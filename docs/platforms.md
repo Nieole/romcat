@@ -1,0 +1,60 @@
+# 平台清单（用户库实际覆盖范围）
+
+共 26 项，由用户提供。**注意：这份清单超出了「到 PS3 世代」——PSV、3DS、WiiU、XBOX360 属于更后一代。**
+
+## 掌机
+
+| 平台 | 已有调研 | 备注 |
+|---|---|---|
+| GB / GBC | ✅ | 头部 0x134 title、0x13F manufacturer、0x14D header checksum |
+| GBA | ✅ | game code `AGB-XXXX`；汉化补丁通常不改。TOSEC 中文条目仅 26 条 |
+| NDS | ✅ | gamecode；**无中文汉化 DAT**，是最大缺口之一 |
+| 3DS | ✅ | CIA/CCI/NCCH，TitleID |
+| PSP | ✅ | `PARAM.SFO` 的 `DISC_ID` |
+| **PSV** | ❌ 待补 | VPK / NoNpDrm / MaiDump 多种封装并存，成型规则复杂 |
+| **WS / WSC** | ❌ 待补 | 内部头在文件**末尾** |
+| **NGPC** | ❌ 待补 | |
+| **Lynx** | ❌ 待补 | `.lnx` 带 LNX 头 vs `.lyx` 裸 ROM |
+| **N-Gage** | ❌ 待补 | Symbian `.sis` / 解压目录，DAT 收录存疑 |
+| 其他掌机 | — | **不是平台，是兜底桶**，见下 |
+
+## 主机 / 街机
+
+| 平台 | 已有调研 | 备注 |
+|---|---|---|
+| FC | ✅ | iNES / NES 2.0 头；GoodNES 有 646 条 `[T+Chi]`，TOSEC 有 722 条中文 |
+| SFC | ✅ | 内部头 21 字节；**带 512 字节 copier 头的 `.smc` 在严格扫描下匹配不上** |
+| N64 | ✅ | 字节序 z64/v64/n64 需先归一化 |
+| MD | ✅ | SEGA 头 serial；TOSEC 中文 86 条 |
+| SS | ✅ | IP.BIN |
+| DC | ✅ | IP.BIN |
+| NGC | ✅ | 磁盘头 game id |
+| WII | ✅ | 同上 |
+| **WIIU** | ❌ 待补 | WUD/WUX/loadiine 目录，成型规则最复杂的一类 |
+| PS1 | ✅ | `SYSTEM.CNF` 的 `BOOT=` 序列号 |
+| PS2 | ✅ | `SYSTEM.CNF` |
+| PS3 | ✅ | `PARAM.SFO` TitleID；`PS3_GAME` 整个目录是一个变体 |
+| **XBOX360** | ❌ 待补 | ISO / GOD / XBLA / XEX 头 |
+| **3DO** | ❌ 待补 | 光盘上有无可用序列号待查 |
+| 街机 | ✅ | MAME romset，parent/clone/BIOS/device 依赖关系与三层模型不直接对应 |
+
+## 两条建模决定
+
+**「其他掌机」不是平台，是兜底桶。** 变体的平台属性**可空**。扫描到的一切都入库，认不出平台不构成拒绝入库的理由——否则库体检根本无法报告「有 N 个文件认不出平台」，而那正是它最该报告的东西。平台可后期修正。
+
+**平台清单是数据不是代码。** 26 个平台各自的成型规则、头部解析、DAT 源、模拟器映射写成声明式配置。否则加一个平台就要改代码、发版本，而这份清单显然还会增长。
+
+## 8 个补充调研平台的结论
+
+TitleID 全部**免密钥可读**，无需写任何解密代码：X360 的 XEX 头完全不加密；Wii U 的 WUD 前 22 字节是明文 ASCII，TMD/TIK 完全明文；PSV 的 `param.sfo` 在 PKG 里也是明文。PSV 另有捷径：`work.bin` 恒 512 字节，SHA-1 直接命中 No-Intro DAT（实测 1141 条，命中率 96.8%）。
+
+**中文汉化是荒漠，但官中不是。** TOSEC 全部 53 个软件 DAT、2240 个 game 中只有 4 条 `[tr zh]`（NGPC 3 + WSC 1，共 3 个游戏）；Lynx、3DO、N-Gage、PSV、Wii U、X360 全部为零。而官中：PSV 290 条、X360 约 305 条，Wii U 连官中都没有（region 位掩码仅 JPN/USA/EUR）。这印证了 ADR-0012 的区分——这些现代平台的中文几乎全是官中，走精确哈希直接过，不进队列。
+
+| 优先级 | 平台 | 人日估算 |
+|---|---|---|
+| P0 | NGPC 0.3、WS 0.5、Lynx 0.6、3DO 1 | 合计约 2.4 |
+| P1 | XBOX360 3–4、Wii U 3（最小可用） | 约 7 |
+| P2 | PSV | 8.5 |
+| 跳过 | N-Gage（No-Intro 仅 1 条且停更于 2022，TOSEC 5 条全是同一款原型） | — |
+
+P0 那四个合计仅 2.4 人日，便宜到不值得排优先级。**N-Gage 归入「其他掌机」兜底桶，不写专门识别器。**
