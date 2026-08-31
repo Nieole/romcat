@@ -1,0 +1,317 @@
+//! 在真实磁盘上跑一遍扫描。
+//!
+//! 那块 10T 外置盘现在没挂载，也不该为了跑测试去挂——验收靠这个 fixture 主库：
+//! 它把票里点名的每种情况都摆上一份真实文件，包括真实的头部字节。
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use romcat_core::classify::{Category, SuspectReason};
+use romcat_core::fs::RealFs;
+use romcat_core::header::ProbeClass;
+use romcat_core::path::long_path;
+use romcat_core::scan::{self, CancelToken, CheckpointOptions, ScanOptions, ScanOutcome};
+use romcat_core::testing::sample::{chd, gba, iso, nes, zip};
+use romcat_core::testing::{TempDir, temp_dir};
+
+fn 写文件(path: &Path, bytes: &[u8]) {
+    let path = long_path(path).into_owned();
+    fs::create_dir_all(path.parent().expect("有上级目录")).expect("能建目录");
+    fs::write(&path, bytes).expect("能写文件");
+}
+
+/// 一份小而全的 fixture 主库：按平台分目录，含中文文件名、重复拷贝、
+/// 半截下载、模拟器本体、说明文档、系统垃圾，以及一个平台目录之外的散文件。
+fn 建_fixture_主库() -> TempDir {
+    let dir = temp_dir("fixture-library");
+    let root = dir.path();
+
+    写文件(&root.join("FC/超级马里奥.zip"), &zip(4096));
+    写文件(&root.join("FC/魂斗罗汉化版.nes"), &nes());
+    写文件(&root.join("FC/Contra (USA).zip"), &zip(1024));
+    写文件(&root.join("FC/说明.txt"), "这个目录是 FC".as_bytes());
+    写文件(&root.join("FC/备份/超级马里奥.zip"), &zip(4096));
+    写文件(&root.join("FC/.DS_Store"), &[0u8; 6]);
+
+    写文件(&root.join("GBA/黄金太阳汉化版.gba"), &gba(b"AGSJ"));
+    写文件(&root.join("GBA/坏掉的.gba"), &[0u8; 0x200]);
+
+    写文件(&root.join("PS1/最终幻想7/最终幻想7.chd"), &chd());
+    写文件(&root.join("PS1/生化危机.iso"), &iso());
+    写文件(&root.join("PS1/模拟器/epsxe.exe"), &[0u8; 64]);
+    写文件(&root.join("PS1/没下完.iso.part"), &[0u8; 8]);
+
+    写文件(&root.join("PSP/游戏.7z.001"), &[0u8; 32]);
+    写文件(&root.join("PSP/游戏.7z.002"), &[0u8; 32]);
+
+    // 直接躺在库根下：没有平台目录，但照常入报告
+    写文件(&root.join("散落的游戏.gba"), &gba(b"AGBJ"));
+    写文件(&root.join("空文件.zip"), &[]);
+
+    dir
+}
+
+fn 扫(root: &Path) -> ScanOutcome {
+    let mut options = ScanOptions::new(root);
+    options.jobs = 4;
+    scan::scan(&RealFs::new(), &options, &CancelToken::new()).expect("扫描不该失败")
+}
+
+type Snapshot = BTreeMap<PathBuf, (u64, Option<SystemTime>, u64)>;
+
+/// 给整棵树拍个快照：路径、大小、修改时间、内容指纹。
+fn 快照(root: &Path) -> Snapshot {
+    fn walk(dir: &Path, out: &mut Snapshot) {
+        for entry in fs::read_dir(dir).expect("能列目录") {
+            let entry = entry.expect("能读目录项");
+            let path = entry.path();
+            let meta = entry.metadata().expect("能取元数据");
+            if meta.is_dir() {
+                out.insert(path.clone(), (0, meta.modified().ok(), 0));
+                walk(&path, out);
+            } else {
+                let bytes = fs::read(&path).unwrap_or_default();
+                let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+                for byte in &bytes {
+                    hash ^= u64::from(*byte);
+                    hash = hash.wrapping_mul(0x1000_0000_01b3);
+                }
+                out.insert(path.clone(), (meta.len(), meta.modified().ok(), hash));
+            }
+        }
+    }
+    let mut out = Snapshot::new();
+    walk(root, &mut out);
+    out
+}
+
+#[test]
+fn 按平台目录给出文件数与容量分布() {
+    let library = 建_fixture_主库();
+    let report = 扫(library.path()).report;
+
+    assert_eq!(report.totals.files, 16);
+    assert!(!report.interrupted);
+
+    let 取 = |name: &str| {
+        report
+            .platforms
+            .iter()
+            .find(|p| p.name == name)
+            .unwrap_or_else(|| panic!("报告里有 {name}"))
+    };
+    assert_eq!(取("FC").files, 6);
+    assert_eq!(取("GBA").files, 2);
+    assert_eq!(取("PS1").files, 4);
+    assert_eq!(取("PSP").files, 2);
+
+    let unknown = report
+        .platforms
+        .iter()
+        .find(|p| p.unknown)
+        .expect("有平台未知这一组");
+    assert_eq!(unknown.files, 2, "散落的游戏.gba 与 空文件.zip");
+
+    let 合计: u64 = report.platforms.iter().map(|p| p.files).sum();
+    assert_eq!(合计, report.totals.files, "每个文件都落在某一组里");
+    assert_eq!(
+        report.platforms.iter().map(|p| p.bytes).sum::<u64>(),
+        report.totals.bytes
+    );
+}
+
+#[test]
+fn 扩展名构成区分三类() {
+    let library = 建_fixture_主库();
+    let report = 扫(library.path()).report;
+
+    let 类 = |category: Category| {
+        report
+            .categories
+            .iter()
+            .find(|c| c.category == category)
+            .expect("类别都在")
+            .files
+    };
+    // zip×4（含空文件.zip）加两个分卷
+    assert_eq!(类(Category::TransparentContainer), 6);
+    assert_eq!(类(Category::CompressedImage), 1, "chd");
+    assert_eq!(类(Category::BareFile), 5, "nes、gba×3、iso");
+    assert_eq!(report.anomalies.split_volume_parts, 2, "7z.001 与 7z.002");
+
+    let zip = report
+        .extensions
+        .iter()
+        .find(|e| e.extension == "zip")
+        .expect("扩展名表里有 zip");
+    assert_eq!(zip.files, 4);
+    assert_eq!(zip.category, Category::TransparentContainer);
+}
+
+#[test]
+fn 疑似不该入库的内容被标出来() {
+    let library = 建_fixture_主库();
+    let report = 扫(library.path()).report;
+    let 取 = |reason: SuspectReason| {
+        report
+            .suspects
+            .by_reason
+            .iter()
+            .find(|s| s.reason == reason)
+            .expect("理由都在")
+    };
+
+    assert_eq!(取(SuspectReason::DuplicateCopy).files, 2);
+    assert_eq!(report.suspects.duplicate_groups, 1);
+    assert_eq!(report.suspects.duplicate_reclaimable_bytes, 4096);
+    assert_eq!(取(SuspectReason::Document).files, 1);
+    assert_eq!(取(SuspectReason::EmulatorBinary).files, 1);
+    assert_eq!(取(SuspectReason::PartialDownload).files, 1);
+    assert_eq!(取(SuspectReason::SystemJunk).files, 1);
+}
+
+#[test]
+fn 头部抽样报出各类的解析成功率() {
+    let library = 建_fixture_主库();
+    let report = 扫(library.path()).report;
+    let 取 = |class: ProbeClass| {
+        report
+            .samples
+            .iter()
+            .find(|s| s.class == class)
+            .unwrap_or_else(|| panic!("抽到了 {}", class.label()))
+    };
+
+    let zip = 取(ProbeClass::Zip);
+    assert_eq!(zip.sampled, 4);
+    assert_eq!(zip.parsed, 3, "空文件.zip 对不上");
+    assert_eq!(zip.mismatched, 1);
+
+    let gba = 取(ProbeClass::Gba);
+    assert_eq!(gba.sampled, 3);
+    assert_eq!(gba.parsed, 2, "坏掉的.gba 对不上");
+    assert_eq!(gba.failures.len(), 1);
+    assert!(gba.failures[0].0.contains("坏掉的.gba"));
+
+    assert_eq!(取(ProbeClass::Nes).parsed, 1);
+    assert_eq!(取(ProbeClass::Chd).parsed, 1);
+    assert_eq!(取(ProbeClass::DiscImage).parsed, 1);
+}
+
+#[test]
+fn 遍历不改主库一个字节() {
+    let library = 建_fixture_主库();
+    let root = library.path();
+    let workspace = temp_dir("workspace");
+
+    let 之前 = 快照(root);
+
+    let mut options = ScanOptions::new(root);
+    options.jobs = 4;
+    options.checkpoint = Some(CheckpointOptions {
+        // 断点写在主库之外的工作目录里
+        path: workspace.path().join("scans").join("checkpoint.json"),
+        interval: std::time::Duration::ZERO,
+        resume: false,
+    });
+    let outcome = scan::scan(&RealFs::new(), &options, &CancelToken::new()).expect("扫描不该失败");
+    assert!(outcome.report.totals.files > 0);
+
+    let 之后 = 快照(root);
+    assert_eq!(之前.len(), 之后.len(), "扫描不该增删任何条目");
+    assert_eq!(之前, 之后, "扫描不该改动任何文件的大小、修改时间或内容");
+}
+
+#[test]
+fn 断点绝不落在主库里() {
+    let library = 建_fixture_主库();
+    let mut options = ScanOptions::new(library.path());
+    options.checkpoint = Some(CheckpointOptions {
+        path: library.path().join(".romcat").join("checkpoint.json"),
+        interval: std::time::Duration::ZERO,
+        resume: false,
+    });
+    let err = scan::scan(&RealFs::new(), &options, &CancelToken::new()).expect_err("必须拒绝");
+    assert!(err.to_string().contains("主库只读"));
+}
+
+#[test]
+fn 超过_260_字符的路径照样扫得到() {
+    let library = temp_dir("long-path");
+    let root = library.path();
+
+    // 四层 60 字符加一层汉字目录：远超 Windows 的 260 字符上限，
+    // 又不至于撞上 macOS 的 1024 字节 PATH_MAX。
+    let mut deep = root.join("PS2");
+    for i in 0..4 {
+        deep = deep.join(format!("{i}{}", "a".repeat(59)));
+    }
+    deep = deep.join("很深的目录".repeat(6));
+    let file = deep.join("很深的游戏.iso");
+    写文件(&file, &iso());
+    assert!(
+        romcat_core::path::exceeds_max_path(&file),
+        "这条路径应当超过 260 字符，实际 {} 字符",
+        romcat_core::path::char_len(&file)
+    );
+
+    let report = 扫(root).report;
+    assert_eq!(report.totals.files, 1, "最深的那个文件必须被扫到");
+    assert_eq!(report.anomalies.over_max_path, 1);
+    assert_eq!(report.anomalies.errors, 0);
+    assert_eq!(
+        report
+            .platforms
+            .iter()
+            .find(|p| p.name == "PS2")
+            .expect("有 PS2")
+            .files,
+        1
+    );
+}
+
+#[test]
+fn 中断后能从断点接着扫() {
+    let library = 建_fixture_主库();
+    let workspace = temp_dir("workspace");
+    let checkpoint = workspace.path().join("scans").join("checkpoint.json");
+
+    let mut options = ScanOptions::new(library.path());
+    options.jobs = 1;
+    options.checkpoint = Some(CheckpointOptions {
+        path: checkpoint.clone(),
+        interval: std::time::Duration::ZERO,
+        resume: true,
+    });
+
+    // 一开始就按下中断：什么都没扫，但断点必须留下来
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let first = scan::scan(&RealFs::new(), &options, &cancel).expect("中断也算正常返回");
+    assert!(first.interrupted);
+    assert!(checkpoint.exists(), "断点应当落在工作目录里");
+
+    // 续跑，扫完，断点被清掉
+    let second = scan::scan(&RealFs::new(), &options, &CancelToken::new()).expect("续跑不该失败");
+    assert!(second.report.resumed);
+    assert!(!second.interrupted);
+    assert_eq!(second.report.totals.files, 16);
+    assert!(!checkpoint.exists());
+}
+
+#[test]
+fn 并发数不影响结论() {
+    let library = 建_fixture_主库();
+    let mut single = ScanOptions::new(library.path());
+    single.jobs = 1;
+    let mut many = ScanOptions::new(library.path());
+    many.jobs = 8;
+
+    let a = scan::scan(&RealFs::new(), &single, &CancelToken::new()).expect("扫描不该失败");
+    let b = scan::scan(&RealFs::new(), &many, &CancelToken::new()).expect("扫描不该失败");
+    assert_eq!(a.report.totals, b.report.totals);
+    assert_eq!(a.report.categories, b.report.categories);
+    assert_eq!(a.report.extensions, b.report.extensions);
+}

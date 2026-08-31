@@ -1,0 +1,14 @@
+[package]
+name = "romcat-core"
+description = "主库扫描与库体检的核心库：只读遍历、归类、头部抽样、体检报告"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "romcat-cli"
+description = "romcat 命令行：库体检扫描的无界面入口"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "romcat"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+ctrlc.workspace = true
+romcat-core.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
