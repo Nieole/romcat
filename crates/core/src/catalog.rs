@@ -28,7 +28,7 @@ use crate::path;
 use crate::report::ReportMeta;
 use crate::scan::aggregate::{Aggregate, FileObservation, Limits, SampleResult};
 
-pub use baseline::{Baseline, ScanDelta, Snapshot, Verdict};
+pub use baseline::{Baseline, Recorded, ScanDelta, Verdict};
 
 /// 中立库的结构版本。结构变了就加 1；读到对不上的版本直接让用户删库重扫。
 pub const SCHEMA_VERSION: u32 = 1;
@@ -326,11 +326,11 @@ impl Catalog {
             .map_err(|source| self.err(source))
     }
 
-    /// 库里记了多少个文件。
+    /// 库里记了多少个文件。目录与链接不算——`entry` 表里三种都有。
     ///
     /// # Errors
     /// 读库失败时返回错误。
-    pub fn len(&self) -> Result<u64, CatalogError> {
+    pub fn file_count(&self) -> Result<u64, CatalogError> {
         self.count("SELECT COUNT(*) FROM entry WHERE kind = ?1", KIND_FILE)
     }
 
@@ -347,7 +347,7 @@ impl Catalog {
     /// # Errors
     /// 读库失败时返回错误。
     pub fn is_empty(&self) -> Result<bool, CatalogError> {
-        Ok(self.len()? == 0)
+        Ok(self.file_count()? == 0)
     }
 
     /// 库里有没有这条键。键是 NFC 的相对路径（ADR-0020）。
@@ -372,7 +372,7 @@ impl Catalog {
         let mut baseline = Baseline::empty();
         let mut statement = self
             .conn
-            .prepare("SELECT key, readable, len, mtime_ns, sample FROM entry")
+            .prepare("SELECT key, readable, len, mtime_ns FROM entry")
             .map_err(|source| self.err(source))?;
         let mut rows = statement.query([]).map_err(|source| self.err(source))?;
         while let Some(row) = rows.next().map_err(|source| self.err(source))? {
@@ -380,18 +380,14 @@ impl Catalog {
             let readable: i64 = row.get(1).map_err(|source| self.err(source))?;
             let len: Option<i64> = row.get(2).map_err(|source| self.err(source))?;
             let mtime_ns: Option<i64> = row.get(3).map_err(|source| self.err(source))?;
-            let sample: Option<String> = row.get(4).map_err(|source| self.err(source))?;
-            let snapshot = match (readable, len) {
-                (0, _) | (_, None) => Snapshot::Unreadable,
-                (_, Some(len)) => Snapshot::Known {
+            let recorded = match (readable, len) {
+                (0, _) | (_, None) => Recorded::Unreadable,
+                (_, Some(len)) => Recorded::Known {
                     len: u64::try_from(len).unwrap_or(0),
                     mtime_ns,
                 },
             };
-            if let Some((class, _)) = self.decode_sample(&key, sample.as_deref())? {
-                baseline.count_sample(class);
-            }
-            baseline.insert(key, snapshot);
+            baseline.insert(key, recorded);
         }
         Ok(baseline)
     }
@@ -432,23 +428,16 @@ impl Catalog {
     /// # Errors
     /// 写库失败时返回错误。
     pub fn begin_scan(&mut self, scan: i64) -> Result<(), CatalogError> {
-        let tx = self
-            .conn
-            .transaction()
-            .map_err(|source| CatalogError::Sqlite {
-                path: self.path.clone(),
-                source,
-            })?;
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
         tx.execute("DELETE FROM traversal WHERE scan <> ?1", params![scan])
             .and_then(|_| tx.execute("DELETE FROM traversal_note", []))
-            .map_err(|source| CatalogError::Sqlite {
-                path: self.path.clone(),
-                source,
-            })?;
-        tx.commit().map_err(|source| CatalogError::Sqlite {
-            path: self.path.clone(),
-            source,
-        })
+            .map_err(to_err)?;
+        tx.commit().map_err(to_err)
     }
 
     /// 写一批记录。
@@ -596,7 +585,35 @@ impl Catalog {
             .map_err(|source| self.err(source))
     }
 
-    /// 删掉这次扫描没见到的记录，返回删了几条。
+    /// 把一棵子树整个标记成「这次见过」，返回标了几条。
+    ///
+    /// 列不开的目录要用它。目录列不出来时，它下面的记录这一趟一条也不会被写到，
+    /// 而收尾时 [`Catalog::sweep`] 删的正是「这次没见到的」——**看不见不等于不存在**，
+    /// 不标一下的话，一次拒绝访问就会让整棵子树从中立库里消失。这与 ADR-0021 对
+    /// 单个文件的要求是同一条道理，只是粒度在目录上。
+    ///
+    /// `dir_key` 是空串时标记全库：主库根都列不开，这次扫描什么都没看见。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn keep_subtree(&mut self, scan: i64, dir_key: &str) -> Result<u64, CatalogError> {
+        let prefix = if dir_key.is_empty() {
+            String::new()
+        } else {
+            format!("{dir_key}/")
+        };
+        let kept = self
+            .conn
+            .execute(
+                "UPDATE entry SET seen = ?1
+                 WHERE key = ?2 OR substr(key, 1, length(?3)) = ?3",
+                params![scan, dir_key, prefix],
+            )
+            .map_err(|source| self.err(source))?;
+        Ok(kept as u64)
+    }
+
+    /// 删掉这次扫描没见到的**文件**记录，返回删了几个文件。
     ///
     /// **只有完整扫完一遍才能调**。中断的扫描没走完整个库，没见到不等于不存在——
     /// 那时候调它会把还没扫到的那半个库当成已删除抹掉。
@@ -634,25 +651,30 @@ impl Catalog {
             .conn
             // 按键排序，于是例子列表与「先看到谁」无关：同一份中立库出的报告永远一样，
             // 而扫描时哪个线程先跑完是不确定的。
-            .prepare("SELECT key, len, non_utf8, sample FROM entry WHERE kind = ?1 ORDER BY key")
+            .prepare(
+                "SELECT key, readable, len, non_utf8, sample
+                 FROM entry WHERE kind = ?1 ORDER BY key",
+            )
             .map_err(|source| self.err(source))?;
         let mut rows = statement
             .query(params![KIND_FILE])
             .map_err(|source| self.err(source))?;
         while let Some(row) = rows.next().map_err(|source| self.err(source))? {
             let key: String = row.get(0).map_err(|source| self.err(source))?;
-            let len: Option<i64> = row.get(1).map_err(|source| self.err(source))?;
-            let non_utf8: i64 = row.get(2).map_err(|source| self.err(source))?;
-            let sample: Option<String> = row.get(3).map_err(|source| self.err(source))?;
+            let readable: i64 = row.get(1).map_err(|source| self.err(source))?;
+            let len: Option<i64> = row.get(2).map_err(|source| self.err(source))?;
+            let non_utf8: i64 = row.get(3).map_err(|source| self.err(source))?;
+            let sample: Option<String> = row.get(4).map_err(|source| self.err(source))?;
             let sample = self.decode_sample(&key, sample.as_deref())?;
+            // 大小以 `readable` 为准而不是「`len` 是不是 NULL」：两者现在等价，
+            // 但把判据挂在那一列上，将来改结构也不会悄悄换掉「大小未知」的定义。
+            let len = if readable == 0 {
+                None
+            } else {
+                len.map(|len| u64::try_from(len).unwrap_or(0))
+            };
             aggregate.record_file(
-                &FileObservation::derive(
-                    &traversal.root,
-                    &key,
-                    len.map(|len| u64::try_from(len).unwrap_or(0)),
-                    non_utf8 != 0,
-                    sample,
-                ),
+                &FileObservation::derive(&traversal.root, &key, len, non_utf8 != 0, sample),
                 limits,
             );
         }
@@ -673,22 +695,10 @@ impl Catalog {
             let kind: String = row.get(0).map_err(|source| self.err(source))?;
             let path: String = row.get(1).map_err(|source| self.err(source))?;
             let detail: Option<String> = row.get(2).map_err(|source| self.err(source))?;
-            let (count, list, text) = if kind == NOTE_SKIPPED {
-                (
-                    &mut aggregate.anomalies.skipped_system_dirs,
-                    &mut aggregate.anomalies.skipped_system_dir_examples,
-                    path,
-                )
+            if kind == NOTE_SKIPPED {
+                aggregate.record_skipped_system_dir(&path, limits);
             } else {
-                (
-                    &mut aggregate.anomalies.errors,
-                    &mut aggregate.anomalies.error_examples,
-                    format!("{path} — {}", detail.unwrap_or_default()),
-                )
-            };
-            *count += 1;
-            if list.len() < limits.max_examples {
-                list.push(text);
+                aggregate.record_unlistable_dir(&path, &detail.unwrap_or_default(), limits);
             }
         }
 

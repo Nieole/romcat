@@ -225,7 +225,7 @@ pub fn scan(
     } else {
         Baseline::empty()
     };
-    let budget = SampleBudget::new(baseline.sampled().clone(), options.samples_per_class);
+    let budget = SampleBudget::new(options.samples_per_class);
     let queue = Queue::new(std::mem::take(&mut start.pending));
 
     let (results_tx, results_rx) = mpsc::channel::<DirResult>();
@@ -395,17 +395,22 @@ fn save_progress(
     catalog.write(traversal.scan, &progress.records)?;
     progress.records.clear();
     catalog.save_traversal(traversal)?;
-    if let Some(config) = &options.checkpoint {
-        let pending = queue.pending_snapshot();
-        Checkpoint::new(
-            root,
-            options.samples_per_class,
-            &pending,
-            traversal.scan,
-            traversal.elapsed_ms,
-        )
+    save_checkpoint(options, root, queue, traversal.scan, traversal.elapsed_ms)
+}
+
+fn save_checkpoint(
+    options: &ScanOptions,
+    root: &Path,
+    queue: &Queue,
+    scan: i64,
+    elapsed_ms: u64,
+) -> Result<(), ScanError> {
+    let Some(config) = &options.checkpoint else {
+        return Ok(());
+    };
+    let pending = queue.pending_left();
+    Checkpoint::new(root, options.samples_per_class, &pending, scan, elapsed_ms)
         .save(&config.path)?;
-    }
     Ok(())
 }
 
@@ -421,15 +426,7 @@ fn finish_checkpoint(
         return Ok(None);
     };
     if interrupted {
-        let pending = queue.pending_snapshot();
-        Checkpoint::new(
-            root,
-            options.samples_per_class,
-            &pending,
-            scan,
-            traversal.elapsed_ms,
-        )
-        .save(&config.path)?;
+        save_checkpoint(options, root, queue, scan, traversal.elapsed_ms)?;
         return Ok(Some(config.path.clone()));
     }
     // 扫完了就把断点删掉：留着它只会让下次 `--resume` 误以为还有活没干完。
@@ -453,8 +450,11 @@ fn merge(
     for dir in &result.skipped_system_dirs {
         catalog.note_skipped_dir(dir)?;
     }
-    for (path, error) in &result.errors {
-        catalog.note_error(path, error)?;
+    for failed in &result.unlistable {
+        catalog.note_error(&failed.display, &failed.message)?;
+        // 列不开的目录下面那些记录这一趟一条也写不到。不在这儿把它们标成「见过」，
+        // 收尾时就会被当成已删除抹掉——一次拒绝访问抹掉整棵子树（ADR-0021）。
+        catalog.keep_subtree(scan, &failed.key)?;
     }
     for record in result.entries {
         // 差异只数文件。目录与链接也进中立库，但「新增了 3 个」说的该是内容，
@@ -479,12 +479,24 @@ struct DirDone {
     subdirs: Vec<PathBuf>,
 }
 
+/// 一个列不开的目录。
+///
+/// 它下面的记录这一趟一条也写不到，因此必须**原样留着**——看不见不等于不存在。
+struct UnlistableDir {
+    /// 中立库里这棵子树的键前缀。
+    key: String,
+    /// 展示用路径。
+    display: String,
+    /// 列不开的原因。
+    message: String,
+}
+
 struct DirResult {
     dir: PathBuf,
     subdirs: Vec<PathBuf>,
     entries: Vec<EntryRecord>,
     skipped_system_dirs: Vec<String>,
-    errors: Vec<(String, String)>,
+    unlistable: Vec<UnlistableDir>,
     /// 这个目录是被中断打断的，只扫了一部分，不能并入统计。
     partial: bool,
 }
@@ -503,16 +515,18 @@ fn process_dir(
         subdirs: Vec::new(),
         entries: Vec::new(),
         skipped_system_dirs: Vec::new(),
-        errors: Vec::new(),
+        unlistable: Vec::new(),
         partial: false,
     };
 
     let entries = match library.read_dir(&result.dir) {
         Ok(entries) => entries,
         Err(error) => {
-            result
-                .errors
-                .push((path::display(&result.dir), error.to_string()));
+            result.unlistable.push(UnlistableDir {
+                key: path::catalog_key(root, &result.dir),
+                display: path::display(&result.dir),
+                message: error.to_string(),
+            });
             return result;
         }
     };
@@ -611,19 +625,22 @@ fn sample_header(
 
 /// 每类文件的抽样配额。
 ///
-/// 增量扫描从中立库里已有的样本数接着算，否则每扫一次就会多抽一轮。`--full` 从零开始
-/// ——那本来就是「当作从没扫过」。被丢弃的结果（中断时正在扫的那个目录）会白占配额，
-/// 但那至多是一个目录的量。
+/// 它限的是**这一趟扫描开几个文件**，不是中立库里攒了几个样本。反过来（跨扫描累加）
+/// 会让配额一旦填满，后来新增的文件**永远不被抽样**，成功率就此冻结在首扫那批上。
+/// 而只抽新增与已变的文件，本身就把没变的那些排除在外了——配额每趟从零算，
+/// 既不会重复开同一个文件，新东西也总有机会被看一眼。
+///
+/// 被丢弃的结果（中断时正在扫的那个目录）会白占配额，但那至多是一个目录的量。
 struct SampleBudget {
     per_class: usize,
     taken: Mutex<std::collections::BTreeMap<ProbeClass, usize>>,
 }
 
 impl SampleBudget {
-    fn new(taken: std::collections::BTreeMap<ProbeClass, usize>, per_class: usize) -> Self {
+    fn new(per_class: usize) -> Self {
         Self {
             per_class,
-            taken: Mutex::new(taken),
+            taken: Mutex::new(std::collections::BTreeMap::new()),
         }
     }
 
@@ -700,7 +717,7 @@ impl Queue {
         state.stack.is_empty() && state.active.is_empty()
     }
 
-    fn pending_snapshot(&self) -> Vec<PathBuf> {
+    fn pending_left(&self) -> Vec<PathBuf> {
         let state = self.lock();
         let mut pending = state.stack.clone();
         pending.extend(state.active.iter().cloned());
@@ -1030,6 +1047,14 @@ mod tests {
         assert!(library.reads() > 首扫读了, "全量重扫要重新读头部");
         assert_eq!(重扫.delta.unchanged, 0, "全量重扫不认未变");
         assert_eq!(重扫.delta.added, 11);
+
+        // 全量重扫写下的三元组照样要能当下一次的基线，否则 `--full` 跑一次
+        // 就把增量废掉了
+        options.incremental = true;
+        let 再增量 = 扫入(&mut catalog, &library, &options);
+        assert_eq!(再增量.delta.unchanged, 11, "全量重扫之后增量要接得上");
+        assert_eq!(再增量.delta.added, 0);
+        assert_eq!(再增量.delta.removed, 0);
     }
 
     #[test]
@@ -1048,6 +1073,75 @@ mod tests {
         assert_eq!(再扫.delta.changed, 0, "读不到不算已变，否则永远重扫");
         assert_eq!(再扫.delta.removed, 0, "读不到不算已删，否则会从库里消失");
         assert_eq!(再扫.report.totals.files, 12, "它照样在库里");
+    }
+
+    #[test]
+    fn 列不开的目录下面那些记录不算已删除() {
+        let mut catalog = 新中立库();
+        let options = ScanOptions::new("/lib");
+        let 首扫 = 扫入(&mut catalog, &建库(), &options);
+        assert_eq!(首扫.report.totals.files, 11);
+
+        // PS1 这一趟列不开了：它下面有 最终幻想.chd 与 模拟器/epsxe.exe
+        let mut 列不开 = 建库();
+        列不开.unlistable_dir("/lib/PS1");
+        let 再扫 = 扫入(&mut catalog, &列不开, &options);
+
+        assert_eq!(
+            再扫.delta.removed, 0,
+            "看不见不等于不存在：一次拒绝访问不许抹掉整棵子树"
+        );
+        assert_eq!(再扫.report.totals.files, 11, "11 个文件一个都不能少");
+        assert_eq!(再扫.report.anomalies.errors, 1, "列不开这件事要报出来");
+        assert!(
+            catalog.contains("PS1/模拟器/epsxe.exe").expect("查得到"),
+            "隔了一层的记录也要留着"
+        );
+
+        // 目录恢复之后，那些记录还在，也没被当成新增
+        let 三扫 = 扫入(&mut catalog, &建库(), &options);
+        assert_eq!(三扫.delta.added, 0);
+        assert_eq!(三扫.delta.unchanged, 11);
+        assert_eq!(三扫.report.anomalies.errors, 0);
+    }
+
+    #[test]
+    fn 主库根都列不开时一条记录都不删() {
+        let mut catalog = 新中立库();
+        let options = ScanOptions::new("/lib");
+        扫入(&mut catalog, &建库(), &options);
+
+        let mut 空壳 = MemFs::new();
+        空壳.dir("/lib").unlistable_dir("/lib");
+        let 再扫 = 扫入(&mut catalog, &空壳, &options);
+        assert_eq!(再扫.delta.removed, 0);
+        assert_eq!(再扫.report.totals.files, 11, "整个库不许凭空消失");
+    }
+
+    #[test]
+    fn 新增的文件照样会被抽样() {
+        let mut library = MemFs::new();
+        library.dir("/lib");
+        for i in 0..40 {
+            library.file(format!("/lib/FC/{i}.zip"), zip(64));
+        }
+        let mut options = ScanOptions::new("/lib");
+        options.samples_per_class = 5;
+        let mut catalog = 新中立库();
+
+        let 首扫 = 扫入(&mut catalog, &library, &options);
+        assert_eq!(
+            首扫.report.samples[0].sampled, 5,
+            "配额限的是这一趟开几个文件"
+        );
+
+        // 后来又添了几个。配额跨扫描累加的话，它们永远不会被看一眼。
+        library.file("/lib/FC/新来的.zip", zip(64));
+        let 再扫 = 扫入(&mut catalog, &library, &options);
+        assert_eq!(
+            再扫.report.samples[0].sampled, 6,
+            "新增的文件要有机会被抽到，成功率不能冻结在首扫那批上"
+        );
     }
 
     #[test]

@@ -12,6 +12,8 @@
 //! **两者不能混用**（ADR-0020）。
 
 use std::borrow::Cow;
+use std::ffi::OsStr;
+use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 
 use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
@@ -141,9 +143,53 @@ pub fn catalog_key(root: &Path, path: &Path) -> String {
         if !key.is_empty() {
             key.push('/');
         }
-        key.push_str(&part.to_string_lossy());
+        match part.to_str() {
+            Some(text) => key.push_str(text),
+            // 非 UTF-8 的名字：有损转换会把不同的字节折成同一串 U+FFFD，而键是中立库的
+            // 主键——撞上就是一条记录被静默覆盖，事实来源少一个文件（ADR-0001）。
+            // 缀一段原始字节的指纹，让不同的名字仍然是不同的键。键只用来认身份，
+            // 读盘走的始终是系统给的原始路径。
+            None => {
+                key.push_str(&part.to_string_lossy());
+                let _ = write!(key, "#{:016x}", os_str_fingerprint(part));
+            }
+        }
     }
     nfc(&key).into_owned()
+}
+
+/// 一段 `OsStr` 原始码元的 FNV-1a 指纹。
+///
+/// 只要「不同的字节大概率给出不同的值」，不需要密码学强度。两个平台的码元宽度不同，
+/// 因此各走各的分支——这不是平台捷径，是两边真实不同的东西（ADR-0018）。
+#[cfg(unix)]
+fn os_str_fingerprint(part: &OsStr) -> u64 {
+    use std::os::unix::ffi::OsStrExt;
+    fnv1a(part.as_bytes().iter().map(|byte| u32::from(*byte)))
+}
+
+/// 一段 `OsStr` 原始码元的 FNV-1a 指纹。
+#[cfg(windows)]
+fn os_str_fingerprint(part: &OsStr) -> u64 {
+    use std::os::windows::ffi::OsStrExt;
+    fnv1a(part.encode_wide().map(u32::from))
+}
+
+/// 一段 `OsStr` 原始码元的 FNV-1a 指纹。
+#[cfg(not(any(unix, windows)))]
+fn os_str_fingerprint(part: &OsStr) -> u64 {
+    fnv1a(part.to_string_lossy().chars().map(u32::from))
+}
+
+fn fnv1a(units: impl Iterator<Item = u32>) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for unit in units {
+        for byte in unit.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x1000_0000_01b3);
+        }
+    }
+    hash
 }
 
 /// 把中立库的键还原成给人看的完整路径。
@@ -376,6 +422,27 @@ mod tests {
         );
         assert_eq!(a, "FC/a.zip");
         assert_eq!(a, b);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn 两个非_utf8_的名字不会折成同一个键() {
+        use std::os::unix::ffi::OsStrExt;
+        // 有损转换会把这两个都变成同一串 U+FFFD。键是中立库的主键，撞上就是
+        // 一条记录被静默覆盖。
+        let root = Path::new("/lib");
+        let a = Path::new("/lib/FC").join(OsStr::from_bytes(b"\xff\xfe.zip"));
+        let b = Path::new("/lib/FC").join(OsStr::from_bytes(b"\xfe\xff.zip"));
+        assert_eq!(
+            a.to_string_lossy(),
+            b.to_string_lossy(),
+            "有损转换分不开它们"
+        );
+
+        let key_a = catalog_key(root, &a);
+        let key_b = catalog_key(root, &b);
+        assert_ne!(key_a, key_b);
+        assert_eq!(key_a, catalog_key(root, &a), "同一个名字每次给出同一个键");
     }
 
     #[test]

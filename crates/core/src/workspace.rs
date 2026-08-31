@@ -13,10 +13,11 @@ use std::path::{Path, PathBuf};
 /// 默认工作目录。
 ///
 /// 一条链跨平台通用、没有 `cfg` 分支：`$ROMCAT_HOME` 优先，其次各平台的数据目录。
-/// Windows 走 `%APPDATA%`，那是主力机（ADR-0018）。
+/// `%APPDATA%` 排在 `$XDG_DATA_HOME` 前面，因为主力机是 Windows（ADR-0018），
+/// 而 Windows 上偶尔也会有别的工具设上 `XDG_DATA_HOME`。
 #[must_use]
 pub fn default_dir() -> PathBuf {
-    for key in ["ROMCAT_HOME", "XDG_DATA_HOME", "APPDATA"] {
+    for key in ["ROMCAT_HOME", "APPDATA", "XDG_DATA_HOME"] {
         if let Some(value) = env::var_os(key) {
             let path = PathBuf::from(value);
             if !path.as_os_str().is_empty() {

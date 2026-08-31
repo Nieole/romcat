@@ -158,6 +158,7 @@ pub(super) fn render(report: &HealthReport) -> String {
         human_bytes(report.totals.cjk_bytes)
     );
 
+    let anomalies = &report.anomalies;
     if let Some(delta) = report.delta {
         heading(&mut out, "这次扫描的增量（对比中立库上一次的状态）");
         let _ = writeln!(
@@ -168,7 +169,7 @@ pub(super) fn render(report: &HealthReport) -> String {
                 ("新增", 12),
                 ("内容变化", 12),
                 ("已删除", 12),
-                ("不可读", 12),
+                ("这次读不到", 14),
             ])
         );
         let _ = writeln!(
@@ -179,13 +180,21 @@ pub(super) fn render(report: &HealthReport) -> String {
                 (&thousands(delta.added), 12),
                 (&thousands(delta.changed), 12),
                 (&thousands(delta.removed), 12),
-                (&thousands(delta.unreadable), 12),
+                (&thousands(delta.unreadable), 14),
             ])
         );
         let _ = writeln!(
             out,
-            "判据是 (路径, 大小, 修改时间)。不可读既不算已变也不算已删——它在 Windows 上是正常文件。"
+            "判据是 (路径, 大小, 修改时间)。「这次读不到」既不算已变也不算已删——它在 Windows 上是正常文件。"
         );
+        if delta.unreadable > 0 && delta.unreadable != anomalies.unreadable {
+            let _ = writeln!(
+                out,
+                "注：这次读不到 {} 个，而下面「元数据从没读到过」是 {} 个——差额是曾经在别的系统上读到过、大小已经记在中立库里的那些。",
+                thousands(delta.unreadable),
+                thousands(anomalies.unreadable)
+            );
+        }
         if report.interrupted {
             let _ = writeln!(
                 out,
@@ -391,8 +400,11 @@ pub(super) fn render(report: &HealthReport) -> String {
     }
 
     heading(&mut out, "异常与限制");
-    let anomalies = &report.anomalies;
-    let _ = writeln!(out, "读取失败        {} 处", thousands(anomalies.errors));
+    let _ = writeln!(
+        out,
+        "目录列不开      {} 处（下面的记录原样留着，不算已删除）",
+        thousands(anomalies.errors)
+    );
     for example in &anomalies.error_examples {
         let _ = writeln!(out, "  {example}");
     }
@@ -416,7 +428,7 @@ pub(super) fn render(report: &HealthReport) -> String {
     );
     let _ = writeln!(
         out,
-        "元数据读不到    {} 个（名字列得出、属性读不到；不是空文件，也不是不存在）",
+        "元数据从没读到  {} 个（名字列得出、属性读不到；不是空文件，也不是不存在）",
         thousands(anomalies.unreadable)
     );
     let _ = writeln!(

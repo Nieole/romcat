@@ -32,6 +32,8 @@ enum Node {
     },
     /// 名字列得出，元数据读不到（ADR-0021 的第三态）。
     UnreadableMeta,
+    /// 在上级目录里列得出来、自己却列不开的目录。
+    UnlistableDir,
 }
 
 /// 内存文件系统。路径一律用绝对路径。
@@ -129,6 +131,19 @@ impl MemFs {
         self
     }
 
+    /// 建一个列不开的目录：上级列得出它，`read_dir` 它自己会失败。
+    ///
+    /// 用来测「列不开的目录下面那些记录不许被当成已删除」——那正是 ADR-0021
+    /// 点名的陷阱：扫描把「看不见」解释成「不存在」。
+    pub fn unlistable_dir(&mut self, path: impl AsRef<Path>) -> &mut Self {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            self.dir(parent);
+        }
+        self.nodes.insert(path, Node::UnlistableDir);
+        self
+    }
+
     /// 建一个**元数据读不到**的文件：名字列得出，`stat` 失败（ADR-0021 的第三态）。
     ///
     /// 主库那块 NTFS 盘在 macOS 上实测有 4,085 个这样的文件。
@@ -168,6 +183,7 @@ impl LibraryFs for MemFs {
     fn read_dir(&self, dir: &Path) -> io::Result<Vec<DirEntry>> {
         match self.nodes.get(dir) {
             Some(Node::Dir) => {}
+            Some(Node::UnlistableDir) => return Err(denied(dir)),
             Some(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::NotADirectory,
@@ -193,6 +209,7 @@ impl LibraryFs for MemFs {
                     (EntryKind::File, known(*len, *modified))
                 }
                 Node::UnreadableMeta => (EntryKind::File, EntryMeta::Unreadable),
+                Node::UnlistableDir => (EntryKind::Dir, known(0, DEFAULT_MTIME)),
             };
             out.push(DirEntry {
                 path: path.clone(),

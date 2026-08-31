@@ -22,7 +22,7 @@ pub const UNKNOWN_PLATFORM: &str = "";
 pub const NO_EXTENSION: &str = "（无扩展名）";
 
 /// 一组文件数与字节数。
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Counts {
     /// 文件数。
     pub files: u64,
@@ -38,7 +38,7 @@ impl Counts {
 }
 
 /// 一个扩展名的统计。归类跟着计数一起存——报告因此不必拿扩展名字符串再去反推一次。
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ExtensionAcc {
     /// 文件数与字节数。
     pub counts: Counts,
@@ -47,7 +47,7 @@ pub struct ExtensionAcc {
 }
 
 /// 一个平台目录下的统计。
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PlatformAcc {
     /// 该平台目录的合计。
     pub totals: Counts,
@@ -60,7 +60,7 @@ pub struct PlatformAcc {
 }
 
 /// 一组重复拷贝：同名同大小的多份。
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct DuplicateGroup {
     /// 单份的字节数。
     pub size: u64,
@@ -72,7 +72,7 @@ pub struct DuplicateGroup {
 }
 
 /// 一类文件的头部抽样结果。
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SampleAcc {
     /// 抽了几个。
     pub sampled: u64,
@@ -228,11 +228,12 @@ pub enum SampleResult {
 }
 
 /// 扫描累积状态。
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// **它不是持久状态**——断点里不装它，中立库才是事实来源（ADR-0001）。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Aggregate {
     /// 全库合计。
     pub totals: Counts,
-    /// 已扫目录数。
+    /// 目录数。
     pub dirs: u64,
     /// 按平台目录分组，键为目录名，[`UNKNOWN_PLATFORM`] 表示平台未知。
     pub platforms: BTreeMap<String, PlatformAcc>,
@@ -426,47 +427,24 @@ impl Aggregate {
         }
     }
 
-    /// 记下一个已扫完的目录。
-    pub fn record_dir(&mut self) {
-        self.dirs += 1;
-    }
-
-    /// 记下一个整棵跳过的系统目录。
-    pub fn record_skipped_system_dir(&mut self, path: &Path, limits: &Limits) {
+    /// 记下一个整棵跳过的系统目录。跳过什么都要说出来，不能悄悄少扫。
+    pub fn record_skipped_system_dir(&mut self, display_path: &str, limits: &Limits) {
         self.anomalies.skipped_system_dirs += 1;
         push_capped(
             &mut self.anomalies.skipped_system_dir_examples,
-            path::display(path),
+            display_path.to_string(),
             limits.max_examples,
         );
     }
 
-    /// 记下一个符号链接（不跟随）。
-    pub fn record_symlink(&mut self) {
-        self.anomalies.symlinks += 1;
-    }
-
-    /// 记下一个既不是文件也不是目录也不是链接的项。
-    pub fn record_other_entry(&mut self) {
-        self.anomalies.other_entries += 1;
-    }
-
-    /// 记下一次失败。失败不中断扫描——读不到的东西也是体检结论的一部分。
-    pub fn record_error(&mut self, path: &Path, error: &str, limits: &Limits) {
+    /// 记下一个列不开的目录。列不开不中断扫描——读不到的东西也是体检结论的一部分。
+    pub fn record_unlistable_dir(&mut self, display_path: &str, error: &str, limits: &Limits) {
         self.anomalies.errors += 1;
         push_capped(
             &mut self.anomalies.error_examples,
-            format!("{} — {error}", path::display(path)),
+            format!("{display_path} — {error}"),
             limits.max_examples,
         );
-    }
-
-    /// 已经抽过样的数量，用于续跑时恢复抽样配额。
-    #[must_use]
-    pub fn sampled_count(&self, class: ProbeClass) -> usize {
-        self.samples
-            .get(&class)
-            .map_or(0, |acc| usize::try_from(acc.sampled).unwrap_or(usize::MAX))
     }
 }
 

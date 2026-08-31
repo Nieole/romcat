@@ -181,13 +181,10 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
         }
     };
 
-    let write_failed = args
-        .output
-        .emit(&outcome.report, &outcome.aggregate)
-        .is_err();
+    let wrote_everything = args.output.emit(&outcome.report, &outcome.aggregate);
     eprintln!("中立库：{}", catalog.location());
 
-    if write_failed {
+    if !wrote_everything {
         return ExitCode::FAILURE;
     }
 
@@ -263,7 +260,7 @@ fn run_report(args: &ReportArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if args.output.emit(&report, &aggregate).is_err() {
+    if !args.output.emit(&report, &aggregate) {
         return ExitCode::FAILURE;
     }
     eprintln!("以上出自中立库 {}，没有读过主库。", catalog.location());
@@ -282,9 +279,11 @@ impl OutputArgs {
         Ok(())
     }
 
-    /// 把报告送到该去的地方。一份写不出去不该带走另一份：这些输出是几个钟头扫出来的，
-    /// 能落盘一份是一份。
-    fn emit(&self, report: &HealthReport, aggregate: &Aggregate) -> Result<(), ()> {
+    /// 把报告送到该去的地方，返回是不是每一份都写出去了。
+    ///
+    /// 一份写不出去不该带走另一份：这些输出是几个钟头扫出来的，能落盘一份是一份。
+    /// 出错的原因当场打给用户，因此这里只需回答成没成。
+    fn emit(&self, report: &HealthReport, aggregate: &Aggregate) -> bool {
         if !self.quiet {
             let text = report.render_text();
             let mut stdout = io::stdout().lock();
@@ -327,7 +326,7 @@ impl OutputArgs {
             }
         }
 
-        if failed { Err(()) } else { Ok(()) }
+        !failed
     }
 }
 

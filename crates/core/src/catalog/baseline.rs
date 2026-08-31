@@ -1,15 +1,14 @@
 //! 增量扫描的判据：拿这次看到的三元组去比中立库里记的那份。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
 use crate::fs::EntryMeta;
-use crate::header::ProbeClass;
 
-/// 一条记录在中立库里的三元组快照。
+/// 中立库里记着的那条 `(大小, 修改时间)`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Snapshot {
+pub enum Recorded {
     /// 上次扫到时元数据是读得到的。
     Known {
         /// 字节数。
@@ -71,8 +70,7 @@ impl ScanDelta {
 /// 256,128 条记录约 30 MB，换来的是工作线程零查询。真到了内存吃紧那天再改按目录分批取。
 #[derive(Debug, Default, Clone)]
 pub struct Baseline {
-    entries: HashMap<String, Snapshot>,
-    sampled: BTreeMap<ProbeClass, usize>,
+    entries: HashMap<String, Recorded>,
 }
 
 impl Baseline {
@@ -83,19 +81,8 @@ impl Baseline {
     }
 
     /// 记下一条。
-    pub fn insert(&mut self, key: String, snapshot: Snapshot) {
-        self.entries.insert(key, snapshot);
-    }
-
-    /// 记下「这一类已经抽过一个样本了」。
-    pub fn count_sample(&mut self, class: ProbeClass) {
-        *self.sampled.entry(class).or_insert(0) += 1;
-    }
-
-    /// 各类已经抽过几个样本。续扫时抽样配额从这里接着算，否则每扫一次就多抽一轮。
-    #[must_use]
-    pub fn sampled(&self) -> &BTreeMap<ProbeClass, usize> {
-        &self.sampled
+    pub fn insert(&mut self, key: String, recorded: Recorded) {
+        self.entries.insert(key, recorded);
     }
 
     /// 这次看到的元数据对上中立库里记的那份，是什么结论。
@@ -107,13 +94,13 @@ impl Baseline {
         let EntryMeta::Known { len, modified } = meta else {
             return Verdict::Unreadable;
         };
-        let Some(snapshot) = self.entries.get(key) else {
+        let Some(recorded) = self.entries.get(key) else {
             return Verdict::Added;
         };
-        let Snapshot::Known {
+        let Recorded::Known {
             len: stored_len,
             mtime_ns: Some(stored_mtime),
-        } = snapshot
+        } = recorded
         else {
             // 上次读不到、这次读到了：现在有真东西可以入库，当作已变。
             return Verdict::Changed;
@@ -146,7 +133,7 @@ mod tests {
         let mut baseline = Baseline::empty();
         baseline.insert(
             "FC/马里奥.zip".to_string(),
-            Snapshot::Known {
+            Recorded::Known {
                 len: 1024,
                 mtime_ns: Some(1_000_000_000),
             },
@@ -209,7 +196,7 @@ mod tests {
     #[test]
     fn 上次读不到这次读到了算已变() {
         let mut baseline = Baseline::empty();
-        baseline.insert("FC/马里奥.zip".to_string(), Snapshot::Unreadable);
+        baseline.insert("FC/马里奥.zip".to_string(), Recorded::Unreadable);
         assert_eq!(
             baseline.verdict("FC/马里奥.zip", &已知(1024, 1)),
             Verdict::Changed
