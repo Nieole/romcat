@@ -171,7 +171,10 @@ pub fn probe_class_for(path: &Path) -> Option<ProbeClass> {
 }
 
 /// 一次抽样探测的结论。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// 派生 serde 是因为它要存进**中立库**：抽样读了头部就不该白读，未变的文件下次扫描
+/// 直接沿用上次的结论，不再打开一次。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProbeOutcome {
     /// 解析成功，附带认出来的形态。
     Parsed(String),

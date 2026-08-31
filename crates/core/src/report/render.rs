@@ -134,11 +134,20 @@ pub(super) fn render(report: &HealthReport) -> String {
         "耗时            {seconds:.1} 秒（并发 {} 线程，{rate:.0} 文件/秒）",
         report.jobs
     );
+    let unreadable = report.anomalies.unreadable;
     let _ = writeln!(
         out,
-        "文件            {} 个，{}",
+        "文件            {} 个，{}{}",
         thousands(report.totals.files),
-        human_bytes(report.totals.bytes)
+        human_bytes(report.totals.bytes),
+        if unreadable > 0 {
+            format!(
+                "（其中 {} 个元数据读不到，大小未知、未计入容量）",
+                thousands(unreadable)
+            )
+        } else {
+            String::new()
+        }
     );
     let _ = writeln!(out, "目录            {} 个", thousands(report.totals.dirs));
     let _ = writeln!(
@@ -148,6 +157,48 @@ pub(super) fn render(report: &HealthReport) -> String {
         share(report.totals.cjk_files, report.totals.files),
         human_bytes(report.totals.cjk_bytes)
     );
+
+    if let Some(delta) = report.delta {
+        heading(&mut out, "这次扫描的增量（对比中立库上一次的状态）");
+        let _ = writeln!(
+            out,
+            "{}",
+            row(&[
+                ("未变（跳过）", 18),
+                ("新增", 12),
+                ("内容变化", 12),
+                ("已删除", 12),
+                ("不可读", 12),
+            ])
+        );
+        let _ = writeln!(
+            out,
+            "{}",
+            row(&[
+                (&thousands(delta.unchanged), 18),
+                (&thousands(delta.added), 12),
+                (&thousands(delta.changed), 12),
+                (&thousands(delta.removed), 12),
+                (&thousands(delta.unreadable), 12),
+            ])
+        );
+        let _ = writeln!(
+            out,
+            "判据是 (路径, 大小, 修改时间)。不可读既不算已变也不算已删——它在 Windows 上是正常文件。"
+        );
+        if report.interrupted {
+            let _ = writeln!(
+                out,
+                "⚠ 这次扫描被中断，没有走完整个库，因此「已删除」一栏没有判——中立库里的记录一条都没删。"
+            );
+        }
+        if report.resumed {
+            let _ = writeln!(
+                out,
+                "注：这是续跑，以上只涵盖这一趟；中断之前扫到的那部分已经在中立库里了。"
+            );
+        }
+    }
 
     heading(&mut out, "按平台目录");
     let _ = writeln!(
@@ -360,8 +411,13 @@ pub(super) fn render(report: &HealthReport) -> String {
     );
     let _ = writeln!(
         out,
-        "空文件          {} 个",
+        "空文件          {} 个（真的 0 字节）",
         thousands(anomalies.zero_length)
+    );
+    let _ = writeln!(
+        out,
+        "元数据读不到    {} 个（名字列得出、属性读不到；不是空文件，也不是不存在）",
+        thousands(anomalies.unreadable)
     );
     let _ = writeln!(
         out,

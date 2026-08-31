@@ -1,11 +1,18 @@
-//! 断点：把「已经算出来的统计」与「还没扫的目录」一起存盘。
+//! 断点：还没扫的目录，以及这次扫描的代号。
+//!
+//! 断点里**不再装统计**——统计的家是中立库（ADR-0001），扫到的每一条记录都已经落进
+//! SQLite 了。断点只回答一个问题：接着从哪儿扫。于是它从「10T 库可能几 MB」
+//! 缩回到一份目录清单。
 //!
 //! 中断可续跑的代价必须落在**工作目录**而不是主库上——主库只读（ADR-0004），
-//! 而且外接盘不常挂载。断点写在本机，和票 02 的**中立库**将来放在同一个工作目录下。
+//! 而且外接盘不常挂载，中立库与断点都存在本机（ADR-0009）。
 //!
-//! 一致性靠一条规则守住：断点里的 `pending` 同时包含队列里的和**正在扫的**目录。
-//! 正在扫的那些，它们的统计还没并入 `aggregate`，续跑时重扫一遍即可——重做一点点，
-//! 好过算重一遍。
+//! 一致性靠两条规则守住：
+//!
+//! - 断点里的 `pending` 同时包含队列里的和**正在扫的**目录。正在扫的那些结果被整份
+//!   丢掉，续跑时重扫一遍即可——重做一点点，好过少算一个目录。
+//! - 续跑沿用同一个 `scan`。删除是「这次扫描没见到的」，跨几次续跑累计起来才算数；
+//!   中断的扫描绝不 sweep。
 
 use std::ffi::OsString;
 use std::fs;
@@ -14,13 +21,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::aggregate::Aggregate;
-
 /// 断点文件的格式版本。结构变了就加 1，读到对不上的版本直接从头扫。
 ///
-/// 2：`DuplicateGroup` 的 `examples` 改名成 `paths`——它装的不再是几条例子，
-/// 而是组内全部路径（导出重复拷贝明细要靠它）。
-pub const FORMAT_VERSION: u32 = 2;
+/// 3：统计搬进中立库，断点只剩待扫目录、扫描代号与累计耗时。
+pub const FORMAT_VERSION: u32 = 3;
 
 /// 断点读写过程中的错误。
 #[derive(Debug, thiserror::Error)]
@@ -154,8 +158,11 @@ pub struct Checkpoint {
     pub samples_per_class: usize,
     /// 还没扫完的目录：队列里的加上中断时正在扫的。
     pub pending: Vec<PathRepr>,
-    /// 已经算出来的统计。
-    pub aggregate: Aggregate,
+    /// 这次扫描在中立库里的代号。续跑必须沿用它，否则续跑之前扫到的记录
+    /// 会被当成「这次没见到」而在收尾时删掉。
+    pub scan: i64,
+    /// 累计耗时，含此前几次续跑。
+    pub elapsed_ms: u64,
 }
 
 impl Checkpoint {
@@ -165,14 +172,16 @@ impl Checkpoint {
         root: &Path,
         samples_per_class: usize,
         pending: &[PathBuf],
-        aggregate: Aggregate,
+        scan: i64,
+        elapsed_ms: u64,
     ) -> Self {
         Self {
             format_version: FORMAT_VERSION,
             root: encode_path(root),
             samples_per_class,
             pending: pending.iter().map(|p| encode_path(p)).collect(),
-            aggregate,
+            scan,
+            elapsed_ms,
         }
     }
 
@@ -254,19 +263,20 @@ mod tests {
         let dir = crate::testing::temp_dir("checkpoint");
         let file = dir.path().join("scan").join("checkpoint.json");
         let pending = vec![PathBuf::from("/lib/FC"), PathBuf::from("/lib/PS1/游戏")];
-        let checkpoint = Checkpoint::new(Path::new("/lib"), 32, &pending, Aggregate::default());
+        let checkpoint = Checkpoint::new(Path::new("/lib"), 32, &pending, 7, 1234);
         checkpoint.save(&file).expect("能存盘");
 
         let back = Checkpoint::load(&file, Path::new("/lib")).expect("能读回");
         assert_eq!(back, checkpoint);
         assert_eq!(back.pending(), pending);
+        assert_eq!(back.scan, 7, "续跑要沿用同一个扫描代号");
     }
 
     #[test]
     fn 扫描根对不上时拒绝续跑() {
         let dir = crate::testing::temp_dir("checkpoint");
         let file = dir.path().join("checkpoint.json");
-        Checkpoint::new(Path::new("/lib"), 32, &[], Aggregate::default())
+        Checkpoint::new(Path::new("/lib"), 32, &[], 1, 0)
             .save(&file)
             .expect("能存盘");
         let err = Checkpoint::load(&file, Path::new("/other")).expect_err("必须报错");

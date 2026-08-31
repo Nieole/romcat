@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::catalog::ScanDelta;
 use crate::classify::{Category, SuspectReason};
 use crate::header::ProbeClass;
 use crate::scan::aggregate::{
@@ -44,6 +45,8 @@ pub struct ReportMeta {
     pub jobs: usize,
     /// 每类文件的抽样配额。
     pub samples_per_class: usize,
+    /// 这次扫描相对上一次的差异；`None` 表示这份报告是直接从中立库出的，没有扫盘。
+    pub delta: Option<ScanDelta>,
 }
 
 /// 全库合计。
@@ -206,6 +209,10 @@ pub struct HealthReport {
     pub jobs: usize,
     /// 每类文件的抽样配额。
     pub samples_per_class: usize,
+    /// 这次扫描相对中立库上一次状态的差异。
+    ///
+    /// `None` 表示这份报告直接从中立库折出来，没有碰过磁盘——外置盘不在位时就是这样。
+    pub delta: Option<ScanDelta>,
     /// 累计耗时（毫秒），含此前几次续跑。
     pub elapsed_ms: u64,
     /// 全库合计。
@@ -310,6 +317,7 @@ impl HealthReport {
             resumed: meta.resumed,
             jobs: meta.jobs,
             samples_per_class: meta.samples_per_class,
+            delta: meta.delta,
             elapsed_ms: aggregate.elapsed_ms,
             totals: Totals {
                 files: aggregate.totals.files,

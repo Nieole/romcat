@@ -6,10 +6,15 @@
 //! Windows 的 `MAX_PATH` 是 260 字符，而 10T 主库里深层目录加中文文件名极易超限。
 //! 对策是 `\\?\` 扩展长度前缀：[`long_path`] 在 Windows 上给绝对路径加前缀，
 //! 其余平台原样返回。前缀只在真正调用系统 API 时加，报告里展示的仍是原路径。
+//!
+//! 另一半是**中立库的键**：[`catalog_key`] 把系统给的路径折成「相对扫描根、分隔符统一
+//! 成 `/`、再规范化成 NFC」的形式。读盘用系统给的原始路径，入库与比较用键，
+//! **两者不能混用**（ADR-0020）。
 
 use std::borrow::Cow;
-use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
+
+use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
 
 /// Windows 的 `MAX_PATH` 限制，单位是字符（UTF-16 码元）。
 pub const MAX_PATH: usize = 260;
@@ -82,8 +87,10 @@ pub fn strip_windows_verbatim(path: &str) -> Option<String> {
 /// 一个汉字在 UTF-8 里是 3 字节但在 Windows 上只算 1 个字符，
 /// 按字节数判断会把大量正常路径误报成超限。
 #[must_use]
-pub fn char_len(path: &Path) -> usize {
-    display(path).chars().map(char::len_utf16).sum()
+pub fn char_len(text: &str) -> usize {
+    let bare = strip_windows_verbatim(text);
+    let text = bare.as_deref().unwrap_or(text);
+    text.chars().map(char::len_utf16).sum()
 }
 
 /// 路径是否超过 Windows 的 `MAX_PATH` 限制。
@@ -91,25 +98,94 @@ pub fn char_len(path: &Path) -> usize {
 /// 超限本身不是错误——加了 `\\?\` 前缀就能正常访问——但它是体检报告要报出来的数字：
 /// 库里有多少路径在没有长路径支持的工具下会失败。
 #[must_use]
-pub fn exceeds_max_path(path: &Path) -> bool {
-    char_len(path) > MAX_PATH
+pub fn exceeds_max_path(text: &str) -> bool {
+    char_len(text) > MAX_PATH
 }
 
-/// 取出文件相对于扫描根的**平台目录**名。
+/// 把文本规范化成 NFC（ADR-0020）。
+///
+/// **macOS 的 NTFS 驱动把文件名规范化成 NFD 之后才交给 `readdir`**：实测 1.99% 的路径
+/// 受影响（日文浊音假名、拉丁重音符），其中 5 个是**目录名**——一个目录中招，整棵子树
+/// 的键都跟着变。不做这一步，盘在 macOS 与 Windows 之间接一次，约 5,100 个文件会被
+/// 判成新文件重扫一遍，而两台机器轮流碰同一块盘正是既定的工作方式（ADR-0018）。
+///
+/// 已经是 NFC 的原样借用不额外分配——库里 98% 的路径走这条。
+#[must_use]
+pub fn nfc(text: &str) -> Cow<'_, str> {
+    match is_nfc_quick(text.chars()) {
+        IsNormalized::Yes => Cow::Borrowed(text),
+        _ => Cow::Owned(text.nfc().collect()),
+    }
+}
+
+/// 中立库里一条记录的键：相对扫描根的路径，分隔符统一成 `/`，再规范化成 NFC。
+///
+/// 三件事各有理由：
+///
+/// - **相对**：挂载点会变。macOS 上重挂一次就可能从 `/Volumes/新加卷` 变成
+///   `/Volumes/新加卷 1`，Windows 上盘符也会变。存绝对路径的话，换一次挂载点
+///   **全库**都会被判成新文件——那比 ADR-0020 要防的 5,100 个还糟。
+/// - **分隔符统一**：同一块盘在 Windows 上是 `\`、在 macOS 上是 `/`（ADR-0018）。
+///   按 [`Component`] 拆再用 `/` 接，于是 Unix 文件名里合法的字面 `\` 不会被误当分隔符。
+/// - **NFC**：见 [`nfc`] 与 ADR-0020。
+///
+/// **读盘要用系统给的原始路径，只有入库与比较才用这个键**——两者不能混用。
+#[must_use]
+pub fn catalog_key(root: &Path, path: &Path) -> String {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let mut key = String::with_capacity(relative.as_os_str().len());
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            continue;
+        };
+        if !key.is_empty() {
+            key.push('/');
+        }
+        key.push_str(&part.to_string_lossy());
+    }
+    nfc(&key).into_owned()
+}
+
+/// 把中立库的键还原成给人看的完整路径。
+///
+/// 分隔符跟着 `root` 走而不是跟着当前平台走：在 macOS 上看一份上次在 Windows 上扫出来
+/// 的中立库时，`D:\Game\FC\…` 比 `D:\Game/FC/…` 更像那台机器上的真实路径。
+#[must_use]
+pub fn display_key(root: &str, key: &str) -> String {
+    if key.is_empty() {
+        return root.to_string();
+    }
+    let separator = if root.contains('\\') { '\\' } else { '/' };
+    let root = root.trim_end_matches(['/', '\\']);
+    let mut out = String::with_capacity(root.len() + key.len() + 1);
+    out.push_str(root);
+    out.push(separator);
+    for (index, part) in key.split('/').enumerate() {
+        if index > 0 {
+            out.push(separator);
+        }
+        out.push_str(part);
+    }
+    out
+}
+
+/// 取出一个键的**平台目录**名。
 ///
 /// 平台由目录给出（ADR-0011：目录是强先验而非权威）。直接躺在库根下的文件没有平台目录，
 /// 返回 `None`——它们照常计入报告，平台未知不构成跳过的理由。
 #[must_use]
-pub fn platform_dir<'a>(root: &Path, path: &'a Path) -> Option<&'a OsStr> {
-    let rel = path.strip_prefix(root).ok()?;
-    let mut comps = rel.components();
-    let first = match comps.next()? {
-        Component::Normal(name) => name,
-        _ => return None,
-    };
-    // 只有还有下一级时，第一级才是「目录」而不是文件本身。
-    comps.next()?;
-    Some(first)
+pub fn platform_of_key(key: &str) -> Option<&str> {
+    let (head, rest) = key.split_once('/')?;
+    (!head.is_empty() && !rest.is_empty()).then_some(head)
+}
+
+/// 键的文件名部分。
+///
+/// 只按 `/` 拆：键里的分隔符只有 `/`，而 `\` 在 Windows 上是分隔符、在 Unix 上是合法
+/// 的文件名字符——交给 `Path` 去拆会在两个平台上给出不同答案，而中立库的键必须两边一致。
+#[must_use]
+pub fn file_name_of_key(key: &str) -> &str {
+    key.rsplit('/').next().unwrap_or(key)
 }
 
 /// 文件名的扩展名，转成小写。没有扩展名时返回 `None`。
@@ -229,7 +305,7 @@ mod tests {
         assert_eq!(strip_windows_verbatim(&verbatim).as_deref(), Some(raw));
         assert_eq!(display(Path::new(&verbatim)), raw);
         // 前缀是工具加的，不该让路径凭空多出 4 个字符
-        assert_eq!(char_len(Path::new(&verbatim)), char_len(Path::new(raw)));
+        assert_eq!(char_len(&verbatim), char_len(raw));
 
         let unc = windows_verbatim(r"\\nas\share\ROMs").expect("能加前缀");
         assert_eq!(
@@ -242,33 +318,81 @@ mod tests {
     #[test]
     fn 超长路径按字符而非字节判断() {
         // 90 个汉字 = 270 字节的 UTF-8，但只有 90 个 Windows 字符，不算超限。
-        let short = PathBuf::from(format!("D:\\{}", "游".repeat(90)));
+        let short = format!("D:\\{}", "游".repeat(90));
         assert!(!exceeds_max_path(&short));
         assert_eq!(char_len(&short), 93);
 
-        let long = PathBuf::from(format!("D:\\{}", "游".repeat(300)));
+        let long = format!("D:\\{}", "游".repeat(300));
         assert!(exceeds_max_path(&long));
     }
 
     #[test]
-    fn 平台目录取相对根的第一级() {
-        let root = Path::new("/lib");
-        assert_eq!(
-            platform_dir(root, Path::new("/lib/FC/超级马里奥.zip")),
-            Some(OsStr::new("FC"))
-        );
-        assert_eq!(
-            platform_dir(root, Path::new("/lib/PS1/某游戏/disc.cue")),
-            Some(OsStr::new("PS1"))
-        );
+    fn 平台目录取键的第一级() {
+        assert_eq!(platform_of_key("FC/超级马里奥.zip"), Some("FC"));
+        assert_eq!(platform_of_key("PS1/某游戏/disc.cue"), Some("PS1"));
     }
 
     #[test]
     fn 库根下的散文件没有平台目录() {
-        assert_eq!(
-            platform_dir(Path::new("/lib"), Path::new("/lib/readme.txt")),
-            None
+        assert_eq!(platform_of_key("readme.txt"), None);
+        assert_eq!(platform_of_key(""), None);
+    }
+
+    /// 「が」有两种写法：预组合的 U+304C，与「か」加组合浊音符 U+3099。
+    /// macOS 的 NTFS 驱动交出来的是后者，Windows 上存的是前者。
+    const 预组合: &str = "\u{304C}";
+    const 分解: &str = "\u{304B}\u{3099}";
+
+    #[test]
+    fn 分解形的假名被规范化成预组合形() {
+        assert_ne!(预组合, 分解, "两种写法的字节本来就不同");
+        assert_eq!(nfc(分解), 预组合);
+        assert_eq!(nfc(预组合), 预组合);
+    }
+
+    #[test]
+    fn 已是_nfc_的文本不额外分配() {
+        assert!(matches!(nfc("FC/超级马里奥.zip"), Cow::Borrowed(_)));
+        assert!(matches!(nfc(分解), Cow::Owned(_)));
+    }
+
+    #[test]
+    fn 键相对扫描根且规范化成_nfc() {
+        let root = Path::new("/Volumes/新加卷/Game");
+        let path = PathBuf::from(format!("/Volumes/新加卷/Game/PSP/{分解}me.iso"));
+        assert_eq!(catalog_key(root, &path), format!("PSP/{预组合}me.iso"));
+    }
+
+    #[test]
+    fn 换个挂载点键不变() {
+        // 这正是不存绝对路径的理由：macOS 重挂一次盘名就可能变。
+        let a = catalog_key(
+            Path::new("/Volumes/新加卷"),
+            Path::new("/Volumes/新加卷/FC/a.zip"),
         );
+        let b = catalog_key(
+            Path::new("/Volumes/新加卷 1"),
+            Path::new("/Volumes/新加卷 1/FC/a.zip"),
+        );
+        assert_eq!(a, "FC/a.zip");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn 键能还原成给人看的路径() {
+        assert_eq!(display_key("/lib", "FC/a.zip"), "/lib/FC/a.zip");
+        assert_eq!(display_key("/lib/", "FC/a.zip"), "/lib/FC/a.zip");
+        // 在 macOS 上看 Windows 扫出来的中立库，分隔符跟着根走
+        assert_eq!(display_key(r"D:\Game", "FC/a.zip"), r"D:\Game\FC\a.zip");
+        assert_eq!(display_key("/lib", ""), "/lib");
+    }
+
+    #[test]
+    fn 键的文件名只按斜杠拆() {
+        assert_eq!(file_name_of_key("FC/子目录/游戏.zip"), "游戏.zip");
+        assert_eq!(file_name_of_key("游戏.zip"), "游戏.zip");
+        // Unix 上 `\` 是合法的文件名字符，不能当分隔符
+        assert_eq!(file_name_of_key(r"FC/a\b.zip"), r"a\b.zip");
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use super::{DirEntry, EntryKind, LibraryFs};
+use super::{DirEntry, EntryKind, EntryMeta, LibraryFs};
 use crate::path::long_path;
 
 /// 真实文件系统。只打开文件读，从不创建、修改或删除任何东西。
@@ -27,6 +27,20 @@ impl LibraryFs for RealFs {
         Ok(long_path(&absolute).into_owned())
     }
 
+    /// 列一层目录。
+    ///
+    /// # 禁止改用 `getattrlistbulk`（ADR-0021）
+    ///
+    /// `getattrlistbulk` 是 macOS 上批量取目录项元数据的接口，比这里「逐个 `metadata()`」
+    /// 快得多，是将来给扫描提速时最自然的第一选择。**不要换。**
+    ///
+    /// 实测：主库里有 4,085 个文件在 fskit 的只读 NTFS 驱动下 `stat` 失败，而
+    /// `getattrlistbulk` **根本不列出它们**——23 个受影响文件里列出 0 个。于是这批文件
+    /// 会从「读不到」变成「不存在」，而扫描把不存在解释为**已删除**：一次提速改动会
+    /// 静默地让 4,085 个文件从中立库里消失。
+    ///
+    /// 这个陷阱在代码里完全看不出来——`getattrlistbulk` 会成功返回，只是少了东西。
+    /// 要提速，先证明新接口列得出 `readdir` 列得出的每一条。
     fn read_dir(&self, dir: &Path) -> io::Result<Vec<DirEntry>> {
         let mut out = Vec::new();
         for entry in fs::read_dir(long_path(dir).as_ref())? {
@@ -43,15 +57,23 @@ impl LibraryFs for RealFs {
             } else {
                 EntryKind::Other
             };
-            let (len, modified) = match &meta {
-                Ok(meta) => (meta.len(), meta.modified().ok()),
-                Err(_) => (0, None),
+            // 读不到就如实说读不到，绝不退化成 `len = 0`——那会和库里 4,317 个
+            // 真正的空文件混在一起（ADR-0021）。
+            let meta = match meta {
+                Ok(meta) => EntryMeta::Known {
+                    len: if kind == EntryKind::File {
+                        meta.len()
+                    } else {
+                        0
+                    },
+                    modified: meta.modified().ok(),
+                },
+                Err(_) => EntryMeta::Unreadable,
             };
             out.push(DirEntry {
                 path: entry.path(),
                 kind,
-                len: if kind == EntryKind::File { len } else { 0 },
-                modified,
+                meta,
             });
         }
         Ok(out)

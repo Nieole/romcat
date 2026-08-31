@@ -1,21 +1,37 @@
 //! 内存里的 [`LibraryFs`] 实现，供测试使用。
 //!
-//! 有了它，遍历、归类、断点续跑这些逻辑不需要真实磁盘就能测——也不需要那块
+//! 有了它，遍历、归类、增量判断、断点续跑这些逻辑不需要真实磁盘就能测——也不需要那块
 //! 现在没挂载的 10T 外置盘。
+//!
+//! 它刻意能造出主库上真实存在的两种「读不到」，因为两者在扫描里的结论完全不同：
+//!
+//! - [`MemFs::unreadable_meta`]：`readdir` 列得出名字，元数据读不到。这是 ADR-0021 的
+//!   **第三态**，既不算已变也不算已删。
+//! - [`MemFs::unreadable_content`]：元数据正常，但打开读头部会失败。它只影响头部抽样。
 
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
-use super::{DirEntry, EntryKind, LibraryFs};
+use super::{DirEntry, EntryKind, EntryMeta, LibraryFs};
 
 #[derive(Debug, Clone)]
 enum Node {
     Dir,
-    File { data: Vec<u8>, len: u64 },
+    File {
+        data: Vec<u8>,
+        len: u64,
+        modified: SystemTime,
+    },
     Symlink,
-    Unreadable,
+    /// 元数据正常，内容读不动。
+    UnreadableContent {
+        len: u64,
+        modified: SystemTime,
+    },
+    /// 名字列得出，元数据读不到（ADR-0021 的第三态）。
+    UnreadableMeta,
 }
 
 /// 内存文件系统。路径一律用绝对路径。
@@ -23,6 +39,9 @@ enum Node {
 pub struct MemFs {
     nodes: BTreeMap<PathBuf, Node>,
 }
+
+/// 文件默认的修改时间。测试要造「内容变了」时用 [`MemFs::touch`] 往后拨。
+const DEFAULT_MTIME: SystemTime = SystemTime::UNIX_EPOCH;
 
 impl MemFs {
     /// 新建一个空的内存文件系统。
@@ -50,7 +69,37 @@ impl MemFs {
         }
         let data = data.into();
         let len = data.len() as u64;
-        self.nodes.insert(path, Node::File { data, len });
+        self.nodes.insert(
+            path,
+            Node::File {
+                data,
+                len,
+                modified: DEFAULT_MTIME,
+            },
+        );
+        self
+    }
+
+    /// 把一个文件的修改时间往后拨 `seconds` 秒，大小不变。
+    ///
+    /// 这是增量扫描最该防的一种变化：**大小一样但内容变了**。只比大小的话它会被漏掉。
+    ///
+    /// # Panics
+    /// 路径不是一个普通文件时 panic——测试写错了该立刻知道。
+    pub fn touch(&mut self, path: impl AsRef<Path>, seconds: u64) -> &mut Self {
+        let path = path.as_ref().to_path_buf();
+        match self.nodes.get_mut(&path) {
+            Some(Node::File { modified, .. } | Node::UnreadableContent { modified, .. }) => {
+                *modified += Duration::from_secs(seconds);
+            }
+            _ => panic!("touch 的目标不是文件：{}", path.display()),
+        }
+        self
+    }
+
+    /// 删掉一个条目。
+    pub fn remove(&mut self, path: impl AsRef<Path>) -> &mut Self {
+        self.nodes.remove(path.as_ref());
         self
     }
 
@@ -64,13 +113,31 @@ impl MemFs {
         self
     }
 
-    /// 建一个读不动的文件，用来测「读失败要被计入报告而不是中断扫描」。
-    pub fn unreadable_file(&mut self, path: impl AsRef<Path>) -> &mut Self {
+    /// 建一个元数据正常、但内容读不动的文件，用来测「读失败要被计入报告而不是中断扫描」。
+    pub fn unreadable_content(&mut self, path: impl AsRef<Path>, len: u64) -> &mut Self {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             self.dir(parent);
         }
-        self.nodes.insert(path, Node::Unreadable);
+        self.nodes.insert(
+            path,
+            Node::UnreadableContent {
+                len,
+                modified: DEFAULT_MTIME,
+            },
+        );
+        self
+    }
+
+    /// 建一个**元数据读不到**的文件：名字列得出，`stat` 失败（ADR-0021 的第三态）。
+    ///
+    /// 主库那块 NTFS 盘在 macOS 上实测有 4,085 个这样的文件。
+    pub fn unreadable_meta(&mut self, path: impl AsRef<Path>) -> &mut Self {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            self.dir(parent);
+        }
+        self.nodes.insert(path, Node::UnreadableMeta);
         self
     }
 }
@@ -114,17 +181,23 @@ impl LibraryFs for MemFs {
             if path.parent() != Some(dir) {
                 continue;
             }
-            let (kind, len) = match node {
-                Node::Dir => (EntryKind::Dir, 0),
-                Node::File { len, .. } => (EntryKind::File, *len),
-                Node::Symlink => (EntryKind::Symlink, 0),
-                Node::Unreadable => (EntryKind::File, 0),
+            let known = |len: u64, modified: SystemTime| EntryMeta::Known {
+                len,
+                modified: Some(modified),
+            };
+            let (kind, meta) = match node {
+                Node::Dir => (EntryKind::Dir, known(0, DEFAULT_MTIME)),
+                Node::File { len, modified, .. } => (EntryKind::File, known(*len, *modified)),
+                Node::Symlink => (EntryKind::Symlink, known(0, DEFAULT_MTIME)),
+                Node::UnreadableContent { len, modified } => {
+                    (EntryKind::File, known(*len, *modified))
+                }
+                Node::UnreadableMeta => (EntryKind::File, EntryMeta::Unreadable),
             };
             out.push(DirEntry {
                 path: path.clone(),
                 kind,
-                len,
-                modified: Some(SystemTime::UNIX_EPOCH),
+                meta,
             });
         }
         Ok(out)
@@ -133,7 +206,6 @@ impl LibraryFs for MemFs {
     fn read_head(&self, file: &Path, limit: usize) -> io::Result<Vec<u8>> {
         match self.nodes.get(file) {
             Some(Node::File { data, .. }) => Ok(data[..data.len().min(limit)].to_vec()),
-            Some(Node::Unreadable) => Err(denied(file)),
             Some(_) => Err(denied(file)),
             None => Err(not_found(file)),
         }
@@ -145,7 +217,6 @@ impl LibraryFs for MemFs {
                 let start = data.len().saturating_sub(limit);
                 Ok(data[start..].to_vec())
             }
-            Some(Node::Unreadable) => Err(denied(file)),
             Some(_) => Err(denied(file)),
             None => Err(not_found(file)),
         }

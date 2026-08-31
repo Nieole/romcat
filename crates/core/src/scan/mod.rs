@@ -1,17 +1,20 @@
-//! 只读遍历主库，产出**库体检报告**。
+//! 只读遍历主库，把每条记录写进**中立库**，再由中立库出**库体检报告**。
 //!
-//! 三条约束决定了这里的形状：
+//! 四条约束决定了这里的形状：
 //!
-//! - **只读**。一切磁盘接触走 [`LibraryFs`]，它没有写的办法（ADR-0004）。断点写在
-//!   本机工作目录，且落在主库内时直接拒绝开工。
-//! - **并发到打满磁盘带宽**。工作线程只做「列一层目录 + 抽样读头部」这种纯 IO 的事，
-//!   统计全部交给协调线程单线程合并——统计不是瓶颈，而单线程合并让断点有一个明确的
-//!   一致点。
-//! - **可中断可续跑**。协调线程持有队列与统计，断点里的 `pending` 同时包含队列里的和
-//!   正在扫的目录，因此中断只会让少量目录被重扫，绝不会算重。
+//! - **只读**。一切磁盘接触走 [`LibraryFs`]，它没有写的办法（ADR-0004）。断点与中立库
+//!   写在本机工作目录，断点落在主库内时直接拒绝开工。
+//! - **增量**。中立库里记着上次每个文件的 `(路径, 大小, 修改时间)`。三元组没变的文件
+//!   跳过——不重新归类、不重新读头部，上次的结论原样留着。真正省下的活会随着票 07
+//!   的哈希越来越重，那时不重算 7.84 TiB 才是这条接缝的价值所在。
+//! - **可中断可续跑**。协调线程持有队列，断点里的 `pending` 同时包含队列里的和正在扫的
+//!   目录，因此中断只会让少量目录被重扫，绝不会算重——计数是从中立库里**数**出来的，
+//!   不是攒在内存里的。
+//! - **报告不必扫盘**。报告一律由 [`Catalog::aggregate`] 从中立库折出来，扫描刚跑完
+//!   也一样。于是「扫完出的报告」与「盘不在位时出的报告」不可能是两套数字。
 //!
-//! 平台由目录给出（ADR-0011）：文件相对扫描根的第一级目录名就是平台目录。认不出平台
-//! 的照常计入报告——平台未知不构成跳过的理由。
+//! 平台由目录给出（ADR-0011）：文件的键相对扫描根的第一级目录名就是平台目录。认不出
+//! 平台的照常计入报告——平台未知不构成跳过的理由。
 
 pub mod aggregate;
 pub mod checkpoint;
@@ -23,14 +26,20 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
-use crate::classify::{self, classify};
-use crate::fs::{EntryKind, LibraryFs};
+use crate::catalog::{Baseline, Catalog, CatalogError, EntryRecord, ScanDelta, Traversal, Verdict};
+use crate::classify;
+use crate::fs::{DirEntry, EntryKind, EntryMeta, LibraryFs};
 use crate::header::{self, ProbeClass};
 use crate::path;
 use crate::report::{HealthReport, ReportMeta};
 
-use aggregate::{Aggregate, FileObservation, Limits, SampleResult};
+use aggregate::{Aggregate, Limits, SampleResult};
 use checkpoint::{Checkpoint, CheckpointError};
+
+/// 攒够多少条记录写一次中立库。
+///
+/// 一条一条写会让每条都开一次事务；整趟扫完再写则中断时全丢。几千条一批是两者之间。
+const WRITE_BATCH: usize = 4_096;
 
 /// 扫描过程中的致命错误。读不到某个目录这类问题不在此列——那些计入报告，不中断扫描。
 #[derive(Debug, thiserror::Error)]
@@ -43,12 +52,20 @@ pub enum ScanError {
         /// 底层错误。
         source: std::io::Error,
     },
-    /// 断点落在主库内。
-    #[error("断点文件 {0} 落在主库内。主库只读，断点必须写在本机的工作目录里")]
-    CheckpointInsideLibrary(String),
+    /// 断点或中立库落在主库内。
+    #[error("{what} {path} 落在主库内。主库只读，它必须写在本机的工作目录里")]
+    WritesInsideLibrary {
+        /// 是断点还是中立库。
+        what: &'static str,
+        /// 出问题的路径。
+        path: String,
+    },
     /// 断点读写失败。
     #[error(transparent)]
     Checkpoint(#[from] CheckpointError),
+    /// 中立库读写失败。
+    #[error(transparent)]
+    Catalog(#[from] CatalogError),
 }
 
 /// 中断信号。命令行把 Ctrl-C 接到它上面，界面把停止按钮接到它上面。
@@ -98,6 +115,11 @@ pub struct ScanOptions {
     pub limits: Limits,
     /// 断点配置；`None` 表示不写断点（也就不能续跑）。
     pub checkpoint: Option<CheckpointOptions>,
+    /// 按 `(路径, 大小, 修改时间)` 跳过未变的文件。
+    ///
+    /// 关掉它就是「当作从没扫过」重看一遍：每个文件重新抽样、重新归类，中立库里的旧
+    /// 结论一律作废。判据出了问题、或怀疑中立库与磁盘对不上时才需要。
+    pub incremental: bool,
 }
 
 impl ScanOptions {
@@ -110,6 +132,7 @@ impl ScanOptions {
             samples_per_class: 32,
             limits: Limits::default(),
             checkpoint: None,
+            incremental: true,
         }
     }
 }
@@ -132,18 +155,24 @@ pub struct ScanOutcome {
     pub report: HealthReport,
     /// 统计状态本身，供测试与后续票使用。
     pub aggregate: Aggregate,
+    /// 这次扫描相对中立库上一次状态的差异。
+    ///
+    /// **续跑时它只涵盖这一趟**：中断之前那部分的结论早已写进中立库，这一趟看到它们
+    /// 时三元组已经对得上，于是算作未变。
+    pub delta: ScanDelta,
     /// 是否被中断。
     pub interrupted: bool,
     /// 断点文件位置（中断且写了断点时）。
     pub checkpoint_path: Option<PathBuf>,
 }
 
-/// 扫一遍主库。
+/// 扫一遍主库，把结论写进中立库。
 ///
 /// # Errors
-/// 扫描根打不开、断点落在主库内、或断点读写失败时返回错误。
+/// 扫描根打不开、断点落在主库内、断点读写失败或中立库读写失败时返回错误。
 pub fn scan(
     library: &dyn LibraryFs,
+    catalog: &mut Catalog,
     options: &ScanOptions,
     cancel: &CancelToken,
 ) -> Result<ScanOutcome, ScanError> {
@@ -155,23 +184,53 @@ pub fn scan(
             source,
         })?;
 
-    // 断点是这条流程里唯一的写操作，它必须落在主库之外。比较前两边都化成绝对形态，
-    // 否则 `/var` 与 `/private/var` 这类链接会让守卫形同虚设。
-    if let Some(config) = &options.checkpoint
-        && path::is_inside(&root, &path::normalize_existing(&config.path))
-    {
-        return Err(ScanError::CheckpointInsideLibrary(path::display(
-            &config.path,
-        )));
+    // 断点是这条流程里唯一写进文件系统的东西，它必须落在主库之外。比较前两边都化成
+    // 绝对形态，否则 `/var` 与 `/private/var` 这类链接会让守卫形同虚设。
+    let mut guarded: Vec<(&'static str, &Path)> = Vec::new();
+    if let Some(config) = &options.checkpoint {
+        guarded.push(("断点文件", &config.path));
+    }
+    if let Some(file) = catalog.file() {
+        guarded.push(("中立库", file));
+    }
+    for (what, target) in guarded {
+        if path::is_inside(&root, &path::normalize_existing(target)) {
+            return Err(ScanError::WritesInsideLibrary {
+                what,
+                path: path::display(target),
+            });
+        }
     }
 
-    let (mut aggregate, pending, resumed) = load_start_state(options, &root)?;
-    let elapsed_base = Duration::from_millis(aggregate.elapsed_ms);
-    let budget = SampleBudget::resume_from(&aggregate, options.samples_per_class);
-    let queue = Queue::new(pending);
+    let mut start = load_start_state(options, &root, catalog)?;
+    let mut traversal = Traversal {
+        scan: start.scan,
+        root: path::display(&root),
+        elapsed_ms: elapsed(start.elapsed_base, started),
+        jobs: options.jobs.max(1),
+        samples_per_class: options.samples_per_class,
+        interrupted: true,
+        resumed: start.resumed,
+    };
+    if !start.resumed {
+        catalog.begin_scan(start.scan)?;
+    }
+    // 先把这次扫描的行占上，代号才不会因为进程半路被杀而被下次重用。
+    catalog.save_traversal(&traversal)?;
+    // 主库根自己也是一条记录，键是空串——「扫过几个目录」是从表里数出来的。
+    catalog.write(start.scan, &[root_record(&root)])?;
+
+    let baseline = if options.incremental {
+        catalog.baseline()?
+    } else {
+        Baseline::empty()
+    };
+    let budget = SampleBudget::new(baseline.sampled().clone(), options.samples_per_class);
+    let queue = Queue::new(std::mem::take(&mut start.pending));
 
     let (results_tx, results_rx) = mpsc::channel::<DirResult>();
-    let jobs = options.jobs.max(1);
+    let jobs = traversal.jobs;
+    let mut progress = Progress::default();
 
     let interrupted = thread::scope(|scope| -> Result<bool, ScanError> {
         for _ in 0..jobs {
@@ -179,9 +238,10 @@ pub fn scan(
             let queue = &queue;
             let budget = &budget;
             let root = &root;
+            let baseline = &baseline;
             scope.spawn(move || {
                 while let Some(dir) = queue.pop() {
-                    let result = process_dir(library, root, dir, options, budget, cancel);
+                    let result = process_dir(library, root, dir, options, budget, baseline, cancel);
                     if tx.send(result).is_err() {
                         break;
                     }
@@ -206,8 +266,8 @@ pub fn scan(
                 // 文件与子目录**永久消失**——重做一个目录，好过少算一个目录。
                 Ok(result) if result.partial => {}
                 Ok(result) => {
-                    let subdirs = merge(&mut aggregate, result, &options.limits);
-                    queue.finish_and_push(subdirs);
+                    let done = merge(catalog, start.scan, &mut progress, result)?;
+                    queue.finish_and_push(done);
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -215,8 +275,8 @@ pub fn scan(
             if let Some(config) = &options.checkpoint
                 && last_save.elapsed() >= config.interval
             {
-                aggregate.elapsed_ms = elapsed(elapsed_base, started);
-                save_checkpoint(options, &root, &queue, &aggregate)?;
+                traversal.elapsed_ms = elapsed(start.elapsed_base, started);
+                save_progress(catalog, options, &root, &queue, &mut progress, &traversal)?;
                 last_save = Instant::now();
             }
         }
@@ -224,32 +284,76 @@ pub fn scan(
         Ok(interrupted)
     })?;
 
-    aggregate.elapsed_ms = elapsed(elapsed_base, started);
+    traversal.elapsed_ms = elapsed(start.elapsed_base, started);
+    traversal.interrupted = interrupted;
+    catalog.write(start.scan, &progress.records)?;
+    progress.records.clear();
 
-    let checkpoint_path = finish_checkpoint(options, &root, &queue, &aggregate, interrupted)?;
+    // 删除只在完整扫完一遍之后判。中断的扫描没走完整个库，「这次没见到」不等于
+    // 「不存在」——那时候清一遍会把还没扫到的那半个库当成已删除抹掉。
+    if !interrupted {
+        progress.delta.removed = catalog.sweep(start.scan)?;
+    }
+    catalog.save_traversal(&traversal)?;
+    let checkpoint_path =
+        finish_checkpoint(options, &root, &queue, start.scan, &traversal, interrupted)?;
+
+    let aggregate = catalog.aggregate(&options.limits)?;
     let meta = ReportMeta {
-        root: path::display(&root),
+        root: traversal.root.clone(),
         interrupted,
-        resumed,
+        resumed: start.resumed,
         jobs,
         samples_per_class: options.samples_per_class,
+        delta: Some(progress.delta),
     };
     Ok(ScanOutcome {
         report: HealthReport::build(&aggregate, &meta),
         aggregate,
+        delta: progress.delta,
         interrupted,
         checkpoint_path,
     })
+}
+
+fn root_record(root: &Path) -> EntryRecord {
+    EntryRecord {
+        key: String::new(),
+        kind: EntryKind::Dir,
+        meta: EntryMeta::Known {
+            len: 0,
+            modified: None,
+        },
+        non_utf8: !path::is_utf8(root),
+        verdict: Verdict::Added,
+        sample: None,
+    }
 }
 
 fn elapsed(base: Duration, started: Instant) -> u64 {
     u64::try_from((base + started.elapsed()).as_millis()).unwrap_or(u64::MAX)
 }
 
-type StartState = (Aggregate, Vec<PathBuf>, bool);
+/// 这次扫描从哪儿开始。
+struct StartState {
+    pending: Vec<PathBuf>,
+    scan: i64,
+    elapsed_base: Duration,
+    resumed: bool,
+}
 
-fn load_start_state(options: &ScanOptions, root: &Path) -> Result<StartState, ScanError> {
-    let fresh = || (Aggregate::default(), vec![root.to_path_buf()], false);
+fn load_start_state(
+    options: &ScanOptions,
+    root: &Path,
+    catalog: &Catalog,
+) -> Result<StartState, ScanError> {
+    let next = catalog.next_scan()?;
+    let fresh = || StartState {
+        pending: vec![root.to_path_buf()],
+        scan: next,
+        elapsed_base: Duration::ZERO,
+        resumed: false,
+    };
     let Some(config) = &options.checkpoint else {
         return Ok(fresh());
     };
@@ -261,21 +365,41 @@ fn load_start_state(options: &ScanOptions, root: &Path) -> Result<StartState, Sc
     if pending.is_empty() {
         return Ok(fresh());
     }
-    Ok((checkpoint.aggregate, pending, true))
+    Ok(StartState {
+        pending,
+        // 续跑必须沿用同一个代号，否则收尾时「这次没见到」会把中断之前扫到的记录全删掉。
+        scan: checkpoint.scan,
+        elapsed_base: Duration::from_millis(checkpoint.elapsed_ms),
+        resumed: true,
+    })
 }
 
-fn save_checkpoint(
+/// 存一次进度。
+///
+/// 顺序是有讲究的：**先把攒着的记录写进中立库，再写断点**。反过来的话，断点会说
+/// 「这个目录扫完了」而中立库里没有它的记录，续跑就会永久漏掉那一批文件。
+fn save_progress(
+    catalog: &mut Catalog,
     options: &ScanOptions,
     root: &Path,
     queue: &Queue,
-    aggregate: &Aggregate,
+    progress: &mut Progress,
+    traversal: &Traversal,
 ) -> Result<(), ScanError> {
-    let Some(config) = &options.checkpoint else {
-        return Ok(());
-    };
-    let pending = queue.pending_snapshot();
-    Checkpoint::new(root, options.samples_per_class, &pending, aggregate.clone())
+    catalog.write(traversal.scan, &progress.records)?;
+    progress.records.clear();
+    catalog.save_traversal(traversal)?;
+    if let Some(config) = &options.checkpoint {
+        let pending = queue.pending_snapshot();
+        Checkpoint::new(
+            root,
+            options.samples_per_class,
+            &pending,
+            traversal.scan,
+            traversal.elapsed_ms,
+        )
         .save(&config.path)?;
+    }
     Ok(())
 }
 
@@ -283,14 +407,23 @@ fn finish_checkpoint(
     options: &ScanOptions,
     root: &Path,
     queue: &Queue,
-    aggregate: &Aggregate,
+    scan: i64,
+    traversal: &Traversal,
     interrupted: bool,
 ) -> Result<Option<PathBuf>, ScanError> {
     let Some(config) = &options.checkpoint else {
         return Ok(None);
     };
     if interrupted {
-        save_checkpoint(options, root, queue, aggregate)?;
+        let pending = queue.pending_snapshot();
+        Checkpoint::new(
+            root,
+            options.samples_per_class,
+            &pending,
+            scan,
+            traversal.elapsed_ms,
+        )
+        .save(&config.path)?;
         return Ok(Some(config.path.clone()));
     }
     // 扫完了就把断点删掉：留着它只会让下次 `--resume` 误以为还有活没干完。
@@ -298,27 +431,41 @@ fn finish_checkpoint(
     Ok(None)
 }
 
-fn merge(aggregate: &mut Aggregate, result: DirResult, limits: &Limits) -> DirDone {
-    aggregate.record_dir();
-    for _ in 0..result.symlinks {
-        aggregate.record_symlink();
-    }
-    for _ in 0..result.others {
-        aggregate.record_other_entry();
-    }
+/// 协调线程手上的进度：攒着待写的记录，以及这一趟的差异计数。
+#[derive(Debug, Default)]
+struct Progress {
+    records: Vec<EntryRecord>,
+    delta: ScanDelta,
+}
+
+fn merge(
+    catalog: &mut Catalog,
+    scan: i64,
+    progress: &mut Progress,
+    result: DirResult,
+) -> Result<DirDone, CatalogError> {
     for dir in &result.skipped_system_dirs {
-        aggregate.record_skipped_system_dir(dir, limits);
+        catalog.note_skipped_dir(dir)?;
     }
     for (path, error) in &result.errors {
-        aggregate.record_error(path, error, limits);
+        catalog.note_error(path, error)?;
     }
-    for observation in &result.files {
-        aggregate.record_file(observation, limits);
+    for record in result.entries {
+        // 差异只数文件。目录与链接也进中立库，但「新增了 3 个」说的该是内容，
+        // 不该被目录冲淡。
+        if record.kind == EntryKind::File {
+            progress.delta.record(record.verdict);
+        }
+        progress.records.push(record);
     }
-    DirDone {
+    if progress.records.len() >= WRITE_BATCH {
+        catalog.write(scan, &progress.records)?;
+        progress.records.clear();
+    }
+    Ok(DirDone {
         dir: result.dir,
         subdirs: result.subdirs,
-    }
+    })
 }
 
 struct DirDone {
@@ -329,11 +476,9 @@ struct DirDone {
 struct DirResult {
     dir: PathBuf,
     subdirs: Vec<PathBuf>,
-    files: Vec<FileObservation>,
-    symlinks: u64,
-    others: u64,
-    skipped_system_dirs: Vec<PathBuf>,
-    errors: Vec<(PathBuf, String)>,
+    entries: Vec<EntryRecord>,
+    skipped_system_dirs: Vec<String>,
+    errors: Vec<(String, String)>,
     /// 这个目录是被中断打断的，只扫了一部分，不能并入统计。
     partial: bool,
 }
@@ -344,14 +489,13 @@ fn process_dir(
     dir: PathBuf,
     options: &ScanOptions,
     budget: &SampleBudget,
+    baseline: &Baseline,
     cancel: &CancelToken,
 ) -> DirResult {
     let mut result = DirResult {
         dir,
         subdirs: Vec::new(),
-        files: Vec::new(),
-        symlinks: 0,
-        others: 0,
+        entries: Vec::new(),
         skipped_system_dirs: Vec::new(),
         errors: Vec::new(),
         partial: false,
@@ -360,7 +504,9 @@ fn process_dir(
     let entries = match library.read_dir(&result.dir) {
         Ok(entries) => entries,
         Err(error) => {
-            result.errors.push((result.dir.clone(), error.to_string()));
+            result
+                .errors
+                .push((path::display(&result.dir), error.to_string()));
             return result;
         }
     };
@@ -370,55 +516,56 @@ fn process_dir(
             result.partial = true;
             break;
         }
-        match entry.kind {
-            EntryKind::Dir => {
-                let name = path::file_name_lower(&entry.path);
-                if classify::is_skipped_system_dir(&name) {
-                    result.skipped_system_dirs.push(entry.path);
-                } else {
-                    result.subdirs.push(entry.path);
-                }
+        if entry.kind == EntryKind::Dir {
+            let name = path::file_name_lower(&entry.path);
+            if classify::is_skipped_system_dir(&name) {
+                // 跳过什么都要说出来，不能悄悄少扫。整棵跳过的目录不进中立库，
+                // 于是它也不会被算进「库里有几个目录」。
+                result.skipped_system_dirs.push(path::display(&entry.path));
+                continue;
             }
-            // 不跟随符号链接：跟随会引入环，也会让同一份内容被算两次。
-            EntryKind::Symlink => result.symlinks += 1,
-            EntryKind::Other => result.others += 1,
-            EntryKind::File => {
-                result.files.push(observe_file(
-                    library,
-                    root,
-                    &entry.path,
-                    entry.len,
-                    options,
-                    budget,
-                ));
-            }
+            result.subdirs.push(entry.path.clone());
         }
+        // 符号链接不跟随：跟随会引入环，也会让同一份内容被算两次。它照样进中立库，
+        // 因为报告要说出库里有几个链接。
+        result
+            .entries
+            .push(observe(library, root, &entry, options, budget, baseline));
     }
     result
 }
 
-fn observe_file(
+fn observe(
     library: &dyn LibraryFs,
     root: &Path,
-    file: &Path,
-    len: u64,
+    entry: &DirEntry,
     options: &ScanOptions,
     budget: &SampleBudget,
-) -> FileObservation {
-    let classification = classify(file);
-    let probe_class = header::probe_class_for(file);
-    let sample = sample_header(library, file, len, probe_class, options, budget);
-    FileObservation {
-        display_path: path::display(file),
-        name_lower: path::file_name_lower(file),
-        platform: path::platform_dir(root, file).map(|name| name.to_string_lossy().into_owned()),
-        extension: path::extension_lower(file),
-        len,
-        classification,
-        cjk: classify::has_cjk(file),
-        non_utf8: !path::is_utf8(file),
-        over_max_path: path::exceeds_max_path(file),
-        has_probe: probe_class.is_some(),
+    baseline: &Baseline,
+) -> EntryRecord {
+    // 键要过 NFC，读盘用的仍是系统给的原始路径（ADR-0020）。
+    let key = path::catalog_key(root, &entry.path);
+    let verdict = baseline.verdict(&key, &entry.meta);
+    // 未变的文件不再打开一次：上次抽到的头部结论留在中立库里，报告照样用得上。
+    let sample =
+        if entry.kind == EntryKind::File && matches!(verdict, Verdict::Added | Verdict::Changed) {
+            sample_header(
+                library,
+                &entry.path,
+                entry.meta.byte_len().unwrap_or(0),
+                header::probe_class_for(&entry.path),
+                options,
+                budget,
+            )
+        } else {
+            None
+        };
+    EntryRecord {
+        key,
+        kind: entry.kind,
+        meta: entry.meta,
+        non_utf8: !path::is_utf8(&entry.path),
+        verdict,
         sample,
     }
 }
@@ -458,19 +605,16 @@ fn sample_header(
 
 /// 每类文件的抽样配额。
 ///
-/// 续跑时从已有统计里恢复，否则每续跑一次就会多抽一轮。被丢弃的结果（中断时正在扫的
-/// 那个目录）会白占配额，但那至多是一个目录的量。
+/// 增量扫描从中立库里已有的样本数接着算，否则每扫一次就会多抽一轮。`--full` 从零开始
+/// ——那本来就是「当作从没扫过」。被丢弃的结果（中断时正在扫的那个目录）会白占配额，
+/// 但那至多是一个目录的量。
 struct SampleBudget {
     per_class: usize,
     taken: Mutex<std::collections::BTreeMap<ProbeClass, usize>>,
 }
 
 impl SampleBudget {
-    fn resume_from(aggregate: &Aggregate, per_class: usize) -> Self {
-        let mut taken = std::collections::BTreeMap::new();
-        for class in aggregate.samples.keys() {
-            taken.insert(*class, aggregate.sampled_count(*class));
-        }
+    fn new(taken: std::collections::BTreeMap<ProbeClass, usize>, per_class: usize) -> Self {
         Self {
             per_class,
             taken: Mutex::new(taken),
@@ -496,8 +640,8 @@ struct QueueState {
 
 /// 待扫目录队列。
 ///
-/// `active` 是正在被工作线程扫的目录。它必须和 `stack` 一起进断点：那些目录的统计还没
-/// 并进来，续跑时重扫一遍才不会漏。
+/// `active` 是正在被工作线程扫的目录。它必须和 `stack` 一起进断点：那些目录的记录还没
+/// 写进中立库，续跑时重扫一遍才不会漏。
 struct Queue {
     state: Mutex<QueueState>,
     ready: Condvar,
@@ -534,7 +678,7 @@ impl Queue {
         }
     }
 
-    /// 一个目录的结果已经并入统计：把它从 `active` 摘掉，并把它的子目录入队。
+    /// 一个目录的结果已经并入进度：把它从 `active` 摘掉，并把它的子目录入队。
     fn finish_and_push(&self, done: DirDone) {
         let mut state = self.lock();
         if let Some(index) = state.active.iter().position(|dir| *dir == done.dir) {
@@ -596,23 +740,33 @@ mod tests {
         library
     }
 
-    fn 扫(library: &dyn LibraryFs, options: &ScanOptions) -> ScanOutcome {
-        scan(library, options, &CancelToken::new()).expect("扫描不该失败")
+    fn 新中立库() -> Catalog {
+        Catalog::open_in_memory().expect("能开中立库")
     }
 
+    fn 扫入(
+        catalog: &mut Catalog,
+        library: &dyn LibraryFs,
+        options: &ScanOptions,
+    ) -> ScanOutcome {
+        scan(library, catalog, options, &CancelToken::new()).expect("扫描不该失败")
+    }
+
+    fn 扫(library: &dyn LibraryFs, options: &ScanOptions) -> ScanOutcome {
+        扫入(&mut 新中立库(), library, options)
+    }
+
+    /// 耗时是唯一每次都不同的字段。
     fn 规范化(aggregate: &mut Aggregate) {
         aggregate.elapsed_ms = 0;
-        for examples in aggregate.suspect_examples.values_mut() {
-            examples.sort();
+    }
+
+    fn 断点选项(dir: &Path) -> CheckpointOptions {
+        CheckpointOptions {
+            path: dir.join("scans").join("checkpoint.json"),
+            interval: Duration::ZERO,
+            resume: true,
         }
-        for group in aggregate.duplicate_index.values_mut() {
-            group.paths.sort();
-        }
-        for acc in aggregate.samples.values_mut() {
-            acc.failures.sort();
-        }
-        aggregate.anomalies.error_examples.sort();
-        aggregate.anomalies.over_max_path_examples.sort();
     }
 
     #[test]
@@ -760,7 +914,7 @@ mod tests {
     #[test]
     fn 读不动的地方计入报告而不是中断扫描() {
         let mut library = 建库();
-        library.unreadable_file("/lib/FC/读不动.zip");
+        library.unreadable_content("/lib/FC/读不动.zip", 128);
         let outcome = 扫(&library, &ScanOptions::new("/lib"));
         assert_eq!(outcome.report.totals.files, 12);
         let zip = outcome
@@ -787,15 +941,234 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    /// 一个只在「列目录」这一步挂钩子的替身。
-    ///
-    /// 中断要发生在哪一刻，是这些测试唯一需要控制的东西，因此钩子只有一个。
-    struct 读目录时挂钩<'a> {
-        inner: MemFs,
-        hook: Box<dyn Fn(&Path) + Send + Sync + 'a>,
+    // ── 中立库与增量 ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn 第二次扫描按三元组跳过未变的文件() {
+        let library = 建库();
+        let mut catalog = 新中立库();
+        let options = ScanOptions::new("/lib");
+
+        let 首扫 = 扫入(&mut catalog, &library, &options);
+        assert_eq!(首扫.delta.added, 11, "第一次全是新增");
+        assert_eq!(首扫.delta.unchanged, 0);
+
+        let 再扫 = 扫入(&mut catalog, &library, &options);
+        assert_eq!(再扫.delta.unchanged, 11, "一个文件都没变，全跳过");
+        assert_eq!(再扫.delta.added, 0);
+        assert_eq!(再扫.delta.changed, 0);
+        assert_eq!(再扫.delta.removed, 0);
+        assert_eq!(
+            再扫.report.totals, 首扫.report.totals,
+            "跳过不等于漏算：报告的数字必须一模一样"
+        );
     }
 
-    impl LibraryFs for 读目录时挂钩<'_> {
+    #[test]
+    fn 增量认得出新增删除与内容变化() {
+        let mut library = 建库();
+        let mut catalog = 新中立库();
+        let options = ScanOptions::new("/lib");
+        扫入(&mut catalog, &library, &options);
+
+        library.file("/lib/FC/新来的.zip", zip(64));
+        library.remove("/lib/PSP/半截下载.iso.part");
+        // 大小一模一样，只有修改时间变了——只比大小的话这条会被整个漏掉
+        library.touch("/lib/PS1/最终幻想.chd", 3600);
+
+        let 再扫 = 扫入(&mut catalog, &library, &options);
+        assert_eq!(再扫.delta.added, 1, "新来的.zip");
+        assert_eq!(再扫.delta.removed, 1, "半截下载.iso.part 没了");
+        assert_eq!(再扫.delta.changed, 1, "最终幻想.chd 的修改时间变了");
+        assert_eq!(再扫.delta.unchanged, 9, "11 个里删了 1 个、变了 1 个");
+        assert_eq!(再扫.report.totals.files, 11);
+
+        let names: Vec<&str> = 再扫
+            .report
+            .extensions
+            .iter()
+            .map(|e| e.extension.as_str())
+            .collect();
+        assert!(!names.contains(&"part"), "删掉的文件不该还留在报告里");
+    }
+
+    #[test]
+    fn 未变的文件不再打开一次() {
+        let library = 挂钩::new(建库());
+        let mut catalog = 新中立库();
+        let options = ScanOptions::new("/lib");
+
+        扫入(&mut catalog, &library, &options);
+        let 首扫读了 = library.reads();
+        assert!(首扫读了 > 0, "第一次要抽样读头部");
+
+        扫入(&mut catalog, &library, &options);
+        assert_eq!(
+            library.reads(),
+            首扫读了,
+            "三元组没变就不该再打开任何一个文件"
+        );
+    }
+
+    #[test]
+    fn 全量重扫会把每个文件重新看一遍() {
+        let library = 挂钩::new(建库());
+        let mut catalog = 新中立库();
+        let mut options = ScanOptions::new("/lib");
+
+        扫入(&mut catalog, &library, &options);
+        let 首扫读了 = library.reads();
+
+        options.incremental = false;
+        let 重扫 = 扫入(&mut catalog, &library, &options);
+        assert!(library.reads() > 首扫读了, "全量重扫要重新读头部");
+        assert_eq!(重扫.delta.unchanged, 0, "全量重扫不认未变");
+        assert_eq!(重扫.delta.added, 11);
+    }
+
+    #[test]
+    fn 元数据读不到的文件既不算已变也不算已删() {
+        let mut library = 建库();
+        library.unreadable_meta("/lib/Wii/读不到元数据.zip");
+        let mut catalog = 新中立库();
+        let options = ScanOptions::new("/lib");
+
+        let 首扫 = 扫入(&mut catalog, &library, &options);
+        assert_eq!(首扫.delta.unreadable, 1);
+        assert_eq!(首扫.report.anomalies.unreadable, 1, "报告里要单独计一栏");
+
+        let 再扫 = 扫入(&mut catalog, &library, &options);
+        assert_eq!(再扫.delta.unreadable, 1, "还是读不到");
+        assert_eq!(再扫.delta.changed, 0, "读不到不算已变，否则永远重扫");
+        assert_eq!(再扫.delta.removed, 0, "读不到不算已删，否则会从库里消失");
+        assert_eq!(再扫.report.totals.files, 12, "它照样在库里");
+    }
+
+    #[test]
+    fn 大小未知不等于大小为零() {
+        let mut library = 建库();
+        library.unreadable_meta("/lib/Wii/读不到元数据.zip");
+        let outcome = 扫(&library, &ScanOptions::new("/lib"));
+        assert_eq!(outcome.report.anomalies.zero_length, 1, "只有 空文件.zip");
+        assert_eq!(outcome.report.anomalies.unreadable, 1);
+    }
+
+    #[test]
+    fn 键是_nfc_而读盘用的仍是原始形式() {
+        // 「が」的分解形：macOS 的 NTFS 驱动交出来的就是这个（ADR-0020）。
+        let 分解 = "\u{304B}\u{3099}";
+        let 预组合 = "\u{304C}";
+        let mut library = MemFs::new();
+        library
+            .dir("/lib")
+            .file(format!("/lib/PSP/{分解}me.iso"), iso());
+
+        let mut catalog = 新中立库();
+        let options = ScanOptions::new("/lib");
+        let 首扫 = 扫入(&mut catalog, &library, &options);
+        assert_eq!(首扫.delta.added, 1);
+        assert!(
+            首扫
+                .report
+                .samples
+                .iter()
+                .any(|s| s.class == ProbeClass::DiscImage && s.parsed == 1),
+            "读盘用的是系统给的原始路径，抽样必须读得到"
+        );
+
+        assert!(
+            catalog
+                .contains(&format!("PSP/{预组合}me.iso"))
+                .expect("查得到"),
+            "入库的键必须是 NFC 形"
+        );
+        assert!(
+            !catalog
+                .contains(&format!("PSP/{分解}me.iso"))
+                .expect("查得到"),
+            "分解形不该出现在中立库里"
+        );
+
+        // 同一块盘换台机器接，名字换成预组合形交出来——不该被判成新文件
+        let mut 另一台机器 = MemFs::new();
+        另一台机器
+            .dir("/lib")
+            .file(format!("/lib/PSP/{预组合}me.iso"), iso());
+        let 再扫 = 扫入(&mut catalog, &另一台机器, &options);
+        assert_eq!(再扫.delta.added, 0, "规范化之后它就是同一个文件");
+        assert_eq!(再扫.delta.unchanged, 1);
+        assert_eq!(再扫.delta.removed, 0);
+    }
+
+    #[test]
+    fn 体检报告能在主库不在位时从中立库出() {
+        let mut catalog = 新中立库();
+        let 扫出来的 = {
+            let library = 建库();
+            扫入(&mut catalog, &library, &ScanOptions::new("/lib")).report
+        };
+        // 盘拔了：这里连 MemFs 都没有了，中立库照样出得来
+        let mut 库里的 = catalog
+            .aggregate(&Limits::default())
+            .expect("从中立库折得出统计");
+        规范化(&mut 库里的);
+        let 报告 = HealthReport::build(&库里的, &catalog.report_meta().expect("元信息读得出来"));
+
+        assert_eq!(报告.totals, 扫出来的.totals);
+        assert_eq!(报告.platforms, 扫出来的.platforms);
+        assert_eq!(报告.extensions, 扫出来的.extensions);
+        assert_eq!(报告.suspects, 扫出来的.suspects);
+        assert_eq!(报告.samples, 扫出来的.samples, "抽样结论也留在中立库里");
+        assert_eq!(报告.delta, None, "没扫盘就没有增量可说");
+    }
+
+    #[test]
+    fn 中立库落在本机而不是主库里() {
+        let mut catalog = Catalog::open(
+            &crate::testing::temp_dir("catalog")
+                .path()
+                .join("库.sqlite3"),
+        )
+        .expect("能开中立库");
+        let 之前 = 扫入(&mut catalog, &建库(), &ScanOptions::new("/lib")).report;
+        drop(catalog);
+
+        // 关掉再打开：重启工具后结论不丢
+        let path = crate::testing::temp_dir("catalog2")
+            .path()
+            .join("库.sqlite3");
+        let mut catalog = Catalog::open(&path).expect("能开中立库");
+        扫入(&mut catalog, &建库(), &ScanOptions::new("/lib"));
+        drop(catalog);
+        let catalog = Catalog::open(&path).expect("能再打开");
+        let aggregate = catalog.aggregate(&Limits::default()).expect("读得出来");
+        assert_eq!(aggregate.totals.files, 之前.totals.files);
+        assert_eq!(aggregate.totals.bytes, 之前.totals.bytes);
+        assert!(path.exists(), "中立库是本机上的一个文件");
+    }
+
+    /// 一个能数「开了几次文件」、也能在列目录时挂钩子的替身。
+    struct 挂钩<'a> {
+        inner: MemFs,
+        hook: Box<dyn Fn(&Path) + Send + Sync + 'a>,
+        reads: AtomicUsize,
+    }
+
+    impl 挂钩<'static> {
+        fn new(inner: MemFs) -> Self {
+            Self {
+                inner,
+                hook: Box::new(|_: &Path| {}),
+                reads: AtomicUsize::new(0),
+            }
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
+        }
+    }
+
+    impl LibraryFs for 挂钩<'_> {
         fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf> {
             self.inner.canonicalize(path)
         }
@@ -806,10 +1179,12 @@ mod tests {
         }
 
         fn read_head(&self, file: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
             self.inner.read_head(file, limit)
         }
 
         fn read_tail(&self, file: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
             self.inner.read_tail(file, limit)
         }
     }
@@ -817,40 +1192,39 @@ mod tests {
     #[test]
     fn 中断再续跑与一次扫完结论相同() {
         let workspace = crate::testing::temp_dir("scan");
-        let checkpoint = workspace.path().join("scans").join("checkpoint.json");
         let mut options = ScanOptions::new("/lib");
         options.jobs = 1;
-        options.checkpoint = Some(CheckpointOptions {
-            path: checkpoint.clone(),
-            interval: Duration::ZERO,
-            resume: true,
-        });
+        options.checkpoint = Some(断点选项(workspace.path()));
+        let checkpoint = options.checkpoint.as_ref().expect("有断点").path.clone();
 
         // 一次扫完，作为对照
         let mut 对照 = 扫(&建库(), &options).aggregate;
 
-        // 扫到第二个目录时中断
         // 扫到第三个目录时按下中断
         let cancel = CancelToken::new();
         let seen = AtomicUsize::new(0);
-        let 中断的库 = 读目录时挂钩 {
+        let 中断的库 = 挂钩 {
             inner: 建库(),
             hook: Box::new(|_: &Path| {
                 if seen.fetch_add(1, Ordering::SeqCst) >= 2 {
                     cancel.cancel();
                 }
             }),
+            reads: AtomicUsize::new(0),
         };
-        let first = scan(&中断的库, &options, &cancel).expect("中断也算正常返回");
+        let mut catalog = 新中立库();
+        let first = scan(&中断的库, &mut catalog, &options, &cancel).expect("中断也算正常返回");
         assert!(first.interrupted, "应当报告被中断");
         assert!(checkpoint.exists(), "断点应当落盘");
         assert!(
-            first.aggregate.totals.files < 对照.totals.files,
+            first.report.totals.files < 对照.totals.files,
             "中断时只扫了一部分"
         );
+        assert_eq!(first.delta.removed, 0, "中断的扫描一条记录都不许删");
 
         // 续跑，直到扫完
-        let mut 续跑结果 = scan(&建库(), &options, &CancelToken::new()).expect("续跑不该失败");
+        let mut 续跑结果 =
+            scan(&建库(), &mut catalog, &options, &CancelToken::new()).expect("续跑不该失败");
         assert!(续跑结果.report.resumed, "应当认出这是续跑");
         assert!(!续跑结果.interrupted);
         assert!(!checkpoint.exists(), "扫完后断点应当被清掉");
@@ -863,14 +1237,9 @@ mod tests {
     #[test]
     fn 中断落在目录中间时整个目录重扫而不是丢掉半个() {
         let workspace = crate::testing::temp_dir("scan");
-        let checkpoint = workspace.path().join("checkpoint.json");
         let mut options = ScanOptions::new("/lib");
         options.jobs = 1;
-        options.checkpoint = Some(CheckpointOptions {
-            path: checkpoint.clone(),
-            interval: Duration::ZERO,
-            resume: true,
-        });
+        options.checkpoint = Some(断点选项(workspace.path()));
 
         let mut 对照 = 扫(&建库(), &options).aggregate;
 
@@ -879,7 +1248,7 @@ mod tests {
         // 「半个目录的结果被送到协调线程手上」这条最危险的路径必然被走到，
         // 而真实的 Ctrl-C 正是这个时序。
         let cancel = CancelToken::new();
-        let 中断的库 = 读目录时挂钩 {
+        let 中断的库 = 挂钩 {
             inner: 建库(),
             hook: Box::new(|dir: &Path| {
                 if dir == Path::new("/lib/PSP") {
@@ -887,11 +1256,14 @@ mod tests {
                     cancel.cancel();
                 }
             }),
+            reads: AtomicUsize::new(0),
         };
-        let first = scan(&中断的库, &options, &cancel).expect("中断也算正常返回");
+        let mut catalog = 新中立库();
+        let first = scan(&中断的库, &mut catalog, &options, &cancel).expect("中断也算正常返回");
         assert!(first.interrupted);
 
-        let mut 续跑结果 = scan(&建库(), &options, &CancelToken::new()).expect("续跑不该失败");
+        let mut 续跑结果 =
+            scan(&建库(), &mut catalog, &options, &CancelToken::new()).expect("续跑不该失败");
         assert!(续跑结果.report.resumed);
         规范化(&mut 对照);
         规范化(&mut 续跑结果.aggregate);
@@ -910,15 +1282,21 @@ mod tests {
             interval: Duration::ZERO,
             resume: false,
         });
-        let err = scan(&library, &options, &CancelToken::new()).expect_err("必须拒绝");
-        assert!(matches!(err, ScanError::CheckpointInsideLibrary(_)));
+        let err =
+            scan(&library, &mut 新中立库(), &options, &CancelToken::new()).expect_err("必须拒绝");
+        assert!(matches!(err, ScanError::WritesInsideLibrary { .. }));
     }
 
     #[test]
     fn 扫描根不存在时报得明白() {
         let library = 建库();
-        let err = scan(&library, &ScanOptions::new("/不存在"), &CancelToken::new())
-            .expect_err("必须报错");
+        let err = scan(
+            &library,
+            &mut 新中立库(),
+            &ScanOptions::new("/不存在"),
+            &CancelToken::new(),
+        )
+        .expect_err("必须报错");
         assert!(matches!(err, ScanError::Root { .. }));
     }
 
@@ -930,6 +1308,7 @@ mod tests {
         assert!(text.contains("库体检报告"));
         assert!(text.contains("透明容器"));
         assert!(text.contains(UNKNOWN_PLATFORM_LABEL));
+        assert!(text.contains("这次扫描的增量"));
 
         let json = serde_json::to_string(&outcome.report).expect("能序列化");
         let back: crate::report::HealthReport = serde_json::from_str(&json).expect("能读回");

@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use romcat_core::catalog::Catalog;
 use romcat_core::classify::{Category, SuspectReason};
 use romcat_core::fs::RealFs;
 use romcat_core::header::ProbeClass;
@@ -55,10 +56,18 @@ fn 建_fixture_主库() -> TempDir {
     dir
 }
 
+fn 中立库() -> Catalog {
+    Catalog::open_in_memory().expect("能开中立库")
+}
+
+fn 扫入(catalog: &mut Catalog, options: &ScanOptions) -> ScanOutcome {
+    scan::scan(&RealFs::new(), catalog, options, &CancelToken::new()).expect("扫描不该失败")
+}
+
 fn 扫(root: &Path) -> ScanOutcome {
     let mut options = ScanOptions::new(root);
     options.jobs = 4;
-    scan::scan(&RealFs::new(), &options, &CancelToken::new()).expect("扫描不该失败")
+    扫入(&mut 中立库(), &options)
 }
 
 type Snapshot = BTreeMap<PathBuf, (u64, Option<SystemTime>, u64)>;
@@ -227,7 +236,7 @@ fn 完整重复明细列出每一组的每个文件且不动主库() {
     let mut options = ScanOptions::new(root);
     options.jobs = 4;
     options.limits.max_duplicate_paths_per_group = Limits::FULL_DUPLICATE_PATHS_PER_GROUP;
-    let outcome = scan::scan(&RealFs::new(), &options, &CancelToken::new()).expect("扫描不该失败");
+    let outcome = 扫入(&mut 中立库(), &options);
 
     assert_eq!(
         outcome.report.suspects.top_duplicates.len(),
@@ -287,7 +296,9 @@ fn 遍历不改主库一个字节() {
         interval: std::time::Duration::ZERO,
         resume: false,
     });
-    let outcome = scan::scan(&RealFs::new(), &options, &CancelToken::new()).expect("扫描不该失败");
+    let mut catalog =
+        Catalog::open(&workspace.path().join("catalog").join("库.sqlite3")).expect("能开中立库");
+    let outcome = 扫入(&mut catalog, &options);
     assert!(outcome.report.totals.files > 0);
 
     let 之后 = 快照(root);
@@ -304,8 +315,23 @@ fn 断点绝不落在主库里() {
         interval: std::time::Duration::ZERO,
         resume: false,
     });
-    let err = scan::scan(&RealFs::new(), &options, &CancelToken::new()).expect_err("必须拒绝");
+    let err = scan::scan(&RealFs::new(), &mut 中立库(), &options, &CancelToken::new())
+        .expect_err("必须拒绝");
     assert!(err.to_string().contains("主库只读"));
+}
+
+#[test]
+fn 中立库绝不落在主库里() {
+    // 主库只读（ADR-0004），而且外置盘不常挂载——中立库跟着盘走的话，
+    // 盘不在时连浏览元数据都做不到（ADR-0009）。
+    let library = 建_fixture_主库();
+    let mut catalog =
+        Catalog::open(&library.path().join(".romcat").join("库.sqlite3")).expect("能开中立库");
+    let options = ScanOptions::new(library.path());
+    let err = scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new())
+        .expect_err("必须拒绝");
+    assert!(err.to_string().contains("中立库"), "{err}");
+    assert!(err.to_string().contains("主库只读"), "{err}");
 }
 
 #[test]
@@ -323,9 +349,9 @@ fn 超过_260_字符的路径照样扫得到() {
     let file = deep.join("很深的游戏.iso");
     写文件(&file, &iso());
     assert!(
-        romcat_core::path::exceeds_max_path(&file),
+        romcat_core::path::exceeds_max_path(&romcat_core::path::display(&file)),
         "这条路径应当超过 260 字符，实际 {} 字符",
-        romcat_core::path::char_len(&file)
+        romcat_core::path::char_len(&romcat_core::path::display(&file))
     );
 
     let report = 扫(root).report;
@@ -360,12 +386,16 @@ fn 中断后能从断点接着扫() {
     // 一开始就按下中断：什么都没扫，但断点必须留下来
     let cancel = CancelToken::new();
     cancel.cancel();
-    let first = scan::scan(&RealFs::new(), &options, &cancel).expect("中断也算正常返回");
+    // 续跑要接着往同一个中立库里写，因此两趟共用一份
+    let mut catalog = 中立库();
+    let first =
+        scan::scan(&RealFs::new(), &mut catalog, &options, &cancel).expect("中断也算正常返回");
     assert!(first.interrupted);
     assert!(checkpoint.exists(), "断点应当落在工作目录里");
 
     // 续跑，扫完，断点被清掉
-    let second = scan::scan(&RealFs::new(), &options, &CancelToken::new()).expect("续跑不该失败");
+    let second = scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new())
+        .expect("续跑不该失败");
     assert!(second.report.resumed);
     assert!(!second.interrupted);
     assert_eq!(second.report.totals.files, 16);
@@ -380,9 +410,80 @@ fn 并发数不影响结论() {
     let mut many = ScanOptions::new(library.path());
     many.jobs = 8;
 
-    let a = scan::scan(&RealFs::new(), &single, &CancelToken::new()).expect("扫描不该失败");
-    let b = scan::scan(&RealFs::new(), &many, &CancelToken::new()).expect("扫描不该失败");
+    let a = 扫入(&mut 中立库(), &single);
+    let b = 扫入(&mut 中立库(), &many);
     assert_eq!(a.report.totals, b.report.totals);
     assert_eq!(a.report.categories, b.report.categories);
     assert_eq!(a.report.extensions, b.report.extensions);
+}
+
+/// 增量的判据在真实文件系统上也得站得住：这里的修改时间是 APFS 真给的，
+/// 不是 fixture 编出来的。
+#[test]
+fn 真实磁盘上第二次扫描跳过未变的文件() {
+    let library = 建_fixture_主库();
+    let root = library.path();
+    let mut catalog = 中立库();
+    let mut options = ScanOptions::new(root);
+    options.jobs = 4;
+
+    let 首扫 = 扫入(&mut catalog, &options);
+    assert_eq!(首扫.delta.added, 16);
+    assert_eq!(首扫.delta.unchanged, 0);
+
+    let 再扫 = 扫入(&mut catalog, &options);
+    assert_eq!(再扫.delta.unchanged, 16, "一个都没变");
+    assert_eq!(再扫.delta.added, 0);
+    assert_eq!(再扫.delta.changed, 0);
+    assert_eq!(再扫.delta.removed, 0);
+    assert_eq!(再扫.report.totals, 首扫.report.totals);
+
+    // 大小一模一样，只有内容与修改时间变了
+    let 改动 = root.join("FC/Contra (USA).zip");
+    let 原大小 = fs::metadata(&改动).expect("能取元数据").len();
+    写文件(&改动, &zip(1024));
+    assert_eq!(
+        fs::metadata(&改动).expect("能取元数据").len(),
+        原大小,
+        "这一步要保持大小不变，否则测不到 mtime 那一维"
+    );
+    写文件(&root.join("FC/新来的.zip"), &zip(64));
+    fs::remove_file(root.join("PS1/没下完.iso.part")).expect("能删掉");
+
+    let 三扫 = 扫入(&mut catalog, &options);
+    assert_eq!(三扫.delta.changed, 1, "大小没变、修改时间变了，也是已变");
+    assert_eq!(三扫.delta.added, 1);
+    assert_eq!(三扫.delta.removed, 1);
+    assert_eq!(三扫.delta.unchanged, 14);
+    assert_eq!(三扫.report.totals.files, 16);
+}
+
+/// 中立库落在本机的工作目录里，因此重启工具、甚至外置盘不在位时，
+/// 已有的结论照样读得出来（ADR-0009）。
+#[test]
+fn 中立库落在本机重启后仍读得出来() {
+    let library = 建_fixture_主库();
+    let workspace = temp_dir("workspace");
+    let catalog_path = workspace.path().join("catalog").join("库.sqlite3");
+
+    let 扫出来的 = {
+        let mut catalog = Catalog::open(&catalog_path).expect("能开中立库");
+        let mut options = ScanOptions::new(library.path());
+        options.jobs = 4;
+        扫入(&mut catalog, &options).report
+    };
+    assert!(catalog_path.exists(), "中立库是本机上的一个文件");
+
+    // 盘拔了，工具也重启了
+    drop(library);
+    let catalog = Catalog::open(&catalog_path).expect("能再打开");
+    let aggregate = catalog.aggregate(&Limits::default()).expect("读得出来");
+    let report = romcat_core::report::HealthReport::build(
+        &aggregate,
+        &catalog.report_meta().expect("元信息读得出来"),
+    );
+    assert_eq!(report.totals, 扫出来的.totals);
+    assert_eq!(report.platforms, 扫出来的.platforms);
+    assert_eq!(report.suspects, 扫出来的.suspects);
+    assert_eq!(report.delta, None, "没扫盘就没有增量可说");
 }
