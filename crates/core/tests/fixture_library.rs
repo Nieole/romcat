@@ -70,11 +70,16 @@ fn 扫(root: &Path) -> ScanOutcome {
     扫入(&mut 中立库(), &options)
 }
 
-type Snapshot = BTreeMap<PathBuf, (u64, Option<SystemTime>, u64)>;
+/// 盘上的**基线**：路径、大小、修改时间、内容指纹。
+///
+/// 词表里**快照**是**清单**词条明列的 `_Avoid_` 词；这里记的正是「拿它作比」的那份
+/// 三元组，所以叫**基线**。与 [`romcat_core::catalog::Baseline`] 是同一个概念的两处
+/// 落点：那份来自中立库，这份直接量磁盘。
+type 盘上基线 = BTreeMap<PathBuf, (u64, Option<SystemTime>, u64)>;
 
-/// 给整棵树拍个快照：路径、大小、修改时间、内容指纹。
-fn 快照(root: &Path) -> Snapshot {
-    fn walk(dir: &Path, out: &mut Snapshot) {
+/// 量一遍整棵树，记下**基线**。
+fn 记下基线(root: &Path) -> 盘上基线 {
+    fn walk(dir: &Path, out: &mut 盘上基线) {
         for entry in fs::read_dir(dir).expect("能列目录") {
             let entry = entry.expect("能读目录项");
             let path = entry.path();
@@ -93,7 +98,7 @@ fn 快照(root: &Path) -> Snapshot {
             }
         }
     }
-    let mut out = Snapshot::new();
+    let mut out = 盘上基线::new();
     walk(root, &mut out);
     out
 }
@@ -231,7 +236,7 @@ fn 完整重复明细列出每一组的每个文件且不动主库() {
         写文件(&root.join(format!("MD/备份{copy}/魂斗罗.zip")), &zip(4096));
     }
 
-    let 之前 = 快照(root);
+    let 之前 = 记下基线(root);
 
     let mut options = ScanOptions::new(root);
     options.jobs = 4;
@@ -277,7 +282,7 @@ fn 完整重复明细列出每一组的每个文件且不动主库() {
             .expect("能读回")
             .contains("#1  可腾")
     );
-    assert_eq!(之前, 快照(root), "导出清单不该改动主库");
+    assert_eq!(之前, 记下基线(root), "导出清单不该改动主库");
 }
 
 #[test]
@@ -286,7 +291,7 @@ fn 遍历不改主库一个字节() {
     let root = library.path();
     let workspace = temp_dir("workspace");
 
-    let 之前 = 快照(root);
+    let 之前 = 记下基线(root);
 
     let mut options = ScanOptions::new(root);
     options.jobs = 4;
@@ -301,7 +306,7 @@ fn 遍历不改主库一个字节() {
     let outcome = 扫入(&mut catalog, &options);
     assert!(outcome.report.totals.files > 0);
 
-    let 之后 = 快照(root);
+    let 之后 = 记下基线(root);
     assert_eq!(之前.len(), 之后.len(), "扫描不该增删任何条目");
     assert_eq!(之前, 之后, "扫描不该改动任何文件的大小、修改时间或内容");
 }
