@@ -365,6 +365,12 @@ fn load_start_state(
     if pending.is_empty() {
         return Ok(fresh());
     }
+    // 断点比中立库旧就当它不存在。这种断点只可能来自「中断之后又跑过一次不写断点的
+    // 完整扫描」：照着它续跑会以那个旧代号收尾，于是那次完整扫描记下的东西会被当成
+    // 「这次没见到」整批删掉。宁可重扫一遍。
+    if checkpoint.scan + 1 != next {
+        return Ok(fresh());
+    }
     Ok(StartState {
         pending,
         // 续跑必须沿用同一个代号，否则收尾时「这次没见到」会把中断之前扫到的记录全删掉。
@@ -1271,6 +1277,35 @@ mod tests {
             续跑结果.aggregate, 对照,
             "被打断的那个目录必须整个重扫，一个文件都不能少"
         );
+    }
+
+    #[test]
+    fn 比中立库旧的断点不会被续跑() {
+        let workspace = crate::testing::temp_dir("scan");
+        let mut options = ScanOptions::new("/lib");
+        options.jobs = 1;
+        options.checkpoint = Some(断点选项(workspace.path()));
+        let checkpoint = options.checkpoint.as_ref().expect("有断点").path.clone();
+
+        // 中断一次，留下断点
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let mut catalog = 新中立库();
+        let first = scan(&建库(), &mut catalog, &options, &cancel).expect("中断也算正常返回");
+        assert!(first.interrupted);
+        assert!(checkpoint.exists());
+
+        // 中间插一次不写断点的完整扫描：中立库整个被刷新了一遍
+        let mut 不写断点 = ScanOptions::new("/lib");
+        不写断点.jobs = 1;
+        扫入(&mut catalog, &建库(), &不写断点);
+
+        // 那份断点现在比中立库旧。照它续跑会把上一次完整扫描的记录全删掉。
+        let 再扫 =
+            scan(&建库(), &mut catalog, &options, &CancelToken::new()).expect("扫描不该失败");
+        assert!(!再扫.report.resumed, "过期的断点不该被当成续跑");
+        assert_eq!(再扫.report.totals.files, 11, "一个文件都不许丢");
+        assert_eq!(再扫.delta.removed, 0);
     }
 
     #[test]

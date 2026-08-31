@@ -98,6 +98,14 @@ fn kind_code(kind: EntryKind) -> i64 {
 /// 中立库读写过程中的错误。
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogError {
+    /// 中立库所在的目录建不出来。
+    #[error("中立库的目录建不出来：{path}（{source}）")]
+    Io {
+        /// 出问题的路径。
+        path: String,
+        /// 底层错误。
+        source: std::io::Error,
+    },
     /// 底层读写失败。
     #[error("中立库读写失败：{path}（{source}）")]
     Sqlite {
@@ -201,9 +209,9 @@ impl Catalog {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
-            std::fs::create_dir_all(parent).map_err(|error| CatalogError::Sqlite {
-                path: display.clone(),
-                source: rusqlite::Error::ToSqlConversionFailure(Box::new(error)),
+            std::fs::create_dir_all(parent).map_err(|source| CatalogError::Io {
+                path: crate::path::display(parent),
+                source,
             })?;
         }
         let conn = Connection::open(path).map_err(|source| CatalogError::Sqlite {
