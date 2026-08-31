@@ -6,7 +6,7 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] 核心能力以独立的库加命令行两种形式提供，界面不是使用它的唯一途径
 - [ ] 遍历整个主库不修改任何文件，也不依赖网络与任何 DAT
