@@ -2,6 +2,9 @@
 //!
 //! 报告是这张票的交付物本身——所有「先做哪几个平台」的排序都等它出数据。因此它同时
 //! 提供两种形态：给人看的文本，与给后面几票（以及界面）吃的 JSON。
+//!
+//! 报告只列容量最大的前几组重复拷贝。要照着它动手处理，用 [`DuplicateDetails`]——
+//! 那是一份单独导出的完整明细，不塞进报告：大多数场景用不上它，塞进去只会让报告膨胀。
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -21,6 +24,12 @@ const TOP_EXTENSIONS_PER_PLATFORM: usize = 5;
 const TOP_EXTENSIONS_GLOBAL: usize = 25;
 /// 报告里展示几组重复拷贝。
 const TOP_DUPLICATE_GROUPS: usize = 10;
+/// 报告里每组重复拷贝展示几条路径。
+///
+/// 它与扫描时**记下**多少条（[`Limits::max_duplicate_paths_per_group`](crate::scan::aggregate::Limits::max_duplicate_paths_per_group)）
+/// 是两回事：要导出明细就得记全，但报告不该跟着一起膨胀——JSON 会胖出几个数量级，
+/// 文本报告会把整组路径挤在一行。
+const TOP_DUPLICATE_PATHS_PER_GROUP: usize = 10;
 
 /// 生成报告时需要的、统计之外的信息。
 #[derive(Debug, Clone)]
@@ -108,8 +117,25 @@ pub struct DuplicateGroupStats {
     pub size: u64,
     /// 份数。
     pub count: u64,
-    /// 路径样例。
-    pub examples: Vec<String>,
+    /// 组内的路径。可能少于 `count` 条——报告里每组只留几条，完整的在 [`DuplicateDetails`] 里。
+    pub paths: Vec<String>,
+}
+
+impl DuplicateGroupStats {
+    /// 这一组只留一份能腾出多少字节。
+    #[must_use]
+    pub fn reclaimable_bytes(&self) -> u64 {
+        self.size.saturating_mul(self.count.saturating_sub(1))
+    }
+
+    /// 这一组有几份没记下路径。要处理这几份得放开
+    /// [`Limits::max_duplicate_paths_per_group`](crate::scan::aggregate::Limits::max_duplicate_paths_per_group)
+    /// 重扫一遍。
+    #[must_use]
+    pub fn paths_missing(&self) -> u64 {
+        let listed = u64::try_from(self.paths.len()).unwrap_or(u64::MAX);
+        self.count.saturating_sub(listed)
+    }
 }
 
 /// 一类疑似不该入库的内容。
@@ -138,7 +164,7 @@ pub struct SuspectSummary {
     pub duplicate_files: u64,
     /// 只留一份的话能腾出多少字节。**只报告，不自动删**（ADR-0004）。
     pub duplicate_reclaimable_bytes: u64,
-    /// 份数最多的几组。
+    /// 可腾出空间最多的几组。完整明细见 [`DuplicateDetails`]。
     pub top_duplicates: Vec<DuplicateGroupStats>,
     /// 重复索引是否因超过上限而截断。
     pub index_truncated: bool,
@@ -309,7 +335,11 @@ impl HealthReport {
     }
 }
 
-fn suspect_summary(aggregate: &Aggregate) -> SuspectSummary {
+/// 全部重复分组，按只留一份可腾出的空间从大到小排。
+///
+/// 报告只展示前几组，[`DuplicateDetails`] 要的是全部——排序与判据必须是同一份，
+/// 否则两处会给出不一样的「最该处理的那几组」。
+fn duplicate_groups(aggregate: &Aggregate) -> Vec<DuplicateGroupStats> {
     let mut groups: Vec<DuplicateGroupStats> = aggregate
         .duplicate_index
         .values()
@@ -317,21 +347,30 @@ fn suspect_summary(aggregate: &Aggregate) -> SuspectSummary {
         .map(|group| DuplicateGroupStats {
             size: group.size,
             count: group.count,
-            examples: group.examples.clone(),
+            paths: group.paths.clone(),
         })
         .collect();
     groups.sort_by(|a, b| {
-        let a_waste = a.size * (a.count - 1);
-        let b_waste = b.size * (b.count - 1);
-        b_waste
-            .cmp(&a_waste)
+        b.reclaimable_bytes()
+            .cmp(&a.reclaimable_bytes())
             .then_with(|| b.count.cmp(&a.count))
-            .then_with(|| a.examples.cmp(&b.examples))
+            .then_with(|| a.paths.cmp(&b.paths))
     });
-    let duplicate_groups = groups.len() as u64;
+    groups
+}
+
+fn suspect_summary(aggregate: &Aggregate) -> SuspectSummary {
+    let mut groups = duplicate_groups(aggregate);
+    let duplicate_groups = u64::try_from(groups.len()).unwrap_or(u64::MAX);
     let duplicate_files: u64 = groups.iter().map(|g| g.count).sum();
-    let duplicate_reclaimable_bytes: u64 = groups.iter().map(|g| g.size * (g.count - 1)).sum();
+    let duplicate_reclaimable_bytes: u64 = groups
+        .iter()
+        .map(DuplicateGroupStats::reclaimable_bytes)
+        .sum();
     groups.truncate(TOP_DUPLICATE_GROUPS);
+    for group in &mut groups {
+        group.paths.truncate(TOP_DUPLICATE_PATHS_PER_GROUP);
+    }
 
     let by_reason = SuspectReason::all()
         .into_iter()
@@ -392,6 +431,8 @@ fn sample_stats(samples: &BTreeMap<ProbeClass, SampleAcc>) -> Vec<SampleStats> {
     list
 }
 
+mod duplicates;
 mod render;
 
+pub use duplicates::DuplicateDetails;
 pub use render::{human_bytes, thousands};

@@ -606,7 +606,7 @@ mod tests {
             examples.sort();
         }
         for group in aggregate.duplicate_index.values_mut() {
-            group.examples.sort();
+            group.paths.sort();
         }
         for acc in aggregate.samples.values_mut() {
             acc.failures.sort();

@@ -12,6 +12,8 @@ use romcat_core::classify::{Category, SuspectReason};
 use romcat_core::fs::RealFs;
 use romcat_core::header::ProbeClass;
 use romcat_core::path::long_path;
+use romcat_core::report::DuplicateDetails;
+use romcat_core::scan::aggregate::Limits;
 use romcat_core::scan::{self, CancelToken, CheckpointOptions, ScanOptions, ScanOutcome};
 use romcat_core::testing::sample::{chd, gba, iso, nes, zip};
 use romcat_core::testing::{TempDir, temp_dir};
@@ -198,6 +200,75 @@ fn 头部抽样报出各类的解析成功率() {
     assert_eq!(取(ProbeClass::Nes).parsed, 1);
     assert_eq!(取(ProbeClass::Chd).parsed, 1);
     assert_eq!(取(ProbeClass::DiscImage).parsed, 1);
+}
+
+/// 报告只列前 10 组，可腾出的空间却算的是全部——要人工处理，得拿到完整明细，
+/// 且组内每一份都要有完整路径。
+#[test]
+fn 完整重复明细列出每一组的每个文件且不动主库() {
+    let library = temp_dir("duplicates");
+    let root = library.path();
+    // 12 组重复：第 n 组 n+1 份、每份 n KiB。报告只装得下 10 组。
+    for n in 1..=12u64 {
+        for copy in 0..=n {
+            写文件(
+                &root.join(format!("FC/备份{copy}/游戏{n}.zip")),
+                &zip(usize::try_from(n).expect("组号不大") * 1024),
+            );
+        }
+    }
+    // 一组 25 份：超过默认每组 10 条路径的上限
+    for copy in 0..25 {
+        写文件(&root.join(format!("MD/备份{copy}/魂斗罗.zip")), &zip(4096));
+    }
+
+    let 之前 = 快照(root);
+
+    let mut options = ScanOptions::new(root);
+    options.jobs = 4;
+    options.limits.max_duplicate_paths_per_group = Limits::FULL_DUPLICATE_PATHS_PER_GROUP;
+    let outcome = scan::scan(&RealFs::new(), &options, &CancelToken::new()).expect("扫描不该失败");
+
+    assert_eq!(
+        outcome.report.suspects.top_duplicates.len(),
+        10,
+        "报告仍然只列前 10 组"
+    );
+
+    let details = DuplicateDetails::build(&outcome.aggregate, &outcome.report);
+    assert_eq!(details.group_count(), 13);
+    assert_eq!(details.groups_with_missing_paths, 0, "每一份都有路径");
+
+    let text = details.render_text();
+    for n in 1..=12u64 {
+        for copy in 0..=n {
+            let path = root.join(format!("FC/备份{copy}/游戏{n}.zip"));
+            assert!(
+                text.contains(&romcat_core::path::display(&path)),
+                "清单里必须有 {}",
+                path.display()
+            );
+        }
+    }
+    for copy in 0..25 {
+        let path = root.join(format!("MD/备份{copy}/魂斗罗.zip"));
+        assert!(
+            text.contains(&romcat_core::path::display(&path)),
+            "25 份都要有完整路径，缺了 {}",
+            path.display()
+        );
+    }
+
+    // 清单能落到主库之外的文件里，且导出这件事一个字节都不改主库
+    let out = temp_dir("dump");
+    let dump = out.path().join("重复拷贝.txt");
+    fs::write(&dump, text.as_bytes()).expect("能写清单");
+    assert!(
+        fs::read_to_string(&dump)
+            .expect("能读回")
+            .contains("#1  可腾")
+    );
+    assert_eq!(之前, 快照(root), "导出清单不该改动主库");
 }
 
 #[test]

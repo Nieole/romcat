@@ -12,6 +12,8 @@ use std::{env, fs};
 
 use clap::{Args, Parser, Subcommand};
 use romcat_core::fs::RealFs;
+use romcat_core::report::{DuplicateDetails, human_bytes, thousands};
+use romcat_core::scan::aggregate::Limits;
 use romcat_core::scan::{self, CancelToken, CheckpointOptions, ScanOptions};
 
 /// ROM 元数据自动化工具的命令行。
@@ -44,6 +46,10 @@ struct ScanArgs {
     /// 把报告另存为 JSON
     #[arg(long, value_name = "文件")]
     json: Option<PathBuf>,
+
+    /// 把完整的重复拷贝明细另存成文本文件——报告里只列前 10 组，这里是全部
+    #[arg(long, value_name = "文件")]
+    dump_duplicates: Option<PathBuf>,
 
     /// 工作目录：断点存这里。绝不写进主库
     #[arg(long, value_name = "目录")]
@@ -81,12 +87,15 @@ fn main() -> ExitCode {
 }
 
 fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
-    // 先拦，再扫：10T 扫上几个钟头才发现报告写不出去，代价太大。
-    if let Some(json) = &args.json
-        && let Err(message) = refuse_writing_into_library(&args.root, json)
+    // 先拦，再扫：10T 扫上几个钟头才发现文件写不出去，代价太大。
+    for target in [args.json.as_deref(), args.dump_duplicates.as_deref()]
+        .into_iter()
+        .flatten()
     {
-        eprintln!("{message}");
-        return ExitCode::FAILURE;
+        if let Err(message) = refuse_writing_into_library(&args.root, target) {
+            eprintln!("{message}");
+            return ExitCode::FAILURE;
+        }
     }
 
     let mut options = ScanOptions::new(&args.root);
@@ -94,6 +103,10 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
         options.jobs = jobs.max(1);
     }
     options.samples_per_class = args.samples_per_class;
+    if args.dump_duplicates.is_some() {
+        // 默认每组只留几条路径当例子。要导出可据以动手的清单，得把组内每一份都记下来。
+        options.limits.max_duplicate_paths_per_group = Limits::FULL_DUPLICATE_PATHS_PER_GROUP;
+    }
 
     let checkpoint_path = if args.no_checkpoint {
         None
@@ -125,20 +138,44 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
         let _ = stdout.flush();
     }
 
+    // 一份写不出去不该带走另一份：这些输出是几个钟头扫出来的，能落盘一份是一份。
+    let mut write_failed = false;
+
     if let Some(path) = &args.json {
         match serde_json::to_vec_pretty(&outcome.report) {
-            Ok(bytes) => {
-                if let Err(error) = write_file(path, &bytes) {
+            Ok(bytes) => match write_file(path, &bytes) {
+                Ok(()) => eprintln!("报告已写入 {}", path.display()),
+                Err(error) => {
                     eprintln!("报告写不进 {}：{error}", path.display());
-                    return ExitCode::FAILURE;
+                    write_failed = true;
                 }
-                eprintln!("报告已写入 {}", path.display());
-            }
+            },
             Err(error) => {
                 eprintln!("报告序列化失败：{error}");
-                return ExitCode::FAILURE;
+                write_failed = true;
             }
         }
+    }
+
+    if let Some(path) = &args.dump_duplicates {
+        let details = DuplicateDetails::build(&outcome.aggregate, &outcome.report);
+        match write_file(path, details.render_text().as_bytes()) {
+            Ok(()) => eprintln!(
+                "重复拷贝完整明细已写入 {}（{} 组、{} 个文件，每组留一份可腾出 {}）",
+                path.display(),
+                thousands(details.group_count()),
+                thousands(details.files),
+                human_bytes(details.reclaimable_bytes)
+            ),
+            Err(error) => {
+                eprintln!("重复拷贝明细写不进 {}：{error}", path.display());
+                write_failed = true;
+            }
+        }
+    }
+
+    if write_failed {
+        return ExitCode::FAILURE;
     }
 
     if outcome.interrupted {
@@ -158,13 +195,13 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
 
 /// 主库只读（ADR-0004）：工具写出去的任何文件都不许落进主库。
 ///
-/// 核心库自己会拦断点，这里拦的是命令行才有的输出——报告文件。
+/// 核心库自己会拦断点，这里拦的是命令行才有的输出——报告与重复拷贝清单。
 fn refuse_writing_into_library(root: &Path, target: &Path) -> Result<(), String> {
     let root = romcat_core::path::normalize_existing(root);
     let target = romcat_core::path::normalize_existing(target);
     if romcat_core::path::is_inside(&root, &target) {
         return Err(format!(
-            "报告文件 {} 落在主库内。主库只读，报告请写到别处。",
+            "输出文件 {} 落在主库内。主库只读，请写到别处。",
             romcat_core::path::display(&target)
         ));
     }
@@ -244,6 +281,27 @@ mod tests {
         assert_eq!(args.jobs, Some(4));
         assert!(args.resume);
         assert_eq!(args.samples_per_class, 32);
+        assert_eq!(args.dump_duplicates, None);
+    }
+
+    #[test]
+    fn 完整重复明细要另存到指定文件() {
+        let cli = Cli::parse_from([
+            "romcat",
+            "scan",
+            "/lib",
+            "--dump-duplicates",
+            "/tmp/重复.txt",
+        ]);
+        let Command::Scan(args) = cli.command;
+        assert_eq!(args.dump_duplicates, Some(PathBuf::from("/tmp/重复.txt")));
+    }
+
+    #[test]
+    fn 重复拷贝明细也不许写进主库() {
+        let root = Path::new("/Volumes/ROMs");
+        assert!(refuse_writing_into_library(root, Path::new("/Volumes/ROMs/重复.txt")).is_err());
+        assert!(refuse_writing_into_library(root, Path::new("/tmp/重复.txt")).is_ok());
     }
 
     #[test]

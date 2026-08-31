@@ -17,7 +17,10 @@ use serde::{Deserialize, Serialize};
 use super::aggregate::Aggregate;
 
 /// 断点文件的格式版本。结构变了就加 1，读到对不上的版本直接从头扫。
-pub const FORMAT_VERSION: u32 = 1;
+///
+/// 2：`DuplicateGroup` 的 `examples` 改名成 `paths`——它装的不再是几条例子，
+/// 而是组内全部路径（导出重复拷贝明细要靠它）。
+pub const FORMAT_VERSION: u32 = 2;
 
 /// 断点读写过程中的错误。
 #[derive(Debug, thiserror::Error)]

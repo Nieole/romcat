@@ -62,7 +62,7 @@ fn width(text: &str) -> usize {
     text.chars().map(char_width).sum()
 }
 
-fn pad(text: &str, target: usize) -> String {
+pub(super) fn pad(text: &str, target: usize) -> String {
     let current = width(text);
     if current >= target {
         format!("{text} ")
@@ -260,12 +260,19 @@ pub(super) fn render(report: &HealthReport) -> String {
         );
     }
     for group in &report.suspects.top_duplicates {
+        // 报告只列每组的头几条路径。少列了就说出来——不说的话，这一行看着就像整组只有这几份。
+        let missing = group.paths_missing();
         let _ = writeln!(
             out,
-            "  ×{} 每份 {}：{}",
+            "  ×{} 每份 {}：{}{}",
             group.count,
             human_bytes(group.size),
-            group.examples.join("、")
+            group.paths.join("、"),
+            if missing > 0 {
+                format!("……另有 {missing} 份")
+            } else {
+                String::new()
+            }
         );
     }
     for suspect in &report.suspects.by_reason {

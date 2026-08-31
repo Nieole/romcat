@@ -63,8 +63,9 @@ pub struct DuplicateGroup {
     pub size: u64,
     /// 这一组里有几份。
     pub count: u64,
-    /// 若干条路径样例。
-    pub examples: Vec<String>,
+    /// 组内的路径，最多 [`Limits::max_duplicate_paths_per_group`] 条。
+    /// 少于 `count` 条就说明有几份没记下路径。
+    pub paths: Vec<String>,
 }
 
 /// 一类文件的头部抽样结果。
@@ -118,6 +119,21 @@ pub struct Limits {
     pub max_examples: usize,
     /// 重复检测索引最多留几个键。
     pub max_duplicate_keys: usize,
+    /// 每组重复拷贝最多记几条路径。
+    ///
+    /// 它与 `max_examples` 分开，因为两者要回答的问题不同：例子列表是「给人看一眼
+    /// 长什么样」，而重复拷贝的路径是「照着它决定删哪一份」，后者少一条就少一个
+    /// 可处理的对象。要导出完整清单时把它放开到 [`Limits::FULL_DUPLICATE_PATHS_PER_GROUP`]。
+    pub max_duplicate_paths_per_group: usize,
+}
+
+impl Limits {
+    /// 导出完整重复拷贝清单时，每组保留的路径数上限。
+    ///
+    /// 不设成无上限：断点里存着这份索引，一个病态目录（同名同大小的几十万份）
+    /// 能把它撑爆。一万条足够覆盖任何真实情况——真库里最大的一组也就个位数份——
+    /// 且真被截断时清单会明说少了几份。
+    pub const FULL_DUPLICATE_PATHS_PER_GROUP: usize = 10_000;
 }
 
 impl Default for Limits {
@@ -125,6 +141,7 @@ impl Default for Limits {
         Self {
             max_examples: 10,
             max_duplicate_keys: 2_000_000,
+            max_duplicate_paths_per_group: 10,
         }
     }
 }
@@ -301,9 +318,9 @@ impl Aggregate {
             Some(group) => {
                 group.count += 1;
                 push_capped(
-                    &mut group.examples,
+                    &mut group.paths,
                     observation.display_path.clone(),
-                    limits.max_examples,
+                    limits.max_duplicate_paths_per_group,
                 );
             }
             None => {
@@ -316,7 +333,7 @@ impl Aggregate {
                     DuplicateGroup {
                         size: observation.len,
                         count: 1,
-                        examples: vec![observation.display_path.clone()],
+                        paths: vec![observation.display_path.clone()],
                     },
                 );
             }
@@ -482,6 +499,34 @@ mod tests {
         agg.record_file(&观察("/lib/FC/b.zip", 2), &limits);
         assert_eq!(agg.duplicate_index.len(), 1);
         assert!(agg.duplicate_index_truncated);
+    }
+
+    #[test]
+    fn 每组重复拷贝的路径数可以放开到记全() {
+        let 存了几条 = |limit: usize| {
+            let mut agg = Aggregate::default();
+            let limits = Limits {
+                max_duplicate_paths_per_group: limit,
+                ..Limits::default()
+            };
+            for i in 0..12 {
+                agg.record_file(&观察(&format!("/lib/FC/备份{i}/魂斗罗.zip"), 1024), &limits);
+            }
+            let group = agg
+                .duplicate_index
+                .values()
+                .find(|g| g.count > 1)
+                .expect("有一组重复")
+                .clone();
+            (group.count, group.paths.len())
+        };
+
+        assert_eq!(存了几条(10), (12, 10), "默认只留 10 条，其余 2 份没有路径");
+        assert_eq!(
+            存了几条(Limits::FULL_DUPLICATE_PATHS_PER_GROUP),
+            (12, 12),
+            "放开后每一份都有路径"
+        );
     }
 
     #[test]
