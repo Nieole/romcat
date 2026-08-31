@@ -112,6 +112,9 @@ CREATE TABLE IF NOT EXISTS container_entry(
 ) STRICT;
 ";
 
+/// `meta` 里记主库根的那把键。
+const META_LIBRARY_ROOT: &str = "library_root";
+
 const NOTE_ERROR: &str = "error";
 const NOTE_SKIPPED: &str = "skipped";
 
@@ -338,6 +341,87 @@ impl Catalog {
     #[must_use]
     pub fn file(&self) -> Option<&Path> {
         self.file.as_deref()
+    }
+
+    fn meta_get(&self, key: &str) -> Result<Option<String>, CatalogError> {
+        self.conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|source| self.err(source))
+    }
+
+    fn meta_set(&self, key: &str, value: &str) -> Result<(), CatalogError> {
+        self.conn
+            .execute(
+                "INSERT INTO meta(key, value) VALUES(?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )
+            .map_err(|source| self.err(source))?;
+        Ok(())
+    }
+
+    /// 这份中立库上次记的主库根在哪；从没记过时是 `None`。
+    ///
+    /// 它**不是**定位这份库的依据——`--library` 起了名字之后，定位跟名字走
+    /// （[`crate::workspace::Slug`]）。它只用来回答一个问题：换了挂载点之后，
+    /// 眼前这个根还是不是同一个主库。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn library_root(&self) -> Result<Option<String>, CatalogError> {
+        self.meta_get(META_LIBRARY_ROOT)
+    }
+
+    /// 记下这份中立库对着哪个主库根。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn set_library_root(&self, root: &str) -> Result<(), CatalogError> {
+        self.meta_set(META_LIBRARY_ROOT, root)
+    }
+
+    /// 抹掉「这份库对着哪个主库」这条记录，装成票 29 之前建的老库。
+    #[cfg(test)]
+    pub(crate) fn forget_library_root(&self) {
+        self.conn
+            .execute(
+                "DELETE FROM meta WHERE key = ?1",
+                params![META_LIBRARY_ROOT],
+            )
+            .expect("删得掉");
+    }
+
+    /// 顶层条目的键，至多 `limit` 条，按键排序。
+    ///
+    /// 顶层键就是主库根下面那一层的名字。它是「这还是不是同一个主库」最便宜的判据：
+    /// 一次 `read_dir` 就能拿实际的那一份来比，不必碰盘上的第二层。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn top_level_keys(&self, limit: usize) -> Result<Vec<String>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT key FROM entry
+                 WHERE key <> '' AND instr(key, '/') = 0
+                 ORDER BY key LIMIT ?1",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|source| self.err(source))?);
+        }
+        Ok(out)
     }
 
     /// 上一次遍历留下的记录；从没扫过时是 `None`。

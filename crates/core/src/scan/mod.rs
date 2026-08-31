@@ -18,6 +18,7 @@
 
 pub mod aggregate;
 pub mod checkpoint;
+pub mod probe;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,6 +37,15 @@ use crate::report::{HealthReport, ReportMeta};
 
 use aggregate::{Aggregate, Limits, SampleResult};
 use checkpoint::{Checkpoint, CheckpointError};
+
+/// 认「还是同一个主库」需要的顶层条目重合比例。
+///
+/// 半数是个务实的线：主库的顶层本来就会增删几个目录，卡太严会把正常的换挂载点也拦下来；
+/// 而两个真正不同的主库要凑够半数同名的顶层条目，得是刻意造出来的巧合。
+const SAME_LIBRARY_OVERLAP: f64 = 0.5;
+
+/// 比对顶层条目时最多取几条。真库的顶层是 73 条，取 512 条绰绰有余。
+const TOP_LEVEL_SAMPLE: usize = 512;
 
 /// 攒够多少条记录写一次中立库。
 ///
@@ -60,6 +70,27 @@ pub enum ScanError {
         what: &'static str,
         /// 出问题的路径。
         path: String,
+    },
+    /// 同一份中立库底下换了另一个主库。
+    ///
+    /// 只有 `--library` 给中立库起了名字才可能出现：名字一样、主库不一样。
+    #[error(
+        "中立库 {catalog} 记的主库是 {recorded}，这次要扫的是 {current}——\
+         顶层条目只有 {common}/{recorded_count} 条对得上，两边多半不是同一个主库。\
+         中立库的键是相对主库根的路径（ADR-0020），两个主库挤进同一份库会直接撞车。\
+         换一个 --library 名字，或者删掉那份中立库重扫一遍"
+    )]
+    DifferentLibrary {
+        /// 中立库文件。
+        catalog: String,
+        /// 库里记着的主库根。
+        recorded: String,
+        /// 这次要扫的主库根。
+        current: String,
+        /// 顶层条目对得上几条。
+        common: usize,
+        /// 库里记着的顶层条目共几条。
+        recorded_count: usize,
     },
     /// 断点读写失败。
     #[error(transparent)]
@@ -103,13 +134,22 @@ pub struct CheckpointOptions {
     pub resume: bool,
 }
 
+/// 并发档：手动点名，还是开扫前按介质探测。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Jobs {
+    /// 开扫前探一探目录读取的延迟，据此定（[`probe`]）。默认走这条。
+    Adaptive,
+    /// 用户用 `-j` 点名的并发数。点了就照办，探测不再插手。
+    Fixed(usize),
+}
+
 /// 扫描参数。
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
     /// 主库根目录。
     pub root: PathBuf,
-    /// 并发线程数。
-    pub jobs: usize,
+    /// 并发档。
+    pub jobs: Jobs,
     /// 每类文件抽样读多少个头部。0 表示不抽样。
     pub samples_per_class: usize,
     /// 例子列表与索引的上限。
@@ -135,7 +175,7 @@ impl ScanOptions {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
-            jobs: default_jobs(),
+            jobs: Jobs::Adaptive,
             samples_per_class: 32,
             limits: Limits::default(),
             checkpoint: None,
@@ -145,10 +185,11 @@ impl ScanOptions {
     }
 }
 
-/// 默认并发数。
+/// 探测下不了判断时的并发数：按 CPU 数取，夹在 2 到 8 之间。
 ///
-/// 机械硬盘上线程开太多只会让磁头来回抖，因此夹在 2 到 8 之间；真要压满某块盘，
-/// 用 `--jobs` 按盘调。
+/// **它是退路而不是默认值**。按 CPU 数取是照 CPU 密集型工作设计的，而扫盘是高延迟
+/// I/O 密集型——真机实测 CPU 占用只有 2.7%（挂账 D9）。介质量得出来时一律听
+/// [`probe::probe`] 的；量不出来（目录太少、被中断）才退到这里。
 #[must_use]
 pub fn default_jobs() -> usize {
     thread::available_parallelism()
@@ -172,6 +213,8 @@ pub struct ScanOutcome {
     pub interrupted: bool,
     /// 断点文件位置（中断且写了断点时）。
     pub checkpoint_path: Option<PathBuf>,
+    /// 开扫前那次介质探测的读数；`-j` 点了名就没探测，是 `None`。
+    pub probe: Option<probe::Probe>,
 }
 
 /// 扫一遍主库，把结论写进中立库。
@@ -210,12 +253,26 @@ pub fn scan(
         }
     }
 
+    // 名字一样、主库不一样的话，两边的记录会挤进同一张表——键是相对的（ADR-0020），
+    // 撞车之后没法分开。开扫之前拦下来。
+    guard_same_library(library, catalog, &root)?;
+
+    // 并发按介质定而不是按 CPU 数猜（挂账 D9）。`-j` 点了名就照办，一个目录都不多读。
+    let measured = match options.jobs {
+        Jobs::Fixed(_) => None,
+        Jobs::Adaptive => Some(probe::probe(library, &root, cancel)),
+    };
+    let resolved_jobs = match options.jobs {
+        Jobs::Fixed(jobs) => jobs.max(1),
+        Jobs::Adaptive => measured.map_or_else(default_jobs, |probe| probe.jobs),
+    };
+
     let mut start = load_start_state(options, &root, catalog)?;
     let mut traversal = Traversal {
         scan: start.scan,
         root: path::display(&root),
         elapsed_ms: elapsed(start.elapsed_base, started),
-        jobs: options.jobs.max(1),
+        jobs: resolved_jobs,
         samples_per_class: options.samples_per_class,
         penetrated_containers: options.penetrate_containers,
         interrupted: true,
@@ -323,6 +380,7 @@ pub fn scan(
         delta: progress.delta,
         interrupted,
         checkpoint_path,
+        probe: measured,
     })
 }
 
@@ -351,6 +409,66 @@ struct StartState {
     scan: i64,
     elapsed_base: Duration,
     resumed: bool,
+}
+
+/// 这份中立库对着的还是不是同一个主库。
+///
+/// `--library` 让中立库跟名字走而不跟路径走（挂账 D16），于是换挂载点、换盘符都还能找回
+/// 同一份库——这正是要的。代价是「名字一样、主库不一样」这种情况变得可能，而中立库的键
+/// 是**相对**主库根的（ADR-0020），两个主库挤进同一份库不会报错，只会静默撞车。
+///
+/// 判据是顶层条目：库里记着的顶层键，与眼前这个根 `read_dir` 出来的名字比一比。它只花
+/// 一次 `read_dir`（扫描本来也要读这一层），却足够分开「同一块盘换了挂载点」（顶层全对得上）
+/// 与「换了另一个主库」（顶层几乎全不同）。**它认不出的那种情况**：两个主库恰好有过半
+/// 同名的顶层目录——那得是刻意造的巧合，真出现了也还有 `--library` 换个名字这条路。
+fn guard_same_library(
+    library: &dyn LibraryFs,
+    catalog: &Catalog,
+    root: &Path,
+) -> Result<(), ScanError> {
+    let current = path::display(root);
+    // 从没记过的库直接认下来：票 29 之前建的中立库都走这条，不该因为升级就打不开。
+    let Some(recorded) = catalog.library_root()? else {
+        catalog.set_library_root(&current)?;
+        return Ok(());
+    };
+    if recorded == current {
+        return Ok(());
+    }
+    let recorded_keys = catalog.top_level_keys(TOP_LEVEL_SAMPLE)?;
+    // 空库没什么可撞的。
+    if recorded_keys.is_empty() {
+        catalog.set_library_root(&current)?;
+        return Ok(());
+    }
+    let entries = library.read_dir(root).map_err(|source| ScanError::Root {
+        path: current.clone(),
+        source,
+    })?;
+    let actual: std::collections::HashSet<String> = entries
+        .iter()
+        .map(|entry| path::catalog_key(root, &entry.path))
+        .collect();
+    let common = recorded_keys
+        .iter()
+        .filter(|key| actual.contains(*key))
+        .count();
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "顶层条目至多 512 条，转 f64 精确"
+    )]
+    let ratio = common as f64 / recorded_keys.len() as f64;
+    if ratio < SAME_LIBRARY_OVERLAP {
+        return Err(ScanError::DifferentLibrary {
+            catalog: catalog.location().to_string(),
+            recorded,
+            current,
+            common,
+            recorded_count: recorded_keys.len(),
+        });
+    }
+    catalog.set_library_root(&current)?;
+    Ok(())
 }
 
 fn load_start_state(
@@ -782,22 +900,30 @@ mod tests {
 
     /// 一个够小、但把这张票关心的每种情况都摆上一份的 fixture 主库。
     fn 建库() -> MemFs {
+        建库于("/lib")
+    }
+
+    /// 同一棵树，搭在任意一个根下面。换挂载点那几条测试要拿它比。
+    fn 建库于(root: &str) -> MemFs {
         let mut library = MemFs::new();
         library
-            .dir("/lib")
-            .file("/lib/FC/超级马里奥.zip", zip(2048))
-            .file("/lib/FC/魂斗罗.zip", vec![0u8; 512]) // 扩展名说 zip，内容不是
-            .file("/lib/FC/说明.txt", "随便写点什么".as_bytes().to_vec())
-            .file("/lib/FC/备份/超级马里奥.zip", zip(2048)) // 与上面同名同大小
-            .file("/lib/PS1/最终幻想.chd", chd())
-            .file("/lib/PS1/模拟器/epsxe.exe", vec![0u8; 100])
-            .file("/lib/PSP/游戏.iso", iso())
-            .file("/lib/PSP/半截下载.iso.part", vec![0u8; 10])
-            .file("/lib/散落的游戏.gba", vec![0u8; 16])
-            .file("/lib/.DS_Store", vec![0u8; 8])
-            .file("/lib/__MACOSX/垃圾", vec![0u8; 8]) // 整棵跳过
-            .file("/lib/空文件.zip", Vec::new())
-            .symlink("/lib/指向别处");
+            .dir(root)
+            .file(format!("{root}/FC/超级马里奥.zip"), zip(2048))
+            .file(format!("{root}/FC/魂斗罗.zip"), vec![0u8; 512]) // 扩展名说 zip，内容不是
+            .file(
+                format!("{root}/FC/说明.txt"),
+                "随便写点什么".as_bytes().to_vec(),
+            )
+            .file(format!("{root}/FC/备份/超级马里奥.zip"), zip(2048)) // 与上面同名同大小
+            .file(format!("{root}/PS1/最终幻想.chd"), chd())
+            .file(format!("{root}/PS1/模拟器/epsxe.exe"), vec![0u8; 100])
+            .file(format!("{root}/PSP/游戏.iso"), iso())
+            .file(format!("{root}/PSP/半截下载.iso.part"), vec![0u8; 10])
+            .file(format!("{root}/散落的游戏.gba"), vec![0u8; 16])
+            .file(format!("{root}/.DS_Store"), vec![0u8; 8])
+            .file(format!("{root}/__MACOSX/垃圾"), vec![0u8; 8]) // 整棵跳过
+            .file(format!("{root}/空文件.zip"), Vec::new())
+            .symlink(format!("{root}/指向别处"));
         library
     }
 
@@ -991,9 +1117,9 @@ mod tests {
     fn 并发数不影响结论() {
         let library = 建库();
         let mut single = ScanOptions::new("/lib");
-        single.jobs = 1;
+        single.jobs = Jobs::Fixed(1);
         let mut many = ScanOptions::new("/lib");
-        many.jobs = 8;
+        many.jobs = Jobs::Fixed(8);
 
         let mut a = 扫(&library, &single).aggregate;
         let mut b = 扫(&library, &many).aggregate;
@@ -1280,6 +1406,98 @@ mod tests {
     }
 
     #[test]
+    fn 同一份中立库换个挂载点判为全部未变() {
+        // macOS 重挂一次盘就可能从 `/Volumes/新加卷` 变成 `/Volumes/新加卷 1`。
+        // 中立库跟名字走之后，同一份库会对上换了路径的同一个主库——键本来就是相对的
+        // （ADR-0020），换挂载点对键没有任何影响（挂账 D16）。
+        let mut catalog = 新中立库();
+        let 先 = 扫入(
+            &mut catalog,
+            &建库于("/Volumes/盘"),
+            &ScanOptions::new("/Volumes/盘"),
+        );
+        assert!(先.delta.added > 0);
+
+        let 再 = 扫入(
+            &mut catalog,
+            &建库于("/Volumes/盘 1"),
+            &ScanOptions::new("/Volumes/盘 1"),
+        );
+        assert_eq!(再.delta.added, 0, "换挂载点不该把整个库判成新增");
+        assert_eq!(再.delta.removed, 0, "更不该把旧的那份判成已删");
+        assert_eq!(再.delta.unchanged, 先.delta.added);
+        assert_eq!(再.report.totals.files, 先.report.totals.files);
+    }
+
+    #[test]
+    fn 两个不同的主库共用一份中立库时报错而不是混表() {
+        // 键是相对主库根的（ADR-0020），两个主库挤进同一份库不会报错，只会静默撞车。
+        let mut catalog = 新中立库();
+        扫入(
+            &mut catalog,
+            &建库于("/Volumes/甲"),
+            &ScanOptions::new("/Volumes/甲"),
+        );
+
+        let mut 另一个主库 = MemFs::new();
+        另一个主库
+            .dir("/Volumes/乙")
+            .file("/Volumes/乙/漫画/第一话.zip", zip(64))
+            .file("/Volumes/乙/照片/去年.jpg", vec![0u8; 64]);
+        let 错 = scan(
+            &另一个主库,
+            &mut catalog,
+            &ScanOptions::new("/Volumes/乙"),
+            &CancelToken::new(),
+        )
+        .expect_err("顶层条目全不一样，该拦下来");
+        let ScanError::DifferentLibrary {
+            recorded,
+            current,
+            common,
+            ..
+        } = &错
+        else {
+            panic!("该是 DifferentLibrary，实际是 {错:?}");
+        };
+        assert_eq!(recorded, "/Volumes/甲");
+        assert_eq!(current, "/Volumes/乙");
+        assert_eq!(*common, 0);
+    }
+
+    #[test]
+    fn 顶层还对得上就认成同一个主库() {
+        // 主库的顶层本来就会增删几个目录，卡太严会把正常的换挂载点也拦下来。
+        let mut catalog = 新中立库();
+        扫入(
+            &mut catalog,
+            &建库于("/Volumes/甲"),
+            &ScanOptions::new("/Volumes/甲"),
+        );
+
+        let mut 少了一个平台 = 建库于("/Volumes/乙");
+        少了一个平台.remove("/Volumes/乙/PSP");
+        少了一个平台.file("/Volumes/乙/SFC/塞尔达.zip", zip(128));
+        let 再 = 扫入(
+            &mut catalog,
+            &少了一个平台,
+            &ScanOptions::new("/Volumes/乙"),
+        );
+        assert!(再.delta.added > 0, "新加的那个平台是新增");
+        assert!(再.delta.unchanged > 0, "没动的那些还是未变");
+    }
+
+    #[test]
+    fn 票_29_之前建的中立库照样打得开() {
+        // 老库的 `meta` 里没有主库根这一条，不该因为升级就被当成「另一个主库」拦下。
+        let mut catalog = 新中立库();
+        扫入(&mut catalog, &建库(), &ScanOptions::new("/lib"));
+        catalog.forget_library_root();
+        let 再 = 扫入(&mut catalog, &建库(), &ScanOptions::new("/lib"));
+        assert_eq!(再.delta.added, 0);
+    }
+
+    #[test]
     fn 体检报告能在主库不在位时从中立库出() {
         let mut catalog = 新中立库();
         let 扫出来的 = {
@@ -1377,7 +1595,7 @@ mod tests {
     fn 中断再续跑与一次扫完结论相同() {
         let workspace = crate::testing::temp_dir("scan");
         let mut options = ScanOptions::new("/lib");
-        options.jobs = 1;
+        options.jobs = Jobs::Fixed(1);
         options.checkpoint = Some(断点选项(workspace.path()));
         let checkpoint = options.checkpoint.as_ref().expect("有断点").path.clone();
 
@@ -1422,7 +1640,7 @@ mod tests {
     fn 中断落在目录中间时整个目录重扫而不是丢掉半个() {
         let workspace = crate::testing::temp_dir("scan");
         let mut options = ScanOptions::new("/lib");
-        options.jobs = 1;
+        options.jobs = Jobs::Fixed(1);
         options.checkpoint = Some(断点选项(workspace.path()));
 
         let mut 对照 = 扫(&建库(), &options).aggregate;
@@ -1461,7 +1679,7 @@ mod tests {
     fn 比中立库旧的断点不会被续跑() {
         let workspace = crate::testing::temp_dir("scan");
         let mut options = ScanOptions::new("/lib");
-        options.jobs = 1;
+        options.jobs = Jobs::Fixed(1);
         options.checkpoint = Some(断点选项(workspace.path()));
         let checkpoint = options.checkpoint.as_ref().expect("有断点").path.clone();
 
@@ -1475,7 +1693,7 @@ mod tests {
 
         // 中间插一次不写断点的完整扫描：中立库整个被刷新了一遍
         let mut 不写断点 = ScanOptions::new("/lib");
-        不写断点.jobs = 1;
+        不写断点.jobs = Jobs::Fixed(1);
         扫入(&mut catalog, &建库(), &不写断点);
 
         // 那份断点现在比中立库旧。照它续跑会把上一次完整扫描的记录全删掉。

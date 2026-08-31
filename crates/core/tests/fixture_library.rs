@@ -15,7 +15,7 @@ use romcat_core::header::ProbeClass;
 use romcat_core::path::long_path;
 use romcat_core::report::DuplicateDetails;
 use romcat_core::scan::aggregate::Limits;
-use romcat_core::scan::{self, CancelToken, CheckpointOptions, ScanOptions, ScanOutcome};
+use romcat_core::scan::{self, CancelToken, CheckpointOptions, Jobs, ScanOptions, ScanOutcome};
 use romcat_core::testing::sample::{chd, gba, iso, nes, zip};
 use romcat_core::testing::{TempDir, temp_dir};
 
@@ -66,7 +66,7 @@ fn 扫入(catalog: &mut Catalog, options: &ScanOptions) -> ScanOutcome {
 
 fn 扫(root: &Path) -> ScanOutcome {
     let mut options = ScanOptions::new(root);
-    options.jobs = 4;
+    options.jobs = Jobs::Fixed(4);
     扫入(&mut 中立库(), &options)
 }
 
@@ -239,7 +239,7 @@ fn 完整重复明细列出每一组的每个文件且不动主库() {
     let 之前 = 记下基线(root);
 
     let mut options = ScanOptions::new(root);
-    options.jobs = 4;
+    options.jobs = Jobs::Fixed(4);
     options.limits.max_duplicate_paths_per_group = Limits::FULL_DUPLICATE_PATHS_PER_GROUP;
     let outcome = 扫入(&mut 中立库(), &options);
 
@@ -294,7 +294,7 @@ fn 遍历不改主库一个字节() {
     let 之前 = 记下基线(root);
 
     let mut options = ScanOptions::new(root);
-    options.jobs = 4;
+    options.jobs = Jobs::Fixed(4);
     options.checkpoint = Some(CheckpointOptions {
         // 断点写在主库之外的工作目录里
         path: workspace.path().join("scans").join("checkpoint.json"),
@@ -381,7 +381,7 @@ fn 中断后能从断点接着扫() {
     let checkpoint = workspace.path().join("scans").join("checkpoint.json");
 
     let mut options = ScanOptions::new(library.path());
-    options.jobs = 1;
+    options.jobs = Jobs::Fixed(1);
     options.checkpoint = Some(CheckpointOptions {
         path: checkpoint.clone(),
         interval: std::time::Duration::ZERO,
@@ -411,9 +411,9 @@ fn 中断后能从断点接着扫() {
 fn 并发数不影响结论() {
     let library = 建_fixture_主库();
     let mut single = ScanOptions::new(library.path());
-    single.jobs = 1;
+    single.jobs = Jobs::Fixed(1);
     let mut many = ScanOptions::new(library.path());
-    many.jobs = 8;
+    many.jobs = Jobs::Fixed(8);
 
     let a = 扫入(&mut 中立库(), &single);
     let b = 扫入(&mut 中立库(), &many);
@@ -430,7 +430,7 @@ fn 真实磁盘上第二次扫描跳过未变的文件() {
     let root = library.path();
     let mut catalog = 中立库();
     let mut options = ScanOptions::new(root);
-    options.jobs = 4;
+    options.jobs = Jobs::Fixed(4);
 
     let 首扫 = 扫入(&mut catalog, &options);
     assert_eq!(首扫.delta.added, 16);
@@ -474,7 +474,7 @@ fn 中立库落在本机重启后仍读得出来() {
     let 扫出来的 = {
         let mut catalog = Catalog::open(&catalog_path).expect("能开中立库");
         let mut options = ScanOptions::new(library.path());
-        options.jobs = 4;
+        options.jobs = Jobs::Fixed(4);
         扫入(&mut catalog, &options).report
     };
     assert!(catalog_path.exists(), "中立库是本机上的一个文件");

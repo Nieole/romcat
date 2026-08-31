@@ -16,10 +16,11 @@ use std::{fs, io};
 use clap::{Args, Parser, Subcommand};
 use romcat_core::catalog::Catalog;
 use romcat_core::fs::RealFs;
+use romcat_core::path;
 use romcat_core::report::{DuplicateDetails, HealthReport, human_bytes, thousands};
 use romcat_core::scan::aggregate::{Aggregate, Limits};
-use romcat_core::scan::{self, CancelToken, CheckpointOptions, ScanOptions};
-use romcat_core::workspace;
+use romcat_core::scan::{self, CancelToken, CheckpointOptions, Jobs, ScanOptions};
+use romcat_core::workspace::{self, Slug};
 
 /// ROM 元数据自动化工具的命令行。
 #[derive(Debug, Parser)]
@@ -58,9 +59,16 @@ struct ScanArgs {
     /// 主库根目录
     root: PathBuf,
 
-    /// 并发线程数（默认按 CPU 数取，夹在 2 到 8 之间）
+    /// 并发线程数（默认开扫前探一探介质自己定；点了名就照办）
     #[arg(short, long)]
     jobs: Option<usize>,
+
+    /// 给这个主库起个名字，中立库跟名字走而不跟路径走
+    ///
+    /// macOS 重挂一次盘就可能从 `/Volumes/新加卷` 变成 `/Volumes/新加卷 1`，Windows 上盘符也会变。
+    /// 起了名字，换挂载点还找得回同一份中立库；不给就维持老行为（按绝对路径取）
+    #[arg(long, value_name = "名字")]
+    library: Option<String>,
 
     /// 每类文件抽样读多少个头部；0 表示不抽样
     #[arg(long, default_value_t = 32)]
@@ -94,8 +102,14 @@ struct ScanArgs {
 
 #[derive(Debug, Args)]
 struct ReportArgs {
-    /// 主库根目录。只用来找到对应的中立库，不会去读它
-    root: PathBuf,
+    /// 主库根目录。只用来找到对应的中立库，不会去读它；给了 `--library` 就不必再给
+    root: Option<PathBuf>,
+
+    /// 按名字找中立库（扫描时用 `--library` 起的那个名字）
+    ///
+    /// 用它就不必再报出主库路径——盘换了挂载点、甚至根本没插，报告照样出得来
+    #[arg(long, value_name = "名字")]
+    library: Option<String>,
 
     /// 工作目录：中立库存这里
     #[arg(long, value_name = "目录")]
@@ -131,10 +145,12 @@ fn workspace_dir(given: Option<&Path>) -> PathBuf {
         .unwrap_or_else(workspace::default_dir)
 }
 
-fn open_catalog(workspace: &Path, root: &Path) -> Result<Catalog, String> {
-    let path = workspace::catalog_path(workspace, root);
+fn open_catalog(workspace: &Path, slug: Slug<'_>, root: Option<&Path>) -> Result<Catalog, String> {
+    let path = workspace::catalog_path(workspace, slug);
     // 主库只读（ADR-0004）：中立库落进主库就该在开扫之前被拦下。
-    refuse_writing_into_library(root, &path)?;
+    if let Some(root) = root {
+        refuse_writing_into_library(root, &path)?;
+    }
     Catalog::open(&path).map_err(|error| format!("中立库打不开：{error}"))
 }
 
@@ -146,7 +162,8 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
     }
 
     let workspace = workspace_dir(args.workspace.as_deref());
-    let mut catalog = match open_catalog(&workspace, &args.root) {
+    let slug = Slug::pick(args.library.as_deref(), &args.root);
+    let mut catalog = match open_catalog(&workspace, slug, Some(&args.root)) {
         Ok(catalog) => catalog,
         Err(message) => {
             eprintln!("{message}");
@@ -156,7 +173,7 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
 
     let mut options = ScanOptions::new(&args.root);
     if let Some(jobs) = args.jobs {
-        options.jobs = jobs.max(1);
+        options.jobs = Jobs::Fixed(jobs.max(1));
     }
     options.samples_per_class = args.samples_per_class;
     options.incremental = !args.full;
@@ -169,7 +186,7 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
     let checkpoint_path = if args.no_checkpoint {
         None
     } else {
-        Some(workspace::checkpoint_path(&workspace, &args.root))
+        Some(workspace::checkpoint_path(&workspace, slug))
     };
     if let Some(path) = &checkpoint_path {
         options.checkpoint = Some(CheckpointOptions {
@@ -187,6 +204,12 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    if let Some(probe) = &outcome.probe {
+        // 并发是量出来的不是猜出来的，那就把量到的数说出来——用户看得见依据才敢信它，
+        // 不服也知道该拿 `-j` 覆盖成多少。
+        eprintln!("{}", probe.describe());
+    }
 
     let wrote_everything = args.output.emit(&outcome.report, &outcome.aggregate);
     eprintln!("中立库：{}", catalog.location());
@@ -211,22 +234,30 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
 }
 
 fn run_report(args: &ReportArgs) -> ExitCode {
-    if let Err(message) = args.output.refuse_targets_in_library(&args.root) {
+    // 只给了 `--library` 时连主库路径都不必知道——这正是名字那条路的用处：
+    // 盘换了挂载点、甚至根本没插，报告照样出得来（ADR-0009）。
+    let (slug, located_by) = match (args.library.as_deref(), args.root.as_deref()) {
+        (Some(name), _) => (Slug::Named(name), format!("--library {name}")),
+        (None, Some(root)) => (Slug::AtPath(root), path::display(root)),
+        (None, None) => {
+            eprintln!("要么给出主库根目录，要么用 --library 报出中立库的名字。");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(root) = args.root.as_deref()
+        && let Err(message) = args.output.refuse_targets_in_library(root)
+    {
         eprintln!("{message}");
         return ExitCode::FAILURE;
     }
     let workspace = workspace_dir(args.workspace.as_deref());
-    let path = workspace::catalog_path(&workspace, &args.root);
+    let path = workspace::catalog_path(&workspace, slug);
     // 只出报告不该顺手建一个空库出来。
     if !path.exists() {
-        eprintln!(
-            "还没有 {} 这个主库的中立库。先跑一次 `romcat scan {}`。",
-            args.root.display(),
-            args.root.display()
-        );
+        eprintln!("还没有 {located_by} 这份中立库。先跑一次 `romcat scan`。");
         return ExitCode::FAILURE;
     }
-    let catalog = match open_catalog(&workspace, &args.root) {
+    let catalog = match open_catalog(&workspace, slug, args.root.as_deref()) {
         Ok(catalog) => catalog,
         Err(message) => {
             eprintln!("{message}");
@@ -234,12 +265,21 @@ fn run_report(args: &ReportArgs) -> ExitCode {
         }
     };
 
+    // 只给了名字时，主库在哪只有中立库知道。**这道守卫不能因此漏掉**——
+    // 主库只读（ADR-0004），报告写不进去这条与用没用 `--library` 无关。
+    if args.root.is_none()
+        && let Ok(Some(recorded)) = catalog.library_root()
+        && let Err(message) = args.output.refuse_targets_in_library(Path::new(&recorded))
+    {
+        eprintln!("{message}");
+        return ExitCode::FAILURE;
+    }
+
     match catalog.is_empty() {
         Ok(true) => {
             eprintln!(
-                "中立库 {} 里还没有东西。先跑一次 `romcat scan {}`。",
-                catalog.location(),
-                args.root.display()
+                "中立库 {} 里还没有东西。先跑一次 `romcat scan`。",
+                catalog.location()
             );
             return ExitCode::FAILURE;
         }
@@ -383,7 +423,7 @@ mod tests {
         let Command::Report(args) = cli.command else {
             panic!("解析出的该是 report");
         };
-        assert_eq!(args.root, PathBuf::from("/lib"));
+        assert_eq!(args.root, Some(PathBuf::from("/lib")));
         assert_eq!(args.output.json, Some(PathBuf::from("/tmp/体检.json")));
     }
 
@@ -424,11 +464,11 @@ mod tests {
     #[test]
     fn 中立库落在工作目录里且不许落进主库() {
         let root = Path::new("/Volumes/ROMs");
-        let path = workspace::catalog_path(Path::new("/work"), root);
+        let path = workspace::catalog_path(Path::new("/work"), Slug::AtPath(root));
         assert!(path.starts_with("/work/catalog"));
         assert!(refuse_writing_into_library(root, &path).is_ok());
         // 真要有人把工作目录指到主库里，扫描之前就得被拦下来
-        let 落在库里 = workspace::catalog_path(root, root);
+        let 落在库里 = workspace::catalog_path(root, Slug::AtPath(root));
         assert!(refuse_writing_into_library(root, &落在库里).is_err());
     }
 
@@ -445,7 +485,7 @@ mod tests {
     #[test]
     fn 断点路径不落在主库里() {
         let workspace = PathBuf::from("/work");
-        let path = workspace::checkpoint_path(&workspace, Path::new("/Volumes/ROMs"));
+        let path = workspace::checkpoint_path(&workspace, Slug::AtPath(Path::new("/Volumes/ROMs")));
         assert!(!path.starts_with("/Volumes/ROMs"));
     }
 }

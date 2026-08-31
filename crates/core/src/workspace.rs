@@ -6,9 +6,21 @@
 //! 一个主库一份文件：中立库的键是**相对**主库根的路径（ADR-0020），两个主库的记录
 //! 混进同一张表会直接撞车。文件名里既留原目录名（人能认出是哪块盘）又带路径的哈希
 //! （两块盘的最后一级恰好同名时不会互相覆盖）。
+//!
+//! ## 名字优先于路径
+//!
+//! 按**绝对路径**取文件名有一个致命处：macOS 重挂一次盘就可能从 `/Volumes/新加卷`
+//! 变成 `/Volumes/新加卷 1`，Windows 上盘符也会变——换了挂载点就找不到原来那份中立库，
+//! 全库白扫一遍。而 ADR-0018 定的工作方式正是盘在两台机器之间来回接，所以这事会反复发生。
+//!
+//! 于是加了 [`Slug::Named`]：`--library <名字>` 一给，中立库就跟名字走而不跟路径走。
+//! 键本来就是相对的（ADR-0020），换挂载点对键没有任何影响，只有「找得到那份库」这一步
+//! 之前还挂在绝对路径上。不给名字时维持老行为，已有的库照样打得开。
 
 use std::env;
 use std::path::{Path, PathBuf};
+
+use crate::path;
 
 /// 默认工作目录。
 ///
@@ -38,46 +50,110 @@ pub fn default_dir() -> PathBuf {
     env::temp_dir().join("romcat")
 }
 
-/// 一个主库在工作目录里的短名：末级目录名加路径哈希。
-#[must_use]
-pub fn slug(root: &Path) -> String {
-    let text = root.to_string_lossy();
-    // FNV-1a。这里只要「不同路径大概率不同名」，不需要密码学强度。
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in text.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x1000_0000_01b3);
+/// 一份中立库在工作目录里叫什么。
+///
+/// 两种取法，差别只在「跟什么走」：[`Slug::Named`] 跟用户起的名字走，
+/// [`Slug::AtPath`] 跟主库的绝对路径走。名字那条是为了换挂载点还能找回同一份库。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slug<'a> {
+    /// 用户用 `--library` 起的名字。换挂载点、换盘符都不影响。
+    Named(&'a str),
+    /// 没起名字时的老办法：跟主库的绝对路径走。
+    AtPath(&'a Path),
+}
+
+impl<'a> Slug<'a> {
+    /// 从可选的名字与主库根挑一种。
+    #[must_use]
+    pub fn pick(name: Option<&'a str>, root: &'a Path) -> Self {
+        match name {
+            Some(name) => Self::Named(name),
+            None => Self::AtPath(root),
+        }
     }
-    let name: String = root
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "library".to_string())
+
+    /// 落到文件名上的那一串：`{认得出的那一半}-{哈希}`。
+    ///
+    /// 哈希取自完整的键（名字，或主库的绝对路径），保证「不同的键几乎必然不同名」；
+    /// 前半截只为人能一眼认出是哪份库。**哈希后缀还顺带挡掉 Windows 的保留设备名**
+    /// ——`CON` 会变成 `CON-xxxxxxxx`，不再是保留名。
+    ///
+    /// 两条路的**可读那一半用的过滤不一样**，这不是疏忽：
+    ///
+    /// - [`Self::AtPath`] 必须一个字符都不变，否则已有的中立库全都对不上名字——
+    ///   而那正是这次要治的病。所以它照旧只留 ASCII 字母数字：
+    ///   `/Volumes/新加卷/漫画` 折出来是 `library-…`，难看，但**是老库的名字**。
+    /// - [`Self::Named`] 是这次新加的，没有向后兼容的包袱，于是放汉字过去：
+    ///   `--library 主库` 折出来是 `主库-…`，人一眼认得出。
+    #[must_use]
+    pub fn text(self) -> String {
+        match self {
+            // 名字先规范化成 NFC 再取哈希（ADR-0020）。`--library` 存在的理由正是
+            // 「盘在 macOS 与 Windows 之间来回接还能找回同一份库」，而两台机器交出来的
+            // 同一个名字可能一个 NFD 一个 NFC——名字里带假名浊音或拉丁重音符的话，
+            // 不规范化就会折出两个文件名、两份中立库，静默全库重扫。
+            //
+            // 名字那条不带 `-at-` 之类的前缀：两条路取的哈希输入不同（名字 vs 绝对路径），
+            // 撞上同一个 16 位十六进制串的概率与随机撞名同量级，不值得为它牺牲可读性。
+            Self::Named(name) => {
+                let name = path::nfc(name);
+                slug_from(&name, &readable(&name, char::is_alphanumeric))
+            }
+            Self::AtPath(root) => {
+                let text = root.to_string_lossy();
+                let last = root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                slug_from(&text, &readable(&last, |c| c.is_ascii_alphanumeric()))
+            }
+        }
+    }
+}
+
+/// 认得出是哪份库的那一半。
+///
+/// 过滤到只剩 `keep` 放行的字符加 `-` `_`，于是名字里写什么都造不出非法文件名——
+/// `/ \ : * ? " < > |` 与控制字符一个都过不去。一个都不剩时退成 `library`。
+fn readable(text: &str, keep: impl Fn(char) -> bool) -> String {
+    let name: String = text
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .filter(|c| keep(*c) || *c == '-' || *c == '_')
         .take(24)
         .collect();
-    let name = if name.is_empty() {
+    if name.is_empty() {
         "library".to_string()
     } else {
         name
-    };
-    format!("{name}-{hash:016x}")
+    }
+}
+
+fn slug_from(key: &str, readable: &str) -> String {
+    // FNV-1a 的变体：乘数比正牌 FNV 的 `0x100000001b3` 多了一位十六进制，是票 01 留下的
+    // 笔误。**不改**——改了已有的中立库全都对不上名字，而那正是这次要治的病。这里要的
+    // 只是「不同的键大概率不同名」，任何奇数乘数都给得出，不需要密码学强度。
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    format!("{readable}-{hash:016x}")
 }
 
 /// 某个主库的**中立库**文件。
 #[must_use]
-pub fn catalog_path(workspace: &Path, root: &Path) -> PathBuf {
+pub fn catalog_path(workspace: &Path, slug: Slug<'_>) -> PathBuf {
     workspace
         .join("catalog")
-        .join(format!("{}.sqlite3", slug(root)))
+        .join(format!("{}.sqlite3", slug.text()))
 }
 
 /// 某个主库的断点文件。
 #[must_use]
-pub fn checkpoint_path(workspace: &Path, root: &Path) -> PathBuf {
+pub fn checkpoint_path(workspace: &Path, slug: Slug<'_>) -> PathBuf {
     workspace
         .join("scans")
-        .join(format!("{}.checkpoint.json", slug(root)))
+        .join(format!("{}.checkpoint.json", slug.text()))
 }
 
 #[cfg(test)]
@@ -87,8 +163,8 @@ mod tests {
     #[test]
     fn 不同主库的中立库与断点互不覆盖() {
         let workspace = PathBuf::from("/work");
-        let a = Path::new("/Volumes/ROMs");
-        let b = Path::new("/Volumes/ROMs2");
+        let a = Slug::AtPath(Path::new("/Volumes/ROMs"));
+        let b = Slug::AtPath(Path::new("/Volumes/ROMs2"));
         assert_ne!(catalog_path(&workspace, a), catalog_path(&workspace, b));
         assert_ne!(
             checkpoint_path(&workspace, a),
@@ -99,8 +175,8 @@ mod tests {
     #[test]
     fn 末级同名的两块盘也分得开() {
         let workspace = PathBuf::from("/work");
-        let a = catalog_path(&workspace, Path::new("/Volumes/甲/Game"));
-        let b = catalog_path(&workspace, Path::new("/Volumes/乙/Game"));
+        let a = catalog_path(&workspace, Slug::AtPath(Path::new("/Volumes/甲/Game")));
+        let b = catalog_path(&workspace, Slug::AtPath(Path::new("/Volumes/乙/Game")));
         assert_ne!(a, b);
         assert!(
             a.to_string_lossy().contains("Game"),
@@ -114,7 +190,108 @@ mod tests {
         // 何况主库只读（ADR-0004）。
         let root = Path::new("/Volumes/ROMs");
         let workspace = PathBuf::from("/work");
-        assert!(!catalog_path(&workspace, root).starts_with(root));
-        assert!(!checkpoint_path(&workspace, root).starts_with(root));
+        assert!(!catalog_path(&workspace, Slug::AtPath(root)).starts_with(root));
+        assert!(!checkpoint_path(&workspace, Slug::AtPath(root)).starts_with(root));
+    }
+
+    #[test]
+    fn 起了名字之后换挂载点还是同一份中立库() {
+        // macOS 重挂一次盘就可能从 `/Volumes/新加卷` 变成 `/Volumes/新加卷 1`，
+        // Windows 上盘符也会变。名字一给，这些都不影响找得到哪份库（挂账 D16）。
+        let workspace = PathBuf::from("/work");
+        let 挂在甲 = catalog_path(
+            &workspace,
+            Slug::pick(Some("主库"), Path::new("/Volumes/新加卷/Game")),
+        );
+        let 挂在乙 = catalog_path(
+            &workspace,
+            Slug::pick(Some("主库"), Path::new("/Volumes/新加卷 1/Game")),
+        );
+        let 盘符 = catalog_path(&workspace, Slug::pick(Some("主库"), Path::new("E:\\Game")));
+        assert_eq!(挂在甲, 挂在乙);
+        assert_eq!(挂在甲, 盘符);
+        assert_eq!(
+            checkpoint_path(&workspace, Slug::Named("主库")),
+            checkpoint_path(&workspace, Slug::pick(Some("主库"), Path::new("E:\\Game")))
+        );
+    }
+
+    #[test]
+    fn 不给名字时维持老行为() {
+        // 已有的库不能因为这次改动就打不开了：**这几串是票 01 那版算法的输出，钉死**。
+        // 换一个字符，那份中立库就再也找不到——而那正是这张票要治的病。
+        let workspace = PathBuf::from("/work");
+        let root = Path::new("/Volumes/新加卷/Game");
+        assert_eq!(Slug::pick(None, root), Slug::AtPath(root));
+        assert_eq!(
+            catalog_path(&workspace, Slug::AtPath(root)),
+            PathBuf::from("/work/catalog/Game-3a0183855885f3a5.sqlite3")
+        );
+        // 末级目录名不含 ASCII 字母数字的老库：可读那一半整个被滤光，退成 `library`。
+        // 名字那条放汉字过去，路径这条**不许跟着放**——放了就是另一个文件名。
+        assert_eq!(
+            Slug::AtPath(Path::new("/Volumes/新加卷/漫画")).text(),
+            "library-39a9fc87af2531b6"
+        );
+        assert_eq!(
+            Slug::AtPath(Path::new("/Volumes/新加卷")).text(),
+            "library-f88dd3e91cc9873a"
+        );
+    }
+
+    #[test]
+    fn 不同名字互不覆盖() {
+        let workspace = PathBuf::from("/work");
+        let a = catalog_path(&workspace, Slug::Named("主库"));
+        let b = catalog_path(&workspace, Slug::Named("备份库"));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn 名字里的非法字符造不出非法文件名() {
+        // 名字是用户随手打的，里面什么都可能有。可读那一半只留字母数字与 `-` `_`，
+        // 哈希那一半保证不同名字仍然分得开。
+        for 名字 in [
+            "../../etc/passwd",
+            "C:\\Windows",
+            "带 空格 和 * ? 的",
+            "CON",
+            "",
+            "。、？",
+        ] {
+            let name = Slug::Named(名字).text();
+            assert!(
+                !name.contains('/') && !name.contains('\\') && !name.contains(':'),
+                "{名字} 折出来的 {name} 里不该有路径分隔符"
+            );
+            assert!(!name.is_empty());
+            // 保留设备名后面永远跟着哈希，于是 `CON` 不再是 `CON`。
+            assert_ne!(name, "CON");
+        }
+        assert_ne!(
+            Slug::Named("../../etc/passwd").text(),
+            Slug::Named("etcpasswd").text()
+        );
+    }
+
+    #[test]
+    fn 名字的两种规范化形式折出同一份中立库() {
+        // macOS 的 NTFS 驱动把名字交出来时是 NFD，Windows 上存的是 NFC（ADR-0020）。
+        // `--library` 存在的理由就是「盘在两台机器之间来回接还能找回同一份库」，
+        // 这一条要是漏了，带浊音假名的名字会在两台机器上折出两份库。
+        let 预组合 = "ゲーム";
+        let 分解形 = "\u{30b1}\u{3099}ーム";
+        assert_ne!(预组合, 分解形, "两个字符串本身不同");
+        assert_eq!(
+            Slug::Named(预组合).text(),
+            Slug::Named(分解形).text(),
+            "规范化之后是同一份库"
+        );
+    }
+
+    #[test]
+    fn 汉字名字留得住() {
+        let name = Slug::Named("主库").text();
+        assert!(name.starts_with("主库-"), "{name}");
     }
 }
