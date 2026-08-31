@@ -11,6 +11,7 @@
 
 pub mod catalog;
 pub mod classify;
+pub mod container;
 pub mod fs;
 pub mod header;
 pub mod path;

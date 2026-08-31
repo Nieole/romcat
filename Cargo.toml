@@ -5,7 +5,7 @@ members = ["crates/core", "crates/cli"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.93"
 
 [workspace.dependencies]
 romcat-core = { path = "crates/core" }
@@ -19,6 +19,8 @@ ctrlc = "3"
 rusqlite = { version = "0.40", features = ["bundled"] }
 # 路径以 NFC 规范化后才作为键（ADR-0020）。
 unicode-normalization = "0.1"
+flate2 = "1"
+sevenz-rust2 = { version = "0.22", default-features = false, features = ["bzip2", "ppmd", "deflate"] }
 
 # 主库只读是这个项目唯一不可退让的约束（ADR-0004），
 # 因此禁 unsafe，一切磁盘接触走 `romcat_core::fs::LibraryFs` 这个只读接缝。

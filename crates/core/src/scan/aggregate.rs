@@ -12,6 +12,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::classify::{self, Category, Classification, SuspectReason, classify};
+use crate::container::{ContainerKind, FailureReason};
 use crate::header::{self, ProbeClass, ProbeOutcome};
 use crate::path;
 
@@ -86,6 +87,84 @@ pub struct SampleAcc {
     pub unreadable: u64,
     /// 失败样例：路径与原因。
     pub failures: Vec<(String, String)>,
+}
+
+/// 一种**透明容器**格式的穿透统计。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainerKindAcc {
+    /// 库里有几个这种容器（穿透了的加穿不透的）。
+    pub containers: u64,
+    /// 穿透成功几个。
+    pub penetrated: u64,
+    /// 穿不透几个。
+    pub failed: u64,
+    /// 其中 solid 的有几个（有块装了多于一个内部文件）。
+    pub solid: u64,
+    /// 内部文件数。
+    pub inner_files: u64,
+    /// 内部文件的未压缩字节合计。
+    pub inner_bytes: u64,
+    /// 容器没记 CRC-32 的内部文件数。它们进不了零解压的第一命中层。
+    pub inner_without_crc: u64,
+    /// 一共有几个块。
+    pub blocks: u64,
+}
+
+/// 一个穿透成功的容器折出来的、要并入统计的事实。
+///
+/// 与 [`ContainerKindAcc`] 分开：那个是累加器，这个是**一个**容器的事实。
+/// 两者混用会让「这一条给的 `containers` 到底算不算数」变成读代码才知道的事。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ContainerFacts {
+    /// 内部文件数（目录条目不算）。
+    pub inner_files: u64,
+    /// 内部文件的未压缩字节合计。
+    pub inner_bytes: u64,
+    /// 容器没记 CRC-32 的内部文件数。
+    pub inner_without_crc: u64,
+    /// 块数。
+    pub blocks: u64,
+    /// 是不是 solid。
+    pub solid: bool,
+}
+
+/// 穿透**透明容器**的统计。
+///
+/// 它回答的是这张票的那句话：报告要看得见容器**内部的真实构成**，
+/// 而不只是「这里有一个 3GB 的容器」。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ContainerAcc {
+    /// 按格式分。
+    pub by_kind: BTreeMap<ContainerKind, ContainerKindAcc>,
+    /// 内部文件按三类主线的构成。
+    pub inner_categories: BTreeMap<Category, Counts>,
+    /// 内部文件按扩展名的构成。
+    pub inner_extensions: BTreeMap<String, ExtensionAcc>,
+    /// 名字不是合法 UTF-8、只能有损转换的内部条目数。
+    pub lossy_names: u64,
+    /// 穿不透的按原因分类计数。
+    pub failures_by_reason: BTreeMap<FailureReason, u64>,
+    /// 穿不透的样例：容器路径与原因。
+    pub failures: Vec<(String, String)>,
+}
+
+impl ContainerAcc {
+    /// 全部格式加起来的合计。
+    #[must_use]
+    pub fn totals(&self) -> ContainerKindAcc {
+        let mut total = ContainerKindAcc::default();
+        for acc in self.by_kind.values() {
+            total.containers += acc.containers;
+            total.penetrated += acc.penetrated;
+            total.failed += acc.failed;
+            total.solid += acc.solid;
+            total.inner_files += acc.inner_files;
+            total.inner_bytes += acc.inner_bytes;
+            total.inner_without_crc += acc.inner_without_crc;
+            total.blocks += acc.blocks;
+        }
+        total
+    }
 }
 
 /// 扫描过程中遇到的异常，以及跨平台相关的计数。
@@ -251,6 +330,8 @@ pub struct Aggregate {
     pub duplicate_index_truncated: bool,
     /// 各类文件的头部抽样结果。
     pub samples: BTreeMap<ProbeClass, SampleAcc>,
+    /// 穿透**透明容器**的统计。
+    pub containers: ContainerAcc,
     /// 异常与跨平台计数。
     pub anomalies: Anomalies,
     /// 文件名含汉字的部分。
@@ -393,6 +474,60 @@ impl Aggregate {
                 );
             }
         }
+    }
+
+    /// 并入一个穿透成功的容器。
+    pub fn record_penetrated(&mut self, kind: ContainerKind, facts: &ContainerFacts) {
+        let acc = self.containers.by_kind.entry(kind).or_default();
+        acc.containers += 1;
+        acc.penetrated += 1;
+        acc.solid += u64::from(facts.solid);
+        acc.inner_files += facts.inner_files;
+        acc.inner_bytes += facts.inner_bytes;
+        acc.inner_without_crc += facts.inner_without_crc;
+        acc.blocks += facts.blocks;
+    }
+
+    /// 并入一个穿不透的容器。
+    pub fn record_penetration_failure(
+        &mut self,
+        display_path: &str,
+        kind: ContainerKind,
+        reason: FailureReason,
+        detail: &str,
+        limits: &Limits,
+    ) {
+        let acc = self.containers.by_kind.entry(kind).or_default();
+        acc.containers += 1;
+        acc.failed += 1;
+        *self
+            .containers
+            .failures_by_reason
+            .entry(reason)
+            .or_default() += 1;
+        if self.containers.failures.len() < limits.max_examples {
+            self.containers
+                .failures
+                .push((display_path.to_string(), detail.to_string()));
+        }
+    }
+
+    /// 并入一个容器内部文件。目录条目不进来——它们不是内容。
+    pub fn record_inner_entry(&mut self, inner_path: &str, size: u64, name_lossy: bool) {
+        if name_lossy {
+            self.containers.lossy_names += 1;
+        }
+        let name = Path::new(path::file_name_of_key(inner_path));
+        let classification = classify(name);
+        self.containers
+            .inner_categories
+            .entry(classification.category)
+            .or_default()
+            .add(size);
+        let key = path::extension_lower(name).unwrap_or_else(|| NO_EXTENSION.to_string());
+        let acc = self.containers.inner_extensions.entry(key).or_default();
+        acc.counts.add(size);
+        acc.category = classification.category;
     }
 
     fn record_sample(&mut self, observation: &FileObservation, limits: &Limits) {

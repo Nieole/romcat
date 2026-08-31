@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use super::{DirEntry, EntryKind, EntryMeta, LibraryFs};
+use super::{DirEntry, EntryKind, EntryMeta, LibraryFs, ReadSeek};
 use crate::path::long_path;
 
 /// 真实文件系统。只打开文件读，从不创建、修改或删除任何东西。
@@ -94,5 +94,9 @@ impl LibraryFs for RealFs {
         let mut buf = Vec::new();
         handle.take(want).read_to_end(&mut buf)?;
         Ok(buf)
+    }
+
+    fn open(&self, file: &Path) -> io::Result<Box<dyn ReadSeek + '_>> {
+        Ok(Box::new(fs::File::open(long_path(file).as_ref())?))
     }
 }

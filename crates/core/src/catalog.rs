@@ -22,16 +22,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::container::{ContainerKind, FailureReason, Penetration};
 use crate::fs::{EntryKind, EntryMeta};
 use crate::header::ProbeClass;
 use crate::path;
 use crate::report::ReportMeta;
-use crate::scan::aggregate::{Aggregate, FileObservation, Limits, SampleResult};
+use crate::scan::aggregate::{Aggregate, ContainerFacts, FileObservation, Limits, SampleResult};
 
 pub use baseline::{Baseline, Recorded, ScanDelta, Verdict};
 
 /// 中立库的结构版本。结构变了就加 1；读到对不上的版本直接让用户删库重扫。
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS meta(
@@ -64,6 +65,7 @@ CREATE TABLE IF NOT EXISTS traversal(
     elapsed_ms        INTEGER NOT NULL,
     jobs              INTEGER NOT NULL,
     samples_per_class INTEGER NOT NULL,
+    containers        INTEGER NOT NULL,
     interrupted       INTEGER NOT NULL,
     resumed           INTEGER NOT NULL
 ) STRICT;
@@ -75,6 +77,38 @@ CREATE TABLE IF NOT EXISTS traversal_note(
     path   TEXT NOT NULL,
     detail TEXT,
     PRIMARY KEY (kind, path)
+) STRICT;
+
+-- 穿透一个**透明容器**的结论，一个容器一行。`reason` 非空就是没穿透：那一列是分好类的
+-- 短码（报告要数得出「多少个要密码」），`detail` 是给人看的那一句
+-- （ADR-0021 那条「如实记录，不猜」的道理，粒度在容器上）。
+CREATE TABLE IF NOT EXISTS container(
+    key    TEXT PRIMARY KEY,
+    kind   TEXT    NOT NULL,
+    reason TEXT,
+    detail TEXT,
+    files  INTEGER NOT NULL,
+    bytes  INTEGER NOT NULL,
+    blocks INTEGER NOT NULL,
+    solid  INTEGER NOT NULL,
+    no_crc INTEGER NOT NULL
+) STRICT;
+
+-- 容器里的内部文件。落库是为了**第二次扫描不必再穿一遍**：容器的三元组没变，
+-- 这些行原样留着（调研第 5 部分 L4）。
+--
+-- 主键带 `ordinal` 而不只是内部路径：zip 允许同名条目重复出现，拿路径当键会
+-- 悄悄丢掉其中几条。
+CREATE TABLE IF NOT EXISTS container_entry(
+    key     TEXT    NOT NULL,
+    ordinal INTEGER NOT NULL,
+    inner   TEXT    NOT NULL,
+    size    INTEGER NOT NULL,
+    crc32   INTEGER,
+    block   INTEGER,
+    is_dir  INTEGER NOT NULL,
+    lossy   INTEGER NOT NULL,
+    PRIMARY KEY (key, ordinal)
 ) STRICT;
 ";
 
@@ -168,6 +202,10 @@ pub struct Traversal {
     pub jobs: usize,
     /// 每类文件的抽样配额。
     pub samples_per_class: usize,
+    /// 这次扫描有没有穿透**透明容器**。
+    ///
+    /// 报告要说得出这一条：没穿透时「内部文件 0 个」是因为没去看，不是因为容器是空的。
+    pub penetrated_containers: bool,
     /// 这次扫描是否被中断。
     pub interrupted: bool,
     /// 这次扫描是否从断点续跑。
@@ -189,6 +227,8 @@ pub struct EntryRecord {
     pub verdict: Verdict,
     /// 这次抽到的头部样本；`None` 表示这次没抽。
     pub sample: Option<(ProbeClass, SampleResult)>,
+    /// 这次穿透**透明容器**的结论；`None` 表示这次没穿（不是容器，或者关掉了穿透）。
+    pub container: Option<Penetration>,
 }
 
 /// 中立库。
@@ -307,7 +347,8 @@ impl Catalog {
     pub fn last_traversal(&self) -> Result<Option<Traversal>, CatalogError> {
         self.conn
             .query_row(
-                "SELECT scan, root, elapsed_ms, jobs, samples_per_class, interrupted, resumed
+                "SELECT scan, root, elapsed_ms, jobs, samples_per_class, containers,
+                        interrupted, resumed
                  FROM traversal ORDER BY scan DESC LIMIT 1",
                 [],
                 |row| {
@@ -317,8 +358,9 @@ impl Catalog {
                         elapsed_ms: u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
                         jobs: usize::try_from(row.get::<_, i64>(3)?).unwrap_or(1),
                         samples_per_class: usize::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
-                        interrupted: row.get::<_, i64>(5)? != 0,
-                        resumed: row.get::<_, i64>(6)? != 0,
+                        penetrated_containers: row.get::<_, i64>(5)? != 0,
+                        interrupted: row.get::<_, i64>(6)? != 0,
+                        resumed: row.get::<_, i64>(7)? != 0,
                     })
                 },
             )
@@ -388,6 +430,18 @@ impl Catalog {
                 },
             };
             baseline.insert(key, recorded);
+        }
+        // 哪些容器**穿透成功过**。没成功过的即便三元组没变也要再试一遍：
+        // 一来上次可能是 `--no-containers` 扫的，压根没试；二来上次的失败可能是
+        // 一次性的（库里 1.59% 的文件在 fskit 下连元数据都读不到，那是会变的），
+        // 把失败当成定论会让它永远不再被试。
+        let mut statement = self
+            .conn
+            .prepare("SELECT key FROM container WHERE reason IS NULL")
+            .map_err(|source| self.err(source))?;
+        let mut rows = statement.query([]).map_err(|source| self.err(source))?;
+        while let Some(row) = rows.next().map_err(|source| self.err(source))? {
+            baseline.insert_penetrated(row.get(0).map_err(|source| self.err(source))?);
         }
         Ok(baseline)
     }
@@ -482,6 +536,29 @@ impl Catalog {
                         seen     = excluded.seen",
                 )
                 .map_err(to_err)?;
+            // 容器的内部构成随容器本身一起更新。**先清后插**：容器变了而这次没穿透
+            // （比如关掉了穿透），旧的内部条目就该消失，不能拿一份对不上的清单
+            // 冒充新的。
+            let mut clear_container = tx
+                .prepare("DELETE FROM container WHERE key = ?1")
+                .map_err(to_err)?;
+            let mut clear_inner = tx
+                .prepare("DELETE FROM container_entry WHERE key = ?1")
+                .map_err(to_err)?;
+            let mut insert_container = tx
+                .prepare(
+                    "INSERT INTO container(key, kind, reason, detail, files, bytes, blocks,
+                         solid, no_crc)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                )
+                .map_err(to_err)?;
+            let mut insert_inner = tx
+                .prepare(
+                    "INSERT INTO container_entry(key, ordinal, inner, size, crc32,
+                         block, is_dir, lossy)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                )
+                .map_err(to_err)?;
             for record in records {
                 match record.verdict {
                     Verdict::Unchanged => {
@@ -521,6 +598,48 @@ impl Catalog {
                                 i64::from(record.non_utf8),
                                 sample,
                                 scan
+                            ])
+                            .map_err(to_err)?;
+                    }
+                }
+
+                // 容器的内部构成。**先清后插**，而且清这一步在
+                // 「容器变了但这次没穿透」时也要做——留着一份对不上的旧清单，
+                // 比没有清单更糟。
+                let is_container = ContainerKind::for_path(Path::new(&record.key)).is_some();
+                let changed = matches!(record.verdict, Verdict::Added | Verdict::Changed);
+                if is_container && (changed || record.container.is_some()) {
+                    clear_inner.execute(params![record.key]).map_err(to_err)?;
+                    clear_container
+                        .execute(params![record.key])
+                        .map_err(to_err)?;
+                }
+                if let Some(penetration) = &record.container {
+                    let contents = &penetration.contents;
+                    insert_container
+                        .execute(params![
+                            record.key,
+                            penetration.kind.code(),
+                            penetration.failure.as_ref().map(|f| f.reason.code()),
+                            penetration.failure.as_ref().map(|f| f.detail.as_str()),
+                            i64::try_from(contents.file_count()).unwrap_or(i64::MAX),
+                            i64::try_from(contents.total_size()).unwrap_or(i64::MAX),
+                            i64::try_from(contents.blocks).unwrap_or(i64::MAX),
+                            i64::from(contents.is_solid()),
+                            i64::try_from(contents.without_crc()).unwrap_or(i64::MAX),
+                        ])
+                        .map_err(to_err)?;
+                    for (ordinal, inner) in contents.entries.iter().enumerate() {
+                        insert_inner
+                            .execute(params![
+                                record.key,
+                                i64::try_from(ordinal).unwrap_or(i64::MAX),
+                                inner.path,
+                                i64::try_from(inner.size).unwrap_or(i64::MAX),
+                                inner.crc32.map(i64::from),
+                                inner.block.map(|b| i64::try_from(b).unwrap_or(i64::MAX)),
+                                i64::from(inner.is_dir),
+                                i64::from(inner.name_lossy),
                             ])
                             .map_err(to_err)?;
                     }
@@ -565,11 +684,12 @@ impl Catalog {
         self.conn
             .execute(
                 "INSERT INTO traversal(scan, root, elapsed_ms, jobs, samples_per_class,
-                     interrupted, resumed)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     containers, interrupted, resumed)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(scan) DO UPDATE SET
                      root = excluded.root, elapsed_ms = excluded.elapsed_ms,
                      jobs = excluded.jobs, samples_per_class = excluded.samples_per_class,
+                     containers = excluded.containers,
                      interrupted = excluded.interrupted, resumed = excluded.resumed",
                 params![
                     traversal.scan,
@@ -577,6 +697,7 @@ impl Catalog {
                     i64::try_from(traversal.elapsed_ms).unwrap_or(i64::MAX),
                     i64::try_from(traversal.jobs).unwrap_or(i64::MAX),
                     i64::try_from(traversal.samples_per_class).unwrap_or(i64::MAX),
+                    i64::from(traversal.penetrated_containers),
                     i64::from(traversal.interrupted),
                     i64::from(traversal.resumed),
                 ],
@@ -636,6 +757,11 @@ impl Catalog {
         self.conn
             .execute("DELETE FROM entry WHERE seen <> ?1", params![scan])
             .map_err(|source| self.err(source))?;
+        // 容器没了，它的内部构成也就没了——留着会让报告数出一批不存在的内部文件。
+        self.batch(
+            "DELETE FROM container_entry WHERE key NOT IN (SELECT key FROM entry);
+             DELETE FROM container       WHERE key NOT IN (SELECT key FROM entry);",
+        )?;
         Ok(removed)
     }
 
@@ -679,6 +805,69 @@ impl Catalog {
             );
         }
 
+        // 容器的穿透结论与内部构成一样是从库里折出来的：盘不在位时报告照样说得出
+        // 「容器里装着什么」，这正是零解压层落库的意义（调研第 5 部分 L4）。
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT key, kind, reason, detail, files, bytes, blocks, solid, no_crc
+                 FROM container ORDER BY key",
+            )
+            .map_err(|source| self.err(source))?;
+        let mut rows = statement.query([]).map_err(|source| self.err(source))?;
+        while let Some(row) = rows.next().map_err(|source| self.err(source))? {
+            let key: String = row.get(0).map_err(|source| self.err(source))?;
+            let kind: String = row.get(1).map_err(|source| self.err(source))?;
+            let reason: Option<String> = row.get(2).map_err(|source| self.err(source))?;
+            let detail: Option<String> = row.get(3).map_err(|source| self.err(source))?;
+            let Some(kind) = ContainerKind::from_code(&kind) else {
+                continue;
+            };
+            let display = path::display_key(&traversal.root, &key);
+            if let Some(reason) = reason.as_deref() {
+                // 短码认不出来只可能是库被人改过；当成「结构读不下去」而不是悄悄丢掉这一条。
+                let reason = FailureReason::from_code(reason).unwrap_or(FailureReason::Malformed);
+                aggregate.record_penetration_failure(
+                    &display,
+                    kind,
+                    reason,
+                    detail.as_deref().unwrap_or(""),
+                    limits,
+                );
+                continue;
+            }
+            let count = |index: usize| -> Result<u64, CatalogError> {
+                let raw: i64 = row.get(index).map_err(|source| self.err(source))?;
+                Ok(u64::try_from(raw).unwrap_or(0))
+            };
+            aggregate.record_penetrated(
+                kind,
+                &ContainerFacts {
+                    inner_files: count(4)?,
+                    inner_bytes: count(5)?,
+                    blocks: count(6)?,
+                    solid: count(7)? != 0,
+                    inner_without_crc: count(8)?,
+                },
+            );
+        }
+
+        let mut statement = self
+            .conn
+            .prepare("SELECT inner, size, is_dir, lossy FROM container_entry")
+            .map_err(|source| self.err(source))?;
+        let mut rows = statement.query([]).map_err(|source| self.err(source))?;
+        while let Some(row) = rows.next().map_err(|source| self.err(source))? {
+            let is_dir: i64 = row.get(2).map_err(|source| self.err(source))?;
+            if is_dir != 0 {
+                continue;
+            }
+            let inner: String = row.get(0).map_err(|source| self.err(source))?;
+            let size: i64 = row.get(1).map_err(|source| self.err(source))?;
+            let lossy: i64 = row.get(3).map_err(|source| self.err(source))?;
+            aggregate.record_inner_entry(&inner, u64::try_from(size).unwrap_or(0), lossy != 0);
+        }
+
         // 这几个计数是数出来的而不是攒出来的：中断续跑时重扫一个目录不会让它们翻倍。
         let count = "SELECT COUNT(*) FROM entry WHERE kind = ?1";
         aggregate.dirs = self.count(count, KIND_DIR)?;
@@ -720,6 +909,7 @@ impl Catalog {
             resumed: traversal.resumed,
             jobs: traversal.jobs,
             samples_per_class: traversal.samples_per_class,
+            penetrated_containers: traversal.penetrated_containers,
             delta: None,
         })
     }

@@ -10,12 +10,22 @@
 pub mod mem;
 pub mod real;
 
-use std::io;
+use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub use mem::MemFs;
 pub use real::RealFs;
+
+/// 一个只读的随机访问句柄：能顺序读、也能 seek，但**没有任何写的办法**。
+///
+/// 它是 [`LibraryFs::open`] 的返回类型。之所以要有它，是因为穿透**透明容器**读不了
+/// 固定的两头：zip 的中央目录在文件末尾、长度得先量出来，7z 的头部由
+/// `NextHeaderOffset` 指到任意位置，拿到头部之后还要从某个偏移开始流式解压。
+/// 只读这一条仍然由类型保证（ADR-0004）。
+pub trait ReadSeek: Read + Seek {}
+
+impl<T: Read + Seek + ?Sized> ReadSeek for T {}
 
 /// 目录项的类型。符号链接不跟随，因此它是独立的一类而不是 `File` 或 `Dir`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,4 +124,11 @@ pub trait LibraryFs: Sync {
     ///
     /// WS / WSC 的内部头在文件末尾，没有这个方法就只能把它们排除在抽样之外。
     fn read_tail(&self, file: &Path, limit: usize) -> io::Result<Vec<u8>>;
+
+    /// 打开一个文件做只读随机访问。
+    ///
+    /// 穿透**透明容器**要的就是它（[`crate::container`]）：zip 要先量长度再回头读中央
+    /// 目录，7z 要按头部里的偏移跳过去，解压时还要从某个位置开始一路流下去。
+    /// 返回的句柄只有 [`Read`] 与 [`Seek`]——主库仍然一个字节都写不了。
+    fn open(&self, file: &Path) -> io::Result<Box<dyn ReadSeek + '_>>;
 }

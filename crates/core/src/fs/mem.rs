@@ -14,7 +14,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use super::{DirEntry, EntryKind, EntryMeta, LibraryFs};
+use super::{DirEntry, EntryKind, EntryMeta, LibraryFs, ReadSeek};
 
 #[derive(Debug, Clone)]
 enum Node {
@@ -234,6 +234,16 @@ impl LibraryFs for MemFs {
                 let start = data.len().saturating_sub(limit);
                 Ok(data[start..].to_vec())
             }
+            Some(_) => Err(denied(file)),
+            None => Err(not_found(file)),
+        }
+    }
+
+    fn open(&self, file: &Path) -> io::Result<Box<dyn ReadSeek + '_>> {
+        match self.nodes.get(file) {
+            // 拷一份而不是借出去：内存主库在测试里会被继续改，借出去的句柄会把
+            // `&mut MemFs` 锁死，而真实实现返回的本来就是一个独立的文件句柄。
+            Some(Node::File { data, .. }) => Ok(Box::new(io::Cursor::new(data.clone()))),
             Some(_) => Err(denied(file)),
             None => Err(not_found(file)),
         }

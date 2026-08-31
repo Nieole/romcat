@@ -11,9 +11,10 @@ use std::collections::BTreeMap;
 
 use crate::catalog::ScanDelta;
 use crate::classify::{Category, SuspectReason};
+use crate::container::{ContainerKind, FailureReason};
 use crate::header::ProbeClass;
 use crate::scan::aggregate::{
-    Aggregate, Anomalies, Counts, ExtensionAcc, SampleAcc, UNKNOWN_PLATFORM,
+    Aggregate, Anomalies, ContainerAcc, Counts, ExtensionAcc, SampleAcc, UNKNOWN_PLATFORM,
 };
 
 /// 平台未知时在报告里的显示名。
@@ -23,6 +24,8 @@ pub const UNKNOWN_PLATFORM_LABEL: &str = "（平台未知）";
 const TOP_EXTENSIONS_PER_PLATFORM: usize = 5;
 /// 报告里全库展示几个扩展名。
 const TOP_EXTENSIONS_GLOBAL: usize = 25;
+/// 报告里展示几个**容器内部**的扩展名。
+const TOP_INNER_EXTENSIONS: usize = 15;
 /// 报告里展示几组重复拷贝。
 const TOP_DUPLICATE_GROUPS: usize = 10;
 /// 报告里每组重复拷贝展示几条路径。
@@ -45,6 +48,8 @@ pub struct ReportMeta {
     pub jobs: usize,
     /// 每类文件的抽样配额。
     pub samples_per_class: usize,
+    /// 这次扫描有没有穿透**透明容器**。
+    pub penetrated_containers: bool,
     /// 这次扫描相对上一次的差异；`None` 表示这份报告是直接从中立库出的，没有扫盘。
     pub delta: Option<ScanDelta>,
 }
@@ -196,6 +201,83 @@ pub struct SampleStats {
     pub failures: Vec<(String, String)>,
 }
 
+/// 一种**透明容器**格式的穿透结果。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContainerKindStats {
+    /// 容器格式。
+    pub kind: ContainerKind,
+    /// 报告里用的名字。
+    pub label: String,
+    /// 库里有几个这种容器。
+    pub containers: u64,
+    /// 穿透成功几个。
+    pub penetrated: u64,
+    /// 穿不透几个。
+    pub failed: u64,
+    /// 穿透成功率（百分比）。
+    pub success_rate: f64,
+    /// 其中 solid 的有几个。solid 的容器要按块调度才不至于成倍解压。
+    pub solid: u64,
+    /// 内部文件数。
+    pub inner_files: u64,
+    /// 内部文件的未压缩字节合计。
+    pub inner_bytes: u64,
+    /// 容器没记 CRC-32 的内部文件数。它们进不了零解压的第一命中层。
+    pub inner_without_crc: u64,
+    /// 块数合计。
+    pub blocks: u64,
+}
+
+/// 穿不透的一类原因有多少个。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailureReasonStats {
+    /// 原因。
+    pub reason: FailureReason,
+    /// 中文名。
+    pub label: String,
+    /// 有几个容器卡在这一类上。
+    pub containers: u64,
+}
+
+/// 穿透**透明容器**的汇总。
+///
+/// 它回答的是「容器里到底装着什么」：不解压就读出的内部文件数与构成，
+/// 以及有多少内部文件带着可以直接拿去撞 DAT 的 CRC-32。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContainerSummary {
+    /// 这次扫描有没有穿透容器。为假时下面的数字来自上一次穿透过的扫描。
+    pub penetrated_this_scan: bool,
+    /// 按格式分。
+    pub by_kind: Vec<ContainerKindStats>,
+    /// 容器数合计。
+    pub containers: u64,
+    /// 穿透成功的容器数。
+    pub penetrated: u64,
+    /// 穿不透的容器数。
+    pub failed: u64,
+    /// 内部文件数合计。
+    pub inner_files: u64,
+    /// 内部文件的未压缩字节合计。
+    pub inner_bytes: u64,
+    /// 带 CRC-32 的内部文件数——**零解压就能拿去撞 DAT 的那一批**。
+    pub inner_with_crc: u64,
+    /// 容器没记 CRC-32 的内部文件数。
+    pub inner_without_crc: u64,
+    /// solid 容器数。
+    pub solid: u64,
+    /// 内部文件按三类主线的构成。
+    pub inner_categories: Vec<CategoryStats>,
+    /// 内部文件里容量最大的几个扩展名。
+    pub inner_extensions: Vec<ExtensionStats>,
+    /// 名字只能有损转换的内部条目数。
+    pub lossy_names: u64,
+    /// 穿不透的按原因分类。**「不是这个格式」与「需要密码」的后续处置完全不同**，
+    /// 合成一个数就没法照着它动手。
+    pub failures_by_reason: Vec<FailureReasonStats>,
+    /// 穿不透的样例：容器路径与原因。
+    pub failures: Vec<(String, String)>,
+}
+
 /// 库体检报告。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HealthReport {
@@ -227,6 +309,8 @@ pub struct HealthReport {
     pub suspects: SuspectSummary,
     /// 头部抽样。
     pub samples: Vec<SampleStats>,
+    /// 穿透**透明容器**的结果。
+    pub containers: ContainerSummary,
     /// 属于三类主线、却没有任何探针可用的文件数。抽样成功率覆盖不到它们。
     pub content_files_without_probe: u64,
     /// 异常与跨平台计数。
@@ -331,6 +415,7 @@ impl HealthReport {
             extensions: extension_stats(&aggregate.extensions, TOP_EXTENSIONS_GLOBAL),
             suspects: suspect_summary(aggregate),
             samples: sample_stats(&aggregate.samples),
+            containers: container_summary(&aggregate.containers, meta.penetrated_containers),
             content_files_without_probe: aggregate.content_files_without_probe,
             anomalies: aggregate.anomalies.clone(),
         }
@@ -410,6 +495,58 @@ fn suspect_summary(aggregate: &Aggregate) -> SuspectSummary {
         duplicate_reclaimable_bytes,
         top_duplicates: groups,
         index_truncated: aggregate.duplicate_index_truncated,
+    }
+}
+
+fn container_summary(acc: &ContainerAcc, penetrated_this_scan: bool) -> ContainerSummary {
+    let totals = acc.totals();
+    let by_kind = acc
+        .by_kind
+        .iter()
+        .map(|(kind, value)| ContainerKindStats {
+            kind: *kind,
+            label: kind.label().to_string(),
+            containers: value.containers,
+            penetrated: value.penetrated,
+            failed: value.failed,
+            success_rate: share(value.penetrated, value.containers),
+            solid: value.solid,
+            inner_files: value.inner_files,
+            inner_bytes: value.inner_bytes,
+            inner_without_crc: value.inner_without_crc,
+            blocks: value.blocks,
+        })
+        .collect();
+    let inner_totals = Counts {
+        files: totals.inner_files,
+        bytes: totals.inner_bytes,
+    };
+    ContainerSummary {
+        penetrated_this_scan,
+        by_kind,
+        containers: totals.containers,
+        penetrated: totals.penetrated,
+        failed: totals.failed,
+        inner_files: totals.inner_files,
+        inner_bytes: totals.inner_bytes,
+        inner_with_crc: totals.inner_files.saturating_sub(totals.inner_without_crc),
+        inner_without_crc: totals.inner_without_crc,
+        solid: totals.solid,
+        inner_categories: category_stats(&acc.inner_categories, inner_totals),
+        inner_extensions: extension_stats(&acc.inner_extensions, TOP_INNER_EXTENSIONS),
+        lossy_names: acc.lossy_names,
+        failures_by_reason: FailureReason::all()
+            .into_iter()
+            .filter_map(|reason| {
+                let containers = acc.failures_by_reason.get(&reason).copied()?;
+                Some(FailureReasonStats {
+                    reason,
+                    label: reason.label().to_string(),
+                    containers,
+                })
+            })
+            .collect(),
+        failures: acc.failures.clone(),
     }
 }
 

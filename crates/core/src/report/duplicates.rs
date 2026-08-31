@@ -182,6 +182,7 @@ mod tests {
                 resumed,
                 jobs: 1,
                 samples_per_class: 0,
+                penetrated_containers: true,
                 delta: None,
             },
         )

@@ -31,7 +31,7 @@ pub fn thousands(value: u64) -> String {
     let digits = value.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, ch) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);
@@ -348,6 +348,138 @@ pub(super) fn render(report: &HealthReport) -> String {
         );
         for example in &suspect.examples {
             let _ = writeln!(out, "  {example}");
+        }
+    }
+
+    let containers = &report.containers;
+    heading(&mut out, "透明容器穿透（零解压读 CRC-32）");
+    if containers.containers == 0 {
+        let _ = writeln!(
+            out,
+            "{}",
+            if containers.penetrated_this_scan {
+                "库里没有 zip 或 7z。（rar 是票 04、zst 是票 26，这里不算。）"
+            } else {
+                "这次扫描没有穿透容器（--no-containers），中立库里也没有上次的结论。"
+            }
+        );
+    } else {
+        if !containers.penetrated_this_scan {
+            let _ = writeln!(
+                out,
+                "⚠ 这次扫描没有穿透容器（--no-containers），以下是中立库里上次穿透的结论。"
+            );
+        }
+        let _ = writeln!(
+            out,
+            "容器            {} 个，穿透 {} 个，穿不透 {} 个",
+            thousands(containers.containers),
+            thousands(containers.penetrated),
+            thousands(containers.failed)
+        );
+        let _ = writeln!(
+            out,
+            "内部文件        {} 个，未压缩 {}",
+            thousands(containers.inner_files),
+            human_bytes(containers.inner_bytes)
+        );
+        let _ = writeln!(
+            out,
+            "带 CRC-32      {} 个（{:.1}%）—— 零解压就能拿去撞 DAT 的那一批",
+            thousands(containers.inner_with_crc),
+            share(containers.inner_with_crc, containers.inner_files)
+        );
+        if containers.inner_without_crc > 0 {
+            let _ = writeln!(
+                out,
+                "没有 CRC-32    {} 个（容器自己没记，只能解压后再算）",
+                thousands(containers.inner_without_crc)
+            );
+        }
+        let _ = writeln!(
+            out,
+            "solid 容器      {} 个（块里装了不止一个文件，必须按块调度，否则解压量成倍放大）",
+            thousands(containers.solid)
+        );
+        if containers.lossy_names > 0 {
+            let _ = writeln!(
+                out,
+                "名字只能猜      {} 条内部条目不是合法 UTF-8（不影响命中，判据是 CRC-32 + 大小）",
+                thousands(containers.lossy_names)
+            );
+        }
+
+        let _ = writeln!(
+            out,
+            "\n{}",
+            row(&[
+                ("格式", 10),
+                ("容器", 10),
+                ("穿透", 10),
+                ("穿不透", 10),
+                ("成功率", 10),
+                ("solid", 10),
+                ("内部文件", 12),
+                ("未压缩", 12),
+            ])
+        );
+        for kind in &containers.by_kind {
+            let _ = writeln!(
+                out,
+                "{}",
+                row(&[
+                    (&kind.label, 10),
+                    (&thousands(kind.containers), 10),
+                    (&thousands(kind.penetrated), 10),
+                    (&thousands(kind.failed), 10),
+                    (&format!("{:.1}%", kind.success_rate), 10),
+                    (&thousands(kind.solid), 10),
+                    (&thousands(kind.inner_files), 12),
+                    (&human_bytes(kind.inner_bytes), 12),
+                ])
+            );
+        }
+
+        let _ = writeln!(out, "\n内部构成（按三类主线）");
+        for category in &containers.inner_categories {
+            if category.files == 0 {
+                continue;
+            }
+            let _ = writeln!(
+                out,
+                "{}{} 个（{:.1}%），{}",
+                pad(&category.label, 16),
+                thousands(category.files),
+                category.file_share,
+                human_bytes(category.bytes)
+            );
+        }
+
+        let _ = writeln!(out, "\n内部构成（容量最大的扩展名）");
+        for extension in &containers.inner_extensions {
+            let _ = writeln!(
+                out,
+                "{}{}{} 个，{}",
+                pad(&extension.extension, 14),
+                pad(extension.category.label(), 16),
+                thousands(extension.files),
+                human_bytes(extension.bytes)
+            );
+        }
+
+        if !containers.failures_by_reason.is_empty() {
+            let _ = writeln!(out, "\n穿不透的按原因分");
+            for stats in &containers.failures_by_reason {
+                let _ = writeln!(
+                    out,
+                    "{}{} 个",
+                    pad(&stats.label, 18),
+                    thousands(stats.containers)
+                );
+            }
+        }
+        for (path, reason) in &containers.failures {
+            let _ = writeln!(out, "  穿不透：{path} — {reason}");
         }
     }
 

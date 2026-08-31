@@ -82,6 +82,12 @@ struct ScanArgs {
     #[arg(long)]
     full: bool,
 
+    /// 不穿透 zip 与 7z：不去读容器内部的 CRC-32、大小与名字
+    ///
+    /// 库里 91% 的容量在透明容器里，关掉它报告就只知道「这里有一个 3GB 的容器」，看不见里面装着什么
+    #[arg(long)]
+    no_containers: bool,
+
     #[command(flatten)]
     output: OutputArgs,
 }
@@ -154,6 +160,7 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
     }
     options.samples_per_class = args.samples_per_class;
     options.incremental = !args.full;
+    options.penetrate_containers = !args.no_containers;
     if args.output.dump_duplicates.is_some() {
         // 默认每组只留几条路径当例子。要导出可据以动手的清单，得把组内每一份都记下来。
         options.limits.max_duplicate_paths_per_group = Limits::FULL_DUPLICATE_PATHS_PER_GROUP;

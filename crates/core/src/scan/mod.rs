@@ -28,6 +28,7 @@ use std::{fs, thread};
 
 use crate::catalog::{Baseline, Catalog, CatalogError, EntryRecord, ScanDelta, Traversal, Verdict};
 use crate::classify;
+use crate::container::{self, ContainerKind, Penetration};
 use crate::fs::{DirEntry, EntryKind, EntryMeta, LibraryFs};
 use crate::header::{self, ProbeClass};
 use crate::path;
@@ -120,6 +121,12 @@ pub struct ScanOptions {
     /// 关掉它就是「当作从没扫过」重看一遍：每个文件重新抽样、重新归类，中立库里的旧
     /// 结论一律作废。判据出了问题、或怀疑中立库与磁盘对不上时才需要。
     pub incremental: bool,
+    /// 穿透**透明容器**：零解压读出 zip 与 7z 内部每个文件的 CRC-32、大小与名字。
+    ///
+    /// 库里 91.1% 的容量装在透明容器里，不穿透的话报告只看得见「这里有一个 3GB 的容器」，
+    /// 后面的识别也无从谈起（ADR-0014）。关掉它只在一种场合有意义：怀疑穿透本身
+    /// 有问题，想先把遍历跑通。
+    pub penetrate_containers: bool,
 }
 
 impl ScanOptions {
@@ -133,6 +140,7 @@ impl ScanOptions {
             limits: Limits::default(),
             checkpoint: None,
             incremental: true,
+            penetrate_containers: true,
         }
     }
 }
@@ -209,6 +217,7 @@ pub fn scan(
         elapsed_ms: elapsed(start.elapsed_base, started),
         jobs: options.jobs.max(1),
         samples_per_class: options.samples_per_class,
+        penetrated_containers: options.penetrate_containers,
         interrupted: true,
         resumed: start.resumed,
     };
@@ -305,6 +314,7 @@ pub fn scan(
         resumed: start.resumed,
         jobs,
         samples_per_class: options.samples_per_class,
+        penetrated_containers: options.penetrate_containers,
         delta: Some(progress.delta),
     };
     Ok(ScanOutcome {
@@ -327,6 +337,7 @@ fn root_record(root: &Path) -> EntryRecord {
         non_utf8: !path::is_utf8(root),
         verdict: Verdict::Added,
         sample: None,
+        container: None,
     }
 }
 
@@ -566,20 +577,33 @@ fn observe(
     // 键要过 NFC，读盘用的仍是系统给的原始路径（ADR-0020）。
     let key = path::catalog_key(root, &entry.path);
     let verdict = baseline.verdict(&key, &entry.meta);
-    // 未变的文件不再打开一次：上次抽到的头部结论留在中立库里，报告照样用得上。
-    let sample =
-        if entry.kind == EntryKind::File && matches!(verdict, Verdict::Added | Verdict::Changed) {
-            sample_header(
-                library,
-                &entry.path,
-                entry.meta.byte_len().unwrap_or(0),
-                header::probe_class_for(&entry.path),
-                options,
-                budget,
-            )
-        } else {
-            None
-        };
+    // 未变的文件不再打开一次：上次抽到的头部结论与内部构成都留在中立库里，
+    // 报告照样用得上。容器不必重穿一遍，那正是这条接缝在票 07 之后真正省下的活。
+    let fresh =
+        entry.kind == EntryKind::File && matches!(verdict, Verdict::Added | Verdict::Changed);
+    let sample = if fresh {
+        sample_header(
+            library,
+            &entry.path,
+            entry.meta.byte_len().unwrap_or(0),
+            header::probe_class_for(&entry.path),
+            options,
+            budget,
+        )
+    } else {
+        None
+    };
+    // 已经穿透过、且三元组没变的容器不必重穿——那正是这条接缝省下的活。但中立库里
+    // 压根没有它的穿透结论时（上次是 `--no-containers` 扫的）必须补上，
+    // 否则那批容器永远不会被穿透，报告会静悄悄地少报一批内部文件。
+    let container = if options.penetrate_containers
+        && entry.kind == EntryKind::File
+        && (fresh || !baseline.penetrated(&key))
+    {
+        penetrate(library, &entry.path)
+    } else {
+        None
+    };
     EntryRecord {
         key,
         kind: entry.kind,
@@ -587,6 +611,20 @@ fn observe(
         non_utf8: !path::is_utf8(&entry.path),
         verdict,
         sample,
+        container,
+    }
+}
+
+/// 零解压穿透一个**透明容器**。
+///
+/// **穿不透绝不中断扫描**：一个坏掉的 zip、一个要密码的 7z、一个 `stat` 都失败的
+/// 文件，都只是如实记一笔原因（ADR-0021 的道理，粒度在容器上）。库里约 1.59% 的
+/// 文件在 macOS 的 fskit 驱动下连元数据都读不到，那批会全部落在这里。
+fn penetrate(library: &dyn LibraryFs, file: &Path) -> Option<Penetration> {
+    let kind = ContainerKind::for_path(file)?;
+    match container::list_as(library, file, kind) {
+        Ok(listing) => Some(Penetration::listed(&listing)),
+        Err(error) => Some(Penetration::failed(kind, &error)),
     }
 }
 
@@ -1017,7 +1055,18 @@ mod tests {
 
     #[test]
     fn 未变的文件不再打开一次() {
-        let library = 挂钩::new(建库());
+        // fixture 里的 zip 都是「扩展名对、内容不是」的，一个也穿不透。穿不透的容器
+        // 下次照样要再试一遍（见下一条测试），所以这里把它们排除在外单看别的文件。
+        let mut 库 = 建库();
+        for name in [
+            "/lib/FC/超级马里奥.zip",
+            "/lib/FC/魂斗罗.zip",
+            "/lib/FC/备份/超级马里奥.zip",
+            "/lib/空文件.zip",
+        ] {
+            库.remove(name);
+        }
+        let library = 挂钩::new(库);
         let mut catalog = 新中立库();
         let options = ScanOptions::new("/lib");
 
@@ -1030,6 +1079,36 @@ mod tests {
             library.reads(),
             首扫读了,
             "三元组没变就不该再打开任何一个文件"
+        );
+    }
+
+    #[test]
+    fn 穿透成功的容器不再穿第二遍穿不透的要再试() {
+        use crate::testing::container::{ZipEntrySpec, zip_container};
+
+        let mut 库 = MemFs::new();
+        库.dir("/lib")
+            .file(
+                "/lib/FC/真的.zip",
+                zip_container(&[ZipEntrySpec::stored("超级马里奥.nes", vec![7u8; 64])]),
+            )
+            // 扩展名说 zip，内容不是——这一个每次都要再试。
+            .file("/lib/FC/假的.zip", vec![0u8; 512]);
+        let library = 挂钩::new(库);
+        let mut catalog = 新中立库();
+        // 关掉头部抽样，读的次数里就只剩下穿透这一项。
+        let mut options = ScanOptions::new("/lib");
+        options.samples_per_class = 0;
+
+        扫入(&mut catalog, &library, &options);
+        assert_eq!(library.reads(), 2, "两个容器各打开一次");
+
+        扫入(&mut catalog, &library, &options);
+        assert_eq!(
+            library.reads(),
+            3,
+            "穿透成功的那个不再碰；穿不透的那个要再试一遍——\
+             一次性的读失败不能被当成永久结论（ADR-0021 的道理，粒度在容器上）"
         );
     }
 
@@ -1286,6 +1365,11 @@ mod tests {
         fn read_tail(&self, file: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
             self.reads.fetch_add(1, Ordering::SeqCst);
             self.inner.read_tail(file, limit)
+        }
+
+        fn open(&self, file: &Path) -> std::io::Result<Box<dyn crate::fs::ReadSeek + '_>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.open(file)
         }
     }
 

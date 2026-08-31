@@ -1,6 +1,6 @@
 //! 增量扫描的判据：拿这次看到的三元组去比中立库里记的那份。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -71,6 +71,7 @@ impl ScanDelta {
 #[derive(Debug, Default, Clone)]
 pub struct Baseline {
     entries: HashMap<String, Recorded>,
+    penetrated: HashSet<String>,
 }
 
 impl Baseline {
@@ -83,6 +84,21 @@ impl Baseline {
     /// 记下一条。
     pub fn insert(&mut self, key: String, recorded: Recorded) {
         self.entries.insert(key, recorded);
+    }
+
+    /// 记下「这个**透明容器**上次已经穿透过了」。
+    pub fn insert_penetrated(&mut self, key: String) {
+        self.penetrated.insert(key);
+    }
+
+    /// 中立库里有没有这个容器的穿透结论。
+    ///
+    /// 三元组没变的容器本来就该跳过重穿，但有一种情况必须补上：上一次是带
+    /// `--no-containers` 扫的，中立库里根本没有这份结论。只看三元组的话，那些容器
+    /// 会**永远**不被穿透，报告静悄悄地少报一批内部文件。
+    #[must_use]
+    pub fn penetrated(&self, key: &str) -> bool {
+        self.penetrated.contains(key)
     }
 
     /// 这次看到的元数据对上中立库里记的那份，是什么结论。
