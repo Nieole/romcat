@@ -47,3 +47,12 @@ pub fn gba(game_code: &[u8; 4]) -> Vec<u8> {
     data[0xB2] = 0x96;
     data
 }
+
+/// 一个 NDS 卡带：0x0C 处的 gamecode、0x15C 处的 logo CRC 0xCF56。
+#[must_use]
+pub fn nds(game_code: &[u8; 4]) -> Vec<u8> {
+    let mut data = vec![0u8; 0x200];
+    data[0x0C..0x10].copy_from_slice(game_code);
+    data[0x15C..0x15E].copy_from_slice(&[0x56, 0xCF]);
+    data
+}

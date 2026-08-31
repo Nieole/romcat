@@ -6,7 +6,7 @@
 //!
 //! 它必须是有界的——例子列表、重复索引都带上限，10T 库不会把它撑爆。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,8 @@ use crate::classify::{self, Category, Classification, SuspectReason, classify};
 use crate::container::{ContainerKind, FailureReason};
 use crate::header::{self, ProbeClass, ProbeOutcome};
 use crate::path;
+use crate::platform::{Manifest, Platform};
+use crate::shape::{self, Role, Scope};
 
 /// 「平台未知」在按平台分组时用的键。
 pub const UNKNOWN_PLATFORM: &str = "";
@@ -47,17 +49,176 @@ pub struct ExtensionAcc {
     pub category: Category,
 }
 
-/// 一个平台目录下的统计。
+/// 一条键落在**范围边界**的哪一格（ADR-0011 修订段）。
+///
+/// 它是 [`crate::shape::Scope`] 的自有版本：那个借着平台清单，这个要跟着统计一路存下去。
+/// 四态收成一个类型而不是「组名 + 目录 + 在不在范围内 + 排除理由」四个字段结伴跑，
+/// 是因为四者永远一起出现、也永远一起变；拆开之后每个用它的地方都得自己拼回来一次。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub enum Placement {
+    /// 落在某个平台目录下，值是**平台的规范名**。
+    Platform(String),
+    /// 落在**明确排除**的目录下：看过之后决定不做的。
+    Excluded {
+        /// 排除理由。
+        reason: String,
+    },
+    /// 落在一个还没映射到平台的顶层目录下。
+    Unmapped,
+    /// 直接躺在库根下，连顶层目录都没有——平台无从谈起。
+    #[default]
+    RootLevel,
+}
+
+impl Placement {
+    /// 这一格进不进识别管线。
+    #[must_use]
+    pub fn in_scope(&self) -> bool {
+        matches!(self, Self::Platform(_))
+    }
+
+    /// 明确排除的理由；不是那一格时是 `None`。
+    #[must_use]
+    pub fn excluded_reason(&self) -> Option<&str> {
+        match self {
+            Self::Excluded { reason } => Some(reason),
+            _ => None,
+        }
+    }
+}
+
+/// 一个平台（或者一个还没映射到平台的顶层目录）下的统计。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PlatformAcc {
-    /// 该平台目录的合计。
+    /// 这一组的合计。
     pub totals: Counts,
+    /// 喂给这一组的顶层目录名。一个平台可以有好几个别名目录（`ps` 与 `ps1`）。
+    pub dirs: BTreeSet<String>,
+    /// 这一组落在范围边界的哪一格。
+    pub placement: Placement,
+    /// 这一组里在范围之内、却没进任何变体的文件，按归类分。
+    ///
+    /// **「未归类」那一栏大就是成型的缺口**：既不是媒体也不是文档垃圾，却没成型，
+    /// 说明这个平台的成型规则漏掉了一批东西。把它与媒体、文档混成一个数，
+    /// 「收敛得好」与「压根没成型」会给出同一个答案。
+    pub unshaped: BTreeMap<Category, Counts>,
     /// 按三类主线分组。
     pub categories: BTreeMap<Category, Counts>,
     /// 按扩展名分组。
     pub extensions: BTreeMap<String, ExtensionAcc>,
     /// 文件名含汉字的部分。
     pub cjk: Counts,
+    /// 这一组成型出了几个**变体**。范围之外的一律是 0——它们根本不成型。
+    pub variants: u64,
+}
+
+/// 一个平台名下的变体计数。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VariantCounts {
+    /// 变体数。
+    pub variants: u64,
+    /// 这些变体一共吃掉多少个文件。
+    pub files: u64,
+    /// 字节合计。
+    pub bytes: u64,
+}
+
+/// **成型**的统计，从中立库的变体表折出来。
+///
+/// 它回答这张票最要紧的那个问题：**从文件收敛到了多少个变体**。PSV 那 171,073 个文件
+/// 若没收敛到几百个变体，说明成型规则漏掉了那批目录树转储。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ShapingAcc {
+    /// 成型跑到哪一次遍历为止；从没成型过时是 `None`。
+    pub shaped_scan: Option<i64>,
+    /// 成型用的平台清单与眼下这一份不是同一份。
+    pub manifest_changed: bool,
+    /// 变体数。
+    pub variants: u64,
+    /// 进了变体的文件数。
+    pub files: u64,
+    /// 进了变体的字节数。**这是个下界**（见 `unreadable_files`）。
+    pub bytes: u64,
+    /// 变体成员里有几个元数据读不到，因此容量少算了它们（ADR-0021）。
+    pub unreadable_files: u64,
+    /// 其中人工纠正出来的变体数。
+    pub manual: u64,
+    /// 按平台分。
+    pub by_platform: BTreeMap<String, VariantCounts>,
+    /// 按成型规则分：哪条规则成了几个变体。
+    pub by_rule: BTreeMap<String, u64>,
+    /// 成员按身份分：主文件 / 附属文件 / 内部资源 / 附属内容各几个。
+    pub by_role: BTreeMap<Role, u64>,
+}
+
+impl ShapingAcc {
+    /// 成型跑过没有。
+    #[must_use]
+    pub fn shaped(&self) -> bool {
+        self.shaped_scan.is_some()
+    }
+}
+
+/// 一条「目录说 A、内容是 B」的冲突凭什么算数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum ConflictEvidence {
+    /// 扩展名说了话，**头部抽样也确认了**内容确实是那个格式。这一档最硬。
+    Confirmed,
+    /// 只有扩展名说了话——这个文件没被抽样到，内容没验过。
+    ExtensionOnly,
+    /// 冲突在**透明容器内部**：容器躺在 A 平台目录下，里面装着 B 平台的东西。
+    InsideContainer,
+}
+
+impl ConflictEvidence {
+    /// 报告里用的名字。
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Confirmed => "内容已确认",
+            Self::ExtensionOnly => "仅凭扩展名",
+            Self::InsideContainer => "容器内部",
+        }
+    }
+
+    /// 报告里固定的排列顺序。
+    #[must_use]
+    pub fn all() -> [Self; 3] {
+        [Self::Confirmed, Self::ExtensionOnly, Self::InsideContainer]
+    }
+}
+
+/// 一条平台冲突。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformConflict {
+    /// 展示用路径。容器内部的写成 `容器路径 › 内部路径`。
+    pub path: String,
+    /// 目录声明的平台。
+    pub declared: String,
+    /// 文件说自己是哪个平台。
+    pub implied: String,
+    /// 凭什么算数。
+    pub evidence: ConflictEvidence,
+}
+
+/// 目录声明的平台与文件内容对不上的那些。
+///
+/// 这不是错误而是**库体检最该报告的产出之一**（ADR-0011）：目录是强先验而非权威，
+/// 下错、放错、压缩包混装都是真实会发生的。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ConflictAcc {
+    /// 按凭据分类计数。
+    pub by_evidence: BTreeMap<ConflictEvidence, u64>,
+    /// 样例，有上限。
+    pub examples: Vec<PlatformConflict>,
+}
+
+impl ConflictAcc {
+    /// 一共几条。
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.by_evidence.values().sum()
+    }
 }
 
 /// 一组重复拷贝：同名同大小的多份。
@@ -244,8 +405,14 @@ pub struct FileObservation {
     pub display_path: String,
     /// 文件名转小写，用于重复检测。
     pub name_lower: String,
-    /// 所属平台目录；`None` 表示平台未知。
-    pub platform: Option<String>,
+    /// 这个文件落在范围边界的哪一格。
+    pub placement: Placement,
+    /// 键第一级的那个目录名。平台由目录给出，但一个平台可以有好几个别名目录。
+    pub dir: Option<String>,
+    /// 它进了哪个变体（的身份）；`None` 表示没进任何变体。
+    pub role: Option<Role>,
+    /// 目录声明的平台与文件说自己是什么对不上；对得上或说不准时是 `None`。
+    pub conflict: Option<PlatformConflict>,
     /// 小写扩展名。
     pub extension: Option<String>,
     /// 字节数；`None` 表示**元数据读不到**（不是「0 字节」，见 ADR-0021）。
@@ -269,24 +436,49 @@ impl FileObservation {
     /// 从中立库的一条记录还原出观察结果。
     ///
     /// `root` 是主库根的展示形态，`key` 是那条记录的键（相对根、NFC）。
+    /// 平台由清单从键的第一级目录名折出来（ADR-0011）。
     #[must_use]
     pub fn derive(
+        manifest: &Manifest,
         root: &str,
         key: &str,
         len: Option<u64>,
         non_utf8: bool,
         sample: Option<(ProbeClass, SampleResult)>,
+        role: Option<Role>,
     ) -> Self {
         let display_path = path::display_key(root, key);
         // 归类只看文件名，因此这里传的是文件名而不是整条键——键里的 `/`
         // 交给 `Path` 拆会在 Windows 与 Unix 上给出不同答案。
         let name = Path::new(path::file_name_of_key(key));
+        let scope = shape::scope_of(manifest, key);
+        let dir = path::platform_of_key(key);
+        let extension = path::extension_lower(name);
+        let conflict = extension.as_deref().and_then(|extension| {
+            let (declared, implied) = conflicting_platform(manifest, scope.platform(), extension)?;
+            Some(PlatformConflict {
+                path: display_path.clone(),
+                declared,
+                implied,
+                evidence: evidence_of(sample.as_ref())?,
+            })
+        });
         Self {
             over_max_path: path::exceeds_max_path(&display_path),
             display_path,
             name_lower: path::file_name_lower(name),
-            platform: path::platform_of_key(key).map(ToString::to_string),
-            extension: path::extension_lower(name),
+            placement: match scope {
+                Scope::Platform(platform) => Placement::Platform(platform.name.clone()),
+                Scope::Excluded(reason) => Placement::Excluded {
+                    reason: reason.to_string(),
+                },
+                Scope::Unmapped => Placement::Unmapped,
+                Scope::RootLevel => Placement::RootLevel,
+            },
+            dir: dir.map(ToString::to_string),
+            role,
+            conflict,
+            extension,
             len,
             classification: classify(name),
             cjk: classify::has_cjk(name),
@@ -295,6 +487,53 @@ impl FileObservation {
             sample,
         }
     }
+}
+
+/// 目录声明的平台与这个扩展名说的平台对不对得上；对得上或说不准时是 `None`。
+///
+/// 两条闸，少一条这份清单就成了噪音：
+///
+/// 1. **只看在范围内的东西**。未映射的顶层目录本来就不进识别管线，拿它报冲突没有意义。
+/// 2. **扩展名说不准就不报**。`.iso` / `.bin` / `.zip` 跨平台，清单里那张表故意只填
+///    「只可能属于这一个平台」的（见 `platform/platforms.toml`）。
+///
+/// 裸文件与**容器内部文件**共用这一个判据——两处各写一遍的话，改一条就会有一处漏改。
+fn conflicting_platform(
+    manifest: &Manifest,
+    declared: Option<&Platform>,
+    extension: &str,
+) -> Option<(String, String)> {
+    let declared = declared?;
+    let implied = manifest.platform_for_extension(extension)?;
+    (implied.name != declared.name).then(|| (declared.name.clone(), implied.name.clone()))
+}
+
+/// 这条冲突凭什么算数；`None` 表示**根本不算冲突**。
+///
+/// 头部抽样说「对不上」的一律不算：那说明扩展名本身在撒谎，是抽样成功率那一栏要回答的
+/// 问题；把它记成平台冲突，等于拿一个假前提去下另一个结论。
+fn evidence_of(sample: Option<&(ProbeClass, SampleResult)>) -> Option<ConflictEvidence> {
+    match sample {
+        Some((_, SampleResult::Probed(outcome))) if outcome.is_parsed() => {
+            Some(ConflictEvidence::Confirmed)
+        }
+        Some((_, SampleResult::Probed(_))) => None,
+        _ => Some(ConflictEvidence::ExtensionOnly),
+    }
+}
+
+/// 并入一个容器内部文件时，那个容器的上下文。
+///
+/// 单独一个类型而不是三个参数：`record_inner_entry` 每个内部条目调一次，
+/// 而这三样对同一个容器是不变的。
+#[derive(Debug, Clone, Copy)]
+pub struct InnerEntryContext<'a> {
+    /// 平台清单。
+    pub manifest: &'a Manifest,
+    /// 容器的展示路径。
+    pub display_path: &'a str,
+    /// 容器落在范围的哪一格。
+    pub scope: Scope<'a>,
 }
 
 /// 一次头部抽样的结果。存进中立库，未变的文件下次扫描直接沿用。
@@ -314,7 +553,8 @@ pub struct Aggregate {
     pub totals: Counts,
     /// 目录数。
     pub dirs: u64,
-    /// 按平台目录分组，键为目录名，[`UNKNOWN_PLATFORM`] 表示平台未知。
+    /// 按**平台**分组：认出平台的用平台的规范名，没认出的用那个顶层目录名，
+    /// [`UNKNOWN_PLATFORM`] 是直接躺在库根下的散文件。
     pub platforms: BTreeMap<String, PlatformAcc>,
     /// 全库扩展名构成。
     pub extensions: BTreeMap<String, ExtensionAcc>,
@@ -332,6 +572,12 @@ pub struct Aggregate {
     pub samples: BTreeMap<ProbeClass, SampleAcc>,
     /// 穿透**透明容器**的统计。
     pub containers: ContainerAcc,
+    /// **成型**的统计，从中立库的变体表折出来。
+    pub shaping: ShapingAcc,
+    /// 目录声明的平台与文件内容对不上的那些（ADR-0011）。
+    pub conflicts: ConflictAcc,
+    /// 范围之内、却没进任何变体的文件，按归类分。
+    pub unshaped: BTreeMap<Category, Counts>,
     /// 异常与跨平台计数。
     pub anomalies: Anomalies,
     /// 文件名含汉字的部分。
@@ -361,12 +607,33 @@ impl Aggregate {
         let len = len.unwrap_or(0);
 
         self.totals.add(len);
-        let platform_key = observation
-            .platform
-            .clone()
-            .unwrap_or_else(|| UNKNOWN_PLATFORM.to_string());
+        // 分组名：认出平台就用平台的规范名，没认出就用那个顶层目录名，
+        // 库根下的散文件归 [`UNKNOWN_PLATFORM`]。
+        let platform_key = match &observation.placement {
+            Placement::Platform(name) => name.clone(),
+            _ => observation
+                .dir
+                .clone()
+                .unwrap_or_else(|| UNKNOWN_PLATFORM.to_string()),
+        };
         let platform = self.platforms.entry(platform_key).or_default();
         platform.totals.add(len);
+        platform.placement.clone_from(&observation.placement);
+        if let Some(dir) = &observation.dir {
+            platform.dirs.insert(dir.clone());
+        }
+        // 范围之内、却没进任何变体的文件按归类记一笔。
+        if observation.placement.in_scope() && observation.role.is_none() {
+            platform
+                .unshaped
+                .entry(classification.category)
+                .or_default()
+                .add(len);
+            self.unshaped
+                .entry(classification.category)
+                .or_default()
+                .add(len);
+        }
         platform
             .categories
             .entry(classification.category)
@@ -431,8 +698,24 @@ impl Aggregate {
             self.content_files_without_probe += 1;
         }
 
+        if let Some(conflict) = &observation.conflict {
+            self.record_conflict(conflict.clone(), limits);
+        }
+
         self.record_duplicate_candidate(observation, limits);
         self.record_sample(observation, limits);
+    }
+
+    /// 并入一条平台冲突。
+    pub fn record_conflict(&mut self, conflict: PlatformConflict, limits: &Limits) {
+        *self
+            .conflicts
+            .by_evidence
+            .entry(conflict.evidence)
+            .or_default() += 1;
+        if self.conflicts.examples.len() < limits.max_examples {
+            self.conflicts.examples.push(conflict);
+        }
     }
 
     /// 重复检测只覆盖库的内容本身——媒体、元数据与垃圾文件同名同大小是常态，
@@ -513,11 +796,36 @@ impl Aggregate {
     }
 
     /// 并入一个容器内部文件。目录条目不进来——它们不是内容。
-    pub fn record_inner_entry(&mut self, inner_path: &str, size: u64, name_lossy: bool) {
+    ///
+    /// `container` 是那个容器的展示路径与所在范围，用来认出「容器躺在 A 平台目录下，
+    /// 里面装着 B 平台的东西」。库里 91.1% 的容量在透明容器里，把容器内部排除在
+    /// 冲突检测之外等于放过大头。
+    pub fn record_inner_entry(
+        &mut self,
+        container: &InnerEntryContext<'_>,
+        inner_path: &str,
+        size: u64,
+        name_lossy: bool,
+        limits: &Limits,
+    ) {
         if name_lossy {
             self.containers.lossy_names += 1;
         }
         let name = Path::new(path::file_name_of_key(inner_path));
+        if let Some(extension) = path::extension_lower(name)
+            && let Some((declared, implied)) =
+                conflicting_platform(container.manifest, container.scope.platform(), &extension)
+        {
+            self.record_conflict(
+                PlatformConflict {
+                    path: format!("{} › {inner_path}", container.display_path),
+                    declared,
+                    implied,
+                    evidence: ConflictEvidence::InsideContainer,
+                },
+                limits,
+            );
+        }
         let classification = classify(name);
         self.containers
             .inner_categories
@@ -588,11 +896,19 @@ mod tests {
     use super::*;
 
     fn 观察(key: &str, len: u64) -> FileObservation {
-        FileObservation::derive("/lib", key, Some(len), false, None)
+        FileObservation::derive(
+            &Manifest::builtin(),
+            "/lib",
+            key,
+            Some(len),
+            false,
+            None,
+            None,
+        )
     }
 
     fn 读不到元数据的观察(key: &str) -> FileObservation {
-        FileObservation::derive("/lib", key, None, false, None)
+        FileObservation::derive(&Manifest::builtin(), "/lib", key, None, false, None, None)
     }
 
     #[test]
@@ -712,10 +1028,22 @@ mod tests {
 
     #[test]
     fn 派生字段全由键算出() {
-        let observation =
-            FileObservation::derive("/lib", "PS1/某游戏/disc.cue", Some(64), false, None);
+        let observation = FileObservation::derive(
+            &Manifest::builtin(),
+            "/lib",
+            "PS1/某游戏/disc.cue",
+            Some(64),
+            false,
+            None,
+            None,
+        );
         assert_eq!(observation.display_path, "/lib/PS1/某游戏/disc.cue");
-        assert_eq!(observation.platform.as_deref(), Some("PS1"));
+        assert_eq!(
+            observation.placement,
+            Placement::Platform("PS1".to_string())
+        );
+        assert_eq!(observation.dir.as_deref(), Some("PS1"));
+        assert!(observation.placement.in_scope());
         assert_eq!(observation.extension.as_deref(), Some("cue"));
         assert_eq!(observation.name_lower, "disc.cue");
         assert_eq!(observation.classification.category, Category::BareFile);

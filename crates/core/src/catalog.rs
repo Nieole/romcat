@@ -16,6 +16,7 @@
 //!    中断的扫描绝不能调它，否则没扫到的那半个库会被当成已删除抹掉。
 
 pub mod baseline;
+pub mod content;
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,13 +27,21 @@ use crate::container::{ContainerKind, FailureReason, Penetration};
 use crate::fs::{EntryKind, EntryMeta};
 use crate::header::ProbeClass;
 use crate::path;
+use crate::platform::Manifest;
 use crate::report::ReportMeta;
-use crate::scan::aggregate::{Aggregate, ContainerFacts, FileObservation, Limits, SampleResult};
+use crate::scan::aggregate::{
+    Aggregate, ContainerFacts, FileObservation, InnerEntryContext, Limits, SampleResult,
+};
+use crate::shape;
 
 pub use baseline::{Baseline, Recorded, ScanDelta, Verdict};
+pub use content::VariantRow;
 
 /// 中立库的结构版本。结构变了就加 1；读到对不上的版本直接让用户删库重扫。
-pub const SCHEMA_VERSION: u32 = 2;
+///
+/// 3 是票 05 加的三层内容层级与合集（`catalog::content`）。**删库重扫这条路
+/// 到票 08 就走不通了**——那时沉淀库里攒着裁决，重扫补不回来（挂账 D26）。
+pub const SCHEMA_VERSION: u32 = 3;
 
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS meta(
@@ -285,6 +294,7 @@ impl Catalog {
         // WAL：中断的扫描已经写进去的部分不会因为没提交而整份丢掉。
         catalog.batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
         catalog.batch(SCHEMA)?;
+        catalog.batch(content::CONTENT_SCHEMA)?;
         let found: Option<String> = catalog
             .conn
             .query_row(
@@ -853,7 +863,11 @@ impl Catalog {
     ///
     /// # Errors
     /// 读库失败、或存进去的抽样结果读不回来时返回错误。
-    pub fn aggregate(&self, limits: &Limits) -> Result<Aggregate, CatalogError> {
+    pub fn aggregate(
+        &self,
+        limits: &Limits,
+        manifest: &Manifest,
+    ) -> Result<Aggregate, CatalogError> {
         let traversal = self.last_traversal()?.unwrap_or_default();
         let mut aggregate = Aggregate::default();
 
@@ -861,9 +875,12 @@ impl Catalog {
             .conn
             // 按键排序，于是例子列表与「先看到谁」无关：同一份中立库出的报告永远一样，
             // 而扫描时哪个线程先跑完是不确定的。
+            // 左连变体成员表：报告要答得出「范围之内哪些文件根本没进变体」——
+            // 那个数按归类拆开之后，「未归类」那一栏就是成型的缺口。
             .prepare(
-                "SELECT key, readable, len, non_utf8, sample
-                 FROM entry WHERE kind = ?1 ORDER BY key",
+                "SELECT e.key, e.readable, e.len, e.non_utf8, e.sample, m.role
+                 FROM entry e LEFT JOIN variant_member m ON m.key = e.key
+                 WHERE e.kind = ?1 ORDER BY e.key",
             )
             .map_err(|source| self.err(source))?;
         let mut rows = statement
@@ -876,6 +893,8 @@ impl Catalog {
             let non_utf8: i64 = row.get(3).map_err(|source| self.err(source))?;
             let sample: Option<String> = row.get(4).map_err(|source| self.err(source))?;
             let sample = self.decode_sample(&key, sample.as_deref())?;
+            let role: Option<String> = row.get(5).map_err(|source| self.err(source))?;
+            let role = role.as_deref().and_then(shape::Role::from_code);
             // 大小以 `readable` 为准而不是「`len` 是不是 NULL」：两者现在等价，
             // 但把判据挂在那一列上，将来改结构也不会悄悄换掉「大小未知」的定义。
             let len = if readable == 0 {
@@ -884,7 +903,15 @@ impl Catalog {
                 len.map(|len| u64::try_from(len).unwrap_or(0))
             };
             aggregate.record_file(
-                &FileObservation::derive(&traversal.root, &key, len, non_utf8 != 0, sample),
+                &FileObservation::derive(
+                    manifest,
+                    &traversal.root,
+                    &key,
+                    len,
+                    non_utf8 != 0,
+                    sample,
+                    role,
+                ),
                 limits,
             );
         }
@@ -936,20 +963,38 @@ impl Catalog {
             );
         }
 
+        // 按容器排序，于是同一个容器的内部条目连着来，容器那一侧的上下文只算一次。
         let mut statement = self
             .conn
-            .prepare("SELECT inner, size, is_dir, lossy FROM container_entry")
+            .prepare("SELECT key, inner, size, is_dir, lossy FROM container_entry ORDER BY key")
             .map_err(|source| self.err(source))?;
         let mut rows = statement.query([]).map_err(|source| self.err(source))?;
+        let mut current: Option<(String, String)> = None;
         while let Some(row) = rows.next().map_err(|source| self.err(source))? {
-            let is_dir: i64 = row.get(2).map_err(|source| self.err(source))?;
+            let is_dir: i64 = row.get(3).map_err(|source| self.err(source))?;
             if is_dir != 0 {
                 continue;
             }
-            let inner: String = row.get(0).map_err(|source| self.err(source))?;
-            let size: i64 = row.get(1).map_err(|source| self.err(source))?;
-            let lossy: i64 = row.get(3).map_err(|source| self.err(source))?;
-            aggregate.record_inner_entry(&inner, u64::try_from(size).unwrap_or(0), lossy != 0);
+            let key: String = row.get(0).map_err(|source| self.err(source))?;
+            if current.as_ref().is_none_or(|(seen, _)| *seen != key) {
+                let display = path::display_key(&traversal.root, &key);
+                current = Some((key.clone(), display));
+            }
+            let (container_key, display) = current.as_ref().expect("刚填上");
+            let inner: String = row.get(1).map_err(|source| self.err(source))?;
+            let size: i64 = row.get(2).map_err(|source| self.err(source))?;
+            let lossy: i64 = row.get(4).map_err(|source| self.err(source))?;
+            aggregate.record_inner_entry(
+                &InnerEntryContext {
+                    manifest,
+                    display_path: display,
+                    scope: shape::scope_of(manifest, container_key),
+                },
+                &inner,
+                u64::try_from(size).unwrap_or(0),
+                lossy != 0,
+                limits,
+            );
         }
 
         // 这几个计数是数出来的而不是攒出来的：中断续跑时重扫一个目录不会让它们翻倍。
@@ -958,6 +1003,14 @@ impl Catalog {
         aggregate.anomalies.symlinks = self.count(count, KIND_SYMLINK)?;
         aggregate.anomalies.other_entries = self.count(count, KIND_OTHER)?;
         aggregate.elapsed_ms = traversal.elapsed_ms;
+
+        // 成型的结论也是从库里折出来的：盘不在位时报告照样说得出「库里有多少个变体」。
+        aggregate.shaping = self.shaping(manifest)?;
+        for (platform, counts) in &aggregate.shaping.by_platform {
+            if let Some(acc) = aggregate.platforms.get_mut(platform) {
+                acc.variants = counts.variants;
+            }
+        }
 
         let mut statement = self
             .conn
@@ -989,6 +1042,7 @@ impl Catalog {
         let traversal = self.last_traversal()?.unwrap_or_default();
         Ok(ReportMeta {
             root: traversal.root,
+            scan: traversal.scan,
             interrupted: traversal.interrupted,
             resumed: traversal.resumed,
             jobs: traversal.jobs,

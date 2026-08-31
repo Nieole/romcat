@@ -13,6 +13,7 @@ use romcat_core::classify::{Category, SuspectReason};
 use romcat_core::fs::RealFs;
 use romcat_core::header::ProbeClass;
 use romcat_core::path::long_path;
+use romcat_core::platform::Manifest;
 use romcat_core::report::DuplicateDetails;
 use romcat_core::scan::aggregate::Limits;
 use romcat_core::scan::{self, CancelToken, CheckpointOptions, Jobs, ScanOptions, ScanOutcome};
@@ -482,7 +483,9 @@ fn 中立库落在本机重启后仍读得出来() {
     // 盘拔了，工具也重启了
     drop(library);
     let catalog = Catalog::open(&catalog_path).expect("能再打开");
-    let aggregate = catalog.aggregate(&Limits::default()).expect("读得出来");
+    let aggregate = catalog
+        .aggregate(&Limits::default(), &Manifest::builtin())
+        .expect("读得出来");
     let report = romcat_core::report::HealthReport::build(
         &aggregate,
         &catalog.report_meta().expect("元信息读得出来"),

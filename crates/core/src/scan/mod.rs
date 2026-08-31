@@ -33,7 +33,9 @@ use crate::container::{self, ContainerKind, Penetration};
 use crate::fs::{DirEntry, EntryKind, EntryMeta, LibraryFs};
 use crate::header::{self, ProbeClass};
 use crate::path;
+use crate::platform::Manifest;
 use crate::report::{HealthReport, ReportMeta};
+use crate::shape;
 
 use aggregate::{Aggregate, Limits, SampleResult};
 use checkpoint::{Checkpoint, CheckpointError};
@@ -167,6 +169,8 @@ pub struct ScanOptions {
     /// 后面的识别也无从谈起（ADR-0014）。关掉它只在一种场合有意义：怀疑穿透本身
     /// 有问题，想先把遍历跑通。
     pub penetrate_containers: bool,
+    /// **平台清单与成型规则**。平台由目录给出，而哪些目录算平台写在这里（ADR-0011）。
+    pub manifest: Manifest,
 }
 
 impl ScanOptions {
@@ -181,6 +185,7 @@ impl ScanOptions {
             checkpoint: None,
             incremental: true,
             penetrate_containers: true,
+            manifest: Manifest::builtin(),
         }
     }
 }
@@ -215,6 +220,8 @@ pub struct ScanOutcome {
     pub checkpoint_path: Option<PathBuf>,
     /// 开扫前那次介质探测的读数；`-j` 点了名就没探测，是 `None`。
     pub probe: Option<probe::Probe>,
+    /// 这一趟有没有重新**成型**。中断的扫描不成型——半个库成出来的变体是错的。
+    pub shaped: bool,
 }
 
 /// 扫一遍主库，把结论写进中立库。
@@ -361,12 +368,19 @@ pub fn scan(
         progress.delta.removed = catalog.sweep(start.scan)?;
     }
     catalog.save_traversal(&traversal)?;
+    // **成型也只在完整扫完一遍之后跑**，理由与删除同源：半个库上成出来的变体是错的。
+    // 一份 PSV 转储只扫到 `app/` 就成型，`patch/` 那一半会在下一趟变成第二个变体。
+    let shaped = !interrupted;
+    if shaped {
+        shape::reshape(catalog, &options.manifest, start.scan)?;
+    }
     let checkpoint_path =
         finish_checkpoint(options, &root, &queue, start.scan, &traversal, interrupted)?;
 
-    let aggregate = catalog.aggregate(&options.limits)?;
+    let aggregate = catalog.aggregate(&options.limits, &options.manifest)?;
     let meta = ReportMeta {
         root: traversal.root.clone(),
+        scan: start.scan,
         interrupted,
         resumed: start.resumed,
         jobs,
@@ -381,6 +395,7 @@ pub fn scan(
         interrupted,
         checkpoint_path,
         probe: measured,
+        shaped,
     })
 }
 
@@ -893,6 +908,7 @@ mod tests {
     use super::*;
     use crate::classify::{Category, SuspectReason};
     use crate::fs::{DirEntry, MemFs};
+    use crate::platform::Manifest;
     use crate::report::UNKNOWN_PLATFORM_LABEL;
     use crate::scan::aggregate::UNKNOWN_PLATFORM;
     use crate::testing::sample::{chd, iso, zip};
@@ -1506,7 +1522,7 @@ mod tests {
         };
         // 盘拔了：这里连 MemFs 都没有了，中立库照样出得来
         let mut 库里的 = catalog
-            .aggregate(&Limits::default())
+            .aggregate(&Limits::default(), &Manifest::builtin())
             .expect("从中立库折得出统计");
         规范化(&mut 库里的);
         let 报告 = HealthReport::build(&库里的, &catalog.report_meta().expect("元信息读得出来"));
@@ -1538,7 +1554,9 @@ mod tests {
         扫入(&mut catalog, &建库(), &ScanOptions::new("/lib"));
         drop(catalog);
         let catalog = Catalog::open(&path).expect("能再打开");
-        let aggregate = catalog.aggregate(&Limits::default()).expect("读得出来");
+        let aggregate = catalog
+            .aggregate(&Limits::default(), &Manifest::builtin())
+            .expect("读得出来");
         assert_eq!(aggregate.totals.files, 之前.totals.files);
         assert_eq!(aggregate.totals.bytes, 之前.totals.bytes);
         assert!(path.exists(), "中立库是本机上的一个文件");

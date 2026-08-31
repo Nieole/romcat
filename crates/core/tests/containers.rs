@@ -10,6 +10,7 @@ use romcat_core::container::{
     self, ContainerError, ContainerKind, Demand, InnerEntry, ReadPlan, ReadStats,
 };
 use romcat_core::fs::MemFs;
+use romcat_core::platform::Manifest;
 use romcat_core::testing::container::{
     ZipEntrySpec, crc32, zip_container, zip_container_with_prefix, zip_container_with_trailing,
     zip_container_with_zip64_eocd,
@@ -626,7 +627,9 @@ fn 体检报告说得出容器内部的文件数与构成() {
     let options = romcat_core::scan::ScanOptions::new("/lib");
     let catalog = 扫一遍(&library, &options);
 
-    let aggregate = catalog.aggregate(&Default::default()).expect("能折出统计");
+    let aggregate = catalog
+        .aggregate(&Default::default(), &Manifest::builtin())
+        .expect("能折出统计");
     let meta = catalog.report_meta().expect("能取元信息");
     let report = romcat_core::report::HealthReport::build(&aggregate, &meta);
     let containers = &report.containers;
@@ -682,7 +685,9 @@ fn 盘不在位时报告照样说得出容器里装着什么() {
     let catalog = 扫一遍(&library, &options);
 
     // 这一步一个字节都不碰主库：结论全在中立库里（ADR-0001）。
-    let aggregate = catalog.aggregate(&Default::default()).expect("能折出统计");
+    let aggregate = catalog
+        .aggregate(&Default::default(), &Manifest::builtin())
+        .expect("能折出统计");
     let report =
         romcat_core::report::HealthReport::build(&aggregate, &catalog.report_meta().unwrap());
     assert_eq!(report.containers.inner_files, 5);
@@ -696,7 +701,9 @@ fn 关掉穿透就一个容器都不去读() {
     options.penetrate_containers = false;
     let catalog = 扫一遍(&library, &options);
 
-    let aggregate = catalog.aggregate(&Default::default()).expect("能折出统计");
+    let aggregate = catalog
+        .aggregate(&Default::default(), &Manifest::builtin())
+        .expect("能折出统计");
     let report =
         romcat_core::report::HealthReport::build(&aggregate, &catalog.report_meta().unwrap());
     assert_eq!(report.containers.containers, 0);
@@ -725,7 +732,9 @@ fn 容器变了内部构成跟着换掉而不是叠加() {
     let mut catalog = romcat_core::catalog::Catalog::open_in_memory().expect("能开中立库");
     let cancel = romcat_core::scan::CancelToken::new();
     romcat_core::scan::scan(&library, &mut catalog, &options, &cancel).expect("首扫");
-    let 首扫 = catalog.aggregate(&Default::default()).unwrap();
+    let 首扫 = catalog
+        .aggregate(&Default::default(), &Manifest::builtin())
+        .unwrap();
     assert_eq!(首扫.containers.totals().inner_files, 2);
 
     // 换成一个只装一个文件的 zip，并把修改时间往后拨。
@@ -736,7 +745,9 @@ fn 容器变了内部构成跟着换掉而不是叠加() {
     library.touch("/lib/FC/合集.zip", 60);
     romcat_core::scan::scan(&library, &mut catalog, &options, &cancel).expect("二扫");
 
-    let 二扫 = catalog.aggregate(&Default::default()).unwrap();
+    let 二扫 = catalog
+        .aggregate(&Default::default(), &Manifest::builtin())
+        .unwrap();
     assert_eq!(
         二扫.containers.totals().inner_files,
         1,
@@ -756,7 +767,7 @@ fn 容器被删掉后内部构成一起消失() {
     romcat_core::scan::scan(&library, &mut catalog, &options, &cancel).expect("首扫");
     assert_eq!(
         catalog
-            .aggregate(&Default::default())
+            .aggregate(&Default::default(), &Manifest::builtin())
             .unwrap()
             .containers
             .totals()
@@ -766,7 +777,9 @@ fn 容器被删掉后内部构成一起消失() {
 
     library.remove("/lib/SFC/solid.7z");
     romcat_core::scan::scan(&library, &mut catalog, &options, &cancel).expect("二扫");
-    let 二扫 = catalog.aggregate(&Default::default()).unwrap();
+    let 二扫 = catalog
+        .aggregate(&Default::default(), &Manifest::builtin())
+        .unwrap();
     assert_eq!(二扫.containers.totals().containers, 2);
     assert_eq!(
         二扫.containers.totals().inner_files,
@@ -786,7 +799,7 @@ fn 上次带着_no_containers_扫过的容器下次会补穿() {
     romcat_core::scan::scan(&library, &mut catalog, &不穿, &cancel).expect("首扫");
     assert_eq!(
         catalog
-            .aggregate(&Default::default())
+            .aggregate(&Default::default(), &Manifest::builtin())
             .unwrap()
             .containers
             .totals()
@@ -799,7 +812,7 @@ fn 上次带着_no_containers_扫过的容器下次会补穿() {
     let 穿 = romcat_core::scan::ScanOptions::new("/lib");
     romcat_core::scan::scan(&library, &mut catalog, &穿, &cancel).expect("二扫");
     let totals = catalog
-        .aggregate(&Default::default())
+        .aggregate(&Default::default(), &Manifest::builtin())
         .unwrap()
         .containers
         .totals();

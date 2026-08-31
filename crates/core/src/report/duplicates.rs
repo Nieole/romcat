@@ -166,11 +166,20 @@ impl DuplicateDetails {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::Manifest;
     use crate::report::ReportMeta;
     use crate::scan::aggregate::{FileObservation, Limits};
 
     fn 观察(key: &str, len: u64) -> FileObservation {
-        FileObservation::derive("/lib", key, Some(len), false, None)
+        FileObservation::derive(
+            &Manifest::builtin(),
+            "/lib",
+            key,
+            Some(len),
+            false,
+            None,
+            None,
+        )
     }
 
     fn 报告(aggregate: &Aggregate, interrupted: bool, resumed: bool) -> HealthReport {
@@ -178,6 +187,7 @@ mod tests {
             aggregate,
             &ReportMeta {
                 root: "/lib".to_string(),
+                scan: 1,
                 interrupted,
                 resumed,
                 jobs: 1,

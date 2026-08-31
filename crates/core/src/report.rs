@@ -14,8 +14,10 @@ use crate::classify::{Category, SuspectReason};
 use crate::container::{ContainerKind, FailureReason};
 use crate::header::ProbeClass;
 use crate::scan::aggregate::{
-    Aggregate, Anomalies, ContainerAcc, Counts, ExtensionAcc, SampleAcc, UNKNOWN_PLATFORM,
+    Aggregate, Anomalies, ConflictAcc, ConflictEvidence, ContainerAcc, Counts, ExtensionAcc,
+    Placement, PlatformAcc, PlatformConflict, SampleAcc, ShapingAcc, UNKNOWN_PLATFORM,
 };
+use crate::shape::Role;
 
 /// 平台未知时在报告里的显示名。
 pub const UNKNOWN_PLATFORM_LABEL: &str = "（平台未知）";
@@ -28,6 +30,8 @@ const TOP_EXTENSIONS_GLOBAL: usize = 25;
 const TOP_INNER_EXTENSIONS: usize = 15;
 /// 报告里展示几组重复拷贝。
 const TOP_DUPLICATE_GROUPS: usize = 10;
+/// 报告里列出几个**还没映射**的顶层目录。真库顶层 73 个条目，一多半是这一类。
+const TOP_UNMAPPED_DIRS: usize = 15;
 /// 报告里每组重复拷贝展示几条路径。
 ///
 /// 它与扫描时**记下**多少条（[`Limits::max_duplicate_paths_per_group`](crate::scan::aggregate::Limits::max_duplicate_paths_per_group)）
@@ -50,6 +54,8 @@ pub struct ReportMeta {
     pub samples_per_class: usize,
     /// 这次扫描有没有穿透**透明容器**。
     pub penetrated_containers: bool,
+    /// 中立库里最后一次遍历的代号。报告拿它与成型的代号比，说得出成型是不是旧的。
+    pub scan: i64,
     /// 这次扫描相对上一次的差异；`None` 表示这份报告是直接从中立库出的，没有扫盘。
     pub delta: Option<ScanDelta>,
 }
@@ -99,13 +105,22 @@ pub struct ExtensionStats {
     pub bytes: u64,
 }
 
-/// 一个平台目录的统计。
+/// 一个平台（或者一个还没映射到平台的顶层目录）的统计。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlatformStats {
-    /// 平台目录名；平台未知时是 [`UNKNOWN_PLATFORM_LABEL`]。
+    /// 认出平台就是平台的规范名，没认出就是那个顶层目录名；
+    /// 直接躺在库根下的散文件是 [`UNKNOWN_PLATFORM_LABEL`]。
     pub name: String,
     /// 是否是「平台未知」这一组。
     pub unknown: bool,
+    /// 喂给这一组的顶层目录名。一个平台可以有好几个别名目录。
+    pub dirs: Vec<String>,
+    /// 这一组进不进识别管线（ADR-0011 修订段的范围边界）。
+    pub in_scope: bool,
+    /// 明确排除的话，为什么。与「还没映射」不是一回事。
+    pub excluded_reason: Option<String>,
+    /// 成型出了几个**变体**。范围之外的一律是 0——它们根本不成型。
+    pub variants: u64,
     /// 文件数。
     pub files: u64,
     /// 字节数。
@@ -278,6 +293,132 @@ pub struct ContainerSummary {
     pub failures: Vec<(String, String)>,
 }
 
+/// 一个平台成型出来的变体。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlatformShapeStats {
+    /// 平台名。
+    pub name: String,
+    /// 变体数。
+    pub variants: u64,
+    /// 这些变体一共吃掉多少个文件。
+    pub files: u64,
+    /// 字节合计。
+    pub bytes: u64,
+    /// 平均每个变体吃掉多少个文件。
+    ///
+    /// 它是这张票最要紧的那个数：PSV 那 171,073 个文件若没聚起来，这一栏会是 1.0，
+    /// 而那就说明目录树规则整个没生效。
+    ///
+    /// **不叫「收敛比」**：词表里 **收敛** 专指导出时把同一作品的多个变体合并成前端里的
+    /// 一个条目，与这里说的「几个文件聚成一个变体」是两件事，共用一个词会互相污染。
+    pub files_per_variant: f64,
+}
+
+/// 一条成型规则成了几个变体。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleStats {
+    /// 规则名。
+    pub rule: String,
+    /// 变体数。
+    pub variants: u64,
+}
+
+/// 一种成员身份有几个。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleStats {
+    /// 身份。
+    pub role: Role,
+    /// 成员数。
+    pub members: u64,
+}
+
+/// **成型**的汇总：从文件收敛到了多少个变体。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShapingSummary {
+    /// 成型跑过没有。没跑过时下面全是 0，报告会明说。
+    pub shaped: bool,
+    /// 成型比中立库里最后一次遍历旧——扫过之后没再成型。
+    pub stale: bool,
+    /// 这份变体表是用**另一份平台清单**成的型。
+    pub manifest_changed: bool,
+    /// 变体数。
+    pub variants: u64,
+    /// 进了变体的文件数。
+    pub files: u64,
+    /// 进了变体的字节数。**这是个下界**：元数据读不到的成员按 0 计入（ADR-0021）。
+    pub bytes: u64,
+    /// 变体成员里有几个元数据读不到，因此容量少算了它们。
+    pub unreadable_files: u64,
+    /// 其中人工纠正出来的变体数。
+    pub manual: u64,
+    /// 范围之内、却没进任何变体的文件，按归类分。
+    ///
+    /// **「未归类」那一栏大就是成型的缺口**：既不是媒体也不是文档垃圾，却没成型。
+    /// 与媒体、文档混成一个数的话，「收敛得好」与「压根没成型」会给出同一个答案。
+    pub unshaped: Vec<CategoryStats>,
+    /// 全库平均每个变体吃掉多少个文件（不叫「收敛比」，见 [`PlatformShapeStats`]）。
+    pub files_per_variant: f64,
+    /// 按平台分，变体多的排前面。
+    pub by_platform: Vec<PlatformShapeStats>,
+    /// 按成型规则分。
+    pub by_rule: Vec<RuleStats>,
+    /// 成员按身份分。
+    pub by_role: Vec<RoleStats>,
+}
+
+/// 一个明确排除的顶层目录。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExcludedDir {
+    /// 目录名。
+    pub name: String,
+    /// 为什么排除。
+    pub reason: String,
+    /// 文件数。
+    pub files: u64,
+    /// 字节数。
+    pub bytes: u64,
+}
+
+/// **范围边界**：哪些进识别管线、哪些不进（ADR-0011 修订段）。
+///
+/// 三格分得开是有讲究的：**明确排除**是看过之后决定不做的，**还没映射**是工具不认得
+/// 那个目录名，**库根下的散文件**连顶层目录都没有。三者的后续处置完全不同，
+/// 合成一个数就没法照着它动手。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeSummary {
+    /// 范围之内有几个平台、多少文件、多少字节。
+    pub platforms: u64,
+    /// 同上。
+    pub in_scope_files: u64,
+    /// 同上。
+    pub in_scope_bytes: u64,
+    /// 还没映射的顶层目录数。
+    pub unmapped_dirs: u64,
+    /// 同上的文件数。
+    pub unmapped_files: u64,
+    /// 同上的字节数。
+    pub unmapped_bytes: u64,
+    /// 还没映射的目录，按容量从大到小，有上限。
+    pub unmapped_examples: Vec<String>,
+    /// 明确排除的目录。
+    pub excluded: Vec<ExcludedDir>,
+    /// 直接躺在库根下的散文件数。
+    pub root_level_files: u64,
+    /// 同上的字节数。
+    pub root_level_bytes: u64,
+}
+
+/// 目录声明的平台与文件内容对不上的汇总。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictSummary {
+    /// 一共几条。
+    pub total: u64,
+    /// 按凭据分类。
+    pub by_evidence: Vec<(ConflictEvidence, String, u64)>,
+    /// 样例。
+    pub examples: Vec<PlatformConflict>,
+}
+
 /// 库体检报告。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HealthReport {
@@ -311,6 +452,12 @@ pub struct HealthReport {
     pub samples: Vec<SampleStats>,
     /// 穿透**透明容器**的结果。
     pub containers: ContainerSummary,
+    /// **成型**：从文件收敛到了多少个变体。
+    pub shaping: ShapingSummary,
+    /// 范围边界：哪些进识别管线、哪些不进。
+    pub scope: ScopeSummary,
+    /// 目录声明的平台与文件内容对不上的那些。
+    pub conflicts: ConflictSummary,
     /// 属于三类主线、却没有任何探针可用的文件数。抽样成功率覆盖不到它们。
     pub content_files_without_probe: u64,
     /// 异常与跨平台计数。
@@ -328,6 +475,176 @@ pub(crate) fn share(part: u64, total: u64) -> f64 {
     #[allow(clippy::cast_precision_loss)]
     let raw = part as f64 * 100.0 / total as f64;
     (raw * 100.0).round() / 100.0
+}
+
+fn platform_stats(name: &str, acc: &PlatformAcc) -> PlatformStats {
+    PlatformStats {
+        name: if name == UNKNOWN_PLATFORM {
+            UNKNOWN_PLATFORM_LABEL.to_string()
+        } else {
+            name.to_string()
+        },
+        unknown: name == UNKNOWN_PLATFORM,
+        dirs: acc.dirs.iter().cloned().collect(),
+        in_scope: acc.placement.in_scope(),
+        excluded_reason: acc.placement.excluded_reason().map(ToString::to_string),
+        variants: acc.variants,
+        files: acc.totals.files,
+        bytes: acc.totals.bytes,
+        categories: category_stats(&acc.categories, acc.totals),
+        top_extensions: extension_stats(&acc.extensions, TOP_EXTENSIONS_PER_PLATFORM),
+        cjk_files: acc.cjk.files,
+    }
+}
+
+/// 平均每个变体吃掉多少个文件。
+///
+/// 一个变体都没有时返回 0 而不是无穷：报告里那一格印 `inf` 只会让人以为程序坏了。
+fn per_variant(files: u64, variants: u64) -> f64 {
+    if variants == 0 {
+        return 0.0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let raw = files as f64 / variants as f64;
+    (raw * 100.0).round() / 100.0
+}
+
+fn shaping_summary(
+    acc: &ShapingAcc,
+    unshaped: &BTreeMap<Category, Counts>,
+    scan: i64,
+) -> ShapingSummary {
+    let mut by_platform: Vec<PlatformShapeStats> = acc
+        .by_platform
+        .iter()
+        .map(|(name, counts)| PlatformShapeStats {
+            name: name.clone(),
+            variants: counts.variants,
+            files: counts.files,
+            bytes: counts.bytes,
+            files_per_variant: per_variant(counts.files, counts.variants),
+        })
+        .collect();
+    by_platform.sort_by(|a, b| {
+        b.variants
+            .cmp(&a.variants)
+            .then_with(|| b.files.cmp(&a.files))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    let mut by_rule: Vec<RuleStats> = acc
+        .by_rule
+        .iter()
+        .map(|(rule, variants)| RuleStats {
+            rule: rule.clone(),
+            variants: *variants,
+        })
+        .collect();
+    by_rule.sort_by(|a, b| {
+        b.variants
+            .cmp(&a.variants)
+            .then_with(|| a.rule.cmp(&b.rule))
+    });
+    ShapingSummary {
+        shaped: acc.shaped(),
+        // 成型代号比最后一次遍历小，说明扫过之后没再成型——报告要说出来，
+        // 否则读的人会拿着一份旧变体表当新的看。
+        stale: acc.shaped_scan.is_some_and(|shaped| shaped < scan),
+        manifest_changed: acc.manifest_changed,
+        variants: acc.variants,
+        files: acc.files,
+        bytes: acc.bytes,
+        unreadable_files: acc.unreadable_files,
+        manual: acc.manual,
+        unshaped: category_stats(
+            unshaped,
+            Counts {
+                files: unshaped.values().map(|counts| counts.files).sum(),
+                bytes: unshaped.values().map(|counts| counts.bytes).sum(),
+            },
+        ),
+        files_per_variant: per_variant(acc.files, acc.variants),
+        by_platform,
+        by_rule,
+        by_role: Role::all()
+            .into_iter()
+            .filter_map(|role| {
+                let members = acc.by_role.get(&role).copied()?;
+                Some(RoleStats { role, members })
+            })
+            .collect(),
+    }
+}
+
+fn scope_summary(aggregate: &Aggregate) -> ScopeSummary {
+    let mut summary = ScopeSummary {
+        platforms: 0,
+        in_scope_files: 0,
+        in_scope_bytes: 0,
+        unmapped_dirs: 0,
+        unmapped_files: 0,
+        unmapped_bytes: 0,
+        unmapped_examples: Vec::new(),
+        excluded: Vec::new(),
+        root_level_files: 0,
+        root_level_bytes: 0,
+    };
+    let mut unmapped: Vec<(&str, Counts)> = Vec::new();
+    // 四态直接照 `Placement` 分派：报告不再自己拿几个布尔字段把它拼回来。
+    for (name, acc) in &aggregate.platforms {
+        match &acc.placement {
+            Placement::Platform(_) => {
+                summary.platforms += 1;
+                summary.in_scope_files += acc.totals.files;
+                summary.in_scope_bytes += acc.totals.bytes;
+            }
+            Placement::Excluded { reason } => summary.excluded.push(ExcludedDir {
+                name: name.clone(),
+                reason: reason.clone(),
+                files: acc.totals.files,
+                bytes: acc.totals.bytes,
+            }),
+            Placement::Unmapped => {
+                summary.unmapped_dirs += 1;
+                summary.unmapped_files += acc.totals.files;
+                summary.unmapped_bytes += acc.totals.bytes;
+                unmapped.push((name, acc.totals));
+            }
+            Placement::RootLevel => {
+                summary.root_level_files += acc.totals.files;
+                summary.root_level_bytes += acc.totals.bytes;
+            }
+        }
+    }
+    unmapped.sort_by(|a, b| b.1.bytes.cmp(&a.1.bytes).then_with(|| a.0.cmp(b.0)));
+    summary.unmapped_examples = unmapped
+        .iter()
+        .take(TOP_UNMAPPED_DIRS)
+        .map(|(name, counts)| {
+            format!(
+                "{name}（{} 个文件，{}）",
+                render::thousands(counts.files),
+                render::human_bytes(counts.bytes)
+            )
+        })
+        .collect();
+    summary
+        .excluded
+        .sort_by_key(|dir| std::cmp::Reverse(dir.bytes));
+    summary
+}
+
+fn conflict_summary(acc: &ConflictAcc) -> ConflictSummary {
+    ConflictSummary {
+        total: acc.total(),
+        by_evidence: ConflictEvidence::all()
+            .into_iter()
+            .filter_map(|evidence| {
+                let count = acc.by_evidence.get(&evidence).copied()?;
+                Some((evidence, evidence.label().to_string(), count))
+            })
+            .collect(),
+        examples: acc.examples.clone(),
+    }
 }
 
 fn category_stats(counts: &BTreeMap<Category, Counts>, totals: Counts) -> Vec<CategoryStats> {
@@ -374,19 +691,7 @@ impl HealthReport {
         let mut platforms: Vec<PlatformStats> = aggregate
             .platforms
             .iter()
-            .map(|(name, acc)| PlatformStats {
-                name: if name == UNKNOWN_PLATFORM {
-                    UNKNOWN_PLATFORM_LABEL.to_string()
-                } else {
-                    name.clone()
-                },
-                unknown: name == UNKNOWN_PLATFORM,
-                files: acc.totals.files,
-                bytes: acc.totals.bytes,
-                categories: category_stats(&acc.categories, acc.totals),
-                top_extensions: extension_stats(&acc.extensions, TOP_EXTENSIONS_PER_PLATFORM),
-                cjk_files: acc.cjk.files,
-            })
+            .map(|(name, acc)| platform_stats(name, acc))
             .collect();
         platforms.sort_by(|a, b| {
             b.bytes
@@ -416,6 +721,9 @@ impl HealthReport {
             suspects: suspect_summary(aggregate),
             samples: sample_stats(&aggregate.samples),
             containers: container_summary(&aggregate.containers, meta.penetrated_containers),
+            shaping: shaping_summary(&aggregate.shaping, &aggregate.unshaped, meta.scan),
+            scope: scope_summary(aggregate),
+            conflicts: conflict_summary(&aggregate.conflicts),
             content_files_without_probe: aggregate.content_files_without_probe,
             anomalies: aggregate.anomalies.clone(),
         }

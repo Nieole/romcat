@@ -19,6 +19,10 @@ ctrlc = "3"
 rusqlite = { version = "0.40", features = ["bundled"] }
 # 路径以 NFC 规范化后才作为键（ADR-0020）。
 unicode-normalization = "0.1"
+# 平台清单与成型规则是**数据不是代码**（docs/platforms.md、票 05）。选 TOML 而不是
+# 已经在依赖里的 JSON，是因为这份清单每条规则都得写清「为什么这么定」——JSON 没有注释，
+# 而没有注释的规则表下一个人只能靠猜（挂账 D33）。
+toml = "1"
 flate2 = "1"
 sevenz-rust2 = { version = "0.22", default-features = false, features = ["bzip2", "ppmd", "deflate"] }
 

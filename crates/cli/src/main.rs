@@ -17,9 +17,11 @@ use clap::{Args, Parser, Subcommand};
 use romcat_core::catalog::Catalog;
 use romcat_core::fs::RealFs;
 use romcat_core::path;
+use romcat_core::platform::Manifest;
 use romcat_core::report::{DuplicateDetails, HealthReport, human_bytes, thousands};
 use romcat_core::scan::aggregate::{Aggregate, Limits};
 use romcat_core::scan::{self, CancelToken, CheckpointOptions, Jobs, ScanOptions};
+use romcat_core::shape;
 use romcat_core::workspace::{self, Slug};
 
 /// ROM 元数据自动化工具的命令行。
@@ -36,6 +38,84 @@ enum Command {
     Scan(ScanArgs),
     /// 只从中立库出报告，一个字节都不读主库——外置盘不在位时也能看
     Report(ReportArgs),
+    /// 按平台清单重新成型：把中立库里散落的条目聚成变体。改了成型规则不必重扫主库
+    Shape(ShapeArgs),
+    /// 列出眼下生效的平台清单与成型规则，或者导出一份底稿照着改
+    Platforms(PlatformsArgs),
+}
+
+/// 平台清单从哪儿来。三个子命令共用。
+#[derive(Debug, Args, Clone)]
+struct ManifestArgs {
+    /// 平台清单与成型规则的 TOML 文件
+    ///
+    /// 不给就先看工作目录里有没有 `platforms.toml`，都没有才用内置的那一份。
+    /// `romcat platforms --dump-builtin` 能导出一份底稿照着改
+    #[arg(long, value_name = "文件")]
+    manifest: Option<PathBuf>,
+}
+
+impl ManifestArgs {
+    /// 工作目录里那份可选的清单叫什么。
+    const IN_WORKSPACE: &'static str = "platforms.toml";
+
+    fn load(&self, workspace: &Path) -> Result<Manifest, String> {
+        let path = match &self.manifest {
+            Some(path) => path.clone(),
+            None => {
+                let candidate = workspace.join(Self::IN_WORKSPACE);
+                if !candidate.exists() {
+                    return Ok(Manifest::builtin());
+                }
+                candidate
+            }
+        };
+        Manifest::load(&path).map_err(|error| format!("{error}"))
+    }
+}
+
+#[derive(Debug, Args)]
+struct ShapeArgs {
+    /// 主库根目录。只用来找到对应的中立库，不会去读它；给了 `--library` 就不必再给
+    root: Option<PathBuf>,
+
+    /// 按名字找中立库（扫描时用 `--library` 起的那个名字）
+    #[arg(long, value_name = "名字")]
+    library: Option<String>,
+
+    /// 工作目录：中立库存这里
+    #[arg(long, value_name = "目录")]
+    workspace: Option<PathBuf>,
+
+    /// 人工纠正：这几个键其实是一个变体。第一个当主文件，可重复给
+    ///
+    /// 纠正**优先于一切成型规则**，也不随重新成型或重扫消失——规则的缺陷不该永久污染库
+    #[arg(long = "merge", value_name = "键")]
+    merge: Vec<String>,
+
+    /// 撤掉某个键上的人工纠正，可重复给
+    #[arg(long = "forget-merge", value_name = "键")]
+    forget_merge: Vec<String>,
+
+    #[command(flatten)]
+    manifest: ManifestArgs,
+
+    #[command(flatten)]
+    output: OutputArgs,
+}
+
+#[derive(Debug, Args)]
+struct PlatformsArgs {
+    /// 工作目录：不给 `--manifest` 时来这里找 `platforms.toml`
+    #[arg(long, value_name = "目录")]
+    workspace: Option<PathBuf>,
+
+    /// 把**内置**清单写到这个文件，照着它改就是自己的一份
+    #[arg(long, value_name = "文件")]
+    dump_builtin: Option<PathBuf>,
+
+    #[command(flatten)]
+    manifest: ManifestArgs,
 }
 
 /// 报告的去处。两个子命令共用。
@@ -97,6 +177,9 @@ struct ScanArgs {
     no_containers: bool,
 
     #[command(flatten)]
+    manifest: ManifestArgs,
+
+    #[command(flatten)]
     output: OutputArgs,
 }
 
@@ -114,6 +197,9 @@ struct ReportArgs {
     /// 工作目录：中立库存这里
     #[arg(long, value_name = "目录")]
     workspace: Option<PathBuf>,
+
+    #[command(flatten)]
+    manifest: ManifestArgs,
 
     #[command(flatten)]
     output: OutputArgs,
@@ -135,7 +221,54 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Scan(args) => run_scan(&args, &cancel),
         Command::Report(args) => run_report(&args),
+        Command::Shape(args) => run_shape(&args),
+        Command::Platforms(args) => run_platforms(&args),
     }
+}
+
+/// 从 `--library` 与主库根挑出该开哪一份中立库，并说清是靠什么找到的。
+fn locate<'a>(
+    library: Option<&'a str>,
+    root: Option<&'a Path>,
+) -> Result<(Slug<'a>, String), String> {
+    match (library, root) {
+        (Some(name), _) => Ok((Slug::Named(name), format!("--library {name}"))),
+        (None, Some(root)) => Ok((Slug::AtPath(root), path::display(root))),
+        (None, None) => Err("要么给出主库根目录，要么用 --library 报出中立库的名字。".to_string()),
+    }
+}
+
+/// 打一句给用户，然后以失败收场。
+///
+/// 命令行这一层几乎每个岔路口都是「说清楚 + 退出」，抽出来之后每处只剩一行，
+/// 也就看得出各处说的话有没有真的不一样。
+fn fail(message: impl AsRef<str>) -> ExitCode {
+    eprintln!("{}", message.as_ref());
+    ExitCode::FAILURE
+}
+
+/// 从中立库折出报告并送到该去的地方。`report` 与 `shape` 共用这一段。
+fn emit_from_catalog(catalog: &Catalog, manifest: &Manifest, output: &OutputArgs) -> ExitCode {
+    let mut limits = Limits::default();
+    if output.dump_duplicates.is_some() {
+        // 默认每组只留几条路径当例子。要导出可据以动手的清单，得把组内每一份都记下来。
+        limits.max_duplicate_paths_per_group = Limits::FULL_DUPLICATE_PATHS_PER_GROUP;
+    }
+    let built = catalog.aggregate(&limits, manifest).and_then(|aggregate| {
+        Ok((
+            HealthReport::build(&aggregate, &catalog.report_meta()?),
+            aggregate,
+        ))
+    });
+    let (report, aggregate) = match built {
+        Ok(pair) => pair,
+        Err(error) => return fail(format!("中立库读不出来：{error}")),
+    };
+    if !output.emit(&report, &aggregate) {
+        return ExitCode::FAILURE;
+    }
+    eprintln!("以上出自中立库 {}，没有读过主库。", catalog.location());
+    ExitCode::SUCCESS
 }
 
 /// 这个主库的工作目录：中立库与断点都住这里，必须在本机（ADR-0009）。
@@ -157,18 +290,14 @@ fn open_catalog(workspace: &Path, slug: Slug<'_>, root: Option<&Path>) -> Result
 fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
     // 先拦，再扫：10T 扫上几个钟头才发现文件写不出去，代价太大。
     if let Err(message) = args.output.refuse_targets_in_library(&args.root) {
-        eprintln!("{message}");
-        return ExitCode::FAILURE;
+        return fail(message);
     }
 
     let workspace = workspace_dir(args.workspace.as_deref());
     let slug = Slug::pick(args.library.as_deref(), &args.root);
     let mut catalog = match open_catalog(&workspace, slug, Some(&args.root)) {
         Ok(catalog) => catalog,
-        Err(message) => {
-            eprintln!("{message}");
-            return ExitCode::FAILURE;
-        }
+        Err(message) => return fail(message),
     };
 
     let mut options = ScanOptions::new(&args.root);
@@ -176,6 +305,10 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
         options.jobs = Jobs::Fixed(jobs.max(1));
     }
     options.samples_per_class = args.samples_per_class;
+    options.manifest = match args.manifest.load(&workspace) {
+        Ok(manifest) => manifest,
+        Err(message) => return fail(message),
+    };
     options.incremental = !args.full;
     options.penetrate_containers = !args.no_containers;
     if args.output.dump_duplicates.is_some() {
@@ -205,6 +338,14 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
         }
     };
 
+    if outcome.shaped {
+        eprintln!(
+            "成型完毕：{} 个变体。",
+            thousands(outcome.report.shaping.variants)
+        );
+    } else if outcome.interrupted {
+        eprintln!("这一趟被中断，没有重新成型——半个库上成出来的变体是错的。");
+    }
     if let Some(probe) = &outcome.probe {
         // 并发是量出来的不是猜出来的，那就把量到的数说出来——用户看得见依据才敢信它，
         // 不服也知道该拿 `-j` 覆盖成多少。
@@ -236,33 +377,26 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
 fn run_report(args: &ReportArgs) -> ExitCode {
     // 只给了 `--library` 时连主库路径都不必知道——这正是名字那条路的用处：
     // 盘换了挂载点、甚至根本没插，报告照样出得来（ADR-0009）。
-    let (slug, located_by) = match (args.library.as_deref(), args.root.as_deref()) {
-        (Some(name), _) => (Slug::Named(name), format!("--library {name}")),
-        (None, Some(root)) => (Slug::AtPath(root), path::display(root)),
-        (None, None) => {
-            eprintln!("要么给出主库根目录，要么用 --library 报出中立库的名字。");
-            return ExitCode::FAILURE;
-        }
+    let (slug, located_by) = match locate(args.library.as_deref(), args.root.as_deref()) {
+        Ok(pair) => pair,
+        Err(message) => return fail(message),
     };
     if let Some(root) = args.root.as_deref()
         && let Err(message) = args.output.refuse_targets_in_library(root)
     {
-        eprintln!("{message}");
-        return ExitCode::FAILURE;
+        return fail(message);
     }
     let workspace = workspace_dir(args.workspace.as_deref());
     let path = workspace::catalog_path(&workspace, slug);
     // 只出报告不该顺手建一个空库出来。
     if !path.exists() {
-        eprintln!("还没有 {located_by} 这份中立库。先跑一次 `romcat scan`。");
-        return ExitCode::FAILURE;
+        return fail(format!(
+            "还没有 {located_by} 这份中立库。先跑一次 `romcat scan`。"
+        ));
     }
     let catalog = match open_catalog(&workspace, slug, args.root.as_deref()) {
         Ok(catalog) => catalog,
-        Err(message) => {
-            eprintln!("{message}");
-            return ExitCode::FAILURE;
-        }
+        Err(message) => return fail(message),
     };
 
     // 只给了名字时，主库在哪只有中立库知道。**这道守卫不能因此漏掉**——
@@ -271,8 +405,7 @@ fn run_report(args: &ReportArgs) -> ExitCode {
         && let Ok(Some(recorded)) = catalog.library_root()
         && let Err(message) = args.output.refuse_targets_in_library(Path::new(&recorded))
     {
-        eprintln!("{message}");
-        return ExitCode::FAILURE;
+        return fail(message);
     }
 
     match catalog.is_empty() {
@@ -290,27 +423,162 @@ fn run_report(args: &ReportArgs) -> ExitCode {
         }
     }
 
-    let mut limits = Limits::default();
-    if args.output.dump_duplicates.is_some() {
-        limits.max_duplicate_paths_per_group = Limits::FULL_DUPLICATE_PATHS_PER_GROUP;
-    }
-    let built = catalog.aggregate(&limits).and_then(|aggregate| {
-        Ok((
-            HealthReport::build(&aggregate, &catalog.report_meta()?),
-            aggregate,
-        ))
-    });
-    let (report, aggregate) = match built {
+    let manifest = match args.manifest.load(&workspace) {
+        Ok(manifest) => manifest,
+        Err(message) => return fail(message),
+    };
+    emit_from_catalog(&catalog, &manifest, &args.output)
+}
+
+/// 按平台清单重新成型一遍。**一个字节都不读主库**——成型是中立库上的纯计算，
+/// 改一条规则不必重扫 8.6 TiB。
+fn run_shape(args: &ShapeArgs) -> ExitCode {
+    let (slug, located_by) = match locate(args.library.as_deref(), args.root.as_deref()) {
         Ok(pair) => pair,
+        Err(message) => return fail(message),
+    };
+    if let Some(root) = args.root.as_deref()
+        && let Err(message) = args.output.refuse_targets_in_library(root)
+    {
+        return fail(message);
+    }
+    if args.merge.len() == 1 {
+        return fail("--merge 至少要给两个键：一个变体由哪几个条目组成，一个键说不清。");
+    }
+    let workspace = workspace_dir(args.workspace.as_deref());
+    let path = workspace::catalog_path(&workspace, slug);
+    if !path.exists() {
+        return fail(format!(
+            "还没有 {located_by} 这份中立库。先跑一次 `romcat scan`。"
+        ));
+    }
+    let manifest = match args.manifest.load(&workspace) {
+        Ok(manifest) => manifest,
+        Err(message) => return fail(message),
+    };
+    let mut catalog = match open_catalog(&workspace, slug, args.root.as_deref()) {
+        Ok(catalog) => catalog,
+        Err(message) => return fail(message),
+    };
+
+    // 人工纠正先落库，再成型——顺序反了的话这一趟成型还用的是旧的纠正。
+    for key in &args.forget_merge {
+        match catalog.clear_shaping_override(key) {
+            Ok(true) => eprintln!("撤掉了 {key} 上的人工纠正。"),
+            Ok(false) => eprintln!("{key} 上本来就没有人工纠正。"),
+            Err(error) => {
+                eprintln!("中立库写不进：{error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    // 键打错了要当场说，别静悄悄地记一条永远不生效的纠正。
+    for key in args.merge.iter().chain(&args.forget_merge) {
+        match catalog.contains(key) {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!(
+                    "中立库里没有 {key} 这条记录。键是**相对主库根**的路径，分隔符是 `/`（ADR-0020）。"
+                );
+                return ExitCode::FAILURE;
+            }
+            Err(error) => {
+                eprintln!("中立库读不出来：{error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    if let Some((main, rest)) = args.merge.split_first() {
+        for key in std::iter::once(main).chain(rest) {
+            if let Err(error) = catalog.set_shaping_override(key, main) {
+                eprintln!("中立库写不进：{error}");
+                return ExitCode::FAILURE;
+            }
+        }
+        eprintln!(
+            "记下人工纠正：{} 个条目并成一个变体，主文件是 {main}。",
+            args.merge.len()
+        );
+    }
+
+    let scan = match catalog.last_traversal() {
+        Ok(Some(traversal)) => traversal.scan,
+        Ok(None) => {
+            eprintln!(
+                "中立库 {} 里还没有遍历记录。先跑一次 `romcat scan`。",
+                catalog.location()
+            );
+            return ExitCode::FAILURE;
+        }
         Err(error) => {
             eprintln!("中立库读不出来：{error}");
             return ExitCode::FAILURE;
         }
     };
-    if !args.output.emit(&report, &aggregate) {
-        return ExitCode::FAILURE;
+    let plan = match shape::reshape(&mut catalog, &manifest, scan) {
+        Ok(plan) => plan,
+        Err(error) => {
+            eprintln!("成型失败：{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!(
+        "成型完毕：{} 个变体（另有 {} 个范围之内的文件不是可玩的东西，没进变体）。",
+        thousands(u64::try_from(plan.variants.len()).unwrap_or(u64::MAX)),
+        thousands(plan.unshaped_files)
+    );
+
+    emit_from_catalog(&catalog, &manifest, &args.output)
+}
+
+/// 列出眼下生效的平台清单与成型规则。
+///
+/// 「平台清单是数据不是代码」要落地，用户得看得见眼下到底生效的是哪一份、里面有什么。
+fn run_platforms(args: &PlatformsArgs) -> ExitCode {
+    if let Some(path) = &args.dump_builtin {
+        match write_file(path, Manifest::builtin_text().as_bytes()) {
+            Ok(()) => {
+                println!(
+                    "内置平台清单已写入 {}。改完用 `--manifest {}` 生效，\n\
+                     或者放进工作目录叫 platforms.toml 自动生效。",
+                    path.display(),
+                    path.display()
+                );
+            }
+            Err(error) => {
+                eprintln!("写不进 {}：{error}", path.display());
+                return ExitCode::FAILURE;
+            }
+        }
     }
-    eprintln!("以上出自中立库 {}，没有读过主库。", catalog.location());
+    let workspace = workspace_dir(args.workspace.as_deref());
+    let manifest = match args.manifest.load(&workspace) {
+        Ok(manifest) => manifest,
+        Err(message) => return fail(message),
+    };
+    println!("成型规则");
+    for rule in manifest.rules() {
+        println!("  {}（{}）", rule.name, rule.kind.label());
+    }
+    println!("\n平台（{} 个）", manifest.platforms().len());
+    for platform in manifest.platforms() {
+        let rules = if platform.rules.is_empty() {
+            "一文件一变体".to_string()
+        } else {
+            platform.rules.join("、")
+        };
+        println!(
+            "  {:<10} 目录 {:<28} 成型 {rules}",
+            platform.name,
+            platform.dirs.join("、")
+        );
+    }
+    if !manifest.out_of_scope().is_empty() {
+        println!("\n明确排除的目录");
+        for dir in manifest.out_of_scope() {
+            println!("  {} —— {}", dir.dir, dir.reason);
+        }
+    }
     ExitCode::SUCCESS
 }
 

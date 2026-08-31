@@ -209,12 +209,13 @@ pub(super) fn render(report: &HealthReport) -> String {
         }
     }
 
-    heading(&mut out, "按平台目录");
+    heading(&mut out, "按平台");
     let _ = writeln!(
         out,
         "{}",
         row(&[
-            ("平台目录", 22),
+            ("平台", 22),
+            ("变体", 10),
             ("文件数", 12),
             ("容量", 12),
             ("透明容器", 10),
@@ -231,11 +232,28 @@ pub(super) fn render(report: &HealthReport) -> String {
                 .find(|c| c.category == category)
                 .map_or(0.0, |c| c.file_share)
         };
+        // 范围之外的东西根本不成型，那一格印 0 会读成「一个变体都没成出来」，
+        // 而实情是「压根没去成型」。空着更诚实（ADR-0011 修订段）。
+        let variants = if platform.in_scope {
+            thousands(platform.variants)
+        } else {
+            "—".to_string()
+        };
+        // 这一行现在按**平台**分组而不是按目录，因此目录名与平台名不同时要说出来——
+        // 不然读的人对不上「盘上那个 `ps` 目录去哪儿了」。
+        let name = match platform.dirs.as_slice() {
+            [dir] if !dir.eq_ignore_ascii_case(&platform.name) => {
+                format!("{}（{dir}）", platform.name)
+            }
+            dirs if dirs.len() > 1 => format!("{}（{}）", platform.name, dirs.join("、")),
+            _ => platform.name.clone(),
+        };
         let _ = writeln!(
             out,
             "{}",
             row(&[
-                (&truncate(&platform.name, 21), 22),
+                (&truncate(&name, 21), 22),
+                (&variants, 10),
                 (&thousands(platform.files), 12),
                 (&human_bytes(platform.bytes), 12),
                 (
@@ -266,6 +284,16 @@ pub(super) fn render(report: &HealthReport) -> String {
             "注：{UNKNOWN_PLATFORM_LABEL} 是直接躺在库根下的文件，没有平台目录可依据，但照常计入"
         );
     }
+    if report.platforms.iter().any(|p| !p.in_scope && !p.unknown) {
+        let _ = writeln!(
+            out,
+            "注：「变体」一栏是 — 的那几行不在识别范围内（见下面「范围边界」），库体检照样统计它们"
+        );
+    }
+
+    render_shaping(&mut out, report);
+    render_scope(&mut out, report);
+    render_conflicts(&mut out, report);
 
     heading(&mut out, "三类构成（识别管线会走哪条路径）");
     for category in &report.categories {
@@ -595,6 +623,207 @@ pub(super) fn render(report: &HealthReport) -> String {
         );
     }
     out
+}
+
+fn render_shaping(out: &mut String, report: &HealthReport) {
+    let shaping = &report.shaping;
+    heading(out, "成型：从文件到变体");
+    if !shaping.shaped {
+        let _ = writeln!(
+            out,
+            "还没成型过。跑一次 `romcat scan` 或 `romcat shape`，库里才会有变体。"
+        );
+        return;
+    }
+    if shaping.stale {
+        let _ = writeln!(
+            out,
+            "⚠ 这份变体表比中立库里最后一次遍历旧。扫过之后没再成型，下面的数字对不上现在的库。"
+        );
+    }
+    if shaping.manifest_changed {
+        let _ = writeln!(
+            out,
+            "⚠ 这份变体表是用**另一份平台清单**成的型。上面「按平台」那张表按眼下这份清单分组，\n\
+             \x20 变体数却按成型时那份算——两边可能对不上。跑一次 `romcat shape` 对齐。"
+        );
+    }
+    let _ = writeln!(
+        out,
+        "变体            {} 个，吃掉 {} 个文件、{}",
+        thousands(shaping.variants),
+        thousands(shaping.files),
+        human_bytes(shaping.bytes)
+    );
+    let _ = writeln!(
+        out,
+        "每变体文件数    平均 {:.2} 个（范围之内共 {} 个文件）",
+        shaping.files_per_variant,
+        thousands(report.scope.in_scope_files)
+    );
+    if shaping.unreadable_files > 0 {
+        let _ = writeln!(
+            out,
+            "                其中 {} 个成员元数据读不到，**容量是个下界**（ADR-0021）",
+            thousands(shaping.unreadable_files)
+        );
+    }
+    let not_in_variants: u64 = shaping.unshaped.iter().map(|c| c.files).sum();
+    let _ = writeln!(
+        out,
+        "没进变体        {} 个（范围之内），按归类分：",
+        thousands(not_in_variants)
+    );
+    for category in &shaping.unshaped {
+        if category.files == 0 {
+            continue;
+        }
+        let 注 = if category.category == crate::classify::Category::Unclassified {
+            " ← 既不是媒体也不是文档垃圾，却没成型：**这一栏大就是成型的缺口**"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            out,
+            "  {}{} 个，{}{注}",
+            pad(&category.label, 16),
+            thousands(category.files),
+            human_bytes(category.bytes)
+        );
+    }
+    if shaping.manual > 0 {
+        let _ = writeln!(
+            out,
+            "人工纠正        {} 个变体（`romcat shape --merge`，重新成型不会冲掉）",
+            thousands(shaping.manual)
+        );
+    }
+
+    if !shaping.by_role.is_empty() {
+        let _ = writeln!(out, "\n成员身份");
+        for role in &shaping.by_role {
+            let _ = writeln!(
+                out,
+                "{}{} 个",
+                pad(role.role.code(), 16),
+                thousands(role.members)
+            );
+        }
+    }
+
+    if !shaping.by_rule.is_empty() {
+        let _ = writeln!(out, "\n哪条成型规则成的型");
+        for rule in &shaping.by_rule {
+            let _ = writeln!(
+                out,
+                "{}{} 个变体",
+                pad(&truncate(&rule.rule, 19), 20),
+                thousands(rule.variants)
+            );
+        }
+    }
+
+    if !shaping.by_platform.is_empty() {
+        let _ = writeln!(
+            out,
+            "\n{}",
+            row(&[
+                ("平台", 16),
+                ("变体", 10),
+                ("文件", 12),
+                ("容量", 12),
+                ("文件/变体", 12)
+            ])
+        );
+        for platform in &shaping.by_platform {
+            let _ = writeln!(
+                out,
+                "{}",
+                row(&[
+                    (&truncate(&platform.name, 15), 16),
+                    (&thousands(platform.variants), 10),
+                    (&thousands(platform.files), 12),
+                    (&human_bytes(platform.bytes), 12),
+                    (&format!("{:.2}", platform.files_per_variant), 12),
+                ])
+            );
+        }
+    }
+}
+
+fn render_scope(out: &mut String, report: &HealthReport) {
+    let scope = &report.scope;
+    heading(out, "范围边界（识别管线管哪些）");
+    let _ = writeln!(
+        out,
+        "范围之内        {} 个平台，{} 个文件，{}",
+        thousands(scope.platforms),
+        thousands(scope.in_scope_files),
+        human_bytes(scope.in_scope_bytes)
+    );
+    let _ = writeln!(
+        out,
+        "还没映射        {} 个顶层目录，{} 个文件，{} —— 工具不认得这些目录名，整体不进识别管线；\n\
+         \x20               库体检照样统计，那正是手动整理的依据（ADR-0011）",
+        thousands(scope.unmapped_dirs),
+        thousands(scope.unmapped_files),
+        human_bytes(scope.unmapped_bytes)
+    );
+    for example in &scope.unmapped_examples {
+        let _ = writeln!(out, "  {example}");
+    }
+    if !scope.excluded.is_empty() {
+        let _ = writeln!(
+            out,
+            "明确排除        看过之后决定不做的，与「还没映射」不是一回事"
+        );
+        for dir in &scope.excluded {
+            let _ = writeln!(
+                out,
+                "  {}（{} 个文件，{}）—— {}",
+                dir.name,
+                thousands(dir.files),
+                human_bytes(dir.bytes),
+                dir.reason
+            );
+        }
+    }
+    let _ = writeln!(
+        out,
+        "库根下的散文件  {} 个，{} —— 连顶层目录都没有，平台无从谈起",
+        thousands(scope.root_level_files),
+        human_bytes(scope.root_level_bytes)
+    );
+}
+
+fn render_conflicts(out: &mut String, report: &HealthReport) {
+    let conflicts = &report.conflicts;
+    heading(out, "目录说的与文件说的对不上");
+    if conflicts.total == 0 {
+        let _ = writeln!(
+            out,
+            "没有。（判据是「只可能属于某一个平台」的扩展名，跨平台的 iso/bin/zip 不参与。）"
+        );
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "共 {} 条。目录是强先验而非权威——下错、放错、一个容器里混装几个平台，都会这样（ADR-0011）。",
+        thousands(conflicts.total)
+    );
+    for (_, label, count) in &conflicts.by_evidence {
+        let _ = writeln!(out, "{}{} 条", pad(label, 16), thousands(*count));
+    }
+    for conflict in &conflicts.examples {
+        let _ = writeln!(
+            out,
+            "  {} — 目录说 {}，文件说 {}（{}）",
+            truncate(&conflict.path, 90),
+            conflict.declared,
+            conflict.implied,
+            conflict.evidence.label()
+        );
+    }
 }
 
 #[cfg(test)]

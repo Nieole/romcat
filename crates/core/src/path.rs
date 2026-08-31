@@ -215,6 +215,16 @@ pub fn display_key(root: &str, key: &str) -> String {
     out
 }
 
+/// 把一段名字折成可比较的形式：先小写，再规范化成 NFC。
+///
+/// 两件事都不能少。小写是因为同一个 TitleID 目录在不同转储工具下写成 `PCSG00042` 或
+/// `pcsg00042`；NFC 的理由与键同源（ADR-0020）——macOS 的 NTFS 驱动交出来的名字是 NFD，
+/// 而平台清单里写的多半是 NFC，不折一下的话带浊音假名的目录名会对不上。
+#[must_use]
+pub fn fold(text: &str) -> String {
+    nfc(&text.to_lowercase()).into_owned()
+}
+
 /// 取出一个键的**平台目录**名。
 ///
 /// 平台由目录给出（ADR-0011：目录是强先验而非权威）。直接躺在库根下的文件没有平台目录，
@@ -376,6 +386,13 @@ mod tests {
     fn 平台目录取键的第一级() {
         assert_eq!(platform_of_key("FC/超级马里奥.zip"), Some("FC"));
         assert_eq!(platform_of_key("PS1/某游戏/disc.cue"), Some("PS1"));
+    }
+
+    #[test]
+    fn 折出来的名字小写且是_nfc() {
+        assert_eq!(fold("PCSG00042"), "pcsg00042");
+        // 「が」的分解形折完之后要与预组合形相等
+        assert_eq!(fold(分解), fold(预组合));
     }
 
     #[test]
