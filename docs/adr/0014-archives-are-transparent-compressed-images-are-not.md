@@ -45,3 +45,23 @@ RetroArch 支持 zip 与 7z 但不支持 rar（待同一份调研核实）。若
 - **RetroArch 只支持 zip / 7z / apk / zst，不支持 rar**（`file_archive_get_file_backend()` 的分派只有这四个）。例外仅 melonDS（libarchive 白名单含 `.rar`）与 DeSmuME 的 Windows 前端。
 - **PPSSPP 不支持 ZSO 与 CSO v2**（源码 `hdr.ver > 1` 报错，对应 issue 已 closed as not planned），**而 PCSX2 支持 zso**。与直觉相反。
 - **ES-DE 的哈希刮削对归档文件本身算哈希、不穿透**；**Pegasus 纯扩展名匹配、归档不透明**。
+
+## 修订：zst 进工具，主库不做批量转换
+
+实测发现 `.zst` 是主库中容量第二大的扩展名（2,685 个文件、2.50 TiB，仅次于 `.7z` 的 4.71 TiB），实际形态多为 `.tar.zst`——tar 套 zst 的双层结构。整场设计访谈都未涉及这个格式。
+
+**它进不了「零解压读 CRC-32」快路，三层都是硬性的：**
+
+- zstd 帧格式规范全文中「CRC」出现 **0 次**。唯一的校验和是可选的 `Content_Checksum`（XXH64 低 32 位），且覆盖**整个流**而非成员，而 DAT 用的是 CRC-32。
+- tar 的 `chksum` 是 512 字节头部的**无符号字节简单求和**（POSIX.1-2024），只保护元数据。
+- 两层都没有「成员 → 内容哈希」映射表。zstd 规范原文自陈 *does not attempt to allow random access*。
+
+**真盘实测（43 个样本，32 个可解析）**：`Frame_Content_Size` 仅 **53%** 存在——**不能假设它存在**；`Content_Checksum` 100% 存在但无助于 DAT 匹配；**0% 使用外部字典**，全部可独立解压。
+
+## 决定：工具支持，主库一个字节不动
+
+批量转换主库违背 ADR-0015 已经定下的「格式转换发生在导出侧」。PSV 要装到目标设备时，导出管线按**能力档案**转成目标要的格式（例如 Vita3K 只认 `.zip` / `.vpk` / `.vci`，这批 `.tar.zst` 它一个都装不了）。主库保持原始形态。
+
+成本账支持这个决定：全量解压 2.50 TiB 约 **3.8–7.6 小时**，瓶颈全在磁盘（zstd 解压 1550 MB/s 对盘 100–200 MB/s，解压等于免费）；而手动转 7z/rar 要 **15–44 小时**——同样得把 2.50 TiB 读一遍，却额外付 LZMA2 的 CPU、等量写回、空间风险与不可逆，压缩率收益接近 0，还引入 7z solid block 陷阱。
+
+**读一遍 2.50 TiB 是所有方案共同的地板**，手动转换并不更省，只是把同样的读放进用户的时间里再多付一次写。
