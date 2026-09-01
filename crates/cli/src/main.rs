@@ -687,12 +687,6 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
         Ok(pair) => pair,
         Err(message) => return fail(message),
     };
-    if let Some(root) = args.root.as_deref()
-        && let Some(target) = args.json.as_deref()
-        && let Err(message) = refuse_writing_into_library(root, target)
-    {
-        return fail(message);
-    }
     let workspace = workspace_dir(args.workspace.as_deref());
     let catalog_path = workspace::catalog_path(&workspace, slug);
     if !catalog_path.exists() {
@@ -726,6 +720,9 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
             "不知道主库在哪：给出主库根目录，或者加 --no-read-library 只用容器里那套零解压的 CRC-32。",
         );
     }
+    // 主库只读（ADR-0004）：报告不许落进主库。守一次就够——上面已经把「主库在哪」
+    // 定下来了（命令行给的优先，没给就问中立库），两处各守一遍只会让人以为它们守的
+    // 不是同一件事。
     if let Some(root) = &root
         && let Some(target) = args.json.as_deref()
         && let Err(message) = refuse_writing_into_library(root, target)
@@ -778,20 +775,8 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
         thousands(outcome.read_files),
         thousands(outcome.reused_hashes),
     );
-    if let Some(path) = &args.json {
-        match serde_json::to_vec_pretty(&outcome.report) {
-            Ok(bytes) => match write_file(path, &bytes) {
-                Ok(()) => eprintln!("报告已写入 {}", path.display()),
-                Err(error) => {
-                    eprintln!("报告写不进 {}：{error}", path.display());
-                    return ExitCode::FAILURE;
-                }
-            },
-            Err(error) => {
-                eprintln!("报告序列化失败：{error}");
-                return ExitCode::FAILURE;
-            }
-        }
+    if !write_json(args.json.as_deref(), &outcome.report) {
+        return ExitCode::FAILURE;
     }
     if outcome.interrupted {
         eprintln!("这一趟被中断了，已经算完的那部分留在中立库里，重跑会从头算一遍。");
@@ -960,22 +945,36 @@ fn emit_dat_report(repo: &DatRepo, json: Option<&Path>) -> ExitCode {
     let mut stdout = io::stdout().lock();
     let _ = stdout.write_all(text.as_bytes());
     let _ = stdout.flush();
-    if let Some(path) = json {
-        match serde_json::to_vec_pretty(&report) {
-            Ok(bytes) => match write_file(path, &bytes) {
-                Ok(()) => eprintln!("报告已写入 {}", path.display()),
-                Err(error) => {
-                    eprintln!("报告写不进 {}：{error}", path.display());
-                    return ExitCode::FAILURE;
-                }
-            },
-            Err(error) => {
-                eprintln!("报告序列化失败：{error}");
-                return ExitCode::FAILURE;
-            }
-        }
+    if !write_json(json, &report) {
+        return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// 把一份报告另存成 JSON，返回成没成。`path` 是 `None` 就什么都不做。
+///
+/// 三个子命令都要这一段（体检、DAT 仓库、识别），各写一遍只会让「写不出去时说什么」
+/// 三处各不相同。
+fn write_json<T: serde::Serialize>(path: Option<&Path>, report: &T) -> bool {
+    let Some(path) = path else {
+        return true;
+    };
+    match serde_json::to_vec_pretty(report) {
+        Ok(bytes) => match write_file(path, &bytes) {
+            Ok(()) => {
+                eprintln!("报告已写入 {}", path.display());
+                true
+            }
+            Err(error) => {
+                eprintln!("报告写不进 {}：{error}", path.display());
+                false
+            }
+        },
+        Err(error) => {
+            eprintln!("报告序列化失败：{error}");
+            false
+        }
+    }
 }
 
 /// 列出眼下生效的数据源清单。
@@ -1052,20 +1051,8 @@ impl OutputArgs {
 
         let mut failed = false;
 
-        if let Some(path) = &self.json {
-            match serde_json::to_vec_pretty(report) {
-                Ok(bytes) => match write_file(path, &bytes) {
-                    Ok(()) => eprintln!("报告已写入 {}", path.display()),
-                    Err(error) => {
-                        eprintln!("报告写不进 {}：{error}", path.display());
-                        failed = true;
-                    }
-                },
-                Err(error) => {
-                    eprintln!("报告序列化失败：{error}");
-                    failed = true;
-                }
-            }
+        if !write_json(self.json.as_deref(), report) {
+            failed = true;
         }
 
         if let Some(path) = &self.dump_duplicates {

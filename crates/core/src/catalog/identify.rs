@@ -167,15 +167,18 @@ impl State {
 }
 
 /// 这一行**作品**或**发行版**是谁造的。
+///
+/// 名字不叫 `Origin`：`dat::registry::Origin` 说的是「一份 DAT 从哪儿取」，
+/// 同一个 crate 里两个 `Origin` 只会让人读错。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Origin {
+pub enum Provenance {
     /// 识别自己造的。重跑识别时整批清掉再造一遍。
     Identified,
     /// 人工**裁决**定下来的。识别绝不碰它。
     Verdict,
 }
 
-impl Origin {
+impl Provenance {
     /// 存进库的那个词。
     #[must_use]
     pub fn label(self) -> &'static str {
@@ -207,10 +210,11 @@ pub struct Candidate {
     pub game: String,
     /// 文件记录名。
     pub rom: String,
-    /// 撞上时用的是哪套哈希（含头 / 去头）。
-    pub hashing: Convention,
-    /// 那份 DAT 自己声明的口径。
-    pub convention: Convention,
+    /// 撞上时用的是**哪套哈希**（含头 / 去头）。
+    pub hashed_as: Convention,
+    /// 那份 DAT 自己声明的**口径**。两者会不一样：没有外挂头的文件，含头那套哈希
+    /// 照样撞得上去头口径的 DAT——两套本来就落在同一串字节上。
+    pub dat_convention: Convention,
     /// **依据**：给人看的那一句。
     pub evidence: String,
     /// 中文记号。
@@ -613,8 +617,8 @@ impl Catalog {
                             candidate.platform,
                             candidate.game,
                             candidate.rom,
-                            candidate.hashing.label(),
-                            candidate.convention.label(),
+                            candidate.hashed_as.label(),
+                            candidate.dat_convention.label(),
                             candidate.evidence,
                             candidate.chinese.map(ChineseMark::label),
                             candidate.serial,
@@ -648,17 +652,22 @@ impl Catalog {
             source,
         };
         let tx = self.conn.transaction().map_err(to_err)?;
+        // 顺序是**从引用方往被引用方**走：候选指着发行版、变体指着作品与发行版，
+        // 外键是开着的（`rusqlite` 的 bundled SQLite 编译时开了
+        // `SQLITE_DEFAULT_FOREIGN_KEYS=1`），先删被指着的那一行会当场报错。
+        for sql in ["DELETE FROM candidate", "DELETE FROM identification"] {
+            tx.execute(sql, []).map_err(to_err)?;
+        }
+        let mine = Provenance::Identified.label();
         for sql in [
             "UPDATE variant SET release_id = NULL
-             WHERE release_id IN (SELECT id FROM release WHERE origin = '识别')",
+             WHERE release_id IN (SELECT id FROM release WHERE origin = ?1)",
             "UPDATE variant SET work_id = NULL
-             WHERE work_id IN (SELECT id FROM work WHERE origin = '识别')",
-            "DELETE FROM candidate",
-            "DELETE FROM identification",
-            "DELETE FROM release WHERE origin = '识别'",
-            "DELETE FROM work WHERE origin = '识别'",
+             WHERE work_id IN (SELECT id FROM work WHERE origin = ?1)",
+            "DELETE FROM release WHERE origin = ?1",
+            "DELETE FROM work WHERE origin = ?1",
         ] {
-            tx.execute(sql, []).map_err(to_err)?;
+            tx.execute(sql, params![mine]).map_err(to_err)?;
         }
         tx.commit().map_err(to_err)
     }
@@ -692,8 +701,8 @@ impl Catalog {
                     platform: row.get(6)?,
                     game: row.get(7)?,
                     rom: row.get(8)?,
-                    hashing: Convention::from_label(&hashing).unwrap_or(Convention::AsIs),
-                    convention: Convention::from_label(&convention).unwrap_or(Convention::AsIs),
+                    hashed_as: Convention::from_label(&hashing).unwrap_or(Convention::AsIs),
+                    dat_convention: Convention::from_label(&convention).unwrap_or(Convention::AsIs),
                     evidence: row.get(11)?,
                     chinese: chinese.as_deref().and_then(|label| match label {
                         "汉化" => Some(ChineseMark::FanTranslated),
@@ -759,6 +768,13 @@ impl Catalog {
                 .map_err(|source| self.err(source))?;
             Ok(u64::try_from(value).unwrap_or(0))
         };
+        let one_of = |sql: &str, arg: &str| -> Result<u64, CatalogError> {
+            let value: i64 = self
+                .conn
+                .query_row(sql, params![arg], |row| row.get(0))
+                .map_err(|source| self.err(source))?;
+            Ok(u64::try_from(value).unwrap_or(0))
+        };
         counts.candidates = one("SELECT COUNT(*) FROM candidate")?;
         counts.accepted = one("SELECT COUNT(*) FROM candidate WHERE accepted <> 0")?;
         counts.multi = one("SELECT COUNT(*) FROM (SELECT variant_key FROM candidate
@@ -768,8 +784,14 @@ impl Catalog {
         counts.official =
             one("SELECT COUNT(DISTINCT variant_key) FROM candidate WHERE chinese = '官中'")?;
         counts.nkit = one("SELECT COALESCE(SUM(nkit), 0) FROM identification")?;
-        counts.works = one("SELECT COUNT(*) FROM work WHERE origin = '识别'")?;
-        counts.releases = one("SELECT COUNT(*) FROM release WHERE origin = '识别'")?;
+        counts.works = one_of(
+            "SELECT COUNT(*) FROM work WHERE origin = ?1",
+            Provenance::Identified.label(),
+        )?;
+        counts.releases = one_of(
+            "SELECT COUNT(*) FROM release WHERE origin = ?1",
+            Provenance::Identified.label(),
+        )?;
 
         let mut statement = self
             .conn

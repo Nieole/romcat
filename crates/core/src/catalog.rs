@@ -38,7 +38,7 @@ use crate::shape;
 pub use baseline::{Baseline, Recorded, ScanDelta, Verdict};
 pub use content::VariantRow;
 pub use identify::{
-    Candidate, CandidateCounts, Confidence, ContentHash, EntryFact, Identification, Origin,
+    Candidate, CandidateCounts, Confidence, ContentHash, EntryFact, Identification, Provenance,
     SourceCount, State,
 };
 

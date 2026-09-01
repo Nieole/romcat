@@ -520,6 +520,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "romcat-core",
+ "serde",
  "serde_json",
 ]
 

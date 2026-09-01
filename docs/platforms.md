@@ -44,7 +44,17 @@
 
 **平台清单是数据不是代码。** 26 个平台各自的成型规则、头部解析、DAT 源、模拟器映射写成声明式配置。否则加一个平台就要改代码、发版本，而这份清单显然还会增长。
 
-> **这一条在票 05 落地了**，落点是 `crates/core/src/platform/platforms.toml`：哪些顶层目录算哪个平台、每个平台用哪几条**成型规则**、哪些扩展名只可能属于某一个平台，全在那一份 TOML 里。头部解析、DAT 源、模拟器映射还在代码里，等到票 07 / 票 06 / 票 21 各自落地时再搬。
+> **这一条在票 05 落地了**，落点是 `crates/core/src/platform/platforms.toml`：哪些顶层目录算哪个平台、每个平台用哪几条**成型规则**、哪些扩展名只可能属于某一个平台，全在那一份 TOML 里。
+>
+> **DAT 源**在票 06 也搬出去了：`crates/core/src/dat/sources.toml`，`romcat dat sources --dump-builtin` 导底稿。模拟器映射等票 21。
+>
+> **头部解析这一项改了归属：**票 07 落地之后看清了它其实是两件事。一件是**外挂头**
+> （iNES 的 16 字节、拷贝机的 512 字节）——它按**格式**而不是按平台走，判据是魔数加
+> 尺寸余数，而调研（`docs/research/rom-identification.md` B.5.5）明确记着：数据驱动的
+> XML skipper 表达不了「从文件里读出跳过长度」这类规则，RomVault 与 igir 都是**硬编码在
+> 代码里**、以 skipper 文件名为键。票 07 照做（`identify::header`，五种头、四十行、
+> 逐条有测试）。另一件是**卡带内部头**（GBA 的 game code、NDS 的 gamecode），那是**票 10**
+> 的活，搬不搬进清单由那张票定。
 >
 > - `romcat platforms` 列出眼下生效的那一份
 > - `romcat platforms --dump-builtin <文件>` 导出一份底稿照着改

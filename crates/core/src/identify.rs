@@ -13,15 +13,23 @@
 //! 丢掉一整边，含头那边丢掉的正是 TOSEC 全部的汉化条目。两套的成本却完全不同：
 //!
 //! - **裸文件**本来就要整份读一遍，那就一次读取把两套一起算出来（[`fingerprint`]）。
-//! - **容器内部条目**的含头那套白拿，去头那套要解压。于是**含头先撞；撞不上、而且这个
-//!   扩展名可能带外挂头，才回头解那一条算去头**。它不损失任何一次命中：没有外挂头的
-//!   文件两套本来就是同一串字节，含头那次就已经把去头那档 DAT 撞过了。
+//! - **容器内部条目**的含头那套白拿（元数据里就有），去头那套要解压。于是先用**未压缩
+//!   大小**筛一道：外挂头都是「固定长度的头加上整齐的内容」，尺寸对不上就一定没有头，
+//!   两套落在同一串字节上——含头那次已经把去头那档 DAT 一并撞过了，不必解压。
+//!   尺寸说得通的才解出来算第二套（[`header::size_suggests_header`]）。
+//!
+//! 于是**两套都撞**，而且撞出来的记录里有一部分是「去头口径的 DAT 被含头那套哈希撞上」
+//! ——那些文件本来就没有外挂头，两套是同一串字节。实测数字在 `docs/library-facts.md`。
 //!
 //! ## NKit 前置于任何 CRC 匹配
 //!
 //! Dolphin 的原话：NKit 处理过的镜像**的 CRC32 可能和好转储的相同，即使两个文件并不
 //! 完全一样**。所以 GC / Wii 的镜像在**接受**一条命中之前先验 `0x200` 处的 `NKIT`
 //! （[`header::is_nkit`]），验出来就降一档置信度、不许自动通过。转回 ISO 再识别是票 09 的活。
+//!
+//! **验不了也不许自动通过。** 判据取自**撞上的那条记录说它是 GC / Wii 的光盘**，
+//! 不是取自目录名——目录只是强先验（ADR-0011），放错地方的镜像照样存在。盘不在位、
+//! 容器解不开、`--no-read-library`：这几种情形下验不出来，那条命中就只能是中置信。
 //!
 //! ## 四种结论，跳过与无判据都不混进未命中
 //!
@@ -40,7 +48,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::catalog::identify::{Candidate, Confidence, ContentHash, EntryFact, Identification};
-use crate::catalog::{Catalog, CatalogError, Origin, State, VariantRow};
+use crate::catalog::{Catalog, CatalogError, Provenance, State, VariantRow};
 use crate::classify::{self, Category};
 use crate::container::{self, ContainerKind, Demand, ReadPlan};
 use crate::dat::chinese::ChineseMark;
@@ -126,9 +134,12 @@ pub struct Outcome {
     pub reused_hashes: u64,
 }
 
-/// 一份拿去撞 DAT 的内容。
+/// 一份拿去撞 DAT 的内容：容器里的一个内部文件，或者一个裸文件。
+///
+/// 名字不叫 `Unit`：`dat::repo::Unit` 说的是「一次取数的最小单位」，同一个 crate 里
+/// 两个 `Unit` 只会让人读错。
 #[derive(Debug, Clone)]
-struct Unit {
+struct ContentUnit {
     /// 是变体的哪个成员。
     member: String,
     /// 容器内部路径；裸文件是空串。
@@ -147,7 +158,7 @@ struct Unit {
     in_container: bool,
 }
 
-impl Unit {
+impl ContentUnit {
     fn is_nkit(&self) -> bool {
         self.print.and_then(|print| print.nkit).unwrap_or(false)
     }
@@ -303,7 +314,7 @@ fn identify_variant(
     // 二、撞。含头那套一律撞一次——容器里的它零解压就有，裸文件的它刚算出来。
     for unit in &mut units {
         if let Some(print) = unit.print {
-            unit.hits = lookup(repo, print.size, print.crc32, Convention::AsIs)?;
+            unit.hits = lookup(repo, print.crc32, print.size, Convention::AsIs)?;
         }
         // 去头那套**照撞不误**，哪怕含头那次已经撞上了：一份带外挂头的卡带在 TOSEC 里
         // 按含头收、在 No-Intro 的 headerless 集里按去头收，两边各是一条候选。
@@ -312,7 +323,7 @@ fn identify_variant(
             && let Some((size, crc32)) = print.headerless_pair()
             && (size, crc32) != (print.size, print.crc32)
         {
-            let mut bare = lookup(repo, size, crc32, Convention::Headerless)?;
+            let mut bare = lookup(repo, crc32, size, Convention::Headerless)?;
             unit.hits.append(&mut bare);
         }
     }
@@ -324,7 +335,7 @@ fn identify_variant(
 fn collect(
     catalog: &Catalog,
     members: &[(String, Role)],
-) -> Result<(Vec<Unit>, Vec<String>), CatalogError> {
+) -> Result<(Vec<ContentUnit>, Vec<String>), CatalogError> {
     let mut units = Vec::new();
     let mut contents = Vec::new();
     for (key, role) in members {
@@ -357,7 +368,7 @@ fn collect(
                     continue;
                 }
                 match crc32 {
-                    Some(crc32) => units.push(Unit {
+                    Some(crc32) => units.push(ContentUnit {
                         member: key.clone(),
                         name: inner.clone(),
                         inner,
@@ -390,7 +401,7 @@ fn collect(
                 false,
             )),
             Category::BareFile | Category::Unclassified => match catalog.entry_fact(key)? {
-                EntryFact::File(size) => units.push(Unit {
+                EntryFact::File(size) => units.push(ContentUnit {
                     member: key.clone(),
                     inner: String::new(),
                     name: key.clone(),
@@ -434,8 +445,8 @@ fn collect(
     Ok((units, contents))
 }
 
-fn blocked_unit(member: &str, inner: &str, reason: String, in_container: bool) -> Unit {
-    Unit {
+fn blocked_unit(member: &str, inner: &str, reason: String, in_container: bool) -> ContentUnit {
+    ContentUnit {
         member: member.to_string(),
         inner: inner.to_string(),
         name: if inner.is_empty() {
@@ -467,7 +478,7 @@ fn fill_in(
     catalog: &mut Catalog,
     options: &Options,
     variant: &VariantRow,
-    units: &mut [Unit],
+    units: &mut [ContentUnit],
     state: &mut Run,
 ) -> Result<u64, IdentifyError> {
     // 先看中立库里有没有算过的。算过的哈希留着，第二趟就不必再读一遍盘（挂账 D14）。
@@ -491,15 +502,29 @@ fn fill_in(
     let platform = variant.platform.as_deref();
     // 按成员分组，一个容器最多开一次。
     let mut wanted: BTreeMap<String, Vec<(usize, Demand)>> = BTreeMap::new();
+    let mut capped: Vec<(usize, String)> = Vec::new();
     for (index, unit) in units.iter().enumerate() {
         if unit.blocked.is_some() {
             continue;
         }
-        if let Some(demand) = demand_of(unit, platform, options) {
-            wanted
-                .entry(unit.member.clone())
-                .or_default()
-                .push((index, demand));
+        let Some(demand) = demand_of(unit, platform) else {
+            continue;
+        };
+        // 上限只挡整份读，不挡那 0x204 字节的 NKit 探测——那一趟的代价与文件多大无关。
+        if matches!(demand, Demand::All)
+            && let Some(reason) = over_limit(unit, options)
+        {
+            capped.push((index, reason));
+            continue;
+        }
+        wanted
+            .entry(unit.member.clone())
+            .or_default()
+            .push((index, demand));
+    }
+    for (index, reason) in capped {
+        if units[index].print.is_none() {
+            units[index].blocked = Some(reason);
         }
     }
     if wanted.is_empty() {
@@ -543,13 +568,10 @@ fn fill_in(
 }
 
 /// 这份内容要回盘读吗，读多少。
-fn demand_of(unit: &Unit, platform: Option<&str>, options: &Options) -> Option<Demand> {
+fn demand_of(unit: &ContentUnit, platform: Option<&str>) -> Option<Demand> {
     let Some(print) = unit.print else {
         // 一个字节都还没看过——裸文件就是这一档。
-        return match options.max_read_bytes {
-            Some(limit) if unit.size > limit => None,
-            _ => Some(Demand::All),
-        };
+        return Some(Demand::All);
     };
     // NKit **前置于任何 CRC 匹配**：验不了就不许自动通过。读 0x204 字节，与文件多大无关。
     if print.nkit.is_none() && header::may_be_nkit(platform, &unit.name) {
@@ -570,12 +592,24 @@ fn demand_of(unit: &Unit, platform: Option<&str>, options: &Options) -> Option<D
         if unit.in_container && unit.size > MAX_INLINE_READ {
             return None;
         }
-        return match options.max_read_bytes {
-            Some(limit) if unit.size > limit => None,
-            _ => Some(Demand::All),
-        };
+        return Some(Demand::All);
     }
     None
+}
+
+/// 体积超过上限，这一份就不读了。
+///
+/// 返回**为什么不读**而不是一个光秃秃的「没读」：报告要说得出「是这一层拿不到判据」
+/// 与「是我按上限没去拿」的区别，后者是一条**策略**，说不清就成了默默压低未命中数。
+fn over_limit(unit: &ContentUnit, options: &Options) -> Option<String> {
+    let limit = options.max_read_bytes?;
+    (unit.size > limit).then(|| {
+        format!(
+            "按 --max-read-mib 定的上限没读：这一份 {}，上限 {}",
+            crate::report::human_bytes(unit.size),
+            crate::report::human_bytes(limit)
+        )
+    })
 }
 
 /// 容器里的一条整份读进内存的上限。带外挂头的卡带最大的也就几 MB（SFC 的 6 MB 卡是
@@ -585,7 +619,7 @@ const MAX_INLINE_READ: u64 = 64 << 20;
 fn read_bare(
     library: &dyn LibraryFs,
     path: &Path,
-    unit: &mut Unit,
+    unit: &mut ContentUnit,
     demand: Demand,
     state: &mut Run,
 ) -> u64 {
@@ -618,7 +652,7 @@ fn read_bare(
 
 /// 只读前若干字节：这一趟只回答「是不是 NKit」，**绝不拿它当哈希**——前缀的 CRC-32
 /// 不是这份内容的 CRC-32，混进去就是一条永远撞不上的判据。
-fn probe_prefix(unit: &Unit, reader: &mut dyn Read, limit: u64) -> Fingerprint {
+fn probe_prefix(unit: &ContentUnit, reader: &mut dyn Read, limit: u64) -> Fingerprint {
     let mut head = vec![0u8; usize::try_from(limit).unwrap_or(fingerprint::PROBE_LEN)];
     let mut filled = 0;
     while filled < head.len() {
@@ -638,7 +672,7 @@ fn probe_prefix(unit: &Unit, reader: &mut dyn Read, limit: u64) -> Fingerprint {
 fn read_from_container(
     library: &dyn LibraryFs,
     path: &Path,
-    units: &mut [Unit],
+    units: &mut [ContentUnit],
     indexes: &[(usize, Demand)],
     state: &mut Run,
 ) -> u64 {
@@ -709,14 +743,16 @@ fn library_path(root: &Path, key: &str) -> PathBuf {
     path
 }
 
+/// 撞一次，并记住**撞上时用的是哪套哈希**。参数顺序跟 [`DatRepo::lookup`] 一致，
+/// 免得在调用处把 CRC-32 与大小写反——两个都是整数，写反了编译器不会说话。
 fn lookup(
     repo: &DatRepo,
-    size: u64,
     crc32: u32,
-    hashing: Convention,
+    size: u64,
+    hashed_as: Convention,
 ) -> Result<Vec<(Hit, Convention)>, RepoError> {
     repo.lookup(crc32, size)
-        .map(|hits| hits.into_iter().map(|hit| (hit, hashing)).collect())
+        .map(|hits| hits.into_iter().map(|hit| (hit, hashed_as)).collect())
 }
 
 fn restore(row: &ContentHash) -> Fingerprint {
@@ -751,7 +787,7 @@ fn restore(row: &ContentHash) -> Fingerprint {
     }
 }
 
-fn store(unit: &Unit, print: Fingerprint) -> ContentHash {
+fn store(unit: &ContentUnit, print: Fingerprint) -> ContentHash {
     ContentHash {
         key: unit.member.clone(),
         inner: unit.inner.clone(),
@@ -775,44 +811,49 @@ fn store(unit: &Unit, print: Fingerprint) -> ContentHash {
 fn assemble(
     catalog: &mut Catalog,
     variant: &VariantRow,
-    units: &[Unit],
+    units: &[ContentUnit],
     read_bytes: u64,
     state: &mut Run,
 ) -> Result<Identification, CatalogError> {
-    let mut candidates: Vec<Candidate> = Vec::new();
+    // 候选与它的**父条目名**成对走：`cloneof` 是 No-Intro 的 parent/clone 关系，
+    // ADR-0010 拿它映射「同一部**作品**下的多个**发行版**」。排序会打乱顺序，
+    // 所以不能靠下标去另一张表里找它。
+    let mut scored: Vec<(Candidate, Option<String>)> = Vec::new();
     let mut nkit = 0;
     for unit in units {
         if unit.is_nkit() {
             nkit += 1;
         }
-        for (hit, hashing) in &unit.hits {
-            candidates.push(candidate_of(unit, hit, *hashing));
+        for (hit, hashed_as) in &unit.hits {
+            scored.push((candidate_of(unit, hit, *hashed_as), hit.cloneof.clone()));
         }
     }
     // 排序：先按候选自己的可信程度，再按数据源的先后，最后按名字定死顺序——
     // 同一份中立库跑两次，候选的次序必须一样。
-    candidates.sort_by(|a, b| {
-        rank(variant, a)
-            .cmp(&rank(variant, b))
-            .then_with(|| a.game.cmp(&b.game))
-            .then_with(|| a.dat.cmp(&b.dat))
+    scored.sort_by(|a, b| {
+        rank(variant, &a.0)
+            .cmp(&rank(variant, &b.0))
+            .then_with(|| a.0.game.cmp(&b.0.game))
+            .then_with(|| a.0.dat.cmp(&b.0.dat))
     });
 
     let mut work_id = None;
     let mut release_id = None;
-    if let Some(best) = candidates.iter().position(|c| c.accepted) {
-        let parsed = naming::parse(&candidates[best].game, None);
+    if let Some(best) = scored.iter().position(|(c, _)| c.accepted) {
+        let (candidate, cloneof) = &scored[best];
+        let parsed = naming::parse(&candidate.game, cloneof.as_deref());
         let work = ensure_work(catalog, state, &parsed.work)?;
         work_id = Some(work);
         // **汉化版条目是变体不是发行版**（ADR-0012）：TOSEC 的 `[tr zh]` 条目说的是
         // 「有人把某个发行版汉化了」，它自己不是一次官方发行。认得出是哪部作品，
         // 认不出它基于哪一条发行版——那就只挂作品，发行版留空，等裁决补。
-        if candidates[best].chinese != Some(ChineseMark::FanTranslated) {
-            let id = ensure_release(catalog, state, work, &candidates[best], &parsed)?;
+        if candidate.chinese != Some(ChineseMark::FanTranslated) {
+            let id = ensure_release(catalog, state, work, candidate, &parsed)?;
             release_id = Some(id);
-            candidates[best].release_id = Some(id);
+            scored[best].0.release_id = Some(id);
         }
     }
+    let candidates: Vec<Candidate> = scored.into_iter().map(|(candidate, _)| candidate).collect();
 
     let blocked: Vec<&str> = units
         .iter()
@@ -849,6 +890,11 @@ fn assemble(
 }
 
 /// 候选之间怎么排。数字小的排前面。
+///
+/// 源的先后**不是** `sources.toml` 那份清单的抄件，而是一句关于**元数据质量**的判断：
+/// No-Intro 与 Redump 的条目名、序列号与 parent/clone 关系最整齐，TOSEC 的名字里
+/// 塞满了发行年份与小组名，MAME 是逐芯片的。清单里的顺序说的是「先取哪一个」，
+/// 与「哪个的名字更可信」无关，两者没有理由绑在一起。认不出的源排最后。
 fn rank(variant: &VariantRow, candidate: &Candidate) -> (u8, u8, u8) {
     let platform_matches =
         u8::from(variant.platform.as_deref() != Some(candidate.platform.as_str()));
@@ -871,23 +917,31 @@ fn rank(variant: &VariantRow, candidate: &Candidate) -> (u8, u8, u8) {
     )
 }
 
-fn candidate_of(unit: &Unit, hit: &Hit, hashing: Convention) -> Candidate {
+fn candidate_of(unit: &ContentUnit, hit: &Hit, hashed_as: Convention) -> Candidate {
     let nkit = unit.is_nkit();
+    // **NKit 没验过的 GC / Wii 镜像一律不许自动通过。**
+    //
+    // 「NKit 检测前置于任何 CRC 匹配」这条不能只靠目录去落实——目录只是强先验
+    // （ADR-0011），放错地方的镜像照样存在。这里的判据换成**内容自己给的**：
+    // 撞上的那条记录说它是 GC / Wii 的光盘，那这份内容就必须验过 NKit 才敢自动认账。
+    // 验不了（盘不在位、容器解不开、`--no-read-library`）就降一档，等裁决。
+    let unverified = unit.print.is_none_or(|print| print.nkit.is_none())
+        && matches!(hit.platform.as_str(), "NGC" | "WII");
     // **逐芯片的命中不自动通过。** MAME 的 software list 把一张卡拆成 `prg` / `chr`
     // 若干 dataarea，一条 `rom` 是**一颗芯片**的内容。单芯片卡上它恰好等于去头哈希，
     // 多芯片卡上「对上了一颗芯片」离「这个文件就是那次发行」还差着别的芯片
     // （`dat::Convention::PerChip` 的文档说的就是这件事）。所以它降一档：
     // 通过但标记，等裁决（ADR-0002 的中置信那一档）。
     let per_chip = hit.convention == Convention::PerChip;
-    let exact = hit.is_exact() && !nkit && !per_chip;
+    let exact = hit.is_exact() && !nkit && !per_chip && !unverified;
     let mut evidence = format!(
         "{} 的《{}》里条目「{}」的文件「{}」，按{}哈希匹配 CRC-32 {:08X}",
         hit.source,
         hit.dat,
         hit.game,
         hit.rom,
-        hashing.label(),
-        unit.print.map_or(0, |print| match hashing {
+        hashed_as.label(),
+        unit.print.map_or(0, |print| match hashed_as {
             Convention::Headerless => print.headerless_pair().map_or(print.crc32, |pair| pair.1),
             _ => print.crc32,
         })
@@ -897,7 +951,7 @@ fn candidate_of(unit: &Unit, hit: &Hit, hashing: Convention) -> Candidate {
         None => evidence.push_str("；这份 DAT 没记大小，只凭 CRC-32 撞上"),
     }
     // 剥了什么头只在**去头**那条候选上说——含头那条根本没剥。
-    if hashing == Convention::Headerless
+    if hashed_as == Convention::Headerless
         && let Some(header) = unit.print.and_then(|print| print.header())
     {
         evidence.push_str(&format!("（剥掉了 {}）", header.label()));
@@ -912,6 +966,11 @@ fn candidate_of(unit: &Unit, hit: &Hit, hashing: Convention) -> Candidate {
         evidence.push_str(
             "；**这份镜像是 NKit 处理过的**，Dolphin 明说它的 CRC32 可能与好转储相同而内容不同，\
              不许自动通过（票 09 转回 ISO 再识别）",
+        );
+    } else if unverified {
+        evidence.push_str(
+            "；这条记录说它是 GC / Wii 的光盘，而这份内容**没验过 NKit**——\
+             NKit 处理过的镜像 CRC32 可能与好转储相同（Dolphin），验不了就不敢自动通过",
         );
     }
     if let Some(status) = &hit.status
@@ -933,8 +992,8 @@ fn candidate_of(unit: &Unit, hit: &Hit, hashing: Convention) -> Candidate {
         platform: hit.platform.clone(),
         game: hit.game.clone(),
         rom: hit.rom.clone(),
-        hashing,
-        convention: hit.convention,
+        hashed_as,
+        dat_convention: hit.convention,
         evidence,
         chinese: hit.chinese,
         serial: hit.serial.clone(),
@@ -946,7 +1005,7 @@ fn ensure_work(catalog: &mut Catalog, state: &mut Run, name: &str) -> Result<i64
     if let Some(id) = state.works.get(name) {
         return Ok(*id);
     }
-    let id = catalog.add_work(name, Origin::Identified)?;
+    let id = catalog.add_work(name, Provenance::Identified)?;
     state.works.insert(name.to_string(), id);
     Ok(id)
 }
@@ -971,7 +1030,7 @@ fn ensure_release(
         parsed.region.as_deref(),
         candidate.serial.as_deref(),
         parsed.languages.as_deref(),
-        Origin::Identified,
+        Provenance::Identified,
     )?;
     state.releases.insert(key, id);
     Ok(id)

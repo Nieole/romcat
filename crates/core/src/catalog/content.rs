@@ -32,7 +32,7 @@ use std::collections::BTreeMap;
 
 use rusqlite::{OptionalExtension, params};
 
-use super::identify::Origin;
+use super::identify::Provenance;
 use super::{Catalog, CatalogError};
 use crate::platform::Manifest;
 use crate::scan::aggregate::ShapingAcc;
@@ -488,7 +488,7 @@ impl Catalog {
     ///
     /// # Errors
     /// 写库失败时返回错误。
-    pub fn add_work(&mut self, name: &str, origin: Origin) -> Result<i64, CatalogError> {
+    pub fn add_work(&mut self, name: &str, origin: Provenance) -> Result<i64, CatalogError> {
         self.conn
             .execute(
                 "INSERT INTO work(name, origin) VALUES(?1, ?2)",
@@ -512,7 +512,7 @@ impl Catalog {
         region: Option<&str>,
         serial: Option<&str>,
         languages: Option<&str>,
-        origin: Origin,
+        origin: Provenance,
     ) -> Result<i64, CatalogError> {
         self.conn
             .execute(
@@ -685,7 +685,7 @@ mod tests {
             .expect("写得进");
 
         let work = catalog
-            .add_work("幻想传说", Origin::Verdict)
+            .add_work("幻想传说", Provenance::Verdict)
             .expect("建得了作品");
         let release = catalog
             .add_release(
@@ -694,7 +694,7 @@ mod tests {
                 Some("日本"),
                 Some("SHVC-TO"),
                 Some("ja"),
-                Origin::Verdict,
+                Provenance::Verdict,
             )
             .expect("建得了发行版");
         catalog
@@ -768,7 +768,7 @@ mod tests {
             .replace_variants(&[变体("FC/甲.zip", Some("FC"))], 1, &Manifest::builtin())
             .expect("写得进");
         let work = catalog
-            .add_work("超级马里奥", Origin::Verdict)
+            .add_work("超级马里奥", Provenance::Verdict)
             .expect("建得了作品");
         catalog
             .link_variant("FC/甲.zip", Some(work), None)

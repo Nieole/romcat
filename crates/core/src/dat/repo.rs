@@ -246,7 +246,7 @@ impl DatRepo {
     fn prepare(&self) -> Result<(), RepoError> {
         self.conn
             .execute_batch(&format!("PRAGMA journal_mode=WAL;\n{SCHEMA}"))
-            .map_err(|source| self.wrap(source))?;
+            .map_err(|source| self.error(source))?;
         let found: Option<String> = self
             .conn
             .query_row(
@@ -255,7 +255,7 @@ impl DatRepo {
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|source| self.wrap(source))?;
+            .map_err(|source| self.error(source))?;
         match found.and_then(|text| text.parse::<u32>().ok()) {
             Some(version) if version != SCHEMA_VERSION => Err(RepoError::Version {
                 path: self.location(),
@@ -269,14 +269,10 @@ impl DatRepo {
                         "INSERT INTO meta(key, value) VALUES('schema_version', ?1)",
                         params![SCHEMA_VERSION.to_string()],
                     )
-                    .map_err(|source| self.wrap(source))?;
+                    .map_err(|source| self.error(source))?;
                 Ok(())
             }
         }
-    }
-
-    fn wrap(&self, source: rusqlite::Error) -> RepoError {
-        self.error(source)
     }
 
     /// 把底层错误包成这份库的错误。查询散在别的模块里（[`super::lookup`]、
@@ -302,15 +298,15 @@ impl DatRepo {
         let mut statement = self
             .conn
             .prepare("SELECT name, fingerprint FROM unit WHERE source = ?1")
-            .map_err(|error| self.wrap(error))?;
+            .map_err(|error| self.error(error))?;
         let rows = statement
             .query_map(params![source], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
-            .map_err(|error| self.wrap(error))?;
+            .map_err(|error| self.error(error))?;
         let mut out = BTreeMap::new();
         for row in rows {
-            let (name, fingerprint) = row.map_err(|error| self.wrap(error))?;
+            let (name, fingerprint) = row.map_err(|error| self.error(error))?;
             out.insert(name, fingerprint);
         }
         Ok(out)
@@ -324,7 +320,7 @@ impl DatRepo {
         let count: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM dat", [], |row| row.get(0))
-            .map_err(|error| self.wrap(error))?;
+            .map_err(|error| self.error(error))?;
         Ok(count == 0)
     }
 

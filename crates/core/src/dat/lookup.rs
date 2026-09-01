@@ -19,8 +19,6 @@ use super::{Convention, chinese};
 /// 它就是一条**候选**的**依据**：命中了哪个数据库的哪条记录、匹配了哪个字段。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hit {
-    /// 这条文件记录在 DAT 库里的 id。同一份内容被两套哈希各撞出一次时靠它去重。
-    pub rom_id: i64,
     /// 哪个数据源。
     pub source: String,
     /// 哪一份 DAT。
@@ -86,7 +84,7 @@ impl DatRepo {
         let mut statement = self
             .conn()
             .prepare_cached(
-                "SELECT r.id, d.source, d.name, d.platform, d.convention,
+                "SELECT d.source, d.name, d.platform, d.convention,
                         g.name, g.cloneof, r.name, g.serial, g.chinese, r.size, r.status
                  FROM rom r
                  JOIN game g ON g.id = r.game
@@ -97,24 +95,23 @@ impl DatRepo {
             .map_err(|source| self.error(source))?;
         let rows = statement
             .query_map(params![i64::from(crc32)], |row| {
-                let recorded: Option<i64> = row.get(10)?;
+                let recorded: Option<i64> = row.get(9)?;
                 let recorded = recorded.and_then(|size| u64::try_from(size).ok());
-                let convention: String = row.get(4)?;
-                let game: String = row.get(5)?;
+                let convention: String = row.get(3)?;
+                let game: String = row.get(4)?;
                 let chinese = chinese::mark_of(&game);
                 Ok(Hit {
-                    rom_id: row.get(0)?,
-                    source: row.get(1)?,
-                    dat: row.get(2)?,
-                    platform: row.get(3)?,
+                    source: row.get(0)?,
+                    dat: row.get(1)?,
+                    platform: row.get(2)?,
                     convention: Convention::from_label(&convention).unwrap_or(Convention::AsIs),
                     game,
-                    cloneof: row.get(6)?,
-                    rom: row.get(7)?,
-                    serial: row.get(8)?,
+                    cloneof: row.get(5)?,
+                    rom: row.get(6)?,
+                    serial: row.get(7)?,
                     chinese,
                     size: recorded,
-                    status: row.get(11)?,
+                    status: row.get(10)?,
                     sized: recorded == Some(size),
                 })
             })

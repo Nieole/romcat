@@ -58,6 +58,14 @@ const PATCH_EXTENSIONS: &[&str] = &[
 /// 名字里出现这些词，说明它自称是补丁。
 const PATCH_WORDS: &[&str] = &["补丁", "patch"];
 
+/// TitleID 那条判据只对这个平台生效。
+///
+/// **不能对所有平台生效**：`ULUS10041.iso`（PSP）、`BLJS10250`（PS3）、
+/// `BCAS20228`（PS3 的**官中版**）在形态上都是「四个字母加五位数字」，而下面那张
+/// 官方前缀表只列了 PSV 的。不限定平台的话，这条判据会把整批官中版挡在识别管线之外
+/// ——那正是 ADR-0012 说「官中版走精确哈希直接过」要避免的事。
+const TITLE_ID_PLATFORM: &str = "PSV";
+
 /// PSV 的**官方** TitleID 前缀。
 ///
 /// Sony 给零售与 PSN 发行版的前缀是这几个（`PCSA`–`PCSI` 按地区分，`VCAS` / `VLAS` /
@@ -95,6 +103,11 @@ pub fn decide(variant: &VariantRow, contents: &[String]) -> Option<Skip> {
     // 一、裁决说了它没有发行版。**这是词表定义的那条判据**：同人移植与 homebrew
     // 直接挂在作品下，没有发行版链接这件事本身就在说「别拿它去撞 DAT」。
     // 识别自己挂上去的链接不会落到这里——重跑识别的第一件事就是把它们清掉。
+    //
+    // **一个还没堵上的口子**（挂账 D48）：裁决挂的作品 + 识别挂的发行版，清完之后
+    // 也是「作品有、发行版空」，这里会读成「裁决说它没有发行版」。真正的出路是让裁决
+    // 把「确认没有发行版」说成一条**明确的记录**而不是靠链接为空推断出来——那是票 08
+    // 定裁决记录形态时的事。眼下裁决还不存在，这一态在真库上是 0 条。
     if variant.work_id.is_some() && variant.release_id.is_none() {
         return Some(Skip::NoRelease("裁决记着它没有发行版".to_string()));
     }
@@ -103,7 +116,7 @@ pub fn decide(variant: &VariantRow, contents: &[String]) -> Option<Skip> {
     if let Some(skip) = patch_of(name, &variant.main_key, contents) {
         return Some(skip);
     }
-    homebrew_of(name)
+    homebrew_of(name, variant.platform.as_deref())
 }
 
 /// 这是不是一个**补丁**。
@@ -136,8 +149,9 @@ fn patch_of(name: &str, main_key: &str, contents: &[String]) -> Option<Skip> {
 }
 
 /// 这是不是**没有发行版链接**的那一类：同人移植与 homebrew。
-fn homebrew_of(name: &str) -> Option<Skip> {
-    if let Some(id) = title_id_prefix(name)
+fn homebrew_of(name: &str, platform: Option<&str>) -> Option<Skip> {
+    if platform == Some(TITLE_ID_PLATFORM)
+        && let Some(id) = title_id_prefix(name)
         && !OFFICIAL_TITLE_ID_PREFIXES.contains(&id.as_str())
     {
         return Some(Skip::NoRelease(format!(
@@ -268,6 +282,20 @@ mod tests {
 
         // 官方前缀照常进识别管线。
         assert_eq!(decide(&变体("PSV/PCSG00718(恋爱复仇战)"), &[]), None);
+    }
+
+    #[test]
+    fn 别的平台的序列号形态不当成自造_titleid() {
+        // `ULUS10041`（PSP）、`BCAS20228`（PS3 的官中版）形态上都是四字母加五位数字。
+        // 那张官方前缀表只列了 PSV 的，不限定平台就会把整批官中版挡在管线之外
+        // ——ADR-0012 说的正是「官中版走精确哈希直接过」。
+        let mut psp = 变体("psp/ULUS10041.iso");
+        psp.platform = Some("PSP".to_string());
+        assert_eq!(decide(&psp, &[]), None);
+
+        let mut ps3 = 变体("ps3/BCAS20228");
+        ps3.platform = Some("PS3".to_string());
+        assert_eq!(decide(&ps3, &[]), None);
     }
 
     #[test]

@@ -13,6 +13,8 @@ path = "src/main.rs"
 clap.workspace = true
 ctrlc.workspace = true
 romcat-core.workspace = true
+# 报告要另存成 JSON，`write_json` 那个泛型入口要 `Serialize` 这个 trait 本身。
+serde.workspace = true
 serde_json.workspace = true
 
 [lints]

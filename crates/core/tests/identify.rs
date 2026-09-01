@@ -96,6 +96,11 @@ fn 建现场() -> 现场 {
 
     // ── WII：NKit 处理过的镜像，CRC 与 Redump 那条一模一样（Dolphin 说的正是这件事）
     写(&root.join("wii/某游戏.iso"), &nkit_iso());
+    // 同一份东西再装进一个容器：容器里的 CRC-32 零解压就有，**但 NKit 只能读字节才验得出**。
+    写(
+        &root.join("wii/装进包里的.zip"),
+        &zip_container(&[ZipEntrySpec::stored("某游戏.iso", nkit_iso())]),
+    );
 
     // ── 两类不该撞 DAT 的东西，真库里就躺着这两份形态
     写(
@@ -260,7 +265,7 @@ fn 结论(现场: &现场, key: &str) -> (State, Option<String>) {
 }
 
 #[test]
-fn 含头与去头两套规则同时算并且分别匹配() {
+fn 含头与去头两套规则同时算并且各撞各的() {
     let mut 现场 = 建现场();
     跑(&mut 现场);
 
@@ -274,10 +279,10 @@ fn 含头与去头两套规则同时算并且分别匹配() {
     assert_eq!(候选.len(), 2, "两套口径各撞上一条：{候选:#?}");
     let 去头 = 候选
         .iter()
-        .find(|c| c.hashing == Convention::Headerless)
+        .find(|c| c.hashed_as == Convention::Headerless)
         .expect("去头那套撞上了 No-Intro");
     assert_eq!(去头.source, "No-Intro");
-    assert_eq!(去头.convention, Convention::Headerless);
+    assert_eq!(去头.dat_convention, Convention::Headerless);
     assert!(
         去头.evidence.contains("剥掉了 iNES 16 字节头"),
         "{}",
@@ -285,7 +290,7 @@ fn 含头与去头两套规则同时算并且分别匹配() {
     );
     let 含头 = 候选
         .iter()
-        .find(|c| c.hashing == Convention::AsIs)
+        .find(|c| c.hashed_as == Convention::AsIs)
         .expect("含头那套撞上了 TOSEC");
     assert_eq!(含头.source, "TOSEC");
 
@@ -375,7 +380,7 @@ fn 带拷贝机头的裸文件靠去头哈希撞上() {
         .catalog
         .candidates_of("SFC/带拷贝机头的.smc")
         .expect("读得出")[0];
-    assert_eq!(候选.hashing, Convention::Headerless);
+    assert_eq!(候选.hashed_as, Convention::Headerless);
     assert!(
         候选.evidence.contains("SFC 拷贝机 512 字节头"),
         "{}",
@@ -384,7 +389,7 @@ fn 带拷贝机头的裸文件靠去头哈希撞上() {
 }
 
 #[test]
-fn nkit_验在撞_crc_之前命中也不许自动通过() {
+fn nkit_验在撞_crc_之前撞上了也不许自动通过() {
     // Dolphin 原话：这个文件的 CRC32 可能和好转储的相同，即使两个文件并不完全一样。
     let mut 现场 = 建现场();
     let outcome = 跑(&mut 现场);
@@ -395,10 +400,50 @@ fn nkit_验在撞_crc_之前命中也不许自动通过() {
     assert_eq!(候选.confidence, Confidence::Medium, "降一档");
     assert!(!候选.accepted, "不许自动通过");
     assert!(候选.evidence.contains("NKit"), "{}", 候选.evidence);
-    assert_eq!(outcome.report.nkit, 1, "报告数得出来");
+    assert_eq!(
+        outcome.report.nkit, 2,
+        "报告数得出来：裸的那份与装进包里的那份"
+    );
 
     // 降档了但**候选照样在**——它确实撞上了那条记录，只是不能自动认账。
     assert_eq!(结论(&现场, "wii/某游戏.iso").0, State::Matched);
+}
+
+#[test]
+fn 验不了_nkit_的_gc_与_wii_镜像不许自动通过() {
+    // 容器里那套 CRC-32 是零解压白拿的，**而 NKit 要读字节才验得出**。不读盘时
+    // 两者都在：撞得上，但验不了——这时候绝不能自动认账，Dolphin 说过它的 CRC32
+    // 可能与好转储相同而内容不同。判据取自**撞上的那条记录说它是 GC / Wii 的光盘**，
+    // 不是取自目录名（ADR-0011：目录只是强先验）。
+    let mut 现场 = 建现场();
+    let mut options = Options::new(现场.dir.path());
+    options.read_library = false;
+    identify::run(
+        &RealFs::new(),
+        &mut 现场.catalog,
+        &现场.repo,
+        &options,
+        &CancelToken::new(),
+        &mut |_| {},
+    )
+    .expect("识别不该失败");
+
+    let 候选 = &现场
+        .catalog
+        .candidates_of("wii/装进包里的.zip")
+        .expect("读得出")[0];
+    assert_eq!(候选.confidence, Confidence::Medium);
+    assert!(!候选.accepted, "没验过 NKit 就不敢自动通过");
+    assert!(候选.evidence.contains("没验过 NKit"), "{}", 候选.evidence);
+
+    // 读得了盘的那一趟，同一个变体验得出来、也照样不自动通过（它真是 NKit）。
+    跑(&mut 现场);
+    let 候选 = &现场
+        .catalog
+        .candidates_of("wii/装进包里的.zip")
+        .expect("读得出")[0];
+    assert!(!候选.accepted);
+    assert!(候选.evidence.contains("NKit 处理过的"), "{}", 候选.evidence);
 }
 
 #[test]
@@ -429,7 +474,7 @@ fn 逐芯片的命中通过但标记不自动过() {
 }
 
 #[test]
-fn 补丁与没有发行版链接的变体跳过_dat_匹配() {
+fn 补丁与没有发行版链接的变体不去撞_dat() {
     let mut 现场 = 建现场();
     let outcome = 跑(&mut 现场);
 
@@ -479,7 +524,7 @@ fn 报告给出每个平台的命中率与未命中数() {
     assert!(fc.dat_games > 0, "报告顺带说得出这个平台有多少弹药");
 
     // 跳过与无判据都不在命中率的分母里。
-    assert_eq!(report.total.matched + report.total.unmatched, 5);
+    assert_eq!(report.total.matched + report.total.unmatched, 6);
     assert_eq!(report.total.skipped, 2);
 
     let text = report.render_text();

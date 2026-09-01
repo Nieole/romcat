@@ -61,6 +61,24 @@ impl DumpHeader {
         }
     }
 
+    /// 从存进中立库的那个名字认回来；认不出时是 `None`。
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::all().into_iter().find(|it| it.label() == label)
+    }
+
+    /// 全部五种，顺序固定。
+    #[must_use]
+    pub fn all() -> [Self; 5] {
+        [
+            Self::INes,
+            Self::Fds,
+            Self::Lynx,
+            Self::Atari7800,
+            Self::SnesCopier,
+        ]
+    }
+
     /// 去头要跳过几个字节。
     #[must_use]
     pub fn bytes(self) -> u64 {
@@ -186,6 +204,16 @@ pub fn may_be_nkit(platform: Option<&str>, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 外挂头的名字能来回折() {
+        // 中立库里存的是这个名字，读回来认不出就只能当「没看过」重算——
+        // 绝不能猜一个头顶上。
+        for header in DumpHeader::all() {
+            assert_eq!(DumpHeader::from_label(header.label()), Some(header));
+        }
+        assert_eq!(DumpHeader::from_label("拷贝机头"), None);
+    }
 
     #[test]
     fn 五种外挂头各认得出来() {
