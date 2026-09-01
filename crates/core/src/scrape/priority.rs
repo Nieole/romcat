@@ -392,19 +392,12 @@ mod tests {
     #[test]
     fn 表里点名了却不存在的源报得出来() {
         let priorities = Priorities::builtin();
-        let 全都在 = [
-            "No-Intro",
-            "Redump",
-            "TOSEC",
-            "MAME",
-            "GoodNES",
-            "文件名",
-            "本地媒体",
-        ];
+        let 全都在 = crate::scrape::all_source_names();
         assert!(priorities.sources_not_in(&全都在).is_empty());
         // 少了一个 TOSEC，就该点它的名——而不是让它静默地排到链尾。
+        let 缺一个: Vec<&str> = 全都在.into_iter().filter(|name| *name != "TOSEC").collect();
         assert_eq!(
-            priorities.sources_not_in(&["No-Intro", "Redump", "MAME", "GoodNES", "文件名"]),
+            priorities.sources_not_in(&缺一个),
             vec!["TOSEC".to_string()]
         );
     }

@@ -30,7 +30,7 @@
 
 use crate::identify::naming;
 
-use super::{Field, Harvest, Locality, Source, Subject};
+use super::{Failure, Field, Harvest, Locality, Source, Subject};
 
 /// 一个 DAT 数据源。
 #[derive(Debug, Clone)]
@@ -78,7 +78,7 @@ impl Source for DatSource {
         Some(super::fingerprint(&names))
     }
 
-    fn collect(&self, subject: &Subject<'_>, out: &mut Harvest) {
+    fn collect(&self, subject: &Subject<'_>, out: &mut Harvest) -> Result<(), Failure> {
         let tosec = self.name == "TOSEC";
         for name in self.names(subject) {
             let why = format!("{} 的条目名「{name}」", self.name);
@@ -111,6 +111,8 @@ impl Source for DatSource {
                 }
             }
         }
+        // 本地源没有会失败的动作：条目名已经在中立库里躺着了。
+        Ok(())
     }
 }
 
@@ -201,6 +203,8 @@ mod tests {
             main_key: None,
             media: &[],
             media_limit: None,
+            confirmed: true,
+            basis: None,
         }
     }
 
@@ -254,12 +258,16 @@ mod tests {
         let subject = 作品(&entries);
 
         let mut nointro = Harvest::default();
-        DatSource::new("No-Intro").collect(&subject, &mut nointro);
+        DatSource::new("No-Intro")
+            .collect(&subject, &mut nointro)
+            .expect("本地源不会失败");
         assert_eq!(nointro.values.len(), 1, "No-Intro 只给得出标题");
         assert_eq!(nointro.values[0].value, "1942");
 
         let mut tosec = Harvest::default();
-        DatSource::new("TOSEC").collect(&subject, &mut tosec);
+        DatSource::new("TOSEC")
+            .collect(&subject, &mut tosec)
+            .expect("本地源不会失败");
         let fields: Vec<Field> = tosec.values.iter().map(|found| found.field).collect();
         assert_eq!(fields, vec![Field::Title, Field::Year, Field::Publisher]);
     }

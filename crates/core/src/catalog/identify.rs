@@ -460,6 +460,110 @@ impl Catalog {
             .map_err(|source| self.err(source))
     }
 
+    /// 一个**已确认**的变体撞上 DAT 时用的那套判据：`(CRC-32, 字节数, 记录名)`。
+    ///
+    /// 「已确认」的判据是**有一条自动通过的候选**（`accepted`）。这正是在线刮削档发查询
+    /// 的门槛：ScreenScraper 强制要求「crc/md5/sha1 之一**加**文件字节大小」同发
+    /// （调研 §1.4），而它对认不出来的 ROM 有一份**专门的当日配额**（431），撞穿了
+    /// 连账号带 IP 一起封（ADR-0007）。**未识别的变体一个请求都不许发。**
+    ///
+    /// 取的是**撞上时用的那一套**，不是随便一套：候选的 `hashing` 记着它撞的是含头还是
+    /// 去头的哈希，取错一套就是把一串对不上的 CRC 发出去——那是白扣一份「未识别 ROM」
+    /// 配额，正是这道门槛要省下来的东西。
+    ///
+    /// 判据从**两张表**里找，因为它本来就躺在两处：**裸文件**读一遍算出来，落在
+    /// `content_hash`；**透明容器**里的东西零解压就有，落在 `container_entry`
+    /// （票 03 的整个意义就是不去解压它们）。只查前一张，库里 91.1% 的容量——
+    /// 也就是绝大多数已确认的变体——会安静地取不到判据。
+    ///
+    /// ## 为什么是逐个查而不是一条大 JOIN
+    ///
+    /// 写成一条 `candidate LEFT JOIN content_hash LEFT JOIN container_entry` 在真库上
+    /// **实测 73 秒**：136,238 条自动通过的候选各自去 1,016,857 行的容器构成表里按
+    /// `key` 做一次范围扫描，而候选是按 `variant_key` 排的，没有任何局部性。
+    /// 逐个查的次数少一个量级——**在线档只为每部作品的那一个代表变体查一次**
+    /// （真库 9,226 次而不是 136,238 次），而且离线档一次都不查。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn accepted_hash(
+        &self,
+        variant_key: &str,
+    ) -> Result<Option<(u32, u64, String)>, CatalogError> {
+        // 一个变体可以有好几条自动通过的候选（同一份内容撞上 No-Intro 与 TOSEC 的同一条）。
+        // 它们说的是**同一串字节**，取第一条就够；`ORDER BY id` 保证同一份库跑两次
+        // 取到的是同一条。
+        let pick: Option<(String, String, String, String)> = self
+            .conn
+            .prepare_cached(
+                "SELECT hashing, rom, member_key, inner FROM candidate
+                 WHERE variant_key = ?1 AND accepted = 1 ORDER BY id LIMIT 1",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_row(params![variant_key], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    })
+                    .optional()
+            })
+            .map_err(|source| self.err(source))?;
+        let Some((hashing, rom, member_key, inner)) = pick else {
+            return Ok(None);
+        };
+
+        // **去头那一套只有 `content_hash` 有**——容器内部构成给的永远是原样的字节。
+        // 取哪一套在这里当场判完，免得把四个 `Option<i64>` 原样端出去。
+        let bare = Convention::from_label(&hashing) == Some(Convention::Headerless);
+        let picked: Option<(i64, i64)> = self
+            .conn
+            .prepare_cached(
+                "SELECT size, crc32, bare_size, bare_crc32 FROM content_hash
+                 WHERE key = ?1 AND inner = ?2",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_row(params![member_key, inner], |row| {
+                        let size: Option<i64> = row.get(0)?;
+                        let crc: Option<i64> = row.get(1)?;
+                        let bare_size: Option<i64> = row.get(2)?;
+                        let bare_crc: Option<i64> = row.get(3)?;
+                        Ok(if bare {
+                            bare_crc.zip(bare_size).or_else(|| crc.zip(size))
+                        } else {
+                            crc.zip(size)
+                        })
+                    })
+                    .optional()
+            })
+            .map_err(|source| self.err(source))?
+            .flatten();
+        let picked = match picked {
+            Some(pair) => Some(pair),
+            None => self
+                .conn
+                .prepare_cached(
+                    "SELECT crc32, size FROM container_entry
+                     WHERE key = ?1 AND inner = ?2 LIMIT 1",
+                )
+                .and_then(|mut statement| {
+                    statement
+                        .query_row(params![member_key, inner], |row| {
+                            Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?))
+                        })
+                        .optional()
+                })
+                .map_err(|source| self.err(source))?
+                .and_then(|(crc, size)| crc.map(|crc| (crc, size))),
+        };
+        let Some((crc, size)) = picked else {
+            return Ok(None);
+        };
+        let Ok(size) = u64::try_from(size) else {
+            return Ok(None);
+        };
+        Ok(Some((u32::try_from(crc).unwrap_or(0), size, rom)))
+    }
+
     /// 某个成员上算过的哈希：内部路径 → 那一份。裸文件的内部路径是空串。
     ///
     /// # Errors

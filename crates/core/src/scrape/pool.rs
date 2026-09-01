@@ -77,8 +77,23 @@ pub enum Ingested {
         bytes: Option<u64>,
     },
     /// **读不动。** ADR-0021 的第三态在媒体这一侧的样子：条目在库里，字节取不到。
+    ///
+    /// **只有这一档是那个第三态。** 「闸门不许下」与「服务端说没有」都不是读不动，
+    /// 它们各有自己的变体——混进来，报告就会指着一块好好的盘说它读不动。
     Unreadable {
         /// 为什么。
+        why: String,
+    },
+    /// **取数闸门不许下这一个。** URL 指向白名单之外，而那是**永久**的判断：
+    /// 下一趟还是同一个答案，所以它不该让这一对反复重采。
+    Refused {
+        /// 哪个 URL，闸门怎么说的。
+        why: String,
+    },
+    /// **源说这一份没有。** 一条结论，不是失败——当成失败的话，下一趟会为同一张
+    /// 不存在的图再花一份配额。
+    Missing {
+        /// 哪一个。
         why: String,
     },
     /// 这个扩展名不当成媒体收。防御性的一档——本地媒体源本来就按扩展名筛过一遍了。
@@ -248,11 +263,7 @@ pub fn ingest(
         }
     };
 
-    let temp = pool.tmp().join(format!(
-        "{}-{}.part",
-        std::process::id(),
-        TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
+    let temp = temp_path(pool);
     let mut sink = std::fs::File::create(&temp).map_err(|source| PoolError::Io {
         path: path::display(&temp),
         source,
@@ -295,13 +306,75 @@ pub fn ingest(
     drop(sink);
 
     let hash = hex(context.finish().as_ref());
-    // 扩展名以库里记的那一个为准：同一串字节先以 `.jpeg` 进过池，后来又以 `.jpg`
-    // 撞上来，仍然落在原来那个文件上。
-    let ext = catalog.media_ext(&hash)?.unwrap_or_else(|| ext.to_string());
-    let fresh = pool.adopt(&temp, &hash, &ext)?;
-    catalog.put_media(&hash, &ext, bytes)?;
+    let fresh = adopt_into(pool, catalog, &temp, &hash, ext, bytes)?;
     catalog.put_media_blob(key, &hash, bytes)?;
     Ok(Ingested::Stored { hash, bytes, fresh })
+}
+
+/// 池里的一个临时落脚点。算哈希时先写它，算完改名进池。
+fn temp_path(pool: &MediaPool) -> PathBuf {
+    pool.tmp().join(format!(
+        "{}-{}.part",
+        std::process::id(),
+        TEMP.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+/// 一份算好哈希的临时文件收尾进池：定扩展名、改名、记库。
+///
+/// **两条进池的路共用这一段**——主库那份边读边算，在线那份整块下回来，前半截不同，
+/// 从这里起一模一样。各写一遍的话，同一张图迟早会在池里躺成两份。
+///
+/// 扩展名**以库里记的那一个为准**：同一串字节以 `.jpg` 与 `.jpeg` 两个名字进来，
+/// 各按各的落盘就成了两个文件，「只存一份」当场失效。
+///
+/// # Errors
+/// 中立库读写不了、或者池写不进时返回错误。
+fn adopt_into(
+    pool: &MediaPool,
+    catalog: &mut Catalog,
+    temp: &Path,
+    hash: &str,
+    ext_hint: &str,
+    bytes: u64,
+) -> Result<bool, super::ScrapeError> {
+    let ext = catalog
+        .media_ext(hash)?
+        .unwrap_or_else(|| ext_hint.to_string());
+    let fresh = pool.adopt(temp, hash, &ext)?;
+    catalog.put_media(hash, &ext, bytes)?;
+    Ok(fresh)
+}
+
+/// 把手里这一串字节收进池里，返回 `(内容哈希, 池里此前没有这份吗)`。
+///
+/// 在线那一侧走它：媒体是下下来的一整块，不像主库那份可以边读边算。
+///
+/// # Errors
+/// 中立库读写不了、或者池写不进时返回错误。
+pub fn store(
+    pool: &MediaPool,
+    catalog: &mut Catalog,
+    bytes: &[u8],
+    ext: &str,
+) -> Result<(String, bool), super::ScrapeError> {
+    let mut context = Context::new(&SHA256);
+    context.update(bytes);
+    let hash = hex(context.finish().as_ref());
+    let temp = temp_path(pool);
+    std::fs::write(&temp, bytes).map_err(|source| PoolError::Io {
+        path: path::display(&temp),
+        source,
+    })?;
+    let fresh = adopt_into(
+        pool,
+        catalog,
+        &temp,
+        &hash,
+        normalized_ext(ext).unwrap_or("png"),
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+    )?;
+    Ok((hash, fresh))
 }
 
 /// 要收的一份媒体：它是谁、库里说它多大、这一趟的上限是多少。

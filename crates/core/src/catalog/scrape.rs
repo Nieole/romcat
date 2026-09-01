@@ -12,6 +12,11 @@
 //!   一行、池里仍然只有一个文件**——「只存一份」是内容寻址天然给的，不是另加的去重步骤。
 //! - `media_blob`：主库里那份媒体文件算过的内容哈希。**读过的盘不白读**：由扫描按文件的
 //!   三元组作废，与 `content_hash` 是同一条路（挂账 D14）。
+//! - `media_remote`：**在线源下过的那个 URL 算出来是哪一份内容**。它与 `media_blob`
+//!   刻意分成两张表，理由是**作废的方式完全相反**：`media_blob` 的键是主库里的文件，
+//!   扫描一发现文件没了就整行扫掉（`Catalog::sweep` 的 `key NOT IN entry`）；而一个
+//!   在线 URL 在主库里永远不存在，混进同一张表会被那句 SQL 每次扫描都清一遍，
+//!   于是**下过的图每次都要重下**——花的是配额与带宽。
 //! - `scrape_probe`：一个源对一个锚点采集过了没有，以及当时的**输入指纹**。指纹一样就
 //!   整条跳过，连「查过、没有」也记着——离线档省的是算力，在线档（票 14）省的是配额，
 //!   而重复打一次空查询在 ScreenScraper 那边要额外扣一份「未识别 ROM」配额（ADR-0007）。
@@ -77,6 +82,15 @@ CREATE INDEX IF NOT EXISTS media_ref_hash ON media_ref(hash);
 -- 主库里那份媒体文件算过的内容哈希。扫描按文件的三元组作废它（同 content_hash）。
 CREATE TABLE IF NOT EXISTS media_blob(
     key   TEXT PRIMARY KEY,
+    bytes INTEGER NOT NULL,
+    hash  TEXT    NOT NULL
+) STRICT;
+
+-- 在线源下过的那个 URL 算出来是哪一份内容。**与 media_blob 分开**：扫描按
+-- 「主库里还有没有这个键」清 media_blob，而在线 URL 在主库里永远不存在，
+-- 混在一起等于每次扫描都把下过的图作废一遍——那要重花配额与带宽。
+CREATE TABLE IF NOT EXISTS media_remote(
+    url   TEXT PRIMARY KEY,
     bytes INTEGER NOT NULL,
     hash  TEXT    NOT NULL
 ) STRICT;
@@ -456,6 +470,48 @@ impl Catalog {
                     i64::try_from(bytes).unwrap_or(i64::MAX),
                     now_secs()
                 ],
+            )
+            .map(|_| ())
+            .map_err(|source| self.err(source))
+    }
+
+    /// 在线源下过的这个 URL 算出来是哪一份内容：`(字节数, 哈希)`。
+    ///
+    /// **下过的量不白下**：一次在线刮削花的是配额，比回盘读一遍贵得多。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn remote_media(&self, url: &str) -> Result<Option<(u64, String)>, CatalogError> {
+        self.conn
+            .prepare_cached("SELECT bytes, hash FROM media_remote WHERE url = ?1")
+            .and_then(|mut statement| {
+                statement
+                    .query_row(params![url], |row| {
+                        Ok((
+                            u64::try_from(row.get::<_, i64>(0)?).unwrap_or(0),
+                            row.get::<_, String>(1)?,
+                        ))
+                    })
+                    .optional()
+            })
+            .map_err(|source| self.err(source))
+    }
+
+    /// 记下「这个 URL 下过了，内容哈希是这个」。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn put_remote_media(
+        &mut self,
+        url: &str,
+        hash: &str,
+        bytes: u64,
+    ) -> Result<(), CatalogError> {
+        self.conn
+            .execute(
+                "INSERT INTO media_remote(url, bytes, hash) VALUES(?1,?2,?3)
+                 ON CONFLICT(url) DO UPDATE SET bytes = excluded.bytes, hash = excluded.hash",
+                params![url, i64::try_from(bytes).unwrap_or(i64::MAX), hash],
             )
             .map(|_| ())
             .map_err(|source| self.err(source))

@@ -49,7 +49,7 @@ enum Command {
     Shape(ShapeArgs),
     /// 拿变体的 CRC-32 加大小撞 DAT，产出带置信度与依据的候选，并报出真实命中率
     Identify(IdentifyArgs),
-    /// 在识别结论上取元数据与媒体。离线档只用本地数据源，一个网络请求都不发
+    /// 在识别结论上取元数据与媒体。离线档一个网络请求都不发；在线档补简介与封面，默认限流
     Scrape(ScrapeArgs),
     /// 列出眼下生效的平台清单与成型规则，或者导出一份底稿照着改
     Platforms(PlatformsArgs),
@@ -263,6 +263,21 @@ struct ScrapeArgs {
     #[arg(long, value_name = "目录")]
     workspace: Option<PathBuf>,
 
+    /// 策略档案：`离线`（默认，一个网络请求都不发）或 `在线`（再加联网源补简介与封面）
+    ///
+    /// 在线档要一套 ScreenScraper 凭据，从环境变量读。它默认限流，且把配额超限
+    /// 当作硬停止——配额同时按账号与 IP 计，撞穿了会被永久封禁
+    #[arg(long, value_name = "档案", default_value = "离线")]
+    profile: String,
+
+    /// 在线档这一趟最多发多少个请求。**这是自己设的保守闸，不是服务端的配额**
+    #[arg(long, value_name = "个数")]
+    online_budget: Option<u64>,
+
+    /// 在线档两次请求之间至少隔多少毫秒
+    #[arg(long, value_name = "毫秒")]
+    online_interval_ms: Option<u64>,
+
     /// 字段级优先级表
     ///
     /// 不给就先看工作目录里有没有 `priorities.toml`，都没有才用内置的那一份
@@ -297,6 +312,33 @@ struct ScrapeArgs {
 impl ScrapeArgs {
     /// 工作目录里那份可选的优先级表叫什么。
     const IN_WORKSPACE: &'static str = "priorities.toml";
+
+    fn profile(&self) -> Result<scrape::Profile, String> {
+        scrape::Profile::from_label(&self.profile).ok_or_else(|| {
+            format!(
+                "不认得策略档案「{}」。有两套：`离线`（只用本地数据源）与 `在线`。",
+                self.profile
+            )
+        })
+    }
+
+    /// 命令行给的频率**有下限**。
+    ///
+    /// 默认值只是默认值，挡不住 `--online-interval-ms 0`——而「并发与频率有明确上限」
+    /// 说的正是**挡得住**。库里那一层允许 0（测试要跑得动），产品这一层不允许：
+    /// 真正会去打 ScreenScraper 的只有这一条路。
+    const MIN_INTERVAL: Duration = Duration::from_millis(200);
+
+    fn limits(&self) -> scrape::online::Limits {
+        let mut limits = scrape::online::Limits::default();
+        if let Some(budget) = self.online_budget {
+            limits.budget = budget;
+        }
+        if let Some(ms) = self.online_interval_ms {
+            limits.interval = Duration::from_millis(ms).max(Self::MIN_INTERVAL);
+        }
+        limits
+    }
 
     fn load_priorities(&self, workspace: &Path) -> Result<Priorities, String> {
         let path = match &self.priorities {
@@ -856,6 +898,19 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
 ///
 /// 读盘只发生在一处：把主库里现成的图与视频收进**媒体池**。`--no-media` 把那一处也
 /// 关掉，于是一个字节都不读主库。
+///
+/// ## 三种退出
+///
+/// | 退出码 | 什么情况 | 已经采到的东西 | 马上重跑有用吗 |
+/// |---|---|---|---|
+/// | 0 | 跑完了 | 在库里 | 不必 |
+/// | 1 | **没跑起来**：参数不对、库不在、缺凭据 | —— | 先改参数 |
+/// | 3 | **对面不让了**：配额超限、凭据被拒、被拉黑、网断了 | **在库里** | **没用**；配额那条今天都别再来 |
+/// | 4 | **自己收的手**：`--online-budget` 用完了 | **在库里** | 有用，接着采 |
+/// | 130 | Ctrl-C | 在库里 | 有用 |
+///
+/// 3 与 4 分开，是因为脚本要照着它决定「循环着跑到完」还是「今天到此为止」——
+/// 而这两件事在 ScreenScraper 上的代价差得很远：接着打的那一条通向永久封禁。
 fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
     if let Some(path) = &args.dump_priorities {
         match write_file(path, Priorities::builtin_text().as_bytes()) {
@@ -872,6 +927,10 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
         }
     }
 
+    let profile = match args.profile() {
+        Ok(profile) => profile,
+        Err(message) => return fail(message),
+    };
     let (slug, located_by) = match locate(args.library.as_deref(), args.root.as_deref()) {
         Ok(pair) => pair,
         Err(message) => return fail(message),
@@ -917,9 +976,47 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
     }
 
     let mut options = scrape::Options::new(root.clone().unwrap_or_default(), pool_dir);
+    options.profile = profile;
     options.media = !args.no_media;
     options.max_media_bytes = args.max_media_mib.map(|mib| mib.saturating_mul(1 << 20));
     options.refresh = args.refresh;
+
+    // **在线档的网络句柄只在这一档造出来。** 传输层也按同一个间隔限一次流——
+    // 上面那道闸管的是「一趟发几个」，这一道管的是「打得多快」。
+    let limits = args.limits();
+    let online = profile == scrape::Profile::Online;
+    let credentials = match (online, scrape::online::Credentials::from_env()) {
+        (false, _) => None,
+        (true, Some(credentials)) => Some(credentials),
+        // **宁可不启动也不匿名试探**：没有 devid 的请求直接 403，而那是白扣一次的。
+        (true, None) => {
+            return fail(format!(
+                "在线档要一套 ScreenScraper 凭据，从环境变量读：{}。\n\
+                 devid / devpassword 要在 ScreenScraper 的论坛人工申请（无 devid 直接 403），\n\
+                 **不要拿别人的 devid 用**——那会连累对方被拉黑（426）。",
+                scrape::online::ENV_KEYS.join(" / ")
+            ));
+        }
+    };
+    let fetcher = online.then(|| HttpFetcher::with_throttle(limits.interval));
+    let net = match (fetcher.as_ref(), credentials) {
+        (Some(fetcher), Some(credentials)) => {
+            eprintln!(
+                "在线档：并发上限 {}，两次请求之间至少 {} 毫秒，这一趟最多 {} 个请求。\n\
+                 只对**已确认**的条目发请求；配额超限会当场停下，不重试也不换账号。",
+                scrape::online::MAX_CONCURRENCY,
+                limits.interval.as_millis(),
+                thousands(limits.budget),
+            );
+            Some(scrape::online::Net::new(
+                fetcher,
+                limits,
+                credentials,
+                cancel,
+            ))
+        }
+        _ => None,
+    };
 
     let library = RealFs::new();
     let started = Instant::now();
@@ -941,6 +1038,7 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
         &mut catalog,
         &priorities,
         &options,
+        net.as_ref(),
         &mut scrape::RunContext {
             cancel,
             progress: &mut progress,
@@ -976,6 +1074,12 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
             thousands(outcome.forgotten)
         );
     }
+    if outcome.missing_media > 0 {
+        eprintln!(
+            "有 {} 份媒体源说它没有，记下了——下一趟不会为同一张不存在的图再花一份配额。",
+            thousands(outcome.missing_media)
+        );
+    }
     if outcome.not_media > 0 {
         eprintln!(
             "有 {} 份被认领的媒体，扩展名这一层却不认得——本地媒体源与媒体池的扩展名表\n             对不上了，这是要查的。",
@@ -994,8 +1098,36 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
             thousands(outcome.unreadable_media)
         );
     }
+    if outcome.skipped > 0 {
+        eprintln!(
+            "有 {} 个「锚点 × 源」这次没采成，**一个字都没写库**——重跑会再来一次。\n\
+             头一个是：{}",
+            thousands(outcome.skipped),
+            outcome.first_skip.as_deref().unwrap_or("（没说）"),
+        );
+    }
+    if let Some(online) = &outcome.report.online
+        && online.refused > 0
+    {
+        eprintln!(
+            "有 {} 个 URL 被取数闸门拦下：源给回来的地址在白名单之外。这是要看一眼的。",
+            thousands(online.refused)
+        );
+    }
     if !write_json(args.json.as_deref(), &outcome.report) {
         return ExitCode::FAILURE;
+    }
+    // **停下来不等于白跑。** 已经采完的那批在上面就写进中立库了，报告也照出——
+    // 退出码只是让脚本知道「这一趟没跑完」，以及**还能不能马上再来一趟**。
+    if let Some(halt) = &outcome.halted {
+        eprintln!("\n{}", halt.describe());
+        return ExitCode::from(match halt {
+            // **4：我们自己收的手。** 立刻重跑就接着采——脚本可以照着循环。
+            scrape::online::Halt::Budget { .. } => 4,
+            // **3：对面不让了**（配额超限、凭据不对、被拉黑），或者网断了。
+            // 立刻重跑没有意义，配额那一条更是**今天都别再来**。
+            _ => 3,
+        });
     }
     if outcome.interrupted {
         eprintln!("这一趟被中断了，已经采完的那部分留在中立库里，重跑会接着采。");

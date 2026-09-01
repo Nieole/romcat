@@ -2,12 +2,16 @@
 //!
 //! 这两条纪律写在注释里是不够的——[`registry`](super::registry) 那份数据源清单是
 //! **数据**，用户可以整份换掉，而换掉的那一份完全可能把 `datomatic` 写回去。因此闸门
-//! 是一个**纯函数**，同时挂在两处：
+//! 是一个**纯函数**，同时挂在三处：
 //!
 //! - [`sync::plan`](super::sync::plan) 排计划时逐条查，于是「会不会碰到禁区」在
 //!   一个字节都还没发出去的时候就是可断言的事实；
 //! - [`HttpFetcher`](super::fetch::HttpFetcher) 每一跳（**含重定向落到的每一跳**）
-//!   再查一遍，兜住计划之外的路径。
+//!   再查一遍，兜住计划之外的路径；
+//! - **在线刮削档**（[`scrape::online`](crate::scrape::online)）发查询前查一遍，
+//!   而且**响应里给回来的每一个媒体 URL 也查一遍**——那些 URL 是**服务器说了算**的，
+//!   一条被改过的响应就能把请求送到禁区去。闸门是这个库里唯一一处「可以连哪儿」的
+//!   声明，在线源不另开一条路。
 //!
 //! ## 挡什么
 //!
@@ -38,6 +42,12 @@ pub const ALLOWED_HOSTS: &[&str] = &[
     "release-assets.githubusercontent.com",
     "raw.githubusercontent.com",
     "codeload.github.com",
+    // **在线刮削档**（票 14）：ScreenScraper 的 API 与它的媒体落点。
+    // `api.` 是 `jeuInfos.php` / `mediaJeu.php` 的家，`www.` 是响应里那些媒体 URL
+    // 常见的另一个落点。两个都得在名单上，因为**媒体 URL 是服务器给的**——闸门
+    // 逐个查它们，名单之外的一律不下。
+    "api.screenscraper.fr",
+    "www.screenscraper.fr",
 ];
 
 /// 明确点名拒绝的主机。它们本来就不在白名单里，单列一份是为了**说得出理由**——
@@ -263,6 +273,23 @@ mod tests {
         );
         // 同一个镜像的 No-Intro 资产照常放行——「绝不直连 datomatic」正靠它。
         assert!(check_asset("hugo19941994/auto-datfile-generator", "no-intro.zip").is_ok());
+    }
+
+    #[test]
+    fn 在线刮削的两个落点在名单上_别的站点一律拒() {
+        // **媒体 URL 是服务器给的**，闸门是唯一挡得住「响应把我们送到别处」的东西。
+        assert!(check("https://api.screenscraper.fr/api2/jeuInfos.php?crc=50ABC90A").is_ok());
+        assert!(check("https://www.screenscraper.fr/image.php?gameid=1&media=box-2D").is_ok());
+        // 一条被改过的响应把媒体 URL 指到禁区——一次请求就够触发永久封禁。
+        assert_eq!(
+            check("https://datomatic.no-intro.org/media/box.png"),
+            Err(Refusal::Datomatic)
+        );
+        // 名单之外的图床同样不下：白名单不是黑名单。
+        assert!(matches!(
+            check("https://cdn.example.com/box.png"),
+            Err(Refusal::NotAllowed { .. })
+        ));
     }
 
     #[test]

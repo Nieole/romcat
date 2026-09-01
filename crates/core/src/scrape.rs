@@ -4,15 +4,26 @@
 //! 重新判断「这是哪个游戏」——那是[识别](crate::identify)的活，它的结论已经躺在中立库里
 //! （候选、作品、发行版）。这里只做一件事：**按锚点、按字段、按源，把元数据与媒体收进来**。
 //!
-//! ## 离线档：运行时零网络请求
+//! ## 两套策略档案，在任务级别手动切换（ADR-0007）
 //!
-//! 这一趟只用**本地数据源**：中立库里已经有的候选（票 06 镜像下来的 DAT 撞出来的）、
-//! 变体的文件名、主库里现成的图片与视频。全库刮一遍不消耗任何在线配额（ADR-0007）。
+//! [离线档](Profile::Offline)只用**本地数据源**：中立库里已经有的候选（票 06 镜像下来的
+//! DAT 撞出来的）、变体的文件名、主库里现成的图片与视频。全库刮一遍不消耗任何在线配额。
 //!
-//! 「不联网」不是靠注释保证的，是一道**闸门**：每个源自报[本地还是联网](Locality)，
-//! 而[离线档](Profile::Offline)只收本地源，混进一个联网源会当场被拒。这与
+//! [在线档](Profile::Online)在这些之上再加联网源（[`online`]），补离线档补不上的那几样
+//! ——简介、类型、开发商，以及**封面**：本地数据源里根本没有图片。它对这个库有结构性
+//! 风险，全部小心都收在 [`online`] 那个模块里。
+//!
+//! 「离线档不联网」不是靠注释保证的，是一道**闸门**：每个源自报[本地还是联网](Locality)，
+//! 而离线档只收本地源，混进一个联网源会当场被拒。这与
 //! [`dat::guard`](crate::dat::guard) 是同一个套路——数据源清单是**数据**，用户可以换掉，
-//! 靠自觉守不住。
+//! 靠自觉守不住。**给了网络句柄也一样**：[`run`] 拿到 `Some(net)` 而档案是离线时，
+//! 那个句柄一次都不会被碰——闸门查的是源自报的 `Locality`，不是参数表长什么样。
+//!
+//! ## 两套档案共用同一份优先级表与同一份缓存
+//!
+//! 字段级优先级（[`Priorities`]）与采集缓存（`scrape_probe` / `scrape_value` /
+//! `media_ref`）是两个档位**共用**的机制，不是在线档专有（ADR-0007）。于是「离线跑一遍、
+//! 再用在线档补缺口」是同一份库上的两趟，不是两套结论；而改一次优先级不必重采。
 //!
 //! ## 三个 ID 必须分开（调研 13.3(2)）
 //!
@@ -33,6 +44,7 @@
 
 pub mod dat;
 pub mod local;
+pub mod online;
 pub mod pool;
 pub mod priority;
 pub mod report;
@@ -45,6 +57,7 @@ use crate::catalog::{Catalog, CatalogError};
 use crate::fs::LibraryFs;
 use crate::scan::CancelToken;
 
+use online::{Halt, Net};
 use pool::{MediaPool, PoolError};
 
 pub use priority::Priorities;
@@ -73,6 +86,34 @@ pub enum ScrapeError {
         /// 哪个源。
         name: String,
     },
+    /// 在线档没有网络句柄。
+    ///
+    /// **宁可不启动也不要退回离线偷偷跑完**：用户点名要在线档，是因为他要的正是离线档
+    /// 补不上的那几样；悄悄降级只会让他对着一份缺封面的报告以为「在线源也没有」。
+    #[error(
+        "在线档要一个网络句柄与一套凭据才起得来。\
+         凭据从环境变量读：{}。\
+         ScreenScraper 的 devid 要在它的论坛人工申请（无 devid 直接 403），\
+         **不要拿别人的 devid 用**——那会连累对方被拉黑。",
+        online::ENV_KEYS.join(" / ")
+    )]
+    NoNetwork,
+}
+
+/// 一个源这一次没采成。
+///
+/// **与「无话可说」是两件事**：无话可说（`probe` 返回 `None`）说的是「这个源对这个锚点
+/// 本来就没有意见」，引擎据此清掉上一轮的结论；而这里说的是「本该有意见，这次没问到」。
+/// 混为一谈会让一次网络抖动把库里好好的结论删掉。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Failure {
+    /// 这一条没采到，整趟接着跑。**不写库**——那一对下一趟还会再来。
+    Skip {
+        /// 为什么。
+        why: String,
+    },
+    /// **整趟到此为止。** 配额超限、凭据不对、网断了。已经采完的那部分留在库里。
+    Halt(Halt),
 }
 
 /// **锚点种类**：刮削结论挂在三层内容层级的哪一层。
@@ -192,10 +233,20 @@ pub enum Locality {
 }
 
 /// **刮削策略档案**。预置两套，在任务级别切换（ADR-0007）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// 切换是**任务级别**的：`romcat scrape --profile 在线` 是一趟，不是一个全局开关。
+/// 两档共用同一份优先级表与同一份采集缓存，所以「先离线跑全库、再在线补缺口」
+/// 是同一份库上的两趟。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Profile {
     /// **离线优先**：只用本地数据源，全库刮一遍不消耗任何在线配额。
+    #[default]
     Offline,
+    /// **在线优先**：本地源照用，再加联网源补它们补不上的那几样。
+    ///
+    /// **它不是「只用在线源」**：离线源是免费的，把它们关掉只会让在线源多背几个字段、
+    /// 多花几份配额。在线源排在哪一位由优先级表说了算。
+    Online,
 }
 
 impl Profile {
@@ -204,6 +255,17 @@ impl Profile {
     pub fn label(self) -> &'static str {
         match self {
             Self::Offline => "离线档",
+            Self::Online => "在线档",
+        }
+    }
+
+    /// 从词认回来。命令行的 `--profile` 走它。
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "离线" | "离线档" | "offline" => Some(Self::Offline),
+            "在线" | "在线档" | "online" => Some(Self::Online),
+            _ => None,
         }
     }
 
@@ -212,8 +274,29 @@ impl Profile {
     pub fn accepts(self, locality: Locality) -> bool {
         match self {
             Self::Offline => locality == Locality::Local,
+            Self::Online => true,
         }
     }
+}
+
+/// **判据**：一个已确认的条目撞上 DAT 时用的那几个数。
+///
+/// 名字不叫 `RomHash`：`ROM` 是词表里 **发行版** 与 **变体** 的 `_Avoid_` 词，而这个
+/// 类型说的既不是发行版也不是变体，是**判据**——`identify::fingerprint` 那一侧
+/// 用的就是这个词。只有 `rom_name` 保留 `rom`，因为它指的是 Logiqx schema 里那个
+/// `<rom>` 记录的名字，也是 ScreenScraper `romnom` 参数要的东西。
+///
+/// 在线源拿它发查询：ScreenScraper 强制要求「crc / md5 / sha1 之一**加**文件字节大小」
+/// 同发（调研 §1.4）。这两样票 07 都已经算好躺在中立库里——**在线档不重新算一遍哈希，
+/// 更不重新判断这是哪个游戏**（那是识别的活）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Basis {
+    /// 撞上时用的那套 CRC-32（含头或去头，以候选记的为准）。
+    pub crc32: u32,
+    /// 对应的字节数。**少了它这次查询注定未命中**，白扣一份「未识别 ROM」配额。
+    pub bytes: u64,
+    /// 那条 DAT 记录里的文件名。只作辅助，判据是哈希。
+    pub rom_name: String,
 }
 
 /// 一条撞出来的 DAT 条目，刮削用得上的那两列。
@@ -266,22 +349,53 @@ pub struct Subject<'a> {
     /// 该多收进来几份。凡是改变结果的东西都必须进**输入指纹**，否则调完上限重跑，
     /// 缓存会一口咬定「输入没变」而整条跳过——那些文件永远收不进来。
     pub media_limit: Option<u64>,
+    /// **识别确认了这个锚点没有**：有没有一条自动通过的候选。
+    ///
+    /// 在线源只对已确认的发请求——真库里 46,444 个变体只有 30,024 个被认出来，
+    /// 剩下那 16,420 个每问一次都要扣一份 ScreenScraper 的「未识别 ROM」配额，
+    /// 而那份配额撞穿的处置是**连账号带 IP 永久封禁**（ADR-0007）。
+    pub confirmed: bool,
+    /// 已确认时，撞上的那份**判据**。
+    ///
+    /// **只有作品锚点有**：在线源一部作品只查一次，给每个变体都取一份判据是几万次
+    /// 白查的库查询（见 `Plan::build`）。
+    pub basis: Option<&'a Basis>,
 }
 
-/// 一个源说「主库里这份文件是这个锚点的某种媒体」。
+/// 一个源说「这一份东西是这个锚点的某种媒体」。
 ///
-/// 带着**库里记的字节数**，于是超过上限的那些在**打开文件之前**就拦得下来——
-/// 少了这一样，一份 662 MiB 的预览视频要先读满上限那一段才发现超了。
+/// 带着**事先知道的字节数**，于是超过上限的那些在**打开文件、或者下载之前**就拦得下来
+/// ——少了这一样，一份 662 MiB 的预览视频要先读满上限那一段才发现超了，而在线那一侧
+/// 还要连带白花一份配额。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaClaim {
     /// 是封面还是截图还是视频。
     pub kind: MediaKind,
-    /// 主库里那份文件的键。
-    pub key: String,
-    /// 库里记的字节数；元数据读不到时是 `None`（ADR-0021）。
+    /// 这份媒体的字节从哪儿来。
+    pub from: MediaFrom,
+    /// 事先知道的字节数；不知道就是 `None`（主库那侧是 ADR-0021 的第三态，
+    /// 在线那侧是源没说）。
     pub bytes: Option<u64>,
     /// **依据**。
     pub why: String,
+}
+
+/// 一份媒体的字节从哪儿来。
+///
+/// 两条路的代价完全不同，所以在类型上分开：主库那一份**读一遍盘**就有，在线那一份
+/// 要**花一份配额加一段带宽**。凡是要在「值不值得重来一次」上做判断的地方，
+/// 这个差别都是判据。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaFrom {
+    /// 主库里现成的一份文件，值是它在中立库里的键。
+    Library(String),
+    /// 在线源给的一个 URL。
+    Online {
+        /// 从哪儿下。**它是服务器说了算的，因此下之前要过一遍闸门。**
+        url: String,
+        /// 源说的格式。URL 里往往没有扩展名，而池要一个落盘的名字。
+        ext: String,
+    },
 }
 
 /// 一个源给出的一个字段值，连着它的**依据**。
@@ -341,8 +455,10 @@ impl Harvest {
 ///
 /// 三件事：自报家门（名字与本地/联网）、给出**输入指纹**、采集。
 ///
-/// **采集是纯的**——它只说「主库里这个键的文件是这个变体的封面」，读字节、算哈希、
-/// 往池里放全都归引擎。这样源可以完全在内存里测，而全部 IO 收在一处。
+/// **采集不碰字节**——它只说「主库里这个键的文件是这个变体的封面」「这个 URL 是这部
+/// 作品的封面」，读盘、下载、算哈希、往池里放全都归引擎。这样源可以完全在内存里测，
+/// 而全部 IO（连同那道限流与配额闸）收在一处。**本地源的 `collect` 因此永远返回
+/// `Ok(())`**：它没有会失败的动作。
 pub trait Source {
     /// 这个源叫什么。它会进优先级表，也会进每一条**依据**。
     fn name(&self) -> &str;
@@ -363,7 +479,11 @@ pub trait Source {
     fn probe(&self, subject: &Subject<'_>) -> Option<String>;
 
     /// 采集。
-    fn collect(&self, subject: &Subject<'_>, out: &mut Harvest);
+    ///
+    /// # Errors
+    /// 这一条没采到时返回 [`Failure::Skip`]（那一对**不写库**，下一趟再来）；
+    /// 整趟该停时返回 [`Failure::Halt`]（配额超限、凭据不对、网断了）。
+    fn collect(&self, subject: &Subject<'_>, out: &mut Harvest) -> Result<(), Failure>;
 }
 
 /// 刮削的选项。
@@ -446,27 +566,61 @@ pub struct Outcome {
     /// 重跑识别把某个源的候选清空时就是这一态。**留着比缺着更糟**：那些值带着一条
     /// 指向已经不存在的条目的**依据**。
     pub forgotten: u64,
+    /// 有几个「锚点 × 源」这次没采成、**留着下一趟再来**。
+    ///
+    /// 与 `forgotten` 是相反的两件事：那个是「问过了，答案是没有」，这个是「没问到」。
+    /// 没问到的**一个字都不写库**——写了就等于宣布这一对采全了，下一趟会整条跳过。
+    pub skipped: u64,
+    /// 源说「这一份媒体没有」的有几份。**不是错误**：那是一条结论，
+    /// 下一趟不会为同一张不存在的图再花一份配额。
+    pub missing_media: u64,
+    /// 头一个「没采成」是为什么。
+    ///
+    /// **只留第一句**：一万条一样的抱怨没用，而一句都不留，用户只看得到一个数字——
+    /// 「有 900 个没采成」既分不出是网断了还是凭据过期了，也就没法决定下一步做什么。
+    pub first_skip: Option<String>,
+    /// 这一趟停了没有，为什么。**不是错误**：已经采完的那部分留在中立库里，重跑接着采。
+    pub halted: Option<Halt>,
+    /// 在线那一侧用掉了多少。离线档是 `None`。
+    pub online: Option<online::Usage>,
 }
 
 /// 一趟刮削。
 ///
-/// **不联网**（离线档的全部意义），**不写主库一个字节**（ADR-0004）：读主库只发生在
-/// 一处——把一份本地媒体读进**媒体池**，而那也可以用 `options.media = false` 关掉。
+/// **离线档不联网**，**两档都不写主库一个字节**（ADR-0004）：读主库只发生在一处——
+/// 把一份本地媒体读进**媒体池**，而那也可以用 `options.media = false` 关掉。
+///
+/// `net` 给不给由档案定：离线档**给了也不会碰**（闸门查的是源自报的 `Locality`），
+/// 在线档不给就起不来。
+///
+/// ## 停下来不等于失败
+///
+/// 撞上配额、凭据不对、网断了，这一趟会**停**：把已经采完的那批写进中立库、照常出报告，
+/// 在 [`Outcome::halted`] 里说清为什么。做成错误的话，跑到 80% 撞上配额就会把那 80%
+/// 一起丢掉——而配额是每天才回一次的东西。
 ///
 /// # Errors
-/// 中立库读写不了、媒体池建不出来、或者档案里混进了联网源时返回错误。
+/// 中立库读写不了、媒体池建不出来、档案里混进了它不该有的源、或者在线档没有网络句柄
+/// 时返回错误。
 pub fn run(
     library: &dyn LibraryFs,
     catalog: &mut Catalog,
     priorities: &Priorities,
     options: &Options,
+    net: Option<&Net<'_>>,
     context: &mut RunContext<'_>,
 ) -> Result<Outcome, ScrapeError> {
-    let sources = offline_sources(options.profile, options.media)?;
+    let sources = sources(options.profile, options.media, net)?;
     if options.refresh {
         catalog.clear_scraped()?;
     }
     let pool = MediaPool::open(&options.pool)?;
+    let into = Ingesting {
+        library,
+        pool: &pool,
+        options,
+        net,
+    };
 
     let plan = Plan::build(catalog, options)?;
     let mut run = Run::default();
@@ -474,8 +628,9 @@ pub fn run(
     let mut done = 0_u64;
     let total = u64::try_from(plan.subjects.len()).unwrap_or(u64::MAX);
     let mut interrupted = false;
+    let mut halted: Option<Halt> = None;
 
-    for subject in &plan.subjects {
+    'subjects: for subject in &plan.subjects {
         if context.cancel.is_cancelled() {
             interrupted = true;
             break;
@@ -499,8 +654,31 @@ pub fn run(
                 continue;
             }
             let mut harvest = Harvest::default();
-            source.collect(&view, &mut harvest);
-            let media = ingest_all(library, catalog, &pool, options, &harvest, &mut run)?;
+            match source.collect(&view, &mut harvest) {
+                Ok(()) => {}
+                // **没问到就什么都不写。** 写了等于宣布这一对采全了，下一趟整条跳过，
+                // 那条结论就永远缺着——而这里的典型成因只是网抖了一下。
+                Err(Failure::Skip { why }) => {
+                    run.note_skip(why);
+                    continue;
+                }
+                Err(Failure::Halt(reason)) => {
+                    halted = Some(reason);
+                    break 'subjects;
+                }
+            }
+            let media = match ingest_all(&into, catalog, &harvest, &mut run) {
+                Ok(media) => media,
+                Err(Stop::Incomplete(why)) => {
+                    run.note_skip(why);
+                    continue;
+                }
+                Err(Stop::Halt(reason)) => {
+                    halted = Some(reason);
+                    break 'subjects;
+                }
+                Err(Stop::Fatal(error)) => return Err(error),
+            };
             batch.push(Harvested {
                 anchor: subject.kind.label().to_string(),
                 subject: subject.id.clone(),
@@ -532,6 +710,8 @@ pub fn run(
             });
         }
     }
+    // **停下来之前先落库。** 这一句就是「网络失败不影响已完成的部分」：撞上配额时
+    // 手里那一批照样写进去，重跑从这儿接着采。
     catalog.put_scraped(&batch)?;
     (context.progress)(Progress {
         done,
@@ -541,7 +721,18 @@ pub fn run(
     });
 
     let names: Vec<&str> = sources.iter().map(|source| source.name()).collect();
-    let report = ScrapeReport::build(catalog, priorities, options, &names, &plan.counts)?;
+    let online = net.map(Net::usage);
+    let report = ScrapeReport::build(
+        catalog,
+        priorities,
+        options,
+        &report::Run {
+            sources: &names,
+            plan: &plan.counts,
+            online,
+            halted: halted.as_ref().map(Halt::describe),
+        },
+    )?;
     Ok(Outcome {
         report,
         interrupted,
@@ -555,7 +746,43 @@ pub fn run(
         oversized_media: run.oversized_media,
         not_media: run.not_media,
         forgotten: run.forgotten,
+        skipped: run.skipped,
+        missing_media: run.missing_media,
+        first_skip: run.first_skip,
+        halted,
+        online,
     })
+}
+
+/// 一次采集半路上停下来的三种理由。
+///
+/// 三种的处置完全不同，所以分得开：**没采全**下一趟再来（不写库）、**整趟停**要把手里
+/// 那批先落库、**真出错**才往上抛。
+enum Stop {
+    /// 这一对没采全（下媒体时网抖了一下）。**不写进采集记录**——写了下一趟就跳过了。
+    Incomplete(String),
+    /// 整趟到此为止。
+    Halt(Halt),
+    /// 中立库或媒体池真的坏了。
+    Fatal(ScrapeError),
+}
+
+impl From<ScrapeError> for Stop {
+    fn from(error: ScrapeError) -> Self {
+        Self::Fatal(error)
+    }
+}
+
+impl From<CatalogError> for Stop {
+    fn from(error: CatalogError) -> Self {
+        Self::Fatal(error.into())
+    }
+}
+
+impl From<PoolError> for Stop {
+    fn from(error: PoolError) -> Self {
+        Self::Fatal(error.into())
+    }
 }
 
 /// 跑一趟要的那两样外部东西：中断信号与进度回调。
@@ -584,14 +811,37 @@ fn fingerprint(parts: &[&str]) -> String {
     pool::hex(&context.finish().as_ref()[..8])
 }
 
-/// 离线档的全部源。**顺序无关**——谁排前面由优先级表说了算，不由这里说了算。
+/// 这个程序认得的全部源，两档合起来。
+///
+/// 报告拿它分辨「优先级表里点名了一个不存在的源」（多半是打错字）与「点名了一个这一档
+/// 没参加的源」（正常，换个档案就有了）。混成一件事，用户每跑一趟离线档都会看见一句
+/// 「ScreenScraper 不存在」。
+#[must_use]
+pub fn all_source_names() -> Vec<&'static str> {
+    vec![
+        "No-Intro",
+        "Redump",
+        "TOSEC",
+        "MAME",
+        "GoodNES",
+        local::FILENAME,
+        local::LOCAL_MEDIA,
+        online::SCREEN_SCRAPER,
+    ]
+}
+
+/// 这一档的全部源。**顺序无关**——谁排前面由优先级表说了算，不由这里说了算。
 ///
 /// `media` 为假时**本地媒体源整个不参加**，而不是喂给它一份空的媒体清单。差别是要命的：
 /// 空清单会让它的 `probe` 返回「无话可说」，而「无话可说 + 上次说过话」正是引擎清掉
 /// 上一轮结论的那一态——于是 `--no-media` 会把此前收好的媒体映射**悄悄删掉**。
 /// `--no-media` 说的是「这趟不收媒体」，不是「把收过的扔了」。
-fn offline_sources(profile: Profile, media: bool) -> Result<Vec<Box<dyn Source>>, ScrapeError> {
-    let mut sources: Vec<Box<dyn Source>> = vec![
+fn sources<'a>(
+    profile: Profile,
+    media: bool,
+    net: Option<&'a Net<'a>>,
+) -> Result<Vec<Box<dyn Source + 'a>>, ScrapeError> {
+    let mut sources: Vec<Box<dyn Source + 'a>> = vec![
         Box::new(dat::DatSource::new("No-Intro")),
         Box::new(dat::DatSource::new("Redump")),
         Box::new(dat::DatSource::new("TOSEC")),
@@ -602,8 +852,14 @@ fn offline_sources(profile: Profile, media: bool) -> Result<Vec<Box<dyn Source>>
     if media {
         sources.push(Box::new(local::LocalMediaSource::new()));
     }
+    // **联网源只在在线档里造出来。** 离线档拿到 `Some(net)` 也不会碰它——这一条
+    // 比「参数表里没有网络句柄」硬：句柄可以从别处传进来，而这里根本不造那个源。
+    if profile == Profile::Online {
+        let net = net.ok_or(ScrapeError::NoNetwork)?;
+        sources.push(Box::new(online::ScreenScraper::new(net)));
+    }
     // **闸门**：档案说不收的源，一个都不许混进来。写在这里而不是靠上面那张表自觉，
-    // 是因为将来票 14 会往这张表里加联网源，而加的时候最容易忘的就是档案这一层。
+    // 是因为源的清单会一直长，而加的时候最容易忘的就是档案这一层。
     for source in &sources {
         if !profile.accepts(source.locality()) {
             return Err(ScrapeError::WrongLocality {
@@ -630,6 +886,17 @@ pub struct PlanCounts {
     pub variants: u64,
     /// 找到几份可以归给某个变体的本地媒体。
     pub local_media: u64,
+    /// **有判据可以拿去发在线查询**的作品锚点几个。
+    ///
+    /// **只有在线档算这个数**（`None` 表示这一趟没算）：取判据要逐个查中立库，
+    /// 真库上那是 9,226 次查询，而离线档一次都用不上它。
+    pub queryable_works: Option<u64>,
+    /// 未被识别确认、因此**一个在线请求都不会为它发出去**的变体有几个。
+    ///
+    /// 报告必须把这个数说出来：它既是「在线档为什么补不上这些」的解释，
+    /// 也是「配额没有被这些烧掉」的凭据。两档都算得起——判据是变体那一行上的
+    /// 作品链接，不必再查一次库。
+    pub unconfirmed_variants: u64,
 }
 
 struct PlannedSubject {
@@ -639,6 +906,8 @@ struct PlannedSubject {
     entries: Vec<DatEntry>,
     main_key: Option<String>,
     media: Vec<LocalMedia>,
+    basis: Option<Basis>,
+    confirmed: bool,
 }
 
 impl PlannedSubject {
@@ -651,6 +920,8 @@ impl PlannedSubject {
             main_key: self.main_key.as_deref(),
             media: &self.media,
             media_limit,
+            confirmed: self.confirmed,
+            basis: self.basis.as_ref(),
         }
     }
 }
@@ -687,18 +958,38 @@ impl Plan {
 
         // 作品锚点：把它下面全部变体的候选并起来。平台取第一个说得出的——同一部作品
         // 跨平台时哪个都不算错，而平台在这一层只用于按平台覆写优先级。
-        let mut work_entries: BTreeMap<String, (Option<String>, Vec<DatEntry>)> = BTreeMap::new();
+        let mut work_entries: BTreeMap<String, WorkSlot> = BTreeMap::new();
         let mut subjects = Vec::with_capacity(variants.len() + works.len());
+        let mut unconfirmed = 0_u64;
         for variant in &variants {
             let entries = by_variant.remove(&variant.key).unwrap_or_default();
+            // **「已确认」的判据是有一条自动通过的候选**，不是「有发行版链接」：
+            // 汉化版认得出是哪部作品、认不出基于哪一条发行版，发行版那一列本来就空着
+            // （ADR-0012），拿它当判据会把整批汉化版划成未识别。判据在变体这一行上
+            // 就有，不必再查一次库——于是两个档位都算得起这个数。
+            let confirmed = variant.work_id.is_some();
+            if !confirmed {
+                unconfirmed += 1;
+            }
             if let Some(name) = variant.work_id.and_then(|id| works.get(&id)) {
                 let slot = work_entries
                     .entry(name.clone())
-                    .or_insert_with(|| (variant.platform.clone(), Vec::new()));
-                if slot.0.is_none() {
-                    slot.0.clone_from(&variant.platform);
+                    .or_insert_with(|| WorkSlot {
+                        platform: variant.platform.clone(),
+                        entries: Vec::new(),
+                        representative: None,
+                    });
+                if slot.platform.is_none() {
+                    slot.platform.clone_from(&variant.platform);
                 }
-                slot.1.extend(entries.iter().cloned());
+                slot.entries.extend(entries.iter().cloned());
+                // **一部作品发一次查询就够**，所以只留一个代表变体。变体按键排序遍历，
+                // 于是同一份库跑两次挑中的是同一个。按变体查等于把配额乘上三倍
+                // （真库 30,024 个已确认变体 vs 9,226 部作品），而简介与封面本来就是
+                // 挂在**作品**这一层的（`CONTEXT.md`）。
+                if slot.representative.is_none() {
+                    slot.representative = Some(variant.key.clone());
+                }
             }
             subjects.push(PlannedSubject {
                 kind: AnchorKind::Variant,
@@ -707,19 +998,44 @@ impl Plan {
                 entries,
                 main_key: Some(variant.main_key.clone()),
                 media: media_index.get(&variant.key).cloned().unwrap_or_default(),
+                // **变体这一层不带判据**：在线源只查作品锚点，给每个变体都取一次判据
+                // 就是 30,024 次白查的库查询（实测那一层不便宜）。
+                basis: None,
+                confirmed,
             });
         }
         let works_count = u64::try_from(work_entries.len()).unwrap_or(u64::MAX);
-        for (name, (platform, mut entries)) in work_entries {
+        // **只有在线档取判据。** 取一次是一次库查询，离线档一次都用不上。
+        let online = options.profile == Profile::Online;
+        let mut queryable = 0_u64;
+        for (name, slot) in work_entries {
+            let mut entries = slot.entries;
             entries.sort();
             entries.dedup();
+            let basis = match (online, &slot.representative) {
+                (true, Some(key)) => {
+                    catalog
+                        .accepted_hash(key)?
+                        .map(|(crc32, bytes, rom_name)| Basis {
+                            crc32,
+                            bytes,
+                            rom_name,
+                        })
+                }
+                _ => None,
+            };
+            if basis.is_some() {
+                queryable += 1;
+            }
             subjects.push(PlannedSubject {
                 kind: AnchorKind::Work,
                 id: name,
-                platform,
+                platform: slot.platform,
                 entries,
                 main_key: None,
                 media: Vec::new(),
+                confirmed: slot.representative.is_some(),
+                basis,
             });
         }
         Ok(Self {
@@ -727,10 +1043,20 @@ impl Plan {
                 works: works_count,
                 variants: u64::try_from(variants.len()).unwrap_or(u64::MAX),
                 local_media,
+                queryable_works: online.then_some(queryable),
+                unconfirmed_variants: unconfirmed,
             },
             subjects,
         })
     }
+}
+
+/// 攒一个作品锚点时手里的那几样。
+struct WorkSlot {
+    platform: Option<String>,
+    entries: Vec<DatEntry>,
+    /// 拿哪个变体的判据去发那**一次**在线查询。
+    representative: Option<String>,
 }
 
 /// 一趟跑下来攒的那些数。
@@ -746,31 +1072,67 @@ struct Run {
     oversized_media: u64,
     not_media: u64,
     forgotten: u64,
+    skipped: u64,
+    missing_media: u64,
     media_count: u64,
+    first_skip: Option<String>,
+}
+
+impl Run {
+    /// 记一次「这一对没采成」。**留下第一句理由**：一万条一样的抱怨没用，
+    /// 而一句都不留，用户只看得到一个数字。
+    fn note_skip(&mut self, why: String) {
+        self.skipped += 1;
+        if self.first_skip.is_none() {
+            self.first_skip = Some(why);
+        }
+    }
+}
+
+/// 媒体进池要的那几样外部东西。
+///
+/// 捏成一个结构而不是四个参数，与 [`RunContext`]、[`pool::Claim`] 是同一条纪律：
+/// 它们本来就成群结队地一起走。
+struct Ingesting<'a> {
+    /// 主库的只读视图。
+    library: &'a dyn LibraryFs,
+    /// 媒体池。
+    pool: &'a MediaPool,
+    /// 这一趟的选项（主库根、单份上限）。
+    options: &'a Options,
+    /// 网络句柄；离线档是 `None`。
+    net: Option<&'a Net<'a>>,
 }
 
 /// 把一次采集里的媒体全部收进池里，返回写库要的 `(类型, 哈希, 依据)`。
 fn ingest_all(
-    library: &dyn LibraryFs,
+    into: &Ingesting<'_>,
     catalog: &mut Catalog,
-    pool: &MediaPool,
-    options: &Options,
     harvest: &Harvest,
     run: &mut Run,
-) -> Result<Vec<HarvestedMedia>, ScrapeError> {
+) -> Result<Vec<HarvestedMedia>, Stop> {
     let mut out = Vec::with_capacity(harvest.media.len());
     for claim in &harvest.media {
-        let ingested = pool::ingest(
-            library,
-            catalog,
-            pool,
-            &options.root,
-            &pool::Claim {
-                key: &claim.key,
-                bytes: claim.bytes,
-                max_bytes: options.max_media_bytes,
+        let want = pool::Claim {
+            key: match &claim.from {
+                MediaFrom::Library(key) => key,
+                MediaFrom::Online { url, .. } => url,
             },
-        )?;
+            bytes: claim.bytes,
+            max_bytes: into.options.max_media_bytes,
+        };
+        let ingested = match &claim.from {
+            MediaFrom::Library(_) => {
+                pool::ingest(into.library, catalog, into.pool, &into.options.root, &want)?
+            }
+            MediaFrom::Online { ext, .. } => {
+                let Some(net) = into.net else {
+                    // 在线源造得出来就一定有 net；这一支只在有人把源接错时到得了。
+                    return Err(Stop::Fatal(ScrapeError::NoNetwork));
+                };
+                ingest_online(net, catalog, into.pool, &want, ext)?
+            }
+        };
         match ingested {
             pool::Ingested::Reused { hash } => {
                 run.reused_hashes += 1;
@@ -794,15 +1156,97 @@ fn ingest_all(
                     evidence: claim.why.clone(),
                 });
             }
-            // 三种跳过分开数。**它们不是同一件事**，塞进同一个计数器，
-            // 报告就只能说「有 108 份没收进来」而说不出为什么。
+            // 几种跳过**分开数**。它们不是同一件事，塞进同一个计数器，报告就只能说
+            // 「有 108 份没收进来」而说不出为什么——而它们的处置各不相同：超上限是
+            // 自己设的，读不动是 ADR-0021 的第三态，闸门拦下是要去看一眼的，
+            // 源说没有则什么都不必做。
             pool::Ingested::TooBig { .. } => run.oversized_media += 1,
             pool::Ingested::Unreadable { .. } => run.unreadable_media += 1,
+            // 闸门拦下的数记在 `Net` 那一处，报告从它取——查询 URL 与媒体 URL 被拦下
+            // 是同一件事，各记一个计数器只会让两个数对不上。
+            pool::Ingested::Refused { .. } => {}
+            pool::Ingested::Missing { .. } => run.missing_media += 1,
             pool::Ingested::NotMedia { .. } => run.not_media += 1,
         }
     }
     run.media_count += u64::try_from(out.len()).unwrap_or(0);
     Ok(out)
+}
+
+/// 把一份在线媒体下进池里。
+///
+/// 四道先手，全都是为了**别白花配额与带宽**：
+///
+/// 1. **闸门在发出去之前查**——媒体 URL 是服务器说了算的；
+/// 2. **源说了多大就先按它判上限**——超了当场不下。这一条是在线这一侧最要紧的：
+///    真库里最大的一份预览媒体有 662 MiB，先下回来再嫌它大，配额与带宽都已经花掉了；
+/// 3. **下过的不重下**——`media_remote` 记着这个 URL 算出来是哪一份内容；
+/// 4. 下回来之后再按实际大小兜一道——源报的大小可能是假的。
+fn ingest_online(
+    net: &Net<'_>,
+    catalog: &mut Catalog,
+    pool: &MediaPool,
+    claim: &pool::Claim<'_>,
+    ext: &str,
+) -> Result<pool::Ingested, Stop> {
+    let url = claim.key;
+    // **闸门先查，而且这一条的结果是永久的**：URL 指向白名单之外，下一趟还是同一个
+    // 答案。于是它不让这一对「没采全」，只是记一笔——否则这一对会永远重采下去。
+    // 这里查一遍、`Net::request` 里再查一遍，**不是重复**：这一道要的是「拦下之后
+    // 该怎么办」——它是永久的判断，所以不让这一对重采；那一道守的是「一个字节都
+    // 不许发到禁区去」，它得挡住每一条走到发送口的 URL，不管谁先查过。
+    if let Err(refusal) = crate::dat::guard::check(url) {
+        net.refused();
+        return Ok(pool::Ingested::Refused {
+            why: format!("{url} 被取数闸门拦下：{refusal}"),
+        });
+    }
+    // 上限先于复用判，也**先于下载**：源自报的大小与上一趟记下的大小，谁说得出算谁的。
+    // 调低上限之后，此前下进来的那一份也该被挡在外面（同本地那一侧）。
+    let known = catalog.remote_media(url)?;
+    let size = claim.bytes.or(known.as_ref().map(|(bytes, _)| *bytes));
+    if let (Some(cap), Some(bytes)) = (claim.max_bytes, size)
+        && bytes > cap
+    {
+        return Ok(pool::Ingested::TooBig { bytes: Some(bytes) });
+    }
+    if let Some((_, hash)) = known {
+        let stored = catalog.media_ext(&hash)?;
+        if let Some(stored) = stored
+            && pool.contains(&hash, &stored)
+        {
+            return Ok(pool::Ingested::Reused { hash });
+        }
+    }
+
+    let bytes = match net.request(online::SCREEN_SCRAPER, url, online::Ask::Media) {
+        Ok(Some(bytes)) => bytes,
+        // **服务器说这张图没有。** 那是一条结论而不是失败：这一对照样算采全了，
+        // 只是少一张图。当成失败的话，下一趟会为同一张不存在的图再花一份配额。
+        Ok(None) => {
+            return Ok(pool::Ingested::Missing {
+                why: format!("{url} 那份媒体服务器说没有"),
+            });
+        }
+        Err(Failure::Halt(reason)) => return Err(Stop::Halt(reason)),
+        // 网抖了：**这一对整个不写库**，下一趟重来。少写一份图而把这一对记成采全了，
+        // 那份图就永远缺着。
+        Err(Failure::Skip { why }) => return Err(Stop::Incomplete(why)),
+    };
+    // 兜底：源报的大小可能是假的，也可能根本没报。
+    let got = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if let Some(cap) = claim.max_bytes
+        && got > cap
+    {
+        return Ok(pool::Ingested::TooBig { bytes: Some(got) });
+    }
+    let (hash, fresh) = pool::store(pool, catalog, &bytes, ext)?;
+    catalog.put_remote_media(url, &hash, got)?;
+    Ok(pool::Ingested::Stored {
+        hash,
+        bytes: got,
+        fresh,
+    })
 }
 
 #[cfg(test)]
@@ -822,27 +1266,75 @@ mod tests {
             fn probe(&self, _: &Subject<'_>) -> Option<String> {
                 None
             }
-            fn collect(&self, _: &Subject<'_>, _: &mut Harvest) {}
+            fn collect(&self, _: &Subject<'_>, _: &mut Harvest) -> Result<(), Failure> {
+                Ok(())
+            }
         }
         let source = 假源;
         assert!(!Profile::Offline.accepts(source.locality()));
         assert!(Profile::Offline.accepts(Locality::Local));
+        assert!(Profile::Online.accepts(Locality::Online));
+        // **在线档不是「只用在线源」**：离线源免费，关掉它们只会让在线源多花配额。
+        assert!(Profile::Online.accepts(Locality::Local));
     }
 
     #[test]
     fn 离线档那七个源全是本地的() {
-        let sources = offline_sources(Profile::Offline, true).expect("离线档该收得下这七个源");
+        let sources = sources(Profile::Offline, true, None).expect("离线档该收得下这七个源");
         assert_eq!(sources.len(), 7);
         assert!(sources.iter().all(|s| s.locality() == Locality::Local));
+    }
+
+    #[test]
+    fn 离线档拿到网络句柄也不造联网源() {
+        // 「离线档不联网」的保证不在参数表上——句柄可以从别处传进来。它在这里：
+        // 档案是离线时，联网源**根本不会被造出来**。
+        let fetcher = crate::dat::CannedFetcher::new();
+        let cancel = CancelToken::new();
+        let net = Net::new(
+            &fetcher,
+            online::Limits::default(),
+            online::Credentials {
+                dev_id: "测试".to_string(),
+                dev_password: "口令".to_string(),
+                soft_name: "romcat-test".to_string(),
+                user: None,
+                user_password: None,
+            },
+            &cancel,
+        );
+        let sources = sources(Profile::Offline, true, Some(&net)).expect("收得下");
+        assert!(sources.iter().all(|s| s.locality() == Locality::Local));
+        assert!(fetcher.asked().is_empty());
+    }
+
+    #[test]
+    fn 在线档没有网络句柄就不启动() {
+        // **宁可不启动也不悄悄降级**：用户点名要在线档，要的正是离线档补不上的那几样。
+        assert!(matches!(
+            sources(Profile::Online, true, None),
+            Err(ScrapeError::NoNetwork)
+        ));
     }
 
     #[test]
     fn 不收媒体时本地媒体源整个不参加() {
         // 它若参加而拿到一份空清单，`probe` 会返回「无话可说」，
         // 上一轮收好的媒体映射就被当成过期结论清掉了。
-        let sources = offline_sources(Profile::Offline, false).expect("收得下");
+        let sources = sources(Profile::Offline, false, None).expect("收得下");
         assert_eq!(sources.len(), 6);
         assert!(sources.iter().all(|s| s.name() != local::LOCAL_MEDIA));
+    }
+
+    #[test]
+    fn 每个源都在优先级表里有位置() {
+        // 优先级表点名了一个不存在的源，后果是**静默**的：它被排到链尾，用户以为
+        // 自己调了优先级，实际什么也没发生。反过来，程序有而表里没有的源同样静默。
+        let priorities = Priorities::builtin();
+        assert!(
+            priorities.sources_not_in(&all_source_names()).is_empty(),
+            "内置优先级表里点名的源，这个程序全都有"
+        );
     }
 
     #[test]

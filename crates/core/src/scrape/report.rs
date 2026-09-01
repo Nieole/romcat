@@ -7,8 +7,14 @@
 //!
 //! 离线档补不上简介、类型与开发商——这是调研早就写明的结论（Bangumi 的离线 dump 不含
 //! 图片、Wikidata 只有标签没有简介）。**报告必须把这件事说出来**：空着的字段如果不点名，
-//! 用户看到的就是「刮削跑完了」，而实际上前端里一半的格子是空的。这一节正是票 14
-//! 存在的理由。
+//! 用户看到的就是「刮削跑完了」，而实际上前端里一半的格子是空的。这一节正是**在线档**
+//! 存在的理由，所以它也要说清「换 `--profile 在线` 跑一趟才补得上」。
+//!
+//! ## 在线那一节是给「对着真账号跑之前」看的
+//!
+//! 发了几个请求、服务端说还剩多少、并发上限是几、**未识别的变体一个请求都没发**——
+//! 这几个数必须在报告里，因为在线档赌上的是用户的账号与 IP（ADR-0007）。
+//! 只在代码里限流而不把限到多少说出来，用户没有任何办法在跑之前判断这一趟安不安全。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -19,7 +25,46 @@ use crate::catalog::{Catalog, CatalogError};
 use crate::report::{human_bytes, pad, thousands, width};
 
 use super::priority::Priorities;
-use super::{Field, MediaKind, Options, PlanCounts};
+use super::{Field, MediaKind, Options, PlanCounts, online};
+
+/// 一趟跑完之后，报告要的那几样「这一趟」的事实。
+///
+/// 捏成一个结构而不是四个参数：[`ScrapeReport::build`] 本来就已经拿着中立库、
+/// 优先级表与选项三样了。
+pub struct Run<'a> {
+    /// 这一档有哪些源。
+    pub sources: &'a [&'a str],
+    /// 这一趟看了些什么。
+    pub plan: &'a PlanCounts,
+    /// 在线那一侧用掉了多少；离线档是 `None`。
+    pub online: Option<online::Usage>,
+    /// 这一趟停了没有，为什么。
+    pub halted: Option<String>,
+}
+
+/// 在线那一侧的账。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct OnlineRow {
+    /// 一共发了几个请求。
+    pub requests: u64,
+    /// 其中几个**条目查询**是「查过、没有」。**431 盯的就是这一类。**
+    ///
+    /// 下媒体时的 404 不算在内：那说的是「这份媒体没有」，不是「这个 ROM 我不认识」。
+    pub not_found: u64,
+    /// 几个 URL 被**取数闸门**拦下、没有发出去。正常是 0。
+    pub refused: u64,
+    /// 服务端说今天还剩几个请求；它没说就是 `None`。
+    pub requests_left: Option<u64>,
+    /// 服务端说今天还剩几个「未识别 ROM」请求。
+    pub ko_left: Option<u64>,
+    /// 服务端说这个账号可以开几个线程。
+    ///
+    /// **我们照样只开一个**（`concurrency`）。两个数并排报着是有用的：它让「我们比
+    /// 服务端允许的还保守」成为看得见的事实，而不是一句注释。
+    pub server_threads: Option<u64>,
+    /// 并发上限。**恒为 1。**
+    pub concurrency: usize,
+}
 
 /// 一个字段一行。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -70,11 +115,24 @@ pub struct ScrapeReport {
     pub variants: u64,
     /// 归得上某个变体的本地媒体有几份。
     pub local_media: u64,
+    /// **有判据可以拿去发在线查询**的作品锚点几个；离线档不算这个数，是 `None`。
+    pub queryable_works: Option<u64>,
+    /// 未被识别确认、因此一个在线请求都不会为它发出去的变体有几个。
+    pub unconfirmed_variants: u64,
+    /// 在线那一侧的账；离线档是 `None`。
+    pub online: Option<OnlineRow>,
+    /// 这一趟停了没有，为什么。**不是错误**——已经采完的那部分留在中立库里。
+    pub halted: Option<String>,
+    /// 这个程序认得、而这一档没参加的源。
+    ///
+    /// 与 `unknown_sources` 是两件事：那个多半是打错字，这个是**换个档案就有**。
+    /// 混成一件事，用户每跑一趟离线档都会看见一句「ScreenScraper 不存在」。
+    pub idle_sources: Vec<String>,
     /// 有刮削结论的锚点：`(锚点种类, 个数)`。
     pub scraped: Vec<(String, u64)>,
     /// 按字段。
     pub fields: Vec<FieldRow>,
-    /// **离线档补不上的字段**。
+    /// **一个值都没采到的字段**。离线档跑的时候，这正是「在线档存在的理由」那一份清单。
     pub gaps: Vec<String>,
     /// 按媒体类型。
     pub media: Vec<MediaRow>,
@@ -105,17 +163,29 @@ impl ScrapeReport {
         catalog: &Catalog,
         priorities: &Priorities,
         options: &Options,
-        sources: &[&str],
-        plan: &PlanCounts,
+        run: &Run<'_>,
     ) -> Result<Self, CatalogError> {
+        let plan = run.plan;
         let mut report = Self {
             catalog: catalog.location().to_string(),
             pool: crate::path::display(&options.pool),
             profile: options.profile.label().to_string(),
-            sources: sources.iter().map(|s| (*s).to_string()).collect(),
+            sources: run.sources.iter().map(|s| (*s).to_string()).collect(),
             works: plan.works,
             variants: plan.variants,
             local_media: plan.local_media,
+            queryable_works: plan.queryable_works,
+            unconfirmed_variants: plan.unconfirmed_variants,
+            halted: run.halted.clone(),
+            online: run.online.map(|usage| OnlineRow {
+                requests: usage.requests,
+                not_found: usage.not_found,
+                refused: usage.refused,
+                requests_left: usage.server.requests_left,
+                ko_left: usage.server.ko_left,
+                server_threads: usage.server.max_threads,
+                concurrency: online::MAX_CONCURRENCY,
+            }),
             scraped: catalog.scraped_subjects()?,
             ..Self::default()
         };
@@ -192,7 +262,14 @@ impl ScrapeReport {
                 (platform.to_string(), field.to_string(), order.to_vec())
             })
             .collect();
-        report.unknown_sources = priorities.sources_not_in(sources);
+        // **打错字**与**这一档没参加**分开报：前者是要改的，后者换个档案就有。
+        let known = super::all_source_names();
+        report.unknown_sources = priorities.sources_not_in(&known);
+        report.idle_sources = known
+            .into_iter()
+            .filter(|name| !run.sources.contains(name))
+            .map(ToString::to_string)
+            .collect();
         Ok(report)
     }
 
@@ -233,6 +310,62 @@ impl ScrapeReport {
             thousands(self.pool_refs),
             thousands(self.pool_shared),
         );
+
+        if let Some(online) = &self.online {
+            heading(&mut out, "在线那一侧的账");
+            let _ = writeln!(
+                out,
+                "请求            {} 个\n条目查询没命中    {} 个\
+                 ——**431 盯的就是这一类**；一张图没有不算在内",
+                thousands(online.requests),
+                thousands(online.not_found),
+            );
+            let _ = writeln!(
+                out,
+                "并发            {}{}",
+                online.concurrency,
+                online
+                    .server_threads
+                    .map_or_else(String::new, |threads| format!(
+                        "（服务端允许 {threads}——我们照样只开一个）"
+                    )),
+            );
+            let 说 = |left: Option<u64>| left.map_or_else(|| "服务端没说".to_string(), thousands);
+            let _ = writeln!(
+                out,
+                "服务端说的剩余  今日请求 {}、今日「未识别 ROM」{}\n\
+                 （**一个数字都不写死**：三份官方文档给了三个不同的日配额，只有响应里的作数）",
+                说(online.requests_left),
+                说(online.ko_left),
+            );
+            if online.refused > 0 {
+                let _ = writeln!(
+                    out,
+                    "**有 {} 个媒体 URL 被取数闸门拦下**——源给回来的地址在白名单之外，\
+                     这是要看一眼的。",
+                    thousands(online.refused)
+                );
+            }
+            let _ = writeln!(
+                out,
+                "只对**已确认**的条目发请求：{} 个作品锚点拿得出撞过 DAT 的判据，\
+                 一部作品只查一次；\n\
+                 另有 {} 个变体没被识别确认，**一个请求都没有为它们发出去**——\
+                 那些在 ScreenScraper 眼里是「未识别 ROM」，\n\
+                 每问一次扣一份专门的配额，撞穿了连账号带 IP 一起封（ADR-0007）。",
+                self.queryable_works
+                    .map_or_else(|| "（没算）".to_string(), thousands),
+                thousands(self.unconfirmed_variants),
+            );
+        }
+
+        if let Some(halted) = &self.halted {
+            heading(&mut out, "这一趟停了");
+            let _ = writeln!(
+                out,
+                "{halted}\n已经采完的那部分**留在中立库里**，重跑会从这儿接着采。"
+            );
+        }
 
         if self.fields.is_empty() {
             let _ = writeln!(
@@ -292,11 +425,16 @@ impl ScrapeReport {
         }
 
         if !self.gaps.is_empty() {
-            heading(&mut out, "离线档补不上的字段");
+            heading(&mut out, "一个值都没采到的字段");
             let _ = writeln!(
                 out,
-                "{}——本地数据源里没有这些东西，要等在线档（票 14）。",
-                self.gaps.join("、")
+                "{}——{}",
+                self.gaps.join("、"),
+                if self.online.is_some() {
+                    "在线源这一趟也没给出这些：要么条目本身没有，要么请求还没轮到它们。"
+                } else {
+                    "本地数据源里没有这些东西。换 `--profile 在线` 跑一趟才补得上。"
+                }
             );
         }
 
@@ -328,12 +466,21 @@ impl ScrapeReport {
         }
 
         if !self.unknown_sources.is_empty() {
-            heading(&mut out, "优先级表里点名了、而这一档没有的源");
+            heading(&mut out, "优先级表里点名了、而这个程序根本没有的源");
             let _ = writeln!(
                 out,
                 "{}——不是错误（列了不存在的源只是排序时永远轮不到它），\
                  但十有八九是打错了字，而打错的后果是静默的。",
                 self.unknown_sources.join("、")
+            );
+        }
+
+        if !self.idle_sources.is_empty() {
+            heading(&mut out, "这一档没参加的源");
+            let _ = writeln!(
+                out,
+                "{}——不是错误，换个策略档案（或者去掉 --no-media）它们就有了。",
+                self.idle_sources.join("、")
             );
         }
 

@@ -29,7 +29,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::catalog::{Catalog, CatalogError, VariantRow};
 use crate::path::file_name_of_key;
 
-use super::{Field, Harvest, LocalMedia, Locality, MediaClaim, MediaKind, Source, Subject};
+use super::{
+    Failure, Field, Harvest, LocalMedia, Locality, MediaClaim, MediaFrom, MediaKind, Source,
+    Subject,
+};
 
 use super::pool::{extension_of, normalized_ext};
 
@@ -68,9 +71,9 @@ impl Source for FilenameSource {
         Some(super::fingerprint(&[main]))
     }
 
-    fn collect(&self, subject: &Subject<'_>, out: &mut Harvest) {
+    fn collect(&self, subject: &Subject<'_>, out: &mut Harvest) -> Result<(), Failure> {
         let Some(main) = subject.main_key else {
-            return;
+            return Ok(());
         };
         let name = file_name_of_key(main);
         out.value(
@@ -78,6 +81,7 @@ impl Source for FilenameSource {
             title_from_filename(name),
             format!("主文件叫「{name}」"),
         );
+        Ok(())
     }
 }
 
@@ -162,15 +166,16 @@ impl Source for LocalMediaSource {
         Some(super::fingerprint(&refs))
     }
 
-    fn collect(&self, subject: &Subject<'_>, out: &mut Harvest) {
+    fn collect(&self, subject: &Subject<'_>, out: &mut Harvest) -> Result<(), Failure> {
         for media in subject.media {
             out.picture(MediaClaim {
                 kind: media.kind,
-                key: media.key.clone(),
+                from: MediaFrom::Library(media.key.clone()),
                 bytes: media.bytes,
                 why: format!("{}：{}", media.why, media.key),
             });
         }
+        Ok(())
     }
 }
 

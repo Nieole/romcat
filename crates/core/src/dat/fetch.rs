@@ -171,6 +171,13 @@ impl HttpFetcher {
             // 重定向自己跟：闸门必须看到每一跳（见模块文档）。
             .max_redirects(0)
             .max_redirects_will_error(false)
+            // **状态码要拿到手，不要被折成一句错误文本。** ureq 默认把 4xx/5xx 变成
+            // `Error::StatusCode`，于是这一层只剩下一个 `Transport{detail}`
+            // ——而在线刮削档必须分得出 430（当日配额超限）与 431（当日「未识别 ROM」
+            // 配额超限），那两个码的处置是**硬停止**，跟一次网络抖动完全不是一回事
+            // （`scrape::online::classify`）。关掉它，状态码原样交上来，
+            // 由 [`require_ok`] 统一折成 [`FetchError::Status`]。
+            .http_status_as_error(false)
             .build();
         Self {
             agent: config.into(),
@@ -267,6 +274,9 @@ enum Method {
 /// **抽成纯函数是为了让「重定向也过闸门」这件事测得动。** 关掉 HTTP 层的自动重定向
 /// 只是第一步——真正要证明的是「一个 302 送不到 datomatic 去」，而那需要在不联网的
 /// 情况下断言得出来。
+///
+/// **它不判状态码好坏**：走到头就是走到头，是不是 2xx 由 [`require_ok`] 说。分开是
+/// 因为在线刮削档要看到 430 / 431 那两个码本身，而不是一句「取数失败」。
 fn next_hop(from: &str, head: &Head) -> Result<Option<String>, FetchError> {
     let redirect = (300..400).contains(&head.status);
     match head.get("location") {
@@ -275,11 +285,22 @@ fn next_hop(from: &str, head: &Head) -> Result<Option<String>, FetchError> {
             guard::check(&next)?;
             Ok(Some(next))
         }
-        _ if head.is_ok() => Ok(None),
-        _ => Err(FetchError::Status {
-            url: from.to_string(),
+        _ => Ok(None),
+    }
+}
+
+/// 走到头的那一跳是不是 2xx。
+///
+/// # Errors
+/// 不是 2xx 时返回 [`FetchError::Status`]，**状态码原样带着**。
+fn require_ok(url: &str, head: &Head) -> Result<(), FetchError> {
+    if head.is_ok() {
+        Ok(())
+    } else {
+        Err(FetchError::Status {
+            url: url.to_string(),
             status: head.status,
-        }),
+        })
     }
 }
 
@@ -302,11 +323,14 @@ fn absolute(from: &str, location: &str) -> String {
 
 impl Fetcher for HttpFetcher {
     fn head(&self, url: &str) -> Result<Head, FetchError> {
-        self.follow(Method::Head, url).map(|(head, _)| head)
+        let (head, _) = self.follow(Method::Head, url)?;
+        require_ok(url, &head)?;
+        Ok(head)
     }
 
     fn get(&self, url: &str) -> Result<Fetched, FetchError> {
         let (head, mut body) = self.follow(Method::Get, url)?;
+        require_ok(url, &head)?;
         let bytes = body
             .with_config()
             .limit(MAX_BODY)
@@ -320,6 +344,7 @@ impl Fetcher for HttpFetcher {
 
     fn download(&self, url: &str, to: &Path) -> Result<Head, FetchError> {
         let (head, mut body) = self.follow(Method::Get, url)?;
+        require_ok(url, &head)?;
         if let Some(parent) = to.parent() {
             std::fs::create_dir_all(parent).map_err(|source| FetchError::Io {
                 path: parent.display().to_string(),
@@ -351,9 +376,19 @@ impl Fetcher for HttpFetcher {
 ///
 /// 它与 [`MemFs`](crate::fs::MemFs) 是同一个用法：同步编排的全部逻辑挂在纯计算上，
 /// 测试用它把「服务器会怎么答」直接摆出来。
+///
+/// ## 它必须和真的一样处置状态码
+///
+/// [`with_status`](Self::with_status) 备得下 429 / 430 / 431 这些码，而且**返回的形状
+/// 与 [`HttpFetcher`] 一模一样**（走同一个 [`require_ok`]）。差一点都不行：在线刮削档
+/// 的硬停止全靠认出这几个码，而真实凭据这一趟拿不到——**假服务器是这件事唯一能跑起来的
+/// 验证场**，它若比真的宽容，验的就是另一个东西。
 #[derive(Debug, Default)]
 pub struct CannedFetcher {
     canned: BTreeMap<String, (Head, Vec<u8>)>,
+    /// 按**前缀**匹配的那些。真 API 的查询串里带着凭据与逐条参数，整条 URL
+    /// 对不上，而「这个端点回什么」正是要摆出来的东西。
+    prefixed: Vec<(String, Head, Vec<u8>)>,
     /// 问过哪些 URL，按顺序。测试据此断言「没有多发请求」。
     asked: Mutex<Vec<String>>,
 }
@@ -400,6 +435,43 @@ impl CannedFetcher {
         self
     }
 
+    /// 备一条：这个 URL 回这个状态码与这段正文。
+    ///
+    /// 备 4xx / 5xx 时，取回来的形状与真服务器一致——[`Fetcher::get`] 返回
+    /// [`FetchError::Status`]，状态码原样带着。
+    #[must_use]
+    pub fn with_status(mut self, url: &str, status: u16, body: impl Into<Vec<u8>>) -> Self {
+        self.canned.insert(
+            url.to_string(),
+            (
+                Head {
+                    status,
+                    headers: BTreeMap::new(),
+                },
+                body.into(),
+            ),
+        );
+        self
+    }
+
+    /// 备一条：**以这一段开头**的 URL 都回这个状态码与这段正文。
+    ///
+    /// 真 API 的查询串里带着凭据与逐条参数，整条 URL 在测试里写不出来；而要摆出来的
+    /// 本来就是「这个端点会怎么答」。**整条匹配的那些优先**，所以一个端点可以先定一个
+    /// 默认答案、再给某几条 URL 单独备一个。
+    #[must_use]
+    pub fn with_prefix(mut self, prefix: &str, status: u16, body: impl Into<Vec<u8>>) -> Self {
+        self.prefixed.push((
+            prefix.to_string(),
+            Head {
+                status,
+                headers: BTreeMap::new(),
+            },
+            body.into(),
+        ));
+        self
+    }
+
     /// 一共问过哪些 URL。
     #[must_use]
     pub fn asked(&self) -> Vec<String> {
@@ -409,24 +481,35 @@ impl CannedFetcher {
             .clone()
     }
 
-    fn look_up(&self, url: &str) -> Result<&(Head, Vec<u8>), FetchError> {
+    fn look_up(&self, url: &str) -> Result<(&Head, &Vec<u8>), FetchError> {
         self.asked
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(url.to_string());
-        self.canned.get(url).ok_or_else(|| FetchError::NotCanned {
-            url: url.to_string(),
-        })
+        if let Some((head, body)) = self.canned.get(url) {
+            return Ok((head, body));
+        }
+        self.prefixed
+            .iter()
+            .find(|(prefix, _, _)| url.starts_with(prefix.as_str()))
+            .map(|(_, head, body)| (head, body))
+            .ok_or_else(|| FetchError::NotCanned {
+                url: url.to_string(),
+            })
     }
 }
 
 impl Fetcher for CannedFetcher {
     fn head(&self, url: &str) -> Result<Head, FetchError> {
-        self.look_up(url).map(|(head, _)| head.clone())
+        let (head, _) = self.look_up(url)?;
+        require_ok(url, head)?;
+        Ok(head.clone())
     }
 
     fn get(&self, url: &str) -> Result<Fetched, FetchError> {
-        self.look_up(url).map(|(head, body)| Fetched {
+        let (head, body) = self.look_up(url)?;
+        require_ok(url, head)?;
+        Ok(Fetched {
             head: head.clone(),
             body: body.clone(),
         })
@@ -434,6 +517,7 @@ impl Fetcher for CannedFetcher {
 
     fn download(&self, url: &str, to: &Path) -> Result<Head, FetchError> {
         let (head, body) = self.look_up(url)?;
+        require_ok(url, head)?;
         if let Some(parent) = to.parent() {
             std::fs::create_dir_all(parent).map_err(|source| FetchError::Io {
                 path: parent.display().to_string(),
@@ -560,15 +644,33 @@ mod tests {
         .expect("2xx 就是到头了");
         assert_eq!(done, None);
 
-        let bad = next_hop(
+        // 404 也是「走到头」——**状态码好不好由 `require_ok` 说**，分开是因为在线档
+        // 要认出 430 / 431 那两个码本身。
+        let stopped = next_hop(
             "https://redump.info/datfile/NOPE",
             &Head {
                 status: 404,
                 headers: BTreeMap::new(),
             },
         )
-        .expect_err("404 该报错");
-        assert!(matches!(bad, FetchError::Status { status: 404, .. }));
+        .expect("走到头了");
+        assert_eq!(stopped, None);
+    }
+
+    #[test]
+    fn 状态码原样交上来_而不是折成一句错误文本() {
+        // 在线刮削档靠 430 / 431 分辨「今天别再打了」与「今天别再打没识别的了」，
+        // 而这两个的处置都是**硬停止**。少了这一条，两个码都会退化成一句
+        // 「取数失败」，于是被当成可以重试的网络抖动——那正是会被永久封禁的走法。
+        for status in [404_u16, 429, 430, 431] {
+            let url = format!("https://api.screenscraper.fr/api2/jeuInfos.php?n={status}");
+            let fetcher = CannedFetcher::new().with_status(&url, status, Vec::new());
+            let error = fetcher.get(&url).expect_err("非 2xx 该是错误");
+            assert!(
+                matches!(error, FetchError::Status { status: got, .. } if got == status),
+                "{status} 该原样带回来，实际是 {error}"
+            );
+        }
     }
 
     #[test]
