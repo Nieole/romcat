@@ -15,6 +15,11 @@ use std::{fs, io};
 
 use clap::{Args, Parser, Subcommand};
 use romcat_core::catalog::Catalog;
+use romcat_core::dat::HttpFetcher;
+use romcat_core::dat::registry::Registry;
+use romcat_core::dat::repo::DatRepo;
+use romcat_core::dat::report::DatReport;
+use romcat_core::dat::sync::{self, Action, SyncOptions};
 use romcat_core::fs::RealFs;
 use romcat_core::path;
 use romcat_core::platform::Manifest;
@@ -42,6 +47,108 @@ enum Command {
     Shape(ShapeArgs),
     /// 列出眼下生效的平台清单与成型规则，或者导出一份底稿照着改
     Platforms(PlatformsArgs),
+    /// DAT 仓库：把几个哈希数据库镜像到本地，并报出每个平台有多少条可用记录
+    #[command(subcommand)]
+    Dat(DatCommand),
+}
+
+/// DAT 仓库的几件事。
+#[derive(Debug, Subcommand)]
+enum DatCommand {
+    /// 同步 DAT。指纹没变的整件跳过，不必每次全量重下
+    Sync(DatSyncArgs),
+    /// 只从 DAT 库出报告，一个字节都不联网
+    Report(DatReportArgs),
+    /// 列出眼下生效的数据源清单，或者导出一份底稿照着改
+    Sources(DatSourcesArgs),
+}
+
+/// 数据源清单从哪儿来。三个子命令共用。
+#[derive(Debug, Args, Clone)]
+struct SourcesArgs {
+    /// 数据源清单 TOML 文件
+    ///
+    /// 不给就先看工作目录里有没有 `sources.toml`，都没有才用内置的那一份。
+    /// `romcat dat sources --dump-builtin` 能导出一份底稿照着改
+    #[arg(long, value_name = "文件")]
+    sources: Option<PathBuf>,
+}
+
+impl SourcesArgs {
+    /// 工作目录里那份可选的清单叫什么。
+    const IN_WORKSPACE: &'static str = "sources.toml";
+
+    fn load(&self, workspace: &Path) -> Result<Registry, String> {
+        let path = match &self.sources {
+            Some(path) => path.clone(),
+            None => {
+                let candidate = workspace.join(Self::IN_WORKSPACE);
+                if !candidate.exists() {
+                    return Ok(Registry::builtin());
+                }
+                candidate
+            }
+        };
+        Registry::load(&path).map_err(|error| format!("{error}"))
+    }
+}
+
+#[derive(Debug, Args)]
+struct DatSyncArgs {
+    /// 只同步这几个源（`No-Intro` / `Redump` / `TOSEC` / `MAME` / `GoodNES`），可重复给
+    #[arg(long = "source", value_name = "源名")]
+    only: Vec<String>,
+
+    /// 无视指纹，全部重取
+    #[arg(long)]
+    full: bool,
+
+    /// 只排计划、报出这一趟会干什么，不取也不写
+    #[arg(long)]
+    dry_run: bool,
+
+    /// 工作目录：DAT 库与取回来的原件存这里
+    #[arg(long, value_name = "目录")]
+    workspace: Option<PathBuf>,
+
+    /// 两次请求之间至少隔多少毫秒（按主机计）
+    #[arg(long, default_value_t = 1000)]
+    throttle_ms: u64,
+
+    #[command(flatten)]
+    manifest: ManifestArgs,
+
+    #[command(flatten)]
+    sources: SourcesArgs,
+
+    /// 把报告另存为 JSON
+    #[arg(long, value_name = "文件")]
+    json: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct DatReportArgs {
+    /// 工作目录：DAT 库存这里
+    #[arg(long, value_name = "目录")]
+    workspace: Option<PathBuf>,
+
+    /// 把报告另存为 JSON
+    #[arg(long, value_name = "文件")]
+    json: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct DatSourcesArgs {
+    /// 工作目录：不给 `--sources` 时来这里找 `sources.toml`
+    #[arg(long, value_name = "目录")]
+    workspace: Option<PathBuf>,
+
+    /// 把**内置**清单写到这个文件，照着它改就是自己的一份
+    #[arg(long, value_name = "文件")]
+    dump_builtin: Option<PathBuf>,
+
+    #[command(flatten)]
+    sources: SourcesArgs,
 }
 
 /// 平台清单从哪儿来。三个子命令共用。
@@ -223,6 +330,9 @@ fn main() -> ExitCode {
         Command::Report(args) => run_report(&args),
         Command::Shape(args) => run_shape(&args),
         Command::Platforms(args) => run_platforms(&args),
+        Command::Dat(DatCommand::Sync(args)) => run_dat_sync(&args),
+        Command::Dat(DatCommand::Report(args)) => run_dat_report(&args),
+        Command::Dat(DatCommand::Sources(args)) => run_dat_sources(&args),
     }
 }
 
@@ -579,6 +689,181 @@ fn run_platforms(args: &PlatformsArgs) -> ExitCode {
             println!("  {} —— {}", dir.dir, dir.reason);
         }
     }
+    ExitCode::SUCCESS
+}
+
+/// 同步一趟 DAT。**这是这个程序里唯一联网的子命令。**
+fn run_dat_sync(args: &DatSyncArgs) -> ExitCode {
+    let workspace = workspace_dir(args.workspace.as_deref());
+    let registry = match args.sources.load(&workspace) {
+        Ok(registry) => registry,
+        Err(message) => return fail(message),
+    };
+    let manifest = match args.manifest.load(&workspace) {
+        Ok(manifest) => manifest,
+        Err(message) => return fail(message),
+    };
+    // 平台名打错一个字，那份 DAT 就归到一个谁也查不到的平台上。开工前说出来。
+    let unknown = registry.unknown_platforms(&manifest);
+    if !unknown.is_empty() {
+        return fail(format!(
+            "数据源清单里这几个平台名在平台清单里查无此人：{}。\n\
+             `romcat platforms` 看得到眼下有哪些平台。",
+            unknown.join("、")
+        ));
+    }
+
+    let mut repo = match DatRepo::open(&workspace::dat_repo_path(&workspace)) {
+        Ok(repo) => repo,
+        Err(error) => return fail(format!("DAT 库打不开：{error}")),
+    };
+    let mut options = SyncOptions::new(&workspace);
+    options.only = args.only.clone();
+    options.full = args.full;
+    options.dry_run = args.dry_run;
+    if !options.only.is_empty()
+        && let Some(unknown) = options
+            .only
+            .iter()
+            .find(|name| registry.source(name).is_none())
+    {
+        return fail(format!(
+            "数据源清单里没有 {unknown} 这个源。`romcat dat sources` 看得到有哪些。"
+        ));
+    }
+
+    let fetcher = HttpFetcher::with_throttle(Duration::from_millis(args.throttle_ms));
+    let outcome = match sync::run(&fetcher, &mut repo, &registry, &options) {
+        Ok(outcome) => outcome,
+        Err(error) => return fail(format!("同步失败：{error}")),
+    };
+
+    for plan in &outcome.plans {
+        eprintln!(
+            "{:<10} 取 {}，已是最新 {}，不入库 {}",
+            plan.source,
+            plan.to_fetch(),
+            plan.up_to_date(),
+            plan.out_of_scope()
+        );
+        // 被闸门拦下的一条都不能沉默——那正是这张票要防的事。
+        for item in &plan.items {
+            if let Action::Refused(refusal) = &item.action {
+                eprintln!("  ⚠ {} 被拦下：{refusal}", item.name);
+            }
+        }
+    }
+    if args.dry_run {
+        eprintln!("这是 --dry-run，什么都没取、什么都没写。");
+        return ExitCode::SUCCESS;
+    }
+    eprintln!(
+        "同步完毕：取了 {} 件、跳过 {} 件，写进 {} 份 DAT（另有 {} 份取回来了但没有映射命中，\
+         不入库）、{} 条条目（汉化 {}、官中 {}）。",
+        outcome.fetched,
+        outcome.skipped,
+        outcome.dats,
+        outcome.unmapped_dats,
+        thousands(outcome.counts.games),
+        thousands(outcome.counts.fan),
+        thousands(outcome.counts.official),
+    );
+    for problem in &outcome.problems {
+        eprintln!("  ⚠ {problem}");
+    }
+
+    emit_dat_report(&repo, args.json.as_deref())
+}
+
+/// 只从 DAT 库出报告。**一个字节都不联网。**
+fn run_dat_report(args: &DatReportArgs) -> ExitCode {
+    let workspace = workspace_dir(args.workspace.as_deref());
+    let path = workspace::dat_repo_path(&workspace);
+    if !path.exists() {
+        return fail(format!(
+            "还没有 DAT 库（该在 {}）。先跑一次 `romcat dat sync`。",
+            path.display()
+        ));
+    }
+    let repo = match DatRepo::open(&path) {
+        Ok(repo) => repo,
+        Err(error) => return fail(format!("DAT 库打不开：{error}")),
+    };
+    emit_dat_report(&repo, args.json.as_deref())
+}
+
+fn emit_dat_report(repo: &DatRepo, json: Option<&Path>) -> ExitCode {
+    let report = match DatReport::build(repo) {
+        Ok(report) => report,
+        Err(error) => return fail(format!("DAT 库读不出来：{error}")),
+    };
+    let text = report.render_text();
+    let mut stdout = io::stdout().lock();
+    let _ = stdout.write_all(text.as_bytes());
+    let _ = stdout.flush();
+    if let Some(path) = json {
+        match serde_json::to_vec_pretty(&report) {
+            Ok(bytes) => match write_file(path, &bytes) {
+                Ok(()) => eprintln!("报告已写入 {}", path.display()),
+                Err(error) => {
+                    eprintln!("报告写不进 {}：{error}", path.display());
+                    return ExitCode::FAILURE;
+                }
+            },
+            Err(error) => {
+                eprintln!("报告序列化失败：{error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// 列出眼下生效的数据源清单。
+fn run_dat_sources(args: &DatSourcesArgs) -> ExitCode {
+    if let Some(path) = &args.dump_builtin {
+        match write_file(path, Registry::builtin_text().as_bytes()) {
+            Ok(()) => println!(
+                "内置数据源清单已写入 {}。改完用 `--sources {}` 生效，\n\
+                 或者放进工作目录叫 sources.toml 自动生效。",
+                path.display(),
+                path.display()
+            ),
+            Err(error) => {
+                eprintln!("写不进 {}：{error}", path.display());
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let workspace = workspace_dir(args.workspace.as_deref());
+    let registry = match args.sources.load(&workspace) {
+        Ok(registry) => registry,
+        Err(message) => return fail(message),
+    };
+    println!("数据源（{} 个）", registry.sources().len());
+    for source in registry.sources() {
+        println!(
+            "\n  {}（{}，默认口径 {}）",
+            source.name,
+            source.shape.label(),
+            source.convention.label()
+        );
+        println!("    取自 {}", source.origin.describe());
+        for line in source.note.trim().lines() {
+            println!("    {line}");
+        }
+    }
+    let mapped = registry
+        .mappings()
+        .iter()
+        .filter(|mapping| mapping.platform.is_some())
+        .count();
+    println!(
+        "\n映射 {} 条（{} 条归到平台，{} 条明确不要）。没有任何映射命中的 DAT 整份不入库。",
+        registry.mappings().len(),
+        mapped,
+        registry.mappings().len() - mapped
+    );
     ExitCode::SUCCESS
 }
 

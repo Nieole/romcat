@@ -58,11 +58,18 @@ fn char_width(ch: char) -> usize {
     if wide { 2 } else { 1 }
 }
 
-fn width(text: &str) -> usize {
+/// `text` 占多少个显示格。
+#[must_use]
+pub fn width(text: &str) -> usize {
     text.chars().map(char_width).sum()
 }
 
-pub(super) fn pad(text: &str, target: usize) -> String {
+/// 把 `text` 垫到 `target` 个**显示格**宽。一个汉字占两格。
+///
+/// 报告的表格全靠它对齐。DAT 仓库那份报告（`dat::report`）也用它——
+/// 两份报告并排放在同一个终端里，列宽算法不该有两套。
+#[must_use]
+pub fn pad(text: &str, target: usize) -> String {
     let current = width(text);
     if current >= target {
         format!("{text} ")

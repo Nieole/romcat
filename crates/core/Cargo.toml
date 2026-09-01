@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 flate2.workspace = true
+quick-xml.workspace = true
 rusqlite.workspace = true
 sevenz-rust2.workspace = true
 serde.workspace = true
@@ -14,6 +15,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 unicode-normalization.workspace = true
+ureq.workspace = true
 
 # 测试要造 7z 样本，才需要编码器；正式构建只解压，不压缩。
 [dev-dependencies]

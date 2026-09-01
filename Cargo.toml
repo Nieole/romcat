@@ -24,6 +24,14 @@ unicode-normalization = "0.1"
 # 而没有注释的规则表下一个人只能靠猜（挂账 D33）。
 toml = "1"
 flate2 = "1"
+# DAT 是 XML（Logiqx DTD 与 No-Intro 自有 XSD，见票 06）。自己写 XML 解析器要处理
+# 实体引用、CDATA、DOCTYPE 与属性引号，那是经典的自伤——DAT 里的游戏名真的带 `&amp;`。
+# 钉在 0.38：0.42 把 API 整体从字节改成了 `&str`，实体引用也拆成了独立的
+# `Event::GeneralRef` 事件——那等于要自己维护一张命名实体表，正是引这个库要躲开的活。
+quick-xml = "0.38"
+# 取 DAT 要联网。选阻塞式的 ureq 而不是 reqwest：这个代码库没有 async 运行时，
+# 为了下几个文件引一整套 tokio 不划算。TLS 走 rustls，不依赖各机器上的系统库。
+ureq = "3"
 sevenz-rust2 = { version = "0.22", default-features = false, features = ["bzip2", "ppmd", "deflate"] }
 
 # 主库只读是这个项目唯一不可退让的约束（ADR-0004），

@@ -1,0 +1,791 @@
+# 数据源清单：DAT 从哪儿取、哪份归哪个平台
+#
+# **这份文件是数据不是代码**（同 `docs/platforms.md`）。加一个源、改一条映射都不该动
+# Rust——工具内置这一份，`--sources <文件>` 可以整份换掉，
+# `romcat dat sources --dump-builtin` 导得出底稿。
+#
+# ════════════════════════════════════════════════════════════════════════
+# 两条取数纪律。**改这份文件的人先读这一段。**
+# ════════════════════════════════════════════════════════════════════════
+#
+# 1. **绝不写 `datomatic.no-intro.org`。** 那是 No-Intro 的 DAT 生成站点，调研中一次
+#    参数畸形的请求就触发了**永久 IP 封禁**，解封要发邮件求人。它的 robots.txt 声称允许
+#    抓取，**不可作为安全依据**（ADR-0007）。No-Intro 的 DAT 一律走下面那个 GitHub
+#    每日镜像。
+#
+# 2. **Redump 绝不写 `redump.org`，也绝不从上面那个镜像取。** 镜像的 `redump.py`
+#    硬编码了 `redump.org`，而那自 2026-06-20 起是**冻结镜像**：旧站 60 个系统、
+#    现站 106 个，相差 46 个（Wii U 541 条、Symbian 3 条全在旧站上看不见）。更坏的是
+#    旧站会以「系统存在但 No discs found」的形式**误导**（ADR-0007 修订段）。
+#
+# 这两条不指望靠自觉——`dat::guard` 是一道**运行时闸门**，写进去也发不出去。
+#
+# ════════════════════════════════════════════════════════════════════════
+# 哈希口径
+# ════════════════════════════════════════════════════════════════════════
+#
+# `含头` = 按磁盘上原样的整个文件算；`去头` = 先剥掉转储头再算；
+# `逐芯片` = MAME 那种一颗芯片一条记录。
+#
+# **No-Intro 的 headerless 集按去头，TOSEC 与 GoodNES 按含头**（ADR-0002 修订段）。
+# 同一份 `'89 Dennou Kyuusei Uranai` 在两边的 SHA-1 完全不同，只算一套就会丢掉
+# TOSEC 里全部汉化条目。票 07 要同时算两套，据这一列决定拿哪一套去撞。
+#
+# 大多数卡带平台（GB/GBA/NDS/N64/MD…）根本没有外挂头，两套口径落在同一串字节上，
+# 写 `含头` 即可。真正要区分的只有 NES（iNES 16 字节）、FDS、SFC（copier 512 字节）
+# 与 Lynx（LNX 64 字节）这几家。
+#
+# ════════════════════════════════════════════════════════════════════════
+# 映射：从上往下第一条匹配的胜出
+# ════════════════════════════════════════════════════════════════════════
+#
+# 模式记号同成型规则（`platform::pattern`）：`#` 一位数字、`@` 一位字母、`*` 任意长，
+# 其余字面量且大小写不敏感。**先写窄的、再写宽的。**
+#
+# 拿什么去匹配随源而变：No-Intro 是 DAT 自称的名字，Redump 是系统短码，
+# 其余是仓库内的路径。
+#
+# 一条映射要么给「平台」，要么给「跳过」（附理由），正好一个。
+# **没有任何映射命中的 DAT 整份不入库**——那是范围边界，不是遗漏。
+# 选进来的这一批对着 `docs/library-facts.md` 里实测的 22 个平台，
+# 顺带留了几个库里现在没有、以后可能有的。
+
+"版本" = 1
+
+# ════════════════════════════════════════════════════════════════════════
+# 数据源
+# ════════════════════════════════════════════════════════════════════════
+
+[["数据源"]]
+"名" = "No-Intro"
+"取法" = "GitHub 发行资产"
+"仓库" = "hugo19941994/auto-datfile-generator"
+"资产" = "no-intro.zip"
+"格式" = "Logiqx"
+"口径" = "含头"
+"说明" = """
+每 24 小时自动重建的 No-Intro 全量包，实测 334 份 DAT、106 MB。走 GitHub Releases 的 \
+CDN，无封禁风险、无速率问题。**这是 No-Intro 唯一许可的取法**——直连 datomatic 会被永久封 IP。
+增量的粒度是整个包：镜像只发整包，发不了单份 DAT。指纹取发行资产的 updated_at 加大小。
+同一个仓库里还有 redump.zip / redump.xml，**那两个不能用**（硬编码了冻结的旧域名），
+闸门会挡下来。"""
+
+[["数据源"]]
+"名" = "Redump"
+"取法" = "Redump 站点"
+"站点" = "https://redump.info"
+"格式" = "Logiqx"
+"口径" = "含头"
+"说明" = """
+光盘世代的权威库，实测 106 个系统。`/downloads/` 列系统短码，`/datfile/<短码>` 直接返回 \
+ZIP，无需注册无需登录。它既不给 ETag 也不给 Last-Modified，但 Content-Disposition 里的 \
+附件名带着条目数与生成时刻（`… - Datfile (10974) (2026-08-31 07-59-02).zip`），正好当指纹用：
+先 HEAD 问一句，没变就不下正文。robots.txt 全站放行、无 Crawl-delay，但仍按每秒一次自我节流。"""
+
+[["数据源"]]
+"名" = "TOSEC"
+"取法" = "GitHub 仓库文件"
+"仓库" = "smesgr9000/TOSEC-DAT"
+"引用" = "main"
+"格式" = "Logiqx"
+"口径" = "含头"
+"说明" = """
+TOSEC 官方 release 的 GitHub 镜像，实测 4502 份 DAT。**它是汉化版哈希的主力来源**——
+TOSEC 的命名规范把汉化版正式收录为 `[tr zh]`，带完整 CRC32/MD5/SHA1，而 No-Intro 与 \
+Redump 在政策上永不收录修改版。本工具实测这份清单映射到的 309 份 DAT 里共 **499 条** \
+`[tr zh]`（FC 364、MD 44、GB 42、SFC 25、GBA 13、N64 4、NGPC 3、GBC 2、DC 1、WSC 1）。
+⚠ 调研记的「960 条」是每平台恰好两倍：那个计数把 `<game name>` 与 `<description>` 各数了一次。
+按条目数，正确的数是这里这一批。
+列举必须走 git/trees?recursive=1：`/contents` 在 1000 条处硬截断且不报错，
+调研中因此一度误判 TOSEC 缺少多个平台集。指纹取每个 blob 的 sha。"""
+
+[["数据源"]]
+"名" = "MAME"
+"取法" = "GitHub 仓库文件"
+"仓库" = "mamedev/mame"
+"引用" = "master"
+"子树" = "hash"
+"格式" = "MAME software list"
+"口径" = "逐芯片"
+"说明" = """
+家用系统的 software list。价值不在覆盖面而在**许可**：MAME 整体是 GPL-2.0，但 hash/ 目录 \
+被单独献给公有领域（每个 XML 自带 `license:CC0-1.0`）——全部数据源里唯一可无条件商用、
+无署名义务、无 ShareAlike 传染的哈希源。只看 hash 这棵子树：MAME 有五万多个文件，
+递归列举整个仓库又大又慢。**街机的 ROM 哈希不在这里**（硬编码在 C++ 驱动源码里）。"""
+
+[["数据源"]]
+"名" = "GoodNES"
+"取法" = "GitHub 仓库文件"
+"仓库" = "TASEmulators/BizHawk"
+"引用" = "master"
+"子树" = "Assets/gamedb"
+"格式" = "BizHawk gamedb"
+"口径" = "含头"
+"说明" = """
+GoodTools 早已停更、官网也没了，但 BizHawk 把 GoodNES 与 GoodGen 转成纯文本跟着发行版一起发。
+本工具实测 gamedb_goodnes.txt 22,095 条里有 **646** 条 `[T+Chi]` / `[T-Chi]` 汉化，\
+gamedb_sega_md.txt 8,149 条里有 **102** 条。
+⚠ 调研记的 MD「172 条」是把 102 条汉化与 70 条 `(Ch)`（GoodTools 的**中国区**国别码）\
+加在了一起。这里只把 `[T±Chi]` 算作汉化——`(Ch)` 说的是发行地区不是谁做的中文。
+**没有大小也没有 CRC-32**，而且首列的哈希**逐行而定**：MD 那份 5,774 行 MD5、2,375 行 SHA-1，\
+两种都得收，只认 SHA-1 会丢掉 102 条中文里的 35 条。含头口径有实测佐证：
+`'89 Dennou Kyuusei Uranai (J) [f1]` 在这里的 SHA-1 与 TOSEC 那份带头 .nes 逐位相同。"""
+
+# ════════════════════════════════════════════════════════════════════════
+# 映射 · No-Intro（拿 DAT 自称的名字去匹配）
+# ════════════════════════════════════════════════════════════════════════
+
+# NES 是唯一一个 No-Intro 同时发两套的平台：`.nes`（含头）7066 条与 `.unh`（去头）7065 条。
+# **两份都要**——用户库里两种形态都有，而 RetroArch 的扫描器完全不做头剥离，
+# 靠的正是数据库这边收两套。窄的写在前面。
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Nintendo - Nintendo Entertainment System (Headerless)"
+"平台" = "FC"
+"口径" = "去头"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Nintendo - Nintendo Entertainment System (Head*"
+"平台" = "FC"
+"口径" = "含头"
+"说明" = "剩下的那份就是 (Headered)。"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Nintendo - Family Computer Disk System *"
+"平台" = "FDS"
+"口径" = "去头"
+"说明" = "FDS 尺寸 65500/131000，均为无头（实测）。"
+
+# SFC 只有一套，且是无头的——No-Intro 没有 headered 变体记录，所以带 512 字节 copier 头的
+# `.smc` 必须先剥头才对得上。这正是「同时算两套哈希」要救的第二个平台。
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Nintendo - Super Nintendo Entertainment System"
+"平台" = "SFC"
+"口径" = "去头"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Nintendo - Satellaview"
+"平台" = "SFC"
+"口径" = "去头"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Nintendo - Sufami Turbo"
+"平台" = "SFC"
+"口径" = "去头"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Nintendo - Game Boy Color"
+"平台" = "GBC"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Nintendo - Game Boy Advance*"
+"平台" = "GBA"
+"说明" = "含 Multiboot / Video / e-Reader / Play-Yan 几个附集。"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Nintendo - Game Boy"
+"平台" = "GB"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Nintendo - Nintendo DS (Decrypted)"
+"平台" = "NDS"
+"说明" = "NDS 是中文玩家存量最大的两个平台之一，却没有 TOSEC DAT——这一份是它的全部离线覆盖。"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Nintendo - Nintendo DS (Encrypted)"
+"平台" = "NDS"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Nintendo - Nintendo 3DS (Decrypted)"
+"平台" = "3DS"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Nintendo - Nintendo 3DS (Encrypted)"
+"平台" = "3DS"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Nintendo - Nintendo 64 (BigEndian)"
+"平台" = "N64"
+"说明" = "ByteSwapped 那份是同一批转储的字节序变体，暂不收——真要用得先做字节序归一。"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Nintendo - Virtual Boy"
+"平台" = "VB"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Non-Redump - Nintendo - Nintendo GameCube"
+"平台" = "NGC"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Non-Redump - Nintendo - Wii"
+"平台" = "WII"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Non-Redump - Nintendo - Wii U"
+"平台" = "WIIU"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Sega - Mega Drive - Genesis"
+"平台" = "MD"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Sega - Master System - Mark III"
+"平台" = "SMS"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Sega - Game Gear"
+"平台" = "GG"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Sega - 32X"
+"平台" = "32X"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Non-Redump - Sega - Sega Mega CD + Sega CD"
+"平台" = "Mega-CD"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Non-Redump - Sega - Sega Saturn"
+"平台" = "SS"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Non-Redump - Sega - Dreamcast"
+"平台" = "DC"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "NEC - PC Engine - TurboGrafx-16"
+"平台" = "PCE"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "NEC - PC Engine SuperGrafx"
+"平台" = "PCE"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Bandai - WonderSwan*"
+"平台" = "WS"
+"说明" = "WS 与 WSC 在平台清单里是同一个平台。"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "SNK - NeoGeo Pocket*"
+"平台" = "NGPC"
+
+# Lynx 是第三个口径分岔的平台：同一个游戏在 No-Intro 里以 `.lnx`（含 64 字节头）与
+# `.lyx`（裸 ROM）两套并存，不分开就会漏掉一半。
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Atari - Atari Lynx (LYX)"
+"平台" = "Lynx"
+"口径" = "去头"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Atari - Atari Lynx (LNX)"
+"平台" = "Lynx"
+"口径" = "含头"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Microsoft - MSX*"
+"平台" = "MSX"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Non-Redump - Panasonic - 3DO Interactive Multiplayer"
+"平台" = "3DO"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Non-Redump - Sony - PlayStation"
+"平台" = "PS1"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Non-Redump - Sony - PlayStation 2"
+"平台" = "PS2"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Non-Redump - Sony - PlayStation 3"
+"平台" = "PS3"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Non-Redump - Sony - PlayStation Portable"
+"平台" = "PSP"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Sony - PlayStation Portable (PSN) (Decrypted)"
+"平台" = "PSP"
+"说明" = "PSP 按变体数是全库第二大平台（6,959 个），值得多收一份。"
+
+# PSV 那几份「整目录逐文件」的 DAT 明确不要：`(NoNpDrm)` 一份就有 431,605 条文件记录，
+# 而调研的结论是这类平台的识别主键是 TitleID（票 09），整目录比对在工程上不可行。
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Unofficial - Sony - PlayStation Vita (NoNpDrm)"
+"跳过" = "452 个条目对 431,605 条文件记录。这类平台走 TitleID 识别（票 09），不走逐文件哈希。"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Unofficial - Sony - PlayStation Vita (PSN) (Decrypted) (NoNpDrm)"
+"跳过" = "同上，整目录逐文件。"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Unofficial - Sony - PlayStation Vita (VPK)"
+"平台" = "PSV"
+"说明" = "库里 PSV 有 1,177 个散落的 .vpk 与归档，一文件一变体，这一份对得上。"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Sony - PlayStation Vita (PSN) (Content)"
+"平台" = "PSV"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Nintendo - Wii U (Digital) (CDN)"
+"跳过" = "3682 个条目对 168,387 条文件记录，是 NUS 内容目录。Wii U 走 Redump 的整盘 ISO。"
+
+[["映射"]]
+"源" = "No-Intro"
+"名" = "Microsoft - Xbox 360 (Digital)"
+"跳过" = "内容目录树。Xbox 360 走 Redump 的整盘 ISO（3707 条）。"
+
+# ════════════════════════════════════════════════════════════════════════
+# 映射 · Redump（拿系统短码去匹配）
+# ════════════════════════════════════════════════════════════════════════
+#
+# 现站 106 个短码，这里只取库里真有的那些光盘平台。**Wii U 与 Xbox 360 只有现站才有**
+# ——旧的冻结镜像上它们显示「系统存在但 No discs found」。
+
+[["映射"]]
+"源" = "Redump"
+"名" = "PSX"
+"平台" = "PS1"
+
+[["映射"]]
+"源" = "Redump"
+"名" = "PS2"
+"平台" = "PS2"
+
+[["映射"]]
+"源" = "Redump"
+"名" = "PS3"
+"平台" = "PS3"
+
+[["映射"]]
+"源" = "Redump"
+"名" = "PSP"
+"平台" = "PSP"
+
+[["映射"]]
+"源" = "Redump"
+"名" = "SS"
+"平台" = "SS"
+
+[["映射"]]
+"源" = "Redump"
+"名" = "DC"
+"平台" = "DC"
+
+[["映射"]]
+"源" = "Redump"
+"名" = "GC"
+"平台" = "NGC"
+
+[["映射"]]
+"源" = "Redump"
+"名" = "WII"
+"平台" = "WII"
+
+[["映射"]]
+"源" = "Redump"
+"名" = "WIIU"
+"平台" = "WIIU"
+"说明" = "541 条，全部恰为 25,025,314,816 字节。旧镜像上这个系统是空的。"
+
+[["映射"]]
+"源" = "Redump"
+"名" = "XBOX360"
+"平台" = "XBOX360"
+
+[["映射"]]
+"源" = "Redump"
+"名" = "MCD"
+"平台" = "Mega-CD"
+
+[["映射"]]
+"源" = "Redump"
+"名" = "PCE"
+"平台" = "PCE"
+
+[["映射"]]
+"源" = "Redump"
+"名" = "3DO"
+"平台" = "3DO"
+
+# ════════════════════════════════════════════════════════════════════════
+# 映射 · TOSEC（拿仓库内路径去匹配）
+# ════════════════════════════════════════════════════════════════════════
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC-PIX/*"
+"跳过" = "手册、封面、宣传片的扫描件，不是 ROM。1091 份。"
+
+# TOSEC 的 NES 主集是带头 `[NES]`，另有一小撮无头 `[UNF]`。窄的写在前面。
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Nintendo Famicom & Entertainment System - * - [UNF]*"
+"平台" = "FC"
+"口径" = "去头"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Nintendo Famicom & Entertainment System - *"
+"平台" = "FC"
+"说明" = "含头。TOSEC 不用 header skipper，按带头文件原样哈希——这正是汉化条目能对上的前提。"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Nintendo Famicom Disk System - *"
+"平台" = "FDS"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Nintendo Super Famicom & Super Entertainment System - *"
+"平台" = "SFC"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC-ISO/Nintendo Super Famicom & Super Entertainment System - *"
+"平台" = "SFC"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Nintendo Game Boy Color - *"
+"平台" = "GBC"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Nintendo Game Boy Advance - *"
+"平台" = "GBA"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Nintendo Game Boy - *"
+"平台" = "GB"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Nintendo DS - *"
+"平台" = "NDS"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Nintendo 3DS - *"
+"平台" = "3DS"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Nintendo 64 - *"
+"平台" = "N64"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Nintendo Virtual Boy - *"
+"平台" = "VB"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Nintendo GameCube - *"
+"平台" = "NGC"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC-ISO/Nintendo GameCube - *"
+"平台" = "NGC"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Nintendo Wii - *"
+"平台" = "WII"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Sega Mega Drive & Genesis - *"
+"平台" = "MD"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Sega Mark III & Master System - *"
+"平台" = "SMS"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Sega Game Gear - *"
+"平台" = "GG"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Sega 32X - *"
+"平台" = "32X"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC-ISO/Sega 32X - *"
+"平台" = "32X"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Sega Mega-CD & Sega CD - *"
+"平台" = "Mega-CD"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC-ISO/Sega Mega-CD & Sega CD - *"
+"平台" = "Mega-CD"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC-ISO/Sega Saturn - *"
+"平台" = "SS"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC-ISO/Sega Dreamcast - *"
+"平台" = "DC"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Bandai WonderSwan*"
+"平台" = "WS"
+"说明" = "WSC 那 1 条 `[tr zh]`（机动战士高达 SEED）就在这一族里。"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/SNK Neo-Geo Pocket*"
+"平台" = "NGPC"
+"说明" = "NGPC 有 3 条 `[tr zh]`，是这批平台里中文最多的。"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Atari Lynx - * - [LYX]*"
+"平台" = "Lynx"
+"口径" = "去头"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Atari Lynx - *"
+"平台" = "Lynx"
+"说明" = "TOSEC 的 Lynx 主集是带头 `[LNX]`（347 条），与 No-Intro 主集是无头 `.lyx` 正好相反。"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/NEC PC-Engine & TurboGrafx-16 - *"
+"平台" = "PCE"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC-ISO/NEC PC-Engine CD & TurboGrafx-16 CD - *"
+"平台" = "PCE"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC-ISO/Sony PlayStation - *"
+"平台" = "PS1"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC-ISO/Sony PlayStation 2 - *"
+"平台" = "PS2"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC-ISO/Sony PlayStation Portable - *"
+"平台" = "PSP"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/Sony PlayStation Vita - *"
+"平台" = "PSV"
+"说明" = "41 条，全是 homebrew 与 demo，无商业游戏。收着不亏。"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC-ISO/3DO 3DO Interactive Multiplayer - *"
+"平台" = "3DO"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC-ISO/Microsoft Xbox 360 - *"
+"平台" = "XBOX360"
+
+[["映射"]]
+"源" = "TOSEC"
+"名" = "TOSEC/MSX MSX*"
+"平台" = "MSX"
+
+# ════════════════════════════════════════════════════════════════════════
+# 映射 · MAME（拿 hash 子树内的文件名去匹配）
+# ════════════════════════════════════════════════════════════════════════
+
+[["映射"]]
+"源" = "MAME"
+"名" = "nes.xml"
+"平台" = "FC"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "snes.xml"
+"平台" = "SFC"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "gameboy.xml"
+"平台" = "GB"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "gbcolor.xml"
+"平台" = "GBC"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "gba.xml"
+"平台" = "GBA"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "nds.xml"
+"平台" = "NDS"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "n64.xml"
+"平台" = "N64"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "megadriv.xml"
+"平台" = "MD"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "megacd.xml"
+"平台" = "Mega-CD"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "sms.xml"
+"平台" = "SMS"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "gamegear.xml"
+"平台" = "GG"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "32x.xml"
+"平台" = "32X"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "saturn.xml"
+"平台" = "SS"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "dc.xml"
+"平台" = "DC"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "psx.xml"
+"平台" = "PS1"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "pce.xml"
+"平台" = "PCE"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "ngp.xml"
+"平台" = "NGPC"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "ngpc.xml"
+"平台" = "NGPC"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "lynx.xml"
+"平台" = "Lynx"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "vboy.xml"
+"平台" = "VB"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "wswan.xml"
+"平台" = "WS"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "wscolor.xml"
+"平台" = "WS"
+
+[["映射"]]
+"源" = "MAME"
+"名" = "3do.xml"
+"平台" = "3DO"
+
+# ════════════════════════════════════════════════════════════════════════
+# 映射 · GoodNES（拿 Assets/gamedb 内的文件名去匹配）
+# ════════════════════════════════════════════════════════════════════════
+
+[["映射"]]
+"源" = "GoodNES"
+"名" = "gamedb_goodnes.txt"
+"平台" = "FC"
+"说明" = "22,095 条里 646 条 `[T+Chi]` / `[T-Chi]` 汉化（实测）。FC 按变体数是全库第一大平台（20,516 个）。"
+
+[["映射"]]
+"源" = "GoodNES"
+"名" = "gamedb_sega_md.txt"
+"平台" = "MD"
+"说明" = "8,149 条里 102 条 `[T±Chi]` 汉化（实测）。首列 MD5 与 SHA-1 混着来，两种都收。"

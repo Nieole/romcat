@@ -148,6 +148,25 @@ pub fn catalog_path(workspace: &Path, slug: Slug<'_>) -> PathBuf {
         .join(format!("{}.sqlite3", slug.text()))
 }
 
+/// **DAT 仓库**在哪。
+///
+/// 注意它**不带 [`Slug`]**——这不是疏忽。中立库一个主库一份（键是相对主库根的路径，
+/// ADR-0020），而「世上有哪些发行版」对两块盘是同一份。跟着主库分开存，等于把一百多 MB
+/// 的 DAT 存两遍，而且第二块盘接上来还要重新同步一遍。
+#[must_use]
+pub fn dat_repo_path(workspace: &Path) -> PathBuf {
+    workspace.join("dat").join("dat.sqlite3")
+}
+
+/// 取回来的原件放哪。
+///
+/// 留着原件是有用的：改一条 DAT→平台的映射之后重新入库，不必把那个 106 MB 的整包
+/// 再下一遍——与 `romcat shape` 改一条成型规则不必重扫 8.6 TiB 是同一个道理（ADR-0022）。
+#[must_use]
+pub fn dat_cache_dir(workspace: &Path) -> PathBuf {
+    workspace.join("dat").join("cache")
+}
+
 /// 某个主库的断点文件。
 #[must_use]
 pub fn checkpoint_path(workspace: &Path, slug: Slug<'_>) -> PathBuf {
@@ -237,6 +256,17 @@ mod tests {
             Slug::AtPath(Path::new("/Volumes/新加卷")).text(),
             "library-f88dd3e91cc9873a"
         );
+    }
+
+    #[test]
+    fn dat_仓库不跟着主库分开存() {
+        // DAT 与哪个主库无关：两块盘接同一台机器，同步一次就够。
+        let workspace = PathBuf::from("/work");
+        assert_eq!(
+            dat_repo_path(&workspace),
+            PathBuf::from("/work/dat/dat.sqlite3")
+        );
+        assert!(dat_cache_dir(&workspace).starts_with("/work/dat"));
     }
 
     #[test]
