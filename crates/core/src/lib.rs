@@ -24,6 +24,7 @@ pub mod scan;
 pub mod scrape;
 pub mod shape;
 pub mod sublibrary;
+pub mod sync;
 pub mod testing;
 pub mod title;
 pub mod workspace;

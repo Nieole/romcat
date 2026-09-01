@@ -20,7 +20,7 @@ use romcat_core::dat::HttpFetcher;
 use romcat_core::dat::registry::Registry;
 use romcat_core::dat::repo::DatRepo;
 use romcat_core::dat::report::DatReport;
-use romcat_core::dat::sync::{self, Action, SyncOptions};
+use romcat_core::dat::sync::{self as dat_sync, Action, SyncOptions};
 use romcat_core::fs::RealFs;
 use romcat_core::identify;
 use romcat_core::path;
@@ -31,6 +31,7 @@ use romcat_core::scan::{self, CancelToken, CheckpointOptions, Jobs, ScanOptions}
 use romcat_core::scrape::{self, Priorities};
 use romcat_core::shape;
 use romcat_core::sublibrary::{self, Sublibrary};
+use romcat_core::sync;
 use romcat_core::title;
 use romcat_core::workspace::{self, Slug};
 
@@ -655,6 +656,7 @@ fn main() -> ExitCode {
         Command::Sublibrary(SublibraryCommand::Rule(args)) => run_sublibrary_rule(&args),
         Command::Sublibrary(SublibraryCommand::Except(args)) => run_sublibrary_except(&args),
         Command::Sublibrary(SublibraryCommand::Show(args)) => run_sublibrary_show(&args),
+        Command::Sublibrary(SublibraryCommand::Plan(args)) => run_sublibrary_plan(&args),
         Command::Dat(DatCommand::Sync(args)) => run_dat_sync(&args),
         Command::Dat(DatCommand::Report(args)) => run_dat_report(&args),
         Command::Dat(DatCommand::Sources(args)) => run_dat_sources(&args),
@@ -1593,7 +1595,8 @@ fn run_export(args: &ExportArgs) -> ExitCode {
 
 /// 子库的几件事。
 ///
-/// **这一组只定义与查看，不同步**：排计划是票 19、搬文件是票 20、转格式是票 21。
+/// **这一组只定义、查看与排计划，不搬文件**：搬文件是票 20、转格式是票 21。
+/// `plan` 排出的那份计划**就是差量预览**——同步前必须先看它（ADR-0016）。
 #[derive(Debug, Subcommand)]
 enum SublibraryCommand {
     /// 新建或改一个子库：目标路径、前端格式、容量上限
@@ -1608,9 +1611,11 @@ enum SublibraryCommand {
     Except(SubExceptArgs),
     /// 看选择集：选中多少条、共多少容量、装不装得下
     Show(SubShowArgs),
+    /// **差量预览**：同步前先看清楚会新增什么、删除什么、净变化多少。只读，不搬任何文件
+    Plan(SubPlanArgs),
 }
 
-/// 六个子命令共用的那几个参数。
+/// 七个子命令共用的那几个参数。
 #[derive(Debug, Args, Clone)]
 struct SubCommonArgs {
     /// 主库根目录。只用来找到对应的中立库，不会去读它；给了 `--library` 就不必再给
@@ -1717,6 +1722,34 @@ struct SubShowArgs {
     json: Option<PathBuf>,
 
     /// 不往标准输出打报告
+    #[arg(long)]
+    quiet: bool,
+
+    #[command(flatten)]
+    common: SubCommonArgs,
+}
+
+#[derive(Debug, Args)]
+struct SubPlanArgs {
+    /// 子库叫什么
+    #[arg(value_name = "子库")]
+    name: String,
+
+    /// 把计划另存为 JSON。**它就是预览本身**，不是另算的一份
+    #[arg(long, value_name = "文件")]
+    json: Option<PathBuf>,
+
+    /// 不看子库定义里的目标路径，改看这个目录（拿本地目录当目标设备演练）
+    #[arg(long, value_name = "目录")]
+    target: Option<PathBuf>,
+
+    /// 把「清单说有、实际没了」的那些补回去
+    ///
+    /// 默认**不补**：那可能是你在掌机上有意删的（ADR-0015）。它们照样会被报出来
+    #[arg(long)]
+    restore: bool,
+
+    /// 不往标准输出打预览
     #[arg(long)]
     quiet: bool,
 
@@ -2099,6 +2132,96 @@ fn run_sublibrary_show(args: &SubShowArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// 排一次同步计划，也就是**差量预览**。
+///
+/// **只读**：选择集从中立库折出来，目标设备走 `LibraryFs` 那道只读接缝走一遍，
+/// 排计划的那一步是纯函数。这条命令一个文件都不写（`--json` 那份报告除外）——
+/// 真正搬文件是票 20。
+fn run_sublibrary_plan(args: &SubPlanArgs) -> ExitCode {
+    let catalog = match args.common.open() {
+        Ok(catalog) => catalog,
+        Err(message) => return fail(message),
+    };
+    let mut sublibrary = match load_sublibrary(&catalog, &args.name) {
+        Ok(sublibrary) => sublibrary,
+        Err(message) => return fail(message),
+    };
+    // **读盘用的路径与入库比较用的键分开**（ADR-0020）：`--target` 给的是系统给的
+    // 原始形式，就拿它原样去读；折成显示用的那一份只进报告。混用会让带假名或带音标的
+    // 目标目录 `canonicalize` 失败，然后被报成「卡不在位」——那正是最不该说的谎。
+    let root = match &args.target {
+        Some(target) => path::normalize_existing(target),
+        None => PathBuf::from(&sublibrary.target),
+    };
+    if args.target.is_some() {
+        sublibrary.target = path::display(&root);
+    }
+    // 主库只读（ADR-0004）：报告不许落进主库。
+    if let Some(root) = args.common.root.as_deref()
+        && let Some(target) = args.json.as_deref()
+        && let Err(message) = refuse_writing_into_library(root, target)
+    {
+        return fail(message);
+    }
+    let loaded = match catalog.selection(&args.name) {
+        Ok(loaded) => loaded,
+        Err(error) => return fail(format!("中立库读不动：{error}")),
+    };
+    let started = Instant::now();
+    let facts = match sublibrary::facts(&catalog) {
+        Ok(facts) => facts,
+        Err(error) => return fail(format!("中立库读不动：{error}")),
+    };
+    let selected = sublibrary::select(&loaded.selection, &facts);
+    let desired = match sync::desired(&catalog, &selected) {
+        Ok(desired) => desired,
+        Err(error) => return fail(format!("中立库读不动：{error}")),
+    };
+    let manifest = match catalog.manifest(&args.name) {
+        Ok(manifest) => manifest,
+        Err(error) => return fail(format!("中立库读不动：{error}")),
+    };
+    let actual = match sync::observe(&RealFs, &root) {
+        Ok(actual) => actual,
+        Err(error) => return fail(format!("{error}")),
+    };
+    let plan = sync::plan(
+        &sublibrary,
+        &desired,
+        &manifest,
+        &actual,
+        sync::Options {
+            restore_missing: args.restore,
+        },
+    );
+    if !args.quiet {
+        let text = plan.render_text();
+        let mut stdout = io::stdout().lock();
+        let _ = stdout.write_all(text.as_bytes());
+        let _ = stdout.flush();
+    }
+    eprintln!(
+        "排计划用了 {:.1} 秒：读了中立库、看了一遍目标，**一个文件都没写**。\n\
+         清单里 {} 个文件，目标上 {} 个；这次要动 {} 个。",
+        started.elapsed().as_secs_f64(),
+        thousands(manifest.files.len() as u64),
+        thousands(actual.files.len() as u64),
+        thousands(plan.touched()),
+    );
+    if !loaded.broken.is_empty() {
+        eprintln!(
+            "⚠️ 有 {} 条规则读不懂、这一趟没参与求值——少选出来的东西全在它们里面。\n\
+             `romcat sublibrary show {}` 看是哪几条。",
+            thousands(loaded.broken.len() as u64),
+            args.name,
+        );
+    }
+    if !write_json(args.json.as_deref(), &plan) {
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
 /// 列出眼下生效的平台清单与成型规则。
 ///
 /// 「平台清单是数据不是代码」要落地，用户得看得见眼下到底生效的是哪一份、里面有什么。
@@ -2191,7 +2314,7 @@ fn run_dat_sync(args: &DatSyncArgs) -> ExitCode {
     }
 
     let fetcher = HttpFetcher::with_throttle(Duration::from_millis(args.throttle_ms));
-    let outcome = match sync::run(&fetcher, &mut repo, &registry, &options) {
+    let outcome = match dat_sync::run(&fetcher, &mut repo, &registry, &options) {
         Ok(outcome) => outcome,
         Err(error) => return fail(format!("同步失败：{error}")),
     };

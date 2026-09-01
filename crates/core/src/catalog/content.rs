@@ -180,6 +180,27 @@ pub struct VariantRow {
     pub release_id: Option<i64>,
 }
 
+/// 一个变体的一个成员，连它在主库里的形态与大小。
+///
+/// 它是 [`Catalog::variant_files`] 的返回行，也是**同步计划器**折期望状态的原料
+/// （[`sync::desired`](crate::sync::desired)）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberFile {
+    /// 属于哪个变体。
+    pub variant_key: String,
+    /// 成员自己的键。
+    pub key: String,
+    /// 是不是普通文件。目录、符号链接不是——它们不是要搬的东西。
+    pub is_file: bool,
+    /// 字节数；**`None` 是元数据读不到**而不是 0 字节（ADR-0021）。
+    pub len: Option<u64>,
+    /// 修改时间（UNIX 纪元起的纳秒）；取不到时是 `None`。
+    ///
+    /// 同步靠它判「主库里这份变了没有」：只比大小的话，**原地改过、大小没变**的
+    /// 文件会被静默判成不用重传——与增量扫描比的是同一个三元组。
+    pub mtime_ns: Option<i64>,
+}
+
 impl Catalog {
     /// 供**成型**读的条目表：键、是不是目录、大小。
     ///
@@ -414,6 +435,64 @@ impl Catalog {
                 row.get(0).map_err(|source| self.err(source))?,
                 Role::from_code(&code).unwrap_or(Role::Internal),
             ));
+        }
+        Ok(out)
+    }
+
+    /// 一批变体的**文件成员**，连它们在主库里的大小。**同步计划器的原料**。
+    ///
+    /// 一趟顺读整张成员表、在内存里筛，而不是逐个变体查一次，也不是把几千个键拼成
+    /// 一条 `IN`：真库上 216,203 条成员对 46,444 个变体，一条规则选中上千个变体是
+    /// 常态，逐个查就是上千次往返，而拼 `IN` 会撞上 SQLite 的绑定参数上限。
+    ///
+    /// **非文件成员照样返回**（`is_file` 为假），由调用方决定怎么处置——目录树变体的
+    /// 那个目录本身是它的主文件，在这里悄悄扔掉的话，「一个成员都不该凭空消失」
+    /// 这件事就没人数得出来了。
+    ///
+    /// **不返回成员的身份**（主文件 / 附属文件 / 内部资源 / 附属内容）：同步要搬的是
+    /// 变体的**全部**文件成员，四种身份一视同仁（挂账 D80），于是读出来也没人用。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn variant_files(
+        &self,
+        variants: &std::collections::BTreeSet<String>,
+    ) -> Result<Vec<MemberFile>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT m.variant_key, m.key, e.kind, e.readable, e.len, e.mtime_ns
+                 FROM variant_member m JOIN entry e ON e.key = m.key
+                 ORDER BY m.variant_key, m.key",
+            )
+            .map_err(|source| self.err(source))?;
+        let mut rows = statement.query([]).map_err(|source| self.err(source))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|source| self.err(source))? {
+            let variant_key: String = row.get(0).map_err(|source| self.err(source))?;
+            if !variants.contains(&variant_key) {
+                continue;
+            }
+            let kind: i64 = row.get(2).map_err(|source| self.err(source))?;
+            let readable: i64 = row.get(3).map_err(|source| self.err(source))?;
+            let len: Option<i64> = row.get(4).map_err(|source| self.err(source))?;
+            out.push(MemberFile {
+                variant_key,
+                key: row.get(1).map_err(|source| self.err(source))?,
+                is_file: kind == super::KIND_FILE,
+                // **读不到就是 `None`，不是 0**（ADR-0021）：库里另有 4,317 个
+                // 真正的空文件，混在一起两个数都会说谎。
+                len: if readable == 0 {
+                    None
+                } else {
+                    len.and_then(|len| u64::try_from(len).ok())
+                },
+                mtime_ns: if readable == 0 {
+                    None
+                } else {
+                    row.get(5).map_err(|source| self.err(source))?
+                },
+            });
         }
         Ok(out)
     }

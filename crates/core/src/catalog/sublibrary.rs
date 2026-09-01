@@ -1,11 +1,14 @@
 //! 中立库里的**子库**与**选择集**：一台目标设备一行，带它的规则与例外。
 //!
-//! ## 三张表各自回答一个问题
+//! ## 四张表各自回答一个问题
 //!
 //! - `sublibrary`：**这台设备是什么样的**——目标路径、前端格式、容量上限。
 //! - `sublibrary_rule`：**要什么**，可重放的那一半。存的是**规则的原文**而不是求值
 //!   结果——存结果的话「主库新增的内容下次自动进入」就不成立了，那正是规则存在的理由。
 //! - `sublibrary_exception`：**另外还要 / 偏不要什么**，优先于规则的那一半。
+//! - `sublibrary_manifest`：**上次往这台设备上放了哪些文件**——增量同步的依据，
+//!   也是工具在目标设备上的行为边界（ADR-0015）。它由票 20 的执行写，票 19 的
+//!   [`plan`](crate::sync::plan) 只读。
 //!
 //! ## 例外为什么不给变体挂外键
 //!
@@ -17,9 +20,16 @@
 //! 指向库里没有的变体的例外，由 [`select`](crate::sublibrary::select) 如实报出来，
 //! 不删也不当错。
 //!
+//! ## 清单为什么落在中立库而不是卡上
+//!
+//! 中立库是事实来源（ADR-0001），而子库的定义本来就在这儿；清单是子库的一部分，
+//! 分家存没有道理。放卡上还有一个绕不开的怪圈：**那份清单自己也是工具写在目标上的
+//! 一个文件**，于是它要不要记进自己里？记则自引用，不记则它成了「清单之外」而工具
+//! 连自己的记录都不敢碰。挂账 D77 记着另一条路（卡自描述）。
+//!
 //! ## 结构版本没有加 1
 //!
-//! 这三张表是**纯加表**：已有的表一列没动、一条语义没改，`CREATE TABLE IF NOT EXISTS`
+//! 这四张表是**纯加表**：已有的表一列没动、一条语义没改，`CREATE TABLE IF NOT EXISTS`
 //! 在打开时就补上，旧库照样打得开。判据是「旧数据会不会被读错」而不是「文件里多了
 //! 点东西」（见 [`SCHEMA_VERSION`](super::SCHEMA_VERSION) 与挂账 D50）。
 
@@ -28,6 +38,7 @@ use rusqlite::{OptionalExtension, params};
 use super::{Catalog, CatalogError};
 use crate::path;
 use crate::sublibrary::{Exception, ExceptionRow, LoadedSelection, Rule, StoredRule, Sublibrary};
+use crate::sync::{FileKind, Manifest, ManifestFile, Stamp};
 
 /// 子库与选择集的表。
 pub(super) const SUBLIBRARY_SCHEMA: &str = "\
@@ -73,6 +84,33 @@ CREATE TABLE IF NOT EXISTS sublibrary_exception(
     note        TEXT,
     at          INTEGER NOT NULL,
     PRIMARY KEY (sublibrary, variant_key)
+) STRICT;
+
+-- **清单**：某个子库上次导出的完整记录（ADR-0015）。
+-- 它是增量同步的依据，**也是工具在目标设备上的行为边界**——清单之外的文件一律不碰。
+-- 于是这张表是同步计划里唯一能长出「删除」的地方。
+CREATE TABLE IF NOT EXISTS sublibrary_manifest(
+    sublibrary TEXT    NOT NULL REFERENCES sublibrary(name),
+    -- **相对子库根**的路径，`/` 分隔、NFC（ADR-0015、ADR-0020）。
+    -- 绝不存绝对路径：卡插到别的设备、盘符变了都不该让全库对不上。
+    path       TEXT    NOT NULL,
+    -- `ROM` / `媒体` / `元数据`。
+    kind       TEXT    NOT NULL,
+    -- 写完之后**从目标上读回来的**大小与修改时间，不是主库侧那份的。
+    -- 于是 FAT32 那 2 秒的时间戳刻度不构成问题：两次读的是同一个被截断过的值。
+    bytes      INTEGER NOT NULL,
+    mtime_ns   INTEGER,
+    -- 主库侧的键（媒体是媒体池里的键）。
+    source     TEXT    NOT NULL,
+    -- 放上去的**那一刻**主库侧那份的大小与修改时间。判「主库那份变了没有」用这两列，
+    -- 不用上面那两列——目标上那份的戳与主库侧那份的根本不是一回事，票 21 转起格式来
+    -- 连大小都会变。只比大小也不够：**原地改过、大小没变**的文件会被静默判成不用重传。
+    source_bytes    INTEGER NOT NULL,
+    source_mtime_ns INTEGER,
+    -- 属于哪个变体。报告拿它把文件数折回用户认得的那个数。
+    variant    TEXT    NOT NULL,
+    at         INTEGER NOT NULL,
+    PRIMARY KEY (sublibrary, path)
 ) STRICT;
 ";
 
@@ -173,6 +211,11 @@ impl Catalog {
         };
         let tx = self.conn.transaction().map_err(to_err)?;
         // **先删子表**：外键检查默认是开着的（见 `catalog::content` 里那段注释）。
+        tx.execute(
+            "DELETE FROM sublibrary_manifest WHERE sublibrary = ?1",
+            params![name],
+        )
+        .map_err(to_err)?;
         tx.execute(
             "DELETE FROM sublibrary_exception WHERE sublibrary = ?1",
             params![name],
@@ -352,5 +395,103 @@ impl Catalog {
         let mut out = LoadedSelection::from_stored(&self.sublibrary_rules(name)?);
         out.selection.exceptions = self.sublibrary_exceptions(name)?;
         Ok(out)
+    }
+
+    /// 读一个子库的**清单**：上次导出往目标上放了哪些文件。
+    ///
+    /// 没同步过的子库读出来是一份**空清单**，于是计划里一条删除也长不出来——
+    /// 「工具只删自己放过的东西」在这条路径上是自动成立的。
+    ///
+    /// 认不出类别的行**整条跳过**：那一条说不清是 ROM 还是别人的截图，而说不清的
+    /// 一律当作不归工具管（清单之外）。宁可少删，不可错删。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn manifest(&self, name: &str) -> Result<Manifest, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT path, kind, bytes, mtime_ns, source, variant,
+                        source_bytes, source_mtime_ns
+                 FROM sublibrary_manifest WHERE sublibrary = ?1 ORDER BY path",
+            )
+            .map_err(|source| self.err(source))?;
+        let mut rows = statement
+            .query(params![name])
+            .map_err(|source| self.err(source))?;
+        let mut out = Manifest::default();
+        while let Some(row) = rows.next().map_err(|source| self.err(source))? {
+            let kind: String = row.get(1).map_err(|source| self.err(source))?;
+            let Some(kind) = FileKind::from_label(&kind) else {
+                continue;
+            };
+            let bytes: i64 = row.get(2).map_err(|source| self.err(source))?;
+            let source_bytes: i64 = row.get(6).map_err(|source| self.err(source))?;
+            out.files.push(ManifestFile {
+                path: row.get(0).map_err(|source| self.err(source))?,
+                kind,
+                stamp: Stamp {
+                    bytes: u64::try_from(bytes).unwrap_or(0),
+                    mtime_ns: row.get(3).map_err(|source| self.err(source))?,
+                },
+                source: row.get(4).map_err(|source| self.err(source))?,
+                source_stamp: Stamp {
+                    bytes: u64::try_from(source_bytes).unwrap_or(0),
+                    mtime_ns: row.get(7).map_err(|source| self.err(source))?,
+                },
+                variant: row.get(5).map_err(|source| self.err(source))?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// 把一个子库的清单整份换掉——同步完成后记下**目标的真实状态**（票 20）。
+    ///
+    /// **整份换而不是逐条改**，而且在一个事务里：清单是「上次导出的完整记录」，
+    /// 半份新半份旧的清单比没有清单更危险——它会让工具以为自己放过某个文件。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn put_manifest(&mut self, name: &str, manifest: &Manifest) -> Result<(), CatalogError> {
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let at = super::now_secs();
+        let tx = self.conn.transaction().map_err(to_err)?;
+        tx.execute(
+            "DELETE FROM sublibrary_manifest WHERE sublibrary = ?1",
+            params![name],
+        )
+        .map_err(to_err)?;
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO sublibrary_manifest(
+                         sublibrary, path, kind, bytes, mtime_ns, source, variant,
+                         source_bytes, source_mtime_ns, at)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                )
+                .map_err(to_err)?;
+            for file in &manifest.files {
+                insert
+                    .execute(params![
+                        name,
+                        crate::path::nfc(&file.path).into_owned(),
+                        file.kind.label(),
+                        i64::try_from(file.stamp.bytes).unwrap_or(i64::MAX),
+                        file.stamp.mtime_ns,
+                        file.source,
+                        file.variant,
+                        i64::try_from(file.source_stamp.bytes).unwrap_or(i64::MAX),
+                        file.source_stamp.mtime_ns,
+                        at,
+                    ])
+                    .map_err(to_err)?;
+            }
+        }
+        tx.commit().map_err(to_err)?;
+        Ok(())
     }
 }

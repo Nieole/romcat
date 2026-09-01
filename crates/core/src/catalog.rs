@@ -40,7 +40,7 @@ use crate::scan::aggregate::{
 use crate::shape;
 
 pub use baseline::{Baseline, Recorded, ScanDelta, Verdict};
-pub use content::{ReleaseRow, VariantRow};
+pub use content::{MemberFile, ReleaseRow, VariantRow};
 pub use frontend::{SnapshotOrigin, SnapshotRow};
 pub use identify::{
     AcceptedCandidate, Candidate, CandidateCounts, Confidence, ContentHash, EntryFact,

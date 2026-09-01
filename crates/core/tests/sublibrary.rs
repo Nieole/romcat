@@ -379,7 +379,11 @@ fn 报告数得出选中多少条与多少容量_并报出超限() {
         report.over_capacity,
         Some(2 * 1024 * 1024 * 1024 + 6 * 1024 * 1024)
     );
-    assert_eq!(report.trim_suggestions[0].0, "PSV/大作.vpk");
+    assert_eq!(report.trim_suggestions[0].variant, "PSV/大作.vpk");
+    assert_eq!(
+        report.trim_suggestions[0].cumulative, report.trim_suggestions[0].bytes,
+        "累计从最大的那个起算——「砍到第几个才够」直接读得出来"
+    );
     let text = report.render_text();
     assert!(text.contains("装不下"), "{text}");
     assert!(text.contains("不会自动截断"), "{text}");

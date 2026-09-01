@@ -19,10 +19,9 @@ use serde::Serialize;
 
 use crate::report::{heading, human_bytes, pad, thousands};
 
-use super::{LoadedSelection, Selected, Sublibrary, VariantFacts};
-
-/// 超容量时列几个最大的当裁剪建议。
-const TRIM_SUGGESTIONS: usize = 10;
+use super::{
+    LoadedSelection, Selected, Sublibrary, Trim, VariantFacts, over_capacity, trim_suggestions,
+};
 
 /// 报告里例外那一栏最多列几个键。
 const EXAMPLES: usize = 10;
@@ -107,8 +106,8 @@ pub struct SelectionReport {
     pub thin_dimensions: Vec<String>,
     /// 超出容量上限多少字节；没超或没设上限时是 `None`。
     pub over_capacity: Option<u64>,
-    /// 超了的话，最大的那几个：`(变体的键, 字节)`。
-    pub trim_suggestions: Vec<(String, u64)>,
+    /// 超了的话，按体积排序的裁剪建议。**不自动截断**（ADR-0016）。
+    pub trim_suggestions: Vec<Trim>,
 }
 
 impl SelectionReport {
@@ -161,22 +160,20 @@ impl SelectionReport {
             anchors.insert((platform, anchor));
         }
 
-        let over_capacity = sublibrary
-            .capacity
-            .and_then(|limit| selected.bytes.checked_sub(limit))
-            .filter(|over| *over > 0);
-        let mut trim_suggestions = Vec::new();
-        if over_capacity.is_some() {
-            let mut biggest: Vec<(String, u64)> = selected
-                .picked
-                .iter()
-                .map(|picked| (picked.key.clone(), picked.bytes))
-                .collect();
-            // 体积降序；同体积按键排，同一份库跑两次结果必须一样。
-            biggest.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            biggest.truncate(TRIM_SUGGESTIONS);
-            trim_suggestions = biggest;
-        }
+        // 超没超与砍谁，与同步计划器共用一套算法（`sublibrary::over_capacity` /
+        // `trim_suggestions`）：两处各写一遍的话，「这份报告说装得下、那份说砍这几个」
+        // 这种对不上的账迟早会出现。
+        let over = over_capacity(sublibrary.capacity, selected.bytes);
+        let trims = if over.is_some() {
+            trim_suggestions(
+                selected
+                    .picked
+                    .iter()
+                    .map(|picked| (picked.key.clone(), picked.bytes)),
+            )
+        } else {
+            Vec::new()
+        };
 
         Self {
             catalog: catalog.to_string(),
@@ -220,8 +217,8 @@ impl SelectionReport {
                 .iter()
                 .map(|name| (*name).to_string())
                 .collect(),
-            over_capacity,
-            trim_suggestions,
+            over_capacity: over,
+            trim_suggestions: trims,
         }
     }
 
@@ -371,8 +368,25 @@ impl SelectionReport {
                     "**不会自动截断**（ADR-0016）——同一套规则在两张不同容量的卡上会选出\n\
                      完全不同的东西，而你无从得知它砍掉了什么。砍谁由你定，最大的几个是：",
                 );
-                for (key, bytes) in &self.trim_suggestions {
-                    let _ = writeln!(out, "  {}  {key}", pad(&human_bytes(*bytes), 12));
+                let _ = writeln!(out, "  {}{}变体", pad("腾出", 12), pad("累计", 12));
+                for trim in &self.trim_suggestions {
+                    let _ = writeln!(
+                        out,
+                        "  {}{}{}",
+                        pad(&human_bytes(trim.bytes), 12),
+                        pad(&human_bytes(trim.cumulative), 12),
+                        trim.variant,
+                    );
+                }
+                if let Some(last) = self.trim_suggestions.last()
+                    && last.cumulative < over
+                {
+                    let _ = writeln!(
+                        out,
+                        "这十个**全砍掉也只腾出 {}，还差 {}**。`--json` 出完整的一份。",
+                        human_bytes(last.cumulative),
+                        human_bytes(over - last.cumulative),
+                    );
                 }
                 let _ = writeln!(
                     out,

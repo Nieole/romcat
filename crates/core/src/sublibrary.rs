@@ -44,6 +44,8 @@ pub mod rule;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::Serialize;
+
 use crate::catalog::{Catalog, CatalogError};
 use crate::scrape::{AnchorKind, Field};
 
@@ -317,6 +319,62 @@ pub struct Selected {
     ///
     /// 选不出东西时，**是缺数据还是规则写错了**，这一列直接分开。
     pub thin_dimensions: Vec<&'static str>,
+}
+
+/// 超容量时列几个最大的当裁剪建议。
+///
+/// 十个是**看得完**与**够用**之间的折中：真库上一条规则能选出上千个变体，全列出来
+/// 谁也读不完；而 [`Trim::cumulative`] 让「这十个全砍掉够不够」一眼看得出来，
+/// 不够时报告直接说还差多少。
+pub const TRIM_SUGGESTIONS: usize = 10;
+
+/// 一条**裁剪建议**：砍掉这个变体能腾出多少。
+///
+/// **落在变体这一层而不是文件**：例外记的是变体的键
+/// （`romcat sublibrary except --exclude <变体的键>`），落在文件上的建议照着做不了。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Trim {
+    /// 变体的键。
+    pub variant: String,
+    /// 砍掉它腾出多少字节。
+    pub bytes: u64,
+    /// 从最大的那个砍起、砍到这一条为止一共腾出多少。
+    ///
+    /// **「砍到第几个才够」直接读得出来**——没有它，用户对着十行数字还得自己加一遍，
+    /// 而超出量动辄是几十上百 GiB。
+    pub cumulative: u64,
+}
+
+/// 超出容量上限多少字节；没超或没设上限时是 `None`。
+#[must_use]
+pub fn over_capacity(capacity: Option<u64>, bytes: u64) -> Option<u64> {
+    capacity
+        .and_then(|limit| bytes.checked_sub(limit))
+        .filter(|over| *over > 0)
+}
+
+/// 按体积排序的**裁剪建议**：最大的那几个变体。
+///
+/// **只建议，绝不自动截断**（ADR-0016）——同一套规则在两张不同容量的卡上会选出
+/// 完全不同的东西，而用户无从得知它砍掉了什么。
+#[must_use]
+pub fn trim_suggestions(by_variant: impl IntoIterator<Item = (String, u64)>) -> Vec<Trim> {
+    let mut biggest: Vec<(String, u64)> = by_variant.into_iter().collect();
+    // 体积降序；同体积按键排，同一份输入跑两次结果必须一样。
+    biggest.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    biggest.truncate(TRIM_SUGGESTIONS);
+    let mut cumulative = 0;
+    biggest
+        .into_iter()
+        .map(|(variant, bytes)| {
+            cumulative += bytes;
+            Trim {
+                variant,
+                bytes,
+                cumulative,
+            }
+        })
+        .collect()
 }
 
 /// 按选择集在一批事实上求值。**纯函数**：不碰中立库、不碰磁盘、不看时钟。
