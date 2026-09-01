@@ -276,6 +276,12 @@ impl DatRepo {
     }
 
     fn wrap(&self, source: rusqlite::Error) -> RepoError {
+        self.error(source)
+    }
+
+    /// 把底层错误包成这份库的错误。查询散在别的模块里（[`super::lookup`]、
+    /// [`super::report`]），它们也得说得出「是哪份库读不出来」。
+    pub(crate) fn error(&self, source: rusqlite::Error) -> RepoError {
         RepoError::Sqlite {
             path: self.location(),
             source,

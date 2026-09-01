@@ -1,0 +1,255 @@
+//! **拿判据去 DAT 库里查**：CRC-32 加大小，第一命中层的全部查询都在这里。
+//!
+//! 查询走 `rom(crc32)` 上那条索引（票 06 建的），一次查询是一次索引命中——48 万条
+//! 文件记录上这一层的代价可以忽略，真正贵的是拿到判据那一步。
+//!
+//! **判据是 CRC-32 加未压缩大小两件事，不是只有 CRC-32。** 32 位的校验和在几十万条
+//! 记录上撞车是现实存在的（生日问题），大小几乎免费地把它挡掉。DAT 偶尔有不记大小
+//! 的记录（实测极少），那种命中单独标出来，[`Hit::sized`] 为假——[`super::super::identify`]
+//! 据此把置信度降一档，而不是假装它和精确命中一样可靠。
+
+use rusqlite::params;
+
+use super::chinese::ChineseMark;
+use super::repo::{DatRepo, RepoError};
+use super::{Convention, chinese};
+
+/// DAT 库里被撞上的一条文件记录，连同它所在的条目与那份 DAT。
+///
+/// 它就是一条**候选**的**依据**：命中了哪个数据库的哪条记录、匹配了哪个字段。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hit {
+    /// 这条文件记录在 DAT 库里的 id。同一份内容被两套哈希各撞出一次时靠它去重。
+    pub rom_id: i64,
+    /// 哪个数据源。
+    pub source: String,
+    /// 哪一份 DAT。
+    pub dat: String,
+    /// 这份 DAT 归哪个平台。
+    pub platform: String,
+    /// 这份 DAT 的哈希口径。
+    pub convention: Convention,
+    /// 条目名。**通常是一个发行版**，但 TOSEC 的 `[tr zh]` 条目是**汉化版**，那是变体。
+    pub game: String,
+    /// 父条目名（No-Intro 的 parent/clone）。同一**作品**下的多个发行版靠它归堆。
+    pub cloneof: Option<String>,
+    /// 文件记录名。
+    pub rom: String,
+    /// 序列号；No-Intro 有，Redump 与 TOSEC 没有。
+    pub serial: Option<String>,
+    /// 条目名上的中文记号：**汉化版**还是**官中版**（ADR-0012）。
+    pub chinese: Option<ChineseMark>,
+    /// DAT 自己记的大小；`None` 表示这份 DAT 没记。
+    pub size: Option<u64>,
+    /// DAT 记的 `status`，实测取值 `verified` / `baddump` / `nodump`。
+    pub status: Option<String>,
+    /// 大小对上了没有。`false` 表示这条记录根本没记大小，只凭 CRC-32 撞上的。
+    pub sized: bool,
+}
+
+impl Hit {
+    /// 这条命中是不是**精确**的：CRC-32 与大小都对上了，而且 DAT 没说这是个坏转储。
+    #[must_use]
+    pub fn is_exact(&self) -> bool {
+        self.sized && !matches!(self.status.as_deref(), Some("baddump" | "nodump"))
+    }
+}
+
+impl DatRepo {
+    /// DAT 库覆盖到哪几个平台。
+    ///
+    /// 识别拿它回答一个花钱的问题：**这个平台值不值得为它读盘**。库里一条记录都没有的
+    /// 平台（真机上是 Switch 与街机），读出来的哈希无处可撞。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn platforms(&self) -> Result<std::collections::BTreeSet<String>, RepoError> {
+        let mut statement = self
+            .conn()
+            .prepare("SELECT DISTINCT platform FROM dat")
+            .map_err(|source| self.error(source))?;
+        let rows = statement
+            .query_map(params![], |row| row.get::<_, String>(0))
+            .map_err(|source| self.error(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.error(source))
+    }
+
+    /// 拿 `(CRC-32, 大小)` 去查，返回全部撞上的文件记录。
+    ///
+    /// 大小对不上的记录**不返回**——那不是候选，是撞车。DAT 没记大小的记录返回，
+    /// 但 [`Hit::sized`] 为假。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn lookup(&self, crc32: u32, size: u64) -> Result<Vec<Hit>, RepoError> {
+        let mut statement = self
+            .conn()
+            .prepare_cached(
+                "SELECT r.id, d.source, d.name, d.platform, d.convention,
+                        g.name, g.cloneof, r.name, g.serial, g.chinese, r.size, r.status
+                 FROM rom r
+                 JOIN game g ON g.id = r.game
+                 JOIN dat  d ON d.id = r.dat
+                 WHERE r.crc32 = ?1
+                 ORDER BY r.id",
+            )
+            .map_err(|source| self.error(source))?;
+        let rows = statement
+            .query_map(params![i64::from(crc32)], |row| {
+                let recorded: Option<i64> = row.get(10)?;
+                let recorded = recorded.and_then(|size| u64::try_from(size).ok());
+                let convention: String = row.get(4)?;
+                let game: String = row.get(5)?;
+                let chinese = chinese::mark_of(&game);
+                Ok(Hit {
+                    rom_id: row.get(0)?,
+                    source: row.get(1)?,
+                    dat: row.get(2)?,
+                    platform: row.get(3)?,
+                    convention: Convention::from_label(&convention).unwrap_or(Convention::AsIs),
+                    game,
+                    cloneof: row.get(6)?,
+                    rom: row.get(7)?,
+                    serial: row.get(8)?,
+                    chinese,
+                    size: recorded,
+                    status: row.get(11)?,
+                    sized: recorded == Some(size),
+                })
+            })
+            .map_err(|source| self.error(source))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let hit = row.map_err(|source| self.error(source))?;
+            // 大小对不上就是撞车，不是候选。没记大小的留着，但标出来。
+            if hit.size.is_none() || hit.sized {
+                out.push(hit);
+            }
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dat::logiqx::{DatHeader, GameRecord, RomRecord};
+    use crate::dat::repo::{DatMeta, Unit};
+
+    fn 装一份(repo: &mut DatRepo, source: &str, convention: Convention, games: &[GameRecord]) {
+        let mut writer = repo
+            .begin(&Unit {
+                source: source.to_string(),
+                name: format!("{source}.dat"),
+                url: "https://example.invalid/x".to_string(),
+                fingerprint: "sha".to_string(),
+            })
+            .expect("事务");
+        writer
+            .write_dat(
+                &DatMeta {
+                    name: format!("{source} - FC"),
+                    platform: "FC".to_string(),
+                    convention,
+                    header: DatHeader::default(),
+                },
+                games,
+            )
+            .expect("写");
+        writer.commit().expect("提交");
+    }
+
+    fn 条目(name: &str, size: Option<u64>, crc: u32) -> GameRecord {
+        GameRecord {
+            name: name.to_string(),
+            roms: vec![RomRecord {
+                name: format!("{name}.nes"),
+                size,
+                crc32: Some(crc),
+                ..RomRecord::default()
+            }],
+            ..GameRecord::default()
+        }
+    }
+
+    #[test]
+    fn 说得出库里有哪几个平台() {
+        // 识别拿它决定「这个平台值不值得为它读盘」。
+        let mut repo = DatRepo::in_memory().expect("开得出来");
+        assert!(repo.platforms().expect("查得出").is_empty());
+        装一份(
+            &mut repo,
+            "No-Intro",
+            Convention::Headerless,
+            &[条目("甲 (Japan)", Some(1), 1)],
+        );
+        assert!(repo.platforms().expect("查得出").contains("FC"));
+        assert!(!repo.platforms().expect("查得出").contains("SWITCH"));
+    }
+
+    #[test]
+    fn 判据是_crc32_加大小两件事() {
+        let mut repo = DatRepo::in_memory().expect("开得出来");
+        装一份(
+            &mut repo,
+            "No-Intro",
+            Convention::Headerless,
+            &[条目("甲 (Japan)", Some(40_960), 0xAABB_CCDD)],
+        );
+        assert_eq!(repo.lookup(0xAABB_CCDD, 40_960).expect("查得出").len(), 1);
+        // CRC 一样、大小不一样：撞车，不是候选。
+        assert!(repo.lookup(0xAABB_CCDD, 40_976).expect("查得出").is_empty());
+        assert!(repo.lookup(0x0000_0001, 40_960).expect("查得出").is_empty());
+    }
+
+    #[test]
+    fn 一份内容可以撞上好几个源() {
+        let mut repo = DatRepo::in_memory().expect("开得出来");
+        装一份(
+            &mut repo,
+            "No-Intro",
+            Convention::Headerless,
+            &[条目("甲 (Japan)", Some(40_960), 1)],
+        );
+        装一份(
+            &mut repo,
+            "TOSEC",
+            Convention::AsIs,
+            &[条目("甲 (1990)(某社)[tr zh 某组]", Some(40_960), 1)],
+        );
+        let hits = repo.lookup(1, 40_960).expect("查得出");
+        assert_eq!(hits.len(), 2, "一个变体可以有多条候选");
+        assert_eq!(hits[0].convention, Convention::Headerless);
+        assert_eq!(hits[1].convention, Convention::AsIs);
+        assert_eq!(hits[1].chinese, Some(ChineseMark::FanTranslated));
+        assert!(hits.iter().all(Hit::is_exact));
+    }
+
+    #[test]
+    fn 没记大小的命中标出来而不是当精确命中() {
+        let mut repo = DatRepo::in_memory().expect("开得出来");
+        装一份(
+            &mut repo,
+            "TOSEC",
+            Convention::AsIs,
+            &[条目("没记大小的", None, 7)],
+        );
+        let hits = repo.lookup(7, 12_345).expect("查得出");
+        assert_eq!(hits.len(), 1);
+        assert!(!hits[0].sized);
+        assert!(!hits[0].is_exact(), "只凭 CRC-32 撞上的不算精确命中");
+    }
+
+    #[test]
+    fn 坏转储不算精确命中() {
+        let mut repo = DatRepo::in_memory().expect("开得出来");
+        let mut game = 条目("坏的 (Japan)", Some(16), 9);
+        game.roms[0].status = Some("baddump".to_string());
+        装一份(&mut repo, "No-Intro", Convention::AsIs, &[game]);
+        let hits = repo.lookup(9, 16).expect("查得出");
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].sized);
+        assert!(!hits[0].is_exact(), "DAT 自己说这是坏转储");
+    }
+}

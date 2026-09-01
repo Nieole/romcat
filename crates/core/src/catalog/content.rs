@@ -32,6 +32,7 @@ use std::collections::BTreeMap;
 
 use rusqlite::{OptionalExtension, params};
 
+use super::identify::Origin;
 use super::{Catalog, CatalogError};
 use crate::platform::Manifest;
 use crate::scan::aggregate::ShapingAcc;
@@ -42,8 +43,11 @@ pub(super) const CONTENT_SCHEMA: &str = "\
 -- **作品**：跨平台、跨地区的同一个游戏概念。刮削来的简介、封面默认挂在这一层。
 -- 票 07 之前这张表是空的——识别还没开工，谁也不知道哪个变体属于哪个作品。
 CREATE TABLE IF NOT EXISTS work(
-    id   INTEGER PRIMARY KEY,
-    name TEXT NOT NULL
+    id     INTEGER PRIMARY KEY,
+    name   TEXT NOT NULL,
+    -- 这一行是**识别**自己造的，还是**裁决**定下来的（票 07）。重跑识别要清掉
+    -- 自己上一轮造的，而裁决攒出来的一行都不能碰。
+    origin TEXT NOT NULL
 ) STRICT;
 
 -- **发行版**：某个平台、某个地区的一次官方发行，通常对应 No-Intro / Redump 里的一条记录。
@@ -56,7 +60,8 @@ CREATE TABLE IF NOT EXISTS release(
     platform  TEXT,
     region    TEXT,
     serial    TEXT,
-    languages TEXT
+    languages TEXT,
+    origin    TEXT NOT NULL
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS release_work ON release(work_id);
@@ -80,6 +85,13 @@ CREATE TABLE IF NOT EXISTS variant(
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS variant_platform ON variant(platform);
+
+-- 这两条索引不是为了查得快，是为了**删得动**：`rusqlite` 的 bundled SQLite
+-- 编译时开了 `SQLITE_DEFAULT_FOREIGN_KEYS=1`，外键检查默认是**开着**的。
+-- 于是重跑识别删掉自己上一轮建的一万多条发行版时，每删一行都要在 variant 上找
+-- 「还有没有人指着我」——没有索引就是一次全表扫描，实测 46,444 个变体上要 3 分半。
+CREATE INDEX IF NOT EXISTS variant_work ON variant(work_id);
+CREATE INDEX IF NOT EXISTS variant_release ON variant(release_id);
 
 -- 变体的成员：一个条目只属于一个变体，因此键就是主键。
 -- `role` 是**主文件 / 附属文件 / 内部资源 / 附属内容**之一。
@@ -471,11 +483,17 @@ impl Catalog {
 
     /// 记一个**作品**，返回它的 id。
     ///
+    /// `origin` 说这一行是谁造的。识别重跑时只清自己造的那些（见
+    /// [`Catalog::clear_identifications`](super::Catalog::clear_identifications)）。
+    ///
     /// # Errors
     /// 写库失败时返回错误。
-    pub fn add_work(&mut self, name: &str) -> Result<i64, CatalogError> {
+    pub fn add_work(&mut self, name: &str, origin: Origin) -> Result<i64, CatalogError> {
         self.conn
-            .execute("INSERT INTO work(name) VALUES(?1)", params![name])
+            .execute(
+                "INSERT INTO work(name, origin) VALUES(?1, ?2)",
+                params![name, origin.label()],
+            )
             .map_err(|source| self.err(source))?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -494,12 +512,13 @@ impl Catalog {
         region: Option<&str>,
         serial: Option<&str>,
         languages: Option<&str>,
+        origin: Origin,
     ) -> Result<i64, CatalogError> {
         self.conn
             .execute(
-                "INSERT INTO release(work_id, platform, region, serial, languages)
-                 VALUES(?1, ?2, ?3, ?4, ?5)",
-                params![work_id, platform, region, serial, languages],
+                "INSERT INTO release(work_id, platform, region, serial, languages, origin)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![work_id, platform, region, serial, languages, origin.label()],
             )
             .map_err(|source| self.err(source))?;
         Ok(self.conn.last_insert_rowid())
@@ -665,9 +684,18 @@ mod tests {
             )
             .expect("写得进");
 
-        let work = catalog.add_work("幻想传说").expect("建得了作品");
+        let work = catalog
+            .add_work("幻想传说", Origin::Verdict)
+            .expect("建得了作品");
         let release = catalog
-            .add_release(work, Some("SFC"), Some("日本"), Some("SHVC-TO"), Some("ja"))
+            .add_release(
+                work,
+                Some("SFC"),
+                Some("日本"),
+                Some("SHVC-TO"),
+                Some("ja"),
+                Origin::Verdict,
+            )
             .expect("建得了发行版");
         catalog
             .link_variant("FC/甲.zip", Some(work), Some(release))
@@ -739,7 +767,9 @@ mod tests {
         catalog
             .replace_variants(&[变体("FC/甲.zip", Some("FC"))], 1, &Manifest::builtin())
             .expect("写得进");
-        let work = catalog.add_work("超级马里奥").expect("建得了作品");
+        let work = catalog
+            .add_work("超级马里奥", Origin::Verdict)
+            .expect("建得了作品");
         catalog
             .link_variant("FC/甲.zip", Some(work), None)
             .expect("挂得上");

@@ -10,7 +10,7 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{fs, io};
 
 use clap::{Args, Parser, Subcommand};
@@ -21,6 +21,7 @@ use romcat_core::dat::repo::DatRepo;
 use romcat_core::dat::report::DatReport;
 use romcat_core::dat::sync::{self, Action, SyncOptions};
 use romcat_core::fs::RealFs;
+use romcat_core::identify;
 use romcat_core::path;
 use romcat_core::platform::Manifest;
 use romcat_core::report::{DuplicateDetails, HealthReport, human_bytes, thousands};
@@ -45,6 +46,8 @@ enum Command {
     Report(ReportArgs),
     /// 按平台清单重新成型：把中立库里散落的条目聚成变体。改了成型规则不必重扫主库
     Shape(ShapeArgs),
+    /// 拿变体的 CRC-32 加大小撞 DAT，产出带置信度与依据的候选，并报出真实命中率
+    Identify(IdentifyArgs),
     /// 列出眼下生效的平台清单与成型规则，或者导出一份底稿照着改
     Platforms(PlatformsArgs),
     /// DAT 仓库：把几个哈希数据库镜像到本地，并报出每个平台有多少条可用记录
@@ -212,6 +215,39 @@ struct ShapeArgs {
 }
 
 #[derive(Debug, Args)]
+struct IdentifyArgs {
+    /// 主库根目录。要算裸文件的哈希才用得上；给了 `--library` 就不必再给
+    root: Option<PathBuf>,
+
+    /// 按名字找中立库（扫描时用 `--library` 起的那个名字）
+    #[arg(long, value_name = "名字")]
+    library: Option<String>,
+
+    /// 工作目录：中立库与 DAT 库存这里
+    #[arg(long, value_name = "目录")]
+    workspace: Option<PathBuf>,
+
+    /// 一个字节都不读主库
+    ///
+    /// 容器里零解压可得的 CRC-32 照撞；裸文件与去头那套哈希则报「无判据」——
+    /// 它们只能从字节里来。盘不在位时用它
+    #[arg(long)]
+    no_read_library: bool,
+
+    /// 单份内容读到多大（MiB）就不读了；不给就不设上限
+    #[arg(long, value_name = "MiB")]
+    max_read_mib: Option<u64>,
+
+    /// 把报告另存为 JSON
+    #[arg(long, value_name = "文件")]
+    json: Option<PathBuf>,
+
+    /// 不打印文本报告
+    #[arg(long)]
+    quiet: bool,
+}
+
+#[derive(Debug, Args)]
 struct PlatformsArgs {
     /// 工作目录：不给 `--manifest` 时来这里找 `platforms.toml`
     #[arg(long, value_name = "目录")]
@@ -329,6 +365,7 @@ fn main() -> ExitCode {
         Command::Scan(args) => run_scan(&args, &cancel),
         Command::Report(args) => run_report(&args),
         Command::Shape(args) => run_shape(&args),
+        Command::Identify(args) => run_identify(&args, &cancel),
         Command::Platforms(args) => run_platforms(&args),
         Command::Dat(DatCommand::Sync(args)) => run_dat_sync(&args),
         Command::Dat(DatCommand::Report(args)) => run_dat_report(&args),
@@ -639,6 +676,128 @@ fn run_shape(args: &ShapeArgs) -> ExitCode {
     );
 
     emit_from_catalog(&catalog, &manifest, &args.output)
+}
+
+/// 拿变体去撞 DAT。**不联网、不写任何 ROM 文件。**
+///
+/// 读盘只发生在一处：裸文件的哈希只能从字节里来，容器里的 CRC-32 零解压就有（票 03）。
+/// `--no-read-library` 把那一处也关掉，于是一个字节都不读主库。
+fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
+    let (slug, located_by) = match locate(args.library.as_deref(), args.root.as_deref()) {
+        Ok(pair) => pair,
+        Err(message) => return fail(message),
+    };
+    if let Some(root) = args.root.as_deref()
+        && let Some(target) = args.json.as_deref()
+        && let Err(message) = refuse_writing_into_library(root, target)
+    {
+        return fail(message);
+    }
+    let workspace = workspace_dir(args.workspace.as_deref());
+    let catalog_path = workspace::catalog_path(&workspace, slug);
+    if !catalog_path.exists() {
+        return fail(format!(
+            "还没有 {located_by} 这份中立库。先跑一次 `romcat scan`。"
+        ));
+    }
+    let dat_path = workspace::dat_repo_path(&workspace);
+    if !dat_path.exists() {
+        return fail(format!(
+            "还没有 DAT 库（该在 {}）。先跑一次 `romcat dat sync`——没有弹药就没有命中率。",
+            dat_path.display()
+        ));
+    }
+    let mut catalog = match open_catalog(&workspace, slug, args.root.as_deref()) {
+        Ok(catalog) => catalog,
+        Err(message) => return fail(message),
+    };
+    let repo = match DatRepo::open(&dat_path) {
+        Ok(repo) => repo,
+        Err(error) => return fail(format!("DAT 库打不开：{error}")),
+    };
+
+    // 主库根：命令行给的优先，没给就问中立库——盘换了挂载点时那一份才是对的。
+    let root = match args.root.clone() {
+        Some(root) => Some(root),
+        None => catalog.library_root().ok().flatten().map(PathBuf::from),
+    };
+    if root.is_none() && !args.no_read_library {
+        return fail(
+            "不知道主库在哪：给出主库根目录，或者加 --no-read-library 只用容器里那套零解压的 CRC-32。",
+        );
+    }
+    if let Some(root) = &root
+        && let Some(target) = args.json.as_deref()
+        && let Err(message) = refuse_writing_into_library(root, target)
+    {
+        return fail(message);
+    }
+
+    let mut options = identify::Options::new(root.unwrap_or_default());
+    options.read_library = !args.no_read_library;
+    options.max_read_bytes = args.max_read_mib.map(|mib| mib.saturating_mul(1 << 20));
+
+    let library = RealFs::new();
+    let started = Instant::now();
+    let mut last = Instant::now();
+    let outcome = identify::run(
+        &library,
+        &mut catalog,
+        &repo,
+        &options,
+        cancel,
+        &mut |progress| {
+            // 46,444 个变体、可能几十分钟：不说进度的话，用户分不清它是在干活还是卡住了。
+            if last.elapsed() >= Duration::from_secs(5) {
+                last = Instant::now();
+                eprintln!(
+                    "  已算 {} / {} 个变体，命中 {}，读盘 {}",
+                    thousands(progress.done),
+                    thousands(progress.total),
+                    thousands(progress.matched),
+                    human_bytes(progress.read_bytes),
+                );
+            }
+        },
+    );
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => return fail(format!("识别失败：{error}")),
+    };
+
+    if !args.quiet {
+        let text = outcome.report.render_text();
+        let mut stdout = io::stdout().lock();
+        let _ = stdout.write_all(text.as_bytes());
+        let _ = stdout.flush();
+    }
+    eprintln!(
+        "识别用了 {:.1} 秒，回盘读了 {}（{} 份内容），另有 {} 份哈希是从中立库直接取回来的。",
+        started.elapsed().as_secs_f64(),
+        human_bytes(outcome.read_bytes),
+        thousands(outcome.read_files),
+        thousands(outcome.reused_hashes),
+    );
+    if let Some(path) = &args.json {
+        match serde_json::to_vec_pretty(&outcome.report) {
+            Ok(bytes) => match write_file(path, &bytes) {
+                Ok(()) => eprintln!("报告已写入 {}", path.display()),
+                Err(error) => {
+                    eprintln!("报告写不进 {}：{error}", path.display());
+                    return ExitCode::FAILURE;
+                }
+            },
+            Err(error) => {
+                eprintln!("报告序列化失败：{error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    if outcome.interrupted {
+        eprintln!("这一趟被中断了，已经算完的那部分留在中立库里，重跑会从头算一遍。");
+        return ExitCode::from(130);
+    }
+    ExitCode::SUCCESS
 }
 
 /// 列出眼下生效的平台清单与成型规则。

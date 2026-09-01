@@ -17,6 +17,7 @@
 
 pub mod baseline;
 pub mod content;
+pub mod identify;
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -36,12 +37,17 @@ use crate::shape;
 
 pub use baseline::{Baseline, Recorded, ScanDelta, Verdict};
 pub use content::VariantRow;
+pub use identify::{
+    Candidate, CandidateCounts, Confidence, ContentHash, EntryFact, Identification, Origin,
+    SourceCount, State,
+};
 
 /// 中立库的结构版本。结构变了就加 1；读到对不上的版本直接让用户删库重扫。
 ///
-/// 3 是票 05 加的三层内容层级与合集（`catalog::content`）。**删库重扫这条路
-/// 到票 08 就走不通了**——那时沉淀库里攒着裁决，重扫补不回来（挂账 D26）。
-pub const SCHEMA_VERSION: u32 = 3;
+/// 3 是票 05 加的三层内容层级与合集（`catalog::content`）；**4** 是票 07 加的识别结论
+/// （`catalog::identify`：候选、结论、算过的哈希，以及作品与发行版上那一列来路）。
+/// **删库重扫这条路到票 08 就走不通了**——那时沉淀库里攒着裁决，重扫补不回来（挂账 D26）。
+pub const SCHEMA_VERSION: u32 = 4;
 
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS meta(
@@ -295,6 +301,7 @@ impl Catalog {
         catalog.batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
         catalog.batch(SCHEMA)?;
         catalog.batch(content::CONTENT_SCHEMA)?;
+        catalog.batch(identify::IDENTIFY_SCHEMA)?;
         let found: Option<String> = catalog
             .conn
             .query_row(
@@ -633,6 +640,12 @@ impl Catalog {
             // 容器的内部构成随容器本身一起更新。**先清后插**：容器变了而这次没穿透
             // （比如关掉了穿透），旧的内部条目就该消失，不能拿一份对不上的清单
             // 冒充新的。
+            // 文件变了，上一趟算出来的哈希就作废了——留着它，识别会拿一份对不上的
+            // CRC-32 去撞 DAT，撞出来的候选还带着「精确命中」的置信度。
+            // 与容器内部构成的作废方式是同一条（挂账 D14）。
+            let mut clear_hashes = tx
+                .prepare("DELETE FROM content_hash WHERE key = ?1")
+                .map_err(to_err)?;
             let mut clear_container = tx
                 .prepare("DELETE FROM container WHERE key = ?1")
                 .map_err(to_err)?;
@@ -702,6 +715,9 @@ impl Catalog {
                 // 比没有清单更糟。
                 let is_container = ContainerKind::for_path(Path::new(&record.key)).is_some();
                 let changed = matches!(record.verdict, Verdict::Added | Verdict::Changed);
+                if changed {
+                    clear_hashes.execute(params![record.key]).map_err(to_err)?;
+                }
                 if is_container && (changed || record.container.is_some()) {
                     clear_inner.execute(params![record.key]).map_err(to_err)?;
                     clear_container
@@ -854,7 +870,8 @@ impl Catalog {
         // 容器没了，它的内部构成也就没了——留着会让报告数出一批不存在的内部文件。
         self.batch(
             "DELETE FROM container_entry WHERE key NOT IN (SELECT key FROM entry);
-             DELETE FROM container       WHERE key NOT IN (SELECT key FROM entry);",
+             DELETE FROM container       WHERE key NOT IN (SELECT key FROM entry);
+             DELETE FROM content_hash    WHERE key NOT IN (SELECT key FROM entry);",
         )?;
         Ok(removed)
     }

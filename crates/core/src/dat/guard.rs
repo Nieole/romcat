@@ -22,14 +22,20 @@
 /// 允许连的主机。**白名单**——不在这里的一律拒。
 ///
 /// GitHub 那几个是同一件事的不同落点：API 在 `api.github.com`，发行资产的下载会
-/// 302 到 `objects.githubusercontent.com`，仓库里的单个文件在
-/// `raw.githubusercontent.com`。重定向的每一跳都要过这道闸门，所以落点也得在名单里。
+/// 302 到 `release-assets.githubusercontent.com`（**GitHub 现在实际发出去的那一个**）
+/// 或者 `objects.githubusercontent.com`，仓库里的单个文件在 `raw.githubusercontent.com`。
+/// 重定向的每一跳都要过这道闸门，所以落点也得在名单里。
 pub const ALLOWED_HOSTS: &[&str] = &[
     // Redump 的**现行**域名。旧的 `redump.org` 在下面被显式拒。
     "redump.info",
     "api.github.com",
     "github.com",
+    // GitHub 发行资产的两个下载主机。`github.com/.../releases/download/...` 会 302
+    // 到它们中的一个，而**闸门看每一跳**（`fetch::follow`），所以两个都得在名单上。
+    // `release-assets.` 是 GitHub 现在实际发出去的那一个：2026-09-01 取 No-Intro 那个
+    // 整包时实测就是它，少了它 No-Intro 整档一件都取不回来。
     "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
     "raw.githubusercontent.com",
     "codeload.github.com",
 ];
@@ -189,6 +195,15 @@ mod tests {
         ] {
             assert_eq!(check(url), Err(Refusal::Datomatic), "{url}");
         }
+    }
+
+    #[test]
+    fn github_发行资产的两个落点都在名单上() {
+        // `github.com/.../releases/download/...` 会 302 到这两个之一，而闸门看每一跳。
+        // 少了 `release-assets.` 那一个，No-Intro 整档一件都取不回来——票 07 第一次
+        // 真机取数就撞上了这个（那 48 份 DAT、76,429 条条目是第一命中层的主力弹药）。
+        assert!(check("https://release-assets.githubusercontent.com/x/no-intro.zip").is_ok());
+        assert!(check("https://objects.githubusercontent.com/x/no-intro.zip").is_ok());
     }
 
     #[test]

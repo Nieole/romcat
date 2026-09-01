@@ -15,6 +15,7 @@ pub mod container;
 pub mod dat;
 pub mod fs;
 pub mod header;
+pub mod identify;
 pub mod path;
 pub mod platform;
 pub mod report;
