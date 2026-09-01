@@ -29,6 +29,7 @@ use romcat_core::scan::aggregate::{Aggregate, Limits};
 use romcat_core::scan::{self, CancelToken, CheckpointOptions, Jobs, ScanOptions};
 use romcat_core::scrape::{self, Priorities};
 use romcat_core::shape;
+use romcat_core::title;
 use romcat_core::workspace::{self, Slug};
 
 /// ROM 元数据自动化工具的命令行。
@@ -51,6 +52,8 @@ enum Command {
     Identify(IdentifyArgs),
     /// 在识别结论上取元数据与媒体。离线档一个网络请求都不发；在线档补简介与封面，默认限流
     Scrape(ScrapeArgs),
+    /// 折出标题集合，挑出显示标题与排序标题，并报出多少个作品拿到了中文标题
+    Titles(TitlesArgs),
     /// 列出眼下生效的平台清单与成型规则，或者导出一份底稿照着改
     Platforms(PlatformsArgs),
     /// DAT 仓库：把几个哈希数据库镜像到本地，并报出每个平台有多少条可用记录
@@ -310,9 +313,6 @@ struct ScrapeArgs {
 }
 
 impl ScrapeArgs {
-    /// 工作目录里那份可选的优先级表叫什么。
-    const IN_WORKSPACE: &'static str = "priorities.toml";
-
     fn profile(&self) -> Result<scrape::Profile, String> {
         scrape::Profile::from_label(&self.profile).ok_or_else(|| {
             format!(
@@ -341,18 +341,62 @@ impl ScrapeArgs {
     }
 
     fn load_priorities(&self, workspace: &Path) -> Result<Priorities, String> {
-        let path = match &self.priorities {
-            Some(path) => path.clone(),
-            None => {
-                let candidate = workspace.join(Self::IN_WORKSPACE);
-                if !candidate.exists() {
-                    return Ok(Priorities::builtin());
-                }
-                candidate
-            }
-        };
-        Priorities::load(&path).map_err(|error| format!("{error}"))
+        load_priorities(self.priorities.as_deref(), workspace)
     }
+}
+
+/// 工作目录里那份可选的优先级表叫什么。
+const PRIORITIES_IN_WORKSPACE: &str = "priorities.toml";
+
+/// 挑出这一趟用哪一份优先级表：命令行给的 > 工作目录里那份 > 内置的。
+///
+/// `scrape` 与 `titles` 共用它，**而且必须共用**：两条命令对「哪个源说了算」的答案
+/// 不一样的话，报告里合并出来的标题与导出时挑出来的标题就会对不上。
+fn load_priorities(given: Option<&Path>, workspace: &Path) -> Result<Priorities, String> {
+    let path = match given {
+        Some(path) => path.to_path_buf(),
+        None => {
+            let candidate = workspace.join(PRIORITIES_IN_WORKSPACE);
+            if !candidate.exists() {
+                return Ok(Priorities::builtin());
+            }
+            candidate
+        }
+    };
+    Priorities::load(&path).map_err(|error| format!("{error}"))
+}
+
+/// `romcat titles` 的参数。
+///
+/// 它**一个字节都不读主库、一个请求都不发**：标题集合是从中立库里已有的识别与刮削
+/// 结论折出来的（ADR-0001）。所以这里没有主库根之外的任何东西——那个也只是用来
+/// 找到对应的中立库。
+#[derive(Debug, Args)]
+struct TitlesArgs {
+    /// 主库根目录。只用来找到对应的中立库，不会去读它；给了 `--library` 就不必再给
+    root: Option<PathBuf>,
+
+    /// 按名字找中立库（扫描时用 `--library` 起的那个名字）
+    #[arg(long, value_name = "名字")]
+    library: Option<String>,
+
+    /// 工作目录：中立库存这里
+    #[arg(long, value_name = "目录")]
+    workspace: Option<PathBuf>,
+
+    /// 字段级优先级表。同一部作品同一档里有好几个叫法时，它定源的先后
+    ///
+    /// 不给就先看工作目录里有没有 `priorities.toml`，都没有才用内置的那一份
+    #[arg(long, value_name = "文件")]
+    priorities: Option<PathBuf>,
+
+    /// 把报告另存为 JSON
+    #[arg(long, value_name = "文件")]
+    json: Option<PathBuf>,
+
+    /// 不打印文本报告
+    #[arg(long)]
+    quiet: bool,
 }
 
 #[derive(Debug, Args)]
@@ -475,6 +519,7 @@ fn main() -> ExitCode {
         Command::Shape(args) => run_shape(&args),
         Command::Identify(args) => run_identify(&args, &cancel),
         Command::Scrape(args) => run_scrape(&args, &cancel),
+        Command::Titles(args) => run_titles(&args),
         Command::Platforms(args) => run_platforms(&args),
         Command::Dat(DatCommand::Sync(args)) => run_dat_sync(&args),
         Command::Dat(DatCommand::Report(args)) => run_dat_report(&args),
@@ -1114,6 +1159,17 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
             thousands(online.refused)
         );
     }
+    // 标题这一层不在刮削里：**刮削给值，`titles` 把值折成标题集合**再挑显示标题——
+    // 那一步要的还有识别那一侧的地区与中文记号，而且换一份优先级表就该重挑一次，
+    // 不必重采。不说一句的话，用户没有任何途径知道还有这一步。
+    //
+    // **跟着 `--quiet` 一起闭嘴**：脚本里跑 `--quiet` 的人要的是干净的输出，
+    // 而这一句是提示不是结论。
+    if !args.quiet {
+        eprintln!(
+            "标题是**集合**：`romcat titles` 把这一趟采到的标题折成标题集合，挑出显示标题与排序标题。"
+        );
+    }
     if !write_json(args.json.as_deref(), &outcome.report) {
         return ExitCode::FAILURE;
     }
@@ -1132,6 +1188,65 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
     if outcome.interrupted {
         eprintln!("这一趟被中断了，已经采完的那部分留在中立库里，重跑会接着采。");
         return ExitCode::from(130);
+    }
+    ExitCode::SUCCESS
+}
+
+/// 折出**标题集合**，挑出**显示标题**与**排序标题**。
+///
+/// 它是刮削与导出之间的那一折：值来自刮削（DAT 条目名、文件名），语言、地区与类型来自
+/// 识别（发行版的地区与语言、候选上的中文记号）。**一个字节都不读主库，一个请求都不发。**
+fn run_titles(args: &TitlesArgs) -> ExitCode {
+    let (slug, located_by) = match locate(args.library.as_deref(), args.root.as_deref()) {
+        Ok(pair) => pair,
+        Err(message) => return fail(message),
+    };
+    let workspace = workspace_dir(args.workspace.as_deref());
+    let catalog_path = workspace::catalog_path(&workspace, slug);
+    if !catalog_path.exists() {
+        return fail(format!(
+            "还没有 {located_by} 这份中立库。先跑一次 `romcat scan`。"
+        ));
+    }
+    let priorities = match load_priorities(args.priorities.as_deref(), &workspace) {
+        Ok(priorities) => priorities,
+        Err(message) => return fail(message),
+    };
+    // 主库只读（ADR-0004）：报告不许落进主库。
+    if let Some(root) = args.root.as_deref()
+        && let Some(target) = args.json.as_deref()
+        && let Err(message) = refuse_writing_into_library(root, target)
+    {
+        return fail(message);
+    }
+    let mut catalog = match open_catalog(&workspace, slug, args.root.as_deref()) {
+        Ok(catalog) => catalog,
+        Err(message) => return fail(message),
+    };
+
+    let started = Instant::now();
+    let report = match title::run(&mut catalog, &priorities) {
+        Ok(report) => report,
+        Err(error) => return fail(format!("标题折不出来：{error}")),
+    };
+    if !args.quiet {
+        let text = report.render_text();
+        let mut stdout = io::stdout().lock();
+        let _ = stdout.write_all(text.as_bytes());
+        let _ = stdout.flush();
+    }
+    eprintln!(
+        "折标题用了 {:.1} 秒，一个字节都没读主库。{} 个作品拿到了中文显示标题。",
+        started.elapsed().as_secs_f64(),
+        thousands(report.chinese_works),
+    );
+    if report.works == 0 {
+        eprintln!(
+            "库里一个作品都没有——标题挂在作品上，先跑一次 `romcat identify`，再跑 `romcat scrape`。"
+        );
+    }
+    if !write_json(args.json.as_deref(), &report) {
+        return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
 }

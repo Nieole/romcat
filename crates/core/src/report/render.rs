@@ -96,7 +96,12 @@ fn truncate(text: &str, max: usize) -> String {
     out
 }
 
-fn heading(out: &mut String, title: &str) {
+/// 报告里的一节标题：空一行、写标题、再画一条与它等宽的横线。
+///
+/// 四份报告（体检、命中率、刮削、标题）逐字节相同地写过四遍，收在这里一份。
+/// 它与 `pad` / `thousands` / `width` 是同一档东西：**报告长什么样是一件事，
+/// 报告说什么是另一件事**。
+pub fn heading(out: &mut String, title: &str) {
     let _ = write!(out, "\n{title}\n{}\n", "─".repeat(width(title) / 2 + 8));
 }
 

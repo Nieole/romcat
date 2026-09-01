@@ -22,7 +22,7 @@ use serde::Serialize;
 
 use crate::catalog::{Catalog, CatalogError, State};
 use crate::dat::DatRepo;
-use crate::report::{pad, thousands, width};
+use crate::report::{heading, pad, thousands};
 
 /// 一个平台一行。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -327,10 +327,6 @@ impl IdentifyReport {
         }
         out
     }
-}
-
-fn heading(out: &mut String, title: &str) {
-    let _ = write!(out, "\n{title}\n{}\n", "─".repeat(width(title) / 2 + 8));
 }
 
 fn reasons(out: &mut String, title: &str, rows: &[ReasonRow]) {

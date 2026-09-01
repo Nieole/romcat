@@ -19,6 +19,7 @@ pub mod baseline;
 pub mod content;
 pub mod identify;
 pub mod scrape;
+pub mod title;
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -37,11 +38,12 @@ use crate::scan::aggregate::{
 use crate::shape;
 
 pub use baseline::{Baseline, Recorded, ScanDelta, Verdict};
-pub use content::VariantRow;
+pub use content::{ReleaseRow, VariantRow};
 pub use identify::{
-    Candidate, CandidateCounts, Confidence, ContentHash, EntryFact, Identification, Provenance,
-    SourceCount, State,
+    AcceptedCandidate, Candidate, CandidateCounts, Confidence, ContentHash, EntryFact,
+    Identification, Provenance, SourceCount, State,
 };
+pub use title::TitleRow;
 
 /// 中立库的结构版本。**读到对不上的版本直接让用户删库重扫。**
 ///
@@ -312,6 +314,7 @@ impl Catalog {
         catalog.batch(content::CONTENT_SCHEMA)?;
         catalog.batch(identify::IDENTIFY_SCHEMA)?;
         catalog.batch(scrape::SCRAPE_SCHEMA)?;
+        catalog.batch(title::TITLE_SCHEMA)?;
         let found: Option<String> = catalog
             .conn
             .query_row(

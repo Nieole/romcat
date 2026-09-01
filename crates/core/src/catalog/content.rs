@@ -133,6 +133,28 @@ const META_SHAPED_SCAN: &str = "shaped_scan";
 /// `meta` 里记「成型用的是哪一份平台清单」的那把键。
 const META_SHAPED_MANIFEST: &str = "shaped_manifest";
 
+/// 一条**发行版**记录读回来的样子。
+///
+/// `region` 与 `languages` 分开读出来不是冗余：**标题集合**靠它们分辨三件事——
+/// 名字是官方英文名还是日文原名的罗马字转写（地区是不是 Japan）、这条发行版是不是
+/// 官中那一条（地区是不是中国 / 台湾 / 香港）、以及它是不是只是**顺带带着中文**
+/// （语言里有 `Zh` 而地区不是中文地区）。最后两件正是 ADR-0019 那道世代裂缝的两侧。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseRow {
+    /// 行号。**只在一趟之内有效**——重跑识别会把它换掉。
+    pub id: i64,
+    /// 属于哪个作品。
+    pub work_id: i64,
+    /// 平台；可空。
+    pub platform: Option<String>,
+    /// 地区；DAT 的名字里认不出来时是 `None`。
+    pub region: Option<String>,
+    /// 序列号；可空。
+    pub serial: Option<String>,
+    /// 语言标记组（`En,Zh-Hans`）；可空。
+    pub languages: Option<String>,
+}
+
 /// 一条变体记录读回来的样子。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariantRow {
@@ -567,6 +589,38 @@ impl Catalog {
         for row in rows {
             let (id, name) = row.map_err(|source| self.err(source))?;
             out.insert(id, name);
+        }
+        Ok(out)
+    }
+
+    /// 全部**发行版**：id → 那一行。
+    ///
+    /// 一次读完而不是逐条查：**标题集合**要为每个变体问一次「它基于的那条发行版是什么
+    /// 地区、什么语言」，真库上那是 46,444 次查询，而发行版本身只有 18,571 行。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn releases(&self) -> Result<BTreeMap<i64, ReleaseRow>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT id, work_id, platform, region, serial, languages FROM release")
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(ReleaseRow {
+                    id: row.get(0)?,
+                    work_id: row.get(1)?,
+                    platform: row.get(2)?,
+                    region: row.get(3)?,
+                    serial: row.get(4)?,
+                    languages: row.get(5)?,
+                })
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let row = row.map_err(|source| self.err(source))?;
+            out.insert(row.id, row);
         }
         Ok(out)
     }

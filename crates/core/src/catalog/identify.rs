@@ -258,6 +258,27 @@ pub type IdentificationVisitor<'a> = dyn FnMut(Option<&str>, State, Option<&str>
 /// 就是多搬 150,959 个字符串。
 pub type CandidateFactVisitor<'a> = dyn FnMut(&str, &str, &str) + 'a;
 
+/// 一条**自动通过**的候选，**标题集合**用得上的那几列。
+///
+/// 捏成一个结构而不是五个参数：这几样本来就成群结队地一起走，而分开传的话
+/// `source` 与 `game` 两个 `&str` 挨在一起，调用处写反了编译器不会说话。
+#[derive(Debug, Clone, Copy)]
+pub struct AcceptedCandidate<'a> {
+    /// 哪个变体撞上的。
+    pub variant_key: &'a str,
+    /// 哪个数据源。
+    pub source: &'a str,
+    /// 条目名。**那次发行的官方名就编码在这里面。**
+    pub game: &'a str,
+    /// 中文记号。
+    pub chinese: Option<ChineseMark>,
+    /// 这条候选建出来的发行版。
+    pub release_id: Option<i64>,
+}
+
+/// 逐条走**自动通过**的候选时收到的那一条。
+pub type AcceptedCandidateVisitor<'a> = dyn FnMut(&AcceptedCandidate<'_>) + 'a;
+
 /// 一个数据源贡献了多少条候选。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceCount {
@@ -315,6 +336,19 @@ pub struct ContentHash {
     pub bare_crc32: Option<u32>,
     /// 验过 NKit 没有、结论是什么。
     pub nkit: Option<bool>,
+}
+
+/// 库里存的那个词认回一个中文记号。
+///
+/// 认不出的一律 `None`：中文记号只有两种（[`ChineseMark`]），认不出说明库被人改过，
+/// 那时**当作没有记号**比猜一个安全——猜错了会把汉化版当成官中版，
+/// 而那正是 ADR-0012 要分开的两件事。
+fn chinese_mark(label: &str) -> Option<ChineseMark> {
+    match label {
+        "汉化" => Some(ChineseMark::FanTranslated),
+        "官中" => Some(ChineseMark::Official),
+        _ => None,
+    }
 }
 
 /// 一个条目在中立库里是什么样。
@@ -815,11 +849,7 @@ impl Catalog {
                     hashed_as: Convention::from_label(&hashing).unwrap_or(Convention::AsIs),
                     dat_convention: Convention::from_label(&convention).unwrap_or(Convention::AsIs),
                     evidence: row.get(11)?,
-                    chinese: chinese.as_deref().and_then(|label| match label {
-                        "汉化" => Some(ChineseMark::FanTranslated),
-                        "官中" => Some(ChineseMark::Official),
-                        _ => None,
-                    }),
+                    chinese: chinese.as_deref().and_then(chinese_mark),
                     serial: row.get(13)?,
                     release_id: row.get(14)?,
                 })
@@ -853,6 +883,44 @@ impl Catalog {
             let src: String = row.get(1).map_err(|source| self.err(source))?;
             let game: String = row.get(2).map_err(|source| self.err(source))?;
             each(&key, &src, &game);
+        }
+        Ok(())
+    }
+
+    /// 一条条走过**自动通过**的候选：变体的键、源、条目名、中文记号、发行版。
+    ///
+    /// **只走自动通过的那些**：标题集合要的是「那次发行的官方名叫什么」与「这个变体是不是
+    /// 官中 / 汉化」，两者都是**结论**而不是猜测——没通过的候选连它到底是不是这个游戏
+    /// 都还没定，拿它的条目名当官方名等于把猜测写成事实。真库上这一刀把 150,959 条
+    /// 候选筛成 136,238 条。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn for_each_accepted_candidate(
+        &self,
+        each: &mut AcceptedCandidateVisitor,
+    ) -> Result<(), CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT variant_key, source, game, chinese, release_id FROM candidate
+                 WHERE accepted <> 0 ORDER BY variant_key, id",
+            )
+            .map_err(|source| self.err(source))?;
+        let mut rows = statement.query([]).map_err(|source| self.err(source))?;
+        while let Some(row) = rows.next().map_err(|source| self.err(source))? {
+            let variant_key: String = row.get(0).map_err(|source| self.err(source))?;
+            let src: String = row.get(1).map_err(|source| self.err(source))?;
+            let game: String = row.get(2).map_err(|source| self.err(source))?;
+            let chinese: Option<String> = row.get(3).map_err(|source| self.err(source))?;
+            let release_id: Option<i64> = row.get(4).map_err(|source| self.err(source))?;
+            each(&AcceptedCandidate {
+                variant_key: &variant_key,
+                source: &src,
+                game: &game,
+                chinese: chinese.as_deref().and_then(chinese_mark),
+                release_id,
+            });
         }
         Ok(())
     }

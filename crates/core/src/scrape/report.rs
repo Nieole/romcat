@@ -22,7 +22,7 @@ use std::fmt::Write as _;
 use serde::Serialize;
 
 use crate::catalog::{Catalog, CatalogError};
-use crate::report::{human_bytes, pad, thousands, width};
+use crate::report::{heading, human_bytes, pad, thousands};
 
 use super::priority::Priorities;
 use super::{Field, MediaKind, Options, PlanCounts, online};
@@ -541,8 +541,4 @@ fn winners(
     })?;
     tally(&batch, &mut out);
     Ok(out)
-}
-
-fn heading(out: &mut String, title: &str) {
-    let _ = write!(out, "\n{title}\n{}\n", "─".repeat(width(title) / 2 + 8));
 }

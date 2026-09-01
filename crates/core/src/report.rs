@@ -888,4 +888,4 @@ mod duplicates;
 mod render;
 
 pub use duplicates::DuplicateDetails;
-pub use render::{human_bytes, pad, thousands, width};
+pub use render::{heading, human_bytes, pad, thousands, width};
