@@ -724,6 +724,32 @@ impl Catalog {
         rows.collect::<Result<_, _>>()
             .map_err(|source| self.err(source))
     }
+
+    /// 全库的合集成员关系：变体的键 → 它在哪几个合集里。
+    ///
+    /// 与逐个变体问一遍 [`Self::collections_of`] 的差别不是风格问题：**子库的选择集**
+    /// 要在 46,444 个变体上求值，逐个查等于把这条连接跑四万多遍。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn collection_memberships(&self) -> Result<BTreeMap<String, Vec<String>>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT cv.variant_key, c.name FROM collection c
+                 JOIN collection_variant cv ON cv.collection_id = c.id
+                 ORDER BY cv.variant_key, c.name",
+            )
+            .map_err(|source| self.err(source))?;
+        let mut rows = statement.query([]).map_err(|source| self.err(source))?;
+        let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        while let Some(row) = rows.next().map_err(|source| self.err(source))? {
+            let key: String = row.get(0).map_err(|source| self.err(source))?;
+            let name: String = row.get(1).map_err(|source| self.err(source))?;
+            out.entry(key).or_default().push(name);
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

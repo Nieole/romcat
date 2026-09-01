@@ -141,10 +141,7 @@ impl Catalog {
         bytes: &[u8],
         origin: SnapshotOrigin,
     ) -> Result<(), CatalogError> {
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-            .unwrap_or(0);
+        let at = super::now_secs();
         self.conn
             .execute(
                 "INSERT INTO frontend_snapshot(format, path, bytes, hash, origin, at)

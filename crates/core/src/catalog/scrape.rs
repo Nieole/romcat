@@ -32,7 +32,6 @@
 //! **变体的键**（相对主库根的路径，ADR-0020）。两者都不随识别重跑而变。
 
 use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{OptionalExtension, params};
 
@@ -215,14 +214,6 @@ pub struct FieldCount {
     pub subjects: u64,
 }
 
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_secs()).ok())
-        .unwrap_or(0)
-}
-
 impl Catalog {
     /// 一个锚点上、各个源上次采集的**输入指纹**：源 → 指纹。
     ///
@@ -269,7 +260,7 @@ impl Catalog {
             path: path.clone(),
             source,
         };
-        let at = now_secs();
+        let at = super::now_secs();
         let tx = self.conn.transaction().map_err(to_err)?;
         {
             let mut drop_values = tx
@@ -468,7 +459,7 @@ impl Catalog {
                     hash,
                     ext,
                     i64::try_from(bytes).unwrap_or(i64::MAX),
-                    now_secs()
+                    super::now_secs()
                 ],
             )
             .map(|_| ())

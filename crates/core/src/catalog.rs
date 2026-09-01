@@ -20,6 +20,7 @@ pub mod content;
 pub mod frontend;
 pub mod identify;
 pub mod scrape;
+pub mod sublibrary;
 pub mod title;
 
 use std::path::{Path, PathBuf};
@@ -59,7 +60,8 @@ pub use title::TitleRow;
 /// （`catalog::scrape`）是**纯加表**：已有的表一列没动、一条语义没改，`CREATE TABLE IF
 /// NOT EXISTS` 在打开时就把它们补上，旧库照样打得开，拿旧版程序再打开也照样能用。
 /// 为它逼用户删掉 780 MB 的库、重扫 27 分钟、重跑 14 分钟识别，换不到任何东西
-/// （挂账 D50）。**改了已有表的列或含义才加 1。**
+/// （挂账 D50）。**改了已有表的列或含义才加 1。** 票 15 的标题集合、票 16 的旁路快照、
+/// 票 18 的子库三张表都是同一档，因此这个数一直停在 4。
 pub const SCHEMA_VERSION: u32 = 4;
 
 const SCHEMA: &str = "\
@@ -201,6 +203,18 @@ pub enum CatalogError {
     },
 }
 
+/// 现在是 UNIX 纪元起的第几秒。
+///
+/// 一处定死：快照、刮削、子库三处都往库里记时刻，各写一遍的话「取不到时钟怎么办」
+/// 这个岔路口就有三个不一样的答案。
+pub(crate) fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+        .unwrap_or(0)
+}
+
 /// 把 [`SystemTime`] 折成 UNIX 纪元起的纳秒。
 ///
 /// 纳秒是够用的：NTFS 的刻度是 100 纳秒、APFS 是 1 纳秒，两者都能逐位存下
@@ -318,6 +332,7 @@ impl Catalog {
         catalog.batch(scrape::SCRAPE_SCHEMA)?;
         catalog.batch(title::TITLE_SCHEMA)?;
         catalog.batch(frontend::FRONTEND_SCHEMA)?;
+        catalog.batch(sublibrary::SUBLIBRARY_SCHEMA)?;
         let found: Option<String> = catalog
             .conn
             .query_row(

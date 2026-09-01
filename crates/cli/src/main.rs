@@ -30,6 +30,7 @@ use romcat_core::scan::aggregate::{Aggregate, Limits};
 use romcat_core::scan::{self, CancelToken, CheckpointOptions, Jobs, ScanOptions};
 use romcat_core::scrape::{self, Priorities};
 use romcat_core::shape;
+use romcat_core::sublibrary::{self, Sublibrary};
 use romcat_core::title;
 use romcat_core::workspace::{self, Slug};
 
@@ -63,6 +64,9 @@ enum Command {
     Adapters,
     /// 列出眼下生效的平台清单与成型规则，或者导出一份底稿照着改
     Platforms(PlatformsArgs),
+    /// 子库与选择集：一台目标设备一个子库，选择集由**规则**加**例外**组成
+    #[command(subcommand, alias = "sublib")]
+    Sublibrary(SublibraryCommand),
     /// DAT 仓库：把几个哈希数据库镜像到本地，并报出每个平台有多少条可用记录
     #[command(subcommand)]
     Dat(DatCommand),
@@ -406,11 +410,15 @@ struct TitlesArgs {
     quiet: bool,
 }
 
+/// 不指名时用哪个前端格式。**一处定死**：`--format` 的默认值与新建子库时落库的那个
+/// 必须是同一个词，各写一遍的话哪天加了第二个适配器就会有一处忘了改。
+const DEFAULT_FORMAT: &str = "Pegasus";
+
 /// 用哪个适配器。两个子命令共用。
 #[derive(Debug, Args, Clone)]
 struct FormatArgs {
     /// 前端格式（`romcat adapters` 列得出有哪些）
-    #[arg(long, value_name = "格式", default_value = "Pegasus")]
+    #[arg(long, value_name = "格式", default_value = DEFAULT_FORMAT)]
     format: String,
 }
 
@@ -641,6 +649,12 @@ fn main() -> ExitCode {
         Command::Export(args) => run_export(&args),
         Command::Adapters => run_adapters(),
         Command::Platforms(args) => run_platforms(&args),
+        Command::Sublibrary(SublibraryCommand::Set(args)) => run_sublibrary_set(&args),
+        Command::Sublibrary(SublibraryCommand::List(args)) => run_sublibrary_list(&args),
+        Command::Sublibrary(SublibraryCommand::Remove(args)) => run_sublibrary_remove(&args),
+        Command::Sublibrary(SublibraryCommand::Rule(args)) => run_sublibrary_rule(&args),
+        Command::Sublibrary(SublibraryCommand::Except(args)) => run_sublibrary_except(&args),
+        Command::Sublibrary(SublibraryCommand::Show(args)) => run_sublibrary_show(&args),
         Command::Dat(DatCommand::Sync(args)) => run_dat_sync(&args),
         Command::Dat(DatCommand::Report(args)) => run_dat_report(&args),
         Command::Dat(DatCommand::Sources(args)) => run_dat_sources(&args),
@@ -1569,6 +1583,514 @@ fn run_export(args: &ExportArgs) -> ExitCode {
         return ExitCode::FAILURE;
     }
     if report.entries == 0 {
+        eprintln!("库里一个变体都没有——先跑一次 `romcat scan`，再跑 `romcat shape`。");
+    }
+    if !write_json(args.json.as_deref(), &report) {
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+/// 子库的几件事。
+///
+/// **这一组只定义与查看，不同步**：排计划是票 19、搬文件是票 20、转格式是票 21。
+#[derive(Debug, Subcommand)]
+enum SublibraryCommand {
+    /// 新建或改一个子库：目标路径、前端格式、容量上限
+    Set(SubSetArgs),
+    /// 列出这个主库上的全部子库——**互不干扰**，规则与例外各记各的
+    List(SubCommonArgs),
+    /// 删掉一个子库，连它的规则与例外一起
+    Remove(SubNameArgs),
+    /// 规则：可重放的那一半。主库新增的、规则说得中的内容，下次自动进入
+    Rule(SubRuleArgs),
+    /// 例外：手动增删的那一半。**优先于规则、永久记住**
+    Except(SubExceptArgs),
+    /// 看选择集：选中多少条、共多少容量、装不装得下
+    Show(SubShowArgs),
+}
+
+/// 六个子命令共用的那几个参数。
+#[derive(Debug, Args, Clone)]
+struct SubCommonArgs {
+    /// 主库根目录。只用来找到对应的中立库，不会去读它；给了 `--library` 就不必再给
+    #[arg(long, value_name = "目录")]
+    root: Option<PathBuf>,
+
+    /// 按名字找中立库（扫描时用 `--library` 起的那个名字）
+    #[arg(long, value_name = "名字")]
+    library: Option<String>,
+
+    /// 工作目录：中立库存这里
+    #[arg(long, value_name = "目录")]
+    workspace: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SubNameArgs {
+    /// 子库叫什么
+    #[arg(value_name = "子库")]
+    name: String,
+
+    #[command(flatten)]
+    common: SubCommonArgs,
+}
+
+#[derive(Debug, Args)]
+struct SubSetArgs {
+    /// 子库叫什么。一台目标设备一个
+    #[arg(value_name = "子库")]
+    name: String,
+
+    /// 目标设备上的子库根：读卡器挂上来的那个盘上的目录。**新建时必须给**
+    #[arg(long, value_name = "路径")]
+    target: Option<PathBuf>,
+
+    /// 前端格式（`romcat adapters` 列得出有哪些）。新建时默认 Pegasus
+    #[arg(long, value_name = "格式")]
+    format: Option<String>,
+
+    /// 容量上限，如 `512GB`、`476GiB`。超限**不自动截断**，只报出超出量与裁剪建议
+    #[arg(long, value_name = "容量")]
+    capacity: Option<String>,
+
+    /// 去掉容量上限
+    #[arg(long, conflicts_with = "capacity")]
+    no_capacity: bool,
+
+    #[command(flatten)]
+    common: SubCommonArgs,
+}
+
+#[derive(Debug, Args)]
+struct SubRuleArgs {
+    /// 子库叫什么
+    #[arg(value_name = "子库")]
+    name: String,
+
+    /// 加一条规则，如 `平台=GB,GBA 且 中文=汉化`
+    #[arg(long, value_name = "规则")]
+    add: Option<String>,
+
+    /// 按序号删掉一条规则（序号见 `romcat sublibrary rule <子库>`）
+    #[arg(long, value_name = "序号")]
+    remove: Option<i64>,
+
+    #[command(flatten)]
+    common: SubCommonArgs,
+}
+
+#[derive(Debug, Args)]
+struct SubExceptArgs {
+    /// 子库叫什么
+    #[arg(value_name = "子库")]
+    name: String,
+
+    /// 强行收入这个变体：规则没选中也带上
+    #[arg(long, value_name = "变体的键")]
+    include: Option<String>,
+
+    /// 强行排除这个变体：规则选中了也不带
+    #[arg(long, value_name = "变体的键")]
+    exclude: Option<String>,
+
+    /// 忘掉这个变体上的例外，从此听规则的
+    #[arg(long, value_name = "变体的键")]
+    forget: Option<String>,
+
+    /// 记一句为什么。半年后你会想知道当初为什么排除它
+    #[arg(long, value_name = "一句话")]
+    note: Option<String>,
+
+    #[command(flatten)]
+    common: SubCommonArgs,
+}
+
+#[derive(Debug, Args)]
+struct SubShowArgs {
+    /// 子库叫什么
+    #[arg(value_name = "子库")]
+    name: String,
+
+    /// 把报告另存为 JSON
+    #[arg(long, value_name = "文件")]
+    json: Option<PathBuf>,
+
+    /// 不往标准输出打报告
+    #[arg(long)]
+    quiet: bool,
+
+    #[command(flatten)]
+    common: SubCommonArgs,
+}
+
+impl SubCommonArgs {
+    /// 找到并打开这个主库的中立库。
+    ///
+    /// 子库的每件事都只读中立库——**目标设备不在位、外置盘不在位都照样干得了**
+    /// （ADR-0009）。子库是持久实体，不是「插上卡才存在的东西」。
+    fn open(&self) -> Result<Catalog, String> {
+        let (slug, located_by) = locate(self.library.as_deref(), self.root.as_deref())?;
+        let workspace = workspace_dir(self.workspace.as_deref());
+        if !workspace::catalog_path(&workspace, slug).exists() {
+            return Err(format!(
+                "还没有 {located_by} 这份中立库。先跑一次 `romcat scan`。"
+            ));
+        }
+        open_catalog(&workspace, slug, self.root.as_deref())
+    }
+}
+
+/// 取出这个子库，取不到就说清怎么建。
+fn load_sublibrary(catalog: &Catalog, name: &str) -> Result<Sublibrary, String> {
+    match catalog.sublibrary(name) {
+        Ok(Some(sublibrary)) => Ok(sublibrary),
+        Ok(None) => Err(format!(
+            "没有叫「{name}」的子库。\n\
+             建一个：`romcat sublibrary set {name} --target <目标设备上的目录>`"
+        )),
+        Err(error) => Err(format!("中立库读不动：{error}")),
+    }
+}
+
+fn run_sublibrary_set(args: &SubSetArgs) -> ExitCode {
+    let mut catalog = match args.common.open() {
+        Ok(catalog) => catalog,
+        Err(message) => return fail(message),
+    };
+    let existing = match catalog.sublibrary(&args.name) {
+        Ok(existing) => existing,
+        Err(error) => return fail(format!("中立库读不动：{error}")),
+    };
+    let target = match (&args.target, &existing) {
+        (Some(target), _) => path::display(&path::normalize_existing(target)),
+        (None, Some(existing)) => existing.target.clone(),
+        (None, None) => {
+            return fail(
+                "新建子库要给 `--target <目标设备上的目录>`——子库总得知道往哪儿导。\n\
+                 一律走读卡器（ADR-0015）：SD 卡挂成普通盘，给它在卡上的那个目录。",
+            );
+        }
+    };
+    let format = match &args.format {
+        Some(format) => match adapter::find(format) {
+            Some(adapter) => adapter.name().to_string(),
+            None => {
+                let names: Vec<&str> = adapter::all().iter().map(|a| a.name()).collect();
+                return fail(format!(
+                    "没有叫「{format}」的适配器。眼下带的是：{}。",
+                    names.join("、")
+                ));
+            }
+        },
+        None => existing
+            .as_ref()
+            .map_or_else(|| DEFAULT_FORMAT.to_string(), |sub| sub.format.clone()),
+    };
+    let capacity = if args.no_capacity {
+        None
+    } else {
+        match &args.capacity {
+            Some(text) => match sublibrary::rule::parse_size(text) {
+                Some(bytes) => Some(bytes),
+                None => {
+                    return fail(format!(
+                        "读不懂容量「{text}」。写法是 `512GB`、`476GiB`、`64MiB`——\n\
+                         单位必须写全：`GiB` 是 1024³，`GB` 是 1000³，两者差 7%。"
+                    ));
+                }
+            },
+            None => existing.as_ref().and_then(|sub| sub.capacity),
+        }
+    };
+    let sublibrary = Sublibrary {
+        name: args.name.clone(),
+        target,
+        format,
+        capacity,
+    };
+    if let Err(error) = catalog.put_sublibrary(&sublibrary) {
+        return fail(format!("子库写不进中立库：{error}"));
+    }
+    println!(
+        "{}子库「{}」：目标 {}，格式 {}，容量上限 {}。",
+        if existing.is_some() {
+            "已改"
+        } else {
+            "已建"
+        },
+        sublibrary.name,
+        sublibrary.target,
+        sublibrary.format,
+        sublibrary
+            .capacity
+            .map_or_else(|| "不设限".to_string(), human_bytes),
+    );
+    if existing.is_none() {
+        println!(
+            "下一步写规则：`romcat sublibrary rule {} --add \"平台=GB,GBA 且 中文=汉化\"`",
+            sublibrary.name
+        );
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_sublibrary_list(args: &SubCommonArgs) -> ExitCode {
+    let catalog = match args.open() {
+        Ok(catalog) => catalog,
+        Err(message) => return fail(message),
+    };
+    let subs = match catalog.sublibraries() {
+        Ok(subs) => subs,
+        Err(error) => return fail(format!("中立库读不动：{error}")),
+    };
+    if subs.is_empty() {
+        println!(
+            "这个主库上还没有子库。\n\
+             建一个：`romcat sublibrary set 掌机 --target /Volumes/SDCARD/Games --capacity 512GB`"
+        );
+        return ExitCode::SUCCESS;
+    }
+    println!("子库");
+    println!("{}", "═".repeat(24));
+    println!(
+        "{}{}{}{}目标",
+        pad("名字", 12),
+        pad("规则", 6),
+        pad("例外", 6),
+        pad("容量上限", 12),
+    );
+    for sub in &subs {
+        // **不吞错误。** `unwrap_or(0)` 会让「读不动」与「一条都没有」印出来一模一样，
+        // 而这两件事该做的处置完全相反。
+        let counts = catalog
+            .sublibrary_rules(&sub.name)
+            .and_then(|rules| Ok((rules.len(), catalog.sublibrary_exceptions(&sub.name)?.len())));
+        let (rules, exceptions) = match counts {
+            Ok(counts) => counts,
+            Err(error) => return fail(format!("中立库读不动：{error}")),
+        };
+        println!(
+            "{}{}{}{}{}",
+            pad(&sub.name, 12),
+            pad(&rules.to_string(), 6),
+            pad(&exceptions.to_string(), 6),
+            pad(
+                &sub.capacity.map_or_else(|| "—".to_string(), human_bytes),
+                12
+            ),
+            sub.target,
+        );
+    }
+    println!("\n一个主库上可以同时有好几个子库，**互不干扰**：规则各写各的，例外各记各的。");
+    ExitCode::SUCCESS
+}
+
+fn run_sublibrary_remove(args: &SubNameArgs) -> ExitCode {
+    let mut catalog = match args.common.open() {
+        Ok(catalog) => catalog,
+        Err(message) => return fail(message),
+    };
+    match catalog.remove_sublibrary(&args.name) {
+        Ok(true) => {
+            println!("子库「{}」已删掉，它的规则与例外一起没了。", args.name);
+            ExitCode::SUCCESS
+        }
+        Ok(false) => fail(format!("没有叫「{}」的子库。", args.name)),
+        Err(error) => fail(format!("中立库写不动：{error}")),
+    }
+}
+
+fn run_sublibrary_rule(args: &SubRuleArgs) -> ExitCode {
+    let mut catalog = match args.common.open() {
+        Ok(catalog) => catalog,
+        Err(message) => return fail(message),
+    };
+    if let Err(message) = load_sublibrary(&catalog, &args.name) {
+        return fail(message);
+    }
+    if let Some(text) = &args.add {
+        // **先读懂再写。** `add_rule` 收的就是读通了的规则，这一步过不去就写不进去。
+        let rule = match sublibrary::Rule::parse(text) {
+            Ok(rule) => rule,
+            Err(error) => return fail(format!("这条规则读不懂：{error}")),
+        };
+        match catalog.add_rule(&args.name, &rule) {
+            Ok(ordinal) => println!("规则 {ordinal} 已加进子库「{}」：{text}", args.name),
+            Err(error) => return fail(format!("规则写不进中立库：{error}")),
+        }
+    }
+    if let Some(ordinal) = args.remove {
+        match catalog.remove_rule(&args.name, ordinal) {
+            Ok(true) => println!("规则 {ordinal} 已从子库「{}」删掉。", args.name),
+            Ok(false) => return fail(format!("子库「{}」里没有 {ordinal} 号规则。", args.name)),
+            Err(error) => return fail(format!("中立库写不动：{error}")),
+        }
+    }
+    let rules = match catalog.sublibrary_rules(&args.name) {
+        Ok(rules) => rules,
+        Err(error) => return fail(format!("中立库读不动：{error}")),
+    };
+    println!("\n子库「{}」的规则", args.name);
+    println!("{}", "═".repeat(24));
+    if rules.is_empty() {
+        println!("（一条都没有）");
+    } else {
+        for rule in &rules {
+            let broken = sublibrary::Rule::parse(&rule.text)
+                .err()
+                .map(|error| format!("   ⚠️ {error}"))
+                .unwrap_or_default();
+            println!("{}{}{broken}", pad(&rule.ordinal.to_string(), 6), rule.text);
+        }
+        println!("\n多条规则之间是**并集**，一条之内的子句用 ` 且 ` 连起来是**交集**。");
+    }
+    println!("\n能筛的维度");
+    println!("{}", "─".repeat(16));
+    for dimension in sublibrary::Dimension::all() {
+        println!("{}{}", pad(dimension.label(), 8), dimension.hint());
+    }
+    println!(
+        "\n运算符：= != ~（含有）<= < >= >。写法举例：\n  \
+         平台=GB,GBA 且 中文=汉化\n  \
+         平台=FC 且 体积<=4MiB\n  \
+         作品~火焰纹章 且 年份>=2000"
+    );
+    ExitCode::SUCCESS
+}
+
+fn run_sublibrary_except(args: &SubExceptArgs) -> ExitCode {
+    let mut catalog = match args.common.open() {
+        Ok(catalog) => catalog,
+        Err(message) => return fail(message),
+    };
+    if let Err(message) = load_sublibrary(&catalog, &args.name) {
+        return fail(message);
+    }
+    let wanted = [
+        (
+            args.include.as_deref(),
+            Some(sublibrary::Exception::Include),
+        ),
+        (
+            args.exclude.as_deref(),
+            Some(sublibrary::Exception::Exclude),
+        ),
+        (args.forget.as_deref(), None),
+    ];
+    // **同一个变体不许在一条命令里领两个决定。** 挨个执行的话后一个会静默盖掉前一个，
+    // 而两行「已记下」都打了出来——对着「例外优先于规则、永久记住」这条纪律，
+    // 让用户以为自己记下的是第一个，是最坏的一种错。
+    for (index, (key, _)) in wanted.iter().enumerate() {
+        let Some(key) = key else { continue };
+        if wanted[index + 1..]
+            .iter()
+            .any(|(other, _)| *other == Some(*key))
+        {
+            return fail(format!(
+                "「{key}」在同一条命令里被给了不止一个决定。一次只对一个变体说一件事。"
+            ));
+        }
+    }
+    for (key, kind) in wanted {
+        let Some(key) = key else { continue };
+        match kind {
+            Some(kind) => {
+                if let Err(error) =
+                    catalog.set_exception(&args.name, key, kind, args.note.as_deref())
+                {
+                    return fail(format!("例外写不进中立库：{error}"));
+                }
+                println!(
+                    "例外已记下：子库「{}」{}「{key}」。",
+                    args.name,
+                    kind.label()
+                );
+                // 库里眼下没有这个变体也照记不误——例外是**永久记住**的（ADR-0016）。
+                if matches!(catalog.variant(key), Ok(None)) {
+                    println!(
+                        "  ⚠️ 库里眼下没有这个变体（盘没插、目录改了名都会这样）。例外照旧记着。"
+                    );
+                }
+            }
+            None => match catalog.clear_exception(&args.name, key) {
+                Ok(true) => println!("例外已忘掉：「{key}」从此听规则的。"),
+                Ok(false) => {
+                    return fail(format!("子库「{}」在「{key}」上没有例外。", args.name));
+                }
+                Err(error) => return fail(format!("中立库写不动：{error}")),
+            },
+        }
+    }
+    let exceptions = match catalog.sublibrary_exceptions(&args.name) {
+        Ok(exceptions) => exceptions,
+        Err(error) => return fail(format!("中立库读不动：{error}")),
+    };
+    println!("\n子库「{}」的例外", args.name);
+    println!("{}", "═".repeat(24));
+    if exceptions.is_empty() {
+        println!("（一条都没有——眼下全听规则的）");
+    } else {
+        println!("{}{}变体", pad("方向", 6), pad("为什么", 20));
+        for row in &exceptions {
+            println!(
+                "{}{}{}",
+                pad(row.kind.label(), 6),
+                pad(row.note.as_deref().unwrap_or("—"), 20),
+                row.variant_key,
+            );
+        }
+        println!("\n例外**优先于规则**：规则改了、重跑识别、重新成型，这几条一条都不动。");
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_sublibrary_show(args: &SubShowArgs) -> ExitCode {
+    let catalog = match args.common.open() {
+        Ok(catalog) => catalog,
+        Err(message) => return fail(message),
+    };
+    let sublibrary = match load_sublibrary(&catalog, &args.name) {
+        Ok(sublibrary) => sublibrary,
+        Err(message) => return fail(message),
+    };
+    // 主库只读（ADR-0004）：报告不许落进主库。
+    if let Some(root) = args.common.root.as_deref()
+        && let Some(target) = args.json.as_deref()
+        && let Err(message) = refuse_writing_into_library(root, target)
+    {
+        return fail(message);
+    }
+    let loaded = match catalog.selection(&args.name) {
+        Ok(loaded) => loaded,
+        Err(error) => return fail(format!("中立库读不动：{error}")),
+    };
+    let started = Instant::now();
+    let facts = match sublibrary::facts(&catalog) {
+        Ok(facts) => facts,
+        Err(error) => return fail(format!("中立库读不动：{error}")),
+    };
+    let selected = sublibrary::select(&loaded.selection, &facts);
+    let report = sublibrary::report::SelectionReport::build(
+        catalog.location(),
+        &sublibrary,
+        &loaded,
+        &facts,
+        &selected,
+    );
+    if !args.quiet {
+        let text = report.render_text();
+        let mut stdout = io::stdout().lock();
+        let _ = stdout.write_all(text.as_bytes());
+        let _ = stdout.flush();
+    }
+    eprintln!(
+        "求值用了 {:.1} 秒，一个字节都没读主库、也没碰目标设备。选中 {} 个变体、{}。",
+        started.elapsed().as_secs_f64(),
+        thousands(report.picked),
+        human_bytes(report.bytes),
+    );
+    if report.variants == 0 {
         eprintln!("库里一个变体都没有——先跑一次 `romcat scan`，再跑 `romcat shape`。");
     }
     if !write_json(args.json.as_deref(), &report) {
