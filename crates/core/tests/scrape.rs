@@ -491,19 +491,7 @@ fn 报告说得出离线档补不上哪些字段() {
 fn 一个字节都不读主库也采得出元数据() {
     let mut 现场 = 建现场();
     识别(&mut 现场);
-    let mut options = scrape::Options::new(现场.dir.path(), 现场.pool_dir.path());
-    options.media = false;
-    let outcome = scrape::run(
-        &RealFs::new(),
-        &mut 现场.catalog,
-        &Priorities::builtin(),
-        &options,
-        &mut scrape::RunContext {
-            cancel: &CancelToken::new(),
-            progress: &mut |_| {},
-        },
-    )
-    .expect("刮削不该失败");
+    let outcome = 不收媒体(&mut 现场);
 
     assert_eq!(outcome.read_bytes, 0);
     assert_eq!(outcome.new_blobs, 0);
@@ -519,6 +507,44 @@ fn 一个字节都不读主库也采得出元数据() {
             .is_empty(),
         "关掉媒体就一份都不该进池"
     );
+}
+
+#[test]
+fn 不收媒体不会把收过的媒体扔掉() {
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    刮削(&mut 现场);
+    let 收过的 = 现场.catalog.pool_counts().expect("数得出");
+    assert_eq!(收过的.refs, 3);
+
+    // `--no-media` 说的是「这趟不收媒体」，**不是「把收过的扔了」**。
+    let outcome = 不收媒体(&mut 现场);
+    assert_eq!(outcome.forgotten, 0, "本地媒体源整个没参加，谈不上作废");
+    assert_eq!(现场.catalog.pool_counts().expect("数得出").refs, 3);
+    assert_eq!(
+        现场
+            .catalog
+            .scraped_media("变体", 原版变体)
+            .expect("读得出")
+            .len(),
+        1
+    );
+}
+
+fn 不收媒体(现场: &mut 现场) -> scrape::Outcome {
+    let mut options = scrape::Options::new(现场.dir.path(), 现场.pool_dir.path());
+    options.media = false;
+    scrape::run(
+        &RealFs::new(),
+        &mut 现场.catalog,
+        &Priorities::builtin(),
+        &options,
+        &mut scrape::RunContext {
+            cancel: &CancelToken::new(),
+            progress: &mut |_| {},
+        },
+    )
+    .expect("刮削不该失败")
 }
 
 #[test]
@@ -540,4 +566,113 @@ fn 超上限与读不动是两件事() {
             .expect("读得出")
             .is_empty()
     );
+}
+
+#[test]
+fn 一个源不再说话时它上一轮的结论被清掉() {
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    刮削(&mut 现场);
+    assert_eq!(
+        值(&现场, "作品", 作品, "年份", "TOSEC").as_deref(),
+        Some("1988")
+    );
+
+    // 把 TOSEC 从 DAT 库里撤掉再重跑识别：那个作品上不再有任何 TOSEC 条目。
+    // 上一轮 TOSEC 挂上去的年份与发行商**必须跟着消失**——留着的话，它们带着一条
+    // 指向已经不存在的条目的**依据**，事后复核会对不上。
+    现场.repo = {
+        let mut repo = DatRepo::in_memory().expect("开得出来");
+        装(
+            &mut repo,
+            "No-Intro",
+            "Nintendo - Nintendo Entertainment System",
+            &[条目("Contra (Japan)", "Contra (Japan).nes", &原版())],
+        );
+        repo
+    };
+    识别(&mut 现场);
+    let outcome = 刮削(&mut 现场);
+
+    assert!(outcome.forgotten > 0, "该有「锚点 × 源」被清掉");
+    assert_eq!(值(&现场, "作品", 作品, "年份", "TOSEC"), None);
+    assert_eq!(值(&现场, "作品", 作品, "发行商", "TOSEC"), None);
+    assert_eq!(值(&现场, "变体", 汉化变体, "汉化组", "TOSEC"), None);
+    // 别的源一条都没被碰。
+    assert_eq!(
+        值(&现场, "作品", 作品, "标题", "No-Intro").as_deref(),
+        Some("Contra")
+    );
+    assert_eq!(
+        值(&现场, "变体", 汉化变体, "标题", "文件名").as_deref(),
+        Some("魂斗罗")
+    );
+}
+
+#[test]
+fn 调高媒体上限之后那些媒体真的会被收进来() {
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+
+    // 先用一个小得离谱的上限跑一趟：三份媒体全被挡在外面。
+    let 收紧 = 刮削带上限(&mut 现场, false, Some(100));
+    assert_eq!(收紧.oversized_media, 3);
+    assert_eq!(现场.catalog.pool_counts().expect("数得出").refs, 0);
+
+    // **上限放开再跑，它们必须进来。**
+    // 上限改变采集的结果，所以它必须进**输入指纹**——不进的话，这一趟会一口咬定
+    // 「输入没变」而整条跳过，那三份永远收不进来，只有整份 `--refresh` 才逃得掉。
+    let 放开 = 刮削带上限(&mut 现场, false, None);
+    assert_eq!(放开.oversized_media, 0);
+    assert_eq!(放开.new_blobs, 2, "两份不同的内容");
+    assert_eq!(现场.catalog.pool_counts().expect("数得出").refs, 3);
+
+    // 反过来收紧也一样：上限降下来，此前收进来的那一份也该被挡在外面。
+    let 再收紧 = 刮削带上限(&mut 现场, false, Some(100));
+    assert_eq!(再收紧.oversized_media, 3);
+    assert_eq!(现场.catalog.pool_counts().expect("数得出").refs, 0);
+}
+
+#[test]
+fn 报告把合并真的跑了一遍() {
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    let outcome = 刮削(&mut 现场);
+
+    let 标题 = outcome
+        .report
+        .fields
+        .iter()
+        .find(|row| row.field == "标题")
+        .expect("该有标题这一行");
+    // 三个源都给了标题（No-Intro、TOSEC 各一个作品锚点，文件名给了每个变体），
+    // 但**作品那一层上 No-Intro 胜出**——TOSEC 贡献了值却一条都没胜出。
+    assert!(标题.sources.iter().any(|(source, _)| source == "TOSEC"));
+    let 胜出: Vec<&str> = 标题
+        .winners
+        .iter()
+        .map(|(source, _)| source.as_str())
+        .collect();
+    assert!(胜出.contains(&"No-Intro"), "作品那一层该是 No-Intro 胜出");
+    assert!(
+        !胜出.contains(&"TOSEC"),
+        "TOSEC 排在 No-Intro 之后，一条都不该胜出"
+    );
+
+    // 年份只有 TOSEC 给得出，那它当然胜出——「用一个源的标题配另一个源的年份」
+    // 这件事，报告自己就说得出来。
+    let 年份 = outcome
+        .report
+        .fields
+        .iter()
+        .find(|row| row.field == "年份")
+        .expect("该有年份这一行");
+    assert_eq!(年份.winners, vec![("TOSEC".to_string(), 1)]);
+    assert_eq!(年份.subjects, 1);
+
+    assert!(
+        outcome.report.unknown_sources.is_empty(),
+        "内置优先级表里点名的源，这一档全都有"
+    );
+    assert!(outcome.report.render_text().contains("合并之后谁说了算"));
 }

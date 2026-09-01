@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ring::digest::{Context, SHA256};
 
-use crate::catalog::{Catalog, CatalogError};
+use crate::catalog::Catalog;
 use crate::fs::LibraryFs;
 use crate::path;
 
@@ -195,32 +195,41 @@ const CHUNK: usize = 64 * 1024;
 /// **主库只读**（ADR-0004）：这里只 `open` 加顺序读，一个字节都不写回去。
 ///
 /// # Errors
-/// 中立库读写不了、或者池写不进时返回错误。**读不动那份媒体不是错误**——它返回
-/// [`Ingested::Skipped`]，那一份跳过，整趟继续。
+/// 中立库读写不了、或者池写不进时返回错误。**没收进来不是错误**——那是
+/// [`Ingested`] 的三个「没收」变体（[`TooBig`](Ingested::TooBig) /
+/// [`Unreadable`](Ingested::Unreadable) / [`NotMedia`](Ingested::NotMedia)），
+/// 那一份跳过，整趟继续。三者分开，正因为它们不是同一件事。
 pub fn ingest(
     library: &dyn LibraryFs,
     catalog: &mut Catalog,
     pool: &MediaPool,
     root: &Path,
     claim: &Claim<'_>,
-) -> Result<Ingested, IngestError> {
+) -> Result<Ingested, super::ScrapeError> {
     let key = claim.key;
     let Some(ext) = normalized_ext(extension_of(key)) else {
         return Ok(Ingested::NotMedia {
             key: key.to_string(),
         });
     };
-    // **先按库里记的大小拦一道，再打开文件。** 不拦的话，一份 662 MiB 的预览视频要先读
-    // 满上限那一段才发现超了——真库上那是 3.4 GiB 的白读。库里的大小可能过期，
-    // 所以下面读的时候还有一道兜底。
-    if let (Some(cap), Some(bytes)) = (claim.max_bytes, claim.bytes)
+    // 算过的哈希留着，**连同它的字节数**。**读过的盘不白读**：一块 8.60 TiB 的盘上，
+    // 第二趟不该再读一遍（挂账 D14 在识别那一侧兑现过一次，这里是同一条）。
+    let known = catalog.media_blob(key)?;
+
+    // **上限在「复用」之前判，而且判之前先把大小凑齐。** 两件事各有理由：
+    //
+    // - **先于复用**：调低上限之后，此前收进来的那一份也该被挡在外面。上限说的是
+    //   「这一趟要不要它」，不是「要不要现在去读它」。
+    // - **凑齐大小**：库里的条目大小读不到时（ADR-0021 的第三态）还有算过的那一份
+    //   兜着。两处都没有才只能读了才知道——下面读的时候还有一道兜底。
+    let size = claim.bytes.or(known.as_ref().map(|(bytes, _)| *bytes));
+    if let (Some(cap), Some(bytes)) = (claim.max_bytes, size)
         && bytes > cap
     {
         return Ok(Ingested::TooBig { bytes: Some(bytes) });
     }
-    // 算过的哈希留着。**读过的盘不白读**：一块 8.60 TiB 的盘上，第二趟不该再读一遍
-    // （挂账 D14 在识别那一侧兑现过一次，这里是同一条）。
-    if let Some((_, hash)) = catalog.media_blob(key)? {
+
+    if let Some((_, hash)) = known {
         let stored = catalog.media_ext(&hash)?;
         if let Some(stored) = stored
             && pool.contains(&hash, &stored)
@@ -309,28 +318,26 @@ pub struct Claim<'a> {
     pub max_bytes: Option<u64>,
 }
 
-/// 收一份媒体时可能出的错。
-#[derive(Debug, thiserror::Error)]
-pub enum IngestError {
-    /// 中立库读写失败。
-    #[error(transparent)]
-    Catalog(#[from] CatalogError),
-    /// 媒体池读写失败。
-    #[error(transparent)]
-    Pool(#[from] PoolError),
-}
-
-fn extension_of(key: &str) -> &str {
+/// 一个键的扩展名（不含点）；没有扩展名时是空串。
+///
+/// `Path::extension` 用不上：中立库的键是**用 `/` 分隔的字符串**（ADR-0020），
+/// 在 Windows 上拿去造 `Path` 会按 `\\` 断词。
+#[must_use]
+pub fn extension_of(key: &str) -> &str {
     let name = path::file_name_of_key(key);
     name.rsplit_once('.').map_or("", |(_, ext)| ext)
 }
 
-fn hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
+/// 一串字节的十六进制。**媒体的内容哈希与输入指纹都走它**，各写一遍必然有一天写岔。
+#[must_use]
+pub fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
 }
 
 #[cfg(test)]

@@ -28,7 +28,6 @@
 //! `(199x)` 与 `(198x)` 是 TOSEC 表示「年份不确定」的写法，`(-)` 是「发行商不详」。
 //! 两者都**不产出值**：错的元数据比缺的元数据难查得多。
 
-use crate::dat::chinese::ChineseMark;
 use crate::identify::naming;
 
 use super::{Field, Harvest, Locality, Source, Subject};
@@ -115,26 +114,17 @@ impl Source for DatSource {
     }
 }
 
-/// 名字里 `(…)` 括起来的每一组，按出现顺序。
-fn rounds(name: &str) -> impl Iterator<Item = &str> {
+/// 名字里由 `open` / `close` 括起来的每一组（不含括号本身），按出现顺序。
+///
+/// 不处理嵌套：DAT 的命名规范里这些标记本来就是平铺的，而按最近的 `close` 收口
+/// 在畸形名字上也不会走飞（同 `dat::chinese::groups`）。
+fn groups(name: &str, open: char, close: char) -> impl Iterator<Item = &str> {
     let mut rest = name;
     std::iter::from_fn(move || {
-        let start = rest.find('(')? + 1;
+        let start = rest.find(open)? + open.len_utf8();
         let body = &rest[start..];
-        let end = body.find(')')?;
-        rest = &body[end + 1..];
-        Some(&body[..end])
-    })
-}
-
-/// 名字里 `[…]` 括起来的每一组。
-fn squares(name: &str) -> impl Iterator<Item = &str> {
-    let mut rest = name;
-    std::iter::from_fn(move || {
-        let start = rest.find('[')? + 1;
-        let body = &rest[start..];
-        let end = body.find(']')?;
-        rest = &body[end + 1..];
+        let end = body.find(close)?;
+        rest = &body[end + close.len_utf8()..];
         Some(&body[..end])
     })
 }
@@ -146,7 +136,7 @@ fn squares(name: &str) -> impl Iterator<Item = &str> {
 /// 等于把「不知道」伪装成「知道」。
 #[must_use]
 pub fn tosec_year(name: &str) -> Option<String> {
-    let first = rounds(name).next()?;
+    let first = groups(name, '(', ')').next()?;
     let head = first.get(..4)?;
     if head.len() == 4 && head.chars().all(|c| c.is_ascii_digit()) {
         Some(head.to_string())
@@ -158,7 +148,7 @@ pub fn tosec_year(name: &str) -> Option<String> {
 /// TOSEC 名字里的发行商。第二个 `(…)`；`-` 是「不详」，不产出。
 #[must_use]
 pub fn tosec_publisher(name: &str) -> Option<String> {
-    let second = rounds(name).nth(1)?.trim();
+    let second = groups(name, '(', ')').nth(1)?.trim();
     if second.is_empty() || second == "-" {
         return None;
     }
@@ -171,7 +161,7 @@ pub fn tosec_publisher(name: &str) -> Option<String> {
 /// 没署名就返回 `None`——空着比编一个名字强。
 #[must_use]
 pub fn translation_group(name: &str) -> Option<String> {
-    for group in squares(name) {
+    for group in groups(name, '[', ']') {
         let mut parts = group.split_whitespace();
         if parts.next() != Some("tr") {
             continue;
@@ -190,13 +180,6 @@ pub fn translation_group(name: &str) -> Option<String> {
     None
 }
 
-/// 这条条目名说自己是中文的哪一种。转手 [`crate::dat::chinese`]，只为让本模块的
-/// 读者不必跳出去才知道这件事在哪儿判。
-#[must_use]
-pub fn chinese_mark(name: &str) -> Option<ChineseMark> {
-    crate::dat::chinese::mark_of(name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,9 +188,7 @@ mod tests {
     fn 条目(source: &str, game: &str) -> DatEntry {
         DatEntry {
             source: source.to_string(),
-            dat: "某份 DAT".to_string(),
             game: game.to_string(),
-            chinese: None,
         }
     }
 
@@ -219,6 +200,7 @@ mod tests {
             entries,
             main_key: None,
             media: &[],
+            media_limit: None,
         }
     }
 
@@ -274,11 +256,11 @@ mod tests {
         let mut nointro = Harvest::default();
         DatSource::new("No-Intro").collect(&subject, &mut nointro);
         assert_eq!(nointro.values.len(), 1, "No-Intro 只给得出标题");
-        assert_eq!(nointro.values[0].1, "1942");
+        assert_eq!(nointro.values[0].value, "1942");
 
         let mut tosec = Harvest::default();
         DatSource::new("TOSEC").collect(&subject, &mut tosec);
-        let fields: Vec<Field> = tosec.values.iter().map(|(f, _, _)| *f).collect();
+        let fields: Vec<Field> = tosec.values.iter().map(|found| found.field).collect();
         assert_eq!(fields, vec![Field::Title, Field::Year, Field::Publisher]);
     }
 
@@ -301,13 +283,5 @@ mod tests {
         ];
         let source = DatSource::new("No-Intro");
         assert_eq!(source.probe(&作品(&a)), source.probe(&作品(&b)));
-    }
-
-    #[test]
-    fn 中文记号转手得出去() {
-        assert_eq!(
-            chinese_mark("Contra (1988)(Konami)(JP)[tr zh]"),
-            Some(ChineseMark::FanTranslated)
-        );
     }
 }

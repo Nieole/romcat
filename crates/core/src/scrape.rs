@@ -20,7 +20,7 @@
 //!
 //! | 概念 | 这里叫什么 | 是什么 |
 //! |---|---|---|
-//! | 缓存主键 | **锚点**（[`Anchor`]） | 刮削结论挂在哪儿：作品名，或变体的键 |
+//! | 采集缓存的主键 | **锚点**（[`AnchorKind`] 加一个自然键） | 刮削结论挂在哪儿：作品名，或变体的键 |
 //! | 查询哈希 | 识别那一侧的 CRC-32 | 拿去撞 DAT 的判据，刮削这一层根本不碰 |
 //! | 媒体主键 | 内容哈希（[`pool`]） | **文件名不是媒体的主键**（ADR-0009） |
 //!
@@ -40,15 +40,13 @@ pub mod report;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use crate::catalog::scrape::Harvested;
+use crate::catalog::scrape::{Harvested, HarvestedMedia, HarvestedValue};
 use crate::catalog::{Catalog, CatalogError};
-use crate::dat::chinese::ChineseMark;
 use crate::fs::LibraryFs;
 use crate::scan::CancelToken;
 
 use pool::{MediaPool, PoolError};
 
-pub use pool::MediaPool as Pool;
 pub use priority::Priorities;
 pub use report::ScrapeReport;
 
@@ -64,9 +62,6 @@ pub enum ScrapeError {
     /// 媒体池读写失败。
     #[error(transparent)]
     Pool(#[from] PoolError),
-    /// 收一份媒体时出错。
-    #[error(transparent)]
-    Ingest(#[from] pool::IngestError),
     /// 策略档案里混进了它不该有的源。
     ///
     /// 字段不叫 `source`：`thiserror` 把叫这个名字的字段当成**错误的来源**，
@@ -99,18 +94,6 @@ impl AnchorKind {
             Self::Variant => "变体",
         }
     }
-}
-
-/// 一个**锚点**：刮削结论挂在哪儿。
-///
-/// 它是**自然键**而不是行号，因为重跑识别会把作品整批删掉重建
-/// （`catalog::scrape` 的模块文档）。
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Anchor {
-    /// 哪一层。
-    pub kind: AnchorKind,
-    /// 作品名，或者变体的键。
-    pub id: String,
 }
 
 /// 一个刮削**字段**。
@@ -164,12 +147,6 @@ impl Field {
             Self::Description,
             Self::TranslationGroup,
         ]
-    }
-
-    /// 从词认回来。
-    #[must_use]
-    pub fn from_label(label: &str) -> Option<Self> {
-        Self::all().into_iter().find(|f| f.label() == label)
     }
 }
 
@@ -239,17 +216,16 @@ impl Profile {
     }
 }
 
-/// 一条撞出来的 DAT 条目，刮削用得上的那几列。
+/// 一条撞出来的 DAT 条目，刮削用得上的那两列。
+///
+/// **只有这两列**：哪个源、条目名。是哪一份 DAT、有没有中文记号，`candidate` 那张表里
+/// 都记着，事后复核照查不误——在这里再抄一遍，只是让 46,444 个锚点各多背一串没人读的字符串。
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DatEntry {
     /// 哪个数据源（`No-Intro` / `TOSEC` / …）。
     pub source: String,
-    /// 哪一份 DAT。
-    pub dat: String,
     /// 条目名。**语义信息全编码在这里面**——TOSEC 的名字里就带着年份与发行商。
     pub game: String,
-    /// 中文记号。
-    pub chinese: Option<ChineseMark>,
 }
 
 /// 主库里一份现成的媒体文件。
@@ -284,6 +260,12 @@ pub struct Subject<'a> {
     pub main_key: Option<&'a str>,
     /// **变体**锚点才有：能归给它的本地媒体。
     pub media: &'a [LocalMedia],
+    /// 这一趟单份媒体的上限；`None` 是不设上限。
+    ///
+    /// 它在这里，是因为**它改变采集的结果**：上限从 32 MiB 提到 128 MiB，同一批文件
+    /// 该多收进来几份。凡是改变结果的东西都必须进**输入指纹**，否则调完上限重跑，
+    /// 缓存会一口咬定「输入没变」而整条跳过——那些文件永远收不进来。
+    pub media_limit: Option<u64>,
 }
 
 /// 一个源说「主库里这份文件是这个锚点的某种媒体」。
@@ -302,23 +284,51 @@ pub struct MediaClaim {
     pub why: String,
 }
 
+/// 一个源给出的一个字段值，连着它的**依据**。
+///
+/// 不用三元组：第三位是词表里的一等术语**依据**，而「没有依据的结论事后无法复核」
+/// 是这个项目反复说的一条（ADR-0002 在识别那一侧，这里是同一条）。叫得出名字的东西
+/// 不该在类型里退化成 `String`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finding {
+    /// 哪个字段。
+    pub field: Field,
+    /// 值。
+    pub value: String,
+    /// **依据**：这个值是怎么来的。
+    pub evidence: String,
+}
+
 /// 一个源在一个锚点上采到的东西。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Harvest {
-    /// 字段值：字段、值、**依据**。
-    pub values: Vec<(Field, String, String)>,
+    /// 字段值。
+    pub values: Vec<Finding>,
     /// 媒体。
     pub media: Vec<MediaClaim>,
 }
 
 impl Harvest {
-    /// 记一个字段值。空值不记——**缺的字段就该是缺的**，写个空串进去只会让
-    /// 优先级链在它身上停下来。
+    /// 记一个字段值。
+    ///
+    /// 两种情况**不记**：
+    ///
+    /// - **空值**。缺的字段就该是缺的，写个空串进去只会让优先级链在它身上停下来。
+    /// - **这个字段这个源已经说过话了**。库里一个「锚点 × 字段 × 源」只存一条
+    ///   （那正是三元组并存的粒度），一个源交出两个值只会有一个落库，另一个连同它的
+    ///   **依据**一起蒸发，而采集记录还记着「采到两条」——数对不上，还查不出为什么。
+    ///   于是**第一个胜出**：源按确定的顺序遍历条目名，同一份库跑两次结果一样。
+    ///   一个字段要装多个值，那是**标题集合**的形状，票 15 的模型，不是这一层。
     pub fn value(&mut self, field: Field, value: impl Into<String>, why: impl Into<String>) {
         let value = value.into();
-        if !value.trim().is_empty() {
-            self.values.push((field, value, why.into()));
+        if value.trim().is_empty() || self.values.iter().any(|found| found.field == field) {
+            return;
         }
+        self.values.push(Finding {
+            field,
+            value,
+            evidence: why.into(),
+        });
     }
 
     /// 记一份媒体。
@@ -342,8 +352,14 @@ pub trait Source {
 
     /// 这一轮对这个锚点的**输入指纹**；`None` 表示这个源对这个锚点无话可说。
     ///
-    /// 指纹与上次一样就整条跳过，连采集都不跑。它必须**盖住全部输入**：漏了一样，
-    /// 那一样变了也不会重采。
+    /// 指纹与上次一样就整条跳过，连采集都不跑。它必须**盖住全部会改变结果的输入**：
+    /// 漏了一样，那一样变了也不会重采。媒体那个源的上限就是这么一样——上限从 32 MiB
+    /// 提到 128 MiB，同一批文件该多收进来几份，不盖它的话它们永远收不进来。
+    ///
+    /// **盖不住的只有一样：这个源自己的解析逻辑。** 改了 `collect` 里读名字的办法，
+    /// 指纹不会变，已经采过的锚点不会重采。这一条不打算靠「往指纹里折一个代码版本号」
+    /// 解决——那要靠人手动改一个常量，忘了改就是同样的静默失效。出口是 `--refresh`，
+    /// 而它在真库上只要 4.1 秒、回盘 0 字节（算过的媒体哈希留着）。
     fn probe(&self, subject: &Subject<'_>) -> Option<String>;
 
     /// 采集。
@@ -422,6 +438,14 @@ pub struct Outcome {
     /// **超过单份上限**、因此跳过的媒体有几份。**与读不动是平行的两件事**：
     /// 那些文件好好的，是用户设了上限。混成一个数，报告就说不出跳过的到底怎么了。
     pub oversized_media: u64,
+    /// 扩展名不认得、因此没当成媒体收的有几份。**正常情况下是 0**：本地媒体源本来就
+    /// 按扩展名筛过一遍。它不是 0 就说明两处的表对不上了，那是要查的。
+    pub not_media: u64,
+    /// 有几个「锚点 × 源」这次无话可说、于是上一轮的结论被清掉了。
+    ///
+    /// 重跑识别把某个源的候选清空时就是这一态。**留着比缺着更糟**：那些值带着一条
+    /// 指向已经不存在的条目的**依据**。
+    pub forgotten: u64,
 }
 
 /// 一趟刮削。
@@ -438,7 +462,7 @@ pub fn run(
     options: &Options,
     context: &mut RunContext<'_>,
 ) -> Result<Outcome, ScrapeError> {
-    let sources = offline_sources(options.profile)?;
+    let sources = offline_sources(options.profile, options.media)?;
     if options.refresh {
         catalog.clear_scraped()?;
     }
@@ -458,8 +482,16 @@ pub fn run(
         }
         let known = catalog.scrape_inputs(subject.kind.label(), &subject.id)?;
         for source in &sources {
-            let view = subject.view();
+            let view = subject.view(options.max_media_bytes);
             let Some(input) = source.probe(&view) else {
+                // **这个源这次无话可说，而上次说过话**——那上次说的话已经作废了。
+                // 重跑一次识别就会出现这一态：TOSEC 的候选没了，它上一轮挂上去的年份
+                // 与发行商还留在库里，而库里现在没有任何东西支持它们。留着比缺着更糟：
+                // 它带着一条指向已经不存在的条目的**依据**，事后复核会对不上。
+                if known.contains_key(source.name()) {
+                    catalog.forget_scraped(subject.kind.label(), &subject.id, source.name())?;
+                    run.forgotten += 1;
+                }
                 continue;
             };
             if known.get(source.name()) == Some(&input) {
@@ -468,11 +500,7 @@ pub fn run(
             }
             let mut harvest = Harvest::default();
             source.collect(&view, &mut harvest);
-            let media = if options.media {
-                ingest_all(library, catalog, &pool, options, &harvest, &mut run)?
-            } else {
-                Vec::new()
-            };
+            let media = ingest_all(library, catalog, &pool, options, &harvest, &mut run)?;
             batch.push(Harvested {
                 anchor: subject.kind.label().to_string(),
                 subject: subject.id.clone(),
@@ -481,7 +509,11 @@ pub fn run(
                 values: harvest
                     .values
                     .into_iter()
-                    .map(|(field, value, why)| (field.label().to_string(), value, why))
+                    .map(|found| HarvestedValue {
+                        field: found.field.label().to_string(),
+                        value: found.value,
+                        evidence: found.evidence,
+                    })
                     .collect(),
                 media,
             });
@@ -521,6 +553,8 @@ pub fn run(
         deduped: run.deduped,
         unreadable_media: run.unreadable_media,
         oversized_media: run.oversized_media,
+        not_media: run.not_media,
+        forgotten: run.forgotten,
     })
 }
 
@@ -547,25 +581,27 @@ fn fingerprint(parts: &[&str]) -> String {
         // 分隔符不能省：`["ab", "c"]` 与 `["a", "bc"]` 拼起来是同一串。
         context.update(&[0]);
     }
-    let digest = context.finish();
-    let mut out = String::with_capacity(16);
-    for byte in digest.as_ref().iter().take(8) {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
+    pool::hex(&context.finish().as_ref()[..8])
 }
 
 /// 离线档的全部源。**顺序无关**——谁排前面由优先级表说了算，不由这里说了算。
-fn offline_sources(profile: Profile) -> Result<Vec<Box<dyn Source>>, ScrapeError> {
-    let sources: Vec<Box<dyn Source>> = vec![
+///
+/// `media` 为假时**本地媒体源整个不参加**，而不是喂给它一份空的媒体清单。差别是要命的：
+/// 空清单会让它的 `probe` 返回「无话可说」，而「无话可说 + 上次说过话」正是引擎清掉
+/// 上一轮结论的那一态——于是 `--no-media` 会把此前收好的媒体映射**悄悄删掉**。
+/// `--no-media` 说的是「这趟不收媒体」，不是「把收过的扔了」。
+fn offline_sources(profile: Profile, media: bool) -> Result<Vec<Box<dyn Source>>, ScrapeError> {
+    let mut sources: Vec<Box<dyn Source>> = vec![
         Box::new(dat::DatSource::new("No-Intro")),
         Box::new(dat::DatSource::new("Redump")),
         Box::new(dat::DatSource::new("TOSEC")),
         Box::new(dat::DatSource::new("MAME")),
         Box::new(dat::DatSource::new("GoodNES")),
         Box::new(local::FilenameSource::new()),
-        Box::new(local::LocalMediaSource::new()),
     ];
+    if media {
+        sources.push(Box::new(local::LocalMediaSource::new()));
+    }
     // **闸门**：档案说不收的源，一个都不许混进来。写在这里而不是靠上面那张表自觉，
     // 是因为将来票 14 会往这张表里加联网源，而加的时候最容易忘的就是档案这一层。
     for source in &sources {
@@ -606,7 +642,7 @@ struct PlannedSubject {
 }
 
 impl PlannedSubject {
-    fn view(&self) -> Subject<'_> {
+    fn view(&self, media_limit: Option<u64>) -> Subject<'_> {
         Subject {
             kind: self.kind,
             id: &self.id,
@@ -614,6 +650,7 @@ impl PlannedSubject {
             entries: &self.entries,
             main_key: self.main_key.as_deref(),
             media: &self.media,
+            media_limit,
         }
     }
 }
@@ -627,7 +664,7 @@ impl Plan {
         // 归堆时去重——刮削要的是「这个源说这是什么」，不是「撞了几次」。
         let mut by_variant: BTreeMap<String, Vec<DatEntry>> = BTreeMap::new();
         let mut seen: BTreeSet<(String, String, String)> = BTreeSet::new();
-        catalog.for_each_candidate_fact(&mut |key, source, dat, game, chinese| {
+        catalog.for_each_candidate_fact(&mut |key, source, game| {
             let mark = (key.to_string(), source.to_string(), game.to_string());
             if !seen.insert(mark) {
                 return;
@@ -637,9 +674,7 @@ impl Plan {
                 .or_default()
                 .push(DatEntry {
                     source: source.to_string(),
-                    dat: dat.to_string(),
                     game: game.to_string(),
-                    chinese,
                 });
         })?;
 
@@ -710,6 +745,7 @@ struct Run {
     unreadable_media: u64,
     oversized_media: u64,
     not_media: u64,
+    forgotten: u64,
     media_count: u64,
 }
 
@@ -721,7 +757,7 @@ fn ingest_all(
     options: &Options,
     harvest: &Harvest,
     run: &mut Run,
-) -> Result<Vec<(String, String, String)>, ScrapeError> {
+) -> Result<Vec<HarvestedMedia>, ScrapeError> {
     let mut out = Vec::with_capacity(harvest.media.len());
     for claim in &harvest.media {
         let ingested = pool::ingest(
@@ -738,7 +774,11 @@ fn ingest_all(
         match ingested {
             pool::Ingested::Reused { hash } => {
                 run.reused_hashes += 1;
-                out.push((claim.kind.label().to_string(), hash, claim.why.clone()));
+                out.push(HarvestedMedia {
+                    kind: claim.kind.label().to_string(),
+                    hash,
+                    evidence: claim.why.clone(),
+                });
             }
             pool::Ingested::Stored { hash, bytes, fresh } => {
                 run.read_bytes += bytes;
@@ -748,7 +788,11 @@ fn ingest_all(
                 } else {
                     run.deduped += 1;
                 }
-                out.push((claim.kind.label().to_string(), hash, claim.why.clone()));
+                out.push(HarvestedMedia {
+                    kind: claim.kind.label().to_string(),
+                    hash,
+                    evidence: claim.why.clone(),
+                });
             }
             // 三种跳过分开数。**它们不是同一件事**，塞进同一个计数器，
             // 报告就只能说「有 108 份没收进来」而说不出为什么。
@@ -787,9 +831,18 @@ mod tests {
 
     #[test]
     fn 离线档那七个源全是本地的() {
-        let sources = offline_sources(Profile::Offline).expect("离线档该收得下这七个源");
+        let sources = offline_sources(Profile::Offline, true).expect("离线档该收得下这七个源");
         assert_eq!(sources.len(), 7);
         assert!(sources.iter().all(|s| s.locality() == Locality::Local));
+    }
+
+    #[test]
+    fn 不收媒体时本地媒体源整个不参加() {
+        // 它若参加而拿到一份空清单，`probe` 会返回「无话可说」，
+        // 上一轮收好的媒体映射就被当成过期结论清掉了。
+        let sources = offline_sources(Profile::Offline, false).expect("收得下");
+        assert_eq!(sources.len(), 6);
+        assert!(sources.iter().all(|s| s.name() != local::LOCAL_MEDIA));
     }
 
     #[test]
@@ -798,5 +851,19 @@ mod tests {
         harvest.value(Field::Title, "  ", "空的");
         harvest.value(Field::Title, "魔界村", "有的");
         assert_eq!(harvest.values.len(), 1);
+        assert_eq!(harvest.values[0].value, "魔界村");
+    }
+
+    #[test]
+    fn 一个源在一个字段上只留第一个值() {
+        // 库里一个「锚点 × 字段 × 源」只存一条。交出两个，第二个连同它的**依据**
+        // 一起蒸发，而采集记录还记着「采到两条」——数对不上，还查不出为什么。
+        let mut harvest = Harvest::default();
+        harvest.value(Field::Title, "魔界村", "第一个条目名");
+        harvest.value(Field::Title, "Ghosts 'n Goblins", "第二个条目名");
+        harvest.value(Field::Year, "1985", "同一个源的另一个字段照记");
+        assert_eq!(harvest.values.len(), 2);
+        assert_eq!(harvest.values[0].value, "魔界村");
+        assert_eq!(harvest.values[1].field, Field::Year);
     }
 }

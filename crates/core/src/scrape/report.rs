@@ -32,6 +32,12 @@ pub struct FieldRow {
     pub values: u64,
     /// 各个源各贡献了几条：`(源, 条数)`，多的排前面。
     pub sources: Vec<(String, u64)>,
+    /// **按优先级合并之后真正胜出的**：`(源, 在几个锚点上胜出)`。
+    ///
+    /// 它与 `sources` 是两回事，而两个都得看：一个源贡献了 6,800 条却几乎没胜出，
+    /// 说明它排在链尾、而前面的源覆盖得比它全——那正是「某个源值不值得继续用」的判据。
+    /// 这一栏也是**合并这件事在产品里真的跑了一遍**的证据，不是只在测试里跑。
+    pub winners: Vec<(String, u64)>,
     /// 优先级链。
     pub order: Vec<String>,
 }
@@ -82,6 +88,12 @@ pub struct ScrapeReport {
     pub pool_shared: u64,
     /// 按平台覆盖的优先级有哪几条：`(平台, 字段, 顺序)`。
     pub platform_overrides: Vec<(String, String, Vec<String>)>,
+    /// 优先级表里点名了、而这一档根本没有的源。
+    ///
+    /// **不是错误**（没列到的源按时间戳兜底，列了不存在的源也只是排序时永远轮不到它），
+    /// 但十有八九是打错了字，而打错的后果是静默的：那个源被排到链尾，用户以为自己
+    /// 调了优先级，实际什么也没发生。所以报出来。
+    pub unknown_sources: Vec<String>,
 }
 
 impl ScrapeReport {
@@ -108,12 +120,26 @@ impl ScrapeReport {
             ..Self::default()
         };
 
+        let subjects = catalog.field_subjects()?;
+        let winners = winners(catalog, priorities)?;
         let mut by_field: BTreeMap<String, FieldRow> = BTreeMap::new();
         for count in catalog.field_counts()? {
             let row = by_field
                 .entry(count.field.clone())
                 .or_insert_with(|| FieldRow {
                     field: count.field.clone(),
+                    subjects: subjects.get(&count.field).copied().unwrap_or(0),
+                    winners: winners
+                        .get(&count.field)
+                        .map(|by_source| {
+                            let mut rows: Vec<(String, u64)> = by_source
+                                .iter()
+                                .map(|(source, count)| (source.clone(), *count))
+                                .collect();
+                            rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                            rows
+                        })
+                        .unwrap_or_default(),
                     order: priorities
                         .order(&count.field, None)
                         .iter()
@@ -122,9 +148,6 @@ impl ScrapeReport {
                     ..FieldRow::default()
                 });
             row.values += count.values;
-            // 锚点数不能把各源的加起来——同一个锚点被两个源填过就会数两遍。
-            // 这里取最大值当下界，真值要另查一遍，不值得为报告多跑一次全表扫描。
-            row.subjects = row.subjects.max(count.subjects);
             row.sources.push((count.source, count.values));
         }
         // 报告里的字段按 `Field::all()` 的固定顺序排，不按数量——同一份库出的报告
@@ -169,6 +192,7 @@ impl ScrapeReport {
                 (platform.to_string(), field.to_string(), order.to_vec())
             })
             .collect();
+        report.unknown_sources = priorities.sources_not_in(sources);
         Ok(report)
     }
 
@@ -242,6 +266,31 @@ impl ScrapeReport {
             );
         }
 
+        heading(&mut out, "合并之后谁说了算");
+        let _ = writeln!(
+            out,
+            "{}{}（按优先级合并一遍数出来的；贡献多而胜出少，说明它排在链尾）",
+            pad("字段", 10),
+            pad("胜出", 10),
+        );
+        for row in &self.fields {
+            let by_source: Vec<String> = row
+                .winners
+                .iter()
+                .map(|(source, count)| format!("{source} {}", thousands(*count)))
+                .collect();
+            let _ = writeln!(
+                out,
+                "{}{}",
+                pad(&row.field, 10),
+                if by_source.is_empty() {
+                    "（没有）".to_string()
+                } else {
+                    by_source.join("、")
+                },
+            );
+        }
+
         if !self.gaps.is_empty() {
             heading(&mut out, "离线档补不上的字段");
             let _ = writeln!(
@@ -278,6 +327,16 @@ impl ScrapeReport {
             );
         }
 
+        if !self.unknown_sources.is_empty() {
+            heading(&mut out, "优先级表里点名了、而这一档没有的源");
+            let _ = writeln!(
+                out,
+                "{}——不是错误（列了不存在的源只是排序时永远轮不到它），\
+                 但十有八九是打错了字，而打错的后果是静默的。",
+                self.unknown_sources.join("、")
+            );
+        }
+
         heading(&mut out, "优先级");
         for row in &self.fields {
             if row.order.is_empty() {
@@ -296,6 +355,45 @@ impl ScrapeReport {
         }
         out
     }
+}
+
+/// 把库里的值真正合并一遍，数出**每个字段各是哪个源胜出**。
+///
+/// 一个锚点上的值攒齐了才轮得到合并（优先级要在同一批候选值之间比），所以按
+/// `(锚点种类, 锚点)` 分批——SQL 那边已经按这两列排好序，攒一个锚点的量就够。
+///
+/// 平台传 `None`：报告是全库口径，而按平台的覆盖是**按平台**的，混在一起报会既不是
+/// 通用那条也不是覆盖那条。覆盖有哪几条另有一节列着。
+fn winners(
+    catalog: &Catalog,
+    priorities: &Priorities,
+) -> Result<BTreeMap<String, BTreeMap<String, u64>>, CatalogError> {
+    let mut out: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
+    let mut current: Option<(String, String)> = None;
+    let mut batch: Vec<crate::catalog::scrape::ScrapedValue> = Vec::new();
+    let tally = |batch: &[crate::catalog::scrape::ScrapedValue],
+                 out: &mut BTreeMap<String, BTreeMap<String, u64>>| {
+        let fields: BTreeSet<&str> = batch.iter().map(|value| value.field.as_str()).collect();
+        for field in fields {
+            if let Some(best) = priorities.pick(field, None, batch) {
+                *out.entry(field.to_string())
+                    .or_default()
+                    .entry(best.source.clone())
+                    .or_default() += 1;
+            }
+        }
+    };
+    catalog.for_each_scraped_value(&mut |anchor, subject, value| {
+        let here = (anchor.to_string(), subject.to_string());
+        if current.as_ref() != Some(&here) {
+            tally(&batch, &mut out);
+            batch.clear();
+            current = Some(here);
+        }
+        batch.push(value);
+    })?;
+    tally(&batch, &mut out);
+    Ok(out)
 }
 
 fn heading(out: &mut String, title: &str) {

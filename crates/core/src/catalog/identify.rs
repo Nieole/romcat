@@ -251,8 +251,12 @@ pub struct Identification {
 /// 逐条走识别结论时收到的那五样：平台、结论、理由、变体的键、这一趟读了多少字节。
 pub type IdentificationVisitor<'a> = dyn FnMut(Option<&str>, State, Option<&str>, &str, u64) + 'a;
 
-/// 逐条走候选时收到的那五样：变体的键、源、DAT、条目名、中文记号。
-pub type CandidateFactVisitor<'a> = dyn FnMut(&str, &str, &str, &str, Option<ChineseMark>) + 'a;
+/// 逐条走候选时收到的那三样：变体的键、源、条目名。
+///
+/// **只有这三样**：刮削从条目名里读元数据，是哪一份 DAT、有没有中文记号都在
+/// `candidate` 那张表里躺着，事后复核照查不误。真库里这是 150,959 行，多搬一列
+/// 就是多搬 150,959 个字符串。
+pub type CandidateFactVisitor<'a> = dyn FnMut(&str, &str, &str) + 'a;
 
 /// 一个数据源贡献了多少条候选。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -721,7 +725,7 @@ impl Catalog {
             .map_err(|source| self.err(source))
     }
 
-    /// 一条条走过全部**候选**里刮削用得上的那几列：变体的键、源、DAT、条目名、中文记号。
+    /// 一条条走过全部**候选**里刮削用得上的那几列：变体的键、源、条目名。
     ///
     /// 走回调而不是返回一整份 `Vec`：真库里这是 150,959 行，而刮削要的只是把它们按
     /// 锚点归堆。
@@ -735,7 +739,7 @@ impl Catalog {
         let mut statement = self
             .conn
             .prepare(
-                "SELECT variant_key, source, dat, game, chinese FROM candidate
+                "SELECT variant_key, source, game FROM candidate
                  ORDER BY variant_key, id",
             )
             .map_err(|source| self.err(source))?;
@@ -743,15 +747,8 @@ impl Catalog {
         while let Some(row) = rows.next().map_err(|source| self.err(source))? {
             let key: String = row.get(0).map_err(|source| self.err(source))?;
             let src: String = row.get(1).map_err(|source| self.err(source))?;
-            let dat: String = row.get(2).map_err(|source| self.err(source))?;
-            let game: String = row.get(3).map_err(|source| self.err(source))?;
-            let chinese: Option<String> = row.get(4).map_err(|source| self.err(source))?;
-            let mark = chinese.as_deref().and_then(|label| match label {
-                "汉化" => Some(ChineseMark::FanTranslated),
-                "官中" => Some(ChineseMark::Official),
-                _ => None,
-            });
-            each(&key, &src, &dat, &game, mark);
+            let game: String = row.get(2).map_err(|source| self.err(source))?;
+            each(&key, &src, &game);
         }
         Ok(())
     }

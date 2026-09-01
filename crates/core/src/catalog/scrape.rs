@@ -96,6 +96,28 @@ CREATE TABLE IF NOT EXISTS scrape_probe(
 ) STRICT;
 ";
 
+/// 一条要写进去的字段值。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarvestedValue {
+    /// 字段。
+    pub field: String,
+    /// 值。
+    pub value: String,
+    /// **依据**。
+    pub evidence: String,
+}
+
+/// 一条要写进去的媒体引用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarvestedMedia {
+    /// 媒体类型。
+    pub kind: String,
+    /// 内容哈希，也就是它在**媒体池**里的主键。
+    pub hash: String,
+    /// **依据**。
+    pub evidence: String,
+}
+
 /// 一个源在一个锚点上采到的东西，写库前的样子。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Harvested {
@@ -107,10 +129,10 @@ pub struct Harvested {
     pub source: String,
     /// 这一轮的**输入指纹**。下次一样就整条跳过。
     pub input: String,
-    /// 字段值：字段、值、依据。
-    pub values: Vec<(String, String, String)>,
-    /// 媒体引用：类型、内容哈希、依据。
-    pub media: Vec<(String, String, String)>,
+    /// 字段值。
+    pub values: Vec<HarvestedValue>,
+    /// 媒体引用。
+    pub media: Vec<HarvestedMedia>,
 }
 
 /// 一条读回来的字段值。
@@ -158,6 +180,13 @@ pub struct PoolCounts {
 
 /// 逐条走文件条目时收到的那三样：键、字节数、修改时间。
 pub type FileVisitor<'a> = dyn FnMut(&str, Option<u64>, Option<i64>) + 'a;
+
+/// 逐条走刮削结论时收到的那三样：锚点种类、锚点、那条值。
+///
+/// **`evidence` 在这条路上是空的**：报告只用得着值与源，而真库里那是 78,902 条依据、
+/// 每条几十个字——为一次计数把它们全搬进内存不划算。要看依据走
+/// [`scraped_values`](Catalog::scraped_values)。
+pub type ScrapedVisitor<'a> = dyn FnMut(&str, &str, ScrapedValue) + 'a;
 
 /// 刮削结论按「字段 × 源」的条数。报告要答得出「某个源值不值得继续用」。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -269,28 +298,28 @@ impl Catalog {
                 drop_media
                     .execute(params![got.anchor, got.subject, got.source])
                     .map_err(to_err)?;
-                for (field, value, evidence) in &got.values {
+                for found in &got.values {
                     insert_value
                         .execute(params![
                             got.anchor,
                             got.subject,
-                            field,
+                            found.field,
                             got.source,
-                            value,
-                            evidence,
+                            found.value,
+                            found.evidence,
                             at
                         ])
                         .map_err(to_err)?;
                 }
-                for (kind, hash, evidence) in &got.media {
+                for picture in &got.media {
                     insert_media
                         .execute(params![
                             got.anchor,
                             got.subject,
-                            kind,
+                            picture.kind,
                             got.source,
-                            hash,
-                            evidence,
+                            picture.hash,
+                            picture.evidence,
                             at
                         ])
                         .map_err(to_err)?;
@@ -544,6 +573,72 @@ impl Catalog {
             .map_err(|source| self.err(source))
     }
 
+    /// 每个字段各有几个锚点拿到了值：字段 → 锚点数。
+    ///
+    /// **单独查一次，不从 [`field_counts`](Self::field_counts) 加出来**：同一个锚点被
+    /// 两个源填过，加起来就数了两遍；取各源的最大值又只是个下界。报告里印出去的数
+    /// 得是真的。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn field_subjects(&self) -> Result<BTreeMap<String, u64>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT field, COUNT(DISTINCT anchor || '\u{1}' || subject)
+                 FROM scrape_value GROUP BY field",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+                ))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (field, count) = row.map_err(|source| self.err(source))?;
+            out.insert(field, count);
+        }
+        Ok(out)
+    }
+
+    /// 一条条走过全部刮削出来的字段值：锚点种类、锚点、字段、源、值、采集时刻。
+    ///
+    /// 报告拿它跑一遍**真正的合并**——不跑的话，「按字段级优先级合并」就只是一个
+    /// 库函数，产品里没有任何地方证明它在工作。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn for_each_scraped_value(&self, each: &mut ScrapedVisitor) -> Result<(), CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT anchor, subject, field, source, value, at FROM scrape_value
+                 ORDER BY anchor, subject",
+            )
+            .map_err(|source| self.err(source))?;
+        let mut rows = statement.query([]).map_err(|source| self.err(source))?;
+        while let Some(row) = rows.next().map_err(|source| self.err(source))? {
+            let anchor: String = row.get(0).map_err(|source| self.err(source))?;
+            let subject: String = row.get(1).map_err(|source| self.err(source))?;
+            each(
+                &anchor,
+                &subject,
+                ScrapedValue {
+                    field: row.get(2).map_err(|source| self.err(source))?,
+                    source: row.get(3).map_err(|source| self.err(source))?,
+                    value: row.get(4).map_err(|source| self.err(source))?,
+                    evidence: String::new(),
+                    at: row.get(5).map_err(|source| self.err(source))?,
+                },
+            );
+        }
+        Ok(())
+    }
+
     /// 有刮削结论的锚点各有几个：`(锚点种类, 个数)`。
     ///
     /// # Errors
@@ -568,6 +663,34 @@ impl Catalog {
             .map_err(|source| self.err(source))
     }
 
+    /// 把**一个源在一个锚点上**留下的一切清掉：值、媒体引用、以及那条采集记录。
+    ///
+    /// 用在「这个源这次无话可说、而上次说过话」那一态上——重跑识别把某个源的候选
+    /// 清空时就是这样。**留着比缺着更糟**：那些值带着一条指向已经不存在的条目的**依据**，
+    /// 事后复核会对不上。
+    ///
+    /// 与 [`put_scraped`](Self::put_scraped) 一样，**只碰这个源的行**。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn forget_scraped(
+        &mut self,
+        anchor: &str,
+        subject: &str,
+        source: &str,
+    ) -> Result<(), CatalogError> {
+        for sql in [
+            "DELETE FROM scrape_value WHERE anchor = ?1 AND subject = ?2 AND source = ?3",
+            "DELETE FROM media_ref    WHERE anchor = ?1 AND subject = ?2 AND source = ?3",
+            "DELETE FROM scrape_probe WHERE anchor = ?1 AND subject = ?2 AND source = ?3",
+        ] {
+            self.conn
+                .execute(sql, params![anchor, subject, source])
+                .map_err(|source| self.err(source))?;
+        }
+        Ok(())
+    }
+
     /// 把刮削结论整批清掉。`--refresh` 之外还有一个用处：换一套源之后重来。
     ///
     /// **媒体池里的文件一个都不删**——池是内容寻址的，删文件要先确认没人再引用它，
@@ -577,5 +700,65 @@ impl Catalog {
     /// 写库失败时返回错误。
     pub fn clear_scraped(&mut self) -> Result<(), CatalogError> {
         self.batch("DELETE FROM media_ref; DELETE FROM scrape_value; DELETE FROM scrape_probe;")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 引用一份池里没有的媒体会被外键挡下() {
+        // `media_ref.hash REFERENCES media(hash)` **不是装饰**：`rusqlite` 的 bundled
+        // SQLite 编译时开了 `SQLITE_DEFAULT_FOREIGN_KEYS=1`，外键检查默认就是开着的
+        // （票 07 为此在 `variant` 上补过两条索引，见 `catalog::content`）。
+        // 这条测试把那个前提钉住——哪天换了 SQLite 的编译选项，这里会先响。
+        let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+        let 悬空 = Harvested {
+            anchor: "变体".to_string(),
+            subject: "FC/某个.zip".to_string(),
+            source: "本地媒体".to_string(),
+            input: "指纹".to_string(),
+            values: Vec::new(),
+            media: vec![HarvestedMedia {
+                kind: "封面".to_string(),
+                hash: "池里根本没有这一份".to_string(),
+                evidence: "编的".to_string(),
+            }],
+        };
+        assert!(catalog.put_scraped(&[悬空]).is_err());
+    }
+
+    #[test]
+    fn 一个源的值删得干净而别的源一条不碰() {
+        let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+        let 采到 = |source: &str, value: &str| Harvested {
+            anchor: "作品".to_string(),
+            subject: "魔界村".to_string(),
+            source: source.to_string(),
+            input: format!("{source} 的指纹"),
+            values: vec![HarvestedValue {
+                field: "标题".to_string(),
+                value: value.to_string(),
+                evidence: "依据".to_string(),
+            }],
+            media: Vec::new(),
+        };
+        catalog
+            .put_scraped(&[
+                采到("No-Intro", "Ghosts 'n Goblins"),
+                采到("TOSEC", "魔界村"),
+            ])
+            .expect("写得进");
+        catalog
+            .forget_scraped("作品", "魔界村", "TOSEC")
+            .expect("删得掉");
+
+        let 剩下 = catalog.scraped_values("作品", "魔界村").expect("读得出");
+        assert_eq!(剩下.len(), 1);
+        assert_eq!(剩下[0].source, "No-Intro");
+        // 采集记录也跟着走，否则下一趟会以为 TOSEC 采过了。
+        let 记录 = catalog.scrape_inputs("作品", "魔界村").expect("读得出");
+        assert_eq!(记录.keys().collect::<Vec<_>>(), vec!["No-Intro"]);
     }
 }

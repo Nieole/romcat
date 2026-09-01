@@ -29,7 +29,7 @@
 //! 与平台清单、数据源清单一样：工具内置一份，`--priorities <文件>` 整份换掉，
 //! `romcat scrape --dump-priorities` 导得出底稿。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::Deserialize;
@@ -225,6 +225,25 @@ impl Priorities {
         self.orders.keys().map(String::as_str).collect()
     }
 
+    /// 表里点名了、而 `known` 里没有的源，去重后按字典序。
+    ///
+    /// **不是错误**：规则三说得很清楚，没列到的源按时间戳兜底，反过来列了不存在的源
+    /// 也只是排序时永远轮不到它。但那是**静默**的——用户以为自己调了优先级，实际什么
+    /// 也没发生。所以报告要点名。人工来源（[`VERDICT`]）不算：它到票 08 才产出值，
+    /// 位置先占着是有意的。
+    #[must_use]
+    pub fn sources_not_in(&self, known: &[&str]) -> Vec<String> {
+        let mut out: BTreeSet<&str> = BTreeSet::new();
+        for order in self.orders.values().chain(self.overrides.values()) {
+            for source in order {
+                if source != VERDICT && !known.contains(&source.as_str()) {
+                    out.insert(source);
+                }
+            }
+        }
+        out.into_iter().map(ToString::to_string).collect()
+    }
+
     /// 按平台的覆盖有哪几条。
     #[must_use]
     pub fn platform_overrides(&self) -> Vec<(&str, &str, &[String])> {
@@ -368,6 +387,26 @@ mod tests {
                 "字段「{field}」没有把人工来源排在最前"
             );
         }
+    }
+
+    #[test]
+    fn 表里点名了却不存在的源报得出来() {
+        let priorities = Priorities::builtin();
+        let 全都在 = [
+            "No-Intro",
+            "Redump",
+            "TOSEC",
+            "MAME",
+            "GoodNES",
+            "文件名",
+            "本地媒体",
+        ];
+        assert!(priorities.sources_not_in(&全都在).is_empty());
+        // 少了一个 TOSEC，就该点它的名——而不是让它静默地排到链尾。
+        assert_eq!(
+            priorities.sources_not_in(&["No-Intro", "Redump", "MAME", "GoodNES", "文件名"]),
+            vec!["TOSEC".to_string()]
+        );
     }
 
     #[test]

@@ -31,7 +31,7 @@ use crate::path::file_name_of_key;
 
 use super::{Field, Harvest, LocalMedia, Locality, MediaClaim, MediaKind, Source, Subject};
 
-use super::pool::normalized_ext;
+use super::pool::{extension_of, normalized_ext};
 
 /// **文件名源**：从变体主文件的名字里读一个标题。
 #[derive(Debug, Clone, Default)]
@@ -135,22 +135,29 @@ impl Source for LocalMediaSource {
         if subject.media.is_empty() {
             return None;
         }
-        // 指纹盖住的是**扫描判增量用的那个三元组**：键、大小、修改时间。只盖键的话，
-        // 一张图被原地换掉（名字没变、内容变了）就不会重收，池里那份成了旧的。
-        let parts: Vec<String> = subject
-            .media
-            .iter()
-            .map(|media| {
-                format!(
-                    "{}|{}|{}",
-                    media.key,
-                    media
-                        .bytes
-                        .map_or(-1, |bytes| i64::try_from(bytes).unwrap_or(i64::MAX)),
-                    media.mtime.unwrap_or(-1)
-                )
-            })
-            .collect();
+        // 指纹要盖住**一切会改变结果的东西**，漏一样，那一样变了就不会重收。
+        //
+        // - **扫描判增量用的那个三元组**（键、大小、修改时间）：只盖键的话，一张图被
+        //   原地换掉（名字没变、内容变了）就不会重收，池里那份成了旧的。
+        // - **这一趟的媒体上限**：上限从 32 MiB 提到 128 MiB，同一批文件该多收进来几份。
+        //   不盖它的话，调完上限重跑，缓存一口咬定「输入没变」而整条跳过——真库上那是
+        //   108 份永远收不进来的媒体，而且只有整份 `--refresh` 才逃得掉。
+        let mut parts: Vec<String> = vec![format!(
+            "上限={}",
+            subject
+                .media_limit
+                .map_or(-1, |cap| i64::try_from(cap).unwrap_or(i64::MAX))
+        )];
+        parts.extend(subject.media.iter().map(|media| {
+            format!(
+                "{}|{}|{}",
+                media.key,
+                media
+                    .bytes
+                    .map_or(-1, |bytes| i64::try_from(bytes).unwrap_or(i64::MAX)),
+                media.mtime.unwrap_or(-1)
+            )
+        }));
         let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
         Some(super::fingerprint(&refs))
     }
@@ -289,11 +296,6 @@ fn dir_of(key: &str) -> &str {
 
 fn stem_of(name: &str) -> &str {
     name.rsplit_once('.').map_or(name, |(stem, _)| stem)
-}
-
-fn extension_of(key: &str) -> &str {
-    let name = file_name_of_key(key);
-    name.rsplit_once('.').map_or("", |(_, ext)| ext)
 }
 
 #[cfg(test)]

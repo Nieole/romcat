@@ -281,7 +281,7 @@ struct ScrapeArgs {
     #[arg(long, value_name = "MiB")]
     max_media_mib: Option<u64>,
 
-    /// 无视缓存全部重采。**媒体池里的文件一个都不删**
+    /// 无视采集记录全部重采。**媒体池里的文件一个都不删**
     #[arg(long)]
     refresh: bool,
 
@@ -958,7 +958,7 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
         let _ = stdout.flush();
     }
     eprintln!(
-        "刮削用了 {:.1} 秒。回盘读了 {}（{} 份媒体），另有 {} 份媒体的哈希从中立库直接取回；\n         {} 个「锚点 × 源」因为输入没变整条跳过。池里新增 {} 份，{} 次算出来发现已经有了。",
+        "刮削用了 {:.1} 秒。回盘读了 {}（{} 份媒体），另有 {} 份媒体的哈希从中立库直接取回；\n         {} 个「锚点 × 源」因为输入没变整条跳过。池里新增 {} 份，另有 {} 次算出来发现池里已经有了（那就是「只存一份」）。",
         started.elapsed().as_secs_f64(),
         human_bytes(outcome.read_bytes),
         thousands(outcome.read_files),
@@ -970,6 +970,18 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
     // 两种跳过分开说。**它们不是同一件事**：超上限的那些文件好好的，
     // 是自己设了上限；读不动的那些是 ADR-0021 的第三态。合成一句话，
     // 用户会以为盘出了问题。
+    if outcome.forgotten > 0 {
+        eprintln!(
+            "有 {} 个「锚点 × 源」这次无话可说，上一轮的结论已清掉——\n             那些值背后的 DAT 条目不在了，留着只会带出一条对不上的依据。",
+            thousands(outcome.forgotten)
+        );
+    }
+    if outcome.not_media > 0 {
+        eprintln!(
+            "有 {} 份被认领的媒体，扩展名这一层却不认得——本地媒体源与媒体池的扩展名表\n             对不上了，这是要查的。",
+            thousands(outcome.not_media)
+        );
+    }
     if outcome.oversized_media > 0 {
         eprintln!(
             "有 {} 份媒体超过了 --max-media-mib 的上限，没收进来（文件本身没问题）。",
