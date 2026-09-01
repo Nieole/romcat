@@ -9,6 +9,7 @@
 //! 事实来源是中立库而不是某次扫描的内存状态（ADR-0001）：报告因此不必扫盘就出得来，
 //! 而第二次之后的扫描按 `(路径, 大小, 修改时间)` 跳过未变的文件。
 
+pub mod adapter;
 pub mod catalog;
 pub mod classify;
 pub mod container;

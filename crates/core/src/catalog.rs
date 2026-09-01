@@ -17,6 +17,7 @@
 
 pub mod baseline;
 pub mod content;
+pub mod frontend;
 pub mod identify;
 pub mod scrape;
 pub mod title;
@@ -39,6 +40,7 @@ use crate::shape;
 
 pub use baseline::{Baseline, Recorded, ScanDelta, Verdict};
 pub use content::{ReleaseRow, VariantRow};
+pub use frontend::{SnapshotOrigin, SnapshotRow};
 pub use identify::{
     AcceptedCandidate, Candidate, CandidateCounts, Confidence, ContentHash, EntryFact,
     Identification, Provenance, SourceCount, State,
@@ -315,6 +317,7 @@ impl Catalog {
         catalog.batch(identify::IDENTIFY_SCHEMA)?;
         catalog.batch(scrape::SCRAPE_SCHEMA)?;
         catalog.batch(title::TITLE_SCHEMA)?;
+        catalog.batch(frontend::FRONTEND_SCHEMA)?;
         let found: Option<String> = catalog
             .conn
             .query_row(

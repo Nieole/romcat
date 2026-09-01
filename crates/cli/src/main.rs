@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use std::{fs, io};
 
 use clap::{Args, Parser, Subcommand};
+use romcat_core::adapter::{self, Adapter, transfer};
 use romcat_core::catalog::Catalog;
 use romcat_core::dat::HttpFetcher;
 use romcat_core::dat::registry::Registry;
@@ -24,7 +25,7 @@ use romcat_core::fs::RealFs;
 use romcat_core::identify;
 use romcat_core::path;
 use romcat_core::platform::Manifest;
-use romcat_core::report::{DuplicateDetails, HealthReport, human_bytes, thousands};
+use romcat_core::report::{DuplicateDetails, HealthReport, human_bytes, pad, thousands};
 use romcat_core::scan::aggregate::{Aggregate, Limits};
 use romcat_core::scan::{self, CancelToken, CheckpointOptions, Jobs, ScanOptions};
 use romcat_core::scrape::{self, Priorities};
@@ -54,6 +55,12 @@ enum Command {
     Scrape(ScrapeArgs),
     /// 折出标题集合，挑出显示标题与排序标题，并报出多少个作品拿到了中文标题
     Titles(TitlesArgs),
+    /// 把维护者手工维护的前端元数据导进中立库。原文逐字节留存，往返实测当场报出档位
+    Import(ImportArgs),
+    /// 把中立库导出成前端元数据。作品级收敛，检测到外部改动就停下来、不静默覆盖
+    Export(ExportArgs),
+    /// 列出眼下带的适配器与它们的能力档位——导出前就知道哪个格式会丢掉什么
+    Adapters,
     /// 列出眼下生效的平台清单与成型规则，或者导出一份底稿照着改
     Platforms(PlatformsArgs),
     /// DAT 仓库：把几个哈希数据库镜像到本地，并报出每个平台有多少条可用记录
@@ -399,6 +406,116 @@ struct TitlesArgs {
     quiet: bool,
 }
 
+/// 用哪个适配器。两个子命令共用。
+#[derive(Debug, Args, Clone)]
+struct FormatArgs {
+    /// 前端格式（`romcat adapters` 列得出有哪些）
+    #[arg(long, value_name = "格式", default_value = "Pegasus")]
+    format: String,
+}
+
+impl FormatArgs {
+    fn load(&self) -> Result<Box<dyn Adapter>, String> {
+        adapter::find(&self.format).ok_or_else(|| {
+            let names: Vec<&str> = adapter::all().iter().map(|a| a.name()).collect();
+            format!(
+                "没有叫「{}」的适配器。眼下带的是：{}。",
+                self.format,
+                names.join("、")
+            )
+        })
+    }
+}
+
+/// `romcat import` 的参数。
+///
+/// **它一个字节都不改那些文件**：读进来、逐字节存下快照、把手工维护的值落进中立库。
+#[derive(Debug, Args)]
+struct ImportArgs {
+    /// 要导入的元数据文件，可以给多个
+    #[arg(required = true, value_name = "文件")]
+    files: Vec<PathBuf>,
+
+    /// 主库根目录。`file:` 里的路径要靠它折成变体的键
+    #[arg(long, value_name = "目录")]
+    root: Option<PathBuf>,
+
+    /// 按名字找中立库（扫描时用 `--library` 起的那个名字）
+    #[arg(long, value_name = "名字")]
+    library: Option<String>,
+
+    /// 工作目录：中立库存这里
+    #[arg(long, value_name = "目录")]
+    workspace: Option<PathBuf>,
+
+    #[command(flatten)]
+    format: FormatArgs,
+
+    /// 只跑往返实测、报出档位与会留下什么，**不写中立库**
+    #[arg(long)]
+    dry_run: bool,
+
+    /// 把报告另存为 JSON
+    #[arg(long, value_name = "文件")]
+    json: Option<PathBuf>,
+
+    /// 不打印文本报告
+    #[arg(long)]
+    quiet: bool,
+}
+
+/// `romcat export` 的参数。
+#[derive(Debug, Args)]
+struct ExportArgs {
+    /// 写到哪个目录
+    ///
+    /// 这个目录在语义上就是**主库根的替身**：文件里的 `file:` 是相对元数据文件所在
+    /// 目录解析的，而中立库的键是相对主库根的。把导出来的这几份文件放到主库根下，
+    /// 路径直接就对
+    #[arg(long, value_name = "目录")]
+    out: PathBuf,
+
+    /// 主库根目录。只用来找到对应的中立库，不会去读它；给了 `--library` 就不必再给
+    #[arg(long, value_name = "目录")]
+    root: Option<PathBuf>,
+
+    /// 按名字找中立库
+    #[arg(long, value_name = "名字")]
+    library: Option<String>,
+
+    /// 工作目录：中立库存这里
+    #[arg(long, value_name = "目录")]
+    workspace: Option<PathBuf>,
+
+    #[command(flatten)]
+    format: FormatArgs,
+
+    /// 字段级优先级表
+    #[arg(long, value_name = "文件")]
+    priorities: Option<PathBuf>,
+
+    /// **裁决**：这个变体是它那个作品在那个平台上的首选变体，压过「汉化 > 官中 > 日版」
+    /// 那条规则。可重复给，记进中立库、永久生效
+    #[arg(long = "prefer", value_name = "变体的键")]
+    prefer: Vec<String>,
+
+    /// 只排计划、报出这一趟会写什么，不写盘
+    #[arg(long)]
+    dry_run: bool,
+
+    /// 外面有人动过也照写。**这会丢掉那次手改**
+    #[arg(long)]
+    force: bool,
+
+    /// 把报告另存为 JSON
+    #[arg(long, value_name = "文件")]
+    json: Option<PathBuf>,
+
+    /// 不打印文本报告
+    #[arg(long)]
+    quiet: bool,
+}
+
 #[derive(Debug, Args)]
 struct PlatformsArgs {
     /// 工作目录：不给 `--manifest` 时来这里找 `platforms.toml`
@@ -520,6 +637,9 @@ fn main() -> ExitCode {
         Command::Identify(args) => run_identify(&args, &cancel),
         Command::Scrape(args) => run_scrape(&args, &cancel),
         Command::Titles(args) => run_titles(&args),
+        Command::Import(args) => run_import(&args),
+        Command::Export(args) => run_export(&args),
+        Command::Adapters => run_adapters(),
         Command::Platforms(args) => run_platforms(&args),
         Command::Dat(DatCommand::Sync(args)) => run_dat_sync(&args),
         Command::Dat(DatCommand::Report(args)) => run_dat_report(&args),
@@ -1244,6 +1364,212 @@ fn run_titles(args: &TitlesArgs) -> ExitCode {
         eprintln!(
             "库里一个作品都没有——标题挂在作品上，先跑一次 `romcat identify`，再跑 `romcat scrape`。"
         );
+    }
+    if !write_json(args.json.as_deref(), &report) {
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+/// 列出眼下带的适配器与它们的能力档位。
+///
+/// **能力档位对用户可见**是 ADR-0003 点名的要求：导出前就该说得出「这个格式会丢掉
+/// 你的什么」，而不是让用户事后发现。这里列的是每个适配器**声称的上限**——
+/// 实测档位由 `romcat import` 在维护者手上那份真文件上跑一趟往返断言出来。
+fn run_adapters() -> ExitCode {
+    println!("适配器与能力档位");
+    println!("{}", "═".repeat(24));
+    println!("{}{}元数据文件", pad("格式", 12), pad("上限", 12));
+    for adapter in adapter::all() {
+        println!(
+            "{}{}{}",
+            pad(adapter.name(), 12),
+            pad(adapter.ceiling().label(), 12),
+            adapter.file_name()
+        );
+    }
+    println!(
+        "\n上限是**声称**的。实测档位在 `romcat import` 时断言出来：\n\
+         每份文件读进来又写回去，逐字节比过——过了才算无损往返，没过自动降一档。"
+    );
+    ExitCode::SUCCESS
+}
+
+/// 把维护者手工维护的前端元数据导进中立库。
+fn run_import(args: &ImportArgs) -> ExitCode {
+    // **先认格式。** 打错一个格式名是最先该被告知的事，不该等到中立库都找过一遍。
+    let adapter = match args.format.load() {
+        Ok(adapter) => adapter,
+        Err(message) => return fail(message),
+    };
+    let (slug, located_by) = match locate(args.library.as_deref(), args.root.as_deref()) {
+        Ok(pair) => pair,
+        Err(message) => return fail(message),
+    };
+    let workspace = workspace_dir(args.workspace.as_deref());
+    let catalog_path = workspace::catalog_path(&workspace, slug);
+    if !catalog_path.exists() {
+        return fail(format!(
+            "还没有 {located_by} 这份中立库。先跑一次 `romcat scan`。"
+        ));
+    }
+    if let Some(root) = args.root.as_deref()
+        && let Some(target) = args.json.as_deref()
+        && let Err(message) = refuse_writing_into_library(root, target)
+    {
+        return fail(message);
+    }
+    let mut catalog = match open_catalog(&workspace, slug, args.root.as_deref()) {
+        Ok(catalog) => catalog,
+        Err(message) => return fail(message),
+    };
+    // `--dry-run` 走同一条路，只是落在一份临时的内存库上：往返实测与「会留下什么」
+    // 照报，中立库一行不动。
+    let report = if args.dry_run {
+        let mut scratch = match Catalog::open_in_memory() {
+            Ok(scratch) => scratch,
+            Err(error) => return fail(format!("临时中立库开不出来：{error}")),
+        };
+        transfer::import(
+            &mut scratch,
+            adapter.as_ref(),
+            &args.files,
+            args.root.as_deref(),
+        )
+    } else {
+        transfer::import(
+            &mut catalog,
+            adapter.as_ref(),
+            &args.files,
+            args.root.as_deref(),
+        )
+    };
+    let mut report = match report {
+        Ok(report) => report,
+        Err(error) => return fail(format!("导入没跑完：{error}")),
+    };
+    report.catalog = catalog.location().to_string();
+    if !args.quiet {
+        let text = report.render_text();
+        let mut stdout = io::stdout().lock();
+        let _ = stdout.write_all(text.as_bytes());
+        let _ = stdout.flush();
+    }
+    let 逐字节 = report.files.iter().filter(|file| file.roundtrip).count();
+    eprintln!(
+        "{} 份文件，其中 {} 份写回去与原文逐字节相同；实测档位是**{}**。{}",
+        thousands(report.files.len() as u64),
+        thousands(逐字节 as u64),
+        report.tier,
+        if args.dry_run {
+            "（`--dry-run`：中立库一行没动。）"
+        } else {
+            "原文已逐字节存进中立库。"
+        }
+    );
+    if args.root.is_none() && matches!(catalog.library_root(), Ok(None)) {
+        eprintln!(
+            "中立库里没记主库根、命令行也没给 `--root`：`file:` 里的路径折不成变体的键，\n\
+             这一趟只存了快照。加上 `--root <主库根>` 再跑一次，值才落得进库。"
+        );
+    }
+    if !write_json(args.json.as_deref(), &report) {
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+/// 把中立库导出成前端元数据。
+fn run_export(args: &ExportArgs) -> ExitCode {
+    let adapter = match args.format.load() {
+        Ok(adapter) => adapter,
+        Err(message) => return fail(message),
+    };
+    let (slug, located_by) = match locate(args.library.as_deref(), args.root.as_deref()) {
+        Ok(pair) => pair,
+        Err(message) => return fail(message),
+    };
+    let workspace = workspace_dir(args.workspace.as_deref());
+    let catalog_path = workspace::catalog_path(&workspace, slug);
+    if !catalog_path.exists() {
+        return fail(format!(
+            "还没有 {located_by} 这份中立库。先跑一次 `romcat scan`。"
+        ));
+    }
+    let priorities = match load_priorities(args.priorities.as_deref(), &workspace) {
+        Ok(priorities) => priorities,
+        Err(message) => return fail(message),
+    };
+    if let Some(root) = args.root.as_deref()
+        && let Some(target) = args.json.as_deref()
+        && let Err(message) = refuse_writing_into_library(root, target)
+    {
+        return fail(message);
+    }
+    let mut catalog = match open_catalog(&workspace, slug, None) {
+        Ok(catalog) => catalog,
+        Err(message) => return fail(message),
+    };
+
+    // **裁决先落库**：它是沉淀，不随这一趟导出消失。
+    for key in &args.prefer {
+        let variant = match catalog.variant(key) {
+            Ok(Some(variant)) => variant,
+            Ok(None) => return fail(format!("库里没有叫「{key}」的变体。")),
+            Err(error) => return fail(format!("中立库读不动：{error}")),
+        };
+        let work = match variant.work_id {
+            Some(id) => match catalog.work_names() {
+                Ok(names) => names.get(&id).cloned().unwrap_or_else(|| key.clone()),
+                Err(error) => return fail(format!("中立库读不动：{error}")),
+            },
+            None => key.clone(),
+        };
+        let platform = variant
+            .platform
+            .clone()
+            .unwrap_or_else(|| romcat_core::report::UNKNOWN_PLATFORM_LABEL.to_string());
+        if let Err(error) = catalog.set_preferred_variant(&work, &platform, key) {
+            return fail(format!("裁决写不进中立库：{error}"));
+        }
+        eprintln!("裁决已记下：作品「{work}」在 {platform} 上默认启动 {key}。");
+    }
+
+    let started = Instant::now();
+    let options = transfer::ExportOptions {
+        out: args.out.clone(),
+        dry_run: args.dry_run,
+        force: args.force,
+    };
+    let report = match transfer::export(&mut catalog, adapter.as_ref(), &priorities, &options) {
+        Ok(report) => report,
+        Err(error) => return fail(format!("导出没跑完：{error}")),
+    };
+    if !args.quiet {
+        let text = report.render_text();
+        let mut stdout = io::stdout().lock();
+        let _ = stdout.write_all(text.as_bytes());
+        let _ = stdout.flush();
+    }
+    eprintln!(
+        "导出用了 {:.1} 秒，一个字节都没读主库。{} 个条目写进 {} 份文件，实测档位**{}**。",
+        started.elapsed().as_secs_f64(),
+        thousands(report.entries),
+        thousands(report.files.len() as u64),
+        report.tier,
+    );
+    if !report.conflicts.is_empty() {
+        eprintln!(
+            "有 {} 份没写——外面有人动过。**没有静默覆盖**，详见报告。",
+            thousands(report.conflicts.len() as u64)
+        );
+        if !write_json(args.json.as_deref(), &report) {
+            return ExitCode::FAILURE;
+        }
+        return ExitCode::FAILURE;
+    }
+    if report.entries == 0 {
+        eprintln!("库里一个变体都没有——先跑一次 `romcat scan`，再跑 `romcat shape`。");
     }
     if !write_json(args.json.as_deref(), &report) {
         return ExitCode::FAILURE;

@@ -816,9 +816,14 @@ fn fingerprint(parts: &[&str]) -> String {
 /// 报告拿它分辨「优先级表里点名了一个不存在的源」（多半是打错字）与「点名了一个这一档
 /// 没参加的源」（正常，换个档案就有了）。混成一件事，用户每跑一趟离线档都会看见一句
 /// 「ScreenScraper 不存在」。
+///
+/// **适配器也在里面**：`romcat import` 把维护者手工维护的前端元数据落成
+/// `scrape_value`，源名就是那个适配器的名字（票 16）。它不参加 [`run`] 这一趟——
+/// 它是导入那一趟产出的——但它**确实往同一张表里写值**，因此优先级表点名它是正当的。
+/// 漏在这里，`priorities.toml` 里那一行就会被报成「打错字」。
 #[must_use]
 pub fn all_source_names() -> Vec<&'static str> {
-    vec![
+    let mut out = vec![
         "No-Intro",
         "Redump",
         "TOSEC",
@@ -827,7 +832,9 @@ pub fn all_source_names() -> Vec<&'static str> {
         local::FILENAME,
         local::LOCAL_MEDIA,
         online::SCREEN_SCRAPER,
-    ]
+    ];
+    out.extend(crate::adapter::names());
+    out
 }
 
 /// 这一档的全部源。**顺序无关**——谁排前面由优先级表说了算，不由这里说了算。

@@ -279,7 +279,7 @@ fn identify_variant(
         return Ok(Identification {
             variant_key: variant.key.clone(),
             state: State::Skipped,
-            reason: Some(format!("{}：{}", skip.kind(), skip.detail())),
+            reason: Some(skip.recorded()),
             units: 0,
             nkit: 0,
             read_bytes: 0,

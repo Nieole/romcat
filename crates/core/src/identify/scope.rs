@@ -36,8 +36,8 @@ impl Skip {
     #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {
-            Self::Patch(_) => "补丁",
-            Self::NoRelease(_) => "没有发行版链接",
+            Self::Patch(_) => PATCH,
+            Self::NoRelease(_) => NO_RELEASE,
         }
     }
 
@@ -48,7 +48,31 @@ impl Skip {
             Self::Patch(detail) | Self::NoRelease(detail) => detail,
         }
     }
+
+    /// 落进中立库 `identification.reason` 那一列的那句话。
+    ///
+    /// **写与读必须共用它。** 导出要挡下补丁（补丁不可运行，做不成前端条目），
+    /// 判据只能从这一列读回来——识别那一趟才有容器内容可看，导出这一趟没有。
+    /// 两处各写一遍格式串，改一次就会有一处对不上。
+    #[must_use]
+    pub fn recorded(&self) -> String {
+        format!("{}：{}", self.kind(), self.detail())
+    }
+
+    /// 从库里那句话认回它是哪一类；认不出是 `None`。
+    #[must_use]
+    pub fn kind_in(recorded: &str) -> Option<&'static str> {
+        [PATCH, NO_RELEASE]
+            .into_iter()
+            .find(|kind| recorded.starts_with(&format!("{kind}：")))
+    }
 }
+
+/// 「补丁」那一类在报告与库里叫什么。
+pub const PATCH: &str = "补丁";
+
+/// 「没有发行版链接」那一类在报告与库里叫什么。
+pub const NO_RELEASE: &str = "没有发行版链接";
 
 /// 补丁的扩展名。它们一个都不在 [`classify`] 的三类主线里——补丁不是内容。
 const PATCH_EXTENSIONS: &[&str] = &[
