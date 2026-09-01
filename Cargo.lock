@@ -530,6 +530,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "quick-xml",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",

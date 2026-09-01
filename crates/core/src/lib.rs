@@ -20,6 +20,7 @@ pub mod path;
 pub mod platform;
 pub mod report;
 pub mod scan;
+pub mod scrape;
 pub mod shape;
 pub mod testing;
 pub mod workspace;

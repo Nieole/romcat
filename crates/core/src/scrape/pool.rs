@@ -1,0 +1,367 @@
+//! **媒体池**：按内容哈希存放全部封面、截图、视频的中央仓库，位于本机（ADR-0009）。
+//!
+//! ## 文件名不是媒体的主键
+//!
+//! 各前端的媒体目录互不兼容，而且**匹配键在格式之间横跳**：Pegasus 按 ROM 文件名、
+//! ES-DE 按文件名、RetroArch 按净化后的 label、Batocera 按文件名加后缀。净化函数
+//! **多对一不可逆**——两个不同的标题净化成同一个 label 之后，谁也说不出那张图原本是谁的。
+//!
+//! 于是媒体一律按**内容哈希**入池，映射只存在中立库里，导出时再按目标格式铺设。
+//! 「同一份媒体被多个条目引用时只存一份」因此不是另加的去重步骤，而是内容寻址天然给的：
+//! 两个条目引用同一串字节，算出来就是同一个哈希，落在同一个文件上。
+//!
+//! ## 布局
+//!
+//! ```text
+//! <池>/ab/abcdef…0123.jpg      内容哈希的前两位分一层目录
+//! <池>/tmp/…                   算哈希时的落脚处，算完就改名进去
+//! ```
+//!
+//! 分一层目录是给文件系统留余地：一个目录里几十万个文件在很多文件系统上会明显变慢。
+//!
+//! **扩展名以中立库里记的那一个为准**：同一串字节以 `.jpg` 与 `.jpeg` 两个名字出现时
+//! 哈希是同一个，各按各的扩展名落盘就成了两个文件，「只存一份」当场失效。
+//!
+//! ## 为什么是 SHA-256 而不是识别那一层的 CRC-32
+//!
+//! CRC-32 是**校验**不是**指纹**：32 位在几万份媒体上撞一次的概率已经不能忽略，而池是
+//! 内容寻址的——撞一次就是一张封面悄悄变成另一张。识别那一层用 CRC-32 是因为 DAT 用它、
+//! 而且撞上之后还有大小与 DAT 记录兜底；池这里没有第二道判据。
+
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use ring::digest::{Context, SHA256};
+
+use crate::catalog::{Catalog, CatalogError};
+use crate::fs::LibraryFs;
+use crate::path;
+
+/// 媒体池读写出错。
+#[derive(Debug, thiserror::Error)]
+pub enum PoolError {
+    /// 目录建不出来，或者文件落不进去。
+    #[error("媒体池写不了：{path}（{source}）")]
+    Io {
+        /// 出问题的路径。
+        path: String,
+        /// 底层错误。
+        source: io::Error,
+    },
+}
+
+/// 一份内容读进池里的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ingested {
+    /// 哈希是从中立库里直接取回来的，**一个字节都没读盘**。
+    Reused {
+        /// 内容哈希。
+        hash: String,
+    },
+    /// 读了盘、算了哈希。
+    Stored {
+        /// 内容哈希。
+        hash: String,
+        /// 读了多少字节。
+        bytes: u64,
+        /// 池里此前没有这份内容吗。`false` 就是**去重命中**——算出来发现已经有了，
+        /// 池里仍然只有一个文件。
+        fresh: bool,
+    },
+    /// **超过了单份媒体的上限。** 文件好好的，是用户设了上限——
+    /// 与「读不动」是平行的两件事，混成一个数，报告就说不出「跳过的那些到底怎么了」
+    /// （`CONTEXT.md` 分开 **穿不透** 与 **不可读** 是同一个道理）。
+    TooBig {
+        /// 已知的字节数；库里没记就是 `None`。
+        bytes: Option<u64>,
+    },
+    /// **读不动。** ADR-0021 的第三态在媒体这一侧的样子：条目在库里，字节取不到。
+    Unreadable {
+        /// 为什么。
+        why: String,
+    },
+    /// 这个扩展名不当成媒体收。防御性的一档——本地媒体源本来就按扩展名筛过一遍了。
+    NotMedia {
+        /// 哪一个。
+        key: String,
+    },
+}
+
+/// 媒体池。
+#[derive(Debug, Clone)]
+pub struct MediaPool {
+    root: PathBuf,
+}
+
+/// 临时文件的编号。同一个进程里连着收几百份媒体，名字不能撞。
+static TEMP: AtomicU64 = AtomicU64::new(0);
+
+impl MediaPool {
+    /// 打开（必要时新建）一个媒体池。
+    ///
+    /// # Errors
+    /// 目录建不出来时返回错误。
+    pub fn open(root: &Path) -> Result<Self, PoolError> {
+        let pool = Self {
+            root: root.to_path_buf(),
+        };
+        mkdir(&pool.root)?;
+        mkdir(&pool.tmp())?;
+        Ok(pool)
+    }
+
+    /// 池在哪。
+    #[must_use]
+    pub fn location(&self) -> &Path {
+        &self.root
+    }
+
+    /// 一份媒体在池里的落点。
+    #[must_use]
+    pub fn path_of(&self, hash: &str, ext: &str) -> PathBuf {
+        let shard = hash.get(..2).unwrap_or("00");
+        self.root.join(shard).join(format!("{hash}.{ext}"))
+    }
+
+    /// 池里有这一份吗。
+    #[must_use]
+    pub fn contains(&self, hash: &str, ext: &str) -> bool {
+        self.path_of(hash, ext).is_file()
+    }
+
+    fn tmp(&self) -> PathBuf {
+        self.root.join("tmp")
+    }
+
+    /// 把临时文件改名进池里。**已经有了就删掉临时文件**——那正是「只存一份」。
+    fn adopt(&self, temp: &Path, hash: &str, ext: &str) -> Result<bool, PoolError> {
+        let target = self.path_of(hash, ext);
+        if target.is_file() {
+            let _ = std::fs::remove_file(temp);
+            return Ok(false);
+        }
+        if let Some(parent) = target.parent() {
+            mkdir(parent)?;
+        }
+        std::fs::rename(temp, &target).map_err(|source| PoolError::Io {
+            path: path::display(&target),
+            source,
+        })?;
+        Ok(true)
+    }
+}
+
+fn mkdir(dir: &Path) -> Result<(), PoolError> {
+    std::fs::create_dir_all(dir).map_err(|source| PoolError::Io {
+        path: path::display(dir),
+        source,
+    })
+}
+
+/// 认得出的媒体扩展名，以及它们**规范化之后**叫什么。
+///
+/// `jpeg` 折成 `jpg` 是有代价可算的：不折的话同一串字节在池里会有两个名字。
+const NORMALIZED: &[(&str, &str)] = &[
+    ("jpg", "jpg"),
+    ("jpeg", "jpg"),
+    ("png", "png"),
+    ("gif", "gif"),
+    ("webp", "webp"),
+    ("bmp", "bmp"),
+    ("tga", "tga"),
+    ("mp4", "mp4"),
+    ("mkv", "mkv"),
+    ("webm", "webm"),
+    ("mov", "mov"),
+    ("avi", "avi"),
+];
+
+/// 这个扩展名是媒体吗，规范化之后叫什么。
+#[must_use]
+pub fn normalized_ext(ext: &str) -> Option<&'static str> {
+    let lower = ext.to_ascii_lowercase();
+    NORMALIZED
+        .iter()
+        .find(|(name, _)| *name == lower)
+        .map(|(_, canonical)| *canonical)
+}
+
+/// 一次读取的块大小。64 KiB 是「系统调用次数」与「内存占用」之间的常规折中。
+const CHUNK: usize = 64 * 1024;
+
+/// 把主库里的一份媒体收进池里。
+///
+/// **主库只读**（ADR-0004）：这里只 `open` 加顺序读，一个字节都不写回去。
+///
+/// # Errors
+/// 中立库读写不了、或者池写不进时返回错误。**读不动那份媒体不是错误**——它返回
+/// [`Ingested::Skipped`]，那一份跳过，整趟继续。
+pub fn ingest(
+    library: &dyn LibraryFs,
+    catalog: &mut Catalog,
+    pool: &MediaPool,
+    root: &Path,
+    claim: &Claim<'_>,
+) -> Result<Ingested, IngestError> {
+    let key = claim.key;
+    let Some(ext) = normalized_ext(extension_of(key)) else {
+        return Ok(Ingested::NotMedia {
+            key: key.to_string(),
+        });
+    };
+    // **先按库里记的大小拦一道，再打开文件。** 不拦的话，一份 662 MiB 的预览视频要先读
+    // 满上限那一段才发现超了——真库上那是 3.4 GiB 的白读。库里的大小可能过期，
+    // 所以下面读的时候还有一道兜底。
+    if let (Some(cap), Some(bytes)) = (claim.max_bytes, claim.bytes)
+        && bytes > cap
+    {
+        return Ok(Ingested::TooBig { bytes: Some(bytes) });
+    }
+    // 算过的哈希留着。**读过的盘不白读**：一块 8.60 TiB 的盘上，第二趟不该再读一遍
+    // （挂账 D14 在识别那一侧兑现过一次，这里是同一条）。
+    if let Some((_, hash)) = catalog.media_blob(key)? {
+        let stored = catalog.media_ext(&hash)?;
+        if let Some(stored) = stored
+            && pool.contains(&hash, &stored)
+        {
+            return Ok(Ingested::Reused { hash });
+        }
+    }
+
+    let path = root.join(key.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let mut reader = match library.open(&path) {
+        Ok(reader) => reader,
+        Err(source) => {
+            return Ok(Ingested::Unreadable {
+                why: format!("{key} 打不开（{source}）"),
+            });
+        }
+    };
+
+    let temp = pool.tmp().join(format!(
+        "{}-{}.part",
+        std::process::id(),
+        TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut sink = std::fs::File::create(&temp).map_err(|source| PoolError::Io {
+        path: path::display(&temp),
+        source,
+    })?;
+    let mut context = Context::new(&SHA256);
+    let mut buf = vec![0_u8; CHUNK];
+    let mut bytes = 0_u64;
+    loop {
+        let got = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(got) => got,
+            Err(source) => {
+                drop(sink);
+                let _ = std::fs::remove_file(&temp);
+                return Ok(Ingested::Unreadable {
+                    why: format!("{key} 读到一半读不动了（{source}）"),
+                });
+            }
+        };
+        bytes += got as u64;
+        // 兜底：库里记的大小过期时（文件换过、还没重扫），照样不许超上限。
+        if let Some(cap) = claim.max_bytes
+            && bytes > cap
+        {
+            drop(sink);
+            let _ = std::fs::remove_file(&temp);
+            return Ok(Ingested::TooBig { bytes: claim.bytes });
+        }
+        context.update(&buf[..got]);
+        sink.write_all(&buf[..got])
+            .map_err(|source| PoolError::Io {
+                path: path::display(&temp),
+                source,
+            })?;
+    }
+    sink.flush().map_err(|source| PoolError::Io {
+        path: path::display(&temp),
+        source,
+    })?;
+    drop(sink);
+
+    let hash = hex(context.finish().as_ref());
+    // 扩展名以库里记的那一个为准：同一串字节先以 `.jpeg` 进过池，后来又以 `.jpg`
+    // 撞上来，仍然落在原来那个文件上。
+    let ext = catalog.media_ext(&hash)?.unwrap_or_else(|| ext.to_string());
+    let fresh = pool.adopt(&temp, &hash, &ext)?;
+    catalog.put_media(&hash, &ext, bytes)?;
+    catalog.put_media_blob(key, &hash, bytes)?;
+    Ok(Ingested::Stored { hash, bytes, fresh })
+}
+
+/// 要收的一份媒体：它是谁、库里说它多大、这一趟的上限是多少。
+///
+/// 把三样捏成一个结构，是为了让 [`ingest`] 的参数表停在五个以内，也为了让
+/// 「先按库里记的大小拦一道」这件事在类型上说得出来——没有 `bytes` 就只能读了才知道。
+#[derive(Debug, Clone, Copy)]
+pub struct Claim<'a> {
+    /// 主库里那份媒体的键。
+    pub key: &'a str,
+    /// 库里记的字节数；元数据读不到时是 `None`（ADR-0021）。
+    pub bytes: Option<u64>,
+    /// 单份媒体的上限；`None` 是不设上限。
+    pub max_bytes: Option<u64>,
+}
+
+/// 收一份媒体时可能出的错。
+#[derive(Debug, thiserror::Error)]
+pub enum IngestError {
+    /// 中立库读写失败。
+    #[error(transparent)]
+    Catalog(#[from] CatalogError),
+    /// 媒体池读写失败。
+    #[error(transparent)]
+    Pool(#[from] PoolError),
+}
+
+fn extension_of(key: &str) -> &str {
+    let name = path::file_name_of_key(key);
+    name.rsplit_once('.').map_or("", |(_, ext)| ext)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 扩展名规范化把jpeg折成jpg() {
+        assert_eq!(normalized_ext("JPEG"), Some("jpg"));
+        assert_eq!(normalized_ext("jpg"), Some("jpg"));
+        assert_eq!(normalized_ext("nes"), None);
+    }
+
+    #[test]
+    fn 落点按哈希前两位分片() {
+        let pool = MediaPool {
+            root: PathBuf::from("/池"),
+        };
+        assert_eq!(
+            pool.path_of("abcdef", "jpg"),
+            PathBuf::from("/池/ab/abcdef.jpg")
+        );
+    }
+
+    #[test]
+    fn 哈希是sha256() {
+        // FIPS 180-4 的经典测试向量：空串。
+        let context = Context::new(&SHA256);
+        assert_eq!(
+            hex(context.finish().as_ref()),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+}

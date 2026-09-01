@@ -18,6 +18,7 @@
 pub mod baseline;
 pub mod content;
 pub mod identify;
+pub mod scrape;
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -42,11 +43,19 @@ pub use identify::{
     SourceCount, State,
 };
 
-/// 中立库的结构版本。结构变了就加 1；读到对不上的版本直接让用户删库重扫。
+/// 中立库的结构版本。**读到对不上的版本直接让用户删库重扫。**
 ///
 /// 3 是票 05 加的三层内容层级与合集（`catalog::content`）；**4** 是票 07 加的识别结论
 /// （`catalog::identify`：候选、结论、算过的哈希，以及作品与发行版上那一列来路）。
 /// **删库重扫这条路到票 08 就走不通了**——那时沉淀库里攒着裁决，重扫补不回来（挂账 D26）。
+///
+/// ## 什么算「结构变了」
+///
+/// 加 1 的判据是**旧数据会不会被读错**，不是「文件里多了点东西」。票 13 的刮削那五张表
+/// （`catalog::scrape`）是**纯加表**：已有的表一列没动、一条语义没改，`CREATE TABLE IF
+/// NOT EXISTS` 在打开时就把它们补上，旧库照样打得开，拿旧版程序再打开也照样能用。
+/// 为它逼用户删掉 780 MB 的库、重扫 27 分钟、重跑 14 分钟识别，换不到任何东西
+/// （挂账 D50）。**改了已有表的列或含义才加 1。**
 pub const SCHEMA_VERSION: u32 = 4;
 
 const SCHEMA: &str = "\
@@ -302,6 +311,7 @@ impl Catalog {
         catalog.batch(SCHEMA)?;
         catalog.batch(content::CONTENT_SCHEMA)?;
         catalog.batch(identify::IDENTIFY_SCHEMA)?;
+        catalog.batch(scrape::SCRAPE_SCHEMA)?;
         let found: Option<String> = catalog
             .conn
             .query_row(
@@ -646,6 +656,11 @@ impl Catalog {
             let mut clear_hashes = tx
                 .prepare("DELETE FROM content_hash WHERE key = ?1")
                 .map_err(to_err)?;
+            // 媒体文件变了，上一趟算出来的内容哈希同样作废——留着它，刮削会拿一个
+            // 对不上的哈希去引用**媒体池**里另一份内容的图。与 content_hash 同一条路。
+            let mut clear_media = tx
+                .prepare("DELETE FROM media_blob WHERE key = ?1")
+                .map_err(to_err)?;
             let mut clear_container = tx
                 .prepare("DELETE FROM container WHERE key = ?1")
                 .map_err(to_err)?;
@@ -717,6 +732,7 @@ impl Catalog {
                 let changed = matches!(record.verdict, Verdict::Added | Verdict::Changed);
                 if changed {
                     clear_hashes.execute(params![record.key]).map_err(to_err)?;
+                    clear_media.execute(params![record.key]).map_err(to_err)?;
                 }
                 if is_container && (changed || record.container.is_some()) {
                     clear_inner.execute(params![record.key]).map_err(to_err)?;
@@ -871,7 +887,8 @@ impl Catalog {
         self.batch(
             "DELETE FROM container_entry WHERE key NOT IN (SELECT key FROM entry);
              DELETE FROM container       WHERE key NOT IN (SELECT key FROM entry);
-             DELETE FROM content_hash    WHERE key NOT IN (SELECT key FROM entry);",
+             DELETE FROM content_hash    WHERE key NOT IN (SELECT key FROM entry);
+             DELETE FROM media_blob      WHERE key NOT IN (SELECT key FROM entry);",
         )?;
         Ok(removed)
     }

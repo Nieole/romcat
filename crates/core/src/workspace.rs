@@ -167,6 +167,19 @@ pub fn dat_cache_dir(workspace: &Path) -> PathBuf {
     workspace.join("dat").join("cache")
 }
 
+/// **媒体池**在哪。
+///
+/// 与 DAT 库一样**不带 [`Slug`]**，理由也一样：池是**内容寻址**的，同一张封面在两块盘
+/// 上算出来是同一个哈希，跟着主库分开存等于把同一份内容存两遍。而映射（谁引用了哪一份）
+/// 落在各自的中立库里，两块盘互不干扰。
+///
+/// 它**必须在本机**（ADR-0009）：外置盘不常挂载，池若跟着盘走，盘不在时连看一眼封面
+/// 都做不到。
+#[must_use]
+pub fn media_pool_dir(workspace: &Path) -> PathBuf {
+    workspace.join("media")
+}
+
 /// 某个主库的断点文件。
 #[must_use]
 pub fn checkpoint_path(workspace: &Path, slug: Slug<'_>) -> PathBuf {

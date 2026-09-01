@@ -33,6 +33,11 @@ quick-xml = "0.38"
 # 为了下几个文件引一整套 tokio 不划算。TLS 走 rustls，不依赖各机器上的系统库。
 ureq = "3"
 sevenz-rust2 = { version = "0.22", default-features = false, features = ["bzip2", "ppmd", "deflate"] }
+# **媒体池**按内容哈希存（ADR-0009），要一个货真价实的摘要——CRC-32 是校验不是指纹，
+# 32 位在几万份媒体上撞一次就是一张封面悄悄变成另一张。选 `ring` 而不是 `sha2`：
+# 它**已经在依赖树里**（ureq 的 rustls 后端用它），直接依赖不多编译一行代码，
+# 而 RustCrypto 那一套要新拉五六个 crate。
+ring = "0.17"
 
 # 主库只读是这个项目唯一不可退让的约束（ADR-0004），
 # 因此禁 unsafe，一切磁盘接触走 `romcat_core::fs::LibraryFs` 这个只读接缝。

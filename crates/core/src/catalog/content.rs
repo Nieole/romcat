@@ -546,6 +546,31 @@ impl Catalog {
             .map_err(|source| self.err(source))
     }
 
+    /// 全部**作品**：id → 名字。
+    ///
+    /// 刮削拿它做**锚点**：作品锚点是**作品名**而不是行号，因为重跑识别会把行整批
+    /// 换掉（`catalog::scrape` 的模块文档说的就是这件事）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn work_names(&self) -> Result<BTreeMap<i64, String>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT id, name FROM work")
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (id, name) = row.map_err(|source| self.err(source))?;
+            out.insert(id, name);
+        }
+        Ok(out)
+    }
+
     /// 一个作品下面有哪几条发行版。
     ///
     /// # Errors

@@ -27,6 +27,7 @@ use romcat_core::platform::Manifest;
 use romcat_core::report::{DuplicateDetails, HealthReport, human_bytes, thousands};
 use romcat_core::scan::aggregate::{Aggregate, Limits};
 use romcat_core::scan::{self, CancelToken, CheckpointOptions, Jobs, ScanOptions};
+use romcat_core::scrape::{self, Priorities};
 use romcat_core::shape;
 use romcat_core::workspace::{self, Slug};
 
@@ -48,6 +49,8 @@ enum Command {
     Shape(ShapeArgs),
     /// 拿变体的 CRC-32 加大小撞 DAT，产出带置信度与依据的候选，并报出真实命中率
     Identify(IdentifyArgs),
+    /// 在识别结论上取元数据与媒体。离线档只用本地数据源，一个网络请求都不发
+    Scrape(ScrapeArgs),
     /// 列出眼下生效的平台清单与成型规则，或者导出一份底稿照着改
     Platforms(PlatformsArgs),
     /// DAT 仓库：把几个哈希数据库镜像到本地，并报出每个平台有多少条可用记录
@@ -248,6 +251,69 @@ struct IdentifyArgs {
 }
 
 #[derive(Debug, Args)]
+struct ScrapeArgs {
+    /// 主库根目录。只有要把本地媒体收进媒体池才用得上；给了 `--library` 就不必再给
+    root: Option<PathBuf>,
+
+    /// 按名字找中立库（扫描时用 `--library` 起的那个名字）
+    #[arg(long, value_name = "名字")]
+    library: Option<String>,
+
+    /// 工作目录：中立库与媒体池存这里
+    #[arg(long, value_name = "目录")]
+    workspace: Option<PathBuf>,
+
+    /// 字段级优先级表
+    ///
+    /// 不给就先看工作目录里有没有 `priorities.toml`，都没有才用内置的那一份
+    #[arg(long, value_name = "文件")]
+    priorities: Option<PathBuf>,
+
+    /// 把**内置**优先级表写到这个文件，照着它改就是自己的一份
+    #[arg(long, value_name = "文件")]
+    dump_priorities: Option<PathBuf>,
+
+    /// 不收媒体。一个字节都不读主库，盘不在位时用它
+    #[arg(long)]
+    no_media: bool,
+
+    /// 单份媒体大到多少 MiB 就不收了；不给就不设上限
+    #[arg(long, value_name = "MiB")]
+    max_media_mib: Option<u64>,
+
+    /// 无视缓存全部重采。**媒体池里的文件一个都不删**
+    #[arg(long)]
+    refresh: bool,
+
+    /// 把报告另存为 JSON
+    #[arg(long, value_name = "文件")]
+    json: Option<PathBuf>,
+
+    /// 不打印文本报告
+    #[arg(long)]
+    quiet: bool,
+}
+
+impl ScrapeArgs {
+    /// 工作目录里那份可选的优先级表叫什么。
+    const IN_WORKSPACE: &'static str = "priorities.toml";
+
+    fn load_priorities(&self, workspace: &Path) -> Result<Priorities, String> {
+        let path = match &self.priorities {
+            Some(path) => path.clone(),
+            None => {
+                let candidate = workspace.join(Self::IN_WORKSPACE);
+                if !candidate.exists() {
+                    return Ok(Priorities::builtin());
+                }
+                candidate
+            }
+        };
+        Priorities::load(&path).map_err(|error| format!("{error}"))
+    }
+}
+
+#[derive(Debug, Args)]
 struct PlatformsArgs {
     /// 工作目录：不给 `--manifest` 时来这里找 `platforms.toml`
     #[arg(long, value_name = "目录")]
@@ -366,6 +432,7 @@ fn main() -> ExitCode {
         Command::Report(args) => run_report(&args),
         Command::Shape(args) => run_shape(&args),
         Command::Identify(args) => run_identify(&args, &cancel),
+        Command::Scrape(args) => run_scrape(&args, &cancel),
         Command::Platforms(args) => run_platforms(&args),
         Command::Dat(DatCommand::Sync(args)) => run_dat_sync(&args),
         Command::Dat(DatCommand::Report(args)) => run_dat_report(&args),
@@ -780,6 +847,146 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
     }
     if outcome.interrupted {
         eprintln!("这一趟被中断了，已经算完的那部分留在中立库里，重跑会从头算一遍。");
+        return ExitCode::from(130);
+    }
+    ExitCode::SUCCESS
+}
+
+/// 在识别结论上取元数据与媒体。**离线档一个网络请求都不发。**
+///
+/// 读盘只发生在一处：把主库里现成的图与视频收进**媒体池**。`--no-media` 把那一处也
+/// 关掉，于是一个字节都不读主库。
+fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
+    if let Some(path) = &args.dump_priorities {
+        match write_file(path, Priorities::builtin_text().as_bytes()) {
+            Ok(()) => {
+                println!(
+                    "内置优先级表已写入 {}。改完用 `--priorities {}` 生效，\n\
+                     或者放进工作目录叫 priorities.toml 自动生效。",
+                    path.display(),
+                    path.display()
+                );
+                return ExitCode::SUCCESS;
+            }
+            Err(error) => return fail(format!("写不进 {}：{error}", path.display())),
+        }
+    }
+
+    let (slug, located_by) = match locate(args.library.as_deref(), args.root.as_deref()) {
+        Ok(pair) => pair,
+        Err(message) => return fail(message),
+    };
+    let workspace = workspace_dir(args.workspace.as_deref());
+    let catalog_path = workspace::catalog_path(&workspace, slug);
+    if !catalog_path.exists() {
+        return fail(format!(
+            "还没有 {located_by} 这份中立库。先跑一次 `romcat scan`。"
+        ));
+    }
+    let priorities = match args.load_priorities(&workspace) {
+        Ok(priorities) => priorities,
+        Err(message) => return fail(message),
+    };
+    let mut catalog = match open_catalog(&workspace, slug, args.root.as_deref()) {
+        Ok(catalog) => catalog,
+        Err(message) => return fail(message),
+    };
+
+    // 主库根：命令行给的优先，没给就问中立库——盘换了挂载点时那一份才是对的。
+    let root = match args.root.clone() {
+        Some(root) => Some(root),
+        None => catalog.library_root().ok().flatten().map(PathBuf::from),
+    };
+    if root.is_none() && !args.no_media {
+        return fail("不知道主库在哪：给出主库根目录，或者加 --no-media 只采元数据不收媒体。");
+    }
+    // 主库只读（ADR-0004）：报告不许落进主库。
+    if let Some(root) = &root
+        && let Some(target) = args.json.as_deref()
+        && let Err(message) = refuse_writing_into_library(root, target)
+    {
+        return fail(message);
+    }
+
+    let pool_dir = workspace::media_pool_dir(&workspace);
+    // 媒体池也不许落进主库：它是要往里写文件的（ADR-0009 说它必须在本机）。
+    if let Some(root) = &root
+        && let Err(message) = refuse_writing_into_library(root, &pool_dir)
+    {
+        return fail(message);
+    }
+
+    let mut options = scrape::Options::new(root.clone().unwrap_or_default(), pool_dir);
+    options.media = !args.no_media;
+    options.max_media_bytes = args.max_media_mib.map(|mib| mib.saturating_mul(1 << 20));
+    options.refresh = args.refresh;
+
+    let library = RealFs::new();
+    let started = Instant::now();
+    let mut last = Instant::now();
+    let mut progress = |progress: scrape::Progress| {
+        if last.elapsed() >= Duration::from_secs(5) {
+            last = Instant::now();
+            eprintln!(
+                "  已采 {} / {} 个锚点，收进媒体 {} 份，读盘 {}",
+                thousands(progress.done),
+                thousands(progress.total),
+                thousands(progress.media),
+                human_bytes(progress.read_bytes),
+            );
+        }
+    };
+    let outcome = scrape::run(
+        &library,
+        &mut catalog,
+        &priorities,
+        &options,
+        &mut scrape::RunContext {
+            cancel,
+            progress: &mut progress,
+        },
+    );
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => return fail(format!("刮削失败：{error}")),
+    };
+
+    if !args.quiet {
+        let text = outcome.report.render_text();
+        let mut stdout = io::stdout().lock();
+        let _ = stdout.write_all(text.as_bytes());
+        let _ = stdout.flush();
+    }
+    eprintln!(
+        "刮削用了 {:.1} 秒。回盘读了 {}（{} 份媒体），另有 {} 份媒体的哈希从中立库直接取回；\n         {} 个「锚点 × 源」因为输入没变整条跳过。池里新增 {} 份，{} 次算出来发现已经有了。",
+        started.elapsed().as_secs_f64(),
+        human_bytes(outcome.read_bytes),
+        thousands(outcome.read_files),
+        thousands(outcome.reused_hashes),
+        thousands(outcome.reused_probes),
+        thousands(outcome.new_blobs),
+        thousands(outcome.deduped),
+    );
+    // 两种跳过分开说。**它们不是同一件事**：超上限的那些文件好好的，
+    // 是自己设了上限；读不动的那些是 ADR-0021 的第三态。合成一句话，
+    // 用户会以为盘出了问题。
+    if outcome.oversized_media > 0 {
+        eprintln!(
+            "有 {} 份媒体超过了 --max-media-mib 的上限，没收进来（文件本身没问题）。",
+            thousands(outcome.oversized_media)
+        );
+    }
+    if outcome.unreadable_media > 0 {
+        eprintln!(
+            "有 {} 份媒体读不动，跳过了（ADR-0021 的第三态，不是错误）。",
+            thousands(outcome.unreadable_media)
+        );
+    }
+    if !write_json(args.json.as_deref(), &outcome.report) {
+        return ExitCode::FAILURE;
+    }
+    if outcome.interrupted {
+        eprintln!("这一趟被中断了，已经采完的那部分留在中立库里，重跑会接着采。");
         return ExitCode::from(130);
     }
     ExitCode::SUCCESS

@@ -251,6 +251,9 @@ pub struct Identification {
 /// 逐条走识别结论时收到的那五样：平台、结论、理由、变体的键、这一趟读了多少字节。
 pub type IdentificationVisitor<'a> = dyn FnMut(Option<&str>, State, Option<&str>, &str, u64) + 'a;
 
+/// 逐条走候选时收到的那五样：变体的键、源、DAT、条目名、中文记号。
+pub type CandidateFactVisitor<'a> = dyn FnMut(&str, &str, &str, &str, Option<ChineseMark>) + 'a;
+
 /// 一个数据源贡献了多少条候选。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceCount {
@@ -716,6 +719,41 @@ impl Catalog {
             .map_err(|source| self.err(source))?;
         rows.collect::<Result<_, _>>()
             .map_err(|source| self.err(source))
+    }
+
+    /// 一条条走过全部**候选**里刮削用得上的那几列：变体的键、源、DAT、条目名、中文记号。
+    ///
+    /// 走回调而不是返回一整份 `Vec`：真库里这是 150,959 行，而刮削要的只是把它们按
+    /// 锚点归堆。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn for_each_candidate_fact(
+        &self,
+        each: &mut CandidateFactVisitor,
+    ) -> Result<(), CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT variant_key, source, dat, game, chinese FROM candidate
+                 ORDER BY variant_key, id",
+            )
+            .map_err(|source| self.err(source))?;
+        let mut rows = statement.query([]).map_err(|source| self.err(source))?;
+        while let Some(row) = rows.next().map_err(|source| self.err(source))? {
+            let key: String = row.get(0).map_err(|source| self.err(source))?;
+            let src: String = row.get(1).map_err(|source| self.err(source))?;
+            let dat: String = row.get(2).map_err(|source| self.err(source))?;
+            let game: String = row.get(3).map_err(|source| self.err(source))?;
+            let chinese: Option<String> = row.get(4).map_err(|source| self.err(source))?;
+            let mark = chinese.as_deref().and_then(|label| match label {
+                "汉化" => Some(ChineseMark::FanTranslated),
+                "官中" => Some(ChineseMark::Official),
+                _ => None,
+            });
+            each(&key, &src, &dat, &game, mark);
+        }
+        Ok(())
     }
 
     /// 一条条走过全部识别结论：平台、结论、理由、变体的键、这一趟读了多少字节。
