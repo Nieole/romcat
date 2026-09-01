@@ -43,6 +43,7 @@ pub mod report;
 pub mod rule;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -61,15 +62,28 @@ const RATING_FIELD: &str = "评分";
 /// 一个**子库**的定义。
 ///
 /// 目标路径与前端格式在这里，**能力档案**（目标设备吃哪些格式）不在——那是票 21 的活。
+///
+/// ## 目标路径存两份，键与读盘各用各的
+///
+/// ADR-0020 的红线：**读盘用系统给的原始形式，入库与比较用 NFC**，两者不能混用。
+/// [`Self::target`] 是 NFC 的那一份（当键、进报告），[`Self::target_raw`] 是系统交出来
+/// 的原始那一份（[`Self::read_path`] 拿它去开目录）。只存 NFC 一份的话，目标目录名
+/// 是分解形式、又挂在**分解敏感**的文件系统上时，`canonicalize` 会失败然后被报成
+/// 「目标不在位」——而那正是最不该说的那个谎（挂账 D82）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sublibrary {
     /// 子库叫什么。命令行拿它指名道姓，也是中立库里的主键。
     pub name: String,
-    /// 目标设备上的子库根。
+    /// 目标设备上的子库根，**NFC 形式**（ADR-0020）。当键用、进报告用。
     ///
     /// 一律走读卡器（ADR-0015）：SD 卡挂成普通盘，于是这就是本机上的一个绝对路径。
     /// 卡不在位时它照样存着——子库是持久实体，不是「插上卡才存在的东西」。
     pub target: String,
+    /// 同一个目标根，**系统给的原始形式**。读盘走它（[`Self::read_path`]）。
+    ///
+    /// 路径不是有效 UTF-8 时是 `None`——那种名字存不成文本，只能退回 NFC 那一份。
+    /// 票 18 之前建的子库这一列也是 `None`（那时还没有这一列），行为与从前一致。
+    pub target_raw: Option<String>,
     /// 前端格式（适配器名）。
     pub format: String,
     /// 容量上限，字节；`None` 表示不设限。
@@ -78,6 +92,28 @@ pub struct Sublibrary {
     /// 自动截断的结果不可预测——同一套规则在两张不同容量的卡上会选出完全不同的东西，
     /// 而用户无从得知它砍掉了什么。
     pub capacity: Option<u64>,
+}
+
+impl Sublibrary {
+    /// 从一条**系统给的**目标路径造一个子库：两种形式一次填齐。
+    #[must_use]
+    pub fn at(name: &str, target: &Path, format: &str, capacity: Option<u64>) -> Self {
+        Self {
+            name: name.to_string(),
+            target: crate::path::nfc(&crate::path::display(target)).into_owned(),
+            target_raw: target.to_str().map(ToString::to_string),
+            format: format.to_string(),
+            capacity,
+        }
+    }
+
+    /// **读盘该用的那条路径**（ADR-0020）。
+    ///
+    /// 原始形式在就用原始形式；不在（老库、或者路径不是 UTF-8）才退回 NFC 那一份。
+    #[must_use]
+    pub fn read_path(&self) -> PathBuf {
+        PathBuf::from(self.target_raw.as_ref().unwrap_or(&self.target))
+    }
 }
 
 /// 一条**例外**是把变体强行拉进来还是踢出去。

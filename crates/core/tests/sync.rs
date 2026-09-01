@@ -29,12 +29,7 @@ fn 写(path: &Path, bytes: &[u8]) {
 }
 
 fn 子库(target: &Path, capacity: Option<u64>) -> Sublibrary {
-    Sublibrary {
-        name: "掌机".to_string(),
-        target: target.display().to_string(),
-        format: "Pegasus".to_string(),
-        capacity,
-    }
+    Sublibrary::at("掌机", target, "Pegasus", capacity)
 }
 
 // ───────────────────────── 一、那条硬约束是一条可断言的性质
@@ -130,6 +125,7 @@ fn 摆好现场(组合们: &[(String, 组合)]) -> (Desired, Manifest, TargetSta
                 source: path.clone(),
                 source_stamp: 记着,
                 variant: path.clone(),
+                absent: false,
             });
         }
         let stamp = match 这一种.目标 {
@@ -424,6 +420,7 @@ fn 手动拷进目标的存档在整条链路上绝对安全() {
                 mtime_ns: Some(7),
             },
             variant: "FC/魂斗罗.zip".to_string(),
+            absent: false,
         }],
     };
     catalog.put_manifest("掌机", &上次).expect("清单写得进");
@@ -532,6 +529,7 @@ fn 清单跟着子库一起没() {
                         mtime_ns: None,
                     },
                     variant: "FC/一.zip".to_string(),
+                    absent: false,
                 }],
             },
         )

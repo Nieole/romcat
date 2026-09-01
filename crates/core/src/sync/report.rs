@@ -15,6 +15,7 @@ use std::fmt::Write as _;
 
 use crate::report::{heading, human_bytes, pad, thousands};
 
+use super::execute::{Done, Outcome, Placement};
 use super::{Act, FileKind, Plan, Step, SurpriseKind, Tally};
 
 /// 每一类操作在报告里举几个例子。
@@ -127,7 +128,15 @@ impl Plan {
 
         heading(&mut out, "目标上对不上的");
         if self.surprises.is_empty() {
-            let _ = writeln!(out, "没有。清单记的每一条在目标上都还是原样。");
+            let _ = writeln!(
+                out,
+                "{}",
+                if self.withheld > 0 {
+                    "没有新的。"
+                } else {
+                    "没有。清单记的每一条在目标上都还是原样。"
+                },
+            );
         } else {
             for kind in SurpriseKind::all() {
                 let rows: Vec<_> = self
@@ -178,6 +187,14 @@ impl Plan {
                 out,
                 "⚠️ 目标上有 {} 个目录列不开，那几枝底下的东西全部说不清——说不清的一律不碰。",
                 thousands(self.unlistable_dirs),
+            );
+        }
+        if self.withheld > 0 {
+            let _ = writeln!(
+                out,
+                "另有 {} 个是**你删过、工具记着不补**的：选择集还要它们，但它们不会自己\n\
+                 长回来。这次加 `--restore` 才补。",
+                thousands(self.withheld),
             );
         }
 
@@ -287,6 +304,135 @@ impl Plan {
     }
 }
 
+impl Outcome {
+    /// 打给人看的**同步结果**。
+    ///
+    /// 它与[差量预览](Plan::render_text)是两份报告，因为回答的是两个不同的问题：
+    /// 预览说「会做什么」，这一份说「**做成了什么**」。两者对不上正是要看得见的东西
+    /// ——写不进去的那几个、被中断截住的那几个，都落在这个差里。
+    #[must_use]
+    pub fn render_text(&self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(out, "子库 {} · 同步结果", self.sublibrary);
+        let _ = writeln!(out, "{}", "═".repeat(24));
+        let _ = writeln!(out, "目标            {}", self.target);
+
+        heading(&mut out, "做成了什么");
+        done_line(&mut out, "新增", self.added);
+        done_line(&mut out, "更新", self.updated);
+        done_line(&mut out, "删除", self.deleted);
+        if self.touched() == 0 && self.failures.is_empty() {
+            let _ = writeln!(out, "**一个文件都没动**：目标本来就与选择集对齐。");
+        }
+
+        if let Some(placement) = self.placement {
+            heading(&mut out, "媒体怎么放的");
+            let _ = writeln!(out, "探测结果      {}（媒体池 → 目标）", placement.label());
+            // **这两个数只算媒体。** ROM 与元数据一律复制，把它们算进来会让「复制了
+            // 几份」虚高，然后这一栏指着一条走对了的链接路径说它没生效。
+            let _ = writeln!(
+                out,
+                "实际          媒体 {} 份：硬链接 {}、复制 {}",
+                thousands(self.linked + self.copied),
+                thousands(self.linked),
+                thousands(self.copied),
+            );
+            match placement {
+                Placement::Link => {
+                    let _ = writeln!(
+                        out,
+                        "同卷且支持硬链接，铺过去的媒体**不额外占空间**（ADR-0009）。",
+                    );
+                }
+                Placement::Copy => {
+                    let _ = writeln!(
+                        out,
+                        "目标文件系统不支持硬链接（SD 卡的 exFAT / FAT32 就是这样），\n\
+                         自动降级为复制——这是必需路径，不是退让。",
+                    );
+                }
+            }
+        }
+
+        heading(&mut out, "清单");
+        let _ = writeln!(
+            out,
+            "{}{} 条（同步完之后目标的真实状态）",
+            pad("现在记着", 12),
+            thousands(self.manifest.files.len() as u64),
+        );
+        if self.withheld > 0 {
+            let _ = writeln!(
+                out,
+                "其中 {} 条标着「你在目标上删过、工具记着不补」——**它们不会自己长回来**。\n\
+                 想补回来下次加 `--restore`；想让它们从此不再被念叨，记一条例外：\n\
+                 `romcat sublibrary except {} --exclude <变体的键>`",
+                thousands(self.withheld),
+                self.sublibrary,
+            );
+        }
+        if self.dropped > 0 {
+            let _ = writeln!(
+                out,
+                "另有 {} 条从清单里丢掉了：不要它们了，目标上也确实没有。",
+                thousands(self.dropped),
+            );
+        }
+
+        if !self.failures.is_empty() {
+            heading(&mut out, "没做成的");
+            let _ = writeln!(
+                out,
+                "{} 个。**它们没有进清单**——清单只记真的放上去了的那些。",
+                thousands(self.failures.len() as u64),
+            );
+            for failure in self.failures.iter().take(EXAMPLES) {
+                let _ = writeln!(
+                    out,
+                    "  {}{}——{}",
+                    pad(failure.act.label(), 6),
+                    failure.path,
+                    failure.why,
+                );
+            }
+            if self.failures.len() > EXAMPLES {
+                let _ = writeln!(
+                    out,
+                    "  …… 另有 {} 个。",
+                    thousands((self.failures.len() - EXAMPLES) as u64),
+                );
+            }
+        }
+        if self.gave_up {
+            let _ = writeln!(
+                out,
+                "\n⚠️ **连着 {} 个写不进去，停下来了。** 多半是卡满了、卡被拔了，\n\
+                 或者目标变成只读。清单记的是到停下来为止的真实状态，**接着跑就是**。",
+                thousands(super::execute::GIVE_UP_AFTER),
+            );
+        }
+        if self.interrupted {
+            let _ = writeln!(
+                out,
+                "\n⚠️ **这一趟被中断了。** 写到一半的那份已经清掉，落点上是完整的旧文件；\n\
+                 清单记的是到中断为止目标上的真实状态。**再跑一次就从剩下的接着来。**",
+            );
+        }
+        out
+    }
+}
+
+/// 做成了什么那一栏的一行。
+fn done_line(out: &mut String, name: &str, done: Done) {
+    let _ = writeln!(
+        out,
+        "{}{}{}",
+        pad(name, 12),
+        pad(&format!("{} 个文件", thousands(done.files)), 26),
+        human_bytes(done.bytes),
+    );
+}
+
 /// 差量那一栏的一行。
 fn line(out: &mut String, name: &str, tally: Tally, before: Option<u64>) {
     let _ = writeln!(
@@ -336,6 +482,7 @@ mod tests {
         Sublibrary {
             name: "掌机".to_string(),
             target: "/Volumes/SDCARD/Games".to_string(),
+            target_raw: Some("/Volumes/SDCARD/Games".to_string()),
             format: "Pegasus".to_string(),
             capacity: Some(4096),
         }

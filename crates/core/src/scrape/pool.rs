@@ -118,12 +118,28 @@ impl MediaPool {
     /// # Errors
     /// 目录建不出来时返回错误。
     pub fn open(root: &Path) -> Result<Self, PoolError> {
-        let pool = Self {
-            root: root.to_path_buf(),
-        };
+        let pool = Self::at(root);
         mkdir(&pool.root)?;
         mkdir(&pool.tmp())?;
         Ok(pool)
+    }
+
+    /// 指着一个池，**一个目录都不建**。
+    ///
+    /// 只读用途走这条：排一次计划要问「这份媒体在池里吗」，而排计划那条命令说的是
+    /// 「一个文件都没写」——顺手建出两个空目录也算食言。
+    #[must_use]
+    pub fn at(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+        }
+    }
+
+    /// 池里那个**临时落脚处**。硬链接探测拿它当源那一头（`sync::execute::probe`）：
+    /// 两头都得是工具自己的地盘，拿主库里的文件去试会改到主库那一侧的 inode。
+    #[must_use]
+    pub fn scratch(&self) -> PathBuf {
+        self.tmp()
     }
 
     /// 池在哪。

@@ -94,6 +94,7 @@ fn 建子库(catalog: &mut Catalog, name: &str, capacity: Option<u64>) {
         .put_sublibrary(&Sublibrary {
             name: name.to_string(),
             target: format!("/Volumes/SDCARD/{name}"),
+            target_raw: Some(format!("/Volumes/SDCARD/{name}")),
             format: "Pegasus".to_string(),
             capacity,
         })

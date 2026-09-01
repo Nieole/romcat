@@ -333,6 +333,9 @@ impl Catalog {
         catalog.batch(title::TITLE_SCHEMA)?;
         catalog.batch(frontend::FRONTEND_SCHEMA)?;
         catalog.batch(sublibrary::SUBLIBRARY_SCHEMA)?;
+        // 建完表再补列：票 18、19 建的那两张表在老库里已经存在，
+        // `CREATE TABLE IF NOT EXISTS` 对它们一个字都不改（见 `add_columns`）。
+        sublibrary::add_columns(&catalog.conn).map_err(|source| catalog.err(source))?;
         let found: Option<String> = catalog
             .conn
             .query_row(

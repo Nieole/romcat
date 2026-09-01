@@ -107,6 +107,54 @@ pub struct DirEntry {
     pub meta: EntryMeta,
 }
 
+/// 把一个**中立库的键**还原成盘上真实存在的那条路径。
+///
+/// ADR-0020 的红线：**读盘用系统给的原始形式，入库与比较用 NFC**。键是 NFC 的，
+/// 而盘上那个名字可能是分解形式——macOS 的 NTFS 驱动交出来的名字实测 1.99% 如此。
+/// 直接把键接在根后面去开文件，在**分解敏感**的文件系统上会打不开，然后这个失败
+/// 会被解释成「文件不在了」，而在同步这一侧，「不在了」意味着删除或者重传。
+///
+/// 于是这里分两步：
+///
+/// 1. **先原样试一次**。绝大多数路径两种形式相同，而查找不分解敏感的文件系统
+///    （实测 macOS 的 fskit NTFS 驱动就是，383 个两种形式不同的键 NFC/NFD 都开得了）
+///    连剩下那点也一次就中。这一步不花任何额外的系统调用。
+/// 2. **不中才逐段列目录去认**，按 NFC 折过再比。只有真正撞上分解敏感的文件系统时
+///    才走到这里。
+///
+/// 找不到时返回 `None`：**这是「盘上没有这条路径」的意思**，不是「读不动」。
+#[must_use]
+pub fn real_path(fs: &dyn LibraryFs, root: &Path, key: &str) -> Option<PathBuf> {
+    let direct = root.join(key.replace('/', std::path::MAIN_SEPARATOR_STR));
+    // `read_head` 读 0 字节：只要开得了就说明这条路径在。比 `metadata` 更贴近
+    // 「等下真要读它」这件事，而目录上它会失败——目录也确实不该走这条路。
+    if fs.read_head(&direct, 0).is_ok() {
+        return Some(direct);
+    }
+    let mut at = root.to_path_buf();
+    for segment in key.split('/') {
+        if segment.is_empty() {
+            continue;
+        }
+        let joined = at.join(segment);
+        // 逐段也先原样试：整条路径开不了可能只是因为最后一段是目录。
+        if fs.read_dir(&joined).is_ok() || fs.read_head(&joined, 0).is_ok() {
+            at = joined;
+            continue;
+        }
+        let entries = fs.read_dir(&at).ok()?;
+        let found = entries.into_iter().find(|entry| {
+            entry
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| crate::path::nfc(name) == crate::path::nfc(segment))
+        })?;
+        at = found.path;
+    }
+    Some(at)
+}
+
 /// 主库的只读视图。
 pub trait LibraryFs: Sync {
     /// 规范化扫描根：转成绝对路径，并在 Windows 上加 `\\?\` 扩展长度前缀。
@@ -131,4 +179,50 @@ pub trait LibraryFs: Sync {
     /// 目录，7z 要按头部里的偏移跳过去，解压时还要从某个位置开始一路流下去。
     /// 返回的句柄只有 [`Read`] 与 [`Seek`]——主库仍然一个字节都写不了。
     fn open(&self, file: &Path) -> io::Result<Box<dyn ReadSeek + '_>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs::MemFs;
+
+    /// 同一个名字的两种规范化形式。`ゲ` 预组合 vs `ケ` + 浊音符。
+    const 预组合: &str = "ゲーム/一.zip";
+    const 分解形: &str = "\u{30b1}\u{3099}ーム/一.zip";
+
+    #[test]
+    fn 键与盘上的名字同形时一次就中() {
+        let mut fs = MemFs::new();
+        fs.file("/库/FC/魂斗罗.zip", vec![0; 8]);
+        assert_eq!(
+            real_path(&fs, Path::new("/库"), "FC/魂斗罗.zip"),
+            Some(PathBuf::from("/库/FC/魂斗罗.zip"))
+        );
+    }
+
+    #[test]
+    fn 盘上是分解形式时照样找得到() {
+        // `MemFs` 按字节精确匹配，于是它就是一个**分解敏感**的文件系统——
+        // SD 卡的 exFAT / FAT32 会不会这样没人查过，而这正是挂账 D82 的由来。
+        let mut fs = MemFs::new();
+        fs.file(format!("/库/{分解形}"), vec![0; 8]);
+        assert_ne!(预组合, 分解形, "两个字符串本身不同");
+        assert!(
+            fs.read_head(Path::new(&format!("/库/{预组合}")), 0)
+                .is_err(),
+            "直接拼是打不开的——这条测试要防的就是把这个失败读成「文件不在了」",
+        );
+        assert_eq!(
+            real_path(&fs, Path::new("/库"), 预组合),
+            Some(PathBuf::from(format!("/库/{分解形}"))),
+        );
+    }
+
+    #[test]
+    fn 盘上真的没有时是空的() {
+        let mut fs = MemFs::new();
+        fs.file("/库/FC/魂斗罗.zip", vec![0; 8]);
+        assert_eq!(real_path(&fs, Path::new("/库"), "FC/不存在.zip"), None);
+        assert_eq!(real_path(&fs, Path::new("/库"), "没有这个目录/x.zip"), None);
+    }
 }

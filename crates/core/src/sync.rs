@@ -36,14 +36,23 @@
 //! - 落点上有个**清单之外**的文件挡着 → 那多半就是维护者自己拷进去的，不覆盖。
 //! - 目标上这个文件**元数据读不到**（ADR-0021 的第三态）→ 既不算在、也不算不在。
 //!
-//! ## 眼下的期望状态只含 ROM 那一侧
+//! ## 期望状态由三样拼起来
 //!
-//! [`desired`] 折出来的是**选中变体的文件成员**。媒体与前端元数据要等票 20，
-//! 格式转换要等票 21——它们进来时改的是 [`desired`] 一个函数，[`plan`] 一个字不用动。
-//! [`FileKind`] 三类从第一天就立着，因为**清单是持久数据**：等票 20 再往一张写满了
-//! 的表上加一列，代价比现在立好大得多（与 `catalog::content` 那段「等到那时再改，
-//! 改的是已经写满数据的表」是同一条理由）。
+//! [`desired`] 折**选中变体的文件成员**，[`media::lay`] 铺**媒体池**里的封面截图视频，
+//! [`frontend::lay`] 折**前端元数据**。三份都是 [`DesiredFile`]，[`plan`] 一视同仁
+//! ——票 20 补上后两样时，[`plan`] 一个字都没动，正是当初把 [`FileKind`] 三类一次立
+//! 齐的那笔账兑现了（清单是持久数据，往写满了的表上加一列贵得多）。
+//!
+//! 格式转换要等票 21，它进来时改的仍然只是折期望状态那一步。
+//!
+//! ## 落到目标上的是 [`execute::run`]
+//!
+//! 计划是纯的，执行不是。两者分开，于是「只碰清单里记录过的文件」这条硬约束由计划
+//! 那一侧**构造性地**守住，执行只认计划里的步骤——它连清单之外的路径都拿不到。
 
+pub mod execute;
+pub mod frontend;
+pub mod media;
 pub mod observe;
 pub mod report;
 
@@ -54,6 +63,7 @@ use serde::{Deserialize, Serialize};
 use crate::catalog::{Catalog, CatalogError};
 use crate::sublibrary::{Selected, Sublibrary, Trim, over_capacity, trim_suggestions};
 
+pub use execute::{Outcome, Placement, Sources};
 pub use observe::{ObserveError, observe};
 
 /// 子库里一个文件是干什么的。
@@ -196,6 +206,14 @@ pub struct ManifestFile {
     pub source_stamp: Stamp,
     /// 属于哪个变体。
     pub variant: String,
+    /// **工具放过它，而维护者在目标设备上把它删了，工具没有补回。**
+    ///
+    /// 这一格是清单里唯一一条「记着的东西现在不在目标上」。留它的理由只有一条：
+    /// 不留的话，同步完这条会整个从清单里消失，于是**下一趟它变成一条普通的新增
+    /// 又长回来**——而用户故事 65 的原话是「在掌机上有意删掉的东西不会自己长回来」
+    /// （挂账 D75）。[`Stamp`] 仍然记着**当初放上去时**那一份的样子：它又被拷回来时
+    /// 拿它认得出「回来的是不是同一份」。
+    pub absent: bool,
 }
 
 /// 某个子库**上次导出的完整记录**（`CONTEXT.md` 的**清单**）。
@@ -215,10 +233,19 @@ impl Manifest {
         Self::default()
     }
 
-    /// 清单记着的容量合计。
+    /// 清单记着的容量合计。**已经不在目标上的那些不算**——它们一个字节都没占。
     #[must_use]
     pub fn bytes(&self) -> u64 {
-        self.files.iter().map(|file| file.stamp.bytes).sum()
+        self.files
+            .iter()
+            .filter(|file| !file.absent)
+            .map(|file| file.stamp.bytes)
+            .sum()
+    }
+
+    /// 清单里**眼下确实在目标上**的那几条。
+    pub fn present(&self) -> impl Iterator<Item = &ManifestFile> {
+        self.files.iter().filter(|file| !file.absent)
     }
 }
 
@@ -410,6 +437,12 @@ pub struct Plan {
     pub stranger_bytes: u64,
     /// 清单之外、且元数据也读不到的有几个。
     pub stranger_unreadable: u64,
+    /// **你删过、工具记着不补**的有几个：清单里 `absent` 的那些，这一趟仍然不在目标上，
+    /// 而选择集还要它们。
+    ///
+    /// 它们不是[意外](Surprise)——上一趟已经报过一次了，这一趟只是**继续不补**。
+    /// 想让它们回来，这次加 `--restore`；想让它们从此不再被念叨，记一条**例外**。
+    pub withheld: u64,
     /// 目标上列不开的目录数。
     pub unlistable_dirs: u64,
     /// 主库侧元数据读不到的成员数：这几个的容量没算进账里（ADR-0021）。
@@ -512,6 +545,17 @@ pub fn plan(
             }
             continue;
         };
+        // 上一趟就已经知道它没了：那是维护者在掌机上删的，工具**记着不补**（故事 65）。
+        // 目标上眼下还是没有它，就只数一数——不当意外报第二遍，也不重新变成一条新增。
+        if previous.absent && !on_target.contains_key(path) {
+            out.withheld += 1;
+            if options.restore_missing {
+                steps.push(step(Act::Add, file, 0, true));
+            }
+            continue;
+        }
+        // 它又落回目标上了（维护者自己拷回去的，或者换了一份）：底下这段核对照常走，
+        // 比的是**当初放上去时**记下的那个戳——回来的是不是同一份，那一格答得出来。
         match verify(previous, on_target.get(path).copied()) {
             Verified::Same => {
                 if source_unchanged(file, previous) {
@@ -547,6 +591,12 @@ pub fn plan(
     // ── 清单这一侧：删除。**删除项只可能从这个循环里长出来。**
     for (path, previous) in &recorded {
         if wanted.contains_key(path) {
+            continue;
+        }
+        // 早就知道它没了，这次也不要它了：没什么可删的，也没什么可报的。
+        // 执行那一步会把清单里这一格丢掉——记着一个「不在目标上、也不再要」的路径，
+        // 只会让同一条「没了」每一趟都被报一遍。
+        if previous.absent && !on_target.contains_key(path) {
             continue;
         }
         match verify(previous, on_target.get(path).copied()) {
@@ -791,6 +841,7 @@ mod tests {
         Sublibrary {
             name: "掌机".to_string(),
             target: "/Volumes/SDCARD/Games".to_string(),
+            target_raw: Some("/Volumes/SDCARD/Games".to_string()),
             format: "Pegasus".to_string(),
             capacity,
         }
@@ -823,6 +874,7 @@ mod tests {
             source: path.to_string(),
             source_stamp: 戳(bytes),
             variant: path.to_string(),
+            absent: false,
         }
     }
 
@@ -845,6 +897,94 @@ mod tests {
             files,
             unlistable_dirs: 0,
         }
+    }
+
+    /// 清单里那种「工具放过、你把它删了、工具没补」的格子。
+    fn 删过的清单条(path: &str, bytes: u64) -> ManifestFile {
+        ManifestFile {
+            absent: true,
+            ..清单条(path, bytes)
+        }
+    }
+
+    #[test]
+    fn 你在目标上删掉的东西不会自己长回来() {
+        // 用户故事 65 的原话。清单里那一格记着「知道它没了、也知道你没让我补」，
+        // 于是它既不再变成一条新增，也不再被当成意外报第二遍。
+        let plan = plan(
+            &子库(None),
+            &期望状态(vec![期望("GB/口袋妖怪.zip", 1024)]),
+            &Manifest {
+                files: vec![删过的清单条("GB/口袋妖怪.zip", 1024)],
+            },
+            &实际状态(vec![]),
+            Options::default(),
+        );
+        assert_eq!(plan.touched(), 0, "一步都不该有");
+        assert_eq!(plan.withheld, 1);
+        assert!(plan.surprises.is_empty(), "上一趟已经报过一次了");
+    }
+
+    #[test]
+    fn 记着不补的那些_加了_restore_才补回来() {
+        let plan = plan(
+            &子库(None),
+            &期望状态(vec![期望("GB/口袋妖怪.zip", 1024)]),
+            &Manifest {
+                files: vec![删过的清单条("GB/口袋妖怪.zip", 1024)],
+            },
+            &实际状态(vec![]),
+            Options {
+                restore_missing: true,
+            },
+        );
+        assert_eq!(plan.adds.files, 1);
+        assert!(plan.steps[0].restore, "补回来的那一步得标出来");
+        assert_eq!(plan.withheld, 1, "照样数出来：明知故犯不是静默");
+    }
+
+    #[test]
+    fn 早知道没了_这次也不要了_一句话都不用说() {
+        let plan = plan(
+            &子库(None),
+            &期望状态(vec![]),
+            &Manifest {
+                files: vec![删过的清单条("GB/口袋妖怪.zip", 1024)],
+            },
+            &实际状态(vec![]),
+            Options::default(),
+        );
+        assert_eq!(plan.touched(), 0);
+        assert!(plan.surprises.is_empty(), "没什么可删，也没什么可报");
+        assert_eq!(plan.withheld, 0, "它连「还要」都算不上");
+    }
+
+    #[test]
+    fn 记着不补的那份又被拷回来了_照常核对() {
+        // 维护者自己把它拷回去了。回来的是不是同一份，靠当初放上去时记的那个戳判。
+        let plan = plan(
+            &子库(None),
+            &期望状态(vec![期望("GB/口袋妖怪.zip", 1024)]),
+            &Manifest {
+                files: vec![删过的清单条("GB/口袋妖怪.zip", 1024)],
+            },
+            &实际状态(vec![在目标上("GB/口袋妖怪.zip", 1024)]),
+            Options::default(),
+        );
+        assert_eq!(plan.withheld, 0);
+        assert_eq!(plan.keeps.files, 1, "是同一份，什么都不用做");
+    }
+
+    #[test]
+    fn 清单里记着不补的那几条不算占地方() {
+        let manifest = Manifest {
+            files: vec![
+                清单条("GB/在的.zip", 1000),
+                删过的清单条("GB/没了的.zip", 500),
+            ],
+        };
+        assert_eq!(manifest.bytes(), 1000, "没了的那份一个字节都没占");
+        assert_eq!(manifest.present().count(), 1);
     }
 
     #[test]

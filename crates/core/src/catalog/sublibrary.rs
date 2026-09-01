@@ -32,6 +32,10 @@
 //! 这四张表是**纯加表**：已有的表一列没动、一条语义没改，`CREATE TABLE IF NOT EXISTS`
 //! 在打开时就补上，旧库照样打得开。判据是「旧数据会不会被读错」而不是「文件里多了
 //! 点东西」（见 [`SCHEMA_VERSION`](super::SCHEMA_VERSION) 与挂账 D50）。
+//!
+//! 票 20 给这两张表各加了一列（`sublibrary.target_raw`、`sublibrary_manifest.absent`），
+//! 判据仍是同一条：两列在老行上取得到的值与加它们之前的唯一可能完全一致，
+//! 于是旧数据读不错。补列的活在 [`add_columns`] 里，那个函数的注释写着为什么。
 
 use rusqlite::{OptionalExtension, params};
 
@@ -48,8 +52,12 @@ pub(super) const SUBLIBRARY_SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS sublibrary(
     name      TEXT PRIMARY KEY,
     -- 目标设备上的子库根。一律走读卡器，因此这是本机上的一个绝对路径（ADR-0015）。
-    -- 存 NFC 形式（ADR-0020）。
+    -- 存 NFC 形式（ADR-0020）：它是**键**，也是报告里印出来的那一份。
     target    TEXT NOT NULL,
+    -- 同一个目标根，**系统给的原始形式**——读盘走这一列（ADR-0020、挂账 D82）。
+    -- 路径不是有效 UTF-8 时为 NULL，读的时候退回 `target`。
+    -- 这一列由 `add_columns` 给老库补上，见那个函数的注释。
+    target_raw TEXT,
     -- 前端格式（适配器名）。
     format    TEXT NOT NULL,
     -- 容量上限，字节；NULL 表示不设限。**超限不自动截断**（ADR-0016）。
@@ -109,10 +117,55 @@ CREATE TABLE IF NOT EXISTS sublibrary_manifest(
     source_mtime_ns INTEGER,
     -- 属于哪个变体。报告拿它把文件数折回用户认得的那个数。
     variant    TEXT    NOT NULL,
+    -- **工具放过它，而维护者在目标设备上把它删了，工具没有补回。**
+    -- 0 是「就在目标上」，1 是「知道它没了、也知道你没让我补」（挂账 D75）。
+    -- 这一格不留的话，同步完清单里那条会整个消失，于是**下一趟它变成一条普通的新增
+    -- 又长回来**——而用户故事 65 的原话是「在掌机上有意删掉的东西不会自己长回来」。
+    absent     INTEGER NOT NULL DEFAULT 0,
     at         INTEGER NOT NULL,
     PRIMARY KEY (sublibrary, path)
 ) STRICT;
 ";
+
+/// 给票 18、19 建的老表补上票 20 加的那两列。
+///
+/// `CREATE TABLE IF NOT EXISTS` 对**已经存在**的表一个字都不改，于是加一列得单独走
+/// 一趟 `ALTER TABLE`。判有没有走 `PRAGMA table_info`，因此重复调用是安全的。
+///
+/// **这不算结构版本加 1**（见 [`SCHEMA_VERSION`](crate::catalog::SCHEMA_VERSION)）：
+/// 判据是「旧数据会不会被读错」。两列在老行上都取得到一个与从前完全一致的含义
+/// ——`target_raw` 为 NULL 就是「没有原始形式，用 `target`」，`absent` 为 0 就是
+/// 「它就在目标上」，那正是加这两列之前的唯一可能。反过来，旧版程序按列名取值，
+/// 多两列它也照样读得动。
+pub(super) fn add_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    add_column(conn, "sublibrary", "target_raw", "TEXT")?;
+    add_column(
+        conn,
+        "sublibrary_manifest",
+        "absent",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+}
+
+/// 一张表上缺了这一列就补上；已经有了就什么都不做。
+fn add_column(
+    conn: &rusqlite::Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> rusqlite::Result<()> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(());
+        }
+    }
+    drop(rows);
+    drop(statement);
+    // 表名与列名都是这个文件里写死的字面量，不来自外面。
+    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))
+}
 
 impl Catalog {
     /// 新建或改一个子库。
@@ -128,14 +181,16 @@ impl Catalog {
             .execute(
                 // 改一个已有的子库**不碰 `next_rule`**：发号器是单调的，
                 // 「改一次目标路径」不该让规则的号从头再来。
-                "INSERT INTO sublibrary(name, target, format, capacity, next_rule, at)
-                 VALUES(?1, ?2, ?3, ?4, 1, ?5)
+                "INSERT INTO sublibrary(name, target, target_raw, format, capacity, next_rule, at)
+                 VALUES(?1, ?2, ?3, ?4, ?5, 1, ?6)
                  ON CONFLICT(name) DO UPDATE SET
-                    target = excluded.target, format = excluded.format,
+                    target = excluded.target, target_raw = excluded.target_raw,
+                    format = excluded.format,
                     capacity = excluded.capacity, at = excluded.at",
                 params![
                     sublibrary.name,
                     target,
+                    sublibrary.target_raw,
                     sublibrary.format,
                     capacity,
                     super::now_secs()
@@ -152,15 +207,17 @@ impl Catalog {
     pub fn sublibrary(&self, name: &str) -> Result<Option<Sublibrary>, CatalogError> {
         self.conn
             .query_row(
-                "SELECT name, target, format, capacity FROM sublibrary WHERE name = ?1",
+                "SELECT name, target, target_raw, format, capacity
+                 FROM sublibrary WHERE name = ?1",
                 params![name],
                 |row| {
                     Ok(Sublibrary {
                         name: row.get(0)?,
                         target: row.get(1)?,
-                        format: row.get(2)?,
+                        target_raw: row.get(2)?,
+                        format: row.get(3)?,
                         capacity: row
-                            .get::<_, Option<i64>>(3)?
+                            .get::<_, Option<i64>>(4)?
                             .and_then(|v| u64::try_from(v).ok()),
                     })
                 },
@@ -178,16 +235,20 @@ impl Catalog {
     pub fn sublibraries(&self) -> Result<Vec<Sublibrary>, CatalogError> {
         let mut statement = self
             .conn
-            .prepare("SELECT name, target, format, capacity FROM sublibrary ORDER BY name")
+            .prepare(
+                "SELECT name, target, target_raw, format, capacity
+                 FROM sublibrary ORDER BY name",
+            )
             .map_err(|source| self.err(source))?;
         let rows = statement
             .query_map([], |row| {
                 Ok(Sublibrary {
                     name: row.get(0)?,
                     target: row.get(1)?,
-                    format: row.get(2)?,
+                    target_raw: row.get(2)?,
+                    format: row.get(3)?,
                     capacity: row
-                        .get::<_, Option<i64>>(3)?
+                        .get::<_, Option<i64>>(4)?
                         .and_then(|v| u64::try_from(v).ok()),
                 })
             })
@@ -412,7 +473,7 @@ impl Catalog {
             .conn
             .prepare(
                 "SELECT path, kind, bytes, mtime_ns, source, variant,
-                        source_bytes, source_mtime_ns
+                        source_bytes, source_mtime_ns, absent
                  FROM sublibrary_manifest WHERE sublibrary = ?1 ORDER BY path",
             )
             .map_err(|source| self.err(source))?;
@@ -440,6 +501,7 @@ impl Catalog {
                     mtime_ns: row.get(7).map_err(|source| self.err(source))?,
                 },
                 variant: row.get(5).map_err(|source| self.err(source))?,
+                absent: row.get::<_, i64>(8).map_err(|source| self.err(source))? != 0,
             });
         }
         Ok(out)
@@ -470,8 +532,8 @@ impl Catalog {
                 .prepare(
                     "INSERT INTO sublibrary_manifest(
                          sublibrary, path, kind, bytes, mtime_ns, source, variant,
-                         source_bytes, source_mtime_ns, at)
-                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                         source_bytes, source_mtime_ns, absent, at)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 )
                 .map_err(to_err)?;
             for file in &manifest.files {
@@ -486,6 +548,7 @@ impl Catalog {
                         file.variant,
                         i64::try_from(file.source_stamp.bytes).unwrap_or(i64::MAX),
                         file.source_stamp.mtime_ns,
+                        i64::from(file.absent),
                         at,
                     ])
                     .map_err(to_err)?;

@@ -177,3 +177,161 @@ fn 子库不在时说得清怎么建() {
     assert!(!out.status.success(), "{text}");
     assert!(text.contains("没有叫「备用卡」的子库"), "{text}");
 }
+
+// ───────────────────────── `romcat sublibrary sync`：真的往目标上写
+
+/// 卡上文件的 `(相对路径, 字节数)`。
+fn 卡上有什么(dir: &Path) -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&at) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            out.push((
+                path.strip_prefix(dir)
+                    .expect("在树里")
+                    .display()
+                    .to_string(),
+                entry.metadata().expect("读得到").len(),
+            ));
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn 同步之前一定先印一遍差量预览() {
+    // ADR-0016：「永远不能点了同步就开始传」。预览与计划是同一个值，于是这一句
+    // 印的就是等下真要做的事。
+    let (_library, workspace, target) = 现场();
+    let out = 子库(workspace.path(), &["sync", "掌机"]);
+    let text = 出来的话(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("差量预览"), "{text}");
+    assert!(text.contains("同步结果"), "{text}");
+    // 预览排在结果前面——反过来就不叫「先呈现」了。
+    assert!(
+        text.find("差量预览") < text.find("同步结果"),
+        "预览必须印在动手之前：{text}"
+    );
+    assert_eq!(卡上有什么(target.path()).len(), 3, "两个 ROM 加一份元数据");
+}
+
+#[test]
+fn 干跑一个字节都不写() {
+    let (_library, workspace, target) = 现场();
+    let out = 子库(workspace.path(), &["sync", "掌机", "--dry-run"]);
+    let text = 出来的话(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("差量预览"), "{text}");
+    assert!(text.contains("一个字节都没写"), "{text}");
+    assert_eq!(文件数(target.path()), 0, "**干跑不搬任何文件**");
+}
+
+#[test]
+fn 有删除时不点头就一个字节都不动() {
+    let (_library, workspace, target) = 现场();
+    assert!(子库(workspace.path(), &["sync", "掌机"]).status.success());
+    let 放好了 = 卡上有什么(target.path());
+    assert!(!放好了.is_empty());
+
+    // 规则改成只要 GB：FC 那两个加那份元数据都该被删——但**删之前要点头**。
+    assert!(
+        子库(workspace.path(), &["rule", "掌机", "--remove", "1"])
+            .status
+            .success()
+    );
+    assert!(
+        子库(workspace.path(), &["rule", "掌机", "--add", "平台=GB"])
+            .status
+            .success()
+    );
+    let out = 子库(workspace.path(), &["sync", "掌机"]);
+    let text = 出来的话(&out);
+    assert!(!out.status.success(), "没点头不该算成功：{text}");
+    assert!(text.contains("加 `--yes` 再跑一次"), "{text}");
+    assert_eq!(卡上有什么(target.path()), 放好了, "卡上一个字节都没变");
+
+    // 点头之后才真的删。
+    let out = 子库(workspace.path(), &["sync", "掌机", "--yes"]);
+    let text = 出来的话(&out);
+    assert!(out.status.success(), "{text}");
+    let 现在 = 卡上有什么(target.path());
+    assert!(
+        现在.iter().all(|(path, _)| !path.starts_with("FC")),
+        "{现在:?}"
+    );
+    assert!(
+        现在.iter().any(|(path, _)| path.starts_with("GB")),
+        "{现在:?}"
+    );
+}
+
+#[test]
+fn 同步完清单记的是目标的真实状态_再跑一趟什么都不用动() {
+    let (_library, workspace, target) = 现场();
+    assert!(子库(workspace.path(), &["sync", "掌机"]).status.success());
+    let out = 子库(workspace.path(), &["sync", "掌机"]);
+    let text = 出来的话(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("一个文件都不用动"), "{text}");
+    assert!(text.contains("一个字节都没写"), "{text}");
+    assert_eq!(卡上有什么(target.path()).len(), 3);
+}
+
+#[test]
+fn 在掌机上删掉的东西不会自己长回来() {
+    // 用户故事 65。清单更新成目标的真实状态之后，那一格记着「你删过、我不补」。
+    let (_library, workspace, target) = 现场();
+    assert!(子库(workspace.path(), &["sync", "掌机"]).status.success());
+    fs::remove_file(target.path().join("FC/魂斗罗.zip")).expect("删得掉");
+
+    let text = 出来的话(&子库(workspace.path(), &["sync", "掌机"]));
+    assert!(text.contains("没了"), "第一趟要如实报一次：{text}");
+    assert!(!target.path().join("FC/魂斗罗.zip").exists(), "不静默补回");
+
+    let text = 出来的话(&子库(workspace.path(), &["sync", "掌机"]));
+    assert!(text.contains("你删过"), "{text}");
+    assert!(!target.path().join("FC/魂斗罗.zip").exists(), "还是不补");
+
+    // 明说要补才补——**明知故犯不是静默**。
+    let text = 出来的话(&子库(workspace.path(), &["sync", "掌机", "--restore"]));
+    assert!(text.contains("补回"), "{text}");
+    assert!(target.path().join("FC/魂斗罗.zip").exists(), "这次补回来了");
+}
+
+#[test]
+fn 手动拷进目标的东西同步之后一个字节都没变() {
+    let (_library, workspace, target) = 现场();
+    写(&target.path().join("saves/魂斗罗.sav"), &[9u8; 512]);
+    写(&target.path().join("cheats/金手指.txt"), b"unlimited lives");
+    assert!(子库(workspace.path(), &["sync", "掌机"]).status.success());
+    assert_eq!(
+        fs::read(target.path().join("saves/魂斗罗.sav")).expect("还在"),
+        vec![9u8; 512],
+    );
+    assert_eq!(
+        fs::read(target.path().join("cheats/金手指.txt")).expect("还在"),
+        b"unlimited lives",
+    );
+}
+
+#[test]
+fn 子库里的元数据路径全部相对子库根() {
+    let (library, workspace, target) = 现场();
+    assert!(子库(workspace.path(), &["sync", "掌机"]).status.success());
+    let text = fs::read_to_string(target.path().join("FC.metadata.pegasus.txt")).expect("落到位了");
+    assert!(
+        !text.contains(&library.path().display().to_string()),
+        "绝不写主库的绝对路径：\n{text}"
+    );
+    assert!(text.contains("files: FC/魂斗罗.zip"), "{text}");
+}

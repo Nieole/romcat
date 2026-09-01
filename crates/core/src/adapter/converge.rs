@@ -208,13 +208,39 @@ pub fn file_name_for(collection: &str, suffix: &str) -> String {
 ///
 /// # Errors
 /// 读中立库失败时返回错误。
-#[allow(clippy::too_many_lines)]
 pub fn run(
     catalog: &Catalog,
     priorities: &Priorities,
     file_suffix: &str,
 ) -> Result<Converged, CatalogError> {
-    let variants = catalog.variants()?;
+    run_within(catalog, priorities, file_suffix, None)
+}
+
+/// 只收敛这几个变体，别的一个都不进来。
+///
+/// **子库的元数据只该写卡上真有的那些游戏**：整库那一份写过去，前端会列出一堆
+/// 点了打不开的条目。`only` 是 `None` 时收敛整个库，也就是 [`run`]。
+///
+/// 收敛的粒度不变（作品 × 平台）：一部作品在卡上只带了汉化版，卡上那个条目就只有
+/// 汉化版这一个文件——而这正是用户挑变体而不是挑条目的理由（`sublibrary` 模块文档）。
+///
+/// # Errors
+/// 读中立库失败时返回错误。
+#[allow(clippy::too_many_lines)]
+pub fn run_within(
+    catalog: &Catalog,
+    priorities: &Priorities,
+    file_suffix: &str,
+    only: Option<&BTreeSet<String>>,
+) -> Result<Converged, CatalogError> {
+    let variants: Vec<VariantRow> = match only {
+        Some(only) => catalog
+            .variants()?
+            .into_iter()
+            .filter(|variant| only.contains(&variant.key))
+            .collect(),
+        None => catalog.variants()?,
+    };
     let works = catalog.work_names()?;
     let releases = catalog.releases()?;
     let overrides = catalog.preferred_variants()?;
