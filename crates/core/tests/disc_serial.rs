@@ -379,7 +379,9 @@ fn 目录名里的_titleid_是一条独立的依据且不自动通过() {
         .find(|c| c.evidence.contains("名字里直接写着"))
         .expect("目录名里那个 TitleID 是一条独立的依据");
     assert!(!名字.accepted, "目录只是强先验（ADR-0011）");
-    assert_eq!(名字.confidence, Confidence::Medium);
+    // **只看了名字没看内容**的那一条落在低置信那一档——那正是「文件名规则」本身
+    // （ADR-0002 的三档；票 10 起从内容里读出来的与从名字上看出来的分开记）。
+    assert_eq!(名字.confidence, Confidence::Low);
 }
 
 #[test]

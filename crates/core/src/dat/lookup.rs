@@ -7,12 +7,44 @@
 //! 记录上撞车是现实存在的（生日问题），大小几乎免费地把它挡掉。DAT 偶尔有不记大小
 //! 的记录（实测极少），那种命中单独标出来，[`Hit::sized`] 为假——[`super::super::identify`]
 //! 据此把置信度降一档，而不是假装它和精确命中一样可靠。
+//!
+//! ## 还有一条 SHA-1 的窄路（票 10）
+//!
+//! 库里有一批记录**连 `crc32` 与 `size` 两列都是空的**：GoodNES 那两份实测 30,244 条
+//! （FC 22,095、MD 8,149，其中 748 条中文汉化）只记 SHA-1。它们撞不到第一命中层，
+//! 不是因为撞不上，是因为根本没有可以对的那一列。[`DatRepo::lookup_sha1`] 专为它们而设，
+//! 而且**只查那一批**（`crc32 IS NULL`）——不然每一份 FC 卡都会得到一条与 CRC 那一层
+//! 一模一样的重复候选。
 
 use rusqlite::params;
 
 use super::chinese::ChineseMark;
 use super::repo::{DatRepo, RepoError};
 use super::{Convention, chinese};
+
+/// 一条命中是靠哪一样撞上的。
+///
+/// **它决定 [`Hit::is_exact`] 怎么算**：CRC-32 那条要大小一起对上才算精确（32 位的
+/// 校验和在几十万条记录上会撞车），SHA-1 那条不需要——160 位摆在那儿，而且那批记录
+/// 本来就一列大小都没有。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Matched {
+    /// CRC-32 加未压缩大小。
+    CrcAndSize,
+    /// SHA-1。
+    Sha1,
+}
+
+impl Matched {
+    /// 依据里写的那个词。
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CrcAndSize => "CRC-32 加大小",
+            Self::Sha1 => "SHA-1",
+        }
+    }
+}
 
 /// DAT 库里被撞上的一条文件记录，连同它所在的条目与那份 DAT。
 ///
@@ -43,13 +75,22 @@ pub struct Hit {
     pub status: Option<String>,
     /// 大小对上了没有。`false` 表示这条记录根本没记大小，只凭 CRC-32 撞上的。
     pub sized: bool,
+    /// 靠哪一样撞上的。
+    pub matched_by: Matched,
 }
 
 impl Hit {
-    /// 这条命中是不是**精确**的：CRC-32 与大小都对上了，而且 DAT 没说这是个坏转储。
+    /// 这条命中是不是**精确**的。
+    ///
+    /// CRC-32 那条要**大小一起对上**；SHA-1 那条只要撞上就是精确的——那批记录一列大小
+    /// 都没有，拿 `sized` 去要求它等于永远不认账。两条都还要 DAT 自己没说这是坏转储。
     #[must_use]
     pub fn is_exact(&self) -> bool {
-        self.sized && !matches!(self.status.as_deref(), Some("baddump" | "nodump"))
+        let matched = match self.matched_by {
+            Matched::CrcAndSize => self.sized,
+            Matched::Sha1 => true,
+        };
+        matched && !matches!(self.status.as_deref(), Some("baddump" | "nodump"))
     }
 }
 
@@ -113,6 +154,7 @@ impl DatRepo {
                     size: recorded,
                     status: row.get(10)?,
                     sized: recorded == Some(size),
+                    matched_by: Matched::CrcAndSize,
                 })
             })
             .map_err(|source| self.error(source))?;
@@ -125,6 +167,79 @@ impl DatRepo {
             }
         }
         Ok(out)
+    }
+
+    /// 拿一串 **SHA-1**（四十位小写十六进制）去查，返回全部撞上的文件记录。
+    ///
+    /// **只查第一命中层够不着的那一批**（`crc32 IS NULL`）。查全部的话，每一份 FC 卡都会
+    /// 得到一条与 CRC 那一层内容完全相同的候选——多一条候选不多一分信息，只多一次
+    /// 人工裁决时要读的东西。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn lookup_sha1(&self, sha1: &str, size: u64) -> Result<Vec<Hit>, RepoError> {
+        let mut statement = self
+            .conn()
+            .prepare_cached(
+                "SELECT d.source, d.name, d.platform, d.convention,
+                        g.name, g.cloneof, r.name, g.serial, g.chinese, r.size, r.status
+                 FROM rom r
+                 JOIN game g ON g.id = r.game
+                 JOIN dat  d ON d.id = r.dat
+                 WHERE r.sha1 = ?1 AND r.crc32 IS NULL
+                 ORDER BY r.id",
+            )
+            .map_err(|source| self.error(source))?;
+        let rows = statement
+            .query_map(params![sha1], |row| {
+                let recorded: Option<i64> = row.get(9)?;
+                let recorded = recorded.and_then(|size| u64::try_from(size).ok());
+                let convention: String = row.get(3)?;
+                let game: String = row.get(4)?;
+                let chinese = chinese::mark_of(&game);
+                Ok(Hit {
+                    source: row.get(0)?,
+                    dat: row.get(1)?,
+                    platform: row.get(2)?,
+                    convention: Convention::from_label(&convention).unwrap_or(Convention::AsIs),
+                    game,
+                    cloneof: row.get(5)?,
+                    rom: row.get(6)?,
+                    serial: row.get(7)?,
+                    chinese,
+                    size: recorded,
+                    status: row.get(10)?,
+                    sized: recorded == Some(size),
+                    matched_by: Matched::Sha1,
+                })
+            })
+            .map_err(|source| self.error(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.error(source))
+    }
+
+    /// 哪几个平台**值得为它算 SHA-1**：库里有第一命中层够不着的记录的那几个。
+    ///
+    /// 识别拿它回答一个花钱的问题。SHA-1 要把内容整份读一遍，而绝大多数平台的每一条
+    /// 记录都带 CRC-32——为它们多算一个摘要换不到任何一条候选。真机实测只有 FC 与 MD
+    /// 两个卡带平台在这张名单上（还有 PS1 / SS / DC / Mega-CD 那几个 MAME 的
+    /// `<disk>`，但那是光盘，体积上这笔钱不划算，ADR-0008 的修订段算过）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn sha1_only_platforms(&self) -> Result<std::collections::BTreeSet<String>, RepoError> {
+        let mut statement = self
+            .conn()
+            .prepare(
+                "SELECT DISTINCT d.platform FROM rom r JOIN dat d ON d.id = r.dat
+                 WHERE r.crc32 IS NULL AND r.sha1 IS NOT NULL",
+            )
+            .map_err(|source| self.error(source))?;
+        let rows = statement
+            .query_map(params![], |row| row.get::<_, String>(0))
+            .map_err(|source| self.error(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.error(source))
     }
 }
 

@@ -36,7 +36,12 @@ use super::logiqx::{DatHeader, GameRecord};
 /// **2（票 09）**：加了 `game_serial` 这张序列号索引。加表本身不必重建，但那张表要靠
 /// **重新解析 DAT** 才填得上——序列号写在 `<rom serial>` 与 `<game_id>` 上，
 /// 票 06 的解析器两处都没读。升版本正是为了逼出那一趟重新解析。
-pub const SCHEMA_VERSION: u32 = 2;
+///
+/// **3（票 10）**：`game_serial` 的**内容口径**变了——MAME 那几份卡带 software list 记的是
+/// 卡上丝印的 `AGB-BR6J-JPN`，而卡带内部头里只有中间那四个字（`dat::serial::game_code_in`）。
+/// 现在一条丝印编号落两行索引。表结构一个字没动，但**已经建好的那些行少了一半**，
+/// 而它们同样只有重新解析 DAT 才补得上。升版本还是为了逼出那一趟。
+pub const SCHEMA_VERSION: u32 = 3;
 
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS meta(

@@ -117,7 +117,66 @@ CREATE TABLE IF NOT EXISTS content_disc(
     facts    TEXT    NOT NULL,
     PRIMARY KEY (key, inner)
 ) STRICT;
+
+-- 从一份内容前几百字节里读出来的**卡带内部头**（票 10）。与 `content_disc` 同一条路：
+-- 同样自带有效期、同样「读过的不白读」、同样加表而不加列。
+--
+-- `platform` 单独一列而不是只躺在 JSON 里，是因为**报告要按它数一件事**：内部头说的
+-- 平台与目录声明的平台对不上（ADR-0011 说那正是最该报告的产出之一）。一条 SQL 数得出来
+-- 的东西，不该逐行反序列化几万段 JSON 去数。
+CREATE TABLE IF NOT EXISTS content_cart(
+    key      TEXT    NOT NULL,
+    inner    TEXT    NOT NULL,
+    len      INTEGER,
+    mtime_ns INTEGER,
+    -- 内部头说这份内容属于哪个平台；认不出是 NULL。
+    platform TEXT,
+    -- 这份头**认哪几个平台**，写成 `,GB,GBC,` 这样两头带逗号的一串。
+    --
+    -- 它与 `platform` 是两件事，而**判冲突要看它不看那一个**：GB 与 GBC 共用一份卡带头
+    -- （差别只在 `0x143` 那一个字节），一份 CGB 卡躺在 `gb/` 目录里不是冲突，是常态。
+    -- 只按 `platform` 比字符串，报告会被这类同族配对淹掉（真机实测 1,722 份里绝大多数）。
+    -- 两头的逗号是为了让 SQL 能用 `instr` 做整词匹配，不至于 `GB` 匹配上 `GBA`。
+    family   TEXT,
+    -- `identify::cart::Facts` 的 JSON。
+    facts    TEXT    NOT NULL,
+    PRIMARY KEY (key, inner)
+) STRICT;
 ";
+
+/// 补上后来加的列。**纯加列，不改已有列的含义**，所以不动
+/// [`SCHEMA_VERSION`](super::SCHEMA_VERSION)——旧库照样打得开，旧程序也照样能用
+/// （与 `catalog::sublibrary::add_columns` 同一条路）。
+///
+/// 票 10 加的是 `content_hash` 上那两列 SHA-1。为它逼用户删掉 8.60 TiB 的中立库、
+/// 重扫 27 分钟，换不到任何东西。
+///
+/// **`content_cart` 不在这里**：那张表是票 10 新建的，`CREATE TABLE IF NOT EXISTS`
+/// 一次就把它连同 `family` 那一列建齐了。这里只放「已经存在于旧库里的表上后来加的列」。
+pub(super) fn add_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    add_column(conn, "content_hash", "sha1", "TEXT")?;
+    add_column(conn, "content_hash", "bare_sha1", "TEXT")
+}
+
+/// 一张表上缺了这一列就补上；已经有了就什么都不做。
+fn add_column(
+    conn: &rusqlite::Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> rusqlite::Result<()> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(());
+        }
+    }
+    drop(rows);
+    drop(statement);
+    // 表名与列名都是这个文件里写死的字面量，不来自外面。
+    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))
+}
 
 /// 一条候选的**置信度**（ADR-0002）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -128,7 +187,10 @@ pub enum Confidence {
     /// 通过但标记，等人裁决。
     Medium,
     /// **低置信**：文件名规则、模糊匹配与模型推断那几层的产物，一律进待确认队列。
-    /// 这张票还产不出这一档，它先立在这里等票 11 与票 12。
+    ///
+    /// 票 10 起有一条真的落在这一档：**目录名里直接写着的那个 TitleID**
+    /// （`identify::serial::title_id_in_name`）——它连内容都没看，正是「文件名规则」
+    /// 本身。票 11 与票 12 会把这一档填满。
     Low,
 }
 
@@ -258,6 +320,50 @@ pub struct Candidate {
     pub release_id: Option<i64>,
 }
 
+/// 一份内容探出来的**卡带内部头**，写库前的样子（票 10）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CartFactRow {
+    /// 成员的键。
+    pub key: String,
+    /// 容器内部路径；裸文件是空串。
+    pub inner: String,
+    /// 内部头说这份内容属于哪个平台；认不出是 `None`。
+    pub platform: Option<String>,
+    /// 这份头认哪几个平台，写成 `,GB,GBC,` 这样两头带逗号的一串。**判冲突看它。**
+    pub family: Option<String>,
+    /// `identify::cart::Facts` 的 JSON。
+    pub facts: String,
+}
+
+/// 「内部头与目录声明的平台对不上」这件事的判据，两处查询共用一份。
+///
+/// **判据是家族不是那一个平台**：GB 与 GBC 共用一份卡带头，一份 CGB 卡躺在 `gb/`
+/// 目录里不是冲突。`instr` 上两头带逗号是为了整词匹配——不然 `GB` 会匹配上 `GBA`。
+const CONFLICT_FROM: &str = "\
+                 FROM content_cart c
+                 JOIN variant_member m ON m.key = c.key
+                 JOIN variant v ON v.key = m.variant_key
+                 WHERE c.platform IS NOT NULL
+                   AND c.family IS NOT NULL
+                   AND v.platform IS NOT NULL
+                   AND instr(c.family, ',' || v.platform || ',') = 0";
+
+/// 内部头说的平台与**目录声明的平台**对不上的一条（ADR-0011）。
+///
+/// 「目录说 GBA、文件头说 NDS」是真实会发生的（下错、放错、压缩包混装），而 ADR-0011
+/// 明说这类冲突不是错误而是**最该报告的产出之一**。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PlatformConflict {
+    /// 哪个变体。
+    pub variant_key: String,
+    /// 目录声明的平台。
+    pub declared: String,
+    /// 内部头说的平台。
+    pub found: String,
+    /// 是哪一份内容说的。
+    pub member: String,
+}
+
 /// 一份内容探出来的**光盘标识**，写库前的样子。
 ///
 /// 捏成一个类型而不是一个三元组：三样都是 `String`，元组里写错顺序编译器不会说话
@@ -383,6 +489,10 @@ pub struct ContentHash {
     pub bare_crc32: Option<u32>,
     /// 验过 NKit 没有、结论是什么。
     pub nkit: Option<bool>,
+    /// 含头（原样）的 SHA-1，四十位小写十六进制；没算过是 `None`（票 10）。
+    pub sha1: Option<String>,
+    /// 去头之后的 SHA-1；没有外挂头时与 `sha1` 相同，没算过是 `None`。
+    pub bare_sha1: Option<String>,
 }
 
 /// 库里存的那个词认回一个中文记号。
@@ -734,7 +844,8 @@ impl Catalog {
         let mut statement = self
             .conn
             .prepare_cached(
-                "SELECT inner, size, crc32, looked, header, bare_size, bare_crc32, nkit
+                "SELECT inner, size, crc32, looked, header, bare_size, bare_crc32, nkit,
+                        sha1, bare_sha1
                  FROM content_hash WHERE key = ?1",
             )
             .map_err(|source| self.err(source))?;
@@ -755,6 +866,8 @@ impl Catalog {
                         .get::<_, Option<i64>>(6)?
                         .and_then(|crc| u32::try_from(crc).ok()),
                     nkit: nkit.map(|nkit| nkit != 0),
+                    sha1: row.get(8)?,
+                    bare_sha1: row.get(9)?,
                 })
             })
             .map_err(|source| self.err(source))?;
@@ -784,13 +897,17 @@ impl Catalog {
             let mut insert = tx
                 .prepare(
                     "INSERT INTO content_hash(key, inner, size, crc32, looked, header,
-                         bare_size, bare_crc32, nkit)
-                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                         bare_size, bare_crc32, nkit, sha1, bare_sha1)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
                      ON CONFLICT(key, inner) DO UPDATE SET
                         size = excluded.size, crc32 = excluded.crc32,
                         looked = excluded.looked, header = excluded.header,
                         bare_size = excluded.bare_size, bare_crc32 = excluded.bare_crc32,
-                        nkit = excluded.nkit",
+                        nkit = excluded.nkit,
+                        -- **算过的 SHA-1 不许被一次没算的覆盖回 NULL**：这一层是按需
+                        -- 才付的钱（票 10），下一趟没走到它不等于上一趟白算了。
+                        sha1 = COALESCE(excluded.sha1, content_hash.sha1),
+                        bare_sha1 = COALESCE(excluded.bare_sha1, content_hash.bare_sha1)",
                 )
                 .map_err(to_err)?;
             for row in rows {
@@ -806,6 +923,8 @@ impl Catalog {
                             .map(|size| i64::try_from(size).unwrap_or(i64::MAX)),
                         row.bare_crc32.map(i64::from),
                         row.nkit.map(i64::from),
+                        row.sha1.as_deref(),
+                        row.bare_sha1.as_deref(),
                     ])
                     .map_err(to_err)?;
             }
@@ -841,6 +960,109 @@ impl Catalog {
             out.insert(inner, facts);
         }
         Ok(out)
+    }
+
+    /// 某个成员上探过的**卡带内部头**：内部路径 → 那一份。裸文件的内部路径是空串。
+    ///
+    /// 与 [`disc_facts`](Self::disc_facts) 同一条路，**自带有效期**。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn cart_facts(&self, key: &str) -> Result<BTreeMap<String, String>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare_cached(
+                "SELECT c.inner, c.facts FROM content_cart c
+                 JOIN entry e ON e.key = c.key
+                 WHERE c.key = ?1
+                   AND c.len IS e.len AND c.mtime_ns IS e.mtime_ns",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![key], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (inner, facts) = row.map_err(|source| self.err(source))?;
+            out.insert(inner, facts);
+        }
+        Ok(out)
+    }
+
+    /// 把探出来的卡带内部头整批存下来。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn put_cart_facts(&mut self, rows: &[CartFactRow]) -> Result<(), CatalogError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO content_cart(key, inner, len, mtime_ns, platform, family, facts)
+                     VALUES(?1, ?2,
+                            (SELECT len FROM entry WHERE key = ?1),
+                            (SELECT mtime_ns FROM entry WHERE key = ?1),
+                            ?3, ?4, ?5)
+                     ON CONFLICT(key, inner) DO UPDATE SET
+                        len = excluded.len, mtime_ns = excluded.mtime_ns,
+                        platform = excluded.platform, family = excluded.family,
+                        facts = excluded.facts",
+                )
+                .map_err(to_err)?;
+            for row in rows {
+                insert
+                    .execute(params![
+                        row.key,
+                        row.inner,
+                        row.platform,
+                        row.family,
+                        row.facts
+                    ])
+                    .map_err(to_err)?;
+            }
+        }
+        tx.commit().map_err(to_err)
+    }
+
+    /// **内部头说的平台与目录声明的平台对不上的那些**（ADR-0011）。
+    ///
+    /// 报告从中立库折出来，不重跑识别（ADR-0001）：所以这件事记在 `content_cart` 上，
+    /// 而不是攒在一趟识别的内存里。`limit` 是最多取几条例子。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn platform_conflicts(&self, limit: usize) -> Result<Vec<PlatformConflict>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(&format!(
+                "SELECT v.key, v.platform, c.platform, c.key
+                 {CONFLICT_FROM}
+                 ORDER BY v.key
+                 LIMIT ?1"
+            ))
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+                Ok(PlatformConflict {
+                    variant_key: row.get(0)?,
+                    declared: row.get(1)?,
+                    found: row.get(2)?,
+                    member: row.get(3)?,
+                })
+            })
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
     }
 
     /// 把探出来的光盘标识整批存下来。有效期那两列从 `entry` 上现取。
@@ -1222,6 +1444,72 @@ impl Catalog {
             .collect::<Result<_, _>>()
             .map_err(|source| self.err(source))?;
         Ok(counts)
+    }
+
+    /// 按平台数**中文**：官中版几个、汉化版几个。
+    ///
+    /// 这是**发行版级**的统计（票 10 从挂账转来的那条前瞻）：数的是识别撞出来的候选
+    /// 上带的那个记号，而不是文件名里有没有汉字。两者差得远——票 01 用文件名做的粗略
+    /// 代理实测 15.6%，那个数里既有官中也有汉化，还混着一堆压根不是中文版的目录名。
+    ///
+    /// **官中版与汉化版分开数，不许加成一个「中文条目数」**（ADR-0012）：前者在卡带与
+    /// 光盘世代是一次独立的**官方发行**（独立序列号、DAT 里独立一条、精确哈希直接命中），
+    /// 后者是改过字节的**变体**。加成一个数，「TOSEC 与 GoodNES 补的正是官方库覆盖不到
+    /// 的那部分」这个判断就彻底失真了。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn chinese_by_platform(
+        &self,
+        unknown: &str,
+    ) -> Result<BTreeMap<String, (u64, u64)>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                // **平台为空的一行也要在里面**。滤掉它，按平台加出来的总数就与
+                // `candidate_counts` 那个全局数对不上——同一份报告里两个中文总数，
+                // 读的人无从判断哪个是真的。空平台交给调用方按它自己的「（未知）」归。
+                "SELECT COALESCE(v.platform, ?1),
+                        COUNT(DISTINCT CASE WHEN c.chinese = '官中' THEN c.variant_key END),
+                        COUNT(DISTINCT CASE WHEN c.chinese = '汉化' THEN c.variant_key END)
+                 FROM candidate c
+                 JOIN variant v ON v.key = c.variant_key
+                 GROUP BY 1",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![unknown], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (
+                        u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+                        u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+                    ),
+                ))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (platform, counts) = row.map_err(|source| self.err(source))?;
+            out.insert(platform, counts);
+        }
+        Ok(out)
+    }
+
+    /// 内部头与目录声明的平台对不上的**总数**（ADR-0011）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn platform_conflict_count(&self) -> Result<u64, CatalogError> {
+        let value: i64 = self
+            .conn
+            .query_row(
+                &format!("SELECT COUNT(DISTINCT v.key) {CONFLICT_FROM}"),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|source| self.err(source))?;
+        Ok(u64::try_from(value).unwrap_or(0))
     }
 
     /// 只改一条结论的**理由**那一列，别的一个字不动。

@@ -1118,6 +1118,27 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
             thousands(outcome.serial_only),
         );
     }
+    if outcome.cart.probed > 0 {
+        eprintln!(
+            "卡带那一层探了 {} 份内容（读出游戏码 {} 份，另有 {} 份这一趟没读到），\
+             撞出 {} 条候选，其中 {} 个变体是**只靠内部头**才认出来的；\
+             内部头与目录声明的平台对不上的有 {} 份。",
+            thousands(outcome.cart.probed),
+            thousands(outcome.cart.with_id),
+            thousands(outcome.cart.missed),
+            thousands(outcome.cart.candidates),
+            thousands(outcome.cart.only),
+            thousands(outcome.cart.conflicts),
+        );
+    }
+    if outcome.sha1_hits > 0 {
+        eprintln!(
+            "SHA-1 那条窄路撞出 {} 条候选（第一命中层够不到的那批记录），\
+             其中 {} 个变体是靠它才认出来的。",
+            thousands(outcome.sha1_hits),
+            thousands(outcome.sha1_only),
+        );
+    }
     if outcome.from_verdicts > 0 {
         eprintln!(
             "其中 {} 个变体的结论直接来自**沉淀库**（{} 条裁决）——裁决过的东西不必再撞一遍 DAT。",

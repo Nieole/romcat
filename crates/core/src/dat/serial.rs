@@ -28,6 +28,24 @@
 //! `license_content_id.substr(7, 9)`、pkg2zip 的 `content + 7`，
 //! 见 `docs/research/rom-identification-part2.md` 2.1.3）。
 //!
+//! ## 卡带的丝印编号要拆出里面那个**游戏码**
+//!
+//! 卡带这一头也有同一个毛病，而且它把[卡带内部头那一层](crate::identify::cart)整个卡住：
+//!
+//! | 出处 | 样子 |
+//! |---|---|
+//! | GBA 卡带头 `0x0AC` 读出来的 | `BR6J` |
+//! | No-Intro 的 `<rom serial>` | `BR6J` |
+//! | **MAME 的 `<info name="serial">`** | **`AGB-BR6J-JPN`**（卡上丝印的那一串） |
+//! | GBC / GB / N64 / SFC 同理 | `CGB-BO7E-USA`、`DMG-AUFP-NOE`、`NUS-NDAJ-JPN`、`SHVC-ALPJ-JPN` |
+//!
+//! 卡带头里**只有中间那四个字**（GBATEK 的 `AGB-UTTD`：丝印上那一串的第二段就是它）。
+//! 不拆，MAME 那几份就一条都撞不上——真机实测这样的记录有 GBA 2,316、GB 1,503、
+//! GBC 1,489、N64 925、SFC 1,312、FC 1,168 条，而 GBC 在 No-Intro 那边只有 87 条
+//! 四字形式的，命中率因此卡在 0%。
+//!
+//! 拆法与 CONTENT_ID 那一条同构：**一条丝印编号落两行索引**，完整那行与中间那段。
+//!
 //! ## 一条记录可以写好几个序列号
 //!
 //! MAME 的 software list 把再版与廉价版并在一条里：`SLUS-01300, SLUS-01300CE`、
@@ -42,6 +60,9 @@ const MIN_LEN: usize = 4;
 
 /// 一条记录里几个序列号之间的分隔符。
 const SEPARATORS: &[char] = &[',', '/', ';'];
+
+/// 卡带**游戏码**就是四个字。GBATEK 的 `AGB-UTTD`、NDS 的 `NTR-<code>` 都是这个长度。
+const GAME_CODE_LEN: usize = 4;
 
 /// 折平一个序列号：只留字母与数字，折成大写。
 ///
@@ -87,6 +108,27 @@ pub fn title_id_in(text: &str) -> Option<String> {
     normalize(&bytes[7..16].iter().collect::<String>())
 }
 
+/// 这串东西是不是一条**卡带丝印编号**；是的话返回中间那个四字游戏码。
+///
+/// 形状是 `厂商码-游戏码-地区`：`AGB-BR6J-JPN`、`CGB-BO7E-USA`、`SHVC-ALPJ-JPN`。
+/// **三段都要卡死**，尤其是最后一段必须是三个字母——MD 的 `MK-1198-00` 中间也恰好
+/// 四个字，只有那一条挡得住它（它的最后一段是两位修订号，不是地区码）。
+#[must_use]
+pub fn game_code_in(text: &str) -> Option<String> {
+    let mut parts = text.split('-');
+    let (maker, code, region) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    let ok = (3..=4).contains(&maker.chars().count())
+        && maker.chars().all(|c| c.is_ascii_alphanumeric())
+        && code.chars().count() == GAME_CODE_LEN
+        && code.chars().all(|c| c.is_ascii_alphanumeric())
+        && region.chars().count() == 3
+        && region.chars().all(|c| c.is_ascii_alphabetic());
+    ok.then(|| normalize(code)).flatten()
+}
+
 /// 一条记录里写着的序列号，拆开、折平、去重。
 ///
 /// 每一项是 `(折平后的键, 原样)`——**依据里要写原样**，那是人去 Redump 上核对时
@@ -116,6 +158,12 @@ pub fn spread(text: &str) -> Vec<(String, String)> {
         // 就分不出来了——本体、更新与 DLC 会一起被当成精确命中。
         if let Some(inner) = title_id_in(piece) {
             push(inner, piece);
+        }
+        // 卡带的丝印编号再落一行里面那个四字游戏码：**卡带头里只有那四个字**
+        // （票 10）。`shown` 记完整那一串，与 CONTENT_ID 那一条同理——依据里该写
+        // DAT 上真正写着的形式。
+        if let Some(code) = game_code_in(piece) {
+            push(code, piece);
         }
     }
     out
@@ -184,6 +232,51 @@ mod tests {
         assert_eq!(
             got[1].1, "JP0103-PCSG00245_00-APP0000000000000",
             "内嵌那一行记完整的 CONTENT_ID：查询方靠它分辨精确与「只对上里面那一段」"
+        );
+    }
+
+    #[test]
+    fn 卡带的丝印编号拆得出中间那个游戏码() {
+        // 卡带头里只有中间那四个字（GBATEK 的 `AGB-UTTD`）。
+        for (text, code) in [
+            ("AGB-BR6J-JPN", "BR6J"),
+            ("CGB-BO7E-USA", "BO7E"),
+            ("DMG-AUFP-NOE", "AUFP"),
+            ("NUS-NDAJ-JPN", "NDAJ"),
+            ("SHVC-ALPJ-JPN", "ALPJ"),
+            ("NTR-C32J-JPN", "C32J"),
+        ] {
+            assert_eq!(game_code_in(text).as_deref(), Some(code), "{text}");
+        }
+    }
+
+    #[test]
+    fn 不是丝印编号的形状不许硬切一段出来() {
+        // MD 的产品码中间也恰好四个字，而最后一段是两位修订号不是地区码。
+        assert_eq!(game_code_in("MK-1198-00"), None);
+        assert_eq!(game_code_in("T-76053-10"), None);
+        // 中段不是四个字的。
+        assert_eq!(game_code_in("SNS-ES-USA"), None);
+        assert_eq!(game_code_in("DMG-U2-USA"), None);
+        // 段数不对的。
+        assert_eq!(game_code_in("LNA-CTR-BC5K-KOR"), None);
+        assert_eq!(game_code_in("SLPS-02170"), None);
+        // CONTENT_ID 恰好也是三段，但中段是 12 个字。
+        assert_eq!(game_code_in("JP0103-PCSG00245_00-APP0000000000000"), None);
+    }
+
+    #[test]
+    fn 丝印编号落两行索引() {
+        let got = spread("CGB-BO7E-USA");
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            got[0],
+            ("CGBBO7EUSA".to_string(), "CGB-BO7E-USA".to_string())
+        );
+        assert_eq!(
+            got[1],
+            ("BO7E".to_string(), "CGB-BO7E-USA".to_string()),
+            "中间那行记完整的丝印编号：依据里该写 DAT 上真正写着的形式"
         );
     }
 

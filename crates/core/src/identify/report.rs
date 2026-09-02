@@ -20,7 +20,9 @@ use std::fmt::Write as _;
 use rusqlite::params;
 use serde::Serialize;
 
+use crate::catalog::identify::PlatformConflict;
 use crate::catalog::{Catalog, CatalogError, State};
+use crate::classify::has_cjk;
 use crate::dat::DatRepo;
 use crate::report::{heading, pad, thousands};
 
@@ -41,6 +43,12 @@ pub struct PlatformRow {
     pub skipped: u64,
     /// DAT 库里这个平台有多少条条目——**没有弹药的平台命中率低是另一回事**。
     pub dat_games: u64,
+    /// 命中里带**官中**记号的变体数（票 10 的中文占比统计）。
+    pub official_chinese: u64,
+    /// 命中里带**汉化**记号的变体数。
+    pub fan_translated: u64,
+    /// **文件名含汉字**的变体数——票 01 用的那个粗略代理，摆在旁边好看出差多少。
+    pub cjk_named: u64,
     /// DAT 库里这个平台索引了多少条**序列号**（票 09）。
     ///
     /// 它与 `dat_games` 是两种弹药，缺哪一种都会让命中率低而**与识别准不准无关**。
@@ -49,30 +57,42 @@ pub struct PlatformRow {
     pub dat_serials: u64,
 }
 
+/// 一个百分比，分母是 0 时算 0。**这份报告里每一个占比都走它**——四个算式各写一遍
+/// 的话，哪天要改「分母是 0 怎么办」就得记得改四处。
+fn rate(part: u64, whole: u64) -> f64 {
+    if whole == 0 {
+        return 0.0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    {
+        part as f64 * 100.0 / whole as f64
+    }
+}
+
 impl PlatformRow {
     /// 撞了 DAT 的里面命中多少。
     #[must_use]
     pub fn hit_rate(&self) -> f64 {
-        let tried = self.matched + self.unmatched;
-        if tried == 0 {
-            return 0.0;
-        }
-        #[allow(clippy::cast_precision_loss)]
-        {
-            self.matched as f64 * 100.0 / tried as f64
-        }
+        rate(self.matched, self.matched + self.unmatched)
+    }
+
+    /// 认出中文的占这个平台多少。**官中版与汉化版加在一起**——这一条问的是
+    /// 「库里有多少东西是中文的」，那两种都算；分开数的那两列在上面（ADR-0012）。
+    #[must_use]
+    pub fn chinese_rate(&self) -> f64 {
+        rate(self.official_chinese + self.fan_translated, self.variants)
+    }
+
+    /// 文件名含汉字的占这个平台多少（票 01 的粗略代理）。
+    #[must_use]
+    pub fn cjk_rate(&self) -> f64 {
+        rate(self.cjk_named, self.variants)
     }
 
     /// 全部变体里命中多少。
     #[must_use]
     pub fn coverage(&self) -> f64 {
-        if self.variants == 0 {
-            return 0.0;
-        }
-        #[allow(clippy::cast_precision_loss)]
-        {
-            self.matched as f64 * 100.0 / self.variants as f64
-        }
+        rate(self.matched, self.variants)
     }
 }
 
@@ -135,9 +155,16 @@ pub struct IdentifyReport {
     pub releases: u64,
     /// 这一轮回盘读了多少字节。
     pub read_bytes: u64,
+    /// **内部头说的平台与目录声明的平台对不上**的变体数（ADR-0011）。
+    pub platform_conflicts: u64,
+    /// 其中几条的样子，好让人一眼看出是下错了还是放错了。
+    pub conflict_examples: Vec<PlatformConflict>,
 }
 
 const UNKNOWN_PLATFORM: &str = "（未知）";
+
+/// 每一类理由、每一种冲突各举几个例子。三条够看出「判得对不对」，多了淹掉报告。
+const EXAMPLES: usize = 3;
 
 impl IdentifyReport {
     /// 从中立库与 DAT 库折出报告。**不碰主库、不联网。**
@@ -152,6 +179,7 @@ impl IdentifyReport {
         };
         let ammo = dat_games(repo);
         let serials = repo.serial_counts().unwrap_or_default();
+        let chinese = catalog.chinese_by_platform(UNKNOWN_PLATFORM)?;
         let mut rows: BTreeMap<String, PlatformRow> = BTreeMap::new();
         catalog.for_each_identification(&mut |platform, state, reason, key, read_bytes| {
             let platform = platform.unwrap_or(UNKNOWN_PLATFORM).to_string();
@@ -159,9 +187,16 @@ impl IdentifyReport {
                 platform: platform.clone(),
                 dat_games: ammo.get(&platform).copied().unwrap_or(0),
                 dat_serials: serials.get(&platform).copied().unwrap_or(0),
+                official_chinese: chinese.get(&platform).map_or(0, |it| it.0),
+                fan_translated: chinese.get(&platform).map_or(0, |it| it.1),
                 ..PlatformRow::default()
             });
             row.variants += 1;
+            // 票 01 那个粗略代理就地算出来：报告要能并排给出「文件名猜的」与
+            // 「识别认出来的」，不然「这一层还差多少」只能靠感觉。
+            if has_cjk(std::path::Path::new(key)) {
+                row.cjk_named += 1;
+            }
             match state {
                 State::Matched => row.matched += 1,
                 State::Unmatched => row.unmatched += 1,
@@ -196,6 +231,9 @@ impl IdentifyReport {
             report.total.skipped += row.skipped;
             report.total.dat_games += row.dat_games;
             report.total.dat_serials += row.dat_serials;
+            report.total.official_chinese += row.official_chinese;
+            report.total.fan_translated += row.fan_translated;
+            report.total.cjk_named += row.cjk_named;
         }
         report.total.platform = "合计".to_string();
         sort_reasons(&mut report.skipped);
@@ -207,6 +245,8 @@ impl IdentifyReport {
         report.multi_candidate_variants = counts.multi;
         report.fan_translated = counts.fan;
         report.official_chinese = counts.official;
+        report.platform_conflicts = catalog.platform_conflict_count()?;
+        report.conflict_examples = catalog.platform_conflicts(EXAMPLES)?;
         report.nkit = counts.nkit;
         report.works = counts.works;
         report.releases = counts.releases;
@@ -227,7 +267,10 @@ impl IdentifyReport {
     #[must_use]
     pub fn render_text(&self) -> String {
         let mut out = String::new();
-        let _ = writeln!(out, "识别：CRC-32 加大小撞 DAT，撞不上的读光盘序列号");
+        let _ = writeln!(
+            out,
+            "识别：CRC-32 加大小撞 DAT，撞不上的读光盘序列号与卡带内部头"
+        );
         let _ = writeln!(out, "{}", "═".repeat(40));
         let _ = writeln!(out, "中立库          {}", self.catalog);
         let _ = writeln!(out, "DAT 库          {}", self.dat);
@@ -257,9 +300,14 @@ impl IdentifyReport {
         );
         let _ = writeln!(
             out,
-            "中文            命中里汉化版 {} 个、官中版 {} 个",
-            thousands(self.fan_translated),
-            thousands(self.official_chinese),
+            "中文            命中里官中版 {} 个（{:.1}%）、汉化版 {} 个（{:.1}%）；\
+             文件名含汉字的有 {} 个（{:.1}%，票 01 的粗略代理）",
+            thousands(self.total.official_chinese),
+            rate(self.total.official_chinese, self.total.variants),
+            thousands(self.total.fan_translated),
+            rate(self.total.fan_translated, self.total.variants),
+            thousands(self.total.cjk_named),
+            self.total.cjk_rate(),
         );
         let _ = writeln!(
             out,
@@ -319,6 +367,63 @@ impl IdentifyReport {
              这个平台的命中率低就与识别准不准无关）"
         );
 
+        heading(&mut out, "中文（这是识别结论，不是从文件名猜的）");
+        let _ = writeln!(
+            out,
+            "{}{}{}{}{}文件名含汉字",
+            pad("平台", 10),
+            pad("变体", 9),
+            pad("官中版", 9),
+            pad("汉化版", 9),
+            pad("中文占比", 11),
+        );
+        for row in &self.platforms {
+            if row.official_chinese + row.fan_translated + row.cjk_named == 0 {
+                continue;
+            }
+            let _ = writeln!(
+                out,
+                "{}{}{}{}{}{}（{:.1}%）",
+                pad(&row.platform, 10),
+                pad(&thousands(row.variants), 9),
+                pad(&thousands(row.official_chinese), 9),
+                pad(&thousands(row.fan_translated), 9),
+                pad(&format!("{:.1}%", row.chinese_rate()), 11),
+                thousands(row.cjk_named),
+                row.cjk_rate(),
+            );
+        }
+        let _ = writeln!(
+            out,
+            "（**官中版与汉化版不许加成一个数**：在卡带与光盘世代官中是一次独立的官方\
+             **发行版**，汉化版是改过字节的**变体**——ADR-0012、ADR-0019）"
+        );
+        let _ = writeln!(
+            out,
+            "（最后一列是票 01 用文件名做的粗略代理。两列并排看，差出来的那部分就是\
+             这一层还没认出来的中文）"
+        );
+
+        if self.platform_conflicts > 0 {
+            heading(
+                &mut out,
+                "内部头与目录声明的平台对不上（ADR-0011：目录只是强先验）",
+            );
+            let _ = writeln!(
+                out,
+                "{}个变体：文件内容说的平台与它躺着的目录不一致。**这不是错误**，\
+                 是下错、放错或压缩包混装，也是库体检最该报告的产出之一",
+                thousands(self.platform_conflicts)
+            );
+            for it in &self.conflict_examples {
+                let _ = writeln!(
+                    out,
+                    "         · {}｜目录说 {}，内部头说 {}（{}）",
+                    it.variant_key, it.declared, it.found, it.member
+                );
+            }
+        }
+
         reasons(&mut out, "跳过的（不该撞 DAT）", &self.skipped);
         reasons(&mut out, "无判据的（这一层拿不到判据）", &self.no_evidence);
 
@@ -374,7 +479,7 @@ fn record_reason(bucket: &mut Vec<ReasonRow>, reason: &str, key: &str) {
         }
     };
     row.count += 1;
-    if row.examples.len() < 3 {
+    if row.examples.len() < EXAMPLES {
         row.examples.push(format!("{key}｜{reason}"));
     }
 }

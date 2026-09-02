@@ -354,6 +354,7 @@ impl Catalog {
         // 建完表再补列：票 18、19 建的那两张表在老库里已经存在，
         // `CREATE TABLE IF NOT EXISTS` 对它们一个字都不改（见 `add_columns`）。
         sublibrary::add_columns(&catalog.conn).map_err(|source| catalog.err(source))?;
+        identify::add_columns(&catalog.conn).map_err(|source| catalog.err(source))?;
         let found: Option<String> = catalog
             .conn
             .query_row(
@@ -774,6 +775,10 @@ impl Catalog {
             let mut clear_disc = tx
                 .prepare("DELETE FROM content_disc WHERE key = ?1")
                 .map_err(to_err)?;
+            // 卡带内部头同理（票 10）。
+            let mut clear_cart = tx
+                .prepare("DELETE FROM content_cart WHERE key = ?1")
+                .map_err(to_err)?;
             // 媒体文件变了，上一趟算出来的内容哈希同样作废——留着它，刮削会拿一个
             // 对不上的哈希去引用**媒体池**里另一份内容的图。与 content_hash 同一条路。
             let mut clear_media = tx
@@ -851,6 +856,7 @@ impl Catalog {
                 if changed {
                     clear_hashes.execute(params![record.key]).map_err(to_err)?;
                     clear_disc.execute(params![record.key]).map_err(to_err)?;
+                    clear_cart.execute(params![record.key]).map_err(to_err)?;
                     clear_media.execute(params![record.key]).map_err(to_err)?;
                 }
                 if is_container && (changed || record.container.is_some()) {
@@ -1008,6 +1014,7 @@ impl Catalog {
              DELETE FROM container       WHERE key NOT IN (SELECT key FROM entry);
              DELETE FROM content_hash    WHERE key NOT IN (SELECT key FROM entry);
              DELETE FROM content_disc    WHERE key NOT IN (SELECT key FROM entry);
+             DELETE FROM content_cart    WHERE key NOT IN (SELECT key FROM entry);
              DELETE FROM media_blob      WHERE key NOT IN (SELECT key FROM entry);",
         )?;
         Ok(removed)

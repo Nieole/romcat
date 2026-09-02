@@ -41,6 +41,7 @@ use std::path::Path;
 
 use crate::path::{extension_lower, file_name_of_key};
 
+use super::ident::{IdKind, Ident};
 use super::iso9660;
 use super::sfo::Sfo;
 
@@ -216,89 +217,6 @@ pub fn by_name(name: &str) -> Option<Shell> {
     }
 }
 
-/// 一条从镜像里读出来的**标识**是哪一种。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum IdKind {
-    /// 光盘序列号：PS1 / PS2 的 `SLPS-02170`、PSP 的 `ULJM-05800`。
-    Serial,
-    /// 数字世代的 TitleID：PSV / PS3 的 `PCSG00245`。
-    TitleId,
-    /// CONTENT_ID：`JP0103-PCSG00245_00-APP…`，比 TitleID 更细一档。
-    ContentId,
-    /// GC / Wii 的光盘 ID（`GALE01`）。
-    DiscId,
-}
-
-impl IdKind {
-    /// 依据里写的那个词。
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Serial => "光盘序列号",
-            Self::TitleId => "TitleID",
-            Self::ContentId => "CONTENT_ID",
-            Self::DiscId => "光盘 ID",
-        }
-    }
-
-    /// 存进中立库用的短码。**不拿 [`label`](Self::label) 当键**：那是展示词，
-    /// 改一次报告用词就会让整张缓存静默作废。
-    #[must_use]
-    pub fn code(self) -> &'static str {
-        match self {
-            Self::Serial => "serial",
-            Self::TitleId => "title-id",
-            Self::ContentId => "content-id",
-            Self::DiscId => "disc-id",
-        }
-    }
-
-    /// 从短码读回来。
-    #[must_use]
-    pub fn from_code(code: &str) -> Option<Self> {
-        Self::all().into_iter().find(|it| it.code() == code)
-    }
-
-    /// 全部四种，顺序固定。
-    #[must_use]
-    pub fn all() -> [Self; 4] {
-        [Self::Serial, Self::TitleId, Self::ContentId, Self::DiscId]
-    }
-}
-
-/// 一条读出来的标识。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct DiscId {
-    /// 折平后的键，撞 DAT 走它（`dat::serial::normalize`）。
-    pub key: String,
-    /// 原样那一串，写进依据。
-    pub shown: String,
-    /// 哪一种标识。
-    #[serde(with = "kind_serde")]
-    pub kind: IdKind,
-    /// 从哪儿读出来的，写进依据。
-    pub from: String,
-    /// 顺带读到的标题。
-    pub title: Option<String>,
-    /// 顺带读到的版本。
-    pub version: Option<String>,
-}
-
-mod kind_serde {
-    use super::IdKind;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub(super) fn serialize<S: Serializer>(kind: &IdKind, out: S) -> Result<S::Ok, S::Error> {
-        kind.code().serialize(out)
-    }
-
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(input: D) -> Result<IdKind, D::Error> {
-        let code = String::deserialize(input)?;
-        IdKind::from_code(&code)
-            .ok_or_else(|| serde::de::Error::custom(format!("认不出的标识种类：{code}")))
-    }
-}
-
 /// 一份内容探出来的全部事实。
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Facts {
@@ -307,7 +225,7 @@ pub struct Facts {
     /// 验过 NKit 没有、结论是什么。`None` = **没验过**，与 `Some(false)` 是两回事。
     pub nkit: Option<bool>,
     /// 读出来的标识，按可信程度排好。
-    pub ids: Vec<DiscId>,
+    pub ids: Vec<Ident>,
     /// 读不到想要的那一段时，说人话的一句。
     pub note: Option<String>,
 }
@@ -486,7 +404,7 @@ fn read_logical(facts: &mut Facts, image: &[u8], name: &str, shell: Shell) {
 }
 
 /// GC / Wii 的光盘头。两个魔数各自只在一边出现（WiiBrew：另一边为零）。
-fn gamecube_or_wii(image: &[u8]) -> Option<DiscId> {
+fn gamecube_or_wii(image: &[u8]) -> Option<Ident> {
     let magic_at = |at: usize, m: [u8; 4]| image.get(at..at + 4) == Some(&m[..]);
     let which = if magic_at(0x18, [0x5D, 0x1C, 0x9E, 0xA3]) {
         "Wii"
@@ -502,7 +420,7 @@ fn gamecube_or_wii(image: &[u8]) -> Option<DiscId> {
         return None;
     }
     let shown = String::from_utf8_lossy(raw).into_owned();
-    Some(DiscId {
+    Some(Ident {
         key: crate::dat::serial::normalize(&shown)?,
         shown,
         kind: IdKind::DiscId,
@@ -513,7 +431,7 @@ fn gamecube_or_wii(image: &[u8]) -> Option<DiscId> {
 }
 
 /// PSP 的 UMD 把序列号明文写在主卷描述符的 Application Used 区里。
-fn psp_application_use(image: &[u8]) -> Option<DiscId> {
+fn psp_application_use(image: &[u8]) -> Option<Ident> {
     let region = iso9660::application_use(image)?;
     // 形如 `ULUS-10339|D8E7…`：竖线前那一段就是序列号。
     //
@@ -530,7 +448,7 @@ fn psp_application_use(image: &[u8]) -> Option<DiscId> {
     {
         return None;
     }
-    Some(DiscId {
+    Some(Ident {
         key: crate::dat::serial::normalize(head)?,
         shown: head.to_string(),
         kind: IdKind::Serial,
@@ -545,7 +463,7 @@ fn psp_application_use(image: &[u8]) -> Option<DiscId> {
 /// 归一化照 DuckStation 的 `System::GetGameCodeForPath`（PS1）与 PCSX2 的
 /// `ExecutablePathToSerial`（PS2）：取最后一段路径、在第一个 `;` 处截断、删掉所有 `.`、
 /// `_` 换成 `-`、其余大写。`SCES_123.45` → `SCES-12345`。
-fn system_cnf(bytes: &[u8]) -> Option<DiscId> {
+fn system_cnf(bytes: &[u8]) -> Option<Ident> {
     let text = String::from_utf8_lossy(bytes);
     for line in text.lines() {
         // 没有 `=` 的行跳过而不是收工：`SYSTEM.CNF` 里空行与注释都真实存在，
@@ -587,7 +505,7 @@ fn system_cnf(bytes: &[u8]) -> Option<DiscId> {
                 }
             })
             .collect();
-        return Some(DiscId {
+        return Some(Ident {
             key: crate::dat::serial::normalize(&shown)?,
             shown,
             kind: IdKind::Serial,
@@ -631,7 +549,7 @@ fn read_sfo(facts: &mut Facts, bytes: &[u8], from: &str) {
     if let Some(text) = sfo.text("CONTENT_ID")
         && let Some(key) = crate::dat::serial::normalize(text)
     {
-        facts.ids.push(DiscId {
+        facts.ids.push(Ident {
             key,
             shown: text.to_string(),
             kind: IdKind::ContentId,
@@ -645,7 +563,7 @@ fn read_sfo(facts: &mut Facts, bytes: &[u8], from: &str) {
         if let Some(text) = sfo.text(name)
             && let Some(key) = crate::dat::serial::normalize(text)
         {
-            facts.ids.push(DiscId {
+            facts.ids.push(Ident {
                 key,
                 shown: text.to_string(),
                 kind,

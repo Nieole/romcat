@@ -32,6 +32,25 @@
 //! 它排在 CRC 之后跑，不是因为不如它可信（票据定的是「序列号命中等同于精确哈希命中」），
 //! 而是因为 CRC 那一层免费：撞上了就不必再为那份内容读几百 KB（`worth_probing`）。
 //!
+//! ## 第三命中层：卡带内部头（票 10）
+//!
+//! CRC 那一层对卡带世代的**汉化版**同样结构性地不够用，而且缺口正落在中文玩家存量
+//! 最大的两个平台上：票 07 实测 GBA 5.8%、NDS 4.4%、GBC 0%，抽样确认那批未命中全是
+//! 汉化版。**汉化补丁通常不改内部头**（调研 C.2、D.3.1），于是 GBA 头里的 game code、
+//! NDS 头里的 gamecode 照样说得出「这是哪个游戏」——缺的只是「这是谁汉化的第几版」，
+//! 那归**裁决**（ADR-0008）。
+//!
+//! 因此[卡带那一层](cart)的候选**永远不自动通过**：它只说得到**发行版**这一层。
+//! 这与光盘序列号那一层不同——一张汉化过的盘与原版盘是两份不同的转储、各自有哈希，
+//! 序列号对上就是同一次发行；而一张汉化过的卡与原版卡**共用同一个游戏码**。
+//!
+//! ## 还有一条 SHA-1 的窄路
+//!
+//! DAT 库里有一批记录连 `crc32` 与 `size` 两列都是空的（GoodNES 实测 30,244 条，
+//! 其中 748 条中文汉化），第一命中层够不到它们。SHA-1 要整份读一遍，所以它**只对
+//! 真有这种弹药的平台、而且第一层没办成时**才付（`has_sha1_ammo`）——ADR-0008 的修订段
+//! 算过这笔账，对光盘世代不值，对卡带世代反过来。
+//!
 //! ## ⭐ NKit 前置于任何 CRC 匹配
 //!
 //! Dolphin 的原话：NKit 处理过的镜像**的 CRC32 可能和好转储的相同，即使两个文件并不
@@ -52,9 +71,11 @@
 //! 失真了——「DAT 里没有这个东西」与「这东西根本不该撞 DAT」是两件事（[`scope`]），
 //! 「拿不到判据」（容器穿不透、压缩镜像、目录树转储）又是第三件。
 
+pub mod cart;
 pub mod disc;
 pub mod fingerprint;
 pub mod header;
+pub mod ident;
 pub mod iso9660;
 pub mod naming;
 pub mod report;
@@ -67,13 +88,13 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::catalog::identify::{
-    Candidate, Confidence, ContentHash, DiscFactRow, EntryFact, Identification,
+    Candidate, CartFactRow, Confidence, ContentHash, DiscFactRow, EntryFact, Identification,
 };
 use crate::catalog::{Catalog, CatalogError, Provenance, State, VariantRow};
 use crate::classify::{self, Category};
 use crate::container::{self, ContainerKind, Demand, ReadPlan};
 use crate::dat::chinese::ChineseMark;
-use crate::dat::{Convention, DatRepo, Hit, RepoError};
+use crate::dat::{Convention, DatRepo, Hit, Matched, RepoError};
 use crate::fs::LibraryFs;
 use crate::path::{extension_lower, file_name_of_key};
 use crate::report::thousands;
@@ -81,7 +102,7 @@ use crate::scan::CancelToken;
 use crate::shape::Role;
 use crate::verdict::{self, Decision, Verdict};
 
-use fingerprint::{Fingerprint, Headerless};
+use fingerprint::{Fingerprint, Headerless, Want};
 use header::DumpHeader;
 use report::IdentifyReport;
 use serial::Evidence;
@@ -142,6 +163,27 @@ pub struct Progress {
     pub read_files: u64,
 }
 
+/// **卡带那一层**这一趟干了什么。
+///
+/// 六个数永远同进同出（一层探测的全部账目），所以是一个类型而不是六个字段：
+/// [`Run`] 与 [`Outcome`] 上各摆一份，`run()` 收尾时整个搬过去——散成六个字段的话，
+/// 加一个计数器要改三处，而漏掉一处不会有任何人告诉你。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CartCount {
+    /// 探了几份内容。
+    pub probed: u64,
+    /// 其中读出了游戏码的。
+    pub with_id: u64,
+    /// 撞出来的候选条数。
+    pub candidates: u64,
+    /// **靠这一层才认出来**的变体数。
+    pub only: u64,
+    /// 这一趟没读到几份。**读不到不是结论，不落库**（ADR-0021）。
+    pub missed: u64,
+    /// 内部头说的平台与目录声明的平台对不上的份数（ADR-0011）。
+    pub conflicts: u64,
+}
+
 /// 一趟识别的产物。
 #[derive(Debug, Clone)]
 pub struct Outcome {
@@ -167,6 +209,12 @@ pub struct Outcome {
     pub serial_candidates: u64,
     /// **靠序列号层才认出来**的变体数——第一命中层在它们身上一条自动通过的候选都没有。
     pub serial_only: u64,
+    /// 卡带那一层这一趟干了什么。
+    pub cart: CartCount,
+    /// SHA-1 那一层撞出来的候选条数。
+    pub sha1_hits: u64,
+    /// **靠 SHA-1 才认出来**的变体数。
+    pub sha1_only: u64,
 }
 
 /// 一份拿去撞 DAT 的内容：容器里的一个内部文件，或者一个裸文件。
@@ -193,6 +241,8 @@ struct ContentUnit {
     in_container: bool,
     /// 光盘那一层探出来的事实：壳子、NKit、内部标识（票 09）。
     disc: Option<disc::Facts>,
+    /// 卡带那一层探出来的事实：内部头、游戏码、平台（票 10）。
+    cart: Option<cart::Facts>,
 }
 
 impl ContentUnit {
@@ -244,6 +294,9 @@ pub fn run(
         // `switch/` 那 91 个变体是 154 GiB 的 `.xci`，而 DAT 库里 Switch 一条记录都没有
         // （那是票 27 的活），读完它们只是把 154 GiB 换成一堆撞不上的数。
         ammo: repo.platforms()?,
+        // **只有真有 SHA-1 弹药的平台才付整份读一遍那笔钱**（票 10）。真机实测这份
+        // 名单上的卡带平台只有 FC 与 MD——GoodNES 那两份只记 SHA-1。
+        sha1_ammo: repo.sha1_only_platforms()?,
         ..Run::default()
     };
     let mut batch: Vec<Identification> = Vec::new();
@@ -282,6 +335,9 @@ pub fn run(
         missed: state.missed,
         serial_candidates: state.serial_candidates,
         serial_only: state.serial_only,
+        cart: state.cart,
+        sha1_hits: state.sha1_hits,
+        sha1_only: state.sha1_only,
     })
 }
 
@@ -291,6 +347,8 @@ struct Run {
     progress: Progress,
     /// DAT 库覆盖到的平台。
     ammo: BTreeSet<String>,
+    /// **值得为它算 SHA-1** 的平台：库里有第一命中层够不着的记录的那几个（票 10）。
+    sha1_ammo: BTreeSet<String>,
     /// 这一轮算出来的哈希，攒够一批写一次。
     hashes: Vec<ContentHash>,
     /// 把结论落成作品与发行版那几行的家伙。识别与**裁决**共用同一个。
@@ -311,6 +369,14 @@ struct Run {
     serial_only: u64,
     /// 这一轮探出来的光盘事实，攒够一批写一次。
     facts: Vec<DiscFactRow>,
+    /// 卡带那一层这一趟干了什么。
+    cart: CartCount,
+    /// SHA-1 那一层撞出来的候选条数。
+    sha1_hits: u64,
+    /// **靠 SHA-1 才认出来**的变体数。
+    sha1_only: u64,
+    /// 这一轮探出来的卡带事实，攒够一批写一次。
+    carts: Vec<CartFactRow>,
 }
 
 /// DAT 库里有没有这个平台的记录。平台认不出来时当作**有**——那时无从判断，
@@ -322,6 +388,17 @@ fn has_ammo(variant: &VariantRow, state: &Run) -> bool {
         .is_none_or(|platform| state.ammo.contains(platform))
 }
 
+/// 这个平台**值得为它算 SHA-1** 吗——库里有第一命中层够不着的记录吗（票 10）。
+///
+/// 与 [`has_ammo`] 那条反过来：**平台认不出来时当作没有**。那一条少读一次会丢一条候选，
+/// 这一条多读一次是把整份内容读一遍，而认不出平台的东西按定义撞不上任何一份专属 DAT。
+fn has_sha1_ammo(variant: &VariantRow, state: &Run) -> bool {
+    variant
+        .platform
+        .as_deref()
+        .is_some_and(|platform| state.sha1_ammo.contains(platform))
+}
+
 fn flush(
     catalog: &mut Catalog,
     batch: &mut Vec<Identification>,
@@ -331,6 +408,8 @@ fn flush(
     state.hashes.clear();
     catalog.put_disc_facts(&state.facts)?;
     state.facts.clear();
+    catalog.put_cart_facts(&state.carts)?;
+    state.carts.clear();
     catalog.write_identifications(batch)?;
     batch.clear();
     Ok(())
@@ -391,8 +470,15 @@ fn identify_variant(
     // 但**这个平台在 DAT 库里一条记录都没有**时，一个字节都不读：读出来的哈希
     // 无处可撞。容器里那套零解压的 CRC-32 照撞不误——它是白拿的，而且撞的是
     // 全库的记录，说不定这个 `switch/` 目录下躺着的其实是别的平台的东西。
+    // 这个平台的 DAT 里有只记 SHA-1 的记录吗。有的话，**该读的那几份顺手把 SHA-1 也
+    // 算出来**——边际成本几乎为零，而且省掉了下面那一步为它们再读一遍（票 10）。
+    let want = if has_sha1_ammo(variant, state) {
+        Want::sha1_if_free()
+    } else {
+        Want::crc_only()
+    };
     let read_bytes = if has_ammo(variant, state) {
-        fill_in(library, options, &mut units, &cached, state)?
+        fill_in(library, options, &mut units, &cached, want, state)?
     } else {
         let platform = variant.platform.as_deref().unwrap_or("这个");
         for unit in &mut units {
@@ -424,6 +510,55 @@ fn identify_variant(
         }
     }
 
+    // 二之二、**SHA-1 那条窄路**（票 10）。DAT 库里有一批记录连 `crc32` 与 `size` 两列
+    // 都是空的（GoodNES 实测 30,244 条，其中 748 条中文汉化），第一命中层够不到它们
+    // ——不是撞不上，是**根本没有可以对的那一列**。
+    //
+    // 它排在撞 CRC **之后**，理由与光盘那一层的 `worth_probing` 一模一样：**第一层办成了
+    // 的事不必重办**，而这一层要把内容整份读一遍。真机上 FC 全平台 2.01 GiB，撞上了的
+    // 占 1.97 GiB——先撞后读，读的是剩下那 0.45 GiB。
+    let first_layer_empty = units.iter().all(|unit| unit.hits.is_empty());
+    let crc_accepted = units
+        .iter()
+        .any(|unit| unit.hits.iter().any(|(hit, _)| hit.is_exact()));
+    let read_bytes = read_bytes
+        + if want.sha1.wanted() && !crc_accepted {
+            let more = fill_in(
+                library,
+                options,
+                &mut units,
+                &cached,
+                Want::pay_for_sha1(),
+                state,
+            )?;
+            let mut added = 0;
+            for unit in &mut units {
+                let Some(print) = unit.print else { continue };
+                if let Some(sha1) = print.sha1 {
+                    let mut hits = lookup_sha1(repo, sha1, print.size, Convention::AsIs)?;
+                    added += hits.len();
+                    unit.hits.append(&mut hits);
+                }
+                // 去头那套照撞，理由与 CRC 那一层一模一样：含头与去头是两档 DAT。
+                // 两套落在同一串字节上时不重复撞。
+                if let Some(bare) = print.headerless_sha1()
+                    && Some(bare) != print.sha1
+                    && let Some((size, _)) = print.headerless_pair()
+                {
+                    let mut hits = lookup_sha1(repo, bare, size, Convention::Headerless)?;
+                    added += hits.len();
+                    unit.hits.append(&mut hits);
+                }
+            }
+            state.sha1_hits += u64::try_from(added).unwrap_or(0);
+            if added > 0 && first_layer_empty {
+                state.sha1_only += 1;
+            }
+            more
+        } else {
+            0
+        };
+
     // 三、⭐ **光盘那一层**：只读几百字节把内部标识取出来，顺便按**逻辑**偏移 0x200
     // 验 NKit。它在**接受**任何 CRC 命中之前跑完——NKit 处理过的镜像的 CRC32 可能与
     // 好转储相同（Dolphin），验完才敢说那句「命中」。
@@ -432,15 +567,33 @@ fn identify_variant(
     )?;
     let read_bytes = read_bytes + found.read_bytes;
 
-    // 四、拿标识撞 DAT 的序列号索引。
+    // 三之二、⭐ **卡带那一层**（票 10）：哈希撞不上时，从卡带内部头里读出游戏码。
+    // **汉化补丁通常不改内部头**，所以一份对不上任何数据库的汉化版照样说得出它基于
+    // 哪一次发行——缺的只是「谁汉化的第几版」，那归裁决（ADR-0008）。
+    let carted = probe_carts(library, catalog, options, variant, &mut units, state)?;
+    let read_bytes = read_bytes + carted.read_bytes;
+
+    // 四、拿标识撞 DAT 的序列号索引。**光盘与卡带各撞一次**，为的是数得出「靠哪一层
+    // 才认出来的」——两层混在一起撞，那个数就只剩一个总和。
     let mut serial_candidates = serial::candidates(repo, &found.evidence)?;
     state.serial_candidates += u64::try_from(serial_candidates.len()).unwrap_or(0);
+    let mut cart_candidates = serial::candidates(repo, &carted.evidence)?;
+    state.cart.candidates += u64::try_from(cart_candidates.len()).unwrap_or(0);
+    // **靠卡带那一层才认出来**：前面几层一条候选都没有，而它撞出来了。
+    if !cart_candidates.is_empty()
+        && serial_candidates.is_empty()
+        && units.iter().all(|unit| unit.hits.is_empty())
+    {
+        state.cart.only += 1;
+    }
+    serial_candidates.append(&mut cart_candidates);
 
+    let evidence: Vec<Evidence> = found.evidence.into_iter().chain(carted.evidence).collect();
     let mut record = assemble(
         catalog,
         variant,
         &units,
-        &found.evidence,
+        &evidence,
         &mut serial_candidates,
         read_bytes,
         state,
@@ -518,6 +671,7 @@ fn collect(
                         hits: Vec::new(),
                         in_container: true,
                         disc: None,
+                        cart: None,
                     }),
                     // 7z 的 `kCRC` 是可选块。没有 CRC 的条目进不了第一命中层。
                     None => units.push(blocked_unit(
@@ -551,6 +705,7 @@ fn collect(
                     hits: Vec::new(),
                     in_container: false,
                     disc: None,
+                    cart: None,
                 }),
                 // 目录树转储：整个变体里没有一份「整文件」可以算哈希，锚是里面那份
                 // `param.sfo`（[光盘那一层](disc)去读）。这句话是那一份也没读到时的落点。
@@ -603,6 +758,7 @@ fn blocked_unit(member: &str, inner: &str, reason: String, in_container: bool) -
         hits: Vec::new(),
         in_container,
         disc: None,
+        cart: None,
     }
 }
 
@@ -650,6 +806,7 @@ fn fill_in(
     options: &Options,
     units: &mut [ContentUnit],
     cached: &BTreeMap<String, BTreeMap<String, ContentHash>>,
+    want: Want,
     state: &mut Run,
 ) -> Result<u64, IdentifyError> {
     let mut read_bytes = 0;
@@ -660,7 +817,7 @@ fn fill_in(
         if unit.blocked.is_some() {
             continue;
         }
-        let Some(demand) = demand_of(unit) else {
+        let Some(demand) = demand_of(unit, want) else {
             continue;
         };
         // 上限只挡整份读，不挡那 0x204 字节的 NKit 探测——那一趟的代价与文件多大无关。
@@ -699,10 +856,10 @@ fn fill_in(
     for (member, indexes) in wanted {
         let path = library_path(&options.root, &member);
         if units[indexes[0].0].in_container {
-            read_bytes += read_from_container(library, &path, units, &indexes, state);
+            read_bytes += read_from_container(library, &path, units, &indexes, want, state);
         } else {
             let (index, demand) = indexes[0];
-            read_bytes += read_bare(library, &path, &mut units[index], demand, state);
+            read_bytes += read_bare(library, &path, &mut units[index], demand, want, state);
         }
     }
 
@@ -724,11 +881,22 @@ fn fill_in(
 ///
 /// **NKit 不在这里了**（票 09）：它挪进了[光盘那一层](disc)，判据从「文件偏移 0x200」
 /// 改成「**逻辑**偏移 0x200」——那才是 Dolphin 说的那一处，压缩镜像也验得了。
-fn demand_of(unit: &ContentUnit) -> Option<Demand> {
+fn demand_of(unit: &ContentUnit, want: Want) -> Option<Demand> {
     let Some(print) = unit.print else {
         // 一个字节都还没看过——裸文件就是这一档。
         return Some(Demand::All);
     };
+    // **专门为 SHA-1 读一趟**（票 10）。只有 [`Sha1::Pay`] 那一档走到这儿——「顺手算」
+    // 那一档绝不在这里要求读，它只是挂在别的理由已经决定要读的那一趟上。
+    //
+    // **体积闸在这儿是硬的**（ADR-0002 的再修订：「按文件体积决定解压深度」）：
+    // 有 SHA-1 弹药的平台不全是卡带——MAME 的 `psx.xml` / `saturn.xml` / `dc.xml`
+    // 那几份 `<disk>` 也只记 SHA-1，而它们说的是 CHD 那条逻辑流，与磁盘上这份
+    // `.iso` 本来就对不上（ADR-0014 的修订段）。不设闸的话，一份 700 MB 的镜像会被
+    // 整份读一遍去算一个注定撞不上的摘要。
+    if want.sha1.pays_for_a_read() && print.sha1.is_none() && unit.size <= MAX_SHA1_READ {
+        return Some(Demand::All);
+    }
     // 这个扩展名可能带外挂头，**而且尺寸也说得通**：解出来把去头那套也算上。
     //
     // 不看「含头那次撞上没有」——撞上了照样要算：一份带 iNES 头的卡带在 TOSEC 里按
@@ -768,6 +936,14 @@ fn over_limit(unit: &ContentUnit, options: &Options) -> Option<String> {
 /// 上限那一档），64 MiB 是宽出一个数量级的保险。
 const MAX_INLINE_READ: u64 = 64 << 20;
 
+/// **专门为 SHA-1 读一趟**时，肯读多大的一份。
+///
+/// 与 [`MAX_INLINE_READ`] 同一个数但不是同一件事，所以是两个常量：那一个挡的是
+/// 「整份读进内存」，这一个挡的是「值不值得为一个摘要读这么多」。真机上卡带那几个
+/// 平台最大的一份 NDS 卡是 512 MB，而未命中的那批平均只有几 MB——64 MiB 宽出一个
+/// 数量级，同时把光盘镜像整批挡在外面。
+const MAX_SHA1_READ: u64 = 64 << 20;
+
 /// 为了够到 solid 块里排在后面的一条，最多肯先解开多少字节扔掉。
 ///
 /// 这个数是**光盘那一层的成本闸**。它存在的理由是这一层的全部意义：只读几百字节。
@@ -783,6 +959,7 @@ fn read_bare(
     path: &Path,
     unit: &mut ContentUnit,
     demand: Demand,
+    want: Want,
     state: &mut Run,
 ) -> u64 {
     let mut handle = match library.open(path) {
@@ -794,7 +971,7 @@ fn read_bare(
     };
     let print = match demand {
         Demand::Prefix(limit) => probe_prefix(unit, &mut handle, limit),
-        _ => match fingerprint::of_reader(&unit.name, unit.size, &mut handle) {
+        _ => match fingerprint::of_reader(&unit.name, unit.size, &mut handle, want) {
             Ok(print) => print,
             Err(error) => {
                 unit.blocked = Some(format!("读不动：{error}"));
@@ -836,6 +1013,7 @@ fn read_from_container(
     path: &Path,
     units: &mut [ContentUnit],
     indexes: &[(usize, Demand)],
+    want: Want,
     state: &mut Run,
 ) -> u64 {
     let listing = match container::list(library, path) {
@@ -884,7 +1062,7 @@ fn read_from_container(
         state.progress.read_files += 1;
         state.progress.read_bytes += bytes.len() as u64;
         if *full {
-            unit.print = Some(Fingerprint::of_bytes(&unit.name, bytes));
+            unit.print = Some(Fingerprint::of_bytes(&unit.name, bytes, want));
         } else {
             unit.print = Some(probe_prefix(
                 unit,
@@ -917,6 +1095,17 @@ fn lookup(
         .map(|hits| hits.into_iter().map(|hit| (hit, hashed_as)).collect())
 }
 
+/// 拿一串 SHA-1 撞一次，并记住撞上时用的是哪套口径。
+fn lookup_sha1(
+    repo: &DatRepo,
+    sha1: [u8; 20],
+    size: u64,
+    hashed_as: Convention,
+) -> Result<Vec<(Hit, Convention)>, RepoError> {
+    repo.lookup_sha1(&fingerprint::hex(sha1), size)
+        .map(|hits| hits.into_iter().map(|hit| (hit, hashed_as)).collect())
+}
+
 fn restore(row: &ContentHash) -> Fingerprint {
     let headerless = match (
         row.looked,
@@ -946,6 +1135,8 @@ fn restore(row: &ContentHash) -> Fingerprint {
         crc32: row.crc32,
         headerless,
         nkit: row.nkit,
+        sha1: row.sha1.as_deref().and_then(fingerprint::from_hex),
+        bare_sha1: row.bare_sha1.as_deref().and_then(fingerprint::from_hex),
     }
 }
 
@@ -966,6 +1157,8 @@ fn store(unit: &ContentUnit, print: Fingerprint) -> ContentHash {
             _ => None,
         },
         nkit: print.nkit,
+        sha1: print.sha1.map(fingerprint::hex),
+        bare_sha1: print.bare_sha1.map(fingerprint::hex),
     }
 }
 
@@ -1113,25 +1306,25 @@ struct Wanted {
     in_container: bool,
 }
 
-/// 探一份内容的结果。
+/// 探一份内容的结果。`T` 是那一层自己的事实类型。
 ///
 /// 两档分开，是因为它们的**保质期**完全不同：
 ///
-/// - [`Self::Read`] 是关于这份内容的**结论**，只要文件没变就一直成立 → 落进
-///   `content_disc`，第二趟直接取回。
+/// - [`Self::Read`] 是关于这份内容的**结论**，只要文件没变就一直成立 → 落进中立库，
+///   第二趟直接取回。
 /// - [`Self::Missed`] 是「**这一趟**没读到」——盘不在位、容器解不开、
 ///   或者那 4,085 个在 macOS 上连 `stat` 都失败的文件（ADR-0021 的第三态）。
 ///   **它绝不落库**：缓存一次读失败等于让它永久生效，而那批文件在 Windows 上是正常的
 ///   （ADR-0018 定的工作方式正是两台机器轮流碰同一块盘）。
-enum Probe {
+enum Probed<T> {
     /// 读到了，这是结论。
-    Read(disc::Facts),
+    Read(T),
     /// 这一趟没读到，理由在这儿。
     Missed(String),
 }
 
 /// 光盘那一层探完之后攒下来的东西。
-struct Probed {
+struct Discovered {
     /// 收集到的标识，按可信程度排好。
     evidence: Vec<Evidence>,
     /// 这一趟为它读了多少字节。
@@ -1158,8 +1351,8 @@ fn probe_discs(
     members: &[(String, Role)],
     units: &mut [ContentUnit],
     state: &mut Run,
-) -> Result<Probed, IdentifyError> {
-    let mut probed = Probed {
+) -> Result<Discovered, IdentifyError> {
+    let mut probed = Discovered {
         evidence: Vec::new(),
         read_bytes: 0,
     };
@@ -1213,29 +1406,25 @@ fn probe_discs(
             cached.insert(it.member.clone(), catalog.disc_facts(&it.member)?);
         }
     }
-    let mut todo: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    let mut facts: Vec<Option<Probe>> = Vec::with_capacity(wanted.len());
-    for (at, it) in wanted.iter().enumerate() {
-        let stored = cached
-            .get(&it.member)
-            .and_then(|rows| rows.get(&it.inner))
-            .and_then(|text| serde_json::from_str::<disc::Facts>(text).ok())
-            .map(Probe::Read);
-        if stored.is_none() && options.read_library {
-            todo.entry(it.member.clone()).or_default().push(at);
-        }
-        facts.push(stored);
-    }
+    let (mut facts, todo) = restore_probed::<disc::Facts>(&cached, &wanted, options.read_library);
     for (member, indexes) in todo {
         let path = library_path(&options.root, &member);
-        let read = if wanted[indexes[0]].in_container {
-            read_disc_from_container(library, &path, &wanted, &indexes, &mut facts)
-        } else {
-            indexes
-                .iter()
-                .map(|at| read_disc_bare(library, &path, &wanted[*at], &mut facts[*at]))
-                .sum()
-        };
+        // **壳子认不出来的一条都不读**——那不是光盘形态的东西。
+        let (got, read) = fetch_prefixes(library, &path, &wanted, &indexes, &|it| {
+            disc::by_name(&it.name).map(disc::probe_len)
+        });
+        for (at, prefix) in got {
+            let it = &wanted[at];
+            facts[at] = Some(match prefix {
+                Prefix::Bytes(bytes) => Probed::Read(disc::probe(&it.name, &bytes, it.size)),
+                // 排得太深是一条**结论**不是一次读失败（判据零解压可得），照样落库。
+                Prefix::TooDeep(note) => Probed::Read(disc::Facts {
+                    note: Some(note),
+                    ..disc::Facts::default()
+                }),
+                Prefix::Missed(why) => Probed::Missed(why),
+            });
+        }
         probed.read_bytes += read;
         // 这一层读的字节也进总账：**「第二趟读了多少」是这条增量兑现与否的唯一凭据**
         // （挂账 D14），少记一处就等于自己给自己发了张漂亮的成绩单。
@@ -1251,7 +1440,7 @@ fn probe_discs(
             // 也**不覆盖 `blocked`**——第一命中层写在那儿的那句话（「元数据读不到」
             // 之类）才是这条该报的理由。只有它本来什么都没说时才补上这一句，
             // 否则报告里这条会一个字都没有。
-            Some(Probe::Missed(why)) => {
+            Some(Probed::Missed(why)) => {
                 state.missed += 1;
                 if let Some(index) = it.unit
                     && units[index].print.is_none()
@@ -1261,7 +1450,7 @@ fn probe_discs(
                 }
                 continue;
             }
-            Some(Probe::Read(found)) => found,
+            Some(Probed::Read(found)) => found,
         };
         state.probed += 1;
         if !found.ids.is_empty() {
@@ -1281,7 +1470,7 @@ fn probe_discs(
         }
         // **GC / Wii 的光盘才在乎 NKit**，而判据取自内容自己（读出来的是一条光盘 ID），
         // 不取自目录（ADR-0011）。别的盘验不验都不影响它干不干净。
-        let is_disc = found.ids.iter().any(|id| id.kind == disc::IdKind::DiscId);
+        let is_disc = found.ids.iter().any(|id| id.kind == ident::IdKind::DiscId);
         let nkit_clean = found.nkit != Some(true) && (!is_disc || found.nkit.is_some());
         for id in &found.ids {
             probed.evidence.push(Evidence {
@@ -1290,6 +1479,7 @@ fn probe_discs(
                 id: id.clone(),
                 from_content: true,
                 nkit_clean,
+                platforms: Vec::new(),
             });
         }
         if let Some(index) = it.unit {
@@ -1318,6 +1508,7 @@ fn probe_discs(
             id,
             from_content: false,
             nkit_clean: true,
+            platforms: Vec::new(),
         });
     }
     Ok(probed)
@@ -1336,53 +1527,337 @@ fn worth_probing(unit: &ContentUnit) -> bool {
     !unit.hits.iter().any(|(hit, _)| hit.is_exact()) || disc::may_hold_nkit(&unit.name)
 }
 
-/// 探一个裸文件：只读前若干字节。
-fn read_disc_bare(
-    library: &dyn LibraryFs,
-    path: &Path,
-    wanted: &Wanted,
-    slot: &mut Option<Probe>,
-) -> u64 {
-    let Some(shell) = disc::by_name(&wanted.name) else {
-        return 0;
-    };
-    let limit = disc::probe_len(shell);
-    let head = match library.read_head(path, limit) {
-        Ok(head) => head,
-        Err(error) => {
-            *slot = Some(Probe::Missed(format!("读不动：{error}")));
-            return 0;
-        }
-    };
-    let read = head.len() as u64;
-    *slot = Some(Probe::Read(disc::probe(&wanted.name, &head, wanted.size)));
-    read
+/// 卡带那一层探完之后攒下来的东西。
+struct Carted {
+    /// 收集到的游戏码。
+    evidence: Vec<Evidence>,
+    /// 这一趟为它读了多少字节。
+    read_bytes: u64,
 }
 
-/// 探容器里的几条：一趟打开，每条只要前若干字节（[`Demand::Prefix`]）。
-fn read_disc_from_container(
+/// ⭐ **卡带内部头**：哈希撞不上时，从卡带自己的字节里读出「这是哪个游戏」。
+///
+/// 它与[光盘那一层](probe_discs)是同一条路——**只读几百字节、算过的不再算、这一趟
+/// 没读到的不落库**——三处差别写在这儿：
+///
+/// 1. **判据是内部头不是光盘结构**（[`cart`]），要连**总长**一起给：SFC 的拷贝机头
+///    没有魔数，唯一的判据是总长的余数。
+/// 2. **撞上了就不必再探**。这一层没有 NKit 那样「CRC 会骗人所以照验」的例外——
+///    卡带头认出来的是发行版，而精确哈希已经认得更细。
+/// 3. **它顺带回答一个不撞库的问题**：内部头说的平台与目录声明的平台对不对得上
+///    （ADR-0011 说那正是最该报告的产出之一）。答案落进 `content_cart.platform`，
+///    报告一条 SQL 数得出来。
+fn probe_carts(
+    library: &dyn LibraryFs,
+    catalog: &mut Catalog,
+    options: &Options,
+    variant: &VariantRow,
+    units: &mut [ContentUnit],
+    state: &mut Run,
+) -> Result<Carted, IdentifyError> {
+    let mut carted = Carted {
+        evidence: Vec::new(),
+        read_bytes: 0,
+    };
+    let hint = variant.platform.as_deref();
+    // 一、要探哪几份。**精确命中过的不探**：第一层办成了的事不必重办。
+    let mut wanted: Vec<Wanted> = Vec::new();
+    for (index, unit) in units.iter().enumerate() {
+        if cart::by_name(&unit.name, hint).is_none()
+            || unit.hits.iter().any(|(hit, _)| hit.is_exact())
+        {
+            continue;
+        }
+        wanted.push(Wanted {
+            unit: Some(index),
+            member: unit.member.clone(),
+            inner: unit.inner.clone(),
+            name: unit.name.clone(),
+            size: unit.size,
+            in_container: unit.in_container,
+        });
+    }
+    if wanted.is_empty() {
+        return Ok(carted);
+    }
+
+    // 二、算过的先取回来（不读盘），剩下的才回盘。
+    let mut cached: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for it in &wanted {
+        if !cached.contains_key(&it.member) {
+            cached.insert(it.member.clone(), catalog.cart_facts(&it.member)?);
+        }
+    }
+    let (mut facts, todo) = restore_probed::<cart::Facts>(&cached, &wanted, options.read_library);
+    for (member, indexes) in todo {
+        let path = library_path(&options.root, &member);
+        let (got, read) = fetch_prefixes(library, &path, &wanted, &indexes, &|it| {
+            cart::by_name(&it.name, hint).map(|kind| cart::probe_len(kind, it.size))
+        });
+        for (at, prefix) in got {
+            let it = &wanted[at];
+            facts[at] = Some(match prefix {
+                Prefix::Bytes(bytes) => Probed::Read(cart::probe(&it.name, &bytes, it.size, hint)),
+                Prefix::TooDeep(note) => Probed::Read(cart::Facts {
+                    note: Some(note),
+                    ..cart::Facts::default()
+                }),
+                Prefix::Missed(why) => Probed::Missed(why),
+            });
+        }
+        carted.read_bytes += read;
+        // 这一层读的字节也进总账（挂账 D14）。
+        state.progress.read_bytes += read;
+        state.progress.read_files += u64::try_from(indexes.len()).unwrap_or(0);
+    }
+
+    // 三、装回 units，落库，收集游戏码，数平台冲突。
+    for (at, it) in wanted.iter().enumerate() {
+        let found = match facts[at].take() {
+            None => continue,
+            // 这一趟没读到：**不落库**，也不覆盖第一命中层写在那儿的那句话。
+            Some(Probed::Missed(why)) => {
+                state.cart.missed += 1;
+                if let Some(index) = it.unit
+                    && units[index].print.is_none()
+                    && units[index].blocked.is_none()
+                {
+                    units[index].blocked = Some(why);
+                }
+                continue;
+            }
+            Some(Probed::Read(found)) => found,
+        };
+        state.cart.probed += 1;
+        if !found.ids.is_empty() {
+            state.cart.with_id += 1;
+        }
+        // 这份头认哪几个平台。它有两个用处，而两个都不能拿「头说的那一个平台」顶替：
+        //
+        // 1. **撞库时圈住候选**：4 个字符的游戏码跨平台撞车是现实存在的（`A83J` 在
+        //    SFC 与 GBA 各有一条）。判据取自内容自己，不取自目录（ADR-0011）。
+        // 2. **判平台冲突**：GB 与 GBC 共用一份卡带头，一份 CGB 卡躺在 `gb/` 目录里
+        //    不是冲突，是常态。
+        let kind = found.cart.as_deref().and_then(cart::Cart::from_code);
+        let platforms: Vec<String> = kind
+            .map(|kind| {
+                kind.platforms()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        // **内部头与目录声明的平台冲突**（ADR-0011）。目录只是强先验，字节说了算。
+        if let Some(declared) = hint
+            && !platforms.is_empty()
+            && !platforms.iter().any(|it| it == declared)
+        {
+            state.cart.conflicts += 1;
+        }
+        if cached
+            .get(&it.member)
+            .and_then(|rows| rows.get(&it.inner))
+            .is_none()
+            && let Ok(text) = serde_json::to_string(&found)
+        {
+            state.carts.push(CartFactRow {
+                key: it.member.clone(),
+                inner: it.inner.clone(),
+                platform: found.platform.clone(),
+                family: kind.map(|kind| format!(",{},", kind.platforms().join(","))),
+                facts: text,
+            });
+        }
+        for id in &found.ids {
+            let mut id = id.clone();
+            // **读出来却没人看得见的字段等于没读。** 归一化做了什么、头部校验和自洽
+            // 与否、发行商与地区，全写进依据那一句——尤其是校验和：调研 D.3.3 的那条
+            // 推断说「校验和自洽而整文件哈希撞不上任何 DAT」高度提示这是一份改过并
+            // 正确修好了头的变体，也就是汉化版，而人在裁决队列里正需要这一句。
+            id.from = enrich(&id.from, &found);
+            carted.evidence.push(Evidence {
+                member: it.member.clone(),
+                inner: it.inner.clone(),
+                id,
+                from_content: true,
+                nkit_clean: true,
+                platforms: platforms.clone(),
+            });
+        }
+        if let Some(index) = it.unit {
+            if !found.ids.is_empty() {
+                units[index].blocked = None;
+            } else if let Some(note) = &found.note
+                && units[index].print.is_none()
+            {
+                units[index].blocked = Some(note.clone());
+            }
+            units[index].cart = Some(found);
+        }
+    }
+    Ok(carted)
+}
+
+/// 把卡带头读出来的那几个字段接在「这一条是从哪儿读出来的」后面。
+///
+/// 它们不参与命中（命中靠编号），但**依据**要说得出来：事后复核的人靠这一句判断
+/// 一条候选对不对，而裁决的人靠「校验和自洽而哈希撞不上」这个信号一眼认出汉化版。
+fn enrich(from: &str, found: &cart::Facts) -> String {
+    let mut text = from.to_string();
+    if let Some(normalized) = &found.normalized {
+        text.push_str(&format!("；解析前做了归一化：{normalized}"));
+    }
+    for (label, value) in [
+        ("发行商", found.maker.as_deref()),
+        ("地区", found.region.as_deref()),
+    ] {
+        if let Some(value) = value {
+            text.push_str(&format!("；{label} {value}"));
+        }
+    }
+    match found.checksum {
+        Some(true) => text.push_str(
+            "；**头部校验和自洽**——而整文件哈希撞不上任何 DAT，\
+             那多半是一份改过内容、又把头修回去的变体（调研 D.3.3）",
+        ),
+        Some(false) => text.push_str("；头部校验和对不上，这份头被改过且没修回去"),
+        None => {}
+    }
+    text
+}
+
+/// 一层探测排完计划之后手上有什么：每一份的事实（还没读的是 `None`），
+/// 以及「哪个成员上还要读哪几条」。
+type Planned<T> = (Vec<Option<Probed<T>>>, BTreeMap<String, Vec<usize>>);
+
+/// 把中立库里**算过的那些事实**装回来，顺带排出「还要读哪几份」。
+///
+/// **一个字节都不读盘。** 光盘与卡带两层共用它：两层的差别全在事实类型 `T` 上，
+/// 而「算过的不再算」这件事一模一样（挂账 D14）。
+fn restore_probed<T: serde::de::DeserializeOwned>(
+    cached: &BTreeMap<String, BTreeMap<String, String>>,
+    wanted: &[Wanted],
+    read_library: bool,
+) -> Planned<T> {
+    let mut todo: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut facts: Vec<Option<Probed<T>>> = Vec::with_capacity(wanted.len());
+    for (at, it) in wanted.iter().enumerate() {
+        let stored = cached
+            .get(&it.member)
+            .and_then(|rows| rows.get(&it.inner))
+            .and_then(|text| serde_json::from_str::<T>(text).ok())
+            .map(Probed::Read);
+        if stored.is_none() && read_library {
+            todo.entry(it.member.clone()).or_default().push(at);
+        }
+        facts.push(stored);
+    }
+    (facts, todo)
+}
+
+/// 把同一个成员上要读的那几条读出来，交出每一条的前缀字节与这一趟读了多少。
+///
+/// `limit_of` 说这一份读多少；答 `None` 的一条都不读——那不是这一层认得的东西。
+/// 光盘与卡带两层共用它：一个是壳子、一个是卡带头，「一趟打开、每条只要前面那一段」
+/// 这件事一模一样。
+fn fetch_prefixes(
     library: &dyn LibraryFs,
     path: &Path,
     wanted: &[Wanted],
     indexes: &[usize],
-    facts: &mut [Option<Probe>],
-) -> u64 {
+    limit_of: &dyn Fn(&Wanted) -> Option<usize>,
+) -> (BTreeMap<usize, Prefix>, u64) {
+    let asks: BTreeMap<usize, Ask> = indexes
+        .iter()
+        .filter_map(|at| {
+            let it = &wanted[*at];
+            limit_of(it).map(|limit| {
+                (
+                    *at,
+                    Ask {
+                        inner: it.inner.clone(),
+                        limit,
+                    },
+                )
+            })
+        })
+        .collect();
+    let got = if wanted[indexes[0]].in_container {
+        read_prefixes_from_container(library, path, &asks)
+    } else {
+        asks.iter()
+            .map(|(at, ask)| (*at, read_prefix_bare(library, path, ask.limit)))
+            .collect()
+    };
+    let read = got
+        .values()
+        .map(|prefix| match prefix {
+            Prefix::Bytes(bytes) => bytes.len() as u64,
+            _ => 0,
+        })
+        .sum();
+    (got, read)
+}
+
+/// 要读某一条的前多少字节。
+struct Ask {
+    /// 容器内部路径；裸文件是空串。
+    inner: String,
+    /// 读到这么多就够了。
+    limit: usize,
+}
+
+/// 一份内容的前若干字节要来了没有。
+///
+/// 三档而不是 `Result`，因为**它们的保质期不一样**：[`Self::Bytes`] 与 [`Self::TooDeep`]
+/// 都是关于这份内容的**结论**（前者是字节，后者是「够到它太贵」这件事，判据零解压可得），
+/// 只要文件没变就一直成立，落得了库；[`Self::Missed`] 是「这一趟没读到」——盘不在位、
+/// 容器解不开——**绝不落库**（ADR-0021）。
+enum Prefix {
+    /// 读到了。
+    Bytes(Vec<u8>),
+    /// 这一趟没读到，理由在这儿。
+    Missed(String),
+    /// 在 solid 块里排得太深，为它解开前面几个 GB 不值。
+    TooDeep(String),
+}
+
+/// 读一个裸文件的前若干字节。
+fn read_prefix_bare(library: &dyn LibraryFs, path: &Path, limit: usize) -> Prefix {
+    match library.read_head(path, limit) {
+        Ok(head) => Prefix::Bytes(head),
+        Err(error) => Prefix::Missed(format!("读不动：{error}")),
+    }
+}
+
+/// 读容器里几条的前若干字节：一趟打开，每条只要前面那一段（[`Demand::Prefix`]）。
+///
+/// ⭐ **solid block 的代价要在开工前算清楚**（ADR-0014 1.6）。7z 的一个块里几个条目是
+/// 连着压的，解压器**跳不过**中间的字节——想读排在后面那一条，前面那些就得先解出来
+/// 扔掉。真机上撞见过一次：一份 7z 里那个 `.iso` 排在几 GB 的东西后面，
+/// 「只读几百字节」当场变成解几个 GB，一个变体卡住整趟识别。
+///
+/// 判据零解压可得（`block` 与每条的未压缩大小都在容器头里），所以这里**在下计划之前**
+/// 就把太贵的那些踢出去，并如实说为什么——而不是等它跑几分钟。
+fn read_prefixes_from_container(
+    library: &dyn LibraryFs,
+    path: &Path,
+    asks: &BTreeMap<usize, Ask>,
+) -> BTreeMap<usize, Prefix> {
+    let mut out: BTreeMap<usize, Prefix> = BTreeMap::new();
+    if asks.is_empty() {
+        return out;
+    }
     let listing = match container::list(library, path) {
         Ok(listing) => listing,
         Err(error) => {
-            for at in indexes {
-                facts[*at] = Some(Probe::Missed(format!("容器读不动：{error}")));
+            for at in asks.keys() {
+                out.insert(*at, Prefix::Missed(format!("容器读不动：{error}")));
             }
-            return 0;
+            return out;
         }
     };
-    // ⭐ **solid block 的代价要在开工前算清楚**（ADR-0014 1.6）。7z 的一个块里几个条目是
-    // 连着压的，解压器**跳不过**中间的字节——想读排在后面那一条，前面那些就得先解出来
-    // 扔掉。真机上撞见过一次：一份 7z 里那个 `.iso` 排在几 GB 的东西后面，
-    // 「只读几百字节」当场变成解几个 GB，一个变体卡住整趟识别。
-    //
-    // 判据零解压可得（`block` 与每条的未压缩大小都在容器头里），所以这里**在下计划之前**
-    // 就把太贵的那些踢出去，并如实说为什么——而不是等它跑几分钟。
+    // 同一个 solid 块里排在这一条前面的、要先解出来扔掉的字节数。
     let mut before: BTreeMap<usize, u64> = BTreeMap::new();
     {
         let mut running: BTreeMap<usize, u64> = BTreeMap::new();
@@ -1400,35 +1875,29 @@ fn read_disc_from_container(
         .enumerate()
         .map(|(index, entry)| (entry.path.as_str(), index))
         .collect();
-    let mut asked: BTreeMap<&str, u64> = BTreeMap::new();
-    for at in indexes {
-        let it = &wanted[*at];
-        let Some(shell) = disc::by_name(&it.name) else {
-            continue;
-        };
+    let mut wanted: BTreeMap<&str, u64> = BTreeMap::new();
+    for (at, ask) in asks {
         let ahead = position
-            .get(it.inner.as_str())
+            .get(ask.inner.as_str())
             .and_then(|index| before.get(index))
             .copied()
             .unwrap_or(0);
         if ahead > MAX_SOLID_DRAIN {
-            // 这是一条**结论**不是一次读失败：判据（块与每条的未压缩大小）零解压可得，
-            // 只要容器没变就一直成立，所以它照样落库，第二趟不必再把容器头解析一遍。
-            facts[*at] = Some(Probe::Read(disc::Facts {
-                note: Some(format!(
+            out.insert(
+                *at,
+                Prefix::TooDeep(format!(
                     "solid 块太深：这一条前面还压着 {}，要解开才够得到它，而这一层只想读几百字节",
                     crate::report::human_bytes(ahead)
                 )),
-                ..disc::Facts::default()
-            }));
+            );
             continue;
         }
-        asked.insert(it.inner.as_str(), disc::probe_len(shell) as u64);
+        wanted.insert(ask.inner.as_str(), ask.limit as u64);
     }
-    if asked.is_empty() {
-        return 0;
+    if wanted.is_empty() {
+        return out;
     }
-    let plan = ReadPlan::new(&listing, |entry| match asked.get(entry.path.as_str()) {
+    let plan = ReadPlan::new(&listing, |entry| match wanted.get(entry.path.as_str()) {
         Some(limit) => Demand::Prefix(*limit),
         None => Demand::Skip,
     });
@@ -1439,23 +1908,24 @@ fn read_disc_from_container(
         got.insert(entry.path.clone(), buffer);
         Ok(())
     });
-    if let Err(error) = outcome {
-        for at in indexes {
-            if facts[*at].is_none() {
-                facts[*at] = Some(Probe::Missed(format!("解不开：{error}")));
+    for (at, ask) in asks {
+        if out.contains_key(at) {
+            continue;
+        }
+        match got.remove(&ask.inner) {
+            Some(bytes) => {
+                out.insert(*at, Prefix::Bytes(bytes));
+            }
+            None => {
+                let why = match &outcome {
+                    Err(error) => format!("解不开：{error}"),
+                    Ok(_) => "容器里没有这一条".to_string(),
+                };
+                out.insert(*at, Prefix::Missed(why));
             }
         }
     }
-    let mut read = 0;
-    for at in indexes {
-        let it = &wanted[*at];
-        let Some(bytes) = got.get(&it.inner) else {
-            continue;
-        };
-        read += bytes.len() as u64;
-        facts[*at] = Some(Probe::Read(disc::probe(&it.name, bytes, it.size)));
-    }
-    read
+    out
 }
 
 /// 把撞出来的东西折成候选、结论，以及作品与发行版。
@@ -1620,20 +2090,41 @@ fn candidate_of(unit: &ContentUnit, hit: &Hit, hashed_as: Convention) -> Candida
     let per_chip = hit.convention == Convention::PerChip;
     let exact = hit.is_exact() && !nkit && !per_chip && !unverified;
     let mut evidence = format!(
-        "{} 的《{}》里条目「{}」的文件「{}」，按{}哈希匹配 CRC-32 {:08X}",
+        "{} 的《{}》里条目「{}」的文件「{}」，按{}哈希",
         hit.source,
         hit.dat,
         hit.game,
         hit.rom,
         hashed_as.label(),
-        unit.print.map_or(0, |print| match hashed_as {
-            Convention::Headerless => print.headerless_pair().map_or(print.crc32, |pair| pair.1),
-            _ => print.crc32,
-        })
     );
-    match hit.size {
-        Some(size) => evidence.push_str(&format!(" 加大小 {}", thousands(size))),
-        None => evidence.push_str("；这份 DAT 没记大小，只凭 CRC-32 撞上"),
+    match hit.matched_by {
+        Matched::CrcAndSize => {
+            evidence.push_str(&format!(
+                "匹配 CRC-32 {:08X}",
+                unit.print.map_or(0, |print| match hashed_as {
+                    Convention::Headerless =>
+                        print.headerless_pair().map_or(print.crc32, |pair| pair.1),
+                    _ => print.crc32,
+                })
+            ));
+            match hit.size {
+                Some(size) => evidence.push_str(&format!(" 加大小 {}", thousands(size))),
+                None => evidence.push_str("；这份 DAT 没记大小，只凭 CRC-32 撞上"),
+            }
+        }
+        // **SHA-1 那条窄路**（票 10）：这批记录连 `crc32` 与 `size` 两列都是空的，
+        // 第一命中层够不到它们。160 位对上就是对上了，不必再拿大小去补一刀。
+        Matched::Sha1 => {
+            let digest = match hashed_as {
+                Convention::Headerless => unit.print.and_then(|print| print.headerless_sha1()),
+                _ => unit.print.and_then(|print| print.sha1),
+            };
+            evidence.push_str(&format!(
+                "匹配 SHA-1 {}；这份 DAT 只记 SHA-1（连 CRC-32 与大小都没有），\
+                 第一命中层够不到它",
+                digest.map(fingerprint::hex).unwrap_or_default()
+            ));
+        }
     }
     // 剥了什么头只在**去头**那条候选上说——含头那条根本没剥。
     if hashed_as == Convention::Headerless

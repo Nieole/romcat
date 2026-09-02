@@ -20,6 +20,18 @@
 //!   → **中置信、通过但标记**。这不是打折，是如实说：同一个 TitleID 下面躺着本体、
 //!   更新和一堆 DLC，光凭 TitleID 说不出是哪一个（`dat::serial` 的模块文档）。
 //!
+//! ## 卡带游戏码走同一条路，但**永远不自动通过**
+//!
+//! 票 10 起这一层还收[卡带那一层](super::cart)读出来的游戏码——No-Intro 的卡带集把
+//! 4 字符的游戏码写在 `<rom serial>` 上，与 Vita 那一份 CONTENT_ID 落在同一张索引里，
+//! 查询这一步没有任何区别。**区别在敢不敢自动通过**：汉化补丁不改卡带头，所以同一个
+//! 游戏码底下躺着原版转储和一堆汉化版，撞上它只说得到**发行版**这一层（ADR-0008）。
+//! 判据是 [`IdKind::release_level_only`]，不是这一层自己新造的一句话。
+//!
+//! 还有一件事只有卡带这一层需要：**按平台把候选圈起来**。4 个字符的游戏码在几万条
+//! 记录上跨平台撞车是现实存在的（`A83J` 在 SFC 与 GBA 各有一条），而卡带头自己说得出
+//! 它属于哪个平台——那是**内容给的**判据，不是目录给的，圈得住。
+//!
 //! ## 目录名里那个 TitleID 是**一条独立的依据**
 //!
 //! 真库的 PSV 目录名里直接写着 TitleID（`AIME00001(wan华镜 v3.1)`、
@@ -30,7 +42,7 @@
 use crate::catalog::identify::{Candidate, Confidence};
 use crate::dat::{Convention, DatRepo, RepoError, SerialHit, serial as folding};
 
-use super::disc::{DiscId, IdKind};
+use super::ident::{IdKind, Ident};
 
 /// 一条标识，连同它是从哪一份内容上读出来的。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,9 +52,15 @@ pub struct Evidence {
     /// 容器内部路径；裸文件是空串。
     pub inner: String,
     /// 读出来的标识。
-    pub id: DiscId,
+    pub id: Ident,
     /// 这一条是从**内容**里读出来的，还是从**名字**上看出来的。
     pub from_content: bool,
+    /// 这条标识**只在这几个平台里算数**；空着表示不限。
+    ///
+    /// 卡带那一层填它：一份 GBA 卡带头读出来的 4 字符游戏码，撞到 SFC 的 DAT 上是
+    /// **撞车不是候选**。判据取自内容自己（卡带头说它是哪台机器的卡），不取自目录
+    /// ——目录只是强先验（ADR-0011）。光盘那一层留空：那些编号长得多，不需要圈。
+    pub platforms: Vec<String>,
     /// 这份内容在 NKit 这一关上是干净的吗。
     ///
     /// **两件事同时成立才算干净**：验出来不是 NKit，而且——如果它是一张 GC / Wii 光盘
@@ -65,10 +83,10 @@ pub fn title_id_head(name: &str) -> Option<String> {
 ///
 /// PSV 的目录名把它塞在中间：`A11 新罗罗的炼金工房[PCSG00245][日版][v1.03][NONPDRM]`。
 #[must_use]
-pub fn title_id_in_name(name: &str) -> Option<DiscId> {
+pub fn title_id_in_name(name: &str) -> Option<Ident> {
     let chars: Vec<char> = name.chars().collect();
     let shown = (0..chars.len().saturating_sub(8)).find_map(|at| title_id_at(&chars, at))?;
-    Some(DiscId {
+    Some(Ident {
         key: folding::normalize(&shown)?,
         shown,
         kind: IdKind::TitleId,
@@ -109,6 +127,10 @@ pub fn candidates(
     let mut out: Vec<(Candidate, Option<String>)> = Vec::new();
     for evidence in found {
         for hit in repo.lookup_serial(&evidence.id.key)? {
+            // 圈得住就圈：一个 4 字符的游戏码撞到别的机器的 DAT 上是撞车。
+            if !evidence.platforms.is_empty() && !evidence.platforms.contains(&hit.platform) {
+                continue;
+            }
             // DAT 那一条写的就是这一串吗。写的是一条 CONTENT_ID 而只有里面那段对上时，
             // 折平之后不相等——那就是「含在里面」那一档。
             let exact = folding::normalize(&hit.shown).as_deref() == Some(evidence.id.key.as_str());
@@ -127,7 +149,10 @@ pub fn candidates(
 }
 
 fn candidate_of(evidence: &Evidence, hit: &SerialHit, exact: bool) -> Candidate {
-    let accepted = exact && evidence.from_content && evidence.nkit_clean;
+    // **卡带游戏码这一档永不自动通过**（ADR-0008、票 10 的验收「置信度低于精确哈希」）：
+    // 补丁不改卡带头，同一个游戏码底下躺着原版和一堆汉化版，撞上它只说得到发行版这一层。
+    let release_level_only = evidence.id.kind.release_level_only();
+    let accepted = exact && evidence.from_content && evidence.nkit_clean && !release_level_only;
     let mut text = format!(
         "{} 的《{}》里条目「{}」写着{} {}，与{}读出来的{} {} 对上",
         hit.source,
@@ -153,6 +178,13 @@ fn candidate_of(evidence: &Evidence, hit: &SerialHit, exact: bool) -> Candidate 
     if let Some(version) = &evidence.id.version {
         text.push_str(&format!("，版本 {version}"));
     }
+    if release_level_only {
+        text.push_str(
+            "；**这只说得到发行版这一层**——汉化补丁通常不改卡带内部头，同一个游戏码底下\
+             既有原版转储也有一堆汉化版，认得出是哪个游戏，认不出是谁汉化的第几版\
+             （ADR-0008），不自动通过",
+        );
+    }
     if !exact {
         text.push_str(
             "；**对上的只是里面那一段**——同一个 TitleID 下面还有更新与 DLC，\
@@ -171,10 +203,17 @@ fn candidate_of(evidence: &Evidence, hit: &SerialHit, exact: bool) -> Candidate 
     Candidate {
         member_key: evidence.member.clone(),
         inner: evidence.inner.clone(),
+        // 三档各有各的意思（ADR-0002）：撞上了、从内容里读的、又验干净了 → **高置信**；
+        // 从内容里读的但有保留（只对上 CONTENT_ID 里那一段、或者停在发行版这一层）
+        // → **中置信**；**只看了名字没看内容** → **低置信**——那就是「文件名规则」
+        // 那一档本身。票 10 的验收要「内部头高于文件名」，而两条都记中置信的话，
+        // 那句话在排序上就是空的。
         confidence: if accepted {
             Confidence::High
-        } else {
+        } else if evidence.from_content {
             Confidence::Medium
+        } else {
+            Confidence::Low
         },
         accepted,
         source: hit.source.clone(),
@@ -205,7 +244,7 @@ mod tests {
         Evidence {
             member: "PSV/游戏".to_string(),
             inner: String::new(),
-            id: DiscId {
+            id: Ident {
                 key: key.to_string(),
                 shown: key.to_string(),
                 kind,
@@ -215,6 +254,7 @@ mod tests {
             },
             from_content,
             nkit_clean,
+            platforms: Vec::new(),
         }
     }
 

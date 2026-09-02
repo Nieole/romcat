@@ -53,7 +53,7 @@ pub mod xml;
 pub use chinese::{ChineseMark, mark_of};
 pub use fetch::{CannedFetcher, FetchError, Fetched, Fetcher, Head, HttpFetcher};
 pub use guard::Refusal;
-pub use lookup::{Hit, SerialHit};
+pub use lookup::{Hit, Matched, SerialHit};
 pub use registry::{Lookup, Mapped, Origin, Registry, RegistryError, Shape, Source};
 pub use repo::Unit;
 pub use repo::{DatRepo, RepoError};
