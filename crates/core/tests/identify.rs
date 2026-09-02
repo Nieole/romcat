@@ -22,6 +22,7 @@ use romcat_core::identify::{self, Options};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
+use romcat_core::verdict;
 
 /// 一份带 iNES 头的 FC 卡带：前 16 字节是外挂头，后面才是内容。
 fn ines(fill: u8, payload: usize) -> Vec<u8> {
@@ -249,6 +250,7 @@ fn 跑(现场: &mut 现场) -> identify::Outcome {
         &RealFs::new(),
         &mut 现场.catalog,
         &现场.repo,
+        &verdict::Index::empty(),
         &options,
         &CancelToken::new(),
         &mut |_| {},
@@ -422,6 +424,7 @@ fn 验不了_nkit_的_gc_与_wii_镜像不许自动通过() {
         &RealFs::new(),
         &mut 现场.catalog,
         &现场.repo,
+        &verdict::Index::empty(),
         &options,
         &CancelToken::new(),
         &mut |_| {},
@@ -569,6 +572,7 @@ fn 不读主库时容器里那套零解压的_crc32_照撞() {
         &RealFs::new(),
         &mut 现场.catalog,
         &现场.repo,
+        &verdict::Index::empty(),
         &options,
         &CancelToken::new(),
         &mut |_| {},

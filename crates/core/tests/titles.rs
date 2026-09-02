@@ -29,6 +29,7 @@ use romcat_core::scrape::{self, Priorities};
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::title::{self, Language, Seam, SortFrom, TitleKind};
+use romcat_core::verdict;
 
 /// 日版魂斗罗的字节。
 fn 日版() -> Vec<u8> {
@@ -196,6 +197,7 @@ fn 跑一遍(现场: &mut 现场) -> title::TitleReport {
         &RealFs::new(),
         &mut 现场.catalog,
         &现场.repo,
+        &verdict::Index::empty(),
         &identify::Options::new(现场.dir.path()),
         &CancelToken::new(),
         &mut |_| {},

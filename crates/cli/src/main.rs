@@ -35,6 +35,8 @@ use romcat_core::shape;
 use romcat_core::sublibrary::{self, Sublibrary};
 use romcat_core::sync;
 use romcat_core::title;
+use romcat_core::triage::{self, DecisionSpec, Filter};
+use romcat_core::verdict::{self, Store};
 use romcat_core::workspace::{self, Slug};
 
 /// ROM 元数据自动化工具的命令行。
@@ -46,6 +48,10 @@ struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+// 这个枚举**一个进程只构造一次**（`Cli::parse()`），最大的那一支比最小的大几百字节
+// 与任何东西都无关。而 clippy 提的「装箱」在这里做不到：`clap` 的 derive 要求变体的
+// 载荷自己实现 `FromArgMatches`，`Box<T>` 没有实现。
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// 对主库跑一遍只读扫描，把结论写进中立库并出一份库体检报告
     Scan(ScanArgs),
@@ -69,6 +75,9 @@ enum Command {
     Platforms(PlatformsArgs),
     /// **能力档案**：目标设备吃得下什么、目标存储放得下什么，连每条声明的出处与核实日期
     Capability(CapabilityArgs),
+    /// **待确认队列**：列出识别拿不定主意的变体，按目录 / 候选作品 / 命名规律批量裁决
+    #[command(subcommand)]
+    Triage(TriageCommand),
     /// 子库与选择集：一台目标设备一个子库，选择集由**规则**加**例外**组成
     #[command(subcommand, alias = "sublib")]
     Sublibrary(SublibraryCommand),
@@ -665,6 +674,12 @@ fn main() -> ExitCode {
         Command::Adapters => run_adapters(),
         Command::Platforms(args) => run_platforms(&args),
         Command::Capability(args) => run_capability(&args),
+        Command::Triage(TriageCommand::List(args)) => run_triage_list(&args),
+        Command::Triage(TriageCommand::Show(args)) => run_triage_show(&args),
+        Command::Triage(TriageCommand::Decide(args)) => run_triage_decide(&args),
+        Command::Triage(TriageCommand::Undo(args)) => run_triage_undo(&args),
+        Command::Triage(TriageCommand::Export(args)) => run_triage_export(&args),
+        Command::Triage(TriageCommand::Import(args)) => run_triage_import(&args),
         Command::Sublibrary(SublibraryCommand::Set(args)) => run_sublibrary_set(&args),
         Command::Sublibrary(SublibraryCommand::List(args)) => run_sublibrary_list(&args),
         Command::Sublibrary(SublibraryCommand::Remove(args)) => run_sublibrary_remove(&args),
@@ -1016,6 +1031,16 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
         Ok(repo) => repo,
         Err(error) => return fail(format!("DAT 库打不开：{error}")),
     };
+    // **沉淀库先说话**：裁决过的内容直接精确命中，不再进队列（ADR-0008）。
+    // 它不跟中立库走，删掉中立库重扫也不会丢这些裁决。
+    let store = match open_store(&workspace) {
+        Ok(store) => store,
+        Err(message) => return fail(message),
+    };
+    let verdicts = match verdict::Index::load(&store, &slug.text()) {
+        Ok(index) => index,
+        Err(error) => return fail(format!("沉淀库读不动：{error}")),
+    };
 
     // 主库根：命令行给的优先，没给就问中立库——盘换了挂载点时那一份才是对的。
     let root = match args.root.clone() {
@@ -1048,6 +1073,7 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
         &library,
         &mut catalog,
         &repo,
+        &verdicts,
         &options,
         cancel,
         &mut |progress| {
@@ -1082,6 +1108,13 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
         thousands(outcome.read_files),
         thousands(outcome.reused_hashes),
     );
+    if outcome.from_verdicts > 0 {
+        eprintln!(
+            "其中 {} 个变体的结论直接来自**沉淀库**（{} 条裁决）——裁决过的东西不必再撞一遍 DAT。",
+            thousands(outcome.from_verdicts),
+            thousands(u64::try_from(verdicts.len()).unwrap_or(0)),
+        );
+    }
     if !write_json(args.json.as_deref(), &outcome.report) {
         return ExitCode::FAILURE;
     }
@@ -1612,6 +1645,237 @@ fn run_export(args: &ExportArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// **待确认队列**的几件事。
+///
+/// 队列是这个工具的主界面（ADR-0002）。命令行这一版把逻辑跑通并测试，界面是它的一层壳。
+#[derive(Debug, Subcommand)]
+enum TriageCommand {
+    /// 列出待裁决的变体、它们的全部候选与依据，并报出按各个轴一次能覆盖多少
+    List(TriageListArgs),
+    /// 看一条：它的候选、每条候选的依据、以及裁决会钉在什么上
+    Show(TriageShowArgs),
+    /// **批量裁决**：按目录、按候选作品、按命名规律一次套用几百条
+    Decide(TriageDecideArgs),
+    /// 忘掉裁决。批量下错了得走得回来
+    Undo(TriageUndoArgs),
+    /// 把沉淀库导出成可分享的一份 JSON——这份数据补的正是 TOSEC 缺的中文汉化部分
+    Export(TriageExportArgs),
+    /// 收下别人分享的一份裁决
+    Import(TriageImportArgs),
+}
+
+/// 队列这几条命令共用的：开哪一份中立库、哪一份沉淀库。
+#[derive(Debug, Args, Clone)]
+struct TriageCommonArgs {
+    /// 主库根目录。只用来找到对应的中立库，不会去读它；给了 `--library` 就不必再给
+    #[arg(value_name = "主库根")]
+    root: Option<PathBuf>,
+    /// 按名字找中立库（扫描时用 `--library` 起的那个名字）
+    #[arg(long, value_name = "名字")]
+    library: Option<String>,
+    /// 工作目录：中立库与沉淀库存这里
+    #[arg(long, value_name = "目录")]
+    workspace: Option<PathBuf>,
+}
+
+/// 一份开好的中立库加沉淀库，连这份主库在裁决里叫什么名字。
+struct TriageSite {
+    catalog: Catalog,
+    store: Store,
+    library: String,
+}
+
+impl TriageCommonArgs {
+    fn open(&self) -> Result<TriageSite, String> {
+        let (slug, located_by) = locate(self.library.as_deref(), self.root.as_deref())?;
+        let workspace = workspace_dir(self.workspace.as_deref());
+        let path = workspace::catalog_path(&workspace, slug);
+        if !path.exists() {
+            return Err(format!(
+                "还没有 {located_by} 这份中立库。先跑一次 `romcat scan`。"
+            ));
+        }
+        let catalog = open_catalog(&workspace, slug, self.root.as_deref())?;
+        let store = open_store(&workspace)?;
+        Ok(TriageSite {
+            catalog,
+            store,
+            // **路径锚跟中立库走同一把钥匙**：同一个 slug 就是同一份中立库，
+            // 也就该是同一批路径锚。换挂载点不影响（`--library` 存在的理由）。
+            library: slug.text(),
+        })
+    }
+}
+
+fn open_store(workspace: &Path) -> Result<Store, String> {
+    Store::open(&workspace::verdict_store_path(workspace)).map_err(|error| format!("{error}"))
+}
+
+/// 挑队列里的哪些。**几个条件之间是交集**，同一个条件给几次是并集。
+#[derive(Debug, Args, Clone, Default)]
+struct TriageFilterArgs {
+    /// **按目录**：只要这个目录下的，如 `--under FC`。可重复给
+    #[arg(long, value_name = "目录前缀")]
+    under: Vec<String>,
+    /// 按平台，如 `--platform GBA`。可重复给
+    ///
+    /// **这是选择器，不是裁决内容**——裁决记的平台是 `--set-platform`
+    #[arg(long, value_name = "平台")]
+    platform: Vec<String>,
+    /// 按识别结论：`未命中` / `无判据` / `命中` / `跳过`。可重复给
+    ///
+    /// 不给就是默认那三档（命中但没自动通过 / 未命中 / 无判据）。
+    /// **跳过默认不在队列里**——那不是「拿不定主意」，是「本来就不该撞 DAT」
+    #[arg(long, value_name = "结论")]
+    state: Vec<String>,
+    /// **按命名规律**：文件名里含有这段文字（不分大小写）。可重复给
+    ///
+    /// 汉化组的记号常常就写在名字里，这一条一次能圈住一整批
+    #[arg(long, value_name = "文字")]
+    name: Vec<String>,
+    /// **按候选作品**：候选里有一条指着这部作品。可重复给
+    #[arg(long, value_name = "作品")]
+    candidate_work: Vec<String>,
+    /// 点名这个变体（用它的键）。可重复给
+    #[arg(long, value_name = "变体键")]
+    key: Vec<String>,
+}
+
+impl TriageFilterArgs {
+    fn build(&self) -> Result<Filter, String> {
+        let mut states = Vec::new();
+        for label in &self.state {
+            let state = romcat_core::catalog::State::from_label(label).ok_or_else(|| {
+                format!("认不出结论「{label}」。写 `未命中` / `无判据` / `命中` / `跳过` 之一。")
+            })?;
+            states.push(state);
+        }
+        Ok(Filter {
+            under: self.under.clone(),
+            platform: self.platform.clone(),
+            states,
+            name_contains: self.name.clone(),
+            candidate_work: self.candidate_work.clone(),
+            keys: self.key.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Args)]
+struct TriageListArgs {
+    #[command(flatten)]
+    common: TriageCommonArgs,
+    #[command(flatten)]
+    filter: TriageFilterArgs,
+    /// 印几条明细（分组那几张表照印不误）
+    #[arg(long, value_name = "条数", default_value_t = 10)]
+    limit: usize,
+    /// 把报告另存为 JSON
+    #[arg(long, value_name = "文件")]
+    json: Option<PathBuf>,
+    /// 不打印文本报告
+    #[arg(long)]
+    quiet: bool,
+}
+
+#[derive(Debug, Args)]
+struct TriageShowArgs {
+    /// 变体的键
+    #[arg(value_name = "变体键")]
+    key: String,
+    #[command(flatten)]
+    common: TriageCommonArgs,
+}
+
+#[derive(Debug, Args)]
+struct TriageDecideArgs {
+    #[command(flatten)]
+    common: TriageCommonArgs,
+    #[command(flatten)]
+    filter: TriageFilterArgs,
+    /// 采用第几条**候选**（从 1 数起，序号见 `romcat triage list`）
+    #[arg(long, value_name = "序号")]
+    pick: Option<usize>,
+    /// **手工指定**这部作品。候选集不构成天花板——队列里大多数条目一条候选都没有
+    #[arg(long, value_name = "作品")]
+    work: Option<String>,
+    /// 裁决记的平台；不给就用变体自己的平台
+    #[arg(long, value_name = "平台")]
+    set_platform: Option<String>,
+    /// 裁决记的地区
+    #[arg(long, value_name = "地区")]
+    region: Option<String>,
+    /// 裁决记的序列号
+    #[arg(long, value_name = "序列号")]
+    serial: Option<String>,
+    /// 裁决记的语言标记组，如 `Ja,Zh-Hans`
+    #[arg(long, value_name = "语言")]
+    languages: Option<String>,
+    /// 中文身份：`汉化` 或 `官中`（ADR-0012 分的正是这两件事）
+    #[arg(long, value_name = "记号")]
+    chinese: Option<String>,
+    /// **汉化组**：谁做的这个中文版本。自动识别只做到发行版级，这一样只能由人说
+    #[arg(long, value_name = "汉化组")]
+    team: Option<String>,
+    /// 版本，如 `v1.2`
+    #[arg(long, value_name = "版本")]
+    version: Option<String>,
+    /// 判定「都不对」：它**没有发行版**（同人移植、homebrew）。配 `--work` 还能挂个作品
+    #[arg(long)]
+    no_release: bool,
+    /// 判定「都不对，而且我也认不出」。记下来别再问第二遍
+    #[arg(long)]
+    unknown: bool,
+    /// 记一句为什么。半年后你会想知道当初凭什么这么定
+    #[arg(long, value_name = "一句话")]
+    note: Option<String>,
+    /// 只排计划、报出这一趟会裁多少条，**一个字都不写**
+    #[arg(long)]
+    dry_run: bool,
+    /// 看过计划之后拿它点头。**一次改不止一条时必须给**
+    #[arg(long)]
+    yes: bool,
+}
+
+#[derive(Debug, Args)]
+struct TriageUndoArgs {
+    #[command(flatten)]
+    common: TriageCommonArgs,
+    #[command(flatten)]
+    filter: TriageFilterArgs,
+    /// 只排计划，不忘
+    #[arg(long)]
+    dry_run: bool,
+    /// 看过计划之后拿它点头。**一次忘不止一条时必须给**
+    #[arg(long)]
+    yes: bool,
+}
+
+#[derive(Debug, Args)]
+struct TriageExportArgs {
+    /// 工作目录：沉淀库存这里
+    #[arg(long, value_name = "目录")]
+    workspace: Option<PathBuf>,
+    /// 写到哪个文件
+    #[arg(long, value_name = "文件")]
+    out: PathBuf,
+    /// 连**只在本机成立**的路径锚一起导出
+    ///
+    /// 默认不带：它们对别人毫无用处，而且顺带把自己的目录结构也交出去了
+    #[arg(long)]
+    include_path: bool,
+}
+
+#[derive(Debug, Args)]
+struct TriageImportArgs {
+    /// 要收下的裁决文件，可以给多个
+    #[arg(value_name = "文件", required = true)]
+    files: Vec<PathBuf>,
+    /// 工作目录：沉淀库存这里
+    #[arg(long, value_name = "目录")]
+    workspace: Option<PathBuf>,
+}
+
 /// 子库的几件事。
 ///
 /// **这一组只定义、查看与排计划，不搬文件**：搬文件是票 20、转格式是票 21。
@@ -1862,6 +2126,461 @@ fn load_sublibrary(catalog: &Catalog, name: &str) -> Result<Sublibrary, String> 
         )),
         Err(error) => Err(format!("中立库读不动：{error}")),
     }
+}
+
+/// 列出**待确认队列**。
+///
+/// **一个字节都不读主库**：队列由中立库与沉淀库折出来（ADR-0001），盘不在位时照样看得见。
+fn run_triage_list(args: &TriageListArgs) -> ExitCode {
+    let site = match args.common.open() {
+        Ok(site) => site,
+        Err(message) => return fail(message),
+    };
+    // 主库只读（ADR-0004）：报告不许落进主库。
+    if let Some(root) = args.common.root.as_deref()
+        && let Some(target) = args.json.as_deref()
+        && let Err(message) = refuse_writing_into_library(root, target)
+    {
+        return fail(message);
+    }
+    let filter = match args.filter.build() {
+        Ok(filter) => filter,
+        Err(message) => return fail(message),
+    };
+    let (mut survey, counts) = match collect_queue(&site, &filter) {
+        Ok(loaded) => loaded,
+        Err(message) => return fail(message),
+    };
+    if !survey.identified {
+        let report = triage::report::QueueReport::not_identified(
+            site.catalog.location(),
+            site.store.location(),
+            counts,
+        );
+        if !args.quiet {
+            print!("{}", report.render_text());
+        }
+        if !write_json(args.json.as_deref(), &report) {
+            return ExitCode::FAILURE;
+        }
+        return ExitCode::SUCCESS;
+    }
+    // 只为要印出来的那几条算判据：那一步要为每个变体查两次中立库，
+    // 一万多条的队列不该在只是列一眼的时候整份算出来。
+    let shown = args.limit.min(survey.items.len());
+    if let Err(error) = triage::fill_prints(&site.catalog, &mut survey.items[..shown]) {
+        return fail(format!("中立库读不动：{error}"));
+    }
+    let report = triage::report::QueueReport::build(
+        site.catalog.location(),
+        site.store.location(),
+        survey.queue,
+        &survey.items,
+        counts,
+        args.limit,
+    );
+    if !args.quiet {
+        let mut stdout = io::stdout().lock();
+        let _ = stdout.write_all(report.render_text().as_bytes());
+        let _ = stdout.flush();
+    }
+    if !write_json(args.json.as_deref(), &report) {
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+/// 折一次队列，连沉淀库眼下的账。
+fn collect_queue(
+    site: &TriageSite,
+    filter: &Filter,
+) -> Result<(triage::Survey, verdict::Counts), String> {
+    let counts = site
+        .store
+        .counts()
+        .map_err(|error| format!("沉淀库读不动：{error}"))?;
+    let index = verdict::Index::load(&site.store, &site.library)
+        .map_err(|error| format!("沉淀库读不动：{error}"))?;
+    let survey = triage::survey(&site.catalog, &index, filter)
+        .map_err(|error| format!("中立库读不动：{error}"))?;
+    Ok((survey, counts))
+}
+
+/// 看一条队列条目的全部候选与依据。
+fn run_triage_show(args: &TriageShowArgs) -> ExitCode {
+    let site = match args.common.open() {
+        Ok(site) => site,
+        Err(message) => return fail(message),
+    };
+    let filter = Filter {
+        keys: vec![args.key.clone()],
+        // 点名一条时**四档全看**：用户已经说出它的键了，再拿默认那三档把它筛掉
+        // 只会让人以为库里没有这个变体。
+        states: vec![
+            romcat_core::catalog::State::Matched,
+            romcat_core::catalog::State::Unmatched,
+            romcat_core::catalog::State::NoEvidence,
+            romcat_core::catalog::State::Skipped,
+        ],
+        ..Filter::default()
+    };
+    let (mut survey, counts) = match collect_queue(&site, &filter) {
+        Ok(loaded) => loaded,
+        Err(message) => return fail(message),
+    };
+    if survey.items.is_empty() {
+        return fail(format!(
+            "队列里没有「{}」。它要么已经自动通过、要么已经裁决过、要么根本不在库里\n\
+             （`romcat triage list --under <目录>` 看得到有哪些）。",
+            args.key
+        ));
+    }
+    if let Err(error) = triage::fill_prints(&site.catalog, &mut survey.items) {
+        return fail(format!("中立库读不动：{error}"));
+    }
+    let shown = survey.items.len();
+    let report = triage::report::QueueReport::build(
+        site.catalog.location(),
+        site.store.location(),
+        survey.queue,
+        &survey.items,
+        counts,
+        shown,
+    );
+    print!("{}", report.render_text());
+    ExitCode::SUCCESS
+}
+
+/// **批量裁决**。
+///
+/// 先印计划再动手，与同步那一侧的差量预览同源（ADR-0016）：一条命令改几百条记录，
+/// 看不见它要改什么就按下去，错了没处找。
+fn run_triage_decide(args: &TriageDecideArgs) -> ExitCode {
+    let (spec, overrides) = match args.spec().and_then(|spec| Ok((spec, args.overrides()?))) {
+        Ok(pair) => pair,
+        Err(message) => return fail(message),
+    };
+    let mut site = match args.common.open() {
+        Ok(site) => site,
+        Err(message) => return fail(message),
+    };
+    let filter = match args.filter.build() {
+        Ok(filter) => filter,
+        Err(message) => return fail(message),
+    };
+    let (mut survey, _) = match collect_queue(&site, &filter) {
+        Ok(loaded) => loaded,
+        Err(message) => return fail(message),
+    };
+    if !survey.identified {
+        return fail("还没跑过识别，队列无从谈起。先跑一次 `romcat identify`。");
+    }
+    if survey.items.is_empty() {
+        return fail(
+            "一条都没选中。选择器写宽一点，或者先 `romcat triage list` 看看队列里有什么。",
+        );
+    }
+    if let Err(error) = triage::fill_prints(&site.catalog, &mut survey.items) {
+        return fail(format!("中立库读不动：{error}"));
+    }
+    let decide = triage::Decide {
+        spec,
+        overrides,
+        note: args.note.clone(),
+        library: site.library.clone(),
+    };
+    let plan = match triage::plan(&site.store, &survey.items, &decide) {
+        Ok(plan) => plan,
+        Err(error) => return fail(format!("排不出计划：{error}")),
+    };
+    print_verdict_plan(&plan, &decide);
+    if plan.decided.is_empty() {
+        return fail("一条都落不下去（上面说了各自的原因）。");
+    }
+    if args.dry_run {
+        eprintln!("这是 --dry-run，一个字都没写。");
+        return ExitCode::SUCCESS;
+    }
+    if plan.decided.len() > 1 && !args.yes {
+        return fail(format!(
+            "这一趟要裁 {} 条。看过上面的计划之后加 --yes 点头，或者用 --dry-run 只看不做。",
+            thousands(plan.decided.len() as u64)
+        ));
+    }
+    let applied = match triage::apply(&mut site.catalog, &mut site.store, &survey.items, &plan) {
+        Ok(applied) => applied,
+        Err(error) => return fail(format!("裁决写不进去：{error}")),
+    };
+    println!(
+        "\n裁决已沉淀 {} 条（新增 {}、盖掉 {}）：钉在内容上的 {} 条（**可导出分享**），\n\
+         只钉得住本机路径的 {} 条。中立库当场兑现：{} 条转成命中、{} 条转成跳过。",
+        thousands(applied.verdicts),
+        thousands(applied.added),
+        thousands(applied.replaced),
+        thousands(applied.content_anchored),
+        thousands(applied.path_anchored),
+        thousands(applied.matched),
+        thousands(applied.skipped),
+    );
+    println!(
+        "沉淀库在 {}——它**不跟中立库走**，删掉中立库重扫也不会丢这些裁决。",
+        site.store.location()
+    );
+    ExitCode::SUCCESS
+}
+
+impl TriageDecideArgs {
+    /// 这条命令要下的是哪一种裁决。**四选一**，给多了就说清而不是挑一个。
+    fn spec(&self) -> Result<DecisionSpec, String> {
+        let given = [
+            self.unknown,
+            self.no_release,
+            self.pick.is_some(),
+            self.work.is_some() && !self.no_release,
+        ];
+        if given.iter().filter(|on| **on).count() > 1 {
+            return Err(
+                "一次只说一种裁决：`--pick`、`--work`、`--no-release`、`--unknown` 挑一个。"
+                    .to_string(),
+            );
+        }
+        // **说不成立的话就当场说不成立，绝不静默丢掉。** 「没有发行版」与「认不出」说的是
+        // 「它不成其为一次发行」，而汉化组、版本、地区那几样说的是「这次发行是什么样」
+        // ——两句话不能同时说。收下再默默扔掉的话，计划书上印着「汉化组 外星科技」，
+        // 库里却一个字都没记。
+        if (self.no_release || self.unknown) && !self.overrides()?.is_empty() {
+            return Err(format!(
+                "`{}` 说的是「它不成其为一次发行」，那就没有平台、地区、汉化组、版本可记。\n\
+                 去掉那几个开关，或者改用 `--work` 手工指定它是哪次发行。",
+                if self.unknown {
+                    "--unknown"
+                } else {
+                    "--no-release"
+                }
+            ));
+        }
+        if self.unknown {
+            return Ok(DecisionSpec::Unknown);
+        }
+        if self.no_release {
+            return Ok(DecisionSpec::NoRelease {
+                work: self.work.clone(),
+            });
+        }
+        if let Some(nth) = self.pick {
+            if nth == 0 {
+                return Err("候选的序号从 1 数起。".to_string());
+            }
+            return Ok(DecisionSpec::Pick(nth));
+        }
+        let Some(work) = self.work.clone() else {
+            return Err(
+                "没说要裁成什么：`--pick <序号>` 采用一条候选，`--work <作品>` 手工指定，\n\
+                 `--no-release` 判它没有发行版，`--unknown` 判「都不对而且认不出」。"
+                    .to_string(),
+            );
+        };
+        Ok(DecisionSpec::Manual(work))
+    }
+
+    /// 人补上去的那几样事实。**`--pick` 也吃它们**——「就是这条候选，另外汉化组是某某」
+    /// 是最常见的一句话，收下再忽略是最坏的一种「实现了」。
+    fn overrides(&self) -> Result<triage::Overrides, String> {
+        let chinese = match self.chinese.as_deref() {
+            None => None,
+            Some("汉化") => Some(romcat_core::dat::chinese::ChineseMark::FanTranslated),
+            Some("官中") => Some(romcat_core::dat::chinese::ChineseMark::Official),
+            Some(other) => {
+                return Err(format!(
+                    "认不出中文记号「{other}」。只有 `汉化` 与 `官中` 两种（ADR-0012）。"
+                ));
+            }
+        };
+        Ok(triage::Overrides {
+            platform: self.set_platform.clone(),
+            region: self.region.clone(),
+            serial: self.serial.clone(),
+            languages: self.languages.clone(),
+            chinese,
+            team: self.team.clone(),
+            version: self.version.clone(),
+        })
+    }
+}
+
+/// 把一次批量裁决的计划印出来。
+fn print_verdict_plan(plan: &triage::Plan, decide: &triage::Decide) {
+    println!("批量裁决计划");
+    println!("{}", "═".repeat(24));
+    println!("裁成            {}", describe_spec(&decide.spec));
+    for (label, value) in [
+        ("平台", &decide.overrides.platform),
+        ("地区", &decide.overrides.region),
+        ("序列号", &decide.overrides.serial),
+        ("语言", &decide.overrides.languages),
+        ("汉化组", &decide.overrides.team),
+        ("版本", &decide.overrides.version),
+    ] {
+        if let Some(value) = value {
+            println!("{}{value}", pad(label, 16));
+        }
+    }
+    if let Some(mark) = decide.overrides.chinese {
+        println!("{}{}", pad("中文", 16), mark.label());
+    }
+    println!(
+        "要裁            {} 条（其中 {} 条会盖掉已有的裁决）",
+        thousands(plan.decided.len() as u64),
+        thousands(plan.replacing() as u64),
+    );
+    println!(
+        "锚              内容 {} 条（可分享）／路径 {} 条（只在本机成立）",
+        thousands(plan.content_anchored() as u64),
+        thousands(plan.path_anchored() as u64),
+    );
+    let show = 10;
+    for row in plan.decided.iter().take(show) {
+        println!("  + {}", row.key);
+    }
+    if plan.decided.len() > show {
+        println!(
+            "  …… 还有 {} 条",
+            thousands((plan.decided.len() - show) as u64)
+        );
+    }
+    if !plan.blocked.is_empty() {
+        println!("\n落不下去的 {} 条：", thousands(plan.blocked.len() as u64));
+        for row in plan.blocked.iter().take(show) {
+            println!("  ! {}：{}", row.key, row.why);
+        }
+        if plan.blocked.len() > show {
+            println!(
+                "  …… 还有 {} 条",
+                thousands((plan.blocked.len() - show) as u64)
+            );
+        }
+    }
+}
+
+fn describe_spec(spec: &DecisionSpec) -> String {
+    match spec {
+        DecisionSpec::Pick(nth) => format!("采用各自的第 {nth} 条候选"),
+        DecisionSpec::Manual(work) => format!("作品《{work}》"),
+        DecisionSpec::NoRelease { work } => format!(
+            "确认没有发行版{}",
+            work.as_deref()
+                .map(|w| format!("，挂在作品《{w}》下"))
+                .unwrap_or_default()
+        ),
+        DecisionSpec::Unknown => "都不对，而且认不出是什么".to_string(),
+    }
+}
+
+/// 忘掉裁决。
+fn run_triage_undo(args: &TriageUndoArgs) -> ExitCode {
+    let mut site = match args.common.open() {
+        Ok(site) => site,
+        Err(message) => return fail(message),
+    };
+    let filter = match args.filter.build() {
+        Ok(filter) => filter,
+        Err(message) => return fail(message),
+    };
+    if filter.is_empty() {
+        return fail("`undo` 不接受空的选择器——那是把整份沉淀库忘掉。至少给一个条件。");
+    }
+    let plan = match triage::plan_forget(&site.catalog, &site.store, &filter, &site.library) {
+        Ok(plan) => plan,
+        Err(error) => return fail(format!("中立库或沉淀库读不动：{error}")),
+    };
+    if plan.rows.is_empty() {
+        return fail("这些变体上一条裁决都没有。");
+    }
+    println!("要忘掉 {} 条裁决：", thousands(plan.rows.len() as u64));
+    for (key, anchor) in plan.rows.iter().take(10) {
+        println!("  - {key}（{}）", anchor.describe());
+    }
+    if plan.rows.len() > 10 {
+        println!("  …… 还有 {} 条", thousands((plan.rows.len() - 10) as u64));
+    }
+    if args.dry_run {
+        eprintln!("这是 --dry-run，一个字都没写。");
+        return ExitCode::SUCCESS;
+    }
+    if plan.rows.len() > 1 && !args.yes {
+        return fail("一次忘不止一条时要加 --yes 点头。");
+    }
+    match triage::forget(&mut site.store, &plan) {
+        Ok(gone) => {
+            println!("已忘掉 {} 条。", thousands(gone));
+            println!("中立库那一半下一趟 `romcat identify` 会重算——那时它们回到队列里。");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(format!("沉淀库写不动：{error}")),
+    }
+}
+
+/// 把沉淀库导出成可分享的一份 JSON。
+fn run_triage_export(args: &TriageExportArgs) -> ExitCode {
+    let workspace = workspace_dir(args.workspace.as_deref());
+    let store = match open_store(&workspace) {
+        Ok(store) => store,
+        Err(message) => return fail(message),
+    };
+    let export = match store.export(args.include_path) {
+        Ok(export) => export,
+        Err(error) => return fail(format!("沉淀库读不动：{error}")),
+    };
+    let text = match serde_json::to_string_pretty(&export) {
+        Ok(text) => text,
+        Err(error) => return fail(format!("序列化失败：{error}")),
+    };
+    if let Err(error) = write_file(&args.out, format!("{text}\n").as_bytes()) {
+        return fail(format!("写不出 {}：{error}", path::display(&args.out)));
+    }
+    println!(
+        "已导出 {} 条裁决到 {}。",
+        thousands(export.verdicts.len() as u64),
+        path::display(&args.out)
+    );
+    if !args.include_path {
+        let counts = store.counts().unwrap_or_default();
+        if counts.path > 0 {
+            println!(
+                "另有 {} 条只钉得住本机路径，没有导出（`--include-path` 带上它们，但它们对别人没用）。",
+                thousands(counts.path)
+            );
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// 收下别人分享的裁决。
+fn run_triage_import(args: &TriageImportArgs) -> ExitCode {
+    let workspace = workspace_dir(args.workspace.as_deref());
+    let mut store = match open_store(&workspace) {
+        Ok(store) => store,
+        Err(message) => return fail(message),
+    };
+    for file in &args.files {
+        let text = match fs::read_to_string(file) {
+            Ok(text) => text,
+            Err(error) => return fail(format!("读不动 {}：{error}", path::display(file))),
+        };
+        match store.import(&text) {
+            Ok(account) => println!(
+                "{}：读到 {} 条，新收 {}、盖掉 {}、认不出锚丢掉 {}。",
+                path::display(file),
+                thousands(account.read),
+                thousands(account.added),
+                thousands(account.replaced),
+                thousands(account.unreadable),
+            ),
+            Err(error) => return fail(format!("{}：{error}", path::display(file))),
+        }
+    }
+    println!("收下的裁决下一趟 `romcat identify` 就会直接命中，那些变体不再进队列。");
+    ExitCode::SUCCESS
 }
 
 fn run_sublibrary_set(args: &SubSetArgs) -> ExitCode {

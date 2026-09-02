@@ -58,6 +58,7 @@ use crate::path::{extension_lower, file_name_of_key};
 use crate::report::thousands;
 use crate::scan::CancelToken;
 use crate::shape::Role;
+use crate::verdict::{self, Decision, Verdict};
 
 use fingerprint::{Fingerprint, Headerless};
 use header::DumpHeader;
@@ -132,6 +133,8 @@ pub struct Outcome {
     pub read_files: u64,
     /// 有几份内容的哈希是从中立库里直接取回来的，没有再读一遍盘。
     pub reused_hashes: u64,
+    /// 有几个变体的结论直接来自**沉淀库**——**裁决过的东西不必再撞一遍 DAT**。
+    pub from_verdicts: u64,
 }
 
 /// 一份拿去撞 DAT 的内容：容器里的一个内部文件，或者一个裸文件。
@@ -175,13 +178,14 @@ pub fn run(
     library: &dyn LibraryFs,
     catalog: &mut Catalog,
     repo: &DatRepo,
+    verdicts: &verdict::Index,
     options: &Options,
     cancel: &CancelToken,
     progress: &mut dyn FnMut(&Progress),
 ) -> Result<Outcome, IdentifyError> {
-    // 先把识别自己上一轮造的东西清干净：候选、结论，以及它建出来的作品与发行版。
-    // **裁决定下来的一行都不碰**——清完再读变体，于是「作品有、发行版没有」这条
-    // 判据看到的只会是人说的话（见 `scope::decide`）。
+    // 先把上一轮的结论清干净：候选、结论，以及作品与发行版里由它们造出来的行。
+    // **裁决那些行也一起清**——它们是沉淀库的投影，下面照沉淀库重建一遍就回来了
+    // （`Catalog::clear_identifications` 的文档说的就是这件事）。
     catalog.clear_identifications()?;
 
     let variants = catalog.variants()?;
@@ -204,7 +208,9 @@ pub fn run(
             interrupted = true;
             break;
         }
-        let record = identify_variant(library, catalog, repo, options, variant, &mut state)?;
+        let record = identify_variant(
+            library, catalog, repo, verdicts, options, variant, &mut state,
+        )?;
         if record.state == State::Matched {
             state.progress.matched += 1;
         }
@@ -224,6 +230,7 @@ pub fn run(
         read_bytes: state.progress.read_bytes,
         read_files: state.progress.read_files,
         reused_hashes: state.reused,
+        from_verdicts: state.from_verdicts,
     })
 }
 
@@ -235,12 +242,12 @@ struct Run {
     ammo: BTreeSet<String>,
     /// 这一轮算出来的哈希，攒够一批写一次。
     hashes: Vec<ContentHash>,
-    /// 作品名 → id。同一部作品的几个发行版共用一行。
-    works: BTreeMap<String, i64>,
-    /// 「源 + DAT + 条目名」→ id。同一条 DAT 条目在几个变体上共用一行发行版。
-    releases: BTreeMap<String, i64>,
+    /// 把结论落成作品与发行版那几行的家伙。识别与**裁决**共用同一个。
+    projector: Projector,
     /// 从中立库直接取回来、没再读一遍盘的哈希数。
     reused: u64,
+    /// 结论直接来自沉淀库的变体数。
+    from_verdicts: u64,
 }
 
 /// DAT 库里有没有这个平台的记录。平台认不出来时当作**有**——那时无从判断，
@@ -268,14 +275,38 @@ fn identify_variant(
     library: &dyn LibraryFs,
     catalog: &mut Catalog,
     repo: &DatRepo,
+    verdicts: &verdict::Index,
     options: &Options,
     variant: &VariantRow,
     state: &mut Run,
 ) -> Result<Identification, IdentifyError> {
     let members = catalog.variant_members(&variant.key)?;
-    let (mut units, contents) = collect(catalog, &members)?;
+    let (mut units, visible) = collect(catalog, &members)?;
+    // 算过的哈希先取回来。**这一步不读盘**，只是把中立库里存着的那套判据装回 units
+    // （挂账 D14）。它排在撞库之前，是为了让沉淀库拿判据查得着——裁决过的东西
+    // 一个字节都不必再读。
+    let cached = restore_cached(catalog, &mut units, state)?;
 
-    if let Some(skip) = scope::decide(variant, &contents) {
+    // 零、**沉淀库先说话**：裁决过的内容直接精确命中，不再进队列（ADR-0008）。
+    let found = find_verdict(verdicts, variant, &units);
+    let mut unknown = false;
+    if let Some(found) = &found {
+        state.from_verdicts += 1;
+        match state.projector.project(
+            catalog,
+            variant,
+            found.verdict,
+            &found.member,
+            &found.inner,
+        )? {
+            Some(record) => return Ok(record),
+            // 「都不对而且认不出」不短路：它照常走完下面的流程，只在结论上盖一句
+            // [`VERDICT_UNKNOWN_REASON`]，队列据此不再问它。
+            None => unknown = true,
+        }
+    }
+
+    if let Some(skip) = scope::decide(variant, &visible) {
         return Ok(Identification {
             variant_key: variant.key.clone(),
             state: State::Skipped,
@@ -298,7 +329,7 @@ fn identify_variant(
     // 无处可撞。容器里那套零解压的 CRC-32 照撞不误——它是白拿的，而且撞的是
     // 全库的记录，说不定这个 `switch/` 目录下躺着的其实是别的平台的东西。
     let read_bytes = if has_ammo(variant, state) {
-        fill_in(library, catalog, options, variant, &mut units, state)?
+        fill_in(library, options, variant, &mut units, &cached, state)?
     } else {
         let platform = variant.platform.as_deref().unwrap_or("这个");
         for unit in &mut units {
@@ -328,16 +359,21 @@ fn identify_variant(
         }
     }
 
-    Ok(assemble(catalog, variant, &units, read_bytes, state)?)
+    let mut record = assemble(catalog, variant, &units, read_bytes, state)?;
+    if unknown {
+        record.reason = Some(VERDICT_UNKNOWN_REASON.to_string());
+    }
+    Ok(record)
 }
 
 /// 把一个变体拆成几份要撞 DAT 的内容，顺带收集它里面能看见的名字（给 [`scope`] 用）。
 fn collect(
     catalog: &Catalog,
     members: &[(String, Role)],
-) -> Result<(Vec<ContentUnit>, Vec<String>), CatalogError> {
+) -> Result<(Vec<ContentUnit>, scope::Visible), CatalogError> {
     let mut units = Vec::new();
-    let mut contents = Vec::new();
+    let mut visible = scope::Visible::new();
+    let contents = &mut visible.names;
     for (key, role) in members {
         if ContainerKind::for_path(Path::new(key)).is_none() {
             contents.push(key.clone());
@@ -358,16 +394,26 @@ fn collect(
                 // **三种情况说三句不同的话**（`CONTEXT.md` 的「穿不透」条）：穿不透是
                 // 试过了读不出来，空容器是读出来了里面没东西，还没读过是压根没试。
                 // 三者的下一步完全不同——去看看这文件、不用管、再扫一趟。
+                //
+                // 对 [`scope::Visible::saw_inside`] 而言这三者**也不是一回事**：只有「读出来了、
+                // 里面没东西」才算看进去过；另外两种交出来的空名单是「没看见」。
                 let reason = match catalog.container_status(key)? {
-                    Some(Some(detail)) => format!("容器穿不透：{detail}"),
+                    Some(Some(detail)) => {
+                        visible.saw_inside = false;
+                        format!("容器穿不透：{detail}")
+                    }
                     Some(None) => "容器里没有内容".to_string(),
                     None if kind.is_penetrable() => {
+                        visible.saw_inside = false;
                         "这一趟扫描没有读容器（--no-containers）".to_string()
                     }
-                    None => format!(
-                        "{} 穿不透，而这一趟没为它付全量解压的代价（`romcat scan --zst`）",
-                        kind.label()
-                    ),
+                    None => {
+                        visible.saw_inside = false;
+                        format!(
+                            "{} 穿不透，而这一趟没为它付全量解压的代价（`romcat scan --zst`）",
+                            kind.label()
+                        )
+                    }
                 };
                 units.push(blocked_unit(key, "", reason, true));
                 continue;
@@ -437,19 +483,22 @@ fn collect(
             },
             // `.rar` 在归类里也是**透明容器**，但穿透层故意还认不出它（票 04）。
             // 说清楚是「还穿不透」而不是「没有内容」——两句话指向完全不同的下一步。
-            Category::TransparentContainer => units.push(blocked_unit(
-                key,
-                "",
-                match extension_lower(Path::new(file_name_of_key(key))).as_deref() {
-                    Some("rar") => "rar 容器这一层还穿不透（票 04）".to_string(),
-                    _ => "这个容器格式还穿不透".to_string(),
-                },
-                true,
-            )),
+            Category::TransparentContainer => {
+                visible.saw_inside = false;
+                units.push(blocked_unit(
+                    key,
+                    "",
+                    match extension_lower(Path::new(file_name_of_key(key))).as_deref() {
+                        Some("rar") => "rar 容器这一层还穿不透（票 04）".to_string(),
+                        _ => "这个容器格式还穿不透".to_string(),
+                    },
+                    true,
+                ));
+            }
             Category::MediaOrMetadata => {}
         }
     }
-    Ok((units, contents))
+    Ok((units, visible))
 }
 
 fn blocked_unit(member: &str, inner: &str, reason: String, in_container: bool) -> ContentUnit {
@@ -479,16 +528,16 @@ fn worth_matching(inner: &str) -> bool {
         && classification.suspect.is_none()
 }
 
-/// 该回盘的回盘。返回这个变体这一趟读了多少字节。
-fn fill_in(
-    library: &dyn LibraryFs,
-    catalog: &mut Catalog,
-    options: &Options,
-    variant: &VariantRow,
+/// 把中立库里算过的哈希装回 units。**一个字节都不读盘。**
+///
+/// 抽出来单开一步，是因为它有**两个**消费者：回盘那一步（算过的不必再算，挂账 D14），
+/// 以及**沉淀库**那一步（裁决按内容哈希钉，取不到判据就查不着）。塞在回盘里面的话，
+/// 沉淀库就只能在读完盘之后才查得起来——而那正是它要省下的那笔钱。
+fn restore_cached(
+    catalog: &Catalog,
     units: &mut [ContentUnit],
     state: &mut Run,
-) -> Result<u64, IdentifyError> {
-    // 先看中立库里有没有算过的。算过的哈希留着，第二趟就不必再读一遍盘（挂账 D14）。
+) -> Result<BTreeMap<String, BTreeMap<String, ContentHash>>, CatalogError> {
     let mut cached: BTreeMap<String, BTreeMap<String, ContentHash>> = BTreeMap::new();
     for unit in units.iter() {
         if !cached.contains_key(&unit.member) {
@@ -504,7 +553,18 @@ fn fill_in(
             state.reused += 1;
         }
     }
+    Ok(cached)
+}
 
+/// 该回盘的回盘。返回这个变体这一趟读了多少字节。
+fn fill_in(
+    library: &dyn LibraryFs,
+    options: &Options,
+    variant: &VariantRow,
+    units: &mut [ContentUnit],
+    cached: &BTreeMap<String, BTreeMap<String, ContentHash>>,
+    state: &mut Run,
+) -> Result<u64, IdentifyError> {
     let mut read_bytes = 0;
     let platform = variant.platform.as_deref();
     // 按成员分组，一个容器最多开一次。
@@ -814,6 +874,130 @@ fn store(unit: &ContentUnit, print: Fingerprint) -> ContentHash {
     }
 }
 
+/// 候选表里，**沉淀库**那条候选的「数据源」叫什么。
+///
+/// 它和 `No-Intro`、`TOSEC` 平级地出现在报告的数据源那一栏里——**裁决攒出来的
+/// 覆盖率和 DAT 给的覆盖率要一眼看得出各占多少**，那正是这份数据存在的理由（ADR-0008）。
+pub const VERDICT_SOURCE: &str = "沉淀库";
+
+/// 候选表里，沉淀库那条候选的「哪一份 DAT」叫什么。
+pub const VERDICT_DAT: &str = "本机裁决";
+
+/// 「都不对，而且认不出」那一档裁决落进 `identification.reason` 的那句话。
+///
+/// **写与读必须共用它**（与 `scope::Skip::recorded` 同理）：队列靠这一句把「人看过了、
+/// 认不出」与「还没人看过」分开，而那两件事混在一起就会让人被反复问同一个问题。
+/// 它落在 `reason` 而不是另立一个状态，是因为**结论本身没有变**——它照旧是未命中或
+/// 无判据，变的只是「为什么还停在这儿」，而那正是这一列装的东西。
+pub const VERDICT_UNKNOWN_REASON: &str = "裁决：都不对，而且认不出是什么";
+
+/// 一个变体拿得到的**内容判据**：第一命中层那一套（含头的 CRC-32 加大小）。
+///
+/// **裁决**拿它当锚：钉在内容上的裁决换台机器、改个名字照样认得出，钉在路径上的不行
+/// （`verdict::Anchor`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentPrint {
+    /// 是变体的哪个成员：容器的键，或者裸文件自己的键。
+    pub member: String,
+    /// 容器内部路径；裸文件是空串。
+    pub inner: String,
+    /// 未压缩大小。
+    pub size: u64,
+    /// 含头（原样）的 CRC-32。
+    pub crc32: u32,
+}
+
+/// 这个变体拿得到内容判据吗；拿不到就是 `None`。
+///
+/// **一个字节都不读主库**：判据要么零解压地躺在容器构成里（票 03），要么是上一趟识别
+/// 算过之后存在中立库里的（挂账 D14）。取不到就如实说没有——**待确认队列**据此告诉
+/// 用户「这一条的裁决只钉得住本机的路径」。
+///
+/// # Errors
+/// 读中立库失败时返回错误。
+pub fn content_print(
+    catalog: &Catalog,
+    variant: &VariantRow,
+) -> Result<Option<ContentPrint>, CatalogError> {
+    let members = catalog.variant_members(&variant.key)?;
+    let (mut units, _visible) = collect(catalog, &members)?;
+    let mut state = Run::default();
+    restore_cached(catalog, &mut units, &mut state)?;
+    Ok(representative(variant, &units).and_then(|unit| {
+        unit.print.map(|print| ContentPrint {
+            member: unit.member.clone(),
+            inner: unit.inner.clone(),
+            size: print.size,
+            crc32: print.crc32,
+        })
+    }))
+}
+
+/// 一个变体拿哪一份内容代表自己。
+///
+/// **主文件那一份优先，同为主文件的取大的**。一个变体可以是好几份内容（`cue` 加几条
+/// `bin`、一个包里装着 ROM 和说明书），拿说明书的哈希去当这个变体的锚，换台机器就再也
+/// 对不上了。顺序还要**定死**：同一份库跑两次，锚必须是同一份。
+fn representative<'a>(variant: &VariantRow, units: &'a [ContentUnit]) -> Option<&'a ContentUnit> {
+    ordered(variant, units).first().map(|index| &units[*index])
+}
+
+/// 按「谁最能代表这个变体」把 units 排个序，返回下标。带不动判据的一律不进。
+fn ordered(variant: &VariantRow, units: &[ContentUnit]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..units.len())
+        .filter(|index| units[*index].print.is_some())
+        .collect();
+    order.sort_by(|a, b| {
+        let (left, right) = (&units[*a], &units[*b]);
+        u8::from(left.member != variant.main_key)
+            .cmp(&u8::from(right.member != variant.main_key))
+            .then_with(|| right.size.cmp(&left.size))
+            .then_with(|| left.member.cmp(&right.member))
+            .then_with(|| left.inner.cmp(&right.inner))
+    });
+    order
+}
+
+/// 沉淀库对这个变体说过话没有，说的是钉在哪一份内容上的。
+struct Found<'a> {
+    verdict: &'a Verdict,
+    member: String,
+    inner: String,
+}
+
+/// 查沉淀库。**内容锚优先于路径锚**：前者说的是「这串字节是什么」，后者只是本机的退路。
+///
+/// [`Decision::Unknown`] 也查得出来，但它**不短路**——「都不对，我也认不出」是一条
+/// 记下来别再问第二遍的裁决，不是一个结论。把它变成「命中」或者「跳过」都会让命中率
+/// 说谎，所以它照常走完下面的流程，只在结论上盖一句
+/// [`VERDICT_UNKNOWN_REASON`]，队列据此不再问它。
+fn find_verdict<'a>(
+    verdicts: &'a verdict::Index,
+    variant: &VariantRow,
+    units: &[ContentUnit],
+) -> Option<Found<'a>> {
+    if verdicts.is_empty() {
+        return None;
+    }
+    for index in ordered(variant, units) {
+        let unit = &units[index];
+        if let Some(print) = unit.print
+            && let Some(found) = verdicts.by_content(print.crc32, print.size)
+        {
+            return Some(Found {
+                verdict: found,
+                member: unit.member.clone(),
+                inner: unit.inner.clone(),
+            });
+        }
+    }
+    verdicts.by_path(&variant.key).map(|found| Found {
+        verdict: found,
+        member: variant.main_key.clone(),
+        inner: String::new(),
+    })
+}
+
 /// 把撞出来的东西折成候选、结论，以及作品与发行版。
 fn assemble(
     catalog: &mut Catalog,
@@ -849,13 +1033,17 @@ fn assemble(
     if let Some(best) = scored.iter().position(|(c, _)| c.accepted) {
         let (candidate, cloneof) = &scored[best];
         let parsed = naming::parse(&candidate.game, cloneof.as_deref());
-        let work = ensure_work(catalog, state, &parsed.work)?;
+        let work = state
+            .projector
+            .work(catalog, &parsed.work, Provenance::Identified)?;
         work_id = Some(work);
         // **汉化版条目是变体不是发行版**（ADR-0012）：TOSEC 的 `[tr zh]` 条目说的是
         // 「有人把某个发行版汉化了」，它自己不是一次官方发行。认得出是哪部作品，
         // 认不出它基于哪一条发行版——那就只挂作品，发行版留空，等裁决补。
         if candidate.chinese != Some(ChineseMark::FanTranslated) {
-            let id = ensure_release(catalog, state, work, candidate, &parsed)?;
+            let id = state
+                .projector
+                .dat_release(catalog, work, candidate, &parsed)?;
             release_id = Some(id);
             scored[best].0.release_id = Some(id);
         }
@@ -1008,37 +1196,218 @@ fn candidate_of(unit: &ContentUnit, hit: &Hit, hashed_as: Convention) -> Candida
     }
 }
 
-fn ensure_work(catalog: &mut Catalog, state: &mut Run, name: &str) -> Result<i64, CatalogError> {
-    if let Some(id) = state.works.get(name) {
-        return Ok(*id);
-    }
-    let id = catalog.add_work(name, Provenance::Identified)?;
-    state.works.insert(name.to_string(), id);
-    Ok(id)
+/// 把一条结论落成中立库里的**作品**与**发行版**那几行。
+///
+/// **识别与裁决共用它，而且必须共用**：两条路各写一遍「找出或建出一行作品」，
+/// 同一部作品迟早会攒出两行——而导出时的**收敛**按作品走，两行就是两个前端条目。
+///
+/// 它也是 [`triage`](crate::triage) 那一侧的同一件东西：裁决一落下就立刻在中立库里
+/// 看得见（不必等下一趟识别），而下一趟识别照沉淀库重放一遍，结果与这次一模一样。
+#[derive(Debug, Default)]
+pub struct Projector {
+    /// 作品名 → id。同一部作品的几个发行版共用一行。
+    works: BTreeMap<String, i64>,
+    /// 发行版的去重键 → id。
+    releases: BTreeMap<String, i64>,
+    /// 有裁决点过名的作品。
+    verdict_works: BTreeSet<String>,
 }
 
-fn ensure_release(
-    catalog: &mut Catalog,
-    state: &mut Run,
-    work: i64,
-    candidate: &Candidate,
-    parsed: &naming::Parsed,
-) -> Result<i64, CatalogError> {
-    // 一条 DAT 条目就是一条发行版。**数字世代不必特殊对待**（ADR-0019）：那里港服与
-    // 美服共用同一个 TitleID，本来就是 DAT 里的同一条条目，于是自然只有一条发行版，
-    // 中文落在 `languages` 那一列上。
-    let key = format!("{}|{}|{}", candidate.source, candidate.dat, candidate.game);
-    if let Some(id) = state.releases.get(&key) {
-        return Ok(*id);
+impl Projector {
+    /// 一个空的。
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
     }
-    let id = catalog.add_release(
-        work,
-        Some(&candidate.platform),
-        parsed.region.as_deref(),
-        candidate.serial.as_deref(),
-        parsed.languages.as_deref(),
-        Provenance::Identified,
-    )?;
-    state.releases.insert(key, id);
-    Ok(id)
+
+    /// 找出（必要时建出）一个**作品**行。识别撞出来的与裁决定下来的**共用这一张表**。
+    ///
+    /// 共用是必须的：一部作品两行的话，导出时的**收敛**会把它拆成两个前端条目，而作品名
+    /// 正是刮削的锚点（`catalog::scrape`）。于是来路这样定——**只要有一条裁决点过它的名，
+    /// 这一行就算裁决的**，先来后到不影响最终的样子。
+    fn work(
+        &mut self,
+        catalog: &mut Catalog,
+        name: &str,
+        origin: Provenance,
+    ) -> Result<i64, CatalogError> {
+        let id = match self.works.get(name).copied() {
+            Some(id) => id,
+            None => match catalog.work_named(name)? {
+                Some(id) => {
+                    self.works.insert(name.to_string(), id);
+                    id
+                }
+                None => {
+                    let id = catalog.add_work(name, origin)?;
+                    self.works.insert(name.to_string(), id);
+                    if origin == Provenance::Verdict {
+                        self.verdict_works.insert(name.to_string());
+                    }
+                    return Ok(id);
+                }
+            },
+        };
+        if origin == Provenance::Verdict && self.verdict_works.insert(name.to_string()) {
+            catalog.set_work_origin(id, origin)?;
+        }
+        Ok(id)
+    }
+
+    /// 识别撞出来的那条 DAT 条目对应的发行版。一条 DAT 条目就是一条发行版。
+    fn dat_release(
+        &mut self,
+        catalog: &mut Catalog,
+        work: i64,
+        candidate: &Candidate,
+        parsed: &naming::Parsed,
+    ) -> Result<i64, CatalogError> {
+        // **数字世代不必特殊对待**（ADR-0019）：那里港服与美服共用同一个 TitleID，
+        // 本来就是 DAT 里的同一条条目，于是自然只有一条发行版，中文落在 `languages` 上。
+        let key = format!("{}|{}|{}", candidate.source, candidate.dat, candidate.game);
+        if let Some(id) = self.releases.get(&key) {
+            return Ok(*id);
+        }
+        let id = catalog.add_release(
+            work,
+            Some(&candidate.platform),
+            parsed.region.as_deref(),
+            candidate.serial.as_deref(),
+            parsed.languages.as_deref(),
+            Provenance::Identified,
+        )?;
+        self.releases.insert(key, id);
+        Ok(id)
+    }
+
+    /// 裁决说出口的那次发行。
+    fn verdict_release(
+        &mut self,
+        catalog: &mut Catalog,
+        work: i64,
+        facts: &verdict::Facts,
+        platform: Option<&str>,
+    ) -> Result<i64, CatalogError> {
+        // 键取裁决说出口的那几样。同一次发行被裁决过几次（几个变体基于它），
+        // 只该有一行发行版——多出来的行会让导出时的**收敛**把一个条目拆成好几个。
+        let key = format!(
+            "裁决|{}|{}|{}|{}|{}",
+            facts.work,
+            platform.unwrap_or(""),
+            facts.region.as_deref().unwrap_or(""),
+            facts.serial.as_deref().unwrap_or(""),
+            facts.languages.as_deref().unwrap_or(""),
+        );
+        if let Some(id) = self.releases.get(&key) {
+            return Ok(*id);
+        }
+        // 跨调用的去重靠库自己：`romcat triage decide` 一次一批，两批之间这张表是空的。
+        let id = match catalog.release_like(
+            work,
+            platform,
+            facts.region.as_deref(),
+            facts.serial.as_deref(),
+            facts.languages.as_deref(),
+        )? {
+            Some(id) => id,
+            None => catalog.add_release(
+                work,
+                platform,
+                facts.region.as_deref(),
+                facts.serial.as_deref(),
+                facts.languages.as_deref(),
+                Provenance::Verdict,
+            )?,
+        };
+        self.releases.insert(key, id);
+        Ok(id)
+    }
+
+    /// 把一条**裁决**落成这个变体的结论；`None` 表示这条裁决不产生结论。
+    ///
+    /// 产出的候选是**高置信、自动通过**的——它不是猜出来的，是人看过之后定下来的
+    /// （ADR-0002 那三档里最上面那一档）。**依据**照样写全：锚是哪一种、钉在哪串字节上、
+    /// 汉化组与版本是什么，事后一样复核得了。
+    ///
+    /// **「都不对而且认不出」那一档返回 `None`**，而不是一份空结论：它只是记下来别再问
+    /// 第二遍，结论本身没有变（照旧是未命中或无判据），连候选都该原样留着。返回一份
+    /// 空结论写回去的话，那个变体识别撞出来的候选会被连带清掉——而它们是事实，
+    /// 与人认不认得出无关。调用方拿到 `None` 该走
+    /// [`Catalog::set_identification_reason`](crate::catalog::Catalog::set_identification_reason)。
+    ///
+    /// # Errors
+    /// 写中立库失败时返回错误。
+    pub fn project(
+        &mut self,
+        catalog: &mut Catalog,
+        variant: &VariantRow,
+        found: &Verdict,
+        member: &str,
+        inner: &str,
+    ) -> Result<Option<Identification>, CatalogError> {
+        let record = |work_id, release_id, state_of, reason, candidates| Identification {
+            variant_key: variant.key.clone(),
+            state: state_of,
+            reason,
+            units: 1,
+            nkit: 0,
+            read_bytes: 0,
+            work_id,
+            release_id,
+            candidates,
+        };
+        match &found.decision {
+            Decision::Release(facts) => {
+                let work = self.work(catalog, &facts.work, Provenance::Verdict)?;
+                let platform = facts
+                    .platform
+                    .clone()
+                    .or_else(|| variant.platform.clone())
+                    .unwrap_or_default();
+                let named = Some(platform.as_str()).filter(|text| !text.is_empty());
+                let release = self.verdict_release(catalog, work, facts, named)?;
+                let candidate = Candidate {
+                    member_key: member.to_string(),
+                    inner: inner.to_string(),
+                    confidence: Confidence::High,
+                    accepted: true,
+                    source: VERDICT_SOURCE.to_string(),
+                    dat: VERDICT_DAT.to_string(),
+                    platform,
+                    game: facts.work.clone(),
+                    rom: file_name_of_key(if inner.is_empty() { member } else { inner })
+                        .to_string(),
+                    hashed_as: Convention::AsIs,
+                    dat_convention: Convention::AsIs,
+                    evidence: found.evidence(),
+                    chinese: facts.chinese,
+                    serial: facts.serial.clone(),
+                    release_id: Some(release),
+                };
+                Ok(Some(record(
+                    Some(work),
+                    Some(release),
+                    State::Matched,
+                    None,
+                    vec![candidate],
+                )))
+            }
+            // **明说的**「没有发行版」——不再靠「作品有、发行版空」推断（原挂账 D48）。
+            Decision::NoRelease { work } => {
+                let work_id = match work {
+                    Some(name) => Some(self.work(catalog, name, Provenance::Verdict)?),
+                    None => None,
+                };
+                let skip = scope::Skip::NoRelease("裁决记着它没有发行版".to_string());
+                Ok(Some(record(
+                    work_id,
+                    None,
+                    State::Skipped,
+                    Some(skip.recorded()),
+                    Vec::new(),
+                )))
+            }
+            Decision::Unknown => Ok(None),
+        }
+    }
 }

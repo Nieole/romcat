@@ -10,6 +10,13 @@
 //! 让它们一路掉到模型推断（票 12）是白烧一遍，而且会产生**自信的错误候选**。所以在
 //! 第一命中层就认出来、跳过，并且**单独计数**——混进「未命中」会让命中率失真。
 //!
+//! ## 「裁决说它没有发行版」不在这里
+//!
+//! 那一条走**沉淀库**：`verdict::Decision::NoRelease` 是一条**明说**的裁决记录，
+//! 由 [`identify`](super) 在撞库之前读掉。这里曾经拿「作品有、发行版空」去推它，
+//! 而那个形状同时也是「裁决定了作品、识别认出了发行版」的样子——两者混着读，
+//! 后一种会被误判成 homebrew 跳过（原挂账 D48）。**判据只认明说的那一条。**
+//!
 //! ## 判据宁可窄不宜宽
 //!
 //! 每条规则都要求**两件事同时成立**（一个标记加上「没有可运行的内容」），或者要求一个
@@ -21,6 +28,33 @@ use std::path::Path;
 use crate::catalog::VariantRow;
 use crate::classify::{self, Category};
 use crate::path::{extension_lower, file_name_of_key};
+
+/// 一个变体里**能看见的内容名字**，连一句「这份名单靠不靠得住」。
+///
+/// 两样必须一起走，所以捏成一个类型：**穿不透**的容器交出来的是一份空名单，而空在那里
+/// 的意思是「没看见」，不是「里面没有」（`CONTEXT.md` 的「穿不透」条）。只把名单交过来
+/// 的话，[`decide`] 会对着一个根本没打开过的包说「里面也没有可运行的内容」。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Visible {
+    /// 看得见的名字：**透明容器**穿透出来的内部文件名，加上变体自己的非容器成员。
+    pub names: Vec<String>,
+    /// 这个变体里的容器**全都**看进去了吗。
+    ///
+    /// 一个容器都没有时是真；**读出来了、里面确实空**也是真（那是看过的结论）；
+    /// 只有**穿不透**与**还没读过**才是假——那两种交出来的空名单是「没看见」。
+    pub saw_inside: bool,
+}
+
+impl Visible {
+    /// 一个还什么都没看见、但也还没碰上看不进去的东西的名单。
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            names: Vec::new(),
+            saw_inside: true,
+        }
+    }
+}
 
 /// 一个变体被挡在 DAT 匹配之外的理由。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,32 +153,20 @@ const HOMEBREW_APPS: &[&str] = &[
 
 /// 这个变体该不该拿去撞 DAT；`None` 表示该撞。
 ///
-/// `contents` 是这个变体里能看见的内容名字：**透明容器**穿透出来的内部文件名，
-/// 加上变体自己的成员名。补丁的判据要看它——一个名字叫「汉化补丁」的 zip，
-/// 里面若装着一份完整的 ROM，那它就不是补丁。
+/// 补丁的判据要看 [`Visible`]——一个名字叫「汉化补丁」的 zip，里面若装着一份完整的
+/// ROM，那它就不是补丁；而里面**看不进去**时，这句话根本说不出口。
 #[must_use]
-pub fn decide(variant: &VariantRow, contents: &[String]) -> Option<Skip> {
-    // 一、裁决说了它没有发行版。**这是词表定义的那条判据**：同人移植与 homebrew
-    // 直接挂在作品下，没有发行版链接这件事本身就在说「别拿它去撞 DAT」。
-    // 识别自己挂上去的链接不会落到这里——重跑识别的第一件事就是把它们清掉。
-    //
-    // **一个还没堵上的口子**（挂账 D48）：裁决挂的作品 + 识别挂的发行版，清完之后
-    // 也是「作品有、发行版空」，这里会读成「裁决说它没有发行版」。真正的出路是让裁决
-    // 把「确认没有发行版」说成一条**明确的记录**而不是靠链接为空推断出来——那是票 08
-    // 定裁决记录形态时的事。眼下裁决还不存在，这一态在真库上是 0 条。
-    if variant.work_id.is_some() && variant.release_id.is_none() {
-        return Some(Skip::NoRelease("裁决记着它没有发行版".to_string()));
-    }
-
+pub fn decide(variant: &VariantRow, visible: &Visible) -> Option<Skip> {
     let name = file_name_of_key(&variant.key);
-    if let Some(skip) = patch_of(name, &variant.main_key, contents) {
+    if let Some(skip) = patch_of(name, &variant.main_key, visible) {
         return Some(skip);
     }
     homebrew_of(name, variant.platform.as_deref())
 }
 
 /// 这是不是一个**补丁**。
-fn patch_of(name: &str, main_key: &str, contents: &[String]) -> Option<Skip> {
+fn patch_of(name: &str, main_key: &str, visible: &Visible) -> Option<Skip> {
+    let contents = &visible.names;
     // 主文件本身就是补丁格式：`.ips` / `.bps` / `.ppf` 之流。
     if let Some(ext) = patch_extension(main_key) {
         return Some(Skip::Patch(format!("主文件是 .{ext} 补丁")));
@@ -163,8 +185,15 @@ fn patch_of(name: &str, main_key: &str, contents: &[String]) -> Option<Skip> {
             inner.1, inner.0
         )));
     }
-    // 名字自称是补丁，而里面确实没有可运行的东西。
-    if let Some(word) = patch_word(name) {
+    // 名字自称是补丁，而里面**确实**没有可运行的东西。
+    //
+    // **看不进去就不算**：容器穿不透时 `contents` 是空的，而那是「没看见」不是
+    // 「里面没有」。真机上 39 个 `.tar.zst`（`怪物猎人4G[ACG汉化组]+最终汉化补丁.tar.zst`
+    // 之流）正是这样被判成补丁的——它们是游戏**加**补丁，不是补丁。错跳一个的代价是
+    // 一个本来认得出来的变体永远不进识别管线，而漏跳一个只是一条落空的撞库。
+    if visible.saw_inside
+        && let Some(word) = patch_word(name)
+    {
         return Some(Skip::Patch(format!(
             "名字里写着「{word}」，里面也没有可运行的内容"
         )));
@@ -268,15 +297,18 @@ mod tests {
         }
     }
 
-    fn 内容(names: &[&str]) -> Vec<String> {
-        names.iter().map(ToString::to_string).collect()
+    fn 看得见(names: &[&str], saw_inside: bool) -> Visible {
+        Visible {
+            names: names.iter().map(ToString::to_string).collect(),
+            saw_inside,
+        }
     }
 
     #[test]
     fn 汉化补丁包被认出来并跳过() {
         // 真库里就躺着这一个（票面点名的例子）。
         let v = 变体("PSV/《夏莉的炼金工房 ~黄昏海洋的炼金术士~ Plus》汉化补丁 Ver.1.0.zip");
-        let skip = decide(&v, &内容(&["ATELIER.ppf", "使用说明.txt"])).expect("该跳过");
+        let skip = decide(&v, &看得见(&["ATELIER.ppf", "使用说明.txt"], true)).expect("该跳过");
         assert_eq!(skip.kind(), "补丁");
         assert!(skip.detail().contains("ppf"), "{}", skip.detail());
     }
@@ -286,13 +318,16 @@ mod tests {
         // 判据是能否独立运行，不是名字。名字说了算的话，装着完整 ROM 的
         // 「汉化补丁合集.zip」会被整个挡在识别管线之外。
         let v = 变体("FC/某某汉化补丁合集.zip");
-        assert_eq!(decide(&v, &内容(&["游戏 (Japan).nes", "readme.txt"])), None);
+        assert_eq!(
+            decide(&v, &看得见(&["游戏 (Japan).nes", "readme.txt"], true)),
+            None
+        );
     }
 
     #[test]
     fn 主文件本身是补丁格式的直接跳过() {
         let v = 变体("FC/某游戏汉化.ips");
-        let skip = decide(&v, &[]).expect("该跳过");
+        let skip = decide(&v, &看得见(&[], true)).expect("该跳过");
         assert_eq!(skip.kind(), "补丁");
     }
 
@@ -300,12 +335,15 @@ mod tests {
     fn 自造_titleid_是同人移植不是发行版() {
         // `AIME` 不是 Sony 发出去的前缀，No-Intro 的 PSV 集里不会有它。
         let v = 变体("PSV/AIME00001(wan华镜 v3.1)");
-        let skip = decide(&v, &[]).expect("该跳过");
+        let skip = decide(&v, &看得见(&[], true)).expect("该跳过");
         assert_eq!(skip.kind(), "没有发行版链接");
         assert!(skip.detail().contains("AIME"), "{}", skip.detail());
 
         // 官方前缀照常进识别管线。
-        assert_eq!(decide(&变体("PSV/PCSG00718(恋爱复仇战)"), &[]), None);
+        assert_eq!(
+            decide(&变体("PSV/PCSG00718(恋爱复仇战)"), &看得见(&[], true)),
+            None
+        );
     }
 
     #[test]
@@ -315,46 +353,66 @@ mod tests {
         // ——ADR-0012 说的正是「官中版走精确哈希直接过」。
         let mut psp = 变体("psp/ULUS10041.iso");
         psp.platform = Some("PSP".to_string());
-        assert_eq!(decide(&psp, &[]), None);
+        assert_eq!(decide(&psp, &看得见(&[], true)), None);
 
         let mut ps3 = 变体("ps3/BCAS20228");
         ps3.platform = Some("PS3".to_string());
-        assert_eq!(decide(&ps3, &[]), None);
+        assert_eq!(decide(&ps3, &看得见(&[], true)), None);
     }
 
     #[test]
     fn 自制应用没有发行版() {
         let v = 变体("PSV/mGBA-0.10.0-vita.7z");
-        let skip = decide(&v, &内容(&["mGBA.vpk"])).expect("该跳过");
+        let skip = decide(&v, &看得见(&["mGBA.vpk"], true)).expect("该跳过");
         assert_eq!(skip.kind(), "没有发行版链接");
     }
 
     #[test]
-    fn 裁决说了没有发行版就不再撞_dat() {
-        // 词表定义的那条判据：作品有、发行版没有，本身就是「别撞 DAT」的信号。
+    fn 作品有发行版空这个形状本身不再当判据() {
+        // 原挂账 D48：这个形状既可能是「裁决说它没有发行版」，也可能是「裁决定了作品、
+        // 识别认出了发行版」——照着它跳过，后一种就被误判成 homebrew 了。
+        // 「没有发行版」如今是沉淀库里一条明说的裁决，由识别在撞库之前读掉。
         let mut v = 变体("PS1/某同人移植.chd");
         v.work_id = Some(7);
         v.release_id = None;
-        let skip = decide(&v, &[]).expect("该跳过");
-        assert_eq!(skip.kind(), "没有发行版链接");
+        assert_eq!(decide(&v, &看得见(&[], true)), None);
+        assert_eq!(decide(&变体("PS1/某游戏.chd"), &看得见(&[], true)), None);
+    }
 
-        // 两个都空是「还没识别过」，不是「没有发行版」。
-        assert_eq!(decide(&变体("PS1/某游戏.chd"), &[]), None);
+    #[test]
+    fn 看不进去的包不许被说成里面没有可运行的内容() {
+        // 真机上 39 个 `.tar.zst` 撞的正是这一条：容器穿不透，`contents` 是空的，
+        // 而那是「没看见」不是「里面没有」。它们是游戏**加**补丁，不是补丁。
+        let v = 变体("3ds/怪物猎人4G[ACG汉化组]+最终汉化补丁.tar.zst");
+        assert_eq!(
+            decide(&v, &看得见(&[], false)),
+            None,
+            "看不进去就不该下这个判断"
+        );
+        // 看得进去、里面确实只有说明文档，那才算。
+        let skip = decide(&v, &看得见(&["说明.txt"], true)).expect("该跳过");
+        assert_eq!(skip.kind(), "补丁");
+        // **主文件本身就是补丁格式**那一条不受影响——它压根不看包里有什么。
+        let ips = 变体("FC/某游戏汉化.ips");
+        assert!(decide(&ips, &看得见(&[], false)).is_some());
     }
 
     #[test]
     fn 整词才算不然_dispatcher_也成了补丁() {
         assert!(has_word("game.patch.zip", "patch"));
         assert!(!has_word("dispatcher.zip", "patch"));
-        assert_eq!(decide(&变体("PSV/dispatcher.zip"), &[]), None);
+        assert_eq!(
+            decide(&变体("PSV/dispatcher.zip"), &看得见(&[], true)),
+            None
+        );
     }
 
     #[test]
     fn 普通游戏一律照撞() {
         assert_eq!(
-            decide(&变体("FC/超级马里奥.zip"), &内容(&["smb.nes"])),
+            decide(&变体("FC/超级马里奥.zip"), &看得见(&["smb.nes"], true)),
             None
         );
-        assert_eq!(decide(&变体("PS1/游戏.chd"), &[]), None);
+        assert_eq!(decide(&变体("PS1/游戏.chd"), &看得见(&[], true)), None);
     }
 }

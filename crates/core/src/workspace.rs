@@ -167,6 +167,20 @@ pub fn dat_cache_dir(workspace: &Path) -> PathBuf {
     workspace.join("dat").join("cache")
 }
 
+/// **沉淀库**在哪。
+///
+/// 与 DAT 库、媒体池一样**不带 [`Slug`]**，理由也同源：一条**裁决**说的是「世上这份
+/// 内容是什么」，与它躺在哪块盘上无关——键是内容哈希不是路径。两块盘接同一台机器，
+/// 裁决一次两边都受益。
+///
+/// 它**单独一份文件、不进中立库**：中立库里每一条都可再生（重扫、重成型、重识别），
+/// 所以那边的结构版本一变就让用户删库重扫；而**裁决不可再生**，两者住在一起，那条便宜
+/// 的路就再也走不通了（原挂账 D26，`verdict` 模块文档）。
+#[must_use]
+pub fn verdict_store_path(workspace: &Path) -> PathBuf {
+    workspace.join("verdict").join("verdict.sqlite3")
+}
+
 /// **媒体池**在哪。
 ///
 /// 与 DAT 库一样**不带 [`Slug`]**，理由也一样：池是**内容寻址**的，同一张封面在两块盘

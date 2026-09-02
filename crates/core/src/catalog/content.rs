@@ -608,6 +608,24 @@ impl Catalog {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// 改一行**作品**的来路。
+    ///
+    /// **识别撞出来的与裁决定下来的共用同一张作品表**（一部作品两行会让导出时的收敛
+    /// 把它拆成两个条目）。于是同一个名字先被识别建出来、后被裁决点名时，这一行要改口
+    /// 说自己是裁决的——报告里「识别建出来的作品数」才数得对。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn set_work_origin(&mut self, id: i64, origin: Provenance) -> Result<(), CatalogError> {
+        self.conn
+            .execute(
+                "UPDATE work SET origin = ?2 WHERE id = ?1",
+                params![id, origin.label()],
+            )
+            .map(|_| ())
+            .map_err(|source| self.err(source))
+    }
+
     /// 记一个**发行版**，返回它的 id。
     ///
     /// `languages` 装的是 ADR-0019 那道世代裂缝的数字世代一侧：中文在那里是同一条
@@ -632,6 +650,37 @@ impl Catalog {
             )
             .map_err(|source| self.err(source))?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// 找一条形状一模一样的**发行版**；没有就是 `None`。
+    ///
+    /// **裁决**拿它跨调用去重：`romcat triage decide` 一次一批，两批之间内存里那张
+    /// 去重表是空的，同一次发行被第二批裁决点到时不查库就会多建一行。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn release_like(
+        &self,
+        work_id: i64,
+        platform: Option<&str>,
+        region: Option<&str>,
+        serial: Option<&str>,
+        languages: Option<&str>,
+    ) -> Result<Option<i64>, CatalogError> {
+        self.conn
+            .query_row(
+                "SELECT id FROM release
+                 WHERE work_id = ?1
+                   AND COALESCE(platform, '')  = COALESCE(?2, '')
+                   AND COALESCE(region, '')    = COALESCE(?3, '')
+                   AND COALESCE(serial, '')    = COALESCE(?4, '')
+                   AND COALESCE(languages, '') = COALESCE(?5, '')
+                 ORDER BY id LIMIT 1",
+                params![work_id, platform, region, serial, languages],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|source| self.err(source))
     }
 
     /// 把一个变体挂到作品与发行版上。

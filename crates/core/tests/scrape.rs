@@ -183,6 +183,7 @@ fn 识别(现场: &mut 现场) {
         &RealFs::new(),
         &mut 现场.catalog,
         &现场.repo,
+        &verdict::Index::empty(),
         &identify::Options::new(现场.dir.path()),
         &CancelToken::new(),
         &mut |_| {},
@@ -692,6 +693,7 @@ fn 报告把合并真的跑了一遍() {
 
 use romcat_core::dat::CannedFetcher;
 use romcat_core::scrape::online::{self, Credentials, Halt, Limits, Net};
+use romcat_core::verdict;
 
 /// `jeuInfos.php` 的落点。假服务器按**前缀**答，因为查询串里带着凭据与逐条参数。
 const 查询端点: &str = "https://api.screenscraper.fr/api2/jeuInfos.php";

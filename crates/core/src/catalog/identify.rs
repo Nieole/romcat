@@ -11,16 +11,24 @@
 //!   容器里的 CRC-32 零解压就有，而裸文件要整份读一遍——一块 8.60 TiB 的盘上，
 //!   第二趟识别不该再读一遍。它由扫描按文件的三元组作废（`Catalog::write`），
 //!   与容器内部构成的作废方式是同一条。
-//! - 作品与发行版多出一列 `origin`：这一行是**识别**自己造的，还是**裁决**定下来的。
-//!   没有这一列，重跑识别就分不清哪些该清掉——而清错了会把人工裁决的结论冲掉。
+//! - 作品与发行版多出一列 `origin`：这一行是**识别**撞出来的，还是**裁决**定下来的。
+//!   报告靠它把「识别建出来的作品数」与裁决攒出来的分开数。
 //!
-//! ## 「没有发行版链接」为什么必须分得出来路
+//! ## 这里的每一行都是可再生的
 //!
-//! `CONTEXT.md` 说：同人移植与 homebrew 直接挂在**作品**下，**没有发行版链接这件事
-//! 本身就告诉识别管线不要拿它去撞 DAT**。这条判据只有在链接的来路分得清时才成立——
-//! 识别自己刚挂上去的「作品有、发行版没有」（汉化版就是这样：认得出是哪个作品，
-//! 认不出它基于哪一条发行版）不能反过来被下一轮当成 homebrew。因此重跑识别的第一件事
-//! 是把**识别自己造的**那些行连同链接一起清掉，留下的才是裁决说的话。
+//! 三张表加那两列 `origin`，**没有一行是攒出来的**：识别撞出来的重跑一遍就有，
+//! 裁决定下来的照**沉淀库**（[`verdict::Store`](crate::verdict::Store)）重放一遍就有。
+//! 沉淀库是一份不跟中立库走、也不随它删的文件（票 08），中立库里这几行只是它的投影。
+//!
+//! 这条性质值钱：中立库因此可以一直走「结构版本对不上就删库重扫」那条便宜路
+//! （见 [`SCHEMA_VERSION`](super::SCHEMA_VERSION)），不必为它写迁移。
+//!
+//! ## 「没有发行版链接」不再靠推断
+//!
+//! `CONTEXT.md` 说：同人移植与 homebrew 直接挂在**作品**下，没有发行版链接这件事
+//! 本身就在告诉识别管线别拿它去撞 DAT。**但那条判据不能靠「作品有、发行版空」推出来**
+//! ——裁决定了作品、识别认出了发行版，清完也是这个形状（原挂账 D48）。票 08 起
+//! 沉淀库把「确认没有发行版」记成一条**明确的裁决**，识别读那一条，不再猜。
 
 use std::collections::BTreeMap;
 
@@ -172,9 +180,14 @@ impl State {
 /// 同一个 crate 里两个 `Origin` 只会让人读错。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provenance {
-    /// 识别自己造的。重跑识别时整批清掉再造一遍。
+    /// **识别**撞 DAT 撞出来的。
     Identified,
-    /// 人工**裁决**定下来的。识别绝不碰它。
+    /// 人工**裁决**定下来的。
+    ///
+    /// **票 08 起它也随重跑识别整批清掉再重建**——裁决的家搬去了
+    /// [`verdict::Store`](crate::verdict::Store)，中立库里这几行只是它的投影
+    /// （见 [`Catalog::clear_identifications`](super::Catalog::clear_identifications)）。
+    /// 这一列留着是为了**报告分得清两者各建出来多少**，不再是「别删我」的记号。
     Verdict,
 }
 
@@ -351,6 +364,24 @@ fn chinese_mark(label: &str) -> Option<ChineseMark> {
     }
 }
 
+/// **待确认队列**要的一行：变体连它这一轮的结论。
+///
+/// 捏成一次查询而不是「先列变体、再逐个问结论」：真库里那是 46,444 个变体，
+/// 逐个问就是 46,444 次查询，而队列只是要把其中一万多条挑出来。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueRow {
+    /// 变体本身。
+    pub variant: super::VariantRow,
+    /// 这一轮的结论。
+    pub state: State,
+    /// 跳过或无判据的具体理由。
+    pub reason: Option<String>,
+    /// 有几条**候选**。
+    pub candidates: u64,
+    /// 其中**自动通过**的有几条。**一条都没有的才要人裁决**（ADR-0002）。
+    pub accepted: u64,
+}
+
 /// 一个条目在中立库里是什么样。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryFact {
@@ -367,6 +398,69 @@ pub enum EntryFact {
 }
 
 impl Catalog {
+    /// 全部变体连它们这一轮的识别结论，按键排序。**待确认队列**的原料。
+    ///
+    /// 还没识别过的变体**不在里面**：队列说的是「识别拿不定主意的那些」，
+    /// 而没跑过识别时那是「全部」——那时该说的是「先跑一次 `romcat identify`」。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn queue_rows(&self) -> Result<Vec<QueueRow>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT v.key, v.platform, v.rule, v.main_key, v.files, v.bytes, v.unreadable,
+                        v.manual, v.work_id, v.release_id, i.state, i.reason, i.candidates,
+                        i.accepted
+                 FROM variant v JOIN identification i ON i.variant_key = v.key
+                 ORDER BY v.key",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map([], |row| {
+                let state: String = row.get(10)?;
+                Ok(QueueRow {
+                    variant: super::VariantRow {
+                        key: row.get(0)?,
+                        platform: row.get(1)?,
+                        rule: row.get(2)?,
+                        main_key: row.get(3)?,
+                        files: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
+                        bytes: u64::try_from(row.get::<_, i64>(5)?).unwrap_or(0),
+                        unreadable_files: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
+                        manual: row.get::<_, i64>(7)? != 0,
+                        work_id: row.get(8)?,
+                        release_id: row.get(9)?,
+                    },
+                    state: State::from_label(&state).unwrap_or(State::NoEvidence),
+                    reason: row.get(11)?,
+                    candidates: u64::try_from(row.get::<_, i64>(12)?).unwrap_or(0),
+                    accepted: u64::try_from(row.get::<_, i64>(13)?).unwrap_or(0),
+                })
+            })
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
+    /// 按名字找一个**作品**；没有就是 `None`。
+    ///
+    /// **裁决**拿它把说的是同一部作品的几条裁决归到同一行上——建出两行作品会让导出时的
+    /// **收敛**把它们拆成两个前端条目。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn work_named(&self, name: &str) -> Result<Option<i64>, CatalogError> {
+        self.conn
+            .query_row(
+                "SELECT id FROM work WHERE name = ?1 ORDER BY id LIMIT 1",
+                params![name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|source| self.err(source))
+    }
+
     /// 全部变体，按键排序。
     ///
     /// # Errors
@@ -784,9 +878,19 @@ impl Catalog {
         tx.commit().map_err(to_err)
     }
 
-    /// 把**识别自己**上一轮造的东西清掉：候选、结论、以及它建出来的作品与发行版。
+    /// 把上一轮的识别结论整批清掉：候选、结论，以及**作品**与**发行版**里由它们造出来的行。
     ///
     /// 顺序是有讲究的：先摘链接再删行，否则变体上会留下指向已删除记录的悬空 id。
+    ///
+    /// ## 为什么 `origin = 裁决` 的行也一起清
+    ///
+    /// 票 08 之前那些行没有产者，留着它们是怕清掉之后没处补。**票 08 起裁决有了自己的
+    /// 家**——[`verdict::Store`](crate::verdict::Store)，一份不跟中立库走、也不随它删的
+    /// 文件。于是中立库里这几行成了那份库的**投影**：清掉再照沉淀库重建一遍，结果一模一样，
+    /// 而不清的话每跑一次识别就多攒一份重复的作品与发行版。
+    ///
+    /// `origin` 这一列照旧有用——它说得出一行是**识别**撞出来的还是**裁决**定下来的，
+    /// 报告里的「识别建出来的作品数」靠它把两者分开数。
     ///
     /// # Errors
     /// 写库失败时返回错误。
@@ -803,16 +907,13 @@ impl Catalog {
         for sql in ["DELETE FROM candidate", "DELETE FROM identification"] {
             tx.execute(sql, []).map_err(to_err)?;
         }
-        let mine = Provenance::Identified.label();
         for sql in [
-            "UPDATE variant SET release_id = NULL
-             WHERE release_id IN (SELECT id FROM release WHERE origin = ?1)",
-            "UPDATE variant SET work_id = NULL
-             WHERE work_id IN (SELECT id FROM work WHERE origin = ?1)",
-            "DELETE FROM release WHERE origin = ?1",
-            "DELETE FROM work WHERE origin = ?1",
+            "UPDATE variant SET release_id = NULL",
+            "UPDATE variant SET work_id = NULL",
+            "DELETE FROM release",
+            "DELETE FROM work",
         ] {
-            tx.execute(sql, params![mine]).map_err(to_err)?;
+            tx.execute(sql, []).map_err(to_err)?;
         }
         tx.commit().map_err(to_err)
     }
@@ -1021,6 +1122,28 @@ impl Catalog {
             .collect::<Result<_, _>>()
             .map_err(|source| self.err(source))?;
         Ok(counts)
+    }
+
+    /// 只改一条结论的**理由**那一列，别的一个字不动。
+    ///
+    /// **裁决**里「都不对，而且认不出」那一档走这条：结论本身没有变（照旧是未命中或
+    /// 无判据），变的只是「为什么还停在这儿」。整条重写的话，那个变体的候选会被
+    /// 连带清掉——而它们是识别撞出来的事实，与人认不认得出无关。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn set_identification_reason(
+        &mut self,
+        variant_key: &str,
+        reason: Option<&str>,
+    ) -> Result<bool, CatalogError> {
+        self.conn
+            .execute(
+                "UPDATE identification SET reason = ?2 WHERE variant_key = ?1",
+                params![variant_key, reason],
+            )
+            .map(|rows| rows > 0)
+            .map_err(|source| self.err(source))
     }
 
     /// 一个变体这一轮的结论；没识别过时是 `None`。

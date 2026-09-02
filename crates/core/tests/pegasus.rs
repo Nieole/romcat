@@ -32,6 +32,7 @@ use romcat_core::scrape::{self, Priorities};
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::title;
+use romcat_core::verdict;
 
 fn 日版() -> Vec<u8> {
     vec![0xA1; 4_096]
@@ -214,6 +215,7 @@ fn 跑一遍(现场: &mut 现场) {
         &RealFs::new(),
         &mut 现场.catalog,
         &repo,
+        &verdict::Index::empty(),
         &identify::Options::new(现场.dir.path()),
         &CancelToken::new(),
         &mut |_| {},

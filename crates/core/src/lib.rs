@@ -29,4 +29,6 @@ pub mod sublibrary;
 pub mod sync;
 pub mod testing;
 pub mod title;
+pub mod triage;
+pub mod verdict;
 pub mod workspace;
