@@ -91,6 +91,26 @@ pub fn work_title(name: &str) -> String {
     title.trim().to_string()
 }
 
+/// TOSEC 名字里的发行年份。
+///
+/// 第一个 `(…)` 是发行日期，形如 `1985`、`1985-12-11`、`199x`、`19xx`。
+/// **只认得出四位数字才产出**——`199x` 说的正是「不知道是哪一年」，把它当年份写进去
+/// 等于把「不知道」伪装成「知道」。
+///
+/// 它住在这里而不是[刮削那一侧](crate::scrape::dat)，是因为**有两个消费者**：刮削拿它
+/// 填年份字段，而识别的[文件名那一层](super::fuzzy)拿它做**年份交叉校验**——同一个字段
+/// 两处各解析一遍，迟早会漂开。刮削那边原样再导出一次，调用处不必改。
+#[must_use]
+pub fn tosec_year(name: &str) -> Option<String> {
+    let first = rounds(name).next()?;
+    let head = first.get(..4)?;
+    if head.len() == 4 && head.chars().all(|c| c.is_ascii_digit()) {
+        Some(head.to_string())
+    } else {
+        None
+    }
+}
+
 /// 名字里 `(…)` 括起来的每一组。
 fn rounds(name: &str) -> impl Iterator<Item = &str> {
     let mut rest = name;
@@ -155,6 +175,19 @@ mod tests {
         );
         assert_eq!(parse("Foo (Japan) (Rev A)", None).languages, None);
         assert_eq!(parse("Foo (Japan)", None).languages, None);
+    }
+
+    #[test]
+    fn tosec_名字里的年份读得出来而不确定的那种读不出() {
+        // 两个消费者共用这一份：刮削填年份字段，识别的文件名那一层做交叉校验。
+        assert_eq!(
+            tosec_year("1942 (1985-12-11)(Capcom)(JP-US)").as_deref(),
+            Some("1985")
+        );
+        // `199x` 说的正是「不知道是哪一年」。
+        assert_eq!(tosec_year("1944 (199x)(-)(AS)[p]"), None);
+        // No-Intro 的名字里第一个括号是地区，不是年份。
+        assert_eq!(tosec_year("1942 (Japan, USA) (En)"), None);
     }
 
     #[test]

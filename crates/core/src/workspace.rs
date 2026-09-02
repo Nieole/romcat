@@ -167,6 +167,25 @@ pub fn dat_cache_dir(workspace: &Path) -> PathBuf {
     workspace.join("dat").join("cache")
 }
 
+/// **中文离线数据源**的本机索引在哪。
+///
+/// 与 DAT 库一样**不带 [`Slug`]**，理由也一样：「世上有哪些游戏、中文叫什么」对两块盘
+/// 是同一份。跟着主库分开存，等于把同一份索引存两遍，第二块盘接上来还要再取一次
+/// 435 MB 的 dump。
+#[must_use]
+pub fn zh_store_path(workspace: &Path) -> PathBuf {
+    workspace.join("zh").join("zh.sqlite3")
+}
+
+/// 中文数据源取回来的原件放哪。
+///
+/// 留着原件的理由与 [`dat_cache_dir`] 一模一样：改一条平台别名之后重建索引，
+/// 不必把那 435 MB 再下一遍。
+#[must_use]
+pub fn zh_cache_dir(workspace: &Path) -> PathBuf {
+    workspace.join("zh").join("cache")
+}
+
 /// **沉淀库**在哪。
 ///
 /// 与 DAT 库、媒体池一样**不带 [`Slug`]**，理由也同源：一条**裁决**说的是「世上这份
@@ -283,6 +302,17 @@ mod tests {
             Slug::AtPath(Path::new("/Volumes/新加卷")).text(),
             "library-f88dd3e91cc9873a"
         );
+    }
+
+    #[test]
+    fn 中文索引不跟着主库分开存() {
+        // 「世上有哪些游戏、中文叫什么」对两块盘是同一份，跟着主库分开存就要取两次。
+        let workspace = PathBuf::from("/work");
+        assert_eq!(
+            zh_store_path(&workspace),
+            PathBuf::from("/work/zh/zh.sqlite3")
+        );
+        assert!(zh_cache_dir(&workspace).starts_with("/work/zh"));
     }
 
     #[test]

@@ -18,6 +18,7 @@ use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
 use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
 use romcat_core::fs::RealFs;
+use romcat_core::identify::fuzzy;
 use romcat_core::identify::{self, Options};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::testing::cart as real;
@@ -262,8 +263,11 @@ fn 跑一趟(现场: &mut 现场) -> identify::Outcome {
     identify::run(
         &RealFs::new(),
         &mut 现场.catalog,
-        &现场.repo,
-        &verdict::Index::default(),
+        &identify::Ammo {
+            repo: &现场.repo,
+            verdicts: &verdict::Index::default(),
+            naming: &fuzzy::Naming::off(),
+        },
         &options,
         &CancelToken::new(),
         &mut |_| {},
@@ -419,8 +423,11 @@ fn 盘不在位时这一层如实报没读到而不是瞎猜() {
     let outcome = identify::run(
         &RealFs::new(),
         &mut 现场.catalog,
-        &现场.repo,
-        &verdict::Index::default(),
+        &identify::Ammo {
+            repo: &现场.repo,
+            verdicts: &verdict::Index::default(),
+            naming: &fuzzy::Naming::off(),
+        },
         &options,
         &CancelToken::new(),
         &mut |_| {},

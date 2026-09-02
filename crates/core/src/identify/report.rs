@@ -49,6 +49,18 @@ pub struct PlatformRow {
     pub fan_translated: u64,
     /// **文件名含汉字**的变体数——票 01 用的那个粗略代理，摆在旁边好看出差多少。
     pub cjk_named: u64,
+    /// 命中里**只有文件名那一层的候选**的变体数（票 11）。
+    ///
+    /// 它单列一列，因为它改变「命中」这两个字的含义：那一层的候选一条都不自动通过，
+    /// 它只是**给了一条带依据的候选让人去裁**。把它混进命中率里，读者就分不出
+    /// 「认出来了」与「有人按名字猜了一下」——而那正是这份报告一直在防的事
+    /// （跳过与无判据不混进未命中，是同一条道理）。
+    pub name_only: u64,
+    /// 上面那些里，**本来是无判据**的有几个（一份可以撞的内容都没有）。
+    ///
+    /// 「不算文件名那一层的命中率」要靠它把分母也还原回去——无判据本来就不在命中率的
+    /// 分母里，只减分子不减分母，算出来的数会比那一层跑之前还低。
+    pub name_only_no_evidence: u64,
     /// DAT 库里这个平台索引了多少条**序列号**（票 09）。
     ///
     /// 它与 `dat_games` 是两种弹药，缺哪一种都会让命中率低而**与识别准不准无关**。
@@ -74,6 +86,19 @@ impl PlatformRow {
     #[must_use]
     pub fn hit_rate(&self) -> f64 {
         rate(self.matched, self.matched + self.unmatched)
+    }
+
+    /// **不算文件名那一层**的命中率。
+    ///
+    /// 两个数都要给（同「撞了 DAT 的里面」与「全部变体里」那一对）：一个说的是
+    /// 「这个库现在有多少东西有带依据的候选」，另一个说的是「有多少东西是靠内容
+    /// 认出来的」。只给前者，报告就在替一层从不自动通过的猜测邀功。
+    #[must_use]
+    pub fn hit_rate_without_names(&self) -> f64 {
+        rate(
+            self.matched.saturating_sub(self.name_only),
+            (self.matched + self.unmatched).saturating_sub(self.name_only_no_evidence),
+        )
     }
 
     /// 认出中文的占这个平台多少。**官中版与汉化版加在一起**——这一条问的是
@@ -180,6 +205,8 @@ impl IdentifyReport {
         let ammo = dat_games(repo);
         let serials = repo.serial_counts().unwrap_or_default();
         let chinese = catalog.chinese_by_platform(UNKNOWN_PLATFORM)?;
+        let name_only =
+            catalog.name_only_by_platform(crate::identify::fuzzy::SOURCE, UNKNOWN_PLATFORM)?;
         let mut rows: BTreeMap<String, PlatformRow> = BTreeMap::new();
         catalog.for_each_identification(&mut |platform, state, reason, key, read_bytes| {
             let platform = platform.unwrap_or(UNKNOWN_PLATFORM).to_string();
@@ -189,6 +216,8 @@ impl IdentifyReport {
                 dat_serials: serials.get(&platform).copied().unwrap_or(0),
                 official_chinese: chinese.get(&platform).map_or(0, |it| it.0),
                 fan_translated: chinese.get(&platform).map_or(0, |it| it.1),
+                name_only: name_only.get(&platform).map_or(0, |it| it.0),
+                name_only_no_evidence: name_only.get(&platform).map_or(0, |it| it.1),
                 ..PlatformRow::default()
             });
             row.variants += 1;
@@ -234,6 +263,8 @@ impl IdentifyReport {
             report.total.official_chinese += row.official_chinese;
             report.total.fan_translated += row.fan_translated;
             report.total.cjk_named += row.cjk_named;
+            report.total.name_only += row.name_only;
+            report.total.name_only_no_evidence += row.name_only_no_evidence;
         }
         report.total.platform = "合计".to_string();
         sort_reasons(&mut report.skipped);
@@ -291,6 +322,16 @@ impl IdentifyReport {
             thousands(self.total.matched + self.total.unmatched),
             self.total.coverage(),
         );
+        if self.total.name_only > 0 {
+            let _ = writeln!(
+                out,
+                "                其中 {} 个**只有文件名那一层的候选**（那一层一条都不自动通过，\
+                 全部等裁决；其中 {} 个本来是无判据的）——不算那一层，撞了 DAT 的里面是 {:.1}%",
+                thousands(self.total.name_only),
+                thousands(self.total.name_only_no_evidence),
+                self.total.hit_rate_without_names(),
+            );
+        }
         let _ = writeln!(
             out,
             "候选            {} 条（自动通过 {}），{} 个变体有不止一条候选",
@@ -332,10 +373,11 @@ impl IdentifyReport {
         heading(&mut out, "按平台");
         let _ = writeln!(
             out,
-            "{}{}{}{}{}{}{}{}序列号",
+            "{}{}{}{}{}{}{}{}{}序列号",
             pad("平台", 10),
             pad("变体", 9),
             pad("命中", 9),
+            pad("只靠名字", 11),
             pad("未命中", 9),
             pad("无判据", 9),
             pad("跳过", 8),
@@ -345,10 +387,11 @@ impl IdentifyReport {
         for row in &self.platforms {
             let _ = writeln!(
                 out,
-                "{}{}{}{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}{}{}{}",
                 pad(&row.platform, 10),
                 pad(&thousands(row.variants), 9),
                 pad(&thousands(row.matched), 9),
+                pad(&thousands(row.name_only), 11),
                 pad(&thousands(row.unmatched), 9),
                 pad(&thousands(row.no_evidence), 9),
                 pad(&thousands(row.skipped), 8),
@@ -365,6 +408,11 @@ impl IdentifyReport {
             out,
             "（最后两列是两种**弹药**：DAT 条目撞哈希，序列号撞光盘内部标识。哪一种为 0，\
              这个平台的命中率低就与识别准不准无关）"
+        );
+        let _ = writeln!(
+            out,
+            "（「只靠名字」那一列是**文件名那一层**给的候选，它一条都不自动通过——\
+             那些变体有了带依据的候选，但还没被认出来）"
         );
 
         heading(&mut out, "中文（这是识别结论，不是从文件名猜的）");

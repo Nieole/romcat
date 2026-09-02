@@ -48,6 +48,7 @@ pub mod online;
 pub mod pool;
 pub mod priority;
 pub mod report;
+pub mod zh;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -57,6 +58,7 @@ use crate::catalog::{Catalog, CatalogError};
 use crate::fs::LibraryFs;
 use crate::scan::CancelToken;
 
+use crate::identify::fuzzy;
 use online::{Halt, Net};
 use pool::{MediaPool, PoolError};
 
@@ -610,7 +612,7 @@ pub fn run(
     net: Option<&Net<'_>>,
     context: &mut RunContext<'_>,
 ) -> Result<Outcome, ScrapeError> {
-    let sources = sources(options.profile, options.media, net)?;
+    let sources = sources(options.profile, options.media, net, context.naming)?;
     if options.refresh {
         catalog.clear_scraped()?;
     }
@@ -794,6 +796,12 @@ pub struct RunContext<'a> {
     pub cancel: &'a CancelToken,
     /// 进度回调。
     pub progress: &'a mut dyn FnMut(Progress),
+    /// **中文离线源**认得的东西与调得动的参数（票 11）。
+    ///
+    /// 它在这里而不在 [`Options`] 里，是因为它借着一份整装在内存里的索引活着，
+    /// 而 `Options` 是一份可以随手 clone 的配置。[`Naming::off`](fuzzy::Naming::off)
+    /// 是「这个源不参加」的那一份。
+    pub naming: &'a fuzzy::Naming<'a>,
 }
 
 /// 一串输入折成**输入指纹**。
@@ -831,6 +839,7 @@ pub fn all_source_names() -> Vec<&'static str> {
         "GoodNES",
         local::FILENAME,
         local::LOCAL_MEDIA,
+        fuzzy::SOURCE,
         online::SCREEN_SCRAPER,
     ];
     out.extend(crate::adapter::names());
@@ -847,6 +856,7 @@ fn sources<'a>(
     profile: Profile,
     media: bool,
     net: Option<&'a Net<'a>>,
+    naming: &'a fuzzy::Naming<'a>,
 ) -> Result<Vec<Box<dyn Source + 'a>>, ScrapeError> {
     let mut sources: Vec<Box<dyn Source + 'a>> = vec![
         Box::new(dat::DatSource::new("No-Intro")),
@@ -858,6 +868,16 @@ fn sources<'a>(
     ];
     if media {
         sources.push(Box::new(local::LocalMediaSource::new()));
+    }
+    // **中文离线源只在取过数之后参加**（票 11）。没取过就整个不造这个源——
+    // 与「`--no-media` 时本地媒体源整个不参加」同一条道理：造一个永远无话可说的源，
+    // 会让引擎把它上一轮说过的话当成「这次改主意了」而清掉。
+    if let Some(index) = naming.index {
+        sources.push(Box::new(zh::ChineseSource::new(
+            naming.rules,
+            index,
+            naming.tuning,
+        )));
     }
     // **联网源只在在线档里造出来。** 离线档拿到 `Some(net)` 也不会碰它——这一条
     // 比「参数表里没有网络句柄」硬：句柄可以从别处传进来，而这里根本不造那个源。
@@ -1287,7 +1307,8 @@ mod tests {
 
     #[test]
     fn 离线档那七个源全是本地的() {
-        let sources = sources(Profile::Offline, true, None).expect("离线档该收得下这七个源");
+        let 关掉 = fuzzy::Naming::off();
+        let sources = sources(Profile::Offline, true, None, &关掉).expect("离线档该收得下这七个源");
         assert_eq!(sources.len(), 7);
         assert!(sources.iter().all(|s| s.locality() == Locality::Local));
     }
@@ -1310,7 +1331,8 @@ mod tests {
             },
             &cancel,
         );
-        let sources = sources(Profile::Offline, true, Some(&net)).expect("收得下");
+        let 关掉 = fuzzy::Naming::off();
+        let sources = sources(Profile::Offline, true, Some(&net), &关掉).expect("收得下");
         assert!(sources.iter().all(|s| s.locality() == Locality::Local));
         assert!(fetcher.asked().is_empty());
     }
@@ -1318,8 +1340,9 @@ mod tests {
     #[test]
     fn 在线档没有网络句柄就不启动() {
         // **宁可不启动也不悄悄降级**：用户点名要在线档，要的正是离线档补不上的那几样。
+        let 关掉 = fuzzy::Naming::off();
         assert!(matches!(
-            sources(Profile::Online, true, None),
+            sources(Profile::Online, true, None, &关掉),
             Err(ScrapeError::NoNetwork)
         ));
     }
@@ -1328,7 +1351,8 @@ mod tests {
     fn 不收媒体时本地媒体源整个不参加() {
         // 它若参加而拿到一份空清单，`probe` 会返回「无话可说」，
         // 上一轮收好的媒体映射就被当成过期结论清掉了。
-        let sources = sources(Profile::Offline, false, None).expect("收得下");
+        let 关掉 = fuzzy::Naming::off();
+        let sources = sources(Profile::Offline, false, None, &关掉).expect("收得下");
         assert_eq!(sources.len(), 6);
         assert!(sources.iter().all(|s| s.name() != local::LOCAL_MEDIA));
     }

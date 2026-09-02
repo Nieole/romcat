@@ -478,7 +478,8 @@ pub(super) fn render(report: &HealthReport) -> String {
         if containers.lossy_names > 0 {
             let _ = writeln!(
                 out,
-                "名字只能猜      {} 条内部条目不是合法 UTF-8（不影响命中，判据是 CRC-32 + 大小）",
+                "名字解不出来    {} 条内部条目连编码都探不出来（GBK / Big5 / Shift_JIS 都不是），\
+                 只能有损转换。不影响命中（判据是 CRC-32 加大小），但**文件名那一层不撞它们**",
                 thousands(containers.lossy_names)
             );
         }

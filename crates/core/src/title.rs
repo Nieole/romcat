@@ -573,7 +573,7 @@ pub fn fold(catalog: &Catalog) -> Result<Vec<TitleRow>, CatalogError> {
             // 中文名，发行版的地区说不了它是什么语言。反过来，DAT 的条目名确实跟着那次
             // 发行走，所以上面那一轮传了地区。
             let language = language_of(value, None);
-            let told = classify(language, marks, chinese, release);
+            let told = classify(source, language, marks, chinese, release);
             tally.add(TitleRow {
                 work: work.clone(),
                 language,
@@ -670,11 +670,31 @@ struct Classified {
 
 /// 一个变体给出的叫法是**哪一种**，以及它的置信度与**依据**。
 fn classify(
+    source: &str,
     language: Language,
     marks: Option<&BTreeSet<ChineseMark>>,
     chinese: Option<ChineseRelease>,
     release: Option<&ReleaseRow>,
 ) -> Classified {
+    // **中文离线源那一条排第一**（票 11）。它与别的值有一处根本不同：**这串字不是盘上
+    // 那个文件的名字**，是中文数据源里那条条目的名字，而且平台与年份两道交叉校验都对上。
+    //
+    // 排第一是必须的，不是图省事：下面第一条按「这个变体撞上了汉化条目」判**汉化组自取
+    // 的名**——那句话对文件名成立，对一条来自 wiki 的条目名不成立。让它落到那一档，
+    // 一个有出处的中文名会被记成汉化组起的名字，而 ADR-0012 明说别拿那种名字当标题。
+    if source == crate::identify::fuzzy::SOURCE {
+        return Classified {
+            kind: TitleKind::Alias,
+            // **中置信**：有出处，但出处是一份用户共同维护的 wiki，不是原厂——
+            // 所以它不是**译名**那一档（那一档留给官中版的官方译名，ADR-0012），
+            // 而是一条**有人背书的别名**。高置信留给裁决。
+            confidence: Confidence::Medium,
+            seam: None,
+            evidence: "这个名字有出处：中文离线数据源里那条条目的中文名，\
+                       平台与年份两道交叉校验都对上（候选那一侧记着完整依据）"
+                .to_string(),
+        };
+    }
     // **汉化版是变体**（ADR-0012）：它的文件名是汉化组自取的名字，不是官方译名。
     // 这一档先判，因为一个汉化版完全可能基于一条带中文语言标记的发行版——
     // 底版说什么语言不改变「这个名字是汉化组起的」这件事。
@@ -1134,9 +1154,51 @@ mod tests {
         let marks = BTreeSet::from([ChineseMark::FanTranslated, ChineseMark::Official]);
         let chinese = chinese_release(Some(&release), Some(&marks));
         assert!(chinese.is_some(), "底版确实是一条中文发行版");
-        let told = classify(Language::Chinese, Some(&marks), chinese, Some(&release));
+        let told = classify(
+            crate::scrape::local::FILENAME,
+            Language::Chinese,
+            Some(&marks),
+            chinese,
+            Some(&release),
+        );
         assert_eq!(told.kind, TitleKind::FanName);
         assert_eq!(told.seam, None);
+    }
+
+    #[test]
+    fn 中文离线源给的名字是有出处的别名而不是汉化组自取的名() {
+        // 同一个变体：它撞上了汉化条目，所以**文件名**那一条是汉化组自取的名。
+        // 但中文离线源给的那一串不是盘上那个文件的名字，是数据源里那条条目的名字——
+        // 落到汉化组那一档，一个有出处的中文名会被 ADR-0012 那条「别拿它当标题」误伤。
+        let marks = BTreeSet::from([ChineseMark::FanTranslated]);
+        let 文件名 = classify(
+            crate::scrape::local::FILENAME,
+            Language::Chinese,
+            Some(&marks),
+            None,
+            None,
+        );
+        assert_eq!(文件名.kind, TitleKind::FanName);
+        let 中文源 = classify(
+            crate::identify::fuzzy::SOURCE,
+            Language::Chinese,
+            Some(&marks),
+            None,
+            None,
+        );
+        assert_eq!(中文源.kind, TitleKind::Alias);
+        assert_eq!(中文源.confidence, Confidence::Medium);
+        assert!(中文源.evidence.contains("有出处"));
+        // 没人背书的文件名照旧是低置信别名。
+        let 没背书 = classify(
+            crate::scrape::local::FILENAME,
+            Language::Chinese,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(没背书.kind, TitleKind::Alias);
+        assert_eq!(没背书.confidence, Confidence::Low);
     }
 
     #[test]

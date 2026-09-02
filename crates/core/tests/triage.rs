@@ -20,6 +20,7 @@ use romcat_core::dat::chinese::ChineseMark;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
 use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
 use romcat_core::fs::RealFs;
+use romcat_core::identify::fuzzy;
 use romcat_core::identify::{self, Options};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
@@ -170,8 +171,11 @@ fn 跑识别(现场: &mut 现场) -> identify::Outcome {
     identify::run(
         &RealFs::new(),
         &mut 现场.catalog,
-        &现场.repo,
-        &index,
+        &identify::Ammo {
+            repo: &现场.repo,
+            verdicts: &index,
+            naming: &fuzzy::Naming::off(),
+        },
         &Options::new(现场.dir.path()),
         &CancelToken::new(),
         &mut |_| {},
@@ -626,8 +630,11 @@ fn 换一份中立库换一个路径同一个文件照样直接命中() {
     let outcome = identify::run(
         &RealFs::new(),
         &mut 乙,
-        &建_dat(),
-        &index,
+        &identify::Ammo {
+            repo: &建_dat(),
+            verdicts: &index,
+            naming: &fuzzy::Naming::off(),
+        },
         &Options::new(乙目录.path()),
         &CancelToken::new(),
         &mut |_| {},

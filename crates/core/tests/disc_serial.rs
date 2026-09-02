@@ -18,6 +18,7 @@ use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
 use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
 use romcat_core::fs::RealFs;
+use romcat_core::identify::fuzzy;
 use romcat_core::identify::{self, Options};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::testing::container::{ZipEntrySpec, zip_container};
@@ -235,8 +236,11 @@ fn 跑(现场: &mut 现场) -> identify::Outcome {
     identify::run(
         &RealFs::new(),
         &mut 现场.catalog,
-        &现场.repo,
-        &verdict::Index::empty(),
+        &identify::Ammo {
+            repo: &现场.repo,
+            verdicts: &verdict::Index::empty(),
+            naming: &fuzzy::Naming::off(),
+        },
         &options,
         &CancelToken::new(),
         &mut |_| {},
@@ -366,8 +370,11 @@ fn 目录名里的_titleid_是一条独立的依据且不自动通过() {
     identify::run(
         &RealFs::new(),
         &mut 现场.catalog,
-        &现场.repo,
-        &verdict::Index::empty(),
+        &identify::Ammo {
+            repo: &现场.repo,
+            verdicts: &verdict::Index::empty(),
+            naming: &fuzzy::Naming::off(),
+        },
         &options,
         &CancelToken::new(),
         &mut |_| {},

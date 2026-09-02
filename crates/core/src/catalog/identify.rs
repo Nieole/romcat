@@ -335,6 +335,30 @@ pub struct CartFactRow {
     pub facts: String,
 }
 
+/// **命中里只靠某一个源的候选**的变体数，按平台。
+///
+/// 它为一件事而存在：[文件名那一层](crate::identify::fuzzy)产出的候选一条都不自动通过，
+/// 却照样把变体的结论从「未命中」变成「命中」——那是对的（**它确实拿到了带依据的候选**），
+/// 但如果报告只给一个总的命中率，读者就分不出「认出来了」与「有人猜了一下」。
+///
+/// 于是这一列单列。判据是「这个变体的候选**全部**来自那个源」——只要还有一条别的源的
+/// 候选，它就不算只靠名字。
+///
+/// **第三列是「这些变体本来是无判据的」**（`units = 0`：一份可以撞的内容都没有）。
+/// 少了它，「不算那一层的命中率」会算错：那一层把一批本来在**无判据**里的变体拉进了
+/// 命中，而无判据本来就不在命中率的分母里（跳过与无判据不混进未命中，见模块文档）。
+/// 只从分子里减掉它们、分母却留着，那个数会比那一层跑之前还低——凭空冤枉前几层。
+pub(super) const NAME_ONLY_SQL: &str = "\
+SELECT COALESCE(v.platform, ?2), COUNT(*), SUM(CASE WHEN i.units = 0 THEN 1 ELSE 0 END)
+                 FROM identification i
+                 JOIN variant v ON v.key = i.variant_key
+                 WHERE i.state = ?3
+                   AND i.candidates > 0
+                   AND NOT EXISTS (
+                       SELECT 1 FROM candidate c
+                        WHERE c.variant_key = i.variant_key AND c.source <> ?1)
+                 GROUP BY 1";
+
 /// 「内部头与目录声明的平台对不上」这件事的判据，两处查询共用一份。
 ///
 /// **判据是家族不是那一个平台**：GB 与 GBC 共用一份卡带头，一份 CGB 卡躺在 `gb/`
@@ -1510,6 +1534,42 @@ impl Catalog {
             )
             .map_err(|source| self.err(source))?;
         Ok(u64::try_from(value).unwrap_or(0))
+    }
+
+    /// **命中里只有 `source` 这一个源的候选**的变体数，按平台。判据见 [`NAME_ONLY_SQL`]。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn name_only_by_platform(
+        &self,
+        source: &str,
+        unknown: &str,
+    ) -> Result<BTreeMap<String, (u64, u64)>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(NAME_ONLY_SQL)
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![source, unknown, State::Matched.label()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                ))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (platform, count, blind) = row.map_err(|source| self.err(source))?;
+            out.insert(
+                platform,
+                (
+                    u64::try_from(count).unwrap_or(0),
+                    u64::try_from(blind).unwrap_or(0),
+                ),
+            );
+        }
+        Ok(out)
     }
 
     /// 只改一条结论的**理由**那一列，别的一个字不动。

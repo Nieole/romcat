@@ -44,6 +44,16 @@
 //! 这与光盘序列号那一层不同——一张汉化过的盘与原版盘是两份不同的转储、各自有哈希，
 //! 序列号对上就是同一次发行；而一张汉化过的卡与原版卡**共用同一个游戏码**。
 //!
+//! ## 倒数第二层：文件名规则加中文离线模糊匹配（票 11）
+//!
+//! 上面三层的判据都来自**内容自己的字节**。数据库覆盖不到的那批变体，字节说不出话了，
+//! 手上只剩一个文件名——而这个库里的文件名多半是中文，中文在 No-Intro / Redump /
+//! TOSEC 里一个字都没有。于是[这一层](fuzzy)把文件名剥成正题，去撞一份**中文离线
+//! 数据源**（[`zh`](crate::zh)），用**平台与年份**做交叉校验。
+//!
+//! 它**永远不自动通过**，理由比卡带那一层还硬：**它一个字节都没看**。结论一律进
+//! 待确认队列（ADR-0002）。
+//!
 //! ## 还有一条 SHA-1 的窄路
 //!
 //! DAT 库里有一批记录连 `crc32` 与 `size` 两列都是空的（GoodNES 实测 30,244 条，
@@ -74,6 +84,7 @@
 pub mod cart;
 pub mod disc;
 pub mod fingerprint;
+pub mod fuzzy;
 pub mod header;
 pub mod ident;
 pub mod iso9660;
@@ -103,6 +114,7 @@ use crate::shape::Role;
 use crate::verdict::{self, Decision, Verdict};
 
 use fingerprint::{Fingerprint, Headerless, Want};
+use fuzzy::Naming;
 use header::DumpHeader;
 use report::IdentifyReport;
 use serial::Evidence;
@@ -119,6 +131,21 @@ pub enum IdentifyError {
     /// DAT 库读写失败。
     #[error(transparent)]
     Dat(#[from] RepoError),
+}
+
+/// 这一趟能用的**弹药**：撞哈希的 DAT 库、裁决攒出来的沉淀库、撞名字的中文离线索引。
+///
+/// 三样捆在一起传而不是散成三个参数，是因为它们**永远同进同出**：每一层识别都要问过
+/// 它们才敢说话，而加第四样弹药（票 12 的模型推断就是一样）时，散着的写法要把
+/// 所有调用处改一遍——那正是这一趟已经干过一次的事。
+#[derive(Clone, Copy)]
+pub struct Ammo<'a> {
+    /// DAT 库：世上有哪些发行版。
+    pub repo: &'a DatRepo,
+    /// **沉淀库**：人裁决过什么。它先说话——裁决过的东西不必再撞一遍 DAT（ADR-0008）。
+    pub verdicts: &'a verdict::Index,
+    /// 文件名那一层认得的东西与调得动的参数（票 11）。
+    pub naming: &'a Naming<'a>,
 }
 
 /// 识别的选项。
@@ -184,6 +211,26 @@ pub struct CartCount {
     pub conflicts: u64,
 }
 
+/// **文件名那一层**这一趟干了什么（票 11）。
+///
+/// 与 [`CartCount`] 同一个道理：这几个数永远同进同出，散成六个字段的话，
+/// 加一个计数器要改三处，而漏掉一处不会有任何人告诉你。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FuzzyCount {
+    /// 为几个变体撞过。
+    pub variants: u64,
+    /// 一共拿几串字去撞的。
+    pub tried: u64,
+    /// 撞出来的候选条数。
+    pub candidates: u64,
+    /// 其中两道交叉校验都对上、够得着中置信的。
+    pub strong: u64,
+    /// **靠这一层才有候选**的变体数。
+    pub only: u64,
+    /// 有几个名字因为**还是乱码**没敢撞（票 03 有损转换留下的，见 [`fuzzy`]）。
+    pub garbled: u64,
+}
+
 /// 一趟识别的产物。
 #[derive(Debug, Clone)]
 pub struct Outcome {
@@ -215,6 +262,13 @@ pub struct Outcome {
     pub sha1_hits: u64,
     /// **靠 SHA-1 才认出来**的变体数。
     pub sha1_only: u64,
+    /// 文件名那一层这一趟干了什么（票 11）。
+    pub fuzzy: FuzzyCount,
+    /// 剥离规则**归不了类的记号**，按出现次数从多到少。
+    ///
+    /// **它是这一层的主要产出之一**：维护者照着它往剥离规则里补，补完重跑一遍就看得见
+    /// 效果——那正是「规则是配置而不是硬编码」真正兑现的地方。
+    pub unknown_marks: Vec<(String, u64)>,
 }
 
 /// 一份拿去撞 DAT 的内容：容器里的一个内部文件，或者一个裸文件。
@@ -273,8 +327,7 @@ impl ContentUnit {
 pub fn run(
     library: &dyn LibraryFs,
     catalog: &mut Catalog,
-    repo: &DatRepo,
-    verdicts: &verdict::Index,
+    ammo: &Ammo<'_>,
     options: &Options,
     cancel: &CancelToken,
     progress: &mut dyn FnMut(&Progress),
@@ -293,10 +346,14 @@ pub fn run(
         // DAT 库里有哪几个平台。**没有弹药的平台不值得为它读盘**——真机上
         // `switch/` 那 91 个变体是 154 GiB 的 `.xci`，而 DAT 库里 Switch 一条记录都没有
         // （那是票 27 的活），读完它们只是把 154 GiB 换成一堆撞不上的数。
-        ammo: repo.platforms()?,
+        ammo: ammo.repo.platforms()?,
         // **只有真有 SHA-1 弹药的平台才付整份读一遍那笔钱**（票 10）。真机实测这份
         // 名单上的卡带平台只有 FC 与 MD——GoodNES 那两份只记 SHA-1。
-        sha1_ammo: repo.sha1_only_platforms()?,
+        sha1_ammo: ammo.repo.sha1_only_platforms()?,
+        // **独占目录**：这个目录下只有这一个变体。文件名那一层据此决定敢不敢拿目录名
+        // 去撞——`FC/` 底下三千个 zip 挤在一起时，目录名属于谁根本说不清
+        // （判据与刮削那一侧认本地媒体的规则同源，`scrape::local`）。
+        exclusive_dirs: exclusive_dirs(&variants),
         ..Run::default()
     };
     let mut batch: Vec<Identification> = Vec::new();
@@ -307,9 +364,7 @@ pub fn run(
             interrupted = true;
             break;
         }
-        let record = identify_variant(
-            library, catalog, repo, verdicts, options, variant, &mut state,
-        )?;
+        let record = identify_variant(library, catalog, ammo, options, variant, &mut state)?;
         if record.state == State::Matched {
             state.progress.matched += 1;
         }
@@ -324,7 +379,7 @@ pub fn run(
     progress(&state.progress);
 
     Ok(Outcome {
-        report: IdentifyReport::build(catalog, repo)?,
+        report: IdentifyReport::build(catalog, ammo.repo)?,
         interrupted,
         read_bytes: state.progress.read_bytes,
         read_files: state.progress.read_files,
@@ -338,7 +393,41 @@ pub fn run(
         cart: state.cart,
         sha1_hits: state.sha1_hits,
         sha1_only: state.sha1_only,
+        fuzzy: state.fuzzy,
+        unknown_marks: rank_marks(state.unknown_marks),
     })
+}
+
+/// 只装着一个变体的那些目录。
+///
+/// 它一趟算完（`variants` 本来就整份在手上），而不是每个变体查一次库——真库上那是
+/// 46,444 次查询，换来的是一件早就摆在眼前的事实。
+fn exclusive_dirs(variants: &[VariantRow]) -> BTreeSet<String> {
+    let mut counts: BTreeMap<&str, u32> = BTreeMap::new();
+    for variant in variants {
+        if let Some(dir) = parent_dir(&variant.key) {
+            *counts.entry(dir).or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter(|(_, count)| *count == 1)
+        .map(|(dir, _)| dir.to_string())
+        .collect()
+}
+
+/// 键的上一级目录；顶层的东西没有。
+fn parent_dir(key: &str) -> Option<&str> {
+    let at = key.rfind('/')?;
+    (at > 0).then(|| &key[..at])
+}
+
+/// 认不出的记号按出现次数排个序，多的在前。
+fn rank_marks(marks: BTreeMap<String, u64>) -> Vec<(String, u64)> {
+    let mut out: Vec<(String, u64)> = marks.into_iter().collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out.truncate(40);
+    out
 }
 
 /// 一趟识别路上攒着的东西。
@@ -377,6 +466,12 @@ struct Run {
     sha1_only: u64,
     /// 这一轮探出来的卡带事实，攒够一批写一次。
     carts: Vec<CartFactRow>,
+    /// 只装着一个变体的那些目录（文件名那一层拿目录名去撞的前提）。
+    exclusive_dirs: BTreeSet<String>,
+    /// 文件名那一层这一趟干了什么。
+    fuzzy: FuzzyCount,
+    /// 剥离规则归不了类的记号，连出现次数。
+    unknown_marks: BTreeMap<String, u64>,
 }
 
 /// DAT 库里有没有这个平台的记录。平台认不出来时当作**有**——那时无从判断，
@@ -418,12 +513,12 @@ fn flush(
 fn identify_variant(
     library: &dyn LibraryFs,
     catalog: &mut Catalog,
-    repo: &DatRepo,
-    verdicts: &verdict::Index,
+    ammo: &Ammo<'_>,
     options: &Options,
     variant: &VariantRow,
     state: &mut Run,
 ) -> Result<Identification, IdentifyError> {
+    let (repo, verdicts, naming) = (ammo.repo, ammo.verdicts, ammo.naming);
     let members = catalog.variant_members(&variant.key)?;
     let (mut units, visible) = collect(catalog, &members)?;
     // 算过的哈希先取回来。**这一步不读盘**，只是把中立库里存着的那套判据装回 units
@@ -588,14 +683,18 @@ fn identify_variant(
     }
     serial_candidates.append(&mut cart_candidates);
 
-    let evidence: Vec<Evidence> = found.evidence.into_iter().chain(carted.evidence).collect();
+    // 标识那两层交出来的东西捆在一起交给 `assemble`：它们同出一源，也同去一处。
+    let mut from_ids = FromIds {
+        evidence: found.evidence.into_iter().chain(carted.evidence).collect(),
+        candidates: serial_candidates,
+    };
     let mut record = assemble(
         catalog,
         variant,
         &units,
-        &evidence,
-        &mut serial_candidates,
+        &mut from_ids,
         read_bytes,
+        naming,
         state,
     )?;
     if unknown {
@@ -1929,15 +2028,29 @@ fn read_prefixes_from_container(
 }
 
 /// 把撞出来的东西折成候选、结论，以及作品与发行版。
+/// **标识那两层**（光盘序列号与卡带内部头）交出来的东西。
+///
+/// 捆成一个类型而不是两个参数：两样同出一源、同去一处——`assemble` 拿候选去排序，
+/// 拿标识去数「这个变体到底有没有判据」，少传一样就会让一份读出了序列号却撞不上 DAT
+/// 的镜像被记成「无判据」。
+struct FromIds {
+    /// 读出来的标识，连它们是从哪一份内容上读的。
+    evidence: Vec<Evidence>,
+    /// 拿这些标识撞出来的候选，连 DAT 那条记录的父条目名。
+    candidates: Vec<(Candidate, Option<String>)>,
+}
+
 fn assemble(
     catalog: &mut Catalog,
     variant: &VariantRow,
     units: &[ContentUnit],
-    evidence: &[Evidence],
-    from_serial: &mut Vec<(Candidate, Option<String>)>,
+    from_ids: &mut FromIds,
     read_bytes: u64,
+    naming: &Naming<'_>,
     state: &mut Run,
 ) -> Result<Identification, CatalogError> {
+    let evidence = &from_ids.evidence;
+    let from_serial = &mut from_ids.candidates;
     // 候选与它的**父条目名**成对走：`cloneof` 是 No-Intro 的 parent/clone 关系，
     // ADR-0010 拿它映射「同一部**作品**下的多个**发行版**」。排序会打乱顺序，
     // 所以不能靠下标去另一张表里找它。
@@ -1959,6 +2072,40 @@ fn assemble(
         state.serial_only += 1;
     }
     scored.append(from_serial);
+
+    // ⭐ **文件名那一层**（票 11）：前面几层一条**自动通过**的候选都没有时才跑。
+    //
+    // 判据是「自动通过」而不是「有没有候选」：一份撞上了卡带游戏码的汉化版有候选，
+    // 但那条候选只说得到发行版这一层（ADR-0008），中文名照样没有着落——而这一层
+    // 正是为它准备的。它一个字节都不读盘，代价只有几十微秒的查表。
+    if naming.ready() && !scored.iter().any(|(candidate, _)| candidate.accepted) {
+        // 年份从**已有候选的条目名**里读：TOSEC 的第一个括号是发行日期，而
+        // No-Intro 的名字里根本没有年份（`scrape::dat` 的那张对照表）。
+        let year = year_in(&scored);
+        let names = names_of(variant, units, state);
+        let found = fuzzy::candidates(naming, variant, &names, year);
+        state.fuzzy.variants += 1;
+        state.fuzzy.tried += found.tried;
+        state.fuzzy.garbled += found.garbled;
+        state.fuzzy.strong += found.strong;
+        state.fuzzy.candidates += u64::try_from(found.candidates.len()).unwrap_or(0);
+        for mark in found.unknown {
+            *state.unknown_marks.entry(mark).or_insert(0) += 1;
+        }
+        if !found.candidates.is_empty() && scored.is_empty() {
+            state.fuzzy.only += 1;
+        }
+        // 父条目名那一栏是 `None`：中文数据源没有 parent/clone 那套关系（ADR-0010 说的
+        // 是 No-Intro 与 MAME 的），而这一层产出的候选**永不自动通过**，走不到用它
+        // 立发行版那一步。
+        scored.extend(
+            found
+                .candidates
+                .into_iter()
+                .map(|candidate| (candidate, None)),
+        );
+    }
+
     // 排序：先按候选自己的可信程度，再按数据源的先后，最后按名字定死顺序——
     // 同一份中立库跑两次，候选的次序必须一样。
     scored.sort_by(|a, b| {
@@ -2045,6 +2192,46 @@ fn assemble(
     })
 }
 
+/// 这个变体拿哪几个名字去撞文件名那一层。
+///
+/// 三处，各有各的理由（[`fuzzy`] 的模块文档说得更细）：
+///
+/// - **变体自己的名字**：多数时候中文名就写在这儿。
+/// - **独占目录的名字**：`我的暑假[ACG汉化组]/ACG_Summer_Holiday.7z` 这种，中文名在
+///   目录上。**只有独占目录才收**——一个装着三千个 zip 的目录，它的名字属于谁说不清。
+/// - **容器里那个文件的名字**：容器里**只有一个**内容条目时才收。有好几个的时候，
+///   哪一个代表这个变体是说不清的，而这一层错一条就是往队列里塞一条错的候选。
+fn names_of(variant: &VariantRow, units: &[ContentUnit], state: &Run) -> Vec<fuzzy::Named> {
+    let mut names = vec![fuzzy::Named::own(file_name_of_key(&variant.key))];
+    if let Some(dir) = parent_dir(&variant.key)
+        && state.exclusive_dirs.contains(dir)
+    {
+        names.push(fuzzy::Named::directory(file_name_of_key(dir)));
+    }
+    let mut inside = units.iter().filter(|unit| !unit.inner.is_empty());
+    if let Some(unit) = inside.next()
+        && inside.next().is_none()
+    {
+        names.push(fuzzy::Named::inside(file_name_of_key(&unit.inner)));
+    }
+    // 同一串字不撞两遍。
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    names.retain(|named| seen.insert(named.text.clone()));
+    names
+}
+
+/// 已有候选的条目名里读得出年份吗。
+///
+/// **只有 TOSEC 的名字里有年份**（第一个括号是发行日期），No-Intro 与 Redump 的没有。
+/// 读得出就拿它给文件名那一层做**年份交叉校验**——那是这个库里少数几处
+/// 「变体这一侧真的说得出年份」的地方。
+fn year_in(scored: &[(Candidate, Option<String>)]) -> Option<u16> {
+    scored
+        .iter()
+        .filter_map(|(candidate, _)| naming::tosec_year(&candidate.game))
+        .find_map(|year| year.parse::<u16>().ok())
+}
+
 /// 候选之间怎么排。数字小的排前面。
 ///
 /// 源的先后**不是** `sources.toml` 那份清单的抄件，而是一句关于**元数据质量**的判断：
@@ -2060,7 +2247,10 @@ fn rank(variant: &VariantRow, candidate: &Candidate) -> (u8, u8, u8) {
         "TOSEC" => 2,
         "MAME" => 3,
         "GoodNES" => 4,
-        _ => 5,
+        // **中文离线源排在 DAT 之后**：它的条目名是中文 wiki 的写法，而这一层
+        // 一个字节都没看（`fuzzy` 的模块文档）。它照样排在「认不出的源」前面。
+        fuzzy::SOURCE => 5,
+        _ => 6,
     };
     (
         match candidate.confidence {

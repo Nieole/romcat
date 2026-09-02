@@ -23,6 +23,7 @@ use romcat_core::dat::registry::Registry;
 use romcat_core::dat::repo::DatRepo;
 use romcat_core::dat::report::DatReport;
 use romcat_core::dat::sync::{self as dat_sync, Action, SyncOptions};
+use romcat_core::filename::Rules;
 use romcat_core::fs::RealFs;
 use romcat_core::identify;
 use romcat_core::path;
@@ -38,6 +39,7 @@ use romcat_core::title;
 use romcat_core::triage::{self, DecisionSpec, Filter};
 use romcat_core::verdict::{self, Store};
 use romcat_core::workspace::{self, Slug};
+use romcat_core::zh;
 
 /// ROM 元数据自动化工具的命令行。
 #[derive(Debug, Parser)]
@@ -84,6 +86,163 @@ enum Command {
     /// DAT 仓库：把几个哈希数据库镜像到本地，并报出每个平台有多少条可用记录
     #[command(subcommand)]
     Dat(DatCommand),
+    /// **中文离线数据源**：把中文条目索引取到本机，数据库覆盖不到时靠它撞文件名
+    #[command(subcommand)]
+    Zh(ZhCommand),
+    /// **文件名剥离规则**：看看一个名字剥完剩什么，或者导出一份规则底稿照着改
+    Names(NamesArgs),
+}
+
+/// 中文离线数据源的几件事。
+#[derive(Debug, Subcommand)]
+enum ZhCommand {
+    /// 取一次中文离线 dump 并建成本机索引。指纹没变就整件跳过
+    Sync(ZhSyncArgs),
+    /// 拿一个名字试一次模糊匹配——**调参数用的就是它**，一个字节都不联网
+    Find(ZhFindArgs),
+}
+
+#[derive(Debug, Args)]
+struct ZhSyncArgs {
+    /// 工作目录：中文索引与取回来的原件存这里
+    #[arg(long, value_name = "目录")]
+    workspace: Option<PathBuf>,
+
+    /// 无视指纹，整份重取
+    #[arg(long)]
+    full: bool,
+
+    /// 只说这一趟会干什么，不取也不写
+    #[arg(long)]
+    dry_run: bool,
+
+    /// 两次请求之间至少隔多少毫秒（按主机计）
+    #[arg(long, default_value_t = 1000)]
+    throttle_ms: u64,
+
+    #[command(flatten)]
+    manifest: ManifestArgs,
+
+    #[command(flatten)]
+    rules: NameRulesArgs,
+
+    /// 把报告另存为 JSON
+    #[arg(long, value_name = "文件")]
+    json: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct ZhFindArgs {
+    /// 要撞的名字。给的是文件名就先按剥离规则剥一遍
+    #[arg(value_name = "名字")]
+    names: Vec<String>,
+
+    /// 工作目录：中文索引存这里
+    #[arg(long, value_name = "目录")]
+    workspace: Option<PathBuf>,
+
+    /// 拿这个平台做交叉校验
+    #[arg(long, value_name = "平台")]
+    platform: Option<String>,
+
+    /// 拿这个年份做交叉校验
+    #[arg(long, value_name = "年份")]
+    year: Option<u16>,
+
+    #[command(flatten)]
+    tuning: TuningArgs,
+
+    #[command(flatten)]
+    rules: NameRulesArgs,
+}
+
+/// 模糊匹配的参数。**识别与 `zh find` 共用这一组**——调参数的地方与用参数的地方
+/// 写成两套，调出来的值就对不上了。
+#[derive(Debug, Args, Clone)]
+struct TuningArgs {
+    /// 入门相似度：低于它的一条候选都不产出
+    #[arg(long, value_name = "0~1")]
+    similarity: Option<f64>,
+
+    /// 够得着中置信的相似度（还得平台与年份两道交叉校验都对上）
+    #[arg(long, value_name = "0~1")]
+    strong_similarity: Option<f64>,
+
+    /// 一条查询最多产出几条候选
+    #[arg(long, value_name = "条数")]
+    fuzzy_limit: Option<usize>,
+
+    /// 年份差多少之内算对得上
+    #[arg(long, value_name = "年数")]
+    year_slack: Option<u16>,
+}
+
+impl TuningArgs {
+    fn tuning(&self) -> zh::Tuning {
+        let mut tuning = zh::Tuning::default();
+        if let Some(value) = self.similarity {
+            tuning.threshold = value;
+        }
+        if let Some(value) = self.strong_similarity {
+            tuning.strong = value;
+        }
+        if let Some(value) = self.fuzzy_limit {
+            tuning.limit = value;
+        }
+        if let Some(value) = self.year_slack {
+            tuning.year_slack = value;
+        }
+        tuning
+    }
+}
+
+/// 剥离规则从哪儿来。与 `--manifest` / `--sources` 同一个套路。
+#[derive(Debug, Args, Clone)]
+struct NameRulesArgs {
+    /// 文件名剥离规则的 TOML 文件
+    ///
+    /// 不给就先看工作目录里有没有 `name-rules.toml`，都没有才用内置的那一份。
+    /// 自己那份默认是**补充**内置规则（`"继承内置" = false` 才是整份换掉），
+    /// `romcat names --dump-builtin` 能导出内置那份当底稿
+    #[arg(long, value_name = "文件")]
+    name_rules: Option<PathBuf>,
+}
+
+impl NameRulesArgs {
+    /// 工作目录里那份可选的规则叫什么。
+    const IN_WORKSPACE: &'static str = "name-rules.toml";
+
+    fn load(&self, workspace: &Path) -> Result<Rules, String> {
+        let path = match &self.name_rules {
+            Some(path) => path.clone(),
+            None => {
+                let candidate = workspace.join(Self::IN_WORKSPACE);
+                if !candidate.exists() {
+                    return Ok(Rules::builtin());
+                }
+                candidate
+            }
+        };
+        Rules::load(&path).map_err(|error| format!("{error}"))
+    }
+}
+
+#[derive(Debug, Args)]
+struct NamesArgs {
+    /// 要剥的文件名，可给多个
+    #[arg(value_name = "文件名")]
+    names: Vec<String>,
+
+    /// 工作目录：不给 `--name-rules` 时来这里找 `name-rules.toml`
+    #[arg(long, value_name = "目录")]
+    workspace: Option<PathBuf>,
+
+    /// 把**内置**规则写到这个文件，照着它改就是自己的一份
+    #[arg(long, value_name = "文件")]
+    dump_builtin: Option<PathBuf>,
+
+    #[command(flatten)]
+    rules: NameRulesArgs,
 }
 
 /// DAT 仓库的几件事。
@@ -269,6 +428,19 @@ struct IdentifyArgs {
     #[arg(long, value_name = "MiB")]
     max_read_mib: Option<u64>,
 
+    /// 关掉**文件名那一层**：不拿文件名去撞中文离线数据源
+    ///
+    /// 这一层零成本、不读盘，但它产出的候选一条都不自动通过、全部进待确认队列。
+    /// 只想看前几层的命中率时关掉它
+    #[arg(long)]
+    no_fuzzy: bool,
+
+    #[command(flatten)]
+    rules: NameRulesArgs,
+
+    #[command(flatten)]
+    tuning: TuningArgs,
+
     /// 把报告另存为 JSON
     #[arg(long, value_name = "文件")]
     json: Option<PathBuf>,
@@ -315,6 +487,12 @@ struct ScrapeArgs {
     /// 把**内置**优先级表写到这个文件，照着它改就是自己的一份
     #[arg(long, value_name = "文件")]
     dump_priorities: Option<PathBuf>,
+
+    #[command(flatten)]
+    rules: NameRulesArgs,
+
+    #[command(flatten)]
+    tuning: TuningArgs,
 
     /// 不收媒体。一个字节都不读主库，盘不在位时用它
     #[arg(long)]
@@ -691,6 +869,9 @@ fn main() -> ExitCode {
         Command::Dat(DatCommand::Sync(args)) => run_dat_sync(&args),
         Command::Dat(DatCommand::Report(args)) => run_dat_report(&args),
         Command::Dat(DatCommand::Sources(args)) => run_dat_sources(&args),
+        Command::Zh(ZhCommand::Sync(args)) => run_zh_sync(&args),
+        Command::Zh(ZhCommand::Find(args)) => run_zh_find(&args),
+        Command::Names(args) => run_names(&args),
     }
 }
 
@@ -740,6 +921,20 @@ fn emit_from_catalog(catalog: &Catalog, manifest: &Manifest, output: &OutputArgs
 }
 
 /// 这个主库的工作目录：中立库与断点都住这里，必须在本机（ADR-0009）。
+/// 本机那份中文离线索引，装进内存。**没取过数不是错误**——识别照跑，少一层而已。
+fn load_zh_index(workspace: &Path) -> Result<Option<zh::Index>, String> {
+    let path = workspace::zh_store_path(workspace);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let store =
+        zh::store::Store::open(&path).map_err(|error| format!("中文索引打不开：{error}"))?;
+    let index = store
+        .load()
+        .map_err(|error| format!("中文索引读不出来：{error}"))?;
+    Ok((!index.is_empty()).then_some(index))
+}
+
 fn workspace_dir(given: Option<&Path>) -> PathBuf {
     given
         .map(Path::to_path_buf)
@@ -1066,14 +1261,49 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
     options.read_library = !args.no_read_library;
     options.max_read_bytes = args.max_read_mib.map(|mib| mib.saturating_mul(1 << 20));
 
+    // **文件名那一层**（票 11）：剥离规则加中文离线索引。取过数才跑得起来——
+    // 没取过就如实说一句，识别照跑，只是少一层。
+    let rules = match args.rules.load(&workspace) {
+        Ok(rules) => rules,
+        Err(message) => return fail(message),
+    };
+    let index = if args.no_fuzzy {
+        None
+    } else {
+        match load_zh_index(&workspace) {
+            Ok(index) => index,
+            Err(message) => return fail(message),
+        }
+    };
+    let naming = identify::fuzzy::Naming {
+        rules: &rules,
+        index: index.as_ref(),
+        tuning: args.tuning.tuning(),
+    };
+    if args.no_fuzzy {
+        eprintln!("文件名那一层关掉了（--no-fuzzy）。");
+    } else if let Some(index) = index.as_ref() {
+        eprintln!(
+            "文件名那一层：中文离线数据源 {} 条条目（dump {}），相似度门槛 {:.2}。",
+            thousands(index.len() as u64),
+            index.dump(),
+            naming.tuning.threshold,
+        );
+    } else {
+        eprintln!("还没取过中文离线数据源，文件名那一层不跑。要它就先跑一次 `romcat zh sync`。");
+    }
+
     let library = RealFs::new();
     let started = Instant::now();
     let mut last = Instant::now();
     let outcome = identify::run(
         &library,
         &mut catalog,
-        &repo,
-        &verdicts,
+        &identify::Ammo {
+            repo: &repo,
+            verdicts: &verdicts,
+            naming: &naming,
+        },
         &options,
         cancel,
         &mut |progress| {
@@ -1138,6 +1368,37 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
             thousands(outcome.sha1_hits),
             thousands(outcome.sha1_only),
         );
+    }
+    if outcome.fuzzy.variants > 0 {
+        eprintln!(
+            "文件名那一层为 {} 个变体撞了 {} 串字，产出 {} 条候选（其中 {} 条两道交叉校验都对上、\
+             够得着中置信），{} 个变体是**只靠它**才有候选的。\
+             **这一层的候选一条都不自动通过**，全部进待确认队列。",
+            thousands(outcome.fuzzy.variants),
+            thousands(outcome.fuzzy.tried),
+            thousands(outcome.fuzzy.candidates),
+            thousands(outcome.fuzzy.strong),
+            thousands(outcome.fuzzy.only),
+        );
+        if outcome.fuzzy.garbled > 0 {
+            eprintln!(
+                "  ⚠ 另有 {} 个名字**还是乱码**没敢撞（票 03 有损转换留下的）。\
+                 容器名字现在会先探编码再解码，重扫一遍容器就好了。",
+                thousands(outcome.fuzzy.garbled),
+            );
+        }
+        if !outcome.unknown_marks.is_empty() {
+            let top: Vec<String> = outcome
+                .unknown_marks
+                .iter()
+                .take(12)
+                .map(|(mark, count)| format!("{mark}×{count}"))
+                .collect();
+            eprintln!(
+                "  剥离规则认不出的记号（照着往 name-rules.toml 里补，补完重跑一遍就看得见效果）：{}",
+                top.join("、"),
+            );
+        }
     }
     if outcome.from_verdicts > 0 {
         eprintln!(
@@ -1280,6 +1541,28 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
         _ => None,
     };
 
+    // **中文离线源**（票 11）：取过数才参加，没取过就少一个源，别的照跑。
+    let rules = match args.rules.load(&workspace) {
+        Ok(rules) => rules,
+        Err(message) => return fail(message),
+    };
+    let index = match load_zh_index(&workspace) {
+        Ok(index) => index,
+        Err(message) => return fail(message),
+    };
+    let naming = identify::fuzzy::Naming {
+        rules: &rules,
+        index: index.as_ref(),
+        tuning: args.tuning.tuning(),
+    };
+    if let Some(index) = index.as_ref() {
+        eprintln!(
+            "中文离线源：{} 条条目（dump {}）——只给两道交叉校验都对上的那一档中文名。",
+            thousands(index.len() as u64),
+            index.dump(),
+        );
+    }
+
     let library = RealFs::new();
     let started = Instant::now();
     let mut last = Instant::now();
@@ -1304,6 +1587,7 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
         &mut scrape::RunContext {
             cancel,
             progress: &mut progress,
+            naming: &naming,
         },
     );
     let outcome = match outcome {
@@ -3577,6 +3861,222 @@ fn run_platforms(args: &PlatformsArgs) -> ExitCode {
 }
 
 /// 同步一趟 DAT。**这是这个程序里唯一联网的子命令。**
+fn run_zh_sync(args: &ZhSyncArgs) -> ExitCode {
+    let workspace = workspace_dir(args.workspace.as_deref());
+    let manifest = match args.manifest.load(&workspace) {
+        Ok(manifest) => manifest,
+        Err(message) => return fail(message),
+    };
+    let rules = match args.rules.load(&workspace) {
+        Ok(rules) => rules,
+        Err(message) => return fail(message),
+    };
+    let mut store = match zh::store::Store::open(&workspace::zh_store_path(&workspace)) {
+        Ok(store) => store,
+        Err(error) => return fail(format!("中文索引打不开：{error}")),
+    };
+    let options = zh::sync::Options {
+        cache: workspace::zh_cache_dir(&workspace),
+        full: args.full,
+        dry_run: args.dry_run,
+    };
+    let fetcher = HttpFetcher::with_throttle(Duration::from_millis(args.throttle_ms));
+    let library = RealFs;
+    let started = Instant::now();
+    let outcome = match zh::sync::sync(&fetcher, &library, &mut store, &manifest, &rules, &options)
+    {
+        Ok(outcome) => outcome,
+        Err(error) => return fail(format!("取中文数据源失败：{error}")),
+    };
+    if outcome.dry_run {
+        eprintln!(
+            "这是 --dry-run：最新的一版是 {}（{}），什么都没取、什么都没写。",
+            outcome.dump,
+            human_bytes(outcome.bytes)
+        );
+        return ExitCode::SUCCESS;
+    }
+    if outcome.skipped {
+        eprintln!(
+            "指纹没变（{}），整件跳过——本机这份索引就是最新的。",
+            outcome.dump
+        );
+    } else {
+        eprintln!(
+            "取回 {}（{}），读了 {} 条记录，留下 {} 条游戏条目，{:.1} 秒。",
+            outcome.dump,
+            human_bytes(outcome.bytes),
+            thousands(outcome.records),
+            thousands(outcome.games),
+            started.elapsed().as_secs_f64(),
+        );
+    }
+    print_zh_stats(&outcome.stats);
+    if !write_json(args.json.as_deref(), &outcome) {
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+/// 索引里现在有什么。**老平台深度浅是事实不是缺陷**，按平台摆出来，
+/// 免得「这个平台命中低」被误读成「匹配算法不行」。
+fn print_zh_stats(stats: &zh::store::Stats) {
+    println!(
+        "中文离线数据源：{} 条游戏条目（dump {}）",
+        thousands(stats.subjects),
+        stats.dump
+    );
+    println!(
+        "  有中文名 {}、说得出平台 {}、说得出年份 {}",
+        thousands(stats.with_chinese),
+        thousands(stats.with_platform),
+        thousands(stats.with_year),
+    );
+    let mut line = String::new();
+    for (platform, count) in stats.by_platform.iter().take(24) {
+        if !line.is_empty() {
+            line.push('、');
+        }
+        line.push_str(&format!("{platform} {}", thousands(*count)));
+    }
+    if !line.is_empty() {
+        println!("  按平台：{line}");
+    }
+}
+
+fn run_zh_find(args: &ZhFindArgs) -> ExitCode {
+    let workspace = workspace_dir(args.workspace.as_deref());
+    let rules = match args.rules.load(&workspace) {
+        Ok(rules) => rules,
+        Err(message) => return fail(message),
+    };
+    let store = match zh::store::Store::open(&workspace::zh_store_path(&workspace)) {
+        Ok(store) => store,
+        Err(error) => return fail(format!("中文索引打不开：{error}")),
+    };
+    let index = match store.load() {
+        Ok(index) => index,
+        Err(error) => return fail(format!("中文索引读不出来：{error}")),
+    };
+    if index.is_empty() {
+        return fail("中文索引是空的。先跑一次 `romcat zh sync`。");
+    }
+    let tuning = args.tuning.tuning();
+    for name in &args.names {
+        let parsed = rules.parse(name);
+        println!("{name}");
+        println!(
+            "  剥完剩「{}」{}{}",
+            parsed.title,
+            parsed
+                .team
+                .as_deref()
+                .map_or_else(String::new, |team| format!("，汉化组「{team}」")),
+            parsed
+                .version
+                .as_deref()
+                .map_or_else(String::new, |version| format!("，版本 {version}")),
+        );
+        if !parsed.unknown.is_empty() {
+            println!("  认不出的记号：{}", parsed.unknown.join("、"));
+        }
+        let mut found = 0;
+        for (label, text) in parsed.queries() {
+            let matches = index.lookup(
+                &zh::Query {
+                    text,
+                    platform: args.platform.as_deref(),
+                    year: args.year.or(parsed.year),
+                },
+                &tuning,
+            );
+            for one in &matches {
+                found += 1;
+                println!(
+                    "  {:.2} {}「{}」 平台{} 年份{} —— 拿{}「{}」撞的",
+                    one.score,
+                    one.kind.label(),
+                    one.matched,
+                    one.platform.label(),
+                    one.year.label(),
+                    label,
+                    text,
+                );
+                println!(
+                    "        条目 {} 中文名「{}」 原名「{}」 平台「{}」 {}",
+                    one.entry.id,
+                    one.entry.name_cn,
+                    one.entry.name,
+                    one.entry.platform_text,
+                    one.entry
+                        .year
+                        .map_or_else(|| "年份没写".to_string(), |year| format!("{year} 年")),
+                );
+            }
+        }
+        if found == 0 {
+            println!("  一条都没撞上（阈值 {:.2}）", tuning.threshold);
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_names(args: &NamesArgs) -> ExitCode {
+    let workspace = workspace_dir(args.workspace.as_deref());
+    if let Some(path) = args.dump_builtin.as_deref() {
+        if let Err(error) = fs::write(path, Rules::BUILTIN) {
+            return fail(format!("写不进 {}：{error}", path::display(path)));
+        }
+        eprintln!("内置剥离规则已写到 {}。", path::display(path));
+        if args.names.is_empty() {
+            return ExitCode::SUCCESS;
+        }
+    }
+    let rules = match args.rules.load(&workspace) {
+        Ok(rules) => rules,
+        Err(message) => return fail(message),
+    };
+    if args.names.is_empty() {
+        eprintln!(
+            "给几个文件名看看剥完剩什么，例如：\n               romcat names '超级机器人大战R[星组](v1.2+)(简)(JP)(68.92Mb).zip'"
+        );
+        return ExitCode::SUCCESS;
+    }
+    for name in &args.names {
+        let parsed = rules.parse(name);
+        println!("{name}");
+        println!("  正题「{}」", parsed.title);
+        if let Some(chinese) = &parsed.chinese {
+            println!("  中文「{chinese}」");
+        }
+        if let Some(latin) = &parsed.latin {
+            println!("  拉丁「{latin}」");
+        }
+        if let Some(team) = &parsed.team {
+            println!("  汉化组「{team}」");
+        }
+        if let Some(version) = &parsed.version {
+            println!("  版本「{version}」");
+        }
+        if let Some(year) = parsed.year {
+            println!("  年份 {year}");
+        }
+        if !parsed.languages.is_empty() {
+            println!("  语言地区 {}", parsed.languages.join("、"));
+        }
+        for strip in &parsed.stripped {
+            println!("  剥掉 {:<10} 「{}」", strip.why.label(), strip.what);
+        }
+        if !parsed.unknown.is_empty() {
+            println!(
+                "  ⚠ 认不出的记号：{}——照着它往规则里补一条",
+                parsed.unknown.join("、")
+            );
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 fn run_dat_sync(args: &DatSyncArgs) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let registry = match args.sources.load(&workspace) {

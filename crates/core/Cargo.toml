@@ -6,6 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+encoding_rs.workspace = true
 flate2.workspace = true
 quick-xml.workspace = true
 ring.workspace = true

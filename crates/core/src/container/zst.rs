@@ -496,13 +496,16 @@ fn member<R: Read>(
     }))
 }
 
-/// 名字按 UTF-8 认，认不出来就有损转换并标记（与 zip 那一侧同一条规矩）。
+/// 名字按 UTF-8 认，不是 UTF-8 的**先探编码再解码**（与 zip 那一侧同一条规矩，票 11）。
+///
+/// 返回的那个布尔是「连编码都探不出来」，不是「不是 UTF-8」——含义见
+/// [`InnerEntry::name_lossy`](crate::container::InnerEntry::name_lossy)。
 fn decode_name(raw: &[u8]) -> (String, bool) {
-    let (text, lossy) = match std::str::from_utf8(raw) {
-        Ok(text) => (text.to_string(), false),
-        Err(_) => (String::from_utf8_lossy(raw).into_owned(), true),
-    };
-    (nfc(&text.replace('\\', "/")).into_owned(), lossy)
+    let (text, charset) = super::charset::decode(raw);
+    (
+        nfc(&text.replace('\\', "/")).into_owned(),
+        charset == super::charset::Charset::Lossy,
+    )
 }
 
 /// 单文件 `.zst` 的内部名：外层文件名去掉 `.zst`。

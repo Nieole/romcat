@@ -24,6 +24,7 @@ use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
 use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
 use romcat_core::fs::RealFs;
 use romcat_core::identify;
+use romcat_core::identify::fuzzy;
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::scrape::{self, Priorities};
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
@@ -196,8 +197,11 @@ fn 跑一遍(现场: &mut 现场) -> title::TitleReport {
     identify::run(
         &RealFs::new(),
         &mut 现场.catalog,
-        &现场.repo,
-        &verdict::Index::empty(),
+        &identify::Ammo {
+            repo: &现场.repo,
+            verdicts: &verdict::Index::empty(),
+            naming: &fuzzy::Naming::off(),
+        },
         &identify::Options::new(现场.dir.path()),
         &CancelToken::new(),
         &mut |_| {},
@@ -214,6 +218,7 @@ fn 跑一遍(现场: &mut 现场) -> title::TitleReport {
         &mut scrape::RunContext {
             cancel: &CancelToken::new(),
             progress: &mut |_| {},
+            naming: &fuzzy::Naming::off(),
         },
     )
     .expect("刮削不该失败");

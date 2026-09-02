@@ -307,7 +307,8 @@ pub struct ContainerAcc {
     pub inner_categories: BTreeMap<Category, Counts>,
     /// 内部文件按扩展名的构成。
     pub inner_extensions: BTreeMap<String, ExtensionAcc>,
-    /// 名字不是合法 UTF-8、只能有损转换的内部条目数。
+    /// 名字**连编码都探不出来**、只能有损转换的内部条目数（票 11 收窄了这个含义，
+    /// 见 `container::InnerEntry::name_lossy`）。
     pub lossy_names: u64,
     /// 穿不透的按原因分类计数。
     pub failures_by_reason: BTreeMap<FailureReason, u64>,

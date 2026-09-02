@@ -29,6 +29,7 @@
 //! 两者都**不产出值**：错的元数据比缺的元数据难查得多。
 
 use crate::identify::naming;
+pub use crate::identify::naming::tosec_year;
 
 use super::{Failure, Field, Harvest, Locality, Source, Subject};
 
@@ -129,22 +130,6 @@ fn groups(name: &str, open: char, close: char) -> impl Iterator<Item = &str> {
         rest = &body[end + close.len_utf8()..];
         Some(&body[..end])
     })
-}
-
-/// TOSEC 名字里的发行年份。
-///
-/// 第一个 `(…)` 是发行日期，形如 `1985`、`1985-12-11`、`199x`、`19xx`。
-/// **只认得出四位数字才产出**——`199x` 说的正是「不知道是哪一年」，把它当年份写进去
-/// 等于把「不知道」伪装成「知道」。
-#[must_use]
-pub fn tosec_year(name: &str) -> Option<String> {
-    let first = groups(name, '(', ')').next()?;
-    let head = first.get(..4)?;
-    if head.len() == 4 && head.chars().all(|c| c.is_ascii_digit()) {
-        Some(head.to_string())
-    } else {
-        None
-    }
 }
 
 /// TOSEC 名字里的发行商。第二个 `(…)`；`-` 是「不详」，不产出。

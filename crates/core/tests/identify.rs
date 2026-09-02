@@ -18,6 +18,7 @@ use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
 use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
 use romcat_core::fs::RealFs;
+use romcat_core::identify::fuzzy;
 use romcat_core::identify::{self, Options};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
@@ -249,8 +250,11 @@ fn 跑(现场: &mut 现场) -> identify::Outcome {
     identify::run(
         &RealFs::new(),
         &mut 现场.catalog,
-        &现场.repo,
-        &verdict::Index::empty(),
+        &identify::Ammo {
+            repo: &现场.repo,
+            verdicts: &verdict::Index::empty(),
+            naming: &fuzzy::Naming::off(),
+        },
         &options,
         &CancelToken::new(),
         &mut |_| {},
@@ -423,8 +427,11 @@ fn 验不了_nkit_的_gc_与_wii_镜像不许自动通过() {
     identify::run(
         &RealFs::new(),
         &mut 现场.catalog,
-        &现场.repo,
-        &verdict::Index::empty(),
+        &identify::Ammo {
+            repo: &现场.repo,
+            verdicts: &verdict::Index::empty(),
+            naming: &fuzzy::Naming::off(),
+        },
         &options,
         &CancelToken::new(),
         &mut |_| {},
@@ -571,8 +578,11 @@ fn 不读主库时容器里那套零解压的_crc32_照撞() {
     let outcome = identify::run(
         &RealFs::new(),
         &mut 现场.catalog,
-        &现场.repo,
-        &verdict::Index::empty(),
+        &identify::Ammo {
+            repo: &现场.repo,
+            verdicts: &verdict::Index::empty(),
+            naming: &fuzzy::Naming::off(),
+        },
         &options,
         &CancelToken::new(),
         &mut |_| {},
