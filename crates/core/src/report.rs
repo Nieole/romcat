@@ -229,7 +229,9 @@ pub struct ContainerKindStats {
     pub penetrated: u64,
     /// 穿不透几个。
     pub failed: u64,
-    /// 穿透成功率（百分比）。
+    /// **还没读过**几个。与穿不透是两件事：那个是试过读不出来，这个是压根还没试。
+    pub unread: u64,
+    /// 读出内部构成的成功率（百分比）。分母只算试过的那些——还没读过的不该拉低它。
     pub success_rate: f64,
     /// 其中 solid 的有几个。solid 的容器要按块调度才不至于成倍解压。
     pub solid: u64,
@@ -270,6 +272,13 @@ pub struct ContainerSummary {
     pub penetrated: u64,
     /// 穿不透的容器数。
     pub failed: u64,
+    /// **还没读过**的容器数：zst 默认不读（穿不透，要全量解压），`--no-containers` 同理。
+    pub unread: u64,
+    /// 还没读过的那批里，有没有**穿不透的格式**（zst）。
+    ///
+    /// 报告要照着它说话：zip / 7z 没读是因为 `--no-containers`，zst 没读是因为它没有
+    /// 零解压那条路。对着一个 zip 说 zst 的话，读的人会照着一条不成立的结论去动手。
+    pub unread_includes_impenetrable: bool,
     /// 内部文件数合计。
     pub inner_files: u64,
     /// 内部文件的未压缩字节合计。
@@ -817,7 +826,11 @@ fn container_summary(acc: &ContainerAcc, penetrated_this_scan: bool) -> Containe
             containers: value.containers,
             penetrated: value.penetrated,
             failed: value.failed,
-            success_rate: share(value.penetrated, value.containers),
+            unread: value.unread,
+            success_rate: share(
+                value.penetrated,
+                value.containers.saturating_sub(value.unread),
+            ),
             solid: value.solid,
             inner_files: value.inner_files,
             inner_bytes: value.inner_bytes,
@@ -835,6 +848,11 @@ fn container_summary(acc: &ContainerAcc, penetrated_this_scan: bool) -> Containe
         containers: totals.containers,
         penetrated: totals.penetrated,
         failed: totals.failed,
+        unread: totals.unread,
+        unread_includes_impenetrable: acc
+            .by_kind
+            .iter()
+            .any(|(kind, value)| value.unread > 0 && !kind.is_penetrable()),
         inner_files: totals.inner_files,
         inner_bytes: totals.inner_bytes,
         inner_with_crc: totals.inner_files.saturating_sub(totals.inner_without_crc),

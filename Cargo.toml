@@ -33,6 +33,20 @@ quick-xml = "0.38"
 # 为了下几个文件引一整套 tokio 不划算。TLS 走 rustls，不依赖各机器上的系统库。
 ureq = "3"
 sevenz-rust2 = { version = "0.22", default-features = false, features = ["bzip2", "ppmd", "deflate"] }
+# `.zst` 是主库里容量第二大的扩展名（2,685 个文件、2.50 TiB，`docs/library-facts.md`）。
+# 选官方绑定而不是纯 Rust 的 `ruzstd`：这条路上要读的是 2.50 TiB 真实字节，参考实现
+# 是唯一不必自己承担「解码器有没有边角 bug」的选择，而 C 工具链本来就已经是硬前提
+# （`rusqlite` 的 `bundled` 与 `ring` 都编 C）。关掉三个默认特性：`legacy` 是 2016 年
+# 之前的 v0.x 帧（真库里不存在，认出来也只该如实报「旧版帧格式」），
+# `zdict_builder` 是训练字典的（本项目只解压、从不压缩），`arrays` 只影响 zstd-safe 的
+# 常量数组 API。
+zstd = { version = "0.13", default-features = false }
+# `.zst` 的实际形态多为 `.tar.zst`。tar 这一层**不自己写**——调研 2.5 实测 bsdtar 默认
+# 产出 pax：第一个 512 字节块是 `PaxHeader/…` 伪条目（`typeflag='x'`），真条目在偏移
+# 1024，「读前 512 字节取文件名」是错的。pax、GNU longname 与 sparse 这三个坑这个 crate
+# 都已经趟平了，而它们与本项目要解决的问题毫无关系。关掉 `xattr`：那是**解包**时
+# 往磁盘写扩展属性用的，而这里只读不写（ADR-0004）。
+tar = { version = "0.4", default-features = false }
 # **媒体池**按内容哈希存（ADR-0009），要一个货真价实的摘要——CRC-32 是校验不是指纹，
 # 32 位在几万份媒体上撞一次就是一张封面悄悄变成另一张。选 `ring` 而不是 `sha2`：
 # 它**已经在依赖树里**（ureq 的 rustls 后端用它），直接依赖不多编译一行代码，

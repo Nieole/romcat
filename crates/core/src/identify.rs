@@ -347,7 +347,7 @@ fn collect(
         if !matches!(role, Role::Main | Role::Companion) {
             continue;
         }
-        if ContainerKind::for_path(Path::new(key)).is_some() {
+        if let Some(kind) = ContainerKind::for_path(Path::new(key)) {
             let files = catalog.container_files(key)?;
             // **只收容器里装着什么，不收容器自己**：补丁的判据是「里面没有可运行的
             // 内容」，把容器自己算进去的话每个 zip 都自称可运行，那条判据就废了。
@@ -355,10 +355,19 @@ fn collect(
                 contents.push(inner.clone());
             }
             if files.is_empty() {
+                // **三种情况说三句不同的话**（`CONTEXT.md` 的「穿不透」条）：穿不透是
+                // 试过了读不出来，空容器是读出来了里面没东西，还没读过是压根没试。
+                // 三者的下一步完全不同——去看看这文件、不用管、再扫一趟。
                 let reason = match catalog.container_status(key)? {
                     Some(Some(detail)) => format!("容器穿不透：{detail}"),
                     Some(None) => "容器里没有内容".to_string(),
-                    None => "这一趟扫描没有穿透容器".to_string(),
+                    None if kind.is_penetrable() => {
+                        "这一趟扫描没有读容器（--no-containers）".to_string()
+                    }
+                    None => format!(
+                        "{} 穿不透，而这一趟没为它付全量解压的代价（`romcat scan --zst`）",
+                        kind.label()
+                    ),
                 };
                 units.push(blocked_unit(key, "", reason, true));
                 continue;
@@ -426,15 +435,13 @@ fn collect(
                 )),
                 EntryFact::Missing | EntryFact::Other => {}
             },
-            // `.rar`（票 04）与 `.zst`（票 26）在归类里也是**透明容器**，但穿透层
-            // 故意还认不出它们。说清楚是「还穿不透」而不是「没有内容」——两句话
-            // 指向完全不同的下一步。
+            // `.rar` 在归类里也是**透明容器**，但穿透层故意还认不出它（票 04）。
+            // 说清楚是「还穿不透」而不是「没有内容」——两句话指向完全不同的下一步。
             Category::TransparentContainer => units.push(blocked_unit(
                 key,
                 "",
                 match extension_lower(Path::new(file_name_of_key(key))).as_deref() {
                     Some("rar") => "rar 容器这一层还穿不透（票 04）".to_string(),
-                    Some("zst") => "zst 容器这一层还穿不透（票 26）".to_string(),
                     _ => "这个容器格式还穿不透".to_string(),
                 },
                 true,

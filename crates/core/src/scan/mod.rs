@@ -163,12 +163,24 @@ pub struct ScanOptions {
     /// 关掉它就是「当作从没扫过」重看一遍：每个文件重新抽样、重新归类，中立库里的旧
     /// 结论一律作废。判据出了问题、或怀疑中立库与磁盘对不上时才需要。
     pub incremental: bool,
-    /// 穿透**透明容器**：零解压读出 zip 与 7z 内部每个文件的 CRC-32、大小与名字。
+    /// 读**透明容器**内部装着什么：内部每个文件的名字、大小与可得的 CRC-32。
     ///
     /// 库里 91.1% 的容量装在透明容器里，不穿透的话报告只看得见「这里有一个 3GB 的容器」，
     /// 后面的识别也无从谈起（ADR-0014）。关掉它只在一种场合有意义：怀疑穿透本身
     /// 有问题，想先把遍历跑通。
     pub penetrate_containers: bool,
+    /// 为 `.zst` 付**全量解压**的代价，把它的内部构成也读出来。
+    ///
+    /// **它不叫穿透**（`CONTEXT.md`：穿透是零解压那件事）。zip 与 7z 穿得透，几乎不花钱；
+    /// `.zst` 穿不了——格式里就没有内部清单，列全清单只能把整条流解一遍
+    /// （ADR-0014 的第二段修订）。主库里这是 2,685 个文件、2.50 TiB，
+    /// 真机实测约 125 MB/s，一趟约 **5.8 小时**（瓶颈全在磁盘）。
+    ///
+    /// **默认关**：让一条 `romcat scan` 默认从半小时变成一整夜，是不能不打招呼就做的事
+    /// （挂账 D94）。打开一次即可——结论按三元组落进中立库，往后的扫描原样沿用
+    /// （`Baseline::penetrated`），实测二次扫描 1.0 秒。没打开时那批容器只是
+    /// **还没读过**，既不是穿透了也不是穿不透，报告单列一栏。
+    pub decompress_zst: bool,
     /// **平台清单与成型规则**。平台由目录给出，而哪些目录算平台写在这里（ADR-0011）。
     pub manifest: Manifest,
 }
@@ -185,6 +197,7 @@ impl ScanOptions {
             checkpoint: None,
             incremental: true,
             penetrate_containers: true,
+            decompress_zst: false,
             manifest: Manifest::builtin(),
         }
     }
@@ -733,7 +746,7 @@ fn observe(
         && entry.kind == EntryKind::File
         && (fresh || !baseline.penetrated(&key))
     {
-        penetrate(library, &entry.path)
+        penetrate(library, &entry.path, options)
     } else {
         None
     };
@@ -753,8 +766,14 @@ fn observe(
 /// **穿不透绝不中断扫描**：一个坏掉的 zip、一个要密码的 7z、一个 `stat` 都失败的
 /// 文件，都只是如实记一笔原因（ADR-0021 的道理，粒度在容器上）。库里约 1.59% 的
 /// 文件在 macOS 的 fskit 驱动下连元数据都读不到，那批会全部落在这里。
-fn penetrate(library: &dyn LibraryFs, file: &Path) -> Option<Penetration> {
+fn penetrate(library: &dyn LibraryFs, file: &Path, options: &ScanOptions) -> Option<Penetration> {
     let kind = ContainerKind::for_path(file)?;
+    // 穿不透的格式（今天只有 zst）得真的解一遍才读得出内部构成，不打招呼不做——那是
+    // 几小时而不是几毫秒。**返回 `None` 而不是记一笔穿不透**：它不是穿不透，是还没读过，
+    // 而这两句话指向完全不同的下一步（`CONTEXT.md`）。
+    if !kind.is_penetrable() && !options.decompress_zst {
+        return None;
+    }
     match container::list_as(library, file, kind) {
         Ok(listing) => Some(Penetration::listed(&listing)),
         Err(error) => Some(Penetration::failed(kind, &error)),

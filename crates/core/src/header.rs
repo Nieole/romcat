@@ -120,6 +120,11 @@ impl ProbeClass {
             // SMS 的 `TMR SEGA` 可能在 0x1FF0 / 0x3FF0 / 0x7FF0。
             Self::MasterSystem => 0x8000,
             Self::Cue => 0x400,
+            // zst 要看的不只是魔数：帧头之后还要**解第一个块**，才说得出里面装的是不是
+            // 一个 tar、第一条叫什么。上界是规范算出来的
+            // （`Block_Maximum_Size = min(Window_Size, 128 KiB)`，见 `container::zst`），
+            // 与文件本身多大无关——这是 zst 唯一一条便宜的路。
+            Self::Zstd => crate::container::zst::PEEK_LIMIT,
             _ => 0x200,
         }
     }
@@ -331,14 +336,7 @@ pub fn probe(class: ProbeClass, head: &[u8], tail: &[u8], len: u64) -> ProbeOutc
                 _ => parsed("WBFS，未取到光盘 ID"),
             }
         }
-        // zstd 的魔数是小端 0xFD2FB528。
-        ProbeClass::Zstd => {
-            if matches_at(head, 0, &[0x28, 0xB5, 0x2F, 0xFD]) {
-                parsed("zstd 帧头")
-            } else {
-                mismatch(format!("zstd 魔数对不上：{}", magic_prefix(head)))
-            }
-        }
+        ProbeClass::Zstd => probe_zstd(head),
         // WUX 的魔数是 `WUX0`（小端 0x30585557）。
         ProbeClass::Wux => {
             if matches_at(head, 0, b"WUX0") {
@@ -547,6 +545,56 @@ fn probe_disc(class: ProbeClass, head: &[u8]) -> ProbeOutcome {
         "没有认出光盘头（Wii/NGC/Wii U/ISO9660 都对不上）：{}",
         magic_prefix(head)
     ))
+}
+
+/// zst 的探针：**零解压读帧头，再解第一个块看看里面装的是什么**。
+///
+/// 与其余探针不同，这一条真的解压了——但只解第一个块，上界
+/// [`PEEK_LIMIT`](crate::container::zst::PEEK_LIMIT) 约 131 KB，与文件多大无关。
+/// 它同时回答体检报告最想知道的两件事：这批 `.zst` 有多少带 `Frame_Content_Size`
+/// （真盘实测只有约 53%），以及它们裹的到底是 tar 还是单个文件。
+fn probe_zstd(head: &[u8]) -> ProbeOutcome {
+    use crate::container::ContainerError;
+    use crate::container::zst::{self, Inner};
+
+    let peek = match zst::peek_bytes(head) {
+        Ok(peek) => peek,
+        // **缺外部字典不是「结构对不上」。** 帧头不但读到了，还完全读懂了——读懂的结论
+        // 恰恰是「这个文件没有那本字典就解不开」。`Mismatch` 的意思是「对不上这一类应有的
+        // 结构」，套在一个合法的 zstd 帧上是错的，而这正是 `CONTEXT.md` 刚立起来的
+        // 那条区分。这里如实报「解析成功，结论是无法独立解压」。
+        Err(ContainerError::NeedsDictionary(id)) => {
+            return parsed(format!("zstd 帧：需要外部字典 {id}，无法独立解压"));
+        }
+        Err(error) => return mismatch(error.to_string()),
+    };
+    let size = match peek.frame.content_size {
+        Some(size) => format!("原始大小 {size} 字节"),
+        None => "没写原始大小".to_string(),
+    };
+    let check = if peek.frame.has_checksum {
+        "带校验和"
+    } else {
+        "无校验和"
+    };
+    let inner = match &peek.inner {
+        Inner::Tar(first) => {
+            let members = match peek.single_member() {
+                Some(true) => "，且只有这一条",
+                Some(false) => "，后面还有",
+                None => "",
+            };
+            format!(
+                "内部是 tar，第一条 {}（{} 字节）{members}",
+                first.path, first.size
+            )
+        }
+        Inner::TarUnreadable(why) => format!("内部是 tar，但第一条读不出来：{why}"),
+        Inner::Single => "不是 tar，整个流就是一个文件".to_string(),
+        // 这一条才是货真价实的「结构对不上」：帧头没问题，压缩数据解不动。
+        Inner::Opaque(why) => return mismatch(format!("帧头没问题，第一个块解不出来：{why}")),
+    };
+    parsed(format!("zstd 帧：{size}、{check}；{inner}"))
 }
 
 fn probe_snes(head: &[u8], len: u64) -> ProbeOutcome {

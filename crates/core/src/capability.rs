@@ -406,12 +406,13 @@ pub fn decide(
         // 上是自相矛盾的理由——那一份其实是当初**穿不透**（要密码、结构读不下去），
         // 而穿不透与「不是那个格式」在这个项目里从来是分开的两件事（`CONTEXT.md`）。
         let why = if crate::container::ContainerKind::for_path(Path::new(key)).is_some() {
-            "这是**透明容器**，可它当初**穿不透**：要密码、或者结构读不下去。\
+            "这是**透明容器**，可中立库里没有它的内部构成：当初**穿不透**（要密码、\
+             结构读不下去），或者那一趟压根没读它（zst 要 `romcat scan --zst`）。\
              内部构成读不出来，于是转不了——`romcat report` 说得出它卡在哪一类"
                 .to_string()
         } else {
             format!(
-                "`.{extension}` 不是这一版认得的**透明容器**（只认 zip 与 7z），\
+                "`.{extension}` 不是这一版认得的**透明容器**（只认 zip、7z 与 zst），\
                  转换要外部工具，工具做不到"
             )
         };

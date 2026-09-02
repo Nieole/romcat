@@ -727,6 +727,20 @@ for entry in ar.entries()? { ... }   // <-- 这会解压整个流！见 2.4 节�
 
 **⚠️ `entries_with_seek()` 用不了**：它要求 `R: Read + Seek`，而 `zstd::Decoder` 只实现 `Read`。
 
+> **⛔ 落地时的更正（票 26，2026-09-02 真机）：「它已正确处理 pax / GNU longname / sparse」这句在这块盘上不成立。**
+>
+> `tar` 0.4.46 的 `next_entry()` 处理 `././@LongLink` 有一个前提：伪条目自己得是
+> `entry.header().as_gnu().is_some() || entry.header().as_ustar().is_some()`，
+> 也就是 magic 处写着 `ustar`。**真库不满足**——NDS `【全部汉化】` 那批 559 个 `.tar.zst`
+> 里有 **414 个（74%）** 的 `@LongLink` 块是**老式 v7 头配 GNU 的 `typeflag='L'`**，
+> 偏移 257 起的 6 字节全是零。于是 crate 把伪条目当成一个真文件交了出来（**448 条**假条目），
+> 而真条目的名字停在 `name[100]` 处被截断，还常常截在一个 UTF-8 字符中间
+> （**163 条名字变成有损**）。系统 `bsdtar` 认这种块——它只看 `typeflag`。
+>
+> **结论：pax 那一半照旧交给 crate（libarchive 写的 pax 头都带 `ustar` 魔数），
+> 但 `typeflag == 'L'` 必须自己认。** 修正后假条目 0 条、有损名字 0 条，
+> 随机抽 10 份与系统 `tar -tvf` 逐条一致。
+
 ---
 
 ## 第 5 部分 · 生态支持

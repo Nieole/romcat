@@ -27,8 +27,8 @@ use std::path::Path;
 use sevenz_rust2::{Archive, ArchiveEntry, BlockDecoder, Password};
 
 use super::{
-    ContainerError, ContainerKind, Contents, Counting, InnerEntry, Listing, Locator, ReadPlan,
-    ReadStats, drain,
+    ContainerError, ContainerKind, Contents, InnerEntry, Listing, Locator, ReadPlan, ReadStats,
+    drain, hand_entry,
 };
 use crate::fs::LibraryFs;
 use crate::path::nfc;
@@ -169,19 +169,12 @@ pub(super) fn read_entries(
             };
             let demand = plan.demand(index);
             if demand.wanted() && inner.has_content() {
-                // 借用限制在这个块里：出了块 `bytes` 与 `reader` 才好接着用。
-                let handed = {
-                    let mut counted = Counting {
-                        inner: &mut *reader,
-                        counter: &mut bytes,
-                    };
-                    // 只要前若干字节时截一截就够——读够就停，块里后面的字节不解。
-                    let mut bounded = (&mut counted).take(demand.limit());
-                    each(inner, &mut bounded)
-                };
-                if let Err(error) = handed {
-                    caller = Err(error);
-                    return Ok(false);
+                match hand_entry(inner, &mut *reader, demand, each) {
+                    Ok(handed) => bytes = bytes.saturating_add(handed),
+                    Err(error) => {
+                        caller = Err(error);
+                        return Ok(false);
+                    }
                 }
                 read_here += 1;
                 left = left.saturating_sub(1);

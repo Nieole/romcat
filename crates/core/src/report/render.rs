@@ -411,13 +411,13 @@ pub(super) fn render(report: &HealthReport) -> String {
     }
 
     let containers = &report.containers;
-    heading(&mut out, "透明容器穿透（零解压读 CRC-32）");
+    heading(&mut out, "透明容器：内部构成");
     if containers.containers == 0 {
         let _ = writeln!(
             out,
             "{}",
             if containers.penetrated_this_scan {
-                "库里没有 zip 或 7z。（rar 是票 04、zst 是票 26，这里不算。）"
+                "库里没有 zip、7z 或 zst。（rar 是票 04，这里不算。）"
             } else {
                 "这次扫描没有穿透容器（--no-containers），中立库里也没有上次的结论。"
             }
@@ -431,11 +431,26 @@ pub(super) fn render(report: &HealthReport) -> String {
         }
         let _ = writeln!(
             out,
-            "容器            {} 个，穿透 {} 个，穿不透 {} 个",
+            "容器            {} 个，读出内部构成 {} 个，读不出 {} 个",
             thousands(containers.containers),
             thousands(containers.penetrated),
             thousands(containers.failed)
         );
+        if containers.unread > 0 {
+            // **还没读过不是穿不透。** 两句话指向完全不同的下一步：一个是再扫一趟，
+            // 一个是这文件本身有问题。
+            //
+            // 而「为什么没读」也有两种，说错了同样害人：zip / 7z 穿得透，没读只可能是
+            // `--no-containers`；zst 穿不透，没读是因为读它要把整条流解一遍。
+            let _ = writeln!(out, "还没读过        {} 个", thousands(containers.unread));
+            if containers.unread_includes_impenetrable {
+                let _ = writeln!(
+                    out,
+                    "                其中的 zst 穿不透——没有零解压那条路，列全清单要把整条流解一遍\n\
+                     \x20               `romcat scan --zst` 读一次，结论落进中立库，往后的扫描原样沿用"
+                );
+            }
+        }
         let _ = writeln!(
             out,
             "内部文件        {} 个，未压缩 {}",
@@ -474,8 +489,9 @@ pub(super) fn render(report: &HealthReport) -> String {
             row(&[
                 ("格式", 10),
                 ("容器", 10),
-                ("穿透", 10),
-                ("穿不透", 10),
+                ("读出", 10),
+                ("读不出", 10),
+                ("还没读", 10),
                 ("成功率", 10),
                 ("solid", 10),
                 ("内部文件", 12),
@@ -491,6 +507,7 @@ pub(super) fn render(report: &HealthReport) -> String {
                     (&thousands(kind.containers), 10),
                     (&thousands(kind.penetrated), 10),
                     (&thousands(kind.failed), 10),
+                    (&thousands(kind.unread), 10),
                     (&format!("{:.1}%", kind.success_rate), 10),
                     (&thousands(kind.solid), 10),
                     (&thousands(kind.inner_files), 12),

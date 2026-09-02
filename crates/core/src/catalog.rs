@@ -1016,8 +1016,13 @@ impl Catalog {
         let mut rows = statement
             .query(params![KIND_FILE])
             .map_err(|source| self.err(source))?;
+        // 库里各有几个容器，按格式分。它是「还没读过几个」的被减数（见下）。
+        let mut in_library: BTreeMap<ContainerKind, u64> = BTreeMap::new();
         while let Some(row) = rows.next().map_err(|source| self.err(source))? {
             let key: String = row.get(0).map_err(|source| self.err(source))?;
+            if let Some(kind) = ContainerKind::for_path(Path::new(&key)) {
+                *in_library.entry(kind).or_default() += 1;
+            }
             let readable: i64 = row.get(1).map_err(|source| self.err(source))?;
             let len: Option<i64> = row.get(2).map_err(|source| self.err(source))?;
             let non_utf8: i64 = row.get(3).map_err(|source| self.err(source))?;
@@ -1091,6 +1096,22 @@ impl Catalog {
                     inner_without_crc: count(8)?,
                 },
             );
+        }
+
+        // 库里有、`container` 表里没有的容器：**还没读过**。zst 默认不读（穿不透，
+        // 要全量解压），带 `--no-containers` 扫过的那一趟同理。不数出来的话这批容器会从
+        // 报告里整个消失——「有多少东西还没看过」正是维护者最该知道的那个数。
+        //
+        // **减出来而不是再查一遍**：上面那趟已经把每个容器数过（`in_library`），
+        // 这趟又把每一行 `container` 数过，两者一减就是答案。为它单开一趟
+        // `entry LEFT JOIN container` 等于在二十几万行上白走一遍。
+        for (kind, seen) in in_library {
+            let read = aggregate
+                .containers
+                .by_kind
+                .get(&kind)
+                .map_or(0, |acc| acc.containers);
+            aggregate.record_containers_unread(kind, seen.saturating_sub(read));
         }
 
         // 按容器排序，于是同一个容器的内部条目连着来，容器那一侧的上下文只算一次。

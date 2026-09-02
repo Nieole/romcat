@@ -28,8 +28,8 @@ use std::path::Path;
 use flate2::read::DeflateDecoder;
 
 use super::{
-    ContainerError, ContainerKind, Contents, Counting, InnerEntry, Listing, Locator, ReadPlan,
-    ReadStats,
+    ContainerError, ContainerKind, Contents, InnerEntry, Listing, Locator, ReadPlan, ReadStats,
+    hand_entry,
 };
 use crate::fs::{LibraryFs, ReadSeek};
 use crate::path::nfc;
@@ -508,8 +508,7 @@ pub(super) fn read_entries(
         let start = data_start(file.as_mut(), locator)?;
         file.seek(SeekFrom::Start(start))?;
         let packed = (&mut file).take(locator.compressed_size);
-        let mut counter = 0u64;
-        let raw: Box<dyn Read> = match locator.method {
+        let mut raw: Box<dyn Read> = match locator.method {
             METHOD_STORED => Box::new(packed),
             METHOD_DEFLATE => Box::new(DeflateDecoder::new(packed)),
             other => {
@@ -518,17 +517,7 @@ pub(super) fn read_entries(
                 )));
             }
         };
-        {
-            // 借用限制在这个块里：出了块 `counter` 才好读回来。
-            let mut counted = Counting {
-                inner: raw,
-                counter: &mut counter,
-            };
-            // 只要前若干字节时，`take` 一截就够——deflate 是位流，读够就停，
-            // 代价与文件总大小无关（调研 1.5.1）。
-            let mut bounded = (&mut counted).take(demand.limit());
-            each(entry, &mut bounded)?;
-        }
+        let counter = hand_entry(entry, &mut raw, demand, each)?;
         stats.bytes_decompressed = stats.bytes_decompressed.saturating_add(counter);
         stats.entries_read += 1;
         stats.blocks_decoded += 1;

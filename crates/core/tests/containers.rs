@@ -344,13 +344,12 @@ fn 扩展名说是容器内容不是时如实说不是() {
 }
 
 #[test]
-fn rar_与_zst_这票不碰() {
-    // 它们在归类上同样是**透明容器**，但 rar 是票 04、zst 是票 26。
-    for name in ["/lib/a.rar", "/lib/a.zst"] {
-        let library = 建库(name, vec![0u8; 64]);
-        let error = container::list(&library, std::path::Path::new(name)).unwrap_err();
-        assert!(matches!(error, ContainerError::NotSupportedHere));
-    }
+fn rar_这票不碰() {
+    // rar 在归类上同样是**透明容器**，但它是票 04：要自己写头部解析器避开 UnRAR 的
+    // 许可传染。这里故意认不出来，而且要与「字节不是那个格式」分得开。
+    let library = 建库("/lib/a.rar", vec![0u8; 64]);
+    let error = container::list(&library, std::path::Path::new("/lib/a.rar")).unwrap_err();
+    assert!(matches!(error, ContainerError::NotSupportedHere));
 }
 
 // ───────────────────────────── 7z ─────────────────────────────
@@ -674,7 +673,7 @@ fn 体检报告说得出容器内部的文件数与构成() {
     assert_eq!(containers.failures_by_reason[0].containers, 1);
 
     let text = report.render_text();
-    assert!(text.contains("透明容器穿透"), "{text}");
+    assert!(text.contains("透明容器：内部构成"), "{text}");
     assert!(text.contains("零解压就能拿去撞 DAT 的那一批"), "{text}");
 }
 
@@ -706,15 +705,24 @@ fn 关掉穿透就一个容器都不去读() {
         .expect("能折出统计");
     let report =
         romcat_core::report::HealthReport::build(&aggregate, &catalog.report_meta().unwrap());
-    assert_eq!(report.containers.containers, 0);
+    // **容器还在，只是没读过。** 从报告里整个消失比数字难看糟得多：那会让人以为
+    // 库里根本没有容器。
+    assert_eq!(report.containers.containers, 3);
+    assert_eq!(report.containers.penetrated, 0);
+    assert_eq!(report.containers.failed, 0);
+    assert_eq!(report.containers.unread, 3);
     assert_eq!(report.containers.inner_files, 0);
     assert!(
         !report.containers.penetrated_this_scan,
         "报告要说得出这次没去穿透，否则「0 个内部文件」会被读成「容器是空的」"
     );
+    let text = report.render_text();
+    assert!(text.contains("--no-containers"), "文本报告要写明这次没穿透");
+    // **别对着一个 zip 说 zst 的话。** 这三个都是 zip / 7z，它们穿得透，没读只是因为
+    // `--no-containers`；照着「要 --zst」去动手是白忙一趟。
     assert!(
-        report.render_text().contains("--no-containers"),
-        "文本报告要写明这次没穿透"
+        !text.contains("--zst"),
+        "还没读过的全是穿得透的格式时，不该建议加 --zst：\n{text}"
     );
 }
 
@@ -797,15 +805,14 @@ fn 上次带着_no_containers_扫过的容器下次会补穿() {
     let mut 不穿 = romcat_core::scan::ScanOptions::new("/lib");
     不穿.penetrate_containers = false;
     romcat_core::scan::scan(&library, &mut catalog, &不穿, &cancel).expect("首扫");
-    assert_eq!(
-        catalog
-            .aggregate(&Default::default(), &Manifest::builtin())
-            .unwrap()
-            .containers
-            .totals()
-            .containers,
-        0
-    );
+    let 首扫 = catalog
+        .aggregate(&Default::default(), &Manifest::builtin())
+        .unwrap()
+        .containers
+        .totals();
+    assert_eq!(首扫.containers, 3, "容器还在，只是还没读过");
+    assert_eq!(首扫.unread, 3);
+    assert_eq!(首扫.penetrated, 0);
 
     // 第二趟打开穿透。三元组一个都没变，但中立库里压根没有穿透结论——
     // 只看三元组的话这批容器会永远不被穿透。
@@ -817,6 +824,7 @@ fn 上次带着_no_containers_扫过的容器下次会补穿() {
         .containers
         .totals();
     assert_eq!(totals.containers, 3);
+    assert_eq!(totals.unread, 0, "补穿之后不该还挂着「没读过」");
     assert_eq!(totals.inner_files, 5);
     assert_eq!(totals.inner_bytes, 内部合计);
 }

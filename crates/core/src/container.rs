@@ -1,12 +1,20 @@
-//! 穿透**透明容器**：不解压就读出内部每个文件的 CRC-32、未压缩大小与名字。
+//! 读出**透明容器**内部装着什么：每个内部文件的名字、未压缩大小与可得的校验和。
+//!
+//! zip 与 7z 走的是**穿透**——零解压，容器的元数据里就写着 CRC-32。zst 走不了那条路，
+//! 只能真的解一遍（见下）。两条路的产出是同一个形状，代价差 500–900 倍。
 //!
 //! **这是整个项目性能可行性的支点。** 主库 8.60 TiB 里有 91.1% 的容量装在透明容器里，
 //! 其中 7z 独占 4.71 TiB（`docs/library-facts.md`）。DAT 的每条记录都带
 //! `size` + `crc`，因此第一命中层用 **CRC-32 + 未压缩大小**（ADR-0002 的再修订）就能
 //! 完全不解压地认出绝大部分内容。这一条不成立的话，7.84 TiB 得先解压一遍。
 //!
-//! **只做 zip 与 7z。** rar 是票 04（要自己写头部解析器以避开 UnRAR 许可传染），
-//! zst / tar.zst 是票 26（它进不了零解压快路，见 ADR-0014 的第二段修订）。
+//! **rar 还不在这里**：它是票 04，要自己写头部解析器以避开 UnRAR 的许可传染。
+//!
+//! **zst 在这里，但走的是另一条路。** `.zst` / `.tar.zst` 是**第一个进不了零解压快路的
+//! 容器**——zstd 帧格式里根本没有 CRC-32 这个字段，tar 的 `chksum` 只保护头部元数据，
+//! 两层都没有「成员 → 内容哈希」的映射表（ADR-0014 的第二段修订）。于是它的内部条目
+//! 一律没有校验和，列全清单要真的把整条流解一遍。**接口不因此变形**：调用方拿到的
+//! 仍是「名字、大小、可得的校验和」，只是 zst 的校验和那一栏空着。详见 [`zst`]。
 //!
 //! ## 三个必须显式处理的坑
 //!
@@ -25,6 +33,7 @@
 
 pub mod sevenz;
 pub mod zip;
+pub mod zst;
 
 use std::io::{self, Read};
 use std::path::Path;
@@ -41,6 +50,9 @@ pub enum ContainerKind {
     Zip,
     /// 7z。元数据集中在文件末尾，**可能被压缩过**（`kEncodedHeader`），且压缩单元是块。
     SevenZip,
+    /// zst（含 tar.zst）。**没有元数据可言**：zstd 是单流压缩器，不是归档器。
+    /// 内部构成只能靠解压读出来，而且一个校验和都拿不到（[`zst`]）。
+    Zstd,
 }
 
 impl ContainerKind {
@@ -50,6 +62,7 @@ impl ContainerKind {
         match self {
             Self::Zip => "zip",
             Self::SevenZip => "7z",
+            Self::Zstd => "zst",
         }
     }
 
@@ -62,6 +75,7 @@ impl ContainerKind {
         match self {
             Self::Zip => "zip",
             Self::SevenZip => "7z",
+            Self::Zstd => "zst",
         }
     }
 
@@ -71,20 +85,36 @@ impl ContainerKind {
         match code {
             "zip" => Some(Self::Zip),
             "7z" => Some(Self::SevenZip),
+            "zst" => Some(Self::Zstd),
             _ => None,
         }
     }
 
-    /// 按扩展名判断这个文件该按哪种容器穿透；不是这票管的格式时是 `None`。
+    /// 按扩展名判断这个文件该按哪种容器读；本程序还读不了的格式是 `None`。
     ///
-    /// `.rar` 与 `.zst` 在 [`classify`](crate::classify) 里同样是透明容器，但它们
-    /// 分别是票 04 与票 26 的活，这里**故意**认不出来。
+    /// `.rar` 在 [`classify`](crate::classify) 里同样是透明容器，但它是票 04 的活，
+    /// 这里**故意**认不出来。
     #[must_use]
     pub fn for_path(path: &Path) -> Option<Self> {
         match extension_lower(path)?.as_str() {
             "zip" | "cbz" => Some(Self::Zip),
             "7z" => Some(Self::SevenZip),
+            "zst" => Some(Self::Zstd),
             _ => None,
+        }
+    }
+
+    /// 这种格式**穿得透吗**——也就是不解压就读得出内部构成吗（`CONTEXT.md`）。
+    ///
+    /// zip 与 7z 穿得透：中央目录与头部把「名字、大小、CRC-32」显式存了下来。zst 穿不了，
+    /// 而且不是「差一点」——格式里就没有这些字段（ADR-0014 的第二段修订），
+    /// 它的内部构成只能靠完整解压读出来。调度器与报告都要说得出这个区别：
+    /// 一个容器要花 30 秒还是 30 毫秒，全看这一条。
+    #[must_use]
+    pub fn is_penetrable(self) -> bool {
+        match self {
+            Self::Zip | Self::SevenZip => true,
+            Self::Zstd => false,
         }
     }
 }
@@ -205,6 +235,7 @@ pub struct Listing {
 enum Locator {
     Zip(Vec<zip::EntryLocator>),
     SevenZip(Box<sevenz_rust2::Archive>),
+    Zstd(zst::Shape),
 }
 
 /// 一个容器穿不透的原因，按类分好。
@@ -224,6 +255,8 @@ pub enum FailureReason {
     NeedsPassword,
     /// 压缩方法本程序解不了。
     UnsupportedMethod,
+    /// 要外部字典。zstd 的帧头可以写一个 `Dictionary_ID`，那本字典不在库里就永远解不开。
+    NeedsDictionary,
 }
 
 impl FailureReason {
@@ -236,6 +269,7 @@ impl FailureReason {
             Self::Malformed => "结构读不下去",
             Self::NeedsPassword => "需要密码",
             Self::UnsupportedMethod => "压缩方法解不了",
+            Self::NeedsDictionary => "需要外部字典",
         }
     }
 
@@ -248,6 +282,7 @@ impl FailureReason {
             Self::Malformed => "malformed",
             Self::NeedsPassword => "needs-password",
             Self::UnsupportedMethod => "unsupported-method",
+            Self::NeedsDictionary => "needs-dictionary",
         }
     }
 
@@ -259,13 +294,14 @@ impl FailureReason {
 
     /// 报告里固定的排列顺序。
     #[must_use]
-    pub fn all() -> [Self; 5] {
+    pub fn all() -> [Self; 6] {
         [
             Self::Unreadable,
             Self::WrongFormat,
             Self::Malformed,
             Self::NeedsPassword,
             Self::UnsupportedMethod,
+            Self::NeedsDictionary,
         ]
     }
 }
@@ -350,8 +386,14 @@ pub enum ContainerError {
     /// 压缩方法本程序解不了（零解压层照样给得出 CRC 与大小，只有取内容时才卡住）。
     #[error("解不了这个压缩方法：{0}")]
     UnsupportedMethod(String),
-    /// 扩展名不是这票管的透明容器。
-    #[error("不是 zip 或 7z")]
+    /// 帧头写着要一本外部字典。
+    ///
+    /// 字典内容参与 LZ 匹配的「历史」，没有它 sequence 指令引用的偏移无从解析——
+    /// **这个文件无法独立解压**。真库里实测 0 个，但零成本就查得出来，查出来就如实说。
+    #[error("需要外部字典 {0}，无法独立解压")]
+    NeedsDictionary(u32),
+    /// 扩展名不是本程序读得了的透明容器。
+    #[error("不是 zip、7z 或 zst")]
     NotSupportedHere,
 }
 
@@ -365,6 +407,7 @@ impl ContainerError {
             Self::Malformed(_) => FailureReason::Malformed,
             Self::Encrypted => FailureReason::NeedsPassword,
             Self::UnsupportedMethod(_) => FailureReason::UnsupportedMethod,
+            Self::NeedsDictionary(_) => FailureReason::NeedsDictionary,
         }
     }
 }
@@ -390,6 +433,7 @@ pub fn list_as(
     match kind {
         ContainerKind::Zip => zip::list(library, path),
         ContainerKind::SevenZip => sevenz::list(library, path),
+        ContainerKind::Zstd => zst::list(library, path),
     }
 }
 
@@ -540,7 +584,39 @@ pub fn read_entries(
         Locator::SevenZip(archive) => {
             sevenz::read_entries(library, path, &listing.contents, archive, plan, each)
         }
+        Locator::Zstd(shape) => {
+            zst::read_entries(library, path, &listing.contents, *shape, plan, each)
+        }
     }
+}
+
+/// 把一个内部条目按 [`Demand`] 截好交给调用方，并把它实际拉走的字节记进账。
+///
+/// 三种格式共用这一份：**它是「读够就停」这条纪律唯一的落点**。截断这一步一旦在某个
+/// 格式里漏掉，那个格式就会把整个条目解出来——而这件事在报告里看不出来，只会表现为
+/// 「这台机器怎么这么慢」。放在一处，就没有第二个地方能漏。
+///
+/// 返回值是拉走了多少字节，由调用方并进 [`ReadStats::bytes_decompressed`]——
+/// 各格式还要往里加自己「为了对齐而丢掉」的那些，那部分只有它们自己知道。
+fn hand_entry(
+    entry: &InnerEntry,
+    reader: &mut dyn Read,
+    demand: Demand,
+    each: &mut dyn FnMut(&InnerEntry, &mut dyn Read) -> io::Result<()>,
+) -> io::Result<u64> {
+    let mut bytes = 0u64;
+    {
+        // 借用限制在这个块里：出了块 `bytes` 才好读回来。
+        let mut counted = Counting {
+            inner: reader,
+            counter: &mut bytes,
+        };
+        // 只要前若干字节时截一截就够——三种格式的解码器都是流，读够就停，
+        // 代价与条目总大小无关（调研 1.5.1）。
+        let mut bounded = (&mut counted).take(demand.limit());
+        each(entry, &mut bounded)?;
+    }
+    Ok(bytes)
 }
 
 /// 数着字节走的读取器。`bytes_decompressed` 就是它数出来的。

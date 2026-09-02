@@ -595,11 +595,21 @@ struct ScanArgs {
     #[arg(long)]
     full: bool,
 
-    /// 不穿透 zip 与 7z：不去读容器内部的 CRC-32、大小与名字
+    /// 一个透明容器都不读：不去读容器内部的 CRC-32、大小与名字
     ///
-    /// 库里 91% 的容量在透明容器里，关掉它报告就只知道「这里有一个 3GB 的容器」，看不见里面装着什么
+    /// 库里 91% 的容量在透明容器里，关掉它报告就只知道「这里有一个 3GB 的容器」，看不见里面装着什么。
+    /// 它盖过 `--zst`：这一条说的是「一个都别读」
     #[arg(long)]
     no_containers: bool,
+
+    /// 也读 zst 与 tar.zst 的内部构成。**这一趟会慢几个小时**
+    ///
+    /// zip 与 7z 的内部清单零解压就在容器头里写着；zstd 没有这个东西，列全清单只能把
+    /// 整条流解一遍。主库里这是 2,685 个文件、2.50 TiB，真机实测约 125 MB/s，一趟约 5.8 小时
+    /// （瓶颈全在磁盘）。打开一次即可：结论按 (路径, 大小, 修改时间) 落进中立库，
+    /// 往后的扫描原样沿用，实测二次扫描 1.0 秒
+    #[arg(long)]
+    zst: bool,
 
     #[command(flatten)]
     manifest: ManifestArgs,
@@ -754,6 +764,7 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
     };
     options.incremental = !args.full;
     options.penetrate_containers = !args.no_containers;
+    options.decompress_zst = args.zst;
     if args.output.dump_duplicates.is_some() {
         // 默认每组只留几条路径当例子。要导出可据以动手的清单，得把组内每一份都记下来。
         options.limits.max_duplicate_paths_per_group = Limits::FULL_DUPLICATE_PATHS_PER_GROUP;

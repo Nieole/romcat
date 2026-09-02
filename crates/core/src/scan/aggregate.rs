@@ -259,6 +259,12 @@ pub struct ContainerKindAcc {
     pub penetrated: u64,
     /// 穿不透几个。
     pub failed: u64,
+    /// **还没读过**几个：中立库里没有这个容器的内部构成。
+    ///
+    /// 它与穿不透是两件事：穿不透是试过了读不出来，这个是压根还没试。zst 默认不读
+    /// （穿不透，要全量解压，几小时起），`--no-containers` 扫过的那一趟也落在这里。
+    /// 不单列一栏的话，这批容器会从报告里整个消失——那比数字难看糟得多。
+    pub unread: u64,
     /// 其中 solid 的有几个（有块装了多于一个内部文件）。
     pub solid: u64,
     /// 内部文件数。
@@ -318,6 +324,7 @@ impl ContainerAcc {
             total.containers += acc.containers;
             total.penetrated += acc.penetrated;
             total.failed += acc.failed;
+            total.unread += acc.unread;
             total.solid += acc.solid;
             total.inner_files += acc.inner_files;
             total.inner_bytes += acc.inner_bytes;
@@ -769,6 +776,20 @@ impl Aggregate {
         acc.inner_bytes += facts.inner_bytes;
         acc.inner_without_crc += facts.inner_without_crc;
         acc.blocks += facts.blocks;
+    }
+
+    /// 并入一批**还没读过**的容器：库里有这么多个，中立库里没有它们的内部构成。
+    ///
+    /// 整批并入而不是逐个记，是因为这个数是**减出来的**——库里有多少个减去
+    /// `container` 表里有多少行。逐个记就得为它单开一趟全表扫描，而 `entry` 那张表
+    /// 在 10T 库上有二十几万行，白走一趟不划算。
+    pub fn record_containers_unread(&mut self, kind: ContainerKind, count: u64) {
+        if count == 0 {
+            return;
+        }
+        let acc = self.containers.by_kind.entry(kind).or_default();
+        acc.containers += count;
+        acc.unread += count;
     }
 
     /// 并入一个穿不透的容器。
