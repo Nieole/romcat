@@ -477,7 +477,7 @@ fn member<R: Read>(
         while raw.last() == Some(&0) {
             raw.pop();
         }
-        *pending = Some(decode_name(&raw));
+        *pending = Some(super::charset::decode_path(&raw));
         return Ok(None);
     }
     if kind.is_gnu_longlink() || kind.is_pax_local_extensions() || kind.is_pax_global_extensions() {
@@ -487,25 +487,13 @@ fn member<R: Read>(
     }
     let (path, name_lossy) = match pending.take() {
         Some(long) => long,
-        None => decode_name(&entry.path_bytes()),
+        None => super::charset::decode_path(&entry.path_bytes()),
     };
     Ok(Some(TarHead {
         path,
         size: entry.size(),
         name_lossy,
     }))
-}
-
-/// 名字按 UTF-8 认，不是 UTF-8 的**先探编码再解码**（与 zip 那一侧同一条规矩，票 11）。
-///
-/// 返回的那个布尔是「连编码都探不出来」，不是「不是 UTF-8」——含义见
-/// [`InnerEntry::name_lossy`](crate::container::InnerEntry::name_lossy)。
-fn decode_name(raw: &[u8]) -> (String, bool) {
-    let (text, charset) = super::charset::decode(raw);
-    (
-        nfc(&text.replace('\\', "/")).into_owned(),
-        charset == super::charset::Charset::Lossy,
-    )
 }
 
 /// 单文件 `.zst` 的内部名：外层文件名去掉 `.zst`。

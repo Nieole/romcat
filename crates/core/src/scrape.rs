@@ -872,12 +872,8 @@ fn sources<'a>(
     // **中文离线源只在取过数之后参加**（票 11）。没取过就整个不造这个源——
     // 与「`--no-media` 时本地媒体源整个不参加」同一条道理：造一个永远无话可说的源，
     // 会让引擎把它上一轮说过的话当成「这次改主意了」而清掉。
-    if let Some(index) = naming.index {
-        sources.push(Box::new(zh::ChineseSource::new(
-            naming.rules,
-            index,
-            naming.tuning,
-        )));
+    if naming.ready() {
+        sources.push(Box::new(zh::ChineseSource::new(*naming)));
     }
     // **联网源只在在线档里造出来。** 离线档拿到 `Some(net)` 也不会碰它——这一条
     // 比「参数表里没有网络句柄」硬：句柄可以从别处传进来，而这里根本不造那个源。

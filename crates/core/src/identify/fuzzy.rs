@@ -149,6 +149,23 @@ impl Named {
     }
 }
 
+/// 撞上的那一条，连**它是怎么撞上的**。
+///
+/// 捏成一个类型而不是一个五元组：五样东西一路穿过一张表、一次排序、再进候选，
+/// 而其中三样都是 `String`——元组里写错顺序编译器一个字都不会说。
+struct Picked {
+    /// 撞上的那条条目与两道校验的结论。
+    one: zh::Match,
+    /// 拿哪一串字撞的。
+    text: String,
+    /// 那一串字是名字的哪一部分（正题 / 正题里的中文）。
+    label: &'static str,
+    /// 那个名字本身从哪儿来（变体自己的 / 独占目录的 / 容器里那个文件的）。
+    from: &'static str,
+    /// 剥离那一步做了什么，写成一句。
+    stripped: String,
+}
+
 /// 这一层对一个变体干了什么。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Found {
@@ -166,6 +183,11 @@ pub struct Found {
 
 /// 拿一个变体的几个名字去撞中文离线数据源。
 ///
+/// `platform` 是拿去做**平台交叉校验**的那一个。**它该是内容说的那个，不是目录说的**
+/// ——目录只是强先验，字节说了算（ADR-0011）。调用方按这个顺序取：卡带内部头读出来的
+/// 平台优先，读不出来才退回变体所在的目录。真库里 `psp/` 目录下混着整包的 FC / GB /
+/// SFC ROM，按目录判会把它们的中文名整批判成「平台对不上」。
+///
 /// `year` 是**这个变体这一侧**说得出的发行年份：文件名里明写的，或者已有候选的
 /// DAT 条目名里读出来的（TOSEC 的第一个括号是发行日期）。说不出就是 `None`——
 /// **那时年份那道校验只能是「说不出」，这条候选够不着中置信**。
@@ -174,6 +196,7 @@ pub fn candidates(
     naming: &Naming<'_>,
     variant: &VariantRow,
     names: &[Named],
+    platform: Option<&str>,
     year: Option<u16>,
 ) -> Found {
     let mut found = Found::default();
@@ -185,8 +208,7 @@ pub fn candidates(
     }
     // 同一条条目会被好几个名字撞上（变体自己的名字与它上一级目录名说的是同一件事），
     // 只留分最高的那一条——留两条只是让人在队列里读同一句话两遍。
-    let mut best: BTreeMap<u32, (zh::Match, String, &'static str, String, String)> =
-        BTreeMap::new();
+    let mut best: BTreeMap<u32, Picked> = BTreeMap::new();
     for named in names {
         // **乱码不撞。** 有损转换留下的 `U+FFFD` 一进来就把相似度算成一团糟，
         // 而撞出来的东西没人分辨得了对错。
@@ -201,68 +223,55 @@ pub fn candidates(
             }
         }
         let year = year.or(parsed.year);
+        let stripped = describe(&named.text, &parsed);
         for (label, text) in parsed.queries() {
             found.tried += 1;
             for one in index.lookup(
                 &zh::Query {
                     text,
-                    platform: variant.platform.as_deref(),
+                    platform,
                     year,
                 },
                 &naming.tuning,
             ) {
-                let slot = best.entry(one.entry.id);
-                let stripped = describe(&named.text, &parsed);
+                let picked = Picked {
+                    one,
+                    text: text.to_string(),
+                    label,
+                    from: named.from,
+                    stripped: stripped.clone(),
+                };
+                let slot = best.entry(picked.one.entry.id);
                 match slot {
                     std::collections::btree_map::Entry::Vacant(slot) => {
-                        slot.insert((
-                            one,
-                            text.to_string(),
-                            label,
-                            named.from.to_string(),
-                            stripped,
-                        ));
+                        slot.insert(picked);
                     }
                     std::collections::btree_map::Entry::Occupied(mut slot) => {
-                        if one.score > slot.get().0.score {
-                            slot.insert((
-                                one,
-                                text.to_string(),
-                                label,
-                                named.from.to_string(),
-                                stripped,
-                            ));
+                        if picked.one.score > slot.get().one.score {
+                            slot.insert(picked);
                         }
                     }
                 }
             }
         }
     }
-    let mut rows: Vec<(zh::Match, String, &'static str, String, String)> =
-        best.into_values().collect();
+    let mut rows: Vec<Picked> = best.into_values().collect();
     // 分高的在前；同分按条目号定死顺序——同一份库跑两次产出的次序必须一样。
     rows.sort_by(|a, b| {
-        b.0.score
-            .partial_cmp(&a.0.score)
+        b.one
+            .score
+            .partial_cmp(&a.one.score)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.0.entry.id.cmp(&b.0.entry.id))
+            .then_with(|| a.one.entry.id.cmp(&b.one.entry.id))
     });
     rows.truncate(naming.tuning.limit);
-    for (one, text, label, from, stripped) in rows {
-        let strong = one.strong(&naming.tuning);
-        if strong {
+    for picked in rows {
+        if picked.one.strong(&naming.tuning) {
             found.strong += 1;
         }
-        found.candidates.push(candidate_of(
-            variant,
-            &one,
-            index.dump(),
-            label,
-            &text,
-            &from,
-            &stripped,
-            strong,
-        ));
+        found
+            .candidates
+            .push(candidate_of(variant, &picked, index.dump(), &naming.tuning));
     }
     found
 }
@@ -290,19 +299,16 @@ fn describe(name: &str, parsed: &filename::Parsed) -> String {
     text
 }
 
-#[allow(clippy::too_many_arguments)]
 fn candidate_of(
     variant: &VariantRow,
-    one: &zh::Match,
+    picked: &Picked,
     dump: &str,
-    label: &str,
-    text: &str,
-    from: &str,
-    stripped: &str,
-    strong: bool,
+    tuning: &zh::Tuning,
 ) -> Candidate {
-    let mut evidence = format!("{stripped}（{from}）。");
-    evidence.push_str(&one.evidence(dump, label, text));
+    let one = &picked.one;
+    let strong = one.strong(tuning);
+    let mut evidence = format!("{}（{}）。", picked.stripped, picked.from);
+    evidence.push_str(&one.evidence(dump, picked.label, &picked.text));
     if !strong {
         evidence.push_str(
             "；**两道交叉校验没有都对上**，所以只到低置信——平台与年份任何一边说不出，\
@@ -407,6 +413,7 @@ mod tests {
             &naming,
             &变体("nds/游戏.7z", platform),
             &[Named::own(name)],
+            platform,
             year,
         )
     }
@@ -481,6 +488,7 @@ mod tests {
                 Named::own("合金弹头7.7z"),
                 Named::directory("合金弹头7[汉化]"),
             ],
+            Some("NDS"),
             None,
         );
         assert_eq!(found.candidates.len(), 1);
@@ -495,6 +503,7 @@ mod tests {
             &naming,
             &变体("nds/合金弹头7.7z", Some("NDS")),
             &[Named::own("合金弹头7.7z")],
+            Some("NDS"),
             None,
         );
         assert!(found.candidates.is_empty());

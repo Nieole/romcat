@@ -14,7 +14,13 @@ use flate2::write::DeflateEncoder;
 /// 一个待写进 zip 的内部文件。
 #[derive(Debug, Clone)]
 pub struct ZipEntrySpec {
-    name: String,
+    /// 名字的**原始字节**，不是 `String`。
+    ///
+    /// zip 的名字只有在通用标志位第 11 位置位时才保证是 UTF-8，其余是「本地代码页」
+    /// ——真库里大量中文名是 GBK。`String` 装不下那种字节，而
+    /// [编码探测](crate::container::charset)恰恰只能拿那种字节去测
+    /// （见 [`stored_raw`](Self::stored_raw)）。
+    name: Vec<u8>,
     data: Vec<u8>,
     deflate: bool,
     data_descriptor: bool,
@@ -27,12 +33,21 @@ impl ZipEntrySpec {
     #[must_use]
     pub fn stored(name: &str, data: impl Into<Vec<u8>>) -> Self {
         Self {
-            name: name.to_string(),
+            name: name.as_bytes().to_vec(),
             data: data.into(),
             deflate: false,
             data_descriptor: false,
             zip64_extra: false,
             zip64_extra_full: false,
+        }
+    }
+
+    /// 名字按**原始字节**给：造非 UTF-8 的内部名字用它（真库里那批 GBK 名字）。
+    #[must_use]
+    pub fn stored_raw(name: &[u8], data: impl Into<Vec<u8>>) -> Self {
+        Self {
+            name: name.to_vec(),
+            ..Self::stored("", data)
         }
     }
 
@@ -166,7 +181,7 @@ fn build(entries: &[ZipEntrySpec], zip64_eocd: bool, prefix: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&local_plain.to_le_bytes());
         out.extend_from_slice(&(spec.name.len() as u16).to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes()); // extra len
-        out.extend_from_slice(spec.name.as_bytes());
+        out.extend_from_slice(&spec.name);
         out.extend_from_slice(&packed);
         if spec.data_descriptor {
             out.extend_from_slice(b"PK\x07\x08");
@@ -233,7 +248,7 @@ fn build(entries: &[ZipEntrySpec], zip64_eocd: bool, prefix: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
         out.extend_from_slice(&0u32.to_le_bytes()); // external attrs
         out.extend_from_slice(&offset_field.to_le_bytes());
-        out.extend_from_slice(item.spec.name.as_bytes());
+        out.extend_from_slice(&item.spec.name);
         out.extend_from_slice(&extra);
     }
     let directory_size = (out.len() - prefix.len()) as u64 - directory_start;

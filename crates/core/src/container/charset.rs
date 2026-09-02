@@ -39,6 +39,12 @@
 use encoding_rs::{BIG5, Encoding, GBK, SHIFT_JIS};
 
 /// 一条名字是按哪种编码解出来的。
+///
+/// **它没有 `label()`**，与这个库里别的枚举不一样：眼下没有一处报告要印这几个词
+/// ——[`decode_path`] 把结论压成一个「解不解得出来」的布尔，而重解那一趟
+/// （`scan::names::recheck`）报的是**改前改后的名字本身**，那比一列「GBK ×20,020」
+/// 有用得多：三种编码字节分布相近，猜错会把一种乱码换成另一种，而一列数字看不出
+/// 猜没猜对，一眼扫过 `ð�յ�2 → 冒险岛2` 看得出。真要印那几个词时再加。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Charset {
     /// 合法 UTF-8，没有猜。
@@ -53,24 +59,21 @@ pub enum Charset {
     Lossy,
 }
 
-impl Charset {
-    /// 报告里写的那个词。
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Utf8 => "UTF-8",
-            Self::Gbk => "GBK",
-            Self::Big5 => "Big5",
-            Self::ShiftJis => "Shift_JIS",
-            Self::Lossy => "解不出来",
-        }
-    }
-
-    /// 这条名字是猜出来的吗（不是 UTF-8）。
-    #[must_use]
-    pub fn guessed(self) -> bool {
-        !matches!(self, Self::Utf8)
-    }
+/// 探一条**内部路径**的编码，解码，并折成中立库要的形状。
+///
+/// 三种格式的名字解码是同一件事，所以只写一处（zip 与 zst 都调它）：探编码、
+/// 把 `\` 换成 `/`（规范要求用 `/`，但确实有工具写 `\`；键的分隔符统一成 `/`，
+/// 与 ADR-0020 同一条）、规范化成 NFC。
+///
+/// 第二个返回值是**「连编码都探不出来」**，不是「不是 UTF-8」——含义见
+/// [`InnerEntry::name_lossy`](super::InnerEntry::name_lossy)。
+#[must_use]
+pub fn decode_path(raw: &[u8]) -> (String, bool) {
+    let (text, charset) = decode(raw);
+    (
+        crate::path::nfc(&text.replace('\\', "/")).into_owned(),
+        charset == Charset::Lossy,
+    )
 }
 
 /// 探一条名字的编码并解码。
@@ -250,7 +253,14 @@ mod tests {
         let (text, charset) = decode("超级马里奥.nes".as_bytes());
         assert_eq!(text, "超级马里奥.nes");
         assert_eq!(charset, Charset::Utf8);
-        assert!(!charset.guessed());
+    }
+
+    #[test]
+    fn 内部路径的分隔符统一成斜杠() {
+        // 规范要求用 `/`，但确实有工具写 `\`（与 ADR-0020 的键同一条规矩）。
+        let (path, lossy) = decode_path(b"dir\\\xc9\xcf\xba\xa3.nes");
+        assert_eq!(path, "dir/上海.nes");
+        assert!(!lossy);
     }
 
     #[test]

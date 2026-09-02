@@ -41,7 +41,11 @@ CREATE TABLE IF NOT EXISTS subject(
 
 CREATE INDEX IF NOT EXISTS subject_year ON subject(year);
 
--- 一条**叫法**。原名、中文名与别名各占一行——匹配撞的是叫法不是条目。
+-- 一条**别名**。
+--
+-- **原名与中文名不在这儿**：它们是条目自己的一级字段，就摆在 `subject` 那一行上。
+-- 这张表只收 `infobox` 里那一组别名——于是 `kind` 这一列眼下恒为 `alias`。留着它是
+-- 为了让读库的人一眼知道这些行是什么，而不是等着将来往里塞别的东西。
 CREATE TABLE IF NOT EXISTS subject_name(
     subject INTEGER NOT NULL,
     kind    TEXT    NOT NULL,
@@ -237,36 +241,28 @@ impl Store {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|it| i64::try_from(it.as_secs()).unwrap_or(i64::MAX))
             .unwrap_or(0);
-        let tx = self
-            .conn
-            .transaction()
-            .map_err(|source| StoreError::Sqlite {
-                path: crate::path::display(&self.path),
-                source,
-            })?;
+        // 事务借走了 `self`，`self.error` 这一路就用不上了；把同一句话捏成一个闭包，
+        // 免得下面每一步各写一遍 `StoreError::Sqlite { path, source }`。
+        let path = crate::path::display(&self.path);
+        let failed = |source: rusqlite::Error| StoreError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(failed)?;
         tx.execute_batch("DELETE FROM subject_name; DELETE FROM subject;")
-            .map_err(|source| StoreError::Sqlite {
-                path: crate::path::display(&self.path),
-                source,
-            })?;
+            .map_err(failed)?;
         {
             let mut subject = tx
                 .prepare(
                     "INSERT OR REPLACE INTO subject(id, name, name_cn, year, platforms, platform_text)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 )
-                .map_err(|source| StoreError::Sqlite {
-                    path: crate::path::display(&self.path),
-                    source,
-                })?;
+                .map_err(failed)?;
             let mut name = tx
                 .prepare(
                     "INSERT OR IGNORE INTO subject_name(subject, kind, value) VALUES (?1, ?2, ?3)",
                 )
-                .map_err(|source| StoreError::Sqlite {
-                    path: crate::path::display(&self.path),
-                    source,
-                })?;
+                .map_err(failed)?;
             for entry in entries {
                 subject
                     .execute(params![
@@ -277,23 +273,14 @@ impl Store {
                         fold_platforms(&entry.platforms),
                         entry.platform_text,
                     ])
-                    .map_err(|source| StoreError::Sqlite {
-                        path: crate::path::display(&self.path),
-                        source,
-                    })?;
+                    .map_err(failed)?;
                 for alias in &entry.aliases {
                     name.execute(params![entry.id, NameKind::Alias.code(), alias])
-                        .map_err(|source| StoreError::Sqlite {
-                            path: crate::path::display(&self.path),
-                            source,
-                        })?;
+                        .map_err(failed)?;
                 }
             }
         }
-        tx.commit().map_err(|source| StoreError::Sqlite {
-            path: crate::path::display(&self.path),
-            source,
-        })?;
+        tx.commit().map_err(failed)?;
         self.put_meta("dump", dump)?;
         self.put_meta("fingerprint", fingerprint)?;
         self.put_meta("built_at", &now.to_string())?;

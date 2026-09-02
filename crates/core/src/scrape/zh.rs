@@ -24,7 +24,6 @@
 //! 所以这一侧的闸比识别那一侧紧一档：只有 [`zh::Match::strong`]（平台对得上，且名字
 //! 一字不差或者年份也对得上）才产出。
 
-use crate::filename::Rules;
 use crate::identify::fuzzy;
 use crate::identify::naming;
 use crate::zh;
@@ -33,58 +32,51 @@ use super::{AnchorKind, Failure, Field, Harvest, Locality, Source, Subject};
 
 /// 中文离线源。
 ///
-/// 它借着索引与规则活着（两样都是整份装在内存里的，一次跑几万个锚点），
-/// 所以带生命周期而不是自己拥有一份。
+/// 它借着[识别那一层认得的东西](fuzzy::Naming)活着——**剥离规则、索引、匹配参数三样
+/// 与那一层是同一份**，各带一份的话，调完参数只有一半生效。索引与规则都是整份装在内存
+/// 里的（一次跑几万个锚点），所以带生命周期而不是自己拥有一份。
 #[derive(Debug, Clone, Copy)]
 pub struct ChineseSource<'a> {
-    rules: &'a Rules,
-    index: &'a zh::Index,
-    tuning: zh::Tuning,
+    naming: fuzzy::Naming<'a>,
 }
 
 impl<'a> ChineseSource<'a> {
-    /// 造一个。
+    /// 造一个。**调用方保证索引在场**（`sources()` 只在取过数之后造它）；
+    /// 万一不在场，这个源一句话都不说，而不是给一个没有出处的中文名。
     #[must_use]
-    pub fn new(rules: &'a Rules, index: &'a zh::Index, tuning: zh::Tuning) -> Self {
-        Self {
-            rules,
-            index,
-            tuning,
-        }
+    pub fn new(naming: fuzzy::Naming<'a>) -> Self {
+        Self { naming }
     }
 
     /// 这个锚点上撞得出哪一条。
     fn best(&self, subject: &Subject<'_>) -> Option<(zh::Match, String, &'static str)> {
+        let index = self.naming.index?;
         let name = crate::path::file_name_of_key(subject.main_key?);
         // **乱码不撞**（同 `identify::fuzzy`）：有损转换留下的替换字符一进来就把相似度
         // 算成一团糟，而撞出来的东西没人分辨得了对错。
         if name.contains('\u{FFFD}') {
             return None;
         }
-        let parsed = self.rules.parse(name);
+        let parsed = self.naming.rules.parse(name);
         // 年份这一侧：文件名里明写的，或者**已经撞上的那条 DAT 条目名**里读出来的。
         // 后者是这一侧比识别那一层多出来的弹药——已确认的变体身上往往有 TOSEC 的条目名，
         // 而 TOSEC 的第一个括号就是发行日期。
-        let year = parsed.year.or_else(|| {
-            subject
-                .entries
-                .iter()
-                .filter_map(|entry| naming::tosec_year(&entry.game))
-                .find_map(|year| year.parse::<u16>().ok())
-        });
+        let year = parsed
+            .year
+            .or_else(|| naming::year_in(subject.entries.iter().map(|entry| entry.game.as_str())));
         let mut best: Option<(zh::Match, String, &'static str)> = None;
         for (label, text) in parsed.queries() {
-            for one in self.index.lookup(
+            for one in index.lookup(
                 &zh::Query {
                     text,
                     platform: subject.platform,
                     year,
                 },
-                &self.tuning,
+                &self.naming.tuning,
             ) {
                 // **只收够得着中置信的那一档**，而且它得真有一个中文名——
                 // 条目自己都没写中文名时，这个源无话可说。
-                if !one.strong(&self.tuning) || one.entry.name_cn.trim().is_empty() {
+                if !one.strong(&self.naming.tuning) || one.entry.name_cn.trim().is_empty() {
                     continue;
                 }
                 if best
@@ -118,17 +110,19 @@ impl Source for ChineseSource<'_> {
         // 用的是哪一版 dump、以及**匹配参数**——门槛从 0.85 调到 0.80 该重采一遍，
         // 不盖它的话缓存会一口咬定「输入没变」而整条跳过。
         let platform = subject.platform.unwrap_or("");
-        let tuning = format!(
-            "{}|{}|{}|{}",
-            self.tuning.threshold, self.tuning.strong, self.tuning.limit, self.tuning.year_slack
-        );
+        let tuning = self.naming.tuning.fingerprint();
         // 已经撞上的 DAT 条目名也进指纹：年份从它们里读。
         let entries: Vec<&str> = subject
             .entries
             .iter()
             .map(|entry| entry.game.as_str())
             .collect();
-        let mut parts = vec![main, platform, self.index.dump(), tuning.as_str()];
+        let mut parts = vec![
+            main,
+            platform,
+            self.naming.index.map_or("", zh::Index::dump),
+            tuning.as_str(),
+        ];
         parts.extend(entries);
         Some(super::fingerprint(&parts))
     }
@@ -140,7 +134,7 @@ impl Source for ChineseSource<'_> {
         out.value(
             Field::Title,
             one.entry.name_cn.clone(),
-            one.evidence(self.index.dump(), label, &text),
+            one.evidence(self.naming.index.map_or("", zh::Index::dump), label, &text),
         );
         // 本地源没有会失败的动作：索引整份在内存里。
         Ok(())
@@ -150,6 +144,7 @@ impl Source for ChineseSource<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::filename::Rules;
     use crate::scrape::{DatEntry, LocalMedia};
 
     fn 索引() -> zh::Index {
@@ -195,7 +190,11 @@ mod tests {
     fn 采(key: &str, entries: &[DatEntry]) -> Harvest {
         let rules = Rules::builtin();
         let index = 索引();
-        let source = ChineseSource::new(&rules, &index, zh::Tuning::default());
+        let source = ChineseSource::new(fuzzy::Naming {
+            rules: &rules,
+            index: Some(&index),
+            tuning: zh::Tuning::default(),
+        });
         let mut out = Harvest::default();
         source
             .collect(&变体(key, entries, &[]), &mut out)
@@ -237,7 +236,11 @@ mod tests {
         // 而 TOSEC 的第一个括号就是发行日期。
         let rules = Rules::builtin();
         let index = 索引();
-        let source = ChineseSource::new(&rules, &index, zh::Tuning::default());
+        let source = ChineseSource::new(fuzzy::Naming {
+            rules: &rules,
+            index: Some(&index),
+            tuning: zh::Tuning::default(),
+        });
         let entries = vec![DatEntry {
             source: "TOSEC".to_string(),
             game: "Metal Slug 7 (2008)(SNK)".to_string(),
@@ -251,7 +254,11 @@ mod tests {
     fn 只在变体这一层说话() {
         let rules = Rules::builtin();
         let index = 索引();
-        let source = ChineseSource::new(&rules, &index, zh::Tuning::default());
+        let source = ChineseSource::new(fuzzy::Naming {
+            rules: &rules,
+            index: Some(&index),
+            tuning: zh::Tuning::default(),
+        });
         let mut work = 变体("合金弹头7", &[], &[]);
         work.kind = AnchorKind::Work;
         assert!(source.probe(&work).is_none());
@@ -263,12 +270,19 @@ mod tests {
         let rules = Rules::builtin();
         let index = 索引();
         let subject = 变体("nds/合金弹头7.7z", &[], &[]);
-        let a = ChineseSource::new(&rules, &index, zh::Tuning::default()).probe(&subject);
-        let tuning = zh::Tuning {
+        let 造 = |tuning| {
+            ChineseSource::new(fuzzy::Naming {
+                rules: &rules,
+                index: Some(&index),
+                tuning,
+            })
+        };
+        let a = 造(zh::Tuning::default()).probe(&subject);
+        let b = 造(zh::Tuning {
             threshold: 0.5,
             ..zh::Tuning::default()
-        };
-        let b = ChineseSource::new(&rules, &index, tuning).probe(&subject);
+        })
+        .probe(&subject);
         assert_ne!(a, b);
     }
 }

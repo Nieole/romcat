@@ -12,12 +12,13 @@ use std::fs;
 use std::path::Path;
 
 use romcat_core::catalog::identify::State;
-use romcat_core::catalog::{Catalog, Confidence};
+use romcat_core::catalog::{Catalog, Confidence, EntryRecord, Verdict};
+use romcat_core::container::{ContainerKind, Contents, InnerEntry, Penetration};
 use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
 use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
 use romcat_core::filename::Rules;
-use romcat_core::fs::RealFs;
+use romcat_core::fs::{EntryKind, EntryMeta, RealFs};
 use romcat_core::identify::fuzzy;
 use romcat_core::identify::{self, Options};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
@@ -283,6 +284,91 @@ fn 没取过中文数据源时识别照跑只是少一层() {
     assert!(候选(&现场, 机器人).is_empty());
     // 前面几层照常工作。
     assert!(候选(&现场, 认得出来的).iter().any(|it| it.accepted));
+}
+
+#[test]
+fn 名字还是乱码的容器重读一遍就解对了() {
+    // 票 03 的有损转换不可逆，而编码探测只对**之后**扫的容器生效。已经落库的那批
+    // （真机 21,901 条）走这条补救路径：只读那几个容器的中央目录，只改名字那两列。
+    let dir = temp_dir("recheck");
+    let root = dir.path();
+    // `上海大亨.nes` 的 GBK 字节——真库 `FC/【HACK版游戏】/…` 里那条名字。
+    let gbk: &[u8] = &[
+        0xc9, 0xcf, 0xba, 0xa3, 0xb4, 0xf3, 0xba, 0xe0, 0x2e, 0x6e, 0x65, 0x73,
+    ];
+    let 容器 = "FC/上海大亨.zip";
+    写(
+        &root.join(容器),
+        &zip_container(&[ZipEntrySpec::stored_raw(gbk, 卡带(0xE5))]),
+    );
+    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+    let mut options = ScanOptions::new(root);
+    options.jobs = Jobs::Fixed(1);
+    scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
+
+    // 新扫的本来就解对了——这正是这一改的正面效果。
+    let 名字 = |catalog: &Catalog| {
+        catalog
+            .container_files(容器)
+            .expect("读得到")
+            .first()
+            .map(|it| it.0.clone())
+            .expect("有一条")
+    };
+    assert_eq!(名字(&catalog), "上海大亨.nes");
+
+    // 把它按票 03 那种样子写回去：有损转换、`lossy` 为真。走的是扫描那条真写入路径。
+    let 有损 = String::from_utf8_lossy(gbk).into_owned();
+    assert!(有损.contains('\u{fffd}'));
+    catalog
+        .write(
+            1,
+            &[EntryRecord {
+                key: 容器.to_string(),
+                kind: EntryKind::File,
+                meta: EntryMeta::Known {
+                    len: fs::metadata(root.join(容器)).expect("在盘上").len(),
+                    modified: None,
+                },
+                non_utf8: false,
+                verdict: Verdict::Changed,
+                sample: None,
+                container: Some(Penetration {
+                    kind: ContainerKind::Zip,
+                    contents: Contents {
+                        entries: vec![InnerEntry {
+                            path: 有损.clone(),
+                            size: 4_096,
+                            crc32: Some(0),
+                            is_dir: false,
+                            block: Some(0),
+                            name_lossy: true,
+                        }],
+                        blocks: 1,
+                    },
+                    failure: None,
+                }),
+            }],
+        )
+        .expect("写得进去");
+    assert_eq!(名字(&catalog), 有损);
+
+    let outcome = scan::names::recheck(
+        &RealFs::new(),
+        &mut catalog,
+        root,
+        &CancelToken::new(),
+        &mut |_| {},
+    )
+    .expect("重读跑得动");
+    assert_eq!(outcome.containers, 1);
+    assert_eq!(outcome.reread, 1);
+    assert_eq!(outcome.renamed, 1);
+    assert_eq!(outcome.still_lossy, 0);
+    assert_eq!(名字(&catalog), "上海大亨.nes");
+    // 样例是这一趟唯一**可核对**的产出：猜错了一眼看得出来。
+    assert_eq!(outcome.samples.len(), 1);
+    assert_eq!(outcome.samples[0].1, "上海大亨.nes");
 }
 
 #[test]

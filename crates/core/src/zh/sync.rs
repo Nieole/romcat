@@ -28,7 +28,6 @@ use crate::container::{self, Demand, ReadPlan};
 use crate::dat::fetch::{FetchError, Fetcher};
 use crate::filename::Rules;
 use crate::fs::LibraryFs;
-use crate::path::fold;
 use crate::platform::Manifest;
 
 use super::store::{Stats, Store, StoreError};
@@ -69,7 +68,11 @@ pub struct Options {
     /// 取回来的原件放哪。**留着原件**：改一条平台别名之后重建索引，不必把那 435 MB
     /// 再下一遍（与 `dat::cache_dir` 同一条道理）。
     pub cache: PathBuf,
-    /// 无视指纹，整份重取。
+    /// 无视指纹，整份**重建索引**。
+    ///
+    /// **它不等于「重下」**：原件的文件名里带着这一版的日期（`dump-2026-09-01.…zip`），
+    /// 同名就是同一版，手边有就直接用。改一条平台别名之后要重建索引，走的正是这条——
+    /// 那时再下一遍 415 MB 纯属白花。
     pub full: bool,
     /// 只说这一趟会干什么，不取也不写。
     pub dry_run: bool,
@@ -135,8 +138,9 @@ pub fn sync(
         source,
     })?;
     let file = options.cache.join(&release.name);
-    // 原件已经在手边就不再下一遍：改一条平台别名重建索引时省的正是这 435 MB。
-    if options.full || !file.exists() {
+    // **原件已经在手边就不再下一遍**，`--full` 也不例外：文件名里带着这一版的日期，
+    // 同名就是同一版。改一条平台别名重建索引时省的正是这 415 MB。
+    if !file.exists() {
         fetcher.download(&release.url, &file)?;
     }
     let (entries, records) = read_dump(library, &file, manifest, rules)?;
@@ -279,10 +283,7 @@ pub fn platform_of<'a>(manifest: &'a Manifest, rules: &'a Rules, text: &str) -> 
         return Some(platform.name.as_str());
     }
     // 去掉空格与连字符再问一遍：`Wii U` 与 `wiiu`、`Mega Drive` 与 `megadrive`。
-    let squeezed: String = fold(trimmed)
-        .chars()
-        .filter(|c| !c.is_whitespace() && *c != '-' && *c != '_')
-        .collect();
+    let squeezed = crate::filename::fold_platform(trimmed);
     if !squeezed.is_empty()
         && let Some(platform) = manifest.platform_for_dir(&squeezed)
     {

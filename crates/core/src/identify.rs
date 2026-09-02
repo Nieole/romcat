@@ -2081,9 +2081,9 @@ fn assemble(
     if naming.ready() && !scored.iter().any(|(candidate, _)| candidate.accepted) {
         // 年份从**已有候选的条目名**里读：TOSEC 的第一个括号是发行日期，而
         // No-Intro 的名字里根本没有年份（`scrape::dat` 的那张对照表）。
-        let year = year_in(&scored);
+        let year = naming::year_in(scored.iter().map(|(candidate, _)| candidate.game.as_str()));
         let names = names_of(variant, units, state);
-        let found = fuzzy::candidates(naming, variant, &names, year);
+        let found = fuzzy::candidates(naming, variant, &names, platform_of(variant, units), year);
         state.fuzzy.variants += 1;
         state.fuzzy.tried += found.tried;
         state.fuzzy.garbled += found.garbled;
@@ -2192,6 +2192,24 @@ fn assemble(
     })
 }
 
+/// 平台交叉校验拿哪一个平台去校。
+///
+/// **内容说的那个优先**：卡带内部头读出来的平台是从字节里来的，而目录只是强先验
+/// （ADR-0011：目录声明必须能被文件内容推翻）。真库里 `psp/` 目录下混着整包的
+/// FC / GB / SFC ROM——按目录判，它们的中文名会被整批判成「平台对不上」而一条不产出。
+///
+/// 头读不出来（没探过、不是卡带、光盘世代）才退回目录那一个。
+fn platform_of<'a>(variant: &'a VariantRow, units: &'a [ContentUnit]) -> Option<&'a str> {
+    units
+        .iter()
+        .find_map(|unit| {
+            unit.cart
+                .as_ref()
+                .and_then(|facts| facts.platform.as_deref())
+        })
+        .or(variant.platform.as_deref())
+}
+
 /// 这个变体拿哪几个名字去撞文件名那一层。
 ///
 /// 三处，各有各的理由（[`fuzzy`] 的模块文档说得更细）：
@@ -2218,18 +2236,6 @@ fn names_of(variant: &VariantRow, units: &[ContentUnit], state: &Run) -> Vec<fuz
     let mut seen: BTreeSet<String> = BTreeSet::new();
     names.retain(|named| seen.insert(named.text.clone()));
     names
-}
-
-/// 已有候选的条目名里读得出年份吗。
-///
-/// **只有 TOSEC 的名字里有年份**（第一个括号是发行日期），No-Intro 与 Redump 的没有。
-/// 读得出就拿它给文件名那一层做**年份交叉校验**——那是这个库里少数几处
-/// 「变体这一侧真的说得出年份」的地方。
-fn year_in(scored: &[(Candidate, Option<String>)]) -> Option<u16> {
-    scored
-        .iter()
-        .filter_map(|(candidate, _)| naming::tosec_year(&candidate.game))
-        .find_map(|year| year.parse::<u16>().ok())
 }
 
 /// 候选之间怎么排。数字小的排前面。
@@ -2580,5 +2586,75 @@ impl Projector {
             }
             Decision::Unknown => Ok(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn 变体(key: &str, platform: Option<&str>) -> VariantRow {
+        VariantRow {
+            key: key.to_string(),
+            platform: platform.map(ToString::to_string),
+            rule: "同名成组".to_string(),
+            main_key: key.to_string(),
+            files: 1,
+            bytes: 1,
+            unreadable_files: 0,
+            manual: false,
+            work_id: None,
+            release_id: None,
+        }
+    }
+
+    fn 一份内容(member: &str, platform: Option<&str>) -> ContentUnit {
+        ContentUnit {
+            member: member.to_string(),
+            inner: String::new(),
+            name: member.to_string(),
+            size: 1,
+            print: None,
+            blocked: None,
+            hits: Vec::new(),
+            in_container: false,
+            disc: None,
+            cart: platform.map(|platform| cart::Facts {
+                platform: Some(platform.to_string()),
+                ..cart::Facts::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn 平台交叉校验先听内容的再听目录的() {
+        // ADR-0011：目录声明必须能被文件内容推翻。真库里 `psp/` 目录下混着整包的
+        // FC / GB / SFC ROM——按目录判，它们的中文名会被整批判成「平台对不上」。
+        let variant = 变体("psp/整理包/超级马里奥.zip", Some("PSP"));
+        let units = vec![一份内容("psp/整理包/超级马里奥.zip", Some("FC"))];
+        assert_eq!(platform_of(&variant, &units), Some("FC"));
+    }
+
+    #[test]
+    fn 内容说不出平台时才退回目录() {
+        let variant = 变体("PSV/游戏.7z", Some("PSV"));
+        let units = vec![一份内容("PSV/游戏.7z", None)];
+        assert_eq!(platform_of(&variant, &units), Some("PSV"));
+        // 连目录都说不出时就是说不出——那一道校验会记成「说不出」，不许当成「对得上」。
+        assert_eq!(platform_of(&变体("游戏.7z", None), &units), None);
+    }
+
+    #[test]
+    fn 独占目录才拿目录名去撞() {
+        // 判据与刮削那一侧认本地媒体的规则同源：一个装着三千个 zip 的目录，
+        // 它的名字属于谁根本说不清。
+        let variants = vec![
+            变体("FC/合集/一.zip", Some("FC")),
+            变体("FC/合集/二.zip", Some("FC")),
+            变体("FC/我的暑假[某汉化组]/game.zip", Some("FC")),
+        ];
+        let dirs = exclusive_dirs(&variants);
+        assert!(dirs.contains("FC/我的暑假[某汉化组]"));
+        assert!(!dirs.contains("FC/合集"));
     }
 }

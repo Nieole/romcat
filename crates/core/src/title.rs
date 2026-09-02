@@ -59,6 +59,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::catalog::identify::Confidence;
 use crate::catalog::title::TitleRow;
 use crate::catalog::{Catalog, CatalogError, ReleaseRow};
+use crate::classify::{is_han, is_kana};
 use crate::dat::chinese::ChineseMark;
 use crate::identify::naming;
 use crate::scrape::priority::Priorities;
@@ -422,19 +423,6 @@ pub fn sort_title(title: &str) -> String {
 #[must_use]
 pub fn sortable(title: &str) -> bool {
     !title.chars().any(|c| is_han(c) || is_kana(c))
-}
-
-fn is_han(c: char) -> bool {
-    matches!(c,
-        '\u{3400}'..='\u{4DBF}'
-        | '\u{4E00}'..='\u{9FFF}'
-        | '\u{F900}'..='\u{FAFF}'
-        | '\u{20000}'..='\u{2FA1F}')
-}
-
-fn is_kana(c: char) -> bool {
-    matches!(c,
-        '\u{3040}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}' | '\u{FF66}'..='\u{FF9D}')
 }
 
 /// 这一串字是什么语言：**先看字形，再让发行版的地区纠正**。

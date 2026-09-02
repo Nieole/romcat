@@ -89,7 +89,8 @@ enum Command {
     /// **中文离线数据源**：把中文条目索引取到本机，数据库覆盖不到时靠它撞文件名
     #[command(subcommand)]
     Zh(ZhCommand),
-    /// **文件名剥离规则**：看看一个名字剥完剩什么，或者导出一份规则底稿照着改
+    /// **文件名剥离规则**：看看一个名字剥完剩什么、导出一份规则底稿照着改，
+    /// 或者把名字还是乱码的那些容器重读一遍
     Names(NamesArgs),
 }
 
@@ -108,7 +109,9 @@ struct ZhSyncArgs {
     #[arg(long, value_name = "目录")]
     workspace: Option<PathBuf>,
 
-    /// 无视指纹，整份重取
+    /// 无视指纹，整份重建索引
+    ///
+    /// 改过平台别名之后要它——**原件在手边就不重下那 415 MB**
     #[arg(long)]
     full: bool,
 
@@ -240,6 +243,21 @@ struct NamesArgs {
     /// 把**内置**规则写到这个文件，照着它改就是自己的一份
     #[arg(long, value_name = "文件")]
     dump_builtin: Option<PathBuf>,
+
+    /// **把名字还是乱码的那些容器重读一遍**，按新的编码探测解一次
+    ///
+    /// 只读那几个容器的中央目录（几 KB 一个），只改中立库里名字那两列——
+    /// 大小、CRC-32 一个不动。要主库在位，也要 `--library` 或主库根找得到中立库
+    #[arg(long)]
+    recheck: bool,
+
+    /// 主库根目录。`--recheck` 才用得上；给了 `--library` 就不必再给
+    #[arg(long, value_name = "目录")]
+    root: Option<PathBuf>,
+
+    /// 按名字找中立库（扫描时用 `--library` 起的那个名字）
+    #[arg(long, value_name = "名字")]
+    library: Option<String>,
 
     #[command(flatten)]
     rules: NameRulesArgs,
@@ -871,7 +889,7 @@ fn main() -> ExitCode {
         Command::Dat(DatCommand::Sources(args)) => run_dat_sources(&args),
         Command::Zh(ZhCommand::Sync(args)) => run_zh_sync(&args),
         Command::Zh(ZhCommand::Find(args)) => run_zh_find(&args),
-        Command::Names(args) => run_names(&args),
+        Command::Names(args) => run_names(&args, &cancel),
     }
 }
 
@@ -920,7 +938,6 @@ fn emit_from_catalog(catalog: &Catalog, manifest: &Manifest, output: &OutputArgs
     ExitCode::SUCCESS
 }
 
-/// 这个主库的工作目录：中立库与断点都住这里，必须在本机（ADR-0009）。
 /// 本机那份中文离线索引，装进内存。**没取过数不是错误**——识别照跑，少一层而已。
 fn load_zh_index(workspace: &Path) -> Result<Option<zh::Index>, String> {
     let path = workspace::zh_store_path(workspace);
@@ -935,6 +952,7 @@ fn load_zh_index(workspace: &Path) -> Result<Option<zh::Index>, String> {
     Ok((!index.is_empty()).then_some(index))
 }
 
+/// 这个主库的工作目录：中立库与断点都住这里，必须在本机（ADR-0009）。
 fn workspace_dir(given: Option<&Path>) -> PathBuf {
     given
         .map(Path::to_path_buf)
@@ -3860,7 +3878,8 @@ fn run_platforms(args: &PlatformsArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// 同步一趟 DAT。**这是这个程序里唯一联网的子命令。**
+/// 取一趟**中文离线数据源**。**这是这个程序里第二个联网的子命令**（另一个是
+/// `dat sync`），走的是同一道取数闸门。
 fn run_zh_sync(args: &ZhSyncArgs) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let manifest = match args.manifest.load(&workspace) {
@@ -4021,7 +4040,79 @@ fn run_zh_find(args: &ZhFindArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run_names(args: &NamesArgs) -> ExitCode {
+/// 把名字还是乱码的那些容器重读一遍（票 11 的补救路径）。
+///
+/// 它**不遍历主库**：要读哪几个容器是中立库说的（`lossy = 1`），一个容器只读它的
+/// 中央目录。真机上那是 21,901 条名字散在若干个容器里，全库重扫要 27 分钟，
+/// 而这一趟只有几秒。
+fn run_names_recheck(args: &NamesArgs, cancel: &CancelToken) -> ExitCode {
+    let (slug, located_by) = match locate(args.library.as_deref(), args.root.as_deref()) {
+        Ok(pair) => pair,
+        Err(message) => return fail(message),
+    };
+    let workspace = workspace_dir(args.workspace.as_deref());
+    let mut catalog = match open_catalog(&workspace, slug, args.root.as_deref()) {
+        Ok(catalog) => catalog,
+        Err(message) => return fail(message),
+    };
+    let root = match args.root.clone() {
+        Some(root) => Some(root),
+        None => catalog.library_root().ok().flatten().map(PathBuf::from),
+    };
+    let Some(root) = root else {
+        return fail(format!(
+            "不知道 {located_by} 那份主库在哪：给出主库根目录。重读容器要主库在位。"
+        ));
+    };
+    let library = RealFs::new();
+    let started = Instant::now();
+    let mut last = Instant::now();
+    let outcome = scan::names::recheck(&library, &mut catalog, &root, cancel, &mut |so_far| {
+        if last.elapsed() >= Duration::from_secs(5) {
+            last = Instant::now();
+            eprintln!(
+                "  已重读 {} / {} 个容器，改掉 {} 条名字",
+                thousands(so_far.reread),
+                thousands(so_far.containers),
+                thousands(so_far.renamed),
+            );
+        }
+    });
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => return fail(format!("重读失败：{error}")),
+    };
+    println!(
+        "名字还是乱码的容器 {} 个：重读成功 {}，**改掉 {} 条名字**，\n         仍然解不出来 {} 条（GBK / Big5 / Shift_JIS 都不是），\n         读不动 {} 个，文件已经变了、这一趟不动它的 {} 个。{:.1} 秒。",
+        thousands(outcome.containers),
+        thousands(outcome.reread),
+        thousands(outcome.renamed),
+        thousands(outcome.still_lossy),
+        thousands(outcome.unreadable),
+        thousands(outcome.moved_on),
+        started.elapsed().as_secs_f64(),
+    );
+    if !outcome.samples.is_empty() {
+        // **这几条是唯一可核对的产出**：三种编码字节分布相近，猜错会把一种乱码换成
+        // 另一种，而一列数字看不出猜没猜对——一眼扫过这几行看得出。
+        println!("\n改之前 → 改之后（人眼扫一遍，猜错了看得出来）");
+        for (was, now) in &outcome.samples {
+            println!("  {was}\n    → {now}");
+        }
+    }
+    if outcome.renamed > 0 {
+        println!("\n名字改了，下一趟 `romcat identify` 的文件名那一层就撞得上它们了。");
+    }
+    if outcome.interrupted {
+        return ExitCode::from(130);
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_names(args: &NamesArgs, cancel: &CancelToken) -> ExitCode {
+    if args.recheck {
+        return run_names_recheck(args, cancel);
+    }
     let workspace = workspace_dir(args.workspace.as_deref());
     if let Some(path) = args.dump_builtin.as_deref() {
         if let Err(error) = fs::write(path, Rules::BUILTIN) {
@@ -4038,7 +4129,9 @@ fn run_names(args: &NamesArgs) -> ExitCode {
     };
     if args.names.is_empty() {
         eprintln!(
-            "给几个文件名看看剥完剩什么，例如：\n               romcat names '超级机器人大战R[星组](v1.2+)(简)(JP)(68.92Mb).zip'"
+            "给几个文件名看看剥完剩什么，例如：\n  \
+             romcat names '超级机器人大战R[星组](v1.2+)(简)(JP)(68.92Mb).zip'\n\
+             要把名字还是乱码的那些容器重读一遍，用 `romcat names --recheck`。"
         );
         return ExitCode::SUCCESS;
     }
@@ -4077,6 +4170,8 @@ fn run_names(args: &NamesArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// 同步一趟 DAT。**联网的子命令之一**（另两个是 `zh sync` 与 `scrape --profile 在线`），
+/// 每一个 URL 都过同一道闸门。
 fn run_dat_sync(args: &DatSyncArgs) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let registry = match args.sources.load(&workspace) {

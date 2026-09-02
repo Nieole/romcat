@@ -38,6 +38,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::classify::{is_cjk, is_han};
 use crate::path::fold;
 use crate::platform::pattern::{Pattern, PatternError};
 
@@ -228,6 +229,9 @@ impl Rules {
             genres.extend(base.genres);
             platform_prefixes.extend(base.platform_prefixes);
             numbering.extend(base.numbering);
+            // **用户那几条排在前面，内置的接在后面**，然后按键去重留先出现的那条——
+            // 于是用户既补得了新条目，也**改得动内置那一条**。都塞进去再排序的话，
+            // 同一个键上内置那条会按字典序赢，而用户的更正静默失效。
             aliases.extend(base.aliases);
         }
         // 长的先试：`简体中文版` 要排在 `中文` 前面，不然剥完还剩半截。
@@ -240,8 +244,8 @@ impl Rules {
         team_words.dedup();
         numbering.sort_unstable();
         numbering.dedup();
-        aliases.sort();
-        aliases.dedup();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        aliases.retain(|(called, _)| seen.insert(called.clone()));
         Ok(Self {
             team_words,
             team_names,
@@ -526,7 +530,13 @@ impl Rules {
             record(out, Why::Numbering);
             return;
         }
-        // 九、**归不了类**。照样剥掉——记号组里几乎不会有正题——但要说出来，
+        // 九、整组就是一个分类：`[AVG]`、`[SLG]`、`[角色扮演]`。这个库里的整理者
+        // 成批地把分类写在方括号里。
+        if self.genres.contains(&key) {
+            record(out, Why::Genre);
+            return;
+        }
+        // 十、**归不了类**。照样剥掉——记号组里几乎不会有正题——但要说出来，
         // 那是维护者补规则的依据。
         out.unknown.push(trimmed.to_string());
         record(out, Why::Unknown);
@@ -827,24 +837,12 @@ fn is_edge_punctuation(c: char) -> bool {
     )
 }
 
-/// 汉字。
-fn is_han(c: char) -> bool {
-    matches!(c,
-        '\u{3400}'..='\u{4DBF}'
-        | '\u{4E00}'..='\u{9FFF}'
-        | '\u{F900}'..='\u{FAFF}'
-        | '\u{20000}'..='\u{2FA1F}')
-}
-
-/// 汉字或假名。
-fn is_cjk(c: char) -> bool {
-    is_han(c)
-        || matches!(c,
-            '\u{3040}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}' | '\u{FF66}'..='\u{FF9D}')
-}
-
 /// 平台名折成可比较的形式：小写、去掉空格、连字符与点。
-fn fold_platform(text: &str) -> String {
+///
+/// [`crate::zh::sync::platform_of`] 也要它——「`Wii U` 与 `wiiu` 是同一个平台」这条
+/// 判据两处各写一遍，迟早会漂开。
+#[must_use]
+pub fn fold_platform(text: &str) -> String {
     fold(text)
         .chars()
         .filter(|c| !c.is_whitespace() && *c != '-' && *c != '.' && *c != '_')
@@ -1076,6 +1074,22 @@ mod tests {
             Rules::load(&path),
             Err(RulesError::Version { found: 99, .. })
         ));
+    }
+
+    #[test]
+    fn 用户改得动内置的那一条平台别名() {
+        // 补新条目谁都做得到，**改内置那一条**才是「继承」与「覆盖」的分界。
+        let dir = crate::testing::temp_dir("name-rules-alias");
+        let path = dir.path().join("rules.toml");
+        std::fs::write(
+            &path,
+            "\"版本\" = 1\n[[\"中文源平台别名\"]]\n\"叫\" = \"Nintendo Switch\"\n\"是\" = \"NS\"\n",
+        )
+        .expect("能写");
+        let rules = Rules::load(&path).expect("读得进来");
+        assert_eq!(rules.platform_alias("Nintendo Switch"), Some("NS"));
+        // 没改的那些照旧。
+        assert_eq!(rules.platform_alias("PS Vita"), Some("PSV"));
     }
 
     #[test]

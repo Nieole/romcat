@@ -302,17 +302,37 @@ pub fn classify(path: &Path) -> Classification {
 #[must_use]
 pub fn has_cjk(path: &Path) -> bool {
     path.file_name()
-        .map(|name| {
-            name.to_string_lossy().chars().any(|c| {
-                matches!(u32::from(c),
-                    0x3400..=0x4DBF     // 扩展 A
-                    | 0x4E00..=0x9FFF   // 基本区
-                    | 0xF900..=0xFAFF   // 兼容汉字
-                    | 0x20000..=0x2FA1F // 扩展 B 及以后
-                )
-            })
-        })
+        .map(|name| name.to_string_lossy().chars().any(is_han))
         .unwrap_or(false)
+}
+
+/// 这个字符是汉字吗。
+///
+/// **假名不算**（[`is_kana`] 管那一档）。两条判据住在一起而不是各模块各写一份：
+/// 「哪些码位算汉字」是一条会被引用很多次的事实——标题排不排得动（`title::sortable`）、
+/// 文件名里哪一段是中文（`filename`）、一串字值不值得拿去撞（`zh`）看的都是它，
+/// 而抄成四份之后，补一个码位区间就得记得改四处。
+#[must_use]
+pub fn is_han(c: char) -> bool {
+    matches!(u32::from(c),
+        0x3400..=0x4DBF     // 扩展 A
+        | 0x4E00..=0x9FFF   // 基本区
+        | 0xF900..=0xFAFF   // 兼容汉字
+        | 0x20000..=0x2FA1F // 扩展 B 及以后
+    )
+}
+
+/// 这个字符是假名吗（含半角片假名）。
+#[must_use]
+pub fn is_kana(c: char) -> bool {
+    matches!(u32::from(c),
+        0x3040..=0x30FF | 0x31F0..=0x31FF | 0xFF66..=0xFF9D)
+}
+
+/// 这个字符是汉字或假名。
+#[must_use]
+pub fn is_cjk(c: char) -> bool {
+    is_han(c) || is_kana(c)
 }
 
 #[cfg(test)]

@@ -32,7 +32,6 @@ use super::{
     hand_entry,
 };
 use crate::fs::{LibraryFs, ReadSeek};
-use crate::path::nfc;
 
 const SIG_LOCAL: [u8; 4] = [b'P', b'K', 3, 4];
 const SIG_CENTRAL: [u8; 4] = [b'P', b'K', 1, 2];
@@ -364,7 +363,7 @@ fn parse_central(
         )?;
     }
 
-    let (path, name_lossy) = decode_name(name_raw);
+    let (path, name_lossy) = super::charset::decode_path(name_raw);
     let is_dir = path.ends_with('/');
 
     // zip 每个条目独立压缩，自成一块：可以任意顺序、任意并行地读。
@@ -461,24 +460,6 @@ fn apply_zip64(
         at = body_at + size;
     }
     Err(malformed("有 ZIP64 哨兵，却没有 0x0001 的 extra field"))
-}
-
-/// 名字按 UTF-8 认，不是 UTF-8 的**先探编码再解码**（[`charset`](super::charset)）。
-///
-/// 通用标志位第 11 位声明「名字是 UTF-8」，但直接验一遍字节比信那一位更稳：库里
-/// 大量中文名是 GBK 且没置这一位。
-///
-/// **返回的那个布尔是「连编码都探不出来」，不是「不是 UTF-8」**（票 11 改的正是这个）：
-/// 票 03 时名字不参与命中，有损转换无所谓；而文件名那一层要拿名字去撞中文数据源，
-/// 一个 `U+FFFD` 就把整条名字废掉，而且不可逆。探得出编码的现在解得对，
-/// 探不出来的才如实标成有损。
-fn decode_name(raw: &[u8]) -> (String, bool) {
-    let (text, charset) = super::charset::decode(raw);
-    // 规范要求用 `/`，但确实有工具写 `\`。键的分隔符统一成 `/`（与 ADR-0020 同一条）。
-    (
-        nfc(&text.replace('\\', "/")).into_owned(),
-        charset == super::charset::Charset::Lossy,
-    )
 }
 
 /// 按计划读一遍：zip 每个条目独立压缩，块与条目一一对应，没有 solid 可言。

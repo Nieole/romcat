@@ -18,6 +18,7 @@
 
 pub mod aggregate;
 pub mod checkpoint;
+pub mod names;
 pub mod probe;
 
 use std::path::{Path, PathBuf};

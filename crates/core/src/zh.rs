@@ -74,6 +74,7 @@ pub mod sync;
 
 use std::collections::BTreeMap;
 
+use crate::classify::is_cjk;
 use crate::path::nfc;
 
 /// 一条**叫法**是哪一种。
@@ -105,17 +106,6 @@ impl NameKind {
             Self::Original => "name",
             Self::Chinese => "name-cn",
             Self::Alias => "alias",
-        }
-    }
-
-    /// 从短码认回来。
-    #[must_use]
-    pub fn from_code(code: &str) -> Option<Self> {
-        match code {
-            "name" => Some(Self::Original),
-            "name-cn" => Some(Self::Chinese),
-            "alias" => Some(Self::Alias),
-            _ => None,
         }
     }
 }
@@ -215,6 +205,21 @@ pub struct Tuning {
     pub max_postings: usize,
     /// 年份差多少之内算对得上。调研给的三重校验里写的是 ≤1。
     pub year_slack: u16,
+}
+
+impl Tuning {
+    /// 这几个参数折成一串，进**输入指纹**。
+    ///
+    /// **每一个都要在里面**：任何一个变了，同一个名字撞出来的东西就可能不一样，
+    /// 而漏掉的那一个变了之后，缓存会一口咬定「输入没变」而整条跳过
+    /// （`scrape::Source::probe` 的文档说的就是这件事）。
+    #[must_use]
+    pub fn fingerprint(&self) -> String {
+        format!(
+            "{}|{}|{}|{}|{}",
+            self.threshold, self.strong, self.limit, self.max_postings, self.year_slack
+        )
+    }
 }
 
 impl Default for Tuning {
@@ -626,18 +631,6 @@ pub fn similarity(a: &str, b: &str) -> f64 {
 #[must_use]
 pub fn alnum_of(key: &str) -> String {
     key.chars().filter(char::is_ascii_alphanumeric).collect()
-}
-
-/// 汉字或假名。
-fn is_cjk(c: char) -> bool {
-    matches!(c,
-        '\u{3400}'..='\u{4DBF}'
-        | '\u{4E00}'..='\u{9FFF}'
-        | '\u{F900}'..='\u{FAFF}'
-        | '\u{20000}'..='\u{2FA1F}'
-        | '\u{3040}'..='\u{30FF}'
-        | '\u{31F0}'..='\u{31FF}'
-        | '\u{FF66}'..='\u{FF9D}')
 }
 
 #[cfg(test)]

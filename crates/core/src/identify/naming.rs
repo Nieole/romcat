@@ -111,6 +111,19 @@ pub fn tosec_year(name: &str) -> Option<String> {
     }
 }
 
+/// 一串 DAT 条目名里读得出年份吗，取第一个读得出的。
+///
+/// **只有 TOSEC 的名字里有年份**（[`tosec_year`]），No-Intro 与 Redump 的没有。
+/// 识别的[文件名那一层](super::fuzzy)与[中文离线源](crate::scrape::zh)都要它——
+/// 那是这个库里少数几处「变体这一侧真的说得出年份」的地方，两处各走一遍同样的路，
+/// 迟早会一处改了另一处没改。
+#[must_use]
+pub fn year_in<'a>(names: impl Iterator<Item = &'a str>) -> Option<u16> {
+    names
+        .filter_map(tosec_year)
+        .find_map(|year| year.parse::<u16>().ok())
+}
+
 /// 名字里 `(…)` 括起来的每一组。
 fn rounds(name: &str) -> impl Iterator<Item = &str> {
     let mut rest = name;
@@ -188,6 +201,17 @@ mod tests {
         assert_eq!(tosec_year("1944 (199x)(-)(AS)[p]"), None);
         // No-Intro 的名字里第一个括号是地区，不是年份。
         assert_eq!(tosec_year("1942 (Japan, USA) (En)"), None);
+    }
+
+    #[test]
+    fn 一串条目名里读得出第一个年份() {
+        let names = [
+            "1942 (Japan, USA) (En)",
+            "1942 (1985-12-11)(Capcom)(JP-US)",
+            "1942 (1990)(X)",
+        ];
+        assert_eq!(year_in(names.into_iter()), Some(1985));
+        assert_eq!(year_in(["Foo (Japan)"].into_iter()), None);
     }
 
     #[test]

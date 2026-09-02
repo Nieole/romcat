@@ -449,6 +449,141 @@ impl Catalog {
     ///
     /// # Errors
     /// 读库失败时返回错误。
+    /// 名字里**还有替换字符**的那些容器，按键排序。
+    ///
+    /// 票 03 对非 UTF-8 的内部名字按有损转换处理（那时名字不参与命中）。票 11 起名字
+    /// 参与匹配了，而有损转换不可逆——`U+FFFD` 已经把原字节吃掉了。这张名单是
+    /// **补救的入口**（`scan::names::recheck`）：只把这些容器的中央目录重读一遍，
+    /// 几 KB 一个，不必为它重扫整个主库。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn containers_with_lossy_names(&self) -> Result<Vec<String>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT DISTINCT key FROM container_entry WHERE lossy = 1 ORDER BY key")
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|source| self.err(source))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|source| self.err(source))?);
+        }
+        Ok(out)
+    }
+
+    /// **一个容器**的内部条目，按序号排好。
+    ///
+    /// 它与 [`container_contents`](Self::container_contents) 是两件事：那一个一趟把
+    /// **全库**的容器构成折出来（成型要的就是全库），这一个只问一个键。名字重解那一趟
+    /// 要按容器一个个问——拿全库那一个去问 7,177 次，等于把一百万行的表扫 7,177 遍。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn container_entries(
+        &self,
+        key: &str,
+    ) -> Result<Vec<crate::container::InnerEntry>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare_cached(
+                "SELECT inner, size, crc32, block, is_dir, lossy FROM container_entry
+                 WHERE key = ?1 ORDER BY ordinal",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![key], |row| {
+                Ok(crate::container::InnerEntry {
+                    path: row.get(0)?,
+                    size: u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+                    crc32: row
+                        .get::<_, Option<i64>>(2)?
+                        .and_then(|raw| u32::try_from(raw).ok()),
+                    block: row
+                        .get::<_, Option<i64>>(3)?
+                        .and_then(|raw| usize::try_from(raw).ok()),
+                    is_dir: row.get::<_, i64>(4)? != 0,
+                    name_lossy: row.get::<_, i64>(5)? != 0,
+                })
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|source| self.err(source))?);
+        }
+        Ok(out)
+    }
+
+    /// 只改一个容器里那些内部条目的**名字**，别的一个字不动。
+    ///
+    /// **按 `ordinal` 对位**：重读的是同一个文件（大小与修改时间都没变，不然扫描早就
+    /// 把它整条换掉了），条目的顺序因此与当初落库时一模一样。条数对不上就一条都不改并
+    /// 返回 `None`——那说明这个文件确实变了，该走的是**扫描**那条路，不是这条补救路。
+    ///
+    /// 名字之外一个字节都不碰：大小、CRC-32、块号、是不是目录全留着。那些是识别的判据，
+    /// 而这一趟的全部目的只是把名字解对。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn rename_container_entries(
+        &mut self,
+        key: &str,
+        entries: &[crate::container::InnerEntry],
+    ) -> Result<Option<u64>, CatalogError> {
+        let stored = self.container_entries(key)?;
+        if stored.is_empty() || stored.len() != entries.len() {
+            return Ok(None);
+        }
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        let mut changed = 0u64;
+        {
+            let mut update = tx
+                .prepare(
+                    "UPDATE container_entry SET inner = ?3, lossy = ?4
+                      WHERE key = ?1 AND ordinal = ?2",
+                )
+                .map_err(to_err)?;
+            for (ordinal, (was, now)) in stored.iter().zip(entries).enumerate() {
+                if was.path == now.path && was.name_lossy == now.name_lossy {
+                    continue;
+                }
+                update
+                    .execute(params![
+                        key,
+                        i64::try_from(ordinal).unwrap_or(i64::MAX),
+                        now.path,
+                        i64::from(now.name_lossy),
+                    ])
+                    .map_err(to_err)?;
+                changed += 1;
+            }
+        }
+        tx.commit().map_err(to_err)?;
+        Ok(Some(changed))
+    }
+
+    /// 一批**透明容器**的内部构成，零解压层当初落库的那一份。
+    ///
+    /// **格式转换在差量预览阶段就得知道「转出来多大、转出来叫什么」**，而这两样正好
+    /// 都在容器头里（ADR-0014：内部文件名与未压缩大小零解压可得，扫描那一趟已经读进
+    /// 中立库了，调研第 5 部分 L4）。于是排计划这一步**一个字节都不必解压**，
+    /// 外置盘不在位照样排得出。
+    ///
+    /// 穿不透的容器（`container.reason` 非空）**不在返回值里**：内部构成读不出来，
+    /// 于是它转不了，由调用方判成「吃不下且转不了」如实报出来——而不是当成一个空容器。
+    ///
+    /// 与 [`variant_files`](Self::variant_files) 同一条取数纪律：一趟顺读、在内存里筛。
+    /// 只问**一个**容器时走 [`container_entries`](Self::container_entries)——
+    /// 这一个每次都把整张表扫一遍。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
     pub fn container_contents(
         &self,
         keys: &std::collections::BTreeSet<String>,
