@@ -324,7 +324,7 @@ impl ExportReport {
             out,
             "收敛是按**作品 × 平台**：一个合集一份文件。合集混在一份文件里就说不清归属\n\
              ——Pegasus 会把一个 game 加进该文件中此前定义过的**所有**合集，\n\
-             ES 家族则是一个系统一个目录、一份 gamelist。"
+             ES 家族则是一个平台目录一份 gamelist。"
         );
 
         heading(&mut out, "首选变体");

@@ -8,8 +8,8 @@
 //! 2. **用户状态逐条原样搬过去**——收藏、游玩次数、游玩时长、上次游玩长在同一个
 //!    文件里，导出时省略等于把维护者多年的记录**清零**（ADR-0006）；
 //! 3. **导入是合并不是覆盖**——包里那些我们没认出来的条目一条都不少；
-//! 4. **落点是 `gamelists/<系统>/gamelist.xml`**，`<path>` 相对系统 ROM 目录；
-//! 5. **媒体按 `downloaded_media/<系统>/<类型>/` 铺**，而且条目里一个媒体路径都不写。
+//! 4. **落点是 `gamelists/<平台目录>/gamelist.xml`**，`<path>` 相对那个平台目录；
+//! 5. **媒体按 `downloaded_media/<平台目录>/<类型>/` 铺**，而且条目里一个媒体路径都不写。
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -47,8 +47,8 @@ struct 现场 {
 }
 
 impl 现场 {
-    /// 导出的落点。**就是主库根**：ES-DE 的 `<path>` 相对系统 ROM 目录解析，
-    /// 而系统 ROM 目录就是主库根下那一层平台目录。ADR-0004 允许工具往主库里写
+    /// 导出的落点。**就是主库根**：ES-DE 的 `<path>` 相对那个**平台目录**解析，
+    /// 而平台目录就是主库根下那一层。ADR-0004 允许工具往主库里写
     /// **元数据文件**，ROM 一个字节都不碰。
     fn out(&self) -> &Path {
         self.dir.path()
@@ -88,7 +88,7 @@ fn 建现场() -> 现场 {
 /// - 用户状态就长在 `<game>` 里；
 /// - 有我们库里根本没有的条目（别人机器上的游戏）；
 /// - 有别的 ES 变体写的媒体路径与我们不认得的元素；
-/// - `<path>` 相对系统 ROM 目录，带前导 `./`。
+/// - `<path>` 相对平台目录，带前导 `./`。
 const 分享包: &str = "<?xml version=\"1.0\"?>\n\
     <alternativeEmulator>\n\
     \x20   <label>Nestopia UE</label>\n\
@@ -278,11 +278,11 @@ fn 导出是合并不是覆盖_包里没认出来的条目一条不少() {
 }
 
 #[test]
-fn 落点是_gamelists_下每系统一份_路径相对系统_rom_目录() {
+fn 落点是_gamelists_下每个平台目录一份_路径相对它() {
     let mut 现场 = 建现场();
     let report = 导出(&mut 现场);
 
-    // 一个平台一份，全在 `gamelists/<系统>/gamelist.xml` 下。
+    // 一个平台一份，全在 `gamelists/<平台目录>/gamelist.xml` 下。
     let mut 落点: Vec<String> = report
         .files
         .iter()
@@ -301,8 +301,8 @@ fn 落点是_gamelists_下每系统一份_路径相对系统_rom_目录() {
     assert!(现场.dir.path().join("gamelists/FC/gamelist.xml").is_file());
     assert!(现场.dir.path().join("gamelists/GB/gamelist.xml").is_file());
 
-    // `<path>` 相对**系统 ROM 目录**解析（源码 `createRelativePath()`），
-    // 于是平台那一段被剥掉、前导 `./` 加上。
+    // `<path>` 相对**平台目录**解析（源码 `createRelativePath()`），
+    // 于是那一段被剥掉、前导 `./` 加上。
     let fc = fs::read_to_string(现场.dir.path().join("gamelists/FC/gamelist.xml")).expect("读得出");
     assert!(fc.contains("<path>./魂斗罗台版/魂斗罗.zip</path>"), "{fc}");
     assert!(
@@ -314,7 +314,7 @@ fn 落点是_gamelists_下每系统一份_路径相对系统_rom_目录() {
 
 #[test]
 fn 导出的文件再导入回来_条目对得回库里的变体() {
-    // 一趟闭合：导出 → 导入。`<path>` 是相对系统 ROM 目录的，
+    // 一趟闭合：导出 → 导入。`<path>` 是相对那个平台目录的，
     // [`Adapter::rom_bases`] 那一侧要把它折回中立库的键。
     let mut 现场 = 建现场();
     导出(&mut 现场);
@@ -361,7 +361,7 @@ fn 子库的媒体按_downloaded_media_铺_条目里一个路径都不写() {
     let selected = sublibrary::select(&selection, &facts);
     let media = sync::media::lay(&现场.catalog, &Gamelist, &现场.pool, &selected).expect("铺得出");
 
-    // **路径镜像 ROM 相对系统目录的路径，文件名是去掉扩展名的 ROM 文件名。**
+    // **路径镜像 ROM 相对平台目录的路径，文件名是去掉扩展名的 ROM 文件名。**
     let 路径: Vec<&str> = media.files.iter().map(|file| file.path.as_str()).collect();
     assert_eq!(
         路径,
@@ -370,6 +370,7 @@ fn 子库的媒体按_downloaded_media_铺_条目里一个路径都不写() {
     );
     // **条目里一个媒体路径都不写**：ES-DE 靠文件名找媒体（官方原话）。
     assert!(media.assets.is_empty(), "{:#?}", media.assets);
+    assert_eq!(media.crowded_out, 0, "就一张封面，挤不着谁");
 
     let frontend = sync::frontend::lay(
         &现场.catalog,
@@ -395,6 +396,51 @@ fn 子库的媒体按_downloaded_media_铺_条目里一个路径都不写() {
             .expect("读得动")
             .identical
     );
+}
+
+#[test]
+fn 同一个变体的第二张同类图被挤掉_而且这件事说得出口() {
+    // 这个格式靠**文件名**找媒体：一个变体的一个类型落点就一条
+    // （`<ROM 主名>.<扩展名>`），第二张截图与第一张是同一条路径。挤掉是这个格式的
+    // 容量，不是错；但**静默挤掉**就是一次看不见的丢失。
+    let mut 现场 = 建现场();
+    for (n, 字节) in [
+        (1u8, b"screenshot-1".to_vec()),
+        (2, b"screenshot-2".to_vec()),
+    ] {
+        let hash = romcat_core::catalog::frontend::hash_of(&字节);
+        写(&现场.pool.path_of(&hash, "png"), &字节);
+        现场
+            .catalog
+            .put_media(&hash, "png", 字节.len() as u64)
+            .expect("池里记得下");
+        现场
+            .catalog
+            .put_scraped(&[Harvested {
+                anchor: AnchorKind::Variant.label().to_string(),
+                subject: 台版.to_string(),
+                // 一个源在一个锚点上写两次是同一个结果，所以两张图得来自两个源。
+                source: format!("本地媒体-{n}"),
+                input: format!("{台版}/{hash}"),
+                values: Vec::new(),
+                media: vec![HarvestedMedia {
+                    kind: MediaKind::Screenshot.label().to_string(),
+                    hash,
+                    evidence: "测试".to_string(),
+                }],
+            }])
+            .expect("引用写得进");
+    }
+
+    let selection = Selection {
+        rules: vec![Rule::parse("平台=FC").expect("规则读得懂")],
+        exceptions: Vec::new(),
+    };
+    let facts = sublibrary::facts(&现场.catalog).expect("折得出事实");
+    let selected = sublibrary::select(&selection, &facts);
+    let media = sync::media::lay(&现场.catalog, &Gamelist, &现场.pool, &selected).expect("铺得出");
+    assert_eq!(media.files.len(), 1, "落点就一条：{:#?}", media.files);
+    assert_eq!(media.crowded_out, 1, "被挤掉的那一张要数出来，不能静默");
 }
 
 #[test]

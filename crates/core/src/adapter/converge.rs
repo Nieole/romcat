@@ -130,7 +130,7 @@ pub struct CollectionFile {
     pub collection: String,
     /// 这一份写成哪个**相对导出目录的路径**。
     ///
-    /// 是路径不是文件名：ES-DE 那一套要 `gamelists/<系统>/gamelist.xml`，落点带目录。
+    /// 是路径不是文件名：ES-DE 那一套要 `gamelists/<平台目录>/gamelist.xml`，落点带目录。
     pub file_name: String,
     /// 里面的内容。
     pub doc: Document,
@@ -196,15 +196,22 @@ pub const GROUP_KEY: &str = "romcat-translation-group";
 /// 把这几份文件放到主库根下就直接生效。
 ///
 /// 这是**默认**的摆法，不是唯一的：落点归适配器答（[`Adapter::metadata_path`]），
-/// 因为它是格式的一部分——ES-DE 要的是 `gamelists/<系统>/gamelist.xml`。
+/// 因为它是格式的一部分——ES-DE 要的是 `gamelists/<平台目录>/gamelist.xml`。
 #[must_use]
 pub fn file_name_for(collection: &str, suffix: &str) -> String {
-    // 合集名里可能有路径分隔符（平台名不会，但清单是数据、用户能改）。
-    let safe: String = collection
+    format!("{}.{suffix}", safe_segment(collection))
+}
+
+/// 把一个合集名化成**一段安全的路径**：分隔符与保留字符换成 `_`。
+///
+/// 合集名里可能有路径分隔符（平台名不会，但清单是数据、用户能改），而它要么当文件名
+/// 用、要么当目录名用（ES-DE 的 `gamelists/<平台目录>/`）——不换掉就能造出别处的文件。
+#[must_use]
+pub fn safe_segment(collection: &str) -> String {
+    collection
         .chars()
         .map(|c| if "/\\:*?\"<>|".contains(c) { '_' } else { c })
-        .collect();
-    format!("{safe}.{suffix}")
+        .collect()
 }
 
 /// 把中立库收敛成一份份中立文档。
@@ -326,21 +333,21 @@ pub fn run_within(
     }
 
     for (platform, anchors) in grouped {
-        // 这个平台的内容住在哪个**顶层目录**下。**从键上数出来，不从平台清单上猜**：
+        // 这个平台的内容住在哪个**平台目录**下。**从键上数出来，不从平台清单上猜**：
         // 清单里一个平台可以映射好几个目录别名（`FC` 收 `fc`/`nes`/`famicom`），
         // 而这里要的是「这份库里实际用的是哪一个」。散在多个目录里就交白卷——
-        // 那时说不出唯一的系统目录，路径整条原样写出去。
+        // 那时说不出唯一的那一个，路径整条原样写出去。
         //
         // 真库上 22 个平台各自都只用一个目录，而其中 **12 个的目录名与平台名对不上**
-        // （`WII` 的目录叫 `Wii`、`PS1` 的叫 `ps`、`WS` 的叫 `wsc`）。ES 家族靠它当
-        // system 名，拿平台名顶上去的话，那 12 个在 Android 与 Linux 上（大小写敏感）
-        // 一个都指不着。
+        // （`WII` 的目录叫 `Wii`、`PS1` 的叫 `ps`、`WS` 的叫 `wsc`）。ES 家族的
+        // `es_systems.xml` 拿它当 `<name>`，拿平台名顶上去的话，那 12 个在 Android 与
+        // Linux 上（大小写敏感）一个都指不着。
         let dirs: BTreeSet<&str> = anchors
             .values()
             .flatten()
             .filter_map(|variant| crate::path::platform_of_key(&variant.key))
             .collect();
-        let system = match dirs.len() {
+        let directory = match dirs.len() {
             1 => dirs.iter().next().map(|dir| (*dir).to_string()),
             _ => None,
         };
@@ -350,7 +357,7 @@ pub fn run_within(
         // 更糟的是维护者自己写对了的那一行会被这个猜测覆盖掉。**猜不准就不写。**
         let mut entries = vec![Entry::new(Body::Collection(Collection {
             name: platform.clone(),
-            system: system.clone(),
+            directory: directory.clone(),
             ..Collection::default()
         }))];
         for (anchor, mut members) in anchors {
@@ -391,10 +398,10 @@ pub fn run_within(
             ))));
         }
         out.files.push(CollectionFile {
-            // **落点按系统目录，不按平台名。** ES-DE 的 `es_systems.xml` 里
+            // **落点按平台目录，不按平台名。** ES-DE 的 `es_systems.xml` 里
             // `<name>` 就是那个目录名（`<path>%ROMPATH%/<name>`），gamelist 摆在
             // `gamelists/<name>/` 下。数不出唯一目录时退回平台名。
-            file_name: adapter.metadata_path(system.as_deref().unwrap_or(&platform)),
+            file_name: adapter.metadata_path(directory.as_deref().unwrap_or(&platform)),
             collection: platform,
             doc: Document { entries },
         });

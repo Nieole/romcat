@@ -38,8 +38,9 @@
 //! ## 格式在磁盘上怎么摆，也是适配器的事
 //!
 //! 两个格式的布局差得很远：Pegasus 是**一个合集一个文件**摊在导出目录根上、媒体按
-//! 内容哈希躺在 `media/` 里、路径写进条目；ES-DE 是 `gamelists/<系统>/gamelist.xml`
-//! 加 `downloaded_media/<系统>/<类型>/`、媒体**靠文件名找**、条目里一个媒体路径都不写。
+//! 内容哈希躺在 `media/` 里、路径写进条目；ES-DE 是
+//! `gamelists/<平台目录>/gamelist.xml` 加 `downloaded_media/<平台目录>/<类型>/`、
+//! 媒体**靠文件名找**、条目里一个媒体路径都不写。
 //! 于是 [`Adapter`] 除了读写还答三个布局问题——[`Adapter::metadata_path`]、
 //! [`Adapter::rom_bases`]、[`Adapter::media_placement`]。放在适配器里而不是散在
 //! `sync` 与 `converge` 里，是因为 ADR-0003 定的就是「一个格式一个**自包含**模块」。
@@ -164,7 +165,7 @@ pub trait Adapter {
     /// 一个**合集**的元数据落在导出目录里的哪个**相对路径**上。
     ///
     /// 默认是「一个合集一个文件、全摊在根上」（Pegasus）。ES-DE 那一套要
-    /// `gamelists/<系统>/gamelist.xml`，于是它自己覆盖这一条。
+    /// `gamelists/<平台目录>/gamelist.xml`，于是它自己覆盖这一条。
     fn metadata_path(&self, collection: &str) -> String {
         converge::file_name_for(collection, self.file_name())
     }
@@ -172,10 +173,9 @@ pub trait Adapter {
     /// 条目里那条**相对路径**该以哪几个目录为基准解析回中立库的键。
     ///
     /// **按顺序试，第一个在库里找得到变体的算数。** 给的是一串而不是一个：ES-DE 的
-    /// gamelist 躺在 `gamelists/<系统>/` 下、ROM 却在 `<主库根>/<系统>/` 下，而那个
-    /// `<系统>` 是**平台名**、磁盘上的目录名未必与它一字不差（`platforms.toml` 里
-    /// `FC` 的目录别名有 `fc`/`nes`/`famicom` 三个）。多试一个主库根，对不上的那批
-    /// 就不必被报成「对不上库里的变体」。
+    /// gamelist 躺在 `gamelists/<平台目录>/` 下、ROM 却在 `<主库根>/<平台目录>/` 下，
+    /// 而**别人分享的包里那一段写的未必是我们这份库的平台目录**——他机器上的目录叫
+    /// 什么是他的事。多试一个主库根，那批就不必被报成「对不上库里的变体」。
     ///
     /// 默认是元数据文件自己所在的目录——Pegasus 的 `file:` 就是这样解析的。
     fn rom_bases(&self, file: &Path, root: Option<&Path>) -> Vec<PathBuf> {
@@ -368,20 +368,21 @@ pub struct Collection {
     pub name: String,
     /// 短名（`snes`、`nes`）。
     pub shortname: Option<String>,
-    /// 这个合集的内容在磁盘上住在哪个**顶层目录**下。
+    /// 这个合集的内容住在哪个**平台目录**下（[`path::platform_of_key`](crate::path::platform_of_key)
+    /// 取的就是它）。
     ///
     /// **它与 [`name`](Self::name) 常常不是同一个词**：真库上 22 个平台里有 12 个
     /// 目录名与平台名对不上（`WII` 的目录叫 `Wii`、`PS1` 的叫 `ps`、`WS` 的叫 `wsc`）。
-    /// 平台名是给人看的，目录名是磁盘上的事实（ADR-0011：目录是强先验）。
+    /// 平台名是给人看的，平台目录是磁盘上的事实（ADR-0011：目录是强先验）。
     ///
-    /// ES 家族要它：`es_systems.xml` 里的 `<name>` **就是那个目录名**
-    /// （`<path>%ROMPATH%/<name>`），而 `<path>` 是相对那个目录解析的。拿平台名去当
-    /// 系统名，Android 与 Linux 上（大小写敏感）那 12 个平台一个都指不着。
-    /// Pegasus 那一侧没有对应的键，写出去的文件一个字都不因此改变。
+    /// ES 家族要它：`es_systems.xml` 里那个 `<name>` **就是这个目录名**
+    /// （`<path>%ROMPATH%/<name>`），而条目的 `<path>` 是相对它解析的。拿平台名顶上去，
+    /// Android 与 Linux 上（大小写敏感）那 12 个平台一个都指不着。Pegasus 那一侧没有
+    /// 对应的键，写出去的文件一个字都不因此改变。
     ///
-    /// 一个平台的内容散在多个顶层目录里时是 `None`——那时说不出唯一的系统目录，
+    /// 一个平台的内容散在多个平台目录里时是 `None`——那时说不出唯一的那一个，
     /// 路径就整条原样写出去。
-    pub system: Option<String>,
+    pub directory: Option<String>,
     /// 集合级默认启动命令。
     pub launch: Option<String>,
     /// 一段式简介。

@@ -44,11 +44,11 @@
 //! - **`<path>` 必须带前导 `./`**（源码 `createRelativePath()` 返回 `"./" + rel`），
 //!   USERGUIDE 明确警告从旧版 ES 搬来的文件常常没有这个前缀。
 //!
-//! ## 布局：`gamelists/<系统>/` 与 `downloaded_media/<系统>/<类型>/`
+//! ## 布局：`gamelists/<平台目录>/` 与 `downloaded_media/<平台目录>/<类型>/`
 //!
 //! 与 Pegasus 的 `media/` 完全不同，也与 Batocera 的 `images|videos/` 加文件名后缀
 //! 不同（别混）。ES-DE 的 gamelist 里**不再包含媒体路径**（官方原话），媒体靠
-//! **文件名约定**找：路径精确镜像 ROM 相对系统目录的路径，文件名是去掉扩展名的 ROM
+//! **文件名约定**找：路径精确镜像 ROM 相对平台目录的路径，文件名是去掉扩展名的 ROM
 //! 文件名。于是 [`Adapter::media_placement`] 交出来的槽是 `None`——一个媒体路径都不写。
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -58,6 +58,7 @@ use std::path::{Path, PathBuf};
 use crate::path;
 use crate::scrape::MediaKind;
 
+use super::converge;
 use super::{
     Adapter, AdapterError, Body, Capability, Document, Entry, Game, Lossy, LossyNote,
     MediaPlacement, Parsed, PlayerCount, Preserved, ReleaseDate,
@@ -70,10 +71,10 @@ pub struct Gamelist;
 /// 元数据文件叫什么。**大小写敏感**，ES 家族四个变体一致。
 pub const FILE_NAME: &str = "gamelist.xml";
 
-/// gamelist 摆在哪个目录下（ES-DE：`<应用数据目录>/gamelists/<系统>/gamelist.xml`）。
+/// gamelist 摆在哪个目录下（ES-DE：`<应用数据目录>/gamelists/<平台目录>/gamelist.xml`）。
 pub const GAMELISTS_DIR: &str = "gamelists";
 
-/// 媒体摆在哪个目录下（ES-DE：`<应用数据目录>/downloaded_media/<系统>/<类型>/`）。
+/// 媒体摆在哪个目录下（ES-DE：`<应用数据目录>/downloaded_media/<平台目录>/<类型>/`）。
 pub const MEDIA_DIR: &str = "downloaded_media";
 
 /// 根元素。**大写 L，大小写敏感**。
@@ -206,6 +207,16 @@ pub struct Span {
     pub end: usize,
 }
 
+/// 快照里的**一段**：那几个节点，连同它们躺在哪儿。
+///
+/// 单独立一个类型而不是到处传 `(&[Node], Span)`：这一对在拆子元素、找 `<path>`、
+/// 量缩进、找段尾这四件事里成对出现，分开传就总有一天传成两段的组合。
+#[derive(Debug, Clone, Copy)]
+struct Block<'a> {
+    nodes: &'a [Node],
+    span: Span,
+}
+
 /// **旁路快照**：一份 gamelist 拆开的样子。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
@@ -223,6 +234,14 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// 第 `nth` 段。
+    fn block(&self, span: Span) -> Block<'_> {
+        Block {
+            nodes: &self.nodes,
+            span,
+        }
+    }
+
     /// 把整份快照原样拼回去。
     #[must_use]
     pub fn render(&self) -> Vec<u8> {
@@ -312,23 +331,26 @@ impl Adapter for Gamelist {
     }
 
     fn metadata_path(&self, collection: &str) -> String {
-        format!("{GAMELISTS_DIR}/{}/{FILE_NAME}", safe_segment(collection))
+        format!(
+            "{GAMELISTS_DIR}/{}/{FILE_NAME}",
+            converge::safe_segment(collection)
+        )
     }
 
     fn rom_bases(&self, file: &Path, root: Option<&Path>) -> Vec<PathBuf> {
         let dir = file.parent().unwrap_or(Path::new(".")).to_path_buf();
         let Some(root) = root else {
             // 没给主库根：只剩「gamelist 与 ROM 同处一个目录」这条路——原版 ES、
-            // Batocera 与 Recalbox 都把它写在系统的 ROM 目录旁边。
+            // Batocera 与 Recalbox 都把它写在那个平台目录里，与 ROM 并排。
             return vec![dir];
         };
         let mut out = Vec::new();
-        // `gamelists/<系统>/gamelist.xml` → ROM 在 `<主库根>/<系统>/` 下。
-        if let Some(system) = system_of(file) {
-            out.push(root.join(system));
+        // `gamelists/<平台目录>/gamelist.xml` → ROM 在 `<主库根>/<平台目录>/` 下。
+        if let Some(directory) = directory_of(file) {
+            out.push(root.join(directory));
         }
-        // 主库根本身。两条理由：`<path>` 写的是完整的键（平台名与磁盘上的目录名对不上
-        // 时导出就是这样写的），以及别人分享的包里路径写法五花八门。
+        // 主库根本身。两条理由：`<path>` 写的是完整的键（数不出唯一平台目录时导出
+        // 就是这样写的），以及别人分享的包里路径写法五花八门。
         out.push(root.to_path_buf());
         // 最后才是文件自己所在的目录。
         if !out.contains(&dir) {
@@ -344,14 +366,17 @@ impl Adapter for Gamelist {
         _hash: &str,
         ext: &str,
     ) -> Option<MediaPlacement> {
-        // **路径精确镜像 ROM 相对系统目录的路径，文件名是去掉扩展名的 ROM 文件名。**
+        // **路径精确镜像 ROM 相对平台目录的路径，文件名是去掉扩展名的 ROM 文件名。**
         // 官方示例：ROM `~/ROMs/c64/Multidisk/Last Ninja 2/Last Ninja 2.m3u`
         // → 媒体 `downloaded_media/c64/screenshots/Multidisk/Last Ninja 2/Last Ninja 2.jpg`。
-        let system = path::platform_of_key(rom_key)?;
-        let rest = rom_key.strip_prefix(system)?.trim_start_matches('/');
+        let directory = path::platform_of_key(rom_key)?;
+        let rest = rom_key.strip_prefix(directory)?.trim_start_matches('/');
         let stem = rest.rsplit_once('.').map_or(rest, |(stem, _)| stem);
         Some(MediaPlacement {
-            path: format!("{MEDIA_DIR}/{system}/{}/{stem}.{ext}", media_dir_of(kind)?),
+            path: format!(
+                "{MEDIA_DIR}/{directory}/{}/{stem}.{ext}",
+                media_dir_of(kind)?
+            ),
             // **条目里一个媒体路径都不写。** ES-DE 官方原话：gamelist.xml 里不再包含
             // 媒体信息，应用会去找与 ROM 文件名匹配的任何媒体。写进去既没用，
             // 又会在 ES-DE 重写这份文件时被清掉，凭空造出一次「外部改动」。
@@ -373,19 +398,11 @@ pub fn media_dir_of(kind: MediaKind) -> Option<&'static str> {
     })
 }
 
-/// `gamelists/<这一段>/gamelist.xml` 里那一段。合集名里的路径分隔符造不出别处的文件。
-fn safe_segment(collection: &str) -> String {
-    collection
-        .chars()
-        .map(|c| if "/\\:*?\"<>|".contains(c) { '_' } else { c })
-        .collect()
-}
-
-/// 一份 gamelist 说的是哪个系统：`…/gamelists/<系统>/gamelist.xml` 里那一段。
-fn system_of(file: &Path) -> Option<String> {
+/// 一份 gamelist 说的是哪个**平台目录**：`…/gamelists/<平台目录>/gamelist.xml` 里那一段。
+fn directory_of(file: &Path) -> Option<String> {
     let dir = file.parent()?;
     // 上一级得真叫 `gamelists`，否则这就是「与 ROM 同处一目录」的那一种摆法，
-    // 目录名是系统名这件事无从谈起。
+    // 目录名是平台目录名这件事无从谈起。
     if dir.parent()?.file_name()?.to_str()? != GAMELISTS_DIR {
         return None;
     }
@@ -503,8 +520,7 @@ fn lex_start(rest: &str) -> Option<(Tag, usize)> {
     loop {
         let lead_len = cursor.len() - cursor.trim_start().len();
         let (lead, body) = cursor.split_at(lead_len);
-        if let Some(what) = body.strip_prefix("/>") {
-            let _ = what;
+        if body.starts_with("/>") {
             return Some((
                 Tag {
                     name: name.to_string(),
@@ -657,6 +673,61 @@ struct Child {
 
 /// 把一段里的子元素收出来。**只收直接子元素**，孙子（Recalbox 的 `<maps><map/></maps>`）
 /// 连同它的父元素一起当成一个整体留在快照里。
+impl Block<'_> {
+    /// 把这一段里的子元素收出来。**只收直接子元素**，孙子（Recalbox 的
+    /// `<maps><map/></maps>`）连同它的父元素一起当成一个整体留在快照里。
+    fn children(self) -> Vec<Child> {
+        children(self.nodes, self.span)
+    }
+
+    /// 这一段的 `<path>` 写的是什么（原样，含前导 `./`）。
+    fn path(self) -> Option<String> {
+        self.children()
+            .into_iter()
+            .find(|kid| kid.name == "path")
+            .map(|kid| kid.text.trim().to_string())
+    }
+
+    /// 一个子元素从 `at` 起到哪个节点为止（不含）。
+    fn element_end(self, at: usize) -> usize {
+        element_end(self.nodes, self.span, at)
+    }
+
+    /// 这一段里子元素的缩进（含前面那个换行）。
+    fn child_indent(self) -> String {
+        for index in self.span.start + 1..self.span.end {
+            if let Node::Text(raw) = &self.nodes[index]
+                && let Some((_, tail)) = raw.rsplit_once('\n')
+                && tail.chars().all(char::is_whitespace)
+            {
+                return format!("\n{tail}");
+            }
+        }
+        format!("\n{INDENT}{INDENT}")
+    }
+
+    /// 这一段结尾那几个字：`</game>` 与它前面那一截空白。
+    fn close_suffix(self) -> String {
+        let mut out = String::new();
+        if self.span.end >= 2
+            && let Node::Text(raw) = &self.nodes[self.span.end - 2]
+        {
+            out.push_str(raw);
+        }
+        if self.span.end >= 1 {
+            self.nodes[self.span.end - 1].render(&mut out);
+        }
+        out
+    }
+
+    /// 把这一段原样搬出去。
+    fn render(self, out: &mut String) {
+        for index in self.span.start..self.span.end {
+            self.nodes[index].render(out);
+        }
+    }
+}
+
 fn children(nodes: &[Node], span: Span) -> Vec<Child> {
     let mut out = Vec::new();
     let mut index = span.start + 1;
@@ -716,7 +787,7 @@ fn fold(snapshot: &Snapshot) -> (Document, Vec<LossyNote>, Counts) {
     let mut counts = Counts::default();
     let line_of = line_index(&snapshot.nodes);
     for (nth, span) in snapshot.blocks.iter().enumerate() {
-        let kids = children(&snapshot.nodes, *span);
+        let kids = snapshot.block(*span).children();
         let game = fold_game(&kids, &line_of, &mut lossy, &mut counts);
         entries.push(Entry {
             origin: Some(nth),
@@ -824,14 +895,10 @@ fn fold_game(
             // 别的 ES 变体写在这里的媒体路径（原版 ES / Batocera / Recalbox 的
             // `image` / `video` / `marquee` / `thumbnail`）。ES-DE 自己不写也不读，
             // 但**别人分享的元数据包里到处都是**，收进资源槽，往返照旧。
-            name if media_slot(name).is_some() => {
-                if !value.is_empty() {
-                    out.assets
-                        .entry(media_slot(name).unwrap_or_default().to_string())
-                        .or_default()
-                        .push(value);
-                }
-            }
+            //
+            // 槽在这里**一次查出来绑住**：查两遍再 `unwrap_or_default` 的话，
+            // 兜到空串时写回去 `slot_element("")` 认不出，那张图会无声消失。
+            _ if 已归槽(&mut out.assets, &kid.name, &value) => {}
             // 我们自己写出去的那几个扩展元素（`x-romcat-*`）。
             name if name.starts_with(EXTRA_PREFIX) => {
                 out.extra.insert(
@@ -848,6 +915,23 @@ fn fold_game(
         }
     }
     out
+}
+
+/// 这个元素是不是一条媒体路径；是就收进它的资源槽，并回答「收下了」。
+///
+/// 写成一个「查一次、就地收下」的判据，而不是「先问一次再查一次」：后者中间那一步
+/// 兜底成空串时，写回去认不出那个槽，那张图会无声消失。
+fn 已归槽(assets: &mut BTreeMap<String, Vec<String>>, name: &str, value: &str) -> bool {
+    let Some(slot) = media_slot(name) else {
+        return false;
+    };
+    if !value.is_empty() {
+        assets
+            .entry(slot.to_string())
+            .or_default()
+            .push(value.to_string());
+    }
+    true
 }
 
 fn non_empty(value: &str) -> Option<String> {
@@ -870,36 +954,40 @@ fn push_non_empty(out: &mut Vec<String>, value: &str) {
 /// （调研 D.4 第 2 条：主键用路径），扩展元素只是锦上添花。
 pub const EXTRA_PREFIX: &str = "x-";
 
-/// 别的 ES 变体写在 gamelist 里的媒体元素 → 规范资源槽。
+/// 别的 ES 变体写在 gamelist 里的媒体元素 ↔ 规范资源槽。
+///
+/// **一张表两个方向**，不是两个互为反表的 `match`：那种写法改一边忘一边，媒体路径
+/// 就静默消失。每行第一列是**写回去用的那个元素名**（读的时候认全部别名，写的时候
+/// 只用这一个），第二列是规范槽，其余是只读得进来的别名。
+///
+/// ES-DE 自己不写也不读这些元素（它靠文件名找媒体），但**别人分享的元数据包里到处
+/// 都是**——原版 ES、Batocera 与 Recalbox 都写它们。
+const MEDIA_ELEMENTS: &[(&str, &str, &[&str])] = &[
+    ("image", "boxFront", &["boxart"]),
+    ("thumbnail", "boxFull", &[]),
+    ("marquee", "marquee", &[]),
+    ("video", "video", &[]),
+    ("fanart", "background", &[]),
+    ("titleshot", "titlescreen", &[]),
+    ("boxback", "boxBack", &[]),
+    ("wheel", "logo", &[]),
+    ("cartridge", "cartridge", &[]),
+];
+
+/// 一个元素名落在哪个规范资源槽上。认不出是 `None`。
 fn media_slot(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "image" | "boxart" => "boxFront",
-        "thumbnail" => "boxFull",
-        "marquee" => "marquee",
-        "video" => "video",
-        "fanart" => "background",
-        "titleshot" => "titlescreen",
-        "boxback" => "boxBack",
-        "wheel" => "logo",
-        "cartridge" => "cartridge",
-        _ => return None,
-    })
+    MEDIA_ELEMENTS
+        .iter()
+        .find(|(element, _, aliases)| *element == name || aliases.contains(&name))
+        .map(|(_, slot, _)| *slot)
 }
 
-/// 规范资源槽 → 写回去用哪个元素名。**读的时候认全部别名，写的时候只用这一个。**
+/// 一个规范资源槽写回去用哪个元素名。认不出是 `None`。
 fn slot_element(slot: &str) -> Option<&'static str> {
-    Some(match slot {
-        "boxFront" => "image",
-        "boxFull" => "thumbnail",
-        "marquee" => "marquee",
-        "video" => "video",
-        "background" => "fanart",
-        "titlescreen" => "titleshot",
-        "boxBack" => "boxback",
-        "logo" => "wheel",
-        "cartridge" => "cartridge",
-        _ => return None,
-    })
+    MEDIA_ELEMENTS
+        .iter()
+        .find(|(_, canonical, _)| *canonical == slot)
+        .map(|(element, _, _)| *element)
 }
 
 fn strip_dot_slash(value: &str) -> &str {
@@ -926,10 +1014,9 @@ pub fn parse_rating(raw: &str) -> Option<f64> {
 pub fn format_rating(value: f64) -> String {
     let clamped = value.clamp(0.0, 1.0);
     // 载入时反正要四舍五入到 0.1，写一个它存不下的精度只是自欺。
-    let rounded = round_to_tenth(clamped);
-    let text = format!("{rounded}");
-    // `1` 与 `0` 照 float 的样子写出来，读回去还是同一个数。
-    text
+    // `{}` 出的正是最短往返形式：`0.7` 而不是 `0.700000`，满分是 `1` 而不是 `1.0`
+    // ——`std::stringstream` 那一侧写出来也是这两个样子。
+    format!("{}", round_to_tenth(clamped))
 }
 
 /// 读 `players`。自由文本，`4` 与 `1-2` 都接得住；别的写法交给 `None`。
@@ -1127,16 +1214,15 @@ fn paths_of(game: &Game, prefix: Option<&str>) -> Vec<String> {
         .collect()
 }
 
-/// 把中立库的键化成相对**系统 ROM 目录**的路径。
+/// 把中立库的键化成相对那个**平台目录**的路径。
 ///
-/// `<path>` 是相对系统目录解析的（源码 `createRelativePath()`，官方示例
+/// `<path>` 是相对平台目录解析的（源码 `createRelativePath()`，官方示例
 /// `~/ROMs/c64/Multidisk/…` 对 `./Multidisk/…`），而中立库的键是相对主库根的
-/// （ADR-0020）。两者差的正好是那一段平台目录。
+/// （ADR-0020）。两者差的正好是那一段。
 ///
-/// **对不上就整条原样写出去**：平台名与磁盘上的目录名未必一字不差
-/// （`platforms.toml` 里 `FC` 的目录别名有三个）。这时写完整的键，用户把系统的
-/// ROM 目录指到主库根上照样对得起来，而 [`Adapter::rom_bases`] 那一侧也把主库根
-/// 列进了候选。
+/// **对不上就整条原样写出去**：数不出唯一的平台目录时前缀是合集名，而它未必是
+/// 磁盘上那个目录。这时写完整的键，用户把 ES 那边的 ROM 目录指到主库根上照样对得
+/// 起来，而 [`Adapter::rom_bases`] 那一侧也把主库根列进了候选。
 fn relativize<'a>(file: &'a str, prefix: Option<&str>) -> &'a str {
     let Some(prefix) = prefix else { return file };
     file.strip_prefix(prefix)
@@ -1144,19 +1230,19 @@ fn relativize<'a>(file: &'a str, prefix: Option<&str>) -> &'a str {
         .unwrap_or(file)
 }
 
-/// 这份文档说的是哪个系统——也就是要从 `<path>` 里剥掉的那一段。
+/// 要从 `<path>` 里剥掉的那一段**平台目录**。
 ///
-/// 来自文档里的**合集**段，取的是它的 `system`（磁盘上那个顶层目录）而不是名字：
-/// 真库上 22 个平台里有 12 个两者对不上，而 `<path>` 是相对**磁盘上那个目录**解析的。
-/// 数不出唯一目录时退回合集名，剥不掉就整条原样写出去（见 [`relativize`]）。
+/// 来自文档里的**合集**段，取的是它的 `directory` 而不是名字：真库上 22 个平台里有
+/// 12 个两者对不上，而 `<path>` 是相对**磁盘上那个目录**解析的。数不出唯一目录时
+/// 退回合集名，剥不掉就整条原样写出去（见 [`relativize`]）。
 ///
-/// ES gamelist 自己没有合集这个概念（系统是由文件摆在哪个目录下说的），所以读进来的
-/// 文档里没有合集段，剥不掉也不必剥：那些路径本来就是相对系统目录的。
+/// ES gamelist 自己没有合集这个概念（平台是由文件摆在哪个目录下说的），所以读进来的
+/// 文档里没有合集段，剥不掉也不必剥：那些路径本来就是相对平台目录的。
 fn prefix_of(doc: &Document) -> Option<&str> {
     let collection = doc.entries.iter().find_map(|entry| entry.collection())?;
     Some(
         collection
-            .system
+            .directory
             .as_deref()
             .unwrap_or(collection.name.as_str()),
     )
@@ -1179,7 +1265,7 @@ fn claims(
 ) -> BTreeMap<usize, (usize, usize)> {
     let mut by_path: BTreeMap<String, usize> = BTreeMap::new();
     for (nth, span) in snapshot.blocks.iter().enumerate() {
-        if let Some(path) = path_of_block(&snapshot.nodes, *span) {
+        if let Some(path) = snapshot.block(*span).path() {
             by_path.entry(path).or_insert(nth);
         }
     }
@@ -1240,8 +1326,7 @@ fn render(doc: &Document, baseline: Option<(&Document, &Snapshot)>) -> Vec<u8> {
         match claimed.get(&nth) {
             Some((owner, index)) => merge_block(
                 &mut out,
-                snapshot,
-                *span,
+                snapshot.block(*span),
                 was.entries.get(nth),
                 &doc.entries[*owner],
                 *index,
@@ -1249,11 +1334,7 @@ fn render(doc: &Document, baseline: Option<(&Document, &Snapshot)>) -> Vec<u8> {
             ),
             // 新文档里没有它：**照搬**。别人分享的包里那些我们没认出来的条目，
             // 不因为工具不认得就消失——那正是「合并而不是覆盖」。
-            None => {
-                for index in span.start..span.end {
-                    snapshot.nodes[index].render(&mut out);
-                }
-            }
+            None => snapshot.block(*span).render(&mut out),
         }
         cursor = span.end;
     }
@@ -1300,14 +1381,6 @@ fn indent_of(snapshot: &Snapshot) -> String {
         }
         _ => INDENT.to_string(),
     }
-}
-
-/// 一段的 `<path>` 写的是什么（原样，含前导 `./`）。
-fn path_of_block(nodes: &[Node], span: Span) -> Option<String> {
-    children(nodes, span)
-        .into_iter()
-        .find(|kid| kid.name == "path")
-        .map(|kid| kid.text.trim().to_string())
 }
 
 /// 从头生成整份文件。
@@ -1384,27 +1457,21 @@ fn write_block(
 /// **「库里没有」不等于「用户想删掉它」**（同 Pegasus）：新文档在某个字段上是空的，
 /// 就一律照搬基线那几行。用户状态、`kidgame`、`altemulator`、别人包里那些我们不认得
 /// 的元素，都不会因为「中立库里恰好没有对应的值」而在一次导出里蒸发掉。
-#[allow(clippy::too_many_arguments)]
 fn merge_block(
     out: &mut String,
-    snapshot: &Snapshot,
-    span: Span,
+    block: Block<'_>,
     was: Option<&Entry>,
     now: &Entry,
     file_index: usize,
     prefix: Option<&str>,
 ) {
     let Some(game) = now.game() else {
-        for index in span.start..span.end {
-            snapshot.nodes[index].render(out);
-        }
+        block.render(out);
         return;
     };
     let files = paths_of(game, prefix);
     let Some(file) = files.get(file_index).cloned() else {
-        for index in span.start..span.end {
-            snapshot.nodes[index].render(out);
-        }
+        block.render(out);
         return;
     };
     // 哪些元素变了。**没变的一律照搬原文**——这正是「逐字节相同」成立的地方。
@@ -1459,7 +1526,7 @@ fn merge_block(
         changed.insert(name.as_str(), value.clone());
     }
 
-    let kids = children(&snapshot.nodes, span);
+    let kids = block.children();
     let mut written: BTreeSet<&str> = BTreeSet::new();
     // 段里第几个节点是某个要重写的子元素的开头 → 它到哪个节点为止。
     let mut rewrite: BTreeMap<usize, (usize, &str)> = BTreeMap::new();
@@ -1467,14 +1534,13 @@ fn merge_block(
         let Some((element, _)) = changed.get_key_value(kid.name.as_str()) else {
             continue;
         };
-        let end = element_end(&snapshot.nodes, span, kid.at);
-        rewrite.insert(kid.at, (end, element));
+        rewrite.insert(kid.at, (block.element_end(kid.at), element));
     }
 
-    let indent = child_indent(snapshot, span);
-    let mut index = span.start;
+    let indent = block.child_indent();
+    let mut index = block.span.start;
     // 段末尾的空白留到最后——新加的元素要插在 `</game>` 前面。
-    while index < span.end {
+    while index < block.span.end {
         if let Some((end, element)) = rewrite.get(&index) {
             if written.insert(element) {
                 let value = changed.get(element).cloned().unwrap_or_default();
@@ -1483,7 +1549,7 @@ fn merge_block(
             index = *end;
             continue;
         }
-        snapshot.nodes[index].render(out);
+        block.nodes[index].render(out);
         index += 1;
     }
     // 基线里没有、这次新出现的元素，补在 `</game>` **之前**。
@@ -1495,39 +1561,24 @@ fn merge_block(
         let _ = write!(tail, "{indent}<{element}>{}</{element}>", escape(value));
     }
     if !tail.is_empty() {
-        insert_before_close(out, &tail, span, snapshot);
+        insert_before_close(out, &tail, block);
     }
-}
-
-/// 段里子元素的缩进（含前面那个换行）。
-fn child_indent(snapshot: &Snapshot, span: Span) -> String {
-    for index in span.start + 1..span.end {
-        if let Node::Text(raw) = &snapshot.nodes[index]
-            && let Some((_, tail)) = raw.rsplit_once('\n')
-            && tail.chars().all(char::is_whitespace)
-        {
-            return format!("\n{tail}");
-        }
-    }
-    format!("\n{INDENT}{INDENT}")
 }
 
 /// 把补写的元素塞在这一段的 `</game>` 之前。
-fn insert_before_close(out: &mut String, tail: &str, span: Span, snapshot: &Snapshot) {
+fn insert_before_close(out: &mut String, tail: &str, block: Block<'_>) {
     // 段的最后一个节点就是 `</game>`；它前面那一截空白（换行加缩进）也要留在
     // 补写内容的**后面**，不然 `</game>` 会贴到新元素屁股上。
-    let mut close = String::new();
-    let mut lead = String::new();
-    if span.end >= 1 {
-        snapshot.nodes[span.end - 1].render(&mut close);
-        if span.end >= 2
-            && let Node::Text(raw) = &snapshot.nodes[span.end - 2]
-        {
-            lead = raw.clone();
-        }
+    let suffix = block.close_suffix();
+    // **段尾不在手上就接在末尾。** 一段写岔了的原文（比如某个子元素没有结束标签）
+    // 会让重写那一步把 `</game>` 一并吞掉，于是 `out` 末尾根本不是段尾那几个字。
+    // 那时宁可排版难看：往返当场不成立、档位自动降到双向（`assert_capability` 指得出
+    // 第一处分岔），而那是**说得出口的失败**——按长度硬切一刀是 panic。
+    if !out.ends_with(&suffix) {
+        out.push_str(tail);
+        return;
     }
-    let cut = out.len() - close.len() - lead.len();
-    let rest: String = out.split_off(cut);
+    let rest = out.split_off(out.len() - suffix.len());
     out.push_str(tail);
     out.push_str(&rest);
 }
@@ -1708,7 +1759,7 @@ mod tests {
             entries: vec![
                 Entry::new(Body::Collection(Collection {
                     name: "FC".to_string(),
-                    system: Some("FC".to_string()),
+                    directory: Some("FC".to_string()),
                     ..Collection::default()
                 })),
                 Entry::new(Body::Game(Game {
@@ -1723,11 +1774,11 @@ mod tests {
         };
         let text = String::from_utf8(Gamelist.write(&doc, None).expect("写得出")).expect("UTF-8");
         assert_eq!(text.matches("<game>").count(), 2, "{text}");
-        // 平台那一段被剥掉了：`<path>` 是相对**系统 ROM 目录**解析的。
+        // 平台目录那一段被剥掉了：`<path>` 是相对**它**解析的。
         assert!(text.contains("<path>./魂斗罗汉化.zip</path>"), "{text}");
         assert!(text.contains("<path>./魂斗罗日版.zip</path>"), "{text}");
         assert!(!text.contains("FC/"), "平台那一段不该出现：{text}");
-        // 合集段自己不写出去——系统是由文件摆在哪个目录下说的。
+        // 合集段自己不写出去——平台是由文件摆在哪个目录下说的。
         assert!(!text.contains("collection"), "{text}");
     }
 
@@ -1739,7 +1790,7 @@ mod tests {
             entries: vec![
                 Entry::new(Body::Collection(Collection {
                     name: "WII".to_string(),
-                    system: Some("Wii".to_string()),
+                    directory: Some("Wii".to_string()),
                     ..Collection::default()
                 })),
                 Entry::new(Body::Game(Game {
@@ -1755,12 +1806,12 @@ mod tests {
 
     #[test]
     fn 数不出唯一目录时整条键原样写出去() {
-        // 一个平台的内容散在多个顶层目录里：说不出唯一的系统目录，就不猜。
+        // 一个平台的内容散在多个平台目录里：说不出唯一的那一个，就不猜。
         let doc = Document {
             entries: vec![
                 Entry::new(Body::Collection(Collection {
                     name: "FC".to_string(),
-                    system: None,
+                    directory: None,
                     ..Collection::default()
                 })),
                 Entry::new(Body::Game(Game {
@@ -1798,7 +1849,7 @@ mod tests {
     }
 
     #[test]
-    fn 元数据落点是_gamelists_下的每系统一份() {
+    fn 元数据落点是_gamelists_下每个平台目录一份() {
         assert_eq!(Gamelist.metadata_path("FC"), "gamelists/FC/gamelist.xml");
         assert_eq!(
             Gamelist.metadata_path("../etc"),
@@ -1835,10 +1886,10 @@ mod tests {
     }
 
     #[test]
-    fn 路径以系统目录为基准解析回中立库的键() {
+    fn 路径以平台目录为基准解析回中立库的键() {
         let file = Path::new("/卡/gamelists/FC/gamelist.xml");
         let bases = Gamelist.rom_bases(file, Some(Path::new("/库")));
-        assert_eq!(bases[0], PathBuf::from("/库/FC"), "先试系统目录");
+        assert_eq!(bases[0], PathBuf::from("/库/FC"), "先试平台目录");
         assert_eq!(bases[1], PathBuf::from("/库"), "再试主库根");
         // 与 ROM 同处一目录的那种摆法（原版 ES、Batocera、Recalbox）。
         let beside = Path::new("/库/FC/gamelist.xml");
@@ -1920,6 +1971,24 @@ mod tests {
         // 认不出的实体猜错了就是改写用户的字。
         assert_eq!(unescape("a&amp;b&nbsp;c&#65;"), "a&b&nbsp;cA");
         assert_eq!(escape("a&b<c>d"), "a&amp;b&lt;c&gt;d");
+    }
+
+    #[test]
+    fn 子元素没有结束标签时不炸_只是往返不成立() {
+        // 写岔了的原文一定会有。**它可以让往返不成立，但不许让工具崩**——
+        // 与「不可读是第三种状态」（ADR-0021）是同一条纪律：说得出口的失败，不是崩。
+        let 写岔了 = "<gameList><game><path>./甲.zip</path><name>甲</game></gameList>";
+        let baseline = Gamelist.read(写岔了.as_bytes()).expect("读得动");
+        let mut doc = baseline.doc.clone();
+        let Body::Game(game) = &mut doc.entries[0].body else {
+            panic!("是游戏");
+        };
+        game.title = "乙".to_string();
+        game.genres = vec!["射击".to_string()];
+        let bytes = Gamelist.write(&doc, Some(&baseline)).expect("写得出");
+        let text = String::from_utf8(bytes).expect("UTF-8");
+        assert!(text.contains("<name>乙</name>"), "{text}");
+        assert!(text.contains("<genre>射击</genre>"), "{text}");
     }
 
     #[test]

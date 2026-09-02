@@ -7,7 +7,7 @@
 //!
 //! - **Pegasus**：`media/<内容哈希前两位>/<内容哈希>.<扩展名>`——与 [`MediaPool`]
 //!   自己的分层一模一样，路径写进条目的 `assets.*`，前端不需要认得任何约定。
-//! - **ES-DE**：`downloaded_media/<系统>/<类型>/<ROM 主名>.<扩展名>`，条目里
+//! - **ES-DE**：`downloaded_media/<平台目录>/<类型>/<ROM 主名>.<扩展名>`，条目里
 //!   **一个媒体路径都不写**——官方原话是 gamelist.xml 里不再包含媒体信息，
 //!   应用按 ROM 文件名去找。
 //!
@@ -45,13 +45,6 @@ use crate::sublibrary::Selected;
 
 use super::{DesiredFile, FileKind, Stamp};
 
-/// 媒体在子库里的落脚目录（Pegasus 那一种）。
-///
-/// ASCII 且短：目标多半是 exFAT / FAT32 的 SD 卡，路径长度是稀缺资源（票 21 要查的
-/// 正是这个）。**它有可能与主库里一个真叫 `media` 的平台目录撞上**——撞上时那条路径
-/// 会被报成「落点被占」而不是被覆盖，因为工具在清单之外没有写的权利（ADR-0015）。
-pub use crate::adapter::pegasus::MEDIA_DIR;
-
 /// 铺出来的东西。
 #[derive(Debug, Clone, Default)]
 pub struct Laid {
@@ -65,6 +58,12 @@ pub struct Laid {
     pub not_in_pool: u64,
     /// 认不出是什么的图有几张——**一张都不铺**。
     pub unknown_kind: u64,
+    /// **被同类挤掉**的图有几张。
+    ///
+    /// 靠文件名找媒体的格式（ES-DE）里，一个变体的一个类型只**放得下一张**——落点
+    /// 是 `<ROM 主名>.<扩展名>`，第二张截图与第一张是同一条路径。挤掉不是错，是这个
+    /// 格式的容量；但**得说出来**，不然它就是一次静默的丢失。
+    pub crowded_out: u64,
 }
 
 impl Laid {
@@ -133,6 +132,12 @@ pub fn lay(
                     }
                 }
                 if !placed.insert(path.clone()) {
+                    // 同一条路径已经铺过了。**两种情形，只有一种要报**：内容寻址那一种
+                    // 是同一份内容被多个条目引用（本来就该只有一份，见模块文档），
+                    // 按文件名那一种是同一个变体的第二张图被同类挤掉——那是丢东西。
+                    if placement.slot.is_none() {
+                        out.crowded_out += 1;
+                    }
                     continue;
                 }
                 out.from_pool.insert(path.clone(), at);

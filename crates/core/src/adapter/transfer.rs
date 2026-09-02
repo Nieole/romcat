@@ -163,7 +163,7 @@ pub fn import(
         };
         // **条目里那条相对路径以哪儿为基准，归适配器答**（[`Adapter::rom_bases`]）：
         // Pegasus 的 `file:` 是相对元数据文件所在目录的，ES gamelist 躺在
-        // `gamelists/<系统>/` 下而 ROM 在 `<主库根>/<系统>/` 下。
+        // `gamelists/<平台目录>/` 下而 ROM 在 `<主库根>/<平台目录>/` 下。
         let bases = adapter.rom_bases(&absolute, root.as_deref());
         let mut batch = Vec::new();
         for entry in &parsed.doc.entries {
@@ -366,9 +366,9 @@ pub fn export(
     // 1. **按合集名认**——维护者自己那份 `metadata.pegasus.txt` 叫什么名字是他的事，
     //    我们生成的叫 `FC.metadata.pegasus.txt`。认出来之后落点也改用他原来的名字，
     //    于是「把自己的文件导进来、再导出到同一个目录」就是一次真正的往返。
-    // 2. **按落点路径认**——ES gamelist 的文档里没有合集段（系统是由文件摆在哪个
+    // 2. **按落点路径认**——ES gamelist 的文档里没有合集段（平台是由文件摆在哪个
     //    目录下说的），第一条路对它一句话都说不出来。而它的落点本来就是唯一的
-    //    （`gamelists/<系统>/gamelist.xml`），路径本身就是身份。
+    //    （`gamelists/<平台目录>/gamelist.xml`），路径本身就是身份。
     //
     // ⚠️ **路径从 `read_dir` 来，不从快照那一列来。** 快照的键是 NFC 形式，它是身份；
     // 而 macOS 上 NTFS 交出来的名字是 NFD（ADR-0020：1.99% 的路径两种形式不同）。
@@ -608,15 +608,28 @@ fn rebase(doc: &Document, baseline: Option<&Parsed>) -> Document {
         }
     }
 
-    // 这份文档说的是哪个合集。**同一个文件在两个格式里可能写成两种路径**：中立库的键
-    // 带着平台那一段（`FC/魂斗罗.zip`），而 ES gamelist 的 `<path>` 是相对**系统 ROM
-    // 目录**的（`魂斗罗.zip`）。对回基线时两种都试，否则同一个文件会被当成两条，
+    // 这份文档要剥的是哪一段。**同一个文件在两个格式里可能写成两种路径**：中立库的键
+    // 带着**平台目录**那一段（`FC/魂斗罗.zip`），而 ES gamelist 的 `<path>` 是相对
+    // 那个目录的（`魂斗罗.zip`）。对回基线时两种都试，否则同一个文件会被当成两条，
     // 基线那一段永远对不上、一趟比一趟长。
-    let collection = doc
+    //
+    // **平台目录与合集名都要试**：真库 22 个平台里有 12 个两者对不上（`WII` 的目录叫
+    // `Wii`），只试合集名的话，那 12 个平台这条判据一次都不命中——于是 `origin` 退到
+    // 「标题一字不差」那一档，而标题在这个库里大量重名（见上面那段注释）。
+    let prefixes: Vec<String> = doc
         .entries
         .iter()
         .find_map(|entry| entry.collection())
-        .map(|collection| format!("{}/", collection.name));
+        .map(|collection| {
+            let mut out = vec![format!("{}/", collection.name)];
+            if let Some(directory) = &collection.directory
+                && directory != &collection.name
+            {
+                out.push(format!("{directory}/"));
+            }
+            out
+        })
+        .unwrap_or_default();
 
     let mut used: BTreeSet<usize> = BTreeSet::new();
     let mut entries = Vec::with_capacity(doc.entries.len());
@@ -636,10 +649,10 @@ fn rebase(doc: &Document, baseline: Option<&Parsed>) -> Document {
                 }
                 for file in &game.files {
                     lanes.extend(by_file.get(file.as_str()));
-                    if let Some(prefix) = &collection
-                        && let Some(rest) = file.strip_prefix(prefix.as_str())
-                    {
-                        lanes.extend(by_file.get(rest));
+                    for prefix in &prefixes {
+                        if let Some(rest) = file.strip_prefix(prefix.as_str()) {
+                            lanes.extend(by_file.get(rest));
+                        }
                     }
                 }
                 if !game.title.is_empty() {
@@ -722,6 +735,46 @@ mod tests {
         // 在交给 `catalog_key` 之前就被约掉了，而不是被它悄悄丢掉。
         let out = normalize(Path::new("/没有这个目录/FC/../GBA/x.zip"));
         assert_eq!(out, PathBuf::from("/没有这个目录/GBA/x.zip"));
+    }
+
+    #[test]
+    fn 平台目录与合集名对不上时也对得回基线() {
+        // 真库 22 个平台里有 12 个两者对不上（`WII` 的目录叫 `Wii`）。基线那一侧写的是
+        // 相对平台目录的路径，新文档这一侧是中立库的键——只试合集名的话，那 12 个平台
+        // 「有一条 file 相同」这条判据一次都不命中，`origin` 退到「标题一字不差」，
+        // 而标题在这个库里大量重名。
+        let 基线 = Parsed {
+            doc: Document {
+                entries: vec![Entry {
+                    origin: Some(0),
+                    body: Body::Game(super::super::Game {
+                        title: "甲".to_string(),
+                        files: vec!["塞尔达.rar".to_string()],
+                        ..super::super::Game::default()
+                    }),
+                }],
+            },
+            source: Vec::new(),
+            preserved: super::super::Preserved::default(),
+            lossy: Vec::new(),
+        };
+        let doc = Document {
+            entries: vec![
+                Entry::new(Body::Collection(super::super::Collection {
+                    name: "WII".to_string(),
+                    directory: Some("Wii".to_string()),
+                    ..super::super::Collection::default()
+                })),
+                Entry::new(Body::Game(super::super::Game {
+                    // 标题与基线那一段**不一样**：能对上就只可能是靠路径。
+                    title: "塞尔达传说".to_string(),
+                    files: vec!["Wii/塞尔达.rar".to_string()],
+                    ..super::super::Game::default()
+                })),
+            ],
+        };
+        let rebased = rebase(&doc, Some(&基线));
+        assert_eq!(rebased.entries[1].origin, Some(0), "该靠路径对回基线那一段");
     }
 
     #[test]

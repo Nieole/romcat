@@ -3649,6 +3649,8 @@ struct Prepared {
     media_not_in_pool: u64,
     /// 认不出是什么、因此一张都没铺的图有几张。
     media_unknown_kind: u64,
+    /// 靠文件名找媒体的格式里，被同类挤掉、因此没铺出去的图有几张。
+    media_crowded_out: u64,
     /// 折出了几个前端条目。
     entries: u64,
     /// 子库记着的能力档案在眼下这份名册里找不到——退回了「不作声称」。
@@ -3760,6 +3762,7 @@ fn prepare(
         broken: loaded.broken.len(),
         media_not_in_pool: media.not_in_pool,
         media_unknown_kind: media.unknown_kind,
+        media_crowded_out: media.crowded_out,
         entries: frontend.entries,
         missing_capability,
         stale_claims: profile.stale_claims(&today()),
@@ -3835,6 +3838,13 @@ fn warn_about(ready: &Prepared, name: &str) {
         eprintln!(
             "认不出是什么的图有 {} 张，**一张都没铺**——猜错了就是把说明书当封面。",
             thousands(ready.media_unknown_kind),
+        );
+    }
+    if ready.media_crowded_out > 0 {
+        eprintln!(
+            "有 {} 张图被同类挤掉、没铺出去：这个格式靠**文件名**找媒体，\n\
+             一个游戏的一个类型只放得下一张。挤掉的是同一个游戏的第二张起。",
+            thousands(ready.media_crowded_out),
         );
     }
     if let Some(missing) = &ready.missing_capability {
