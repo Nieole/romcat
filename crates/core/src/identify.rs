@@ -88,6 +88,7 @@ pub mod fuzzy;
 pub mod header;
 pub mod ident;
 pub mod iso9660;
+pub mod model;
 pub mod naming;
 pub mod report;
 pub mod scope;
@@ -100,6 +101,7 @@ use std::path::{Path, PathBuf};
 
 use crate::catalog::identify::{
     Candidate, CartFactRow, Confidence, ContentHash, DiscFactRow, EntryFact, Identification,
+    ModelAnswerRow,
 };
 use crate::catalog::{Catalog, CatalogError, Provenance, State, VariantRow};
 use crate::classify::{self, Category};
@@ -135,9 +137,9 @@ pub enum IdentifyError {
 
 /// 这一趟能用的**弹药**：撞哈希的 DAT 库、裁决攒出来的沉淀库、撞名字的中文离线索引。
 ///
-/// 三样捆在一起传而不是散成三个参数，是因为它们**永远同进同出**：每一层识别都要问过
-/// 它们才敢说话，而加第四样弹药（票 12 的模型推断就是一样）时，散着的写法要把
-/// 所有调用处改一遍——那正是这一趟已经干过一次的事。
+/// 四样捆在一起传而不是散成四个参数，是因为它们**永远同进同出**：每一层识别都要问过
+/// 它们才敢说话。第四样（票 12 的模型推断）加进来时，这条文档预言的那件事真的发生了
+/// ——而因为它们本来就捆着，调用处一处都没改。
 #[derive(Clone, Copy)]
 pub struct Ammo<'a> {
     /// DAT 库：世上有哪些发行版。
@@ -146,6 +148,8 @@ pub struct Ammo<'a> {
     pub verdicts: &'a verdict::Index,
     /// 文件名那一层认得的东西与调得动的参数（票 11）。
     pub naming: &'a Naming<'a>,
+    /// **模型推断那一层**的缓存、价钱、上限与（要真问时的）网络句柄（票 12）。
+    pub guessing: &'a model::Guessing<'a>,
 }
 
 /// 识别的选项。
@@ -264,6 +268,8 @@ pub struct Outcome {
     pub sha1_only: u64,
     /// 文件名那一层这一趟干了什么（票 11）。
     pub fuzzy: FuzzyCount,
+    /// **模型推断那一层**这一趟干了什么（票 12）：残渣多少、问了几个请求、花了多少。
+    pub model: model::ModelCount,
     /// 剥离规则**归不了类的记号**，按出现次数从多到少。
     ///
     /// **它是这一层的主要产出之一**：维护者照着它往剥离规则里补，补完重跑一遍就看得见
@@ -354,6 +360,8 @@ pub fn run(
         // 去撞——`FC/` 底下三千个 zip 挤在一起时，目录名属于谁根本说不清
         // （判据与刮削那一侧认本地媒体的规则同源，`scrape::local`）。
         exclusive_dirs: exclusive_dirs(&variants),
+        // 谁挨着谁——模型推断那一层的「同目录还有」（票 12）。
+        neighbours: Neighbours::build(&variants),
         ..Run::default()
     };
     let mut batch: Vec<Identification> = Vec::new();
@@ -378,8 +386,27 @@ pub fn run(
     flush(catalog, &mut batch, &mut state)?;
     progress(&state.progress);
 
+    // ⭐ **第二趟：模型推断兜底**（票 12）。
+    //
+    // 它跑在主循环**之后**而不是里面，理由有两条，都不是风格问题：
+    //
+    // 1. **批量打包**要先把一批凑齐——边跑边问就退化成逐条问。
+    // 2. **「一共要问多少、要花多少」这个数，只有残渣全部确定之后才说得出来**，
+    //    而那正是发第一个请求之前必须先摆出来的东西（[`model::Plan`]）。
+    //
+    // 被中断时整个不跑：那时残渣是半份的，照着半份算出来的计划会骗人。
+    if !interrupted {
+        ask_model(catalog, ammo, &variants, &mut state, cancel)?;
+    }
+
+    let mut report = IdentifyReport::build(catalog, ammo.repo)?;
+    // 花费要留得下痕迹：`--json` 存的是这份报告，只在标准错误上说一句的话，跑完就没了。
+    if state.model.residue > 0 {
+        report.model = Some(state.model.clone());
+    }
+
     Ok(Outcome {
-        report: IdentifyReport::build(catalog, ammo.repo)?,
+        report,
         interrupted,
         read_bytes: state.progress.read_bytes,
         read_files: state.progress.read_files,
@@ -395,7 +422,124 @@ pub fn run(
         sha1_only: state.sha1_only,
         fuzzy: state.fuzzy,
         unknown_marks: rank_marks(state.unknown_marks),
+        model: state.model,
     })
+}
+
+/// **模型推断那一层**：把残渣打包问出去，答案落库，候选追加到已有的结论上。
+///
+/// 三件事按这个顺序，一件都不能挪：
+///
+/// 1. **先算计划**。它在发第一个请求之前就说得出问多少个、打成几个请求、花费的下界与
+///    上界——而 `--model-plan` 到这里就停了，一个请求都不发。
+/// 2. **一批一批问**。每收到一个响应就**当场落库**：这一层每一条都付过钱，攒到最后
+///    一次性写的话，跑到一半被 Ctrl-C 就等于把已经花掉的钱扔了。
+/// 3. **候选只追加，不重写结论**（[`Catalog::append_candidates`]）。
+fn ask_model(
+    catalog: &mut Catalog,
+    ammo: &Ammo<'_>,
+    variants: &[VariantRow],
+    state: &mut Run,
+    cancel: &CancelToken,
+) -> Result<(), IdentifyError> {
+    let guessing = ammo.guessing;
+    let pending = std::mem::take(&mut state.model_pending);
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let questions: Vec<model::Question> = pending.iter().map(|one| one.question.clone()).collect();
+    let plan = model::plan(
+        &guessing.model,
+        guessing.price,
+        &guessing.limits,
+        &questions,
+        state.model.from_cache,
+        &guessing.checked,
+    );
+    state.model.estimated_input_tokens = plan.input_tokens;
+    state.model.batch_size = u64::try_from(guessing.limits.batch.max(1)).unwrap_or(0);
+    // **摆在第一个请求之前。** 「花费可预估」说的是花钱之前看得见，
+    // 不是跑完之后报告里有个数。
+    if let Some(announce) = guessing.announce {
+        announce(&plan);
+    }
+    state.model.plan = Some(plan);
+    let Some(net) = guessing.net else {
+        // 只用缓存的那一趟（含 `--model-plan`）：计划算出来了，一个请求都不发。
+        return Ok(());
+    };
+    let by_key: BTreeMap<&str, &VariantRow> = variants
+        .iter()
+        .map(|variant| (variant.key.as_str(), variant))
+        .collect();
+    let batch = guessing.limits.batch.max(1);
+    for chunk in pending.chunks(batch) {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let asked: Vec<model::Question> = chunk.iter().map(|one| one.question.clone()).collect();
+        let body = model::body_of(&guessing.model, &guessing.limits, &asked);
+        let before = net.usage();
+        let response = match net.ask(&body) {
+            Ok(response) => response,
+            // **停下来不是错误**：手里已经落库的答案照旧有效，报告里说清为什么停。
+            Err(model::Failure::Halt(halt)) => {
+                state.model.halted = Some(halt.describe());
+                state.model.halt = Some(halt.kind());
+                break;
+            }
+            // 只有这一批没问成，别的照问。
+            Err(model::Failure::Skip { why }) => {
+                if state.model.halted.is_none() {
+                    state.model.halted = Some(format!("有一批没问成：{why}"));
+                }
+                continue;
+            }
+        };
+        let after = net.usage();
+        state.model.usage = after;
+        catalog.put_model_call(
+            &guessing.model,
+            u64::try_from(chunk.len()).unwrap_or(0),
+            after.input_tokens - before.input_tokens,
+            after.output_tokens - before.output_tokens,
+            after.cost_micros - before.cost_micros,
+        )?;
+        // 真的答话的那个模型照抄响应里的，未必等于我们请求的那个。
+        let answered_by = response
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(guessing.model.as_str())
+            .to_string();
+        let answers = model::parse_answers(&response, chunk.len());
+        let mut rows: Vec<ModelAnswerRow> = Vec::new();
+        for (at, answer) in &answers {
+            let Some(one) = chunk.get(*at) else {
+                continue;
+            };
+            rows.push(ModelAnswerRow {
+                variant_key: one.question.variant_key.clone(),
+                ask: one.ask.clone(),
+                model: answered_by.clone(),
+                answer: answer.to_json(),
+            });
+        }
+        catalog.put_model_answers(&rows)?;
+        // **问出去的按这一批的条数算，不按答回来的条数算。** 少答的那几条钱一样付了，
+        // 记成「没问」的话，报告会说这一趟比实际便宜。
+        state.model.asked += u64::try_from(chunk.len()).unwrap_or(0);
+        for (at, answer) in &answers {
+            let Some(question) = chunk.get(*at).map(|one| &one.question) else {
+                continue;
+            };
+            let Some(variant) = by_key.get(question.variant_key.as_str()) else {
+                continue;
+            };
+            let built = fold_answer(&mut state.model, variant, question, answer, &answered_by);
+            catalog.append_candidates(&question.variant_key, &built)?;
+        }
+    }
+    Ok(())
 }
 
 /// 只装着一个变体的那些目录。
@@ -420,6 +564,94 @@ fn exclusive_dirs(variants: &[VariantRow]) -> BTreeSet<String> {
 fn parent_dir(key: &str) -> Option<&str> {
     let at = key.rfind('/')?;
     (at > 0).then(|| &key[..at])
+}
+
+/// **谁挨着谁**：每个目录下的变体名字，连每个变体在自己那个目录里排第几。
+///
+/// 模型推断那一层的「同目录还有」（票 12）要它。捏成一个类型而不是两张散着的表，
+/// 是因为**那个下标离了那张名单没有意义**——两张表分开传，早晚有人拿甲的下标去查乙。
+#[derive(Debug, Default)]
+struct Neighbours {
+    /// 目录 → 这个目录下每个变体的名字，按键的顺序。
+    by_dir: BTreeMap<String, Vec<String>>,
+    /// 变体的键 → 它在上面那张名单里排第几。
+    ///
+    /// **不存它就得每次现找**（`position()`），而那是一次线性扫描：真库里
+    /// `3ds/3DSCH/` 这样的目录底下几千个变体，一次识别就是几百万次比较——
+    /// 实测那让整趟识别从 38 秒涨到 91 秒。
+    at: BTreeMap<String, usize>,
+}
+
+impl Neighbours {
+    /// 一趟算完（`variants` 本来就整份在手上），而不是每个变体查一次库。
+    ///
+    /// **名字整份留着，不截断**：全库加起来正好是变体的条数（真机 46,444 个名字，
+    /// 几 MB）。截断的代价是真的——只留目录里头几个的话，同一个目录下每一条残渣
+    /// 拿到的**是同一组名字**，与它自己旁边是什么无关，那就不是「同目录其他文件」，
+    /// 是「本目录头几个」。
+    fn build(variants: &[VariantRow]) -> Self {
+        let mut out = Self::default();
+        for variant in variants {
+            let Some(dir) = parent_dir(&variant.key) else {
+                continue;
+            };
+            let slot = out.by_dir.entry(dir.to_string()).or_default();
+            out.at.insert(variant.key.clone(), slot.len());
+            slot.push(file_name_of_key(&variant.key).to_string());
+        }
+        out
+    }
+
+    /// 同一个目录下**紧挨着它**的那几个变体叫什么。
+    ///
+    /// **取的是它左右两侧的邻居，不是目录的开头**：一个装着三千个 zip 的目录里，
+    /// 头几个的名字对第两千条说明不了什么，而挨着它的那几个多半是同一批东西
+    /// （同一个整理者、同一次打包、同一个系列）——那才是这条上下文的全部价值。
+    ///
+    /// **自己那一条剔掉**：问「这是什么」的时候把问题本身混进上下文里，
+    /// 只会让模型把它当成一条旁证。
+    fn around(&self, key: &str) -> Vec<String> {
+        let Some(dir) = parent_dir(key) else {
+            return Vec::new();
+        };
+        let Some(names) = self.by_dir.get(dir) else {
+            return Vec::new();
+        };
+        let at = self.at.get(key).copied().unwrap_or(0);
+        let from = at.saturating_sub(model::CONTEXT_LIMIT / 2);
+        names
+            .iter()
+            .enumerate()
+            .skip(from)
+            .filter(|(seat, _)| *seat != at)
+            .map(|(_, name)| name.clone())
+            .take(model::CONTEXT_LIMIT)
+            .collect()
+    }
+}
+
+/// 把一条答复折成候选，顺手记进账上。
+///
+/// 缓存那一路与真问那一路**共用它**：两边都要「折候选 + 数一笔」，各写一遍的话，
+/// 加一个计数器就会漏掉其中一处——而漏掉的那一处不会有任何人告诉你
+/// （同 [`CartCount`] 与 [`FuzzyCount`] 捆成一个类型的道理）。
+fn fold_answer(
+    count: &mut model::ModelCount,
+    variant: &VariantRow,
+    question: &model::Question,
+    answer: &model::Answer,
+    answered_by: &str,
+) -> Vec<Candidate> {
+    if answer.guesses.is_empty() {
+        // **模型自己说不出**是这一层的正当产出，不是失败：那批模拟器、存档与主题包
+        // 压根不是任何一部作品。把它数出来，才看得出这一层花的钱有多少落在了这上面。
+        count.speechless += 1;
+        return Vec::new();
+    }
+    let built = model::candidates_of(variant, question, answer, answered_by);
+    count.with_candidates += 1;
+    count.candidates += u64::try_from(built.len()).unwrap_or(0);
+    built
 }
 
 /// 认不出的记号按出现次数排个序，多的在前。
@@ -472,6 +704,16 @@ struct Run {
     fuzzy: FuzzyCount,
     /// 剥离规则归不了类的记号，连出现次数。
     unknown_marks: BTreeMap<String, u64>,
+    /// 谁挨着谁（模型推断那一层的「同目录还有」）。
+    neighbours: Neighbours,
+    /// 模型推断那一层这一趟干了什么。
+    model: model::ModelCount,
+    /// **落到模型推断这一层、而缓存里还没有答案**的那些问题，连它们的提问指纹。
+    ///
+    /// 攒起来等主循环跑完再打包问，而不是边跑边问：批量打包本来就要求先把一批凑齐，
+    /// 而且「一共要问多少、要花多少」这个数只有在残渣全部确定之后才说得出来
+    /// ——**而那正是发第一个请求之前必须先摆出来的东西**。
+    model_pending: Vec<model::Asking>,
 }
 
 /// DAT 库里有没有这个平台的记录。平台认不出来时当作**有**——那时无从判断，
@@ -518,7 +760,7 @@ fn identify_variant(
     variant: &VariantRow,
     state: &mut Run,
 ) -> Result<Identification, IdentifyError> {
-    let (repo, verdicts, naming) = (ammo.repo, ammo.verdicts, ammo.naming);
+    let (repo, verdicts) = (ammo.repo, ammo.verdicts);
     let members = catalog.variant_members(&variant.key)?;
     let (mut units, visible) = collect(catalog, &members)?;
     // 算过的哈希先取回来。**这一步不读盘**，只是把中立库里存着的那套判据装回 units
@@ -694,7 +936,7 @@ fn identify_variant(
         &units,
         &mut from_ids,
         read_bytes,
-        naming,
+        ammo,
         state,
     )?;
     if unknown {
@@ -2046,9 +2288,10 @@ fn assemble(
     units: &[ContentUnit],
     from_ids: &mut FromIds,
     read_bytes: u64,
-    naming: &Naming<'_>,
+    ammo: &Ammo<'_>,
     state: &mut Run,
 ) -> Result<Identification, CatalogError> {
+    let naming = ammo.naming;
     let evidence = &from_ids.evidence;
     let from_serial = &mut from_ids.candidates;
     // 候选与它的**父条目名**成对走：`cloneof` 是 No-Intro 的 parent/clone 关系，
@@ -2178,6 +2421,59 @@ fn assemble(
         }),
         _ => None,
     };
+
+    // ⭐ **最后一档：模型推断兜底**（票 12）。
+    //
+    // 判据是「**一条候选都没有**」，比文件名那一层的「没有自动通过的候选」严一档——
+    // 已经有东西可裁的变体不重复花钱。**结论与理由在上面已经算完了，这一层不动它们**：
+    // 「rar 容器这一层还穿不透」那类理由是真事实，让一句猜测覆盖掉是净损失
+    // （`model` 的模块文档说得更细）。
+    let mut candidates = candidates;
+    if candidates.is_empty() && state_of != State::Skipped && ammo.guessing.ready() {
+        state.model.residue += 1;
+        let question = model::Question {
+            variant_key: variant.key.clone(),
+            main_key: variant.main_key.clone(),
+            platform: units
+                .iter()
+                .find_map(|unit| unit.cart.as_ref().and_then(|f| f.platform.clone())),
+            declared: variant.platform.clone(),
+            names: names_of(variant, units, state)
+                .into_iter()
+                .map(|named| (named.text, named.from))
+                .collect(),
+            inner: units
+                .iter()
+                .filter(|unit| !unit.inner.is_empty())
+                .map(|unit| file_name_of_key(&unit.inner).to_string())
+                .take(model::CONTEXT_LIMIT)
+                .collect(),
+            siblings: state.neighbours.around(&variant.key),
+            // **措辞在 `model` 那一侧**：那几句是提示词的一部分，而提问指纹认的就是它们。
+            facts: model::head_fields(
+                units.iter().filter_map(|unit| unit.disc.as_ref()),
+                units.iter().filter_map(|unit| unit.cart.as_ref()),
+            ),
+            bytes: variant.bytes,
+        };
+        let ask = question.ask(&ammo.guessing.model, &ammo.guessing.limits);
+        match ammo.guessing.answers.get(&variant.key, &ask) {
+            // 问过了：**这一趟一分钱都不花**，直接把候选重建出来。
+            // 依据里印的是**当时真答话的那个模型**，不是这一趟命令行上写的那一个。
+            Some((answered_by, answer)) => {
+                state.model.from_cache += 1;
+                candidates.extend(fold_answer(
+                    &mut state.model,
+                    variant,
+                    &question,
+                    answer,
+                    answered_by,
+                ));
+            }
+            // 没问过：排进队里，等主循环跑完一起打包问。
+            None => state.model_pending.push(model::Asking { question, ask }),
+        }
+    }
 
     Ok(Identification {
         variant_key: variant.key.clone(),

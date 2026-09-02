@@ -26,6 +26,7 @@ use romcat_core::dat::sync::{self as dat_sync, Action, SyncOptions};
 use romcat_core::filename::Rules;
 use romcat_core::fs::RealFs;
 use romcat_core::identify;
+use romcat_core::identify::model;
 use romcat_core::path;
 use romcat_core::platform::Manifest;
 use romcat_core::report::{DuplicateDetails, HealthReport, human_bytes, pad, thousands};
@@ -459,6 +460,9 @@ struct IdentifyArgs {
     #[command(flatten)]
     tuning: TuningArgs,
 
+    #[command(flatten)]
+    guessing: ModelArgs,
+
     /// 把报告另存为 JSON
     #[arg(long, value_name = "文件")]
     json: Option<PathBuf>,
@@ -466,6 +470,94 @@ struct IdentifyArgs {
     /// 不打印文本报告
     #[arg(long)]
     quiet: bool,
+}
+
+/// **模型推断兜底**那一层的开关与闸（票 12）。
+///
+/// 默认**整层关着**：它是识别管线里唯一花钱的一层，而花钱这件事绝不该是默认行为。
+/// 缓存里已有的答案不受这个开关影响——那些钱已经付过了，白拿。
+#[derive(Debug, Args)]
+struct ModelArgs {
+    /// 打开**模型推断兜底**：把前面各层全部落空的变体打包问模型
+    ///
+    /// 它要一套凭据（`ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`），
+    /// 读不到就不启动、**绝不匿名试探**。这一层的候选**永不自动通过**，
+    /// 一律进待确认队列（ADR-0002）
+    #[arg(long)]
+    model: bool,
+
+    /// 只算这一趟会问多少、花多少，**一个请求都不发**
+    ///
+    /// 不需要凭据。花钱之前先看一眼这个
+    #[arg(long)]
+    model_plan: bool,
+
+    /// 问哪个模型。**必须在价目表里**——不知道 token 值多少钱就设不了花费上限
+    #[arg(long, value_name = "名字", default_value = romcat_core::identify::model::DEFAULT_MODEL)]
+    model_id: String,
+
+    /// 一个请求里打包几条
+    #[arg(long, value_name = "条数", default_value_t = romcat_core::identify::model::DEFAULT_BATCH)]
+    model_batch: usize,
+
+    /// 每一条最多要几个猜测
+    #[arg(long, value_name = "条数", default_value_t = romcat_core::identify::model::DEFAULT_GUESSES)]
+    model_guesses: usize,
+
+    /// 这一趟最多发几个请求
+    #[arg(long, value_name = "次数", default_value_t = romcat_core::identify::model::DEFAULT_BUDGET)]
+    model_budget: u64,
+
+    /// 这一趟最多花多少美元
+    ///
+    /// 卡的是**实际花费**：每收到一个响应就按 `usage` 里的真数字加一笔，加到头就停。
+    /// 因此最多超出一个请求的顶，而那个顶在计划里印得出来
+    #[arg(long, value_name = "美元", default_value = "5.00")]
+    model_max_spend: f64,
+
+    /// 一个响应最多多少输出 token。**它同时是花费上界的那一半**
+    #[arg(long, value_name = "token", default_value_t = romcat_core::identify::model::DEFAULT_MAX_OUTPUT)]
+    model_max_tokens: u64,
+
+    /// 力度：`low` / `medium` / `high` / `xhigh` / `max`
+    ///
+    /// 力度进**提问指纹**——换一档会自动重问，不必先把缓存清掉
+    #[arg(long, value_name = "力度", default_value = romcat_core::identify::model::DEFAULT_EFFORT)]
+    model_effort: String,
+
+    /// 两次请求之间至少隔多少毫秒（下限 200）
+    #[arg(long, value_name = "毫秒", default_value_t = 1000)]
+    model_interval_ms: u64,
+
+    /// 换一份价目表
+    #[arg(long, value_name = "文件")]
+    model_pricing: Option<PathBuf>,
+
+    /// 把内置价目表导出成一份底稿，照着改
+    #[arg(long, value_name = "文件")]
+    model_dump_pricing: Option<PathBuf>,
+}
+
+impl ModelArgs {
+    /// 请求间隔的**下限**：默认值挡不住 `--model-interval-ms 0`，
+    /// 而「频率有明确上限」说的正是挡得住。
+    const MIN_INTERVAL_MS: u64 = 200;
+
+    /// 折成库那一层的闸。
+    fn limits(&self) -> romcat_core::identify::model::Limits {
+        romcat_core::identify::model::Limits {
+            batch: self.model_batch.max(1),
+            guesses: self.model_guesses.max(1),
+            budget: self.model_budget,
+            // 美元折成微美元。上限是整数运算的输入，从这里就折干净。
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            spend_cap_micros: (self.model_max_spend.max(0.0) * 1_000_000.0) as u64,
+            max_output_tokens: self.model_max_tokens,
+            effort: self.model_effort.clone(),
+            interval: Duration::from_millis(self.model_interval_ms.max(Self::MIN_INTERVAL_MS)),
+            backoff: romcat_core::identify::model::BACKOFF,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -1218,6 +1310,20 @@ fn run_shape(args: &ShapeArgs) -> ExitCode {
 /// 读盘只发生在一处：裸文件的哈希只能从字节里来，容器里的 CRC-32 零解压就有（票 03）。
 /// `--no-read-library` 把那一处也关掉，于是一个字节都不读主库。
 fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
+    // 价目表底稿：与 `--dump-priorities` / `names --dump-builtin` 同一个套路。
+    if let Some(path) = &args.guessing.model_dump_pricing {
+        match write_file(path, model::Pricing::BUILTIN.as_bytes()) {
+            Ok(()) => {
+                println!(
+                    "内置价目表已写入 {}。改完用 `--model-pricing {}` 生效。",
+                    path.display(),
+                    path.display()
+                );
+                return ExitCode::SUCCESS;
+            }
+            Err(error) => return fail(format!("写不进 {}：{error}", path.display())),
+        }
+    }
     let (slug, located_by) = match locate(args.library.as_deref(), args.root.as_deref()) {
         Ok(pair) => pair,
         Err(message) => return fail(message),
@@ -1311,6 +1417,104 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
         eprintln!("还没取过中文离线数据源，文件名那一层不跑。要它就先跑一次 `romcat zh sync`。");
     }
 
+    // **模型推断兜底**（票 12）：默认整层关着。缓存里已有的答案不受这个开关影响——
+    // 那些钱已经付过了，白拿；只有「真的再问一次」才要 `--model`。
+    let answers = match catalog.model_answers() {
+        Ok(rows) => model::Answers::build(rows),
+        Err(error) => return fail(format!("问过的答案读不动：{error}")),
+    };
+    let pricing = match args.guessing.model_pricing.as_deref() {
+        Some(path) => match model::Pricing::load(path) {
+            Ok(pricing) => pricing,
+            Err(error) => return fail(format!("{error}")),
+        },
+        None => model::Pricing::builtin(),
+    };
+    // **价目表里没有这个模型就整层不启动**：不知道 token 值多少钱，
+    // 「花费上限」就是一句空话（`pricing.toml` 开头写的就是这件事）。
+    let price = match pricing.price(&args.guessing.model_id) {
+        Some(price) => price,
+        None => {
+            // 拒的判据是「这一层这一趟会不会做事」，不只是「要不要发请求」：
+            // 库里存着问过的答案时它照样会算一份计划，而一份用 0 价算出来的计划
+            // 会印出「花费 0.00 美元」——那比不印还糟。
+            if args.guessing.model || args.guessing.model_plan || !answers.is_empty() {
+                return fail(format!(
+                    "价目表里没有模型「{}」，于是花费上限设不了，这一层不启动。\
+                     表里有的是：{}。用 --model-pricing 换一份，\
+                     或者 --model-dump-pricing 导一份底稿照着加。",
+                    args.guessing.model_id,
+                    pricing.known().join("、"),
+                ));
+            }
+            model::Price {
+                input_per_mtok: 0,
+                output_per_mtok: 0,
+            }
+        }
+    };
+    let limits = args.guessing.limits();
+    // 凭据读不到就不启动，**绝不匿名试探**（票 14 同一条纪律）。
+    //
+    // **`--model-plan` 压过 `--model`**：那个开关的帮助文本写着「一个请求都不发」，
+    // 两个同给时若照发不误，就是帮助文本在撒谎——而它撒的谎正好是花钱那一头。
+    let credentials = if args.guessing.model && !args.guessing.model_plan {
+        match model::Credentials::from_env() {
+            Some(credentials) => Some(credentials),
+            None => {
+                return fail(format!(
+                    "模型推断这一层要一套凭据，{} 两个环境变量都没有设。\
+                     **不匿名试探**——没有凭据的请求必然被拒，那一发对谁都没有好处。\
+                     只想看看要花多少钱就用 --model-plan，它一个请求都不发。",
+                    model::ENV_KEYS.join(" 或 "),
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    let fetcher = HttpFetcher::new();
+    let net = credentials.map(|credentials| {
+        model::Inference::new(&fetcher, limits.clone(), price, credentials, cancel)
+    });
+    // 计划**在第一个请求发出去之前**就摆出来（不是跑完之后才印）。
+    let announce = |plan: &model::Plan| eprintln!("{}", render_plan(plan));
+    let guessing = model::Guessing {
+        answers: &answers,
+        net: net.as_ref(),
+        announce: Some(&announce),
+        planning: args.guessing.model_plan,
+        model: args.guessing.model_id.clone(),
+        price,
+        checked: pricing.checked().to_string(),
+        limits,
+    };
+    if guessing.asking() {
+        eprintln!(
+            "模型推断兜底**开着**（{}，力度 {}，一批 {} 条，最多 {} 个请求 / {}）。\
+             价目表核实于 {}（{}）。这一层的候选**永不自动通过**，全部进待确认队列。",
+            guessing.model,
+            guessing.limits.effort,
+            guessing.limits.batch,
+            guessing.limits.budget,
+            model::dollars(guessing.limits.spend_cap_micros),
+            pricing.checked(),
+            pricing.cite(),
+        );
+    } else if args.guessing.model_plan {
+        if args.guessing.model {
+            eprintln!(
+                "--model 与 --model-plan 同给，按 --model-plan 办：只算计划，一个请求都不发。"
+            );
+        }
+        eprintln!("只算计划（--model-plan），一个请求都不发。");
+    } else if !answers.is_empty() {
+        eprintln!(
+            "模型推断兜底关着，但库里存着 {} 条问过的答案——它们照旧折成候选，不花一分钱。",
+            thousands(u64::try_from(answers.len()).unwrap_or(0)),
+        );
+    }
+
     let library = RealFs::new();
     let started = Instant::now();
     let mut last = Instant::now();
@@ -1321,6 +1525,7 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
             repo: &repo,
             verdicts: &verdicts,
             naming: &naming,
+            guessing: &guessing,
         },
         &options,
         cancel,
@@ -1425,6 +1630,7 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
             thousands(u64::try_from(verdicts.len()).unwrap_or(0)),
         );
     }
+    report_model(&outcome.model, &catalog);
     if !write_json(args.json.as_deref(), &outcome.report) {
         return ExitCode::FAILURE;
     }
@@ -1432,7 +1638,103 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
         eprintln!("这一趟被中断了，已经算完的那部分留在中立库里，重跑会从头算一遍。");
         return ExitCode::from(130);
     }
-    ExitCode::SUCCESS
+    // **停下来不是错误**（票 14 那条纪律）：已经问到的答案都落库了，报告照常出。
+    // 但退出码要分得出「立刻重跑就接着问」与「重跑没用，先去解决它」——
+    // 这两件事在一层**花钱**的管线上代价差得很远。
+    match outcome.model.halt {
+        Some(identify::model::HaltKind::Self_) => ExitCode::from(4),
+        Some(identify::model::HaltKind::Refused) => ExitCode::from(3),
+        None => ExitCode::SUCCESS,
+    }
+}
+
+/// 把一份[计划](model::Plan)写成给人看的一段。
+///
+/// **两处共用**：一处在第一个请求发出去之前（那是「花费可预估」真正要的时刻），
+/// 一处在收尾的报告里。各写一遍的话，两处早晚会说出不一样的数。
+fn render_plan(plan: &model::Plan) -> String {
+    use romcat_core::identify::model::dollars;
+    let mut out = format!(
+        "  计划（第一个请求发出去之前就算得出）：待问 {} 个变体，打成 {} 个请求，\
+         上限卡下来真发 {} 个；输入约 {} token（估的）。\
+         花费 **{} 到 {}**——上界是硬的，一个响应的输出不可能超过 max_tokens。\
+         一个请求的顶 {}（花费上限最多超出这么多）。价目表核实于 {}。",
+        thousands(plan.variants),
+        thousands(plan.batches),
+        thousands(plan.requests),
+        thousands(plan.input_tokens),
+        dollars(plan.floor_micros),
+        dollars(plan.ceiling_micros),
+        dollars(plan.ceiling_per_request_micros),
+        plan.priced_at,
+    );
+    // **花钱之前不只要看见数字，还要看见问的是什么。** 上下文拼错了在数字上一点都
+    // 看不出来，在这一段上一眼就看得出来。
+    if let Some(sample) = &plan.sample {
+        out.push_str("\n  第一条问题长这样（一批里的头一条）：\n");
+        out.push_str(sample);
+    }
+    out
+}
+
+/// 把**模型推断那一层**这一趟干了什么打出来。
+///
+/// 三样东西一样都不能省：**残渣有多少**（这一层的分母）、**这一趟花了多少**
+/// （赌的是用户的钱，必须看得见）、以及**这一层的候选永不自动通过**（ADR-0002，
+/// 队列里将要出现几千条模型编的东西，报告不说清就是在骗人）。
+fn report_model(count: &identify::model::ModelCount, catalog: &Catalog) {
+    use romcat_core::identify::model::dollars;
+    if count.residue == 0 {
+        return;
+    }
+    eprintln!(
+        "模型推断兜底：**前面各层全部落空**的变体有 {} 个（一条候选都没有）——\
+         其中 {} 个直接从缓存里取到答案（这一趟一分钱没花），{} 个这一趟真问了。",
+        thousands(count.residue),
+        thousands(count.from_cache),
+        thousands(count.asked),
+    );
+    if count.usage.requests > 0 {
+        eprintln!(
+            "  实际：发了 {} 个请求（**一个请求装 {} 条**，不是一条一发），\
+             输入 {} token、输出 {} token，花了 **{}**。\
+             估的输入是 {} token，估偏了 {:+.0}%。",
+            thousands(count.usage.requests),
+            thousands(count.batch_size),
+            thousands(count.usage.input_tokens),
+            thousands(count.usage.output_tokens),
+            dollars(count.usage.cost_micros),
+            thousands(count.estimated_input_tokens),
+            count.estimate_skew(),
+        );
+    }
+    eprintln!(
+        "  产出 {} 条候选，涉及 {} 个变体；另有 {} 个变体**模型自己也说不出**\
+         （那批模拟器、存档、主题包本来就不是游戏——留空比编一个名字好）。\
+         **这一层的候选一条都不自动通过**，全部进待确认队列（ADR-0002），\
+         每一条的依据第一句就写着它是模型推断的。",
+        thousands(count.candidates),
+        thousands(count.with_candidates),
+        thousands(count.speechless),
+    );
+    if let Ok((calls, micros)) = catalog.model_spend() {
+        eprintln!(
+            "  这个库上这一层**一共**发过 {} 个请求、花了 {}。",
+            thousands(calls),
+            dollars(micros),
+        );
+    }
+    if count.unanswered() > 0 {
+        eprintln!(
+            "  ⚠ 另有 {} 个问出去了却一个字都没答回来（一批被截断，或者响应的形状认不出来）。\
+             钱已经付了，而它们下一趟会被再问一遍——`--model-batch` 调小或者
+             `--model-max-tokens` 调大再来。",
+            thousands(count.unanswered()),
+        );
+    }
+    if let Some(halted) = &count.halted {
+        eprintln!("  ⚠ {halted}");
+    }
 }
 
 /// 在识别结论上取元数据与媒体。**离线档一个网络请求都不发。**

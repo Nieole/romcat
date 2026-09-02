@@ -48,6 +48,10 @@ pub const ALLOWED_HOSTS: &[&str] = &[
     // 逐个查它们，名单之外的一律不下。
     "api.screenscraper.fr",
     "www.screenscraper.fr",
+    // **模型推断兜底**（票 12）：`https://api.anthropic.com/v1/messages`。
+    // 只有这一个主机，而且这一层**只 POST 不下载**——它不会像刮削那样从响应里
+    // 拿到一串新的 URL 再去取，所以名单上不必为它留第二个落点。
+    "api.anthropic.com",
 ];
 
 /// 明确点名拒绝的主机。它们本来就不在白名单里，单列一份是为了**说得出理由**——

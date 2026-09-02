@@ -201,6 +201,7 @@ fn 跑一遍(现场: &mut 现场) -> title::TitleReport {
             repo: &现场.repo,
             verdicts: &verdict::Index::empty(),
             naming: &fuzzy::Naming::off(),
+            guessing: &identify::model::Guessing::off(),
         },
         &identify::Options::new(现场.dir.path()),
         &CancelToken::new(),

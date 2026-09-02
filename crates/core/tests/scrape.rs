@@ -187,6 +187,7 @@ fn 识别(现场: &mut 现场) {
             repo: &现场.repo,
             verdicts: &verdict::Index::empty(),
             naming: &fuzzy::Naming::off(),
+            guessing: &identify::model::Guessing::off(),
         },
         &identify::Options::new(现场.dir.path()),
         &CancelToken::new(),

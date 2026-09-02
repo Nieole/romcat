@@ -809,7 +809,7 @@ pub struct RunContext<'a> {
 /// 取 SHA-256 的前 16 位十六进制。全长 64 位存进库里，46,444 个变体 × 7 个源就是
 /// 20 MB 的纯噪音；16 位（64 比特）在这个量级上撞一次的概率可以忽略，而撞了的后果
 /// 只是**少重采一次**——不是错，是慢一步被发现。
-fn fingerprint(parts: &[&str]) -> String {
+pub(crate) fn fingerprint(parts: &[&str]) -> String {
     let mut context = ring::digest::Context::new(&ring::digest::SHA256);
     for part in parts {
         context.update(part.as_bytes());

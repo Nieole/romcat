@@ -142,6 +142,42 @@ CREATE TABLE IF NOT EXISTS content_cart(
     facts    TEXT    NOT NULL,
     PRIMARY KEY (key, inner)
 ) STRICT;
+
+-- **模型推断问过的答案**（票 12）。识别管线里唯一花过钱的东西，所以它只花一次。
+--
+-- 它**不被 `clear_identifications` 清掉**，与 `candidate` / `identification` 那两张
+-- 恰恰相反：那两张是识别每一趟重算的产物，清了再算一遍是免费的；这一张是**付过钱的**。
+-- 清掉它等于把几十美元冲进下水道，而下一趟识别会一声不响地再付一遍。
+--
+-- 主键里有 `ask`（**提问指纹**：提示词版本 + 模型名 + 力度 + 问题正文）。换一个模型
+-- 或改一版提示词，指纹就变，于是自动重问；只是重跑一遍识别，指纹一模一样，于是白拿。
+CREATE TABLE IF NOT EXISTS model_answer(
+    variant_key TEXT NOT NULL,
+    ask         TEXT NOT NULL,
+    -- 真的答话的那个模型（照抄响应里的 `model`，未必等于我们请求的那个）。
+    model       TEXT NOT NULL,
+    asked_at    INTEGER NOT NULL,
+    -- `identify::model::Answer` 的 JSON，**原样留着**——事后复核靠它。
+    answer      TEXT NOT NULL,
+    PRIMARY KEY (variant_key, ask)
+) STRICT;
+
+-- **一次提问的账**（票 12）。一个请求一行。
+--
+-- 它与 `model_answer` 分开：那一张按变体记「答了什么」，这一张按请求记「花了多少」。
+-- 合成一张的话，一个请求里打包的二十条会各背上二十分之一笔账——而那是编出来的数。
+-- 有了它，「这一层到目前为止一共花了多少」是一条 SQL，不必翻日志。
+CREATE TABLE IF NOT EXISTS model_call(
+    id            INTEGER PRIMARY KEY,
+    asked_at      INTEGER NOT NULL,
+    model         TEXT    NOT NULL,
+    -- 这一发里打包了几条。**批量打包这件事在库里也留得下证据。**
+    packed        INTEGER NOT NULL,
+    input_tokens  INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    -- 微美元。整数——一趟几百笔加起来正好是「有没有超上限」那个判断的输入。
+    cost_micros   INTEGER NOT NULL
+) STRICT;
 ";
 
 /// 补上后来加的列。**纯加列，不改已有列的含义**，所以不动
@@ -563,6 +599,23 @@ pub enum EntryFact {
     Unreadable,
     /// 符号链接或别的什么，不参与识别。
     Other,
+}
+
+/// **模型推断问过的一条答案**（票 12）。
+///
+/// 四样东西同进同出：哪个变体、哪一次提问、**谁答的**、答了什么。裸元组穿过读、写、
+/// 缓存三处的话，写岔一个位置编译器一个字都不会说——而写岔 `model` 与 `answer` 的
+/// 后果是把「谁答的」印成一段 JSON（同 `DiscFactRow` / `CartFactRow` 的道理）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelAnswerRow {
+    /// 哪个变体。
+    pub variant_key: String,
+    /// **提问指纹**：提示词版本 + 模型名 + 力度 + 这个变体的身份。
+    pub ask: String,
+    /// **真答话的那个模型**，照抄响应里的 `model`——未必等于我们请求的那个。
+    pub model: String,
+    /// `identify::model::Answer` 的 JSON，原样留着。
+    pub answer: String,
 }
 
 impl Catalog {
@@ -1616,5 +1669,208 @@ impl Catalog {
             )
             .optional()
             .map_err(|source| self.err(source))
+    }
+    /// **模型推断问过的答案**，整份读回来（票 12）。
+    ///
+    /// 整份读而不是逐个变体查：残渣最多也就一万多条，一次读进内存是几 MB，而逐个查
+    /// 是每个变体一次查询——识别那一趟本来就在为 46,444 个变体做别的事了。
+    ///
+    /// **`model` 那一列要一起读回来**：依据里印的必须是**真答话的那个模型**，
+    /// 而请求的那个未必是它。少读这一列，同一条候选两趟会印出两个模型名。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn model_answers(&self) -> Result<Vec<ModelAnswerRow>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT variant_key, ask, model, answer FROM model_answer")
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(ModelAnswerRow {
+                    variant_key: row.get(0)?,
+                    ask: row.get(1)?,
+                    model: row.get(2)?,
+                    answer: row.get(3)?,
+                })
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|source| self.err(source))?);
+        }
+        Ok(out)
+    }
+
+    /// 把这一批答案落库。**收到一个响应就落一次**——这一层每一条都付过钱，
+    /// 攒到最后一次性写的话，跑到一半被 Ctrl-C 就等于把已经花掉的钱扔了。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn put_model_answers(&mut self, rows: &[ModelAnswerRow]) -> Result<(), CatalogError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let now = crate::catalog::now_secs();
+        let tx = self.conn.transaction().map_err(to_err)?;
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO model_answer(variant_key, ask, model, asked_at, answer)
+                     VALUES(?1,?2,?3,?4,?5)
+                     ON CONFLICT(variant_key, ask) DO UPDATE SET
+                        model = excluded.model, asked_at = excluded.asked_at,
+                        answer = excluded.answer",
+                )
+                .map_err(to_err)?;
+            for row in rows {
+                insert
+                    .execute(params![
+                        row.variant_key,
+                        row.ask,
+                        row.model,
+                        now,
+                        row.answer
+                    ])
+                    .map_err(to_err)?;
+            }
+        }
+        tx.commit().map_err(to_err)
+    }
+
+    /// 记一次提问的账（票 12）。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn put_model_call(
+        &mut self,
+        model: &str,
+        packed: u64,
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_micros: u64,
+    ) -> Result<(), CatalogError> {
+        self.conn
+            .execute(
+                "INSERT INTO model_call(asked_at, model, packed, input_tokens, output_tokens,
+                     cost_micros) VALUES(?1,?2,?3,?4,?5,?6)",
+                params![
+                    crate::catalog::now_secs(),
+                    model,
+                    i64::try_from(packed).unwrap_or(i64::MAX),
+                    i64::try_from(input_tokens).unwrap_or(i64::MAX),
+                    i64::try_from(output_tokens).unwrap_or(i64::MAX),
+                    i64::try_from(cost_micros).unwrap_or(i64::MAX),
+                ],
+            )
+            .map_err(|source| self.err(source))?;
+        Ok(())
+    }
+
+    /// 这一层**到目前为止一共**发过几个请求、花了多少微美元（票 12）。
+    ///
+    /// 报告要它：一趟的花费只说得出这一趟，而「这个库上这一层一共烧了多少」是另一个
+    /// 问题，也是决定下一趟设多少上限的那个数。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn model_spend(&self) -> Result<(u64, u64), CatalogError> {
+        let (calls, micros): (i64, i64) = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(cost_micros), 0) FROM model_call",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|source| self.err(source))?;
+        Ok((
+            u64::try_from(calls).unwrap_or(0),
+            u64::try_from(micros).unwrap_or(0),
+        ))
+    }
+
+    /// 往一条已有的结论上**追加候选**，别的一个字不动（票 12）。
+    ///
+    /// 与 [`write_identifications`](Self::write_identifications) 恰恰相反：那一条整条
+    /// 重写（先 `DELETE FROM candidate`），这一条只加。模型推断那一层在识别的主循环
+    /// **跑完之后**才问得出答案，那时结论早已落库；整条重写就要把 `state`、`reason`、
+    /// `units`、`nkit`、`read_bytes` 全部再算一遍并原样写回，而其中任何一个写岔了都是
+    /// 静默的坏账。
+    ///
+    /// **`state` 与 `reason` 一个字都不改**，这是有意的（见 `identify::model` 的模块
+    /// 文档）：那两列上写着「rar 容器这一层还穿不透」这类真事实，让一句模型的猜测把它
+    /// 覆盖掉是净损失。候选照样进**待确认队列**——队列的判据是「没有自动通过的候选、
+    /// 而且不是跳过」，与状态无关。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn append_candidates(
+        &mut self,
+        variant_key: &str,
+        candidates: &[Candidate],
+    ) -> Result<(), CatalogError> {
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        // **不许从这条路写进一条自动通过的候选。** 这一条通道是为模型推断开的，
+        // 而 ADR-0002 说那一层永不自动通过；真要有自动通过的东西，它得走
+        // `write_identifications`——那里会顺带把作品与发行版立起来，这里不会。
+        debug_assert!(
+            candidates.iter().all(|candidate| !candidate.accepted),
+            "append_candidates 不接自动通过的候选"
+        );
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO candidate(variant_key, member_key, inner, confidence, accepted,
+                         source, dat, platform, game, rom, hashing, convention, evidence,
+                         chinese, serial, release_id)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                )
+                .map_err(to_err)?;
+            for candidate in candidates {
+                if candidate.accepted {
+                    continue;
+                }
+                insert
+                    .execute(params![
+                        variant_key,
+                        candidate.member_key,
+                        candidate.inner,
+                        candidate.confidence.label(),
+                        0_i64,
+                        candidate.source,
+                        candidate.dat,
+                        candidate.platform,
+                        candidate.game,
+                        candidate.rom,
+                        candidate.hashed_as.label(),
+                        candidate.dat_convention.label(),
+                        candidate.evidence,
+                        candidate.chinese.map(|mark| mark.label()),
+                        candidate.serial,
+                        candidate.release_id,
+                    ])
+                    .map_err(to_err)?;
+            }
+            // 队列按这一列决定要不要去把候选读出来，不加就等于白写。
+            tx.execute(
+                "UPDATE identification SET candidates = candidates + ?2 WHERE variant_key = ?1",
+                params![variant_key, i64::try_from(candidates.len()).unwrap_or(0)],
+            )
+            .map_err(to_err)?;
+        }
+        tx.commit().map_err(to_err)
     }
 }

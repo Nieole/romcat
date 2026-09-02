@@ -184,6 +184,13 @@ pub struct IdentifyReport {
     pub platform_conflicts: u64,
     /// 其中几条的样子，好让人一眼看出是下错了还是放错了。
     pub conflict_examples: Vec<PlatformConflict>,
+    /// **模型推断那一层**这一趟干了什么（票 12）：残渣多少、问了几个请求、花了多少。
+    ///
+    /// 它与这份报告里别的东西不一样——**不是从中立库折出来的**，是这一趟跑出来的。
+    /// 放进来是因为花费必须留得下痕迹：`--json` 存的是这份报告，而「这一趟花了几美元」
+    /// 只在标准错误上说一句的话，跑完就没了。这一层没跑时是 `None`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<crate::identify::model::ModelCount>,
 }
 
 const UNKNOWN_PLATFORM: &str = "（未知）";

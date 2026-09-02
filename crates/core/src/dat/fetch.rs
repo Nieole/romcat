@@ -145,6 +145,21 @@ pub trait Fetcher: Sync {
     /// # Errors
     /// 同 [`Self::head`]，外加写不进目标文件。
     fn download(&self, url: &str, to: &Path) -> Result<Head, FetchError>;
+
+    /// 发一个带正文的请求（票 12 的模型推断要它——问题装在正文里，不装在查询串上）。
+    ///
+    /// **这一条不跟重定向。** `head` / `get` 一跳一跳自己走，是因为 DAT 的落点真的会
+    /// 302 到对象存储上去；而一个 POST 被重定向意味着落点不对，把正文原样再发一遍到
+    /// 另一个主机上，是把请求（连同 `headers` 里的凭据）送到没打算送的地方。走到头
+    /// 不是 2xx 就照 [`require_ok`] 折成 [`FetchError::Status`]，**状态码原样带着**。
+    ///
+    /// `headers` 里装的是凭据。**实现不许把它记进任何日志或测试录音**——
+    /// [`CannedFetcher`] 只记 URL 与正文。
+    ///
+    /// # Errors
+    /// 同 [`Self::head`]。
+    fn post(&self, url: &str, headers: &[(&str, &str)], body: &[u8])
+    -> Result<Fetched, FetchError>;
 }
 
 /// 真的联网的那一个。
@@ -370,6 +385,47 @@ impl Fetcher for HttpFetcher {
         })?;
         Ok(head)
     }
+
+    fn post(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Result<Fetched, FetchError> {
+        let host = guard::check(url)?;
+        self.wait_turn(host);
+        let mut request = self.agent.post(url);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = request.send(body).map_err(|error| FetchError::Transport {
+            url: url.to_string(),
+            detail: error.to_string(),
+        })?;
+        let (parts, mut payload) = response.into_parts();
+        let mut got = BTreeMap::new();
+        for (name, value) in &parts.headers {
+            if let Ok(text) = value.to_str() {
+                got.insert(name.as_str().to_ascii_lowercase(), text.to_string());
+            }
+        }
+        let head = Head {
+            status: parts.status.as_u16(),
+            headers: got,
+        };
+        // **状态码走同一道 `require_ok`**：假服务器与真服务器对 4xx 的处置必须逐字一致
+        // （见 [`CannedFetcher`] 的文档），而这一层唯一能跑起来的验证场就是假服务器。
+        require_ok(url, &head)?;
+        let bytes = payload
+            .with_config()
+            .limit(MAX_BODY)
+            .read_to_vec()
+            .map_err(|error| FetchError::Transport {
+                url: url.to_string(),
+                detail: error.to_string(),
+            })?;
+        Ok(Fetched { head, body: bytes })
+    }
 }
 
 /// **测试替身**：备好的响应从这里发，一个字节都不上网。
@@ -391,6 +447,9 @@ pub struct CannedFetcher {
     prefixed: Vec<(String, Head, Vec<u8>)>,
     /// 问过哪些 URL，按顺序。测试据此断言「没有多发请求」。
     asked: Mutex<Vec<String>>,
+    /// [`Fetcher::post`] 发出去的正文，按顺序。**只记正文，不记请求头**——
+    /// 头里装着凭据，录下来就等于把它写进测试的失败输出里。
+    posted: Mutex<Vec<Vec<u8>>>,
 }
 
 impl CannedFetcher {
@@ -481,6 +540,18 @@ impl CannedFetcher {
             .clone()
     }
 
+    /// [`Fetcher::post`] 一共发出去哪些正文，按顺序。
+    ///
+    /// **批量打包这件事只能从这里验**（票 12）：「一次给若干条」不是看发了几个请求，
+    /// 而是看**一个正文里装着几条**——两者只有对着正文才分得开。
+    #[must_use]
+    pub fn posted(&self) -> Vec<Vec<u8>> {
+        self.posted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     fn look_up(&self, url: &str) -> Result<(&Head, &Vec<u8>), FetchError> {
         self.asked
             .lock()
@@ -530,11 +601,49 @@ impl Fetcher for CannedFetcher {
         })?;
         Ok(head.clone())
     }
+
+    fn post(
+        &self,
+        url: &str,
+        _headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Result<Fetched, FetchError> {
+        self.posted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(body.to_vec());
+        let (head, canned) = self.look_up(url)?;
+        require_ok(url, head)?;
+        Ok(Fetched {
+            head: head.clone(),
+            body: canned.clone(),
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **真的那一个也过闸门。**
+    ///
+    /// 假服务器的 `post` 不查闸门（与既有的 `get` / `head` 一致——测试替身不该替
+    /// 生产代码守边界），于是 [`HttpFetcher::post`] 里那一行 `guard::check` 漏掉了
+    /// 假服务器**测不出来**。这条测试就是补那个缺口：它一个字节都不上网——
+    /// 闸门在任何连接之前就拦下了。
+    #[test]
+    fn 真的那个_post_也过闸门() {
+        let error = HttpFetcher::new()
+            .post("https://example.com/v1/messages", &[], b"{}")
+            .expect_err("白名单之外该拦下");
+        assert!(matches!(error, FetchError::Refused(_)), "{error:?}");
+        assert!(format!("{error}").contains("example.com"));
+        // 点名拒绝的那些同样拦得住。
+        let error = HttpFetcher::new()
+            .post("https://datomatic.no-intro.org/x", &[], b"{}")
+            .expect_err("点名拒绝的该拦下");
+        assert!(matches!(error, FetchError::Refused(_)), "{error:?}");
+    }
 
     fn head_with(value: &str) -> Head {
         Head {
