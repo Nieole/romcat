@@ -27,8 +27,12 @@
 //!
 //! Dolphin 的原话（`VolumeVerifier.cpp`）：这个文件**的 CRC32 可能和好转储的相同，
 //! 即使两个文件并不完全一样**。判据是光盘逻辑偏移 `0x200` 处的 4 字节 `NKIT`
-//! （`VolumeDisc::IsNKit()`）。所以 GC / Wii 的镜像在撞 CRC **之前**先验这一条，
-//! 命中了也不许自动通过——真正的处置（转回 ISO 再识别）是票 09 的活。
+//! （`VolumeDisc::IsNKit()`）。
+//!
+//! **这里只剩「整份字节在手上时顺手验一眼」那一档**（[`is_nkit`]，由 [`fingerprint`]
+//! 在算哈希的同一趟里调用）。**逻辑**偏移那条完整的判据搬去了
+//! [`disc`](super::disc)——压缩镜像里那一处不在文件的 `0x200` 上，得先按壳子打开
+//! 才读得到，而按文件偏移验等于对整批压缩镜像装作验过了。
 
 use crate::path::{extension_lower, file_name_of_key};
 use std::path::Path;
@@ -186,21 +190,6 @@ pub fn is_nkit(name: &str, head: &[u8]) -> bool {
     head.get(0x200..0x204) == Some(b"NKIT".as_slice())
 }
 
-/// 这份内容该不该在撞 CRC **之前**先验一遍 NKit。
-///
-/// 只有 GC / Wii 的镜像会被 NKit 处理，验一遍要回盘读 `0x204` 字节。整库无差别地验
-/// 一遍等于把这笔读盘摊到几万个与 NKit 毫无关系的条目上，因此按平台与扩展名先筛。
-#[must_use]
-pub fn may_be_nkit(platform: Option<&str>, name: &str) -> bool {
-    let file = file_name_of_key(name).to_ascii_lowercase();
-    if file.contains(".nkit.") {
-        return true;
-    }
-    let disc_image = extension_lower(Path::new(file.as_str()))
-        .is_some_and(|ext| matches!(ext.as_str(), "iso" | "gcm" | "img"));
-    disc_image && matches!(platform, Some("NGC" | "WII"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,16 +281,5 @@ mod tests {
         assert!(is_nkit("WII/游戏.iso", &head), "偏移 0x200 处的魔数");
         assert!(is_nkit("WII/游戏.nkit.iso", &[]), "名字里就写着");
         assert!(!is_nkit("WII/游戏.iso", &[0u8; NKIT_PROBE_LEN]));
-    }
-
-    #[test]
-    fn 只给_gc_与_wii_的镜像付这笔读盘() {
-        assert!(may_be_nkit(Some("WII"), "WII/游戏.iso"));
-        assert!(may_be_nkit(Some("NGC"), "NGC/游戏.gcm"));
-        // PS2 的 iso 一样是镜像，但 NKit 不处理它。
-        assert!(!may_be_nkit(Some("PS2"), "PS2/游戏.iso"));
-        // 名字里写着的，哪个平台都验。
-        assert!(may_be_nkit(None, "别处/游戏.nkit.iso"));
-        assert!(!may_be_nkit(Some("WII"), "WII/游戏.7z"));
     }
 }

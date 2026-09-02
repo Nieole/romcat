@@ -32,7 +32,11 @@ use super::logiqx::{DatHeader, GameRecord};
 ///
 /// 重建这条路在这里一直走得通——DAT 库里没有任何攒出来的东西，全部内容都能重取。
 /// 沉淀库（票 08）绝不能放进这份库，放进来这条就不成立了。
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// **2（票 09）**：加了 `game_serial` 这张序列号索引。加表本身不必重建，但那张表要靠
+/// **重新解析 DAT** 才填得上——序列号写在 `<rom serial>` 与 `<game_id>` 上，
+/// 票 06 的解析器两处都没读。升版本正是为了逼出那一趟重新解析。
+pub const SCHEMA_VERSION: u32 = 2;
 
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS meta(
@@ -101,6 +105,23 @@ CREATE TABLE IF NOT EXISTS rom(
     sha256 TEXT,
     status TEXT
 ) STRICT;
+
+-- 一条条目上写着的**序列号**，折平之后一行一条（票 09）。
+-- 它单开一张表而不是 `game` 上加一列，因为**一条条目可以有好几个序列号**：MAME 的
+-- software list 把再版并在一条里（`SLUS-01300, SLUS-01300CE`），而 No-Intro 的 PSN 集
+-- 一条 CONTENT_ID 还要额外落一行里面那段 TITLE_ID（见 `dat::serial`）。
+CREATE TABLE IF NOT EXISTS game_serial(
+    game   INTEGER NOT NULL,
+    dat    INTEGER NOT NULL,
+    -- 折平后的键：只留字母数字、大写。查询走它。
+    serial TEXT    NOT NULL,
+    -- 原样的那一串。**依据里要写它**——那是人去 Redump 上核对时输进去的形式。
+    shown  TEXT    NOT NULL,
+    PRIMARY KEY (game, serial)
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS game_serial_key ON game_serial(serial);
+CREATE INDEX IF NOT EXISTS game_serial_dat ON game_serial(dat);
 
 -- 票 07 的三条查询路径。CRC-32 是主力，SHA-1 是 GoodNES 唯一能给的东西。
 CREATE INDEX IF NOT EXISTS rom_crc32 ON rom(crc32);
@@ -179,6 +200,8 @@ pub struct DatCounts {
     pub fan: u64,
     /// 官中条目数。
     pub official: u64,
+    /// 索引进去的**序列号**行数（票 09）。
+    pub serials: u64,
 }
 
 impl DatCounts {
@@ -190,6 +213,7 @@ impl DatCounts {
             roms: self.roms + other.roms,
             fan: self.fan + other.fan,
             official: self.official + other.official,
+            serials: self.serials + other.serials,
         }
     }
 }
@@ -338,6 +362,12 @@ impl DatRepo {
         // 整件换掉：先把这件旧的全部记录连根拔掉。SQLite 没开外键级联，
         // 这里手写三条 DELETE——顺序从叶子往根走，中途出错事务整个回滚。
         tx.execute(
+            "DELETE FROM game_serial WHERE dat IN (SELECT d.id FROM dat d JOIN unit u ON d.unit = u.id
+             WHERE u.source = ?1 AND u.name = ?2)",
+            params![unit.source, unit.name],
+        )
+        .map_err(wrap)?;
+        tx.execute(
             "DELETE FROM rom WHERE dat IN (SELECT d.id FROM dat d JOIN unit u ON d.unit = u.id
              WHERE u.source = ?1 AND u.name = ?2)",
             params![unit.source, unit.name],
@@ -454,6 +484,14 @@ impl UnitWriter<'_> {
                      VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
                 )
                 .map_err(wrap)?;
+            // 同一条目的同一个序列号会从好几处冒出来（`<game_id>`、每一条 `<rom serial>`），
+            // 主键把它们收成一行——`OR IGNORE` 是这里的正常路径，不是容错。
+            let mut insert_serial = self
+                .tx
+                .prepare(
+                    "INSERT OR IGNORE INTO game_serial(game, dat, serial, shown) VALUES(?1,?2,?3,?4)",
+                )
+                .map_err(wrap)?;
             for game in games {
                 let chinese = mark_of(&game.name);
                 match chinese {
@@ -491,6 +529,31 @@ impl UnitWriter<'_> {
                         ])
                         .map_err(wrap)?;
                     counts.roms += 1;
+                }
+                // **序列号从三处来，三处都要收**：`<game serial>`（No-Intro 的卡带集与
+                // MAME 的 `<info name="serial">`）、`<game_id>` 这个子元素（Vita / PSP 的
+                // PSN 集、3DS）、以及每一条 `<rom serial>`（真库里最多的一处，
+                // PSP (PSN) 一份就 56,794 条）。少收一处就少掉一整个平台的弹药。
+                let written = &mut counts.serials;
+                let mut index = |text: &str| -> Result<(), RepoError> {
+                    for (key, shown) in super::serial::spread(text) {
+                        let changed = insert_serial
+                            .execute(params![game_id, dat_id, key, shown])
+                            .map_err(wrap)?;
+                        *written += u64::try_from(changed).unwrap_or(0);
+                    }
+                    Ok(())
+                };
+                if let Some(text) = &game.serial {
+                    index(text)?;
+                }
+                if let Some(text) = &game.game_id {
+                    index(text)?;
+                }
+                for rom in &game.roms {
+                    if let Some(text) = &rom.serial {
+                        index(text)?;
+                    }
                 }
             }
         }

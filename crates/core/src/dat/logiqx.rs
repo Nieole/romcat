@@ -47,6 +47,14 @@ pub struct GameRecord {
     pub cloneof: Option<String>,
     /// 序列号。No-Intro 有，Redump 与 TOSEC 都没有（实测确认）。
     pub serial: Option<String>,
+    /// `<game_id>` 这个**子元素**。
+    ///
+    /// 它不是属性，所以只认属性的解析器一条都读不到——真库实测：Vita 的 NoNpDrm 集
+    /// 452 条、VPK 集 240 条、PSP (PSN) (Decrypted) 4,169 条、3DS 两个集各 2,135 条
+    /// 全都写在这里。内容随集而变：Vita 的 VPK 集是 TITLE_ID（`PCSG00159`），
+    /// PSN 集是 CONTENT_ID（`JP0103-PCSG00245_00-APP…`），3DS 是十六进制 TitleID。
+    /// 折平与拆分交给 [`serial`](super::serial)。
+    pub game_id: Option<String>,
     /// `<category>`：Redump 用它分 Games / Demos / Applications。
     pub category: Option<String>,
     /// 这条条目下的文件记录。
@@ -70,6 +78,12 @@ pub struct RomRecord {
     pub sha256: Option<String>,
     /// `status`：实测取值 `verified` / `baddump` / `nodump`。
     pub status: Option<String>,
+    /// 这条文件记录上写的序列号。
+    ///
+    /// **它挂在 `<rom>` 上而不是 `<game>` 上**，所以只读 `<game serial>` 的解析器
+    /// 一条都拿不到。真库实测最多的三份：PSP (PSN) (Decrypted) 56,794 条、
+    /// Vita 的 NoNpDrm 集 41,620 条、NDS 7,629 条。
+    pub serial: Option<String>,
 }
 
 /// DAT 读不动。
@@ -185,10 +199,12 @@ pub fn parse(
                             "author" => header.author = value,
                             _ => {}
                         }
-                    } else if let Some(game) = game.as_mut()
-                        && tag == "category"
-                    {
-                        game.category = Some(value);
+                    } else if let Some(game) = game.as_mut() {
+                        match tag.as_str() {
+                            "category" => game.category = Some(value),
+                            "game_id" => game.game_id = Some(value),
+                            _ => {}
+                        }
                     }
                 }
                 field = None;
@@ -214,6 +230,7 @@ fn game_from(start: &BytesStart<'_>) -> GameRecord {
         key: xml::attribute(start, "id"),
         cloneof: xml::attribute(start, "cloneof"),
         serial: xml::attribute(start, "serial"),
+        game_id: None,
         category: None,
         roms: Vec::new(),
     }
@@ -228,6 +245,7 @@ fn rom_from(tag: &BytesStart<'_>) -> RomRecord {
         sha1: xml::attribute(tag, "sha1").map(|text| text.to_ascii_lowercase()),
         sha256: xml::attribute(tag, "sha256").map(|text| text.to_ascii_lowercase()),
         status: xml::attribute(tag, "status"),
+        serial: xml::attribute(tag, "serial"),
     }
 }
 
@@ -320,6 +338,33 @@ mod tests {
         );
         assert!(rom.sha256.is_some());
         assert_eq!(rom.status.as_deref(), Some("verified"));
+        assert_eq!(rom.serial.as_deref(), Some("BJBJ"), "序列号挂在 rom 上");
+    }
+
+    #[test]
+    fn 序列号写在_rom_上与_game_id_这个子元素里() {
+        // 抄自真库 `Unofficial - Sony - PlayStation Vita (VPK)` 与
+        // `Sony - PlayStation Vita (PSN) (Content)` 的两条。**两处都不是 `<game serial>`**
+        // ——只认那一个属性的话，Vita 与 PSP 两个平台一条序列号都读不到。
+        let xml =
+            br#"<datafile><header><name>Unofficial - Sony - PlayStation Vita (VPK)</name></header>
+<game name="Akiba Strip 2 (Korea)" id="0078">
+  <description>Akiba Strip 2 (Korea)</description>
+  <game_id>PCSG00159</game_id>
+  <rom name="Akiba Strip 2 (Korea).vpk" size="1429914890" crc="ac365da0" serial="PCSG-00159"/>
+</game>
+<game name="Shin Rorona no Atelier (Japan)" id="08554">
+  <game_id>JP0103-PCSG00245_00-APP0000000000000</game_id>
+  <rom name="x.pkg" size="2975524912" crc="f87fb0fe"/>
+</game></datafile>"#;
+        let (_, games) = games_of(xml);
+        assert_eq!(games[0].game_id.as_deref(), Some("PCSG00159"));
+        assert_eq!(games[0].roms[0].serial.as_deref(), Some("PCSG-00159"));
+        assert_eq!(games[0].serial, None, "`<game serial>` 这一份没有");
+        assert_eq!(
+            games[1].game_id.as_deref(),
+            Some("JP0103-PCSG00245_00-APP0000000000000")
+        );
     }
 
     #[test]

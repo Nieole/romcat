@@ -3,6 +3,7 @@
 //! 只为测试存在，但它是普通模块而不是 `#[cfg(test)]`——集成测试与后续票的测试都要用。
 
 pub mod container;
+pub mod disc;
 pub mod sample;
 
 use std::path::{Path, PathBuf};

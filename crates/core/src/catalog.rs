@@ -769,6 +769,11 @@ impl Catalog {
             let mut clear_hashes = tx
                 .prepare("DELETE FROM content_hash WHERE key = ?1")
                 .map_err(to_err)?;
+            // 光盘标识同理（票 09）。那张表每一行自带有效期，所以这一句不是它唯一的
+            // 依靠，只是把过期的行**当场**清掉而不是留到下一趟识别去发现。
+            let mut clear_disc = tx
+                .prepare("DELETE FROM content_disc WHERE key = ?1")
+                .map_err(to_err)?;
             // 媒体文件变了，上一趟算出来的内容哈希同样作废——留着它，刮削会拿一个
             // 对不上的哈希去引用**媒体池**里另一份内容的图。与 content_hash 同一条路。
             let mut clear_media = tx
@@ -845,6 +850,7 @@ impl Catalog {
                 let changed = matches!(record.verdict, Verdict::Added | Verdict::Changed);
                 if changed {
                     clear_hashes.execute(params![record.key]).map_err(to_err)?;
+                    clear_disc.execute(params![record.key]).map_err(to_err)?;
                     clear_media.execute(params![record.key]).map_err(to_err)?;
                 }
                 if is_container && (changed || record.container.is_some()) {
@@ -1001,6 +1007,7 @@ impl Catalog {
             "DELETE FROM container_entry WHERE key NOT IN (SELECT key FROM entry);
              DELETE FROM container       WHERE key NOT IN (SELECT key FROM entry);
              DELETE FROM content_hash    WHERE key NOT IN (SELECT key FROM entry);
+             DELETE FROM content_disc    WHERE key NOT IN (SELECT key FROM entry);
              DELETE FROM media_blob      WHERE key NOT IN (SELECT key FROM entry);",
         )?;
         Ok(removed)

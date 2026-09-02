@@ -128,6 +128,101 @@ impl DatRepo {
     }
 }
 
+/// DAT 库里被**序列号**撞上的一条条目。
+///
+/// 它和 [`Hit`] 是两件事，所以是两个类型：`Hit` 说的是「这串字节就是那条文件记录」，
+/// 而这一条说的是「这张盘里写着的编号就是那次发行的编号」。**它没有文件记录**
+/// ——一条 `<game>` 可以有好几个 `<rom>`，而序列号是挂在条目上的。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SerialHit {
+    /// 哪个数据源。
+    pub source: String,
+    /// 哪一份 DAT。
+    pub dat: String,
+    /// 这份 DAT 归哪个平台。
+    pub platform: String,
+    /// 条目名。
+    pub game: String,
+    /// 父条目名（No-Intro 的 parent/clone）。
+    pub cloneof: Option<String>,
+    /// DAT 里这个序列号的**原样**写法。依据里写它。
+    pub shown: String,
+    /// 条目名上的中文记号。
+    pub chinese: Option<ChineseMark>,
+}
+
+impl DatRepo {
+    /// 拿一个**折平后的序列号**去查，返回全部写着它的条目。
+    ///
+    /// 折平的规矩在 [`serial`](super::serial)：只留字母数字、大写。调用方必须先折过，
+    /// 这里不再折一次——两边各折一次的话，哪天改了规矩就会有一边忘掉。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn lookup_serial(&self, serial: &str) -> Result<Vec<SerialHit>, RepoError> {
+        let mut statement = self
+            .conn()
+            .prepare_cached(
+                "SELECT d.source, d.name, d.platform, g.name, g.cloneof, s.shown
+                 FROM game_serial s
+                 JOIN game g ON g.id = s.game
+                 JOIN dat  d ON d.id = s.dat
+                 WHERE s.serial = ?1
+                 ORDER BY g.id",
+            )
+            .map_err(|source| self.error(source))?;
+        let rows = statement
+            .query_map(params![serial], |row| {
+                let game: String = row.get(3)?;
+                let chinese = chinese::mark_of(&game);
+                Ok(SerialHit {
+                    source: row.get(0)?,
+                    dat: row.get(1)?,
+                    platform: row.get(2)?,
+                    game,
+                    cloneof: row.get(4)?,
+                    shown: row.get(5)?,
+                    chinese,
+                })
+            })
+            .map_err(|source| self.error(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.error(source))
+    }
+
+    /// 每个平台索引了多少条**序列号**。
+    ///
+    /// 报告拿它回答与 `DAT 条目` 那一列同样的问题：**没有弹药的平台认不出来是另一回事**。
+    /// 真库实测 Redump 的官方 DAT 一条序列号都不写，于是 PS2 / NGC / WII 这三个平台
+    /// 序列号读得出来也无处可撞——那不是这一层不准，是那几份 DAT 里没有这样东西。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn serial_counts(&self) -> Result<std::collections::BTreeMap<String, u64>, RepoError> {
+        let mut statement = self
+            .conn()
+            .prepare(
+                "SELECT d.platform, COUNT(*) FROM game_serial s JOIN dat d ON d.id = s.dat
+                 GROUP BY d.platform",
+            )
+            .map_err(|source| self.error(source))?;
+        let rows = statement
+            .query_map(params![], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+                ))
+            })
+            .map_err(|source| self.error(source))?;
+        let mut out = std::collections::BTreeMap::new();
+        for row in rows {
+            let (platform, count) = row.map_err(|source| self.error(source))?;
+            out.insert(platform, count);
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -97,6 +97,26 @@ CREATE TABLE IF NOT EXISTS content_hash(
     nkit       INTEGER,
     PRIMARY KEY (key, inner)
 ) STRICT;
+
+-- 从一份内容前几百字节里读出来的**光盘标识**与 **NKit** 结论（票 09）。
+--
+-- 它与 `content_hash` 同源同命：都是「读过的盘不白读」，都按文件的三元组作废。
+-- 分开一张表而不是往 `content_hash` 上加列，是为了**不动已有的表结构**——加列要用户
+-- 删掉 8.60 TiB 的中立库重扫一遍，而加表在 `CREATE TABLE IF NOT EXISTS` 这条路上是
+-- 白拿的。代价写在下面那两列上。
+--
+-- `len` 与 `mtime_ns` 是**这一行自带的有效期**：算这一条时那个成员文件多大、什么时候
+-- 改的。读回来先对一遍，对不上就当没算过。有了这两列，这张表就不依赖任何人记得
+-- 去作废它——而一个旧版本的程序照样会更新 `entry`、却不知道这张表存在。
+CREATE TABLE IF NOT EXISTS content_disc(
+    key      TEXT    NOT NULL,
+    inner    TEXT    NOT NULL,
+    len      INTEGER,
+    mtime_ns INTEGER,
+    -- `identify::disc::Facts` 的 JSON。壳子、NKit 结论、读出来的标识、说不出口时那句话。
+    facts    TEXT    NOT NULL,
+    PRIMARY KEY (key, inner)
+) STRICT;
 ";
 
 /// 一条候选的**置信度**（ADR-0002）。
@@ -236,6 +256,20 @@ pub struct Candidate {
     pub serial: Option<String>,
     /// 这条候选建出来的发行版。
     pub release_id: Option<i64>,
+}
+
+/// 一份内容探出来的**光盘标识**，写库前的样子。
+///
+/// 捏成一个类型而不是一个三元组：三样都是 `String`，元组里写错顺序编译器不会说话
+/// （与 `identify::Wanted` 同理）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscFactRow {
+    /// 是变体的哪个成员：容器的键，或者裸文件自己的键。
+    pub key: String,
+    /// 容器内部路径；裸文件是空串。
+    pub inner: String,
+    /// `identify::disc::Facts` 的 JSON。
+    pub facts: String,
 }
 
 /// 一个变体这一轮的结论，写库前的样子。
@@ -773,6 +807,72 @@ impl Catalog {
                         row.bare_crc32.map(i64::from),
                         row.nkit.map(i64::from),
                     ])
+                    .map_err(to_err)?;
+            }
+        }
+        tx.commit().map_err(to_err)
+    }
+
+    /// 某个成员上探过的**光盘标识**：内部路径 → 那一份。裸文件的内部路径是空串。
+    ///
+    /// **自带有效期**：存进去时记下了那个成员文件的大小与修改时间，这里逐行对一遍，
+    /// 对不上的当没算过（那一行随后会被这一趟重新算出来的覆盖掉）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn disc_facts(&self, key: &str) -> Result<BTreeMap<String, String>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare_cached(
+                "SELECT d.inner, d.facts FROM content_disc d
+                 JOIN entry e ON e.key = d.key
+                 WHERE d.key = ?1
+                   AND d.len IS e.len AND d.mtime_ns IS e.mtime_ns",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![key], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (inner, facts) = row.map_err(|source| self.err(source))?;
+            out.insert(inner, facts);
+        }
+        Ok(out)
+    }
+
+    /// 把探出来的光盘标识整批存下来。有效期那两列从 `entry` 上现取。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn put_disc_facts(&mut self, rows: &[DiscFactRow]) -> Result<(), CatalogError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO content_disc(key, inner, len, mtime_ns, facts)
+                     VALUES(?1, ?2,
+                            (SELECT len FROM entry WHERE key = ?1),
+                            (SELECT mtime_ns FROM entry WHERE key = ?1),
+                            ?3)
+                     ON CONFLICT(key, inner) DO UPDATE SET
+                        len = excluded.len, mtime_ns = excluded.mtime_ns,
+                        facts = excluded.facts",
+                )
+                .map_err(to_err)?;
+            for row in rows {
+                insert
+                    .execute(params![row.key, row.inner, row.facts])
                     .map_err(to_err)?;
             }
         }

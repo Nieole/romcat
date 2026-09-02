@@ -1108,6 +1108,16 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
         thousands(outcome.read_files),
         thousands(outcome.reused_hashes),
     );
+    if outcome.probed > 0 || outcome.missed > 0 {
+        eprintln!(
+            "光盘那一层探了 {} 份内容（读出标识 {} 份，另有 {} 份这一趟没读到），撞出 {} 条候选，其中 {} 个变体是**只靠序列号**才认出来的。",
+            thousands(outcome.probed),
+            thousands(outcome.with_id),
+            thousands(outcome.missed),
+            thousands(outcome.serial_candidates),
+            thousands(outcome.serial_only),
+        );
+    }
     if outcome.from_verdicts > 0 {
         eprintln!(
             "其中 {} 个变体的结论直接来自**沉淀库**（{} 条裁决）——裁决过的东西不必再撞一遍 DAT。",

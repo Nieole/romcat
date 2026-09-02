@@ -41,6 +41,12 @@ pub struct PlatformRow {
     pub skipped: u64,
     /// DAT 库里这个平台有多少条条目——**没有弹药的平台命中率低是另一回事**。
     pub dat_games: u64,
+    /// DAT 库里这个平台索引了多少条**序列号**（票 09）。
+    ///
+    /// 它与 `dat_games` 是两种弹药，缺哪一种都会让命中率低而**与识别准不准无关**。
+    /// 真库实测 Redump 的官方 DAT 一条序列号都不写：PS2 / NGC / WII 三个平台的
+    /// 序列号读得出来也无处可撞。这一列就是为了让那件事一眼看得见。
+    pub dat_serials: u64,
 }
 
 impl PlatformRow {
@@ -145,12 +151,14 @@ impl IdentifyReport {
             ..Self::default()
         };
         let ammo = dat_games(repo);
+        let serials = repo.serial_counts().unwrap_or_default();
         let mut rows: BTreeMap<String, PlatformRow> = BTreeMap::new();
         catalog.for_each_identification(&mut |platform, state, reason, key, read_bytes| {
             let platform = platform.unwrap_or(UNKNOWN_PLATFORM).to_string();
             let row = rows.entry(platform.clone()).or_insert_with(|| PlatformRow {
                 platform: platform.clone(),
                 dat_games: ammo.get(&platform).copied().unwrap_or(0),
+                dat_serials: serials.get(&platform).copied().unwrap_or(0),
                 ..PlatformRow::default()
             });
             row.variants += 1;
@@ -187,6 +195,7 @@ impl IdentifyReport {
             report.total.no_evidence += row.no_evidence;
             report.total.skipped += row.skipped;
             report.total.dat_games += row.dat_games;
+            report.total.dat_serials += row.dat_serials;
         }
         report.total.platform = "合计".to_string();
         sort_reasons(&mut report.skipped);
@@ -218,8 +227,8 @@ impl IdentifyReport {
     #[must_use]
     pub fn render_text(&self) -> String {
         let mut out = String::new();
-        let _ = writeln!(out, "识别：CRC-32 加大小撞 DAT");
-        let _ = writeln!(out, "{}", "═".repeat(28));
+        let _ = writeln!(out, "识别：CRC-32 加大小撞 DAT，撞不上的读光盘序列号");
+        let _ = writeln!(out, "{}", "═".repeat(40));
         let _ = writeln!(out, "中立库          {}", self.catalog);
         let _ = writeln!(out, "DAT 库          {}", self.dat);
         let _ = writeln!(
@@ -261,7 +270,8 @@ impl IdentifyReport {
         if self.nkit > 0 {
             let _ = writeln!(
                 out,
-                "NKit            {} 份镜像验出是 NKit 处理过的，一律不许自动通过（票 09）",
+                "NKit            {} 份镜像验出是 NKit 处理过的，一律不许自动通过——\
+                 它的 CRC32 可能与好转储相同（Dolphin），要先转回 ISO",
                 thousands(self.nkit)
             );
         }
@@ -274,7 +284,7 @@ impl IdentifyReport {
         heading(&mut out, "按平台");
         let _ = writeln!(
             out,
-            "{}{}{}{}{}{}{}DAT 条目",
+            "{}{}{}{}{}{}{}{}序列号",
             pad("平台", 10),
             pad("变体", 9),
             pad("命中", 9),
@@ -282,11 +292,12 @@ impl IdentifyReport {
             pad("无判据", 9),
             pad("跳过", 8),
             pad("命中率", 9),
+            pad("DAT 条目", 11),
         );
         for row in &self.platforms {
             let _ = writeln!(
                 out,
-                "{}{}{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}{}{}",
                 pad(&row.platform, 10),
                 pad(&thousands(row.variants), 9),
                 pad(&thousands(row.matched), 9),
@@ -294,12 +305,18 @@ impl IdentifyReport {
                 pad(&thousands(row.no_evidence), 9),
                 pad(&thousands(row.skipped), 8),
                 pad(&format!("{:.1}%", row.hit_rate()), 9),
-                thousands(row.dat_games),
+                pad(&thousands(row.dat_games), 11),
+                thousands(row.dat_serials),
             );
         }
         let _ = writeln!(
             out,
             "（命中率的分母是「撞了 DAT 的」，跳过与无判据不在里面——混进去命中率就失真了）"
+        );
+        let _ = writeln!(
+            out,
+            "（最后两列是两种**弹药**：DAT 条目撞哈希，序列号撞光盘内部标识。哪一种为 0，\
+             这个平台的命中率低就与识别准不准无关）"
         );
 
         reasons(&mut out, "跳过的（不该撞 DAT）", &self.skipped);

@@ -219,17 +219,12 @@ fn homebrew_of(name: &str, platform: Option<&str>) -> Option<Skip> {
 }
 
 /// 名字开头是不是 `@@@@#####` 形态的 TitleID；是的话返回那四个字母（大写）。
+///
+/// 形状本身认在 [`serial::title_id_head`](super::serial::title_id_head)——那儿还拿它
+/// 当**依据**（票 09）。**同一个形状只写一处**：两边各写一遍，改一次判据就会有一边
+/// 跳过、另一边当依据，而那两个结论互相矛盾。
 fn title_id_prefix(name: &str) -> Option<String> {
-    let bytes: Vec<char> = name.chars().take(9).collect();
-    if bytes.len() < 9 {
-        return None;
-    }
-    if !bytes[..4].iter().all(|c| c.is_ascii_alphabetic())
-        || !bytes[4..9].iter().all(|c| c.is_ascii_digit())
-    {
-        return None;
-    }
-    Some(bytes[..4].iter().collect::<String>().to_uppercase())
+    super::serial::title_id_head(name).map(|id| id.chars().take(4).collect())
 }
 
 /// 这个名字的扩展名是不是补丁格式。

@@ -21,14 +21,29 @@
 //! 于是**两套都撞**，而且撞出来的记录里有一部分是「去头口径的 DAT 被含头那套哈希撞上」
 //! ——那些文件本来就没有外挂头，两套是同一串字节。实测数字在 `docs/library-facts.md`。
 //!
-//! ## NKit 前置于任何 CRC 匹配
+//! ## 第二命中层：光盘序列号（票 09）
+//!
+//! CRC-32 那一层对光盘世代结构性地不够用——**压缩镜像的 CRC-32 算在压缩后的字节上**、
+//! **汉化版改过字节**、**目录树转储压根没有一个整文件可以算哈希**。而这三种东西
+//! 都把身份**明文**写在最前面：PS1 / PS2 的 `SYSTEM.CNF`、PSP / PS3 / PSV 的
+//! `PARAM.SFO`、GC / Wii 的光盘头。于是有了[光盘那一层](disc)与[序列号那一层](serial)：
+//! **识别一个 8 GB 的 ISO 不需要读 8 GB。**
+//!
+//! 它排在 CRC 之后跑，不是因为不如它可信（票据定的是「序列号命中等同于精确哈希命中」），
+//! 而是因为 CRC 那一层免费：撞上了就不必再为那份内容读几百 KB（`worth_probing`）。
+//!
+//! ## ⭐ NKit 前置于任何 CRC 匹配
 //!
 //! Dolphin 的原话：NKit 处理过的镜像**的 CRC32 可能和好转储的相同，即使两个文件并不
-//! 完全一样**。所以 GC / Wii 的镜像在**接受**一条命中之前先验 `0x200` 处的 `NKIT`
-//! （[`header::is_nkit`]），验出来就降一档置信度、不许自动通过。转回 ISO 再识别是票 09 的活。
+//! 完全一样**。所以 GC / Wii 的镜像在**接受**一条命中之前先验**光盘逻辑偏移** `0x200`
+//! 处的 `NKIT`，验出来就降一档置信度、不许自动通过——序列号那一层也一样，一份 NKit
+//! 镜像的序列号照样是对的，但它不是一份好转储，得先转回 ISO。
 //!
-//! **验不了也不许自动通过。** 判据取自**撞上的那条记录说它是 GC / Wii 的光盘**，
-//! 不是取自目录名——目录只是强先验（ADR-0011），放错地方的镜像照样存在。盘不在位、
+//! **逻辑**偏移三个字是要害：`.nkit.gcz` 与 WBFS 里那一处不在文件的 `0x200` 上，
+//! 得先按壳子打开（[`disc`]）。票 07 只按文件偏移验，压缩镜像一律漏网。
+//!
+//! **验不了也不许自动通过。** 判据取自**内容自己**——撞上的那条记录说它是 GC / Wii 的
+//! 光盘，或者光盘头就摆在那儿——不是取自目录名，目录只是强先验（ADR-0011）。盘不在位、
 //! 容器解不开、`--no-read-library`：这几种情形下验不出来，那条命中就只能是中置信。
 //!
 //! ## 四种结论，跳过与无判据都不混进未命中
@@ -37,17 +52,23 @@
 //! 失真了——「DAT 里没有这个东西」与「这东西根本不该撞 DAT」是两件事（[`scope`]），
 //! 「拿不到判据」（容器穿不透、压缩镜像、目录树转储）又是第三件。
 
+pub mod disc;
 pub mod fingerprint;
 pub mod header;
+pub mod iso9660;
 pub mod naming;
 pub mod report;
 pub mod scope;
+pub mod serial;
+pub mod sfo;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::catalog::identify::{Candidate, Confidence, ContentHash, EntryFact, Identification};
+use crate::catalog::identify::{
+    Candidate, Confidence, ContentHash, DiscFactRow, EntryFact, Identification,
+};
 use crate::catalog::{Catalog, CatalogError, Provenance, State, VariantRow};
 use crate::classify::{self, Category};
 use crate::container::{self, ContainerKind, Demand, ReadPlan};
@@ -63,6 +84,7 @@ use crate::verdict::{self, Decision, Verdict};
 use fingerprint::{Fingerprint, Headerless};
 use header::DumpHeader;
 use report::IdentifyReport;
+use serial::Evidence;
 
 /// 识别跑不下去的原因。
 ///
@@ -135,6 +157,16 @@ pub struct Outcome {
     pub reused_hashes: u64,
     /// 有几个变体的结论直接来自**沉淀库**——**裁决过的东西不必再撞一遍 DAT**。
     pub from_verdicts: u64,
+    /// 光盘那一层探了几份内容。
+    pub probed: u64,
+    /// 其中读出了内部标识的。
+    pub with_id: u64,
+    /// 光盘那一层这一趟没读到几份。**读不到不是结论，不落库**（ADR-0021）。
+    pub missed: u64,
+    /// **序列号层**产出的候选条数。
+    pub serial_candidates: u64,
+    /// **靠序列号层才认出来**的变体数——第一命中层在它们身上一条自动通过的候选都没有。
+    pub serial_only: u64,
 }
 
 /// 一份拿去撞 DAT 的内容：容器里的一个内部文件，或者一个裸文件。
@@ -159,11 +191,25 @@ struct ContentUnit {
     hits: Vec<(Hit, Convention)>,
     /// 这份内容在容器里，还是躺在盘上。
     in_container: bool,
+    /// 光盘那一层探出来的事实：壳子、NKit、内部标识（票 09）。
+    disc: Option<disc::Facts>,
 }
 
 impl ContentUnit {
+    /// 验过 NKit 没有，结论是什么。**`None` 是「没验过」，与 `Some(false)` 是两回事**
+    /// ——混起来会让一份没验过的 GC 镜像自动通过（Dolphin：NKit 的 CRC32 可能与好转储相同）。
+    ///
+    /// 两个来源：光盘那一层按**逻辑**偏移 `0x200` 验的（压缩镜像也验得了），以及裸文件
+    /// 整份读那一趟顺手验的。前者优先——后者只在字节恰好就是逻辑光盘时才对。
+    fn nkit(&self) -> Option<bool> {
+        self.disc
+            .as_ref()
+            .and_then(|facts| facts.nkit)
+            .or_else(|| self.print.and_then(|print| print.nkit))
+    }
+
     fn is_nkit(&self) -> bool {
-        self.print.and_then(|print| print.nkit).unwrap_or(false)
+        self.nkit() == Some(true)
     }
 }
 
@@ -231,6 +277,11 @@ pub fn run(
         read_files: state.progress.read_files,
         reused_hashes: state.reused,
         from_verdicts: state.from_verdicts,
+        probed: state.probed,
+        with_id: state.with_id,
+        missed: state.missed,
+        serial_candidates: state.serial_candidates,
+        serial_only: state.serial_only,
     })
 }
 
@@ -248,6 +299,18 @@ struct Run {
     reused: u64,
     /// 结论直接来自沉淀库的变体数。
     from_verdicts: u64,
+    /// 光盘那一层探了几份内容。
+    probed: u64,
+    /// 其中读出了标识的。
+    with_id: u64,
+    /// 这一趟没读到的份数（盘不在位、容器解不开、元数据读不到）。**它们不落库。**
+    missed: u64,
+    /// 序列号层产出的候选条数。
+    serial_candidates: u64,
+    /// 靠序列号层才认出来的变体数（第一命中层一条自动通过的候选都没有）。
+    serial_only: u64,
+    /// 这一轮探出来的光盘事实，攒够一批写一次。
+    facts: Vec<DiscFactRow>,
 }
 
 /// DAT 库里有没有这个平台的记录。平台认不出来时当作**有**——那时无从判断，
@@ -266,6 +329,8 @@ fn flush(
 ) -> Result<(), IdentifyError> {
     catalog.put_content_hashes(&state.hashes)?;
     state.hashes.clear();
+    catalog.put_disc_facts(&state.facts)?;
+    state.facts.clear();
     catalog.write_identifications(batch)?;
     batch.clear();
     Ok(())
@@ -320,16 +385,14 @@ fn identify_variant(
         });
     }
 
-    // 一、该回盘的回盘：裸文件要整份读一遍才有判据；GC / Wii 的镜像在**接受**命中
-    // 之前要先验 NKit（NKit **前置于任何 CRC 匹配**，所以读盘在撞库之前）；可能带
-    // 外挂头的，解出来把去头那套也算上。容器里那套含头的 CRC-32 是零解压白拿的，
-    // 这一步碰都不碰它们。
+    // 一、该回盘的回盘：裸文件要整份读一遍才有判据；可能带外挂头的，解出来把去头
+    // 那套也算上。容器里那套含头的 CRC-32 是零解压白拿的，这一步碰都不碰它们。
     //
     // 但**这个平台在 DAT 库里一条记录都没有**时，一个字节都不读：读出来的哈希
     // 无处可撞。容器里那套零解压的 CRC-32 照撞不误——它是白拿的，而且撞的是
     // 全库的记录，说不定这个 `switch/` 目录下躺着的其实是别的平台的东西。
     let read_bytes = if has_ammo(variant, state) {
-        fill_in(library, options, variant, &mut units, &cached, state)?
+        fill_in(library, options, &mut units, &cached, state)?
     } else {
         let platform = variant.platform.as_deref().unwrap_or("这个");
         for unit in &mut units {
@@ -342,7 +405,9 @@ fn identify_variant(
         0
     };
 
-    // 二、撞。含头那套一律撞一次——容器里的它零解压就有，裸文件的它刚算出来。
+    // 二、撞 CRC。含头那套一律撞一次——容器里的它零解压就有，裸文件的它刚算出来。
+    // **它排在光盘那一层之前**，不是因为更可信，而是因为它免费：撞上了就不必再为
+    // 那份内容读几百 KB 去找序列号（`worth_probing`）。
     for unit in &mut units {
         if let Some(print) = unit.print {
             unit.hits = lookup(repo, print.crc32, print.size, Convention::AsIs)?;
@@ -359,7 +424,27 @@ fn identify_variant(
         }
     }
 
-    let mut record = assemble(catalog, variant, &units, read_bytes, state)?;
+    // 三、⭐ **光盘那一层**：只读几百字节把内部标识取出来，顺便按**逻辑**偏移 0x200
+    // 验 NKit。它在**接受**任何 CRC 命中之前跑完——NKit 处理过的镜像的 CRC32 可能与
+    // 好转储相同（Dolphin），验完才敢说那句「命中」。
+    let found = probe_discs(
+        library, catalog, options, variant, &members, &mut units, state,
+    )?;
+    let read_bytes = read_bytes + found.read_bytes;
+
+    // 四、拿标识撞 DAT 的序列号索引。
+    let mut serial_candidates = serial::candidates(repo, &found.evidence)?;
+    state.serial_candidates += u64::try_from(serial_candidates.len()).unwrap_or(0);
+
+    let mut record = assemble(
+        catalog,
+        variant,
+        &units,
+        &found.evidence,
+        &mut serial_candidates,
+        read_bytes,
+        state,
+    )?;
     if unknown {
         record.reason = Some(VERDICT_UNKNOWN_REASON.to_string());
     }
@@ -432,6 +517,7 @@ fn collect(
                         blocked: None,
                         hits: Vec::new(),
                         in_container: true,
+                        disc: None,
                     }),
                     // 7z 的 `kCRC` 是可选块。没有 CRC 的条目进不了第一命中层。
                     None => units.push(blocked_unit(
@@ -448,11 +534,10 @@ fn collect(
         match category {
             // **压缩镜像不是包装，它就是变体本身的形态**（ADR-0014）。它的 CRC-32 是
             // 压缩之后那串字节的，DAT 记的是原始转储的——撞不上，也不该假装撞得上。
-            // 认它要读内部的光盘序列号，那是票 09。
             Category::CompressedImage => units.push(blocked_unit(
                 key,
                 "",
-                "压缩镜像：CRC-32 算在压缩后的字节上，撞不了 DAT（票 09 读光盘序列号）".to_string(),
+                "压缩镜像：CRC-32 算在压缩后的字节上，撞不了 DAT，内部标识也没读出来".to_string(),
                 false,
             )),
             Category::BareFile | Category::Unclassified => match catalog.entry_fact(key)? {
@@ -465,12 +550,14 @@ fn collect(
                     blocked: None,
                     hits: Vec::new(),
                     in_container: false,
+                    disc: None,
                 }),
-                // 目录树转储：`param.sfo` 与内部序列号是票 09 的活。
+                // 目录树转储：整个变体里没有一份「整文件」可以算哈希，锚是里面那份
+                // `param.sfo`（[光盘那一层](disc)去读）。这句话是那一份也没读到时的落点。
                 EntryFact::Dir => units.push(blocked_unit(
                     key,
                     "",
-                    "目录树转储：这一层认不了（票 09 读 param.sfo 与光盘序列号）".to_string(),
+                    "目录树转储：没有可以算哈希的整份内容，也没读到 param.sfo".to_string(),
                     false,
                 )),
                 EntryFact::Unreadable => units.push(blocked_unit(
@@ -515,6 +602,7 @@ fn blocked_unit(member: &str, inner: &str, reason: String, in_container: bool) -
         blocked: Some(reason),
         hits: Vec::new(),
         in_container,
+        disc: None,
     }
 }
 
@@ -560,13 +648,11 @@ fn restore_cached(
 fn fill_in(
     library: &dyn LibraryFs,
     options: &Options,
-    variant: &VariantRow,
     units: &mut [ContentUnit],
     cached: &BTreeMap<String, BTreeMap<String, ContentHash>>,
     state: &mut Run,
 ) -> Result<u64, IdentifyError> {
     let mut read_bytes = 0;
-    let platform = variant.platform.as_deref();
     // 按成员分组，一个容器最多开一次。
     let mut wanted: BTreeMap<String, Vec<(usize, Demand)>> = BTreeMap::new();
     let mut capped: Vec<(usize, String)> = Vec::new();
@@ -574,7 +660,7 @@ fn fill_in(
         if unit.blocked.is_some() {
             continue;
         }
-        let Some(demand) = demand_of(unit, platform) else {
+        let Some(demand) = demand_of(unit) else {
             continue;
         };
         // 上限只挡整份读，不挡那 0x204 字节的 NKit 探测——那一趟的代价与文件多大无关。
@@ -635,15 +721,14 @@ fn fill_in(
 }
 
 /// 这份内容要回盘读吗，读多少。
-fn demand_of(unit: &ContentUnit, platform: Option<&str>) -> Option<Demand> {
+///
+/// **NKit 不在这里了**（票 09）：它挪进了[光盘那一层](disc)，判据从「文件偏移 0x200」
+/// 改成「**逻辑**偏移 0x200」——那才是 Dolphin 说的那一处，压缩镜像也验得了。
+fn demand_of(unit: &ContentUnit) -> Option<Demand> {
     let Some(print) = unit.print else {
         // 一个字节都还没看过——裸文件就是这一档。
         return Some(Demand::All);
     };
-    // NKit **前置于任何 CRC 匹配**：验不了就不许自动通过。读 0x204 字节，与文件多大无关。
-    if print.nkit.is_none() && header::may_be_nkit(platform, &unit.name) {
-        return Some(Demand::Prefix(fingerprint::PROBE_LEN as u64));
-    }
     // 这个扩展名可能带外挂头，**而且尺寸也说得通**：解出来把去头那套也算上。
     //
     // 不看「含头那次撞上没有」——撞上了照样要算：一份带 iNES 头的卡带在 TOSEC 里按
@@ -682,6 +767,16 @@ fn over_limit(unit: &ContentUnit, options: &Options) -> Option<String> {
 /// 容器里的一条整份读进内存的上限。带外挂头的卡带最大的也就几 MB（SFC 的 6 MB 卡是
 /// 上限那一档），64 MiB 是宽出一个数量级的保险。
 const MAX_INLINE_READ: u64 = 64 << 20;
+
+/// 为了够到 solid 块里排在后面的一条，最多肯先解开多少字节扔掉。
+///
+/// 这个数是**光盘那一层的成本闸**。它存在的理由是这一层的全部意义：只读几百字节。
+/// 一份 7z 里的 `.iso` 排在几 GB 的东西后面时，为它付几分钟的解压等于把这条道理
+/// 反过来做——而那一条真机上存在，第一次跑就撞上了。
+///
+/// 64 MiB 按 LZMA 约 50 MB/s 算是一秒多，摊在两千来个容器上是分钟量级；踢掉的那些
+/// 报告里逐条点名，看得见、也补得回来（改大这个数重跑即可）。
+const MAX_SOLID_DRAIN: u64 = 64 << 20;
 
 fn read_bare(
     library: &dyn LibraryFs,
@@ -998,11 +1093,378 @@ fn find_verdict<'a>(
     })
 }
 
+/// 要探的一份内容。
+///
+/// 六样东西成群结队地一起走，所以捏成一个类型而不是一个六元组——`member` / `inner` /
+/// `name` 三个都是 `String`，元组里写错顺序编译器不会说话。
+struct Wanted {
+    /// 对应 [`ContentUnit`] 里的哪一条。**目录树转储里那份 `param.sfo` 是 `None`**：
+    /// 它的角色是**内部资源**，压根不产生候选，也就不在 units 里。
+    unit: Option<usize>,
+    /// 是变体的哪个成员。
+    member: String,
+    /// 容器内部路径；裸文件是空串。
+    inner: String,
+    /// 判壳子用的名字。
+    name: String,
+    /// 这份内容多大。
+    size: u64,
+    /// 在容器里，还是躺在盘上。
+    in_container: bool,
+}
+
+/// 探一份内容的结果。
+///
+/// 两档分开，是因为它们的**保质期**完全不同：
+///
+/// - [`Self::Read`] 是关于这份内容的**结论**，只要文件没变就一直成立 → 落进
+///   `content_disc`，第二趟直接取回。
+/// - [`Self::Missed`] 是「**这一趟**没读到」——盘不在位、容器解不开、
+///   或者那 4,085 个在 macOS 上连 `stat` 都失败的文件（ADR-0021 的第三态）。
+///   **它绝不落库**：缓存一次读失败等于让它永久生效，而那批文件在 Windows 上是正常的
+///   （ADR-0018 定的工作方式正是两台机器轮流碰同一块盘）。
+enum Probe {
+    /// 读到了，这是结论。
+    Read(disc::Facts),
+    /// 这一趟没读到，理由在这儿。
+    Missed(String),
+}
+
+/// 光盘那一层探完之后攒下来的东西。
+struct Probed {
+    /// 收集到的标识，按可信程度排好。
+    evidence: Vec<Evidence>,
+    /// 这一趟为它读了多少字节。
+    read_bytes: u64,
+}
+
+/// ⭐ **只读几百字节就认出来**：把变体里每一份光盘形态的内容探一遍。
+///
+/// 它同时办两件事，而两件都必须发生在**接受**任何命中之前：
+///
+/// 1. **NKit**。判据是**光盘逻辑偏移** `0x200` 处的 `NKIT`（Dolphin
+///    `VolumeDisc::IsNKit()`）。逻辑偏移这三个字是要害——`.nkit.gcz` 与 WBFS 里那一处
+///    不在文件的 `0x200` 上，得先按壳子打开才读得到（[`disc`]）。
+/// 2. **内部标识**：PS1 / PS2 的 `SYSTEM.CNF`、PSP / PS3 / PSV 的 `PARAM.SFO`、
+///    GC / Wii 的光盘头。
+///
+/// **算过的不再算**：探出来的事实落在中立库的 `content_disc` 里，按文件的三元组作废，
+/// 与算过的哈希是同一条路（挂账 D14）。第二趟识别在这一层上同样是零字节。
+fn probe_discs(
+    library: &dyn LibraryFs,
+    catalog: &mut Catalog,
+    options: &Options,
+    variant: &VariantRow,
+    members: &[(String, Role)],
+    units: &mut [ContentUnit],
+    state: &mut Run,
+) -> Result<Probed, IdentifyError> {
+    let mut probed = Probed {
+        evidence: Vec::new(),
+        read_bytes: 0,
+    };
+    // 一、要探哪几份。先是 units 里那些长得像光盘形态的；再是变体成员里那些
+    // **裸的 `param.sfo`**——目录树转储里那一份的角色是**内部资源**，压根不在 units 里
+    // （`CONTEXT.md`：内部资源不产生候选），可它正是 PSV 那 1,416 个变体的锚。
+    let mut wanted: Vec<Wanted> = Vec::new();
+    for (index, unit) in units.iter().enumerate() {
+        // **`blocked` 不是跳过的理由**：压缩镜像与目录树转储在第一命中层就是带着
+        // 「拿不到判据」这句话过来的，而它们正是这一层要救的东西。真正读不动的
+        // （元数据读不到、rar 穿不透）自然过不了下面那道 `by_name`。
+        if disc::by_name(&unit.name).is_none() || !worth_probing(unit) {
+            continue;
+        }
+        wanted.push(Wanted {
+            unit: Some(index),
+            member: unit.member.clone(),
+            inner: unit.inner.clone(),
+            name: unit.name.clone(),
+            size: unit.size,
+            in_container: unit.in_container,
+        });
+    }
+    for (key, _role) in members {
+        if !file_name_of_key(key).eq_ignore_ascii_case("param.sfo") {
+            continue;
+        }
+        if wanted
+            .iter()
+            .any(|it| it.member == *key && it.inner.is_empty())
+        {
+            continue;
+        }
+        let EntryFact::File(size) = catalog.entry_fact(key)? else {
+            continue;
+        };
+        wanted.push(Wanted {
+            unit: None,
+            member: key.clone(),
+            inner: String::new(),
+            name: key.clone(),
+            size,
+            in_container: false,
+        });
+    }
+
+    // 二、算过的先取回来（不读盘），剩下的才回盘。
+    let mut cached: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for it in &wanted {
+        if !cached.contains_key(&it.member) {
+            cached.insert(it.member.clone(), catalog.disc_facts(&it.member)?);
+        }
+    }
+    let mut todo: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut facts: Vec<Option<Probe>> = Vec::with_capacity(wanted.len());
+    for (at, it) in wanted.iter().enumerate() {
+        let stored = cached
+            .get(&it.member)
+            .and_then(|rows| rows.get(&it.inner))
+            .and_then(|text| serde_json::from_str::<disc::Facts>(text).ok())
+            .map(Probe::Read);
+        if stored.is_none() && options.read_library {
+            todo.entry(it.member.clone()).or_default().push(at);
+        }
+        facts.push(stored);
+    }
+    for (member, indexes) in todo {
+        let path = library_path(&options.root, &member);
+        let read = if wanted[indexes[0]].in_container {
+            read_disc_from_container(library, &path, &wanted, &indexes, &mut facts)
+        } else {
+            indexes
+                .iter()
+                .map(|at| read_disc_bare(library, &path, &wanted[*at], &mut facts[*at]))
+                .sum()
+        };
+        probed.read_bytes += read;
+        // 这一层读的字节也进总账：**「第二趟读了多少」是这条增量兑现与否的唯一凭据**
+        // （挂账 D14），少记一处就等于自己给自己发了张漂亮的成绩单。
+        state.progress.read_bytes += read;
+        state.progress.read_files += u64::try_from(indexes.len()).unwrap_or(0);
+    }
+
+    // 三、装回 units（NKit 靠它），落库，收集标识。
+    for (at, it) in wanted.iter().enumerate() {
+        let found = match facts[at].take() {
+            None => continue,
+            // 这一趟没读到：**不落库**（缓存一次读失败等于让它永久生效，ADR-0021），
+            // 也**不覆盖 `blocked`**——第一命中层写在那儿的那句话（「元数据读不到」
+            // 之类）才是这条该报的理由。只有它本来什么都没说时才补上这一句，
+            // 否则报告里这条会一个字都没有。
+            Some(Probe::Missed(why)) => {
+                state.missed += 1;
+                if let Some(index) = it.unit
+                    && units[index].print.is_none()
+                    && units[index].blocked.is_none()
+                {
+                    units[index].blocked = Some(why);
+                }
+                continue;
+            }
+            Some(Probe::Read(found)) => found,
+        };
+        state.probed += 1;
+        if !found.ids.is_empty() {
+            state.with_id += 1;
+        }
+        if cached
+            .get(&it.member)
+            .and_then(|rows| rows.get(&it.inner))
+            .is_none()
+            && let Ok(text) = serde_json::to_string(&found)
+        {
+            state.facts.push(DiscFactRow {
+                key: it.member.clone(),
+                inner: it.inner.clone(),
+                facts: text,
+            });
+        }
+        // **GC / Wii 的光盘才在乎 NKit**，而判据取自内容自己（读出来的是一条光盘 ID），
+        // 不取自目录（ADR-0011）。别的盘验不验都不影响它干不干净。
+        let is_disc = found.ids.iter().any(|id| id.kind == disc::IdKind::DiscId);
+        let nkit_clean = found.nkit != Some(true) && (!is_disc || found.nkit.is_some());
+        for id in &found.ids {
+            probed.evidence.push(Evidence {
+                member: it.member.clone(),
+                inner: it.inner.clone(),
+                id: id.clone(),
+                from_content: true,
+                nkit_clean,
+            });
+        }
+        if let Some(index) = it.unit {
+            // 读出标识了，第一命中层那句「压缩镜像 / 目录树转储这一层认不了」就过时了
+            // ——留着它，报告会把一个已经认出来的变体记成「无判据」。
+            if !found.ids.is_empty() {
+                units[index].blocked = None;
+            } else if let Some(note) = &found.note
+                // **只在那条本来就没判据时换掉它**：容器里那条有零解压的 CRC-32，
+                // 给它盖一句「认不了」会让报告拿它当无判据的理由。
+                && units[index].print.is_none()
+            {
+                units[index].blocked = Some(note.clone());
+            }
+            units[index].disc = Some(found);
+        }
+    }
+    // 四、**名字里那个 TitleID 是一条独立的依据**（票 09）。它永远不自动通过——
+    // 目录只是强先验（ADR-0011），这一条连内容都没看。
+    if let Some(id) = serial::title_id_in_name(file_name_of_key(&variant.key))
+        && !probed.evidence.iter().any(|seen| seen.id.key == id.key)
+    {
+        probed.evidence.push(Evidence {
+            member: variant.main_key.clone(),
+            inner: String::new(),
+            id,
+            from_content: false,
+            nkit_clean: true,
+        });
+    }
+    Ok(probed)
+}
+
+/// 这份内容值不值得为它读那几百 KB。
+///
+/// **已经精确命中的不必再探**——序列号是第二命中层，第一层办成了的事不必重办。
+///
+/// **唯一的例外是 NKit，而且这条例外不看 CRC 撞上了什么。** 票据原话：「NKit 检测在
+/// 任何 CRC 匹配之前执行」。所以判据取自[内容自己的形态](disc::may_hold_nkit)——
+/// 可能是一张 GC / Wii 光盘的，撞上了也照验。拿「撞上的那条记录说它是 GC / Wii」当判据
+/// 就把顺序倒过来了：CRC 的结论反过来决定要不要验 NKit，而 NKit 存在的理由正是
+/// **CRC 会骗人**。
+fn worth_probing(unit: &ContentUnit) -> bool {
+    !unit.hits.iter().any(|(hit, _)| hit.is_exact()) || disc::may_hold_nkit(&unit.name)
+}
+
+/// 探一个裸文件：只读前若干字节。
+fn read_disc_bare(
+    library: &dyn LibraryFs,
+    path: &Path,
+    wanted: &Wanted,
+    slot: &mut Option<Probe>,
+) -> u64 {
+    let Some(shell) = disc::by_name(&wanted.name) else {
+        return 0;
+    };
+    let limit = disc::probe_len(shell);
+    let head = match library.read_head(path, limit) {
+        Ok(head) => head,
+        Err(error) => {
+            *slot = Some(Probe::Missed(format!("读不动：{error}")));
+            return 0;
+        }
+    };
+    let read = head.len() as u64;
+    *slot = Some(Probe::Read(disc::probe(&wanted.name, &head, wanted.size)));
+    read
+}
+
+/// 探容器里的几条：一趟打开，每条只要前若干字节（[`Demand::Prefix`]）。
+fn read_disc_from_container(
+    library: &dyn LibraryFs,
+    path: &Path,
+    wanted: &[Wanted],
+    indexes: &[usize],
+    facts: &mut [Option<Probe>],
+) -> u64 {
+    let listing = match container::list(library, path) {
+        Ok(listing) => listing,
+        Err(error) => {
+            for at in indexes {
+                facts[*at] = Some(Probe::Missed(format!("容器读不动：{error}")));
+            }
+            return 0;
+        }
+    };
+    // ⭐ **solid block 的代价要在开工前算清楚**（ADR-0014 1.6）。7z 的一个块里几个条目是
+    // 连着压的，解压器**跳不过**中间的字节——想读排在后面那一条，前面那些就得先解出来
+    // 扔掉。真机上撞见过一次：一份 7z 里那个 `.iso` 排在几 GB 的东西后面，
+    // 「只读几百字节」当场变成解几个 GB，一个变体卡住整趟识别。
+    //
+    // 判据零解压可得（`block` 与每条的未压缩大小都在容器头里），所以这里**在下计划之前**
+    // 就把太贵的那些踢出去，并如实说为什么——而不是等它跑几分钟。
+    let mut before: BTreeMap<usize, u64> = BTreeMap::new();
+    {
+        let mut running: BTreeMap<usize, u64> = BTreeMap::new();
+        for (index, entry) in listing.contents.entries.iter().enumerate() {
+            let Some(block) = entry.block else { continue };
+            let sum = running.entry(block).or_insert(0);
+            before.insert(index, *sum);
+            *sum = sum.saturating_add(entry.size);
+        }
+    }
+    let position: BTreeMap<&str, usize> = listing
+        .contents
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.path.as_str(), index))
+        .collect();
+    let mut asked: BTreeMap<&str, u64> = BTreeMap::new();
+    for at in indexes {
+        let it = &wanted[*at];
+        let Some(shell) = disc::by_name(&it.name) else {
+            continue;
+        };
+        let ahead = position
+            .get(it.inner.as_str())
+            .and_then(|index| before.get(index))
+            .copied()
+            .unwrap_or(0);
+        if ahead > MAX_SOLID_DRAIN {
+            // 这是一条**结论**不是一次读失败：判据（块与每条的未压缩大小）零解压可得，
+            // 只要容器没变就一直成立，所以它照样落库，第二趟不必再把容器头解析一遍。
+            facts[*at] = Some(Probe::Read(disc::Facts {
+                note: Some(format!(
+                    "solid 块太深：这一条前面还压着 {}，要解开才够得到它，而这一层只想读几百字节",
+                    crate::report::human_bytes(ahead)
+                )),
+                ..disc::Facts::default()
+            }));
+            continue;
+        }
+        asked.insert(it.inner.as_str(), disc::probe_len(shell) as u64);
+    }
+    if asked.is_empty() {
+        return 0;
+    }
+    let plan = ReadPlan::new(&listing, |entry| match asked.get(entry.path.as_str()) {
+        Some(limit) => Demand::Prefix(*limit),
+        None => Demand::Skip,
+    });
+    let mut got: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let outcome = container::read_entries(library, path, &listing, &plan, &mut |entry, reader| {
+        let mut buffer = Vec::new();
+        reader.read_to_end(&mut buffer)?;
+        got.insert(entry.path.clone(), buffer);
+        Ok(())
+    });
+    if let Err(error) = outcome {
+        for at in indexes {
+            if facts[*at].is_none() {
+                facts[*at] = Some(Probe::Missed(format!("解不开：{error}")));
+            }
+        }
+    }
+    let mut read = 0;
+    for at in indexes {
+        let it = &wanted[*at];
+        let Some(bytes) = got.get(&it.inner) else {
+            continue;
+        };
+        read += bytes.len() as u64;
+        facts[*at] = Some(Probe::Read(disc::probe(&it.name, bytes, it.size)));
+    }
+    read
+}
+
 /// 把撞出来的东西折成候选、结论，以及作品与发行版。
 fn assemble(
     catalog: &mut Catalog,
     variant: &VariantRow,
     units: &[ContentUnit],
+    evidence: &[Evidence],
+    from_serial: &mut Vec<(Candidate, Option<String>)>,
     read_bytes: u64,
     state: &mut Run,
 ) -> Result<Identification, CatalogError> {
@@ -1019,6 +1481,14 @@ fn assemble(
             scored.push((candidate_of(unit, hit, *hashed_as), hit.cloneof.clone()));
         }
     }
+    // **序列号层**的候选并进来，父条目名一起带着——ADR-0010 拿 `cloneof` 把同一部
+    // **作品**下的几个发行版归堆，序列号撞出来的那条与哈希撞出来的那条在这件事上没有区别。
+    let first_layer_accepted = scored.iter().any(|(candidate, _)| candidate.accepted);
+    let serial_accepted = from_serial.iter().any(|(candidate, _)| candidate.accepted);
+    if serial_accepted && !first_layer_accepted {
+        state.serial_only += 1;
+    }
+    scored.append(from_serial);
     // 排序：先按候选自己的可信程度，再按数据源的先后，最后按名字定死顺序——
     // 同一份中立库跑两次，候选的次序必须一样。
     scored.sort_by(|a, b| {
@@ -1054,7 +1524,28 @@ fn assemble(
         .iter()
         .filter_map(|unit| unit.blocked.as_deref())
         .collect();
-    let usable = units.iter().filter(|unit| unit.print.is_some()).count();
+    // **判据不只是哈希**：光盘那一层读出来的标识同样是判据。不算进来的话，一份读出了
+    // 序列号却撞不上 DAT 的镜像会被记成「无判据」——而那是在说谎，判据拿到了，
+    // 只是 DAT 里没有这一条。
+    //
+    // 按 `(成员, 内部路径)` 去重：同一份内容既算过哈希、又读出了标识时只算一份。
+    // 而**目录树转储里那份 `param.sfo` 压根不在 `units` 里**（它的角色是内部资源），
+    // 所以只数 units 会把整个 PSV 平台记成没有判据。
+    let mut with_evidence: BTreeSet<(&str, &str)> = units
+        .iter()
+        .filter(|unit| {
+            unit.print.is_some()
+                || unit
+                    .disc
+                    .as_ref()
+                    .is_some_and(|facts| !facts.ids.is_empty())
+        })
+        .map(|unit| (unit.member.as_str(), unit.inner.as_str()))
+        .collect();
+    for found in evidence.iter().filter(|found| found.from_content) {
+        with_evidence.insert((found.member.as_str(), found.inner.as_str()));
+    }
+    let usable = with_evidence.len();
     let state_of = if !candidates.is_empty() {
         State::Matched
     } else if usable > 0 {
@@ -1120,8 +1611,7 @@ fn candidate_of(unit: &ContentUnit, hit: &Hit, hashed_as: Convention) -> Candida
     // （ADR-0011），放错地方的镜像照样存在。这里的判据换成**内容自己给的**：
     // 撞上的那条记录说它是 GC / Wii 的光盘，那这份内容就必须验过 NKit 才敢自动认账。
     // 验不了（盘不在位、容器解不开、`--no-read-library`）就降一档，等裁决。
-    let unverified = unit.print.is_none_or(|print| print.nkit.is_none())
-        && matches!(hit.platform.as_str(), "NGC" | "WII");
+    let unverified = unit.nkit().is_none() && matches!(hit.platform.as_str(), "NGC" | "WII");
     // **逐芯片的命中不自动通过。** MAME 的 software list 把一张卡拆成 `prg` / `chr`
     // 若干 dataarea，一条 `rom` 是**一颗芯片**的内容。单芯片卡上它恰好等于去头哈希，
     // 多芯片卡上「对上了一颗芯片」离「这个文件就是那次发行」还差着别的芯片
