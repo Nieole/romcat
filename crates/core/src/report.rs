@@ -241,6 +241,8 @@ pub struct ContainerKindStats {
     pub inner_bytes: u64,
     /// 容器没记 CRC-32 的内部文件数。它们进不了零解压的第一命中层。
     pub inner_without_crc: u64,
+    /// **要完整解压才认得出来**的容器数：有内容的条目一条 CRC-32 都没有。
+    pub needs_full_decompress: u64,
     /// 块数合计。
     pub blocks: u64,
 }
@@ -276,7 +278,7 @@ pub struct ContainerSummary {
     pub unread: u64,
     /// 还没读过的那批里，有没有**穿不透的格式**（zst）。
     ///
-    /// 报告要照着它说话：zip / 7z 没读是因为 `--no-containers`，zst 没读是因为它没有
+    /// 报告要照着它说话：zip / 7z / rar 没读是因为 `--no-containers`，zst 没读是因为它没有
     /// 零解压那条路。对着一个 zip 说 zst 的话，读的人会照着一条不成立的结论去动手。
     pub unread_includes_impenetrable: bool,
     /// 内部文件数合计。
@@ -287,6 +289,12 @@ pub struct ContainerSummary {
     pub inner_with_crc: u64,
     /// 容器没记 CRC-32 的内部文件数。
     pub inner_without_crc: u64,
+    /// **要完整解压才认得出来**的容器数：有内容的条目一条 CRC-32 都没有。
+    ///
+    /// 它与**还没读过**不是一回事：这一档是穿透了、名字与大小都拿到了，只是
+    /// 第一命中层用不上（只写 BLAKE2sp 的 RAR5、带密码校验和被搅过的），
+    /// 与 zst 同一档处置（ADR-0014）。
+    pub needs_full_decompress: u64,
     /// solid 容器数。
     pub solid: u64,
     /// 内部文件按三类主线的构成。
@@ -835,6 +843,7 @@ fn container_summary(acc: &ContainerAcc, penetrated_this_scan: bool) -> Containe
             inner_files: value.inner_files,
             inner_bytes: value.inner_bytes,
             inner_without_crc: value.inner_without_crc,
+            needs_full_decompress: value.needs_full_decompress,
             blocks: value.blocks,
         })
         .collect();
@@ -857,6 +866,7 @@ fn container_summary(acc: &ContainerAcc, penetrated_this_scan: bool) -> Containe
         inner_bytes: totals.inner_bytes,
         inner_with_crc: totals.inner_files.saturating_sub(totals.inner_without_crc),
         inner_without_crc: totals.inner_without_crc,
+        needs_full_decompress: totals.needs_full_decompress,
         solid: totals.solid,
         inner_categories: category_stats(&acc.inner_categories, inner_totals),
         inner_extensions: extension_stats(&acc.inner_extensions, TOP_INNER_EXTENSIONS),

@@ -105,11 +105,11 @@ use crate::catalog::identify::{
 };
 use crate::catalog::{Catalog, CatalogError, Provenance, State, VariantRow};
 use crate::classify::{self, Category};
-use crate::container::{self, ContainerKind, Demand, ReadPlan};
+use crate::container::{self, ContainerKind, Demand, ReadPlan, volume};
 use crate::dat::chinese::ChineseMark;
 use crate::dat::{Convention, DatRepo, Hit, Matched, RepoError};
 use crate::fs::LibraryFs;
-use crate::path::{extension_lower, file_name_of_key};
+use crate::path::file_name_of_key;
 use crate::report::thousands;
 use crate::scan::CancelToken;
 use crate::shape::Role;
@@ -962,6 +962,28 @@ fn collect(
         if !matches!(role, Role::Main | Role::Companion) {
             continue;
         }
+        // **一组分卷是一个容器**（CONTEXT 的「透明容器」条）：非入口段没有自己的头，
+        // 整组由入口段代表。它当附属文件时一声不吭地跳过——入口段已经把整组的内部
+        // 构成交出来了，再为每一段各记一条「读不了」等于把一组数成好几个未命中。
+        if volume::is_non_entry_part(file_name_of_key(key)) {
+            if *role == Role::Companion {
+                continue;
+            }
+            // 当主文件就说明**这一组的入口卷不在这个变体里**——真库里那个
+            // `废都物语_资料合辑_220928.7z.006` 正是这样：`.001` 到 `.005` 都不在库里。
+            visible.saw_inside = false;
+            units.push(blocked_unit(
+                key,
+                "",
+                format!(
+                    "分卷的一段，而这一组的入口卷（{}）不在这个变体里",
+                    volume::volume_of(file_name_of_key(key))
+                        .map_or("入口卷", |it| it.scheme.entry_hint())
+                ),
+                true,
+            ));
+            continue;
+        }
         if let Some(kind) = ContainerKind::for_path(Path::new(key)) {
             let files = catalog.container_files(key)?;
             // **只收容器里装着什么，不收容器自己**：补丁的判据是「里面没有可运行的
@@ -1064,17 +1086,14 @@ fn collect(
                 )),
                 EntryFact::Missing | EntryFact::Other => {}
             },
-            // `.rar` 在归类里也是**透明容器**，但穿透层故意还认不出它（票 04）。
+            // 归类说它是**透明容器**、穿透层却认不出来的，只剩这一版还没做的格式。
             // 说清楚是「还穿不透」而不是「没有内容」——两句话指向完全不同的下一步。
             Category::TransparentContainer => {
                 visible.saw_inside = false;
                 units.push(blocked_unit(
                     key,
                     "",
-                    match extension_lower(Path::new(file_name_of_key(key))).as_deref() {
-                        Some("rar") => "rar 容器这一层还穿不透（票 04）".to_string(),
-                        _ => "这个容器格式还穿不透".to_string(),
-                    },
+                    "这个容器格式还穿不透".to_string(),
                     true,
                 ));
             }

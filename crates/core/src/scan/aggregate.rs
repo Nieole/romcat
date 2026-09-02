@@ -273,6 +273,12 @@ pub struct ContainerKindAcc {
     pub inner_bytes: u64,
     /// 容器没记 CRC-32 的内部文件数。它们进不了零解压的第一命中层。
     pub inner_without_crc: u64,
+    /// **要完整解压才认得出来**的容器数：有内容的条目一条 CRC-32 都没有。
+    ///
+    /// 眼下有两种走到这一档的：只写 BLAKE2sp 的 RAR5（`rar a -htb`，而 DAT 一条
+    /// BLAKE2 都不记），以及带密码、校验和被密钥搅过的（ADR-0014）。它们**穿透了**
+    /// ——名字与大小都在——只是第一命中层用不上，与 zst 同一档处置。
+    pub needs_full_decompress: u64,
     /// 一共有几个块。
     pub blocks: u64,
 }
@@ -330,6 +336,7 @@ impl ContainerAcc {
             total.inner_files += acc.inner_files;
             total.inner_bytes += acc.inner_bytes;
             total.inner_without_crc += acc.inner_without_crc;
+            total.needs_full_decompress += acc.needs_full_decompress;
             total.blocks += acc.blocks;
         }
         total
@@ -776,6 +783,10 @@ impl Aggregate {
         acc.inner_files += facts.inner_files;
         acc.inner_bytes += facts.inner_bytes;
         acc.inner_without_crc += facts.inner_without_crc;
+        // 判据从已经落库的两个数里减出来，不必为它加一列：有内容的条目全都没有
+        // CRC-32，这个容器就只能靠完整解压认出来。
+        acc.needs_full_decompress +=
+            u64::from(facts.inner_files > 0 && facts.inner_without_crc == facts.inner_files);
         acc.blocks += facts.blocks;
     }
 

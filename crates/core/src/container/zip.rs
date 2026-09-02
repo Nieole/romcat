@@ -29,7 +29,7 @@ use flate2::read::DeflateDecoder;
 
 use super::{
     ContainerError, ContainerKind, Contents, InnerEntry, Listing, Locator, ReadPlan, ReadStats,
-    hand_entry,
+    hand_entry, malformed,
 };
 use crate::fs::{LibraryFs, ReadSeek};
 
@@ -77,6 +77,13 @@ pub(super) struct EntryLocator {
     compressed_size: u64,
     method: u16,
     encrypted: bool,
+    /// 这一条的数据**不在手上这一段**时，它在第几段（APPNOTE §8 的 split archive）。
+    ///
+    /// 不是 split 的 zip 上一律是 `None`。**这一栏不能丢**：真库里 WIIU 那 4 组
+    /// `XenobladeX-…-WUP.z01…z04 + .zip` 是货真价实的 ZIP split，中央目录在末段那个
+    /// `.zip` 里（所以清单读得出来），可条目的数据分散在 `.z01`…`.z04` 上。
+    /// 丢了它就会拿着一个属于别段的偏移在 `.zip` 里乱找，撞上什么就报什么。
+    elsewhere: Option<u16>,
 }
 
 fn le16(buf: &[u8], at: usize) -> Option<u16> {
@@ -92,10 +99,6 @@ fn le32(buf: &[u8], at: usize) -> Option<u32> {
 fn le64(buf: &[u8], at: usize) -> Option<u64> {
     buf.get(at..at + 8)
         .map(|b| u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
-}
-
-fn malformed(detail: impl Into<String>) -> ContainerError {
-    ContainerError::Malformed(detail.into())
 }
 
 fn read_exact_at(file: &mut dyn ReadSeek, offset: u64, len: usize) -> io::Result<Vec<u8>> {
@@ -115,6 +118,8 @@ struct Directory {
     entries: u64,
     /// 自解压模块造成的整体位移：条目里记的 local header 偏移要加上它。
     shift: u64,
+    /// 中央目录**自己**在第几段上。取字节时只够得着这一段。
+    disk: u16,
 }
 
 /// 零解压读出一个 zip 的内部构成。
@@ -144,7 +149,7 @@ pub(super) fn list(library: &dyn LibraryFs, path: &Path) -> Result<Listing, Cont
             // 中央目录之后紧跟着 ZIP64 EOCD 或 EOCD，扫到别的签名就是走完了。
             break;
         }
-        let (entry, locator, next) = parse_central(&raw, cursor, &mut blocks, directory.shift)?;
+        let (entry, locator, next) = parse_central(&raw, cursor, &mut blocks, &directory)?;
         entries.push(entry);
         locators.push(locator);
         cursor = next;
@@ -216,6 +221,7 @@ fn read_directory_at(
     let eocd = &window[eocd_at..];
     let eocd_pos = window_start + eocd_at as u64;
 
+    let this_disk = le16(eocd, 4).ok_or_else(|| malformed("EOCD 截断"))?;
     let entries16 = le16(eocd, 10).ok_or_else(|| malformed("EOCD 截断"))?;
     let size32 = le32(eocd, 12).ok_or_else(|| malformed("EOCD 截断"))?;
     let offset32 = le32(eocd, 16).ok_or_else(|| malformed("EOCD 截断"))?;
@@ -259,6 +265,7 @@ fn read_directory_at(
         size,
         entries,
         shift: start.saturating_sub(recorded),
+        disk: this_disk,
     })
 }
 
@@ -321,7 +328,7 @@ fn parse_central(
     raw: &[u8],
     at: usize,
     blocks: &mut usize,
-    shift: u64,
+    directory: &Directory,
 ) -> Result<(InnerEntry, EntryLocator, usize), ContainerError> {
     let truncated = || malformed("中央目录记录截断");
     let flags = le16(raw, at + 0x08).ok_or_else(truncated)?;
@@ -382,10 +389,11 @@ fn parse_central(
         name_lossy,
     };
     let locator = EntryLocator {
-        local_offset: local_offset.saturating_add(shift),
+        local_offset: local_offset.saturating_add(directory.shift),
         compressed_size: compressed,
         method,
         encrypted: flags & FLAG_ENCRYPTED != 0,
+        elsewhere: (disk != directory.disk).then_some(disk),
     };
     Ok((entry, locator, next))
 }
@@ -489,6 +497,22 @@ pub(super) fn read_entries(
             .ok_or_else(|| malformed("条目没有对应的定位信息"))?;
         if locator.encrypted {
             return Err(ContainerError::Encrypted);
+        }
+        if let Some(disk) = locator.elsewhere {
+            // **ZIP split：清单读得出来，字节取不出来。** 中央目录写在末段那个 `.zip`
+            // 里（APPNOTE §8.3.4 说末段用 `.zip` 扩展名正是为了这个），所以名字、
+            // 大小与 CRC-32 一样不缺——第一命中层照撞。可这一条的数据坐在 `.zNN` 上，
+            // 这一层还不会跨段读（挂账 D136）。**如实说在第几段**：不说的话，
+            // 这个偏移会在 `.zip` 里撞上一堆压缩数据，然后报成「local header 签名对不上」
+            // ——一个把人引向错误方向的理由。
+            return Err(ContainerError::MissingVolume {
+                detail: format!(
+                    "{} 的数据在第 {} 段（`.z{:02}`）上，而这一层只读得了末段那个 `.zip`",
+                    entry.path,
+                    disk + 1,
+                    disk + 1
+                ),
+            });
         }
         let start = data_start(file.as_mut(), locator)?;
         file.seek(SeekFrom::Start(start))?;

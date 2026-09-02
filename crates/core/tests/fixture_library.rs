@@ -156,7 +156,9 @@ fn 扩展名构成区分三类() {
     assert_eq!(类(Category::TransparentContainer), 6);
     assert_eq!(类(Category::CompressedImage), 1, "chd");
     assert_eq!(类(Category::BareFile), 5, "nes、gba×3、iso");
-    assert_eq!(report.anomalies.split_volume_parts, 2, "7z.001 与 7z.002");
+    // **入口段不算多出来的一段**：`.7z.001` 是那一组的入口，它自己就是那个容器；
+    // 数它会把一组数两次（票 04）。
+    assert_eq!(report.anomalies.split_volume_parts, 1, "只数 7z.002");
 
     let zip = report
         .extensions

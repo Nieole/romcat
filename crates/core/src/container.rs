@@ -1,14 +1,20 @@
 //! 读出**透明容器**内部装着什么：每个内部文件的名字、未压缩大小与可得的校验和。
 //!
-//! zip 与 7z 走的是**穿透**——零解压，容器的元数据里就写着 CRC-32。zst 走不了那条路，
-//! 只能真的解一遍（见下）。两条路的产出是同一个形状，代价差 500–900 倍。
+//! zip、7z 与 rar 走的是**穿透**——零解压，容器的元数据里就写着 CRC-32。zst 走不了
+//! 那条路，只能真的解一遍（见下）。两条路的产出是同一个形状，代价差 500–900 倍。
 //!
 //! **这是整个项目性能可行性的支点。** 主库 8.60 TiB 里有 91.1% 的容量装在透明容器里，
 //! 其中 7z 独占 4.71 TiB（`docs/library-facts.md`）。DAT 的每条记录都带
 //! `size` + `crc`，因此第一命中层用 **CRC-32 + 未压缩大小**（ADR-0002 的再修订）就能
 //! 完全不解压地认出绝大部分内容。这一条不成立的话，7.84 TiB 得先解压一遍。
 //!
-//! **rar 还不在这里**：它是票 04，要自己写头部解析器以避开 UnRAR 的许可传染。
+//! **rar 也在这里，而且是自己写的头部解析器**（[`rar`]）：`unrar` crate 内嵌那份 C++
+//! 源码，许可传染（ADR-0014 的「UnRAR 许可」一节）。读头不需要解压，于是那份许可
+//! 可以彻底绕开——代价是 rar 的**解压**这条路走不了，取内容只交得出「原样存放」的条目。
+//!
+//! **分卷的多个分卷合起来才是一个容器**（CONTEXT 的 **透明容器** 词条）。三种分卷机制
+//! 长得像却完全不同，[`volume`] 把它们分清：RAR 官方分卷、7-Zip 的通用字节切分、
+//! ZIP 官方 split。非入口段不是独立的容器，[`ContainerKind::for_path`] 对它返回 `None`。
 //!
 //! **zst 在这里，但走的是另一条路。** `.zst` / `.tar.zst` 是**第一个进不了零解压快路的
 //! 容器**——zstd 帧格式里根本没有 CRC-32 这个字段，tar 的 `chksum` 只保护头部元数据，
@@ -32,7 +38,9 @@
 //! 出处见 `docs/research/containers-and-compressed-images.md` 第 1.1、1.2、1.6 节。
 
 pub mod charset;
+pub mod rar;
 pub mod sevenz;
+pub mod volume;
 pub mod zip;
 pub mod zst;
 
@@ -51,6 +59,10 @@ pub enum ContainerKind {
     Zip,
     /// 7z。元数据集中在文件末尾，**可能被压缩过**（`kEncodedHeader`），且压缩单元是块。
     SevenZip,
+    /// rar（含分卷）。头部散在整条流上，一个文件头挨着它自己的数据。
+    ///
+    /// **一组分卷算一个**：入口卷代表整组，非入口段不是独立的容器（[`volume`]）。
+    Rar,
     /// zst（含 tar.zst）。**没有元数据可言**：zstd 是单流压缩器，不是归档器。
     /// 内部构成只能靠解压读出来，而且一个校验和都拿不到（[`zst`]）。
     Zstd,
@@ -63,6 +75,7 @@ impl ContainerKind {
         match self {
             Self::Zip => "zip",
             Self::SevenZip => "7z",
+            Self::Rar => "rar",
             Self::Zstd => "zst",
         }
     }
@@ -76,6 +89,7 @@ impl ContainerKind {
         match self {
             Self::Zip => "zip",
             Self::SevenZip => "7z",
+            Self::Rar => "rar",
             Self::Zstd => "zst",
         }
     }
@@ -86,6 +100,7 @@ impl ContainerKind {
         match code {
             "zip" => Some(Self::Zip),
             "7z" => Some(Self::SevenZip),
+            "rar" => Some(Self::Rar),
             "zst" => Some(Self::Zstd),
             _ => None,
         }
@@ -93,13 +108,20 @@ impl ContainerKind {
 
     /// 按扩展名判断这个文件该按哪种容器读；本程序还读不了的格式是 `None`。
     ///
-    /// `.rar` 在 [`classify`](crate::classify) 里同样是透明容器，但它是票 04 的活，
-    /// 这里**故意**认不出来。
+    /// **分卷的非入口段也是 `None`**，而且理由不同：它不是「读不了这个格式」，
+    /// 而是「它自己不是一个容器」——`X.part2.rar` 没有自己的头一段，整组由
+    /// `X.part1.rar` 代表（[`volume`]）。判据放在这一处，于是数容器、扫描、识别、
+    /// 格式转换四处自动一致；四处各记一遍，迟早有一处忘了。
     #[must_use]
     pub fn for_path(path: &Path) -> Option<Self> {
+        let name = path.file_name()?.to_string_lossy();
+        if volume::is_non_entry_part(&name) {
+            return None;
+        }
         match extension_lower(path)?.as_str() {
             "zip" | "cbz" => Some(Self::Zip),
             "7z" => Some(Self::SevenZip),
+            "rar" => Some(Self::Rar),
             "zst" => Some(Self::Zstd),
             _ => None,
         }
@@ -107,14 +129,14 @@ impl ContainerKind {
 
     /// 这种格式**穿得透吗**——也就是不解压就读得出内部构成吗（`CONTEXT.md`）。
     ///
-    /// zip 与 7z 穿得透：中央目录与头部把「名字、大小、CRC-32」显式存了下来。zst 穿不了，
+    /// zip、7z 与 rar 穿得透：中央目录与头部把「名字、大小、CRC-32」显式存了下来。zst 穿不了，
     /// 而且不是「差一点」——格式里就没有这些字段（ADR-0014 的第二段修订），
     /// 它的内部构成只能靠完整解压读出来。调度器与报告都要说得出这个区别：
     /// 一个容器要花 30 秒还是 30 毫秒，全看这一条。
     #[must_use]
     pub fn is_penetrable(self) -> bool {
         match self {
-            Self::Zip | Self::SevenZip => true,
+            Self::Zip | Self::SevenZip | Self::Rar => true,
             Self::Zstd => false,
         }
     }
@@ -216,6 +238,22 @@ impl Contents {
             .count()
     }
 
+    /// 这个容器**要完整解压才认得出来**吗：有内容的条目一条 CRC-32 都没有。
+    ///
+    /// 这是 zst 那一档的处置（ADR-0014 的第二段修订），rar 也够得着它：RAR5 的
+    /// CRC-32 是可选的，只写 BLAKE2sp 的容器（`-htb`）一条 CRC 都不记，而
+    /// No-Intro / Redump / TOSEC 一条 BLAKE2 都不收。**穿透归穿透**——名字与大小
+    /// 照样读得出来，只是第一命中层用不上它。
+    /// **判据只用这两个数**：内部文件数与其中没有 CRC-32 的个数。
+    /// 库体检那一侧从中立库里读回来的正是这两个数（`container` 表的 `files`
+    /// 与 `no_crc`），照同一条式子再算一遍——两处口径必须一模一样，
+    /// 否则同一个容器在报告里与在这里会给出相反的结论。
+    #[must_use]
+    pub fn needs_full_decompress(&self) -> bool {
+        let files = self.file_count();
+        files > 0 && self.without_crc() == files
+    }
+
     /// 这个容器是不是 solid：**有任何一个块装了多于一个条目**。
     ///
     /// 判据零解压可得（7z 看 `NumUnPackStreamsInFolders[i] > 1`），因此调度器在
@@ -243,6 +281,7 @@ pub struct Listing {
 enum Locator {
     Zip(Vec<zip::EntryLocator>),
     SevenZip(Box<sevenz_rust2::Archive>),
+    Rar(Box<rar::RarLocator>),
     Zstd(zst::Shape),
 }
 
@@ -265,6 +304,11 @@ pub enum FailureReason {
     UnsupportedMethod,
     /// 要外部字典。zstd 的帧头可以写一个 `Dictionary_ID`，那本字典不在库里就永远解不开。
     NeedsDictionary,
+    /// **缺分卷**。一组分卷缺了其中一卷，整组的内部构成就读不全。
+    ///
+    /// 它与「结构读不下去」分开，因为下一步完全不同：那个是这个文件本身有问题，
+    /// 这个是**别的文件不在**——去找那一卷，或者确认这一组本来就只搬来了半截。
+    MissingVolume,
 }
 
 impl FailureReason {
@@ -278,6 +322,7 @@ impl FailureReason {
             Self::NeedsPassword => "需要密码",
             Self::UnsupportedMethod => "压缩方法解不了",
             Self::NeedsDictionary => "需要外部字典",
+            Self::MissingVolume => "缺分卷",
         }
     }
 
@@ -291,6 +336,7 @@ impl FailureReason {
             Self::NeedsPassword => "needs-password",
             Self::UnsupportedMethod => "unsupported-method",
             Self::NeedsDictionary => "needs-dictionary",
+            Self::MissingVolume => "missing-volume",
         }
     }
 
@@ -302,7 +348,7 @@ impl FailureReason {
 
     /// 报告里固定的排列顺序。
     #[must_use]
-    pub fn all() -> [Self; 6] {
+    pub fn all() -> [Self; 7] {
         [
             Self::Unreadable,
             Self::WrongFormat,
@@ -310,6 +356,7 @@ impl FailureReason {
             Self::NeedsPassword,
             Self::UnsupportedMethod,
             Self::NeedsDictionary,
+            Self::MissingVolume,
         ]
     }
 }
@@ -400,8 +447,17 @@ pub enum ContainerError {
     /// **这个文件无法独立解压**。真库里实测 0 个，但零成本就查得出来，查出来就如实说。
     #[error("需要外部字典 {0}，无法独立解压")]
     NeedsDictionary(u32),
-    /// 扩展名不是本程序读得了的透明容器。
-    #[error("不是 zip、7z 或 zst")]
+    /// 一组分卷缺了一卷。
+    ///
+    /// **不交半张清单**：缺卷时跨卷条目的校验和还停在「打包后数据」那一档
+    /// （ADR-0014），而报告里「读出来了」的含义是「这就是里面的全部」。
+    #[error("分卷不齐：{detail}")]
+    MissingVolume {
+        /// 缺的是哪一卷。
+        detail: String,
+    },
+    /// 扩展名不是本程序读得了的透明容器，或者它是一组分卷的非入口段。
+    #[error("不是 zip、7z、rar 或 zst，也可能是某一组分卷的非入口段")]
     NotSupportedHere,
 }
 
@@ -416,8 +472,18 @@ impl ContainerError {
             Self::Encrypted => FailureReason::NeedsPassword,
             Self::UnsupportedMethod(_) => FailureReason::UnsupportedMethod,
             Self::NeedsDictionary(_) => FailureReason::NeedsDictionary,
+            Self::MissingVolume { .. } => FailureReason::MissingVolume,
         }
     }
+}
+
+/// 记一次「结构读不下去」。
+///
+/// 三个格式共用这一份而不是各写各的：它决定的是这一条进报告的**哪一格**
+/// （[`FailureReason::Malformed`]），而分类一旦在某个格式里写歪，报告里
+/// 「多少个是结构坏的」就再也数不对。
+pub(crate) fn malformed(detail: impl Into<String>) -> ContainerError {
+    ContainerError::Malformed(detail.into())
 }
 
 /// 零解压读出一个容器的内部构成。
@@ -441,6 +507,7 @@ pub fn list_as(
     match kind {
         ContainerKind::Zip => zip::list(library, path),
         ContainerKind::SevenZip => sevenz::list(library, path),
+        ContainerKind::Rar => rar::list(library, path),
         ContainerKind::Zstd => zst::list(library, path),
     }
 }
@@ -592,6 +659,8 @@ pub fn read_entries(
         Locator::SevenZip(archive) => {
             sevenz::read_entries(library, path, &listing.contents, archive, plan, each)
         }
+        // rar 不吃 `path`：分卷时条目的字节散在好几卷上，走哪一卷写在定位信息里。
+        Locator::Rar(locator) => rar::read_entries(library, &listing.contents, locator, plan, each),
         Locator::Zstd(shape) => {
             zst::read_entries(library, path, &listing.contents, *shape, plan, each)
         }

@@ -26,6 +26,8 @@ pub struct ZipEntrySpec {
     data_descriptor: bool,
     zip64_extra: bool,
     zip64_extra_full: bool,
+    /// 这一条的数据在第几段上（APPNOTE §8 的 split archive）。默认 0，也就是不分段。
+    disk: u16,
 }
 
 impl ZipEntrySpec {
@@ -39,7 +41,18 @@ impl ZipEntrySpec {
             data_descriptor: false,
             zip64_extra: false,
             zip64_extra_full: false,
+            disk: 0,
         }
+    }
+
+    /// 把这一条的数据放到**别的分段**上（ZIP 官方 split，APPNOTE §8）。
+    ///
+    /// 真库里 WIIU 那 4 组 `XenobladeX-…-WUP.z01…z04 + .zip` 就是这个样子：
+    /// 中央目录在末段那个 `.zip` 里，条目的数据分散在前面几段上。
+    #[must_use]
+    pub fn on_disk(mut self, disk: u16) -> Self {
+        self.disk = disk;
+        self
     }
 
     /// 名字按**原始字节**给：造非 UTF-8 的内部名字用它（真库里那批 GBK 名字）。
@@ -244,7 +257,7 @@ fn build(entries: &[ZipEntrySpec], zip64_eocd: bool, prefix: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&(item.spec.name.len() as u16).to_le_bytes());
         out.extend_from_slice(&(extra.len() as u16).to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes()); // comment len
-        out.extend_from_slice(&0u16.to_le_bytes()); // disk start
+        out.extend_from_slice(&item.spec.disk.to_le_bytes()); // disk start
         out.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
         out.extend_from_slice(&0u32.to_le_bytes()); // external attrs
         out.extend_from_slice(&offset_field.to_le_bytes());
@@ -514,5 +527,378 @@ pub fn zst_needing_dictionary(id: u32, body: &[u8]) -> Vec<u8> {
     out.push(0x58);
     out.extend_from_slice(&id.to_le_bytes());
     out.extend_from_slice(body);
+    out
+}
+
+// ───────────────────────────── rar ─────────────────────────────
+
+/// 一个待写进 rar 的内部文件。
+///
+/// **故意不借第三方 rar 库**（也没有干净的那一个可借——`unrar` crate 内嵌的
+/// C++ 源码许可传染，ADR-0014）。这里一个字节一个字节地摆，偏移与字段顺序照
+/// <https://www.rarlab.com/technote.htm>（RAR5）与 unrar 的 `arcread.cpp`（RAR4）。
+///
+/// 这样才造得出真正要验的那几种样本：**分卷的非末段**（校验和记的是打包后数据的）、
+/// **只写 BLAKE2sp 的 RAR5**（一条 CRC-32 都没有）、**带密码时被搅过的校验和**。
+/// 现成的库只会压出规规矩矩的容器，这三种一种都造不出来。
+#[derive(Debug, Clone)]
+pub struct RarEntrySpec {
+    name: Vec<u8>,
+    /// 数据区的字节。原样存放时它就是内容本身。
+    data: Vec<u8>,
+    /// 未压缩大小。分卷的一段上它是**整个文件**的大小，不是这一段的长度。
+    size: u64,
+    crc32: Option<u32>,
+    blake2: bool,
+    stored: bool,
+    solid: bool,
+    is_dir: bool,
+    split_before: bool,
+    split_after: bool,
+    /// 带密码，且校验和被密钥搅过（`unrar lt` 印成 `CRC32 MAC`）。
+    tweaked: bool,
+    /// RAR4 专用：名字里带 unrar 私有的 Unicode 编码段。
+    unicode: Option<Vec<u8>>,
+}
+
+impl RarEntrySpec {
+    /// 原样存放（压缩方法 0），CRC-32 按内容算。
+    #[must_use]
+    pub fn stored(name: &str, data: impl Into<Vec<u8>>) -> Self {
+        let data = data.into();
+        Self {
+            name: name.as_bytes().to_vec(),
+            size: data.len() as u64,
+            crc32: Some(crc32(&data)),
+            data,
+            blake2: false,
+            stored: true,
+            solid: false,
+            is_dir: false,
+            split_before: false,
+            split_after: false,
+            tweaked: false,
+            unicode: None,
+        }
+    }
+
+    /// 压缩过的条目：数据区的字节是什么无所谓——**零解压层从不去解它**。
+    #[must_use]
+    pub fn compressed(name: &str, data: impl Into<Vec<u8>>) -> Self {
+        Self {
+            stored: false,
+            ..Self::stored(name, data)
+        }
+    }
+
+    /// 名字按**原始字节**给：造 GBK 名字用它。
+    #[must_use]
+    pub fn stored_raw(name: &[u8], data: impl Into<Vec<u8>>) -> Self {
+        Self {
+            name: name.to_vec(),
+            ..Self::stored("", data)
+        }
+    }
+
+    /// RAR4 的名字带 unrar 私有的 Unicode 编码段（`LHD_UNICODE`）。
+    #[must_use]
+    pub fn with_unicode_name(mut self, encoded: &[u8]) -> Self {
+        self.unicode = Some(encoded.to_vec());
+        self
+    }
+
+    /// 未压缩大小与数据区的长度不一样时（压缩过的、或者分卷的一段）用它。
+    #[must_use]
+    pub fn with_size(mut self, size: u64) -> Self {
+        self.size = size;
+        self
+    }
+
+    /// 换掉校验和那一栏。分卷的末段要它——那一段记的才是未压缩数据的 CRC。
+    #[must_use]
+    pub fn with_crc32(mut self, crc: u32) -> Self {
+        self.crc32 = Some(crc);
+        self
+    }
+
+    /// 目录条目。
+    #[must_use]
+    pub fn dir(name: &str) -> Self {
+        Self {
+            is_dir: true,
+            size: 0,
+            data: Vec::new(),
+            crc32: None,
+            ..Self::stored(name, Vec::new())
+        }
+    }
+
+    /// **只写 BLAKE2sp，不写 CRC-32**（`rar a -htb` 的产物）。
+    #[must_use]
+    pub fn blake2_only(mut self) -> Self {
+        self.crc32 = None;
+        self.blake2 = true;
+        self
+    }
+
+    /// solid：接着用上一个文件留下的压缩字典。
+    #[must_use]
+    pub fn solid(mut self) -> Self {
+        self.solid = true;
+        self.stored = false;
+        self
+    }
+
+    /// 数据续到下一卷。**这一段记的校验和是打包后数据的**，所以顺手把它换成别的值。
+    #[must_use]
+    pub fn split_after(mut self, packed_crc: u32, total_size: u64) -> Self {
+        self.split_after = true;
+        self.crc32 = Some(packed_crc);
+        self.size = total_size;
+        self
+    }
+
+    /// 数据从上一卷续来。
+    #[must_use]
+    pub fn split_before(mut self, total_size: u64) -> Self {
+        self.split_before = true;
+        self.size = total_size;
+        self
+    }
+
+    /// 带密码，且校验和被密钥搅过。
+    #[must_use]
+    pub fn tweaked_checksum(mut self, mac: u32) -> Self {
+        self.tweaked = true;
+        self.crc32 = Some(mac);
+        self
+    }
+}
+
+/// RAR5 的变长整数。
+fn vint(value: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut left = value;
+    loop {
+        let byte = (left & 0x7F) as u8;
+        left >>= 7;
+        if left == 0 {
+            out.push(byte);
+            return out;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+/// 把一个 RAR5 头部封好：算出头长、算出头部自己的 CRC-32、拼起来。
+///
+/// technote 原文：头部 CRC 覆盖的是**从 Header size 字段起、到 extra area 结束**
+/// 那一段。照着算，产出的样本就是真 rar 而不是「只够骗过自己解析器」的字节——
+/// 真机上拿官方 `unrar lt` 读过，名字、大小与 CRC-32 一条不差。
+fn rar5_header(kind: u64, flags: u64, body: &[u8], extra: &[u8], data_len: u64) -> Vec<u8> {
+    let mut head = Vec::new();
+    head.extend_from_slice(&vint(kind));
+    head.extend_from_slice(&vint(flags));
+    if flags & 0x0001 != 0 {
+        head.extend_from_slice(&vint(extra.len() as u64));
+    }
+    if flags & 0x0002 != 0 {
+        head.extend_from_slice(&vint(data_len));
+    }
+    head.extend_from_slice(body);
+    head.extend_from_slice(extra);
+
+    let mut sized = vint(head.len() as u64);
+    sized.extend_from_slice(&head);
+    let mut out = crc32(&sized).to_le_bytes().to_vec();
+    out.extend_from_slice(&sized);
+    out
+}
+
+/// 造一份 RAR5（不是分卷）。
+#[must_use]
+pub fn rar5_archive(entries: &[RarEntrySpec]) -> Vec<u8> {
+    rar5_build(entries, None, false)
+}
+
+/// 造 RAR5 分卷里的一卷。
+///
+/// `number` 是卷号（从 0 起），`next_volume` 是「容器结束块说后面还有一卷」。
+#[must_use]
+pub fn rar5_volume(entries: &[RarEntrySpec], number: u64, next_volume: bool) -> Vec<u8> {
+    rar5_build(entries, Some(number), next_volume)
+}
+
+fn rar5_build(entries: &[RarEntrySpec], number: Option<u64>, next_volume: bool) -> Vec<u8> {
+    let mut out = b"Rar!\x1a\x07\x01\x00".to_vec();
+    // 容器总头。分卷时置「分卷」（0x01）与「卷号字段存在」（0x02）两位。
+    let mut main = vint(if number.is_some() { 0x0003 } else { 0x0000 });
+    if let Some(number) = number {
+        main.extend_from_slice(&vint(number));
+    }
+    out.extend_from_slice(&rar5_header(1, 0x0000, &main, &[], 0));
+
+    for entry in entries {
+        let mut file_flags = 0u64;
+        if entry.is_dir {
+            file_flags |= 0x0001;
+        }
+        if entry.crc32.is_some() {
+            file_flags |= 0x0004;
+        }
+        let mut body = vint(file_flags);
+        body.extend_from_slice(&vint(entry.size));
+        body.extend_from_slice(&vint(0x20));
+        if let Some(crc) = entry.crc32 {
+            body.extend_from_slice(&crc.to_le_bytes());
+        }
+        // compression info：低 6 位版本，第 6 位 solid，第 7–9 位方法。
+        let method: u64 = if entry.stored { 0 } else { 3 };
+        let compression = (method << 7) | if entry.solid { 0x40 } else { 0 };
+        body.extend_from_slice(&vint(compression));
+        body.extend_from_slice(&vint(0));
+        body.extend_from_slice(&vint(entry.name.len() as u64));
+        body.extend_from_slice(&entry.name);
+
+        let mut extra = Vec::new();
+        if entry.tweaked {
+            // 文件加密记录：版本、旗标（0x02 = 校验和被搅过）、KDF 次数、盐、IV。
+            let mut record = vint(0x01);
+            record.extend_from_slice(&vint(0));
+            record.extend_from_slice(&vint(0x0002));
+            record.push(15);
+            record.extend_from_slice(&[0u8; 16]);
+            record.extend_from_slice(&[0u8; 16]);
+            extra.extend_from_slice(&vint(record.len() as u64));
+            extra.extend_from_slice(&record);
+        }
+        if entry.blake2 {
+            // 文件哈希记录：类型 0x02，哈希类型 0x00 = BLAKE2sp，32 字节摘要。
+            let mut record = vint(0x02);
+            record.extend_from_slice(&vint(0x00));
+            record.extend_from_slice(&[0xABu8; 32]);
+            extra.extend_from_slice(&vint(record.len() as u64));
+            extra.extend_from_slice(&record);
+        }
+
+        let mut flags = 0u64;
+        if !extra.is_empty() {
+            flags |= 0x0001;
+        }
+        if !entry.data.is_empty() {
+            flags |= 0x0002;
+        }
+        if entry.split_before {
+            flags |= 0x0008;
+        }
+        if entry.split_after {
+            flags |= 0x0010;
+        }
+        out.extend_from_slice(&rar5_header(
+            2,
+            flags,
+            &body,
+            &extra,
+            entry.data.len() as u64,
+        ));
+        out.extend_from_slice(&entry.data);
+    }
+
+    // 服务头（quick open）：**不是内部文件**，认成文件的话每个容器都会凭空多一条。
+    let mut service = vint(0);
+    service.extend_from_slice(&vint(4));
+    service.extend_from_slice(&vint(0));
+    service.extend_from_slice(&vint(0));
+    service.extend_from_slice(&vint(0));
+    service.extend_from_slice(&vint(2));
+    service.extend_from_slice(b"QO");
+    out.extend_from_slice(&rar5_header(3, 0x0002, &service, &[], 4));
+    out.extend_from_slice(&[0u8; 4]);
+
+    let end = vint(u64::from(next_volume));
+    out.extend_from_slice(&rar5_header(5, 0x0000, &end, &[], 0));
+    out
+}
+
+/// 造一份 RAR4（不是分卷）。
+#[must_use]
+pub fn rar4_archive(entries: &[RarEntrySpec]) -> Vec<u8> {
+    rar4_build(entries, false, false, false)
+}
+
+/// 造 RAR4 分卷里的一卷。`new_numbering` 决定下一卷叫 `.partN.rar` 还是 `.rNN`。
+#[must_use]
+pub fn rar4_volume(entries: &[RarEntrySpec], next_volume: bool, new_numbering: bool) -> Vec<u8> {
+    rar4_build(entries, true, next_volume, new_numbering)
+}
+
+fn rar4_build(
+    entries: &[RarEntrySpec],
+    volume: bool,
+    next_volume: bool,
+    new_numbering: bool,
+) -> Vec<u8> {
+    let mut out = b"Rar!\x1a\x07\x00".to_vec();
+    let mut main_flags = if volume { 0x0001u16 } else { 0 }; // MHD_VOLUME
+    if new_numbering {
+        main_flags |= 0x0010;
+    }
+    out.extend_from_slice(&rar4_block(0x73, main_flags, &[0u8; 6], &[]));
+
+    for entry in entries {
+        let mut flags = 0x8000u16; // LONG_BLOCK：后面跟着数据
+        if entry.split_before {
+            flags |= 0x0001;
+        }
+        if entry.split_after {
+            flags |= 0x0002;
+        }
+        if entry.solid {
+            flags |= 0x0010;
+        }
+        if entry.is_dir {
+            flags |= 0x00E0;
+        }
+        let name = match &entry.unicode {
+            Some(encoded) => {
+                flags |= 0x0200;
+                let mut name = entry.name.clone();
+                name.push(0);
+                name.extend_from_slice(encoded);
+                name
+            }
+            None => entry.name.clone(),
+        };
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&(entry.data.len() as u32).to_le_bytes());
+        body.extend_from_slice(&(entry.size as u32).to_le_bytes());
+        body.push(2); // Host OS
+        // **RAR4 的 CRC-32 无条件存在**：没有旗标可以省掉它。
+        body.extend_from_slice(&entry.crc32.unwrap_or(0).to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes()); // 时间
+        body.push(29); // 解包版本
+        body.push(if entry.stored { b'0' } else { b'3' });
+        body.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes()); // 属性
+        out.extend_from_slice(&rar4_block(0x74, flags, &body, &name));
+        out.extend_from_slice(&entry.data);
+    }
+
+    let end_flags = 0x4000u16 | if next_volume { 0x0001 } else { 0 };
+    out.extend_from_slice(&rar4_block(0x7B, end_flags, &[], &[]));
+    out
+}
+
+/// 封一个 RAR4 块：头长写进去，再算头部自己的 CRC（取低 16 位）。
+fn rar4_block(kind: u8, flags: u16, body: &[u8], tail: &[u8]) -> Vec<u8> {
+    let head_size = (7 + body.len() + tail.len()) as u16;
+    let mut head = vec![kind];
+    head.extend_from_slice(&flags.to_le_bytes());
+    head.extend_from_slice(&head_size.to_le_bytes());
+    head.extend_from_slice(body);
+    head.extend_from_slice(tail);
+    let mut out = ((crc32(&head) & 0xFFFF) as u16).to_le_bytes().to_vec();
+    out.extend_from_slice(&head);
     out
 }

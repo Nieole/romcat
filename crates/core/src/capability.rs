@@ -412,12 +412,27 @@ pub fn decide(
                 .to_string()
         } else {
             format!(
-                "`.{extension}` 不是这一版认得的**透明容器**（只认 zip、7z 与 zst），\
+                "`.{extension}` 不是这一版认得的**透明容器**（只认 zip、7z、rar 与 zst），\
                  转换要外部工具，工具做不到"
             )
         };
         return Decision::Unsupported { want, why };
     };
+    // **rar 读得出头，取不出字节。** 头部解析器是自己写的，为的正是避开 UnRAR 的
+    // 许可传染（ADR-0014），代价就是解压那条路不存在——只有「原样存放」的条目取得
+    // 出来。既然转换要真的把字节搬出来，这里在**差量预览**阶段就说清做不到，
+    // 好过跑到执行那一步才失败：差量预览是同步的前置条件，它说会转的就得真能转。
+    if crate::container::ContainerKind::for_path(Path::new(key))
+        == Some(crate::container::ContainerKind::Rar)
+    {
+        return Decision::Unsupported {
+            want,
+            why: "rar 的内部构成读得出来，字节取不出来：解压要 UnRAR 的算法，\
+                  而这个项目刻意没有引进它（许可传染，ADR-0014）。\
+                  要转的话先用外部工具解一次"
+                .to_string(),
+        };
+    }
     match recipe {
         Recipe::Rezip => rezip(contents, key, bytes, &want),
         Recipe::Unpack => unpack(contents, entry, key, bytes, &want),
@@ -1203,18 +1218,25 @@ mod tests {
 
     #[test]
     fn rar_几乎无人支持_而这一版转不了它_于是如实报出来() {
-        // `.rar` 不是这一版认得的透明容器（ADR-0014：自行实现头部解析器避开 UnRAR
-        // 许可，而那只读头不解压）。**假装搞定了比不转换更糟**。
-        let Decision::Unsupported { why, .. } = decide(
-            &档案("retroarch-exfat"),
-            Some("SFC"),
-            "SFC/魂斗罗.rar",
-            600_000,
-            None,
-        ) else {
-            panic!("RetroArch 不支持 rar，而工具转不了它");
-        };
-        assert!(why.contains("透明容器"), "要说清为什么转不了：{why}");
+        // 票 04 起 rar 的内部构成读得出来了，**可字节仍然取不出来**——解压要 UnRAR
+        // 的算法，而这个项目刻意没有引进它（许可传染，ADR-0014）。
+        // **假装搞定了比不转换更糟**：差量预览说会转的，同步那一步就得真能转。
+        let 包 = 内容(&[("魂斗罗.sfc", 600_000)]);
+        for contents in [None, Some(&包)] {
+            let Decision::Unsupported { why, .. } = decide(
+                &档案("retroarch-exfat"),
+                Some("SFC"),
+                "SFC/魂斗罗.rar",
+                600_000,
+                contents,
+            ) else {
+                panic!("RetroArch 不支持 rar，而工具转不了它");
+            };
+            assert!(
+                why.contains("透明容器") || why.contains("UnRAR"),
+                "要说清为什么转不了：{why}"
+            );
+        }
     }
 
     #[test]

@@ -105,7 +105,9 @@ pub struct Classification {
     pub category: Category,
     /// 疑似不该入库的理由；`None` 表示看起来正常。
     pub suspect: Option<SuspectReason>,
-    /// 是否像分卷压缩的一个分卷。多个分卷合起来才是一个透明容器（票 04 才聚合）。
+    /// 是否像分卷的一段，且**不是入口段**。多个分卷合起来才是一个透明容器
+    /// ——聚成一个变体发生在**成型**那一步（[`crate::shape`]），不在遍历途中
+    /// （ADR-0022）。
     pub split_volume: bool,
 }
 
@@ -203,7 +205,10 @@ pub fn is_skipped_system_dir(name_lower: &str) -> bool {
 }
 
 /// 这个扩展名是否出现在任何一张归类表里。
-fn is_known_extension(ext: &str) -> bool {
+///
+/// [`container::volume`](crate::container::volume) 也要它：`.z64` 长得像 ZIP split
+/// 的第 64 段，而它是 N64 的**裸文件**。认错会把整个 N64 平台记成透明容器。
+pub(crate) fn is_known_extension(ext: &str) -> bool {
     TRANSPARENT_CONTAINERS.contains(&ext)
         || COMPRESSED_IMAGES.contains(&ext)
         || BARE_FILES.contains(&ext)
@@ -213,46 +218,16 @@ fn is_known_extension(ext: &str) -> bool {
         || PARTIAL_DOWNLOADS.contains(&ext)
 }
 
-/// 文件名看起来是否像分卷压缩的一个分卷。
-///
-/// 只用来在报告里报出数量——把分卷聚成一个**透明容器**是票 04 的事。
-#[must_use]
-pub fn is_split_volume_part(name_lower: &str) -> bool {
-    // RAR5 分卷 `.part1.rar`
-    let rar5_part = name_lower
-        .strip_suffix(".rar")
-        .and_then(|stem| stem.rsplit_once(".part"))
-        .is_some_and(|(head, n)| {
-            !head.is_empty() && !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())
-        });
-    if rar5_part {
-        return true;
-    }
-    let Some((_, ext)) = name_lower.rsplit_once('.') else {
-        return false;
-    };
-    if ext.len() != 3 {
-        return false;
-    }
-    // `.z64` 是 N64 的裸文件，不是 ZIP 分卷。表里认得的扩展名一律不当分卷看，
-    // 否则整个 N64 平台会被记成透明容器。
-    if is_known_extension(ext) {
-        return false;
-    }
-    // `.7z.001` / `.zip.001` 这类 7-Zip 通用切分
-    if ext.chars().all(|c| c.is_ascii_digit()) {
-        return true;
-    }
-    // ZIP 官方分卷 `.z01`…、RAR4 分卷 `.r00`…
-    matches!(ext.as_bytes()[0], b'z' | b'r') && ext[1..].chars().all(|c| c.is_ascii_digit())
-}
-
 /// 给一个文件定归类。
 #[must_use]
 pub fn classify(path: &Path) -> Classification {
     let name = file_name_lower(path);
     let ext = extension_lower(path);
-    let split_volume = is_split_volume_part(&name);
+    // **判据只写一处**（[`container::volume`](crate::container::volume)）：归类、成型与
+    // 穿透三处看的是同一套规则，抄成三份的话「哪些名字算一段」迟早漂成三个答案。
+    // 数的是**非入口段**：`X.part1.rar` 与 `X.zip` 是整组的入口，它们自己就是那个容器，
+    // 不算「多出来的一段」。
+    let split_volume = crate::container::volume::is_non_entry_part(&name);
 
     let mut result = Classification {
         category: Category::Unclassified,
@@ -287,8 +262,9 @@ pub fn classify(path: &Path) -> Classification {
         result.suspect = Some(SuspectReason::EmulatorBinary);
     } else if PARTIAL_DOWNLOADS.contains(&ext) {
         result.suspect = Some(SuspectReason::PartialDownload);
-    } else if split_volume {
-        // 表里没有的扩展名才轮到分卷规则，例如 `.7z.001`、`.z01`、`.r00`
+    } else if crate::container::volume::is_volume_segment(&name) {
+        // 表里没有的扩展名才轮到分卷规则，例如 `.7z.001`、`.z01`、`.r00`。
+        // **入口段也算**：`.7z.001` 是那一组的入口，它当然是个透明容器。
         result.category = Category::TransparentContainer;
     }
 
@@ -403,15 +379,18 @@ mod tests {
 
     #[test]
     fn 分卷压缩的分卷被认出来() {
-        for name in [
-            "a.7z.001",
-            "a.zip.002",
-            "a.z01",
-            "a.r00",
-            "a.part1.rar",
-            "a.part12.rar",
-        ] {
-            assert!(is_split_volume_part(name), "{name}");
+        for name in ["a.zip.002", "a.z01", "a.r00", "a.part12.rar"] {
+            assert!(归类(name).split_volume, "{name}");
+            assert_eq!(
+                归类(name).category,
+                Category::TransparentContainer,
+                "{name}"
+            );
+        }
+        // **入口段不算「多出来的一段」**：`.part1.rar` 与 `.7z.001` 自己就是那个容器，
+        // 整组由它代表（票 04）。数它们会让「疑似分卷」把一组数两次。
+        for name in ["a.part1.rar", "a.7z.001"] {
+            assert!(!归类(name).split_volume, "{name} 是入口段");
             assert_eq!(
                 归类(name).category,
                 Category::TransparentContainer,
@@ -420,7 +399,7 @@ mod tests {
         }
         for name in ["a.zip", "a.rar", "a.z1", "a.001x", "part1.rar"] {
             assert!(
-                !is_split_volume_part(name) || name == "part1.rar",
+                !归类(name).split_volume || name == "part1.rar",
                 "{name} 不该被当成分卷"
             );
         }
@@ -433,9 +412,8 @@ mod tests {
         let c = 归类("超级马里奥64.z64");
         assert_eq!(c.category, Category::BareFile);
         assert!(!c.split_volume);
-        assert!(!is_split_volume_part("超级马里奥64.z64"));
         // 同理，`.r00` 之外的已知扩展名也不该被吃掉
-        assert!(!is_split_volume_part("game.z64"));
+        assert!(!归类("game.z64").split_volume);
     }
 
     #[test]

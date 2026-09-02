@@ -70,10 +70,17 @@ pub enum Charset {
 #[must_use]
 pub fn decode_path(raw: &[u8]) -> (String, bool) {
     let (text, charset) = decode(raw);
-    (
-        crate::path::nfc(&text.replace('\\', "/")).into_owned(),
-        charset == Charset::Lossy,
-    )
+    (normalize_path(&text), charset == Charset::Lossy)
+}
+
+/// 把一条已经解好码的内部路径折成中立库要的形状：`\` 换成 `/`，再规范化成 NFC。
+///
+/// 与 [`decode_path`] 分开，是因为 rar4 的名字有一条**自己解码**的路
+/// （unrar 的私有 Unicode 编码，[`super::rar`]），解出来已经是 `String` 了，
+/// 但后半截这两步一步都不能少。
+#[must_use]
+pub fn normalize_path(text: &str) -> String {
+    crate::path::nfc(&text.replace('\\', "/")).into_owned()
 }
 
 /// 探一条名字的编码并解码。

@@ -417,7 +417,7 @@ pub(super) fn render(report: &HealthReport) -> String {
             out,
             "{}",
             if containers.penetrated_this_scan {
-                "库里没有 zip、7z 或 zst。（rar 是票 04，这里不算。）"
+                "库里没有 zip、7z、rar 或 zst。"
             } else {
                 "这次扫描没有穿透容器（--no-containers），中立库里也没有上次的结论。"
             }
@@ -440,7 +440,7 @@ pub(super) fn render(report: &HealthReport) -> String {
             // **还没读过不是穿不透。** 两句话指向完全不同的下一步：一个是再扫一趟，
             // 一个是这文件本身有问题。
             //
-            // 而「为什么没读」也有两种，说错了同样害人：zip / 7z 穿得透，没读只可能是
+            // 而「为什么没读」也有两种，说错了同样害人：zip / 7z / rar 穿得透，没读只可能是
             // `--no-containers`；zst 穿不透，没读是因为读它要把整条流解一遍。
             let _ = writeln!(out, "还没读过        {} 个", thousands(containers.unread));
             if containers.unread_includes_impenetrable {
@@ -463,6 +463,17 @@ pub(super) fn render(report: &HealthReport) -> String {
             thousands(containers.inner_with_crc),
             share(containers.inner_with_crc, containers.inner_files)
         );
+        if containers.needs_full_decompress > 0 {
+            // **这一档不是「还没读过」**：它穿透了，名字与大小都在手上，只是第一命中层
+            // 用不上——只写 BLAKE2sp 的 RAR5（DAT 一条 BLAKE2 都不记），或者带密码、
+            // 校验和被密钥搅过的（`unrar lt` 印成 `CRC32 MAC`）。与 zst 同一档。
+            let _ = writeln!(
+                out,
+                "要完整解压      {} 个容器有内容却一条 CRC-32 都没有——名字与大小读得出来，\
+                 第一命中层用不上",
+                thousands(containers.needs_full_decompress)
+            );
+        }
         if containers.inner_without_crc > 0 {
             let _ = writeln!(
                 out,
@@ -647,7 +658,8 @@ pub(super) fn render(report: &HealthReport) -> String {
     );
     let _ = writeln!(
         out,
-        "疑似分卷        {} 个分卷（多个分卷合起来才是一个透明容器，票 04 才会聚合）",
+        "疑似分卷        {} 段（不含入口卷——入口卷自己就是那个容器；\
+         聚成一个变体在**成型**那一步，`romcat shape` 的「分卷压缩」那一行）",
         thousands(anomalies.split_volume_parts)
     );
     let _ = writeln!(

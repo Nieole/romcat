@@ -33,6 +33,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::catalog::{Catalog, CatalogError};
 use crate::classify::{self, Category};
+use crate::container::volume;
 use crate::path::{self, fold, platform_of_key};
 use crate::platform::{Manifest, Platform, Rule, ShapeKind, TreeRoot};
 
@@ -135,6 +136,9 @@ pub const MANUAL_RULE: &str = "人工纠正";
 /// 兜底：一个文件一个变体。
 pub const SINGLE_FILE_RULE: &str = "一文件一变体";
 
+/// **分卷压缩**：一组分卷是一个变体，主文件是入口卷。
+pub const SPLIT_VOLUME_RULE: &str = "分卷压缩";
+
 /// 成型的产物。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Plan {
@@ -234,6 +238,10 @@ pub fn plan(entries: &[Entry], manifest: &Manifest, overrides: &BTreeMap<String,
     let overrides = &with_targets(overrides);
     let index = Index::build(entries);
     let tree_roots = find_tree_roots(entries, manifest, &index);
+    // **分卷的多个分卷合起来才是一个容器**（CONTEXT 的「透明容器」条），落到成型上
+    // 就是一组分卷一个**变体**：主文件是入口卷，其余是附属文件。先整批算出来，
+    // 因为判据要看**整个目录**——单看一个 `X.zip` 断不出它是不是某一组的末段。
+    let volumes = find_volume_groups(entries, manifest);
 
     // 键 → (变体的键, 身份)。一个文件只属于一个变体。
     let mut assigned: BTreeMap<&str, (String, Role)> = BTreeMap::new();
@@ -283,6 +291,14 @@ pub fn plan(entries: &[Entry], manifest: &Manifest, overrides: &BTreeMap<String,
                 Role::Internal
             };
             assigned.insert(&entry.key, (root.to_string(), role));
+            continue;
+        }
+
+        // 一组分卷？**排在目录树之后**：目录树转储里的 `root.pfs.000/001/002` 是
+        // **内部资源**，它们已经归了那棵树，不该再被当成一组分卷拎出来。
+        if let Some((main, role)) = volumes.get(entry.key.as_str()) {
+            assigned.insert(&entry.key, (main.clone(), *role));
+            rule_of_variant.insert(main.clone(), SPLIT_VOLUME_RULE.to_string());
             continue;
         }
 
@@ -613,6 +629,53 @@ fn main_rule_name(manifest: &Manifest, key: &str) -> Option<String> {
     main_rule(manifest, key).map(|rule| rule.name.clone())
 }
 
+/// 找出全部**分卷**组：键 → (这一组的变体键, 这一条在组里的身份)。
+///
+/// 分组这件事本身**不在这里做**——它住在
+/// [`container::volume`](crate::container::volume)，归类、成型与穿透看的是同一份判据。
+/// 这里只做成型这一侧的两件事：**按目录切开**（分卷不会散落在两个目录，而两个目录里
+/// 同名的两组是两组东西），以及把组里的成员折成变体的成员表。
+///
+/// 挑主文件时认的是「哪一段是入口」，不是段号最小：**ZIP split 的入口是最后那个
+/// `.zip`**（APPNOTE §8.3.4 说末段用 `.zip` 扩展名正是为了让中央目录一次读到）。
+/// 认反了，主文件会指向一段连中央目录都没有的碎片。
+fn find_volume_groups(entries: &[Entry], manifest: &Manifest) -> BTreeMap<String, (String, Role)> {
+    let mut by_dir: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for entry in entries {
+        if entry.is_dir || scope_of(manifest, &entry.key).platform().is_none() {
+            continue;
+        }
+        let Some(dir) = parent_of(&entry.key) else {
+            continue;
+        };
+        by_dir
+            .entry(dir)
+            .or_default()
+            .push(path::file_name_of_key(&entry.key));
+    }
+
+    let mut out: BTreeMap<String, (String, Role)> = BTreeMap::new();
+    for (dir, names) in by_dir {
+        for group in volume::group_volumes(names.iter().copied()) {
+            // 一段入口都没有（**缺入口卷**）时退而取段号最小的那一段，好过留一组
+            // 谁也代表不了的碎片——识别那一侧会照实说这一组缺入口卷。
+            let Some(main) = group.entry.or_else(|| group.members.first().cloned()) else {
+                continue;
+            };
+            let main_key = format!("{dir}/{main}");
+            for name in &group.members {
+                let role = if *name == main {
+                    Role::Main
+                } else {
+                    Role::Companion
+                };
+                out.insert(format!("{dir}/{name}"), (main_key.clone(), role));
+            }
+        }
+    }
+    out
+}
+
 /// 这个文件是不是**内容**：透明容器、压缩镜像、裸文件三类主线之一。
 ///
 /// 媒体、元数据、文档、模拟器本体、系统垃圾都不是——它们在库体检里另有归属，
@@ -829,6 +892,79 @@ mod tests {
             .iter()
             .find(|v| v.key == key)
             .unwrap_or_else(|| panic!("有变体 {key}，实际是 {:?}", 变体键(plan)))
+    }
+
+    #[test]
+    fn 一组分卷是一个变体而不是一堆孤立碎片() {
+        // CONTEXT 的「透明容器」条：**分卷压缩的多个分卷合起来才是一个容器**。
+        let plan = 成型(&[
+            ("ps2/大作/大作.part1.rar", 4_000_000),
+            ("ps2/大作/大作.part2.rar", 4_000_000),
+            ("ps2/大作/大作.part3.rar", 1_000_000),
+        ]);
+        assert_eq!(变体键(&plan), ["ps2/大作/大作.part1.rar"]);
+        let variant = 取(&plan, "ps2/大作/大作.part1.rar");
+        assert_eq!(variant.rule, SPLIT_VOLUME_RULE);
+        assert_eq!(
+            variant.main_key, "ps2/大作/大作.part1.rar",
+            "主文件是入口卷"
+        );
+        assert_eq!(variant.files, 3);
+        assert_eq!(variant.bytes, 9_000_000);
+    }
+
+    #[test]
+    fn zip_官方_split_的主文件是最后那个_zip() {
+        // 最容易搞反的一条：APPNOTE §8.3.4 说末段用 `.zip` 扩展名，正是为了让中央目录
+        // 一次读到。主文件指向 `.z01` 的话，那一段连中央目录都没有。
+        // 真库里 WIIU 那 4 组 `XenobladeX-…-WUP.z01…z04 + .zip` 就是这一种。
+        let plan = 成型(&[
+            ("WIIU/异度/游戏.z01", 4_000_000),
+            ("WIIU/异度/游戏.z02", 4_000_000),
+            ("WIIU/异度/游戏.zip", 3_000_000),
+        ]);
+        assert_eq!(变体键(&plan), ["WIIU/异度/游戏.zip"]);
+        let variant = 取(&plan, "WIIU/异度/游戏.zip");
+        assert_eq!(variant.rule, SPLIT_VOLUME_RULE);
+        assert_eq!(variant.files, 3);
+    }
+
+    #[test]
+    fn 字节切分的一组也是一个变体() {
+        let plan = 成型(&[("SFC/合集/资料.7z.001", 500), ("SFC/合集/资料.7z.002", 400)]);
+        assert_eq!(变体键(&plan), ["SFC/合集/资料.7z.001"]);
+        assert_eq!(取(&plan, "SFC/合集/资料.7z.001").files, 2);
+    }
+
+    #[test]
+    fn 同目录里两组分卷不会串到一起() {
+        let plan = 成型(&[
+            ("ps2/甲.part1.rar", 100),
+            ("ps2/甲.part2.rar", 100),
+            ("ps2/乙.part1.rar", 100),
+            ("ps2/乙.part2.rar", 100),
+        ]);
+        assert_eq!(变体键(&plan), ["ps2/乙.part1.rar", "ps2/甲.part1.rar"]);
+    }
+
+    #[test]
+    fn 一个普通的容器不会被当成一组分卷() {
+        // 库里 34,808 个 zip 与 1,333 个 rar 全都长着「入口候选」的样子。
+        let plan = 成型(&[("FC/甲.zip", 100), ("FC/乙.zip", 100), ("FC/丙.rar", 100)]);
+        assert_eq!(变体键(&plan), ["FC/丙.rar", "FC/乙.zip", "FC/甲.zip"]);
+        for key in ["FC/甲.zip", "FC/丙.rar"] {
+            assert_eq!(取(&plan, key).rule, SINGLE_FILE_RULE);
+        }
+    }
+
+    #[test]
+    fn 缺入口卷时那一组也不散成碎片() {
+        // 真库里那个 `废都物语_资料合辑_220928.7z.006`：`.001` 到 `.005` 都不在库里。
+        // 段号最小的那一段当主文件——好过留一组谁也代表不了的碎片；识别那一侧会照实
+        // 说这一组缺入口卷。
+        let plan = 成型(&[("SFC/合集/资料.7z.005", 500), ("SFC/合集/资料.7z.006", 400)]);
+        assert_eq!(变体键(&plan), ["SFC/合集/资料.7z.005"]);
+        assert_eq!(取(&plan, "SFC/合集/资料.7z.005").rule, SPLIT_VOLUME_RULE);
     }
 
     #[test]

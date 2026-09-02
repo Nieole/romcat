@@ -344,11 +344,74 @@ fn 扩展名说是容器内容不是时如实说不是() {
 }
 
 #[test]
-fn rar_这票不碰() {
-    // rar 在归类上同样是**透明容器**，但它是票 04：要自己写头部解析器避开 UnRAR 的
-    // 许可传染。这里故意认不出来，而且要与「字节不是那个格式」分得开。
+fn zip_官方_split_的清单读得出而别段上的字节取不出来() {
+    // APPNOTE §8.3.4：末段用 `.zip` 扩展名正是为了**让中央目录一次读到**。于是
+    // 名字、大小与 CRC-32 一样不缺，第一命中层照撞；可数据坐在 `.z01` 上，
+    // 这一层还不会跨段读（挂账 D136）。**如实说在第几段**——不说的话，那个偏移会在
+    // `.zip` 里撞上一堆压缩数据，然后报成「local header 签名对不上」，把人引向错处。
+    //
+    // 真库里 WIIU 那 4 组 `XenobladeX-…-WUP.z01…z04 + .zip` 就是这一种，每组 5 个
+    // 文件约 20 GiB，末段那个 `.zip` 自己就交出了 47 条内部条目的 CRC-32。
+    let 甲 = 样本(3, 800);
+    let library = 建库(
+        "/lib/WIIU/分段.zip",
+        zip_container(&[
+            ZipEntrySpec::stored("在别段.iso", 甲.clone()).on_disk(1),
+            ZipEntrySpec::stored("在末段.txt", 样本(4, 100)),
+        ]),
+    );
+    let listing =
+        container::list(&library, std::path::Path::new("/lib/WIIU/分段.zip")).expect("能穿透");
+    assert_eq!(listing.contents.entries.len(), 2);
+    assert_eq!(
+        listing.contents.entries[0].crc32,
+        Some(crc32(&甲)),
+        "清单照读"
+    );
+    assert_eq!(listing.contents.entries[0].size, 800);
+
+    // 取字节才卡住，而且说得出卡在哪
+    let plan = ReadPlan::only(&listing, 0);
+    let error = container::read_entries(
+        &library,
+        std::path::Path::new("/lib/WIIU/分段.zip"),
+        &listing,
+        &plan,
+        &mut |_, reader| std::io::copy(reader, &mut std::io::sink()).map(|_| ()),
+    )
+    .expect_err("数据不在这一段上");
+    assert!(
+        matches!(error, ContainerError::MissingVolume { .. }),
+        "得到的是 {error}"
+    );
+    assert!(error.to_string().contains("第 2 段"), "{error}");
+
+    // 末段上的那一条照常读得出来
+    let plan = ReadPlan::only(&listing, 1);
+    container::read_entries(
+        &library,
+        std::path::Path::new("/lib/WIIU/分段.zip"),
+        &listing,
+        &plan,
+        &mut |_, reader| std::io::copy(reader, &mut std::io::sink()).map(|_| ()),
+    )
+    .expect("末段上的读得了");
+}
+
+#[test]
+fn 扩展名是_rar_而字节不是() {
+    // 票 04 起 rar 穿得透了（头部解析器自己写，避开 UnRAR 的许可传染）。
+    // 「字节不是那个格式」与「本程序读不了这个格式」仍然要分得开：报告里前者该去
+    // 看看这文件到底是什么，后者是这一版还没做。
     let library = 建库("/lib/a.rar", vec![0u8; 64]);
     let error = container::list(&library, std::path::Path::new("/lib/a.rar")).unwrap_err();
+    assert!(
+        matches!(error, ContainerError::NotAContainer { .. }),
+        "得到的是 {error}"
+    );
+    // 而真正读不了的格式仍是「不在这里读」。
+    let library = 建库("/lib/a.tar.gz", vec![0u8; 64]);
+    let error = container::list(&library, std::path::Path::new("/lib/a.tar.gz")).unwrap_err();
     assert!(matches!(error, ContainerError::NotSupportedHere));
 }
 
