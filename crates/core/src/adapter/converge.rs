@@ -51,7 +51,7 @@ use crate::shape::Role;
 use crate::title::{self, Chosen, SortFrom};
 
 use super::report::EXAMPLES;
-use super::{Body, Collection, Document, Entry, Game, ReleaseDate};
+use super::{Adapter, Body, Collection, Document, Entry, Game, ReleaseDate};
 
 /// 一个变体为什么做不成前端条目。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -128,7 +128,9 @@ impl Preference {
 pub struct CollectionFile {
     /// 合集叫什么（当前是平台名）。
     pub collection: String,
-    /// 这一份写成哪个文件名（相对导出目录）。
+    /// 这一份写成哪个**相对导出目录的路径**。
+    ///
+    /// 是路径不是文件名：ES-DE 那一套要 `gamelists/<系统>/gamelist.xml`，落点带目录。
     pub file_name: String,
     /// 里面的内容。
     pub doc: Document,
@@ -192,6 +194,9 @@ pub const GROUP_KEY: &str = "romcat-translation-group";
 /// `*.metadata.pegasus.txt`，而 `file:` 是相对元数据文件所在目录解析的，
 /// 于是文件里的路径就是中立库的键本身（相对主库根，ADR-0020），
 /// 把这几份文件放到主库根下就直接生效。
+///
+/// 这是**默认**的摆法，不是唯一的：落点归适配器答（[`Adapter::metadata_path`]），
+/// 因为它是格式的一部分——ES-DE 要的是 `gamelists/<系统>/gamelist.xml`。
 #[must_use]
 pub fn file_name_for(collection: &str, suffix: &str) -> String {
     // 合集名里可能有路径分隔符（平台名不会，但清单是数据、用户能改）。
@@ -211,9 +216,9 @@ pub fn file_name_for(collection: &str, suffix: &str) -> String {
 pub fn run(
     catalog: &Catalog,
     priorities: &Priorities,
-    file_suffix: &str,
+    adapter: &dyn Adapter,
 ) -> Result<Converged, CatalogError> {
-    run_within(catalog, priorities, file_suffix, None)
+    run_within(catalog, priorities, adapter, None)
 }
 
 /// 只收敛这几个变体，别的一个都不进来。
@@ -230,7 +235,7 @@ pub fn run(
 pub fn run_within(
     catalog: &Catalog,
     priorities: &Priorities,
-    file_suffix: &str,
+    adapter: &dyn Adapter,
     only: Option<&BTreeSet<String>>,
 ) -> Result<Converged, CatalogError> {
     let variants: Vec<VariantRow> = match only {
@@ -321,12 +326,31 @@ pub fn run_within(
     }
 
     for (platform, anchors) in grouped {
+        // 这个平台的内容住在哪个**顶层目录**下。**从键上数出来，不从平台清单上猜**：
+        // 清单里一个平台可以映射好几个目录别名（`FC` 收 `fc`/`nes`/`famicom`），
+        // 而这里要的是「这份库里实际用的是哪一个」。散在多个目录里就交白卷——
+        // 那时说不出唯一的系统目录，路径整条原样写出去。
+        //
+        // 真库上 22 个平台各自都只用一个目录，而其中 **12 个的目录名与平台名对不上**
+        // （`WII` 的目录叫 `Wii`、`PS1` 的叫 `ps`、`WS` 的叫 `wsc`）。ES 家族靠它当
+        // system 名，拿平台名顶上去的话，那 12 个在 Android 与 Linux 上（大小写敏感）
+        // 一个都指不着。
+        let dirs: BTreeSet<&str> = anchors
+            .values()
+            .flatten()
+            .filter_map(|variant| crate::path::platform_of_key(&variant.key))
+            .collect();
+        let system = match dirs.len() {
+            1 => dirs.iter().next().map(|dir| (*dir).to_string()),
+            _ => None,
+        };
         // **不给 `shortname`。** Pegasus 拿它去对第三方资源目录（Skraper、ES 的
         // system 名），而那套名字与我们的平台名不是一回事——FC 在那边叫 `nes`。
         // 按平台名折一个 `fc` 出来，等于让前端去一个不存在的目录里找封面；
         // 更糟的是维护者自己写对了的那一行会被这个猜测覆盖掉。**猜不准就不写。**
         let mut entries = vec![Entry::new(Body::Collection(Collection {
             name: platform.clone(),
+            system: system.clone(),
             ..Collection::default()
         }))];
         for (anchor, mut members) in anchors {
@@ -367,7 +391,10 @@ pub fn run_within(
             ))));
         }
         out.files.push(CollectionFile {
-            file_name: file_name_for(&platform, file_suffix),
+            // **落点按系统目录，不按平台名。** ES-DE 的 `es_systems.xml` 里
+            // `<name>` 就是那个目录名（`<path>%ROMPATH%/<name>`），gamelist 摆在
+            // `gamelists/<name>/` 下。数不出唯一目录时退回平台名。
+            file_name: adapter.metadata_path(system.as_deref().unwrap_or(&platform)),
             collection: platform,
             doc: Document { entries },
         });

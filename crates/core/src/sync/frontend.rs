@@ -20,6 +20,10 @@
 //!
 //! 与 `adapter::converge` 那一侧同一条约定，理由也一样：Pegasus 里**写文件的顺序
 //! 本身有语义**，两个合集写进同一个文件，里面每个游戏就同时属于两个。
+//!
+//! **落在哪由适配器答**（`Adapter::metadata_path`）：Pegasus 摊在子库根上，
+//! ES-DE 是 `gamelists/<系统>/gamelist.xml`。于是清单里那一列是**路径**不是文件名，
+//! 而执行那一步本来就会把上级目录建出来。
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -66,6 +70,9 @@ pub enum FrontendError {
 /// 路径」。**资源取首选变体那一个**：一个条目底下可能挂着好几个变体，而条目在前端里
 /// 只有一张封面——取首选变体的，与「默认启动首选变体」是同一个选择（ADR-0012）。
 ///
+/// **靠文件名找媒体的格式这一份是空的**（ES-DE），于是这一步什么都不写进条目——
+/// 那正是它要的：媒体已经按 ROM 文件名铺在 `downloaded_media/` 下了。
+///
 /// # Errors
 /// 读中立库失败、或者适配器写不出来时返回错误。
 pub fn lay(
@@ -80,7 +87,7 @@ pub fn lay(
         .iter()
         .map(|variant| variant.key.clone())
         .collect();
-    let converged = converge::run_within(catalog, priorities, adapter.file_name(), Some(&picked))?;
+    let converged = converge::run_within(catalog, priorities, adapter, Some(&picked))?;
 
     let mut out = Laid {
         entries: converged.entries,

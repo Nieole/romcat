@@ -1,7 +1,7 @@
 //! **适配器**：把某一种前端格式与**中立库**对接的自包含模块（ADR-0003）。
 //!
 //! 每个格式一个适配器，负责该格式的读、写与字段映射。第一个是
-//! [`pegasus`]，做到**无损往返**档。
+//! [`pegasus`]，第二个是 [`gamelist`]，两个都做到**无损往返**档。
 //!
 //! ## 能力档位是**断言**不是声明
 //!
@@ -30,15 +30,30 @@
 //!
 //! 收藏、游玩次数、通关状态一律不在 [`Game`] 上。Pegasus 那一侧它们根本不在
 //! `metadata.pegasus.txt` 里（收藏在 `favorites.txt`、游玩统计在 `stats.db`），
-//! 工具**既不读也不写**。ES gamelist 那一侧它们长在同一个文件里，「不碰」于是
-//! 变成「从快照原样搬运」——那是票 17 的活，这一层的快照机制已经为它备好。
+//! 工具**既不读也不写**。ES gamelist 那一侧它们**长在同一个文件里**，「不碰」于是
+//! 变成「从快照原样搬运」——[`gamelist`] 靠的正是这一层备好的快照机制：那些元素
+//! 一个都不折进 [`Game`]，只躺在快照里，导出时逐条原样搬回去（[`Preserved::user_state`]
+//! 数的就是它们）。
+//!
+//! ## 格式在磁盘上怎么摆，也是适配器的事
+//!
+//! 两个格式的布局差得很远：Pegasus 是**一个合集一个文件**摊在导出目录根上、媒体按
+//! 内容哈希躺在 `media/` 里、路径写进条目；ES-DE 是 `gamelists/<系统>/gamelist.xml`
+//! 加 `downloaded_media/<系统>/<类型>/`、媒体**靠文件名找**、条目里一个媒体路径都不写。
+//! 于是 [`Adapter`] 除了读写还答三个布局问题——[`Adapter::metadata_path`]、
+//! [`Adapter::rom_bases`]、[`Adapter::media_placement`]。放在适配器里而不是散在
+//! `sync` 与 `converge` 里，是因为 ADR-0003 定的就是「一个格式一个**自包含**模块」。
 
 pub mod converge;
+pub mod gamelist;
 pub mod pegasus;
 pub mod report;
 pub mod transfer;
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use crate::scrape::MediaKind;
 
 /// 一个适配器对自己能做到什么程度的显式声明（`CONTEXT.md` 的**能力档位**）。
 ///
@@ -121,6 +136,80 @@ pub trait Adapter {
     /// # Errors
     /// 中立文档里有这个格式装不下的东西时返回错误。
     fn write(&self, doc: &Document, baseline: Option<&Parsed>) -> Result<Vec<u8>, AdapterError>;
+
+    /// 基线里有几段**这次的中立文档一段都没认领**，因此原样留了下来。
+    ///
+    /// 导出报告直接印它，那是「一次往返没有蒸发别人的心血」的证据。**归适配器答**，
+    /// 因为「一个条目占几段」是格式自己的事：Pegasus 一个条目一段，ES gamelist 一个
+    /// `<game>` 只装得下一个文件，多文件条目于是摊成好几段。在共用那一层按
+    /// [`Entry::origin`] 数，会把摊开的那几段全算成「没认领」——真库上一趟导出就是
+    /// 19,442 段的谎。
+    ///
+    /// 默认按 [`Entry::origin`] 数：一个条目认领一段。
+    fn kept_verbatim(&self, doc: &Document, baseline: &Parsed) -> u64 {
+        let claimed: std::collections::BTreeSet<usize> = doc
+            .entries
+            .iter()
+            .filter_map(|entry| entry.origin)
+            .collect();
+        baseline
+            .doc
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(nth, entry)| entry.game().is_some() && !claimed.contains(nth))
+            .count() as u64
+    }
+
+    /// 一个**合集**的元数据落在导出目录里的哪个**相对路径**上。
+    ///
+    /// 默认是「一个合集一个文件、全摊在根上」（Pegasus）。ES-DE 那一套要
+    /// `gamelists/<系统>/gamelist.xml`，于是它自己覆盖这一条。
+    fn metadata_path(&self, collection: &str) -> String {
+        converge::file_name_for(collection, self.file_name())
+    }
+
+    /// 条目里那条**相对路径**该以哪几个目录为基准解析回中立库的键。
+    ///
+    /// **按顺序试，第一个在库里找得到变体的算数。** 给的是一串而不是一个：ES-DE 的
+    /// gamelist 躺在 `gamelists/<系统>/` 下、ROM 却在 `<主库根>/<系统>/` 下，而那个
+    /// `<系统>` 是**平台名**、磁盘上的目录名未必与它一字不差（`platforms.toml` 里
+    /// `FC` 的目录别名有 `fc`/`nes`/`famicom` 三个）。多试一个主库根，对不上的那批
+    /// 就不必被报成「对不上库里的变体」。
+    ///
+    /// 默认是元数据文件自己所在的目录——Pegasus 的 `file:` 就是这样解析的。
+    fn rom_bases(&self, file: &Path, root: Option<&Path>) -> Vec<PathBuf> {
+        let _ = root;
+        vec![file.parent().unwrap_or(Path::new(".")).to_path_buf()]
+    }
+
+    /// 一份媒体铺到**子库**的哪个落点上，以及这条路径要不要写进条目。
+    ///
+    /// `rom_key` 是那个变体在中立库里的键——子库里的布局照搬它（挂账 D79），于是
+    /// 「媒体路径镜像 ROM 路径」这类约定在这里算得出来。`None` 表示这一份不铺
+    /// （认不出是什么的图就是这一档，见 [`crate::sync::media`] 的模块文档）。
+    ///
+    /// **没有默认实现**：铺法是格式的一部分，猜错一次就是把说明书扫描件当封面铺到
+    /// 掌机上，或者铺了一堆前端根本找不到的文件。
+    fn media_placement(
+        &self,
+        rom_key: &str,
+        kind: MediaKind,
+        hash: &str,
+        ext: &str,
+    ) -> Option<MediaPlacement>;
+}
+
+/// 一份媒体在子库里的落点。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaPlacement {
+    /// 相对子库根的路径。
+    pub path: String,
+    /// 写进条目的哪个**资源槽**。
+    ///
+    /// `None` 表示这个格式**靠文件名找媒体**，条目里一个媒体路径都不该写——ES-DE
+    /// 正是这一种（官方原话：gamelist.xml 里不再包含媒体路径，应用按 ROM 文件名去找）。
+    pub slot: Option<&'static str>,
 }
 
 /// 读一份文件的产物：中立模型看得懂的那一半，加上表达不了的那一半。
@@ -158,6 +247,14 @@ pub struct Preserved {
     pub unknown_keys: u64,
     /// 几个扩展键（Pegasus 的 `x-*`）。
     pub extension_keys: u64,
+    /// 几处**用户状态**（ADR-0006）。
+    ///
+    /// 收藏、游玩次数、游玩时长、通关状态、上次游玩。它们**一个都不折进中立模型**，
+    /// 只躺在快照里，导出时逐条原样搬回去。Pegasus 那一侧这个数永远是 0——那些东西
+    /// 根本不在 `metadata.pegasus.txt` 里；ES gamelist 那一侧它们长在同一个文件里，
+    /// **导出时省略这些元素就等于把维护者的收藏与游玩记录清零**，所以这个数就是
+    /// 「搬运真的发生了」的证据。
+    pub user_state: u64,
 }
 
 /// 格式吞东西的三种吃法。**分开数**：把它们混成一个总数会把最要命的那种淹掉。
@@ -271,6 +368,20 @@ pub struct Collection {
     pub name: String,
     /// 短名（`snes`、`nes`）。
     pub shortname: Option<String>,
+    /// 这个合集的内容在磁盘上住在哪个**顶层目录**下。
+    ///
+    /// **它与 [`name`](Self::name) 常常不是同一个词**：真库上 22 个平台里有 12 个
+    /// 目录名与平台名对不上（`WII` 的目录叫 `Wii`、`PS1` 的叫 `ps`、`WS` 的叫 `wsc`）。
+    /// 平台名是给人看的，目录名是磁盘上的事实（ADR-0011：目录是强先验）。
+    ///
+    /// ES 家族要它：`es_systems.xml` 里的 `<name>` **就是那个目录名**
+    /// （`<path>%ROMPATH%/<name>`），而 `<path>` 是相对那个目录解析的。拿平台名去当
+    /// 系统名，Android 与 Linux 上（大小写敏感）那 12 个平台一个都指不着。
+    /// Pegasus 那一侧没有对应的键，写出去的文件一个字都不因此改变。
+    ///
+    /// 一个平台的内容散在多个顶层目录里时是 `None`——那时说不出唯一的系统目录，
+    /// 路径就整条原样写出去。
+    pub system: Option<String>,
     /// 集合级默认启动命令。
     pub launch: Option<String>,
     /// 一段式简介。
@@ -511,7 +622,7 @@ fn first_difference(expected: &[u8], found: &[u8]) -> Difference {
 /// 而「支持哪些格式」是增量工作不是版本级决策（ADR-0003）。
 #[must_use]
 pub fn all() -> Vec<Box<dyn Adapter>> {
-    vec![Box::new(pegasus::Pegasus)]
+    vec![Box::new(pegasus::Pegasus), Box::new(gamelist::Gamelist)]
 }
 
 /// 本程序带的全部适配器叫什么。
@@ -555,7 +666,20 @@ mod tests {
     fn 按名字找得到适配器() {
         assert!(find("pegasus").is_some());
         assert!(find("PEGASUS").is_some());
+        assert!(find("es-gamelist").is_some());
+        assert!(find("ES-Gamelist").is_some());
         assert!(find("没有这个格式").is_none());
+    }
+
+    #[test]
+    fn 每个适配器的名字与默认文件名各不相同() {
+        // 名字是 `priorities.toml` 里的源名，也是 `--format` 认的那个词；
+        // 撞名等于两个格式抢同一列刮削值。
+        let names = names();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "适配器的名字撞了：{names:?}");
     }
 
     #[test]

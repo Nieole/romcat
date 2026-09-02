@@ -140,7 +140,8 @@ impl 现场 {
         let adapter = adapter::find("Pegasus").expect("带着 Pegasus 适配器");
         let priorities = Priorities::builtin();
         let mut desired = sync::desired(&self.catalog, &selected, profile).expect("折得出期望状态");
-        let media = sync::media::lay(&self.catalog, &self.pool, &selected).expect("铺得出媒体");
+        let media = sync::media::lay(&self.catalog, adapter.as_ref(), &self.pool, &selected)
+            .expect("铺得出媒体");
         let frontend = sync::frontend::lay(
             &self.catalog,
             adapter.as_ref(),

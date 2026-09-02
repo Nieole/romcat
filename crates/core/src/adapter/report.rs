@@ -8,9 +8,12 @@
 //! 1. **档位是实测出来的。** 每份文件都跑了一趟往返，逐字节比过。过了才写「无损往返」，
 //!    没过就写降档后的那一档并指出第一处分岔在第几行。
 //! 2. **留下了什么。** 注释几条、未知键几个、`x-` 扩展键几个——这几个数就是
-//!    「一次往返没有蒸发心血」的证据。
+//!    「一次往返没有蒸发心血」的证据。**用户状态单独一行**：ES gamelist 把收藏、
+//!    游玩次数、上次游玩长在同一个文件里，导出时省略它们就等于清零（ADR-0006），
+//!    所以「搬了几处」必须说出口，而不是混在未知键里。
 //! 3. **格式自己会吞掉的写法在哪几行。** `rating: 85` 这一行在 Pegasus 里本来就没生效，
-//!    维护者多半不知道。说出来比替他改掉强。
+//!    维护者多半不知道。说出来比替他改掉强。ES gamelist 那一侧最常见的是**补足**：
+//!    这个格式的日期没有精度这一说，只知道年份的发行日期写进去也带着一个月一个日。
 //!
 //! ## 导出报告要说出口的三件事
 //!
@@ -51,6 +54,8 @@ pub struct ImportedFile {
     pub unknown_keys: u64,
     /// 几个 `x-` 扩展键。
     pub extension_keys: u64,
+    /// 几处**用户状态**从快照原样搬了过去（ADR-0006）。
+    pub user_state: u64,
     /// 往返逐字节相同吗。
     pub roundtrip: bool,
     /// 实测下来是哪一档。
@@ -136,6 +141,18 @@ impl ImportReport {
             if let Some(difference) = &file.difference {
                 let _ = writeln!(out, "  ⚠️ {difference}");
             }
+        }
+
+        // **用户状态单独说一句。** 它长在 ES gamelist 里，导出时省略等于把维护者的
+        // 收藏与游玩记录清零（ADR-0006）。这个数就是「搬运真的发生了」的证据。
+        let user_state: u64 = self.files.iter().map(|file| file.user_state).sum();
+        if user_state > 0 {
+            let _ = writeln!(
+                out,
+                "用户状态        {} 处（收藏、游玩次数、游玩时长、通关状态、上次游玩）\n\
+                 工具**既不生成也不覆盖**，只从快照原样搬运——省略它们等于清零。",
+                thousands(user_state)
+            );
         }
 
         let lossy: u64 = self.files.iter().map(|file| file.lossy_total).sum();
@@ -305,8 +322,9 @@ impl ExportReport {
         );
         let _ = writeln!(
             out,
-            "收敛是按**作品 × 平台**：一个合集一个文件，而 Pegasus 会把一个 game 加进\n\
-             该文件中此前定义过的**所有**合集——合集混在一份文件里就说不清归属了。"
+            "收敛是按**作品 × 平台**：一个合集一份文件。合集混在一份文件里就说不清归属\n\
+             ——Pegasus 会把一个 game 加进该文件中此前定义过的**所有**合集，\n\
+             ES 家族则是一个系统一个目录、一份 gamelist。"
         );
 
         heading(&mut out, "首选变体");

@@ -3712,7 +3712,7 @@ fn prepare(
 
     let mut desired = sync::desired(catalog, &selected, &profile)
         .map_err(|error| format!("中立库读不动：{error}"))?;
-    let media = sync::media::lay(catalog, &pool, &selected)
+    let media = sync::media::lay(catalog, adapter.as_ref(), &pool, &selected)
         .map_err(|error| format!("中立库读不动：{error}"))?;
     let frontend = sync::frontend::lay(
         catalog,

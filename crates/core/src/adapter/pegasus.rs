@@ -46,9 +46,11 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use crate::scrape::MediaKind;
+
 use super::{
     Adapter, AdapterError, Body, Capability, Collection, Document, Entry, Game, Lossy, LossyNote,
-    Parsed, PlayerCount, Preserved, ReleaseDate,
+    MediaPlacement, Parsed, PlayerCount, Preserved, ReleaseDate,
 };
 
 /// Pegasus 适配器。
@@ -239,6 +241,9 @@ impl Adapter for Pegasus {
                 .iter()
                 .map(|entry| extra_of(&entry.body).len() as u64)
                 .sum(),
+            // **Pegasus 这一侧永远是 0。** 收藏在 `favorites.txt`、游玩统计在
+            // `stats.db`，一样都不在 `metadata.pegasus.txt` 里（ADR-0006）。
+            user_state: 0,
         };
         Ok(Parsed {
             doc,
@@ -284,6 +289,40 @@ impl Adapter for Pegasus {
             baseline.as_ref().map(|(was, snapshot)| (*was, snapshot)),
         ))
     }
+
+    fn media_placement(
+        &self,
+        _rom_key: &str,
+        kind: MediaKind,
+        hash: &str,
+        ext: &str,
+    ) -> Option<MediaPlacement> {
+        Some(MediaPlacement {
+            // **内容寻址**：路径就是内容的哈希，与池自己的分层一模一样。理由见
+            // [`crate::sync::media`] 的模块文档——文件名不是媒体的主键（ADR-0009），
+            // 而 Pegasus 靠条目里写死的 `assets.*` 路径找媒体，不需要认得任何约定。
+            path: format!("{MEDIA_DIR}/{}/{hash}.{ext}", hash.get(..2).unwrap_or("00")),
+            slot: Some(slot_of(kind)?),
+        })
+    }
+}
+
+/// 媒体在子库里的落脚目录。
+///
+/// ASCII 且短：目标多半是 exFAT / FAT32 的 SD 卡，路径长度是稀缺资源。
+pub const MEDIA_DIR: &str = "media";
+
+/// 一份媒体落在 Pegasus 的哪个**资源槽**上。
+///
+/// **认不出是什么的图没有槽**：不猜——猜错了就是把说明书扫描件当封面铺到掌机上。
+#[must_use]
+pub fn slot_of(kind: MediaKind) -> Option<&'static str> {
+    Some(match kind {
+        MediaKind::Cover => "boxFront",
+        MediaKind::Screenshot => "screenshot",
+        MediaKind::Video => "video",
+        MediaKind::Other => return None,
+    })
 }
 
 /// 把一份原文拆成快照。**读与写共用它**，各拆一遍必然有一天拆得不一样。

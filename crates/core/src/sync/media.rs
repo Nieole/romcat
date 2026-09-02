@@ -1,9 +1,17 @@
 //! 把**媒体池**里的封面、截图、视频铺到目标上。
 //!
-//! ## 目标上的布局照抄池的布局
+//! ## 铺在哪由**适配器**说了算
 //!
-//! `媒体/<内容哈希前两位>/<内容哈希>.<扩展名>`——与 [`MediaPool`] 自己的分层一模一样。
-//! 三条理由：
+//! 布局是格式的一部分（[`Adapter::media_placement`](crate::adapter::Adapter::media_placement)），
+//! 两家差得很远：
+//!
+//! - **Pegasus**：`media/<内容哈希前两位>/<内容哈希>.<扩展名>`——与 [`MediaPool`]
+//!   自己的分层一模一样，路径写进条目的 `assets.*`，前端不需要认得任何约定。
+//! - **ES-DE**：`downloaded_media/<系统>/<类型>/<ROM 主名>.<扩展名>`，条目里
+//!   **一个媒体路径都不写**——官方原话是 gamelist.xml 里不再包含媒体信息，
+//!   应用按 ROM 文件名去找。
+//!
+//! 内容寻址那一种的三条理由（也是为什么它是 Pegasus 的默认）：
 //!
 //! - **文件名不是媒体的主键**（ADR-0009）。按游戏名铺出去要先净化文件名，而净化函数
 //!   多对一不可逆——两个条目净化成同一个名字之后，谁也说不出那张图原本是谁的。
@@ -12,8 +20,9 @@
 //! - **名字稳定**。按序号铺（`screenshot1`、`screenshot2`）的话，中间插进来一张新截图
 //!   会让后面每一张都改名，于是下一趟同步凭空多出一批「更新」。
 //!
-//! 前端靠元数据里写死的 `assets.*` 路径找到它们（[`frontend`](super::frontend)），
-//! 因此这套布局不需要前端认得任何约定。
+//! ⚠️ **按文件名铺的那一种付得起这笔账**：同一张封面被三个变体引用时，目标上就是三份
+//! 字节相同的文件。那是格式的代价——ES 家族没有内容寻址这回事，媒体的**主键就是
+//! 文件名**，去重就等于让其中两个条目找不到自己的图。
 //!
 //! ## 认不出是什么的图一张都不铺
 //!
@@ -28,6 +37,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
+use crate::adapter::Adapter;
 use crate::catalog::{Catalog, CatalogError};
 use crate::scrape::pool::MediaPool;
 use crate::scrape::{AnchorKind, MediaKind};
@@ -35,25 +45,12 @@ use crate::sublibrary::Selected;
 
 use super::{DesiredFile, FileKind, Stamp};
 
-/// 媒体在子库里的落脚目录。
+/// 媒体在子库里的落脚目录（Pegasus 那一种）。
 ///
 /// ASCII 且短：目标多半是 exFAT / FAT32 的 SD 卡，路径长度是稀缺资源（票 21 要查的
 /// 正是这个）。**它有可能与主库里一个真叫 `media` 的平台目录撞上**——撞上时那条路径
 /// 会被报成「落点被占」而不是被覆盖，因为工具在清单之外没有写的权利（ADR-0015）。
-pub const MEDIA_DIR: &str = "media";
-
-/// 一份媒体在 Pegasus 的哪个资源槽上。
-///
-/// **认不出是什么的图没有槽**：见模块文档。
-#[must_use]
-pub fn slot_of(kind: MediaKind) -> Option<&'static str> {
-    Some(match kind {
-        MediaKind::Cover => "boxFront",
-        MediaKind::Screenshot => "screenshot",
-        MediaKind::Video => "video",
-        MediaKind::Other => return None,
-    })
-}
+pub use crate::adapter::pegasus::MEDIA_DIR;
 
 /// 铺出来的东西。
 #[derive(Debug, Clone, Default)]
@@ -85,7 +82,12 @@ impl Laid {
 ///
 /// # Errors
 /// 读中立库失败时返回错误。
-pub fn lay(catalog: &Catalog, pool: &MediaPool, selected: &Selected) -> Result<Laid, CatalogError> {
+pub fn lay(
+    catalog: &Catalog,
+    adapter: &dyn Adapter,
+    pool: &MediaPool,
+    selected: &Selected,
+) -> Result<Laid, CatalogError> {
     let works = work_of_variant(catalog)?;
     let mut out = Laid::default();
     // 同一份媒体被多个变体引用时目标上只有一个文件，于是同一条路径只铺一次；
@@ -106,12 +108,14 @@ pub fn lay(catalog: &Catalog, pool: &MediaPool, selected: &Selected) -> Result<L
                     out.unknown_kind += 1;
                     continue;
                 };
-                let Some(slot) = slot_of(kind) else {
-                    out.unknown_kind += 1;
-                    continue;
-                };
                 let Some(ext) = catalog.media_ext(&reference.hash)? else {
                     out.not_in_pool += 1;
+                    continue;
+                };
+                let Some(placement) =
+                    adapter.media_placement(&picked.key, kind, &reference.hash, &ext)
+                else {
+                    out.unknown_kind += 1;
                     continue;
                 };
                 let at = pool.path_of(&reference.hash, &ext);
@@ -119,15 +123,14 @@ pub fn lay(catalog: &Catalog, pool: &MediaPool, selected: &Selected) -> Result<L
                     out.not_in_pool += 1;
                     continue;
                 };
-                let path = format!(
-                    "{MEDIA_DIR}/{}/{}.{ext}",
-                    reference.hash.get(..2).unwrap_or("00"),
-                    reference.hash,
-                );
-                let slots = out.assets.entry(picked.key.clone()).or_default();
-                let list = slots.entry(slot).or_default();
-                if !list.contains(&path) {
-                    list.push(path.clone());
+                let path = placement.path;
+                // 槽是 `None` 的格式**靠文件名找媒体**，条目里一个路径都不写。
+                if let Some(slot) = placement.slot {
+                    let slots = out.assets.entry(picked.key.clone()).or_default();
+                    let list = slots.entry(slot).or_default();
+                    if !list.contains(&path) {
+                        list.push(path.clone());
+                    }
                 }
                 if !placed.insert(path.clone()) {
                     continue;
@@ -181,14 +184,41 @@ fn work_of_variant(catalog: &Catalog) -> Result<BTreeMap<String, String>, Catalo
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::adapter::gamelist::Gamelist;
+    use crate::adapter::pegasus::Pegasus;
+    use crate::adapter::{Adapter, MediaPlacement};
+    use crate::scrape::MediaKind;
 
     #[test]
-    fn 认不出是什么的图没有资源槽() {
+    fn 认不出是什么的图哪个格式都不铺() {
         // **不猜**——猜错了就是把说明书当封面铺到掌机上。
-        assert_eq!(slot_of(MediaKind::Other), None);
-        assert_eq!(slot_of(MediaKind::Cover), Some("boxFront"));
-        assert_eq!(slot_of(MediaKind::Screenshot), Some("screenshot"));
-        assert_eq!(slot_of(MediaKind::Video), Some("video"));
+        for adapter in [&Pegasus as &dyn Adapter, &Gamelist] {
+            assert_eq!(
+                adapter.media_placement("FC/甲.zip", MediaKind::Other, "abc123", "png"),
+                None,
+                "{}",
+                adapter.name()
+            );
+        }
+    }
+
+    #[test]
+    fn 两家的媒体布局差得很远() {
+        // Pegasus：内容寻址，路径写进条目的资源槽。
+        assert_eq!(
+            Pegasus.media_placement("FC/甲.zip", MediaKind::Cover, "abc123", "png"),
+            Some(MediaPlacement {
+                path: "media/ab/abc123.png".to_string(),
+                slot: Some("boxFront"),
+            })
+        );
+        // ES-DE：按文件名约定，条目里一个路径都不写。
+        assert_eq!(
+            Gamelist.media_placement("FC/甲.zip", MediaKind::Cover, "abc123", "png"),
+            Some(MediaPlacement {
+                path: "downloaded_media/FC/covers/甲.png".to_string(),
+                slot: None,
+            })
+        );
     }
 }

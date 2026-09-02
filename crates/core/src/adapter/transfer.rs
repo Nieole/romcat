@@ -120,6 +120,7 @@ pub fn import(
             comments: parsed.preserved.comments,
             unknown_keys: parsed.preserved.unknown_keys,
             extension_keys: parsed.preserved.extension_keys,
+            user_state: parsed.preserved.user_state,
             roundtrip: assertion.identical,
             tier: assertion.asserted.label().to_string(),
             difference: assertion.difference.as_ref().map(|difference| {
@@ -160,7 +161,10 @@ pub fn import(
                 .collect(),
             ..ImportedFile::default()
         };
-        let dir = absolute.parent().unwrap_or(Path::new(".")).to_path_buf();
+        // **条目里那条相对路径以哪儿为基准，归适配器答**（[`Adapter::rom_bases`]）：
+        // Pegasus 的 `file:` 是相对元数据文件所在目录的，ES gamelist 躺在
+        // `gamelists/<系统>/` 下而 ROM 在 `<主库根>/<系统>/` 下。
+        let bases = adapter.rom_bases(&absolute, root.as_deref());
         let mut batch = Vec::new();
         for entry in &parsed.doc.entries {
             match &entry.body {
@@ -169,7 +173,7 @@ pub fn import(
                     account.games += 1;
                     let variant = root
                         .as_deref()
-                        .and_then(|root| resolve(catalog, &works, root, &dir, game).transpose())
+                        .and_then(|root| resolve(catalog, &works, root, &bases, game).transpose())
                         .transpose()?;
                     match variant {
                         Some((key, work)) => {
@@ -213,23 +217,25 @@ fn resolve(
     catalog: &Catalog,
     works: &BTreeMap<i64, String>,
     root: &Path,
-    dir: &Path,
+    bases: &[PathBuf],
     game: &super::Game,
 ) -> Result<Option<(String, Option<String>)>, CatalogError> {
     for file in &game.files {
-        let key = path::catalog_key(root, &normalize(&dir.join(file)));
-        // 先按变体自己的键找，找不到再看它是不是某个变体的**成员**——多碟条目里
-        // 写的常常是其中一张碟，而那张碟只是变体的一个成员。
-        let variant = match catalog.variant(&key)? {
-            Some(variant) => Some(variant),
-            None => match catalog.variant_of(&key)? {
-                Some((variant_key, _)) => catalog.variant(&variant_key)?,
-                None => None,
-            },
-        };
-        let Some(variant) = variant else { continue };
-        let work = variant.work_id.and_then(|id| works.get(&id).cloned());
-        return Ok(Some((variant.key, work)));
+        for base in bases {
+            let key = path::catalog_key(root, &normalize(&base.join(file)));
+            // 先按变体自己的键找，找不到再看它是不是某个变体的**成员**——多碟条目里
+            // 写的常常是其中一张碟，而那张碟只是变体的一个成员。
+            let variant = match catalog.variant(&key)? {
+                Some(variant) => Some(variant),
+                None => match catalog.variant_of(&key)? {
+                    Some((variant_key, _)) => catalog.variant(&variant_key)?,
+                    None => None,
+                },
+            };
+            let Some(variant) = variant else { continue };
+            let work = variant.work_id.and_then(|id| works.get(&id).cloned());
+            return Ok(Some((variant.key, work)));
+        }
     }
     Ok(None)
 }
@@ -283,35 +289,49 @@ fn landed(
     // 就是一整个结构体摊成的长字符串，逐条存进 `scrape_probe` 是白花的空间。
     let input = format!("{fingerprint}#{variant_key}");
     let mut out = Vec::new();
-    if !variant_values.is_empty() {
-        out.push(Harvested {
-            anchor: AnchorKind::Variant.label().to_string(),
-            subject: variant_key.to_string(),
-            source: source.to_string(),
-            input: input.clone(),
-            values: variant_values,
-            media: Vec::new(),
-        });
-    }
-    if !work_values.is_empty() {
-        out.push(match work {
-            Some(work) => Harvested {
-                anchor: AnchorKind::Work.label().to_string(),
-                subject: work.to_string(),
-                source: source.to_string(),
-                input,
-                values: work_values,
-                media: Vec::new(),
-            },
-            None => Harvested {
-                anchor: AnchorKind::Variant.label().to_string(),
-                subject: variant_key.to_string(),
-                source: source.to_string(),
-                input,
-                values: work_values,
-                media: Vec::new(),
-            },
-        });
+    match work {
+        // 认出了作品：标题挂变体、其余挂作品，两个**不同的锚点**，各写各的。
+        Some(work) => {
+            if !variant_values.is_empty() {
+                out.push(Harvested {
+                    anchor: AnchorKind::Variant.label().to_string(),
+                    subject: variant_key.to_string(),
+                    source: source.to_string(),
+                    input: input.clone(),
+                    values: variant_values,
+                    media: Vec::new(),
+                });
+            }
+            if !work_values.is_empty() {
+                out.push(Harvested {
+                    anchor: AnchorKind::Work.label().to_string(),
+                    subject: work.to_string(),
+                    source: source.to_string(),
+                    input,
+                    values: work_values,
+                    media: Vec::new(),
+                });
+            }
+        }
+        // **还没认出作品：两拨值挂在同一个锚点上，必须并成一条。**
+        //
+        // `put_scraped` 是按「锚点 + 主体 + 源」整组替换的：同一组写两次，第二次会把
+        // 第一次删掉。分成两条推进去，标题（第一条）当场被简介开发商那一条抹掉——
+        // 真库上 16.3% 的变体还没认出作品，那就是每六条手工维护的标题丢掉一条，
+        // 而「无损导入维护者多年手工维护的成果」正是这条路的全部意义（ADR-0001）。
+        None => {
+            variant_values.extend(work_values);
+            if !variant_values.is_empty() {
+                out.push(Harvested {
+                    anchor: AnchorKind::Variant.label().to_string(),
+                    subject: variant_key.to_string(),
+                    source: source.to_string(),
+                    input,
+                    values: variant_values,
+                    media: Vec::new(),
+                });
+            }
+        }
     }
     out
 }
@@ -338,10 +358,17 @@ pub fn export(
     priorities: &Priorities,
     options: &ExportOptions,
 ) -> Result<ExportReport, TransferError> {
-    let converged = converge::run(catalog, priorities, adapter.file_name())?;
+    let converged = converge::run(catalog, priorities, adapter)?;
     let out_dir = normalize(&options.out);
 
-    // 落点目录里对齐过的快照：合集名 → （盘上那个**真实路径**，那份快照）。
+    // 落点目录里对齐过的快照，两条路各认各的：
+    //
+    // 1. **按合集名认**——维护者自己那份 `metadata.pegasus.txt` 叫什么名字是他的事，
+    //    我们生成的叫 `FC.metadata.pegasus.txt`。认出来之后落点也改用他原来的名字，
+    //    于是「把自己的文件导进来、再导出到同一个目录」就是一次真正的往返。
+    // 2. **按落点路径认**——ES gamelist 的文档里没有合集段（系统是由文件摆在哪个
+    //    目录下说的），第一条路对它一句话都说不出来。而它的落点本来就是唯一的
+    //    （`gamelists/<系统>/gamelist.xml`），路径本身就是身份。
     //
     // ⚠️ **路径从 `read_dir` 来，不从快照那一列来。** 快照的键是 NFC 形式，它是身份；
     // 而 macOS 上 NTFS 交出来的名字是 NFD（ADR-0020：1.99% 的路径两种形式不同）。
@@ -350,26 +377,25 @@ pub fn export(
     // ADR-0020 的「读盘用系统给的原始路径，入库与比较用 NFC 形式」在这里是硬约束。
     let stored_snapshots = catalog.snapshots(adapter.name())?;
     let mut baselines: BTreeMap<String, (PathBuf, Parsed)> = BTreeMap::new();
-    if !stored_snapshots.is_empty()
-        && let Ok(entries) = std::fs::read_dir(&out_dir)
-    {
-        let on_disk: BTreeMap<String, PathBuf> = entries
-            .flatten()
-            .map(|entry| entry.path())
-            .map(|path| (path::nfc(&path::display(&path)).into_owned(), path))
-            .collect();
-        for row in &stored_snapshots {
-            let Some(real) = on_disk.get(&row.path) else {
-                continue;
-            };
-            let Ok(parsed) = adapter.read(&row.bytes) else {
-                continue;
-            };
-            for entry in &parsed.doc.entries {
-                if let Some(collection) = entry.collection() {
-                    baselines.insert(collection.name.clone(), (real.clone(), parsed.clone()));
-                    break;
-                }
+    let mut by_path: BTreeMap<String, (PathBuf, Parsed)> = BTreeMap::new();
+    for row in &stored_snapshots {
+        // **只认落在导出目录里的那些。** 别处的快照与这一趟无关，拿它当基线等于
+        // 把文件写到 `--out` 之外去。
+        let stored = PathBuf::from(&row.path);
+        if !path::is_inside(&out_dir, &stored) {
+            continue;
+        }
+        let Some(real) = real_path(&stored) else {
+            continue;
+        };
+        let Ok(parsed) = adapter.read(&row.bytes) else {
+            continue;
+        };
+        by_path.insert(row.path.clone(), (real.clone(), parsed.clone()));
+        for entry in &parsed.doc.entries {
+            if let Some(collection) = entry.collection() {
+                baselines.insert(collection.name.clone(), (real, parsed));
+                break;
             }
         }
     }
@@ -386,9 +412,16 @@ pub fn export(
     let mut worst = adapter.ceiling();
 
     for file in &converged.files {
+        let default = out_dir.join(&file.file_name);
         let (target, baseline) = match baselines.get(&file.collection) {
             Some((real, parsed)) => (real.clone(), Some(parsed)),
-            None => (out_dir.join(&file.file_name), None),
+            None => {
+                let key = path::nfc(&path::display(&default)).into_owned();
+                match by_path.get(&key) {
+                    Some((real, parsed)) => (real.clone(), Some(parsed)),
+                    None => (default, None),
+                }
+            }
         };
         let stored = path::nfc(&path::display(&target)).into_owned();
 
@@ -415,22 +448,9 @@ pub fn export(
         let roundtrip = assert_capability(adapter, &bytes)?;
         worst = worst.min(roundtrip.asserted);
 
-        let kept = baseline.map_or(0, |baseline| {
-            // 用集合而不是 `Vec` 加 `contains`：真库上 FC 一个平台 7,739 个段，
-            // 线性查找在这里就是六千万次比较。
-            let claimed: BTreeSet<usize> = doc
-                .entries
-                .iter()
-                .filter_map(|entry| entry.origin)
-                .collect();
-            baseline
-                .doc
-                .entries
-                .iter()
-                .enumerate()
-                .filter(|(nth, entry)| entry.game().is_some() && !claimed.contains(nth))
-                .count() as u64
-        });
+        // 「基线里有几段这次一段都没认领」**归适配器答**：一个条目占几段是格式自己的事
+        // （见 [`Adapter::kept_verbatim`]）。
+        let kept = baseline.map_or(0, |baseline| adapter.kept_verbatim(&doc, baseline));
 
         if !options.dry_run {
             if let Some(parent) = target.parent() {
@@ -544,7 +564,7 @@ fn external_change(
 /// 1. **`x-romcat-variant` 相同**——那是我们自己导出时写进去的**首选变体的键**，
 ///    机器读得动，不会认错；
 /// 2. **有一条 `file:` 相同**——路径是这几个格式里最稳的身份（调研 D.4 第 2 条：
-///    主键用路径，不要用标题）；
+///    主键用路径，不要用标题）。**带不带平台那一段都算**，见函数体里的注释；
 /// 3. **标题一字不差**——最后的兜底。
 ///
 /// **「整层走完再降一层」不是排版，是正确性。** 标题在这个库里大量重名：真机上
@@ -588,6 +608,16 @@ fn rebase(doc: &Document, baseline: Option<&Parsed>) -> Document {
         }
     }
 
+    // 这份文档说的是哪个合集。**同一个文件在两个格式里可能写成两种路径**：中立库的键
+    // 带着平台那一段（`FC/魂斗罗.zip`），而 ES gamelist 的 `<path>` 是相对**系统 ROM
+    // 目录**的（`魂斗罗.zip`）。对回基线时两种都试，否则同一个文件会被当成两条，
+    // 基线那一段永远对不上、一趟比一趟长。
+    let collection = doc
+        .entries
+        .iter()
+        .find_map(|entry| entry.collection())
+        .map(|collection| format!("{}/", collection.name));
+
     let mut used: BTreeSet<usize> = BTreeSet::new();
     let mut entries = Vec::with_capacity(doc.entries.len());
     for entry in &doc.entries {
@@ -606,6 +636,11 @@ fn rebase(doc: &Document, baseline: Option<&Parsed>) -> Document {
                 }
                 for file in &game.files {
                     lanes.extend(by_file.get(file.as_str()));
+                    if let Some(prefix) = &collection
+                        && let Some(rest) = file.strip_prefix(prefix.as_str())
+                    {
+                        lanes.extend(by_file.get(rest));
+                    }
                 }
                 if !game.title.is_empty() {
                     lanes.extend(by_title.get(game.title.as_str()));
@@ -626,6 +661,23 @@ fn rebase(doc: &Document, baseline: Option<&Parsed>) -> Document {
         });
     }
     Document { entries }
+}
+
+/// 快照那一列记的是 NFC 形式的键，盘上那份的名字未必是同一种形式——把它找回来。
+///
+/// ⚠️ 这一步不能省（ADR-0020：真机上 1.99% 的路径两种形式不同）。拿 NFC 键直接去
+/// `fs::write`，macOS 上会在维护者的原件**旁边**新建一个同名不同形式的文件，
+/// 原件一个字没改地躺着——从此两份各走各的，外部改动检测再也认不出那一份。
+///
+/// 盘上没有这份文件时是 `None`：那说明这个落点还没有原件，这一趟从头生成。
+fn real_path(stored: &Path) -> Option<PathBuf> {
+    let parent = stored.parent()?;
+    let want = path::nfc(&path::display(stored)).into_owned();
+    std::fs::read_dir(parent)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path::nfc(&path::display(path)) == want)
 }
 
 /// 把一个路径化成**可与中立库里那个主库根比较**的绝对形态。
