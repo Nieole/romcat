@@ -13,10 +13,11 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use crate::report::{heading, human_bytes, pad, thousands};
+use crate::report::{heading, human_bytes, human_duration, pad, thousands};
 
 use super::execute::{Done, Outcome, Placement};
 use super::{Act, FileKind, Plan, Step, SurpriseKind, Tally};
+use crate::capability::RejectReason;
 
 /// 每一类操作在报告里举几个例子。
 const EXAMPLES: usize = 10;
@@ -40,6 +41,7 @@ impl Plan {
             self.capacity
                 .map_or_else(|| "不设限".to_string(), human_bytes)
         );
+        let _ = writeln!(out, "能力档案        {}", self.capability);
 
         heading(&mut out, "差量");
         line(&mut out, "新增", self.adds, None);
@@ -124,6 +126,177 @@ impl Plan {
                     thousands((steps.len() - EXAMPLES) as u64),
                 );
             }
+        }
+
+        heading(&mut out, "要转格式的");
+        if self.converts.files == 0 {
+            let _ = writeln!(
+                out,
+                "一个都不用转：目标吃得下这一趟要搬的每一份（或者这份档案不作声称）。"
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "{}{}（{} 个变体）",
+                pad("要转", 12),
+                pad(&format!("{} 个", thousands(self.converts.files)), 12),
+                thousands(self.converts.variants),
+            );
+            let _ = writeln!(
+                out,
+                "{}{}",
+                pad("要读", 12),
+                human_bytes(self.convert_source_bytes),
+            );
+            let _ = writeln!(
+                out,
+                "{}{}",
+                pad("转出来", 12),
+                human_bytes(self.converts.bytes),
+            );
+            // **粗估两个字必须印出来。** 它是「字节数乘一个常量」，源盘、目标介质、
+            // 是解压还是重压，随便哪一样都能把它带偏一倍。印一个看着精确的错数，
+            // 比印一个明说是粗估的数糟得多。
+            let _ = writeln!(
+                out,
+                "{}{}（**粗估**：按实测吞吐乘出来的，真机上差一倍很正常）",
+                pad("大概要", 12),
+                human_duration(self.convert_ms),
+            );
+            if self.convert_estimated > 0 {
+                let _ = writeln!(
+                    out,
+                    "其中 {} 个的**产物大小也是估的**（重打包成 zip 那一路，压完才知道多大），\n\
+                     上面「转出来」与容量那一栏因此是**上界**。",
+                    thousands(self.convert_estimated),
+                );
+            }
+            let mut rows: Vec<&Step> = self
+                .steps
+                .iter()
+                .filter(|step| step.act != Act::Delete && step.convert.is_some())
+                .collect();
+            rows.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.path.cmp(&b.path)));
+            for step in rows.iter().take(EXAMPLES) {
+                let Some(conversion) = &step.convert else {
+                    continue;
+                };
+                let _ = writeln!(
+                    out,
+                    "  {}{} → {}",
+                    pad(&human_bytes(step.bytes), 12),
+                    step.source,
+                    step.path,
+                );
+                let _ = writeln!(out, "  {}转成{}", pad("", 12), conversion.recipe.label(),);
+            }
+            if rows.len() > EXAMPLES {
+                let _ = writeln!(
+                    out,
+                    "  …… 另有 {} 个。`--json` 出完整的一份。",
+                    thousands((rows.len() - EXAMPLES) as u64),
+                );
+            }
+            let _ = writeln!(
+                out,
+                "**转换只产生新文件**：主库里那几份原始形态一个字节都不会动（ADR-0004）。"
+            );
+        }
+
+        if !self.rejected.is_empty() {
+            heading(&mut out, "放不进目标存储");
+            let _ = writeln!(
+                out,
+                "{} 个、{}。**这一趟一个都不传**——传必然失败，而失败会在卡上留下\n\
+                 半份文件、在清单里留下一条谎。这几个也**不会被删掉**：万一目标上已经\n\
+                 有一份，那是这条声明自己可能就错了，不是它该被删的理由。",
+                thousands(self.rejected.len() as u64),
+                human_bytes(self.rejected.iter().map(|file| file.bytes).sum()),
+            );
+            for reason in RejectReason::all() {
+                let rows: Vec<_> = self
+                    .rejected
+                    .iter()
+                    .filter(|file| file.reason == reason)
+                    .collect();
+                if rows.is_empty() {
+                    continue;
+                }
+                let _ = writeln!(
+                    out,
+                    "{}  {} 个",
+                    pad(reason.label(), 18),
+                    thousands(rows.len() as u64),
+                );
+                for file in rows.iter().take(EXAMPLES) {
+                    let _ = writeln!(out, "  {}", file.path);
+                    let _ = writeln!(out, "    {}", file.detail);
+                }
+                if rows.len() > EXAMPLES {
+                    let _ = writeln!(
+                        out,
+                        "  …… 另有 {} 个。",
+                        thousands((rows.len() - EXAMPLES) as u64)
+                    );
+                }
+            }
+            // **上界不能当准数报。** 重打包成 zip 那一路填的是未压缩总量，压完说不定
+            // 就装得下了——不说这句，用户会照着一条其实不成立的结论去换一张卡。
+            let 估的 = self.rejected.iter().filter(|file| file.estimated).count();
+            if 估的 > 0 {
+                let _ = writeln!(
+                    out,
+                    "其中 {} 个的大小是**上界**（重打包的产物压完才知道多大），\n\
+                     这几条有可能是误判——真压完说不定就装得下了。",
+                    thousands(估的 as u64),
+                );
+            }
+            let _ = writeln!(
+                out,
+                "换一张 exFAT 的卡，或者 `romcat sublibrary except {} --exclude <变体的键>`\n\
+                 把它们从选择集里去掉。",
+                self.sublibrary,
+            );
+        }
+
+        if !self.unsupported.is_empty() {
+            heading(&mut out, "到了目标上打不开");
+            let _ = writeln!(
+                out,
+                "{} 个、{}。目标吃不下这个形态，而**这一版转不了它**。\n\
+                 它们**照样搬过去**——不搬是静默丢掉你亲手挑中的东西，比白占地方糟得多。\n\
+                 但说清楚：搬过去也开不了，得你自己拿外部工具转一遍。",
+                thousands(self.unsupported.len() as u64),
+                human_bytes(self.unsupported.iter().map(|file| file.bytes).sum()),
+            );
+            let mut rows: Vec<_> = self.unsupported.iter().collect();
+            rows.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.path.cmp(&b.path)));
+            for file in rows.iter().take(EXAMPLES) {
+                let _ = writeln!(out, "  {}{}", pad(&human_bytes(file.bytes), 12), file.path,);
+                let _ = writeln!(
+                    out,
+                    "  {}{}想要 {}",
+                    pad("", 12),
+                    file.platform
+                        .as_deref()
+                        .map_or_else(String::new, |name| format!("[{name}] ")),
+                    file.want,
+                );
+                let _ = writeln!(out, "  {}{}", pad("", 12), file.why);
+            }
+            if rows.len() > EXAMPLES {
+                let _ = writeln!(
+                    out,
+                    "  …… 另有 {} 个。`--json` 出完整的一份。",
+                    thousands((rows.len() - EXAMPLES) as u64),
+                );
+            }
+            let _ = writeln!(
+                out,
+                "这一栏来自**能力档案**「{}」。矩阵错了比不转换更糟（ADR-0017）——\n\
+                 觉得这几条判错了，`romcat capability {}` 看它的出处与核实日期。",
+                self.capability, self.capability,
+            );
         }
 
         heading(&mut out, "目标上对不上的");
@@ -325,6 +498,35 @@ impl Outcome {
             let _ = writeln!(out, "**一个文件都没动**：目标本来就与选择集对齐。");
         }
 
+        if self.converted.files > 0 {
+            heading(&mut out, "转了什么");
+            let _ = writeln!(
+                out,
+                "{}{}",
+                pad("转了", 12),
+                format_args!(
+                    "{} 份，产物共 {}",
+                    thousands(self.converted.files),
+                    human_bytes(self.converted.bytes),
+                ),
+            );
+            let _ = writeln!(
+                out,
+                "{}{}",
+                pad("用时", 12),
+                human_duration(self.convert_ms)
+            );
+            if self.convert_cached > 0 {
+                let _ = writeln!(
+                    out,
+                    "其中 {} 份是**从转换缓存取的**，没有真转——多台设备要同一种格式时\n\
+                     转一次用多次。",
+                    thousands(self.convert_cached),
+                );
+            }
+            let _ = writeln!(out, "主库那几份原始形态**一个字节都没动**（ADR-0004）。");
+        }
+
         if let Some(placement) = self.placement {
             heading(&mut out, "媒体怎么放的");
             let _ = writeln!(out, "探测结果      {}（媒体池 → 目标）", placement.label());
@@ -485,6 +687,7 @@ mod tests {
             target_raw: Some("/Volumes/SDCARD/Games".to_string()),
             format: "Pegasus".to_string(),
             capacity: Some(4096),
+            capability: None,
         }
     }
 
@@ -502,6 +705,7 @@ mod tests {
                     mtime_ns: Some(1),
                 },
                 variant: "GB/一.zip".to_string(),
+                convert: None,
             }],
             ..Desired::default()
         };

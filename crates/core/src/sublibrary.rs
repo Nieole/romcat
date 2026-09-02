@@ -61,7 +61,9 @@ const RATING_FIELD: &str = "评分";
 
 /// 一个**子库**的定义。
 ///
-/// 目标路径与前端格式在这里，**能力档案**（目标设备吃哪些格式）不在——那是票 21 的活。
+/// 目标路径、前端格式与**能力档案**的名字都在这里。档案本身不在：它是一份可以整份换掉
+/// 的数据（[`capability::Roster`](crate::capability::Roster)），子库只记着自己挑的是哪一份
+/// 的名字——换一份名册、改一条矩阵，子库一个字都不用动。
 ///
 /// ## 目标路径存两份，键与读盘各用各的
 ///
@@ -92,6 +94,13 @@ pub struct Sublibrary {
     /// 自动截断的结果不可预测——同一套规则在两张不同容量的卡上会选出完全不同的东西，
     /// 而用户无从得知它砍掉了什么。
     pub capacity: Option<u64>,
+    /// **能力档案**的名字：这台设备吃得下什么、这张卡放得下什么（票 21、ADR-0017）。
+    ///
+    /// `None` 是「没挑过」，走[不作声称](crate::capability::DEFAULT_PROFILE)那一份
+    /// ——不转换、不检查，与票 20 的行为一个字不差。票 21 之前建的子库也是 `None`。
+    /// **默认必须是「不作声称」而不是某份真的矩阵**：一份没人挑过的矩阵替用户做了
+    /// 决定，而它可能是错的（ADR-0017：矩阵错误比不转换更糟）。
+    pub capability: Option<String>,
 }
 
 impl Sublibrary {
@@ -104,6 +113,7 @@ impl Sublibrary {
             target_raw: target.to_str().map(ToString::to_string),
             format: format.to_string(),
             capacity,
+            capability: None,
         }
     }
 

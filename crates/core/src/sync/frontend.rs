@@ -122,6 +122,8 @@ pub fn lay(
                 mtime_ns: Some(0),
             },
             variant: NOT_A_VARIANT.to_string(),
+            // 元数据不转格式：适配器写出来的就是目标前端要的那一份。
+            convert: None,
         });
         out.bytes.insert(file.file_name.clone(), bytes);
     }

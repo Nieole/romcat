@@ -199,6 +199,12 @@ pub struct MemberFile {
     /// 同步靠它判「主库里这份变了没有」：只比大小的话，**原地改过、大小没变**的
     /// 文件会被静默判成不用重传——与增量扫描比的是同一个三元组。
     pub mtime_ns: Option<i64>,
+    /// 是这个变体的**主文件**吗。
+    ///
+    /// 票 21 起要它：**能力档案判的是主文件**，因为主文件才是「用来交给模拟器启动
+    /// 的那一个」（`CONTEXT.md`）。拿它去判每一个成员的话，一个 PSV 目录树变体底下
+    /// 几千个**内部资源**会各自领一条「吃不下」，报告当场变成噪音。
+    pub is_main: bool,
 }
 
 impl Catalog {
@@ -449,8 +455,9 @@ impl Catalog {
     /// 那个目录本身是它的主文件，在这里悄悄扔掉的话，「一个成员都不该凭空消失」
     /// 这件事就没人数得出来了。
     ///
-    /// **不返回成员的身份**（主文件 / 附属文件 / 内部资源 / 附属内容）：同步要搬的是
-    /// 变体的**全部**文件成员，四种身份一视同仁（挂账 D80），于是读出来也没人用。
+    /// **搬的时候四种身份一视同仁**（挂账 D80）：同步要搬的是变体的全部文件成员。
+    /// 但 [`MemberFile::is_main`] 仍然读出来——**格式转换判的是主文件**（票 21），
+    /// 那是「交给模拟器启动的那一个」，与「要不要搬」是两个问题。
     ///
     /// # Errors
     /// 读库失败时返回错误。
@@ -461,7 +468,7 @@ impl Catalog {
         let mut statement = self
             .conn
             .prepare(
-                "SELECT m.variant_key, m.key, e.kind, e.readable, e.len, e.mtime_ns
+                "SELECT m.variant_key, m.key, e.kind, e.readable, e.len, e.mtime_ns, m.role
                  FROM variant_member m JOIN entry e ON e.key = m.key
                  ORDER BY m.variant_key, m.key",
             )
@@ -492,6 +499,8 @@ impl Catalog {
                 } else {
                     row.get(5).map_err(|source| self.err(source))?
                 },
+                is_main: row.get::<_, String>(6).map_err(|source| self.err(source))?
+                    == Role::Main.code(),
             });
         }
         Ok(out)

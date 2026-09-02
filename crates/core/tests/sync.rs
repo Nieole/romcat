@@ -12,6 +12,7 @@
 use std::fs;
 use std::path::Path;
 
+use romcat_core::capability::Profile;
 use romcat_core::catalog::Catalog;
 use romcat_core::fs::RealFs;
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
@@ -115,6 +116,7 @@ fn 摆好现场(组合们: &[(String, 组合)]) -> (Desired, Manifest, TargetSta
                 source: path.clone(),
                 source_stamp: 记着,
                 variant: path.clone(),
+                convert: None,
             });
         }
         if 这一种.清单里有 {
@@ -335,7 +337,8 @@ fn 期望状态是选中变体的文件成员_容量与变体那一层对得上(
     let dir = 建库();
     let catalog = 扫成库(dir.path());
     let selected = 选中(&catalog, "平台=FC,PSV");
-    let desired = sync::desired(&catalog, &selected).expect("折得出期望状态");
+    let desired =
+        sync::desired(&catalog, &selected, &Profile::unclaimed()).expect("折得出期望状态");
 
     // 一个变体可以是好几个文件，而容量的账两层必须一致。
     assert!(
@@ -377,7 +380,8 @@ fn 头一次同步是全新增_一条删除也长不出来() {
     let 目标 = temp_dir("sync-target-empty");
     let catalog = 扫成库(dir.path());
     let selected = 选中(&catalog, "平台=FC");
-    let desired = sync::desired(&catalog, &selected).expect("折得出期望状态");
+    let desired =
+        sync::desired(&catalog, &selected, &Profile::unclaimed()).expect("折得出期望状态");
     let actual = sync::observe(&RealFs::new(), 目标.path()).expect("目标在位");
     let plan = sync::plan(
         &子库(目标.path(), None),
@@ -431,7 +435,8 @@ fn 手动拷进目标的存档在整条链路上绝对安全() {
     );
 
     let selected = 选中(&catalog, "平台=PSV");
-    let desired = sync::desired(&catalog, &selected).expect("折得出期望状态");
+    let desired =
+        sync::desired(&catalog, &selected, &Profile::unclaimed()).expect("折得出期望状态");
     let actual = sync::observe(&RealFs::new(), 目标.path()).expect("目标在位");
     let plan = sync::plan(
         &子库(目标.path(), None),
@@ -476,7 +481,8 @@ fn 超出目标容量时给出超出量与裁剪建议_一个都不砍() {
     let 目标 = temp_dir("sync-target-full");
     let catalog = 扫成库(dir.path());
     let selected = 选中(&catalog, "平台=FC,PSV");
-    let desired = sync::desired(&catalog, &selected).expect("折得出期望状态");
+    let desired =
+        sync::desired(&catalog, &selected, &Profile::unclaimed()).expect("折得出期望状态");
     let 只装得下一半 = desired.bytes() / 2;
     let plan = sync::plan(
         &子库(目标.path(), Some(只装得下一半)),

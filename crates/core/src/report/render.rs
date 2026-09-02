@@ -25,6 +25,25 @@ pub fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// 一段时长排成人看得懂的样子。
+///
+/// **只给粗估用**，因此刻意粗：一小时以上不报秒、一分钟以上不报小数。一个看着精确的
+/// 错数比一个明显粗的数更糟——「3 小时 12 分 07 秒」会让人以为工具算过，而它只是把
+/// 字节数乘了一个常量（`capability::estimate_secs`）。
+#[must_use]
+pub fn human_duration(ms: u64) -> String {
+    let secs = ms / 1000;
+    if secs >= 3600 {
+        format!("{} 小时 {} 分", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{} 分 {} 秒", secs / 60, secs % 60)
+    } else if ms >= 1000 {
+        format!("{secs} 秒")
+    } else {
+        format!("{ms} 毫秒")
+    }
+}
+
 /// 给数字加千位分隔符。
 #[must_use]
 pub fn thousands(value: u64) -> String {

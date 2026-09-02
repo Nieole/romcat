@@ -16,6 +16,7 @@ use std::{fs, io};
 
 use clap::{Args, Parser, Subcommand};
 use romcat_core::adapter::{self, Adapter, transfer};
+use romcat_core::capability::{Roster, today};
 use romcat_core::catalog::Catalog;
 use romcat_core::dat::HttpFetcher;
 use romcat_core::dat::registry::Registry;
@@ -66,6 +67,8 @@ enum Command {
     Adapters,
     /// 列出眼下生效的平台清单与成型规则，或者导出一份底稿照着改
     Platforms(PlatformsArgs),
+    /// **能力档案**：目标设备吃得下什么、目标存储放得下什么，连每条声明的出处与核实日期
+    Capability(CapabilityArgs),
     /// 子库与选择集：一台目标设备一个子库，选择集由**规则**加**例外**组成
     #[command(subcommand, alias = "sublib")]
     Sublibrary(SublibraryCommand),
@@ -651,6 +654,7 @@ fn main() -> ExitCode {
         Command::Export(args) => run_export(&args),
         Command::Adapters => run_adapters(),
         Command::Platforms(args) => run_platforms(&args),
+        Command::Capability(args) => run_capability(&args),
         Command::Sublibrary(SublibraryCommand::Set(args)) => run_sublibrary_set(&args),
         Command::Sublibrary(SublibraryCommand::List(args)) => run_sublibrary_list(&args),
         Command::Sublibrary(SublibraryCommand::Remove(args)) => run_sublibrary_remove(&args),
@@ -1253,7 +1257,8 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
     // 用户会以为盘出了问题。
     if outcome.forgotten > 0 {
         eprintln!(
-            "有 {} 个「锚点 × 源」这次无话可说，上一轮的结论已清掉——\n             那些值背后的 DAT 条目不在了，留着只会带出一条对不上的依据。",
+            "有 {} 个「锚点 × 源」这次无话可说，上一轮的结论已清掉——\n\
+             那些值背后的 DAT 条目不在了，留着只会带出一条对不上的依据。",
             thousands(outcome.forgotten)
         );
     }
@@ -1265,7 +1270,8 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
     }
     if outcome.not_media > 0 {
         eprintln!(
-            "有 {} 份被认领的媒体，扩展名这一层却不认得——本地媒体源与媒体池的扩展名表\n             对不上了，这是要查的。",
+            "有 {} 份被认领的媒体，扩展名这一层却不认得——本地媒体源与媒体池的扩展名表\n\
+             对不上了，这是要查的。",
             thousands(outcome.not_media)
         );
     }
@@ -1667,6 +1673,12 @@ struct SubSetArgs {
     #[arg(long, conflicts_with = "capacity")]
     no_capacity: bool,
 
+    /// **能力档案**：这台设备吃得下什么、这张卡放得下什么（`romcat capability` 列得出）
+    ///
+    /// 不给就是「不作声称」——不转换、不检查
+    #[arg(long, value_name = "档案")]
+    capability: Option<String>,
+
     #[command(flatten)]
     common: SubCommonArgs,
 }
@@ -1801,6 +1813,13 @@ struct SubSyncArgs {
     #[arg(long, value_name = "文件")]
     priorities: Option<PathBuf>,
 
+    /// **转换缓存目录**。不给就边转边流式写进目标，中间不落第三份
+    ///
+    /// 转换很贵，而缓存要再占一份等同空间，因此**默认不缓存**（ADR-0017）。
+    /// 几台设备要的是同一种格式时给一个目录，转一次用多次
+    #[arg(long, value_name = "目录")]
+    convert_cache: Option<PathBuf>,
+
     #[command(flatten)]
     common: SubCommonArgs,
 }
@@ -1889,6 +1908,26 @@ fn run_sublibrary_set(args: &SubSetArgs) -> ExitCode {
             .as_ref()
             .map_or_else(|| DEFAULT_FORMAT.to_string(), |sub| sub.format.clone()),
     };
+    // **挑不存在的档案当场拦下来。** 存一个名册里没有的名字，同步时会悄悄退回
+    // 「不作声称」——于是用户以为配了 FAT32 的检查，其实一条都没查。
+    let workspace = workspace_dir(args.common.workspace.as_deref());
+    let capability = match &args.capability {
+        Some(name) => {
+            let roster = match romcat_core::capability::Roster::in_workspace(&workspace) {
+                Ok(roster) => roster,
+                Err(error) => return fail(format!("{error}")),
+            };
+            if roster.find(name).is_none() {
+                return fail(format!(
+                    "没有叫「{name}」的能力档案。眼下带的是：{}。\n\
+                     `romcat capability` 看它们各自对着什么设备。",
+                    roster.names().join("、"),
+                ));
+            }
+            Some(name.clone())
+        }
+        None => existing.as_ref().and_then(|sub| sub.capability.clone()),
+    };
     let capacity = if args.no_capacity {
         None
     } else {
@@ -1911,12 +1950,13 @@ fn run_sublibrary_set(args: &SubSetArgs) -> ExitCode {
         target_raw,
         format,
         capacity,
+        capability,
     };
     if let Err(error) = catalog.put_sublibrary(&sublibrary) {
         return fail(format!("子库写不进中立库：{error}"));
     }
     println!(
-        "{}子库「{}」：目标 {}，格式 {}，容量上限 {}。",
+        "{}子库「{}」：目标 {}，格式 {}，容量上限 {}，能力档案 {}。",
         if existing.is_some() {
             "已改"
         } else {
@@ -1928,7 +1968,17 @@ fn run_sublibrary_set(args: &SubSetArgs) -> ExitCode {
         sublibrary
             .capacity
             .map_or_else(|| "不设限".to_string(), human_bytes),
+        sublibrary
+            .capability
+            .as_deref()
+            .unwrap_or(romcat_core::capability::DEFAULT_PROFILE),
     );
+    if sublibrary.capability.is_none() {
+        println!(
+            "  没挑能力档案：**不转换、不检查**。`romcat capability` 看有哪些，\n\
+             挑一份之后差量预览才会告诉你哪些在掌机上打不开、哪些放不进这张卡。"
+        );
+    }
     if existing.is_none() {
         println!(
             "下一步写规则：`romcat sublibrary rule {} --add \"平台=GB,GBA 且 中文=汉化\"`",
@@ -1957,11 +2007,12 @@ fn run_sublibrary_list(args: &SubCommonArgs) -> ExitCode {
     println!("子库");
     println!("{}", "═".repeat(24));
     println!(
-        "{}{}{}{}目标",
+        "{}{}{}{}{}目标",
         pad("名字", 12),
         pad("规则", 6),
         pad("例外", 6),
         pad("容量上限", 12),
+        pad("能力档案", 20),
     );
     for sub in &subs {
         // **不吞错误。** `unwrap_or(0)` 会让「读不动」与「一条都没有」印出来一模一样，
@@ -1974,13 +2025,19 @@ fn run_sublibrary_list(args: &SubCommonArgs) -> ExitCode {
             Err(error) => return fail(format!("中立库读不动：{error}")),
         };
         println!(
-            "{}{}{}{}{}",
+            "{}{}{}{}{}{}",
             pad(&sub.name, 12),
             pad(&rules.to_string(), 6),
             pad(&exceptions.to_string(), 6),
             pad(
                 &sub.capacity.map_or_else(|| "—".to_string(), human_bytes),
                 12
+            ),
+            pad(
+                sub.capability
+                    .as_deref()
+                    .unwrap_or(romcat_core::capability::DEFAULT_PROFILE),
+                20,
             ),
             sub.target,
         );
@@ -2229,6 +2286,10 @@ struct Prepared {
     media_unknown_kind: u64,
     /// 折出了几个前端条目。
     entries: u64,
+    /// 子库记着的能力档案在眼下这份名册里找不到——退回了「不作声称」。
+    missing_capability: Option<String>,
+    /// 这份档案里有几条声明已经陈旧。
+    stale_claims: usize,
 }
 
 /// 把中立库、媒体池与目标设备折成一份计划。**除了目标目录，什么都不写。**
@@ -2260,6 +2321,20 @@ fn prepare(
         )
     })?;
     let workspace = workspace_dir(common.workspace.as_deref());
+    // **能力档案**：目标吃得下什么、这张卡放得下什么（票 21、ADR-0017）。
+    // 子库记的是名字，档案本身是一份可以整份换掉的数据。
+    let roster = romcat_core::capability::Roster::in_workspace(&workspace)
+        .map_err(|error| format!("{error}"))?;
+    let missing_capability = sublibrary
+        .capability
+        .as_deref()
+        .filter(|name| roster.find(name).is_none())
+        .map(ToString::to_string);
+    let profile = roster.find_or_unclaimed(sublibrary.capability.as_deref());
+    // **报告里印真正生效的那一份，不是子库上记着的那个名字。** 记着的名字在名册里
+    // 找不到时上面已经退回了「不作声称」——这时预览与 `--json` 还印着原来那个名字的话，
+    // 用户会以为它替自己查过了，而实际上一条都没查（ADR-0017：矩阵错误比不转换更糟）。
+    sublibrary.capability = Some(profile.name.clone());
     let priorities = load_priorities(priorities, &workspace)?;
     // **不建目录**：排计划那条命令说的是「一个文件都没写」。
     let pool = romcat_core::scrape::pool::MediaPool::at(&workspace::media_pool_dir(&workspace));
@@ -2270,8 +2345,8 @@ fn prepare(
     let facts = sublibrary::facts(catalog).map_err(|error| format!("中立库读不动：{error}"))?;
     let selected = sublibrary::select(&loaded.selection, &facts);
 
-    let mut desired =
-        sync::desired(catalog, &selected).map_err(|error| format!("中立库读不动：{error}"))?;
+    let mut desired = sync::desired(catalog, &selected, &profile)
+        .map_err(|error| format!("中立库读不动：{error}"))?;
     let media = sync::media::lay(catalog, &pool, &selected)
         .map_err(|error| format!("中立库读不动：{error}"))?;
     let frontend = sync::frontend::lay(
@@ -2285,6 +2360,15 @@ fn prepare(
     desired.files.extend(media.files.iter().cloned());
     desired.files.extend(frontend.files.iter().cloned());
     desired.files.sort_by(|a, b| a.path.cmp(&b.path));
+    // **放不进目标存储的在这里就被拦下来**（ADR-0017 补充段）：FAT32 那 4 GiB 的
+    // 单文件上限、文件名不收的字符、路径太长。拦在排计划**之前**，于是它们连成为一条
+    // 步骤的路径都没有——「传到一半失败」这件事在构造上不会发生。
+    //
+    // 路径上限比的是**完整路径**，因此把子库根那串的长度也交进去。
+    desired.screen(
+        &profile.filesystem,
+        path::display(&root).encode_utf16().count(),
+    );
 
     let manifest = catalog
         .manifest(name)
@@ -2312,6 +2396,8 @@ fn prepare(
         media_not_in_pool: media.not_in_pool,
         media_unknown_kind: media.unknown_kind,
         entries: frontend.entries,
+        missing_capability,
+        stale_claims: profile.stale_claims(&today()),
     })
 }
 
@@ -2384,6 +2470,20 @@ fn warn_about(ready: &Prepared, name: &str) {
         eprintln!(
             "认不出是什么的图有 {} 张，**一张都没铺**——猜错了就是把说明书当封面。",
             thousands(ready.media_unknown_kind),
+        );
+    }
+    if let Some(missing) = &ready.missing_capability {
+        eprintln!(
+            "⚠️ 子库记着的能力档案「{missing}」在眼下这份名册里**找不到**，这一趟退回了\n\
+             「不作声称」：**不转换、也不检查**。别以为它替你查过了。\n\
+             `romcat capability` 看还有哪些，`romcat sublibrary set {name} --capability <名字>` 重挑一份。",
+        );
+    }
+    if ready.stale_claims > 0 {
+        eprintln!(
+            "⚠️ 这份能力档案里有 {} 条声明**超过半年没核实**。模拟器一年发好几版，\n\
+             而矩阵错了比不转换更糟（ADR-0017）——`romcat capability <档案名>` 看是哪几条。",
+            thousands(ready.stale_claims as u64),
         );
     }
 }
@@ -2483,6 +2583,8 @@ fn run_sublibrary_sync(args: &SubSyncArgs, cancel: &CancelToken) -> ExitCode {
         // 探测的源那一头是**媒体池自己的临时目录**：两头都得是工具的地盘，
         // 拿主库里的文件去试链接会改到主库那一侧的 inode（ADR-0004）。
         link_probe_dir: Some(&ready.scratch),
+        // **默认不缓存**（ADR-0017）：不给 `--convert-cache` 就边转边流式写进目标。
+        convert_cache: args.convert_cache.as_deref(),
     };
     let outcome = match sync::execute::run(
         &ready.plan,
@@ -2583,6 +2685,83 @@ fn refuse_target_in_library(
         ));
     }
     Ok(())
+}
+
+#[derive(Debug, Args)]
+struct CapabilityArgs {
+    /// 只看这一份档案的全文，连每条声明的一手来源与核实日期
+    #[arg(value_name = "档案")]
+    name: Option<String>,
+
+    /// 看这个文件里的名册，而不是内置的那一份
+    #[arg(long, value_name = "文件")]
+    file: Option<PathBuf>,
+
+    /// 把内置名册导出成 TOML 底稿。改完放进工作目录叫 `capability.toml` 就自动生效
+    #[arg(long, value_name = "文件")]
+    dump_builtin: Option<PathBuf>,
+
+    /// 工作目录：中立库存这里
+    #[arg(long, value_name = "目录")]
+    workspace: Option<PathBuf>,
+}
+
+/// 列出眼下生效的**能力档案**，或者看其中一份的全文。
+///
+/// **这条命令的全部意义是让矩阵可被复核。** ADR-0017：矩阵错误比不转换更糟——用户会
+/// 以为工具已经处理妥当，直到在掌机上打不开才发现。于是 `show` 印的不是「支持哪些格式」
+/// 这一行结论，而是**结论加它的出处**：哪个源码文件、哪份官方文档、哪天核实的，
+/// 以及**它是不是已经陈旧**。
+fn run_capability(args: &CapabilityArgs) -> ExitCode {
+    if let Some(path) = &args.dump_builtin {
+        match write_file(path, Roster::builtin_text().as_bytes()) {
+            Ok(()) => {
+                println!(
+                    "内置能力档案已写入 {}。改完放进工作目录叫 {} 自动生效，\n\
+                     或者 `romcat capability --file {}` 看一眼改成了什么。",
+                    path.display(),
+                    Roster::IN_WORKSPACE,
+                    path.display(),
+                );
+            }
+            Err(error) => {
+                eprintln!("写不进 {}：{error}", path.display());
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let workspace = workspace_dir(args.workspace.as_deref());
+    let roster = match &args.file {
+        Some(path) => Roster::load(path),
+        None => Roster::in_workspace(&workspace),
+    };
+    let roster = match roster {
+        Ok(roster) => roster,
+        Err(error) => return fail(format!("{error}")),
+    };
+    let today = today();
+    let text = match &args.name {
+        Some(name) => match roster.find(name) {
+            Some(profile) => profile.render_text(&today),
+            None => {
+                return fail(format!(
+                    "没有叫「{name}」的能力档案。眼下带的是：{}。",
+                    roster.names().join("、"),
+                ));
+            }
+        },
+        None => roster.render_text(&today),
+    };
+    let mut stdout = io::stdout().lock();
+    let _ = stdout.write_all(text.as_bytes());
+    let _ = stdout.flush();
+    if args.file.is_none() && !workspace.join(Roster::IN_WORKSPACE).exists() {
+        eprintln!(
+            "用的是**内置**那一份（工作目录里没有 {}）。",
+            Roster::IN_WORKSPACE
+        );
+    }
+    ExitCode::SUCCESS
 }
 
 /// 列出眼下生效的平台清单与成型规则。

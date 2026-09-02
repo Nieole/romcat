@@ -97,6 +97,7 @@ fn 建子库(catalog: &mut Catalog, name: &str, capacity: Option<u64>) {
             target_raw: Some(format!("/Volumes/SDCARD/{name}")),
             format: "Pegasus".to_string(),
             capacity,
+            capability: None,
         })
         .expect("子库写得进");
 }

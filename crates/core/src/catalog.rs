@@ -23,12 +23,13 @@ pub mod scrape;
 pub mod sublibrary;
 pub mod title;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::container::{ContainerKind, FailureReason, Penetration};
+use crate::container::{ContainerKind, Contents, FailureReason, Penetration};
 use crate::fs::{EntryKind, EntryMeta};
 use crate::header::ProbeClass;
 use crate::path;
@@ -414,6 +415,77 @@ impl Catalog {
             )
             .map_err(|source| self.err(source))?;
         Ok(())
+    }
+
+    /// 一批**透明容器**的内部构成，零解压层当初落库的那一份。
+    ///
+    /// **格式转换在差量预览阶段就得知道「转出来多大、转出来叫什么」**，而这两样正好
+    /// 都在容器头里（ADR-0014：内部文件名与未压缩大小零解压可得，扫描那一趟已经读进
+    /// 中立库了，调研第 5 部分 L4）。于是排计划这一步**一个字节都不必解压**，
+    /// 外置盘不在位照样排得出。
+    ///
+    /// 穿不透的容器（`container.reason` 非空）**不在返回值里**：内部构成读不出来，
+    /// 于是它转不了，由调用方判成「吃不下且转不了」如实报出来——而不是当成一个空容器。
+    ///
+    /// 与 [`variant_files`](Self::variant_files) 同一条取数纪律：一趟顺读、在内存里筛。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn container_contents(
+        &self,
+        keys: &std::collections::BTreeSet<String>,
+    ) -> Result<BTreeMap<String, Contents>, CatalogError> {
+        let mut penetrated: BTreeSet<String> = BTreeSet::new();
+        let mut statement = self
+            .conn
+            .prepare("SELECT key FROM container WHERE reason IS NULL")
+            .map_err(|source| self.err(source))?;
+        let mut rows = statement.query([]).map_err(|source| self.err(source))?;
+        while let Some(row) = rows.next().map_err(|source| self.err(source))? {
+            let key: String = row.get(0).map_err(|source| self.err(source))?;
+            if keys.contains(&key) {
+                penetrated.insert(key);
+            }
+        }
+
+        let mut out: BTreeMap<String, Contents> = BTreeMap::new();
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT key, ordinal, inner, size, crc32, block, is_dir, lossy
+                 FROM container_entry ORDER BY key, ordinal",
+            )
+            .map_err(|source| self.err(source))?;
+        let mut rows = statement.query([]).map_err(|source| self.err(source))?;
+        while let Some(row) = rows.next().map_err(|source| self.err(source))? {
+            let key: String = row.get(0).map_err(|source| self.err(source))?;
+            if !penetrated.contains(&key) {
+                continue;
+            }
+            let size: i64 = row.get(3).map_err(|source| self.err(source))?;
+            let crc32: Option<i64> = row.get(4).map_err(|source| self.err(source))?;
+            let block: Option<i64> = row.get(5).map_err(|source| self.err(source))?;
+            let is_dir: i64 = row.get(6).map_err(|source| self.err(source))?;
+            let lossy: i64 = row.get(7).map_err(|source| self.err(source))?;
+            let contents = out.entry(key).or_default();
+            contents.entries.push(crate::container::InnerEntry {
+                path: row.get(2).map_err(|source| self.err(source))?,
+                size: u64::try_from(size).unwrap_or(0),
+                crc32: crc32.and_then(|raw| u32::try_from(raw).ok()),
+                is_dir: is_dir != 0,
+                block: block.and_then(|raw| usize::try_from(raw).ok()),
+                name_lossy: lossy != 0,
+            });
+        }
+        for contents in out.values_mut() {
+            // 块数是条目里出现过的不同块号有几个。存的时候没单独记一列，数出来即可
+            // ——`Contents::is_solid` 与调度只看这个数。
+            let mut blocks: Vec<usize> = contents.entries.iter().filter_map(|e| e.block).collect();
+            blocks.sort_unstable();
+            blocks.dedup();
+            contents.blocks = blocks.len();
+        }
+        Ok(out)
     }
 
     /// 这份中立库上次记的主库根在哪；从没记过时是 `None`。

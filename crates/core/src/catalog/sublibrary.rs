@@ -62,6 +62,11 @@ CREATE TABLE IF NOT EXISTS sublibrary(
     format    TEXT NOT NULL,
     -- 容量上限，字节；NULL 表示不设限。**超限不自动截断**（ADR-0016）。
     capacity  INTEGER,
+    -- **能力档案**的名字（票 21、ADR-0017）：这台设备吃得下什么、这张卡放得下什么。
+    -- NULL 是「没挑过」，走**不作声称**那一份——不转换、不检查。存的是名字而不是
+    -- 档案本身：矩阵会过时、要能整份换掉，而子库不该跟着一起改。
+    -- 这一列由 `add_columns` 给老库补上，见那个函数的注释。
+    capability TEXT,
     -- 下一条规则发几号。**只增不减**，于是删掉的号永不复用——见 sublibrary_rule。
     next_rule INTEGER NOT NULL,
     at        INTEGER NOT NULL
@@ -127,18 +132,19 @@ CREATE TABLE IF NOT EXISTS sublibrary_manifest(
 ) STRICT;
 ";
 
-/// 给票 18、19 建的老表补上票 20 加的那两列。
+/// 给老表补上后面几张票加的那几列。
 ///
 /// `CREATE TABLE IF NOT EXISTS` 对**已经存在**的表一个字都不改，于是加一列得单独走
 /// 一趟 `ALTER TABLE`。判有没有走 `PRAGMA table_info`，因此重复调用是安全的。
 ///
 /// **这不算结构版本加 1**（见 [`SCHEMA_VERSION`](crate::catalog::SCHEMA_VERSION)）：
-/// 判据是「旧数据会不会被读错」。两列在老行上都取得到一个与从前完全一致的含义
+/// 判据是「旧数据会不会被读错」。三列在老行上都取得到一个与从前完全一致的含义
 /// ——`target_raw` 为 NULL 就是「没有原始形式，用 `target`」，`absent` 为 0 就是
-/// 「它就在目标上」，那正是加这两列之前的唯一可能。反过来，旧版程序按列名取值，
-/// 多两列它也照样读得动。
+/// 「它就在目标上」，`capability` 为 NULL 就是「没挑过能力档案，不转换也不检查」，
+/// 那正是加这几列之前的唯一可能。反过来，旧版程序按列名取值，多几列它也照样读得动。
 pub(super) fn add_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     add_column(conn, "sublibrary", "target_raw", "TEXT")?;
+    add_column(conn, "sublibrary", "capability", "TEXT")?;
     add_column(
         conn,
         "sublibrary_manifest",
@@ -181,18 +187,21 @@ impl Catalog {
             .execute(
                 // 改一个已有的子库**不碰 `next_rule`**：发号器是单调的，
                 // 「改一次目标路径」不该让规则的号从头再来。
-                "INSERT INTO sublibrary(name, target, target_raw, format, capacity, next_rule, at)
-                 VALUES(?1, ?2, ?3, ?4, ?5, 1, ?6)
+                "INSERT INTO sublibrary(
+                     name, target, target_raw, format, capacity, capability, next_rule, at)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)
                  ON CONFLICT(name) DO UPDATE SET
                     target = excluded.target, target_raw = excluded.target_raw,
                     format = excluded.format,
-                    capacity = excluded.capacity, at = excluded.at",
+                    capacity = excluded.capacity, capability = excluded.capability,
+                    at = excluded.at",
                 params![
                     sublibrary.name,
                     target,
                     sublibrary.target_raw,
                     sublibrary.format,
                     capacity,
+                    sublibrary.capability,
                     super::now_secs()
                 ],
             )
@@ -207,7 +216,7 @@ impl Catalog {
     pub fn sublibrary(&self, name: &str) -> Result<Option<Sublibrary>, CatalogError> {
         self.conn
             .query_row(
-                "SELECT name, target, target_raw, format, capacity
+                "SELECT name, target, target_raw, format, capacity, capability
                  FROM sublibrary WHERE name = ?1",
                 params![name],
                 |row| {
@@ -219,6 +228,7 @@ impl Catalog {
                         capacity: row
                             .get::<_, Option<i64>>(4)?
                             .and_then(|v| u64::try_from(v).ok()),
+                        capability: row.get(5)?,
                     })
                 },
             )
@@ -236,7 +246,7 @@ impl Catalog {
         let mut statement = self
             .conn
             .prepare(
-                "SELECT name, target, target_raw, format, capacity
+                "SELECT name, target, target_raw, format, capacity, capability
                  FROM sublibrary ORDER BY name",
             )
             .map_err(|source| self.err(source))?;
@@ -250,6 +260,7 @@ impl Catalog {
                     capacity: row
                         .get::<_, Option<i64>>(4)?
                         .and_then(|v| u64::try_from(v).ok()),
+                    capability: row.get(5)?,
                 })
             })
             .map_err(|source| self.err(source))?;

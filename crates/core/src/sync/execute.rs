@@ -39,7 +39,18 @@
 //! 就链接（零额外占用），不支持就复制——**SD 卡的 exFAT / FAT32 两者都不支持，
 //! 这条降级不是优化项而是必需路径**。探测怎么做见 [`probe`]。
 //!
-//! ## 五、写完从目标上读回来
+//! ## 五、转换只产生新文件，而且默认不落第三份
+//!
+//! 要转格式的那几步走 [`convert::run`](crate::convert::run)：从主库那道只读接缝读进来，
+//! 直接流进目标上的 `.romcat-part`。**主库一个字节不改**（ADR-0004），**中间不落盘**
+//! （ADR-0017：转换产物默认不缓存——512 GB 的子库转一趟可能几小时，再占一份等同空间
+//! 是灾难而不是优化）。
+//!
+//! 多台设备共用同一种格式时，[`Sources::convert_cache`] 给一个目录就开缓存：产物按
+//! **源的键 + 源的戳 + 配方**寻址，第二台设备直接取，转一次用多次。缓存键带着源的戳，
+//! 于是主库那份一改，键就变——**永远不会取到一份过期的产物**。
+//!
+//! ## 六、写完从目标上读回来
 //!
 //! 清单里记的戳是**写完之后 stat 目标**得到的那一个，不是主库侧那份的。于是 FAT32
 //! 那 2 秒的时间戳刻度不构成问题：下一趟读到的是同一个被截断过的值。
@@ -48,9 +59,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+use ring::digest::{Context, SHA256};
+
+use crate::capability::Conversion;
 use crate::catalog::mtime_ns;
+use crate::convert::{self, ConvertError};
 use crate::fs::{LibraryFs, real_path};
 use crate::scan::CancelToken;
+use crate::scrape::pool::hex;
 
 use super::{Act, Desired, FileKind, Manifest, ManifestFile, Plan, Stamp, Step, TargetState};
 
@@ -144,6 +160,16 @@ pub struct Outcome {
     pub dropped: u64,
     /// 清单里新标成「你删过、我不补」的有几格（挂账 D75）。
     pub withheld: u64,
+    /// 真的**转了格式**的有几份、转出来多大（票 21）。
+    pub converted: Done,
+    /// 转换里有几份是**从缓存取的**，没有真转。开了缓存目录才可能不是 0。
+    pub convert_cached: u64,
+    /// 转换真的花了多少毫秒。
+    ///
+    /// 与计划里那个**粗估**摆在一起印出来：差得远就说明该去调
+    /// [`Recipe`](crate::capability::Recipe) 的吞吐常量了。一个预估只有在能被回头
+    /// 核对时才值得印。
+    pub convert_ms: u64,
 }
 
 impl Outcome {
@@ -171,6 +197,11 @@ pub struct Sources<'a> {
     pub generated: &'a BTreeMap<String, Vec<u8>>,
     /// 铺媒体时从哪儿探测硬链接。给 `None` 就一律复制。
     pub link_probe_dir: Option<&'a Path>,
+    /// **转换缓存目录**；`None`（默认）就边转边流式写进目标，不落第三份。
+    ///
+    /// ADR-0017：转换很贵而缓存要再占一份等同空间，因此**默认不缓存**。给了目录才开，
+    /// 用在「几台设备要的是同一种格式」那种场合。
+    pub convert_cache: Option<&'a Path>,
 }
 
 /// 把计划落到目标设备上。
@@ -217,6 +248,9 @@ pub fn run(
         manifest: Manifest::empty(),
         dropped: 0,
         withheld: 0,
+        converted: Done::default(),
+        convert_cached: 0,
+        convert_ms: 0,
     };
     let mut done: BTreeMap<String, ManifestFile> = BTreeMap::new();
     let mut removed: BTreeSet<String> = BTreeSet::new();
@@ -229,9 +263,8 @@ pub fn run(
         }
         let outcome = match step.act {
             Act::Delete => erase(sources, step).map(|()| None),
-            Act::Add | Act::Update => {
-                place(sources, step, placement, cancel).map(|(stamp, how)| Some((stamp, how)))
-            }
+            Act::Add | Act::Update => place(sources, step, placement, cancel, &mut out)
+                .map(|(stamp, how)| Some((stamp, how))),
         };
         match outcome {
             Ok(None) => {
@@ -242,6 +275,10 @@ pub fn run(
             }
             Ok(Some((stamp, how))) => {
                 consecutive = 0;
+                if step.convert.is_some() {
+                    out.converted.files += 1;
+                    out.converted.bytes += stamp.bytes;
+                }
                 if step.kind == FileKind::Media {
                     match how {
                         Placement::Link => out.linked += 1,
@@ -299,6 +336,7 @@ fn place(
     step: &Step,
     placement: Option<Placement>,
     cancel: &CancelToken,
+    out: &mut Outcome,
 ) -> io::Result<(Stamp, Placement)> {
     let target = landing(sources, &step.path);
     let parent = target.parent().unwrap_or(sources.target_root).to_path_buf();
@@ -349,8 +387,18 @@ fn place(
                     format!("主库里找不到 {}", step.source),
                 )
             })?;
-            let mut reader = sources.library.open(&from)?;
-            copy_stream(&mut reader, &temp, cancel)?;
+            match &step.convert {
+                // 要转格式：读主库那份原始形态，写出一份**新文件**（ADR-0004）。
+                Some(conversion) => {
+                    let started = std::time::Instant::now();
+                    convert_into(sources, step, conversion, &from, &temp, cancel, out)?;
+                    out.convert_ms += u64::try_from(started.elapsed().as_millis()).unwrap_or(0);
+                }
+                None => {
+                    let mut reader = sources.library.open(&from)?;
+                    copy_stream(&mut reader, &temp, cancel)?;
+                }
+            }
             Placement::Copy
         }
     };
@@ -367,6 +415,79 @@ fn place(
         },
         how,
     ))
+}
+
+/// 转一份出来，落到目标上那个临时文件。
+///
+/// 没开缓存（默认）就直接转进 `temp`——**边转边流式写入目标，中间不落第三份**
+/// （ADR-0017）。开了缓存就先在缓存里做一份，再从缓存链接或复制到目标；第二台设备
+/// 要同一份产物时直接命中，转一次用多次。
+fn convert_into(
+    sources: &Sources<'_>,
+    step: &Step,
+    conversion: &Conversion,
+    from: &Path,
+    temp: &Path,
+    cancel: &CancelToken,
+    out: &mut Outcome,
+) -> io::Result<()> {
+    let to_io = |error: ConvertError| -> io::Error {
+        if error.is_interrupted() {
+            io::Error::from(io::ErrorKind::Interrupted)
+        } else {
+            io::Error::other(format!("{} 转不出来：{error}", step.source))
+        }
+    };
+    let Some(cache) = sources.convert_cache else {
+        convert::run(sources.library, from, conversion, temp, cancel).map_err(to_io)?;
+        return Ok(());
+    };
+
+    let cached = cache_path(cache, step, conversion);
+    if !cached.is_file() {
+        let parent = cached.parent().unwrap_or(cache);
+        std::fs::create_dir_all(parent)?;
+        let staging = part_path(&cached);
+        let _ = std::fs::remove_file(&staging);
+        convert::run(sources.library, from, conversion, &staging, cancel).map_err(to_io)?;
+        // 先落到 `.romcat-part` 再改名：中断留下的半份产物绝不能被下一趟当成缓存命中。
+        if let Err(error) = std::fs::rename(&staging, &cached) {
+            let _ = std::fs::remove_file(&staging);
+            return Err(error);
+        }
+    } else {
+        out.convert_cached += 1;
+    }
+    // 缓存与目标同卷就链接（零额外占用），不同卷（卡就是不同卷）落回复制。
+    match std::fs::hard_link(&cached, temp) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            let _ = std::fs::remove_file(temp);
+            copy_local(&cached, temp, cancel)
+        }
+    }
+}
+
+/// 一份转换产物在缓存里叫什么。
+///
+/// 键里**必须有源的戳**：主库那份一改键就变，于是永远取不到一份过期的产物。
+/// 分两级目录与**媒体池**同一条理由——几万份文件平铺在一个目录里，
+/// 在 FAT 系文件系统上列一次目录就是灾难。
+fn cache_path(cache: &Path, step: &Step, conversion: &Conversion) -> PathBuf {
+    let mut context = Context::new(&SHA256);
+    context.update(conversion.recipe.label().as_bytes());
+    context.update(b"\0");
+    context.update(step.source.as_bytes());
+    context.update(b"\0");
+    context.update(&step.source_stamp.bytes.to_le_bytes());
+    context.update(&step.source_stamp.mtime_ns.unwrap_or(-1).to_le_bytes());
+    context.update(&(conversion.inner.unwrap_or(usize::MAX) as u64).to_le_bytes());
+    let hash = hex(context.finish().as_ref());
+    let extension = conversion
+        .path
+        .rsplit_once('.')
+        .map_or_else(String::new, |(_, ext)| format!(".{ext}"));
+    cache.join(&hash[..2]).join(format!("{hash}{extension}"))
 }
 
 /// 临时文件叫什么。**同目录**：跨目录改名可能跨设备而失败。

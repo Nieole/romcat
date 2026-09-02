@@ -10,9 +10,11 @@
 //! 而第二次之后的扫描按 `(路径, 大小, 修改时间)` 跳过未变的文件。
 
 pub mod adapter;
+pub mod capability;
 pub mod catalog;
 pub mod classify;
 pub mod container;
+pub mod convert;
 pub mod dat;
 pub mod fs;
 pub mod header;

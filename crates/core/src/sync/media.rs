@@ -149,6 +149,10 @@ pub fn lay(catalog: &Catalog, pool: &MediaPool, selected: &Selected) -> Result<L
                         mtime_ns: Some(0),
                     },
                     variant: picked.key.clone(),
+                    // 媒体不转格式：**能力档案说的是模拟器吃什么**，而封面截图是给
+                    // 前端看的，前端吃什么由适配器那一侧决定（票 13 的媒体池已经把
+                    // 扩展名规范过了）。
+                    convert: None,
                 });
             }
         }

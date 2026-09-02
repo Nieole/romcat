@@ -17,6 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use romcat_core::adapter;
+use romcat_core::capability::Profile;
 use romcat_core::catalog::Catalog;
 use romcat_core::catalog::scrape::{Harvested, HarvestedMedia};
 use romcat_core::fs::RealFs;
@@ -128,12 +129,17 @@ impl 现场 {
         hash
     }
 
-    /// 折一趟：期望状态 + 计划 + 执行要的那几样。
+    /// 折一趟：期望状态 + 计划 + 执行要的那几样。**不作声称**的档案，不转也不检查。
     fn 排一趟(&self, 规则: &str, manifest: &Manifest) -> 一趟 {
+        self.排一趟_按档案(规则, manifest, &Profile::unclaimed())
+    }
+
+    /// 同上，但指定一份**能力档案**——转格式与文件系统检查都从这儿来（票 21）。
+    fn 排一趟_按档案(&self, 规则: &str, manifest: &Manifest, profile: &Profile) -> 一趟 {
         let selected = 选中(&self.catalog, 规则);
         let adapter = adapter::find("Pegasus").expect("带着 Pegasus 适配器");
         let priorities = Priorities::builtin();
-        let mut desired = sync::desired(&self.catalog, &selected).expect("折得出期望状态");
+        let mut desired = sync::desired(&self.catalog, &selected, profile).expect("折得出期望状态");
         let media = sync::media::lay(&self.catalog, &self.pool, &selected).expect("铺得出媒体");
         let frontend = sync::frontend::lay(
             &self.catalog,
@@ -146,8 +152,10 @@ impl 现场 {
         desired.files.extend(media.files.iter().cloned());
         desired.files.extend(frontend.files.iter().cloned());
         desired.files.sort_by(|a, b| a.path.cmp(&b.path));
+        desired.screen(&profile.filesystem, 0);
 
-        let 子库 = Sublibrary::at("掌机", self.卡.path(), "Pegasus", None);
+        let mut 子库 = Sublibrary::at("掌机", self.卡.path(), "Pegasus", None);
+        子库.capability = Some(profile.name.clone());
         let actual = sync::observe(&RealFs, self.卡.path()).expect("看得见目标");
         let plan = sync::plan(&子库, &desired, manifest, &actual, sync::Options::default());
         一趟 {
@@ -170,6 +178,16 @@ struct 一趟 {
 
 impl 现场 {
     fn 执行(&self, 这趟: &一趟, 清单: &Manifest, cancel: &CancelToken) -> sync::Outcome {
+        self.执行_带缓存(这趟, 清单, None, cancel)
+    }
+
+    fn 执行_带缓存(
+        &self,
+        这趟: &一趟,
+        清单: &Manifest,
+        缓存: Option<&Path>,
+        cancel: &CancelToken,
+    ) -> sync::Outcome {
         let sources = Sources {
             library: &RealFs,
             library_root: Some(&self.库根),
@@ -177,6 +195,7 @@ impl 现场 {
             from_pool: &这趟.from_pool,
             generated: &这趟.generated,
             link_probe_dir: Some(&self.pool.scratch()),
+            convert_cache: 缓存,
         };
         sync::execute::run(
             &这趟.plan,
@@ -367,6 +386,7 @@ fn 探不动硬链接就复制_降级路径在任何文件系统上都成立() {
         from_pool: &这趟.from_pool,
         generated: &这趟.generated,
         link_probe_dir: None,
+        convert_cache: None,
     };
     let outcome = sync::execute::run(
         &这趟.plan,

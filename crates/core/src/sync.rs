@@ -57,9 +57,11 @@ pub mod observe;
 pub mod report;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::capability::{Conversion, Decision, Filesystem, Profile, RejectReason};
 use crate::catalog::{Catalog, CatalogError};
 use crate::sublibrary::{Selected, Sublibrary, Trim, over_capacity, trim_suggestions};
 
@@ -162,6 +164,66 @@ pub struct DesiredFile {
     pub source_stamp: Stamp,
     /// 属于哪个**变体**。报告按它把文件数折回用户认得的那个数。
     pub variant: String,
+    /// 这一份是**转换产物**吗；`None` 就是原样搬（票 21、ADR-0017）。
+    ///
+    /// 有值时 [`Self::path`] 已经是**产物**的落点（`.7z` 变 `.zip`、容器变裸文件），
+    /// 而 [`Self::source`] 仍然指着主库里那份**原始形态**——**转换只产生新文件，
+    /// 主库一个字节不改**（ADR-0004、ADR-0015）。
+    pub convert: Option<Conversion>,
+}
+
+/// 一份内容**放不进目标存储**。
+///
+/// ADR-0017 补充段点名的那件事：FAT32 有 4 GiB 单文件上限，PS2 / PSP 的大 ISO 直接
+/// 放不进去。**这类必须在差量预览阶段就报出来**，而不是传到一半失败——传到一半会在
+/// 卡上留下半份文件、在清单里留下一条谎。
+///
+/// 被拦下的**既不新增也不删除**：它进不了目标，可万一目标上已经有一份（换过档案、
+/// 或者我们这条声明本身就是错的），那也不是它该被删掉的理由。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Rejected {
+    /// 本来要落在目标上的哪条路径。
+    pub path: String,
+    /// 这是个什么文件。
+    pub kind: FileKind,
+    /// 多大。
+    pub bytes: u64,
+    /// 属于哪个变体。
+    pub variant: String,
+    /// 哪一条约束拦下的。
+    pub reason: RejectReason,
+    /// 说清楚是怎么回事。
+    pub detail: String,
+    /// 上面那个 [`Self::bytes`] 是**估**出来的吗。
+    ///
+    /// 重打包成 zip 那一路填的是**未压缩总量**，也就是上界（[`Conversion::estimated`]）。
+    /// 于是「超过单文件上限」这一条在它身上可能是**误判**——压完说不定就装得下了。
+    /// 报告必须把这件事说出口，不然用户会照着一条其实不成立的结论去换卡。
+    pub estimated: bool,
+}
+
+/// 一份内容**目标吃不下，而这一版转不了**。
+///
+/// 库里那批 PSV 的 `.tar.zst`（Vita3K 只认 zip/vpk/vci）、33.4% 容量的 Switch
+/// `.nsz`/`.xcz`（ES-DE 不认）、几乎无人支持的 `.rar` 都落在这里。
+///
+/// **照样搬过去**，只是点名说出口。不搬的话是静默丢掉用户亲手挑中的东西，那比白占
+/// 一点地方糟得多；而假装已经处理妥当，正是 ADR-0017 那句「矩阵错误比不转换更糟」
+/// 说的那种错。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Unsupported {
+    /// 主库里那条键。
+    pub path: String,
+    /// 属于哪个变体。
+    pub variant: String,
+    /// 哪个平台。
+    pub platform: Option<String>,
+    /// 多大。
+    pub bytes: u64,
+    /// 目标要的是什么形态。
+    pub want: String,
+    /// 为什么转不了。
+    pub why: String,
 }
 
 /// 一个子库的**期望状态**：目标上该有的全部文件。
@@ -178,6 +240,10 @@ pub struct Desired {
     pub non_files: u64,
     /// 选中了、却一个文件成员都没有的变体。**不是错误，是要说出口的怪事**。
     pub empty_variants: Vec<String>,
+    /// 目标存储放不下的那些。**不在 [`Self::files`] 里**：传必然失败。
+    pub rejected: Vec<Rejected>,
+    /// 目标吃不下、而这一版转不了的那些。**在 [`Self::files`] 里**：照搬，但报出来。
+    pub unsupported: Vec<Unsupported>,
 }
 
 impl Desired {
@@ -329,6 +395,10 @@ pub struct Step {
     /// 这一步是在**补回**一个意外消失的文件（只有开了
     /// [`Options::restore_missing`] 才会有）。
     pub restore: bool,
+    /// 要不要转格式；`None` 就是原样复制。见 [`DesiredFile::convert`]。
+    ///
+    /// **删除那一步永远是 `None`**：删掉一个转换产物不必知道它当初是怎么转出来的。
+    pub convert: Option<Conversion>,
 }
 
 /// 目标上一件**对不上**的事。
@@ -450,6 +520,27 @@ pub struct Plan {
     /// 选中了、却一个文件成员都没有的变体。
     pub empty_variants: Vec<String>,
 
+    /// 这一趟要**转格式**的有几个、转出来多大（票 21）。
+    ///
+    /// 只数真要动手的那些（新增与更新）——目标上已经有的那份转换产物不必再转一遍。
+    pub converts: Tally,
+    /// 这一趟转换要**读**多少源字节。耗时预估拿它算。
+    pub convert_source_bytes: u64,
+    /// 转换的**粗估**耗时，毫秒。见 [`estimate_secs`](crate::capability::estimate_secs)。
+    ///
+    /// 存整数而不是浮点，是为了让 [`Plan`] 保持 `Eq`——差量预览要能逐字段比对，
+    /// 而「两份计划相不相等」上不该出现浮点那套「相等但不全等」的麻烦。
+    /// 一个粗估本来也不需要亚毫秒精度。
+    pub convert_ms: u64,
+    /// 有几个转换产物的大小是**估**出来的（重打包成 zip 那一路）。
+    pub convert_estimated: u64,
+    /// 目标存储**放不下**的那些：本次既不新增也不删除，只报出来（ADR-0017 补充段）。
+    pub rejected: Vec<Rejected>,
+    /// 目标**吃不下、而这一版转不了**的那些：照搬，但点名说出口。
+    pub unsupported: Vec<Unsupported>,
+    /// 这份计划用的是哪份**能力档案**。
+    pub capability: String,
+
     /// 超出容量上限多少字节；没超或没设上限时是 `None`。
     ///
     /// 比的是**子库占用加上清单之外的占用**：卡上的地方是共用的，只算自己那一半
@@ -508,15 +599,30 @@ pub fn plan(
         .map(|file| (file.path.as_str(), file))
         .collect();
 
+    // 目标存储放不下的那些**既不新增也不删除**：它们进不了目标（新增必然失败），
+    // 可万一目标上已经有一份，那也不是它该被删掉的理由——我们这条「放不下」的声明
+    // 本身就可能是错的，而删掉别人的东西是这条链路上唯一不可逆的动作。
+    let barred: BTreeSet<&str> = desired
+        .rejected
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+
     let mut out = Plan {
         sublibrary: sublibrary.name.clone(),
         target: sublibrary.target.clone(),
         format: sublibrary.format.clone(),
         capacity: sublibrary.capacity,
+        capability: sublibrary
+            .capability
+            .clone()
+            .unwrap_or_else(|| crate::capability::DEFAULT_PROFILE.to_string()),
         desired_bytes: desired.bytes(),
         unreadable_sources: desired.unreadable,
         empty_variants: desired.empty_variants.clone(),
         unlistable_dirs: actual.unlistable_dirs,
+        rejected: desired.rejected.clone(),
+        unsupported: desired.unsupported.clone(),
         ..Plan::default()
     };
     let mut steps: Vec<Step> = Vec::new();
@@ -590,7 +696,7 @@ pub fn plan(
 
     // ── 清单这一侧：删除。**删除项只可能从这个循环里长出来。**
     for (path, previous) in &recorded {
-        if wanted.contains_key(path) {
+        if wanted.contains_key(path) || barred.contains(path) {
             continue;
         }
         // 早就知道它没了，这次也不要它了：没什么可删的，也没什么可报的。
@@ -610,6 +716,8 @@ pub fn plan(
                 source_stamp: previous.source_stamp,
                 variant: previous.variant.clone(),
                 restore: false,
+                // 删掉一个转换产物不必知道它当初是怎么转出来的。
+                convert: None,
             }),
             // 已经不在了，而这次本来也要删掉它——结果一致，但仍然如实报出来：
             // 「清单说有、实际没了」是同一件事，用户想不想让它别再回来是另一回事。
@@ -672,6 +780,42 @@ pub fn plan(
     };
     out.net_bytes =
         signed(out.adds.bytes + out.updates.bytes) - signed(out.updates_before + out.deletes.bytes);
+
+    // ── 这一趟要转几个、要读多少、大概多久（票 21 的验收条目）。
+    //
+    // **只数真要动手的那些**：目标上已经躺着的那份转换产物不必再转一遍，把它算进
+    // 「要转 N 个、约 M 分钟」只会让第二趟同步显示一个根本不会发生的等待。
+    let converting: Vec<&Step> = steps
+        .iter()
+        .filter(|step| step.act != Act::Delete && step.convert.is_some())
+        .collect();
+    out.converts = Tally {
+        files: converting.len() as u64,
+        variants: distinct(converting.iter().map(|step| step.variant.as_str())),
+        bytes: converting.iter().map(|step| step.bytes).sum(),
+    };
+    out.convert_source_bytes = converting
+        .iter()
+        .filter_map(|step| step.convert.as_ref())
+        .map(|conversion| conversion.source_bytes)
+        .sum();
+    let secs: f64 = converting
+        .iter()
+        .filter_map(|step| step.convert.as_ref())
+        // **拿未压缩量估，不是源文件大小**：解压器与压缩器要处理的是前者
+        // （`capability::Recipe::throughput_mib` 记着这个数是怎么栽出来的）。
+        .map(|conversion| crate::capability::estimate_secs(conversion.recipe, conversion.bytes))
+        .sum();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        out.convert_ms = (secs * 1000.0).round().max(0.0) as u64;
+    }
+    out.convert_estimated = converting
+        .iter()
+        .filter_map(|step| step.convert.as_ref())
+        .filter(|conversion| conversion.estimated)
+        .count() as u64;
+
     out.steps = steps;
 
     // ── 装不装得下。**超限绝不自动截断**（ADR-0016）。
@@ -754,6 +898,7 @@ fn step(act: Act, file: &DesiredFile, was: u64, restore: bool) -> Step {
         source_stamp: file.source_stamp,
         variant: file.variant.clone(),
         restore,
+        convert: file.convert.clone(),
     }
 }
 
@@ -790,17 +935,80 @@ fn signed(bytes: u64) -> i64 {
 /// - **非文件成员跳过**：目录树变体的那个目录本身、符号链接。目录由执行那一步顺手建。
 /// - **元数据读不到的照样搬**，只是容量按 0 计并数出来（ADR-0021）。
 ///
+/// ## 格式转换在这一步定下来，而且**不解压一个字节**
+///
+/// `profile` 是这个子库的**能力档案**。判的是每个变体的**主文件**——那是「用来交给
+/// 模拟器启动的那一个」（`CONTEXT.md`），能力矩阵描述的正是模拟器启动得了什么。
+/// 判每一个成员的话，一个 PSV 目录树变体底下几千个**内部资源**会各自领一条「吃不下」。
+///
+/// 「转出来多大、转出来叫什么」全从中立库里那份零解压读进来的**内部构成**算出来
+/// （ADR-0014、[`Catalog::container_contents`]），于是**差量预览排得出来而外置盘可以
+/// 不在位**——与这一整层「折的时候读库、算的时候不读」是同一条缝。
+///
+/// 转不了的落进 [`Desired::unsupported`]：**照搬，但点名说出口**。
+///
 /// # Errors
 /// 读中立库失败时返回错误。
-pub fn desired(catalog: &Catalog, selected: &Selected) -> Result<Desired, CatalogError> {
+pub fn desired(
+    catalog: &Catalog,
+    selected: &Selected,
+    profile: &Profile,
+) -> Result<Desired, CatalogError> {
     let picked: BTreeSet<String> = selected
         .picked
         .iter()
         .map(|variant| variant.key.clone())
         .collect();
+    let platforms: BTreeMap<&str, Option<&str>> = selected
+        .picked
+        .iter()
+        .map(|variant| (variant.key.as_str(), variant.platform.as_deref()))
+        .collect();
     let members = catalog.variant_files(&picked)?;
 
+    // 主文件里凡是**透明容器**的，把内部构成一次取回来。转换要不要得起、转出来多大，
+    // 全看这一份——而它零解压就在中立库里躺着（调研第 5 部分 L4）。
+    let container_mains: BTreeSet<String> = members
+        .iter()
+        .filter(|member| member.is_main && member.is_file)
+        .filter(|member| {
+            crate::container::ContainerKind::for_path(Path::new(&member.key)).is_some()
+        })
+        .map(|member| member.key.clone())
+        .collect();
+    let contents = catalog.container_contents(&container_mains)?;
+
+    // 一个变体的主文件判出来的处置，全变体共用一份结论。
+    let mut verdicts: BTreeMap<&str, Decision> = BTreeMap::new();
     let mut out = Desired::default();
+    for member in &members {
+        if !member.is_main || !member.is_file {
+            continue;
+        }
+        let platform = platforms
+            .get(member.variant_key.as_str())
+            .copied()
+            .flatten();
+        let decision = crate::capability::decide(
+            profile,
+            platform,
+            &member.key,
+            member.len.unwrap_or(0),
+            contents.get(&member.key),
+        );
+        if let Decision::Unsupported { want, why } = &decision {
+            out.unsupported.push(Unsupported {
+                path: member.key.clone(),
+                variant: member.variant_key.clone(),
+                platform: platform.map(ToString::to_string),
+                bytes: member.len.unwrap_or(0),
+                want: want.clone(),
+                why: why.clone(),
+            });
+        }
+        verdicts.insert(member.variant_key.as_str(), decision);
+    }
+
     let mut has_file: BTreeSet<&str> = BTreeSet::new();
     for member in &members {
         if !member.is_file {
@@ -808,10 +1016,20 @@ pub fn desired(catalog: &Catalog, selected: &Selected) -> Result<Desired, Catalo
             continue;
         }
         has_file.insert(member.variant_key.as_str());
+        // **只有主文件会被转**。附属文件与内部资源原样搬：它们不是交给模拟器启动的
+        // 那一份，转它们既没有依据也没有落点。
+        let conversion = match verdicts.get(member.variant_key.as_str()) {
+            Some(Decision::Convert(conversion)) if member.is_main => Some((**conversion).clone()),
+            _ => None,
+        };
+        let (path, bytes) = match &conversion {
+            Some(conversion) => (conversion.path.clone(), conversion.bytes),
+            None => (member.key.clone(), member.len.unwrap_or(0)),
+        };
         out.files.push(DesiredFile {
-            path: member.key.clone(),
+            path,
             kind: FileKind::Rom,
-            bytes: member.len.unwrap_or(0),
+            bytes,
             unreadable: member.len.is_none(),
             source: member.key.clone(),
             source_stamp: Stamp {
@@ -819,18 +1037,72 @@ pub fn desired(catalog: &Catalog, selected: &Selected) -> Result<Desired, Catalo
                 mtime_ns: member.mtime_ns,
             },
             variant: member.variant_key.clone(),
+            convert: conversion,
         });
         if member.len.is_none() {
             out.unreadable += 1;
         }
     }
     out.files.sort_by(|a, b| a.path.cmp(&b.path));
+    out.unsupported.sort_by(|a, b| a.path.cmp(&b.path));
     out.empty_variants = picked
         .iter()
         .filter(|key| !has_file.contains(key.as_str()))
         .cloned()
         .collect();
     Ok(out)
+}
+
+impl Desired {
+    /// 把**目标存储放不下**的那些从期望状态里挑出来，落进 [`Self::rejected`]。
+    ///
+    /// ADR-0017 补充段：**FAT32 有 4 GiB 单文件上限**，PS2 / PSP 的大 ISO 直接放不进去
+    /// ——这类情况必须在差量预览阶段就报出来，而不是传到一半失败。文件名的字符限制与
+    /// 路径长度限制同理。
+    ///
+    /// 单独一趟而不是揉进 [`desired`]，是因为它要看**全部三类文件**（ROM、媒体、元数据）
+    /// 与**子库根那串路径有多长**——媒体与元数据是另外两个 `lay` 折出来的，而目标根
+    /// 只有调用方知道。
+    ///
+    /// 顺手还查**落点撞车**：转换会把 `游戏.zip` 变成 `游戏.sfc`，两个不同的容器解出
+    /// 同名内容时就撞上了。撞上的**一个都不放行**——留一个放行等于随排序决定谁赢，
+    /// 而下一趟排序变了赢家就换人，卡上那份会莫名其妙地改内容。
+    pub fn screen(&mut self, filesystem: &Filesystem, prefix_chars: usize) {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut collided: BTreeSet<String> = BTreeSet::new();
+        for file in &self.files {
+            if !seen.insert(file.path.as_str()) {
+                collided.insert(file.path.clone());
+            }
+        }
+
+        let mut keep = Vec::with_capacity(self.files.len());
+        for file in std::mem::take(&mut self.files) {
+            let verdict = if collided.contains(&file.path) {
+                Some((
+                    RejectReason::Collision,
+                    format!("不止一份内容要落到这条路径上（{}）", file.source),
+                ))
+            } else {
+                filesystem.screen(&file.path, file.bytes, prefix_chars)
+            };
+            match verdict {
+                Some((reason, detail)) => self.rejected.push(Rejected {
+                    path: file.path,
+                    kind: file.kind,
+                    bytes: file.bytes,
+                    variant: file.variant,
+                    reason,
+                    detail,
+                    estimated: file.convert.is_some_and(|conversion| conversion.estimated),
+                }),
+                None => keep.push(file),
+            }
+        }
+        self.files = keep;
+        self.rejected
+            .sort_by(|a, b| a.reason.cmp(&b.reason).then_with(|| a.path.cmp(&b.path)));
+    }
 }
 
 #[cfg(test)]
@@ -844,6 +1116,7 @@ mod tests {
             target_raw: Some("/Volumes/SDCARD/Games".to_string()),
             format: "Pegasus".to_string(),
             capacity,
+            capability: None,
         }
     }
 
@@ -856,6 +1129,7 @@ mod tests {
             source: path.to_string(),
             source_stamp: 戳(bytes),
             variant: path.to_string(),
+            convert: None,
         }
     }
 
