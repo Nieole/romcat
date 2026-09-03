@@ -16,8 +16,8 @@
 //! 发一条 `IMEAllowed(false)`，下一帧再关。[`App::closing`] 就是这两拍的状态。
 
 use egui::{Align, Layout};
-use romcat_core::catalog::browse::PlatformFilter;
 use romcat_core::catalog::{Catalog, VariantQuery, VariantRow};
+use romcat_core::report::human_bytes;
 
 use crate::font;
 use crate::table::{SPAN, Table, Window};
@@ -37,13 +37,15 @@ pub enum Closing {
 pub struct App {
     catalog: Catalog,
     window: Window,
-    filter: String,
-    platform: PlatformFilter,
-    platforms: Vec<Option<String>>,
+    /// 筛选与排序。**界面上这一份是源头**，[`Window`] 里那一份是它的副本，每帧同步一次。
+    query: VariantQuery,
     selected: Option<u64>,
     detail: Option<VariantRow>,
-    /// 详情面板里的备注框。**这是这个界面上唯一的中文输入点**，票 23 要在真机上敲的
-    /// 就是它。
+    /// 详情面板里的备注框。
+    ///
+    /// **它是验证脚手架，不是功能**：内容不落库，也没人读。存在的理由是票 23 要在
+    /// Windows 真机上敲中文，而 ADR-0005 定的位置是详情面板——这个框把那个位置占住，
+    /// 免得票 24 顺手把输入放进表格单元格里。
     note: String,
     sample: bool,
     closing: Closing,
@@ -56,13 +58,10 @@ impl App {
     /// 开一个界面，数据来自这份中立库。
     #[must_use]
     pub fn new(catalog: Catalog) -> Self {
-        let platforms = catalog.variant_platforms().unwrap_or_default();
         Self {
             catalog,
             window: Window::new(SPAN),
-            filter: String::new(),
-            platform: PlatformFilter::Any,
-            platforms,
+            query: VariantQuery::default(),
             selected: None,
             detail: None,
             note: String::new(),
@@ -70,11 +69,6 @@ impl App {
             closing: Closing::No,
             scroll_to: None,
         }
-    }
-
-    /// 装字体、定版式。`eframe` 起来时调一次。
-    pub fn setup(ctx: &egui::Context) {
-        font::install(ctx);
     }
 
     /// 关窗走到哪一拍了。测试拿它核对两拍的次序。
@@ -92,11 +86,7 @@ impl App {
     /// 画一帧。`eframe` 与量帧率的那条路走的是同一个函数——量出来的才是这个界面的代价。
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         self.handle_close(ui.ctx());
-        self.window.set_query(VariantQuery {
-            contains: self.filter.clone(),
-            platform: self.platform.clone(),
-            ..self.window.query().clone()
-        });
+        self.window.set_query(self.query.clone());
         self.window.sync(&self.catalog);
 
         egui::Panel::top("顶栏").show(ui, |ui| self.top_bar(ui));
@@ -106,22 +96,16 @@ impl App {
                 self.font_sample(ui);
                 ui.separator();
             }
-            let painted = Table {
+            let picked = Table {
                 catalog: &self.catalog,
                 window: &mut self.window,
+                query: &mut self.query,
                 selected: &mut self.selected,
                 scroll_to: self.scroll_to,
             }
             .show(ui);
-            if let Some(sorted) = painted.sort {
-                self.window.set_query(VariantQuery {
-                    order: sorted.order,
-                    descending: sorted.descending,
-                    ..self.window.query().clone()
-                });
-            }
-            if let Some(picked) = painted.picked {
-                self.detail = Some(picked);
+            if let Some(row) = picked {
+                self.detail = Some(row);
             }
         });
     }
@@ -132,25 +116,10 @@ impl App {
             ui.separator();
             ui.label("筛选");
             ui.add(
-                egui::TextEdit::singleline(&mut self.filter)
-                    .desired_width(220.0)
+                egui::TextEdit::singleline(&mut self.query.contains)
+                    .desired_width(260.0)
                     .hint_text("键里含这段文字"),
             );
-            ui.separator();
-            ui.label("平台");
-            egui::ComboBox::from_id_salt("平台筛选")
-                .selected_text(platform_text(&self.platform))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.platform, PlatformFilter::Any, "全部");
-                    ui.selectable_value(&mut self.platform, PlatformFilter::Unknown, "平台未知");
-                    for platform in self.platforms.iter().flatten() {
-                        ui.selectable_value(
-                            &mut self.platform,
-                            PlatformFilter::Known(platform.clone()),
-                            platform,
-                        );
-                    }
-                });
             ui.separator();
             ui.toggle_value(&mut self.sample, "字体样张");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -183,7 +152,7 @@ impl App {
                         variant.platform.as_deref().unwrap_or("未知"),
                         variant.rule,
                         variant.files,
-                        crate::table::bytes_text(variant.bytes),
+                        human_bytes(variant.bytes),
                     ));
                 });
             }
@@ -194,16 +163,8 @@ impl App {
                 egui::TextEdit::multiline(&mut self.note)
                     .desired_rows(2)
                     .desired_width(f32::INFINITY)
-                    .hint_text("中文输入在这里试"),
+                    .hint_text("中文输入在这里试打（还不落库）"),
             );
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.label("符号");
-            for symbol in font::SYMBOLS {
-                if ui.small_button(*symbol).clicked() {
-                    self.note.push_str(symbol);
-                }
-            }
         });
         ui.add_space(4.0);
     }
@@ -211,11 +172,11 @@ impl App {
     /// 字体样张：把 egui 内置字体缺的那几类字**摆出来给人看**。
     ///
     /// 它是这张票「界面上不出现豆腐块」那条验收的肉眼证据，自动化那一份在
-    /// `tests/font.rs`。
+    /// `tests/font.rs`，拿真库核对覆盖面的那一条是 `romcat-gui --font-check --catalog`。
     fn font_sample(&self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.strong("字体样张");
-            ui.label(format!("子集 {} 字节", font::subset_bytes()));
+            ui.label(format!("子集 {} 字节", human_bytes(font::subset_bytes() as u64)));
         });
         for (what, text) in font::SAMPLE.iter().copied() {
             ui.horizontal(|ui| {
@@ -223,6 +184,12 @@ impl App {
                 ui.label(text);
             });
         }
+        // OFL 要求分发字体时随附许可，而这份字体是嵌在可执行文件里的——许可得跟着走。
+        ui.collapsing("字体许可（SIL Open Font License 1.1）", |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(160.0)
+                .show(ui, |ui| ui.monospace(font::LICENSE));
+        });
     }
 
     /// 关窗的两拍。
@@ -243,14 +210,6 @@ impl App {
             self.closing = Closing::Sent;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-    }
-}
-
-fn platform_text(filter: &PlatformFilter) -> &str {
-    match filter {
-        PlatformFilter::Any => "全部",
-        PlatformFilter::Unknown => "平台未知",
-        PlatformFilter::Known(platform) => platform,
     }
 }
 

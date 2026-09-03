@@ -15,6 +15,14 @@
 
 源字体从 <https://github.com/google/fonts/tree/main/ofl/notosanssc> 取，
 许可为 SIL Open Font License 1.1，副本在 `crates/gui/assets/OFL.txt`。
+
+**同样的输入产出同样的字节。** 于是「仓库里那份字体是不是这个脚本裁出来的」是可核对的：
+重跑一遍，对 SHA-256。两步都显式关掉了时间戳重算，否则 `head.modified` 每次都不同。
+
+| | SHA-256 | 字节 |
+|---|---|---|
+| 源 `NotoSansSC[wght].ttf` | `a3041811…` | 17,772,300 |
+| 产物 `NotoSansSC-Subset.ttf` | `066c7a2b…` | 7,670,804 |
 """
 
 from __future__ import annotations
@@ -25,21 +33,20 @@ import subprocess
 import sys
 import tempfile
 
-# 字符集的四块，各自的理由写在旁边——下一个人要加字符时得知道往哪一块加。
+# 字符集由两块拼起来：这两个双字节编码**能表示的全部字符**，加上下面几段显式补的区段。
 #
-# 1. GBK：简体正文。用 Python 自带的编解码器**枚举**出来，而不是手写码位表——
-#    GBK 一家两万三千条映射，手写必错。
-# 2. Big5：繁体标题。港台发行版与繁体汉化版的标题落在这里，GBK 覆盖不全。
-# 3. 假名：日文标题。GBK/Big5 各带一份假名，但区段边界不一致，显式补齐。
-# 4. 符号区 U+2100–U+27BF：游戏标题里真实存在的 `Ⅲ`（罗马数字）、`①`（带圈数字）、
-#    `★ ☆ ♪ ♥ → Ⓡ`。这一段是**这张票存在的半个理由**——egui 内置字体全缺。
+# 用 Python 自带的编解码器枚举，而不是手写码位表——GBK 一家两万三千条映射，手写必错。
+# GBK 是简体正文（含一部分繁体），Big5 是繁体标题：港台发行版与繁体汉化版的标题落在
+# 那里，GBK 覆盖不全。
 DOUBLE_BYTE_CODECS = ("gbk", "big5")
 
+# 显式补的区段，每段的理由写在第三栏——下一个人要加字符时得知道往哪一段加。
 EXTRA_RANGES = (
     (0x0020, 0x007E, "ASCII 可见字符"),
     (0x00A0, 0x017F, "拉丁补充与扩展 A：ō ū é ü ñ，日文罗马字与欧洲语标题要用"),
     (0x2000, 0x206F, "通用标点：— … “ ” ‘ ’ ※ 前后的那一段"),
     (0x20A0, 0x20BF, "货币符号：€ ₩ ₽"),
+    # 这一段是这张票存在的半个理由——egui 内置字体这些符号大半都没有。
     (0x2100, 0x27BF, "符号区：Ⅲ ① ★ ☆ ♪ ♥ → Ⓡ ∀ 都在这里"),
     (0x3000, 0x303F, "中日韩标点：，。、《》〜・"),
     (0x3040, 0x30FF, "平假名与片假名"),
@@ -122,6 +129,8 @@ def main() -> int:
                 "fontTools.varLib.instancer",
                 str(args.source),
                 f"wght={args.weight}",
+                # 不盖当前时间戳，否则同样的输入每次产出的字节都不同。
+                "--no-recalc-timestamp",
                 "-o",
                 str(fixed),
             ]
@@ -139,8 +148,9 @@ def main() -> int:
                 # 不留 hinting：ab_glyph 不跑 TrueType 字节码，留着是纯浪费。
                 "--no-hinting",
                 "--drop-tables+=DSIG",
-                # 让同样的输入产出同样的字节，好核对这份二进制没被手工动过。
-                "--recalc-timestamp=0",
+                # 同上：这两步都不盖时间戳，同样的输入才产出同样的字节——
+                # 这份 7.3 MB 的二进制是否被手工动过，靠重跑一遍对哈希来核。
+                "--no-recalc-timestamp",
             ]
         )
 

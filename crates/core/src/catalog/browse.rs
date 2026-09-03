@@ -91,28 +91,10 @@ pub struct VariantQuery {
     /// 大小写按 SQLite 的 `LIKE` 语义——**只对 ASCII 不敏感**，汉字与假名是逐字节比的。
     /// 中文本来就没有大小写，这个限制在这里不咬人。
     pub contains: String,
-    /// 平台这一栏筛不筛、筛哪个。
-    pub platform: PlatformFilter,
     /// 按哪一列排。
     pub order: VariantOrder,
     /// 倒着排。
     pub descending: bool,
-}
-
-/// 平台这一栏怎么筛。
-///
-/// 单独一个枚举而不是 `Option<String>`：**平台未知**是一等的一档（认不出平台的内容照常
-/// 入库，`docs/platforms.md`），把它和「不筛」都写成 `None` 的话，「只看认不出平台的那些」
-/// 这个真实需求就表达不出来。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum PlatformFilter {
-    /// 不筛，什么平台都要。
-    #[default]
-    Any,
-    /// 只要这个平台。
-    Known(String),
-    /// 只要**平台未知**的那些。
-    Unknown,
 }
 
 /// 一页最多取多少行。
@@ -139,28 +121,14 @@ fn escape_like(text: &str) -> String {
 impl VariantQuery {
     /// 折出 `WHERE` 那一段与它的参数。两处（数总数、取一页）共用，免得筛选条件漂开——
     /// 总数与页内容用了不同的筛选，滚动条就会指向不存在的行。
-    fn where_clause(&self) -> (String, Vec<Box<dyn ToSql>>) {
-        let mut clauses: Vec<&str> = Vec::new();
-        let mut args: Vec<Box<dyn ToSql>> = Vec::new();
-        if !self.contains.is_empty() {
-            clauses.push("key LIKE ? ESCAPE '\\'");
-            args.push(Box::new(format!("%{}%", escape_like(&self.contains))));
+    fn where_clause(&self) -> (&'static str, Vec<Box<dyn ToSql>>) {
+        if self.contains.is_empty() {
+            return ("", Vec::new());
         }
-        match &self.platform {
-            PlatformFilter::Any => {}
-            PlatformFilter::Known(platform) => {
-                clauses.push("platform = ?");
-                args.push(Box::new(platform.clone()));
-            }
-            // `= NULL` 永远不成立，认不出平台的那一档只能用 `IS NULL` 挑出来。
-            PlatformFilter::Unknown => clauses.push("platform IS NULL"),
-        }
-        let sql = if clauses.is_empty() {
-            String::new()
-        } else {
-            format!(" WHERE {}", clauses.join(" AND "))
-        };
-        (sql, args)
+        (
+            " WHERE key LIKE ? ESCAPE '\\'",
+            vec![Box::new(format!("%{}%", escape_like(&self.contains)))],
+        )
     }
 
     /// 折出 `ORDER BY` 那一段。列名来自 [`VariantOrder::column`]，不含任何用户输入。
@@ -241,21 +209,4 @@ impl Catalog {
             .map_err(|source| self.err(source))
     }
 
-    /// 库里出现过的全部平台，按名字排；**平台未知**的那一档以 `None` 出现在最前。
-    ///
-    /// 界面拿它填筛选下拉框。走的是 `variant_platform` 那条索引，不必读变体正文。
-    ///
-    /// # Errors
-    /// 读库失败时返回错误。
-    pub fn variant_platforms(&self) -> Result<Vec<Option<String>>, CatalogError> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT DISTINCT platform FROM variant ORDER BY platform")
-            .map_err(|source| self.err(source))?;
-        let rows = statement
-            .query_map([], |row| row.get::<_, Option<String>>(0))
-            .map_err(|source| self.err(source))?;
-        rows.collect::<Result<_, _>>()
-            .map_err(|source| self.err(source))
-    }
 }

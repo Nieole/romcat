@@ -1,8 +1,10 @@
 //! romcat 的界面壳。
 //!
 //! 核心是一个**独立的库**，界面只是它的壳（ADR-0005）。这条约束在这里落成一句可核对的
-//! 话：**这个 crate 里没有一行领域逻辑**。排序、筛选、分页全在
-//! [`romcat_core::catalog::browse`]，界面只负责问它要哪一段、把要来的画出来。
+//! 话：**领域判断一条都不在这里**——排序、筛选、分页在
+//! [`romcat_core::catalog::browse`]，容量怎么写成人话在
+//! [`romcat_core::report::human_bytes`]，界面只负责问它要哪一段、把要来的画出来。
+//! （[`demo`] 造的合成数据是演示与实测用的脚手架，走的也是核心库的公开 API。）
 //! 将来若 Windows 真机的输入法验证（票 23）没过，换掉的只是这个 crate。
 //!
 //! ## 这一层清掉的两个风险
@@ -27,4 +29,5 @@ pub mod app;
 pub mod bench;
 pub mod demo;
 pub mod font;
+pub mod headless;
 pub mod table;

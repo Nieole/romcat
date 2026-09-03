@@ -10,7 +10,7 @@
 
 use romcat_core::catalog::{Catalog, CatalogError};
 use romcat_core::platform::Manifest;
-use romcat_core::shape::Variant;
+use romcat_core::shape::{SINGLE_FILE_RULE, SPLIT_VOLUME_RULE, Variant};
 
 /// 造名字用的作品名。繁简、假名、罗马数字、带圈数字、音符、星号各占几条。
 const WORKS: &[&str] = &[
@@ -72,10 +72,12 @@ pub fn synthetic(rows: u64) -> Result<Catalog, CatalogError> {
                 // 每十七个留一个**平台未知**：那是真库里存在的一档，
                 // 筛选与排序都得能处理它。
                 platform: (i % 17 != 3).then(|| platform.to_string()),
+                // 成型规则只能是真有的那几条：库里绝大多数是一文件一变体，
+                // 分卷压缩是少数（`docs/library-facts.md`）。
                 rule: if i % 11 == 0 {
-                    romcat_core::shape::SINGLE_FILE_RULE.to_string()
+                    SPLIT_VOLUME_RULE.to_string()
                 } else {
-                    "透明容器".to_string()
+                    SINGLE_FILE_RULE.to_string()
                 },
                 manual: false,
                 files: 1 + i % 9,

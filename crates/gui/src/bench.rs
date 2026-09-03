@@ -3,14 +3,11 @@
 //! ## 为什么不开窗也算数
 //!
 //! 一帧的代价分两半：CPU 上的**布局 + 三角化**，与 GPU 上的**画三角形**。表格这种界面
-//! 后一半是常数级的几千个三角形，真正会随行数涨的是前一半——而前一半 `egui::Context`
-//! 自己就跑得完，一个像素都不用画。
+//! 后一半是常数级的几千个三角形，真正会随行数涨的是前一半——而前一半
+//! [`crate::headless`] 里那条通路就跑得完，一个像素都不用画。
 //!
-//! 于是这里跑的是 [`egui::Context::run_ui`] 加 [`egui::Context::tessellate`]，走的是
-//! [`crate::app::App::ui`] **本人**，不是另写一份简化版。量出来的数字是「这个界面每帧
-//! 要花多少 CPU」，与「开窗之后看起来顺不顺」之间只差一个 GPU 常数。
-//!
-//! 顺带，这也是这张票的帧率验收能进门禁的原因：不开窗就不需要显示器。
+//! 跑的是 [`crate::app::App::ui`] **本人**，不是另写一份简化版。量出来的数字是
+//! 「这个界面每帧要花多少 CPU」，与「开窗之后看起来顺不顺」之间只差一个 GPU 常数。
 //!
 //! ## 两种滚法量的是两件事
 //!
@@ -24,6 +21,7 @@
 use std::time::Instant;
 
 use crate::app::App;
+use crate::headless::{self, VIEWPORT};
 use crate::table::ROW_HEIGHT;
 
 /// 一次实测的结果，毫秒。
@@ -60,9 +58,6 @@ pub enum Sweep {
     Rows(f32),
 }
 
-/// 视口大小，点。定死一个常见的窗口尺寸，免得量出来的数字随屏幕变。
-const VIEWPORT: [f32; 2] = [1280.0, 800.0];
-
 /// 一行占多高，含行距。
 fn row_pitch() -> f32 {
     ROW_HEIGHT + egui::Style::default().spacing.item_spacing.y
@@ -74,18 +69,11 @@ fn row_pitch() -> f32 {
 /// 算进稳态帧率里会把结论带偏。
 #[must_use]
 pub fn scroll(app: &mut App, frames: u32, sweep: Sweep) -> FrameCost {
-    let ctx = egui::Context::default();
-    App::setup(&ctx);
-    let input = || egui::RawInput {
-        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, VIEWPORT.into())),
-        ..Default::default()
-    };
+    let ctx = headless::context();
 
     // 先跑一帧把总行数问出来，滚动的行程要按它算。
     app.scroll_to = Some(0.0);
-    let mut output = ctx.run_ui(input(), |ui| app.ui(ui));
-    // 没有显卡在收字体图集，得显式认领掉这批纹理增量，否则 `epaint` 会在丢弃时 panic。
-    output.textures_delta.clear();
+    headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
     let before = app.window().reads();
     let travel = (app.window().total() as f32 * row_pitch() - VIEWPORT[1]).max(0.0);
 
@@ -98,10 +86,9 @@ pub fn scroll(app: &mut App, frames: u32, sweep: Sweep) -> FrameCost {
         };
         app.scroll_to = Some(at);
         let started = Instant::now();
-        let mut output = ctx.run_ui(input(), |ui| app.ui(ui));
+        let output = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
         let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
         let elapsed = started.elapsed().as_secs_f64() * 1000.0;
-        output.textures_delta.clear();
         // 前两帧是热身：字体图集与列宽都在这两帧里定下来。
         if frame >= 2 {
             costs.push(elapsed);

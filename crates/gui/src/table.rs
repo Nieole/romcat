@@ -7,10 +7,10 @@
 //! - [`Table`] 管**画出来什么**。`egui_extras::TableBuilder` 的 `body.rows()` 只调用
 //!   视口里那几十行的闭包，开销与总行数无关（官方 demo 的行数滑杆上限就是 100,000）。
 //!
-//! 两层合起来是这张票的第二条验收：**排序、筛选、分页在数据库层完成，内存占用与总行数
-//! 无关**。排序尤其要说一句——`egui_extras` 完全没有排序能力（源码里 `sort` 零出现），
-//! 于是它只能由别人做；做在 `ORDER BY` 里而不是内存的 `Vec` 上，正是因为后者要求先把
-//! 全库读进来。
+//! 两层合起来是这张票的第二条验收：**排序、筛选、分页在中立库那一层完成，内存占用与
+//! 总行数无关**。排序尤其要说一句——`egui_extras` 完全没有排序能力（源码里 `sort`
+//! 零出现），于是它只能由别人做；做在 `ORDER BY` 里而不是内存的 `Vec` 上，正是因为
+//! 后者要求先把全库读进来。
 //!
 //! ## 行高等高，绝不用 `heterogeneous_rows`
 //!
@@ -21,6 +21,7 @@ use egui::{Align, Layout};
 use egui_extras::{Column, TableBuilder};
 use romcat_core::catalog::browse::VariantOrder;
 use romcat_core::catalog::{Catalog, VariantQuery, VariantRow};
+use romcat_core::report::human_bytes;
 
 /// 一行多高，点。
 ///
@@ -49,8 +50,10 @@ pub struct Window {
     span: u64,
     /// 一共查了几次库。测试拿它证明**不是每帧都查**。
     reads: u64,
-    /// 上一次读库的错误；`None` 表示一切正常。界面把它显示在状态栏而不是弹窗——
-    /// 表格每帧都在读，弹窗会弹到关不掉。
+    /// 上一次读库的错误；`None` 表示一切正常。
+    ///
+    /// 它同时是**闸门**：有错时不再读库。表格每帧都在问行，读不动的时候一帧一次地重试
+    /// 只会把同一个错误刷满状态栏，而下一帧成功的理由并不存在——换筛选或换排序才是。
     error: Option<String>,
     /// 查询换过了，总数与内容都得重取。
     stale: bool,
@@ -84,6 +87,8 @@ impl Window {
             self.query = query;
             self.rows.clear();
             self.first = 0;
+            // 换了条件就重新试一次：上一次读不动的可能正是这条件本身。
+            self.error = None;
             self.stale = true;
         }
     }
@@ -138,10 +143,10 @@ impl Window {
 
     /// 取全序里第 `index` 行；不在窗里就去库里取一段回来。
     ///
-    /// 越界或读库失败都返回 `None`——表格照样画得下去，只是那一行是空的，
-    /// 出错的原因在 [`Window::error`] 里。
+    /// 越界、读库出过错、这一行取不到，都返回 `None`——表格照样画得下去，只是那一行是
+    /// 空的，出错的原因在 [`Window::error`] 里。
     pub fn row(&mut self, catalog: &Catalog, index: u64) -> Option<&VariantRow> {
-        if index >= self.total {
+        if index >= self.total || self.error.is_some() {
             return None;
         }
         if !self.holds(index) {
@@ -178,43 +183,38 @@ impl Window {
     }
 }
 
-/// 表头点了一下的结果。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Sorted {
-    /// 按哪一列排。
-    pub order: VariantOrder,
-    /// 倒着排。
-    pub descending: bool,
-}
-
-/// 画一张变体表，返回这一帧里被点选的那一行（若有）。
+/// 一张变体表。
+///
+/// 它**直接改 `query`**：点表头就是换排序，而排序是中立库那一层的事，界面这边只是把
+/// 用户点的那一下写进查询里。多存一份「点了哪个表头」的状态只会与查询漂开。
 pub struct Table<'a> {
     /// 数据从哪来。
     pub catalog: &'a Catalog,
     /// 窗口。
     pub window: &'a mut Window,
+    /// 筛选与排序。**界面那一份的引用，不是副本。**
+    pub query: &'a mut VariantQuery,
     /// 选中的是哪一行（全序下标）。
     pub selected: &'a mut Option<u64>,
     /// 把滚动位置强按到这个像素偏移。**只有量帧率时才用**，界面上是 `None`。
     pub scroll_to: Option<f32>,
 }
 
-/// 一帧画下来发生了什么。
-#[derive(Debug, Default)]
-pub struct Painted {
-    /// 表头被点了，要换排序。
-    pub sort: Option<Sorted>,
-    /// 有一行被点选了，附它的内容——**拷一份**而不是留个下标：详情面板要在那一行滚出
-    /// 视口之后照样显示得出来。
-    pub picked: Option<VariantRow>,
-}
-
 impl Table<'_> {
-    /// 画出来。
-    pub fn show(&mut self, ui: &mut egui::Ui) -> Painted {
-        let mut painted = Painted::default();
-        let total = usize::try_from(self.window.total()).unwrap_or(usize::MAX);
-        let current = self.window.query().clone();
+    /// 画出来，返回这一帧里被点选的那一行。
+    ///
+    /// 返回的是**一份拷贝**而不是下标：详情面板要在那一行滚出视口之后照样显示得出来。
+    pub fn show(self, ui: &mut egui::Ui) -> Option<VariantRow> {
+        let Self {
+            catalog,
+            window,
+            query,
+            selected,
+            scroll_to,
+        } = self;
+        let mut picked = None;
+        let total = usize::try_from(window.total()).unwrap_or(usize::MAX);
+        let (sorted_by, descending) = (query.order, query.descending);
 
         let mut builder = TableBuilder::new(ui)
             .striped(true)
@@ -228,7 +228,7 @@ impl Table<'_> {
             .column(Column::initial(110.0).at_least(70.0).clip(true))
             .column(Column::initial(70.0).at_least(50.0))
             .column(Column::remainder().at_least(90.0));
-        if let Some(offset) = self.scroll_to {
+        if let Some(offset) = scroll_to {
             builder = builder.vertical_scroll_offset(offset);
         }
 
@@ -236,25 +236,19 @@ impl Table<'_> {
             .header(24.0, |mut header| {
                 for order in VariantOrder::ALL {
                     header.col(|ui| {
-                        let mark = if current.order != order {
-                            ""
-                        } else if current.descending {
-                            " ▼"
-                        } else {
-                            " ▲"
+                        let active = sorted_by == order;
+                        let mark = match (active, descending) {
+                            (false, _) => "",
+                            (true, true) => " ▼",
+                            (true, false) => " ▲",
                         };
                         if ui
-                            .selectable_label(
-                                current.order == order,
-                                format!("{}{mark}", order.label()),
-                            )
+                            .selectable_label(active, format!("{}{mark}", order.label()))
                             .clicked()
                         {
-                            painted.sort = Some(Sorted {
-                                order,
-                                // 再点一次同一列就翻方向。
-                                descending: current.order == order && !current.descending,
-                            });
+                            query.order = order;
+                            // 再点一次同一列就翻方向。
+                            query.descending = active && !descending;
                         }
                     });
                 }
@@ -262,8 +256,8 @@ impl Table<'_> {
             .body(|body| {
                 body.rows(ROW_HEIGHT, total, |mut row| {
                     let index = row.index() as u64;
-                    row.set_selected(*self.selected == Some(index));
-                    let Some(variant) = self.window.row(self.catalog, index) else {
+                    row.set_selected(*selected == Some(index));
+                    let Some(variant) = window.row(catalog, index) else {
                         // 读不到就留空行：滚动条的长度已经由总数定死，
                         // 这里少画一行不会让下面的行位移。
                         for _ in 0..5 {
@@ -271,45 +265,41 @@ impl Table<'_> {
                         }
                         return;
                     };
-                    let picked = variant.clone();
                     row.col(|ui| {
-                        ui.label(&picked.key);
+                        ui.label(&variant.key);
                     });
                     row.col(|ui| {
-                        ui.label(picked.platform.as_deref().unwrap_or("—"));
+                        ui.label(variant.platform.as_deref().unwrap_or("—"));
                     });
                     row.col(|ui| {
-                        ui.label(&picked.rule);
+                        ui.label(&variant.rule);
                     });
                     row.col(|ui| {
-                        ui.label(picked.files.to_string());
+                        ui.label(variant.files.to_string());
                     });
                     row.col(|ui| {
-                        ui.label(bytes_text(picked.bytes));
+                        ui.label(capacity_text(variant));
                     });
                     if row.response().clicked() {
-                        *self.selected = Some(index);
-                        painted.picked = Some(picked);
+                        *selected = Some(index);
+                        picked = Some(variant.clone());
                     }
                 });
             });
-        painted
+        picked
     }
 }
 
-/// 把字节数说成人看得懂的样子。
-#[must_use]
-pub fn bytes_text(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut size = bytes as f64;
-    let mut unit = 0;
-    while size >= 1024.0 && unit + 1 < UNITS.len() {
-        size /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
+/// 一个变体占多大——**带上「这是个下界」那件事**。
+///
+/// 元数据读不到的成员按 0 计入字节合计（ADR-0021），于是有不可读成员时这个数**少算了**。
+/// 画成确数等于把「我不知道」显示成「我知道，是这么多」，而不可读是如实记录的第三种状态，
+/// 不是零。
+fn capacity_text(variant: &VariantRow) -> String {
+    let size = human_bytes(variant.bytes);
+    if variant.unreadable_files == 0 {
+        size
     } else {
-        format!("{size:.1} {}", UNITS[unit])
+        format!("≥ {size}")
     }
 }
