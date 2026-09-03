@@ -5,7 +5,8 @@
 //! [`romcat_core::catalog::browse`]，队列怎么筛、按什么分组、一次裁决说得成不成立在
 //! [`romcat_core::triage`]（`Queue`、`Axis`、`Draft`），容量怎么写成人话在
 //! [`romcat_core::report::human_bytes`]，界面只负责问它要哪一段、把要来的画出来。
-//! （[`demo`] 造的合成数据是演示与实测用的脚手架，走的也是核心库的公开 API。）
+//! （合成数据是演示与实测用的脚手架，走的也是核心库的公开 API。它在 `demo` feature
+//! 之后，**默认不编进来**：交付出去的客户端里不该有一个字节的假数据。）
 //! 将来若 Windows 真机的输入法验证（票 23）没过，换掉的只是这个 crate——
 //! **那正是把领域判断按在核心里的理由**。
 //!
@@ -42,6 +43,8 @@
 
 pub mod app;
 pub mod bench;
+/// 合成数据。**只在 `demo` feature 下编进来**——交付的客户端里不该有假数据。
+#[cfg(feature = "demo")]
 pub mod demo;
 pub mod font;
 pub mod headless;

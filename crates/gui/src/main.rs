@@ -1,11 +1,16 @@
 //! `romcat-gui`：界面的入口。
 //!
-//! 四种跑法：开窗（默认）、量变体表的帧率（`--bench`）、量**待确认队列**的响应
-//! （`--bench-queue`）、查豆腐块（`--font-check`）。后三种不开窗，于是在没有显示器的
-//! 地方也跑得起来——那几条验收因此可以进门禁。
+//! 交付出去的客户端只有两种跑法：**开窗**（默认）与**查豆腐块**（`--font-check`）。
+//!
+//! 实测那几条（`--bench` / `--bench-queue` / `--bench-browse` / `--bench-sublibrary`）
+//! 与合成数据（`--demo`）在 `demo` feature 之后，**默认不编进来**——它们是量数用的
+//! 脚手架，不是交付物。跑它们要 `cargo run -p romcat-gui --features demo -- …`。
+//! 它们都不开窗，于是在没有显示器的地方也跑得起来。
 //!
 //! 开哪份库：给主库根或 `--library <名字>` 就按名字去工作目录里找，`--catalog <文件>`
-//! 直接开一份，三样都不给就用**合成数据**（形状照真机来，见 [`demo`]）。
+//! 直接开一份。**三样都不给就如实报错**——不擅自造一份合成的糊弄人：假数据与真库在
+//! 界面上长得一模一样，看见一屏假名字的第一反应会是「我的库怎么了」。要看合成数据
+//! （形状照真机来，见 [`demo`]）得显式给 `--demo`。
 //! **一个字节都不读主库**（ADR-0001、ADR-0004）。
 
 use std::collections::BTreeSet;
@@ -13,12 +18,28 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use romcat_core::catalog::{Catalog, VariantQuery};
+#[cfg(feature = "demo")]
+use romcat_core::catalog::Catalog;
+use romcat_core::catalog::VariantQuery;
+#[cfg(feature = "demo")]
 use romcat_core::site::Site;
-use romcat_gui::app::{App, View};
+use romcat_gui::app::App;
+#[cfg(feature = "demo")]
+use romcat_gui::app::View;
+#[cfg(feature = "demo")]
 use romcat_gui::bench::Sweep;
 use romcat_gui::site::Locate;
-use romcat_gui::{bench, demo, font, headless};
+#[cfg(feature = "demo")]
+use romcat_gui::{bench, demo};
+use romcat_gui::{font, headless};
+
+/// 没说开哪份库时说的那句话。**不擅自造一份假的**。
+const NO_LIBRARY: &str = "说清要开哪份库：\n\
+     \x20 romcat-gui <主库根>\n\
+     \x20 romcat-gui --library <名字> [--workspace <目录>]\n\
+     \x20 romcat-gui --catalog <中立库文件>\n\
+     \n\
+     只想看看界面长什么样：`cargo run -p romcat-gui --features demo -- --demo`。";
 
 /// romcat 的界面。
 #[derive(Debug, Parser)]
@@ -40,29 +61,44 @@ struct Args {
     #[arg(long, value_name = "目录")]
     workspace: Option<PathBuf>,
 
-    /// 直接打开这一份中立库文件；不给就按名字找，都不给就用合成数据
+    /// 直接打开这一份中立库文件；不给就按名字找
     #[arg(long, value_name = "文件")]
     catalog: Option<PathBuf>,
 
+    /// 不开窗，检查必备字符有没有豆腐块。开了现成的库就连库里全部变体的键一起查
+    #[arg(long)]
+    font_check: bool,
+
+    // ── 以下全在 `demo` feature 之后：量数用的脚手架，不是交付物 ──────────────
+    /// 拿**合成数据**开一个演示窗口。**主库一个字节都不读**
+    #[cfg(feature = "demo")]
+    #[arg(long)]
+    demo: bool,
+
     /// 合成数据里的**待裁决**条数。**主库只读**，这条路一个字节都不碰真库
+    #[cfg(feature = "demo")]
     #[arg(long, value_name = "条数", default_value_t = demo::QUEUE_ROWS)]
     queue_rows: u64,
 
     /// `--bench` 用的合成变体数（那一条量的是变体表，不是队列）
+    #[cfg(feature = "demo")]
     #[arg(long, value_name = "行数", default_value_t = 100_000)]
     rows: u64,
 
     /// 不开窗，滚一遍变体表量每帧的代价，打印中位数与最慢的一帧
+    #[cfg(feature = "demo")]
     #[arg(long, value_name = "帧数", num_args = 0..=1, default_missing_value = "240")]
     bench: Option<u32>,
 
     /// 不开窗，量**待确认队列**：列队列、换选择器、每帧、排计划各要多久
     ///
     /// **只在合成数据上跑**：它最后一步真的落一批裁决下去，那不该落进你的沉淀库
+    #[cfg(feature = "demo")]
     #[arg(long, value_name = "帧数", num_args = 0..=1, default_missing_value = "240")]
     bench_queue: Option<u32>,
 
     /// 不开窗，量**库浏览**：列筛选面板、换一次筛选、点开一条、每帧各要多久
+    #[cfg(feature = "demo")]
     #[arg(long, value_name = "帧数", num_args = 0..=1, default_missing_value = "240")]
     bench_browse: Option<u32>,
 
@@ -70,24 +106,24 @@ struct Args {
     ///
     /// **目标设备一律用本地 fixture 目录模拟**：这条命令自己在临时目录里造一个空目录当
     /// 目标，绝不去动任何真实设备或 SD 卡
+    #[cfg(feature = "demo")]
     #[arg(long)]
     bench_sublibrary: bool,
 
     /// `--bench-sublibrary` 用的规则；容量上限写在 `--bench-capacity`
+    #[cfg(feature = "demo")]
     #[arg(long, value_name = "规则", default_value = "平台=SFC,GBA,MD")]
     bench_rule: String,
 
     /// `--bench-sublibrary` 里那个子库的容量上限，如 `512MB`
+    #[cfg(feature = "demo")]
     #[arg(long, value_name = "容量", default_value = "512MB")]
     bench_capacity: String,
 
     /// 每帧往下滚几行；不给就一趟滚完整张表（**最坏情况**，每帧都要读库）
+    #[cfg(feature = "demo")]
     #[arg(long, value_name = "行数")]
     rows_per_frame: Option<f32>,
-
-    /// 不开窗，检查必备字符有没有豆腐块。开了现成的库就连库里全部变体的键一起查
-    #[arg(long)]
-    font_check: bool,
 }
 
 impl Args {
@@ -101,8 +137,49 @@ impl Args {
         }
     }
 
-    /// 开一份现成的库；没说要开就造一份合成的。
+    /// 说了要开合成数据吗。没编进 `demo` feature 时**永远是否**。
+    #[cfg(feature = "demo")]
+    fn wants_demo(&self) -> bool {
+        self.demo || self.benching()
+    }
+
+    /// 没编进 `demo` feature：合成数据这条路根本不存在。
+    #[cfg(not(feature = "demo"))]
+    const fn wants_demo(&self) -> bool {
+        false
+    }
+
+    /// 在跑哪一条**实测**。这几条量的就是合成数据，不给库也照造。
+    #[cfg(feature = "demo")]
+    fn benching(&self) -> bool {
+        self.bench.is_some()
+            || self.bench_queue.is_some()
+            || self.bench_browse.is_some()
+            || self.bench_sublibrary
+    }
+
+    /// 开一份现成的库。**没说开哪份、也没要合成数据，就如实报错。**
+    ///
+    /// 以前这里是「都不给就悄悄造一份合成的」。合成数据与真库在界面上长得一模一样，
+    /// 于是不带参数打开看见的是一屏假名字，第一反应是「我的库怎么了」而不是
+    /// 「我打开的不是我的库」——**不报错的错比报错的错难查得多**。
+    #[cfg(feature = "demo")]
     fn open(&self, synthetic: impl FnOnce() -> Result<Catalog, String>) -> Result<Site, String> {
+        if self.locate().given() {
+            return self.locate().open();
+        }
+        if !self.wants_demo() {
+            return Err(NO_LIBRARY.to_string());
+        }
+        demo::site(synthetic()?)
+    }
+
+    /// 实测那几条专用：它们量的就是合成数据，不给库也照造。
+    #[cfg(feature = "demo")]
+    fn open_for_bench(
+        &self,
+        synthetic: impl FnOnce() -> Result<Catalog, String>,
+    ) -> Result<Site, String> {
         if self.locate().given() {
             return self.locate().open();
         }
@@ -111,13 +188,19 @@ impl Args {
 
     /// 这一趟的**工作目录**：子库那一屏排差量预览时要读它里头的媒体池与能力档案名册。
     ///
-    /// 说了 `--workspace` 就用它；开的是现成的库就按 [`Locate`] 那条算；跑合成数据时
-    /// 用一个**临时目录**——演示不该去翻维护者真正的那一份（[`demo::workspace`]）。
+    /// 说了 `--workspace` 就用它；开的是现成的库就按 [`Locate`] 那条算；跑**合成数据**
+    /// 时用一个**临时目录**——演示不该去翻维护者真正的那一份。
     fn workspace_dir(&self) -> PathBuf {
         if self.workspace.is_some() || self.locate().given() {
-            self.locate().workspace_dir()
-        } else {
+            return self.locate().workspace_dir();
+        }
+        #[cfg(feature = "demo")]
+        {
             demo::workspace()
+        }
+        #[cfg(not(feature = "demo"))]
+        {
+            romcat_core::workspace::default_dir()
         }
     }
 }
@@ -129,75 +212,41 @@ fn main() -> ExitCode {
         return font_check(&args);
     }
 
-    if let Some(frames) = args.bench {
-        // 这一条量的是**变体表**：十万行虚拟滚动的代价（票 22）。
-        let rows = args.rows;
-        let site = match args
-            .open(|| demo::synthetic(rows).map_err(|error| format!("造不出合成数据：{error}")))
-        {
-            Ok(site) => site,
-            Err(message) => return fail(&message),
-        };
-        let mut app = App::new(site, args.workspace_dir());
-        app.show_view(View::Variants);
-        let sweep = args.rows_per_frame.map_or(Sweep::Whole, Sweep::Rows);
-        let cost = bench::scroll(&mut app, frames, sweep);
-        println!(
-            "{} 行、{}：{} 帧，中位 {:.2} ms（{:.0} fps），最慢 {:.2} ms；\
-             内存里 {} 行，这一趟读库 {} 次",
-            app.window().total(),
-            match sweep {
-                Sweep::Whole => "一趟滚到底".to_string(),
-                Sweep::Rows(step) => format!("每帧 {step} 行"),
-            },
-            cost.frames,
-            cost.median_ms,
-            cost.fps(),
-            cost.worst_ms,
-            app.window().retained(),
-            cost.reads,
-        );
-        return ExitCode::SUCCESS;
+    #[cfg(feature = "demo")]
+    if let Some(code) = benches(&args) {
+        return code;
     }
 
-    // 量队列的那一趟**最后真的落一批裁决下去**（那是「落下要多久」这个数的来源），
-    // 所以它只许在合成数据上跑——落进真的沉淀库就是往用户的裁决里掺假数据。
-    if args.bench_queue.is_some() && args.locate().given() {
-        return fail(
-            "`--bench-queue` 最后会真的落一批裁决下去，只能在合成数据上跑。\n\
-             去掉 `--catalog` / `--library` / 主库根，改用 `--queue-rows <条数>` 定规模。",
-        );
+    if !args.locate().given() && !args.wants_demo() {
+        return fail(NO_LIBRARY);
     }
 
-    let queue_rows = args.queue_rows;
+    #[cfg(feature = "demo")]
     let site = match args
-        .open(|| demo::queue(queue_rows).map_err(|error| format!("造不出合成数据：{error}")))
+        .open(|| demo::queue(args.queue_rows).map_err(|error| format!("造不出合成数据：{error}")))
     {
         Ok(site) => site,
         Err(message) => return fail(&message),
     };
+    #[cfg(not(feature = "demo"))]
+    let site = match args.locate().open() {
+        Ok(site) => site,
+        Err(message) => return fail(&message),
+    };
 
-    if let Some(frames) = args.bench_queue {
-        let mut app = App::new(site, args.workspace_dir());
-        let cost = bench::queue(&mut app, frames);
-        print!("{}", cost.render());
-        return ExitCode::SUCCESS;
-    }
-
-    if let Some(frames) = args.bench_browse {
-        return bench_browse(&args, frames);
-    }
-
-    if args.bench_sublibrary {
-        return bench_sublibrary(&args);
-    }
-
+    // 标题里说清开的是哪一份。合成数据与真库在界面上长得一模一样，标题是唯一
+    // 一直看得见的区分处。
+    let title = if args.locate().given() {
+        format!("romcat — {}", site.library)
+    } else {
+        "romcat — 合成数据（演示）".to_string()
+    };
     let app = App::new(site, args.workspace_dir());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([720.0, 480.0])
-            .with_title("romcat"),
+            .with_title(title),
         ..Default::default()
     };
     match eframe::run_native(
@@ -216,16 +265,85 @@ fn main() -> ExitCode {
     }
 }
 
+/// 实测那几条的派发。跑了哪一条就返回它的退出码，一条都没跑就是 `None`。
+#[cfg(feature = "demo")]
+fn benches(args: &Args) -> Option<ExitCode> {
+    if let Some(frames) = args.bench {
+        return Some(bench_scroll(args, frames));
+    }
+    // 量队列那一趟**最后真的落一批裁决下去**（那是「落下要多久」这个数的来源），
+    // 所以它只许在合成数据上跑——落进真的沉淀库就是往用户的裁决里掺假数据。
+    if let Some(frames) = args.bench_queue {
+        if args.locate().given() {
+            return Some(fail(
+                "`--bench-queue` 最后会真的落一批裁决下去，只能在合成数据上跑。\n\
+                 去掉 `--catalog` / `--library` / 主库根，改用 `--queue-rows <条数>` 定规模。",
+            ));
+        }
+        let rows = args.queue_rows;
+        let site = match args.open_for_bench(|| {
+            demo::queue(rows).map_err(|error| format!("造不出合成数据：{error}"))
+        }) {
+            Ok(site) => site,
+            Err(message) => return Some(fail(&message)),
+        };
+        let mut app = App::new(site, args.workspace_dir());
+        let cost = bench::queue(&mut app, frames);
+        print!("{}", cost.render());
+        return Some(ExitCode::SUCCESS);
+    }
+    if let Some(frames) = args.bench_browse {
+        return Some(bench_browse(args, frames));
+    }
+    if args.bench_sublibrary {
+        return Some(bench_sublibrary(args));
+    }
+    None
+}
+
+/// 量一遍**变体表**：十万行虚拟滚动的代价（票 22）。
+#[cfg(feature = "demo")]
+fn bench_scroll(args: &Args, frames: u32) -> ExitCode {
+    let rows = args.rows;
+    let site = match args.open_for_bench(|| {
+        demo::synthetic(rows).map_err(|error| format!("造不出合成数据：{error}"))
+    }) {
+        Ok(site) => site,
+        Err(message) => return fail(&message),
+    };
+    let mut app = App::new(site, args.workspace_dir());
+    app.show_view(View::Variants);
+    let sweep = args.rows_per_frame.map_or(Sweep::Whole, Sweep::Rows);
+    let cost = bench::scroll(&mut app, frames, sweep);
+    println!(
+        "{} 行、{}：{} 帧，中位 {:.2} ms（{:.0} fps），最慢 {:.2} ms；\
+         内存里 {} 行，这一趟读库 {} 次",
+        app.window().total(),
+        match sweep {
+            Sweep::Whole => "一趟滚到底".to_string(),
+            Sweep::Rows(step) => format!("每帧 {step} 行"),
+        },
+        cost.frames,
+        cost.median_ms,
+        cost.fps(),
+        cost.worst_ms,
+        app.window().retained(),
+        cost.reads,
+    );
+    ExitCode::SUCCESS
+}
+
 fn fail(message: &str) -> ExitCode {
     eprintln!("{message}");
     ExitCode::FAILURE
 }
 
 /// 量一遍**库浏览**。开了现成的库就量真库，不然量合成数据。
+#[cfg(feature = "demo")]
 fn bench_browse(args: &Args, frames: u32) -> ExitCode {
     let rows = args.rows;
     let site = match args
-        .open(|| demo::library(rows).map_err(|error| format!("造不出合成数据：{error}")))
+        .open_for_bench(|| demo::library(rows).map_err(|error| format!("造不出合成数据：{error}")))
     {
         Ok(site) => site,
         Err(message) => return fail(&message),
@@ -240,6 +358,7 @@ fn bench_browse(args: &Args, frames: u32) -> ExitCode {
 ///
 /// **目标设备用本地 fixture 目录模拟**：在临时目录里造一个空目录当目标，绝不去动任何
 /// 真实设备或 SD 卡。它会往中立库里建一个子库，所以**只在合成数据上跑**。
+#[cfg(feature = "demo")]
 fn bench_sublibrary(args: &Args) -> ExitCode {
     if args.locate().given() {
         return fail(

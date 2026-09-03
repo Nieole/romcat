@@ -5,9 +5,37 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+# **合成数据与实测那几条开关，默认关掉。**
+#
+# 交付出去的客户端里不该有一个字节的假数据：假数据与真库在界面上长得一模一样，
+# 看见一屏假名字的第一反应会是「我的库怎么了」，而不是「我打开的不是我的库」。
+# 关掉之后 `demo` 模块与 `--demo` / `--bench*` 全部不进二进制。
+#
+# 测试与实测：`cargo test --features demo`；门禁一律用 `--all-features`，
+# 否则下面那四个测试会被**静默跳过**。
+demo = []
+
 [[bin]]
 name = "romcat-gui"
 path = "src/main.rs"
+
+# 这四个测试要合成数据撑场面，因此声明依赖。门禁不带 `--all-features` 就跑不到它们。
+[[test]]
+name = "close"
+required-features = ["demo"]
+
+[[test]]
+name = "library"
+required-features = ["demo"]
+
+[[test]]
+name = "queue"
+required-features = ["demo"]
+
+[[test]]
+name = "table"
+required-features = ["demo"]
 
 [dependencies]
 # 三个开关（`--catalog` / `--bench` / `--font-check`）本可以手写解析，用 clap 是为了与
