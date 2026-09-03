@@ -69,8 +69,8 @@ pub fn synthetic(rows: u64) -> Result<Catalog, CatalogError> {
             Variant {
                 main_key: key.clone(),
                 key,
-                // 每十七个留一个**平台未知**：那是真库里存在的一档，
-                // 筛选与排序都得能处理它。
+                // 每十七个留一个**平台未知**：那是真库里存在的一档（认不出平台的内容
+                // 照常入库），按平台排序时 `NULL` 不该让表格翻车。
                 platform: (i % 17 != 3).then(|| platform.to_string()),
                 // 成型规则只能是真有的那几条：库里绝大多数是一文件一变体，
                 // 分卷压缩是少数（`docs/library-facts.md`）。

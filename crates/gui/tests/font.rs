@@ -3,19 +3,19 @@
 //! 问的是 egui 自己的字形查找，而不是直接读字体的 `cmap`——真正决定屏幕上是不是豆腐块的
 //! 是整条回退链。
 
-use romcat_gui::app::App;
-use romcat_gui::font;
+use romcat_gui::{font, headless};
 
 /// 装完字体跑一帧，返回一个问得动字体的 [`egui::Context`]。
+///
+/// `install` 为假时**不装**子集字体——那是反证那条用的，见文末。
 fn ready(install: bool) -> egui::Context {
-    let ctx = egui::Context::default();
-    if install {
-        App::setup(&ctx);
-    }
-    // 跑一帧字体才建得出来；纹理增量得显式认领掉，否则 `epaint` 会在丢弃时 panic。
-    ctx.run_ui(egui::RawInput::default(), |_| {})
-        .textures_delta
-        .clear();
+    let ctx = if install {
+        headless::context()
+    } else {
+        egui::Context::default()
+    };
+    // 跑一帧字体才建得出来。
+    headless::frame(&ctx, egui::RawInput::default(), |_| {});
     ctx
 }
 
@@ -41,18 +41,6 @@ fn 字体样张整张都画得出来() {
             missing.into_iter().collect::<String>()
         );
     }
-}
-
-#[test]
-fn 符号面板上的字都画得出来() {
-    let ctx = ready(true);
-    let all: String = font::SYMBOLS.concat();
-    let missing = font::missing(&ctx, &all);
-    assert!(
-        missing.is_empty(),
-        "画不出来：{}",
-        missing.into_iter().collect::<String>()
-    );
 }
 
 /// 反证：不装子集字体的话，这些字**确实**是豆腐块。

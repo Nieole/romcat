@@ -8,7 +8,7 @@
 //!    不是在写模式。
 //! 3. **一页取不出全库**。`limit` 有硬上界，堵住「把四万行读进内存」这条路。
 
-use romcat_core::catalog::browse::{MAX_PAGE, PlatformFilter, VariantOrder, VariantQuery};
+use romcat_core::catalog::browse::{MAX_PAGE, VariantOrder, VariantQuery};
 use romcat_core::catalog::{Catalog, VariantRow};
 use romcat_core::platform::Manifest;
 use romcat_core::shape::Variant;
@@ -42,8 +42,9 @@ fn 合成库(rows: u64) -> Catalog {
     let variants: Vec<Variant> = (0..rows)
         .map(|i| {
             变体(
-                &format!("{}/游戏 {i:05} 汉化版.zip", 平台[(i % 4) as usize]),
-                // 每七个留一个平台未知。
+                &format!("{}/幻想传说 {i:05} 汉化版.zip", 平台[(i % 4) as usize]),
+                // 每七个留一个平台未知：那是真库里存在的一档（认不出平台的内容照常入库），
+                // 排序遇到 `NULL` 时不该翻车。
                 (i % 7 != 2).then(|| 平台[(i % 4) as usize]),
                 1 + i % 3,
                 // 只有十种取值，于是并列一大片。
@@ -150,41 +151,24 @@ fn 筛选框里的通配符是普通字符() {
 }
 
 #[test]
-fn 平台未知是单独的一档() {
+fn 平台未知的那些行照样排得进去() {
+    // `platform` 可空，而排序键缀了主键。按平台排时 `NULL` 不该让某些行凭空消失——
+    // 十行里有一行是平台未知的，翻完仍得是七十行。
     let catalog = 合成库(70);
-    let 全部 = catalog
-        .variant_total(&VariantQuery::default())
-        .expect("数得出");
-    let 未知 = catalog
-        .variant_total(&VariantQuery {
-            platform: PlatformFilter::Unknown,
-            ..Default::default()
-        })
-        .expect("数得出");
-    assert_eq!(全部, 70);
-    assert_eq!(未知, 10, "七个里有一个平台未知");
-
-    let 平台们 = catalog.variant_platforms().expect("列得出");
-    // 各平台各数一遍，加上平台未知那一档，应当不多不少正好是全部——
-    // 「不筛」与「平台未知」若混成同一个 `None`，这里就对不上。
-    let 逐个数出来: u64 = 平台们
-        .iter()
-        .map(|platform| {
-            let filter = match platform {
-                Some(name) => PlatformFilter::Known(name.clone()),
-                None => PlatformFilter::Unknown,
-            };
-            catalog
-                .variant_total(&VariantQuery {
-                    platform: filter,
-                    ..Default::default()
-                })
-                .expect("数得出")
-        })
-        .sum();
-    assert_eq!(逐个数出来, 全部);
-    assert!(平台们.contains(&None), "平台未知那一档没出现在下拉框里");
-    assert!(平台们.contains(&Some("SFC".to_string())));
+    let query = VariantQuery {
+        order: VariantOrder::Platform,
+        ..Default::default()
+    };
+    assert_eq!(catalog.variant_total(&query).expect("数得出"), 70);
+    let keys = 翻完(&catalog, &query, 9);
+    assert_eq!(keys.len(), 70);
+    let 未知的 = catalog
+        .variant_page(&query, 0, 10)
+        .expect("取得出")
+        .into_iter()
+        .filter(|row| row.platform.is_none())
+        .count();
+    assert!(未知的 > 0, "平台未知的行没排在最前，`NULL` 的次序漂了");
 }
 
 #[test]

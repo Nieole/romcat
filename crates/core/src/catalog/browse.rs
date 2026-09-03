@@ -208,5 +208,4 @@ impl Catalog {
         rows.collect::<Result<_, _>>()
             .map_err(|source| self.err(source))
     }
-
 }

@@ -6,17 +6,11 @@
 
 use egui::{RawInput, ViewportCommand, ViewportEvent, ViewportId, ViewportInfo};
 use romcat_gui::app::{App, Closing};
-use romcat_gui::demo;
+use romcat_gui::{demo, headless};
 
 /// 一帧的输入：`closing` 为真时带上「窗口被要求关闭」这个事件。
 fn 输入(closing: bool) -> RawInput {
-    let mut input = RawInput {
-        screen_rect: Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(1024.0, 640.0),
-        )),
-        ..Default::default()
-    };
+    let mut input = headless::input();
     let mut viewport = ViewportInfo::default();
     if closing {
         viewport.events.push(ViewportEvent::Close);
@@ -27,9 +21,7 @@ fn 输入(closing: bool) -> RawInput {
 
 /// 跑一帧，返回这一帧对根视口发出的全部命令。
 fn 跑一帧(ctx: &egui::Context, app: &mut App, closing: bool) -> Vec<ViewportCommand> {
-    let mut output = ctx.run_ui(输入(closing), |ui| app.ui(ui));
-    output.textures_delta.clear();
-    output
+    headless::frame(ctx, 输入(closing), |ui| app.ui(ui))
         .viewport_output
         .get(&ViewportId::ROOT)
         .map(|viewport| viewport.commands.clone())
@@ -38,8 +30,7 @@ fn 跑一帧(ctx: &egui::Context, app: &mut App, closing: bool) -> Vec<ViewportC
 
 #[test]
 fn 关窗分两拍先关输入法再关窗() {
-    let ctx = egui::Context::default();
-    App::setup(&ctx);
+    let ctx = headless::context();
     let mut app = App::new(demo::synthetic(200).expect("造得出合成数据"));
 
     // 第 0 帧：没人要关，什么都不该发。

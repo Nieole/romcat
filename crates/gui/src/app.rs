@@ -176,7 +176,7 @@ impl App {
     fn font_sample(&self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.strong("字体样张");
-            ui.label(format!("子集 {} 字节", human_bytes(font::subset_bytes() as u64)));
+            ui.label(format!("子集 {}", human_bytes(font::subset_bytes() as u64)));
         });
         for (what, text) in font::SAMPLE.iter().copied() {
             ui.horizontal(|ui| {
