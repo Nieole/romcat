@@ -202,7 +202,7 @@ pub fn queue(app: &mut App, frames: u32) -> QueueCost {
     let load_ms = started.elapsed().as_secs_f64() * 1000.0;
     let (queue_total, selected) = {
         let queue = app.queue().queue();
-        (queue.total(), queue.len() as u64)
+        (queue.pending(), queue.selected().len() as u64)
     };
 
     // 二、点一行分组表：挑三个轴上**最大的那一组**——ADR-0002 说队列只能逐条点就等于
@@ -225,7 +225,7 @@ pub fn queue(app: &mut App, frames: u32) -> QueueCost {
     // 换选择器是**下一帧**才兑现的（界面每帧把草稿写进队列），所以这一帧要跑完才算数。
     headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
     let filter_ms = started.elapsed().as_secs_f64() * 1000.0;
-    let batch = app.queue().queue().len() as u64;
+    let batch = app.queue().queue().selected().len() as u64;
 
     // 三、滚一趟：表格是虚拟化的，代价该与队列有多少条无关。
     let travel = (batch as f32 * row_pitch() - VIEWPORT[1]).max(0.0);
@@ -299,6 +299,6 @@ pub fn queue(app: &mut App, frames: u32) -> QueueCost {
         plan_ms,
         planned,
         apply_ms,
-        left: app.queue().queue().total(),
+        left: app.queue().queue().pending(),
     }
 }

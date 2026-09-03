@@ -21,7 +21,7 @@ use egui::{Align, Layout};
 use egui_extras::{Column, TableBuilder};
 use romcat_core::catalog::browse::VariantOrder;
 use romcat_core::catalog::{Catalog, VariantQuery, VariantRow};
-use romcat_core::report::human_bytes;
+use romcat_core::report::capacity;
 
 /// 一行多高，点。
 ///
@@ -278,7 +278,7 @@ impl Table<'_> {
                         ui.label(variant.files.to_string());
                     });
                     row.col(|ui| {
-                        ui.label(capacity_text(variant));
+                        ui.label(capacity(variant.bytes, variant.unreadable_files));
                     });
                     if row.response().clicked() {
                         *selected = Some(index);
@@ -287,19 +287,5 @@ impl Table<'_> {
                 });
             });
         picked
-    }
-}
-
-/// 一个变体占多大——**带上「这是个下界」那件事**。
-///
-/// 元数据读不到的成员按 0 计入字节合计（ADR-0021），于是有不可读成员时这个数**少算了**。
-/// 画成确数等于把「我不知道」显示成「我知道，是这么多」，而不可读是如实记录的第三种状态，
-/// 不是零。
-fn capacity_text(variant: &VariantRow) -> String {
-    let size = human_bytes(variant.bytes);
-    if variant.unreadable_files == 0 {
-        size
-    } else {
-        format!("≥ {size}")
     }
 }

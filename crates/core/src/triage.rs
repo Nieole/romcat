@@ -308,6 +308,17 @@ impl Axis {
     /// 三个轴，报告与界面照这个次序摆。
     pub const ALL: [Self; 3] = [Self::Directory, Self::CandidateWork, Self::NameMark];
 
+    /// 它在 [`Axis::ALL`] 里排第几。**穷尽匹配**而不是去表里找一遍：找得到与找不到
+    /// 两条路里，后一条根本不存在，写出来只会多一个悄悄退回第一个轴的分支。
+    #[must_use]
+    pub fn index(self) -> usize {
+        match self {
+            Self::Directory => 0,
+            Self::CandidateWork => 1,
+            Self::NameMark => 2,
+        }
+    }
+
     /// 这个轴在界面上叫什么。
     #[must_use]
     pub fn label(self) -> &'static str {
@@ -315,6 +326,16 @@ impl Axis {
             Self::Directory => "按目录",
             Self::CandidateWork => "按候选作品",
             Self::NameMark => "按命名规律",
+        }
+    }
+
+    /// 这个轴筛的是什么，一句人话。界面上是输入框的提示。
+    #[must_use]
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Directory => "这个目录下的",
+            Self::CandidateWork => "候选指着这部作品的",
+            Self::NameMark => "名字里含这段文字的",
         }
     }
 
@@ -624,7 +645,7 @@ impl Draft {
         ];
         if given.iter().filter(|on| **on).count() > 1 {
             return Err(
-                "一次只说一种裁决：`--pick`、`--work`、`--no-release`、`--unknown` 挑一个。"
+                "一次只说一种裁决：采用候选、手工指定作品、没有发行版、认不出，挑一个。"
                     .to_string(),
             );
         }
@@ -633,13 +654,14 @@ impl Draft {
         // ——两句话不能同时说。收下再默默扔掉的话，计划书上印着「汉化组 外星科技」，
         // 库里却一个字都没记。
         if (self.no_release || self.unknown) && !self.overrides.is_empty() {
+            // 这句话命令行与界面共用，所以**不提开关名**——界面上没有开关。
             return Err(format!(
-                "`{}` 说的是「它不成其为一次发行」，那就没有平台、地区、汉化组、版本可记。\n\
-                 去掉那几个开关，或者改用 `--work` 手工指定它是哪次发行。",
+                "「{}」说的是「它不成其为一次发行」，那就没有平台、地区、汉化组、版本可记。\n\
+                 那几样留空，或者改成手工指定它是哪次发行。",
                 if self.unknown {
-                    "--unknown"
+                    "认不出"
                 } else {
-                    "--no-release"
+                    "没有发行版"
                 }
             ));
         }
@@ -659,8 +681,8 @@ impl Draft {
         }
         let Some(work) = self.work.clone() else {
             return Err(
-                "没说要裁成什么：`--pick <序号>` 采用一条候选，`--work <作品>` 手工指定，\n\
-                 `--no-release` 判它没有发行版，`--unknown` 判「都不对而且认不出」。"
+                "没说要裁成什么：采用一条候选、手工指定作品、判它没有发行版、\n\
+                 判「都不对而且认不出」，四选一。"
                     .to_string(),
             );
         };
@@ -765,7 +787,7 @@ fn resolve(item: &Item, decide: &Decide) -> Result<Decision, String> {
         DecisionSpec::Pick(nth) => {
             let candidate = item.candidates.get(nth.saturating_sub(1)).ok_or_else(|| {
                 format!(
-                    "只有 {} 条候选，挑不出第 {nth} 条（`romcat triage show` 看得到有哪些）",
+                    "只有 {} 条候选，挑不出第 {nth} 条——先看清这一条有哪些候选",
                     item.candidates.len()
                 )
             })?;
@@ -942,4 +964,33 @@ pub fn forget(store: &mut Store, plan: &Forget) -> Result<u64, TriageError> {
         }
     }
     Ok(gone)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 按目录差一个字符就是另一个平台() {
+        assert!(under("FC/游戏.zip", "FC"));
+        assert!(under("FC/游戏.zip", "FC/"));
+        // 这条命令后面跟着的是「照这个改几百条」，`FC` 绝不能捎上 `FCX`。
+        assert!(!under("FCX/游戏.zip", "FC"));
+    }
+
+    #[test]
+    fn 根那一层写成斜杠还是空串都是同一批() {
+        // 「按目录」那张表上主库根那一组的标签是**空串**，而界面上空框的意思是「不筛」，
+        // 于是界面把它写成 `/`。两种写法必须选出同一批，否则表上写多少与点下去选中多少
+        // 就对不上了——那正是 `Axis` 存在的理由。
+        for key in ["顶层.zip", "FC/游戏.zip", "a/b/c.zip"] {
+            assert_eq!(
+                under(key, ""),
+                under(key, "/"),
+                "{key} 在两种写法下不是同一个答案",
+            );
+        }
+        assert!(under("顶层.zip", "/"), "主库根那一层该选得中");
+        assert!(!under("FC/游戏.zip", "/"), "根那一层不该把子目录也捎上");
+    }
 }

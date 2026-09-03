@@ -794,12 +794,12 @@ fn 队列列一次之后换选择器不再读库() {
     跑识别(&mut 现场);
     let index = verdict::Index::load(&现场.store, 库名).expect("读得出沉淀库");
     let mut queue = triage::Queue::load(&现场.catalog, &index).expect("列得出队列");
-    let 整个队列 = queue.len();
+    let 整个队列 = queue.selected().len();
     assert!(整个队列 > 0);
 
     // 换成「只要 FC 目录下的」——一次都不碰中立库。
     queue.set_filter(triage::Axis::Directory.filter("FC"));
-    let fc = queue.len();
+    let fc = queue.selected().len();
     assert!(fc > 0 && fc < 整个队列, "FC 该是队列的一部分而不是全部");
     assert!(
         queue.selected().iter().all(|item| item.directory() == "FC"),
@@ -808,7 +808,7 @@ fn 队列列一次之后换选择器不再读库() {
 
     // 换回去，条数与刚列出来时一模一样：就地重筛不该丢东西。
     queue.set_filter(Filter::default());
-    assert_eq!(queue.len(), 整个队列);
+    assert_eq!(queue.selected().len(), 整个队列);
 }
 
 #[test]
@@ -818,10 +818,10 @@ fn 裁完的当场从队列里消失() {
     跑识别(&mut 现场);
     let index = verdict::Index::load(&现场.store, 库名).expect("读得出沉淀库");
     let mut queue = triage::Queue::load(&现场.catalog, &index).expect("列得出队列");
-    let 原有 = queue.total();
+    let 原有 = queue.pending();
 
     queue.set_filter(triage::Axis::Directory.filter("GBA"));
-    let 这一批 = queue.len();
+    let 这一批 = queue.selected().len();
     assert!(这一批 > 0);
     let 键: Vec<String> = queue
         .selected()
@@ -848,7 +848,7 @@ fn 裁完的当场从队列里消失() {
         .expect("落得下");
     assert_eq!(applied.verdicts, 这一批 as u64);
 
-    assert_eq!(queue.total(), 原有 - 这一批 as u64);
+    assert_eq!(queue.pending(), 原有 - 这一批 as u64);
     queue.set_filter(Filter::default());
     assert!(
         queue

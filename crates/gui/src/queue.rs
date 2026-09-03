@@ -24,19 +24,28 @@
 //! 把要来的画出来、把点的那一下写回去、把中文输入放在对的位置上。ADR-0005 说得清楚，
 //! 若 Windows 真机的输入法验证没过，换掉的只是这个 crate。
 
+use std::fmt::Write as _;
+
 use egui::{Align, Layout};
 use egui_extras::{Column, TableBuilder};
 use romcat_core::catalog::State;
 use romcat_core::dat::chinese::ChineseMark;
-use romcat_core::report::{human_bytes, thousands};
-use romcat_core::triage::{Applied, Axis, Draft, Filter, Item, Overrides, Plan, Queue};
+use romcat_core::report::{capacity, thousands};
+use romcat_core::triage::{Applied, Axis, Draft, Filter, Overrides, Plan, Queue};
 use romcat_core::verdict;
 
-use crate::site::Site;
 use crate::table::ROW_HEIGHT;
+use romcat_core::site::Site;
 
 /// 分组表一个轴最多列几行。再多就不是给人看的了（与命令行报告同一个数）。
 const TOP: usize = 12;
+
+/// 「主库根那一层」在**按目录**那个框里写成什么。
+///
+/// 空框的意思是「这个轴不筛」，而主库根那一组的标签正好**是空串**——两件事必须分得开，
+/// 不然那一行既永远显示为选中、又永远点不动。`/` 折进选择器时会被 [`Filter::under`]
+/// 剥掉，落到核心库那边就是空前缀，也就是主库根。
+const ROOT: &str = "/";
 
 /// 待确认队列这个屏幕。
 pub struct Screen {
@@ -55,6 +64,12 @@ pub struct Screen {
     applied: Option<Applied>,
     /// 上一次出的错。
     error: Option<String>,
+    /// **只裁选中的那一条**。
+    ///
+    /// 批量是这件事成不成立的分界（ADR-0002），但「采用第 N 条候选」天生是逐条的动作
+    /// ——同一批里各人的候选不是同一部游戏。勾上它，选择器就多一条「点名这个变体」
+    /// （[`Filter::keys`]），队列、分组表、计划书全都跟着只剩这一条。
+    only_picked: bool,
     /// 把表格的滚动位置强按到这个像素偏移。**只有量帧率时才设**（[`crate::bench`]），
     /// 真界面上永远是 `None`。
     pub scroll_to: Option<f32>,
@@ -73,6 +88,7 @@ impl Screen {
             pending: None,
             applied: None,
             error: None,
+            only_picked: false,
             scroll_to: None,
         }
     }
@@ -109,7 +125,7 @@ impl Screen {
 
     /// 画一帧。
     pub fn ui(&mut self, ui: &mut egui::Ui, site: &mut Site) {
-        self.queue.set_filter(self.picks.filter());
+        self.sync();
         egui::Panel::bottom("裁决面板")
             .default_size(268.0)
             .min_size(120.0)
@@ -146,8 +162,43 @@ impl Screen {
         self.picks.pick(axis, label);
     }
 
+    /// 点中表里的一行。界面上点那一下之后剩下的那半段就是它。
+    pub fn pick_row(&mut self, key: &str) {
+        self.picked = Some(key.to_string());
+    }
+
+    /// 只裁选中的那一条，还是整批。
+    pub fn set_only_picked(&mut self, only: bool) {
+        self.only_picked = only;
+    }
+
+    /// 把界面上那份选择器草稿写进队列，再把「选中的是哪一行」对到下标上。
+    ///
+    /// 顶栏与正文各画各的，而顶栏先画——不先同步一次，状态栏上那两个数就永远比表格慢
+    /// 一帧。没换过选择器时它是空操作。
+    fn sync(&mut self) {
+        if self.picked.is_none() {
+            self.only_picked = false;
+        }
+        // **一帧只换一次选择器**：换一次就是一次重新分区加三次重新分组，一万六千条上
+        // 那是十几毫秒。所以「只裁这一条」不是在筛完之后再收一道口，而是从一开始就换成
+        // 另一个选择器——点名那一个变体（[`Filter::keys`]），三个轴一概不管。于是
+        // 「只裁这一条」就真的只是那一条，与眼下选择器里写着什么无关。
+        let filter = match (self.only_picked, &self.picked) {
+            (true, Some(key)) => Filter {
+                keys: vec![key.clone()],
+                states: self.picks.filter().states,
+                ..Filter::default()
+            },
+            _ => self.picks.filter(),
+        };
+        self.queue.set_filter(filter);
+        self.resolve_picked();
+    }
+
     /// 顶栏上属于队列的那一段：队列多少条、选中多少条、重新列一次。
     pub fn status(&mut self, ui: &mut egui::Ui, site: &Site) {
+        self.sync();
         if ui
             .button("重新列队列")
             .on_hover_text("识别跑过一趟之后点它。一个字节都不读主库。")
@@ -160,11 +211,18 @@ impl Screen {
             ui.label("还没跑过识别，队列无从谈起。先跑一次 `romcat identify`。");
             return;
         }
-        ui.label(format!(
-            "队列 {} 条待裁决；选中 {} 条",
-            thousands(self.queue.total()),
-            thousands(self.queue.len() as u64),
-        ));
+        let mut line = format!("队列 {} 条待裁决", thousands(self.queue.pending()));
+        // **跳过**不算在待裁决里（它不是「拿不定主意」），但勾一下就连它们一起复核，
+        // 那时选中的条数会大过待裁决数——不把这个数说出来，那两个数看着就是错的。
+        if self.queue.skipped() > 0 {
+            let _ = write!(line, "，另有 {} 条跳过", thousands(self.queue.skipped()));
+        }
+        let _ = write!(
+            line,
+            "；选中 {} 条",
+            thousands(self.queue.selected().len() as u64)
+        );
+        ui.label(line);
     }
 
     /// 左边那三张分组表：**一行就是一次批量裁决能覆盖多少**。
@@ -202,7 +260,11 @@ impl Screen {
                     let on = self.picks.holds(axis, &row.label);
                     if ui
                         .selectable_label(on, format!("{}  {}", thousands(row.count), label))
-                        .on_hover_text(format!("{} {}", axis.selector(), row.label))
+                        .on_hover_text(format!(
+                            "点它就只看这一批；命令行上是 `{} {}`",
+                            axis.selector(),
+                            row.label
+                        ))
                         .clicked()
                     {
                         clicked = Some(row.label.clone());
@@ -227,7 +289,7 @@ impl Screen {
             });
             return;
         }
-        if self.queue.is_empty() {
+        if self.queue.selected().is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(24.0);
                 ui.label("一条都没选中。选择器写宽一点，或者点「整个队列」。");
@@ -277,7 +339,7 @@ impl Screen {
                         ui.label(item.candidates.len().to_string());
                     });
                     row.col(|ui| {
-                        ui.label(capacity_text(item));
+                        ui.label(capacity(item.variant.bytes, item.variant.unreadable_files));
                     });
                     if row.response().clicked() {
                         picked = Some((index, item.variant.key.clone()));
@@ -330,19 +392,17 @@ impl Screen {
             ui.weak("点表里的一行看它的候选与依据。选择器与中文输入都在右边这一栏。");
             return;
         };
+        // 不写 `**内容**`：那是命令行报告里的记法，`ui.label` 会把星号照着画出来。
         let anchored = if item.print.is_some() {
-            format!(
-                "**{}**（换台机器也认得出，可导出分享）",
-                verdict::ANCHOR_CONTENT
-            )
+            format!("{}——换台机器也认得出，可导出分享", verdict::ANCHOR_CONTENT)
         } else {
-            format!("**{}**（只在本机成立）", verdict::ANCHOR_PATH)
+            format!("{}——只在本机成立", verdict::ANCHOR_PATH)
         };
         let (key, state, platform, bytes) = (
             item.variant.key.clone(),
             item.state.label(),
             item.variant.platform.clone(),
-            capacity_text(item),
+            capacity(item.variant.bytes, item.variant.unreadable_files),
         );
         let reason = item.reason.clone();
         let candidates: Vec<String> = item
@@ -364,13 +424,17 @@ impl Screen {
                 )
             })
             .collect();
+        ui.checkbox(&mut self.only_picked, "只裁选中的这一条")
+            .on_hover_text(
+                "「采用第 N 条候选」天生是逐条的动作：同一批里各人的候选不是同一部游戏。",
+            );
         egui::ScrollArea::vertical().id_salt("详情").show(ui, |ui| {
             ui.strong(&key);
             ui.label(format!(
                 "{state}｜平台 {}｜容量 {bytes}",
                 platform.as_deref().unwrap_or("未知"),
             ));
-            ui.label(format!("裁决钉在{anchored}上"));
+            ui.label(format!("裁决钉在：{anchored}"));
             if let Some(reason) = reason {
                 ui.label(format!("为什么没定下来：{reason}"));
             }
@@ -399,8 +463,9 @@ impl Screen {
                         ui.add(
                             egui::TextEdit::singleline(self.picks.text_mut(axis))
                                 .desired_width(f32::INFINITY)
-                                .hint_text(axis.selector()),
-                        );
+                                .hint_text(axis.hint()),
+                        )
+                        .on_hover_text(format!("命令行上是 `{}`", axis.selector()));
                         ui.end_row();
                     }
                 });
@@ -429,6 +494,7 @@ impl Screen {
                     text_row(ui, "版本", &mut self.form.version, facts);
                     text_row(ui, "平台", &mut self.form.platform, facts);
                     text_row(ui, "地区", &mut self.form.region, facts);
+                    text_row(ui, "序列号", &mut self.form.serial, facts);
                     text_row(ui, "语言", &mut self.form.languages, facts);
                     ui.label("中文身份");
                     ui.add_enabled_ui(facts, |ui| {
@@ -453,7 +519,7 @@ impl Screen {
             let complaint = draft.check().err();
             ui.separator();
             ui.horizontal_wrapped(|ui| {
-                let ready = complaint.is_none() && !self.queue.is_empty();
+                let ready = complaint.is_none() && !self.queue.selected().is_empty();
                 if ui
                     .add_enabled(ready, egui::Button::new("预览这一批"))
                     .on_hover_text(
@@ -463,7 +529,10 @@ impl Screen {
                 {
                     self.preview(site, &draft);
                 }
-                ui.label(format!("选中 {} 条", thousands(self.queue.len() as u64)));
+                ui.label(format!(
+                    "选中 {} 条",
+                    thousands(self.queue.selected().len() as u64)
+                ));
             });
             if let Some(complaint) = complaint {
                 ui.colored_label(ui.visuals().warn_fg_color, complaint);
@@ -579,18 +648,32 @@ impl Screen {
         }
     }
 
-    /// 选中的那一条眼下排在第几行。**记的是键**，表重排之后照样指得回去。
-    fn picked_index(&self) -> Option<usize> {
-        let key = self.picked.as_deref()?;
+    /// 把「选中的是哪一条」重新对到下标上。
+    ///
+    /// **记的是键，不是下标**：换个选择器表就重排了，下标会指到别人身上。对得上就直接
+    /// 用，对不上才扫一遍；扫不着说明它被这一次筛选筛掉了，那就**放掉**——留着的话
+    /// 每帧都要为一个已经不在表里的键把一万六千条重扫一遍。
+    fn resolve_picked(&mut self) {
+        let Some(key) = self.picked.clone() else {
+            return;
+        };
         let items = self.queue.selected();
         if items
             .get(self.picked_at)
             .map(|item| item.variant.key.as_str())
-            == Some(key)
+            == Some(key.as_str())
         {
-            return Some(self.picked_at);
+            return;
         }
-        items.iter().position(|item| item.variant.key == key)
+        match items.iter().position(|item| item.variant.key == key) {
+            Some(at) => self.picked_at = at,
+            None => self.picked = None,
+        }
+    }
+
+    /// 选中的那一条眼下排在第几行；这一帧开头 [`Screen::resolve_picked`] 已经对准过了。
+    fn picked_index(&self) -> Option<usize> {
+        self.picked.as_ref().map(|_| self.picked_at)
     }
 }
 
@@ -659,35 +742,26 @@ impl Picks {
         }
     }
 
-    /// 点中分组表的一行：**换成这一批**。
-    ///
-    /// 换成什么由 [`Axis::filter`] 说了算——报告里那句「一条 `--under` 覆盖 852 条」
-    /// 与这里点下去真的选中多少，出自同一个函数。
-    fn pick(&mut self, axis: Axis, label: &str) {
+    /// 点中分组表的一行：**换成这一批**；再点一次同一行就取消，回到整个队列。
+    pub fn pick(&mut self, axis: Axis, label: &str) {
         let already = self.holds(axis, label);
         self.clear_axes();
-        if already {
-            // 再点一次同一行就取消，回到整个队列。
-            return;
-        }
-        let filter = axis.filter(label);
-        for (axis, value) in [
-            (Axis::Directory, filter.under.first()),
-            (Axis::CandidateWork, filter.candidate_work.first()),
-            (Axis::NameMark, filter.name_contains.first()),
-        ] {
-            if let Some(value) = value {
-                self.text_mut(axis).clone_from(value);
-            }
+        if !already {
+            *self.text_mut(axis) = written(label);
         }
     }
 
     /// 这个轴眼下选的就是这一组吗。
     fn holds(&self, axis: Axis, label: &str) -> bool {
+        self.text(axis) == written(label)
+    }
+
+    /// 这个轴框里现在写着什么。
+    fn text(&self, axis: Axis) -> &str {
         match axis {
-            Axis::Directory => self.under == label,
-            Axis::CandidateWork => self.candidate_work == label,
-            Axis::NameMark => self.name == label,
+            Axis::Directory => &self.under,
+            Axis::CandidateWork => &self.candidate_work,
+            Axis::NameMark => &self.name,
         }
     }
 
@@ -741,7 +815,7 @@ impl How {
 }
 
 /// 界面上那份**裁决**草稿。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Form {
     /// 裁成哪一种。
     pub how: How,
@@ -767,6 +841,25 @@ pub struct Form {
     pub note: String,
 }
 
+impl Default for Form {
+    fn default() -> Self {
+        Self {
+            how: How::default(),
+            // **候选的序号从 1 数起**（0 会被 `triage::Draft` 当场挡下）。
+            pick: 1,
+            work: String::new(),
+            platform: String::new(),
+            region: String::new(),
+            serial: String::new(),
+            languages: String::new(),
+            chinese: None,
+            team: String::new(),
+            version: String::new(),
+            note: String::new(),
+        }
+    }
+}
+
 impl Form {
     /// 折成一份 [`Draft`]。**说得成不成立由核心库判**，这里只负责搬。
     #[must_use]
@@ -777,7 +870,7 @@ impl Form {
         };
         let facts = self.how.wants_facts();
         Draft {
-            pick: (self.how == How::Pick).then_some(self.pick.max(1)),
+            pick: (self.how == How::Pick).then_some(self.pick),
             work: self.how.wants_work().then(|| some(&self.work)).flatten(),
             no_release: self.how == How::NoRelease,
             unknown: self.how == How::Unknown,
@@ -809,22 +902,21 @@ fn text_row(ui: &mut egui::Ui, label: &str, value: &mut String, enabled: bool) {
     ui.end_row();
 }
 
+/// 一组的标签在框里写成什么。**主库根那一组的标签是空串**，而空框的意思是「不筛」。
+fn written(label: &str) -> String {
+    if label.is_empty() {
+        ROOT.to_string()
+    } else {
+        label.to_string()
+    }
+}
+
 /// 这个轴上一组都没有时说的那句话。
 fn empty_axis(axis: Axis) -> &'static str {
     match axis {
         Axis::Directory => "（选中的这些不在任何目录下）",
         Axis::CandidateWork => "（选中的这些一条候选都没有——那正是队列的常态，走手工指定）",
         Axis::NameMark => "（选中的这些名字里一个记号都没有）",
-    }
-}
-
-/// 一个变体占多大——**带上「这是个下界」那件事**（ADR-0021，同 [`crate::table`]）。
-fn capacity_text(item: &Item) -> String {
-    let size = human_bytes(item.variant.bytes);
-    if item.variant.unreadable_files == 0 {
-        size
-    } else {
-        format!("≥ {size}")
     }
 }
 
@@ -861,6 +953,43 @@ mod tests {
             !filter.keeps_state(State::Skipped),
             "跳过不是「拿不定主意」，默认不该进队列",
         );
+    }
+
+    #[test]
+    fn 点一行折出来的选择器就是那个轴说的那一个() {
+        // 这是 `Axis` 存在的全部意义：表上写「852 条」，点下去就该是那 852 条。
+        // 界面这一侧多绕一道（文本框），所以要单独钉一次。
+        for (axis, label) in [
+            (Axis::Directory, "gba/【全部汉化】"),
+            (Axis::CandidateWork, "勇者斗恶龙"),
+            (Axis::NameMark, "ACG汉化组"),
+        ] {
+            let mut picks = Picks::default();
+            picks.pick(axis, label);
+            let 界面 = picks.filter();
+            let 领域 = axis.filter(label);
+            assert_eq!(界面.under, 领域.under, "{label}");
+            assert_eq!(界面.candidate_work, 领域.candidate_work, "{label}");
+            assert_eq!(界面.name_contains, 领域.name_contains, "{label}");
+        }
+    }
+
+    #[test]
+    fn 主库根那一组点得动而且不默认高亮() {
+        // 空框的意思是「这个轴不筛」，而主库根那一组的标签正好是空串。两件事不分开的话，
+        // 那一行既永远显示为选中、又永远点不动——`Axis` 的不变式当场破掉。
+        let mut picks = Picks::default();
+        assert!(
+            !picks.holds(Axis::Directory, ""),
+            "什么都没选的时候主库根那一行不该是高亮的",
+        );
+        picks.pick(Axis::Directory, "");
+        assert!(picks.holds(Axis::Directory, ""), "点了却没选中");
+        // 框里写的是哨兵 `/`；它与领域侧的空前缀是同一件事，那一条钉在核心库的
+        // `根那一层写成斜杠还是空串都是同一批` 上。
+        assert_eq!(picks.filter().under, vec![ROOT.to_string()]);
+        picks.pick(Axis::Directory, "");
+        assert!(picks.filter().under.is_empty(), "再点一次该取消");
     }
 
     #[test]

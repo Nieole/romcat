@@ -7,6 +7,23 @@ use std::fmt::Write as _;
 
 use super::{HealthReport, UNKNOWN_PLATFORM_LABEL, share};
 
+/// 一个变体占多大——**带上「这是个下界」那件事**。
+///
+/// 元数据读不到的成员按 0 计入字节合计（ADR-0021），于是有不可读成员时这个数**少算了**。
+/// 画成确数等于把「我不知道」显示成「我知道，是这么多」，而**不可读**是如实记录的第三种
+/// 状态，不是零。
+///
+/// 这条规矩在核心库里而不在界面里：它是「这个数怎么读」的判断，不是「怎么画」的判断。
+#[must_use]
+pub fn capacity(bytes: u64, unreadable_files: u64) -> String {
+    let size = human_bytes(bytes);
+    if unreadable_files == 0 {
+        size
+    } else {
+        format!("≥ {size}")
+    }
+}
+
 /// 把字节数写成人能读的形态。
 #[must_use]
 pub fn human_bytes(bytes: u64) -> String {

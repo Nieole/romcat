@@ -34,6 +34,7 @@ use romcat_core::scan::aggregate::{Aggregate, Limits};
 use romcat_core::scan::{self, CancelToken, CheckpointOptions, Jobs, ScanOptions};
 use romcat_core::scrape::{self, Priorities};
 use romcat_core::shape;
+use romcat_core::site::Site;
 use romcat_core::sublibrary::{self, Sublibrary};
 use romcat_core::sync;
 use romcat_core::title;
@@ -2426,37 +2427,22 @@ struct TriageCommonArgs {
     workspace: Option<PathBuf>,
 }
 
-/// 一份开好的中立库加沉淀库，连这份主库在裁决里叫什么名字。
-struct TriageSite {
-    catalog: Catalog,
-    store: Store,
-    library: String,
+/// 只开**沉淀库**：导出、导入与「忘掉裁决」不必连中立库一起开。
+fn open_store(workspace: &Path) -> Result<Store, String> {
+    Store::open(&workspace::verdict_store_path(workspace)).map_err(|error| format!("{error}"))
 }
 
 impl TriageCommonArgs {
-    fn open(&self) -> Result<TriageSite, String> {
+    /// 开一份**现场**：中立库、沉淀库，连这份主库在**路径锚**里叫什么名字。
+    ///
+    /// 三样一起开在 `core::site` 里——界面走的是同一条（ADR-0005：核心是独立的库）。
+    /// 命令行这一层只负责把三种给法折成一个 [`Slug`]。
+    fn open(&self) -> Result<Site, String> {
         let (slug, located_by) = locate(self.library.as_deref(), self.root.as_deref())?;
         let workspace = workspace_dir(self.workspace.as_deref());
-        let path = workspace::catalog_path(&workspace, slug);
-        if !path.exists() {
-            return Err(format!(
-                "还没有 {located_by} 这份中立库。先跑一次 `romcat scan`。"
-            ));
-        }
-        let catalog = open_catalog(&workspace, slug, self.root.as_deref())?;
-        let store = open_store(&workspace)?;
-        Ok(TriageSite {
-            catalog,
-            store,
-            // **路径锚跟中立库走同一把钥匙**：同一个 slug 就是同一份中立库，
-            // 也就该是同一批路径锚。换挂载点不影响（`--library` 存在的理由）。
-            library: slug.text(),
-        })
+        Site::open(&workspace, slug, self.root.as_deref(), &located_by)
+            .map_err(|error| format!("{error}"))
     }
-}
-
-fn open_store(workspace: &Path) -> Result<Store, String> {
-    Store::open(&workspace::verdict_store_path(workspace)).map_err(|error| format!("{error}"))
 }
 
 /// 挑队列里的哪些。**几个条件之间是交集**，同一个条件给几次是并集。
@@ -2940,7 +2926,7 @@ fn run_triage_list(args: &TriageListArgs) -> ExitCode {
 
 /// 折一次队列，连沉淀库眼下的账。
 fn collect_queue(
-    site: &TriageSite,
+    site: &Site,
     filter: &Filter,
 ) -> Result<(triage::Survey, verdict::Counts), String> {
     let counts = site

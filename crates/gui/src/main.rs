@@ -14,9 +14,10 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use romcat_core::catalog::{Catalog, VariantQuery};
+use romcat_core::site::Site;
 use romcat_gui::app::{App, View};
 use romcat_gui::bench::Sweep;
-use romcat_gui::site::{Locate, Site};
+use romcat_gui::site::Locate;
 use romcat_gui::{bench, demo, font, headless};
 
 /// romcat 的界面。
@@ -56,6 +57,8 @@ struct Args {
     bench: Option<u32>,
 
     /// 不开窗，量**待确认队列**：列队列、换选择器、每帧、排计划各要多久
+    ///
+    /// **只在合成数据上跑**：它最后一步真的落一批裁决下去，那不该落进你的沉淀库
     #[arg(long, value_name = "帧数", num_args = 0..=1, default_missing_value = "240")]
     bench_queue: Option<u32>,
 
@@ -69,20 +72,20 @@ struct Args {
 }
 
 impl Args {
-    /// 说了要开现成的库吗。三样给法任给一样都算。
-    fn wants_real(&self) -> bool {
-        self.catalog.is_some() || self.library.is_some() || self.root.is_some()
+    /// 三种给法折成核心库认得的形状。
+    fn locate(&self) -> Locate<'_> {
+        Locate {
+            root: self.root.as_deref(),
+            library: self.library.as_deref(),
+            workspace: self.workspace.as_deref(),
+            catalog: self.catalog.as_deref(),
+        }
     }
 
     /// 开一份现成的库；没说要开就造一份合成的。
     fn open(&self, synthetic: impl FnOnce() -> Result<Catalog, String>) -> Result<Site, String> {
-        if self.wants_real() {
-            return Site::open(&Locate {
-                root: self.root.as_deref(),
-                library: self.library.as_deref(),
-                workspace: self.workspace.as_deref(),
-                catalog: self.catalog.as_deref(),
-            });
+        if self.locate().given() {
+            return self.locate().open();
         }
         demo::site(synthetic()?)
     }
@@ -124,6 +127,15 @@ fn main() -> ExitCode {
             cost.reads,
         );
         return ExitCode::SUCCESS;
+    }
+
+    // 量队列的那一趟**最后真的落一批裁决下去**（那是「落下要多久」这个数的来源），
+    // 所以它只许在合成数据上跑——落进真的沉淀库就是往用户的裁决里掺假数据。
+    if args.bench_queue.is_some() && args.locate().given() {
+        return fail(
+            "`--bench-queue` 最后会真的落一批裁决下去，只能在合成数据上跑。\n\
+             去掉 `--catalog` / `--library` / 主库根，改用 `--queue-rows <条数>` 定规模。",
+        );
     }
 
     let queue_rows = args.queue_rows;
@@ -189,13 +201,8 @@ fn font_check(args: &Args) -> ExitCode {
         missing.extend(font::missing(&ctx, text));
     }
 
-    if args.wants_real() {
-        let site = match Site::open(&Locate {
-            root: args.root.as_deref(),
-            library: args.library.as_deref(),
-            workspace: args.workspace.as_deref(),
-            catalog: args.catalog.as_deref(),
-        }) {
+    if args.locate().given() {
+        let site = match args.locate().open() {
             Ok(site) => site,
             Err(message) => return fail(&message),
         };

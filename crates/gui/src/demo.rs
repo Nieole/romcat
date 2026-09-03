@@ -13,9 +13,8 @@ use romcat_core::catalog::{Candidate, Catalog, CatalogError, Confidence, State};
 use romcat_core::dat::Convention;
 use romcat_core::platform::Manifest;
 use romcat_core::shape::{Role, SINGLE_FILE_RULE, SPLIT_VOLUME_RULE, Variant};
+use romcat_core::site::Site;
 use romcat_core::verdict::Store;
-
-use crate::site::Site;
 
 /// 造名字用的作品名。繁简、假名、罗马数字、带圈数字、音符、星号各占几条。
 const WORKS: &[&str] = &[
@@ -395,11 +394,14 @@ fn candidate_of(work: &str, bucket: &Bucket, mark: &str) -> Candidate {
     }
 }
 
+/// 这份合成数据在**路径锚**里叫什么名字。真库永远不会叫这个。
+pub const LIBRARY: &str = "合成数据";
+
 /// 一份**全在内存里**的现场：合成数据配一份空沉淀库。
 ///
 /// # Errors
 /// 建库失败时返回错误。
 pub fn site(catalog: Catalog) -> Result<Site, String> {
     let store = Store::in_memory().map_err(|error| format!("开不出沉淀库：{error}"))?;
-    Ok(Site::in_memory(catalog, store))
+    Ok(Site::in_memory(catalog, store, LIBRARY))
 }

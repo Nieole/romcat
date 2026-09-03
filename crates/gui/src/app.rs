@@ -22,9 +22,9 @@ use egui::{Align, Layout};
 use romcat_core::catalog::{VariantQuery, VariantRow};
 use romcat_core::report::human_bytes;
 
-use crate::site::Site;
 use crate::table::{SPAN, Table, Window};
 use crate::{font, queue};
+use romcat_core::site::Site;
 
 /// 关窗走到哪一拍了。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

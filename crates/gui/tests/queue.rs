@@ -9,6 +9,7 @@ use egui::widgets::text_edit::TextEditState;
 use romcat_core::catalog::State;
 use romcat_core::triage::{Axis, Draft, Overrides};
 use romcat_gui::app::{App, View};
+use romcat_gui::table::ROW_HEIGHT;
 use romcat_gui::{demo, headless};
 
 fn 界面(rows: u64) -> App {
@@ -29,7 +30,7 @@ fn 队列是打开工具后的默认界面() {
     let app = 界面(demo::QUEUE_ROWS);
     assert_eq!(app.view(), View::Queue);
     assert_eq!(
-        app.queue().queue().total(),
+        app.queue().queue().pending(),
         demo::QUEUE_ROWS,
         "打开就该已经列好了队列，而不是等人再点一次",
     );
@@ -92,7 +93,7 @@ fn 三个轴各能一次盖住一批() {
         let (screen, _) = app.queue_and_site();
         screen.pick(axis, label);
         跑(&ctx, app, 1);
-        app.queue().queue().len()
+        app.queue().queue().selected().len()
     };
     assert_eq!(
         点一行(&mut app, Axis::Directory, "gba/【全部汉化】"),
@@ -135,12 +136,12 @@ fn 表格里画多少行文本输入框都是那几个() {
         let mut app = 界面(rows);
         跑(&ctx, &mut app, 3);
         // 滚一整趟：虚拟化的表格会把不同的行画出来，若单元格里有文本框，这个数会涨。
-        let total = app.queue().queue().len();
-        for step in 0..24 {
+        const STEPS: u32 = 24;
+        #[allow(clippy::cast_precision_loss)]
+        let travel = app.queue().queue().selected().len() as f32 * ROW_HEIGHT;
+        for step in 0..=STEPS {
             let (screen, _) = app.queue_and_site();
-            #[allow(clippy::cast_precision_loss)]
-            let at = total as f32 * 24.0 * step as f32 / 24.0;
-            screen.scroll_to = Some(at);
+            screen.scroll_to = Some(travel * step as f32 / STEPS as f32);
             headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
         }
         ctx.data(|data| data.count::<TextEditState>())
@@ -160,14 +161,14 @@ fn 表格里画多少行文本输入框都是那几个() {
 #[test]
 fn 裁决即时写进沉淀库并从队列移除() {
     let mut app = 界面(demo::QUEUE_ROWS);
-    let 原有 = app.queue().queue().total();
+    let 原有 = app.queue().queue().pending();
 
     // 点**按命名规律**里的一个汉化组记号——ADR-0002 点名的那种批量。
     let (screen, _) = app.queue_and_site();
     screen.pick(Axis::NameMark, "ACG汉化组");
     let ctx = headless::context();
     跑(&ctx, &mut app, 1);
-    let 这一批 = app.queue().queue().len();
+    let 这一批 = app.queue().queue().selected().len();
     assert_eq!(这一批, 129, "真机上 [ACG汉化组] 带 129 条");
 
     // 手工指定作品，顺手补上**汉化组**——自动识别只做到发行版级（ADR-0008）。
@@ -207,7 +208,7 @@ fn 裁决即时写进沉淀库并从队列移除() {
     assert_eq!(counts.total, 这一批 as u64);
     assert_eq!(counts.with_team, 这一批 as u64, "汉化组要真的落库");
     assert_eq!(
-        app.queue().queue().total(),
+        app.queue().queue().pending(),
         原有 - 这一批 as u64,
         "裁完了还留在队列里的话，人会被同一条问第二遍",
     );
@@ -222,13 +223,54 @@ fn 裁决即时写进沉淀库并从队列移除() {
 }
 
 #[test]
+fn 只裁选中的这一条也做得到() {
+    // 批量是这件事成不成立的分界（ADR-0002），但「采用第 N 条候选」天生是逐条的动作：
+    // 同一批里各人的候选不是同一部游戏。两种粒度都得有。
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    跑(&ctx, &mut app, 1);
+    let 整批 = app.queue().queue().selected().len();
+    assert!(整批 > 1);
+
+    // 点表里第一行——`pick_row` 走的就是界面上点那一下之后剩下的那半段。
+    let key = app.queue().queue().selected()[0].variant.key.clone();
+    {
+        let (screen, _) = app.queue_and_site();
+        screen.pick_row(&key);
+        screen.set_only_picked(true);
+    }
+    跑(&ctx, &mut app, 1);
+    assert_eq!(
+        app.queue().queue().selected().len(),
+        1,
+        "勾了「只裁选中的这一条」，选中的却不止一条",
+    );
+
+    let draft = Draft {
+        work: Some("单条指定的作品".to_string()),
+        ..Draft::default()
+    };
+    let (screen, site) = app.queue_and_site();
+    screen.preview(site, &draft);
+    assert_eq!(screen.pending().expect("排得出计划").decided.len(), 1);
+    screen.commit(site);
+    assert!(screen.error().is_none(), "{:?}", screen.error());
+    assert_eq!(app.site().store.counts().expect("读得出").total, 1);
+    assert_eq!(
+        app.queue().queue().pending(),
+        整批 as u64 - 1,
+        "只该少掉那一条",
+    );
+}
+
+#[test]
 fn 都不对可以手工指定也可以说它没有发行版() {
     let mut app = 界面(2_000);
     let (screen, _) = app.queue_and_site();
     screen.pick(Axis::Directory, "GoodNES3.1");
     let ctx = headless::context();
     跑(&ctx, &mut app, 1);
-    let 这一批 = app.queue().queue().len();
+    let 这一批 = app.queue().queue().selected().len();
     assert!(这一批 > 0);
 
     // 「都不对」的第一种明说：它**没有发行版**（同人移植、homebrew）。

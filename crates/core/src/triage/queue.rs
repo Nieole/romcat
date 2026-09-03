@@ -43,8 +43,14 @@ pub struct Queue {
     items: Vec<Item>,
     /// 选中了几条。
     taken: usize,
-    /// 整个队列有多少条，按报告的口径（默认那三档，不含跳过）。
-    total: u64,
+    /// 整个队列有多少条待裁决，按报告的口径（默认那三档，**不含跳过**）。
+    pending: u64,
+    /// 内存里那些**跳过**的有多少条。
+    ///
+    /// 它们不算在 `pending` 里（跳过不是「拿不定主意」），但**选中的条数里可能有它们**
+    /// ——界面上勾一下就连跳过一起复核。两个数分开报，状态栏才说得出
+    /// 「队列 16,656 条待裁决，另有 N 条跳过，选中 M 条」这种自洽的话。
+    skipped: u64,
     /// 跑过识别没有。没跑过时队列是空的，**但那不是「没什么可裁的」**。
     identified: bool,
     /// 眼下的选择器。
@@ -73,10 +79,16 @@ impl Queue {
             ..Filter::default()
         };
         let survey = survey(catalog, verdicts, &everything)?;
+        let skipped = survey
+            .items
+            .iter()
+            .filter(|item| item.state == State::Skipped)
+            .count();
         let mut queue = Self {
             items: survey.items,
             taken: 0,
-            total: survey.queue,
+            pending: survey.queue,
+            skipped: skipped as u64,
             identified: survey.identified,
             filter: Filter::default(),
             groups: Default::default(),
@@ -92,7 +104,8 @@ impl Queue {
         Self {
             items: Vec::new(),
             taken: 0,
-            total: 0,
+            pending: 0,
+            skipped: 0,
             identified: false,
             filter: Filter::default(),
             groups: Default::default(),
@@ -106,10 +119,16 @@ impl Queue {
         self.identified
     }
 
-    /// 整个队列有多少条（报告口径：默认那三档，不含**跳过**）。
+    /// 整个队列有多少条**待裁决**（报告口径：默认那三档，不含**跳过**）。
     #[must_use]
-    pub fn total(&self) -> u64 {
-        self.total
+    pub fn pending(&self) -> u64 {
+        self.pending
+    }
+
+    /// 内存里那些**跳过**的有多少条。它们默认不在队列里，勾一下才连它们一起复核。
+    #[must_use]
+    pub fn skipped(&self) -> u64 {
+        self.skipped
     }
 
     /// 眼下的选择器。
@@ -124,26 +143,10 @@ impl Queue {
         &self.items[..self.taken]
     }
 
-    /// 选中了几条。
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.taken
-    }
-
-    /// 一条都没选中吗。
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.taken == 0
-    }
-
     /// 选中的那些在这个轴上分成哪些组。**每一行就是一次批量裁决能覆盖多少。**
     #[must_use]
     pub fn groups(&self, axis: Axis) -> &[GroupRow] {
-        let at = Axis::ALL
-            .iter()
-            .position(|other| *other == axis)
-            .unwrap_or(0);
-        &self.groups[at]
+        &self.groups[axis.index()]
     }
 
     /// 换一套选择器。和现在这套一样就什么都不做——界面每帧都会调它。
@@ -221,13 +224,19 @@ impl Queue {
     ) -> Result<Applied, TriageError> {
         let account = apply(catalog, store, self.selected(), plan)?;
         let gone: BTreeSet<&str> = plan.decided.iter().map(|row| row.key.as_str()).collect();
-        // 整个队列的条数按**报告口径**减：跳过的那些本来就没算在里面。
-        let counted = self
-            .items
-            .iter()
-            .filter(|item| item.state != State::Skipped && gone.contains(item.variant.key.as_str()))
-            .count();
-        self.total = self.total.saturating_sub(counted as u64);
+        // 两个数分开减：跳过的那些本来就没算在待裁决里。
+        let (mut pending, mut skipped) = (0, 0);
+        for item in &self.items {
+            if gone.contains(item.variant.key.as_str()) {
+                if item.state == State::Skipped {
+                    skipped += 1;
+                } else {
+                    pending += 1;
+                }
+            }
+        }
+        self.pending = self.pending.saturating_sub(pending);
+        self.skipped = self.skipped.saturating_sub(skipped);
         self.items
             .retain(|item| !gone.contains(item.variant.key.as_str()));
         self.printed.retain(|key| !gone.contains(key.as_str()));

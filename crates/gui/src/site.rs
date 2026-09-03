@@ -1,36 +1,20 @@
-//! 一份开好的**中立库**加**沉淀库**：界面开工前要的全部原料。
+//! 界面从哪儿找那两份库。
 //!
-//! 两份库都在**工作目录**里，都在本机（ADR-0009）——**主库一个字节都不读**，
-//! 队列、候选、依据、裁决全部由这两份库折出来（ADR-0001）。所以外置盘没挂上的时候
-//! 这个界面照样打得开、照样裁得动。
+//! **开库这件事本身在核心里**（[`romcat_core::site::Site`]）——中立库、沉淀库、
+//! 「这份主库在**路径锚**里叫什么名字」三样一起开，界面与命令行走同一条。谁自己另起
+//! 一个名字，谁裁出来的那批锚就与别处对不上。
 //!
-//! ## 为什么路径的算法要跟命令行一模一样
-//!
-//! 一条**路径锚**记的是「主库『某某』里的某某变体」，那个「某某」就是中立库的文件名
-//! （`workspace::Slug::text`）。界面若自己另起一个名字，同一台机器上界面裁的与命令行裁的
-//! 就落在两批锚上——`romcat triage list` 看不见界面刚裁完的那几条。于是这里只做一件事：
-//! 把 `--library` / 主库根 / `--catalog` 三种给法**折回同一个名字**。
-//!
-//! `--catalog` 那条尤其要说清：中立库的文件名**就是**那个名字加 `.sqlite3`，
-//! 所以直接开一个文件时，主库的名字就是它的主文件名——不是猜的，是同一条算法的逆向。
+//! 这一层只剩一件事：把命令行上那三种给法（主库根 / `--library <名字>` /
+//! `--catalog <文件>`）折成核心库认得的形状，外加一条 `--catalog` 独有的推断——
+//! 它的**工作目录**从文件路径反推（`工作目录/catalog/某某.sqlite3`），因为沉淀库
+//! 得跟它住在同一个工作目录里。
 
 use std::path::{Path, PathBuf};
 
-use romcat_core::catalog::Catalog;
-use romcat_core::verdict::Store;
+use romcat_core::site::Site;
 use romcat_core::workspace::{self, Slug};
 
-/// 一份开好的中立库加沉淀库，连这份主库在裁决里叫什么名字。
-pub struct Site {
-    /// **中立库**：变体、候选、依据、这一轮的识别结论。
-    pub catalog: Catalog,
-    /// **沉淀库**：裁决落在这里，**不跟中立库走**，删掉中立库重扫也不丢。
-    pub store: Store,
-    /// 这份主库在**路径锚**里叫什么名字。
-    pub library: String,
-}
-
-/// 界面从哪儿找中立库。
+/// 界面从哪儿找中立库。三种给法任给一样，都不给就是合成数据。
 #[derive(Debug, Clone, Default)]
 pub struct Locate<'a> {
     /// 主库根目录。**只用来找到对应的中立库，一个字节都不读它。**
@@ -43,79 +27,53 @@ pub struct Locate<'a> {
     pub catalog: Option<&'a Path>,
 }
 
-impl Site {
-    /// 开一份现成的库。
+impl Locate<'_> {
+    /// 说了要开现成的库吗。
+    #[must_use]
+    pub fn given(&self) -> bool {
+        self.catalog.is_some() || self.library.is_some() || self.root.is_some()
+    }
+
+    /// 开这份现场。
     ///
     /// # Errors
     /// 说不出要开哪一份、库不在、或者打不开时，返回一句给人看的话。
-    pub fn open(locate: &Locate<'_>) -> Result<Self, String> {
-        let workspace = locate.workspace.map_or_else(
+    pub fn open(&self) -> Result<Site, String> {
+        let workspace = self.workspace.map_or_else(
             || {
-                locate
-                    .catalog
+                self.catalog
                     .and_then(workspace_of)
                     .unwrap_or_else(workspace::default_dir)
             },
             Path::to_path_buf,
         );
-        let (path, library) = match locate.catalog {
-            // 中立库的文件名就是主库在**路径锚**里的名字（见模块文档）。
-            Some(path) => (path.to_path_buf(), stem_of(path)?),
+        let opened = match self.catalog {
+            Some(catalog) => Site::open_file(&workspace, catalog, self.root),
             None => {
-                let slug = match (locate.library, locate.root) {
-                    (Some(name), _) => Slug::Named(name),
-                    (None, Some(root)) => Slug::AtPath(root),
+                let (slug, located_by) = match (self.library, self.root) {
+                    (Some(name), _) => (Slug::Named(name), format!("--library {name}")),
+                    (None, Some(root)) => (Slug::AtPath(root), romcat_core::path::display(root)),
                     (None, None) => {
                         return Err("说清要开哪份库：给主库根、`--library <名字>`，\
                                     或者 `--catalog <文件>`。不给就是合成数据。"
                             .to_string());
                     }
                 };
-                (workspace::catalog_path(&workspace, slug), slug.text())
+                Site::open(&workspace, slug, self.root, &located_by)
             }
         };
-        if !path.exists() {
-            return Err(format!(
-                "还没有 {} 这份中立库。先跑一次 `romcat scan`。",
-                path.display()
-            ));
-        }
-        let catalog = Catalog::open(&path).map_err(|error| format!("中立库打不开：{error}"))?;
-        let store = Store::open(&workspace::verdict_store_path(&workspace))
-            .map_err(|error| format!("沉淀库打不开：{error}"))?;
-        Ok(Self {
-            catalog,
-            store,
-            library,
-        })
-    }
-
-    /// 一份**全在内存里**的现场：合成数据配一份空沉淀库。
-    ///
-    /// 演示与实测走这条。**主库只读**（ADR-0004），而这条路连磁盘都不碰。
-    #[must_use]
-    pub fn in_memory(catalog: Catalog, store: Store) -> Self {
-        Self {
-            catalog,
-            store,
-            library: "合成数据".to_string(),
-        }
+        opened.map_err(|error| format!("{error}"))
     }
 }
 
 /// `工作目录/catalog/某某.sqlite3` 反推回工作目录；形状不对就是 `None`。
+///
+/// 沉淀库不跟中立库同一个文件，但跟它同一个**工作目录**——只给了 `--catalog` 时，
+/// 那个目录只能从这条路径上读出来。
 fn workspace_of(catalog: &Path) -> Option<PathBuf> {
     let parent = catalog.parent()?;
     if parent.file_name()? != "catalog" {
         return None;
     }
     Some(parent.parent()?.to_path_buf())
-}
-
-/// 中立库文件的主文件名——也就是这份主库在路径锚里的名字。
-fn stem_of(catalog: &Path) -> Result<String, String> {
-    catalog
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .ok_or_else(|| format!("{} 不像是一份中立库文件。", catalog.display()))
 }

@@ -916,4 +916,4 @@ mod duplicates;
 mod render;
 
 pub use duplicates::DuplicateDetails;
-pub use render::{heading, human_bytes, human_duration, pad, thousands, width};
+pub use render::{capacity, heading, human_bytes, human_duration, pad, thousands, width};
