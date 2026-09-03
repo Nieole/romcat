@@ -6,6 +6,7 @@ pub mod cart;
 pub mod container;
 pub mod disc;
 pub mod sample;
+pub mod switch;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

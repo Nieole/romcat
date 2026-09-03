@@ -143,6 +143,27 @@ CREATE TABLE IF NOT EXISTS content_cart(
     PRIMARY KEY (key, inner)
 ) STRICT;
 
+-- 从一份 Switch 容器的**明文文件名表**里读出来的东西（票 27）。与 `content_disc`、
+-- `content_cart` 同一条路：同样自带有效期、同样「读过的不白读」、同样加表而不加列。
+--
+-- `title_id` 与 `kind` 单独两列而不是只躺在 JSON 里，理由与 `content_cart.platform`
+-- 一样：**报告要按它们数东西**。「这个库里有多少个本体、多少个补丁、多少份附属内容」
+-- 是一条 SQL 数得出来的，不该逐行反序列化几万段 JSON 去数——而不数它，库体检就会把
+-- 一堆更新包报成游戏（调研的实现陷阱第 7 条）。
+CREATE TABLE IF NOT EXISTS content_switch(
+    key      TEXT    NOT NULL,
+    inner    TEXT    NOT NULL,
+    len      INTEGER,
+    mtime_ns INTEGER,
+    -- `.tik` 的文件名说出来的 TitleID（16 位 hex 大写）；没有票据就是 NULL。
+    title_id TEXT,
+    -- 本体 / 补丁 / 附属内容，存的是 `identify::switch::Kind::code`。
+    kind     TEXT,
+    -- `identify::switch::Facts` 的 JSON。
+    facts    TEXT    NOT NULL,
+    PRIMARY KEY (key, inner)
+) STRICT;
+
 -- **模型推断问过的答案**（票 12）。识别管线里唯一花过钱的东西，所以它只花一次。
 --
 -- 它**不被 `clear_identifications` 清掉**，与 `candidate` / `identification` 那两张
@@ -392,7 +413,8 @@ SELECT COALESCE(v.platform, ?2), COUNT(*), SUM(CASE WHEN i.units = 0 THEN 1 ELSE
                    AND i.candidates > 0
                    AND NOT EXISTS (
                        SELECT 1 FROM candidate c
-                        WHERE c.variant_key = i.variant_key AND c.source <> ?1)
+                        WHERE c.variant_key = i.variant_key
+                          AND instr(?1, ',' || c.source || ',') = 0)
                  GROUP BY 1";
 
 /// 「内部头与目录声明的平台对不上」这件事的判据，两处查询共用一份。
@@ -435,6 +457,24 @@ pub struct DiscFactRow {
     /// 容器内部路径；裸文件是空串。
     pub inner: String,
     /// `identify::disc::Facts` 的 JSON。
+    pub facts: String,
+}
+
+/// 一份 Switch 容器探出来的东西，写库前的样子。
+///
+/// 与 [`DiscFactRow`] 同一个道理捏成一个类型：几样都是 `String`，元组里写错顺序
+/// 编译器不会说话。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchFactRow {
+    /// 是变体的哪个成员：容器的键，或者裸文件自己的键。
+    pub key: String,
+    /// **透明容器**内部路径；裸文件是空串。
+    pub inner: String,
+    /// `.tik` 说出来的 TitleID；没有票据就是 `None`。
+    pub title_id: Option<String>,
+    /// 本体 / 补丁 / 附属内容的短码。
+    pub kind: Option<String>,
+    /// `identify::switch::Facts` 的 JSON。
     pub facts: String,
 }
 
@@ -1178,6 +1218,122 @@ impl Catalog {
         tx.commit().map_err(to_err)
     }
 
+    /// 某个成员上探过的 **Switch 容器**：内部路径 → 那一份。裸文件的内部路径是空串。
+    ///
+    /// 与 [`cart_facts`](Self::cart_facts) 同一条路，**自带有效期**。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn switch_facts(&self, key: &str) -> Result<BTreeMap<String, String>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare_cached(
+                "SELECT s.inner, s.facts FROM content_switch s
+                 JOIN entry e ON e.key = s.key
+                 WHERE s.key = ?1
+                   AND s.len IS e.len AND s.mtime_ns IS e.mtime_ns",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![key], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (inner, facts) = row.map_err(|source| self.err(source))?;
+            out.insert(inner, facts);
+        }
+        Ok(out)
+    }
+
+    /// 把探出来的 Switch 容器事实整批存下来。有效期那两列从 `entry` 上现取。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn put_switch_facts(&mut self, rows: &[SwitchFactRow]) -> Result<(), CatalogError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO content_switch(key, inner, len, mtime_ns, title_id, kind, facts)
+                     VALUES(?1, ?2,
+                            (SELECT len FROM entry WHERE key = ?1),
+                            (SELECT mtime_ns FROM entry WHERE key = ?1),
+                            ?3, ?4, ?5)
+                     ON CONFLICT(key, inner) DO UPDATE SET
+                        len = excluded.len, mtime_ns = excluded.mtime_ns,
+                        title_id = excluded.title_id, kind = excluded.kind,
+                        facts = excluded.facts",
+                )
+                .map_err(to_err)?;
+            for row in rows {
+                insert
+                    .execute(params![
+                        row.key,
+                        row.inner,
+                        row.title_id,
+                        row.kind,
+                        row.facts
+                    ])
+                    .map_err(to_err)?;
+            }
+        }
+        tx.commit().map_err(to_err)
+    }
+
+    /// 一共读出了几份 Switch 容器的**明文文件名表**。
+    ///
+    /// 它是 [`switch_kinds`](Self::switch_kinds) 的分母：那几个数只有带 `.tik` 的容器
+    /// 说得出，不摆分母，读者会以为「本体 16」是全部。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn switch_read(&self) -> Result<u64, CatalogError> {
+        self.conn
+            .query_row("SELECT count(*) FROM content_switch", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|it| u64::try_from(it).unwrap_or(0))
+            .map_err(|source| self.err(source))
+    }
+
+    /// **Switch 的内容分布**：本体 / 补丁 / 附属内容各有多少份。
+    ///
+    /// 报告从中立库折出来、不重跑识别（ADR-0001），所以这件事是一条 SQL 而不是攒在
+    /// 一趟识别的内存里。不摆出这个数，库体检会把一堆更新包报成游戏。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn switch_kinds(&self) -> Result<Vec<(String, u64)>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT kind, count(*) FROM content_switch
+                 WHERE kind IS NOT NULL GROUP BY kind ORDER BY 2 DESC, 1",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (kind, count) = row.map_err(|source| self.err(source))?;
+            out.push((kind, u64::try_from(count).unwrap_or(0)));
+        }
+        Ok(out)
+    }
+
     /// 把一批变体的结论写进去。**一个变体写两次是同一个结果**：先删掉它上一批候选
     /// 再插新的，于是重跑与分批写都不会攒出重复的候选。
     ///
@@ -1589,13 +1745,21 @@ impl Catalog {
         Ok(u64::try_from(value).unwrap_or(0))
     }
 
-    /// **命中里只有 `source` 这一个源的候选**的变体数，按平台。判据见 [`NAME_ONLY_SQL`]。
+    /// **命中里只有「一个字节都不读」那几个源的候选**的变体数，按平台。
+    ///
+    /// `sources` 是那几个源的名字，写成 `,中文离线源,Switch 文件名,` 这样两头带逗号的
+    /// 一串——与 `content_cart.family` 同一个写法，为的是 SQL 里能用 `instr` 做整词
+    /// 匹配。**它不止一个源**：票 11 的中文离线源与票 27 的 Switch 文件名层是同一件事
+    /// ——都只看名字、都永不自动通过，而这一列存在的理由正是**不让「命中」两个字被
+    /// 只看名字的层撑起来**。少数一个，那一列就会撒谎。
+    ///
+    /// 判据见 [`NAME_ONLY_SQL`]。
     ///
     /// # Errors
     /// 读库失败时返回错误。
     pub fn name_only_by_platform(
         &self,
-        source: &str,
+        sources: &str,
         unknown: &str,
     ) -> Result<BTreeMap<String, (u64, u64)>, CatalogError> {
         let mut statement = self
@@ -1603,7 +1767,7 @@ impl Catalog {
             .prepare(NAME_ONLY_SQL)
             .map_err(|source| self.err(source))?;
         let rows = statement
-            .query_map(params![source, unknown, State::Matched.label()], |row| {
+            .query_map(params![sources, unknown, State::Matched.label()], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,

@@ -184,6 +184,17 @@ pub struct IdentifyReport {
     pub platform_conflicts: u64,
     /// 其中几条的样子，好让人一眼看出是下错了还是放错了。
     pub conflict_examples: Vec<PlatformConflict>,
+    /// **Switch 的内容分布**：本体 / 补丁 / 附属内容各有多少份（票 27）。
+    ///
+    /// 它单列出来，因为不摆这个数，库体检会把一堆更新包报成游戏——真机上 `.nsp`
+    /// 平均只有 512 MiB，82 个里相当一部分是更新与 DLC 而不是本体（调研的实现陷阱
+    /// 第 7 条）。空的表示这个库里没有 Switch，或者还没跑过那一层。
+    pub switch_kinds: Vec<(String, u64)>,
+    /// 一共读出了几份 Switch 容器的**明文文件名表**。
+    ///
+    /// 它是 [`switch_kinds`](Self::switch_kinds) 的分母：那几个数只有带 `.tik` 的容器
+    /// 说得出，不摆分母，读者会以为「本体 16」是全部（真机 134 份里 64 份没有票据）。
+    pub switch_read: u64,
     /// **模型推断那一层**这一趟干了什么（票 12）：残渣多少、问了几个请求、花了多少。
     ///
     /// 它与这份报告里别的东西不一样——**不是从中立库折出来的**，是这一趟跑出来的。
@@ -194,6 +205,15 @@ pub struct IdentifyReport {
 }
 
 const UNKNOWN_PLATFORM: &str = "（未知）";
+
+/// **一个字节都不读**的那几个源，两头带逗号（`catalog::name_only_by_platform` 的写法）。
+///
+/// 它们共用「只靠名字」那一列，因为它们是同一件事：都只看文件名、都永不自动通过。
+/// 少列一个，那一列就会让「命中」两个字被只看名字的层悄悄撑起来——而这一列存在的
+/// 全部理由正是防这件事（同「跳过与无判据不混进未命中」）。
+/// 源名写死在这儿而不是拼出来，是因为 SQL 要的是一个 `&'static str`；
+/// **有一条测试钉着它与那两个常量一致**，改了名字而忘了改这里，测试当场红。
+const BLIND_SOURCES: &str = ",中文离线源,Switch 文件名,";
 
 /// 每一类理由、每一种冲突各举几个例子。三条够看出「判得对不对」，多了淹掉报告。
 const EXAMPLES: usize = 3;
@@ -212,8 +232,7 @@ impl IdentifyReport {
         let ammo = dat_games(repo);
         let serials = repo.serial_counts().unwrap_or_default();
         let chinese = catalog.chinese_by_platform(UNKNOWN_PLATFORM)?;
-        let name_only =
-            catalog.name_only_by_platform(crate::identify::fuzzy::SOURCE, UNKNOWN_PLATFORM)?;
+        let name_only = catalog.name_only_by_platform(BLIND_SOURCES, UNKNOWN_PLATFORM)?;
         let mut rows: BTreeMap<String, PlatformRow> = BTreeMap::new();
         catalog.for_each_identification(&mut |platform, state, reason, key, read_bytes| {
             let platform = platform.unwrap_or(UNKNOWN_PLATFORM).to_string();
@@ -283,6 +302,8 @@ impl IdentifyReport {
         report.multi_candidate_variants = counts.multi;
         report.fan_translated = counts.fan;
         report.official_chinese = counts.official;
+        report.switch_kinds = catalog.switch_kinds()?;
+        report.switch_read = catalog.switch_read()?;
         report.platform_conflicts = catalog.platform_conflict_count()?;
         report.conflict_examples = catalog.platform_conflicts(EXAMPLES)?;
         report.nkit = counts.nkit;
@@ -479,6 +500,32 @@ impl IdentifyReport {
             }
         }
 
+        if !self.switch_kinds.is_empty() {
+            heading(&mut out, "Switch 的内容分布（免密钥读出来的）");
+            let mut line = String::new();
+            for (kind, count) in &self.switch_kinds {
+                if !line.is_empty() {
+                    line.push('、');
+                }
+                let label = crate::identify::switch::Kind::from_code(kind)
+                    .map_or(kind.clone(), |kind| kind.label().to_string());
+                line.push_str(&format!("{label} {}", thousands(*count)));
+            }
+            let named: u64 = self.switch_kinds.iter().map(|(_, count)| *count).sum();
+            let _ = writeln!(
+                out,
+                "{line}（{} / {} 份说得出）",
+                thousands(named),
+                thousands(self.switch_read),
+            );
+            let _ = writeln!(
+                out,
+                "（判据是 TitleID 的尾三位：本体恒 000、补丁恒 800、其余是附属内容。\
+                 **只有带 `.tik` 的容器说得出**——没有票据的那些，这一层读不出 TitleID。\
+                 不分开数的话，一堆更新包会被报成游戏）"
+            );
+        }
+
         reasons(&mut out, "跳过的（不该撞 DAT）", &self.skipped);
         reasons(&mut out, "无判据的（这一层拿不到判据）", &self.no_evidence);
 
@@ -563,4 +610,24 @@ fn dat_games(repo: &DatRepo) -> BTreeMap<String, u64> {
         out.insert(row.0, row.1);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 只靠名字那一列覆盖了每一个不读字节的源() {
+        // 少列一个，「命中」两个字就会被只看名字的层悄悄撑起来——而这一列存在的
+        // 全部理由正是防这件事。源名改了而这里没跟着改，这条测试当场红。
+        for source in [
+            crate::identify::fuzzy::SOURCE,
+            crate::identify::switch::SOURCE_NAME,
+        ] {
+            assert!(
+                BLIND_SOURCES.contains(&format!(",{source},")),
+                "{source} 不在「只靠名字」那一列里"
+            );
+        }
+    }
 }

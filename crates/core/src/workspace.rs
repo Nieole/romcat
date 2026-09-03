@@ -186,6 +186,25 @@ pub fn zh_cache_dir(workspace: &Path) -> PathBuf {
     workspace.join("zh").join("cache")
 }
 
+/// **第三方 TitleID 数据库**的本机索引在哪（票 27）。
+///
+/// 与 DAT 库、中文索引一样**不带 [`Slug`]**，理由也一样：「哪个 ContentId 属于哪个
+/// 游戏的哪个版本」对两块盘是同一份。跟着主库分开存，等于把同一份索引存两遍，
+/// 第二块盘接上来还要再取一次几百 MB。
+#[must_use]
+pub fn titledb_store_path(workspace: &Path) -> PathBuf {
+    workspace.join("titledb").join("titledb.sqlite3")
+}
+
+/// titledb 取回来的原件放哪。
+///
+/// 留着原件的理由与 [`dat_cache_dir`] 一模一样：改一版折算规则之后重建索引，
+/// 不必把那两三百 MB 再下一遍。
+#[must_use]
+pub fn titledb_cache_dir(workspace: &Path) -> PathBuf {
+    workspace.join("titledb").join("cache")
+}
+
 /// **沉淀库**在哪。
 ///
 /// 与 DAT 库、媒体池一样**不带 [`Slug`]**，理由也同源：一条**裁决**说的是「世上这份

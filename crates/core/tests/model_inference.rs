@@ -228,6 +228,7 @@ fn 跑一趟(
             verdicts: &verdict::Index::empty(),
             naming: &naming,
             guessing: &guessing,
+            titledb: None,
         },
         &options,
         &cancel,

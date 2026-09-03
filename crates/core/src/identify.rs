@@ -94,6 +94,7 @@ pub mod report;
 pub mod scope;
 pub mod serial;
 pub mod sfo;
+pub mod switch;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -101,7 +102,7 @@ use std::path::{Path, PathBuf};
 
 use crate::catalog::identify::{
     Candidate, CartFactRow, Confidence, ContentHash, DiscFactRow, EntryFact, Identification,
-    ModelAnswerRow,
+    ModelAnswerRow, SwitchFactRow,
 };
 use crate::catalog::{Catalog, CatalogError, Provenance, State, VariantRow};
 use crate::classify::{self, Category};
@@ -113,6 +114,7 @@ use crate::path::file_name_of_key;
 use crate::report::thousands;
 use crate::scan::CancelToken;
 use crate::shape::Role;
+use crate::titledb;
 use crate::verdict::{self, Decision, Verdict};
 
 use fingerprint::{Fingerprint, Headerless, Want};
@@ -133,6 +135,9 @@ pub enum IdentifyError {
     /// DAT 库读写失败。
     #[error(transparent)]
     Dat(#[from] RepoError),
+    /// **TitleID 索引**读写失败（票 27）。
+    #[error(transparent)]
+    TitleDb(#[from] titledb::store::StoreError),
 }
 
 /// 这一趟能用的**弹药**：撞哈希的 DAT 库、裁决攒出来的沉淀库、撞名字的中文离线索引。
@@ -150,6 +155,13 @@ pub struct Ammo<'a> {
     pub naming: &'a Naming<'a>,
     /// **模型推断那一层**的缓存、价钱、上限与（要真问时的）网络句柄（票 12）。
     pub guessing: &'a model::Guessing<'a>,
+    /// **第三方 TitleID 数据库**：Switch 那一层拿它把 ContentId 反查成
+    /// (TitleID, 版本)（票 27）。
+    ///
+    /// **它是 `Option` 而别的三样不是**，因为这一层没有它照样跑得动：容器的明文
+    /// 文件名表免密钥就说得出 TitleID，查表只是把结论从「哪个游戏」抬到
+    /// 「哪个游戏的哪个版本」。没取过就是 `None`，依据里会如实写这一句。
+    pub titledb: Option<&'a titledb::store::Store>,
 }
 
 /// 识别的选项。
@@ -268,6 +280,10 @@ pub struct Outcome {
     pub sha1_only: u64,
     /// 文件名那一层这一趟干了什么（票 11）。
     pub fuzzy: FuzzyCount,
+    /// **Switch 那一层**这一趟干了什么（票 27）。
+    pub switch: switch::Found,
+    /// **靠 Switch 那一层才认出来**的变体数。
+    pub switch_only: u64,
     /// **模型推断那一层**这一趟干了什么（票 12）：残渣多少、问了几个请求、花了多少。
     pub model: model::ModelCount,
     /// 剥离规则**归不了类的记号**，按出现次数从多到少。
@@ -303,6 +319,8 @@ struct ContentUnit {
     disc: Option<disc::Facts>,
     /// 卡带那一层探出来的事实：内部头、游戏码、平台（票 10）。
     cart: Option<cart::Facts>,
+    /// Switch 那一层探出来的事实：明文文件名表、TitleID、结构指纹（票 27）。
+    switch: Option<switch::Facts>,
 }
 
 impl ContentUnit {
@@ -421,6 +439,8 @@ pub fn run(
         sha1_hits: state.sha1_hits,
         sha1_only: state.sha1_only,
         fuzzy: state.fuzzy,
+        switch: state.switch,
+        switch_only: state.switch_only,
         unknown_marks: rank_marks(state.unknown_marks),
         model: state.model,
     })
@@ -698,6 +718,12 @@ struct Run {
     sha1_only: u64,
     /// 这一轮探出来的卡带事实，攒够一批写一次。
     carts: Vec<CartFactRow>,
+    /// Switch 那一层这一趟干了什么（票 27）。
+    switch: switch::Found,
+    /// 靠 Switch 那一层才认出来的变体数（前面几层一条候选都没有）。
+    switch_only: u64,
+    /// 这一轮探出来的 Switch 容器事实，攒够一批写一次。
+    switches: Vec<SwitchFactRow>,
     /// 只装着一个变体的那些目录（文件名那一层拿目录名去撞的前提）。
     exclusive_dirs: BTreeSet<String>,
     /// 文件名那一层这一趟干了什么。
@@ -747,6 +773,8 @@ fn flush(
     state.facts.clear();
     catalog.put_cart_facts(&state.carts)?;
     state.carts.clear();
+    catalog.put_switch_facts(&state.switches)?;
+    state.switches.clear();
     catalog.write_identifications(batch)?;
     batch.clear();
     Ok(())
@@ -910,6 +938,13 @@ fn identify_variant(
     let carted = probe_carts(library, catalog, options, variant, &mut units, state)?;
     let read_bytes = read_bytes + carted.read_bytes;
 
+    // 三之三、⭐ **Switch 那一层**（票 27）：容器的**明文文件名表**免密钥就说得出
+    // 「这是哪个游戏」。它与前两层不同的地方是**自己产出候选不撞 DAT**——No-Intro 的
+    // 每日镜像里 334 份 DAT 一个 Switch 都没有，Redump 与 libretro 也没有，判据只能
+    // 来自容器自己与第三方 TitleID 数据库。
+    let switched = probe_switch(library, catalog, options, variant, &mut units, ammo, state)?;
+    let read_bytes = read_bytes + switched.read_bytes;
+
     // 四、拿标识撞 DAT 的序列号索引。**光盘与卡带各撞一次**，为的是数得出「靠哪一层
     // 才认出来的」——两层混在一起撞，那个数就只剩一个总和。
     let mut serial_candidates = serial::candidates(repo, &found.evidence)?;
@@ -924,10 +959,30 @@ fn identify_variant(
         state.cart.only += 1;
     }
     serial_candidates.append(&mut cart_candidates);
+    // **靠 Switch 那一层才认出来**：前面几层一条候选都没有，而它产出了。
+    if !switched.candidates.is_empty()
+        && serial_candidates.is_empty()
+        && units.iter().all(|unit| unit.hits.is_empty())
+    {
+        state.switch_only += 1;
+    }
+    // 父条目名那一栏是 `None`：这一层的候选不来自 DAT，没有 No-Intro 的 parent/clone
+    // 那套关系（ADR-0010 说的是 No-Intro 与 MAME 的）。
+    serial_candidates.extend(
+        switched
+            .candidates
+            .into_iter()
+            .map(|candidate| (candidate, None)),
+    );
 
-    // 标识那两层交出来的东西捆在一起交给 `assemble`：它们同出一源，也同去一处。
+    // 标识那几层交出来的东西捆在一起交给 `assemble`：它们同出一源，也同去一处。
     let mut from_ids = FromIds {
-        evidence: found.evidence.into_iter().chain(carted.evidence).collect(),
+        evidence: found
+            .evidence
+            .into_iter()
+            .chain(carted.evidence)
+            .chain(switched.evidence)
+            .collect(),
         candidates: serial_candidates,
     };
     let mut record = assemble(
@@ -1035,6 +1090,7 @@ fn collect(
                         in_container: true,
                         disc: None,
                         cart: None,
+                        switch: None,
                     }),
                     // 7z 的 `kCRC` 是可选块。没有 CRC 的条目进不了第一命中层。
                     None => units.push(blocked_unit(
@@ -1069,6 +1125,7 @@ fn collect(
                     in_container: false,
                     disc: None,
                     cart: None,
+                    switch: None,
                 }),
                 // 目录树转储：整个变体里没有一份「整文件」可以算哈希，锚是里面那份
                 // `param.sfo`（[光盘那一层](disc)去读）。这句话是那一份也没读到时的落点。
@@ -1119,6 +1176,7 @@ fn blocked_unit(member: &str, inner: &str, reason: String, in_container: bool) -
         in_container,
         disc: None,
         cart: None,
+        switch: None,
     }
 }
 
@@ -1760,13 +1818,12 @@ fn probe_discs(
     }
 
     // 二、算过的先取回来（不读盘），剩下的才回盘。
-    let mut cached: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    for it in &wanted {
-        if !cached.contains_key(&it.member) {
-            cached.insert(it.member.clone(), catalog.disc_facts(&it.member)?);
-        }
-    }
-    let (mut facts, todo) = restore_probed::<disc::Facts>(&cached, &wanted, options.read_library);
+    let (cached, (mut facts, todo)) = plan_probe::<disc::Facts>(
+        catalog,
+        &wanted,
+        options.read_library,
+        &|catalog, member| catalog.disc_facts(member),
+    )?;
     for (member, indexes) in todo {
         let path = library_path(&options.root, &member);
         // **壳子认不出来的一条都不读**——那不是光盘形态的东西。
@@ -1942,13 +1999,12 @@ fn probe_carts(
     }
 
     // 二、算过的先取回来（不读盘），剩下的才回盘。
-    let mut cached: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    for it in &wanted {
-        if !cached.contains_key(&it.member) {
-            cached.insert(it.member.clone(), catalog.cart_facts(&it.member)?);
-        }
-    }
-    let (mut facts, todo) = restore_probed::<cart::Facts>(&cached, &wanted, options.read_library);
+    let (cached, (mut facts, todo)) = plan_probe::<cart::Facts>(
+        catalog,
+        &wanted,
+        options.read_library,
+        &|catalog, member| catalog.cart_facts(member),
+    )?;
     for (member, indexes) in todo {
         let path = library_path(&options.root, &member);
         let (got, read) = fetch_prefixes(library, &path, &wanted, &indexes, &|it| {
@@ -2058,6 +2114,206 @@ fn probe_carts(
     Ok(carted)
 }
 
+/// Switch 那一层探完之后攒下来的东西。
+struct Switched {
+    /// 收集到的 TitleID，连它们是从哪一份内容上读的。
+    evidence: Vec<Evidence>,
+    /// 这一层产出的候选。**它不撞 DAT**——Switch 没有 DAT（No-Intro 的每日镜像里
+    /// 334 份一个都没有），判据来自容器自己与 titledb。
+    candidates: Vec<Candidate>,
+    /// 这一趟为它读了多少字节。
+    read_bytes: u64,
+}
+
+/// **透明容器**里那一条给这一层留多长的前缀。
+///
+/// PFS0 的头、条目表与字符串表加起来通常几百字节，64 KiB 宽出两个数量级。它挡的是
+/// 「为了读一张文件名表把整个 5 GB 的条目解出来」——而 XCI 在容器里本来就够不着
+/// （`secure` 分区的头真机实测落在文件的 368 MB 处），那时如实说够不着。
+const SWITCH_PREFIX: usize = 64 << 10;
+
+/// ⭐ **Switch 那一层**（票 27）：容器的**明文文件名表**里就写着「这是哪个游戏」。
+///
+/// 它与前两层（[光盘](probe_discs)、[卡带](probe_carts)）是同一条路——**只读几 KB、
+/// 算过的不再算、这一趟没读到的不落库**——三处差别写在这儿：
+///
+/// 1. **它自己产出候选，不撞 DAT。** 前两层读出编号之后交给
+///    [序列号那一层](serial::candidates)去撞 DAT 的序列号索引；而 Switch **没有 DAT**
+///    ——调研把那个每日镜像的 334 份全查过，命中 0 个。判据来自容器自己
+///    （`.tik` 的文件名）与第三方 TitleID 数据库（[`titledb`]）。
+/// 2. **裸文件要 seek，不能只读前缀。** XCI 的入口在 `secure` 分区那张 HFS0 表上，
+///    而它前面还压着整套系统更新——真机实测落在文件的 368 MB 处。**跳过去只读几 KB**，
+///    但必须跳得动。容器里那一条跳不动，所以只给前缀，够不着就如实说。
+/// 3. **精确命中过的照探。** 一份 `.nsp` 撞上 DAT 是不可能的事（那 334 份里没有
+///    Switch），所以这里没有「第一层办成了就不办」那道闸——真撞上了，说明这个
+///    `switch/` 目录下躺着的其实是别的平台的东西，而那时 `probe` 自己会认不出容器
+///    并如实说。
+fn probe_switch(
+    library: &dyn LibraryFs,
+    catalog: &mut Catalog,
+    options: &Options,
+    variant: &VariantRow,
+    units: &mut [ContentUnit],
+    ammo: &Ammo<'_>,
+    state: &mut Run,
+) -> Result<Switched, IdentifyError> {
+    let mut switched = Switched {
+        evidence: Vec::new(),
+        candidates: Vec::new(),
+        read_bytes: 0,
+    };
+    // 一、要探哪几份。判据是**名字**——那是最便宜的强先验；字节在 `probe` 里说了算。
+    let mut wanted: Vec<Wanted> = Vec::new();
+    for (index, unit) in units.iter().enumerate() {
+        if !switch::by_name(&unit.name) {
+            continue;
+        }
+        wanted.push(Wanted {
+            unit: Some(index),
+            member: unit.member.clone(),
+            inner: unit.inner.clone(),
+            name: unit.name.clone(),
+            size: unit.size,
+            in_container: unit.in_container,
+        });
+    }
+    if wanted.is_empty() {
+        return Ok(switched);
+    }
+
+    // 二、算过的先取回来（不读盘），剩下的才回盘。
+    let (cached, (mut facts, todo)) = plan_probe::<switch::Facts>(
+        catalog,
+        &wanted,
+        options.read_library,
+        &|catalog, member| catalog.switch_facts(member),
+    )?;
+    for (member, indexes) in todo {
+        let path = library_path(&options.root, &member);
+        // **裸文件走 seek，容器里那一条只给前缀。** 两条路的差别只在取字节的办法上，
+        // 解析器是同一份（`switch::Source` 的两个实现）。
+        if wanted[indexes[0]].in_container {
+            let (got, read) =
+                fetch_prefixes(library, &path, &wanted, &indexes, &|_| Some(SWITCH_PREFIX));
+            for (at, prefix) in got {
+                let it = &wanted[at];
+                facts[at] = Some(match prefix {
+                    Prefix::Bytes(bytes) => {
+                        Probed::Read(switch::probe(&it.name, &mut switch::Prefix(&bytes)))
+                    }
+                    Prefix::TooDeep(note) => Probed::Read(switch::Facts {
+                        note: Some(note),
+                        ..switch::Facts::default()
+                    }),
+                    Prefix::Missed(why) => Probed::Missed(why),
+                });
+            }
+            switched.read_bytes += read;
+            state.progress.read_bytes += read;
+            state.progress.read_files += u64::try_from(indexes.len()).unwrap_or(0);
+            continue;
+        }
+        for at in &indexes {
+            let it = &wanted[*at];
+            facts[*at] = Some(match library.open(&path) {
+                Ok(mut handle) => {
+                    let mut source = switch::Seeked::new(handle.as_mut(), switch::BUDGET);
+                    let found = switch::probe(&it.name, &mut source);
+                    let read = source.read();
+                    switched.read_bytes += read;
+                    // 这一层读的字节也进总账（挂账 D14）。
+                    state.progress.read_bytes += read;
+                    state.progress.read_files += 1;
+                    Probed::Read(found)
+                }
+                Err(error) => Probed::Missed(format!("读不动：{error}")),
+            });
+        }
+    }
+
+    // 三、装回 units，落库，收集 TitleID。
+    let mut probes: Vec<(usize, switch::Facts)> = Vec::new();
+    for (at, it) in wanted.iter().enumerate() {
+        let found = match facts[at].take() {
+            None => continue,
+            // 这一趟没读到：**不落库**（缓存一次读失败等于让它永久生效，ADR-0021），
+            // 也不覆盖第一命中层写在那儿的那句话。
+            Some(Probed::Missed(why)) => {
+                state.missed += 1;
+                if let Some(index) = it.unit
+                    && units[index].print.is_none()
+                    && units[index].blocked.is_none()
+                {
+                    units[index].blocked = Some(why);
+                }
+                continue;
+            }
+            Some(Probed::Read(found)) => found,
+        };
+        if cached
+            .get(&it.member)
+            .and_then(|rows| rows.get(&it.inner))
+            .is_none()
+            && let Ok(text) = serde_json::to_string(&found)
+        {
+            state.switches.push(SwitchFactRow {
+                key: it.member.clone(),
+                inner: it.inner.clone(),
+                title_id: found.title_id().map(ToString::to_string),
+                kind: found.kind.clone(),
+                facts: text,
+            });
+        }
+        for id in &found.ids {
+            switched.evidence.push(Evidence {
+                member: it.member.clone(),
+                inner: it.inner.clone(),
+                id: id.clone(),
+                from_content: true,
+                nkit_clean: true,
+                // 这一层**不撞 DAT 的序列号索引**（Switch 没有 DAT），这一列用不上。
+                platforms: Vec::new(),
+            });
+        }
+        if let Some(index) = it.unit {
+            // 读出东西了，第一命中层那句「DAT 库里 SWITCH 平台一条记录都没有」就过时了
+            // ——留着它，报告会把一个已经认出来的变体记成「无判据」。
+            if found.usable() {
+                units[index].blocked = None;
+            } else if let Some(note) = &found.note
+                && units[index].print.is_none()
+            {
+                units[index].blocked = Some(note.clone());
+            }
+            probes.push((at, found.clone()));
+            units[index].switch = Some(found);
+        } else {
+            probes.push((at, found));
+        }
+    }
+
+    // 四、折候选。**文件名里那个 TitleID 一起交上去**：它不是主判据，用处是与容器里
+    // 读出来的那个互相印证（对不上就是极强的「被改过」信号）。
+    let named = file_name_of_key(&variant.key);
+    let asks: Vec<switch::Probe<'_>> = probes
+        .iter()
+        .map(|(at, found)| switch::Probe {
+            member: wanted[*at].member.as_str(),
+            inner: wanted[*at].inner.as_str(),
+            facts: found,
+        })
+        .collect();
+    let found = switch::candidates(
+        ammo.titledb,
+        variant.platform.as_deref(),
+        &asks,
+        Some(named),
+    )?;
+    state.switch.merge(&found);
+    switched.candidates = found.candidates;
+    Ok(switched)
+}
+
 /// 把卡带头读出来的那几个字段接在「这一条是从哪儿读出来的」后面。
 ///
 /// 它们不参与命中（命中靠编号），但**依据**要说得出来：事后复核的人靠这一句判断
@@ -2090,9 +2346,37 @@ fn enrich(from: &str, found: &cart::Facts) -> String {
 /// 以及「哪个成员上还要读哪几条」。
 type Planned<T> = (Vec<Option<Probed<T>>>, BTreeMap<String, Vec<usize>>);
 
+/// 一层探测开工前的那两步：**把算过的取回来，排出还要读哪几份**。
+///
+/// 三层（光盘、卡带、Switch）逐字相同，所以只写一处：先按成员把中立库里存着的事实
+/// 整批取回来（`facts_of` 说去哪张表取），再交给 [`restore_probed`]。
+/// **一个字节都不读盘。** 顺带把取回来的那张表交出去——落库那一步要靠它判断
+/// 「这一条是不是本来就在库里」，不然每一趟都会把同样的事实重写一遍。
+type Cached = BTreeMap<String, BTreeMap<String, String>>;
+
+/// 「去哪张表取算过的事实」：`content_disc` / `content_cart` / `content_switch`
+/// 三张表的取法一模一样，差别只在表名，所以传一个取数的办法而不是三份代码。
+type FactsOf<'a> = &'a dyn Fn(&Catalog, &str) -> Result<BTreeMap<String, String>, CatalogError>;
+
+fn plan_probe<T: serde::de::DeserializeOwned>(
+    catalog: &Catalog,
+    wanted: &[Wanted],
+    read_library: bool,
+    facts_of: FactsOf<'_>,
+) -> Result<(Cached, Planned<T>), CatalogError> {
+    let mut cached: Cached = BTreeMap::new();
+    for it in wanted {
+        if !cached.contains_key(&it.member) {
+            cached.insert(it.member.clone(), facts_of(catalog, &it.member)?);
+        }
+    }
+    let planned = restore_probed::<T>(&cached, wanted, read_library);
+    Ok((cached, planned))
+}
+
 /// 把中立库里**算过的那些事实**装回来，顺带排出「还要读哪几份」。
 ///
-/// **一个字节都不读盘。** 光盘与卡带两层共用它：两层的差别全在事实类型 `T` 上，
+/// **一个字节都不读盘。** 三层探测共用它：各层的差别全在事实类型 `T` 上，
 /// 而「算过的不再算」这件事一模一样（挂账 D14）。
 fn restore_probed<T: serde::de::DeserializeOwned>(
     cached: &BTreeMap<String, BTreeMap<String, String>>,
@@ -2568,10 +2852,17 @@ fn rank(variant: &VariantRow, candidate: &Candidate) -> (u8, u8, u8) {
         "TOSEC" => 2,
         "MAME" => 3,
         "GoodNES" => 4,
-        // **中文离线源排在 DAT 之后**：它的条目名是中文 wiki 的写法，而这一层
+        // **titledb 紧跟在 DAT 后面**：它给的是 eShop 上的官方名字与官方语言表，
+        // 整齐程度与 No-Intro 是一个量级；排在 DAT 之后只因为它不是一份转储数据库
+        // （Switch 压根没有 DAT，票 27）。
+        switch::SOURCE_TITLEDB => 5,
+        // **容器自己那一层**排第三档：没取过 titledb 时它的名字只是一串 TitleID，
+        // 干瘪；但那一串是**从字节里读出来的**，比下面那一层靠名字猜出来的硬。
+        switch::SOURCE_CONTAINER => 6,
+        // **中文离线源排在最后**：它的条目名是中文 wiki 的写法，而这一层
         // 一个字节都没看（`fuzzy` 的模块文档）。它照样排在「认不出的源」前面。
-        fuzzy::SOURCE => 5,
-        _ => 6,
+        fuzzy::SOURCE => 7,
+        _ => 8,
     };
     (
         match candidate.confidence {
@@ -2938,6 +3229,7 @@ mod tests {
                 platform: Some(platform.to_string()),
                 ..cart::Facts::default()
             }),
+            switch: None,
         }
     }
 

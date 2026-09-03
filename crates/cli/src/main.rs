@@ -37,6 +37,7 @@ use romcat_core::shape;
 use romcat_core::sublibrary::{self, Sublibrary};
 use romcat_core::sync;
 use romcat_core::title;
+use romcat_core::titledb;
 use romcat_core::triage::{self, DecisionSpec, Filter};
 use romcat_core::verdict::{self, Store};
 use romcat_core::workspace::{self, Slug};
@@ -90,9 +91,66 @@ enum Command {
     /// **中文离线数据源**：把中文条目索引取到本机，数据库覆盖不到时靠它撞文件名
     #[command(subcommand)]
     Zh(ZhCommand),
+    /// **Switch**：取一份第三方 TitleID 数据库，或者读一份转储的**明文文件名表**
+    #[command(subcommand)]
+    Switch(SwitchCommand),
     /// **文件名剥离规则**：看看一个名字剥完剩什么、导出一份规则底稿照着改，
     /// 或者把名字还是乱码的那些容器重读一遍
     Names(NamesArgs),
+}
+
+/// Switch 那一层的几件事。
+#[derive(Debug, Subcommand)]
+enum SwitchCommand {
+    /// 取一次第三方 TitleID 数据库并建成本机索引。`ETag` 没变就整件跳过
+    Sync(SwitchSyncArgs),
+    /// **读一份转储的明文文件名表**——一个密钥都不要，一个字节的内容都不解开
+    Read(SwitchReadArgs),
+}
+
+#[derive(Debug, Args)]
+struct SwitchSyncArgs {
+    /// 工作目录：TitleID 索引与取回来的原件存这里
+    #[arg(long, value_name = "目录")]
+    workspace: Option<PathBuf>,
+
+    /// 无视 `ETag`，整份重建索引。原件在手边就不重下
+    #[arg(long)]
+    full: bool,
+
+    /// 只说这一趟会干什么，不取也不写
+    #[arg(long)]
+    dry_run: bool,
+
+    /// 不取 eShop 元数据（名字、发行商、语言），只取那份反查表
+    ///
+    /// 反查表一份 50 MB 就够认出「哪个游戏的哪个版本」；四个区的元数据加起来
+    /// 两三百 MB，换来的是名字与**官中标注**（ADR-0019）
+    #[arg(long)]
+    no_regions: bool,
+
+    /// 两次请求之间至少隔多少毫秒（按主机计）
+    #[arg(long, value_name = "毫秒", default_value_t = 1000)]
+    throttle_ms: u64,
+
+    /// 把报告另存为 JSON
+    #[arg(long, value_name = "文件")]
+    json: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SwitchReadArgs {
+    /// 要读的 `.xci` / `.nsp` / `.nsz` / `.xcz`，可给多个
+    #[arg(value_name = "文件", required = true)]
+    files: Vec<PathBuf>,
+
+    /// 工作目录：有 TitleID 索引就顺手把 ContentId 反查一遍
+    #[arg(long, value_name = "目录")]
+    workspace: Option<PathBuf>,
+
+    /// 把结果另存为 JSON
+    #[arg(long, value_name = "文件")]
+    json: Option<PathBuf>,
 }
 
 /// 中文离线数据源的几件事。
@@ -981,6 +1039,8 @@ fn main() -> ExitCode {
         Command::Dat(DatCommand::Sources(args)) => run_dat_sources(&args),
         Command::Zh(ZhCommand::Sync(args)) => run_zh_sync(&args),
         Command::Zh(ZhCommand::Find(args)) => run_zh_find(&args),
+        Command::Switch(SwitchCommand::Sync(args)) => run_switch_sync(&args),
+        Command::Switch(SwitchCommand::Read(args)) => run_switch_read(&args),
         Command::Names(args) => run_names(&args, &cancel),
     }
 }
@@ -1417,6 +1477,27 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
         eprintln!("还没取过中文离线数据源，文件名那一层不跑。要它就先跑一次 `romcat zh sync`。");
     }
 
+    // **第三方 TitleID 数据库**（票 27）：Switch 那一层拿它把 ContentId 反查成
+    // (TitleID, 版本)。**没取过照样跑**——容器的明文文件名表免密钥就说得出 TitleID，
+    // 查表只是把结论从「哪个游戏」抬到「哪个游戏的哪个版本」。
+    let titledb = titledb::store::Store::open(&workspace::titledb_store_path(&workspace)).ok();
+    let titledb = titledb.filter(|store| store.ready().unwrap_or(false));
+    match &titledb {
+        Some(store) => match store.stats() {
+            Ok(stats) => eprintln!(
+                "Switch 那一层：TitleID 索引 {} 条 ContentId、{} 个 TitleID（其中官中 {}）。",
+                thousands(stats.ncas),
+                thousands(stats.titles),
+                thousands(stats.chinese),
+            ),
+            Err(error) => return fail(format!("TitleID 索引读不动：{error}")),
+        },
+        None => eprintln!(
+            "还没取过 TitleID 索引，Switch 那一层只读得出 TitleID、读不出版本。\
+             要它就先跑一次 `romcat switch sync`。"
+        ),
+    }
+
     // **模型推断兜底**（票 12）：默认整层关着。缓存里已有的答案不受这个开关影响——
     // 那些钱已经付过了，白拿；只有「真的再问一次」才要 `--model`。
     let answers = match catalog.model_answers() {
@@ -1526,6 +1607,7 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
             verdicts: &verdicts,
             naming: &naming,
             guessing: &guessing,
+            titledb: titledb.as_ref(),
         },
         &options,
         cancel,
@@ -1620,6 +1702,37 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
             eprintln!(
                 "  剥离规则认不出的记号（照着往 name-rules.toml 里补，补完重跑一遍就看得见效果）：{}",
                 top.join("、"),
+            );
+        }
+    }
+    if outcome.switch.probed > 0 {
+        eprintln!(
+            "Switch 那一层读了 {} 份容器的**明文文件名表**（一个密钥都没用）：\
+             {} 份的 `.tik` 说出了 TitleID，{} 份靠 ContentId 反查出了精确版本，\
+             {} 个变体是**只靠它**才有候选的。",
+            thousands(outcome.switch.probed),
+            thousands(outcome.switch.ticketed),
+            thousands(outcome.switch.resolved),
+            thousands(outcome.switch_only),
+        );
+        if outcome.switch.compressed > 0 {
+            eprintln!(
+                "  其中 {} 份是 `.nsz` / `.xcz`——识别不受影响（零解压），\
+                 但 **ES-DE 的扩展名表里没有它们**，那个前端里默认看不见（ADR-0017）。",
+                thousands(outcome.switch.compressed),
+            );
+        }
+        if outcome.switch.multi > 0 {
+            eprintln!(
+                "  另有 {} 份容器里装着不止一个 TitleID（合集卡带），哪一个代表那个变体归裁决。",
+                thousands(outcome.switch.multi),
+            );
+        }
+        if outcome.switch.name_conflicts > 0 {
+            eprintln!(
+                "  ⚠ {} 条候选上，**文件名里写的 TitleID 与容器里读出来的对不上**——\
+                 那是极强的「文件被改过 / 命名错误」信号，逐条在依据里点了名。",
+                thousands(outcome.switch.name_conflicts),
             );
         }
     }
@@ -4247,6 +4360,164 @@ fn run_zh_sync(args: &ZhSyncArgs) -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// 取一趟**第三方 TitleID 数据库**。**这是这个程序里第三个联网的子命令**
+/// （另两个是 `dat sync` 与 `zh sync`），走的是同一道取数闸门——
+/// `raw.githubusercontent.com` 本来就在白名单上，这一层一个主机都没往里加。
+fn run_switch_sync(args: &SwitchSyncArgs) -> ExitCode {
+    let workspace = workspace_dir(args.workspace.as_deref());
+    let mut store = match titledb::store::Store::open(&workspace::titledb_store_path(&workspace)) {
+        Ok(store) => store,
+        Err(error) => return fail(format!("TitleID 索引打不开：{error}")),
+    };
+    let options = titledb::sync::Options {
+        cache: workspace::titledb_cache_dir(&workspace),
+        full: args.full,
+        dry_run: args.dry_run,
+        regions: !args.no_regions,
+    };
+    let fetcher = HttpFetcher::with_throttle(Duration::from_millis(args.throttle_ms));
+    let started = Instant::now();
+    let outcome = match titledb::sync::sync(&fetcher, &mut store, &options) {
+        Ok(outcome) => outcome,
+        Err(error) => return fail(format!("取 titledb 失败：{error}")),
+    };
+    for file in &outcome.files {
+        let what = if outcome.dry_run {
+            "只排计划".to_string()
+        } else if file.skipped {
+            "ETag 没变，整件跳过".to_string()
+        } else if file.downloaded {
+            format!("下回来了，读出 {} 条", thousands(file.rows))
+        } else {
+            format!("原件在手边，重建出 {} 条", thousands(file.rows))
+        };
+        eprintln!("  {}：{what}", file.file);
+    }
+    if !outcome.dry_run {
+        eprintln!("{:.1} 秒。", started.elapsed().as_secs_f64());
+    }
+    print_titledb_stats(&outcome.stats);
+    if !write_json(args.json.as_deref(), &outcome) {
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+/// 索引里现在有什么。**官中那两行是这份数据源对本项目的价值**：Switch 的中文覆盖是
+/// 全库最好的（8,447 个 TitleID），而其中多区共用的那些，中文只是**语言属性**
+/// 不是独立发行版（ADR-0019）。
+fn print_titledb_stats(stats: &titledb::store::Stats) {
+    println!(
+        "TitleID 索引：{} 条 ContentId → (TitleID, 版本)，涉及 {} 个 TitleID",
+        thousands(stats.ncas),
+        thousands(stats.titles),
+    );
+    println!(
+        "  eShop 元数据 {} 行、{} 个 TitleID；其中官中 {}，而**多区共用**同一个 TitleID 的有 {}",
+        thousands(stats.entries),
+        thousands(stats.named),
+        thousands(stats.chinese),
+        thousands(stats.chinese_shared),
+    );
+    if !stats.by_region.is_empty() {
+        let mut line = String::new();
+        for (region, count) in &stats.by_region {
+            if !line.is_empty() {
+                line.push('、');
+            }
+            line.push_str(&format!("{region} {}", thousands(*count)));
+        }
+        println!("  按区：{line}");
+    }
+}
+
+/// ⭐ **读一份 Switch 转储的明文文件名表。**
+///
+/// 它存在的理由是这条纪律得看得见：**容器层不加密**，所以「哪个游戏的哪个版本」
+/// 免密钥就说得出来。这个子命令一个密钥都不要、一个字节的 NCA 都不解开，
+/// 每份只读几 KB。
+fn run_switch_read(args: &SwitchReadArgs) -> ExitCode {
+    let workspace = workspace_dir(args.workspace.as_deref());
+    let store = titledb::store::Store::open(&workspace::titledb_store_path(&workspace)).ok();
+    let ready = store
+        .as_ref()
+        .and_then(|store| store.ready().ok())
+        .unwrap_or(false);
+    if !ready {
+        eprintln!(
+            "本机还没取过 titledb，只读得出 TitleID、读不出版本——`romcat switch sync` 取一次即可。"
+        );
+    }
+    let library = RealFs;
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    for file in &args.files {
+        let name = path::display(file);
+        let facts = match romcat_core::fs::LibraryFs::open(&library, file) {
+            Ok(mut handle) => {
+                let mut source =
+                    identify::switch::Seeked::new(handle.as_mut(), identify::switch::BUDGET);
+                let facts = identify::switch::probe(&name, &mut source);
+                println!("{name}（读了 {} 字节）", thousands(source.read()));
+                facts
+            }
+            Err(error) => {
+                println!("{name}：读不动（{error}）");
+                continue;
+            }
+        };
+        print_switch_facts(&facts, if ready { store.as_ref() } else { None });
+        rows.push(serde_json::json!({ "文件": name, "事实": facts }));
+    }
+    if !write_json(args.json.as_deref(), &rows) {
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+/// 一份转储读出来的东西，摊开给人看。
+fn print_switch_facts(facts: &identify::switch::Facts, store: Option<&titledb::store::Store>) {
+    use identify::switch::{Kind, Structure, Wrapper};
+    if let Some(note) = &facts.note {
+        println!("  {note}");
+    }
+    let Some(wrapper) = facts.wrapper.as_deref().and_then(Wrapper::from_code) else {
+        return;
+    };
+    let structure = facts
+        .structure
+        .as_deref()
+        .and_then(Structure::from_code)
+        .map_or("认不出", Structure::label);
+    println!(
+        "  容器 {}，结构 {structure}{}",
+        wrapper.label(),
+        if facts.compressed {
+            "，**压缩过的**（ES-DE 看不见 .nsz / .xcz）"
+        } else {
+            ""
+        }
+    );
+    if !facts.partitions.is_empty() {
+        println!("  分区：{}", facts.partitions.join(" / "));
+    }
+    for name in &facts.entries {
+        println!("    {name}");
+    }
+    for id in &facts.ids {
+        let kind = Kind::of(&id.key).map_or("认不出", Kind::label);
+        println!("  TitleID {}（{kind}）——{}", id.shown, id.from);
+    }
+    for content_id in &facts.content_ids {
+        let found = store
+            .and_then(|store| store.content(content_id).ok().flatten())
+            .map(|content| format!("{} v{}", content.title_id, content.version));
+        println!(
+            "  ContentId {content_id} → {}",
+            found.unwrap_or_else(|| "titledb 里查不到".to_string())
+        );
+    }
 }
 
 /// 索引里现在有什么。**老平台深度浅是事实不是缺陷**，按平台摆出来，

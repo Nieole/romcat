@@ -188,6 +188,7 @@ fn 识别(现场: &mut 现场) {
             verdicts: &verdict::Index::empty(),
             naming: &fuzzy::Naming::off(),
             guessing: &identify::model::Guessing::off(),
+            titledb: None,
         },
         &identify::Options::new(现场.dir.path()),
         &CancelToken::new(),

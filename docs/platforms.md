@@ -95,7 +95,7 @@ P0 那四个合计仅 2.4 人日，便宜到不值得排优先级。**N-Gage 归
 
 **`pc` 本期不做。** 它是容量最大的一块（2.72 TiB、792 个文件），但不在原议定的 27 平台里，用户也不要求导出。明确排除，不是遗漏。
 
-**`switch` 纳入。** 库里 `.xci` 9 / `.nsp` 82 / `.nsz` 48 / `.xcz` 7，合计 223.84 GiB。它比 PS3 晚一代，原清单没有。已出票 27，调研见 `research/switch-identification.md`。成本估算最小可用 2.5 人日、完整 4.3 人日。
+**`switch` 纳入。** 库里 `.xci` 9 / `.nsp` 82 / `.nsz` 48 / `.xcz` 7，合计 223.84 GiB。它比 PS3 晚一代，原清单没有。调研见 `research/switch-identification.md`。**票 27 已落地**（免密钥路线：容器层的明文文件名表，`identify::switch`）——实测 146 个变体命中 141，详见 `library-facts.md`。
 
 **`N-Gage` 维持跳过**，归入「其他掌机」兜底桶。
 

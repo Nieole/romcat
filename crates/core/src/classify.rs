@@ -126,7 +126,19 @@ const BARE_FILES: &[&str] = &[
     "sg", "pce", "sgx", "ws", "wsc", "ngp", "ngc", "lnx", "lyx", "a26", "a78", "col", "int", "vec",
     "vb", "min", "jag", "j64", "rom", "prg", "d64", "adf", "3ds", "cci", "cxi", "cia", "3dsx",
     "xci", "nsp", "vpk", "pkg", "wad", "dol", "elf", "self", "sfo", "edat", "xex", "xbe", "wud",
-    "wup", "tik", "tmd", // 光盘镜像与轨道
+    "wup", "tik", "tmd",
+    // ⭐ Switch 的压缩形态（票 27）。**它们是裸文件不是压缩镜像**，两个理由：
+    //
+    // 1. **识别读它们的路子与 `.nsp` / `.xci` 一模一样**——`.nsz` 与 `.nsp`、`.xcz` 与
+    //    `.xci` 的容器层完全相同（nsz 的 `docs/formats.md` 原话「functionally
+    //    identical」），压缩只改内部条目的扩展名（`.nca` → `.ncz`）。头是明文，零解压。
+    // 2. **压缩镜像在这个词表里的定义是「模拟器直接读它」**（`CONTEXT.md`），而**没有
+    //    任何 Switch 模拟器读得了 `.nsz`**——Eden 的 `FileType` 枚举里没有它，
+    //    ES-DE 的扩展名表里也没有。归进那一档等于说反了票 21 记下来的事实。
+    //
+    // 漏掉它们的代价真机上量得出来：这两个扩展名不在表里时它们**连变体都成不了**，
+    // 55 个文件、74.67 GiB（Switch 容量的 33.4%）压根没进过识别管线。
+    "nsz", "xcz", // 光盘镜像与轨道
     "iso", "img", "gcm", "cue", "bin", "gdi", "cdi", "mdf", "mds", "nrg", "ccd", "sub", "toc",
     "raw", "ape", "wv",
 ];
@@ -340,6 +352,16 @@ mod tests {
     #[test]
     fn 卡带与光盘镜像是裸文件() {
         for name in ["a.nes", "a.sfc", "a.gba", "a.iso", "a.cue", "a.bin"] {
+            assert_eq!(归类(name).category, Category::BareFile, "{name}");
+        }
+    }
+
+    #[test]
+    fn switch_的四种扩展名都是裸文件() {
+        // ⭐ `.nsz` / `.xcz` 与 `.nsp` / `.xci` 的容器层完全相同，识别读它们零解压。
+        // 它们不在这张表里时**连变体都成不了**——真机上 55 个文件、74.67 GiB
+        // （Switch 容量的 33.4%）压根没进过识别管线（票 27）。
+        for name in ["a.nsp", "a.xci", "a.nsz", "a.xcz"] {
             assert_eq!(归类(name).category, Category::BareFile, "{name}");
         }
     }
