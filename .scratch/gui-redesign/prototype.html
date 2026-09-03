@@ -1,0 +1,676 @@
+<title>romcat 界面原型</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<style>
+:root{
+  --ground:#F4F6F9; --surface:#FFFFFF; --surface-2:#EDF0F5; --sunken:#E4E8EF;
+  --ink:#181B21; --ink-2:#4E5765; --ink-3:#79828F;
+  --line:#DCE1E9; --line-2:#C6CDD8;
+  --accent:#4250C8; --accent-soft:#E8EAFA; --accent-ink:#3341B0;
+  --hi:#0B7D60; --hi-soft:#DFF2EC;
+  --mid:#A66A00; --mid-soft:#FAEEDA;
+  --lo:#B33F35; --lo-soft:#FBE5E2;
+  --none:#79828F; --none-soft:#E9ECF1;
+  --sans:"IBM Plex Sans","Noto Sans SC",-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --r:6px;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --ground:#101319; --surface:#181C24; --surface-2:#1F242E; --sunken:#0B0E13;
+  --ink:#E7EBF2; --ink-2:#A2ACBB; --ink-3:#727C8B;
+  --line:#2A3140; --line-2:#39424F;
+  --accent:#7F8CF5; --accent-soft:#232842; --accent-ink:#9AA5F8;
+  --hi:#3DBE9B; --hi-soft:#14322B;
+  --mid:#D69A38; --mid-soft:#332616;
+  --lo:#E8776C; --lo-soft:#361F1D;
+  --none:#727C8B; --none-soft:#212630;
+}}
+:root[data-theme="dark"]{
+  --ground:#101319; --surface:#181C24; --surface-2:#1F242E; --sunken:#0B0E13;
+  --ink:#E7EBF2; --ink-2:#A2ACBB; --ink-3:#727C8B;
+  --line:#2A3140; --line-2:#39424F;
+  --accent:#7F8CF5; --accent-soft:#232842; --accent-ink:#9AA5F8;
+  --hi:#3DBE9B; --hi-soft:#14322B;
+  --mid:#D69A38; --mid-soft:#332616;
+  --lo:#E8776C; --lo-soft:#361F1D;
+  --none:#727C8B; --none-soft:#212630;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);
+  font-size:14px;line-height:1.6;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1240px;margin:0 auto;padding:36px 24px 80px}
+h1,h2,h3,h4{text-wrap:balance;margin:0;font-weight:600;letter-spacing:-.01em}
+p{margin:0}
+code,.mono{font-family:var(--mono);font-size:.88em;font-variant-numeric:tabular-nums}
+.num{font-variant-numeric:tabular-nums}
+
+/* ── 页头 ── */
+.masthead{display:flex;flex-wrap:wrap;gap:20px;align-items:flex-end;justify-content:space-between;
+  padding-bottom:20px;border-bottom:2px solid var(--ink);margin-bottom:8px}
+.masthead h1{font-size:30px;line-height:1.15}
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--ink-3);margin-bottom:8px}
+.masthead p{color:var(--ink-2);max-width:56ch;margin-top:8px}
+.stamp{font-family:var(--mono);font-size:11px;color:var(--ink-3);text-align:right;line-height:1.9;white-space:nowrap}
+
+/* ── 置信度色条：本页的视觉标识，编码真信息 ── */
+.tier{--c:var(--none);--cs:var(--none-soft)}
+.tier.hi{--c:var(--hi);--cs:var(--hi-soft)}
+.tier.mid{--c:var(--mid);--cs:var(--mid-soft)}
+.tier.lo{--c:var(--lo);--cs:var(--lo-soft)}
+.chip{display:inline-flex;align-items:center;gap:5px;padding:1px 7px;border-radius:3px;
+  background:var(--cs);color:var(--c);font-size:11px;font-weight:500;white-space:nowrap}
+.chip::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--c)}
+
+/* ── 应用外壳 ── */
+.app{margin-top:28px;border:1px solid var(--line-2);border-radius:9px;overflow:hidden;
+  background:var(--surface);box-shadow:0 1px 2px rgba(0,0,0,.05),0 8px 28px -18px rgba(0,0,0,.35)}
+.titlebar{display:flex;align-items:center;gap:10px;padding:9px 14px;background:var(--surface-2);
+  border-bottom:1px solid var(--line)}
+.dots{display:flex;gap:6px}
+.dots i{width:10px;height:10px;border-radius:50%;background:var(--line-2)}
+.titlebar .t{font-size:12px;color:var(--ink-2);font-family:var(--mono)}
+.shell{display:grid;grid-template-columns:172px 1fr;min-height:560px}
+@media(max-width:820px){.shell{grid-template-columns:1fr}}
+
+/* 左栏 */
+.rail{background:var(--surface-2);border-right:1px solid var(--line);padding:12px 8px;
+  display:flex;flex-direction:column;gap:2px}
+.rail .grp{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--ink-3);padding:12px 10px 5px}
+.nav{display:flex;align-items:center;gap:9px;width:100%;padding:8px 10px;border:0;border-radius:5px;
+  background:none;color:var(--ink-2);font:inherit;font-size:13px;text-align:left;cursor:pointer}
+.nav:hover{background:var(--sunken);color:var(--ink)}
+.nav[aria-selected="true"]{background:var(--accent-soft);color:var(--accent-ink);font-weight:500}
+.nav .badge{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--ink-3)}
+.nav[aria-selected="true"] .badge{color:var(--accent-ink)}
+.nav:focus-visible,button:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* 主区 */
+.pane{padding:0;display:none;min-width:0}
+.pane[data-on]{display:block}
+.paneHead{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;
+  align-items:center;gap:12px;flex-wrap:wrap}
+.paneHead h3{font-size:15px}
+.paneHead .sub{font-size:12px;color:var(--ink-3);font-family:var(--mono)}
+.paneBody{padding:16px 18px}
+.spacer{flex:1}
+
+/* 通用件 */
+.btn{border:1px solid var(--line-2);background:var(--surface);color:var(--ink);font:inherit;
+  font-size:12px;padding:5px 11px;border-radius:5px;cursor:pointer;white-space:nowrap}
+.btn:hover{border-color:var(--ink-3)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.pri:hover{background:var(--accent-ink);border-color:var(--accent-ink)}
+.btn.sm{padding:3px 8px;font-size:11px}
+.row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sec{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--ink-3);margin-bottom:9px}
+.card{border:1px solid var(--line);border-radius:var(--r);background:var(--surface)}
+.split{display:grid;grid-template-columns:1fr 300px;gap:0;min-height:420px}
+@media(max-width:900px){.split{grid-template-columns:1fr}}
+.detail{border-left:1px solid var(--line);padding:14px;background:var(--surface-2);min-width:0}
+@media(max-width:900px){.detail{border-left:0;border-top:1px solid var(--line)}}
+
+/* 表 */
+.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th{text-align:left;font-size:11px;font-weight:500;color:var(--ink-3);padding:6px 9px;
+  border-bottom:1px solid var(--line);white-space:nowrap;font-family:var(--mono);letter-spacing:.04em}
+.tbl td{padding:7px 9px;border-bottom:1px solid var(--line);vertical-align:middle}
+.tbl tbody tr{cursor:pointer}
+.tbl tbody tr:hover{background:var(--surface-2)}
+.tbl tbody tr[aria-selected="true"]{background:var(--accent-soft)}
+.tbl td.k{border-left:3px solid var(--c);padding-left:9px}
+.scrollx{overflow-x:auto}
+.dim{color:var(--ink-3)}
+.r{text-align:right}
+
+/* 筛选器 */
+.filter{border:1px solid var(--line);border-radius:var(--r);padding:10px;background:var(--surface-2)}
+.grpbox{border-left:2px solid var(--accent);padding:2px 0 2px 10px;margin:7px 0}
+.clause{display:flex;align-items:center;gap:5px;flex-wrap:wrap;padding:3px 0;font-size:12px}
+.tok{font-family:var(--mono);font-size:11px;padding:2px 6px;border-radius:3px;
+  border:1px solid var(--line-2);background:var(--surface)}
+.tok.dim{color:var(--ink-3)}
+.joiner{font-size:11px;color:var(--accent-ink);font-weight:500;padding:1px 6px;
+  background:var(--accent-soft);border-radius:3px}
+
+/* 批 */
+.batch{border:1px solid var(--line);border-radius:var(--r);margin-bottom:8px;overflow:hidden;
+  border-left:3px solid var(--c)}
+.batch>summary{padding:9px 12px;cursor:pointer;display:flex;align-items:center;gap:10px;
+  flex-wrap:wrap;background:var(--surface);list-style:none}
+.batch>summary::-webkit-details-marker{display:none}
+.batch>summary:hover{background:var(--surface-2)}
+.batch .why{font-size:12px;color:var(--ink-2);min-width:0}
+.batch .cnt{font-family:var(--mono);font-size:13px;font-weight:500;font-variant-numeric:tabular-nums}
+.batch .inner{padding:11px 12px;border-top:1px solid var(--line);background:var(--surface-2)}
+.sample{font-family:var(--mono);font-size:11.5px;padding:4px 0;border-bottom:1px dashed var(--line);
+  display:flex;gap:10px;justify-content:space-between}
+.sample:last-child{border-bottom:0}
+
+/* 容量条 */
+.meter{height:7px;border-radius:4px;background:var(--sunken);overflow:hidden;display:flex}
+.meter i{display:block;height:100%}
+
+/* 媒体 */
+.thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(78px,1fr));gap:7px}
+.thumb{aspect-ratio:3/4;border-radius:4px;border:1px solid var(--line-2);position:relative;
+  display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--ink-3);
+  background:linear-gradient(150deg,var(--surface-2),var(--sunken));overflow:hidden}
+.thumb.vid::after{content:"▶";position:absolute;inset:0;display:flex;align-items:center;
+  justify-content:center;background:rgba(0,0,0,.34);color:#fff;font-size:15px}
+
+/* 任务 */
+.task{display:grid;grid-template-columns:1fr auto;gap:4px 12px;padding:9px 0;
+  border-bottom:1px solid var(--line);align-items:center}
+.bar{height:5px;border-radius:3px;background:var(--sunken);overflow:hidden;grid-column:1/-1}
+.bar i{display:block;height:100%;background:var(--accent)}
+
+/* 刮削面板 */
+.sheet{border:1px solid var(--accent);border-radius:var(--r);background:var(--surface);
+  box-shadow:0 12px 32px -20px rgba(0,0,0,.5);overflow:hidden}
+.sheet .hd{padding:10px 13px;background:var(--accent-soft);color:var(--accent-ink);
+  font-weight:500;font-size:13px;border-bottom:1px solid var(--line)}
+.opt{display:flex;align-items:flex-start;gap:7px;padding:3px 0;font-size:12.5px}
+.opt input{margin-top:4px;accent-color:var(--accent)}
+.note{font-size:12px;color:var(--ink-2);padding:8px 10px;border-radius:5px;background:var(--surface-2);
+  border-left:2px solid var(--hi)}
+
+/* PRD */
+.prd{margin-top:64px}
+.prd h2{font-size:22px;padding-bottom:10px;border-bottom:2px solid var(--ink);margin-bottom:22px}
+.prd h3{font-size:16px;margin:34px 0 10px}
+.prd h4{font-size:13.5px;margin:20px 0 6px;color:var(--ink-2)}
+.prd p,.prd li{color:var(--ink-2);max-width:74ch}
+.prd ul{margin:6px 0;padding-left:19px}
+.prd li{margin:3px 0}
+.prd strong{color:var(--ink);font-weight:600}
+.ptable{width:100%;border-collapse:collapse;font-size:13px;margin:12px 0}
+.ptable th{text-align:left;font-size:11px;font-family:var(--mono);letter-spacing:.05em;
+  color:var(--ink-3);border-bottom:1px solid var(--line-2);padding:7px 10px 7px 0;font-weight:500}
+.ptable td{padding:8px 10px 8px 0;border-bottom:1px solid var(--line);vertical-align:top;color:var(--ink-2)}
+.ptable td:first-child{color:var(--ink);white-space:nowrap}
+.callout{border:1px solid var(--line);border-left:3px solid var(--mid);border-radius:var(--r);
+  padding:12px 14px;margin:16px 0;background:var(--surface)}
+.callout .sec{margin-bottom:6px;color:var(--mid)}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(268px,1fr));gap:14px;margin:14px 0}
+.stat{border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;background:var(--surface)}
+.stat .v{font-family:var(--mono);font-size:23px;font-weight:500;font-variant-numeric:tabular-nums;
+  letter-spacing:-.02em;line-height:1.25}
+.stat .l{font-size:11.5px;color:var(--ink-3);margin-top:2px}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <div>
+    <div class="eyebrow">交互设计稿 · 待确认</div>
+    <h1>romcat 界面原型</h1>
+    <p>五屏重构的可点原型与交互 PRD。全部数字取自 <code>主库-f5c61109</code> 的真实中立库，不是占位数据。</p>
+  </div>
+  <div class="stamp">
+    46,428 变体 · 10,978 作品<br>
+    18,241 条待裁决<br>
+    2026-09-04
+  </div>
+</header>
+
+<div class="app">
+  <div class="titlebar">
+    <div class="dots"><i></i><i></i><i></i></div>
+    <span class="t" id="wintitle">romcat — 主库</span>
+  </div>
+  <div class="shell">
+    <nav class="rail" role="tablist" aria-label="五屏">
+      <div class="grp">原料</div>
+      <button class="nav" role="tab" data-go="lib">库<span class="badge">2 根</span></button>
+      <div class="grp">干活</div>
+      <button class="nav" role="tab" data-go="browse" aria-selected="true">浏览<span class="badge">10,978</span></button>
+      <button class="nav" role="tab" data-go="queue">待确认<span class="badge">18,241</span></button>
+      <div class="grp">产出</div>
+      <button class="nav" role="tab" data-go="sub">子库<span class="badge">1</span></button>
+      <div class="grp">进行中</div>
+      <button class="nav" role="tab" data-go="task">任务<span class="badge">1</span></button>
+    </nav>
+
+    <!-- ═══ 浏览 ═══ -->
+    <section class="pane" id="p-browse" data-on>
+      <div class="paneHead">
+        <h3>浏览</h3>
+        <span class="sub">1,284 / 10,978 作品</span>
+        <div class="spacer"></div>
+        <button class="btn" id="scrapeBtn">刮削选中…</button>
+        <button class="btn">存成子库</button>
+        <button class="btn sm">★ 收藏</button>
+      </div>
+      <div class="paneBody" style="padding-bottom:10px">
+        <div class="filter">
+          <div class="row" style="margin-bottom:6px">
+            <span class="sec" style="margin:0">筛选器</span>
+            <span class="joiner">全部满足</span>
+            <div class="spacer"></div>
+            <button class="btn sm">+ 子句</button><button class="btn sm">+ 分组</button>
+          </div>
+          <div class="clause"><span class="tok">平台</span><span class="tok dim">=</span><span class="tok">GBA, GB, SFC</span></div>
+          <div class="grpbox">
+            <div class="row" style="margin-bottom:2px"><span class="joiner">任一满足</span></div>
+            <div class="clause"><span class="tok">作品</span><span class="tok dim">^ 以…开始</span><span class="tok">口袋</span></div>
+            <div class="clause"><span class="tok">类型</span><span class="tok dim">~ 含有</span><span class="tok">RPG</span></div>
+          </div>
+          <div class="clause"><span class="tok">收藏</span><span class="tok dim">=</span><span class="tok">是</span></div>
+        </div>
+      </div>
+      <div class="split">
+        <div class="scrollx">
+          <table class="tbl">
+            <thead><tr><th>作品</th><th>平台</th><th class="r">变体</th><th class="r">容量</th><th>年份</th><th>元数据</th></tr></thead>
+            <tbody id="works"></tbody>
+          </table>
+        </div>
+        <aside class="detail">
+          <div class="sec">详情 · 作品</div>
+          <div style="font-size:15px;font-weight:600;margin-bottom:2px">口袋妖怪 红</div>
+          <div class="dim" style="font-size:12px;margin-bottom:12px">Pocket Monsters Aka · 1996 · Game Freak</div>
+
+          <div class="sec">变体 3 个</div>
+          <div class="card" style="margin-bottom:14px">
+            <table class="tbl" style="font-size:12px">
+              <tbody>
+                <tr class="tier hi" aria-selected="true"><td class="k">日版原版<div class="dim mono" style="font-size:10.5px">GB/口袋妖怪 红.zip</div></td><td class="r"><span class="chip">高</span></td></tr>
+                <tr class="tier mid"><td class="k">汉化 · 口袋汉化组<div class="dim mono" style="font-size:10.5px">GB/汉化/口袋妖怪红(简).zip</div></td><td class="r"><span class="chip">中</span></td></tr>
+                <tr class="tier lo"><td class="k">汉化 · 未署名<div class="dim mono" style="font-size:10.5px">GB/合集v1.2/pm_red_cn.gb</div></td><td class="r"><span class="chip">低</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="sec">文件 · 日版原版</div>
+          <div class="mono" style="font-size:11px;color:var(--ink-2);line-height:1.9;margin-bottom:14px">
+            口袋妖怪 红.gb <span class="dim">· 1.00 MiB · CRC 9506C014</span>
+          </div>
+
+          <div class="sec">媒体 6 件</div>
+          <div class="thumbs">
+            <div class="thumb">封面</div><div class="thumb">标题画面</div>
+            <div class="thumb">截图</div><div class="thumb vid">视频</div>
+            <div class="thumb">logo</div><div class="thumb">卡带</div>
+          </div>
+        </aside>
+      </div>
+      <div class="paneBody" id="scrapeSheet" hidden>
+        <div class="sheet">
+          <div class="hd">刮削 · 作用于筛出来的 1,284 个作品</div>
+          <div style="padding:13px;display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:16px">
+            <div>
+              <div class="sec">字段 · 要什么</div>
+              <label class="opt"><input type="checkbox" checked><span>简介</span></label>
+              <label class="opt"><input type="checkbox" checked><span>类型</span></label>
+              <label class="opt"><input type="checkbox" checked><span>开发商 / 发行商</span></label>
+              <label class="opt"><input type="checkbox"><span>媒体（封面、截图、视频）</span></label>
+            </div>
+            <div>
+              <div class="sec">源 · 花多少代价</div>
+              <label class="opt"><input type="checkbox" checked><span>中文离线源 <span class="dim">本地 · 免费</span></span></label>
+              <label class="opt"><input type="checkbox" checked><span>DAT <span class="dim">本地 · 免费</span></span></label>
+              <label class="opt"><input type="checkbox" id="onlineSrc"><span>ScreenScraper <span class="dim">联网 · 扣配额</span></span></label>
+            </div>
+            <div>
+              <div class="sec">采法</div>
+              <label class="opt"><input type="radio" name="how" checked><span><b>补缺</b><br><span class="dim">只采一个源都没给过值的</span></span></label>
+              <label class="opt"><input type="radio" name="how"><span><b>重采</b><br><span class="dim">绕过输入指纹，全部重来</span></span></label>
+            </div>
+          </div>
+          <div style="padding:0 13px 13px">
+            <div class="note" id="estimate">预计 <b>0 个网络请求</b>、约 <b>1 分 40 秒</b>。<br>裁决与你手工维护的元数据不会被动。</div>
+          </div>
+          <div style="padding:0 13px 13px" class="row">
+            <button class="btn pri" id="scrapeGo">加入任务队列</button>
+            <button class="btn" id="scrapeCancel">取消</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ 待确认 ═══ -->
+    <section class="pane" id="p-queue">
+      <div class="paneHead">
+        <h3>待确认</h3>
+        <span class="sub">18,241 变体 · 30,304 条候选</span>
+        <div class="spacer"></div>
+        <span class="tier hi"><span class="chip">高 0</span></span>
+        <span class="tier mid"><span class="chip">中 16,972</span></span>
+        <span class="tier lo"><span class="chip">低 1,930</span></span>
+      </div>
+      <div class="paneBody">
+        <div class="sec">一级 · 按依据形状分批 <span class="dim" style="text-transform:none;letter-spacing:0">（源 / DAT / 置信度 / 哈希口径）</span></div>
+
+        <details class="batch tier mid" open>
+          <summary>
+            <span class="cnt">3,053</span>
+            <span class="why">MAME <span class="dim">/ gameboy.xml /</span> 含头 —— 都只有一个候选，判据都是「名字一字不差 + 平台对得上」</span>
+            <span class="spacer"></span><span class="chip">中</span>
+          </summary>
+          <div class="inner">
+            <div class="sec">二级 · 按目录</div>
+            <div style="margin-bottom:11px">
+              <div class="sample"><span>GB/合集v1.2（2022.5.7）/</span><span class="dim">1,204 条 · <a href="#" style="color:var(--accent-ink)">下钻</a></span></div>
+              <div class="sample"><span>GB/【其他整理】/</span><span class="dim">918 条 · <a href="#" style="color:var(--accent-ink)">下钻</a></span></div>
+              <div class="sample"><span>GB/汉化/</span><span class="dim">576 条 · <a href="#" style="color:var(--accent-ink)">下钻</a></span></div>
+              <div class="sample"><span class="dim">…另有 12 个目录</span><span class="dim">355 条</span></div>
+            </div>
+            <div class="sec">随机样本 5 条</div>
+            <div style="margin-bottom:12px">
+              <div class="sample"><span>口袋妖怪 金.zip</span><span class="dim">→ Pocket Monsters Kin (Japan)</span></div>
+              <div class="sample"><span>塞尔达传说 织梦岛DX.zip</span><span class="dim">→ Zelda no Densetsu - Yume o Miru Shima DX</span></div>
+              <div class="sample"><span>瓦里奥大陆3.zip</span><span class="dim">→ Wario Land 3 (World)</span></div>
+              <div class="sample"><span>星之卡比2.zip</span><span class="dim">→ Hoshi no Kirby 2 (Japan)</span></div>
+              <div class="sample"><span>魂斗罗 精神.zip</span><span class="dim">→ Contra Spirits (Japan)</span></div>
+            </div>
+            <div class="row">
+              <button class="btn pri">整批通过 3,053 条</button>
+              <button class="btn">换一组样本</button>
+              <button class="btn">逐条看</button>
+              <div class="spacer"></div>
+              <button class="btn">整批拒绝</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="batch tier mid"><summary><span class="cnt">3,034</span><span class="why">MAME <span class="dim">/ snes.xml /</span> 含头</span><span class="spacer"></span><span class="chip">中</span></summary><div class="inner dim">展开后同上：二级分组 + 随机样本 + 整批操作。</div></details>
+        <details class="batch tier mid"><summary><span class="cnt">2,760</span><span class="why">MAME <span class="dim">/ gbcolor.xml /</span> 含头</span><span class="spacer"></span><span class="chip">中</span></summary><div class="inner dim">同上。</div></details>
+        <details class="batch tier mid"><summary><span class="cnt">1,734</span><span class="why">中文离线源 <span class="dim">/ dump-2026-09-01 /</span> 含头 —— 正题模糊匹配上的中文名</span><span class="spacer"></span><span class="chip">中</span></summary><div class="inner dim">同上。</div></details>
+        <details class="batch tier mid"><summary><span class="cnt">1,642</span><span class="why">MAME <span class="dim">/ nes.xml /</span> 去头</span><span class="spacer"></span><span class="chip">中</span></summary><div class="inner dim">同上。</div></details>
+        <details class="batch tier lo"><summary><span class="cnt">763</span><span class="why">中文离线源 <span class="dim">/ dump-2026-09-01 /</span> 含头</span><span class="spacer"></span><span class="chip">低</span></summary><div class="inner dim">低置信这一档默认收起，建议逐条看。</div></details>
+
+        <div class="note" style="margin-top:14px;border-left-color:var(--accent)">
+          前 5 批盖住 <b>12,223</b> 条 —— 占 14,657 条单候选的 <b>83%</b>。剩下 3,584 条多候选走逐条键盘流（<code>←→</code> 切候选、<code>Y</code> 过、<code>N</code> 拒、<code>空格</code> 跳过）。
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ 库 ═══ -->
+    <section class="pane" id="p-lib">
+      <div class="paneHead"><h3>库</h3><span class="sub">这个库由什么构成</span></div>
+      <div class="paneBody">
+        <div class="row" style="margin-bottom:9px">
+          <span class="sec" style="margin:0">根 · 2 个</span><div class="spacer"></div>
+          <button class="btn">+ 添加目录</button><button class="btn">全部重扫</button>
+        </div>
+        <div class="card scrollx" style="margin-bottom:26px">
+          <table class="tbl">
+            <thead><tr><th>根名</th><th>路径</th><th class="r">变体</th><th class="r">容量</th><th>上次扫描</th><th></th></tr></thead>
+            <tbody>
+              <tr class="tier hi"><td class="k">主库</td><td class="mono dim">/Volumes/新加卷/Game</td><td class="r num">46,428</td><td class="r num">5.33 TiB</td><td>09-03 14:58 <span class="dim">· 37.1 分钟</span></td><td class="r"><button class="btn sm">重扫</button></td></tr>
+              <tr class="tier"><td class="k">元数据库</td><td class="mono dim">/Volumes/备份/Pegasus</td><td class="r dim">—</td><td class="r dim">≈3 TiB</td><td class="dim">还没扫过</td><td class="r"><button class="btn sm">扫描</button></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="row" style="margin-bottom:9px">
+          <span class="sec" style="margin:0">数据源 · 让识别能干活的原料</span><div class="spacer"></div>
+          <button class="btn">全部重取</button>
+        </div>
+        <div class="card scrollx">
+          <table class="tbl">
+            <thead><tr><th>源</th><th class="r">记录</th><th>上次取回</th><th>覆盖</th><th></th></tr></thead>
+            <tbody>
+              <tr class="tier hi"><td class="k">DAT 仓库</td><td class="r num">481,106</td><td>09-02 17:43</td><td class="dim">395 份 · No-Intro / Redump / TOSEC / MAME / GoodNES</td><td class="r"><button class="btn sm">重取</button></td></tr>
+              <tr class="tier hi"><td class="k">中文离线源</td><td class="r num">112,562</td><td>09-02 17:57</td><td class="dim">94.2% 带中文简介 · 435 MB</td><td class="r"><button class="btn sm">重取</button></td></tr>
+              <tr class="tier lo"><td class="k">Switch TitleID</td><td class="r dim">0</td><td class="dim">还没取过</td><td class="dim">取回前 Switch 平台认不出任何东西</td><td class="r"><button class="btn sm">取回</button></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="note" style="margin-top:14px">扫完没认出来？先看这一屏——多半是某个源还没取回。</div>
+      </div>
+    </section>
+
+    <!-- ═══ 子库 ═══ -->
+    <section class="pane" id="p-sub">
+      <div class="paneHead"><h3>子库</h3><span class="sub">1 台设备</span><div class="spacer"></div><button class="btn">+ 新建子库</button></div>
+      <div class="paneBody">
+        <div class="card" style="padding:15px;max-width:600px">
+          <div class="row" style="margin-bottom:3px">
+            <div style="font-size:15px;font-weight:600">实测掌机</div>
+            <span class="tier mid"><span class="chip">待同步 218 步</span></span>
+            <div class="spacer"></div>
+            <button class="btn sm">改选择…</button>
+          </div>
+          <div class="mono dim" style="font-size:11.5px;margin-bottom:14px">/Volumes/SDCARD · Pegasus · exFAT</div>
+
+          <div class="sec">选择集</div>
+          <div class="clause" style="margin-bottom:14px">
+            <span class="tok">平台</span><span class="tok dim">=</span><span class="tok">GBA, GB, MD</span>
+            <span class="joiner">且</span>
+            <span class="tok">收藏</span><span class="tok dim">=</span><span class="tok">是</span>
+            <span class="dim" style="font-size:11px">· 2 条例外</span>
+          </div>
+
+          <div class="sec">容量</div>
+          <div class="meter" style="margin-bottom:6px">
+            <i style="width:58%;background:var(--accent)"></i><i style="width:11%;background:var(--mid)"></i>
+          </div>
+          <div class="row" style="font-size:11.5px;gap:16px;margin-bottom:15px">
+            <span><span style="color:var(--accent)">■</span> 选中 297 GiB</span>
+            <span><span style="color:var(--mid)">■</span> 清单之外 56 GiB</span>
+            <span class="dim">上限 512 GB</span>
+          </div>
+
+          <div class="sec">这一趟要动的 218 步（先删后传）</div>
+          <div style="margin-bottom:14px">
+            <div class="sample"><span>删 · GBA/旧汉化版 ×12</span><span class="dim">腾出 1.4 GiB</span></div>
+            <div class="sample"><span>传 · GB/口袋妖怪 金.zip → 转 zip</span><span class="dim">1.0 MiB</span></div>
+            <div class="sample"><span class="dim">…另有 205 步</span><span class="dim"><a href="#" style="color:var(--accent-ink)">全部展开</a></span></div>
+          </div>
+          <div class="row"><button class="btn pri">同步</button><button class="btn">重排差量</button><div class="spacer"></div><button class="btn">删掉这个子库</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ 任务 ═══ -->
+    <section class="pane" id="p-task">
+      <div class="paneHead"><h3>任务</h3><span class="sub">1 个进行中 · 3 条历史</span><div class="spacer"></div><button class="btn">清空历史</button></div>
+      <div class="paneBody">
+        <div class="sec">进行中</div>
+        <div class="task">
+          <div><b>扫描 · 元数据库</b> <span class="dim" style="font-size:12px">/Volumes/备份/Pegasus</span></div>
+          <div class="row"><span class="mono" style="font-size:12px">14:02 / ≈22 分</span><button class="btn sm">停下</button></div>
+          <div class="bar"><i style="width:38%"></i></div>
+          <div class="dim" style="font-size:11.5px;grid-column:1/-1">已走 38% · 98,412 个条目 · 并发 2（寻道受限）</div>
+        </div>
+        <div class="sec" style="margin-top:22px">历史</div>
+        <div class="task"><div>刮削 · 1,284 个作品 <span class="dim" style="font-size:12px">补缺 · 仅本地源</span></div><div class="mono dim" style="font-size:12px">1 分 38 秒 · 完成</div></div>
+        <div class="task"><div>识别 · 全库</div><div class="mono dim" style="font-size:12px">65.5 秒 · 完成</div></div>
+        <div class="task"><div>扫描 · 主库</div><div class="mono dim" style="font-size:12px">37.1 分钟 · 完成</div></div>
+        <div class="note" style="margin-top:16px">任务跑着的时候，其余四屏照常用——浏览、筛选、看详情都不受影响。</div>
+      </div>
+    </section>
+
+  </div>
+</div>
+
+<!-- ═══════════ PRD ═══════════ -->
+<div class="prd">
+  <h2>交互设计 PRD</h2>
+
+  <p>本稿把 <code>/grill-with-docs</code> 那一轮定下的 13 条决策，落成可实现的交互规格。上面的原型是它的可视对照；下文是判据。</p>
+
+  <div class="grid2">
+    <div class="stat"><div class="v">5</div><div class="l">屏，各管一种活</div></div>
+    <div class="stat"><div class="v">12,223</div><div class="l">前 5 批能清掉的待裁决（83%）</div></div>
+    <div class="stat"><div class="v">1</div><div class="l">选东西的地方（只有浏览屏）</div></div>
+    <div class="stat"><div class="v">0</div><div class="l">会被刮削动到的裁决</div></div>
+  </div>
+
+  <h3>1 · 五屏的分工</h3>
+  <p>三个「看不懂」的根因是同一个：三屏各有一套选东西的办法。新架构把<strong>选</strong>收拢到一屏，其余各屏只做自己那件事。</p>
+  <table class="ptable">
+    <thead><tr><th>屏</th><th>一句话</th><th>它<em>不</em>做什么</th></tr></thead>
+    <tbody>
+      <tr><td>库</td><td>这个库由什么构成：根 + 数据源</td><td>不浏览内容</td></tr>
+      <tr><td>浏览</td><td>找到这一批，然后对它施加操作</td><td>不管设备、不管任务</td></tr>
+      <tr><td>待确认</td><td>过完这一堆</td><td>不做自由浏览</td></tr>
+      <tr><td>子库</td><td>管住这几台设备</td><td><strong>不选内容</strong>——改选择跳回浏览屏</td></tr>
+      <tr><td>任务</td><td>排队、进度、可停、历史</td><td>不发起操作，只承接</td></tr>
+    </tbody>
+  </table>
+
+  <h3>2 · 浏览屏</h3>
+  <h4>行是作品，不是变体</h4>
+  <p>主列表 <strong>10,978 行</strong>（而非 46,428 个变体）。六成作品下面挂着不止一个变体，它们在<strong>详情面板</strong>里展开。元数据本就锚在作品这一层，所以这个粒度与数据模型天然对齐。</p>
+  <ul>
+    <li>批量操作（刮削、导出、收藏）作用于<strong>选中作品的全部变体</strong>。</li>
+    <li>精确到某个变体的操作（裁决、加进子库）在<strong>详情面板</strong>里点。</li>
+  </ul>
+
+  <h4>筛选器就是子库的规则</h4>
+  <p>同一套语言，两处用。筛到满意按「存成子库」，规则原样带过去；反过来，子库屏点「改选择」跳回这里，规则预填进筛选器——<strong>你改规则时看得见它真的筛出了什么</strong>。</p>
+  <ul>
+    <li><strong>维度</strong>：平台、语言、中文、合集、收藏、类型、作品、年份、评分、容量、开发商、发行商、简介</li>
+    <li><strong>运算符</strong>：<code>=</code> <code>!=</code> <code>~含有</code> <code>^以…开始</code> <code>$以…结束</code> <code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code></li>
+    <li><strong>分组可嵌套</strong>，每组选「全部满足 / 任一满足 / 都不满足」</li>
+  </ul>
+  <p>搜索框独立于筛选器，<strong>自动按匹配质量排序</strong>：以搜索词开头 &gt; 含有 &gt; 别名命中 &gt; 简介命中。权重内置，不暴露给用户配。</p>
+
+  <h4>详情面板三层</h4>
+  <p>作品 → 变体 → 文件。媒体：图片内嵌显示；视频抽首帧当封面加一个播放标，点击交给系统播放器。<strong>ffmpeg 找不到就退化成占位图标</strong>，不当硬依赖。</p>
+
+  <h3>3 · 待确认屏</h3>
+  <div class="callout">
+    <div class="sec">这一屏的设计前提</div>
+    <p><strong>18,241 条 × 5 秒 = 25 小时。</strong> 逐条处理不可能是主路径。但其中 <strong>14,657 条（80.4%）只有一个候选</strong>——那不是「选哪个」，是「对不对」，而「对不对」可以按批回答。</p>
+  </div>
+
+  <h4>二级分组</h4>
+  <ul>
+    <li><strong>一级按依据形状</strong>：源 / DAT / 置信度 / 哈希口径。这一层分得动是因为它就是「工具凭什么这么认为」，而整批通过时你验证的正是这句话。</li>
+    <li><strong>二级按目录或命名规律</strong>。坏的那几条往往集中在某一个目录里，随机抽样未必抽得到——所以要能下钻。</li>
+    <li>每一层都能整批过 / 整批拒，你自己决定下钻到多细。</li>
+  </ul>
+
+  <h4>屏上常驻三样</h4>
+  <p>批的条数、<strong>那句共同依据</strong>、<strong>随机样本</strong>（可换一组）。三样齐了才敢按「整批通过 3,053 条」。</p>
+
+  <h4>撤销必须干净</h4>
+  <p>整批通过之后发现不对，要能按批整个撤回。<strong>现在的 <code>triage undo</code> 不回滚中立库那一半</strong>（挂账 D102）——批量优先的设计成立的前提就是撤销可信，这条必须先补上。</p>
+
+  <h4>难货走逐条</h4>
+  <p>3,584 条多候选（2–3 个 2,750、4–10 个 688、10 个以上 146）走键盘流：<code>←→</code> 切候选、<code>Y</code> 过、<code>N</code> 拒、<code>空格</code> 跳过、<code>U</code> 撤销上一条。</p>
+
+  <h3>4 · 刮削面板</h3>
+  <p>从浏览屏筛选后触发，作用范围就是筛出来的那批。四个旋钮，两条轴分得清清楚楚：</p>
+  <table class="ptable">
+    <thead><tr><th>旋钮</th><th>答的是</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>范围</td><td>对谁</td><td>筛出来的这批，带条数，不可编辑（要改回筛选器改）</td></tr>
+      <tr><td>字段</td><td><strong>我要什么</strong></td><td>简介 / 类型 / 开发商 / 发行商 / 年份 / 媒体</td></tr>
+      <tr><td>源</td><td><strong>花多少代价</strong></td><td>默认只勾本地源；勾联网源弹配额提醒</td></tr>
+      <tr><td>采法</td><td>跑多久</td><td>补缺（只采没值的）/ 重采（绕过输入指纹）</td></tr>
+    </tbody>
+  </table>
+  <p>面板底部实时估算<strong>会发多少网络请求、大概多久</strong>，并常驻一句：<strong>裁决与你手工维护的元数据不会被动。</strong></p>
+
+  <div class="callout">
+    <div class="sec">一个要纠正的心智模型</div>
+    <p>刮削结果按「锚点 × 字段 × 源」三元组<strong>并存</strong>，没有「覆盖」这回事。所以<strong>「有值了但我想换一个」不该靠重刮</strong>——那是<strong>优先级</strong>的事，改一次排序，零成本、不重跑。真正需要重采的只有两种：数据源更新了，或解析逻辑改了。</p>
+  </div>
+
+  <h3>5 · 库屏</h3>
+  <p><strong>主库是一组根</strong>，不是一个目录。几块盘、几个目录都能加进同一个库，扫完收进同一份中立库。变体的键因此变成「根名 + 相对路径」。</p>
+  <p><strong>根</strong>与<strong>数据源</strong>同屏，因为它们是同一件事：让识别能干活的原料。新用户最容易卡的「扫完了怎么没认出来」，在这一屏上一眼看得见——某个源那一行是空的。</p>
+
+  <h3>6 · 子库屏</h3>
+  <p>管理为主。一台设备一张卡：目标路径、前端格式、容量条（选中 / 清单之外 / 上限三段）、待同步步数、同步按钮。<strong>选择集只读展示，点「改选择」跳回浏览屏。</strong></p>
+
+  <h3>7 · 任务屏</h3>
+  <p>扫描（37.1 分钟）、识别（65.5 秒）、刮削、同步统一排队。带进度、可停、留历史。任务跑着时其余四屏照常可用——<strong>这是基础设施，不是一屏；差量预览僵住窗口那条挂账（D156）跟着收掉。</strong></p>
+
+  <h3>8 · 贯穿全局的约定</h3>
+  <ul>
+    <li><strong>置信度色条</strong>：凡是带置信度的行与卡，左边缘一条 3px 色带 —— <span class="tier hi"><span class="chip">高置信</span></span> <span class="tier mid"><span class="chip">中置信</span></span> <span class="tier lo"><span class="chip">低置信</span></span> <span class="tier"><span class="chip">还没识别</span></span></li>
+    <li><strong>收藏</strong>是一颗星，多选/全选后批量加减。它走合集机制，所以你顺带能建「通关过的」这类自定义合集。落<strong>沉淀库</strong>、锚在<strong>内容</strong>上——重扫、改名、挪目录都不丢。</li>
+    <li><strong>面板边界可拖</strong>，位置记住。</li>
+    <li><strong>存量优先</strong>：默认筛选与快捷键按「把 10,978 个作品扫平」这个节奏排，增量日常次之。</li>
+  </ul>
+
+  <h3>9 · 开工前要付的两笔账</h3>
+  <table class="ptable">
+    <thead><tr><th>代价</th><th>为什么现在付</th></tr></thead>
+    <tbody>
+      <tr><td>重扫一遍主库<br><span class="dim">约 37 分钟</span></td><td>变体的键换形状会让<strong>路径锚</strong>失效。你现在 <strong>0 条裁决、0 条人工纠正</strong>——这是这个改动最便宜的一刻，晚做就要赔上攒下来的裁决。</td></tr>
+      <tr><td>重写现在 GUI 的大部分<br><span class="dim">queue / library / sublibrary / table 合计 3,940 行</span></td><td>领域逻辑全在核心库里，界面只画和转发，所以重写的是画的那一层。已落的 6 张票（中文离线源取全字段）改的是刮削从数据源取什么，与界面无关，<strong>可并行推进</strong>。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>10 · 顺带收掉的挂账</h3>
+  <ul>
+    <li><strong>D74</strong> 合集没有任何建的办法 —— 收藏与合集同机制，一并解决</li>
+    <li><strong>D102</strong> <code>triage undo</code> 不回滚中立库 —— 批量优先的前提</li>
+    <li><strong>D154</strong> 五个筛选之间只能「且」 —— 规则语言取代</li>
+    <li><strong>D156</strong> 差量预览僵住窗口 —— 任务台取代</li>
+    <li><strong>D160</strong> 媒体列得出但不显示图 —— 详情面板媒体区</li>
+  </ul>
+
+  <p style="margin-top:34px;padding-top:18px;border-top:1px solid var(--line);font-size:12.5px" class="dim">
+    确认这一稿之后走 <code>/to-spec</code> → <code>/to-tickets</code>。数字取自 2026-09-03 的中立库与实测记录；界面为静态原型，交互仅演示导航、批展开与刮削面板。
+  </p>
+</div>
+</div>
+
+<script>
+(function(){
+  var works=[
+    ["口袋妖怪 红","GB",3,"3.0 MiB","1996","hi","齐"],
+    ["塞尔达传说 织梦岛DX","GB / GBC",2,"2.1 MiB","1998","hi","齐"],
+    ["火焰之纹章 烈火之剑","GBA",5,"41 MiB","2003","mid","缺简介"],
+    ["超级机器人大战A","GBA",4,"33 MiB","2001","mid","缺简介"],
+    ["幻想传说","SFC",6,"28 MiB","1995","hi","齐"],
+    ["勇者鬥惡龍Ⅲ","SFC",3,"12 MiB","1996","mid","缺开发商"],
+    ["星之卡比 超豪华版","SFC",2,"8.0 MiB","1996","hi","齐"],
+    ["洛克人X","SFC",4,"16 MiB","1993","hi","齐"],
+    ["名侦探柯南 疑惑的豪华列车","GB",1,"1.0 MiB","1996","lo","缺全部"],
+    ["瓦里奥大陆3","GBC",2,"2.0 MiB","2000","mid","缺类型"],
+    ["皇家騎士團 ①","SFC",1,"4.0 MiB","1995","","还没识别"],
+    ["魂斗罗 精神","SFC",3,"6.0 MiB","1992","hi","齐"]
+  ];
+  var tb=document.getElementById("works");
+  works.forEach(function(w,i){
+    var tr=document.createElement("tr");
+    tr.className="tier "+w[5];
+    if(i===0)tr.setAttribute("aria-selected","true");
+    var tierLabel=w[5]==="hi"?"高":w[5]==="mid"?"中":w[5]==="lo"?"低":"—";
+    tr.innerHTML='<td class="k">'+w[0]+'</td><td class="dim">'+w[1]+
+      '</td><td class="r num">'+w[2]+'</td><td class="r num dim">'+w[3]+
+      '</td><td class="num dim">'+w[4]+'</td><td><span class="chip">'+tierLabel+' · '+w[6]+'</span></td>';
+    tr.addEventListener("click",function(){
+      tb.querySelectorAll("tr").forEach(function(r){r.removeAttribute("aria-selected")});
+      tr.setAttribute("aria-selected","true");
+    });
+    tb.appendChild(tr);
+  });
+
+  var titles={lib:"romcat — 主库 · 库",browse:"romcat — 主库 · 浏览",
+    queue:"romcat — 主库 · 待确认",sub:"romcat — 主库 · 子库",task:"romcat — 主库 · 任务"};
+  document.querySelectorAll(".nav").forEach(function(b){
+    b.addEventListener("click",function(){
+      document.querySelectorAll(".nav").forEach(function(x){x.removeAttribute("aria-selected")});
+      b.setAttribute("aria-selected","true");
+      document.querySelectorAll(".pane").forEach(function(p){p.removeAttribute("data-on")});
+      document.getElementById("p-"+b.dataset.go).setAttribute("data-on","");
+      document.getElementById("wintitle").textContent=titles[b.dataset.go];
+    });
+  });
+
+  var sheet=document.getElementById("scrapeSheet");
+  document.getElementById("scrapeBtn").addEventListener("click",function(){sheet.hidden=!sheet.hidden});
+  document.getElementById("scrapeCancel").addEventListener("click",function(){sheet.hidden=true});
+  document.getElementById("scrapeGo").addEventListener("click",function(){
+    sheet.hidden=true;
+    document.querySelector('[data-go="task"]').click();
+  });
+  document.getElementById("onlineSrc").addEventListener("change",function(e){
+    document.getElementById("estimate").innerHTML=e.target.checked
+      ? '预计 <b>1,284 个网络请求</b>、约 <b>21 分钟</b>。<span style="color:var(--mid)">会扣 ScreenScraper 配额。</span><br>裁决与你手工维护的元数据不会被动。'
+      : '预计 <b>0 个网络请求</b>、约 <b>1 分 40 秒</b>。<br>裁决与你手工维护的元数据不会被动。';
+  });
+})();
+</script>
