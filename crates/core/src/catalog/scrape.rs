@@ -36,6 +36,8 @@ use std::collections::BTreeMap;
 use rusqlite::{OptionalExtension, params};
 
 use super::{Catalog, CatalogError};
+use crate::scrape::priority::VERDICT;
+use crate::scrape::{AnchorKind, Field};
 
 /// 刮削相关的表。
 pub(super) const SCRAPE_SCHEMA: &str = "\
@@ -707,6 +709,65 @@ impl Catalog {
             })
             .map_err(|source| self.err(source))?;
         rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
+    /// 人在界面上直接写下的一个字段值，**来源记作裁决**。
+    ///
+    /// 与 [`put_scraped`](Self::put_scraped) 分开的理由是它**只动这一行**：那条路的语义
+    /// 是「一个源在一个锚点上写两次是同一个结果」，于是它会先把这个源在这个锚点上的值
+    /// 整批删掉再插——人一次只改一个字段，走那条路等于把他上次写的另外五个字段一起抹了。
+    ///
+    /// 优先级表把**裁决**排在每个字段的最前（`priorities.toml` 的规则一），所以写下之后
+    /// 导出真会用它——而不是「记下了但不生效」。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn put_verdict_value(
+        &mut self,
+        anchor: AnchorKind,
+        subject: &str,
+        field: Field,
+        value: &str,
+        evidence: &str,
+    ) -> Result<(), CatalogError> {
+        self.conn
+            .execute(
+                "INSERT INTO scrape_value(anchor, subject, field, source, value, evidence, at)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7)
+                 ON CONFLICT(anchor, subject, field, source) DO UPDATE SET
+                    value = excluded.value, evidence = excluded.evidence, at = excluded.at",
+                params![
+                    anchor.label(),
+                    subject,
+                    field.label(),
+                    VERDICT,
+                    value,
+                    evidence,
+                    super::now_secs(),
+                ],
+            )
+            .map(|_| ())
+            .map_err(|source| self.err(source))
+    }
+
+    /// 撤掉一条**裁决**来源的字段值，让别的源重新说了算。返回撤掉了没有。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn clear_verdict_value(
+        &mut self,
+        anchor: AnchorKind,
+        subject: &str,
+        field: Field,
+    ) -> Result<bool, CatalogError> {
+        self.conn
+            .execute(
+                "DELETE FROM scrape_value
+                 WHERE anchor = ?1 AND subject = ?2 AND field = ?3 AND source = ?4",
+                params![anchor.label(), subject, field.label(), VERDICT],
+            )
+            .map(|removed| removed > 0)
             .map_err(|source| self.err(source))
     }
 

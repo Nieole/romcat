@@ -458,6 +458,7 @@ pub fn library(rows: u64) -> Result<Catalog, CatalogError> {
     use romcat_core::catalog::scrape::{Harvested, HarvestedMedia, HarvestedValue};
     use romcat_core::catalog::title::TitleRow;
     use romcat_core::catalog::{EntryRecord, Verdict};
+    use romcat_core::dat::chinese::ChineseMark;
     use romcat_core::fs::{EntryKind, EntryMeta};
     use romcat_core::scrape::priority::VERDICT;
     use romcat_core::scrape::{AnchorKind, Field, MediaKind};
@@ -541,6 +542,15 @@ pub fn library(rows: u64) -> Result<Catalog, CatalogError> {
         }
         let state = State::ALL[(i as usize / 5) % State::ALL.len()];
         let at = (i as usize / 3) % works.len();
+        // **中文身份挂在自动通过的候选上**（与 `sublibrary::facts`、`adapter::converge`
+        // 同一条路）：汉化版是**变体**，它基于的发行版多半是日版——那正是「只按语言筛
+        // 筛不出汉化版」的由来，中文那一维要有得测就得真造出这批记号来（ADR-0012）。
+        let mark = MARKS[(i as usize / 7) % MARKS.len()];
+        let chinese = match mark {
+            "汉化版" | "英化" => Some(ChineseMark::FanTranslated),
+            "官中" | "繁中" => Some(ChineseMark::Official),
+            _ => None,
+        };
         records.push(Identification {
             variant_key: key_of(i),
             state,
@@ -551,7 +561,32 @@ pub fn library(rows: u64) -> Result<Catalog, CatalogError> {
             read_bytes: 0,
             work_id: Some(works[at]),
             release_id: Some(releases[at * REGIONS.len() + (i as usize) % REGIONS.len()]),
-            candidates: Vec::new(),
+            candidates: chinese
+                .map(|mark| {
+                    vec![Candidate {
+                        member_key: key_of(i),
+                        inner: String::new(),
+                        confidence: Confidence::High,
+                        // **自动通过**：中文记号只从这一档上读回来。
+                        accepted: true,
+                        source: "合成数据".to_string(),
+                        dat: "合成.dat".to_string(),
+                        platform: PLATFORMS[(i as usize) % PLATFORMS.len()].to_string(),
+                        game: format!(
+                            "{} ({})",
+                            WORKS[(i as usize / 3) % WORKS.len()],
+                            mark.label()
+                        ),
+                        rom: "rom.bin".to_string(),
+                        hashed_as: Convention::AsIs,
+                        dat_convention: Convention::AsIs,
+                        evidence: "合成数据里钉死的中文记号".to_string(),
+                        chinese: Some(mark),
+                        serial: None,
+                        release_id: None,
+                    }]
+                })
+                .unwrap_or_default(),
         });
     }
     catalog.write_identifications(&records)?;

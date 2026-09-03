@@ -592,13 +592,7 @@ pub fn facts(catalog: &Catalog) -> Result<Vec<VariantFacts>, CatalogError> {
             .release_id
             .and_then(|id| releases.get(&id))
             .and_then(|release| release.languages.as_deref())
-            .map(|text| {
-                text.split(',')
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string)
-                    .collect()
-            })
+            .map(crate::catalog::ReleaseRow::language_codes)
             .unwrap_or_default();
         let mut row = VariantFacts {
             platform: variant.platform,

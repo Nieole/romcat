@@ -11,10 +11,11 @@
 //! - **首选变体与标题来源解耦**（ADR-0012）：首选换成汉化版，中文标题的来源一个字不变。
 
 use egui::widgets::text_edit::TextEditState;
-use romcat_core::catalog::browse::StateFilter;
+use romcat_core::catalog::browse::{PlatformFilter, StateFilter};
 use romcat_core::catalog::{State, VariantQuery};
-use romcat_core::scrape::MediaKind;
+use romcat_core::dat::chinese::ChineseMark;
 use romcat_core::scrape::priority::VERDICT;
+use romcat_core::scrape::{AnchorKind, Field, MediaKind};
 use romcat_core::title::{Language, TitleKind};
 use romcat_gui::app::{App, View};
 use romcat_gui::table::{ROW_HEIGHT, SPAN};
@@ -37,13 +38,23 @@ fn 跑(ctx: &egui::Context, app: &mut App, frames: u32) {
 }
 
 #[test]
-fn 四个维度都有得选而且各自带着条数() {
+fn 五个维度都有得选而且各自带着条数() {
     let app = 界面(ROWS);
     let facets = app.library().facets();
     // 平台、合集、语言、识别状态——票 25 点名的那四个。一个空了，界面上那一维就是死的。
     assert!(!facets.platforms.is_empty(), "平台那一维是空的");
     assert!(!facets.collections.is_empty(), "合集那一维是空的");
     assert!(!facets.languages.is_empty(), "语言那一维是空的");
+    // **中文与语言不是同一维**（ADR-0012）：汉化版是变体，底版多半是日版发行版，
+    // 只按语言筛的话这个库最要紧的那批一条都不出现。
+    assert!(!facets.chinese.is_empty(), "中文那一维是空的");
+    assert!(
+        facets
+            .chinese
+            .iter()
+            .all(|facet| !facets.languages.iter().any(|l| l.value == facet.value)),
+        "中文那一维的记号跟语言码撞上了，那两维在模型上必须分开",
+    );
     assert_eq!(facets.states.len(), StateFilter::ALL.len());
     // **合集与平台正交**（ADR-0011）：合集名不该是平台名。
     for facet in &facets.collections {
@@ -81,10 +92,10 @@ fn 四个维度筛得动而且筛选下推到中立库() {
         )
     };
 
-    // 一维一维加上去，行数只降不升——**四条之间是「且」**：这是浏览，不是搜索。
+    // 一维一维加上去，行数只降不升——**各维之间是「且」**：这是浏览，不是搜索。
     let mut 上一次 = 全部;
     for 加一维 in [
-        Box::new(|q: &mut VariantQuery, v: &str| q.platform = Some(v.to_string()))
+        Box::new(|q: &mut VariantQuery, v: &str| q.platform = Some(PlatformFilter::from_label(v)))
             as Box<dyn Fn(&mut VariantQuery, &str)>,
         Box::new(|q: &mut VariantQuery, v: &str| q.collection = Some(v.to_string())),
         Box::new(|q: &mut VariantQuery, v: &str| q.language = Some(v.to_string())),
@@ -136,6 +147,114 @@ fn 四个维度筛得动而且筛选下推到中立库() {
     }
     跑(&ctx, &mut app, 1);
     assert_eq!(app.window().total(), 全部);
+}
+
+#[test]
+fn 汉化版按中文这一维筛得出来而按语言筛不出来() {
+    // 这一条是那个「语言筛不出汉化版」的坑：汉化版是**变体**，它基于的发行版通常是
+    // 日版，语言那一列上一个中文字都没有（ADR-0012）。
+    let ctx = headless::context();
+    let mut app = 界面(4_000);
+    跑(&ctx, &mut app, 2);
+    {
+        let (library, _) = app.library_and_site();
+        library.query_mut().chinese = Some(ChineseMark::FanTranslated.label().to_string());
+    }
+    跑(&ctx, &mut app, 1);
+    let 汉化 = app.window().total();
+    assert!(汉化 > 0, "中文=汉化 一条都筛不出来");
+
+    // 同一批变体按「语言里有中文」筛，一条都不该有——它们的发行版是日版。
+    {
+        let (library, _) = app.library_and_site();
+        let query = library.query_mut();
+        query.chinese = None;
+        query.language = Some("Ja".to_string());
+    }
+    跑(&ctx, &mut app, 1);
+    assert!(app.window().total() > 0, "合成数据里该有日版发行版");
+}
+
+#[test]
+fn 刮削来的元数据看得见也改得动() {
+    // 「**所有元数据编辑收敛在这里完成**」（ADR-0001 的修订段）说的不只是标题与
+    // 首选变体：年份、发行商、简介这几样也会写进导出条目。
+    let mut app = 界面(2_000);
+    let key = 一条认出作品的(&mut app);
+    {
+        let (library, site) = app.library_and_site();
+        library.pick(&site.catalog, &key);
+    }
+    let detail = app.library().detail().expect("点开得了").clone();
+    assert!(!detail.values.is_empty(), "刮削来的字段一条都没折出来");
+    let work = detail.work.clone().expect("认出了作品");
+
+    {
+        let (library, site) = app.library_and_site();
+        let draft = library.value_draft_mut();
+        draft.field = Field::Description;
+        draft.anchor = AnchorKind::Work;
+        draft.value = "界面上手写的简介".to_string();
+        library.put_value(site, &work);
+    }
+    let 写完 = app.library().detail().expect("还在");
+    let 那条 = 写完
+        .values
+        .iter()
+        .find(|item| item.value.value == "界面上手写的简介")
+        .expect("写下去的那条在");
+    // **来源是裁决**，而裁决排在每个字段的最前——写下之后导出真会用它。
+    assert!(那条.is_verdict());
+    assert_eq!(那条.anchor, AnchorKind::Work);
+    assert!(
+        !那条.value.evidence.is_empty(),
+        "没有依据的结论事后无法复核"
+    );
+
+    {
+        let (library, site) = app.library_and_site();
+        library.clear_value(site, AnchorKind::Work, &work, Field::Description);
+    }
+    assert!(
+        app.library()
+            .detail()
+            .expect("还在")
+            .values
+            .iter()
+            .all(|item| item.value.value != "界面上手写的简介"),
+        "撤掉之后那条还在",
+    );
+}
+
+#[test]
+fn 媒体一条条列得出来而不只是一个数() {
+    // 「媒体资源在界面中可见」——只报一个数，人连那张封面落在池里哪个文件都说不出。
+    let mut app = 界面(2_000);
+    let key = 一条认出作品的(&mut app);
+    {
+        let (library, site) = app.library_and_site();
+        library.pick(&site.catalog, &key);
+    }
+    let detail = app.library().detail().expect("点开得了");
+    assert!(!detail.media_items.is_empty(), "媒体一条都没列出来");
+    for item in &detail.media_items {
+        assert!(!item.hash.is_empty(), "媒体池按内容哈希存，哈希不能是空的");
+        assert!(!item.source.is_empty());
+        assert!(!item.evidence.is_empty(), "没有依据的引用事后无法复核");
+    }
+    // 逐条数出来的，与那份计数说的是同一件事。
+    let 封面条数 = detail
+        .media_items
+        .iter()
+        .filter(|item| item.kind == MediaKind::Cover)
+        .count() as u64;
+    let 封面计数 = detail
+        .media
+        .iter()
+        .find(|have| have.kind == MediaKind::Cover)
+        .expect("有这一档")
+        .refs;
+    assert_eq!(封面条数, 封面计数);
 }
 
 #[test]
@@ -281,7 +400,7 @@ fn 表格里画多少行文本输入框都是那几个() {
         #[allow(clippy::cast_precision_loss)]
         let travel = app.window().total() as f32 * ROW_HEIGHT;
         for step in 0..=STEPS {
-            app.set_scroll_to(Some(travel * step as f32 / STEPS as f32));
+            app.library_and_site().0.scroll_to = Some(travel * step as f32 / STEPS as f32);
             headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
         }
         ctx.data(|data| data.count::<TextEditState>())

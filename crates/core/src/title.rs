@@ -368,6 +368,22 @@ pub fn choose(set: &TitleSet, priorities: &Priorities) -> Chosen {
     }
 }
 
+/// 这个集合里的**中文**叫法，按 [`choose`] 那条一模一样的规则挑一条出来。
+///
+/// ADR-0012 那句「**首选变体与标题来源解耦**」在界面上要摆给人看：即使首选启动的是
+/// 汉化版，中文标题仍取**官中版的官方译名**。摆出来的那一条必须与导出真会写进去的
+/// 那一条是同一个——所以这里**不另写一套排序**，而是把 [`rank`] 原样用在中文那一档上
+/// （裁决优先 → 语言与类型档位 → 置信度 → 源名次 → 有几个变体这么叫 → 字典序）。
+///
+/// 集合里一条中文叫法都没有时是 `None`。
+#[must_use]
+pub fn best_chinese<'a>(set: &'a TitleSet, priorities: &Priorities) -> Option<&'a TitleRow> {
+    set.entries
+        .iter()
+        .filter(|entry| entry.language == Language::Chinese)
+        .min_by_key(|entry| rank(entry, priorities))
+}
+
 /// 一条叫法在回退链上排第几。数字小的排前面。六层的含义见 [`choose`]。
 fn rank(entry: &TitleRow, priorities: &Priorities) -> Rank {
     let bucket = match (entry.language, entry.kind) {

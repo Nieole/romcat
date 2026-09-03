@@ -190,6 +190,15 @@ impl Window {
 pub struct Table<'a> {
     /// 数据从哪来。
     pub catalog: &'a Catalog,
+    /// 作品 id → 作品名。
+    ///
+    /// **翻库时人认的是作品，不是文件名**——库里那些名字是各路来源攒出来的，
+    /// 有的还是乱码（票 11）。所以表里多一列作品名。
+    ///
+    /// 它是**整份带进来的一张小表**（真库 9,226 个作品，几百 KiB），不是每行查一次库：
+    /// 那样会把「一行一次查询」重新引回这张四万行的表上。代价是这一列**排不了序、
+    /// 也筛不了**——排序与筛选一律下推到 `ORDER BY`/`WHERE`，而这一列不在那儿（挂账 D160）。
+    pub works: &'a std::collections::BTreeMap<i64, String>,
     /// 窗口。
     pub window: &'a mut Window,
     /// 筛选与排序。**界面那一份的引用，不是副本。**
@@ -207,6 +216,7 @@ impl Table<'_> {
     pub fn show(self, ui: &mut egui::Ui) -> Option<VariantRow> {
         let Self {
             catalog,
+            works,
             window,
             query,
             selected,
@@ -223,7 +233,8 @@ impl Table<'_> {
             .cell_layout(Layout::left_to_right(Align::Center))
             // 列宽给定值而不是 `Column::auto()`：自动列宽是按**当前可见的那几行**量出来的，
             // 滚动时可见行一直在换，列宽就会随滚动跳。
-            .column(Column::initial(360.0).at_least(160.0).clip(true))
+            .column(Column::initial(300.0).at_least(140.0).clip(true))
+            .column(Column::initial(180.0).at_least(90.0).clip(true))
             .column(Column::initial(90.0).at_least(60.0).clip(true))
             .column(Column::initial(110.0).at_least(70.0).clip(true))
             .column(Column::initial(70.0).at_least(50.0))
@@ -251,6 +262,16 @@ impl Table<'_> {
                             query.descending = active && !descending;
                         }
                     });
+                    // **作品名那一列排不了序**，所以它不是个可点的表头：点了没反应
+                    // 比灰着更糟。它插在「变体」右边——那是人扫这张表时先看的位置。
+                    if order == VariantOrder::Key {
+                        header.col(|ui| {
+                            ui.label("作品").on_hover_text(
+                                "识别认出来的那个作品。**这一列排不了序也筛不了**——\
+                                 排序与筛选一律下推到中立库，而它是另一张表上的名字。",
+                            );
+                        });
+                    }
                 }
             })
             .body(|body| {
@@ -260,13 +281,21 @@ impl Table<'_> {
                     let Some(variant) = window.row(catalog, index) else {
                         // 读不到就留空行：滚动条的长度已经由总数定死，
                         // 这里少画一行不会让下面的行位移。
-                        for _ in 0..5 {
+                        for _ in 0..6 {
                             row.col(|_ui| {});
                         }
                         return;
                     };
                     row.col(|ui| {
                         ui.label(&variant.key);
+                    });
+                    row.col(|ui| {
+                        ui.label(
+                            variant
+                                .work_id
+                                .and_then(|id| works.get(&id))
+                                .map_or("—", String::as_str),
+                        );
                     });
                     row.col(|ui| {
                         ui.label(variant.platform.as_deref().unwrap_or("—"));

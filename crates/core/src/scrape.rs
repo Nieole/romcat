@@ -218,6 +218,20 @@ impl MediaKind {
         }
     }
 
+    /// 从词认回来。**认不出时是 `None`，不猜**——把一个不认得的类别静默归进
+    /// [`Self::Other`]，等于把「这是张说明书」与「这一版不认得这个类别」说成同一件事，
+    /// 而后者该被人看见（同 `State::from_label` / `FileKind::from_label` 的规矩）。
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        Some(match label {
+            "封面" => Self::Cover,
+            "截图" => Self::Screenshot,
+            "视频" => Self::Video,
+            "其他" => Self::Other,
+            _ => return None,
+        })
+    }
+
     /// 报告里固定的排列顺序。
     #[must_use]
     pub fn all() -> [Self; 4] {

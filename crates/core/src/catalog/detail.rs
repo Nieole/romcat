@@ -23,11 +23,13 @@
 //! 摆在人眼前，而不是让人自己去推。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use rusqlite::{OptionalExtension, params};
 
-use super::content::{ReleaseRow, VariantRow};
+use super::content::{ReleaseRow, VARIANT_COLUMNS, VariantRow, read_variant_row};
 use super::identify::State;
+use super::scrape::ScrapedValue;
 use super::title::TitleRow;
 use super::{Catalog, CatalogError};
 use crate::adapter::converge::{Preference, preference_for};
@@ -65,6 +67,47 @@ pub struct MediaHave {
     pub in_pool: Option<u64>,
 }
 
+/// 一条**媒体引用**：库里记着一份什么、来自哪个源、在不在**媒体池**里。
+///
+/// 与 [`MediaHave`] 那份计数分开：计数回答「缺不缺」，这一条回答「是哪一份、去哪儿找」。
+/// 「媒体资源在界面中可见」要的是后者——只给一个数字，人连它落在池里哪个文件都说不出。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaItem {
+    /// 挂在**作品**上还是**变体**上（ADR-0009）。
+    pub anchor: AnchorKind,
+    /// 封面 / 截图 / 视频 / 其他。
+    pub kind: MediaKind,
+    /// 哪个源给的。
+    pub source: String,
+    /// 内容哈希，也就是它在**媒体池**里的主键（**文件名不是媒体的主键**，ADR-0009）。
+    pub hash: String,
+    /// 扩展名。池里那个文件靠 `(哈希, 扩展名)` 找。
+    pub ext: String,
+    /// 它在**媒体池**里的落点；没查池子时是 `None`。
+    pub at: Option<PathBuf>,
+    /// 池里真有那个文件吗；没查池子时是 `None`。
+    pub in_pool: Option<bool>,
+    /// **依据**：这条引用是怎么来的。
+    pub evidence: String,
+}
+
+/// 一条**刮削来的字段值**，连它挂在哪一层。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueItem {
+    /// 挂在**作品**上还是**变体**上。年份挂作品、汉化组挂变体（ADR-0012）。
+    pub anchor: AnchorKind,
+    /// 那条值。
+    pub value: ScrapedValue,
+}
+
+impl ValueItem {
+    /// 这一条是不是人工**裁决**写下的。
+    #[must_use]
+    pub fn is_verdict(&self) -> bool {
+        self.value.source == crate::scrape::priority::VERDICT
+    }
+}
+
 /// 要在面板上点名「缺不缺」的那几类媒体。
 ///
 /// [`MediaKind::Other`] **不在里面**：它是「认不出是什么的图」，缺它不是个缺口
@@ -95,12 +138,21 @@ pub struct VariantDetail {
     pub titles: Vec<TitleRow>,
     /// 从标题集合里挑出来的**显示标题**与**排序标题**；作品未知时是 `None`。
     pub display: Option<Chosen>,
+    /// 中文标题取的是哪一条叫法。读它走 [`Self::chinese_title`]。
+    chinese_title: Option<TitleRow>,
     /// **首选变体**的人工裁决；没人裁过是 `None`（那时按规则算，见 [`Self::preferred_now`]）。
     pub preferred: Option<String>,
     /// 同一个作品、同一个平台下的全部变体，**按首选规则排好**，第一个就是眼下的首选。
     pub siblings: Vec<Sibling>,
     /// 媒体各类各有多少。
     pub media: Vec<MediaHave>,
+    /// 媒体**一条条列出来**：是哪一份、来自哪个源、在池里哪儿。
+    pub media_items: Vec<MediaItem>,
+    /// **刮削来的字段值**：年份、发行商、开发商、类型、简介、汉化组、标题。
+    ///
+    /// 同一个字段可以有好几条——**三元组并存，不互相覆盖**（`catalog::scrape`）。
+    /// 哪一条最终写进导出，由优先级表说了算，而**裁决**排在每个字段的最前。
+    pub values: Vec<ValueItem>,
 }
 
 impl VariantDetail {
@@ -123,17 +175,13 @@ impl VariantDetail {
     ///
     /// 官中版的**官方译名**优先，其次才是别的中文叫法。**它与首选变体无关**——
     /// 首选启动的是汉化版，中文标题照旧取官中版的官方译名。
+    ///
+    /// 挑法与导出**同一条**（[`title::best_chinese`](crate::title::best_chinese) 用的
+    /// 是 `title::choose` 那把排序键）：面板上写着「中文标题取的是这一条」，而导出时
+    /// 写进去的是另一条，那句话就是在骗人。
     #[must_use]
     pub fn chinese_title(&self) -> Option<&TitleRow> {
-        self.titles
-            .iter()
-            .filter(|row| row.language == Language::Chinese)
-            .min_by_key(|row| match row.kind {
-                TitleKind::Translated => 0,
-                TitleKind::Official => 1,
-                TitleKind::Alias => 2,
-                TitleKind::FanName => 3,
-            })
+        self.chinese_title.as_ref()
     }
 
     /// 缺哪几类媒体：[`EXPECTED_MEDIA`] 里一张都用不上的那些。
@@ -195,7 +243,7 @@ impl Catalog {
         let languages = release
             .as_ref()
             .and_then(|release| release.languages.as_deref())
-            .map(split_languages)
+            .map(ReleaseRow::language_codes)
             .unwrap_or_default();
         let (state, reason) = match self.identification_of(key)? {
             Some((state, reason)) => (Some(state), reason),
@@ -205,15 +253,17 @@ impl Catalog {
             Some(work) => self.titles_of(work)?,
             None => Vec::new(),
         };
-        let display = work.as_ref().map(|work| {
-            crate::title::choose(
-                &TitleSet {
-                    work: work.clone(),
-                    entries: titles.clone(),
-                },
-                priorities,
-            )
+        let set = work.as_ref().map(|work| TitleSet {
+            work: work.clone(),
+            entries: titles.clone(),
         });
+        let display = set
+            .as_ref()
+            .map(|set| crate::title::choose(set, priorities));
+        let chinese_title = set
+            .as_ref()
+            .and_then(|set| crate::title::best_chinese(set, priorities))
+            .cloned();
         let preferred = match (&work, &row.platform) {
             (Some(work), Some(platform)) => self.preferred_variant(work, platform)?,
             _ => None,
@@ -225,6 +275,13 @@ impl Catalog {
             _ => Vec::new(),
         };
         let media = self.media_have(key, work.as_deref(), pool)?;
+        let media_items = self.media_items(key, work.as_deref(), pool)?;
+        let mut values = Vec::new();
+        for (anchor, subject) in anchors_of(key, work.as_deref()) {
+            for value in self.scraped_values(anchor.label(), subject)? {
+                values.push(ValueItem { anchor, value });
+            }
+        }
 
         Ok(Some(VariantDetail {
             collections: self.collections_of(key)?,
@@ -237,9 +294,12 @@ impl Catalog {
             reason,
             titles,
             display,
+            chinese_title,
             preferred,
             siblings,
             media,
+            media_items,
+            values,
         }))
     }
 
@@ -360,27 +420,13 @@ impl Catalog {
     ) -> Result<Vec<Sibling>, CatalogError> {
         let mut statement = self
             .conn
-            .prepare_cached(
-                "SELECT key, platform, rule, main_key, files, bytes, unreadable, manual,
-                        work_id, release_id
-                 FROM variant WHERE work_id = ?1 AND platform = ?2 ORDER BY key",
-            )
+            .prepare_cached(&format!(
+                "SELECT {VARIANT_COLUMNS} FROM variant
+                 WHERE work_id = ?1 AND platform = ?2 ORDER BY key"
+            ))
             .map_err(|source| self.err(source))?;
         let rows = statement
-            .query_map(params![work_id, platform], |row| {
-                Ok(VariantRow {
-                    key: row.get(0)?,
-                    platform: row.get(1)?,
-                    rule: row.get(2)?,
-                    main_key: row.get(3)?,
-                    files: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
-                    bytes: u64::try_from(row.get::<_, i64>(5)?).unwrap_or(0),
-                    unreadable_files: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
-                    manual: row.get::<_, i64>(7)? != 0,
-                    work_id: row.get(8)?,
-                    release_id: row.get(9)?,
-                })
-            })
+            .query_map(params![work_id, platform], read_variant_row)
             .map_err(|source| self.err(source))?;
         let rows: Vec<VariantRow> = rows
             .collect::<Result<_, _>>()
@@ -422,43 +468,12 @@ impl Catalog {
         work: Option<&str>,
         pool: Option<&MediaPool>,
     ) -> Result<Vec<MediaHave>, CatalogError> {
+        let items = self.media_items(key, work, pool)?;
         let mut refs: BTreeMap<MediaKind, (u64, u64)> = BTreeMap::new();
-        let mut anchors: Vec<(&str, &str)> = vec![(AnchorKind::Variant.label(), key)];
-        if let Some(work) = work {
-            anchors.push((AnchorKind::Work.label(), work));
-        }
-        for (anchor, subject) in anchors {
-            // 一条一条读而不是 `GROUP BY` 数出来：**在不在池里**这件事库里没有，
-            // 只有拿哈希与扩展名去问池子才知道（`MediaPool::contains`）。
-            let mut statement = self
-                .conn
-                .prepare_cached(
-                    "SELECT r.kind, r.hash, m.ext
-                     FROM media_ref r JOIN media m ON m.hash = r.hash
-                     WHERE r.anchor = ?1 AND r.subject = ?2",
-                )
-                .map_err(|source| self.err(source))?;
-            let rows = statement
-                .query_map(params![anchor, subject], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })
-                .map_err(|source| self.err(source))?;
-            for row in rows {
-                let (label, hash, ext) = row.map_err(|source| self.err(source))?;
-                let kind = MediaKind::all()
-                    .into_iter()
-                    .find(|kind| kind.label() == label)
-                    .unwrap_or(MediaKind::Other);
-                let slot = refs.entry(kind).or_default();
-                slot.0 += 1;
-                if pool.is_some_and(|pool| pool.contains(&hash, &ext)) {
-                    slot.1 += 1;
-                }
-            }
+        for item in &items {
+            let slot = refs.entry(item.kind).or_default();
+            slot.0 += 1;
+            slot.1 += u64::from(item.in_pool.unwrap_or(false));
         }
         Ok(MediaKind::all()
             .into_iter()
@@ -472,13 +487,74 @@ impl Catalog {
             })
             .collect())
     }
+
+    /// 这个变体的媒体**一条条列出来**：是哪一份、来自哪个源、在池里哪儿。
+    ///
+    /// **作品锚点与变体锚点合起来看**：封面挂在作品上、这个变体目录里那几张图挂在变体上
+    /// （ADR-0009），而人问的是「这个东西导出去有没有封面」。
+    ///
+    /// 一条一条读而不是 `GROUP BY` 数出来：**在不在池里**这件事库里没有，只有拿哈希与
+    /// 扩展名去问池子才知道（[`MediaPool::contains`]）。
+    fn media_items(
+        &self,
+        key: &str,
+        work: Option<&str>,
+        pool: Option<&MediaPool>,
+    ) -> Result<Vec<MediaItem>, CatalogError> {
+        let mut out = Vec::new();
+        for (anchor, subject) in anchors_of(key, work) {
+            let mut statement = self
+                .conn
+                .prepare_cached(
+                    "SELECT r.kind, r.source, r.hash, m.ext, r.evidence
+                     FROM media_ref r JOIN media m ON m.hash = r.hash
+                     WHERE r.anchor = ?1 AND r.subject = ?2
+                     ORDER BY r.kind, r.source, r.hash",
+                )
+                .map_err(|source| self.err(source))?;
+            let rows = statement
+                .query_map(params![anchor.label(), subject], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })
+                .map_err(|source| self.err(source))?;
+            for row in rows {
+                let (label, source, hash, ext, evidence) = row.map_err(|e| self.err(e))?;
+                // **认不出的类别不静默归进「其他」**：那会把「这是张说明书」与
+                // 「这一版不认得这个类别」说成同一件事。认不出就整条不算。
+                let Some(kind) = MediaKind::from_label(&label) else {
+                    continue;
+                };
+                out.push(MediaItem {
+                    anchor,
+                    kind,
+                    source,
+                    at: pool.map(|pool| pool.path_of(&hash, &ext)),
+                    in_pool: pool.map(|pool| pool.contains(&hash, &ext)),
+                    hash,
+                    ext,
+                    evidence,
+                });
+            }
+        }
+        Ok(out)
+    }
 }
 
-/// 逗号分隔的语言标记拆成一条条。
-fn split_languages(text: &str) -> Vec<String> {
-    text.split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .collect()
+/// 一个变体的两个**锚点**：它自己，以及它属于的那个作品。
+///
+/// **两处合起来看**：封面与年份挂在作品上，汉化组与这个变体目录里那几张图挂在变体上
+/// （ADR-0009、ADR-0012）。人问的是「这个东西导出去带什么」，而不该被要求先弄清
+/// 某个字段挂在哪一层。
+fn anchors_of<'a>(key: &'a str, work: Option<&'a str>) -> Vec<(AnchorKind, &'a str)> {
+    let mut out = vec![(AnchorKind::Variant, key)];
+    if let Some(work) = work {
+        out.push((AnchorKind::Work, work));
+    }
+    out
 }

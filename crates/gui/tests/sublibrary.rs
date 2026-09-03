@@ -265,11 +265,14 @@ fn 卡不在手边也算得出选中多少与超限多少() {
     场.求值();
     let screen = 场.app.sublibrary();
     assert!(screen.error().is_none(), "{:?}", screen.error());
-    let evaluated = screen.evaluated().expect("求得出来");
-    assert_eq!(evaluated.selected.picked.len(), 2);
-    assert_eq!(evaluated.selected.rule_hits, vec![2]);
-    assert!(evaluated.over_capacity.is_some(), "4KB 装不下 12KiB");
-    assert!(!evaluated.trims.is_empty(), "超限了却没给裁剪建议");
+    // 报告本身由核心折（`SelectionReport::build`），与 `romcat sublibrary show`
+    // 印出来的是同一个值——界面上另算一遍就会长出「这份说装得下、那份说砍这几个」。
+    let report = &screen.evaluated().expect("求得出来").report;
+    assert_eq!(report.picked, 2);
+    assert_eq!(report.rules.len(), 1);
+    assert_eq!(report.rules[0].hits, 2);
+    assert!(report.over_capacity.is_some(), "4KB 装不下 12KiB");
+    assert!(!report.trim_suggestions.is_empty(), "超限了却没给裁剪建议");
 
     // 而**差量预览**这时该直说目标不在位，不是编一份出来。
     场.排预览();
@@ -318,6 +321,13 @@ fn 同步从这里触发而且只碰清单里记录过的文件() {
     assert_eq!(outcome.touched(), 该动几个, "落下来的与预览说的不是一回事");
     assert!(!outcome.interrupted);
     assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    // **界面上要说得出这一趟干了什么**：被停的一趟、半数写失败的一趟与全成功的一趟
+    // 长得一样，那句「同步用了 X 秒」就是在骗人。
+    let notice = screen.notice().expect("有回执");
+    assert!(
+        notice.contains("新增") && notice.contains("删除"),
+        "回执只报了个总数：{notice}",
+    );
 
     // **维护者自己拷进去的那份，连修改时间都没动过。**
     assert_eq!(

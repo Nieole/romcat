@@ -139,6 +139,31 @@ CREATE TABLE IF NOT EXISTS shaping_override(
 ) STRICT;
 ";
 
+/// 一行**变体**要读哪几列，以及它们的次序。
+///
+/// **只有这一处写列名。** 按主键取一条（[`Catalog::variant`]）、翻页取一段
+/// （`catalog::browse`）、取同作品同平台的那几个（`catalog::detail`）三处走同一份，
+/// 于是往 `variant` 表上加一列时改一处就够——分开写的话，漏改的那一处会静默地
+/// 读出一个字段全是默认值的 [`VariantRow`]。
+pub(super) const VARIANT_COLUMNS: &str = "key, platform, rule, main_key, files, bytes, unreadable,
+                                          manual, work_id, release_id";
+
+/// 按 [`VARIANT_COLUMNS`] 的次序读一行变体。
+pub(super) fn read_variant_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VariantRow> {
+    Ok(VariantRow {
+        key: row.get(0)?,
+        platform: row.get(1)?,
+        rule: row.get(2)?,
+        main_key: row.get(3)?,
+        files: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
+        bytes: u64::try_from(row.get::<_, i64>(5)?).unwrap_or(0),
+        unreadable_files: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
+        manual: row.get::<_, i64>(7)? != 0,
+        work_id: row.get(8)?,
+        release_id: row.get(9)?,
+    })
+}
+
 /// `meta` 里记「成型跑到哪一次遍历为止」的那把键。
 const META_SHAPED_SCAN: &str = "shaped_scan";
 
@@ -165,6 +190,23 @@ pub struct ReleaseRow {
     pub serial: Option<String>,
     /// 语言标记组（`En,Zh-Hans`）；可空。
     pub languages: Option<String>,
+}
+
+impl ReleaseRow {
+    /// 这条发行版标着的语言，拆成一个个语言码。
+    ///
+    /// **这一处拆，别处不拆。** 库里存的是逗号分隔的一串（`En,Fr,De`），而读它的地方
+    /// 有三个：选择集求事实、筛选面板列可选值、详情面板摆给人看。三处各写一遍
+    /// `split(',').trim().filter(非空)` 的话，哪天格式变了（分号？空格？）就得记得改三处。
+    #[must_use]
+    pub fn language_codes(languages: &str) -> Vec<String> {
+        languages
+            .split(',')
+            .map(str::trim)
+            .filter(|code| !code.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
 }
 
 /// 一条变体记录读回来的样子。
@@ -411,24 +453,9 @@ impl Catalog {
     pub fn variant(&self, key: &str) -> Result<Option<VariantRow>, CatalogError> {
         self.conn
             .query_row(
-                "SELECT key, platform, rule, main_key, files, bytes, unreadable, manual,
-                        work_id, release_id
-                 FROM variant WHERE key = ?1",
+                &format!("SELECT {VARIANT_COLUMNS} FROM variant WHERE key = ?1"),
                 params![key],
-                |row| {
-                    Ok(VariantRow {
-                        key: row.get(0)?,
-                        platform: row.get(1)?,
-                        rule: row.get(2)?,
-                        main_key: row.get(3)?,
-                        files: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
-                        bytes: u64::try_from(row.get::<_, i64>(5)?).unwrap_or(0),
-                        unreadable_files: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
-                        manual: row.get::<_, i64>(7)? != 0,
-                        work_id: row.get(8)?,
-                        release_id: row.get(9)?,
-                    })
-                },
+                read_variant_row,
             )
             .optional()
             .map_err(|source| self.err(source))

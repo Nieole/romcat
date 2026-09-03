@@ -75,7 +75,7 @@ pub fn scroll(app: &mut App, frames: u32, sweep: Sweep) -> FrameCost {
     let ctx = headless::context();
 
     // 先跑一帧把总行数问出来，滚动的行程要按它算。
-    app.set_scroll_to(Some(0.0));
+    app.library_and_site().0.scroll_to = Some(0.0);
     headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
     let before = app.window().reads();
     let travel = (app.window().total() as f32 * row_pitch() - VIEWPORT[1]).max(0.0);
@@ -87,7 +87,7 @@ pub fn scroll(app: &mut App, frames: u32, sweep: Sweep) -> FrameCost {
             Sweep::Whole => 0.0,
             Sweep::Rows(step) => (frame as f32 * step * row_pitch()).min(travel),
         };
-        app.set_scroll_to(Some(at));
+        app.library_and_site().0.scroll_to = Some(at);
         let started = Instant::now();
         let output = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
         let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
@@ -97,7 +97,7 @@ pub fn scroll(app: &mut App, frames: u32, sweep: Sweep) -> FrameCost {
             costs.push(elapsed);
         }
     }
-    app.set_scroll_to(None);
+    app.library_and_site().0.scroll_to = None;
 
     let reads = app.window().reads() - before;
     costs.sort_by(f64::total_cmp);
@@ -313,10 +313,10 @@ pub fn queue(app: &mut App, frames: u32) -> QueueCost {
 pub struct BrowseCost {
     /// 库里一共多少个变体。
     pub rows: u64,
-    /// **列一次筛选面板**要多久。
+    /// **列一次筛选面板**要多久（连表里那一列作品名靠的那张小表一起）。
     pub facets_ms: f64,
-    /// 平台、合集、语言各有几个可选值。
-    pub facet_counts: (usize, usize, usize),
+    /// 平台、合集、语言、中文各有几个可选值。
+    pub facet_counts: (usize, usize, usize, usize),
     /// **换一次筛选**要多久：换一套 `WHERE`、重数总行数、重取一页。
     pub filter_ms: f64,
     /// 换成了哪一条。
@@ -343,7 +343,8 @@ impl BrowseCost {
     pub fn render(&self) -> String {
         format!(
             "库浏览 {} 个变体\n\
-             列一次筛选面板  {:.1} ms（平台 {} 个、合集 {} 个、语言 {} 个）\n\
+             列一次筛选面板  {:.1} ms（平台 {} 个、合集 {} 个、语言 {} 个、中文 {} 个；\
+             连作品名那张表）\n\
              换一次筛选      {:.1} ms（{}，剩 {} 行）\n\
              点开一条        {:.2} ms（作品、发行版、标题集合、首选变体、媒体一次折齐）\n\
              每帧            中位 {:.2} ms，最慢 {:.2} ms，共 {} 帧\n\
@@ -353,6 +354,7 @@ impl BrowseCost {
             self.facet_counts.0,
             self.facet_counts.1,
             self.facet_counts.2,
+            self.facet_counts.3,
             self.filter_ms,
             self.filter_label,
             thousands(self.filtered),
@@ -388,6 +390,7 @@ pub fn browse(app: &mut App, frames: u32) -> BrowseCost {
             facets.platforms.len(),
             facets.collections.len(),
             facets.languages.len(),
+            facets.chinese.len(),
         )
     };
 
@@ -405,7 +408,8 @@ pub fn browse(app: &mut App, frames: u32) -> BrowseCost {
         .map(|facet| facet.value.clone());
     let started = Instant::now();
     if let Some(platform) = biggest.clone() {
-        app.library_and_site().0.query_mut().platform = Some(platform);
+        app.library_and_site().0.query_mut().platform =
+            Some(romcat_core::catalog::PlatformFilter::from_label(&platform));
     }
     // 换筛选是**下一帧**才兑现的（界面每帧把查询写进窗口），所以这一帧要跑完才算数。
     headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
@@ -438,7 +442,7 @@ pub fn browse(app: &mut App, frames: u32) -> BrowseCost {
         } else {
             0.0
         };
-        app.set_scroll_to(Some(at));
+        app.library_and_site().0.scroll_to = Some(at);
         let started = Instant::now();
         let output = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
         let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
@@ -448,7 +452,7 @@ pub fn browse(app: &mut App, frames: u32) -> BrowseCost {
             costs.push(elapsed);
         }
     }
-    app.set_scroll_to(None);
+    app.library_and_site().0.scroll_to = None;
     costs.sort_by(f64::total_cmp);
 
     BrowseCost {

@@ -3730,7 +3730,7 @@ fn run_sublibrary_plan(args: &SubPlanArgs) -> ExitCode {
         thousands(ready.actual.files.len() as u64),
         thousands(ready.plan.touched()),
     );
-    warn_about(&ready, &args.name);
+    warn_about(&ready);
     if !write_json(args.json.as_deref(), &ready.plan) {
         return ExitCode::FAILURE;
     }
@@ -3739,7 +3739,7 @@ fn run_sublibrary_plan(args: &SubPlanArgs) -> ExitCode {
 
 /// 折期望状态时那几件要说出口的怪事。**`plan` 与 `sync` 印同一份**，
 /// 而且**与界面印同一份**——那几句话在核心里（[`sync::Prepared::concerns`]）。
-fn warn_about(ready: &sync::Prepared, _name: &str) {
+fn warn_about(ready: &sync::Prepared) {
     for concern in ready.concerns() {
         eprintln!("{concern}");
     }
@@ -3790,7 +3790,7 @@ fn run_sublibrary_sync(args: &SubSyncArgs, cancel: &CancelToken) -> ExitCode {
         let _ = stdout.write_all(text.as_bytes());
         let _ = stdout.flush();
     }
-    warn_about(&ready, &args.name);
+    warn_about(&ready);
     if !write_json(args.json.as_deref(), &ready.plan) {
         return ExitCode::FAILURE;
     }
@@ -3817,12 +3817,7 @@ fn run_sublibrary_sync(args: &SubSyncArgs, cancel: &CancelToken) -> ExitCode {
     // ── 三、找到主库。搬 ROM 要真的去读它——这是这条命令里唯一需要盘在位的部分，
     //    而**只有真要搬 ROM 时才需要**：一趟只删文件、只重写元数据、或者一步都不用做
     //    的同步，盘不在位照样跑得完（ADR-0009 那句「扫描是唯一需要盘在位的操作」）。
-    let needs_library = ready
-        .plan
-        .steps
-        .iter()
-        .any(|step| step.kind == sync::FileKind::Rom && step.act != sync::Act::Delete);
-    let library_root = if needs_library {
+    let library_root = if ready.needs_library() {
         match library_root_for(&catalog, args.library_root.as_deref()) {
             Ok(root) => Some(root),
             Err(message) => return fail(message),

@@ -29,12 +29,12 @@
 //! 那四个维度是**选**出来的不是打出来的，值从中立库现问（[`Catalog::facets`]）。
 
 use egui::{Align, Layout};
-use romcat_core::catalog::browse::Facets;
+use romcat_core::catalog::browse::{Facets, PlatformFilter};
 use romcat_core::catalog::{Catalog, VariantDetail, VariantQuery};
 use romcat_core::report::{capacity, human_bytes, thousands};
-use romcat_core::scrape::Priorities;
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::priority::VERDICT;
+use romcat_core::scrape::{AnchorKind, Field, Priorities};
 use romcat_core::site::Site;
 use romcat_core::title::{Language, TitleKind};
 
@@ -47,8 +47,18 @@ use crate::table::{SPAN, Table, Window};
 /// 但那也比空着强——半年后看见一个来路不明的中文名，至少知道它是自己敲的。
 const HAND_WRITTEN: &str = "库浏览的详情面板上人工写的";
 
-/// 底下那块面板里，标题集合最多列几条。
+/// 底下那块面板里，**标题集合**最多列几条。
+///
+/// 一部作品的叫法在真库里能攒到几十条（每个源一条、每种语言一条），而面板上那一栏
+/// 只有半屏高。列到这儿打住，末尾说清还有多少条没列。
 const TOP_TITLES: usize = 24;
+
+/// 面板上**文件成员**最多列几条。
+///
+/// 与标题分开定：一个变体可以是**一整个目录**（`CONTEXT.md` 的「变体」词条），
+/// PSV 那批目录树转储一个变体底下就是上千个文件。这个数管的是「扫一眼看得完」，
+/// 与「一部作品有几个叫法」不是同一件事，共用一个常量迟早会为了一边把另一边调坏。
+const TOP_MEMBERS: usize = 40;
 
 /// 加一条叫法时界面上那份草稿。
 #[derive(Debug, Clone)]
@@ -72,6 +82,28 @@ impl Default for TitleDraft {
     }
 }
 
+/// 写下一个**刮削字段值**时界面上那份草稿。
+#[derive(Debug, Clone)]
+pub struct ValueDraft {
+    /// 哪个字段。
+    pub field: Field,
+    /// 挂在**作品**上还是**变体**上。年份挂作品、汉化组挂变体（ADR-0012）。
+    pub anchor: AnchorKind,
+    /// 值本身。**会碰到输入法**，所以它在详情面板里。
+    pub value: String,
+}
+
+impl Default for ValueDraft {
+    fn default() -> Self {
+        Self {
+            // 简介是离线源补不上、又最想手写的那一个（`scrape::Field` 的注释）。
+            field: Field::Description,
+            anchor: AnchorKind::Work,
+            value: String::new(),
+        }
+    }
+}
+
 /// 库浏览这个屏幕。
 pub struct Screen {
     window: Window,
@@ -79,9 +111,12 @@ pub struct Screen {
     query: VariantQuery,
     /// 四个维度各有哪些值可选。换库或改过元数据才重问。
     facets: Facets,
+    /// 作品 id → 作品名。表里那一列作品名从它来（见 [`crate::table::Table::works`]）。
+    works: std::collections::BTreeMap<i64, String>,
     /// 选中的是哪一行（全序下标）。
     selected: Option<u64>,
     /// 选中那一行的键。**记键不记下标**：换个筛选表就重排了，下标会指到别人身上。
+    /// 底下那块面板认的是它。
     picked: Option<String>,
     /// 点开的那一条的详情。
     detail: Option<VariantDetail>,
@@ -92,6 +127,8 @@ pub struct Screen {
     pool: Option<MediaPool>,
     /// 加一条叫法的草稿。
     title_draft: TitleDraft,
+    /// 写下一个刮削字段值的草稿。
+    value_draft: ValueDraft,
     /// 上一次动作的回执。
     notice: Option<String>,
     /// 上一次出的错。
@@ -116,12 +153,14 @@ impl Screen {
             window: Window::new(SPAN),
             query: VariantQuery::default(),
             facets: Facets::default(),
+            works: std::collections::BTreeMap::new(),
             selected: None,
             picked: None,
             detail: None,
             priorities: Priorities::builtin(),
             pool: None,
             title_draft: TitleDraft::default(),
+            value_draft: ValueDraft::default(),
             notice: None,
             error: None,
             sample: false,
@@ -147,6 +186,10 @@ impl Screen {
                 self.facets = facets;
                 self.error = None;
             }
+            Err(error) => self.error = Some(format!("中立库读不动：{error}")),
+        }
+        match site.catalog.work_names() {
+            Ok(works) => self.works = works,
             Err(error) => self.error = Some(format!("中立库读不动：{error}")),
         }
     }
@@ -195,6 +238,57 @@ impl Screen {
     /// 加一条叫法的草稿，供实测与测试填。
     pub fn title_draft_mut(&mut self) -> &mut TitleDraft {
         &mut self.title_draft
+    }
+
+    /// 写下一个刮削字段值的草稿，供实测与测试填。
+    pub fn value_draft_mut(&mut self) -> &mut ValueDraft {
+        &mut self.value_draft
+    }
+
+    /// 把草稿里那个字段值写下，**来源记作裁决**。
+    ///
+    /// 优先级表把裁决排在每个字段的最前，所以写下之后**导出真会用它**。
+    /// 界面上「写下」那个按钮走的就是它。
+    pub fn put_value(&mut self, site: &mut Site, subject: &str) {
+        let value = self.value_draft.value.trim().to_string();
+        if value.is_empty() {
+            return;
+        }
+        match site.catalog.put_verdict_value(
+            self.value_draft.anchor,
+            subject,
+            self.value_draft.field,
+            &value,
+            HAND_WRITTEN,
+        ) {
+            Ok(()) => {
+                self.notice = Some(format!(
+                    "{} 记成了「{value}」，来源是裁决——导出会用它。",
+                    self.value_draft.field.label(),
+                ));
+                self.value_draft.value.clear();
+                self.load_detail(&site.catalog);
+            }
+            Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+        }
+    }
+
+    /// 撤掉一条**裁决**来源的字段值，让别的源重新说了算。
+    pub fn clear_value(
+        &mut self,
+        site: &mut Site,
+        anchor: AnchorKind,
+        subject: &str,
+        field: Field,
+    ) {
+        match site.catalog.clear_verdict_value(anchor, subject, field) {
+            Ok(true) => {
+                self.notice = Some(format!("撤掉了人工写的{}。", field.label()));
+                self.load_detail(&site.catalog);
+            }
+            Ok(false) => self.notice = Some("本来就没人写过。".to_string()),
+            Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+        }
     }
 
     /// 点开一条变体。**界面上点那一行走的就是它**，测试拿它当那一下。
@@ -280,7 +374,11 @@ impl Screen {
     }
 
     /// 顶栏上属于这一屏的那一段。
-    pub fn status(&mut self, ui: &mut egui::Ui) {
+    ///
+    /// 先同步一次窗口再画：顶栏与正文各画各的，而顶栏**先画**——不先同步，
+    /// 状态栏上那个行数就永远比表格慢一帧（与队列那一屏 `status` 同一条道理）。
+    pub fn status(&mut self, ui: &mut egui::Ui, site: &Site) {
+        self.sync_window(&site.catalog);
         ui.toggle_value(&mut self.sample, "字体样张");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if let Some(error) = self.window.error() {
@@ -296,10 +394,22 @@ impl Screen {
         });
     }
 
+    /// 换过筛选或排序就把窗口作废重取。没换过是空操作。
+    ///
+    /// **换了就把「选中第几行」也丢掉**：那是个全序下标，而换一套筛选等于换了一张表，
+    /// 同一个下标会指到另一条变体身上，于是高亮的那一行与底下面板摆着的那一条对不上。
+    /// 面板认的是**键**（[`Self::picked`]），它照旧留着。
+    fn sync_window(&mut self, catalog: &Catalog) {
+        if self.window.query() != &self.query {
+            self.selected = None;
+            self.window.set_query(self.query.clone());
+        }
+        self.window.sync(catalog);
+    }
+
     /// 画一帧。
     pub fn ui(&mut self, ui: &mut egui::Ui, site: &mut Site) {
-        self.window.set_query(self.query.clone());
-        self.window.sync(&site.catalog);
+        self.sync_window(&site.catalog);
         egui::Panel::bottom("库浏览详情")
             .default_size(300.0)
             .min_size(120.0)
@@ -315,6 +425,7 @@ impl Screen {
             }
             let picked = Table {
                 catalog: &site.catalog,
+                works: &self.works,
                 window: &mut self.window,
                 query: &mut self.query,
                 selected: &mut self.selected,
@@ -328,7 +439,7 @@ impl Screen {
         });
     }
 
-    /// 左边那栏：四个筛选维度。**一个文本框都没有**——值是选的，不是打的。
+    /// 左边那栏：五个筛选维度。**一个文本框都没有**——值是选的，不是打的。
     fn filter_panel(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical()
             .id_salt("筛选栏")
@@ -344,19 +455,34 @@ impl Screen {
                         };
                     }
                 });
-                ui.weak("四条是「且」：一层层收窄。全部下推到中立库。");
+                ui.weak("各维之间是「且」：一层层收窄。全部下推到中立库。");
                 ui.separator();
 
-                facet_picker(ui, "平台", &self.facets.platforms, &mut self.query.platform);
+                platform_picker(ui, &self.facets.platforms, &mut self.query.platform);
                 ui.separator();
                 facet_picker(
                     ui,
                     "合集",
+                    "用户自定义的一组游戏，与平台正交（ADR-0011）。",
                     &self.facets.collections,
                     &mut self.query.collection,
                 );
                 ui.separator();
-                facet_picker(ui, "语言", &self.facets.languages, &mut self.query.language);
+                facet_picker(
+                    ui,
+                    "语言",
+                    "**发行版**标着的语言码。汉化版不在这一维里——它是变体，底版多半是日版。",
+                    &self.facets.languages,
+                    &mut self.query.language,
+                );
+                ui.separator();
+                facet_picker(
+                    ui,
+                    "中文",
+                    "**变体**的中文身份：汉化 / 官中（ADR-0012）。这个库最要紧的那批全在这儿。",
+                    &self.facets.chinese,
+                    &mut self.query.chinese,
+                );
                 ui.separator();
 
                 ui.strong("识别状态");
@@ -470,6 +596,34 @@ impl Screen {
 
                 ui.separator();
                 ui.strong("媒体");
+                // **一条条列出来**，不只报一个数：人问的往往是「那张封面到底在哪」，
+                // 而媒体池按内容哈希存（ADR-0009），只给个数字他连去哪儿找都说不出。
+                for item in &detail.media_items {
+                    let where_at = match (&item.at, item.in_pool) {
+                        (Some(at), Some(true)) => romcat_core::path::display(at),
+                        (Some(_), _) => "**池里没有这个文件**".to_string(),
+                        _ => "（媒体池没查）".to_string(),
+                    };
+                    let line = format!(
+                        "{} · {}｜{}｜{}",
+                        item.kind.label(),
+                        item.anchor.label(),
+                        item.source,
+                        where_at,
+                    );
+                    if item.in_pool == Some(false) {
+                        ui.colored_label(ui.visuals().warn_fg_color, line)
+                    } else {
+                        ui.label(line)
+                    }
+                    .on_hover_text(format!(
+                        "{}.{}｜依据：{}",
+                        item.hash, item.ext, item.evidence
+                    ));
+                }
+                if detail.media_items.is_empty() {
+                    ui.weak("一条媒体引用都没有。");
+                }
                 for have in &detail.media {
                     let line = match have.in_pool {
                         Some(got) => format!(
@@ -521,13 +675,13 @@ impl Screen {
 
                 ui.separator();
                 ui.strong(format!("文件成员（{}）", detail.members.len()));
-                for (key, role) in detail.members.iter().take(TOP_TITLES) {
+                for (key, role) in detail.members.iter().take(TOP_MEMBERS) {
                     ui.label(format!("{}  {key}", role.code()));
                 }
-                if detail.members.len() > TOP_TITLES {
+                if detail.members.len() > TOP_MEMBERS {
                     ui.weak(format!(
                         "……另有 {} 个没列",
-                        detail.members.len() - TOP_TITLES
+                        detail.members.len() - TOP_MEMBERS
                     ));
                 }
             });
@@ -545,6 +699,8 @@ impl Screen {
                 dirty |= self.titles_ui(ui, site, &detail);
                 ui.separator();
                 dirty |= self.preferred_ui(ui, site, &detail);
+                ui.separator();
+                dirty |= self.values_ui(ui, site, &detail);
             });
         if dirty {
             self.load_detail(&site.catalog);
@@ -684,6 +840,106 @@ impl Screen {
         }
     }
 
+    /// **刮削来的字段值**：看得见，也改得动。
+    ///
+    /// 「所有元数据编辑收敛在这里完成」（ADR-0001 的修订段）说的不只是标题与首选变体
+    /// ——年份、发行商、开发商、类型、简介、汉化组这几样也会写进导出条目
+    /// （`adapter::converge`），主库的元数据文件既然不再是编辑入口，它们就得在这儿改。
+    fn values_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, detail: &VariantDetail) -> bool {
+        ui.strong("刮削来的元数据");
+        ui.weak("同一个字段可以有好几条，三元组并存不互相覆盖；**裁决**排在最前，导出用它。");
+        let mut dirty = false;
+        let mut clear: Option<(AnchorKind, Field)> = None;
+        for item in &detail.values {
+            ui.horizontal(|ui| {
+                if item.is_verdict() {
+                    if ui
+                        .small_button("撤")
+                        .on_hover_text("撤掉这条人工写的，让别的源重新说了算")
+                        .clicked()
+                        && let Some(field) = Field::all()
+                            .into_iter()
+                            .find(|field| field.label() == item.value.field)
+                    {
+                        clear = Some((item.anchor, field));
+                    }
+                } else {
+                    ui.add_space(24.0);
+                }
+                let line = format!(
+                    "{} · {}｜{}｜{}",
+                    item.value.field,
+                    item.anchor.label(),
+                    item.value.source,
+                    item.value.value,
+                );
+                if item.is_verdict() {
+                    ui.strong(line).on_hover_text(&item.value.evidence);
+                } else {
+                    ui.label(line).on_hover_text(&item.value.evidence);
+                }
+            });
+        }
+        if detail.values.is_empty() {
+            ui.weak("一条刮削结论都没有。跑一次 `romcat scrape`，或者在这儿手写。");
+        }
+        // 作品未知时只挂得到变体那一层——**作品锚点是作品名**，没有名字就没有锚点。
+        let anchors: Vec<AnchorKind> = if detail.work.is_some() {
+            vec![AnchorKind::Work, AnchorKind::Variant]
+        } else {
+            vec![AnchorKind::Variant]
+        };
+        if !anchors.contains(&self.value_draft.anchor) {
+            self.value_draft.anchor = AnchorKind::Variant;
+        }
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("字段")
+                .selected_text(self.value_draft.field.label())
+                .show_ui(ui, |ui| {
+                    for field in Field::all() {
+                        ui.selectable_value(&mut self.value_draft.field, field, field.label());
+                    }
+                });
+            egui::ComboBox::from_id_salt("挂在哪一层")
+                .selected_text(self.value_draft.anchor.label())
+                .show_ui(ui, |ui| {
+                    for anchor in &anchors {
+                        ui.selectable_value(&mut self.value_draft.anchor, *anchor, anchor.label());
+                    }
+                });
+            ui.add(
+                egui::TextEdit::singleline(&mut self.value_draft.value)
+                    .desired_width(220.0)
+                    .hint_text("写下这个字段的值"),
+            );
+            let subject = match self.value_draft.anchor {
+                AnchorKind::Work => detail.work.clone(),
+                AnchorKind::Variant => Some(detail.row.key.clone()),
+            };
+            let ready = !self.value_draft.value.trim().is_empty() && subject.is_some();
+            if ui
+                .add_enabled(ready, egui::Button::new("写下"))
+                .on_hover_text("来源记作「裁决」：它排在每个字段的最前，导出真会用它")
+                .clicked()
+                && let Some(subject) = subject
+            {
+                self.put_value(site, &subject);
+                dirty = true;
+            }
+        });
+        if let Some((anchor, field)) = clear {
+            let subject = match anchor {
+                AnchorKind::Work => detail.work.clone(),
+                AnchorKind::Variant => Some(detail.row.key.clone()),
+            };
+            if let Some(subject) = subject {
+                self.clear_value(site, anchor, &subject, field);
+                dirty = true;
+            }
+        }
+        dirty
+    }
+
     /// **首选变体**：这个作品在这个平台上默认启动哪一个。
     fn preferred_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, detail: &VariantDetail) -> bool {
         ui.strong("首选变体");
@@ -774,17 +1030,18 @@ impl Screen {
     }
 }
 
-/// 一个维度的选项列表：一行一个值，右边是它选中多少个变体。
+/// 一个维度的选项列表：一行一个值，左边是它选中多少个变体。
 ///
 /// 空列表也画出标题与一句话，而不是整块消失——「这个维度一条数据都没有」与
 /// 「这个维度不在界面上」是两件事，后者会让人以为工具不支持按它筛。
 fn facet_picker(
     ui: &mut egui::Ui,
     what: &str,
+    hint: &str,
     facets: &[romcat_core::catalog::Facet],
     picked: &mut Option<String>,
 ) {
-    ui.strong(what);
+    ui.strong(what).on_hover_text(hint);
     if facets.is_empty() {
         ui.weak(format!("库里还没有{what}这一维的数据。"));
         return;
@@ -792,21 +1049,41 @@ fn facet_picker(
     if ui.selectable_label(picked.is_none(), "不筛").clicked() {
         *picked = None;
     }
-    let mut clicked: Option<String> = None;
     for facet in facets {
         let on = picked.as_deref() == Some(facet.value.as_str());
         if ui
             .selectable_label(on, format!("{}  {}", thousands(facet.count), facet.value))
             .clicked()
         {
-            clicked = Some(facet.value.clone());
+            *picked = (!on).then(|| facet.value.clone());
         }
     }
-    if let Some(value) = clicked {
-        if picked.as_deref() == Some(value.as_str()) {
-            *picked = None;
-        } else {
-            *picked = Some(value);
+}
+
+/// 平台那一维。它比别的多一档——**平台未知**在表里是 `NULL`，只能是独立的一支
+/// （[`PlatformFilter`]）。
+fn platform_picker(
+    ui: &mut egui::Ui,
+    facets: &[romcat_core::catalog::Facet],
+    picked: &mut Option<PlatformFilter>,
+) {
+    ui.strong("平台")
+        .on_hover_text("变体所属的硬件系统。认不出平台的内容照常入库（ADR-0011）。");
+    if facets.is_empty() {
+        ui.weak("库里还没有平台这一维的数据。");
+        return;
+    }
+    if ui.selectable_label(picked.is_none(), "不筛").clicked() {
+        *picked = None;
+    }
+    for facet in facets {
+        let filter = PlatformFilter::from_label(&facet.value);
+        let on = picked.as_ref() == Some(&filter);
+        if ui
+            .selectable_label(on, format!("{}  {}", thousands(facet.count), facet.value))
+            .clicked()
+        {
+            *picked = (!on).then_some(filter);
         }
     }
 }

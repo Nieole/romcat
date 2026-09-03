@@ -180,11 +180,6 @@ impl App {
         self.library.window()
     }
 
-    /// 把表格的滚动位置强按到这个像素偏移。**只有量帧率时才用**（[`crate::bench`]）。
-    pub fn set_scroll_to(&mut self, offset: Option<f32>) {
-        self.library.scroll_to = offset;
-    }
-
     /// 画一帧。`eframe` 与量帧率的那条路走的是同一个函数——量出来的才是这个界面的代价。
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         self.handle_close(ui.ctx());
@@ -219,7 +214,10 @@ impl App {
                         ui.label(format!("沉淀库 {}", self.site.store.location()));
                     });
                 }
-                View::Variants => self.library.status(ui),
+                View::Variants => {
+                    let (library, site) = (&mut self.library, &self.site);
+                    library.status(ui, site);
+                }
                 View::Sublibraries => {
                     let (sublibrary, site) = (&mut self.sublibrary, &self.site);
                     sublibrary.status(ui, site);

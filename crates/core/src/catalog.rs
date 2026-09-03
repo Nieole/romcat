@@ -43,9 +43,11 @@ use crate::scan::aggregate::{
 use crate::shape;
 
 pub use baseline::{Baseline, Recorded, ScanDelta, Verdict};
-pub use browse::{Facet, Facets, MAX_PAGE, StateFilter, VariantOrder, VariantQuery};
+pub use browse::{
+    Facet, Facets, MAX_PAGE, PlatformFilter, StateFilter, VariantOrder, VariantQuery,
+};
 pub use content::{MemberFile, ReleaseRow, VariantRow};
-pub use detail::{MediaHave, Sibling, VariantDetail};
+pub use detail::{MediaHave, MediaItem, Sibling, ValueItem, VariantDetail};
 pub use frontend::{SnapshotOrigin, SnapshotRow};
 pub use identify::{
     AcceptedCandidate, Candidate, CandidateCounts, Confidence, ContentHash, EntryFact,

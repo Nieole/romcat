@@ -5,7 +5,7 @@
 //! ADR-0016：**同步前必须预览差量，且这是硬要求不是优化项**——「永远不能点了同步就开始
 //! 传」。ADR-0015 再加一条：**删除前必须干跑预览**。这一屏把两句话变成一个构造上的事实：
 //! [`Screen::sync`] 只认 [`Screen::prepared`] 里那份计划，而那份计划是
-//! [`romcat_core::sync::prepare`] 排出来的、界面上正摆着的同一个值。**没预览就没有可传的
+//! [`romcat_core::sync::prepare`](fn@romcat_core::sync::prepare) 排出来的、界面上正摆着的同一个值。**没预览就没有可传的
 //! 东西**；改过规则、改过目标之后那份预览当场作废（[`Screen::invalidate`]），
 //! 「同步」按钮跟着灰掉。
 //!
@@ -38,8 +38,9 @@ use egui::{Align, Layout};
 use romcat_core::report::{human_bytes, thousands};
 use romcat_core::scan::CancelToken;
 use romcat_core::site::Site;
+use romcat_core::sublibrary::report::SelectionReport;
 use romcat_core::sublibrary::{
-    BrokenRule, Exception, ExceptionRow, Rule, StoredRule, Sublibrary, rule,
+    BrokenRule, Exception, ExceptionRow, Rule, StoredRule, Sublibrary, Trim, rule,
 };
 use romcat_core::sync::{self, Act, Outcome, Prepared};
 
@@ -104,18 +105,15 @@ struct Running {
     handle: JoinHandle<Result<Outcome, String>>,
 }
 
-/// 只求一次**选择集**的结果：这套规则加例外选出什么，装不装得下。
+/// 只求了一次**选择集**的那份结果，连它花了多久。
 ///
-/// **不碰目标设备**：算它只要中立库，于是卡不在手边时照样调得动规则、看得见容量账。
+/// 报告本身由核心折（[`SelectionReport::build`]）——超没超、砍谁、每条规则命中多少，
+/// 与 `romcat sublibrary show` 印的是**同一个值**。这一屏另写一遍的话，
+/// 「这份报告说装得下、那份说砍这几个」这种对不上的账迟早会出现
+/// （`sublibrary::report` 的模块注释说的就是这件事）。
 pub struct Evaluated {
-    /// 求值的产物与它的账：选中哪些、每条规则各命中多少、例外起没起作用。
-    pub selected: romcat_core::sublibrary::Selected,
-    /// 超出容量上限多少字节；没超或没设上限时是 `None`。
-    pub over_capacity: Option<u64>,
-    /// 超了的话，按体积排序的**裁剪建议**。**绝不自动截断**（ADR-0016）。
-    pub trims: Vec<romcat_core::sublibrary::Trim>,
-    /// 读不懂的规则有几条——少选出来的东西全在它们里面。
-    pub broken: usize,
+    /// 报告本身。
+    pub report: SelectionReport,
     /// 求它用了多久，毫秒。
     pub elapsed_ms: f64,
 }
@@ -159,6 +157,8 @@ pub struct Screen {
     outcome: Option<Outcome>,
     /// 上一次动作的回执。
     notice: Option<String>,
+    /// 上一趟同步有没有出岔子（被停、放弃、有步骤失败）。回执照红的画。
+    failed: bool,
     /// 上一次出的错。
     error: Option<String>,
 }
@@ -184,6 +184,7 @@ impl Screen {
             running: None,
             outcome: None,
             notice: None,
+            failed: false,
             error: None,
         }
     }
@@ -319,7 +320,9 @@ impl Screen {
     /// **只求一次选择集**：这套规则加例外选出什么、多大、装不装得下。
     ///
     /// **不碰目标设备**——卡不在手边时照样调得动规则、看得见容量账（ADR-0009）。
-    /// 容量超限时给出按体积排序的**裁剪建议**，但**一个都不砍**（ADR-0016）。
+    /// 折报告那一步整份交给核心（[`SelectionReport::build`]），于是界面上摆着的与
+    /// `romcat sublibrary show` 印出来的是同一个值：超没超、砍谁、每条规则命中多少，
+    /// 一处算法。容量超限时**只给建议，一个都不砍**（ADR-0016）。
     ///
     /// 界面上按那个按钮走的就是它，实测与测试拿它当那一下。
     pub fn evaluate(&mut self, site: &Site) {
@@ -327,11 +330,10 @@ impl Screen {
             self.error = Some("先挑一个子库。".to_string());
             return;
         };
-        let capacity = self
-            .list
-            .iter()
-            .find(|row| row.name == name)
-            .and_then(|row| row.capacity);
+        let Some(sublibrary) = self.list.iter().find(|row| row.name == name).cloned() else {
+            self.error = Some(format!("库里没有叫「{name}」的子库了。"));
+            return;
+        };
         let started = Instant::now();
         let loaded = match site.catalog.selection(&name) {
             Ok(loaded) => loaded,
@@ -348,22 +350,14 @@ impl Screen {
             }
         };
         let selected = romcat_core::sublibrary::select(&loaded.selection, &facts);
-        let over_capacity = romcat_core::sublibrary::over_capacity(capacity, selected.bytes);
-        let trims = if over_capacity.is_some() {
-            romcat_core::sublibrary::trim_suggestions(
-                selected
-                    .picked
-                    .iter()
-                    .map(|picked| (picked.key.clone(), picked.bytes)),
-            )
-        } else {
-            Vec::new()
-        };
         self.evaluated = Some(Evaluated {
-            selected,
-            over_capacity,
-            trims,
-            broken: loaded.broken.len(),
+            report: SelectionReport::build(
+                site.catalog.location(),
+                &sublibrary,
+                &loaded,
+                &facts,
+                &selected,
+            ),
             elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
         });
         self.error = None;
@@ -448,6 +442,7 @@ impl Screen {
         });
         self.error = None;
         self.notice = None;
+        self.failed = false;
     }
 
     /// 正在跑的那一趟同步跑完没有。跑完了就收账、把**清单**落回中立库。
@@ -474,10 +469,43 @@ impl Screen {
                          放上去的东西当成「清单之外」，于是碰都不敢碰。先修好中立库再跑一次。"
                     ));
                 }
-                self.notice = Some(format!(
-                    "同步用了 {elapsed:.1} 秒：动了 {} 个文件。",
+                // **中断、失败、主动停了，一样都不许吞。** 全成功的一趟与半数写失败的
+                // 一趟若在界面上长得一样，那句「同步用了 X 秒」就是在骗人
+                // （命令行那一侧靠 `Outcome::render_text` 把这几样印全）。
+                let mut line = format!(
+                    "同步用了 {elapsed:.1} 秒：动了 {} 个文件（新增 {}、更新 {}、删除 {}）。",
                     thousands(outcome.touched()),
-                ));
+                    thousands(outcome.added.files),
+                    thousands(outcome.updated.files),
+                    thousands(outcome.deleted.files),
+                );
+                if outcome.interrupted {
+                    line.push_str(
+                        "\n⚠️ **这一趟被你按停了**：目标上没有半份文件，清单记的是\
+                                   到中断为止真实有什么，再跑一趟就接上。",
+                    );
+                }
+                if outcome.gave_up {
+                    line.push_str("\n⚠️ **连着失败太多次，主动停了**：多半是卡拔了或者写满了。");
+                }
+                if !outcome.failures.is_empty() {
+                    line.push_str(&format!(
+                        "\n⚠️ **有 {} 步没做成**：",
+                        thousands(outcome.failures.len() as u64),
+                    ));
+                    for failure in outcome.failures.iter().take(TOP_NOTES) {
+                        line.push_str(&format!("\n  {}：{}", failure.path, failure.why));
+                    }
+                    if outcome.failures.len() > TOP_NOTES {
+                        line.push_str(&format!(
+                            "\n  ……另有 {} 步没列",
+                            outcome.failures.len() - TOP_NOTES,
+                        ));
+                    }
+                }
+                self.failed =
+                    outcome.interrupted || outcome.gave_up || !outcome.failures.is_empty();
+                self.notice = Some(line);
                 self.outcome = Some(outcome);
                 // 传完之后那份预览说的已经是过去时了：目标现在是另一个样子。
                 self.prepared = None;
@@ -567,7 +595,12 @@ impl Screen {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
         if let Some(notice) = &self.notice {
-            ui.colored_label(ui.visuals().warn_fg_color, notice);
+            let color = if self.failed {
+                ui.visuals().error_fg_color
+            } else {
+                ui.visuals().warn_fg_color
+            };
+            ui.colored_label(color, notice);
         }
         let Some(name) = self.picked.clone() else {
             ui.vertical_centered(|ui| {
@@ -612,91 +645,76 @@ impl Screen {
     }
 
     /// 只求了一次选择集的那份结果：选中多少、多大、每条规则各命中多少、装不装得下。
+    ///
+    /// 摆的每一个数都直接来自核心折的 [`SelectionReport`]——这一层一个都不重算。
     fn evaluated_ui(&mut self, ui: &mut egui::Ui, site: &mut Site) {
         let Some(evaluated) = &self.evaluated else {
             return;
         };
+        let report = &evaluated.report;
         ui.label(format!(
-            "选择集选出 {} 个变体、{}（求它用了 {:.0} ms，一次都没碰目标设备）",
-            thousands(evaluated.selected.picked.len() as u64),
-            human_bytes(evaluated.selected.bytes),
+            "选择集选出 {} / {} 个变体、{}；分属 {} 个「作品 × 平台」（求它用了 {:.0} ms，\
+             一次都没碰目标设备）",
+            thousands(report.picked),
+            thousands(report.variants),
+            human_bytes(report.bytes),
+            thousands(report.anchors),
             evaluated.elapsed_ms,
         ));
         // **逐条各自算，不扣例外也不扣重叠**：这个数回答的是「我这条规则写对了吗」。
-        for (at, hits) in evaluated.selected.rule_hits.iter().enumerate() {
-            let text = self
-                .rules
-                .get(at)
-                .map_or_else(|| format!("第 {at} 条"), |stored| stored.text.clone());
-            ui.label(format!("  {} 个 ← {text}", thousands(*hits)));
-        }
-        if evaluated.selected.forced_in > 0 || evaluated.selected.forced_out > 0 {
+        for line in &report.rules {
             ui.label(format!(
-                "例外：收入 {} 个（其中 {} 个是多余的），排除 {} 个（其中 {} 个真起了作用）",
-                thousands(evaluated.selected.forced_in),
-                thousands(evaluated.selected.forced_in_redundant),
-                thousands(evaluated.selected.forced_out),
-                thousands(evaluated.selected.forced_out_effective),
+                "  {} 个 ← {}. {}",
+                thousands(line.hits),
+                line.ordinal,
+                line.text,
             ));
         }
-        if !evaluated.selected.missing_exceptions.is_empty() {
+        for line in &report.broken_rules {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!(
+                    "  {}. {}（读不懂：{}）——少选出来的东西全在它里面",
+                    line.ordinal, line.text, line.error,
+                ),
+            );
+        }
+        if report.forced_in > 0 || report.forced_out > 0 {
+            ui.label(format!(
+                "例外：收入 {} 个（其中 {} 个是多余的），排除 {} 个（其中 {} 个真起了作用）",
+                thousands(report.forced_in),
+                thousands(report.forced_in_redundant),
+                thousands(report.forced_out),
+                thousands(report.forced_out_effective),
+            ));
+        }
+        if !report.missing_exceptions.is_empty() {
             // **不是错误，也不删**：盘没插、目录改了名，例外照旧记着（ADR-0016）。
             ui.label(format!(
                 "有 {} 条例外指着库里眼下没有的变体——照旧记着，不删。",
-                thousands(evaluated.selected.missing_exceptions.len() as u64),
+                thousands(report.missing_exceptions.len() as u64),
             ));
         }
-        if !evaluated.selected.thin_dimensions.is_empty() {
+        if !report.thin_dimensions.is_empty() {
             ui.colored_label(
                 ui.visuals().warn_fg_color,
                 format!(
-                    "规则引到了这几维，而这份库里一条数据都没有：{}。\
-                     选不出东西是**缺数据**，不是规则写错了。",
-                    evaluated.selected.thin_dimensions.join("、"),
+                    "规则引到了这几维，而这份库里一条数据都没有：{}。选不出东西是\
+                     **缺数据**，不是规则写错了。",
+                    report.thin_dimensions.join("、"),
                 ),
             );
         }
-        if evaluated.broken > 0 {
-            ui.colored_label(
-                ui.visuals().error_fg_color,
-                format!(
-                    "有 {} 条规则读不懂、没参与求值——少选出来的东西全在它们里面。",
-                    thousands(evaluated.broken as u64),
-                ),
-            );
-        }
-        if let Some(over) = evaluated.over_capacity {
-            let trims = evaluated.trims.clone();
-            ui.colored_label(
-                ui.visuals().error_fg_color,
-                format!(
-                    "超出容量上限 {}。**不会自动截断**（ADR-0016）——砍谁由你定。",
-                    human_bytes(over),
-                ),
-            );
-            let mut exclude: Option<String> = None;
-            for trim in &trims {
-                ui.horizontal(|ui| {
-                    if ui
-                        .small_button("排除")
-                        .on_hover_text("记一条**排除例外**：规则选中了也不带")
-                        .clicked()
-                    {
-                        exclude = Some(trim.variant.clone());
-                    }
-                    ui.label(format!(
-                        "{}  砍到这条为止腾出 {}  {}",
-                        human_bytes(trim.bytes),
-                        human_bytes(trim.cumulative),
-                        trim.variant,
-                    ));
-                });
+        match report.over_capacity {
+            None => {
+                ui.label("容量：没超。");
             }
-            if let Some(variant) = exclude {
-                self.add_exception(site, Exception::Exclude, &variant, "容量超限时裁掉的");
+            Some(over) => {
+                let trims = report.trim_suggestions.clone();
+                if let Some(variant) = trim_ui(ui, over, report.capacity, &trims) {
+                    self.add_exception(site, Exception::Exclude, &variant, "容量超限时裁掉的");
+                }
             }
-        } else {
-            ui.label("容量：没超。");
         }
         ui.separator();
     }
@@ -746,42 +764,8 @@ impl Screen {
         // **容量超限：只报出超出量与裁剪建议，绝不自动截断**（ADR-0016）。
         if let Some(over) = plan.over_capacity {
             ui.separator();
-            ui.colored_label(
-                ui.visuals().error_fg_color,
-                format!(
-                    "超出容量上限 {}（上限 {}）。**不会自动截断**——砍谁由你定。",
-                    human_bytes(over),
-                    plan.capacity.map_or_else(|| "—".to_string(), human_bytes),
-                ),
-            );
-            ui.label("按体积排序的裁剪建议：");
-            let mut exclude: Option<String> = None;
-            for trim in &plan.trim_suggestions {
-                ui.horizontal(|ui| {
-                    if ui
-                        .small_button("排除")
-                        .on_hover_text("记一条**排除例外**：规则选中了也不带")
-                        .clicked()
-                    {
-                        exclude = Some(trim.variant.clone());
-                    }
-                    ui.label(format!(
-                        "{}  砍到这条为止腾出 {}  {}",
-                        human_bytes(trim.bytes),
-                        human_bytes(trim.cumulative),
-                        trim.variant,
-                    ));
-                });
-            }
-            if let Some(last) = plan.trim_suggestions.last()
-                && last.cumulative < over
-            {
-                ui.colored_label(
-                    ui.visuals().warn_fg_color,
-                    format!("这几个全砍掉还差 {}。", human_bytes(over - last.cumulative)),
-                );
-            }
-            if let Some(variant) = exclude {
+            let trims = plan.trim_suggestions.clone();
+            if let Some(variant) = trim_ui(ui, over, plan.capacity, &trims) {
                 self.add_exception(site, Exception::Exclude, &variant, "容量超限时裁掉的");
             }
         }
@@ -1088,10 +1072,11 @@ impl Screen {
                 });
                 if let Some(key) = drop_exception {
                     match site.catalog.clear_exception(&name, &key) {
-                        Ok(_) => {
+                        Ok(true) => {
                             self.notice = Some(format!("撤掉了 {key} 上那条例外。"));
                             self.open(site, &name);
                         }
+                        Ok(false) => self.notice = Some("那一条已经不在了。".to_string()),
                         Err(error) => self.error = Some(format!("中立库写不动：{error}")),
                     }
                 }
@@ -1217,4 +1202,53 @@ fn run_sync(
         cancel,
     )
     .map_err(|error| format!("目标写不了：{error}"))
+}
+
+/// **容量超限**那一段：超了多少、按体积排序的裁剪建议、每行旁边一个「排除」。
+///
+/// 只求选择集与排完差量预览两处摆的是同一段——超出量与建议本来就由核心一处算
+/// （`sublibrary::over_capacity` / `trim_suggestions`），画法也就只该写一处：
+/// 各画一遍的话，改了一处的措辞另一处就跟着说另一套话。
+///
+/// 返回被点了「排除」的那个变体的键；没人点就是 `None`。**这一屏一个都不砍**
+/// （ADR-0016）：砍谁由人定，而「定」的落点是一条**排除例外**。
+fn trim_ui(ui: &mut egui::Ui, over: u64, capacity: Option<u64>, trims: &[Trim]) -> Option<String> {
+    ui.colored_label(
+        ui.visuals().error_fg_color,
+        format!(
+            "超出容量上限 {}（上限 {}）。**不会自动截断**——砍谁由你定。",
+            human_bytes(over),
+            capacity.map_or_else(|| "—".to_string(), human_bytes),
+        ),
+    );
+    ui.label("按体积排序的裁剪建议：");
+    let mut exclude = None;
+    for trim in trims {
+        ui.horizontal(|ui| {
+            if ui
+                .small_button("排除")
+                .on_hover_text("记一条**排除例外**：规则选中了也不带")
+                .clicked()
+            {
+                exclude = Some(trim.variant.clone());
+            }
+            ui.label(format!(
+                "{}  砍到这条为止腾出 {}  {}",
+                human_bytes(trim.bytes),
+                human_bytes(trim.cumulative),
+                trim.variant,
+            ));
+        });
+    }
+    // **「砍到第几个才够」要一眼看得出来**：超出量动辄几十上百 GiB，让人自己把十行
+    // 数字加一遍是白让他算。
+    if let Some(last) = trims.last()
+        && last.cumulative < over
+    {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!("这几个全砍掉还差 {}。", human_bytes(over - last.cumulative)),
+        );
+    }
+    exclude
 }

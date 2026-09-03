@@ -36,7 +36,7 @@
 
 use rusqlite::{ToSql, params_from_iter};
 
-use super::content::VariantRow;
+use super::content::{VARIANT_COLUMNS, VariantRow, read_variant_row};
 use super::identify::State;
 use super::{Catalog, CatalogError};
 
@@ -135,11 +135,45 @@ impl StateFilter {
     }
 }
 
-/// **平台未知**那一档在筛选里写成什么。
+/// **平台**那一维怎么筛。
 ///
-/// `variant.platform` 可空，而「认不出平台」在真库里是一档真实存在的内容，不是缺陷
-/// （ADR-0011）。筛选要选得中它，就得给 `NULL` 一个说得出口的名字——借报告里
-/// 已经在用的那一个，两处印的字一样。
+/// 它比一个 `Option<String>` 多一档：**平台未知**。`variant.platform` 可空，而
+/// 「认不出平台」在真库里是一档真实存在的内容，不是缺陷（ADR-0011）——`= NULL`
+/// 永远不成立，所以它只能是独立的一支。
+///
+/// **不拿一个约定字符串当哨兵。** 借 [`UNKNOWN_PLATFORM_LABEL`] 那串字去表示 `NULL`
+/// 的话，一个真的叫这个名字的平台就会把两件事撞在一起；而这个库里「两件事必须分得开」
+/// 是一条反复出现的纪律（ADR-0021 的不可读、[`StateFilter`] 的还没识别）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlatformFilter {
+    /// 就这个平台。
+    Named(String),
+    /// **平台未知**：这一列在库里是 `NULL`。
+    Unknown,
+}
+
+impl PlatformFilter {
+    /// 打给用户的那个词。平台未知那一档借报告里已经在用的那一串，两处印的字一样。
+    #[must_use]
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Named(platform) => platform,
+            Self::Unknown => UNKNOWN_PLATFORM_LABEL,
+        }
+    }
+
+    /// 从筛选面板上那一行的字认回来。
+    #[must_use]
+    pub fn from_label(label: &str) -> Self {
+        if label == UNKNOWN_PLATFORM_LABEL {
+            Self::Unknown
+        } else {
+            Self::Named(label.to_string())
+        }
+    }
+}
+
+/// **平台未知**那一档在界面上印成什么。
 pub use crate::report::UNKNOWN_PLATFORM_LABEL;
 
 /// 一次翻页要的是哪一段：筛什么、按什么排。
@@ -155,13 +189,20 @@ pub struct VariantQuery {
     /// 大小写按 SQLite 的 `LIKE` 语义——**只对 ASCII 不敏感**，汉字与假名是逐字节比的。
     /// 中文本来就没有大小写，这个限制在这里不咬人。
     pub contains: String,
-    /// 只要这个**平台**的；[`UNKNOWN_PLATFORM_LABEL`] 选的是平台未知那一档。
-    pub platform: Option<String>,
+    /// 只要这个**平台**的；[`PlatformFilter::Unknown`] 选的是平台未知那一档。
+    pub platform: Option<PlatformFilter>,
     /// 只要在这个**合集**里的。
     pub collection: Option<String>,
     /// 只要发行版标着这个语言的。**逐个语言码比**，不是子串——`zh` 不该匹配上 `zh-Hant`
     /// 之外的东西，而 `en` 更不该匹配上 `Danish`。
     pub language: Option<String>,
+    /// 只要带这个**中文身份**记号的：`汉化` / `官中`（ADR-0012）。
+    ///
+    /// **它与[语言](Self::language)不是一回事，缺一不可。** 语言是**发行版**标着的
+    /// 语言码（`Zh-Hans`），而**汉化版是变体**——它多半基于一条日版发行版，语言那一列
+    /// 上一个中文字都没有。这个库里最要紧的那批内容恰恰全在这一档里，只按语言筛的话
+    /// 它们一条都不出现。
+    pub chinese: Option<String>,
     /// 只要**识别状态**是这一档的。
     pub state: Option<StateFilter>,
     /// 按哪一列排。
@@ -204,13 +245,13 @@ impl VariantQuery {
             parts.push("key LIKE ? ESCAPE '\\'");
             args.push(Box::new(format!("%{}%", escape_like(&self.contains))));
         }
-        match self.platform.as_deref() {
+        match &self.platform {
             None => {}
             // **平台未知那一档要选得中**：它在表里是 `NULL`，而 `= NULL` 永远不成立。
-            Some(UNKNOWN_PLATFORM_LABEL) => parts.push("platform IS NULL"),
-            Some(platform) => {
+            Some(PlatformFilter::Unknown) => parts.push("platform IS NULL"),
+            Some(PlatformFilter::Named(platform)) => {
                 parts.push("platform = ?");
-                args.push(Box::new(platform.to_string()));
+                args.push(Box::new(platform.clone()));
             }
         }
         if let Some(collection) = &self.collection {
@@ -233,6 +274,16 @@ impl VariantQuery {
                                      ',' || ? || ',') > 0)",
             );
             args.push(Box::new(language.clone()));
+        }
+        if let Some(mark) = &self.chinese {
+            // 记号从**自动通过**的候选上读回来，与 `sublibrary::facts` 和
+            // `adapter::converge` 同一条路——三处答案不一样的话，界面上筛出来的那批
+            // 与真正导出去的那批就对不上。
+            parts.push(
+                "EXISTS (SELECT 1 FROM candidate c
+                         WHERE c.variant_key = variant.key AND c.accepted <> 0 AND c.chinese = ?)",
+            );
+            args.push(Box::new(mark.clone()));
         }
         match self.state {
             None => {}
@@ -264,24 +315,6 @@ impl VariantQuery {
             format!(" ORDER BY {column} {direction}, key {direction}")
         }
     }
-}
-
-const COLUMNS: &str = "key, platform, rule, main_key, files, bytes, unreadable, manual,
-                       work_id, release_id";
-
-fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VariantRow> {
-    Ok(VariantRow {
-        key: row.get(0)?,
-        platform: row.get(1)?,
-        rule: row.get(2)?,
-        main_key: row.get(3)?,
-        files: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
-        bytes: u64::try_from(row.get::<_, i64>(5)?).unwrap_or(0),
-        unreadable_files: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
-        manual: row.get::<_, i64>(7)? != 0,
-        work_id: row.get(8)?,
-        release_id: row.get(9)?,
-    })
 }
 
 impl Catalog {
@@ -320,12 +353,13 @@ impl Catalog {
         }
         let (where_sql, mut args) = query.where_clause();
         let order_sql = query.order_clause();
-        let sql = format!("SELECT {COLUMNS} FROM variant{where_sql}{order_sql} LIMIT ? OFFSET ?");
+        let sql =
+            format!("SELECT {VARIANT_COLUMNS} FROM variant{where_sql}{order_sql} LIMIT ? OFFSET ?");
         args.push(Box::new(i64::try_from(limit).unwrap_or(i64::MAX)));
         args.push(Box::new(i64::try_from(offset).unwrap_or(i64::MAX)));
         let mut statement = self.conn.prepare(&sql).map_err(|source| self.err(source))?;
         let rows = statement
-            .query_map(params_from_iter(args.iter()), read_row)
+            .query_map(params_from_iter(args.iter()), read_variant_row)
             .map_err(|source| self.err(source))?;
         rows.collect::<Result<_, _>>()
             .map_err(|source| self.err(source))
@@ -353,7 +387,15 @@ pub struct Facets {
     pub collections: Vec<Facet>,
     /// 发行版标着的语言，按条数从多到少。
     pub languages: Vec<Facet>,
+    /// **中文身份**：`汉化` / `官中`（ADR-0012）。与语言那一维分开，见
+    /// [`VariantQuery::chinese`]。
+    pub chinese: Vec<Facet>,
     /// 识别状态，按 [`StateFilter::ALL`] 的次序。
+    ///
+    /// **不是 [`Facet`]，也不按条数排**：另外三维的值是库里现有的字符串（库里没有 PSV
+    /// 就不该有 PSV 那一档），而这一维是个**闭集合**——四档结论加「还没识别」，
+    /// 一档为零也照样摆出来。零本身是句话：「这份库里一条无判据都没有」与
+    /// 「这份库没跑过识别」看起来会是同一片空白，而它们是两回事（ADR-0002）。
     pub states: Vec<(StateFilter, u64)>,
 }
 
@@ -445,6 +487,27 @@ impl Catalog {
                 .into_iter()
                 .map(|(value, count)| Facet { value, count })
                 .collect(),
+        );
+
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT c.chinese, COUNT(DISTINCT c.variant_key) FROM candidate c
+                 WHERE c.accepted <> 0 AND c.chinese IS NOT NULL
+                 GROUP BY c.chinese",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(Facet {
+                    value: row.get(0)?,
+                    count: u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+                })
+            })
+            .map_err(|source| self.err(source))?;
+        out.chinese = rank_facets(
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|source| self.err(source))?,
         );
 
         let mut statement = self
