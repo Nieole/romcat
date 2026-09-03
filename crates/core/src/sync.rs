@@ -54,6 +54,7 @@ pub mod execute;
 pub mod frontend;
 pub mod media;
 pub mod observe;
+pub mod prepare;
 pub mod report;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -67,6 +68,7 @@ use crate::sublibrary::{Selected, Sublibrary, Trim, over_capacity, trim_suggesti
 
 pub use execute::{Outcome, Placement, Sources};
 pub use observe::{ObserveError, observe};
+pub use prepare::{Prepared, Request, prepare};
 
 /// 子库里一个文件是干什么的。
 ///

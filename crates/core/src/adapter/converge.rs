@@ -468,17 +468,39 @@ fn preference_of(
     releases: &BTreeMap<i64, ReleaseRow>,
     picked: Option<&String>,
 ) -> Preference {
-    if picked == Some(&variant.key) {
+    static NONE: BTreeSet<ChineseMark> = BTreeSet::new();
+    preference_for(
+        &variant.key,
+        marks.get(&variant.key).unwrap_or(&NONE),
+        variant.release_id.and_then(|id| releases.get(&id)),
+        picked.map(String::as_str),
+    )
+}
+
+/// 一个变体凭什么当上**首选变体**：汉化 > 官中 > 日版 > 其他，人裁过的一律让路。
+///
+/// **这条规则只有这一处实现。** 导出那一步走它（[`preference_of`]），库浏览的详情面板
+/// 也走它（[`Catalog::variant_detail`](crate::catalog::Catalog::variant_detail)）——
+/// 面板上排第一的那个，就得是同步到掌机上会默认启动的那个，两处各写一遍必然漂开。
+///
+/// 输入是**这一个变体自己的**记号与发行版，不是整份库的映射表：详情面板一次只看几个
+/// 变体，为它整读一遍 38,963 条自动通过的候选是几十毫秒的卡顿。
+#[must_use]
+pub fn preference_for(
+    key: &str,
+    marks: &BTreeSet<ChineseMark>,
+    release: Option<&ReleaseRow>,
+    picked: Option<&str>,
+) -> Preference {
+    if picked == Some(key) {
         return Preference::Verdict;
     }
-    let marks = marks.get(&variant.key);
     // **汉化压过官中**：一个汉化版完全可能基于一条带中文语言标记的发行版，
     // 底版说什么语言不改变「这是民间汉化版」这件事（同 `dat::chinese::mark_of`）。
-    if marks.is_some_and(|marks| marks.contains(&ChineseMark::FanTranslated)) {
+    if marks.contains(&ChineseMark::FanTranslated) {
         return Preference::FanTranslated;
     }
-    let release = variant.release_id.and_then(|id| releases.get(&id));
-    if marks.is_some_and(|marks| marks.contains(&ChineseMark::Official))
+    if marks.contains(&ChineseMark::Official)
         || release.is_some_and(|release| {
             release
                 .languages

@@ -14,7 +14,7 @@ use romcat_gui::{demo, headless};
 
 fn 界面(rows: u64) -> App {
     let site = demo::site(demo::queue(rows).expect("造得出合成数据")).expect("开得出现场");
-    App::new(site)
+    App::new(site, demo::workspace())
 }
 
 /// 跑几帧，返回这个上下文。

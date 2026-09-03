@@ -34,19 +34,31 @@ impl Locate<'_> {
         self.catalog.is_some() || self.library.is_some() || self.root.is_some()
     }
 
-    /// 开这份现场。
+    /// 这一趟的**工作目录**：中立库、沉淀库、**媒体池**、能力档案名册都在这儿。
     ///
-    /// # Errors
-    /// 说不出要开哪一份、库不在、或者打不开时，返回一句给人看的话。
-    pub fn open(&self) -> Result<Site, String> {
-        let workspace = self.workspace.map_or_else(
+    /// 说了 `--workspace` 就是它；只给了 `--catalog` 时从那条路径反推
+    /// （[`workspace_of`]）；再没有就是默认那个。
+    ///
+    /// 它单独交出来，是因为**子库那一屏要用它**：排差量预览要读媒体池与能力档案名册
+    /// （`romcat_core::sync::prepare`）。
+    #[must_use]
+    pub fn workspace_dir(&self) -> PathBuf {
+        self.workspace.map_or_else(
             || {
                 self.catalog
                     .and_then(workspace_of)
                     .unwrap_or_else(workspace::default_dir)
             },
             Path::to_path_buf,
-        );
+        )
+    }
+
+    /// 开这份现场。
+    ///
+    /// # Errors
+    /// 说不出要开哪一份、库不在、或者打不开时，返回一句给人看的话。
+    pub fn open(&self) -> Result<Site, String> {
+        let workspace = self.workspace_dir();
         let opened = match self.catalog {
             Some(catalog) => Site::open_file(&workspace, catalog, self.root),
             None => {

@@ -62,6 +62,25 @@ struct Args {
     #[arg(long, value_name = "帧数", num_args = 0..=1, default_missing_value = "240")]
     bench_queue: Option<u32>,
 
+    /// 不开窗，量**库浏览**：列筛选面板、换一次筛选、点开一条、每帧各要多久
+    #[arg(long, value_name = "帧数", num_args = 0..=1, default_missing_value = "240")]
+    bench_browse: Option<u32>,
+
+    /// 不开窗，量**子库**：建一个、写一条规则、排一次差量预览
+    ///
+    /// **目标设备一律用本地 fixture 目录模拟**：这条命令自己在临时目录里造一个空目录当
+    /// 目标，绝不去动任何真实设备或 SD 卡
+    #[arg(long)]
+    bench_sublibrary: bool,
+
+    /// `--bench-sublibrary` 用的规则；容量上限写在 `--bench-capacity`
+    #[arg(long, value_name = "规则", default_value = "平台=SFC,GBA,MD")]
+    bench_rule: String,
+
+    /// `--bench-sublibrary` 里那个子库的容量上限，如 `512MB`
+    #[arg(long, value_name = "容量", default_value = "512MB")]
+    bench_capacity: String,
+
     /// 每帧往下滚几行；不给就一趟滚完整张表（**最坏情况**，每帧都要读库）
     #[arg(long, value_name = "行数")]
     rows_per_frame: Option<f32>,
@@ -89,6 +108,18 @@ impl Args {
         }
         demo::site(synthetic()?)
     }
+
+    /// 这一趟的**工作目录**：子库那一屏排差量预览时要读它里头的媒体池与能力档案名册。
+    ///
+    /// 说了 `--workspace` 就用它；开的是现成的库就按 [`Locate`] 那条算；跑合成数据时
+    /// 用一个**临时目录**——演示不该去翻维护者真正的那一份（[`demo::workspace`]）。
+    fn workspace_dir(&self) -> PathBuf {
+        if self.workspace.is_some() || self.locate().given() {
+            self.locate().workspace_dir()
+        } else {
+            demo::workspace()
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -107,7 +138,7 @@ fn main() -> ExitCode {
             Ok(site) => site,
             Err(message) => return fail(&message),
         };
-        let mut app = App::new(site);
+        let mut app = App::new(site, args.workspace_dir());
         app.show_view(View::Variants);
         let sweep = args.rows_per_frame.map_or(Sweep::Whole, Sweep::Rows);
         let cost = bench::scroll(&mut app, frames, sweep);
@@ -147,13 +178,21 @@ fn main() -> ExitCode {
     };
 
     if let Some(frames) = args.bench_queue {
-        let mut app = App::new(site);
+        let mut app = App::new(site, args.workspace_dir());
         let cost = bench::queue(&mut app, frames);
         print!("{}", cost.render());
         return ExitCode::SUCCESS;
     }
 
-    let app = App::new(site);
+    if let Some(frames) = args.bench_browse {
+        return bench_browse(&args, frames);
+    }
+
+    if args.bench_sublibrary {
+        return bench_sublibrary(&args);
+    }
+
+    let app = App::new(site, args.workspace_dir());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0])
@@ -180,6 +219,55 @@ fn main() -> ExitCode {
 fn fail(message: &str) -> ExitCode {
     eprintln!("{message}");
     ExitCode::FAILURE
+}
+
+/// 量一遍**库浏览**。开了现成的库就量真库，不然量合成数据。
+fn bench_browse(args: &Args, frames: u32) -> ExitCode {
+    let rows = args.rows;
+    let site = match args
+        .open(|| demo::library(rows).map_err(|error| format!("造不出合成数据：{error}")))
+    {
+        Ok(site) => site,
+        Err(message) => return fail(&message),
+    };
+    let mut app = App::new(site, args.workspace_dir());
+    let cost = bench::browse(&mut app, frames);
+    print!("{}", cost.render());
+    ExitCode::SUCCESS
+}
+
+/// 量一遍**子库**那一屏。
+///
+/// **目标设备用本地 fixture 目录模拟**：在临时目录里造一个空目录当目标，绝不去动任何
+/// 真实设备或 SD 卡。它会往中立库里建一个子库，所以**只在合成数据上跑**。
+fn bench_sublibrary(args: &Args) -> ExitCode {
+    if args.locate().given() {
+        return fail(
+            "`--bench-sublibrary` 会往中立库里建一个子库，只能在合成数据上跑。\n             去掉 `--catalog` / `--library` / 主库根。",
+        );
+    }
+    let rows = args.rows;
+    let site = match demo::site(match demo::library(rows) {
+        Ok(catalog) => catalog,
+        Err(error) => return fail(&format!("造不出合成数据：{error}")),
+    }) {
+        Ok(site) => site,
+        Err(message) => return fail(&message),
+    };
+    let target = demo::workspace().join("目标设备-fixture");
+    if let Err(error) = std::fs::create_dir_all(&target) {
+        return fail(&format!("造不出 fixture 目标目录：{error}"));
+    }
+    let capacity = romcat_core::sublibrary::rule::parse_size(&args.bench_capacity);
+    let mut app = App::new(site, args.workspace_dir());
+    let cost = bench::sublibrary(&mut app, "实测掌机", &target, capacity, &args.bench_rule);
+    println!(
+        "规则：{}｜目标：{}",
+        args.bench_rule,
+        romcat_core::path::display(&target)
+    );
+    print!("{}", cost.render());
+    ExitCode::SUCCESS
 }
 
 /// 装完字体跑一帧，问 egui 哪些字画不出来。

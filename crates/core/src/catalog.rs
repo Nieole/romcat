@@ -18,6 +18,7 @@
 pub mod baseline;
 pub mod browse;
 pub mod content;
+pub mod detail;
 pub mod frontend;
 pub mod identify;
 pub mod scrape;
@@ -42,8 +43,9 @@ use crate::scan::aggregate::{
 use crate::shape;
 
 pub use baseline::{Baseline, Recorded, ScanDelta, Verdict};
-pub use browse::{MAX_PAGE, VariantOrder, VariantQuery};
+pub use browse::{Facet, Facets, MAX_PAGE, StateFilter, VariantOrder, VariantQuery};
 pub use content::{MemberFile, ReleaseRow, VariantRow};
+pub use detail::{MediaHave, Sibling, VariantDetail};
 pub use frontend::{SnapshotOrigin, SnapshotRow};
 pub use identify::{
     AcceptedCandidate, Candidate, CandidateCounts, Confidence, ContentHash, EntryFact,

@@ -397,6 +397,16 @@ fn candidate_of(work: &str, bucket: &Bucket, mark: &str) -> Candidate {
 /// 这份合成数据在**路径锚**里叫什么名字。真库永远不会叫这个。
 pub const LIBRARY: &str = "合成数据";
 
+/// 合成数据这一趟的**工作目录**。
+///
+/// **故意不是维护者真正的工作目录**：子库那一屏会读工作目录里的**媒体池**与能力档案
+/// 名册，而合成数据跑的是演示，不该让它去翻真库那一套。这个目录**不建出来**——
+/// 名册与媒体池在目录不存在时都退回内置的空手状态，正是演示要的。
+#[must_use]
+pub fn workspace() -> std::path::PathBuf {
+    std::env::temp_dir().join("romcat-合成数据")
+}
+
 /// 一份**全在内存里**的现场：合成数据配一份空沉淀库。
 ///
 /// # Errors
@@ -404,4 +414,245 @@ pub const LIBRARY: &str = "合成数据";
 pub fn site(catalog: Catalog) -> Result<Site, String> {
     let store = Store::in_memory().map_err(|error| format!("开不出沉淀库：{error}"))?;
     Ok(Site::in_memory(catalog, store, LIBRARY))
+}
+
+// ── 库浏览与子库那两屏的合成数据 ────────────────────────────────────────────
+
+/// 合成数据里的**合集**。与平台正交（ADR-0011）：「我通关过的」是合集，「SFC」是平台。
+const COLLECTIONS: &[(&str, u64)] = &[
+    ("我通关过的", 9),
+    ("适合双人玩的", 17),
+    ("小时候玩过", 29),
+    ("汉化精选", 41),
+];
+
+/// 发行版的地区，连它标着的语言。
+///
+/// **官中版在有独立序列号的世代是一条独立的发行版**（ADR-0019）：`China` 那一条带
+/// `Zh-Hans`，与日版、美版平级。数字世代那一侧则是 `Asia` 加一个语言标记——
+/// 这里两种形状都造得出来，筛选那一维才有得测。
+const REGIONS: &[(&str, &str)] = &[
+    ("Japan", "Ja"),
+    ("USA", "En"),
+    ("Europe", "En,Fr,De"),
+    ("China", "Zh-Hans"),
+    ("Asia", "Ja,Zh-Hant,En"),
+];
+
+/// 一份**库浏览**与**子库**用的中立库：`rows` 个变体，连作品、发行版、合集、
+/// 识别结论、**标题集合**与**媒体**引用，而且每个变体真的有一个**文件成员**。
+///
+/// [`synthetic`] 只造变体（那一份是给十万行表格量帧率的）。这一份多造五样，因为票 25
+/// 的四个筛选维度——平台、合集、语言、识别状态——各要一样：语言在发行版上、合集在
+/// 关系表里、识别状态在结论表里，一样缺了那一维在界面上就是空的。第五样是**成员与
+/// 条目**：子库那一屏要折出期望状态，而 `sync::desired` 拿的是
+/// `variant_member` 连 `entry`——没有它们，差量预览里一个 ROM 都不会出现。
+///
+/// **主库只读**（ADR-0004），这条路一个字节都不碰真库；库本身在内存里。
+///
+/// # Errors
+/// 建库或写库失败时返回错误。
+#[allow(clippy::too_many_lines)]
+pub fn library(rows: u64) -> Result<Catalog, CatalogError> {
+    use romcat_core::catalog::identify::Provenance;
+    use romcat_core::catalog::scrape::{Harvested, HarvestedMedia, HarvestedValue};
+    use romcat_core::catalog::title::TitleRow;
+    use romcat_core::catalog::{EntryRecord, Verdict};
+    use romcat_core::fs::{EntryKind, EntryMeta};
+    use romcat_core::scrape::priority::VERDICT;
+    use romcat_core::scrape::{AnchorKind, Field, MediaKind};
+    use romcat_core::title::{Language, TitleKind};
+
+    let key_of = |i: u64| {
+        let platform = PLATFORMS[(i as usize) % PLATFORMS.len()];
+        let work = WORKS[(i as usize / 3) % WORKS.len()];
+        let mark = MARKS[(i as usize / 7) % MARKS.len()];
+        format!("{platform}/{work}（{mark}）#{i:06}.zip")
+    };
+
+    let mut catalog = Catalog::open_in_memory()?;
+    // 零、条目与变体。**每个变体一个文件成员**：子库那一屏要靠它折出期望状态
+    //     （`sync::desired` 走的是 `variant_member` 连 `entry`）。容量刻意压在
+    //     几十 KiB 到几 MiB——`--bench-sublibrary` 那一趟要真的往 fixture 目录里写，
+    //     几 GiB 的合成文件既没意义又写不下（本机只有十几 GiB）。
+    let mut entries = Vec::with_capacity(rows as usize);
+    let mut variants = Vec::with_capacity(rows as usize);
+    for i in 0..rows {
+        let key = key_of(i);
+        let bytes = 32 * 1024 + (i.wrapping_mul(2_654_435_761)) % (4 * 1024 * 1024);
+        entries.push(EntryRecord {
+            key: key.clone(),
+            kind: EntryKind::File,
+            meta: EntryMeta::Known {
+                len: bytes,
+                modified: None,
+            },
+            non_utf8: false,
+            verdict: Verdict::Added,
+            sample: None,
+            container: None,
+        });
+        variants.push(Variant {
+            main_key: key.clone(),
+            platform: (i % 17 != 3).then(|| PLATFORMS[(i as usize) % PLATFORMS.len()].to_string()),
+            rule: if i % 11 == 0 {
+                SPLIT_VOLUME_RULE.to_string()
+            } else {
+                SINGLE_FILE_RULE.to_string()
+            },
+            manual: false,
+            files: 1,
+            bytes,
+            unreadable_files: 0,
+            members: vec![(key.clone(), Role::Main)],
+            key,
+        });
+    }
+    catalog.write(1, &entries)?;
+    catalog.replace_variants(&variants, 1, &Manifest::default())?;
+
+    // 一、作品与发行版。作品 20 个，发行版是「作品 × 平台 × 地区」里真用得上的那些。
+    let mut works = Vec::with_capacity(WORKS.len());
+    for name in WORKS {
+        works.push(catalog.add_work(name, Provenance::Identified)?);
+    }
+    let mut releases: Vec<i64> = Vec::new();
+    for (at, work) in works.iter().enumerate() {
+        for (which, (region, languages)) in REGIONS.iter().enumerate() {
+            let platform = PLATFORMS[(at + which) % PLATFORMS.len()];
+            releases.push(catalog.add_release(
+                *work,
+                Some(platform),
+                Some(region),
+                Some(&format!("SLPS-{:05}", at * 10 + which)),
+                Some(languages),
+                Provenance::Identified,
+            )?);
+        }
+    }
+
+    // 二、识别结论，顺带把变体挂到作品与发行版上（`write_identifications` 一趟做完，
+    //     一条一条 `link_variant` 在十万行上是几万次自动提交）。
+    //     **每十三个留一个压根没有结论行**：那是「还没识别」，与「未命中」不是一回事。
+    let mut records = Vec::new();
+    for i in 0..rows {
+        if i % 13 == 7 {
+            continue;
+        }
+        let state = State::ALL[(i as usize / 5) % State::ALL.len()];
+        let at = (i as usize / 3) % works.len();
+        records.push(Identification {
+            variant_key: key_of(i),
+            state,
+            reason: (state == State::NoEvidence)
+                .then(|| REASONS[(i as usize) % REASONS.len()].to_string()),
+            units: 1,
+            nkit: 0,
+            read_bytes: 0,
+            work_id: Some(works[at]),
+            release_id: Some(releases[at * REGIONS.len() + (i as usize) % REGIONS.len()]),
+            candidates: Vec::new(),
+        });
+    }
+    catalog.write_identifications(&records)?;
+
+    // 三、合集。
+    for (name, every) in COLLECTIONS {
+        let id = catalog.add_collection(name)?;
+        for i in (0..rows).filter(|i| i % every == 0) {
+            catalog.add_to_collection(id, &key_of(i))?;
+        }
+    }
+
+    // 四、**标题集合**：每个作品三条叫法。中文那条是**官中版的官方译名**——
+    //     ADR-0012 那句「首选变体与标题来源解耦」要看得见，就得真有这么一条。
+    let mut titles = Vec::new();
+    for (at, work) in WORKS.iter().enumerate() {
+        for (value, language, kind, source, region) in [
+            (
+                format!("Work {at:02} (USA)"),
+                Language::English,
+                TitleKind::Official,
+                "No-Intro",
+                Some("USA"),
+            ),
+            (
+                format!("Sakuhin {at:02}"),
+                Language::Japanese,
+                TitleKind::Official,
+                "No-Intro",
+                Some("Japan"),
+            ),
+            (
+                (*work).to_string(),
+                Language::Chinese,
+                TitleKind::Translated,
+                "Redump",
+                Some("China"),
+            ),
+        ] {
+            titles.push(TitleRow {
+                work: (*work).to_string(),
+                value,
+                language,
+                kind,
+                source: source.to_string(),
+                region: region.map(str::to_string),
+                variant_key: None,
+                confidence: Confidence::High,
+                seam: None,
+                evidence: "合成数据".to_string(),
+                seen: 3,
+            });
+        }
+    }
+    // 一条**裁决**来源的，用来核对「人改过的东西不许被数据源覆盖」在界面上看得出来。
+    titles.push(TitleRow {
+        work: WORKS[0].to_string(),
+        value: "幻想传说（人改过的）".to_string(),
+        language: Language::Chinese,
+        kind: TitleKind::Translated,
+        source: VERDICT.to_string(),
+        region: None,
+        variant_key: None,
+        confidence: Confidence::High,
+        seam: None,
+        evidence: "合成数据里那条人工裁决".to_string(),
+        seen: 1,
+    });
+    catalog.put_titles(&titles)?;
+
+    // 五、**媒体**：封面每个作品都有，截图只有一半有，视频一个都没有——
+    //     「这条缺哪些媒体」那条验收要有东西可缺。
+    let mut harvested = Vec::new();
+    for (at, work) in WORKS.iter().enumerate() {
+        let mut media = Vec::new();
+        for (kind, salt) in [(MediaKind::Cover, 0), (MediaKind::Screenshot, 1)] {
+            if kind == MediaKind::Screenshot && !at.is_multiple_of(2) {
+                continue;
+            }
+            let hash = format!("{:040x}", at * 2 + salt);
+            catalog.put_media(&hash, "png", 64 * 1024)?;
+            media.push(HarvestedMedia {
+                kind: kind.label().to_string(),
+                hash,
+                evidence: "合成数据".to_string(),
+            });
+        }
+        harvested.push(Harvested {
+            anchor: AnchorKind::Work.label().to_string(),
+            subject: (*work).to_string(),
+            source: "合成数据".to_string(),
+            input: format!("合成 {at}"),
+            values: vec![HarvestedValue {
+                field: Field::Genre.label().to_string(),
+                value: "角色扮演".to_string(),
+                evidence: "合成数据".to_string(),
+            }],
+            media,
+        });
+    }
+    catalog.put_scraped(&harvested)?;
+
+    Ok(catalog)
 }

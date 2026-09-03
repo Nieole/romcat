@@ -7,7 +7,6 @@
 //! 两个子命令的分工是这张票的核心：`scan` 碰盘，`report` 不碰。体检报告由**中立库**
 //! 折出来，因此外置盘不在位时 `report` 照样出得来（ADR-0009）。
 
-use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -717,25 +716,13 @@ impl ScrapeArgs {
     }
 }
 
-/// 工作目录里那份可选的优先级表叫什么。
-const PRIORITIES_IN_WORKSPACE: &str = "priorities.toml";
-
 /// 挑出这一趟用哪一份优先级表：命令行给的 > 工作目录里那份 > 内置的。
 ///
-/// `scrape` 与 `titles` 共用它，**而且必须共用**：两条命令对「哪个源说了算」的答案
+/// `scrape`、`titles` 与同步共用它，**而且必须共用**：几条路对「哪个源说了算」的答案
 /// 不一样的话，报告里合并出来的标题与导出时挑出来的标题就会对不上。
+/// 算法在核心里（`sync::prepare::priorities`），界面走的是同一个。
 fn load_priorities(given: Option<&Path>, workspace: &Path) -> Result<Priorities, String> {
-    let path = match given {
-        Some(path) => path.to_path_buf(),
-        None => {
-            let candidate = workspace.join(PRIORITIES_IN_WORKSPACE);
-            if !candidate.exists() {
-                return Ok(Priorities::builtin());
-            }
-            candidate
-        }
-    };
-    Priorities::load(&path).map_err(|error| format!("{error}"))
+    sync::prepare::priorities(given, workspace)
 }
 
 /// `romcat titles` 的参数。
@@ -3679,38 +3666,8 @@ fn run_sublibrary_show(args: &SubShowArgs) -> ExitCode {
 /// **`plan` 与 `sync` 共用它，而且必须共用**：预览说的与同步要做的必须是同一份差量。
 /// 两条命令各折一遍期望状态的话，两份账迟早漂开，而那正是 ADR-0016 那条硬要求
 /// （同步前必须先呈现差量预览）要防的事。
-struct Prepared {
-    /// 目标根，**系统给的原始形式**——读盘走它（ADR-0020、挂账 D82）。
-    root: PathBuf,
-    desired: sync::Desired,
-    manifest: sync::Manifest,
-    actual: sync::TargetState,
-    plan: sync::Plan,
-    /// 媒体：相对子库根的路径 → 它在**媒体池**里的落点。
-    from_pool: BTreeMap<String, PathBuf>,
-    /// 生成物：相对子库根的路径 → 内容。前端元数据走这条。
-    generated: BTreeMap<String, Vec<u8>>,
-    /// **媒体池**自己的临时目录。执行那一步拿它当硬链接探测的源那一头
-    /// ——两头都得是工具的地盘（`sync::execute::probe`）。
-    scratch: PathBuf,
-    /// 读不懂的规则有几条。
-    broken: usize,
-    /// 库里记着、池里却没有那个文件的媒体引用有几条。
-    media_not_in_pool: u64,
-    /// 认不出是什么、因此一张都没铺的图有几张。
-    media_unknown_kind: u64,
-    /// 靠文件名找媒体的格式里，被同类挤掉、因此没铺出去的图有几张。
-    media_crowded_out: u64,
-    /// 折出了几个前端条目。
-    entries: u64,
-    /// 子库记着的能力档案在眼下这份名册里找不到——退回了「不作声称」。
-    missing_capability: Option<String>,
-    /// 这份档案里有几条声明已经陈旧。
-    stale_claims: usize,
-}
-
-/// 把中立库、媒体池与目标设备折成一份计划。**除了目标目录，什么都不写。**
-#[allow(clippy::too_many_lines)]
+/// 排一次计划。**算法在核心里**（[`sync::prepare`]）——命令行与界面得到的是同一份差量，
+/// 而不是两条各自演化的代码（ADR-0016 那句「预览说的就是同步会做的」）。
 fn prepare(
     catalog: &Catalog,
     common: &SubCommonArgs,
@@ -3718,105 +3675,17 @@ fn prepare(
     target: Option<&Path>,
     restore: bool,
     priorities: Option<&Path>,
-) -> Result<Prepared, String> {
-    let mut sublibrary = load_sublibrary(catalog, name)?;
-    // **读盘用的路径与入库比较用的键分开**（ADR-0020）：`--target` 给的是系统给的
-    // 原始形式，就拿它原样去读；子库自己那条走 `read_path`，它取的正是存进库的
-    // 那一份原始形式。混用会让带假名或带音标的目标目录 `canonicalize` 失败，
-    // 然后被报成「卡不在位」——那正是最不该说的谎（挂账 D82）。
-    let root = match target {
-        Some(target) => path::normalize_existing(target),
-        None => sublibrary.read_path(),
-    };
-    if target.is_some() {
-        sublibrary.target = path::nfc(&path::display(&root)).into_owned();
-    }
-    let adapter = adapter::find(&sublibrary.format).ok_or_else(|| {
-        format!(
-            "子库「{name}」的前端格式是「{}」，可这一版没带这个适配器。",
-            sublibrary.format
-        )
-    })?;
-    let workspace = workspace_dir(common.workspace.as_deref());
-    // **能力档案**：目标吃得下什么、这张卡放得下什么（票 21、ADR-0017）。
-    // 子库记的是名字，档案本身是一份可以整份换掉的数据。
-    let roster = romcat_core::capability::Roster::in_workspace(&workspace)
-        .map_err(|error| format!("{error}"))?;
-    let missing_capability = sublibrary
-        .capability
-        .as_deref()
-        .filter(|name| roster.find(name).is_none())
-        .map(ToString::to_string);
-    let profile = roster.find_or_unclaimed(sublibrary.capability.as_deref());
-    // **报告里印真正生效的那一份，不是子库上记着的那个名字。** 记着的名字在名册里
-    // 找不到时上面已经退回了「不作声称」——这时预览与 `--json` 还印着原来那个名字的话，
-    // 用户会以为它替自己查过了，而实际上一条都没查（ADR-0017：矩阵错误比不转换更糟）。
-    sublibrary.capability = Some(profile.name.clone());
-    let priorities = load_priorities(priorities, &workspace)?;
-    // **不建目录**：排计划那条命令说的是「一个文件都没写」。
-    let pool = romcat_core::scrape::pool::MediaPool::at(&workspace::media_pool_dir(&workspace));
-
-    let loaded = catalog
-        .selection(name)
-        .map_err(|error| format!("中立库读不动：{error}"))?;
-    let facts = sublibrary::facts(catalog).map_err(|error| format!("中立库读不动：{error}"))?;
-    let selected = sublibrary::select(&loaded.selection, &facts);
-
-    let mut desired = sync::desired(catalog, &selected, &profile)
-        .map_err(|error| format!("中立库读不动：{error}"))?;
-    let media = sync::media::lay(catalog, adapter.as_ref(), &pool, &selected)
-        .map_err(|error| format!("中立库读不动：{error}"))?;
-    let frontend = sync::frontend::lay(
+) -> Result<sync::Prepared, String> {
+    sync::prepare(
         catalog,
-        adapter.as_ref(),
-        &priorities,
-        &selected,
-        &media.assets,
-    )
-    .map_err(|error| format!("元数据折不出来：{error}"))?;
-    desired.files.extend(media.files.iter().cloned());
-    desired.files.extend(frontend.files.iter().cloned());
-    desired.files.sort_by(|a, b| a.path.cmp(&b.path));
-    // **放不进目标存储的在这里就被拦下来**（ADR-0017 补充段）：FAT32 那 4 GiB 的
-    // 单文件上限、文件名不收的字符、路径太长。拦在排计划**之前**，于是它们连成为一条
-    // 步骤的路径都没有——「传到一半失败」这件事在构造上不会发生。
-    //
-    // 路径上限比的是**完整路径**，因此把子库根那串的长度也交进去。
-    desired.screen(
-        &profile.filesystem,
-        path::display(&root).encode_utf16().count(),
-    );
-
-    let manifest = catalog
-        .manifest(name)
-        .map_err(|error| format!("中立库读不动：{error}"))?;
-    let actual = sync::observe(&RealFs, &root).map_err(|error| format!("{error}"))?;
-    let plan = sync::plan(
-        &sublibrary,
-        &desired,
-        &manifest,
-        &actual,
-        sync::Options {
+        &workspace_dir(common.workspace.as_deref()),
+        name,
+        &sync::Request {
+            target,
             restore_missing: restore,
+            priorities,
         },
-    );
-    Ok(Prepared {
-        root,
-        desired,
-        manifest,
-        actual,
-        plan,
-        from_pool: media.from_pool,
-        generated: frontend.bytes,
-        scratch: pool.scratch(),
-        broken: loaded.broken.len(),
-        media_not_in_pool: media.not_in_pool,
-        media_unknown_kind: media.unknown_kind,
-        media_crowded_out: media.crowded_out,
-        entries: frontend.entries,
-        missing_capability,
-        stale_claims: profile.stale_claims(&today()),
-    })
+    )
 }
 
 /// 排一次同步计划，也就是**差量预览**。
@@ -3868,48 +3737,11 @@ fn run_sublibrary_plan(args: &SubPlanArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// 折期望状态时那几件要说出口的怪事。**`plan` 与 `sync` 印同一份**。
-fn warn_about(ready: &Prepared, name: &str) {
-    if ready.broken > 0 {
-        eprintln!(
-            "⚠️ 有 {} 条规则读不懂、这一趟没参与求值——少选出来的东西全在它们里面。\n\
-             `romcat sublibrary show {name}` 看是哪几条。",
-            thousands(ready.broken as u64),
-        );
-    }
-    if ready.media_not_in_pool > 0 {
-        eprintln!(
-            "⚠️ 有 {} 条媒体引用在**媒体池**里找不到那个文件，这一趟一张都不铺。\n\
-             重新跑一次 `romcat scrape` 把它们收回池里。",
-            thousands(ready.media_not_in_pool),
-        );
-    }
-    if ready.media_unknown_kind > 0 {
-        eprintln!(
-            "认不出是什么的图有 {} 张，**一张都没铺**——猜错了就是把说明书当封面。",
-            thousands(ready.media_unknown_kind),
-        );
-    }
-    if ready.media_crowded_out > 0 {
-        eprintln!(
-            "有 {} 张图被同类挤掉、没铺出去：这个格式靠**文件名**找媒体，\n\
-             一个游戏的一个类型只放得下一张。挤掉的是同一个游戏的第二张起。",
-            thousands(ready.media_crowded_out),
-        );
-    }
-    if let Some(missing) = &ready.missing_capability {
-        eprintln!(
-            "⚠️ 子库记着的能力档案「{missing}」在眼下这份名册里**找不到**，这一趟退回了\n\
-             「不作声称」：**不转换、也不检查**。别以为它替你查过了。\n\
-             `romcat capability` 看还有哪些，`romcat sublibrary set {name} --capability <名字>` 重挑一份。",
-        );
-    }
-    if ready.stale_claims > 0 {
-        eprintln!(
-            "⚠️ 这份能力档案里有 {} 条声明**超过半年没核实**。模拟器一年发好几版，\n\
-             而矩阵错了比不转换更糟（ADR-0017）——`romcat capability <档案名>` 看是哪几条。",
-            thousands(ready.stale_claims as u64),
-        );
+/// 折期望状态时那几件要说出口的怪事。**`plan` 与 `sync` 印同一份**，
+/// 而且**与界面印同一份**——那几句话在核心里（[`sync::Prepared::concerns`]）。
+fn warn_about(ready: &sync::Prepared, _name: &str) {
+    for concern in ready.concerns() {
+        eprintln!("{concern}");
     }
 }
 
@@ -4057,59 +3889,18 @@ fn run_sublibrary_sync(args: &SubSyncArgs, cancel: &CancelToken) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// 这一趟去哪儿读主库。
+/// 这一趟去哪儿读主库。**算法在核心里**——界面那个「同步」按钮走的是同一条。
 fn library_root_for(catalog: &Catalog, given: Option<&Path>) -> Result<PathBuf, String> {
-    let root = recorded_library_root(catalog, given)?.ok_or_else(|| {
-        "这份中立库没记着主库在哪。给 `--library-root <主库根目录>`，\n\
-         或者先跑一次 `romcat scan` 让它记下来。"
-            .to_string()
-    })?;
-    if !root.is_dir() {
-        return Err(format!(
-            "主库不在位：{}\n\
-             搬 ROM 要真的去读它。插上外置盘，或者给 `--library-root <主库根目录>`。",
-            path::display(&root)
-        ));
-    }
-    Ok(root)
+    sync::prepare::library_root(catalog, given)
 }
 
-/// 这份中立库对着的主库根：命令行给了就用给的，否则用扫描时记下的那个。
-fn recorded_library_root(
-    catalog: &Catalog,
-    given: Option<&Path>,
-) -> Result<Option<PathBuf>, String> {
-    match given {
-        Some(root) => Ok(Some(path::normalize_existing(root))),
-        None => catalog
-            .library_root()
-            .map(|root| root.map(PathBuf::from))
-            .map_err(|error| format!("中立库读不动：{error}")),
-    }
-}
-
-/// 目标落在主库里就拦下来。
-///
-/// **只有 `sync` 需要这一道。** `plan` 从头到尾只读，指哪儿都无所谓；而 `sync` 从票 20
-/// 起是真的往目标上建目录、写文件、删文件——一个手滑的 `--target` 就会在那块 10 TiB
-/// 不可再生的盘里动手（ADR-0004）。判据用中立库记着的主库根，于是 `--root` 给不给
-/// 都拦得住。**取不到主库根时不拦**：那说明这份库还没扫过，没有边界可守。
+/// 目标落在主库里就拦下来（ADR-0004）。**这道红线在核心里**，界面与命令行共用一条。
 fn refuse_target_in_library(
     catalog: &Catalog,
     given: Option<&Path>,
     target: &Path,
 ) -> Result<(), String> {
-    let Some(root) = recorded_library_root(catalog, given)? else {
-        return Ok(());
-    };
-    if romcat_core::path::is_inside(&root, &path::normalize_existing(target)) {
-        return Err(format!(
-            "目标 {} 落在主库里。**主库只读**（ADR-0004）：同步会往目标上写文件、\n\
-             删文件，绝不能指着那块盘。子库要导到别处去——一律走读卡器（ADR-0015）。",
-            path::display(target)
-        ));
-    }
-    Ok(())
+    sync::prepare::refuse_target_in_library(catalog, given, target)
 }
 
 #[derive(Debug, Args)]

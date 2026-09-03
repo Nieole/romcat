@@ -18,12 +18,11 @@
 //! `set_ime_allowed(false)`。所以关窗请求来的第一帧不真的关：先撤销关闭、放掉文本焦点、
 //! 发一条 `IMEAllowed(false)`，下一帧再关。[`App::closing`] 就是这两拍的状态。
 
-use egui::{Align, Layout};
-use romcat_core::catalog::{VariantQuery, VariantRow};
-use romcat_core::report::human_bytes;
+use std::path::PathBuf;
 
-use crate::table::{SPAN, Table, Window};
-use crate::{font, queue};
+use egui::{Align, Layout};
+
+use crate::{library, queue, sublibrary};
 use romcat_core::site::Site;
 
 /// 关窗走到哪一拍了。
@@ -43,20 +42,25 @@ pub enum View {
     /// **待确认队列**：打开工具就是它（ADR-0002）。
     #[default]
     Queue,
-    /// 变体表：库浏览的骨架，票 25 在它上面长。
+    /// **库浏览**：翻整个主库、按四个维度筛、改条目的元数据（票 25）。
+    ///
+    /// 名字里留着 `Variants`，因为它中间那张表就是票 22 那张**变体表**。
     Variants,
+    /// **子库**：选择集、差量预览、同步（票 25）。
+    Sublibraries,
 }
 
 impl View {
     /// 顶栏照这个次序摆。
-    pub const ALL: [Self; 2] = [Self::Queue, Self::Variants];
+    pub const ALL: [Self; 3] = [Self::Queue, Self::Variants, Self::Sublibraries];
 
     /// 这一屏叫什么。用**词表**里的词。
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Queue => "待确认队列",
-            Self::Variants => "变体",
+            Self::Variants => "库浏览",
+            Self::Sublibraries => "子库",
         }
     }
 }
@@ -68,35 +72,45 @@ pub struct App {
     view: View,
     /// 待确认队列那一屏。
     queue: queue::Screen,
-    window: Window,
-    /// 筛选与排序。**界面上这一份是源头**，[`Window`] 里那一份是它的副本，每帧同步一次。
-    query: VariantQuery,
-    selected: Option<u64>,
-    detail: Option<VariantRow>,
-    sample: bool,
+    /// 库浏览那一屏。
+    library: library::Screen,
+    /// 子库那一屏。
+    sublibrary: sublibrary::Screen,
     closing: Closing,
-    /// 把表格的滚动位置强按到这个像素偏移。**只有量帧率时才设**（[`crate::bench`]），
-    /// 真界面上永远是 `None`。
-    pub scroll_to: Option<f32>,
 }
 
 impl App {
     /// 开一个界面，数据来自这份现成的库。**打开就是待确认队列。**
+    ///
+    /// `workspace` 是**工作目录**：子库那一屏排差量预览时要读它里头的**媒体池**与
+    /// 能力档案名册（`romcat_core::sync::prepare`）。
     #[must_use]
-    pub fn new(site: Site) -> Self {
+    pub fn new(site: Site, workspace: PathBuf) -> Self {
         let mut queue = queue::Screen::new();
         queue.reload(&site);
+        let mut library = library::Screen::new();
+        library.reload(&site);
+        // 优先级表与导出共用一份：面板上写着的显示标题就是同步到掌机上会看见的那个。
+        if let Ok(priorities) = romcat_core::sync::prepare::priorities(None, &workspace) {
+            library.set_priorities(priorities);
+        }
+        // **媒体池不在就不指**：那时详情面板如实说「没查池子」，而不是报一句
+        // 「一张都没有」——后者会把人赶去重跑刮削，而问题其实出在工作目录上。
+        let pool_dir = romcat_core::workspace::media_pool_dir(&workspace);
+        library.set_pool(
+            pool_dir
+                .is_dir()
+                .then(|| romcat_core::scrape::pool::MediaPool::at(&pool_dir)),
+        );
+        let mut sublibrary = sublibrary::Screen::new(workspace);
+        sublibrary.reload(&site);
         Self {
             site,
             view: View::default(),
             queue,
-            window: Window::new(SPAN),
-            query: VariantQuery::default(),
-            selected: None,
-            detail: None,
-            sample: false,
+            library,
+            sublibrary,
             closing: Closing::No,
-            scroll_to: None,
         }
     }
 
@@ -138,10 +152,37 @@ impl App {
         &self.site
     }
 
-    /// 窗口，供测试查「内存里装了几行」。
+    /// 库浏览那一屏，供测试查「筛出多少行、点开的那一条是什么」。
     #[must_use]
-    pub fn window(&self) -> &Window {
-        &self.window
+    pub fn library(&self) -> &library::Screen {
+        &self.library
+    }
+
+    /// 库浏览那一屏**连它的库**。改元数据这件事同时要它们俩。
+    pub fn library_and_site(&mut self) -> (&mut library::Screen, &mut Site) {
+        (&mut self.library, &mut self.site)
+    }
+
+    /// 子库那一屏，供测试查「有几个子库、差量预览长什么样」。
+    #[must_use]
+    pub fn sublibrary(&self) -> &sublibrary::Screen {
+        &self.sublibrary
+    }
+
+    /// 子库那一屏**连它的库**。建子库、写规则、排预览、同步都同时要它们俩。
+    pub fn sublibrary_and_site(&mut self) -> (&mut sublibrary::Screen, &mut Site) {
+        (&mut self.sublibrary, &mut self.site)
+    }
+
+    /// 变体表背后那扇窗，供测试查「内存里装了几行」。
+    #[must_use]
+    pub fn window(&self) -> &crate::table::Window {
+        self.library.window()
+    }
+
+    /// 把表格的滚动位置强按到这个像素偏移。**只有量帧率时才用**（[`crate::bench`]）。
+    pub fn set_scroll_to(&mut self, offset: Option<f32>) {
+        self.library.scroll_to = offset;
     }
 
     /// 画一帧。`eframe` 与量帧率的那条路走的是同一个函数——量出来的才是这个界面的代价。
@@ -153,32 +194,15 @@ impl App {
                 let (queue, site) = (&mut self.queue, &mut self.site);
                 queue.ui(ui, site);
             }
-            View::Variants => self.variants(ui),
+            View::Variants => {
+                let (library, site) = (&mut self.library, &mut self.site);
+                library.ui(ui, site);
+            }
+            View::Sublibraries => {
+                let (sublibrary, site) = (&mut self.sublibrary, &mut self.site);
+                sublibrary.ui(ui, site);
+            }
         }
-    }
-
-    /// 变体表那一屏（票 22 的骨架，票 25 在它上面长）。
-    fn variants(&mut self, ui: &mut egui::Ui) {
-        self.window.set_query(self.query.clone());
-        self.window.sync(&self.site.catalog);
-        egui::Panel::bottom("详情").show(ui, |ui| self.detail_panel(ui));
-        egui::CentralPanel::default().show(ui, |ui| {
-            if self.sample {
-                self.font_sample(ui);
-                ui.separator();
-            }
-            let picked = Table {
-                catalog: &self.site.catalog,
-                window: &mut self.window,
-                query: &mut self.query,
-                selected: &mut self.selected,
-                scroll_to: self.scroll_to,
-            }
-            .show(ui);
-            if let Some(row) = picked {
-                self.detail = Some(row);
-            }
-        });
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
@@ -195,78 +219,12 @@ impl App {
                         ui.label(format!("沉淀库 {}", self.site.store.location()));
                     });
                 }
-                View::Variants => {
-                    ui.toggle_value(&mut self.sample, "字体样张");
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if let Some(error) = self.window.error() {
-                            ui.colored_label(ui.visuals().error_fg_color, error);
-                        } else {
-                            ui.label(format!(
-                                "{} 行；内存里 {} 行、读库 {} 次",
-                                self.window.total(),
-                                self.window.retained(),
-                                self.window.reads()
-                            ));
-                        }
-                    });
+                View::Variants => self.library.status(ui),
+                View::Sublibraries => {
+                    let (sublibrary, site) = (&mut self.sublibrary, &self.site);
+                    sublibrary.status(ui, site);
                 }
             }
-        });
-    }
-
-    fn detail_panel(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(4.0);
-        match &self.detail {
-            None => {
-                ui.label("点一行看详情。中文输入在这块面板里，不在表格单元格里。");
-            }
-            Some(variant) => {
-                ui.horizontal_wrapped(|ui| {
-                    ui.strong(&variant.key);
-                    ui.separator();
-                    ui.label(format!(
-                        "平台 {}｜成型规则 {}｜{} 个文件｜{}",
-                        variant.platform.as_deref().unwrap_or("未知"),
-                        variant.rule,
-                        variant.files,
-                        human_bytes(variant.bytes),
-                    ));
-                });
-            }
-        }
-        // 筛选框在面板里而不在顶栏，与队列那一屏同一条规矩：会碰到输入法的控件全收在
-        // **不虚拟化**的面板里。筛选本身下推到中立库（`catalog::browse`）。
-        ui.horizontal(|ui| {
-            ui.label("筛选");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.query.contains)
-                    .desired_width(320.0)
-                    .hint_text("键里含这段文字"),
-            );
-        });
-        ui.add_space(4.0);
-    }
-
-    /// 字体样张：把 egui 内置字体缺的那几类字**摆出来给人看**。
-    ///
-    /// 它是这张票「界面上不出现豆腐块」那条验收的肉眼证据，自动化那一份在
-    /// `tests/font.rs`，拿真库核对覆盖面的那一条是 `romcat-gui --font-check --catalog`。
-    fn font_sample(&self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            ui.strong("字体样张");
-            ui.label(format!("子集 {}", human_bytes(font::subset_bytes() as u64)));
-        });
-        for (what, text) in font::SAMPLE.iter().copied() {
-            ui.horizontal(|ui| {
-                ui.add_sized([90.0, 18.0], egui::Label::new(what));
-                ui.label(text);
-            });
-        }
-        // OFL 要求分发字体时随附许可，而这份字体是嵌在可执行文件里的——许可得跟着走。
-        ui.collapsing("字体许可（SIL Open Font License 1.1）", |ui| {
-            egui::ScrollArea::vertical()
-                .max_height(160.0)
-                .show(ui, |ui| ui.monospace(font::LICENSE));
         });
     }
 

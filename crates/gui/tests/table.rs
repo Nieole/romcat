@@ -15,7 +15,7 @@ use romcat_gui::table::SPAN;
 
 fn 界面(rows: u64) -> App {
     let site = demo::site(demo::synthetic(rows).expect("造得出合成数据")).expect("开得出现场");
-    let mut app = App::new(site);
+    let mut app = App::new(site, demo::workspace());
     // 这几条量的是**变体表**；打开工具看见的那一屏是待确认队列（ADR-0002）。
     app.show_view(View::Variants);
     app

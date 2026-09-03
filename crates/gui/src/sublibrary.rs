@@ -1,0 +1,1220 @@
+//! **子库**：建一个、写它的**规则**与**例外**、看**差量预览**、从这里触发**同步**。
+//!
+//! ## 顺序是硬要求，不是排版
+//!
+//! ADR-0016：**同步前必须预览差量，且这是硬要求不是优化项**——「永远不能点了同步就开始
+//! 传」。ADR-0015 再加一条：**删除前必须干跑预览**。这一屏把两句话变成一个构造上的事实：
+//! [`Screen::sync`] 只认 [`Screen::prepared`] 里那份计划，而那份计划是
+//! [`romcat_core::sync::prepare`] 排出来的、界面上正摆着的同一个值。**没预览就没有可传的
+//! 东西**；改过规则、改过目标之后那份预览当场作废（[`Screen::invalidate`]），
+//! 「同步」按钮跟着灰掉。
+//!
+//! ## 容量超限只给建议，绝不自动截断
+//!
+//! 同样是 ADR-0016。超出量与**按体积排序的裁剪建议**都由核心算好
+//! （[`Plan::over_capacity`](romcat_core::sync::Plan::over_capacity)、
+//! [`Plan::trim_suggestions`](romcat_core::sync::Plan::trim_suggestions)），这一屏只是把它们
+//! 画出来，并在每一行旁边放一个「记一条排除例外」——砍谁由人定。
+//!
+//! ## 领域判断一条都不在这里
+//!
+//! 规则怎么读（[`Rule::parse`]）、选择集怎么求值（`sublibrary::select`）、三方对比怎么排
+//! （`sync::plan`）、目标落在主库里要不要拦（`sync::prepare::refuse_target_in_library`）
+//! ——全在核心。这一层只做三件事：把要来的画出来、把点的那一下写回去、把中文输入放在
+//! 对的位置上。
+//!
+//! ## 同步跑在后台线程上
+//!
+//! 一趟同步要搬的可能是几十 GiB。搬在画帧那条线程上，窗口就是几分钟的白板，连
+//! 「停下」都点不动。所以计划一旦点头就整个搬进一条后台线程，主线程每帧只问一句
+//! 「跑完没有」，外加一个真的按得动的**停下**（[`CancelToken`]）。中断的那一趟照样落清单
+//! ——那份清单记的是「到中断为止目标上真实有什么」，下一趟才接得上。
+
+use std::path::PathBuf;
+use std::thread::JoinHandle;
+use std::time::Instant;
+
+use egui::{Align, Layout};
+use romcat_core::report::{human_bytes, thousands};
+use romcat_core::scan::CancelToken;
+use romcat_core::site::Site;
+use romcat_core::sublibrary::{
+    BrokenRule, Exception, ExceptionRow, Rule, StoredRule, Sublibrary, rule,
+};
+use romcat_core::sync::{self, Act, Outcome, Prepared};
+
+use crate::table::ROW_HEIGHT;
+
+/// 差量预览里最多列几条步骤。再多就不是给人看的了——总数照旧在账上。
+const TOP_STEPS: usize = 2_000;
+
+/// 意外与放不下的那几类，最多各列几条。
+const TOP_NOTES: usize = 20;
+
+/// 新建或改一个子库时界面上那份草稿。
+///
+/// **每一格都会碰到输入法**（目标路径里有中文目录名是常态），所以这几个控件全在底下那块
+/// 不虚拟化的面板里（ADR-0005）。
+#[derive(Debug, Clone, Default)]
+pub struct Form {
+    /// 子库叫什么。一台目标设备一个。
+    pub name: String,
+    /// 目标设备上的子库根：读卡器挂上来的那个盘上的目录。
+    pub target: String,
+    /// 前端格式（适配器名）。空着就是 Pegasus。
+    pub format: String,
+    /// 容量上限，如 `512GB`、`476GiB`。空着就是不设限。
+    pub capacity: String,
+    /// **能力档案**的名字。空着就是「不作声称」——不转换、不检查。
+    pub capability: String,
+}
+
+impl Form {
+    /// 从一个现成的子库填一份草稿。
+    #[must_use]
+    pub fn of(sublibrary: &Sublibrary) -> Self {
+        Self {
+            name: sublibrary.name.clone(),
+            target: sublibrary.target.clone(),
+            format: sublibrary.format.clone(),
+            capacity: sublibrary.capacity.map(human_bytes).unwrap_or_default(),
+            capability: sublibrary.capability.clone().unwrap_or_default(),
+        }
+    }
+}
+
+/// 记一条**例外**时界面上那份草稿。
+#[derive(Debug, Clone, Default)]
+pub struct ExceptDraft {
+    /// 哪个变体（键是相对主库根的路径）。
+    pub key: String,
+    /// 为什么。**口味半年后就想不起来了**，留一句话的位置。
+    pub note: String,
+}
+
+/// 一趟正在后台跑的同步。
+struct Running {
+    /// 哪个子库。
+    name: String,
+    /// 停下用的那个信号。
+    cancel: CancelToken,
+    /// 什么时候开始的。
+    started: Instant,
+    /// 后台那条线程。
+    handle: JoinHandle<Result<Outcome, String>>,
+}
+
+/// 只求一次**选择集**的结果：这套规则加例外选出什么，装不装得下。
+///
+/// **不碰目标设备**：算它只要中立库，于是卡不在手边时照样调得动规则、看得见容量账。
+pub struct Evaluated {
+    /// 求值的产物与它的账：选中哪些、每条规则各命中多少、例外起没起作用。
+    pub selected: romcat_core::sublibrary::Selected,
+    /// 超出容量上限多少字节；没超或没设上限时是 `None`。
+    pub over_capacity: Option<u64>,
+    /// 超了的话，按体积排序的**裁剪建议**。**绝不自动截断**（ADR-0016）。
+    pub trims: Vec<romcat_core::sublibrary::Trim>,
+    /// 读不懂的规则有几条——少选出来的东西全在它们里面。
+    pub broken: usize,
+    /// 求它用了多久，毫秒。
+    pub elapsed_ms: f64,
+}
+
+/// 子库这个屏幕。
+pub struct Screen {
+    /// 工作目录：中立库、**媒体池**、能力档案名册都在这儿。
+    workspace: PathBuf,
+    /// 库里现有的子库。
+    list: Vec<Sublibrary>,
+    /// 眼下看的是哪一个。
+    picked: Option<String>,
+    /// 编辑草稿。
+    form: Form,
+    /// 这个子库的规则原文，连库里的序号。
+    rules: Vec<StoredRule>,
+    /// 读不懂的那几条。**一条坏的不该让另外五条一起用不了。**
+    broken: Vec<BrokenRule>,
+    /// 例外。
+    exceptions: Vec<ExceptionRow>,
+    /// 加一条规则的草稿。
+    rule_draft: String,
+    /// 记一条例外的草稿。
+    except_draft: ExceptDraft,
+    /// 排出来的那份计划，**它就是差量预览**。
+    prepared: Option<Prepared>,
+    /// 排它用了多久，毫秒。
+    prepare_ms: f64,
+    /// 只求一次**选择集**的结果：选中哪些、多大、超限多少、砍谁。
+    ///
+    /// **与差量预览分开**，因为它们要的东西不一样：差量预览要目标设备在位（三方对比的
+    /// 第三方就是目标上实际有什么），而「这套规则选出多少、装不装得下」只要中立库。
+    /// 子库是持久实体，不是「插上卡才存在的东西」（ADR-0009）——卡不在手边时照样该
+    /// 调得动规则、看得见容量账。
+    evaluated: Option<Evaluated>,
+    /// 计划里有删除时，要先勾这一格才动得了手。
+    acknowledged: bool,
+    /// 正在跑的那一趟同步。
+    running: Option<Running>,
+    /// 上一趟同步的账。
+    outcome: Option<Outcome>,
+    /// 上一次动作的回执。
+    notice: Option<String>,
+    /// 上一次出的错。
+    error: Option<String>,
+}
+
+impl Screen {
+    /// 开一个空屏幕。
+    #[must_use]
+    pub fn new(workspace: PathBuf) -> Self {
+        Self {
+            workspace,
+            list: Vec::new(),
+            picked: None,
+            form: Form::default(),
+            rules: Vec::new(),
+            broken: Vec::new(),
+            exceptions: Vec::new(),
+            rule_draft: String::new(),
+            except_draft: ExceptDraft::default(),
+            prepared: None,
+            prepare_ms: 0.0,
+            evaluated: None,
+            acknowledged: false,
+            running: None,
+            outcome: None,
+            notice: None,
+            error: None,
+        }
+    }
+
+    /// 重新列一遍库里有哪些子库。
+    pub fn reload(&mut self, site: &Site) {
+        match site.catalog.sublibraries() {
+            Ok(list) => {
+                self.list = list;
+                self.error = None;
+            }
+            Err(error) => self.error = Some(format!("中立库读不动：{error}")),
+        }
+        if let Some(name) = self.picked.clone() {
+            self.open(site, &name);
+        }
+    }
+
+    /// 库里现有的子库。
+    #[must_use]
+    pub fn list(&self) -> &[Sublibrary] {
+        &self.list
+    }
+
+    /// 眼下看的是哪一个。
+    #[must_use]
+    pub fn picked(&self) -> Option<&str> {
+        self.picked.as_deref()
+    }
+
+    /// 这个子库的规则原文。
+    #[must_use]
+    pub fn rules(&self) -> &[StoredRule] {
+        &self.rules
+    }
+
+    /// 读不懂的那几条规则。
+    #[must_use]
+    pub fn broken(&self) -> &[BrokenRule] {
+        &self.broken
+    }
+
+    /// 这个子库的例外。
+    #[must_use]
+    pub fn exceptions(&self) -> &[ExceptionRow] {
+        &self.exceptions
+    }
+
+    /// 排出来的那份差量预览。
+    #[must_use]
+    pub fn prepared(&self) -> Option<&Prepared> {
+        self.prepared.as_ref()
+    }
+
+    /// 排一次预览用了多久，毫秒。
+    #[must_use]
+    pub fn prepare_ms(&self) -> f64 {
+        self.prepare_ms
+    }
+
+    /// 只求了一次选择集的那份结果。
+    #[must_use]
+    pub fn evaluated(&self) -> Option<&Evaluated> {
+        self.evaluated.as_ref()
+    }
+
+    /// 上一趟同步的账。
+    #[must_use]
+    pub fn outcome(&self) -> Option<&Outcome> {
+        self.outcome.as_ref()
+    }
+
+    /// 上一次出的错。
+    #[must_use]
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// 上一次动作的回执。
+    #[must_use]
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
+    }
+
+    /// 编辑草稿，供实测与测试填。
+    pub fn form_mut(&mut self) -> &mut Form {
+        &mut self.form
+    }
+
+    /// 加一条规则的草稿，供实测与测试填。
+    pub fn rule_draft_mut(&mut self) -> &mut String {
+        &mut self.rule_draft
+    }
+
+    /// 记一条例外的草稿，供实测与测试填。
+    pub fn except_draft_mut(&mut self) -> &mut ExceptDraft {
+        &mut self.except_draft
+    }
+
+    /// 打开一个子库：读它的规则与例外。**排出来的那份预览当场作废**——
+    /// 换了子库还留着上一个的差量，是这一屏最容易骗到人的一种写法。
+    pub fn open(&mut self, site: &Site, name: &str) {
+        self.picked = Some(name.to_string());
+        self.invalidate();
+        if let Some(sublibrary) = self.list.iter().find(|row| row.name == name) {
+            self.form = Form::of(sublibrary);
+        }
+        match site.catalog.selection(name) {
+            Ok(loaded) => {
+                self.exceptions = loaded.selection.exceptions;
+                self.broken = loaded.broken;
+                self.error = None;
+            }
+            Err(error) => self.error = Some(format!("中立库读不动：{error}")),
+        }
+        match site.catalog.sublibrary_rules(name) {
+            Ok(rules) => self.rules = rules,
+            Err(error) => self.error = Some(format!("中立库读不动：{error}")),
+        }
+    }
+
+    /// 把排出来的那份预览作废。
+    ///
+    /// 改过规则、改过例外、改过子库本身之后都要走一趟：那份差量说的已经不是眼下这套
+    /// 选择集会做的事了，而「同步」按钮认的正是它（ADR-0016）。
+    pub fn invalidate(&mut self) {
+        self.prepared = None;
+        self.evaluated = None;
+        self.acknowledged = false;
+        self.outcome = None;
+    }
+
+    /// **只求一次选择集**：这套规则加例外选出什么、多大、装不装得下。
+    ///
+    /// **不碰目标设备**——卡不在手边时照样调得动规则、看得见容量账（ADR-0009）。
+    /// 容量超限时给出按体积排序的**裁剪建议**，但**一个都不砍**（ADR-0016）。
+    ///
+    /// 界面上按那个按钮走的就是它，实测与测试拿它当那一下。
+    pub fn evaluate(&mut self, site: &Site) {
+        let Some(name) = self.picked.clone() else {
+            self.error = Some("先挑一个子库。".to_string());
+            return;
+        };
+        let capacity = self
+            .list
+            .iter()
+            .find(|row| row.name == name)
+            .and_then(|row| row.capacity);
+        let started = Instant::now();
+        let loaded = match site.catalog.selection(&name) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.error = Some(format!("中立库读不动：{error}"));
+                return;
+            }
+        };
+        let facts = match romcat_core::sublibrary::facts(&site.catalog) {
+            Ok(facts) => facts,
+            Err(error) => {
+                self.error = Some(format!("中立库读不动：{error}"));
+                return;
+            }
+        };
+        let selected = romcat_core::sublibrary::select(&loaded.selection, &facts);
+        let over_capacity = romcat_core::sublibrary::over_capacity(capacity, selected.bytes);
+        let trims = if over_capacity.is_some() {
+            romcat_core::sublibrary::trim_suggestions(
+                selected
+                    .picked
+                    .iter()
+                    .map(|picked| (picked.key.clone(), picked.bytes)),
+            )
+        } else {
+            Vec::new()
+        };
+        self.evaluated = Some(Evaluated {
+            selected,
+            over_capacity,
+            trims,
+            broken: loaded.broken.len(),
+            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+        });
+        self.error = None;
+    }
+
+    /// **排一次差量预览**。只读：中立库读一遍、目标设备走只读接缝看一遍，一个文件都不写。
+    ///
+    /// 界面上按那个按钮走的就是它，实测与测试拿它当那一下。
+    pub fn preview(&mut self, site: &Site) {
+        let Some(name) = self.picked.clone() else {
+            self.error = Some("先挑一个子库。".to_string());
+            return;
+        };
+        self.invalidate();
+        let started = Instant::now();
+        match sync::prepare(
+            &site.catalog,
+            &self.workspace,
+            &name,
+            &sync::Request::default(),
+        ) {
+            Ok(prepared) => {
+                self.prepare_ms = started.elapsed().as_secs_f64() * 1000.0;
+                self.prepared = Some(prepared);
+                self.error = None;
+            }
+            Err(message) => self.error = Some(message),
+        }
+    }
+
+    /// **同步**：把差量真正落到目标设备上，跑在后台线程里。
+    ///
+    /// 三道闸一道都不能少：**得先有预览**（ADR-0016）、**有删除就得先点头**（ADR-0015）、
+    /// **目标不许落在主库里**（ADR-0004，判据在核心里）。
+    pub fn sync(&mut self, site: &Site) {
+        if self.running.is_some() {
+            return;
+        }
+        let Some(prepared) = self.prepared.clone() else {
+            // 这句话不是提示，是这一屏的规矩：没预览就没有可传的东西。
+            self.error = Some("还没排过差量预览。先看一遍它要做什么（ADR-0016）。".to_string());
+            return;
+        };
+        if prepared.plan.deletes.files > 0 && !self.acknowledged {
+            self.error = Some(format!(
+                "这份计划里有 {} 个**删除**（{}）。看过上面的预览之后，勾上「我看过删除清单」再来。",
+                thousands(prepared.plan.deletes.files),
+                human_bytes(prepared.plan.deletes.bytes),
+            ));
+            return;
+        }
+        if let Err(message) =
+            sync::prepare::refuse_target_in_library(&site.catalog, None, &prepared.root)
+        {
+            self.error = Some(message);
+            return;
+        }
+        // 搬 ROM 要真的去读主库——**只有真要搬时才需要**：一趟只删文件、只重写元数据的
+        // 同步，盘不在位照样跑得完（ADR-0009）。
+        let library_root = if prepared.needs_library() {
+            match sync::prepare::library_root(&site.catalog, None) {
+                Ok(root) => Some(root),
+                Err(message) => {
+                    self.error = Some(message);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
+        let name = prepared.sublibrary.name.clone();
+        let cancel = CancelToken::new();
+        let token = cancel.clone();
+        let handle =
+            std::thread::spawn(move || run_sync(&prepared, library_root.as_deref(), &token));
+        self.running = Some(Running {
+            name,
+            cancel,
+            started: Instant::now(),
+            handle,
+        });
+        self.error = None;
+        self.notice = None;
+    }
+
+    /// 正在跑的那一趟同步跑完没有。跑完了就收账、把**清单**落回中立库。
+    ///
+    /// 每帧问一次。**中断的那一趟也要落清单**——那份清单记的是「到中断为止目标上真实有
+    /// 什么」，下一趟才接得上。
+    pub fn poll(&mut self, site: &mut Site) {
+        let Some(running) = &self.running else {
+            return;
+        };
+        if !running.handle.is_finished() {
+            return;
+        }
+        let Some(running) = self.running.take() else {
+            return;
+        };
+        let elapsed = running.started.elapsed().as_secs_f64();
+        match running.handle.join() {
+            Ok(Ok(outcome)) => {
+                if let Err(error) = site.catalog.put_manifest(&running.name, &outcome.manifest) {
+                    self.error = Some(format!(
+                        "⚠️ 清单写不回中立库：{error}\n\
+                         目标上的文件已经动过了，而清单还是旧的那一份——下一趟同步会把这次\n\
+                         放上去的东西当成「清单之外」，于是碰都不敢碰。先修好中立库再跑一次。"
+                    ));
+                }
+                self.notice = Some(format!(
+                    "同步用了 {elapsed:.1} 秒：动了 {} 个文件。",
+                    thousands(outcome.touched()),
+                ));
+                self.outcome = Some(outcome);
+                // 传完之后那份预览说的已经是过去时了：目标现在是另一个样子。
+                self.prepared = None;
+                self.acknowledged = false;
+            }
+            Ok(Err(message)) => self.error = Some(message),
+            Err(_) => self.error = Some("同步那条线程炸了。".to_string()),
+        }
+    }
+
+    /// 画一帧。
+    pub fn ui(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+        self.poll(site);
+        if self.running.is_some() {
+            // 后台在跑，主线程得继续画，不然「停下」按钮按不动。
+            ui.ctx().request_repaint();
+        }
+        egui::Panel::bottom("子库编辑")
+            .default_size(300.0)
+            .min_size(120.0)
+            .show(ui, |ui| self.edit_panel(ui, site));
+        egui::Panel::left("子库列表")
+            .default_size(240.0)
+            .min_size(160.0)
+            .show(ui, |ui| self.list_panel(ui, site));
+        egui::CentralPanel::default().show(ui, |ui| self.preview_panel(ui, site));
+    }
+
+    /// 顶栏上属于这一屏的那一段。
+    pub fn status(&mut self, ui: &mut egui::Ui, site: &Site) {
+        if ui.button("重新列一遍").clicked() {
+            self.reload(site);
+        }
+        ui.separator();
+        ui.label(format!("{} 个子库", self.list.len()));
+        if let Some(running) = &self.running {
+            ui.separator();
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!(
+                    "正在同步「{}」，{:.0} 秒",
+                    running.name,
+                    running.started.elapsed().as_secs_f64()
+                ),
+            );
+            if ui.button("停下").clicked() {
+                running.cancel.cancel();
+            }
+        }
+    }
+
+    /// 左边那栏：库里有哪些子库。**一个文本框都没有。**
+    fn list_panel(&mut self, ui: &mut egui::Ui, site: &Site) {
+        egui::ScrollArea::vertical()
+            .id_salt("子库列表栏")
+            .show(ui, |ui| {
+                ui.strong("子库");
+                ui.weak("一台目标设备一个。规则各写各的，例外各记各的。");
+                ui.separator();
+                if self.list.is_empty() {
+                    ui.weak("还一个都没有。在底下那块面板里填个名字与目标路径。");
+                }
+                let mut open = None;
+                for sublibrary in &self.list {
+                    let on = self.picked.as_deref() == Some(sublibrary.name.as_str());
+                    let label = format!(
+                        "{}\n  {}｜{}",
+                        sublibrary.name,
+                        sublibrary.format,
+                        sublibrary
+                            .capacity
+                            .map_or_else(|| "不设限".to_string(), human_bytes),
+                    );
+                    if ui.selectable_label(on, label).clicked() {
+                        open = Some(sublibrary.name.clone());
+                    }
+                }
+                if let Some(name) = open {
+                    self.open(site, &name);
+                }
+            });
+    }
+
+    /// 中间：**差量预览**，以及从这里触发的同步。
+    fn preview_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+        if let Some(error) = &self.error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        if let Some(notice) = &self.notice {
+            ui.colored_label(ui.visuals().warn_fg_color, notice);
+        }
+        let Some(name) = self.picked.clone() else {
+            ui.vertical_centered(|ui| {
+                ui.add_space(24.0);
+                ui.label("左边挑一个子库，或者在底下那块面板里建一个。");
+            });
+            return;
+        };
+        ui.horizontal(|ui| {
+            ui.heading(&name);
+            if ui
+                .button("求值选择集")
+                .on_hover_text(
+                    "只问中立库：这套规则加例外选出什么、多大、装不装得下。\
+                     **卡不在手边也算得出来**。",
+                )
+                .clicked()
+            {
+                self.evaluate(site);
+            }
+            if ui
+                .add_enabled(self.running.is_none(), egui::Button::new("排差量预览"))
+                .on_hover_text(
+                    "只读：中立库读一遍、目标设备看一遍，一个文件都不写。\
+                     插上读卡器再点——目标不在位时它会直说。",
+                )
+                .clicked()
+            {
+                self.preview(site);
+            }
+        });
+        let Some(prepared) = self.prepared.clone() else {
+            ui.separator();
+            self.evaluated_ui(ui, site);
+            ui.label(
+                "还没有差量预览。**同步前必须先看一遍它要做什么**——那是硬要求，\
+                 不是可以跳过的一步（ADR-0016）。",
+            );
+            return;
+        };
+        self.plan_ui(ui, site, &prepared);
+    }
+
+    /// 只求了一次选择集的那份结果：选中多少、多大、每条规则各命中多少、装不装得下。
+    fn evaluated_ui(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+        let Some(evaluated) = &self.evaluated else {
+            return;
+        };
+        ui.label(format!(
+            "选择集选出 {} 个变体、{}（求它用了 {:.0} ms，一次都没碰目标设备）",
+            thousands(evaluated.selected.picked.len() as u64),
+            human_bytes(evaluated.selected.bytes),
+            evaluated.elapsed_ms,
+        ));
+        // **逐条各自算，不扣例外也不扣重叠**：这个数回答的是「我这条规则写对了吗」。
+        for (at, hits) in evaluated.selected.rule_hits.iter().enumerate() {
+            let text = self
+                .rules
+                .get(at)
+                .map_or_else(|| format!("第 {at} 条"), |stored| stored.text.clone());
+            ui.label(format!("  {} 个 ← {text}", thousands(*hits)));
+        }
+        if evaluated.selected.forced_in > 0 || evaluated.selected.forced_out > 0 {
+            ui.label(format!(
+                "例外：收入 {} 个（其中 {} 个是多余的），排除 {} 个（其中 {} 个真起了作用）",
+                thousands(evaluated.selected.forced_in),
+                thousands(evaluated.selected.forced_in_redundant),
+                thousands(evaluated.selected.forced_out),
+                thousands(evaluated.selected.forced_out_effective),
+            ));
+        }
+        if !evaluated.selected.missing_exceptions.is_empty() {
+            // **不是错误，也不删**：盘没插、目录改了名，例外照旧记着（ADR-0016）。
+            ui.label(format!(
+                "有 {} 条例外指着库里眼下没有的变体——照旧记着，不删。",
+                thousands(evaluated.selected.missing_exceptions.len() as u64),
+            ));
+        }
+        if !evaluated.selected.thin_dimensions.is_empty() {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!(
+                    "规则引到了这几维，而这份库里一条数据都没有：{}。\
+                     选不出东西是**缺数据**，不是规则写错了。",
+                    evaluated.selected.thin_dimensions.join("、"),
+                ),
+            );
+        }
+        if evaluated.broken > 0 {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!(
+                    "有 {} 条规则读不懂、没参与求值——少选出来的东西全在它们里面。",
+                    thousands(evaluated.broken as u64),
+                ),
+            );
+        }
+        if let Some(over) = evaluated.over_capacity {
+            let trims = evaluated.trims.clone();
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!(
+                    "超出容量上限 {}。**不会自动截断**（ADR-0016）——砍谁由你定。",
+                    human_bytes(over),
+                ),
+            );
+            let mut exclude: Option<String> = None;
+            for trim in &trims {
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button("排除")
+                        .on_hover_text("记一条**排除例外**：规则选中了也不带")
+                        .clicked()
+                    {
+                        exclude = Some(trim.variant.clone());
+                    }
+                    ui.label(format!(
+                        "{}  砍到这条为止腾出 {}  {}",
+                        human_bytes(trim.bytes),
+                        human_bytes(trim.cumulative),
+                        trim.variant,
+                    ));
+                });
+            }
+            if let Some(variant) = exclude {
+                self.add_exception(site, Exception::Exclude, &variant, "容量超限时裁掉的");
+            }
+        } else {
+            ui.label("容量：没超。");
+        }
+        ui.separator();
+    }
+
+    /// 那份计划本身：账、步骤、意外、容量、裁剪建议，以及「真的传」。
+    #[allow(clippy::too_many_lines)]
+    fn plan_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, prepared: &Prepared) {
+        let plan = &prepared.plan;
+        ui.label(format!(
+            "目标 {}｜格式 {}｜能力档案 {}｜排它用了 {:.0} ms",
+            plan.target, plan.format, plan.capability, self.prepare_ms,
+        ));
+        ui.separator();
+        egui::Grid::new("差量账")
+            .num_columns(4)
+            .spacing([16.0, 4.0])
+            .show(ui, |ui| {
+                ui.strong("");
+                ui.strong("文件");
+                ui.strong("变体");
+                ui.strong("容量");
+                ui.end_row();
+                for (what, tally) in [
+                    ("新增", plan.adds),
+                    ("更新", plan.updates),
+                    ("删除", plan.deletes),
+                    ("原样留着", plan.keeps),
+                ] {
+                    ui.label(what);
+                    ui.label(thousands(tally.files));
+                    ui.label(thousands(tally.variants));
+                    ui.label(human_bytes(tally.bytes));
+                    ui.end_row();
+                }
+            });
+        let net = if plan.net_bytes >= 0 {
+            format!("＋{}", human_bytes(plan.net_bytes.unsigned_abs()))
+        } else {
+            format!("－{}", human_bytes(plan.net_bytes.unsigned_abs()))
+        };
+        ui.label(format!(
+            "净变化 {net}；同步完之后目标上占 {}（眼下 {}）",
+            human_bytes(plan.after_bytes),
+            human_bytes(plan.actual_bytes),
+        ));
+
+        // **容量超限：只报出超出量与裁剪建议，绝不自动截断**（ADR-0016）。
+        if let Some(over) = plan.over_capacity {
+            ui.separator();
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!(
+                    "超出容量上限 {}（上限 {}）。**不会自动截断**——砍谁由你定。",
+                    human_bytes(over),
+                    plan.capacity.map_or_else(|| "—".to_string(), human_bytes),
+                ),
+            );
+            ui.label("按体积排序的裁剪建议：");
+            let mut exclude: Option<String> = None;
+            for trim in &plan.trim_suggestions {
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button("排除")
+                        .on_hover_text("记一条**排除例外**：规则选中了也不带")
+                        .clicked()
+                    {
+                        exclude = Some(trim.variant.clone());
+                    }
+                    ui.label(format!(
+                        "{}  砍到这条为止腾出 {}  {}",
+                        human_bytes(trim.bytes),
+                        human_bytes(trim.cumulative),
+                        trim.variant,
+                    ));
+                });
+            }
+            if let Some(last) = plan.trim_suggestions.last()
+                && last.cumulative < over
+            {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!("这几个全砍掉还差 {}。", human_bytes(over - last.cumulative)),
+                );
+            }
+            if let Some(variant) = exclude {
+                self.add_exception(site, Exception::Exclude, &variant, "容量超限时裁掉的");
+            }
+        }
+
+        for concern in prepared.concerns() {
+            ui.colored_label(ui.visuals().warn_fg_color, concern);
+        }
+        if !plan.surprises.is_empty() {
+            ui.separator();
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!(
+                    "{} 件对不上的事，**本次一律不动它们**：",
+                    thousands(plan.surprises.len() as u64)
+                ),
+            );
+            for surprise in plan.surprises.iter().take(TOP_NOTES) {
+                ui.label(format!(
+                    "{}｜{}｜{}",
+                    surprise.kind.label(),
+                    surprise.path,
+                    if surprise.still_wanted {
+                        "选择集还要它"
+                    } else {
+                        "选择集已经不要它了"
+                    },
+                ));
+            }
+            if plan.surprises.len() > TOP_NOTES {
+                ui.weak(format!(
+                    "……另有 {} 件没列",
+                    plan.surprises.len() - TOP_NOTES
+                ));
+            }
+        }
+        if plan.strangers > 0 {
+            ui.label(format!(
+                "目标上有 {} 个**清单之外**的文件（{}）——工具连看都不看。",
+                thousands(plan.strangers),
+                human_bytes(plan.stranger_bytes),
+            ));
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            if plan.deletes.files > 0 {
+                ui.checkbox(
+                    &mut self.acknowledged,
+                    format!(
+                        "我看过删除清单（{} 个，{}）",
+                        thousands(plan.deletes.files),
+                        human_bytes(plan.deletes.bytes),
+                    ),
+                );
+            }
+            let ready = self.running.is_none()
+                && plan.touched() > 0
+                && (plan.deletes.files == 0 || self.acknowledged);
+            if ui
+                .add_enabled(ready, egui::Button::new("同步"))
+                .on_hover_text("把上面这份差量真的落到目标设备上。只碰清单里记录过的文件。")
+                .clicked()
+            {
+                self.sync(site);
+            }
+            if plan.touched() == 0 {
+                ui.label("一步都不用做：目标已经和选择集对齐了。");
+            }
+        });
+
+        ui.separator();
+        ui.label(format!(
+            "这一趟要动的 {} 步（先删后传）：",
+            thousands(plan.touched())
+        ));
+        let shown = plan.steps.len().min(TOP_STEPS);
+        egui_extras::TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .cell_layout(Layout::left_to_right(Align::Center))
+            .column(egui_extras::Column::initial(60.0).at_least(50.0))
+            .column(egui_extras::Column::initial(70.0).at_least(50.0))
+            .column(egui_extras::Column::initial(90.0).at_least(70.0))
+            .column(egui_extras::Column::remainder().at_least(160.0).clip(true))
+            .header(22.0, |mut header| {
+                for title in ["干什么", "类别", "容量", "目标上的路径"] {
+                    header.col(|ui| {
+                        ui.strong(title);
+                    });
+                }
+            })
+            .body(|body| {
+                body.rows(ROW_HEIGHT, shown, |mut row| {
+                    let index = row.index();
+                    let Some(step) = plan.steps.get(index) else {
+                        return;
+                    };
+                    row.col(|ui| {
+                        if step.act == Act::Delete {
+                            ui.colored_label(ui.visuals().error_fg_color, step.act.label());
+                        } else {
+                            ui.label(step.act.label());
+                        }
+                    });
+                    row.col(|ui| {
+                        ui.label(step.kind.label());
+                    });
+                    row.col(|ui| {
+                        ui.label(human_bytes(if step.act == Act::Delete {
+                            step.was
+                        } else {
+                            step.bytes
+                        }));
+                    });
+                    row.col(|ui| {
+                        ui.label(&step.path);
+                    });
+                });
+            });
+        if plan.steps.len() > shown {
+            ui.weak(format!("……另有 {} 步没列", plan.steps.len() - shown));
+        }
+    }
+
+    /// 底下那块面板：建子库、写规则、记例外。**全部中文输入都在这里。**
+    fn edit_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+        ui.add_space(4.0);
+        let available = ui.available_width();
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2((available * 0.40).max(260.0), ui.available_height()),
+                Layout::top_down(Align::Min),
+                |ui| self.form_ui(ui, site),
+            );
+            ui.separator();
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), ui.available_height()),
+                Layout::top_down(Align::Min),
+                |ui| self.selection_ui(ui, site),
+            );
+        });
+    }
+
+    /// 左半：子库本身。名字、目标路径、格式、容量上限、能力档案。
+    fn form_ui(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+        egui::ScrollArea::vertical()
+            .id_salt("子库表单")
+            .show(ui, |ui| {
+                ui.strong("子库");
+                egui::Grid::new("子库表单格")
+                    .num_columns(2)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        for (label, value, hint) in [
+                            ("名字", &mut self.form.name, "一台目标设备一个"),
+                            ("目标路径", &mut self.form.target, "读卡器挂上来的那个目录"),
+                            ("前端格式", &mut self.form.format, "空着就是 Pegasus"),
+                            ("容量上限", &mut self.form.capacity, "如 512GB；空着不设限"),
+                            ("能力档案", &mut self.form.capability, "空着就是不作声称"),
+                        ] {
+                            ui.label(label);
+                            ui.add(
+                                egui::TextEdit::singleline(value)
+                                    .desired_width(f32::INFINITY)
+                                    .hint_text(hint),
+                            );
+                            ui.end_row();
+                        }
+                    });
+                ui.horizontal(|ui| {
+                    let ready = !self.form.name.trim().is_empty()
+                        && !self.form.target.trim().is_empty();
+                    if ui
+                        .add_enabled(ready, egui::Button::new("存下来"))
+                        .on_hover_text("新建或改写这个子库。**目标设备不在位也存得下**——子库是持久实体。")
+                        .clicked()
+                    {
+                        self.save(site);
+                    }
+                    if ui
+                        .add_enabled(self.picked.is_some(), egui::Button::new("删掉这个子库"))
+                        .on_hover_text("只删中立库里的这条定义与它的规则、例外、清单；目标设备上的文件一个都不碰")
+                        .clicked()
+                    {
+                        self.remove(site);
+                    }
+                });
+            });
+    }
+
+    /// 右半：**选择集** = 规则 + 例外。
+    fn selection_ui(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+        let Some(name) = self.picked.clone() else {
+            ui.weak("挑一个子库，或者在左边填个名字与目标路径先建一个。");
+            return;
+        };
+        egui::ScrollArea::vertical()
+            .id_salt("选择集")
+            .show(ui, |ui| {
+                ui.strong("规则");
+                ui.weak(format!(
+                    "可重放：主库里新增的、规则说得中的内容下次自动进。维度：{}",
+                    rule::Dimension::all()
+                        .iter()
+                        .map(|d| d.label())
+                        .collect::<Vec<_>>()
+                        .join("、"),
+                ));
+                let mut drop_rule: Option<i64> = None;
+                for stored in &self.rules {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("删").clicked() {
+                            drop_rule = Some(stored.ordinal);
+                        }
+                        ui.label(format!("{}. {}", stored.ordinal, stored.text));
+                    });
+                }
+                for row in &self.broken {
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        format!("{}. {}（读不懂：{}）", row.ordinal, row.text, row.error),
+                    );
+                }
+                if self.rules.is_empty() && self.broken.is_empty() {
+                    ui.weak("一条规则都没有——选择集是空的，同步过去也是空的。");
+                }
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.rule_draft)
+                            .desired_width(320.0)
+                            .hint_text("平台=GBA,GB 且 中文=汉化"),
+                    );
+                    if ui
+                        .add_enabled(
+                            !self.rule_draft.trim().is_empty(),
+                            egui::Button::new("加一条"),
+                        )
+                        .clicked()
+                    {
+                        self.add_rule(site, &name);
+                    }
+                });
+                if let Some(ordinal) = drop_rule {
+                    match site.catalog.remove_rule(&name, ordinal) {
+                        Ok(true) => {
+                            self.notice = Some(format!("删掉了第 {ordinal} 条规则。"));
+                            self.open(site, &name);
+                        }
+                        Ok(false) => self.notice = Some("那一条已经不在了。".to_string()),
+                        Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+                    }
+                }
+
+                ui.separator();
+                ui.strong("例外");
+                ui.weak("**优先于规则、永久记住**：规则表达不了的个人口味。");
+                let mut drop_exception: Option<String> = None;
+                for row in &self.exceptions {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("撤").clicked() {
+                            drop_exception = Some(row.variant_key.clone());
+                        }
+                        ui.label(format!(
+                            "{}｜{}{}",
+                            row.kind.label(),
+                            row.variant_key,
+                            row.note
+                                .as_deref()
+                                .map(|note| format!("（{note}）"))
+                                .unwrap_or_default(),
+                        ));
+                    });
+                }
+                if self.exceptions.is_empty() {
+                    ui.weak("一条例外都没有。");
+                }
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.except_draft.key)
+                            .desired_width(260.0)
+                            .hint_text("变体的键"),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.except_draft.note)
+                            .desired_width(160.0)
+                            .hint_text("为什么（半年后你会想知道）"),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    let ready = !self.except_draft.key.trim().is_empty();
+                    for kind in [Exception::Include, Exception::Exclude] {
+                        if ui
+                            .add_enabled(ready, egui::Button::new(format!("{}它", kind.label())))
+                            .clicked()
+                        {
+                            let (key, note) = (
+                                self.except_draft.key.trim().to_string(),
+                                self.except_draft.note.clone(),
+                            );
+                            self.add_exception(site, kind, &key, &note);
+                            self.except_draft = ExceptDraft::default();
+                        }
+                    }
+                });
+                if let Some(key) = drop_exception {
+                    match site.catalog.clear_exception(&name, &key) {
+                        Ok(_) => {
+                            self.notice = Some(format!("撤掉了 {key} 上那条例外。"));
+                            self.open(site, &name);
+                        }
+                        Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+                    }
+                }
+            });
+    }
+
+    /// 存下这个子库。**界面上按那个按钮走的就是它**，实测与测试拿它当那一下。
+    pub fn save(&mut self, site: &mut Site) {
+        let capacity = if self.form.capacity.trim().is_empty() {
+            None
+        } else {
+            match rule::parse_size(self.form.capacity.trim()) {
+                Some(bytes) => Some(bytes),
+                None => {
+                    self.error = Some(format!(
+                        "看不懂容量「{}」。写成 `512GB` 或 `476GiB` 那样，单位得写全。",
+                        self.form.capacity.trim(),
+                    ));
+                    return;
+                }
+            }
+        };
+        let name = self.form.name.trim().to_string();
+        let target = std::path::PathBuf::from(self.form.target.trim());
+        let format = if self.form.format.trim().is_empty() {
+            "Pegasus".to_string()
+        } else {
+            self.form.format.trim().to_string()
+        };
+        // 两种路径形式怎么折，**由核心的 `Sublibrary::at` 一处说了算**（ADR-0020）。
+        let mut sublibrary = Sublibrary::at(&name, &target, &format, capacity);
+        sublibrary.capability =
+            Some(self.form.capability.trim().to_string()).filter(|value| !value.is_empty());
+        match site.catalog.put_sublibrary(&sublibrary) {
+            Ok(()) => {
+                self.notice = Some(format!("存下了子库「{name}」。"));
+                self.reload(site);
+                self.open(site, &name);
+            }
+            Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+        }
+    }
+
+    /// 删掉这个子库的定义。**目标设备上的文件一个都不碰。**
+    pub fn remove(&mut self, site: &mut Site) {
+        let Some(name) = self.picked.clone() else {
+            return;
+        };
+        match site.catalog.remove_sublibrary(&name) {
+            Ok(true) => {
+                self.notice = Some(format!(
+                    "删掉了子库「{name}」的定义。目标设备上的文件一个都没动。"
+                ));
+                self.picked = None;
+                self.invalidate();
+                self.reload(site);
+            }
+            Ok(false) => self.notice = Some("那个子库已经不在了。".to_string()),
+            Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+        }
+    }
+
+    /// 加一条规则。**读不懂就当场说清楚**，不入库。
+    pub fn add_rule(&mut self, site: &mut Site, name: &str) {
+        match Rule::parse(self.rule_draft.trim()) {
+            Ok(parsed) => match site.catalog.add_rule(name, &parsed) {
+                Ok(ordinal) => {
+                    self.notice = Some(format!("加上了第 {ordinal} 条规则。"));
+                    self.rule_draft.clear();
+                    self.open(site, name);
+                }
+                Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+            },
+            Err(error) => self.error = Some(format!("这条规则读不懂：{error}")),
+        }
+    }
+
+    /// 记一条例外。
+    pub fn add_exception(&mut self, site: &mut Site, kind: Exception, key: &str, note: &str) {
+        let Some(name) = self.picked.clone() else {
+            return;
+        };
+        let note = (!note.trim().is_empty()).then(|| note.trim().to_string());
+        match site
+            .catalog
+            .set_exception(&name, key, kind, note.as_deref())
+        {
+            Ok(()) => {
+                self.notice = Some(format!("记下了一条{}例外：{key}", kind.label()));
+                self.open(site, &name);
+            }
+            Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+        }
+    }
+}
+
+/// 后台那条线程干的活：把计划落到目标上。
+///
+/// **它拿到的只有计划里那些步骤**——清单之外的路径连进来的门都没有（ADR-0015）。
+fn run_sync(
+    prepared: &Prepared,
+    library_root: Option<&std::path::Path>,
+    cancel: &CancelToken,
+) -> Result<Outcome, String> {
+    let sources = sync::Sources {
+        library: &romcat_core::fs::RealFs,
+        library_root,
+        target_root: &prepared.root,
+        from_pool: &prepared.from_pool,
+        generated: &prepared.generated,
+        // 探测的源那一头是**媒体池自己的临时目录**：两头都得是工具的地盘，
+        // 拿主库里的文件去试链接会改到主库那一侧的 inode（ADR-0004）。
+        link_probe_dir: Some(&prepared.scratch),
+        // **默认不缓存**（ADR-0017）：边转边流式写进目标。
+        convert_cache: None,
+    };
+    sync::execute::run(
+        &prepared.plan,
+        &prepared.desired,
+        &prepared.actual,
+        &prepared.manifest,
+        &sources,
+        cancel,
+    )
+    .map_err(|error| format!("目标写不了：{error}"))
+}
