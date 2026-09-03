@@ -8,13 +8,17 @@
 //!
 //! 绝对数字（多少毫秒、多少 fps）由 `romcat-gui --bench` 在 release 下量，写在票据里。
 
-use romcat_gui::app::App;
+use romcat_gui::app::{App, View};
 use romcat_gui::bench::{self, Sweep};
 use romcat_gui::demo;
 use romcat_gui::table::SPAN;
 
 fn 界面(rows: u64) -> App {
-    App::new(demo::synthetic(rows).expect("造得出合成数据"))
+    let site = demo::site(demo::synthetic(rows).expect("造得出合成数据")).expect("开得出现场");
+    let mut app = App::new(site);
+    // 这几条量的是**变体表**；打开工具看见的那一屏是待确认队列（ADR-0002）。
+    app.show_view(View::Variants);
+    app
 }
 
 #[test]

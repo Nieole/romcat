@@ -9,23 +9,15 @@
 //! 按命名规律分出来的那三张表，每一行就是一条 `romcat triage decide` 能一次覆盖的批
 //! ——**报告直接告诉你这一条命令值多少**。少了它，批量裁决这件事在命令行上就只能靠猜。
 
-use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use serde::Serialize;
 
-use super::Item;
+use super::{Axis, Item, tally, tally_by};
 use crate::report::{heading, human_bytes, pad, thousands};
 use crate::verdict;
 
-/// 一行分组计数。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct GroupRow {
-    /// 这一组叫什么。
-    pub label: String,
-    /// 多少条。
-    pub count: u64,
-}
+pub use super::GroupRow;
 
 /// 报告里印出来的一条**候选**。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -125,8 +117,8 @@ impl QueueReport {
             verdicts: counts,
             ..Self::default()
         };
-        report.by_state = tally(items, |item| vec![item.state.label().to_string()]);
-        report.by_platform = tally(items, |item| {
+        report.by_state = tally_by(items, |item| vec![item.state.label().to_string()]);
+        report.by_platform = tally_by(items, |item| {
             vec![
                 item.variant
                     .platform
@@ -134,10 +126,12 @@ impl QueueReport {
                     .unwrap_or_else(|| crate::report::UNKNOWN_PLATFORM_LABEL.to_string()),
             ]
         });
-        report.by_directory = tally(items, |item| vec![item.directory().to_string()]);
-        report.by_candidate_work = tally(items, Item::candidate_works);
-        report.by_name_mark = tally(items, Item::name_marks);
-        report.by_reason = tally(items, |item| {
+        // 三个轴走 `triage::tally`：报告印出来的「一条命令覆盖多少」与选择器真的选中
+        // 多少，必须出自同一个 `Axis`（见 `Axis` 的文档）。
+        report.by_directory = tally(items, Axis::Directory);
+        report.by_candidate_work = tally(items, Axis::CandidateWork);
+        report.by_name_mark = tally(items, Axis::NameMark);
+        report.by_reason = tally_by(items, |item| {
             item.reason.clone().map(|r| vec![r]).unwrap_or_default()
         });
         report.shown = items.iter().take(show).map(row_of).collect();
@@ -191,9 +185,9 @@ impl QueueReport {
 
         group(&mut out, "按识别结论", &self.by_state, self.selected);
         group(&mut out, "按平台", &self.by_platform, self.selected);
-        heading(&mut out, "按目录——一条 `--under` 覆盖多少");
+        heading(&mut out, &axis_heading(Axis::Directory));
         table(&mut out, &self.by_directory, self.selected);
-        heading(&mut out, "按候选作品——一条 `--candidate-work` 覆盖多少");
+        heading(&mut out, &axis_heading(Axis::CandidateWork));
         if self.by_candidate_work.is_empty() {
             let _ = writeln!(
                 out,
@@ -203,7 +197,7 @@ impl QueueReport {
         } else {
             table(&mut out, &self.by_candidate_work, self.selected);
         }
-        heading(&mut out, "按命名规律——一条 `--name` 覆盖多少");
+        heading(&mut out, &axis_heading(Axis::NameMark));
         if self.by_name_mark.is_empty() {
             let _ = writeln!(out, "（选中的这些名字里一个记号都没有）");
         } else {
@@ -313,20 +307,9 @@ fn row_of(item: &Item) -> ItemRow {
     }
 }
 
-/// 按某个轴数一遍，多的排前面，同数按名字定死顺序。
-fn tally(items: &[Item], keys: impl Fn(&Item) -> Vec<String>) -> Vec<GroupRow> {
-    let mut counts: BTreeMap<String, u64> = BTreeMap::new();
-    for item in items {
-        for key in keys(item) {
-            *counts.entry(key).or_default() += 1;
-        }
-    }
-    let mut rows: Vec<GroupRow> = counts
-        .into_iter()
-        .map(|(label, count)| GroupRow { label, count })
-        .collect();
-    rows.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.label.cmp(&b.label)));
-    rows
+/// 一个轴那张表的表头：**这一条命令值多少**。
+fn axis_heading(axis: Axis) -> String {
+    format!("{}——一条 `{}` 覆盖多少", axis.label(), axis.selector())
 }
 
 fn group(out: &mut String, title: &str, rows: &[GroupRow], total: u64) {

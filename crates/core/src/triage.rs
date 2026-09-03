@@ -35,7 +35,10 @@
 //! - 裁决过的一律退出队列，包括 `认不出` 那一档：**「我看过了，认不出」与「还没人看过」
 //!   是两件事**，混在一起的话人会被反复问同一个问题。
 
+pub mod queue;
 pub mod report;
+
+pub use queue::Queue;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -194,9 +197,33 @@ impl Filter {
             && self.keys.is_empty()
     }
 
-    /// 这一条留不留。
+    /// 这一档**识别结论**要不要。空表示默认那三档，**不含跳过**。
+    ///
+    /// 与 [`Self::keeps`] 分开，是因为它在 [`Item`] 折出来**之前**就用得上：折一条队列
+    /// 条目要读它的候选，而跳过的那些本来就不进队列，先筛掉能省下几千次查询。
     #[must_use]
-    fn keeps(&self, item: &Item) -> bool {
+    pub fn keeps_state(&self, state: State) -> bool {
+        if self.states.is_empty() {
+            state != State::Skipped
+        } else {
+            self.states.contains(&state)
+        }
+    }
+
+    /// 这一条留不留——**结论那一档也算在内**。
+    ///
+    /// [`Queue`] 就地重筛靠它：队列列一次之后，换选择器不该再读一遍中立库。
+    #[must_use]
+    pub fn keeps_item(&self, item: &Item) -> bool {
+        self.keeps_state(item.state) && self.keeps(item)
+    }
+
+    /// 这一条留不留，**不看识别结论**。
+    ///
+    /// 「忘掉裁决」走的是这一条：裁决过的变体已经退出队列，它们的结论是什么样都得选得到
+    /// （确认没有发行版的那些眼下正投影成**跳过**，拿默认三档去选一条也选不着）。
+    #[must_use]
+    pub fn keeps(&self, item: &Item) -> bool {
         if !self.keys.is_empty() && !self.keys.contains(&item.variant.key) {
             return false;
         }
@@ -246,13 +273,127 @@ impl Filter {
 ///
 /// `FC` 选中 `FC/游戏.zip`，但**不选中** `FCX/游戏.zip`——差一个字符就是另一个平台，
 /// 而这条命令后面跟着的是「照这个改几百条」。
+///
+/// 空前缀是**主库根那一层**，不是「全部」：[`Item::directory`] 给顶层的文件交出的正是
+/// 空串，而「按目录」那张表上的每一行都得能原样折回一个选择器（[`Axis::filter`]）。
+/// 要整个队列不写 `--under`，那是 `under` 这个字段整个为空的意思。
 fn under(key: &str, prefix: &str) -> bool {
     let prefix = prefix.trim_end_matches('/');
     if prefix.is_empty() {
-        return true;
+        return !key.contains('/');
     }
     key.strip_prefix(prefix)
         .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// **批量裁决的一个轴**：队列按什么分组，以及点中一组之后选择器长什么样。
+///
+/// 两件事收在同一个类型里而不是各写一处，因为报告与界面上那句话是
+/// 「一条 `--under gba/【全部汉化】` 覆盖 **852** 条」——它只在选择器真的选出同样
+/// 852 条时才算数。分组按 [`Item::directory`]、选中按 [`Filter::under`]，两边各写一遍
+/// 的话，报告说的数与命令跑出来的数迟早对不上，而用户是照着那个数按下去的。
+///
+/// ADR-0002 点名的正是这三个轴：**按目录**、**按候选作品**、**按汉化组命名规律**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Axis {
+    /// **按目录**：一个平台目录（或它下面某一层）里的全部待裁决变体。
+    Directory,
+    /// **按候选作品**：候选指着同一部作品的那些。
+    CandidateWork,
+    /// **按命名规律**：名字里带同一个记号的那些——汉化组几乎总是写在方括号里。
+    NameMark,
+}
+
+impl Axis {
+    /// 三个轴，报告与界面照这个次序摆。
+    pub const ALL: [Self; 3] = [Self::Directory, Self::CandidateWork, Self::NameMark];
+
+    /// 这个轴在界面上叫什么。
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Directory => "按目录",
+            Self::CandidateWork => "按候选作品",
+            Self::NameMark => "按命名规律",
+        }
+    }
+
+    /// 命令行上对应的那个开关。报告把它印在表头上——照着抄一行就是一条覆盖几百条的命令。
+    #[must_use]
+    pub fn selector(self) -> &'static str {
+        match self {
+            Self::Directory => "--under",
+            Self::CandidateWork => "--candidate-work",
+            Self::NameMark => "--name",
+        }
+    }
+
+    /// 这一条落在这个轴的哪几组里。
+    ///
+    /// 可以落进不止一组：一个名字里能有好几个记号，一个变体也能有好几条候选。
+    /// 也可以一组都不落——队列里绝大多数条目一条候选都没有。
+    #[must_use]
+    pub fn keys_of(self, item: &Item) -> Vec<String> {
+        match self {
+            Self::Directory => vec![item.directory().to_string()],
+            Self::CandidateWork => item.candidate_works(),
+            Self::NameMark => item.name_marks(),
+        }
+    }
+
+    /// 点中这一组之后，选择器长什么样。
+    #[must_use]
+    pub fn filter(self, label: &str) -> Filter {
+        let value = vec![label.to_string()];
+        match self {
+            Self::Directory => Filter {
+                under: value,
+                ..Filter::default()
+            },
+            Self::CandidateWork => Filter {
+                candidate_work: value,
+                ..Filter::default()
+            },
+            Self::NameMark => Filter {
+                name_contains: value,
+                ..Filter::default()
+            },
+        }
+    }
+}
+
+/// 一行分组计数：这一组叫什么、带几条。
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct GroupRow {
+    /// 这一组叫什么。**它同时是选择器的值**——[`Axis::filter`] 拿它折出选择器。
+    pub label: String,
+    /// 多少条。
+    pub count: u64,
+}
+
+/// 把这些条目按某个轴数一遍：**每一行就是一次批量裁决能覆盖多少**。
+///
+/// 报告与界面用的是同一个函数。多的排前面（人要先看见最值钱的那一批），
+/// 同数按名字定死顺序（同一份库跑两次，表得长得一模一样）。
+#[must_use]
+pub fn tally(items: &[Item], axis: Axis) -> Vec<GroupRow> {
+    tally_by(items, |item| axis.keys_of(item))
+}
+
+/// 按任意一把钥匙数一遍。报告拿它数「按平台」「为什么没定下来」这类不成其为轴的分组。
+pub(crate) fn tally_by(items: &[Item], keys: impl Fn(&Item) -> Vec<String>) -> Vec<GroupRow> {
+    let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+    for item in items {
+        for key in keys(item) {
+            *counts.entry(key).or_default() += 1;
+        }
+    }
+    let mut rows: Vec<GroupRow> = counts
+        .into_iter()
+        .map(|(label, count)| GroupRow { label, count })
+        .collect();
+    rows.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.label.cmp(&b.label)));
+    rows
 }
 
 /// 走一趟**待确认队列**的结果。
@@ -313,14 +454,7 @@ pub fn survey(
 
 /// 这个变体在队列里吗（还没过过滤器）。
 fn in_queue(row: &QueueRow, filter: &Filter) -> bool {
-    if row.accepted > 0 {
-        return false;
-    }
-    if filter.states.is_empty() {
-        row.state != State::Skipped
-    } else {
-        filter.states.contains(&row.state)
-    }
+    row.accepted == 0 && filter.keeps_state(row.state)
 }
 
 /// 沉淀库对这个变体说过话没有。
@@ -431,6 +565,107 @@ pub struct Decide {
     pub note: Option<String>,
     /// 路径锚要记是哪一份主库。
     pub library: String,
+}
+
+/// 一次裁决**还在起草**的样子：四种说法挑一种，外加人补的那几样事实。
+///
+/// 命令行上是四个开关，界面上是四个单选钮——**说的是同一件事，判据只该有一份**。
+/// 「一次只说一种裁决」与「说它不成其为一次发行就没有汉化组可记」这两句写两遍，
+/// 两处迟早会漂开，而漂开的样子是：界面上收下了汉化组，库里一个字都没记。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Draft {
+    /// 采用第几条**候选**（从 1 数起）。
+    pub pick: Option<usize>,
+    /// **手工指定**这部作品；配 `no_release` 时是「挂在哪个作品下」。
+    pub work: Option<String>,
+    /// 判它**没有发行版**。
+    pub no_release: bool,
+    /// 判「都不对，而且认不出」。
+    pub unknown: bool,
+    /// 人补上去的那几样事实。
+    pub overrides: Overrides,
+    /// 记一句为什么。
+    pub note: Option<String>,
+}
+
+impl Draft {
+    /// 折成一次批量裁决；说不成立的话**当场说不成立**。
+    ///
+    /// # Errors
+    /// 一次说了不止一种裁决、一种都没说、序号从 0 数起，或者给「不成其为一次发行」
+    /// 的那两档配了事实，都返回一句给人看的话。
+    pub fn build(&self, library: &str) -> Result<Decide, String> {
+        Ok(Decide {
+            spec: self.spec()?,
+            overrides: self.overrides.clone(),
+            note: self.note.clone(),
+            library: library.to_string(),
+        })
+    }
+
+    /// 这份草稿说得成立吗。
+    ///
+    /// **界面拿它决定「落下」那个按钮亮不亮**，并把话原样显示出来；命令行拿它在开库
+    /// 之前就把不成立的话说清。
+    ///
+    /// # Errors
+    /// 与 [`Self::build`] 同。
+    pub fn check(&self) -> Result<(), String> {
+        self.spec().map(|_| ())
+    }
+
+    /// 这一次要下的是哪一种裁决。**四选一**，给多了就说清而不是挑一个。
+    fn spec(&self) -> Result<DecisionSpec, String> {
+        let given = [
+            self.unknown,
+            self.no_release,
+            self.pick.is_some(),
+            self.work.is_some() && !self.no_release,
+        ];
+        if given.iter().filter(|on| **on).count() > 1 {
+            return Err(
+                "一次只说一种裁决：`--pick`、`--work`、`--no-release`、`--unknown` 挑一个。"
+                    .to_string(),
+            );
+        }
+        // **说不成立的话就当场说不成立，绝不静默丢掉。** 「没有发行版」与「认不出」说的是
+        // 「它不成其为一次发行」，而汉化组、版本、地区那几样说的是「这次发行是什么样」
+        // ——两句话不能同时说。收下再默默扔掉的话，计划书上印着「汉化组 外星科技」，
+        // 库里却一个字都没记。
+        if (self.no_release || self.unknown) && !self.overrides.is_empty() {
+            return Err(format!(
+                "`{}` 说的是「它不成其为一次发行」，那就没有平台、地区、汉化组、版本可记。\n\
+                 去掉那几个开关，或者改用 `--work` 手工指定它是哪次发行。",
+                if self.unknown {
+                    "--unknown"
+                } else {
+                    "--no-release"
+                }
+            ));
+        }
+        if self.unknown {
+            return Ok(DecisionSpec::Unknown);
+        }
+        if self.no_release {
+            return Ok(DecisionSpec::NoRelease {
+                work: self.work.clone(),
+            });
+        }
+        if let Some(nth) = self.pick {
+            if nth == 0 {
+                return Err("候选的序号从 1 数起。".to_string());
+            }
+            return Ok(DecisionSpec::Pick(nth));
+        }
+        let Some(work) = self.work.clone() else {
+            return Err(
+                "没说要裁成什么：`--pick <序号>` 采用一条候选，`--work <作品>` 手工指定，\n\
+                 `--no-release` 判它没有发行版，`--unknown` 判「都不对而且认不出」。"
+                    .to_string(),
+            );
+        };
+        Ok(DecisionSpec::Manual(work))
+    }
 }
 
 /// 一条要落下的裁决。

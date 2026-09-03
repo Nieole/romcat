@@ -289,6 +289,17 @@ pub enum State {
 }
 
 impl State {
+    /// 四档全在这儿。
+    ///
+    /// **点名一条变体时四档全看**：用户已经说出它的键了，再拿默认那三档把它筛掉
+    /// 只会让人以为库里没有这个变体。界面上的「结论」筛选也照这个次序摆。
+    pub const ALL: [Self; 4] = [
+        Self::Matched,
+        Self::Unmatched,
+        Self::NoEvidence,
+        Self::Skipped,
+    ];
+
     /// 存进库、也打给用户的那个词。
     #[must_use]
     pub fn label(self) -> &'static str {
@@ -601,11 +612,7 @@ pub struct ContentHash {
 /// 那时**当作没有记号**比猜一个安全——猜错了会把汉化版当成官中版，
 /// 而那正是 ADR-0012 要分开的两件事。
 fn chinese_mark(label: &str) -> Option<ChineseMark> {
-    match label {
-        "汉化" => Some(ChineseMark::FanTranslated),
-        "官中" => Some(ChineseMark::Official),
-        _ => None,
-    }
+    ChineseMark::from_label(label)
 }
 
 /// **待确认队列**要的一行：变体连它这一轮的结论。

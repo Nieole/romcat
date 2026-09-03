@@ -747,3 +747,114 @@ fn keys(items: &[triage::Item]) -> Vec<String> {
         .map(|item| item.variant.key.clone())
         .collect::<Vec<_>>()
 }
+
+#[test]
+fn 分组表上那一行照着抄成选择器选中的就是那么多条() {
+    // 报告与界面上那句话是「一条 `--under gba/【全部汉化】` 覆盖 **852** 条」。
+    // 它只在选择器真的选出同样 852 条时才算数——分组按 `Item::directory` 数、
+    // 选中按 `Filter::under` 筛，两边各写一遍的话迟早各说各的（`triage::Axis`）。
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    let 整个队列 = 队列(&现场, &Filter::default());
+    assert!(!整个队列.is_empty(), "队列该有东西");
+
+    for axis in triage::Axis::ALL {
+        for row in triage::tally(&整个队列, axis) {
+            let 选中 = 队列(&现场, &axis.filter(&row.label));
+            match axis {
+                // **按命名规律**是子串匹配（`--name 汉化` 在真机上覆盖 1,986 条，
+                // 而「汉化」压根不是一个括号记号），所以它选中的是这一组**或更多**。
+                triage::Axis::NameMark => assert!(
+                    选中.len() as u64 >= row.count,
+                    "`{} {}` 的表上写着 {} 条，真选出来只有 {} 条",
+                    axis.selector(),
+                    row.label,
+                    row.count,
+                    选中.len(),
+                ),
+                _ => assert_eq!(
+                    选中.len() as u64,
+                    row.count,
+                    "`{} {}` 的表上写着 {} 条，真选出来 {} 条",
+                    axis.selector(),
+                    row.label,
+                    row.count,
+                    选中.len(),
+                ),
+            }
+        }
+    }
+}
+
+#[test]
+fn 队列列一次之后换选择器不再读库() {
+    // 界面上人一分钟能换十几次选择器。每换一次重跑一遍 `survey`，真机上就是每次
+    // 1.3 秒的卡顿——那样的队列没人用得下去（`triage::queue` 的模块文档）。
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    let index = verdict::Index::load(&现场.store, 库名).expect("读得出沉淀库");
+    let mut queue = triage::Queue::load(&现场.catalog, &index).expect("列得出队列");
+    let 整个队列 = queue.len();
+    assert!(整个队列 > 0);
+
+    // 换成「只要 FC 目录下的」——一次都不碰中立库。
+    queue.set_filter(triage::Axis::Directory.filter("FC"));
+    let fc = queue.len();
+    assert!(fc > 0 && fc < 整个队列, "FC 该是队列的一部分而不是全部");
+    assert!(
+        queue.selected().iter().all(|item| item.directory() == "FC"),
+        "选中的里面混进了别的目录",
+    );
+
+    // 换回去，条数与刚列出来时一模一样：就地重筛不该丢东西。
+    queue.set_filter(Filter::default());
+    assert_eq!(queue.len(), 整个队列);
+}
+
+#[test]
+fn 裁完的当场从队列里消失() {
+    // ADR-0002 说队列是主界面，而一个裁完了还留在原地的条目会被人再问一遍。
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    let index = verdict::Index::load(&现场.store, 库名).expect("读得出沉淀库");
+    let mut queue = triage::Queue::load(&现场.catalog, &index).expect("列得出队列");
+    let 原有 = queue.total();
+
+    queue.set_filter(triage::Axis::Directory.filter("GBA"));
+    let 这一批 = queue.len();
+    assert!(这一批 > 0);
+    let 键: Vec<String> = queue
+        .selected()
+        .iter()
+        .map(|item| item.variant.key.clone())
+        .collect();
+
+    let decide = triage::Draft {
+        work: Some("某掌机游戏".to_string()),
+        overrides: Overrides {
+            team: Some("某汉化组".to_string()),
+            ..Overrides::default()
+        },
+        ..triage::Draft::default()
+    }
+    .build(库名)
+    .expect("说得成立");
+    let plan = queue
+        .plan(&现场.catalog, &现场.store, &decide)
+        .expect("排得出计划");
+    assert_eq!(plan.decided.len(), 这一批);
+    let applied = queue
+        .apply(&mut 现场.catalog, &mut 现场.store, &plan)
+        .expect("落得下");
+    assert_eq!(applied.verdicts, 这一批 as u64);
+
+    assert_eq!(queue.total(), 原有 - 这一批 as u64);
+    queue.set_filter(Filter::default());
+    assert!(
+        queue
+            .selected()
+            .iter()
+            .all(|item| !键.contains(&item.variant.key)),
+        "刚裁完的还留在队列里",
+    );
+}

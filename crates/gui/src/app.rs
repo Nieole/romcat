@@ -1,13 +1,16 @@
-//! 界面骨架：一张变体表、一个详情面板、一份字体样张。
+//! 窗口本体：**待确认队列**是打开工具后看见的那一屏，变体表是它旁边的另一屏。
 //!
-//! 这是**骨架**而不是成品——待确认队列（票 24）与库浏览（票 25）在这上面长。它现在
-//! 就该立住的是三件事：表格的形状、中文输入的位置、退出的路线。
+//! ## 为什么默认是队列而不是封面墙
+//!
+//! ADR-0002 定死了：GUI 的主界面是待确认队列，封面墙是次要视图。库里以**汉化版**为主，
+//! 而汉化补丁改了字节，最可靠的那一环（精确哈希）对主力内容结构性失效——于是「人来裁」
+//! 不是收尾工作，是这条管线的正文。真机上那是一万六千多条。
 //!
 //! ## 中文输入放在详情面板里
 //!
 //! 不放在表格单元格里，而且不是审美选择：表格是虚拟化的，正在组字的那一行一旦滚出视口，
 //! 那个控件就不存在了，输入法上屏时会没人接（ADR-0005 的修订段）。详情面板在表格之外，
-//! 怎么滚都在。
+//! 怎么滚都在。队列那一屏把这条推到底——**连搜索框都在面板里**，见 [`crate::queue`]。
 //!
 //! ## 退出前先关输入法
 //!
@@ -16,11 +19,12 @@
 //! 发一条 `IMEAllowed(false)`，下一帧再关。[`App::closing`] 就是这两拍的状态。
 
 use egui::{Align, Layout};
-use romcat_core::catalog::{Catalog, VariantQuery, VariantRow};
+use romcat_core::catalog::{VariantQuery, VariantRow};
 use romcat_core::report::human_bytes;
 
-use crate::font;
+use crate::site::Site;
 use crate::table::{SPAN, Table, Window};
+use crate::{font, queue};
 
 /// 关窗走到哪一拍了。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,20 +37,42 @@ pub enum Closing {
     Sent,
 }
 
+/// 看的是哪一屏。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum View {
+    /// **待确认队列**：打开工具就是它（ADR-0002）。
+    #[default]
+    Queue,
+    /// 变体表：库浏览的骨架，票 25 在它上面长。
+    Variants,
+}
+
+impl View {
+    /// 顶栏照这个次序摆。
+    pub const ALL: [Self; 2] = [Self::Queue, Self::Variants];
+
+    /// 这一屏叫什么。用**词表**里的词。
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Queue => "待确认队列",
+            Self::Variants => "变体",
+        }
+    }
+}
+
 /// 界面本体。
 pub struct App {
-    catalog: Catalog,
+    site: Site,
+    /// 看的是哪一屏。**默认是队列**。
+    view: View,
+    /// 待确认队列那一屏。
+    queue: queue::Screen,
     window: Window,
     /// 筛选与排序。**界面上这一份是源头**，[`Window`] 里那一份是它的副本，每帧同步一次。
     query: VariantQuery,
     selected: Option<u64>,
     detail: Option<VariantRow>,
-    /// 详情面板里的备注框。
-    ///
-    /// **它是验证脚手架，不是功能**：内容不落库，也没人读。存在的理由是票 23 要在
-    /// Windows 真机上敲中文，而 ADR-0005 定的位置是详情面板——这个框把那个位置占住，
-    /// 免得票 24 顺手把输入放进表格单元格里。
-    note: String,
     sample: bool,
     closing: Closing,
     /// 把表格的滚动位置强按到这个像素偏移。**只有量帧率时才设**（[`crate::bench`]），
@@ -55,16 +81,19 @@ pub struct App {
 }
 
 impl App {
-    /// 开一个界面，数据来自这份中立库。
+    /// 开一个界面，数据来自这份现成的库。**打开就是待确认队列。**
     #[must_use]
-    pub fn new(catalog: Catalog) -> Self {
+    pub fn new(site: Site) -> Self {
+        let mut queue = queue::Screen::new();
+        queue.reload(&site);
         Self {
-            catalog,
+            site,
+            view: View::default(),
+            queue,
             window: Window::new(SPAN),
             query: VariantQuery::default(),
             selected: None,
             detail: None,
-            note: String::new(),
             sample: false,
             closing: Closing::No,
             scroll_to: None,
@@ -77,6 +106,38 @@ impl App {
         self.closing
     }
 
+    /// 看的是哪一屏。
+    #[must_use]
+    pub fn view(&self) -> View {
+        self.view
+    }
+
+    /// 换一屏。量帧率那条路拿它点名要量哪一屏。
+    pub fn show_view(&mut self, view: View) {
+        self.view = view;
+    }
+
+    /// 待确认队列那一屏，供测试查「列出多少条、选中多少条」。
+    #[must_use]
+    pub fn queue(&self) -> &queue::Screen {
+        &self.queue
+    }
+
+    /// 队列那一屏**连它的库**。
+    ///
+    /// 两样一起交出来，是因为队列上每一个真会花时间的动作——排计划、落下——都同时要
+    /// 它们俩。实测（[`crate::bench::queue`]）与测试拿它走界面上那条一模一样的路，
+    /// 而不是另写一份简化版。
+    pub fn queue_and_site(&mut self) -> (&mut queue::Screen, &mut Site) {
+        (&mut self.queue, &mut self.site)
+    }
+
+    /// 这份现场。
+    #[must_use]
+    pub fn site(&self) -> &Site {
+        &self.site
+    }
+
     /// 窗口，供测试查「内存里装了几行」。
     #[must_use]
     pub fn window(&self) -> &Window {
@@ -86,10 +147,20 @@ impl App {
     /// 画一帧。`eframe` 与量帧率的那条路走的是同一个函数——量出来的才是这个界面的代价。
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         self.handle_close(ui.ctx());
-        self.window.set_query(self.query.clone());
-        self.window.sync(&self.catalog);
-
         egui::Panel::top("顶栏").show(ui, |ui| self.top_bar(ui));
+        match self.view {
+            View::Queue => {
+                let (queue, site) = (&mut self.queue, &mut self.site);
+                queue.ui(ui, site);
+            }
+            View::Variants => self.variants(ui),
+        }
+    }
+
+    /// 变体表那一屏（票 22 的骨架，票 25 在它上面长）。
+    fn variants(&mut self, ui: &mut egui::Ui) {
+        self.window.set_query(self.query.clone());
+        self.window.sync(&self.site.catalog);
         egui::Panel::bottom("详情").show(ui, |ui| self.detail_panel(ui));
         egui::CentralPanel::default().show(ui, |ui| {
             if self.sample {
@@ -97,7 +168,7 @@ impl App {
                 ui.separator();
             }
             let picked = Table {
-                catalog: &self.catalog,
+                catalog: &self.site.catalog,
                 window: &mut self.window,
                 query: &mut self.query,
                 selected: &mut self.selected,
@@ -112,28 +183,34 @@ impl App {
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("变体");
+            for view in View::ALL {
+                ui.selectable_value(&mut self.view, view, view.label());
+            }
             ui.separator();
-            ui.label("筛选");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.query.contains)
-                    .desired_width(260.0)
-                    .hint_text("键里含这段文字"),
-            );
-            ui.separator();
-            ui.toggle_value(&mut self.sample, "字体样张");
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if let Some(error) = self.window.error() {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
-                } else {
-                    ui.label(format!(
-                        "{} 行；内存里 {} 行、读库 {} 次",
-                        self.window.total(),
-                        self.window.retained(),
-                        self.window.reads()
-                    ));
+            match self.view {
+                View::Queue => {
+                    let (queue, site) = (&mut self.queue, &self.site);
+                    queue.status(ui, site);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(format!("沉淀库 {}", self.site.store.location()));
+                    });
                 }
-            });
+                View::Variants => {
+                    ui.toggle_value(&mut self.sample, "字体样张");
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if let Some(error) = self.window.error() {
+                            ui.colored_label(ui.visuals().error_fg_color, error);
+                        } else {
+                            ui.label(format!(
+                                "{} 行；内存里 {} 行、读库 {} 次",
+                                self.window.total(),
+                                self.window.retained(),
+                                self.window.reads()
+                            ));
+                        }
+                    });
+                }
+            }
         });
     }
 
@@ -157,13 +234,14 @@ impl App {
                 });
             }
         }
+        // 筛选框在面板里而不在顶栏，与队列那一屏同一条规矩：会碰到输入法的控件全收在
+        // **不虚拟化**的面板里。筛选本身下推到中立库（`catalog::browse`）。
         ui.horizontal(|ui| {
-            ui.label("备注");
+            ui.label("筛选");
             ui.add(
-                egui::TextEdit::multiline(&mut self.note)
-                    .desired_rows(2)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("中文输入在这里试打（还不落库）"),
+                egui::TextEdit::singleline(&mut self.query.contains)
+                    .desired_width(320.0)
+                    .hint_text("键里含这段文字"),
             );
         });
         ui.add_space(4.0);

@@ -31,7 +31,8 @@ fn 跑一帧(ctx: &egui::Context, app: &mut App, closing: bool) -> Vec<ViewportC
 #[test]
 fn 关窗分两拍先关输入法再关窗() {
     let ctx = headless::context();
-    let mut app = App::new(demo::synthetic(200).expect("造得出合成数据"));
+    let mut app =
+        App::new(demo::site(demo::synthetic(200).expect("造得出合成数据")).expect("开得出现场"));
 
     // 第 0 帧：没人要关，什么都不该发。
     let 平常 = 跑一帧(&ctx, &mut app, false);

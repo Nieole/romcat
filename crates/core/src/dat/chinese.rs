@@ -44,6 +44,20 @@ impl ChineseMark {
             Self::Official => "官中",
         }
     }
+
+    /// 从词认回来；认不出就是 `None`。
+    ///
+    /// 命令行的 `--chinese`、界面上的下拉、以及从中立库读回来的那一列走的是同一张表。
+    /// **认不出一律 `None`**：猜一个会把**汉化版**当成**官中版**，而 ADR-0012 要分开的
+    /// 正是这两件事。
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "汉化" => Some(Self::FanTranslated),
+            "官中" => Some(Self::Official),
+            _ => None,
+        }
+    }
 }
 
 /// 这条 DAT 条目名说自己是中文的哪一种。

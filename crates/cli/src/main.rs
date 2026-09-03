@@ -2964,12 +2964,7 @@ fn run_triage_show(args: &TriageShowArgs) -> ExitCode {
         keys: vec![args.key.clone()],
         // 点名一条时**四档全看**：用户已经说出它的键了，再拿默认那三档把它筛掉
         // 只会让人以为库里没有这个变体。
-        states: vec![
-            romcat_core::catalog::State::Matched,
-            romcat_core::catalog::State::Unmatched,
-            romcat_core::catalog::State::NoEvidence,
-            romcat_core::catalog::State::Skipped,
-        ],
+        states: romcat_core::catalog::State::ALL.to_vec(),
         ..Filter::default()
     };
     let (mut survey, counts) = match collect_queue(&site, &filter) {
@@ -3004,8 +2999,9 @@ fn run_triage_show(args: &TriageShowArgs) -> ExitCode {
 /// 先印计划再动手，与同步那一侧的差量预览同源（ADR-0016）：一条命令改几百条记录，
 /// 看不见它要改什么就按下去，错了没处找。
 fn run_triage_decide(args: &TriageDecideArgs) -> ExitCode {
-    let (spec, overrides) = match args.spec().and_then(|spec| Ok((spec, args.overrides()?))) {
-        Ok(pair) => pair,
+    // 先把话说清再开库：不成立的裁决不该等到读完一遍队列才被挡下。
+    let draft = match args.draft().and_then(|draft| draft.check().map(|()| draft)) {
+        Ok(draft) => draft,
         Err(message) => return fail(message),
     };
     let mut site = match args.common.open() {
@@ -3031,11 +3027,9 @@ fn run_triage_decide(args: &TriageDecideArgs) -> ExitCode {
     if let Err(error) = triage::fill_prints(&site.catalog, &mut survey.items) {
         return fail(format!("中立库读不动：{error}"));
     }
-    let decide = triage::Decide {
-        spec,
-        overrides,
-        note: args.note.clone(),
-        library: site.library.clone(),
+    let decide = match draft.build(&site.library) {
+        Ok(decide) => decide,
+        Err(message) => return fail(message),
     };
     let plan = match triage::plan(&site.store, &survey.items, &decide) {
         Ok(plan) => plan,
@@ -3078,80 +3072,37 @@ fn run_triage_decide(args: &TriageDecideArgs) -> ExitCode {
 }
 
 impl TriageDecideArgs {
-    /// 这条命令要下的是哪一种裁决。**四选一**，给多了就说清而不是挑一个。
-    fn spec(&self) -> Result<DecisionSpec, String> {
-        let given = [
-            self.unknown,
-            self.no_release,
-            self.pick.is_some(),
-            self.work.is_some() && !self.no_release,
-        ];
-        if given.iter().filter(|on| **on).count() > 1 {
-            return Err(
-                "一次只说一种裁决：`--pick`、`--work`、`--no-release`、`--unknown` 挑一个。"
-                    .to_string(),
-            );
-        }
-        // **说不成立的话就当场说不成立，绝不静默丢掉。** 「没有发行版」与「认不出」说的是
-        // 「它不成其为一次发行」，而汉化组、版本、地区那几样说的是「这次发行是什么样」
-        // ——两句话不能同时说。收下再默默扔掉的话，计划书上印着「汉化组 外星科技」，
-        // 库里却一个字都没记。
-        if (self.no_release || self.unknown) && !self.overrides()?.is_empty() {
-            return Err(format!(
-                "`{}` 说的是「它不成其为一次发行」，那就没有平台、地区、汉化组、版本可记。\n\
-                 去掉那几个开关，或者改用 `--work` 手工指定它是哪次发行。",
-                if self.unknown {
-                    "--unknown"
-                } else {
-                    "--no-release"
-                }
-            ));
-        }
-        if self.unknown {
-            return Ok(DecisionSpec::Unknown);
-        }
-        if self.no_release {
-            return Ok(DecisionSpec::NoRelease {
-                work: self.work.clone(),
-            });
-        }
-        if let Some(nth) = self.pick {
-            if nth == 0 {
-                return Err("候选的序号从 1 数起。".to_string());
-            }
-            return Ok(DecisionSpec::Pick(nth));
-        }
-        let Some(work) = self.work.clone() else {
-            return Err(
-                "没说要裁成什么：`--pick <序号>` 采用一条候选，`--work <作品>` 手工指定，\n\
-                 `--no-release` 判它没有发行版，`--unknown` 判「都不对而且认不出」。"
-                    .to_string(),
-            );
-        };
-        Ok(DecisionSpec::Manual(work))
-    }
-
-    /// 人补上去的那几样事实。**`--pick` 也吃它们**——「就是这条候选，另外汉化组是某某」
-    /// 是最常见的一句话，收下再忽略是最坏的一种「实现了」。
-    fn overrides(&self) -> Result<triage::Overrides, String> {
+    /// 这条命令起草的那次裁决。
+    ///
+    /// **判据在核心库里**（`triage::Draft`）：命令行的开关与界面上的单选钮说的是同一件
+    /// 事，「一次只说一种裁决」这类话写两遍迟早会漂开。这里只负责把开关搬过去，
+    /// 外加一样命令行独有的活——把 `--chinese` 那串文字认回一个记号。
+    fn draft(&self) -> Result<triage::Draft, String> {
         let chinese = match self.chinese.as_deref() {
             None => None,
-            Some("汉化") => Some(romcat_core::dat::chinese::ChineseMark::FanTranslated),
-            Some("官中") => Some(romcat_core::dat::chinese::ChineseMark::Official),
-            Some(other) => {
-                return Err(format!(
-                    "认不出中文记号「{other}」。只有 `汉化` 与 `官中` 两种（ADR-0012）。"
-                ));
-            }
+            Some(label) => Some(
+                romcat_core::dat::chinese::ChineseMark::from_label(label).ok_or_else(|| {
+                    format!("认不出中文记号「{label}」。只有 `汉化` 与 `官中` 两种（ADR-0012）。")
+                })?,
+            ),
         };
-        Ok(triage::Overrides {
-            platform: self.set_platform.clone(),
-            region: self.region.clone(),
-            serial: self.serial.clone(),
-            languages: self.languages.clone(),
-            chinese,
-            team: self.team.clone(),
-            version: self.version.clone(),
+        Ok(triage::Draft {
+            pick: self.pick,
+            work: self.work.clone(),
+            no_release: self.no_release,
+            unknown: self.unknown,
+            // **`--pick` 也吃这几样**——「就是这条候选，另外汉化组是某某」是最常见的
+            // 一句话，收下再忽略是最坏的一种「实现了」。
+            overrides: triage::Overrides {
+                platform: self.set_platform.clone(),
+                region: self.region.clone(),
+                serial: self.serial.clone(),
+                languages: self.languages.clone(),
+                chinese,
+                team: self.team.clone(),
+                version: self.version.clone(),
+            },
+            note: self.note.clone(),
         })
     }
 }
