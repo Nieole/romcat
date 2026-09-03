@@ -100,7 +100,3 @@ D161（作品名那一列排不了序也筛不了）。
 - 门禁：`cargo fmt --check`、`cargo clippy --workspace --all-targets`（零警告）、
   `cargo test --workspace` 全绿；`cargo doc --workspace --no-deps` 这次没新增警告。
 - 真机纪律：目标设备一律拿本地 fixture 目录模拟，主库一个字节都没读、没写、没 touch。
-
-## 挂账裁决（2026-09-03 清理挂账队列）
-
-- **D155 详情面板每行重查一次库** — 维持，不加缓存。十万行合成数据上 6.16 ms，仍在一帧内。
