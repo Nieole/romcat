@@ -1,0 +1,22 @@
+[package]
+name = "romcat-gui"
+description = "romcat 界面：待确认队列与库浏览的窗口壳"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "romcat-gui"
+path = "src/main.rs"
+
+[dependencies]
+# 三个开关（`--catalog` / `--bench` / `--font-check`）本可以手写解析，用 clap 是为了与
+# `romcat-cli` 一套写法，`--help` 也顺带有了。
+clap.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui_extras.workspace = true
+romcat-core.workspace = true
+
+[lints]
+workspace = true

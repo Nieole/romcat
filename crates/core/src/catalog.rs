@@ -16,6 +16,7 @@
 //!    中断的扫描绝不能调它，否则没扫到的那半个库会被当成已删除抹掉。
 
 pub mod baseline;
+pub mod browse;
 pub mod content;
 pub mod frontend;
 pub mod identify;
@@ -41,6 +42,7 @@ use crate::scan::aggregate::{
 use crate::shape;
 
 pub use baseline::{Baseline, Recorded, ScanDelta, Verdict};
+pub use browse::{MAX_PAGE, PlatformFilter, VariantOrder, VariantQuery};
 pub use content::{MemberFile, ReleaseRow, VariantRow};
 pub use frontend::{SnapshotOrigin, SnapshotRow};
 pub use identify::{

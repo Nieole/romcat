@@ -93,6 +93,18 @@ CREATE INDEX IF NOT EXISTS variant_platform ON variant(platform);
 CREATE INDEX IF NOT EXISTS variant_work ON variant(work_id);
 CREATE INDEX IF NOT EXISTS variant_release ON variant(release_id);
 
+-- 界面那张表按这几列排序时走的索引（`catalog::browse`）。每条都缀上 `key`，
+-- 因为排序键本身有大量并列，并列行的次序不定死翻页就会漏行与重行——而缀了 `key`
+-- 之后，`ORDER BY bytes DESC, key DESC` 正好是这条索引倒着扫，不必落临时表排序。
+--
+-- 值不值得多这四条索引：不加的话，十万行按容量翻到第九万行实测要 **96 毫秒**一次，
+-- 那是六帧的预算，滚动条一拖就是肉眼可见的卡顿；加了之后是 **1 毫秒**级。
+-- 代价是索引本身的体积，真机四万多个变体上是几兆。
+CREATE INDEX IF NOT EXISTS variant_platform_key ON variant(platform, key);
+CREATE INDEX IF NOT EXISTS variant_rule_key ON variant(rule, key);
+CREATE INDEX IF NOT EXISTS variant_files_key ON variant(files, key);
+CREATE INDEX IF NOT EXISTS variant_bytes_key ON variant(bytes, key);
+
 -- 变体的成员：一个条目只属于一个变体，因此键就是主键。
 -- `role` 是**主文件 / 附属文件 / 内部资源 / 附属内容**之一。
 -- 目录树成型出来的变体，它的主文件成员是**那个目录本身**。

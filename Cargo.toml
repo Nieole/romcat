@@ -1,14 +1,27 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/cli"]
+members = ["crates/core", "crates/cli", "crates/gui"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.95"
 
 [workspace.dependencies]
 romcat-core = { path = "crates/core" }
+# 界面层（ADR-0005）。**版本下限锁 0.35**：中文输入最致命的两个 bug——回车上屏在多行
+# 输入里多插一个换行、组字时退格误删已有文字——2026-03-24 才修掉，随 0.35.0 发布，
+# 一切基于 0.34 及更早版本的中文输入评价都已作废。这里钉的 0.36 正是
+# `docs/research/egui-viability.md` 逐条核实过的那一版（0.36.1），它把工作区的
+# `rust-version` 顶到了 1.95。
+#
+# `eframe` 走默认的 wgpu 后端：glow 那条路在 macOS 上依赖已被系统弃用的 OpenGL。
+egui = "0.36"
+eframe = "0.36"
+# 十万行表格靠它的 `TableBuilder`：`TableBody::rows` 的开销与总行数无关。
+# 它**没有排序能力**（源码里 `sort` 零出现），所以排序下推到 SQLite——
+# 那本来也是「绝不把全库载入内存」的既定做法。
+egui_extras = "0.36"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
