@@ -65,7 +65,7 @@ enum Command {
     Shape(ShapeArgs),
     /// 拿变体的 CRC-32 加大小撞 DAT，产出带置信度与依据的候选，并报出真实命中率
     Identify(IdentifyArgs),
-    /// 在识别结论上取元数据与媒体。离线档一个网络请求都不发；在线档补简介与封面，默认限流
+    /// 在识别结论上取元数据与媒体。离线档一个网络请求都不发，中文名、类型与简介都补得上；在线档补封面与开发商，默认限流
     Scrape(ScrapeArgs),
     /// 折出标题集合，挑出显示标题与排序标题，并报出多少个作品拿到了中文标题
     Titles(TitlesArgs),
@@ -631,7 +631,7 @@ struct ScrapeArgs {
     #[arg(long, value_name = "目录")]
     workspace: Option<PathBuf>,
 
-    /// 策略档案：`离线`（默认，一个网络请求都不发）或 `在线`（再加联网源补简介与封面）
+    /// 策略档案：`离线`（默认，一个网络请求都不发）或 `在线`（再加联网源补**封面**与开发商）
     ///
     /// 在线档要一套 ScreenScraper 凭据，从环境变量读。它默认限流，且把配额超限
     /// 当作硬停止——配额同时按账号与 IP 计，撞穿了会被永久封禁
@@ -1078,8 +1078,13 @@ fn emit_from_catalog(catalog: &Catalog, manifest: &Manifest, output: &OutputArgs
     ExitCode::SUCCESS
 }
 
-/// 本机那份中文离线索引，装进内存。**没取过数不是错误**——识别照跑，少一层而已。
-fn load_zh_index(workspace: &Path, rules: &Rules) -> Result<Option<zh::Index>, String> {
+/// 本机那份中文索引，打开（必要时**就地重建**）但不装进内存。
+///
+/// **没取过数不是错误**——识别照跑，少一层而已，所以库不在位时返回 `None`。
+///
+/// 与 [`load_zh_index`] 分成两步，是因为刮削那一趟**两样都要**：撞名字要内存里那份
+/// 索引，取**简介**要留着这个库句柄按条目号点着读（`scrape::zh::Summaries`）。
+fn open_zh_store(workspace: &Path, rules: &Rules) -> Result<Option<zh::store::Store>, String> {
     let path = workspace::zh_store_path(workspace);
     if !path.exists() {
         return Ok(None);
@@ -1087,6 +1092,14 @@ fn load_zh_index(workspace: &Path, rules: &Rules) -> Result<Option<zh::Index>, S
     let mut store =
         zh::store::Store::open(&path).map_err(|error| format!("中文索引打不开：{error}"))?;
     heal_zh_store(workspace, &mut store, rules, None);
+    Ok(Some(store))
+}
+
+/// 本机那份中文离线索引，装进内存。**没取过数不是错误**——识别照跑，少一层而已。
+fn load_zh_index(workspace: &Path, rules: &Rules) -> Result<Option<zh::Index>, String> {
+    let Some(store) = open_zh_store(workspace, rules)? else {
+        return Ok(None);
+    };
     let index = store
         .load()
         .map_err(|error| format!("中文索引读不出来：{error}"))?;
@@ -2035,20 +2048,33 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
         Ok(rules) => rules,
         Err(message) => return fail(message),
     };
-    let index = match load_zh_index(&workspace, &rules) {
-        Ok(index) => index,
+    // **库句柄留着别扔**：撞名字走内存里那份索引，取**简介**要按条目号回库里点名
+    // （票 03，`scrape::zh::Summaries`）——简介不跟着索引进内存，那是九十来 MB 常驻。
+    let store = match open_zh_store(&workspace, &rules) {
+        Ok(store) => store,
         Err(message) => return fail(message),
+    };
+    let index = match store.as_ref().map(zh::store::Store::load).transpose() {
+        Ok(index) => index.filter(|index: &zh::Index| !index.is_empty()),
+        Err(error) => return fail(format!("中文索引读不出来：{error}")),
     };
     let naming = identify::fuzzy::Naming {
         rules: &rules,
         index: index.as_ref(),
         tuning: args.tuning.tuning(),
     };
+    // 索引空着的时候这个源整个不参加，简介那条路也就无从谈起——两边跟着同一个判据走。
+    let summaries: Option<&dyn scrape::zh::Summaries> = index
+        .as_ref()
+        .and(store.as_ref())
+        .map(|store| store as &dyn scrape::zh::Summaries);
     if let Some(index) = index.as_ref() {
         eprintln!(
-            "中文离线源：{} 条条目（dump {}）——只给两道交叉校验都对上的那一档中文名。",
+            "中文离线源：{} 条条目（dump {}）——只给两道交叉校验都对上的那一档中文名，\
+             撞上的那条条目的中文简介一并取回（最长 {} 字，超出的截断并在报告里点名）。",
             thousands(index.len() as u64),
             index.dump(),
+            thousands(scrape::zh::DESCRIPTION_LIMIT as u64),
         );
     }
 
@@ -2077,6 +2103,7 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
             cancel,
             progress: &mut progress,
             naming: &naming,
+            summaries,
         },
     );
     let outcome = match outcome {

@@ -60,6 +60,36 @@ const TOP_TITLES: usize = 24;
 /// 与「一部作品有几个叫法」不是同一件事，共用一个常量迟早会为了一边把另一边调坏。
 const TOP_MEMBERS: usize = 40;
 
+/// 刮削字段值那一列，一行最多画多少个字。
+///
+/// **这是画法，不是产品决定**：一条简介在中立库里最多 4,000 字
+/// （`scrape::zh::DESCRIPTION_LIMIT`），而这一行画在一条**横排**里——横排不折行，
+/// 4,000 个汉字就是四五万像素宽的一行，面板会被它撑出一条横向滚动条，那份清单也就
+/// 滚不动了。原文一个字都没动，整段挂在悬停里。
+const VALUE_SHOWN: usize = 60;
+
+/// 把一个字段值收成**一行画得下的那一截**。
+///
+/// 返回 `None` 表示原样画得下，不必动它。两件事都要管：
+///
+/// - **换行**。数据源的排版原样留在值里（规格 18），可横排里一个换行就把那一行撑高。
+/// - **长度**。超过 [`VALUE_SHOWN`] 个字就用省略号收住。
+///
+/// **原文一个字都没动**——收窄的只是画出来的那一行，整段挂在悬停里。
+///
+/// 它是公开的，因为「一条 4,000 字的简介不会把这块面板撑出去」这条验收就钉在它上面：
+/// 那一行画在详情面板深处，egui 不画视口之外的文字，headless 的一帧里根本够不着它
+/// （挂单 Q20）。
+#[must_use]
+pub fn one_line(value: &str) -> Option<String> {
+    let flat = value.replace(['\n', '\r'], " ");
+    if flat.chars().count() > VALUE_SHOWN {
+        let head: String = flat.chars().take(VALUE_SHOWN).collect();
+        return Some(format!("{head}…"));
+    }
+    (flat != value).then_some(flat)
+}
+
 /// 加一条叫法时界面上那份草稿。
 #[derive(Debug, Clone)]
 pub struct TitleDraft {
@@ -866,17 +896,30 @@ impl Screen {
                 } else {
                     ui.add_space(24.0);
                 }
+                // **一行画得下的那一截**：简介能有 4,000 字，横排里不折行（见 `one_line`）。
+                let short = one_line(&item.value.value);
                 let line = format!(
                     "{} · {}｜{}｜{}",
                     item.value.field,
                     item.anchor.label(),
                     item.value.source,
-                    item.value.value,
+                    short.as_deref().unwrap_or(&item.value.value),
                 );
-                if item.is_verdict() {
-                    ui.strong(line).on_hover_text(&item.value.evidence);
+                let response = if item.is_verdict() {
+                    ui.strong(line)
                 } else {
-                    ui.label(line).on_hover_text(&item.value.evidence);
+                    ui.label(line)
+                };
+                if short.is_some() {
+                    // 收窄过的那些，整段挂在悬停里——**面板上画不下不等于看不到**。
+                    // 用 `on_hover_ui` 而不是拼一个大字符串：那个闭包只在真悬停时才跑。
+                    response.on_hover_ui(|ui| {
+                        ui.label(&item.value.value);
+                        ui.separator();
+                        ui.label(&item.value.evidence);
+                    });
+                } else {
+                    response.on_hover_text(&item.value.evidence);
                 }
             });
         }

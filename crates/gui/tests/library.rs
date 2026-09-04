@@ -18,8 +18,9 @@ use romcat_core::scrape::priority::VERDICT;
 use romcat_core::scrape::{AnchorKind, Field, MediaKind};
 use romcat_core::title::{Language, TitleKind};
 use romcat_gui::app::{App, View};
+use romcat_gui::bench::{self, Sweep};
 use romcat_gui::table::{ROW_HEIGHT, SPAN};
-use romcat_gui::{demo, headless};
+use romcat_gui::{demo, headless, library};
 
 /// 合成数据的规模。真库是 46,483 个变体（`docs/library-facts.md`），照它来。
 const ROWS: u64 = 46_483;
@@ -461,4 +462,62 @@ fn 一条有兄弟的(app: &mut App) -> String {
         }
     }
     panic!("合成数据里该有同作品同平台的两个变体");
+}
+
+#[test]
+fn 一条顶到闸上的简介收成一行画得下的那一截() {
+    // 票 03 的第二处边界的界面这一半。中立库里一条简介最多 4,000 字
+    // （`scrape::zh::DESCRIPTION_LIMIT`），而刮削字段那一栏画在一条**横排**里——
+    // 横排不折行，整段原样排进去就是四五万点宽的一行，面板跟着长出一条横向滚动条。
+    let 顶到闸上 = "外".repeat(romcat_core::scrape::zh::DESCRIPTION_LIMIT);
+    let 一行 = library::one_line(&顶到闸上).expect("这么长该收窄");
+    assert!(
+        一行.chars().count() < 80,
+        "收成了 {} 个字，那一行还是画不下",
+        一行.chars().count(),
+    );
+    assert!(一行.ends_with('…'), "收窄过要看得出来：{一行}");
+
+    // **换行也要管**：数据源的排版原样留在值里（规格 18），可横排里一个换行就把那
+    // 一行撑高，底下几条就被挤出视口。
+    let 带换行 = library::one_line("　　两个人一起打外星人。\n第二段：外星人赢了。")
+        .expect("带换行的该折平");
+    assert!(!带换行.contains('\n'));
+    assert!(带换行.starts_with('\u{3000}'), "折平不等于掐两头：{带换行}");
+
+    // 原样画得下的**一个字都不动**——不动就不必换一份字符串出去。
+    assert_eq!(library::one_line("两个人一起打外星人。"), None);
+}
+
+#[test]
+fn 库里有一条顶到闸上的简介时列表照样滚得动() {
+    // 「界面上的列表仍然滚得动」这一条钉的是**表**：它是虚拟化的，滚起来的代价与库里
+    // 有什么无关。简介根本不在表的六列里，所以这一条要证的是「它也没从别处漏进来」。
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    跑(&ctx, &mut app, 2);
+    let key = 头几行(&mut app, 1).first().cloned().expect("有一行");
+    {
+        let (library, site) = app.library_and_site();
+        site.catalog
+            .put_verdict_value(
+                AnchorKind::Variant,
+                &key,
+                Field::Description,
+                &"外".repeat(romcat_core::scrape::zh::DESCRIPTION_LIMIT),
+                "测试摆进去的",
+            )
+            .expect("写得进去");
+        library.pick(&site.catalog, &key);
+    }
+    let cost = bench::scroll(&mut app, 120, Sweep::Rows(3.0));
+    assert_eq!(app.window().total(), 2_000);
+    assert!(
+        app.window().retained() as u64 <= SPAN,
+        "内存里 {} 行，超过一扇窗（{SPAN} 行）",
+        app.window().retained(),
+    );
+    // 240 行滚下来，一扇窗 512 行——窗口预取该只跨一次。
+    assert!(cost.reads <= 2, "滚了 240 行读了 {} 次库", cost.reads);
+    assert!(cost.median_ms > 0.0, "没量到时间，这一趟没滚动");
 }

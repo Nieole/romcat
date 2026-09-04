@@ -66,6 +66,17 @@
 //!
 //! **别名那一路只在变体这一层说话**：一部作品的几个叫法该跟着那个撞上它的文件走，
 //! 顺手搬到作品锚点上只会让同一串字在库里多躺一份、还多一条说不清是谁撞出来的依据。
+//!
+//! ## 简介走的是另一条路（票 03）
+//!
+//! 撞上那条条目的**中文简介**是这份数据源里最大的一块（实测 94.2% 的游戏条目有它），
+//! 可它**不跟着索引进内存**：8.7 万条乘中位 338 字是九十来 MB 常驻，而撞名字不看简介
+//! （[`zh::store::Store::load`] 的文档）。撞上之后手里已经有条目号了，那时再按号去库里
+//! 点一次名——一趟刮削也就几千次点名。这条路就是 [`Summaries`]。
+//!
+//! 因此**简介这一栏与别的作品级字段不同**：这个源手里没有 [`Summaries`] 时它一句话都
+//! 不说，而类型照旧产出。这件事进[输入指纹](ChineseSource::work_probe)，不然把这条路
+//! 接上之后重跑，缓存会一口咬定「输入没变」，那些简介永远补不上来。
 
 use std::collections::BTreeMap;
 
@@ -74,6 +85,82 @@ use crate::identify::naming;
 use crate::zh;
 
 use super::{AnchorKind, DatEntry, Failure, Field, Harvest, Locality, Source, Subject};
+
+/// **简介的闸**：一条简介最多留这么多**字**（`char`），超出的截掉。
+///
+/// ## 这个数是怎么定的
+///
+/// 数据源实测（`dump-2026-09-01`）：中位 338 字，最长 **9,962 字**。用户手上那份维护
+/// 多年的前端元数据，简介的中位是 1,354 字——工具产出的东西不该比手写那份还短，所以
+/// 闸必须高出这个数一大截。4,000 字同时满足两头：
+///
+/// - **绝大多数条目一个字都不动**：中位数的 11 倍，连用户手写那份的中位数也只到它的
+///   三分之一。被这道闸碰到的是那条 9,962 字的极端条目那一类，而不是常态。
+/// - **一条的上界是死的**：4,000 个汉字 = 12 KB。一万条作品全顶到闸上也就 120 MB，
+///   而实际按中位数算是几 MB。存储与导出都不会因为某一条超长条目变得不可用。
+///
+/// **闸也进输入指纹**（[`ChineseSource::work_probe`]）：把它调小了重跑，同一条简介
+/// 该重新截一遍，而不是被缓存跳过。
+pub const DESCRIPTION_LIMIT: usize = 4_000;
+
+/// 简介被截断时缀在末尾那句话的**开头**。
+///
+/// 报告靠它把被截断的条目**点得出名**（`scrape::report`）：截断这件事不许是悄悄发生的。
+/// 按记号找而不是按长度找——闸是会调的，按长度找的话调完闸老的那些行就点不出来了。
+pub const TRUNCATED_MARK: &str = "〔简介太长：原文 ";
+
+/// 把一条简介收进闸内。
+///
+/// 返回 `(收好的那一份, 原文有多少字)`；**没超闸时返回的就是原文，一个字都不改**——
+/// 换行、开头那两个全角空格与数据源自带的排版都是内容的一部分（规格 18、挂单 Q3）。
+fn clamp(text: &str) -> (String, Option<usize>) {
+    let total = text.chars().count();
+    if total <= DESCRIPTION_LIMIT {
+        return (text.to_string(), None);
+    }
+    let head: String = text.chars().take(DESCRIPTION_LIMIT).collect();
+    // 截断这件事**写在值里**，不只写在依据里：值是导出到前端、用户真会读到的那一份，
+    // 而依据只有回到工具里才看得见。前端里一段话戛然而止，用户没有任何办法分辨那是
+    // 数据源本来就写到这儿，还是工具砍的。
+    //
+    // **那句说明接在同一行上，不另起段。** Pegasus 那一侧的写出（`adapter::pegasus`
+    // 的 `write_attribute`）把单值写成一行，值里的换行会变成一行顶格的续行，而空行
+    // 更是直接把那一段截断在半路（挂单 Q22）。数据源自带的换行是规格 18 要求原样留着
+    // 的，这一个是**我们自己加的**——加了它只会让那个洞多一处出口。
+    (
+        format!("{head}……{TRUNCATED_MARK}{total} 字，这里留了前 {DESCRIPTION_LIMIT} 字。〕"),
+        Some(total),
+    )
+}
+
+/// **按条目号取中文简介**的那条路。
+///
+/// ## 为什么它是单独一条路，而不是索引上的一格
+///
+/// 简介不跟着 [`zh::store::Store::load`] 进内存：8.7 万条条目、94.2% 有简介、中位
+/// 338 字，装进来是九十来 MB 常驻，而那一层的活是**撞名字**，撞名字不看简介。
+/// 撞完之后手里已经有条目号了，那时再按号点一次名——一趟刮削的作品锚点也就几千个。
+///
+/// ## 为什么是个 trait 而不是直接收一个 [`zh::store::Store`]
+///
+/// 这一侧要测的是「撞上之后简介落在哪个锚点上、超长的怎么处置」，不是「SQLite 读得出
+/// 来没有」。收一个 trait，那些行为在内存里就测得完（同 `Source` 自己「采集不碰字节」
+/// 那条纪律）。
+pub trait Summaries: std::fmt::Debug {
+    /// 某一条条目的**中文简介**；数据源没写、或者这条条目不在库里就是 `None`。
+    ///
+    /// # Errors
+    /// 读不出来时返回一句给人看的话。**不要把它吞成 `None`**——那会让整趟悄悄少一栏，
+    /// 而报告还说得像模像样。
+    fn summary(&self, id: u32) -> Result<Option<String>, String>;
+}
+
+impl Summaries for zh::store::Store {
+    fn summary(&self, id: u32) -> Result<Option<String>, String> {
+        // **走的是库里那一列**，不是内存里那份索引——那一格永远是空串。
+        zh::store::Store::summary(self, id).map_err(|error| format!("中文索引读不出简介：{error}"))
+    }
+}
 
 /// 一个变体撞出来的那一条，连着**拿什么去撞的**。
 ///
@@ -110,6 +197,26 @@ struct WorkHit {
     matched: usize,
 }
 
+impl WorkHit {
+    /// 一个**作品级字段**的依据。
+    ///
+    /// 收在一处而不是每个字段各拼一遍：这段话说的是「这条结论为什么挂在作品这一层」，
+    /// 对简介、类型、开发商、发行商是同一句，只有字段名那一个词不同。各拼一遍的话，
+    /// 加第四个字段时最容易漏掉的正是后半句。
+    fn evidence(&self, dump: &str, field: Field) -> String {
+        format!(
+            "{}；**这条结论挂在作品这一层**：撞是名下的变体「{}」撞的，\
+             而{}跨平台跨地区都成立（名下 {} 个变体撞上了中文条目，\
+             其中 {} 个撞的是这一条）",
+            self.hit.evidence(dump),
+            self.from,
+            field.label(),
+            self.matched,
+            self.votes,
+        )
+    }
+}
+
 /// 中文离线源。
 ///
 /// 它借着[识别那一层认得的东西](fuzzy::Naming)活着——**剥离规则、索引、匹配参数三样
@@ -120,14 +227,31 @@ struct WorkHit {
 #[derive(Debug, Clone, Copy)]
 pub struct ChineseSource<'a> {
     naming: fuzzy::Naming<'a>,
+    summaries: Option<&'a dyn Summaries>,
 }
 
 impl<'a> ChineseSource<'a> {
     /// 造一个。**调用方保证索引在场**（`sources()` 只在取过数之后造它）；
     /// 万一不在场，这个源一句话都不说，而不是给一个没有出处的中文名。
+    ///
+    /// 造出来的这一份**不产出简介**——简介不在内存里那份索引上，它走
+    /// [`Summaries`]，由 [`with_summaries`](Self::with_summaries) 接上。
     #[must_use]
     pub fn new(naming: fuzzy::Naming<'a>) -> Self {
-        Self { naming }
+        Self {
+            naming,
+            summaries: None,
+        }
+    }
+
+    /// 接上**简介**那条路（票 03）。
+    ///
+    /// 单独一步而不是并进 [`new`](Self::new)：中文名、别名与类型都在内存里那份索引上，
+    /// 简介在库里那一列上，两者的寿命与代价都不同（见 [`Summaries`]）。
+    #[must_use]
+    pub fn with_summaries(mut self, summaries: &'a dyn Summaries) -> Self {
+        self.summaries = Some(summaries);
+        self
     }
 
     /// 这个**变体**锚点上撞得出哪一条。
@@ -276,6 +400,16 @@ impl<'a> ChineseSource<'a> {
             self.naming.index.map_or("", zh::Index::dump).to_string(),
             self.naming.index.map_or("", zh::Index::fields).to_string(),
             self.naming.tuning.fingerprint(),
+            // **简介那道闸**：调小了重跑，同一条简介该重新截一遍。
+            DESCRIPTION_LIMIT.to_string(),
+            // **简介那条路在不在场**：不在场时这一层一条简介都产不出，接上之后不重采
+            // 的话它们永远补不上来——而「接上」正是这张票让用户做的那件事。
+            if self.summaries.is_some() {
+                "简介：在"
+            } else {
+                "简介：不在"
+            }
+            .to_string(),
         ];
         for variant in subject.variants {
             parts.push(variant.main_key.clone());
@@ -303,32 +437,59 @@ impl<'a> ChineseSource<'a> {
 
     /// 作品锚点上采到的：撞上那条条目里**属于作品**的那几样。
     ///
-    /// 眼下只有**类型**（票 02 用它把「撞在变体层、挂在作品层」这条路跑通）。
-    /// 简介、开发商、发行商分别是票 03 与票 04 的活，接在同一条路上。
-    fn collect_work(&self, subject: &Subject<'_>, out: &mut Harvest) {
+    /// 眼下有**类型**（票 02 用它把「撞在变体层、挂在作品层」这条路跑通）与**简介**
+    /// （票 03）。开发商与发行商是票 04 的活，接在同一条路上。
+    ///
+    /// # Errors
+    /// 简介那条路读不出来时返回 [`Failure::Skip`]：**这一对不写库，下一趟再来**。
+    /// 不吞成「这条没有简介」——那会让整趟悄悄少一栏，而报告还说得像模像样。
+    fn collect_work(&self, subject: &Subject<'_>, out: &mut Harvest) -> Result<(), Failure> {
         let Some(won) = self.work_hit(subject) else {
-            return;
+            return Ok(());
         };
+        let dump = self.naming.index.map_or("", zh::Index::dump);
         // **类型是单值字段**：`Priorities::merge` 一个字段只回一个值，而集合那条路
         // （`Harvest::each` 加 `title::fold`）眼下只有标题走得通。条目的 infobox 里
         // 写了好几个类型时取头一个——数据源里的原次序，同一份库跑两次取的是同一个。
-        let Some(genre) = won.hit.one.entry.genres.first() else {
-            return;
+        if let Some(genre) = won.hit.one.entry.genres.first() {
+            out.value(
+                Field::Genre,
+                genre.clone(),
+                won.evidence(dump, Field::Genre),
+            );
+        }
+        self.collect_summary(&won, dump, out)
+    }
+
+    /// 作品锚点上那条**中文简介**（票 03）。
+    ///
+    /// 与类型分开一个函数，是因为它取数的路完全不同：类型在内存里那份索引上，简介在
+    /// 库里那一列上、而且**读得出读不出是会失败的**（见 [`Summaries`]）。
+    fn collect_summary(&self, won: &WorkHit, dump: &str, out: &mut Harvest) -> Result<(), Failure> {
+        // 这条路没接上时**一句话都不说**，而不是给一条空简介：空值会让优先级链在它
+        // 身上停下来（`Harvest::value` 的文档）。这件事进指纹，见 `work_probe`。
+        let Some(summaries) = self.summaries else {
+            return Ok(());
         };
-        let dump = self.naming.index.map_or("", zh::Index::dump);
-        out.value(
-            Field::Genre,
-            genre.clone(),
-            format!(
-                "{}；**这条结论挂在作品这一层**：撞是名下的变体「{}」撞的，\
-                 而类型跨平台跨地区都成立（名下 {} 个变体撞上了中文条目，\
-                 其中 {} 个撞的是这一条）",
-                won.hit.evidence(dump),
-                won.from,
-                won.matched,
-                won.votes,
+        let Some(text) = summaries
+            .summary(won.hit.one.entry.id)
+            .map_err(|why| Failure::Skip { why })?
+        else {
+            return Ok(());
+        };
+        let (value, cut) = clamp(&text);
+        let why = match cut {
+            // **没超闸就一个字都没动**：换行、开头那两个全角空格与数据源自带的排版
+            // 都是内容的一部分（规格 18）。
+            None => won.evidence(dump, Field::Description),
+            Some(total) => format!(
+                "{}；⚠️ **这条简介被截断了**：原文 {total} 字，超过 {DESCRIPTION_LIMIT} \
+                 字这道闸，落库的是前 {DESCRIPTION_LIMIT} 字",
+                won.evidence(dump, Field::Description),
             ),
-        );
+        };
+        out.value(Field::Description, value, why);
+        Ok(())
     }
 }
 
@@ -351,11 +512,14 @@ impl Source for ChineseSource<'_> {
 
     fn collect(&self, subject: &Subject<'_>, out: &mut Harvest) -> Result<(), Failure> {
         match subject.kind {
-            AnchorKind::Variant => self.collect_variant(subject, out),
+            // 变体那一层整个在内存里，没有会失败的动作。
+            AnchorKind::Variant => {
+                self.collect_variant(subject, out);
+                Ok(())
+            }
+            // 作品那一层要去库里点一次简介，那一下**读得出读不出是会失败的**。
             AnchorKind::Work => self.collect_work(subject, out),
         }
-        // 本地源没有会失败的动作：索引整份在内存里。
-        Ok(())
     }
 }
 
@@ -442,7 +606,7 @@ impl Source for ChineseAliasSource<'_> {
 mod tests {
     use super::*;
     use crate::filename::Rules;
-    use crate::scrape::{DatEntry, LocalMedia, WorkVariant};
+    use crate::scrape::{DatEntry, Finding, LocalMedia, WorkVariant};
 
     fn 索引() -> zh::Index {
         zh::Index::build(
@@ -545,15 +709,54 @@ mod tests {
         out
     }
 
-    /// 在**作品**锚点上采一趟。
+    /// 在**作品**锚点上采一趟。**简介那条路没接上**，所以这一趟不产出简介。
     fn 采作品(variants: &[WorkVariant]) -> Harvest {
         let rules = Rules::builtin();
         let index = 索引();
         let mut out = Harvest::default();
         源(&rules, &index)
             .collect(&作品(variants), &mut out)
-            .expect("本地源不会失败");
+            .expect("这一趟没有会失败的动作");
         out
+    }
+
+    /// 本机那份库里的简介，摆在内存里的一份（见 [`Summaries`] 为什么是个 trait）。
+    #[derive(Debug)]
+    struct 简介表(Option<String>);
+
+    impl Summaries for 简介表 {
+        fn summary(&self, _: u32) -> Result<Option<String>, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// 一条读不出来的：整条路都在，就是读不动。
+    #[derive(Debug)]
+    struct 读不动;
+
+    impl Summaries for 读不动 {
+        fn summary(&self, _: u32) -> Result<Option<String>, String> {
+            Err("库文件被截断了".to_string())
+        }
+    }
+
+    /// 接上**简介**那条路，在作品锚点上采一趟。
+    fn 采作品带简介(
+        variants: &[WorkVariant],
+        summaries: &dyn Summaries,
+    ) -> Result<Harvest, Failure> {
+        let rules = Rules::builtin();
+        let index = 索引();
+        let mut out = Harvest::default();
+        源(&rules, &index)
+            .with_summaries(summaries)
+            .collect(&作品(variants), &mut out)?;
+        Ok(out)
+    }
+
+    /// 作品锚点上采到的某一个字段。
+    fn 那一格(out: &Harvest, field: Field) -> Option<&Finding> {
+        out.values.iter().find(|it| it.field == field)
     }
 
     #[test]
@@ -797,5 +1000,131 @@ mod tests {
             造(松).probe(&subject)
         );
         assert_ne!(造(zh::Tuning::default()).probe(&work), 造(松).probe(&work));
+    }
+
+    /// 数据源里那条简介的原样：开头两个**全角空格**、中间一个换行。
+    const 简介原文: &str = "　　以细腻的画风讲了一个故事。\n第二段：故事讲完了。";
+
+    #[test]
+    fn 简介一个字都不改地落在作品锚点上() {
+        // 规格 18 与挂单 Q3：换行、开头那两个全角空格、以及数据源自带的排版**原样保留**。
+        // `str::trim` 把 U+3000 当空白扫掉，照仓库里别的字段那条惯例写就违反规格。
+        let out = 采作品带简介(&[名下("nds/合金弹头7.7z")], &简介表(Some(简介原文.to_string())))
+            .expect("读得出来就不该失败");
+        let got = 那一格(&out, Field::Description).expect("有这一条");
+        assert_eq!(got.value, 简介原文, "简介被改动了");
+        assert!(got.value.starts_with('\u{3000}'), "开头那两个全角空格被吃掉了");
+        // 依据说得出这条结论为什么挂在作品这一层。
+        assert!(got.evidence.contains("条目 4"), "{}", got.evidence);
+        assert!(
+            got.evidence.contains("而简介跨平台跨地区都成立"),
+            "{}",
+            got.evidence
+        );
+        // 没超闸的那一条**不该**说自己被截断了。
+        assert!(!got.evidence.contains("这条简介被截断了"), "{}", got.evidence);
+        // 类型照旧在同一趟里产出——两个字段跟着同一次匹配走。
+        assert_eq!(那一格(&out, Field::Genre).expect("有这一条").value, "ACT");
+    }
+
+    #[test]
+    fn 同一条条目只留一份简介() {
+        // 同一部作品的两个变体撞到同一条条目，作品锚点上**只有一份**简介，不是两份。
+        let out = 采作品带简介(
+            &[名下("nds/合金弹头7[某汉化组](简).7z"), 名下("nds/合金弹头7.7z")],
+            &简介表(Some(简介原文.to_string())),
+        )
+        .expect("读得出来就不该失败");
+        let 几条 = out
+            .values
+            .iter()
+            .filter(|it| it.field == Field::Description)
+            .count();
+        assert_eq!(几条, 1, "两个变体撞到同一条，只该有一份简介");
+    }
+
+    #[test]
+    fn 恰好卡在闸上的那一条一个字都不截() {
+        // 闸是「最多留这么多字」，不是「超过这么多就截」——边界那一条要留全。
+        let 刚好 = "外".repeat(DESCRIPTION_LIMIT);
+        let out = 采作品带简介(&[名下("nds/合金弹头7.7z")], &简介表(Some(刚好.clone())))
+            .expect("读得出来就不该失败");
+        let got = 那一格(&out, Field::Description).expect("有这一条");
+        assert_eq!(got.value, 刚好);
+        assert!(!got.value.contains(TRUNCATED_MARK));
+    }
+
+    #[test]
+    fn 超过闸的那一条截到闸上而且留得下记号() {
+        // 实测最长一条 9,962 字。截断这件事**写在值里**：值是导出到前端、用户真会读到
+        // 的那一份，而依据只有回到工具里才看得见。
+        let 超长 = "外".repeat(DESCRIPTION_LIMIT + 1);
+        let out = 采作品带简介(&[名下("nds/合金弹头7.7z")], &简介表(Some(超长.clone())))
+            .expect("读得出来就不该失败");
+        let got = 那一格(&out, Field::Description).expect("有这一条");
+        assert!(got.value.starts_with(&"外".repeat(DESCRIPTION_LIMIT)));
+        assert!(got.value.contains(TRUNCATED_MARK), "记号丢了");
+        // **按字取尾**：这一串是汉字，按字节切多半落在字符中间，一 panic 就顶掉了
+        // 本该看见的那句说明。
+        let 尾巴: String = got.value.chars().rev().take(40).collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        assert!(
+            got.value.contains(&format!("{} 字", DESCRIPTION_LIMIT + 1)),
+            "说明里该写得出原文有多少字：{尾巴}",
+        );
+        // 正文那一段截到闸上，剩下的是那句说明——**总长有个死上界**。
+        assert!(got.value.chars().count() < DESCRIPTION_LIMIT + 100);
+        assert!(got.evidence.contains("这条简介被截断了"), "{}", got.evidence);
+    }
+
+    #[test]
+    fn 数据源没写简介时无话可说而别的字段照旧产出() {
+        // 缺一格不是错误——「照常产出它有的那些字段」（规格 21）。
+        let out =
+            采作品带简介(&[名下("nds/合金弹头7.7z")], &简介表(None)).expect("不该失败");
+        assert!(那一格(&out, Field::Description).is_none());
+        assert_eq!(那一格(&out, Field::Genre).expect("有这一条").value, "ACT");
+    }
+
+    #[test]
+    fn 简介读不动时整对不写库而不是当成没有简介() {
+        // 吞成「这条没有简介」的话，一次读库失败会让整趟悄悄少一栏，而报告还说得
+        // 像模像样；更糟的是缓存会把这一趟的空手当成结论，下一趟连重试都不会有。
+        let got = 采作品带简介(&[名下("nds/合金弹头7.7z")], &读不动);
+        assert!(
+            matches!(got, Err(Failure::Skip { ref why }) if why.contains("库文件被截断了")),
+            "{got:?}",
+        );
+    }
+
+    #[test]
+    fn 撞不上的作品一条简介都不产出() {
+        // **宁可留空也不要写错的**：简介那条路每一条都答得出来，所以「没有简介」
+        // 只可能是因为没撞上。
+        let out = 采作品带简介(
+            &[名下("nds/Only English.7z"), 名下("nds/谁也不认得的名字.7z")],
+            &简介表(Some(简介原文.to_string())),
+        )
+        .expect("不该失败");
+        assert!(out.values.is_empty(), "{:?}", out.values);
+    }
+
+    #[test]
+    fn 简介那条路在不在场进作品那一层的指纹() {
+        // 不进的话，把这条路接上之后重跑，缓存会一口咬定「输入没变」而整条跳过——
+        // 那些简介就永远补不上来了。
+        let rules = Rules::builtin();
+        let index = 索引();
+        let 名下变体 = [名下("nds/合金弹头7.7z")];
+        let work = 作品(&名下变体);
+        let 没接上 = 源(&rules, &index);
+        let 表 = 简介表(Some(简介原文.to_string()));
+        let 接上了 = 没接上.with_summaries(&表);
+        assert_ne!(没接上.probe(&work), 接上了.probe(&work));
+        // **变体那一层不受影响**：简介是作品级的字段，那一层的输入一个字都没变。
+        let subject = 变体("nds/合金弹头7.7z", &[], &[]);
+        assert_eq!(没接上.probe(&subject), 接上了.probe(&subject));
     }
 }

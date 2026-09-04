@@ -27,6 +27,11 @@ use crate::report::{heading, human_bytes, pad, thousands};
 use super::priority::Priorities;
 use super::{Field, MediaKind, Options, PlanCounts, online};
 
+/// 文本报告里最多逐条列出几个**被截断的简介**。
+///
+/// 超出的只报个数——文本报告是给人扫一眼的，`--json` 那一份里名单是全的。
+const TRUNCATED_SHOWN: usize = 20;
+
 /// 一趟跑完之后，报告要的那几样「这一趟」的事实。
 ///
 /// 捏成一个结构而不是四个参数：[`ScrapeReport::build`] 本来就已经拿着中立库、
@@ -134,6 +139,12 @@ pub struct ScrapeReport {
     pub fields: Vec<FieldRow>,
     /// **一个值都没采到的字段**。离线档跑的时候，这正是「在线档存在的理由」那一份清单。
     pub gaps: Vec<String>,
+    /// **简介被截断了的那些锚点**：`(锚点种类, 锚点)`（票 03）。
+    ///
+    /// 数据源实测最长一条 9,962 字，超过 [`zh::DESCRIPTION_LIMIT`](super::zh::DESCRIPTION_LIMIT)
+    /// 的那些会被截到闸上。**截断不许是悄悄发生的**：值里留着记号，报告在这儿把它们
+    /// 逐条点出来，人要核对哪一条被砍了，照着这份名单就查得回去。
+    pub truncated_descriptions: Vec<(String, String)>,
     /// 按媒体类型。
     pub media: Vec<MediaRow>,
     /// 池里几份媒体。
@@ -239,6 +250,10 @@ impl ScrapeReport {
             .map(|field| field.label().to_string())
             .filter(|label| !filled.contains(label))
             .collect();
+        // **被截断的简介**照旧从中立库折出来（ADR-0001）：不重跑一遍刮削，于是上一趟
+        // 截掉的那些这一趟照样点得出名。
+        report.truncated_descriptions =
+            catalog.values_marked(Field::Description.label(), super::zh::TRUNCATED_MARK)?;
 
         let counts = catalog.pool_counts()?;
         report.pool_blobs = counts.blobs;
@@ -436,6 +451,31 @@ impl ScrapeReport {
                     "本地数据源里没有这些东西。换 `--profile 在线` 跑一趟才补得上。"
                 }
             );
+        }
+
+        if !self.truncated_descriptions.is_empty() {
+            heading(&mut out, "被截断的简介");
+            let _ = writeln!(
+                out,
+                "{} 个锚点的简介超过了 {} 字这道闸，落库的是前 {} 字，末尾留着一句\
+                 说明——**前端里读到的那一段不会无缘无故地断在半路**。",
+                thousands(u64::try_from(self.truncated_descriptions.len()).unwrap_or(u64::MAX)),
+                thousands(super::zh::DESCRIPTION_LIMIT as u64),
+                thousands(super::zh::DESCRIPTION_LIMIT as u64),
+            );
+            for (anchor, subject) in self.truncated_descriptions.iter().take(TRUNCATED_SHOWN) {
+                let _ = writeln!(out, "  {}{subject}", pad(anchor, 6));
+            }
+            if self.truncated_descriptions.len() > TRUNCATED_SHOWN {
+                let _ = writeln!(
+                    out,
+                    "  ……另有 {} 个（整份清单在 `--json` 那一份里）",
+                    thousands(
+                        u64::try_from(self.truncated_descriptions.len() - TRUNCATED_SHOWN)
+                            .unwrap_or(u64::MAX)
+                    ),
+                );
+            }
         }
 
         if self.media.is_empty() {

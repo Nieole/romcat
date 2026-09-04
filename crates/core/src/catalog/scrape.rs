@@ -663,6 +663,40 @@ impl Catalog {
         Ok(out)
     }
 
+    /// 某个字段上，值里带着某个**记号**的那些锚点：`(锚点种类, 锚点)`，按键排好。
+    ///
+    /// 眼下的用处只有一个：报告要把**被截断的简介**点得出名（票 03 的验收）——截断
+    /// 这件事不许是悄悄发生的。
+    ///
+    /// **按记号找而不是按长度找。** 长度那条判据要求「截到多少字」这个常量与库里的
+    /// 值永远一致，而闸是会调的：调完闸之后，上一趟按老闸截出来的那些行就点不出来了，
+    /// 而它们恰恰是最需要被点出来的。记号写在值里，跟着那一行一起活。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn values_marked(
+        &self,
+        field: &str,
+        mark: &str,
+    ) -> Result<Vec<(String, String)>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                // `instr` 而不是 `LIKE`：记号里若有 `%` 或 `_`，`LIKE` 会把它们当通配符。
+                "SELECT DISTINCT anchor, subject FROM scrape_value
+                 WHERE field = ?1 AND instr(value, ?2) > 0
+                 ORDER BY anchor, subject",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![field, mark], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
     /// 一条条走过全部刮削出来的字段值：锚点种类、锚点、字段、源、值、采集时刻。
     ///
     /// 报告拿它跑一遍**真正的合并**——不跑的话，「按字段级优先级合并」就只是一个

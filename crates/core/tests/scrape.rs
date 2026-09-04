@@ -239,6 +239,7 @@ fn 刮削带上限(现场: &mut 现场, refresh: bool, cap: Option<u64>) -> scra
             cancel: &CancelToken::new(),
             progress: &mut |_| {},
             naming: &fuzzy::Naming::off(),
+            summaries: None,
         },
     )
     .expect("刮削不该失败")
@@ -246,6 +247,17 @@ fn 刮削带上限(现场: &mut 现场, refresh: bool, cap: Option<u64>) -> scra
 
 /// 带上一份**中文离线索引**跑一趟。中文离线源与它的别名那一路只在取过数之后参加。
 fn 刮削带中文索引(现场: &mut 现场, index: &romcat_core::zh::Index) -> scrape::Outcome {
+    刮削带中文简介(现场, index, None)
+}
+
+/// 再带上**简介那条路**跑一趟（票 03）。
+///
+/// 简介不跟着索引进内存（`scrape::zh::Summaries` 的文档），所以它是单独一个句柄。
+fn 刮削带中文简介(
+    现场: &mut 现场,
+    index: &romcat_core::zh::Index,
+    summaries: Option<&dyn scrape::zh::Summaries>,
+) -> scrape::Outcome {
     let rules = romcat_core::filename::Rules::builtin();
     let options = scrape::Options::new(现场.dir.path(), 现场.pool_dir.path());
     scrape::run(
@@ -263,9 +275,40 @@ fn 刮削带中文索引(现场: &mut 现场, index: &romcat_core::zh::Index) ->
                 index: Some(index),
                 tuning: romcat_core::zh::Tuning::default(),
             },
+            summaries,
         },
     )
     .expect("刮削不该失败")
+}
+
+/// 本机那份中文索引里的简介，摆在内存里的一份。
+///
+/// 真跑的时候这一路是 `zh::store::Store`（简介留在库里那一列上，按条目号点着读）。
+/// 这里要测的是「撞上之后简介落在哪个锚点、超长的怎么处置」，不是「SQLite 读得出来
+/// 没有」——那正是 `scrape::zh::Summaries` 收成一个 trait 的理由。
+#[derive(Debug, Default)]
+struct 简介表(std::collections::BTreeMap<u32, String>);
+
+impl 简介表 {
+    fn 一条(id: u32, text: &str) -> Self {
+        Self(std::iter::once((id, text.to_string())).collect())
+    }
+}
+
+impl scrape::zh::Summaries for 简介表 {
+    fn summary(&self, id: u32) -> Result<Option<String>, String> {
+        Ok(self.0.get(&id).cloned())
+    }
+}
+
+/// 一条**读不动**的简介那一路：整条路都在，就是读不出来。
+#[derive(Debug)]
+struct 读不动的简介表;
+
+impl scrape::zh::Summaries for 读不动的简介表 {
+    fn summary(&self, _: u32) -> Result<Option<String>, String> {
+        Err("库文件被截断了".to_string())
+    }
 }
 
 /// 一份最小的中文离线索引：魂斗罗那一条，带两个别名。
@@ -279,7 +322,9 @@ fn 中文索引() -> romcat_core::zh::Index {
             year: Some(1988),
             platforms: vec!["FC".to_string()],
             platform_text: "FC".to_string(),
-            summary: "　　两个人一起打外星人。".to_string(),
+            // **简介这一格空着是对的**：`zh::store::Store::load` 读回来的条目上它永远是
+            // 空串（简介不进内存），简介走的是另一条路——`scrape::zh::Summaries`。
+            summary: String::new(),
             genres: vec!["ACT".to_string()],
             developers: vec!["Konami".to_string()],
             publishers: vec!["Konami".to_string()],
@@ -510,6 +555,233 @@ fn 名下一个变体都没撞上的作品不产出任何字段() {
         .filter(|value| value.source.starts_with("中文离线源"))
         .count();
     assert_eq!(中文的, 0, "名下一个变体都没撞上，作品锚点上不该有任何一条");
+}
+
+/// 数据源里那条简介的原样：开头两个**全角空格**、中间一个换行。
+///
+/// Bangumi 的简介几乎都是这个形状。`str::trim` 会把 U+3000 当空白扫掉，所以这一路上
+/// 一个字都不许改、两头也不许掐（挂单 Q3）。
+const 简介原文: &str = "　　两个人一起打外星人。\n第二段：外星人赢了。";
+
+#[test]
+fn 简介落在作品锚点上而且换行与全角空格逐字保留() {
+    // 票 03 的正题：跑一趟**离线档**，简介落在**作品**锚点上，源是中文离线源，
+    // 而这一趟一个网络请求都没发。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    let index = 中文索引();
+    let 简介 = 简介表::一条(12_345, 简介原文);
+    let outcome = 刮削带中文简介(&mut 现场, &index, Some(&简介));
+
+    // 一、**这一趟的网络请求数是 0**：网络句柄压根没传，档案那道闸门也只放本地源进来。
+    assert!(!outcome.report.sources.contains(&"ScreenScraper".to_string()));
+    assert!(outcome.report.sources.contains(&"中文离线源".to_string()));
+    assert!(outcome.report.online.is_none(), "离线档不该有在线那一侧的账");
+
+    // 二、简介落在**作品**锚点上，源是中文离线源，而且**只有一份**——同一部作品名下
+    // 两个汉化变体各撞了一次，撞到的是同一条条目。
+    assert_eq!(
+        各值(&现场, "作品", 作品, "简介", "中文离线源"),
+        vec![简介原文],
+        "作品锚点上该正好有一份简介，而且是原文",
+    );
+
+    // 三、**逐字保留**：开头那两个全角空格与中间那个换行都是内容的一部分，
+    // 掐掉两头（`str::trim` 那一档）就违反规格 18。
+    let 落库 = 值(&现场, "作品", 作品, "简介", "中文离线源").expect("有这一条");
+    assert!(落库.starts_with('\u{3000}'), "开头那两个全角空格被吃掉了：{落库:?}");
+    assert!(落库.contains('\n'), "中间那个换行被压掉了：{落库:?}");
+    assert_eq!(落库.chars().count(), 简介原文.chars().count(), "长度都变了");
+
+    // 四、简介**不挂在变体上**：那是作品级的字段，挂到变体上就是每个变体各存一份。
+    for 变体 in [原版变体, 汉化变体, 汉化变体二] {
+        assert!(各值(&现场, "变体", 变体, "简介", "中文离线源").is_empty());
+    }
+
+    // 五、每一条都带**依据**：条目号、撞上的是哪个名字、两道校验的结果，
+    // 外加「这条结论是名下哪个变体撞出来的」。
+    let 依据 = 现场
+        .catalog
+        .scraped_values("作品", 作品)
+        .expect("读得出")
+        .into_iter()
+        .find(|value| value.field == "简介" && value.source == "中文离线源")
+        .expect("有这一条")
+        .evidence;
+    assert!(依据.contains("条目 12345"), "{依据}");
+    assert!(依据.contains("的中文名「魂斗罗」"), "{依据}");
+    assert!(依据.contains("平台交叉校验对得上"), "{依据}");
+    assert!(依据.contains("而简介跨平台跨地区都成立"), "{依据}");
+    assert!(依据.contains(&format!("名下的变体「{汉化变体}」")), "{依据}");
+    // **中置信、照旧进待确认队列**：多一个字段不等于自动通过（票 05 才管裁决那一侧）。
+    assert!(依据.contains("一律进待确认队列"), "{依据}");
+    // 没超闸的那一条**不该**说自己被截断了。
+    assert!(!依据.contains("这条简介被截断了"), "{依据}");
+
+    // 六、合并之后作品那一层的简介就是它——离线档这一栏不再是空的。
+    let values = 现场.catalog.scraped_values("作品", 作品).expect("读得出");
+    let merged = Priorities::builtin().merge(Some("FC"), &values);
+    assert_eq!(merged["简介"].source, "中文离线源");
+    assert_eq!(merged["简介"].value, 简介原文);
+
+    // 七、报告里「一个值都没采到的字段」不再点名简介。
+    assert!(
+        !outcome.report.gaps.contains(&"简介".to_string()),
+        "离线档现在补得上简介了：{:?}",
+        outcome.report.gaps,
+    );
+    assert!(
+        outcome.report.truncated_descriptions.is_empty(),
+        "没超闸的简介不该被点名"
+    );
+
+    // 八、**再跑一趟，简介还在。** 与类型那一条同一个道理（票 02 的骨架）：
+    // 第二趟变体那一层整片命中缓存，作品层照样自己现撞一遍。
+    let 再跑 = 刮削带中文简介(&mut 现场, &index, Some(&简介));
+    assert_eq!(再跑.forgotten, 0, "一条结论都不该被当成作废清掉");
+    assert_eq!(各值(&现场, "作品", 作品, "简介", "中文离线源"), vec![简介原文]);
+}
+
+#[test]
+fn 超长的简介有闸而且被截断的条目在报告里点得出名() {
+    // 实测最长一条 9,962 字。**存储与导出都不能因为超长条目变得不可用**，
+    // 而截断这件事**不许是悄悄发生的**（票 03 的两处边界之一）。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    let index = 中文索引();
+    // 造一条比实测最长那条还长的：闸响不响与「数据源里最长是多少」无关。
+    let 超长: String = "外".repeat(scrape::zh::DESCRIPTION_LIMIT + 500);
+    let outcome = 刮削带中文简介(&mut 现场, &index, Some(&简介表::一条(12_345, &超长)));
+
+    let 落库 = 值(&现场, "作品", 作品, "简介", "中文离线源").expect("有这一条");
+    // 一、**闸真的响了**：正文截到闸上，后面缀的是那句说明，不是原文。
+    assert!(
+        落库.chars().count() < 超长.chars().count(),
+        "一个字都没截：{} 字",
+        落库.chars().count(),
+    );
+    assert!(
+        落库.starts_with(&"外".repeat(scrape::zh::DESCRIPTION_LIMIT)),
+        "截的不是前 {} 字",
+        scrape::zh::DESCRIPTION_LIMIT,
+    );
+    // 二、**用户看得见**：落库那一份自己带着一句说明，前端里读到的那段不会无缘无故
+    // 断在半路。
+    assert!(落库.contains(scrape::zh::TRUNCATED_MARK), "{落库:.80}");
+    assert!(
+        落库.contains(&format!("{} 字", 超长.chars().count())),
+        "说明里该写得出原文有多少字",
+    );
+
+    // 三、**依据**里也说得出这件事。
+    let 依据 = 现场
+        .catalog
+        .scraped_values("作品", 作品)
+        .expect("读得出")
+        .into_iter()
+        .find(|value| value.field == "简介" && value.source == "中文离线源")
+        .expect("有这一条")
+        .evidence;
+    assert!(依据.contains("这条简介被截断了"), "{依据}");
+
+    // 四、**报告里点得出名**：哪一个锚点被截了，照着这份名单查得回去。
+    assert_eq!(
+        outcome.report.truncated_descriptions,
+        vec![("作品".to_string(), 作品.to_string())],
+        "被截断的条目该在报告里逐条点名",
+    );
+    let 文本 = outcome.report.render_text();
+    assert!(文本.contains("被截断的简介"), "文本报告里该有这一节");
+    assert!(文本.contains(作品), "文本报告里该点得出锚点的名字");
+
+    // 五、**报告是从中立库折出来的**（ADR-0001）：上一趟截掉的那些，下一趟照样点得出名。
+    let 再跑 = 刮削带中文简介(&mut 现场, &index, Some(&简介表::一条(12_345, &超长)));
+    assert_eq!(再跑.report.truncated_descriptions.len(), 1);
+}
+
+#[test]
+fn 简介那条路没接上时一条简介都不产出而接上之后重跑真的补得上() {
+    // 简介不跟着索引进内存，所以它是单独一条路。这条路**在不在场**进输入指纹：
+    // 不进的话，把它接上之后重跑，缓存会一口咬定「输入没变」而整条跳过。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    let index = 中文索引();
+
+    // 一、没接上时**一条简介都不产出**，而类型照旧产出——两者不是同生共死。
+    刮削带中文索引(&mut 现场, &index);
+    assert!(各值(&现场, "作品", 作品, "简介", "中文离线源").is_empty());
+    assert_eq!(各值(&现场, "作品", 作品, "类型", "中文离线源"), vec!["ACT"]);
+
+    // 二、接上之后重跑，简介**真的补上来了**，而且没有 `--refresh`。
+    let 简介 = 简介表::一条(12_345, 简介原文);
+    刮削带中文简介(&mut 现场, &index, Some(&简介));
+    assert_eq!(各值(&现场, "作品", 作品, "简介", "中文离线源"), vec![简介原文]);
+}
+
+#[test]
+fn 撞不上的作品不产出简介() {
+    // **宁可留空也不要写错的**：撞不上就一个字段都不产出，而不是给一条像模像样的猜测。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    // 索引里只有一条与这个库毫不相干的条目，而简介那一路**每一条都答得出来**——
+    // 于是「没有简介」只可能是因为没撞上，不可能是因为简介取不到。
+    let index = romcat_core::zh::Index::build(
+        vec![romcat_core::zh::Entry {
+            id: 999,
+            name: "スーパーマリオ".to_string(),
+            name_cn: "超级马里奥".to_string(),
+            year: Some(1985),
+            platforms: vec!["FC".to_string()],
+            platform_text: "FC".to_string(),
+            genres: vec!["ACT".to_string()],
+            ..romcat_core::zh::Entry::default()
+        }],
+        "dump-2026-09-01".to_string(),
+    );
+    let 简介 = 简介表(
+        [(999, 简介原文.to_string()), (12_345, 简介原文.to_string())]
+            .into_iter()
+            .collect(),
+    );
+    let outcome = 刮削带中文简介(&mut 现场, &index, Some(&简介));
+
+    assert!(各值(&现场, "作品", 作品, "简介", "中文离线源").is_empty());
+    for 变体 in [原版变体, 汉化变体, 汉化变体二] {
+        assert!(各值(&现场, "变体", 变体, "简介", "中文离线源").is_empty());
+    }
+    // 报告那一栏照旧空着——**空着是如实的**，不是漏了。
+    assert!(outcome.report.gaps.contains(&"简介".to_string()));
+}
+
+#[test]
+fn 简介读不出来时这一对不写库而不是当成没有简介() {
+    // 吞成「这条没有简介」的话，一次读库失败会让整趟悄悄少一栏，而报告还说得像模像样；
+    // 更糟的是缓存会把这一趟的空手当成结论，下一趟连重试都不会有。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    let index = 中文索引();
+    刮削带中文简介(&mut 现场, &index, Some(&读不动的简介表));
+
+    // 作品锚点上**中文离线源一条值都没有**——连同一次采集里的类型一起，整对没写库。
+    let 中文的 = 现场
+        .catalog
+        .scraped_values("作品", 作品)
+        .expect("读得出")
+        .into_iter()
+        .filter(|value| value.source == "中文离线源")
+        .count();
+    assert_eq!(中文的, 0, "简介读不动时这一对不该写库");
+
+    // 而变体那一层照跑——那一层整个在内存里，没有会失败的动作。
+    assert_eq!(
+        值(&现场, "变体", 汉化变体, "标题", "中文离线源").as_deref(),
+        Some("魂斗罗"),
+    );
+
+    // 下一趟路通了就补得上：上一趟没写库，也就没有指纹把它挡在外面。
+    let 简介 = 简介表::一条(12_345, 简介原文);
+    刮削带中文简介(&mut 现场, &index, Some(&简介));
+    assert_eq!(各值(&现场, "作品", 作品, "简介", "中文离线源"), vec![简介原文]);
 }
 
 #[test]
@@ -831,6 +1103,7 @@ fn 不收媒体(现场: &mut 现场) -> scrape::Outcome {
             cancel: &CancelToken::new(),
             progress: &mut |_| {},
             naming: &fuzzy::Naming::off(),
+            summaries: None,
         },
     )
     .expect("刮削不该失败")
@@ -1048,6 +1321,7 @@ fn 刮削在线(现场: &mut 现场, fetcher: &CannedFetcher, limits: Limits) ->
             cancel: &cancel,
             progress: &mut |_| {},
             naming: &fuzzy::Naming::off(),
+            summaries: None,
         },
     )
     .expect("刮削不该失败——配额超限是「停」不是「错」")

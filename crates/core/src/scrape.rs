@@ -541,8 +541,12 @@ impl Harvest {
 ///
 /// **采集不碰字节**——它只说「主库里这个键的文件是这个变体的封面」「这个 URL 是这部
 /// 作品的封面」，读盘、下载、算哈希、往池里放全都归引擎。这样源可以完全在内存里测，
-/// 而全部 IO（连同那道限流与配额闸）收在一处。**本地源的 `collect` 因此永远返回
-/// `Ok(())`**：它没有会失败的动作。
+/// 而全部 IO（连同那道限流与配额闸）收在一处。
+///
+/// 本地源因此**几乎**永远返回 `Ok(())`。唯一的例外是[中文离线源](zh)的作品那一层：
+/// 简介不跟着索引进内存，撞上之后要按条目号去本机那份库里点一次名（`zh::Summaries`），
+/// 而那一下读得出读不出是会失败的。它照 [`Failure::Skip`] 处置——**那一对不写库，
+/// 下一趟再来**，不吞成「这条没有简介」。
 pub trait Source {
     /// 这个源叫什么。它会进优先级表，也会进每一条**依据**。
     fn name(&self) -> &str;
@@ -694,7 +698,13 @@ pub fn run(
     net: Option<&Net<'_>>,
     context: &mut RunContext<'_>,
 ) -> Result<Outcome, ScrapeError> {
-    let sources = sources(options.profile, options.media, net, context.naming)?;
+    let sources = sources(
+        options.profile,
+        options.media,
+        net,
+        context.naming,
+        context.summaries,
+    )?;
     if options.refresh {
         catalog.clear_scraped()?;
     }
@@ -884,6 +894,12 @@ pub struct RunContext<'a> {
     /// 而 `Options` 是一份可以随手 clone 的配置。[`Naming::off`](fuzzy::Naming::off)
     /// 是「这个源不参加」的那一份。
     pub naming: &'a fuzzy::Naming<'a>,
+    /// **中文简介**从哪儿读；`None` 表示这条路没接上，这一趟一条简介都不产出（票 03）。
+    ///
+    /// 它与 `naming` 分开一格，是因为两者的代价与寿命都不同：索引整份装在内存里，
+    /// 而简介留在本机那份库里、按条目号点着读（`zh::Summaries` 的文档）。
+    /// 本机那份 [`zh::store::Store`](crate::zh::store::Store) 直接就是它的一个实现。
+    pub summaries: Option<&'a dyn zh::Summaries>,
 }
 
 /// 一串输入折成**输入指纹**。
@@ -940,6 +956,7 @@ fn sources<'a>(
     media: bool,
     net: Option<&'a Net<'a>>,
     naming: &'a fuzzy::Naming<'a>,
+    summaries: Option<&'a dyn zh::Summaries>,
 ) -> Result<Vec<Box<dyn Source + 'a>>, ScrapeError> {
     let mut sources: Vec<Box<dyn Source + 'a>> = vec![
         Box::new(dat::DatSource::new("No-Intro")),
@@ -956,7 +973,13 @@ fn sources<'a>(
     // 与「`--no-media` 时本地媒体源整个不参加」同一条道理：造一个永远无话可说的源，
     // 会让引擎把它上一轮说过的话当成「这次改主意了」而清掉。
     if naming.ready() {
-        sources.push(Box::new(zh::ChineseSource::new(*naming)));
+        // **简介那条路接得上就接上**（票 03）：接不上时这个源照样参加，只是这一趟
+        // 一条简介都不产出——而那件事进它的输入指纹，接上之后重跑会真的重采。
+        let mut chinese = zh::ChineseSource::new(*naming);
+        if let Some(summaries) = summaries {
+            chinese = chinese.with_summaries(summaries);
+        }
+        sources.push(Box::new(chinese));
         // **别名那一路单开一个源名**，好让优先级表把它排在标题那条链的最后：
         // 别名只进标题集合、只管搜得到，永不当显示标题（`zh::ChineseAliasSource`）。
         sources.push(Box::new(zh::ChineseAliasSource::new(*naming)));
@@ -1406,7 +1429,8 @@ mod tests {
     #[test]
     fn 离线档那七个源全是本地的() {
         let 关掉 = fuzzy::Naming::off();
-        let sources = sources(Profile::Offline, true, None, &关掉).expect("离线档该收得下这七个源");
+        let sources =
+            sources(Profile::Offline, true, None, &关掉, None).expect("离线档该收得下这七个源");
         assert_eq!(sources.len(), 7);
         assert!(sources.iter().all(|s| s.locality() == Locality::Local));
     }
@@ -1430,7 +1454,7 @@ mod tests {
             &cancel,
         );
         let 关掉 = fuzzy::Naming::off();
-        let sources = sources(Profile::Offline, true, Some(&net), &关掉).expect("收得下");
+        let sources = sources(Profile::Offline, true, Some(&net), &关掉, None).expect("收得下");
         assert!(sources.iter().all(|s| s.locality() == Locality::Local));
         assert!(fetcher.asked().is_empty());
     }
@@ -1440,7 +1464,7 @@ mod tests {
         // **宁可不启动也不悄悄降级**：用户点名要在线档，要的正是离线档补不上的那几样。
         let 关掉 = fuzzy::Naming::off();
         assert!(matches!(
-            sources(Profile::Online, true, None, &关掉),
+            sources(Profile::Online, true, None, &关掉, None),
             Err(ScrapeError::NoNetwork)
         ));
     }
@@ -1450,7 +1474,7 @@ mod tests {
         // 它若参加而拿到一份空清单，`probe` 会返回「无话可说」，
         // 上一轮收好的媒体映射就被当成过期结论清掉了。
         let 关掉 = fuzzy::Naming::off();
-        let sources = sources(Profile::Offline, false, None, &关掉).expect("收得下");
+        let sources = sources(Profile::Offline, false, None, &关掉, None).expect("收得下");
         assert_eq!(sources.len(), 6);
         assert!(sources.iter().all(|s| s.name() != local::LOCAL_MEDIA));
     }

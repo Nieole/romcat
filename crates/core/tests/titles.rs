@@ -221,6 +221,7 @@ fn 跑一遍(现场: &mut 现场) -> title::TitleReport {
             cancel: &CancelToken::new(),
             progress: &mut |_| {},
             naming: &fuzzy::Naming::off(),
+            summaries: None,
         },
     )
     .expect("刮削不该失败");
