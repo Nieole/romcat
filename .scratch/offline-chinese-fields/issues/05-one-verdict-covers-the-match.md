@@ -63,4 +63,6 @@
   `cargo test --workspace --all-features -j 1 --no-run` → `Finished`；
   `cargo test --workspace --all-features -j 1 -- --skip 断点落在主库内直接拒绝开工`
   → 全部 `test result: ok`。`/code-review high` 报的 5 条（另加 2 条顺带）**全部就地处理**，
-  连带落成挂单 Q40、Q41 与 Q33 / Q36 的两处补充。
+  连带落成挂单 Q40、Q41 与 Q33 / Q36 的两处补充。收尾时另补一条
+  `第一版的老库带着裁决升上来_一条都不丢`：真的走一遍「第 1 版的库 → 最新版」并看着老裁决
+  原样还在——这份库**不可再生**，「迁移只许往后追加」不该只写在模块文档里。

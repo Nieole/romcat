@@ -1491,6 +1491,41 @@ mod tests {
     }
 
     #[test]
+    fn 第一版的老库带着裁决升上来_一条都不丢() {
+        // **这份库不可再生**，所以「迁移只许往后追加」不能只写在模块文档里——要有一条
+        // 测试真的走一遍「第 1 版的库 → 最新版」，并且看着老裁决原样还在。
+        // 眼下第 2 条迁移是 `CREATE TABLE IF NOT EXISTS`，本来就动不了老数据；这一条钉的
+        // 是**将来**：等哪天第 3 条迁移改的是已有的表，它会先炸，而不是等用户丢了裁决才发现。
+        let conn = Connection::open_in_memory().expect("开得出来");
+        conn.execute_batch(MIGRATIONS[0]).expect("建得出第一版");
+        conn.execute_batch("PRAGMA user_version = 1")
+            .expect("盖得上第一版的版本号");
+        let mut store = Store {
+            conn,
+            path: "（内存）".to_string(),
+        };
+        let verdict = 汉化裁决();
+        store.put(&verdict).expect("第一版里就存得进");
+
+        store.migrate().expect("升得上来");
+
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("读得到");
+        assert_eq!(
+            u32::try_from(version).expect("装得下"),
+            schema_version(),
+            "升到最新一版"
+        );
+        let back = store
+            .find(&verdict.anchor)
+            .expect("读得到")
+            .expect("老裁决还在");
+        assert_eq!(back.decision, verdict.decision, "一个字都没变");
+    }
+
+    #[test]
     fn 库比程序新时如实拒绝而不是叫人删库() {
         // 裁决不可再生。「版本对不上就删掉重来」这条路在这份库上永远不许走。
         let store = Store::in_memory().expect("开得出来");
