@@ -1118,11 +1118,20 @@ fn assets_of(body: &Body) -> &BTreeMap<String, Vec<String>> {
 }
 
 /// 写一个属性：一个值就写一行，多个值就写成续行。
+///
+/// **值里带换行的也走续行**。早先单值一律 `writeln!("{key}: {value}")`，值里那个 `\n`
+/// 于是变成一行**顶格**的文字：读回来 `classify` 判它 `Malformed`，那一行里若还有半角
+/// `:`（简介里的 URL 很常见）更会被当成一个新属性键——写出来的是一份**坏文件**。
+/// 中文离线源的简介让这件事从偶发变成了默认必然（挂单 Q22）。
+///
+/// **段落分隔往返得回来，单个换行折成空格**：读那一侧的 `joined` 认 `.` 为 `\n\n`、
+/// 把普通续行折成空格，这里照它的规矩写，两边就对上了。单个换行折成空格是 Pegasus
+/// 这个格式本身的天花板，不是这里的疏漏——**该由能力档位说出口**（ADR-0003）。
 fn write_attribute(out: &mut String, key: &str, values: &[String]) {
     if values.is_empty() {
         return;
     }
-    if values.len() == 1 {
+    if values.len() == 1 && !values[0].contains('\n') {
         let _ = writeln!(out, "{key}: {}", values[0]);
         return;
     }
@@ -1130,7 +1139,14 @@ fn write_attribute(out: &mut String, key: &str, values: &[String]) {
     // 于是每个值都在自己那一行上，值里带逗号也不会被拆开。
     let _ = writeln!(out, "{key}:");
     for value in values {
-        let _ = writeln!(out, "{INDENT}{value}");
+        for line in value.split('\n') {
+            // 空行写成 `.`——那是 Pegasus 的段落分隔记号，`joined` 读回来还它 `\n\n`。
+            if line.trim().is_empty() {
+                let _ = writeln!(out, "{INDENT}.");
+            } else {
+                let _ = writeln!(out, "{INDENT}{line}");
+            }
+        }
     }
 }
 
@@ -1766,5 +1782,44 @@ regex: .*
                 .expect("读得动")
                 .identical
         );
+    }
+
+    #[test]
+    fn 带换行的简介写成续行_读回来不是坏行也不冒出新键() {
+        // 中文离线源的简介带换行与空行（票 `offline-chinese-fields/03`）。早先单值一律
+        // 写成一行，那个 `\n` 于是变成一行**顶格**的文字——读回来是 `Malformed`，而
+        // 「更新: https://x」那一行里的半角 `:` 还会被当成一个新属性键（挂单 Q22）。
+        let mut doc = Document::default();
+        doc.entries.push(Entry {
+            origin: None,
+            body: Body::Game(Game {
+                title: "魂斗罗".to_string(),
+                files: vec!["魂斗罗.nes".to_string()],
+                description: Some("第一段\n\n第二段 更新: https://例子/a\n收尾".to_string()),
+                ..Game::default()
+            }),
+        });
+
+        let written = Pegasus.write(&doc, None).expect("写得出");
+        let text = String::from_utf8(written).expect("是 UTF-8");
+        // 简介那几行都缩进着，没有一行是顶格的裸文字。
+        assert!(text.contains("description:\n"), "走的是续行形式：{text}");
+        assert!(!text.contains("\n第二段"), "第二段不该顶格：{text}");
+
+        let back = Pegasus.read(text.as_bytes()).expect("读得回来");
+        assert!(
+            back.lossy.iter().all(|note| !format!("{note:?}").contains("Malformed")),
+            "读回来不该有坏行：{:?}",
+            back.lossy
+        );
+        let Body::Game(game) = &back.doc.entries[0].body else {
+            panic!("是游戏段");
+        };
+        // **段落分隔往返得回来**；单个换行折成空格是 Pegasus 这个格式自己的天花板。
+        let 简介 = game.description.as_deref().expect("简介还在");
+        assert!(简介.starts_with("第一段\n\n第二段"), "段落分隔还在：{简介:?}");
+        assert!(简介.contains("https://例子/a"), "带冒号的那截没丢：{简介:?}");
+        // 那个半角 `:` 没有变成一个新属性键。
+        assert!(game.unknown.is_empty(), "不该冒出新键：{:?}", game.unknown);
     }
 }

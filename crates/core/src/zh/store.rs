@@ -311,20 +311,21 @@ impl Store {
 
     /// 换上新结构：旧的那几张表整个扔掉重建。
     ///
-    /// **只有 [`Store::replace`] 调它**，而且紧接着就把新数据写进去——这两件事之间不留
-    /// 空当，正是「旧数据一直留到新数据真的写进来那一刻」那一条。
-    fn reshape(&mut self) -> Result<(), StoreError> {
-        if self.rebuilding.is_none() {
-            return Ok(());
-        }
-        self.conn
-            .execute_batch(&format!(
-                "DROP TABLE IF EXISTS subject_fact;
-                 DROP TABLE IF EXISTS subject_name;
-                 DROP TABLE IF EXISTS subject;
-                 {SCHEMA}"
-            ))
-            .map_err(|source| self.error(source))
+    /// **只有 [`Store::replace`] 调它，而且是在它那个事务里面调**。SQLite 的 DDL 是
+    /// 事务性的，所以 `DROP` 与紧接着那几万条 `INSERT` 要么一起落盘、要么一起不落——
+    /// 模块文档那句「换结构与写新数据是同一个事务里的事」说的正是这个。
+    ///
+    /// 早先它走的是 `Store::execute_batch`（**自动提交**），于是 `DROP` 落盘与新数据
+    /// 提交之间有一个真实的窗口：重建写到一半被 Ctrl-C 或杀掉，库里就只剩一份空的新
+    /// 结构表。缓存里那份 dump 还在时下一趟自己补得回来，被清掉了就只剩重下 435 MB
+    /// ——恰是这套设计要避免的结局（挂单 Q23）。
+    fn reshape(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+        tx.execute_batch(&format!(
+            "DROP TABLE IF EXISTS subject_fact;
+             DROP TABLE IF EXISTS subject_name;
+             DROP TABLE IF EXISTS subject;
+             {SCHEMA}"
+        ))
     }
 
     fn error(&self, source: rusqlite::Error) -> StoreError {
@@ -380,8 +381,9 @@ impl Store {
         dump: &str,
         fingerprint: &str,
     ) -> Result<(), StoreError> {
-        // **换结构与写数据在同一趟里**：旧数据一直留到这一刻。
-        self.reshape()?;
+        // **换结构与写数据在同一个事务里**：旧数据一直留到这一刻，而且中途被打断时
+        // 一起回滚（`Store::reshape` 的文档）。
+        let rebuilding = self.rebuilding.is_some();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|it| i64::try_from(it.as_secs()).unwrap_or(i64::MAX))
@@ -394,6 +396,9 @@ impl Store {
             source,
         };
         let tx = self.conn.transaction().map_err(failed)?;
+        if rebuilding {
+            Self::reshape(&tx).map_err(failed)?;
+        }
         tx.execute_batch("DELETE FROM subject_fact; DELETE FROM subject_name; DELETE FROM subject;")
             .map_err(failed)?;
         {
