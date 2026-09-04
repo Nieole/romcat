@@ -342,6 +342,39 @@ pub struct LocalMedia {
     pub why: &'static str,
 }
 
+/// **作品锚点手里的一个变体**：够拿去撞[中文离线源](zh)的那几样（票 02）。
+///
+/// ## 为什么作品锚点要带着它们
+///
+/// **撞只能在变体这一层做。** 高信号只有一处——文件名剥出来的**正题**是中文的，
+/// 拿它去撞中文条目的中文名与别名；而作品这一层手里只有 DAT 给的名字（多为英文或
+/// 罗马字），实测中文条目里带纯拉丁别名的不到六分之一，作品层自己撞根本撞不上。
+///
+/// 可**类型、简介、开发商、发行商属于作品**——那正是 [`AnchorKind::Work`] 的定义
+/// （跨平台跨地区都成立的东西挂这一层）。挂到变体上就是同一部作品的每个变体各存
+/// 一份重复内容。
+///
+/// 于是中文离线源**在两层都参加**：变体层照旧撞、出中文名与别名；作品层不自己撞名字，
+/// 而是把名下这些变体各撞一遍，取撞得最多的那条条目，产出作品级字段。
+///
+/// ## 带的是「够撞一次的那几样」，不是撞完的结果
+///
+/// 撞完的结果会与「这一趟哪些锚点被输入指纹跳过了」绑在一起：第一趟采完之后变体那一层
+/// 整片命中缓存，`collect` 一次都不跑，作品锚点手里就是空的——于是第二趟会把上一趟
+/// 好好的类型当成「这个源改主意了」清掉。带输入而不带结果，作品那一层就与**采集顺序
+/// 和缓存状态都无关**：同一份库跑几趟结果一样。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkVariant {
+    /// 变体的键。**依据里要写它**——说得出「这条结论是名下哪个变体撞出来的」。
+    pub key: String,
+    /// 主文件的键；**正题**从它的文件名剥出来。
+    pub main_key: String,
+    /// 平台；认不出就是 `None`。
+    pub platform: Option<String>,
+    /// 撞出这个变体的 DAT 条目。年份从它们的名字里读。
+    pub entries: Vec<DatEntry>,
+}
+
 /// 交给一个源去看的东西。
 ///
 /// 一个源不必用得上全部——`probe` 返回 `None` 就是「这个源对这个锚点无话可说」。
@@ -359,6 +392,10 @@ pub struct Subject<'a> {
     pub main_key: Option<&'a str>,
     /// **变体**锚点才有：能归给它的本地媒体。
     pub media: &'a [LocalMedia],
+    /// **作品**锚点才有：它名下的变体，够拿去撞[中文离线源](zh)的那几样（票 02）。
+    ///
+    /// **变体那一层永远是空的**：那一层撞的是它自己的文件名，不必再带一份名单。
+    pub variants: &'a [WorkVariant],
     /// 这一趟单份媒体的上限；`None` 是不设上限。
     ///
     /// 它在这里，是因为**它改变采集的结果**：上限从 32 MiB 提到 128 MiB，同一批文件
@@ -978,6 +1015,7 @@ struct PlannedSubject {
     entries: Vec<DatEntry>,
     main_key: Option<String>,
     media: Vec<LocalMedia>,
+    variants: Vec<WorkVariant>,
     basis: Option<Basis>,
     confirmed: bool,
 }
@@ -991,6 +1029,7 @@ impl PlannedSubject {
             entries: &self.entries,
             main_key: self.main_key.as_deref(),
             media: &self.media,
+            variants: &self.variants,
             media_limit,
             confirmed: self.confirmed,
             basis: self.basis.as_ref(),
@@ -1049,12 +1088,21 @@ impl Plan {
                     .or_insert_with(|| WorkSlot {
                         platform: variant.platform.clone(),
                         entries: Vec::new(),
+                        variants: Vec::new(),
                         representative: None,
                     });
                 if slot.platform.is_none() {
                     slot.platform.clone_from(&variant.platform);
                 }
                 slot.entries.extend(entries.iter().cloned());
+                // **作品层不自己撞名字，读的是名下变体撞出来的条目**（票 02）。
+                // 这里攒的是「够撞一次的那几样」而不是撞完的结果，理由见 [`WorkVariant`]。
+                slot.variants.push(WorkVariant {
+                    key: variant.key.clone(),
+                    main_key: variant.main_key.clone(),
+                    platform: variant.platform.clone(),
+                    entries: entries.clone(),
+                });
                 // **一部作品发一次查询就够**，所以只留一个代表变体。变体按键排序遍历，
                 // 于是同一份库跑两次挑中的是同一个。按变体查等于把配额乘上三倍
                 // （真库 30,024 个已确认变体 vs 9,226 部作品），而简介与封面本来就是
@@ -1070,6 +1118,8 @@ impl Plan {
                 entries,
                 main_key: Some(variant.main_key.clone()),
                 media: media_index.get(&variant.key).cloned().unwrap_or_default(),
+                // 变体这一层撞的是它自己的文件名，不必再带一份名单。
+                variants: Vec::new(),
                 // **变体这一层不带判据**：在线源只查作品锚点，给每个变体都取一次判据
                 // 就是 30,024 次白查的库查询（实测那一层不便宜）。
                 basis: None,
@@ -1106,6 +1156,7 @@ impl Plan {
                 entries,
                 main_key: None,
                 media: Vec::new(),
+                variants: slot.variants,
                 confirmed: slot.representative.is_some(),
                 basis,
             });
@@ -1127,6 +1178,8 @@ impl Plan {
 struct WorkSlot {
     platform: Option<String>,
     entries: Vec<DatEntry>,
+    /// 名下的变体，够拿去撞**中文离线源**的那几样（[`WorkVariant`]）。
+    variants: Vec<WorkVariant>,
     /// 拿哪个变体的判据去发那**一次**在线查询。
     representative: Option<String>,
 }

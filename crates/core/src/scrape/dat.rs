@@ -187,6 +187,7 @@ mod tests {
             entries,
             main_key: None,
             media: &[],
+            variants: &[],
             media_limit: None,
             confirmed: true,
             basis: None,

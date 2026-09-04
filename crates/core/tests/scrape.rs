@@ -41,6 +41,12 @@ fn 汉化版() -> Vec<u8> {
     vec![0xB2; 4_096]
 }
 
+/// **另一个组做的汉化版**：与上面那份不是同一串字节，因此是同一部作品的第二个**变体**。
+/// 票 02 要的正是这个形状——同一部作品名下两个变体，各自撞一次中文条目。
+fn 汉化版二() -> Vec<u8> {
+    vec![0xE5; 4_096]
+}
+
 /// 一张封面。**两个变体旁边各放一份一模一样的**，用来验「只存一份」。
 fn 封面() -> Vec<u8> {
     let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
@@ -69,6 +75,7 @@ struct 现场 {
 
 const 原版变体: &str = "FC/魂斗罗原版/Contra (Japan).zip";
 const 汉化变体: &str = "FC/魂斗罗汉化/魂斗罗[dwt_so 汉化].zip";
+const 汉化变体二: &str = "FC/魂斗罗汉化二/魂斗罗[另一组 汉化].zip";
 const 作品: &str = "Contra";
 
 fn 建现场() -> 现场 {
@@ -88,6 +95,14 @@ fn 建现场() -> 现场 {
     // **同一张封面**：内容一模一样，名字与位置都不同。
     写(&root.join("FC/魂斗罗汉化/封面.png"), &封面());
     写(&root.join("FC/魂斗罗汉化/1.jpg"), &截图());
+
+    // ── 同一部作品的**第二个汉化变体**，独占一个目录、旁边没有图。
+    // 它与上面那个变体的文件名剥出来是同一个**正题**，于是两个变体撞到同一条中文条目
+    // ——票 02 的「作品锚点上只有一份类型」要的就是这个形状。
+    写(
+        &root.join(汉化变体二),
+        &zip_container(&[ZipEntrySpec::stored("魂斗罗2.nes", 汉化版二())]),
+    );
 
     // ── 一个目录里两个变体：**同目录的图一张都不许认**。
     写(
@@ -173,6 +188,11 @@ fn 建_dat() -> DatRepo {
                 "Contra (1988-02-09)(Konami)(JP)[tr zh dwt_so][v.20030208]",
                 "Contra [tr zh].nes",
                 &汉化版(),
+            ),
+            条目(
+                "Contra (1988-02-09)(Konami)(JP)[tr zh 另一组][v.20240101]",
+                "Contra [tr zh 2].nes",
+                &汉化版二(),
             ),
         ],
     );
@@ -379,6 +399,117 @@ fn 撞上中文条目的变体在变体锚点上多出别名而且进了标题�
     assert!(
         各值(&现场, "变体", "FC/一堆/甲.zip", "标题", "中文离线源·别名").is_empty()
     );
+}
+
+#[test]
+fn 类型落在作品锚点上而且同一条条目只留一份() {
+    // 票 02 的正题：**撞在变体层、挂在作品层**。同一部作品的两个汉化变体各撞一次，
+    // 撞到的是同一条中文条目，于是作品锚点上**只有一份**类型。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    let index = 中文索引();
+    let outcome = 刮削带中文索引(&mut 现场, &index);
+
+    // 一、**这一趟的网络请求数是 0**：网络句柄压根没传，档案那道闸门也只放本地源进来。
+    assert!(!outcome.report.sources.contains(&"ScreenScraper".to_string()));
+    assert!(outcome.report.sources.contains(&"中文离线源".to_string()));
+
+    // 二、类型落在**作品**锚点上，源是中文离线源，而且只有一份。
+    assert_eq!(各值(&现场, "作品", 作品, "类型", "中文离线源"), vec!["ACT"]);
+
+    // 三、每条新字段都带**依据**：条目号、撞上的是哪个名字、两道校验的结果，
+    // 外加「这条结论是名下哪个变体撞出来的」。
+    let 依据 = 现场
+        .catalog
+        .scraped_values("作品", 作品)
+        .expect("读得出")
+        .into_iter()
+        .find(|value| value.field == "类型" && value.source == "中文离线源")
+        .expect("有这一条")
+        .evidence;
+    assert!(依据.contains("条目 12345"), "{依据}");
+    assert!(依据.contains("的中文名「魂斗罗」"), "{依据}");
+    assert!(依据.contains("平台交叉校验对得上"), "{依据}");
+    // 年份这一道钉**结果**：条目写着 1988，而 TOSEC 那条条目名的第一个括号也是 1988，
+    // 所以两边都说得出、而且对得上。只钉「年份交叉校验」这五个字是恒真的——
+    // 那句话无条件拼在每一条依据上。
+    assert!(依据.contains("年份交叉校验对得上"), "{依据}");
+    // **写全那个键**：名下两个汉化变体都以 `FC/魂斗罗汉化` 打头，只写前缀的话
+    // 换成哪一个断言都照绿。代表取的是变体键最小的那个。
+    assert!(依据.contains(&format!("名下的变体「{汉化变体}」")), "{依据}");
+    assert!(
+        依据.contains("名下 2 个变体撞上了中文条目，其中 2 个撞的是这一条"),
+        "{依据}"
+    );
+    // **产出仍是中置信、照旧进待确认队列**：多了几个字段不等于自动通过。
+    assert!(依据.contains("一律进待确认队列"), "{依据}");
+
+    // 四、**类型不挂在变体上**：那是作品级的字段，挂到变体上就是每个变体各存一份。
+    for 变体 in [汉化变体, 汉化变体二] {
+        assert!(各值(&现场, "变体", 变体, "类型", "中文离线源").is_empty());
+    }
+
+    // 五、**中文名与别名仍然在变体锚点上，没有被顺手搬走。**
+    for 变体 in [汉化变体, 汉化变体二] {
+        assert_eq!(
+            值(&现场, "变体", 变体, "标题", "中文离线源").as_deref(),
+            Some("魂斗罗")
+        );
+        assert_eq!(
+            各值(&现场, "变体", 变体, "标题", "中文离线源·别名"),
+            vec!["Probotector", "魂斗羅"]
+        );
+    }
+    assert!(各值(&现场, "作品", 作品, "标题", "中文离线源").is_empty());
+    assert!(
+        各值(&现场, "作品", 作品, "标题", "中文离线源·别名").is_empty(),
+        "别名那一路不跟到作品那一层去"
+    );
+
+    // 六、合并之后作品那一层的类型就是它——离线档里这一栏不再是空的。
+    let values = 现场.catalog.scraped_values("作品", 作品).expect("读得出");
+    let merged = Priorities::builtin().merge(Some("FC"), &values);
+    assert_eq!(merged["类型"].source, "中文离线源");
+    assert_eq!(merged["类型"].value, "ACT");
+
+    // 七、**再跑一趟，作品那一层的类型还在。** 这一条是作品层「带输入不带结果」那个
+    // 决定的验收：第二趟变体那一层整片命中缓存、`collect` 一次都不跑，若作品层读的是
+    // 变体撞完的结果，这里就会空手而归，把上一趟好好的类型当成「这个源改主意了」清掉。
+    let 再跑 = 刮削带中文索引(&mut 现场, &index);
+    assert!(再跑.reused_probes > 0, "第二趟该有锚点因为输入指纹没变而跳过");
+    assert_eq!(再跑.forgotten, 0, "一条结论都不该被当成作废清掉");
+    assert_eq!(各值(&现场, "作品", 作品, "类型", "中文离线源"), vec!["ACT"]);
+}
+
+#[test]
+fn 名下一个变体都没撞上的作品不产出任何字段() {
+    // **宁可留空也不要写错的**：撞不上就一个字段都不产出，而不是给一条像模像样的猜测。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    // 索引里只有一条与这个库毫不相干的条目。
+    let index = romcat_core::zh::Index::build(
+        vec![romcat_core::zh::Entry {
+            id: 999,
+            name: "スーパーマリオ".to_string(),
+            name_cn: "超级马里奥".to_string(),
+            year: Some(1985),
+            platforms: vec!["FC".to_string()],
+            platform_text: "FC".to_string(),
+            genres: vec!["ACT".to_string()],
+            ..romcat_core::zh::Entry::default()
+        }],
+        "dump-2026-09-01".to_string(),
+    );
+    刮削带中文索引(&mut 现场, &index);
+
+    let 中文的 = 现场
+        .catalog
+        .scraped_values("作品", 作品)
+        .expect("读得出")
+        .into_iter()
+        .filter(|value| value.source.starts_with("中文离线源"))
+        .count();
+    assert_eq!(中文的, 0, "名下一个变体都没撞上，作品锚点上不该有任何一条");
 }
 
 #[test]
