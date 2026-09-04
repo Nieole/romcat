@@ -10,33 +10,74 @@
 //!
 //! 这份库里**没有一行是攒出来的**——全部内容都能从 dump 重建，所以结构版本对不上时
 //! 直接重建（同 `dat::repo::SCHEMA_VERSION`）。
+//!
+//! ## 版本对不上就地重建，**不要用户重下那 435 MB**
+//!
+//! 「重建」指的是从**本机那份原件**（取数时留在缓存目录里的那个 zip）重读一遍，
+//! 不走顺序迁移，也**不发一个网络请求**。[`Store::open`] 撞上旧版本时把这一版的 `dump`
+//! 与指纹留在 [`Store::rebuilding`] 里交给 [`sync::rebuild`](super::sync::rebuild)——
+//! 那两样正是「从哪个原件重建、重建完该记什么指纹」的全部所需。
+//!
+//! 反过来做（报个错让用户自己删）在这份库上尤其糟：删掉它就等于删掉那份 435 MB 的
+//! 下载凭据，而结构版本每加一格都要用户重下一遍，是这份库当初与中立库分家的理由的反面。
+//!
+//! ### 旧数据一直留到新数据真的写进来那一刻
+//!
+//! **打开一份旧索引什么都不毁**：旧表原样躺着，`schema_version` 也还写着旧的那个数。
+//! 换结构与写新数据是[同一个事务](Store::replace)里的事。
+//!
+//! 这一条不是洁癖。重建要读一份 435 MB 的 zip（解开 960 MB），中途 Ctrl-C、进程被杀、
+//! 或者那份缓存 zip 本身就是截断的，都是真会发生的事。先扫后建的话，那一下之后库里
+//! 是一份空索引、盖着新版本号，而「该从哪份原件重建」的线索已经跟着 `meta` 一起没了
+//! ——唯一的出路正是重下那 435 MB，恰恰是这一整段要避免的事。
+//!
+//! 代价是这中间 [`Store::load`] 与 [`Store::stats`] 交出来的是空的：旧表的列与本程序
+//! 认得的对不上，**半懂不懂地读比读不出来更糟**。
 
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::{Entry, Index, NameKind};
+use super::{Entry, FactKind, Index, NameKind};
 
-/// 索引的结构版本。结构变了就加 1；读到对不上的版本直接重建。
-pub const SCHEMA_VERSION: u32 = 1;
+/// 索引的结构版本。结构变了就加 1；读到对不上的版本**就地重建**（见模块文档）。
+///
+/// 2：条目多存了简介、类型、开发商、发行商四样。
+pub const SCHEMA_VERSION: u32 = 2;
 
-const SCHEMA: &str = "\
+/// 这一版索引**从数据源里取了哪几样**。
+///
+/// 它有两个去处，缺一不可：
+///
+/// - 写进 `meta`，于是 `romcat zh sync` 之后看得出这一版索引带了哪些字段；
+/// - 进**输入指纹**（`scrape::zh` 的 `probe`）。改了取哪些字段就该重采一遍——
+///   不盖它的话缓存会一口咬定「输入没变」而整条跳过，新取到的字段永远出不来。
+pub const FIELDS: &str = "中文名、别名、简介、类型、开发商、发行商、年份、平台";
+
+/// `meta` 单开一份**先建**：结构版本就写在它里面，而要读它得先有这张表。
+const META_SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS meta(
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 ) STRICT;
+";
 
+const SCHEMA: &str = "\
 -- 一条中文条目。`platforms` 是**折成本工具平台名**之后的那一串，两头带逗号
 -- （`,GBA,NDS,`）——与 `content_cart.family` 同一个写法，为的是 SQL 里能用 `instr`
 -- 做整词匹配，不至于 `GB` 匹配上 `GBA`。
 -- `platform_text` 是数据源原样写的那一串，**依据里要写它**：人去核对时看的是原文。
+-- `summary` 是**中文简介**，原样存着：换行、全角空格与数据源自带的排版都是内容的
+-- 一部分，压掉它们导出到前端里就是一坨。实测最长 9,962 字——SQLite 的 TEXT 装得下，
+-- 撑不撑得动是界面那一侧的事（列表要滚得动）。
 CREATE TABLE IF NOT EXISTS subject(
     id            INTEGER PRIMARY KEY,
     name          TEXT NOT NULL,
     name_cn       TEXT NOT NULL,
     year          INTEGER,
     platforms     TEXT NOT NULL,
-    platform_text TEXT NOT NULL
+    platform_text TEXT NOT NULL,
+    summary       TEXT NOT NULL
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS subject_year ON subject(year);
@@ -51,6 +92,21 @@ CREATE TABLE IF NOT EXISTS subject_name(
     kind    TEXT    NOT NULL,
     value   TEXT    NOT NULL,
     PRIMARY KEY (subject, kind, value)
+) STRICT;
+
+-- 条目上一条**不是叫法**的事实：类型、开发商、发行商（`zh::FactKind`）。
+--
+-- **与叫法分开一张表**：那一张会被拿去撞名字，这一张不会。混在一起，`开发= 任天堂`
+-- 会变成一条能撞上《任天堂》的「叫法」。
+--
+-- `ord` 是数据源里的**原次序**，不是排序用的装饰：前端只写得下一个开发商时取的就是
+-- 第一个（`gamelist` 的 `developers.first()`），按字典序重排等于换一家公司。
+CREATE TABLE IF NOT EXISTS subject_fact(
+    subject INTEGER NOT NULL,
+    kind    TEXT    NOT NULL,
+    ord     INTEGER NOT NULL,
+    value   TEXT    NOT NULL,
+    PRIMARY KEY (subject, kind, ord)
 ) STRICT;
 ";
 
@@ -73,12 +129,17 @@ pub enum StoreError {
         /// 底层错误。
         source: rusqlite::Error,
     },
-    /// 结构版本对不上。
+    /// **这份索引是更新的程序建的。**
+    ///
+    /// 与「旧版本」处置相反，而这个方向**必须拒绝**：旧程序不认得新结构里的列，
+    /// 照「重建」走就是拿旧程序的理解把新索引整份覆盖掉。两个版本的程序交替在同一个
+    /// 工作目录上跑（发布版加本地版、bisect、两份 checkout）时，那是真会发生的事。
     #[error(
-        "中文索引 {path} 的结构版本是 {found}，本程序认得的是 {expected}。\
-         删掉它重新跑一次 `romcat zh sync` 即可——这份库里没有攒出来的东西，全部内容都能重建"
+        "中文索引 {path} 的结构版本是 {found}，比本程序认得的 {expected} 还新——\
+         它是更新的那一版程序建的。升级程序即可；\
+         真要用这一版程序，删掉它重跑一次 `romcat zh sync`"
     )]
-    Version {
+    TooNew {
         /// 索引文件。
         path: String,
         /// 文件里的版本。
@@ -88,11 +149,26 @@ pub enum StoreError {
     },
 }
 
+/// **这份索引等着从本机那份原件重建**：结构版本对不上，数据已经扫掉了。
+///
+/// 两样都是重建要用的：从缓存目录里哪个文件重读，以及重建完该把哪个指纹记回去
+/// ——记回去了，下一趟 `romcat zh sync` 才认得出「本机这份就是最新的」而整件跳过。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rebuilding {
+    /// 上一版是从哪个 dump 建的（缓存目录里那个文件就叫这个名字）。
+    pub dump: String,
+    /// 那一版的指纹。
+    pub fingerprint: String,
+    /// 扫掉之前那份索引里的结构版本。报告里要如实说一句。
+    pub was: u32,
+}
+
 /// 本机那份中文条目索引。
 #[derive(Debug)]
 pub struct Store {
     conn: Connection,
     path: PathBuf,
+    rebuilding: Option<Rebuilding>,
 }
 
 /// 索引里现在有什么。
@@ -110,6 +186,16 @@ pub struct Stats {
     pub with_platform: u64,
     /// 其中说得出年份的。
     pub with_year: u64,
+    /// 其中有中文简介的。
+    pub with_summary: u64,
+    /// 其中写得出类型的。
+    pub with_genre: u64,
+    /// 其中写得出开发商的。
+    pub with_developer: u64,
+    /// 其中写得出发行商的。
+    pub with_publisher: u64,
+    /// 这一版索引从数据源里取了哪几样（[`FIELDS`]）。**换了这一行就该重刮**。
+    pub fields: String,
     /// 按平台：平台名与条目数。**老平台深度浅是事实不是缺陷**，报告要摆出来。
     pub by_platform: Vec<(String, u64)>,
 }
@@ -117,8 +203,12 @@ pub struct Stats {
 impl Store {
     /// 打开（必要时新建）本机那份索引。
     ///
+    /// 结构版本对不上时**不报错**：数据整批扫掉、换上新结构，等着
+    /// [`sync::rebuild`](super::sync::rebuild) 从本机那份原件重读一遍
+    /// （[`Store::rebuilding`]）。这份库里没有攒出来的东西，重建不丢任何判断。
+    ///
     /// # Errors
-    /// 目录建不出来、库打不开、或者结构版本对不上时返回错误。
+    /// 目录建不出来或者库打不开时返回错误。
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
@@ -132,9 +222,10 @@ impl Store {
             path: crate::path::display(path),
             source,
         })?;
-        let store = Self {
+        let mut store = Self {
             conn,
             path: path.to_path_buf(),
+            rebuilding: None,
         };
         store.prepare()?;
         Ok(store)
@@ -149,39 +240,82 @@ impl Store {
             path: ":memory:".to_string(),
             source,
         })?;
-        let store = Self {
+        let mut store = Self {
             conn,
             path: PathBuf::from(":memory:"),
+            rebuilding: None,
         };
         store.prepare()?;
         Ok(store)
     }
 
-    fn prepare(&self) -> Result<(), StoreError> {
+    /// 这份索引在等着重建吗——是的话，从哪个原件重建、重建完记哪个指纹。
+    #[must_use]
+    pub fn rebuilding(&self) -> Option<&Rebuilding> {
+        self.rebuilding.as_ref()
+    }
+
+    fn prepare(&mut self) -> Result<(), StoreError> {
+        // **先读版本再建那几张表**：`CREATE TABLE IF NOT EXISTS` 对已经存在的旧表一个字
+        // 都不改，先建完再读，读到的会是新旧混着的一份结构（旧表缺着新列），而 `meta`
+        // 里那个数还写着旧版本。`meta` 自己例外——版本就写在它里面，得先有它。
         self.conn
-            .execute_batch(&format!("PRAGMA journal_mode=WAL;\n{SCHEMA}"))
+            .execute_batch(&format!("PRAGMA journal_mode=WAL;\n{META_SCHEMA}"))
             .map_err(|source| self.error(source))?;
-        let found: Option<String> = self
+        let found: Option<u32> = self
             .conn
             .query_row(
                 "SELECT value FROM meta WHERE key = 'schema_version'",
                 [],
-                |row| row.get(0),
+                |row| row.get::<_, String>(0),
             )
             .optional()
-            .map_err(|source| self.error(source))?;
-        match found.as_deref().and_then(|text| text.parse::<u32>().ok()) {
-            Some(version) if version == SCHEMA_VERSION => Ok(()),
-            Some(version) => Err(StoreError::Version {
-                path: crate::path::display(&self.path),
-                found: version,
-                expected: SCHEMA_VERSION,
-            }),
-            None => {
-                self.put_meta("schema_version", &SCHEMA_VERSION.to_string())?;
-                Ok(())
+            .map_err(|source| self.error(source))?
+            .and_then(|text| text.parse().ok());
+        match found {
+            // **比本程序新的一律拒绝。** 旧程序不认得新结构里的列，照「重建」走就是拿
+            // 旧程序的理解把新索引整份覆盖掉。
+            Some(version) if version > SCHEMA_VERSION => {
+                return Err(StoreError::TooNew {
+                    path: crate::path::display(&self.path),
+                    found: version,
+                    expected: SCHEMA_VERSION,
+                });
             }
+            // **旧版本：一个字都不动**，只把重建要用的两样记下来。换结构与写新数据是
+            // `replace` 那一个事务里的事（见模块文档「旧数据一直留到新数据真的写进来」）。
+            Some(version) if version < SCHEMA_VERSION => {
+                self.rebuilding = Some(Rebuilding {
+                    dump: self.meta("dump")?.unwrap_or_default(),
+                    fingerprint: self.meta("fingerprint")?.unwrap_or_default(),
+                    was: version,
+                });
+                return Ok(());
+            }
+            _ => {}
         }
+        self.conn
+            .execute_batch(SCHEMA)
+            .map_err(|source| self.error(source))?;
+        Ok(())
+    }
+
+    /// 换上新结构：旧的那几张表整个扔掉重建。
+    ///
+    /// **只有 [`Store::replace`] 调它**，而且紧接着就把新数据写进去——这两件事之间不留
+    /// 空当，正是「旧数据一直留到新数据真的写进来那一刻」那一条。
+    fn reshape(&mut self) -> Result<(), StoreError> {
+        if self.rebuilding.is_none() {
+            return Ok(());
+        }
+        self.conn
+            .execute_batch(&format!(
+                "DROP TABLE IF EXISTS subject_fact;
+                 DROP TABLE IF EXISTS subject_name;
+                 DROP TABLE IF EXISTS subject;
+                 {SCHEMA}"
+            ))
+            .map_err(|source| self.error(source))
     }
 
     fn error(&self, source: rusqlite::Error) -> StoreError {
@@ -237,6 +371,8 @@ impl Store {
         dump: &str,
         fingerprint: &str,
     ) -> Result<(), StoreError> {
+        // **换结构与写数据在同一趟里**：旧数据一直留到这一刻。
+        self.reshape()?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|it| i64::try_from(it.as_secs()).unwrap_or(i64::MAX))
@@ -249,18 +385,24 @@ impl Store {
             source,
         };
         let tx = self.conn.transaction().map_err(failed)?;
-        tx.execute_batch("DELETE FROM subject_name; DELETE FROM subject;")
+        tx.execute_batch("DELETE FROM subject_fact; DELETE FROM subject_name; DELETE FROM subject;")
             .map_err(failed)?;
         {
             let mut subject = tx
                 .prepare(
-                    "INSERT OR REPLACE INTO subject(id, name, name_cn, year, platforms, platform_text)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    "INSERT OR REPLACE INTO subject(id, name, name_cn, year, platforms, platform_text, summary)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 )
                 .map_err(failed)?;
             let mut name = tx
                 .prepare(
                     "INSERT OR IGNORE INTO subject_name(subject, kind, value) VALUES (?1, ?2, ?3)",
+                )
+                .map_err(failed)?;
+            let mut fact = tx
+                .prepare(
+                    "INSERT OR IGNORE INTO subject_fact(subject, kind, ord, value)
+                     VALUES (?1, ?2, ?3, ?4)",
                 )
                 .map_err(failed)?;
             for entry in entries {
@@ -272,11 +414,23 @@ impl Store {
                         entry.year,
                         fold_platforms(&entry.platforms),
                         entry.platform_text,
+                        entry.summary,
                     ])
                     .map_err(failed)?;
                 for alias in &entry.aliases {
                     name.execute(params![entry.id, NameKind::Alias.code(), alias])
                         .map_err(failed)?;
+                }
+                for kind in FactKind::all() {
+                    for (at, value) in entry.facts(kind).iter().enumerate() {
+                        fact.execute(params![
+                            entry.id,
+                            kind.code(),
+                            i64::try_from(at).unwrap_or(i64::MAX),
+                            value
+                        ])
+                        .map_err(failed)?;
+                    }
                 }
             }
         }
@@ -284,15 +438,31 @@ impl Store {
         self.put_meta("dump", dump)?;
         self.put_meta("fingerprint", fingerprint)?;
         self.put_meta("built_at", &now.to_string())?;
+        self.put_meta("fields", FIELDS)?;
+        // **结构版本最后才落盘**：写在这之前的话，一次半途而废的重建会留下一份空索引
+        // 盖着新版本号，而「该从哪份原件重建」的线索已经没了。
+        self.put_meta("schema_version", &SCHEMA_VERSION.to_string())?;
+        self.rebuilding = None;
         Ok(())
     }
 
     /// 把整份索引装进内存。**匹配走内存不走 SQL**：一次匹配要看上千条叫法，
     /// 几万个变体就是几千万次查询，那不是 SQLite 该干的活。
     ///
+    /// **简介不在里面**（`Entry::summary` 一律是空串）。装进来要多背九十来 MB 常驻
+    /// （8.7 万条条目、94.2% 有简介、中位 338 字），而这一层的活是撞名字，撞名字不看
+    /// 简介。要某一条的简介走 [`Store::summary`]——那时手上已经有条目号了。
+    ///
+    /// 类型、开发商、发行商留在里面：它们是几个短串，量级差着两个数量级。
+    ///
     /// # Errors
     /// 读库失败时返回错误。
     pub fn load(&self) -> Result<Index, StoreError> {
+        // 等着重建时交出一份空的：旧表的列与本程序认得的对不上，
+        // **半懂不懂地读比读不出来更糟**。
+        if self.rebuilding.is_some() {
+            return Ok(Index::default());
+        }
         let mut aliases: std::collections::BTreeMap<u32, Vec<String>> =
             std::collections::BTreeMap::new();
         let mut statement = self
@@ -308,10 +478,34 @@ impl Store {
             let (subject, value) = row.map_err(|source| self.error(source))?;
             aliases.entry(subject).or_default().push(value);
         }
+        // 事实（类型 / 开发商 / 发行商）按 `ord` 读回来：那是数据源里的**原次序**，
+        // 前端只写得下一个开发商时取的就是第一个。
+        let mut facts: std::collections::BTreeMap<(u32, String), Vec<String>> =
+            std::collections::BTreeMap::new();
+        let mut statement = self
+            .conn
+            .prepare("SELECT subject, kind, value FROM subject_fact ORDER BY subject, kind, ord")
+            .map_err(|source| self.error(source))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, u32>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|source| self.error(source))?;
+        for row in rows {
+            let (subject, kind, value) = row.map_err(|source| self.error(source))?;
+            facts.entry((subject, kind)).or_default().push(value);
+        }
+        // **简介不装进内存**，见 `load` 的文档：8.7 万条乘中位 338 字是九十来 MB 常驻，
+        // 而这一层的活是撞名字，撞名字不看简介。要哪一条的简介走 [`Store::summary`]。
         let mut statement = self
             .conn
             .prepare(
-                "SELECT id, name, name_cn, year, platforms, platform_text FROM subject ORDER BY id",
+                "SELECT id, name, name_cn, year, platforms, platform_text
+                 FROM subject ORDER BY id",
             )
             .map_err(|source| self.error(source))?;
         let rows = statement
@@ -324,6 +518,7 @@ impl Store {
                     year: row.get(3)?,
                     platforms: split_platforms(&row.get::<_, String>(4)?),
                     platform_text: row.get(5)?,
+                    ..Entry::default()
                 })
             })
             .map_err(|source| self.error(source))?;
@@ -331,10 +526,35 @@ impl Store {
         for row in rows {
             let mut entry = row.map_err(|source| self.error(source))?;
             entry.aliases = aliases.remove(&entry.id).unwrap_or_default();
+            for kind in FactKind::all() {
+                let got = facts
+                    .remove(&(entry.id, kind.code().to_string()))
+                    .unwrap_or_default();
+                *entry.facts_mut(kind) = got;
+            }
             entries.push(entry);
         }
         let dump = self.meta("dump")?.unwrap_or_default();
-        Ok(Index::build(entries, dump))
+        let fields = self.meta("fields")?.unwrap_or_default();
+        Ok(Index::build(entries, dump).with_fields(fields))
+    }
+
+    /// 某一条条目的**中文简介**；这条条目不在库里、或者数据源没写就是 `None`。
+    ///
+    /// 单独一条路而不是跟着 [`Store::load`] 一起进内存：见那个函数的文档。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn summary(&self, id: u32) -> Result<Option<String>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT summary FROM subject WHERE id = ?1",
+                params![id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|source| self.error(source))
+            .map(|found| found.filter(|text| !text.is_empty()))
     }
 
     /// 索引里现在有什么。
@@ -342,12 +562,21 @@ impl Store {
     /// # Errors
     /// 读库失败时返回错误。
     pub fn stats(&self) -> Result<Stats, StoreError> {
+        if self.rebuilding.is_some() {
+            // 同 `load`：数不出来的时候不要编一个数。dump 那一行还说得出来，
+            // 因为它就写在 `meta` 里，而 `meta` 一直没动过。
+            return Ok(Stats {
+                dump: self.meta("dump")?.unwrap_or_default(),
+                ..Stats::default()
+            });
+        }
         let mut stats = Stats {
             dump: self.meta("dump")?.unwrap_or_default(),
             built_at: self
                 .meta("built_at")?
                 .and_then(|it| it.parse().ok())
                 .unwrap_or(0),
+            fields: self.meta("fields")?.unwrap_or_default(),
             ..Stats::default()
         };
         let counts = self
@@ -356,7 +585,8 @@ impl Store {
                 "SELECT COUNT(*),
                         SUM(CASE WHEN name_cn <> '' THEN 1 ELSE 0 END),
                         SUM(CASE WHEN platforms <> '' THEN 1 ELSE 0 END),
-                        SUM(CASE WHEN year IS NOT NULL THEN 1 ELSE 0 END)
+                        SUM(CASE WHEN year IS NOT NULL THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN summary <> '' THEN 1 ELSE 0 END)
                  FROM subject",
                 [],
                 |row| {
@@ -365,6 +595,7 @@ impl Store {
                         row.get::<_, Option<i64>>(1)?.unwrap_or(0),
                         row.get::<_, Option<i64>>(2)?.unwrap_or(0),
                         row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                        row.get::<_, Option<i64>>(4)?.unwrap_or(0),
                     ))
                 },
             )
@@ -373,6 +604,25 @@ impl Store {
         stats.with_chinese = u64::try_from(counts.1).unwrap_or(0);
         stats.with_platform = u64::try_from(counts.2).unwrap_or(0);
         stats.with_year = u64::try_from(counts.3).unwrap_or(0);
+        stats.with_summary = u64::try_from(counts.4).unwrap_or(0);
+        // **数的是有几条条目写得出这一样，不是一共有几条值**：一条条目写了三个开发商
+        // 仍然只算一条有开发商，不然「覆盖率」会大于 100%。
+        for kind in FactKind::all() {
+            let count: i64 = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(DISTINCT subject) FROM subject_fact WHERE kind = ?1",
+                    params![kind.code()],
+                    |row| row.get(0),
+                )
+                .map_err(|source| self.error(source))?;
+            let count = u64::try_from(count).unwrap_or(0);
+            match kind {
+                FactKind::Genre => stats.with_genre = count,
+                FactKind::Developer => stats.with_developer = count,
+                FactKind::Publisher => stats.with_publisher = count,
+            }
+        }
         let mut by_platform: std::collections::BTreeMap<String, u64> =
             std::collections::BTreeMap::new();
         let mut statement = self
@@ -425,6 +675,10 @@ mod tests {
             year: Some(2008),
             platforms: vec!["NDS".to_string()],
             platform_text: "NDS".to_string(),
+            summary: "　　以细腻的画风…\n第二段。".to_string(),
+            genres: vec!["ACT".to_string()],
+            developers: vec!["SNK".to_string(), "北斗".to_string()],
+            publishers: vec!["世嘉".to_string()],
         }
     }
 
@@ -436,7 +690,14 @@ mod tests {
             .expect("写得进去");
         let index = store.load().expect("读得回来");
         assert_eq!(index.len(), 1);
-        assert_eq!(index.entries()[0], 一条());
+        // **简介不在装进内存那一份里**（见 `load` 的文档），别的一格不差。
+        assert_eq!(
+            index.entries()[0],
+            Entry {
+                summary: String::new(),
+                ..一条()
+            }
+        );
         assert_eq!(index.dump(), "dump-2026-09-01");
         assert_eq!(
             store.fingerprint().expect("读得到").as_deref(),
@@ -458,6 +719,108 @@ mod tests {
     }
 
     #[test]
+    fn 简介类型开发商发行商都留得住() {
+        // 这四样以前一列都没有——那份 435 MB 的数据被当成「撞名字的索引」在用。
+        let mut store = Store::in_memory().expect("开得起来");
+        store.replace(&[一条()], "dump", "指纹").expect("写得进去");
+        // **简介单独一条路读**：装进内存那份索引里要多背九十来 MB，而撞名字不看简介。
+        assert_eq!(
+            store.summary(4).expect("读得回来").as_deref(),
+            // **简介原样**：中间那个换行是内容的一部分，压掉它导出到前端里就是一坨。
+            Some("　　以细腻的画风…\n第二段。")
+        );
+        assert_eq!(store.summary(999).expect("读得回来"), None, "没有这条条目");
+        let index = store.load().expect("读得回来");
+        let entry = &index.entries()[0];
+        assert_eq!(entry.summary, "", "简介不进内存");
+        assert_eq!(entry.genres, vec!["ACT"]);
+        // **原次序留着**：前端只写得下一个开发商时取的就是第一个。
+        assert_eq!(entry.developers, vec!["SNK", "北斗"]);
+        assert_eq!(entry.publishers, vec!["世嘉"]);
+        // 这一版索引取了哪几样也记着——它同时是刮削那一侧的输入指纹的一部分。
+        assert_eq!(index.fields(), FIELDS);
+    }
+
+    /// 造一份「结构版本是 `version`」的索引，返回它的路径。
+    fn 一份旧索引(dir: &crate::testing::TempDir, version: u32) -> PathBuf {
+        let path = dir.path().join("zh.sqlite3");
+        {
+            let mut store = Store::open(&path).expect("开得起来");
+            assert!(store.rebuilding().is_none(), "新建的一份不必重建");
+            store
+                .replace(&[一条()], "dump-2026-09-01.zip", "sha256:abc")
+                .expect("写得进去");
+        }
+        let conn = rusqlite::Connection::open(&path).expect("开得起来");
+        conn.execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+            params![version.to_string()],
+        )
+        .expect("改得动");
+        path
+    }
+
+    #[test]
+    fn 结构版本旧了先不动旧数据_只交出重建线索() {
+        // **不报错让用户自己删**：删掉它就等于删掉那份 435 MB 的下载凭据。
+        // 也**不先扫后建**：重建要读一份 435 MB 的 zip，中途 Ctrl-C 是真会发生的事，
+        // 那一下之后不该只剩一份空索引加一个新版本号。
+        let dir = crate::testing::temp_dir("zh-store-version");
+        let path = 一份旧索引(&dir, 1);
+
+        let store = Store::open(&path).expect("旧版本照样打得开，不报错");
+        let pending = store.rebuilding().expect("等着重建").clone();
+        assert_eq!(pending.was, 1);
+        // 重建要用的两样都在：从哪个原件重建、重建完记哪个指纹。
+        assert_eq!(pending.dump, "dump-2026-09-01.zip");
+        assert_eq!(pending.fingerprint, "sha256:abc");
+        // 这中间读出来的是空的——旧表的列与本程序认得的对不上，半懂不懂地读更糟。
+        assert!(store.load().expect("读得回来").is_empty());
+        assert_eq!(store.stats().expect("数得出来").subjects, 0);
+        // **而版本号还写着旧的那个**：这一趟半途而废也不丢线索，下次打开照样重建得了。
+        assert_eq!(
+            store.meta("schema_version").expect("读得到"),
+            Some("1".to_string())
+        );
+        drop(store);
+        assert!(
+            Store::open(&path)
+                .expect("再打开一次")
+                .rebuilding()
+                .is_some(),
+            "没重建成就该一直等着"
+        );
+
+        // 真写进新数据那一刻，结构与版本号才一起换掉。
+        let mut store = Store::open(&path).expect("开得起来");
+        store
+            .replace(&[一条()], "dump-2026-09-01.zip", "sha256:abc")
+            .expect("写得进去");
+        assert!(store.rebuilding().is_none());
+        assert_eq!(
+            store.meta("schema_version").expect("读得到"),
+            Some(SCHEMA_VERSION.to_string())
+        );
+        assert_eq!(store.load().expect("读得回来").len(), 1);
+    }
+
+    #[test]
+    fn 结构版本比本程序新的一律拒绝() {
+        // 与「旧版本」处置相反，而这个方向必须拒绝：照「重建」走就是拿旧程序的理解
+        // 把新索引整份覆盖掉。两个版本的程序交替在同一个工作目录上跑是真会发生的事。
+        let dir = crate::testing::temp_dir("zh-store-too-new");
+        let path = 一份旧索引(&dir, SCHEMA_VERSION + 1);
+        let error = Store::open(&path).expect_err("该拒绝");
+        assert!(matches!(error, StoreError::TooNew { found, .. } if found == SCHEMA_VERSION + 1));
+        // 库一个字都没动。
+        let conn = rusqlite::Connection::open(&path).expect("开得起来");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM subject", [], |row| row.get(0))
+            .expect("数得出来");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
     fn 统计数得出中文名与平台的覆盖() {
         let mut store = Store::in_memory().expect("开得起来");
         let mut 没中文名 = 一条();
@@ -465,6 +828,10 @@ mod tests {
         没中文名.name_cn = String::new();
         没中文名.platforms = Vec::new();
         没中文名.year = None;
+        没中文名.summary = String::new();
+        没中文名.genres = Vec::new();
+        没中文名.developers = Vec::new();
+        没中文名.publishers = Vec::new();
         store
             .replace(&[一条(), 没中文名], "dump", "指纹")
             .expect("写得进去");
@@ -474,5 +841,12 @@ mod tests {
         assert_eq!(stats.with_platform, 1);
         assert_eq!(stats.with_year, 1);
         assert_eq!(stats.by_platform, vec![("NDS".to_string(), 1)]);
+        // 新的四样也数得出来。**数的是有几条条目写得出这一样**：那一条写了两个开发商
+        // 仍然只算一条，不然「覆盖率」会大于 100%。
+        assert_eq!(stats.with_summary, 1);
+        assert_eq!(stats.with_genre, 1);
+        assert_eq!(stats.with_developer, 1);
+        assert_eq!(stats.with_publisher, 1);
+        assert_eq!(stats.fields, FIELDS);
     }
 }

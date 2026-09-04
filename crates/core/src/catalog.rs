@@ -361,6 +361,9 @@ impl Catalog {
         // `CREATE TABLE IF NOT EXISTS` 对它们一个字都不改（见 `add_columns`）。
         sublibrary::add_columns(&catalog.conn).map_err(|source| catalog.err(source))?;
         identify::add_columns(&catalog.conn).map_err(|source| catalog.err(source))?;
+        // 票 01 给 `scrape_value` 的去重键加了 `value` 那一列。老库里那张表照样搬得过来
+        // ——一行不丢、一列不改，所以结构版本不必加（`scrape::rekey` 的文档算了这笔账）。
+        scrape::rekey(&catalog.conn).map_err(|source| catalog.err(source))?;
         let found: Option<String> = catalog
             .conn
             .query_row(

@@ -129,6 +129,7 @@ fn 建索引() -> zh::Index {
                 year: Some(2002),
                 platforms: vec!["GBA".to_string()],
                 platform_text: "GBA".to_string(),
+                ..zh::Entry::default()
             },
             zh::Entry {
                 id: 4,
@@ -138,6 +139,7 @@ fn 建索引() -> zh::Index {
                 year: Some(2008),
                 platforms: vec!["GBA".to_string()],
                 platform_text: "GBA".to_string(),
+                ..zh::Entry::default()
             },
             // 同名不同平台：**平台对不上的一条都不该产出**。
             zh::Entry {
@@ -148,6 +150,7 @@ fn 建索引() -> zh::Index {
                 year: Some(1995),
                 platforms: vec!["SFC".to_string()],
                 platform_text: "SFC".to_string(),
+                ..zh::Entry::default()
             },
         ],
         "dump-2026-09-01".to_string(),

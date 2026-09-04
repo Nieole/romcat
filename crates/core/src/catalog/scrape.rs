@@ -2,9 +2,15 @@
 //!
 //! ## 五张表各自回答一个问题
 //!
-//! - `scrape_value`：**一个锚点、一个字段、一个源给出的一个值**。去重键是这个三元组，
-//!   **并存而非覆盖**（调研 13.3(4)）。后写的源盖掉先写的，就永远做不了字段级 fallback，
-//!   也无法在不重新采集的前提下调一次优先级——而调优先级正是这套机制存在的理由。
+//! - `scrape_value`：**一个锚点、一个字段、一个源给出的值**。**并存而非覆盖**
+//!   （调研 13.3(4)）：后写的源盖掉先写的，就永远做不了字段级 fallback，也无法在不重新
+//!   采集的前提下调一次优先级——而调优先级正是这套机制存在的理由。
+//!
+//!   去重键里**带上值本身**，于是一个源在一个字段上说得出好几句话。**这不是给「一个源
+//!   两个答案」开口子**：单值字段仍旧第一个胜出，那道闸在 `Harvest::value` 上。它是给
+//!   **标题集合**留的位置——中立库里标题永远是集合不是单值（`CONTEXT.md`），而中文离线源
+//!   撞上一条条目之后，那条条目的中文名与**别名**本来就是同一部作品的好几个叫法
+//!   （`Harvest::each`）。
 //! - `media`：**媒体池**里的一份媒体，主键是**内容哈希**。文件名不是媒体的主键
 //!   （ADR-0009）：各前端的媒体匹配键在文件名、标题、label 之间横跳，净化函数多对一
 //!   不可逆，只有内容哈希在所有格式之间都说得通。
@@ -39,9 +45,47 @@ use super::{Catalog, CatalogError};
 use crate::scrape::priority::VERDICT;
 use crate::scrape::{AnchorKind, Field};
 
+/// 老库里那张 `scrape_value` 的去重键**换掉**：加上 `value` 那一列。
+///
+/// 为什么不是把中立库的结构版本加一格：那个数一加，用户就得删掉 780 MB 的库、重扫
+/// 27 分钟、重跑 14 分钟识别（`catalog::SCHEMA_VERSION` 的文档算过这笔账）。而这张表
+/// 是**刮削结论**，本来就整份可再生——离线档 `--refresh` 重跑一遍只要几秒。
+///
+/// 这里做的是**无损换键**：旧表原样搬过来，一行不丢、一列不改，只是主键多了一列。
+/// 与 `identify::add_columns`、`sublibrary::add_columns` 是同一档的就地修补，
+/// 判据也是同一条——**旧数据会不会被读错**。不会：搬过去的每一行都还是它自己。
+///
+/// SQLite 改不动主键，所以只能重建那张表。这一步是幂等的：键已经对了就一个字都不动。
+pub(super) fn rekey(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'scrape_value'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(sql) = sql else {
+        return Ok(());
+    };
+    if sql.contains("field, source, value") {
+        return Ok(());
+    }
+    // 索引跟着旧表改名过去了，名字却没变——不先扔掉它，下面那句 `CREATE INDEX` 会撞名。
+    conn.execute_batch(&format!(
+        "BEGIN;
+         DROP INDEX IF EXISTS scrape_value_subject;
+         ALTER TABLE scrape_value RENAME TO scrape_value_old;
+         {SCRAPE_SCHEMA}
+         INSERT OR IGNORE INTO scrape_value(anchor, subject, field, source, value, evidence, at)
+             SELECT anchor, subject, field, source, value, evidence, at FROM scrape_value_old;
+         DROP TABLE scrape_value_old;
+         COMMIT;"
+    ))
+}
+
 /// 刮削相关的表。
 pub(super) const SCRAPE_SCHEMA: &str = "\
--- 一个锚点、一个字段、一个源给出的一个值。**三元组并存，不互相覆盖。**
+-- 一个锚点、一个字段、一个源给出的值。**不同的源并存，不互相覆盖。**
 CREATE TABLE IF NOT EXISTS scrape_value(
     anchor   TEXT NOT NULL,
     subject  TEXT NOT NULL,
@@ -53,7 +97,10 @@ CREATE TABLE IF NOT EXISTS scrape_value(
     evidence TEXT NOT NULL,
     -- 采集时刻。**优先级表里没列到的源按它兜底**（新的优先），于是加一个源不必改配置。
     at       INTEGER NOT NULL,
-    PRIMARY KEY (anchor, subject, field, source)
+    -- **值也在键里**：一个源在一个字段上说得出好几句话（标题集合那一种形状）。
+    -- 少了它，中文离线源撞上一条条目之后那几个别名只有一个落得了库，其余的连同它们的
+    -- **依据**一起蒸发，而采集记录还记着「采到五条」——数对不上，还查不出为什么。
+    PRIMARY KEY (anchor, subject, field, source, value)
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS scrape_value_subject ON scrape_value(anchor, subject);
@@ -277,8 +324,8 @@ impl Catalog {
                 .prepare(
                     "INSERT INTO scrape_value(anchor, subject, field, source, value, evidence, at)
                      VALUES(?1,?2,?3,?4,?5,?6,?7)
-                     ON CONFLICT(anchor, subject, field, source) DO UPDATE SET
-                        value = excluded.value, evidence = excluded.evidence, at = excluded.at",
+                     ON CONFLICT(anchor, subject, field, source, value) DO UPDATE SET
+                        evidence = excluded.evidence, at = excluded.at",
                 )
                 .map_err(to_err)?;
             let mut insert_media = tx
@@ -731,24 +778,36 @@ impl Catalog {
         value: &str,
         evidence: &str,
     ) -> Result<(), CatalogError> {
-        self.conn
-            .execute(
-                "INSERT INTO scrape_value(anchor, subject, field, source, value, evidence, at)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7)
-                 ON CONFLICT(anchor, subject, field, source) DO UPDATE SET
-                    value = excluded.value, evidence = excluded.evidence, at = excluded.at",
-                params![
-                    anchor.label(),
-                    subject,
-                    field.label(),
-                    VERDICT,
-                    value,
-                    evidence,
-                    super::now_secs(),
-                ],
-            )
-            .map(|_| ())
-            .map_err(|source| self.err(source))
+        // **裁决一个字段上只有一条**：人改了主意就是改了主意，不是又添了一句。
+        // 去重键里带上值之后，光靠 `ON CONFLICT` 做不到这件事——改一个字的新裁决会
+        // 落成第二行，旧的那条还在。所以先把这个字段上的裁决删干净再写。
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        tx.execute(
+            "DELETE FROM scrape_value
+             WHERE anchor = ?1 AND subject = ?2 AND field = ?3 AND source = ?4",
+            params![anchor.label(), subject, field.label(), VERDICT],
+        )
+        .map_err(to_err)?;
+        tx.execute(
+            "INSERT INTO scrape_value(anchor, subject, field, source, value, evidence, at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                anchor.label(),
+                subject,
+                field.label(),
+                VERDICT,
+                value,
+                evidence,
+                super::now_secs(),
+            ],
+        )
+        .map_err(to_err)?;
+        tx.commit().map_err(to_err)
     }
 
     /// 撤掉一条**裁决**来源的字段值，让别的源重新说了算。返回撤掉了没有。
@@ -814,6 +873,70 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 老库那张表无损换键_一行不丢而且能装下同一个源的第二个值() {
+        // 加中立库的结构版本要用户删掉 780 MB 的库、重扫 27 分钟；而这张表整份可再生。
+        // 所以是**就地换键**——旧表原样搬过来，一行不丢一列不改。
+        let conn = rusqlite::Connection::open_in_memory().expect("开得起来");
+        conn.execute_batch(
+            "CREATE TABLE scrape_value(
+                 anchor TEXT NOT NULL, subject TEXT NOT NULL, field TEXT NOT NULL,
+                 source TEXT NOT NULL, value TEXT NOT NULL, evidence TEXT NOT NULL,
+                 at INTEGER NOT NULL,
+                 PRIMARY KEY (anchor, subject, field, source)
+             ) STRICT;
+             CREATE INDEX scrape_value_subject ON scrape_value(anchor, subject);
+             INSERT INTO scrape_value VALUES('变体','FC/甲.zip','标题','中文离线源','魂斗罗','旧依据',1);",
+        )
+        .expect("造得出老库");
+
+        rekey(&conn).expect("换得动键");
+
+        // 旧的那一行还在，evidence 与 at 一个字都没改。
+        let (value, evidence, at): (String, String, i64) = conn
+            .query_row("SELECT value, evidence, at FROM scrape_value", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .expect("读得回来");
+        assert_eq!((value.as_str(), evidence.as_str(), at), ("魂斗罗", "旧依据", 1));
+        // 换完键之后，同一个源在同一个字段上装得下第二个值——别名走的正是这条。
+        conn.execute(
+            "INSERT INTO scrape_value VALUES('变体','FC/甲.zip','标题','中文离线源','魂斗羅','新依据',2)",
+            [],
+        )
+        .expect("第二条装得下");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM scrape_value", [], |row| row.get(0))
+            .expect("数得出来");
+        assert_eq!(count, 2);
+        // 幂等：键已经对了就一个字都不动。
+        rekey(&conn).expect("再来一次也行");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM scrape_value", [], |row| row.get(0))
+            .expect("数得出来");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn 裁决一个字段上永远只有一条() {
+        // 去重键里带上值之后，`ON CONFLICT` 做不到这件事了：改一个字的新裁决会落成
+        // 第二行，旧的那条还在。人改了主意就是改了主意，不是又添了一句。
+        let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+        catalog
+            .put_verdict_value(AnchorKind::Variant, "FC/甲.zip", Field::Title, "魂斗罗", "人定的")
+            .expect("写得进去");
+        catalog
+            .put_verdict_value(AnchorKind::Variant, "FC/甲.zip", Field::Title, "魂斗罗改", "改主意了")
+            .expect("写得进去");
+        let values = catalog.scraped_values("变体", "FC/甲.zip").expect("读得出");
+        let 裁决: Vec<&str> = values
+            .iter()
+            .filter(|value| value.source == VERDICT)
+            .map(|value| value.value.as_str())
+            .collect();
+        assert_eq!(裁决, vec!["魂斗罗改"]);
+    }
 
     #[test]
     fn 引用一份池里没有的媒体会被外键挡下() {

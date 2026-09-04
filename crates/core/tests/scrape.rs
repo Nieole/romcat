@@ -224,6 +224,64 @@ fn 刮削带上限(现场: &mut 现场, refresh: bool, cap: Option<u64>) -> scra
     .expect("刮削不该失败")
 }
 
+/// 带上一份**中文离线索引**跑一趟。中文离线源与它的别名那一路只在取过数之后参加。
+fn 刮削带中文索引(现场: &mut 现场, index: &romcat_core::zh::Index) -> scrape::Outcome {
+    let rules = romcat_core::filename::Rules::builtin();
+    let options = scrape::Options::new(现场.dir.path(), 现场.pool_dir.path());
+    scrape::run(
+        &RealFs::new(),
+        &mut 现场.catalog,
+        &Priorities::builtin(),
+        &options,
+        // **网络句柄压根不传**：这一趟的网络请求数是 0，不是「小于某个数」。
+        None,
+        &mut scrape::RunContext {
+            cancel: &CancelToken::new(),
+            progress: &mut |_| {},
+            naming: &fuzzy::Naming {
+                rules: &rules,
+                index: Some(index),
+                tuning: romcat_core::zh::Tuning::default(),
+            },
+        },
+    )
+    .expect("刮削不该失败")
+}
+
+/// 一份最小的中文离线索引：魂斗罗那一条，带两个别名。
+fn 中文索引() -> romcat_core::zh::Index {
+    romcat_core::zh::Index::build(
+        vec![romcat_core::zh::Entry {
+            id: 12_345,
+            name: "魂斗羅".to_string(),
+            name_cn: "魂斗罗".to_string(),
+            aliases: vec!["魂斗羅".to_string(), "Probotector".to_string()],
+            year: Some(1988),
+            platforms: vec!["FC".to_string()],
+            platform_text: "FC".to_string(),
+            summary: "　　两个人一起打外星人。".to_string(),
+            genres: vec!["ACT".to_string()],
+            developers: vec!["Konami".to_string()],
+            publishers: vec!["Konami".to_string()],
+        }],
+        "dump-2026-09-01".to_string(),
+    )
+}
+
+/// 一个锚点上某个字段、某个源给的全部值。
+fn 各值(现场: &现场, anchor: &str, subject: &str, field: &str, source: &str) -> Vec<String> {
+    现场
+        .catalog
+        .scraped_values(anchor, subject)
+        .expect("读得出")
+        .into_iter()
+        .filter(|value| value.field == field && value.source == source)
+        .map(|value| value.value)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 /// 一个锚点上某个字段、某个源给的值。
 fn 值(现场: &现场, anchor: &str, subject: &str, field: &str, source: &str) -> Option<String> {
     现场
@@ -233,6 +291,94 @@ fn 值(现场: &现场, anchor: &str, subject: &str, field: &str, source: &str) 
         .into_iter()
         .find(|value| value.field == field && value.source == source)
         .map(|value| value.value)
+}
+
+#[test]
+fn 撞上中文条目的变体在变体锚点上多出别名而且进了标题集合() {
+    // 票 01 的正题：撞上一条条目之后，那条条目的**别名**该进**标题集合**——
+    // 同一部作品的几个叫法，用户搜哪个都该找得到。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    let index = 中文索引();
+    let outcome = 刮削带中文索引(&mut 现场, &index);
+
+    // 一、**这一趟的网络请求数是 0**：两个中文源都自报本地，档案那道闸门只放本地源进来，
+    // 而 `scrape::run` 拿到的网络句柄是 `None`。
+    assert!(!outcome.report.sources.contains(&"ScreenScraper".to_string()));
+    assert!(outcome.report.sources.contains(&"中文离线源".to_string()));
+    assert!(
+        outcome
+            .report
+            .sources
+            .contains(&"中文离线源·别名".to_string())
+    );
+
+    // 二、中文名照旧落在**变体**锚点上，一条。
+    assert_eq!(
+        值(&现场, "变体", 汉化变体, "标题", "中文离线源").as_deref(),
+        Some("魂斗罗")
+    );
+    // 三、**别名多出来了**，而且是几条不是一条——去重键里带着值，它们各占一行、
+    // 各带自己的**依据**。中文名不在这一路里重复一遍。
+    let 别名 = 各值(&现场, "变体", 汉化变体, "标题", "中文离线源·别名");
+    assert_eq!(别名, vec!["Probotector", "魂斗羅"]);
+    let 依据 = 现场
+        .catalog
+        .scraped_values("变体", 汉化变体)
+        .expect("读得出")
+        .into_iter()
+        .find(|value| value.source == "中文离线源·别名" && value.value == "魂斗羅")
+        .expect("有这一条")
+        .evidence;
+    assert!(依据.contains("条目 12345"), "{依据}");
+    assert!(依据.contains("还叫「魂斗羅」"), "{依据}");
+
+    // 四、**它们进了标题集合**。
+    let rows = romcat_core::title::fold(&现场.catalog).expect("折得出标题集合");
+    let 集合: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.work == 作品)
+        .map(|row| row.value.as_str())
+        .collect();
+    for 叫法 in ["魂斗罗", "魂斗羅", "Probotector"] {
+        assert!(集合.contains(&叫法), "标题集合里少了「{叫法}」：{集合:?}");
+    }
+    // 别名进的是**别名**那一档，不是译名——那一档留给官中版的官方译名（ADR-0012）。
+    let 一条 = rows
+        .iter()
+        .find(|row| row.value == "Probotector")
+        .expect("有这一条");
+    assert_eq!(一条.kind, romcat_core::title::TitleKind::Alias);
+    assert_eq!(一条.source, "中文离线源·别名");
+
+    // 五、**显示标题不受别名影响**。这一条要拿**中文别名**去试才算数：`Probotector`
+    // 是拉丁字母，落在回退链最后一档，它不当显示标题是白捡的；而 `魂斗羅` 与中文名
+    // `魂斗罗` 同语言同类型，两者真正靠置信度分先后（别名是低置信，见
+    // `title::classify`）。
+    let set = romcat_core::title::TitleSet {
+        work: 作品.to_string(),
+        entries: rows
+            .iter()
+            .filter(|row| row.work == 作品)
+            .cloned()
+            .collect(),
+    };
+    let chosen = romcat_core::title::choose(&set, &Priorities::builtin());
+    assert_eq!(chosen.display, "魂斗罗", "显示标题该是撞上的那个中文名");
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.value == "魂斗羅")
+            .expect("集合里有这一条")
+            .confidence,
+        romcat_core::catalog::identify::Confidence::Low,
+        "别名是低置信——它与文件名同档，再由优先级表分先后"
+    );
+
+    // 六、**撞不上中文条目的变体一个新字段都不产出。**
+    assert!(各值(&现场, "变体", "FC/一堆/甲.zip", "标题", "中文离线源").is_empty());
+    assert!(
+        各值(&现场, "变体", "FC/一堆/甲.zip", "标题", "中文离线源·别名").is_empty()
+    );
 }
 
 #[test]

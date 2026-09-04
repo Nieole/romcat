@@ -20,8 +20,9 @@
 //!
 //! ## `infobox` 是原始 wiki 字符串
 //!
-//! 官方有正式的语法规范与解析器（`bangumi/wiki-syntax-spec`），但这里只取三个字段
-//! （平台、别名、发行日期），用不着一整套解析器。要的形状只有两种：`|键= 值` 与
+//! 官方有正式的语法规范与解析器（`bangumi/wiki-syntax-spec`），但这里只取六个键
+//! （平台、别名、发行日期、游戏类型、开发、发行），用不着一整套解析器。要的形状只有
+//! 两种：`|键= 值` 与
 //!
 //! ```text
 //! |别名={
@@ -31,6 +32,16 @@
 //! ```
 //!
 //! 认不出的行整行跳过——**认不出就留空**，这一层宁可少说（同 `identify::naming`）。
+//! **缺键也是留空不是错误**：一条 infobox 没写 `|开发=`，它写了的那几样照样读得出来。
+//!
+//! ## 一个键装着好几个值时拆成好几条
+//!
+//! 多值块（`|开发={ [A] [B] }`）与**顿号分隔**（`|开发= A、B`）说的是同一件事，
+//! 而后者在真库里更常见。[`values`] 把两种写法都拆成好几条——不拆的话「开发商」
+//! 那一格就是一串带顿号的长字符串，前端里既筛不动也搜不着。
+//!
+//! **只有拆得动的键才走 [`values`]**：平台与别名仍旧走 [`field`]，一个名字里本来就
+//! 可能带顿号，拆了就是把一个名字劈成两半。
 
 use serde::Deserialize;
 
@@ -54,6 +65,12 @@ pub struct Row {
     /// 原始 wiki 字符串。
     #[serde(default)]
     pub infobox: String,
+    /// **中文简介**，条目的一级字段。实测 94.2% 的游戏条目有它（中位 338 字）。
+    ///
+    /// **原样留着，一个字都不改**：换行、全角空格与数据源自带的排版都是内容的一部分，
+    /// 压掉它们导出到前端里就是一坨。
+    #[serde(default)]
+    pub summary: String,
     /// 发行日期，`2008-07-17` 这样。
     #[serde(default)]
     pub date: Option<String>,
@@ -92,9 +109,32 @@ impl Row {
     }
 
     /// 全部别名：`infobox` 里 `|别名=` 那一组。
+    ///
+    /// **不拆顿号**：一个名字里本来就可能带顿号，拆了就是把一个名字劈成两半。
     #[must_use]
     pub fn aliases(&self) -> Vec<String> {
         field(&self.infobox, "别名")
+    }
+
+    /// 类型：`infobox` 里 `|游戏类型=`。实测 99.7% 的游戏条目写了它。
+    #[must_use]
+    pub fn genres(&self) -> Vec<String> {
+        values(&self.infobox, "游戏类型")
+    }
+
+    /// 开发商：`infobox` 里 `|开发=`。实测 83.8% 写了它。
+    #[must_use]
+    pub fn developers(&self) -> Vec<String> {
+        values(&self.infobox, "开发")
+    }
+
+    /// 发行商：`infobox` 里 `|发行=`。实测 78.5% 写了它。
+    ///
+    /// **与 `|发行日期=` 不是一个键**：[`field`] 比的是整个键名，`发行` 匹配不上
+    /// `发行日期`，两者各读各的。
+    #[must_use]
+    pub fn publishers(&self) -> Vec<String> {
+        values(&self.infobox, "发行")
     }
 
     /// 发行年份。顶层 `date` 优先，没有就从 `infobox` 的发行日期里读。
@@ -184,6 +224,25 @@ pub fn field(infobox: &str, key: &str) -> Vec<String> {
     out
 }
 
+/// `infobox` 里某个键的值，**顿号也拆开**，去掉重复的那些。
+///
+/// 与 [`field`] 的分工：那一个交出原样的几项，这一个再把每一项按顿号劈开。
+/// 拆得动的键（类型、开发、发行）走这里，名字那几个键（平台、别名）走 [`field`]。
+#[must_use]
+pub fn values(infobox: &str, key: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for item in field(infobox, key) {
+        for part in item.split('、') {
+            let part = part.trim();
+            if part.is_empty() || out.iter().any(|seen| seen == part) {
+                continue;
+            }
+            out.push(part.to_string());
+        }
+    }
+    out
+}
+
 /// 一组里的一行：`[值]` 或者 `[键|值]`。
 fn list_item(line: &str) -> Option<String> {
     let body = line.strip_prefix('[')?.strip_suffix(']')?;
@@ -197,8 +256,12 @@ fn list_item(line: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// 调研 §9.1 实测的那条记录（id=4），原样。
-    const 合金弹头七: &str = r#"{"id":4,"type":4,"name":"メタルスラッグ7","name_cn":"合金弹头7","infobox":"{{Infobox Game\r\n|中文名= 合金弹头7\r\n|别名={\r\n[Metal Slug 7]\r\n[合金彈頭7]\r\n}\r\n|平台= NDS\r\n|游戏类型= ACT\r\n|发行日期= 2008-07-17\r\n}}","platform":4001,"summary":"　　以细腻的画风…","date":"2008-07-17","meta_tags":["ACT","NDS","游戏"]}"#;
+    /// 调研 §9.1 实测的那条记录（id=4）。
+    ///
+    /// `开发` 与 `发行` 两个键是**照真库的写法补上的**——调研当时抄的那一版只留了
+    /// 平台、别名与发行日期三样，而这一票要取的正是它没抄的那几样。两种写法各摆一个：
+    /// `开发` 是顿号分隔的单值，`发行` 是多值块。
+    const 合金弹头七: &str = r#"{"id":4,"type":4,"name":"メタルスラッグ7","name_cn":"合金弹头7","infobox":"{{Infobox Game\r\n|中文名= 合金弹头7\r\n|别名={\r\n[Metal Slug 7]\r\n[合金彈頭7]\r\n}\r\n|平台= NDS\r\n|游戏类型= ACT\r\n|开发= SNK、北斗\r\n|发行={\r\n[世嘉]\r\n}\r\n|发行日期= 2008-07-17\r\n}}","platform":4001,"summary":"　　以细腻的画风…","date":"2008-07-17","meta_tags":["ACT","NDS","游戏"]}"#;
 
     fn 一条() -> Row {
         serde_json::from_str(合金弹头七).expect("读得进来")
@@ -246,6 +309,73 @@ mod tests {
     }
 
     #[test]
+    fn infobox_单值多值块与顿号三种写法都拆得开() {
+        // 单值。
+        assert_eq!(values("{{Infobox Game\n|开发= 任天堂\n}}", "开发"), vec!["任天堂"]);
+        // 多值块。
+        assert_eq!(
+            values("{{Infobox Game\n|开发={\n[任天堂]\n[HAL研究所]\n}\n}}", "开发"),
+            vec!["任天堂", "HAL研究所"]
+        );
+        // 顿号分隔——真库里比多值块常见。
+        assert_eq!(
+            values("{{Infobox Game\n|开发= 任天堂、HAL研究所\n}}", "开发"),
+            vec!["任天堂", "HAL研究所"]
+        );
+        // 两种写法混着来，重复的只留一条。
+        assert_eq!(
+            values(
+                "{{Infobox Game\n|开发={\n[任天堂、HAL研究所]\n[任天堂]\n}\n}}",
+                "开发"
+            ),
+            vec!["任天堂", "HAL研究所"]
+        );
+    }
+
+    #[test]
+    fn infobox_缺键空值与键名带空格() {
+        let infobox = "{{Infobox Game\n| 游戏类型 = ACT\n|开发=\n|发行=  \n}}";
+        // **键名两边带空格照样认得出**：这份数据是人手写的 wiki，空格全凭手感。
+        assert_eq!(values(infobox, "游戏类型"), vec!["ACT"]);
+        // 空值就是没有值——不产出一条空串，那会让优先级链在它身上停下来。
+        assert!(values(infobox, "开发").is_empty());
+        assert!(values(infobox, "发行").is_empty());
+        // **缺键是留空不是错误**：它写了的那几样照样读得出来。
+        assert!(values(infobox, "别名").is_empty());
+        assert!(field(infobox, "别名").is_empty());
+    }
+
+    #[test]
+    fn 发行与发行日期是两个键() {
+        // `field` 比的是整个键名，`发行` 匹配不上 `发行日期`——两者各读各的。
+        let infobox = "{{Infobox Game\n|发行= 世嘉\n|发行日期= 2008-07-17\n}}";
+        assert_eq!(values(infobox, "发行"), vec!["世嘉"]);
+        let row = Row {
+            id: 1,
+            kind: 4,
+            name: String::new(),
+            name_cn: String::new(),
+            platform: 4001,
+            infobox: infobox.to_string(),
+            summary: String::new(),
+            date: None,
+            meta_tags: Vec::new(),
+        };
+        assert_eq!(row.publishers(), vec!["世嘉"]);
+        assert_eq!(row.year(), Some(2008));
+    }
+
+    #[test]
+    fn 一条真实记录读得出简介类型开发商与发行商() {
+        // 这四样以前一条都没被取出来过——那份 435 MB 的数据被当成「撞名字的索引」在用。
+        let row = 一条();
+        assert_eq!(row.summary, "　　以细腻的画风…", "简介原样留着");
+        assert_eq!(row.genres(), vec!["ACT"]);
+        assert_eq!(row.developers(), vec!["SNK", "北斗"]);
+        assert_eq!(row.publishers(), vec!["世嘉"]);
+    }
+
+    #[test]
     fn 平台读不出来时才退回标签() {
         // 标签是用户随手打的，`ACT` 与 `游戏` 也在里面——拿它当主证据会把
         // 「平台对不上」判成「对得上」。
@@ -263,6 +393,7 @@ mod tests {
             name_cn: String::new(),
             platform: 4001,
             infobox: "{{Infobox Game\r\n|发行日期= 未知\r\n}}".to_string(),
+            summary: String::new(),
             date: Some(String::new()),
             meta_tags: Vec::new(),
         };

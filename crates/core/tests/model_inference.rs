@@ -146,6 +146,7 @@ fn 建索引() -> zh::Index {
             year: Some(2008),
             platforms: vec!["GBA".to_string()],
             platform_text: "GBA".to_string(),
+            ..zh::Entry::default()
         }],
         "dump-2026-09-01".to_string(),
     )

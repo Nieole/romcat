@@ -124,7 +124,11 @@ pub fn sync(
         dry_run: options.dry_run,
         ..Synced::default()
     };
-    if !options.full && store.fingerprint()? == Some(out.fingerprint.clone()) {
+    // **等着重建的那一份不许走「指纹没变就整件跳过」这条路。** 它的指纹确实没变——
+    // 变的是本程序，而库里那份数据这一版读不了。跳过就等于让它永远读不了，
+    // 而这条路本来是留给「本机这份就是最新的」的。
+    let pending = store.rebuilding().is_some();
+    if !options.full && !pending && store.fingerprint()? == Some(out.fingerprint.clone()) {
         out.skipped = true;
         out.stats = store.stats()?;
         return Ok(out);
@@ -264,7 +268,80 @@ fn entry_of(row: &dump::Row, manifest: &Manifest, rules: &Rules) -> Entry {
         year: row.year(),
         platforms,
         platform_text: raw.join("、"),
+        // **简介一个字都不改**：换行、开头那两个全角空格、以及数据源自带的排版都是内容的
+        // 一部分（规格 18）。连两头都不掐——`　　以细腻的画风…` 那两个全角空格是排版，
+        // `trim` 会把它们当空白扫掉。整段只有空白时才算没有。
+        summary: if row.summary.trim().is_empty() {
+            String::new()
+        } else {
+            row.summary.clone()
+        },
+        genres: row.genres(),
+        developers: row.developers(),
+        publishers: row.publishers(),
     }
+}
+
+/// **从本机那份原件重建索引**：一个网络请求都不发，也不要用户重下那 435 MB。
+///
+/// 结构版本一变就走这条（[`Store::rebuilding`]）。原件就是取数时留在缓存目录里的那个
+/// zip——文件名里带着这一版的日期，**同名就是同一版**（`Options::full` 的文档说的是
+/// 同一件事）。重建完把原来那个指纹记回去，下一趟 `zh sync` 才认得出「本机这份就是
+/// 最新的」而整件跳过。
+///
+/// 三种结局都不是错误：不必重建、原件不在手边（那时才轮到用户跑一趟 `zh sync`）、
+/// 重建了。
+///
+/// # Errors
+/// 原件读不动或者写索引失败时返回错误。
+pub fn rebuild(
+    library: &dyn LibraryFs,
+    store: &mut Store,
+    manifest: &Manifest,
+    rules: &Rules,
+    cache: &Path,
+) -> Result<Rebuilt, SyncError> {
+    let Some(pending) = store.rebuilding().cloned() else {
+        return Ok(Rebuilt::NotNeeded);
+    };
+    let file = cache.join(&pending.dump);
+    if pending.dump.is_empty() || !file.exists() {
+        return Ok(Rebuilt::NoOriginal {
+            was: pending.was,
+            dump: pending.dump,
+        });
+    }
+    let (entries, _) = read_dump(library, &file, manifest, rules)?;
+    let games = u64::try_from(entries.len()).unwrap_or(u64::MAX);
+    store.replace(&entries, &pending.dump, &pending.fingerprint)?;
+    Ok(Rebuilt::Done {
+        was: pending.was,
+        dump: pending.dump,
+        games,
+    })
+}
+
+/// 一趟重建的结局。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rebuilt {
+    /// 结构版本对得上，什么都没做。
+    NotNeeded,
+    /// 该重建，但**本机没有那份原件**——只有这一种结局才轮到用户跑一趟 `zh sync`。
+    NoOriginal {
+        /// 旧索引的结构版本。
+        was: u32,
+        /// 缺的是哪一份原件；上一版索引连 dump 名都没记时是空串。
+        dump: String,
+    },
+    /// 从本机那份原件重建好了。
+    Done {
+        /// 旧索引的结构版本。
+        was: u32,
+        /// 从哪一份原件重建的。
+        dump: String,
+        /// 重建出多少条游戏条目。
+        games: u64,
+    },
 }
 
 /// 中文数据源写的那个平台名，在本工具里叫什么。
@@ -312,6 +389,179 @@ mod tests {
         // 下载地址在闸门的白名单上——这一层一个字都不必往白名单里加。
         assert!(crate::dat::guard::check(&release.url).is_ok());
         assert!(crate::dat::guard::check(LATEST_URL).is_ok());
+    }
+
+    #[test]
+    fn 结构版本一变就从本机那份原件重建_不下载不报错() {
+        // 规格 16：「存储结构升级时自己从本地那份原件重建，这样我不必重新下载 435 MB。」
+        // 这条测试里**没有 fetcher**——重建这条路上根本没有发请求的地方。
+        let dir = crate::testing::temp_dir("zh-rebuild");
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).expect("建得出缓存目录");
+        std::fs::write(cache.join(原件名), 一份原件()).expect("写得下原件");
+
+        let path = dir.path().join("zh.sqlite3");
+        let manifest = Manifest::builtin();
+        let rules = Rules::builtin();
+        let library = crate::fs::RealFs;
+        {
+            let mut store = Store::open(&path).expect("开得起来");
+            let (entries, records) = read_dump(&library, &cache.join(原件名), &manifest, &rules)
+                .expect("原件读得动");
+            assert_eq!(records, 1, "读到几条记录");
+            assert_eq!(entries.len(), 1, "留下几条游戏条目");
+            store
+                .replace(&entries, 原件名, 指纹)
+                .expect("写得进去");
+        }
+        // 把版本改回上一格：这就是「拿一份旧结构版本的索引打开」。
+        let conn = rusqlite::Connection::open(&path).expect("开得起来");
+        conn.execute(
+            "UPDATE meta SET value = '1' WHERE key = 'schema_version'",
+            [],
+        )
+        .expect("改得动");
+        drop(conn);
+
+        let mut store = Store::open(&path).expect("旧版本照样打得开");
+        assert!(store.load().expect("读得回来").is_empty(), "先扫干净");
+        let outcome = rebuild(&library, &mut store, &manifest, &rules, &cache).expect("重建得了");
+        assert_eq!(
+            outcome,
+            Rebuilt::Done {
+                was: 1,
+                dump: 原件名.to_string(),
+                games: 1,
+            }
+        );
+        // 重建完索引又满了，而且带上了新结构才有的那几样。
+        let index = store.load().expect("读得回来");
+        assert_eq!(index.len(), 1);
+        assert_eq!(index.entries()[0].genres, vec!["ACT"]);
+        // 简介不进内存（`Store::load` 的文档），单独一条路读得出来。
+        assert_eq!(
+            store.summary(4).expect("读得回来").as_deref(),
+            Some("　　以细腻的画风…")
+        );
+        // **指纹记回去了**：下一趟 `zh sync` 才认得出「本机这份就是最新的」而整件跳过。
+        assert_eq!(
+            store.fingerprint().expect("读得到").as_deref(),
+            Some(指纹)
+        );
+        assert_eq!(store.rebuilding(), None, "重建完就不再等着重建了");
+    }
+
+    #[test]
+    fn 等着重建的那一份不许因为指纹没变而整件跳过() {
+        // 指纹确实没变——变的是本程序，而库里那份数据这一版读不了。跳过就等于让它
+        // 永远读不了，而那条路本来是留给「本机这份就是最新的」的。
+        let dir = crate::testing::temp_dir("zh-sync-pending");
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).expect("建得出缓存目录");
+        std::fs::write(cache.join(原件名), 一份原件()).expect("写得下原件");
+
+        let path = dir.path().join("zh.sqlite3");
+        {
+            let mut store = Store::open(&path).expect("开得起来");
+            store
+                .replace(&[], 原件名, 指纹)
+                .expect("写得进去");
+        }
+        let conn = rusqlite::Connection::open(&path).expect("开得起来");
+        conn.execute(
+            "UPDATE meta SET value = '1' WHERE key = 'schema_version'",
+            [],
+        )
+        .expect("改得动");
+        drop(conn);
+
+        let mut store = Store::open(&path).expect("旧版本照样打得开");
+        assert!(store.rebuilding().is_some());
+        assert_eq!(store.fingerprint().expect("读得到").as_deref(), Some(指纹));
+
+        let fetcher = crate::dat::CannedFetcher::new().with(LATEST_URL, 一份_latest_json());
+        let outcome = sync(
+            &fetcher,
+            &crate::fs::RealFs,
+            &mut store,
+            &Manifest::builtin(),
+            &Rules::builtin(),
+            &Options {
+                cache,
+                full: false,
+                dry_run: false,
+            },
+        )
+        .expect("取得动");
+        assert!(!outcome.skipped, "指纹一样也不许跳过——那份索引这一版读不了");
+        assert_eq!(outcome.games, 1);
+        // **原件在手边就没下载**：`CannedFetcher` 根本没备那个下载地址，
+        // 真去下会当场失败。
+        assert_eq!(store.load().expect("读得回来").len(), 1);
+        assert!(store.rebuilding().is_none());
+    }
+
+    #[test]
+    fn 本机没有那份原件时如实说一句而不是硬报错() {
+        let dir = crate::testing::temp_dir("zh-rebuild-missing");
+        let path = dir.path().join("zh.sqlite3");
+        {
+            let mut store = Store::open(&path).expect("开得起来");
+            store
+                .replace(&[], "dump-2026-09-01.210329Z.zip", "sha256:abc")
+                .expect("写得进去");
+        }
+        let conn = rusqlite::Connection::open(&path).expect("开得起来");
+        conn.execute(
+            "UPDATE meta SET value = '1' WHERE key = 'schema_version'",
+            [],
+        )
+        .expect("改得动");
+        drop(conn);
+        let mut store = Store::open(&path).expect("旧版本照样打得开");
+        let outcome = rebuild(
+            &crate::fs::RealFs,
+            &mut store,
+            &Manifest::builtin(),
+            &Rules::builtin(),
+            dir.path(),
+        )
+        .expect("不是错误");
+        assert_eq!(
+            outcome,
+            Rebuilt::NoOriginal {
+                was: 1,
+                dump: "dump-2026-09-01.210329Z.zip".to_string(),
+            }
+        );
+    }
+
+    /// 缓存目录里那份原件叫什么。文件名里带着这一版的日期，**同名就是同一版**。
+    const 原件名: &str = "dump-2026-09-01.210329Z.zip";
+
+    /// 那一版的指纹，形状与 [`Release::fingerprint`] 一致。
+    const 指纹: &str = "dump-2026-09-01.210329Z.zip|sha256:abc";
+
+    /// `aux/latest.json` 说的正是本机手上这一版。
+    fn 一份_latest_json() -> Vec<u8> {
+        format!(
+            "{{\"browser_download_url\": \
+             \"https://github.com/bangumi/Archive/releases/download/archive/{原件名}\",\
+             \"digest\": \"sha256:abc\", \"name\": \"{原件名}\", \"size\": 1}}"
+        )
+        .into_bytes()
+    }
+
+    /// 一份最小的 dump：一个 zip，里头一份 `subject.jsonlines`，一条游戏记录。
+    fn 一份原件() -> Vec<u8> {
+        let line = r#"{"id":4,"type":4,"name":"メタルスラッグ7","name_cn":"合金弹头7","infobox":"{{Infobox Game\r\n|别名={\r\n[Metal Slug 7]\r\n}\r\n|平台= NDS\r\n|游戏类型= ACT\r\n|开发= SNK\r\n|发行= 世嘉\r\n}}","platform":4001,"summary":"　　以细腻的画风…","date":"2008-07-17","meta_tags":["ACT","NDS","游戏"]}"#;
+        crate::testing::container::zip_container(&[
+            crate::testing::container::ZipEntrySpec::stored(
+                SUBJECTS,
+                format!("{line}
+").into_bytes(),
+            ),
+        ])
     }
 
     #[test]

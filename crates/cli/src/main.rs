@@ -1079,17 +1079,85 @@ fn emit_from_catalog(catalog: &Catalog, manifest: &Manifest, output: &OutputArgs
 }
 
 /// 本机那份中文离线索引，装进内存。**没取过数不是错误**——识别照跑，少一层而已。
-fn load_zh_index(workspace: &Path) -> Result<Option<zh::Index>, String> {
+fn load_zh_index(workspace: &Path, rules: &Rules) -> Result<Option<zh::Index>, String> {
     let path = workspace::zh_store_path(workspace);
     if !path.exists() {
         return Ok(None);
     }
-    let store =
+    let mut store =
         zh::store::Store::open(&path).map_err(|error| format!("中文索引打不开：{error}"))?;
+    heal_zh_store(workspace, &mut store, rules, None);
     let index = store
         .load()
         .map_err(|error| format!("中文索引读不出来：{error}"))?;
     Ok((!index.is_empty()).then_some(index))
+}
+
+/// 结构版本对不上时**从本机那份原件重建**：一个网络请求都不发，也不要用户重下 435 MB。
+///
+/// 三个用得着中文索引的子命令都走这一条。重建要把数据源写的平台名折成本工具的平台名，
+/// 所以要一份**平台清单**：`zh sync` 手上有它自己那份（`--manifest` 指得了），传进来；
+/// `identify` 与 `scrape` 的参数表里本来就没有这个开关，那时按 `ManifestArgs` 的老规矩
+/// 解析——工作目录里那份 `platforms.toml`，没有就用内置的。
+///
+/// **重建不成不是错误，只是少一层。** 缓存里那个 zip 截断了、读不动了，都不该让
+/// `romcat identify` 整条命令跑不起来——那与 `load_zh_index` 自己的契约（「没取过数不是
+/// 错误，识别照跑」）直接相抵。何况这时旧索引还原样躺着，什么都没丢
+/// （`zh::store` 的「旧数据一直留到新数据真的写进来那一刻」）。
+fn heal_zh_store(
+    workspace: &Path,
+    store: &mut zh::store::Store,
+    rules: &Rules,
+    manifest: Option<&Manifest>,
+) {
+    let Some(pending) = store.rebuilding().map(|it| it.was) else {
+        return;
+    };
+    let fallback = match manifest {
+        Some(_) => None,
+        None => match (ManifestArgs { manifest: None }).load(workspace) {
+            Ok(manifest) => Some(manifest),
+            Err(message) => {
+                eprintln!("中文索引要重建，但平台清单读不出来：{message}。这一趟先少这一层。");
+                return;
+            }
+        },
+    };
+    let Some(manifest) = manifest.or(fallback.as_ref()) else {
+        return;
+    };
+    let outcome = zh::sync::rebuild(
+        &RealFs,
+        store,
+        manifest,
+        rules,
+        &workspace::zh_cache_dir(workspace),
+    );
+    match outcome {
+        Ok(zh::sync::Rebuilt::NotNeeded) => {}
+        Ok(zh::sync::Rebuilt::Done { was, dump, games }) => eprintln!(
+            "中文索引的结构版本是 {was}，本程序认得的是 {}——已从本机那份原件 {dump} \
+             就地重建，{} 条游戏条目，没下载任何东西。",
+            zh::store::SCHEMA_VERSION,
+            thousands(games),
+        ),
+        Ok(zh::sync::Rebuilt::NoOriginal { was, dump }) => eprintln!(
+            "中文索引的结构版本是 {was}，本程序认得的是 {}，而本机缓存里找不到原件{}——\
+             跑一次 `romcat zh sync` 就补回来了。这一趟先少这一层。",
+            zh::store::SCHEMA_VERSION,
+            if dump.is_empty() {
+                String::new()
+            } else {
+                format!("（{dump}）")
+            },
+        ),
+        Err(error) => eprintln!(
+            "中文索引的结构版本是 {pending}，本程序认得的是 {}，而就地重建没成：{error}。\
+             旧索引原样留着，什么都没丢；跑一次 `romcat zh sync` 就补回来了。\
+             这一趟先少这一层。",
+            zh::store::SCHEMA_VERSION,
+        ),
+    }
 }
 
 /// 这个主库的工作目录：中立库与断点都住这里，必须在本机（ADR-0009）。
@@ -1442,7 +1510,7 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
     let index = if args.no_fuzzy {
         None
     } else {
-        match load_zh_index(&workspace) {
+        match load_zh_index(&workspace, &rules) {
             Ok(index) => index,
             Err(message) => return fail(message),
         }
@@ -1967,7 +2035,7 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
         Ok(rules) => rules,
         Err(message) => return fail(message),
     };
-    let index = match load_zh_index(&workspace) {
+    let index = match load_zh_index(&workspace, &rules) {
         Ok(index) => index,
         Err(message) => return fail(message),
     };
@@ -4042,6 +4110,24 @@ fn run_zh_sync(args: &ZhSyncArgs) -> ExitCode {
         Ok(store) => store,
         Err(error) => return fail(format!("中文索引打不开：{error}")),
     };
+    // **先就地重建再取数**：结构版本一变，本机那份原件就够把索引补回来，
+    // 而重建完指纹也记回去了——下面那句「指纹没变就整件跳过」于是照样成立。
+    //
+    // **`--dry-run` 不重建**：那一档说的是「只说这一趟会干什么，不取也不写」，而重建
+    // 要读一份 435 MB 的原件再整份写回去，是这句话的反面。
+    if args.dry_run {
+        if let Some(pending) = store.rebuilding() {
+            eprintln!(
+                "（这一份索引的结构版本是 {}，本程序认得的是 {}——真跑一趟会先从本机那份\
+                 原件 {} 就地重建。`--dry-run` 不动它。）",
+                pending.was,
+                zh::store::SCHEMA_VERSION,
+                pending.dump,
+            );
+        }
+    } else {
+        heal_zh_store(&workspace, &mut store, &rules, Some(&manifest));
+    }
     let options = zh::sync::Options {
         cache: workspace::zh_cache_dir(&workspace),
         full: args.full,
@@ -4257,6 +4343,17 @@ fn print_zh_stats(stats: &zh::store::Stats) {
         thousands(stats.with_platform),
         thousands(stats.with_year),
     );
+    println!(
+        "  有中文简介 {}、写得出类型 {}、开发商 {}、发行商 {}",
+        thousands(stats.with_summary),
+        thousands(stats.with_genre),
+        thousands(stats.with_developer),
+        thousands(stats.with_publisher),
+    );
+    if !stats.fields.is_empty() {
+        // **这一版索引带了哪些字段**：换了这一行就该重刮一遍（它进刮削那一侧的输入指纹）。
+        println!("  这一版取了：{}", stats.fields);
+    }
     let mut line = String::new();
     for (platform, count) in stats.by_platform.iter().take(24) {
         if !line.is_empty() {
@@ -4275,10 +4372,11 @@ fn run_zh_find(args: &ZhFindArgs) -> ExitCode {
         Ok(rules) => rules,
         Err(message) => return fail(message),
     };
-    let store = match zh::store::Store::open(&workspace::zh_store_path(&workspace)) {
+    let mut store = match zh::store::Store::open(&workspace::zh_store_path(&workspace)) {
         Ok(store) => store,
         Err(error) => return fail(format!("中文索引打不开：{error}")),
     };
+    heal_zh_store(&workspace, &mut store, &rules, None);
     let index = match store.load() {
         Ok(index) => index,
         Err(error) => return fail(format!("中文索引读不出来：{error}")),

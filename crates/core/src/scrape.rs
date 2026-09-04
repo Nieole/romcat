@@ -439,19 +439,50 @@ pub struct Harvest {
 }
 
 impl Harvest {
-    /// 记一个字段值。
+    /// 记**一个单值字段**的值。
     ///
     /// 两种情况**不记**：
     ///
     /// - **空值**。缺的字段就该是缺的，写个空串进去只会让优先级链在它身上停下来。
-    /// - **这个字段这个源已经说过话了**。库里一个「锚点 × 字段 × 源」只存一条
-    ///   （那正是三元组并存的粒度），一个源交出两个值只会有一个落库，另一个连同它的
-    ///   **依据**一起蒸发，而采集记录还记着「采到两条」——数对不上，还查不出为什么。
+    /// - **这个字段这个源已经说过话了**。年份、发行商、简介这些字段一个源只该有一个
+    ///   答案；交出两个只说明它自己没想清楚，而那两个里必有一个是错的。库那一侧照单
+    ///   全收（去重键里带着值），所以这道闸只能设在这里——设在库里的话，前端会拿到
+    ///   两个互相打架的年份，而谁胜出取决于字典序。
     ///   于是**第一个胜出**：源按确定的顺序遍历条目名，同一份库跑两次结果一样。
-    ///   一个字段要装多个值，那是**标题集合**的形状，票 15 的模型，不是这一层。
+    ///
+    /// **集合字段**（眼下只有标题）走 [`Harvest::each`]，不是这一条。
     pub fn value(&mut self, field: Field, value: impl Into<String>, why: impl Into<String>) {
         let value = value.into();
         if value.trim().is_empty() || self.values.iter().any(|found| found.field == field) {
+            return;
+        }
+        self.values.push(Finding {
+            field,
+            value,
+            evidence: why.into(),
+        });
+    }
+
+    /// 记**同一个字段上的又一个值**。
+    ///
+    /// 与 [`Harvest::value`] 是两种字段的两条路，不是同一条路的宽松版：
+    ///
+    /// - **单值字段**（年份、开发商、简介……）走 `value`，第一个胜出。一个源在这些字段上
+    ///   交出两个答案，只说明它自己没想清楚，而那两个里必有一个是错的。
+    /// - **集合字段**走这一条。眼下只有**标题**：中立库里标题永远是集合不是单值
+    ///   （`CONTEXT.md` 的**标题集合**词条），同一部作品的中文名与别名本来就该都在里面
+    ///   ——用户搜哪个都该找得到。
+    ///
+    /// 空值与**这个字段上一模一样的值**照样不记：前者会让优先级链在它身上停下来，
+    /// 后者在库里本来就是同一行（去重键带着值），只是白搭一条**依据**。
+    pub fn each(&mut self, field: Field, value: impl Into<String>, why: impl Into<String>) {
+        let value = value.into();
+        if value.trim().is_empty()
+            || self
+                .values
+                .iter()
+                .any(|found| found.field == field && found.value == value)
+        {
             return;
         }
         self.values.push(Finding {
@@ -854,6 +885,7 @@ pub fn all_source_names() -> Vec<&'static str> {
         local::FILENAME,
         local::LOCAL_MEDIA,
         fuzzy::SOURCE,
+        fuzzy::ALIAS_SOURCE,
         online::SCREEN_SCRAPER,
     ];
     out.extend(crate::adapter::names());
@@ -888,6 +920,9 @@ fn sources<'a>(
     // 会让引擎把它上一轮说过的话当成「这次改主意了」而清掉。
     if naming.ready() {
         sources.push(Box::new(zh::ChineseSource::new(*naming)));
+        // **别名那一路单开一个源名**，好让优先级表把它排在标题那条链的最后：
+        // 别名只进标题集合、只管搜得到，永不当显示标题（`zh::ChineseAliasSource`）。
+        sources.push(Box::new(zh::ChineseAliasSource::new(*naming)));
     }
     // **联网源只在在线档里造出来。** 离线档拿到 `Some(net)` 也不会碰它——这一条
     // 比「参数表里没有网络句柄」硬：句柄可以从别处传进来，而这里根本不造那个源。

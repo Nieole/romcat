@@ -86,7 +86,7 @@ romcat-gui --catalog ~/.romcat/catalog/主库-xxxx.sqlite3
 
 ## 现在到哪一步了
 
-**27/29 张票落地**，余下两张是 Windows 真机验证（`ready-for-human`，需要人在 Windows 上跑）。**1,119 条测试全绿。**
+**27/29 张票落地**，余下两张是 Windows 真机验证（`ready-for-human`，需要人在 Windows 上跑）。**1,134 条测试全绿。**
 
 真库实测（`docs/library-facts.md` 记着全部数字与日期）：
 
@@ -137,7 +137,7 @@ CONTEXT.md     词表。动手前先读它，输出用它的词
 ```bash
 cargo fmt --all
 cargo clippy --workspace --all-targets --all-features     # 零警告
-cargo test --workspace --all-features                     # 1,119 条
+cargo test --workspace --all-features                     # 1,134 条
 cargo doc --workspace --no-deps
 ```
 
@@ -145,7 +145,7 @@ cargo doc --workspace --no-deps
 
 `romcat-gui` 有一个默认关掉的 **`demo` feature**：合成数据、`--demo`、以及 `--bench*` 那几条实测开关全在它后面。**关掉之后它们一个字节都不进交付出去的二进制**——假数据与真库在界面上长得一模一样，看见一屏假名字的第一反应会是「我的库怎么了」，那比起不来更坏。
 
-代价是：**不带 `--all-features` 跑测试，会有 22 条被静默跳过**（1,097 而不是 1,119）。跳过不报错，所以命令得记牢。
+代价是：**不带 `--all-features` 跑测试，会有 22 条被静默跳过**（1,112 而不是 1,134）。跳过不报错，所以命令得记牢。
 
 ```bash
 # 跑实测（那几条都不开窗，没显示器也跑得起来）

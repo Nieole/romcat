@@ -110,8 +110,54 @@ impl NameKind {
     }
 }
 
+/// 条目上一条**不是叫法**的事实是哪一种。
+///
+/// 与 [`NameKind`] 分开是有理由的：那一个说的是「这条条目还叫什么」，会进**标题集合**；
+/// 这一个说的是「这条条目是什么样的东西」，会进**字段**。两者存在同一张表里，读库的人
+/// 就分不出哪些行该拿去撞名字、哪些行不该。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FactKind {
+    /// 类型。
+    Genre,
+    /// 开发商。
+    Developer,
+    /// 发行商。
+    Publisher,
+}
+
+impl FactKind {
+    /// 依据里写的那个词。**用词表里的词**（`CONTEXT.md`）。
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Genre => "类型",
+            Self::Developer => "开发商",
+            Self::Publisher => "发行商",
+        }
+    }
+
+    /// 存进索引用的短码。**不拿展示词当键**（同 [`NameKind::code`]）。
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Genre => "genre",
+            Self::Developer => "developer",
+            Self::Publisher => "publisher",
+        }
+    }
+
+    /// 存库时固定的遍历顺序。
+    #[must_use]
+    pub fn all() -> [Self; 3] {
+        [Self::Genre, Self::Developer, Self::Publisher]
+    }
+}
+
 /// 索引里的一条中文条目。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Default` 是给测试与「先造一条再往里填」用的：真库里的条目全部由
+/// [`sync`] 从 dump 折出来，**这份库里没有一行是攒出来的**（`store` 的模块文档）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Entry {
     /// 数据源里的条目号。**依据里要写它**——人要去核对时，那是唯一查得回去的东西。
     pub id: u32,
@@ -127,6 +173,20 @@ pub struct Entry {
     pub platforms: Vec<String>,
     /// 数据源原样写的平台，写进依据。
     pub platform_text: String,
+    /// **中文简介**；数据源没写就是空串。
+    ///
+    /// **原样留着**：换行、全角空格与数据源自带的排版都是内容的一部分（规格 18）。
+    ///
+    /// ⚠️ **从 [`store::Store::load`] 读回来的条目上，这一格永远是空串**——简介不进内存
+    /// （那是九十来 MB 常驻，而撞名字不看简介）。要某一条的简介走
+    /// [`store::Store::summary`]。
+    pub summary: String,
+    /// 类型；`infobox` 里一个键装着好几个的已经拆开了。
+    pub genres: Vec<String>,
+    /// 开发商。
+    pub developers: Vec<String>,
+    /// 发行商。
+    pub publishers: Vec<String>,
 }
 
 impl Entry {
@@ -148,6 +208,28 @@ impl Entry {
             }
         }
         out
+    }
+
+    /// 某一类事实的全部值，按数据源里的原次序。
+    #[must_use]
+    pub fn facts(&self, kind: FactKind) -> &[String] {
+        match kind {
+            FactKind::Genre => &self.genres,
+            FactKind::Developer => &self.developers,
+            FactKind::Publisher => &self.publishers,
+        }
+    }
+
+    /// 某一类事实那一格，写得进去的那一面。
+    ///
+    /// 收在这里而不是让调用方 `match` 一遍：读库那一侧要按种类把三格填回去，
+    /// 各写一遍 `match` 的话，加第四种事实时漏掉一处编译器一句话都不会说。
+    pub fn facts_mut(&mut self, kind: FactKind) -> &mut Vec<String> {
+        match kind {
+            FactKind::Genre => &mut self.genres,
+            FactKind::Developer => &mut self.developers,
+            FactKind::Publisher => &mut self.publishers,
+        }
     }
 
     /// 拿去展示的那个名字：有中文名就用中文名。
@@ -363,6 +445,7 @@ pub struct Index {
     names: Vec<Name>,
     postings: BTreeMap<u64, Vec<u32>>,
     dump: String,
+    fields: String,
 }
 
 impl Index {
@@ -401,13 +484,33 @@ impl Index {
             names,
             postings,
             dump,
+            fields: store::FIELDS.to_string(),
         }
+    }
+
+    /// 记上这一版索引**取了哪几样**（[`store::FIELDS`]）。
+    ///
+    /// 建索引的那一刻取的当然是本程序这一版取的那几样；从**本机那份库**读回来的就不一定
+    /// 了——那份库可能是上一版程序建的。所以读库那一侧要把库里记着的那一行盖回来。
+    #[must_use]
+    pub fn with_fields(mut self, fields: String) -> Self {
+        if !fields.is_empty() {
+            self.fields = fields;
+        }
+        self
     }
 
     /// 这份索引是从哪一版 dump 建的。**它进输入指纹**：换一版 dump 就该重跑一遍。
     #[must_use]
     pub fn dump(&self) -> &str {
         &self.dump
+    }
+
+    /// 这份索引**从数据源里取了哪几样**。**它也进输入指纹**：改了取哪些字段，
+    /// 撞上过的锚点该重采一遍，而不是被缓存一口咬定「输入没变」而整条跳过。
+    #[must_use]
+    pub fn fields(&self) -> &str {
+        &self.fields
     }
 
     /// 索引里有多少条条目。
@@ -650,6 +753,7 @@ mod tests {
                 vec![platform.to_string()]
             },
             platform_text: platform.to_string(),
+            ..Entry::default()
         }
     }
 
@@ -880,6 +984,7 @@ mod tests {
                 year: Some(2008),
                 platforms: vec!["NDS".to_string()],
                 platform_text: "NDS".to_string(),
+                ..Entry::default()
             }],
             "dump".to_string(),
         );

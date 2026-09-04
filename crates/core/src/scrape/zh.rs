@@ -23,6 +23,19 @@
 //! 等人裁决，代价是人多看一眼；一个错的标题会**直接铺进前端**，而且再也没人会去核对。
 //! 所以这一侧的闸比识别那一侧紧一档：只有 [`zh::Match::strong`]（平台对得上，且名字
 //! 一字不差或者年份也对得上）才产出。
+//!
+//! ## 一次匹配，两个源名
+//!
+//! 撞上一条条目之后拿得到的不只一个名字：那条条目**还叫什么**（它的别名）同样是这部
+//! 作品的叫法，该进**标题集合**——一部作品的几个叫法，用户搜哪个都该找得到。
+//!
+//! 于是这个模块出两个源：[`ChineseSource`] 给中文名，[`ChineseAliasSource`] 给别名。
+//! **它们撞的是同一次**（同一份索引、同一套剥离规则、同一组匹配参数、同一个
+//! `best`），分成两个名字纯粹是为了让[优先级表](super::priority)排得动它们——别名垫在
+//! 标题那条链的最后，**只进集合、只管搜得到，永远轮不到它当显示标题**。
+//!
+//! 合成一个源名的话，两者在库里是同一个源的几条值，排序上完全平手，最后按字典序定
+//! 胜负：`合金彈頭7` 与 `合金弹头7` 谁当显示标题全看码位。那不是一条判据。
 
 use crate::identify::fuzzy;
 use crate::identify::naming;
@@ -107,8 +120,9 @@ impl Source for ChineseSource<'_> {
         }
         let main = subject.main_key?;
         // 指纹要盖住**一切会改变结果的东西**（`Source::probe` 的文档）：名字、平台、
-        // 用的是哪一版 dump、以及**匹配参数**——门槛从 0.85 调到 0.80 该重采一遍，
-        // 不盖它的话缓存会一口咬定「输入没变」而整条跳过。
+        // 用的是哪一版 dump、**这一版索引从数据源里取了哪几样**、以及**匹配参数**——
+        // 门槛从 0.85 调到 0.80 该重采一遍，取的字段从五样变成九样也该重采一遍，
+        // 不盖它们的话缓存会一口咬定「输入没变」而整条跳过。
         let platform = subject.platform.unwrap_or("");
         let tuning = self.naming.tuning.fingerprint();
         // 已经撞上的 DAT 条目名也进指纹：年份从它们里读。
@@ -121,6 +135,7 @@ impl Source for ChineseSource<'_> {
             main,
             platform,
             self.naming.index.map_or("", zh::Index::dump),
+            self.naming.index.map_or("", zh::Index::fields),
             tuning.as_str(),
         ];
         parts.extend(entries);
@@ -137,6 +152,72 @@ impl Source for ChineseSource<'_> {
             one.evidence(self.naming.index.map_or("", zh::Index::dump), label, &text),
         );
         // 本地源没有会失败的动作：索引整份在内存里。
+        Ok(())
+    }
+}
+
+/// **中文离线源的别名那一路**：撞上的那条条目**还叫什么**。
+///
+/// ## 为什么它是一个单独的源，而不是上面那个源多说几句
+///
+/// 两路给的东西在标题这一栏上的分量差得远：中文名是「这个文件的正题撞上的那个名字」，
+/// 别名是「那条条目还叫什么」。分成两个源名，[优先级表](super::priority)就排得动它们
+/// ——别名排在整条链的最后，**只进标题集合、只管搜得到，永远轮不到它当显示标题**。
+///
+/// 合成一路的话，两者在库里是同一个源的几条值，排序上完全平手，最后按字典序定胜负：
+/// `合金彈頭7` 与 `合金弹头7` 谁当显示标题全看码位。那不是一条判据。
+///
+/// ## 它与上面那个源撞的是同一次
+///
+/// 同一份索引、同一套剥离规则、同一组匹配参数、同一个 `ChineseSource::best`。
+/// 于是**两路同生共死**：中文名撞不上，别名也一个都不产出。
+#[derive(Debug, Clone, Copy)]
+pub struct ChineseAliasSource<'a> {
+    inner: ChineseSource<'a>,
+}
+
+impl<'a> ChineseAliasSource<'a> {
+    /// 造一个。参数与 [`ChineseSource::new`] 一模一样——**它们撞的是同一次**。
+    #[must_use]
+    pub fn new(naming: fuzzy::Naming<'a>) -> Self {
+        Self {
+            inner: ChineseSource::new(naming),
+        }
+    }
+}
+
+impl Source for ChineseAliasSource<'_> {
+    fn name(&self) -> &str {
+        fuzzy::ALIAS_SOURCE
+    }
+
+    fn locality(&self) -> Locality {
+        Locality::Local
+    }
+
+    fn probe(&self, subject: &Subject<'_>) -> Option<String> {
+        // 与中文名那一路盖的是同一批输入——它们撞的是同一次。
+        self.inner.probe(subject)
+    }
+
+    fn collect(&self, subject: &Subject<'_>, out: &mut Harvest) -> Result<(), Failure> {
+        let Some((one, text, label)) = self.inner.best(subject) else {
+            return Ok(());
+        };
+        let dump = self.inner.naming.index.map_or("", zh::Index::dump);
+        let evidence = one.evidence(dump, label, &text);
+        for alias in &one.entry.aliases {
+            // **中文名不在这儿再来一遍**：那是另一路的值，重复一条只会让同一串字在
+            // 标题集合里占两行、各带一条说法不同的**依据**。
+            if alias.trim().is_empty() || alias.trim() == one.entry.name_cn.trim() {
+                continue;
+            }
+            out.each(
+                Field::Title,
+                alias.clone(),
+                format!("{evidence}；而这条条目还叫「{alias}」"),
+            );
+        }
         Ok(())
     }
 }
@@ -158,6 +239,7 @@ mod tests {
                     year: Some(2008),
                     platforms: vec!["NDS".to_string()],
                     platform_text: "NDS".to_string(),
+                    ..zh::Entry::default()
                 },
                 zh::Entry {
                     id: 5,
@@ -167,6 +249,7 @@ mod tests {
                     year: Some(2000),
                     platforms: vec!["NDS".to_string()],
                     platform_text: "NDS".to_string(),
+                    ..zh::Entry::default()
                 },
             ],
             "dump-2026-09-01".to_string(),
@@ -262,6 +345,57 @@ mod tests {
         let mut work = 变体("合金弹头7", &[], &[]);
         work.kind = AnchorKind::Work;
         assert!(source.probe(&work).is_none());
+    }
+
+    #[test]
+    fn 别名那一路把条目的别名都交出来而且不重复中文名() {
+        let rules = Rules::builtin();
+        let index = 索引();
+        let source = ChineseAliasSource::new(fuzzy::Naming {
+            rules: &rules,
+            index: Some(&index),
+            tuning: zh::Tuning::default(),
+        });
+        let mut out = Harvest::default();
+        source
+            .collect(&变体("nds/合金弹头7.7z", &[], &[]), &mut out)
+            .expect("本地源不会失败");
+        let 值: Vec<&str> = out.values.iter().map(|it| it.value.as_str()).collect();
+        assert_eq!(值, vec!["Metal Slug 7"]);
+        assert!(out.values.iter().all(|it| it.field == Field::Title));
+        // 依据里既说得出撞的是哪条条目，也说得出这一条是那条条目的另一个叫法。
+        assert!(out.values[0].evidence.contains("条目 4"));
+        assert!(out.values[0].evidence.contains("还叫「Metal Slug 7」"));
+        // **两路同生共死**：中文名撞不上，别名也一个都不产出。
+        let mut out = Harvest::default();
+        source
+            .collect(&变体("nds/合金弹头7代.7z", &[], &[]), &mut out)
+            .expect("本地源不会失败");
+        assert!(out.values.is_empty());
+        // 它同样只在变体这一层说话。
+        let mut work = 变体("合金弹头7", &[], &[]);
+        work.kind = AnchorKind::Work;
+        assert!(source.probe(&work).is_none());
+    }
+
+    #[test]
+    fn 索引取了哪几样也进输入指纹() {
+        // 改了取哪些字段之后重跑，撞上过的锚点该**重采**而不是被缓存跳过——
+        // 那正是这一票把简介、类型、开发商、发行商取进索引之后要保住的事。
+        let rules = Rules::builtin();
+        let subject = 变体("nds/合金弹头7.7z", &[], &[]);
+        let 造 = |index: &zh::Index| {
+            ChineseSource::new(fuzzy::Naming {
+                rules: &rules,
+                index: Some(index),
+                tuning: zh::Tuning::default(),
+            })
+            .probe(&subject)
+        };
+        let 现在 = 索引();
+        // 上一版索引：同一份 dump、同一批条目，只是当时只取了中文名与别名。
+        let 上一版 = 索引().with_fields("中文名、别名、年份、平台".to_string());
+        assert_ne!(造(&现在), 造(&上一版));
     }
 
     #[test]
