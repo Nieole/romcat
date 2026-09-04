@@ -557,6 +557,163 @@ fn 名下一个变体都没撞上的作品不产出任何字段() {
     assert_eq!(中文的, 0, "名下一个变体都没撞上，作品锚点上不该有任何一条");
 }
 
+/// 数据源里那条 infobox 的原样：**开发**写成顿号分隔的一行，**发行**写成多值块。
+///
+/// 两种写法真库里都有，说的是同一件事（`zh::dump` 的模块文档），而顿号那一种更常见。
+/// 顺带还摆了 `|发行日期=`：它与 `|发行=` 是两个键，各读各的。
+const 魂斗罗信息框: &str = "{{Infobox Game\n|中文名= 魂斗罗\n|平台= FC\n|游戏类型= ACT\n\
+                           |开发= 科乐美、KCE东京\n|发行={\n[科乐美]\n[任天堂]\n}\n\
+                           |发行日期= 1988-02-09\n}}";
+
+/// 一份中文离线索引，条目上那几样**从 infobox 折出来**。
+///
+/// 走的是取数那一侧的同一条路：`zh::sync` 折条目时调的就是 `Row::developers` /
+/// `Row::publishers`。直接把 `vec!["甲", "乙"]` 摆进去也能测出「多条落进库」，
+/// 但那样一来「顿号那一行是怎么变成两条的」在这条接缝上就一个字都没证。
+fn 中文索引带信息框(infobox: &str) -> romcat_core::zh::Index {
+    let row = romcat_core::zh::dump::Row {
+        id: 12_345,
+        kind: 4,
+        name: "魂斗羅".to_string(),
+        name_cn: "魂斗罗".to_string(),
+        platform: 4001,
+        infobox: infobox.to_string(),
+        summary: String::new(),
+        date: Some("1988-02-09".to_string()),
+        meta_tags: Vec::new(),
+    };
+    assert!(row.is_game(), "fixture 得是个游戏条目");
+    romcat_core::zh::Index::build(
+        vec![romcat_core::zh::Entry {
+            id: row.id,
+            name: row.name.clone(),
+            name_cn: row.name_cn.clone(),
+            aliases: row.aliases(),
+            year: row.year(),
+            platforms: vec!["FC".to_string()],
+            platform_text: row.platforms().join("、"),
+            // 简介走的是另一条路（`scrape::zh::Summaries`），索引上这一格永远空着。
+            summary: String::new(),
+            genres: row.genres(),
+            developers: row.developers(),
+            publishers: row.publishers(),
+        }],
+        "dump-2026-09-01".to_string(),
+    )
+}
+
+#[test]
+fn 开发商与发行商落在作品锚点上而且一个键写了几个值就拆成几条() {
+    // 票 04 的正题：跑一趟**离线档**，开发商与发行商落在**作品**锚点上，源是中文离线源，
+    // 而 infobox 里一个键写了几个值，库里就是**几条**——不是一串带顿号的长字符串。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    let index = 中文索引带信息框(魂斗罗信息框);
+    let outcome = 刮削带中文索引(&mut 现场, &index);
+
+    // 一、**这一趟的网络请求数是 0**：网络句柄压根没传，档案那道闸门也只放本地源进来。
+    assert!(!outcome.report.sources.contains(&"ScreenScraper".to_string()));
+    assert!(outcome.report.sources.contains(&"中文离线源".to_string()));
+    assert!(outcome.report.online.is_none(), "离线档不该有在线那一侧的账");
+
+    // 二、**顿号分隔的一行拆成两条**（`|开发= 科乐美、KCE东京`）。
+    assert_eq!(
+        各值(&现场, "作品", 作品, "开发商", "中文离线源"),
+        vec!["KCE东京", "科乐美"],
+        "顿号那一行该是两条开发商，不是一条「科乐美、KCE东京」",
+    );
+
+    // 三、**多值块拆成两条**（`|发行={ [科乐美] [任天堂] }`）。
+    assert_eq!(
+        各值(&现场, "作品", 作品, "发行商", "中文离线源"),
+        vec!["任天堂", "科乐美"],
+    );
+
+    // 四、这两样**不挂在变体上**：跨平台跨地区都成立的东西挂作品层，
+    // 挂到变体上就是同一部作品的每个变体各存一份。
+    for 变体 in [原版变体, 汉化变体, 汉化变体二] {
+        assert!(各值(&现场, "变体", 变体, "开发商", "中文离线源").is_empty());
+        assert!(各值(&现场, "变体", 变体, "发行商", "中文离线源").is_empty());
+    }
+
+    // 五、**每一条都带依据**：条目号、撞上的是哪个名字、两道校验的结果，
+    // 外加「这条结论是名下哪个变体撞出来的」。
+    let 全部 = 现场.catalog.scraped_values("作品", 作品).expect("读得出");
+    let 开发商的依据: Vec<&str> = 全部
+        .iter()
+        .filter(|value| value.field == "开发商" && value.source == "中文离线源")
+        .map(|value| value.evidence.as_str())
+        .collect();
+    assert_eq!(开发商的依据.len(), 2);
+    for 依据 in 开发商的依据 {
+        assert!(依据.contains("条目 12345"), "{依据}");
+        assert!(依据.contains("的中文名「魂斗罗」"), "{依据}");
+        assert!(依据.contains("平台交叉校验对得上"), "{依据}");
+        assert!(依据.contains("年份交叉校验对得上"), "{依据}");
+        assert!(依据.contains("而开发商跨平台跨地区都成立"), "{依据}");
+        assert!(依据.contains(&format!("名下的变体「{汉化变体}」")), "{依据}");
+        // **中置信、照旧进待确认队列**：多两栏不等于自动通过（票 05 才管裁决那一侧）。
+        assert!(依据.contains("一律进待确认队列"), "{依据}");
+    }
+
+    // 六、合并之后：**开发商这一栏由中文离线源填**——DAT 那几家一条都给不出，
+    // 而 ScreenScraper 在离线档里根本不在场。
+    let merged = Priorities::builtin().merge(Some("FC"), &全部);
+    assert_eq!(merged["开发商"].source, "中文离线源");
+    // 发行商那一栏**仍旧由 TOSEC 说了算**：它在离线档里是在场的，而且排在前面——
+    // 它的发行商跟着那一条按哈希确认的 DAT 记录走。这是优先级表里明写的名次。
+    assert_eq!(
+        merged["发行商"].source, "TOSEC",
+        "TOSEC 认得出这个文件时，发行商该听它的",
+    );
+
+    // 七、报告里「一个值都没采到的字段」不再点名开发商。
+    assert!(
+        !outcome.report.gaps.contains(&"开发商".to_string()),
+        "离线档现在补得上开发商了：{:?}",
+        outcome.report.gaps,
+    );
+
+    // 八、**再跑一趟，两栏都还在。** 与类型、简介两条同一个道理（票 02 的骨架）：
+    // 第二趟变体那一层整片命中缓存，作品层照样自己现撞一遍。
+    let 再跑 = 刮削带中文索引(&mut 现场, &index);
+    assert_eq!(再跑.forgotten, 0, "一条结论都不该被当成作废清掉");
+    assert_eq!(
+        各值(&现场, "作品", 作品, "开发商", "中文离线源"),
+        vec!["KCE东京", "科乐美"],
+    );
+    assert_eq!(
+        各值(&现场, "作品", 作品, "发行商", "中文离线源"),
+        vec!["任天堂", "科乐美"],
+    );
+}
+
+#[test]
+fn 数据源缺开发这个键的条目照常产出它有的那些字段() {
+    // 规格 21：**缺键就是没有，不是错误**。这条 infobox 写了发行没写开发。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    let index = 中文索引带信息框(
+        "{{Infobox Game\n|中文名= 魂斗罗\n|平台= FC\n|游戏类型= ACT\n\
+         |发行= 科乐美\n|发行日期= 1988-02-09\n}}",
+    );
+    刮削带中文索引(&mut 现场, &index);
+
+    // 缺的那个键就该是缺的——而不是一条空串（空值会让优先级链在它身上停下来）。
+    assert!(
+        各值(&现场, "作品", 作品, "开发商", "中文离线源").is_empty(),
+        "没写的键不该凭空冒出一条",
+    );
+    // **只有一个值时就是一条**，没有多出空条目。
+    assert_eq!(各值(&现场, "作品", 作品, "发行商", "中文离线源"), vec!["科乐美"]);
+    // **整条不跳过**：它写了的那几样照样落库。
+    assert_eq!(各值(&现场, "作品", 作品, "类型", "中文离线源"), vec!["ACT"]);
+    assert_eq!(
+        值(&现场, "变体", 汉化变体, "标题", "中文离线源").as_deref(),
+        Some("魂斗罗"),
+    );
+}
+
 /// 数据源里那条简介的原样：开头两个**全角空格**、中间一个换行。
 ///
 /// Bangumi 的简介几乎都是这个形状。`str::trim` 会把 U+3000 当空白扫掉，所以这一路上

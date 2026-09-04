@@ -99,8 +99,12 @@ CREATE TABLE IF NOT EXISTS subject_name(
 -- **与叫法分开一张表**：那一张会被拿去撞名字，这一张不会。混在一起，`开发= 任天堂`
 -- 会变成一条能撞上《任天堂》的「叫法」。
 --
--- `ord` 是数据源里的**原次序**，不是排序用的装饰：前端只写得下一个开发商时取的就是
--- 第一个（`gamelist` 的 `developers.first()`），按字典序重排等于换一家公司。
+-- `ord` 是数据源里的**原次序**，不是排序用的装饰。⚠️ **票 04 之后，导出那条链上还没有
+-- 人读它**：开发商与发行商拆成多条进中立库之后，`converge::build_game` 只 `pick` 得出
+-- 一条，而那一条由 `Priorities::pick` 第四层排序键（**值本身**，即码位序）定——
+-- `|开发= 科乐美、KCE东京` 导出去写的是 `KCE东京`，**换了一家公司，不只是换了次序**。
+-- 这一格留着不是白留：把它折进那层排序键、或者让导出侧按集合读这两栏，两条路都要它。
+-- 记在挂单 Q27。
 CREATE TABLE IF NOT EXISTS subject_fact(
     subject INTEGER NOT NULL,
     kind    TEXT    NOT NULL,

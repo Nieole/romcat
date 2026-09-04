@@ -77,6 +77,24 @@
 //! 因此**简介这一栏与别的作品级字段不同**：这个源手里没有 [`Summaries`] 时它一句话都
 //! 不说，而类型照旧产出。这件事进[输入指纹](ChineseSource::work_probe)，不然把这条路
 //! 接上之后重跑，缓存会一口咬定「输入没变」，那些简介永远补不上来。
+//!
+//! ## 开发商与发行商拆成多条（票 04）
+//!
+//! 数据源里这两个键有两种写法：顿号分隔的一行（`|开发= 甲、乙`）与多值块
+//! （`|发行={ [甲] [乙] }`）。取数那一侧（[`zh::dump::values`]）把两种都拆开了，
+//! 这一层照着**一个值一条**产出（[`Harvest::each`]），而不是塞成一串带顿号的长字符串
+//! ——用户在前端里按开发商筛的时候，「甲、乙」与「甲」是两个不同的东西，
+//! 而一串长字符串两个都筛不出来。
+//!
+//! **这与类型那一栏的处置正好相反**（挂单 Q11：一条条目写了好几个类型时只取头一个），
+//! 两者并不打架：那是票 02 拿类型跑通「撞在变体层、挂在作品层」时的最小做法，而这一票
+//! 的验收明写着「拆成多条」。**代价说清楚**：同一个字段上并存好几条时，导出那一侧眼下
+//! 只读得出一条（`adapter::converge::build_game` 里那个 `pick`），而胜出的是
+//! `Priorities::pick` 第四层排序键挑的那条——那一层比的是**值本身**，也就是**码位序**。
+//! 于是 `|开发= 科乐美、KCE东京` 导到前端里写的是 `KCE东京`：**换的不是次序，是换了
+//! 一家公司**。数据源的原次序在中立库的上一层（`zh::store` 那张 `subject_fact` 的 `ord`）
+//! 好好留着，只是导出那条链上还没有人读它。让前端拿到整组、或者把 `ord` 折进那层排序键，
+//! 都是导出那一侧的活——「导出侧一行不改」是这一票的硬约束，所以记在挂单 Q27，不在这儿改。
 
 use std::collections::BTreeMap;
 
@@ -108,6 +126,22 @@ pub const DESCRIPTION_LIMIT: usize = 4_000;
 /// 报告靠它把被截断的条目**点得出名**（`scrape::report`）：截断这件事不许是悄悄发生的。
 /// 按记号找而不是按长度找——闸是会调的，按长度找的话调完闸老的那些行就点不出来了。
 pub const TRUNCATED_MARK: &str = "〔简介太长：原文 ";
+
+/// **作品那一层产出哪几个字段。**
+///
+/// 它进[作品锚点的输入指纹](ChineseSource::work_probe)。索引那一行
+/// （[`zh::store::FIELDS`]）盖不住这件事：那一行说的是**取数**那一侧往库里存了哪几样，
+/// 而票 01 早就把开发商与发行商存进去了；改的是**这一侧取不取**。不盖住的话，票 03
+/// 那一版采过的作品会被缓存一口咬定「输入没变」而整条跳过，这两栏永远补不上来。
+///
+/// **这一层将来多产出一个字段，这里要跟着加一行**——`collect_work` 真的产出的那几样
+/// 与这一行对不对得上，有一条测试钉着。
+const WORK_FIELDS: [Field; 4] = [
+    Field::Genre,
+    Field::Description,
+    Field::Developer,
+    Field::Publisher,
+];
 
 /// 把一条简介收进闸内。
 ///
@@ -400,6 +434,12 @@ impl<'a> ChineseSource<'a> {
             self.naming.index.map_or("", zh::Index::dump).to_string(),
             self.naming.index.map_or("", zh::Index::fields).to_string(),
             self.naming.tuning.fingerprint(),
+            // **这一层产出哪几个字段**（[`WORK_FIELDS`]）：多接一样上来就该重采一遍。
+            WORK_FIELDS
+                .iter()
+                .map(|field| field.label())
+                .collect::<Vec<_>>()
+                .join("、"),
             // **简介那道闸**：调小了重跑，同一条简介该重新截一遍。
             DESCRIPTION_LIMIT.to_string(),
             // **简介那条路在不在场**：不在场时这一层一条简介都产不出，接上之后不重采
@@ -437,8 +477,9 @@ impl<'a> ChineseSource<'a> {
 
     /// 作品锚点上采到的：撞上那条条目里**属于作品**的那几样。
     ///
-    /// 眼下有**类型**（票 02 用它把「撞在变体层、挂在作品层」这条路跑通）与**简介**
-    /// （票 03）。开发商与发行商是票 04 的活，接在同一条路上。
+    /// 四样：**类型**（票 02 用它把「撞在变体层、挂在作品层」这条路跑通）、**简介**
+    /// （票 03）、**开发商**与**发行商**（票 04）。哪几样在这儿，[`WORK_FIELDS`]
+    /// 那一行就写着哪几样——它进作品锚点的输入指纹。
     ///
     /// # Errors
     /// 简介那条路读不出来时返回 [`Failure::Skip`]：**这一对不写库，下一趟再来**。
@@ -458,7 +499,35 @@ impl<'a> ChineseSource<'a> {
                 won.evidence(dump, Field::Genre),
             );
         }
+        self.collect_facts(&won, dump, out);
         self.collect_summary(&won, dump, out)
+    }
+
+    /// 作品锚点上那几条**开发商**与**发行商**（票 04）。
+    ///
+    /// **一个值一条**（[`Harvest::each`]），不是一串带顿号的长字符串：数据源里这两个键
+    /// 写成顿号分隔的一行或者多值块，取数那一侧（[`zh::dump::values`]）已经拆开了，
+    /// 这一层照着一条一条产出。合起来的话，用户在前端里按开发商筛就只剩一条路——
+    /// 拿「甲、乙」这一整串去筛，而那与「甲」是两个不同的东西。
+    ///
+    /// **两栏同一条路**：它们在数据源里是一对孪生的键（`|开发=` 与 `|发行=`），
+    /// 形状、拆法与依据一模一样。各写一遍的话，将来改依据最容易漏掉的正是后一栏。
+    ///
+    /// ⚠️ **产出的次序不是导出的次序。** 这里按数据源的原次序一条条产出，可导出那一侧
+    /// 只挑得出一条、而且按码位挑（见模块文档那一节与挂单 Q27）。要靠次序的人别指望
+    /// 这个函数。
+    fn collect_facts(&self, won: &WorkHit, dump: &str, out: &mut Harvest) {
+        for (field, values) in [
+            (Field::Developer, &won.hit.one.entry.developers),
+            (Field::Publisher, &won.hit.one.entry.publishers),
+        ] {
+            for value in values {
+                // **首尾空白掐在这儿**：取数那一侧掐过一遍，但手里这份索引也可能是
+                // 上一版程序建的库读回来的。掐在产出这一处，这条纪律就与索引是谁建的
+                // 无关。掐完是空的就一条都不产出——空值会让优先级链在它身上停下来。
+                out.each(field, value.trim(), won.evidence(dump, field));
+            }
+        }
     }
 
     /// 作品锚点上那条**中文简介**（票 03）。
@@ -620,6 +689,11 @@ mod tests {
                     platforms: vec!["NDS".to_string()],
                     platform_text: "NDS".to_string(),
                     genres: vec!["ACT".to_string()],
+                    // 照真库那条记录写的（`zh::dump` 的单元测试钉的是同一条）：
+                    // 开发写成**顿号分隔的一行**（`|开发= SNK、北斗`），发行写成
+                    // **多值块**。取数那一侧已经把两种都拆开了，索引上就是几条。
+                    developers: vec!["SNK".to_string(), "北斗".to_string()],
+                    publishers: vec!["世嘉".to_string()],
                     ..zh::Entry::default()
                 },
                 zh::Entry {
@@ -643,6 +717,9 @@ mod tests {
                     platforms: vec!["NDS".to_string()],
                     platform_text: "NDS".to_string(),
                     genres: vec!["AVG".to_string()],
+                    // 开发只写了一家，而**发行这个键这条条目根本没写**——
+                    // 缺键就是没有，不是错误（规格 21）。
+                    developers: vec!["科乐美".to_string()],
                     ..zh::Entry::default()
                 },
             ],
@@ -759,6 +836,18 @@ mod tests {
         out.values.iter().find(|it| it.field == field)
     }
 
+    /// 作品锚点上某个字段采到的**全部**值，按产出的次序。
+    ///
+    /// 与 [`那一格`] 分开：开发商与发行商在同一个锚点上是**好几条**（票 04），
+    /// 拿 `find` 去看只看得见头一条，而这一票要钉的正是「一共有几条」。
+    fn 那几条(out: &Harvest, field: Field) -> Vec<&str> {
+        out.values
+            .iter()
+            .filter(|it| it.field == field)
+            .map(|it| it.value.as_str())
+            .collect()
+    }
+
     #[test]
     fn 撞上了就给一个有出处的中文名() {
         let out = 采("nds/合金弹头7[某汉化组](简).7z", &[]);
@@ -812,10 +901,10 @@ mod tests {
             名下("nds/合金弹头7[某汉化组](简).7z"),
             名下("nds/合金弹头7.7z"),
         ]);
-        assert_eq!(out.values.len(), 1, "两个变体撞到同一条，只该有一份类型");
-        assert_eq!(out.values[0].field, Field::Genre);
-        assert_eq!(out.values[0].value, "ACT");
-        let 依据 = &out.values[0].evidence;
+        // 这一层现在产出四样（类型、简介、开发商、发行商），所以按**字段**数，
+        // 不按整个 `Harvest` 的条数——「只有一份类型」才是这条测试要钉的话。
+        assert_eq!(那几条(&out, Field::Genre), vec!["ACT"], "两个变体撞到同一条，只该有一份类型");
+        let 依据 = &那一格(&out, Field::Genre).expect("有这一条").evidence;
         // **依据**四样齐全：条目号、撞上的是哪个名字、两道校验各是什么。
         assert!(依据.contains("条目 4"), "{依据}");
         assert!(依据.contains("「合金弹头7」"), "{依据}");
@@ -865,14 +954,16 @@ mod tests {
             名下("nds/恶魔城.7z"),
             名下("nds/恶魔城[某汉化组](简).7z"),
         ]);
-        assert_eq!(out.values.len(), 1);
-        assert_eq!(out.values[0].value, "AVG", "两票的条目 6 该胜过一票的条目 4");
+        let 类型 = 那一格(&out, Field::Genre).expect("有这一条");
+        assert_eq!(类型.value, "AVG", "两票的条目 6 该胜过一票的条目 4");
+        // 别的字段也跟着那条胜出的条目走：条目 6 的开发是科乐美，不是条目 4 的 SNK。
+        assert_eq!(那几条(&out, Field::Developer), vec!["科乐美"]);
         assert!(
-            out.values[0]
+            类型
                 .evidence
                 .contains("名下 3 个变体撞上了中文条目，其中 2 个撞的是这一条"),
             "{}",
-            out.values[0].evidence
+            类型.evidence
         );
     }
 
@@ -884,8 +975,11 @@ mod tests {
         let 乙 = 名下("nds/恶魔城.7z");
         let 正 = 采作品(&[甲.clone(), 乙.clone()]);
         let 反 = 采作品(&[乙, 甲]);
-        assert_eq!(正.values.len(), 1);
-        assert_eq!(正.values[0].value, "ACT", "平票该取条目号小的那条（4 < 6）");
+        assert_eq!(
+            那一格(&正, Field::Genre).expect("有这一条").value,
+            "ACT",
+            "平票该取条目号小的那条（4 < 6）"
+        );
         assert_eq!(正.values, 反.values, "换个次序，结论与依据都该一模一样");
     }
 
@@ -1109,6 +1203,92 @@ mod tests {
         )
         .expect("不该失败");
         assert!(out.values.is_empty(), "{:?}", out.values);
+    }
+
+    #[test]
+    fn 开发商与发行商拆成多条落在作品锚点上() {
+        // 票 04 的正题：数据源里一个键写了好几个值（顿号分隔的一行、或者多值块），
+        // 到这一层就是**好几条**，不是一串带顿号的长字符串——用户按开发商筛的时候，
+        // 「SNK、北斗」与「SNK」是两个不同的东西。
+        let out = 采作品(&[名下("nds/合金弹头7.7z")]);
+        assert_eq!(那几条(&out, Field::Developer), vec!["SNK", "北斗"]);
+        // **只有一个值时就是一条**，没有多出空条目。
+        assert_eq!(那几条(&out, Field::Publisher), vec!["世嘉"]);
+        // 每一条都带**依据**，而且说得清它为什么挂在作品这一层。
+        for found in out.values.iter().filter(|it| it.field == Field::Developer) {
+            assert!(found.evidence.contains("条目 4"), "{}", found.evidence);
+            assert!(
+                found.evidence.contains("而开发商跨平台跨地区都成立"),
+                "{}",
+                found.evidence
+            );
+            // **中置信、照旧进待确认队列**：多两栏不等于自动通过（票 05 才管裁决）。
+            assert!(found.evidence.contains("一律进待确认队列"), "{}", found.evidence);
+        }
+        // **不挂在变体上**：这两样跨平台跨地区都成立，挂到变体上就是每个变体各存一份。
+        let 变体上的 = 采("nds/合金弹头7.7z", &[]);
+        assert!(
+            变体上的
+                .values
+                .iter()
+                .all(|it| it.field != Field::Developer && it.field != Field::Publisher),
+            "{:?}",
+            变体上的.values
+        );
+    }
+
+    #[test]
+    fn 数据源缺发行这个键时照常产出它有的那些字段() {
+        // 规格 21：**缺键就是没有，不是错误**。条目 6 写了开发没写发行。
+        let out = 采作品(&[名下("nds/恶魔城.7z")]);
+        assert_eq!(那几条(&out, Field::Developer), vec!["科乐美"]);
+        assert!(那几条(&out, Field::Publisher).is_empty(), "缺的键就该是缺的");
+        assert_eq!(那一格(&out, Field::Genre).expect("有这一条").value, "AVG");
+    }
+
+    #[test]
+    fn 拆出来的每一条都掐掉首尾空白而且不产出空串() {
+        // 取数那一侧（`zh::dump::values`）已经掐过一遍，可手里这份索引也可能是**上一版
+        // 程序**建的库读回来的。掐在产出这一处，这条纪律就与索引是谁建的无关。
+        // 空串一条都不产出——空值会让优先级链在它身上停下来。
+        let index = zh::Index::build(
+            vec![zh::Entry {
+                id: 4,
+                name: "メタルスラッグ7".to_string(),
+                name_cn: "合金弹头7".to_string(),
+                year: Some(2008),
+                platforms: vec!["NDS".to_string()],
+                platform_text: "NDS".to_string(),
+                developers: vec![
+                    "  SNK  ".to_string(),
+                    String::new(),
+                    "　".to_string(),
+                    "北斗\n".to_string(),
+                ],
+                ..zh::Entry::default()
+            }],
+            "dump-2026-09-01".to_string(),
+        );
+        let rules = Rules::builtin();
+        let mut out = Harvest::default();
+        源(&rules, &index)
+            .collect(&作品(&[名下("nds/合金弹头7.7z")]), &mut out)
+            .expect("这一趟没有会失败的动作");
+        assert_eq!(那几条(&out, Field::Developer), vec!["SNK", "北斗"]);
+    }
+
+    #[test]
+    fn 这一层产出的字段与进指纹的那一行对得上() {
+        // `WORK_FIELDS` 进作品锚点的输入指纹。它与这一层**真的产出**的那几样一旦漂开，
+        // 新接上来的字段就永远补不到已经采过的作品上——缓存会一口咬定「输入没变」。
+        let out = 采作品带简介(&[名下("nds/合金弹头7.7z")], &简介表(Some(简介原文.to_string())))
+            .expect("读得出来就不该失败");
+        let mut 产出: Vec<Field> = out.values.iter().map(|it| it.field).collect();
+        产出.sort_unstable();
+        产出.dedup();
+        let mut 写着的 = WORK_FIELDS.to_vec();
+        写着的.sort_unstable();
+        assert_eq!(产出, 写着的);
     }
 
     #[test]
