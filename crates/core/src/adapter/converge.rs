@@ -544,6 +544,13 @@ fn build_game(
     let head = &members[0];
     let merged = priorities.merge(Some(platform), values);
     let pick = |field: Field| merged.get(field.label()).map(|value| value.value.clone());
+    let pick_all = |field: Field| {
+        priorities
+            .pick_all(field.label(), Some(platform), values)
+            .into_iter()
+            .map(|value| value.value.clone())
+            .collect::<Vec<_>>()
+    };
 
     // **显示标题**：作品级的由票 15 挑（中文优先、官中的官方译名优先）；
     // 还没认出作品的那些只有一条路——刮削收上来的变体级标题，兜底是文件名。
@@ -613,8 +620,10 @@ fn build_game(
         title,
         sort_title: sort,
         files: members.iter().map(|v| v.main_key.clone()).collect(),
-        developers: pick(Field::Developer).into_iter().collect(),
-        publishers: pick(Field::Publisher).into_iter().collect(),
+        // **开发商与发行商按集合读**：数据源一个键写了几家就是几家，挑一条等于换掉
+        // 一家公司（`Priorities::pick_all` 的文档、挂单 Q27）。
+        developers: pick_all(Field::Developer),
+        publishers: pick_all(Field::Publisher),
         genres: pick(Field::Genre).into_iter().collect(),
         tags: Vec::new(),
         players: None,

@@ -283,6 +283,36 @@ impl Priorities {
             })
     }
 
+    /// 胜出那个**源**在这个字段上说的**全部**值。
+    ///
+    /// [`Priorities::pick`] 挑的是一条，那对单值字段（标题、年份、简介）正合适。可开发商
+    /// 与发行商是**集合字段**——数据源一个键写了几家（`|开发= 科乐美、KCE东京`），
+    /// 中立库里就是几行。这时挑一条等于**换掉一家公司**：前三层排序键（表里的名次、
+    /// 采集时刻、源名）在同一个源的几条值上完全平手，第四层比的是值本身，也就是**码位序**
+    /// ——挑出来的既不是第一家也不是主要那家（挂单 Q27）。
+    ///
+    /// 所以这里先用同一套优先级选出**哪个源说了算**，再把那个源在这个字段上的话全都交出来。
+    /// **不跨源合并**：两个源各说各的「Konami」与「KONAMI」并成两条，那不是集合是重复。
+    ///
+    /// 值的先后仍是码位序（`ScrapedValue` 上没有数据源原次序那一列）。**少一家比排错序坏
+    /// 得多**，所以这一步先把「全都在」做到；原次序要不要一路带到这里，是 Q27 留给
+    /// 拿主意的人的那半。
+    #[must_use]
+    pub fn pick_all<'a>(
+        &self,
+        field: &str,
+        platform: Option<&str>,
+        values: &'a [ScrapedValue],
+    ) -> Vec<&'a ScrapedValue> {
+        let Some(winner) = self.pick(field, platform, values) else {
+            return Vec::new();
+        };
+        values
+            .iter()
+            .filter(|value| value.field == field && value.source == winner.source)
+            .collect()
+    }
+
     /// 一个锚点上全部字段各自的胜出值：字段 → 那一条。
     #[must_use]
     pub fn merge<'a>(
@@ -344,6 +374,46 @@ mod tests {
         let merged = priorities.merge(Some("FC"), &values);
         assert_eq!(merged["标题"].source, "No-Intro");
         assert_eq!(merged["年份"].source, "TOSEC");
+    }
+
+    #[test]
+    fn 集合字段交出胜出那个源说的全部值而不是挑一条() {
+        // `|开发= 科乐美、KCE东京` 在中立库里是两行。挑一条的话，前三层排序键在同一个源
+        // 的两条值上完全平手，第四层比码位——挑出来的是 `KCE东京`，**换的是一家公司**
+        // 不是次序（挂单 Q27）。
+        let priorities = Priorities::builtin();
+        let values = vec![
+            值("开发商", "中文离线源", "科乐美", 100),
+            值("开发商", "中文离线源", "KCE东京", 100),
+        ];
+        let mut got: Vec<&str> = priorities
+            .pick_all("开发商", Some("FC"), &values)
+            .into_iter()
+            .map(|value| value.value.as_str())
+            .collect();
+        got.sort_unstable();
+        assert_eq!(got, ["KCE东京", "科乐美"], "两家都得在");
+    }
+
+    #[test]
+    fn 集合字段不跨源合并_输的那个源一条都不带出来() {
+        // 两个源各说各的不是集合，是重复。胜出的那个源说了算，另一个一条都不出。
+        let priorities = Priorities::builtin();
+        let values = vec![
+            值("开发商", "TOSEC", "Konami", 100),
+            值("开发商", "中文离线源", "科乐美", 100),
+            值("开发商", "中文离线源", "KCE东京", 100),
+        ];
+        let 胜出源 = priorities
+            .pick("开发商", Some("FC"), &values)
+            .expect("挑得出")
+            .source
+            .clone();
+        let got = priorities.pick_all("开发商", Some("FC"), &values);
+        assert!(
+            got.iter().all(|value| value.source == 胜出源),
+            "只该有胜出那个源的话：{got:?}"
+        );
     }
 
     #[test]
