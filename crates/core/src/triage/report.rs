@@ -275,6 +275,18 @@ impl QueueReport {
             thousands(counts.path),
             thousands(counts.with_team),
         );
+        // **匹配裁决单独一行**（票 05）：它与上面那几个数**不是同一张表**——上面说的是
+        // 「这份内容是什么」，这一行说的是「某个源撞出来的那一次匹配对不对」。
+        // 加起来会让两个问题看着像一个。一条都没有时整行不印，免得多一行永远是 0 的噪音。
+        if counts.matches > 0 {
+            let _ = writeln!(
+                out,
+                "另有**匹配裁决** {} 条（说「就是这条」的 {}）：一条管住那一次匹配带来的\
+                 全部字段，`romcat zh matches <变体键>` 看得出是哪几个",
+                thousands(counts.matches),
+                thousands(counts.matches_accepted),
+            );
+        }
         out
     }
 }

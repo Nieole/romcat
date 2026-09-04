@@ -769,6 +769,27 @@ impl Catalog {
         Ok(out)
     }
 
+    /// **这个变体属于哪个作品**：作品锚点上那个名字；识别还没认出来时是 `None`。
+    ///
+    /// 单开一条而不是让调用方读一遍 [`work_names`](Self::work_names)：只想问一个变体的
+    /// 时候，那是把 9,226 行整份读进内存去取其中一行。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn work_of_variant(&self, key: &str) -> Result<Option<String>, CatalogError> {
+        self.conn
+            .prepare_cached(
+                "SELECT work.name FROM variant JOIN work ON work.id = variant.work_id
+                 WHERE variant.key = ?1",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_row(params![key], |row| row.get::<_, String>(0))
+                    .optional()
+            })
+            .map_err(|source| self.err(source))
+    }
+
     /// 全部**发行版**：id → 那一行。
     ///
     /// 一次读完而不是逐条查：**标题集合**要为每个变体问一次「它基于的那条发行版是什么

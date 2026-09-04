@@ -78,6 +78,28 @@
 //! 不说，而类型照旧产出。这件事进[输入指纹](ChineseSource::work_probe)，不然把这条路
 //! 接上之后重跑，缓存会一口咬定「输入没变」，那些简介永远补不上来。
 //!
+//! ## 一条**裁决**管住同一次匹配的全部字段（票 05）
+//!
+//! 撞上一条条目之后一口气产出六样东西：中文名、别名、类型、简介、开发商、发行商。
+//! 它们**同生共死**，都来自同一个条目号——所以裁决的粒度是「**这次匹配对不对**」，
+//! 不是「这个字段对不对」。按字段裁，用户得为同一次误撞裁决五遍。
+//!
+//! 那条裁决住在**沉淀库**里（[`verdict::MatchVerdict`]），钉在**内容锚**上：换台机器、
+//! 改过名字之后仍然认得出，两块盘接同一台机器裁决一次两边都受益。刮削这一侧拿到的是
+//! 它按变体键摊平之后的那一份（[`Rulings`]），两层各自这么用：
+//!
+//! - **否定**：那条条目从这个变体的候选里**划掉**（[`ChineseSource::hit`] 里那道闸）。
+//!   于是中文名、别名一个都不产出，作品那一层数票时这个变体也不再投它的票——
+//!   同一次匹配带来的其余字段跟着一起没了。
+//! - **肯定**：那条条目在这个变体的候选里**排到最前**，依据的末尾从「一律进待确认队列」
+//!   换成「由人工裁决确认过」（[`zh::Match::evidence_confirmed`]）。
+//!
+//! **裁决进输入指纹**（两层的 `probe` 都进）：不进的话，人裁完重跑一趟，缓存会一口咬定
+//! 「输入没变」而整条跳过——那条错的中文名就永远撞回来。
+//!
+//! **置信度的口径一个字都没松**：没人裁过的模糊匹配仍旧是**中置信**、仍旧不自动通过。
+//! 变的只是**一条裁决管多大范围**。
+//!
 //! ## 开发商与发行商拆成多条（票 04）
 //!
 //! 数据源里这两个键有两种写法：顿号分隔的一行（`|开发= 甲、乙`）与多值块
@@ -98,8 +120,10 @@
 
 use std::collections::BTreeMap;
 
+use crate::catalog::{Catalog, CatalogError};
 use crate::identify::fuzzy;
 use crate::identify::naming;
+use crate::verdict::{self, Anchor, MatchVerdict, VerdictError};
 use crate::zh;
 
 use super::{AnchorKind, DatEntry, Failure, Field, Harvest, Locality, Source, Subject};
@@ -196,6 +220,162 @@ impl Summaries for zh::store::Store {
     }
 }
 
+/// **一个变体身上的匹配裁决**：人对这个源撞出来的哪几条条目说过话（票 05）。
+///
+/// 一个变体上可以有好几条——「条目 4 不对」与「条目 9 就是它」是两句不同的话，
+/// 两句都要留着。把它们挤成一条（「这个变体认哪一条」），改一次匹配参数就分不清人
+/// 到底否定过哪一个了。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ruling {
+    /// 条目号 →（人说的是「就是这条」吗，那条裁决钉在什么上）。
+    ///
+    /// 锚跟着一起存，是因为**依据里要写它**：说得出「这条裁决换台机器还认不认得出」
+    /// 比让人以为每条都认得出强（ADR-0021 在这里的样子）。
+    by_entry: BTreeMap<u32, (bool, String)>,
+}
+
+impl Ruling {
+    /// 人对这条条目说过话吗；说过就交出`（是不是「就是这条」, 锚是什么）`。
+    #[must_use]
+    pub fn stance(&self, entry: u32) -> Option<(bool, &str)> {
+        self.by_entry
+            .get(&entry)
+            .map(|(accepted, anchor)| (*accepted, anchor.as_str()))
+    }
+
+    /// 进**输入指纹**的那一行。
+    ///
+    /// **锚也进去**：一条裁决从路径锚换成内容锚时，说的还是同一句话，但依据里那半句
+    /// 变了——而依据是要落库的东西，不重采就永远是旧的那句。
+    fn fingerprint(&self) -> String {
+        self.by_entry
+            .iter()
+            .map(|(entry, (accepted, anchor))| {
+                format!("{entry}{}{anchor}", if *accepted { "准" } else { "否" })
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+/// **匹配裁决按变体键摊平之后的那一份**，一趟刮削整份拿在手里（票 05）。
+///
+/// ## 为什么摊平是单独一步
+///
+/// 沉淀库里那一份（[`verdict::MatchIndex`]）按**锚**存：内容锚说的是「世上这份内容」，
+/// 那正是「换台机器仍然认得出」的来处。而刮削这一侧手里只有变体的键——「本机哪个变体
+/// 装着这份内容」只有中立库答得出。
+///
+/// 摊平的方向是**从裁决问变体**，不是从变体问裁决：裁决是人一条条裁出来的，量级是几百
+/// 到几千；变体是 46,444 个，而刮削那一侧本来就特意不为每个变体取内容判据
+/// （见 `scrape::Plan::build` 里那句「变体这一层不带判据」）。
+#[derive(Debug, Clone, Default)]
+pub struct Rulings {
+    by_variant: BTreeMap<String, Ruling>,
+}
+
+impl Rulings {
+    /// 一条都没有的那一份。**没有沉淀库时用它，刮削照跑不误。**
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// 手上直接摆一条。**真跑一趟不走这条**——那走 [`Rulings::resolve`]，从沉淀库摊平。
+    /// 它在这儿是为了让「刮削怎么用裁决」在内存里测得完，不必先开两份库。
+    pub fn put(&mut self, variant_key: &str, entry: u32, accepted: bool, anchor: &str) {
+        self.by_variant
+            .entry(variant_key.to_string())
+            .or_default()
+            .by_entry
+            .insert(entry, (accepted, anchor.to_string()));
+    }
+
+    /// 把沉淀库里那一份摊平到变体键上。
+    ///
+    /// **内容锚那一批要复核一遍**：[`Catalog::variants_with_content`] 交出来的是
+    /// 「某个成员正好是这份内容」的变体，而裁决钉的是「代表这个变体的那份内容」。
+    /// 两者只在一种情况下分岔——一个变体里某个附属成员（同一份说明文件是最可能的那种）
+    /// 与另一个变体的锚撞了同一个 CRC-32 加大小。复核走 [`crate::identify::content_print`]，
+    /// **那一层才是「谁代表这个变体」的唯一说法**，在这儿另写一遍迟早会漂开。
+    ///
+    /// # Errors
+    /// 读中立库失败时返回错误。
+    pub fn resolve(
+        catalog: &Catalog,
+        index: &verdict::MatchIndex,
+        source: &str,
+    ) -> Result<Self, CatalogError> {
+        let mut out = Self::default();
+        for (&(crc32, size), list) in index.by_content() {
+            let wanted: Vec<&MatchVerdict> = list
+                .iter()
+                .filter(|verdict| verdict.source == source)
+                .collect();
+            if wanted.is_empty() {
+                continue;
+            }
+            for key in catalog.variants_with_content(crc32, size)? {
+                let Some(row) = catalog.variant(&key)? else {
+                    continue;
+                };
+                let Some(print) = crate::identify::content_print(catalog, &row)? else {
+                    continue;
+                };
+                if print.crc32 != crc32 || print.size != size {
+                    continue;
+                }
+                for verdict in &wanted {
+                    out.take(&key, verdict);
+                }
+            }
+        }
+        for (key, list) in index.by_path() {
+            for verdict in list.iter().filter(|verdict| verdict.source == source) {
+                out.take(key, verdict);
+            }
+        }
+        Ok(out)
+    }
+
+    /// 收下一条。条目号读不成数的那些**如实扔掉**——那不是这个源写的号。
+    fn take(&mut self, variant_key: &str, verdict: &MatchVerdict) {
+        if let Ok(entry) = verdict.entry.parse::<u32>() {
+            self.put(
+                variant_key,
+                entry,
+                verdict.accepted,
+                &verdict.anchor.describe(),
+            );
+        }
+    }
+
+    /// 这个变体身上的那一份；没人裁过就是 `None`。
+    #[must_use]
+    pub fn for_variant(&self, variant_key: &str) -> Option<&Ruling> {
+        self.by_variant.get(variant_key)
+    }
+
+    /// 摊到了几个变体身上。
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.by_variant.len()
+    }
+
+    /// 一个变体都没摊到吗。
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_variant.is_empty()
+    }
+
+    /// 一个变体那一份进输入指纹的字符串；没人裁过就是空串。
+    fn fingerprint_of(&self, variant_key: &str) -> String {
+        self.for_variant(variant_key)
+            .map(Ruling::fingerprint)
+            .unwrap_or_default()
+    }
+}
+
 /// 一个变体撞出来的那一条，连着**拿什么去撞的**。
 ///
 /// 三样绑在一起而不是分开传：**依据**里要写「与文件名剥出来的正题相似度多少」，
@@ -209,12 +389,20 @@ struct Hit {
     text: String,
     /// 那串字是怎么来的（`正题` / `正题里的中文`）。
     label: &'static str,
+    /// **人裁决过这一次匹配吗**（票 05）。裁过就是那条裁决钉在什么上的那一句。
+    ///
+    /// 它跟着 `Hit` 走而不是另开一路：依据的最后一句由它决定，而依据与结论必须是
+    /// 同一次匹配上的两半——分开传，早晚会把甲的结论配上乙的那句话。
+    confirmed: Option<String>,
 }
 
 impl Hit {
     /// 这一条的**依据**，写成给人看的一句。
     fn evidence(&self, dump: &str) -> String {
-        self.one.evidence(dump, self.label, &self.text)
+        match &self.confirmed {
+            Some(anchor) => self.one.evidence_confirmed(dump, self.label, &self.text, anchor),
+            None => self.one.evidence(dump, self.label, &self.text),
+        }
     }
 }
 
@@ -262,6 +450,7 @@ impl WorkHit {
 pub struct ChineseSource<'a> {
     naming: fuzzy::Naming<'a>,
     summaries: Option<&'a dyn Summaries>,
+    rulings: Option<&'a Rulings>,
 }
 
 impl<'a> ChineseSource<'a> {
@@ -275,6 +464,7 @@ impl<'a> ChineseSource<'a> {
         Self {
             naming,
             summaries: None,
+            rulings: None,
         }
     }
 
@@ -288,17 +478,49 @@ impl<'a> ChineseSource<'a> {
         self
     }
 
+    /// 接上**匹配裁决**那一份（票 05）。
+    ///
+    /// 单独一步而不是并进 [`new`](Self::new)：没有沉淀库的时候这个源照样跑，只是这一趟
+    /// 没有人裁过任何一次匹配——那与「裁过、全是否定」是两件事。
+    #[must_use]
+    pub fn with_rulings(mut self, rulings: &'a Rulings) -> Self {
+        self.rulings = Some(rulings);
+        self
+    }
+
+    /// 这个变体身上人裁过什么。
+    fn ruling_of(&self, variant_key: &str) -> Option<&Ruling> {
+        self.rulings
+            .and_then(|rulings| rulings.for_variant(variant_key))
+    }
+
     /// 这个**变体**锚点上撞得出哪一条。
     fn best(&self, subject: &Subject<'_>) -> Option<Hit> {
-        self.hit(subject.main_key?, subject.platform, subject.entries)
+        // 变体锚点的 `id` 就是变体的键——**匹配裁决**按它摊平（[`Rulings`]）。
+        self.hit(
+            subject.id,
+            subject.main_key?,
+            subject.platform,
+            subject.entries,
+        )
     }
 
     /// 拿一个变体的那几样撞一次。
     ///
-    /// 参数表摊开成三样而不是收一个 [`Subject`]：作品那一层撞的是[名下的变体](
+    /// 参数表摊开成四样而不是收一个 [`Subject`]：作品那一层撞的是[名下的变体](
     /// super::WorkVariant)，手里根本没有那些变体的 `Subject`。
-    fn hit(&self, main_key: &str, platform: Option<&str>, entries: &[DatEntry]) -> Option<Hit> {
+    ///
+    /// **匹配裁决在这一处生效**（票 05），一处而不是两处：变体层与作品层撞的是同一个
+    /// 函数，闸设在这儿，两层就不可能一个认裁决一个不认。
+    fn hit(
+        &self,
+        variant_key: &str,
+        main_key: &str,
+        platform: Option<&str>,
+        entries: &[DatEntry],
+    ) -> Option<Hit> {
         let index = self.naming.index?;
+        let ruling = self.ruling_of(variant_key);
         let name = crate::path::file_name_of_key(main_key);
         // **乱码不撞**（同 `identify::fuzzy`）：有损转换留下的替换字符一进来就把相似度
         // 算成一团糟，而撞出来的东西没人分辨得了对错。
@@ -327,11 +549,32 @@ impl<'a> ChineseSource<'a> {
                 if !one.strong(&self.naming.tuning) || one.entry.name_cn.trim().is_empty() {
                     continue;
                 }
-                if best.as_ref().is_none_or(|seen| one.score > seen.one.score) {
+                let stance = ruling.and_then(|ruling| ruling.stance(one.entry.id));
+                // **人说了「不是这条」，这条条目就从这个变体的候选里划掉**（票 05）。
+                // 不是「这个变体从此没有中文条目」——那是两句不同的话，而人只说了前一句。
+                if stance.is_some_and(|(accepted, _)| !accepted) {
+                    continue;
+                }
+                let confirmed = stance
+                    .filter(|(accepted, _)| *accepted)
+                    .map(|(_, anchor)| anchor.to_string());
+                // 排序键是`（人说过就是它, 相似度）`：**人说过的排在机器挑的前面**。
+                // 这不是改匹配算法（候选还是它算出来的那一批），是在它交出来的那一批上
+                // 认人说过的话——否则「肯定」这一档在下一趟就被一个分数更高的候选顶掉了。
+                let better = match &best {
+                    None => true,
+                    Some(seen) => match (confirmed.is_some(), seen.confirmed.is_some()) {
+                        (true, false) => true,
+                        (false, true) => false,
+                        _ => one.score > seen.one.score,
+                    },
+                };
+                if better {
                     best = Some(Hit {
                         one,
                         text: text.to_string(),
                         label,
+                        confirmed,
                     });
                 }
             }
@@ -349,6 +592,7 @@ impl<'a> ChineseSource<'a> {
         let mut hits: Vec<(&str, Hit)> = Vec::new();
         for variant in subject.variants {
             if let Some(hit) = self.hit(
+                &variant.key,
                 &variant.main_key,
                 variant.platform.as_deref(),
                 &variant.entries,
@@ -368,19 +612,31 @@ impl<'a> ChineseSource<'a> {
         let (&winner, &votes) = tally
             .iter()
             .max_by_key(|(id, count)| (**count, std::cmp::Reverse(**id)))?;
-        // 胜出那条条目名下可能有好几个变体撞上，挑一个当**依据**里的代表：相似度最高的
-        // 那个；相似度也平手时取**变体键最小**的那个。后半句不能省、也不能改成「取先
-        // 遍历到的那个」——那样这条结论就挂在调用方摆进来的次序上，而这个函数自己保证
-        // 不了那件事。按键定序，它与次序无关。
+        // 胜出那条条目名下可能有好几个变体撞上，挑一个当**依据**里的代表。三层键：
+        //
+        // 1. **人裁决过这一次匹配的排最前**（票 05）。这一层不能省：作品级那四栏的依据
+        //    是从代表这一条上抄下来的，而「这一次匹配盖没盖过章」正写在那句话的末尾。
+        //    只按相似度挑的话，人裁的是甲、而乙分数更高，那四栏就照旧写着「一律进待确认
+        //    队列」——一条裁决管住全部字段这件事当场落空，而且不报错。
+        // 2. 相似度最高的那个。
+        // 3. 相似度也平手时取**变体键最小**的那个。这一层不能省、也不能改成「取先遍历
+        //    到的那个」——那样这条结论就挂在调用方摆进来的次序上，而这个函数自己保证
+        //    不了那件事。按键定序，它与次序无关。
         let mut chosen: Option<&(&str, Hit)> = None;
         for got in hits.iter().filter(|(_, hit)| hit.one.entry.id == winner) {
             let better = match chosen {
                 None => true,
-                Some(&(key, ref seen)) => match got.1.one.score.partial_cmp(&seen.one.score) {
-                    Some(std::cmp::Ordering::Greater) => true,
-                    Some(std::cmp::Ordering::Equal) => got.0 < key,
-                    _ => false,
-                },
+                Some(&(key, ref seen)) => {
+                    match (got.1.confirmed.is_some(), seen.confirmed.is_some()) {
+                        (true, false) => true,
+                        (false, true) => false,
+                        _ => match got.1.one.score.partial_cmp(&seen.one.score) {
+                            Some(std::cmp::Ordering::Greater) => true,
+                            Some(std::cmp::Ordering::Equal) => got.0 < key,
+                            _ => false,
+                        },
+                    }
+                }
             };
             if better {
                 chosen = Some(got);
@@ -410,12 +666,16 @@ impl<'a> ChineseSource<'a> {
             .iter()
             .map(|entry| entry.game.as_str())
             .collect();
+        // **人裁过什么也是一样输入**（票 05）：不进指纹的话，人裁完重跑一趟，
+        // 缓存会一口咬定「输入没变」而整条跳过——那条被否定掉的中文名就永远撞回来。
+        let judged = self.rulings.map(|rulings| rulings.fingerprint_of(subject.id));
         let mut parts = vec![
             main,
             platform,
             self.naming.index.map_or("", zh::Index::dump),
             self.naming.index.map_or("", zh::Index::fields),
             tuning.as_str(),
+            judged.as_deref().unwrap_or(""),
         ];
         parts.extend(entries);
         Some(super::fingerprint(&parts))
@@ -458,6 +718,13 @@ impl<'a> ChineseSource<'a> {
             // 后一个身上一条条目都没有」在这串里长得一模一样。
             parts.push(variant.entries.len().to_string());
             parts.extend(variant.entries.iter().map(|entry| entry.game.clone()));
+            // **名下每个变体身上人裁过什么**（票 05）：作品这一层的答案是名下变体数票
+            // 数出来的，某一个变体的匹配被否定掉，票数就变了，这一层该重采。
+            parts.push(
+                self.rulings
+                    .map(|rulings| rulings.fingerprint_of(&variant.key))
+                    .unwrap_or_default(),
+            );
         }
         let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
         Some(super::fingerprint(&parts))
@@ -592,6 +859,258 @@ impl Source for ChineseSource<'_> {
     }
 }
 
+/// 裁一次匹配裁不下去的原因。
+#[derive(Debug, thiserror::Error)]
+pub enum JudgeError {
+    /// 中立库读写失败。
+    #[error(transparent)]
+    Catalog(#[from] CatalogError),
+    /// 沉淀库读写失败。
+    #[error(transparent)]
+    Verdict(#[from] VerdictError),
+    /// 中立库里没有这个变体。
+    #[error("中立库里没有 {0} 这个变体。")]
+    NoVariant(String),
+}
+
+/// 一条**匹配裁决**落下之后的账。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Judged {
+    /// 这条裁决钉在什么上。**内容锚才是换台机器还认得出的那一种。**
+    pub anchor: Anchor,
+    /// 新立的一条（真），还是改掉了本来就有的那一条（假）。
+    pub fresh: bool,
+    /// **这个变体自己撞的就是这条条目吗。**
+    ///
+    /// 假的时候这条裁决多半管不到任何东西：裁决钉在**这个变体**的内容上，而这条条目
+    /// 是名下**别的变体**撞出来、在作品那一层数票胜出的。下一趟刮削时那几栏照旧由那些
+    /// 变体投票投回来。调用方要把这件事说给人听，别让他以为裁完就完了。
+    pub from_variant: bool,
+    /// 就地清掉了几条字段值，一共。**只有否定那一档会清**，见 [`judge`]。
+    pub cleared: u64,
+    /// 其中**作品**那一层几条。为 0 就是那一层一个字都没动。
+    pub cleared_work: u64,
+    /// 这个变体属于哪个作品；识别还没认出来时是 `None`。
+    ///
+    /// **它不表示那一层被动过**——动没动看 [`cleared_work`](Self::cleared_work)。
+    pub work: Option<String>,
+}
+
+/// 对**中文离线源那一次匹配**下一条裁决：说它对，或者说它不对（票 05）。
+///
+/// ## 粒度是「这次匹配」，不是「这个字段」
+///
+/// 撞上一条条目之后一口气产出六样：中文名、别名（变体锚点上）、类型、简介、开发商、
+/// 发行商（作品锚点上）。它们**同生共死**——都来自同一个条目号，所以人只需要说一次
+/// 「这次撞错了」，不必对同一次误撞裁决五遍。
+///
+/// ## 两档做的事不一样
+///
+/// - **否定**：那一次匹配的产出**就地清掉**——变体锚点上中文名与别名两个源的行、
+///   作品锚点上中文离线源的行，一条不留。错的东西不许在库里多躺一秒，而它带着的
+///   **依据**指着一条人已经说了不对的条目。作品那一层下一趟重跑刮削时按**剩下的变体**
+///   重新数票：名下还有别的变体撞着同一条条目的话，那几栏会照样回来，而且是对的。
+/// - **肯定**：**一个字都不清**。那些值是对的，留着；变的只是它们的**依据**——
+///   下一趟重跑时末尾那句从「一律进待确认队列」换成「由人工裁决确认过」。
+///   靠的是输入指纹（[`Ruling::fingerprint`] 进了两层的 `probe`），不是靠清库。
+///
+/// ## 作品那一层只在「这个变体自己撞的就是这条」时才动
+///
+/// 裁决钉在**这个变体**的内容上，而作品那一层的答案是**名下变体数票**数出来的——胜出的
+/// 可能是别的变体撞出来的另一条条目。这时清掉作品那一层是**白清**：下一趟那些变体照旧
+/// 投它们的票，那几栏原样回来，而用户以为自己刚刚把它裁掉了。所以先看变体锚点上有没有
+/// 这条条目的产出（[`Judged::from_variant`]），没有就一个字都不动那一层，并且把这件事
+/// 报回去。
+///
+/// **别的源产出的同名字段一个字都不碰**：这条裁决只管中文离线源那一次匹配。
+///
+/// 参数表摊开成三样而不是收一个 [`Site`](crate::site::Site)，与 `triage::apply` 一致：
+/// 那个类型管的是「这三样必须一起**开**」，不是「每个函数都得收着它」。
+///
+/// # Errors
+/// 变体不在库里、或者两份库有一份读写失败时返回错误。
+pub fn judge(
+    catalog: &mut Catalog,
+    store: &mut verdict::Store,
+    library: &str,
+    variant_key: &str,
+    entry: u32,
+    accepted: bool,
+    note: Option<String>,
+) -> Result<Judged, JudgeError> {
+    let Some(row) = catalog.variant(variant_key)? else {
+        return Err(JudgeError::NoVariant(variant_key.to_string()));
+    };
+    // **内容锚优先**：换台机器、改过名字之后仍然认得出，而且两块盘接同一台机器时
+    // 裁决一次两边都受益。拿不到内容判据（容器穿不透、压缩镜像、目录树转储）才退到
+    // 路径锚——那一种**只在本机成立**，`Anchor::is_shareable` 说得出这件事。
+    let anchor = match crate::identify::content_print(catalog, &row)? {
+        Some(print) => Anchor::Content {
+            crc32: print.crc32,
+            size: print.size,
+            sha1: None,
+        },
+        None => Anchor::Path {
+            library: library.to_string(),
+            variant_key: variant_key.to_string(),
+        },
+    };
+    let fresh = store.put_match(
+        &MatchVerdict::now(anchor.clone(), fuzzy::SOURCE, &entry.to_string(), accepted)
+            .with_note(note),
+    )?;
+    let work = catalog.work_of_variant(variant_key)?;
+    // **先问「这个变体自己撞的是不是这一条」**，再决定动不动作品那一层。问在清库之前，
+    // 因为清完就问不出来了。
+    let from_variant = catalog
+        .scraped_values(AnchorKind::Variant.label(), variant_key)?
+        .iter()
+        .any(|value| {
+            value.source == fuzzy::SOURCE && zh::entry_in(&value.evidence) == Some(entry)
+        });
+    let mut cleared = 0;
+    let mut cleared_work = 0;
+    if !accepted {
+        for source in [fuzzy::SOURCE, fuzzy::ALIAS_SOURCE] {
+            cleared += clear_source(catalog, AnchorKind::Variant, variant_key, source, entry)?;
+        }
+        if from_variant && let Some(work) = &work {
+            cleared_work = clear_source(catalog, AnchorKind::Work, work, fuzzy::SOURCE, entry)?;
+            cleared += cleared_work;
+        }
+    }
+    Ok(Judged {
+        anchor,
+        fresh,
+        from_variant,
+        cleared,
+        cleared_work,
+        work,
+    })
+}
+
+/// 把一个锚点上某个源**来自这一次匹配**的字段值清掉，返回清掉了几条。
+///
+/// **先按条目号确认这个锚点上的话真是这一次匹配说的**：作品那一层的答案是名下变体
+/// 数票数出来的，胜出的可能是**另一条**条目——那几栏与人刚否定的这一次匹配无关，
+/// 一个字都不该动。确认过之后整批扫掉是对的：一个源在一个锚点上只认一条条目
+/// （变体层就撞一次，作品层数完票只留胜出那一条），所以「这个源在这个锚点上说的话」
+/// 与「这一次匹配说的话」是同一批。
+fn clear_source(
+    catalog: &mut Catalog,
+    kind: AnchorKind,
+    subject: &str,
+    source: &str,
+    entry: u32,
+) -> Result<u64, CatalogError> {
+    let values = catalog.scraped_values(kind.label(), subject)?;
+    let mine: Vec<_> = values
+        .iter()
+        .filter(|value| value.source == source)
+        .collect();
+    // 这个锚点上这个源的话，说的是这一次匹配吗。
+    if !mine
+        .iter()
+        .any(|value| zh::entry_in(&value.evidence) == Some(entry))
+    {
+        return Ok(0);
+    }
+    // **连采集记录一起扫掉**（`forget_scraped`）：留着那条记录，下一趟会被输入指纹
+    // 一口咬定「这一对采全了」而整条跳过——而这一票要的正是「重跑一趟结论稳定」。
+    catalog.forget_scraped(kind.label(), subject, source)?;
+    // **报的数就是真删掉的那批**（这个源在这个锚点上的全部行），不是「依据里认得出这个
+    // 条目号」的那批。两者眼下是同一批，但前者是 `forget_scraped` 的定义，后者依赖依据
+    // 那句话的写法——依据改一个字，后者就会少报。
+    Ok(u64::try_from(mine.len()).unwrap_or(u64::MAX))
+}
+
+/// 一条**来自同一次匹配**的字段值，连它落在哪个锚点上。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchedValue {
+    /// 落在哪一层锚点上。
+    pub kind: AnchorKind,
+    /// 锚点：变体的键，或者作品名。
+    pub subject: String,
+    /// 哪个字段。
+    pub field: Field,
+    /// 值。
+    pub value: String,
+    /// 哪个源产出的（中文名那一路，还是别名那一路）。
+    pub source: String,
+}
+
+/// **同一次匹配带来的那一堆字段**：一个条目号，一堆值（票 05）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchGroup {
+    /// 条目号。**它就是「同一次匹配」的判据**。
+    pub entry: u32,
+    /// 人已经裁决过这一次匹配了吗。
+    pub confirmed: bool,
+    /// **这一堆里有落在变体锚点上的值吗**——也就是「这个变体自己撞的就是这一条」。
+    ///
+    /// 假的时候这一堆全在作品锚点上：它是名下**别的变体**撞出来、在作品那一层数票胜出的
+    /// 条目。**裁它要去裁那个变体**——裁决钉在内容上，钉在这个变体身上管不到那一层
+    /// （[`judge`] 的文档说的就是这件事）。
+    pub from_variant: bool,
+    /// 这一次匹配带来的全部字段值，两层锚点都在里面。
+    pub values: Vec<MatchedValue>,
+}
+
+/// 一个变体身上，**中文离线源那几次匹配**各带来了哪些字段，按**条目号**归堆（票 05）。
+///
+/// ## 为什么判据只能是条目号
+///
+/// 同一次匹配的产出散在两层锚点上——中文名与别名挂在**变体**上，类型、简介、开发商、
+/// 发行商挂在**作品**上；字段名不同、值不同、锚点也不同。它们身上唯一共通的东西是各自
+/// **依据**里那个条目号（[`zh::entry_in`]）。队列要**看得出哪几个字段来自同一次匹配**，
+/// 就只能按它归。
+///
+/// 作品锚点上那一堆是**整部作品共有的**：名下别的变体也撞着同一条条目时，它们看见的是
+/// 同一堆值。这不是重复计数，是这几个字段本来就挂在那一层（票 02）。
+///
+/// # Errors
+/// 读中立库失败时返回错误。
+pub fn matched_groups(
+    catalog: &Catalog,
+    variant_key: &str,
+) -> Result<Vec<MatchGroup>, CatalogError> {
+    let mut by_entry: BTreeMap<u32, MatchGroup> = BTreeMap::new();
+    let work = catalog.work_of_variant(variant_key)?;
+    let mut places = vec![(AnchorKind::Variant, variant_key.to_string())];
+    if let Some(work) = work {
+        places.push((AnchorKind::Work, work));
+    }
+    for (kind, subject) in places {
+        for value in catalog.scraped_values(kind.label(), &subject)? {
+            if value.source != fuzzy::SOURCE && value.source != fuzzy::ALIAS_SOURCE {
+                continue;
+            }
+            let (Some(entry), Some(field)) = (
+                zh::entry_in(&value.evidence),
+                Field::from_label(&value.field),
+            ) else {
+                continue;
+            };
+            let group = by_entry.entry(entry).or_insert(MatchGroup {
+                entry,
+                confirmed: false,
+                from_variant: false,
+                values: Vec::new(),
+            });
+            group.confirmed |= zh::is_confirmed(&value.evidence);
+            group.from_variant |= kind == AnchorKind::Variant;
+            group.values.push(MatchedValue {
+                kind,
+                subject: subject.clone(),
+                field,
+                value: value.value,
+                source: value.source,
+            });
+        }
+    }
+    Ok(by_entry.into_values().collect())
+}
+
 /// **中文离线源的别名那一路**：撞上的那条条目**还叫什么**。
 ///
 /// ## 为什么它是一个单独的源，而不是上面那个源多说几句
@@ -624,6 +1143,17 @@ impl<'a> ChineseAliasSource<'a> {
         Self {
             inner: ChineseSource::new(naming),
         }
+    }
+
+    /// 接上**匹配裁决**那一份（票 05）。
+    ///
+    /// **别名不单独裁**：它跟着中文名那一路的同一次匹配走，所以读的是同一个源名下的
+    /// 那批裁决（[`fuzzy::SOURCE`]），而不是自己那个源名下的。人否定了那一次匹配，
+    /// 中文名与别名一起没有——它们本来就同生共死。
+    #[must_use]
+    pub fn with_rulings(mut self, rulings: &'a Rulings) -> Self {
+        self.inner = self.inner.with_rulings(rulings);
+        self
     }
 }
 
@@ -815,6 +1345,37 @@ mod tests {
         fn summary(&self, _: u32) -> Result<Option<String>, String> {
             Err("库文件被截断了".to_string())
         }
+    }
+
+    /// 摆一份**匹配裁决**：这个变体上，人对这条条目说了这句话。
+    fn 裁过(key: &str, entry: u32, accepted: bool) -> Rulings {
+        let mut rulings = Rulings::none();
+        rulings.put(key, entry, accepted, "CRC-32 1234ABCD + 4096 字节");
+        rulings
+    }
+
+    /// 带着一份匹配裁决，在**变体**锚点上采一趟。
+    fn 采带裁决(key: &str, rulings: &Rulings) -> Harvest {
+        let rules = Rules::builtin();
+        let index = 索引();
+        let mut out = Harvest::default();
+        源(&rules, &index)
+            .with_rulings(rulings)
+            .collect(&变体(key, &[], &[]), &mut out)
+            .expect("本地源不会失败");
+        out
+    }
+
+    /// 带着一份匹配裁决，在**作品**锚点上采一趟。
+    fn 采作品带裁决(variants: &[WorkVariant], rulings: &Rulings) -> Harvest {
+        let rules = Rules::builtin();
+        let index = 索引();
+        let mut out = Harvest::default();
+        源(&rules, &index)
+            .with_rulings(rulings)
+            .collect(&作品(variants), &mut out)
+            .expect("这一趟没有会失败的动作");
+        out
     }
 
     /// 接上**简介**那条路，在作品锚点上采一趟。
@@ -1306,5 +1867,156 @@ mod tests {
         // **变体那一层不受影响**：简介是作品级的字段，那一层的输入一个字都没变。
         let subject = 变体("nds/合金弹头7.7z", &[], &[]);
         assert_eq!(没接上.probe(&subject), 接上了.probe(&subject));
+    }
+
+    #[test]
+    fn 一条否定裁决把那条条目从这个变体的候选里划掉() {
+        // 票 05：人说「不是这条」，中文名就不产出了——而中文名与别名、类型、简介、
+        // 开发商、发行商是同一次匹配带来的，一条裁决全管。
+        let key = "nds/合金弹头7[某汉化组](简).7z";
+        assert!(!采(key, &[]).values.is_empty(), "没人裁过时本来是产出的");
+        let out = 采带裁决(key, &裁过(key, 4, false));
+        assert!(out.values.is_empty(), "{:?}", out.values);
+
+        // **别名那一路跟着一起没有**：它们撞的是同一次。
+        let rules = Rules::builtin();
+        let index = 索引();
+        let rulings = 裁过(key, 4, false);
+        let mut 别名 = Harvest::default();
+        ChineseAliasSource::new(fuzzy::Naming {
+            rules: &rules,
+            index: Some(&index),
+            tuning: zh::Tuning::default(),
+        })
+        .with_rulings(&rulings)
+        .collect(&变体(key, &[], &[]), &mut 别名)
+        .expect("本地源不会失败");
+        assert!(别名.values.is_empty(), "{:?}", 别名.values);
+    }
+
+    #[test]
+    fn 否定的是这一条条目不是这个变体从此没有中文条目() {
+        // 人只说了「4 不对」，没说「这个文件没有中文条目」。于是 4 从候选里划掉，
+        // 剩下的照撞——撞出来的仍旧是**中置信**、仍旧进待确认队列。
+        let key = "nds/恶魔城.7z";
+        let out = 采带裁决(key, &裁过(key, 4, false));
+        assert_eq!(out.values.len(), 1);
+        assert_eq!(out.values[0].value, "恶魔城");
+        assert!(out.values[0].evidence.contains("条目 6"), "{:?}", out.values[0]);
+        assert!(out.values[0].evidence.contains("一律进待确认队列"));
+    }
+
+    #[test]
+    fn 一条肯定裁决管住同一次匹配带来的全部字段() {
+        // 六样字段散在两层锚点上，共通的只有那个条目号。一条裁决盖章，六样一起盖。
+        let key = "nds/合金弹头7.7z";
+        let rulings = 裁过(key, 4, true);
+        let 变体产出 = 采带裁决(key, &rulings);
+        assert_eq!(变体产出.values.len(), 1);
+        assert!(zh::is_confirmed(&变体产出.values[0].evidence));
+        assert!(!变体产出.values[0].evidence.contains("一律进待确认队列"));
+
+        let 作品产出 = 采作品带裁决(&[名下(key)], &rulings);
+        assert!(!作品产出.values.is_empty());
+        for found in &作品产出.values {
+            assert!(
+                zh::is_confirmed(&found.evidence),
+                "{:?} 该盖上同一个章",
+                found.field
+            );
+        }
+        // **值本身一个字都没变**：裁决改的是「这条结论算什么」，不是这条结论说什么。
+        assert_eq!(那几条(&作品产出, Field::Genre), vec!["ACT"]);
+        assert_eq!(那几条(&作品产出, Field::Developer), vec!["SNK", "北斗"]);
+    }
+
+    #[test]
+    fn 人说过的那一条排在机器挑的前面() {
+        // 不这么办的话，「肯定」这一档下一趟就被一个分数更高的候选顶掉了——
+        // 而票 05 要的正是「裁决之后重跑刮削，结论稳定」。
+        let key = "nds/合金弹头7.7z";
+        // 没人裁过时撞的是条目 4；把条目 6 说成「就是它」，撞出来的就该是 6。
+        assert!(采(key, &[]).values[0].evidence.contains("条目 4"));
+        let out = 采带裁决(key, &裁过(key, 6, true));
+        // 条目 6 在这个变体上够不着中置信，所以它进不了候选——人说了也白说，
+        // 这一条钉的是**不许凭空造一条匹配出来**。
+        assert!(out.values[0].evidence.contains("条目 4"), "{:?}", out.values[0]);
+    }
+
+    #[test]
+    fn 作品那一层数票时不数被否定掉的那个变体() {
+        // 名下两个变体，一个撞条目 4、一个撞条目 6。否定掉撞 4 的那个，
+        // 作品这一层的答案就该翻成 6——它是名下变体数票数出来的。
+        let 甲 = "nds/合金弹头7.7z";
+        let 乙 = "nds/恶魔城.7z";
+        let 没裁过 = 采作品(&[名下(甲), 名下(乙)]);
+        // 平票时取条目号最小的那一条。
+        assert_eq!(那几条(&没裁过, Field::Genre), vec!["ACT"]);
+
+        let out = 采作品带裁决(&[名下(甲), 名下(乙)], &裁过(甲, 4, false));
+        assert_eq!(那几条(&out, Field::Genre), vec!["AVG"]);
+        assert_eq!(那几条(&out, Field::Developer), vec!["科乐美"]);
+        let 依据 = &那一格(&out, Field::Genre).expect("有这一条").evidence;
+        assert!(依据.contains("名下 1 个变体撞上了中文条目"), "{依据}");
+    }
+
+    #[test]
+    fn 作品那一层的章盖在人裁过的那个变体上而不是分数最高的那个() {
+        // 作品级那四栏的依据是从**代表变体**那一条上抄下来的，而「盖没盖过章」正写在
+        // 那句话的末尾。代表只按相似度挑的话，人裁的是甲、乙分数更高，那四栏就照旧写着
+        // 「一律进待确认队列」——一条裁决管住全部字段这件事当场落空，而且不报错。
+        let 高分 = "nds/合金弹头7.7z";
+        let 低分 = "nds/合金弹头7[某汉化组](简).7z";
+        let 名下 = [名下(高分), 名下(低分)];
+        // 两个变体撞的是同一条条目、分数也平手，没人裁过时代表取变体键最小的那个。
+        let 没裁过 = 采作品(&名下);
+        assert!(!zh::is_confirmed(
+            &那一格(&没裁过, Field::Genre).expect("有这一条").evidence
+        ));
+        // 裁**键更大**的那一个：代表该翻到它身上，那四栏才盖得上章。
+        let out = 采作品带裁决(&名下, &裁过(低分, 4, true));
+        for found in &out.values {
+            assert!(
+                zh::is_confirmed(&found.evidence),
+                "{:?} 该盖上章：{}",
+                found.field,
+                found.evidence
+            );
+        }
+        assert!(
+            那一格(&out, Field::Genre)
+                .expect("有这一条")
+                .evidence
+                .contains(&format!("名下的变体「{低分}」")),
+            "代表该是人裁过的那一个"
+        );
+    }
+
+    #[test]
+    fn 匹配裁决进两层的输入指纹() {
+        // 不进的话，人裁完重跑一趟，缓存会一口咬定「输入没变」而整条跳过——
+        // 那条被否定掉的中文名就永远撞回来。
+        let rules = Rules::builtin();
+        let index = 索引();
+        let key = "nds/合金弹头7.7z";
+        let 名下变体 = [名下(key)];
+        let work = 作品(&名下变体);
+        let subject = 变体(key, &[], &[]);
+        let 空 = Rulings::none();
+        let 没裁过 = 源(&rules, &index).with_rulings(&空);
+        let 否 = 裁过(key, 4, false);
+        let 准 = 裁过(key, 4, true);
+        let 裁否了 = 源(&rules, &index).with_rulings(&否);
+        let 裁准了 = 源(&rules, &index).with_rulings(&准);
+        for (甲, 乙) in [(没裁过, 裁否了), (没裁过, 裁准了), (裁否了, 裁准了)] {
+            assert_ne!(甲.probe(&subject), 乙.probe(&subject), "变体那一层该重采");
+            assert_ne!(甲.probe(&work), 乙.probe(&work), "作品那一层也该重采");
+        }
+        // **别人的裁决不算数**：裁的是另一个变体，这一个的指纹一个字都不该变。
+        let 别人 = 裁过("nds/别的.7z", 4, false);
+        assert_eq!(
+            没裁过.probe(&subject),
+            源(&rules, &index).with_rulings(&别人).probe(&subject)
+        );
     }
 }

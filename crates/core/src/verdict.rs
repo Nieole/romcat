@@ -27,7 +27,9 @@
 //! 打开时把没跑过的接着跑完。**往前迁得动，往后（库比程序新）如实拒绝并说清**——
 //! 那时该换新程序，而不是删库。
 //!
-//! 现在只有一条迁移（建表），趁库还是空的把框架立起来最便宜。
+//! 眼下两条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**）。
+//! 加第二条时库还是空的，但那不改变纪律——**永远不要求删库**，中立库那条「版本一变就
+//! 重建」的便宜路子在这份库上不许走。
 //!
 //! ## 两种锚，如实分开
 //!
@@ -41,6 +43,26 @@
 //!
 //! 分开记而不是含糊成一种，是 ADR-0021 那条纪律在这里的样子：说得出「这条裁决换台
 //! 机器还认不认得出」，比让用户以为每条都认得出强。
+//!
+//! ## 两种裁决：**这是什么** 与 **这次匹配对不对**
+//!
+//! [`Verdict`] 说的是「世上这份内容是哪个作品的哪一次发行」——识别那一层的活。
+//! [`MatchVerdict`] 说的是另一件事：**某个源在这份内容上撞出来的那一次匹配，人说对
+//! 还是不对**（票 05）。
+//!
+//! 两者分开，是因为它们管的范围不同：
+//!
+//! - 一个变体只有一个「它是什么」，所以 [`Verdict`] 一条锚上只有一条。
+//! - 一份内容上可以有好几次匹配（这个源撞出条目 4，那个源撞出别的），所以
+//!   [`MatchVerdict`] 的键上还带着**哪个源**与**哪个条目号**。别的源在同名字段上说的话
+//!   **一个字都不受影响**。
+//!
+//! **为什么粒度是「一次匹配」而不是「一个字段」**：中文离线源撞上一条条目之后一口气
+//! 给出中文名、别名、类型、简介、开发商与发行商——它们**同生共死**，都来自同一个条目号。
+//! 按字段裁，用户得为同一次误撞裁决五遍；按匹配裁，一条就够。
+//!
+//! 它与 [`Verdict`] 共用同一套两种锚，理由也是同一条：**内容锚换台机器、改过名字之后
+//! 仍然认得出**，两块盘接同一台机器裁决一次两边都受益。
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -98,6 +120,34 @@ CREATE UNIQUE INDEX IF NOT EXISTS verdict_content
 CREATE UNIQUE INDEX IF NOT EXISTS verdict_path
     ON verdict(library, variant_key) WHERE anchor = '路径';
 CREATE INDEX IF NOT EXISTS verdict_sha1 ON verdict(sha1);
+",
+    // 2：**匹配裁决**（票 05）。一条说的是「某个源在这份内容上撞出来的那一次匹配，
+    // 人说对还是不对」——不是某一个字段对不对。
+    "\
+-- 一条**匹配裁决**。锚与 `verdict` 那张表是同一套两种（见模块文档）。
+CREATE TABLE IF NOT EXISTS match_verdict(
+    id          INTEGER PRIMARY KEY,
+    anchor      TEXT    NOT NULL,
+    crc32       INTEGER,
+    size        INTEGER,
+    library     TEXT,
+    variant_key TEXT,
+    -- **哪个源撞的。** 有了它，这条裁决只管这一个源那一次匹配：别的源在同名字段上
+    -- 说的话一个字都不受影响。
+    source      TEXT    NOT NULL,
+    -- **那个源那边的条目号。** 它是「同一次匹配」的唯一判据——同一次匹配带来的几个
+    -- 字段散在两层锚点上，值里没有一样共通的东西，共通的只有这个号。
+    entry       TEXT    NOT NULL,
+    -- 1 = 就是这条；0 = 不是这条。
+    accepted    INTEGER NOT NULL,
+    note        TEXT,
+    decided_at  INTEGER NOT NULL
+) STRICT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS match_verdict_content
+    ON match_verdict(crc32, size, source, entry) WHERE anchor = '内容';
+CREATE UNIQUE INDEX IF NOT EXISTS match_verdict_path
+    ON match_verdict(library, variant_key, source, entry) WHERE anchor = '路径';
 ",
 ];
 
@@ -317,6 +367,64 @@ impl Verdict {
     }
 }
 
+/// 一条**匹配裁决**：某个源在这份内容上撞出来的那一次匹配，人说对还是不对（票 05）。
+///
+/// ## 为什么它不是 [`Decision`] 的第四个变体
+///
+/// [`Decision`] 那三档回答的是同一个问题（「这份内容是什么」），一条锚上只允许有一个
+/// 答案，所以它是个枚举、`put` 是覆盖。匹配裁决回答的是另一个问题，而且**同一份内容上
+/// 可以有好几条**——这个源撞出条目 4、那个源撞出条目 9，各裁各的。混进同一张表就得在
+/// 唯一索引上二选一：要么「一条锚一条」把好几个源挤成一条，要么放开唯一性让「这是什么」
+/// 也能攒出两条打架的记录。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchVerdict {
+    /// 钉在什么上。与 [`Verdict`] 同一套两种锚。
+    pub anchor: Anchor,
+    /// **哪个源撞的**（`scrape::priority` 里那个源名）。
+    pub source: String,
+    /// **那个源那边的条目号**。写成字符串而不是数字：不同的源编号方式不一样，
+    /// 而这一层要做的只是「同一次匹配认得回来」，不必自己会算。
+    pub entry: String,
+    /// 人说的是「就是这条」还是「不是这条」。
+    pub accepted: bool,
+    /// 记一句为什么。
+    pub note: Option<String>,
+    /// 什么时候定的（UNIX 纪元起的秒）。
+    pub decided_at: i64,
+}
+
+impl MatchVerdict {
+    /// 立一条**现在**定下来的匹配裁决。
+    #[must_use]
+    pub fn now(anchor: Anchor, source: &str, entry: &str, accepted: bool) -> Self {
+        Self {
+            anchor,
+            source: source.to_string(),
+            entry: entry.to_string(),
+            accepted,
+            note: None,
+            decided_at: now_secs(),
+        }
+    }
+
+    /// 给它记一句为什么。
+    #[must_use]
+    pub fn with_note(mut self, note: Option<String>) -> Self {
+        self.note = note;
+        self
+    }
+
+    /// 存进库、也打给用户的那个词。
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        if self.accepted {
+            "就是这条"
+        } else {
+            "不是这条"
+        }
+    }
+}
+
 /// 沉淀库里有多少条、都是什么样。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct Counts {
@@ -336,6 +444,10 @@ pub struct Counts {
     pub unknown: u64,
     /// 补了**汉化组**的几条。
     pub with_team: u64,
+    /// **匹配裁决**一共几条（票 05）。与上面那几个数不重叠——它们是两张表。
+    pub matches: u64,
+    /// 其中说「就是这条」的几条。
+    pub matches_accepted: u64,
 }
 
 /// **沉淀库**。
@@ -597,8 +709,193 @@ impl Store {
             no_release: one("SELECT COUNT(*) FROM verdict WHERE kind = '没有发行版'")?,
             unknown: one("SELECT COUNT(*) FROM verdict WHERE kind = '认不出'")?,
             with_team: one("SELECT COUNT(*) FROM verdict WHERE team IS NOT NULL")?,
+            matches: one("SELECT COUNT(*) FROM match_verdict")?,
+            matches_accepted: one("SELECT COUNT(*) FROM match_verdict WHERE accepted = 1")?,
         })
     }
+
+    /// 记下（或改掉）一条**匹配裁决**。返回它是不是**新**的一条。
+    ///
+    /// 同一条锚、同一个源、同一个条目号上再裁一次是**覆盖**：人从「不是这条」改成
+    /// 「就是这条」，改的就该是那一条，而不是攒出两条互相打架的记录。
+    ///
+    /// **不同的条目号各算一条**：一份内容上撞过条目 4 也撞过条目 9 时，「4 不对」与
+    /// 「9 对」是两句不同的话，都要留着——把它们挤成一条，改一次匹配参数就分不清人
+    /// 到底否定过哪一个了。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn put_match(&mut self, verdict: &MatchVerdict) -> Result<bool, VerdictError> {
+        let existed = self
+            .find_match(&verdict.anchor, &verdict.source, &verdict.entry)?
+            .is_some();
+        let (crc32, size, library, variant_key) = match_columns(&verdict.anchor);
+        self.remove_match(&verdict.anchor, &verdict.source, &verdict.entry)?;
+        self.conn
+            .execute(
+                "INSERT INTO match_verdict(anchor, crc32, size, library, variant_key,
+                     source, entry, accepted, note, decided_at)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                params![
+                    verdict.anchor.label(),
+                    crc32,
+                    size,
+                    library,
+                    variant_key,
+                    verdict.source,
+                    verdict.entry,
+                    i64::from(verdict.accepted),
+                    verdict.note,
+                    verdict.decided_at,
+                ],
+            )
+            .map_err(|source| self.err(source))?;
+        Ok(!existed)
+    }
+
+    /// 忘掉一条匹配裁决。返回真的忘掉了没有。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn remove_match(
+        &mut self,
+        anchor: &Anchor,
+        source: &str,
+        entry: &str,
+    ) -> Result<bool, VerdictError> {
+        let changed = match anchor {
+            Anchor::Content { crc32, size, .. } => self.conn.execute(
+                "DELETE FROM match_verdict
+                 WHERE anchor = ?1 AND crc32 = ?2 AND size = ?3 AND source = ?4 AND entry = ?5",
+                params![
+                    ANCHOR_CONTENT,
+                    i64::from(*crc32),
+                    i64::try_from(*size).unwrap_or(i64::MAX),
+                    source,
+                    entry
+                ],
+            ),
+            Anchor::Path {
+                library,
+                variant_key,
+            } => self.conn.execute(
+                "DELETE FROM match_verdict
+                 WHERE anchor = ?1 AND library = ?2 AND variant_key = ?3
+                   AND source = ?4 AND entry = ?5",
+                params![ANCHOR_PATH, library, variant_key, source, entry],
+            ),
+        };
+        changed
+            .map(|rows| rows > 0)
+            .map_err(|source| self.err(source))
+    }
+
+    /// 查一条匹配裁决。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn find_match(
+        &self,
+        anchor: &Anchor,
+        source: &str,
+        entry: &str,
+    ) -> Result<Option<MatchVerdict>, VerdictError> {
+        let row = match anchor {
+            Anchor::Content { crc32, size, .. } => self
+                .conn
+                .query_row(
+                    &format!(
+                        "{MATCH_SELECT} WHERE anchor = ?1 AND crc32 = ?2 AND size = ?3
+                         AND source = ?4 AND entry = ?5"
+                    ),
+                    params![
+                        ANCHOR_CONTENT,
+                        i64::from(*crc32),
+                        i64::try_from(*size).unwrap_or(i64::MAX),
+                        source,
+                        entry
+                    ],
+                    read_match_row,
+                )
+                .optional(),
+            Anchor::Path {
+                library,
+                variant_key,
+            } => self
+                .conn
+                .query_row(
+                    &format!(
+                        "{MATCH_SELECT} WHERE anchor = ?1 AND library = ?2 AND variant_key = ?3
+                         AND source = ?4 AND entry = ?5"
+                    ),
+                    params![ANCHOR_PATH, library, variant_key, source, entry],
+                    read_match_row,
+                )
+                .optional(),
+        };
+        row.map_err(|source| self.err(source))
+    }
+
+    /// 全部匹配裁决，按定下来的先后排。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn all_matches(&self) -> Result<Vec<MatchVerdict>, VerdictError> {
+        let mut statement = self
+            .conn
+            .prepare(&format!("{MATCH_SELECT} ORDER BY decided_at, id"))
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map([], read_match_row)
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+}
+
+/// 一条匹配裁决那四列锚，两处共用。
+fn match_columns(anchor: &Anchor) -> (Option<i64>, Option<i64>, Option<String>, Option<String>) {
+    match anchor {
+        Anchor::Content { crc32, size, .. } => (
+            Some(i64::from(*crc32)),
+            Some(i64::try_from(*size).unwrap_or(i64::MAX)),
+            None,
+            None,
+        ),
+        Anchor::Path {
+            library,
+            variant_key,
+        } => (None, None, Some(library.clone()), Some(variant_key.clone())),
+    }
+}
+
+/// 读一行匹配裁决时要的那一串列。
+const MATCH_SELECT: &str = "SELECT anchor, crc32, size, library, variant_key, source, entry,
+     accepted, note, decided_at FROM match_verdict";
+
+fn read_match_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MatchVerdict> {
+    let anchor: String = row.get(0)?;
+    let anchor = if anchor == ANCHOR_PATH {
+        Anchor::Path {
+            library: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+            variant_key: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+        }
+    } else {
+        Anchor::Content {
+            crc32: u32::try_from(row.get::<_, i64>(1).unwrap_or(0)).unwrap_or(0),
+            size: u64::try_from(row.get::<_, i64>(2).unwrap_or(0)).unwrap_or(0),
+            // 匹配裁决这一侧一条 SHA-1 都不记：它的锚是从中立库里零成本取来的那一份。
+            sha1: None,
+        }
+    };
+    Ok(MatchVerdict {
+        anchor,
+        source: row.get(5)?,
+        entry: row.get(6)?,
+        accepted: row.get::<_, i64>(7)? != 0,
+        note: row.get(8)?,
+        decided_at: row.get(9)?,
+    })
 }
 
 /// 读一行时要的那一串列，两处查询共用。
@@ -723,11 +1020,91 @@ impl Index {
     }
 }
 
+/// 一趟刮削拿在手里的**匹配裁决**快照（票 05）。
+///
+/// 与 [`Index`] 同一个形状、同一条道理：一趟刮削要为几万个锚点各查一次，逐次开库查是把
+/// 一件常数时间的事做成几万次 I/O。
+///
+/// **它按锚存，不按变体键存**——把它摊平到变体键上是另一件事，要中立库才做得到
+/// （`scrape::zh::Rulings::resolve`）：内容锚说的是「世上这份内容」，而「本机哪个变体
+/// 装着这份内容」只有中立库答得出。分成两步，是为了让「换台机器仍然认得出」这条性质
+/// 留在锚这一侧，不被本机的路径吃掉。
+#[derive(Debug, Default)]
+pub struct MatchIndex {
+    content: BTreeMap<(u32, u64), Vec<MatchVerdict>>,
+    path: BTreeMap<String, Vec<MatchVerdict>>,
+}
+
+impl MatchIndex {
+    /// 一条都没有的空快照。没有沉淀库时用它，刮削照跑不误。
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// 把一份沉淀库里的匹配裁决整个读进来。
+    ///
+    /// `library` 是这一趟对着的主库名，**只有它的路径锚算数**（同 [`Index::load`]）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn load(store: &Store, library: &str) -> Result<Self, VerdictError> {
+        let mut index = Self::default();
+        for verdict in store.all_matches()? {
+            match &verdict.anchor {
+                Anchor::Content { crc32, size, .. } => {
+                    index.content.entry((*crc32, *size)).or_default().push(verdict);
+                }
+                Anchor::Path {
+                    library: owner,
+                    variant_key,
+                } if owner == library => {
+                    let key = variant_key.clone();
+                    index.path.entry(key).or_default().push(verdict);
+                }
+                Anchor::Path { .. } => {}
+            }
+        }
+        Ok(index)
+    }
+
+    /// 一条都没有吗。
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.content.is_empty() && self.path.is_empty()
+    }
+
+    /// 一共几条（只算这一趟用得上的）。
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.content.values().map(Vec::len).sum::<usize>()
+            + self.path.values().map(Vec::len).sum::<usize>()
+    }
+
+    /// 一条条走过全部**内容锚**上的匹配裁决：`((CRC-32, 大小), 那一批)`。
+    pub fn by_content(&self) -> impl Iterator<Item = (&(u32, u64), &[MatchVerdict])> {
+        self.content.iter().map(|(key, list)| (key, list.as_slice()))
+    }
+
+    /// 一条条走过全部**路径锚**上的匹配裁决：`(变体的键, 那一批)`。
+    pub fn by_path(&self) -> impl Iterator<Item = (&str, &[MatchVerdict])> {
+        self.path
+            .iter()
+            .map(|(key, list)| (key.as_str(), list.as_slice()))
+    }
+}
+
 /// 导出文件的格式名。导入时认它，认不出就拒绝——**读错一份别人的裁决比读不了更糟**。
 pub const EXPORT_FORMAT: &str = "romcat-沉淀库";
 
-/// 导出文件的版本。
-pub const EXPORT_VERSION: u32 = 1;
+/// 导出文件的版本，**本程序认得到第几版**。
+///
+/// **票 05 从 1 涨到 2**：文件里多了**匹配裁决**那一批。往前兼容（第 1 版的文件照读，
+/// 只是那一批是空的），往后如实拒绝——一份第 2 版的文件里可能装着老程序读不出来的
+/// 匹配裁决，静静地丢掉它们比读不了更糟。
+///
+/// **导出时写的不一定是这个数**：见 [`Export::version_for`]。
+pub const EXPORT_VERSION: u32 = 2;
 
 /// 一份可分享的裁决文件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -740,6 +1117,107 @@ pub struct Export {
     pub exported_at: i64,
     /// 全部裁决。
     pub verdicts: Vec<Row>,
+    /// 全部**匹配裁决**（票 05）。第 1 版的文件里没有这一栏，读回来就是空的。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matches: Vec<MatchRow>,
+}
+
+impl Export {
+    /// 一份导出文件**该盖第几版**。
+    ///
+    /// 一条匹配裁决都没有时盖 **1**，有才盖 [`EXPORT_VERSION`]。理由是版本号在这个格式里
+    /// 的唯一作用是**那道往后拒绝的闸**（`version > EXPORT_VERSION` 就不收）：无条件盖 2
+    /// 的话，升级之后导出的**每一份**文件——哪怕内容与第 1 版一模一样——都会被老版本的
+    /// 程序拒收，而它其实一个字都读得懂。**装着新东西的才该拦下，空的不该。**
+    #[must_use]
+    pub fn version_for(matches: &[MatchRow]) -> u32 {
+        if matches.is_empty() { 1 } else { EXPORT_VERSION }
+    }
+}
+
+/// 导出文件里的一条**匹配裁决**。
+///
+/// CRC-32 与 [`Row`] 一样写成八位十六进制字符串，理由也一样：人拿它去 grep 一份 DAT 时
+/// 不必先换算。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MatchRow {
+    /// CRC-32，八位十六进制；路径锚的那些没有。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub crc32: Option<String>,
+    /// 未压缩大小。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub size: Option<u64>,
+    /// 路径锚：哪份主库。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub library: Option<String>,
+    /// 路径锚：变体的键。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub variant_key: Option<String>,
+    /// 哪个源撞的。
+    pub source: String,
+    /// 那个源那边的条目号。
+    pub entry: String,
+    /// 就是这条（真）还是不是这条（假）。
+    pub accepted: bool,
+    /// 记的那一句。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub note: Option<String>,
+    /// 定下来的时刻。
+    pub decided_at: i64,
+}
+
+impl MatchRow {
+    /// 把一条匹配裁决折成导出行。
+    #[must_use]
+    pub fn of(verdict: &MatchVerdict) -> Self {
+        let mut row = Self {
+            source: verdict.source.clone(),
+            entry: verdict.entry.clone(),
+            accepted: verdict.accepted,
+            note: verdict.note.clone(),
+            decided_at: verdict.decided_at,
+            ..Self::default()
+        };
+        match &verdict.anchor {
+            Anchor::Content { crc32, size, .. } => {
+                row.crc32 = Some(format!("{crc32:08X}"));
+                row.size = Some(*size);
+            }
+            Anchor::Path {
+                library,
+                variant_key,
+            } => {
+                row.library = Some(library.clone());
+                row.variant_key = Some(variant_key.clone());
+            }
+        }
+        row
+    }
+
+    /// 从导出行认回一条匹配裁决；锚认不出来时是 `None`。
+    #[must_use]
+    pub fn into_match(self) -> Option<MatchVerdict> {
+        let anchor = match (&self.crc32, self.size, &self.variant_key) {
+            (Some(crc32), Some(size), _) => Anchor::Content {
+                crc32: u32::from_str_radix(crc32.trim(), 16).ok()?,
+                size,
+                sha1: None,
+            },
+            (_, _, Some(variant_key)) => Anchor::Path {
+                library: self.library.clone()?,
+                variant_key: variant_key.clone(),
+            },
+            _ => return None,
+        };
+        Some(MatchVerdict {
+            anchor,
+            source: self.source,
+            entry: self.entry,
+            accepted: self.accepted,
+            note: self.note,
+            decided_at: self.decided_at,
+        })
+    }
 }
 
 /// 导出文件里的一条。
@@ -884,8 +1362,12 @@ pub struct Imported {
     pub added: u64,
     /// 盖掉了本机已有的几条。
     pub replaced: u64,
-    /// 认不出锚、丢掉了几条。
+    /// 认不出锚、丢掉了几条。**两张表合起来数**——裁决与匹配裁决都算在这一格里。
     pub unreadable: u64,
+    /// 文件里有几条**匹配裁决**。
+    pub matches_read: u64,
+    /// 收下了几条匹配裁决（新增加盖掉，合起来数）。
+    pub matches_taken: u64,
 }
 
 impl Store {
@@ -903,11 +1385,20 @@ impl Store {
             .filter(|verdict| include_path || verdict.anchor.is_shareable())
             .map(Row::of)
             .collect();
+        // **匹配裁决走同一道闸**：只在本机成立的那些默认不带出去，理由与上面那一批
+        // 一模一样——带给别人只是噪音，还顺带把自己的目录结构交出去了。
+        let matches: Vec<MatchRow> = self
+            .all_matches()?
+            .iter()
+            .filter(|verdict| include_path || verdict.anchor.is_shareable())
+            .map(MatchRow::of)
+            .collect();
         Ok(Export {
             format: EXPORT_FORMAT.to_string(),
-            version: EXPORT_VERSION,
+            version: Export::version_for(&matches),
             exported_at: now_secs(),
             verdicts,
+            matches,
         })
     }
 
@@ -937,6 +1428,7 @@ impl Store {
             read: u64::try_from(export.verdicts.len()).unwrap_or(u64::MAX),
             ..Imported::default()
         };
+        account.matches_read = u64::try_from(export.matches.len()).unwrap_or(u64::MAX);
         for row in export.verdicts {
             match row.into_verdict() {
                 Some(verdict) => {
@@ -945,6 +1437,15 @@ impl Store {
                     } else {
                         account.replaced += 1;
                     }
+                }
+                None => account.unreadable += 1,
+            }
+        }
+        for row in export.matches {
+            match row.into_match() {
+                Some(verdict) => {
+                    self.put_match(&verdict)?;
+                    account.matches_taken += 1;
                 }
                 None => account.unreadable += 1,
             }
@@ -1094,6 +1595,145 @@ mod tests {
     }
 
     #[test]
+    fn 匹配裁决存得进也取得回() {
+        let mut store = Store::in_memory().expect("开得出来");
+        let 裁决 = MatchVerdict::now(内容锚(0xAAAA_BBBB, 4_096), "中文离线源", "12345", false)
+            .with_note(Some("撞成别的游戏了".to_string()));
+        assert!(store.put_match(&裁决).expect("写得进"), "第一次是新增");
+        let back = store
+            .find_match(&裁决.anchor, "中文离线源", "12345")
+            .expect("读得到")
+            .expect("有一条");
+        assert_eq!(back, 裁决);
+        assert_eq!(back.label(), "不是这条");
+    }
+
+    #[test]
+    fn 同一条条目上再裁一次是覆盖而不同条目各算一条() {
+        // 「4 不对」与「9 就是它」是两句不同的话，两句都要留着——挤成一条，
+        // 改一次匹配参数就分不清人到底否定过哪一个了。
+        let mut store = Store::in_memory().expect("开得出来");
+        let 锚 = 内容锚(0x1111_2222, 512);
+        for (entry, accepted) in [("4", false), ("9", true)] {
+            store
+                .put_match(&MatchVerdict::now(锚.clone(), "中文离线源", entry, accepted))
+                .expect("写得进");
+        }
+        // 同一条条目上改主意：覆盖，不是攒第二条。
+        assert!(
+            !store
+                .put_match(&MatchVerdict::now(锚.clone(), "中文离线源", "4", true))
+                .expect("写得进"),
+            "第二次不是新增"
+        );
+        let counts = store.counts().expect("数得出");
+        assert_eq!((counts.matches, counts.matches_accepted), (2, 2));
+        // **两张表互不干扰**：匹配裁决一条都不算进「这是什么」那几个数里。
+        assert_eq!(counts.total, 0);
+    }
+
+    #[test]
+    fn 同一条条目号在两个源下各算一条() {
+        // 别的源撞出来的那一次匹配**不受这条裁决影响**——键上带着源名就是为了这个。
+        let mut store = Store::in_memory().expect("开得出来");
+        let 锚 = 内容锚(0x3333_4444, 1_024);
+        for source in ["中文离线源", "另一家中文源"] {
+            store
+                .put_match(&MatchVerdict::now(锚.clone(), source, "7", false))
+                .expect("写得进");
+        }
+        assert_eq!(store.counts().expect("数得出").matches, 2);
+        assert!(
+            store
+                .find_match(&锚, "另一家中文源", "7")
+                .expect("读得到")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn 匹配裁决跟着导出再导入是同一份() {
+        let mut store = Store::in_memory().expect("开得出来");
+        store.put(&汉化裁决()).expect("写得进");
+        store
+            .put_match(&MatchVerdict::now(
+                内容锚(0x5555_6666, 2_048),
+                "中文离线源",
+                "12345",
+                true,
+            ))
+            .expect("写得进");
+        // 只在本机成立的那一条**默认不带出去**，与「这是什么」那一批同一道闸。
+        store
+            .put_match(&MatchVerdict::now(
+                Anchor::Path {
+                    library: "主库".to_string(),
+                    variant_key: "FC/x.zip".to_string(),
+                },
+                "中文离线源",
+                "9",
+                false,
+            ))
+            .expect("写得进");
+        let 导出 = store.export(false).expect("导得出");
+        assert_eq!(导出.matches.len(), 1, "路径锚那条不该带出去");
+        let text = serde_json::to_string(&导出).expect("序列化");
+
+        let mut 别人的 = Store::in_memory().expect("开得出来");
+        let account = 别人的.import(&text).expect("收得下");
+        assert_eq!((account.matches_read, account.matches_taken), (1, 1));
+        let back = 别人的
+            .find_match(&内容锚(0x5555_6666, 2_048), "中文离线源", "12345")
+            .expect("读得到")
+            .expect("有一条");
+        assert!(back.accepted);
+    }
+
+    #[test]
+    fn 一条匹配裁决都没有的导出文件还盖第一版() {
+        // 版本号在这个格式里的唯一作用是那道**往后拒绝**的闸。无条件盖 2 的话，升级之后
+        // 导出的每一份文件——哪怕内容与第 1 版一模一样——都会被老版本的程序拒收，
+        // 而它其实一个字都读得懂。装着新东西的才该拦下，空的不该。
+        let mut store = Store::in_memory().expect("开得出来");
+        store.put(&汉化裁决()).expect("写得进");
+        assert_eq!(store.export(false).expect("导得出").version, 1);
+        store
+            .put_match(&MatchVerdict::now(
+                内容锚(0x9999_0000, 8),
+                "中文离线源",
+                "1",
+                false,
+            ))
+            .expect("写得进");
+        assert_eq!(store.export(false).expect("导得出").version, EXPORT_VERSION);
+        // 只在本机成立的那条不带出去，于是**不带路径锚的那一份仍旧盖第 1 版**。
+        let mut 只有路径锚 = Store::in_memory().expect("开得出来");
+        只有路径锚
+            .put_match(&MatchVerdict::now(
+                Anchor::Path {
+                    library: "主库".to_string(),
+                    variant_key: "FC/x.zip".to_string(),
+                },
+                "中文离线源",
+                "1",
+                false,
+            ))
+            .expect("写得进");
+        assert_eq!(只有路径锚.export(false).expect("导得出").version, 1);
+        assert_eq!(只有路径锚.export(true).expect("导得出").version, EXPORT_VERSION);
+    }
+
+    #[test]
+    fn 第一版的裁决文件照读只是没有匹配裁决() {
+        // 往前兼容：老文件里没有 `matches` 那一栏，读回来是空的，不是读不动。
+        let mut store = Store::in_memory().expect("开得出来");
+        let text = r#"{"format":"romcat-沉淀库","version":1,"exported_at":0,
+             "verdicts":[{"crc32":"12345678","size":40976,"kind":"认不出","decided_at":0}]}"#;
+        let account = store.import(text).expect("收得下");
+        assert_eq!((account.read, account.added, account.matches_read), (1, 1, 0));
+    }
+
+    #[test]
     fn 快照只认这一份主库的路径锚() {
         let mut store = Store::in_memory().expect("开得出来");
         for library in ["甲", "乙"] {
@@ -1110,5 +1750,36 @@ mod tests {
         let index = Index::load(&store, "甲").expect("读得出");
         assert_eq!(index.len(), 1);
         assert!(index.by_path("FC/x.zip").is_some());
+    }
+
+    #[test]
+    fn 匹配裁决的快照也只认这一份主库的路径锚() {
+        let mut store = Store::in_memory().expect("开得出来");
+        for library in ["甲", "乙"] {
+            store
+                .put_match(&MatchVerdict::now(
+                    Anchor::Path {
+                        library: library.to_string(),
+                        variant_key: "FC/x.zip".to_string(),
+                    },
+                    "中文离线源",
+                    "4",
+                    false,
+                ))
+                .expect("写得进");
+        }
+        // 内容锚那一批**两台机器都算数**，那正是它存在的理由。
+        store
+            .put_match(&MatchVerdict::now(
+                内容锚(0x7777_8888, 64),
+                "中文离线源",
+                "5",
+                true,
+            ))
+            .expect("写得进");
+        let index = MatchIndex::load(&store, "甲").expect("读得出");
+        assert_eq!(index.len(), 2, "乙那一条路径锚不算数，内容锚那条算");
+        assert_eq!(index.by_path().count(), 1);
+        assert_eq!(index.by_content().count(), 1);
     }
 }

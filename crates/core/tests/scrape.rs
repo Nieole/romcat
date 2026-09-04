@@ -240,6 +240,7 @@ fn 刮削带上限(现场: &mut 现场, refresh: bool, cap: Option<u64>) -> scra
             progress: &mut |_| {},
             naming: &fuzzy::Naming::off(),
             summaries: None,
+            rulings: &scrape::zh::Rulings::none(),
         },
     )
     .expect("刮削不该失败")
@@ -257,6 +258,19 @@ fn 刮削带中文简介(
     现场: &mut 现场,
     index: &romcat_core::zh::Index,
     summaries: Option<&dyn scrape::zh::Summaries>,
+) -> scrape::Outcome {
+    刮削带裁决(现场, index, summaries, &scrape::zh::Rulings::none())
+}
+
+/// 再带上一份**匹配裁决**跑一趟（票 05）。
+///
+/// 裁决住在沉淀库里、按内容锚钉；摊平到变体键上是 `scrape::zh::Rulings::resolve` 的活，
+/// 而刮削这一侧收的就是摊平之后的那一份。这里直接摆一份，测的是**刮削怎么用它**。
+fn 刮削带裁决(
+    现场: &mut 现场,
+    index: &romcat_core::zh::Index,
+    summaries: Option<&dyn scrape::zh::Summaries>,
+    rulings: &scrape::zh::Rulings,
 ) -> scrape::Outcome {
     let rules = romcat_core::filename::Rules::builtin();
     let options = scrape::Options::new(现场.dir.path(), 现场.pool_dir.path());
@@ -276,6 +290,7 @@ fn 刮削带中文简介(
                 tuning: romcat_core::zh::Tuning::default(),
             },
             summaries,
+            rulings,
         },
     )
     .expect("刮削不该失败")
@@ -1261,6 +1276,7 @@ fn 不收媒体(现场: &mut 现场) -> scrape::Outcome {
             progress: &mut |_| {},
             naming: &fuzzy::Naming::off(),
             summaries: None,
+            rulings: &scrape::zh::Rulings::none(),
         },
     )
     .expect("刮削不该失败")
@@ -1397,6 +1413,321 @@ fn 报告把合并真的跑了一遍() {
 }
 
 // ════════════════════════════════════════════════════════════════════════
+// 票 05：一条**裁决**管住同一次匹配的全部字段
+//
+// 中文离线源撞上一条条目之后一口气产出六样：中文名、别名（变体锚点上），类型、简介、
+// 开发商、发行商（作品锚点上）。它们**同生共死**——都来自同一个条目号。所以裁决的粒度
+// 是「这次匹配对不对」，而不是「这个字段对不对」。
+// ════════════════════════════════════════════════════════════════════════
+
+/// 沉淀库开一份空的：这一批测试要往里落**匹配裁决**。
+fn 沉淀库() -> verdict::Store {
+    verdict::Store::in_memory().expect("开得出来")
+}
+
+/// 把沉淀库里那批匹配裁决摊平到变体键上——**真跑一趟走的就是这条路**。
+fn 摊平(现场: &现场, store: &verdict::Store) -> scrape::zh::Rulings {
+    let index = verdict::MatchIndex::load(store, "主库").expect("沉淀库读得出");
+    scrape::zh::Rulings::resolve(&现场.catalog, &index, "中文离线源").expect("中立库读得出")
+}
+
+/// 对一个变体身上那一次匹配下裁决。
+fn 裁(
+    现场: &mut 现场,
+    store: &mut verdict::Store,
+    key: &str,
+    entry: u32,
+    accepted: bool,
+) -> scrape::zh::Judged {
+    scrape::zh::judge(
+        &mut 现场.catalog,
+        store,
+        "主库",
+        key,
+        entry,
+        accepted,
+        None,
+    )
+    .expect("裁得下去")
+}
+
+/// 一个锚点上某个源留下的全部字段值。
+fn 某个源的全部值(现场: &现场, anchor: &str, subject: &str, source: &str) -> Vec<String> {
+    现场
+        .catalog
+        .scraped_values(anchor, subject)
+        .expect("读得出")
+        .into_iter()
+        .filter(|value| value.source == source)
+        .map(|value| format!("{}={}", value.field, value.value))
+        .collect()
+}
+
+#[test]
+fn 一条否定裁决管住同一次匹配带来的全部字段() {
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    let index = 中文索引();
+    刮削带中文索引(&mut 现场, &index);
+
+    // 落库了才谈得上「一并失效」：变体锚点上中文名与别名，作品锚点上另外三样。
+    assert_eq!(
+        值(&现场, "变体", 汉化变体, "标题", "中文离线源").as_deref(),
+        Some("魂斗罗")
+    );
+    assert!(!某个源的全部值(&现场, "变体", 汉化变体, "中文离线源·别名").is_empty());
+    assert_eq!(各值(&现场, "作品", 作品, "类型", "中文离线源"), vec!["ACT"]);
+    assert_eq!(
+        各值(&现场, "作品", 作品, "开发商", "中文离线源"),
+        vec!["Konami"]
+    );
+
+    // ── 一条裁决。**不是五条**：人只说了一句「这次撞错了」。
+    let mut store = 沉淀库();
+    let judged = 裁(&mut 现场, &mut store, 汉化变体, 12_345, false);
+
+    // 一、**裁决记的是内容锚**——换台机器、改过名字之后仍然认得出（ADR-0008 的那条性质）。
+    assert_eq!(judged.anchor.label(), "内容");
+    assert!(judged.anchor.is_shareable());
+    assert_eq!(judged.work.as_deref(), Some(作品));
+
+    // 二、**同一次匹配带来的其余字段一并失效**：变体那两路、作品那一层，一条不留。
+    assert!(某个源的全部值(&现场, "变体", 汉化变体, "中文离线源").is_empty());
+    assert!(某个源的全部值(&现场, "变体", 汉化变体, "中文离线源·别名").is_empty());
+    assert!(某个源的全部值(&现场, "作品", 作品, "中文离线源").is_empty());
+    assert!(judged.cleared >= 4, "清掉的条数该报出来：{judged:?}");
+    assert!(judged.from_variant, "这个变体自己撞的就是这一条");
+    assert!(judged.cleared_work > 0, "作品那一层动过了才该报动过：{judged:?}");
+
+    // 三、**别的源产出的同名字段不受影响**——这条裁决只管这一次匹配。
+    // 发行商这一栏两个源都说过话：中文离线源那条没了，TOSEC 那条一个字都没动。
+    assert_eq!(
+        值(&现场, "作品", 作品, "发行商", "TOSEC").as_deref(),
+        Some("Konami")
+    );
+    assert_eq!(
+        值(&现场, "作品", 作品, "标题", "TOSEC").as_deref(),
+        Some("Contra")
+    );
+    assert_eq!(
+        值(&现场, "作品", 作品, "年份", "TOSEC").as_deref(),
+        Some("1988")
+    );
+    assert_eq!(
+        值(&现场, "变体", 汉化变体, "标题", "文件名").as_deref(),
+        Some("魂斗罗")
+    );
+
+    // 四、**这条裁决只管这一个变体**：名下另一个变体撞的是另一次匹配，一个字都没动。
+    assert_eq!(
+        值(&现场, "变体", 汉化变体二, "标题", "中文离线源").as_deref(),
+        Some("魂斗罗")
+    );
+
+    // 五、**重跑刮削结论稳定**：不会被下一趟重新撞回错的那个。
+    let rulings = 摊平(&现场, &store);
+    assert_eq!(rulings.len(), 1, "内容锚该反查得回那个变体");
+    刮削带裁决(&mut 现场, &index, None, &rulings);
+    assert!(某个源的全部值(&现场, "变体", 汉化变体, "中文离线源").is_empty());
+    assert!(!某个源的全部值(&现场, "变体", 汉化变体二, "中文离线源").is_empty());
+    // 作品那一层**按剩下的变体重新数票**：另一个变体还撞着这条条目，所以那几栏回来了，
+    // 而且是对的。这不是「裁决没生效」——生效的是「这个变体不再投它的票」。
+    assert_eq!(各值(&现场, "作品", 作品, "类型", "中文离线源"), vec!["ACT"]);
+
+    // 六、把名下另一个变体也否掉，作品那一层就真的一条都不剩了。
+    裁(&mut 现场, &mut store, 汉化变体二, 12_345, false);
+    let rulings = 摊平(&现场, &store);
+    刮削带裁决(&mut 现场, &index, None, &rulings);
+    assert!(某个源的全部值(&现场, "作品", 作品, "中文离线源").is_empty());
+}
+
+#[test]
+fn 一条肯定裁决管住同一次匹配带来的全部字段() {
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    let index = 中文索引();
+    刮削带中文索引(&mut 现场, &index);
+
+    let mut store = 沉淀库();
+    let judged = 裁(&mut 现场, &mut store, 汉化变体, 12_345, true);
+    // **肯定这一档一个字都不清**：那些值是对的，留着。
+    assert_eq!(judged.cleared, 0);
+    assert!(judged.fresh);
+
+    let rulings = 摊平(&现场, &store);
+    刮削带裁决(&mut 现场, &index, None, &rulings);
+
+    // 同一次匹配带来的字段**一并定下**：两层锚点上每一条的依据都换了尾巴。
+    let 盖过章 = |anchor: &str, subject: &str, source: &str| {
+        let values = 现场
+            .catalog
+            .scraped_values(anchor, subject)
+            .expect("读得出")
+            .into_iter()
+            .filter(|value| value.source == source)
+            .collect::<Vec<_>>();
+        assert!(!values.is_empty(), "{anchor} {subject} {source} 该有值");
+        for value in values {
+            assert!(
+                romcat_core::zh::is_confirmed(&value.evidence),
+                "{} 该盖上同一个章：{}",
+                value.field,
+                value.evidence
+            );
+            assert!(!value.evidence.contains("一律进待确认队列"), "{}", value.evidence);
+        }
+    };
+    盖过章("变体", 汉化变体, "中文离线源");
+    盖过章("变体", 汉化变体, "中文离线源·别名");
+    盖过章("作品", 作品, "中文离线源");
+
+    // **值本身一个字都没变**：裁决改的是「这条结论算什么」，不是它说什么。
+    assert_eq!(
+        值(&现场, "变体", 汉化变体, "标题", "中文离线源").as_deref(),
+        Some("魂斗罗")
+    );
+    assert_eq!(各值(&现场, "作品", 作品, "类型", "中文离线源"), vec!["ACT"]);
+
+    // **名下那个没裁过的变体照旧等着裁**：一条裁决只管它自己那一次匹配。
+    let 另一个 = 值(&现场, "变体", 汉化变体二, "标题", "中文离线源");
+    assert_eq!(另一个.as_deref(), Some("魂斗罗"));
+    let 它的依据 = 现场
+        .catalog
+        .scraped_values("变体", 汉化变体二)
+        .expect("读得出")
+        .into_iter()
+        .find(|value| value.source == "中文离线源")
+        .expect("有这一条")
+        .evidence;
+    assert!(它的依据.contains("一律进待确认队列"), "{它的依据}");
+}
+
+#[test]
+fn 队列看得出哪几个字段来自同一次匹配() {
+    // 同一次匹配的产出散在两层锚点上，字段名不同、值不同、锚点也不同——共通的只有
+    // 各自**依据**里那个条目号。看得出这件事，才裁得动「这一次匹配对不对」。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    let index = 中文索引();
+    刮削带中文索引(&mut 现场, &index);
+
+    let groups = scrape::zh::matched_groups(&现场.catalog, 汉化变体).expect("读得出");
+    assert_eq!(groups.len(), 1, "只撞了一次，就只有一堆");
+    let group = &groups[0];
+    assert_eq!(group.entry, 12_345);
+    assert!(!group.confirmed, "还没人裁过");
+
+    // 两层锚点上的字段都在这一堆里，别名那一路也在。
+    let 摘要: std::collections::BTreeSet<String> = group
+        .values
+        .iter()
+        .map(|value| {
+            format!(
+                "{} {} {}",
+                value.kind.label(),
+                value.field.label(),
+                value.source
+            )
+        })
+        .collect();
+    for 该有 in [
+        "变体 标题 中文离线源",
+        "变体 标题 中文离线源·别名",
+        "作品 类型 中文离线源",
+        "作品 开发商 中文离线源",
+        "作品 发行商 中文离线源",
+    ] {
+        assert!(摘要.contains(该有), "{该有} 该在这一堆里：{摘要:?}");
+    }
+    // **别的源不混进来**：这一堆说的是「中文离线源那一次匹配」。
+    assert!(group.values.iter().all(|value| value.source.starts_with("中文离线源")));
+
+    // 裁过之后这一堆**看得出已经定下了**。
+    let mut store = 沉淀库();
+    裁(&mut 现场, &mut store, 汉化变体, 12_345, true);
+    let rulings = 摊平(&现场, &store);
+    刮削带裁决(&mut 现场, &index, None, &rulings);
+    let groups = scrape::zh::matched_groups(&现场.catalog, 汉化变体).expect("读得出");
+    assert!(groups[0].confirmed);
+}
+
+#[test]
+fn 裁一条这个变体自己没撞上的条目不会白清作品那一层() {
+    // 作品那一层的答案是**名下变体数票**数出来的，胜出的可能是别的变体撞出来的条目。
+    // 拿这个变体去裁它是白裁——裁决钉在这个变体的内容上，下一趟那些变体照旧投回来。
+    // 那时若还把作品那一层清了，用户看到的是「删了一次、然后什么都没变」。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    let index = 中文索引();
+    刮削带中文索引(&mut 现场, &index);
+
+    // 原版那个变体撞不上中文条目（它的正题是英文），但它与两个汉化变体同属一个作品，
+    // 所以作品锚点上那几栏是**名下别人**撞出来的。
+    assert!(某个源的全部值(&现场, "变体", 原版变体, "中文离线源").is_empty());
+    assert_eq!(各值(&现场, "作品", 作品, "类型", "中文离线源"), vec!["ACT"]);
+
+    let mut store = 沉淀库();
+    let judged = 裁(&mut 现场, &mut store, 原版变体, 12_345, false);
+    assert!(!judged.from_variant, "这个变体自己没有这条条目的产出");
+    assert_eq!(judged.cleared_work, 0, "作品那一层一个字都不该动");
+    assert_eq!(judged.cleared, 0);
+    // 作品那一层原样还在——那几栏本来就不是这个变体撞出来的。
+    assert_eq!(各值(&现场, "作品", 作品, "类型", "中文离线源"), vec!["ACT"]);
+
+    // 队列那一侧也说得出这件事：这一堆全在作品那一层，裁它要去裁别的变体。
+    let groups = scrape::zh::matched_groups(&现场.catalog, 原版变体).expect("读得出");
+    assert_eq!(groups.len(), 1);
+    assert!(!groups[0].from_variant);
+    let 自己撞的 = scrape::zh::matched_groups(&现场.catalog, 汉化变体).expect("读得出");
+    assert!(自己撞的[0].from_variant);
+}
+
+#[test]
+fn 裁决记的是内容锚换台机器与改过名字之后仍然认得出() {
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    let index = 中文索引();
+    刮削带中文索引(&mut 现场, &index);
+
+    let mut store = 沉淀库();
+    裁(&mut 现场, &mut store, 汉化变体, 12_345, false);
+
+    // 一、**换台机器**：那台机器的主库叫别的名字，路径锚一条都不算数；这一条照样认得出。
+    let 别处 = verdict::MatchIndex::load(&store, "另一台机器上的主库").expect("读得出");
+    assert_eq!(别处.len(), 1);
+    // 导出默认不带只在本机成立的那些，而这一条带得出去。
+    assert_eq!(store.export(false).expect("导得出").matches.len(), 1);
+
+    // 二、**改过名字**：把那个变体所在的目录改名，重扫一趟——变体的键跟着变了，
+    // 而裁决钉的是那份字节，摊平之后落在**新的键**上。
+    let root = 现场.dir.path().to_path_buf();
+    fs::rename(root.join("FC/魂斗罗汉化"), root.join("FC/魂斗罗汉化甲")).expect("改得动名字");
+    let mut options = ScanOptions::new(&root);
+    options.jobs = Jobs::Fixed(2);
+    scan::scan(
+        &RealFs::new(),
+        &mut 现场.catalog,
+        &options,
+        &CancelToken::new(),
+    )
+    .expect("扫得动");
+    识别(&mut 现场);
+
+    let 新键 = "FC/魂斗罗汉化甲/魂斗罗[dwt_so 汉化].zip";
+    assert!(
+        现场.catalog.variant(新键).expect("读得出").is_some(),
+        "改过名字之后该有这个变体"
+    );
+    let rulings = 摊平(&现场, &store);
+    assert!(rulings.for_variant(新键).is_some(), "裁决该跟着字节走到新键上");
+    assert!(rulings.for_variant(汉化变体).is_none(), "老那个键已经不在库里了");
+
+    // 三、跑一趟刮削，那个变体照旧一个字段都不产出——**结论稳定**。
+    刮削带裁决(&mut 现场, &index, None, &rulings);
+    assert!(某个源的全部值(&现场, "变体", 新键, "中文离线源").is_empty());
+}
+
+// ════════════════════════════════════════════════════════════════════════
 // 票 14：在线档与配额守护
 //
 // **真实凭据这一趟拿不到，也不该去申请**——ScreenScraper 的 devid 要在论坛人工审批，
@@ -1479,6 +1810,7 @@ fn 刮削在线(现场: &mut 现场, fetcher: &CannedFetcher, limits: Limits) ->
             progress: &mut |_| {},
             naming: &fuzzy::Naming::off(),
             summaries: None,
+            rulings: &scrape::zh::Rulings::none(),
         },
     )
     .expect("刮削不该失败——配额超限是「停」不是「错」")

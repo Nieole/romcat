@@ -387,8 +387,46 @@ impl Match {
     /// 两处各写一句的话，同一条匹配在队列里和在标题集合里会给出不同的说法。
     #[must_use]
     pub fn evidence(&self, dump: &str, query_label: &str, query_text: &str) -> String {
+        self.evidence_with(dump, query_label, query_text, FUZZY_TAIL)
+    }
+
+    /// 同一条匹配的**依据**，但末尾那句改成「**人已经裁决过这一次匹配**」（票 05）。
+    ///
+    /// 两句尾巴是同一件事的两个态，所以摆在同一个类型上：一条模糊匹配来的结论**永不
+    /// 自动通过**，除非人亲口说了它对；而人说过之后，那句「一律进待确认队列」在这一条
+    /// 上就不再成立——留着它，半年后读依据的人会以为这一条还等着裁。
+    ///
+    /// `anchor` 是那条裁决钉在什么上（`verdict::Anchor::describe`），写进依据是为了
+    /// 说得出「换台机器还认不认得出」。
+    #[must_use]
+    pub fn evidence_confirmed(
+        &self,
+        dump: &str,
+        query_label: &str,
+        query_text: &str,
+        anchor: &str,
+    ) -> String {
+        self.evidence_with(
+            dump,
+            query_label,
+            query_text,
+            &format!(
+                "。{CONFIRMED_MARK}（锚是{anchor}）：这一次匹配带来的**全部字段**\
+                 ——中文名、别名、类型、简介、开发商、发行商——由这**一条**裁决一并定下，\
+                 不再进待确认队列"
+            ),
+        )
+    }
+
+    fn evidence_with(
+        &self,
+        dump: &str,
+        query_label: &str,
+        query_text: &str,
+        tail: &str,
+    ) -> String {
         let mut text = format!(
-            "中文离线数据源（Bangumi 离线 dump {dump}）的条目 {} 「{}」的{}「{}」，\
+            "中文离线数据源（Bangumi 离线 dump {dump}）{ENTRY_MARK}{} 「{}」的{}「{}」，\
              与文件名剥出来的{}「{}」相似度 {:.2}",
             self.entry.id,
             self.entry.shown(),
@@ -417,12 +455,48 @@ impl Match {
         if !self.entry.name_cn.trim().is_empty() {
             text.push_str(&format!("；这条条目的中文名是「{}」", self.entry.name_cn));
         }
-        text.push_str(
-            "。**这是模糊匹配不是命中**：它只看名字，没看这个文件里的一个字节，\
-             所以永不自动通过，一律进待确认队列（ADR-0002）",
-        );
+        text.push_str(tail);
         text
     }
+}
+
+/// **条目号**在一条依据里写成什么样。
+///
+/// 队列要**看得出哪几个字段来自同一次匹配**（票 05），而判据只能是条目号——中文名、
+/// 别名挂在变体上，类型、简介、开发商、发行商挂在作品上，四处的值里没有任何一样是共通的，
+/// 共通的只有它们各自的**依据**里那个号。
+///
+/// **按记号找而不是按位置找**，与 `scrape::zh::TRUNCATED_MARK` 同一条道理：依据这句话
+/// 是会改的，改完之后按位置切出来的东西会悄悄变成别的字。
+pub const ENTRY_MARK: &str = "的条目 ";
+
+/// 一条依据里说「人已经裁决过这一次匹配」时写的那个记号。
+///
+/// 队列靠它把**已经定下的**与**还等着裁的**分开——两者的下一步完全不同。
+pub const CONFIRMED_MARK: &str = "这一次匹配**由人工裁决确认过**";
+
+/// 依据的最后一句：这一档在**置信度**上算什么。
+///
+/// 它与 [`Match::evidence_confirmed`] 那一句是同一个位置上的两个态，摆在一起是为了
+/// 让「裁决过了还写着一律进队列」这种自相矛盾没地方长出来。
+const FUZZY_TAIL: &str = "。**这是模糊匹配不是命中**：它只看名字，没看这个文件里的一个字节，\
+     所以永不自动通过，一律进待确认队列（ADR-0002）";
+
+/// 从一条**依据**里认回**条目号**；不是这个源写的那句话就是 `None`。
+///
+/// 与 [`Match::evidence`] 摆在同一个文件里，因为它们是同一条约定的两头：写的那一侧改了
+/// 格式，读的这一侧当场就该跟着改。一条单元测试钉着「写出去的认得回来」。
+#[must_use]
+pub fn entry_in(evidence: &str) -> Option<u32> {
+    let at = evidence.find(ENTRY_MARK)? + ENTRY_MARK.len();
+    let digits: String = evidence[at..].chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// 这条依据说的是「人已经裁决过这一次匹配」吗。
+#[must_use]
+pub fn is_confirmed(evidence: &str) -> bool {
+    evidence.contains(CONFIRMED_MARK)
 }
 
 /// 索引里的一条叫法。
@@ -1008,5 +1082,33 @@ mod tests {
         assert!(text.contains("平台交叉校验对得上"), "{text}");
         assert!(text.contains("年份交叉校验对得上"), "{text}");
         assert!(text.contains("永不自动通过"), "{text}");
+        // **写出去的号认得回来**：队列按条目号把「同一次匹配带来的字段」归堆（票 05），
+        // 而依据这句话是会改的——两头摆在同一个文件里，这条钉着它们不许各走各的。
+        assert_eq!(entry_in(&text), Some(4));
+        assert!(!is_confirmed(&text), "没人裁过的那一档不该说已确认");
+    }
+
+    #[test]
+    fn 裁决过的那一条依据里不再说一律进待确认队列() {
+        // 票 05：人说过「就是这条」之后，那句「一律进待确认队列」在这一条上就不再成立。
+        // 留着它，半年后读依据的人会以为这一条还等着裁。
+        let found = 撞("合金弹头7", Some("NDS"), Some(2008));
+        let text = found[0].evidence_confirmed(
+            "dump-2026-09-01",
+            "正题",
+            "合金弹头7",
+            "CRC-32 1234ABCD + 4096 字节",
+        );
+        assert!(is_confirmed(&text), "{text}");
+        assert!(!text.contains("一律进待确认队列"), "{text}");
+        assert!(text.contains("CRC-32 1234ABCD"), "锚要写进依据：{text}");
+        // 条目号那一半一个字都没变——归堆的判据两档共用。
+        assert_eq!(entry_in(&text), Some(4));
+    }
+
+    #[test]
+    fn 不是这个源写的那句话认不出条目号() {
+        assert_eq!(entry_in("TOSEC 的条目名里第一个括号是发行日期"), None);
+        assert_eq!(entry_in(""), None);
     }
 }

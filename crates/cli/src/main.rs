@@ -160,6 +160,48 @@ enum ZhCommand {
     Sync(ZhSyncArgs),
     /// 拿一个名字试一次模糊匹配——**调参数用的就是它**，一个字节都不联网
     Find(ZhFindArgs),
+    /// 一个变体身上，中文离线源**每一次匹配**各带来了哪些字段（按条目号归堆）
+    Matches(ZhMatchesArgs),
+    /// 对一次匹配下**裁决**：一条管住这次匹配带来的全部字段，不必逐个字段裁
+    Judge(ZhJudgeArgs),
+}
+
+/// 看一个变体身上那几次匹配各带来了什么。
+#[derive(Debug, Args)]
+struct ZhMatchesArgs {
+    /// 变体的键（相对主库根的路径）
+    #[arg(value_name = "变体键")]
+    key: String,
+
+    #[command(flatten)]
+    site: TriageCommonArgs,
+}
+
+/// 对一次匹配下裁决。
+#[derive(Debug, Args)]
+struct ZhJudgeArgs {
+    /// 变体的键（相对主库根的路径）
+    #[arg(value_name = "变体键")]
+    key: String,
+
+    /// 裁的是哪一次匹配——中文离线源那边的**条目号**。`romcat zh matches` 列得出来
+    #[arg(long, value_name = "条目号")]
+    entry: u32,
+
+    /// **就是这条**：这一次匹配带来的全部字段一并定下，不再进待确认队列
+    #[arg(long, conflicts_with = "no")]
+    yes: bool,
+
+    /// **不是这条**：这一次匹配带来的全部字段一并失效，重跑刮削也不会再撞回来
+    #[arg(long)]
+    no: bool,
+
+    /// 记一句为什么。半年后你会想知道当初凭什么这么定
+    #[arg(long, value_name = "一句话")]
+    note: Option<String>,
+
+    #[command(flatten)]
+    site: TriageCommonArgs,
 }
 
 #[derive(Debug, Args)]
@@ -1027,6 +1069,8 @@ fn main() -> ExitCode {
         Command::Dat(DatCommand::Sources(args)) => run_dat_sources(&args),
         Command::Zh(ZhCommand::Sync(args)) => run_zh_sync(&args),
         Command::Zh(ZhCommand::Find(args)) => run_zh_find(&args),
+        Command::Zh(ZhCommand::Matches(args)) => run_zh_matches(&args),
+        Command::Zh(ZhCommand::Judge(args)) => run_zh_judge(&args),
         Command::Switch(SwitchCommand::Sync(args)) => run_switch_sync(&args),
         Command::Switch(SwitchCommand::Read(args)) => run_switch_read(&args),
         Command::Names(args) => run_names(&args, &cancel),
@@ -2078,6 +2122,38 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
         );
     }
 
+    // **匹配裁决**（票 05）：人在队列里说过「这一次撞错了」的那些，这一趟要认。
+    //
+    // **打不开就停下，不降级成「没人裁过」。** `open_store` 建得出库（谁也没裁过时它建
+    // 一份空的），所以真走到错误那一支的是别的原因——最典型的是**库比程序新**
+    // （两个版本的 romcat 轮流在同一个工作目录上跑），还有库损坏、工作目录只读。
+    // 那几种情况下当成「没人裁过」跑下去，会把否定掉的中文名整片撞回来、把肯定过的依据
+    // 改写回「一律进待确认队列」——正是沉淀库那条「库比程序新时如实拒绝、绝不将就」
+    // 要拦的事。别处都停线，这里不该是唯一静悄悄降级的地方。
+    let rulings = match open_store(&workspace)
+        .and_then(|store| {
+            verdict::MatchIndex::load(&store, &slug.text())
+                .map_err(|error| format!("沉淀库读不动：{error}"))
+        })
+        .and_then(|index| {
+            scrape::zh::Rulings::resolve(&catalog, &index, identify::fuzzy::SOURCE)
+                .map_err(|error| format!("匹配裁决摊不平：{error}"))
+        }) {
+        Ok(rulings) => rulings,
+        Err(message) => {
+            return fail(format!(
+                "{message}\n沉淀库里装着你的**裁决**——读不到它就等于把裁过的那些当成\n                 没裁过，这一趟宁可不跑。"
+            ));
+        }
+    };
+    if !rulings.is_empty() {
+        eprintln!(
+            "匹配裁决：{} 个变体身上有人裁过中文离线源那一次匹配——否定的那几条这一趟\
+             一个字段都不产出，肯定的那几条依据里写明「已由人裁决确认」。",
+            thousands(rulings.len() as u64),
+        );
+    }
+
     let library = RealFs::new();
     let started = Instant::now();
     let mut last = Instant::now();
@@ -2104,6 +2180,7 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
             progress: &mut progress,
             naming: &naming,
             summaries,
+            rulings: &rulings,
         },
     );
     let outcome = match outcome {
@@ -4391,6 +4468,160 @@ fn print_zh_stats(stats: &zh::store::Stats) {
     if !line.is_empty() {
         println!("  按平台：{line}");
     }
+}
+
+/// 一个变体身上，中文离线源**每一次匹配**各带来了哪些字段（票 05）。
+///
+/// 归堆的判据是**条目号**：同一次匹配的产出散在两层锚点上——中文名与别名挂在变体上，
+/// 类型、简介、开发商、发行商挂在作品上，字段名不同、值不同、锚点也不同，唯一共通的
+/// 是它们各自**依据**里那个号。看得出这件事，才裁得动「这一次匹配对不对」。
+fn run_zh_matches(args: &ZhMatchesArgs) -> ExitCode {
+    let site = match args.site.open() {
+        Ok(site) => site,
+        Err(message) => return fail(message),
+    };
+    // **路径键一律 NFC 归一**（ADR-0020）：命令行上敲进来的中文可能是 NFD，
+    // 不归一就与库里那一行对不上，而对不上的表现是「查不到这个变体」。
+    let key = path::nfc(&args.key).into_owned();
+    // **键打错了与「这个变体确实什么都没撞上」是两件事**，说同一句话的话，
+    // 一个 NFD 或者多打一个斜杠会看起来像「刮削没产出」。
+    match site.catalog.variant(&key) {
+        Ok(Some(_)) => {}
+        Ok(None) => return fail(format!("中立库里没有 {key} 这个变体。")),
+        Err(error) => return fail(format!("中立库读不动：{error}")),
+    }
+    let groups = match scrape::zh::matched_groups(&site.catalog, &key) {
+        Ok(groups) => groups,
+        Err(error) => return fail(format!("中立库读不动：{error}")),
+    };
+    if groups.is_empty() {
+        println!("{key}：中文离线源在这个变体上一个字段都没产出——没撞上，或者还没跑过刮削。");
+        return ExitCode::SUCCESS;
+    }
+    println!("{key}：中文离线源那几次匹配带来的字段\n");
+    for group in &groups {
+        println!(
+            "条目 {}（{}）——{} 个字段，**一条裁决全管**：",
+            group.entry,
+            if group.confirmed {
+                "已由人裁决确认"
+            } else {
+                "还等着裁：模糊匹配来的，中置信，不自动通过"
+            },
+            group.values.len(),
+        );
+        for value in &group.values {
+            println!(
+                "  {} {} · {}｜{} = {}",
+                value.kind.label(),
+                value.subject,
+                value.source,
+                value.field.label(),
+                one_line(&value.value),
+            );
+        }
+        if group.from_variant {
+            println!(
+                "  裁它：romcat zh judge {key} --entry {} --yes（或 --no）",
+                group.entry,
+            );
+        } else {
+            // **裁决钉在内容上**：这一堆全在作品锚点上，是名下别的变体撞出来、在那一层
+            // 数票胜出的。钉在这个变体身上管不到那一层——下一趟那些变体照旧投它们的票。
+            println!(
+                "  ⚠️ 这一堆全在**作品**那一层：撞它的是名下别的变体，不是这一个。\
+                 裁它要去裁那个变体（`romcat zh matches` 一个个看得出来）。"
+            );
+        }
+        println!();
+    }
+    ExitCode::SUCCESS
+}
+
+/// 一个字段值收成一行印得下的那一截。**原文一个字都没动**，收的只是印出来那一行。
+fn one_line(value: &str) -> String {
+    const SHOWN: usize = 48;
+    let flat: String = value
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    if flat.chars().count() <= SHOWN {
+        return flat;
+    }
+    format!("{}……", flat.chars().take(SHOWN).collect::<String>())
+}
+
+/// 对一次匹配下**裁决**（票 05）。
+///
+/// 一条裁决管住这一次匹配带来的**全部字段**——不必对同一次误撞裁决五遍。裁决落进
+/// **沉淀库**，钉在**内容锚**上：换台机器、改过名字之后仍然认得出。
+fn run_zh_judge(args: &ZhJudgeArgs) -> ExitCode {
+    if !args.yes && !args.no {
+        return fail("要说清是哪一档：`--yes`（就是这条）或者 `--no`（不是这条）。");
+    }
+    let mut site = match args.site.open() {
+        Ok(site) => site,
+        Err(message) => return fail(message),
+    };
+    // **路径键一律 NFC 归一**（ADR-0020）：命令行上敲进来的中文可能是 NFD，
+    // 不归一就与库里那一行对不上，而对不上的表现是「查不到这个变体」。
+    let key = path::nfc(&args.key).into_owned();
+    let judged = match scrape::zh::judge(
+        &mut site.catalog,
+        &mut site.store,
+        &site.library,
+        &key,
+        args.entry,
+        args.yes,
+        args.note.clone(),
+    ) {
+        Ok(judged) => judged,
+        Err(error) => return fail(format!("裁不下去：{error}")),
+    };
+    println!(
+        "{}：条目 {} {}。锚是{}——{}。",
+        key,
+        args.entry,
+        if args.yes { "就是这条" } else { "不是这条" },
+        judged.anchor.label(),
+        judged.anchor.describe(),
+    );
+    if !judged.anchor.is_shareable() {
+        println!(
+            "  ⚠️ 这一条**只在本机成立**：拿不到内容判据（容器穿不透、压缩镜像、\
+             或者目录树转储），退到了路径锚。改个名字、换台机器就认不出了。"
+        );
+    }
+    if !judged.fresh {
+        println!("  （这条锚上本来就裁过，这次是改主意——覆盖掉了老的那一条。）");
+    }
+    if !judged.from_variant {
+        // 说清楚这条裁决多半什么都管不到，别让人以为裁完就完了。
+        println!(
+            "  ⚠️ **这个变体自己撞的不是这条条目**（库里没有它在变体那一层的产出）。\
+             裁决记下了，但它钉在这个变体的内容上——作品那一层若是名下别的变体撞出来的，\
+             下一趟刮削它们照旧投回来。要裁就去裁那个变体。"
+        );
+    }
+    if args.yes {
+        println!(
+            "  这一次匹配带来的字段**一并定下**：下一趟 `romcat scrape` 会把它们的依据\
+             改写成「由人工裁决确认过」，不再进待确认队列。一个字都不必清。"
+        );
+    } else {
+        println!(
+            "  就地清掉了 {} 条字段值{}。重跑 `romcat scrape` 不会再撞回这条条目——\
+             那条裁决进了输入指纹，缓存不会把它跳过去。",
+            thousands(judged.cleared),
+            match (&judged.work, judged.cleared_work) {
+                // **动过才说动过**：作品那一层一个字没动时，这半句一个字都不该印。
+                (Some(work), n) if n > 0 =>
+                    format!("（其中作品「{work}」那一层 {} 条）", thousands(n)),
+                _ => String::new(),
+            },
+        );
+    }
+    ExitCode::SUCCESS
 }
 
 fn run_zh_find(args: &ZhFindArgs) -> ExitCode {

@@ -179,6 +179,15 @@ impl Field {
         }
     }
 
+    /// 从库里存的那个词认回一个字段；认不出就是 `None`。
+    ///
+    /// [`label`](Self::label) 反着走的那一条。中立库里字段名是**字符串**（锚点是自然键，
+    /// 见 `catalog::scrape` 的模块文档），读回来要认回类型的地方就得有它。
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::all().into_iter().find(|field| field.label() == label)
+    }
+
     /// 报告里固定的排列顺序。
     #[must_use]
     pub fn all() -> [Self; 7] {
@@ -707,6 +716,7 @@ pub fn run(
         net,
         context.naming,
         context.summaries,
+        context.rulings,
     )?;
     if options.refresh {
         catalog.clear_scraped()?;
@@ -903,6 +913,13 @@ pub struct RunContext<'a> {
     /// 而简介留在本机那份库里、按条目号点着读（`zh::Summaries` 的文档）。
     /// 本机那份 [`zh::store::Store`](crate::zh::store::Store) 直接就是它的一个实现。
     pub summaries: Option<&'a dyn zh::Summaries>,
+    /// **匹配裁决**按变体键摊平之后的那一份（票 05）。
+    ///
+    /// 人在队列里说过「这一次撞错了」的那些，在这里；[`zh::Rulings::none`] 是「一条都
+    /// 没裁过」的那一份。它与 `naming`、`summaries` 分开一格的理由同上——三样的来处、
+    /// 代价与寿命都不同：规则与索引在内存里，简介在中文索引那份库里，而裁决在**沉淀库**
+    /// 里，那是三份库里唯一不可再生的一份。
+    pub rulings: &'a zh::Rulings,
 }
 
 /// 一串输入折成**输入指纹**。
@@ -960,6 +977,7 @@ fn sources<'a>(
     net: Option<&'a Net<'a>>,
     naming: &'a fuzzy::Naming<'a>,
     summaries: Option<&'a dyn zh::Summaries>,
+    rulings: &'a zh::Rulings,
 ) -> Result<Vec<Box<dyn Source + 'a>>, ScrapeError> {
     let mut sources: Vec<Box<dyn Source + 'a>> = vec![
         Box::new(dat::DatSource::new("No-Intro")),
@@ -978,14 +996,18 @@ fn sources<'a>(
     if naming.ready() {
         // **简介那条路接得上就接上**（票 03）：接不上时这个源照样参加，只是这一趟
         // 一条简介都不产出——而那件事进它的输入指纹，接上之后重跑会真的重采。
-        let mut chinese = zh::ChineseSource::new(*naming);
+        // **匹配裁决两路都接上**（票 05）：中文名与别名撞的是同一次，人否定了那一次，
+        // 两路一起不产出。接的是同一份，所以不可能一路认裁决另一路不认。
+        let mut chinese = zh::ChineseSource::new(*naming).with_rulings(rulings);
         if let Some(summaries) = summaries {
             chinese = chinese.with_summaries(summaries);
         }
         sources.push(Box::new(chinese));
         // **别名那一路单开一个源名**，好让优先级表把它排在标题那条链的最后：
         // 别名只进标题集合、只管搜得到，永不当显示标题（`zh::ChineseAliasSource`）。
-        sources.push(Box::new(zh::ChineseAliasSource::new(*naming)));
+        sources.push(Box::new(
+            zh::ChineseAliasSource::new(*naming).with_rulings(rulings),
+        ));
     }
     // **联网源只在在线档里造出来。** 离线档拿到 `Some(net)` 也不会碰它——这一条
     // 比「参数表里没有网络句柄」硬：句柄可以从别处传进来，而这里根本不造那个源。
@@ -1432,8 +1454,9 @@ mod tests {
     #[test]
     fn 离线档那七个源全是本地的() {
         let 关掉 = fuzzy::Naming::off();
+        let 无裁决 = zh::Rulings::none();
         let sources =
-            sources(Profile::Offline, true, None, &关掉, None).expect("离线档该收得下这七个源");
+            sources(Profile::Offline, true, None, &关掉, None, &无裁决).expect("离线档该收得下这七个源");
         assert_eq!(sources.len(), 7);
         assert!(sources.iter().all(|s| s.locality() == Locality::Local));
     }
@@ -1457,7 +1480,8 @@ mod tests {
             &cancel,
         );
         let 关掉 = fuzzy::Naming::off();
-        let sources = sources(Profile::Offline, true, Some(&net), &关掉, None).expect("收得下");
+        let 无裁决 = zh::Rulings::none();
+        let sources = sources(Profile::Offline, true, Some(&net), &关掉, None, &无裁决).expect("收得下");
         assert!(sources.iter().all(|s| s.locality() == Locality::Local));
         assert!(fetcher.asked().is_empty());
     }
@@ -1466,8 +1490,9 @@ mod tests {
     fn 在线档没有网络句柄就不启动() {
         // **宁可不启动也不悄悄降级**：用户点名要在线档，要的正是离线档补不上的那几样。
         let 关掉 = fuzzy::Naming::off();
+        let 无裁决 = zh::Rulings::none();
         assert!(matches!(
-            sources(Profile::Online, true, None, &关掉, None),
+            sources(Profile::Online, true, None, &关掉, None, &无裁决),
             Err(ScrapeError::NoNetwork)
         ));
     }
@@ -1477,7 +1502,8 @@ mod tests {
         // 它若参加而拿到一份空清单，`probe` 会返回「无话可说」，
         // 上一轮收好的媒体映射就被当成过期结论清掉了。
         let 关掉 = fuzzy::Naming::off();
-        let sources = sources(Profile::Offline, false, None, &关掉, None).expect("收得下");
+        let 无裁决 = zh::Rulings::none();
+        let sources = sources(Profile::Offline, false, None, &关掉, None, &无裁决).expect("收得下");
         assert_eq!(sources.len(), 6);
         assert!(sources.iter().all(|s| s.name() != local::LOCAL_MEDIA));
     }

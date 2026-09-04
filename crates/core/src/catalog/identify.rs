@@ -98,6 +98,10 @@ CREATE TABLE IF NOT EXISTS content_hash(
     PRIMARY KEY (key, inner)
 ) STRICT;
 
+-- **按内容判据反查**（票 05）：与 `container_entry_print` 同一条道理，见那一条上的说明。
+-- 裸文件的判据落在这张表上，容器里那些落在 `container_entry` 上，反查要两张都问一遍。
+CREATE INDEX IF NOT EXISTS content_hash_print ON content_hash(crc32, size);
+
 -- 从一份内容前几百字节里读出来的**光盘标识**与 **NKit** 结论（票 09）。
 --
 -- 它与 `content_hash` 同源同命：都是「读过的盘不白读」，都按文件的三元组作废。
@@ -958,6 +962,55 @@ impl Catalog {
             return Ok(None);
         };
         Ok(Some((u32::try_from(crc).unwrap_or(0), size, rom)))
+    }
+
+    /// **哪些变体装着这份内容**：拿内容判据（含头的 CRC-32 加大小）反查变体的键。
+    ///
+    /// ## 为什么要有反着走的这一条
+    ///
+    /// 一条**匹配裁决**钉在**内容锚**上（票 05），那正是「换台机器、改过名字仍然认得出」
+    /// 的来处；而刮削那一侧手里只有变体的键。两头要接得上，只有两条路：
+    ///
+    /// - 为每个变体算一次内容判据（`identify::content_print`）——真库 46,444 个变体，
+    ///   每个要查两次库。**这条路刮削那一侧本来就特意不走**（见 `scrape::Plan::build`
+    ///   里那句「变体这一层不带判据」）。
+    /// - 反过来，拿手里那几条裁决去问「谁装着这份内容」。裁决是**人一条条裁出来的**，
+    ///   量级是几百到几千，与变体数不同阶。
+    ///
+    /// 走后者。两张表都要问：**裸文件**的判据落在 `content_hash` 上，**透明容器**里那些
+    /// 零解压就有的落在 `container_entry` 上。
+    ///
+    /// **返回的是「某个成员正好是这份内容」的那些变体**，不是「代表这个变体的那份内容
+    /// 正好是它」。两者的差别只在一种情况下现形：一个变体里某个**附属**成员与另一个
+    /// 变体的锚撞了同一个 CRC-32 加大小（同一份说明文件是最可能的那一种）。调用方要自己
+    /// 拿 `identify::content_print` 复核一遍——那一层才是「谁代表这个变体」的唯一说法。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn variants_with_content(
+        &self,
+        crc32: u32,
+        size: u64,
+    ) -> Result<Vec<String>, CatalogError> {
+        let size = i64::try_from(size).unwrap_or(i64::MAX);
+        let crc32 = i64::from(crc32);
+        let mut statement = self
+            .conn
+            .prepare_cached(
+                "SELECT DISTINCT variant_key FROM variant_member
+                 WHERE key IN (
+                     SELECT key FROM content_hash    WHERE crc32 = ?1 AND size = ?2
+                     UNION
+                     SELECT key FROM container_entry WHERE crc32 = ?1 AND size = ?2
+                 )
+                 ORDER BY variant_key",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![crc32, size], |row| row.get::<_, String>(0))
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
     }
 
     /// 某个成员上算过的哈希：内部路径 → 那一份。裸文件的内部路径是空串。

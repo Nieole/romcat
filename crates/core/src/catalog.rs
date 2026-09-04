@@ -170,6 +170,11 @@ CREATE TABLE IF NOT EXISTS container_entry(
     lossy   INTEGER NOT NULL,
     PRIMARY KEY (key, ordinal)
 ) STRICT;
+
+-- **按内容判据反查**（票 05）：一条**匹配裁决**钉在内容锚（CRC-32 加大小）上，而刮削
+-- 那一侧手里只有变体的键——两头要接得上，就得答得出「本机哪个变体装着这份内容」。
+-- 没有这条索引就是一次全表扫描，真库里 216,203 条内部条目。
+CREATE INDEX IF NOT EXISTS container_entry_print ON container_entry(crc32, size);
 ";
 
 /// `meta` 里记主库根的那把键。
