@@ -4610,8 +4610,8 @@ fn run_zh_judge(args: &ZhJudgeArgs) -> ExitCode {
         );
     } else {
         println!(
-            "  就地清掉了 {} 条字段值{}。重跑 `romcat scrape` 不会再撞回这条条目——\
-             那条裁决进了输入指纹，缓存不会把它跳过去。",
+            "  就地清掉了 {} 条字段值{}。**这个变体**重跑 `romcat scrape` 不会再撞回\
+             这条条目——那条裁决进了输入指纹，缓存不会把它跳过去。",
             thousands(judged.cleared),
             match (&judged.work, judged.cleared_work) {
                 // **动过才说动过**：作品那一层一个字没动时，这半句一个字都不该印。
@@ -4620,6 +4620,16 @@ fn run_zh_judge(args: &ZhJudgeArgs) -> ExitCode {
                 _ => String::new(),
             },
         );
+        // **作品那一层不许跟着一起许诺。** 那几栏是名下变体**数票**数出来的
+        // （`zh::judge` 的文档），别的变体还撞着同一条条目时，下一趟它们照样投这一票。
+        // 上面那句话把「不会再撞回来」许到作品头上，就是又一句报告说的假话（票 06）。
+        if judged.cleared_work > 0 {
+            println!(
+                "  ⚠️ **作品那一层可能自己回来**：那几栏按名下变体数票定，名下还有别的\
+                 变体撞着这条条目的话，下一趟它们照样投这一票——而那时它是对的。\n\
+                 要连作品一起否掉，就把那几个变体各裁一次。"
+            );
+        }
     }
     ExitCode::SUCCESS
 }

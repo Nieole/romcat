@@ -1200,22 +1200,154 @@ fn 识别重跑之后刮削结论还在() {
 }
 
 #[test]
-fn 报告说得出离线档补不上哪些字段() {
+fn 报告说离线档补不上的是图而不是简介类型开发商() {
+    // 票 06 的正题。这一趟**没带中文索引**（`Naming::off`），所以那几栏确实空着——
+    // 报告照旧点名，但**不许把空着说成「离线档补不上」**：那三样撞上一条中文条目就有。
     let mut 现场 = 建现场();
     识别(&mut 现场);
     let outcome = 刮削(&mut 现场);
 
-    // 这三样本地数据源里没有，报告必须点名——空着不点名，用户会以为刮完了。
+    // 空着的字段照旧点名——不点名，用户看到的就是「刮削跑完了」。
     for field in ["简介", "类型", "开发商"] {
         assert!(
             outcome.report.gaps.iter().any(|gap| gap == field),
-            "报告该点名「{field}」补不上"
+            "报告该点名「{field}」这一趟一个值都没采到"
         );
     }
     let text = outcome.report.render_text();
     assert!(text.contains("一个值都没采到的字段"));
-    assert!(text.contains("换 `--profile 在线` 跑一趟才补得上"));
+    // **那句假话不许再出现。** 它把「不含图片」误传成「补不上简介、类型与开发商」，
+    // 代价是用户被推去烧在线配额换英文简介，而中文简介就躺在本地。
+    assert!(
+        !text.contains("本地数据源里没有这些东西"),
+        "报告不许再说本地数据源里没有这几样：\n{text}"
+    );
+    assert!(
+        !text.contains("换 `--profile 在线` 跑一趟才补得上"),
+        "报告不许再把这几样推给在线档：\n{text}"
+    );
+    assert!(
+        text.contains("**这不等于「离线档补不上」**"),
+        "空着的字段要说清空的是什么原因：\n{text}"
+    );
+    // 如实说：**补不上的是图**，而那正是在线档存在的理由。
+    assert!(
+        text.contains("**离线档补不上的是图**"),
+        "缺口那一节要说清离线档补不上的是图：\n{text}"
+    );
+    assert!(text.contains("这正是在线档存在的理由"), "{text}");
+    // 规格的真机验收要报「网络请求数（应为 0）」——那个数报告自己印得出来。
+    assert!(text.contains("**网络请求数是 0**"), "{text}");
     assert!(text.contains("媒体池"));
+}
+
+#[test]
+fn 报告数得出中文离线源补上了哪几个字段各多少条() {
+    // 票 06 的第三条验收：这一层到底值多少，报告要答得出——**贡献与胜出两个数**。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    // 这份 infobox 六样齐全：别名、类型、开发（顿号分隔）、发行（多值块）。
+    let index = 中文索引带信息框(
+        "{{Infobox Game\n|中文名= 魂斗罗\n|平台= FC\n|游戏类型= ACT\n\
+         |别名={\n[魂斗羅]\n[Probotector]\n}\n|开发= 科乐美、KCE东京\n\
+         |发行={\n[科乐美]\n[任天堂]\n}\n|发行日期= 1988-02-09\n}}",
+    );
+    let 简介 = 简介表::一条(12_345, 简介原文);
+    let outcome = 刮削带中文简介(&mut 现场, &index, Some(&简介));
+
+    let 一行 = |source: &str, field: &str| {
+        outcome
+            .report
+            .zh_fields
+            .iter()
+            .find(|row| row.source == source && row.field == field)
+            .unwrap_or_else(|| panic!("报告里该有「{source} × {field}」这一行"))
+    };
+    // **两个变体撞上同一条条目**：中文名落在各自的变体锚点上。
+    assert_eq!(一行("中文离线源", "标题").subjects, 2);
+    assert_eq!(一行("中文离线源", "标题").values, 2);
+    // 作品级那四栏落在**一个**作品锚点上；开发商与发行商一个键写了两个值就是两条。
+    assert_eq!(一行("中文离线源", "简介").subjects, 1);
+    assert_eq!(一行("中文离线源", "类型").values, 1);
+    assert_eq!(一行("中文离线源", "开发商").values, 2, "科乐美、KCE东京");
+    assert_eq!(一行("中文离线源", "发行商").values, 2, "科乐美、任天堂");
+    // 别名另占一个源名，只在变体这一层说话。
+    assert!(一行("中文离线源·别名", "标题").values >= 2);
+
+    // **贡献与胜出是两回事**，报告两个都给（挂单 Q28）：开发商这一栏 DAT 各家一条都
+    // 给不出，中文离线源胜出；发行商那一栏 TOSEC 在场而且排在前面，它一个都没胜出。
+    assert_eq!(一行("中文离线源", "开发商").winners, 1);
+    assert_eq!(
+        一行("中文离线源", "发行商").winners,
+        0,
+        "TOSEC 认得出这个文件时，发行商那一栏轮不到中文离线源——只报贡献就是邀功",
+    );
+
+    let text = outcome.report.render_text();
+    assert!(text.contains("中文离线源补上了什么"), "{text}");
+    assert!(text.contains("合并之后胜出"), "{text}");
+    // 这几栏补上了，缺口那一节就不该再点它们的名。
+    for field in ["简介", "类型", "开发商", "发行商"] {
+        assert!(
+            !outcome.report.gaps.iter().any(|gap| gap == field),
+            "「{field}」这一趟补上了：{:?}",
+            outcome.report.gaps,
+        );
+    }
+}
+
+#[test]
+fn 报告按平台报中文离线源的覆盖() {
+    // 票 06 的第四条验收：按平台那一栏是给「老平台补不上」一个交代——**那是数据源
+    // 本身浅，不是匹配算法的锅**。不按平台报，用户只看得见一个全库的百分比。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    let index = 中文索引();
+    let outcome = 刮削带中文索引(&mut 现场, &index);
+
+    let fc = outcome
+        .report
+        .zh_platforms
+        .iter()
+        .find(|row| row.platform == "FC")
+        .expect("报告里该有 FC 这一行");
+    // 分母是**库里这个平台的变体数**：五个变体（原版、两个汉化、挤在一个目录里的两个）。
+    assert_eq!(fc.variants, 5);
+    // 撞上的是两个汉化变体——它们的正题都是「魂斗罗」。原版那个是拉丁文件名，
+    // 「一堆」底下那两个正题对不上，**撞不上就一个字段都不产出**。
+    assert_eq!(fc.matched, 2);
+    assert!((fc.rate() - 40.0).abs() < f64::EPSILON, "{}", fc.rate());
+    // 合计行单独一格：`--json` 那一份里「撞上的变体数」是要被引用的一个数。
+    assert_eq!(outcome.report.zh_total.matched, 2);
+    assert_eq!(
+        outcome.report.zh_total.variants,
+        outcome
+            .report
+            .zh_platforms
+            .iter()
+            .map(|row| row.variants)
+            .sum::<u64>(),
+        "合计行与按平台那几行必须对得上",
+    );
+
+    let text = outcome.report.render_text();
+    assert!(text.contains("中文离线源按平台的覆盖"), "{text}");
+    assert!(text.contains("40.0%"), "{text}");
+    assert!(text.contains("**老平台覆盖低多半是数据源本身浅**"), "{text}");
+}
+
+#[test]
+fn 没取过中文索引时那两节说的是索引还没取而不是摆一张全零的表() {
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    let outcome = 刮削(&mut 现场);
+
+    assert!(outcome.report.zh_fields.is_empty());
+    assert_eq!(outcome.report.zh_total.matched, 0);
+    let text = outcome.report.render_text();
+    assert!(text.contains("romcat zh sync"), "{text}");
+    // 几十行全零说不出任何事，只会把报告冲长。
+    assert!(!text.contains("中文离线源按平台的覆盖"), "{text}");
 }
 
 #[test]
@@ -1821,7 +1953,8 @@ fn 两档在任务级别切换而优先级表一份都不用换() {
     let mut 现场 = 建现场();
     识别(&mut 现场);
 
-    // 第一趟离线：一个网络请求都不发，而简介、类型、开发商一个都补不上。
+    // 第一趟离线：一个网络请求都不发。**这一趟没带中文索引**（`Naming::off`），
+    // 所以简介、类型、开发商还空着——那是没撞上，不是离线档做不到（票 06）。
     let 离线 = 刮削(&mut 现场);
     assert_eq!(离线.report.profile, "离线档");
     assert!(离线.online.is_none(), "离线档不该有在线的账");
@@ -1845,7 +1978,7 @@ fn 两档在任务级别切换而优先级表一份都不用换() {
     assert_eq!(在线.report.profile, "在线档");
     assert!(在线.report.sources.contains(&"ScreenScraper".to_string()));
 
-    // 离线档补不上的那三样，现在有了。
+    // 这三样在线源也给得出——**它给的是英文的那一份**，而中文那一份离线档自己就有。
     assert_eq!(
         值(&现场, "作品", 作品, "简介", "ScreenScraper").as_deref(),
         Some("两个大兵闯外星人基地"),

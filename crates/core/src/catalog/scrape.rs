@@ -212,6 +212,20 @@ pub type FileVisitor<'a> = dyn FnMut(&str, Option<u64>, Option<i64>) + 'a;
 /// [`scraped_values`](Catalog::scraped_values)。
 pub type ScrapedVisitor<'a> = dyn FnMut(&str, &str, ScrapedValue) + 'a;
 
+/// 一个源在一个平台上的**覆盖**：那个平台有几个变体、其中几个被它撞上了。
+///
+/// 报告要答得出「N64、DC 这些老平台为什么补不上」——**那是数据源本身浅，不是匹配
+/// 算法的锅**（票 06）。不按平台报的话，用户只看得见一个全库的百分比，怪错的地方。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceCoverage {
+    /// 平台。平台认不出来的那些归在调用方给的那个词底下。
+    pub platform: String,
+    /// 这个平台一共几个变体。**分母是库里的变体数**，不是这一趟采过的个数。
+    pub variants: u64,
+    /// 其中几个变体身上有这个源给的值。
+    pub matched: u64,
+}
+
 /// 刮削结论按「字段 × 源」的条数。报告要答得出「某个源值不值得继续用」。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FieldCount {
@@ -609,6 +623,55 @@ impl Catalog {
             .map_err(|source| self.err(source))
     }
 
+    /// 一个源在**变体**这一层的覆盖，按平台：那个平台几个变体、其中几个被它撞上。
+    ///
+    /// **只数变体锚点。** 中文离线源在两层都说话（票 02），可撞只发生在变体这一层
+    /// ——作品那一层是读「名下的变体撞到了哪些条目号」推上去的。于是「撞上多少」这个
+    /// 数唯一说得清的地方就是变体：作品锚点上按平台归本来就归不动（一部作品跨平台）。
+    ///
+    /// **分母是库里那个平台的变体数**，不是这一趟采过的个数。报告是从中立库折出来的
+    /// （ADR-0001），而「这一趟看了几个」是 `PlanCounts` 那一侧的事；两个口径混在一份
+    /// 表里，读的人无从判断 40% 说的是「四成撞上了」还是「采过的里头四成撞上了」。
+    ///
+    /// **平台为空的那一行也在里面**（同 [`chinese_by_platform`](Catalog::chinese_by_platform)）：
+    /// 滤掉它，按平台加出来的总数就与全库的变体数对不上。归在 `unknown` 那个词底下。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn source_by_platform(
+        &self,
+        source: &str,
+        unknown: &str,
+    ) -> Result<Vec<SourceCoverage>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                // `LEFT JOIN` 而不是相关子查询：一个平台一行，撞不上的那些平台照样有行
+                // ——那正是这张表要说的话。`COUNT(DISTINCT s.subject)` 不数 NULL，
+                // 于是它就是「撞上了的变体数」，而同一个变体上有几条值不影响它。
+                "SELECT COALESCE(v.platform, ?3), COUNT(DISTINCT v.key), COUNT(DISTINCT s.subject)
+                 FROM variant v
+                 LEFT JOIN scrape_value s
+                   ON s.subject = v.key AND s.anchor = ?2 AND s.source = ?1
+                 GROUP BY 1 ORDER BY 1",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(
+                params![source, AnchorKind::Variant.label(), unknown],
+                |row| {
+                    Ok(SourceCoverage {
+                        platform: row.get(0)?,
+                        variants: u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+                        matched: u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+                    })
+                },
+            )
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
     /// 某一类媒体有几条引用、涉及几份**不同的内容**。
     ///
     /// 两个数分开报是有用的：引用 646 条而内容只有 600 份，差出来的 46 份就是
@@ -888,6 +951,84 @@ mod tests {
             .map(|value| value.value.as_str())
             .collect();
         assert_eq!(裁决, vec!["魂斗罗改"]);
+    }
+
+    #[test]
+    fn 按平台数覆盖时同一个变体上几条值只算一次而平台空着的那一行照样在() {
+        // 报告拿这张表回答「N64、DC 这些老平台为什么补不上」（票 06）。两条性质：
+        // 撞上的是**变体数**（一个变体上几条值不影响它），以及**平台空着的照样一行**
+        // ——滤掉它，按平台加出来的总数就与全库的变体数对不上。
+        let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+        catalog
+            .replace_variants(
+                &[
+                    变体("FC/撞上的.zip", Some("FC")),
+                    变体("FC/没撞上的.zip", Some("FC")),
+                    变体("散着的.bin", None),
+                ],
+                1,
+                &crate::platform::Manifest::builtin(),
+            )
+            .expect("写得进");
+        let 采到 = |key: &str, value: &str| Harvested {
+            anchor: AnchorKind::Variant.label().to_string(),
+            subject: key.to_string(),
+            source: "中文离线源".to_string(),
+            input: "指纹".to_string(),
+            values: vec![HarvestedValue {
+                field: Field::Title.label().to_string(),
+                value: value.to_string(),
+                evidence: "依据".to_string(),
+            }],
+            media: Vec::new(),
+        };
+        catalog
+            .put_scraped(&[
+                采到("FC/撞上的.zip", "魂斗罗"),
+                // 同一个变体上的第二条值（别名那一路就是这个形状）。
+                采到("FC/撞上的.zip", "魂斗羅"),
+                采到("散着的.bin", "魔界村"),
+            ])
+            .expect("写得进");
+
+        let 覆盖 = catalog
+            .source_by_platform("中文离线源", "（平台未知）")
+            .expect("读得出");
+        assert_eq!(
+            覆盖,
+            vec![
+                SourceCoverage {
+                    platform: "FC".to_string(),
+                    variants: 2,
+                    matched: 1,
+                },
+                SourceCoverage {
+                    platform: "（平台未知）".to_string(),
+                    variants: 1,
+                    matched: 1,
+                },
+            ],
+        );
+        // 别的源在这张表上一个数都不动——它问的是「这个源撞上了多少」。
+        let 别人 = catalog
+            .source_by_platform("TOSEC", "（平台未知）")
+            .expect("读得出");
+        assert!(别人.iter().all(|row| row.matched == 0));
+    }
+
+    /// 一个最小的变体（同 `catalog::content` 那一侧的写法）。
+    fn 变体(key: &str, platform: Option<&str>) -> crate::shape::Variant {
+        crate::shape::Variant {
+            key: key.to_string(),
+            platform: platform.map(ToString::to_string),
+            rule: crate::shape::SINGLE_FILE_RULE.to_string(),
+            main_key: key.to_string(),
+            manual: false,
+            files: 1,
+            bytes: 100,
+            unreadable_files: 0,
+            members: vec![(key.to_string(), crate::shape::Role::Main)],
+        }
     }
 
     #[test]

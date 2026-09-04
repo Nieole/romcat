@@ -126,7 +126,8 @@ pub struct ValueDraft {
 impl Default for ValueDraft {
     fn default() -> Self {
         Self {
-            // 简介是离线源补不上、又最想手写的那一个（`scrape::Field` 的注释）。
+            // 简介是最想手写的那一个：离线档撞上一条中文条目就有（`scrape::zh`），
+            // 而撞不上的那些正是没人替它写过一句话的。
             field: Field::Description,
             anchor: AnchorKind::Work,
             value: String::new(),

@@ -61,11 +61,11 @@ fn 不给档案就是离线档_一个网络请求都不发() {
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("刮削：离线档"), "{text}");
-    // 报告要说清「换个档案才补得上」，而不是把在线源报成不存在的源。
-    assert!(
-        text.contains("换 `--profile 在线` 跑一趟才补得上"),
-        "{text}"
-    );
+    // 报告要说清**离线档补不上的是图**（票 06），而不是把空着的字段推给在线档；
+    // 在线源也不许被报成不存在的源。
+    assert!(text.contains("**离线档补不上的是图**"), "{text}");
+    assert!(text.contains("这正是在线档存在的理由"), "{text}");
+    assert!(text.contains("**网络请求数是 0**"), "{text}");
     assert!(text.contains("这一档没参加的源"), "{text}");
     assert!(text.contains("ScreenScraper"), "{text}");
 }

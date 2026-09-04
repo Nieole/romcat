@@ -167,6 +167,24 @@ const WORK_FIELDS: [Field; 4] = [
     Field::Publisher,
 ];
 
+/// **这一层产出得了的全部字段**：变体那一层的中文名，加上作品那一层的那四样。
+///
+/// 报告拿它回答缺口那一节里最要紧的一句话（票 06）：空着的这一栏，**中文离线源到底
+/// 给不给得出**。给得出的那些空着说的是「没撞上」或者「索引还没取」，那才轮得到
+/// 「先跑一次 `romcat zh sync`」；而**年份与汉化组这一层根本不产出**——年份走 DAT
+/// 那几家与在线源，汉化组只有 TOSEC 的 `[tr zh <组>]` 说得出。对着这两栏叫用户去取
+/// 中文索引，是把人支去做一件永远不会有结果的事，与这张票要修的那句假话是同一类。
+///
+/// **这一层将来多产出一个字段，这里要跟着加一行**——有一条测试钉着它与
+/// [`WORK_FIELDS`] 加中文名对得上。
+pub const FIELDS: [Field; 5] = [
+    Field::Title,
+    Field::Genre,
+    Field::Description,
+    Field::Developer,
+    Field::Publisher,
+];
+
 /// 把一条简介收进闸内。
 ///
 /// 返回 `(收好的那一份, 原文有多少字)`；**没超闸时返回的就是原文，一个字都不改**——
@@ -1850,6 +1868,22 @@ mod tests {
         let mut 写着的 = WORK_FIELDS.to_vec();
         写着的.sort_unstable();
         assert_eq!(产出, 写着的);
+    }
+
+    #[test]
+    fn 报告用的那份字段清单与两层真的产出的对得上() {
+        // `FIELDS` 是报告的判据：「这一栏空着，跑一趟 `romcat zh sync` 有没有用」。
+        // 它与真的产出漂开，报告就会把用户支去取一份补不了这一栏的索引（票 06）。
+        let mut 写着的 = FIELDS.to_vec();
+        写着的.sort_unstable();
+        let mut 两层 = WORK_FIELDS.to_vec();
+        两层.push(Field::Title);
+        两层.sort_unstable();
+        assert_eq!(写着的, 两层);
+        // 变体那一层真的产出的就是中文名那一个（别名那一路也落在这个字段上）。
+        let out = 采("nds/合金弹头7.7z", &[]);
+        assert!(!out.values.is_empty(), "这个 fixture 本来就该撞得上");
+        assert!(out.values.iter().all(|it| it.field == Field::Title));
     }
 
     #[test]

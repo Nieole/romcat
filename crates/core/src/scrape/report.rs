@@ -3,12 +3,25 @@
 //! 它和体检报告、命中率报告是同一个形状——**从中立库折出来，不重跑一遍刮削**
 //! （ADR-0001）。因此盘不在位时上一趟的结论照样看得见。
 //!
-//! ## 缺口那一节不是装饰
+//! ## 缺口那一节不是装饰，可它一度在说假话
 //!
-//! 离线档补不上简介、类型与开发商——这是调研早就写明的结论（Bangumi 的离线 dump 不含
-//! 图片、Wikidata 只有标签没有简介）。**报告必须把这件事说出来**：空着的字段如果不点名，
-//! 用户看到的就是「刮削跑完了」，而实际上前端里一半的格子是空的。这一节正是**在线档**
-//! 存在的理由，所以它也要说清「换 `--profile 在线` 跑一趟才补得上」。
+//! 这一节原先写的是「离线档补不上简介、类型与开发商——换 `--profile 在线` 跑一趟才
+//! 补得上」。**那三样全在本机那份数据里**：调研的原话是中文离线源那份 dump「不含
+//! **图片**」，两个离线数据源各缺一样（这一份缺图、另一份缺简介），在报告里被并成了
+//! 一句。代价是实打实的：用户被推去烧在线配额换英文简介，而中文简介就躺在本地。
+//!
+//! 现在如实说：**离线档补不上的是图**——本地数据源里一张图片都没有，那正是**在线档**
+//! 唯一不可替代的地方（`CONTEXT.md` 的「中文离线源」词条）。空着的字段照旧点名，但
+//! 不再把它们算在「离线档补不上」头上：简介、类型、开发商、发行商撞上一条中文条目
+//! 就有（票 02–05），空着说的是**没撞上**或者**索引还没取**，不是这一档做不到。
+//!
+//! ## 中文离线源那一层到底值多少，报告要答得出
+//!
+//! 光说「补得上」还不够。报告因此多两节：**补上了哪几个字段、各多少条**（贡献与
+//! **合并之后胜出**两个数并排——发行商那一栏 TOSEC 排在前面，中文离线源常常轮不到，
+//! 只报贡献就是在替它邀功），以及**按平台的覆盖**。按平台那一栏是给「老平台补不上」
+//! 一个交代：N64、DC 这些平台在数据源里条目数以几十计，那是**数据源本身浅**，
+//! 不是匹配算法的锅——报告不点名的话，用户会怪错地方。
 //!
 //! ## 在线那一节是给「对着真账号跑之前」看的
 //!
@@ -22,7 +35,8 @@ use std::fmt::Write as _;
 use serde::Serialize;
 
 use crate::catalog::{Catalog, CatalogError};
-use crate::report::{heading, human_bytes, pad, thousands};
+use crate::identify::fuzzy;
+use crate::report::{UNKNOWN_PLATFORM_LABEL, heading, human_bytes, pad, share, thousands};
 
 use super::priority::Priorities;
 use super::{Field, MediaKind, Options, PlanCounts, online};
@@ -92,6 +106,48 @@ pub struct FieldRow {
     pub order: Vec<String>,
 }
 
+/// **中文离线源**那一层补上了什么：一个「源 × 字段」一行（票 06）。
+///
+/// 它与[按字段那一节](FieldRow)不重复：那一节是全库口径、一个字段一行，这一节盯的是
+/// **这一层自己**——用户要判断的是「取全字段这件事到底值不值」，而那个判断要的是
+/// 「它给了几条」与「其中几条真的胜出」两个数，不是全库的合计。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ZhFieldRow {
+    /// 哪个源：中文名与作品级那几栏走 `中文离线源`，别名另占 `中文离线源·别名`。
+    pub source: String,
+    /// 字段。
+    pub field: String,
+    /// 落在几个锚点上。
+    pub subjects: u64,
+    /// 值一共几条。**它大于锚点数**：一个键写了几个值就拆成几条（票 04）。
+    pub values: u64,
+    /// **按优先级合并之后真正胜出的**有几个锚点。
+    ///
+    /// 与 `values` 分开报是这一节的要害：发行商那一栏 TOSEC 在场而且排在前面，
+    /// 中文离线源只在 TOSEC 认不出那个文件时才轮得到（挂单 Q28）。只报贡献，
+    /// 报告就是在替一个几乎不出场的源邀功。
+    pub winners: u64,
+}
+
+/// **中文离线源**在一个平台上的覆盖（票 06）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ZhPlatformRow {
+    /// 平台。认不出平台的那些归在「（平台未知）」底下。
+    pub platform: String,
+    /// 这个平台一共几个变体。**分母是库里的变体数**，不是这一趟采过的个数。
+    pub variants: u64,
+    /// 其中几个变体撞上了一条中文条目。
+    pub matched: u64,
+}
+
+impl ZhPlatformRow {
+    /// 这个平台的变体里，撞上中文条目的占多少。
+    #[must_use]
+    pub fn rate(&self) -> f64 {
+        share(self.matched, self.variants)
+    }
+}
+
 /// 一种媒体一行。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct MediaRow {
@@ -137,8 +193,22 @@ pub struct ScrapeReport {
     pub scraped: Vec<(String, u64)>,
     /// 按字段。
     pub fields: Vec<FieldRow>,
-    /// **一个值都没采到的字段**。离线档跑的时候，这正是「在线档存在的理由」那一份清单。
+    /// **一个值都没采到的字段**。
+    ///
+    /// **它不等于「离线档补不上的东西」**（票 06）：简介、类型、开发商、发行商撞上一条
+    /// 中文条目就有，空着说的是没撞上、或者索引还没取。离线档真正补不上的是**图**，
+    /// 而图不在这份清单里——那一份是[媒体](Self::media)那一节的事。
     pub gaps: Vec<String>,
+    /// **中文离线源补上了哪几个字段、各多少条**（票 06）。
+    pub zh_fields: Vec<ZhFieldRow>,
+    /// **中文离线源按平台的覆盖**（票 06），变体多的排前面。
+    pub zh_platforms: Vec<ZhPlatformRow>,
+    /// 上面那张表的合计行：全库几个变体、其中几个撞上了中文条目。
+    ///
+    /// 单独一格而不是让读的人自己去加：`--json` 那一份里「撞上的变体数」是要被引用的
+    /// 一个数（规格的「真机验收」那一节点名要它），加出来的数与报告里印的数万一
+    /// 对不上，谁也说不清哪个是真的。
+    pub zh_total: ZhPlatformRow,
     /// **简介被截断了的那些锚点**：`(锚点种类, 锚点)`（票 03）。
     ///
     /// 数据源实测最长一条 9,962 字，超过 [`zh::DESCRIPTION_LIMIT`](super::zh::DESCRIPTION_LIMIT)
@@ -205,6 +275,21 @@ impl ScrapeReport {
         let winners = winners(catalog, priorities)?;
         let mut by_field: BTreeMap<String, FieldRow> = BTreeMap::new();
         for count in catalog.field_counts()? {
+            // **中文离线源那一层单独记一笔**（票 06）：贡献与胜出并排，缺一个数这一节
+            // 就会撒谎（挂单 Q28 的发行商那一栏）。
+            if count.source == fuzzy::SOURCE || count.source == fuzzy::ALIAS_SOURCE {
+                report.zh_fields.push(ZhFieldRow {
+                    source: count.source.clone(),
+                    field: count.field.clone(),
+                    subjects: count.subjects,
+                    values: count.values,
+                    winners: winners
+                        .get(&count.field)
+                        .and_then(|by_source| by_source.get(&count.source))
+                        .copied()
+                        .unwrap_or(0),
+                });
+            }
             let row = by_field
                 .entry(count.field.clone())
                 .or_insert_with(|| FieldRow {
@@ -250,6 +335,42 @@ impl ScrapeReport {
             .map(|field| field.label().to_string())
             .filter(|label| !filled.contains(label))
             .collect();
+        // 这一节按 `Field::all()` 那个固定顺序排，同一个字段的两个源挨着——同一份库
+        // 出的报告每次长得一样，人才能对着上一次看差异（同上面那一段）。
+        report.zh_fields.sort_by_key(|row| {
+            (
+                Field::from_label(&row.field).map_or(usize::MAX, |field| {
+                    Field::all()
+                        .into_iter()
+                        .position(|it| it == field)
+                        .unwrap_or(usize::MAX)
+                }),
+                row.field.clone(),
+                row.source.clone(),
+            )
+        });
+        // **按平台的覆盖**（票 06）：只数变体这一层——撞只发生在那儿，作品锚点跨平台，
+        // 按平台归不动（`Catalog::source_by_platform`）。
+        report.zh_platforms = catalog
+            .source_by_platform(fuzzy::SOURCE, UNKNOWN_PLATFORM_LABEL)?
+            .into_iter()
+            .map(|coverage| ZhPlatformRow {
+                platform: coverage.platform,
+                variants: coverage.variants,
+                matched: coverage.matched,
+            })
+            .collect();
+        report.zh_total = ZhPlatformRow {
+            platform: "合计".to_string(),
+            variants: report.zh_platforms.iter().map(|row| row.variants).sum(),
+            matched: report.zh_platforms.iter().map(|row| row.matched).sum(),
+        };
+        // 变体多的排前面：那正是「这一层还差多少」最该先看的顺序（同命中率报告）。
+        report.zh_platforms.sort_by(|a, b| {
+            b.variants
+                .cmp(&a.variants)
+                .then_with(|| a.platform.cmp(&b.platform))
+        });
         // **被截断的简介**照旧从中立库折出来（ADR-0001）：不重跑一遍刮削，于是上一趟
         // 截掉的那些这一趟照样点得出名。
         report.truncated_descriptions =
@@ -439,19 +560,72 @@ impl ScrapeReport {
             );
         }
 
-        if !self.gaps.is_empty() {
-            heading(&mut out, "一个值都没采到的字段");
-            let _ = writeln!(
-                out,
-                "{}——{}",
-                self.gaps.join("、"),
-                if self.online.is_some() {
+        self.render_chinese(&mut out);
+
+        heading(&mut out, "缺口");
+        if self.gaps.is_empty() {
+            let _ = writeln!(out, "**一个值都没采到的字段**：没有，每个字段都有值。");
+        } else {
+            let _ = writeln!(out, "**一个值都没采到的字段**：{}。", self.gaps.join("、"));
+            if self.online.is_some() {
+                let _ = writeln!(
+                    out,
                     "在线源这一趟也没给出这些：要么条目本身没有，要么请求还没轮到它们。"
-                } else {
-                    "本地数据源里没有这些东西。换 `--profile 在线` 跑一趟才补得上。"
+                );
+            } else {
+                // **两拨分开说。** 中文离线源给得出的那几栏空着，去取一份索引是有用的；
+                // 而年份与汉化组这一层根本不产出（`zh::FIELDS`）——对着它们说「跑一次
+                // `romcat zh sync`」，是把人支去做一件永远不会有结果的事，与这一节
+                // 原先那句假话是同一类。
+                let (可补, 补不了): (Vec<&String>, Vec<&String>) =
+                    self.gaps.iter().partition(|label| {
+                        Field::from_label(label)
+                            .is_some_and(|field| super::zh::FIELDS.contains(&field))
+                    });
+                if !可补.is_empty() {
+                    let _ = writeln!(
+                        out,
+                        "**这不等于「离线档补不上」**：{}撞上一条中文条目就有（上一节）。\n\
+                         空着说的是这些锚点名下的变体一个都没撞上，或者索引还没取\
+                         ——那就先跑一次 `romcat zh sync`。",
+                        可补.iter()
+                            .map(|label| label.as_str())
+                            .collect::<Vec<_>>()
+                            .join("、"),
+                    );
                 }
-            );
+                if !补不了.is_empty() {
+                    let _ = writeln!(
+                        out,
+                        "{}**不在中文离线源的产出里**，取索引补不上它们：年份走 DAT 那几家\
+                         与在线源，\n汉化组只有 TOSEC 的 `[tr zh <组>]` 说得出——\
+                         那正是官方数据库补不上的那一块。",
+                        补不了
+                            .iter()
+                            .map(|label| label.as_str())
+                            .collect::<Vec<_>>()
+                            .join("、"),
+                    );
+                }
+            }
         }
+        // **这一段与 gaps 空不空无关，照打。** 「离线档补不上什么」是这一节存在的理由，
+        // 而它恰恰不在 `gaps` 那份清单里：图不是字段（票 06）。
+        let _ = writeln!(
+            out,
+            "{}",
+            if self.online.is_some() {
+                "**在线档补的就是图**：封面、截图、视频——本地数据源里一张图片都没有。\n\
+                 文字那几栏离线档自己都有，而且是**中文**的那一份；在线源那边的简介是\
+                 英文的，还要赌上账号与 IP（ADR-0007）。"
+            } else {
+                "**离线档补不上的是图**：本地数据源里一张图片都没有，中文离线源那份 dump \
+                 也不含图。\n这正是在线档存在的理由——`--profile 在线` 补的是封面、截图\
+                 与视频，别的字段离线档自己都有。\n这一趟的**网络请求数是 0**：离线档只收\
+                 本地源，混进一个联网源会当场被拒——闸门查的是每个源自报的本地还是联网，\
+                 不是参数表长什么样。"
+            }
+        );
 
         if !self.truncated_descriptions.is_empty() {
             heading(&mut out, "被截断的简介");
@@ -542,6 +716,97 @@ impl ScrapeReport {
         }
         out
     }
+
+    /// **中文离线源那一层**的两节：补上了哪几个字段各多少条、按平台的覆盖（票 06）。
+    ///
+    /// 单独一个函数是因为它自成一段话：上一节答的是「全库这一趟有什么」，这两节答的是
+    /// 「**取全字段这件事值多少**」，而那正是这一整批票要交代的东西。
+    fn render_chinese(&self, out: &mut String) {
+        heading(out, "中文离线源补上了什么");
+        if self.zh_fields.is_empty() {
+            let _ = writeln!(
+                out,
+                "库里一条都没有。这一层撞的是文件名剥出来的**正题**，先跑一次 \
+                 `romcat zh sync` 取回索引它才参加；\n\
+                 取过了还是空，那就是这些变体的正题一个都没撞上那份数据——\
+                 **撞不上就一个字段都不产出**，不猜。"
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "{}{}{}{}合并之后胜出",
+                pad("源", 16),
+                pad("字段", 10),
+                pad("锚点", 9),
+                pad("值", 9),
+            );
+            for row in &self.zh_fields {
+                let _ = writeln!(
+                    out,
+                    "{}{}{}{}{}",
+                    pad(&row.source, 16),
+                    pad(&row.field, 10),
+                    pad(&thousands(row.subjects), 9),
+                    pad(&thousands(row.values), 9),
+                    thousands(row.winners),
+                );
+            }
+            let _ = writeln!(
+                out,
+                "（**贡献与胜出是两回事**：发行商那一栏 TOSEC 在场而且排在优先级链的前面，\
+                 中文离线源\n\
+                 只在 TOSEC 认不出那个文件时才轮得到——只报贡献，等于替一个几乎不出场的\
+                 源邀功）"
+            );
+            let _ = writeln!(
+                out,
+                "（值多于锚点是对的：`|开发= 甲、乙` 拆成两条，别名一条条目能给好几个）"
+            );
+            let _ = writeln!(
+                out,
+                "（这一层的结论**全部离线**，一个网络请求都不发，也不扣任何在线配额；\n\
+                 它是模糊匹配来的**中置信**结论，照旧进待确认队列）"
+            );
+        }
+
+        // 一条都没撞上时不摆这张表：几十行全零说不出任何事，只会把报告冲长。
+        if self.zh_total.matched == 0 {
+            return;
+        }
+        heading(out, "中文离线源按平台的覆盖");
+        let _ = writeln!(
+            out,
+            "{}{}{}覆盖",
+            pad("平台", 10),
+            pad("变体", 9),
+            pad("撞上", 9),
+        );
+        for row in self
+            .zh_platforms
+            .iter()
+            .chain(std::iter::once(&self.zh_total))
+        {
+            let _ = writeln!(
+                out,
+                "{}{}{}{:.1}%",
+                pad(&row.platform, 10),
+                pad(&thousands(row.variants), 9),
+                pad(&thousands(row.matched), 9),
+                row.rate(),
+            );
+        }
+        let _ = writeln!(
+            out,
+            "（分母是**库里这个平台的变体数**，不是这一趟采过的个数；只数变体这一层——\
+             撞只发生在那儿，\n作品那一层是顺着名下变体撞到的条目号推上去的）"
+        );
+        let _ = writeln!(
+            out,
+            "（**老平台覆盖低多半是数据源本身浅**，不是匹配算法的锅：N64、DC 这些平台在\
+             那份数据里条目数以几十计。\n\
+             要判断是哪一种，拿这一列与命中率报告里同一个平台的变体数对着看）"
+        );
+    }
 }
 
 /// 把库里的值真正合并一遍，数出**每个字段各是哪个源胜出**。
@@ -581,4 +846,53 @@ fn winners(
     })?;
     tally(&batch, &mut out);
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 一份只填了缺口那几栏的报告——这一节的渲染不依赖库里别的东西。
+    fn 只有缺口(gaps: &[&str]) -> ScrapeReport {
+        ScrapeReport {
+            gaps: gaps.iter().map(|it| (*it).to_string()).collect(),
+            // 字段一个都没有时 `render_text` 会早早收尾，所以摆一行进去。
+            fields: vec![FieldRow {
+                field: Field::Title.label().to_string(),
+                ..FieldRow::default()
+            }],
+            ..ScrapeReport::default()
+        }
+    }
+
+    #[test]
+    fn 中文离线源产出不了的那几栏不许被推去取索引() {
+        // 「跑一次 `romcat zh sync`」只对这一层真的产出的那几栏成立（`zh::FIELDS`）。
+        // **年份与汉化组这一层根本不产出**：年份走 DAT 那几家与在线源，汉化组只有
+        // TOSEC 的 `[tr zh]`。对着它们叫用户去取 435 MB 的索引，是把人支去做一件
+        // 永远不会有结果的事——与这一节原先那句假话是同一类，只是指向反了。
+        let text = 只有缺口(&["年份", "汉化组"]).render_text();
+        assert!(text.contains("**不在中文离线源的产出里**"), "{text}");
+        // 缺口这一节里那句指路的话不许出现（上一节那句「先跑一次 `romcat zh sync`
+        // 取回索引它才参加」说的是另一件事——那一层这一趟一条都没有）。
+        assert!(
+            !text.contains("**这不等于「离线档补不上」**"),
+            "这两栏取索引也补不上，不该拿那句话指路：\n{text}"
+        );
+        assert!(
+            !text.contains("空着说的是这些锚点名下的变体一个都没撞上"),
+            "这两栏空着与撞不撞得上无关：\n{text}"
+        );
+
+        // 给得出的那几栏照旧指路。
+        let text = 只有缺口(&["简介", "开发商"]).render_text();
+        assert!(text.contains("romcat zh sync"), "{text}");
+        assert!(text.contains("**这不等于「离线档补不上」**"), "{text}");
+        assert!(!text.contains("**不在中文离线源的产出里**"), "{text}");
+
+        // 两拨都有时**两句都说**，各点各的名。
+        let text = 只有缺口(&["简介", "汉化组"]).render_text();
+        assert!(text.contains("简介撞上一条中文条目就有"), "{text}");
+        assert!(text.contains("汉化组**不在中文离线源的产出里**"), "{text}");
+    }
 }
