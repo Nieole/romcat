@@ -297,6 +297,15 @@ impl Store {
         self.conn
             .execute_batch(SCHEMA)
             .map_err(|source| self.error(source))?;
+        // **新建的库当场落版本号。** 少了这一句，「文件已建好、`replace` 还没跑过」那一档
+        // （第一次 `zh sync` 中途断网，或先跑了 `zh find`）留下的库里 `meta` 没有这一行；
+        // 等结构版本再升一格，`prepare` 读到 `None` 既不走 `TooNew` 也不置 `rebuilding`，
+        // `CREATE TABLE IF NOT EXISTS` 对已存在的旧表一个字不改，最后在 `replace` 那句
+        // `INSERT INTO subject(… 新列 …)` 上硬报 `no column named`——而这一下发生在
+        // **下完 435 MB 之后**，恰是自动重建这条路要避免的那个失败（挂单 Q14）。
+        if found.is_none() {
+            self.put_meta("schema_version", &SCHEMA_VERSION.to_string())?;
+        }
         Ok(())
     }
 

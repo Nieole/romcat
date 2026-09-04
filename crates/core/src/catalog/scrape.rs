@@ -45,44 +45,6 @@ use super::{Catalog, CatalogError};
 use crate::scrape::priority::VERDICT;
 use crate::scrape::{AnchorKind, Field};
 
-/// 老库里那张 `scrape_value` 的去重键**换掉**：加上 `value` 那一列。
-///
-/// 为什么不是把中立库的结构版本加一格：那个数一加，用户就得删掉 780 MB 的库、重扫
-/// 27 分钟、重跑 14 分钟识别（`catalog::SCHEMA_VERSION` 的文档算过这笔账）。而这张表
-/// 是**刮削结论**，本来就整份可再生——离线档 `--refresh` 重跑一遍只要几秒。
-///
-/// 这里做的是**无损换键**：旧表原样搬过来，一行不丢、一列不改，只是主键多了一列。
-/// 与 `identify::add_columns`、`sublibrary::add_columns` 是同一档的就地修补，
-/// 判据也是同一条——**旧数据会不会被读错**。不会：搬过去的每一行都还是它自己。
-///
-/// SQLite 改不动主键，所以只能重建那张表。这一步是幂等的：键已经对了就一个字都不动。
-pub(super) fn rekey(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    let sql: Option<String> = conn
-        .query_row(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'scrape_value'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(sql) = sql else {
-        return Ok(());
-    };
-    if sql.contains("field, source, value") {
-        return Ok(());
-    }
-    // 索引跟着旧表改名过去了，名字却没变——不先扔掉它，下面那句 `CREATE INDEX` 会撞名。
-    conn.execute_batch(&format!(
-        "BEGIN;
-         DROP INDEX IF EXISTS scrape_value_subject;
-         ALTER TABLE scrape_value RENAME TO scrape_value_old;
-         {SCRAPE_SCHEMA}
-         INSERT OR IGNORE INTO scrape_value(anchor, subject, field, source, value, evidence, at)
-             SELECT anchor, subject, field, source, value, evidence, at FROM scrape_value_old;
-         DROP TABLE scrape_value_old;
-         COMMIT;"
-    ))
-}
-
 /// 刮削相关的表。
 pub(super) const SCRAPE_SCHEMA: &str = "\
 -- 一个锚点、一个字段、一个源给出的值。**不同的源并存，不互相覆盖。**
@@ -873,50 +835,6 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn 老库那张表无损换键_一行不丢而且能装下同一个源的第二个值() {
-        // 加中立库的结构版本要用户删掉 780 MB 的库、重扫 27 分钟；而这张表整份可再生。
-        // 所以是**就地换键**——旧表原样搬过来，一行不丢一列不改。
-        let conn = rusqlite::Connection::open_in_memory().expect("开得起来");
-        conn.execute_batch(
-            "CREATE TABLE scrape_value(
-                 anchor TEXT NOT NULL, subject TEXT NOT NULL, field TEXT NOT NULL,
-                 source TEXT NOT NULL, value TEXT NOT NULL, evidence TEXT NOT NULL,
-                 at INTEGER NOT NULL,
-                 PRIMARY KEY (anchor, subject, field, source)
-             ) STRICT;
-             CREATE INDEX scrape_value_subject ON scrape_value(anchor, subject);
-             INSERT INTO scrape_value VALUES('变体','FC/甲.zip','标题','中文离线源','魂斗罗','旧依据',1);",
-        )
-        .expect("造得出老库");
-
-        rekey(&conn).expect("换得动键");
-
-        // 旧的那一行还在，evidence 与 at 一个字都没改。
-        let (value, evidence, at): (String, String, i64) = conn
-            .query_row("SELECT value, evidence, at FROM scrape_value", [], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .expect("读得回来");
-        assert_eq!((value.as_str(), evidence.as_str(), at), ("魂斗罗", "旧依据", 1));
-        // 换完键之后，同一个源在同一个字段上装得下第二个值——别名走的正是这条。
-        conn.execute(
-            "INSERT INTO scrape_value VALUES('变体','FC/甲.zip','标题','中文离线源','魂斗羅','新依据',2)",
-            [],
-        )
-        .expect("第二条装得下");
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM scrape_value", [], |row| row.get(0))
-            .expect("数得出来");
-        assert_eq!(count, 2);
-        // 幂等：键已经对了就一个字都不动。
-        rekey(&conn).expect("再来一次也行");
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM scrape_value", [], |row| row.get(0))
-            .expect("数得出来");
-        assert_eq!(count, 2);
-    }
 
     #[test]
     fn 裁决一个字段上永远只有一条() {

@@ -85,8 +85,14 @@ pub use title::TitleRow;
 /// NOT EXISTS` 在打开时就把它们补上，旧库照样打得开，拿旧版程序再打开也照样能用。
 /// 为它逼用户删掉 780 MB 的库、重扫 27 分钟、重跑 14 分钟识别，换不到任何东西
 /// （挂账 D50）。**改了已有表的列或含义才加 1。** 票 15 的标题集合、票 16 的旁路快照、
-/// 票 18 的子库三张表都是同一档，因此这个数一直停在 4。
-pub const SCHEMA_VERSION: u32 = 4;
+/// 票 18 的子库三张表都是同一档。
+///
+/// **中文离线源那批票的 01 是头一个真正撞上这条判据的**：它给 `scrape_value` 的去重键
+/// 加了 `value` 那一列——改的是已有表的键，旧库拿新程序打开会把「一个源的第二个值」
+/// 当成冲突丢掉。按上面那条判据加 1，于是这个数是 5。**不为它写迁移代码**：这张表整份
+/// 可再生，而中立库本来就是「结构版本一变就删库重扫」那一档——省下一整套迁移代码
+/// 是这个设计当初就付过账的便宜买卖。
+pub const SCHEMA_VERSION: u32 = 5;
 
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS meta(
@@ -361,9 +367,6 @@ impl Catalog {
         // `CREATE TABLE IF NOT EXISTS` 对它们一个字都不改（见 `add_columns`）。
         sublibrary::add_columns(&catalog.conn).map_err(|source| catalog.err(source))?;
         identify::add_columns(&catalog.conn).map_err(|source| catalog.err(source))?;
-        // 票 01 给 `scrape_value` 的去重键加了 `value` 那一列。老库里那张表照样搬得过来
-        // ——一行不丢、一列不改，所以结构版本不必加（`scrape::rekey` 的文档算了这笔账）。
-        scrape::rekey(&catalog.conn).map_err(|source| catalog.err(source))?;
         let found: Option<String> = catalog
             .conn
             .query_row(
