@@ -13,6 +13,22 @@
 //! **跳过**（补丁、没有发行版链接）与**无判据**（容器穿不透、压缩镜像、目录树转储）
 //! 都不进第一个分母：把它们混进未命中，等于拿「本来就不该撞」的东西去压低准确率。
 //! 但它们**照样进第二个**——库里确实还有这么多东西没被认出来，那不该被藏起来。
+//!
+//! ### 第二个分母是**全部**变体，包括还没识别的那些
+//!
+//! **还没识别**（`CONTEXT.md` 那条：连识别都还没跑过）与上面两种又不一样——它连一行
+//! 结论都没有。跳过与无判据是识别说出口的话，还没识别是**一个字都还没说**。
+//!
+//! 它的落点是：
+//!
+//! - **变体总数里有它**——那是「这个库里有多少东西」，不看识别跑没跑过。
+//! - **第一个分母里没有它**（同跳过与无判据）：它压根没撞过 DAT，混进未命中是撒谎。
+//! - **第二个分母里有它**——不然「这个库现在被认出来多少」会把没轮到的那些整个抹掉，
+//!   命中率虚高。真机上的形状就是这个：4 个变体识别完、又扫进 1 个新文件，
+//!   分母是 5 不是 4，覆盖率 20% 不是 25%。
+//!
+//! 它按平台单占一列（`还没识别`），于是每一行的 `变体 = 命中 + 未命中 + 无判据 +
+//! 跳过 + 还没识别` 加得起来——加不起来的表，读者只能猜差额去哪了。
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -20,7 +36,7 @@ use std::fmt::Write as _;
 use rusqlite::params;
 use serde::Serialize;
 
-use crate::catalog::identify::PlatformConflict;
+use crate::catalog::identify::{NOT_RUN_LABEL, PlatformConflict};
 use crate::catalog::{Catalog, CatalogError, State};
 use crate::classify::has_cjk;
 use crate::dat::DatRepo;
@@ -31,7 +47,8 @@ use crate::report::{heading, pad, thousands};
 pub struct PlatformRow {
     /// 平台名；认不出平台的归到「（未知）」。
     pub platform: String,
-    /// 这个平台有多少个变体。
+    /// 这个平台有多少个变体。**跑过识别的与[还没识别](Self::not_run)的都算**
+    /// ——这一栏问的是「库里有多少东西」，不是「识别说过话的有多少」。
     pub variants: u64,
     /// 命中。
     pub matched: u64,
@@ -41,6 +58,15 @@ pub struct PlatformRow {
     pub no_evidence: u64,
     /// 跳过。
     pub skipped: u64,
+    /// **还没识别**：这个平台有多少个变体连识别都还没跑过
+    /// （[`NOT_RUN_LABEL`](crate::catalog::identify::NOT_RUN_LABEL)）。
+    ///
+    /// 它**进 `variants`**（那是「这个库里有多少东西」），但**不进
+    /// [`hit_rate`](Self::hit_rate) 的分母**——它一次都没撞过 DAT，混进未命中是撒谎。
+    /// 名字不叫 `unidentified`：那四个字在
+    /// [`Tier::Unidentified`](crate::catalog::identify::Tier::Unidentified) 上另有一个
+    /// 用法（「没有置信度可标」，而那些条目**跑过**识别），挂单 `Q84` 记着这笔账。
+    pub not_run: u64,
     /// DAT 库里这个平台有多少条条目——**没有弹药的平台命中率低是另一回事**。
     pub dat_games: u64,
     /// 命中里带**官中**记号的变体数（票 10 的中文占比统计）。
@@ -83,6 +109,9 @@ fn rate(part: u64, whole: u64) -> f64 {
 
 impl PlatformRow {
     /// 撞了 DAT 的里面命中多少。
+    ///
+    /// 分母只有**命中 + 未命中**：跳过、无判据与[还没识别](PlatformRow::not_run)
+    /// 三者都没撞过 DAT，把它们混进来就是拿「本来就没撞」的东西压低这一层的准确率。
     #[must_use]
     pub fn hit_rate(&self) -> f64 {
         rate(self.matched, self.matched + self.unmatched)
@@ -115,6 +144,11 @@ impl PlatformRow {
     }
 
     /// 全部变体里命中多少。
+    ///
+    /// **分母是全部变体，[还没识别](PlatformRow::not_run)的那些也在里面。** 它问的是
+    /// 「这个库现在被认出来多少」，而没轮到识别的那些确实还没被认出来——把它们从分母里
+    /// 拿掉，这个数就只是在夸「已经跑过的那部分」（4 个跑完、又扫进 1 个：说 25% 而不是
+    /// 20%，而库里明明有 5 个）。
     #[must_use]
     pub fn coverage(&self) -> f64 {
         rate(self.matched, self.variants)
@@ -234,18 +268,24 @@ impl IdentifyReport {
         let chinese = catalog.chinese_by_platform(UNKNOWN_PLATFORM)?;
         let name_only = catalog.name_only_by_platform(BLIND_SOURCES, UNKNOWN_PLATFORM)?;
         let mut rows: BTreeMap<String, PlatformRow> = BTreeMap::new();
+        // 一个平台第一次露面时那一行长什么样。**两趟共用**（走结论那一趟、走还没识别
+        // 那一趟）：各写一遍的话，只在第二趟里露面的平台会缺掉弹药与中文那几列，
+        // 而那正是「加了一个新根、还没识别」时最常见的形状。
+        let blank = |platform: &str| PlatformRow {
+            platform: platform.to_string(),
+            dat_games: ammo.get(platform).copied().unwrap_or(0),
+            dat_serials: serials.get(platform).copied().unwrap_or(0),
+            official_chinese: chinese.get(platform).map_or(0, |it| it.0),
+            fan_translated: chinese.get(platform).map_or(0, |it| it.1),
+            name_only: name_only.get(platform).map_or(0, |it| it.0),
+            name_only_no_evidence: name_only.get(platform).map_or(0, |it| it.1),
+            ..PlatformRow::default()
+        };
         catalog.for_each_identification(&mut |platform, state, reason, key, read_bytes| {
             let platform = platform.unwrap_or(UNKNOWN_PLATFORM).to_string();
-            let row = rows.entry(platform.clone()).or_insert_with(|| PlatformRow {
-                platform: platform.clone(),
-                dat_games: ammo.get(&platform).copied().unwrap_or(0),
-                dat_serials: serials.get(&platform).copied().unwrap_or(0),
-                official_chinese: chinese.get(&platform).map_or(0, |it| it.0),
-                fan_translated: chinese.get(&platform).map_or(0, |it| it.1),
-                name_only: name_only.get(&platform).map_or(0, |it| it.0),
-                name_only_no_evidence: name_only.get(&platform).map_or(0, |it| it.1),
-                ..PlatformRow::default()
-            });
+            let row = rows
+                .entry(platform.clone())
+                .or_insert_with(|| blank(&platform));
             row.variants += 1;
             // 票 01 那个粗略代理就地算出来：报告要能并排给出「文件名猜的」与
             // 「识别认出来的」，不然「这一层还差多少」只能靠感觉。
@@ -271,6 +311,26 @@ impl IdentifyReport {
             }
         })?;
 
+        // ⭐ **第二趟：连识别都还没跑过的那些变体**（词表「还没识别」条）。
+        //
+        // 上面那一趟走的是 `identification` 那张表，而这些变体一行都没有——只走上面
+        // 那一趟，它们就会被从「变体总数」里整个抹掉，覆盖率当场虚高（4 个识别完、
+        // 又扫进 1 个，报告说「变体 4」、25%，而实情是 5 与 20%）。
+        //
+        // 它们**只加 `variants` 与 `not_run`**：结论那四档一档都不加，因为它们一个字
+        // 都还没说。文件名含汉字那一列照加——那一列是从文件名猜的，与识别跑没跑过无关。
+        catalog.for_each_not_run(&mut |platform, key| {
+            let platform = platform.unwrap_or(UNKNOWN_PLATFORM).to_string();
+            let row = rows
+                .entry(platform.clone())
+                .or_insert_with(|| blank(&platform));
+            row.variants += 1;
+            row.not_run += 1;
+            if has_cjk(std::path::Path::new(key)) {
+                row.cjk_named += 1;
+            }
+        })?;
+
         report.platforms = rows.into_values().collect();
         // 变体多的排前面：那正是「还差多少」最该先看的顺序。
         report.platforms.sort_by(|a, b| {
@@ -284,6 +344,7 @@ impl IdentifyReport {
             report.total.unmatched += row.unmatched;
             report.total.no_evidence += row.no_evidence;
             report.total.skipped += row.skipped;
+            report.total.not_run += row.not_run;
             report.total.dat_games += row.dat_games;
             report.total.dat_serials += row.dat_serials;
             report.total.official_chinese += row.official_chinese;
@@ -335,21 +396,37 @@ impl IdentifyReport {
         let _ = writeln!(out, "DAT 库          {}", self.dat);
         let _ = writeln!(
             out,
-            "变体            {} 个：命中 {}、未命中 {}、无判据 {}、跳过 {}",
+            "变体            {} 个：命中 {}、未命中 {}、无判据 {}、跳过 {}、{} {}",
             thousands(self.total.variants),
             thousands(self.total.matched),
             thousands(self.total.unmatched),
             thousands(self.total.no_evidence),
             thousands(self.total.skipped),
+            NOT_RUN_LABEL,
+            thousands(self.total.not_run),
         );
         let _ = writeln!(
             out,
-            "命中率          撞了 DAT 的里面 {:.1}%（{} / {}），全部变体里 {:.1}%",
+            "命中率          撞了 DAT 的里面 {:.1}%（{} / {}），全部变体里 {:.1}%（{} / {}）",
             self.total.hit_rate(),
             thousands(self.total.matched),
             thousands(self.total.matched + self.total.unmatched),
             self.total.coverage(),
+            thousands(self.total.matched),
+            thousands(self.total.variants),
         );
+        // **还没识别不是一句脚注**：它说的是「这份报告只盖住了库的一部分」，
+        // 而下面每一个数都是在那一部分上算的。不说这句，读者会把半份报告当整份读。
+        if self.total.not_run > 0 {
+            let _ = writeln!(
+                out,
+                "                其中 {} 个**{NOT_RUN_LABEL}**（连识别都还没跑过——\
+                 既不是未命中，也不是无判据，它一个字都还没说）。\
+                 它们**在「全部变体里」那个分母里**，不在「撞了 DAT 的里面」那个里。\
+                 补上它们：`romcat identify`",
+                thousands(self.total.not_run),
+            );
+        }
         if self.total.name_only > 0 {
             let _ = writeln!(
                 out,
@@ -401,7 +478,7 @@ impl IdentifyReport {
         heading(&mut out, "按平台");
         let _ = writeln!(
             out,
-            "{}{}{}{}{}{}{}{}{}序列号",
+            "{}{}{}{}{}{}{}{}{}{}序列号",
             pad("平台", 10),
             pad("变体", 9),
             pad("命中", 9),
@@ -409,13 +486,14 @@ impl IdentifyReport {
             pad("未命中", 9),
             pad("无判据", 9),
             pad("跳过", 8),
+            pad(NOT_RUN_LABEL, 11),
             pad("命中率", 9),
             pad("DAT 条目", 11),
         );
         for row in &self.platforms {
             let _ = writeln!(
                 out,
-                "{}{}{}{}{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}{}{}{}{}",
                 pad(&row.platform, 10),
                 pad(&thousands(row.variants), 9),
                 pad(&thousands(row.matched), 9),
@@ -423,6 +501,7 @@ impl IdentifyReport {
                 pad(&thousands(row.unmatched), 9),
                 pad(&thousands(row.no_evidence), 9),
                 pad(&thousands(row.skipped), 8),
+                pad(&thousands(row.not_run), 11),
                 pad(&format!("{:.1}%", row.hit_rate()), 9),
                 pad(&thousands(row.dat_games), 11),
                 thousands(row.dat_serials),
@@ -430,7 +509,10 @@ impl IdentifyReport {
         }
         let _ = writeln!(
             out,
-            "（命中率的分母是「撞了 DAT 的」，跳过与无判据不在里面——混进去命中率就失真了）"
+            "（命中率的分母是「撞了 DAT 的」，跳过、无判据与{NOT_RUN_LABEL}都不在里面\
+             ——混进去命中率就失真了。**「变体」= 命中 + 未命中 + 无判据 + 跳过 + \
+             {NOT_RUN_LABEL}**，每一行都对得上账；「只靠名字」是**命中里的一部分**，\
+             不另计）"
         );
         let _ = writeln!(
             out,

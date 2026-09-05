@@ -14,6 +14,7 @@ use std::fmt::Write as _;
 use serde::Serialize;
 
 use super::{Axis, Item, tally, tally_by};
+use crate::catalog::identify::NOT_RUN_LABEL;
 use crate::report::{heading, human_bytes, pad, thousands};
 use crate::verdict;
 
@@ -69,6 +70,16 @@ pub struct QueueReport {
     pub identified: bool,
     /// 整个队列有多少条。
     pub queue: u64,
+    /// 库里有多少个变体**还没识别**（[`NOT_RUN_LABEL`]）。
+    ///
+    /// **它们不在队列里，也不该在**：一条候选都没有、连结论都没有，裁不了。但只说
+    /// 「队列 N 条待裁决」，用户会读成「库里只剩 N 条没定下来」——而实情是另有这么多个
+    /// 连问都还没问过（识别中断，或者识别跑完之后又扫进了新文件、加了新的**根**）。
+    ///
+    /// **选择器不筛它**：与 [`queue`](Self::queue) 同一个口径，说的始终是整个库。
+    /// [`not_identified`](Self::not_identified) 那一份里它是 0——那时整库都还没识别，
+    /// 这个数没有信息量，那句话本身已经说清了。
+    pub not_run: u64,
     /// 这次的选择器选中多少条。
     pub selected: u64,
     /// 选中的按识别结论分。
@@ -99,11 +110,17 @@ impl QueueReport {
     ///
     /// `items` 是**选择器选中的**那些，`queue` 是整个队列有多少条——两个数都要说，
     /// 不然用户看不出自己的选择器是选窄了还是库里本来就只有这些。
+    ///
+    /// `not_run` 是库里**还没识别**的变体数
+    /// （[`Catalog::not_run_count`](crate::catalog::Catalog::not_run_count)）。它是
+    /// **第三个数**，与前两个都不是一回事：那两个说的是「要人裁的有多少」，这个说的是
+    /// 「连问都还没问过的有多少」。不给它，队列就把那批变体整个咽了下去。
     #[must_use]
     pub fn build(
         catalog: &str,
         store: &str,
         queue: u64,
+        not_run: u64,
         items: &[Item],
         counts: verdict::Counts,
         show: usize,
@@ -113,6 +130,7 @@ impl QueueReport {
             store: store.to_string(),
             identified: true,
             queue,
+            not_run,
             selected: u64::try_from(items.len()).unwrap_or(u64::MAX),
             verdicts: counts,
             ..Self::default()
@@ -168,6 +186,19 @@ impl QueueReport {
             return out;
         }
         let _ = writeln!(out, "队列            {} 条待裁决", thousands(self.queue));
+        // **还没识别的那些单说一句。** 它们不在上面那个数里（没有候选，裁不了），
+        // 而咽下去的话「队列 N 条」会被读成「库里只剩 N 条没定下来」。
+        // 该做的事也不一样——这一句指向 `identify`，不是指向裁决。
+        if self.not_run > 0 {
+            let _ = writeln!(
+                out,
+                "{NOT_RUN_LABEL}        另有 {} 个变体连识别都还没跑过：\
+                 它们**不在队列里**（一条候选都没有，裁不了），选择器也筛不到。\n\
+                 {:16}先跑一趟 `romcat identify` 把它们补上。",
+                thousands(self.not_run),
+                "",
+            );
+        }
         if self.selected != self.queue {
             let _ = writeln!(
                 out,
