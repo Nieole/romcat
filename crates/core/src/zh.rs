@@ -508,6 +508,74 @@ struct Name {
     key: String,
 }
 
+/// **建索引那一刻，平台折叠实际折出来的那张表。**
+///
+/// 建索引时每条条目的平台名都要折成本工具的平台名（`sync::entry_of` →
+/// [`sync::platform_of`]：先问平台清单再问剥离规则的别名表），
+/// 折出来的那一串决定交叉校验，进而决定这个源说不说得出话。**折叠发生在建索引那一刻**，
+/// 用的是那一刻的平台清单与别名表——所以这张表记的是「这份索引是怎么建出来的」，
+/// 不是「现在那两张表长什么样」。
+///
+/// 它进[`Index::platform_fold`]，再进刮削那一侧两层锚点的**输入指纹**：补一条平台别名
+/// 之后重建索引，新折得动的那些条目该重采一遍，而不是被缓存一口咬定「输入没变」
+/// 而整片跳过。
+///
+/// ## 只记**真折出来了**的那些
+///
+/// 折不动的原文一个都不记。两条理由：
+///
+/// - **够用**。同一份 dump 上，「折出来的那些对」一样就等于每条条目的平台一模一样：
+///   折叠是原文的一个函数，某个原文在这一版折得出 `NDS`、在那一版折不出，两版的表必然
+///   不一样。反过来也一样。
+/// - **有界**。记折不动的那些等于把 dump 里那份用户随手写的平台词表整个抄进来；
+///   只记折得动的，条数被平台清单与别名表本身框住（真机上百来条）。
+///
+/// 于是「平台清单里加了一个这份 dump 里根本没人写的平台」不改变这张表，那种无关改动
+/// **不引发全片重采**——盖的是折叠真发生了什么，不是那两张表长什么样。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlatformFold {
+    pairs: std::collections::BTreeSet<(String, String)>,
+}
+
+impl PlatformFold {
+    /// 记一次：数据源写的 `raw` 这一版折成了本工具的 `platform`。
+    ///
+    /// 去重且按序——同一份 dump 建两遍，写出来的那一行必须一模一样。
+    pub fn record(&mut self, raw: &str, platform: &str) {
+        self.pairs.insert((raw.to_string(), platform.to_string()));
+    }
+
+    /// 折出来了几对。
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.pairs.len()
+    }
+
+    /// 一对都没折出来吗。
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
+
+    /// 写成落进 `meta` 的那一行（也就是进指纹的那一串）。
+    ///
+    /// **头一行是对数，一对都没有时也写。** 于是「这一趟一对都没折出来」写出来是
+    /// `共 0 对`，与**老索引根本没记过这件事**（空串）分得开——两者混成一件事的话，
+    /// 删掉最后一条别名重建之后，指纹会撞回老索引那一份而整片跳过。
+    #[must_use]
+    pub fn line(&self) -> String {
+        let mut out = format!("共 {} 对", self.pairs.len());
+        for (raw, platform) in &self.pairs {
+            // 原文与平台名都出自 infobox 里的一行，**换不了行**，所以按行摆是明确的。
+            out.push('\n');
+            out.push_str(raw);
+            out.push('=');
+            out.push_str(platform);
+        }
+        out
+    }
+}
+
 /// **中文条目索引**：整份装在内存里。
 ///
 /// 装得下是算过的：真机 8.7 万条条目、二十几万条叫法，倒排表按**二元组**打，
@@ -520,6 +588,7 @@ pub struct Index {
     postings: BTreeMap<u64, Vec<u32>>,
     dump: String,
     fields: String,
+    platform_fold: String,
 }
 
 impl Index {
@@ -559,6 +628,7 @@ impl Index {
             postings,
             dump,
             fields: store::FIELDS.to_string(),
+            platform_fold: String::new(),
         }
     }
 
@@ -574,6 +644,18 @@ impl Index {
         self
     }
 
+    /// 记上这份索引**建的时候把平台折成了什么样**（[`PlatformFold::line`]）。
+    ///
+    /// **空串照样盖上去**，这一点与 [`Index::with_fields`] 相反，而且不能照抄它：
+    /// 「取了哪几样」有一份「本程序这一版取的那几样」可以兜底，而**折叠没有**——
+    /// 折叠是建索引那一刻的事，本程序现在这两张表长什么样说明不了那一刻。
+    /// 库里没记（老索引）就是**不知道**，如实交出空串比编一个像样的值安全。
+    #[must_use]
+    pub fn with_platform_fold(mut self, fold: String) -> Self {
+        self.platform_fold = fold;
+        self
+    }
+
     /// 这份索引是从哪一版 dump 建的。**它进输入指纹**：换一版 dump 就该重跑一遍。
     #[must_use]
     pub fn dump(&self) -> &str {
@@ -585,6 +667,17 @@ impl Index {
     #[must_use]
     pub fn fields(&self) -> &str {
         &self.fields
+    }
+
+    /// 这份索引**建的时候把平台折成了什么样**（[`PlatformFold`]）。
+    ///
+    /// **它也进输入指纹**，而且 [`Index::dump`] 与 [`Index::fields`] 都盖不住它：
+    /// 补一条平台别名再重建，dump 是同一份、取的字段一个没变，变的只有折出来的那一串
+    /// ——而那一串正是交叉校验看的东西。空串表示**这份索引没记过这件事**（上一版程序
+    /// 建的），不是「一个都没折出来」。
+    #[must_use]
+    pub fn platform_fold(&self) -> &str {
+        &self.platform_fold
     }
 
     /// 索引里有多少条条目。
@@ -1110,5 +1203,51 @@ mod tests {
     fn 不是这个源写的那句话认不出条目号() {
         assert_eq!(entry_in("TOSEC 的条目名里第一个括号是发行日期"), None);
         assert_eq!(entry_in(""), None);
+    }
+
+    #[test]
+    fn 折出来的那张表去重且与记录次序无关() {
+        // 同一份 dump 建两遍写出来的那一行必须一模一样——它进输入指纹，
+        // 次序稍有不同就会被当成「输入变了」而整片重采。
+        let mut 甲 = PlatformFold::default();
+        甲.record("Nintendo DS", "NDS");
+        甲.record("GBA", "GBA");
+        甲.record("Nintendo DS", "NDS");
+        let mut 乙 = PlatformFold::default();
+        乙.record("GBA", "GBA");
+        乙.record("Nintendo DS", "NDS");
+        assert_eq!(甲.line(), 乙.line());
+        assert_eq!(甲.len(), 2, "重复那一次不另算一对");
+        assert_eq!(甲.line(), "共 2 对\nGBA=GBA\nNintendo DS=NDS");
+    }
+
+    #[test]
+    fn 一对都没折出来与老索引没记过这件事分得开() {
+        // 两者混成一件事的话，删掉最后一条别名重建之后，指纹会撞回老索引那一份
+        // 而整片跳过——那正是这一层要拦的事。
+        let 空的 = PlatformFold::default();
+        assert!(空的.is_empty());
+        assert_eq!(空的.line(), "共 0 对");
+        assert_ne!(空的.line(), "", "老索引读回来才是空串");
+    }
+
+    #[test]
+    fn 折得动的那一串变了折出来的那张表就跟着变() {
+        // 用户的原话：补一条平台别名之后重建索引。折不动的那一版与折得动的那一版
+        // 必须写出两行不同的字。
+        let 折不动 = PlatformFold::default();
+        let mut 折得动 = PlatformFold::default();
+        折得动.record("Nintendo DS", "NDS");
+        assert_ne!(折不动.line(), 折得动.line());
+    }
+
+    #[test]
+    fn 索引把建的时候折成什么样带在身上() {
+        let index = 索引().with_platform_fold("共 1 对\nNDS=NDS".to_string());
+        assert_eq!(index.platform_fold(), "共 1 对\nNDS=NDS");
+        // **空串照样盖得上去**：库里没记过就是不知道，这一点与 `with_fields` 相反
+        // ——那一边有「本程序这一版取的那几样」可以兜底，折叠没有。
+        assert_eq!(索引().with_platform_fold(String::new()).platform_fold(), "");
+        assert_eq!(索引().fields(), store::FIELDS, "字段那一行照旧兜得住底");
     }
 }
