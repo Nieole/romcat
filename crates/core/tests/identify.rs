@@ -18,7 +18,7 @@ use romcat_core::catalog::{Catalog, Confidence, Roots};
 use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
 use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
-use romcat_core::fs::RealFs;
+use romcat_core::fs::{MemFs, RealFs};
 use romcat_core::identify::fuzzy;
 use romcat_core::identify::{self, Options};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
@@ -624,4 +624,110 @@ fn 快照(root: &Path) -> Vec<(String, u64, std::time::SystemTime)> {
     }
     out.sort();
     out
+}
+
+// ───────── 盘上的名字是分解形式：回盘读那一趟不能落成「无判据」 ─────────
+//
+// 中立库的键一律是 NFC（ADR-0020），而主库里 1.99% 的名字在盘上是**分解形式**。
+// 在**分解敏感**的文件系统上（Windows 的 NTFS、Linux 的 ext4——ADR-0018 说主力机
+// 是 Windows），拿 NFC 的键直接拼出来的那条路径根本开不了，而识别把「开不了」读成
+// **无判据**：几百个变体从此认不出来，报告里说的却是「拿不到可撞的东西」。
+
+/// 同一个名字的两种规范化形式。`ゲ` 预组合 vs `ケ` + 组合浊音符（U+3099）。
+const 预组合名: &str = "ゲーム.nes";
+const 分解形名: &str = "\u{30b1}\u{3099}ーム.nes";
+
+/// 一份**分解敏感**的主库：[`MemFs`] 按字节精确认路径，正是 NTFS 与 ext4 的样子。
+/// macOS 的 fskit 驱动查找**不**分解敏感（ADR-0020 修订段实测 383/383 两种形式都开得了），
+/// 所以真机上今天看不见这条——这份 fixture 是它唯一能在 macOS 上变红的地方。
+fn 建一份分解形名字的主库() -> (MemFs, Catalog) {
+    let mut library = MemFs::new();
+    library.file(format!("/lib/FC/{分解形名}"), 原版());
+    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+    scan::scan(
+        &library,
+        &mut catalog,
+        &ScanOptions::named("/lib", "库"),
+        &Handle::new(),
+    )
+    .expect("扫得动");
+    (library, catalog)
+}
+
+fn 跑一趟(library: &MemFs, catalog: &mut Catalog, repo: &DatRepo) {
+    identify::run(
+        library,
+        catalog,
+        &identify::Ammo {
+            repo,
+            verdicts: &verdict::Index::empty(),
+            naming: &fuzzy::Naming::off(),
+            guessing: &identify::model::Guessing::off(),
+            titledb: None,
+        },
+        &Options::new(Roots::single("库", "/lib")),
+        &CancelToken::new(),
+        &mut |_| {},
+    )
+    .expect("识别不该失败");
+}
+
+#[test]
+fn 盘上的名字是分解形式时照样读得到字节而不是落成无判据() {
+    let (library, mut catalog) = 建一份分解形名字的主库();
+    let 键 = format!("库/FC/{预组合名}");
+
+    // 前提：键是 NFC 的那一份，与盘上那串字节**不同**。
+    assert_ne!(预组合名, 分解形名, "两串字节本来就不一样");
+    assert!(
+        catalog.identification_of(&键).expect("读得出").is_none(),
+        "跑之前这条还没识别",
+    );
+
+    跑一趟(&library, &mut catalog, &建_dat());
+
+    let (结论, 为什么) = catalog
+        .identification_of(&键)
+        .expect("读得出")
+        .unwrap_or_else(|| panic!("{键} 没有识别结论"));
+    assert_eq!(
+        结论,
+        State::Matched,
+        "分解形式的名字照样该读得到字节：{为什么:?}",
+    );
+    let 候选 = catalog.candidates_of(&键).expect("读得出");
+    assert!(
+        候选.iter().any(|c| c.source == "No-Intro"),
+        "去头那套撞得上 No-Intro：{候选:#?}",
+    );
+}
+
+#[test]
+fn 目录名是分解形式时它底下整棵子树都还认得出() {
+    // 一个**目录名**中招，整棵子树的键全跟着走折回去那条退路——主库实测有 5 个目录名
+    // 是分解形式（ADR-0020）。这里还顺带证同一层的两条只列一次目录就都认得出。
+    let mut library = MemFs::new();
+    let 分解形目录 = "\u{30b1}\u{3099}ーム";
+    let 预组合目录 = "ゲーム";
+    library.file(format!("/lib/FC/{分解形目录}/原版.nes"), 原版());
+    library.file(format!("/lib/FC/{分解形目录}/汉化.nes"), 汉化版());
+    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+    scan::scan(
+        &library,
+        &mut catalog,
+        &ScanOptions::named("/lib", "库"),
+        &Handle::new(),
+    )
+    .expect("扫得动");
+
+    跑一趟(&library, &mut catalog, &建_dat());
+
+    for 文件名 in ["原版.nes", "汉化.nes"] {
+        let 键 = format!("库/FC/{预组合目录}/{文件名}");
+        let (结论, 为什么) = catalog
+            .identification_of(&键)
+            .expect("读得出")
+            .unwrap_or_else(|| panic!("{键} 没有识别结论"));
+        assert_eq!(结论, State::Matched, "{键}：{为什么:?}");
+    }
 }

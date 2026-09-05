@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{OptionalExtension, params};
 
 use super::{Catalog, CatalogError, now_secs};
-use crate::fs::LibraryFs;
+use crate::fs::{DirCache, LibraryFs};
 use crate::path;
 
 /// 主库那一组根的表。
@@ -552,9 +552,21 @@ impl Roots {
     /// 与「读得到但是空的」不是一件事（ADR-0021）。
     #[must_use]
     pub fn real_path(&self, fs: &dyn LibraryFs, key: &str) -> Option<PathBuf> {
+        self.real_path_in(fs, &mut DirCache::default(), key)
+    }
+
+    /// 与 [`Roots::real_path`] 同一件事，只是一趟里的几万条键共用一份 [`DirCache`]——
+    /// 逐段列目录那条退路上，同一个目录只列一次。
+    #[must_use]
+    pub fn real_path_in(
+        &self,
+        fs: &dyn LibraryFs,
+        dirs: &mut DirCache,
+        key: &str,
+    ) -> Option<PathBuf> {
         let (name, relative) = path::split_root(key);
         let root = self.path_of(name)?;
-        crate::fs::real_path(fs, root, relative)
+        dirs.real_path(fs, root, relative)
     }
 
     /// 把一条**中立库的键**还原成给人看的完整路径。认不出根名时原样返回那条键。
