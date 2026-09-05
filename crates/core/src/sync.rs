@@ -444,6 +444,13 @@ pub struct Surprise {
     pub kind: SurpriseKind,
     /// 目标上的哪个文件。
     pub path: String,
+    /// 我们本来要**落**在哪条路径上；与 [`Self::path`] 一样时是 `None`。
+    ///
+    /// 只有[落点被占](SurpriseKind::Occupied)这一种可能不一样：目标大小写不敏感
+    /// （SD 卡的 exFAT / FAT32、Windows、macOS 默认的 APFS 全是），卡上那份
+    /// `GB/Tetris.zip` 与我们要落的 `GB/tetris.zip` 是**同一个文件**。两条都得印出来
+    /// ——只印一条，用户要么在卡上找不到那个名字，要么不知道是谁要挤进来。
+    pub landing: Option<String>,
     /// 清单说它该是什么样；[`SurpriseKind::Occupied`] 时没有（那条路径不在清单里）。
     pub expected: Option<Stamp>,
     /// 目标上实际是什么样；[`SurpriseKind::Gone`] 时没有。
@@ -567,12 +574,32 @@ impl Plan {
 /// 三个输入正是**同步**词条里的三方：`desired` 是主库该有的、`manifest` 是清单
 /// 记录的、`actual` 是目标上实际有的。
 ///
+/// ## 「落点上有没有东西」按**折起来的路径**比
+///
+/// 目标是 SD 卡（exFAT / FAT32），主力机是 Windows（ADR-0018），macOS 默认的 APFS
+/// 也一样——**这几个全都大小写不敏感**。于是卡上那份 `GB/Tetris.zip` 与我们要落的
+/// `GB/tetris.zip` 是同一个文件，逐字比会判成「落点是空的」然后把它顶掉。
+///
+/// 判据落在**计划这一层**，理由是差量预览得先说真话（ADR-0016：预览是硬要求）——
+/// 一份写着「新增」而实际会顶掉别人东西的预览，比不预览更糟。折叠函数用
+/// [`path::fold`]（小写 + NFC），于是大小写与 NFC/NFD（ADR-0020）这两层用的是同一个
+/// 折法：两者在目标上是同一类等价，没有理由分开判。
+///
+/// **在大小写敏感的目标（ext4）上这是保守误报**：两份真能并存的文件，我们只落一份、
+/// 报一条「落点被占」。这笔账认了——误报的代价是少放一个文件加一句报告，判反了的代价
+/// 是维护者的东西没了，而后者不可逆。哪天能力档案里真有「大小写敏感」那一格，
+/// 这里再按档案分开走。
+///
+/// **折叠只用来发现挡路的东西，绝不用来认领它。** 删除与更新那一侧照旧要求
+/// **一模一样的键**（[`verify`]）：那两条会动别人的文件，而「折起来一样」证明不了
+/// 「就是我们放的那一份」。
+///
 /// 判定表（照这个次序读）：
 ///
 /// | 期望 | 清单 | 实际 | 结论 |
 /// |---|---|---|---|
 /// | 有 | 无 | 无 | **新增** |
-/// | 有 | 无 | 有 | **落点被占**——不覆盖，报告 |
+/// | 有 | 无 | 有（逐字或折起来一样） | **落点被占**——不覆盖，报告 |
 /// | 有 | 有 | 对得上 | 一样就**保持**，主库那份变了就**更新** |
 /// | 有 | 有 | 没了 | **报告**；默认不补回（ADR-0015） |
 /// | 有 | 有 | 对不上 | **报告**，本次不动 |
@@ -602,6 +629,19 @@ pub fn plan(
         .iter()
         .map(|file| (file.path.as_str(), file))
         .collect();
+    // **清单之外**的那些，按**折起来的落点**再索引一份（见函数文档）。只收清单之外的：
+    // ADR-0015 里「落点被占」说的就是「有个清单之外的文件挡着」，而清单里记着的那些
+    // 归下面两个循环按**一模一样的键**处置——折起来一样的不算认领。
+    //
+    // 同一个折起来的键上撞了好几个（只有大小写敏感的目标才可能）就留**最先**那个：
+    // 报出来的是挡路的证据，谁挡的都一样，而按路径排过的输入让这个选择是确定的。
+    let mut strangers: BTreeMap<String, &TargetFile> = BTreeMap::new();
+    for file in &actual.files {
+        if recorded.contains_key(file.path.as_str()) {
+            continue;
+        }
+        strangers.entry(path::fold(&file.path)).or_insert(file);
+    }
 
     // 目标存储放不下的那些**既不新增也不删除**：它们进不了目标（新增必然失败），
     // 可万一目标上已经有一份，那也不是它该被删掉的理由——我们这条「放不下」的声明
@@ -634,24 +674,21 @@ pub fn plan(
 
     // ── 期望这一侧：新增、更新、保持，以及落点被占。
     for (path, file) in &wanted {
+        // 落点上有个**清单之外**的东西挡着吗。逐字先问一次（那是常态），
+        // 折起来再问一次（目标多半大小写不敏感，见函数文档）。清单里记着的那些
+        // 不算挡路：它们是工具自己放的，下面按一模一样的键处置。
+        let blocking = on_target
+            .get(path)
+            .copied()
+            .filter(|_| !recorded.contains_key(path))
+            .or_else(|| strangers.get(&path::fold(path)).copied());
+
         let Some(previous) = recorded.get(path) else {
             // 清单里没有这条路径。目标上有东西挡着就一定不碰——**那多半就是维护者
             // 自己拷进去的**，而工具在清单之外没有任何写的权利（ADR-0015）。
-            if let Some(target) = on_target.get(path) {
-                out.surprises.push(Surprise {
-                    kind: if target.stamp.is_none() {
-                        SurpriseKind::Unreadable
-                    } else {
-                        SurpriseKind::Occupied
-                    },
-                    path: (*path).to_string(),
-                    expected: None,
-                    found: target.stamp,
-                    variant: file.variant.clone(),
-                    still_wanted: true,
-                });
-            } else {
-                steps.push(step(Act::Add, file, 0, false));
+            match blocking {
+                Some(target) => out.surprises.push(occupied(path, target, &file.variant)),
+                None => steps.push(step(Act::Add, file, 0, false)),
             }
             continue;
         };
@@ -660,7 +697,11 @@ pub fn plan(
         if previous.absent && !on_target.contains_key(path) {
             out.withheld += 1;
             if options.restore_missing {
-                steps.push(step(Act::Add, file, 0, true));
+                // **补回也要看落点**：明知故犯不是静默，但它也不是覆盖别人的许可。
+                match blocking {
+                    Some(target) => out.surprises.push(occupied(path, target, &file.variant)),
+                    None => steps.push(step(Act::Add, file, 0, true)),
+                }
             }
             continue;
         }
@@ -678,18 +719,25 @@ pub fn plan(
                 out.surprises.push(Surprise {
                     kind: SurpriseKind::Gone,
                     path: (*path).to_string(),
+                    landing: None,
                     expected: Some(previous.stamp),
                     found: None,
                     variant: file.variant.clone(),
                     still_wanted: true,
                 });
                 if options.restore_missing {
-                    steps.push(step(Act::Add, file, 0, true));
+                    // 我们放的那份没了，可落点上换了个清单之外的东西站着
+                    // （只差大小写就看不见它）——补回去等于顶掉它。
+                    match blocking {
+                        Some(target) => out.surprises.push(occupied(path, target, &file.variant)),
+                        None => steps.push(step(Act::Add, file, 0, true)),
+                    }
                 }
             }
             Verified::Off(kind, stamp) => out.surprises.push(Surprise {
                 kind,
                 path: (*path).to_string(),
+                landing: None,
                 expected: Some(previous.stamp),
                 found: stamp,
                 variant: file.variant.clone(),
@@ -728,6 +776,7 @@ pub fn plan(
             Verified::Gone => out.surprises.push(Surprise {
                 kind: SurpriseKind::Gone,
                 path: (*path).to_string(),
+                landing: None,
                 expected: Some(previous.stamp),
                 found: None,
                 variant: previous.variant.clone(),
@@ -737,6 +786,7 @@ pub fn plan(
             Verified::Off(kind, stamp) => out.surprises.push(Surprise {
                 kind,
                 path: (*path).to_string(),
+                landing: None,
                 expected: Some(previous.stamp),
                 found: stamp,
                 variant: previous.variant.clone(),
@@ -859,6 +909,29 @@ enum Verified {
     Gone,
     /// 目标上有，但对不上（被改过，或者元数据读不到）。
     Off(SurpriseKind, Option<Stamp>),
+}
+
+/// 落点被一个**清单之外**的文件挡住时该报的那一条。
+///
+/// `landing` 是我们本来要落的路径，`target` 是卡上真正挡在那儿的那个文件。两者只在
+/// 目标大小写不敏感（或不区分 NFC/NFD）时才不一样，而那时**两条都得说出口**：
+/// 只说落点，用户按那个名字在卡上找不到东西；只说卡上那份，用户不知道是谁要挤进来。
+///
+/// 元数据读不到的走[读不到](SurpriseKind::Unreadable)那一支：说不清是什么的一律不动。
+fn occupied(landing: &str, target: &TargetFile, variant: &str) -> Surprise {
+    Surprise {
+        kind: if target.stamp.is_none() {
+            SurpriseKind::Unreadable
+        } else {
+            SurpriseKind::Occupied
+        },
+        path: target.path.clone(),
+        landing: (target.path != landing).then(|| landing.to_string()),
+        expected: None,
+        found: target.stamp,
+        variant: variant.to_string(),
+        still_wanted: true,
+    }
 }
 
 /// 拿清单里那条去核对目标上的实际状态。
@@ -1083,21 +1156,52 @@ impl Desired {
     /// 顺手还查**落点撞车**：转换会把 `游戏.zip` 变成 `游戏.sfc`，两个不同的容器解出
     /// 同名内容时就撞上了。撞上的**一个都不放行**——留一个放行等于随排序决定谁赢，
     /// 而下一趟排序变了赢家就换人，卡上那份会莫名其妙地改内容。
+    ///
+    /// 撞车按**折起来的路径**判（[`path::fold`]，小写 + NFC），与 [`plan`] 那一侧
+    /// 同一个折法。主库是**一组根**（ADR-0020 末段），于是 `甲/FC/Contra.zip` 与
+    /// `乙/FC/contra.zip` 剥掉根名之后落在卡上是**同一个文件**——目标大小写不敏感
+    /// （exFAT / FAT32 / Windows / APFS 默认）时后写的会盖掉先写的，而清单里会留下
+    /// 两行谎。挂账 Q57 说的「两个根同一条相对路径」正是这件事，只差大小写是它的
+    /// 另一副样子，处置口径因此也一样：**两边都不落**。
+    ///
+    /// 大小写敏感的目标上这同样是保守误报，取舍见 [`plan`] 的函数文档。
     pub fn screen(&mut self, filesystem: &Filesystem, prefix_chars: usize) {
-        let mut seen: BTreeSet<&str> = BTreeSet::new();
-        let mut collided: BTreeSet<String> = BTreeSet::new();
-        for file in &self.files {
-            if !seen.insert(file.path.as_str()) {
-                collided.insert(file.path.clone());
+        // 撞上的按**折起来的键**记；顺带记住是不是「只差大小写」那一种，好把话说清楚。
+        let (collided, only_folded) = {
+            let mut first: BTreeMap<String, &str> = BTreeMap::new();
+            let mut collided: BTreeSet<String> = BTreeSet::new();
+            let mut only_folded: BTreeSet<String> = BTreeSet::new();
+            for file in &self.files {
+                let folded = path::fold(&file.path);
+                match first.get(folded.as_str()) {
+                    Some(seen) => {
+                        if *seen != file.path.as_str() {
+                            only_folded.insert(folded.clone());
+                        }
+                        collided.insert(folded);
+                    }
+                    None => {
+                        first.insert(folded, file.path.as_str());
+                    }
+                }
             }
-        }
+            (collided, only_folded)
+        };
 
         let mut keep = Vec::with_capacity(self.files.len());
         for file in std::mem::take(&mut self.files) {
-            let verdict = if collided.contains(&file.path) {
+            let folded = path::fold(&file.path);
+            let verdict = if collided.contains(&folded) {
                 Some((
                     RejectReason::Collision,
-                    format!("不止一份内容要落到这条路径上（{}）", file.source),
+                    if only_folded.contains(&folded) {
+                        format!(
+                            "不止一份内容要落到这条路径上——目标大小写不敏感时它们是同一个文件（{}）",
+                            file.source,
+                        )
+                    } else {
+                        format!("不止一份内容要落到这条路径上（{}）", file.source)
+                    },
                 ))
             } else {
                 filesystem.screen(&file.path, file.bytes, prefix_chars)
@@ -1669,5 +1773,146 @@ mod tests {
         assert_eq!(plan.adds.files, 2);
         assert_eq!(plan.adds.variants, 1);
         assert_eq!(plan.adds.bytes, 1000);
+    }
+
+    // ───────────────────────── 落点大小写不敏感
+
+    #[test]
+    fn 落点被只差大小写的清单之外文件占着_照样不覆盖() {
+        // 卡是 exFAT / FAT32，主力机是 Windows（ADR-0018），macOS 默认的 APFS 也一样
+        // ——**全都大小写不敏感**。逐字比会判成「落点是空的」，然后把维护者自己那份
+        // `GB/Tetris.zip` 顶掉。
+        let plan = plan(
+            &子库(None),
+            &期望状态(vec![期望("GB/tetris.zip", 1024)]),
+            &Manifest::empty(),
+            &实际状态(vec![在目标上("GB/Tetris.zip", 999)]),
+            Options::default(),
+        );
+        assert!(plan.steps.is_empty(), "一步都不该有：{:?}", plan.steps);
+        assert_eq!(plan.surprises.len(), 1);
+        assert_eq!(plan.surprises[0].kind, SurpriseKind::Occupied);
+        // 报的是**卡上那个名字**，外加我们本来要落的那条——两条都得说出口。
+        assert_eq!(plan.surprises[0].path, "GB/Tetris.zip");
+        assert_eq!(
+            plan.surprises[0].landing.as_deref(),
+            Some("GB/tetris.zip"),
+            "只印一条的话，用户按那个名字在卡上找不到东西"
+        );
+        assert_eq!(plan.strangers, 1, "它照样算清单之外");
+    }
+
+    #[test]
+    fn 落点逐字撞上时不多印一条本来要落的() {
+        // 两条路径一模一样，再印一遍只是噪音。
+        let plan = plan(
+            &子库(None),
+            &期望状态(vec![期望("GB/一.zip", 1024)]),
+            &Manifest::empty(),
+            &实际状态(vec![在目标上("GB/一.zip", 999)]),
+            Options::default(),
+        );
+        assert_eq!(plan.surprises[0].path, "GB/一.zip");
+        assert!(plan.surprises[0].landing.is_none());
+    }
+
+    #[test]
+    fn 折起来一样也证明不了是我们放的那一份_删除仍然要求一模一样的键() {
+        // **折叠只用来发现挡路的东西，绝不用来认领它。** 清单记着 `GB/tetris.zip`，
+        // 卡上只有 `GB/Tetris.zip`——在大小写敏感的目标上那是**另一个文件**，
+        // 顺手删掉就是删了维护者的东西。
+        let plan = plan(
+            &子库(None),
+            &期望状态(vec![]),
+            &Manifest {
+                files: vec![清单条("GB/tetris.zip", 1024)],
+            },
+            &实际状态(vec![在目标上("GB/Tetris.zip", 1024)]),
+            Options::default(),
+        );
+        assert_eq!(plan.deletes.files, 0, "一条删除都不许长出来");
+        assert!(plan.steps.is_empty());
+        assert_eq!(plan.surprises.len(), 1);
+        assert_eq!(plan.surprises[0].kind, SurpriseKind::Gone);
+        assert_eq!(plan.strangers, 1);
+    }
+
+    #[test]
+    fn 补回也要看落点_只差大小写的东西挡着就不补() {
+        // `--restore` 是「明知故犯不是静默」，不是覆盖别人东西的许可。
+        let plan = plan(
+            &子库(None),
+            &期望状态(vec![期望("GB/tetris.zip", 1024)]),
+            &Manifest {
+                files: vec![删过的清单条("GB/tetris.zip", 1024)],
+            },
+            &实际状态(vec![在目标上("GB/Tetris.zip", 999)]),
+            Options {
+                restore_missing: true,
+            },
+        );
+        assert!(plan.steps.is_empty(), "补不得：{:?}", plan.steps);
+        assert!(
+            plan.surprises
+                .iter()
+                .any(|s| s.kind == SurpriseKind::Occupied),
+            "得说清为什么没补：{:?}",
+            plan.surprises
+        );
+    }
+
+    #[test]
+    fn 我们自己放的那一份不算挡路() {
+        // 清单里记着的就是工具自己导出的，落在它上面是**更新**不是覆盖别人。
+        let plan = plan(
+            &子库(None),
+            &期望状态(vec![期望("GB/一.zip", 2048)]),
+            &Manifest {
+                files: vec![清单条("GB/一.zip", 1024)],
+            },
+            &实际状态(vec![在目标上("GB/一.zip", 1024)]),
+            Options::default(),
+        );
+        assert_eq!(plan.updates.files, 1);
+        assert!(plan.surprises.is_empty(), "{:?}", plan.surprises);
+    }
+
+    #[test]
+    fn 两个根同一条相对路径只差大小写_两边都不落() {
+        // 主库是**一组根**（ADR-0020 末段）：`甲/FC/Contra.zip` 与 `乙/FC/contra.zip`
+        // 剥掉根名之后落在卡上是同一个文件。留一个放行等于随排序决定谁赢，而清单里
+        // 会留下两行谎。与挂账 Q57「完全相同的相对路径」同一个处置口径。
+        let mut 甲 = 期望("FC/Contra.zip", 1024);
+        甲.source = "甲/FC/Contra.zip".to_string();
+        let mut 乙 = 期望("FC/contra.zip", 1024);
+        乙.source = "乙/FC/contra.zip".to_string();
+        let mut desired = 期望状态(vec![甲, 乙]);
+        desired.screen(&Filesystem::unlimited(), 0);
+        assert!(desired.files.is_empty(), "两边都不落");
+        assert_eq!(desired.rejected.len(), 2);
+        assert!(
+            desired
+                .rejected
+                .iter()
+                .all(|one| one.reason == RejectReason::Collision)
+        );
+        assert!(
+            desired.rejected[0].detail.contains("大小写不敏感"),
+            "得说清是折起来撞上的：{}",
+            desired.rejected[0].detail
+        );
+    }
+
+    #[test]
+    fn 同一根内重打包出来的落点撞上旁边那份只差大小写的_也不落() {
+        // `X.7z` 重打包成 `X.zip`，而旁边本来就有一份 `X.ZIP`。
+        let mut 原有 = 期望("SFC/X.ZIP", 1024);
+        原有.source = "库/SFC/X.ZIP".to_string();
+        let mut 产物 = 期望("SFC/X.zip", 2048);
+        产物.source = "库/SFC/X.7z".to_string();
+        let mut desired = 期望状态(vec![原有, 产物]);
+        desired.screen(&Filesystem::unlimited(), 0);
+        assert!(desired.files.is_empty());
+        assert_eq!(desired.rejected.len(), 2);
     }
 }

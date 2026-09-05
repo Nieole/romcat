@@ -579,3 +579,102 @@ fn 有半份文件(dir: &Path) -> bool {
     }
     false
 }
+
+/// 一份主库，里面那个文件与卡上维护者自己那份**只差大小写**。
+fn 建个只差大小写的库() -> TempDir {
+    let dir = temp_dir("run-case-lib");
+    写(&dir.path().join("GB/tetris.zip"), &zip(2048));
+    dir
+}
+
+#[test]
+fn 大小写不敏感的目标上_清单之外只差大小写的文件不被顶掉() {
+    // 卡是 exFAT / FAT32，macOS 默认的 APFS 也一样：**大小写不敏感**。
+    // 维护者自己往卡上放了 `GB/Tetris.zip`，而选择集里的变体落点是 `GB/tetris.zip`。
+    // 清单之外的文件工具一律不碰（ADR-0015），于是这该报**落点被占**而不是新增。
+    let 现场 = 现场::摆在(建个只差大小写的库());
+    let 维护者那份 = 现场.卡.path().join("GB/Tetris.zip");
+    写(&维护者那份, "这是我自己拷进去的".as_bytes());
+    let 原样 = fs::read(&维护者那份).expect("读得出");
+
+    let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
+    assert!(
+        这趟.plan
+            .surprises
+            .iter()
+            .any(|s| s.kind == sync::SurpriseKind::Occupied),
+        "该报落点被占：{:?}",
+        这趟.plan.surprises
+    );
+    assert!(
+        !这趟.plan
+            .steps
+            .iter()
+            .any(|step| step.path.eq_ignore_ascii_case("GB/tetris.zip")),
+        "落点被占就一步都不该排：{:?}",
+        这趟.plan.steps
+    );
+
+    let outcome = 现场.执行(&这趟, &Manifest::empty(), &CancelToken::new());
+    assert_eq!(
+        fs::read(&维护者那份).expect("还在"),
+        原样,
+        "维护者自己那份连一个字节都不许动",
+    );
+    assert!(
+        !现场.卡.path().join("GB/tetris.zip").exists()
+            || fs::read(现场.卡.path().join("GB/tetris.zip")).expect("读得出") == 原样,
+        "卡上不该多出一份工具写的 tetris.zip",
+    );
+    for file in &outcome.manifest.files {
+        assert!(
+            !file.path.eq_ignore_ascii_case("GB/tetris.zip"),
+            "{} 混进了清单",
+            file.path
+        );
+    }
+}
+
+#[test]
+fn 计划算完之后才出现的落点占用_执行这一层也挡得住() {
+    // 计划靠的是 `observe` 交出来的那份键的集合，而那份集合**可能是不全的**：
+    // 列不开的目录底下一个键都拿不到，那一枝上的落点计划根本无从判断；计划算完到
+    // 真的改名之间也隔着整趟同步的时间，卡还插在机器上。于是执行这一层还要兜一道。
+    let 现场 = 现场::摆在(建个只差大小写的库());
+    let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
+    assert!(
+        这趟.plan
+            .steps
+            .iter()
+            .any(|step| step.act == Act::Add && step.path == "GB/tetris.zip"),
+        "计划这一侧看不见它，本来就该排一条新增"
+    );
+
+    // 排完计划之后，维护者才把自己那份拷进卡里——只差大小写。
+    let 维护者那份 = 现场.卡.path().join("GB/Tetris.zip");
+    写(&维护者那份, "这是我自己拷进去的".as_bytes());
+    let 原样 = fs::read(&维护者那份).expect("读得出");
+
+    let outcome = 现场.执行(&这趟, &Manifest::empty(), &CancelToken::new());
+    assert_eq!(
+        fs::read(&维护者那份).expect("还在"),
+        原样,
+        "维护者自己那份连一个字节都不许动",
+    );
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .any(|failure| failure.path == "GB/tetris.zip" && failure.act == Act::Add),
+        "挡下来要记成一条没做成，而不是整趟停住：{:?}",
+        outcome.failures
+    );
+    assert!(
+        !outcome
+            .manifest
+            .files
+            .iter()
+            .any(|file| file.path.eq_ignore_ascii_case("GB/tetris.zip")),
+        "没写成的不许进清单"
+    );
+}
