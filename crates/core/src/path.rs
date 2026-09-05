@@ -398,8 +398,36 @@ pub fn file_name_lower(path: &Path) -> String {
 /// 断点文件通常还不存在，`canonicalize` 直接对它会失败；而在 macOS 上
 /// `/var` 是指向 `/private/var` 的链接——不化开就会得出「断点不在主库里」这种错判，
 /// 而那正是只读边界的守卫要拦的东西。
+///
+/// 它走的是**真文件系统**。要跟另一条路算出来的形态比大小时（典型是只读边界那道
+/// 守卫：一边是扫描根、一边是断点），两边必须问同一个文件系统——走
+/// [`normalize_existing_in`]。
 #[must_use]
 pub fn normalize_existing(path: &Path) -> PathBuf {
+    normalize_existing_in(path, |p| std::fs::canonicalize(long_path(p).as_ref()))
+}
+
+/// 与 [`normalize_existing`] 同一件事，只是**由调用方指定拿哪套文件系统去化开**。
+///
+/// # 为什么非得能换
+///
+/// 两条路径要比「谁在谁里面」时，只有**同一套规范化**下的结果才可比。只读边界那道
+/// 守卫（`scan::scan` 里的 [`is_inside`]）就栽在这上面：扫描根走的是
+/// [`LibraryFs::canonicalize`](crate::fs::LibraryFs::canonicalize)，断点走的是这里的
+/// 真文件系统版本，于是在一切 **merged-usr** 的发行版上——`/lib` 是指向 `usr/lib` 的
+/// 符号链接——根折出来还是 `/lib`、断点折出来成了 `/usr/lib/…`，两边对不上，
+/// 闸不响，扫描带着断点往主库里写（ADR-0004 守的正是这个）。
+///
+/// 换成两边都问同一个 `canonicalize`，这道闸的结论就只跟那套文件系统的形状有关，
+/// 与跑测试的这台机器上恰好有没有 `/lib` 无关。
+///
+/// `canonicalize` 失败即「这一级还不存在」，于是往上退一级再试；退到头都不成就原样
+/// 返回那条绝对路径——根打错字、盘没挂上都走这条，不能炸。
+#[must_use]
+pub fn normalize_existing_in(
+    path: &Path,
+    canonicalize: impl Fn(&Path) -> std::io::Result<PathBuf>,
+) -> PathBuf {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -408,7 +436,7 @@ pub fn normalize_existing(path: &Path) -> PathBuf {
     let mut trailing: Vec<std::ffi::OsString> = Vec::new();
     let mut cursor = absolute.as_path();
     loop {
-        if let Ok(canonical) = std::fs::canonicalize(long_path(cursor).as_ref()) {
+        if let Ok(canonical) = canonicalize(cursor) {
             let mut result = canonical;
             for part in trailing.iter().rev() {
                 result.push(part);
@@ -441,6 +469,9 @@ pub fn is_utf8(path: &Path) -> bool {
 /// `inner` 是否落在 `outer` 之内（含相等）。
 ///
 /// 用于守住只读边界：断点文件绝不允许写进主库。
+///
+/// **两边必须是同一套规范化折出来的**——它只比字符串前缀，认不出 `/lib` 与
+/// `/usr/lib` 是同一个目录。同源的办法见 [`normalize_existing_in`]。
 #[must_use]
 pub fn is_inside(outer: &Path, inner: &Path) -> bool {
     inner.starts_with(outer)
@@ -711,5 +742,48 @@ mod tests {
             Path::new("/lib"),
             Path::new("/home/me/.romcat/checkpoint.json")
         ));
+    }
+
+    #[test]
+    fn 化开哪一段由传进来的那套文件系统说了算() {
+        // 只认得 `/lib` 这一个目录的一套文件系统：它不跟随符号链接。
+        let 只认库 = |p: &Path| {
+            if p == Path::new("/lib") {
+                Ok(PathBuf::from("/lib"))
+            } else {
+                Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+            }
+        };
+        assert_eq!(
+            normalize_existing_in(Path::new("/lib/.romcat/checkpoint.json"), 只认库),
+            PathBuf::from("/lib/.romcat/checkpoint.json"),
+            "已存在的那一段是 `/lib`，余下的原样接回去"
+        );
+
+        // 同一条路径，换成一套 merged-usr 的文件系统（`/lib` → `/usr/lib`）。
+        // 两套折出来的结果不一样，正是这道闸当初失效的由来（挂单 Q8）。
+        let merged_usr = |p: &Path| {
+            if p == Path::new("/lib") {
+                Ok(PathBuf::from("/usr/lib"))
+            } else {
+                Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+            }
+        };
+        let 折过的 = normalize_existing_in(Path::new("/lib/.romcat/checkpoint.json"), merged_usr);
+        assert_eq!(折过的, PathBuf::from("/usr/lib/.romcat/checkpoint.json"));
+        assert!(
+            !is_inside(Path::new("/lib"), &折过的),
+            "两边不同源时闸就是这样静默失效的——扫描根那一侧折出来还是 `/lib`"
+        );
+    }
+
+    #[test]
+    fn 一级都化不开时原样返回那条绝对路径() {
+        let 都不认 = |_: &Path| Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert_eq!(
+            normalize_existing_in(Path::new("/盘没挂上/FC"), 都不认),
+            PathBuf::from("/盘没挂上/FC"),
+            "根打错字、盘没挂上都走这条，不能炸"
+        );
     }
 }
