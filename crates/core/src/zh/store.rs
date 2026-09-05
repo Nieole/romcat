@@ -54,6 +54,27 @@ pub const SCHEMA_VERSION: u32 = 2;
 ///   不盖它的话缓存会一口咬定「输入没变」而整条跳过，新取到的字段永远出不来。
 pub const FIELDS: &str = "中文名、别名、简介、类型、开发商、发行商、年份、平台";
 
+/// `meta` 里记「这份索引**建的时候把平台折成了什么样**」的那个键
+/// （[`zh::PlatformFold`](crate::zh::PlatformFold)）。
+///
+/// 与 [`FIELDS`] 一样有两个去处：写进 `meta`，以及进**输入指纹**
+/// （`scrape::zh` 的 `probe`）。差别在于 `FIELDS` 是**本程序这一版**的一个常量，
+/// 而这一行是**那一趟建索引时算出来的**——本机那两张表事后再变也改不了它。
+///
+/// ## 老索引没有这个键：当作**不知道**，不为它加结构版本
+///
+/// 读回来是空串，于是两层锚点的指纹与从前都不一样，本程序第一次跑会把中文离线源那两路
+/// 整片重采一遍——**离线的、一个网络请求都不发**，与 Q38 认下的是同一笔账。
+///
+/// 没有加 [`SCHEMA_VERSION`] 是想清楚了的：**表结构一列都没变**，老索引里那些行这一版
+/// 照样读得出、读出来也仍旧是对的，缺的只是「当时是怎么折的」这一句话。加一格版本号
+/// 会让每个人重读一遍那 435 MB（缓存里那份原件已经不在的还得重下），换来的只是这一句
+/// ——而不加的代价是一趟离线重采，那一趟本来就因为指纹多了一格而躲不掉。
+///
+/// 空串**不会与真的值撞上**：真写进来的那一行永远以 `共 N 对` 打头
+/// （[`PlatformFold::line`](crate::zh::PlatformFold::line)），一对都没折出来时也是。
+pub const PLATFORM_FOLD: &str = "platform_fold";
+
 /// `meta` 单开一份**先建**：结构版本就写在它里面，而要读它得先有这张表。
 const META_SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS meta(
@@ -408,6 +429,11 @@ impl Store {
     ///
     /// 逐条比对差异在这里毫无意义——dump 本来就是整份重新导出的（同 `dat::repo`）。
     ///
+    /// `fold` 是**这一趟建索引时平台折叠实际折出来的那张表**
+    /// （[`zh::PlatformFold`](crate::zh::PlatformFold)）。它跟着数据一起落进 `meta`，
+    /// 因为它说的正是「这份索引是怎么建出来的」——本机那两张表事后再变，也改不了
+    /// 库里这一份是怎么折出来的。刮削那一侧拿它当输入指纹。
+    ///
     /// # Errors
     /// 写库失败时返回错误。
     pub fn replace(
@@ -415,6 +441,7 @@ impl Store {
         entries: &[Entry],
         dump: &str,
         fingerprint: &str,
+        fold: &crate::zh::PlatformFold,
     ) -> Result<(), StoreError> {
         // **换结构与写数据在同一个事务里**：旧数据一直留到这一刻，而且中途被打断时
         // 一起回滚（`Store::reshape` 的文档）。
@@ -488,6 +515,7 @@ impl Store {
         self.put_meta("fingerprint", fingerprint)?;
         self.put_meta("built_at", &now.to_string())?;
         self.put_meta("fields", FIELDS)?;
+        self.put_meta(PLATFORM_FOLD, &fold.line())?;
         // **结构版本最后才落盘**：写在这之前的话，一次半途而废的重建会留下一份空索引
         // 盖着新版本号，而「该从哪份原件重建」的线索已经没了。
         self.put_meta("schema_version", &SCHEMA_VERSION.to_string())?;
@@ -585,7 +613,12 @@ impl Store {
         }
         let dump = self.meta("dump")?.unwrap_or_default();
         let fields = self.meta("fields")?.unwrap_or_default();
-        Ok(Index::build(entries, dump).with_fields(fields))
+        // 老索引没记过这件事，那时是空串——**不知道**，不是「一个都没折出来」
+        // （[`PLATFORM_FOLD`] 的文档）。
+        let fold = self.meta(PLATFORM_FOLD)?.unwrap_or_default();
+        Ok(Index::build(entries, dump)
+            .with_fields(fields)
+            .with_platform_fold(fold))
     }
 
     /// 某一条条目的**中文简介**；这条条目不在库里、或者数据源没写就是 `None`。
@@ -714,6 +747,14 @@ fn split_platforms(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::zh::PlatformFold;
+
+    /// 建 [`一条`] 那条条目时折出来的那张表：`NDS` 这个原文折成了本工具的 `NDS`。
+    fn 折了一对() -> PlatformFold {
+        let mut fold = PlatformFold::default();
+        fold.record("NDS", "NDS");
+        fold
+    }
 
     fn 一条() -> Entry {
         Entry {
@@ -735,7 +776,7 @@ mod tests {
     fn 写进去再读回来是同一条() {
         let mut store = Store::in_memory().expect("开得起来");
         store
-            .replace(&[一条()], "dump-2026-09-01", "sha256:abc")
+            .replace(&[一条()], "dump-2026-09-01", "sha256:abc", &折了一对())
             .expect("写得进去");
         let index = store.load().expect("读得回来");
         assert_eq!(index.len(), 1);
@@ -758,10 +799,14 @@ mod tests {
     fn 整份换掉不留旧条目() {
         // dump 是整份重新导出的，逐条比对差异毫无意义。
         let mut store = Store::in_memory().expect("开得起来");
-        store.replace(&[一条()], "旧", "旧指纹").expect("写得进去");
+        store
+            .replace(&[一条()], "旧", "旧指纹", &折了一对())
+            .expect("写得进去");
         let mut another = 一条();
         another.id = 99;
-        store.replace(&[another], "新", "新指纹").expect("写得进去");
+        store
+            .replace(&[another], "新", "新指纹", &折了一对())
+            .expect("写得进去");
         let index = store.load().expect("读得回来");
         assert_eq!(index.len(), 1);
         assert_eq!(index.entries()[0].id, 99);
@@ -771,7 +816,9 @@ mod tests {
     fn 简介类型开发商发行商都留得住() {
         // 这四样以前一列都没有——那份 435 MB 的数据被当成「撞名字的索引」在用。
         let mut store = Store::in_memory().expect("开得起来");
-        store.replace(&[一条()], "dump", "指纹").expect("写得进去");
+        store
+            .replace(&[一条()], "dump", "指纹", &折了一对())
+            .expect("写得进去");
         // **简介单独一条路读**：装进内存那份索引里要多背九十来 MB，而撞名字不看简介。
         assert_eq!(
             store.summary(4).expect("读得回来").as_deref(),
@@ -797,7 +844,7 @@ mod tests {
             let mut store = Store::open(&path).expect("开得起来");
             assert!(store.rebuilding().is_none(), "新建的一份不必重建");
             store
-                .replace(&[一条()], "dump-2026-09-01.zip", "sha256:abc")
+                .replace(&[一条()], "dump-2026-09-01.zip", "sha256:abc", &折了一对())
                 .expect("写得进去");
         }
         let conn = rusqlite::Connection::open(&path).expect("开得起来");
@@ -843,7 +890,7 @@ mod tests {
         // 真写进新数据那一刻，结构与版本号才一起换掉。
         let mut store = Store::open(&path).expect("开得起来");
         store
-            .replace(&[一条()], "dump-2026-09-01.zip", "sha256:abc")
+            .replace(&[一条()], "dump-2026-09-01.zip", "sha256:abc", &折了一对())
             .expect("写得进去");
         assert!(store.rebuilding().is_none());
         assert_eq!(
@@ -896,7 +943,7 @@ mod tests {
         // 真写进新数据那一刻，结构与版本号才一起换上。
         let mut store = Store::open(&path).expect("开得起来");
         store
-            .replace(&[一条()], "dump-2026-09-01.zip", "sha256:abc")
+            .replace(&[一条()], "dump-2026-09-01.zip", "sha256:abc", &折了一对())
             .expect("写得进去");
         assert!(store.rebuilding().is_none());
         assert_eq!(
@@ -935,7 +982,7 @@ mod tests {
         没中文名.developers = Vec::new();
         没中文名.publishers = Vec::new();
         store
-            .replace(&[一条(), 没中文名], "dump", "指纹")
+            .replace(&[一条(), 没中文名], "dump", "指纹", &折了一对())
             .expect("写得进去");
         let stats = store.stats().expect("数得出来");
         assert_eq!(stats.subjects, 2);
@@ -950,5 +997,50 @@ mod tests {
         assert_eq!(stats.with_developer, 1);
         assert_eq!(stats.with_publisher, 1);
         assert_eq!(stats.fields, FIELDS);
+    }
+
+    #[test]
+    fn 老索引没有折成什么样那一格时读回来是空串() {
+        // 升级到这一版之前建的索引，`meta` 里根本没有这一格。当作**不知道**，
+        // 不为它加结构版本：表结构一列都没变，那些行照样读得出、读出来也仍旧是对的
+        // ——加一格版本号会让每个人重读一遍那 435 MB，换来的只是「当时是怎么折的」
+        // 这一句话。不加的代价是这一版第一次跑把中文离线源那两路整片重采一遍，
+        // 离线的、一个网络请求都不发，与 Q38 认下的是同一笔账。
+        let dir = crate::testing::temp_dir("zh-fold-legacy");
+        let path = dir.path().join("zh.sqlite3");
+        {
+            let mut store = Store::open(&path).expect("开得起来");
+            store
+                .replace(&[一条()], "dump", "指纹", &折了一对())
+                .expect("写得进去");
+        }
+        // 把这一格抹掉：这就是「上一版程序建的那份索引」。
+        let conn = rusqlite::Connection::open(&path).expect("开得起来");
+        conn.execute("DELETE FROM meta WHERE key = ?1", params![PLATFORM_FOLD])
+            .expect("删得掉");
+        drop(conn);
+
+        let store = Store::open(&path).expect("照样打得开");
+        assert_eq!(store.meta(PLATFORM_FOLD).expect("读得到"), None);
+        assert_eq!(
+            store.load().expect("读得回来").platform_fold(),
+            "",
+            "不知道就如实交出空串，别编一个像样的值"
+        );
+    }
+
+    #[test]
+    fn 一对都没折出来也照样写一行而不是空串() {
+        // 空串是**老索引专用**的那个态。一对都没折出来时也写 `共 0 对`，两者才分得开
+        // ——混成一件事的话，删掉最后一条别名重建之后指纹会撞回老索引那一份而整片跳过。
+        let mut store = Store::in_memory().expect("开得起来");
+        store
+            .replace(&[一条()], "dump", "指纹", &PlatformFold::default())
+            .expect("写得进去");
+        assert_eq!(
+            store.meta(PLATFORM_FOLD).expect("读得到"),
+            Some("共 0 对".to_string())
+        );
+        assert_eq!(store.load().expect("读得回来").platform_fold(), "共 0 对");
     }
 }

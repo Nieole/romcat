@@ -686,8 +686,9 @@ impl<'a> ChineseSource<'a> {
     fn variant_probe(&self, subject: &Subject<'_>) -> Option<String> {
         let main = subject.main_key?;
         // 指纹要盖住**一切会改变结果的东西**（`Source::probe` 的文档）：名字、平台、
-        // 用的是哪一版 dump、**这一版索引从数据源里取了哪几样**、以及**匹配参数**——
-        // 门槛从 0.85 调到 0.80 该重采一遍，取的字段从五样变成九样也该重采一遍，
+        // 用的是哪一版 dump、**这一版索引从数据源里取了哪几样**、**它建的时候把平台
+        // 折成了什么样**、以及**匹配参数**——门槛从 0.85 调到 0.80 该重采一遍，取的字段
+        // 从五样变成九样也该重采一遍，补一条平台别名重建索引之后同样该重采一遍，
         // 不盖它们的话缓存会一口咬定「输入没变」而整条跳过。
         let platform = subject.platform.unwrap_or("");
         let tuning = self.naming.tuning.fingerprint();
@@ -705,6 +706,12 @@ impl<'a> ChineseSource<'a> {
             platform,
             self.naming.index.map_or("", zh::Index::dump),
             self.naming.index.map_or("", zh::Index::fields),
+            // **建索引那一刻平台折出来的那张表**：dump 与字段那两行都盖不住它——
+            // 补一条平台别名重建，dump 是同一份、字段一个没变，变的只有折出来的那一串，
+            // 而交叉校验看的正是那一串（`zh::PlatformFold`）。盖的是**折叠真发生了
+            // 什么**，不是本机那两张表现在长什么样：后者会在「改了别名但还没重建」时
+            // 反过来说谎，说这份索引变了——而它一个字都没变。
+            self.naming.index.map_or("", zh::Index::platform_fold),
             tuning.as_str(),
             judged.as_deref().unwrap_or(""),
         ];
@@ -724,6 +731,14 @@ impl<'a> ChineseSource<'a> {
         let mut parts: Vec<String> = vec![
             self.naming.index.map_or("", zh::Index::dump).to_string(),
             self.naming.index.map_or("", zh::Index::fields).to_string(),
+            // **建索引那一刻平台折出来的那张表**（`zh::PlatformFold`）：与变体那一层
+            // 盖的是同一样东西，理由也一样——名下的变体撞不撞得上要过交叉校验那一关，
+            // 而交叉校验看的正是折出来的那一串。少了它，补一条平台别名重建索引之后，
+            // 这一层会整片复用旧的采集记录，新折得动的作品那四栏永远补不上来。
+            self.naming
+                .index
+                .map_or("", zh::Index::platform_fold)
+                .to_string(),
             self.naming.tuning.fingerprint(),
             // **这一层产出哪几个字段**（[`WORK_FIELDS`]）：多接一样上来就该重采一遍。
             WORK_FIELDS
@@ -1660,6 +1675,104 @@ mod tests {
         let 名下变体 = [名下("nds/合金弹头7.7z")];
         let work = 作品(&名下变体);
         assert_ne!(源(&rules, &现在).probe(&work), 源(&rules, &上一版).probe(&work));
+    }
+
+    /// 同一份 dump、同一批字段，只是**建索引时平台折得动与折不动**的两份索引。
+    ///
+    /// 折不动那一份就是用户遇到的那个场景：数据源写着一个两张表都不认的平台名，
+    /// 条目身上那一串是空的，交叉校验说不出话，这个源整条产不出东西。
+    fn 折不动那一版() -> zh::Index {
+        let mut entries = 索引().entries().to_vec();
+        for entry in &mut entries {
+            entry.platforms.clear();
+            entry.platform_text = "任天堂DS".to_string();
+        }
+        zh::Index::build(entries, "dump-2026-09-01".to_string())
+            .with_platform_fold(zh::PlatformFold::default().line())
+    }
+
+    /// 补上那条别名重建之后的同一份索引：dump 没换、字段没换，只有折出来的那串变了。
+    fn 折得动那一版() -> zh::Index {
+        let mut entries = 索引().entries().to_vec();
+        for entry in &mut entries {
+            entry.platform_text = "任天堂DS".to_string();
+        }
+        let mut fold = zh::PlatformFold::default();
+        fold.record("任天堂DS", "NDS");
+        zh::Index::build(entries, "dump-2026-09-01".to_string()).with_platform_fold(fold.line())
+    }
+
+    #[test]
+    fn 建索引时平台折成什么样进两层的输入指纹() {
+        // **这一条是这次修复的正题。** 补一条平台别名、`zh sync --full` 重建索引之后，
+        // 新折得动的那些条目该重采一遍。dump 是同一份、[`zh::store::FIELDS`] 一个字
+        // 没变、匹配参数也没动——两个指纹从前一模一样，于是刮削整片复用旧的采集记录，
+        // 那些条目永远不产出，而且不报错。
+        let rules = Rules::builtin();
+        let 折不动 = 折不动那一版();
+        let 折得动 = 折得动那一版();
+        // 前提先钉住：这两份索引除了折出来的那一串，别的一模一样。
+        assert_eq!(折不动.dump(), 折得动.dump());
+        assert_eq!(折不动.fields(), 折得动.fields());
+        assert_ne!(折不动.platform_fold(), 折得动.platform_fold());
+
+        let subject = 变体("nds/合金弹头7.7z", &[], &[]);
+        assert_ne!(
+            源(&rules, &折不动).probe(&subject),
+            源(&rules, &折得动).probe(&subject),
+            "变体那一层：折出来的那一串变了，指纹就得变"
+        );
+        let 名下变体 = [名下("nds/合金弹头7.7z")];
+        let work = 作品(&名下变体);
+        assert_ne!(
+            源(&rules, &折不动).probe(&work),
+            源(&rules, &折得动).probe(&work),
+            "作品那一层同样盖得住它"
+        );
+    }
+
+    #[test]
+    fn 折不动的那一版一条中文名都产不出而折得动的产得出() {
+        // 指纹必须跟着变的**理由**：这两份索引的产出真的不一样。
+        // 不钉这一条，上面那条指纹测试只是在比两个字符串。
+        let rules = Rules::builtin();
+        let 折不动 = 折不动那一版();
+        let 折得动 = 折得动那一版();
+        let subject = 变体("nds/合金弹头7.7z", &[], &[]);
+
+        let mut out = Harvest::default();
+        源(&rules, &折不动)
+            .collect(&subject, &mut out)
+            .expect("本地源不该失败");
+        assert!(
+            out.values.is_empty(),
+            "平台折不动时交叉校验说不出话，够不着中置信那一档，这个源无话可说"
+        );
+
+        let mut out = Harvest::default();
+        源(&rules, &折得动)
+            .collect(&subject, &mut out)
+            .expect("本地源不该失败");
+        assert_eq!(
+            那一格(&out, Field::Title).map(|it| it.value.clone()),
+            Some("合金弹头7".to_string()),
+            "补上别名重建之后，同一个变体撞得上了"
+        );
+    }
+
+    #[test]
+    fn 老索引没记过折成什么样与一对都没折出来分得开() {
+        // 升级到这一版之前建的索引，`meta` 里根本没有这一格，读回来是空串；
+        // 而「这一趟一对都没折出来」写出来是 `共 0 对`。两者撞回同一个指纹的话，
+        // 删掉最后一条别名重建之后会整片跳过。
+        let rules = Rules::builtin();
+        let 老索引 = 索引().with_platform_fold(String::new());
+        let 一对都没折出来 = 索引().with_platform_fold(zh::PlatformFold::default().line());
+        let subject = 变体("nds/合金弹头7.7z", &[], &[]);
+        assert_ne!(
+            源(&rules, &老索引).probe(&subject),
+            源(&rules, &一对都没折出来).probe(&subject)
+        );
     }
 
     #[test]
