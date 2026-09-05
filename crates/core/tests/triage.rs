@@ -1568,3 +1568,97 @@ fn 识别与刮削的待确认在同一条队列里() {
     );
 }
 
+#[test]
+fn 排完计划之后换过选择器再落下整份被拒两库一个字都没动() {
+    // 计划书还开着的时候队列变过样，从前落下去是这样的：沉淀库照着过期计划写下了，
+    // 中立库那一半却不投影（`by_key` 里没有那条，`apply` 直接跳过），同一条变体两边
+    // 各说各的，要等下一趟识别才收得回来。
+    //
+    // **一份计划的身份是它对着哪一批条目排的**（`Plan::against`），对不上就整份拒掉
+    // ——三条路里为什么取这一条，算在 `triage::apply` 的文档里。
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    let mut queue = 列队列(&现场);
+    let 全部 = keys(queue.selected());
+    assert_eq!(全部.len(), 4);
+    let plan = queue
+        .plan(&现场.catalog, &现场.store, &手工("某作"))
+        .expect("排得出计划");
+    assert_eq!(plan.decided.len(), 4);
+    let 之前 = 对拍快照(&现场, &全部);
+
+    // 队列变了样——界面上换一套选择器就是这样。
+    queue.set_filter(点名(&["某游戏 别家汉化.zip"]));
+    assert_eq!(queue.selected().len(), 1);
+
+    let error = queue
+        .apply(&mut 现场.catalog, &mut 现场.store, &plan)
+        .expect_err("对着另一批条目排的计划不该落得下去");
+    let 话 = error.to_string();
+    assert!(
+        话.contains("重排一份计划"),
+        "这句话要让人去**重排计划**，而不是以为数据坏了：{话}",
+    );
+    assert!(话.contains("其中 3 条"), "{话}");
+    assert_eq!(对拍快照(&现场, &全部), 之前, "拒掉的那一趟留下了字");
+    assert_eq!(现场.store.counts().expect("数得出").total, 0);
+}
+
+#[test]
+fn 排完计划之后先裁掉其中一条再落下整份被拒那一条照旧只有一个答案() {
+    // 逐条键盘流按下 `N` 就是这个形状：计划书开着，光标那一条当场落了下去。再点
+    // 「落下」时那份计划已经过期——从前它拿《某作》盖掉沉淀库里刚写下的「认不出」，
+    // 中立库却照旧写着「认不出」、`work_id` 还是空的，两边各说各的。
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    let mut queue = 列队列(&现场);
+    let 全部 = keys(queue.selected());
+    let 整批 = queue
+        .plan(&现场.catalog, &现场.store, &手工("某作"))
+        .expect("排得出计划");
+    assert_eq!(整批.decided.len(), 4);
+
+    // 逐条落下光标那一条：记成「我看过了，认不出」。
+    let 那一条 = "库/FC/某游戏 别家汉化.zip".to_string();
+    queue.set_filter(点名(&["某游戏 别家汉化.zip"]));
+    let 认不出 = Decide {
+        spec: DecisionSpec::Unknown,
+        overrides: Overrides::default(),
+        note: None,
+        library: 库名.to_string(),
+    };
+    let 单条 = queue
+        .plan(&现场.catalog, &现场.store, &认不出)
+        .expect("排得出计划");
+    queue
+        .apply(&mut 现场.catalog, &mut 现场.store, &单条)
+        .expect("这一条落得下");
+    queue.set_filter(Filter::default());
+    assert_eq!(queue.selected().len(), 3, "裁完的那一条该退出队列");
+    let 之后 = 对拍快照(&现场, &全部);
+
+    let error = queue
+        .apply(&mut 现场.catalog, &mut 现场.store, &整批)
+        .expect_err("裁掉过一条之后那份计划就过期了");
+    assert!(error.to_string().contains("重排一份计划"), "{error}");
+    assert_eq!(对拍快照(&现场, &全部), 之后, "拒掉的那一趟留下了字");
+    // **两边照旧只有一个答案**：沉淀库记着「认不出」，中立库那一条也写着「认不出」。
+    let counts = 现场.store.counts().expect("数得出");
+    assert_eq!((counts.unknown, counts.releases), (1, 0));
+    let (_, reason) = 现场
+        .catalog
+        .identification_of(&那一条)
+        .expect("读得出")
+        .expect("有结论");
+    assert_eq!(reason.as_deref(), Some(identify::VERDICT_UNKNOWN_REASON));
+    assert_eq!(
+        现场
+            .catalog
+            .variant(&那一条)
+            .expect("读得出")
+            .expect("变体在")
+            .work_id,
+        None,
+    );
+}
+
