@@ -179,6 +179,11 @@ pub enum RootNameError {
     /// 带了控制字符。它进得了键，却在报告与界面上看不见——两条键长得一模一样却不相等，
     /// 是最难查的那种撞车。
     Control,
+    /// 带了 `=`。命令行上「换某个根的位置」写成 `根名=路径`（`--library-root`），
+    /// 从**左边第一个** `=` 切。名字里也有一个的话，那个根就再也点不到名——
+    /// `a=b=/新位置` 切出来的左半是 `a`，而库里那个根叫 `a=b`。
+    /// **挡在起名这一步**，语法才是全的：库里任何一个根都写得出来。
+    Equals,
 }
 
 impl std::fmt::Display for RootNameError {
@@ -187,6 +192,9 @@ impl std::fmt::Display for RootNameError {
             Self::Empty => f.write_str("根名不能是空的"),
             Self::Separator => f.write_str("根名里不能有 `/` 或 `\\`——它们是键的分隔符"),
             Self::Control => f.write_str("根名里不能有控制字符"),
+            Self::Equals => f.write_str(
+                "根名里不能有 `=`——`根名=路径` 靠它切开，名字里再有一个就点不到这个根了",
+            ),
         }
     }
 }
@@ -200,7 +208,7 @@ impl std::error::Error for RootNameError {}
 /// 机器上就是两个根，全库重扫一遍。
 ///
 /// # Errors
-/// 名字空、带分隔符或带控制字符时返回 [`RootNameError`]。
+/// 名字空、带分隔符、带控制字符或带 `=` 时返回 [`RootNameError`]。
 pub fn root_name(name: &str) -> Result<String, RootNameError> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -211,6 +219,9 @@ pub fn root_name(name: &str) -> Result<String, RootNameError> {
     }
     if trimmed.chars().any(char::is_control) {
         return Err(RootNameError::Control);
+    }
+    if trimmed.contains('=') {
+        return Err(RootNameError::Equals);
     }
     Ok(nfc(trimmed).into_owned())
 }
@@ -526,6 +537,17 @@ mod tests {
         assert_eq!(root_name("甲\u{7}乙"), Err(RootNameError::Control));
         // 名字也要折成 NFC（ADR-0020）：两台机器敲同一个名字才是同一个根。
         assert_eq!(root_name(分解).as_deref(), root_name(预组合).as_deref());
+    }
+
+    #[test]
+    fn 根名不许带等号否则那个根点不到名() {
+        // `--library-root 根名=路径` 从**左边第一个** `=` 切。名字里也有一个的话，
+        // `a=b=/新位置` 切出来的左半是 `a`，而库里那个根叫 `a=b`——再也点不到它。
+        assert_eq!(root_name("a=b"), Err(RootNameError::Equals));
+        assert!(root_name("a=b").unwrap_err().to_string().contains('='));
+        // Windows 那两种写法里一个 `=` 都没有，照旧当路径走，不受这条影响。
+        assert_eq!(root_name("主库").as_deref(), Ok("主库"));
+        assert_eq!(root_name(r"C:").as_deref(), Ok("C:"));
     }
 
     #[test]
