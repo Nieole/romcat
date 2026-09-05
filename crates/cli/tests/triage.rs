@@ -466,3 +466,97 @@ fn 忘掉裁决要给条件也要点头() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+#[test]
+fn 按批撤销之后当场列队列就看得见它们回来了() {
+    // 票 gui-redesign/08 的要害：**不必重跑识别**。命令行这一层验的是那句话真的印出来了，
+    // 而且 `triage list` 当场数得出那两条回到了队列里（原挂账 D102 被推翻的那一条）。
+    let (library, workspace) = 现场();
+    扫并识别(library.path(), workspace.path());
+    let 工作目录 = workspace.path().to_string_lossy().into_owned();
+
+    let out = 跑(&[
+        "triage",
+        "decide",
+        "--library",
+        "小库",
+        "--workspace",
+        &工作目录,
+        "--name",
+        "外星科技",
+        "--work",
+        "某部作品",
+        "--yes",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let 落下 = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(落下.contains("这是第 1 批"), "{落下}");
+    assert!(落下.contains("undo --batch 1"), "按错了怎么走回来要印在这儿：{落下}");
+
+    // `batches` 列得出这一批：编号、条数、裁成什么。
+    let out = 跑(&[
+        "triage", "batches", "--library", "小库", "--workspace", &工作目录,
+    ]);
+    let 列表 = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(列表.contains("#1"), "{列表}");
+    assert!(列表.contains("2 条"), "{列表}");
+    assert!(列表.contains("作品《某部作品》"), "摘要要与计划书上那句话对得上：{列表}");
+
+    // 一次撤不止一条要点头。
+    let out = 跑(&[
+        "triage", "undo", "--library", "小库", "--workspace", &工作目录, "--batch", "1",
+    ]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--yes"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = 跑(&[
+        "triage", "undo", "--library", "小库", "--workspace", &工作目录, "--batch", "1", "--yes",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let 撤回 = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(撤回.contains("已撤 2 条"), "{撤回}");
+    assert!(撤回.contains("不必重跑识别"), "{撤回}");
+
+    // **不重跑识别**，当场列队列：那两条回来了。
+    let out = 跑(&[
+        "triage", "list", "--library", "小库", "--workspace", &工作目录, "--limit", "0",
+    ]);
+    let 队列 = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(队列.contains("队列            3 条待裁决"), "撤完该回到裁决之前的 3 条：{队列}");
+
+    // 撤销本身撤得回来。
+    let out = 跑(&[
+        "triage", "redo", "--library", "小库", "--workspace", &工作目录, "--last",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("第 1 批放回去了"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let out = 跑(&[
+        "triage", "list", "--library", "小库", "--workspace", &工作目录, "--limit", "0",
+    ]);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("队列            1 条待裁决"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}

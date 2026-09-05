@@ -27,9 +27,24 @@
 //! 打开时把没跑过的接着跑完。**往前迁得动，往后（库比程序新）如实拒绝并说清**——
 //! 那时该换新程序，而不是删库。
 //!
-//! 眼下两条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**）。
-//! 加第二条时库还是空的，但那不改变纪律——**永远不要求删库**，中立库那条「版本一变就
+//! 眼下三条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
+//! 第 3 条建 `verdict_batch` 与 `verdict_batch_row` 两张表（**批**，见下一节）。
+//! 加这几条时库还是空的，但那不改变纪律——**永远不要求删库**，中立库那条「版本一变就
 //! 重建」的便宜路子在这份库上不许走。
+//!
+//! ## **批**：撤销认得住的那个粒度
+//!
+//! 一次 [`triage::apply`](crate::triage::apply) 落下的那些是一**批**。批本身记在这里而不是
+//! 中立库里，理由只有一条，而且是硬的：**一批可能盖掉先前的裁决，而被盖掉的那一条
+//! 除了这里没有第二份**。裁决不可再生，一份只有一处的东西不许住在可以删掉重建的库里。
+//!
+//! `verdict_batch_row` 因此为每条记两样：这一批**落下的那条**（`after`）与**它盖掉的那条**
+//! （`before`，没盖掉就为空）。撤销时先核对「锚上眼下这一条还是我们当初落下的那条吗」
+//! ——不是就一个字都不动（后来有人在同一条锚上重新裁过，那是别人的账），是就删掉它、
+//! 再把 `before` 原样放回去。
+//!
+//! 中立库那一半的撤销原料**不在这里**：那是候选与结论，可再生，住在中立库自己的
+//! `verdict_batch_shadow`（`catalog::identify`）。两半分开住，各按各的身份。
 //!
 //! ## 两种锚，如实分开
 //!
@@ -166,6 +181,42 @@ CREATE UNIQUE INDEX IF NOT EXISTS match_verdict_content
     ON match_verdict(crc32, size, source, entry) WHERE anchor = '内容';
 CREATE UNIQUE INDEX IF NOT EXISTS match_verdict_path
     ON match_verdict(library, variant_key, source, entry) WHERE anchor = '路径';
+",
+    // 3：**批**（票 gui-redesign/08）。一次批量裁决落下的那些记成一批，**撤销以它为粒度**。
+    "\
+-- 一**批**裁决。`undone_at` 非空就是已经撤过了——撤掉的批不删行：撤销本身要撤得回来，
+-- 而把它放回去要的正是这几行（`after`）。
+CREATE TABLE IF NOT EXISTS verdict_batch(
+    id         INTEGER PRIMARY KEY,
+    -- 这一批落在哪份主库上。路径锚只在本机的这一份主库里成立，列批时按它筛。
+    library    TEXT    NOT NULL,
+    -- 裁成什么，给人看的一句（`triage::Decide::summary`）。
+    summary    TEXT    NOT NULL,
+    note       TEXT,
+    decided_at INTEGER NOT NULL,
+    undone_at  INTEGER
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS verdict_batch_library ON verdict_batch(library);
+
+-- 一批里的一条：钉在哪条锚上、**落下的那条**长什么样、**它盖掉的那条**长什么样。
+--
+-- `after` 与 `before` 存的是导出格式里那一行（`Row`）的 JSON——同一个形状读写两处，
+-- 不为撤销另造一份序列化。`before` 为空表示那条锚上当时一条裁决都没有。
+CREATE TABLE IF NOT EXISTS verdict_batch_row(
+    batch       INTEGER NOT NULL REFERENCES verdict_batch(id),
+    -- 哪个变体。中立库那一半按它找回快照。
+    variant_key TEXT    NOT NULL,
+    -- 内容锚钉在这个变体的哪一份内容上。**重做要它**：把裁决重新投影回中立库时，
+    -- 那条候选要说得出「是包里的哪一个」（`identify::Projector::project`）。
+    member      TEXT    NOT NULL,
+    inner       TEXT    NOT NULL,
+    -- **锚不另开几列**：它已经在 `after` 里了（`Row` 那个形状连锚一起存）。
+    -- 另存一份的话，同一条锚在一行里有两个说法，而它们迟早会各说各的。
+    after       TEXT    NOT NULL,
+    before      TEXT,
+    PRIMARY KEY (batch, variant_key)
+) STRICT;
 ",
 ];
 
@@ -443,6 +494,59 @@ impl MatchVerdict {
         } else {
             "不是这条"
         }
+    }
+}
+
+/// 一**批**裁决：一次批量裁决落下的那些。**撤销以它为粒度**。
+///
+/// 批不是「几条裁决凑在一起」那么简单——它还记着**每条盖掉了什么**，而被盖掉的那条
+/// 除了这里没有第二份（见模块文档）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Batch {
+    /// 编号。命令行与界面拿它点名要撤哪一批。
+    pub id: i64,
+    /// 落在哪份主库上。
+    pub library: String,
+    /// 裁成什么，给人看的一句。
+    pub summary: String,
+    /// 记的那一句为什么。
+    pub note: Option<String>,
+    /// 落下的时刻（UNIX 纪元起的秒）。
+    pub decided_at: i64,
+    /// 撤掉的时刻；没撤过就是 `None`。
+    pub undone_at: Option<i64>,
+    /// 这一批有几条。
+    pub rows: u64,
+}
+
+impl Batch {
+    /// 这一批眼下是撤掉的状态吗。
+    #[must_use]
+    pub fn undone(&self) -> bool {
+        self.undone_at.is_some()
+    }
+}
+
+/// 一批里的一条。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchRow {
+    /// 哪个变体。中立库那一半按它找回快照。
+    pub variant_key: String,
+    /// 内容锚钉在这个变体的哪一份内容上：成员的键。
+    pub member: String,
+    /// 容器内部路径；裸文件是空串。
+    pub inner: String,
+    /// **这一批落下的那条**。撤销前先核对锚上眼下是不是还是它。
+    pub after: Verdict,
+    /// **它盖掉的那条**；那条锚上当时没有裁决就是 `None`。
+    pub before: Option<Verdict>,
+}
+
+impl BatchRow {
+    /// 这一条钉在什么上。
+    #[must_use]
+    pub fn anchor(&self) -> &Anchor {
+        &self.after.anchor
     }
 }
 
@@ -733,6 +837,180 @@ impl Store {
             matches: one("SELECT COUNT(*) FROM match_verdict")?,
             matches_accepted: one("SELECT COUNT(*) FROM match_verdict WHERE accepted = 1")?,
         })
+    }
+
+    /// 记下一**批**：这一批落下的那些，连各自盖掉的那条一起。返回这一批的编号。
+    ///
+    /// **落裁决与记批在同一个事务里**（调用方把两件事一起交过来）：批记下了而裁决没落，
+    /// 或者反过来，都会让撤销这件事从一开始就说不准。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn put_batch(
+        &mut self,
+        library: &str,
+        summary: &str,
+        note: Option<&str>,
+        rows: &[BatchRow],
+    ) -> Result<i64, VerdictError> {
+        let path = self.path.clone();
+        let to_err = |source| VerdictError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        let id = {
+            tx.execute(
+                "INSERT INTO verdict_batch(library, summary, note, decided_at)
+                 VALUES(?1,?2,?3,?4)",
+                params![library, summary, note, now_secs()],
+            )
+            .map_err(to_err)?;
+            let id = tx.last_insert_rowid();
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO verdict_batch_row(batch, variant_key, member, inner,
+                         after, before)
+                     VALUES(?1,?2,?3,?4,?5,?6)",
+                )
+                .map_err(to_err)?;
+            for row in rows {
+                insert
+                    .execute(params![
+                        id,
+                        row.variant_key,
+                        row.member,
+                        row.inner,
+                        encode(&row.after)?,
+                        row.before.as_ref().map(encode).transpose()?,
+                    ])
+                    .map_err(to_err)?;
+            }
+            id
+        };
+        tx.commit().map_err(to_err)?;
+        Ok(id)
+    }
+
+    /// 这份主库上的那些**批**，新的在前。`limit` 为 0 表示不限。
+    ///
+    /// 按主库筛，是因为**路径锚只在本机的这一份主库里成立**——把别的主库的批列出来，
+    /// 撤起来一条也对不上。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn batches(&self, library: &str, limit: usize) -> Result<Vec<Batch>, VerdictError> {
+        let mut sql = String::from(
+            "SELECT b.id, b.library, b.summary, b.note, b.decided_at, b.undone_at,
+                    (SELECT COUNT(*) FROM verdict_batch_row r WHERE r.batch = b.id)
+             FROM verdict_batch b WHERE b.library = ?1 ORDER BY b.id DESC",
+        );
+        if limit > 0 {
+            sql.push_str(&format!(" LIMIT {limit}"));
+        }
+        let mut statement = self.conn.prepare(&sql).map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![library], |row| {
+                Ok(Batch {
+                    id: row.get(0)?,
+                    library: row.get(1)?,
+                    summary: row.get(2)?,
+                    note: row.get(3)?,
+                    decided_at: row.get(4)?,
+                    undone_at: row.get(5)?,
+                    rows: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
+                })
+            })
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
+    /// 点名要一**批**；没这一批就是 `None`。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn batch(&self, id: i64) -> Result<Option<Batch>, VerdictError> {
+        self.conn
+            .query_row(
+                "SELECT b.id, b.library, b.summary, b.note, b.decided_at, b.undone_at,
+                        (SELECT COUNT(*) FROM verdict_batch_row r WHERE r.batch = b.id)
+                 FROM verdict_batch b WHERE b.id = ?1",
+                params![id],
+                |row| {
+                    Ok(Batch {
+                        id: row.get(0)?,
+                        library: row.get(1)?,
+                        summary: row.get(2)?,
+                        note: row.get(3)?,
+                        decided_at: row.get(4)?,
+                        undone_at: row.get(5)?,
+                        rows: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
+                    })
+                },
+            )
+            .optional()
+            .map_err(|source| self.err(source))
+    }
+
+    /// 一批里的那些条，按变体的键排。
+    ///
+    /// **读不回来的行整条丢掉而不是报错**：`after` 是本程序自己写下的 JSON，读不回来
+    /// 说明这一行已经不可信了，拿着半份数据去撤销比撤不了更糟。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn batch_rows(&self, id: i64) -> Result<Vec<BatchRow>, VerdictError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT variant_key, member, inner, after, before
+                 FROM verdict_batch_row WHERE batch = ?1 ORDER BY variant_key",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (variant_key, member, inner, after, before) =
+                row.map_err(|source| self.err(source))?;
+            let Some(after) = decode(&after) else {
+                continue;
+            };
+            out.push(BatchRow {
+                variant_key,
+                member,
+                inner,
+                after,
+                before: before.as_deref().and_then(decode),
+            });
+        }
+        Ok(out)
+    }
+
+    /// 把一批标成撤掉的（或者标回没撤）。
+    ///
+    /// **撤掉的批不删行**：撤销本身要撤得回来，而把它放回去要的正是那几行。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn mark_batch_undone(&mut self, id: i64, undone: bool) -> Result<(), VerdictError> {
+        self.conn
+            .execute(
+                "UPDATE verdict_batch SET undone_at = ?2 WHERE id = ?1",
+                params![id, undone.then(now_secs)],
+            )
+            .map(|_| ())
+            .map_err(|source| self.err(source))
     }
 
     /// 记下（或改掉）一条**匹配裁决**。返回它是不是**新**的一条。
@@ -1374,6 +1652,22 @@ impl Row {
     }
 }
 
+/// 把一条裁决折成**批**里存的那份 JSON。
+///
+/// 用的是导出格式里那一行（[`Row`]）：同一个形状读写两处，不为撤销另造一份序列化——
+/// 造第二份的话，哪天导出格式加了一栏而这一处忘了跟，撤销会把那一栏悄悄丢掉。
+fn encode(verdict: &Verdict) -> Result<String, VerdictError> {
+    serde_json::to_string(&Row::of(verdict))
+        .map_err(|error| VerdictError::Format(format!("这条裁决记不进批里：{error}")))
+}
+
+/// 从批里那份 JSON 认回一条裁决；读不回来就是 `None`。
+fn decode(text: &str) -> Option<Verdict> {
+    serde_json::from_str::<Row>(text)
+        .ok()
+        .and_then(Row::into_verdict)
+}
+
 /// 导入一份裁决文件之后的账。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct Imported {
@@ -1515,8 +1809,9 @@ mod tests {
     fn 第一版的老库带着裁决升上来_一条都不丢() {
         // **这份库不可再生**，所以「迁移只许往后追加」不能只写在模块文档里——要有一条
         // 测试真的走一遍「第 1 版的库 → 最新版」，并且看着老裁决原样还在。
-        // 眼下第 2 条迁移是 `CREATE TABLE IF NOT EXISTS`，本来就动不了老数据；这一条钉的
-        // 是**将来**：等哪天第 3 条迁移改的是已有的表，它会先炸，而不是等用户丢了裁决才发现。
+        // 眼下第 2、3 条迁移都是 `CREATE TABLE IF NOT EXISTS`，本来就动不了老数据；
+        // 这一条钉的是**将来**：等哪天有一条迁移改的是已有的表，它会先炸，
+        // 而不是等用户丢了裁决才发现。
         let conn = Connection::open_in_memory().expect("开得出来");
         conn.execute_batch(MIGRATIONS[0]).expect("建得出第一版");
         conn.execute_batch("PRAGMA user_version = 1")
@@ -1544,6 +1839,49 @@ mod tests {
             .expect("读得到")
             .expect("老裁决还在");
         assert_eq!(back.decision, verdict.decision, "一个字都没变");
+    }
+
+    #[test]
+    fn 一批连它盖掉的那条一起记得住也读得回来() {
+        // **被盖掉的那条除了这儿没有第二份**（它不可再生），所以批里存着它，撤销才放得回去。
+        let mut store = Store::in_memory().expect("开得出来");
+        let 旧的 = 汉化裁决();
+        let 新的 = Verdict::now(
+            旧的.anchor.clone(),
+            Decision::Release(Facts {
+                work: "改成这个".to_string(),
+                ..Facts::default()
+            }),
+        );
+        let rows = vec![BatchRow {
+            variant_key: "库/FC/某.zip".to_string(),
+            member: "库/FC/某.zip".to_string(),
+            inner: "rom.nes".to_string(),
+            after: 新的.clone(),
+            before: Some(旧的.clone()),
+        }];
+        let id = store
+            .put_batch("小库", "作品《改成这个》", Some("按记号裁一批"), &rows)
+            .expect("记得下");
+
+        let 列出来 = store.batches("小库", 0).expect("列得出");
+        assert_eq!(列出来.len(), 1);
+        assert_eq!((列出来[0].id, 列出来[0].rows), (id, 1));
+        assert_eq!(列出来[0].summary, "作品《改成这个》");
+        assert!(!列出来[0].undone(), "刚落下的一批不该是撤掉的状态");
+        // **按主库筛**：路径锚只在本机的这一份主库里成立，别的主库的批列出来撤不动。
+        assert!(store.batches("另一份库", 0).expect("列得出").is_empty());
+
+        let 读回来 = store.batch_rows(id).expect("读得回来");
+        assert_eq!(读回来.len(), 1);
+        assert_eq!(读回来[0].after, 新的, "落下的那条要一个字不差");
+        assert_eq!(读回来[0].before, Some(旧的), "盖掉的那条也要一个字不差");
+        assert_eq!(读回来[0].inner, "rom.nes", "重做要靠它说得出是包里的哪一个");
+
+        store.mark_batch_undone(id, true).expect("标得上");
+        assert!(store.batch(id).expect("读得到").expect("在").undone());
+        store.mark_batch_undone(id, false).expect("标得回去");
+        assert!(!store.batch(id).expect("读得到").expect("在").undone());
     }
 
     #[test]

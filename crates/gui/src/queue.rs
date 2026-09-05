@@ -31,7 +31,7 @@ use egui_extras::{Column, TableBuilder};
 use romcat_core::catalog::State;
 use romcat_core::dat::chinese::ChineseMark;
 use romcat_core::report::{capacity, thousands};
-use romcat_core::triage::{Applied, Axis, Draft, Filter, Overrides, Plan, Queue};
+use romcat_core::triage::{Applied, Axis, Draft, Filter, Overrides, Plan, Queue, Undone};
 use romcat_core::verdict;
 
 use crate::table::ROW_HEIGHT;
@@ -62,6 +62,8 @@ pub struct Screen {
     pending: Option<Plan>,
     /// 上一次落下的账。
     applied: Option<Applied>,
+    /// 上一次撤回的账。
+    undone: Option<Undone>,
     /// 上一次出的错。
     error: Option<String>,
     /// **只裁选中的那一条**。
@@ -87,6 +89,7 @@ impl Screen {
             form: Form::default(),
             pending: None,
             applied: None,
+            undone: None,
             error: None,
             only_picked: false,
             scroll_to: None,
@@ -144,6 +147,12 @@ impl Screen {
     #[must_use]
     pub fn pending(&self) -> Option<&Plan> {
         self.pending.as_ref()
+    }
+
+    /// 上一次撤回的账。
+    #[must_use]
+    pub fn undone(&self) -> Option<&Undone> {
+        self.undone.as_ref()
     }
 
     /// 上一次落下的账。
@@ -358,8 +367,40 @@ impl Screen {
         if let Some(error) = &self.error {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
+        // **落下之后那一行，右边就是「撤回这一批」。** 批量的胆量来自撤销可信
+        // （票 gui-redesign/08）——走回来那一下要在按下去的地方，不该逼人去开命令行。
+        let mut undo = false;
         if let Some(applied) = &self.applied {
-            ui.colored_label(ui.visuals().warn_fg_color, applied_text(applied));
+            let batch = applied.batch;
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(ui.visuals().warn_fg_color, applied_text(applied));
+                undo = ui
+                    .button(format!("撤回第 {batch} 批"))
+                    .on_hover_text(
+                        "中立库与沉淀库两边都回到这一批落下之前，\
+                         那些变体当场回到待裁决——不必重跑识别。",
+                    )
+                    .clicked();
+            });
+        }
+        if undo {
+            self.undo_last(site);
+        }
+        // 撤回之后那一行，右边就是「放回去」。**撤销本身也撤得回来**——按错了撤回、
+        // 又发现撤错了，不该逼人把刚才那一批重打一遍。
+        let mut redo = false;
+        if let Some(undone) = &self.undone {
+            let batch = undone.batch;
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(ui.visuals().warn_fg_color, undone_text(undone));
+                redo = ui
+                    .button(format!("放回第 {batch} 批"))
+                    .on_hover_text("把这一批原样放回去：当初落下的每一条都记在批里，一个字都不必重打。")
+                    .clicked();
+            });
+        }
+        if redo {
+            self.redo_last(site);
         }
         let available = ui.available_width();
         ui.horizontal_top(|ui| {
@@ -642,9 +683,51 @@ impl Screen {
             Ok(applied) => {
                 self.error = None;
                 self.applied = Some(applied);
+                self.undone = None;
                 self.picked = None;
             }
             Err(error) => self.error = Some(format!("裁决写不进去：{error}")),
+        }
+    }
+
+    /// **撤回刚落下的那一批**：两边一起回到它落下之前，队列当场重列。
+    ///
+    /// 领域判断一条都不在这里——[`Queue::undo`] 走的是命令行 `romcat triage undo --batch`
+    /// 那条同一条路（ADR-0005）。这一层只负责把按下去的那一下转过去，再把账画出来。
+    pub fn undo_last(&mut self, site: &mut Site) {
+        let Some(batch) = self.applied.map(|applied| applied.batch) else {
+            return;
+        };
+        match self
+            .queue
+            .undo(&mut site.catalog, &mut site.store, &site.library, batch)
+        {
+            Ok(account) => {
+                self.error = None;
+                self.applied = None;
+                self.undone = Some(account);
+                self.picked = None;
+            }
+            Err(error) => self.error = Some(format!("撤不掉：{error}")),
+        }
+    }
+
+    /// **把刚撤掉的那一批放回去**。与 [`Screen::undo_last`] 对称，走的也是核心库那条路。
+    pub fn redo_last(&mut self, site: &mut Site) {
+        let Some(batch) = self.undone.map(|undone| undone.batch) else {
+            return;
+        };
+        match self
+            .queue
+            .redo(&mut site.catalog, &mut site.store, &site.library, batch)
+        {
+            Ok(account) => {
+                self.error = None;
+                self.undone = None;
+                self.applied = Some(account);
+                self.picked = None;
+            }
+            Err(error) => self.error = Some(format!("放不回去：{error}")),
         }
     }
 
@@ -933,6 +1016,39 @@ fn applied_text(applied: &Applied) -> String {
         thousands(applied.matched),
         thousands(applied.skipped),
     )
+}
+
+/// 撤回之后那一句账。
+///
+/// **「中立库那一半回没回去」必须说出口**：回去了，那些变体当场就在队列里；没回去
+/// （快照随重跑识别清掉了），人得再跑一趟识别才看得见——两种情形说同一句话是撒谎。
+fn undone_text(undone: &Undone) -> String {
+    let mut text = format!(
+        "第 {} 批已撤回 {} 条（其中 {} 条把它盖掉的那条旧裁决放了回去）",
+        undone.batch,
+        thousands(undone.removed),
+        thousands(undone.restored),
+    );
+    if undone.kept > 0 {
+        let _ = write!(
+            text,
+            "；另有 {} 条没动——同一条锚上后来有人重新裁过",
+            thousands(undone.kept)
+        );
+    }
+    if undone.catalog_rolled_back {
+        let _ = write!(
+            text,
+            "。中立库那一半也回去了（{} 个变体），它们已经回到队列里，不必重跑识别。",
+            thousands(undone.variants),
+        );
+    } else {
+        text.push_str(
+            "。⚠️ 这一批之后跑过识别（或者中立库重建过），中立库那一半的快照已经清掉了\
+             ——沉淀库这一半撤干净了，要让它们回到队列请再跑一趟识别。",
+        );
+    }
+    text
 }
 
 fn thousands_len(value: usize) -> String {

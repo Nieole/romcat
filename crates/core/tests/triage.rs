@@ -710,6 +710,289 @@ fn 忘掉裁决之后重跑识别就回到队列里() {
     assert_eq!(队列(&现场, &filter).len(), 2);
 }
 
+/// 一个变体眼下在中立库里长什么样：结论、理由、候选、挂在哪个作品与发行版上。
+/// **撤销要证的就是这一整份原样回来了**，只比状态是骗自己。
+fn 中立库快照(现场: &现场, key: &str) -> (State, Option<String>, Vec<String>, Option<i64>, Option<i64>) {
+    let (state, reason) = 现场
+        .catalog
+        .identification_of(key)
+        .expect("读得出")
+        .expect("有结论");
+    let candidates = 现场
+        .catalog
+        .candidates_of(key)
+        .expect("读得出候选")
+        .into_iter()
+        .map(|candidate| format!("{}|{}|{}", candidate.source, candidate.game, candidate.evidence))
+        .collect();
+    let variant = 现场.catalog.variant(key).expect("读得出").expect("变体在");
+    (state, reason, candidates, variant.work_id, variant.release_id)
+}
+
+#[test]
+fn 撤掉一批之后中立库与沉淀库两边都回到原样() {
+    // 票 gui-redesign/08 的要害，也是原挂账 D102 被推翻的那一条：撤销**不必重跑识别**。
+    // 一次「整批通过三千条」按错了却撤不干净，批量这件事本身就不成立。
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    let filter = Filter {
+        name_contains: vec!["外星科技".to_string()],
+        ..Filter::default()
+    };
+    let 那两条 = keys(&队列(&现场, &filter));
+    assert_eq!(那两条.len(), 2);
+    let 原样: Vec<_> = 那两条.iter().map(|key| 中立库快照(&现场, key)).collect();
+    let 原有作品 = 现场.catalog.work_names().expect("读得出").len();
+
+    let applied = 裁(&mut 现场, &filter, &手工("外星科技的某作"));
+    assert_eq!(applied.verdicts, 2);
+    assert!(applied.batch > 0, "落下的那一趟该记成一批");
+    assert!(队列(&现场, &filter).is_empty(), "裁完了不该还在队列里");
+
+    let account =
+        triage::undo_batch(&mut 现场.catalog, &mut 现场.store, applied.batch).expect("撤得掉");
+    assert_eq!((account.removed, account.kept), (2, 0));
+    assert!(account.catalog_rolled_back, "中立库那一半也该回去");
+    assert_eq!(account.variants, 2);
+
+    // **沉淀库那一半**：一条不剩。
+    assert_eq!(现场.store.counts().expect("数得出").total, 0);
+    // **中立库那一半**：结论、理由、候选、两条链接，一样不差地回来了——
+    // 而且这中间**一趟识别都没跑**。
+    for (key, before) in 那两条.iter().zip(&原样) {
+        assert_eq!(&中立库快照(&现场, key), before, "{key} 没回到原样");
+    }
+    assert_eq!(
+        现场.catalog.work_names().expect("读得出").len(),
+        原有作品,
+        "裁决建出来的那行作品该跟着收掉——重跑一趟识别时它本来就不在",
+    );
+    // 而它们**当场**回到了队列里。
+    assert_eq!(队列(&现场, &filter).len(), 2);
+}
+
+#[test]
+fn 撤销只动这一批别的裁决一条都不受影响() {
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    let 甲 = Filter {
+        name_contains: vec!["外星科技".to_string()],
+        ..Filter::default()
+    };
+    let 乙 = Filter {
+        name_contains: vec!["别家汉化".to_string()],
+        ..Filter::default()
+    };
+    let 第一批 = 裁(&mut 现场, &甲, &手工("外星科技的某作"));
+    let 第二批 = 裁(&mut 现场, &乙, &手工("别家的某作"));
+    assert_ne!(第一批.batch, 第二批.batch, "两次裁决该是两批");
+    assert_eq!(现场.store.counts().expect("数得出").total, 3);
+
+    triage::undo_batch(&mut 现场.catalog, &mut 现场.store, 第一批.batch).expect("撤得掉");
+    assert_eq!(
+        现场.store.counts().expect("数得出").total,
+        1,
+        "撤第一批不该碰第二批那一条",
+    );
+    assert!(队列(&现场, &乙).is_empty(), "第二批裁过的不该回到队列里");
+    assert_eq!(队列(&现场, &甲).len(), 2);
+}
+
+#[test]
+fn 一批盖掉了先前的裁决时撤销把旧的那条放回去() {
+    // 被盖掉的那条**不可再生**：沉淀库里那一行没了就是没了。所以批里存着它，
+    // 撤销把它原样放回去——不然「撤销只动这一批」就是一句空话。
+    //
+    // 怎么会盖上：**重复拷贝是真机上的常态**（同一份内容躺着好几份）。裁过其中一份之后，
+    // 另一份在下一趟识别之前照旧留在队列里，而它俩钉的是同一条**内容锚**。
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    let filter = Filter {
+        name_contains: vec!["别家汉化".to_string()],
+        ..Filter::default()
+    };
+    let 那一条 = 队列(&现场, &filter).remove(0);
+    let 锚 = 那一条.anchor(库名);
+    let 旧的 = verdict::Verdict::now(
+        锚.clone(),
+        Decision::Release(verdict::Facts {
+            work: "先定成这个".to_string(),
+            ..verdict::Facts::default()
+        }),
+    );
+    现场.store.put(&旧的).expect("写得进");
+
+    let 这一批 = 裁(&mut 现场, &filter, &手工("改成那个"));
+    assert_eq!(这一批.replaced, 1, "该盖掉先前那条");
+    assert_eq!(现场.store.counts().expect("数得出").total, 1);
+
+    let account =
+        triage::undo_batch(&mut 现场.catalog, &mut 现场.store, 这一批.batch).expect("撤得掉");
+    assert_eq!((account.removed, account.restored), (1, 1));
+    let 现在 = 现场.store.all().expect("读得出");
+    assert_eq!(现在.len(), 1);
+    assert_eq!(现在[0], 旧的, "盖掉的那条旧裁决要原样回来");
+}
+
+#[test]
+fn 一批里有几份同内容的拷贝时撤销把它们全都放回队列() {
+    // **重复拷贝是真机上的常态**：同一份内容躺着好几份，它们钉的是同一条**内容锚**。
+    // 一批里同时裁了两份时，撤销走到第二份，锚上那条已经被第一份删掉了——分不清
+    // 「我们自己刚删的」与「别人重新裁过」的话，第二份会留着一条指向已经不存在的裁决的
+    // 「命中」，而那正是这一票要消掉的那个形状。
+    let dir = temp_dir("triage-重复拷贝");
+    let 同一份 = 汉化版(0xD0);
+    for name in ["FC/甲 某汉化.zip", "FC/乙 某汉化.zip"] {
+        写(
+            &dir.path().join(name),
+            &zip_container(&[ZipEntrySpec::stored("rom.nes", 同一份.clone())]),
+        );
+    }
+    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+    let mut options = ScanOptions::named(dir.path(), "库");
+    options.jobs = Jobs::Fixed(1);
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
+    let mut 现场 = 现场 {
+        dir,
+        catalog,
+        repo: 建_dat(),
+        store: Store::in_memory().expect("开得出沉淀库"),
+    };
+    跑识别(&mut 现场);
+    let filter = Filter {
+        name_contains: vec!["某汉化".to_string()],
+        ..Filter::default()
+    };
+    assert_eq!(队列(&现场, &filter).len(), 2);
+
+    let applied = 裁(&mut 现场, &filter, &手工("同一部作品"));
+    assert_eq!(applied.verdicts, 2, "两个变体各记一条，锚是同一条");
+    assert_eq!(现场.store.counts().expect("数得出").total, 1, "同一条锚只有一条裁决");
+
+    let account =
+        triage::undo_batch(&mut 现场.catalog, &mut 现场.store, applied.batch).expect("撤得掉");
+    assert_eq!(account.kept, 0, "第二份不是「别人的账」，是我们自己刚删的那条");
+    assert_eq!(account.variants, 2, "两个变体的结论都该放回去");
+    assert_eq!(现场.store.counts().expect("数得出").total, 0);
+    assert_eq!(队列(&现场, &filter).len(), 2, "两份拷贝都该回到队列里");
+
+    // 放回去那一侧同样：两个变体都得重新兑现成命中。
+    let 放回 =
+        triage::redo_batch(&mut 现场.catalog, &mut 现场.store, applied.batch).expect("放得回去");
+    assert_eq!(放回.matched, 2);
+    assert!(队列(&现场, &filter).is_empty());
+}
+
+#[test]
+fn 几份同内容的拷贝盖掉过旧裁决时撤销照样把它们全都放回队列() {
+    // 上一条的**盖掉了旧裁决**那一版。撤第一份时锚上留下的是那条**旧的**，不是空的——
+    // 判据要是写成「锚上是不是空的」，第二份就会被当成「别人的账」，它的中立库结论
+    // 留着一条指向已经不存在的裁决的「命中」，再也回不到队列里。
+    let dir = temp_dir("triage-重复拷贝-盖掉");
+    let 同一份 = 汉化版(0xD4);
+    for name in ["FC/甲 某汉化.zip", "FC/乙 某汉化.zip"] {
+        写(
+            &dir.path().join(name),
+            &zip_container(&[ZipEntrySpec::stored("rom.nes", 同一份.clone())]),
+        );
+    }
+    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+    let mut options = ScanOptions::named(dir.path(), "库");
+    options.jobs = Jobs::Fixed(1);
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
+    let mut 现场 = 现场 {
+        dir,
+        catalog,
+        repo: 建_dat(),
+        store: Store::in_memory().expect("开得出沉淀库"),
+    };
+    跑识别(&mut 现场);
+    let filter = Filter {
+        name_contains: vec!["某汉化".to_string()],
+        ..Filter::default()
+    };
+    // 那条锚上先有一条裁决（换台机器导进来的、或者别处那份拷贝早先裁过的）。
+    let 锚 = 队列(&现场, &filter)[0].anchor(库名);
+    let 旧的 = verdict::Verdict::now(
+        锚,
+        Decision::Release(verdict::Facts {
+            work: "先定成这个".to_string(),
+            ..verdict::Facts::default()
+        }),
+    );
+    现场.store.put(&旧的).expect("写得进");
+
+    let applied = 裁(&mut 现场, &filter, &手工("改成那个"));
+    assert_eq!((applied.verdicts, applied.replaced), (2, 2), "两条都盖在同一条锚上");
+
+    let account =
+        triage::undo_batch(&mut 现场.catalog, &mut 现场.store, applied.batch).expect("撤得掉");
+    assert_eq!(account.kept, 0, "第二份不是「别人的账」");
+    assert_eq!(account.variants, 2, "两个变体的结论都该放回去");
+    let 现在 = 现场.store.all().expect("读得出");
+    assert_eq!(现在.len(), 1);
+    assert_eq!(现在[0], 旧的, "盖掉的那条旧裁决要原样回来");
+    assert_eq!(队列(&现场, &filter).len(), 2, "两份拷贝都该回到队列里");
+}
+
+#[test]
+fn 撤销本身撤得回来() {
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    let filter = Filter {
+        name_contains: vec!["外星科技".to_string()],
+        ..Filter::default()
+    };
+    let applied = 裁(&mut 现场, &filter, &手工("外星科技的某作"));
+    triage::undo_batch(&mut 现场.catalog, &mut 现场.store, applied.batch).expect("撤得掉");
+    assert_eq!(队列(&现场, &filter).len(), 2);
+
+    // 放回去：一个字都不必用户重打，那一批当初落下的每一条原样记在批里。
+    let 放回 =
+        triage::redo_batch(&mut 现场.catalog, &mut 现场.store, applied.batch).expect("放得回去");
+    assert_eq!(放回.verdicts, 2);
+    assert_eq!(放回.matched, 2, "中立库那一半也该当场兑现");
+    assert_eq!(现场.store.counts().expect("数得出").total, 2);
+    assert!(队列(&现场, &filter).is_empty());
+
+    // 撤过的批不许再撤一次，放回去的批不许再放一次——两句都得说得出口。
+    assert!(
+        triage::redo_batch(&mut 现场.catalog, &mut 现场.store, applied.batch).is_err(),
+        "已经在册的一批不该再放一次",
+    );
+    // 再撤一次照样干净。
+    triage::undo_batch(&mut 现场.catalog, &mut 现场.store, applied.batch).expect("撤得掉");
+    assert_eq!(现场.store.counts().expect("数得出").total, 0);
+    assert_eq!(队列(&现场, &filter).len(), 2);
+    assert!(
+        triage::undo_batch(&mut 现场.catalog, &mut 现场.store, applied.batch).is_err(),
+        "撤过的一批不该再撤一次",
+    );
+}
+
+#[test]
+fn 跑过识别之后那一批只撤得回沉淀库那一半并如实说出来() {
+    // 中立库那一半的快照**可再生**，所以它跟着中立库活：重跑一趟识别就清掉了
+    // （`Catalog::clear_identifications`）。那时撤销只回滚得了沉淀库那一半——
+    // **说出来**比让人以为队列已经回来了强（ADR-0021 那条纪律）。
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    let filter = Filter {
+        name_contains: vec!["外星科技".to_string()],
+        ..Filter::default()
+    };
+    let applied = 裁(&mut 现场, &filter, &手工("外星科技的某作"));
+    跑识别(&mut 现场);
+
+    let account =
+        triage::undo_batch(&mut 现场.catalog, &mut 现场.store, applied.batch).expect("撤得掉");
+    assert_eq!(account.removed, 2, "沉淀库那一半照样撤得干净");
+    assert!(!account.catalog_rolled_back, "快照没了就该如实说没回滚");
+    // 再跑一趟识别，它们照样回到队列——那是这条路一直都在的出口。
+    跑识别(&mut 现场);
+    assert_eq!(队列(&现场, &filter).len(), 2);
+}
+
 #[test]
 fn 报告说得出按各个轴一次能覆盖多少() {
     let mut 现场 = 建现场();

@@ -34,6 +34,24 @@
 //!   DAT」。要复核它们，把 `跳过` 写进 [`Filter::states`]。
 //! - 裁决过的一律退出队列，包括 `认不出` 那一档：**「我看过了，认不出」与「还没人看过」
 //!   是两件事**，混在一起的话人会被反复问同一个问题。
+//!
+//! ## 撤销：粒度是**批**，两边一起回去
+//!
+//! **批量的胆量来自撤销可信。** 一次「整批通过三千条」按错了却撤不干净，批量这件事本身
+//! 就不成立——所以一次 [`apply`] 落下的那些记成一**批**（[`verdict::Batch`]），
+//! [`undo_batch`] 把**沉淀库与中立库两边**一起退回这一批落下之前的样子，
+//! 撤完当场列队列就看得见它们回来了，**不必重跑识别、也不要 DAT 库在手边**。
+//!
+//! 撤销放回中立库的那一份不是现编的，是这一批落下之前
+//! [`Catalog::stash_conclusions`](crate::catalog::Catalog::stash_conclusions) 收起来的
+//! ——**上一趟识别自己算出来的东西**。所以「重算一遍是什么样」与「眼下是什么样」
+//! 照旧只有一个答案，[`undo_batch`] 的文档把这笔账算全了（原挂账 D102）。
+//!
+//! 撤销本身也撤得回来：[`redo_batch`] 把那一批原样放回去，一个字都不必用户重打。
+//!
+//! [`plan_forget`] / [`forget`] 那一对是**另一件事**——按选择器忘掉散落的裁决
+//! （典型：别人分享来、`triage import` 收下的那些，它们不属于本机任何一批）。
+//! 它只动沉淀库，理由与出口都写在 [`forget`] 上。
 
 pub mod queue;
 pub mod report;
@@ -58,6 +76,15 @@ pub enum TriageError {
     /// 沉淀库读写失败。
     #[error(transparent)]
     Verdict(#[from] VerdictError),
+    /// 点名要撤的那一**批**根本不在。
+    #[error("沉淀库里没有第 {0} 批。`romcat triage batches` 列得出有哪几批")]
+    NoBatch(i64),
+    /// 那一批已经撤过了。
+    #[error("第 {0} 批已经撤过了。要放回去用 `romcat triage redo --batch {0}`")]
+    AlreadyUndone(i64),
+    /// 那一批还没撤过，没什么可放回去的。
+    #[error("第 {0} 批还没撤过，没什么可放回去的")]
+    NotUndone(i64),
 }
 
 /// **待确认队列**里的一条。
@@ -122,6 +149,19 @@ impl Item {
                 library: library.to_string(),
                 variant_key: self.variant.key.clone(),
             },
+        }
+    }
+
+    /// 这一条的裁决钉在哪一份内容上：`(成员的键, 容器内部路径)`。
+    ///
+    /// 拿不到内容判据时退回**主文件**——那时锚是路径锚，这两样只用来在投影出来的那条
+    /// 候选上说清「是包里的哪一个」。**落下与重做共用它**：两处各写一遍的话，重做出来的
+    /// 那条候选会指向另一份内容，而那正是「重放一遍结果一模一样」这句话的反面。
+    #[must_use]
+    pub fn representative(&self) -> (String, String) {
+        match &self.print {
+            Some(print) => (print.member.clone(), print.inner.clone()),
+            None => (self.variant.main_key.clone(), String::new()),
         }
     }
 
@@ -531,6 +571,27 @@ pub enum DecisionSpec {
     Unknown,
 }
 
+impl DecisionSpec {
+    /// 「裁成什么」这句话。计划书、批的摘要、界面上那一行**共用它**。
+    ///
+    /// 收在核心库里而不是各处各写一句：**批的摘要要与当初计划书上那句话对得上**，
+    /// 不然半年后按编号撤销的人看着摘要，认不出它就是自己当初看过并点头的那一批。
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Pick(nth) => format!("采用各自的第 {nth} 条候选"),
+            Self::Manual(work) => format!("作品《{work}》"),
+            Self::NoRelease { work } => format!(
+                "确认没有发行版{}",
+                work.as_deref()
+                    .map(|work| format!("，挂在作品《{work}》下"))
+                    .unwrap_or_default()
+            ),
+            Self::Unknown => "都不对，而且认不出是什么".to_string(),
+        }
+    }
+}
+
 /// 人补上去的那几样事实。给了就**盖过**从候选里读出来的那一份。
 ///
 /// **汉化组**与**版本**永远只能从这里来：自动识别只保证做到发行版级，
@@ -591,6 +652,30 @@ pub struct Decide {
     pub note: Option<String>,
     /// 路径锚要记是哪一份主库。
     pub library: String,
+}
+
+impl Decide {
+    /// 这一批**裁成什么**，写成一句给人看的话。落进 [`verdict::Batch::summary`]。
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let mut text = self.spec.describe();
+        for (label, value) in [
+            ("平台", &self.overrides.platform),
+            ("地区", &self.overrides.region),
+            ("序列号", &self.overrides.serial),
+            ("语言", &self.overrides.languages),
+            ("汉化组", &self.overrides.team),
+            ("版本", &self.overrides.version),
+        ] {
+            if let Some(value) = value {
+                text.push_str(&format!("；{label} {value}"));
+            }
+        }
+        if let Some(mark) = self.overrides.chinese {
+            text.push_str(&format!("；中文 {}", mark.label()));
+        }
+        text
+    }
 }
 
 /// 一次裁决**还在起草**的样子：四种说法挑一种，外加人补的那几样事实。
@@ -725,6 +810,15 @@ pub struct Plan {
     pub decided: Vec<Decided>,
     /// 落不下去的，连原因。
     pub blocked: Vec<Blocked>,
+    /// **裁成什么**，写成一句给人看的话（[`Decide::summary`]）。
+    ///
+    /// 它跟着计划走到 [`apply`]，落成那一**批**的摘要。计划书上印的与半年后按编号撤销时
+    /// 看见的因此是同一句话。
+    pub summary: String,
+    /// 记的那一句为什么，跟着计划落进批里。
+    pub note: Option<String>,
+    /// 这一批落在哪份主库上（路径锚里记的那个名字）。
+    pub library: String,
 }
 
 impl Plan {
@@ -755,7 +849,12 @@ impl Plan {
 /// # Errors
 /// 读沉淀库失败时返回错误。
 pub fn plan(store: &Store, items: &[Item], decide: &Decide) -> Result<Plan, TriageError> {
-    let mut plan = Plan::default();
+    let mut plan = Plan {
+        summary: decide.summary(),
+        note: decide.note.clone(),
+        library: decide.library.clone(),
+        ..Plan::default()
+    };
     for item in items {
         let decision = match resolve(item, decide) {
             Ok(decision) => decision,
@@ -837,6 +936,8 @@ pub struct Applied {
     pub matched: u64,
     /// 立刻变成**跳过**的变体数（确认没有发行版的那些）。
     pub skipped: u64,
+    /// 这一趟落成了第几**批**。**撤销点名的就是它**（[`undo_batch`]）。
+    pub batch: i64,
 }
 
 /// 把计划真正落下：写沉淀库，并**立刻**在中立库里兑现。
@@ -847,6 +948,19 @@ pub struct Applied {
 ///
 /// 下一趟识别会把中立库这一半整批清掉再照沉淀库重放一遍，结果与这里写下的一模一样
 /// （[`Projector`] 两处共用）。
+///
+/// ## 落下的同时记成一**批**
+///
+/// 一次 `apply` 就是一批（[`verdict::Batch`]），**撤销以它为粒度**（[`undo_batch`]）。
+/// 记批要在动手之前，而且分两处记，各按各的身份：
+///
+/// - **沉淀库**记这一批落下的那些、以及每条**盖掉了什么**——被盖掉的那条不可再生，
+///   除了那儿没有第二份。
+/// - **中立库**记这几个变体眼下的结论与候选（[`Catalog::stash_conclusions`]）——
+///   那是上一趟识别自己算出来的东西，可再生，跟着中立库活。
+///
+/// 顺序是**先记批、再落裁决**。反过来的话，中途出错会留下一批已经落库、却没有一处
+/// 记着它们是哪一批的裁决——那时撤销从一开始就无从谈起。
 ///
 /// # Errors
 /// 写中立库或沉淀库失败时返回错误。
@@ -860,8 +974,31 @@ pub fn apply(
         .iter()
         .map(|item| (item.variant.key.as_str(), item))
         .collect();
+    // **先把批记下来。** `before` 要在落下之前读——落完再读，读到的就是刚写进去的那条，
+    // 而那正是撤销时要拿来还原的东西。
+    let mut rows = Vec::with_capacity(plan.decided.len());
+    for row in &plan.decided {
+        let (member, inner) = match by_key.get(row.key.as_str()) {
+            Some(item) => item.representative(),
+            None => (row.key.clone(), String::new()),
+        };
+        rows.push(verdict::BatchRow {
+            variant_key: row.key.clone(),
+            member,
+            inner,
+            after: row.verdict.clone(),
+            before: store.find(&row.verdict.anchor)?,
+        });
+    }
+    let batch = store.put_batch(&plan.library, &plan.summary, plan.note.as_deref(), &rows)?;
+    let keys: Vec<&str> = rows.iter().map(|row| row.variant_key.as_str()).collect();
+    catalog.stash_conclusions(batch, &keys)?;
+
+    let mut account = Applied {
+        batch,
+        ..Applied::default()
+    };
     let mut projector = Projector::new();
-    let mut account = Applied::default();
     // 结论攒一批写一次：`write_identifications` 一次一个事务，几百条各开一次
     // 是把一件批量的事做成几百件零碎的事。
     let mut records = Vec::new();
@@ -889,10 +1026,7 @@ pub fn apply(
             )?;
             continue;
         }
-        let (member, inner) = match &item.print {
-            Some(print) => (print.member.clone(), print.inner.clone()),
-            None => (item.variant.main_key.clone(), String::new()),
-        };
+        let (member, inner) = item.representative();
         let Some(record) =
             projector.project(catalog, &item.variant, &row.verdict, &member, &inner)?
         else {
@@ -906,6 +1040,178 @@ pub fn apply(
         records.push(record);
     }
     catalog.write_identifications(&records)?;
+    Ok(account)
+}
+
+/// 撤掉一**批**之后的账。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Undone {
+    /// 撤的是第几批。
+    pub batch: i64,
+    /// 从沉淀库里删掉了几条。
+    pub removed: u64,
+    /// 其中把**它盖掉的那条旧裁决**放回去了几条。
+    pub restored: u64,
+    /// **没动**几条：同一条锚上后来有人重新裁过，那是别人的账。
+    pub kept: u64,
+    /// 中立库里放回了几个变体的结论。
+    pub variants: u64,
+    /// 中立库那一半回滚得了吗。
+    ///
+    /// 为假就是这一批的快照已经随重跑识别清掉了（[`Catalog::clear_identifications`]），
+    /// 那时只回滚得了沉淀库那一半——**该如实说出来**，而不是让人以为队列已经回来了。
+    pub catalog_rolled_back: bool,
+}
+
+/// 撤掉一**批**：**沉淀库与中立库两边都回到这一批落下之前的样子**。
+///
+/// ## 它凭什么不算「当场手改投影」
+///
+/// 原挂账 D102 当初维持原样，理由是：中立库那一半是投影，重算是它唯一的权威来路，
+/// 当场手改会让「重算一遍是什么样」与「眼下是什么样」有两个答案。
+///
+/// **这一条顾虑是对的，而这里正是按它办的。** 撤销放回去的不是现编的一份结论，是
+/// [`Catalog::stash_conclusions`] 在这一批落下之前收起来的那一份——**上一趟识别自己
+/// 算出来的东西**，一个字节都不是这里编的。放回去之后两个答案照旧是同一个。
+///
+/// 反过来说，D102 维持原样的那个形状才是两个答案真的分了家：裁决从沉淀库里删掉了，
+/// 而它投影出来的那条「命中」还留在中立库里——那时「重算一遍」说的是「回队列」，
+/// 「眼下」说的是「命中《某作品》」。
+///
+/// 还有一层：选项 B（`undo` 顺手重算一遍）要 **DAT 库在手边**，而 `undo` 不要求。
+/// 这条路**一个字节的 DAT 都不要**——要放回去的东西早就在中立库里躺着了。
+///
+/// ## 只动这一批
+///
+/// 每条先核对「这条锚上眼下的裁决还是这一批当初落下的那条吗」。不是就一个字都不动
+/// （后来有人在同一条锚上重新裁过），那一条的中立库结论也不碰——它眼下的样子是那条
+/// **新**裁决的投影，拿一份更老的快照盖上去才是真的改坏了。
+///
+/// # Errors
+/// 没这一批、这一批已经撤过了、或者读写两份库失败时返回错误。
+pub fn undo_batch(
+    catalog: &mut Catalog,
+    store: &mut Store,
+    batch: i64,
+) -> Result<Undone, TriageError> {
+    let found = store.batch(batch)?.ok_or(TriageError::NoBatch(batch))?;
+    if found.undone() {
+        return Err(TriageError::AlreadyUndone(batch));
+    }
+    let mut account = Undone {
+        batch,
+        ..Undone::default()
+    };
+    let mut rolled_back: Vec<String> = Vec::new();
+    // **重复拷贝是真机上的常态**：同一份内容躺着好几份，它们钉的是同一条**内容锚**，
+    // 而一批里可能同时裁了好几份。第二份走到这儿时，锚上那条已经被第一份处理过了——
+    // 那不是「别人重新裁过」，那就是我们自己刚留下的样子。分不清的话，第二份的中立库
+    // 结论会留着一条指向已经不存在的裁决的「命中」，也就是这一票要消掉的那个形状。
+    //
+    // 判据是「**锚上眼下这个样子是不是这一批自己刚留下的**」，不是「锚上是不是空的」：
+    // 这一批盖掉过一条旧裁决时，第一份撤完锚上留下的是那条**旧的**，不是空的。
+    let mut mine: BTreeSet<Anchor> = BTreeSet::new();
+    for row in store.batch_rows(batch)? {
+        let current = store.find(row.anchor())?;
+        if current.as_ref() == Some(&row.after) {
+            store.remove(row.anchor())?;
+            mine.insert(row.after.anchor.clone());
+            account.removed += 1;
+            if let Some(before) = &row.before {
+                store.put(before)?;
+                account.restored += 1;
+            }
+        } else if !(mine.contains(row.anchor()) && current == row.before) {
+            account.kept += 1;
+            continue;
+        }
+        rolled_back.push(row.variant_key);
+    }
+    account.catalog_rolled_back = catalog.stashed(batch)? > 0;
+    if account.catalog_rolled_back {
+        let keys: Vec<&str> = rolled_back.iter().map(String::as_str).collect();
+        account.variants = catalog.restore_conclusions(batch, &keys)?;
+    }
+    store.mark_batch_undone(batch, true)?;
+    Ok(account)
+}
+
+/// 把撤掉的那一**批**放回去。**撤销本身撤得回来，走的就是这条。**
+///
+/// 它不是「再裁一遍」——一个字都不必用户重打：这一批当初落下的每一条原样记在
+/// [`verdict::BatchRow::after`] 里，放回去就是把它们重新写进沉淀库，再走
+/// [`Projector`] 那条**与识别共用的**路投影回中立库。
+///
+/// 与 [`undo_batch`] 对称，它也只动这一批：每条先核对「这条锚上眼下还是撤销之后留下的
+/// 那个样子吗」，不是就不动。
+///
+/// **中立库那一半的快照不重新收一遍。** 快照说的是「这一批第一次落下之前是什么样」，
+/// 那句话不因为撤了又放回去而改变；重新收一遍反而会把撤销刚放回去的那一份当成
+/// 「之前」，于是再撤一次就撤了个寂寞。
+///
+/// # Errors
+/// 没这一批、这一批没撤过、或者读写两份库失败时返回错误。
+pub fn redo_batch(
+    catalog: &mut Catalog,
+    store: &mut Store,
+    batch: i64,
+) -> Result<Applied, TriageError> {
+    let found = store.batch(batch)?.ok_or(TriageError::NoBatch(batch))?;
+    if !found.undone() {
+        return Err(TriageError::NotUndone(batch));
+    }
+    let mut account = Applied {
+        batch,
+        ..Applied::default()
+    };
+    let mut projector = Projector::new();
+    let mut records = Vec::new();
+    // 与撤销那一侧对称：**重复拷贝是真机上的常态**，一批里可能有好几份同内容的拷贝。
+    // 第二份走到这儿时锚上那条已经是这一批自己刚放回去的了——那不是「别人裁过」，
+    // 不写第二遍，但它的中立库那一半照样要补上。
+    let mut mine: BTreeSet<Anchor> = BTreeSet::new();
+    for row in store.batch_rows(batch)? {
+        let current = store.find(row.anchor())?;
+        let already = mine.contains(row.anchor()) && current.as_ref() == Some(&row.after);
+        if current != row.before && !already {
+            continue;
+        }
+        if !already {
+            if store.put(&row.after)? {
+                account.added += 1;
+            } else {
+                account.replaced += 1;
+            }
+            mine.insert(row.after.anchor.clone());
+            account.verdicts += 1;
+            if row.after.anchor.is_shareable() {
+                account.content_anchored += 1;
+            } else {
+                account.path_anchored += 1;
+            }
+        }
+        let Some(variant) = catalog.variant(&row.variant_key)? else {
+            continue;
+        };
+        if matches!(row.after.decision, Decision::Unknown) {
+            catalog
+                .set_identification_reason(&variant.key, Some(identify::VERDICT_UNKNOWN_REASON))?;
+            continue;
+        }
+        let Some(record) =
+            projector.project(catalog, &variant, &row.after, &row.member, &row.inner)?
+        else {
+            continue;
+        };
+        match record.state {
+            State::Matched => account.matched += 1,
+            State::Skipped => account.skipped += 1,
+            _ => {}
+        }
+        records.push(record);
+    }
+    catalog.write_identifications(&records)?;
+    store.mark_batch_undone(batch, false)?;
     Ok(account)
 }
 
@@ -955,9 +1261,13 @@ pub fn plan_forget(
 
 /// 真的忘掉。返回忘掉了几条。
 ///
-/// **中立库那一半不在这里回滚**：下一趟 `romcat identify` 会把结论整批重算，
-/// 那时这几条自然回到队列里。当场改中立库的话，「重算一遍是什么样」与「眼下是什么样」
-/// 就有两个答案了。
+/// **这一条只动沉淀库**，中立库那一半要等下一趟 `romcat identify` 重算才回到队列里。
+///
+/// 那不是遗留的将就，是这条路能给的全部：它按**选择器**选中的可以是任何一条裁决——
+/// 别人分享来、`triage import` 收下的那些不属于本机任何一批，也就没有一份「落下之前
+/// 是什么样」的快照可放回去。
+///
+/// **要两边一起回去，用 [`undo_batch`]**：本机自己裁下去的每一批都记着那份快照。
 ///
 /// # Errors
 /// 写沉淀库失败时返回错误。

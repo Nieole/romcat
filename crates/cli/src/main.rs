@@ -39,7 +39,7 @@ use romcat_core::sublibrary::{self, Sublibrary};
 use romcat_core::sync;
 use romcat_core::title;
 use romcat_core::titledb;
-use romcat_core::triage::{self, DecisionSpec, Filter};
+use romcat_core::triage::{self, Filter};
 use romcat_core::verdict::{self, Store};
 use romcat_core::workspace::{self, Slug};
 use romcat_core::zh;
@@ -1061,7 +1061,9 @@ fn main() -> ExitCode {
         Command::Triage(TriageCommand::List(args)) => run_triage_list(&args),
         Command::Triage(TriageCommand::Show(args)) => run_triage_show(&args),
         Command::Triage(TriageCommand::Decide(args)) => run_triage_decide(&args),
+        Command::Triage(TriageCommand::Batches(args)) => run_triage_batches(&args),
         Command::Triage(TriageCommand::Undo(args)) => run_triage_undo(&args),
+        Command::Triage(TriageCommand::Redo(args)) => run_triage_redo(&args),
         Command::Triage(TriageCommand::Export(args)) => run_triage_export(&args),
         Command::Triage(TriageCommand::Import(args)) => run_triage_import(&args),
         Command::Sublibrary(SublibraryCommand::Set(args)) => run_sublibrary_set(&args),
@@ -2598,8 +2600,13 @@ enum TriageCommand {
     Show(TriageShowArgs),
     /// **批量裁决**：按目录、按候选作品、按命名规律一次套用几百条
     Decide(TriageDecideArgs),
-    /// 忘掉裁决。批量下错了得走得回来
+    /// 列出落过的那些**批**：编号、什么时候、裁成什么、几条、撤过没有
+    Batches(TriageBatchesArgs),
+    /// **按批撤销**：中立库与沉淀库两边都回到那一批落下之前，不必重跑识别。
+    /// 不给 `--batch` 时按选择器忘掉散落的裁决（只动沉淀库那一半）
     Undo(TriageUndoArgs),
+    /// 把撤掉的那一**批**原样放回去。撤销本身撤得回来
+    Redo(TriageRedoArgs),
     /// 把沉淀库导出成可分享的一份 JSON——这份数据补的正是 TOSEC 缺的中文汉化部分
     Export(TriageExportArgs),
     /// 收下别人分享的一份裁决
@@ -2782,17 +2789,47 @@ struct TriageDecideArgs {
 }
 
 #[derive(Debug, Args)]
+struct TriageBatchesArgs {
+    #[command(flatten)]
+    common: TriageCommonArgs,
+    /// 列几批（新的在前）
+    #[arg(long, value_name = "批数", default_value_t = 20)]
+    limit: usize,
+}
+
+#[derive(Debug, Args)]
 struct TriageUndoArgs {
     #[command(flatten)]
     common: TriageCommonArgs,
     #[command(flatten)]
     filter: TriageFilterArgs,
+    /// **按批撤销**第几批（编号见 `romcat triage batches`）。
+    ///
+    /// 走这条时**中立库与沉淀库两边都回到那一批落下之前**，撤完当场 `triage list`
+    /// 就看得见它们回来了
+    #[arg(long, value_name = "编号")]
+    batch: Option<i64>,
+    /// 撤掉**最近那一批**。等价于 `--batch <最新的编号>`
+    #[arg(long, conflicts_with = "batch")]
+    last: bool,
     /// 只排计划，不忘
     #[arg(long)]
     dry_run: bool,
     /// 看过计划之后拿它点头。**一次忘不止一条时必须给**
     #[arg(long)]
     yes: bool,
+}
+
+#[derive(Debug, Args)]
+struct TriageRedoArgs {
+    #[command(flatten)]
+    common: TriageCommonArgs,
+    /// 把第几批放回去（编号见 `romcat triage batches`）
+    #[arg(long, value_name = "编号")]
+    batch: Option<i64>,
+    /// 把**最近撤掉的那一批**放回去
+    #[arg(long, conflicts_with = "batch")]
+    last: bool,
 }
 
 #[derive(Debug, Args)]
@@ -3267,6 +3304,14 @@ fn run_triage_decide(args: &TriageDecideArgs) -> ExitCode {
         "沉淀库在 {}——它**不跟中立库走**，删掉中立库重扫也不会丢这些裁决。",
         site.store.location()
     );
+    // **批量的胆量来自撤销可信**：按错了怎么走回来，就印在按下去之后那一行上。
+    println!(
+        "这是第 {} 批。按错了整批撤回：`romcat triage undo --batch {}{}`\n\
+         ——中立库与沉淀库两边都回到刚才，不必重跑识别。",
+        applied.batch,
+        applied.batch,
+        args.common.选择器(),
+    );
     ExitCode::SUCCESS
 }
 
@@ -3310,7 +3355,9 @@ impl TriageDecideArgs {
 fn print_verdict_plan(plan: &triage::Plan, decide: &triage::Decide) {
     println!("批量裁决计划");
     println!("{}", "═".repeat(24));
-    println!("裁成            {}", describe_spec(&decide.spec));
+    // 「裁成什么」这句话由核心库说了算：计划书上印的这一句，与半年后按编号
+    // 撤销时在批的摘要里看见的那一句，必须是同一句（`DecisionSpec::describe`）。
+    println!("裁成            {}", decide.spec.describe());
     for (label, value) in [
         ("平台", &decide.overrides.platform),
         ("地区", &decide.overrides.region),
@@ -3360,22 +3407,229 @@ fn print_verdict_plan(plan: &triage::Plan, decide: &triage::Decide) {
     }
 }
 
-fn describe_spec(spec: &DecisionSpec) -> String {
-    match spec {
-        DecisionSpec::Pick(nth) => format!("采用各自的第 {nth} 条候选"),
-        DecisionSpec::Manual(work) => format!("作品《{work}》"),
-        DecisionSpec::NoRelease { work } => format!(
-            "确认没有发行版{}",
-            work.as_deref()
-                .map(|w| format!("，挂在作品《{w}》下"))
-                .unwrap_or_default()
-        ),
-        DecisionSpec::Unknown => "都不对，而且认不出是什么".to_string(),
+/// 列出落过的那些**批**。
+fn run_triage_batches(args: &TriageBatchesArgs) -> ExitCode {
+    let site = match args.common.open() {
+        Ok(site) => site,
+        Err(message) => return fail(message),
+    };
+    let batches = match site.store.batches(&site.library, args.limit) {
+        Ok(batches) => batches,
+        Err(error) => return fail(format!("沉淀库读不动：{error}")),
+    };
+    if batches.is_empty() {
+        println!("主库「{}」上还没有落过一批裁决。", site.library);
+        return ExitCode::SUCCESS;
     }
+    println!("落过的那些批（新的在前）");
+    println!("{}", "═".repeat(24));
+    for batch in &batches {
+        println!(
+            "#{}  {}  {} 条  {}",
+            batch.id,
+            when(batch.decided_at),
+            thousands(batch.rows),
+            if batch.undone() { "已撤" } else { "在册" },
+        );
+        println!("    {}", batch.summary);
+        if let Some(note) = &batch.note {
+            println!("    「{note}」");
+        }
+    }
+    println!(
+        "\n撤掉一批：`romcat triage undo --batch <编号>{}`——中立库与沉淀库两边\n\
+         都回到那一批落下之前，不必重跑识别。放回去用 `romcat triage redo --batch <编号>`。",
+        args.common.选择器(),
+    );
+    ExitCode::SUCCESS
+}
+
+/// 一个时刻（UNIX 纪元起的秒）写成给人看的一行，**UTC**。
+///
+/// 自己折而不是拉一个日期库进来：整个仓库到这一票为止一个时刻都不往外印，为一行
+/// 「落于 ……」加一个依赖不划算。**不认本地时区**——那要读时区库，而这一行的用处只是
+/// 让人把几批分得开、认得出哪批是刚才那一批。`列得出这一批是什么时候落的` 钉住它。
+fn when(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rest = secs.rem_euclid(86_400);
+    // 1970-01-01 起的天数折成年月日：闰年四百年一循环，不必拉一个日期库进来。
+    let mut year = 1970;
+    let mut left = days;
+    loop {
+        let len = if leap(year) { 366 } else { 365 };
+        if left < len {
+            break;
+        }
+        left -= len;
+        year += 1;
+    }
+    let lengths = [
+        31,
+        if leap(year) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month = 1;
+    for len in lengths {
+        if left < len {
+            break;
+        }
+        left -= len;
+        month += 1;
+    }
+    format!(
+        "{year:04}-{month:02}-{:02} {:02}:{:02}",
+        left + 1,
+        rest / 3_600,
+        (rest % 3_600) / 60,
+    )
+}
+
+fn leap(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+/// 把撤掉的那一批放回去。
+fn run_triage_redo(args: &TriageRedoArgs) -> ExitCode {
+    let mut site = match args.common.open() {
+        Ok(site) => site,
+        Err(message) => return fail(message),
+    };
+    let batch = match pick_batch(&site, args.batch, args.last, true) {
+        Ok(batch) => batch,
+        Err(message) => return fail(message),
+    };
+    match triage::redo_batch(&mut site.catalog, &mut site.store, batch) {
+        Ok(applied) => {
+            println!(
+                "第 {batch} 批放回去了：沉淀库 {} 条，中立库当场兑现 {} 条命中、{} 条跳过。",
+                thousands(applied.verdicts),
+                thousands(applied.matched),
+                thousands(applied.skipped),
+            );
+            println!("再撤一次：`romcat triage undo --batch {batch}`。");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(format!("放不回去：{error}")),
+    }
+}
+
+/// 这一趟要动哪一批：`--batch` 点名的，或者 `--last` 挑出来的那一个。
+///
+/// `undone` 说的是要挑「已经撤掉的」还是「还在册的」那一批——`--last` 两边挑的不是
+/// 同一个：撤销要最近落下的那一批，放回去要最近撤掉的那一批。
+fn pick_batch(
+    site: &Site,
+    batch: Option<i64>,
+    last: bool,
+    undone: bool,
+) -> Result<i64, String> {
+    if let Some(batch) = batch {
+        return Ok(batch);
+    }
+    if !last {
+        return Err(
+            "要么 `--batch <编号>` 点名一批，要么 `--last` 挑最近那一批。\n\
+             `romcat triage batches` 列得出有哪几批。"
+                .to_string(),
+        );
+    }
+    let batches = site
+        .store
+        .batches(&site.library, 0)
+        .map_err(|error| format!("沉淀库读不动：{error}"))?;
+    batches
+        .iter()
+        .find(|batch| batch.undone() == undone)
+        .map(|batch| batch.id)
+        .ok_or_else(|| {
+            if undone {
+                "一批撤掉的都没有，没什么可放回去的。".to_string()
+            } else {
+                format!("主库「{}」上还没有落过一批裁决。", site.library)
+            }
+        })
+}
+
+/// **按批撤销**：两边一起回到那一批落下之前。
+fn run_triage_undo_batch(args: &TriageUndoArgs) -> ExitCode {
+    let mut site = match args.common.open() {
+        Ok(site) => site,
+        Err(message) => return fail(message),
+    };
+    let batch = match pick_batch(&site, args.batch, args.last, false) {
+        Ok(batch) => batch,
+        Err(message) => return fail(message),
+    };
+    let found = match site.store.batch(batch) {
+        Ok(Some(found)) => found,
+        Ok(None) => return fail(format!("沉淀库里没有第 {batch} 批。")),
+        Err(error) => return fail(format!("沉淀库读不动：{error}")),
+    };
+    println!(
+        "第 {batch} 批：{}，{} 条，落于 {}。",
+        found.summary,
+        thousands(found.rows),
+        when(found.decided_at),
+    );
+    if args.dry_run {
+        eprintln!("这是 --dry-run，一个字都没写。");
+        return ExitCode::SUCCESS;
+    }
+    if found.rows > 1 && !args.yes {
+        return fail(format!(
+            "这一批有 {} 条。看过上面那一行之后加 --yes 点头，或者用 --dry-run 只看不做。",
+            thousands(found.rows)
+        ));
+    }
+    let account = match triage::undo_batch(&mut site.catalog, &mut site.store, batch) {
+        Ok(account) => account,
+        Err(error) => return fail(format!("撤不掉：{error}")),
+    };
+    println!(
+        "已撤 {} 条（其中 {} 条把它盖掉的那条旧裁决放了回去）。",
+        thousands(account.removed),
+        thousands(account.restored),
+    );
+    if account.kept > 0 {
+        println!(
+            "另有 {} 条**没动**：同一条锚上后来有人重新裁过，那是别人的账。",
+            thousands(account.kept)
+        );
+    }
+    if account.catalog_rolled_back {
+        println!(
+            "中立库那一半也回去了（{} 个变体）：**现在就 `romcat triage list`，\n\
+             它们已经回到待裁决，不必重跑识别。**",
+            thousands(account.variants),
+        );
+    } else {
+        println!(
+            "⚠️ 这一批落下之后跑过识别（或者中立库重建过），\n\
+             中立库那一半的快照已经随那一趟清掉了。沉淀库这一半撤干净了；\n\
+             要让它们回到队列，再跑一趟 `romcat identify`。",
+        );
+    }
+    println!("放回去：`romcat triage redo --batch {batch}{}`。", args.common.选择器());
+    ExitCode::SUCCESS
 }
 
 /// 忘掉裁决。
 fn run_triage_undo(args: &TriageUndoArgs) -> ExitCode {
+    // **按批撤**是这条命令的主路**（票 gui-redesign/08）：给了 `--batch` / `--last`
+    // 就走那一条，两边一起回去。选择器那条路留着，它管的是不属于本机任何一批的裁决
+    // （典型：`triage import` 收下的别人那一份）。
+    if args.batch.is_some() || args.last {
+        return run_triage_undo_batch(args);
+    }
     let mut site = match args.common.open() {
         Ok(site) => site,
         Err(message) => return fail(message),
@@ -3385,7 +3639,11 @@ fn run_triage_undo(args: &TriageUndoArgs) -> ExitCode {
         Err(message) => return fail(message),
     };
     if filter.is_empty() {
-        return fail("`undo` 不接受空的选择器——那是把整份沉淀库忘掉。至少给一个条件。");
+        return fail(
+            "`undo` 不接受空的选择器——那是把整份沉淀库忘掉。至少给一个条件。\n\
+             要撤掉刚裁下去的那一批，用 `romcat triage undo --last`\
+            （中立库与沉淀库两边一起回去）。",
+        );
     }
     let plan = match triage::plan_forget(&site.catalog, &site.store, &filter, &site.library) {
         Ok(plan) => plan,
@@ -3411,7 +3669,11 @@ fn run_triage_undo(args: &TriageUndoArgs) -> ExitCode {
     match triage::forget(&mut site.store, &plan) {
         Ok(gone) => {
             println!("已忘掉 {} 条。", thousands(gone));
-            println!("中立库那一半下一趟 `romcat identify` 会重算——那时它们回到队列里。");
+            println!(
+                "**这一条只动了沉淀库**：中立库那一半下一趟 `romcat identify` 会重算，\n\
+                 那时它们回到队列里。要两边一起回去，按批撤：`romcat triage undo --batch <编号>`\n\
+                 （`romcat triage batches` 列得出有哪几批）。"
+            );
             ExitCode::SUCCESS
         }
         Err(error) => fail(format!("沉淀库写不动：{error}")),
@@ -5232,6 +5494,18 @@ fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 列得出这一批是什么时候落的() {
+        // 自己折的日期算术，闰年与月长两处最容易写错，各钉一个。
+        assert_eq!(when(0), "1970-01-01 00:00");
+        assert_eq!(when(86_399), "1970-01-01 23:59");
+        // 2024-02-29 是闰日：不认闰年的话这里会印成 3 月 1 日。
+        assert_eq!(when(1_709_164_800), "2024-02-29 00:00");
+        assert_eq!(when(1_709_251_199), "2024-02-29 23:59");
+        // 2025 不是闰年，同一个 3 月 1 日在它那儿早一天到。
+        assert_eq!(when(1_740_787_200), "2025-03-01 00:00");
+    }
 
     #[test]
     fn 参数能解析() {

@@ -224,6 +224,68 @@ fn 裁决即时写进沉淀库并从队列移除() {
 }
 
 #[test]
+fn 撤回这一批之后那些变体当场回到队列里() {
+    // 票 gui-redesign/08：**批量的胆量来自撤销可信**。界面这一层验的是那一下按得着，
+    // 而且走的是与命令行同一条路（`Queue::undo`，ADR-0005）——领域判断一条都不在界面里。
+    let mut app = 界面(demo::QUEUE_ROWS);
+    let 原有 = app.queue().queue().pending();
+    let (screen, _) = app.queue_and_site();
+    screen.pick(Axis::NameMark, "ACG汉化组");
+    let ctx = headless::context();
+    跑(&ctx, &mut app, 1);
+    let 这一批 = app.queue().queue().selected().len();
+    assert_eq!(这一批, 129);
+
+    let draft = Draft {
+        work: Some("勇者斗恶龙".to_string()),
+        ..Draft::default()
+    };
+    let (screen, site) = app.queue_and_site();
+    screen.preview(site, &draft);
+    screen.commit(site);
+    let batch = screen.applied().expect("落下了就该有账").batch;
+    assert!(batch > 0);
+    assert_eq!(
+        app.queue().queue().pending(),
+        原有 - 这一批 as u64,
+        "裁完了该从队列里消失",
+    );
+
+    let (screen, site) = app.queue_and_site();
+    screen.undo_last(site);
+    assert!(screen.error().is_none(), "{:?}", screen.error());
+    let undone = *app.queue().undone().expect("撤回了就该有账");
+    assert_eq!((undone.batch, undone.removed, undone.kept), (batch, 129, 0));
+    assert!(
+        undone.catalog_rolled_back,
+        "中立库那一半没回去的话，人得先去跑一趟识别才看得见——那正是这一票要消掉的",
+    );
+
+    // **不重新列、不重跑识别**：撤回那一下自己已经把队列整份重列过了。
+    assert_eq!(
+        app.queue().queue().pending(),
+        原有,
+        "撤回之后队列该回到裁决之前那么多条",
+    );
+    assert_eq!(app.site().store.counts().expect("读得出").total, 0);
+    assert!(
+        app.queue().applied().is_none(),
+        "撤回之后还挂着「已落下」那一行的话，那个按钮会把同一批再撤一次",
+    );
+
+    // **撤销本身也撤得回来**：按错了撤回、又发现撤错了，不该逼人把这一批重打一遍。
+    let (screen, site) = app.queue_and_site();
+    screen.redo_last(site);
+    assert!(screen.error().is_none(), "{:?}", screen.error());
+    assert_eq!(
+        app.queue().applied().expect("放回去了就该有账").verdicts,
+        129,
+    );
+    assert_eq!(app.queue().queue().pending(), 原有 - 这一批 as u64);
+    assert!(app.queue().undone().is_none());
+}
+
+#[test]
 fn 只裁选中的这一条也做得到() {
     // 批量是这件事成不成立的分界（ADR-0002），但「采用第 N 条候选」天生是逐条的动作：
     // 同一批里各人的候选不是同一部游戏。两种粒度都得有。

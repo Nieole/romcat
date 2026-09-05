@@ -27,8 +27,8 @@
 use std::collections::BTreeSet;
 
 use super::{
-    Applied, Axis, Decide, Filter, GroupRow, Item, Plan, State, TriageError, apply, fill_prints,
-    plan, survey, tally,
+    Applied, Axis, Decide, Filter, GroupRow, Item, Plan, State, TriageError, Undone, apply,
+    fill_prints, plan, redo_batch, survey, tally, undo_batch,
 };
 use crate::catalog::Catalog;
 use crate::verdict::{self, Store};
@@ -242,6 +242,58 @@ impl Queue {
         self.printed.retain(|key| !gone.contains(key.as_str()));
         self.refresh();
         Ok(account)
+    }
+
+    /// 撤掉一**批**，并把队列整份重列。
+    ///
+    /// **重列而不是就地补回去**：撤销把中立库那一半退回了这一批落下之前的样子
+    /// （结论、候选、变体身上那两条链接都在动），而队列是从中立库折出来的。就地拼一份
+    /// 的话，界面上看见的与库里躺着的迟早各说各的——那正是这一票要消掉的东西。
+    ///
+    /// 界面与命令行走的是同一条 [`undo_batch`]（ADR-0005：核心是独立的库）。
+    ///
+    /// # Errors
+    /// 没这一批、这一批已经撤过了、或者读写两份库失败时返回错误。
+    pub fn undo(
+        &mut self,
+        catalog: &mut Catalog,
+        store: &mut Store,
+        library: &str,
+        batch: i64,
+    ) -> Result<Undone, TriageError> {
+        let account = undo_batch(catalog, store, batch)?;
+        self.reload(catalog, store, library)?;
+        Ok(account)
+    }
+
+    /// 把撤掉的那一**批**放回去，并把队列整份重列。理由同 [`Queue::undo`]。
+    ///
+    /// # Errors
+    /// 没这一批、这一批没撤过、或者读写两份库失败时返回错误。
+    pub fn redo(
+        &mut self,
+        catalog: &mut Catalog,
+        store: &mut Store,
+        library: &str,
+        batch: i64,
+    ) -> Result<Applied, TriageError> {
+        let account = redo_batch(catalog, store, batch)?;
+        self.reload(catalog, store, library)?;
+        Ok(account)
+    }
+
+    /// 整份重列一次，**选择器原样留着**。
+    fn reload(
+        &mut self,
+        catalog: &Catalog,
+        store: &Store,
+        library: &str,
+    ) -> Result<(), TriageError> {
+        let filter = std::mem::take(&mut self.filter);
+        let index = verdict::Index::load(store, library)?;
+        *self = Self::load(catalog, &index)?;
+        self.set_filter(filter);
+        Ok(())
     }
 
     /// 重新过一遍选择器：选中的挪到前面，再按三个轴数一遍。

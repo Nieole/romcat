@@ -30,7 +30,7 @@
 //! ——裁决定了作品、识别认出了发行版，清完也是这个形状（原挂账 D48）。票 08 起
 //! 沉淀库把「确认没有发行版」记成一条**明确的裁决**，识别读那一条，不再猜。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::{OptionalExtension, params};
 
@@ -202,6 +202,69 @@ CREATE TABLE IF NOT EXISTS model_call(
     output_tokens INTEGER NOT NULL,
     -- 微美元。整数——一趟几百笔加起来正好是「有没有超上限」那个判断的输入。
     cost_micros   INTEGER NOT NULL
+) STRICT;
+
+-- 一**批**裁决落下之前，被它盖掉的那些**结论**（票 gui-redesign/08）。
+-- 撤销靠它把中立库那一半原样放回去，**不必重跑识别、也不必 DAT 库在手边**。
+--
+-- ## 它凭什么不算「当场手改投影」
+--
+-- 中立库里 `origin = 裁决` 那几行是**沉淀库的投影**，而重算是它唯一的权威来路
+-- （原挂账 D102）。这张表里存的**正是重算那条路自己的产物**——上一趟 `identify` 为这个
+-- 变体算出来的结论与候选，一个字节都不是撤销现编的。撤销把它原样放回去，于是
+-- 「重算一遍是什么样」与「眼下是什么样」照旧只有一个答案。
+--
+-- 反过来说才是撞车的那一侧：删掉裁决却把它投影出来的「命中」留在原地，那时两个答案
+-- 才真的分了家——而那正是 D102 维持原样时中立库的样子。
+--
+-- ## 它凭什么住在中立库里
+--
+-- 里面装的每一样都**可再生**（识别重跑一遍就有），所以它按中立库的规矩活：
+-- [`Catalog::clear_identifications`] 把它一起清掉。清掉之后那一批的中立库那一半就撤不
+-- 回来了——那是实话，也不是损失：那时该做的本来就是再跑一趟识别。
+CREATE TABLE IF NOT EXISTS verdict_batch_shadow(
+    -- 沉淀库里那一批的编号（`verdict::Batch::id`）。**编号由沉淀库发**——批本身住在
+    -- 那边，因为被盖掉的旧裁决除了那儿没有第二份。
+    batch       INTEGER NOT NULL,
+    variant_key TEXT    NOT NULL,
+    state       TEXT    NOT NULL,
+    reason      TEXT,
+    units       INTEGER NOT NULL,
+    candidates  INTEGER NOT NULL,
+    accepted    INTEGER NOT NULL,
+    nkit        INTEGER NOT NULL,
+    read_bytes  INTEGER NOT NULL,
+    -- 那时候变体挂在哪个作品、哪次发行上。队列里的条目这两样都是空的（队列的判据
+    -- 就是「一条自动通过的候选都没有」），存着是为了不去赌它。
+    work_id     INTEGER,
+    release_id  INTEGER,
+    PRIMARY KEY (batch, variant_key)
+) STRICT;
+
+-- 那时候的**候选**，一条一行。列与 `candidate` 一一对应——放回去就是原样插回那张表。
+--
+-- `ordinal` 是当初那张表里的 `id`，只为**把次序定死**：候选的次序是有意义的
+-- （`--pick 1` 挑的就是第一条），排序键漂一下，撤销之后同一条命令就挑中别人了。
+CREATE TABLE IF NOT EXISTS verdict_batch_shadow_candidate(
+    batch       INTEGER NOT NULL,
+    variant_key TEXT    NOT NULL,
+    ordinal     INTEGER NOT NULL,
+    member_key  TEXT    NOT NULL,
+    inner       TEXT    NOT NULL,
+    confidence  TEXT    NOT NULL,
+    accepted    INTEGER NOT NULL,
+    source      TEXT    NOT NULL,
+    dat         TEXT    NOT NULL,
+    platform    TEXT    NOT NULL,
+    game        TEXT    NOT NULL,
+    rom         TEXT    NOT NULL,
+    hashing     TEXT    NOT NULL,
+    convention  TEXT    NOT NULL,
+    evidence    TEXT    NOT NULL,
+    chinese     TEXT,
+    serial      TEXT,
+    release_id  INTEGER,
+    PRIMARY KEY (batch, variant_key, ordinal)
 ) STRICT;
 ";
 
@@ -1493,6 +1556,213 @@ impl Catalog {
         tx.commit().map_err(to_err)
     }
 
+    /// 把这些变体**眼下的结论**收进一批的快照里。批量裁决落下之前走这一步。
+    ///
+    /// 收的是结论、候选与变体身上那两条链接——也就是这一批马上要盖掉的全部东西。
+    /// 收进来的是**上一趟识别自己算出来的**那份，不是撤销现编的（见
+    /// `verdict_batch_shadow` 上的说明）。
+    ///
+    /// 同一批同一个变体收两次是**覆盖**：一批里一个变体只该有一份快照。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn stash_conclusions(
+        &mut self,
+        batch: i64,
+        keys: &[&str],
+    ) -> Result<u64, CatalogError> {
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        let mut stashed = 0;
+        {
+            let mut one = tx
+                .prepare(
+                    "INSERT OR REPLACE INTO verdict_batch_shadow(batch, variant_key, state,
+                         reason, units, candidates, accepted, nkit, read_bytes,
+                         work_id, release_id)
+                     SELECT ?1, i.variant_key, i.state, i.reason, i.units, i.candidates,
+                            i.accepted, i.nkit, i.read_bytes, v.work_id, v.release_id
+                     FROM identification i JOIN variant v ON v.key = i.variant_key
+                     WHERE i.variant_key = ?2",
+                )
+                .map_err(to_err)?;
+            let mut drop_old = tx
+                .prepare(
+                    "DELETE FROM verdict_batch_shadow_candidate
+                     WHERE batch = ?1 AND variant_key = ?2",
+                )
+                .map_err(to_err)?;
+            let mut candidates = tx
+                .prepare(
+                    "INSERT INTO verdict_batch_shadow_candidate(batch, variant_key, ordinal,
+                         member_key, inner, confidence, accepted, source, dat, platform,
+                         game, rom, hashing, convention, evidence, chinese, serial, release_id)
+                     SELECT ?1, variant_key, id, member_key, inner, confidence, accepted,
+                            source, dat, platform, game, rom, hashing, convention, evidence,
+                            chinese, serial, release_id
+                     FROM candidate WHERE variant_key = ?2",
+                )
+                .map_err(to_err)?;
+            for key in keys {
+                stashed += u64::try_from(one.execute(params![batch, key]).map_err(to_err)?)
+                    .unwrap_or(0);
+                drop_old.execute(params![batch, key]).map_err(to_err)?;
+                candidates.execute(params![batch, key]).map_err(to_err)?;
+            }
+        }
+        tx.commit().map_err(to_err)?;
+        Ok(stashed)
+    }
+
+    /// 一批的快照里还剩几个变体。**撤销之前问它**：为 0 就是这一批的中立库那一半
+    /// 已经随重跑识别清掉了，那时只回滚得了沉淀库那一半，该如实说出来。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn stashed(&self, batch: i64) -> Result<u64, CatalogError> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM verdict_batch_shadow WHERE batch = ?1",
+                params![batch],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|value| u64::try_from(value).unwrap_or(0))
+            .map_err(|source| self.err(source))
+    }
+
+    /// 把一批的快照原样放回去：结论、候选、变体身上那两条链接。返回放回了几个变体。
+    ///
+    /// **只放回点名的那几个变体**。撤销时有些条撤不动（同一条锚上后来有人重新裁过，
+    /// 那是别人的账），那几个变体的结论一个字都不该动——它们眼下的样子是那条新裁决的
+    /// 投影，拿一份更老的快照盖上去才是真的改坏了。
+    ///
+    /// **不删快照**：撤销本身要撤得回来，撤回去之后还能再撤一次，靠的就是它还在。
+    ///
+    /// 顺手把这一批建出来、如今没人再指着的**作品**与**发行版**收掉。那不是额外的清理，
+    /// 是对齐权威那条路：重跑一趟识别会把这两张表整个清掉再重建，那时这几行本来就不在。
+    /// 收的范围**只限这几个变体刚才指着的那几行**——别人的孤行不归这一次撤销管。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn restore_conclusions(
+        &mut self,
+        batch: i64,
+        keys: &[&str],
+    ) -> Result<u64, CatalogError> {
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        // 先记下这几个变体眼下指着谁——放回去之后它们就不指了，那时才好问「还有人指吗」。
+        let mut works: BTreeSet<i64> = BTreeSet::new();
+        let mut releases: BTreeSet<i64> = BTreeSet::new();
+        {
+            let mut statement = self
+                .conn
+                .prepare("SELECT work_id, release_id FROM variant WHERE key = ?1")
+                .map_err(to_err)?;
+            for key in keys {
+                let row = statement
+                    .query_row(params![key], |row| {
+                        Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?))
+                    })
+                    .optional()
+                    .map_err(to_err)?;
+                if let Some((work, release)) = row {
+                    works.extend(work);
+                    releases.extend(release);
+                }
+            }
+        }
+        let tx = self.conn.transaction().map_err(to_err)?;
+        let mut restored = 0;
+        {
+            // 顺序是**从引用方往被引用方**走，与 `clear_identifications` 同一条道理：
+            // 外键是开着的，先删被指着的那一行会当场报错。
+            let mut drop_candidates = tx
+                .prepare("DELETE FROM candidate WHERE variant_key = ?1")
+                .map_err(to_err)?;
+            let mut put_identification = tx
+                .prepare(
+                    "INSERT INTO identification(variant_key, state, reason, units, candidates,
+                         accepted, nkit, read_bytes)
+                     SELECT s.variant_key, s.state, s.reason, s.units, s.candidates,
+                            s.accepted, s.nkit, s.read_bytes
+                     FROM verdict_batch_shadow s
+                     WHERE s.batch = ?1 AND s.variant_key = ?2
+                       AND EXISTS(SELECT 1 FROM variant v WHERE v.key = s.variant_key)
+                     ON CONFLICT(variant_key) DO UPDATE SET
+                        state = excluded.state, reason = excluded.reason,
+                        units = excluded.units, candidates = excluded.candidates,
+                        accepted = excluded.accepted, nkit = excluded.nkit,
+                        read_bytes = excluded.read_bytes",
+                )
+                .map_err(to_err)?;
+            // **链接先摘、行后删**，与 `clear_identifications` 同序。指向已经不在的
+            // 作品或发行版时落空，而不是把一个悬空的 id 写回去。
+            let mut relink = tx
+                .prepare(
+                    "UPDATE variant SET
+                         work_id = (SELECT w.id FROM work w WHERE w.id =
+                             (SELECT s.work_id FROM verdict_batch_shadow s
+                              WHERE s.batch = ?1 AND s.variant_key = variant.key)),
+                         release_id = (SELECT r.id FROM release r WHERE r.id =
+                             (SELECT s.release_id FROM verdict_batch_shadow s
+                              WHERE s.batch = ?1 AND s.variant_key = variant.key))
+                     WHERE key = ?2",
+                )
+                .map_err(to_err)?;
+            let mut put_candidates = tx
+                .prepare(
+                    "INSERT INTO candidate(variant_key, member_key, inner, confidence, accepted,
+                         source, dat, platform, game, rom, hashing, convention, evidence,
+                         chinese, serial, release_id)
+                     SELECT c.variant_key, c.member_key, c.inner, c.confidence, c.accepted,
+                            c.source, c.dat, c.platform, c.game, c.rom, c.hashing, c.convention,
+                            c.evidence, c.chinese, c.serial,
+                            (SELECT r.id FROM release r WHERE r.id = c.release_id)
+                     FROM verdict_batch_shadow_candidate c
+                     WHERE c.batch = ?1 AND c.variant_key = ?2
+                       AND EXISTS(SELECT 1 FROM variant v WHERE v.key = c.variant_key)
+                     ORDER BY c.ordinal",
+                )
+                .map_err(to_err)?;
+            for key in keys {
+                drop_candidates.execute(params![key]).map_err(to_err)?;
+                restored += put_identification
+                    .execute(params![batch, key])
+                    .map_err(to_err)?;
+                relink.execute(params![batch, key]).map_err(to_err)?;
+                put_candidates.execute(params![batch, key]).map_err(to_err)?;
+            }
+            for id in &releases {
+                tx.execute(
+                    "DELETE FROM release WHERE id = ?1 AND origin = ?2
+                     AND NOT EXISTS(SELECT 1 FROM variant WHERE release_id = ?1)
+                     AND NOT EXISTS(SELECT 1 FROM candidate WHERE release_id = ?1)",
+                    params![id, Provenance::Verdict.label()],
+                )
+                .map_err(to_err)?;
+            }
+            for id in &works {
+                tx.execute(
+                    "DELETE FROM work WHERE id = ?1 AND origin = ?2
+                     AND NOT EXISTS(SELECT 1 FROM variant WHERE work_id = ?1)
+                     AND NOT EXISTS(SELECT 1 FROM release WHERE work_id = ?1)",
+                    params![id, Provenance::Verdict.label()],
+                )
+                .map_err(to_err)?;
+            }
+        }
+        tx.commit().map_err(to_err)?;
+        Ok(u64::try_from(restored).unwrap_or(0))
+    }
+
     /// 把上一轮的识别结论整批清掉：候选、结论，以及**作品**与**发行版**里由它们造出来的行。
     ///
     /// 顺序是有讲究的：先摘链接再删行，否则变体上会留下指向已删除记录的悬空 id。
@@ -1507,6 +1777,15 @@ impl Catalog {
     /// `origin` 这一列照旧有用——它说得出一行是**识别**撞出来的还是**裁决**定下来的，
     /// 报告里的「识别建出来的作品数」靠它把两者分开数。
     ///
+    /// ## 那几批的**快照**也一起清
+    ///
+    /// `verdict_batch_shadow` 装的是「一批裁决落下之前这几个变体是什么样」，而这一趟
+    /// 重算把每个变体重新算了一遍——快照说的那个「之前」从此不再是任何人的现状。
+    /// 留着它，撤销会把一份过期的结论盖回一份刚算出来的上面。
+    ///
+    /// 清掉的后果说清楚：**那几批只撤得回沉淀库那一半了**，中立库那一半要再跑一趟识别
+    /// 才回到队列。批本身与它盖掉的旧裁决**一条都不受影响**——那些住在沉淀库里。
+    ///
     /// # Errors
     /// 写库失败时返回错误。
     pub fn clear_identifications(&mut self) -> Result<(), CatalogError> {
@@ -1519,7 +1798,12 @@ impl Catalog {
         // 顺序是**从引用方往被引用方**走：候选指着发行版、变体指着作品与发行版，
         // 外键是开着的（`rusqlite` 的 bundled SQLite 编译时开了
         // `SQLITE_DEFAULT_FOREIGN_KEYS=1`），先删被指着的那一行会当场报错。
-        for sql in ["DELETE FROM candidate", "DELETE FROM identification"] {
+        for sql in [
+            "DELETE FROM candidate",
+            "DELETE FROM identification",
+            "DELETE FROM verdict_batch_shadow_candidate",
+            "DELETE FROM verdict_batch_shadow",
+        ] {
             tx.execute(sql, []).map_err(to_err)?;
         }
         for sql in [
