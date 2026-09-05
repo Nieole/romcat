@@ -198,6 +198,9 @@ pub fn queue(app: &mut App, frames: u32) -> QueueCost {
     {
         let (screen, site) = app.queue_and_site();
         screen.reload(site);
+        // **量的是那张虚拟化的表**，而它在**逐条**那一屏上——批优先是打开时的默认
+        // （票 `gui-redesign/09`）。不切过去的话下面那一趟滚动一行都没画。
+        screen.show_one_by_one();
     }
     let load_ms = started.elapsed().as_secs_f64() * 1000.0;
     let (queue_total, selected) = {

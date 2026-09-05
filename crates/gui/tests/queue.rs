@@ -8,8 +8,9 @@
 
 use egui::widgets::text_edit::TextEditState;
 use romcat_core::catalog::State;
-use romcat_core::triage::{Axis, Draft, Overrides};
+use romcat_core::triage::{Axis, Draft, Overrides, Scope};
 use romcat_gui::app::{App, View};
+use romcat_gui::queue::Mode;
 use romcat_gui::table::ROW_HEIGHT;
 use romcat_gui::{demo, headless};
 
@@ -23,6 +24,57 @@ fn 跑(ctx: &egui::Context, app: &mut App, frames: u32) {
     for _ in 0..frames {
         headless::frame(ctx, headless::input(), |ui| app.ui(ui));
     }
+}
+
+/// 展开这一批（已经展开着就不动）。
+///
+/// 界面上点卡片那一下是**开关**（再点一次收起），而列完队列头一批本来就是展开的
+/// ——测试要的是「让这一批开着」，所以不能无脑再点一下。
+fn 展开(app: &mut App, shape: &romcat_core::triage::Shape) {
+    if app.queue().scope().map(|scope| scope.shape).as_ref() != Some(shape) {
+        app.queue_and_site().0.open_batch(shape);
+    }
+}
+
+/// 这一帧**真的画在屏上**的那些字。
+///
+/// 断言「屏上看得见文件名」只有看这个才算数：查队列里有没有这条数据是恒真的废话，
+/// 而这一屏要证的正是那几样摆出来了没有。egui 每画一段文字就留下一个 `Galley`，
+/// 它带着原文。
+fn 画出来的字(output: &egui::FullOutput) -> String {
+    fn 收(shape: &egui::epaint::Shape, out: &mut String) {
+        match shape {
+            egui::epaint::Shape::Text(text) => {
+                out.push_str(text.galley.text());
+                out.push('\n');
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    收(one, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = String::new();
+    for clipped in &output.shapes {
+        收(&clipped.shape, &mut out);
+    }
+    out
+}
+
+/// 按一下这个键，跑一帧。**逐条键盘流走的就是它**——测试敲的是真的键盘事件，
+/// 不是绕过界面直接调那个函数。
+fn 按(ctx: &egui::Context, app: &mut App, key: egui::Key) {
+    let mut input = headless::input();
+    input.events.push(egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    headless::frame(ctx, input, |ui| app.ui(ui));
 }
 
 #[test]
@@ -135,6 +187,9 @@ fn 表格里画多少行文本输入框都是那几个() {
     let 数一遍 = |rows: u64| {
         let ctx = headless::context();
         let mut app = 界面(rows);
+        // **表格在逐条那一屏上**：批优先是默认的（票 `gui-redesign/09`），
+        // 而这条断言测的是那张虚拟化的表。
+        app.queue_and_site().0.show_one_by_one();
         跑(&ctx, &mut app, 3);
         // 滚一整趟：虚拟化的表格会把不同的行画出来，若单元格里有文本框，这个数会涨。
         const STEPS: u32 = 24;
@@ -367,4 +422,452 @@ fn 说它不成其为一次发行就当场说不成立() {
     };
     let complaint = draft.check().expect_err("该被挡下");
     assert!(complaint.contains("不成其为一次发行"), "{complaint}");
+}
+
+#[test]
+fn 打开看见的是分好的批而不是一万八千行的表() {
+    // 票 `gui-redesign/09` 的正题。18,241 条按 5 秒一条是 25 小时——那张表根本没法用，
+    // 所以打开这一屏看见的必须是**工具已经分好的几十批**。
+    let app = 界面(demo::QUEUE_ROWS);
+    assert_eq!(app.queue().mode(), Mode::Batches, "打开该是批优先");
+    let queue = app.queue().queue();
+    let batches = queue.batches();
+    assert!(batches.len() > 3, "只分出 {} 批，那不叫分批", batches.len());
+    assert_eq!(
+        batches.iter().map(|batch| batch.count).sum::<u64>(),
+        queue.selected().len() as u64,
+        "各批条数加起来不等于队列的条数，屏上那个百分比就是编的",
+    );
+    // 每张卡片上**条数与那句共同依据**都得有——三样里的前两样。
+    for batch in batches {
+        assert!(batch.count > 0);
+        assert!(!batch.why().trim().is_empty(), "{:?} 说不出共同依据", batch.shape);
+    }
+    // 单候选那几批是**按批答得了**的；一条候选都没有的与多候选的都不给「整批通过」。
+    assert!(
+        batches.iter().any(romcat_core::triage::Batch::passable),
+        "一批按批答得了的都没有，那这一屏白分了",
+    );
+    assert!(
+        batches.iter().any(|batch| !batch.passable()),
+        "合成数据里该有走逐条的那几批，不然兜底那条路测不出来",
+    );
+    // 四档的账加起来也是整个队列——屏头上那几个数不能少算谁。
+    assert_eq!(
+        queue.tiers().iter().map(|(_, count)| *count).sum::<u64>(),
+        queue.selected().len() as u64,
+    );
+}
+
+#[test]
+fn 二级下钻的条数加起来等于它所属的一级() {
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    let shape = app.queue().queue().batches()[0].shape.clone();
+    let count = app.queue().queue().batches()[0].count;
+    展开(&mut app, &shape);
+    跑(&ctx, &mut app, 1);
+    let scope = app.queue().scope().expect("展开了就该有作用范围");
+    assert_eq!(app.queue().queue().count(&scope), count);
+
+    // **按目录那个轴分得干净**：一条只落一个目录，各组之和就是这一批。
+    let drilled = app.queue().queue().drill(&scope, Axis::Directory);
+    assert!(drilled.adds_up(), "{drilled:?}");
+    assert_eq!(
+        drilled.rows.iter().map(|row| row.count).sum::<u64>(),
+        count,
+        "二级各组加起来不等于它所属的一级",
+    );
+
+    // 下钻到某一组，作用范围跟着收窄，条数与二级表上写的一模一样。
+    let row = drilled.rows.first().cloned().expect("该有一组");
+    {
+        let (screen, _) = app.queue_and_site();
+        screen.drill_into(&row.label);
+    }
+    跑(&ctx, &mut app, 1);
+    let 那一组 = app.queue().scope().expect("下钻了还该有作用范围");
+    assert_eq!(app.queue().queue().count(&那一组), row.count, "{}", row.label);
+}
+
+#[test]
+fn 每批都有随机样本换一组每次不同但都在批内() {
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    let shape = app.queue().queue().batches()[0].shape.clone();
+    展开(&mut app, &shape);
+    跑(&ctx, &mut app, 1);
+    let scope = Scope::whole(shape);
+    let 批内: Vec<String> = app
+        .queue()
+        .queue()
+        .members(&scope)
+        .iter()
+        .map(|item| item.variant.key.clone())
+        .collect();
+    assert!(批内.len() > 5);
+
+    let mut 上一组 = app.queue().samples();
+    assert_eq!(上一组.len(), 5, "屏上常驻三样里的第三样：随机样本");
+    for round in 0..8 {
+        {
+            let (screen, _) = app.queue_and_site();
+            screen.resample();
+        }
+        let 这一组 = app.queue().samples();
+        assert_ne!(这一组, 上一组, "第 {round} 次「换一组样本」按下去还是同一组");
+        assert!(
+            这一组.iter().all(|one| 批内.contains(&one.key)),
+            "样本跑到批外面去了",
+        );
+        上一组 = 这一组;
+    }
+}
+
+#[test]
+fn 一级与二级都能整批通过而且撤得回来() {
+    // 验收第 4、5 条：**每一层都能整批过**，过完之后按批整个撤回（走票 08 那条路）。
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    let 原有 = app.queue().queue().pending();
+    let batch = app
+        .queue()
+        .queue()
+        .batches()
+        .iter()
+        .find(|batch| batch.passable())
+        .cloned()
+        .expect("该有一批是单候选的");
+    展开(&mut app, &batch.shape);
+    跑(&ctx, &mut app, 1);
+
+    // ——— 一级：整批通过 ———
+    let scope = app.queue().scope().expect("展开了就该有作用范围");
+    let 这一批 = app.queue().queue().count(&scope);
+    assert_eq!(这一批, batch.count);
+    {
+        let (screen, site) = app.queue_and_site();
+        screen.pass(site, &scope);
+    }
+    // **先出计划再动手**：没人点「落下」时那份计划留在屏上。
+    跑(&ctx, &mut app, 2);
+    assert_eq!(
+        app.queue().pending().expect("排得出计划").decided.len() as u64,
+        这一批,
+    );
+    {
+        let (screen, site) = app.queue_and_site();
+        screen.commit(site);
+    }
+    assert!(app.queue().error().is_none(), "{:?}", app.queue().error());
+    let applied = *app.queue().applied().expect("落下了就该有账");
+    assert_eq!(applied.verdicts, 这一批);
+    assert_eq!(app.queue().queue().pending(), 原有 - 这一批);
+
+    // ——— 按批整个撤回 ———
+    {
+        let (screen, site) = app.queue_and_site();
+        screen.undo_last(site);
+    }
+    let undone = *app.queue().undone().expect("撤回了就该有账");
+    assert_eq!((undone.batch, undone.removed), (applied.batch, 这一批));
+    assert!(undone.catalog_rolled_back, "中立库那一半没回去");
+    assert_eq!(
+        app.queue().queue().pending(),
+        原有,
+        "撤回之后队列该回到整批通过之前那么多条",
+    );
+
+    // ——— 二级：下钻之后只过那一组 ———
+    // 撤回之后那一批回到屏上，卡片照旧是展开的——**不必再点一次**（`open_batch` 是
+    // 开关：再点一次是收起来）。
+    跑(&ctx, &mut app, 1);
+    let whole = app.queue().scope().expect("撤回之后那一批该还展开着");
+    let row = app
+        .queue()
+        .queue()
+        .drill(&whole, Axis::Directory)
+        .rows
+        .first()
+        .cloned()
+        .expect("该有一组");
+    {
+        let (screen, _) = app.queue_and_site();
+        screen.drill_into(&row.label);
+    }
+    跑(&ctx, &mut app, 1);
+    let 那一组 = app.queue().scope().expect("下钻了还该有作用范围");
+    {
+        let (screen, site) = app.queue_and_site();
+        screen.pass(site, &那一组);
+    }
+    assert_eq!(
+        app.queue().pending().expect("排得出计划").decided.len() as u64,
+        row.count,
+        "二级整批通过该只作用于下钻出来的那一组",
+    );
+}
+
+#[test]
+fn 整批拒绝记成认不出并且退出队列() {
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    let 原有 = app.queue().queue().pending();
+    let shape = app.queue().queue().batches()[0].shape.clone();
+    展开(&mut app, &shape);
+    跑(&ctx, &mut app, 1);
+    let scope = app.queue().scope().expect("展开了就该有作用范围");
+    let 这一批 = app.queue().queue().count(&scope);
+    {
+        let (screen, site) = app.queue_and_site();
+        screen.reject(site, &scope);
+        screen.commit(site);
+    }
+    assert!(app.queue().error().is_none(), "{:?}", app.queue().error());
+    let counts = app.site().store.counts().expect("读得出沉淀库");
+    assert_eq!(counts.unknown, 这一批, "整批拒绝记的是「我看过了，认不出」");
+    assert_eq!(app.queue().queue().pending(), 原有 - 这一批);
+    assert_eq!(
+        app.queue().queue().count(&scope),
+        0,
+        "拒绝完了那一批还在队列里，人会被同一批问第二遍",
+    );
+}
+
+#[test]
+fn 二级下钻之后整批拒绝只作用于那一组() {
+    // 「每一层都能整批过或整批拒」——拒绝那一半在二级上也得成立。
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    let 原有 = app.queue().queue().pending();
+    let batch = app.queue().queue().batches()[0].clone();
+    展开(&mut app, &batch.shape);
+    跑(&ctx, &mut app, 1);
+    let whole = app.queue().scope().expect("展开了就该有作用范围");
+    let row = drilled_first(&app.queue().queue().drill(&whole, Axis::Directory));
+    assert!(row.count < batch.count, "这一批只有一个目录，二级测不出来");
+    {
+        let (screen, _) = app.queue_and_site();
+        screen.drill_into(&row.label);
+    }
+    跑(&ctx, &mut app, 1);
+    let 那一组 = app.queue().scope().expect("下钻了该有作用范围");
+    {
+        let (screen, site) = app.queue_and_site();
+        screen.reject(site, &那一组);
+        assert_eq!(
+            screen.pending().expect("排得出计划").decided.len() as u64,
+            row.count,
+            "二级整批拒绝该只作用于下钻出来的那一组",
+        );
+        screen.commit(site);
+    }
+    assert!(app.queue().error().is_none(), "{:?}", app.queue().error());
+    assert_eq!(app.site().store.counts().expect("读得出").unknown, row.count);
+    assert_eq!(app.queue().queue().pending(), 原有 - row.count);
+}
+
+#[test]
+fn 逐条键盘流切候选通过拒绝跳过撤销上一条() {
+    // 验收第 7、8 条。多候选那些走这条路：`←→` 切候选、`Y` 过、`N` 拒、
+    // `空格` 先放着、`U` 撤销上一条。**敲的是真的键盘事件**。
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    // 找一批多候选的，切候选才有得切。
+    let 多候选 = app
+        .queue()
+        .queue()
+        .batches()
+        .iter()
+        .find(|batch| batch.shape.fanout() == romcat_core::triage::Fanout::Several)
+        .cloned()
+        .expect("合成数据里该有 4–10 个候选那一档");
+    展开(&mut app, &多候选.shape);
+    {
+        let (screen, _) = app.queue_and_site();
+        screen.show_one_by_one();
+    }
+    跑(&ctx, &mut app, 1);
+    assert_eq!(app.queue().mode(), Mode::OneByOne);
+    let 这一批 = app.queue().queue().selected().len() as u64;
+    assert_eq!(这一批, 多候选.count, "逐条看该只看这一批");
+    let 原有 = app.queue().queue().pending();
+
+    // ——— `→` 切候选，`←` 切回来 ———
+    assert_eq!(app.queue().nth(), 0);
+    按(&ctx, &mut app, egui::Key::ArrowRight);
+    assert_eq!(app.queue().nth(), 1, "`→` 没切到下一条候选");
+    按(&ctx, &mut app, egui::Key::ArrowLeft);
+    assert_eq!(app.queue().nth(), 0, "`←` 没切回上一条候选");
+
+    // ——— `空格` 先放着：**一个字都不写库** ———
+    let 头一条 = app.queue().queue().selected()[0].variant.key.clone();
+    按(&ctx, &mut app, egui::Key::Space);
+    assert_eq!(app.queue().at(), 1, "`空格` 没往下走一条");
+    assert_eq!(
+        app.site().store.counts().expect("读得出").total,
+        0,
+        "「先放着」写了库——那不是跳过，那是替人裁了一刀",
+    );
+    assert_eq!(app.queue().queue().pending(), 原有, "先放着不该动队列");
+    assert!(
+        app.queue().queue().selected()[0].variant.key == 头一条,
+        "先放着把那一条从队列里弄丢了",
+    );
+
+    // ——— `Y` 通过：采用眼下切到的那条候选，当场落下 ———
+    按(&ctx, &mut app, egui::Key::Y);
+    assert!(app.queue().error().is_none(), "{:?}", app.queue().error());
+    let applied = *app.queue().applied().expect("`Y` 该当场落下一条");
+    assert_eq!(applied.verdicts, 1, "逐条一次只该裁一条");
+    assert_eq!(app.queue().queue().pending(), 原有 - 1);
+
+    // ——— `U` 撤销上一条：走的是按批撤那条路（票 08） ———
+    按(&ctx, &mut app, egui::Key::U);
+    assert!(app.queue().error().is_none(), "{:?}", app.queue().error());
+    let undone = *app.queue().undone().expect("`U` 该撤得掉");
+    assert_eq!((undone.batch, undone.removed), (applied.batch, 1));
+    assert!(undone.catalog_rolled_back, "中立库那一半没回去");
+    assert_eq!(app.queue().queue().pending(), 原有, "撤销之后该回到原样");
+
+    // ——— `N` 拒绝：记成「认不出」 ———
+    按(&ctx, &mut app, egui::Key::N);
+    assert!(app.queue().error().is_none(), "{:?}", app.queue().error());
+    assert_eq!(app.queue().applied().expect("`N` 该落下一条").verdicts, 1);
+    assert_eq!(app.site().store.counts().expect("读得出").unknown, 1);
+    assert_eq!(app.queue().queue().pending(), 原有 - 1);
+}
+
+#[test]
+fn 逐条时屏上真的摆着文件名路径与候选的完整依据() {
+    // 验收第 8 条：人按下去之前该看见的全部。**断言看的是这一帧真的画出来的字**
+    // ——查队列里有没有这条数据是恒真的废话，这一屏要证的是那几样摆出来了没有。
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    let 有候选的 = app
+        .queue()
+        .queue()
+        .batches()
+        .iter()
+        .find(|batch| batch.passable())
+        .cloned()
+        .expect("该有一批是带候选的");
+    展开(&mut app, &有候选的.shape);
+    {
+        let (screen, _) = app.queue_and_site();
+        screen.show_one_by_one();
+    }
+    跑(&ctx, &mut app, 2);
+    let item = app
+        .queue()
+        .queue()
+        .selected()
+        .get(app.queue().at())
+        .cloned()
+        .expect("光标底下该有一条");
+    assert!(!item.candidates.is_empty(), "这一批该是带候选的");
+
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    assert!(屏上.contains(item.name()), "屏上没有文件名：{}", item.name());
+    assert!(
+        屏上.contains(item.directory()),
+        "屏上没有路径：{}",
+        item.directory(),
+    );
+    let 依据 = &item.candidates[0].evidence;
+    assert!(屏上.contains(依据.as_str()), "屏上没有那条候选的完整依据：{依据}");
+    assert!(
+        屏上.contains(item.candidates[0].confidence.label()),
+        "屏上没标出这条候选的置信度",
+    );
+}
+
+#[test]
+fn 屏上常驻三样条数共同依据与随机样本() {
+    // 验收第 3 条。**看的是这一帧真的画出来的字**：列完队列头一批本来就是展开的
+    // （设计稿上就是这样），所以打开这一屏三样齐了。
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    let batch = app.queue().queue().batches()[0].clone();
+    let 样本 = app.queue().samples();
+    assert_eq!(样本.len(), 5, "打开这一屏头一批该是展开的，样本该摆着");
+
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    assert!(
+        屏上.contains(&romcat_core::report::thousands(batch.count)),
+        "屏上没有这一批的条数",
+    );
+    assert!(屏上.contains(&batch.why()), "屏上没有那句共同依据");
+    for one in &样本 {
+        assert!(屏上.contains(&one.name), "屏上没有这条样本：{}", one.name);
+    }
+}
+
+#[test]
+fn 下钻只收窄整批操作不把别的批从屏上筛掉() {
+    // 下钻要是借道选择器（`Filter::under` 那三个文本框），下一帧就会把**整个队列**
+    // 收窄——二级表塌成一行、别的批跟着从屏上消失，而人只是想在这一批里看细一点。
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    let batch = app.queue().queue().batches()[0].clone();
+    展开(&mut app, &batch.shape);
+    跑(&ctx, &mut app, 1);
+    let 原有批数 = app.queue().queue().batches().len();
+    let 原有条数 = app.queue().queue().selected().len();
+    let 整批 = app.queue().queue().drill(&Scope::whole(batch.shape.clone()), Axis::Directory);
+    let row = drilled_first(&整批);
+
+    {
+        let (screen, _) = app.queue_and_site();
+        screen.drill_into(&row.label);
+    }
+    跑(&ctx, &mut app, 1);
+    let 那一组 = app.queue().scope().expect("下钻了该有作用范围");
+    assert_eq!(
+        app.queue().queue().count(&那一组),
+        row.count,
+        "整批操作的作用范围该收到下钻那一组上",
+    );
+    assert_eq!(
+        app.queue().queue().batches().len(),
+        原有批数,
+        "下钻把别的批也从屏上筛掉了",
+    );
+    assert_eq!(
+        app.queue().queue().selected().len(),
+        原有条数,
+        "下钻把整个队列一起筛了",
+    );
+    // 二级那张表照旧数整批——不然下钻一次就再也回不去了。
+    assert_eq!(
+        app.queue()
+            .queue()
+            .drill(&Scope::whole(batch.shape.clone()), Axis::Directory)
+            .rows
+            .len(),
+        整批.rows.len(),
+        "二级那张表跟着塌成一行了",
+    );
+}
+
+/// 二级表上最大的那一组。
+fn drilled_first(drill: &romcat_core::triage::Drill) -> romcat_core::triage::GroupRow {
+    drill.rows.first().cloned().expect("该有一组")
+}
+
+#[test]
+fn 识别与刮削的待确认在同一条队列里() {
+    // 验收第 9 条。中文离线源是**刮削那一侧的数据源**，它撞出来的候选与 DAT 的候选
+    // 同表、同一条队列——于是它在这一屏上自己占一批，不必去第二个地方。
+    let app = 界面(demo::QUEUE_ROWS);
+    let batches = app.queue().queue().batches();
+    let 有中文源 = batches.iter().any(|batch| {
+        matches!(&batch.shape, romcat_core::triage::Shape::Candidates { source, .. }
+            if source == "中文离线源")
+    });
+    let 有dat = batches.iter().any(|batch| {
+        matches!(&batch.shape, romcat_core::triage::Shape::Candidates { source, .. }
+            if source == "MAME")
+    });
+    assert!(有中文源 && 有dat, "两侧的待确认该在同一条队列里");
 }

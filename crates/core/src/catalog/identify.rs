@@ -341,6 +341,62 @@ impl Confidence {
     }
 }
 
+/// **置信度那四档**：三档置信度，加上「一条候选都没有」那一档（ADR-0002）。
+///
+/// [`Confidence`] 只有三档，因为它是**一条候选**的属性——而屏上要标出来的是**一个变体**
+/// 或**一批变体**，那里第四种情形是实打实存在的：一条候选都没有。真机上队列里
+/// 绝大多数条目正落在这一档，把它并进「低置信」等于说「工具猜了一下但不太确信」，
+/// 而实情是工具**一个字都没说**。
+///
+/// 收在核心库里而不是各屏各写一份：五屏都要标这四档，含义漂开一点点，用户就再也
+/// 认不出颜色的意思。**把五屏都换到这一份上是票 `gui-redesign/12` 的活**，
+/// 眼下用它的是待确认屏。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Tier {
+    /// **高置信**：精确哈希命中。
+    High,
+    /// **中置信**：撞上了但有保留。
+    Medium,
+    /// **低置信**：文件名规则、模糊匹配与模型推断那几层的产物。
+    Low,
+    /// **还没识别**：一条候选都没有，谈不上置信度。它不是「猜得不准」，是**一个字都没说**。
+    ///
+    /// ⚠️ 这个词与词表里那条「**还没识别**：一个变体连识别都还没跑过」**不是一回事**。
+    /// 界面上「这一格没有置信度可标」一直写的就是这四个字（`browse::WorkRow::confidence_label`
+    /// 与浏览屏的变体行都是），这里跟着它，为的是同一个东西在五屏里说同一个词
+    /// ——那正是票 `gui-redesign/09` 验收第 6 条要的。**两个用法该并成一个还是分成两个词，
+    /// 记在挂单 `Q84` 上交给 `/domain-modeling`。**
+    Unidentified,
+}
+
+impl Tier {
+    /// 四档全在这儿，屏上照这个次序摆。
+    pub const ALL: [Self; 4] = [Self::High, Self::Medium, Self::Low, Self::Unidentified];
+
+    /// 从一条候选的置信度折过来；`None` 就是**还没识别**。
+    #[must_use]
+    pub fn of(confidence: Option<Confidence>) -> Self {
+        match confidence {
+            Some(Confidence::High) => Self::High,
+            Some(Confidence::Medium) => Self::Medium,
+            Some(Confidence::Low) => Self::Low,
+            None => Self::Unidentified,
+        }
+    }
+
+    /// 打给用户的那个词。前三档与 [`Confidence::label`] **逐字一样**——
+    /// 同一件事在两处写成两个词，用户会以为那是两件事。
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::High => Confidence::High.label(),
+            Self::Medium => Confidence::Medium.label(),
+            Self::Low => Confidence::Low.label(),
+            Self::Unidentified => "还没识别",
+        }
+    }
+}
+
 /// 一个变体这一轮识别的结论。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum State {

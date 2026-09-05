@@ -2708,6 +2708,9 @@ impl TriageFilterArgs {
             name_contains: self.name.clone(),
             candidate_work: self.candidate_work.clone(),
             keys: self.key.clone(),
+            // **按依据形状**眼下只有界面上点得到（票 `gui-redesign/09`）：
+            // 命令行上它要一串「源 / DAT / 置信度 / 哈希口径」的写法，那是另一张票的事。
+            ..Filter::default()
         })
     }
 }

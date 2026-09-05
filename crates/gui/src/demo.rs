@@ -357,7 +357,7 @@ pub fn queue(rows: u64) -> Result<Catalog, CatalogError> {
                 // **命中但一条都没自动通过**的那些才有候选可挑；队列里绝大多数一条都没有
                 // （真机上 16,360 条、98.2%），所以「手工指定」是主路径不是备用路径。
                 candidates: if state == State::Matched {
-                    vec![candidate_of(work, bucket, &mark)]
+                    candidates_of(work, bucket, &mark, n)
                 } else {
                     Vec::new()
                 },
@@ -394,29 +394,156 @@ fn mark_of(bucket: &Bucket, at: u64, n: u64, scale: impl Fn(u64) -> u64) -> Stri
     format!("组{:04}", n % MARK_POOL)
 }
 
-/// 一条**没有自动通过**的候选，带**依据**。
-fn candidate_of(work: &str, bucket: &Bucket, mark: &str) -> Candidate {
-    let game = format!("{work} (Japan)");
-    Candidate {
+/// 一种**依据形状**：待确认屏一级分批的那个键（票 `gui-redesign/09`）。
+///
+/// 真库上那几批长这样（设计稿 `.scratch/gui-redesign/prototype.html` 上写着的就是它们）：
+/// MAME 的几份 software list、中文离线源那一份 dump、去头口径的那一批，
+/// 外加多候选那几档——**它们才是逐条键盘流兜底的那些**。
+struct 形状 {
+    /// 哪个数据源。
+    source: &'static str,
+    /// 哪一份 DAT。
+    dat: &'static str,
+    /// 置信度。
+    confidence: Confidence,
+    /// 撞上时用的是哪套哈希。
+    convention: Convention,
+    /// 这一档摆几条候选。**大于 1 的那些走逐条**。
+    fanout: usize,
+    /// 那句依据里逐字一样的那一段。
+    why: &'static str,
+    /// 它在有候选的那些里占几份。
+    weight: u64,
+}
+
+/// 待确认的候选分成哪几种依据形状。
+///
+/// **形状不止一种是这份合成数据的正事**：只有一种形状的话，一级分批画出来永远只有一张
+/// 卡片，那一屏的全部逻辑（分批、下钻、样本、整批过与拒）都测不出真假。
+const 候选形状: &[形状] = &[
+    形状 {
+        source: "MAME",
+        dat: "gameboy.xml",
+        confidence: Confidence::Medium,
+        convention: Convention::AsIs,
+        fanout: 1,
+        why: "名字一字不差 + 平台对得上",
+        weight: 5,
+    },
+    形状 {
+        source: "MAME",
+        dat: "snes.xml",
+        confidence: Confidence::Medium,
+        convention: Convention::AsIs,
+        fanout: 1,
+        why: "名字一字不差 + 平台对得上",
+        weight: 4,
+    },
+    形状 {
+        source: "MAME",
+        dat: "nes.xml",
+        confidence: Confidence::Medium,
+        convention: Convention::Headerless,
+        fanout: 1,
+        why: "剥掉 iNES 的 16 字节转储头之后 CRC-32 撞上",
+        weight: 3,
+    },
+    形状 {
+        source: "中文离线源",
+        dat: "dump-2026-09-01",
+        confidence: Confidence::Medium,
+        convention: Convention::AsIs,
+        fanout: 1,
+        why: "正题模糊匹配上的中文名",
+        weight: 3,
+    },
+    形状 {
+        source: "中文离线源",
+        dat: "dump-2026-09-01",
+        confidence: Confidence::Low,
+        convention: Convention::AsIs,
+        fanout: 1,
+        why: "正题模糊匹配上的中文名，平台没对上",
+        weight: 2,
+    },
+    形状 {
+        source: "No-Intro",
+        dat: "nes.dat",
+        confidence: Confidence::Medium,
+        convention: Convention::AsIs,
+        fanout: 2,
+        why: "CRC-32 撞上，但这份 DAT 没记大小",
+        weight: 2,
+    },
+    形状 {
+        source: "TOSEC",
+        dat: "nes.dat",
+        confidence: Confidence::Low,
+        convention: Convention::AsIs,
+        fanout: 5,
+        why: "名字相似，一批条目都撞得上",
+        weight: 1,
+    },
+];
+
+/// 第 `at` 条有候选的变体是哪一种形状。按份额轮着取，同一份数据跑两次一模一样。
+fn 形状_of(at: u64) -> &'static 形状 {
+    let total: u64 = 候选形状.iter().map(|one| one.weight).sum();
+    let mut pos = at % total.max(1);
+    for one in 候选形状 {
+        if pos < one.weight {
+            return one;
+        }
+        pos -= one.weight;
+    }
+    &候选形状[0]
+}
+
+/// 这一条的全部**候选**，一条都没自动通过，各自带**依据**。
+///
+/// 第一条候选是这一批的形状本身——**整批通过就是采用它**（`triage::batch` 的模块文档）。
+/// 多候选那几档后面跟着别的源的候选：那正是「选哪个」而不是「对不对」的样子。
+fn candidates_of(work: &str, bucket: &Bucket, mark: &str, at: u64) -> Vec<Candidate> {
+    let 形状 = 形状_of(at);
+    let one = |source: &str, dat: &str, confidence, convention, why: &str, game: String| Candidate {
         member_key: String::new(),
         inner: String::new(),
-        // 中置信那一档：撞上了但有保留，通过但标记，等人裁决（ADR-0002）。
-        confidence: Confidence::Medium,
+        confidence,
         accepted: false,
-        source: "TOSEC".to_string(),
-        dat: format!("{}.dat", bucket.ext),
+        source: source.to_string(),
+        dat: dat.to_string(),
         platform: bucket.platform.unwrap_or("未知").to_string(),
         game,
         rom: format!("rom.{}", bucket.ext),
-        hashed_as: Convention::AsIs,
-        dat_convention: Convention::AsIs,
-        evidence: format!("CRC-32 加大小撞上 TOSEC 的一条记录；名字里的记号是「{mark}」"),
+        hashed_as: convention,
+        dat_convention: convention,
+        // 前半截逐字一样、后半截各条不同——**那一段共同的正是卡片上要印的那句共同依据**。
+        evidence: format!("{why}；名字里的记号是「{mark}」"),
         chinese: bucket
             .translated
             .then_some(romcat_core::dat::chinese::ChineseMark::FanTranslated),
         serial: None,
         release_id: None,
+    };
+    let mut out = vec![one(
+        形状.source,
+        形状.dat,
+        形状.confidence,
+        形状.convention,
+        形状.why,
+        format!("{work} (Japan)"),
+    )];
+    for extra in 1..形状.fanout {
+        out.push(one(
+            "GoodNES",
+            "good.dat",
+            Confidence::Low,
+            Convention::AsIs,
+            "名字相似",
+            format!("{work} (Rev {extra})"),
+        ));
     }
+    out
 }
 
 /// 这份合成数据在**路径锚**里叫什么名字。真库永远不会叫这个。

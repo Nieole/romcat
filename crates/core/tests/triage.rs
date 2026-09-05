@@ -1142,3 +1142,295 @@ fn 裁完的当场从队列里消失() {
         "刚裁完的还留在队列里",
     );
 }
+
+/// 往现场里再摆一份**名字撞得上中文离线源**的汉化版，再增量扫一遍。
+fn 装_中文名撞得上的一份(现场: &mut 现场) {
+    // **不摆 iNES 头**：卡带内部头说了算（`identify::platform_of`），摆一份 FC 的头
+    // 会让这份 GBA 卡的平台被判成 FC，中文离线源那条平台交叉校验当场判冲突。
+    写(
+        &现场.dir.path().join("GBA/超级机器人大战R[星组](v1.2+)(简)(JP)(68.92Mb).zip"),
+        &zip_container(&[ZipEntrySpec::stored("srwr.gba", vec![0xD0; 40_960])]),
+    );
+    let mut options = ScanOptions::named(现场.dir.path(), "库");
+    options.jobs = Jobs::Fixed(2);
+    scan::scan(&RealFs::new(), &mut 现场.catalog, &options, &Handle::new()).expect("扫得动");
+}
+
+/// 一份迷你中文离线索引：**刮削那一侧的数据源**，撞出来的候选与 DAT 的候选同表。
+fn 中文离线索引() -> romcat_core::zh::Index {
+    romcat_core::zh::Index::build(
+        vec![romcat_core::zh::Entry {
+            id: 4_723,
+            name: "スーパーロボット大戦R".to_string(),
+            name_cn: "超级机器人大战R".to_string(),
+            aliases: Vec::new(),
+            year: Some(2002),
+            platforms: vec!["GBA".to_string()],
+            platform_text: "GBA".to_string(),
+            ..romcat_core::zh::Entry::default()
+        }],
+        "dump-2026-09-01".to_string(),
+    )
+}
+
+/// 跑一趟识别，**中文离线源那一层开着**。
+fn 跑识别带中文源(现场: &mut 现场, index: &romcat_core::zh::Index) {
+    let rules = romcat_core::filename::Rules::builtin();
+    let verdicts = verdict::Index::load(&现场.store, 库名).expect("读得出沉淀库");
+    identify::run(
+        &RealFs::new(),
+        &mut 现场.catalog,
+        &identify::Ammo {
+            repo: &现场.repo,
+            verdicts: &verdicts,
+            naming: &fuzzy::Naming {
+                rules: &rules,
+                index: Some(index),
+                tuning: romcat_core::zh::Tuning::default(),
+            },
+            guessing: &identify::model::Guessing::off(),
+            titledb: None,
+        },
+        &Options::new(Roots::single("库", 现场.dir.path())),
+        &CancelToken::new(),
+        &mut |_| {},
+    )
+    .expect("识别不该失败");
+}
+
+fn 列队列(现场: &现场) -> triage::Queue {
+    let index = verdict::Index::load(&现场.store, 库名).expect("读得出沉淀库");
+    triage::Queue::load(&现场.catalog, &index).expect("列得出队列")
+}
+
+#[test]
+fn 一级分批按依据形状分而且各批加起来就是整个队列() {
+    // 票 `gui-redesign/09`：打开待确认屏看见的是**工具已经分好的几十批**，不是一万八千
+    // 行的表。这一条钉的是那几十批算得对——各批条数加起来必须就是队列的条数，
+    // 不然屏上「前 5 批盖住多少」是编的。
+    let mut 现场 = 建现场();
+    装_goodnes(&mut 现场);
+    跑识别(&mut 现场);
+    let queue = 列队列(&现场);
+
+    let batches = queue.batches();
+    assert!(batches.len() >= 2, "至少该分出「撞上了的」与「一条候选都没有的」两批");
+    assert_eq!(
+        batches.iter().map(|batch| batch.count).sum::<u64>(),
+        queue.selected().len() as u64,
+        "各批条数加起来不等于队列的条数，屏上那个百分比就是编的",
+    );
+    // 每一批照着它的形状折回一个选择器，**选中的与卡片上写的是同一批**。
+    for batch in batches {
+        let mut queue = 列队列(&现场);
+        queue.set_filter(Filter {
+            shape: vec![batch.shape.clone()],
+            ..Filter::default()
+        });
+        assert_eq!(
+            queue.selected().len() as u64,
+            batch.count,
+            "卡片上写着 {} 条，照着折出来的选择器却选中 {} 条：{}",
+            batch.count,
+            queue.selected().len(),
+            batch.why(),
+        );
+    }
+
+    // 撞上 GoodNES 那一批说得出**源 / DAT / 哈希口径**，还带着那句共同依据。
+    let 撞上的 = batches
+        .iter()
+        .find(|batch| matches!(&batch.shape, triage::Shape::Candidates { source, .. } if source == "GoodNES"))
+        .expect("该有一批是 GoodNES 撞出来的");
+    assert_eq!(撞上的.count, 1);
+    assert_eq!(撞上的.shape.fanout(), triage::Fanout::One);
+    assert!(撞上的.passable(), "单候选那一批问的是「对不对」，按批答得了");
+    assert!(撞上的.why().contains("GoodNES / GoodNES / 含头"), "{}", 撞上的.why());
+    assert!(撞上的.why().contains("这份 DAT 没记大小"), "{}", 撞上的.why());
+
+    // 一条候选都没有那一批说的是**为什么没定下来**，而且整批通过说不出口。
+    let 光秃的 = batches
+        .iter()
+        .find(|batch| matches!(batch.shape, triage::Shape::Bare { .. }))
+        .expect("该有一批一条候选都没有");
+    assert!(
+        !光秃的.passable(),
+        "一条候选都没有却给「整批通过」，那是替人挑了个没人写过的答案",
+    );
+}
+
+#[test]
+fn 二级下钻的条数加起来等于它所属的一级() {
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    let queue = 列队列(&现场);
+    let batch = queue
+        .batches()
+        .first()
+        .cloned()
+        .expect("该分得出至少一批");
+    let scope = triage::Scope::whole(batch.shape.clone());
+    assert_eq!(queue.count(&scope), batch.count);
+
+    // **按目录那个轴分得干净**：一条只落一个目录，所以各组之和就是这一批。
+    let drilled = queue.drill(&scope, triage::Axis::Directory);
+    assert!(drilled.adds_up(), "{drilled:?}");
+    assert_eq!(
+        drilled.rows.iter().map(|row| row.count).sum::<u64>(),
+        batch.count,
+        "二级各组加起来不等于它所属的一级",
+    );
+
+    // 下钻到某一组之后，那一组自己的条数与二级表上写的一模一样。
+    let row = drilled.rows.first().expect("该有一组");
+    let 那一组 = triage::Scope::under(batch.shape.clone(), triage::Axis::Directory, &row.label);
+    assert_eq!(queue.count(&那一组), row.count, "下钻到 {}", row.label);
+}
+
+#[test]
+fn 每批的随机样本换一组就真的换一组而且都在批内() {
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    let queue = 列队列(&现场);
+    let batch = queue
+        .batches()
+        .iter()
+        .max_by_key(|batch| batch.count)
+        .cloned()
+        .expect("该分得出至少一批");
+    let scope = triage::Scope::whole(batch.shape.clone());
+    let 批内: Vec<String> = queue
+        .members(&scope)
+        .iter()
+        .map(|item| item.variant.key.clone())
+        .collect();
+    assert!(批内.len() > 2, "这一批太小，换样本这件事测不出来");
+
+    let 头一组 = queue.sample(&scope, 0, 2);
+    let 第二组 = queue.sample(&scope, 1, 2);
+    assert_ne!(头一组, 第二组, "「换一组样本」按下去还是同一组");
+    for one in 头一组.iter().chain(第二组.iter()) {
+        assert!(批内.contains(&one.key), "样本跑到批外面去了：{}", one.key);
+    }
+}
+
+#[test]
+fn 整批通过之后按批整个撤回() {
+    // 票 `gui-redesign/09` 验收第 5 条：整批操作之后可以**按批整个撤回**，
+    // 走的是票 08 那条路——中立库与沉淀库两边一起回到这一批落下之前，
+    // **一个字节的 DAT 都不读**。
+    let mut 现场 = 建现场();
+    装_goodnes(&mut 现场);
+    跑识别(&mut 现场);
+    let mut queue = 列队列(&现场);
+    let 原有 = queue.pending();
+
+    let batch = queue
+        .batches()
+        .iter()
+        .find(|batch| batch.passable())
+        .cloned()
+        .expect("该有一批是单候选的");
+    let scope = triage::Scope::whole(batch.shape.clone());
+    let 这一批 = queue.count(&scope);
+    assert!(这一批 > 0);
+
+    // **整批通过 ＝ 采用第一条候选**。分批时说的那句共同依据说的正是它。
+    let decide = triage::Draft {
+        pick: Some(1),
+        ..triage::Draft::default()
+    }
+    .build(库名)
+    .expect("说得成立");
+    let plan = queue
+        .plan_scope(&现场.catalog, &现场.store, &decide, &scope)
+        .expect("排得出计划");
+    assert_eq!(plan.decided.len() as u64, 这一批, "{:?}", plan.blocked);
+    let applied = queue
+        .apply(&mut 现场.catalog, &mut 现场.store, &plan)
+        .expect("落得下");
+    assert_eq!(applied.verdicts, 这一批);
+    assert_eq!(queue.pending(), 原有 - 这一批);
+
+    // **按批整个撤回**：两边一起回去，当场列队列就看得见它们回来了。
+    let undone = queue
+        .undo(&mut 现场.catalog, &mut 现场.store, 库名, applied.batch)
+        .expect("撤得掉");
+    assert_eq!((undone.batch, undone.removed, undone.kept), (applied.batch, 这一批, 0));
+    assert!(undone.catalog_rolled_back, "中立库那一半没回去");
+    assert_eq!(queue.pending(), 原有, "撤回之后队列该回到整批通过之前那么多条");
+    assert_eq!(现场.store.counts().expect("读得出").total, 0);
+    // 那一批照旧数得出来——形状没变，卡片回到屏上。
+    assert_eq!(queue.count(&scope), 这一批);
+}
+
+#[test]
+fn 整批拒绝走的是认不出那一档() {
+    // 「都不对」在这一屏上就是**整批拒绝**：它记的是「我看过了，认不出」，
+    // 于是这些条退出队列、不再被问第二遍（`triage` 的模块文档）。
+    let mut 现场 = 建现场();
+    装_goodnes(&mut 现场);
+    跑识别(&mut 现场);
+    let mut queue = 列队列(&现场);
+    let batch = queue
+        .batches()
+        .iter()
+        .find(|batch| batch.passable())
+        .cloned()
+        .expect("该有一批是单候选的");
+    let scope = triage::Scope::whole(batch.shape.clone());
+    let 这一批 = queue.count(&scope);
+
+    let decide = triage::Draft {
+        unknown: true,
+        ..triage::Draft::default()
+    }
+    .build(库名)
+    .expect("说得成立");
+    let plan = queue
+        .plan_scope(&现场.catalog, &现场.store, &decide, &scope)
+        .expect("排得出计划");
+    assert_eq!(plan.decided.len() as u64, 这一批);
+    let applied = queue
+        .apply(&mut 现场.catalog, &mut 现场.store, &plan)
+        .expect("落得下");
+    assert_eq!(applied.verdicts, 这一批);
+    assert_eq!(现场.store.counts().expect("读得出").unknown, 这一批);
+    assert!(
+        queue.count(&scope) == 0,
+        "整批拒绝之后那一批还在队列里，人会被同一批问第二遍",
+    );
+}
+
+#[test]
+fn 识别与刮削的待确认在同一条队列里() {
+    // 票 `gui-redesign/09` 验收第 9 条。**中文离线源是刮削那一侧的数据源**，
+    // 而它撞出来的候选与 DAT 的候选同表、同一条队列——于是它自己占一批，
+    // 卡片上写着的源就是「中文离线源」。
+    let mut 现场 = 建现场();
+    装_中文名撞得上的一份(&mut 现场);
+    let index = 中文离线索引();
+    跑识别带中文源(&mut 现场, &index);
+    let queue = 列队列(&现场);
+
+    let 中文源那批 = queue
+        .batches()
+        .iter()
+        .find(|batch| {
+            matches!(&batch.shape, triage::Shape::Candidates { source, .. } if source == "中文离线源")
+        })
+        .cloned()
+        .expect("中文离线源撞出来的候选该在同一条队列里，自己占一批");
+    assert!(中文源那批.count > 0);
+    assert!(
+        中文源那批.why().contains("中文离线源 / dump-2026-09-01"),
+        "{}",
+        中文源那批.why(),
+    );
+    // 它与 DAT 那几批**在同一份 batches 里**——不必去第二个地方。
+    assert_eq!(
+        queue.batches().iter().map(|batch| batch.count).sum::<u64>(),
+        queue.selected().len() as u64,
+    );
+}
+

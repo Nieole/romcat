@@ -26,10 +26,12 @@
 
 use std::collections::BTreeSet;
 
+use super::batch::{self, Batch, Coverage, Drill, Sample, Scope};
 use super::{
     Applied, Axis, Decide, Filter, GroupRow, Item, Plan, State, TriageError, Undone, apply,
-    fill_prints, plan, redo_batch, survey, tally, undo_batch,
+    fill_prints, plan, plan_each, redo_batch, survey, tally, undo_batch,
 };
+use crate::catalog::identify::Tier;
 use crate::catalog::Catalog;
 use crate::verdict::{self, Store};
 
@@ -57,6 +59,19 @@ pub struct Queue {
     filter: Filter,
     /// 选中的那些按三个轴分出来的组，与 [`Axis::ALL`] 同序。
     groups: [Vec<GroupRow>; Axis::ALL.len()],
+    /// 选中的那些按**依据形状**分出来的一级批，多的排前面。
+    ///
+    /// 与 `groups` 一起在换选择器时算一遍：分批本来就要走完全部条目，而走完了不留着
+    /// 等于每帧再走一遍。真机上这是一万八千条一趟——与三个轴那三趟同一个量级。
+    batches: Vec<Batch>,
+    /// 选中的那些按**四档**各有多少条。屏头上那几个数。
+    tiers: [(Tier, u64); Tier::ALL.len()],
+    /// 队列**换过几次样子**：换选择器、裁完一批、撤回一批，各算一次。
+    ///
+    /// 界面拿它当**缓存的钥匙**：展开那一批的二级分组与随机样本只在这个数变了之后
+    /// 才要重算，而它们各要走一遍这一批的全部条目——一批一万两千条上，每帧重算一次
+    /// 就是每帧一万两千次分配。
+    revision: u64,
     /// **内容判据**已经算过的那些变体的键。
     ///
     /// 算不出来（无判据那一档）也记进来：那时 [`Item::print`] 照旧是 `None`，光看它
@@ -92,6 +107,9 @@ impl Queue {
             identified: survey.identified,
             filter: Filter::default(),
             groups: Default::default(),
+            batches: Vec::new(),
+            tiers: batch::by_tier(&[]),
+            revision: 0,
             printed: BTreeSet::new(),
         };
         queue.refresh();
@@ -109,6 +127,9 @@ impl Queue {
             identified: false,
             filter: Filter::default(),
             groups: Default::default(),
+            batches: Vec::new(),
+            tiers: batch::by_tier(&[]),
+            revision: 0,
             printed: BTreeSet::new(),
         }
     }
@@ -147,6 +168,101 @@ impl Queue {
     #[must_use]
     pub fn groups(&self, axis: Axis) -> &[GroupRow] {
         &self.groups[axis.index()]
+    }
+
+    /// 队列换过几次样子。**界面拿它当缓存的钥匙**，见这个字段的文档。
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// **一级分批**：选中的那些按依据形状分成的几十批，多的排前面。
+    ///
+    /// 待确认屏打开看见的就是它——不是一万八千行的表（票 `gui-redesign/09`）。
+    #[must_use]
+    pub fn batches(&self) -> &[Batch] {
+        &self.batches
+    }
+
+    /// 选中的那些按**四档**各有多少条。
+    #[must_use]
+    pub fn tiers(&self) -> &[(Tier, u64)] {
+        &self.tiers
+    }
+
+    /// 选中的那些一共挂着多少条**候选**。屏头上「N 变体 · M 条候选」的后一个数。
+    #[must_use]
+    pub fn candidates(&self) -> u64 {
+        self.selected()
+            .iter()
+            .map(|item| item.candidates.len() as u64)
+            .sum()
+    }
+
+    /// 这个范围里的那些条目。**整批操作、下钻、抽样都从它出发。**
+    #[must_use]
+    pub fn members(&self, scope: &Scope) -> Vec<&Item> {
+        self.at_in(scope).map(|at| &self.items[at]).collect()
+    }
+
+    /// 这个范围里有多少条。屏上「整批通过 3,053 条」写的就是它。
+    #[must_use]
+    pub fn count(&self, scope: &Scope) -> u64 {
+        self.at_in(scope).count() as u64
+    }
+
+    /// 这个范围里的那些条目**排在选中的第几位**。
+    ///
+    /// 三处（[`Queue::members`]、[`Queue::count`]、[`Queue::plan_scope`]）走同一条：
+    /// 「屏上写着 3,053 条」「抽样抽的那一批」「按下去真的改的那一批」必须是同一批，
+    /// 各写一遍的话它们迟早各说各的。
+    fn at_in<'a>(&'a self, scope: &'a Scope) -> impl Iterator<Item = usize> + 'a {
+        self.selected()
+            .iter()
+            .enumerate()
+            .filter(move |(_, item)| scope.holds(item))
+            .map(|(at, _)| at)
+    }
+
+    /// 一屏分批的**账**：分成几批、前 `head` 批盖住多少、按批答得了的多少。
+    #[must_use]
+    pub fn coverage(&self, head: usize) -> Coverage {
+        batch::coverage(&self.batches, head)
+    }
+
+    /// **二级下钻**：这个范围按某个轴再分一层。
+    ///
+    /// 三个轴是[既有的那三个](Axis)——报告与命令行数的是同一批，界面不另造一套。
+    #[must_use]
+    pub fn drill(&self, scope: &Scope, axis: Axis) -> Drill {
+        batch::drill(&self.members(scope), axis)
+    }
+
+    /// 这个范围里的**随机样本**。**换一组样本就换个 `seed`**。
+    #[must_use]
+    pub fn sample(&self, scope: &Scope, seed: u64, want: usize) -> Vec<Sample> {
+        batch::sample(&self.members(scope), seed, want)
+    }
+
+    /// 排一次**整批**裁决的计划。**不写任何库。**
+    ///
+    /// 与 [`Queue::plan`] 是同一件事，只是范围从「选择器选中的全部」收到「这一批」
+    /// ——屏上按下「整批通过」时选择器一个字都没动，人看的还是那一列卡片。
+    ///
+    /// # Errors
+    /// 读中立库或沉淀库失败时返回错误。
+    pub fn plan_scope(
+        &mut self,
+        catalog: &Catalog,
+        store: &Store,
+        decide: &Decide,
+        scope: &Scope,
+    ) -> Result<Plan, TriageError> {
+        let at: Vec<usize> = self.at_in(scope).collect();
+        for index in &at {
+            self.ensure_prints(catalog, *index..index + 1)?;
+        }
+        plan_each(store, at.iter().map(|index| &self.items[*index]), decide)
     }
 
     /// 换一套选择器。和现在这套一样就什么都不做——界面每帧都会调它。
@@ -306,5 +422,8 @@ impl Queue {
         taken.extend(rest);
         self.items = taken;
         self.groups = Axis::ALL.map(|axis| tally(self.selected(), axis));
+        self.batches = batch::batches(self.selected());
+        self.tiers = batch::by_tier(self.selected());
+        self.revision = self.revision.wrapping_add(1);
     }
 }

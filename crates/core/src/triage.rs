@@ -53,14 +53,16 @@
 //! （典型：别人分享来、`triage import` 收下的那些，它们不属于本机任何一批）。
 //! 它只动沉淀库，理由与出口都写在 [`forget`] 上。
 
+pub mod batch;
 pub mod queue;
 pub mod report;
 
+pub use batch::{Batch, Drill, Fanout, Sample, Scope, Shape};
 pub use queue::Queue;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::catalog::identify::QueueRow;
+use crate::catalog::identify::{QueueRow, Tier};
 use crate::catalog::{Candidate, Catalog, CatalogError, State, VariantRow};
 use crate::dat::chinese::ChineseMark;
 use crate::identify::{self, ContentPrint, Projector};
@@ -165,6 +167,16 @@ impl Item {
         }
     }
 
+    /// 这一条标成**置信度四档**里的哪一档（ADR-0002）。
+    ///
+    /// 看的是**第一条候选**——与 [`Shape::of`](batch::Shape::of) 同一条规则，理由也同一个：
+    /// 「整批通过」就是采用第一条（`triage::batch` 的模块文档）。两处各写一遍的话，
+    /// 屏上那条色条与按下去做的事迟早会指着不同的候选。
+    #[must_use]
+    pub fn tier(&self) -> Tier {
+        Tier::of(self.candidates.first().map(|lead| lead.confidence))
+    }
+
     /// 这一条的名字里带着哪些**记号**——`[…]` 与 `(…)` 括起来的那几段。
     ///
     /// **按命名规律**这个轴要它才用得起来：汉化组、版本、语言几乎总是写在方括号里
@@ -224,6 +236,11 @@ pub struct Filter {
     pub name_contains: Vec<String>,
     /// **按候选作品**：它的候选里有一条指着这部作品。
     pub candidate_work: Vec<String>,
+    /// **按依据形状**：它落在这一批里。**一级分批点一下就是它**（[`batch::batches`]）。
+    ///
+    /// 与另外三个轴同一个身份：屏上那张卡片写着「3,053 条」，照着折出来的选择器就该
+    /// 选中同样 3,053 条。差一条，人按下去的那一下就不是他看过的那一批。
+    pub shape: Vec<Shape>,
     /// 点名这几个变体。
     pub keys: Vec<String>,
 }
@@ -237,6 +254,7 @@ impl Filter {
             && self.states.is_empty()
             && self.name_contains.is_empty()
             && self.candidate_work.is_empty()
+            && self.shape.is_empty()
             && self.keys.is_empty()
     }
 
@@ -307,6 +325,10 @@ impl Filter {
             {
                 return false;
             }
+        }
+        // **形状那一条不分配**（[`Shape::holds`]）：一万八千条每帧都要过一遍。
+        if !self.shape.is_empty() && !self.shape.iter().any(|shape| shape.holds(item)) {
+            return false;
         }
         true
     }
@@ -849,6 +871,21 @@ impl Plan {
 /// # Errors
 /// 读沉淀库失败时返回错误。
 pub fn plan(store: &Store, items: &[Item], decide: &Decide) -> Result<Plan, TriageError> {
+    plan_each(store, items, decide)
+}
+
+/// 与 [`plan`] 同一件事，只是这些条目不必躺在一段连续的切片里。
+///
+/// **整批操作走的是它**：一级分批的一批是队列里**散落**的那些条，把它们拷成一段切片
+/// 只为了排一次计划，在一万八千条的队列上就是白拷一遍。
+///
+/// # Errors
+/// 读沉淀库失败时返回错误。
+pub fn plan_each<'a>(
+    store: &Store,
+    items: impl IntoIterator<Item = &'a Item>,
+    decide: &Decide,
+) -> Result<Plan, TriageError> {
     let mut plan = Plan {
         summary: decide.summary(),
         note: decide.note.clone(),
