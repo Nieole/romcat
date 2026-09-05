@@ -30,8 +30,8 @@
 //!    **它进不了子库的规则**——子库要的是集合不是顺序，所以搜索框里还有字的时候
 //!    「存成子库」当场挡住（挂单 Q70）。
 //! 3. **这一行到底是什么**——右边那块面板的三层：**作品** → **变体**（每个带置信度与
-//!    **依据**）→ **文件**（含附属文件与内部资源）。媒体那一块只列得出来，
-//!    内嵌显示是票 `07`。
+//!    **依据**）→ **文件**（含附属文件与内部资源）→ **媒体**（封面与截图内嵌画出来，
+//!    视频是一张抽出来的首帧加一个播放标，[`crate::media`]）。
 //!
 //! ## 收藏与合集：同一套成员关系
 //!
@@ -87,6 +87,7 @@ use romcat_core::title::{Language, TitleKind};
 
 use crate::filter::Filter;
 use crate::font;
+use crate::media::Gallery;
 use crate::scrape;
 use crate::task::Tasks;
 use crate::table::{Picked, SPAN, Table, Window};
@@ -287,6 +288,9 @@ pub struct Screen {
     /// **媒体池**：查「这张图在不在」用它。池子整个不在位时是 `None`——
     /// 那时面板如实说「没查池子」，而不是报一句「一张都没有」。
     pool: Option<MediaPool>,
+    /// 详情面板那几格**缩略图**（票 `gui-redesign/07`）。解码与抽首帧全在核心库，
+    /// 这里只握着一条后台线程的把手与传上显卡的那几张纹理（[`crate::media`]）。
+    gallery: Gallery,
     /// **合集**那个格子：往哪个合集里加、从哪个合集里拿。收藏不用它——那一组的名字
     /// 是定死的（[`FAVORITE`]）。
     collection: String,
@@ -339,6 +343,7 @@ impl Screen {
             scoped: None,
             priorities: Priorities::builtin(),
             pool: None,
+            gallery: Gallery::new(),
             collection: String::new(),
             standing: Vec::new(),
             standing_for: None,
@@ -359,7 +364,21 @@ impl Screen {
 
     /// 指一份**媒体池**。**目录不在就不指**——「没查」与「查了、没有」得分得开。
     pub fn set_pool(&mut self, pool: Option<MediaPool>) {
+        // **两处一起换。** 那一栏问「在不在池子里」用 `pool`，画那几格图用 `gallery`
+        // 手里那条后台线程——只换一处的话，屏上会一边说「池里有」一边一格图都画不出。
+        self.gallery.set_pool(pool.clone());
         self.pool = pool;
+    }
+
+    /// 详情面板那几格缩略图。测试与实测拿它查「图解出来了没」。
+    #[must_use]
+    pub fn gallery(&self) -> &Gallery {
+        &self.gallery
+    }
+
+    /// 同上，可改。**测试拿它走「ffmpeg 不在」那条路。**
+    pub fn gallery_mut(&mut self) -> &mut Gallery {
+        &mut self.gallery
     }
 
     /// **库里的内容被改过了，整屏重读一遍。** 刮削跑完走它。
@@ -1139,6 +1158,9 @@ impl Screen {
     pub fn ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         self.sync_window(&site.catalog);
         self.sync_standing(site);
+        // **任务台上有活在跑就先不写库**：那时后台正拿着另一份写得动的连接（扫描），
+        // 这条线程上的写会在 `busy_timeout` 上等最长十秒——那是画帧线程的十秒。
+        self.sync_media(ui.ctx(), site, !tasks.busy());
         if self.scrape.is_open() {
             egui::Panel::bottom("刮削面板")
                 .default_size(300.0)
@@ -1160,7 +1182,7 @@ impl Screen {
         egui::Panel::right("浏览详情")
             .default_size(360.0)
             .min_size(200.0)
-            .show(ui, |ui| self.detail_panel(ui, &site.catalog));
+            .show(ui, |ui| self.detail_panel(ui, site));
         egui::CentralPanel::default().show(ui, |ui| {
             if self.sample {
                 self.font_sample(ui);
@@ -1537,13 +1559,38 @@ impl Screen {
     /// **这一份不复制一遍再画**：一行底下可以挂着上百个变体、每个又带着几条候选，
     /// 每帧克隆一次就是每帧几百次分配。所以画的时候只借（`as_ref`），点中哪个变体
     /// 攒在 `pick` 里，出了这个闭包再去改自己。
-    fn detail_panel(&mut self, ui: &mut egui::Ui, catalog: &Catalog) {
+    /// **每帧一次**：跟后台那条解码线程对一次账——跑完的图收进来、这一屏缺的排出去，
+    /// 顺带把刚抽出来的首帧记进中立库（票 `gui-redesign/07`）。
+    ///
+    /// 摆在这一屏的开头而不是详情面板里面，是因为它**与哪块面板正在画无关**：
+    /// 选中哪个变体决定要哪几份图，而详情面板画不画得出来是另一回事。排在画之后的话，
+    /// 刚点开的那个变体还要白等一帧才开始解。
+    ///
+    /// `writable` 是「眼下动得动中立库吗」——任务台上有活在跑时是 `false`
+    /// （[`Gallery::sync`](crate::media::Gallery::sync) 的文档写着为什么）。
+    fn sync_media(&mut self, ctx: &egui::Context, site: &mut Site, writable: bool) {
+        // **没选中变体也照跑一趟。** 抽帧要几百毫秒，人点开一段视频、抽到一半切走，
+        // 那份已经落进池里的首帧就得有人收——不收的话池里多一个孤儿文件，
+        // 两张表里一行都没有，下次打开照样重抽。
+        //
+        // 抄一份：问后台那一下要动 `self.gallery`，而 `items` 是从 `self.detail` 借的。
+        let items = self
+            .detail
+            .as_ref()
+            .map(|detail| detail.media_items.clone())
+            .unwrap_or_default();
+        self.gallery.sync(ctx, &mut site.catalog, &items, writable);
+    }
+
+    fn detail_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
         if self.work.is_none() {
             ui.add_space(4.0);
             ui.weak("点主列表里的一行，看它包含哪几个变体。");
             return;
         }
         let mut pick: Option<String> = None;
+        // 点了哪一格图。
+        let mut open: Option<crate::media::Clicked> = None;
         let this = &*self;
         let Some(work) = this.work.as_ref() else {
             return;
@@ -1582,10 +1629,28 @@ impl Screen {
                 ui.separator();
                 this.files_ui(ui);
                 ui.separator();
-                this.media_ui(ui);
+                open = this.media_ui(ui);
             });
         if let Some(key) = pick {
-            self.pick(catalog, &key);
+            self.pick(&site.catalog, &key);
+        }
+        match open {
+            None => {}
+            // **窗口里一个字节都不解码**：播放与看原图都交给系统默认程序
+            // （规格的 Out of Scope）。调不起来时如实说一句，不崩。
+            Some(crate::media::Clicked::Open(at)) => {
+                match romcat_core::scrape::preview::open_externally(&at) {
+                    Ok(()) => {
+                        self.notice = Some(format!(
+                            "交给系统默认程序打开：{}",
+                            romcat_core::path::display(&at),
+                        ));
+                    }
+                    Err(说的) => self.error = Some(说的),
+                }
+            }
+            // 点了、可这一格指不出文件。**说一句为什么**，别让人以为界面坏了。
+            Some(crate::media::Clicked::Nothing(为什么)) => self.notice = Some(为什么),
         }
     }
 
@@ -1695,46 +1760,75 @@ impl Screen {
         }
     }
 
-    /// 详情面板的**媒体**那一块。
+    /// 详情面板的**媒体**那一块：几格缩略图，底下那份逐条清单收在折叠里。
     ///
-    /// 这一票只把它列得出来——**图片内嵌显示、视频抽首帧交给系统播放器**是票 `07`，
-    /// 位置留在这儿。
-    fn media_ui(&self, ui: &mut egui::Ui) {
-        let Some(detail) = &self.detail else {
-            return;
-        };
+    /// **图直接画出来**（票 `gui-redesign/07`）：jpg 与 png 内嵌显示，视频是一张抽出来的
+    /// 首帧加一个播放标。点一格就用**系统默认程序**打开，返回的就是那一下算什么
+    /// （[`crate::media::Clicked`]）——窗口里一个字节都不解码视频（规格的 Out of Scope）。
+    ///
+    /// 逐条那份清单**一条都没删**（票 `gui-redesign/03` 立的）：媒体池按内容哈希存
+    /// （ADR-0009），人问「那张封面到底落在哪个文件」时要的正是它。只是收进折叠里——
+    /// 一屏 6 件媒体，先看图后看账。
+    fn media_ui(&self, ui: &mut egui::Ui) -> Option<crate::media::Clicked> {
+        let detail = self.detail.as_ref()?;
         ui.strong(format!("媒体 · {} 件", detail.media_items.len()));
-        // **一条条列出来**，不只报一个数：人问的往往是「那张封面到底在哪」，
-        // 而媒体池按内容哈希存（ADR-0009），只给个数字他连去哪儿找都说不出。
-        for item in &detail.media_items {
-            let where_at = match (&item.at, item.in_pool) {
-                (Some(at), Some(true)) => romcat_core::path::display(at),
-                (Some(_), _) => "**池里没有这个文件**".to_string(),
-                _ => "（媒体池没查）".to_string(),
-            };
-            let line = format!(
-                "{} · {}｜{}｜{}",
-                item.kind.label(),
-                item.anchor.label(),
-                item.source,
-                where_at,
-            );
-            if item.in_pool == Some(false) {
-                ui.colored_label(ui.visuals().warn_fg_color, line)
-            } else {
-                ui.label(line)
+        // **几格图**：一行摆得下几格摆几格，照原型 `prototype.html` 那张 `.thumbs` 网格。
+        let mut open = None;
+        ui.horizontal_wrapped(|ui| {
+            for item in &detail.media_items {
+                if let Some(点的) = self.gallery.cell(ui, item) {
+                    open = Some(点的);
+                }
             }
-            .on_hover_text(format!(
-                "{}.{}｜依据：{}",
-                item.hash, item.ext, item.evidence
-            ));
-        }
+        });
         if detail.media_items.is_empty() {
             ui.weak("一条媒体引用都没有。");
         }
         if self.pool.is_none() {
-            ui.weak("媒体池不在工作目录里，「在不在池子里」这一栏查不了。");
+            ui.weak("媒体池不在工作目录里，「在不在池子里」这一栏查不了，图也画不出。");
+        } else if self.gallery.lacks_ffmpeg() {
+            // **只说一遍**：真库里 178 个 mp4，每格各摆一句是噪音。
+            ui.weak("这台机器上没有 ffmpeg，视频抽不出首帧——那几格是占位，点下去照样放得了。");
         }
+        // **一件一件说清**：哪一格没有图、为什么。汇总的那句「有 N 条引用找不到文件」
+        // 说不出是哪一件，而这条验收要的正是后者。
+        for (是哪一件, 为什么) in self.gallery.troubles(&detail.media_items) {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!("{是哪一件}：{为什么}"),
+            );
+        }
+        if let Some(说的) = self.gallery.error() {
+            ui.colored_label(ui.visuals().error_fg_color, 说的);
+        }
+        // **逐条那份账**：类型、锚点、源、它在池里的落点、依据。
+        egui::CollapsingHeader::new("一条条看")
+            .id_salt("媒体逐条")
+            .show(ui, |ui| {
+                for item in &detail.media_items {
+                    let where_at = match (&item.at, item.in_pool) {
+                        (Some(at), Some(true)) => romcat_core::path::display(at),
+                        (Some(_), _) => "**池里没有这个文件**".to_string(),
+                        _ => "（媒体池没查）".to_string(),
+                    };
+                    let line = format!(
+                        "{} · {}｜{}｜{}",
+                        item.kind.label(),
+                        item.anchor.label(),
+                        item.source,
+                        where_at,
+                    );
+                    if item.in_pool == Some(false) {
+                        ui.colored_label(ui.visuals().warn_fg_color, line)
+                    } else {
+                        ui.label(line)
+                    }
+                    .on_hover_text(format!(
+                        "{}.{}｜依据：{}",
+                        item.hash, item.ext, item.evidence
+                    ));
+                }
+            });
         let missing = detail.missing_media();
         if missing.is_empty() {
             ui.label("不缺媒体。");
@@ -1760,6 +1854,7 @@ impl Screen {
                 ),
             );
         }
+        open
     }
 
     /// 底下那块面板：**改**选中那个变体的元数据。这一栏里的每一个文本框都会碰到输入法。

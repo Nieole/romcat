@@ -72,6 +72,19 @@ encoding_rs = "0.8"
 # 它**已经在依赖树里**（ureq 的 rustls 后端用它），直接依赖不多编译一行代码，
 # 而 RustCrypto 那一套要新拉五六个 crate。
 ring = "0.17"
+# **图片得解码成像素才画得出来**（票 `gui-redesign/07`）：egui 自己不解码，`ColorImage`
+# 要的是一片 RGBA。选 `image` 而不是自己写解码器，理由与当年选 `quick-xml` 同源——
+# 自己写 JPEG 解码器要处理霍夫曼表、量化表、反 DCT、色度上采样与重启标记，那是经典的
+# 自伤，而真库里 342 张封面截图正是 jpg。
+#
+# **它本来就在编译图里**：`eframe` 的剪贴板（`arboard`）要它读图，`png` 那一半一行都不多编
+# （同 `ring` 那条：已经在树里的东西，直接依赖比另拉一套便宜）。这里只多开一个 `jpeg`，
+# 代价是 `zune-jpeg` 与 `zune-core` 两个纯 Rust 的小 crate，没有 C、不联网。
+#
+# **只开 png 与 jpeg**：真库的媒体池里图片只有这两种（342 jpg、98 png，
+# `docs/library-facts.md`）。gif 与 webp 各要再拉一个解码器，而库里一张都没有——
+# 认不出的格式如实说「这一版不解这个格式」，不拿一个猜出来的依赖换。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 # 主库只读是这个项目唯一不可退让的约束（ADR-0004），
 # 因此禁 unsafe，一切磁盘接触走 `romcat_core::fs::LibraryFs` 这个只读接缝。

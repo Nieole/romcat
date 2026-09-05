@@ -48,6 +48,7 @@ pub mod estimate;
 pub mod local;
 pub mod online;
 pub mod pool;
+pub mod preview;
 pub mod priority;
 pub mod report;
 pub mod zh;

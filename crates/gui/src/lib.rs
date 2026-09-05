@@ -23,6 +23,9 @@
 //!   **所有元数据编辑收敛在这里**（ADR-0001 的修订段），主库的元数据文件不再是编辑入口。
 //!   抬头那个「刮削选中…」摊开的是[刮削面板](scrape)：四个旋钮，外加**按下去之前**
 //!   就看得见的那本账——会发多少网络请求、大概多久（票 `gui-redesign/10`）。
+//!   右边那块面板底下是[**媒体**那几格](media)：封面与截图**内嵌画出来**，视频是一张
+//!   抽出来的首帧加一个播放标，点一下交给系统默认程序（票 `gui-redesign/07`）。
+//!   抽帧走**外部 ffmpeg**，**找不到就退化成占位图标**——窗口里一个字节都不解码视频。
 //!   抬头另一颗是「**★ 收藏**」：勾一批按一下，那一批底下的变体全进**收藏**——落
 //!   [沉淀库](romcat_core::verdict)、锚在**内容锚**上，删掉中立库重扫也不丢
 //!   （[`romcat_core::collection`]，票 `gui-redesign/06`）。它走的就是**合集**那套成员
@@ -65,6 +68,7 @@ pub mod filter;
 pub mod font;
 pub mod headless;
 pub mod library;
+pub mod media;
 pub mod queue;
 pub mod roots;
 pub mod scrape;

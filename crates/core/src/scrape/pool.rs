@@ -161,6 +161,35 @@ impl MediaPool {
         self.path_of(hash, ext).is_file()
     }
 
+    /// 把手里这串字节**直接落进池里**，一个字都不写中立库。
+    /// 返回 `(内容哈希, 池里此前没有这份吗)`。
+    ///
+    /// **预览抽出来的首帧走它**（[`preview`](super::preview)）：抽帧跑在画帧线程之外，
+    /// 而那条线程手里没有中立库的写连接——**全程只有一个写者**
+    /// （[`Catalog::read_only`](crate::catalog::Catalog::read_only) 的头一条）。
+    /// 落盘这一半是纯文件系统，先做；记库那一半回主线程做，它本来就握着那份写连接。
+    ///
+    /// 与 [`store`] 的差别只在这里：那一条顺手问库要扩展名、也顺手把 `media` 记上，
+    /// 这一条两样都不做。**扩展名因此由调用方说死**，而它唯一的调用方说的恒是 `png`。
+    ///
+    /// # Errors
+    /// 池写不进时返回错误。
+    pub fn take_bytes(&self, bytes: &[u8], ext: &str) -> Result<(String, bool), PoolError> {
+        let mut context = Context::new(&SHA256);
+        context.update(bytes);
+        let hash = hex(context.finish().as_ref());
+        let temp = temp_path(self);
+        if let Some(parent) = temp.parent() {
+            mkdir(parent)?;
+        }
+        std::fs::write(&temp, bytes).map_err(|source| PoolError::Io {
+            path: path::display(&temp),
+            source,
+        })?;
+        let fresh = self.adopt(&temp, &hash, ext)?;
+        Ok((hash, fresh))
+    }
+
     fn tmp(&self) -> PathBuf {
         self.root.join("tmp")
     }

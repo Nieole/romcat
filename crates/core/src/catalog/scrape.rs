@@ -105,6 +105,21 @@ CREATE TABLE IF NOT EXISTS media_remote(
     hash  TEXT    NOT NULL
 ) STRICT;
 
+-- 一份**视频**抽出来的首帧是池里的哪一份内容（票 `gui-redesign/07`）。
+-- **抽帧要外部 ffmpeg，一份视频抽一次就够了**：真库的媒体池里有 178 个 mp4，
+-- 每开一次详情面板重抽一遍，等于每次翻库都拉起一百多个进程。
+--
+-- 键是**视频自己的内容哈希**而不是它的键：媒体池按内容哈希存（ADR-0009），
+-- 同一段视频被几个锚点引用时池里只有一份，它的首帧当然也只该抽一次。
+--
+-- **与 media_blob、media_remote 各分一张表**，理由同它们那两条——作废的方式不一样：
+-- 这一行只在池里那份视频没了才失效，而扫描扫的是主库、动不着它。
+CREATE TABLE IF NOT EXISTS media_frame(
+    video TEXT PRIMARY KEY REFERENCES media(hash),
+    frame TEXT NOT NULL    REFERENCES media(hash),
+    at    INTEGER NOT NULL
+) STRICT;
+
 -- 一个源对一个锚点采集过了没有。`input` 是当时的**输入指纹**，一样就整条跳过。
 -- `vals` / `pics` 记的是那次采到几条，**零也照记**——「查过、没有」是一条结论，
 -- 不是「还没查」。
@@ -516,6 +531,41 @@ impl Catalog {
                     .query_row(params![hash], |row| row.get(0))
                     .optional()
             })
+            .map_err(|source| self.err(source))
+    }
+
+    /// 这份**视频**抽过的首帧是池里的哪一份；没抽过就是 `None`。
+    ///
+    /// **第二次打开不重抽**靠的就是它（票 `gui-redesign/07` 的第四条验收）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn media_frame(&self, video: &str) -> Result<Option<String>, CatalogError> {
+        self.conn
+            .prepare_cached("SELECT frame FROM media_frame WHERE video = ?1")
+            .and_then(|mut statement| {
+                statement
+                    .query_row(params![video], |row| row.get(0))
+                    .optional()
+            })
+            .map_err(|source| self.err(source))
+    }
+
+    /// 记下「这份视频的首帧抽出来是那一份内容」。
+    ///
+    /// **后写的盖掉先写的**：换了一版 ffmpeg 重抽出来的那一帧才是眼下池里那一份，
+    /// 留着旧的等于指着一个可能已经不在的文件。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn put_media_frame(&mut self, video: &str, frame: &str) -> Result<(), CatalogError> {
+        self.conn
+            .execute(
+                "INSERT INTO media_frame(video, frame, at) VALUES(?1,?2,?3)
+                 ON CONFLICT(video) DO UPDATE SET frame = excluded.frame, at = excluded.at",
+                params![video, frame, super::now_secs()],
+            )
+            .map(|_| ())
             .map_err(|source| self.err(source))
     }
 
