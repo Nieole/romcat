@@ -1,36 +1,51 @@
-//! **库浏览**：翻整个主库、按四个维度收窄、点开一行改它的元数据。
+//! **浏览屏**：找到这一批，然后对它施加操作。
+//!
+//! ## 主列表一个游戏一行
+//!
+//! 真库上 46,444 个变体收敛成一万出头的行——**元数据本来就锚在作品这一层**，所以这个
+//! 粒度与数据模型天然对齐。六成作品下面挂着不止一个变体，它们在详情面板里挑。
+//! 收敛在中立库里做（[`romcat_core::catalog::browse`]），这一层只画和转发（ADR-0005）。
+//!
+//! **认不出作品的变体自成一行**，与导出那一侧同一条口径（`adapter::converge` 的
+//! `Anchor::Loose`）：真库上那是一多半，折进「未知」那一行等于让人看不见自己一半的库。
 //!
 //! ## 这一屏要回答的三个问题
 //!
-//! 1. **库里有什么**——中间那张表，虚拟化，四万多行滚起来的代价与总行数无关（票 22）。
-//! 2. **我要找的那一批在哪**——左边那四个筛选：**平台**、**合集**、**语言**、
-//!    **识别状态**。四条一律下推到中立库的 `WHERE`（[`romcat_core::catalog::browse`]），
-//!    内存里永远只有当前视口那几十行。
-//! 3. **这一条到底是什么**——底下那块面板：作品、发行版、**标题集合**、**首选变体**、
-//!    **媒体**缺哪些。改也在那里改。
+//! 1. **我有哪些游戏**——中间那张表，虚拟化，十万行滚起来的代价与总行数无关。
+//! 2. **我要找的那一批在哪**——左边那五个筛选：**平台**、**合集**、**语言**、
+//!    **中文**、**识别状态**。一律下推到中立库的 `WHERE`，内存里永远只有当前视口那几十行。
+//!    （可嵌套的条件组与 `^` `$` 两个运算符是票 `04` 的活，这一栏先把位置占住。）
+//! 3. **这一行到底是什么**——右边那块面板的三层：**作品** → **变体**（每个带置信度与
+//!    **依据**）→ **文件**（含附属文件与内部资源）。媒体那一块只列得出来，
+//!    内嵌显示是票 `07`。
+//!
+//! ## 选中语义：这一屏要钉死的东西
+//!
+//! - 选中主列表的行 ＝ 选中这些**作品**，批量操作作用于它们的变体
+//!   （[`Catalog::scoped_variants`]，随当前筛选收窄；不筛的时候就是全部变体）。
+//! - 在详情面板里选中某一个**变体** ＝ 变体级的操作只作用于它：改它的元数据、
+//!   把首选变体裁给它、看它的文件。
+//!
+//! 两件事各有各的状态（[`Picked`] 与 [`Screen::variant_key`]），混成一件的话，
+//! 翻着看就会把批量操作的范围改掉。
 //!
 //! ## 所有元数据编辑收敛在这里（ADR-0001 的修订段）
 //!
 //! 主库的 Pegasus 文件不再是编辑入口。于是这一屏必须真的改得动库：加一条**裁决**来源的
-//! 叫法、删一条叫法、指定或撤销**首选变体**。这几件事各自都只是一次中立库写入——
-//! 领域判断（怎么去重、裁决优先于任何数据源、规则算出来的首选是哪一个）一条都不在这里，
-//! 全在 [`romcat_core::catalog::detail`]。
-//!
-//! ## ADR-0012：**首选变体与标题来源解耦**
-//!
-//! 这两样在面板上挨着，而它们恰恰不是一件事——首选变体决定**默认启动哪一个**，
-//! 中文标题永远取**官中版的官方译名**，即使首选启动的是汉化版。面板上把这句话写成一行
-//! 摆出来，而不是让人自己去推。
+//! 叫法、删一条叫法、指定或撤销**首选变体**、写下一个刮削字段值。这几件事各自都只是
+//! 一次中立库写入——领域判断一条都不在这里。
 //!
 //! ## 中文输入全在底下那块面板里
 //!
 //! 一个 [`egui::TextEdit`] 都不进表格单元格：表格是虚拟化的，正在组字的那一行一旦滚出
 //! 视口，那个控件就不存在了（ADR-0005 的修订段）。左边的筛选栏里也一个都没有——
-//! 那四个维度是**选**出来的不是打出来的，值从中立库现问（[`Catalog::facets`]）。
+//! 那五个维度是**选**出来的不是打出来的，值从中立库现问（[`Catalog::facets`]）。
 
 use egui::{Align, Layout};
-use romcat_core::catalog::browse::{Facets, PlatformFilter};
-use romcat_core::catalog::{Catalog, VariantDetail, VariantQuery};
+use romcat_core::catalog::browse::{
+    Facets, PlatformFilter, WorkAnchor, WorkDetail, WorkQuery, WorkVariant,
+};
+use romcat_core::catalog::{Catalog, Confidence, VariantDetail};
 use romcat_core::report::{capacity, human_bytes, thousands};
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::priority::VERDICT;
@@ -39,13 +54,13 @@ use romcat_core::site::Site;
 use romcat_core::title::{Language, TitleKind};
 
 use crate::font;
-use crate::table::{SPAN, Table, Window};
+use crate::table::{Picked, SPAN, Table, Window};
 
 /// 界面上人工写下的叫法，**依据**里写这一句。
 ///
 /// 没有依据的结论事后无法复核（ADR-0002）。人工写的那条依据只能是「谁在哪儿写的」，
 /// 但那也比空着强——半年后看见一个来路不明的中文名，至少知道它是自己敲的。
-const HAND_WRITTEN: &str = "库浏览的详情面板上人工写的";
+const HAND_WRITTEN: &str = "浏览屏的详情面板上人工写的";
 
 /// 底下那块面板里，**标题集合**最多列几条。
 ///
@@ -56,9 +71,16 @@ const TOP_TITLES: usize = 24;
 /// 面板上**文件成员**最多列几条。
 ///
 /// 与标题分开定：一个变体可以是**一整个目录**（`CONTEXT.md` 的「变体」词条），
-/// PSV 那批目录树转储一个变体底下就是上千个文件。这个数管的是「扫一眼看得完」，
-/// 与「一部作品有几个叫法」不是同一件事，共用一个常量迟早会为了一边把另一边调坏。
+/// PSV 那批目录树转储一个变体底下就是上千个文件（真库上最大的一份有 21,436 个）。
+/// 这个数管的是「扫一眼看得完」，与「一部作品有几个叫法」不是同一件事，
+/// 共用一个常量迟早会为了一边把另一边调坏。
 const TOP_MEMBERS: usize = 40;
+
+/// 详情面板上**候选的依据**一个变体最多列几条。
+///
+/// 一个变体可以撞上好几条 DAT 记录（真库上多候选那批有 3,584 个），而这一栏是给人
+/// 「判断得出哪个版本更可信」用的，不是给人读完的。
+const TOP_CANDIDATES: usize = 8;
 
 /// 刮削字段值那一列，一行最多画多少个字。
 ///
@@ -135,22 +157,36 @@ impl Default for ValueDraft {
     }
 }
 
-/// 库浏览这个屏幕。
+/// 浏览屏。
 pub struct Screen {
     window: Window,
     /// 筛选与排序。**界面上这一份是源头**，[`Window`] 里那一份是它的副本，每帧同步一次。
-    query: VariantQuery,
-    /// 四个维度各有哪些值可选。换库或改过元数据才重问。
+    query: WorkQuery,
+    /// 五个维度各有哪些值可选。换库或改过元数据才重问。
     facets: Facets,
-    /// 作品 id → 作品名。表里那一列作品名从它来（见 [`crate::table::Table::works`]）。
-    works: std::collections::BTreeMap<i64, String>,
-    /// 选中的是哪一行（全序下标）。
-    selected: Option<u64>,
-    /// 选中那一行的键。**记键不记下标**：换个筛选表就重排了，下标会指到别人身上。
-    /// 底下那块面板认的是它。
-    picked: Option<String>,
-    /// 点开的那一条的详情。
+    /// 高亮的是哪一行（全序下标）。
+    focused: Option<u64>,
+    /// 选中了哪几行——**批量操作的作用范围**。与 [`Self::focused`] 不是一回事。
+    picked: Picked,
+    /// 点开的那一行是谁。**记身份不记下标**：换个筛选表就重排了，下标会指到别人身上。
+    opened: Option<WorkAnchor>,
+    /// 点开那一行的详情：作品 → 变体。
+    work: Option<WorkDetail>,
+    /// 详情面板里**选中的那一个变体**。变体级的操作只作用于它。
+    variant: Option<String>,
+    /// 选中那个变体的详情：文件、媒体、标题集合、首选变体、刮削字段。
     detail: Option<VariantDetail>,
+    /// 眼下这份选中展开成多少个变体。**批量操作按下去会动这么多**。
+    ///
+    /// `None` 是**数不出来**（读库出的错在 [`Self::error`] 里），不是零——
+    /// 屏上写着「作用于 0 个变体」而按下去真会动一百多个，那正是这一栏要防的事。
+    scope: Option<u64>,
+    /// [`Self::scope`] 是照哪一份选中数出来的。与眼下这份不一样就重数一遍。
+    ///
+    /// **不拿一个 `dirty` 标记**：选中是在表格里点的，也可以由实测与测试直接改
+    /// （[`Self::picked_mut`]），标记会漏掉后一条路——而漏掉的后果是屏上写着
+    /// 「作用于 0 个变体」，人却按下了一个真会动 185 个的按钮。
+    scoped: Option<Picked>,
     /// 挑**显示标题**用的优先级表。与导出走同一份，于是面板上写着的就是导出会写的。
     priorities: Priorities,
     /// **媒体池**：查「这张图在不在」用它。池子整个不在位时是 `None`——
@@ -182,12 +218,16 @@ impl Screen {
     pub fn new() -> Self {
         Self {
             window: Window::new(SPAN),
-            query: VariantQuery::default(),
+            query: WorkQuery::default(),
             facets: Facets::default(),
-            works: std::collections::BTreeMap::new(),
-            selected: None,
-            picked: None,
+            focused: None,
+            picked: Picked::default(),
+            opened: None,
+            work: None,
+            variant: None,
             detail: None,
+            scope: None,
+            scoped: None,
             priorities: Priorities::builtin(),
             pool: None,
             title_draft: TitleDraft::default(),
@@ -219,10 +259,6 @@ impl Screen {
             }
             Err(error) => self.error = Some(format!("中立库读不动：{error}")),
         }
-        match site.catalog.work_names() {
-            Ok(works) => self.works = works,
-            Err(error) => self.error = Some(format!("中立库读不动：{error}")),
-        }
     }
 
     /// 窗口，供测试查「内存里装了几行」。
@@ -233,25 +269,70 @@ impl Screen {
 
     /// 眼下的筛选与排序。
     #[must_use]
-    pub fn query(&self) -> &VariantQuery {
+    pub fn query(&self) -> &WorkQuery {
         &self.query
     }
 
     /// 改筛选与排序。实测与测试拿它当界面上点的那一下。
-    pub fn query_mut(&mut self) -> &mut VariantQuery {
+    pub fn query_mut(&mut self) -> &mut WorkQuery {
         &mut self.query
     }
 
-    /// 四个维度各有哪些值可选。
+    /// 五个维度各有哪些值可选。
     #[must_use]
     pub fn facets(&self) -> &Facets {
         &self.facets
     }
 
-    /// 点开的那一条的详情。
+    /// 选中了哪几行。
+    #[must_use]
+    pub fn picked(&self) -> &Picked {
+        &self.picked
+    }
+
+    /// 改选中。实测与测试拿它当界面上勾的那一下。
+    pub fn picked_mut(&mut self) -> &mut Picked {
+        &mut self.picked
+    }
+
+    /// 点开的那一行的详情（作品 → 变体）。
+    #[must_use]
+    pub fn work(&self) -> Option<&WorkDetail> {
+        self.work.as_ref()
+    }
+
+    /// 详情面板里选中的那一个**变体**的键。变体级的操作只作用于它。
+    #[must_use]
+    pub fn variant_key(&self) -> Option<&str> {
+        self.variant.as_deref()
+    }
+
+    /// 选中那个变体的详情。
     #[must_use]
     pub fn detail(&self) -> Option<&VariantDetail> {
         self.detail.as_ref()
+    }
+
+    /// 眼下这份选中展开成多少个变体——**批量操作按下去会动这么多**。
+    ///
+    /// `None` 是数不出来（读库出的错在 [`Self::error`] 里），不是零。
+    #[must_use]
+    pub fn scope_total(&self) -> Option<u64> {
+        self.scope
+    }
+
+    /// **批量操作作用于哪些变体**：选中的那几行底下的变体，按当前筛选。
+    ///
+    /// 刮削、存成子库、加收藏（票 `10` / `11` / `06`）按下去要动的就是这一批。
+    /// 这一票只把这条路铺到位并钉住语义，几个按钮各自在各自的票里接上来。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn batch_variants(
+        &self,
+        catalog: &Catalog,
+    ) -> Result<Vec<String>, romcat_core::catalog::CatalogError> {
+        catalog.scoped_variants(&self.query, self.picked.scope())
     }
 
     /// 上一次出的错。
@@ -274,6 +355,21 @@ impl Screen {
     /// 写下一个刮削字段值的草稿，供实测与测试填。
     pub fn value_draft_mut(&mut self) -> &mut ValueDraft {
         &mut self.value_draft
+    }
+
+    /// 点开主列表的一行。**界面上点那一行走的就是它**，测试拿它当那一下。
+    ///
+    /// 顺带把这一行底下的**第一个变体**选中：详情面板的第二层与第三层总得有东西摆，
+    /// 而「第一个」在核心库那边是按键排的，同一份库点两次结果一样。
+    pub fn open_work(&mut self, catalog: &Catalog, anchor: &WorkAnchor) {
+        self.opened = Some(anchor.clone());
+        self.load_work(catalog);
+    }
+
+    /// 在详情面板里选中某一个**变体**。**变体级的操作只作用于它。**
+    pub fn pick(&mut self, catalog: &Catalog, key: &str) {
+        self.variant = Some(key.to_string());
+        self.load_detail(catalog);
     }
 
     /// 把草稿里那个字段值写下，**来源记作裁决**。
@@ -320,12 +416,6 @@ impl Screen {
             Ok(false) => self.notice = Some("本来就没人写过。".to_string()),
             Err(error) => self.error = Some(format!("中立库写不动：{error}")),
         }
-    }
-
-    /// 点开一条变体。**界面上点那一行走的就是它**，测试拿它当那一下。
-    pub fn pick(&mut self, catalog: &Catalog, key: &str) {
-        self.picked = Some(key.to_string());
-        self.load_detail(catalog);
     }
 
     /// 把草稿里那条叫法写进**标题集合**，**来源记作裁决**。
@@ -386,9 +476,55 @@ impl Screen {
         }
     }
 
-    /// 重新读一遍详情。改过元数据之后要走一趟——面板上摆的必须是库里现在的样子。
+    /// 重新读一遍那一行的详情，**并且把选中的那个变体归位**。
+    ///
+    /// 归位这一步不能省：换一套筛选之后，原先选中的那个变体可能已经不在这一行底下了
+    /// （按平台筛掉的那些），而底下那块面板还照着它画、改元数据还落在它头上——
+    /// 人看见的是一行，动到的是另一行。不在了就退回这一行的第一个变体；
+    /// 一个都不剩就一起清掉。
+    fn load_work(&mut self, catalog: &Catalog) {
+        let Some(anchor) = self.opened.clone() else {
+            self.work = None;
+            self.variant = None;
+            self.detail = None;
+            return;
+        };
+        match catalog.work_detail(&self.query, &anchor) {
+            Ok(work) => {
+                self.work = work;
+                self.error = None;
+            }
+            Err(error) => {
+                self.work = None;
+                self.error = Some(format!("中立库读不动：{error}"));
+            }
+        }
+        let keep = self.variant.as_deref().is_some_and(|key| {
+            self.work
+                .as_ref()
+                .is_some_and(|work| work.variants.iter().any(|v| v.row.key == key))
+        });
+        if keep {
+            return;
+        }
+        let first = self
+            .work
+            .as_ref()
+            .and_then(|work| work.variants.first())
+            .map(|variant| variant.row.key.clone());
+        match first {
+            Some(key) => self.pick(catalog, &key),
+            None => {
+                self.variant = None;
+                self.detail = None;
+            }
+        }
+    }
+
+    /// 重新读一遍选中那个变体的详情。改过元数据之后要走一趟——面板上摆的必须是
+    /// 库里现在的样子。
     fn load_detail(&mut self, catalog: &Catalog) {
-        let Some(key) = self.picked.clone() else {
+        let Some(key) = self.variant.clone() else {
             self.detail = None;
             return;
         };
@@ -415,9 +551,12 @@ impl Screen {
             if let Some(error) = self.window.error() {
                 ui.colored_label(ui.visuals().error_fg_color, error);
             } else {
+                let picked = self.picked.count(self.window.total());
                 ui.label(format!(
-                    "{} 行；内存里 {} 行、读库 {} 次",
+                    "{} 个作品；选中 {} 条、作用于 {} 个变体｜内存里 {} 行、读库 {} 次",
                     thousands(self.window.total()),
+                    thousands(picked),
+                    scope_label(self.scope),
                     self.window.retained(),
                     self.window.reads(),
                 ));
@@ -427,45 +566,70 @@ impl Screen {
 
     /// 换过筛选或排序就把窗口作废重取。没换过是空操作。
     ///
-    /// **换了就把「选中第几行」也丢掉**：那是个全序下标，而换一套筛选等于换了一张表，
-    /// 同一个下标会指到另一条变体身上，于是高亮的那一行与底下面板摆着的那一条对不上。
-    /// 面板认的是**键**（[`Self::picked`]），它照旧留着。
+    /// **换排序与换筛选丢掉的东西不一样**：
+    ///
+    /// - 换**排序**只是把同一批行重排。高亮那一份是个全序下标，重排之后它会指到另一行
+    ///   身上，所以丢掉；**选中的那几行一条都不动**——筛出来的还是同一批，人勾了两百行
+    ///   再按一下「容量」表头，选中不该凭空消失。
+    /// - 换**筛选**才是换了一批行。这时全选说的「当前筛出来的这一批」已经不是同一批，
+    ///   留着它会让批量操作作用到人根本没看见的行上，所以连选中一起清掉；点开的那一行
+    ///   在新的筛选下也可能一个变体都不剩，详情跟着重读一次。
     fn sync_window(&mut self, catalog: &Catalog) {
+        let refiltered = !self.window.query().same_filter(&self.query);
         if self.window.query() != &self.query {
-            self.selected = None;
+            self.focused = None;
             self.window.set_query(self.query.clone());
         }
+        if refiltered {
+            self.picked.clear();
+            self.load_work(catalog);
+        }
         self.window.sync(catalog);
+        if refiltered || self.scoped.as_ref() != Some(&self.picked) {
+            self.scoped = Some(self.picked.clone());
+            match catalog.scoped_variant_total(&self.query, self.picked.scope()) {
+                Ok(total) => self.scope = Some(total),
+                Err(error) => {
+                    // **数不出来就说数不出来**，不摆一个 0 出去：屏上写着
+                    // 「作用于 0 个变体」而按下去真会动一百多个，比不写更坏。
+                    self.scope = None;
+                    self.error = Some(format!("中立库读不动：{error}"));
+                }
+            }
+        }
     }
 
     /// 画一帧。
     pub fn ui(&mut self, ui: &mut egui::Ui, site: &mut Site) {
         self.sync_window(&site.catalog);
-        egui::Panel::bottom("库浏览详情")
-            .default_size(300.0)
-            .min_size(120.0)
-            .show(ui, |ui| self.detail_panel(ui, site));
+        egui::Panel::bottom("浏览编辑")
+            .default_size(260.0)
+            .min_size(110.0)
+            .show(ui, |ui| self.edit_panel(ui, site));
         egui::Panel::left("筛选")
-            .default_size(240.0)
+            .default_size(230.0)
             .min_size(150.0)
             .show(ui, |ui| self.filter_panel(ui));
+        egui::Panel::right("浏览详情")
+            .default_size(360.0)
+            .min_size(200.0)
+            .show(ui, |ui| self.detail_panel(ui, &site.catalog));
         egui::CentralPanel::default().show(ui, |ui| {
             if self.sample {
                 self.font_sample(ui);
                 ui.separator();
             }
-            let picked = Table {
+            let opened = Table {
                 catalog: &site.catalog,
-                works: &self.works,
                 window: &mut self.window,
                 query: &mut self.query,
-                selected: &mut self.selected,
+                focused: &mut self.focused,
+                picked: &mut self.picked,
                 scroll_to: self.scroll_to,
             }
             .show(ui);
-            if let Some(row) = picked {
-                self.picked = Some(row.key.clone());
-                self.load_detail(&site.catalog);
+            if let Some(row) = opened {
+                self.open_work(&site.catalog, &row.anchor);
             }
         });
     }
@@ -479,14 +643,18 @@ impl Screen {
                     ui.strong("筛选");
                     if ui.button("全清").clicked() {
                         let order = (self.query.order, self.query.descending);
-                        self.query = VariantQuery {
+                        self.query = WorkQuery {
                             order: order.0,
                             descending: order.1,
-                            ..VariantQuery::default()
+                            ..WorkQuery::default()
                         };
                     }
                 });
-                ui.weak("各维之间是「且」：一层层收窄。全部下推到中立库。");
+                ui.weak("各维之间是「且」：一层层收窄。全部下推到中立库。")
+                    .on_hover_text(
+                        "**这就是子库的规则**：筛到满意存成子库，规则原样带过去。\
+                         可嵌套的条件组与「以…开始 / 以…结束」在票 04 接上来。",
+                    );
                 ui.separator();
 
                 platform_picker(ui, &self.facets.platforms, &mut self.query.platform);
@@ -534,8 +702,202 @@ impl Screen {
             });
     }
 
-    /// 底下那块面板：这一条到底是什么，以及改它。**全部中文输入都在这里。**
-    fn detail_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+    /// 右边那块面板：**作品 → 变体 → 文件**。
+    ///
+    /// **这一份不复制一遍再画**：一行底下可以挂着上百个变体、每个又带着几条候选，
+    /// 每帧克隆一次就是每帧几百次分配。所以画的时候只借（`as_ref`），点中哪个变体
+    /// 攒在 `pick` 里，出了这个闭包再去改自己。
+    fn detail_panel(&mut self, ui: &mut egui::Ui, catalog: &Catalog) {
+        if self.work.is_none() {
+            ui.add_space(4.0);
+            ui.weak("点主列表里的一行，看它包含哪几个变体。");
+            return;
+        }
+        let mut pick: Option<String> = None;
+        let this = &*self;
+        let Some(work) = this.work.as_ref() else {
+            return;
+        };
+        egui::ScrollArea::vertical()
+            .id_salt("作品详情")
+            .show(ui, |ui| {
+                ui.strong(&work.name);
+                ui.label(format!(
+                    "{}｜{}｜{} 个变体",
+                    if work.platforms.is_empty() {
+                        "—".to_string()
+                    } else {
+                        work.platforms.join(" / ")
+                    },
+                    work.year.as_deref().unwrap_or("年份不详"),
+                    work.variants.len(),
+                ));
+                if matches!(work.anchor, WorkAnchor::Loose(_)) {
+                    // 没有作品链接**本身就是一条信息**：识别还没认出它属于哪个作品，
+                    // 于是它自成一行（与导出那一侧同一条口径）。
+                    ui.weak("识别还没认出它属于哪个作品，所以这一行就是它自己。");
+                }
+
+                ui.separator();
+                ui.strong(format!("变体 {} 个", work.variants.len()));
+                ui.weak("点一个：底下的文件、媒体与元数据编辑就只作用于它。");
+                for variant in &work.variants {
+                    if this.variant_row(ui, variant) {
+                        pick = Some(variant.row.key.clone());
+                    }
+                }
+
+                ui.separator();
+                this.files_ui(ui);
+                ui.separator();
+                this.media_ui(ui);
+            });
+        if let Some(key) = pick {
+            self.pick(catalog, &key);
+        }
+    }
+
+    /// 详情面板里的一个变体：置信度、**依据**、点得中。点中了返回 `true`。
+    fn variant_row(&self, ui: &mut egui::Ui, variant: &WorkVariant) -> bool {
+        let on = self.variant.as_deref() == Some(variant.row.key.as_str());
+        let confidence = match variant.confidence() {
+            Some(Confidence::High) => "高",
+            Some(Confidence::Medium) => "中",
+            Some(Confidence::Low) => "低",
+            None => "还没识别",
+        };
+        let line = format!(
+            "{confidence}｜{}｜{}",
+            variant.row.key,
+            capacity(variant.row.bytes, variant.row.unreadable_files),
+        );
+        let response = ui.selectable_label(on, line);
+        // **依据挂在悬停里**：没有依据的候选事后无法复核（ADR-0002），
+        // 而一条依据能有一整句话，摆在行上会把这一栏撑开。
+        let response = response.on_hover_ui(|ui| {
+            ui.set_max_width(420.0);
+            ui.label(format!(
+                "识别结论：{}",
+                variant.state.map_or("还没识别", |state| state.label()),
+            ));
+            if let Some(reason) = &variant.reason {
+                ui.label(format!("为什么没定下来：{reason}"));
+            }
+            if variant.candidates.is_empty() {
+                ui.label("一条候选都没有——那是**还没识别**，不是「撞过没撞上」。");
+            }
+            for candidate in variant.candidates.iter().take(TOP_CANDIDATES) {
+                ui.separator();
+                ui.label(format!(
+                    "{} · {}｜{}｜{}",
+                    candidate.confidence.label(),
+                    if candidate.accepted {
+                        "自动通过"
+                    } else {
+                        "等人裁决"
+                    },
+                    candidate.source,
+                    candidate.game,
+                ));
+                ui.weak(&candidate.evidence);
+            }
+            if variant.candidates.len() > TOP_CANDIDATES {
+                ui.weak(format!(
+                    "……另有 {} 条候选没列",
+                    variant.candidates.len() - TOP_CANDIDATES,
+                ));
+            }
+        });
+        response.clicked()
+    }
+
+    /// 详情面板第三层：选中那个变体的**全部文件**，含附属文件与内部资源。
+    fn files_ui(&self, ui: &mut egui::Ui) {
+        let Some(detail) = &self.detail else {
+            ui.weak("选一个变体，看它有哪些文件。");
+            return;
+        };
+        ui.strong(format!("文件 · {} 个", detail.members.len()));
+        for (key, role) in detail.members.iter().take(TOP_MEMBERS) {
+            ui.label(format!("{}  {key}", role.code()));
+        }
+        if detail.members.len() > TOP_MEMBERS {
+            ui.weak(format!(
+                "……另有 {} 个没列",
+                detail.members.len() - TOP_MEMBERS
+            ));
+        }
+    }
+
+    /// 详情面板的**媒体**那一块。
+    ///
+    /// 这一票只把它列得出来——**图片内嵌显示、视频抽首帧交给系统播放器**是票 `07`，
+    /// 位置留在这儿。
+    fn media_ui(&self, ui: &mut egui::Ui) {
+        let Some(detail) = &self.detail else {
+            return;
+        };
+        ui.strong(format!("媒体 · {} 件", detail.media_items.len()));
+        // **一条条列出来**，不只报一个数：人问的往往是「那张封面到底在哪」，
+        // 而媒体池按内容哈希存（ADR-0009），只给个数字他连去哪儿找都说不出。
+        for item in &detail.media_items {
+            let where_at = match (&item.at, item.in_pool) {
+                (Some(at), Some(true)) => romcat_core::path::display(at),
+                (Some(_), _) => "**池里没有这个文件**".to_string(),
+                _ => "（媒体池没查）".to_string(),
+            };
+            let line = format!(
+                "{} · {}｜{}｜{}",
+                item.kind.label(),
+                item.anchor.label(),
+                item.source,
+                where_at,
+            );
+            if item.in_pool == Some(false) {
+                ui.colored_label(ui.visuals().warn_fg_color, line)
+            } else {
+                ui.label(line)
+            }
+            .on_hover_text(format!(
+                "{}.{}｜依据：{}",
+                item.hash, item.ext, item.evidence
+            ));
+        }
+        if detail.media_items.is_empty() {
+            ui.weak("一条媒体引用都没有。");
+        }
+        if self.pool.is_none() {
+            ui.weak("媒体池不在工作目录里，「在不在池子里」这一栏查不了。");
+        }
+        let missing = detail.missing_media();
+        if missing.is_empty() {
+            ui.label("不缺媒体。");
+        } else {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!(
+                    "缺：{}",
+                    missing
+                        .iter()
+                        .map(|kind| kind.label())
+                        .collect::<Vec<_>>()
+                        .join("、"),
+                ),
+            );
+        }
+        if detail.dangling_media() > 0 {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!(
+                    "有 {} 条引用在**媒体池**里找不到那个文件，导出时一张都铺不出去。",
+                    thousands(detail.dangling_media()),
+                ),
+            );
+        }
+    }
+
+    /// 底下那块面板：**改**选中那个变体的元数据。这一栏里的每一个文本框都会碰到输入法。
+    fn edit_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
         ui.add_space(4.0);
         if let Some(error) = &self.error {
             ui.colored_label(ui.visuals().error_fg_color, error);
@@ -546,22 +908,39 @@ impl Screen {
         // 筛选框在这块面板里而不在左栏，与队列那一屏同一条规矩：会碰到输入法的控件
         // 全收在**不虚拟化**的面板里（ADR-0005）。筛选本身照旧下推到中立库。
         ui.horizontal(|ui| {
-            ui.label("键里含");
+            ui.label("名字里含");
             ui.add(
                 egui::TextEdit::singleline(&mut self.query.contains)
-                    .desired_width(300.0)
-                    .hint_text("变体的键里含这段文字"),
+                    .desired_width(260.0)
+                    .hint_text("作品名里含这段文字"),
+            )
+            .on_hover_text(
+                "筛的是**主列表这一行的名字**：认出作品的那些按作品名筛，\
+                 没认出来的按它自己的键筛。搜索框与匹配质量排序是票 05。",
             );
+            ui.separator();
+            ui.label(format!(
+                "选中 {} 条，作用于 {} 个变体",
+                thousands(self.picked.count(self.window.total())),
+                scope_label(self.scope),
+            ))
+            .on_hover_text(
+                "**选中主列表的行 ＝ 选中这些作品，批量操作作用于它们的变体。**\
+                 刮削（票 10）、存成子库（票 11）、加收藏（票 06）按下去动的就是这一批。",
+            );
+            if ui.button("全不选").clicked() {
+                self.picked.clear();
+            }
         });
         ui.separator();
         if self.detail.is_none() {
-            ui.weak("点表里的一行看它的元数据。改也在这块面板里改。");
+            ui.weak("在右边选一个变体，改它的元数据。**改动只作用于那一个变体。**");
             return;
         }
         let available = ui.available_width();
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(
-                egui::vec2((available * 0.44).max(240.0), ui.available_height()),
+                egui::vec2((available * 0.42).max(240.0), ui.available_height()),
                 Layout::top_down(Align::Min),
                 |ui| self.facts_column(ui),
             );
@@ -574,7 +953,7 @@ impl Screen {
         });
     }
 
-    /// 左半：这一条是什么。识别结论、作品、发行版、合集、成员、**媒体缺哪些**。
+    /// 左半：选中那个变体是什么。识别结论、作品、发行版、合集。
     fn facts_column(&mut self, ui: &mut egui::Ui) {
         let Some(detail) = &self.detail else {
             return;
@@ -624,101 +1003,10 @@ impl Screen {
                         detail.collections.join("、")
                     },
                 ));
-
-                ui.separator();
-                ui.strong("媒体");
-                // **一条条列出来**，不只报一个数：人问的往往是「那张封面到底在哪」，
-                // 而媒体池按内容哈希存（ADR-0009），只给个数字他连去哪儿找都说不出。
-                for item in &detail.media_items {
-                    let where_at = match (&item.at, item.in_pool) {
-                        (Some(at), Some(true)) => romcat_core::path::display(at),
-                        (Some(_), _) => "**池里没有这个文件**".to_string(),
-                        _ => "（媒体池没查）".to_string(),
-                    };
-                    let line = format!(
-                        "{} · {}｜{}｜{}",
-                        item.kind.label(),
-                        item.anchor.label(),
-                        item.source,
-                        where_at,
-                    );
-                    if item.in_pool == Some(false) {
-                        ui.colored_label(ui.visuals().warn_fg_color, line)
-                    } else {
-                        ui.label(line)
-                    }
-                    .on_hover_text(format!(
-                        "{}.{}｜依据：{}",
-                        item.hash, item.ext, item.evidence
-                    ));
-                }
-                if detail.media_items.is_empty() {
-                    ui.weak("一条媒体引用都没有。");
-                }
-                for have in &detail.media {
-                    let line = match have.in_pool {
-                        Some(got) => format!(
-                            "{}：库里 {} 条引用，池里躺着 {} 份",
-                            have.kind.label(),
-                            have.refs,
-                            got,
-                        ),
-                        None => format!(
-                            "{}：库里 {} 条引用（**媒体池没查**）",
-                            have.kind.label(),
-                            have.refs,
-                        ),
-                    };
-                    if have.refs > 0 && have.in_pool == Some(0) {
-                        ui.colored_label(ui.visuals().warn_fg_color, line);
-                    } else {
-                        ui.label(line);
-                    }
-                }
-                if self.pool.is_none() {
-                    ui.weak("媒体池不在工作目录里，「在不在池子里」这一栏查不了。");
-                }
-                let missing = detail.missing_media();
-                if missing.is_empty() {
-                    ui.label("不缺媒体。");
-                } else {
-                    ui.colored_label(
-                        ui.visuals().warn_fg_color,
-                        format!(
-                            "缺：{}",
-                            missing
-                                .iter()
-                                .map(|kind| kind.label())
-                                .collect::<Vec<_>>()
-                                .join("、"),
-                        ),
-                    );
-                }
-                if detail.dangling_media() > 0 {
-                    ui.colored_label(
-                        ui.visuals().warn_fg_color,
-                        format!(
-                            "有 {} 条引用在**媒体池**里找不到那个文件，导出时一张都铺不出去。",
-                            thousands(detail.dangling_media()),
-                        ),
-                    );
-                }
-
-                ui.separator();
-                ui.strong(format!("文件成员（{}）", detail.members.len()));
-                for (key, role) in detail.members.iter().take(TOP_MEMBERS) {
-                    ui.label(format!("{}  {key}", role.code()));
-                }
-                if detail.members.len() > TOP_MEMBERS {
-                    ui.weak(format!(
-                        "……另有 {} 个没列",
-                        detail.members.len() - TOP_MEMBERS
-                    ));
-                }
             });
     }
 
-    /// 右半：**改**。标题集合与首选变体。这一栏里的每一个文本框都会碰到输入法。
+    /// 右半：**改**。标题集合、首选变体、刮削字段值。
     fn edit_column(&mut self, ui: &mut egui::Ui, site: &mut Site) {
         let Some(detail) = self.detail.clone() else {
             return;
@@ -1076,6 +1364,11 @@ impl Screen {
                 .show(ui, |ui| ui.monospace(font::LICENSE));
         });
     }
+}
+
+/// 作用范围那个数画成什么。**数不出来就说数不出来**，不摆一个 0 出去。
+fn scope_label(scope: Option<u64>) -> String {
+    scope.map_or_else(|| "？".to_string(), thousands)
 }
 
 /// 一个维度的选项列表：一行一个值，左边是它选中多少个变体。

@@ -1,21 +1,24 @@
-//! **库浏览**：四个维度筛得动、点开一条看得全、改得动元数据。
+//! **浏览屏**：主列表按作品出行、五个维度筛得动、点开一行看得全、改得动元数据。
 //!
 //! 这几条断言不看代码长什么样，看的是**跑出来的结果**：
 //!
+//! - 主列表**一个游戏一行**，认不出作品的那些一条都没被吞掉。
 //! - 筛选真的下推到中立库——筛完之后内存里还是那一扇窗，而总行数与另一条独立查出来的
 //!   数字相等。
-//! - 详情面板要的八样（作品、发行版、合集、语言、识别结论、**标题集合**、
-//!   **首选变体**、**媒体**）一次折得齐。
+//! - **选中语义**：选中主列表的行，批量操作作用于它们的变体；在详情面板里选中某一个
+//!   变体，变体级的改动只落在它头上。
+//! - 详情面板三层齐：作品 → 变体（每个带置信度与**依据**）→ 文件（含附属文件与内部资源）。
 //! - 改元数据当场落库：所有元数据编辑收敛在这里（ADR-0001 的修订段），
 //!   主库的元数据文件不再是编辑入口。
 //! - **首选变体与标题来源解耦**（ADR-0012）：首选换成汉化版，中文标题的来源一个字不变。
 
 use egui::widgets::text_edit::TextEditState;
-use romcat_core::catalog::browse::{PlatformFilter, StateFilter};
-use romcat_core::catalog::{State, VariantQuery};
+use romcat_core::catalog::browse::{PlatformFilter, StateFilter, WorkAnchor, WorkOrder, WorkQuery};
+use romcat_core::catalog::State;
 use romcat_core::dat::chinese::ChineseMark;
 use romcat_core::scrape::priority::VERDICT;
 use romcat_core::scrape::{AnchorKind, Field, MediaKind};
+use romcat_core::shape::Role;
 use romcat_core::title::{Language, TitleKind};
 use romcat_gui::app::{App, View};
 use romcat_gui::bench::{self, Sweep};
@@ -77,12 +80,95 @@ fn 五个维度都有得选而且各自带着条数() {
 }
 
 #[test]
-fn 四个维度筛得动而且筛选下推到中立库() {
+fn 主列表按作品出行而且行数与库里的作品数对得上() {
+    // 「主列表一个游戏一行——不是 46,428 个变体」。合成数据里 20 个作品，
+    // 外加每十三个留一个**压根没识别过**的变体——那些认不出作品，各自一行，
+    // 一条都不许被吞掉（与导出那一侧同一条口径）。
+    let ctx = headless::context();
+    let mut app = 界面(ROWS);
+    跑(&ctx, &mut app, 2);
+    let 行数 = app.window().total();
+    assert!(行数 > 0, "主列表一行都没有");
+    assert!(
+        行数 < ROWS,
+        "{行数} 行 vs {ROWS} 个变体——按作品收敛根本没起作用",
+    );
+
+    let rows = {
+        let (library, site) = app.library_and_site();
+        site.catalog
+            .work_page(library.query(), 0, 4_000)
+            .expect("取得出一页")
+    };
+    let 作品行 = rows
+        .iter()
+        .filter(|row| matches!(row.anchor, WorkAnchor::Work(_)))
+        .count() as u64;
+    let 散行 = rows.len() as u64 - 作品行;
+    assert!(作品行 > 0 && 散行 > 0, "两支各该有一批");
+    // 收敛真的起了作用：作品那几行底下挂着不止一个变体。
+    assert!(
+        rows.iter().any(|row| row.variants > 1),
+        "一行都没挂着两个以上的变体，六成作品挂着不止一个才是真库的形状",
+    );
+    // 每一行都摆得出票据点名的那六样。
+    for row in rows.iter().take(64) {
+        assert!(!row.name.is_empty(), "这一行没有名字");
+        assert!(!row.platforms.is_empty(), "平台集合是空的");
+        assert!(row.variants > 0, "一行底下一个变体都没有");
+        assert!(!row.confidence_label().is_empty());
+        assert!(!row.missing_label().is_empty());
+    }
+    // 变体表那一层照旧是全部变体——收敛的是**行**，不是库。
+    assert_eq!(
+        {
+            let (_, site) = app.library_and_site();
+            site.catalog
+                .variant_total(&romcat_core::catalog::VariantQuery::default())
+                .expect("数得出来")
+        },
+        ROWS,
+    );
+}
+
+#[test]
+fn 五列都排得了序而且换排序真的换了次序() {
+    let ctx = headless::context();
+    let mut app = 界面(4_000);
+    跑(&ctx, &mut app, 2);
+    let 头一行 = |app: &mut App| {
+        let (library, site) = app.library_and_site();
+        site.catalog
+            .work_page(library.query(), 0, 1)
+            .expect("取得出一页")
+            .into_iter()
+            .next()
+            .map(|row| row.anchor)
+    };
+    let mut 见过 = Vec::new();
+    for order in WorkOrder::ALL {
+        {
+            let (library, _) = app.library_and_site();
+            let query = library.query_mut();
+            query.order = order;
+            query.descending = true;
+        }
+        跑(&ctx, &mut app, 1);
+        assert!(app.window().total() > 0, "按{}排完一行都不剩", order.label());
+        见过.push(头一行(&mut app));
+    }
+    assert!(
+        见过.iter().collect::<std::collections::BTreeSet<_>>().len() > 1,
+        "五种排序的头一行完全一样，那说明排序压根没生效",
+    );
+}
+
+#[test]
+fn 五个维度筛得动而且筛选下推到中立库() {
     let ctx = headless::context();
     let mut app = 界面(ROWS);
     跑(&ctx, &mut app, 2);
     let 全部 = app.window().total();
-    assert_eq!(全部, ROWS);
 
     let (平台, 合集, 语言) = {
         let facets = app.library().facets();
@@ -96,14 +182,14 @@ fn 四个维度筛得动而且筛选下推到中立库() {
     // 一维一维加上去，行数只降不升——**各维之间是「且」**：这是浏览，不是搜索。
     let mut 上一次 = 全部;
     for 加一维 in [
-        Box::new(|q: &mut VariantQuery, v: &str| q.platform = Some(PlatformFilter::from_label(v)))
-            as Box<dyn Fn(&mut VariantQuery, &str)>,
-        Box::new(|q: &mut VariantQuery, v: &str| q.collection = Some(v.to_string())),
-        Box::new(|q: &mut VariantQuery, v: &str| q.language = Some(v.to_string())),
+        Box::new(|q: &mut WorkQuery, v: &str| q.platform = Some(PlatformFilter::from_label(v)))
+            as Box<dyn Fn(&mut WorkQuery, &str)>,
+        Box::new(|q: &mut WorkQuery, v: &str| q.collection = Some(v.to_string())),
+        Box::new(|q: &mut WorkQuery, v: &str| q.language = Some(v.to_string())),
     ]
     .into_iter()
     .zip([平台.as_str(), 合集.as_str(), 语言.as_str()])
-    .map(|(f, v)| move |q: &mut VariantQuery| f(q, v))
+    .map(|(f, v)| move |q: &mut WorkQuery| f(q, v))
     {
         {
             let (library, _) = app.library_and_site();
@@ -123,16 +209,14 @@ fn 四个维度筛得动而且筛选下推到中立库() {
         library.query_mut().state = Some(StateFilter::Concluded(State::Matched));
     }
     跑(&ctx, &mut app, 1);
-    let 四维 = app.window().total();
+    let 五维 = app.window().total();
 
     // **下推的证据一：** 界面上那个数与另一条独立查出来的数相等。
     let 独立数 = {
         let (library, site) = app.library_and_site();
-        site.catalog
-            .variant_total(library.query())
-            .expect("数得出来")
+        site.catalog.work_total(library.query()).expect("数得出来")
     };
-    assert_eq!(四维, 独立数);
+    assert_eq!(五维, 独立数);
 
     // **下推的证据二：** 筛过之后内存里还是那一扇窗，不是把结果读进来再过一遍。
     assert!(
@@ -144,10 +228,302 @@ fn 四个维度筛得动而且筛选下推到中立库() {
     // 全清之后回到全部。
     {
         let (library, _) = app.library_and_site();
-        *library.query_mut() = VariantQuery::default();
+        *library.query_mut() = WorkQuery::default();
     }
     跑(&ctx, &mut app, 1);
     assert_eq!(app.window().total(), 全部);
+}
+
+#[test]
+fn 多选与全选可用而且屏上看得见选中多少条() {
+    let ctx = headless::context();
+    let mut app = 界面(4_000);
+    跑(&ctx, &mut app, 2);
+    let 行数 = app.window().total();
+    let 头几行: Vec<WorkAnchor> = {
+        let (library, site) = app.library_and_site();
+        site.catalog
+            .work_page(library.query(), 0, 3)
+            .expect("取得出一页")
+            .into_iter()
+            .map(|row| row.anchor)
+            .collect()
+    };
+
+    // 一行都没选就是一行都没选——**空选择不等于全选**。
+    assert_eq!(app.library().picked().count(行数), 0);
+    assert!(app.library().picked().is_empty(行数));
+
+    for anchor in &头几行 {
+        app.library_and_site().0.picked_mut().toggle(anchor);
+    }
+    跑(&ctx, &mut app, 1);
+    assert_eq!(app.library().picked().count(行数), 3, "多选没记住");
+    assert!(app.library().picked().contains(&头几行[0]));
+    // 再点一下就取消。
+    app.library_and_site().0.picked_mut().toggle(&头几行[0]);
+    assert_eq!(app.library().picked().count(行数), 2);
+
+    // **全选**：当前筛选下的每一行。它记的是这个筛选，不是一万行的身份。
+    app.library_and_site().0.picked_mut().select_all();
+    跑(&ctx, &mut app, 1);
+    assert!(app.library().picked().is_all());
+    assert_eq!(app.library().picked().count(行数), 行数);
+    // 全选之后点掉一行，正好少一条（ADR-0016 那条「规则加手动例外」的形状）。
+    app.library_and_site().0.picked_mut().toggle(&头几行[1]);
+    assert_eq!(app.library().picked().count(行数), 行数 - 1);
+    assert!(!app.library().picked().contains(&头几行[1]));
+
+    // **换排序不作废**：筛出来的还是同一批行，只是重排了一遍——人勾了几行再按一下
+    // 表头，选中不该凭空消失。
+    {
+        let (library, _) = app.library_and_site();
+        library.query_mut().order = WorkOrder::Bytes;
+        library.query_mut().descending = true;
+    }
+    跑(&ctx, &mut app, 2);
+    assert_eq!(
+        app.library().picked().count(app.window().total()),
+        行数 - 1,
+        "换了个排序，选中的那一批就没了",
+    );
+
+    // **换筛选就作废**：全选说的是「当前筛出来的这一批」，条件一改那批就不是同一批。
+    {
+        let (library, _) = app.library_and_site();
+        library.query_mut().platform = Some(PlatformFilter::from_label(
+            &library.facets().platforms[0].value.clone(),
+        ));
+    }
+    跑(&ctx, &mut app, 1);
+    assert!(
+        app.library().picked().is_empty(app.window().total()),
+        "换了筛选还留着上一批的选中，批量操作会作用到人没看见的行上",
+    );
+}
+
+#[test]
+fn 选中作品时批量操作作用于其全部变体() {
+    // 这一票要钉死的那半条选中语义：**选中主列表的行 ＝ 选中这些作品，
+    // 批量操作作用于它们的变体**。
+    let ctx = headless::context();
+    let mut app = 界面(4_000);
+    跑(&ctx, &mut app, 2);
+    let 一行 = {
+        let (library, site) = app.library_and_site();
+        site.catalog
+            .work_page(library.query(), 0, 4_000)
+            .expect("取得出一页")
+            .into_iter()
+            .find(|row| row.variants > 1)
+            .expect("有挂着不止一个变体的行")
+    };
+
+    app.library_and_site().0.picked_mut().toggle(&一行.anchor);
+    跑(&ctx, &mut app, 2);
+    let 作用范围 = {
+        let (library, site) = app.library_and_site();
+        library.batch_variants(&site.catalog).expect("展开得了")
+    };
+    assert_eq!(
+        作用范围.len() as u64,
+        一行.variants,
+        "屏上那一行写着 {} 个变体，批量操作却作用于 {} 个",
+        一行.variants,
+        作用范围.len(),
+    );
+    assert!(作用范围.len() > 1, "这一条要测的正是「不止一个变体」");
+    // 屏上那句「作用于多少个变体」与真展开出来的那一批是同一个数。
+    assert_eq!(
+        app.library().scope_total(),
+        Some(作用范围.len() as u64),
+        "屏上那句「作用于多少个变体」与真展开出来的那一批对不上",
+    );
+
+    // 详情面板里列的那几个变体，与批量操作要动的那几个是同一批。
+    {
+        let (library, site) = app.library_and_site();
+        library.open_work(&site.catalog, &一行.anchor);
+    }
+    let 面板里的: Vec<String> = app
+        .library()
+        .work()
+        .expect("点得开")
+        .variants
+        .iter()
+        .map(|variant| variant.row.key.clone())
+        .collect();
+    assert_eq!(面板里的, 作用范围);
+
+    // **全选**展开的是整个库的变体。
+    app.library_and_site().0.picked_mut().select_all();
+    let 全部 = {
+        let (library, site) = app.library_and_site();
+        library.batch_variants(&site.catalog).expect("展开得了")
+    };
+    assert_eq!(全部.len() as u64, 4_000, "全选没盖住当前筛选下的全部变体");
+}
+
+#[test]
+fn 选中一个变体时变体级的操作只作用于它() {
+    // 另半条：**在详情面板里选中某一个变体，变体级的操作只作用于它。**
+    let mut app = 界面(4_000);
+    let 一行 = 一行有兄弟的(&mut app);
+    {
+        let (library, site) = app.library_and_site();
+        library.open_work(&site.catalog, &一行);
+    }
+    let 变体们: Vec<String> = app
+        .library()
+        .work()
+        .expect("点得开")
+        .variants
+        .iter()
+        .map(|variant| variant.row.key.clone())
+        .collect();
+    assert!(变体们.len() > 1, "得有得挑才测得出来");
+    // 点开一行默认选中第一个变体：面板的第二三层总得有东西摆。
+    assert_eq!(app.library().variant_key(), Some(变体们[0].as_str()));
+
+    // 挑第二个，往**变体**这一层写一条元数据。
+    {
+        let (library, site) = app.library_and_site();
+        library.pick(&site.catalog, &变体们[1]);
+        let draft = library.value_draft_mut();
+        draft.field = Field::TranslationGroup;
+        draft.anchor = AnchorKind::Variant;
+        draft.value = "只该落在这一个变体上的汉化组".to_string();
+        let key = 变体们[1].clone();
+        library.put_value(site, &key);
+    }
+    let 落在它头上 = |app: &mut App, key: &str| {
+        let (library, site) = app.library_and_site();
+        library.pick(&site.catalog, key);
+        library
+            .detail()
+            .expect("点得开")
+            .values
+            .iter()
+            .any(|item| item.value.value == "只该落在这一个变体上的汉化组")
+    };
+    assert!(落在它头上(&mut app, &变体们[1]), "写下去的那条没落库");
+    for other in 变体们.iter().filter(|key| *key != &变体们[1]) {
+        assert!(
+            !落在它头上(&mut app, other),
+            "变体级的改动溅到了同一个作品下的另一个变体 {other}",
+        );
+    }
+}
+
+#[test]
+fn 换筛选之后选中的那个变体跟着归位() {
+    // 换一套筛选之后，原先选中的那个变体可能已经不在这一行底下了。面板还照着它画的话，
+    // 人看见的是一行、改元数据动到的是另一行。
+    let ctx = headless::context();
+    let mut app = 界面(4_000);
+    跑(&ctx, &mut app, 2);
+    let 一行 = 一行有兄弟的(&mut app);
+    {
+        let (library, site) = app.library_and_site();
+        library.open_work(&site.catalog, &一行);
+    }
+    let 原先 = app.library().variant_key().expect("点开就该选中一个").to_string();
+    let 那个平台 = app
+        .library()
+        .detail()
+        .expect("点得开")
+        .row
+        .platform
+        .clone()
+        .expect("有平台");
+
+    // 筛成**别的平台**：原先那个变体一定不在这一行底下了。
+    let 另一个 = app
+        .library()
+        .facets()
+        .platforms
+        .iter()
+        .map(|facet| facet.value.clone())
+        .find(|value| *value != 那个平台)
+        .expect("合成数据里不止一个平台");
+    {
+        let (library, _) = app.library_and_site();
+        library.query_mut().platform = Some(PlatformFilter::from_label(&另一个));
+    }
+    跑(&ctx, &mut app, 2);
+    if let Some(work) = app.library().work() {
+        let 现在 = app.library().variant_key().expect("还有变体就该选中一个");
+        assert_ne!(现在, 原先, "选中的还是那个已经被筛掉的变体");
+        assert!(
+            work.variants.iter().any(|v| v.row.key == 现在),
+            "选中的那个变体不在这一行底下",
+        );
+    } else {
+        // 这一行在新筛选下一个变体都不剩，那就该一起清掉，不留一份没人认领的详情。
+        assert!(app.library().variant_key().is_none());
+        assert!(app.library().detail().is_none());
+    }
+}
+
+#[test]
+fn 详情面板列得出全部变体每个带置信度与依据() {
+    let mut app = 界面(4_000);
+    let 一行 = 一行有兄弟的(&mut app);
+    {
+        let (library, site) = app.library_and_site();
+        library.open_work(&site.catalog, &一行);
+    }
+    let work = app.library().work().expect("点得开").clone();
+    assert!(!work.name.is_empty());
+    assert!(!work.platforms.is_empty());
+    assert!(work.variants.len() > 1, "该列出这个作品的全部变体");
+    // 每个变体带置信度；**有候选的那些带依据**——没有依据的候选事后无法复核（ADR-0002）。
+    let mut 有候选 = 0;
+    for variant in &work.variants {
+        assert!(!variant.row.key.is_empty());
+        for candidate in &variant.candidates {
+            有候选 += 1;
+            assert!(
+                !candidate.evidence.is_empty(),
+                "候选没有依据，事后没法复核",
+            );
+            // 行上那一档是**最高**的那一档（`Confidence` 的 `Ord` 里 `High` 最小），
+            // 所以它只该比每一条候选更靠前——一个变体撞上一条高一条低是真库的常态。
+            assert!(
+                variant.confidence() <= Some(candidate.confidence),
+                "行上那一档置信度比某条候选还低",
+            );
+        }
+        if variant.candidates.is_empty() {
+            // 一条候选都没有是**还没识别**，不是「撞过没撞上」。
+            assert_eq!(variant.confidence(), None);
+        }
+    }
+    assert!(有候选 > 0, "合成数据里该有带候选的变体");
+}
+
+#[test]
+fn 详情面板列得出选中变体的全部文件含附属文件与内部资源() {
+    // 「一个变体不等于一个文件」（`CONTEXT.md` 的「变体」词条）：真库里主文件之外
+    // 还有 142 个附属文件与 158,641 个内部资源。
+    let mut app = 界面(4_000);
+    let key = 一条带附属文件的(&mut app);
+    {
+        let (library, site) = app.library_and_site();
+        library.pick(&site.catalog, &key);
+    }
+    let detail = app.library().detail().expect("点得开");
+    let 身份: std::collections::BTreeSet<Role> =
+        detail.members.iter().map(|(_, role)| *role).collect();
+    assert!(身份.contains(&Role::Main), "主文件没列出来");
+    assert!(身份.contains(&Role::Companion), "附属文件没列出来");
+    assert!(身份.contains(&Role::Internal), "内部资源没列出来");
+    for (member, _) in &detail.members {
+        assert!(
+            member.starts_with(&detail.row.key),
+            "列进来的 {member} 不是这个变体的成员",
+        );
+    }
 }
 
 #[test]
@@ -436,15 +812,45 @@ fn 一条认出作品的(app: &mut App) -> String {
     panic!("合成数据里该有认出了作品的变体");
 }
 
-/// 眼下这个筛选下的头几行。
+/// 眼下这个筛选下的头几个**变体**（不是主列表那几行）。
 fn 头几行(app: &mut App, limit: u64) -> Vec<String> {
-    let (library, site) = app.library_and_site();
+    let (_, site) = app.library_and_site();
     site.catalog
-        .variant_page(library.query(), 0, limit)
+        .variant_page(&romcat_core::catalog::VariantQuery::default(), 0, limit)
         .expect("取得出一页")
         .into_iter()
         .map(|row| row.key)
         .collect()
+}
+
+/// 找一行**底下挂着不止一个变体**的：选中语义那两条得有得挑才测得出来。
+fn 一行有兄弟的(app: &mut App) -> WorkAnchor {
+    let (library, site) = app.library_and_site();
+    site.catalog
+        .work_page(library.query(), 0, 4_000)
+        .expect("取得出一页")
+        .into_iter()
+        .find(|row| row.variants > 1)
+        .map(|row| row.anchor)
+        .expect("合成数据里该有挂着不止一个变体的作品")
+}
+
+/// 找一条**带附属文件与内部资源**的变体：合成数据里每九个留一个（见 `demo::library`）。
+fn 一条带附属文件的(app: &mut App) -> String {
+    for key in 头几行(app, 64) {
+        let 有 = {
+            let (_, site) = app.library_and_site();
+            site.catalog
+                .variant_members(&key)
+                .expect("列得出成员")
+                .len()
+                > 1
+        };
+        if 有 {
+            return key;
+        }
+    }
+    panic!("合成数据里该有带附属文件的变体");
 }
 
 /// 找一条**同作品同平台还有别的变体**的：首选变体那件事得有得挑才测得出来。
@@ -492,7 +898,7 @@ fn 一条顶到闸上的简介收成一行画得下的那一截() {
 #[test]
 fn 库里有一条顶到闸上的简介时列表照样滚得动() {
     // 「界面上的列表仍然滚得动」这一条钉的是**表**：它是虚拟化的，滚起来的代价与库里
-    // 有什么无关。简介根本不在表的六列里，所以这一条要证的是「它也没从别处漏进来」。
+    // 有什么无关。简介根本不在表的七列里，所以这一条要证的是「它也没从别处漏进来」。
     let ctx = headless::context();
     let mut app = 界面(2_000);
     跑(&ctx, &mut app, 2);
@@ -511,7 +917,11 @@ fn 库里有一条顶到闸上的简介时列表照样滚得动() {
         library.pick(&site.catalog, &key);
     }
     let cost = bench::scroll(&mut app, 120, Sweep::Rows(3.0));
-    assert_eq!(app.window().total(), 2_000);
+    let 行数 = {
+        let (library, site) = app.library_and_site();
+        site.catalog.work_total(library.query()).expect("数得出来")
+    };
+    assert_eq!(app.window().total(), 行数);
     assert!(
         app.window().retained() as u64 <= SPAN,
         "内存里 {} 行，超过一扇窗（{SPAN} 行）",

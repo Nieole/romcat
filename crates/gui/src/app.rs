@@ -44,9 +44,12 @@ pub enum View {
     Queue,
     /// **库**：这个库由什么构成——**一组根**加上**数据源**（票 `gui-redesign/02`）。
     Library,
-    /// **库浏览**：翻整个主库、按四个维度筛、改条目的元数据（票 25）。
+    /// **浏览**：找到这一批，然后对它施加操作——主列表一个作品一行，
+    /// 变体在详情面板里挑（票 `gui-redesign/03`）。
     ///
-    /// 名字里留着 `Variants`，因为它中间那张表就是票 22 那张**变体表**。
+    /// 名字里还留着 `Variants`，模块也还叫 `library`：改名要连带动
+    /// `crates/gui/tests/library.rs` 与 `Cargo.toml` 里那条 `[[test]]`，
+    /// 留给票 `12` 一起收（挂单 Q61）。
     Variants,
     /// **子库**：选择集、差量预览、同步（票 25）。
     Sublibraries,
@@ -70,7 +73,7 @@ impl View {
         match self {
             Self::Queue => "待确认队列",
             Self::Library => "库",
-            Self::Variants => "库浏览",
+            Self::Variants => "浏览",
             Self::Sublibraries => "子库",
             Self::Tasks => "任务",
         }
@@ -86,7 +89,7 @@ pub struct App {
     queue: queue::Screen,
     /// 库那一屏：一组根 + 数据源。
     roots: roots::Screen,
-    /// 库浏览那一屏。
+    /// 浏览那一屏。
     library: library::Screen,
     /// 子库那一屏。
     sublibrary: sublibrary::Screen,
@@ -188,13 +191,13 @@ impl App {
         (&mut self.roots, &mut self.site, &mut self.board)
     }
 
-    /// 库浏览那一屏，供测试查「筛出多少行、点开的那一条是什么」。
+    /// 浏览那一屏，供测试查「筛出多少行、点开的那一行是什么」。
     #[must_use]
     pub fn library(&self) -> &library::Screen {
         &self.library
     }
 
-    /// 库浏览那一屏**连它的库**。改元数据这件事同时要它们俩。
+    /// 浏览那一屏**连它的库**。改元数据这件事同时要它们俩。
     pub fn library_and_site(&mut self) -> (&mut library::Screen, &mut Site) {
         (&mut self.library, &mut self.site)
     }

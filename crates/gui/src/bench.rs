@@ -303,16 +303,22 @@ pub fn queue(app: &mut App, frames: u32) -> QueueCost {
     }
 }
 
-/// **库浏览**量出来的响应，毫秒。
+/// **浏览屏**量出来的响应，毫秒。
 ///
 /// 量的不是「一帧多少毫秒」这一样：这一屏上人真正会等的是**列一次筛选面板**
 /// （四条 `GROUP BY`）、**换一次筛选**（换一套 `WHERE` 再数一次总行数）、
-/// **点开一条**（把八张表折成一份详情）。三样的量级差着一两个数量级，
-/// 只报其中一样会把结论带偏。
+/// **点开一行**（把作品底下那几个变体连候选一起折出来）、**全选之后展开作用范围**。
+/// 几样的量级差着一两个数量级，只报其中一样会把结论带偏。
 #[derive(Debug, Clone, PartialEq)]
 pub struct BrowseCost {
-    /// 库里一共多少个变体。
+    /// 主列表一共多少行（**一个作品一行**）。
     pub rows: u64,
+    /// **筛完之后**那一批全选展开出多少个变体。它与 [`filtered`](Self::filtered) 是一对
+    /// ——与 [`rows`](Self::rows) 不是（那是没筛之前的行数），两者并排读会得出一个
+    /// 没有意义的比值。
+    pub variants: u64,
+    /// **全选之后展开作用范围**要多久：把选中的那几行折成一串变体的键。
+    pub scope_ms: f64,
     /// **列一次筛选面板**要多久（连表里那一列作品名靠的那张小表一起）。
     pub facets_ms: f64,
     /// 平台、合集、语言、中文各有几个可选值。
@@ -323,7 +329,7 @@ pub struct BrowseCost {
     pub filter_label: String,
     /// 换完之后剩多少行。
     pub filtered: u64,
-    /// **点开一条**要多久。
+    /// **点开一行**要多久。
     pub detail_ms: f64,
     /// 每帧的中位数。
     pub median_ms: f64,
@@ -342,11 +348,11 @@ impl BrowseCost {
     #[must_use]
     pub fn render(&self) -> String {
         format!(
-            "库浏览 {} 个变体\n\
-             列一次筛选面板  {:.1} ms（平台 {} 个、合集 {} 个、语言 {} 个、中文 {} 个；\
-             连作品名那张表）\n\
+            "浏览屏 {} 行作品\n\
+             列一次筛选面板  {:.1} ms（平台 {} 个、合集 {} 个、语言 {} 个、中文 {} 个）\n\
              换一次筛选      {:.1} ms（{}，剩 {} 行）\n\
-             点开一条        {:.2} ms（作品、发行版、标题集合、首选变体、媒体一次折齐）\n\
+             点开一行        {:.2} ms（作品、它的变体、每个变体的候选与依据一次折齐）\n\
+             全选展开范围    {:.1} ms（筛完那 {} 行 → {} 个变体）\n\
              每帧            中位 {:.2} ms，最慢 {:.2} ms，共 {} 帧\n\
              滚一趟读库      {} 次；内存里始终 {} 行\n",
             thousands(self.rows),
@@ -359,6 +365,9 @@ impl BrowseCost {
             self.filter_label,
             thousands(self.filtered),
             self.detail_ms,
+            self.scope_ms,
+            thousands(self.filtered),
+            thousands(self.variants),
             self.median_ms,
             self.worst_ms,
             self.frames,
@@ -368,11 +377,12 @@ impl BrowseCost {
     }
 }
 
-/// 量一遍**库浏览**：列筛选面板、换一次筛选、点开一条、滚一趟。
+/// 量一遍**浏览屏**：列筛选面板、换一次筛选、点开一行、全选展开、滚一趟。
 ///
 /// 走的是界面上那条一模一样的路——[`App::ui`] 本人、
-/// [`crate::library::Screen::pick`] 本人。**一个字节都不写库。**
+/// [`crate::library::Screen::open_work`] 本人。**一个字节都不写库。**
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn browse(app: &mut App, frames: u32) -> BrowseCost {
     let ctx = headless::context();
     app.show_view(crate::app::View::Variants);
@@ -416,23 +426,41 @@ pub fn browse(app: &mut App, frames: u32) -> BrowseCost {
     let filter_ms = started.elapsed().as_secs_f64() * 1000.0;
     let filtered = app.window().total();
 
-    // 三、点开一条：把八张表折成一份详情。
+    // 三、点开一行：作品、它底下那几个变体、每个变体的候选与依据一次折齐。
     let first = {
         let (library, site) = app.library_and_site();
         site.catalog
-            .variant_page(library.query(), 0, 1)
+            .work_page(library.query(), 0, 1)
             .ok()
             .and_then(|rows| rows.into_iter().next())
-            .map(|row| row.key)
+            .map(|row| row.anchor)
     };
     let started = Instant::now();
-    if let Some(key) = &first {
+    if let Some(anchor) = &first {
         let (library, site) = app.library_and_site();
-        library.pick(&site.catalog, key);
+        library.open_work(&site.catalog, anchor);
     }
     let detail_ms = started.elapsed().as_secs_f64() * 1000.0;
 
-    // 四、滚一趟：表格是虚拟化的，代价该与总行数无关。
+    // 四、**全选**，再把作用范围展开成一串变体的键——批量操作按下去要动的就是这一批。
+    {
+        let (library, _) = app.library_and_site();
+        library.picked_mut().select_all();
+    }
+    let started = Instant::now();
+    let variants = {
+        let (library, site) = app.library_and_site();
+        library
+            .batch_variants(&site.catalog)
+            .map_or(0, |keys| keys.len() as u64)
+    };
+    let scope_ms = started.elapsed().as_secs_f64() * 1000.0;
+    {
+        let (library, _) = app.library_and_site();
+        library.picked_mut().clear();
+    }
+
+    // 五、滚一趟：表格是虚拟化的，代价该与总行数无关。
     let travel = (filtered as f32 * row_pitch() - VIEWPORT[1]).max(0.0);
     let before = app.window().reads();
     let mut costs: Vec<f64> = Vec::with_capacity(frames as usize);
@@ -457,6 +485,8 @@ pub fn browse(app: &mut App, frames: u32) -> BrowseCost {
 
     BrowseCost {
         rows,
+        variants,
+        scope_ms,
         facets_ms,
         facet_counts: counts,
         filter_ms,

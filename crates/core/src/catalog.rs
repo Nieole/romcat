@@ -46,7 +46,8 @@ use crate::shape;
 
 pub use baseline::{Baseline, Recorded, ScanDelta, Verdict};
 pub use browse::{
-    Facet, Facets, MAX_PAGE, PlatformFilter, StateFilter, VariantOrder, VariantQuery,
+    Facet, Facets, MAX_PAGE, PlatformFilter, Scope, StateFilter, VariantOrder, VariantQuery,
+    WORK_FIELDS, WorkAnchor, WorkDetail, WorkOrder, WorkQuery, WorkRow, WorkVariant,
 };
 pub use content::{MemberFile, ReleaseRow, VariantRow};
 pub use detail::{MediaHave, MediaItem, Sibling, ValueItem, VariantDetail};

@@ -519,6 +519,32 @@ pub fn library(rows: u64) -> Result<Catalog, CatalogError> {
             sample: None,
             container: None,
         });
+        // **每九个留一个带附属文件与内部资源的**：真库上主文件 46,444 个、
+        // 附属文件 142 个、内部资源 158,641 个（`docs/library-facts.md`），
+        // 一个变体不等于一个文件。详情面板那条「列出选中变体的全部文件」若只在
+        // 「一变体一文件」的数据上验，等于没验。
+        let mut members = vec![(key.clone(), Role::Main)];
+        if i % 9 == 4 {
+            for (suffix, role) in [
+                (".sav".to_string(), Role::Companion),
+                ("/内部/贴图.pak".to_string(), Role::Internal),
+            ] {
+                let member = format!("{key}{suffix}");
+                entries.push(EntryRecord {
+                    key: member.clone(),
+                    kind: EntryKind::File,
+                    meta: EntryMeta::Known {
+                        len: 4 * 1024,
+                        modified: None,
+                    },
+                    non_utf8: false,
+                    verdict: Verdict::Added,
+                    sample: None,
+                    container: None,
+                });
+                members.push((member, role));
+            }
+        }
         variants.push(Variant {
             main_key: key.clone(),
             platform: (i % 17 != 3).then(|| PLATFORMS[(i as usize) % PLATFORMS.len()].to_string()),
@@ -528,10 +554,10 @@ pub fn library(rows: u64) -> Result<Catalog, CatalogError> {
                 SINGLE_FILE_RULE.to_string()
             },
             manual: false,
-            files: 1,
+            files: members.len() as u64,
             bytes,
             unreadable_files: 0,
-            members: vec![(key.clone(), Role::Main)],
+            members,
             key,
         });
     }

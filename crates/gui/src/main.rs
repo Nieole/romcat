@@ -97,7 +97,7 @@ struct Args {
     #[arg(long, value_name = "帧数", num_args = 0..=1, default_missing_value = "240")]
     bench_queue: Option<u32>,
 
-    /// 不开窗，量**库浏览**：列筛选面板、换一次筛选、点开一条、每帧各要多久
+    /// 不开窗，量**浏览屏**：列筛选面板、换一次筛选、点开一行、全选展开、每帧各要多久
     #[cfg(feature = "demo")]
     #[arg(long, value_name = "帧数", num_args = 0..=1, default_missing_value = "240")]
     bench_browse: Option<u32>,
@@ -338,7 +338,7 @@ fn fail(message: &str) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// 量一遍**库浏览**。开了现成的库就量真库，不然量合成数据。
+/// 量一遍**浏览屏**。开了现成的库就量真库，不然量合成数据。
 #[cfg(feature = "demo")]
 fn bench_browse(args: &Args, frames: u32) -> ExitCode {
     let rows = args.rows;

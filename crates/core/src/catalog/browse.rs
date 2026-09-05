@@ -33,12 +33,26 @@
 //! **筛选面板上那几个选项从哪来**：[`Catalog::facets`] 一次问出四个维度各有哪些值、
 //! 各多少个变体。它是 `GROUP BY`，不是把全库读回来数——真库四万多个变体上，
 //! 平台十几个、合集几十个，一次几毫秒。
+//!
+//! ## 作品级的主列表另是一个查询面
+//!
+//! [`WorkQuery`] 那一族按**作品**出行（票 `gui-redesign/03`）：一个游戏一行，
+//! 变体在详情面板里挑。它与变体表**共用同一份筛选**（[`VariantQuery::where_clause`]），
+//! 因为规格里那条贯穿全局的约定是「主列表的筛选就是子库的规则」，而子库选的是变体。
+//!
+//! **它比变体表贵，而且贵得有理由**：变体表的每一条 `ORDER BY` 都有一条索引正好接住
+//! （`variant_bytes_key` 那几条），一次翻页是索引倒着扫；作品级那一条要先 `GROUP BY`
+//! 把全表折成行，再按聚合出来的列排序——两步都没有索引接得住，代价与**库有多大**
+//! 成正比，不与视口成正比。这不是可以绕开的实现细节：「这个作品有几个变体」这件事
+//! 本身就要看过它的每一个变体。内存那一半照旧只有视口那几十行（[`MAX_PAGE`] 还在），
+//! 涨的是每次翻页的时间。数字见 `docs/library-facts.md` 与挂单 Q64。
 
 use rusqlite::{ToSql, params_from_iter};
 
 use super::content::{VARIANT_COLUMNS, VariantRow, read_variant_row};
-use super::identify::State;
+use super::identify::{Candidate, Confidence, State};
 use super::{Catalog, CatalogError};
+use crate::scrape::{AnchorKind, Field};
 
 /// 变体表按哪一列排。
 ///
@@ -242,15 +256,15 @@ impl VariantQuery {
         let mut parts: Vec<&'static str> = Vec::new();
         let mut args: Vec<Box<dyn ToSql>> = Vec::new();
         if !self.contains.is_empty() {
-            parts.push("key LIKE ? ESCAPE '\\'");
+            parts.push("variant.key LIKE ? ESCAPE '\\'");
             args.push(Box::new(format!("%{}%", escape_like(&self.contains))));
         }
         match &self.platform {
             None => {}
             // **平台未知那一档要选得中**：它在表里是 `NULL`，而 `= NULL` 永远不成立。
-            Some(PlatformFilter::Unknown) => parts.push("platform IS NULL"),
+            Some(PlatformFilter::Unknown) => parts.push("variant.platform IS NULL"),
             Some(PlatformFilter::Named(platform)) => {
-                parts.push("platform = ?");
+                parts.push("variant.platform = ?");
                 args.push(Box::new(platform.clone()));
             }
         }
@@ -541,5 +555,863 @@ impl Catalog {
             .collect();
 
         Ok(out)
+    }
+}
+
+// ══ 作品级的主列表 ═══════════════════════════════════════════════════════════
+//
+// 变体表是**磁盘上有什么**，主列表是**我有哪些游戏**。真库里 46,444 个变体收敛成
+// 一万出头的行，六成作品下面挂着不止一个变体——翻库时人认的是后者，变体在详情面板里挑。
+//
+// ## 为什么不是把变体表在界面里聚合
+//
+// 聚合要先看见全部行才数得出「这个作品有几个变体」。那正是这一层从头到尾在躲的事
+// （ADR-0005）。所以它是**新的一个查询面**：`GROUP BY` 在 SQLite 里做，界面照旧
+// 只拿视口那几十行。
+//
+// ## 认不出作品的那些**自成一行**，不许被吞掉
+//
+// 与导出那一侧同一条口径（`adapter::converge` 的 `Anchor::Work` / `Anchor::Loose`）：
+// 识别认出作品的按作品收敛，没认出来的一个变体一行。真库上后者是一多半——把它们
+// 折进「未知」那一行，等于让人在界面上看不见自己一半的库。
+
+/// 主列表这一行**是谁**。
+///
+/// 两支的分野正是 `converge` 那条：识别认出作品的按作品收敛，没认出来的一个变体一行。
+///
+/// **它只在一趟之内有效。** [`Work`](Self::Work) 里那个数是 `work` 表的行号，而重跑
+/// 识别会把自己上一轮造的作品整批删掉再造一遍（[`Catalog::clear_identifications`]），
+/// 新造出来的行拿的是新的号。所以它是**界面上这一屏的临时身份**，不是能存起来的东西
+/// ——要存的东西（裁决、收藏）一律挂**内容锚**或作品名，见 `catalog::scrape` 的
+/// 模块文档。界面在重跑识别之后要把选中与点开的那一行一起丢掉。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WorkAnchor {
+    /// 认出了**作品**：这一行是那个作品，底下挂着它的全部变体。
+    ///
+    /// 那个数是 `work` 表的行号，**重跑识别就换一批**（见枚举文档）。
+    Work(i64),
+    /// **还没认出作品**：这一行就是那一个变体，键是它自己。
+    Loose(String),
+}
+
+/// 主列表按哪一列排。
+///
+/// 与 [`VariantOrder`] 一样是个闭集合：拼进 `ORDER BY` 的只能来自这里。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkOrder {
+    /// 作品名。没认出作品的那些行用它自己的键——**排的与画的是同一串字**。
+    #[default]
+    Name,
+    /// 平台。一行可以跨好几个平台（同一部作品在 GB 与 GBC 上各有变体），
+    /// 排的是这一行平台集合里**排最前**的那个。
+    Platform,
+    /// 变体数。
+    Variants,
+    /// 容量合计（下界，ADR-0021）。
+    Bytes,
+    /// 年份。
+    Year,
+}
+
+impl WorkOrder {
+    /// 全部可排的列，界面照这个次序摆表头。
+    pub const ALL: [Self; 5] = [
+        Self::Name,
+        Self::Platform,
+        Self::Variants,
+        Self::Bytes,
+        Self::Year,
+    ];
+
+    /// 这一列在界面上叫什么。用**词表**里的词。
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Name => "作品",
+            Self::Platform => "平台",
+            Self::Variants => "变体",
+            Self::Bytes => "容量",
+            Self::Year => "年份",
+        }
+    }
+
+    /// 拼进 `ORDER BY` 的那个名字。**只有这个函数认得它们**，而且它们全是
+    /// [`WORK_COLUMNS`] 里自己起的别名，一个字都不来自外面。
+    fn column(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Platform => "platform",
+            Self::Variants => "variants",
+            Self::Bytes => "bytes",
+            Self::Year => "year",
+        }
+    }
+}
+
+/// 主列表上「**元数据齐不齐**」看的是作品这一层该有的哪几样。
+///
+/// **标题不在里面**：叫法是个集合不是单值（`catalog::title`），缺不缺由标题集合自己答。
+/// **汉化组也不在里面**：它挂在**变体**上（ADR-0012），一个作品下有汉化版才谈得上，
+/// 拿它当作品级的缺口会让一整排原版游戏都显示成「缺」。
+pub const WORK_FIELDS: [Field; 5] = [
+    Field::Year,
+    Field::Publisher,
+    Field::Developer,
+    Field::Genre,
+    Field::Description,
+];
+
+/// 主列表的一行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkRow {
+    /// 这一行是谁。批量操作的作用范围靠它展开（[`Catalog::scoped_variants`]）。
+    pub anchor: WorkAnchor,
+    /// 画出来的那个名字：作品名，或者那个变体的键。
+    pub name: String,
+    /// **平台集合**。一部作品可以横跨好几个平台，真库上 9,226 个作品里有 2,314 个如此。
+    pub platforms: Vec<String>,
+    /// 底下挂着几个变体。**按当前筛选算**——屏上写着几个，批量操作就作用于那几个。
+    pub variants: u64,
+    /// 容量合计。**是个下界**：元数据读不到的成员按 0 计入（ADR-0021）。
+    pub bytes: u64,
+    /// 其中有几个成员的元数据读不到。
+    pub unreadable_files: u64,
+    /// 年份；一条都没刮到时是 `None`。
+    pub year: Option<String>,
+    /// [`WORK_FIELDS`] 里**一个值都没有**的那几样。空着就是齐了。
+    pub missing: Vec<Field>,
+    /// 底下那些变体里**最高的那档置信度**（ADR-0002）；
+    /// 一条候选都没有时是 `None`，那是**还没识别**，不是「没撞上」。
+    pub confidence: Option<Confidence>,
+}
+
+impl WorkRow {
+    /// 元数据齐了吗。
+    #[must_use]
+    pub fn complete(&self) -> bool {
+        self.missing.is_empty()
+    }
+
+    /// 「元数据」那一栏画成什么。齐了就一个字，缺了就点名缺哪几样。
+    #[must_use]
+    pub fn missing_label(&self) -> String {
+        if self.missing.is_empty() {
+            return "齐".to_string();
+        }
+        if self.missing.len() == WORK_FIELDS.len() {
+            return "缺全部".to_string();
+        }
+        format!(
+            "缺{}",
+            self.missing
+                .iter()
+                .map(|field| field.label())
+                .collect::<Vec<_>>()
+                .join("、")
+        )
+    }
+
+    /// 置信度那一栏画成什么。**「还没识别」是独立的一档**（ADR-0002）。
+    #[must_use]
+    pub fn confidence_label(&self) -> &'static str {
+        match self.confidence {
+            Some(Confidence::High) => "高",
+            Some(Confidence::Medium) => "中",
+            Some(Confidence::Low) => "低",
+            None => "还没识别",
+        }
+    }
+}
+
+/// 主列表一次翻页要的是哪一段。
+///
+/// 六个筛选维度与变体表**共用一份**（[`VariantQuery::where_clause`]）：规格里那条
+/// 贯穿全局的约定是「**主列表的筛选就是子库的规则**」，而子库选的是变体——两处筛的
+/// 若不是同一批变体，界面上筛出来的那批与真正导出去的那批就对不上。
+///
+/// 只有 [`contains`](Self::contains) 是主列表自己的：变体表按**键**里含什么筛，
+/// 主列表按**这一行的名字**里含什么筛。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkQuery {
+    /// 这一行的名字里含这个子串才算数；空串等于不筛。
+    pub contains: String,
+    /// 只要这个**平台**的变体；[`PlatformFilter::Unknown`] 选的是平台未知那一档。
+    pub platform: Option<PlatformFilter>,
+    /// 只要在这个**合集**里的变体。
+    pub collection: Option<String>,
+    /// 只要发行版标着这个语言的变体。
+    pub language: Option<String>,
+    /// 只要带这个**中文身份**记号的变体：`汉化` / `官中`（ADR-0012）。
+    pub chinese: Option<String>,
+    /// 只要**识别状态**是这一档的变体。
+    pub state: Option<StateFilter>,
+    /// 按哪一列排。
+    pub order: WorkOrder,
+    /// 倒着排。
+    pub descending: bool,
+}
+
+/// 一次批量操作作用在**哪些行**上。
+///
+/// 两支的形状照 ADR-0016 那条「**规则加手动例外**」来：全选不是把一万行的键抓进内存，
+/// 它就是**当前这个筛选**本身，再减去人点掉的那几行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope<'a> {
+    /// 点选的这几行。空的就是一行都没选，展开出来一个变体都没有。
+    Rows(&'a [WorkAnchor]),
+    /// **全选**：当前筛选下的每一行，减去点掉的这几行。
+    AllExcept(&'a [WorkAnchor]),
+}
+
+/// 主列表那条查询的 `SELECT` 列表。**只有这一处写这些别名**——`ORDER BY` 拼的就是它们。
+///
+/// 几处值得说明的写法：
+///
+/// - `group_concat` **不给 `DISTINCT`**：去重与定序反正要在 Rust 那边做一遍
+///   （[`platform_set`] 排序定序——`group_concat` 不保证次序，而同一份库问两次必须
+///   一样），SQLite 那一侧的 `DISTINCT` 聚合要为每一组多建一棵临时 b 树，白花的。
+///   平台名里没有逗号（它来自平台清单），所以逗号拆得回来。
+/// - 平台未知那一档**不塞一个约定字符串进 SQL**：`MIN` 与 `group_concat` 都跳过 `NULL`，
+///   另数一列 `unknowns` 出来，标签在 Rust 那边补（同 [`PlatformFilter`] 的道理）。
+/// - `MIN(year)` 只是个取值器：同一行里 `year` 是常数（作品名一样，join 出来的就是同一条）。
+const WORK_COLUMNS: &str = "\
+    variant.work_id AS work_id,
+    CASE WHEN variant.work_id IS NULL THEN variant.key END AS loose,
+    COALESCE(work.name, variant.key) AS name,
+    COUNT(*) AS variants,
+    SUM(variant.bytes) AS bytes,
+    SUM(variant.unreadable) AS unreadable,
+    MIN(variant.platform) AS platform,
+    group_concat(variant.platform) AS platforms,
+    SUM(variant.platform IS NULL) AS unknowns,
+    MIN(year.value) AS year";
+
+/// 主列表那条查询的 `FROM` 的头一半：变体连它的作品。
+///
+/// 单独拆出来是给[数总行数](Catalog::work_total)用的——**那一条不必连年份那一张**：
+/// 年份既不进 `WHERE` 也不进它的 `ORDER BY`，多连一张表只是白扫一遍。
+const WORK_FROM_BASE: &str = "
+    FROM variant
+    LEFT JOIN work ON work.id = variant.work_id";
+
+/// 主列表那条查询的 `FROM`：变体、它的作品、以及**年份**那一列。
+///
+/// 年份要能排序，所以它必须在这条查询里，不能留到取回来之后再补。它挂的锚点两支
+/// 不同——认出作品的挂**作品名**，没认出来的挂**变体的键**（与 `converge` 同一条口径）。
+///
+/// 同一个作品的年份可以有好几条（一个源一条，三元组并存不互相覆盖）。这里的取法是
+/// **裁决优先，其次取最早的那一个**：裁决排在每个字段的最前是优先级表的第一条规则
+/// （ADR-0001）；而一部作品跨地区先后发行好几次，**最早的那次才是它的年份**。
+///
+/// 参数按出现次序绑：`裁决`、`年份`、`变体`、`作品`。
+const WORK_FROM: &str = "
+    FROM variant
+    LEFT JOIN work ON work.id = variant.work_id
+    LEFT JOIN (SELECT anchor, subject,
+                      COALESCE(MIN(CASE WHEN source = ? THEN value END), MIN(value)) AS value
+                 FROM scrape_value WHERE field = ?
+                GROUP BY anchor, subject) year
+           ON year.subject = COALESCE(work.name, variant.key)
+          AND year.anchor = CASE WHEN variant.work_id IS NULL THEN ? ELSE ? END";
+
+/// 一行一个作品：认出作品的按 `work_id` 归堆，没认出来的按自己的键各成一堆。
+///
+/// **不能只写 `GROUP BY work_id`**：`NULL` 在 `GROUP BY` 里是同一堆，那会把真库里
+/// 一多半的变体压成一行。
+const WORK_GROUP_BY: &str =
+    " GROUP BY variant.work_id, CASE WHEN variant.work_id IS NULL THEN variant.key END";
+
+/// 年份那条 join 的四个参数，按 [`WORK_FROM`] 里的出现次序。
+fn year_args() -> Vec<Box<dyn ToSql>> {
+    vec![
+        Box::new(crate::scrape::priority::VERDICT.to_string()),
+        Box::new(Field::Year.label().to_string()),
+        Box::new(AnchorKind::Variant.label().to_string()),
+        Box::new(AnchorKind::Work.label().to_string()),
+    ]
+}
+
+/// 把 `? , ? , ?` 拼出 `n` 个来。
+fn placeholders(n: usize) -> String {
+    std::iter::repeat_n("?", n).collect::<Vec<_>>().join(", ")
+}
+
+impl WorkQuery {
+    /// 两份查询**筛的是不是同一批**（排序不算）。
+    ///
+    /// 界面拿它分清两种「换过了」：换**排序**只是把同一批行重排，选中的那几行一条都没变；
+    /// 换**筛选**才是换了一批行，那时全选说的「当前筛出来的这一批」已经不是同一批，
+    /// 留着上一批的选中会让批量操作作用到人根本没看见的行上。
+    ///
+    /// 判断落在这一层而不是界面里：哪几个字段是**筛选**、哪几个是**排法**，
+    /// 是这个查询面自己的事（ADR-0005）。
+    #[must_use]
+    pub fn same_filter(&self, other: &Self) -> bool {
+        self.contains == other.contains
+            && self.platform == other.platform
+            && self.collection == other.collection
+            && self.language == other.language
+            && self.chinese == other.chinese
+            && self.state == other.state
+    }
+
+    /// 变体那一层的筛选。**与变体表一字不差地共用**——见结构体文档。
+    fn variant_filter(&self) -> VariantQuery {
+        VariantQuery {
+            // 变体表那一维筛的是**键**，主列表筛的是**名字**，不共用。
+            contains: String::new(),
+            platform: self.platform.clone(),
+            collection: self.collection.clone(),
+            language: self.language.clone(),
+            chinese: self.chinese.clone(),
+            state: self.state,
+            order: VariantOrder::default(),
+            descending: false,
+        }
+    }
+
+    /// 折出 `WHERE` 那一段与它的参数。
+    ///
+    /// 名字那一条**也落在 `WHERE` 而不是 `HAVING`**：它是逐行判得了的条件，
+    /// 搁在 `HAVING` 里就得先把全部行分完组才筛得掉。
+    fn where_clause(&self) -> (String, Vec<Box<dyn ToSql>>) {
+        let (mut sql, mut args) = self.variant_filter().where_clause();
+        if !self.contains.is_empty() {
+            sql.push_str(if sql.is_empty() { " WHERE " } else { " AND " });
+            sql.push_str("COALESCE(work.name, variant.key) LIKE ? ESCAPE '\\'");
+            args.push(Box::new(format!("%{}%", escape_like(&self.contains))));
+        }
+        (sql, args)
+    }
+
+    /// 折出 `ORDER BY` 那一段。
+    ///
+    /// **末尾一律缀上那一行的身份**（名字、`work_id`、那个键），理由与变体表同一条：
+    /// 并列行的次序不定死，翻页就会漏行与重行。`(work_id, loose)` 是这张表的主键，
+    /// 全序由它兜住。
+    fn order_clause(&self) -> String {
+        let direction = if self.descending { "DESC" } else { "ASC" };
+        let column = self.order.column();
+        let mut parts = vec![format!("{column} {direction}")];
+        for tail in ["name", "work_id", "loose"] {
+            if tail != column {
+                parts.push(format!("{tail} {direction}"));
+            }
+        }
+        format!(" ORDER BY {}", parts.join(", "))
+    }
+}
+
+/// 把 `group_concat` 那一串拆回平台集合，排好序、去掉空的。
+///
+/// 排序在这里做而不是 SQL 里：`group_concat` 不保证次序，而同一份库问两次必须一样。
+fn platform_set(joined: Option<String>, unknowns: u64) -> Vec<String> {
+    let mut out: Vec<String> = joined
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect();
+    out.sort();
+    out.dedup();
+    if unknowns > 0 {
+        out.push(UNKNOWN_PLATFORM_LABEL.to_string());
+    }
+    out
+}
+
+/// 把候选那一列的置信度折成一个可比的名次；认不出的当**低置信**。
+///
+/// 那两个词**照旧走参数**（[`confidence_rank_args`]），与这一层别处一个规矩：
+/// 拼进 SQL 的只有这个文件里写死的那些字。
+const CONFIDENCE_RANK: &str = "MIN(CASE candidate.confidence WHEN ? THEN 0 WHEN ? THEN 1 ELSE 2 END)";
+
+/// [`CONFIDENCE_RANK`] 的两个参数，按出现次序。
+fn confidence_rank_args() -> Vec<Box<dyn ToSql>> {
+    vec![
+        Box::new(Confidence::High.label().to_string()),
+        Box::new(Confidence::Medium.label().to_string()),
+    ]
+}
+
+/// 名次折回置信度。
+fn confidence_of_rank(rank: i64) -> Confidence {
+    match rank {
+        0 => Confidence::High,
+        1 => Confidence::Medium,
+        _ => Confidence::Low,
+    }
+}
+
+impl Catalog {
+    /// 满足这个筛选条件的主列表一共几行。**滚动条的长度**由它来。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn work_total(&self, query: &WorkQuery) -> Result<u64, CatalogError> {
+        let (where_sql, args) = query.where_clause();
+        let sql = format!(
+            "SELECT COUNT(*) FROM \
+             (SELECT variant.work_id{WORK_FROM_BASE}{where_sql}{WORK_GROUP_BY})"
+        );
+        let count: i64 = self
+            .conn
+            .query_row(&sql, params_from_iter(args.iter()), |row| row.get(0))
+            .map_err(|source| self.err(source))?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    /// 取主列表的一页：从第 `offset` 行起、最多 `limit` 行，已排好序。
+    ///
+    /// `limit` 会被夹到 [`MAX_PAGE`]——这个入口同样不接受「把全库读出来」。
+    ///
+    /// **两趟**：一趟 `GROUP BY` 出这一页的骨架，再拿这一页那几十行去补
+    /// 「元数据齐不齐」与「最高置信度」。后两样各要连一张大表，摊在整库上做的话
+    /// 每翻一页都要多扫两遍；而它们**排不了序**（表头上没有这两列），所以补在后面
+    /// 不会让这一页的次序变。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn work_page(
+        &self,
+        query: &WorkQuery,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<WorkRow>, CatalogError> {
+        let limit = limit.min(MAX_PAGE);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (where_sql, where_args) = query.where_clause();
+        let order_sql = query.order_clause();
+        let mut args = year_args();
+        args.extend(where_args);
+        args.push(Box::new(i64::try_from(limit).unwrap_or(i64::MAX)));
+        args.push(Box::new(i64::try_from(offset).unwrap_or(i64::MAX)));
+        let sql = format!(
+            "SELECT {WORK_COLUMNS}{WORK_FROM}{where_sql}{WORK_GROUP_BY}{order_sql} \
+             LIMIT ? OFFSET ?"
+        );
+        let mut statement = self.conn.prepare(&sql).map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params_from_iter(args.iter()), |row| {
+                let work_id: Option<i64> = row.get(0)?;
+                let loose: Option<String> = row.get(1)?;
+                let unknowns = u64::try_from(row.get::<_, i64>(8)?).unwrap_or(0);
+                Ok(WorkRow {
+                    anchor: match (work_id, loose) {
+                        (Some(id), _) => WorkAnchor::Work(id),
+                        (None, Some(key)) => WorkAnchor::Loose(key),
+                        // 分组键的两支必有其一；真到不了这里，兜个不会撞上的值。
+                        (None, None) => WorkAnchor::Loose(String::new()),
+                    },
+                    name: row.get(2)?,
+                    variants: u64::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
+                    bytes: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
+                    unreadable_files: u64::try_from(row.get::<_, i64>(5)?).unwrap_or(0),
+                    platforms: platform_set(row.get(7)?, unknowns),
+                    year: row.get(9)?,
+                    // 这两样下面补。
+                    missing: WORK_FIELDS.to_vec(),
+                    confidence: None,
+                })
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out: Vec<WorkRow> = rows
+            .collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))?;
+        self.fill_missing(&mut out)?;
+        self.fill_confidence(query, &mut out)?;
+        Ok(out)
+    }
+
+    /// 补上这一页每一行「**元数据齐不齐**」。
+    ///
+    /// 锚点两支分开问：认出作品的看**作品**锚点，没认出来的看**变体**锚点——
+    /// 与 `converge` 挑值时走的是同一条岔路，于是屏上写着「齐」的那一行，导出时
+    /// 真的填得满。
+    fn fill_missing(&self, rows: &mut [WorkRow]) -> Result<(), CatalogError> {
+        for anchor in [AnchorKind::Work, AnchorKind::Variant] {
+            let subjects: Vec<&str> = rows
+                .iter()
+                .filter(|row| matches!(row.anchor, WorkAnchor::Work(_)) == (anchor == AnchorKind::Work))
+                .map(|row| row.name.as_str())
+                .collect();
+            if subjects.is_empty() {
+                continue;
+            }
+            let sql = format!(
+                "SELECT subject, field FROM scrape_value
+                  WHERE anchor = ? AND field IN ({}) AND subject IN ({})
+                  GROUP BY subject, field",
+                placeholders(WORK_FIELDS.len()),
+                placeholders(subjects.len()),
+            );
+            let mut args: Vec<Box<dyn ToSql>> = vec![Box::new(anchor.label().to_string())];
+            for field in WORK_FIELDS {
+                args.push(Box::new(field.label().to_string()));
+            }
+            for subject in &subjects {
+                args.push(Box::new((*subject).to_string()));
+            }
+            let mut statement = self.conn.prepare(&sql).map_err(|source| self.err(source))?;
+            let found = statement
+                .query_map(params_from_iter(args.iter()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|source| self.err(source))?;
+            let mut have: std::collections::BTreeSet<(String, String)> =
+                std::collections::BTreeSet::new();
+            for row in found {
+                have.insert(row.map_err(|source| self.err(source))?);
+            }
+            for row in rows
+                .iter_mut()
+                .filter(|row| matches!(row.anchor, WorkAnchor::Work(_)) == (anchor == AnchorKind::Work))
+            {
+                row.missing = WORK_FIELDS
+                    .into_iter()
+                    .filter(|field| {
+                        !have.contains(&(row.name.clone(), field.label().to_string()))
+                    })
+                    .collect();
+            }
+        }
+        Ok(())
+    }
+
+    /// 补上这一页每一行的**最高置信度**。
+    ///
+    /// 算的是**当前筛选下**那些变体上的候选：屏上那一行写着几个变体，这一档就是那几个
+    /// 变体里最有把握的那条结论。一条候选都没有就留 `None`——那是**还没识别**，
+    /// 与「撞过没撞上」不是一回事（ADR-0002）。
+    fn fill_confidence(&self, query: &WorkQuery, rows: &mut [WorkRow]) -> Result<(), CatalogError> {
+        let works: Vec<i64> = rows
+            .iter()
+            .filter_map(|row| match row.anchor {
+                WorkAnchor::Work(id) => Some(id),
+                WorkAnchor::Loose(_) => None,
+            })
+            .collect();
+        let loose: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match &row.anchor {
+                WorkAnchor::Loose(key) => Some(key.as_str()),
+                WorkAnchor::Work(_) => None,
+            })
+            .collect();
+        let mut by_work: std::collections::BTreeMap<i64, Confidence> =
+            std::collections::BTreeMap::new();
+        if !works.is_empty() {
+            let (where_sql, where_args) = query.where_clause();
+            let sql = format!(
+                "SELECT variant.work_id, {CONFIDENCE_RANK}
+                   FROM variant
+                   JOIN candidate ON candidate.variant_key = variant.key
+                   LEFT JOIN work ON work.id = variant.work_id
+                  {where_sql}{glue} variant.work_id IN ({ids})
+                  GROUP BY variant.work_id",
+                glue = if where_sql.is_empty() { " WHERE" } else { " AND" },
+                ids = placeholders(works.len()),
+            );
+            let mut args = confidence_rank_args();
+            args.extend(where_args);
+            for id in &works {
+                args.push(Box::new(*id));
+            }
+            let mut statement = self.conn.prepare(&sql).map_err(|source| self.err(source))?;
+            let found = statement
+                .query_map(params_from_iter(args.iter()), |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(|source| self.err(source))?;
+            for row in found {
+                let (id, rank) = row.map_err(|source| self.err(source))?;
+                by_work.insert(id, confidence_of_rank(rank));
+            }
+        }
+        let mut by_key: std::collections::BTreeMap<String, Confidence> =
+            std::collections::BTreeMap::new();
+        if !loose.is_empty() {
+            // 没认出作品的那些行本来就是一个变体一行，页上那几个键已经是筛过的，
+            // 不必再把筛选条件带一遍。
+            let sql = format!(
+                "SELECT candidate.variant_key, {CONFIDENCE_RANK}
+                   FROM candidate WHERE candidate.variant_key IN ({keys})
+                  GROUP BY candidate.variant_key",
+                keys = placeholders(loose.len()),
+            );
+            let mut args = confidence_rank_args();
+            args.extend(
+                loose
+                    .iter()
+                    .map(|key| Box::new((*key).to_string()) as Box<dyn ToSql>),
+            );
+            let mut statement = self.conn.prepare(&sql).map_err(|source| self.err(source))?;
+            let found = statement
+                .query_map(params_from_iter(args.iter()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(|source| self.err(source))?;
+            for row in found {
+                let (key, rank) = row.map_err(|source| self.err(source))?;
+                by_key.insert(key, confidence_of_rank(rank));
+            }
+        }
+        for row in rows {
+            row.confidence = match &row.anchor {
+                WorkAnchor::Work(id) => by_work.get(id).copied(),
+                WorkAnchor::Loose(key) => by_key.get(key).copied(),
+            };
+        }
+        Ok(())
+    }
+
+    /// 一次批量操作**作用于哪些变体**。
+    ///
+    /// 这是这一票要钉死的那半条选中语义：**选中主列表的行 ＝ 选中这些作品，批量操作
+    /// 作用于它们的变体**。另半条（在详情面板里选中某一个变体，变体级操作只作用于它）
+    /// 不必经过这里——那时手上就是一个键。
+    ///
+    /// 作用范围随**当前筛选**收窄，与屏上那一行写着的变体数是同一个数。不筛的时候
+    /// 它就是那些作品的**全部**变体。
+    ///
+    /// 它会把这一批的键整个列出来——**批量操作必须列得出作用范围才谈得上作用范围**。
+    /// 浏览那一半照旧只有视口那几十行，两件事不共用一条路。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn scoped_variants(
+        &self,
+        query: &WorkQuery,
+        scope: Scope<'_>,
+    ) -> Result<Vec<String>, CatalogError> {
+        let Some((sql, args)) = scoped_sql(query, scope, "variant.key") else {
+            return Ok(Vec::new());
+        };
+        let mut statement = self.conn.prepare(&sql).map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params_from_iter(args.iter()), |row| row.get::<_, String>(0))
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
+    /// 这份作用范围里有多少个变体。
+    ///
+    /// 与 [`scoped_variants`](Self::scoped_variants) 分开：屏上那句「作用于多少个变体」
+    /// 每帧都要，而它只要一个数——把四万个键读回来只为数一遍，正是这一层要防的事。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn scoped_variant_total(
+        &self,
+        query: &WorkQuery,
+        scope: Scope<'_>,
+    ) -> Result<u64, CatalogError> {
+        let Some((sql, args)) = scoped_sql(query, scope, "COUNT(*)") else {
+            return Ok(0);
+        };
+        let count: i64 = self
+            .conn
+            .query_row(&sql, params_from_iter(args.iter()), |row| row.get(0))
+            .map_err(|source| self.err(source))?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+}
+
+/// 折出「这份作用范围里的变体」那条查询；一行都没选中时是 `None`。
+///
+/// `pick` 是要取的那一列（键，或者一个 `COUNT(*)`）——两处共用一条 `WHERE`，
+/// 免得「屏上说作用于多少个」与「按下去真动了多少个」漂开。
+fn scoped_sql(
+    query: &WorkQuery,
+    scope: Scope<'_>,
+    pick: &str,
+) -> Option<(String, Vec<Box<dyn ToSql>>)> {
+    {
+        let (where_sql, where_args) = query.where_clause();
+        let (anchors, negated) = match scope {
+            Scope::Rows(anchors) => (anchors, false),
+            Scope::AllExcept(anchors) => (anchors, true),
+        };
+        if anchors.is_empty() && !negated {
+            return None;
+        }
+        let works: Vec<i64> = anchors
+            .iter()
+            .filter_map(|anchor| match anchor {
+                WorkAnchor::Work(id) => Some(*id),
+                WorkAnchor::Loose(_) => None,
+            })
+            .collect();
+        let loose: Vec<&str> = anchors
+            .iter()
+            .filter_map(|anchor| match anchor {
+                WorkAnchor::Loose(key) => Some(key.as_str()),
+                WorkAnchor::Work(_) => None,
+            })
+            .collect();
+        let mut args: Vec<Box<dyn ToSql>> = where_args;
+        let mut sql = format!(
+            "SELECT {pick} FROM variant LEFT JOIN work ON work.id = variant.work_id{where_sql}"
+        );
+        if !anchors.is_empty() {
+            let mut parts: Vec<String> = Vec::new();
+            if !works.is_empty() {
+                // `work_id IN (…)` 在 `work_id` 为 `NULL` 时求值出 `NULL`，而
+                // `NOT NULL` 还是 `NULL`——不裹这一层，全选减例外会把**还没认出作品**
+                // 的那些行整批漏掉（真库上那是一多半）。
+                parts.push(format!(
+                    "COALESCE(variant.work_id IN ({}), 0)",
+                    placeholders(works.len()),
+                ));
+                for id in &works {
+                    args.push(Box::new(*id));
+                }
+            }
+            if !loose.is_empty() {
+                parts.push(format!(
+                    "(variant.work_id IS NULL AND variant.key IN ({}))",
+                    placeholders(loose.len()),
+                ));
+                for key in &loose {
+                    args.push(Box::new((*key).to_string()));
+                }
+            }
+            sql.push_str(if where_sql.is_empty() { " WHERE " } else { " AND " });
+            if negated {
+                sql.push_str("NOT ");
+            }
+            sql.push_str(&format!("({})", parts.join(" OR ")));
+        }
+        if pick == "variant.key" {
+            sql.push_str(" ORDER BY variant.key");
+        }
+        Some((sql, args))
+    }
+}
+
+/// 主列表点开一行之后，详情面板里那一个变体。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkVariant {
+    /// 变体本身。
+    pub row: VariantRow,
+    /// 这一轮的识别结论；压根没识别过时是 `None`。
+    pub state: Option<State>,
+    /// 没定下来的话，**为什么**。
+    pub reason: Option<String>,
+    /// 全部候选，**每条带着置信度与依据**。没有依据的候选事后无法复核（ADR-0002）。
+    pub candidates: Vec<Candidate>,
+}
+
+impl WorkVariant {
+    /// 这个变体最高的那档置信度；一条候选都没有时是 `None`（**还没识别**）。
+    #[must_use]
+    pub fn confidence(&self) -> Option<Confidence> {
+        self.candidates
+            .iter()
+            .map(|candidate| candidate.confidence)
+            .min()
+    }
+}
+
+/// 主列表点开一行之后，详情面板上摆的那一份。
+///
+/// 三层里的头两层（**作品** → **变体**）在这儿；第三层**文件**跟着选中的那个变体走
+/// （[`Catalog::variant_members`](Catalog::variant_members)），因为一个变体可以是
+/// 一整个目录，真库上最大的一份底下有 21,436 个文件——不选中就整份读出来，
+/// 点一行的代价会跟着最大的那个变体走。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkDetail {
+    /// 这一行是谁。
+    pub anchor: WorkAnchor,
+    /// 画出来的那个名字。
+    pub name: String,
+    /// 年份；一条都没刮到时是 `None`。
+    pub year: Option<String>,
+    /// 平台集合。
+    pub platforms: Vec<String>,
+    /// 底下挂着的全部变体（按当前筛选），按键排。
+    pub variants: Vec<WorkVariant>,
+}
+
+impl Catalog {
+    /// 主列表某一行的详情；这一行在当前筛选下一个变体都不剩时是 `None`。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn work_detail(
+        &self,
+        query: &WorkQuery,
+        anchor: &WorkAnchor,
+    ) -> Result<Option<WorkDetail>, CatalogError> {
+        let keys = self.scoped_variants(query, Scope::Rows(std::slice::from_ref(anchor)))?;
+        if keys.is_empty() {
+            return Ok(None);
+        }
+        let mut variants = Vec::with_capacity(keys.len());
+        let mut platforms: Vec<String> = Vec::new();
+        for key in &keys {
+            let Some(row) = self.variant(key)? else {
+                continue;
+            };
+            platforms.push(
+                row.platform
+                    .clone()
+                    .unwrap_or_else(|| UNKNOWN_PLATFORM_LABEL.to_string()),
+            );
+            let (state, reason) = match self.identification_of(key)? {
+                Some((state, reason)) => (Some(state), reason),
+                None => (None, None),
+            };
+            variants.push(WorkVariant {
+                candidates: self.candidates_of(key)?,
+                row,
+                state,
+                reason,
+            });
+        }
+        platforms.sort();
+        platforms.dedup();
+        let name = match anchor {
+            WorkAnchor::Work(id) => self.work_name(*id)?.unwrap_or_default(),
+            WorkAnchor::Loose(key) => key.clone(),
+        };
+        let year = self.work_year(anchor, &name)?;
+        Ok(Some(WorkDetail {
+            anchor: anchor.clone(),
+            name,
+            year,
+            platforms,
+            variants,
+        }))
+    }
+
+    /// 一行的年份。取法与主列表那一列**一模一样**（裁决优先，其次最早的那一个），
+    /// 否则面板上写的与列表上写的会是两个数。
+    fn work_year(&self, anchor: &WorkAnchor, name: &str) -> Result<Option<String>, CatalogError> {
+        let kind = match anchor {
+            WorkAnchor::Work(_) => AnchorKind::Work,
+            WorkAnchor::Loose(_) => AnchorKind::Variant,
+        };
+        self.conn
+            .prepare_cached(
+                "SELECT COALESCE(MIN(CASE WHEN source = ?3 THEN value END), MIN(value))
+                   FROM scrape_value WHERE anchor = ?1 AND subject = ?2 AND field = ?4",
+            )
+            .and_then(|mut statement| {
+                statement.query_row(
+                    rusqlite::params![
+                        kind.label(),
+                        name,
+                        crate::scrape::priority::VERDICT,
+                        Field::Year.label(),
+                    ],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+            })
+            .map_err(|source| self.err(source))
     }
 }
