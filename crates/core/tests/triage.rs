@@ -999,7 +999,8 @@ fn 报告说得出按各个轴一次能覆盖多少() {
     跑识别(&mut 现场);
     let items = 队列(&现场, &Filter::default());
     let counts = 现场.store.counts().expect("数得出");
-    let report = triage::report::QueueReport::build("（内存）", "（内存）", 4, &items, counts, 10);
+    let report =
+        triage::report::QueueReport::build("（内存）", "（内存）", 4, 0, &items, counts, 10);
     assert_eq!(report.queue, 4);
     // **按目录**那张表就是「一条 `--under` 值多少」。
     let fc = report
@@ -1201,6 +1202,71 @@ fn 跑识别带中文源(现场: &mut 现场, index: &romcat_core::zh::Index) {
 fn 列队列(现场: &现场) -> triage::Queue {
     let index = verdict::Index::load(&现场.store, 库名).expect("读得出沉淀库");
     triage::Queue::load(&现场.catalog, &index).expect("列得出队列")
+}
+
+/// 再扫一遍主库，**不重跑识别**——真机上「还没识别」就是这么冒出来的。
+fn 重扫(现场: &mut 现场) {
+    let mut options = ScanOptions::named(现场.dir.path(), "库");
+    options.jobs = Jobs::Fixed(2);
+    scan::scan(&RealFs::new(), &mut 现场.catalog, &options, &Handle::new()).expect("扫得动");
+}
+
+#[test]
+fn 还没识别的变体不算待裁决但队列报得出有几个() {
+    // 词表「还没识别」：一个变体**连识别都还没跑过**。它一条候选都没有、裁不了，
+    // 所以不该混进待裁决那个数；但把它一声不响地咽下去，用户就会把
+    // 「队列 4 条待裁决」读成「库里只剩 4 条没定下来」。
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    let 先 = 列队列(&现场);
+    assert_eq!(先.pending(), 4, "四份汉化版全是未命中，等人裁");
+    assert_eq!(先.not_run(), 0, "跑完一整趟，一个都不剩");
+
+    // 再扫进一个新文件，**不重跑识别**。
+    写(
+        &现场.dir.path().join("FC/后来才放进来的.zip"),
+        &zip_container(&[ZipEntrySpec::stored("rom.nes", 汉化版(0xD0))]),
+    );
+    重扫(&mut 现场);
+
+    let mut queue = 列队列(&现场);
+    assert_eq!(queue.pending(), 4, "它没有候选、裁不了，不许混进待裁决");
+    assert_eq!(queue.skipped(), 先.skipped(), "也不是跳过");
+    assert_eq!(queue.not_run(), 1, "**但队列要说得出它在那儿**");
+    assert!(
+        !queue
+            .selected()
+            .iter()
+            .any(|item| item.variant.key.contains("后来才放进来的")),
+        "它连队列都进不去：{:?}",
+        keys(queue.selected()),
+    );
+
+    // 选择器筛不到它——它压根没有条目可筛，这个数说的**始终是整个库**。
+    queue.set_filter(Filter {
+        under: vec!["库/GBA".to_string()],
+        ..Filter::default()
+    });
+    assert_eq!(queue.not_run(), 1, "`--under` 不改这个数：它说的是整个库");
+    assert!(
+        queue
+            .selected()
+            .iter()
+            .all(|item| item.variant.key.starts_with("库/GBA")),
+        "选择器照旧只作用在队列里那些条目上",
+    );
+
+    // 报告嘴上说得出来，而且说的是**该干什么**——去跑识别，不是去裁决。
+    let items = 队列(&现场, &Filter::default());
+    let counts = 现场.store.counts().expect("数得出");
+    let report =
+        triage::report::QueueReport::build("（内存）", "（内存）", 4, 1, &items, counts, 10);
+    assert_eq!(report.queue, 4);
+    assert_eq!(report.not_run, 1);
+    let text = report.render_text();
+    assert!(text.contains("还没识别"), "{text}");
+    assert!(text.contains("1 个变体连识别都还没跑过"), "{text}");
+    assert!(text.contains("romcat identify"), "{text}");
 }
 
 #[test]

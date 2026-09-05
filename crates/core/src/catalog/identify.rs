@@ -366,6 +366,11 @@ pub enum Tier {
     /// 与浏览屏的变体行都是），这里跟着它，为的是同一个东西在五屏里说同一个词
     /// ——那正是票 `gui-redesign/09` 验收第 6 条要的。**两个用法该并成一个还是分成两个词，
     /// 记在挂单 `Q84` 上交给 `/domain-modeling`。**
+    ///
+    /// 词表那一条在核心里落成 [`NOT_RUN_LABEL`] 与各处的 `not_run` 计数
+    /// （[`Catalog::not_run_count`](super::Catalog::not_run_count)）。**这一档里的条目
+    /// 全都跑过识别**——它们进得了[待确认队列](crate::triage)，只是一条候选都没有；
+    /// 那一条里的变体**连队列都进不去**，因为库里根本没有它们的结论。
     Unidentified,
 }
 
@@ -397,7 +402,32 @@ impl Tier {
     }
 }
 
+/// **还没识别**打给用户的那个词（`CONTEXT.md` 的「还没识别」条）。
+///
+/// 说的是**一个变体连识别都还没跑过**——中立库里它一行 `identification` 都没有。
+/// 它不是 [`State`] 的第五档：那个枚举装的是**识别跑完留下的结论**，而这里说的是
+/// 「这一趟还没轮到它」，库里根本没有那一行可存。报告与队列因此把它当作一个**计数**
+/// 来处理（`not_run`），不进 `identification` 那张表。
+///
+/// 三者分开数才有意义（词表原话）：
+///
+/// - **未命中**：撞过没撞上，是**结论**。
+/// - **无判据**：拿不到可撞的东西，也是**结论**。
+/// - **还没识别**：一个字都还没说。
+///
+/// 混在一起，命中率就失真——真机上那正是「4 个变体识别完、又扫进 1 个新文件」之后
+/// 报告说「变体 4」的那个坑：第 5 个连分母都进不去，覆盖率虚高。
+///
+/// ⚠️ **与 [`Tier::Unidentified`] 撞词**：那一档的标签也是这四个字，说的却是
+/// 「这一格没有置信度可标」（一条候选都没有，但**识别跑过了**）。两个用法的取舍记在
+/// 挂单 `Q84` 上，交给 `/domain-modeling`；在那之前，**核心里这两件事的 Rust 名字
+/// 必须分得开**：`not_run` 是「识别还没跑」，`Unidentified` 是「没有候选」。
+pub const NOT_RUN_LABEL: &str = "还没识别";
+
 /// 一个变体这一轮识别的结论。
+///
+/// **它只有跑过识别的变体才有。** 一个变体连识别都还没跑过时，库里一行都没有——
+/// 那是[还没识别](NOT_RUN_LABEL)，不是这里的第五档。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum State {
     /// 撞上了 DAT。
@@ -638,6 +668,13 @@ pub struct Identification {
 /// 逐条走识别结论时收到的那五样：平台、结论、理由、变体的键、这一趟读了多少字节。
 pub type IdentificationVisitor<'a> = dyn FnMut(Option<&str>, State, Option<&str>, &str, u64) + 'a;
 
+/// 逐条走[还没识别](NOT_RUN_LABEL)的变体时收到的那两样：平台、变体的键。
+///
+/// **只有这两样**：它们连一行结论都没有，结论、理由、读了多少字节这几样都无从谈起
+/// ——那正是「还没识别」与「未命中 / 无判据」的分界。报告拿键做的事与走结论那一趟
+/// 一样（按平台归堆、数文件名里有没有汉字），所以键要给。
+pub type NotRunVisitor<'a> = dyn FnMut(Option<&str>, &str) + 'a;
+
 /// 逐条走候选时收到的那三样：变体的键、源、条目名。
 ///
 /// **只有这三样**：刮削从条目名里读元数据，是哪一份 DAT、有没有中文记号都在
@@ -791,8 +828,12 @@ pub struct ModelAnswerRow {
 impl Catalog {
     /// 全部变体连它们这一轮的识别结论，按键排序。**待确认队列**的原料。
     ///
-    /// 还没识别过的变体**不在里面**：队列说的是「识别拿不定主意的那些」，
-    /// 而没跑过识别时那是「全部」——那时该说的是「先跑一次 `romcat identify`」。
+    /// [还没识别](NOT_RUN_LABEL)的变体**不在里面**：队列说的是「识别拿不定主意的
+    /// 那些」，而一条结论都没有的变体谈不上拿不拿得定——它们一条候选都没有，裁不了。
+    ///
+    /// **但它们得有人报数**，否则「队列 2 条」会被读成「库里只剩 2 条没定下来」。
+    /// 那个数走 [`not_run_count`](Self::not_run_count)，队列拿它在旁边说一句
+    /// 「另有 N 个还没识别，先跑一趟 `romcat identify`」。
     ///
     /// # Errors
     /// 读库失败时返回错误。
@@ -1986,6 +2027,11 @@ impl Catalog {
     /// 走回调而不是返回一整份 `Vec`：真库里这是 46,444 行，报告要的只是几个计数与
     /// 几个例子，攒一份完整的表纯属浪费。
     ///
+    /// ⚠️ **它走的是结论，不是变体。** 连识别都还没跑过的变体这里一条都不出现
+    /// ——库里本来就没有它们的行。**要「变体总数」的地方必须再走一趟
+    /// [`for_each_not_run`](Self::for_each_not_run)**，否则那些变体会被整个抹掉：
+    /// 命中率的分母少了它们，覆盖率就虚高（词表「还没识别」条、[`NOT_RUN_LABEL`]）。
+    ///
     /// # Errors
     /// 读库失败时返回错误。
     pub fn for_each_identification(
@@ -2016,6 +2062,57 @@ impl Catalog {
             );
         }
         Ok(())
+    }
+
+    /// 一条条走过[还没识别](NOT_RUN_LABEL)的变体：平台、变体的键。
+    ///
+    /// 它是 [`for_each_identification`](Self::for_each_identification) 的**另一半**。
+    /// 两半合起来正好是全部变体——报告的「变体总数」与「全部变体里命中多少」那个分母
+    /// 必须走完两半，只走前一半就等于把还没轮到的变体从分母里抹掉，覆盖率当场虚高。
+    ///
+    /// 真机上这一半什么时候不空：识别被中断（没轮到的那些）、识别跑完之后又扫进了
+    /// 新文件或加了新的**根**。识别每一趟起手都 `clear_identifications` 整批重算
+    /// （`identify::run`），所以跑完一整趟之后这一半是空的。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn for_each_not_run(&self, each: &mut NotRunVisitor) -> Result<(), CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT v.platform, v.key FROM variant v
+                 WHERE NOT EXISTS (SELECT 1 FROM identification i WHERE i.variant_key = v.key)
+                 ORDER BY v.key",
+            )
+            .map_err(|source| self.err(source))?;
+        let mut rows = statement.query([]).map_err(|source| self.err(source))?;
+        while let Some(row) = rows.next().map_err(|source| self.err(source))? {
+            let platform: Option<String> = row.get(0).map_err(|source| self.err(source))?;
+            let key: String = row.get(1).map_err(|source| self.err(source))?;
+            each(platform.as_deref(), &key);
+        }
+        Ok(())
+    }
+
+    /// 整个库里[还没识别](NOT_RUN_LABEL)的变体有多少个。
+    ///
+    /// **待确认队列**拿它说那句「另有 N 个还没识别」：那些变体一条候选都没有、裁不了，
+    /// 所以它们不进队列、也不算待裁决（[`queue_rows`](Self::queue_rows)）；但把它们
+    /// 一声不响地咽下去，用户就会以为库里只有队列里那些东西没定下来。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn not_run_count(&self) -> Result<u64, CatalogError> {
+        let value: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM variant v
+                 WHERE NOT EXISTS (SELECT 1 FROM identification i WHERE i.variant_key = v.key)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|source| self.err(source))?;
+        Ok(u64::try_from(value).unwrap_or(0))
     }
 
     /// 报告要的那几个计数：候选、自动通过、中文、NKit、建出来的作品与发行版。

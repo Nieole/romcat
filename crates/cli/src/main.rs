@@ -1781,6 +1781,19 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
         Err(error) => return fail(format!("识别失败：{error}")),
     };
 
+    // **中断这句在报告之前说。** 报告是从上往下读的：几十行数字印完了才补一句
+    // 「刚才那些不作数」，那句话来得太晚，读者早把半份报告当整份读完了。
+    //
+    // 两句话分工：这一句说**为什么**有变体没轮到，报告里那一栏（「还没识别 N 个」）
+    // 说**有多少个**没轮到。少了后者，中断之后的报告会说「变体 1 个，全部变体里
+    // 100.0%」而库里躺着 5 个——那正是这一票要消掉的东西。
+    if outcome.interrupted {
+        eprintln!(
+            "⚠ 这一趟识别被中断了，下面这份报告只是**半份**：没轮到的那些变体\
+             在报告里记作「还没识别」，它们在「全部变体里」那个分母中。\
+             已经算完的那部分留在中立库里，重跑会从头算一遍。"
+        );
+    }
     if !args.quiet {
         let text = outcome.report.render_text();
         let mut stdout = io::stdout().lock();
@@ -1898,8 +1911,8 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
     if !write_json(args.json.as_deref(), &outcome.report) {
         return ExitCode::FAILURE;
     }
+    // 中断那句在报告之前已经说过了（见上），这里只剩退出码。
     if outcome.interrupted {
-        eprintln!("这一趟被中断了，已经算完的那部分留在中立库里，重跑会从头算一遍。");
         return ExitCode::from(130);
     }
     // **停下来不是错误**（票 14 那条纪律）：已经问到的答案都落库了，报告照常出。
@@ -3134,7 +3147,7 @@ fn run_triage_list(args: &TriageListArgs) -> ExitCode {
         Ok(filter) => filter,
         Err(message) => return fail(message),
     };
-    let (mut survey, counts) = match collect_queue(&site, &filter) {
+    let (mut survey, counts, not_run) = match collect_queue(&site, &filter) {
         Ok(loaded) => loaded,
         Err(message) => return fail(message),
     };
@@ -3162,6 +3175,7 @@ fn run_triage_list(args: &TriageListArgs) -> ExitCode {
         site.catalog.location(),
         site.store.location(),
         survey.queue,
+        not_run,
         &survey.items,
         counts,
         args.limit,
@@ -3177,11 +3191,15 @@ fn run_triage_list(args: &TriageListArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// 折一次队列，连沉淀库眼下的账。
+/// 折一次队列，连沉淀库眼下的账、连库里**还没识别**的变体有几个。
+///
+/// 第三个数与前两个不是一回事：队列装的是「识别拿不定主意的那些」，而还没识别的那些
+/// 连一行结论都没有——它们进不了队列（也不该进），但报告必须说得出有多少个，
+/// 否则「队列 N 条」会被读成「库里只剩 N 条没定下来」。
 fn collect_queue(
     site: &Site,
     filter: &Filter,
-) -> Result<(triage::Survey, verdict::Counts), String> {
+) -> Result<(triage::Survey, verdict::Counts, u64), String> {
     let counts = site
         .store
         .counts()
@@ -3190,7 +3208,11 @@ fn collect_queue(
         .map_err(|error| format!("沉淀库读不动：{error}"))?;
     let survey = triage::survey(&site.catalog, &index, filter)
         .map_err(|error| format!("中立库读不动：{error}"))?;
-    Ok((survey, counts))
+    let not_run = site
+        .catalog
+        .not_run_count()
+        .map_err(|error| format!("中立库读不动：{error}"))?;
+    Ok((survey, counts, not_run))
 }
 
 /// 看一条队列条目的全部候选与依据。
@@ -3206,7 +3228,7 @@ fn run_triage_show(args: &TriageShowArgs) -> ExitCode {
         states: romcat_core::catalog::State::ALL.to_vec(),
         ..Filter::default()
     };
-    let (mut survey, counts) = match collect_queue(&site, &filter) {
+    let (mut survey, counts, not_run) = match collect_queue(&site, &filter) {
         Ok(loaded) => loaded,
         Err(message) => return fail(message),
     };
@@ -3225,6 +3247,7 @@ fn run_triage_show(args: &TriageShowArgs) -> ExitCode {
         site.catalog.location(),
         site.store.location(),
         survey.queue,
+        not_run,
         &survey.items,
         counts,
         shown,
@@ -3251,7 +3274,7 @@ fn run_triage_decide(args: &TriageDecideArgs) -> ExitCode {
         Ok(filter) => filter,
         Err(message) => return fail(message),
     };
-    let (mut survey, _) = match collect_queue(&site, &filter) {
+    let (mut survey, _, _) = match collect_queue(&site, &filter) {
         Ok(loaded) => loaded,
         Err(message) => return fail(message),
     };
