@@ -303,15 +303,41 @@ impl Store {
             }
             _ => {}
         }
+        // 到这儿只剩两种：版本号正好，或者**根本没有版本号那一行**。后者又分两种，
+        // 处置完全相反，**分不开就会写坏库**（挂单 Q14 的第二半）：
+        //
+        // - **空文件**——第一次开，什么表都还没有。建表、当场落版本号。
+        // - **已经有表、却没有版本号**——上一版程序在 `execute_batch(SCHEMA)` 与写版本号
+        //   之间被杀，或者干脆是加版本号之前那几版留下的。这一份的**形状不知道**，
+        //   多半比本程序旧。这时若照「新建」走，`CREATE TABLE IF NOT EXISTS` 对已存在的
+        //   旧表一个字不改，而版本号被盖成当前版——**旧形状的库从此顶着新版本号**，
+        //   自动重建那条路再也不会触发，`replace` 每一趟都在
+        //   `INSERT INTO subject(… 新列 …)` 上硬报 `no column named`。**失败还从「下一趟
+        //   自己补得回来」变成了「永远补不回来」**。所以它要走重建那条路。
+        let 已经有表 = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'subject'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|source| self.error(source))?
+            .is_some();
+        if found.is_none() && 已经有表 {
+            // `was: 0` —— 「不知道是哪一版」。重建从本机那份原件读，读的是原件不是这张表，
+            // 所以不知道旧版本号也照样重建得起来。
+            self.rebuilding = Some(Rebuilding {
+                dump: self.meta("dump")?.unwrap_or_default(),
+                fingerprint: self.meta("fingerprint")?.unwrap_or_default(),
+                was: 0,
+            });
+            return Ok(());
+        }
         self.conn
             .execute_batch(SCHEMA)
             .map_err(|source| self.error(source))?;
-        // **新建的库当场落版本号。** 少了这一句，「文件已建好、`replace` 还没跑过」那一档
-        // （第一次 `zh sync` 中途断网，或先跑了 `zh find`）留下的库里 `meta` 没有这一行；
-        // 等结构版本再升一格，`prepare` 读到 `None` 既不走 `TooNew` 也不置 `rebuilding`，
-        // `CREATE TABLE IF NOT EXISTS` 对已存在的旧表一个字不改，最后在 `replace` 那句
-        // `INSERT INTO subject(… 新列 …)` 上硬报 `no column named`——而这一下发生在
-        // **下完 435 MB 之后**，恰是自动重建这条路要避免的那个失败（挂单 Q14）。
+        // **新建的库当场落版本号**，别让它变成上面那种「有表没版本号」的库。
         if found.is_none() {
             self.put_meta("schema_version", &SCHEMA_VERSION.to_string())?;
         }
@@ -815,6 +841,59 @@ mod tests {
         );
 
         // 真写进新数据那一刻，结构与版本号才一起换掉。
+        let mut store = Store::open(&path).expect("开得起来");
+        store
+            .replace(&[一条()], "dump-2026-09-01.zip", "sha256:abc")
+            .expect("写得进去");
+        assert!(store.rebuilding().is_none());
+        assert_eq!(
+            store.meta("schema_version").expect("读得到"),
+            Some(SCHEMA_VERSION.to_string())
+        );
+        assert_eq!(store.load().expect("读得回来").len(), 1);
+    }
+
+    #[test]
+    fn 有表却没有版本号的库走重建_而不是被盖上当前版本号() {
+        // 这一份是上一版程序在「建完表」与「写版本号」之间被杀留下的，也可能是加版本号
+        // 之前那几版留下的。**形状不知道，多半比本程序旧。**
+        //
+        // 照「新建」走的话：`CREATE TABLE IF NOT EXISTS` 对已存在的旧表一个字不改，而
+        // 版本号被盖成当前版——旧形状的库从此顶着新版本号，重建再也不会触发，`replace`
+        // 每一趟都在 `INSERT INTO subject(… 新列 …)` 上硬报 `no column named`。
+        // **失败于是从「下一趟自己补得回来」变成「永远补不回来」**，而唯一的出路是
+        // 重下那 435 MB。
+        let dir = crate::testing::temp_dir("zh-store-no-version");
+        let path = 一份旧索引(&dir, 1);
+        {
+            let conn = rusqlite::Connection::open(&path).expect("开得起来");
+            conn.execute("DELETE FROM meta WHERE key = 'schema_version'", [])
+                .expect("删得掉");
+        }
+
+        let store = Store::open(&path).expect("打得开，不报错");
+
+        let pending = store.rebuilding().expect("该等着重建").clone();
+        assert_eq!(pending.was, 0, "不知道是哪一版");
+        // 重建要用的两样照样交得出来——它们不在被删掉的那一行上。
+        assert_eq!(pending.dump, "dump-2026-09-01.zip");
+        assert_eq!(pending.fingerprint, "sha256:abc");
+        // **绝不能顺手把当前版本号盖上去**：盖上了就再也回不来。
+        assert_eq!(
+            store.meta("schema_version").expect("读得到"),
+            None,
+            "没重建成之前不许盖版本号"
+        );
+        drop(store);
+        assert!(
+            Store::open(&path)
+                .expect("再打开一次")
+                .rebuilding()
+                .is_some(),
+            "没重建成就该一直等着"
+        );
+
+        // 真写进新数据那一刻，结构与版本号才一起换上。
         let mut store = Store::open(&path).expect("开得起来");
         store
             .replace(&[一条()], "dump-2026-09-01.zip", "sha256:abc")
