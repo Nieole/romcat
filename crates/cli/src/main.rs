@@ -2592,6 +2592,23 @@ fn open_store(workspace: &Path) -> Result<Store, String> {
 }
 
 impl TriageCommonArgs {
+    /// 把这一趟用的**库选择器**原样折回一段命令行片段。
+    ///
+    /// 用处只有一个：打印那些**拿来复制粘贴的**命令时，得让粘贴过去的那一条落在
+    /// 同一份库上。`--library` 优先——它是名字，换台机器、盘挂在别的挂载点上也还认得；
+    /// 只给了主库根时才回退到那个路径。两样都没给就回空串（那时用的是工作目录默认那份）。
+    ///
+    /// 路径与名字都**加单引号**：主库根带空格是常态。
+    fn 选择器(&self) -> String {
+        if let Some(name) = &self.library {
+            return format!(" --library '{name}'");
+        }
+        if let Some(root) = &self.root {
+            return format!(" '{}'", path::display(root));
+        }
+        String::new()
+    }
+
     /// 开一份**现场**：中立库、沉淀库，连这份主库在**路径锚**里叫什么名字。
     ///
     /// 三样一起开在 `core::site` 里——界面走的是同一条（ADR-0005：核心是独立的库）。
@@ -4524,8 +4541,21 @@ fn run_zh_matches(args: &ZhMatchesArgs) -> ExitCode {
             );
         }
         if group.from_variant {
+            // **这一行是拿来复制粘贴的，所以要复制得动。** 三处不能省：
+            //
+            // - **变体键加单引号**。它是相对主库根的路径，真库里带空格、括号、方括号
+            //   （`FC/魂斗罗 (J) [T+Chi].zip`）是常态，裸着贴进去 shell 当场就拆散了。
+            // - **把这一趟用的库选择器原样带上**。不带的话粘贴过去是另一份库——或者
+            //   压根找不到库。
+            // - **`--yes` 与 `--no` 分两行**。挤在一行里那句「（或 --no）」会跟着被
+            //   一起选中贴进去，那不是一条命令。
+            let 选库 = args.site.选择器();
             println!(
-                "  裁它：romcat zh judge {key} --entry {} --yes（或 --no）",
+                "  裁它（就是它）：romcat zh judge{选库} '{key}' --entry {} --yes",
+                group.entry,
+            );
+            println!(
+                "      （不是它）：romcat zh judge{选库} '{key}' --entry {} --no",
                 group.entry,
             );
         } else {

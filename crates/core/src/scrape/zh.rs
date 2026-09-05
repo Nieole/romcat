@@ -621,8 +621,21 @@ impl<'a> ChineseSource<'a> {
         if hits.is_empty() {
             return None;
         }
+        // **人裁过的压过数票。** `romcat zh judge --yes` 的原话是「这一次匹配带来的全部
+        // 字段一并定下」，而作品那四栏也是这一层产出的——让人裁的那一条与模糊匹配来的
+        // 平起平坐去数票，就会出现「人在甲上盖了章，可乙撞上的变体多，作品那四栏照旧
+        // 写着乙」，命令自己的承诺当场落空、还不报错。裁决压过一切是这个仓库既定的那条
+        // （`title::tests::裁决压过一切`、`converge::tests::裁决压过全部规则`）。
+        //
+        // 有人裁过就**只在人裁过的那些里数票**：一部作品下有人对两条不同条目各盖过章
+        // 是真会发生的（裁的是不同变体），那时仍旧多数说了算，平票仍旧取条目号最小的
+        // ——只是候选缩到盖过章的那几条里。一条都没裁过时与从前一模一样。
+        let 有人裁过 = hits.iter().any(|(_, hit)| hit.confirmed.is_some());
         let mut tally: BTreeMap<u32, usize> = BTreeMap::new();
-        for (_, hit) in &hits {
+        for (_, hit) in hits
+            .iter()
+            .filter(|(_, hit)| !有人裁过 || hit.confirmed.is_some())
+        {
             *tally.entry(hit.one.entry.id).or_default() += 1;
         }
         // 键取 `(票数, 条目号取反)`：**这个最大值是唯一的**，所以「最大值有好几个时
@@ -1992,6 +2005,34 @@ mod tests {
         assert_eq!(那几条(&out, Field::Developer), vec!["科乐美"]);
         let 依据 = &那一格(&out, Field::Genre).expect("有这一条").evidence;
         assert!(依据.contains("名下 1 个变体撞上了中文条目"), "{依据}");
+    }
+
+    #[test]
+    fn 作品那一层人裁过的那一条压过数票() {
+        // `romcat zh judge --yes` 的原话是「这一次匹配带来的全部字段一并定下」。
+        // 让人裁的那一条与模糊匹配来的平起平坐去数票，就会出现「人在丙上盖了章，
+        // 可甲乙撞的那条票多，作品那四栏照旧写着甲乙的答案」——命令自己的承诺当场
+        // 落空，而且不报错。**裁决压过一切**是这个仓库既定的那条。
+        let 甲 = "nds/合金弹头7.7z";
+        let 乙 = "nds/合金弹头7[某汉化组](简).7z";
+        let 丙 = "nds/恶魔城.7z";
+        let 名下三个 = [名下(甲), 名下(乙), 名下(丙)];
+
+        // 没人裁过：两票对一票，条目 4 赢。
+        let 没裁过 = 采作品(&名下三个);
+        assert_eq!(那几条(&没裁过, Field::Genre), vec!["ACT"]);
+
+        // 人在丙上给条目 6 盖了章。票数仍是 2:1，可这一层的答案要翻成 6。
+        let out = 采作品带裁决(&名下三个, &裁过(丙, 6, true));
+        assert_eq!(
+            那几条(&out, Field::Genre),
+            vec!["AVG"],
+            "人裁过的那一条压过数票"
+        );
+        assert_eq!(那几条(&out, Field::Developer), vec!["科乐美"]);
+        // 盖过的章要跟到作品那四栏上——那正是「一条裁决管住全部字段」。
+        let 依据 = &那一格(&out, Field::Genre).expect("有这一条").evidence;
+        assert!(zh::is_confirmed(依据), "{依据}");
     }
 
     #[test]

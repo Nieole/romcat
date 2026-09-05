@@ -40,10 +40,19 @@ fn 重画间隔(ctx: &egui::Context, app: &mut App) -> Duration {
 ///
 /// 它跑完也不交出产物（`Err`）——这一趟存在的意义只是**占着那个位子**，
 /// 好让别的屏在它跑着的时候照样画。真的活长什么样看 `tests/sublibrary.rs`。
+/// 一趟**跑不完**的活：用它的三条测试都自己按「停下」，没有一条等它自然结束。
+///
+/// **步数要给得足够多，多到它绝不可能在测试看完之前自己跑完。** 早先是 400 步 × 5 ms
+/// ＝ 正好两秒，而 `任务跑着的时候别的屏照常画得出来` 要在三十帧之内看见它还在跑——
+/// 机器一忙（全量测试并排跑、内存吃紧）三十帧就超过两秒，那一趟活自己先结束了，
+/// 测试于是在 `running().expect(…)` 上炸，而它想钉的那件事根本没出问题。
+/// **单独跑绿、全量跑挂**的测试比没有测试更坏：它会把后面每一张票的门禁都染成红的。
+const 占位步数: u32 = 40_000;
+
 fn 排一趟占位的(app: &mut App) -> u64 {
     app.tasks_mut().queue("装作在扫一趟库", |task| {
-        task.steps(400);
-        for at in 1..=400 {
+        task.steps(占位步数);
+        for at in 1..=占位步数 {
             task.step(&format!("走到第 {at} 块"))?;
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -88,17 +97,23 @@ fn 任务跑着的时候别的屏照常画得出来() {
     // 库浏览那一屏照常答得上话：这一帧要来的行还在。
     assert!(app.window().retained() > 0, "任务跑着的时候库浏览空了");
 
+    let 按下那一刻 = std::time::Instant::now();
     app.tasks_mut().stop(id);
     画到台上空了(&ctx, &mut app);
-    // **按停了就记成按停了，不是失败。**
+    let 按下之后过了 = 按下那一刻.elapsed();
+    // **按停了就记成按停了，不是失败。** 这一条本身就说明它没跑到头——跑到头会记成
+    // `Failed`（那个占位闭包最后返回的是 `Err`）。
     assert_eq!(app.tasks().history()[0].ending, Ending::Stopped);
     assert!(
         app.tasks().history()[0].elapsed > Duration::ZERO,
         "历史那条没带耗时",
     );
+    // **「停得动」量的是按下之后多久真的停**，不是那一趟活总共跑了多久。
+    // 早先拿「总耗时 < 2 秒」当判据，可那个数里绝大部分是**这条测试自己画三十一帧
+    // 花掉的时间**——机器一忙就超过两秒，于是一条好好的实现被判成「停不动」。
     assert!(
-        app.tasks().history()[0].elapsed < Duration::from_secs(2),
-        "按了停下却跑满了两秒——那不叫停得动",
+        按下之后过了 < Duration::from_secs(3),
+        "按了停下，过了 {按下之后过了:?} 台上还没空——那不叫停得动",
     );
 }
 

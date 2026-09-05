@@ -915,6 +915,10 @@ impl Screen {
                     // 收窄过的那些，整段挂在悬停里——**面板上画不下不等于看不到**。
                     // 用 `on_hover_ui` 而不是拼一个大字符串：那个闭包只在真悬停时才跑。
                     response.on_hover_ui(|ui| {
+                        // **限宽**。不限的话悬停框跟着最长那一行铺开——简介闸在 4,000 字
+                        // （票 `offline-chinese-fields/03`），一段没有换行的中文会把这个
+                        // 框拉成一条横穿屏幕的线，反倒比截断更看不清。
+                        ui.set_max_width(420.0);
                         ui.label(&item.value.value);
                         ui.separator();
                         ui.label(&item.value.evidence);
