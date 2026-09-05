@@ -43,6 +43,9 @@ romcat scan /path/to/Game --library 主库 --root-name 主库
 # 1b. 第二块盘加进同一个主库：换个根名，扫进同一份中立库
 romcat scan /path/to/Pegasus --library 主库 --root-name 元数据库
 
+# 1c. 盘换了位置：拿原来那个根名再扫一趟，新位置就记进库里了
+romcat scan /新位置 --library 主库 --root-name 主库
+
 # 2. 取 DAT 与中文离线索引（各几百 MB，取一次）
 romcat dat sync
 romcat zh sync

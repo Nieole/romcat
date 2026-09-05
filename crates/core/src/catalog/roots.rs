@@ -455,6 +455,50 @@ pub fn check_placement(
     Ok(())
 }
 
+/// **换一个根的位置**换不动的两种理由。
+///
+/// 两条都只说**诊断**那一半——库里有哪些根、错在哪。**怎么写才对**那一句由壳补
+/// （[`RelocateError::hint`]）：命令行上换位置的选项有两个名字（`sublibrary sync`
+/// 的 `--library-root` 与 `identify` / `scrape` / `names` 的 `--root`），
+/// 而将来界面上那一下一个选项名都没有。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RelocateError {
+    /// 库里没有叫这个名字的根。
+    #[error("这份中立库里没有叫「{name}」的根。加一个根是 `scan` 的活。{}", known_roots(known))]
+    Unknown {
+        /// 点到的那个名字。
+        name: String,
+        /// 库里真有的那几个根。
+        known: Vec<String>,
+    },
+    /// 不点名，而库里的根不止一个（或者一个都没有）。
+    #[error("这份中立库有 {} 个根，得说清换的是哪一个。{}", known.len(), known_roots(known))]
+    Ambiguous {
+        /// 库里真有的那几个根。
+        known: Vec<String>,
+    },
+}
+
+/// 「这份库里的根是：……」那半句。**两条错误共用**，于是列法只有一种。
+fn known_roots(known: &[String]) -> String {
+    if known.is_empty() {
+        return "这份库里一个根都还没有——先 `romcat scan <目录>` 扫一趟".to_string();
+    }
+    format!("这份库里的根是：{}", known.join("、"))
+}
+
+impl RelocateError {
+    /// 诊断后面再补一句**这个壳该怎么写才对**。
+    ///
+    /// 诊断这一半在核心里，于是「没有这个根」「有几个根、分别叫什么」在
+    /// `sublibrary sync`、`identify` 与将来界面上那一下是同一句话；出路那一半各写各的
+    /// ——`--library-root` 点得了名，`--root` 只是一条路径，点不了。
+    #[must_use]
+    pub fn hint(&self, remedy: &str) -> String {
+        format!("{self}\n{remedy}")
+    }
+}
+
 /// **从键回到盘**：一份「根名 → 那个根在哪」的对照表。
 ///
 /// 识别要读那个文件的头、刮削要读那张图、同步要把那个文件搬过去——三件事手上都只有
@@ -490,9 +534,52 @@ impl Roots {
         roots
     }
 
-    /// 换掉（或加上）一个根的位置。命令行的 `--library-root 名字=路径` 走这条。
+    /// 摆一个根进这份表里。**insert 语义**：这个名字没有就加上，有就换掉。
+    ///
+    /// 它是**搭一份 `Roots` 出来**用的（[`Roots::single`]、扫描那一侧），不是
+    /// 「盘换了位置」那一下——那条走 [`Roots::relocate`]。两条分开，是因为
+    /// 「换位置」写错一个字时该当场说出来，而不是凭空多出一个根（见 `relocate` 的文档）。
     pub fn set(&mut self, name: &str, path: impl Into<PathBuf>) {
         self.by_name.insert(name.to_string(), path.into());
+    }
+
+    /// **盘换了位置**：把一个**已有的根**改指到别处，只管这一趟。
+    ///
+    /// `name` 给 `None` 是不点名的那一种，只在**恰好一个根**时算数——那时「哪个根」
+    /// 没有歧义；多于一个却不说名字，覆盖谁都是猜。
+    ///
+    /// **只认已有的名字。** 用 [`Roots::set`] 的话，`--library-root 主庫=/新位置`
+    /// （打错一个字）会凭空多出一个根，而后面报出来的是「根『主库』不在位」——
+    /// 说的是另一件事，用户照着它去插盘、去核对挂载点，一路查不到自己打错了字。
+    /// **加一个根是 `scan` 的活**（`scan::resolve_root` 那一套重名、套叠、工作目录
+    /// 三道校验），不该从「换位置」这条缝里溜进来。
+    ///
+    /// 判据在这一层而不在命令行，是因为**界面上也有「盘换了位置」这一下**——
+    /// 哪些名字算数是这份表自己知道的事，不该靠每个壳自己记得查一遍。
+    ///
+    /// # Errors
+    /// 库里没有这个名字的根、或者不点名却有不止一个根时返回 [`RelocateError`]。
+    pub fn relocate(
+        &mut self,
+        name: Option<&str>,
+        path: impl Into<PathBuf>,
+    ) -> Result<(), RelocateError> {
+        let known = || self.by_name.keys().cloned().collect::<Vec<_>>();
+        let target = match name {
+            Some(name) if self.by_name.contains_key(name) => name.to_string(),
+            Some(name) => {
+                return Err(RelocateError::Unknown {
+                    name: name.to_string(),
+                    known: known(),
+                });
+            }
+            None => match self.only() {
+                Some(only) => only.to_string(),
+                None => return Err(RelocateError::Ambiguous { known: known() }),
+            },
+        };
+        self.by_name.insert(target, path.into());
+        Ok(())
     }
 
     /// 一个根都没有。
@@ -686,5 +773,66 @@ mod tests {
             Some(PathBuf::from("/盘乙/Pegasus/FC/魂斗罗.zip"))
         );
         assert_eq!(roots.join("没这个根/FC/魂斗罗.zip"), None);
+    }
+
+    fn 两个根() -> Roots {
+        let mut roots = Roots::single("主库", "/盘甲/Game");
+        roots.set("元数据库", "/盘乙/Pegasus");
+        roots
+    }
+
+    #[test]
+    fn 换一个不存在的根的位置要报错并列出库里有哪些根() {
+        // 打错一个字：`主庫`。从前它被静默收下，凭空多出第三个根，
+        // 而后面报的是「根『主库』不在位」——说的是另一件事。
+        let mut roots = 两个根();
+        let error = roots
+            .relocate(Some("主庫"), "/盘甲搬走了/Game")
+            .expect_err("该被拒");
+        let RelocateError::Unknown { name, .. } = &error else {
+            panic!("该报「没有这个根」，实际是 {error}");
+        };
+        assert_eq!(name, "主庫");
+        let 话 = error.to_string();
+        assert!(话.contains("主库") && 话.contains("元数据库"), "{话}");
+        assert!(话.contains("`scan`"), "加根是 scan 的活，得说出来：{话}");
+        // **一个根都没多出来**，而且原来那个根还指着原处。
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots.path_of("主库"), Some(Path::new("/盘甲/Game")));
+    }
+
+    #[test]
+    fn 多于一个根时不点名换不动位置() {
+        let mut roots = 两个根();
+        let error = roots.relocate(None, "/别处").expect_err("该被拒");
+        assert!(matches!(error, RelocateError::Ambiguous { .. }));
+        let 话 = error.to_string();
+        assert!(话.contains("2 个根"), "{话}");
+        assert!(话.contains("主库") && 话.contains("元数据库"), "{话}");
+    }
+
+    #[test]
+    fn 只有一个根时不点名照旧换得动() {
+        // 这条便利不能丢：真库上大多数人只有一个根。
+        let mut roots = Roots::single("主库", "/盘甲/Game");
+        roots.relocate(None, "/盘甲搬走了/Game").expect("换得动");
+        assert_eq!(
+            roots.path_of("主库"),
+            Some(Path::new("/盘甲搬走了/Game")),
+            "换的是那个独苗，名字不变"
+        );
+        // 点名也换得动，而且换的是同一个。
+        roots.relocate(Some("主库"), "/又搬了").expect("换得动");
+        assert_eq!(roots.path_of("主库"), Some(Path::new("/又搬了")));
+    }
+
+    #[test]
+    fn 一个根都没有时说清是一个根都没有() {
+        let mut roots = Roots::default();
+        let error = roots.relocate(None, "/盘甲/Game").expect_err("该被拒");
+        assert!(
+            error.to_string().contains("一个根都还没有"),
+            "别印成「有 0 个根，得说清是哪一个」：{error}"
+        );
     }
 }

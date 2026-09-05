@@ -354,6 +354,9 @@ struct NamesArgs {
     recheck: bool,
 
     /// 主库根目录。`--recheck` 才用得上；给了 `--library` 就不必再给
+    ///
+    /// 主库是一组根，而这条只是一条路径：**多于一个根时它换不动谁的位置**，
+    /// 会当场说清库里有哪几个根。盘挪了地方，重扫一趟就把新位置记下了
     #[arg(long, value_name = "目录")]
     root: Option<PathBuf>,
 
@@ -527,6 +530,9 @@ struct ShapeArgs {
 #[derive(Debug, Args)]
 struct IdentifyArgs {
     /// 主库根目录。要算裸文件的哈希才用得上；给了 `--library` 就不必再给
+    ///
+    /// 主库是一组根，而这条只是一条路径：**多于一个根时它换不动谁的位置**，
+    /// 会当场说清库里有哪几个根。盘挪了地方，重扫一趟就把新位置记下了
     root: Option<PathBuf>,
 
     /// 按名字找中立库（扫描时用 `--library` 起的那个名字）
@@ -664,6 +670,9 @@ impl ModelArgs {
 #[derive(Debug, Args)]
 struct ScrapeArgs {
     /// 主库根目录。只有要把本地媒体收进媒体池才用得上；给了 `--library` 就不必再给
+    ///
+    /// 主库是一组根，而这条只是一条路径：**多于一个根时它换不动谁的位置**，
+    /// 会当场说清库里有哪几个根。盘挪了地方，重扫一趟就把新位置记下了
     root: Option<PathBuf>,
 
     /// 按名字找中立库（扫描时用 `--library` 起的那个名字）
@@ -3068,6 +3077,9 @@ struct SubSyncArgs {
     ///
     /// 主库是一组根，所以这条可以给好几次。库里只有一个根时写路径就行；
     /// 有好几个根时得说清是哪一个：`--library-root 根名=路径`
+    ///
+    /// **只换得动库里已有的根。** 名字打错一个字不会凭空多出一个根，
+    /// 会当场说「没有这个根」并把有的那几个列出来——加根是 `scan` 的活
     #[arg(long, value_name = "[根名=]路径")]
     library_root: Vec<String>,
 
@@ -4396,17 +4408,23 @@ fn run_sublibrary_sync(args: &SubSyncArgs, cancel: &CancelToken) -> ExitCode {
 
 /// 把 `--library-root` 那几条折成 `(根名, 路径)`。没有 `=` 就是不点名的那一种。
 ///
+/// **从左边第一个 `=` 切**，而这一刀之所以不会切错，是因为**根名里不许有 `=`**
+/// （`path::root_name`）：左半只可能是整个根名，不可能是根名的前半截。
+///
+/// 左半还得像个根名（不许带 `/`、`\`、控制字符）。`D:\Game` 与 `\\?\C:\Game` 里
+/// 一个 `=` 都没有，走的是「不点名」那条；`/mnt/backup=2024/roms` 里那个 `=` 是路径
+/// 自己的，左半带 `/` 当场被拦下——不拦的话它会被切成根名 `/mnt/backup`。
+///
+/// **左半像个根名、库里却没有这个根**（`roms=2024`、打错一个字的 `主庫`）这一刀
+/// 切不出来：那要知道库里有哪些根，判据因此在核心里（`Roots::relocate`），
+/// 界面上「盘换了位置」那一下与这里共用它。
+///
 /// # Errors
-/// `=` 左边是空的时返回一句给人看的话——那多半是把 Windows 盘符当成了分隔符。
+/// `=` 左边不像一个根名时返回一句给人看的话，并提醒路径本来就带 `=` 时怎么写。
 fn root_overrides(given: &[String]) -> Result<Vec<(Option<String>, PathBuf)>, String> {
     let mut out = Vec::with_capacity(given.len());
     for text in given {
-        // 从**左边第一个** `=` 切，而且左边不许有分隔符：`D:\Game` 里没有 `=`，
-        // 而 `甲=D:\Game` 里那个 `=` 一定是我们要的那一个。
         match text.split_once('=') {
-            // 左边要真是个**根名**才算数：`D:\Game` 里没有 `=`，而
-            // `/mnt/backup=2024/roms` 里那个 `=` 是路径自己的一部分——不校验的话
-            // 它会被切成根名 `/mnt/backup`，凭空多出一个不存在的根。
             Some((name, path)) => match romcat_core::path::root_name(name) {
                 Ok(name) => out.push((Some(name), PathBuf::from(path))),
                 Err(why) => {
@@ -4422,17 +4440,33 @@ fn root_overrides(given: &[String]) -> Result<Vec<(Option<String>, PathBuf)>, St
     Ok(out)
 }
 
-/// 这一趟对着的那**一组根**：库里记着的那份，`--root` 只在**至多一个根**的时候
+/// 这一趟对着的那**一组根**：库里记着的那份，`--root` 只在**恰好一个根**的时候
 /// 换得动位置。
 ///
-/// 一组根里哪个是准的，一条路径说不出来；而那时库里记着的位置本来就更可信——
-/// 每扫一趟它就更新一次。
+/// 一组根里哪个是准的，一条路径说不出来——所以多于一个根时**不点名就报错**，
+/// 与 `sublibrary sync` 的 `--library-root` 同一句诊断、同一个判据
+/// （`Roots::relocate`）。从前这里是静默不换：用户以为盘的新位置生效了，
+/// 实际这一趟读的还是库里那个旧位置，而错误说的是「根不在位」。
+///
+/// **`--root` 换不了名字**，它只是一条路径（还兼着「按路径找中立库」那一职），
+/// 所以多根库上的出路是重扫一趟把新位置记进库里，而不是在这里点名。
+///
+/// 一个根都还没有时照旧原样返回：那句「不知道主库在哪」由各条命令自己说，
+/// 它们各有各的下文（`--no-read-library`、`--no-media`、重读容器）。
 fn roots_for(catalog: &Catalog, given: Option<&Path>) -> Result<Roots, String> {
     let mut roots = Roots::load(catalog).map_err(|error| format!("中立库读不动：{error}"))?;
     if let Some(given) = given
-        && let Some(only) = roots.only().map(str::to_string)
+        && !roots.is_empty()
     {
-        roots.set(&only, romcat_core::path::normalize_existing(given));
+        roots
+            .relocate(None, romcat_core::path::normalize_existing(given))
+            .map_err(|error| {
+                error.hint(
+                    "`--root` 是一条路径，点不了名，只在这份库**只有一个根**时换得动位置。\n\
+                     盘挪了地方就重扫一趟，新位置从此记在库里：\
+                     `romcat scan <新位置> --root-name <根名>`",
+                )
+            })?;
     }
     Ok(roots)
 }
@@ -5587,6 +5621,82 @@ mod tests {
             refuse_writing_into_library(root, Path::new("/Volumes/ROMs/FC/x/体检.json")).is_err()
         );
         assert!(refuse_writing_into_library(root, Path::new("/tmp/体检.json")).is_ok());
+    }
+
+    fn 两个根的库() -> Catalog {
+        let catalog = Catalog::open_in_memory().expect("能开中立库");
+        romcat_core::catalog::roots::add_root(&catalog, None, "主库", Path::new("/盘甲/Game"))
+            .expect("加得上");
+        romcat_core::catalog::roots::add_root(
+            &catalog,
+            None,
+            "元数据库",
+            Path::new("/盘乙/Pegasus"),
+        )
+        .expect("加得上");
+        catalog
+    }
+
+    #[test]
+    fn 多于一个根时root换不动位置且当场说清() {
+        // 从前这里是**静默不换**：用户以为盘的新位置生效了，实际这一趟读的还是库里
+        // 那个旧位置，而报出来的错是「根不在位」。同场景 `sublibrary sync` 的
+        // `--library-root` 却当场要求点名——两处口径不一。
+        let catalog = 两个根的库();
+        let 话 = roots_for(&catalog, Some(Path::new("/盘甲搬走了/Game"))).expect_err("该被拒");
+        assert!(话.contains("2 个根"), "{话}");
+        assert!(
+            话.contains("主库") && 话.contains("元数据库"),
+            "库里有哪些根要列出来：{话}"
+        );
+        assert!(
+            话.contains("romcat scan"),
+            "`--root` 点不了名，出路是重扫一趟，得说出来：{话}"
+        );
+    }
+
+    #[test]
+    fn 只有一个根时root照旧换得动位置() {
+        // **这条便利不能丢。**
+        let catalog = Catalog::open_in_memory().expect("能开中立库");
+        romcat_core::catalog::roots::add_root(&catalog, None, "主库", Path::new("/盘甲/Game"))
+            .expect("加得上");
+        let roots = roots_for(&catalog, Some(Path::new("/盘甲搬走了/Game"))).expect("换得动");
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots.path_of("主库"), Some(Path::new("/盘甲搬走了/Game")));
+    }
+
+    #[test]
+    fn 一个根都没有时root不报错留给各条命令自己说() {
+        // 「不知道主库在哪」各条命令各有各的下文（`--no-read-library`、`--no-media`、
+        // 重读容器），不该在这里抢着说。
+        let catalog = Catalog::open_in_memory().expect("能开中立库");
+        let roots = roots_for(&catalog, Some(Path::new("/盘甲/Game"))).expect("不报错");
+        assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn 库根覆盖从左边第一个等号切() {
+        // 没有 `=` 就是整条路径，不点名。
+        let 一条路径 = root_overrides(&["/盘甲/Game".to_string()]).expect("解得开");
+        assert_eq!(一条路径, vec![(None, PathBuf::from("/盘甲/Game"))]);
+        // 根名里不许有 `=`（`path::root_name`），所以左边第一个 `=` 一定是分隔符，
+        // 右边整个都是路径——路径自己带 `=` 也切得对。
+        let 点名 = root_overrides(&["主库=/mnt/backup=2024/roms".to_string()]).expect("解得开");
+        assert_eq!(
+            点名,
+            vec![(
+                Some("主库".to_string()),
+                PathBuf::from("/mnt/backup=2024/roms")
+            )]
+        );
+        // Windows 那两种写法里一个 `=` 都没有，照旧当整条路径。
+        let windows = root_overrides(&[r"\\?\C:\Game".to_string()]).expect("解得开");
+        assert_eq!(windows, vec![(None, PathBuf::from(r"\\?\C:\Game"))]);
+        // 左半带分隔符时当场拦下，并说清路径本来就带 `=` 该怎么写。
+        let 话 = root_overrides(&["/mnt/backup=2024/roms".to_string()]).expect_err("该被拒");
+        assert!(话.contains("不是一个根名"), "{话}");
+        assert!(话.contains("把根名写全"), "{话}");
     }
 
     #[test]
