@@ -290,6 +290,16 @@ impl Catalog {
     /// 丢掉的全是可再生的（中立库整份可再生，`CONTEXT.md`）；**沉淀库一个字都不动**，
     /// 那里面是用户亲手定的东西。
     ///
+    /// **这个根那一趟遍历也一起删掉。** 移除说的是「这个根在中立库里的一切都不算数了」，
+    /// 遍历与它的批注是那个「一切」的一部分：留着遍历行，报告会继续替一个已经不在的根
+    /// 报抬头与耗时；更要紧的是**断点的身份靠它**——同名同路径加回来时，工作目录里那份
+    /// 按根名取的旧断点会重新对上，于是只扫 `pending` 那一半，收尾还什么都删不到，
+    /// 扫完报「完整」却少文件。删掉这一行，那份旧断点就再也对不上谁
+    /// （[`scan`](crate::scan) 那道守卫），加回来的根从头扫一遍。
+    ///
+    /// **断点文件本身不在这里删**：核心不知道工作目录在哪，而删不删在行为上没有区别
+    /// ——留着它，`--resume` 也是读到、对不上、从头扫。
+    ///
     /// # Errors
     /// 写库失败时返回错误。
     pub fn remove_root(&mut self, name: &str) -> Result<u64, CatalogError> {
@@ -335,9 +345,16 @@ impl Catalog {
                 .execute(sql, params![prefix])
                 .map_err(|source| self.err(source))?;
         }
-        self.conn
-            .execute("DELETE FROM library_root WHERE name = ?1", params![name])
-            .map_err(|source| self.err(source))?;
+        // 遍历与它的批注按**根名**记（`catalog::SCHEMA_VERSION` 的 7），跟着这个根一起走。
+        for sql in [
+            "DELETE FROM traversal WHERE root_name = ?1",
+            "DELETE FROM traversal_note WHERE root_name = ?1",
+            "DELETE FROM library_root WHERE name = ?1",
+        ] {
+            self.conn
+                .execute(sql, params![name])
+                .map_err(|source| self.err(source))?;
+        }
         self.drop_orphans()?;
         Ok(removed)
     }
