@@ -1859,6 +1859,23 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
             );
         }
     }
+    if outcome.collections.members > 0 || outcome.collections.unresolved > 0 {
+        // **合集是沉淀库的投影**（票 `gui-redesign/06`）：识别跑完照它重建一遍。
+        // 落不了地的那几条要说出来——那多半是「那块盘这一趟没扫」，
+        // 而静静少掉几颗星比说出来更坏。
+        eprintln!(
+            "合集照沉淀库重建了 {} 个、{} 条成员关系（收藏是其中名字定死的那一组）。",
+            thousands(outcome.collections.collections as u64),
+            thousands(outcome.collections.members as u64),
+        );
+        if outcome.collections.unresolved > 0 {
+            eprintln!(
+                "  另有 {} 条成员关系在这份中立库里落不了地（那份内容不在这儿：盘没插、\
+                 或者还没扫到）。**它们一条都没删**——沉淀库不可再生，落不了地不等于不该留着。",
+                thousands(outcome.collections.unresolved as u64),
+            );
+        }
+    }
     if outcome.switch.probed > 0 {
         eprintln!(
             "Switch 那一层读了 {} 份容器的**明文文件名表**（一个密钥都没用）：\

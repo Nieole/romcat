@@ -374,7 +374,9 @@ impl App {
                     roots.status(ui, site);
                 }
                 View::Variants => {
-                    let (library, site) = (&mut self.library, &self.site);
+                    // **抬头上那颗「★ 收藏」真的写库**（票 `gui-redesign/06`），
+                    // 所以这一屏的抬头拿的是可变的那一份。
+                    let (library, site) = (&mut self.library, &mut self.site);
                     library.status(ui, site);
                 }
                 View::Sublibraries => {

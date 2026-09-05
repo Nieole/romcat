@@ -33,6 +33,16 @@
 //!    **依据**）→ **文件**（含附属文件与内部资源）。媒体那一块只列得出来，
 //!    内嵌显示是票 `07`。
 //!
+//! ## 收藏与合集：同一套成员关系
+//!
+//! **收藏是一颗星**：勾几行按一下，那一批底下的变体全进去；`收藏=是` 随后筛得出来。
+//! 它走的是**合集**那套成员关系（[`romcat_core::collection`]），所以同一批按钮顺带
+//! 给出自建合集（「通关过的」「送朋友的」），按 `合集=某某` 筛。
+//!
+//! 领域判断一条都不在这里（ADR-0005）：落沉淀库、挑哪种锚、投影回中立库，全在核心库
+//! 那个模块里。这一层只把「勾中的那一批」交过去，再把它交回来的那本账原样印出来
+//! ——**其中几个只钉得住本机路径、挪了位置会飘，屏上照直写**。
+//!
 //! ## 选中语义：这一屏要钉死的东西
 //!
 //! - 选中主列表的行 ＝ 选中这些**作品**，批量操作作用于它们的变体
@@ -66,12 +76,13 @@ use romcat_core::catalog::browse::{
     Facets, PlatformFilter, Scope, WorkAnchor, WorkDetail, WorkQuery, WorkVariant,
 };
 use romcat_core::catalog::{Catalog, Confidence, VariantDetail};
+use romcat_core::collection::{self, Applied, FAVORITE};
 use romcat_core::report::{capacity, human_bytes, thousands};
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::priority::VERDICT;
 use romcat_core::scrape::{AnchorKind, Field, Priorities};
 use romcat_core::site::Site;
-use romcat_core::sublibrary::{Exception, ExceptionRow, Rule, Sublibrary};
+use romcat_core::sublibrary::{Dimension, Exception, ExceptionRow, Rule, Sublibrary};
 use romcat_core::title::{Language, TitleKind};
 
 use crate::filter::Filter;
@@ -276,6 +287,16 @@ pub struct Screen {
     /// **媒体池**：查「这张图在不在」用它。池子整个不在位时是 `None`——
     /// 那时面板如实说「没查池子」，而不是报一句「一张都没有」。
     pool: Option<MediaPool>,
+    /// **合集**那个格子：往哪个合集里加、从哪个合集里拿。收藏不用它——那一组的名字
+    /// 是定死的（[`FAVORITE`]）。
+    collection: String,
+    /// 详情面板里选中那个变体**在哪几个合集里，各钉在哪种锚上**。
+    ///
+    /// 读的是**沉淀库**不是投影：投影那张表只记「在不在里面」，记不着它靠什么认出来的，
+    /// 而「挪了位置会不会飘」这句话的依据恰恰是后者。
+    standing: Vec<(String, &'static str)>,
+    /// [`Self::standing`] 是照哪个变体算的。与眼下选中的那个不一样就重算。
+    standing_for: Option<String>,
     /// 加一条叫法的草稿。
     title_draft: TitleDraft,
     /// 写下一个刮削字段值的草稿。
@@ -318,6 +339,9 @@ impl Screen {
             scoped: None,
             priorities: Priorities::builtin(),
             pool: None,
+            collection: String::new(),
+            standing: Vec::new(),
+            standing_for: None,
             title_draft: TitleDraft::default(),
             value_draft: ValueDraft::default(),
             notice: None,
@@ -844,7 +868,7 @@ impl Screen {
     ///
     /// 先同步一次窗口再画：顶栏与正文各画各的，而顶栏**先画**——不先同步，
     /// 状态栏上那个行数就永远比表格慢一帧（与队列那一屏 `status` 同一条道理）。
-    pub fn status(&mut self, ui: &mut egui::Ui, site: &Site) {
+    pub fn status(&mut self, ui: &mut egui::Ui, site: &mut Site) {
         self.sync_window(&site.catalog);
         ui.toggle_value(&mut self.sample, "字体样张");
         // **「刮削选中…」摆在抬头**，与原型同一个位置。它只摊开面板——真按下去那一下
@@ -858,6 +882,20 @@ impl Screen {
             .clicked()
         {
             self.open_scrape(&site.catalog);
+        }
+        // **「★ 收藏」也摆在抬头**，与原型同一个位置：它是这一屏按得最勤的一下
+        // （勾一批、按一下、接着筛下一批）。取消收藏与自建合集是低频的，
+        // 摆在左栏底下那块「把这批选中变成持久的东西」里，与「存成子库」做邻居。
+        if ui
+            .button("★ 收藏")
+            .on_hover_text(
+                "把勾中的那一批全放进**收藏**。落**沉淀库**、锚在**内容**上——\
+                 删掉中立库重扫、改名、挪目录都还在。**无判据**的那些只钉得住本机路径，\
+                 按完的回执里会点名说有几个。",
+            )
+            .clicked()
+        {
+            self.favorite(site);
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if let Some(error) = self.window.error() {
@@ -963,9 +1001,144 @@ impl Screen {
         }
     }
 
+    // ── 收藏与合集（票 `gui-redesign/06`） ────────────────────────────────────
+
+    /// 「**合集**」那个格子，供实测与测试填。
+    pub fn collection_draft_mut(&mut self) -> &mut String {
+        &mut self.collection
+    }
+
+    /// 详情面板里选中那个变体在哪几个合集里，各钉在哪种锚上（`内容` / `路径`）。
+    #[must_use]
+    pub fn standing(&self) -> &[(String, &'static str)] {
+        &self.standing
+    }
+
+    /// 按「**★ 收藏**」那一下：把勾中的那一批全放进[收藏](FAVORITE)。
+    ///
+    /// 界面上那颗按钮走的就是它，测试拿它当那一下。
+    pub fn favorite(&mut self, site: &mut Site) {
+        self.join(site, FAVORITE);
+    }
+
+    /// 按「**☆ 取消收藏**」那一下。
+    pub fn unfavorite(&mut self, site: &mut Site) {
+        self.part(site, FAVORITE);
+    }
+
+    /// 按「**加入合集**」那一下：格子里那个名字。
+    pub fn join_collection(&mut self, site: &mut Site) {
+        let name = self.collection.trim().to_string();
+        self.join(site, &name);
+    }
+
+    /// 按「**移出合集**」那一下。
+    pub fn leave_collection(&mut self, site: &mut Site) {
+        let name = self.collection.trim().to_string();
+        self.part(site, &name);
+    }
+
+    /// 把勾中的那一批放进一个合集。
+    ///
+    /// **一个都没勾就别动库**：与「刮削选中…」同一条规矩——摆出一份「作用于 0 个变体」
+    /// 的回执，人只会对着它猜哪儿出了问题。
+    fn join(&mut self, site: &mut Site, name: &str) {
+        let Some(keys) = self.scoped_keys(&site.catalog, "加收藏") else {
+            return;
+        };
+        match collection::add(site, name, &keys) {
+            Ok(applied) => self.settle(site, name, applied, true),
+            Err(error) => self.error = Some(format!("{error}")),
+        }
+    }
+
+    /// 把勾中的那一批从一个合集里拿出来。
+    fn part(&mut self, site: &mut Site, name: &str) {
+        let Some(keys) = self.scoped_keys(&site.catalog, "取消收藏") else {
+            return;
+        };
+        match collection::remove(site, name, &keys) {
+            Ok(applied) => self.settle(site, name, applied, false),
+            Err(error) => self.error = Some(format!("{error}")),
+        }
+    }
+
+    /// 勾中的那一批展开成的变体键；一个都没勾（或者读不动库）时给一句话并返回 `None`。
+    fn scoped_keys(&mut self, catalog: &Catalog, doing: &str) -> Option<Vec<String>> {
+        match self.batch_variants(catalog) {
+            Ok(keys) if keys.is_empty() => {
+                self.error = Some(format!(
+                    "一行都没勾。在列表里勾几行，或者按表头那个全选——\
+                     {doing}的作用范围就是勾中的那一批。"
+                ));
+                None
+            }
+            Ok(keys) => Some(keys),
+            Err(error) => {
+                self.error = Some(format!("中立库读不动：{error}"));
+                None
+            }
+        }
+    }
+
+    /// 动完之后：整屏重读一遍，再把核心库交回来的那本账**原样印出来**。
+    ///
+    /// **两种锚各说一句**（验收第 7 条）：拿不到内容判据的那些只钉得住本机的位置，
+    /// 挪了地方收藏会飘。含糊成一句「收藏了 N 个」，人就会以为每一条都稳
+    /// （ADR-0021 那条纪律在这一屏上的样子）。
+    fn settle(&mut self, site: &mut Site, name: &str, applied: Applied, joining: bool) {
+        // 合集这一维的可选值、以及 `收藏=是` 筛出来的那批都变了——整屏重读。
+        self.refresh(site);
+        self.standing_for = None;
+        let 这一下 = if joining { "放进" } else { "拿出" };
+        let mut line = format!(
+            "「{name}」{这一下} {} 个变体（真动了 {} 条）。",
+            thousands(applied.touched() as u64),
+            thousands(applied.changed as u64),
+        );
+        if joining && applied.path > 0 {
+            line.push_str(&format!(
+                "其中 {} 个只钉得住**本机的路径**——那些变体拿不到内容判据（**无判据**那一档），\
+                 改名或挪到别的目录就认不出来了；另外 {} 个钉在**内容**上，\
+                 重扫、改名、挪目录都还认得出。",
+                thousands(applied.path as u64),
+                thousands(applied.content as u64),
+            ));
+        } else if joining {
+            line.push_str("全部钉在**内容**上——重扫、改名、挪目录都还认得出。");
+        }
+        if applied.missing > 0 {
+            line.push_str(&format!(
+                "另有 {} 个键在中立库里已经不在了，跳过。",
+                thousands(applied.missing as u64),
+            ));
+        }
+        self.notice = Some(line);
+        self.error = None;
+    }
+
+    /// 选中的变体换了就重算一次它的合集落点。没换过是空操作。
+    fn sync_standing(&mut self, site: &Site) {
+        if self.standing_for.as_deref() == self.variant.as_deref() {
+            return;
+        }
+        self.standing_for = self.variant.clone();
+        self.standing = match &self.variant {
+            None => Vec::new(),
+            Some(key) => match collection::standing(site, key) {
+                Ok(rows) => rows,
+                Err(error) => {
+                    self.error = Some(format!("{error}"));
+                    Vec::new()
+                }
+            },
+        };
+    }
+
     /// 画一帧。
     pub fn ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         self.sync_window(&site.catalog);
+        self.sync_standing(site);
         if self.scrape.is_open() {
             egui::Panel::bottom("刮削面板")
                 .default_size(300.0)
@@ -1113,8 +1286,70 @@ impl Screen {
                 );
                 ui.separator();
 
+                self.collection_panel(ui, site);
+                ui.separator();
+
                 self.save_panel(ui, site);
             });
+    }
+
+    /// 「**收藏与合集**」那一块：取消收藏，以及往自建合集里加减（票 `gui-redesign/06`）。
+    ///
+    /// 它与「存成子库」做邻居**是故意的**：这两块管的是同一件事的两种落法——把屏上这一批
+    /// 变成持久的东西。一个存成规则（子库要的是集合），一个存成成员关系（收藏是人亲手
+    /// 点的，规则表达不了）。
+    ///
+    /// **加收藏那一下不在这儿，在抬头**（原型钉的位置）：它按得最勤，不该藏在左栏底下。
+    fn collection_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+        ui.strong("收藏与合集");
+        ui.weak("作用范围是**勾中的那一批**（不是筛出来的全部）。落沉淀库，删掉中立库重扫也不丢。")
+            .on_hover_text(
+                "收藏走的就是合集那套成员关系——收藏是名字定死的那一组，\
+                 自建合集是自己起名的那些。筛的时候写 `收藏=是` 或 `合集=某某`。",
+            );
+        if ui
+            .button("☆ 取消收藏")
+            .on_hover_text("把勾中的那一批从收藏里拿出来。**两种锚都拿**，星星不会点不灭。")
+            .clicked()
+        {
+            self.unfavorite(site);
+        }
+        ui.horizontal(|ui| {
+            ui.label("合集");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.collection)
+                    .desired_width(140.0)
+                    .hint_text("通关过的"),
+            );
+        });
+        let name = self.collection.trim().to_string();
+        // **名字里带着规则语言的记号就当场说清。** 建得出来而筛不出来，比建不出来更坏
+        // ——那时人只会以为收藏这件事坏了（折规则那一步的判据在核心库里，一处说了算）。
+        let 写得进规则 = !name.is_empty()
+            && romcat_core::catalog::browse::writable_value(Dimension::Collection, &name);
+        if !name.is_empty() && !写得进规则 {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                "这个名字写不进规则（带着逗号、括号、或者两侧带空白的连接词）。\
+                 加得进去，但 `合集=这个名字` 筛不出来，存成子库时也会被挡下。",
+            );
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!name.is_empty(), egui::Button::new("加入合集"))
+                .on_hover_text("没有这个合集就顺手建出来——**一个合集就是它那些成员**。")
+                .clicked()
+            {
+                self.join_collection(site);
+            }
+            if ui
+                .add_enabled(!name.is_empty(), egui::Button::new("移出合集"))
+                .on_hover_text("一条成员都不剩的合集，从筛选栏那一维里消失。")
+                .clicked()
+            {
+                self.leave_collection(site);
+            }
+        });
     }
 
     /// 「**存成子库**」：把当前筛选原样变成一条规则。
@@ -1343,6 +1578,8 @@ impl Screen {
                 }
 
                 ui.separator();
+                this.collections_ui(ui);
+                ui.separator();
                 this.files_ui(ui);
                 ui.separator();
                 this.media_ui(ui);
@@ -1404,6 +1641,40 @@ impl Screen {
             }
         });
         response.clicked()
+    }
+
+    /// 选中那个变体在哪几个合集里——**连它钉在哪种锚上一起说**。
+    ///
+    /// 这是验收第 7 条落在屏上的地方：钉在**路径**上的那些只在本机成立，改个名字、
+    /// 挪个目录就认不出来了。**不含糊成一句「在收藏里」**——那会让人以为每一条都稳
+    /// （ADR-0021 那条纪律：说得出「这一条换台机器还认不认得出」，比让人以为都认得出强）。
+    fn collections_ui(&self, ui: &mut egui::Ui) {
+        if self.variant.is_none() {
+            ui.weak("选一个变体，看它在哪几个合集里。");
+            return;
+        }
+        ui.strong(format!("收藏与合集 · {} 个", self.standing.len()));
+        if self.standing.is_empty() {
+            ui.weak("一个都没进。勾几行按抬头那颗「★ 收藏」，或者在左栏底下加进自建合集。");
+            return;
+        }
+        for (name, anchor) in &self.standing {
+            let 星 = if name == FAVORITE { "★ " } else { "" };
+            if *anchor == romcat_core::verdict::ANCHOR_CONTENT {
+                ui.label(format!("{星}{name}｜钉在内容上"))
+                    .on_hover_text("锚是这份内容本身（CRC-32 加大小）：删掉中立库重扫、改名、挪目录、换根，都还认得出。");
+            } else {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!("{星}{name}｜只钉得住本机路径，挪了位置会飘"),
+                )
+                .on_hover_text(
+                    "这个变体拿不到**内容判据**（**无判据**那一档：容器穿不透、压缩镜像、\
+                     目录树转储），所以只钉得住它眼下这个位置。改名或挪到别的目录之后，\
+                     这一条就认不出来了。与**裁决**是同一个限制。",
+                );
+            }
+        }
     }
 
     /// 详情面板第三层：选中那个变体的**全部文件**，含附属文件与内部资源。

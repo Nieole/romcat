@@ -1572,3 +1572,245 @@ fn 刮削走任务台而且裁决与手工写的元数据一个字都没动() {
         romcat_gui::scrape::UNTOUCHED,
     );
 }
+
+// ── 收藏与合集（票 `gui-redesign/06`） ────────────────────────────────────────
+
+/// 一条规则在这份库里筛出哪几个变体。屏上那颗星与筛选器说的是不是同一批，靠它比。
+fn 按规则数(app: &mut App, text: &str) -> Vec<String> {
+    按规则与状态数(app, text, None)
+}
+
+/// 同上，再叠一档**识别状态**。
+///
+/// 状态**进不了规则**（`Unruly::State`：那是这一趟的进度不是内容），所以它只能这么叠——
+/// 拿它挑「无判据」那一档的样本，验的正是「拿不到内容判据的收藏只钉得住路径」。
+fn 按规则与状态数(app: &mut App, text: &str, state: Option<StateFilter>) -> Vec<String> {
+    use romcat_core::catalog::browse::{MAX_PAGE, VariantQuery};
+    use romcat_core::sublibrary::Rule;
+    let rule = Rule::parse(text).expect("规则读得懂");
+    let (_, site) = app.library_and_site();
+    site.catalog
+        .variant_page(
+            &VariantQuery {
+                rule: Some(rule),
+                state,
+                ..VariantQuery::default()
+            },
+            0,
+            MAX_PAGE,
+        )
+        .expect("取得出一页")
+        .into_iter()
+        .map(|row| row.key)
+        .collect()
+}
+
+#[test]
+fn 多选之后按一下星_那一批当场收藏而且收藏是筛得出来的() {
+    // 票 `gui-redesign/06` 验收第 1、2 条的界面这一半：**勾几行、按一下、当场生效**，
+    // 而且 `收藏=是` 筛出来的与星标的那批一模一样。
+    //
+    // **作用范围一律走票 03 那条口径**（`batch_variants`）：屏上写几个、按下去动几个。
+    let ctx = headless::context();
+    let mut app = 界面(4_000);
+    跑(&ctx, &mut app, 2);
+    let 头几行: Vec<WorkAnchor> = {
+        let (library, site) = app.library_and_site();
+        site.catalog
+            .work_page(library.query(), 0, 3)
+            .expect("取得出一页")
+            .into_iter()
+            .map(|row| row.anchor)
+            .collect()
+    };
+    for anchor in &头几行 {
+        app.library_and_site().0.picked_mut().toggle(anchor);
+    }
+    跑(&ctx, &mut app, 1);
+    let 作用范围 = {
+        let (library, site) = app.library_and_site();
+        library.batch_variants(&site.catalog).expect("展开得了")
+    };
+    assert!(作用范围.len() > 1, "这一条要测的正是「一下子收藏一批」");
+
+    {
+        let (library, site) = app.library_and_site();
+        library.favorite(site);
+    }
+    跑(&ctx, &mut app, 2);
+    let mut 星标 = 按规则数(&mut app, "收藏=是");
+    let mut 期望 = 作用范围.clone();
+    星标.sort();
+    期望.sort();
+    assert_eq!(星标, 期望, "`收藏=是` 筛出来的与按下去动的不是同一批");
+    // **收藏就是那个名字定死的合集**：同一批东西，两条规则。
+    let mut 按合集 = 按规则数(&mut app, "合集=收藏");
+    按合集.sort();
+    assert_eq!(按合集, 期望);
+    // 筛选栏那一维上真的多了一档——「合集 0 个」那句话（挂账 D74）从此不成立。
+    assert!(
+        app.library()
+            .facets()
+            .collections
+            .iter()
+            .any(|facet| facet.value == "收藏" && facet.count > 0),
+        "收藏没出现在筛选栏的合集那一维里",
+    );
+
+    // 回执里**两种锚各说一句**（验收第 7 条）：合成数据里「无判据」那一档拿不到内容判据。
+    let 回执 = app.library().notice().expect("按完该有一句回执").to_string();
+    assert!(回执.contains("收藏"), "{回执}");
+    assert!(
+        回执.contains("本机的路径") || 回执.contains("全部钉在**内容**上"),
+        "回执里没说清锚钉在哪：{回执}",
+    );
+
+    // 取消：同一批一起拿出来，`收藏=是` 当场空掉。
+    {
+        let (library, site) = app.library_and_site();
+        library.unfavorite(site);
+    }
+    跑(&ctx, &mut app, 2);
+    assert!(按规则数(&mut app, "收藏=是").is_empty(), "取消收藏没生效");
+}
+
+#[test]
+fn 自建合集建得出来而且按合集筛得出来() {
+    // 验收第 3 条，也是挂账 D74 的正题：**合集从此有建的办法**。
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    跑(&ctx, &mut app, 2);
+    let 一行 = {
+        let (library, site) = app.library_and_site();
+        site.catalog
+            .work_page(library.query(), 0, 1)
+            .expect("取得出一页")
+            .into_iter()
+            .map(|row| row.anchor)
+            .next()
+            .expect("有一行")
+    };
+    app.library_and_site().0.picked_mut().toggle(&一行);
+    跑(&ctx, &mut app, 1);
+    let 作用范围 = {
+        let (library, site) = app.library_and_site();
+        library.batch_variants(&site.catalog).expect("展开得了")
+    };
+
+    {
+        let (library, site) = app.library_and_site();
+        "送朋友的".clone_into(library.collection_draft_mut());
+        library.join_collection(site);
+    }
+    跑(&ctx, &mut app, 2);
+    let mut 选出来 = 按规则数(&mut app, "合集=送朋友的");
+    let mut 期望 = 作用范围.clone();
+    选出来.sort();
+    期望.sort();
+    assert_eq!(选出来, 期望);
+
+    // 移出之后**这个合集从筛选栏那一维里消失**：一件东西都选不出来的合集不该摆在那儿。
+    {
+        let (library, site) = app.library_and_site();
+        library.leave_collection(site);
+    }
+    跑(&ctx, &mut app, 2);
+    assert!(按规则数(&mut app, "合集=送朋友的").is_empty());
+    assert!(
+        !app.library()
+            .facets()
+            .collections
+            .iter()
+            .any(|facet| facet.value == "送朋友的"),
+        "空掉的合集还留在筛选栏那一维里",
+    );
+}
+
+#[test]
+fn 拿不到内容锚的那些在详情面板上被标出来() {
+    // 验收第 7 条的界面这一半。**无判据**那一档拿不到内容判据，收藏只钉得住本机路径
+    // ——挪了位置会飘。屏上必须说出这句话，而不是含糊成「在收藏里」。
+    let ctx = headless::context();
+    let mut app = 界面(4_000);
+    跑(&ctx, &mut app, 2);
+    app.library_and_site().0.picked_mut().select_all();
+    跑(&ctx, &mut app, 1);
+    {
+        let (library, site) = app.library_and_site();
+        library.favorite(site);
+    }
+    跑(&ctx, &mut app, 2);
+
+    // 全库都收藏了，于是**两种锚都找得到样本**。
+    let 无判据 = 按规则与状态数(
+        &mut app,
+        "收藏=是",
+        Some(StateFilter::Concluded(State::NoEvidence)),
+    );
+    assert!(!无判据.is_empty(), "合成数据里该有一批无判据的");
+    // 摸一个变体，看屏上那块「收藏与合集」写着什么。**这一份读的是沉淀库**
+    // ——投影那张表只记「在不在里面」，记不着它靠什么认出来的。
+    let 摸一个 = |app: &mut App, key: &str| -> Vec<(String, &'static str)> {
+        {
+            let (library, site) = app.library_and_site();
+            library.pick(&site.catalog, key);
+        }
+        跑(&ctx, app, 1);
+        app.library().standing().to_vec()
+    };
+    let 收藏落在 = |落点: &[(String, &'static str)]| -> &'static str {
+        落点
+            .iter()
+            .find(|(name, _)| name == "收藏")
+            .map(|(_, anchor)| *anchor)
+            .expect("这一个该在收藏里")
+    };
+    // 先挑一个**无判据**的：它只钉得住路径。
+    let 那一个 = 无判据[0].clone();
+    assert_eq!(
+        收藏落在(&摸一个(&mut app, &那一个)),
+        romcat_core::verdict::ANCHOR_PATH,
+        "无判据的那一个该如实标成「只钉得住本机路径」",
+    );
+
+    // 再挑一个拿得到判据的：它钉在内容上。
+    let 有判据 = 按规则与状态数(
+        &mut app,
+        "收藏=是",
+        Some(StateFilter::Concluded(State::Matched)),
+    );
+    assert!(!有判据.is_empty());
+    assert_eq!(
+        收藏落在(&摸一个(&mut app, &有判据[0])),
+        romcat_core::verdict::ANCHOR_CONTENT,
+        "拿得到判据的那一个该钉在内容上",
+    );
+
+    // **左栏说它在哪个合集里，右栏就得说得出同一句。** 合成数据那几个合集也是从沉淀库
+    // 投影出来的（`demo::site` 走的就是真正那条路），不然筛选栏上算它在「我通关过的」里、
+    // 详情面板上却写「一个都没进」——而这一屏正是这一票要给人看的东西。
+    let 通关过的 = 按规则数(&mut app, "合集=我通关过的");
+    assert!(!通关过的.is_empty(), "合成数据里该有这个合集");
+    let 落点 = 摸一个(&mut app, &通关过的[0]);
+    assert!(
+        落点.iter().any(|(name, _)| name == "我通关过的"),
+        "左栏算它在「我通关过的」里，右栏却没写：{落点:?}",
+    );
+}
+
+#[test]
+fn 一行都没勾就按星_说清而不是静静什么都不做() {
+    // 与「刮削选中…」同一条规矩：摆出一份「作用于 0 个变体」的回执，
+    // 人只会对着它猜哪儿出了问题。
+    let ctx = headless::context();
+    let mut app = 界面(500);
+    跑(&ctx, &mut app, 2);
+    {
+        let (library, site) = app.library_and_site();
+        library.favorite(site);
+    }
+    跑(&ctx, &mut app, 1);
+    let 话 = app.library().error().expect("该说一句").to_string();
+    assert!(话.contains("一行都没勾"), "{话}");
+    assert!(按规则数(&mut app, "收藏=是").is_empty(), "什么都不该动");
+}

@@ -8,8 +8,11 @@
 //! 名字里**故意混进中日文、繁体、假名与符号**。表格里画的字若全是 ASCII，
 //! 字体那条验收就等于没测——豆腐块只会在真的要画汉字时才出现。
 
+use std::collections::BTreeMap;
+
 use romcat_core::catalog::identify::{ContentHash, Identification};
 use romcat_core::catalog::{Candidate, Catalog, CatalogError, Confidence, State};
+use romcat_core::collection;
 use romcat_core::dat::Convention;
 use romcat_core::platform::Manifest;
 use romcat_core::shape::{Role, SINGLE_FILE_RULE, SPLIT_VOLUME_RULE, Variant};
@@ -565,7 +568,29 @@ pub fn workspace() -> std::path::PathBuf {
 /// 建库失败时返回错误。
 pub fn site(catalog: Catalog) -> Result<Site, String> {
     let store = Store::in_memory().map_err(|error| format!("开不出沉淀库：{error}"))?;
-    Ok(Site::in_memory(catalog, store, LIBRARY))
+    let mut site = Site::in_memory(catalog, store, LIBRARY);
+    // **合集要落进沉淀库，不能只摆在中立库的投影上**（票 `gui-redesign/06`）。
+    // 造数据那一步（[`library`]）图省事直接写了投影——那样筛选栏那一维有得选，
+    // 可详情面板上那块「收藏与合集」是**现问沉淀库**的，于是同一个变体在左栏算它
+    // 在「我通关过的」里、右栏却写「一个都没进」。**这一屏正是这一票要给人看的东西。**
+    //
+    // 所以在这儿把那份投影原样过一遍真正那条路（`collection::add`）：锚怎么挑、
+    // 投影怎么写，全部与真库上按下那颗星时一模一样。
+    let 摆好的 = site
+        .catalog
+        .collection_memberships()
+        .map_err(|error| format!("读不出合成数据里的合集：{error}"))?;
+    let mut by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (key, names) in 摆好的 {
+        for name in names {
+            by_name.entry(name).or_default().push(key.clone());
+        }
+    }
+    for (name, keys) in by_name {
+        collection::add(&mut site, &name, &keys)
+            .map_err(|error| format!("合成数据里的合集落不进沉淀库：{error}"))?;
+    }
+    Ok(site)
 }
 
 // ── 库浏览与子库那两屏的合成数据 ────────────────────────────────────────────
@@ -769,6 +794,32 @@ pub fn library(rows: u64) -> Result<Catalog, CatalogError> {
         });
     }
     catalog.write_identifications(&records)?;
+
+    // 二点五、**内容判据**。收藏与裁决的锚都从这儿来（票 `gui-redesign/06`）：
+    //     拿得到判据的钉在**内容**上（改名、挪目录、重扫都认得出），拿不到的只钉得住
+    //     本机的**路径**。**无判据那一档故意不给**——那正是它落进那一档的原因，
+    //     而界面上那句「挪了位置会飘」若没有这批数据就一次都画不出来。
+    let mut hashes = Vec::new();
+    for i in 0..rows {
+        if State::ALL[(i as usize / 5) % State::ALL.len()] == State::NoEvidence {
+            continue;
+        }
+        hashes.push(romcat_core::catalog::identify::ContentHash {
+            key: key_of(i),
+            inner: String::new(),
+            size: 1 + i % 4_000_000,
+            #[allow(clippy::cast_possible_truncation)]
+            crc32: i.wrapping_mul(2_654_435_761) as u32,
+            looked: true,
+            header: None,
+            bare_size: None,
+            bare_crc32: None,
+            nkit: None,
+            sha1: None,
+            bare_sha1: None,
+        });
+    }
+    catalog.put_content_hashes(&hashes)?;
 
     // 三、合集。
     for (name, every) in COLLECTIONS {

@@ -1079,6 +1079,17 @@ impl Unruly {
     }
 }
 
+/// 这个值写进规则之后**读回来还是它自己**吗。
+///
+/// **建合集之前问的就是它**（票 `gui-redesign/06`）：合集名是用户自己起的，
+/// 「送朋友的 或 备份」「口袋(日版」都合法，可 `合集=某某` 得筛得出来。
+/// 与 [`facet_clause`] 同一条判据、同一个函数——两处各写一遍的话，
+/// 界面上说得通的名字会在「存成子库」那一步被挡下，而那时人已经建了一百个成员了。
+#[must_use]
+pub fn writable_value(dimension: Dimension, value: &str) -> bool {
+    facet_clause(dimension, value).is_ok()
+}
+
 /// 把左栏一个一按就有的维度折成子句。
 fn facet_clause(dimension: Dimension, value: &str) -> Result<Node, Unruly> {
     if value.contains(',') {

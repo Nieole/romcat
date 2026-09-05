@@ -37,6 +37,7 @@
 
 use rusqlite::ToSql;
 
+use crate::collection::FAVORITE;
 use crate::scrape::{AnchorKind, Field};
 use crate::sublibrary::{Bound, Clause, Dimension, Group, Join, Node, Op, RATING_FIELD, Rule};
 
@@ -210,24 +211,41 @@ fn language_any(clause: &Clause) -> Predicate {
     )
 }
 
-/// **收藏眼下一条都没有。**
+/// **收藏是个是非题**，所以这一维只有两个可能的值：收藏了就是 `是`，没收藏就是 `否`。
 ///
-/// 记收藏的那条路（沉淀库里的成员关系）是票 `gui-redesign/06` 的活，中立库里还没有
-/// 那张表。于是每个变体在这一维上的值都是 `否`，而「有没有一个值让这个比较成立」
-/// 这时**当场算得出来**，不必去问库——省下的不是那点开销，是一句写不出来的 SQL。
+/// 于是「这一维上有没有一个值让这个比较成立」拆成两问——`是` 成立吗、`否` 成立吗——
+/// 两个答案定下四种局面里的哪一种：两个都成立就是全库、都不成立就是空集，
+/// 只有其中一个成立时才真去问库。**这与 `sublibrary::VariantFacts::any_text` 那句
+/// `hit(if self.favorite { "是" } else { "否" })` 是同一个骨架**，两处必须同一个答案。
 ///
-/// 票 06 落地时这里换成一条 `EXISTS (SELECT 1 FROM …)`，规则语言与界面一个字都不用改。
+/// 问库问的是**投影**：收藏落在沉淀库里（`collection::FAVORITE`），中立库里
+/// `collection` / `collection_variant` 那两张表是它的投影，识别跑完照沉淀库重建
+/// （`collection::project`）。这一层跑在中立库自己的连接上，够不着另一个文件。
 fn favorite_any(clause: &Clause) -> Predicate {
     let Bound::Text(values) = &clause.bound else {
         return ("0".to_string(), Vec::new());
     };
-    let hit = values.iter().any(|value| match clause.op {
-        Op::Contains => "否".contains(value.as_str()),
-        Op::StartsWith => "否".starts_with(value.as_str()),
-        Op::EndsWith => "否".ends_with(value.as_str()),
-        _ => value == "否",
-    });
-    (if hit { "1" } else { "0" }.to_string(), Vec::new())
+    let hit = |candidate: &str| {
+        values.iter().any(|value| match clause.op {
+            Op::Contains => candidate.contains(value.as_str()),
+            Op::StartsWith => candidate.starts_with(value.as_str()),
+            Op::EndsWith => candidate.ends_with(value.as_str()),
+            _ => value == candidate,
+        })
+    };
+    // 收藏了的那些：投影里有一条名字是「收藏」的成员关系。
+    let joined = "EXISTS (SELECT 1 FROM collection_variant cv
+                          JOIN collection c ON c.id = cv.collection_id
+                          WHERE cv.variant_key = variant.key AND c.name = ?)";
+    match (hit("是"), hit("否")) {
+        (true, true) => ("1".to_string(), Vec::new()),
+        (true, false) => (joined.to_string(), vec![Box::new(FAVORITE.to_string()) as _]),
+        (false, true) => (
+            format!("(NOT {joined})"),
+            vec![Box::new(FAVORITE.to_string()) as _],
+        ),
+        (false, false) => ("0".to_string(), Vec::new()),
+    }
 }
 
 /// 一列数上的比较。

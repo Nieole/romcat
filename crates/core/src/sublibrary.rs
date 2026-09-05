@@ -214,12 +214,11 @@ pub struct VariantFacts {
     pub descriptions: Vec<String>,
     /// 在不在**收藏**里。
     ///
-    /// **眼下永远是 `false`**：记收藏的那条路（沉淀库里的成员关系）是票
-    /// `gui-redesign/06` 的活，中立库里还没有那张表。维度先立起来——规则认得出
-    /// `收藏=是`、也算得动它，等票 06 把值填进来，一条规则都不用改。
-    ///
-    /// 这条缝故意留在**事实**这一层而不是求值那一层：[`select`] 是纯函数，
-    /// 它只看事实；把收藏接上来是 [`facts`] 多读一张表的事。
+    /// **收藏就是名字定死的那个合集**（[`collection::FAVORITE`](crate::collection::FAVORITE)）：
+    /// 这个布尔与 [`Self::collections`] 里有没有那个名字**永远是同一件事**，
+    /// [`facts`] 从同一份成员关系里折出这两样。它单独立一个字段而不是让人自己去
+    /// `collections` 里找，是因为规则语言把它立成了独立的一维（`收藏=是`），
+    /// 而那一维在 SQL 那一侧也是单独一条谓词。
     pub favorite: bool,
 }
 
@@ -728,6 +727,7 @@ pub fn facts(catalog: &Catalog) -> Result<Vec<VariantFacts>, CatalogError> {
             .and_then(|release| release.languages.as_deref())
             .map(crate::catalog::ReleaseRow::language_codes)
             .unwrap_or_default();
+        let joined = collections.get(&variant.key).cloned().unwrap_or_default();
         let mut row = VariantFacts {
             platform: variant.platform,
             bytes: variant.bytes,
@@ -736,7 +736,10 @@ pub fn facts(catalog: &Catalog) -> Result<Vec<VariantFacts>, CatalogError> {
                 .get(&variant.key)
                 .map(|marks| marks.iter().map(|mark| (*mark).to_string()).collect())
                 .unwrap_or_default(),
-            collections: collections.get(&variant.key).cloned().unwrap_or_default(),
+            // **收藏就是那个名字定死的合集**：两样从同一份成员关系里折出来，
+            // 不给它们留下各说各的余地（`catalog::filter` 那一侧也是同一条判据）。
+            favorite: joined.iter().any(|name| name == crate::collection::FAVORITE),
+            collections: joined,
             ..VariantFacts::default()
         };
         for values in [
