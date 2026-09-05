@@ -403,6 +403,10 @@ pub fn missing_roots_message(missing: &[String]) -> String {
 /// 它在核心里而不在命令行里，是因为**界面也有一个「同步」按钮**——这道红线不能靠
 /// 每个壳自己记得写一遍。
 ///
+/// **判据先把两边折成可比形态**（[`path::is_inside_place`]）：目标过了
+/// [`path::normalize_existing`]，Windows 上于是是 `\\?\D:\…`，而库里的根存的是
+/// display 形态 `D:\…`——不折的话这道红线恒为 false，等于没有。
+///
 /// # Errors
 /// 目标落在主库里、或者中立库读不动时返回一句给人看的话。
 pub fn refuse_target_in_library(
@@ -414,7 +418,7 @@ pub fn refuse_target_in_library(
     let target = path::normalize_existing(target);
     // **每个根都要拦。** 一份中立库装着几块盘，只拦其中一块等于另外几块没人守。
     for (name, root) in roots.iter() {
-        if path::is_inside(root, &target) {
+        if path::is_inside_place(root, &target) {
             return Err(format!(
                 "目标 {} 落在主库的根「{name}」（{}）里。**主库只读**（ADR-0004）：\n\
                  同步会往目标上写文件、删文件，绝不能指着那块盘。\n\

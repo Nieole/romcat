@@ -446,6 +446,153 @@ pub fn is_inside(outer: &Path, inner: &Path) -> bool {
     inner.starts_with(outer)
 }
 
+/// 一条路径的**可比形态**：纯字符串层的折叠，**不碰磁盘**。
+///
+/// # 这一层为什么非有不可
+///
+/// Windows 上 `std::fs::canonicalize` 交出来的是 `\\?\D:\…` 扩展长度形式（标准库的
+/// 文档行为，[`LibraryFs::canonicalize`](crate::fs::LibraryFs::canonicalize) 的注释也
+/// 这么说），[`normalize_existing`] 因此也交出这一形式；而 `library_root.path` 存的是
+/// [`display`] 剥掉前缀之后的 `D:\…`——**存的那一份是给人看的**，报告与 `Slug` 都吃它，
+/// 不能为了好比就改存法（改了已有库全部对不上）。
+///
+/// 两种写法直接拿去比就出事：`Path` 的 `==` 与 `starts_with` 按**分量**比，而
+/// `Prefix::VerbatimDisk('D')` 与 `Prefix::Disk('D')` 不是同一个分量，于是**恒为
+/// false**——套叠的根静默放行（同一批文件数两遍）、从路径折不回键（导入的前端元数据
+/// 一条都对不上变体）、连「目标不许落在主库里」那道 ADR-0004 的红线都拦不住。
+/// 把两边折到同一形态，是这一层唯一的职责。
+///
+/// # 折成什么
+///
+/// 只对**Windows 形状**的路径动手（盘符绝对路径、UNC）；其余原样返回——Unix 路径里的
+/// `/` 一个都不许被换成 `\`。认形状的规则与 [`windows_verbatim`] 同源：
+///
+/// - 剥掉 `\\?\` 前缀（`\\?\UNC\srv\share` 还原成 `\\srv\share`），走
+///   [`strip_windows_verbatim`]。
+/// - 分隔符统一成 `\`；连续的分隔符与结尾那一个都去掉，`D:\` 这种根保留它那一杠。
+/// - **盘符归一大写，其余分量一个字母都不动。** Windows 的路径分量确实大小写不敏感，
+///   但同一份代码也跑在大小写敏感的 macOS 上（ADR-0018）：把分量折成小写，两个真的
+///   不同的目录会被认成同一个根，而那是比漏判更坏的一种错。盘符则不同——它是一个
+///   ASCII 字母，没有用户选的大小写可言，`canonicalize` 自己交出的也是大写那一个。
+///   **盘在位时这一下其实用不上**（两边都是 `canonicalize` 的产物，大小写本来就一样），
+///   它治的是**盘不在位**那一种：`D:\` 自己都不存在时 [`normalize_existing`] 只能把
+///   用户敲进来的 `d:\x` 原样交回来。
+///
+/// 折叠只认写法，不认磁盘：符号链接、`..`、大小写以外的等价都不归它管，那是
+/// [`normalize_existing`] 的活，**两件事要按顺序各做一遍**。
+#[must_use]
+pub fn comparable_text(text: &str) -> Cow<'_, str> {
+    match strip_windows_verbatim(text) {
+        Some(bare) => Cow::Owned(fold_windows_shape(&bare).unwrap_or(bare)),
+        None => match fold_windows_shape(text) {
+            Some(folded) => Cow::Owned(folded),
+            None => Cow::Borrowed(text),
+        },
+    }
+}
+
+/// 一条路径的**可比形态**，见 [`comparable_text`]。
+///
+/// 非 UTF-8 的路径原样返回：Windows 上非 UTF-8 的路径极少，而原样返回至少不会把路径
+/// 改坏（[`long_path`] 是同一个取舍）。
+///
+/// **给 `strip_prefix` 这类还要按分量走的地方用**（`Roots::key_of` 从路径折回键就是）；
+/// 单纯要判断两条路径是不是同一个地方、套不套得住，走 [`is_same_place`] 与
+/// [`is_inside_place`]——它们的主判断在字符串层，各平台都算得出同一个答案。
+#[must_use]
+pub fn comparable(path: &Path) -> Cow<'_, Path> {
+    match path.to_str().map(comparable_text) {
+        Some(Cow::Owned(folded)) => Cow::Owned(PathBuf::from(folded)),
+        _ => Cow::Borrowed(path),
+    }
+}
+
+/// 两条路径指的是不是**同一个地方**：先折成[可比形态](comparable_text)再比。
+///
+/// 加根与改指要拿它与库里已有的根比——库里存的是 display 形态，手上这条可能是
+/// `canonicalize` 交出来的 `\\?\` 形态，直接 `==` 恒为 false。
+#[must_use]
+pub fn is_same_place(a: &Path, b: &Path) -> bool {
+    let (Some(left), Some(right)) = (a.to_str(), b.to_str()) else {
+        return a == b;
+    };
+    let left = comparable_text(left);
+    let right = comparable_text(right);
+    if windows_shaped(&left) || windows_shaped(&right) {
+        // Windows 形状的路径在**字符串层**按段比：这样不依赖 `Path` 的分量拆法，
+        // 主判断在 macOS 上也算得出同一个答案，测得到。
+        return left == right;
+    }
+    Path::new(left.as_ref()) == Path::new(right.as_ref())
+}
+
+/// `inner` 是否落在 `outer` 之内（含相等）：先折成[可比形态](comparable_text)再比。
+///
+/// [`is_inside`] 的带前缀归一版本。守只读边界（ADR-0004）、拦套叠的根、从路径折回键，
+/// 三处都走它——两边形态不一定同源，而 `Path` 的 `starts_with` 按分量比，
+/// `\\?\D:\Game` 圈不住 `D:\Game\FC`。
+#[must_use]
+pub fn is_inside_place(outer: &Path, inner: &Path) -> bool {
+    let (Some(outer_text), Some(inner_text)) = (outer.to_str(), inner.to_str()) else {
+        return is_inside(outer, inner);
+    };
+    let outer_text = comparable_text(outer_text);
+    let inner_text = comparable_text(inner_text);
+    if windows_shaped(&outer_text) || windows_shaped(&inner_text) {
+        return inside_windows_text(&outer_text, &inner_text);
+    }
+    is_inside(Path::new(outer_text.as_ref()), Path::new(inner_text.as_ref()))
+}
+
+/// 两条**折好的** Windows 形状路径之间的包含关系，按段比而不是按字符前缀比：
+/// `D:\Game` 圈不住 `D:\GameOther`。
+fn inside_windows_text(outer: &str, inner: &str) -> bool {
+    let Some(rest) = inner.strip_prefix(outer) else {
+        return false;
+    };
+    // `outer` 是 `D:\` 这样的根时它自己就以分隔符收尾，余下那一段不会再带一个。
+    rest.is_empty() || rest.starts_with('\\') || outer.ends_with('\\')
+}
+
+/// 这条文本是不是一条 **Windows 形状**的路径：`D:` 打头的盘符绝对路径，或者 `\\` /
+/// `//` 打头的 UNC。规则与 [`windows_verbatim`] 认的那一套一致。
+fn windows_shaped(text: &str) -> bool {
+    if let Some(rest) = text.strip_prefix(r"\\").or_else(|| text.strip_prefix("//")) {
+        return !rest.is_empty();
+    }
+    let bytes = text.as_bytes();
+    bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes.len() == 2 || bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
+/// 把一条 Windows 形状的路径折成可比形态；不是那个形状时返回 `None`（原样留着）。
+fn fold_windows_shape(text: &str) -> Option<String> {
+    if !windows_shaped(text) {
+        return None;
+    }
+    let mut folded = String::with_capacity(text.len() + 1);
+    let rest = if let Some(rest) = text.strip_prefix(r"\\").or_else(|| text.strip_prefix("//")) {
+        folded.push_str(r"\\");
+        rest
+    } else {
+        let bytes = text.as_bytes();
+        folded.push(char::from(bytes[0].to_ascii_uppercase()));
+        folded.push_str(":\\");
+        &text[2..]
+    };
+    let mut first = true;
+    for segment in rest.split(['\\', '/']).filter(|part| !part.is_empty()) {
+        if !first {
+            folded.push('\\');
+        }
+        folded.push_str(segment);
+        first = false;
+    }
+    Some(folded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -711,5 +858,126 @@ mod tests {
             Path::new("/lib"),
             Path::new("/home/me/.romcat/checkpoint.json")
         ));
+    }
+
+    #[test]
+    fn 可比形态对每一种写法都给出确定的一串() {
+        // 表里每一行左边是路上真会出现的写法，右边是折完那一串。前几行两两成对：
+        // `canonicalize` 交的与库里存的、界面上敲的与盘不在位时原样留下的。
+        let 表 = [
+            (r"\\?\D:\Game", r"D:\Game"),
+            (r"D:\Game", r"D:\Game"),
+            ("D:/Game", r"D:\Game"),
+            (r"d:\game\", r"D:\game"),
+            (r"\\?\D:\", r"D:\"),
+            (r"D:\", r"D:\"),
+            (r"D:\Game\\FC", r"D:\Game\FC"),
+            (r"\\?\UNC\srv\share\x", r"\\srv\share\x"),
+            (r"\\srv\share\x", r"\\srv\share\x"),
+            ("//srv/share/x", r"\\srv\share\x"),
+            // Unix 路径原样：`/` 一个都不许被换成 `\`。
+            ("/盘/Game", "/盘/Game"),
+            ("/盘/Game/", "/盘/Game/"),
+        ];
+        for (写法, 折完) in 表 {
+            assert_eq!(comparable_text(写法), 折完, "折 {写法}");
+        }
+    }
+
+    #[test]
+    fn 扩展长度形式与去前缀形式是同一个地方() {
+        // 这一对正是病根：`canonicalize` 交出左边，`library_root.path` 存的是右边。
+        assert!(is_same_place(
+            Path::new(r"\\?\D:\Game"),
+            Path::new(r"D:\Game")
+        ));
+        assert!(is_same_place(Path::new(r"D:\Game\"), Path::new("D:/Game")));
+    }
+
+    #[test]
+    fn 盘不在位时盘符大小写不同也是同一个地方() {
+        // 盘在位时两边都是 `canonicalize` 的产物，大小写本来就一样；不在位时
+        // `normalize_existing` 把用户敲的那一串原样交回来，于是有了 `d:` 与 `D:`。
+        assert!(is_same_place(
+            Path::new(r"d:\Game"),
+            Path::new(r"\\?\D:\Game")
+        ));
+        assert!(is_inside_place(
+            Path::new(r"d:\Game"),
+            Path::new(r"\\?\D:\Game\FC\魂斗罗.zip")
+        ));
+    }
+
+    #[test]
+    fn 路径分量的大小写不同不算同一个地方() {
+        // 保守：只归一盘符。Windows 上分量大小写不敏感，但同一份代码也跑在大小写敏感的
+        // macOS 上（ADR-0018），把分量折平会让两个真的不同的目录被认成同一个根。
+        assert!(!is_same_place(Path::new(r"D:\Game"), Path::new(r"D:\game")));
+    }
+
+    #[test]
+    fn 扩展长度形式的根圈得住去前缀形式的子路径() {
+        assert!(is_inside_place(
+            Path::new(r"\\?\D:\Game"),
+            Path::new(r"D:\Game\FC\魂斗罗.zip")
+        ));
+        assert!(is_inside_place(
+            Path::new(r"D:\Game"),
+            Path::new(r"\\?\D:\Game")
+        ));
+        // 盘的根圈得住盘上的一切。
+        assert!(is_inside_place(Path::new(r"D:\"), Path::new(r"\\?\D:\Game")));
+    }
+
+    #[test]
+    fn 前缀撞上一半的两个根不算套在一起() {
+        // 按段比而不是按字符前缀比，否则 `D:\Game` 会把 `D:\GameOther` 圈进去。
+        assert!(!is_inside_place(
+            Path::new(r"D:\Game"),
+            Path::new(r"\\?\D:\GameOther\FC")
+        ));
+        assert!(!is_same_place(Path::new(r"D:\Game"), Path::new(r"E:\Game")));
+    }
+
+    #[test]
+    fn 网络路径的两种写法是同一个地方() {
+        assert!(is_same_place(
+            Path::new(r"\\?\UNC\srv\share\x"),
+            Path::new("//srv/share/x")
+        ));
+        assert!(is_inside_place(
+            Path::new(r"\\?\UNC\srv\share"),
+            Path::new(r"\\srv\share\x\y")
+        ));
+        assert!(!is_inside_place(
+            Path::new(r"\\srv\share"),
+            Path::new(r"\\srv\shareother\x")
+        ));
+    }
+
+    #[test]
+    fn 前缀归一不动_unix_路径() {
+        assert!(is_same_place(Path::new("/盘/Game"), Path::new("/盘/Game/")));
+        assert!(is_inside_place(
+            Path::new("/lib"),
+            Path::new("/lib/.romcat/checkpoint.json")
+        ));
+        assert!(!is_inside_place(
+            Path::new("/lib"),
+            Path::new("/library/checkpoint.json")
+        ));
+        // 文件名里的字面 `\` 在 Unix 上不是分隔符，折叠不许把它当分隔符使。
+        assert_eq!(comparable_text(r"/盘/a\b"), r"/盘/a\b");
+    }
+
+    /// 折齐之后 `strip_prefix` 才切得出相对根的那一段——`Roots::key_of` 从绝对路径
+    /// 折回键靠的就是这一步。**只在 Windows 上算数**：Unix 上 `D:\Game` 是一整个分量，
+    /// `Path` 拆不出盘符前缀。本机是 macOS，这条没跑过。
+    #[cfg(windows)]
+    #[test]
+    fn 折齐之后扩展长度形式也切得出相对根的那一段() {
+        let root = comparable(Path::new(r"D:\Game"));
+        let path = comparable(Path::new(r"\\?\D:\Game\FC\魂斗罗.zip"));
+        assert_eq!(library_key("主库", &root, &path), "主库/FC/魂斗罗.zip");
     }
 }
