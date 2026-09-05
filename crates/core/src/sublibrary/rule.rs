@@ -689,7 +689,10 @@ fn parse_item(text: &str) -> Result<Node, RuleError> {
 /// **一整个**「全部满足」组，那一层留着，否则「A 与 B 不同时成立」会被悄悄改成
 /// 「A 与 B 都不成立」——两句话选出来的东西差得远。
 fn negate(inner: Group) -> Group {
-    if inner.nodes.len() == 1 || inner.join == Join::Any {
+    // **里面那层本身就是「都不满足」时一律留着。** 拍平的话 `都不(都不 A)` 会变成
+    // `都不 A`——双重否定被折成了单重否定，**意思正好相反**。留着那一层，它读作
+    // 「那个『都不满足』组不成立」，也就是「至少有一条成立」，正是双重否定该有的意思。
+    if inner.join != Join::None && (inner.nodes.len() == 1 || inner.join == Join::Any) {
         Group {
             join: Join::None,
             nodes: inner.nodes,
@@ -731,16 +734,27 @@ fn padded_at(text: &str, index: usize, ch: char) -> bool {
 fn matching(text: &str, at: usize) -> Option<usize> {
     // 每一层记着「当前这一项从哪个字节开始」，于是「项的开头」这条规则在里层也成立。
     let mut starts: Vec<usize> = vec![at + 1];
+    // **与 `split_items` 同一套数法**：值里的括号成对跳过（那个函数里有为什么）。
+    let mut in_value: Vec<u32> = vec![0];
     for (index, ch) in text.char_indices().filter(|(index, _)| *index > at) {
         match ch {
             '(' => {
                 let start = *starts.last()?;
                 if opens_group(text, start, index) {
                     starts.push(index + ch.len_utf8());
+                    in_value.push(0);
+                } else if let Some(depth) = in_value.last_mut() {
+                    *depth += 1;
+                }
+            }
+            ')' if in_value.last().is_some_and(|depth| *depth > 0) => {
+                if let Some(depth) = in_value.last_mut() {
+                    *depth -= 1;
                 }
             }
             ')' => {
                 starts.pop();
+                in_value.pop();
                 if starts.is_empty() {
                     return Some(index);
                 }
@@ -776,17 +790,32 @@ fn split_items(text: &str) -> Result<(Option<Join>, Vec<&str>), RuleError> {
     let mut join: Option<Join> = None;
     // 栈顶那一层的「当前这一项从哪个字节开始」；栈底就是这一层。
     let mut starts: Vec<usize> = vec![0];
+    // **每一层还欠着几个「值里的左括号」。** 不数这个的话，`(作品~魂斗罗 (J) 且 平台=FC)`
+    // 里 `(J)` 那个右括号会把**外层组**提前关掉：`(J)` 的左括号不在项的开头、不开组，
+    // 而右括号只看「有没有开着的组」就 pop，两边对不上。后果是整条规则切错、存成子库
+    // 之后静默变成 `BrokenRule`——而 ROM 名字带括号是常态（`魂斗罗 (J)`、`Contra (USA)`）。
+    let mut in_value: Vec<u32> = vec![0];
     for (index, ch) in text.char_indices() {
         match ch {
             '(' => {
                 let start = *starts.last().unwrap_or(&0);
                 if opens_group(text, start, index) {
                     starts.push(index + ch.len_utf8());
+                    in_value.push(0);
+                } else if let Some(depth) = in_value.last_mut() {
+                    *depth += 1;
                 }
             }
-            // 没有开着的组时，`)` 是值里的字（`作品~笑)` 那种）。
+            // 先还值里欠下的那些，再谈关组。没有开着的组时，`)` 是值里的字
+            // （`作品~笑)` 那种）。
+            ')' if in_value.last().is_some_and(|depth| *depth > 0) => {
+                if let Some(depth) = in_value.last_mut() {
+                    *depth -= 1;
+                }
+            }
             ')' if starts.len() > 1 => {
                 starts.pop();
+                in_value.pop();
             }
             AND | OR if padded_at(text, index, ch) => {
                 if starts.len() > 1 {
@@ -1051,6 +1080,56 @@ mod tests {
 
     fn 子句(rule: &Rule, at: usize) -> Clause {
         rule.clauses()[at].clone()
+    }
+
+    #[test]
+    fn 值里带括号的作品名不会把组提前关掉() {
+        // **ROM 名字带括号是常态**（`魂斗罗 (J)`、`Contra (USA)`）。早先 `(J)` 那个
+        // 右括号只看「有没有开着的组」就关组，于是外层组被提前关掉、整条规则切错，
+        // 在界面上「存成子库」之后**静默变成 `BrokenRule`**。
+        let rule = Rule::parse("(作品~魂斗罗 (J) 且 平台=FC) 或 平台=SFC").expect("读得懂");
+        assert_eq!(rule.root.join, Join::Any, "顶层是「任一满足」");
+        assert_eq!(rule.root.nodes.len(), 2, "顶层两项：那个组，加一条平台");
+        let Node::Group(inner) = &rule.root.nodes[0] else {
+            panic!("头一项该是个组：{:?}", rule.root.nodes[0]);
+        };
+        assert_eq!(inner.join, Join::All);
+        assert_eq!(inner.nodes.len(), 2, "组里两条：作品与平台");
+        // 括号原样留在值里，一个字都没少。
+        let Node::Clause(clause) = &inner.nodes[0] else {
+            panic!("组里头一条该是子句");
+        };
+        assert!(
+            format!("{clause:?}").contains("魂斗罗 (J)"),
+            "值里那对括号要原样留着：{clause:?}"
+        );
+        // 整条读回来还是它自己。
+        assert!(
+            Rule::parse(&rule.text).is_ok(),
+            "读得回来：{}",
+            rule.text
+        );
+    }
+
+    #[test]
+    fn 双重否定翻回来而不是折成单重否定() {
+        // `都不(都不 A)` 说的是 A 成立。早先「里面只有一条就拍平」把它折成了
+        // `都不 A`——**意思正好相反**，而且不报错。
+        let 单 = Rule::parse("都不(平台=FC)").expect("读得懂");
+        let 双 = Rule::parse("都不(都不(平台=FC))").expect("读得懂");
+        assert_ne!(
+            format!("{:?}", 单.root),
+            format!("{:?}", 双.root),
+            "双重否定不该与单重否定长成同一棵树"
+        );
+        // 双重否定那一层留着：读作「那个『都不满足』组不成立」。
+        assert_eq!(双.root.join, Join::None);
+        assert_eq!(双.root.nodes.len(), 1);
+        assert!(
+            matches!(&双.root.nodes[0], Node::Group(inner) if inner.join == Join::None),
+            "里面那层「都不满足」要留着：{:?}",
+            双.root.nodes[0]
+        );
     }
 
     #[test]
