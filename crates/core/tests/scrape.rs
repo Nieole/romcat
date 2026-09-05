@@ -29,7 +29,8 @@ use romcat_core::identify;
 use romcat_core::identify::fuzzy;
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::scrape::pool::MediaPool;
-use romcat_core::scrape::{self, Priorities};
+use romcat_core::scrape::priority::VERDICT;
+use romcat_core::scrape::{self, AnchorKind, Field, Priorities};
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
 
@@ -1172,6 +1173,58 @@ fn refresh_把结论重采一遍但池里的文件一个都不删() {
         "但**算过的媒体哈希还在**——重采的是结论，不是重读一遍盘"
     );
     assert_eq!(现场.catalog.pool_counts().expect("数得出").blobs, 2);
+    assert_eq!(
+        值(&现场, "作品", 作品, "年份", "TOSEC").as_deref(),
+        Some("1988")
+    );
+}
+
+#[test]
+fn refresh_把裁决写下的值原样留着() {
+    // 人在浏览屏的详情面板上按下「写下」，来源记作**裁决**（`put_verdict_value`）。
+    // 优先级表把裁决排在每个字段最前，导出真会用它；而**沉淀库里没有第二份**
+    // ——`verdict.rs` 只导出裁决与匹配两张表，中立库里这条一没就永远没了。
+    // 同一层的 `clear_titles` 早就写着「裁决定下来的一行都不碰」，这里要的是同一条纪律。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    刮削(&mut 现场);
+
+    现场
+        .catalog
+        .put_verdict_value(
+            AnchorKind::Work,
+            作品,
+            Field::Year,
+            "1987",
+            "浏览屏的详情面板上人工写的",
+        )
+        .expect("写得下");
+    现场
+        .catalog
+        .put_verdict_value(
+            AnchorKind::Variant,
+            原版变体,
+            Field::Title,
+            "魂斗罗",
+            "浏览屏的详情面板上人工写的",
+        )
+        .expect("写得下");
+
+    let 重来 = 刮削一趟(&mut 现场, true);
+
+    assert_eq!(
+        值(&现场, "作品", 作品, "年份", VERDICT).as_deref(),
+        Some("1987"),
+        "作品锚点上人写下的年份该原样在着"
+    );
+    assert_eq!(
+        值(&现场, "变体", 原版变体, "标题", VERDICT).as_deref(),
+        Some("魂斗罗"),
+        "变体锚点上人写下的标题同样"
+    );
+
+    // **只留裁决，不留别的**：采集记录照旧清空（一条都跳不过），数据源的值重采一遍。
+    assert_eq!(重来.reused_probes, 0, "--refresh 之后没有一条能跳过");
     assert_eq!(
         值(&现场, "作品", 作品, "年份", "TOSEC").as_deref(),
         Some("1988")

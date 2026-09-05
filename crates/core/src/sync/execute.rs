@@ -54,6 +54,29 @@
 //!
 //! 清单里记的戳是**写完之后 stat 目标**得到的那一个，不是主库侧那份的。于是 FAT32
 //! 那 2 秒的时间戳刻度不构成问题：下一趟读到的是同一个被截断过的值。
+//!
+//! ## 七、新增这一步，落点上**必须是空的**
+//!
+//! 计划那一侧已经把「落点被占」判掉了（[`plan`](super::plan) 的函数文档），这里还要
+//! 再确认一次——**两层都做**，因为它们各自堵的洞不一样：
+//!
+//! - 计划靠的是 [`observe`](super::observe) 交出来的那份键的集合，而那份集合**可能是
+//!   不全的**：列不开的目录（[`TargetState::unlistable_dirs`](super::TargetState)）
+//!   底下一个键都拿不到，那一枝上的落点计划根本无从判断。
+//! - 计划算完到真的 `rename` 之间隔着整趟同步的时间，卡还插在机器上。
+//!
+//! 而只做这一层也不行：ADR-0016 定死**差量预览是硬要求**，一份写着「新增」、执行时
+//! 却整批失败的预览本身就是谎。所以计划那一层负责**说真话**，这一层负责**兜住**。
+//!
+//! 判据是 [`landing`] 那一格：[`real_path`] 在大小写不敏感的目标上，拿
+//! `GB/tetris.zip` 也开得了别人那份 `GB/Tetris.zip`。挡下来记成一条
+//! [`Failure`] 而不是让整趟停住——与「单个文件写不进去不中断整趟」同一条纪律。
+//!
+//! **没有改掉 `rename` 的覆盖语义**：更新那一条要的正是「原子地换掉我们自己那一份」，
+//! 而 `rename` 在 Unix 与 Windows 上都替换，那是这条链路想要的性质。`create_new`
+//! 占位能把「查完到改名之间」那道缝也焊死，代价是崩在中间会在落点上留一个 0 字节、
+//! 名字还正正经经的文件——那比 `.romcat-part` 难认得多，而且从此挡住这个落点。
+//! 眼下这个 bug 不是竞态（是「维护者早就拷进去了」），不值得换一种新的失败方式。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Write};
@@ -338,7 +361,18 @@ fn place(
     cancel: &CancelToken,
     out: &mut Outcome,
 ) -> io::Result<(Stamp, Placement)> {
-    let target = landing(sources, &step.path);
+    let (target, taken) = landing(sources, &step.path);
+    // **最后一道防线**（模块文档七）：新增这一步的落点上不该有任何东西。
+    if taken && step.act == Act::Add {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "{} 的落点上已经有东西了（{}）：清单之外的文件一律不碰（ADR-0015）",
+                step.path,
+                crate::path::display(&target),
+            ),
+        ));
+    }
     let parent = target.parent().unwrap_or(sources.target_root).to_path_buf();
     std::fs::create_dir_all(&parent)?;
     let temp = part_path(&target);
@@ -551,7 +585,7 @@ fn on_target(sources: &Sources<'_>, key: &str) -> Option<PathBuf> {
     real_path(&crate::fs::RealFs, sources.target_root, key)
 }
 
-/// 这一份该**落在**目标上的哪条路径。
+/// 这一份该**落在**目标上的哪条路径，以及**那儿现在是不是已经有东西了**。
 ///
 /// ADR-0020 在写这一侧同样成立，而且分两半：
 ///
@@ -560,9 +594,13 @@ fn on_target(sources: &Sources<'_>, key: &str) -> Option<PathBuf> {
 ///   卡上从此变成「清单之外」——票 16 刚被这个 bug 咬过（挂账 D82）。
 /// - **还不在就用我们自己选的那个名字**（NFC 的键），但**目录要用盘上真实那个**：
 ///   上级目录若已存在且是分解形式，照键拼会在它旁边再建一个同名目录。
-fn landing(sources: &Sources<'_>, key: &str) -> PathBuf {
+///
+/// 第二格就是那道最后防线的依据：[`real_path`] 在**大小写不敏感**的目标上，
+/// 拿 `GB/tetris.zip` 也开得了别人那份 `GB/Tetris.zip`，于是它答的正是
+/// 「这条键会落到一个已经存在的文件上吗」——[`place`] 拿它挡住新增（模块文档七）。
+fn landing(sources: &Sources<'_>, key: &str) -> (PathBuf, bool) {
     if let Some(at) = on_target(sources, key) {
-        return at;
+        return (at, true);
     }
     let (dir, name) = match key.rsplit_once('/') {
         Some((dir, name)) => (Some(dir), name),
@@ -575,7 +613,7 @@ fn landing(sources: &Sources<'_>, key: &str) -> PathBuf {
                 .unwrap_or_else(|| sources.target_root.join(dir.replace('/', SEPARATOR)))
         },
     );
-    parent.join(name)
+    (parent.join(name), false)
 }
 
 /// 一条写成了的步骤在清单里长什么样。

@@ -329,13 +329,19 @@ impl Plan {
                 for surprise in rows.iter().take(SURPRISE_EXAMPLES) {
                     let _ = writeln!(
                         out,
-                        "  {}{}",
+                        "  {}{}{}",
                         if surprise.still_wanted {
                             "[还要] "
                         } else {
                             "[不要了] "
                         },
                         surprise.path,
+                        // 落点与卡上那份只差大小写时，**两条都得印**：只印一条，
+                        // 用户要么在卡上找不到那个名字，要么不知道是谁要挤进来。
+                        surprise
+                            .landing
+                            .as_ref()
+                            .map_or_else(String::new, |landing| format!("  ← 本来要落 {landing}")),
                     );
                 }
                 if rows.len() > SURPRISE_EXAMPLES {
@@ -345,6 +351,15 @@ impl Plan {
                         thousands((rows.len() - SURPRISE_EXAMPLES) as u64)
                     );
                 }
+            }
+            if self.surprises.iter().any(|s| s.landing.is_some()) {
+                let _ = writeln!(
+                    out,
+                    "带「← 本来要落」那几条是**只差大小写**（或只差 NFC/NFD）撞上的：\n\
+                     卡是 exFAT / FAT32，Windows 与 macOS 默认的 APFS 也一样，这两条路径\n\
+                     在目标上是**同一个文件**，落上去就顶掉了卡上那份。改掉两边任一个\n\
+                     名字，或者把卡上那份挪走。",
+                );
             }
             let _ = writeln!(
                 out,
@@ -735,5 +750,51 @@ mod tests {
         )
         .render_text();
         assert!(text.contains("一个文件都不用动"), "{text}");
+    }
+
+    #[test]
+    fn 落点只差大小写被占时_两条路径都印出来() {
+        // 只印卡上那个名字，用户不知道是谁要挤进来；只印落点，用户按那个名字在卡上
+        // 什么都找不到。两条都印，再加一句为什么它们是同一个文件。
+        let desired = Desired {
+            files: vec![DesiredFile {
+                path: "GB/tetris.zip".to_string(),
+                kind: FileKind::Rom,
+                bytes: 1024,
+                unreadable: false,
+                source: "库/GB/tetris.zip".to_string(),
+                source_stamp: crate::sync::Stamp {
+                    bytes: 1024,
+                    mtime_ns: Some(1),
+                },
+                variant: "库/GB/tetris.zip".to_string(),
+                convert: None,
+            }],
+            ..Desired::default()
+        };
+        let actual = TargetState {
+            files: vec![crate::sync::TargetFile {
+                path: "GB/Tetris.zip".to_string(),
+                stamp: Some(crate::sync::Stamp {
+                    bytes: 999,
+                    mtime_ns: Some(2),
+                }),
+            }],
+            unlistable_dirs: 0,
+        };
+        let text = plan(
+            &子库(),
+            &desired,
+            &Manifest::empty(),
+            &actual,
+            Options::default(),
+        )
+        .render_text();
+        assert!(text.contains("落点被占"), "{text}");
+        assert!(text.contains("GB/Tetris.zip"), "{text}");
+        assert!(text.contains("← 本来要落 GB/tetris.zip"), "{text}");
+        assert!(text.contains("只差大小写"), "{text}");
+        // 它照样算清单之外——报告不能说出「目标上没有清单之外的文件」。
+        assert!(!text.contains("目标上没有清单之外的文件"), "{text}");
     }
 }
