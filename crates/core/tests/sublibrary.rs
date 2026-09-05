@@ -12,7 +12,9 @@ use romcat_core::dat::chinese::ChineseMark;
 use romcat_core::platform::Manifest;
 use romcat_core::scrape::Field;
 use romcat_core::shape::{Role, SINGLE_FILE_RULE, Variant};
-use romcat_core::sublibrary::{self, Exception, LoadedSelection, Rule, StoredRule, Sublibrary};
+use romcat_core::sublibrary::{
+    self, Exception, Gauge, LoadedSelection, Rule, StoredRule, Sublibrary,
+};
 
 fn 变体(key: &str, platform: &str, bytes: u64) -> Variant {
     Variant {
@@ -390,4 +392,108 @@ fn 报告数得出选中多少条与多少容量_并报出超限() {
     assert!(text.contains("装不下"), "{text}");
     assert!(text.contains("不会自动截断"), "{text}");
     assert!(text.contains("库/PSV/大作.vpk"), "{text}");
+}
+
+#[test]
+fn 换掉规则时读不懂的那几条原样留着() {
+    // 「**改选择**」那条回程走的是 `replace_rules`（票 `gui-redesign/11`）：筛选器折出来
+    // 的是**一条**，所以是换而不是加——加的话旧那几条还在，子库选出来的就比屏上多。
+    let mut catalog = 现场();
+    建子库(&mut catalog, "掌机", None);
+    加规则(&mut catalog, "掌机", "平台=GB");
+    加规则(&mut catalog, "掌机", "平台=SFC");
+    // 中立库是个 SQLite 文件，人打得开；换一版程序、删掉一个维度之后旧规则也会读不懂。
+    catalog
+        .add_rule(
+            "掌机",
+            &Rule {
+                text: "这不是一条规则".to_string(),
+                root: romcat_core::sublibrary::Group::new(
+                    romcat_core::sublibrary::Join::All,
+                    Vec::new(),
+                ),
+            },
+        )
+        .expect("写得进");
+
+    let 新的 = Rule::parse("平台=GB 或 平台=SFC").expect("读得懂");
+    catalog.replace_rules("掌机", &新的).expect("换得了");
+
+    let 剩下的: Vec<String> = catalog
+        .sublibrary_rules("掌机")
+        .expect("读得动")
+        .into_iter()
+        .map(|stored| stored.text)
+        .collect();
+    assert_eq!(
+        剩下的,
+        vec![
+            "这不是一条规则".to_string(),
+            "平台=GB 或 平台=SFC".to_string()
+        ],
+        "读得懂的那两条该被换掉，读不懂的那条该原样留着",
+    );
+    // **序号不复用**：换一趟之后新那条拿的是下一个号，不是被删掉那两个之一。
+    let ordinals: Vec<i64> = catalog
+        .sublibrary_rules("掌机")
+        .expect("读得动")
+        .into_iter()
+        .map(|stored| stored.ordinal)
+        .collect();
+    assert_eq!(ordinals, vec![3, 4]);
+}
+
+#[test]
+fn 容量条三段各自说得清而且清单之外分得出没有与不知道() {
+    // 卡不在手边时目标上有什么本来就没看过——摆一个 0 出去等于说「卡上是空的」。
+    let 没排过 = Gauge {
+        picked: 300,
+        strangers: None,
+        capacity: Some(1_000),
+    };
+    assert_eq!(没排过.taken(), 300);
+    assert_eq!(没排过.scale(), 1_000, "没超限时条子照上限画满");
+    assert!((没排过.picked_share() - 0.3).abs() < 1e-6);
+    assert_eq!(没排过.stranger_share(), 0.0);
+
+    // 排过差量、而且清单之外真的是零：与「不知道」画出来一样，但**说出来的话不同**
+    // ——那句话由界面照 `strangers` 是不是 `None` 分。
+    let 空的 = Gauge {
+        strangers: Some(0),
+        ..没排过
+    };
+    assert_eq!(空的.stranger_share(), 0.0);
+    assert_eq!(空的.taken(), 300);
+
+    let 有外人 = Gauge {
+        picked: 300,
+        strangers: Some(200),
+        capacity: Some(1_000),
+    };
+    assert_eq!(有外人.taken(), 500);
+    assert!((有外人.stranger_share() - 0.2).abs() < 1e-6);
+
+    // **超了就照实际占用画满**：不然「正好装满」与「超了三倍」长得一模一样。
+    let 超了 = Gauge {
+        picked: 900,
+        strangers: Some(300),
+        capacity: Some(1_000),
+    };
+    assert_eq!(超了.scale(), 1_200);
+    assert!((超了.picked_share() + 超了.stranger_share() - 1.0).abs() < 1e-6);
+    assert_eq!(
+        sublibrary::over_capacity(超了.capacity, 超了.taken()),
+        Some(200),
+        "超没超由核心一处算，条子自己不算第二遍",
+    );
+
+    // 不设上限时照占用本身画，两段的比例仍然看得出谁大谁小；一个字节都没有就是空条子。
+    let 不设限 = Gauge {
+        picked: 300,
+        strangers: Some(100),
+        capacity: None,
+    };
+    assert_eq!(不设限.scale(), 400);
+    assert_eq!(Gauge::default().scale(), 0);
+    assert_eq!(Gauge::default().picked_share(), 0.0);
 }

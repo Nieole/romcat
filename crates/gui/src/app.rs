@@ -52,7 +52,10 @@ pub enum View {
     /// `crates/gui/tests/library.rs` 与 `Cargo.toml` 里那条 `[[test]]`，
     /// 留给票 `12` 一起收（挂单 Q61）。
     Variants,
-    /// **子库**：选择集、差量预览、同步（票 25）。
+    /// **子库**：管住这几台设备——一台一张卡，配目标、排差量、同步。
+    ///
+    /// **这一屏不选内容**（票 `gui-redesign/11`）：选择集在这儿只读，改它点「改选择」
+    /// 跳去浏览屏，调完按「更新到子库」回来（[`App::route`]）。
     Sublibraries,
     /// **任务**：排队、进度、可停、历史。**不发起操作，只承接**（票 01）。
     Tasks,
@@ -247,6 +250,43 @@ impl App {
         }
     }
 
+    /// **屏间跳转**：子库屏点「改选择」跳去浏览屏，浏览屏点「更新到子库」跳回来。
+    ///
+    /// 这一段住在窗口里而不在任何一屏里，因为**只有这儿同时够得着两屏**
+    /// （ADR-0005：屏与屏之间不该互相拿着对方）。两屏各自只放下一个「按过了」的记号，
+    /// 由这一趟取走：
+    ///
+    /// - **去程**：把那个子库的规则并成一条预填进浏览屏的筛选器，换到浏览屏。
+    ///   规则**原样摊在筛选器里**——人改的时候看得见它真的筛出了什么。
+    /// - **回程**：规则已经由浏览屏换进中立库了，这儿只负责让子库屏重读那个子库，
+    ///   再换回子库屏。**重读之后那份差量预览当场作废**（`Screen::open` 走的
+    ///   `invalidate`）：选择集变了，上一趟排的差量说的已经不是它了。
+    ///
+    /// **还有一条比回程更宽的**：例外是**一按就落库**的，而人可以按完例外就点
+    /// 「不改了」、或者干脆从顶栏切回子库屏——那两条路上都没有「更新到子库」。
+    /// 所以浏览屏每动一次某个子库的选择集就留一个记号（`take_touched`），
+    /// 由这一趟转告子库屏把为那一台缓着的差量与容量账丢掉（`Screen::forget`）。
+    /// 只认回程的话，子库屏会摆着一份按旧选择集排出来的差量，而「同步」认的正是它
+    /// （ADR-0016）。
+    ///
+    /// 每帧一次。测试与实测拿它当那一下——**走的是界面上那条一模一样的路**。
+    pub fn route(&mut self) {
+        if let Some(jump) = self.sublibrary.take_jump() {
+            self.library
+                .begin_editing(&self.site, &jump.sublibrary, jump.rule, jump.broken);
+            self.view = View::Variants;
+        }
+        // **先丢账再换屏**：回程那一下也会留下记号，丢在前面，`open` 重读到的就是新的。
+        if let Some(name) = self.library.take_touched() {
+            self.sublibrary.forget(&self.site, &name);
+        }
+        if let Some(name) = self.library.take_return() {
+            self.sublibrary.reload(&self.site);
+            self.sublibrary.open(&self.site, &name);
+            self.view = View::Sublibraries;
+        }
+    }
+
     /// 变体表背后那扇窗，供测试查「内存里装了几行」。
     #[must_use]
     pub fn window(&self) -> &crate::table::Window {
@@ -258,6 +298,11 @@ impl App {
         self.handle_close(ui.ctx());
         // 任务台先问一遍：这一帧要画的进度、要交出去的产物都从这儿来。
         self.poll_tasks();
+        // **屏间跳转在画之前结算**：按下「改选择」那一下发生在上一帧的画里，
+        // 记号也是那时放下的——搁在画完之后问，这一帧就会照旧那一屏画一遍，
+        // 人会看见子库屏又闪一下才换过去。点一下 egui 本来就会再要一帧，所以
+        // 「下一帧开头结算」在眼里就是「按下去就换」。
+        self.route();
         egui::Panel::top("顶栏").show(ui, |ui| self.top_bar(ui));
         match self.view {
             View::Queue => {

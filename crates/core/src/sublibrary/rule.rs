@@ -557,15 +557,17 @@ impl Rule {
     /// 一条都没有时是 `None`——那是「没有任何条件」，不是「一条都选不中」。
     #[must_use]
     pub fn any_of(rules: impl IntoIterator<Item = Self>) -> Option<Self> {
-        let nodes: Vec<Node> = rules
-            .into_iter()
-            .map(|rule| Node::Group(rule.root))
-            .collect();
-        match nodes.len() {
+        let mut rules: Vec<Self> = rules.into_iter().collect();
+        match rules.len() {
             0 => None,
+            // **一条就是它自己，连原文一并留着**：「任一满足」里只有一项时，套那层组
+            // 只会让印出来的原文多一对括号。子库屏的「改选择」是一趟往返
+            // （票 `gui-redesign/11`），每往返一次多套一层的话，规则原文会越印越深
+            // ——而它正是用户要照着核对的那句话。
+            1 => rules.pop(),
             _ => Some(Self::from_group(Group {
                 join: Join::Any,
-                nodes,
+                nodes: rules.into_iter().map(|rule| Node::Group(rule.root)).collect(),
             })),
         }
     }

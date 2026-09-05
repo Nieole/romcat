@@ -343,6 +343,66 @@ impl Catalog {
         Ok(ordinal)
     }
 
+    /// 把这个子库**读得懂的那几条规则整个换成这一条**，返回新那条的序号。
+    ///
+    /// 「**改选择**」那条回程走的就是它（票 `gui-redesign/11`）：子库屏点「改选择」时
+    /// 把这个子库的规则并成一条（[`Rule::any_of`](crate::sublibrary::rule::Rule::any_of)）
+    /// 预填进浏览屏的筛选器，调完按「更新到子库」，屏上那份筛选折回一条规则原样带回来。
+    /// 带回来的是**一条**：筛选器是一棵树，它折出来的本来就是一条
+    /// （`WorkQuery::to_rule`）。往上加而不是换掉的话，旧的那几条还在，
+    /// 子库选出来的就比屏上多——而那正是「筛选就是子库的规则」这条约定要消灭的东西。
+    ///
+    /// **读不懂的那几条原样留着，一条都不碰。** 它们本来就没参与求值
+    /// （[`LoadedSelection::from_stored`] 把它们挑出来另放），所以留着不改变这个子库
+    /// 选出什么；而顺手删掉它们等于拿一次「改选择」悄悄清掉用户还没来得及修的东西。
+    ///
+    /// 整趟在一个事务里：删一半就断电的话，那个子库会变成「一条规则都没有」，
+    /// 同步过去是空的。
+    ///
+    /// # Errors
+    /// 写库失败，或者这个子库不存在时返回错误。
+    pub fn replace_rules(&mut self, name: &str, rule: &Rule) -> Result<i64, CatalogError> {
+        let stale: Vec<i64> = self
+            .sublibrary_rules(name)?
+            .into_iter()
+            .filter(|stored| Rule::parse(&stored.text).is_ok())
+            .map(|stored| stored.ordinal)
+            .collect();
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        for ordinal in stale {
+            tx.execute(
+                "DELETE FROM sublibrary_rule WHERE sublibrary = ?1 AND ordinal = ?2",
+                params![name, ordinal],
+            )
+            .map_err(to_err)?;
+        }
+        let ordinal: i64 = tx
+            .query_row(
+                "SELECT next_rule FROM sublibrary WHERE name = ?1",
+                params![name],
+                |row| row.get(0),
+            )
+            .map_err(to_err)?;
+        tx.execute(
+            "INSERT INTO sublibrary_rule(sublibrary, ordinal, text, at)
+             VALUES(?1, ?2, ?3, ?4)",
+            params![name, ordinal, rule.text, super::now_secs()],
+        )
+        .map_err(to_err)?;
+        tx.execute(
+            "UPDATE sublibrary SET next_rule = ?2 WHERE name = ?1",
+            params![name, ordinal + 1],
+        )
+        .map_err(to_err)?;
+        tx.commit().map_err(to_err)?;
+        Ok(ordinal)
+    }
+
     /// 删掉一条规则。返回它本来在不在。
     ///
     /// # Errors

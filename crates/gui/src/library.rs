@@ -19,7 +19,9 @@
 //!
 //!    **那棵条件组就是子库的规则**：筛到满意按「存成子库」，条件原样变成那个子库的
 //!    规则（[`WorkQuery::to_rule`]）；反过来子库屏点「改选择」跳回来，规则预填进筛选器
-//!    （[`Screen::set_filter_rule`]，票 `11`）。
+//!    （[`Screen::begin_editing`]），调完按「更新到子库」原样换回去
+//!    （[`Screen::update_sublibrary`]）。**例外也在这一趟里加减**——「哪一份」只有在
+//!    详情面板里才指得准（[`Screen::set_exception`]）。
 //! 3. **这一行到底是什么**——右边那块面板的三层：**作品** → **变体**（每个带置信度与
 //!    **依据**）→ **文件**（含附属文件与内部资源）。媒体那一块只列得出来，
 //!    内嵌显示是票 `07`。
@@ -50,6 +52,8 @@
 //! ——一个 `ScrollArea` 把里面每一行都画出来，正在组字的那一行不会凭空消失。
 //! 这条界线不是「表格 vs 面板」，是**虚拟化 vs 不虚拟化**。
 
+use std::collections::BTreeMap;
+
 use egui::{Align, Layout};
 use romcat_core::catalog::browse::{
     Facets, PlatformFilter, Scope, WorkAnchor, WorkDetail, WorkQuery, WorkVariant,
@@ -60,7 +64,7 @@ use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::priority::VERDICT;
 use romcat_core::scrape::{AnchorKind, Field, Priorities};
 use romcat_core::site::Site;
-use romcat_core::sublibrary::{Rule, Sublibrary};
+use romcat_core::sublibrary::{Exception, ExceptionRow, Rule, Sublibrary};
 use romcat_core::title::{Language, TitleKind};
 
 use crate::filter::Filter;
@@ -168,6 +172,28 @@ impl Default for ValueDraft {
     }
 }
 
+/// 「**改选择**」跳过来之后，这一屏正在改的是哪个子库。
+///
+/// 子库屏管「送到哪」、浏览屏管「选什么」（票 `gui-redesign/11`）。跳过来时那个子库的
+/// 规则已经预填进筛选器，人在这儿改的时候**看得见它真的筛出了什么**；调完按
+/// 「更新到子库」原样带回去。
+///
+/// **例外也在这儿加减**：规则表达不了的个人口味落在某一个变体上（ADR-0016），
+/// 而「某一个变体」只有在详情面板里才指得准。
+#[derive(Debug, Clone, Default)]
+pub struct Editing {
+    /// 改的是哪个子库。
+    pub sublibrary: String,
+    /// 这个子库有几条规则**读不懂**。它们没参与求值，「更新到子库」也不会碰它们。
+    pub broken: usize,
+    /// 这个子库眼下的例外：变体的键 → 方向与那句话。
+    pub exceptions: BTreeMap<String, ExceptionRow>,
+    /// 记一条例外时写的那句话。**口味半年后就想不起来了**，留一句话的位置。
+    ///
+    /// 它在详情面板里，那儿不虚拟化——**唯一会碰到输入法的位置**（ADR-0005 的修订段）。
+    pub note: String,
+}
+
 /// 「**存成子库**」那两个格子。
 ///
 /// 前端格式与容量上限**不在这儿**：这一栏管的是「把这批选中存下来」，
@@ -197,6 +223,17 @@ pub struct Screen {
     filtered: Option<u64>,
     /// 「存成子库」那两个格子：名字与目标路径。
     save: SaveDraft,
+    /// 「**改选择**」跳过来了，正在改这个子库的选择集。`None` 是平常的浏览。
+    editing: Option<Editing>,
+    /// 「更新到子库」按完了，等窗口把人送回子库屏（[`crate::app::App::route`]）。
+    returned: Option<String>,
+    /// 这一屏刚**动过哪个子库的选择集**（换规则、记例外、撤例外），等窗口转告子库屏。
+    ///
+    /// 与 [`Self::returned`] 不是一回事：那一个说「人要回去了」，这一个说
+    /// 「那台设备缓着的账过期了」。例外是**一按就落库**的，而人可以按完例外就点
+    /// 「不改了」、或者直接从顶栏切回子库屏——那两条路上没有「更新到子库」，
+    /// 只认 `returned` 的话，子库屏会摆着一份按旧选择集排出来的差量，而「同步」认的正是它。
+    touched: Option<String>,
     /// 高亮的是哪一行（全序下标）。
     focused: Option<u64>,
     /// 选中了哪几行——**批量操作的作用范围**。与 [`Self::focused`] 不是一回事。
@@ -256,6 +293,9 @@ impl Screen {
             filter: Filter::default(),
             filtered: None,
             save: SaveDraft::default(),
+            editing: None,
+            returned: None,
+            touched: None,
             focused: None,
             picked: Picked::default(),
             opened: None,
@@ -345,6 +385,162 @@ impl Screen {
     /// 「存成子库」那两个格子，供实测与测试填。
     pub fn save_draft_mut(&mut self) -> &mut SaveDraft {
         &mut self.save
+    }
+
+    /// 正在改哪个子库的选择集；`None` 是平常的浏览。
+    #[must_use]
+    pub fn editing(&self) -> Option<&Editing> {
+        self.editing.as_ref()
+    }
+
+    /// 「**改选择**」跳过来了：把这个子库的规则预填进筛选器，并当场按它筛。
+    ///
+    /// **整份筛选换成这一条**，不是往现有的筛选上再叠一层：屏上摆着的必须正好是
+    /// 这个子库选出来的那一批，多一个档、多一条搜索词，人核对的就不是同一件事了。
+    /// 排序留着——它不属于筛选（`WorkQuery::from_rule` 的文档说的就是这件事）。
+    ///
+    /// 窗口按下「改选择」时走的就是它（[`crate::app::App::route`]），
+    /// 实测与测试拿它当那一下。
+    pub fn begin_editing(&mut self, site: &Site, sublibrary: &str, rule: Option<Rule>, broken: usize) {
+        let (order, descending) = (self.query.order, self.query.descending);
+        self.query = WorkQuery {
+            order,
+            descending,
+            ..WorkQuery::default()
+        };
+        self.filter.clear();
+        self.set_filter_rule(rule);
+        self.editing = Some(Editing {
+            sublibrary: sublibrary.to_string(),
+            broken,
+            exceptions: BTreeMap::new(),
+            note: String::new(),
+        });
+        self.reload_exceptions(site);
+    }
+
+    /// 重读正在改的那个子库的例外。记一条、撤一条之后都走一趟。
+    fn reload_exceptions(&mut self, site: &Site) {
+        let Some(editing) = &self.editing else {
+            return;
+        };
+        match site.catalog.sublibrary_exceptions(&editing.sublibrary) {
+            Ok(rows) => {
+                let map = rows
+                    .into_iter()
+                    .map(|row| (row.variant_key.clone(), row))
+                    .collect();
+                if let Some(editing) = &mut self.editing {
+                    editing.exceptions = map;
+                }
+                self.error = None;
+            }
+            Err(error) => self.error = Some(format!("中立库读不动：{error}")),
+        }
+    }
+
+    /// 「**不改了**」：放下这一趟，筛选留在屏上不动。
+    ///
+    /// **不回滚已经记下的例外**：例外是一记就落库的独立决定（ADR-0016 说它「永久
+    /// 记住」），把它们跟着一次「不改了」一起撤掉，等于替人做了一个他没做的决定。
+    pub fn cancel_editing(&mut self) {
+        self.editing = None;
+    }
+
+    /// 「**更新到子库**」：把屏上这份筛选原样折回一条规则，换掉那个子库读得懂的规则。
+    ///
+    /// 换而不是加（`Catalog::replace_rules`）：筛选器是一棵树，它折出来的本来就是
+    /// **一条**；往上加的话旧那几条还在，子库选出来的就比屏上多——而那正是
+    /// 「筛选就是子库的规则」这条约定要消灭的东西。
+    ///
+    /// **写不成规则的条件当场挡住**（`Unruly`），不是少写一条了事。
+    ///
+    /// 界面上按那个按钮走的就是它，实测与测试拿它当那一下。
+    pub fn update_sublibrary(&mut self, site: &mut Site) {
+        let Some(name) = self.editing.as_ref().map(|editing| editing.sublibrary.clone()) else {
+            return;
+        };
+        let rule = match self.query.to_rule() {
+            Ok(Some(rule)) => rule,
+            Ok(None) => {
+                self.error = Some(format!(
+                    "一个条件都没筛：这样带回去，子库「{name}」选中的会是整个库。\
+                     真要清空它的规则，走命令行。"
+                ));
+                return;
+            }
+            Err(unruly) => {
+                self.error = Some(format!("这份筛选带不回子库：{}", unruly.advice()));
+                return;
+            }
+        };
+        match site.catalog.replace_rules(&name, &rule) {
+            Ok(_) => {
+                self.notice = Some(format!(
+                    "子库「{name}」的规则换成了：{rule}。屏上这 {} 行 · {} 个变体原样带过去。",
+                    thousands(self.window.total()),
+                    scope_label(self.filtered),
+                ));
+                self.error = None;
+                self.editing = None;
+                self.touched = Some(name.clone());
+                self.returned = Some(name);
+            }
+            Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+        }
+    }
+
+    /// 把「更新到子库」那一下取走。**取过就没了**：窗口一帧问一次。
+    pub fn take_return(&mut self) -> Option<String> {
+        self.returned.take()
+    }
+
+    /// 把「刚动过哪个子库的选择集」取走。**取过就没了**：窗口一帧问一次。
+    pub fn take_touched(&mut self) -> Option<String> {
+        self.touched.take()
+    }
+
+    /// 给正在改的那个子库记一条**例外**：把这个变体含进来，或者排除掉。
+    ///
+    /// **优先于规则、永久记住**（ADR-0016）。落在**变体**这一层——「这个我小时候玩过」
+    /// 说的是某一份，不是某个作品下面全部那几份。
+    pub fn set_exception(&mut self, site: &mut Site, key: &str, kind: Exception) {
+        let Some(editing) = &self.editing else {
+            return;
+        };
+        let (name, note) = (editing.sublibrary.clone(), editing.note.trim().to_string());
+        let note = (!note.is_empty()).then_some(note);
+        match site
+            .catalog
+            .set_exception(&name, key, kind, note.as_deref())
+        {
+            Ok(()) => {
+                self.notice = Some(format!("给「{name}」记下了一条{}例外：{key}", kind.label()));
+                if let Some(editing) = &mut self.editing {
+                    editing.note.clear();
+                }
+                // **一按就落库**，所以子库屏那边缓着的差量与容量当场就过期了。
+                self.touched = Some(name);
+                self.reload_exceptions(site);
+            }
+            Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+        }
+    }
+
+    /// 撤掉这个变体上那条例外。
+    pub fn clear_exception(&mut self, site: &mut Site, key: &str) {
+        let Some(name) = self.editing.as_ref().map(|editing| editing.sublibrary.clone()) else {
+            return;
+        };
+        match site.catalog.clear_exception(&name, key) {
+            Ok(true) => {
+                self.notice = Some(format!("撤掉了 {key} 上那条例外。"));
+                self.touched = Some(name);
+                self.reload_exceptions(site);
+            }
+            Ok(false) => self.notice = Some("那一条已经不在了。".to_string()),
+            Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+        }
     }
 
     /// 选中了哪几行。
@@ -713,6 +909,15 @@ impl Screen {
         egui::ScrollArea::vertical()
             .id_salt("筛选栏")
             .show(ui, |ui| {
+                if let Some(editing) = &self.editing {
+                    // **正在替谁改，一进屏就看得见**：这一栏的每一下都会落到那个子库上。
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!("正在改子库「{}」的选择集", editing.sublibrary),
+                    );
+                    ui.weak("调完去底下那块面板按「更新到子库」。");
+                    ui.separator();
+                }
                 ui.horizontal(|ui| {
                     ui.strong("筛选");
                     if ui.button("全清").clicked() {
@@ -812,6 +1017,10 @@ impl Screen {
     ///
     /// **写不成规则的条件当场挡住**，不是少写一条了事：少一条，子库选出来的就比屏上多。
     fn save_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+        if self.editing.is_some() {
+            self.update_panel(ui, site);
+            return;
+        }
         ui.strong("存成子库");
         let folded = self.query.to_rule();
         match &folded {
@@ -850,6 +1059,65 @@ impl Screen {
         }
     }
 
+    /// 「**改选择**」跳过来之后，那一栏换成的样子：改的是谁、折出来会是什么、带不带得回去。
+    ///
+    /// 与「存成子库」共用一个位置**是故意的**：这两个按钮是同一条约定的两个方向
+    /// （筛选就是子库的规则），摆成两处会让人以为它们是两件事。
+    fn update_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+        let Some(editing) = &self.editing else {
+            return;
+        };
+        let (name, broken) = (editing.sublibrary.clone(), editing.broken);
+        ui.strong(format!("正在改子库「{name}」的选择集"));
+        ui.weak("这个子库的规则已经预填在上面的筛选器里。调完按「更新到子库」原样带回。");
+        if broken > 0 {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!(
+                    "这个子库另有 {} 条规则读不懂：它们没参与求值，也**不会**被这一趟改掉。",
+                    thousands(broken as u64),
+                ),
+            );
+        }
+        let folded = self.query.to_rule();
+        match &folded {
+            Ok(None) => {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "一个条件都没筛——这样带回去，这个子库选中的会是整个库。",
+                );
+            }
+            Ok(Some(rule)) => {
+                ui.weak(format!("规则会变成：{rule}"));
+            }
+            Err(unruly) => {
+                ui.colored_label(ui.visuals().error_fg_color, unruly.advice());
+            }
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    matches!(folded, Ok(Some(_))),
+                    egui::Button::new("更新到子库"),
+                )
+                .on_hover_text(
+                    "把屏上这份筛选原样换成那个子库的规则，然后回子库屏。\
+                     **换掉而不是加上去**：加的话子库选出来的会比屏上多。",
+                )
+                .clicked()
+            {
+                self.update_sublibrary(site);
+            }
+            if ui
+                .button("不改了")
+                .on_hover_text("放下这一趟，筛选留在屏上不动。**已经记下的例外不撤**——那是各自独立的决定。")
+                .clicked()
+            {
+                self.cancel_editing();
+            }
+        });
+    }
+
     /// 真的建那个子库。**测试拿它当按下去那一下。**
     pub fn save_as_sublibrary(&mut self, site: &mut Site) {
         let rule = match self.query.to_rule() {
@@ -880,6 +1148,15 @@ impl Screen {
             Ok(None) => {}
         }
         let target = std::path::PathBuf::from(self.save.target.trim());
+        // **目标落在主库里当场拦下**（ADR-0004）：判据在核心里，与同步那一道是同一条。
+        // 拦在建出来这一步而不是等到同步，是因为一个指着主库的子库定义放在库里，
+        // 下一次点同步之前谁都不知道它错了。
+        if let Err(message) =
+            romcat_core::sync::prepare::refuse_target_in_library(&site.catalog, &[], &target)
+        {
+            self.error = Some(message);
+            return;
+        }
         // 两种路径形式怎么折，**由核心的 `Sublibrary::at` 一处说了算**（ADR-0020）。
         let sublibrary = Sublibrary::at(&name, &target, "Pegasus", None);
         if let Err(error) = site.catalog.put_sublibrary(&sublibrary) {
@@ -1224,6 +1501,12 @@ impl Screen {
         egui::ScrollArea::vertical()
             .id_salt("元数据编辑")
             .show(ui, |ui| {
+                // **例外只在「改选择」那一趟里露面**：它是子库的东西，不是变体的属性。
+                // 平常浏览时摆一个「排除掉」在这儿，人会问「排除出哪儿」。
+                if self.editing.is_some() {
+                    self.exception_ui(ui, site, &detail);
+                    ui.separator();
+                }
                 dirty |= self.titles_ui(ui, site, &detail);
                 ui.separator();
                 dirty |= self.preferred_ui(ui, site, &detail);
@@ -1233,6 +1516,72 @@ impl Screen {
         if dirty {
             self.load_detail(&site.catalog);
         }
+    }
+
+    /// **例外**：把选中这个变体含进来，或者排除掉。
+    ///
+    /// **优先于规则、永久记住**（ADR-0016）：规则表达不了「这个我小时候玩过」
+    /// 「这个太占地方先不带」这类个人口味。落在**变体**这一层——那正是例外与规则的
+    /// 分工：规则说「要什么内容」，例外说「另外还要 / 偏不要这一份」。
+    ///
+    /// 它在**这一屏**而不在子库屏，因为「哪一份」只有在详情面板里才指得准：
+    /// 子库屏上人手里只有一串键。
+    fn exception_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, detail: &VariantDetail) {
+        let Some(editing) = &self.editing else {
+            return;
+        };
+        let name = editing.sublibrary.clone();
+        let key = detail.row.key.clone();
+        let current = editing.exceptions.get(&key).cloned();
+        ui.strong(format!("例外 · 子库「{name}」"));
+        match &current {
+            None => {
+                ui.weak("这个变体上还没有例外：进不进选择集，眼下由规则说了算。");
+            }
+            Some(row) => {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!(
+                        "眼下：{}{}",
+                        row.kind.label(),
+                        row.note
+                            .as_deref()
+                            .map(|note| format!("（{note}）")
+                            )
+                            .unwrap_or_default(),
+                    ),
+                );
+            }
+        }
+        if let Some(editing) = &mut self.editing {
+            ui.add(
+                egui::TextEdit::singleline(&mut editing.note)
+                    .desired_width(240.0)
+                    .hint_text("为什么（半年后你会想知道）"),
+            );
+        }
+        ui.horizontal(|ui| {
+            for kind in [Exception::Include, Exception::Exclude] {
+                let on = current.as_ref().is_some_and(|row| row.kind == kind);
+                if ui
+                    .add_enabled(!on, egui::Button::new(format!("{}它", kind.label())))
+                    .on_hover_text(match kind {
+                        Exception::Include => "规则没选中也带上它。",
+                        Exception::Exclude => "规则选中了也不带。容量超限时砍谁，落点就是这一条。",
+                    })
+                    .clicked()
+                {
+                    self.set_exception(site, &key, kind);
+                }
+            }
+            if ui
+                .add_enabled(current.is_some(), egui::Button::new("撤掉"))
+                .on_hover_text("撤掉之后这个变体进不进选择集重新由规则说了算。")
+                .clicked()
+            {
+                self.clear_exception(site, &key);
+            }
+        });
     }
 
     /// **标题集合**：全部叫法，加一条、删一条。

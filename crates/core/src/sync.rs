@@ -1083,6 +1083,12 @@ impl Desired {
     /// 顺手还查**落点撞车**：转换会把 `游戏.zip` 变成 `游戏.sfc`，两个不同的容器解出
     /// 同名内容时就撞上了。撞上的**一个都不放行**——留一个放行等于随排序决定谁赢，
     /// 而下一趟排序变了赢家就换人，卡上那份会莫名其妙地改内容。
+    ///
+    /// **主库变成一组根之后还多了一条路**（挂单 Q57）：子库里的落点一律**剥掉根名**
+    /// （不剥的话卡上多一层，而前端认平台靠的是顶层那一级目录，ADR-0013），于是
+    /// `甲/GB/x.zip` 与 `乙/GB/x.zip` 都想落在卡上同一个 `GB/x.zip`。这条路走的正是
+    /// 这里同一道闸——**判据是落点，不是撞车的原因**，所以不必另加一份检查；
+    /// 变的只是那句话要说清「是两块盘上的同一条相对路径」，不然人会以为自己重复导入了。
     pub fn screen(&mut self, filesystem: &Filesystem, prefix_chars: usize) {
         let mut seen: BTreeSet<&str> = BTreeSet::new();
         let mut collided: BTreeSet<String> = BTreeSet::new();
@@ -1097,7 +1103,13 @@ impl Desired {
             let verdict = if collided.contains(&file.path) {
                 Some((
                     RejectReason::Collision,
-                    format!("不止一份内容要落到这条路径上（{}）", file.source),
+                    // **印完整的键**（带根名）：两块盘上同一条相对路径撞在一起时，
+                    // 不带根名的话两行长得一模一样，人看不出撞的是哪两块盘（Q57）。
+                    format!(
+                        "不止一份内容要落到这条路径上；这一份来自 {}。\
+                         两个根里同一条相对路径会撞在一起——子库里的落点剥掉了根名。",
+                        file.source,
+                    ),
                 ))
             } else {
                 filesystem.screen(&file.path, file.bytes, prefix_chars)

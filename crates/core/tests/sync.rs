@@ -18,8 +18,9 @@ use romcat_core::catalog::Catalog;
 use romcat_core::fs::RealFs;
 use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::sublibrary::{self, Rule, Selection, Sublibrary};
+use romcat_core::capability::{Filesystem, RejectReason};
 use romcat_core::sync::{
-    self, Act, Desired, DesiredFile, FileKind, Manifest, ManifestFile, Options, Stamp,
+    self, Act, Desired, DesiredFile, FileKind, Manifest, ManifestFile, Options, Rejected, Stamp,
     SurpriseKind, TargetFile, TargetState,
 };
 use romcat_core::testing::sample::zip;
@@ -544,4 +545,54 @@ fn 清单跟着子库一起没() {
         .expect("清单写得进");
     assert!(catalog.remove_sublibrary("掌机").expect("删得掉"));
     assert!(catalog.manifest("掌机").expect("读得回").files.is_empty());
+}
+
+#[test]
+fn 两个根里同一条相对路径落在卡上同一个文件上_排计划时就报出来() {
+    // 挂单 Q57：子库里的落点**剥掉根名**（不剥的话卡上多出一层，而前端认平台靠的正是
+    // 顶层那一级目录，ADR-0013），于是 `甲/FC/魂斗罗.zip` 与 `乙/FC/魂斗罗.zip`
+    // 都想落在卡上同一个 `FC/魂斗罗.zip` 上。
+    //
+    // **走的是既有那道闸**（`Desired::screen` 的 `RejectReason::Collision`，票 21 为
+    // 「转换之后两份撞到一起」立的）：判据是**落点**，不是撞车的原因，所以一组根这条
+    // 新路不必另加一份检查。这条测试钉的是「它真的咬得到这条新路」。
+    let 甲 = temp_dir("sync-root-a");
+    let 乙 = temp_dir("sync-root-b");
+    写(&甲.path().join("FC/魂斗罗.zip"), &zip(2048));
+    写(&乙.path().join("FC/魂斗罗.zip"), &zip(4096));
+    写(&乙.path().join("FC/只有乙有.zip"), &zip(1024));
+
+    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+    for (name, dir) in [("甲", &甲), ("乙", &乙)] {
+        let mut options = ScanOptions::named(dir.path(), name);
+        options.jobs = Jobs::Fixed(2);
+        scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
+    }
+    let selected = 选中(&catalog, "平台=FC");
+    assert_eq!(selected.picked.len(), 3, "两个根上一共三个变体");
+    let mut desired =
+        sync::desired(&catalog, &selected, &Profile::unclaimed()).expect("折得出期望状态");
+    assert_eq!(desired.files.len(), 3, "折出来时三条都还在");
+    desired.screen(&Filesystem::unlimited(), 0);
+
+    // **撞上的一个都不放行**：留一个放行等于随排序决定谁赢，而下一趟排序变了赢家就
+    // 换人，卡上那份会莫名其妙地改内容。
+    let 撞上的: Vec<&Rejected> = desired
+        .rejected
+        .iter()
+        .filter(|row| row.reason == RejectReason::Collision)
+        .collect();
+    assert_eq!(撞上的.len(), 2, "两条都该被挡下：{:?}", desired.rejected);
+    assert!(撞上的.iter().all(|row| row.path == "FC/魂斗罗.zip"));
+    // **那句话里印的是完整的键**（带根名）：不带的话两行长得一模一样，
+    // 人看不出撞的是哪两块盘（挂单 Q57）。
+    assert!(
+        撞上的.iter().any(|row| row.detail.contains("甲/FC/魂斗罗.zip"))
+            && 撞上的.iter().any(|row| row.detail.contains("乙/FC/魂斗罗.zip")),
+        "{:?}",
+        撞上的,
+    );
+    // 只有一块盘有的那个照旧放行——撞车判的是落点，不是「这个名字出现过两次」。
+    assert_eq!(desired.files.len(), 1);
+    assert_eq!(desired.files[0].path, "FC/只有乙有.zip");
 }

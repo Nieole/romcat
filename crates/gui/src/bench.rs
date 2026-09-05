@@ -575,8 +575,27 @@ pub fn sublibrary(
                 .unwrap_or_default();
         }
         screen.save(site);
-        rule.clone_into(screen.rule_draft_mut());
-        screen.add_rule(site, name);
+    }
+    // **规则不在子库屏上写了**（票 `gui-redesign/11`：那一屏只管「送到哪」）。
+    // 量的是排差量预览那一趟，规则只是它的前提，所以直接摆进库里——走一遍浏览屏的
+    // 筛选器再「存成子库」，量出来的是筛选器的代价，不是这一屏的。
+    {
+        let (_, site) = app.sublibrary_and_site();
+        // **摆不进去就说出口**：吞掉的话这一趟量的是「一条规则都没有」的子库，
+        // 印出来是「选出 0 个变体、0 步」——一个看着像结果的假数。
+        match romcat_core::sublibrary::Rule::parse(rule) {
+            Ok(parsed) => {
+                if let Err(error) = site.catalog.add_rule(name, &parsed) {
+                    eprintln!("规则写不进中立库：{error}");
+                }
+            }
+            Err(error) => eprintln!("这条规则读不懂：{error}"),
+        }
+    }
+    {
+        let (screen, site) = app.sublibrary_and_site();
+        screen.reload(site);
+        screen.open(site, name);
     }
     {
         let (screen, site, tasks) = app.sublibrary_site_and_tasks();
