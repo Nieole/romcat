@@ -49,6 +49,11 @@
 //!
 //! 撤销本身也撤得回来：[`redo_batch`] 把那一批原样放回去，一个字都不必用户重打。
 //!
+//! **批与批在同一条锚上是叠着的**，于是撤销按落下的**倒序**走：重复拷贝是真机上的常态，
+//! 同一条内容锚上的两份分在两批里是常事，而后一批记着的「它盖掉了什么」正是前一批落下的
+//! 那条。被后来还在册的那一批盖住的先撤不动——[`undo_batch`] 说清是哪一批盖的，
+//! 让人先撤那一批，而不是把它标成已撤、过一会儿裁决又活过来。
+//!
 //! [`plan_forget`] / [`forget`] 那一对是**另一件事**——按选择器忘掉散落的裁决
 //! （典型：别人分享来、`triage import` 收下的那些，它们不属于本机任何一批）。
 //! 它只动沉淀库，理由与出口都写在 [`forget`] 上。
@@ -87,6 +92,19 @@ pub enum TriageError {
     /// 那一批还没撤过，没什么可放回去的。
     #[error("第 {0} 批还没撤过，没什么可放回去的")]
     NotUndone(i64),
+    /// 那一批被后来的、眼下还在册的一批盖住了，撤不动也放不回去。
+    #[error(
+        "第 {batch} 批里有 {rows} 条被第 {by} 批盖住了，那一批还在册——\
+         这一批在那几条锚上回不去。先撤第 {by} 批（`romcat triage undo --batch {by}`）"
+    )]
+    CoveredBy {
+        /// 点名的那一批。
+        batch: i64,
+        /// 盖住它的那一批。
+        by: i64,
+        /// 被盖住了几条。
+        rows: u64,
+    },
 }
 
 /// **待确认队列**里的一条。
@@ -892,6 +910,10 @@ pub fn plan_each<'a>(
         library: decide.library.clone(),
         ..Plan::default()
     };
+    // **一批是一次落下，也就是一个时刻**，所以时刻只取这一次。逐条各取一次的话，
+    // 一批三千条会跨过秒界，而同一条**内容锚**上的几份**重复拷贝**本该落成同一条裁决
+    // ——差一秒就成了两条，[`undo_batch`] 再也认不出哪一条是这一批自己落下的。
+    let decided_at = crate::catalog::now_secs();
     for item in items {
         let decision = match resolve(item, decide) {
             Ok(decision) => decision,
@@ -907,7 +929,7 @@ pub fn plan_each<'a>(
         let replaces = store.find(&anchor)?.is_some();
         plan.decided.push(Decided {
             key: item.variant.key.clone(),
-            verdict: Verdict::now(anchor, decision).with_note(decide.note.clone()),
+            verdict: Verdict::at(anchor, decision, decided_at).with_note(decide.note.clone()),
             replaces,
         });
     }
@@ -1011,6 +1033,15 @@ pub fn apply(
         .iter()
         .map(|item| (item.variant.key.as_str(), item))
         .collect();
+    // **一条锚在一批里只有一条裁决。** 裁决的身份是**锚**、不是变体：同一条内容锚上的
+    // 几份**重复拷贝**在计划里各占一行，落进沉淀库却只有一条——最后落下的那条。
+    // 批里若按变体各记各的，撤销就认不出「锚上眼下这条是不是这一批自己落下的」；
+    // 放回去时落下的也可能与当初那条不是同一个（批里那几行按变体的键排，与计划的顺序
+    // 不是一回事）。所以先按锚归到最后落下的那一条上，两处一起用它。
+    let mut landing: BTreeMap<&Anchor, &Verdict> = BTreeMap::new();
+    for row in &plan.decided {
+        landing.insert(&row.verdict.anchor, &row.verdict);
+    }
     // **先把批记下来。** `before` 要在落下之前读——落完再读，读到的就是刚写进去的那条，
     // 而那正是撤销时要拿来还原的东西。
     let mut rows = Vec::with_capacity(plan.decided.len());
@@ -1019,12 +1050,16 @@ pub fn apply(
             Some(item) => item.representative(),
             None => (row.key.clone(), String::new()),
         };
+        let verdict = landing
+            .get(&row.verdict.anchor)
+            .copied()
+            .unwrap_or(&row.verdict);
         rows.push(verdict::BatchRow {
             variant_key: row.key.clone(),
             member,
             inner,
-            after: row.verdict.clone(),
-            before: store.find(&row.verdict.anchor)?,
+            after: verdict.clone(),
+            before: store.find(&verdict.anchor)?,
         });
     }
     let batch = store.put_batch(&plan.library, &plan.summary, plan.note.as_deref(), &rows)?;
@@ -1040,13 +1075,17 @@ pub fn apply(
     // 是把一件批量的事做成几百件零碎的事。
     let mut records = Vec::new();
     for row in &plan.decided {
-        if store.put(&row.verdict)? {
+        let verdict = landing
+            .get(&row.verdict.anchor)
+            .copied()
+            .unwrap_or(&row.verdict);
+        if store.put(verdict)? {
             account.added += 1;
         } else {
             account.replaced += 1;
         }
         account.verdicts += 1;
-        if row.verdict.anchor.is_shareable() {
+        if verdict.anchor.is_shareable() {
             account.content_anchored += 1;
         } else {
             account.path_anchored += 1;
@@ -1056,7 +1095,7 @@ pub fn apply(
         };
         // 「认不出」不产生结论——它只是在理由那一列上盖一句，别的一个字不动。
         // 结论本身没变（照旧是未命中或无判据），变的只是「为什么还停在这儿」。
-        if matches!(row.verdict.decision, Decision::Unknown) {
+        if matches!(verdict.decision, Decision::Unknown) {
             catalog.set_identification_reason(
                 &item.variant.key,
                 Some(identify::VERDICT_UNKNOWN_REASON),
@@ -1064,8 +1103,7 @@ pub fn apply(
             continue;
         }
         let (member, inner) = item.representative();
-        let Some(record) =
-            projector.project(catalog, &item.variant, &row.verdict, &member, &inner)?
+        let Some(record) = projector.project(catalog, &item.variant, verdict, &member, &inner)?
         else {
             continue;
         };
@@ -1089,7 +1127,9 @@ pub struct Undone {
     pub removed: u64,
     /// 其中把**它盖掉的那条旧裁决**放回去了几条。
     pub restored: u64,
-    /// **没动**几条：同一条锚上后来有人重新裁过，那是别人的账。
+    /// **没动**几条：同一条锚上后来有人在**批以外**重新裁过（`triage import` 收下的、
+    /// 别人分享来的），那是别人的账。被后来那一**批**盖住的撤不动，压根走不到这儿
+    /// （[`TriageError::CoveredBy`]）。
     pub kept: u64,
     /// 中立库里放回了几个变体的结论。
     pub variants: u64,
@@ -1098,6 +1138,25 @@ pub struct Undone {
     /// 为假就是这一批的快照已经随重跑识别清掉了（[`Catalog::clear_identifications`]），
     /// 那时只回滚得了沉淀库那一半——**该如实说出来**，而不是让人以为队列已经回来了。
     pub catalog_rolled_back: bool,
+}
+
+/// 这一批被后来、眼下还在册的一批盖住了吗——盖住了就撤不动、也放不回去。
+///
+/// **撤销与放回共用这一问**：两边认「这一批在这条锚上说了算吗」用的必须是同一条判据，
+/// 不然一边拦下的另一边照旧做得成，而做成的那一下正是把账做乱的那一下。
+///
+/// 它问的是**册子**（[`Store::batch_covering`]）而不是「锚上眼下那条长什么样」：
+/// 两批落下的裁决**值可以一模一样**（同一秒、同一部作品），按值比对认不出这件事。
+fn covered_by(store: &Store, batch: i64, rows: &[verdict::BatchRow]) -> Result<(), TriageError> {
+    let anchors: BTreeSet<Anchor> = rows.iter().map(|row| row.anchor().clone()).collect();
+    if let Some((by, covered)) = store.batch_covering(batch, &anchors)? {
+        return Err(TriageError::CoveredBy {
+            batch,
+            by,
+            rows: covered,
+        });
+    }
+    Ok(())
 }
 
 /// 撤掉一**批**：**沉淀库与中立库两边都回到这一批落下之前的样子**。
@@ -1118,14 +1177,24 @@ pub struct Undone {
 /// 还有一层：选项 B（`undo` 顺手重算一遍）要 **DAT 库在手边**，而 `undo` 不要求。
 /// 这条路**一个字节的 DAT 都不要**——要放回去的东西早就在中立库里躺着了。
 ///
-/// ## 只动这一批
+/// ## 只动这一批，而且**撤不干净就不撤**
 ///
-/// 每条先核对「这条锚上眼下的裁决还是这一批当初落下的那条吗」。不是就一个字都不动
-/// （后来有人在同一条锚上重新裁过），那一条的中立库结论也不碰——它眼下的样子是那条
-/// **新**裁决的投影，拿一份更老的快照盖上去才是真的改坏了。
+/// 动手之前先问一句「这一批被后来、眼下还在册的哪一批盖住了没有」
+/// （[`Store::batch_covering`]）。**批与批在同一条锚上是叠着的**：后一批记着的
+/// 「它盖掉了什么」正是前一批落下的那条，撤后一批就会把它放回来。所以被盖住的那一批
+/// 根本回不到「它落下之前」——硬撤的话它被标成已撤，而它的裁决过一会儿又活了。
+/// 那时不撤，并说清是**哪一批**盖的，让人先撤那一批（[`TriageError::CoveredBy`]）。
+///
+/// 剩下那种「别人的账」不属于任何一批（`triage import` 收下的、别人分享来的），
+/// 谁也不会再把这一批的那条放回来：那一条一个字不动、记进 [`Undone::kept`]，别的照撤
+/// ——这一批落下的裁决一条都不在生效了，标成已撤是实话。
+///
+/// 落到每一条上的判据是「**锚上眼下这条还是这一批当初落下的那条吗**」。不是就一个字
+/// 都不动，那一条的中立库结论也不碰——它眼下的样子是那条**新**裁决的投影，拿一份更老
+/// 的快照盖上去才是真的改坏了。
 ///
 /// # Errors
-/// 没这一批、这一批已经撤过了、或者读写两份库失败时返回错误。
+/// 没这一批、这一批已经撤过了、被后来的一批盖住了、或者读写两份库失败时返回错误。
 pub fn undo_batch(
     catalog: &mut Catalog,
     store: &mut Store,
@@ -1135,6 +1204,8 @@ pub fn undo_batch(
     if found.undone() {
         return Err(TriageError::AlreadyUndone(batch));
     }
+    let rows = store.batch_rows(batch)?;
+    covered_by(store, batch, &rows)?;
     let mut account = Undone {
         batch,
         ..Undone::default()
@@ -1143,12 +1214,14 @@ pub fn undo_batch(
     // **重复拷贝是真机上的常态**：同一份内容躺着好几份，它们钉的是同一条**内容锚**，
     // 而一批里可能同时裁了好几份。第二份走到这儿时，锚上那条已经被第一份处理过了——
     // 那不是「别人重新裁过」，那就是我们自己刚留下的样子。分不清的话，第二份的中立库
-    // 结论会留着一条指向已经不存在的裁决的「命中」，也就是这一票要消掉的那个形状。
+    // 结论会留着一条指向已经不存在的裁决的「命中」，也就是票 08 要消掉的那个形状。
     //
     // 判据是「**锚上眼下这个样子是不是这一批自己刚留下的**」，不是「锚上是不是空的」：
     // 这一批盖掉过一条旧裁决时，第一份撤完锚上留下的是那条**旧的**，不是空的。
+    // 几份拷贝在批里记的是**同一条** `after`（[`apply`] 按锚归过），所以整条相等这个
+    // 判据认得出它们；各记各的话，只差一秒都会让先走到的那一份被当成别人的账。
     let mut mine: BTreeSet<Anchor> = BTreeSet::new();
-    for row in store.batch_rows(batch)? {
+    for row in rows {
         let current = store.find(row.anchor())?;
         if current.as_ref() == Some(&row.after) {
             store.remove(row.anchor())?;
@@ -1179,15 +1252,17 @@ pub fn undo_batch(
 /// [`verdict::BatchRow::after`] 里，放回去就是把它们重新写进沉淀库，再走
 /// [`Projector`] 那条**与识别共用的**路投影回中立库。
 ///
-/// 与 [`undo_batch`] 对称，它也只动这一批：每条先核对「这条锚上眼下还是撤销之后留下的
-/// 那个样子吗」，不是就不动。
+/// 与 [`undo_batch`] 对称，它也只动这一批，而且**放不回去就不放**：先问同一句
+/// 「被后来还在册的哪一批盖住了没有」（[`covered_by`]）——放回去要写的正是那条锚，
+/// 硬写下去会把那一批的裁决顶掉，而顶掉了什么一处也没记。剩下每条再核对
+/// 「这条锚上眼下还是撤销之后留下的那个样子吗」，不是就不动。
 ///
 /// **中立库那一半的快照不重新收一遍。** 快照说的是「这一批第一次落下之前是什么样」，
 /// 那句话不因为撤了又放回去而改变；重新收一遍反而会把撤销刚放回去的那一份当成
 /// 「之前」，于是再撤一次就撤了个寂寞。
 ///
 /// # Errors
-/// 没这一批、这一批没撤过、或者读写两份库失败时返回错误。
+/// 没这一批、这一批没撤过、被后来的一批盖住了、或者读写两份库失败时返回错误。
 pub fn redo_batch(
     catalog: &mut Catalog,
     store: &mut Store,
@@ -1197,6 +1272,8 @@ pub fn redo_batch(
     if !found.undone() {
         return Err(TriageError::NotUndone(batch));
     }
+    let rows = store.batch_rows(batch)?;
+    covered_by(store, batch, &rows)?;
     let mut account = Applied {
         batch,
         ..Applied::default()
@@ -1207,7 +1284,7 @@ pub fn redo_batch(
     // 第二份走到这儿时锚上那条已经是这一批自己刚放回去的了——那不是「别人裁过」，
     // 不写第二遍，但它的中立库那一半照样要补上。
     let mut mine: BTreeSet<Anchor> = BTreeSet::new();
-    for row in store.batch_rows(batch)? {
+    for row in rows {
         let current = store.find(row.anchor())?;
         let already = mine.contains(row.anchor()) && current.as_ref() == Some(&row.after);
         if current != row.before && !already {

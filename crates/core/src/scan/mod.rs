@@ -110,6 +110,33 @@ pub enum ScanError {
         /// 库里记着的顶层条目共几条。
         recorded_count: usize,
     },
+    /// 这个**根**不在位：目录还在，库里记着的顶层条目却一条都不在。
+    ///
+    /// **挂载点目录永远都在**——Linux 的 `/mnt/x` 是先建出来的，macOS 卸盘之后
+    /// `/Volumes/x` 也偶尔残留一个空目录。于是路径一个字没变、`is_dir()` 照样为真，
+    /// 而遍历会顺利跑完、收尾把整个根当成「这次没见到」抹掉。看不见不等于不存在
+    /// （ADR-0021），所以这一趟根本不该开工。
+    ///
+    /// 它与 [`DifferentLibrary`](Self::DifferentLibrary) **不是同一档**：那边是用户
+    /// 主动把根指到了别处、指错了盘，出路是换个根名；这边用户什么都没改，是那块盘
+    /// 自己不在，出路是插上盘。
+    #[error(
+        "根「{name}」记在 {path}，可库里记着的 {recorded_count} 条顶层条目\
+         一条都不在（这一层眼下只有 {present} 条）。\
+         挂载点目录一直都在，盘一拔它就剩个空壳——那块盘多半没挂上。插上那块盘再扫。\
+         上次扫出来的东西照样看得见：它住在中立库里，不跟着盘走。\
+         真是自己把这个根清空了的话，先把这个根移除再加回来"
+    )]
+    RootNotInPlace {
+        /// 这个根叫什么。
+        name: String,
+        /// 这一趟指的是哪个目录。
+        path: String,
+        /// 这一层眼下有几条。
+        present: usize,
+        /// 库里记着的顶层条目共几条。
+        recorded_count: usize,
+    },
     /// 这个根加不进来。
     #[error(transparent)]
     AddRoot(#[from] AddRootError),
@@ -510,8 +537,14 @@ struct StartState {
 /// 名字没给就按目录自己的名字取。库里还没有这个根就**加进来**（校验走
 /// [`roots::add_root`]：不许重名、不许与已有的根套在一起、不许与工作目录纠缠）。
 ///
+/// **守卫每一趟都跑，路径变没变都跑。** 它只花一次 `read_dir`，而扫描本来就要读根
+/// 这一层——真机上那是 27 分钟里的一次目录读取。反过来「路径没变就直接放行」看着
+/// 省事，代价是这条最常走的路上一道闸都没有：盘不在位时挂载点目录还在、路径一个字
+/// 没变，于是遍历顺利跑完、收尾把整个根抹掉。
+///
 /// # Errors
-/// 名字不能用、根加不进来、这个根名底下换了另一块盘，或者中立库读写失败时返回错误。
+/// 名字不能用、根加不进来、这个根不在位、这个根名底下换了另一块盘，或者中立库
+/// 读写失败时返回错误。
 fn resolve_root(
     library: &dyn LibraryFs,
     catalog: &mut Catalog,
@@ -530,10 +563,11 @@ fn resolve_root(
         roots::add_root(catalog, options.workspace.as_deref(), &name, root)?;
         return Ok(name);
     };
-    if existing.path == current {
+    let moved = existing.path != current;
+    guard_same_root(library, catalog, &name, &existing.path, root, moved)?;
+    if !moved {
         return Ok(name);
     }
-    guard_same_root(library, catalog, &name, &existing.path, root)?;
     // **改指到别处也要过摆位那三道校验**：把「主库」从 `/盘/Game` 重指到 `/盘`
     // （而 `/盘/Game/FC` 已经是另一个根）不拦的话，同一批文件从此在两个根下各数一遍。
     roots::check_placement(catalog, options.workspace.as_deref(), &name, root)?;
@@ -553,16 +587,28 @@ pub fn default_root_name(root: &Path) -> String {
         .unwrap_or_else(|| "主库".to_string())
 }
 
-/// 这个**根名**对着的还是不是原来那块盘。
+/// 这个**根名**对着的那块盘还在不在、还是不是原来那一块。
 ///
 /// 根跟名字走而不跟路径走（挂账 D16），于是换挂载点、换盘符都还能找回同一支记录——
-/// 这正是要的。代价是「名字一样、盘不一样」这种情况变得可能，而这个根下面的键都以它的
-/// 名字打头，两块盘挤进同一个名字不会报错，只会静默撞车。
+/// 这正是要的。代价是两件事变得可能，而两件事都不会报错、只会静默撞车或静默抹掉：
+///
+/// - **盘不在位**：挂载点目录永远都在，盘一拔它就剩个空壳。路径一个字没变，遍历
+///   顺利跑完，收尾把整个根当成「这次没见到」删光。
+/// - **名字一样、盘不一样**：这个根下面的键都以它的名字打头，两块盘的记录会挤进
+///   同一串前缀。
 ///
 /// 判据是顶层条目：库里记着的这个根的顶层名，与眼前这个目录 `read_dir` 出来的名字比一比。
-/// 它只花一次 `read_dir`（扫描本来也要读这一层），却足够分开「同一块盘换了挂载点」
-/// （顶层全对得上）与「指错了盘」（顶层几乎全不同）。**它认不出的那种情况**：两块盘恰好
-/// 有过半同名的顶层目录——那得是刻意造的巧合，真出现了也还有「换个根名」这条路。
+/// 它只花一次 `read_dir`（扫描本来也要读这一层），却足够把三种形状分开。**分开它们靠的
+/// 是「路径变没变」**，因为那说的是用户改没改主意：
+///
+/// - **路径没变、顶层一条都对不上** → 盘不在位。用户什么都没改，是那块盘自己不在。
+///   判据是绝对的「一条都不剩」而不是比例——顶层只有两三个目录、用户合法删了其中
+///   大半时，只要还认得出一条就照常放行，不该拿阈值去拦用户自己动的手。
+/// - **路径变了、顶层大半对不上** → 指错了盘（[`ScanError::DifferentLibrary`]）。
+/// - 其余照常放行。
+///
+/// **它认不出的那种情况**：两块盘恰好有过半同名的顶层目录——那得是刻意造的巧合，真出现
+/// 了也还有「换个根名」这条路。
 ///
 /// **按根生效**：别的根一个字都不受影响，那正是「主库是一组根」要的形状。
 fn guard_same_root(
@@ -571,16 +617,27 @@ fn guard_same_root(
     name: &str,
     recorded: &str,
     root: &Path,
+    moved: bool,
 ) -> Result<(), ScanError> {
     let recorded_keys = catalog.top_level_keys(name, TOP_LEVEL_SAMPLE)?;
     // 一条都还没扫过的根没什么可撞的。
     if recorded_keys.is_empty() {
         return Ok(());
     }
-    let entries = library.read_dir(root).map_err(|source| ScanError::Root {
-        path: path::display(root),
-        source,
-    })?;
+    let entries = match library.read_dir(root) {
+        Ok(entries) => entries,
+        // **列不开给不出任何判据**，而遍历本来就会照实记一条错误、把整棵子树原样留着
+        // （`Catalog::keep_subtree`，ADR-0021）——守卫不该抢在它前面把扫描打断。
+        // 路径变了那一趟例外：那时还要往库里改「这个根现在挂在哪」，一个列都列不开的
+        // 目录不配当那个答案。
+        Err(_) if !moved => return Ok(()),
+        Err(source) => {
+            return Err(ScanError::Root {
+                path: path::display(root),
+                source,
+            });
+        }
+    };
     let actual: std::collections::HashSet<String> = entries
         .iter()
         .map(|entry| path::catalog_key(root, &entry.path))
@@ -589,6 +646,21 @@ fn guard_same_root(
         .iter()
         .filter(|key| actual.contains(*key))
         .count();
+    // **盘不在位**。两种形状：这一层什么都没有（不论路径变没变——指到一个空目录上去
+    // 从来不是「换了另一块盘」），或者路径压根没变而库里记着的顶层一条都不在。
+    if entries.is_empty() || (!moved && common == 0) {
+        return Err(ScanError::RootNotInPlace {
+            name: name.to_string(),
+            path: path::display(root),
+            present: entries.len(),
+            recorded_count: recorded_keys.len(),
+        });
+    }
+    // 路径没变、顶层还认得出几条：盘在位，剩下的差异是用户自己在这块盘上动的手，
+    // 照常扫、照常收尾。
+    if !moved {
+        return Ok(());
+    }
     #[expect(
         clippy::cast_precision_loss,
         reason = "顶层条目至多 512 条，转 f64 精确"
@@ -1653,6 +1725,107 @@ mod tests {
         );
         assert!(再.delta.added > 0, "新加的那个平台是新增");
         assert!(再.delta.unchanged > 0, "没动的那些还是未变");
+    }
+
+    #[test]
+    fn 根还记在原地而盘不在位时一趟扫描不许抹掉整个根() {
+        // 挂载点目录永远都在：Linux 的 `/mnt/x` 是先建出来的，macOS 卸盘之后
+        // `/Volumes/x` 也偶尔残留一个空目录。**路径一个字没变**，于是遍历顺利跑完、
+        // 收尾把整个根当成「这次没见到」抹掉——看不见不等于不存在（ADR-0021）。
+        let mut catalog = 新中立库();
+        let options = ScanOptions::named("/Volumes/主库", "主库");
+        let 首扫 = 扫入(&mut catalog, &建库于("/Volumes/主库"), &options);
+        let 扫到的文件 = 首扫.report.totals.files;
+        assert!(扫到的文件 > 0);
+
+        // 盘拔了：挂载点还在，里面什么都没有。
+        let mut 空壳 = MemFs::new();
+        空壳.dir("/Volumes/主库");
+        let 错 = scan(&空壳, &mut catalog, &options, &Handle::new())
+            .expect_err("盘不在位该拦下来，而不是把整个根当成删光了");
+        let ScanError::RootNotInPlace {
+            name,
+            path,
+            present,
+            recorded_count,
+        } = &错
+        else {
+            panic!("该是 RootNotInPlace，实际是 {错:?}");
+        };
+        assert_eq!(name, "主库");
+        assert_eq!(path, "/Volumes/主库");
+        assert_eq!(*present, 0, "这一层什么都没有");
+        assert!(*recorded_count > 0);
+        // 措辞要让用户去插盘，而不是去换根名——那是另一档（`DifferentLibrary`）的出路。
+        assert!(错.to_string().contains("插上那块盘再扫"), "得说清出路：{错}");
+        assert!(!错.to_string().contains("换个根名"), "别把人指错路：{错}");
+
+        // 拦下来那一趟中立库一个字都没动。
+        assert_eq!(catalog.root_stats("主库").expect("数得出").files, 扫到的文件);
+        assert!(
+            catalog.contains("主库/FC/超级马里奥.zip").expect("查得到"),
+            "整个根不许凭空消失"
+        );
+
+        // 顺手把这个根改指到另一个还没挂上的挂载点：**指到一个空目录上去**从来不是
+        // 「换了另一块盘」，出路照旧是插盘。
+        let mut 另一个空壳 = MemFs::new();
+        另一个空壳.dir("/Volumes/主库 1");
+        let 换个挂载点 = scan(
+            &另一个空壳,
+            &mut catalog,
+            &ScanOptions::named("/Volumes/主库 1", "主库"),
+            &Handle::new(),
+        )
+        .expect_err("空的挂载点照样拦");
+        assert!(
+            matches!(换个挂载点, ScanError::RootNotInPlace { .. }),
+            "该是 RootNotInPlace，实际是 {换个挂载点:?}"
+        );
+    }
+
+    #[test]
+    fn 用户真把根清空了就先移除这个根再加回来() {
+        // 「盘不在位」拦下来之后得留一条出路，否则用户真清空了一个根就再也扫不动它。
+        // 出路是**移除这个根**：那是唯一一处工具会主动丢掉扫描结果的地方，由用户按下、
+        // 事先看得见会去掉多少变体，而不是一趟扫描替他决定。
+        let mut catalog = 新中立库();
+        let options = ScanOptions::named("/主库", "主库");
+        扫入(&mut catalog, &建库于("/主库"), &options);
+
+        let mut 清空了 = MemFs::new();
+        清空了.dir("/主库");
+        scan(&清空了, &mut catalog, &options, &Handle::new()).expect_err("先拦一道");
+
+        catalog.remove_root("主库").expect("移得掉");
+        let 再扫 = 扫入(&mut catalog, &清空了, &options);
+        assert_eq!(再扫.report.totals.files, 0, "加回来是个空的根，扫得动");
+        assert_eq!(再扫.delta.removed, 0, "库里已经没有它那一支了，不该再数一遍");
+    }
+
+    #[test]
+    fn 顶层还认得出一条就放行而不看比例() {
+        // 判据是绝对的「一条都不剩」而不是重叠比例：顶层只有三个目录、用户合法删掉
+        // 其中两个时，重叠率掉到 1/3、远低于阈值，可盘明明在位——拿阈值去拦用户
+        // 自己动的手是误伤。
+        let mut library = MemFs::new();
+        library
+            .dir("/lib")
+            .file("/lib/FC/超级马里奥.zip", zip(64))
+            .file("/lib/PS1/最终幻想.chd", chd())
+            .file("/lib/PSP/游戏.iso", iso());
+        let mut catalog = 新中立库();
+        let options = ScanOptions::named("/lib", "主库");
+        扫入(&mut catalog, &library, &options);
+
+        library
+            .remove("/lib/PS1/最终幻想.chd")
+            .remove("/lib/PS1")
+            .remove("/lib/PSP/游戏.iso")
+            .remove("/lib/PSP");
+        let 再扫 = 扫入(&mut catalog, &library, &options);
+        assert_eq!(再扫.delta.removed, 2, "用户自己删的照常收掉");
+        assert_eq!(再扫.report.totals.files, 1);
     }
 
     #[test]

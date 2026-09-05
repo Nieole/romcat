@@ -97,7 +97,7 @@
 //! 它与 [`Verdict`] 共用同一套两种锚，理由也是同一条：**内容锚换台机器、改过名字之后
 //! 仍然认得出**，两块盘接同一台机器裁决一次两边都受益。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -401,11 +401,22 @@ impl Verdict {
     /// 立一条**现在**定下来的裁决。
     #[must_use]
     pub fn now(anchor: Anchor, decision: Decision) -> Self {
+        Self::at(anchor, decision, now_secs())
+    }
+
+    /// 立一条**在这个时刻**定下来的裁决。
+    ///
+    /// **一批裁决共用一个时刻走的是它**（`triage::plan_each`）：一批是一次落下，
+    /// 也就是一个时刻。逐条各取一次的话，一批三千条会跨过秒界，而同一条锚上的几份
+    /// **重复拷贝**本该落成同一条裁决——差一秒就成了两条，撤销那一侧再也认不出
+    /// 「锚上眼下这条是不是这一批自己落下的」。
+    #[must_use]
+    pub fn at(anchor: Anchor, decision: Decision, decided_at: i64) -> Self {
         Self {
             anchor,
             decision,
             note: None,
-            decided_at: now_secs(),
+            decided_at,
         }
     }
 
@@ -995,6 +1006,59 @@ impl Store {
             });
         }
         Ok(out)
+    }
+
+    /// 这一批之后落下、**眼下还在册**的那些批里，头一个碰过这些锚的是第几批，
+    /// 连它在这些锚上占了几条。都没碰过就是 `None`。
+    ///
+    /// **撤销与放回都要先问它一句。** 批与批在同一条锚上是**叠着的**：后一批的
+    /// [`BatchRow::before`] 里存着前一批落下的那条，撤后一批就会把它放回来。所以前一批
+    /// 被后一批盖住时根本回不到「它落下之前」——硬撤的话它被标成已撤，而它的裁决
+    /// 过一会儿又活了。
+    ///
+    /// 问的是**册子**而不是「锚上眼下那条长什么样」：两批落下的裁决**值可以一模一样**
+    /// （同一秒、同一部作品），按值比对认不出这件事。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn batch_covering(
+        &self,
+        after: i64,
+        anchors: &BTreeSet<Anchor>,
+    ) -> Result<Option<(i64, u64)>, VerdictError> {
+        if anchors.is_empty() {
+            return Ok(None);
+        }
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT r.batch, r.after FROM verdict_batch_row r
+                 JOIN verdict_batch b ON b.id = r.batch
+                 WHERE r.batch > ?1 AND b.undone_at IS NULL
+                 ORDER BY r.batch",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![after], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut found: Option<(i64, u64)> = None;
+        for row in rows {
+            let (batch, blob) = row.map_err(|source| self.err(source))?;
+            // 按批号排着，所以头一批的行是连在一起的：换了批号就已经数完了。
+            if found.is_some_and(|(id, _)| id != batch) {
+                break;
+            }
+            if !decode(&blob).is_some_and(|verdict| anchors.contains(&verdict.anchor)) {
+                continue;
+            }
+            match &mut found {
+                Some((_, count)) => *count += 1,
+                None => found = Some((batch, 1)),
+            }
+        }
+        Ok(found)
     }
 
     /// 把一批标成撤掉的（或者标回没撤）。
