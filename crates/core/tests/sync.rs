@@ -614,3 +614,21 @@ fn 只有一个根时不点名照旧换得动位置() {
     assert_eq!(roots.len(), 1);
     assert_eq!(roots.path_of("主库"), Some(Path::new("/又搬了")));
 }
+
+/// 目标落在主库里那道 ADR-0004 的红线：Windows 上 `normalize_existing` 把目标化成
+/// `\\?\D:\…`，而库里的根存的是 display 形态 `D:\…`，两种写法按 `Path` 的分量比
+/// 恒不相等——**红线从此形同虚设**，同步会往那块 10 TiB 不可再生的盘上写文件、删文件。
+/// 判据折成可比形态（`path::is_inside_place`）之后才拦得住。
+///
+/// **本机是 macOS，这条没跑过**：Unix 上 `D:\Game\子库` 不是绝对路径，
+/// `normalize_existing` 会把它接到工作目录后面去，这一幕在 macOS 上摆不出来。
+#[cfg(windows)]
+#[test]
+fn 扩展长度形式的目标落在主库里照样拦得住() {
+    let catalog = Catalog::open_in_memory().expect("能开中立库");
+    roots::add_root(&catalog, None, "主库", Path::new(r"D:\Game")).expect("加得上");
+    let 话 = sync::prepare::refuse_target_in_library(&catalog, &[], Path::new(r"D:\Game\子库"))
+        .expect_err("该被拒");
+    assert!(话.contains("主库"), "哪个根拦下的要说出来：{话}");
+    assert!(话.contains("ADR-0004"), "红线的出处要说出来：{话}");
+}

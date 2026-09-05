@@ -22,6 +22,7 @@
 //! 而**变体数与容量**照旧从库里现折（[`Catalog::root_stats`]）——那两个数在成型之后才准，
 //! 扫描当时的数字反而是过时的。
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -425,6 +426,11 @@ pub fn add_root(
 ///
 /// `name` 是这个根自己的名字：**与自己比不算套在一起**。
 ///
+/// **三道比较都先把两边折成可比形态**（[`path::is_same_place`]、[`path::is_inside_place`]）：
+/// 库里存的是 display 形态 `D:\…`，手上这条可能是 `canonicalize` 交出来的 `\\?\D:\…`，
+/// 直接比恒为 false——套叠的根会静默放行，同路径改名则一路撞到 UNIQUE 索引上去
+/// （见 [`path::comparable_text`]）。
+///
 /// # Errors
 /// 与工作目录纠缠、与别的根套在一起、或者中立库读不动时返回 [`AddRootError`]。
 pub fn check_placement(
@@ -436,7 +442,7 @@ pub fn check_placement(
     let display = path::display(root);
     if let Some(workspace) = workspace {
         let workspace = path::normalize_existing(workspace);
-        if path::is_inside(root, &workspace) || path::is_inside(&workspace, root) {
+        if path::is_inside_place(root, &workspace) || path::is_inside_place(&workspace, root) {
             return Err(AddRootError::Workspace {
                 path: display,
                 workspace: path::display(&workspace),
@@ -448,20 +454,20 @@ pub fn check_placement(
             continue;
         }
         let other = PathBuf::from(&existing.path);
-        if other == root {
+        if path::is_same_place(&other, root) {
             return Err(AddRootError::SamePath {
                 name: existing.name,
                 path: existing.path,
             });
         }
-        if path::is_inside(&other, root) {
+        if path::is_inside_place(&other, root) {
             return Err(AddRootError::Inside {
                 path: display,
                 name: existing.name,
                 outer: existing.path,
             });
         }
-        if path::is_inside(root, &other) {
+        if path::is_inside_place(root, &other) {
             return Err(AddRootError::Contains {
                 path: display,
                 name: existing.name,
@@ -687,20 +693,32 @@ impl Roots {
     /// 导入前端元数据时要走它——那些文件里写的是绝对路径，得先折回键才对得上变体
     /// （`adapter::transfer`）。**最长的根赢**：根之间本来不许套在一起，但命令行
     /// 给的覆盖路径管不住，取最长的那条至少不会把 `/盘/Game/FC` 判给 `/盘`。
+    ///
+    /// **两边都先折成可比形态**（[`path::comparable`]）：[`path::normalize_existing`]
+    /// 在 Windows 上交出 `\\?\D:\…`，而库里的根是 display 形态 `D:\…`，不折的话
+    /// 圈不住、也切不出相对根的那一段——**一条都对不回键**。
     #[must_use]
     pub fn key_of(&self, path: &Path) -> Option<String> {
-        let path = path::normalize_existing(path);
-        let mut best: Option<(&str, &Path)> = None;
+        let normalized = path::normalize_existing(path);
+        // 两边都折成**可比形态**再比、再切：手上这条是 `canonicalize` 的产物
+        // （Windows 上带 `\\?\`），库里那条是 display 形态，直接比恒不相等，
+        // 直接 `strip_prefix` 也切不动（见 [`path::comparable_text`]）。
+        let path = path::comparable(&normalized);
+        let mut best: Option<(&str, Cow<'_, Path>)> = None;
         for (name, root) in self.iter() {
-            if !path::is_inside(root, &path) {
+            let root = path::comparable(root);
+            if !path::is_inside_place(&root, &path) {
                 continue;
             }
-            if best.is_none_or(|(_, chosen)| root.as_os_str().len() > chosen.as_os_str().len()) {
+            if best
+                .as_ref()
+                .is_none_or(|(_, chosen)| root.as_os_str().len() > chosen.as_os_str().len())
+            {
                 best = Some((name, root));
             }
         }
         let (name, root) = best?;
-        Some(path::library_key(name, root, &path))
+        Some(path::library_key(name, &root, &path))
     }
 }
 
@@ -792,6 +810,67 @@ mod tests {
         // **与自己比不算套在一起**：换个挂载点是正常操作。
         check_placement(&catalog, None, "主库", Path::new("/盘/Game")).expect("原地不动");
         check_placement(&catalog, None, "主库", Path::new("/别的盘/Game")).expect("换挂载点");
+    }
+
+    #[test]
+    fn 扩展长度形式的根与库里存的那一条算同一个地方() {
+        // Windows 上 `canonicalize` 交出 `\\?\D:\Game`，而 `library_root.path` 存的是
+        // display 形态 `D:\Game`。两种写法按 `Path` 的分量比恒不相等（`VerbatimDisk`
+        // 与 `Disk` 不是同一个分量），于是同路径改名一路走到 `library_root_path` 的
+        // UNIQUE 索引上，撞出一句裸 SQLite 错。判据折成可比形态之后才说得出人话。
+        //
+        // 这一条各平台都跑得了：折叠在**字符串层**，不靠 `Path` 拆盘符。
+        let catalog = 一份库();
+        catalog.insert_root("主库", r"D:\Game").expect("记得下");
+        let error =
+            check_placement(&catalog, None, "元数据", Path::new(r"\\?\D:\Game")).expect_err("该被拒");
+        let AddRootError::SamePath { name, .. } = &error else {
+            panic!("该报「同一个地方」，实际是 {error}");
+        };
+        assert_eq!(name, "主库");
+    }
+
+    #[test]
+    fn 扩展长度形式的根套在库里那个根里也拦得住() {
+        // 套叠的根静默放行的代价是同一批文件被数两遍。
+        let catalog = 一份库();
+        catalog.insert_root("主库", r"D:\Game").expect("记得下");
+        let error = check_placement(&catalog, None, "元数据", Path::new(r"\\?\D:\Game\FC"))
+            .expect_err("该被拒");
+        assert!(matches!(error, AddRootError::Inside { .. }), "{error}");
+        // 反过来：新的那个把老的圈进去。
+        let error =
+            check_placement(&catalog, None, "元数据", Path::new(r"\\?\D:\")).expect_err("该被拒");
+        assert!(matches!(error, AddRootError::Contains { .. }), "{error}");
+        // 前缀撞上一半不算套在一起，照旧放行。
+        check_placement(&catalog, None, "元数据", Path::new(r"\\?\D:\GameOther"))
+            .expect("两个互不相干的根");
+    }
+
+    #[test]
+    fn 从盘上的路径折回键挑最长的那个根() {
+        let mut roots = Roots::single("主库", "/盘甲/Game");
+        roots.set("元数据库", "/盘甲/Game/FC");
+        assert_eq!(
+            roots.key_of(Path::new("/盘甲/Game/FC/魂斗罗.zip")).as_deref(),
+            Some("元数据库/魂斗罗.zip")
+        );
+        assert_eq!(roots.key_of(Path::new("/别处/魂斗罗.zip")), None);
+    }
+
+    /// 导入前端元数据时要从绝对路径折回键（`adapter::transfer`）：
+    /// [`path::normalize_existing`] 在 Windows 上交出 `\\?\D:\…`，而库里的根是
+    /// `D:\…`——从前**一条都对不回去**。**本机是 macOS，这条没跑过。**
+    #[cfg(windows)]
+    #[test]
+    fn 扩展长度形式的绝对路径也折得回键() {
+        let roots = Roots::single("主库", r"D:\Game");
+        assert_eq!(
+            roots
+                .key_of(Path::new(r"\\?\D:\Game\FC\魂斗罗.zip"))
+                .as_deref(),
+            Some("主库/FC/魂斗罗.zip")
+        );
     }
 
     #[test]
