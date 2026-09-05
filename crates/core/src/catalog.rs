@@ -20,6 +20,7 @@ pub mod baseline;
 pub mod browse;
 pub mod content;
 pub mod detail;
+mod filter;
 pub mod frontend;
 pub mod identify;
 pub mod roots;

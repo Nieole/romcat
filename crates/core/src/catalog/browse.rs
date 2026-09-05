@@ -34,6 +34,15 @@
 //! 各多少个变体。它是 `GROUP BY`，不是把全库读回来数——真库四万多个变体上，
 //! 平台十几个、合集几十个，一次几毫秒。
 //!
+//! ## 那棵**条件组**也一律下推
+//!
+//! 票 `gui-redesign/04`：筛选器就是**规则**语言，可嵌套的组加三种连接。它同样折成
+//! `WHERE`（`catalog::filter`）而不是取回来再过一遍，理由与上面那四条同一条。
+//!
+//! **它与那四个档之间是且**：那四个是一按就有的快捷档（带条数，供探索），
+//! 这一条是手搭的表达式（供表达）。两边收窄的是同一批变体，
+//! 而「存成子库」时两边一起折进同一条规则（[`WorkQuery::to_rule`]）。
+//!
 //! ## 作品级的主列表另是一个查询面
 //!
 //! [`WorkQuery`] 那一族按**作品**出行（票 `gui-redesign/03`）：一个游戏一行，
@@ -53,6 +62,7 @@ use super::content::{VARIANT_COLUMNS, VariantRow, read_variant_row};
 use super::identify::{Candidate, Confidence, State};
 use super::{Catalog, CatalogError};
 use crate::scrape::{AnchorKind, Field};
+use crate::sublibrary::{Clause, Dimension, Group, Join, Node, Op, Rule};
 
 /// 变体表按哪一列排。
 ///
@@ -196,7 +206,10 @@ pub use crate::report::UNKNOWN_PLATFORM_LABEL;
 ///
 /// 四个可选维度之间是**且**：选了平台又选了合集，两条都得满足。这是浏览而不是搜索
 /// ——「一层层收窄」是人在文件管理器里的动作，而并集会让每多选一个条件行数反而变多。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// 要并集就写进[那棵条件组](Self::rule)里，**亲手选出「任一满足」那一档**——
+/// 行数变多之前人先看见了那四个字（挂账 D154 的裁决）。
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct VariantQuery {
     /// 变体的键里含这个子串才算数；空串等于不筛。
     ///
@@ -219,6 +232,13 @@ pub struct VariantQuery {
     pub chinese: Option<String>,
     /// 只要**识别状态**是这一档的。
     pub state: Option<StateFilter>,
+    /// **筛选器那棵条件树**：可嵌套的组，三种连接（票 `gui-redesign/04`）。
+    ///
+    /// 它与上面那几个维度之间是**且**——上面那几个是一按就有的快捷档，这一条是
+    /// 手搭的表达式，两边收窄的是同一批变体。`None` 是「没搭任何条件」。
+    ///
+    /// **它就是子库的规则**：同一套语言、同一个求值口径（`catalog::filter`）。
+    pub rule: Option<Rule>,
     /// 按哪一列排。
     pub order: VariantOrder,
     /// 倒着排。
@@ -235,7 +255,7 @@ pub const MAX_PAGE: u64 = 4_096;
 ///
 /// 不转义的话，用户在筛选框里打一个 `%` 就等于「什么都匹配」，打 `_` 会悄悄多匹配一个
 /// 字符——而主库里真有带 `%` 的文件名。
-fn escape_like(text: &str) -> String {
+pub(super) fn escape_like(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     for ch in text.chars() {
         if matches!(ch, '\\' | '%' | '_') {
@@ -311,6 +331,12 @@ impl VariantQuery {
                 );
                 args.push(Box::new(state.label().to_string()));
             }
+        }
+        let mut parts: Vec<String> = parts.into_iter().map(str::to_string).collect();
+        if let Some(rule) = &self.rule {
+            let (sql, mut more) = crate::catalog::filter::rule_sql(rule);
+            parts.push(sql);
+            args.append(&mut more);
         }
         if parts.is_empty() {
             return (String::new(), args);
@@ -725,13 +751,13 @@ impl WorkRow {
 
 /// 主列表一次翻页要的是哪一段。
 ///
-/// 六个筛选维度与变体表**共用一份**（[`VariantQuery::where_clause`]）：规格里那条
+/// 六个筛选维度**加上那棵条件组**与变体表**共用一份**（[`VariantQuery::where_clause`]）：规格里那条
 /// 贯穿全局的约定是「**主列表的筛选就是子库的规则**」，而子库选的是变体——两处筛的
 /// 若不是同一批变体，界面上筛出来的那批与真正导出去的那批就对不上。
 ///
 /// 只有 [`contains`](Self::contains) 是主列表自己的：变体表按**键**里含什么筛，
 /// 主列表按**这一行的名字**里含什么筛。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct WorkQuery {
     /// 这一行的名字里含这个子串才算数；空串等于不筛。
     pub contains: String,
@@ -745,10 +771,76 @@ pub struct WorkQuery {
     pub chinese: Option<String>,
     /// 只要**识别状态**是这一档的变体。
     pub state: Option<StateFilter>,
+    /// **筛选器那棵条件树**。见 [`VariantQuery::rule`]——两处共用同一份。
+    pub rule: Option<Rule>,
     /// 按哪一列排。
     pub order: WorkOrder,
     /// 倒着排。
     pub descending: bool,
+}
+
+/// 当前筛选里**写不成规则**的那一条。
+///
+/// 存成子库时它必须挡住而不是被悄悄漏掉：漏一条，子库选出来的就比屏上多，
+/// 而「筛出来的这一批」与「导过去的那一批」对不上正是这份规格要消灭的东西。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unruly {
+    /// **搜索框**里打了字。搜索与筛选是两件事：搜索管的是排序，筛选管的是集合
+    /// （票 `gui-redesign/05`）。
+    Search,
+    /// 按**识别状态**筛了。规则语言里没有这一维——子库的规则是「我要什么内容」，
+    /// 而「这个变体识别到哪一步了」是这一趟的进度，下次重跑就变。
+    State,
+    /// 选的是**平台未知**那一档。写成规则要把全部已知平台列一遍，而清单一变那条规则
+    /// 就悄悄失效——宁可不写。
+    UnknownPlatform,
+    /// 这一维选中的值**里面带逗号**，而逗号是规则里的值分隔符，写进去会被读成两个值。
+    Comma(Dimension),
+    /// 这一维选中的值里有规则语言的记号（两侧带空白的连接词、或者没配对的括号），
+    /// 写进去读回来就不是它自己了。
+    ///
+    /// **合集名是用户自己起的**，「送朋友的 或 备份」「口袋(日版」都合法——
+    /// 折成规则那一步得挡住它，而不是折出一条读回来变了样的规则。
+    Unwritable(Dimension),
+}
+
+impl Unruly {
+    /// 界面上照原样印的那句话。**说清是哪一条、以及怎么办**。
+    #[must_use]
+    pub fn advice(self) -> String {
+        match self {
+            Self::Search => "搜索框里还有字。搜索管的是排序、筛选管的是集合，\
+                             它进不了规则——先把搜索框清空。"
+                .to_string(),
+            Self::State => "还筛着「识别状态」。那是这一趟的进度不是内容，\
+                            重跑识别就变，写不进子库的规则——先把它设回「不筛」。"
+                .to_string(),
+            Self::UnknownPlatform => "还筛着「平台未知」。写成规则要把全部已知平台列一遍，\
+                                      而清单一变那条规则就悄悄失效——先把平台设回「不筛」。"
+                .to_string(),
+            Self::Comma(dimension) => format!(
+                "选中的那个{}里带逗号，而逗号是规则里的值分隔符，写进去会被读成两个值。",
+                dimension.label()
+            ),
+            Self::Unwritable(dimension) => format!(
+                "选中的那个{}里有规则语言的记号（两侧带空白的「且」「或」，                 或者没配对的括号），写进规则读回来就不是它自己了。",
+                dimension.label()
+            ),
+        }
+    }
+}
+
+/// 把左栏一个一按就有的维度折成子句。
+fn facet_clause(dimension: Dimension, value: &str) -> Result<Node, Unruly> {
+    if value.contains(',') {
+        return Err(Unruly::Comma(dimension));
+    }
+    // **`Clause::build` 那两道闸也得翻过来**：合集名是用户自己起的，
+    // 「送朋友的 或 备份」「口袋(日版」都合法，而它们折成规则读回来就不是自己了。
+    // 静默少写一条的话，子库选出来的比屏上多——那正是 `Unruly` 要防的事。
+    Clause::build(dimension, Op::Is, value)
+        .map(Node::Clause)
+        .map_err(|_| Unruly::Unwritable(dimension))
 }
 
 /// 一次批量操作作用在**哪些行**上。
@@ -853,6 +945,68 @@ impl WorkQuery {
             && self.language == other.language
             && self.chinese == other.chinese
             && self.state == other.state
+            && self.rule == other.rule
+    }
+
+    /// **当前筛选原样变成的那条规则**——「存成子库」按下去时走的就是这里。
+    ///
+    /// 这是这份规格里那条贯穿全局的约定落成代码的地方：**主列表的筛选就是子库的规则**。
+    /// 左栏那几个一按就有的维度折成子句，手搭的那棵条件树原样接上来，合起来是一个
+    /// 「全部满足」组——与屏上「各维之间是且」写的是同一句话。
+    ///
+    /// 一个条件都没有时是 `Ok(None)`：那不是「选不中任何东西」，是「整个库」。
+    /// 拿它去建子库是不是个好主意由调用方判断（多半不是）。
+    ///
+    /// # Errors
+    /// 屏上有条件**写不成规则**时返回它，见 [`Unruly`]。**不是少写一条就算了**：
+    /// 少一条的子库选出来的比屏上多，而那正是这条约定要防的事。
+    pub fn to_rule(&self) -> Result<Option<Rule>, Unruly> {
+        if !self.contains.is_empty() {
+            return Err(Unruly::Search);
+        }
+        if self.state.is_some() {
+            return Err(Unruly::State);
+        }
+        let mut nodes: Vec<Node> = Vec::new();
+        match &self.platform {
+            None => {}
+            Some(PlatformFilter::Unknown) => return Err(Unruly::UnknownPlatform),
+            Some(PlatformFilter::Named(platform)) => {
+                nodes.push(facet_clause(Dimension::Platform, platform)?);
+            }
+        }
+        for (dimension, picked) in [
+            (Dimension::Collection, &self.collection),
+            (Dimension::Language, &self.language),
+            (Dimension::Chinese, &self.chinese),
+        ] {
+            if let Some(value) = picked {
+                nodes.push(facet_clause(dimension, value)?);
+            }
+        }
+        if let Some(rule) = &self.rule {
+            // 手搭的那棵树若顶层本来就是「全部满足」，摊进来而不是再套一层括号——
+            // 印出来的那行字是用户要照着核对的东西，白多的括号是噪音。
+            if rule.root.join == Join::All {
+                nodes.extend(rule.root.nodes.iter().cloned());
+            } else {
+                nodes.push(Node::Group(rule.root.clone()));
+            }
+        }
+        if nodes.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Rule::from_group(Group::new(Join::All, nodes))))
+    }
+
+    /// 把一条规则预填进筛选器：子库屏点「改选择」跳回浏览屏时走的那条路
+    /// （票 `gui-redesign/11`）。排序不属于筛选，留给调用方自己补。
+    #[must_use]
+    pub fn from_rule(rule: Rule) -> Self {
+        Self {
+            rule: Some(rule),
+            ..Self::default()
+        }
     }
 
     /// 变体那一层的筛选。**与变体表一字不差地共用**——见结构体文档。
@@ -865,6 +1019,7 @@ impl WorkQuery {
             language: self.language.clone(),
             chinese: self.chinese.clone(),
             state: self.state,
+            rule: self.rule.clone(),
             order: VariantOrder::default(),
             descending: false,
         }

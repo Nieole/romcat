@@ -50,14 +50,14 @@ use serde::Serialize;
 use crate::catalog::{Catalog, CatalogError};
 use crate::scrape::{AnchorKind, Field};
 
-pub use rule::{Bound, Clause, Dimension, Op, Rule, RuleError};
+pub use rule::{Bound, Clause, Dimension, Group, Join, Node, Op, Rule, RuleError};
 
 /// **评分**在 `scrape_value` 里的字段名。
 ///
 /// 它**不在 [`Field`] 里**：眼下没有任何源产得出评分（挂账 D68）。这个常量在这里，
 /// 是为了让规则那一维与将来真的落库的那个字段名对得上，而不必现在就在 `Field` 上
 /// 立一列谁也填不满的枚举值。
-const RATING_FIELD: &str = "评分";
+pub(crate) const RATING_FIELD: &str = "评分";
 
 /// 一个**子库**的定义。
 ///
@@ -206,6 +206,21 @@ pub struct VariantFacts {
     pub years: Vec<f64>,
     /// 刮削来的评分，0–1。眼下没有源（见 [`RATING_FIELD`]）。
     pub ratings: Vec<f64>,
+    /// 刮削来的开发商。
+    pub developers: Vec<String>,
+    /// 刮削来的发行商。
+    pub publishers: Vec<String>,
+    /// 刮削来的简介。
+    pub descriptions: Vec<String>,
+    /// 在不在**收藏**里。
+    ///
+    /// **眼下永远是 `false`**：记收藏的那条路（沉淀库里的成员关系）是票
+    /// `gui-redesign/06` 的活，中立库里还没有那张表。维度先立起来——规则认得出
+    /// `收藏=是`、也算得动它，等票 06 把值填进来，一条规则都不用改。
+    ///
+    /// 这条缝故意留在**事实**这一层而不是求值那一层：[`select`] 是纯函数，
+    /// 它只看事实；把收藏接上来是 [`facts`] 多读一张表的事。
+    pub favorite: bool,
 }
 
 impl VariantFacts {
@@ -218,6 +233,12 @@ impl VariantFacts {
             Dimension::Chinese => self.chinese.iter().any(|value| hit(value)),
             Dimension::Collection => self.collections.iter().any(|value| hit(value)),
             Dimension::Genre => self.genres.iter().any(|value| hit(value)),
+            Dimension::Developer => self.developers.iter().any(|value| hit(value)),
+            Dimension::Publisher => self.publishers.iter().any(|value| hit(value)),
+            Dimension::Description => self.descriptions.iter().any(|value| hit(value)),
+            // **收藏是个是非题**：两档都是值，没有「取不到」这一说。于是
+            // `收藏=否` 对一个没收藏的变体成立，而不是像缺数据那样一律不成立。
+            Dimension::Favorite => hit(if self.favorite { "是" } else { "否" }),
             Dimension::Year | Dimension::Rating | Dimension::Size => false,
         }
     }
@@ -236,10 +257,13 @@ impl VariantFacts {
     /// 这个变体在这一维上有没有值。报告拿它算「这一维在这份库里有多少数据」。
     #[must_use]
     pub fn has(&self, dimension: Dimension) -> bool {
-        if dimension.is_number() {
-            self.any_number(dimension, |_| true)
-        } else {
-            self.any_text(dimension, |_| true)
+        match dimension {
+            // **收藏这一维「有数据」指的是真收藏了**。两档都算有值的话，一份一条收藏
+            // 都没有的库上，`收藏=是` 选不出东西这件事就没人说得出是为什么——
+            // 而报告的正题恰恰是「说清是缺数据还是写错了」。
+            Dimension::Favorite => self.favorite,
+            _ if dimension.is_number() => self.any_number(dimension, |_| true),
+            _ => self.any_text(dimension, |_| true),
         }
     }
 }
@@ -433,7 +457,7 @@ pub fn select(selection: &Selection, facts: &[VariantFacts]) -> Selected {
         .collect();
     let mut referenced: BTreeSet<Dimension> = BTreeSet::new();
     for rule in &selection.rules {
-        for condition in &rule.clauses {
+        for condition in rule.clauses() {
             referenced.insert(condition.dimension);
         }
     }
@@ -502,11 +526,23 @@ pub fn select(selection: &Selection, facts: &[VariantFacts]) -> Selected {
     out
 }
 
-/// 这条规则选中这个变体吗——子句之间是**且**。
+/// 这条规则选中这个变体吗——从顶层那个组算起。
 fn matches(rule: &Rule, facts: &VariantFacts) -> bool {
-    rule.clauses
-        .iter()
-        .all(|condition| satisfies(condition, facts))
+    holds(&rule.root, facts)
+}
+
+/// 这个组成立吗。三种连接各算各的，**空组按各自的中性元算**：
+/// 「全部满足」与「都不满足」空着成立（没有一项不成立），「任一满足」空着不成立。
+fn holds(group: &Group, facts: &VariantFacts) -> bool {
+    let mut each = group.nodes.iter().map(|node| match node {
+        Node::Clause(clause) => satisfies(clause, facts),
+        Node::Group(inner) => holds(inner, facts),
+    });
+    match group.join {
+        Join::All => each.all(|ok| ok),
+        Join::Any => each.any(|ok| ok),
+        Join::None => !each.any(|ok| ok),
+    }
 }
 
 /// 这个子句成立吗。
@@ -517,6 +553,8 @@ fn satisfies(condition: &Clause, facts: &VariantFacts) -> bool {
     let any = match &condition.bound {
         Bound::Text(wanted) => facts.any_text(condition.dimension, |value| match condition.op {
             Op::Contains => wanted.iter().any(|want| contains_ignore_case(value, want)),
+            Op::StartsWith => wanted.iter().any(|want| starts_with_ignore_case(value, want)),
+            Op::EndsWith => wanted.iter().any(|want| ends_with_ignore_case(value, want)),
             _ => wanted.iter().any(|want| value.eq_ignore_ascii_case(want)),
         }),
         Bound::Number(wanted) => {
@@ -533,13 +571,31 @@ fn satisfies(condition: &Clause, facts: &VariantFacts) -> bool {
 }
 
 /// 忽略 ASCII 大小写的子串判断。汉字不受影响（本来就没有大小写）。
+///
+/// **不看两头是不是纯 ASCII**：`口袋RED` 里含不含 `red`，答案不该取决于这个作品名
+/// 里还有没有汉字。从前那个写法（非纯 ASCII 就退成逐字节比）与 SQL 那一侧
+/// （`lower()` 只折 ASCII，混着汉字照折）在中英混排的名字上会给出两个答案，
+/// 而那种名字这个库里到处都是。
 fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
-    if haystack.is_ascii() && needle.is_ascii() {
-        return haystack
-            .to_ascii_lowercase()
-            .contains(&needle.to_ascii_lowercase());
-    }
-    haystack.contains(needle)
+    haystack
+        .to_ascii_lowercase()
+        .contains(&needle.to_ascii_lowercase())
+}
+
+/// 忽略 ASCII 大小写的**开头**判断（`^ 以…开始`）。
+fn starts_with_ignore_case(haystack: &str, needle: &str) -> bool {
+    haystack
+        .get(..needle.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(needle))
+}
+
+/// 忽略 ASCII 大小写的**结尾**判断（`$ 以…结束`）。
+fn ends_with_ignore_case(haystack: &str, needle: &str) -> bool {
+    haystack
+        .len()
+        .checked_sub(needle.len())
+        .and_then(|at| haystack.get(at..))
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(needle))
 }
 
 /// 把中立库折成 [`select`] 要的那批事实。
@@ -633,6 +689,9 @@ enum ScrapedInto {
     Genre,
     Year,
     Rating,
+    Developer,
+    Publisher,
+    Description,
 }
 
 impl ScrapedInto {
@@ -643,6 +702,12 @@ impl ScrapedInto {
             Some(Self::Year)
         } else if field == RATING_FIELD {
             Some(Self::Rating)
+        } else if field == Field::Developer.label() {
+            Some(Self::Developer)
+        } else if field == Field::Publisher.label() {
+            Some(Self::Publisher)
+        } else if field == Field::Description.label() {
+            Some(Self::Description)
         } else {
             None
         }
@@ -663,6 +728,9 @@ impl ScrapedInto {
                     facts.ratings.push(rating);
                 }
             }
+            Self::Developer => facts.developers.push(value.to_string()),
+            Self::Publisher => facts.publishers.push(value.to_string()),
+            Self::Description => facts.descriptions.push(value.to_string()),
         }
     }
 }

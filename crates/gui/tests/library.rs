@@ -931,3 +931,226 @@ fn 库里有一条顶到闸上的简介时列表照样滚得动() {
     assert!(cost.reads <= 2, "滚了 240 行读了 {} 次库", cost.reads);
     assert!(cost.median_ms > 0.0, "没量到时间，这一趟没滚动");
 }
+
+/// 把一条规则预填进筛选器，跑几帧，返回筛出多少行。
+///
+/// **走的是界面上那条路**（[`library::Screen::set_filter_rule`]），不是直接改查询：
+/// 子库屏点「改选择」跳回来预填的正是它（票 `gui-redesign/11`）。
+fn 按规则筛(ctx: &egui::Context, app: &mut App, text: &str) -> u64 {
+    let rule = romcat_core::sublibrary::Rule::parse(text)
+        .unwrap_or_else(|error| panic!("「{text}」读不懂：{error}"));
+    app.library_and_site().0.set_filter_rule(Some(rule));
+    跑(ctx, app, 2);
+    app.window().total()
+}
+
+#[test]
+fn 三种连接在筛选器上各自成立而且组嵌得动() {
+    let ctx = headless::context();
+    let mut app = 界面(ROWS);
+    跑(&ctx, &mut app, 2);
+    let 全部 = app.window().total();
+    let (甲, 乙) = {
+        let facets = app.library().facets();
+        (
+            facets.platforms[0].value.clone(),
+            facets.platforms[1].value.clone(),
+        )
+    };
+
+    // 全部满足：一层层收窄。
+    let 单条 = 按规则筛(&ctx, &mut app, &format!("平台={甲}"));
+    assert!(单条 > 0 && 单条 < 全部, "{单条} vs {全部}：这一条根本没筛");
+    let 又加一条 = 按规则筛(&ctx, &mut app, &format!("平台={甲} 且 中文=汉化"));
+    assert!(又加一条 <= 单条, "「全部满足」加一条反而多出行来");
+
+    // 任一满足：两个平台一起看，比任一个单独看都不少。
+    let 另一条 = 按规则筛(&ctx, &mut app, &format!("平台={乙}"));
+    let 并起来 = 按规则筛(&ctx, &mut app, &format!("平台={甲} 或 平台={乙}"));
+    assert!(
+        并起来 >= 单条 && 并起来 >= 另一条,
+        "{并起来} 比 {单条} / {另一条} 还少——「任一满足」算成了交集",
+    );
+
+    // 都不满足：这两个平台一个都不许沾。再叠上其中一个，一行都不该剩。
+    let 都不 = 按规则筛(&ctx, &mut app, &format!("都不(平台={甲} 或 平台={乙})"));
+    assert!(都不 > 0, "合成数据里该有别的平台");
+    assert_eq!(
+        按规则筛(
+            &ctx,
+            &mut app,
+            &format!("平台={甲} 且 都不(平台={甲} 或 平台={乙})")
+        ),
+        0,
+        "「是甲」与「甲乙都不是」同时成立，那说明「都不满足」算错了",
+    );
+
+    // 组嵌两层：里面那个自己是「任一满足」。
+    let 嵌套 = 按规则筛(
+        &ctx,
+        &mut app,
+        &format!("平台={甲} 且 (中文=汉化 或 类型~角色)"),
+    );
+    assert!(嵌套 > 0 && 嵌套 <= 单条);
+
+    // **筛选下推到中立库**：筛完之后内存里还是那一扇窗，不是把全库读进来。
+    assert!(
+        app.window().retained() as u64 <= SPAN,
+        "内存里留了 {} 行——筛选没下推",
+        app.window().retained(),
+    );
+}
+
+#[test]
+fn 以开始与以结束在筛选器上筛得动() {
+    let ctx = headless::context();
+    let mut app = 界面(4_000);
+    跑(&ctx, &mut app, 2);
+    let 平台 = app.library().facets().platforms[0].value.clone();
+    let 头一个字: String = 平台.chars().take(1).collect();
+    let 末一个字: String = 平台.chars().last().into_iter().collect();
+
+    let 等于 = 按规则筛(&ctx, &mut app, &format!("平台={平台}"));
+    let 开头 = 按规则筛(&ctx, &mut app, &format!("平台^{头一个字}"));
+    let 结尾 = 按规则筛(&ctx, &mut app, &format!("平台${末一个字}"));
+    assert!(开头 >= 等于, "「以…开始」比「等于」还窄");
+    assert!(结尾 >= 等于, "「以…结束」比「等于」还窄");
+    // 整个名字当前缀就等于「等于」——同一批行。
+    assert_eq!(按规则筛(&ctx, &mut app, &format!("平台^{平台}")), 等于);
+}
+
+#[test]
+fn 筛出来的条数与真正命中的条数一致() {
+    let ctx = headless::context();
+    let mut app = 界面(ROWS);
+    let 平台 = {
+        跑(&ctx, &mut app, 2);
+        app.library().facets().platforms[0].value.clone()
+    };
+    按规则筛(&ctx, &mut app, &format!("平台={平台} 或 中文=汉化"));
+
+    let 行数 = app.window().total();
+    let 变体数 = app.library().filtered_total().expect("数得出来");
+    assert!(行数 > 0 && 变体数 >= 行数, "{变体数} 个变体撑不起 {行数} 行");
+
+    // 屏上写着几个变体，按下批量操作就该动几个——**三处同一个数**。
+    let (库里, 屏上) = {
+        let (library, site) = app.library_and_site();
+        let query = library.query().clone();
+        (
+            site.catalog
+                .scoped_variants(&query, romcat_core::catalog::browse::Scope::AllExcept(&[]))
+                .expect("展得开")
+                .len(),
+            library.filtered_total().expect("数得出来"),
+        )
+    };
+    assert_eq!(库里 as u64, 屏上);
+}
+
+#[test]
+fn 存成子库把当前条件原样变成规则() {
+    let ctx = headless::context();
+    let mut app = 界面(4_000);
+    跑(&ctx, &mut app, 2);
+    let (平台, 合集) = {
+        let facets = app.library().facets();
+        (
+            facets.platforms[0].value.clone(),
+            facets.collections[0].value.clone(),
+        )
+    };
+    // 左栏点一个合集，筛选器里再搭一棵「任一满足」的树——**两半都要带过去**。
+    {
+        let (library, _) = app.library_and_site();
+        library.query_mut().collection = Some(合集.clone());
+        library.set_filter_rule(Some(
+            romcat_core::sublibrary::Rule::parse(&format!("平台={平台} 或 中文=汉化"))
+                .expect("读得懂"),
+        ));
+    }
+    跑(&ctx, &mut app, 2);
+
+    let 屏上: std::collections::BTreeSet<String> = {
+        let (library, site) = app.library_and_site();
+        let query = library.query().clone();
+        site.catalog
+            .scoped_variants(&query, romcat_core::catalog::browse::Scope::AllExcept(&[]))
+            .expect("展得开")
+            .into_iter()
+            .collect()
+    };
+    assert!(!屏上.is_empty(), "这份筛选该选得中东西，否则这条断言等于没测");
+
+    {
+        let (library, site) = app.library_and_site();
+        let draft = library.save_draft_mut();
+        draft.name = "掌机".to_string();
+        draft.target = "/Volumes/SDCARD/掌机".to_string();
+        library.save_as_sublibrary(site);
+        assert!(library.error().is_none(), "{:?}", library.error());
+        assert!(library.notice().is_some(), "建完子库没有回执");
+    }
+
+    // **新建的子库选出来的东西与屏上一致。**
+    let (库里那条, 子库选出来的) = {
+        let (_, site) = app.library_and_site();
+        let loaded = site.catalog.selection("掌机").expect("选择集读得回来");
+        assert!(loaded.broken.is_empty(), "{:?}", loaded.broken);
+        let facts = romcat_core::sublibrary::facts(&site.catalog).expect("事实折得出来");
+        let picked: std::collections::BTreeSet<String> =
+            romcat_core::sublibrary::select(&loaded.selection, &facts)
+                .picked
+                .into_iter()
+                .map(|picked| picked.key)
+                .collect();
+        (loaded.selection.rules[0].text.clone(), picked)
+    };
+    assert_eq!(子库选出来的, 屏上, "存成子库之后选出来的与屏上筛出来的不是同一批");
+    // 那条规则就是屏上那几条，一条不多一条不少。
+    assert_eq!(
+        库里那条,
+        format!("合集={合集} 且 (平台={平台} 或 中文=汉化)"),
+    );
+
+    // 重名不覆盖：撞上一个已有的子库要当场说清，不能悄悄把它的选择集并上一批。
+    {
+        let (library, site) = app.library_and_site();
+        let draft = library.save_draft_mut();
+        draft.name = "掌机".to_string();
+        draft.target = "/Volumes/SDCARD/另一张".to_string();
+        library.save_as_sublibrary(site);
+        assert!(
+            library.error().is_some_and(|error| error.contains("掌机")),
+            "重名居然存下去了",
+        );
+    }
+}
+
+#[test]
+fn 写不成规则的筛选条件当场挡住() {
+    let ctx = headless::context();
+    let mut app = 界面(4_000);
+    跑(&ctx, &mut app, 2);
+    {
+        let (library, _) = app.library_and_site();
+        // 「识别状态」进不了规则：那是这一趟的进度不是内容。
+        library.query_mut().state = Some(StateFilter::Unidentified);
+        let draft = library.save_draft_mut();
+        draft.name = "存不成".to_string();
+        draft.target = "/Volumes/SDCARD/存不成".to_string();
+    }
+    跑(&ctx, &mut app, 1);
+    {
+        let (library, site) = app.library_and_site();
+        library.save_as_sublibrary(site);
+        assert!(
+            library.error().is_some_and(|error| error.contains("识别状态")),
+            "少写一条就存下去了：那样子库选出来的会比屏上多",
+        );
+        assert!(
+            site.catalog.sublibrary("存不成").expect("读得动").is_none(),
+            "挡住了却还是建了个子库出来",
+        );
+    }
+}

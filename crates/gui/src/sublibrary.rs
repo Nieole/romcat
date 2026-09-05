@@ -1102,7 +1102,13 @@ impl Screen {
                         .map(|d| d.label())
                         .collect::<Vec<_>>()
                         .join("、"),
-                ));
+                ))
+                .on_hover_text(
+                    "一条规则是一棵**组**：` 且 ` 全部满足、` 或 ` 任一满足、\
+                     `都不(…)` 都不满足，组里还能再套组。**在浏览屏的筛选器里搭同一棵树\
+                     看得见它真的选中了什么**，筛到满意按「存成子库」。\
+                     从这一屏跳回去改（「改选择」）是票 11。",
+                );
                 let mut drop_rule: Option<i64> = None;
                 for stored in &self.rules {
                     ui.horizontal(|ui| {
@@ -1125,7 +1131,7 @@ impl Screen {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.rule_draft)
                             .desired_width(320.0)
-                            .hint_text("平台=GBA,GB 且 中文=汉化"),
+                            .hint_text("平台=GBA,GB 且 (中文=汉化 或 类型~RPG)"),
                     );
                     if ui
                         .add_enabled(

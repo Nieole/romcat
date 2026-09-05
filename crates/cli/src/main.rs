@@ -3731,7 +3731,10 @@ fn run_sublibrary_rule(args: &SubRuleArgs) -> ExitCode {
                 .unwrap_or_default();
             println!("{}{}{broken}", pad(&rule.ordinal.to_string(), 6), rule.text);
         }
-        println!("\n多条规则之间是**并集**，一条之内的子句用 ` 且 ` 连起来是**交集**。");
+        println!(
+            "\n多条规则之间是**并集**。一条之内是一棵**组**：` 且 ` 全部满足、\
+             ` 或 ` 任一满足、`都不(…)` 都不满足，组里还能再套组。"
+        );
     }
     println!("\n能筛的维度");
     println!("{}", "─".repeat(16));
@@ -3739,10 +3742,14 @@ fn run_sublibrary_rule(args: &SubRuleArgs) -> ExitCode {
         println!("{}{}", pad(dimension.label(), 8), dimension.hint());
     }
     println!(
-        "\n运算符：= != ~（含有）<= < >= >。写法举例：\n  \
+        "\n运算符：= != ~（含有）^（以…开始）$（以…结束）<= < >= >。写法举例：\n  \
          平台=GB,GBA 且 中文=汉化\n  \
          平台=FC 且 体积<=4MiB\n  \
-         作品~火焰纹章 且 年份>=2000"
+         作品^火焰纹章 且 年份>=2000\n  \
+         平台=GB,GBA 且 (中文=汉化 或 类型~RPG)\n  \
+         平台=SFC 且 都不(语言=En 或 中文=官中)\n\n\
+         连接词两侧要有空白（值里出现「且」「或」不当分隔符）；\
+         同一层里不许既写「且」又写「或」——要混就套括号。"
     );
     ExitCode::SUCCESS
 }

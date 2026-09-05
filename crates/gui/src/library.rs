@@ -12,9 +12,14 @@
 //! ## 这一屏要回答的三个问题
 //!
 //! 1. **我有哪些游戏**——中间那张表，虚拟化，十万行滚起来的代价与总行数无关。
-//! 2. **我要找的那一批在哪**——左边那五个筛选：**平台**、**合集**、**语言**、
-//!    **中文**、**识别状态**。一律下推到中立库的 `WHERE`，内存里永远只有当前视口那几十行。
-//!    （可嵌套的条件组与 `^` `$` 两个运算符是票 `04` 的活，这一栏先把位置占住。）
+//! 2. **我要找的那一批在哪**——左边那一栏。上半是五个一按就有的档：**平台**、
+//!    **合集**、**语言**、**中文**、**识别状态**；下半是一棵可嵌套的**条件组**
+//!    （[`crate::filter`]），三种连接、九个运算符。**两半之间是且**，一律下推到中立库的
+//!    `WHERE`，内存里永远只有当前视口那几十行。
+//!
+//!    **那棵条件组就是子库的规则**：筛到满意按「存成子库」，条件原样变成那个子库的
+//!    规则（[`WorkQuery::to_rule`]）；反过来子库屏点「改选择」跳回来，规则预填进筛选器
+//!    （[`Screen::set_filter_rule`]，票 `11`）。
 //! 3. **这一行到底是什么**——右边那块面板的三层：**作品** → **变体**（每个带置信度与
 //!    **依据**）→ **文件**（含附属文件与内部资源）。媒体那一块只列得出来，
 //!    内嵌显示是票 `07`。
@@ -38,12 +43,16 @@
 //! ## 中文输入全在底下那块面板里
 //!
 //! 一个 [`egui::TextEdit`] 都不进表格单元格：表格是虚拟化的，正在组字的那一行一旦滚出
-//! 视口，那个控件就不存在了（ADR-0005 的修订段）。左边的筛选栏里也一个都没有——
-//! 那五个维度是**选**出来的不是打出来的，值从中立库现问（[`Catalog::facets`]）。
+//! 视口，那个控件就不存在了（ADR-0005 的修订段）。
+//!
+//! 左边那一栏上半的五个维度是**选**出来的不是打出来的，值从中立库现问
+//! （[`Catalog::facets`]）；下半那棵条件组里每条子句有一个值要打，而**那一栏不虚拟化**
+//! ——一个 `ScrollArea` 把里面每一行都画出来，正在组字的那一行不会凭空消失。
+//! 这条界线不是「表格 vs 面板」，是**虚拟化 vs 不虚拟化**。
 
 use egui::{Align, Layout};
 use romcat_core::catalog::browse::{
-    Facets, PlatformFilter, WorkAnchor, WorkDetail, WorkQuery, WorkVariant,
+    Facets, PlatformFilter, Scope, WorkAnchor, WorkDetail, WorkQuery, WorkVariant,
 };
 use romcat_core::catalog::{Catalog, Confidence, VariantDetail};
 use romcat_core::report::{capacity, human_bytes, thousands};
@@ -51,8 +60,10 @@ use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::priority::VERDICT;
 use romcat_core::scrape::{AnchorKind, Field, Priorities};
 use romcat_core::site::Site;
+use romcat_core::sublibrary::{Rule, Sublibrary};
 use romcat_core::title::{Language, TitleKind};
 
+use crate::filter::Filter;
 use crate::font;
 use crate::table::{Picked, SPAN, Table, Window};
 
@@ -157,6 +168,18 @@ impl Default for ValueDraft {
     }
 }
 
+/// 「**存成子库**」那两个格子。
+///
+/// 前端格式与容量上限**不在这儿**：这一栏管的是「把这批选中存下来」，
+/// 那两样是设备的属性，去子库屏调。
+#[derive(Debug, Clone, Default)]
+pub struct SaveDraft {
+    /// 子库叫什么。一台目标设备一个。
+    pub name: String,
+    /// 目标设备上的子库根。**卡不在位也存得下**——子库是持久实体。
+    pub target: String,
+}
+
 /// 浏览屏。
 pub struct Screen {
     window: Window,
@@ -164,6 +187,16 @@ pub struct Screen {
     query: WorkQuery,
     /// 五个维度各有哪些值可选。换库或改过元数据才重问。
     facets: Facets,
+    /// **筛选器**：那棵可嵌套的条件组。它折出来的规则每帧同步进 [`Self::query`]。
+    filter: Filter,
+    /// **当前筛选下一共多少个变体**。`None` 是数不出来，不是零。
+    ///
+    /// 与 [`Self::scope`] 不是一个数：这一个是**筛出来的全部**，那一个是**选中的那几行
+    /// 展开出来的**。屏上两个都写，因为按批量操作之前要分得清「筛出来多少」与
+    /// 「我勾了多少」。
+    filtered: Option<u64>,
+    /// 「存成子库」那两个格子：名字与目标路径。
+    save: SaveDraft,
     /// 高亮的是哪一行（全序下标）。
     focused: Option<u64>,
     /// 选中了哪几行——**批量操作的作用范围**。与 [`Self::focused`] 不是一回事。
@@ -220,6 +253,9 @@ impl Screen {
             window: Window::new(SPAN),
             query: WorkQuery::default(),
             facets: Facets::default(),
+            filter: Filter::default(),
+            filtered: None,
+            save: SaveDraft::default(),
             focused: None,
             picked: Picked::default(),
             opened: None,
@@ -282,6 +318,33 @@ impl Screen {
     #[must_use]
     pub fn facets(&self) -> &Facets {
         &self.facets
+    }
+
+    /// **筛选器**那棵条件组。
+    #[must_use]
+    pub fn filter(&self) -> &Filter {
+        &self.filter
+    }
+
+    /// 把一条**规则**预填进筛选器，并当场按它筛。
+    ///
+    /// 子库屏点「改选择」跳回浏览屏时走的就是它（票 `gui-redesign/11`）：**规则原样摊在
+    /// 筛选器里**，人改的时候看得见它真的筛出了什么。反过来那一半是
+    /// [`WorkQuery::to_rule`]。
+    pub fn set_filter_rule(&mut self, rule: Option<Rule>) {
+        self.filter.set_rule(rule.clone());
+        self.query.rule = rule;
+    }
+
+    /// **当前筛选下一共多少个变体**。`None` 是数不出来，不是零。
+    #[must_use]
+    pub fn filtered_total(&self) -> Option<u64> {
+        self.filtered
+    }
+
+    /// 「存成子库」那两个格子，供实测与测试填。
+    pub fn save_draft_mut(&mut self) -> &mut SaveDraft {
+        &mut self.save
     }
 
     /// 选中了哪几行。
@@ -585,6 +648,17 @@ impl Screen {
             self.load_work(catalog);
         }
         self.window.sync(catalog);
+        if refiltered || self.filtered.is_none() {
+            // **筛出来多少**与**选中多少**是两个数，各数各的：前者换筛选才变，
+            // 后者每勾一行就变。合成一个的话，屏上「筛出 N 行」会跟着勾选跳。
+            match catalog.scoped_variant_total(&self.query, Scope::AllExcept(&[])) {
+                Ok(total) => self.filtered = Some(total),
+                Err(error) => {
+                    self.filtered = None;
+                    self.error = Some(format!("中立库读不动：{error}"));
+                }
+            }
+        }
         if refiltered || self.scoped.as_ref() != Some(&self.picked) {
             self.scoped = Some(self.picked.clone());
             match catalog.scoped_variant_total(&self.query, self.picked.scope()) {
@@ -609,7 +683,7 @@ impl Screen {
         egui::Panel::left("筛选")
             .default_size(230.0)
             .min_size(150.0)
-            .show(ui, |ui| self.filter_panel(ui));
+            .show(ui, |ui| self.filter_panel(ui, site));
         egui::Panel::right("浏览详情")
             .default_size(360.0)
             .min_size(200.0)
@@ -634,8 +708,8 @@ impl Screen {
         });
     }
 
-    /// 左边那栏：五个筛选维度。**一个文本框都没有**——值是选的，不是打的。
-    fn filter_panel(&mut self, ui: &mut egui::Ui) {
+    /// 左边那栏：上半五个一按就有的档，下半那棵**条件组**。
+    fn filter_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
         egui::ScrollArea::vertical()
             .id_salt("筛选栏")
             .show(ui, |ui| {
@@ -648,12 +722,13 @@ impl Screen {
                             descending: order.1,
                             ..WorkQuery::default()
                         };
+                        self.filter.clear();
                     }
                 });
-                ui.weak("各维之间是「且」：一层层收窄。全部下推到中立库。")
+                ui.weak("上下两半之间是「且」：一层层收窄。全部下推到中立库。")
                     .on_hover_text(
-                        "**这就是子库的规则**：筛到满意存成子库，规则原样带过去。\
-                         可嵌套的条件组与「以…开始 / 以…结束」在票 04 接上来。",
+                        "**这就是子库的规则**：筛到满意按「存成子库」，条件原样变成那个\
+                         子库的规则；反过来子库屏点「改选择」跳回这里，规则预填进筛选器。",
                     );
                 ui.separator();
 
@@ -699,7 +774,141 @@ impl Screen {
                     }
                 }
                 self.query.state = state;
+                ui.separator();
+
+                ui.strong("筛选器")
+                    .on_hover_text(
+                        "可嵌套的**条件组**：每组选「全部满足 / 任一满足 / 都不满足」，\
+                         组里还能再套组。**这就是子库的规则**。",
+                    );
+                if self.filter.ui(ui) {
+                    // 条件组一改就是换了一批行——同步进查询，`sync_window` 那一趟
+                    // 会把窗口作废重取，选中也跟着清掉。
+                    self.query.rule = self.filter.rule().cloned();
+                }
+                ui.separator();
+
+                // **筛出多少条当场写出来**：按批量操作之前心里有数。
+                ui.label(format!(
+                    "筛出 {} 行 · {} 个变体",
+                    thousands(self.window.total()),
+                    scope_label(self.filtered),
+                ))
+                .on_hover_text(
+                    "行数照的是「作品数 ＋ 还没认出作品的变体数」；\
+                     变体数是这批行底下的全部变体，按当前筛选。",
+                );
+                ui.separator();
+
+                self.save_panel(ui, site);
             });
+    }
+
+    /// 「**存成子库**」：把当前筛选原样变成一条规则。
+    ///
+    /// 规格里那条贯穿全局的约定落在这一个按钮上——**主列表的筛选就是子库的规则**。
+    /// 折规则那一步在核心库（[`WorkQuery::to_rule`]），这里只把两个格子交给它，
+    /// 再把它说的话原样印出来。
+    ///
+    /// **写不成规则的条件当场挡住**，不是少写一条了事：少一条，子库选出来的就比屏上多。
+    fn save_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+        ui.strong("存成子库");
+        let folded = self.query.to_rule();
+        match &folded {
+            Ok(None) => {
+                ui.weak("一个条件都没筛——存出来的子库就是整个库。先筛一批。");
+            }
+            Ok(Some(rule)) => {
+                ui.weak(format!("规则会是：{rule}"));
+            }
+            Err(unruly) => {
+                ui.colored_label(ui.visuals().error_fg_color, unruly.advice());
+            }
+        }
+        for (label, value, hint) in [
+            ("名字", &mut self.save.name, "一台目标设备一个"),
+            ("目标路径", &mut self.save.target, "读卡器挂上来的那个目录"),
+        ] {
+            ui.horizontal(|ui| {
+                ui.label(label);
+                ui.add(
+                    egui::TextEdit::singleline(value)
+                        .desired_width(140.0)
+                        .hint_text(hint),
+                );
+            });
+        }
+        let ready = !self.save.name.trim().is_empty()
+            && !self.save.target.trim().is_empty()
+            && matches!(folded, Ok(Some(_)));
+        if ui
+            .add_enabled(ready, egui::Button::new("存成子库"))
+            .on_hover_text("把当前筛选原样变成这个子库的规则。前端格式与容量上限去子库屏调。")
+            .clicked()
+        {
+            self.save_as_sublibrary(site);
+        }
+    }
+
+    /// 真的建那个子库。**测试拿它当按下去那一下。**
+    pub fn save_as_sublibrary(&mut self, site: &mut Site) {
+        let rule = match self.query.to_rule() {
+            Ok(Some(rule)) => rule,
+            Ok(None) => {
+                self.error = Some("一个条件都没筛：存出来的子库会是整个库。".to_string());
+                return;
+            }
+            Err(unruly) => {
+                self.error = Some(format!("这份筛选存不成子库：{}", unruly.advice()));
+                return;
+            }
+        };
+        let name = self.save.name.trim().to_string();
+        // **重名不覆盖。** `put_sublibrary` 按名字更新，而 `add_rule` 是往上加一条——
+        // 撞上一个已有的子库，等于悄悄把它的目标路径改掉、再给它的选择集并上一批。
+        match site.catalog.sublibrary(&name) {
+            Ok(Some(_)) => {
+                self.error = Some(format!(
+                    "已经有一个叫「{name}」的子库了。换个名字——改已有子库的选择去子库屏点「改选择」。"
+                ));
+                return;
+            }
+            Err(error) => {
+                self.error = Some(format!("中立库读不动：{error}"));
+                return;
+            }
+            Ok(None) => {}
+        }
+        let target = std::path::PathBuf::from(self.save.target.trim());
+        // 两种路径形式怎么折，**由核心的 `Sublibrary::at` 一处说了算**（ADR-0020）。
+        let sublibrary = Sublibrary::at(&name, &target, "Pegasus", None);
+        if let Err(error) = site.catalog.put_sublibrary(&sublibrary) {
+            self.error = Some(format!("子库写不进中立库：{error}"));
+            return;
+        }
+        match site.catalog.add_rule(&name, &rule) {
+            Ok(_) => {
+                self.notice = Some(format!(
+                    "子库「{name}」已建好，规则是：{rule}。屏上这 {} 行 · {} 个变体原样带过去。",
+                    thousands(self.window.total()),
+                    scope_label(self.filtered),
+                ));
+                self.error = None;
+                self.save = SaveDraft::default();
+            }
+            Err(error) => {
+                // **两步得当一步用**：规则没写进去的话，刚建的那个子库一条规则都没有
+                // ——同步过去是空的，而这个名字还被它占着，人按原名重试会被上面那段
+                // 重名检查挡住。所以退回去，把名字还回来。
+                let 退回 = site.catalog.remove_sublibrary(&name);
+                self.error = Some(match 退回 {
+                    Ok(_) => format!("规则写不进中立库：{error}。刚建的子库「{name}」已经退掉，这个名字还能用。"),
+                    Err(second) => format!(
+                        "规则写不进中立库：{error}。而刚建的子库「{name}」也退不掉（{second}）                         ——它眼下一条规则都没有，同步过去会是空的，去子库屏删掉它。"
+                    ),
+                });
+            }
+        }
     }
 
     /// 右边那块面板：**作品 → 变体 → 文件**。
