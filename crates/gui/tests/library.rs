@@ -17,7 +17,7 @@ use romcat_core::catalog::browse::{PlatformFilter, StateFilter, WorkAnchor, Work
 use romcat_core::catalog::State;
 use romcat_core::dat::chinese::ChineseMark;
 use romcat_core::scrape::priority::VERDICT;
-use romcat_core::scrape::{AnchorKind, Field, MediaKind};
+use romcat_core::scrape::{AnchorKind, Field, Gather, MediaKind};
 use romcat_core::shape::Role;
 use romcat_core::title::{Language, TitleKind};
 use romcat_gui::app::{App, View};
@@ -1153,4 +1153,237 @@ fn 写不成规则的筛选条件当场挡住() {
             "挡住了却还是建了个子库出来",
         );
     }
+}
+
+// ── 刮削面板（票 `gui-redesign/10`）────────────────────────────────────────
+//
+// 这一组钉的是**按下去之前那几件事**：范围是不是筛出来的那一批、默认勾着哪几样、
+// 勾联网源之前有没有把配额那件事说清楚、屏上那个请求数是不是真的 0。
+// 最后一条比别处严一档——**在线源赌的是用户的账号与 IP**（ADR-0007）。
+
+/// 面板测试用的规模：几百行够摆出「筛一批、勾几行」，而刮削真跑一趟只要几毫秒。
+const 小库: u64 = 400;
+
+/// 全选一批，再按「刮削选中…」。**走的是界面上那条一模一样的路**：
+/// 先画两帧让屏上那句「作用于多少个变体」数出来，再按那一下。
+fn 摊开刮削面板(ctx: &egui::Context, app: &mut App) {
+    跑(ctx, app, 2);
+    app.library_and_site().0.picked_mut().select_all();
+    跑(ctx, app, 2);
+    let (library, site) = app.library_and_site();
+    library.open_scrape(&site.catalog);
+}
+
+#[test]
+fn 刮削面板四个旋钮的默认位置() {
+    let ctx = headless::context();
+    let mut app = 界面(小库);
+    摊开刮削面板(&ctx, &mut app);
+    let panel = app.library().scrape();
+
+    assert!(panel.is_open(), "按「刮削选中…」该把面板摊开");
+    // **默认只勾本地源**（ADR-0007）：联网那一档要人明确点头才开。
+    assert!(!panel.online(), "联网源默认不该勾上");
+    // 字段那一栏答的是「我要什么」，几样本来就是一次撞完一起带回来的，默认全勾。
+    for field in romcat_gui::scrape::KNOBS {
+        assert!(panel.fields().contains(&field), "{} 默认该勾着", field.label());
+    }
+    // 媒体默认不收：真库那块盘 10 TB，收媒体要回盘把图读一遍。
+    assert!(!panel.media(), "媒体默认不该勾上");
+    // 采法默认**补缺**：重采是绕过输入指纹全部重来，那不该是随手按到的那一档。
+    assert_eq!(panel.sweep(), Gather::Fill);
+
+    // **字段拨得动，而且拨完真的落到选项上。**
+    let (library, site) = app.library_and_site();
+    library.scrape_mut().toggle_field(Field::Description);
+    let options = library.scrape().options(&site.catalog).expect("折得出选项");
+    assert!(!options.fields.contains(&Field::Description), "取消勾选没生效");
+    assert!(options.fields.contains(&Field::Genre), "别的字段不该跟着掉");
+    // **标题与汉化组不在旋钮上，因此永远采**：中文名与别名落在标题集合里，
+    // 而这个库最要紧的产出就是它们。
+    assert!(options.fields.contains(&Field::Title));
+    assert!(options.fields.contains(&Field::TranslationGroup));
+}
+
+#[test]
+fn 刮削面板每一种样子都画得出来() {
+    let ctx = headless::context();
+    let mut app = 界面(小库);
+    摊开刮削面板(&ctx, &mut app);
+    跑(&ctx, &mut app, 2);
+
+    // 配额提醒摆着的那一帧（那时四个旋钮让位给它）。
+    app.library_site_and_tasks().0.scrape_mut().toggle_online();
+    assert!(app.library().scrape().quota_prompt());
+    跑(&ctx, &mut app, 2);
+
+    // 勾上联网源之后那一帧：底下那本账多出「每份图还要各下一次」那一句。
+    app.library_site_and_tasks().0.scrape_mut().confirm_online();
+    app.library_site_and_tasks().0.scrape_mut().set_media(true);
+    跑(&ctx, &mut app, 2);
+    assert!(
+        app.library()
+            .scrape()
+            .estimate()
+            .is_some_and(|account| account.media_downloads),
+        "收媒体的在线档该把「每份图还要各下一次」说出来",
+    );
+
+    // 收起来那一帧。
+    app.library_site_and_tasks().0.scrape_mut().close();
+    跑(&ctx, &mut app, 2);
+    assert!(!app.library().scrape().is_open());
+}
+
+#[test]
+fn 一行都没勾时不摊开刮削面板而是直说() {
+    let ctx = headless::context();
+    let mut app = 界面(小库);
+    跑(&ctx, &mut app, 2);
+    let (library, site) = app.library_and_site();
+    library.open_scrape(&site.catalog);
+
+    // 摆一块「作用于 0 个变体」的面板出来，人会去按那个按钮，然后对着一份什么都没干的
+    // 报告猜哪儿出了问题。
+    assert!(!app.library().scrape().is_open(), "一行都没勾不该摊开面板");
+    assert!(
+        app.library().error().is_some_and(|why| why.contains("勾")),
+        "该直说一行都没勾：{:?}",
+        app.library().error(),
+    );
+}
+
+#[test]
+fn 刮削面板的范围就是屏上写着的那个数() {
+    let ctx = headless::context();
+    let mut app = 界面(小库);
+    摊开刮削面板(&ctx, &mut app);
+    let panel = app.library().scrape();
+
+    // **屏上写几个、面板列几个、按下去动几个，三处同一个数**（票 03 的口径）。
+    assert!(panel.scope_total() > 0, "全选之后范围不该是空的");
+    assert_eq!(
+        panel.scope_total(),
+        panel.scope_shown(),
+        "面板列的与屏上写的对不上——那正是「按下去动的比屏上写的多」那种事故",
+    );
+    assert_eq!(
+        Some(panel.scope_total()),
+        app.library().scope_total(),
+        "范围没走批量操作那条现成的路",
+    );
+}
+
+#[test]
+fn 勾联网源先弹配额提醒_说清赌的是账号与地址() {
+    let ctx = headless::context();
+    let mut app = 界面(小库);
+    摊开刮削面板(&ctx, &mut app);
+    let (library, ..) = app.library_site_and_tasks();
+    let panel = library.scrape_mut();
+
+    panel.toggle_online();
+    // **提醒摆出来了，而联网源还没勾上。** 反过来的话，人是在勾完之后才读到
+    // 「撞穿是永久封禁」——那时候已经晚了。
+    assert!(panel.quota_prompt(), "勾联网源该先弹配额提醒");
+    assert!(!panel.online(), "点头之前不该算勾上");
+
+    let 提醒 = romcat_gui::scrape::QUOTA_WARNING;
+    for 该说的 in ["账号", "IP", "永久封禁"] {
+        assert!(提醒.contains(该说的), "配额提醒里没说「{该说的}」：{提醒}");
+    }
+
+    panel.decline_online();
+    assert!(!panel.online() && !panel.quota_prompt(), "「算了」该把这一下整个撤掉");
+
+    panel.toggle_online();
+    panel.confirm_online();
+    assert!(panel.online() && !panel.quota_prompt(), "点过头之后才算勾上");
+}
+
+#[test]
+fn 只勾本地源时面板上估的请求数是零() {
+    let ctx = headless::context();
+    let mut app = 界面(小库);
+    摊开刮削面板(&ctx, &mut app);
+    let (library, site, _) = app.library_site_and_tasks();
+    library.scrape_mut().recount(&site.catalog);
+    let account = library.scrape().estimate().expect("这本账该算得出来");
+
+    // **这不是「大概是 0」**：离线档只收自报本地的源，混进一个联网源会当场被拒。
+    assert_eq!(account.requests, 0, "只勾本地源时一个网络请求都不该发");
+    assert!(!account.media_downloads, "本地源收的图不花配额");
+    assert!(account.anchors() > 0, "锚点数是 0 说明范围根本没算出来");
+}
+
+#[test]
+fn 刮削走任务台而且裁决与手工写的元数据一个字都没动() {
+    let ctx = headless::context();
+    let mut app = 界面(小库);
+    跑(&ctx, &mut app, 2);
+
+    // 人在详情面板上一个字一个字敲进去的那条（`Screen::put_value` 走的就是它）。
+    let 作品 = {
+        let (library, site) = app.library_and_site();
+        let rows = site
+            .catalog
+            .work_page(library.query(), 0, 50)
+            .expect("取得出一页");
+        rows.iter()
+            .find_map(|row| match &row.anchor {
+                WorkAnchor::Work(_) => Some(row.name.clone()),
+                WorkAnchor::Loose(_) => None,
+            })
+            .expect("总有一行是认出作品的")
+    };
+    {
+        let (_, site) = app.library_and_site();
+        site.catalog
+            .put_verdict_value(
+                AnchorKind::Work,
+                &作品,
+                Field::Description,
+                "这是我自己写的简介",
+                "浏览屏的详情面板上人工写的",
+            )
+            .expect("写得进");
+    }
+
+    摊开刮削面板(&ctx, &mut app);
+    let (library, site, tasks) = app.library_site_and_tasks();
+    // **重采**：绕过输入指纹全部重来——这一档最有机会把人写的东西冲掉。
+    library.scrape_mut().set_sweep(Gather::Refresh);
+    library.scrape_mut().start(site, tasks);
+    let 任务号 = library.scrape().running().expect("该排上一趟活");
+
+    // **活走的是任务台**：跑完之后台上留着一条带耗时的历史。
+    跑(&ctx, &mut app, 4);
+    assert!(
+        app.tasks()
+            .history()
+            .iter()
+            .any(|record| record.id == 任务号),
+        "刮削那一趟没进任务台的历史",
+    );
+    assert!(app.library().scrape().running().is_none(), "跑完了该销号");
+    assert!(
+        app.library().scrape().error().is_none(),
+        "刮削出错了：{:?}",
+        app.library().scrape().error(),
+    );
+
+    // **面板上那句「裁决与你手工维护的元数据不会被动」，行为上也成立。**
+    let (_, site) = app.library_and_site();
+    let 还在 = site
+        .catalog
+        .scraped_values("作品", &作品)
+        .expect("读得出")
+        .into_iter()
+        .find(|value| value.source == VERDICT && value.field == Field::Description.label());
+    assert_eq!(
+        还在.map(|value| value.value).as_deref(),
+        Some("这是我自己写的简介"),
+        "重采一趟数据源把人手写的元数据冲掉了——{}",
+        romcat_gui::scrape::UNTOUCHED,
+    );
 }

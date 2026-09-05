@@ -29,6 +29,7 @@ use romcat_core::identify;
 use romcat_core::identify::fuzzy;
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::scrape::pool::MediaPool;
+use romcat_core::scrape::priority::VERDICT;
 use romcat_core::scrape::{self, Priorities};
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
@@ -1935,15 +1936,32 @@ fn 答复(带封面: bool) -> Vec<u8> {
 }
 
 fn 刮削在线(现场: &mut 现场, fetcher: &CannedFetcher, limits: Limits) -> scrape::Outcome {
-    let mut options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
+    let options = 在线选项(现场);
+    刮削在线带选项(现场, fetcher, limits, &options)
+}
+
+/// 在线档的一份默认选项。**估算与真跑收的是同一份**——两边各摆一份的话，
+/// 「屏上说 0 个请求」与「按下去发了几个」就没有共同的前提了。
+fn 在线选项(现场: &现场) -> scrape::Options {
+    let mut options =
+        scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
     options.profile = scrape::Profile::Online;
+    options
+}
+
+fn 刮削在线带选项(
+    现场: &mut 现场,
+    fetcher: &CannedFetcher,
+    limits: Limits,
+    options: &scrape::Options,
+) -> scrape::Outcome {
     let cancel = CancelToken::new();
     let net = Net::new(fetcher, limits, 凭据(), &cancel);
     scrape::run(
         &RealFs::new(),
         &mut 现场.catalog,
         &Priorities::builtin(),
-        &options,
+        options,
         Some(&net),
         &mut scrape::RunContext {
             cancel: &cancel,
@@ -2263,5 +2281,364 @@ fn 响应里指向禁区的媒体地址下不来() {
             .scraped_media("作品", 作品)
             .expect("读得出")
             .is_empty()
+    );
+}
+
+// ── 刮削面板的那本账（票 `gui-redesign/10`）────────────────────────────────
+//
+// 这一组钉的是**按下去之前那个数**。它比别处严一档，理由只有一条：**在线源赌的是
+// 用户的账号与 IP**（ADR-0007）——配额同时按账号与 IP 计，撞穿了是永久封禁。
+// 一个「预计 0 个请求」而按下去发了九千个的界面，比不给估算更坏。
+
+/// 这一批变体的键，收成 [`scrape::Options::only`] 要的那个形状。
+fn 范围(keys: &[&str]) -> std::collections::BTreeSet<String> {
+    scrape::estimate::only(keys.iter().map(|key| (*key).to_string()))
+}
+
+#[test]
+fn 只勾本地源时估算的请求数为零() {
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+
+    let options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
+    let 账 = scrape::estimate::estimate(&现场.catalog, &options, 宽松()).expect("算得出");
+
+    // **这不是「大概是 0」**：离线档只收自报本地的源，混进一个联网源会当场被拒
+    // （`scrape::sources` 那道闸门）。所以这个 0 是构造上的，不是统计出来的。
+    assert_eq!(账.requests, 0, "离线档一个网络请求都不该发");
+    assert!(!账.media_downloads, "本地源收的图不花配额");
+    assert!(账.anchors() > 0, "锚点数不该是 0——那说明范围根本没算出来");
+
+    // 真跑一趟对上：离线档连那笔在线的账都没有。
+    let outcome = 刮削(&mut 现场);
+    assert!(outcome.online.is_none(), "离线档不该有在线那一笔账");
+}
+
+#[test]
+fn 估算的请求数与在线档实际发出去的一致() {
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+
+    // **不收媒体**：图有几份要查过才知道，源不说，谁也算不出来。收媒体那一档的口径是
+    // 「`requests` 是下界」，由 `估算说得出媒体那一段是下界` 单独钉。
+    let mut options = 在线选项(&现场);
+    options.media = false;
+    let 账 = scrape::estimate::estimate(&现场.catalog, &options, 宽松()).expect("算得出");
+    assert!(账.requests > 0, "有已确认的作品锚点，不该一个请求都不发");
+    assert!(账.over_budget.is_none(), "这点量撞不到自设上限");
+
+    let fetcher = CannedFetcher::new().with_prefix(
+        "https://api.screenscraper.fr/api2/jeuInfos.php",
+        200,
+        答复(false),
+    );
+    let outcome = 刮削在线带选项(&mut 现场, &fetcher, 宽松(), &options);
+    let 实际 = outcome.online.expect("在线档该有这一笔账").requests;
+
+    assert_eq!(
+        账.requests, 实际,
+        "屏上写的与真发出去的必须是同一个数——差一个都是拿用户的账号在赌",
+    );
+
+    // **第二趟补缺应当一个都不发**：判据没变，输入指纹就没变，整条跳过。
+    let 二趟账 = scrape::estimate::estimate(&现场.catalog, &options, 宽松()).expect("算得出");
+    assert_eq!(二趟账.requests, 0, "补缺不该为同一份判据再问一遍");
+    let 二趟 = 刮削在线带选项(&mut 现场, &fetcher, 宽松(), &options);
+    assert_eq!(二趟.online.expect("有账").requests, 0);
+
+    // **重采绕过输入指纹**，于是估算与实际同时回到第一趟那个数。
+    let mut 重采 = options.clone();
+    重采.refresh = true;
+    let 重采账 = scrape::estimate::estimate(&现场.catalog, &重采, 宽松()).expect("算得出");
+    assert_eq!(重采账.requests, 账.requests, "重采该把这一批整个重问一遍");
+    let 重采跑 = 刮削在线带选项(&mut 现场, &fetcher, 宽松(), &重采);
+    assert_eq!(重采跑.online.expect("有账").requests, 重采账.requests);
+}
+
+#[test]
+fn 范围里一个已确认的作品都没有时在线档也不发请求() {
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+
+    // `FC/一堆/` 那两个 zip 一条 DAT 都没撞上——ScreenScraper 眼里它们正是
+    // 「未识别 ROM」，而那份配额撞穿的处置是**连账号带 IP 永久封禁**（ADR-0007）。
+    let mut options = 在线选项(&现场);
+    options.only = Some(范围(&["库/FC/一堆/甲.zip", "库/FC/一堆/乙.zip"]));
+    options.media = false;
+
+    let 账 = scrape::estimate::estimate(&现场.catalog, &options, 宽松()).expect("算得出");
+    assert_eq!(账.works, 0, "这两个变体一个作品都挂不上");
+    assert_eq!(账.variants, 2, "范围就是这两个");
+    assert_eq!(账.requests, 0);
+
+    let fetcher = CannedFetcher::new();
+    let outcome = 刮削在线带选项(&mut 现场, &fetcher, 宽松(), &options);
+    assert_eq!(outcome.online.expect("有账").requests, 0);
+    assert!(fetcher.asked().is_empty(), "一个请求都不该发出去");
+}
+
+#[test]
+fn 估算说得出媒体那一段是下界() {
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+
+    let options = 在线选项(&现场);
+    let 账 = scrape::estimate::estimate(&现场.catalog, &options, 宽松()).expect("算得出");
+    assert!(
+        账.media_downloads,
+        "收媒体的在线档要把「每份图还要各下一次」说出来",
+    );
+
+    let fetcher = CannedFetcher::new()
+        .with_prefix(
+            "https://api.screenscraper.fr/api2/jeuInfos.php",
+            200,
+            答复(true),
+        )
+        .with(封面地址, 封面());
+    let outcome = 刮削在线带选项(&mut 现场, &fetcher, 宽松(), &options);
+    let 实际 = outcome.online.expect("有账").requests;
+    assert!(
+        实际 > 账.requests,
+        "收媒体时真发出去的会多出那几张图：预计 {} 个查询、实际 {实际} 个请求",
+        账.requests,
+    );
+}
+
+#[test]
+fn 范围之外的变体这一趟一个字都不动() {
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+
+    let mut options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
+    options.only = Some(范围(&[汉化变体]));
+    scrape::run(
+        &RealFs::new(),
+        &mut 现场.catalog,
+        &Priorities::builtin(),
+        &options,
+        None,
+        &mut scrape::RunContext {
+            cancel: &CancelToken::new(),
+            progress: &mut |_| {},
+            naming: &fuzzy::Naming::off(),
+            summaries: None,
+            rulings: &scrape::zh::Rulings::none(),
+        },
+    )
+    .expect("刮削不该失败");
+
+    // 范围里那个变体采到了。
+    assert_eq!(
+        值(&现场, "变体", 汉化变体, "汉化组", "TOSEC").as_deref(),
+        Some("dwt_so"),
+    );
+    // **范围之外那个一条都没有**——屏上写「作用于 1 个变体」，按下去就只能动 1 个。
+    assert!(
+        现场
+            .catalog
+            .scraped_values("变体", 原版变体)
+            .expect("读得出")
+            .is_empty(),
+        "范围之外的变体不该被采",
+    );
+    // **作品锚点照采**：简介与封面挂在作品这一层，漏掉它这一批一个字段都补不上。
+    assert_eq!(
+        值(&现场, "作品", 作品, "年份", "TOSEC").as_deref(),
+        Some("1988"),
+    );
+}
+
+#[test]
+fn 重采不碰裁决与手工维护的元数据() {
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    刮削(&mut 现场);
+
+    // 人在界面上一个字一个字敲进去的那条（`library::Screen::put_value` 走的就是它）。
+    现场
+        .catalog
+        .put_verdict_value(
+            scrape::AnchorKind::Work,
+            作品,
+            scrape::Field::Description,
+            "这是我自己写的简介",
+            "浏览屏的详情面板上人工写的",
+        )
+        .expect("写得进");
+
+    let 原版标题 = 值(&现场, "变体", 原版变体, "标题", "文件名").expect("文件名那一源该给得出");
+
+    // **重采绕过输入指纹全部重来**——但重来的是采集，不是人的判断。
+    刮削一趟(&mut 现场, true);
+    assert_eq!(
+        值(&现场, "作品", 作品, "简介", VERDICT).as_deref(),
+        Some("这是我自己写的简介"),
+        "重采一趟数据源不该把人手写的元数据冲掉",
+    );
+
+    // 范围收窄的那一趟同理。
+    let mut options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
+    options.refresh = true;
+    options.only = Some(范围(&[汉化变体]));
+    scrape::run(
+        &RealFs::new(),
+        &mut 现场.catalog,
+        &Priorities::builtin(),
+        &options,
+        None,
+        &mut scrape::RunContext {
+            cancel: &CancelToken::new(),
+            progress: &mut |_| {},
+            naming: &fuzzy::Naming::off(),
+            summaries: None,
+            rulings: &scrape::zh::Rulings::none(),
+        },
+    )
+    .expect("刮削不该失败");
+    assert_eq!(
+        值(&现场, "作品", 作品, "简介", VERDICT).as_deref(),
+        Some("这是我自己写的简介"),
+    );
+    // 范围之外那个变体上一趟采到的东西也还在：这一趟的重采只清这一批。
+    assert_eq!(
+        值(&现场, "变体", 原版变体, "标题", "文件名").as_deref(),
+        Some(原版标题.as_str()),
+    );
+}
+
+#[test]
+fn 重采不收媒体时上一趟收进来的媒体引用还在() {
+    // **面板默认就是「不收媒体 ＋ 补缺」，而人一按「重采」就走到这一档。**
+    // 重采若先把这一批的采集记录整个清空，`media_ref` 会跟着没——而这一趟根本不收媒体，
+    // 那些引用一个字节都写不回来，池里的图就成了没人引用的孤儿。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    刮削(&mut 现场);
+    let 收过的 = 现场
+        .catalog
+        .scraped_media("变体", 汉化变体)
+        .expect("读得出");
+    assert!(!收过的.is_empty(), "第一趟该收到媒体");
+
+    let mut options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
+    options.refresh = true;
+    options.media = false;
+    scrape::run(
+        &RealFs::new(),
+        &mut 现场.catalog,
+        &Priorities::builtin(),
+        &options,
+        None,
+        &mut scrape::RunContext {
+            cancel: &CancelToken::new(),
+            progress: &mut |_| {},
+            naming: &fuzzy::Naming::off(),
+            summaries: None,
+            rulings: &scrape::zh::Rulings::none(),
+        },
+    )
+    .expect("刮削不该失败");
+
+    assert_eq!(
+        现场
+            .catalog
+            .scraped_media("变体", 汉化变体)
+            .expect("读得出")
+            .len(),
+        收过的.len(),
+        "「这趟不收媒体」说的不是「把收过的扔了」",
+    );
+}
+
+#[test]
+fn 重采半路被按停也不会把没走到的锚点清空() {
+    // **重采不是「先把库清空再重来」**，而是「不看那道输入指纹」。差别在这一条上：
+    // 清空跑在采集之前，中途按停下就只剩一个空壳——而界面对停下来那一档说的是
+    // 「已经采到的那些留在中立库里，再排一次接着采」。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    刮削(&mut 现场);
+
+    let 停 = CancelToken::new();
+    停.cancel();
+    let mut options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
+    options.refresh = true;
+    let outcome = scrape::run(
+        &RealFs::new(),
+        &mut 现场.catalog,
+        &Priorities::builtin(),
+        &options,
+        None,
+        &mut scrape::RunContext {
+            cancel: &停,
+            progress: &mut |_| {},
+            naming: &fuzzy::Naming::off(),
+            summaries: None,
+            rulings: &scrape::zh::Rulings::none(),
+        },
+    )
+    .expect("按停了不是失败");
+    assert!(outcome.interrupted, "这一趟该是被按停的");
+
+    // 一个锚点都没走到，而上一趟采的东西一条都没少。
+    assert_eq!(
+        值(&现场, "作品", 作品, "年份", "TOSEC").as_deref(),
+        Some("1988"),
+    );
+    assert_eq!(
+        值(&现场, "变体", 汉化变体, "汉化组", "TOSEC").as_deref(),
+        Some("dwt_so"),
+    );
+}
+
+#[test]
+fn 字段选窄了不抹掉上一趟采到的别的字段() {
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    刮削(&mut 现场);
+    assert_eq!(
+        值(&现场, "作品", 作品, "发行商", "TOSEC").as_deref(),
+        Some("Konami"),
+    );
+
+    // 只要年份跑一趟。**没有覆盖这回事**：三元组并存，这一趟只管它点名的那几个字段。
+    let mut options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
+    options.fields = [scrape::Field::Year].into_iter().collect();
+    options.media = false;
+    scrape::run(
+        &RealFs::new(),
+        &mut 现场.catalog,
+        &Priorities::builtin(),
+        &options,
+        None,
+        &mut scrape::RunContext {
+            cancel: &CancelToken::new(),
+            progress: &mut |_| {},
+            naming: &fuzzy::Naming::off(),
+            summaries: None,
+            rulings: &scrape::zh::Rulings::none(),
+        },
+    )
+    .expect("刮削不该失败");
+
+    assert_eq!(
+        值(&现场, "作品", 作品, "年份", "TOSEC").as_deref(),
+        Some("1988"),
+        "点名要的字段该采到",
+    );
+    assert_eq!(
+        值(&现场, "作品", 作品, "发行商", "TOSEC").as_deref(),
+        Some("Konami"),
+        "没点名的字段上一趟采到的值该原样留着",
+    );
+    // **收过的媒体也留着**：「这趟不收媒体」说的不是「把收过的扔了」。
+    assert!(
+        !现场
+            .catalog
+            .scraped_media("变体", 汉化变体)
+            .expect("读得出")
+            .is_empty(),
+        "不收媒体不该把上一趟收进来的媒体引用删掉",
     );
 }

@@ -270,8 +270,8 @@ pub fn refetch(
                 .map_err(|error| format!("取 DAT 失败：{error}"))?;
         }
         Source::Chinese => {
-            let manifest = load_manifest(workspace)?;
-            let rules = load_rules(workspace)?;
+            let manifest = manifest(workspace)?;
+            let rules = rules(workspace)?;
             let mut store = zh::store::Store::open(&workspace::zh_store_path(workspace))
                 .map_err(|error| format!("中文离线源打不开：{error}"))?;
             let options = zh::sync::Options {
@@ -315,8 +315,16 @@ fn load_registry(workspace: &Path) -> Result<Registry, String> {
     Registry::load(&candidate).map_err(|error| error.to_string())
 }
 
-/// 平台清单：同上。
-fn load_manifest(workspace: &Path) -> Result<Manifest, String> {
+/// **平台清单**：工作目录里那份优先，没有才用内置的。
+///
+/// 它是公开的，因为**这条查法不能有第二份**：命令行按 `--manifest`、没给就查工作目录，
+/// 界面上没有那个开关、只查工作目录（`romcat_gui::scrape`）。两处各写一遍的话，
+/// 用户改过的那份平台清单会在一条路上生效、另一条路上不生效——而它决定平台名怎么折，
+/// 折出来的名字进的是变体那一行。
+///
+/// # Errors
+/// 那份文件读不出来或者写坏了时返回一句给人看的话。
+pub fn manifest(workspace: &Path) -> Result<Manifest, String> {
     let candidate = workspace.join("platforms.toml");
     if !candidate.exists() {
         return Ok(Manifest::builtin());
@@ -324,8 +332,15 @@ fn load_manifest(workspace: &Path) -> Result<Manifest, String> {
     Manifest::load(&candidate).map_err(|error| error.to_string())
 }
 
-/// **剥离规则**：同上。
-fn load_rules(workspace: &Path) -> Result<crate::filename::Rules, String> {
+/// **剥离规则**：同上，理由也同上。
+///
+/// 它尤其要紧：剥离规则决定文件名剥出来的**正题**长什么样，而正题正是拿去撞
+/// [中文离线源](crate::scrape::zh)的那一串字。两条路各用一份规则，同一个变体在命令行
+/// 与界面上会撞到不同的条目——而那是写进库里的结论，不是显示上的差别。
+///
+/// # Errors
+/// 那份文件读不出来或者写坏了时返回一句给人看的话。
+pub fn rules(workspace: &Path) -> Result<crate::filename::Rules, String> {
     let candidate = workspace.join("name-rules.toml");
     if !candidate.exists() {
         return Ok(crate::filename::Rules::builtin());

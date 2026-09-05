@@ -113,7 +113,7 @@ impl App {
     pub fn new(site: Site, workspace: PathBuf) -> Self {
         let mut queue = queue::Screen::new();
         queue.reload(&site);
-        let mut library = library::Screen::new();
+        let mut library = library::Screen::new(workspace.clone());
         library.reload(&site);
         // 优先级表与导出共用一份：面板上写着的显示标题就是同步到掌机上会看见的那个。
         if let Ok(priorities) = romcat_core::sync::prepare::priorities(None, &workspace) {
@@ -206,6 +206,14 @@ impl App {
         (&mut self.library, &mut self.site)
     }
 
+    /// 浏览那一屏、它的库、**再加任务台**。按「刮削选中…」之后那一下三样都要：
+    /// 展开这一批的键、算那本账、把活排到台上去（票 `gui-redesign/10`）。
+    pub fn library_site_and_tasks(
+        &mut self,
+    ) -> (&mut library::Screen, &mut Site, &mut task::Tasks) {
+        (&mut self.library, &mut self.site, &mut self.board)
+    }
+
     /// 子库那一屏，供测试查「有几个子库、差量预览长什么样」。
     #[must_use]
     pub fn sublibrary(&self) -> &sublibrary::Screen {
@@ -244,6 +252,11 @@ impl App {
             // **各屏按任务号认领自己那一趟，不是它的就放过去。** 将来识别与刮削接上来
             // 时，各自在这儿多认一次。
             if self.roots.settle(&self.site, &done) {
+                continue;
+            }
+            // **刮削跑完了要重读一遍**：这一屏画的元数据那几栏正是它刚写进去的。
+            if self.library.scrape_mut().settle(&done) {
+                self.library.refresh(&self.site);
                 continue;
             }
             self.sublibrary.settle(done);
@@ -314,8 +327,8 @@ impl App {
                 roots.ui(ui, site, board);
             }
             View::Variants => {
-                let (library, site) = (&mut self.library, &mut self.site);
-                library.ui(ui, site);
+                let (library, site, board) = (&mut self.library, &mut self.site, &mut self.board);
+                library.ui(ui, site, board);
             }
             View::Sublibraries => {
                 let (sublibrary, site, board) =

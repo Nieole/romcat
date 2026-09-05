@@ -44,6 +44,7 @@
 //! 同样的空查询。
 
 pub mod dat;
+pub mod estimate;
 pub mod local;
 pub mod online;
 pub mod pool;
@@ -63,6 +64,7 @@ use crate::identify::fuzzy;
 use online::{Halt, Net};
 use pool::{MediaPool, PoolError};
 
+pub use estimate::Estimate;
 pub use priority::Priorities;
 pub use report::ScrapeReport;
 
@@ -586,6 +588,61 @@ pub trait Source {
     fn collect(&self, subject: &Subject<'_>, out: &mut Harvest) -> Result<(), Failure>;
 }
 
+/// **采法**：这一趟怎么采、跑多久。
+///
+/// 名字不叫 `Sweep`：界面那一侧已经有一个 `bench::Sweep`（量帧率时怎么扫过那张表），
+/// 两个不相干的东西同名，看代码的人迟早会把它们当成一件事。
+///
+/// 它是界面上那第四个旋钮（票 `gui-redesign/10`），也是命令行 `--refresh` 的那一档。
+/// 两个词摆在一处，是为了让「界面上按的那个」与「命令行打的那个」说的是同一件事。
+///
+/// **它管的是跑多久、花多少配额，不管显示哪个值。** 「有值了但我想换一个」不该靠重采
+/// ——刮削结果按「锚点 × 字段 × 源」三元组**并存**，没有覆盖这回事，换的是
+/// [优先级](Priorities)，改一次排序、零成本、不重跑。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Gather {
+    /// **补缺**：输入指纹没变的整条跳过，只采还没采过的那些。
+    #[default]
+    Fill,
+    /// **重采**：绕过输入指纹全部重来。
+    ///
+    /// 真正需要它的只有两种：数据源更新了，或者解析逻辑改了
+    /// （[`Source::probe`] 盖不住的正是后者）。
+    Refresh,
+}
+
+impl Gather {
+    /// 打给用户的那个词。
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fill => "补缺",
+            Self::Refresh => "重采",
+        }
+    }
+
+    /// 一句说清它是什么。
+    #[must_use]
+    pub fn why(self) -> &'static str {
+        match self {
+            Self::Fill => "只采一个源都没给过值的",
+            Self::Refresh => "绕过输入指纹，全部重来",
+        }
+    }
+
+    /// 两档摆在一起的次序。
+    #[must_use]
+    pub fn all() -> [Self; 2] {
+        [Self::Fill, Self::Refresh]
+    }
+
+    /// 落到选项上。**这是这两个词与 [`Options::refresh`] 之间唯一的一处映射**——
+    /// 各处自己判一遍的话，迟早有一处把「补缺」判成了重采，而那一处会白烧一天的配额。
+    pub fn apply(self, options: &mut Options) {
+        options.refresh = self == Self::Refresh;
+    }
+}
+
 /// 刮削的选项。
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -598,10 +655,28 @@ pub struct Options {
     pub profile: Profile,
     /// 收不收媒体。关掉之后一个字节都不读主库。
     pub media: bool,
+    /// **这一趟要哪几个字段**。不在这份名单里的，采到了也不落库。
+    ///
+    /// 默认是全部（[`Field::all`]），命令行走的就是这一份。界面上那个「字段」旋钮
+    /// （票 `gui-redesign/10`）换的正是它。
+    ///
+    /// **不在名单里的字段，库里已有的值一个字都不动**：三元组并存、没有覆盖
+    /// （ADR-0007 与 `catalog::scrape` 的模块文档），而「这一趟只要简介」不该把上一趟
+    /// 采到的类型抹掉。落库那一侧因此只在这份名单之内替换（`put_scraped_within`）。
+    pub fields: BTreeSet<Field>,
     /// 单份媒体大到多少字节就不收了；`None` 是不设上限。
     pub max_media_bytes: Option<u64>,
     /// 无视缓存，全部重采。
     pub refresh: bool,
+    /// **只采这些变体**，连同它们所属的作品；`None` 是全库。
+    ///
+    /// 界面上那个「范围」旋钮就是它：浏览屏筛出来的那一批变体的键
+    /// （`Catalog::scoped_variants`）。命令行不给这个开关，一律全库。
+    ///
+    /// **作品锚点手里的变体名单不跟着收窄**：那份名单进输入指纹，跟着范围变的话，
+    /// 同一部作品先刮一半再刮另一半会得出两个不同的结论。范围管的是「过哪些锚点」，
+    /// 不是「一个锚点看得见什么」。
+    pub only: Option<BTreeSet<String>>,
     /// 每采完多少个锚点就写一批进中立库。
     pub write_batch: usize,
 }
@@ -615,10 +690,50 @@ impl Options {
             pool: pool.into(),
             profile: Profile::Offline,
             media: true,
+            fields: Field::all().into_iter().collect(),
             max_media_bytes: None,
             refresh: false,
+            only: None,
             write_batch: 2_000,
         }
+    }
+
+    /// 这一趟**字段一个都不少**吗。
+    ///
+    /// 它是那道「指纹要不要跟着变」的判据：一个都不少时指纹一个字都不折，
+    /// 于是既有的库不会因为多出这个旋钮而整片重采。
+    #[must_use]
+    pub fn wants_all_fields(&self) -> bool {
+        Field::all().iter().all(|field| self.fields.contains(field))
+    }
+
+    /// 一个源报上来的**输入指纹**，折上这一趟「要什么」之后的那一份。
+    ///
+    /// 存进库、也拿来比对的都是它。**要什么改变结果，所以它必须进指纹**
+    /// （同单份媒体上限那一条）：少了它，「先只要简介、再要类型」的第二趟会被缓存
+    /// 一口咬定「输入没变」而整条跳过，那个类型就永远补不上。
+    ///
+    /// 两样折进来的东西各有各的作用面，**分开折而不是一把折进去**：
+    ///
+    /// - **字段名单**对每个源都成立：名单窄了，这个源落库的值就少了。
+    /// - **收不收媒体**只对**联网源**成立。本地媒体那个源在不收媒体时**整个不参加**
+    ///   （见 [`sources`]），别的本地源本来就不出媒体——把这一样折进它们的指纹，
+    ///   等于「命令行跑一趟、界面不收媒体跑一趟」两边互相把对方的缓存作废掉，
+    ///   而那两趟对这些源来说产出一模一样。
+    pub(crate) fn cache_key(&self, locality: Locality, probed: String) -> String {
+        let mut mark: Vec<&str> = Vec::new();
+        let fields: Vec<&str>;
+        if !self.wants_all_fields() {
+            fields = self.fields.iter().map(|field| field.label()).collect();
+            mark.extend(fields.iter().copied());
+        }
+        if locality == Locality::Online && !self.media {
+            mark.push("不收媒体");
+        }
+        if mark.is_empty() {
+            return probed;
+        }
+        fingerprint(&[&probed, &mark.join("+")])
     }
 }
 
@@ -719,10 +834,14 @@ pub fn run(
         context.summaries,
         context.rulings,
     )?;
-    if options.refresh {
-        catalog.clear_scraped()?;
-    }
-    let pool = MediaPool::open(&options.pool)?;
+    // **不收媒体就一个目录都不建。** `--no-media` 说的是「这趟不收媒体」，而顺手在
+    // 工作目录里建出两个空的池目录也算食言（同 `MediaPool::at` 的文档）。收媒体那一档
+    // 照旧先把池建出来——`ingest` 要往里写文件。
+    let pool = if options.media {
+        MediaPool::open(&options.pool)?
+    } else {
+        MediaPool::at(&options.pool)
+    };
     let into = Ingesting {
         library,
         pool: &pool,
@@ -757,7 +876,20 @@ pub fn run(
                 }
                 continue;
             };
-            if known.get(source.name()) == Some(&input) {
+            // 这一趟「要什么」折进指纹（[`Options::cache_key`]）：字段选窄了再选宽，
+            // 第二趟该真的重采。什么都不少时它一个字都不折。
+            let input = options.cache_key(source.locality(), input);
+            // **重采就是不看这道指纹**，不是「先把库清空再重来」。
+            //
+            // 清空那条路在两处会出事，而两处都是这一票要防的：一是它跑在采集**之前**，
+            // 中途按停下或者撞上配额（`break 'subjects`）时，没走到的锚点就只剩空的
+            // ——而 `Panel::settle` 对停下来那一档说的是「已经采到的那些留在中立库里」；
+            // 二是它无条件删这一批的 `media_ref`，而「这趟不收媒体」时那些引用根本写不回来
+            // （`put_scraped_within` 正是为此特意跳过那一句 DELETE）。
+            //
+            // 不看指纹就没有这两件事：每一对照旧走 `collect` 加 `put_scraped_within`，
+            // **该替换的替换、该留的留**，半路停下也只是少采几个锚点。
+            if !options.refresh && known.get(source.name()) == Some(&input) {
                 run.reused_probes += 1;
                 continue;
             }
@@ -774,6 +906,19 @@ pub fn run(
                     halted = Some(reason);
                     break 'subjects;
                 }
+            }
+            // **这一趟不要的东西，采到了也不带走。** 两条各有各的道理：
+            //
+            // - 不要的**字段**丢在这里而不是丢在源里：源只管「我看得出什么」，
+            //   要不要是这一趟的事，让每个源各写一遍过滤只会让七处漏一处。
+            // - 不收媒体时**媒体一律清掉**，在线那一侧尤其要紧：一次条目查询本来就带回
+            //   一串图的 URL，不清的话「不收媒体」照样会为每张图各花一份配额加一段带宽
+            //   ——而那正是这个开关要省下来的东西。
+            harvest
+                .values
+                .retain(|found| options.fields.contains(&found.field));
+            if !options.media {
+                harvest.media.clear();
             }
             let media = match ingest_all(&into, catalog, &harvest, &mut run) {
                 Ok(media) => media,
@@ -806,7 +951,7 @@ pub fn run(
         }
         done += 1;
         if batch.len() >= options.write_batch {
-            catalog.put_scraped(&batch)?;
+            catalog.put_scraped_within(&batch, &options.fields, options.media)?;
             batch.clear();
         }
         if done.is_multiple_of(500) {
@@ -820,7 +965,7 @@ pub fn run(
     }
     // **停下来之前先落库。** 这一句就是「网络失败不影响已完成的部分」：撞上配额时
     // 手里那一批照样写进去，重跑从这儿接着采。
-    catalog.put_scraped(&batch)?;
+    catalog.put_scraped_within(&batch, &options.fields, options.media)?;
     (context.progress)(Progress {
         done,
         total,
@@ -1114,24 +1259,38 @@ impl Plan {
         } else {
             BTreeMap::new()
         };
-        let local_media = media_index.values().map(|list| list.len() as u64).sum();
 
         // 作品锚点：把它下面全部变体的候选并起来。平台取第一个说得出的——同一部作品
         // 跨平台时哪个都不算错，而平台在这一层只用于按平台覆写优先级。
         let mut work_entries: BTreeMap<String, WorkSlot> = BTreeMap::new();
         let mut subjects = Vec::with_capacity(variants.len() + works.len());
         let mut unconfirmed = 0_u64;
+        let mut local_media = 0_u64;
+        // **范围之外的作品名**，用来把作品锚点也收窄。**攒的是名字不是判断**：
+        // 一部作品名下的变体只要有一个在范围里，这部作品就要采——它的简介与封面挂在
+        // 作品这一层，漏掉它等于这一批一个字段都补不上。
+        let mut wanted_works: BTreeSet<String> = BTreeSet::new();
         for variant in &variants {
+            // **范围只决定「过哪些锚点」。** 作品那一格照旧由**全部**变体攒起来
+            // （名单、条目、代表变体），于是同一部作品先刮一半再刮另一半得出的是
+            // 同一个结论——那份名单进输入指纹，跟着范围抖动的话缓存就永远对不上。
+            let taken = options
+                .only
+                .as_ref()
+                .is_none_or(|only| only.contains(&variant.key));
             let entries = by_variant.remove(&variant.key).unwrap_or_default();
             // **「已确认」的判据是有一条自动通过的候选**，不是「有发行版链接」：
             // 汉化版认得出是哪部作品、认不出基于哪一条发行版，发行版那一列本来就空着
             // （ADR-0012），拿它当判据会把整批汉化版划成未识别。判据在变体这一行上
             // 就有，不必再查一次库——于是两个档位都算得起这个数。
             let confirmed = variant.work_id.is_some();
-            if !confirmed {
+            if !confirmed && taken {
                 unconfirmed += 1;
             }
             if let Some(name) = variant.work_id.and_then(|id| works.get(&id)) {
+                if taken {
+                    wanted_works.insert(name.clone());
+                }
                 let slot = work_entries
                     .entry(name.clone())
                     .or_insert_with(|| WorkSlot {
@@ -1160,13 +1319,18 @@ impl Plan {
                     slot.representative = Some(variant.key.clone());
                 }
             }
+            if !taken {
+                continue;
+            }
+            let media = media_index.get(&variant.key).cloned().unwrap_or_default();
+            local_media += u64::try_from(media.len()).unwrap_or(0);
             subjects.push(PlannedSubject {
                 kind: AnchorKind::Variant,
                 id: variant.key.clone(),
                 platform: variant.platform.clone(),
                 entries,
                 main_key: Some(variant.main_key.clone()),
-                media: media_index.get(&variant.key).cloned().unwrap_or_default(),
+                media,
                 // 变体这一层撞的是它自己的文件名，不必再带一份名单。
                 variants: Vec::new(),
                 // **变体这一层不带判据**：在线源只查作品锚点，给每个变体都取一次判据
@@ -1175,11 +1339,14 @@ impl Plan {
                 confirmed,
             });
         }
-        let works_count = u64::try_from(work_entries.len()).unwrap_or(u64::MAX);
+        let works_count = u64::try_from(wanted_works.len()).unwrap_or(u64::MAX);
         // **只有在线档取判据。** 取一次是一次库查询，离线档一次都用不上。
         let online = options.profile == Profile::Online;
         let mut queryable = 0_u64;
         for (name, slot) in work_entries {
+            if !wanted_works.contains(&name) {
+                continue;
+            }
             let mut entries = slot.entries;
             entries.sort();
             entries.dedup();

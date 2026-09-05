@@ -69,6 +69,8 @@ use romcat_core::title::{Language, TitleKind};
 
 use crate::filter::Filter;
 use crate::font;
+use crate::scrape;
+use crate::task::Tasks;
 use crate::table::{Picked, SPAN, Table, Window};
 
 /// 界面上人工写下的叫法，**依据**里写这一句。
@@ -223,6 +225,11 @@ pub struct Screen {
     filtered: Option<u64>,
     /// 「存成子库」那两个格子：名字与目标路径。
     save: SaveDraft,
+    /// **刮削面板**：抬头那个「刮削选中…」摊开的就是它（票 `gui-redesign/10`）。
+    ///
+    /// 它住在这一屏里而不是自成一屏，是因为它的**范围**就是这一屏筛出来的那一批——
+    /// 挪到别处去，那批东西就得再传一遍，而传着传着两边的数就对不上了。
+    scrape: scrape::Panel,
     /// 「**改选择**」跳过来了，正在改这个子库的选择集。`None` 是平常的浏览。
     editing: Option<Editing>,
     /// 「更新到子库」按完了，等窗口把人送回子库屏（[`crate::app::App::route`]）。
@@ -276,16 +283,13 @@ pub struct Screen {
     pub scroll_to: Option<f32>,
 }
 
-impl Default for Screen {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Screen {
     /// 开一个空屏幕。
+    ///
+    /// `workspace` 是**工作目录**：刮削面板要它找媒体池、优先级表、中文离线索引与
+    /// 沉淀库（`scrape::Panel`）。
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(workspace: std::path::PathBuf) -> Self {
         Self {
             window: Window::new(SPAN),
             query: WorkQuery::default(),
@@ -293,6 +297,7 @@ impl Screen {
             filter: Filter::default(),
             filtered: None,
             save: SaveDraft::default(),
+            scrape: scrape::Panel::new(workspace),
             editing: None,
             returned: None,
             touched: None,
@@ -324,6 +329,18 @@ impl Screen {
     /// 指一份**媒体池**。**目录不在就不指**——「没查」与「查了、没有」得分得开。
     pub fn set_pool(&mut self, pool: Option<MediaPool>) {
         self.pool = pool;
+    }
+
+    /// **库里的内容被改过了，整屏重读一遍。** 刮削跑完走它。
+    ///
+    /// 与 [`reload`](Self::reload) 分开：那一条重问的是筛选面板上的可选值，而这一条
+    /// 连**表格里那几行**一起作废——刮削写进去的正是行上那几列（元数据齐不齐、年份），
+    /// 不作废的话人要滚出视口再滚回来才看得见。
+    pub fn refresh(&mut self, site: &Site) {
+        self.window.invalidate();
+        self.reload(site);
+        self.load_work(&site.catalog);
+        self.load_detail(&site.catalog);
     }
 
     /// 重问一次筛选面板上的可选值。开库时与改过元数据之后各一次。
@@ -806,6 +823,18 @@ impl Screen {
     pub fn status(&mut self, ui: &mut egui::Ui, site: &Site) {
         self.sync_window(&site.catalog);
         ui.toggle_value(&mut self.sample, "字体样张");
+        // **「刮削选中…」摆在抬头**，与原型同一个位置。它只摊开面板——真按下去那一下
+        // 在面板底下，因为按之前该先看清那本账。
+        if ui
+            .button("刮削选中…")
+            .on_hover_text(
+                "对筛出来的这一批取元数据与媒体。四个旋钮定清楚要干什么，\
+                 **按下去之前就看得见会发多少网络请求、大概多久**。",
+            )
+            .clicked()
+        {
+            self.open_scrape(&site.catalog);
+        }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if let Some(error) = self.window.error() {
                 ui.colored_label(ui.visuals().error_fg_color, error);
@@ -869,9 +898,60 @@ impl Screen {
         }
     }
 
+    /// **刮削面板**，供测试与实测查旋钮的位置、那本账、任务号。
+    #[must_use]
+    pub fn scrape(&self) -> &scrape::Panel {
+        &self.scrape
+    }
+
+    /// 刮削面板，供测试与实测拨旋钮、按「加入任务队列」。
+    pub fn scrape_mut(&mut self) -> &mut scrape::Panel {
+        &mut self.scrape
+    }
+
+    /// **按「刮削选中…」那一下**：把这一批展开成变体的键，摊开刮削面板。
+    ///
+    /// 范围就是[批量操作作用的那一批](Self::batch_variants)——屏上写几个、面板列几个、
+    /// 按下去动几个，三处同一个数（票 `gui-redesign/03` 的口径，这一票不另算一份）。
+    ///
+    /// 界面上那个按钮走的就是它，测试拿它当那一下。
+    pub fn open_scrape(&mut self, catalog: &Catalog) {
+        match self.batch_variants(catalog) {
+            // **一个都没勾就别摊开面板。** 摆一块「作用于 0 个变体」的面板出来，
+            // 人会去按那个按钮，然后对着一份什么都没干的报告猜哪儿出了问题。
+            Ok(keys) if keys.is_empty() => {
+                self.error = Some(
+                    "一行都没勾。在列表里勾几行，或者按表头那个全选——\
+                     刮削的作用范围就是勾中的那一批。"
+                        .to_string(),
+                );
+            }
+            Ok(keys) => {
+                // **屏上那个数与这份名单必须对得上。** 对不上就是这一层出了问题，
+                // 而那正是「按下去动的比屏上写的多」那种事故。
+                let shown = self
+                    .scope
+                    .unwrap_or(u64::try_from(keys.len()).unwrap_or(u64::MAX));
+                self.scrape.open(keys, shown);
+                self.error = None;
+            }
+            Err(error) => self.error = Some(format!("中立库读不动：{error}")),
+        }
+    }
+
     /// 画一帧。
-    pub fn ui(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         self.sync_window(&site.catalog);
+        if self.scrape.is_open() {
+            egui::Panel::bottom("刮削面板")
+                .default_size(300.0)
+                .min_size(160.0)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("刮削面板")
+                        .show(ui, |ui| self.scrape.ui(ui, site, tasks));
+                });
+        }
         egui::Panel::bottom("浏览编辑")
             .default_size(260.0)
             .min_size(110.0)
@@ -1181,7 +1261,8 @@ impl Screen {
                 self.error = Some(match 退回 {
                     Ok(_) => format!("规则写不进中立库：{error}。刚建的子库「{name}」已经退掉，这个名字还能用。"),
                     Err(second) => format!(
-                        "规则写不进中立库：{error}。而刚建的子库「{name}」也退不掉（{second}）                         ——它眼下一条规则都没有，同步过去会是空的，去子库屏删掉它。"
+                        "规则写不进中立库：{error}。而刚建的子库「{name}」也退不掉（{second}）\
+                         ——它眼下一条规则都没有，同步过去会是空的，去子库屏删掉它。"
                     ),
                 });
             }

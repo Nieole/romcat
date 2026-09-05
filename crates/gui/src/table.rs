@@ -105,6 +105,17 @@ impl Window {
         }
     }
 
+    /// **把内存里那扇窗整个作废**，下一帧重读。
+    ///
+    /// 筛选一个字都没变、而**库里的内容变了**的时候走它——刮削跑完就是这一态：
+    /// 行上那几列（元数据齐不齐、年份）正是它刚写进去的，不作废的话人要滚出视口
+    /// 再滚回来才看得见。
+    pub fn invalidate(&mut self) {
+        self.rows.clear();
+        self.first = 0;
+        self.stale = true;
+    }
+
     /// 满足筛选条件的总行数。
     #[must_use]
     pub fn total(&self) -> u64 {

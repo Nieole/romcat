@@ -713,7 +713,10 @@ struct ScrapeArgs {
     #[arg(long, value_name = "MiB")]
     max_media_mib: Option<u64>,
 
-    /// 无视采集记录全部重采。**媒体池里的文件一个都不删**
+    /// **重采**：无视采集记录（输入指纹）全部重来。不给就是**补缺**——指纹没变的整条跳过。
+    ///
+    /// 界面上那个「采法」旋钮换的是同一样东西（`scrape::Gather`）。
+    /// **媒体池里的文件一个都不删**
     #[arg(long)]
     refresh: bool,
 
