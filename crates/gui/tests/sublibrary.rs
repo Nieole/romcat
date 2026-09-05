@@ -19,9 +19,9 @@ use romcat_core::fs::RealFs;
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::site::Site;
 use romcat_core::sublibrary::Exception;
+use romcat_core::task::Ending;
 use romcat_core::testing::sample::zip;
 use romcat_core::testing::{TempDir, temp_dir};
-use romcat_core::verdict::Store;
 use romcat_gui::app::{App, View};
 
 /// 这一趟拿来当目标的那个 fixture 目录里，维护者自己拷进去的东西叫什么。
@@ -60,13 +60,18 @@ impl 现场 {
         // 维护者自己拷进卡里的东西。工具连看都不该看它（ADR-0015）。
         写(&卡.path().join(存档), 存档内容.as_bytes());
 
-        let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-        let mut options = ScanOptions::new(库.path());
-        options.jobs = Jobs::Fixed(2);
-        scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
-
-        let store = Store::in_memory().expect("开得出沉淀库");
-        let site = Site::in_memory(catalog, store, "fixture");
+        // **中立库落在磁盘上**，不是只活在内存里：排差量预览跑在**任务台**上，
+        // 后台那条线程要的是同一个文件的第二份只读连接（`Catalog::read_only`）。
+        // 真库本来就是这个样子，fixture 照着摆才验得到那条路。
+        let 库文件 = 工作区.path().join("catalog").join("fixture.sqlite3");
+        {
+            let mut catalog = Catalog::open(&库文件).expect("能开中立库");
+            let mut options = ScanOptions::new(库.path());
+            options.jobs = Jobs::Fixed(2);
+            scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new())
+                .expect("扫得动");
+        }
+        let site = Site::open_file(工作区.path(), &库文件, None).expect("开得出现场");
         let mut app = App::new(site, 工作区.path().to_path_buf());
         app.show_view(View::Sublibraries);
         Self {
@@ -97,9 +102,25 @@ impl 现场 {
         screen.add_rule(site, name);
     }
 
+    /// 排一次差量预览，然后等它跑完。**它进任务队列**，所以要一直问「跑完没有」。
     fn 排预览(&mut self) {
-        let (screen, site) = self.app.sublibrary_and_site();
-        screen.preview(site);
+        {
+            let (screen, site, tasks) = self.app.sublibrary_site_and_tasks();
+            screen.preview(site, tasks);
+        }
+        self.等任务跑完();
+    }
+
+    /// 等任务台上那一趟跑完，并把产物收回该收它的那一屏。
+    fn 等任务跑完(&mut self) {
+        for _ in 0..600 {
+            self.app.poll_tasks();
+            if !self.app.tasks().busy() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("任务六秒都没跑完");
     }
 
     fn 求值(&mut self) {
@@ -351,4 +372,109 @@ fn 同步从这里触发而且只碰清单里记录过的文件() {
 
     // 传完之后那份预览是过去时了，得重排。
     assert!(场.app.sublibrary().prepared().is_none());
+}
+
+#[test]
+fn 排差量预览进任务队列跑完之后留一条带耗时的历史() {
+    // 挂账 D156：排差量预览原先跑在画帧那条线程上，点一下窗口就僵住几秒。
+    // 现在它是**任务台**上的一趟活——跑完了台上把那份差量交回这一屏。
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+
+    let screen = 场.app.sublibrary();
+    assert!(screen.error().is_none(), "{:?}", screen.error());
+    assert!(screen.prepared().is_some(), "差量没交回来");
+    assert!(screen.previewing().is_none(), "跑完了却还记着一趟在排");
+    assert!(screen.prepare_ms() > 0.0, "耗时没记下来");
+
+    let history = 场.app.tasks().history();
+    assert_eq!(history.len(), 1, "任务台上没留下这一趟");
+    assert!(
+        history[0].name.contains("排差量预览") && history[0].name.contains("掌机"),
+        "历史那条说不清是给哪个子库排的：{}",
+        history[0].name,
+    );
+    assert_eq!(history[0].ending, Ending::Done);
+}
+
+#[test]
+fn 排差量预览按停之后一个字节都没写而且再排一次照样排得出() {
+    // 「能停」比「能取消」严格：**要停在干净的地方**。排差量预览整条只读，所以它的
+    // 干净可以照字面核对——目标设备上一个文件都没多、没少、没被改过。
+    //
+    // 先拿一趟占位的活把台上那个位子占住，于是「排差量预览」是**排着队**的那一趟，
+    // 停它这件事就不带竞态。停的路子与停正在跑的那一趟是同一个 `Board::stop`。
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    let 卡上原样 = 卡上有什么(场.卡.path());
+
+    let 占位 = 场.app.tasks_mut().queue("占着位子", |task| {
+        for _ in 0..400 {
+            task.check()?;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Err("这一趟只是占着位子".to_string())
+    });
+    {
+        let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
+        screen.preview(site, tasks);
+    }
+    let 预览 = 场.app.sublibrary().previewing().expect("排上队了");
+    场.app.tasks_mut().stop(预览);
+    场.app.poll_tasks();
+
+    let screen = 场.app.sublibrary();
+    assert!(screen.prepared().is_none(), "按停了却还是排出了一份差量");
+    assert!(screen.previewing().is_none(), "按停了却还记着一趟在排");
+    assert!(
+        screen.error().is_none(),
+        "按停下不是出错：{:?}",
+        screen.error()
+    );
+    let notice = screen.notice().expect("该说一句它被停了");
+    assert!(notice.contains("停"), "回执没说清是被停了：{notice}");
+    // **什么都没排出来，就别记「排它用了多久」**：那是给一份不存在的差量记账。
+    assert_eq!(screen.prepare_ms(), 0.0, "按停的那一趟也记了耗时");
+    assert_eq!(
+        场.app.tasks().history()[0].ending,
+        Ending::Stopped,
+        "按停了却记成了别的",
+    );
+
+    // **目标设备上一个字节都没动。**
+    assert_eq!(卡上有什么(场.卡.path()), 卡上原样, "按停了却动了卡上的文件");
+
+    // **再排一次照样排得出完整的一份**：它没有半截状态要收拾。
+    场.app.tasks_mut().stop(占位);
+    场.等任务跑完();
+    场.排预览();
+    let screen = 场.app.sublibrary();
+    assert!(screen.error().is_none(), "{:?}", screen.error());
+    let prepared = screen.prepared().expect("停过一次不该影响下一次");
+    assert_eq!(prepared.selected.picked.len(), 2);
+    assert!(prepared.plan.adds.files > 0, "重排出来的是一份空计划");
+}
+
+/// 目标设备上眼下有什么：每个文件的名字、内容、修改时间。
+fn 卡上有什么(dir: &Path) -> Vec<(String, Vec<u8>, Option<std::time::SystemTime>)> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir).expect("列得开").flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            continue;
+        }
+        out.push((
+            path.file_name()
+                .expect("有名字")
+                .to_string_lossy()
+                .into_owned(),
+            fs::read(&path).expect("读得到"),
+            entry.metadata().expect("读得到元数据").modified().ok(),
+        ));
+    }
+    out.sort();
+    out
 }

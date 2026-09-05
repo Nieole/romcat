@@ -29,6 +29,7 @@ use crate::path;
 use crate::scrape::Priorities;
 use crate::scrape::pool::MediaPool;
 use crate::sublibrary::{self, Selected, Sublibrary};
+use crate::task::Handle;
 use crate::workspace;
 
 use super::{Desired, Manifest, Options, Plan, TargetState};
@@ -165,16 +166,34 @@ pub fn priorities(given: Option<&Path>, workspace: &Path) -> Result<Priorities, 
     Priorities::load(&path).map_err(|error| format!("{error}"))
 }
 
+/// 这一条线一共几步。**改了下面的 `task.step` 就得改这个数**，不然进度条会走过头。
+/// `tests/task.rs::排差量预览一路报得出走到第几步` 盯着这两个数对不对得上。
+const STEPS: u32 = 12;
+
 /// 把中立库、媒体池与目标设备折成一份计划。**除了目标目录，什么都不写。**
 ///
+/// ## 报进度、能停
+///
+/// `task` 是这一趟的**把手**（[`crate::task::Handle`]）：每走完一步报一次，
+/// 每两步之间看一眼有没有被叫停。**这条线整条只读**，所以被叫停时停在哪儿都是干净的
+/// ——中立库、媒体池、目标设备三处一个字节都没动，那份没排完的计划直接丢掉就是。
+/// 也因此它没有「续跑」这回事：再排一次就是从头排一次（几百毫秒的活）。
+///
+/// 不想要把手的调用方给一个 [`Handle::new`](crate::task::Handle::new) 就行——
+/// 没人按停下，它就只是白记几行进度。
+///
 /// # Errors
-/// 子库不在、前端格式没有适配器、中立库读不动、目标看不了时返回一句给人看的话。
+/// 子库不在、前端格式没有适配器、中立库读不动、目标看不了时返回一句给人看的话；
+/// 被叫停时返回 [`Halted`](crate::task::Halted) 那句话。
 pub fn prepare(
     catalog: &Catalog,
     workspace: &Path,
     name: &str,
     request: &Request<'_>,
+    task: &Handle,
 ) -> Result<Prepared, String> {
+    task.steps(STEPS);
+    task.step("读子库")?;
     let mut sublibrary = catalog
         .sublibrary(name)
         .map_err(|error| format!("中立库读不动：{error}"))?
@@ -203,6 +222,7 @@ pub fn prepare(
     })?;
     // **能力档案**：目标吃得下什么、这张卡放得下什么（票 21、ADR-0017）。
     // 子库记的是名字，档案本身是一份可以整份换掉的数据。
+    task.step("读能力档案")?;
     let roster = Roster::in_workspace(workspace).map_err(|error| format!("{error}"))?;
     let missing_capability = sublibrary
         .capability
@@ -218,16 +238,24 @@ pub fn prepare(
     // **不建目录**：排计划那条命令说的是「一个文件都没写」。
     let pool = MediaPool::at(&workspace::media_pool_dir(workspace));
 
+    task.step("读选择集")?;
     let loaded = catalog
         .selection(name)
         .map_err(|error| format!("中立库读不动：{error}"))?;
+    // **这一步是最长的那一步**（真机量级上占大头：它走一遍全库）。把手在两步之间生效，
+    // 所以「按下停下」到「真的停了」之间最坏就是这一步的长度。
+    task.step("折事实")?;
     let facts = sublibrary::facts(catalog).map_err(|error| format!("中立库读不动：{error}"))?;
+    task.step("求值选择集")?;
     let selected = sublibrary::select(&loaded.selection, &facts);
 
+    task.step("折期望状态")?;
     let mut desired = super::desired(catalog, &selected, &profile)
         .map_err(|error| format!("中立库读不动：{error}"))?;
+    task.step("铺媒体")?;
     let media = super::media::lay(catalog, adapter.as_ref(), &pool, &selected)
         .map_err(|error| format!("中立库读不动：{error}"))?;
+    task.step("折前端元数据")?;
     let frontend = super::frontend::lay(
         catalog,
         adapter.as_ref(),
@@ -244,15 +272,19 @@ pub fn prepare(
     // 步骤的路径都没有——「传到一半失败」这件事在构造上不会发生。
     //
     // 路径上限比的是**完整路径**，因此把子库根那串的长度也交进去。
+    task.step("按目标存储筛一遍")?;
     desired.screen(
         &profile.filesystem,
         path::display(&root).encode_utf16().count(),
     );
 
+    task.step("读清单")?;
     let manifest = catalog
         .manifest(name)
         .map_err(|error| format!("中立库读不动：{error}"))?;
+    task.step("看一眼目标")?;
     let actual = super::observe(&RealFs, &root).map_err(|error| format!("{error}"))?;
+    task.step("排计划")?;
     let plan = super::plan(
         &sublibrary,
         &desired,

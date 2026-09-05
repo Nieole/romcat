@@ -544,7 +544,19 @@ pub fn sublibrary(
         screen.save(site);
         rule.clone_into(screen.rule_draft_mut());
         screen.add_rule(site, name);
-        screen.preview(site);
+    }
+    {
+        let (screen, site, tasks) = app.sublibrary_site_and_tasks();
+        screen.preview(site, tasks);
+    }
+    // 排差量预览跑在**任务台**上（票 01）：主线程这边得一直问「跑完没有」。
+    // 量的是那一趟活本身花了多久（[`crate::task`] 记的耗时），不是这个循环的开销。
+    for _ in 0..6_000 {
+        app.poll_tasks();
+        if app.sublibrary().prepared().is_some() || app.sublibrary().error().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let screen = app.sublibrary();
     let prepare_ms = screen.prepare_ms();

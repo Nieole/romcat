@@ -29,6 +29,7 @@ pub mod shape;
 pub mod site;
 pub mod sublibrary;
 pub mod sync;
+pub mod task;
 pub mod testing;
 pub mod title;
 pub mod titledb;

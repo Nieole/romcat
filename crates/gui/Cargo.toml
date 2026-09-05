@@ -20,7 +20,7 @@ demo = []
 name = "romcat-gui"
 path = "src/main.rs"
 
-# 这四个测试要合成数据撑场面，因此声明依赖。门禁不带 `--all-features` 就跑不到它们。
+# 这五个测试要合成数据撑场面，因此声明依赖。门禁不带 `--all-features` 就跑不到它们。
 [[test]]
 name = "close"
 required-features = ["demo"]
@@ -35,6 +35,10 @@ required-features = ["demo"]
 
 [[test]]
 name = "table"
+required-features = ["demo"]
+
+[[test]]
+name = "task"
 required-features = ["demo"]
 
 [dependencies]

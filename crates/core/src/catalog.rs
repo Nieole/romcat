@@ -226,6 +226,15 @@ pub enum CatalogError {
         /// 本程序的版本。
         expected: u32,
     },
+    /// 这份库只活在内存里，分不出第二份连接。
+    #[error(
+        "{path} 这份中立库只活在内存里，分不出第二份连接——\
+         后台跑的活要的是一份落在磁盘上的库"
+    )]
+    NotOnDisk {
+        /// 这份库自称在哪儿。
+        path: String,
+    },
     /// 存进去的抽样结果读不回来。
     #[error("中立库 {path} 里 {key} 的抽样结果读不回来：{source}")]
     Corrupt {
@@ -339,6 +348,61 @@ impl Catalog {
             source,
         })?;
         Self::prepare(conn, Some(path.to_path_buf()), display)
+    }
+
+    /// 为**另一条线程**再开一份同一份中立库，**只读**。
+    ///
+    /// ## 为什么这不会长出「两份库不一致」
+    ///
+    /// 挂账 D156 当时对「为界面再开一份连接」的顾虑正是这句话。这份连接把它拆掉，
+    /// 靠的是三条构造上的事实，不是纪律：
+    ///
+    /// 1. **它写不动。** 连接带 `SQLITE_OPEN_READ_ONLY` 开出来，往它上面写一个字节都会
+    ///    被 SQLite 当场拒绝。**全程只有一个写者**，那还是原来那份连接。
+    /// 2. **它不建表、不改版本。** 建表与版本那一套只在 [`Catalog::open`] 里做一次；
+    ///    这一份只核对版本对不对，对不上就不开。
+    /// 3. **它活得比一趟活还短。** 一趟长活开一份、跑完就丢，不是一份放在那儿慢慢变旧的
+    ///    缓存。WAL 让它在这段时间里读到一份一致的快照——另一条线程同时在写也不打架。
+    ///
+    /// 这份连接对着的是**同一个文件**（路径从这份库自己身上取，调用方无从指错）。
+    ///
+    /// # Errors
+    /// 这份库只活在内存里（分不出第二份连接）、文件打不开、或者结构版本对不上时返回错误。
+    pub fn read_only(&self) -> Result<Self, CatalogError> {
+        let file = self.file.clone().ok_or_else(|| CatalogError::NotOnDisk {
+            path: self.path.clone(),
+        })?;
+        let flags =
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn =
+            Connection::open_with_flags(&file, flags).map_err(|source| CatalogError::Sqlite {
+                path: self.path.clone(),
+                source,
+            })?;
+        let twin = Self {
+            conn,
+            file: Some(file),
+            path: self.path.clone(),
+        };
+        // **只核对，不建、不改。** 版本对不上时开出来的是一份读得出行、却对不上号的库，
+        // 那比打不开更坏。
+        let found: Option<String> = twin
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|source| twin.err(source))?;
+        match found.as_deref().map(str::parse::<u32>) {
+            Some(Ok(version)) if version == SCHEMA_VERSION => Ok(twin),
+            found => Err(CatalogError::Version {
+                path: twin.path.clone(),
+                found: found.and_then(Result::ok).unwrap_or(0),
+                expected: SCHEMA_VERSION,
+            }),
+        }
     }
 
     /// 开一个只活在内存里的中立库。测试用，也用于「只想看看不想留痕」。

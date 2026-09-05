@@ -23,18 +23,24 @@
 //! ——全在核心。这一层只做三件事：把要来的画出来、把点的那一下写回去、把中文输入放在
 //! 对的位置上。
 //!
-//! ## 同步跑在后台线程上
+//! ## 同步与排差量预览都跑在画帧那条线程之外
 //!
 //! 一趟同步要搬的可能是几十 GiB。搬在画帧那条线程上，窗口就是几分钟的白板，连
 //! 「停下」都点不动。所以计划一旦点头就整个搬进一条后台线程，主线程每帧只问一句
 //! 「跑完没有」，外加一个真的按得动的**停下**（[`CancelToken`]）。中断的那一趟照样落清单
 //! ——那份清单记的是「到中断为止目标上真实有什么」，下一趟才接得上。
+//!
+//! **排差量预览也一样，只是它走[任务台](crate::task)**：真机量级上它 343 毫秒，
+//! 大头是走一遍全库折事实（挂账 D156）。这一屏点那个按钮，等于往任务台上排一趟活；
+//! 跑完了台上把那份 [`Prepared`] 交回来（[`Screen::settle`]）。它整条只读，
+//! 所以中途按停下**停在哪儿都是干净的**：一个字节都没写，再排一次就是。
 
 use std::path::PathBuf;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
 use egui::{Align, Layout};
+use romcat_core::catalog::CatalogError;
 use romcat_core::report::{human_bytes, thousands};
 use romcat_core::scan::CancelToken;
 use romcat_core::site::Site;
@@ -43,8 +49,10 @@ use romcat_core::sublibrary::{
     BrokenRule, Exception, ExceptionRow, Rule, StoredRule, Sublibrary, Trim, rule,
 };
 use romcat_core::sync::{self, Act, Outcome, Prepared};
+use romcat_core::task::{Done, Finished};
 
 use crate::table::ROW_HEIGHT;
+use crate::task::{Product, Tasks};
 
 /// 差量预览里最多列几条步骤。再多就不是给人看的了——总数照旧在账上。
 const TOP_STEPS: usize = 2_000;
@@ -140,6 +148,12 @@ pub struct Screen {
     except_draft: ExceptDraft,
     /// 排出来的那份计划，**它就是差量预览**。
     prepared: Option<Prepared>,
+    /// 正在排的那一趟差量预览是任务台上的第几号。
+    ///
+    /// **它同时是认领凭据**：跑完的那一趟按号对得上才收（[`Screen::settle`]）。
+    /// 中途改过规则的话这个号会被 [`Screen::invalidate`] 抹掉，那一趟排出来的差量
+    /// 说的已经不是眼下这套选择集会做的事了，收回来反而是骗人。
+    previewing: Option<u64>,
     /// 排它用了多久，毫秒。
     prepare_ms: f64,
     /// 只求一次**选择集**的结果：选中哪些、多大、超限多少、砍谁。
@@ -178,6 +192,7 @@ impl Screen {
             rule_draft: String::new(),
             except_draft: ExceptDraft::default(),
             prepared: None,
+            previewing: None,
             prepare_ms: 0.0,
             evaluated: None,
             acknowledged: false,
@@ -239,10 +254,16 @@ impl Screen {
         self.prepared.as_ref()
     }
 
-    /// 排一次预览用了多久，毫秒。
+    /// 排一次预览用了多久，毫秒。**任务台记的那个数**，不是界面自己掐的表。
     #[must_use]
     pub fn prepare_ms(&self) -> f64 {
         self.prepare_ms
+    }
+
+    /// 正在排的那一趟差量预览是任务台上的第几号；没排着就是 `None`。
+    #[must_use]
+    pub fn previewing(&self) -> Option<u64> {
+        self.previewing
     }
 
     /// 只求了一次选择集的那份结果。
@@ -310,8 +331,15 @@ impl Screen {
     ///
     /// 改过规则、改过例外、改过子库本身之后都要走一趟：那份差量说的已经不是眼下这套
     /// 选择集会做的事了，而「同步」按钮认的正是它（ADR-0016）。
+    ///
+    /// **正在台上排着的那一趟也一并不认了**：它是照旧那套规则排的，收回来同样是骗人。
+    /// 那趟活自己会跑完（整条只读，跑完也没有副作用），只是没人认领它。
     pub fn invalidate(&mut self) {
         self.prepared = None;
+        self.previewing = None;
+        // **耗时跟着那份差量一起作废。** 留着上一趟的数，下一趟被按停时旁边就摆着一个
+        // 「排它用了 120 ms」——那说的是一份已经不在了的差量。
+        self.prepare_ms = 0.0;
         self.evaluated = None;
         self.acknowledged = false;
         self.outcome = None;
@@ -363,28 +391,98 @@ impl Screen {
         self.error = None;
     }
 
-    /// **排一次差量预览**。只读：中立库读一遍、目标设备走只读接缝看一遍，一个文件都不写。
+    /// **排一次差量预览**：往[任务台](crate::task)上排一趟，跑在画帧那条线程之外。
+    ///
+    /// 只读：中立库读一遍、目标设备走只读接缝看一遍，一个文件都不写。因此中途按停下
+    /// 停在哪儿都是干净的——**再排一次就是从头排一次**，几百毫秒的活，没有半截状态
+    /// 要收拾（挂账 D156）。
+    ///
+    /// ## 后台那条线程读的是哪一份库
+    ///
+    /// `rusqlite::Connection` 不是 `Sync`，所以后台拿不到界面这条线程手里那一份。
+    /// 它拿的是**同一个文件的第二份只读连接**（[`Catalog::read_only`]）：写不动、
+    /// 不建表、跑完就丢，于是「两份库不一致」这条路在构造上就不存在。
+    /// 只活在内存里的那种库（合成数据）分不出第二份连接，那一趟就**就地跑完**——
+    /// 合成数据上它是几毫秒的事。**别的原因分不出来就直说**，不偷偷退到画帧那条线程上
+    /// 跑一趟：那既会僵住窗口，又把真正的问题盖住了。
     ///
     /// 界面上按那个按钮走的就是它，实测与测试拿它当那一下。
-    pub fn preview(&mut self, site: &Site) {
+    ///
+    /// [`Catalog::read_only`]: romcat_core::catalog::Catalog::read_only
+    pub fn preview(&mut self, site: &Site, tasks: &mut Tasks) {
         let Some(name) = self.picked.clone() else {
             self.error = Some("先挑一个子库。".to_string());
             return;
         };
+        if self.previewing.is_some() {
+            return;
+        }
         self.invalidate();
-        let started = Instant::now();
-        match sync::prepare(
-            &site.catalog,
-            &self.workspace,
-            &name,
-            &sync::Request::default(),
-        ) {
-            Ok(prepared) => {
-                self.prepare_ms = started.elapsed().as_secs_f64() * 1000.0;
-                self.prepared = Some(prepared);
+        self.error = None;
+        let workspace = self.workspace.clone();
+        let title = format!("排差量预览 · {name}");
+        self.previewing = Some(match site.catalog.read_only() {
+            Ok(reader) => tasks.queue(title, move |task| {
+                sync::prepare(&reader, &workspace, &name, &sync::Request::default(), task)
+                    .map(|prepared| Product::Preview(Box::new(prepared)))
+            }),
+            // **只活在内存里的库分不出第二份连接**（合成数据走这条），那是意料之中的：
+            // 这一趟就地跑完，几毫秒的事。
+            Err(CatalogError::NotOnDisk { .. }) => tasks.run_here(title, |task| {
+                sync::prepare(
+                    &site.catalog,
+                    &workspace,
+                    &name,
+                    &sync::Request::default(),
+                    task,
+                )
+                .map(|prepared| Product::Preview(Box::new(prepared)))
+            }),
+            // 别的原因是**意外**——开这份库的时候它还好好的，文件却没了、或者结构版本
+            // 对不上。这时**直说，不要退到画帧这条线程上偷偷跑一趟**：那既会僵住窗口，
+            // 又把真正的问题盖在一句「怎么卡了一下」底下。
+            Err(why) => {
+                self.error = Some(format!(
+                    "分不出第二份只读连接：{why}\n\
+                     排差量预览要在画帧那条线程之外跑，而它读的是同一份中立库文件。\
+                     先确认那个文件还在、版本还对得上。"
+                ));
+                return;
+            }
+        });
+    }
+
+    /// 任务台交回来一趟跑完的活。**不是自己那一趟就放过去。**
+    pub fn settle(&mut self, done: Finished<Product>) {
+        if self.previewing != Some(done.id) {
+            return;
+        }
+        self.previewing = None;
+        match done.ended {
+            Done::Product(Product::Preview(prepared)) => {
+                // **只有真排出来那一趟才记耗时。** 被停下、出错的那趟什么都没排出来，
+                // 摆一个「排它用了 120 ms」在旁边等于给一份不存在的差量记账。
+                self.prepare_ms = done.elapsed.as_secs_f64() * 1000.0;
+                self.prepared = Some(*prepared);
                 self.error = None;
             }
-            Err(message) => self.error = Some(message),
+            // **停下来的地方是干净的，就得这么说。** 说成「失败」会让人去找哪儿坏了。
+            Done::Stopped => {
+                self.notice = Some(
+                    "排差量预览按停了。这一趟整条只读——中立库、媒体池、目标设备\
+                     一个字节都没动，再排一次就是。"
+                        .to_string(),
+                );
+                self.failed = false;
+            }
+            // **不静默结束**：哪一步、为什么，两样都说出来。
+            Done::Failed { step, why } => {
+                self.error = Some(if step.is_empty() {
+                    why
+                } else {
+                    format!("排差量预览在「{step}」这一步停下了：{why}")
+                });
+            }
         }
     }
 
@@ -517,7 +615,7 @@ impl Screen {
     }
 
     /// 画一帧。
-    pub fn ui(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         self.poll(site);
         if self.running.is_some() {
             // 后台在跑，主线程得继续画，不然「停下」按钮按不动。
@@ -531,7 +629,7 @@ impl Screen {
             .default_size(240.0)
             .min_size(160.0)
             .show(ui, |ui| self.list_panel(ui, site));
-        egui::CentralPanel::default().show(ui, |ui| self.preview_panel(ui, site));
+        egui::CentralPanel::default().show(ui, |ui| self.preview_panel(ui, site, tasks));
     }
 
     /// 顶栏上属于这一屏的那一段。
@@ -590,7 +688,7 @@ impl Screen {
     }
 
     /// 中间：**差量预览**，以及从这里触发的同步。
-    fn preview_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+    fn preview_panel(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         if let Some(error) = &self.error {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
@@ -622,14 +720,34 @@ impl Screen {
                 self.evaluate(site);
             }
             if ui
-                .add_enabled(self.running.is_none(), egui::Button::new("排差量预览"))
+                .add_enabled(
+                    self.running.is_none() && self.previewing.is_none(),
+                    egui::Button::new("排差量预览"),
+                )
                 .on_hover_text(
                     "只读：中立库读一遍、目标设备看一遍，一个文件都不写。\
-                     插上读卡器再点——目标不在位时它会直说。",
+                     插上读卡器再点——目标不在位时它会直说。\
+                     它进**任务队列**跑，期间这一屏照常用。",
                 )
                 .clicked()
             {
-                self.preview(site);
+                self.preview(site, tasks);
+            }
+            // 正排着的时候把进度摆在按钮旁边：人是在这一屏点的，不该逼他先切去任务屏
+            // 才知道排到哪儿了。**停下也在这儿按得着。**
+            if let Some(id) = self.previewing
+                && let Some(live) = tasks.running().filter(|live| live.id == id)
+            {
+                ui.weak(format!(
+                    "正在排：{}（已用 {:.1} 秒）",
+                    live.progress.render(),
+                    live.elapsed.as_secs_f64(),
+                ));
+                if live.stopping {
+                    ui.colored_label(ui.visuals().warn_fg_color, "正在停……");
+                } else if ui.button("停下").clicked() {
+                    tasks.stop(id);
+                }
             }
         });
         let Some(prepared) = self.prepared.clone() else {

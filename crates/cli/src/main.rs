@@ -3857,6 +3857,9 @@ fn prepare(
             restore_missing: restore,
             priorities,
         },
+        // 命令行这一侧没有人按「停下」：这条命令跑几百毫秒就完了，Ctrl-C 直接结束进程
+        // 就是干净的（整条只读）。把手在这儿只是白记几行进度——**界面那一侧才用得上它**。
+        &romcat_core::task::Handle::new(),
     )
 }
 

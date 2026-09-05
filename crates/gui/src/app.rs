@@ -22,7 +22,7 @@ use std::path::PathBuf;
 
 use egui::{Align, Layout};
 
-use crate::{library, queue, sublibrary};
+use crate::{library, queue, sublibrary, task};
 use romcat_core::site::Site;
 
 /// 关窗走到哪一拍了。
@@ -48,11 +48,13 @@ pub enum View {
     Variants,
     /// **子库**：选择集、差量预览、同步（票 25）。
     Sublibraries,
+    /// **任务**：排队、进度、可停、历史。**不发起操作，只承接**（票 01）。
+    Tasks,
 }
 
 impl View {
     /// 顶栏照这个次序摆。
-    pub const ALL: [Self; 3] = [Self::Queue, Self::Variants, Self::Sublibraries];
+    pub const ALL: [Self; 4] = [Self::Queue, Self::Variants, Self::Sublibraries, Self::Tasks];
 
     /// 这一屏叫什么。用**词表**里的词。
     #[must_use]
@@ -61,6 +63,7 @@ impl View {
             Self::Queue => "待确认队列",
             Self::Variants => "库浏览",
             Self::Sublibraries => "子库",
+            Self::Tasks => "任务",
         }
     }
 }
@@ -76,6 +79,10 @@ pub struct App {
     library: library::Screen,
     /// 子库那一屏。
     sublibrary: sublibrary::Screen,
+    /// 任务那一屏。
+    tasks: task::Screen,
+    /// **任务台**：长活排在这儿跑，跑在画帧那条线程之外。
+    board: task::Tasks,
     closing: Closing,
 }
 
@@ -110,6 +117,8 @@ impl App {
             queue,
             library,
             sublibrary,
+            tasks: task::Screen::new(),
+            board: task::Tasks::new(),
             closing: Closing::No,
         }
     }
@@ -169,9 +178,39 @@ impl App {
         &self.sublibrary
     }
 
-    /// 子库那一屏**连它的库**。建子库、写规则、排预览、同步都同时要它们俩。
+    /// 子库那一屏**连它的库**。建子库、写规则、同步都同时要它们俩。
     pub fn sublibrary_and_site(&mut self) -> (&mut sublibrary::Screen, &mut Site) {
         (&mut self.sublibrary, &mut self.site)
+    }
+
+    /// 子库那一屏、它的库、**再加任务台**。排差量预览这一下三样都要：
+    /// 从库里分一份只读连接出来，把活排到台上去。
+    pub fn sublibrary_site_and_tasks(
+        &mut self,
+    ) -> (&mut sublibrary::Screen, &mut Site, &mut task::Tasks) {
+        (&mut self.sublibrary, &mut self.site, &mut self.board)
+    }
+
+    /// **任务台**，供测试与实测查「跑着什么、历史几条」。
+    #[must_use]
+    pub fn tasks(&self) -> &task::Tasks {
+        &self.board
+    }
+
+    /// 任务台，供测试与实测往上排活、按停下。
+    pub fn tasks_mut(&mut self) -> &mut task::Tasks {
+        &mut self.board
+    }
+
+    /// 问一遍任务台：跑完的那几趟把产物交给该拿它的那一屏。
+    ///
+    /// 每帧一次。测试与实测在等一趟活跑完时也调它——**走的是界面上那条一模一样的路**。
+    pub fn poll_tasks(&mut self) {
+        while let Some(done) = self.board.poll() {
+            // 眼下只有子库那一屏往台上排活（排差量预览）。它按任务号认领自己那一趟，
+            // 不是它的就放过去——将来别的屏接上来时，各自在这儿多认一次。
+            self.sublibrary.settle(done);
+        }
     }
 
     /// 变体表背后那扇窗，供测试查「内存里装了几行」。
@@ -183,6 +222,8 @@ impl App {
     /// 画一帧。`eframe` 与量帧率的那条路走的是同一个函数——量出来的才是这个界面的代价。
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         self.handle_close(ui.ctx());
+        // 任务台先问一遍：这一帧要画的进度、要交出去的产物都从这儿来。
+        self.poll_tasks();
         egui::Panel::top("顶栏").show(ui, |ui| self.top_bar(ui));
         match self.view {
             View::Queue => {
@@ -194,16 +235,32 @@ impl App {
                 library.ui(ui, site);
             }
             View::Sublibraries => {
-                let (sublibrary, site) = (&mut self.sublibrary, &mut self.site);
-                sublibrary.ui(ui, site);
+                let (sublibrary, site, board) =
+                    (&mut self.sublibrary, &mut self.site, &mut self.board);
+                sublibrary.ui(ui, site, board);
             }
+            View::Tasks => {
+                let (tasks, board) = (&mut self.tasks, &mut self.board);
+                tasks.ui(ui, board);
+            }
+        }
+        // **这一句要在画完之后问**：排活的那一下就发生在上面那几屏里
+        // （子库屏点「排差量预览」）。搁在这一帧开头问的话，刚排上去的那一趟要等到
+        // 下一次有输入事件才会被画到——进度不走，「停下」也按不动。
+        if self.board.busy() {
+            ui.ctx().request_repaint();
         }
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             for view in View::ALL {
-                ui.selectable_value(&mut self.view, view, view.label());
+                let label = match (view, self.board.running()) {
+                    // **哪一屏上都看得见台上有活在跑**：跑着的时候人多半正在别的屏上。
+                    (View::Tasks, Some(_)) => format!("{} ●", view.label()),
+                    _ => view.label().to_string(),
+                };
+                ui.selectable_value(&mut self.view, view, label);
             }
             ui.separator();
             match self.view {
@@ -221,6 +278,10 @@ impl App {
                 View::Sublibraries => {
                     let (sublibrary, site) = (&mut self.sublibrary, &self.site);
                     sublibrary.status(ui, site);
+                }
+                View::Tasks => {
+                    let (tasks, board) = (&mut self.tasks, &self.board);
+                    tasks.status(ui, board);
                 }
             }
         });
