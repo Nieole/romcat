@@ -274,6 +274,20 @@ fn 结论(现场: &现场, key: &str) -> (State, Option<String>) {
         .unwrap_or_else(|| panic!("{key} 没有识别结论"))
 }
 
+/// 完整重扫一遍这个根。**删除与成型都只在完整扫完一遍之后才做**，所以要走整条流程，
+/// 不能只写几条记录（ADR-0022）。
+fn 重扫(现场: &mut 现场) {
+    let mut options = ScanOptions::named(现场.dir.path(), "库");
+    options.jobs = Jobs::Fixed(2);
+    scan::scan(
+        &RealFs::new(),
+        &mut 现场.catalog,
+        &options,
+        &Handle::new(),
+    )
+    .expect("扫得动");
+}
+
 #[test]
 fn 含头与去头两套规则同时算并且各撞各的() {
     let mut 现场 = 建现场();
@@ -733,15 +747,6 @@ fn 目录名是分解形式时它底下整棵子树都还认得出() {
     }
 }
 
-/// 再扫一遍主库，**不重跑识别**。
-///
-/// 真机上这正是[还没识别](romcat_core::catalog::identify::NOT_RUN_LABEL)冒出来的那一刻：
-/// 加了一个新**根**、或者往库里放了新文件，扫描把它收成一个变体，而识别还没轮到它。
-fn 重扫(现场: &mut 现场) {
-    let mut options = ScanOptions::named(现场.dir.path(), "库");
-    options.jobs = Jobs::Fixed(2);
-    scan::scan(&RealFs::new(), &mut 现场.catalog, &options, &Handle::new()).expect("扫得动");
-}
 
 #[test]
 fn 还没识别的变体照样占着变体总数与全部变体里那个分母() {
@@ -840,4 +845,94 @@ fn 识别被中断后报告说的是全部变体而不是跑完的那几个() {
     assert!((report.total.coverage() - 0.0).abs() < 1e-9);
     let text = report.render_text();
     assert!(text.contains("还没识别 8"), "{text}");
+}
+
+#[test]
+fn 命中的那份删掉重扫之后结论与候选不再交出() {
+    // ⭐ **变体没了，挂在它身上的结论也就没了。** 窗口是「重扫到下一趟识别之间」：
+    // 那期间报告、标题集合与导出都还在读这几张表，读到的是一个盘上已经不存在的东西。
+    let mut 现场 = 建现场();
+    跑(&mut 现场);
+    let 键 = "库/FC/超级马里奥.zip";
+    assert_eq!(结论(&现场, 键).0, State::Matched, "先得真命中一次");
+    assert_eq!(
+        现场.catalog.candidates_of(键).expect("读得出").len(),
+        2,
+        "含头与去头两套口径各一条"
+    );
+    let 发行版数 = 现场.catalog.releases().expect("读得出").len();
+
+    fs::remove_file(现场.dir.path().join("FC/超级马里奥.zip")).expect("删得掉");
+    重扫(&mut 现场);
+
+    assert!(
+        现场.catalog.variant(键).expect("读得出").is_none(),
+        "前提：重新成型之后这个变体已经不在了"
+    );
+    assert!(
+        现场.catalog.identification_of(键).expect("读得出").is_none(),
+        "结论跟着变体走"
+    );
+    assert!(
+        现场.catalog.candidates_of(键).expect("读得出").is_empty(),
+        "候选跟着变体走"
+    );
+    let mut 交出的 = Vec::new();
+    现场
+        .catalog
+        .for_each_accepted_candidate(&mut |candidate| {
+            交出的.push(candidate.variant_key.to_string());
+        })
+        .expect("走得动");
+    assert!(
+        !交出的.contains(&键.to_string()),
+        "刮削那一侧不许再收到这个键：{交出的:?}"
+    );
+    assert_eq!(
+        现场.catalog.releases().expect("读得出").len(),
+        发行版数 - 1,
+        "只剩那份候选独家撑着的发行版跟着收掉"
+    );
+}
+
+#[test]
+fn 作品与发行版表里不留指不着任何变体的行() {
+    // 留着的话，「识别建出来的作品数」会一直虚高，浏览屏上还会长出指不着任何文件的行。
+    let mut 现场 = 建现场();
+    跑(&mut 现场);
+    fs::remove_file(现场.dir.path().join("FC/超级马里奥.zip")).expect("删得掉");
+    fs::remove_file(现场.dir.path().join("FC/某游戏 汉化版.zip")).expect("删得掉");
+    重扫(&mut 现场);
+
+    let 变体们 = 现场.catalog.variants().expect("读得出变体");
+    let 发行版们 = 现场.catalog.releases().expect("读得出发行版");
+    let 作品们 = 现场.catalog.work_names().expect("读得出作品");
+    let mut 候选指着的 = Vec::new();
+    现场
+        .catalog
+        .for_each_accepted_candidate(&mut |candidate| {
+            候选指着的.extend(candidate.release_id);
+        })
+        .expect("走得动");
+    for (id, release) in &发行版们 {
+        let 有人指 = 变体们.iter().any(|it| it.release_id == Some(*id))
+            || 候选指着的.contains(id);
+        assert!(有人指, "发行版 {id} 指不着任何变体：{release:?}");
+        assert!(作品们.contains_key(&release.work_id), "它的作品还在");
+    }
+    for id in 作品们.keys() {
+        assert!(
+            变体们.iter().any(|it| it.work_id == Some(*id))
+                || 发行版们.values().any(|it| it.work_id == *id),
+            "作品 {id} 指不着任何变体、也没有发行版挂在它下面"
+        );
+    }
+    // **标题集合是这几张表的直接消费者**：孤儿发行版留着，`title::fold` 就照它的
+    // 官方条目名折出一条指不着任何文件的标题。
+    let 折出来 = romcat_core::title::fold(&现场.catalog).expect("折得出标题集合");
+    assert!(
+        !折出来.iter().any(|row| row.value.contains("Super Mario")),
+        "那份已删文件的官方名不许再进标题集合：{:?}",
+        折出来.iter().map(|row| &row.value).collect::<Vec<_>>()
+    );
 }

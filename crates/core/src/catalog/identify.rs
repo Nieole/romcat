@@ -32,7 +32,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 use super::{Catalog, CatalogError};
 use crate::dat::Convention;
@@ -1515,13 +1515,25 @@ impl Catalog {
     /// 它是 [`switch_kinds`](Self::switch_kinds) 的分母：那几个数只有带 `.tik` 的容器
     /// 说得出，不摆分母，读者会以为「本体 16」是全部。
     ///
+    /// **口径与 [`switch_facts`](Self::switch_facts) 一模一样**：连 `entry` 再对一遍
+    /// 这一行自带的有效期。这张表建来就写着「不依赖任何人记得去作废它」，那句话只有
+    /// 在**每一个**读它的地方都对一遍有效期时才成立——一处对、一处不对，同一份库上
+    /// 报告数出来的份数就与识别真正拿得到的事实各说各话。
+    ///
+    /// 读不到元数据的条目不会被这一条漏掉：它的名字 `readdir` 列得出来，`entry` 里
+    /// 那一行还在，而扫描绝不用「不可读」覆盖上次读到的大小与时间（ADR-0021）。
+    ///
     /// # Errors
     /// 读库失败时返回错误。
     pub fn switch_read(&self) -> Result<u64, CatalogError> {
         self.conn
-            .query_row("SELECT count(*) FROM content_switch", [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .query_row(
+                "SELECT count(*) FROM content_switch s
+                 JOIN entry e ON e.key = s.key
+                 WHERE s.len IS e.len AND s.mtime_ns IS e.mtime_ns",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
             .map(|it| u64::try_from(it).unwrap_or(0))
             .map_err(|source| self.err(source))
     }
@@ -1531,14 +1543,20 @@ impl Catalog {
     /// 报告从中立库折出来、不重跑识别（ADR-0001），所以这件事是一条 SQL 而不是攒在
     /// 一趟识别的内存里。不摆出这个数，库体检会把一堆更新包报成游戏。
     ///
+    /// 口径同 [`switch_read`](Self::switch_read)——它是这几个数的分母，两者对不上
+    /// 就是报告自己跟自己打架。
+    ///
     /// # Errors
     /// 读库失败时返回错误。
     pub fn switch_kinds(&self) -> Result<Vec<(String, u64)>, CatalogError> {
         let mut statement = self
             .conn
             .prepare(
-                "SELECT kind, count(*) FROM content_switch
-                 WHERE kind IS NOT NULL GROUP BY kind ORDER BY 2 DESC, 1",
+                "SELECT s.kind, count(*) FROM content_switch s
+                 JOIN entry e ON e.key = s.key
+                 WHERE s.kind IS NOT NULL
+                   AND s.len IS e.len AND s.mtime_ns IS e.mtime_ns
+                 GROUP BY s.kind ORDER BY 2 DESC, 1",
             )
             .map_err(|source| self.err(source))?;
         let rows = statement
@@ -2534,4 +2552,59 @@ impl Catalog {
         }
         tx.commit().map_err(to_err)
     }
+}
+
+/// 收掉**指不着任何变体**的识别结论与候选，连同它们独家撑着的作品与发行版。
+///
+/// ## 为什么落在这一步，而不是 `sweep` 或 `write`
+///
+/// 「条目没了」与「变体没了」是两层，作废也就分两处落。挂在**条目**（文件）上的那几张
+/// 内容表由扫描收（[`Catalog::write`] 管文件变了、`Catalog::drop_orphans` 管文件没了）；
+/// 识别这几张挂在**变体**上，而变体是成型算出来的——少一个文件不等于少一个变体
+/// （三块 `.bin` 少一块，那个变体还在），所以只有重新成型之后才说得出「哪个变体真没了」。
+/// 于是这一步跟着 [`Catalog::replace_variants`] 走：那是变体表唯一的写入口，
+/// 在它那个事务里跑，收不干净就跟着一起回滚。
+///
+/// ## 为什么不怕把结论清光
+///
+/// 判据是**键还在不在**，不是「这一趟有没有重新成型」。成型只是把散落的文件重聚一遍，
+/// 键没变的变体一条都落不进这张网——改一条成型规则不该把攒了半天的识别结论冲掉
+/// （ADR-0022 那条「`work_id` / `release_id` 保住」是同一条道理的另一半）。
+///
+/// ## 作品与发行版凭什么也删得
+///
+/// 这两张表**每一行都可再生**：`origin = 识别` 的重跑一趟识别就有，`origin = 裁决` 的
+/// 是**沉淀库**的投影、照那份库重放一遍就有（见本模块开头与
+/// [`verdict`](crate::verdict) 的模块文档）。删掉一行不带走任何不可再生的东西。
+/// 闸是「眼下还有没有人指着它」——留着没人指的那些，报告里「识别建出来的作品数」
+/// 会一直虚高，浏览屏上还会长出指不着任何文件的行。这与
+/// [`Catalog::restore_conclusions`] 收尾那两句是同一条路，只是那里按一批划范围，
+/// 这里按整库——重新成型本来就是整库一遍的纯计算。
+///
+/// **`model_answer` 不在这份清单里**：那是唯一花过钱的一张表，键回来了还白拿一次
+/// （见它自己那段表注释）。**人工纠正与合集成员也不在**：那两样明写着不随重新成型消失。
+pub(super) fn drop_variant_orphans(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    // 顺序是**从引用方往被引用方**走，与 `clear_identifications` 同一条道理：
+    // 外键是开着的，先删被指着的那一行会当场报错。
+    tx.execute(
+        "DELETE FROM candidate WHERE variant_key NOT IN (SELECT key FROM variant)",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM identification WHERE variant_key NOT IN (SELECT key FROM variant)",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM release
+         WHERE NOT EXISTS(SELECT 1 FROM variant v WHERE v.release_id = release.id)
+           AND NOT EXISTS(SELECT 1 FROM candidate c WHERE c.release_id = release.id)",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM work
+         WHERE NOT EXISTS(SELECT 1 FROM variant v WHERE v.work_id = work.id)
+           AND NOT EXISTS(SELECT 1 FROM release r WHERE r.work_id = work.id)",
+        [],
+    )?;
+    Ok(())
 }

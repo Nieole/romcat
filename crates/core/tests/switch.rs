@@ -208,6 +208,24 @@ fn 候选(现场: &现场, 名字里带: &str) -> Vec<romcat_core::catalog::iden
     现场.catalog.candidates_of(&key).expect("读得出候选")
 }
 
+/// 完整重扫一遍这个根。**删除与成型都只在完整扫完一遍之后才做**（ADR-0022），
+/// 所以要走整条流程，不能只往中立库里补几条记录。
+fn 重扫(现场: &mut 现场) {
+    let mut options = ScanOptions::named(现场.dir.path(), "库");
+    options.jobs = Jobs::Fixed(2);
+    scan::scan(&RealFs::new(), &mut 现场.catalog, &options, &Handle::new()).expect("扫得动");
+}
+
+fn 数一档(现场: &现场, code: &str) -> u64 {
+    现场
+        .catalog
+        .switch_kinds()
+        .expect("读得出")
+        .into_iter()
+        .find(|(kind, _)| kind == code)
+        .map_or(0, |(_, count)| count)
+}
+
 fn 结论(现场: &现场, 名字里带: &str) -> State {
     let key = 现场
         .catalog
@@ -414,6 +432,62 @@ fn 报告分得出本体补丁与附属内容() {
     assert_eq!(取("addon"), 1);
     let text = outcome.report.render_text();
     assert!(text.contains("Switch 的内容分布"), "{text}");
+}
+
+#[test]
+fn 删掉一份重扫之后内容分布不再数那份已删的() {
+    // ⭐ 报告数的必须是**盘上还在的那些**。`content_switch` 挂在**条目**上，条目没了
+    // 它就该没——不然库体检会照着一份已经删掉的容器数本体 / 补丁 / 附属内容。
+    let mut 现场 = 建现场();
+    let titledb = 建_titledb();
+    跑(&mut 现场, Some(&titledb));
+
+    let 读出的份数 = 现场.catalog.switch_read().expect("读得出");
+    assert_eq!(数一档(&现场, "patch"), 1, "先得真读出那份补丁");
+    assert_eq!(数一档(&现场, "addon"), 1);
+
+    fs::remove_file(
+        现场
+            .dir
+            .path()
+            .join(format!("switch/伊蘇X 更新 [{PATCH}][v196608].nsz")),
+    )
+    .expect("删得掉");
+    重扫(&mut 现场);
+
+    assert_eq!(
+        现场.catalog.switch_read().expect("读得出"),
+        读出的份数 - 1,
+        "分母要跟着少一份"
+    );
+    assert_eq!(数一档(&现场, "patch"), 0, "补丁那一档数的就是刚删掉的那一份");
+    assert_eq!(数一档(&现场, "addon"), 1, "别的档一个都不许受牵连");
+}
+
+#[test]
+fn 换掉一份的内容重扫之后旧的那份事实当场作废() {
+    // **文件变了，上一趟从容器头里读出来的东西就作废了**——与哈希、光盘标识、卡带头
+    // 同一条路（挂账 D14）。留着它，报告会照一份已经不在的容器说这是个补丁。
+    let mut 现场 = 建现场();
+    let titledb = 建_titledb();
+    跑(&mut 现场, Some(&titledb));
+    assert_eq!(数一档(&现场, "patch"), 1);
+
+    // 同一个路径换成一份**不是 Switch 容器**的东西：探不出票据，也就没有档可数。
+    写(
+        &现场
+            .dir
+            .path()
+            .join(format!("switch/伊蘇X 更新 [{PATCH}][v196608].nsz")),
+        &[0_u8; 0x3000],
+    );
+    重扫(&mut 现场);
+
+    assert_eq!(
+        数一档(&现场, "patch"),
+        0,
+        "字节换过之后，上一趟那份文件名表一个字都不作数"
+    );
 }
 
 #[test]

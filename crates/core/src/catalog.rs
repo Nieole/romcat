@@ -1082,6 +1082,12 @@ impl Catalog {
             let mut clear_cart = tx
                 .prepare("DELETE FROM content_cart WHERE key = ?1")
                 .map_err(to_err)?;
+            // Switch 容器的明文文件名表同理（票 27）。**它一度漏在这份清单外**，于是
+            // 换掉一份 `.nsp` 之后，库体检的「Switch 的内容分布」照着旧容器的
+            // TitleID 与本体 / 补丁 / 附属内容分档数，数的是一份已经不在盘上的东西。
+            let mut clear_switch = tx
+                .prepare("DELETE FROM content_switch WHERE key = ?1")
+                .map_err(to_err)?;
             // 媒体文件变了，上一趟算出来的内容哈希同样作废——留着它，刮削会拿一个
             // 对不上的哈希去引用**媒体池**里另一份内容的图。与 content_hash 同一条路。
             let mut clear_media = tx
@@ -1160,6 +1166,7 @@ impl Catalog {
                     clear_hashes.execute(params![record.key]).map_err(to_err)?;
                     clear_disc.execute(params![record.key]).map_err(to_err)?;
                     clear_cart.execute(params![record.key]).map_err(to_err)?;
+                    clear_switch.execute(params![record.key]).map_err(to_err)?;
                     clear_media.execute(params![record.key]).map_err(to_err)?;
                 }
                 if is_container && (changed || record.container.is_some()) {
@@ -1341,6 +1348,12 @@ impl Catalog {
 
     /// 条目没了，挂在它身上的那几张表也就没了——留着会让报告数出一批不存在的内部文件。
     ///
+    /// **这里收的是挂在条目（文件）上的那一层。** 挂在**变体**上的那一层（候选、结论、
+    /// 标题）不在这儿收：变体不是文件，它由成型算出来，删一个文件不等于删一个变体
+    /// ——三块 `.bin` 少了一块，那个变体还在。那一层由
+    /// [`Catalog::replace_variants`](crate::catalog::Catalog::replace_variants) 在
+    /// 重新成型之后收，那是变体表唯一的写入口。
+    ///
     /// # Errors
     /// 写库失败时返回错误。
     pub(crate) fn drop_orphans(&self) -> Result<(), CatalogError> {
@@ -1350,6 +1363,7 @@ impl Catalog {
              DELETE FROM content_hash    WHERE key NOT IN (SELECT key FROM entry);
              DELETE FROM content_disc    WHERE key NOT IN (SELECT key FROM entry);
              DELETE FROM content_cart    WHERE key NOT IN (SELECT key FROM entry);
+             DELETE FROM content_switch  WHERE key NOT IN (SELECT key FROM entry);
              DELETE FROM media_blob      WHERE key NOT IN (SELECT key FROM entry);",
         )
     }
