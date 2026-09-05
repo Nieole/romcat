@@ -1243,6 +1243,24 @@ fn open_catalog(workspace: &Path, slug: Slug<'_>, root: Option<&Path>) -> Result
     Catalog::open(&path).map_err(|error| format!("中立库打不开：{error}"))
 }
 
+/// 这一趟扫描的断点文件按哪个**根**名去找。
+///
+/// 算断点路径这一步在开扫之前，而 `scan` 内部认根走的是
+/// [`scan::default_root_name`] 加**化开之后**的根（`scan::resolve_root`）。
+/// 两处必须从同一条路径算：用户敲进来的原串靠不住——`scan .` 的 `.` 没有末级名字，
+/// 落到 `default_root_name` 上退成「主库」，而 `scan` 里认出来的是那个目录真正的
+/// 名字。名字对不上的后果不是少个文件而是两个方向的丢数据：带 `--resume` 撞出一句
+/// 「扫描根对不上」让整趟失败，不带则一趟扫完把**另一个根**的断点当自己的删掉。
+///
+/// 化开走 [`path::normalize_existing`]，与 `workspace::Slug::AtPath` 折中立库文件名
+/// 那一步同源——同一个目录无论敲成 `.`、带尾斜杠、还是夹着 `..`，都落到同一个根名上。
+fn checkpoint_root_name(explicit: Option<&str>, root: &Path) -> String {
+    match explicit {
+        Some(name) => name.to_string(),
+        None => scan::default_root_name(&path::normalize_existing(root)),
+    }
+}
+
 fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
     // 先拦，再扫：10T 扫上几个钟头才发现文件写不出去，代价太大。
     if let Err(message) = args.output.refuse_targets_in_library(&args.root) {
@@ -1284,10 +1302,7 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
         Some(workspace::checkpoint_path(
             &workspace,
             slug,
-            &options
-                .root_name
-                .clone()
-                .unwrap_or_else(|| scan::default_root_name(&args.root)),
+            &checkpoint_root_name(options.root_name.as_deref(), &args.root),
         ))
     };
     if let Some(path) = &checkpoint_path {
@@ -5508,6 +5523,34 @@ mod tests {
         assert_eq!(when(1_709_251_199), "2024-02-29 23:59");
         // 2025 不是闰年，同一个 3 月 1 日在它那儿早一天到。
         assert_eq!(when(1_740_787_200), "2025-03-01 00:00");
+    }
+
+    /// 断点文件名与 `scan` 内部认根，必须从**同一个化开之后**的根算出根名。
+    ///
+    /// 用户敲的原串靠不住：`.`、`x/..`、尾斜杠这几种写法 `file_name()` 都给 `None`，
+    /// 按原串算一律退成「主库」，而 `scan` 里认出来的是那个目录真正的名字。两个不同
+    /// 目录都用 `scan .` 扫就会共用一个断点文件——带 `--resume` 撞
+    /// `RootMismatch` 让整趟失败，不带则一趟扫完把另一个根的进度删掉。
+    #[test]
+    fn 断点根名从化开之后的根算() {
+        let temp = romcat_core::testing::temp_dir("断点根名");
+        let 根 = temp.path().join("甲盘");
+        fs::create_dir_all(根.join("子目录")).expect("能建目录");
+        let 期望 = scan::default_root_name(&path::normalize_existing(&根));
+
+        // 三种「没有末级名字」的写法都得落到同一个根名上。
+        for 写法 in [
+            根.clone(),
+            根.join("子目录").join(".."),
+            PathBuf::from(format!("{}/", 根.display())),
+        ] {
+            let 算出来的 = checkpoint_root_name(None, &写法);
+            assert_eq!(算出来的, 期望, "{} 该算出同一个根名", 写法.display());
+            assert_ne!(算出来的, "主库", "退成「主库」正是这条 bug 的形状");
+        }
+
+        // `--root-name` 点了名就照办，不再猜。
+        assert_eq!(checkpoint_root_name(Some("元数据库"), &根), "元数据库");
     }
 
     #[test]

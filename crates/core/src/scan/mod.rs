@@ -332,6 +332,12 @@ pub fn scan(
 
     // 断点是这条流程里唯一写进文件系统的东西，它必须落在主库之外。比较前两边都化成
     // 绝对形态，否则 `/var` 与 `/private/var` 这类链接会让守卫形同虚设。
+    //
+    // **两边化开走的必须是同一套文件系统**：扫描根上面刚过了 `library.canonicalize`，
+    // 断点这一侧就也得问 `library`。问两套的话，`/lib` 是指向 `usr/lib` 的符号链接
+    // （一切 merged-usr 的发行版）时，根折出来还是 `/lib`、断点折出来成了
+    // `/usr/lib/…`，`is_inside` 只比前缀，于是这道闸静默失效——扫描照跑，带着断点
+    // 往只读的主库里写（ADR-0004）。
     let mut guarded: Vec<(&'static str, &Path)> = Vec::new();
     if let Some(config) = &options.checkpoint {
         guarded.push(("断点文件", &config.path));
@@ -340,7 +346,8 @@ pub fn scan(
         guarded.push(("中立库", file));
     }
     for (what, target) in guarded {
-        if path::is_inside(&root, &path::normalize_existing(target)) {
+        let folded = path::normalize_existing_in(target, |p| library.canonicalize(p));
+        if path::is_inside(&root, &folded) {
             return Err(ScanError::WritesInsideLibrary {
                 what,
                 path: path::display(target),
@@ -417,40 +424,47 @@ pub fn scan(
         drop(results_tx);
 
         let mut last_save = Instant::now();
-        let mut interrupted = false;
-        loop {
-            if cancel.is_cancelled() {
-                interrupted = true;
-                break;
-            }
-            if queue.is_drained() {
-                break;
-            }
-            match results_rx.recv_timeout(Duration::from_millis(100)) {
-                // 被中断打断的目录只扫了一半，整份丢掉：它仍留在 `active` 里，
-                // 会原样进断点，续跑时重扫一遍。合并半份结果会让那个目录里剩下的
-                // 文件与子目录**永久消失**——重做一个目录，好过少算一个目录。
-                Ok(result) if result.partial => {}
-                Ok(result) => {
-                    let done = merge(catalog, start.scan, &root_name, &mut progress, result)?;
-                    queue.finish_and_push(done);
-                    // 遍历说不出分母（走完才知道有多少条目），于是只报分子：
-                    // 总数填 0，界面据此画一条来回跑的条而不是一条假装知道进度的条。
-                    task.tick(progress.delta.total(), 0);
+        let outcome = (|| -> Result<bool, ScanError> {
+            let mut interrupted = false;
+            loop {
+                if cancel.is_cancelled() {
+                    interrupted = true;
+                    break;
                 }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break,
+                if queue.is_drained() {
+                    break;
+                }
+                match results_rx.recv_timeout(Duration::from_millis(100)) {
+                    // 被中断打断的目录只扫了一半，整份丢掉：它仍留在 `active` 里，
+                    // 会原样进断点，续跑时重扫一遍。合并半份结果会让那个目录里剩下的
+                    // 文件与子目录**永久消失**——重做一个目录，好过少算一个目录。
+                    Ok(result) if result.partial => {}
+                    Ok(result) => {
+                        let done = merge(catalog, start.scan, &root_name, &mut progress, result)?;
+                        queue.finish_and_push(done);
+                        // 遍历说不出分母（走完才知道有多少条目），于是只报分子：
+                        // 总数填 0，界面据此画一条来回跑的条而不是一条假装知道进度的条。
+                        task.tick(progress.delta.total(), 0);
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+                if let Some(config) = &options.checkpoint
+                    && last_save.elapsed() >= config.interval
+                {
+                    traversal.elapsed_ms = elapsed(start.elapsed_base, started);
+                    save_progress(catalog, options, &root, &queue, &mut progress, &traversal)?;
+                    last_save = Instant::now();
+                }
             }
-            if let Some(config) = &options.checkpoint
-                && last_save.elapsed() >= config.interval
-            {
-                traversal.elapsed_ms = elapsed(start.elapsed_base, started);
-                save_progress(catalog, options, &root, &queue, &mut progress, &traversal)?;
-                last_save = Instant::now();
-            }
-        }
+            Ok(interrupted)
+        })();
+        // **出错这条路也要关队列。** 工作线程阻塞在 `Queue::pop` 的条件变量上，只有
+        // `close` 叫得醒它们；而 `thread::scope` 退出前一定要 join。协调这一头带着
+        // `?` 直接跳出去的话，谁都不再 `close`，于是「断点写不进去」这条本该说出口的
+        // 错误变成整个进程挂住——挂单 Q8 的第二个症状正是这个。
         queue.close();
-        Ok(interrupted)
+        outcome
     })?;
 
     traversal.elapsed_ms = elapsed(start.elapsed_base, started);
@@ -582,6 +596,11 @@ fn resolve_root(
 ///
 /// **公开出去，因为断点文件名要带根名**（`workspace::checkpoint_path`），而算断点路径
 /// 那一步在开扫之前。两处各猜一遍的话，`--resume` 会去找一个不存在的断点。
+///
+/// **传进来的必须是化开之后的根**（[`path::normalize_existing`]，或者
+/// [`LibraryFs::canonicalize`] 的结果——`resolve_root` 走的就是后者）。用户敲的原串
+/// 没有末级名字的写法不止一种：`.`、`x/..`、单独一个 `/`，`file_name()` 一律给 `None`，
+/// 这里就退成「主库」——于是两个毫不相干的目录用 `scan .` 扫会共用一个断点文件。
 #[must_use]
 pub fn default_root_name(root: &Path) -> String {
     root.file_name()
@@ -2189,6 +2208,85 @@ mod tests {
         let err =
             scan(&library, &mut 新中立库(), &options, &Handle::new()).expect_err("必须拒绝");
         assert!(matches!(err, ScanError::WritesInsideLibrary { .. }));
+    }
+
+    /// 这道闸曾经在一切 **merged-usr** 的发行版上静默失效：那里 `/lib` 是指向
+    /// `usr/lib` 的符号链接，而闸的两边问的是两套文件系统——扫描根走
+    /// `LibraryFs::canonicalize` 折出来还是 `/lib`，断点走真文件系统折出来成了
+    /// `/usr/lib/…`，`is_inside` 只比前缀，于是判成「断点不在主库里」，扫描照跑
+    /// （挂单 Q8）。
+    ///
+    /// 这里在临时目录里造出同一副形状——一个指向别处的根——好让这条回归在任何机器上
+    /// 都成立，而不是碰运气看跑测试的这台机器上恰好有没有 `/lib`。
+    #[cfg(unix)]
+    #[test]
+    fn 根在真盘上是符号链接时断点落在主库内照样拦得下() {
+        let temp = crate::testing::temp_dir("scan-链接根");
+        let 真身 = temp.path().join("usr").join("lib");
+        let 链接 = temp.path().join("lib");
+        std::fs::create_dir_all(&真身).expect("能建真身目录");
+        std::os::unix::fs::symlink(&真身, &链接).expect("能建符号链接");
+
+        // 主库这一侧只认 `链接` 这条路径——`LibraryFs` 不跟随符号链接。
+        let library = 建库于(&链接.to_string_lossy());
+        let mut options = ScanOptions::named(&链接, "库");
+        options.jobs = Jobs::Fixed(1);
+        options.checkpoint = Some(CheckpointOptions {
+            path: 链接.join(".romcat").join("checkpoint.json"),
+            interval: Duration::ZERO,
+            resume: false,
+        });
+
+        let err =
+            scan(&library, &mut 新中立库(), &options, &Handle::new()).expect_err("必须拒绝");
+        assert!(
+            matches!(err, ScanError::WritesInsideLibrary { .. }),
+            "断点写在主库里，闸必须响；实际是 {err}"
+        );
+        assert!(
+            !链接.join(".romcat").exists(),
+            "主库只读（ADR-0004）：连断点的那个目录都不许建出来"
+        );
+    }
+
+    /// 断点写不进去要**报错**，不是挂住。
+    ///
+    /// 协调这一头带着 `?` 跳出 `thread::scope` 而没人 `close` 队列时，工作线程会永远
+    /// 卡在 `Queue::pop` 的条件变量上，`scope` 又非等它们不可——一次写失败于是变成
+    /// 整个进程挂死（挂单 Q8 的第二个症状）。这条测试自己带表：真挂住的话它超时失败，
+    /// 而不是把整趟门禁拖住。
+    #[test]
+    fn 断点写不进去时报错而不是挂住() {
+        let temp = crate::testing::temp_dir("scan-断点写不进去");
+        // 拿一个**普通文件**当断点的上级目录：`create_dir_all` 到这一级必然失败，
+        // 而这条路径在主库之外，闸不会抢在前面把它拦下来。
+        let 挡路的文件 = temp.path().join("这是个文件");
+        std::fs::write(&挡路的文件, b"x").expect("能写临时文件");
+        let 断点 = 挡路的文件.join("checkpoint.json");
+
+        let (tx, rx) = mpsc::channel();
+        let 跑 = thread::spawn(move || {
+            let mut options = ScanOptions::named("/lib", "库");
+            options.jobs = Jobs::Fixed(1);
+            options.checkpoint = Some(CheckpointOptions {
+                path: 断点,
+                // 每转一圈都存一次：写失败要在第一圈就撞上，不必等 15 秒。
+                interval: Duration::ZERO,
+                resume: false,
+            });
+            let result = scan(&建库(), &mut 新中立库(), &options, &Handle::new());
+            let _ = tx.send(result.err().map(|error| error.to_string()));
+        });
+
+        let err = rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("扫描挂住了：断点写不进去该停下并说清，不该等在这里")
+            .expect("断点写不进去必须报错，不能当没事发生");
+        跑.join().expect("跑测试的那个线程正常结束");
+        assert!(
+            err.contains("断点文件读写失败"),
+            "错误得说清是断点写不进去；实际是 {err}"
+        );
     }
 
     #[test]
