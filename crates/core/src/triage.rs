@@ -92,6 +92,21 @@ pub enum TriageError {
     /// 那一批还没撤过，没什么可放回去的。
     #[error("第 {0} 批还没撤过，没什么可放回去的")]
     NotUndone(i64),
+    /// 手上这份计划是对着**另一批条目**排的——排完之后队列变过样。
+    ///
+    /// 措辞的分寸：这不是「数据坏了」，是「**这份计划过期了**」。两份库一个字都没动，
+    /// 人要做的只是**重排一份计划**再落下。
+    #[error(
+        "这份计划是对着另一批条目排的：其中 {missing} 条已经不在手上这一批里了（{names}）。\
+         排完计划之后队列变过样——裁掉过其中一条、换过选择器、重列过一次，都会这样。\
+         两份库一个字都没动，重排一份计划再落下"
+    )]
+    StalePlan {
+        /// 有几条对不上。
+        missing: usize,
+        /// 头几条的键，够人认出是哪些。
+        names: String,
+    },
     /// 那一批被后来的、眼下还在册的一批盖住了，撤不动也放不回去。
     #[error(
         "第 {batch} 批里有 {rows} 条被第 {by} 批盖住了，那一批还在册——\
@@ -859,6 +874,12 @@ pub struct Plan {
     pub note: Option<String>,
     /// 这一批落在哪份主库上（路径锚里记的那个名字）。
     pub library: String,
+    /// 这份计划是对着**哪一批条目**排的：它们的变体键，落得下的与落不下的都在里面。
+    ///
+    /// **一份计划的身份就是那一批条目。** 计划书上印的每一行说的都是排它那一刻队列里
+    /// 的那一条，[`apply`] 因此拿它对一次账：手上这一批凑不齐就整份拒掉，理由与出口
+    /// 写在 [`apply`] 上。
+    pub against: BTreeSet<String>,
 }
 
 impl Plan {
@@ -915,6 +936,9 @@ pub fn plan_each<'a>(
     // ——差一秒就成了两条，[`undo_batch`] 再也认不出哪一条是这一批自己落下的。
     let decided_at = crate::catalog::now_secs();
     for item in items {
+        // **落得下的与落不下的都算数**：计划书上那两段说的是同一批条目，
+        // 少了哪一段它描述的都不再是排它时的那一批。
+        plan.against.insert(item.variant.key.clone());
         let decision = match resolve(item, decide) {
             Ok(decision) => decision,
             Err(why) => {
@@ -1021,8 +1045,30 @@ pub struct Applied {
 /// 顺序是**先记批、再落裁决**。反过来的话，中途出错会留下一批已经落库、却没有一处
 /// 记着它们是哪一批的裁决——那时撤销从一开始就无从谈起。
 ///
+/// ## 计划过期了整份拒掉，不落一半
+///
+/// 计划排完到落下之间队列可能已经变过样：逐条流里刚裁掉过其中一条、换过一套选择器、
+/// 重列过一次。那时计划里那几行说的条目**手上这一批里根本没有**，而从前的做法是把
+/// 它们略过去——沉淀库那一条已经落进去了，中立库这一半却不投影，同一条变体两边各说
+/// 各的，要等下一趟识别才收得回来。
+///
+/// 三条路里取的是**整份拒掉**（[`TriageError::StalePlan`]）：
+///
+/// - **只落对得上的那部分**——就是上面那半吊子：人在计划书上点头的是 14 条，落下去
+///   的是 13 条，批里却照旧记着 14 行。批量的胆量来自撤销可信，一份账目对不上的批
+///   第一时间就把它废掉了。
+/// - **自己去中立库把缺的补读出来再投影**——落下去的就不再是人看过的那一份
+///   （ADR-0016：先出计划再动手）。更要命的是那几条往往**正因为刚被裁过**才不在手上
+///   这一批里，补读回来等于拿一份过期的答案盖掉刚落下的新答案。
+/// - **取的这条**：说清哪几条过期了，让人**重排一份计划**。两份库一个字都不动，
+///   重排一次的代价是一次点击。
+///
+/// 这道门住在核心库而不是界面上（ADR-0005）：「一份计划还作不作数」是领域判断，
+/// 命令行与日后别的壳照样要它。界面另有自己的一道门，那道门管的是**别让它发生**，
+/// 这一道管的是**发生了也不会两边各说各的**。
+///
 /// # Errors
-/// 写中立库或沉淀库失败时返回错误。
+/// 计划过期、或者写中立库、沉淀库失败时返回错误。
 pub fn apply(
     catalog: &mut Catalog,
     store: &mut Store,
@@ -1033,6 +1079,26 @@ pub fn apply(
         .iter()
         .map(|item| (item.variant.key.as_str(), item))
         .collect();
+    // **先对账、再动手。** 计划的身份是它对着哪一批条目排的（[`Plan::against`]），
+    // 手上这一批凑不齐就一个字都不写——理由与另外两条路写在这个函数的文档里。
+    let mut missing: BTreeSet<&str> = BTreeSet::new();
+    let mut landing_rows: Vec<(&Decided, &Item)> = Vec::with_capacity(plan.decided.len());
+    for key in plan.against.iter().map(String::as_str) {
+        if !by_key.contains_key(key) {
+            missing.insert(key);
+        }
+    }
+    for row in &plan.decided {
+        match by_key.get(row.key.as_str()) {
+            Some(item) => landing_rows.push((row, item)),
+            None => {
+                missing.insert(row.key.as_str());
+            }
+        }
+    }
+    if !missing.is_empty() {
+        return Err(stale_plan(&missing));
+    }
     // **一条锚在一批里只有一条裁决。** 裁决的身份是**锚**、不是变体：同一条内容锚上的
     // 几份**重复拷贝**在计划里各占一行，落进沉淀库却只有一条——最后落下的那条。
     // 批里若按变体各记各的，撤销就认不出「锚上眼下这条是不是这一批自己落下的」；
@@ -1044,12 +1110,9 @@ pub fn apply(
     }
     // **先把批记下来。** `before` 要在落下之前读——落完再读，读到的就是刚写进去的那条，
     // 而那正是撤销时要拿来还原的东西。
-    let mut rows = Vec::with_capacity(plan.decided.len());
-    for row in &plan.decided {
-        let (member, inner) = match by_key.get(row.key.as_str()) {
-            Some(item) => item.representative(),
-            None => (row.key.clone(), String::new()),
-        };
+    let mut rows = Vec::with_capacity(landing_rows.len());
+    for (row, item) in &landing_rows {
+        let (member, inner) = item.representative();
         let verdict = landing
             .get(&row.verdict.anchor)
             .copied()
@@ -1074,7 +1137,7 @@ pub fn apply(
     // 结论攒一批写一次：`write_identifications` 一次一个事务，几百条各开一次
     // 是把一件批量的事做成几百件零碎的事。
     let mut records = Vec::new();
-    for row in &plan.decided {
+    for (row, item) in &landing_rows {
         let verdict = landing
             .get(&row.verdict.anchor)
             .copied()
@@ -1090,9 +1153,6 @@ pub fn apply(
         } else {
             account.path_anchored += 1;
         }
-        let Some(item) = by_key.get(row.key.as_str()) else {
-            continue;
-        };
         // 「认不出」不产生结论——它只是在理由那一列上盖一句，别的一个字不动。
         // 结论本身没变（照旧是未命中或无判据），变的只是「为什么还停在这儿」。
         if matches!(verdict.decision, Decision::Unknown) {
@@ -1116,6 +1176,20 @@ pub fn apply(
     }
     catalog.write_identifications(&records)?;
     Ok(account)
+}
+
+/// 计划过期那句话。**说得出是哪几条**，人才知道队列在哪儿变过、该重排哪一批。
+fn stale_plan(missing: &BTreeSet<&str>) -> TriageError {
+    // 只点三条名：过期的可能是整整一批，把一万八千个键印在一句话里没人读得下去。
+    let head = 3;
+    let mut names: Vec<String> = missing.iter().take(head).map(|key| (*key).to_string()).collect();
+    if missing.len() > head {
+        names.push(format!("……还有 {} 条", missing.len() - head));
+    }
+    TriageError::StalePlan {
+        missing: missing.len(),
+        names: names.join("、"),
+    }
 }
 
 /// 撤掉一**批**之后的账。
