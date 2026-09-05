@@ -919,13 +919,36 @@ impl Catalog {
 
     /// 把刮削结论整批清掉。`--refresh` 之外还有一个用处：换一套源之后重来。
     ///
+    /// **裁决那一行不碰**（`source = ` [`VERDICT`]）：刮削结论整份可再生，人在详情面板上
+    /// 亲手写下的那句不是——中立库之外没有第二份（沉淀库导出的是裁决与匹配两张表，
+    /// 不含它），冲掉就永远没了。同一条纪律
+    /// [`clear_titles`](Self::clear_titles) 上已经写着。
+    ///
+    /// **另外两张表照旧整批清**：裁决只落在 `scrape_value` 上，
+    /// [`put_verdict_value`](Self::put_verdict_value) 既不写媒体引用也不写采集记录。
+    /// 采集记录尤其**必须**清干净——留下一条，下一趟就被输入指纹咬定「这一对采全了」
+    /// 而整条跳过，`--refresh` 于是名存实亡。
+    ///
     /// **媒体池里的文件一个都不删**——池是内容寻址的，删文件要先确认没人再引用它，
     /// 那是 `vacuum` 那一档的活（调研 13.3(10)），不该混在这里顺手做掉。
     ///
     /// # Errors
     /// 写库失败时返回错误。
     pub fn clear_scraped(&mut self) -> Result<(), CatalogError> {
-        self.batch("DELETE FROM media_ref; DELETE FROM scrape_value; DELETE FROM scrape_probe;")
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        tx.execute("DELETE FROM media_ref", []).map_err(to_err)?;
+        tx.execute(
+            "DELETE FROM scrape_value WHERE source <> ?1",
+            params![VERDICT],
+        )
+        .map_err(to_err)?;
+        tx.execute("DELETE FROM scrape_probe", []).map_err(to_err)?;
+        tx.commit().map_err(to_err)
     }
 }
 
@@ -1084,5 +1107,44 @@ mod tests {
         // 采集记录也跟着走，否则下一趟会以为 TOSEC 采过了。
         let 记录 = catalog.scrape_inputs("作品", "魔界村").expect("读得出");
         assert_eq!(记录.keys().collect::<Vec<_>>(), vec!["No-Intro"]);
+    }
+
+    #[test]
+    fn 整批清结论时数据源的值与采集记录都清掉而裁决留着() {
+        // `--refresh` 走的就是这一条。刮削结论整份可再生，人亲手写下的那句不是——
+        // 中立库之外没有第二份。**采集记录必须一起清掉**：留下一条，下一趟就被输入
+        // 指纹咬定「这一对采全了」而整条跳过，重采一遍于是名存实亡。
+        let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+        catalog
+            .put_scraped(&[Harvested {
+                anchor: AnchorKind::Work.label().to_string(),
+                subject: "魔界村".to_string(),
+                source: "TOSEC".to_string(),
+                input: "指纹".to_string(),
+                values: vec![HarvestedValue {
+                    field: Field::Year.label().to_string(),
+                    value: "1985".to_string(),
+                    evidence: "依据".to_string(),
+                }],
+                media: Vec::new(),
+            }])
+            .expect("写得进");
+        catalog
+            .put_verdict_value(AnchorKind::Work, "魔界村", Field::Year, "1986", "人定的")
+            .expect("写得下");
+
+        catalog.clear_scraped().expect("清得掉");
+
+        let 剩下 = catalog.scraped_values("作品", "魔界村").expect("读得出");
+        assert_eq!(剩下.len(), 1, "只该剩人写下的那一条");
+        assert_eq!(剩下[0].source, VERDICT);
+        assert_eq!(剩下[0].value, "1986");
+        assert!(
+            catalog
+                .scrape_inputs("作品", "魔界村")
+                .expect("读得出")
+                .is_empty(),
+            "采集记录一条不留，下一趟才真的重采"
+        );
     }
 }
