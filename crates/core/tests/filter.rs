@@ -519,7 +519,7 @@ fn 当前筛选原样变成规则() {
 fn 写不成规则的条件当场挡住而不是悄悄少写一条() {
     // 少写一条，子库选出来的就比屏上多——那正是这条约定要防的事。
     let 搜索 = WorkQuery {
-        contains: "口袋".to_string(),
+        search: "口袋".to_string(),
         ..WorkQuery::default()
     };
     assert_eq!(搜索.to_rule(), Err(Unruly::Search));

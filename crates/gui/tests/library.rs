@@ -1155,6 +1155,191 @@ fn 写不成规则的筛选条件当场挡住() {
     }
 }
 
+// ── 搜索框与匹配质量排序（票 `gui-redesign/05`）──────────────────────────
+//
+// 排序本身在核心库里（`crates/core/tests/search.rs` 把五档一条条钉着）。这一组钉的是
+// **界面上那条路真的通到那儿**：搜索框里打的字进了查询、屏上那张表跟着换了一批行、
+// 而且它**进不了子库的规则**。
+
+/// 在搜索框里打几个字，跑几帧，把主列表眼下这一页读回来。
+///
+/// **走的是界面上那条路**（[`library::Screen::query_mut`] 就是那个文本框绑着的东西），
+/// 不是绕过界面直接问核心库。
+fn 搜(ctx: &egui::Context, app: &mut App, needle: &str) -> Vec<romcat_core::catalog::WorkRow> {
+    {
+        let (library, _) = app.library_and_site();
+        library.query_mut().search = needle.to_string();
+    }
+    跑(ctx, app, 2);
+    let (library, site) = app.library_and_site();
+    site.catalog
+        .work_page(library.query(), 0, 64)
+        .expect("取得出一页")
+}
+
+#[test]
+fn 搜索框打几个字之后匹配得好的排前面() {
+    let ctx = headless::context();
+    let mut app = 界面(4_000);
+    跑(&ctx, &mut app, 2);
+    let 全库 = app.window().total();
+
+    // 合成数据里的作品名是中文（`demo::WORKS`）：「幻想传说」以「幻想」开头，
+    // 「最终幻想 Ⅶ ★特别版★」只是含有它。
+    let rows = 搜(&ctx, &mut app, "幻想");
+    assert!(!rows.is_empty(), "搜「幻想」一行都没有");
+    assert!(
+        app.window().total() < 全库,
+        "搜完之后还是整个库那么多行，搜索框没接上",
+    );
+
+    // **屏上那张表就是这一批**：窗口的总数与核心库另数一遍的数字相等。
+    let 另数一遍 = {
+        let (library, site) = app.library_and_site();
+        site.catalog.work_total(library.query()).expect("数得出来")
+    };
+    assert_eq!(app.window().total(), 另数一遍);
+
+    // 匹配质量是第一把键：`hit` 一路不减，而头一行是「以它开头」那一档。
+    let mut 上一档 = romcat_core::catalog::SearchHit::TitleStart;
+    for row in &rows {
+        let hit = row.hit.expect("搜索着的时候每一行都说得出命中在哪儿");
+        assert!(hit >= 上一档, "「{}」排到了比它更好的一档前面", row.name);
+        上一档 = hit;
+    }
+    assert_eq!(
+        rows.first().map(|row| row.hit),
+        Some(Some(romcat_core::catalog::SearchHit::TitleStart)),
+        "以搜索词开头的没排最前",
+    );
+}
+
+#[test]
+fn 别名搜得到而且屏上说得出是别名命中的() {
+    let ctx = headless::context();
+    let mut app = 界面(4_000);
+    跑(&ctx, &mut app, 2);
+
+    // 合成数据里每个作品的**标题集合**有一条英文官方名 `Work NN (USA)`，
+    // 而作品名与变体的键里一个 `Work` 都没有——搜得到它，只可能是**别名**那条路。
+    let rows = 搜(&ctx, &mut app, "work 0");
+    assert!(!rows.is_empty(), "按别名搜「work 0」一行都没有");
+    for row in &rows {
+        assert!(
+            !row.name.to_ascii_lowercase().contains("work 0"),
+            "「{}」是名字自己命中的，那证明不了别名这条路",
+            row.name,
+        );
+        assert_eq!(
+            row.hit,
+            Some(romcat_core::catalog::SearchHit::AliasStart),
+            "「{}」的命中档不对",
+            row.name,
+        );
+    }
+    // **屏上印得出那句话**：一行名字里一个搜索词都没有的作品冒在前面，
+    // 不说清凭什么，就是这份规格从头到尾在消灭的那种「看不懂」。
+    assert_eq!(
+        romcat_core::catalog::SearchHit::AliasStart.label(),
+        "别名以它开头",
+    );
+}
+
+#[test]
+fn 搜索与筛选叠加而且搜索进不了子库的规则() {
+    let ctx = headless::context();
+    let mut app = 界面(4_000);
+    跑(&ctx, &mut app, 2);
+
+    // 先筛后搜：两边叠加，行数只会更少。
+    let 只搜 = 搜(&ctx, &mut app, "幻想").len();
+    {
+        let (library, _) = app.library_and_site();
+        library.query_mut().platform = Some(PlatformFilter::Named("SFC".to_string()));
+    }
+    跑(&ctx, &mut app, 2);
+    let (筛完, 命中档) = {
+        let (library, site) = app.library_and_site();
+        let rows = site
+            .catalog
+            .work_page(library.query(), 0, 64)
+            .expect("取得出一页");
+        let 档: Vec<_> = rows.iter().filter_map(|row| row.hit).collect();
+        (rows.len(), 档)
+    };
+    assert!(筛完 <= 只搜, "先筛后搜反而多出行来");
+    assert!(命中档.is_sorted(), "先筛之后次序就不按匹配质量了");
+
+    // **排序不进子库的规则**：搜索框里还有字时「存成子库」当场挡住，
+    // 而且一个子库都没建出来。
+    {
+        let (library, _) = app.library_and_site();
+        let draft = library.save_draft_mut();
+        draft.name = "存不成".to_string();
+        draft.target = "/Volumes/SDCARD/存不成".to_string();
+    }
+    跑(&ctx, &mut app, 1);
+    {
+        let (library, site) = app.library_and_site();
+        library.save_as_sublibrary(site);
+        assert!(
+            library.error().is_some_and(|error| error.contains("搜索")),
+            "搜索框里还有字却把子库存下去了：子库要的是集合不是顺序",
+        );
+        assert!(site.catalog.sublibrary("存不成").expect("读得动").is_none());
+    }
+
+    // 清空搜索框之后照存不误——挡住的是搜索，不是「存成子库」这件事本身。
+    {
+        let (library, _) = app.library_and_site();
+        library.query_mut().search.clear();
+    }
+    跑(&ctx, &mut app, 1);
+    {
+        let (library, site) = app.library_and_site();
+        library.save_as_sublibrary(site);
+        assert!(library.error().is_none(), "{:?}", library.error());
+        let 选择集 = site.catalog.selection("存不成").expect("选择集读得回来");
+        // **只带条件不带顺序**：折出来的规则里只有那个平台档，一个字的排序都没有。
+        assert_eq!(
+            选择集
+                .selection
+                .rules
+                .iter()
+                .map(|rule| rule.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["平台=SFC"],
+        );
+    }
+}
+
+#[test]
+fn 筛选栏那颗全清不碰搜索框() {
+    // 「搜索管排序、筛选器管集合」是这一票的界线，而那颗按钮的标签只说**筛选**。
+    // 顺手清掉另一块面板上的搜索框，正是这句话立不住的样子。
+    let ctx = headless::context();
+    let mut app = 界面(4_000);
+    跑(&ctx, &mut app, 2);
+    {
+        let (library, _) = app.library_and_site();
+        library.query_mut().search = "幻想".to_string();
+        library.query_mut().platform = Some(PlatformFilter::Named("SFC".to_string()));
+        library.query_mut().order = WorkOrder::Bytes;
+        library.query_mut().descending = true;
+    }
+    跑(&ctx, &mut app, 2);
+    {
+        let (library, _) = app.library_and_site();
+        library.clear_filter();
+        let query = library.query();
+        assert_eq!(query.search, "幻想", "全清把搜索框也清掉了");
+        assert_eq!(query.platform, None, "全清没把筛选条件清掉");
+        // 排序照旧不属于筛选。
+        assert_eq!(query.order, WorkOrder::Bytes);
+        assert!(query.descending);
+    }
+}
+
 // ── 刮削面板（票 `gui-redesign/10`）────────────────────────────────────────
 //
 // 这一组钉的是**按下去之前那几件事**：范围是不是筛出来的那一批、默认勾着哪几样、

@@ -22,6 +22,13 @@
 //!    （[`Screen::begin_editing`]），调完按「更新到子库」原样换回去
 //!    （[`Screen::update_sublibrary`]）。**例外也在这一趟里加减**——「哪一份」只有在
 //!    详情面板里才指得准（[`Screen::set_exception`]）。
+//!
+//!    底下那块面板上还有一个**搜索框**（票 `gui-redesign/05`）。**它与筛选器不是一类
+//!    东西**：筛选器管集合，它管**顺序**——打几个字，匹配得好的排前面，权重内置、
+//!    不用配。三条路都找：屏上这个名字、**标题集合**里别的叫法（中文名就在这儿）、
+//!    **简介**；命中在哪一条决定这一行排哪一档（`SearchHit`，折在中立库那一层）。
+//!    **它进不了子库的规则**——子库要的是集合不是顺序，所以搜索框里还有字的时候
+//!    「存成子库」当场挡住（挂单 Q70）。
 //! 3. **这一行到底是什么**——右边那块面板的三层：**作品** → **变体**（每个带置信度与
 //!    **依据**）→ **文件**（含附属文件与内部资源）。媒体那一块只列得出来，
 //!    内嵌显示是票 `07`。
@@ -381,6 +388,23 @@ impl Screen {
     #[must_use]
     pub fn filter(&self) -> &Filter {
         &self.filter
+    }
+
+    /// 左栏那颗「**全清**」：这一栏的条件全部清掉。
+    ///
+    /// **排序与搜索框不动。** 这颗按钮的标签只说筛选，而搜索框压根不在这一栏里
+    /// （它在底下那块面板上，票 `gui-redesign/05`）——顺手清掉别人面板上的东西，
+    /// 正是「搜索管排序、筛选器管集合」这句话立不住的样子。
+    ///
+    /// 界面上那颗按钮走的就是它，测试拿它当那一下。
+    pub fn clear_filter(&mut self) {
+        self.query = WorkQuery {
+            search: std::mem::take(&mut self.query.search),
+            order: self.query.order,
+            descending: self.query.descending,
+            ..WorkQuery::default()
+        };
+        self.filter.clear();
     }
 
     /// 把一条**规则**预填进筛选器，并当场按它筛。
@@ -1000,14 +1024,18 @@ impl Screen {
                 }
                 ui.horizontal(|ui| {
                     ui.strong("筛选");
-                    if ui.button("全清").clicked() {
-                        let order = (self.query.order, self.query.descending);
-                        self.query = WorkQuery {
-                            order: order.0,
-                            descending: order.1,
-                            ..WorkQuery::default()
-                        };
-                        self.filter.clear();
+                    if ui
+                        .button("全清")
+                        .on_hover_text(
+                            "把这一栏的条件全部清掉。**排序与搜索框不动**——\
+                             搜索管排序、筛选器管集合，这颗按钮只管后者。",
+                        )
+                        .clicked()
+                    {
+                        // **按钮体只有这一句。** 把那几行抄在这儿的话，钉着
+                        // [`Self::clear_filter`] 的那条测试就钉不到界面上这一下——
+                        // 改了这儿它照样绿，而那正是这条修复要防的漂移。
+                        self.clear_filter();
                     }
                 });
                 ui.weak("上下两半之间是「且」：一层层收窄。全部下推到中立库。")
@@ -1475,15 +1503,18 @@ impl Screen {
         // 筛选框在这块面板里而不在左栏，与队列那一屏同一条规矩：会碰到输入法的控件
         // 全收在**不虚拟化**的面板里（ADR-0005）。筛选本身照旧下推到中立库。
         ui.horizontal(|ui| {
-            ui.label("名字里含");
+            ui.label("搜索");
             ui.add(
-                egui::TextEdit::singleline(&mut self.query.contains)
+                egui::TextEdit::singleline(&mut self.query.search)
                     .desired_width(260.0)
-                    .hint_text("作品名里含这段文字"),
+                    .hint_text("打几个字，匹配得好的排前面"),
             )
             .on_hover_text(
-                "筛的是**主列表这一行的名字**：认出作品的那些按作品名筛，\
-                 没认出来的按它自己的键筛。搜索框与匹配质量排序是票 05。",
+                "**搜索管排序，筛选器管集合。** 三条路都找：屏上这个名字、\
+                 **标题集合**里别的叫法（中文名就在这儿）、**简介**。\
+                 命中在哪一条决定这一行排哪一档，权重内置、不用配。\n\
+                 它**进不了子库的规则**——子库要的是集合不是顺序，\
+                 「存成子库」之前得先把它清空。",
             );
             ui.separator();
             ui.label(format!(

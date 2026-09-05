@@ -55,6 +55,25 @@
 //! 成正比，不与视口成正比。这不是可以绕开的实现细节：「这个作品有几个变体」这件事
 //! 本身就要看过它的每一个变体。内存那一半照旧只有视口那几十行（[`MAX_PAGE`] 还在），
 //! 涨的是每次翻页的时间。数字见 `docs/library-facts.md` 与挂单 Q64。
+//!
+//! ## 搜索框：**它管排序，筛选器管集合**
+//!
+//! 票 `gui-redesign/05`。[`WorkQuery::search`] 里打的字折出一个**匹配质量的名次**
+//! （[`SearchHit`]），而那个名次是排序的**第一把键**——「匹配得好的排前面」是这个框
+//! 唯一的产品承诺（User Story 27）。权重写死在 [`Search::rank`] 里，**不暴露给用户配**：
+//! 那是很少用得上却一直占着界面的东西。
+//!
+//! 它与筛选器**是两件事**，而这条界线在两处看得见：
+//!
+//! - **排序不参与子库的规则。** [`WorkQuery::to_rule`] 撞上搜索框当场挡住
+//!   （[`Unruly::Search`]，挂单 Q70）——子库要的是集合不是顺序，把一个顺序存进规则，
+//!   下次同步搬过去的那批不会因此变，但人会以为它变了。
+//! - **两边叠加时各干各的**：筛选器收窄集合，搜索在那批里面再收一次并排序。
+//!   所以「先筛后搜」的结果既满足条件，又按匹配质量排。
+//!
+//! 收窄这件事搜索框也做（不然「打几个字就找到那个游戏」无从谈起），但它收窄的依据
+//! 是**三条命中路**（屏上那个名字、标题集合里别的叫法、简介），而这三条一条都写不成
+//! 规则语言里的子句——那正是 Q70 挡住它的理由。
 
 use rusqlite::{ToSql, params_from_iter};
 
@@ -709,6 +728,11 @@ pub struct WorkRow {
     /// 底下那些变体里**最高的那档置信度**（ADR-0002）；
     /// 一条候选都没有时是 `None`，那是**还没识别**，不是「没撞上」。
     pub confidence: Option<Confidence>,
+    /// 搜索框打的那几个字**命中在哪儿**；没搜的时候是 `None`。
+    ///
+    /// 屏上要印得出来：一行名字里一个搜索词都没有的作品冒在前面，不说清它是**别名**
+    /// 还是**简介**命中的，那就是这份规格从头到尾在消灭的那种「看不懂」。
+    pub hit: Option<SearchHit>,
 }
 
 impl WorkRow {
@@ -749,18 +773,242 @@ impl WorkRow {
     }
 }
 
+/// 主列表这一行**画出来的那个名字**在 SQL 里怎么取。
+///
+/// **只有这一处写它**：[`WORK_COLUMNS`] 里那一列、[`WORK_FROM`] 里年份那张 join、
+/// 搜索框收窄那三条、匹配质量那一档，全都从这儿展开——排的、画的、搜的不是同一串字
+/// 的话，屏上会出现一行「凭什么排在这儿」看不出答案的结果。
+///
+/// **是个宏而不是常量**，因为那几处里有两处是 `const &str`：`const` 里拼不了
+/// `format!`，而 `concat!` 只吃字面量与展开成字面量的宏。写成常量的话那两处只能各自
+/// 再抄一遍，而「只有这一处写它」这句话就成了空话——那正是它要防的事。
+macro_rules! row_name {
+    () => {
+        "COALESCE(work.name, variant.key)"
+    };
+}
+
+/// 主列表这一行的**刮削锚点**在 SQL 里怎么取：认出作品的挂**作品名**，
+/// 没认出来的挂**变体的键**（与 `converge`、[`Catalog::fill_missing`] 同一条口径）。
+///
+/// 两个 `?` 按出现次序是**变体**、**作品**——与 [`WORK_FROM`] 里年份那张 join 写法一样。
+macro_rules! row_anchor {
+    () => {
+        "CASE WHEN variant.work_id IS NULL THEN ? ELSE ? END"
+    };
+}
+
+/// 搜索框打的这几个字**命中在哪儿**，也就是这一行排在哪一档。
+///
+/// 五档的次序就是票 `gui-redesign/05` 那句「以搜索词开头 > 含有 > 别名命中 >
+/// 简介命中」，只是**别名那一档也分开头与含有**——中文搜索几乎整批落在别名上
+/// （作品名来自 DAT，DAT 里没有中文），不分开的话「匹配得好的排前面」这条承诺
+/// 在中文那一侧根本兑现不了（挂单 Q104）。
+///
+/// **枚举的次序就是排序的次序**：`derive` 出来的 `Ord` 与 [`Search::rank`] 折进 SQL 的
+/// 那几个数一一对应，两处由 [`SearchHit::ALL`] 钉在一起。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SearchHit {
+    /// 屏上那个名字**以搜索词开头**。
+    TitleStart,
+    /// 屏上那个名字**含有**搜索词。
+    Title,
+    /// **标题集合**里别的叫法（中文名、译名、汉化组自取的名……）以搜索词开头。
+    AliasStart,
+    /// 标题集合里别的叫法**含有**搜索词。
+    Alias,
+    /// **简介**里含有搜索词。排最后：一段话里出现过这几个字，离「就是它」最远。
+    Description,
+}
+
+impl SearchHit {
+    /// 五档，从匹配得最好的排到最差的。**下标就是折进 SQL 的那个数**。
+    pub const ALL: [Self; 5] = [
+        Self::TitleStart,
+        Self::Title,
+        Self::AliasStart,
+        Self::Alias,
+        Self::Description,
+    ];
+
+    /// 打给用户的那句话。屏上要看得出这一行**凭什么**排在这儿——一个名字里
+    /// 一个搜索词都没有的行冒在前面，不说清就是「看不懂」。
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TitleStart => "标题以它开头",
+            Self::Title => "标题含有它",
+            Self::AliasStart => "别名以它开头",
+            Self::Alias => "别名含有它",
+            Self::Description => "简介里提到它",
+        }
+    }
+
+    /// SQL 里那个名次折回来；认不出（真到不了）就是 `None`。
+    fn from_rank(rank: i64) -> Option<Self> {
+        usize::try_from(rank).ok().and_then(|at| Self::ALL.get(at)).copied()
+    }
+}
+
+/// 搜索框那几个字折出来的两条 `LIKE` 模板。
+///
+/// **收窄**（`WHERE`）与**排第几档**（`SELECT` 里那个 `CASE`）两处都问它要谓词，
+/// 而不是各写一遍：两处漂开的后果是「搜出来了却排在最后一档」，而那种走样是静默的。
+struct Search {
+    /// 以搜索词开头：`词%`。
+    start: String,
+    /// 含有搜索词：`%词%`。
+    contains: String,
+}
+
+impl Search {
+    /// 折出这两条模板；搜索框是空的（或者只打了空白）时是 `None`。
+    ///
+    /// **大小写只折 ASCII**，与 `catalog::filter` 那一侧同一个口径：SQLite 的 `lower()`
+    /// 本来就只动 ASCII，这边跟着走 `to_ascii_lowercase` 才不会两处答案分家。
+    /// 汉字没有大小写，这条限制在中文上不咬人。
+    ///
+    /// **繁简不折**：搜「合金弹头」搜不到「合金彈頭」。那是匹配算法那条线的活
+    /// （挂账 D121），照现状，不在这一票里顺手做掉（挂单 Q107）。
+    fn new(text: &str) -> Option<Self> {
+        let needle = text.trim();
+        if needle.is_empty() {
+            return None;
+        }
+        let escaped = escape_like(&needle.to_ascii_lowercase());
+        Some(Self {
+            start: format!("{escaped}%"),
+            contains: format!("%{escaped}%"),
+        })
+    }
+
+    /// 「屏上那个名字撞上这条模板」。
+    fn name(pattern: &str) -> (String, Box<dyn ToSql>) {
+        (
+            concat!("lower(", row_name!(), ") LIKE ? ESCAPE '\\'").to_string(),
+            Box::new(pattern.to_string()),
+        )
+    }
+
+    /// 「**标题集合**里有一条叫法撞上这条模板」。
+    ///
+    /// 锚点是**作品名**（`catalog::title` 的模块文档），于是**还没认出作品**的那些行
+    /// 天然够不着这一条——它们压根没有标题集合，屏上那个名字就是它自己的键。
+    fn alias(pattern: &str) -> (String, Box<dyn ToSql>) {
+        (
+            "EXISTS (SELECT 1 FROM title t
+                     WHERE t.work = work.name AND lower(t.value) LIKE ? ESCAPE '\\')"
+                .to_string(),
+            Box::new(pattern.to_string()),
+        )
+    }
+
+    /// 「这一行的**简介**里有这段文字」。
+    ///
+    /// **锚点走主列表自己那条口径**（[`row_anchor!`]：认出作品的看作品锚点，
+    /// 没认出来的看它自己的变体锚点），而**不是** `catalog::filter` 那条
+    /// 「两个锚点合起来看」。两条口径不一样，这里必须挑主列表这一条，有两个理由：
+    ///
+    /// 1. **它得是组内恒定的。** 收窄落在 `WHERE` 上、逐个变体行判，而
+    ///    `catalog::filter` 那条的变体分支比的是 `sv.subject = variant.key`
+    ///    ——**逐行不同**。一部挂着 6 个变体的作品，若只有其中一个变体身上写着简介，
+    ///    分完组之后这一行就只剩那 1 个变体：屏上「变体数」写 1 而不是 6，
+    ///    容量与平台集合跟着缩水，随后「全选 → 批量刮削」也只作用到那一个。
+    ///    搜索是**找这一行**，不该顺手改掉这一行有几个变体。
+    /// 2. **它得与同一屏上别处说的话一致。** 那一行「元数据齐不齐」里的**简介**
+    ///    正是按这条锚点判的（[`Catalog::fill_missing`]），年份那一列也是
+    ///    （[`WORK_FROM`]）。挑另一条口径的话，屏上一行写着「缺简介」，
+    ///    搜索却说它「简介里提到它」。
+    ///
+    /// 参数按出现次序：字段、变体锚点、作品锚点、那条模板。
+    fn description(pattern: &str) -> (String, Vec<Box<dyn ToSql>>) {
+        (
+            concat!(
+                "EXISTS (SELECT 1 FROM scrape_value sv
+                         WHERE sv.field = ? AND sv.anchor = ",
+                row_anchor!(),
+                "
+                           AND sv.subject = ",
+                row_name!(),
+                "
+                           AND lower(sv.value) LIKE ? ESCAPE '\\')"
+            )
+            .to_string(),
+            vec![
+                Box::new(Field::Description.label().to_string()),
+                Box::new(AnchorKind::Variant.label().to_string()),
+                Box::new(AnchorKind::Work.label().to_string()),
+                Box::new(pattern.to_string()),
+            ],
+        )
+    }
+
+    /// **收窄**那一条：三条命中路里任一条成立。
+    ///
+    /// 三条一律用「含有」那条模板——以词开头的必然也含有它，多写一条只是白扫一遍。
+    ///
+    /// **三条都是组内恒定的**：名字与简介读的是 [`row_name!`]（作品名，或者没认出作品时
+    /// 那一个变体自己的键），别名读的是 `work.name`。这一条是 [`rank`](Self::rank)
+    /// 那层 `MIN` 成立的前提，也是「搜索不改这一行有几个变体」成立的前提。
+    ///
+    /// **次序是从便宜排到贵的**：SQLite 的 `OR` 短路求值，名字就命中的行根本走不到
+    /// 后两条子查询上（挂单 Q108）。
+    fn filter(&self) -> (String, Vec<Box<dyn ToSql>>) {
+        let (name_sql, name_arg) = Self::name(&self.contains);
+        let (alias_sql, alias_arg) = Self::alias(&self.contains);
+        let (desc_sql, desc_args) = Self::description(&self.contains);
+        let mut args: Vec<Box<dyn ToSql>> = vec![name_arg, alias_arg];
+        args.extend(desc_args);
+        (format!("({name_sql} OR {alias_sql} OR {desc_sql})"), args)
+    }
+
+    /// **排第几档**那一条：一条 `CASE`，数小的排前面。
+    ///
+    /// 外面那层 `MIN` 只是取值器：这四条谓词读的都是**这一组里恒定的东西**
+    /// （[`row_name!`]，或者别名那两条读的 `work.name`），组里每一行算出来都一样。
+    /// [`filter`](Self::filter) 那三条同样如此——两处若有一条逐行不同，
+    /// 这一行有几个变体就会跟着搜索词变，见 [`description`](Self::description)。
+    ///
+    /// **落到最后一档的只可能是简介命中**，所以那一路不必再写一遍 `EXISTS`：
+    /// [`filter`](Self::filter) 已经保证了三条里至少一条成立，前四支都没接住，
+    /// 剩下的就只有简介。省下的是一遍 `scrape_value` 的扫。
+    fn rank(&self) -> (String, Vec<Box<dyn ToSql>>) {
+        let mut parts = String::new();
+        let mut args: Vec<Box<dyn ToSql>> = Vec::new();
+        for (at, (sql, arg)) in [
+            Self::name(&self.start),
+            Self::name(&self.contains),
+            Self::alias(&self.start),
+            Self::alias(&self.contains),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            parts.push_str(&format!(" WHEN {sql} THEN {at}"));
+            args.push(arg);
+        }
+        let last = SearchHit::ALL.len() - 1;
+        (format!("MIN(CASE{parts} ELSE {last} END) AS hit"), args)
+    }
+}
+
 /// 主列表一次翻页要的是哪一段。
 ///
 /// 六个筛选维度**加上那棵条件组**与变体表**共用一份**（[`VariantQuery::where_clause`]）：规格里那条
 /// 贯穿全局的约定是「**主列表的筛选就是子库的规则**」，而子库选的是变体——两处筛的
 /// 若不是同一批变体，界面上筛出来的那批与真正导出去的那批就对不上。
 ///
-/// 只有 [`contains`](Self::contains) 是主列表自己的：变体表按**键**里含什么筛，
-/// 主列表按**这一行的名字**里含什么筛。
+/// 只有 [`search`](Self::search) 是主列表自己的，而且它与那几维**不是一类东西**：
+/// 那几维筛集合，它排顺序（见模块文档「搜索框」那一节）。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WorkQuery {
-    /// 这一行的名字里含这个子串才算数；空串等于不筛。
-    pub contains: String,
+    /// **搜索框**里打的那几个字：打完之后**匹配得好的排前面**（票 `gui-redesign/05`）。
+    ///
+    /// 三条命中路——屏上那个名字、**标题集合**里别的叫法、**简介**——里有一条撞上就留下，
+    /// 撞在哪一条决定这一行排哪一档（[`SearchHit`]）。空串（或者只有空白）等于没搜。
+    ///
+    /// **它进不了子库的规则**（[`Unruly::Search`]）：子库要的是集合，不是顺序。
+    pub search: String,
     /// 只要这个**平台**的变体；[`PlatformFilter::Unknown`] 选的是平台未知那一档。
     pub platform: Option<PlatformFilter>,
     /// 只要在这个**合集**里的变体。
@@ -867,17 +1115,21 @@ pub enum Scope<'a> {
 /// - 平台未知那一档**不塞一个约定字符串进 SQL**：`MIN` 与 `group_concat` 都跳过 `NULL`，
 ///   另数一列 `unknowns` 出来，标签在 Rust 那边补（同 [`PlatformFilter`] 的道理）。
 /// - `MIN(year)` 只是个取值器：同一行里 `year` 是常数（作品名一样，join 出来的就是同一条）。
-const WORK_COLUMNS: &str = "\
+const WORK_COLUMNS: &str = concat!(
+    "\
     variant.work_id AS work_id,
     CASE WHEN variant.work_id IS NULL THEN variant.key END AS loose,
-    COALESCE(work.name, variant.key) AS name,
+    ",
+    row_name!(),
+    " AS name,
     COUNT(*) AS variants,
     SUM(variant.bytes) AS bytes,
     SUM(variant.unreadable) AS unreadable,
     MIN(variant.platform) AS platform,
     group_concat(variant.platform) AS platforms,
     SUM(variant.platform IS NULL) AS unknowns,
-    MIN(year.value) AS year";
+    MIN(year.value) AS year",
+);
 
 /// 主列表那条查询的 `FROM` 的头一半：变体连它的作品。
 ///
@@ -897,15 +1149,20 @@ const WORK_FROM_BASE: &str = "
 /// （ADR-0001）；而一部作品跨地区先后发行好几次，**最早的那次才是它的年份**。
 ///
 /// 参数按出现次序绑：`裁决`、`年份`、`变体`、`作品`。
-const WORK_FROM: &str = "
+const WORK_FROM: &str = concat!(
+    "
     FROM variant
     LEFT JOIN work ON work.id = variant.work_id
     LEFT JOIN (SELECT anchor, subject,
                       COALESCE(MIN(CASE WHEN source = ? THEN value END), MIN(value)) AS value
                  FROM scrape_value WHERE field = ?
                 GROUP BY anchor, subject) year
-           ON year.subject = COALESCE(work.name, variant.key)
-          AND year.anchor = CASE WHEN variant.work_id IS NULL THEN ? ELSE ? END";
+           ON year.subject = ",
+    row_name!(),
+    "
+          AND year.anchor = ",
+    row_anchor!(),
+);
 
 /// 一行一个作品：认出作品的按 `work_id` 归堆，没认出来的按自己的键各成一堆。
 ///
@@ -940,7 +1197,13 @@ impl WorkQuery {
     /// 是这个查询面自己的事（ADR-0005）。
     #[must_use]
     pub fn same_filter(&self, other: &Self) -> bool {
-        self.contains == other.contains
+        // **搜索框算在筛选这一边**：它虽然只承诺排序，但它同时把没命中的行挡在外面，
+        // 于是换一个搜索词换的确实是**一批行**。算进排序那一边的话，全选说的
+        // 「当前筛出来的这一批」会指向人根本没看见的行。
+        //
+        // **比的是掐掉两头空白之后那一串**，与 [`Search::new`] 同一个口径：多打一个
+        // 空格筛出来的是同一批，不该把人勾了两百行的选中清掉。
+        self.search.trim() == other.search.trim()
             && self.platform == other.platform
             && self.collection == other.collection
             && self.language == other.language
@@ -962,7 +1225,10 @@ impl WorkQuery {
     /// 屏上有条件**写不成规则**时返回它，见 [`Unruly`]。**不是少写一条就算了**：
     /// 少一条的子库选出来的比屏上多，而那正是这条约定要防的事。
     pub fn to_rule(&self) -> Result<Option<Rule>, Unruly> {
-        if !self.contains.is_empty() {
+        // **排序一个字都不进去**（票 `gui-redesign/05` 的验收第 5 条）：
+        // [`order`](Self::order) 与 [`descending`](Self::descending) 这里连读都不读，
+        // 而搜索框既排序又收窄，收窄那一半写不成子句，所以整个挡住（挂单 Q70）。
+        if Search::new(&self.search).is_some() {
             return Err(Unruly::Search);
         }
         if self.state.is_some() {
@@ -1021,7 +1287,8 @@ impl WorkQuery {
     /// 变体那一层的筛选。**与变体表一字不差地共用**——见结构体文档。
     fn variant_filter(&self) -> VariantQuery {
         VariantQuery {
-            // 变体表那一维筛的是**键**，主列表筛的是**名字**，不共用。
+            // 变体表那一维按**键**取子串，主列表那个是**搜索框**（三条命中路加排序），
+            // 两件事不共用一个字段。搜索那一条另外补在 [`Self::where_clause`] 里。
             contains: String::new(),
             platform: self.platform.clone(),
             collection: self.collection.clone(),
@@ -1036,19 +1303,38 @@ impl WorkQuery {
 
     /// 折出 `WHERE` 那一段与它的参数。
     ///
-    /// 名字那一条**也落在 `WHERE` 而不是 `HAVING`**：它是逐行判得了的条件，
+    /// 搜索那一条**也落在 `WHERE` 而不是 `HAVING`**：三条命中路都是逐行判得了的，
     /// 搁在 `HAVING` 里就得先把全部行分完组才筛得掉。
     fn where_clause(&self) -> (String, Vec<Box<dyn ToSql>>) {
         let (mut sql, mut args) = self.variant_filter().where_clause();
-        if !self.contains.is_empty() {
+        if let Some(search) = Search::new(&self.search) {
+            let (hit_sql, mut hit_args) = search.filter();
             sql.push_str(if sql.is_empty() { " WHERE " } else { " AND " });
-            sql.push_str("COALESCE(work.name, variant.key) LIKE ? ESCAPE '\\'");
-            args.push(Box::new(format!("%{}%", escape_like(&self.contains))));
+            sql.push_str(&hit_sql);
+            args.append(&mut hit_args);
         }
         (sql, args)
     }
 
+    /// 折出 `SELECT` 里那一列**匹配质量的名次**，连它的参数。没搜索时是空的。
+    ///
+    /// 它拼在 [`WORK_COLUMNS`] 后面，所以它的参数排在整条查询的**最前面**
+    /// （`SELECT` 在 `FROM` 与 `WHERE` 之前）——[`Catalog::work_page`] 按这个次序绑。
+    fn rank_column(&self) -> (String, Vec<Box<dyn ToSql>>) {
+        match Search::new(&self.search) {
+            None => (String::new(), Vec::new()),
+            Some(search) => {
+                let (sql, args) = search.rank();
+                (format!(", {sql}"), args)
+            }
+        }
+    }
+
     /// 折出 `ORDER BY` 那一段。
+    ///
+    /// **搜索框打了字时，匹配质量是第一把键**，人点的那个表头退成同一档里的次序
+    /// ——「匹配得好的排前面」是这个框唯一的产品承诺，让位给「按容量排」就没了。
+    /// 它**永远升序**（好的在前），不跟着 [`descending`](Self::descending) 翻。
     ///
     /// **末尾一律缀上那一行的身份**（名字、`work_id`、那个键），理由与变体表同一条：
     /// 并列行的次序不定死，翻页就会漏行与重行。`(work_id, loose)` 是这张表的主键，
@@ -1056,7 +1342,11 @@ impl WorkQuery {
     fn order_clause(&self) -> String {
         let direction = if self.descending { "DESC" } else { "ASC" };
         let column = self.order.column();
-        let mut parts = vec![format!("{column} {direction}")];
+        let mut parts = Vec::new();
+        if Search::new(&self.search).is_some() {
+            parts.push("hit ASC".to_string());
+        }
+        parts.push(format!("{column} {direction}"));
         for tail in ["name", "work_id", "loose"] {
             if tail != column {
                 parts.push(format!("{tail} {direction}"));
@@ -1147,14 +1437,21 @@ impl Catalog {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let (rank_sql, rank_args) = query.rank_column();
+        // 搜索着没有。**这一个布尔量决定下面那一列取不取**，而不是拿
+        // 「取不到就算了」去猜——那样「没搜索」与「这一列读不出来」会混成一档。
+        let searching = !rank_sql.is_empty();
         let (where_sql, where_args) = query.where_clause();
         let order_sql = query.order_clause();
-        let mut args = year_args();
+        // **参数按它们在这条 SQL 里出现的次序绑**：名次那一列在 `SELECT` 里，
+        // 年份那张 join 在 `FROM` 里，筛选在 `WHERE` 里，翻页在最后。
+        let mut args = rank_args;
+        args.extend(year_args());
         args.extend(where_args);
         args.push(Box::new(i64::try_from(limit).unwrap_or(i64::MAX)));
         args.push(Box::new(i64::try_from(offset).unwrap_or(i64::MAX)));
         let sql = format!(
-            "SELECT {WORK_COLUMNS}{WORK_FROM}{where_sql}{WORK_GROUP_BY}{order_sql} \
+            "SELECT {WORK_COLUMNS}{rank_sql}{WORK_FROM}{where_sql}{WORK_GROUP_BY}{order_sql} \
              LIMIT ? OFFSET ?"
         );
         let mut statement = self.conn.prepare(&sql).map_err(|source| self.err(source))?;
@@ -1163,6 +1460,14 @@ impl Catalog {
                 let work_id: Option<i64> = row.get(0)?;
                 let loose: Option<String> = row.get(1)?;
                 let unknowns = u64::try_from(row.get::<_, i64>(8)?).unwrap_or(0);
+                // 名次那一列**按名字取**：写死一个下标的话，往 [`WORK_COLUMNS`] 里
+                // 插一列就会静默指到别人身上。没搜索时它压根不在 `SELECT` 里，
+                // 那时一次都不问。
+                let hit = if searching {
+                    SearchHit::from_rank(row.get::<_, i64>("hit")?)
+                } else {
+                    None
+                };
                 Ok(WorkRow {
                     anchor: match (work_id, loose) {
                         (Some(id), _) => WorkAnchor::Work(id),
@@ -1176,6 +1481,7 @@ impl Catalog {
                     unreadable_files: u64::try_from(row.get::<_, i64>(5)?).unwrap_or(0),
                     platforms: platform_set(row.get(7)?, unknowns),
                     year: row.get(9)?,
+                    hit,
                     // 这两样下面补。
                     missing: WORK_FIELDS.to_vec(),
                     confidence: None,
