@@ -66,9 +66,9 @@ fn 现场() -> Catalog {
     catalog
         .replace_variants(
             &[
-                变体("GB/口袋妖怪 汉化.zip", "GB", 4 * 1024 * 1024),
-                变体("GB/官中版.zip", "GB", 2 * 1024 * 1024),
-                变体("PSV/大作.vpk", "PSV", 3 * 1024 * 1024 * 1024),
+                变体("库/GB/口袋妖怪 汉化.zip", "GB", 4 * 1024 * 1024),
+                变体("库/GB/官中版.zip", "GB", 2 * 1024 * 1024),
+                变体("库/PSV/大作.vpk", "PSV", 3 * 1024 * 1024 * 1024),
             ],
             1,
             &Manifest::builtin(),
@@ -76,10 +76,10 @@ fn 现场() -> Catalog {
         .expect("变体写得进");
     标上中文(
         &mut catalog,
-        "GB/口袋妖怪 汉化.zip",
+        "库/GB/口袋妖怪 汉化.zip",
         ChineseMark::FanTranslated,
     );
-    标上中文(&mut catalog, "GB/官中版.zip", ChineseMark::Official);
+    标上中文(&mut catalog, "库/GB/官中版.zip", ChineseMark::Official);
     catalog
 }
 
@@ -140,10 +140,10 @@ fn 主库新增符合规则的内容自动落进选择集() {
     catalog
         .replace_variants(
             &[
-                变体("GB/口袋妖怪 汉化.zip", "GB", 4 * 1024 * 1024),
-                变体("GB/官中版.zip", "GB", 2 * 1024 * 1024),
-                变体("GB/新来的.zip", "GB", 1024 * 1024),
-                变体("PSV/大作.vpk", "PSV", 3 * 1024 * 1024 * 1024),
+                变体("库/GB/口袋妖怪 汉化.zip", "GB", 4 * 1024 * 1024),
+                变体("库/GB/官中版.zip", "GB", 2 * 1024 * 1024),
+                变体("库/GB/新来的.zip", "GB", 1024 * 1024),
+                变体("库/PSV/大作.vpk", "PSV", 3 * 1024 * 1024 * 1024),
             ],
             2,
             &Manifest::builtin(),
@@ -160,13 +160,13 @@ fn 例外优先于规则且不被规则重算覆盖() {
     catalog
         .set_exception(
             "掌机",
-            "GB/官中版.zip",
+            "库/GB/官中版.zip",
             Exception::Exclude,
             Some("这个我玩过了"),
         )
         .expect("例外写得进");
     catalog
-        .set_exception("掌机", "PSV/大作.vpk", Exception::Include, None)
+        .set_exception("掌机", "库/PSV/大作.vpk", Exception::Include, None)
         .expect("例外写得进");
     assert_eq!(求值(&catalog, "掌机").0, 2, "GB 汉化 + 手动收入的 PSV");
 
@@ -181,7 +181,7 @@ fn 例外优先于规则且不被规则重算覆盖() {
     // 忘掉例外之后它才回来。
     assert!(
         catalog
-            .clear_exception("掌机", "GB/官中版.zip")
+            .clear_exception("掌机", "库/GB/官中版.zip")
             .expect("删得动")
     );
     assert_eq!(求值(&catalog, "掌机").0, 3);
@@ -195,7 +195,7 @@ fn 一个主库上多个子库互不干扰() {
     加规则(&mut catalog, "掌机", "平台=GB");
     加规则(&mut catalog, "备用卡", "平台=PSV");
     catalog
-        .set_exception("掌机", "PSV/大作.vpk", Exception::Include, None)
+        .set_exception("掌机", "库/PSV/大作.vpk", Exception::Include, None)
         .expect("例外写得进");
 
     assert_eq!(求值(&catalog, "掌机").0, 3);
@@ -312,7 +312,7 @@ fn 事实从三层内容层级与刮削结论折出来() {
         )
         .expect("建得了发行版");
     catalog
-        .link_variant("GB/口袋妖怪 汉化.zip", Some(work), Some(release))
+        .link_variant("库/GB/口袋妖怪 汉化.zip", Some(work), Some(release))
         .expect("挂得上");
     catalog
         .put_scraped(&[Harvested {
@@ -330,7 +330,7 @@ fn 事实从三层内容层级与刮削结论折出来() {
         .expect("刮削结论写得进");
     let collection = catalog.add_collection("我通关过的").expect("建得了合集");
     catalog
-        .add_to_collection(collection, "GB/口袋妖怪 汉化.zip")
+        .add_to_collection(collection, "库/GB/口袋妖怪 汉化.zip")
         .expect("加得进合集");
 
     建子库(&mut catalog, "掌机", None);
@@ -350,7 +350,7 @@ fn 事实从三层内容层级与刮削结论折出来() {
     // 六条规则各自都该只选中那一个变体——六个维度全部从库里折出来了。
     assert_eq!(selected.rule_hits, vec![1, 1, 1, 1, 1, 1]);
     assert_eq!(selected.picked.len(), 1);
-    assert_eq!(selected.picked[0].key, "GB/口袋妖怪 汉化.zip");
+    assert_eq!(selected.picked[0].key, "库/GB/口袋妖怪 汉化.zip");
 }
 
 #[test]
@@ -381,7 +381,7 @@ fn 报告数得出选中多少条与多少容量_并报出超限() {
         report.over_capacity,
         Some(2 * 1024 * 1024 * 1024 + 6 * 1024 * 1024)
     );
-    assert_eq!(report.trim_suggestions[0].variant, "PSV/大作.vpk");
+    assert_eq!(report.trim_suggestions[0].variant, "库/PSV/大作.vpk");
     assert_eq!(
         report.trim_suggestions[0].cumulative, report.trim_suggestions[0].bytes,
         "累计从最大的那个起算——「砍到第几个才够」直接读得出来"
@@ -389,5 +389,5 @@ fn 报告数得出选中多少条与多少容量_并报出超限() {
     let text = report.render_text();
     assert!(text.contains("装不下"), "{text}");
     assert!(text.contains("不会自动截断"), "{text}");
-    assert!(text.contains("PSV/大作.vpk"), "{text}");
+    assert!(text.contains("库/PSV/大作.vpk"), "{text}");
 }

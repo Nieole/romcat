@@ -13,7 +13,8 @@ use std::fs;
 use std::path::Path;
 
 use romcat_core::catalog::identify::State;
-use romcat_core::catalog::{Catalog, Confidence};
+use romcat_core::task::Handle;
+use romcat_core::catalog::{Catalog, Confidence, Roots};
 use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
 use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
@@ -118,9 +119,9 @@ fn 建现场() -> 现场 {
     );
 
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-    let mut options = ScanOptions::new(root);
+    let mut options = ScanOptions::named(root, "库");
     options.jobs = Jobs::Fixed(2);
-    scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
 
     现场 {
         dir,
@@ -246,7 +247,7 @@ fn 建_dat() -> DatRepo {
 }
 
 fn 跑(现场: &mut 现场) -> identify::Outcome {
-    let options = Options::new(现场.dir.path());
+    let options = Options::new(Roots::single("库", 现场.dir.path()));
     identify::run(
         &RealFs::new(),
         &mut 现场.catalog,
@@ -282,7 +283,7 @@ fn 含头与去头两套规则同时算并且各撞各的() {
     // **一个变体两条候选**，两套口径各一条。
     let 候选 = 现场
         .catalog
-        .candidates_of("FC/超级马里奥.zip")
+        .candidates_of("库/FC/超级马里奥.zip")
         .expect("读得出");
     assert_eq!(候选.len(), 2, "两套口径各撞上一条：{候选:#?}");
     let 去头 = 候选
@@ -304,7 +305,7 @@ fn 含头与去头两套规则同时算并且各撞各的() {
 
     // 只算含头那一套的话，No-Intro 那条永远撞不上；只算去头那套，TOSEC 全部汉化条目
     // 一条都撞不上。两条都在，才说明两套规则真的都跑了。
-    assert_eq!(结论(&现场, "FC/超级马里奥.zip").0, State::Matched);
+    assert_eq!(结论(&现场, "库/FC/超级马里奥.zip").0, State::Matched);
 }
 
 #[test]
@@ -313,7 +314,7 @@ fn 每条候选都带置信度与依据() {
     跑(&mut 现场);
     let 候选 = &现场
         .catalog
-        .candidates_of("FC/超级马里奥.zip")
+        .candidates_of("库/FC/超级马里奥.zip")
         .expect("读得出")[0];
 
     assert_eq!(候选.confidence, Confidence::High, "精确命中是高置信");
@@ -326,7 +327,7 @@ fn 每条候选都带置信度与依据() {
     );
     assert!(候选.evidence.contains("CRC-32"), "{}", 候选.evidence);
     assert!(候选.evidence.contains("大小"), "{}", 候选.evidence);
-    assert_eq!(候选.member_key, "FC/超级马里奥.zip");
+    assert_eq!(候选.member_key, "库/FC/超级马里奥.zip");
     assert_eq!(
         候选.inner, "Super Mario (Japan).nes",
         "包里的哪一个也说得出"
@@ -339,7 +340,7 @@ fn 精确命中的候选自动通过() {
     let outcome = 跑(&mut 现场);
     let 候选 = 现场
         .catalog
-        .candidates_of("FC/超级马里奥.zip")
+        .candidates_of("库/FC/超级马里奥.zip")
         .expect("读得出");
     assert!(候选.iter().all(|c| c.accepted), "精确命中不必人工介入");
     assert!(outcome.report.accepted > 0);
@@ -352,7 +353,7 @@ fn 识别结果在中立库里建起作品与发行版并让变体指向它() {
 
     let 变体 = 现场
         .catalog
-        .variant("FC/超级马里奥.zip")
+        .variant("库/FC/超级马里奥.zip")
         .expect("读得出")
         .expect("在");
     let work = 变体.work_id.expect("挂上了作品");
@@ -370,10 +371,10 @@ fn 识别结果在中立库里建起作品与发行版并让变体指向它() {
     // 哪一条发行版，那就只挂作品、发行版留空，等裁决补。
     let 汉化 = 现场
         .catalog
-        .variant("FC/某游戏 汉化版.zip")
+        .variant("库/FC/某游戏 汉化版.zip")
         .expect("读得出")
         .expect("在");
-    assert_eq!(结论(&现场, "FC/某游戏 汉化版.zip").0, State::Matched);
+    assert_eq!(结论(&现场, "库/FC/某游戏 汉化版.zip").0, State::Matched);
     assert!(汉化.work_id.is_some(), "汉化版认得出是哪部作品");
     assert_eq!(汉化.release_id, None, "但它不是一次官方发行");
 }
@@ -383,10 +384,10 @@ fn 带拷贝机头的裸文件靠去头哈希撞上() {
     // SFC 只有一套 DAT 而且是去头的：只算含头那套，整个平台全落空。
     let mut 现场 = 建现场();
     跑(&mut 现场);
-    assert_eq!(结论(&现场, "SFC/带拷贝机头的.smc").0, State::Matched);
+    assert_eq!(结论(&现场, "库/SFC/带拷贝机头的.smc").0, State::Matched);
     let 候选 = &现场
         .catalog
-        .candidates_of("SFC/带拷贝机头的.smc")
+        .candidates_of("库/SFC/带拷贝机头的.smc")
         .expect("读得出")[0];
     assert_eq!(候选.hashed_as, Convention::Headerless);
     assert!(
@@ -403,7 +404,7 @@ fn nkit_验在撞_crc_之前撞上了也不许自动通过() {
     let outcome = 跑(&mut 现场);
     let 候选 = &现场
         .catalog
-        .candidates_of("wii/某游戏.iso")
+        .candidates_of("库/wii/某游戏.iso")
         .expect("读得出")[0];
     assert_eq!(候选.confidence, Confidence::Medium, "降一档");
     assert!(!候选.accepted, "不许自动通过");
@@ -414,7 +415,7 @@ fn nkit_验在撞_crc_之前撞上了也不许自动通过() {
     );
 
     // 降档了但**候选照样在**——它确实撞上了那条记录，只是不能自动认账。
-    assert_eq!(结论(&现场, "wii/某游戏.iso").0, State::Matched);
+    assert_eq!(结论(&现场, "库/wii/某游戏.iso").0, State::Matched);
 }
 
 #[test]
@@ -424,7 +425,7 @@ fn 验不了_nkit_的_gc_与_wii_镜像不许自动通过() {
     // 可能与好转储相同而内容不同。判据取自**撞上的那条记录说它是 GC / Wii 的光盘**，
     // 不是取自目录名（ADR-0011：目录只是强先验）。
     let mut 现场 = 建现场();
-    let mut options = Options::new(现场.dir.path());
+    let mut options = Options::new(Roots::single("库", 现场.dir.path()));
     options.read_library = false;
     identify::run(
         &RealFs::new(),
@@ -444,7 +445,7 @@ fn 验不了_nkit_的_gc_与_wii_镜像不许自动通过() {
 
     let 候选 = &现场
         .catalog
-        .candidates_of("wii/装进包里的.zip")
+        .candidates_of("库/wii/装进包里的.zip")
         .expect("读得出")[0];
     assert_eq!(候选.confidence, Confidence::Medium);
     assert!(!候选.accepted, "没验过 NKit 就不敢自动通过");
@@ -454,7 +455,7 @@ fn 验不了_nkit_的_gc_与_wii_镜像不许自动通过() {
     跑(&mut 现场);
     let 候选 = &现场
         .catalog
-        .candidates_of("wii/装进包里的.zip")
+        .candidates_of("库/wii/装进包里的.zip")
         .expect("读得出")[0];
     assert!(!候选.accepted);
     assert!(候选.evidence.contains("NKit 处理过的"), "{}", 候选.evidence);
@@ -476,7 +477,7 @@ fn 逐芯片的命中通过但标记不自动过() {
     跑(&mut 现场);
     let 候选 = 现场
         .catalog
-        .candidates_of("FC/超级马里奥.zip")
+        .candidates_of("库/FC/超级马里奥.zip")
         .expect("读得出");
     let 芯片 = 候选
         .iter()
@@ -492,19 +493,19 @@ fn 补丁与没有发行版链接的变体不去撞_dat() {
     let mut 现场 = 建现场();
     let outcome = 跑(&mut 现场);
 
-    let (state, reason) = 结论(&现场, "PSV/《某游戏》汉化补丁 Ver.1.0.zip");
+    let (state, reason) = 结论(&现场, "库/PSV/《某游戏》汉化补丁 Ver.1.0.zip");
     assert_eq!(state, State::Skipped);
     assert!(reason.unwrap_or_default().contains("补丁"));
     assert!(
         现场
             .catalog
-            .candidates_of("PSV/《某游戏》汉化补丁 Ver.1.0.zip")
+            .candidates_of("库/PSV/《某游戏》汉化补丁 Ver.1.0.zip")
             .expect("读得出")
             .is_empty(),
         "跳过的不产生候选"
     );
 
-    let (state, reason) = 结论(&现场, "PSV/AIME00001(某同人移植).zip");
+    let (state, reason) = 结论(&现场, "库/PSV/AIME00001(某同人移植).zip");
     assert_eq!(state, State::Skipped);
     assert!(reason.unwrap_or_default().contains("没有发行版链接"));
 
@@ -577,7 +578,7 @@ fn 识别一个字节都不写主库() {
 fn 不读主库时容器里那套零解压的_crc32_照撞() {
     // 盘不在位、或者不想为去头那套付读盘的钱时：容器里的 CRC-32 零解压就有。
     let mut 现场 = 建现场();
-    let mut options = Options::new(现场.dir.path());
+    let mut options = Options::new(Roots::single("库", 现场.dir.path()));
     options.read_library = false;
     let outcome = identify::run(
         &RealFs::new(),
@@ -597,9 +598,9 @@ fn 不读主库时容器里那套零解压的_crc32_照撞() {
 
     assert_eq!(outcome.read_bytes, 0, "一个字节都没读");
     // 含头那套照样撞上 TOSEC。
-    assert_eq!(结论(&现场, "FC/超级马里奥.zip").0, State::Matched);
+    assert_eq!(结论(&现场, "库/FC/超级马里奥.zip").0, State::Matched);
     // 裸文件没有判据可用——报「无判据」，不是「未命中」。
-    assert_eq!(结论(&现场, "SFC/带拷贝机头的.smc").0, State::NoEvidence);
+    assert_eq!(结论(&现场, "库/SFC/带拷贝机头的.smc").0, State::NoEvidence);
 }
 
 /// 主库里每个文件的 `(路径, 大小, 修改时间)`。

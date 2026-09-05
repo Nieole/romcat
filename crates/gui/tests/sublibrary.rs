@@ -16,7 +16,8 @@ use std::time::Duration;
 
 use romcat_core::catalog::Catalog;
 use romcat_core::fs::RealFs;
-use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
+use romcat_core::scan::{self, Jobs, ScanOptions};
+use romcat_core::task::Handle;
 use romcat_core::site::Site;
 use romcat_core::sublibrary::Exception;
 use romcat_core::task::Ending;
@@ -66,9 +67,9 @@ impl 现场 {
         let 库文件 = 工作区.path().join("catalog").join("fixture.sqlite3");
         {
             let mut catalog = Catalog::open(&库文件).expect("能开中立库");
-            let mut options = ScanOptions::new(库.path());
+            let mut options = ScanOptions::named(库.path(), "库");
             options.jobs = Jobs::Fixed(2);
-            scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new())
+            scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new())
                 .expect("扫得动");
         }
         let site = Site::open_file(工作区.path(), &库文件, None).expect("开得出现场");

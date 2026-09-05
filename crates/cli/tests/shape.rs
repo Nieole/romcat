@@ -53,6 +53,8 @@ fn 扫(workspace: &Path, root: &Path, name: &str) -> std::process::Output {
         workspace,
         &[
             "scan",
+            "--root-name",
+            "库",
             &root.display().to_string(),
             "--library",
             name,
@@ -167,9 +169,9 @@ fn 人工纠正把两个条目并成一个变体且撤得掉() {
             "--library",
             "主库",
             "--merge",
-            "FC/甲.zip",
+            "库/FC/甲.zip",
             "--merge",
-            "FC/乙.zip",
+            "库/FC/乙.zip",
             "--json",
             &json.display().to_string(),
             "--quiet",
@@ -193,9 +195,9 @@ fn 人工纠正把两个条目并成一个变体且撤得掉() {
             "--library",
             "主库",
             "--forget-merge",
-            "FC/乙.zip",
+            "库/FC/乙.zip",
             "--forget-merge",
-            "FC/甲.zip",
+            "库/FC/甲.zip",
             "--json",
             &json.display().to_string(),
             "--quiet",
@@ -225,15 +227,15 @@ fn 键打错了当场报错而不是记一条永远不生效的纠正() {
             "--library",
             "主库",
             "--merge",
-            "FC/甲.zip",
+            "库/FC/甲.zip",
             "--merge",
-            "FC/打错了.zip",
+            "库/FC/打错了.zip",
             "--quiet",
         ],
     );
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("没有 FC/打错了.zip"), "{stderr}");
+    assert!(stderr.contains("没有 库/FC/打错了.zip"), "{stderr}");
 }
 
 #[test]
@@ -252,7 +254,7 @@ fn 只给一个键的合并被拦下来() {
             "--library",
             "主库",
             "--merge",
-            "FC/甲.zip",
+            "库/FC/甲.zip",
             "--quiet",
         ],
     );

@@ -104,7 +104,7 @@ use crate::catalog::identify::{
     Candidate, CartFactRow, Confidence, ContentHash, DiscFactRow, EntryFact, Identification,
     ModelAnswerRow, SwitchFactRow,
 };
-use crate::catalog::{Catalog, CatalogError, Provenance, State, VariantRow};
+use crate::catalog::{Catalog, CatalogError, Provenance, Roots, State, VariantRow};
 use crate::classify::{self, Category};
 use crate::container::{self, ContainerKind, Demand, ReadPlan, volume};
 use crate::dat::chinese::ChineseMark;
@@ -167,8 +167,8 @@ pub struct Ammo<'a> {
 /// 识别的选项。
 #[derive(Debug, Clone)]
 pub struct Options {
-    /// 主库根。只有需要回盘读字节时才用得上。
-    pub root: PathBuf,
+    /// 主库那**一组根**：拿变体的键第一段查出那块盘在哪。只有需要回盘读字节时才用得上。
+    pub roots: Roots,
     /// 允许回盘读吗。关掉之后**一个字节都不读主库**：容器里零解压可得的 CRC-32
     /// 照撞，裸文件与去头那套则报「无判据」。
     pub read_library: bool,
@@ -179,11 +179,11 @@ pub struct Options {
 }
 
 impl Options {
-    /// 对着某个主库根的默认选项。
+    /// 对着一组主库根的默认选项。
     #[must_use]
-    pub fn new(root: impl Into<PathBuf>) -> Self {
+    pub fn new(roots: Roots) -> Self {
         Self {
-            root: root.into(),
+            roots,
             read_library: true,
             max_read_bytes: None,
             write_batch: 2_000,
@@ -1272,7 +1272,7 @@ fn fill_in(
     }
 
     for (member, indexes) in wanted {
-        let path = library_path(&options.root, &member);
+        let path = library_path(&options.roots, &member);
         if units[indexes[0].0].in_container {
             read_bytes += read_from_container(library, &path, units, &indexes, want, state);
         } else {
@@ -1492,13 +1492,12 @@ fn read_from_container(
     read
 }
 
-/// 主库里那个文件在哪。键是**相对主库根**的路径，分隔符是 `/`（ADR-0020）。
-fn library_path(root: &Path, key: &str) -> PathBuf {
-    let mut path = root.to_path_buf();
-    for part in key.split('/') {
-        path.push(part);
-    }
-    path
+/// 主库里那个文件在哪。键是「根名 + 相对那个根的路径」，分隔符是 `/`（ADR-0020）。
+///
+/// 认不出根名时原样把键当路径返回：那条路径开不了，于是这一条走的还是「读不到」
+/// 那一支——与盘不在位是同一种处置，不必在这里多长一条岔路。
+fn library_path(roots: &Roots, key: &str) -> PathBuf {
+    roots.join(key).unwrap_or_else(|| PathBuf::from(key))
 }
 
 /// 撞一次，并记住**撞上时用的是哪套哈希**。参数顺序跟 [`DatRepo::lookup`] 一致，
@@ -1825,7 +1824,7 @@ fn probe_discs(
         &|catalog, member| catalog.disc_facts(member),
     )?;
     for (member, indexes) in todo {
-        let path = library_path(&options.root, &member);
+        let path = library_path(&options.roots, &member);
         // **壳子认不出来的一条都不读**——那不是光盘形态的东西。
         let (got, read) = fetch_prefixes(library, &path, &wanted, &indexes, &|it| {
             disc::by_name(&it.name).map(disc::probe_len)
@@ -2006,7 +2005,7 @@ fn probe_carts(
         &|catalog, member| catalog.cart_facts(member),
     )?;
     for (member, indexes) in todo {
-        let path = library_path(&options.root, &member);
+        let path = library_path(&options.roots, &member);
         let (got, read) = fetch_prefixes(library, &path, &wanted, &indexes, &|it| {
             cart::by_name(&it.name, hint).map(|kind| cart::probe_len(kind, it.size))
         });
@@ -2189,7 +2188,7 @@ fn probe_switch(
         &|catalog, member| catalog.switch_facts(member),
     )?;
     for (member, indexes) in todo {
-        let path = library_path(&options.root, &member);
+        let path = library_path(&options.roots, &member);
         // **裸文件走 seek，容器里那一条只给前缀。** 两条路的差别只在取字节的办法上，
         // 解析器是同一份（`switch::Source` 的两个实现）。
         if wanted[indexes[0]].in_container {

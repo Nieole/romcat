@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use crate::dat::fetch::{FetchError, Fetcher};
 
-use super::store::{Stats, Store, StoreError};
+use super::store::{FETCHED_AT, Stats, Store, StoreError};
 use super::{Content, Title};
 
 /// titledb 的单文件落点。**只走 raw，不走 API、更不 clone。**
@@ -169,6 +169,11 @@ pub fn sync(
             store.put_meta(&key, &etag)?;
         }
         out.files.push(record);
+    }
+    // **取回的时刻**：库里此前只留 ETag，那答得出「变没变」却答不出「多久没取了」，
+    // 而界面上那一行问的正是后者。
+    if !options.dry_run {
+        store.put_meta(FETCHED_AT, &crate::catalog::now_secs().to_string())?;
     }
     out.stats = store.stats()?;
     Ok(out)

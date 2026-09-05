@@ -11,8 +11,9 @@ use std::fs;
 use std::path::Path;
 
 use romcat_core::capability::{self, Roster};
+use romcat_core::task::Handle;
 use romcat_core::catalog::identify::State;
-use romcat_core::catalog::{Catalog, Confidence};
+use romcat_core::catalog::{Catalog, Confidence, Roots};
 use romcat_core::dat::repo::DatRepo;
 use romcat_core::fs::RealFs;
 use romcat_core::identify::fuzzy;
@@ -124,9 +125,9 @@ fn 建现场() -> 现场 {
     写(&root.join("switch/其实不是.nsp"), &[0_u8; 0x2000]);
 
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-    let mut options = ScanOptions::new(root);
+    let mut options = ScanOptions::named(root, "库");
     options.jobs = Jobs::Fixed(2);
-    scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
 
     现场 {
         dir,
@@ -176,7 +177,7 @@ fn 建_titledb() -> TitleDb {
 }
 
 fn 跑(现场: &mut 现场, titledb: Option<&TitleDb>) -> identify::Outcome {
-    let options = Options::new(现场.dir.path());
+    let options = Options::new(Roots::single("库", 现场.dir.path()));
     identify::run(
         &RealFs::new(),
         &mut 现场.catalog,

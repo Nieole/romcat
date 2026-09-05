@@ -28,6 +28,7 @@ fn 建_主库() -> TempDir {
 fn 扫(workspace: &Path, args: &[&Path]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_romcat"))
         .arg("scan")
+        .args(["--root-name", "库"])
         .args(args)
         .arg("--workspace")
         .arg(workspace)
@@ -179,6 +180,7 @@ fn 第二次扫描跳过未变的文件() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_romcat"))
         .arg("scan")
+        .args(["--root-name", "库"])
         .arg(library.path())
         .arg("--workspace")
         .arg(workspace.path())

@@ -31,6 +31,8 @@ fn 现场() -> (TempDir, TempDir) {
     写(&dir.path().join("FC/魂斗罗.zip"), &zip(2048));
     let out = romcat(&[
         "scan",
+        "--root-name",
+        "库",
         &dir.path().to_string_lossy(),
         "--workspace",
         &workspace.path().to_string_lossy(),

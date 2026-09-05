@@ -619,7 +619,17 @@ fn build_game(
     Game {
         title,
         sort_title: sort,
-        files: members.iter().map(|v| v.main_key.clone()).collect(),
+        // **`file:` 剥掉根名。** 它是给前端看的路径，相对元数据文件所在目录解析
+        // （`converge` 的模块文档），而根名是**中立库这一侧**的东西——写进去的话，
+        // 主库导出的那份多一层不存在的目录，子库那份则与卡上的布局对不上
+        // （`sync` 里落点也剥了同一段）。
+        //
+        // 机器读的那一半在 `x-romcat-variant` 里，那一格**带着根名**：它要精确对回
+        // 中立库里的那个变体，而两块盘上同名的东西只靠相对路径分不开。
+        files: members
+            .iter()
+            .map(|v| crate::path::relative_of_key(&v.main_key).to_string())
+            .collect(),
         // **开发商与发行商按集合读**：数据源一个键写了几家就是几家，挑一条等于换掉
         // 一家公司（`Priorities::pick_all` 的文档、挂单 Q27）。
         developers: pick_all(Field::Developer),

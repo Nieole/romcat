@@ -42,7 +42,8 @@ fn 合成库(rows: u64) -> Catalog {
     let variants: Vec<Variant> = (0..rows)
         .map(|i| {
             变体(
-                &format!("{}/幻想传说 {i:05} 汉化版.zip", 平台[(i % 4) as usize]),
+                // 键带**根名**（`path::library_key`）：合成库照真库的形状摆。
+                &format!("库/{}/幻想传说 {i:05} 汉化版.zip", 平台[(i % 4) as usize]),
                 // 每七个留一个平台未知：那是真库里存在的一档（认不出平台的内容照常入库），
                 // 排序遇到 `NULL` 时不该翻车。
                 (i % 7 != 2).then(|| 平台[(i % 4) as usize]),
@@ -119,23 +120,23 @@ fn 排序是全序不是页内序() {
 fn 筛选也下推到库里() {
     let catalog = 合成库(300);
     let query = VariantQuery {
-        contains: "PSP/".into(),
+        contains: "库/PSP/".into(),
         ..Default::default()
     };
     let total = catalog.variant_total(&query).expect("数得出");
     assert_eq!(total, 75, "四个平台里 PSP 该占四分之一");
     let rows = catalog.variant_page(&query, 0, 10).expect("取得出");
     assert_eq!(rows.len(), 10, "筛完还有 75 行，一页该给满 10 行");
-    assert!(rows.iter().all(|row| row.key.starts_with("PSP/")));
+    assert!(rows.iter().all(|row| row.key.starts_with("库/PSP/")));
 }
 
 #[test]
 fn 筛选框里的通配符是普通字符() {
     let catalog = 建库(&[
-        变体("SFC/百分之 100% 通关.sfc", Some("SFC"), 1, 10),
-        变体("SFC/百分之百通关.sfc", Some("SFC"), 1, 10),
-        变体("SFC/下划_线.sfc", Some("SFC"), 1, 10),
-        变体("SFC/下划X线.sfc", Some("SFC"), 1, 10),
+        变体("库/SFC/百分之 100% 通关.sfc", Some("SFC"), 1, 10),
+        变体("库/SFC/百分之百通关.sfc", Some("SFC"), 1, 10),
+        变体("库/SFC/下划_线.sfc", Some("SFC"), 1, 10),
+        变体("库/SFC/下划X线.sfc", Some("SFC"), 1, 10),
     ]);
     for (打的字, 该有几条) in [("100%", 1u64), ("下划_", 1), ("%", 1)] {
         let query = VariantQuery {

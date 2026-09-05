@@ -18,6 +18,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use romcat_core::adapter::converge::{NotAnEntry, Preference};
+use romcat_core::catalog::Roots;
+use romcat_core::task::Handle;
 use romcat_core::adapter::pegasus::Pegasus;
 use romcat_core::adapter::transfer::{self, ExportOptions};
 use romcat_core::adapter::{Capability, assert_capability};
@@ -54,20 +56,26 @@ fn 补丁字节() -> Vec<u8> {
     vec![0xF6; 256]
 }
 
-const 日版变体: &str = "FC/魂斗罗日版/Contra (Japan).zip";
-const 台版变体: &str = "FC/魂斗罗台版/魂斗罗.zip";
-const 汉化变体: &str = "FC/魂斗罗汉化/魂斗罗 中文版[dwt_so 汉化].zip";
-const 塞尔达: &str = "FC/Zelda/Zelda (USA).zip";
-const BIOS: &str = "街机/FBA-ROMS/BIOS/neogeo.zip";
-const 补丁: &str = "FC/《流星洛克人3》汉化补丁.zip";
+/// 把一条**中立库的键**折回盘上那条相对主库根的路径：剥掉第一段根名。
+/// 摆 fixture 用它，断言用键本身——两者差的正是这一段（`path::library_key`）。
+fn 相对(key: &str) -> &str {
+    key.strip_prefix("库/").unwrap_or(key)
+}
+
+const 日版变体: &str = "库/FC/魂斗罗日版/Contra (Japan).zip";
+const 台版变体: &str = "库/FC/魂斗罗台版/魂斗罗.zip";
+const 汉化变体: &str = "库/FC/魂斗罗汉化/魂斗罗 中文版[dwt_so 汉化].zip";
+const 塞尔达: &str = "库/FC/Zelda/Zelda (USA).zip";
+const BIOS: &str = "库/街机/FBA-ROMS/BIOS/neogeo.zip";
+const 补丁: &str = "库/FC/《流星洛克人3》汉化补丁.zip";
 /// 两个**没有作品链接**、而且显示标题会撞在一起的变体。
 ///
 /// 它们撞名是有意的：真机上一趟「导出 → 导入 → 再导出」里，光 FC 一个平台就有近千个
 /// 条目的标题与别的条目撞名（同一部作品的不同 HACK 版、不同合集包里的同一个名字）。
 /// 段对回基线时若让「标题一字不差」这条软判据抢在「变体键相同」前面，撞名的那些就会
 /// 互相截胡。
-const 重名甲: &str = "FC/重名/甲/超级玛丽.zip";
-const 重名乙: &str = "FC/重名/乙/超级玛丽.zip";
+const 重名甲: &str = "库/FC/重名/甲/超级玛丽.zip";
+const 重名乙: &str = "库/FC/重名/乙/超级玛丽.zip";
 
 fn 写(path: &Path, bytes: &[u8]) {
     fs::create_dir_all(path.parent().expect("有上级目录")).expect("能建目录");
@@ -95,46 +103,43 @@ fn 建现场() -> 现场 {
     let dir = temp_dir("pegasus");
     let root = dir.path();
     写(
-        &root.join(日版变体),
+        &root.join(相对(日版变体)),
         &zip_container(&[ZipEntrySpec::stored("Contra.nes", 日版())]),
     );
     写(
-        &root.join(台版变体),
+        &root.join(相对(台版变体)),
         &zip_container(&[ZipEntrySpec::stored("Contra.nes", 台版())]),
     );
     写(
-        &root.join(汉化变体),
+        &root.join(相对(汉化变体)),
         &zip_container(&[ZipEntrySpec::stored("魂斗罗.nes", 汉化版())]),
     );
     写(
-        &root.join(塞尔达),
+        &root.join(相对(塞尔达)),
         &zip_container(&[ZipEntrySpec::stored("Zelda.nes", 只有英文())]),
     );
     // **非游戏资产**：模拟器要它，它本身不是游戏（ADR-0010）。
     写(
-        &root.join(BIOS),
+        &root.join(相对(BIOS)),
         &zip_container(&[ZipEntrySpec::stored("neogeo.rom", 街机bios())]),
     );
     // **补丁**：不可运行，识别那一趟会判它跳过。
     写(
-        &root.join(补丁),
+        &root.join(相对(补丁)),
         &zip_container(&[ZipEntrySpec::stored("rockman3.ips", 补丁字节())]),
     );
     // 两个 DAT 认不出、文件名却一模一样的变体：显示标题会撞在一起。
     for (key, 字节) in [(重名甲, 0x11u8), (重名乙, 0x22u8)] {
         写(
-            &root.join(key),
+            &root.join(相对(key)),
             &zip_container(&[ZipEntrySpec::stored("mario.nes", vec![字节; 2_048])]),
         );
     }
 
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-    catalog
-        .set_library_root(&romcat_core::path::display(root))
-        .expect("写得下主库根");
-    let mut options = ScanOptions::new(root);
+    let mut options = ScanOptions::named(root, "库");
     options.jobs = Jobs::Fixed(2);
-    scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
 
     let mut 场 = 现场 {
         dir,
@@ -222,12 +227,12 @@ fn 跑一遍(现场: &mut 现场) {
             guessing: &identify::model::Guessing::off(),
             titledb: None,
         },
-        &identify::Options::new(现场.dir.path()),
+        &identify::Options::new(Roots::single("库", 现场.dir.path())),
         &CancelToken::new(),
         &mut |_| {},
     )
     .expect("识别不该失败");
-    let mut options = scrape::Options::new(现场.dir.path(), 现场._pool.path());
+    let mut options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场._pool.path());
     options.media = false;
     scrape::run(
         &RealFs::new(),
@@ -460,14 +465,16 @@ fn 作品级收敛_一个条目多个文件_首选变体排在最前() {
     );
     assert!(report.converged_entries >= 1, "至少有一个条目装着多个变体");
 
+    // 导出的 `file:` 是**相对主库根**的路径：根名是中立库这一侧的东西，不写进前端
+    // （`adapter::converge` 里那段注释）。
     let 段 = text
         .split("game: ")
-        .find(|段| 段.contains(汉化变体))
+        .find(|段| 段.contains(相对(汉化变体)))
         .expect("魂斗罗那一段在");
     // **首选变体排在最前**：汉化 > 官中 > 日版（ADR-0012）。
-    let 汉化位置 = 段.find(汉化变体).expect("有汉化");
-    let 台版位置 = 段.find(台版变体).expect("有台版");
-    let 日版位置 = 段.find(日版变体).expect("有日版");
+    let 汉化位置 = 段.find(相对(汉化变体)).expect("有汉化");
+    let 台版位置 = 段.find(相对(台版变体)).expect("有台版");
+    let 日版位置 = 段.find(相对(日版变体)).expect("有日版");
     assert!(汉化位置 < 台版位置, "汉化排在官中前面：{段}");
     assert!(台版位置 < 日版位置, "官中排在日版前面：{段}");
 
@@ -532,10 +539,10 @@ fn 裁决压过首选变体规则() {
     let text = 读出(&现场, "FC.metadata.pegasus.txt");
     let 段 = text
         .split("game: ")
-        .find(|段| 段.contains(汉化变体))
+        .find(|段| 段.contains(相对(汉化变体)))
         .expect("魂斗罗那一段在");
     assert!(
-        段.find(日版变体) < 段.find(汉化变体),
+        段.find(相对(日版变体)) < 段.find(相对(汉化变体)),
         "人指名了日版，规则就得让路：{段}"
     );
 }

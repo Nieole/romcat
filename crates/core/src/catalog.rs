@@ -8,8 +8,9 @@
 //!
 //! ## 三件必须记住的事
 //!
-//! 1. **键是 NFC 的相对路径**（ADR-0020）。读盘用系统给的原始路径，入库与比较用
-//!    [`path::catalog_key`] 折出来的键，两者不能混用。
+//! 1. **键是「根名 + NFC 的相对路径」**（ADR-0020）。主库是**一组根**，键的第一段是
+//!    根名（[`path::library_key`]）。读盘用系统给的原始路径，入库与比较用键，
+//!    两者不能混用；从键回到盘走 [`roots::Roots`]。
 //! 2. **不可读是第三态**（ADR-0021）。`readable = 0` 的记录既不算已变也不算已删，
 //!    `len` 是 `NULL` 而不是 `0`——库里另有 4,317 个真正的空文件。
 //! 3. **删除只在完整扫完一遍之后判**。[`Catalog::sweep`] 删的是「这次扫描没见到的」，
@@ -21,6 +22,7 @@ pub mod content;
 pub mod detail;
 pub mod frontend;
 pub mod identify;
+pub mod roots;
 pub mod scrape;
 pub mod sublibrary;
 pub mod title;
@@ -53,6 +55,7 @@ pub use identify::{
     AcceptedCandidate, Candidate, CandidateCounts, Confidence, ContentHash, EntryFact,
     Identification, Provenance, SourceCount, State,
 };
+pub use roots::{AddRootError, LibraryRoot, RootScan, RootStats, Roots};
 pub use title::TitleRow;
 
 /// 中立库的结构版本。**读到对不上的版本直接让用户删库重扫。**
@@ -92,7 +95,22 @@ pub use title::TitleRow;
 /// 当成冲突丢掉。按上面那条判据加 1，于是这个数是 5。**不为它写迁移代码**：这张表整份
 /// 可再生，而中立库本来就是「结构版本一变就删库重扫」那一档——省下一整套迁移代码
 /// 是这个设计当初就付过账的便宜买卖。
-pub const SCHEMA_VERSION: u32 = 5;
+///
+/// ## 6：主库变成**一组根**
+///
+/// 键的形状变了：从「相对主库根的路径」变成「**根名** + 相对那个根的路径」
+/// （[`path::library_key`]）。这不是加一张表，是**每一条记录的主键都换了形状**——
+/// 旧库拿新程序打开，`FC/魂斗罗.zip` 会被当成根名叫 `FC`、相对路径是 `魂斗罗.zip`
+/// 的一条记录，平台从此认不出来。按上面那条判据这是最硬的一次「改了已有表的含义」。
+///
+/// **照旧不写迁移代码**，理由还是那一条：中立库整份可再生。删库重扫一遍 37.1 分钟，
+/// 比一套只用一次的迁移代码便宜。
+///
+/// **沉淀库不在这条路上。** 它不可再生，走顺序迁移永不要求删库
+/// （[`verdict::MIGRATIONS`](crate::verdict)）。这次换键的代价落在它身上的那一份是：
+/// **路径锚**（`(主库名, 变体的键)`）里存的键是旧形状，从此撞不上——那些行原样留着，
+/// 一条都不删，也不改。**内容锚一条都不受影响**，而那正是它存在的理由。
+pub const SCHEMA_VERSION: u32 = 6;
 
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS meta(
@@ -100,8 +118,12 @@ CREATE TABLE IF NOT EXISTS meta(
     value TEXT NOT NULL
 ) STRICT;
 
--- 一个条目一行，文件、目录、符号链接都在里面。键是相对主库根、分隔符统一成 `/`、
--- 再规范化成 NFC 的路径（ADR-0020）；主库根自己的键是空串。
+-- 一个条目一行，文件、目录、符号链接都在里面。键是「**根名** + `/` + 相对那个根、
+-- 分隔符统一成 `/`、再规范化成 NFC 的路径」（ADR-0020、`path::library_key`）；
+-- **一个根自己的键就是它的名字**。
+--
+-- 根名进键里，是因为主库是**一组根**：几块盘扫进同一份中立库，只按相对路径当键的话
+-- 两块盘上同名的 `FC/魂斗罗.zip` 会静默覆盖成一条，而中立库是事实来源（ADR-0001）。
 --
 -- 目录也存，是为了让「扫过几个目录」这类计数从表里数出来而不是攒在内存里：
 -- 攒着的计数在中断续跑时会重复累加，数出来的不会。
@@ -121,6 +143,8 @@ CREATE INDEX IF NOT EXISTS entry_kind ON entry(kind);
 -- 这次走了一遍的元信息。计数不在这里——那些从 entry 与 traversal_note 数出来。
 CREATE TABLE IF NOT EXISTS traversal(
     scan              INTEGER PRIMARY KEY,
+    -- 这一趟扫的是哪个**根**：名字与它当时挂在哪。一趟只扫一个根。
+    root_name         TEXT    NOT NULL,
     root              TEXT    NOT NULL,
     elapsed_ms        INTEGER NOT NULL,
     jobs              INTEGER NOT NULL,
@@ -176,9 +200,6 @@ CREATE TABLE IF NOT EXISTS container_entry(
 -- 没有这条索引就是一次全表扫描，真库里 216,203 条内部条目。
 CREATE INDEX IF NOT EXISTS container_entry_print ON container_entry(crc32, size);
 ";
-
-/// `meta` 里记主库根的那把键。
-const META_LIBRARY_ROOT: &str = "library_root";
 
 const NOTE_ERROR: &str = "error";
 const NOTE_SKIPPED: &str = "skipped";
@@ -283,7 +304,9 @@ pub fn mtime_ns(time: SystemTime) -> Option<i64> {
 pub struct Traversal {
     /// 扫描代号。
     pub scan: i64,
-    /// 主库根的展示形态。挂载点会变，因此它跟着每次扫描更新。
+    /// 这一趟扫的是哪个**根**。它是那个根下面所有键的第一段。
+    pub root_name: String,
+    /// 那个根的展示形态。挂载点会变，因此它跟着每次扫描更新。
     pub root: String,
     /// 累计耗时，含此前几次续跑。
     pub elapsed_ms: u64,
@@ -384,6 +407,10 @@ impl Catalog {
             file: Some(file),
             path: self.path.clone(),
         };
+        // **这一份也要等。** WAL 让读与写并行，但写者提交那一刻仍会短暂独占；
+        // 默认超时是 0，于是长活那一侧会在扫描提交的那一瞬间拿到一句
+        // 「database is locked」而不是等一会儿（同 `Catalog::open` 那条注释）。
+        twin.batch("PRAGMA busy_timeout = 10000;")?;
         // **只核对，不建、不改。** 版本对不上时开出来的是一份读得出行、却对不上号的库，
         // 那比打不开更坏。
         let found: Option<String> = twin
@@ -424,8 +451,18 @@ impl Catalog {
     ) -> Result<Self, CatalogError> {
         let catalog = Self { conn, file, path };
         // WAL：中断的扫描已经写进去的部分不会因为没提交而整份丢掉。
-        catalog.batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
+        // **`busy_timeout` 不是调优，是界面那一屏的前提**：扫描跑在画帧线程之外，
+        // 后台那条线程按文件路径自己开一份写得动的库（`gui::roots::Screen::scan`），
+        // 于是同一个文件上会有两个写者。WAL 允许一写多读，但两个写者撞上时默认是
+        // **当场返回 `SQLITE_BUSY`** ——那会让用户在界面上按一下裁决就报一句
+        // 「数据库忙」。等一会儿是对的：扫描一批写完就放手。
+        catalog.batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA busy_timeout = 10000;",
+        )?;
         catalog.batch(SCHEMA)?;
+        catalog.batch(roots::ROOTS_SCHEMA)?;
         catalog.batch(content::CONTENT_SCHEMA)?;
         catalog.batch(identify::IDENTIFY_SCHEMA)?;
         catalog.batch(scrape::SCRAPE_SCHEMA)?;
@@ -722,57 +759,34 @@ impl Catalog {
         Ok(out)
     }
 
-    /// 这份中立库上次记的主库根在哪；从没记过时是 `None`。
+    /// 一个根**顶层**条目的名字，至多 `limit` 条，按名字排序。返回的是**相对那个根**
+    /// 的那一段，不带根名。
     ///
-    /// 它**不是**定位这份库的依据——`--library` 起了名字之后，定位跟名字走
-    /// （[`crate::workspace::Slug`]）。它只用来回答一个问题：换了挂载点之后，
-    /// 眼前这个根还是不是同一个主库。
-    ///
-    /// # Errors
-    /// 读库失败时返回错误。
-    pub fn library_root(&self) -> Result<Option<String>, CatalogError> {
-        self.meta_get(META_LIBRARY_ROOT)
-    }
-
-    /// 记下这份中立库对着哪个主库根。
-    ///
-    /// # Errors
-    /// 写库失败时返回错误。
-    pub fn set_library_root(&self, root: &str) -> Result<(), CatalogError> {
-        self.meta_set(META_LIBRARY_ROOT, root)
-    }
-
-    /// 抹掉「这份库对着哪个主库」这条记录，装成票 29 之前建的老库。
-    #[cfg(test)]
-    pub(crate) fn forget_library_root(&self) {
-        self.conn
-            .execute(
-                "DELETE FROM meta WHERE key = ?1",
-                params![META_LIBRARY_ROOT],
-            )
-            .expect("删得掉");
-    }
-
-    /// 顶层条目的键，至多 `limit` 条，按键排序。
-    ///
-    /// 顶层键就是主库根下面那一层的名字。它是「这还是不是同一个主库」最便宜的判据：
+    /// 顶层名就是那个根下面那一层的名字。它是「这个根还是不是原来那块盘」最便宜的判据：
     /// 一次 `read_dir` 就能拿实际的那一份来比，不必碰盘上的第二层。
     ///
     /// # Errors
     /// 读库失败时返回错误。
-    pub fn top_level_keys(&self, limit: usize) -> Result<Vec<String>, CatalogError> {
+    pub fn top_level_keys(
+        &self,
+        root_name: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, CatalogError> {
+        let prefix = format!("{root_name}/");
         let mut statement = self
             .conn
             .prepare(
-                "SELECT key FROM entry
-                 WHERE key <> '' AND instr(key, '/') = 0
-                 ORDER BY key LIMIT ?1",
+                "SELECT substr(key, length(?1) + 1) FROM entry
+                 WHERE substr(key, 1, length(?1)) = ?1
+                   AND instr(substr(key, length(?1) + 1), '/') = 0
+                 ORDER BY key LIMIT ?2",
             )
             .map_err(|source| self.err(source))?;
         let rows = statement
-            .query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
-                row.get::<_, String>(0)
-            })
+            .query_map(
+                params![prefix, i64::try_from(limit).unwrap_or(i64::MAX)],
+                |row| row.get::<_, String>(0),
+            )
             .map_err(|source| self.err(source))?;
         let mut out = Vec::new();
         for row in rows {
@@ -788,20 +802,21 @@ impl Catalog {
     pub fn last_traversal(&self) -> Result<Option<Traversal>, CatalogError> {
         self.conn
             .query_row(
-                "SELECT scan, root, elapsed_ms, jobs, samples_per_class, containers,
+                "SELECT scan, root_name, root, elapsed_ms, jobs, samples_per_class, containers,
                         interrupted, resumed
                  FROM traversal ORDER BY scan DESC LIMIT 1",
                 [],
                 |row| {
                     Ok(Traversal {
                         scan: row.get(0)?,
-                        root: row.get(1)?,
-                        elapsed_ms: u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
-                        jobs: usize::try_from(row.get::<_, i64>(3)?).unwrap_or(1),
-                        samples_per_class: usize::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
-                        penetrated_containers: row.get::<_, i64>(5)? != 0,
-                        interrupted: row.get::<_, i64>(6)? != 0,
-                        resumed: row.get::<_, i64>(7)? != 0,
+                        root_name: row.get(1)?,
+                        root: row.get(2)?,
+                        elapsed_ms: u64::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
+                        jobs: usize::try_from(row.get::<_, i64>(4)?).unwrap_or(1),
+                        samples_per_class: usize::try_from(row.get::<_, i64>(5)?).unwrap_or(0),
+                        penetrated_containers: row.get::<_, i64>(6)? != 0,
+                        interrupted: row.get::<_, i64>(7)? != 0,
+                        resumed: row.get::<_, i64>(8)? != 0,
                     })
                 },
             )
@@ -1150,16 +1165,18 @@ impl Catalog {
     pub fn save_traversal(&mut self, traversal: &Traversal) -> Result<(), CatalogError> {
         self.conn
             .execute(
-                "INSERT INTO traversal(scan, root, elapsed_ms, jobs, samples_per_class,
-                     containers, interrupted, resumed)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                "INSERT INTO traversal(scan, root_name, root, elapsed_ms, jobs,
+                     samples_per_class, containers, interrupted, resumed)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(scan) DO UPDATE SET
-                     root = excluded.root, elapsed_ms = excluded.elapsed_ms,
+                     root_name = excluded.root_name, root = excluded.root,
+                     elapsed_ms = excluded.elapsed_ms,
                      jobs = excluded.jobs, samples_per_class = excluded.samples_per_class,
                      containers = excluded.containers,
                      interrupted = excluded.interrupted, resumed = excluded.resumed",
                 params![
                     traversal.scan,
+                    traversal.root_name,
                     traversal.root,
                     i64::try_from(traversal.elapsed_ms).unwrap_or(i64::MAX),
                     i64::try_from(traversal.jobs).unwrap_or(i64::MAX),
@@ -1201,30 +1218,48 @@ impl Catalog {
         Ok(kept as u64)
     }
 
-    /// 删掉这次扫描没见到的**文件**记录，返回删了几个文件。
+    /// 删掉**这个根下面**这次扫描没见到的文件记录，返回删了几个文件。
     ///
     /// **只有完整扫完一遍才能调**。中断的扫描没走完整个库，没见到不等于不存在——
     /// 那时候调它会把还没扫到的那半个库当成已删除抹掉。
+    ///
+    /// **只收这一个根**，这不是优化是正确性：一趟扫描只走一个根，别的根这一趟一条都
+    /// 没见到——不划范围的话，扫一遍甲盘会把乙盘那几万条整批抹掉。
     ///
     /// 读不到元数据的文件不会被扫到这里：它们的名字 `readdir` 列得出来，因此
     /// 「这次见过」照样会更新（ADR-0021）。
     ///
     /// # Errors
     /// 写库失败时返回错误。
-    pub fn sweep(&mut self, scan: i64) -> Result<u64, CatalogError> {
+    pub fn sweep(&mut self, scan: i64, root_name: &str) -> Result<u64, CatalogError> {
+        let prefix = format!("{root_name}/");
         let removed: i64 = self
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM entry WHERE seen <> ?1 AND kind = ?2",
-                params![scan, KIND_FILE],
+                "SELECT COUNT(*) FROM entry
+                 WHERE seen <> ?1 AND kind = ?2
+                   AND (key = ?3 OR substr(key, 1, length(?4)) = ?4)",
+                params![scan, KIND_FILE, root_name, prefix],
                 |row| row.get(0),
             )
             .map_err(|source| self.err(source))?;
         let removed = u64::try_from(removed).unwrap_or(0);
         self.conn
-            .execute("DELETE FROM entry WHERE seen <> ?1", params![scan])
+            .execute(
+                "DELETE FROM entry
+                 WHERE seen <> ?1 AND (key = ?2 OR substr(key, 1, length(?3)) = ?3)",
+                params![scan, root_name, prefix],
+            )
             .map_err(|source| self.err(source))?;
-        // 容器没了，它的内部构成也就没了——留着会让报告数出一批不存在的内部文件。
+        self.drop_orphans()?;
+        Ok(removed)
+    }
+
+    /// 条目没了，挂在它身上的那几张表也就没了——留着会让报告数出一批不存在的内部文件。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub(crate) fn drop_orphans(&self) -> Result<(), CatalogError> {
         self.batch(
             "DELETE FROM container_entry WHERE key NOT IN (SELECT key FROM entry);
              DELETE FROM container       WHERE key NOT IN (SELECT key FROM entry);
@@ -1232,8 +1267,7 @@ impl Catalog {
              DELETE FROM content_disc    WHERE key NOT IN (SELECT key FROM entry);
              DELETE FROM content_cart    WHERE key NOT IN (SELECT key FROM entry);
              DELETE FROM media_blob      WHERE key NOT IN (SELECT key FROM entry);",
-        )?;
-        Ok(removed)
+        )
     }
 
     /// 从库里的记录折出一份库体检的统计。**不碰磁盘**，外置盘不在位时照样出得来。
@@ -1246,6 +1280,9 @@ impl Catalog {
         manifest: &Manifest,
     ) -> Result<Aggregate, CatalogError> {
         let traversal = self.last_traversal()?.unwrap_or_default();
+        // 展示路径要按**每条键自己的根**去拼：一份中立库里装着几个根，拿上一趟那个根
+        // 的路径去接别的根的键，印出来的是一条盘上根本不存在的路径。
+        let roots = Roots::load(self)?;
         let mut aggregate = Aggregate::default();
 
         let mut statement = self
@@ -1287,7 +1324,7 @@ impl Catalog {
             aggregate.record_file(
                 &FileObservation::derive(
                     manifest,
-                    &traversal.root,
+                    &roots,
                     &key,
                     len,
                     non_utf8 != 0,
@@ -1316,7 +1353,7 @@ impl Catalog {
             let Some(kind) = ContainerKind::from_code(&kind) else {
                 continue;
             };
-            let display = path::display_key(&traversal.root, &key);
+            let display = roots.display_key(&key);
             if let Some(reason) = reason.as_deref() {
                 // 短码认不出来只可能是库被人改过；当成「结构读不下去」而不是悄悄丢掉这一条。
                 let reason = FailureReason::from_code(reason).unwrap_or(FailureReason::Malformed);
@@ -1375,7 +1412,7 @@ impl Catalog {
             }
             let key: String = row.get(0).map_err(|source| self.err(source))?;
             if current.as_ref().is_none_or(|(seen, _)| *seen != key) {
-                let display = path::display_key(&traversal.root, &key);
+                let display = roots.display_key(&key);
                 current = Some((key.clone(), display));
             }
             let (container_key, display) = current.as_ref().expect("刚填上");
@@ -1439,6 +1476,7 @@ impl Catalog {
     pub fn report_meta(&self) -> Result<ReportMeta, CatalogError> {
         let traversal = self.last_traversal()?.unwrap_or_default();
         Ok(ReportMeta {
+            root_name: traversal.root_name,
             root: traversal.root,
             scan: traversal.scan,
             interrupted: traversal.interrupted,

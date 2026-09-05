@@ -331,7 +331,7 @@ impl Profile {
 pub struct Conversion {
     /// 用哪条配方。
     pub recipe: Recipe,
-    /// 产物落在子库里的哪条路径（相对子库根）。
+    /// 产物落在子库里的哪条路径（**相对子库根**，因此不带根名）。
     pub path: String,
     /// 产物多大。
     pub bytes: u64,
@@ -474,7 +474,7 @@ fn rezip(contents: &Contents, key: &str, bytes: u64, want: &str) -> Decision {
     }
     Decision::Convert(Box::new(Conversion {
         recipe: Recipe::Rezip,
-        path: with_extension(key, "zip"),
+        path: with_extension(crate::path::relative_of_key(key), "zip"),
         // 重压之后多大要压完才知道；填未压缩总量，是**上界**。
         bytes: total,
         estimated: true,
@@ -527,7 +527,7 @@ fn unpack(contents: &Contents, entry: &Entry, key: &str, bytes: u64, want: &str)
     }
     Decision::Convert(Box::new(Conversion {
         recipe: Recipe::Unpack,
-        path: sibling(key, name),
+        path: sibling(crate::path::relative_of_key(key), name),
         // 未压缩大小零解压就在容器头里，是**准数**（ADR-0014）。
         bytes: item.size,
         estimated: false,
@@ -602,7 +602,7 @@ pub fn today() -> String {
 }
 
 /// 把 [`day_number`] 那个天数折回 `YYYY-MM-DD`。
-fn from_day_number(days: i64) -> String {
+pub(crate) fn from_day_number(days: i64) -> String {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let day_of_era = z - era * 146_097;
@@ -1175,7 +1175,7 @@ mod tests {
             decide(
                 &档案("retroarch-exfat"),
                 Some("SFC"),
-                "SFC/魂斗罗.7z",
+                "库/SFC/魂斗罗.7z",
                 600_000,
                 Some(&包)
             ),
@@ -1184,7 +1184,7 @@ mod tests {
         let Decision::Convert(conversion) = decide(
             &档案("独立模拟器-exfat"),
             Some("SFC"),
-            "SFC/魂斗罗.7z",
+            "库/SFC/魂斗罗.7z",
             600_000,
             Some(&包),
         ) else {
@@ -1202,7 +1202,7 @@ mod tests {
         let Decision::Convert(conversion) = decide(
             &档案("独立模拟器-exfat"),
             Some("PS1"),
-            "PS1/最终幻想7.zip",
+            "库/PS1/最终幻想7.zip",
             690_000_000,
             Some(&包),
         ) else {

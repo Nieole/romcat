@@ -15,6 +15,7 @@ use romcat_core::container::{
 };
 use romcat_core::fs::{DirEntry, LibraryFs, MemFs, ReadSeek};
 use romcat_core::platform::Manifest;
+use romcat_core::task::Handle;
 use romcat_core::testing::container::{
     TarEntrySpec, tar_archive, tar_zst, tar_zst_without_size, zst_needing_dictionary, zstd_frame,
     zstd_frame_without_size,
@@ -497,15 +498,14 @@ fn 建一个_zst_库() -> MemFs {
 
 fn 扫(library: &MemFs, options: &romcat_core::scan::ScanOptions) -> romcat_core::catalog::Catalog {
     let mut catalog = romcat_core::catalog::Catalog::open_in_memory().expect("能开中立库");
-    let cancel = romcat_core::scan::CancelToken::new();
-    romcat_core::scan::scan(library, &mut catalog, options, &cancel).expect("扫得动");
+    romcat_core::scan::scan(library, &mut catalog, options, &Handle::new()).expect("扫得动");
     catalog
 }
 
 #[test]
 fn 扫描默认不为_zst_付全量解压的代价() {
     let library = 建一个_zst_库();
-    let catalog = 扫(&library, &romcat_core::scan::ScanOptions::new("/lib"));
+    let catalog = 扫(&library, &romcat_core::scan::ScanOptions::named("/lib", "库"));
     let totals = catalog
         .aggregate(&Default::default(), &Manifest::builtin())
         .expect("能折出统计")
@@ -534,12 +534,11 @@ fn 扫描默认不为_zst_付全量解压的代价() {
 #[test]
 fn 加了开关才读并且第二趟直接沿用中立库里的结论() {
     let library = 建一个_zst_库();
-    let mut options = romcat_core::scan::ScanOptions::new("/lib");
+    let mut options = romcat_core::scan::ScanOptions::named("/lib", "库");
     options.decompress_zst = true;
 
     let mut catalog = romcat_core::catalog::Catalog::open_in_memory().expect("能开中立库");
-    let cancel = romcat_core::scan::CancelToken::new();
-    romcat_core::scan::scan(&library, &mut catalog, &options, &cancel).expect("首扫");
+    romcat_core::scan::scan(&library, &mut catalog, &options, &Handle::new()).expect("首扫");
     let totals = catalog
         .aggregate(&Default::default(), &Manifest::builtin())
         .unwrap()
@@ -553,8 +552,8 @@ fn 加了开关才读并且第二趟直接沿用中立库里的结论() {
 
     // 第二趟**不带**开关：三元组没变，中立库里已经有结论，不该被抹掉，
     // 也不该重新解一遍（重解一遍就是每次扫描重付 3.8–7.6 小时）。
-    let 不带开关 = romcat_core::scan::ScanOptions::new("/lib");
-    romcat_core::scan::scan(&library, &mut catalog, &不带开关, &cancel).expect("二扫");
+    let 不带开关 = romcat_core::scan::ScanOptions::named("/lib", "库");
+    romcat_core::scan::scan(&library, &mut catalog, &不带开关, &Handle::new()).expect("二扫");
     let totals = catalog
         .aggregate(&Default::default(), &Manifest::builtin())
         .unwrap()
@@ -568,11 +567,10 @@ fn 加了开关才读并且第二趟直接沿用中立库里的结论() {
 #[test]
 fn 内容变了就重解一遍而不是沿用旧清单() {
     let mut library = 建一个_zst_库();
-    let mut options = romcat_core::scan::ScanOptions::new("/lib");
+    let mut options = romcat_core::scan::ScanOptions::named("/lib", "库");
     options.decompress_zst = true;
     let mut catalog = romcat_core::catalog::Catalog::open_in_memory().expect("能开中立库");
-    let cancel = romcat_core::scan::CancelToken::new();
-    romcat_core::scan::scan(&library, &mut catalog, &options, &cancel).expect("首扫");
+    romcat_core::scan::scan(&library, &mut catalog, &options, &Handle::new()).expect("首扫");
 
     // 沿用与否的判据就是增量扫描那一套三元组：换了内容、拨了修改时间，就该重解。
     library.file(
@@ -580,7 +578,7 @@ fn 内容变了就重解一遍而不是沿用旧清单() {
         tar_zst(&[TarEntrySpec::file("只剩这一个.vpk", 噪声(103, 4321))]),
     );
     library.touch("/lib/PSV/ATSP11823.tar.zst", 60);
-    romcat_core::scan::scan(&library, &mut catalog, &options, &cancel).expect("二扫");
+    romcat_core::scan::scan(&library, &mut catalog, &options, &Handle::new()).expect("二扫");
 
     let totals = catalog
         .aggregate(&Default::default(), &Manifest::builtin())
@@ -594,7 +592,7 @@ fn 内容变了就重解一遍而不是沿用旧清单() {
 #[test]
 fn 头部抽样也说得出_zst_里装着什么() {
     let library = 建一个_zst_库();
-    let catalog = 扫(&library, &romcat_core::scan::ScanOptions::new("/lib"));
+    let catalog = 扫(&library, &romcat_core::scan::ScanOptions::named("/lib", "库"));
     let aggregate = catalog
         .aggregate(&Default::default(), &Manifest::builtin())
         .expect("能折出统计");

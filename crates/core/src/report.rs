@@ -42,7 +42,9 @@ const TOP_DUPLICATE_PATHS_PER_GROUP: usize = 10;
 /// 生成报告时需要的、统计之外的信息。
 #[derive(Debug, Clone)]
 pub struct ReportMeta {
-    /// 扫描根。
+    /// 这一趟扫的那个**根**叫什么。主库是一组根，一趟只扫一个。
+    pub root_name: String,
+    /// 那个根当时挂在哪。
     pub root: String,
     /// 这次扫描是否被中断。
     pub interrupted: bool,
@@ -439,7 +441,10 @@ pub struct ConflictSummary {
 /// 库体检报告。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HealthReport {
-    /// 扫描根。
+    /// 这一趟扫的那个**根**叫什么。主库是一组根，一趟只扫一个。
+    #[serde(default)]
+    pub root_name: String,
+    /// 那个根当时挂在哪。
     pub root: String,
     /// 这次扫描是否被中断。中断的报告仍然可读，只是不完整。
     pub interrupted: bool,
@@ -718,6 +723,7 @@ impl HealthReport {
         });
 
         Self {
+            root_name: meta.root_name.clone(),
             root: meta.root.clone(),
             interrupted: meta.interrupted,
             resumed: meta.resumed,
@@ -916,4 +922,6 @@ mod duplicates;
 mod render;
 
 pub use duplicates::DuplicateDetails;
-pub use render::{capacity, heading, human_bytes, human_duration, pad, thousands, width};
+pub use render::{
+    capacity, heading, human_bytes, human_duration, human_time, pad, thousands, width,
+};

@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ring::digest::{Context, SHA256};
 
-use crate::catalog::Catalog;
+use crate::catalog::{Catalog, Roots};
 use crate::fs::LibraryFs;
 use crate::path;
 
@@ -234,7 +234,7 @@ pub fn ingest(
     library: &dyn LibraryFs,
     catalog: &mut Catalog,
     pool: &MediaPool,
-    root: &Path,
+    roots: &Roots,
     claim: &Claim<'_>,
 ) -> Result<Ingested, super::ScrapeError> {
     let key = claim.key;
@@ -269,7 +269,12 @@ pub fn ingest(
         }
     }
 
-    let path = root.join(key.replace('/', std::path::MAIN_SEPARATOR_STR));
+    // 键的第一段是**根名**，得先查出那块盘在哪（`catalog::roots::Roots`）。
+    let Some(path) = roots.join(key) else {
+        return Ok(Ingested::Unreadable {
+            why: format!("{key} 说的那个根不在这份库里"),
+        });
+    };
     let mut reader = match library.open(&path) {
         Ok(reader) => reader,
         Err(source) => {

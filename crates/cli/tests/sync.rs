@@ -69,6 +69,8 @@ fn 现场() -> (TempDir, TempDir, TempDir) {
         workspace.path(),
         &[
             "scan",
+            "--root-name",
+            "库",
             &library.path().display().to_string(),
             "--library",
             "测试库",

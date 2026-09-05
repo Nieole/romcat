@@ -53,6 +53,14 @@ pub struct ScanDelta {
 }
 
 impl ScanDelta {
+    /// 这一趟到眼下为止看过多少条目。**不含删掉的**——那是收尾时才算得出来的。
+    ///
+    /// 遍历报进度只报得出这个数：走完之前谁也不知道分母是多少。
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.unchanged + self.changed + self.added + self.unreadable
+    }
+
     /// 记下一条结论。
     pub fn record(&mut self, verdict: Verdict) {
         match verdict {

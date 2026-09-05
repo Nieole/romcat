@@ -62,7 +62,7 @@ use std::path::{Path, PathBuf};
 use ring::digest::{Context, SHA256};
 
 use crate::capability::Conversion;
-use crate::catalog::mtime_ns;
+use crate::catalog::{Roots, mtime_ns};
 use crate::convert::{self, ConvertError};
 use crate::fs::{LibraryFs, real_path};
 use crate::scan::CancelToken;
@@ -184,11 +184,11 @@ impl Outcome {
 pub struct Sources<'a> {
     /// 主库的只读视图。
     pub library: &'a dyn LibraryFs,
-    /// 主库根，**系统给的原始形式**；这一趟不搬 ROM 时是 `None`。
+    /// 主库那**一组根**：从变体的键第一段查出那块盘在哪。这一趟不搬 ROM 时是 `None`。
     ///
-    /// 用 `Option` 而不是一个空路径当哨兵：**盘不在位与「这趟不需要盘」是两件事**，
+    /// 用 `Option` 而不是一份空表当哨兵：**盘不在位与「这趟不需要盘」是两件事**，
     /// 混成一个值之后，前者会变成一堆「主库里找不到 X」而不是一句「插上外置盘」。
-    pub library_root: Option<&'a Path>,
+    pub library_roots: Option<&'a Roots>,
     /// 子库根，**系统给的原始形式**（ADR-0020、挂账 D82）。
     pub target_root: &'a Path,
     /// **媒体池**里的落点：相对子库根的路径 → 池里那个文件。
@@ -378,10 +378,10 @@ fn place(
         }
         FileKind::Rom => {
             // **主库只读**：走那道没有写操作的接缝，而且**只复制不链接**（模块文档三）。
-            let root = sources
-                .library_root
+            let roots = sources
+                .library_roots
                 .ok_or_else(|| io::Error::other("这一趟要搬 ROM，可调用方没说主库在哪"))?;
-            let from = real_path(sources.library, root, &step.source).ok_or_else(|| {
+            let from = roots.real_path(sources.library, &step.source).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("主库里找不到 {}", step.source),

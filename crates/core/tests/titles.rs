@@ -19,6 +19,8 @@ use std::fs;
 use std::path::Path;
 
 use romcat_core::catalog::Catalog;
+use romcat_core::catalog::Roots;
+use romcat_core::task::Handle;
 use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
 use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
@@ -69,11 +71,17 @@ struct 现场 {
     repo: DatRepo,
 }
 
-const 日版变体: &str = "FC/魂斗罗日版/Contra (Japan).zip";
-const 台版变体: &str = "FC/魂斗罗台版/魂斗罗.zip";
-const 汉化变体: &str = "FC/魂斗罗汉化/魂斗罗 中文版[dwt_so 汉化].zip";
-const 数字美服变体: &str = "FC/Gaia/Gaia.zip";
-const 数字港服变体: &str = "FC/盖亚/盖亚.zip";
+/// 把一条**中立库的键**折回盘上那条相对主库根的路径：剥掉第一段根名。
+/// 摆 fixture 用它，断言用键本身——两者差的正是这一段（`path::library_key`）。
+fn 相对(key: &str) -> &str {
+    key.strip_prefix("库/").unwrap_or(key)
+}
+
+const 日版变体: &str = "库/FC/魂斗罗日版/Contra (Japan).zip";
+const 台版变体: &str = "库/FC/魂斗罗台版/魂斗罗.zip";
+const 汉化变体: &str = "库/FC/魂斗罗汉化/魂斗罗 中文版[dwt_so 汉化].zip";
+const 数字美服变体: &str = "库/FC/Gaia/Gaia.zip";
+const 数字港服变体: &str = "库/FC/盖亚/盖亚.zip";
 
 fn 建现场() -> 现场 {
     let dir = temp_dir("titles");
@@ -81,15 +89,15 @@ fn 建现场() -> 现场 {
 
     // ── 卡带世代：日版、**台版官中**、民间汉化版各占一个目录。
     写(
-        &root.join(日版变体),
+        &root.join(相对(日版变体)),
         &zip_container(&[ZipEntrySpec::stored("Contra.nes", 日版())]),
     );
     写(
-        &root.join(台版变体),
+        &root.join(相对(台版变体)),
         &zip_container(&[ZipEntrySpec::stored("Contra.nes", 台版())]),
     );
     写(
-        &root.join(汉化变体),
+        &root.join(相对(汉化变体)),
         &zip_container(&[ZipEntrySpec::stored("魂斗罗.nes", 汉化版())]),
     );
 
@@ -97,7 +105,7 @@ fn 建现场() -> 现场 {
     // 它们撞上的是**同一条** DAT 记录——港服与美服共用同一个 TitleID 就是这个样子。
     for key in [数字美服变体, 数字港服变体] {
         写(
-            &root.join(key),
+            &root.join(相对(key)),
             &zip_container(&[ZipEntrySpec::stored("Gaia.bin", 数字版())]),
         );
     }
@@ -109,9 +117,9 @@ fn 建现场() -> 现场 {
     );
 
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-    let mut options = ScanOptions::new(root);
+    let mut options = ScanOptions::named(root, "库");
     options.jobs = Jobs::Fixed(2);
-    scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
 
     现场 {
         dir,
@@ -204,12 +212,12 @@ fn 跑一遍(现场: &mut 现场) -> title::TitleReport {
             guessing: &identify::model::Guessing::off(),
             titledb: None,
         },
-        &identify::Options::new(现场.dir.path()),
+        &identify::Options::new(Roots::single("库", 现场.dir.path())),
         &CancelToken::new(),
         &mut |_| {},
     )
     .expect("识别不该失败");
-    let mut options = scrape::Options::new(现场.dir.path(), 现场.pool_dir.path());
+    let mut options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
     options.media = false;
     scrape::run(
         &RealFs::new(),
@@ -421,13 +429,13 @@ fn 中文名带置信度低的那些进得了队列() {
         &现场.dir.path().join("FC/合集/塞尔达全集.zip"),
         &zip_container(&[ZipEntrySpec::stored("Zelda.nes", 只有英文())]),
     );
-    let mut options = ScanOptions::new(现场.dir.path());
+    let mut options = ScanOptions::named(现场.dir.path(), "库");
     options.jobs = Jobs::Fixed(2);
     scan::scan(
         &RealFs::new(),
         &mut 现场.catalog,
         &options,
-        &CancelToken::new(),
+        &Handle::new(),
     )
     .expect("扫得动");
     let report2 = 跑一遍(&mut 现场);

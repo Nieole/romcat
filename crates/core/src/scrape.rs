@@ -55,7 +55,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::catalog::scrape::{Harvested, HarvestedMedia, HarvestedValue};
-use crate::catalog::{Catalog, CatalogError};
+use crate::catalog::{Catalog, CatalogError, Roots};
 use crate::fs::LibraryFs;
 use crate::scan::CancelToken;
 
@@ -589,8 +589,9 @@ pub trait Source {
 /// 刮削的选项。
 #[derive(Debug, Clone)]
 pub struct Options {
-    /// 主库根。只有要把本地媒体读进池里时才用得上。
-    pub root: PathBuf,
+    /// 主库那**一组根**：拿变体的键第一段查出那块盘在哪。
+    /// 只有要把本地媒体读进池里时才用得上。
+    pub roots: Roots,
     /// 媒体池在哪。
     pub pool: PathBuf,
     /// 策略档案。
@@ -606,11 +607,11 @@ pub struct Options {
 }
 
 impl Options {
-    /// 对着某个主库根与某个媒体池的默认选项。
+    /// 对着一组主库根与某个媒体池的默认选项。
     #[must_use]
-    pub fn new(root: impl Into<PathBuf>, pool: impl Into<PathBuf>) -> Self {
+    pub fn new(roots: Roots, pool: impl Into<PathBuf>) -> Self {
         Self {
-            root: root.into(),
+            roots,
             pool: pool.into(),
             profile: Profile::Offline,
             media: true,
@@ -1296,7 +1297,7 @@ fn ingest_all(
         };
         let ingested = match &claim.from {
             MediaFrom::Library(_) => {
-                pool::ingest(into.library, catalog, into.pool, &into.options.root, &want)?
+                pool::ingest(into.library, catalog, into.pool, &into.options.roots, &want)?
             }
             MediaFrom::Online { ext, .. } => {
                 let Some(net) = into.net else {

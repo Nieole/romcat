@@ -25,6 +25,7 @@ fn 现场() -> (TempDir, TempDir) {
     写(&dir.path().join("FC/魂斗罗.zip"), &zip(2048));
     let out = Command::new(env!("CARGO_BIN_EXE_romcat"))
         .arg("scan")
+        .args(["--root-name", "库"])
         .arg(dir.path())
         .arg("--workspace")
         .arg(workspace.path())

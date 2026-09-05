@@ -11,6 +11,7 @@ use romcat_core::container::{
 };
 use romcat_core::fs::MemFs;
 use romcat_core::platform::Manifest;
+use romcat_core::task::Handle;
 use romcat_core::testing::container::{
     ZipEntrySpec, crc32, zip_container, zip_container_with_prefix, zip_container_with_trailing,
     zip_container_with_zip64_eocd,
@@ -650,7 +651,7 @@ fn 扫一遍(
         library,
         &mut catalog,
         options,
-        &romcat_core::scan::CancelToken::new(),
+        &Handle::new(),
     )
     .expect("扫描不该失败");
     catalog
@@ -686,7 +687,7 @@ fn 建三个容器的库() -> (MemFs, u64) {
 #[test]
 fn 体检报告说得出容器内部的文件数与构成() {
     let (library, 内部合计) = 建三个容器的库();
-    let options = romcat_core::scan::ScanOptions::new("/lib");
+    let options = romcat_core::scan::ScanOptions::named("/lib", "库");
     let catalog = 扫一遍(&library, &options);
 
     let aggregate = catalog
@@ -743,7 +744,7 @@ fn 体检报告说得出容器内部的文件数与构成() {
 #[test]
 fn 盘不在位时报告照样说得出容器里装着什么() {
     let (library, 内部合计) = 建三个容器的库();
-    let options = romcat_core::scan::ScanOptions::new("/lib");
+    let options = romcat_core::scan::ScanOptions::named("/lib", "库");
     let catalog = 扫一遍(&library, &options);
 
     // 这一步一个字节都不碰主库：结论全在中立库里（ADR-0001）。
@@ -759,7 +760,7 @@ fn 盘不在位时报告照样说得出容器里装着什么() {
 #[test]
 fn 关掉穿透就一个容器都不去读() {
     let (library, _) = 建三个容器的库();
-    let mut options = romcat_core::scan::ScanOptions::new("/lib");
+    let mut options = romcat_core::scan::ScanOptions::named("/lib", "库");
     options.penetrate_containers = false;
     let catalog = 扫一遍(&library, &options);
 
@@ -799,10 +800,9 @@ fn 容器变了内部构成跟着换掉而不是叠加() {
             ZipEntrySpec::stored("旧的乙.nes", 样本(137, 100)),
         ]),
     );
-    let options = romcat_core::scan::ScanOptions::new("/lib");
+    let options = romcat_core::scan::ScanOptions::named("/lib", "库");
     let mut catalog = romcat_core::catalog::Catalog::open_in_memory().expect("能开中立库");
-    let cancel = romcat_core::scan::CancelToken::new();
-    romcat_core::scan::scan(&library, &mut catalog, &options, &cancel).expect("首扫");
+    romcat_core::scan::scan(&library, &mut catalog, &options, &Handle::new()).expect("首扫");
     let 首扫 = catalog
         .aggregate(&Default::default(), &Manifest::builtin())
         .unwrap();
@@ -814,7 +814,7 @@ fn 容器变了内部构成跟着换掉而不是叠加() {
         zip_container(&[ZipEntrySpec::stored("新的.nes", 样本(139, 250))]),
     );
     library.touch("/lib/FC/合集.zip", 60);
-    romcat_core::scan::scan(&library, &mut catalog, &options, &cancel).expect("二扫");
+    romcat_core::scan::scan(&library, &mut catalog, &options, &Handle::new()).expect("二扫");
 
     let 二扫 = catalog
         .aggregate(&Default::default(), &Manifest::builtin())
@@ -832,10 +832,9 @@ fn 容器变了内部构成跟着换掉而不是叠加() {
 #[test]
 fn 容器被删掉后内部构成一起消失() {
     let (mut library, _) = 建三个容器的库();
-    let options = romcat_core::scan::ScanOptions::new("/lib");
+    let options = romcat_core::scan::ScanOptions::named("/lib", "库");
     let mut catalog = romcat_core::catalog::Catalog::open_in_memory().expect("能开中立库");
-    let cancel = romcat_core::scan::CancelToken::new();
-    romcat_core::scan::scan(&library, &mut catalog, &options, &cancel).expect("首扫");
+    romcat_core::scan::scan(&library, &mut catalog, &options, &Handle::new()).expect("首扫");
     assert_eq!(
         catalog
             .aggregate(&Default::default(), &Manifest::builtin())
@@ -847,7 +846,7 @@ fn 容器被删掉后内部构成一起消失() {
     );
 
     library.remove("/lib/SFC/solid.7z");
-    romcat_core::scan::scan(&library, &mut catalog, &options, &cancel).expect("二扫");
+    romcat_core::scan::scan(&library, &mut catalog, &options, &Handle::new()).expect("二扫");
     let 二扫 = catalog
         .aggregate(&Default::default(), &Manifest::builtin())
         .unwrap();
@@ -863,11 +862,10 @@ fn 容器被删掉后内部构成一起消失() {
 fn 上次带着_no_containers_扫过的容器下次会补穿() {
     let (library, 内部合计) = 建三个容器的库();
     let mut catalog = romcat_core::catalog::Catalog::open_in_memory().expect("能开中立库");
-    let cancel = romcat_core::scan::CancelToken::new();
 
-    let mut 不穿 = romcat_core::scan::ScanOptions::new("/lib");
+    let mut 不穿 = romcat_core::scan::ScanOptions::named("/lib", "库");
     不穿.penetrate_containers = false;
-    romcat_core::scan::scan(&library, &mut catalog, &不穿, &cancel).expect("首扫");
+    romcat_core::scan::scan(&library, &mut catalog, &不穿, &Handle::new()).expect("首扫");
     let 首扫 = catalog
         .aggregate(&Default::default(), &Manifest::builtin())
         .unwrap()
@@ -879,8 +877,8 @@ fn 上次带着_no_containers_扫过的容器下次会补穿() {
 
     // 第二趟打开穿透。三元组一个都没变，但中立库里压根没有穿透结论——
     // 只看三元组的话这批容器会永远不被穿透。
-    let 穿 = romcat_core::scan::ScanOptions::new("/lib");
-    romcat_core::scan::scan(&library, &mut catalog, &穿, &cancel).expect("二扫");
+    let 穿 = romcat_core::scan::ScanOptions::named("/lib", "库");
+    romcat_core::scan::scan(&library, &mut catalog, &穿, &Handle::new()).expect("二扫");
     let totals = catalog
         .aggregate(&Default::default(), &Manifest::builtin())
         .unwrap()

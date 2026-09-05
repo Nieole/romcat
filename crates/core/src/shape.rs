@@ -34,7 +34,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use crate::catalog::{Catalog, CatalogError};
 use crate::classify::{self, Category};
 use crate::container::volume;
-use crate::path::{self, fold, platform_of_key};
+use crate::path::{self, fold, platform_dir_of_key};
 use crate::platform::{Manifest, Platform, Rule, ShapeKind, TreeRoot};
 
 /// 成型器看到的一条中立库记录。
@@ -185,7 +185,8 @@ impl<'m> Scope<'m> {
 /// 平台由**键的第一级目录名**给出（ADR-0011），大小写不敏感、比较前过 NFC。
 #[must_use]
 pub fn scope_of<'m>(manifest: &'m Manifest, key: &str) -> Scope<'m> {
-    let Some((head, rest)) = key.split_once('/') else {
+    // 键的第一段是**根名**，平台目录在它后面一段（`path::library_key`）。
+    let Some((head, rest)) = path::relative_of_key(key).split_once('/') else {
         return Scope::RootLevel;
     };
     if head.is_empty() || rest.is_empty() {
@@ -433,7 +434,9 @@ fn find_tree_roots(
         if !is_anchor(&entry.key, rule, index) {
             continue;
         }
-        let Some(dir) = platform_of_key(&entry.key) else {
+        // `climb` 拿它与 `parent_of` 出来的那一截比，比的是**完整的键**，
+        // 所以要带根名的那一份。
+        let Some(dir) = platform_dir_of_key(&entry.key) else {
             continue;
         };
         anchors.push(Anchor {
@@ -860,27 +863,62 @@ mod tests {
         }
     }
 
+    /// 测试里那个根叫什么。**键的第一段是根名**（`path::library_key`），
+    /// 所以这几条测试跑的是真库上那条路：`库/FC/…` 而不是 `FC/…`。
+    const 根: &str = "库";
+
+    /// 给一条相对根的路径接上根名。
+    fn 键(相对: &str) -> String {
+        path::join_root(根, 相对)
+    }
+
     /// 补齐一条键路上的每一级目录，省得每条测试都手写一串。
+    ///
+    /// 传进来的是**相对根**的路径，这里替它接上根名——于是每条测试写的还是
+    /// `FC/甲.zip` 这种一眼看得懂的东西，跑的却是带根名的真键。
     fn 建条目(files: &[(&str, u64)]) -> Vec<Entry> {
         let mut dirs: BTreeSet<String> = BTreeSet::new();
         let mut entries: Vec<Entry> = Vec::new();
+        entries.push(目录(根));
         for (key, len) in files {
-            let mut cursor = *key;
+            let key = 键(key);
+            let mut cursor = key.as_str();
             while let Some(parent) = parent_of(cursor) {
                 dirs.insert(parent.to_string());
                 cursor = parent;
             }
-            entries.push(文件(key, *len));
+            entries.push(文件(&key, *len));
         }
         for dir in dirs {
-            entries.push(目录(&dir));
+            if dir != 根 {
+                entries.push(目录(&dir));
+            }
         }
         entries.sort_by(|a, b| a.key.cmp(&b.key));
         entries
     }
 
+    /// 成型跑完之后把根名剥掉再交出来。
+    ///
+    /// **这几条测试考的是成型，不是键的形状**：带根名跑一遍（那是真路），
+    /// 断言里写不带根名的键（那才读得懂）。
+    fn 剥根名(plan: &mut Plan) {
+        let 剥 = |key: &mut String| {
+            *key = path::relative_of_key(key).to_string();
+        };
+        for variant in &mut plan.variants {
+            剥(&mut variant.key);
+            剥(&mut variant.main_key);
+            for (key, _) in &mut variant.members {
+                剥(key);
+            }
+        }
+    }
+
     fn 成型(files: &[(&str, u64)]) -> Plan {
-        plan(&建条目(files), &清单(), &BTreeMap::new())
+        let mut plan = plan(&建条目(files), &清单(), &BTreeMap::new());
+        剥根名(&mut plan);
+        plan
     }
 
     fn 变体键(plan: &Plan) -> Vec<&str> {
@@ -1221,15 +1259,17 @@ mod tests {
     fn 元数据读不到的成员不当成零字节() {
         // ADR-0021：库里另有 4,317 个真正的空文件，两者混起来两个数都会说谎。
         let entries = vec![
-            目录("FC"),
+            目录(根),
+            目录(&键("FC")),
             Entry {
-                key: "FC/读不到.zip".to_string(),
+                key: 键("FC/读不到.zip"),
                 is_dir: false,
                 len: None,
             },
-            文件("FC/空的.zip", 0),
+            文件(&键("FC/空的.zip"), 0),
         ];
-        let plan = plan(&entries, &清单(), &BTreeMap::new());
+        let mut plan = plan(&entries, &清单(), &BTreeMap::new());
+        剥根名(&mut plan);
         let 读不到 = 取(&plan, "FC/读不到.zip");
         assert_eq!(读不到.files, 1);
         assert_eq!(读不到.bytes, 0, "未知大小按 0 计入，容量是个下界");
@@ -1249,9 +1289,10 @@ mod tests {
             ("ps3/散落的补丁.zip", 50),
         ]);
         let mut overrides = BTreeMap::new();
-        overrides.insert("ps3/某游戏".to_string(), "ps3/某游戏".to_string());
-        overrides.insert("ps3/散落的补丁.zip".to_string(), "ps3/某游戏".to_string());
-        let plan = plan(&entries, &清单(), &overrides);
+        overrides.insert(键("ps3/某游戏"), 键("ps3/某游戏"));
+        overrides.insert(键("ps3/散落的补丁.zip"), 键("ps3/某游戏"));
+        let mut plan = plan(&entries, &清单(), &overrides);
+        剥根名(&mut plan);
         let variant = 取(&plan, "ps3/某游戏");
         assert!(variant.manual);
         assert_eq!(variant.main_key, "ps3/某游戏");
@@ -1269,9 +1310,10 @@ mod tests {
     fn 人工纠正指向一个不在库里的键时不留下没有主文件的变体() {
         let entries = 建条目(&[("FC/甲.zip", 100), ("FC/乙.zip", 200)]);
         let mut overrides = BTreeMap::new();
-        overrides.insert("FC/甲.zip".to_string(), "FC/早就删了.zip".to_string());
-        overrides.insert("FC/乙.zip".to_string(), "FC/早就删了.zip".to_string());
-        let plan = plan(&entries, &清单(), &overrides);
+        overrides.insert(键("FC/甲.zip"), 键("FC/早就删了.zip"));
+        overrides.insert(键("FC/乙.zip"), 键("FC/早就删了.zip"));
+        let mut plan = plan(&entries, &清单(), &overrides);
+        剥根名(&mut plan);
         let variant = 取(&plan, "FC/早就删了.zip");
         assert_eq!(
             variant
@@ -1294,9 +1336,10 @@ mod tests {
         // 变体，它没有平台，照样入库（`docs/platforms.md`「其他掌机是兜底桶」）。
         let entries = 建条目(&[("杂志/甲.cbz", 100), ("杂志/乙.cbz", 200)]);
         let mut overrides = BTreeMap::new();
-        overrides.insert("杂志/甲.cbz".to_string(), "杂志/甲.cbz".to_string());
-        overrides.insert("杂志/乙.cbz".to_string(), "杂志/甲.cbz".to_string());
-        let plan = plan(&entries, &清单(), &overrides);
+        overrides.insert(键("杂志/甲.cbz"), 键("杂志/甲.cbz"));
+        overrides.insert(键("杂志/乙.cbz"), 键("杂志/甲.cbz"));
+        let mut plan = plan(&entries, &清单(), &overrides);
+        剥根名(&mut plan);
         let variant = 取(&plan, "杂志/甲.cbz");
         assert_eq!(variant.platform, None, "认不出平台不构成拒绝入库的理由");
         assert_eq!(variant.files, 2);
@@ -1366,9 +1409,10 @@ mod tests {
     fn 人工纠正优先于一切规则且能把散文件并成一个变体() {
         let entries = 建条目(&[("FC/甲.zip", 100), ("FC/乙.zip", 200), ("FC/丙.zip", 300)]);
         let mut overrides = BTreeMap::new();
-        overrides.insert("FC/甲.zip".to_string(), "FC/甲.zip".to_string());
-        overrides.insert("FC/乙.zip".to_string(), "FC/甲.zip".to_string());
-        let plan = plan(&entries, &清单(), &overrides);
+        overrides.insert(键("FC/甲.zip"), 键("FC/甲.zip"));
+        overrides.insert(键("FC/乙.zip"), 键("FC/甲.zip"));
+        let mut plan = plan(&entries, &清单(), &overrides);
+        剥根名(&mut plan);
 
         let mut keys = 变体键(&plan);
         keys.sort_unstable();
@@ -1388,11 +1432,9 @@ mod tests {
             ("ps3/另有隐情.iso", 500),
         ]);
         let mut overrides = BTreeMap::new();
-        overrides.insert(
-            "ps3/另有隐情.iso".to_string(),
-            "ps3/某游戏/PS3_GAME/EBOOT.BIN".to_string(),
-        );
-        let plan = plan(&entries, &清单(), &overrides);
+        overrides.insert(键("ps3/另有隐情.iso"), 键("ps3/某游戏/PS3_GAME/EBOOT.BIN"));
+        let mut plan = plan(&entries, &清单(), &overrides);
+        剥根名(&mut plan);
         // 被纠正的文件从「一文件一变体」里被拉走，落到目录树那个变体的主文件名下。
         assert!(
             plan.variants.iter().all(|v| v.key != "ps3/另有隐情.iso"),
@@ -1417,9 +1459,11 @@ mod tests {
             ("ps/某游戏/游戏.bin", 700),
             ("ps3/某游戏/PS3_GAME/EBOOT.BIN", 900),
         ]);
-        let 正序 = plan(&entries, &清单(), &BTreeMap::new());
+        let mut 正序 = plan(&entries, &清单(), &BTreeMap::new());
+        剥根名(&mut 正序);
         entries.reverse();
-        let 倒序 = plan(&entries, &清单(), &BTreeMap::new());
+        let mut 倒序 = plan(&entries, &清单(), &BTreeMap::new());
+        剥根名(&mut 倒序);
         assert_eq!(正序, 倒序);
     }
 

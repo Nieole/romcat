@@ -12,7 +12,8 @@ use std::fs;
 use std::path::Path;
 
 use romcat_core::catalog::identify::State;
-use romcat_core::catalog::{Catalog, Confidence, EntryRecord, Verdict};
+use romcat_core::task::Handle;
+use romcat_core::catalog::{Catalog, Confidence, EntryRecord, Verdict, Roots};
 use romcat_core::container::{ContainerKind, Contents, InnerEntry, Penetration};
 use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
@@ -70,9 +71,9 @@ fn 建现场() -> 现场 {
     );
 
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-    let mut options = ScanOptions::new(root);
+    let mut options = ScanOptions::named(root, "库");
     options.jobs = Jobs::Fixed(2);
-    scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
 
     现场 {
         dir,
@@ -164,7 +165,7 @@ fn 跑一趟(现场: &mut 现场, index: Option<&zh::Index>) {
         index,
         tuning: zh::Tuning::default(),
     };
-    let options = Options::new(现场.dir.path());
+    let options = Options::new(Roots::single("库", 现场.dir.path()));
     identify::run(
         &RealFs::new(),
         &mut 现场.catalog,
@@ -186,10 +187,16 @@ fn 候选(现场: &现场, key: &str) -> Vec<romcat_core::catalog::Candidate> {
     现场.catalog.candidates_of(key).expect("读得到候选")
 }
 
-const 认得出来的: &str = "gba/认得出来的[星组](简)(JP)(64Mb).zip";
-const 机器人: &str = "gba/超级机器人大战R[星组](v1.2+)(简)(JP)(68.92Mb).zip";
-const 没听说过: &str = "gba/谁也没听说过的东西.zip";
-const 独占目录里的: &str = "gba/合金弹头7[某汉化组]/MSLUG7_CN.zip";
+/// 把一条**中立库的键**折回盘上那条相对主库根的路径：剥掉第一段根名。
+/// 摆 fixture 用它，断言用键本身——两者差的正是这一段（`path::library_key`）。
+fn 相对(key: &str) -> &str {
+    key.strip_prefix("库/").unwrap_or(key)
+}
+
+const 认得出来的: &str = "库/gba/认得出来的[星组](简)(JP)(64Mb).zip";
+const 机器人: &str = "库/gba/超级机器人大战R[星组](v1.2+)(简)(JP)(68.92Mb).zip";
+const 没听说过: &str = "库/gba/谁也没听说过的东西.zip";
+const 独占目录里的: &str = "库/gba/合金弹头7[某汉化组]/MSLUG7_CN.zip";
 
 #[test]
 fn 剥完文件名撞上中文离线源产出带依据的候选() {
@@ -301,15 +308,15 @@ fn 名字还是乱码的容器重读一遍就解对了() {
     let gbk: &[u8] = &[
         0xc9, 0xcf, 0xba, 0xa3, 0xb4, 0xf3, 0xba, 0xe0, 0x2e, 0x6e, 0x65, 0x73,
     ];
-    let 容器 = "FC/上海大亨.zip";
+    let 容器 = "库/FC/上海大亨.zip";
     写(
-        &root.join(容器),
+        &root.join(相对(容器)),
         &zip_container(&[ZipEntrySpec::stored_raw(gbk, 卡带(0xE5))]),
     );
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-    let mut options = ScanOptions::new(root);
+    let mut options = ScanOptions::named(root, "库");
     options.jobs = Jobs::Fixed(1);
-    scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
 
     // 新扫的本来就解对了——这正是这一改的正面效果。
     let 名字 = |catalog: &Catalog| {
@@ -332,7 +339,7 @@ fn 名字还是乱码的容器重读一遍就解对了() {
                 key: 容器.to_string(),
                 kind: EntryKind::File,
                 meta: EntryMeta::Known {
-                    len: fs::metadata(root.join(容器)).expect("在盘上").len(),
+                    len: fs::metadata(root.join(相对(容器))).expect("在盘上").len(),
                     modified: None,
                 },
                 non_utf8: false,
@@ -361,7 +368,7 @@ fn 名字还是乱码的容器重读一遍就解对了() {
     let outcome = scan::names::recheck(
         &RealFs::new(),
         &mut catalog,
-        root,
+        &Roots::single("库", root),
         &CancelToken::new(),
         &mut |_| {},
     )
@@ -382,7 +389,7 @@ fn 换一套匹配参数重跑一遍不必重新扫描() {
     let mut 现场 = 建现场();
     let index = 建索引();
     let rules = Rules::builtin();
-    let options = Options::new(现场.dir.path());
+    let options = Options::new(Roots::single("库", 现场.dir.path()));
     for (threshold, 该有几条) in [(0.85_f64, 1_usize), (1.01_f64, 0_usize)] {
         let naming = fuzzy::Naming {
             rules: &rules,

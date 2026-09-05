@@ -39,7 +39,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use crate::catalog::scrape::{Harvested, HarvestedValue};
-use crate::catalog::{Catalog, CatalogError, SnapshotOrigin};
+use crate::catalog::{Catalog, CatalogError, Roots, SnapshotOrigin};
 use crate::path;
 use crate::scrape::priority::Priorities;
 use crate::scrape::{AnchorKind, Field};
@@ -80,13 +80,17 @@ pub fn import(
     files: &[PathBuf],
     root: Option<&Path>,
 ) -> Result<ImportReport, TransferError> {
-    // 主库根**只用来把 `file:` 折成变体的键，不写回中立库**。写回去是有代价的：
-    // 用户给错一次 `--root`，下一趟扫描就会撞上「这不是同一个主库」那道守卫
-    // （`scan::guard_same_library`）。导入这一趟没有任何理由去动那一列。
-    let root = match root {
-        Some(root) => Some(normalize(root)),
-        None => catalog.library_root()?.map(PathBuf::from),
-    };
+    // 主库那一组根**只用来把 `file:` 折成变体的键，不写回中立库**。写回去是有代价的：
+    // 用户给错一次 `--root`，下一趟扫描就会撞上「这个根名底下换了另一块盘」那道守卫
+    // （`scan::guard_same_root`）。导入这一趟没有任何理由去动那一行。
+    let mut roots = Roots::load(catalog)?;
+    if let Some(given) = root {
+        // `--root` 只在**这份库只有一个根**的时候换得动位置：一组根里哪个是准的，
+        // 一条路径说不出来。多于一个根时它被忽略——库里记着的位置本来就更可信。
+        if let Some(only) = roots.only().map(str::to_string) {
+            roots.set(&only, normalize(given));
+        }
+    }
     // 一次读齐。逐个条目查一遍等于把 9,226 行的作品表读上几千遍。
     let works = catalog.work_names()?;
     let mut report = ImportReport {
@@ -164,17 +168,13 @@ pub fn import(
         // **条目里那条相对路径以哪儿为基准，归适配器答**（[`Adapter::rom_bases`]）：
         // Pegasus 的 `file:` 是相对元数据文件所在目录的，ES gamelist 躺在
         // `gamelists/<平台目录>/` 下而 ROM 在 `<主库根>/<平台目录>/` 下。
-        let bases = adapter.rom_bases(&absolute, root.as_deref());
         let mut batch = Vec::new();
         for entry in &parsed.doc.entries {
             match &entry.body {
                 Body::Collection(_) => account.collections += 1,
                 Body::Game(game) => {
                     account.games += 1;
-                    let variant = root
-                        .as_deref()
-                        .and_then(|root| resolve(catalog, &works, root, &bases, game).transpose())
-                        .transpose()?;
+                    let variant = resolve(catalog, &works, &roots, adapter, &absolute, game)?;
                     match variant {
                         Some((key, work)) => {
                             account.resolved += 1;
@@ -213,16 +213,39 @@ pub fn import(
 }
 
 /// 一个条目的 `file:` 指到库里的哪个变体，以及它属于哪个作品。
+///
+/// **一个根一个根地试**：主库是一组根，同一份元数据文件里的 `file:` 可能指着任何一个。
+/// 先命中的那个赢——根之间不许套在一起（`catalog::roots::add_root`），所以至多命中一个。
 fn resolve(
     catalog: &Catalog,
     works: &BTreeMap<i64, String>,
+    roots: &Roots,
+    adapter: &dyn Adapter,
+    absolute: &Path,
+    game: &super::Game,
+) -> Result<Option<(String, Option<String>)>, CatalogError> {
+    for (name, root) in roots.iter() {
+        // Pegasus 的 `file:` 是相对元数据文件所在目录的，ES gamelist 躺在
+        // `gamelists/<平台目录>/` 下而 ROM 在 `<那个根>/<平台目录>/` 下。
+        let bases = adapter.rom_bases(absolute, Some(root));
+        if let Some(found) = resolve_in(catalog, works, name, root, &bases, game)? {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
+
+fn resolve_in(
+    catalog: &Catalog,
+    works: &BTreeMap<i64, String>,
+    root_name: &str,
     root: &Path,
     bases: &[PathBuf],
     game: &super::Game,
 ) -> Result<Option<(String, Option<String>)>, CatalogError> {
     for file in &game.files {
         for base in bases {
-            let key = path::catalog_key(root, &normalize(&base.join(file)));
+            let key = path::library_key(root_name, root, &normalize(&base.join(file)));
             // 先按变体自己的键找，找不到再看它是不是某个变体的**成员**——多碟条目里
             // 写的常常是其中一张碟，而那张碟只是变体的一个成员。
             let variant = match catalog.variant(&key)? {

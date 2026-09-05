@@ -19,6 +19,8 @@ use std::fs;
 use std::path::Path;
 
 use romcat_core::catalog::Catalog;
+use romcat_core::catalog::Roots;
+use romcat_core::task::Handle;
 use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
 use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
@@ -73,9 +75,15 @@ struct 现场 {
     repo: DatRepo,
 }
 
-const 原版变体: &str = "FC/魂斗罗原版/Contra (Japan).zip";
-const 汉化变体: &str = "FC/魂斗罗汉化/魂斗罗[dwt_so 汉化].zip";
-const 汉化变体二: &str = "FC/魂斗罗汉化二/魂斗罗[另一组 汉化].zip";
+/// 把一条**中立库的键**折回盘上那条相对主库根的路径：剥掉第一段根名。
+/// 摆 fixture 用它，断言用键本身——两者差的正是这一段（`path::library_key`）。
+fn 相对(key: &str) -> &str {
+    key.strip_prefix("库/").unwrap_or(key)
+}
+
+const 原版变体: &str = "库/FC/魂斗罗原版/Contra (Japan).zip";
+const 汉化变体: &str = "库/FC/魂斗罗汉化/魂斗罗[dwt_so 汉化].zip";
+const 汉化变体二: &str = "库/FC/魂斗罗汉化二/魂斗罗[另一组 汉化].zip";
 const 作品: &str = "Contra";
 
 fn 建现场() -> 现场 {
@@ -84,12 +92,12 @@ fn 建现场() -> 现场 {
 
     // ── 两个变体各自独占一个目录，旁边躺着图。这是真库里汉化合集的标准形态。
     写(
-        &root.join(原版变体),
+        &root.join(相对(原版变体)),
         &zip_container(&[ZipEntrySpec::stored("Contra.nes", 原版())]),
     );
     写(&root.join("FC/魂斗罗原版/封面.png"), &封面());
     写(
-        &root.join(汉化变体),
+        &root.join(相对(汉化变体)),
         &zip_container(&[ZipEntrySpec::stored("魂斗罗.nes", 汉化版())]),
     );
     // **同一张封面**：内容一模一样，名字与位置都不同。
@@ -100,7 +108,7 @@ fn 建现场() -> 现场 {
     // 它与上面那个变体的文件名剥出来是同一个**正题**，于是两个变体撞到同一条中文条目
     // ——票 02 的「作品锚点上只有一份类型」要的就是这个形状。
     写(
-        &root.join(汉化变体二),
+        &root.join(相对(汉化变体二)),
         &zip_container(&[ZipEntrySpec::stored("魂斗罗2.nes", 汉化版二())]),
     );
 
@@ -116,9 +124,9 @@ fn 建现场() -> 现场 {
     写(&root.join("FC/一堆/无关.jpg"), &截图());
 
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-    let mut options = ScanOptions::new(root);
+    let mut options = ScanOptions::named(root, "库");
     options.jobs = Jobs::Fixed(2);
-    scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
 
     现场 {
         dir,
@@ -210,7 +218,7 @@ fn 识别(现场: &mut 现场) {
             guessing: &identify::model::Guessing::off(),
             titledb: None,
         },
-        &identify::Options::new(现场.dir.path()),
+        &identify::Options::new(Roots::single("库", 现场.dir.path())),
         &CancelToken::new(),
         &mut |_| {},
     )
@@ -226,7 +234,7 @@ fn 刮削一趟(现场: &mut 现场, refresh: bool) -> scrape::Outcome {
 }
 
 fn 刮削带上限(现场: &mut 现场, refresh: bool, cap: Option<u64>) -> scrape::Outcome {
-    let mut options = scrape::Options::new(现场.dir.path(), 现场.pool_dir.path());
+    let mut options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
     options.refresh = refresh;
     options.max_media_bytes = cap;
     scrape::run(
@@ -273,7 +281,7 @@ fn 刮削带裁决(
     rulings: &scrape::zh::Rulings,
 ) -> scrape::Outcome {
     let rules = romcat_core::filename::Rules::builtin();
-    let options = scrape::Options::new(现场.dir.path(), 现场.pool_dir.path());
+    let options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
     scrape::run(
         &RealFs::new(),
         &mut 现场.catalog,
@@ -455,9 +463,9 @@ fn 撞上中文条目的变体在变体锚点上多出别名而且进了标题�
     );
 
     // 六、**撞不上中文条目的变体一个新字段都不产出。**
-    assert!(各值(&现场, "变体", "FC/一堆/甲.zip", "标题", "中文离线源").is_empty());
+    assert!(各值(&现场, "变体", "库/FC/一堆/甲.zip", "标题", "中文离线源").is_empty());
     assert!(
-        各值(&现场, "变体", "FC/一堆/甲.zip", "标题", "中文离线源·别名").is_empty()
+        各值(&现场, "变体", "库/FC/一堆/甲.zip", "标题", "中文离线源·别名").is_empty()
     );
 }
 
@@ -1015,7 +1023,7 @@ fn 元数据按层挂到锚点上() {
     );
     // 文件名兜底：DAT 认不出来的那些变体，标题只能从这儿来。
     assert_eq!(
-        值(&现场, "变体", "FC/一堆/甲.zip", "标题", "文件名").as_deref(),
+        值(&现场, "变体", "库/FC/一堆/甲.zip", "标题", "文件名").as_deref(),
         Some("甲")
     );
 }
@@ -1115,7 +1123,7 @@ fn 挤在一个目录里的变体一张图都不认() {
     识别(&mut 现场);
     刮削(&mut 现场);
 
-    for key in ["FC/一堆/甲.zip", "FC/一堆/乙.zip"] {
+    for key in ["库/FC/一堆/甲.zip", "库/FC/一堆/乙.zip"] {
         assert!(
             现场
                 .catalog
@@ -1395,7 +1403,7 @@ fn 不收媒体不会把收过的媒体扔掉() {
 }
 
 fn 不收媒体(现场: &mut 现场) -> scrape::Outcome {
-    let mut options = scrape::Options::new(现场.dir.path(), 现场.pool_dir.path());
+    let mut options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
     options.media = false;
     scrape::run(
         &RealFs::new(),
@@ -1834,18 +1842,18 @@ fn 裁决记的是内容锚换台机器与改过名字之后仍然认得出() {
     // 而裁决钉的是那份字节，摊平之后落在**新的键**上。
     let root = 现场.dir.path().to_path_buf();
     fs::rename(root.join("FC/魂斗罗汉化"), root.join("FC/魂斗罗汉化甲")).expect("改得动名字");
-    let mut options = ScanOptions::new(&root);
+    let mut options = ScanOptions::named(&root, "库");
     options.jobs = Jobs::Fixed(2);
     scan::scan(
         &RealFs::new(),
         &mut 现场.catalog,
         &options,
-        &CancelToken::new(),
+        &Handle::new(),
     )
     .expect("扫得动");
     识别(&mut 现场);
 
-    let 新键 = "FC/魂斗罗汉化甲/魂斗罗[dwt_so 汉化].zip";
+    let 新键 = "库/FC/魂斗罗汉化甲/魂斗罗[dwt_so 汉化].zip";
     assert!(
         现场.catalog.variant(新键).expect("读得出").is_some(),
         "改过名字之后该有这个变体"
@@ -1927,7 +1935,7 @@ fn 答复(带封面: bool) -> Vec<u8> {
 }
 
 fn 刮削在线(现场: &mut 现场, fetcher: &CannedFetcher, limits: Limits) -> scrape::Outcome {
-    let mut options = scrape::Options::new(现场.dir.path(), 现场.pool_dir.path());
+    let mut options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
     options.profile = scrape::Profile::Online;
     let cancel = CancelToken::new();
     let net = Net::new(fetcher, limits, 凭据(), &cancel);

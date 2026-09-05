@@ -97,6 +97,8 @@ fn 扫并识别(library: &Path, workspace: &Path) {
     for args in [
         vec![
             "scan",
+            "--root-name",
+            "库",
             &*library.to_string_lossy(),
             "--library",
             "小库",
@@ -166,6 +168,8 @@ fn 还没识别过时说得清下一步() {
     let (library, workspace) = 现场();
     let out = 跑(&[
         "scan",
+        "--root-name",
+        "库",
         &library.path().to_string_lossy(),
         "--library",
         "小库",
@@ -222,7 +226,7 @@ fn 一次改不止一条要点头() {
     // 一个字都没写。
     assert_eq!(
         开中立库(workspace.path())
-            .identification_of("FC/甲 外星科技汉化.zip")
+            .identification_of("库/FC/甲 外星科技汉化.zip")
             .expect("读得出")
             .expect("有结论")
             .0,
@@ -243,7 +247,7 @@ fn 一次改不止一条要点头() {
     assert!(stdout.contains("裁决已沉淀 2 条"), "{stdout}");
     assert_eq!(
         开中立库(workspace.path())
-            .identification_of("FC/甲 外星科技汉化.zip")
+            .identification_of("库/FC/甲 外星科技汉化.zip")
             .expect("读得出")
             .expect("有结论")
             .0,
@@ -286,11 +290,11 @@ fn 沉淀库不跟中立库走删掉中立库重扫也不丢裁决() {
 
     let catalog = 开中立库(workspace.path());
     let (state, _) = catalog
-        .identification_of("FC/丙 别家汉化.zip")
+        .identification_of("库/FC/丙 别家汉化.zip")
         .expect("读得出")
         .expect("有结论");
     assert_eq!(state, State::Matched, "裁决活了下来");
-    let 候选 = catalog.candidates_of("FC/丙 别家汉化.zip").expect("读得出");
+    let 候选 = catalog.candidates_of("库/FC/丙 别家汉化.zip").expect("读得出");
     assert_eq!(候选.len(), 1);
     assert_eq!(候选[0].source, "沉淀库");
     assert!(候选[0].accepted);
@@ -338,7 +342,7 @@ fn 导出再收回来是同一份() {
     assert!(text.contains("romcat-沉淀库"), "{text}");
     assert!(text.contains("外星科技"), "{text}");
     // 分享出去的那份**不带路径**——不然顺带把自己的目录结构也交出去了。
-    assert!(!text.contains("FC/甲"), "{text}");
+    assert!(!text.contains("库/FC/甲"), "{text}");
 
     // 另一台机器收下它。
     let 别处 = temp_dir("triage-cli-别处");
@@ -373,7 +377,7 @@ fn 说不成立的话当场说不成立而不是静默丢掉() {
             "--workspace",
             &workspace.path().to_string_lossy(),
             "--under",
-            "FC",
+            "库/FC",
             裁法,
             "--team",
             "外星科技",
@@ -396,7 +400,7 @@ fn 裁成什么没说清就停下() {
         "--workspace",
         &workspace.path().to_string_lossy(),
         "--under",
-        "FC",
+        "库/FC",
     ]);
     assert!(!out.status.success());
     let text = String::from_utf8_lossy(&out.stderr);

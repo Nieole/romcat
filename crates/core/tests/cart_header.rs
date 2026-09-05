@@ -13,7 +13,8 @@ use std::fs;
 use std::path::Path;
 
 use romcat_core::catalog::identify::State;
-use romcat_core::catalog::{Catalog, Confidence};
+use romcat_core::task::Handle;
+use romcat_core::catalog::{Catalog, Confidence, Roots};
 use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
 use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
@@ -112,9 +113,9 @@ fn 建现场() -> 现场 {
     );
 
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-    let mut options = ScanOptions::new(root);
+    let mut options = ScanOptions::named(root, "库");
     options.jobs = Jobs::Fixed(2);
-    scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
 
     现场 {
         dir,
@@ -259,7 +260,7 @@ fn 建_dat() -> DatRepo {
 }
 
 fn 跑一趟(现场: &mut 现场) -> identify::Outcome {
-    let options = Options::new(现场.dir.path());
+    let options = Options::new(Roots::single("库", 现场.dir.path()));
     identify::run(
         &RealFs::new(),
         &mut 现场.catalog,
@@ -420,7 +421,7 @@ fn 第二趟不再为这一层读一个字节() {
 fn 盘不在位时这一层如实报没读到而不是瞎猜() {
     // ADR-0021 的第三态：读不到不是结论，不落库。
     let mut 现场 = 建现场();
-    let mut options = Options::new(现场.dir.path());
+    let mut options = Options::new(Roots::single("库", 现场.dir.path()));
     options.read_library = false;
     let outcome = identify::run(
         &RealFs::new(),

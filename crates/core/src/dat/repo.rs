@@ -341,6 +341,39 @@ impl DatRepo {
         Ok(out)
     }
 
+    /// 库里有多少条 DAT 条目，以及最后一次取回是什么时候（UNIX 纪元起的秒）。
+    ///
+    /// 一条都没取过时是 `(0, None)`——**「没取过」与「取过但是空的」不是一件事**，
+    /// 界面上那一行要说得出是哪一种。
+    ///
+    /// # Errors
+    /// 读不出来时返回错误。
+    pub fn coverage(&self) -> Result<(u64, Option<i64>), RepoError> {
+        let games: i64 = self
+            .conn
+            .query_row("SELECT COALESCE(SUM(games), 0) FROM dat", [], |row| {
+                row.get(0)
+            })
+            .map_err(|error| self.error(error))?;
+        let fetched: Option<i64> = self
+            .conn
+            .query_row("SELECT MAX(fetched_at) FROM unit", [], |row| row.get(0))
+            .map_err(|error| self.error(error))?;
+        Ok((u64::try_from(games).unwrap_or(0), fetched))
+    }
+
+    /// 库里有几份 DAT。
+    ///
+    /// # Errors
+    /// 读不出来时返回错误。
+    pub fn dat_count(&self) -> Result<u64, RepoError> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM dat", [], |row| row.get(0))
+            .map_err(|error| self.error(error))?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
     /// 库里一条记录都没有。
     ///
     /// # Errors

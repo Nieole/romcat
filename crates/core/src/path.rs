@@ -7,9 +7,12 @@
 //! 对策是 `\\?\` 扩展长度前缀：[`long_path`] 在 Windows 上给绝对路径加前缀，
 //! 其余平台原样返回。前缀只在真正调用系统 API 时加，报告里展示的仍是原路径。
 //!
-//! 另一半是**中立库的键**：[`catalog_key`] 把系统给的路径折成「相对扫描根、分隔符统一
-//! 成 `/`、再规范化成 NFC」的形式。读盘用系统给的原始路径，入库与比较用键，
+//! 另一半是**中立库的键**：[`library_key`] 把系统给的路径折成「**根名** + 相对那个根、
+//! 分隔符统一成 `/`、再规范化成 NFC」的形式。读盘用系统给的原始路径，入库与比较用键，
 //! **两者不能混用**（ADR-0020）。
+//!
+//! 键的第一段是**根名**，是因为主库是**一组根**（`CONTEXT.md`）：几块盘扫进同一份
+//! 中立库，只按相对路径当键的话两块盘上同名的东西会静默覆盖。拆键走 [`split_root`]。
 
 use std::borrow::Cow;
 use std::ffi::OsStr;
@@ -120,7 +123,7 @@ pub fn nfc(text: &str) -> Cow<'_, str> {
     }
 }
 
-/// 中立库里一条记录的键：相对扫描根的路径，分隔符统一成 `/`，再规范化成 NFC。
+/// **相对某个根**的路径键：分隔符统一成 `/`，再规范化成 NFC。
 ///
 /// 三件事各有理由：
 ///
@@ -130,6 +133,10 @@ pub fn nfc(text: &str) -> Cow<'_, str> {
 /// - **分隔符统一**：同一块盘在 Windows 上是 `\`、在 macOS 上是 `/`（ADR-0018）。
 ///   按 [`Component`] 拆再用 `/` 接，于是 Unix 文件名里合法的字面 `\` 不会被误当分隔符。
 /// - **NFC**：见 [`nfc`] 与 ADR-0020。
+///
+/// **中立库的键不是它**——主库是**一组根**，中立库的键还要在前面带上**根名**，
+/// 走 [`library_key`]。这一支单独留着，是因为**子库**那一侧也要算「相对目标根的路径」，
+/// 而那边没有根名可言（`sync::observe`）。
 ///
 /// **读盘要用系统给的原始路径，只有入库与比较才用这个键**——两者不能混用。
 #[must_use]
@@ -156,6 +163,105 @@ pub fn catalog_key(root: &Path, path: &Path) -> String {
         }
     }
     nfc(&key).into_owned()
+}
+
+/// 一个**根**的名字不能用的理由。
+///
+/// 根名是**中立库的键**的第一段（见 [`library_key`]），因此它不是一个纯粹的标签：
+/// 它得能与后面的相对路径拼成一条不会撞车、也不会被拆错的键。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootNameError {
+    /// 空的，或者去掉两头空白之后是空的。
+    Empty,
+    /// 带了路径分隔符。键就是按 `/` 拆的，名字里再有一个，「根名」与「相对路径」
+    /// 的界线就没了。`\` 一并挡掉：Windows 上它是分隔符。
+    Separator,
+    /// 带了控制字符。它进得了键，却在报告与界面上看不见——两条键长得一模一样却不相等，
+    /// 是最难查的那种撞车。
+    Control,
+}
+
+impl std::fmt::Display for RootNameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("根名不能是空的"),
+            Self::Separator => f.write_str("根名里不能有 `/` 或 `\\`——它们是键的分隔符"),
+            Self::Control => f.write_str("根名里不能有控制字符"),
+        }
+    }
+}
+
+impl std::error::Error for RootNameError {}
+
+/// 把一个**根**的名字折成键里那一段：去掉两头空白，再规范化成 NFC。
+///
+/// NFC 这一下与 [`catalog_key`] 同源（ADR-0020）：名字是用户敲进来的，而同一个名字在
+/// macOS 与 Windows 上敲出来可能一个 NFD 一个 NFC。不折一下，「元数据库」这个根在两台
+/// 机器上就是两个根，全库重扫一遍。
+///
+/// # Errors
+/// 名字空、带分隔符或带控制字符时返回 [`RootNameError`]。
+pub fn root_name(name: &str) -> Result<String, RootNameError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(RootNameError::Empty);
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err(RootNameError::Separator);
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(RootNameError::Control);
+    }
+    Ok(nfc(trimmed).into_owned())
+}
+
+/// **中立库里一条记录的键**：`根名` + `/` + 相对根的路径。
+///
+/// 主库是**一组根**（`CONTEXT.md`）：几块盘、几个目录扫进同一份中立库。只按相对路径
+/// 当键的话，两块盘上同名的 `FC/魂斗罗.zip` 会是同一条记录——**一条静默覆盖另一条**，
+/// 而中立库是事实来源（ADR-0001）。带上根名，两个根的变体从此互不覆盖，
+/// 而且每条键自己说得出它来自哪块盘。
+///
+/// **根自己的键就是根名**（相对路径是空串）。
+///
+/// 拼接不会破坏 NFC：中间那个 `/` 不参与任何组合，两侧各自已经是 NFC。
+#[must_use]
+pub fn library_key(root_name: &str, root: &Path, path: &Path) -> String {
+    join_root(root_name, &catalog_key(root, path))
+}
+
+/// 把根名与**相对根的路径**接成中立库的键。
+#[must_use]
+pub fn join_root(root_name: &str, relative: &str) -> String {
+    if relative.is_empty() {
+        return root_name.to_string();
+    }
+    let mut key = String::with_capacity(root_name.len() + 1 + relative.len());
+    key.push_str(root_name);
+    key.push('/');
+    key.push_str(relative);
+    key
+}
+
+/// 把中立库的键拆成 `(根名, 相对根的路径)`。根自己那条键拆出来的相对路径是空串。
+#[must_use]
+pub fn split_root(key: &str) -> (&str, &str) {
+    match key.split_once('/') {
+        Some((name, rest)) => (name, rest),
+        None => (key, ""),
+    }
+}
+
+/// 中立库的键属于哪个**根**。
+#[must_use]
+pub fn root_of_key(key: &str) -> &str {
+    split_root(key).0
+}
+
+/// 中立库的键去掉根名之后剩下的那一截，**相对根**。
+#[must_use]
+pub fn relative_of_key(key: &str) -> &str {
+    split_root(key).1
 }
 
 /// 一段 `OsStr` 原始码元的 FNV-1a 指纹。
@@ -194,10 +300,14 @@ fn fnv1a(units: impl Iterator<Item = u32>) -> u64 {
 
 /// 把中立库的键还原成给人看的完整路径。
 ///
+/// `root` 是这条键**那个根**在盘上的位置：键的第一段是根名，由它顶替掉。
+/// 拿哪个根，由调用方按 [`root_of_key`] 查（`catalog::roots::Roots::display_key`）。
+///
 /// 分隔符跟着 `root` 走而不是跟着当前平台走：在 macOS 上看一份上次在 Windows 上扫出来
 /// 的中立库时，`D:\Game\FC\…` 比 `D:\Game/FC/…` 更像那台机器上的真实路径。
 #[must_use]
 pub fn display_key(root: &str, key: &str) -> String {
+    let key = relative_of_key(key);
     if key.is_empty() {
         return root.to_string();
     }
@@ -227,12 +337,24 @@ pub fn fold(text: &str) -> String {
 
 /// 取出一个键的**平台目录**名。
 ///
-/// 平台由目录给出（ADR-0011：目录是强先验而非权威）。直接躺在库根下的文件没有平台目录，
-/// 返回 `None`——它们照常计入报告，平台未知不构成跳过的理由。
+/// 平台由目录给出（ADR-0011：目录是强先验而非权威）。键的第一段是**根名**，
+/// 所以平台在第二段：`元数据库/FC/魂斗罗.zip` 的平台目录是 `FC`。直接躺在某个根下面
+/// 的文件没有平台目录，返回 `None`——它们照常计入报告，平台未知不构成跳过的理由。
 #[must_use]
 pub fn platform_of_key(key: &str) -> Option<&str> {
-    let (head, rest) = key.split_once('/')?;
+    let (head, rest) = split_root(key).1.split_once('/')?;
     (!head.is_empty() && !rest.is_empty()).then_some(head)
+}
+
+/// 取出一个键的**平台目录**那一段键，`根名/平台`。
+///
+/// 与 [`platform_of_key`] 的区别只在带不带根名：成型要拿它与 `parent_of` 出来的
+/// 那一截比（`shape::climb`），而那一截是**完整的键**，比名字对不上。
+#[must_use]
+pub fn platform_dir_of_key(key: &str) -> Option<&str> {
+    let platform = platform_of_key(key)?;
+    let root = root_of_key(key);
+    Some(&key[..root.len() + 1 + platform.len()])
 }
 
 /// 键的文件名部分。
@@ -383,9 +505,57 @@ mod tests {
     }
 
     #[test]
-    fn 平台目录取键的第一级() {
-        assert_eq!(platform_of_key("FC/超级马里奥.zip"), Some("FC"));
-        assert_eq!(platform_of_key("PS1/某游戏/disc.cue"), Some("PS1"));
+    fn 平台目录取根名之后那一级() {
+        // 第一段是**根名**，平台在它后面（`library_key`）。
+        assert_eq!(platform_of_key("库/FC/超级马里奥.zip"), Some("FC"));
+        assert_eq!(platform_of_key("库/PS1/某游戏/disc.cue"), Some("PS1"));
+        assert_eq!(platform_dir_of_key("库/PS1/某游戏/disc.cue"), Some("库/PS1"));
+        // 直接躺在某个根下面的文件没有平台目录；根自己那条键也没有。
+        assert_eq!(platform_of_key("库/散落的游戏.gba"), None);
+        assert_eq!(platform_of_key("库"), None);
+        assert_eq!(platform_dir_of_key("库/散落的游戏.gba"), None);
+    }
+
+    #[test]
+    fn 根名不许带分隔符也不许带控制字符() {
+        assert_eq!(root_name("  主库  ").as_deref(), Ok("主库"));
+        assert_eq!(root_name(""), Err(RootNameError::Empty));
+        assert_eq!(root_name("   "), Err(RootNameError::Empty));
+        assert_eq!(root_name("甲/乙"), Err(RootNameError::Separator));
+        assert_eq!(root_name(r"甲\乙"), Err(RootNameError::Separator));
+        assert_eq!(root_name("甲\u{7}乙"), Err(RootNameError::Control));
+        // 名字也要折成 NFC（ADR-0020）：两台机器敲同一个名字才是同一个根。
+        assert_eq!(root_name(分解).as_deref(), root_name(预组合).as_deref());
+    }
+
+    #[test]
+    fn 中立库的键带着根名而且拆得回来() {
+        let key = library_key("元数据库", Path::new("/盘乙"), Path::new("/盘乙/FC/魂斗罗.zip"));
+        assert_eq!(key, "元数据库/FC/魂斗罗.zip");
+        assert_eq!(split_root(&key), ("元数据库", "FC/魂斗罗.zip"));
+        // 根自己那条键就是它的名字。
+        assert_eq!(
+            library_key("元数据库", Path::new("/盘乙"), Path::new("/盘乙")),
+            "元数据库"
+        );
+        assert_eq!(split_root("元数据库"), ("元数据库", ""));
+        // 两块盘上同名的东西不再是同一条键——那正是这一层要挡住的静默覆盖。
+        assert_ne!(
+            library_key("甲", Path::new("/盘甲"), Path::new("/盘甲/FC/魂斗罗.zip")),
+            library_key("乙", Path::new("/盘乙"), Path::new("/盘乙/FC/魂斗罗.zip")),
+        );
+    }
+
+    #[test]
+    fn 根名与相对路径接起来仍然是_nfc() {
+        // 中间那个 `/` 不参与任何组合，两侧各自已经是 NFC（ADR-0020）。
+        let key = library_key(
+            &root_name(分解).expect("这个名字能用"),
+            Path::new("/盘"),
+            Path::new(&format!("/盘/{分解}/游戏.zip")),
+        );
+        assert_eq!(nfc(&key), key);
+        assert_eq!(key, format!("{预组合}/{预组合}/游戏.zip"));
     }
 
     #[test]
@@ -396,8 +566,8 @@ mod tests {
     }
 
     #[test]
-    fn 库根下的散文件没有平台目录() {
-        assert_eq!(platform_of_key("readme.txt"), None);
+    fn 根下的散文件没有平台目录() {
+        assert_eq!(platform_of_key("库/readme.txt"), None);
         assert_eq!(platform_of_key(""), None);
     }
 
@@ -464,11 +634,13 @@ mod tests {
 
     #[test]
     fn 键能还原成给人看的路径() {
-        assert_eq!(display_key("/lib", "FC/a.zip"), "/lib/FC/a.zip");
-        assert_eq!(display_key("/lib/", "FC/a.zip"), "/lib/FC/a.zip");
+        // 键的第一段是根名，由 `root` 那条路径顶替掉。
+        assert_eq!(display_key("/lib", "库/FC/a.zip"), "/lib/FC/a.zip");
+        assert_eq!(display_key("/lib/", "库/FC/a.zip"), "/lib/FC/a.zip");
         // 在 macOS 上看 Windows 扫出来的中立库，分隔符跟着根走
-        assert_eq!(display_key(r"D:\Game", "FC/a.zip"), r"D:\Game\FC\a.zip");
-        assert_eq!(display_key("/lib", ""), "/lib");
+        assert_eq!(display_key(r"D:\Game", "库/FC/a.zip"), r"D:\Game\FC\a.zip");
+        // 根自己那条键还原出来就是那个根。
+        assert_eq!(display_key("/lib", "库"), "/lib");
     }
 
     #[test]

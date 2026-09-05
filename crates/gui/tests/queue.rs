@@ -1,7 +1,8 @@
 //! **待确认队列**是主界面：列得出、盖得住一批、裁得下去，而中文输入不在表格单元格里。
 //!
 //! 合成数据的**形状照真机来**（票 08 实测：队列 16,656 条，
-//! `--under gba/【全部汉化】` 852、`--under GoodNES3.1` 1,543、`--name 汉化` 1,986）。
+//! `--under 合成库/gba/【全部汉化】` 852、`--under 合成库/GoodNES3.1` 1,543、`--name 汉化` 1,986）。
+//! 前缀带着**根名**：键的第一段就是它（`path::library_key`）。
 //! 这几个数在这里是**断言**而不是注释——ADR-0002 说批量裁决的覆盖面是这件事成不成立的
 //! 分界，界面上点一行选中多少，就该是报告上印的那个数。
 
@@ -96,14 +97,14 @@ fn 三个轴各能一次盖住一批() {
         app.queue().queue().selected().len()
     };
     assert_eq!(
-        点一行(&mut app, Axis::Directory, "gba/【全部汉化】"),
+        点一行(&mut app, Axis::Directory, "合成库/gba/【全部汉化】"),
         852,
-        "--under gba/【全部汉化】",
+        "--under 合成库/gba/【全部汉化】",
     );
     assert_eq!(
-        点一行(&mut app, Axis::Directory, "GoodNES3.1"),
+        点一行(&mut app, Axis::Directory, "合成库/GoodNES3.1"),
         1_543,
-        "--under GoodNES3.1",
+        "--under 合成库/GoodNES3.1",
     );
     assert_eq!(
         点一行(&mut app, Axis::NameMark, "汉化"),
@@ -267,7 +268,7 @@ fn 只裁选中的这一条也做得到() {
 fn 都不对可以手工指定也可以说它没有发行版() {
     let mut app = 界面(2_000);
     let (screen, _) = app.queue_and_site();
-    screen.pick(Axis::Directory, "GoodNES3.1");
+    screen.pick(Axis::Directory, "合成库/GoodNES3.1");
     let ctx = headless::context();
     跑(&ctx, &mut app, 1);
     let 这一批 = app.queue().queue().selected().len();

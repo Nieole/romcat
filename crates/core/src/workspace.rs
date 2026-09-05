@@ -232,12 +232,21 @@ pub fn media_pool_dir(workspace: &Path) -> PathBuf {
     workspace.join("media")
 }
 
-/// 某个主库的断点文件。
+/// 某个主库里**某一个根**的断点文件。
+///
+/// 带根名，不是疏忽也不是洁癖：主库是一组根，一趟扫描只走其中一个
+/// （`CONTEXT.md` 的**根**）。一份 `--library` 底下的几个根共用一个断点文件的话，
+/// 扫乙盘会覆盖掉甲盘扫到一半的进度，`--resume` 还会拿甲盘的断点去对乙盘的根，
+/// 撞出一句 `RootMismatch` 让整趟直接失败。
+///
+/// 根名先过 [`Slug::Named`] 那套过滤：它落到文件名上，`/ \ : * ? " < > |` 一个都过不去。
 #[must_use]
-pub fn checkpoint_path(workspace: &Path, slug: Slug<'_>) -> PathBuf {
-    workspace
-        .join("scans")
-        .join(format!("{}.checkpoint.json", slug.text()))
+pub fn checkpoint_path(workspace: &Path, slug: Slug<'_>, root_name: &str) -> PathBuf {
+    workspace.join("scans").join(format!(
+        "{}.{}.checkpoint.json",
+        slug.text(),
+        Slug::Named(root_name).text()
+    ))
 }
 
 #[cfg(test)]
@@ -251,9 +260,24 @@ mod tests {
         let b = Slug::AtPath(Path::new("/Volumes/ROMs2"));
         assert_ne!(catalog_path(&workspace, a), catalog_path(&workspace, b));
         assert_ne!(
-            checkpoint_path(&workspace, a),
-            checkpoint_path(&workspace, b)
+            checkpoint_path(&workspace, a, "根"),
+            checkpoint_path(&workspace, b, "根")
         );
+    }
+
+    #[test]
+    fn 同一份库里两个根的断点互不覆盖() {
+        // 一趟扫描只走一个根。共用一个断点文件的话，扫乙盘会盖掉甲盘扫到一半的进度，
+        // 而 `--resume` 会拿甲盘的断点去对乙盘的根，撞出一句「扫描根对不上」。
+        let workspace = PathBuf::from("/work");
+        let slug = Slug::Named("主库");
+        assert_ne!(
+            checkpoint_path(&workspace, slug, "甲盘"),
+            checkpoint_path(&workspace, slug, "乙盘")
+        );
+        // 根名里的分隔符照样造不出非法文件名（同 `Slug::Named`）。
+        let 怪名字 = checkpoint_path(&workspace, slug, "../../etc/passwd");
+        assert_eq!(怪名字.parent(), Some(workspace.join("scans").as_path()));
     }
 
     #[test]
@@ -275,7 +299,7 @@ mod tests {
         let root = Path::new("/Volumes/ROMs");
         let workspace = PathBuf::from("/work");
         assert!(!catalog_path(&workspace, Slug::AtPath(root)).starts_with(root));
-        assert!(!checkpoint_path(&workspace, Slug::AtPath(root)).starts_with(root));
+        assert!(!checkpoint_path(&workspace, Slug::AtPath(root), "根").starts_with(root));
     }
 
     #[test]
@@ -295,8 +319,8 @@ mod tests {
         assert_eq!(挂在甲, 挂在乙);
         assert_eq!(挂在甲, 盘符);
         assert_eq!(
-            checkpoint_path(&workspace, Slug::Named("主库")),
-            checkpoint_path(&workspace, Slug::pick(Some("主库"), Path::new("E:\\Game")))
+            checkpoint_path(&workspace, Slug::Named("主库"), "根"),
+            checkpoint_path(&workspace, Slug::pick(Some("主库"), Path::new("E:\\Game")), "根")
         );
     }
 

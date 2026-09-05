@@ -27,6 +27,9 @@ use super::{Content, Title};
 /// 索引的结构版本。结构变了就加 1；读到对不上的版本直接重建。
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// `meta` 里记「上次取回是什么时候」的那把键。
+pub const FETCHED_AT: &str = "fetched_at";
+
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS meta(
     key   TEXT PRIMARY KEY,
@@ -298,6 +301,14 @@ impl Store {
             }
         }
         tx.commit().map_err(failed)
+    }
+
+    /// 上次取回是什么时候（UNIX 纪元起的秒）；从没取过时是 `None`。
+    ///
+    /// # Errors
+    /// 读不出来时返回错误。
+    pub fn fetched_at(&self) -> Result<Option<i64>, StoreError> {
+        Ok(self.meta(FETCHED_AT)?.and_then(|text| text.parse().ok()))
     }
 
     /// 这份索引里有东西吗。**空的时候 Switch 那一层照样跑**——只是走不到「查得出版本」

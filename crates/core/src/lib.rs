@@ -27,6 +27,7 @@ pub mod scan;
 pub mod scrape;
 pub mod shape;
 pub mod site;
+pub mod sources;
 pub mod sublibrary;
 pub mod sync;
 pub mod task;

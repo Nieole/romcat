@@ -11,6 +11,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::catalog::Roots;
 use crate::classify::{self, Category, Classification, SuspectReason, classify};
 use crate::container::{ContainerKind, FailureReason};
 use crate::header::{self, ProbeClass, ProbeOutcome};
@@ -450,19 +451,20 @@ pub struct FileObservation {
 impl FileObservation {
     /// 从中立库的一条记录还原出观察结果。
     ///
-    /// `root` 是主库根的展示形态，`key` 是那条记录的键（相对根、NFC）。
-    /// 平台由清单从键的第一级目录名折出来（ADR-0011）。
+    /// `key` 是那条记录的键（根名 + 相对那个根、NFC），`roots` 拿它第一段查出那个根
+    /// 在盘上的位置，好把展示路径拼回来。平台由清单从**根名之后**那一级目录名折出来
+    /// （ADR-0011）。
     #[must_use]
     pub fn derive(
         manifest: &Manifest,
-        root: &str,
+        roots: &Roots,
         key: &str,
         len: Option<u64>,
         non_utf8: bool,
         sample: Option<(ProbeClass, SampleResult)>,
         role: Option<Role>,
     ) -> Self {
-        let display_path = path::display_key(root, key);
+        let display_path = roots.display_key(key);
         // 归类只看文件名，因此这里传的是文件名而不是整条键——键里的 `/`
         // 交给 `Path` 拆会在 Windows 与 Unix 上给出不同答案。
         let name = Path::new(path::file_name_of_key(key));
@@ -931,7 +933,7 @@ mod tests {
     fn 观察(key: &str, len: u64) -> FileObservation {
         FileObservation::derive(
             &Manifest::builtin(),
-            "/lib",
+            &Roots::single("库", "/lib"),
             key,
             Some(len),
             false,
@@ -941,7 +943,15 @@ mod tests {
     }
 
     fn 读不到元数据的观察(key: &str) -> FileObservation {
-        FileObservation::derive(&Manifest::builtin(), "/lib", key, None, false, None, None)
+        FileObservation::derive(
+            &Manifest::builtin(),
+            &Roots::single("库", "/lib"),
+            key,
+            None,
+            false,
+            None,
+            None,
+        )
     }
 
     #[test]
@@ -1063,8 +1073,8 @@ mod tests {
     fn 派生字段全由键算出() {
         let observation = FileObservation::derive(
             &Manifest::builtin(),
-            "/lib",
-            "PS1/某游戏/disc.cue",
+            &Roots::single("库", "/lib"),
+            "库/PS1/某游戏/disc.cue",
             Some(64),
             false,
             None,

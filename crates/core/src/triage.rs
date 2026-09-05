@@ -171,7 +171,10 @@ impl Item {
 /// 全空表示「整个队列」。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Filter {
-    /// **按目录**：变体的键落在这个前缀下。`FC` 与 `FC/` 一个意思。
+    /// **按目录**：变体的键落在这个前缀下。`库/FC` 与 `库/FC/` 一个意思。
+    ///
+    /// 键的第一段是**根名**（`path::library_key`），所以前缀也带着它——
+    /// 顺带白拿一条：`--under <根名>` 就是「整个这个根」。
     pub under: Vec<String>,
     /// 按平台。
     pub platform: Vec<String>,
@@ -274,8 +277,10 @@ impl Filter {
 /// `FC` 选中 `FC/游戏.zip`，但**不选中** `FCX/游戏.zip`——差一个字符就是另一个平台，
 /// 而这条命令后面跟着的是「照这个改几百条」。
 ///
-/// 空前缀是**主库根那一层**，不是「全部」：[`Item::directory`] 给顶层的文件交出的正是
+/// 空前缀是**最顶上那一层**，不是「全部」：[`Item::directory`] 给顶层的条目交出的正是
 /// 空串，而「按目录」那张表上的每一行都得能原样折回一个选择器（[`Axis::filter`]）。
+/// 主库变成一组根之后每条键都至少有一段根名，于是这一支实际上走不到了，留着是为了让
+/// 「每一行都折得回一个选择器」这条不变量不依赖键的形状。
 /// 要整个队列不写 `--under`，那是 `under` 这个字段整个为空的意思。
 fn under(key: &str, prefix: &str) -> bool {
     let prefix = prefix.trim_end_matches('/');
@@ -972,10 +977,10 @@ mod tests {
 
     #[test]
     fn 按目录差一个字符就是另一个平台() {
-        assert!(under("FC/游戏.zip", "FC"));
-        assert!(under("FC/游戏.zip", "FC/"));
+        assert!(under("库/FC/游戏.zip", "库/FC"));
+        assert!(under("库/FC/游戏.zip", "库/FC/"));
         // 这条命令后面跟着的是「照这个改几百条」，`FC` 绝不能捎上 `FCX`。
-        assert!(!under("FCX/游戏.zip", "FC"));
+        assert!(!under("库/FCX/游戏.zip", "库/FC"));
     }
 
     #[test]

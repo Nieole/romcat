@@ -199,7 +199,7 @@ mod tests {
         // **不猜**——猜错了就是把说明书当封面铺到掌机上。
         for adapter in [&Pegasus as &dyn Adapter, &Gamelist] {
             assert_eq!(
-                adapter.media_placement("FC/甲.zip", MediaKind::Other, "abc123", "png"),
+                adapter.media_placement("库/FC/甲.zip", MediaKind::Other, "abc123", "png"),
                 None,
                 "{}",
                 adapter.name()
@@ -211,7 +211,7 @@ mod tests {
     fn 两家的媒体布局差得很远() {
         // Pegasus：内容寻址，路径写进条目的资源槽。
         assert_eq!(
-            Pegasus.media_placement("FC/甲.zip", MediaKind::Cover, "abc123", "png"),
+            Pegasus.media_placement("库/FC/甲.zip", MediaKind::Cover, "abc123", "png"),
             Some(MediaPlacement {
                 path: "media/ab/abc123.png".to_string(),
                 slot: Some("boxFront"),
@@ -219,7 +219,7 @@ mod tests {
         );
         // ES-DE：按文件名约定，条目里一个路径都不写。
         assert_eq!(
-            Gamelist.media_placement("FC/甲.zip", MediaKind::Cover, "abc123", "png"),
+            Gamelist.media_placement("库/FC/甲.zip", MediaKind::Cover, "abc123", "png"),
             Some(MediaPlacement {
                 path: "downloaded_media/FC/covers/甲.png".to_string(),
                 slot: None,

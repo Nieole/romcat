@@ -54,6 +54,8 @@ fn 现场() -> (TempDir, TempDir) {
         workspace.path(),
         &[
             "scan",
+            "--root-name",
+            "库",
             &dir.path().display().to_string(),
             "--library",
             "测试库",
@@ -174,11 +176,11 @@ fn 例外优先于规则_并记得住为什么() {
             "except",
             "掌机",
             "--exclude",
-            "FC/魂斗罗.zip",
+            "库/FC/魂斗罗.zip",
             "--note",
             "这个我通关过了",
             "--include",
-            "GB/口袋妖怪.zip",
+            "库/GB/口袋妖怪.zip",
         ],
     );
     assert!(out.status.success(), "{}", 出来的话(&out));
@@ -219,9 +221,9 @@ fn 同一个变体不许在一条命令里领两个决定() {
             "except",
             "掌机",
             "--include",
-            "FC/魂斗罗.zip",
+            "库/FC/魂斗罗.zip",
             "--exclude",
-            "FC/魂斗罗.zip",
+            "库/FC/魂斗罗.zip",
         ],
     );
     assert!(!out.status.success(), "{}", 出来的话(&out));
@@ -242,7 +244,7 @@ fn 库里没有的变体照样记得下例外() {
     assert!(建(ws, "掌机", &[]).status.success());
     let out = 子库(
         ws,
-        &["except", "掌机", "--include", "SFC/盘没插时看不到的.zip"],
+        &["except", "掌机", "--include", "库/SFC/盘没插时看不到的.zip"],
     );
     assert!(out.status.success(), "{}", 出来的话(&out));
     let text = 出来的话(&out);
@@ -268,7 +270,7 @@ fn 多个子库互不干扰() {
             .success()
     );
     assert!(
-        子库(ws, &["except", "掌机", "--include", "GB/口袋妖怪.zip"])
+        子库(ws, &["except", "掌机", "--include", "库/GB/口袋妖怪.zip"])
             .status
             .success()
     );

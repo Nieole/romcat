@@ -466,6 +466,9 @@ impl Screen {
                 self.prepared = Some(*prepared);
                 self.error = None;
             }
+            // 别的屏排上去的活轮不到这儿——`previewing` 那道判断已经挡掉了，
+            // 这一支只为把 `Product` 那个枚举配全。
+            Done::Product(_) => {}
             // **停下来的地方是干净的，就得这么说。** 说成「失败」会让人去找哪儿坏了。
             Done::Stopped => {
                 self.notice = Some(
@@ -508,16 +511,24 @@ impl Screen {
             return;
         }
         if let Err(message) =
-            sync::prepare::refuse_target_in_library(&site.catalog, None, &prepared.root)
+            sync::prepare::refuse_target_in_library(&site.catalog, &[], &prepared.root)
         {
             self.error = Some(message);
             return;
         }
         // 搬 ROM 要真的去读主库——**只有真要搬时才需要**：一趟只删文件、只重写元数据的
         // 同步，盘不在位照样跑得完（ADR-0009）。
-        let library_root = if prepared.needs_library() {
-            match sync::prepare::library_root(&site.catalog, None) {
-                Ok(root) => Some(root),
+        let library_roots = if prepared.needs_library() {
+            match sync::prepare::library_roots(&site.catalog, &[]) {
+                Ok(roots) => {
+                    // 只看这一趟真要搬的那几个根在不在位——**别的盘挂没挂上与这趟无关**。
+                    let missing = sync::prepare::missing_roots(&prepared, &roots);
+                    if !missing.is_empty() {
+                        self.error = Some(sync::prepare::missing_roots_message(&missing));
+                        return;
+                    }
+                    Some(roots)
+                }
                 Err(message) => {
                     self.error = Some(message);
                     return;
@@ -531,7 +542,7 @@ impl Screen {
         let cancel = CancelToken::new();
         let token = cancel.clone();
         let handle =
-            std::thread::spawn(move || run_sync(&prepared, library_root.as_deref(), &token));
+            std::thread::spawn(move || run_sync(&prepared, library_roots.as_ref(), &token));
         self.running = Some(Running {
             name,
             cancel,
@@ -1296,12 +1307,12 @@ impl Screen {
 /// **它拿到的只有计划里那些步骤**——清单之外的路径连进来的门都没有（ADR-0015）。
 fn run_sync(
     prepared: &Prepared,
-    library_root: Option<&std::path::Path>,
+    library_roots: Option<&romcat_core::catalog::Roots>,
     cancel: &CancelToken,
 ) -> Result<Outcome, String> {
     let sources = sync::Sources {
         library: &romcat_core::fs::RealFs,
-        library_root,
+        library_roots,
         target_root: &prepared.root,
         from_pool: &prepared.from_pool,
         generated: &prepared.generated,

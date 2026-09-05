@@ -64,6 +64,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::capability::{Conversion, Decision, Filesystem, Profile, RejectReason};
 use crate::catalog::{Catalog, CatalogError};
+use crate::path;
 use crate::sublibrary::{Selected, Sublibrary, Trim, over_capacity, trim_suggestions};
 
 pub use execute::{Outcome, Placement, Sources};
@@ -1001,7 +1002,8 @@ pub fn desired(
         );
         if let Decision::Unsupported { want, why } = &decision {
             out.unsupported.push(Unsupported {
-                path: member.key.clone(),
+                // 与落点同一个口径：这是**子库里**那条路径，不带根名。
+                path: path::relative_of_key(&member.key).to_string(),
                 variant: member.variant_key.clone(),
                 platform: platform.map(ToString::to_string),
                 bytes: member.len.unwrap_or(0),
@@ -1025,9 +1027,20 @@ pub fn desired(
             Some(Decision::Convert(conversion)) if member.is_main => Some((**conversion).clone()),
             _ => None,
         };
+        // **落点剥掉根名。** 子库里的布局照搬变体的键（挂账 D79），而键的第一段是
+        // 根名（`path::library_key`）——照搬进去的话，卡上多出一层 `主库/`，
+        // 而前端认平台靠的正是**顶层那一级目录**（ADR-0013、`es_systems.xml` 的
+        // `<name>`）。剥掉之后卡上的形状与主库变成一组根之前一模一样。
+        //
+        // 源那一格照旧是**完整的键**：读主库要靠它第一段查出那块盘在哪
+        // （`catalog::roots::Roots`）。两格分开，正是因为它们答的不是同一个问题。
+        // 转格式那一支的落点已经在 `capability` 那边剥过了。
         let (path, bytes) = match &conversion {
             Some(conversion) => (conversion.path.clone(), conversion.bytes),
-            None => (member.key.clone(), member.len.unwrap_or(0)),
+            None => (
+                path::relative_of_key(&member.key).to_string(),
+                member.len.unwrap_or(0),
+            ),
         };
         out.files.push(DesiredFile {
             path,

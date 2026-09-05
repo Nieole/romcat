@@ -16,12 +16,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use romcat_core::adapter::gamelist::Gamelist;
+use romcat_core::task::Handle;
 use romcat_core::adapter::transfer::{self, ExportOptions};
 use romcat_core::adapter::{Capability, assert_capability};
 use romcat_core::catalog::Catalog;
 use romcat_core::catalog::scrape::{Harvested, HarvestedMedia};
 use romcat_core::fs::RealFs;
-use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
+use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::priority::Priorities;
 use romcat_core::scrape::{AnchorKind, MediaKind};
@@ -30,9 +31,13 @@ use romcat_core::sync;
 use romcat_core::testing::sample::zip;
 use romcat_core::testing::{TempDir, temp_dir};
 
-const 台版: &str = "FC/魂斗罗台版/魂斗罗.zip";
-const 塞尔达: &str = "FC/Zelda.zip";
-const 口袋妖怪: &str = "GB/口袋妖怪.zip";
+/// 盘上那几条**相对主库根**的路径。
+const 台版路径: &str = "FC/魂斗罗台版/魂斗罗.zip";
+const 塞尔达路径: &str = "FC/Zelda.zip";
+const 口袋妖怪路径: &str = "GB/口袋妖怪.zip";
+
+/// 同样那一条落进中立库的**键**：第一段是根名（`path::library_key`）。
+const 台版: &str = "库/FC/魂斗罗台版/魂斗罗.zip";
 
 fn 写(path: &Path, bytes: &[u8]) {
     fs::create_dir_all(path.parent().expect("有上级目录")).expect("能建目录");
@@ -62,17 +67,14 @@ impl 现场 {
 fn 建现场() -> 现场 {
     let dir = temp_dir("gamelist");
     let 工作区 = temp_dir("gamelist-ws");
-    写(&dir.path().join(台版), &zip(2_048));
-    写(&dir.path().join(塞尔达), &zip(4_096));
-    写(&dir.path().join(口袋妖怪), &zip(8_192));
+    写(&dir.path().join(台版路径), &zip(2_048));
+    写(&dir.path().join(塞尔达路径), &zip(4_096));
+    写(&dir.path().join(口袋妖怪路径), &zip(8_192));
 
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-    catalog
-        .set_library_root(&romcat_core::path::display(dir.path()))
-        .expect("写得下主库根");
-    let mut options = ScanOptions::new(dir.path());
+    let mut options = ScanOptions::named(dir.path(), "库");
     options.jobs = Jobs::Fixed(2);
-    scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
     let pool = MediaPool::open(&工作区.path().join("media")).expect("池建得出");
     现场 {
         dir,

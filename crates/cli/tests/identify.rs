@@ -73,6 +73,8 @@ fn 现场() -> (TempDir, TempDir) {
 fn 扫(library: &Path, workspace: &Path) {
     let out = 跑(&[
         "scan",
+        "--root-name",
+        "库",
         &library.to_string_lossy(),
         "--library",
         "小库",
@@ -116,11 +118,11 @@ fn 识别跑通并把命中率打出来() {
         workspace::Slug::Named("小库"),
     ))
     .expect("开得出中立库");
-    let 候选 = catalog.candidates_of("FC/游戏.zip").expect("读得出");
+    let 候选 = catalog.candidates_of("库/FC/游戏.zip").expect("读得出");
     assert_eq!(候选.len(), 1);
     assert!(候选[0].accepted, "精确命中自动通过");
     assert!(候选[0].evidence.contains("CRC-32"), "{}", 候选[0].evidence);
-    let 变体 = catalog.variant("FC/游戏.zip").expect("读得出").expect("在");
+    let 变体 = catalog.variant("库/FC/游戏.zip").expect("读得出").expect("在");
     assert!(变体.work_id.is_some() && 变体.release_id.is_some());
 }
 

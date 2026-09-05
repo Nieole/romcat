@@ -18,7 +18,7 @@ use std::time::SystemTime;
 
 use romcat_core::catalog::{Catalog, CatalogError};
 use romcat_core::fs::RealFs;
-use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
+use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::sublibrary::{Rule, Sublibrary};
 use romcat_core::sync;
 use romcat_core::task::Handle;
@@ -56,9 +56,9 @@ impl 现场 {
         let 卡 = temp_dir("task-card");
         let 库文件 = 工作区.path().join("catalog").join("fixture.sqlite3");
         let mut catalog = Catalog::open(&库文件).expect("能开中立库");
-        let mut options = ScanOptions::new(库.path());
+        let mut options = ScanOptions::named(库.path(), "库");
         options.jobs = Jobs::Fixed(2);
-        scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
+        scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
         catalog
             .put_sublibrary(&Sublibrary {
                 name: "掌机".to_string(),

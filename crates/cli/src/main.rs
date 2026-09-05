@@ -16,7 +16,7 @@ use std::{fs, io};
 use clap::{Args, Parser, Subcommand};
 use romcat_core::adapter::{self, Adapter, transfer};
 use romcat_core::capability::{Roster, today};
-use romcat_core::catalog::Catalog;
+use romcat_core::catalog::{Catalog, Roots};
 use romcat_core::dat::HttpFetcher;
 use romcat_core::dat::registry::Registry;
 use romcat_core::dat::repo::DatRepo;
@@ -31,6 +31,7 @@ use romcat_core::platform::Manifest;
 use romcat_core::report::{DuplicateDetails, HealthReport, human_bytes, pad, thousands};
 use romcat_core::scan::aggregate::{Aggregate, Limits};
 use romcat_core::scan::{self, CancelToken, CheckpointOptions, Jobs, ScanOptions};
+use romcat_core::task::Handle;
 use romcat_core::scrape::{self, Priorities};
 use romcat_core::shape;
 use romcat_core::site::Site;
@@ -946,8 +947,15 @@ struct OutputArgs {
 
 #[derive(Debug, Args)]
 struct ScanArgs {
-    /// 主库根目录
+    /// 这一趟扫哪个目录
     root: PathBuf,
+
+    /// 给这个根起个名字。主库是一组根，几块盘都能加进同一个主库
+    ///
+    /// 名字是**变体的键**的第一段，所以它不许带 `/` 或 `\`。不给就按目录自己的名字取。
+    /// 名字已经在库里就按名字对上（换了挂载点也找得回），名字还没有就当新根加进来
+    #[arg(long, value_name = "根名")]
+    root_name: Option<String>,
 
     /// 并发线程数（默认开扫前探一探介质自己定；点了名就照办）
     #[arg(short, long)]
@@ -1247,6 +1255,9 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
     };
 
     let mut options = ScanOptions::new(&args.root);
+    options.root_name = args.root_name.clone();
+    // 加新根时拿工作目录守住「中立库不许被圈进主库」那条线（ADR-0004）。
+    options.workspace = Some(workspace.clone());
     if let Some(jobs) = args.jobs {
         options.jobs = Jobs::Fixed(jobs.max(1));
     }
@@ -1266,7 +1277,16 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
     let checkpoint_path = if args.no_checkpoint {
         None
     } else {
-        Some(workspace::checkpoint_path(&workspace, slug))
+        // 断点按 (库, 根) 分：一份 `--library` 底下几个根各扫各的，
+        // 共用一个断点文件会让扫乙盘覆盖掉甲盘扫到一半的进度。
+        Some(workspace::checkpoint_path(
+            &workspace,
+            slug,
+            &options
+                .root_name
+                .clone()
+                .unwrap_or_else(|| scan::default_root_name(&args.root)),
+        ))
     };
     if let Some(path) = &checkpoint_path {
         options.checkpoint = Some(CheckpointOptions {
@@ -1276,8 +1296,20 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
         });
     }
 
+    // **每个根都要守。** 一份中立库装着几块盘，只拿这一趟扫的那个目录去比，
+    // 报告照样落得进同一个主库的**另一个**根里（ADR-0004）。
+    if let Ok(roots) = catalog.roots() {
+        for root in roots {
+            if let Err(message) = args.output.refuse_targets_in_library(Path::new(&root.path)) {
+                return fail(message);
+            }
+        }
+    }
+
     let library = RealFs::new();
-    let outcome = match scan::scan(&library, &mut catalog, &options, cancel) {
+    // 把手与 Ctrl-C 共用同一个中断信号：按下去的是同一件事。
+    let task = Handle::with_cancel(cancel.clone());
+    let outcome = match scan::scan(&library, &mut catalog, &options, &task) {
         Ok(outcome) => outcome,
         Err(error) => {
             eprintln!("扫描失败：{error}");
@@ -1348,11 +1380,15 @@ fn run_report(args: &ReportArgs) -> ExitCode {
 
     // 只给了名字时，主库在哪只有中立库知道。**这道守卫不能因此漏掉**——
     // 主库只读（ADR-0004），报告写不进去这条与用没用 `--library` 无关。
+    // **每个根都要守。** 一份中立库装着几块盘，只守其中一块等于另外几块没人守。
     if args.root.is_none()
-        && let Ok(Some(recorded)) = catalog.library_root()
-        && let Err(message) = args.output.refuse_targets_in_library(Path::new(&recorded))
+        && let Ok(roots) = catalog.roots()
     {
-        return fail(message);
+        for root in roots {
+            if let Err(message) = args.output.refuse_targets_in_library(Path::new(&root.path)) {
+                return fail(message);
+            }
+        }
     }
 
     match catalog.is_empty() {
@@ -1425,7 +1461,8 @@ fn run_shape(args: &ShapeArgs) -> ExitCode {
             Ok(true) => {}
             Ok(false) => {
                 eprintln!(
-                    "中立库里没有 {key} 这条记录。键是**相对主库根**的路径，分隔符是 `/`（ADR-0020）。"
+                    "中立库里没有 {key} 这条记录。键是「**根名** + 相对那个根的路径」，\n\
+                     分隔符是 `/`（ADR-0020）。`romcat report` 看得见每个根叫什么。"
                 );
                 return ExitCode::FAILURE;
             }
@@ -1534,27 +1571,26 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
         Err(error) => return fail(format!("沉淀库读不动：{error}")),
     };
 
-    // 主库根：命令行给的优先，没给就问中立库——盘换了挂载点时那一份才是对的。
-    let root = match args.root.clone() {
-        Some(root) => Some(root),
-        None => catalog.library_root().ok().flatten().map(PathBuf::from),
+    // 主库那一组根：库里记着的那份，`--root` 只在这份库只有一个根时换得动位置。
+    let roots = match roots_for(&catalog, args.root.as_deref()) {
+        Ok(roots) => roots,
+        Err(message) => return fail(message),
     };
-    if root.is_none() && !args.no_read_library {
+    if roots.is_empty() && !args.no_read_library {
         return fail(
             "不知道主库在哪：给出主库根目录，或者加 --no-read-library 只用容器里那套零解压的 CRC-32。",
         );
     }
-    // 主库只读（ADR-0004）：报告不许落进主库。守一次就够——上面已经把「主库在哪」
-    // 定下来了（命令行给的优先，没给就问中立库），两处各守一遍只会让人以为它们守的
-    // 不是同一件事。
-    if let Some(root) = &root
-        && let Some(target) = args.json.as_deref()
-        && let Err(message) = refuse_writing_into_library(root, target)
-    {
-        return fail(message);
+    // 主库只读（ADR-0004）：报告不许落进主库，**每个根都守一遍**。
+    if let Some(target) = args.json.as_deref() {
+        for (_, root) in roots.iter() {
+            if let Err(message) = refuse_writing_into_library(root, target) {
+                return fail(message);
+            }
+        }
     }
 
-    let mut options = identify::Options::new(root.unwrap_or_default());
+    let mut options = identify::Options::new(roots);
     options.read_library = !args.no_read_library;
     options.max_read_bytes = args.max_read_mib.map(|mib| mib.saturating_mul(1 << 20));
 
@@ -2020,31 +2056,29 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
         Err(message) => return fail(message),
     };
 
-    // 主库根：命令行给的优先，没给就问中立库——盘换了挂载点时那一份才是对的。
-    let root = match args.root.clone() {
-        Some(root) => Some(root),
-        None => catalog.library_root().ok().flatten().map(PathBuf::from),
+    // 主库那一组根：库里记着的那份，`--root` 只在这份库只有一个根时换得动位置。
+    let roots = match roots_for(&catalog, args.root.as_deref()) {
+        Ok(roots) => roots,
+        Err(message) => return fail(message),
     };
-    if root.is_none() && !args.no_media {
+    if roots.is_empty() && !args.no_media {
         return fail("不知道主库在哪：给出主库根目录，或者加 --no-media 只采元数据不收媒体。");
     }
-    // 主库只读（ADR-0004）：报告不许落进主库。
-    if let Some(root) = &root
-        && let Some(target) = args.json.as_deref()
-        && let Err(message) = refuse_writing_into_library(root, target)
-    {
-        return fail(message);
-    }
-
     let pool_dir = workspace::media_pool_dir(&workspace);
-    // 媒体池也不许落进主库：它是要往里写文件的（ADR-0009 说它必须在本机）。
-    if let Some(root) = &root
-        && let Err(message) = refuse_writing_into_library(root, &pool_dir)
-    {
-        return fail(message);
+    // 主库只读（ADR-0004）：报告不许落进主库，媒体池也不许——它是要往里写文件的
+    // （ADR-0009 说它必须在本机）。**每个根都守一遍。**
+    for (_, root) in roots.iter() {
+        if let Some(target) = args.json.as_deref()
+            && let Err(message) = refuse_writing_into_library(root, target)
+        {
+            return fail(message);
+        }
+        if let Err(message) = refuse_writing_into_library(root, &pool_dir) {
+            return fail(message);
+        }
     }
 
-    let mut options = scrape::Options::new(root.clone().unwrap_or_default(), pool_dir);
+    let mut options = scrape::Options::new(roots, pool_dir);
     options.profile = profile;
     options.media = !args.no_media;
     options.max_media_bytes = args.max_media_mib.map(|mib| mib.saturating_mul(1 << 20));
@@ -2443,10 +2477,10 @@ fn run_import(args: &ImportArgs) -> ExitCode {
             "原文已逐字节存进中立库。"
         }
     );
-    if args.root.is_none() && matches!(catalog.library_root(), Ok(None)) {
+    if args.root.is_none() && catalog.roots().is_ok_and(|roots| roots.is_empty()) {
         eprintln!(
-            "中立库里没记主库根、命令行也没给 `--root`：`file:` 里的路径折不成变体的键，\n\
-             这一趟只存了快照。加上 `--root <主库根>` 再跑一次，值才落得进库。"
+            "中立库里一个根都没有、命令行也没给 `--root`：`file:` 里的路径折不成变体的键，\n\
+             这一趟只存了快照。先跑一次 `romcat scan`，值才落得进库。"
         );
     }
     if !write_json(args.json.as_deref(), &report) {
@@ -2990,9 +3024,12 @@ struct SubSyncArgs {
     #[arg(long)]
     restore: bool,
 
-    /// 主库根目录：搬 ROM 要读它。不给就用中立库里记着的那个
-    #[arg(long, value_name = "目录")]
-    library_root: Option<PathBuf>,
+    /// 主库某个根现在挂在哪：搬 ROM 要读它。不给就用中立库里记着的那个
+    ///
+    /// 主库是一组根，所以这条可以给好几次。库里只有一个根时写路径就行；
+    /// 有好几个根时得说清是哪一个：`--library-root 根名=路径`
+    #[arg(long, value_name = "[根名=]路径")]
+    library_root: Vec<String>,
 
     /// 字段级优先级表。不给就先看工作目录里有没有 `priorities.toml`，都没有才用内置的
     #[arg(long, value_name = "文件")]
@@ -3968,9 +4005,7 @@ fn run_sublibrary_sync(args: &SubSyncArgs, cancel: &CancelToken) -> ExitCode {
     // **目标不许落在主库里。** `plan` 只读，指哪儿都无所谓；`sync` 从这张票起是真的
     // 往目标上写字节，一个手滑的 `--target` 就会在 10 TiB 只读主库里建目录写文件
     // （ADR-0004）。用中立库记着的主库根来判，`--root` 给不给都拦得住。
-    if let Err(message) =
-        refuse_target_in_library(&catalog, args.common.root.as_deref(), &ready.root)
-    {
+    if let Err(message) = refuse_target_in_library(&catalog, &[], &ready.root) {
         return fail(message);
     }
 
@@ -4009,9 +4044,20 @@ fn run_sublibrary_sync(args: &SubSyncArgs, cancel: &CancelToken) -> ExitCode {
     // ── 三、找到主库。搬 ROM 要真的去读它——这是这条命令里唯一需要盘在位的部分，
     //    而**只有真要搬 ROM 时才需要**：一趟只删文件、只重写元数据、或者一步都不用做
     //    的同步，盘不在位照样跑得完（ADR-0009 那句「扫描是唯一需要盘在位的操作」）。
-    let library_root = if ready.needs_library() {
-        match library_root_for(&catalog, args.library_root.as_deref()) {
-            Ok(root) => Some(root),
+    let overrides = match root_overrides(&args.library_root) {
+        Ok(overrides) => overrides,
+        Err(message) => return fail(message),
+    };
+    let library_roots = if ready.needs_library() {
+        match sync::prepare::library_roots(&catalog, &overrides) {
+            Ok(roots) => {
+                // 只看这一趟真要搬的那几个根在不在位——**别的盘挂没挂上与这趟无关**。
+                let missing = sync::prepare::missing_roots(&ready, &roots);
+                if !missing.is_empty() {
+                    return fail(sync::prepare::missing_roots_message(&missing));
+                }
+                Some(roots)
+            }
             Err(message) => return fail(message),
         }
     } else {
@@ -4020,7 +4066,7 @@ fn run_sublibrary_sync(args: &SubSyncArgs, cancel: &CancelToken) -> ExitCode {
 
     let sources = sync::Sources {
         library: &RealFs,
-        library_root: library_root.as_deref(),
+        library_roots: library_roots.as_ref(),
         target_root: &ready.root,
         from_pool: &ready.from_pool,
         generated: &ready.generated,
@@ -4076,18 +4122,56 @@ fn run_sublibrary_sync(args: &SubSyncArgs, cancel: &CancelToken) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// 这一趟去哪儿读主库。**算法在核心里**——界面那个「同步」按钮走的是同一条。
-fn library_root_for(catalog: &Catalog, given: Option<&Path>) -> Result<PathBuf, String> {
-    sync::prepare::library_root(catalog, given)
+/// 把 `--library-root` 那几条折成 `(根名, 路径)`。没有 `=` 就是不点名的那一种。
+///
+/// # Errors
+/// `=` 左边是空的时返回一句给人看的话——那多半是把 Windows 盘符当成了分隔符。
+fn root_overrides(given: &[String]) -> Result<Vec<(Option<String>, PathBuf)>, String> {
+    let mut out = Vec::with_capacity(given.len());
+    for text in given {
+        // 从**左边第一个** `=` 切，而且左边不许有分隔符：`D:\Game` 里没有 `=`，
+        // 而 `甲=D:\Game` 里那个 `=` 一定是我们要的那一个。
+        match text.split_once('=') {
+            // 左边要真是个**根名**才算数：`D:\Game` 里没有 `=`，而
+            // `/mnt/backup=2024/roms` 里那个 `=` 是路径自己的一部分——不校验的话
+            // 它会被切成根名 `/mnt/backup`，凭空多出一个不存在的根。
+            Some((name, path)) => match romcat_core::path::root_name(name) {
+                Ok(name) => out.push((Some(name), PathBuf::from(path))),
+                Err(why) => {
+                    return Err(format!(
+                        "`--library-root {text}` 的 `=` 左边不是一个根名：{why}\n\
+                         路径里本来就带 `=` 的话，把根名写全：`--library-root 根名={path}`"
+                    ));
+                }
+            },
+            None => out.push((None, PathBuf::from(text))),
+        }
+    }
+    Ok(out)
+}
+
+/// 这一趟对着的那**一组根**：库里记着的那份，`--root` 只在**至多一个根**的时候
+/// 换得动位置。
+///
+/// 一组根里哪个是准的，一条路径说不出来；而那时库里记着的位置本来就更可信——
+/// 每扫一趟它就更新一次。
+fn roots_for(catalog: &Catalog, given: Option<&Path>) -> Result<Roots, String> {
+    let mut roots = Roots::load(catalog).map_err(|error| format!("中立库读不动：{error}"))?;
+    if let Some(given) = given
+        && let Some(only) = roots.only().map(str::to_string)
+    {
+        roots.set(&only, romcat_core::path::normalize_existing(given));
+    }
+    Ok(roots)
 }
 
 /// 目标落在主库里就拦下来（ADR-0004）。**这道红线在核心里**，界面与命令行共用一条。
 fn refuse_target_in_library(
     catalog: &Catalog,
-    given: Option<&Path>,
+    overrides: &[(Option<String>, PathBuf)],
     target: &Path,
 ) -> Result<(), String> {
-    sync::prepare::refuse_target_in_library(catalog, given, target)
+    sync::prepare::refuse_target_in_library(catalog, overrides, target)
 }
 
 #[derive(Debug, Args)]
@@ -4760,19 +4844,19 @@ fn run_names_recheck(args: &NamesArgs, cancel: &CancelToken) -> ExitCode {
         Ok(catalog) => catalog,
         Err(message) => return fail(message),
     };
-    let root = match args.root.clone() {
-        Some(root) => Some(root),
-        None => catalog.library_root().ok().flatten().map(PathBuf::from),
+    let roots = match roots_for(&catalog, args.root.as_deref()) {
+        Ok(roots) => roots,
+        Err(message) => return fail(message),
     };
-    let Some(root) = root else {
+    if roots.is_empty() {
         return fail(format!(
             "不知道 {located_by} 那份主库在哪：给出主库根目录。重读容器要主库在位。"
         ));
-    };
+    }
     let library = RealFs::new();
     let started = Instant::now();
     let mut last = Instant::now();
-    let outcome = scan::names::recheck(&library, &mut catalog, &root, cancel, &mut |so_far| {
+    let outcome = scan::names::recheck(&library, &mut catalog, &roots, cancel, &mut |so_far| {
         if last.elapsed() >= Duration::from_secs(5) {
             last = Instant::now();
             eprintln!(
@@ -5224,7 +5308,8 @@ mod tests {
     #[test]
     fn 断点路径不落在主库里() {
         let workspace = PathBuf::from("/work");
-        let path = workspace::checkpoint_path(&workspace, Slug::AtPath(Path::new("/Volumes/ROMs")));
+        let path =
+            workspace::checkpoint_path(&workspace, Slug::AtPath(Path::new("/Volumes/ROMs")), "根");
         assert!(!path.starts_with("/Volumes/ROMs"));
     }
 }

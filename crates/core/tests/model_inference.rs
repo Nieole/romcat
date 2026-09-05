@@ -17,7 +17,8 @@ use std::fs;
 use std::path::Path;
 
 use romcat_core::catalog::identify::State;
-use romcat_core::catalog::{Candidate, Catalog, Confidence};
+use romcat_core::task::Handle;
+use romcat_core::catalog::{Candidate, Catalog, Confidence, Roots};
 use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
 use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
@@ -48,12 +49,18 @@ struct 现场 {
     repo: DatRepo,
 }
 
-const 精确命中的: &str = "gba/Known Game (Japan).zip";
-const 名字撞得上的: &str = "gba/合金弹头7[某汉化组].zip";
-const 残渣一: &str = "gba/033.動作：掃地雷.zip";
-const 残渣二: &str = "gba/ACGHH-0113-TP.zip";
-const 残渣三: &str = "gba/my_theme0.zip";
-const 补丁: &str = "gba/流星洛克人 3 汉化补丁.zip";
+/// 把一条**中立库的键**折回盘上那条相对主库根的路径：剥掉第一段根名。
+/// 摆 fixture 用它，断言用键本身——两者差的正是这一段（`path::library_key`）。
+fn 相对(key: &str) -> &str {
+    key.strip_prefix("库/").unwrap_or(key)
+}
+
+const 精确命中的: &str = "库/gba/Known Game (Japan).zip";
+const 名字撞得上的: &str = "库/gba/合金弹头7[某汉化组].zip";
+const 残渣一: &str = "库/gba/033.動作：掃地雷.zip";
+const 残渣二: &str = "库/gba/ACGHH-0113-TP.zip";
+const 残渣三: &str = "库/gba/my_theme0.zip";
+const 补丁: &str = "库/gba/流星洛克人 3 汉化补丁.zip";
 
 fn 建现场() -> 现场 {
     let dir = temp_dir("model");
@@ -61,38 +68,38 @@ fn 建现场() -> 现场 {
 
     // 一、**精确哈希命中**：这一层连碰都不该碰它。
     写(
-        &root.join(精确命中的),
+        &root.join(相对(精确命中的)),
         &zip_container(&[ZipEntrySpec::stored("known.gba", 卡带(0xA1))]),
     );
     // 二、**文件名那一层认得出来**：已经有候选可看了，不重复花钱。
     写(
-        &root.join(名字撞得上的),
+        &root.join(相对(名字撞得上的)),
         &zip_container(&[ZipEntrySpec::stored("m7.gba", 卡带(0xB2))]),
     );
     // 三、**残渣**：前面每一层都落空，名字一个比一个怪。真库里的形状。
     写(
-        &root.join(残渣一),
+        &root.join(相对(残渣一)),
         &zip_container(&[ZipEntrySpec::stored("033.gba", 卡带(0xC3))]),
     );
     写(
-        &root.join(残渣二),
+        &root.join(相对(残渣二)),
         &zip_container(&[ZipEntrySpec::stored("acghh.gba", 卡带(0xC4))]),
     );
     写(
-        &root.join(残渣三),
+        &root.join(相对(残渣三)),
         &zip_container(&[ZipEntrySpec::stored("theme.gba", 卡带(0xC5))]),
     );
     // 四、**补丁**：识别把它判成「跳过」。词表原话：拿补丁去撞 DAT 必然落空，
     //     会一路掉到模型推断白烧一遍——**这一层一个字都不该问它**。
     写(
-        &root.join(补丁),
+        &root.join(相对(补丁)),
         &zip_container(&[ZipEntrySpec::stored("rockman.ips", 卡带(0xC6))]),
     );
 
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-    let mut options = ScanOptions::new(root);
+    let mut options = ScanOptions::named(root, "库");
     options.jobs = Jobs::Fixed(2);
-    scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
 
     现场 {
         dir,
@@ -220,7 +227,7 @@ fn 跑一趟(
         checked: "2026-09-02".to_string(),
         limits,
     };
-    let options = Options::new(现场.dir.path());
+    let options = Options::new(Roots::single("库", 现场.dir.path()));
     let outcome = identify::run(
         &RealFs::new(),
         &mut 现场.catalog,

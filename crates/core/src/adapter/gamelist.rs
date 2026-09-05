@@ -369,8 +369,11 @@ impl Adapter for Gamelist {
         // **路径精确镜像 ROM 相对平台目录的路径，文件名是去掉扩展名的 ROM 文件名。**
         // 官方示例：ROM `~/ROMs/c64/Multidisk/Last Ninja 2/Last Ninja 2.m3u`
         // → 媒体 `downloaded_media/c64/screenshots/Multidisk/Last Ninja 2/Last Ninja 2.jpg`。
+        // 键的第一段是**根名**，平台目录在它后面（`path::library_key`）：
+        // 剥的是「根名 + 平台目录」那一整截，留下来的才是相对平台目录的路径。
+        let prefix = path::platform_dir_of_key(rom_key)?;
         let directory = path::platform_of_key(rom_key)?;
-        let rest = rom_key.strip_prefix(directory)?.trim_start_matches('/');
+        let rest = rom_key.strip_prefix(prefix)?.trim_start_matches('/');
         let stem = rest.rsplit_once('.').map_or(rest, |(stem, _)| stem);
         Some(MediaPlacement {
             path: format!(
@@ -1864,7 +1867,7 @@ mod tests {
         // → `downloaded_media/c64/screenshots/Multidisk/Last Ninja 2/Last Ninja 2.jpg`
         let placed = Gamelist
             .media_placement(
-                "c64/Multidisk/Last Ninja 2/Last Ninja 2.m3u",
+                "库/c64/Multidisk/Last Ninja 2/Last Ninja 2.m3u",
                 MediaKind::Screenshot,
                 "abc123",
                 "jpg",

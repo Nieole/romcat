@@ -14,7 +14,8 @@
 use std::fs;
 use std::path::Path;
 
-use romcat_core::catalog::{Catalog, State};
+use romcat_core::catalog::{Catalog, State, Roots};
+use romcat_core::task::Handle;
 use romcat_core::dat::Convention;
 use romcat_core::dat::chinese::ChineseMark;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
@@ -89,9 +90,9 @@ fn 建现场() -> 现场 {
     );
 
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-    let mut options = ScanOptions::new(root);
+    let mut options = ScanOptions::named(root, "库");
     options.jobs = Jobs::Fixed(2);
-    scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
     现场 {
         dir,
         catalog,
@@ -178,7 +179,7 @@ fn 跑识别(现场: &mut 现场) -> identify::Outcome {
             guessing: &identify::model::Guessing::off(),
             titledb: None,
         },
-        &Options::new(现场.dir.path()),
+        &Options::new(Roots::single("库", 现场.dir.path())),
         &CancelToken::new(),
         &mut |_| {},
     )
@@ -297,7 +298,7 @@ fn 按目录一次裁一批() {
     let applied = 裁(
         &mut 现场,
         &Filter {
-            under: vec!["FC".to_string()],
+            under: vec!["库/FC".to_string()],
             ..Filter::default()
         },
         &手工("某部作品"),
@@ -307,7 +308,7 @@ fn 按目录一次裁一批() {
     let 剩下 = 队列(&现场, &Filter::default());
     assert_eq!(
         keys(&剩下),
-        vec!["GBA/某掌机游戏[某汉化组]汉化.zip".to_string()]
+        vec!["库/GBA/某掌机游戏[某汉化组]汉化.zip".to_string()]
     );
 }
 
@@ -485,7 +486,7 @@ fn 判定都不对之后手工指定候选集不构成天花板() {
     assert_eq!(applied.matched, 1);
     let (state, _) = 现场
         .catalog
-        .identification_of("FC/某游戏 别家汉化.zip")
+        .identification_of("库/FC/某游戏 别家汉化.zip")
         .expect("读得出")
         .expect("有结论");
     assert_eq!(state, State::Matched, "裁决当场兑现，不必等下一趟识别");
@@ -504,7 +505,7 @@ fn 确认没有发行版是一条明说的记录() {
     let applied = 裁(
         &mut 现场,
         &Filter {
-            under: vec!["GBA".to_string()],
+            under: vec!["库/GBA".to_string()],
             ..Filter::default()
         },
         &decide,
@@ -512,7 +513,7 @@ fn 确认没有发行版是一条明说的记录() {
     assert_eq!(applied.skipped, 1);
     let (state, reason) = 现场
         .catalog
-        .identification_of("GBA/某掌机游戏[某汉化组]汉化.zip")
+        .identification_of("库/GBA/某掌机游戏[某汉化组]汉化.zip")
         .expect("读得出")
         .expect("有结论");
     assert_eq!(state, State::Skipped);
@@ -527,7 +528,7 @@ fn 确认没有发行版是一条明说的记录() {
     跑识别(&mut 现场);
     let (state, _) = 现场
         .catalog
-        .identification_of("GBA/某掌机游戏[某汉化组]汉化.zip")
+        .identification_of("库/GBA/某掌机游戏[某汉化组]汉化.zip")
         .expect("读得出")
         .expect("有结论");
     assert_eq!(state, State::Skipped);
@@ -542,7 +543,7 @@ fn 认不出那一档记下来就不再问第二遍() {
     let applied = 裁(
         &mut 现场,
         &Filter {
-            under: vec!["GBA".to_string()],
+            under: vec!["库/GBA".to_string()],
             ..Filter::default()
         },
         &decide,
@@ -551,14 +552,14 @@ fn 认不出那一档记下来就不再问第二遍() {
     // 结论一个字没改（它本来就是未命中），但**退出队列**。
     let (state, _) = 现场
         .catalog
-        .identification_of("GBA/某掌机游戏[某汉化组]汉化.zip")
+        .identification_of("库/GBA/某掌机游戏[某汉化组]汉化.zip")
         .expect("读得出")
         .expect("有结论");
     assert_eq!(state, State::Unmatched);
     跑识别(&mut 现场);
     assert!(
         !keys(&队列(&现场, &Filter::default()))
-            .contains(&"GBA/某掌机游戏[某汉化组]汉化.zip".to_string()),
+            .contains(&"库/GBA/某掌机游戏[某汉化组]汉化.zip".to_string()),
         "看过了、认不出，与还没人看过是两件事"
     );
 }
@@ -621,9 +622,9 @@ fn 换一份中立库换一个路径同一个文件照样直接命中() {
         &zip_container(&[ZipEntrySpec::stored("rom.nes", 汉化版(0xB0))]),
     );
     let mut 乙 = Catalog::open_in_memory().expect("能开中立库");
-    let mut options = ScanOptions::new(乙目录.path());
+    let mut options = ScanOptions::named(乙目录.path(), "库");
     options.jobs = Jobs::Fixed(1);
-    scan::scan(&RealFs::new(), &mut 乙, &options, &CancelToken::new()).expect("扫得动");
+    scan::scan(&RealFs::new(), &mut 乙, &options, &Handle::new()).expect("扫得动");
     let mut 乙库 = Store::in_memory().expect("开得出沉淀库");
     let account = 乙库.import(&导出).expect("收得下");
     assert_eq!((account.read, account.added), (1, 1));
@@ -639,14 +640,14 @@ fn 换一份中立库换一个路径同一个文件照样直接命中() {
             guessing: &identify::model::Guessing::off(),
             titledb: None,
         },
-        &Options::new(乙目录.path()),
+        &Options::new(Roots::single("库", 乙目录.path())),
         &CancelToken::new(),
         &mut |_| {},
     )
     .expect("识别不该失败");
     assert_eq!(outcome.from_verdicts, 1, "路径变了、名字变了，字节没变");
     let (state, _) = 乙
-        .identification_of("FC/另一个目录/改了个名.zip")
+        .identification_of("库/FC/另一个目录/改了个名.zip")
         .expect("读得出")
         .expect("有结论");
     assert_eq!(state, State::Matched);
@@ -659,9 +660,9 @@ fn 拿不到内容判据时退到路径锚并如实说出来() {
     let dir = temp_dir("triage-无判据");
     写(&dir.path().join("PS1/某游戏.chd"), &vec![7u8; 4_096]);
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-    let mut options = ScanOptions::new(dir.path());
+    let mut options = ScanOptions::named(dir.path(), "库");
     options.jobs = Jobs::Fixed(1);
-    scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
     let mut 现场 = 现场 {
         dir,
         catalog,
@@ -721,7 +722,7 @@ fn 报告说得出按各个轴一次能覆盖多少() {
     let fc = report
         .by_directory
         .iter()
-        .find(|row| row.label == "FC")
+        .find(|row| row.label == "库/FC")
         .expect("该有 FC 这一组");
     assert_eq!(fc.count, 3);
     // **按命名规律**那一轴：名字里 `[…]`（…）括起来的记号连条数一起印出来，
@@ -798,11 +799,11 @@ fn 队列列一次之后换选择器不再读库() {
     assert!(整个队列 > 0);
 
     // 换成「只要 FC 目录下的」——一次都不碰中立库。
-    queue.set_filter(triage::Axis::Directory.filter("FC"));
+    queue.set_filter(triage::Axis::Directory.filter("库/FC"));
     let fc = queue.selected().len();
     assert!(fc > 0 && fc < 整个队列, "FC 该是队列的一部分而不是全部");
     assert!(
-        queue.selected().iter().all(|item| item.directory() == "FC"),
+        queue.selected().iter().all(|item| item.directory() == "库/FC"),
         "选中的里面混进了别的目录",
     );
 
@@ -820,7 +821,7 @@ fn 裁完的当场从队列里消失() {
     let mut queue = triage::Queue::load(&现场.catalog, &index).expect("列得出队列");
     let 原有 = queue.pending();
 
-    queue.set_filter(triage::Axis::Directory.filter("GBA"));
+    queue.set_filter(triage::Axis::Directory.filter("库/GBA"));
     let 这一批 = queue.selected().len();
     assert!(这一批 > 0);
     let 键: Vec<String> = queue

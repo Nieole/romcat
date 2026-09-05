@@ -13,9 +13,10 @@ use std::fs;
 use std::path::Path;
 
 use romcat_core::capability::Profile;
+use romcat_core::task::Handle;
 use romcat_core::catalog::Catalog;
 use romcat_core::fs::RealFs;
-use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
+use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::sublibrary::{self, Rule, Selection, Sublibrary};
 use romcat_core::sync::{
     self, Act, Desired, DesiredFile, FileKind, Manifest, ManifestFile, Options, Stamp,
@@ -64,7 +65,7 @@ fn 全部组合() -> Vec<(String, 组合)> {
                 目标态::读不到,
             ] {
                 let path = format!(
-                    "组合/{}-{}-{:?}.zip",
+                    "库/组合/{}-{}-{:?}.zip",
                     u8::from(要不要),
                     u8::from(清单里有),
                     目标
@@ -317,9 +318,9 @@ fn 建库() -> TempDir {
 
 fn 扫成库(root: &Path) -> Catalog {
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-    let mut options = ScanOptions::new(root);
+    let mut options = ScanOptions::named(root, "库");
     options.jobs = Jobs::Fixed(2);
-    scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
     catalog
 }
 
@@ -355,7 +356,8 @@ fn 期望状态是选中变体的文件成员_容量与变体那一层对得上(
     // 目录本身不是要搬的东西，但要数得出来——一个成员都不该凭空消失。
     assert!(desired.non_files > 0, "目录树变体的目录成员被数出来了");
     assert!(desired.empty_variants.is_empty());
-    // 路径一律相对子库根，与主库里的键同一个写法（ADR-0015、ADR-0020）。
+    // 路径一律相对子库根：与主库里的键同一个写法，只是**不带根名**——
+    // 前端认平台靠的是顶层那一级目录（ADR-0013、ADR-0015、ADR-0020）。
     assert!(
         desired
             .files
@@ -412,18 +414,18 @@ fn 手动拷进目标的存档在整条链路上绝对安全() {
     // 上次同步放过一个 FC 的游戏；这次规则只要 PSV，于是它该被删。
     let 上次 = Manifest {
         files: vec![ManifestFile {
-            path: "FC/魂斗罗.zip".to_string(),
+            path: "库/FC/魂斗罗.zip".to_string(),
             kind: FileKind::Rom,
             stamp: Stamp {
                 bytes: 2048,
                 mtime_ns: Some(7),
             },
-            source: "FC/魂斗罗.zip".to_string(),
+            source: "库/FC/魂斗罗.zip".to_string(),
             source_stamp: Stamp {
                 bytes: 2048,
                 mtime_ns: Some(7),
             },
-            variant: "FC/魂斗罗.zip".to_string(),
+            variant: "库/FC/魂斗罗.zip".to_string(),
             absent: false,
         }],
     };
@@ -460,7 +462,7 @@ fn 手动拷进目标的存档在整条链路上绝对安全() {
     assert!(
         plan.surprises
             .iter()
-            .any(|s| s.path == "FC/魂斗罗.zip" && s.kind == SurpriseKind::Gone && !s.still_wanted)
+            .any(|s| s.path == "库/FC/魂斗罗.zip" && s.kind == SurpriseKind::Gone && !s.still_wanted)
     );
     let text = plan.render_text();
     assert!(text.contains("清单之外"), "{text}");
@@ -523,18 +525,18 @@ fn 清单跟着子库一起没() {
             "掌机",
             &Manifest {
                 files: vec![ManifestFile {
-                    path: "FC/一.zip".to_string(),
+                    path: "库/FC/一.zip".to_string(),
                     kind: FileKind::Rom,
                     stamp: Stamp {
                         bytes: 1,
                         mtime_ns: None,
                     },
-                    source: "FC/一.zip".to_string(),
+                    source: "库/FC/一.zip".to_string(),
                     source_stamp: Stamp {
                         bytes: 1,
                         mtime_ns: None,
                     },
-                    variant: "FC/一.zip".to_string(),
+                    variant: "库/FC/一.zip".to_string(),
                     absent: false,
                 }],
             },

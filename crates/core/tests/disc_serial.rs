@@ -13,7 +13,8 @@ use std::fs;
 use std::path::Path;
 
 use romcat_core::catalog::identify::State;
-use romcat_core::catalog::{Catalog, Confidence};
+use romcat_core::task::Handle;
+use romcat_core::catalog::{Catalog, Confidence, Roots};
 use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
 use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
@@ -121,9 +122,9 @@ fn 建现场() -> 现场 {
     );
 
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-    let mut options = ScanOptions::new(root);
+    let mut options = ScanOptions::named(root, "库");
     options.jobs = Jobs::Fixed(2);
-    scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
 
     现场 {
         dir,
@@ -232,7 +233,7 @@ fn 建_dat() -> DatRepo {
 }
 
 fn 跑(现场: &mut 现场) -> identify::Outcome {
-    let options = Options::new(现场.dir.path());
+    let options = Options::new(Roots::single("库", 现场.dir.path()));
     identify::run(
         &RealFs::new(),
         &mut 现场.catalog,
@@ -259,7 +260,7 @@ fn ps1_的启动配置读得出序列号并撞上_dat() {
     // 这一份是**汉化版**：CRC 与任何 DAT 都对不上，而 `SYSTEM.CNF` 里那串编号没动过。
     let mut 现场 = 建现场();
     跑(&mut 现场);
-    let 候选 = 候选(&现场, "ps/某游戏 汉化版.zip");
+    let 候选 = 候选(&现场, "库/ps/某游戏 汉化版.zip");
     let 找到 = 候选
         .iter()
         .find(|c| c.source == "MAME")
@@ -275,7 +276,7 @@ fn ps1_的启动配置读得出序列号并撞上_dat() {
     assert_eq!(
         现场
             .catalog
-            .identification_of("ps/某游戏 汉化版.zip")
+            .identification_of("库/ps/某游戏 汉化版.zip")
             .expect("读得出")
             .expect("有结论")
             .0,
@@ -287,7 +288,7 @@ fn ps1_的启动配置读得出序列号并撞上_dat() {
 fn psp_的参数文件读得出光盘标识与标题() {
     let mut 现场 = 建现场();
     跑(&mut 现场);
-    let 候选 = 候选(&现场, "psp/某游戏.zip");
+    let 候选 = 候选(&现场, "库/psp/某游戏.zip");
     let 找到 = 候选.first().expect("撞上了");
     assert!(找到.accepted);
     // 盘里写的是 `ULJM05800`（`DISC_ID` 不带连字符），DAT 写的是 `ULJM-05800`——
@@ -316,12 +317,12 @@ fn pbp_与_cso_都不解全就取得到标识() {
     // PBP 是读 `param_sfo_offset` 处那段未压缩的明文，CSO 是按索引解头几个块。
     let mut 现场 = 建现场();
     跑(&mut 现场);
-    let pbp = 候选(&现场, "psp/EBOOT.PBP");
+    let pbp = 候选(&现场, "库/psp/EBOOT.PBP");
     assert!(
         pbp.iter().any(|c| c.evidence.contains("PBP 内")),
         "PBP 的 PARAM.SFO 该在固定偏移处读到：{pbp:#?}"
     );
-    let cso = 候选(&现场, "psp/压过的.cso");
+    let cso = 候选(&现场, "库/psp/压过的.cso");
     assert!(
         cso.iter().any(|c| c.accepted),
         "CSO 解头几个块就该拿到 PSP 的序列号：{cso:#?}"
@@ -331,7 +332,7 @@ fn pbp_与_cso_都不解全就取得到标识() {
 #[test]
 fn psv_目录树转储靠_param_sfo_认出来() {
     // 整个变体里没有一个「整文件」可以算哈希——票 07 在它身上只能报「无判据」。
-    let key = "PSV/A11 新罗罗的炼金工房[PCSG00245][日版]";
+    let key = "库/PSV/A11 新罗罗的炼金工房[PCSG00245][日版]";
     let mut 现场 = 建现场();
     跑(&mut 现场);
     let 候选 = 候选(&现场, key);
@@ -362,12 +363,12 @@ fn psv_目录树转储靠_param_sfo_认出来() {
 
 #[test]
 fn 目录名里的_titleid_是一条独立的依据且不自动通过() {
-    let key = "PSV/A11 新罗罗的炼金工房[PCSG00245][日版]";
+    let key = "库/PSV/A11 新罗罗的炼金工房[PCSG00245][日版]";
     let mut 现场 = 建现场();
     // 盘里读出来的那条已经把这个 TitleID 占了，所以名字那一条不重复产出——
     // 它要在**盘读不到**时才顶上。`--no-read-library` 正是那种情形，
     // 而且必须是**第一趟**就不读：读过一次之后事实落在中立库里，还是拿得到。
-    let mut options = Options::new(现场.dir.path());
+    let mut options = Options::new(Roots::single("库", 现场.dir.path()));
     options.read_library = false;
     identify::run(
         &RealFs::new(),
@@ -400,14 +401,14 @@ fn 压缩镜像的光盘头在固定偏移上读得到() {
     // RVZ 的光盘头在文件偏移 0x58，WBFS 的在 `hd_sector_size`。两者都**不解压**。
     let mut 现场 = 建现场();
     跑(&mut 现场);
-    let wii = 候选(&现场, "wii/某游戏.wbfs");
+    let wii = 候选(&现场, "库/wii/某游戏.wbfs");
     let 找到 = wii.first().expect("WBFS 里那份 Wii 光盘头认得出来");
     assert!(找到.evidence.contains("RMCE01"), "{}", 找到.evidence);
     // **NGC 那一份读得出 GALE01，但 DAT 里一条 GC 序列号都没有**——
     // 读得出标识与撞得上是两件事，报告要分得开。
     let (state, _) = 现场
         .catalog
-        .identification_of("ngc/某游戏.rvz")
+        .identification_of("库/ngc/某游戏.rvz")
         .expect("读得出")
         .expect("有结论");
     assert_eq!(state, State::Unmatched, "读出了判据，只是 DAT 里没有");
@@ -419,7 +420,7 @@ fn 没验过_nkit_的_gc_与_wii_镜像不许自动通过() {
     // 验不了就不自动通过，理由与第一命中层那条一模一样（Dolphin）。
     let mut 现场 = 建现场();
     跑(&mut 现场);
-    let wii = 候选(&现场, "wii/某游戏.wbfs");
+    let wii = 候选(&现场, "库/wii/某游戏.wbfs");
     let 找到 = wii.first().expect("撞上了");
     assert!(!找到.accepted, "没验过 NKit 就不敢自动通过");
     assert!(找到.evidence.contains("NKit"), "{}", 找到.evidence);

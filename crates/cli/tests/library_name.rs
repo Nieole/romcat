@@ -39,6 +39,7 @@ fn 扫(workspace: &Path, root: &Path, library: Option<&str>) -> std::process::Ou
     let mut command = Command::new(env!("CARGO_BIN_EXE_romcat"));
     command
         .arg("scan")
+        .args(["--root-name", "库"])
         .arg(root)
         .arg("--workspace")
         .arg(workspace)
@@ -126,16 +127,16 @@ fn 两个不同的主库用同一个名字时报错而不是混表() {
             .success()
     );
 
-    // 顶层条目全不一样：这不是同一个主库。中立库的键是相对路径（ADR-0020），
-    // 混进同一张表会直接撞车。
+    // 顶层条目全不一样：这个根名底下换了另一块盘。中立库的键是「根名 + 相对那个根的
+    // 路径」（ADR-0020），两块盘挤进同一个根名会直接撞车。
     let 乙 = temp_dir("library-clash-b");
     写(&乙.path().join("漫画/第一话.zip"), &zip(64));
     写(&乙.path().join("照片/去年.jpg"), &[0u8; 64]);
     let 出错 = 扫(workspace.path(), 乙.path(), Some("主库"));
     assert!(!出错.status.success(), "该拦下来");
     let 说明 = String::from_utf8_lossy(&出错.stderr);
-    assert!(说明.contains("多半不是同一个主库"), "{说明}");
-    assert!(说明.contains("换一个 --library 名字"), "{说明}");
+    assert!(说明.contains("多半不是同一块盘"), "{说明}");
+    assert!(说明.contains("换个根名"), "{说明}");
 }
 
 #[test]

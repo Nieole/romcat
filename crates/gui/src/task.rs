@@ -7,8 +7,8 @@
 //! 白板：期间切不了屏、滚不动列表、连「停下」都点不着。所以它们统统搬到画帧线程之外，
 //! 这一屏是那件事在界面上的落点。
 //!
-//! **眼下接上来的只有排差量预览一个**（挂账 D156 说的正是它）。扫描、识别、刮削、同步
-//! 各在各自的票里接——接的办法与这里一模一样：核心那一侧收一个
+//! **眼下接上来的是排差量预览、扫描与取数据源**。识别、刮削、同步各在各自的票里接
+//! ——接的办法与这里一模一样：核心那一侧收一个
 //! [`Handle`](romcat_core::task::Handle)，界面这一侧往 [`Board`] 上排一趟。
 //!
 //! ## 领域判断一条都不在这里
@@ -20,13 +20,15 @@
 use std::time::Duration;
 
 use romcat_core::report::human_duration;
+use romcat_core::scan::ScanOutcome;
+use romcat_core::sources::SourceStatus;
 use romcat_core::sync::Prepared;
 use romcat_core::task::{Board, Ending, Live, Record};
 
 /// 一趟任务跑完之后交出来的东西。
 ///
-/// **眼下只有一样。** 扫描、识别、刮削、同步在各自的票里接上来时，各自往这里加一支——
-/// 这个枚举就是「任务台上会跑哪几种活」的清单。
+/// **识别与刮削在各自的票里接上来时，各自往这里加一支**——这个枚举就是「任务台上会跑
+/// 哪几种活」的清单。
 #[derive(Debug)]
 pub enum Product {
     /// 一份排好的**差量预览**。
@@ -34,6 +36,10 @@ pub enum Product {
     /// 装箱是因为它很大（选择集、期望状态、清单、目标状态、计划全在里头），
     /// 而这个枚举将来还要长出别的支。
     Preview(Box<Prepared>),
+    /// 扫完了一个**根**。装箱同上：一趟扫描的产物里带着整份体检统计。
+    Scanned(Box<ScanOutcome>),
+    /// 取回了一个**数据源**。
+    Fetched(SourceStatus),
 }
 
 /// 这个界面上那张**任务台**。

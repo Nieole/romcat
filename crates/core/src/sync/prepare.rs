@@ -18,12 +18,12 @@
 //! 那道只读接缝走一遍，排计划的那一步是纯函数。连**媒体池**的目录都不建——
 //! 「排计划这条命令一个文件都没写」是可以照字面核对的一句话。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::adapter;
 use crate::capability::{Roster, today};
-use crate::catalog::Catalog;
+use crate::catalog::{Catalog, Roots};
 use crate::fs::RealFs;
 use crate::path;
 use crate::scrape::Priorities;
@@ -329,41 +329,72 @@ impl Prepared {
     }
 }
 
-/// 这份中立库对着的主库根：给了就用给的，否则用扫描时记下的那个。
+/// 这份中立库对着的**一组根**：先按扫描时记下的那份，再让 `overrides` 覆盖上去。
+///
+/// `overrides` 是 `(根名, 路径)`：命令行的 `--library-root 名字=路径` 走这条。根名给
+/// `None` 时只在**这份库只有一个根**的时候算数——那时「哪个根」没有歧义；多于一个根
+/// 却不说名字，覆盖谁都是猜。
 ///
 /// # Errors
-/// 中立库读不动时返回一句给人看的话。
-pub fn recorded_library_root(
+/// 中立库读不动、或者不说名字却有不止一个根时返回一句给人看的话。
+pub fn library_roots(
     catalog: &Catalog,
-    given: Option<&Path>,
-) -> Result<Option<PathBuf>, String> {
-    match given {
-        Some(root) => Ok(Some(path::normalize_existing(root))),
-        None => catalog
-            .library_root()
-            .map(|root| root.map(PathBuf::from))
-            .map_err(|error| format!("中立库读不动：{error}")),
+    overrides: &[(Option<String>, PathBuf)],
+) -> Result<Roots, String> {
+    let mut roots = Roots::load(catalog).map_err(|error| format!("中立库读不动：{error}"))?;
+    for (name, path) in overrides {
+        let path = path::normalize_existing(path);
+        match name {
+            Some(name) => roots.set(name, path),
+            None => match roots.only().map(str::to_string) {
+                Some(only) => roots.set(&only, path),
+                None if roots.is_empty() => roots.set("主库", path),
+                None => {
+                    return Err(format!(
+                        "这份中立库有 {} 个根，`--library-root` 得说清是哪一个：\n\
+                         `--library-root 根名=路径`。这份库里的根是：{}",
+                        roots.len(),
+                        roots
+                            .iter()
+                            .map(|(name, _)| name.to_string())
+                            .collect::<Vec<_>>()
+                            .join("、")
+                    ));
+                }
+            },
+        }
     }
+    Ok(roots)
 }
 
-/// 这一趟去哪儿读主库；说不出来或者盘不在位时返回一句给人看的话。
+/// 这一趟真要读的那几个**根**里，哪些不在位。
 ///
-/// # Errors
-/// 这份中立库没记着主库在哪、或者那个目录不在位时返回错误。
-pub fn library_root(catalog: &Catalog, given: Option<&Path>) -> Result<PathBuf, String> {
-    let root = recorded_library_root(catalog, given)?.ok_or_else(|| {
-        "这份中立库没记着主库在哪。给 `--library-root <主库根目录>`，\n\
-         或者先跑一次 `romcat scan` 让它记下来。"
-            .to_string()
-    })?;
-    if !root.is_dir() {
-        return Err(format!(
-            "主库不在位：{}\n\
-             搬 ROM 要真的去读它。插上外置盘，或者给 `--library-root <主库根目录>`。",
-            path::display(&root)
-        ));
+/// 只看这一趟真的要搬的那些 ROM 落在哪个根上——**别的根挂没挂上与这一趟无关**。
+/// 那正是「主库是一组根」比「一个目录」好的地方：甲盘不在位不该挡住只动乙盘的同步。
+#[must_use]
+pub fn missing_roots(prepared: &Prepared, roots: &Roots) -> Vec<String> {
+    let mut missing: BTreeSet<String> = BTreeSet::new();
+    for step in &prepared.plan.steps {
+        if step.kind != super::FileKind::Rom || step.act == super::Act::Delete {
+            continue;
+        }
+        let name = path::root_of_key(&step.source);
+        let present = roots.path_of(name).is_some_and(Path::is_dir);
+        if !present {
+            missing.insert(name.to_string());
+        }
     }
-    Ok(root)
+    missing.into_iter().collect()
+}
+
+/// 这几个根不在位时该对人说的那句话。
+#[must_use]
+pub fn missing_roots_message(missing: &[String]) -> String {
+    format!(
+        "主库这几个根不在位：{}。\n\
+         搬 ROM 要真的去读它们。插上外置盘，或者给 `--library-root 根名=路径`。",
+        missing.join("、")
+    )
 }
 
 /// 目标落在主库里就拦下来。
@@ -380,18 +411,22 @@ pub fn library_root(catalog: &Catalog, given: Option<&Path>) -> Result<PathBuf, 
 /// 目标落在主库里、或者中立库读不动时返回一句给人看的话。
 pub fn refuse_target_in_library(
     catalog: &Catalog,
-    given: Option<&Path>,
+    overrides: &[(Option<String>, PathBuf)],
     target: &Path,
 ) -> Result<(), String> {
-    let Some(root) = recorded_library_root(catalog, given)? else {
-        return Ok(());
-    };
-    if path::is_inside(&root, &path::normalize_existing(target)) {
-        return Err(format!(
-            "目标 {} 落在主库里。**主库只读**（ADR-0004）：同步会往目标上写文件、\n\
-             删文件，绝不能指着那块盘。子库要导到别处去——一律走读卡器（ADR-0015）。",
-            path::display(target)
-        ));
+    let roots = library_roots(catalog, overrides)?;
+    let target = path::normalize_existing(target);
+    // **每个根都要拦。** 一份中立库装着几块盘，只拦其中一块等于另外几块没人守。
+    for (name, root) in roots.iter() {
+        if path::is_inside(root, &target) {
+            return Err(format!(
+                "目标 {} 落在主库的根「{name}」（{}）里。**主库只读**（ADR-0004）：\n\
+                 同步会往目标上写文件、删文件，绝不能指着那块盘。\n\
+                 子库要导到别处去——一律走读卡器（ADR-0015）。",
+                path::display(&target),
+                path::display(root),
+            ));
+        }
     }
     Ok(())
 }

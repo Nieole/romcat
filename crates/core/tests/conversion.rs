@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::{fs, io};
 
 use romcat_core::capability::{Filesystem, Profile, RejectReason, Roster};
+use romcat_core::catalog::Roots;
+use romcat_core::task::Handle;
 use romcat_core::catalog::Catalog;
 use romcat_core::container::{self, ReadPlan};
 use romcat_core::fs::RealFs;
@@ -105,9 +107,9 @@ impl 现场 {
         let 卡 = temp_dir("conv-card");
         let 库根 = 库.path().to_path_buf();
         let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-        let mut options = ScanOptions::new(&库根);
+        let mut options = ScanOptions::named(&库根, "库");
         options.jobs = Jobs::Fixed(2);
-        scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
+        scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
         Self {
             _库: 库,
             _工作区: 工作区,
@@ -158,7 +160,7 @@ impl 现场 {
         let generated = std::collections::BTreeMap::new();
         let sources = Sources {
             library: &RealFs,
-            library_root: Some(&self.库根),
+            library_roots: Some(&Roots::single("库", &self.库根)),
             target_root: self.卡.path(),
             from_pool: &from_pool,
             generated: &generated,
@@ -247,8 +249,8 @@ fn 卡带的_7z_重打包成_zip_而且产物零解压读得回去() {
         .find(|step| step.convert.is_some())
         .expect("有一条转换步骤");
     assert_eq!(那一步.act, Act::Add);
-    assert_eq!(那一步.source, "SFC/魂斗罗.7z", "源仍然指着主库里的原始形态");
-    assert_eq!(那一步.path, "SFC/魂斗罗.zip", "落点是产物");
+    assert_eq!(那一步.source, "库/SFC/魂斗罗.7z", "源仍然指着主库里的原始形态");
+    assert_eq!(那一步.path, "SFC/魂斗罗.zip", "落点是产物——相对子库根，不带根名");
 
     let 转之前 = 取证(&现场.库根.join("SFC/魂斗罗.7z"));
     let outcome = 现场.跑(&desired, &plan, None);
@@ -415,12 +417,12 @@ fn 内置_fat32_档案对一份_4_5_gib_的镜像判放不下() {
         kind: sync::FileKind::Rom,
         bytes: 4_831_838_208,
         unreadable: false,
-        source: "PS2/某作.iso".to_string(),
+        source: "库/PS2/某作.iso".to_string(),
         source_stamp: sync::Stamp {
             bytes: 4_831_838_208,
             mtime_ns: Some(1),
         },
-        variant: "PS2/某作.iso".to_string(),
+        variant: "库/PS2/某作.iso".to_string(),
         convert: None,
     });
     desired.screen(&fat32, 0);
@@ -440,9 +442,9 @@ fn 目标吃不下而且转不了的照搬_但点名说出口() {
     let 工作区 = temp_dir("conv-rar-ws");
     let 卡 = temp_dir("conv-rar-card");
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-    let mut options = ScanOptions::new(库.path());
+    let mut options = ScanOptions::named(库.path(), "库");
     options.jobs = Jobs::Fixed(2);
-    scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
 
     let profile = Roster::builtin()
         .find("retroarch-exfat")
@@ -531,7 +533,7 @@ fn 默认不缓存_给了目录才落第三份而且第二趟直接命中() {
     let generated = std::collections::BTreeMap::new();
     let sources = Sources {
         library: &RealFs,
-        library_root: Some(&现场.库根),
+        library_roots: Some(&Roots::single("库", &现场.库根)),
         target_root: 卡二.path(),
         from_pool: &from_pool,
         generated: &generated,

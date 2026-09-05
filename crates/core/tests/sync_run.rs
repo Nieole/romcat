@@ -17,6 +17,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use romcat_core::adapter;
+use romcat_core::catalog::Roots;
+use romcat_core::task::Handle;
 use romcat_core::capability::Profile;
 use romcat_core::catalog::Catalog;
 use romcat_core::catalog::scrape::{Harvested, HarvestedMedia};
@@ -56,9 +58,9 @@ fn 建个大库() -> TempDir {
 
 fn 扫成库(root: &Path) -> Catalog {
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-    let mut options = ScanOptions::new(root);
+    let mut options = ScanOptions::named(root, "库");
     options.jobs = Jobs::Fixed(2);
-    scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
     catalog
 }
 
@@ -191,7 +193,7 @@ impl 现场 {
     ) -> sync::Outcome {
         let sources = Sources {
             library: &RealFs,
-            library_root: Some(&self.库根),
+            library_roots: Some(&Roots::single("库", &self.库根)),
             target_root: self.卡.path(),
             from_pool: &这趟.from_pool,
             generated: &这趟.generated,
@@ -335,8 +337,8 @@ fn 中断之后落点上没有半份文件_再跑一趟接着来() {
 #[test]
 fn 媒体同卷时走硬链接_不重复占用空间() {
     let mut 现场 = 现场::摆好();
-    现场.收一份媒体("FC/魂斗罗.zip", MediaKind::Cover, &[1u8; 4096]);
-    现场.收一份媒体("FC/魂斗罗.zip", MediaKind::Screenshot, &[2u8; 2048]);
+    现场.收一份媒体("库/FC/魂斗罗.zip", MediaKind::Cover, &[1u8; 4096]);
+    现场.收一份媒体("库/FC/魂斗罗.zip", MediaKind::Screenshot, &[2u8; 2048]);
 
     let 这趟 = 现场.排一趟("平台=FC", &Manifest::empty());
     let 媒体步 = 这趟
@@ -375,14 +377,14 @@ fn 媒体同卷时走硬链接_不重复占用空间() {
 #[test]
 fn 探不动硬链接就复制_降级路径在任何文件系统上都成立() {
     let mut 现场 = 现场::摆好();
-    现场.收一份媒体("FC/魂斗罗.zip", MediaKind::Cover, &[3u8; 1024]);
+    现场.收一份媒体("库/FC/魂斗罗.zip", MediaKind::Cover, &[3u8; 1024]);
     let 这趟 = 现场.排一趟("平台=FC", &Manifest::empty());
 
     // `link_probe_dir` 给 `None` 就是「没法探测」——SD 卡的 exFAT / FAT32 上探测
     // 一定报复制，这条降级不是优化项而是必需路径（ADR-0009）。
     let sources = Sources {
         library: &RealFs,
-        library_root: Some(&现场.库根),
+        library_roots: Some(&Roots::single("库", &现场.库根)),
         target_root: 现场.卡.path(),
         from_pool: &这趟.from_pool,
         generated: &这趟.generated,
@@ -418,7 +420,7 @@ fn 探测本身建不出文件时报复制() {
 #[test]
 fn 子库内元数据里的路径全部相对子库根() {
     let mut 现场 = 现场::摆好();
-    现场.收一份媒体("FC/魂斗罗.zip", MediaKind::Cover, &[4u8; 512]);
+    现场.收一份媒体("库/FC/魂斗罗.zip", MediaKind::Cover, &[4u8; 512]);
     let 这趟 = 现场.排一趟("平台=FC", &Manifest::empty());
     现场.执行(&这趟, &Manifest::empty(), &CancelToken::new());
 

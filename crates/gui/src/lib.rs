@@ -54,6 +54,7 @@ pub mod font;
 pub mod headless;
 pub mod library;
 pub mod queue;
+pub mod roots;
 pub mod site;
 pub mod sublibrary;
 pub mod table;

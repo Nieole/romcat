@@ -166,6 +166,7 @@ impl DuplicateDetails {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::Roots;
     use crate::platform::Manifest;
     use crate::report::ReportMeta;
     use crate::scan::aggregate::{FileObservation, Limits};
@@ -173,7 +174,7 @@ mod tests {
     fn 观察(key: &str, len: u64) -> FileObservation {
         FileObservation::derive(
             &Manifest::builtin(),
-            "/lib",
+            &Roots::single("库", "/lib"),
             key,
             Some(len),
             false,
@@ -186,6 +187,7 @@ mod tests {
         HealthReport::build(
             aggregate,
             &ReportMeta {
+                root_name: "库".to_string(),
                 root: "/lib".to_string(),
                 scan: 1,
                 interrupted,
@@ -209,7 +211,7 @@ mod tests {
         for n in 1..=count {
             for copy in 0..=n {
                 agg.record_file(
-                    &观察(&format!("FC/备份{copy}/游戏{n}.zip"), n * 1024),
+                    &观察(&format!("库/FC/备份{copy}/游戏{n}.zip"), n * 1024),
                     limits,
                 );
             }
@@ -261,7 +263,7 @@ mod tests {
         };
         let mut agg = Aggregate::default();
         for copy in 0..25 {
-            agg.record_file(&观察(&format!("FC/备份{copy}/魂斗罗.zip"), 4096), &limits);
+            agg.record_file(&观察(&format!("库/FC/备份{copy}/魂斗罗.zip"), 4096), &limits);
         }
         let details = 明细(&agg);
         assert_eq!(details.groups_with_missing_paths, 0);
@@ -285,7 +287,7 @@ mod tests {
         };
         let mut agg = Aggregate::default();
         for copy in 0..25 {
-            agg.record_file(&观察(&format!("FC/备份{copy}/魂斗罗.zip"), 4096), &limits);
+            agg.record_file(&观察(&format!("库/FC/备份{copy}/魂斗罗.zip"), 4096), &limits);
         }
         let report = 报告(&agg, false, false);
         let details = DuplicateDetails::build(&agg, &report);
@@ -307,7 +309,7 @@ mod tests {
         };
         let mut agg = Aggregate::default();
         for copy in 0..10 {
-            agg.record_file(&观察(&format!("FC/备份{copy}/魂斗罗.zip"), 4096), &limits);
+            agg.record_file(&观察(&format!("库/FC/备份{copy}/魂斗罗.zip"), 4096), &limits);
         }
         let details = 明细(&agg);
         assert_eq!(details.groups_with_missing_paths, 1);
@@ -347,7 +349,7 @@ mod tests {
     #[test]
     fn 没有重复拷贝时明细也说得清楚() {
         let mut agg = Aggregate::default();
-        agg.record_file(&观察("FC/独一份.zip", 4096), &Limits::default());
+        agg.record_file(&观察("库/FC/独一份.zip", 4096), &Limits::default());
         let details = 明细(&agg);
         assert_eq!(details.group_count(), 0);
         assert_eq!(details.reclaimable_bytes, 0);

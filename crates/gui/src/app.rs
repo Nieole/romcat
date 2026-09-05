@@ -22,7 +22,7 @@ use std::path::PathBuf;
 
 use egui::{Align, Layout};
 
-use crate::{library, queue, sublibrary, task};
+use crate::{library, queue, roots, sublibrary, task};
 use romcat_core::site::Site;
 
 /// 关窗走到哪一拍了。
@@ -42,6 +42,8 @@ pub enum View {
     /// **待确认队列**：打开工具就是它（ADR-0002）。
     #[default]
     Queue,
+    /// **库**：这个库由什么构成——**一组根**加上**数据源**（票 `gui-redesign/02`）。
+    Library,
     /// **库浏览**：翻整个主库、按四个维度筛、改条目的元数据（票 25）。
     ///
     /// 名字里留着 `Variants`，因为它中间那张表就是票 22 那张**变体表**。
@@ -54,13 +56,20 @@ pub enum View {
 
 impl View {
     /// 顶栏照这个次序摆。
-    pub const ALL: [Self; 4] = [Self::Queue, Self::Variants, Self::Sublibraries, Self::Tasks];
+    pub const ALL: [Self; 5] = [
+        Self::Queue,
+        Self::Library,
+        Self::Variants,
+        Self::Sublibraries,
+        Self::Tasks,
+    ];
 
     /// 这一屏叫什么。用**词表**里的词。
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Queue => "待确认队列",
+            Self::Library => "库",
             Self::Variants => "库浏览",
             Self::Sublibraries => "子库",
             Self::Tasks => "任务",
@@ -75,6 +84,8 @@ pub struct App {
     view: View,
     /// 待确认队列那一屏。
     queue: queue::Screen,
+    /// 库那一屏：一组根 + 数据源。
+    roots: roots::Screen,
     /// 库浏览那一屏。
     library: library::Screen,
     /// 子库那一屏。
@@ -109,12 +120,15 @@ impl App {
                 .is_dir()
                 .then(|| romcat_core::scrape::pool::MediaPool::at(&pool_dir)),
         );
+        let mut roots = roots::Screen::new(workspace.clone());
+        roots.reload(&site);
         let mut sublibrary = sublibrary::Screen::new(workspace);
         sublibrary.reload(&site);
         Self {
             site,
             view: View::default(),
             queue,
+            roots,
             library,
             sublibrary,
             tasks: task::Screen::new(),
@@ -159,6 +173,19 @@ impl App {
     #[must_use]
     pub fn site(&self) -> &Site {
         &self.site
+    }
+
+    /// 库那一屏，供测试查「有几个根、数据源什么状况」。
+    #[must_use]
+    pub fn roots(&self) -> &roots::Screen {
+        &self.roots
+    }
+
+    /// 库那一屏、它的库、**再加任务台**。加根、扫描、取数据源这三下都要它们。
+    pub fn roots_site_and_tasks(
+        &mut self,
+    ) -> (&mut roots::Screen, &mut Site, &mut task::Tasks) {
+        (&mut self.roots, &mut self.site, &mut self.board)
     }
 
     /// 库浏览那一屏，供测试查「筛出多少行、点开的那一条是什么」。
@@ -207,8 +234,11 @@ impl App {
     /// 每帧一次。测试与实测在等一趟活跑完时也调它——**走的是界面上那条一模一样的路**。
     pub fn poll_tasks(&mut self) {
         while let Some(done) = self.board.poll() {
-            // 眼下只有子库那一屏往台上排活（排差量预览）。它按任务号认领自己那一趟，
-            // 不是它的就放过去——将来别的屏接上来时，各自在这儿多认一次。
+            // **各屏按任务号认领自己那一趟，不是它的就放过去。** 将来识别与刮削接上来
+            // 时，各自在这儿多认一次。
+            if self.roots.settle(&self.site, &done) {
+                continue;
+            }
             self.sublibrary.settle(done);
         }
     }
@@ -230,6 +260,10 @@ impl App {
                 let (queue, site) = (&mut self.queue, &mut self.site);
                 queue.ui(ui, site);
             }
+            View::Library => {
+                let (roots, site, board) = (&mut self.roots, &mut self.site, &mut self.board);
+                roots.ui(ui, site, board);
+            }
             View::Variants => {
                 let (library, site) = (&mut self.library, &mut self.site);
                 library.ui(ui, site);
@@ -247,7 +281,9 @@ impl App {
         // **这一句要在画完之后问**：排活的那一下就发生在上面那几屏里
         // （子库屏点「排差量预览」）。搁在这一帧开头问的话，刚排上去的那一趟要等到
         // 下一次有输入事件才会被画到——进度不走，「停下」也按不动。
-        if self.board.busy() {
+        // **跑完还没被认领的也算**：`run_here` 就地跑完那一趟，结果落进待认领那一格的
+        // 时刻已经在本帧问过任务台之后了（`Board::settled` 的文档）。
+        if self.board.busy() || self.board.settled() {
             ui.ctx().request_repaint();
         }
     }
@@ -270,6 +306,10 @@ impl App {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(format!("沉淀库 {}", self.site.store.location()));
                     });
+                }
+                View::Library => {
+                    let (roots, site) = (&mut self.roots, &self.site);
+                    roots.status(ui, site);
                 }
                 View::Variants => {
                     let (library, site) = (&mut self.library, &self.site);

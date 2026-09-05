@@ -40,6 +40,29 @@ const WORKS: &[&str] = &[
     "轩辕剑外传 · 天之痕",
 ];
 
+/// 合成数据那个**根**叫什么。
+///
+/// 键的第一段是根名（`path::library_key`），合成数据照真库的形状摆——不带的话，
+/// 平台目录会被当成根名，界面上一个平台都认不出来。
+const DEMO_ROOT: &str = "合成库";
+
+/// 合成数据那个根**假装**挂在哪。它不在盘上——合成数据一个字节都不碰磁盘，
+/// 库屏上那一行因此显示「不在位」，那正是实情。
+const DEMO_ROOT_PATH: &str = "/合成/主库";
+
+/// 把那个根记进中立库。
+///
+/// 不记的话库屏上一个根都没有，而浏览屏上摆着四万条——合成数据自己前后矛盾，
+/// 比不摆更坏。
+fn 记下合成的根(catalog: &Catalog) {
+    let _ = romcat_core::catalog::roots::add_root(
+        catalog,
+        None,
+        DEMO_ROOT,
+        std::path::Path::new(DEMO_ROOT_PATH),
+    );
+}
+
 /// 平台目录名。真库就是按平台分目录的（ADR-0011），合成数据照做。
 const PLATFORMS: &[&str] = &[
     "SFC", "PS1", "PS2", "PSP", "NDS", "GBA", "MD", "N64", "SS", "DC", "WII", "PSV", "3DS", "NSW",
@@ -64,12 +87,13 @@ const MARKS: &[&str] = &[
 /// 建库或写库失败时返回错误。
 pub fn synthetic(rows: u64) -> Result<Catalog, CatalogError> {
     let mut catalog = Catalog::open_in_memory()?;
+    记下合成的根(&catalog);
     let variants: Vec<Variant> = (0..rows)
         .map(|i| {
             let platform = PLATFORMS[(i as usize) % PLATFORMS.len()];
             let work = WORKS[(i as usize / 3) % WORKS.len()];
             let mark = MARKS[(i as usize / 7) % MARKS.len()];
-            let key = format!("{platform}/{work}（{mark}）#{i:06}.zip");
+            let key = format!("{DEMO_ROOT}/{platform}/{work}（{mark}）#{i:06}.zip");
             Variant {
                 main_key: key.clone(),
                 key,
@@ -258,6 +282,7 @@ const REASONS: &[&str] = &[
 /// 建库或写库失败时返回错误。
 pub fn queue(rows: u64) -> Result<Catalog, CatalogError> {
     let mut catalog = Catalog::open_in_memory()?;
+    记下合成的根(&catalog);
     let scale = |count: u64| count.saturating_mul(rows) / QUEUE_ROWS;
     let mut variants = Vec::new();
     let mut hashes = Vec::new();
@@ -280,7 +305,7 @@ pub fn queue(rows: u64) -> Result<Catalog, CatalogError> {
             } else {
                 format!("{work}[{mark}]#{n:05}.{}", bucket.ext)
             };
-            let key = format!("{}/{name}", bucket.dir);
+            let key = format!("{DEMO_ROOT}/{}/{name}", bucket.dir);
             let state = match n {
                 _ if n < matched => State::Matched,
                 _ if n < no_evidence => State::NoEvidence,
@@ -468,10 +493,11 @@ pub fn library(rows: u64) -> Result<Catalog, CatalogError> {
         let platform = PLATFORMS[(i as usize) % PLATFORMS.len()];
         let work = WORKS[(i as usize / 3) % WORKS.len()];
         let mark = MARKS[(i as usize / 7) % MARKS.len()];
-        format!("{platform}/{work}（{mark}）#{i:06}.zip")
+        format!("{DEMO_ROOT}/{platform}/{work}（{mark}）#{i:06}.zip")
     };
 
     let mut catalog = Catalog::open_in_memory()?;
+    记下合成的根(&catalog);
     // 零、条目与变体。**每个变体一个文件成员**：子库那一屏要靠它折出期望状态
     //     （`sync::desired` 走的是 `variant_member` 连 `entry`）。容量刻意压在
     //     几十 KiB 到几 MiB——`--bench-sublibrary` 那一趟要真的往 fixture 目录里写，

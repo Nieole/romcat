@@ -12,11 +12,12 @@ use std::fs;
 use std::path::Path;
 
 use romcat_core::catalog::Catalog;
+use romcat_core::task::Handle;
 use romcat_core::fs::RealFs;
 use romcat_core::platform::Manifest;
 use romcat_core::report::HealthReport;
 use romcat_core::scan::aggregate::{ConflictEvidence, Limits};
-use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions, ScanOutcome};
+use romcat_core::scan::{self, Jobs, ScanOptions, ScanOutcome};
 use romcat_core::shape::Role;
 use romcat_core::testing::sample::{chd, gba, iso, nds, zip};
 use romcat_core::testing::{TempDir, temp_dir};
@@ -97,10 +98,10 @@ fn 建库() -> TempDir {
 }
 
 fn 扫(root: &Path, catalog: &mut Catalog) -> ScanOutcome {
-    let mut options = ScanOptions::new(root);
+    let mut options = ScanOptions::named(root, "库");
     options.jobs = Jobs::Fixed(4);
     options.samples_per_class = 64;
-    scan::scan(&RealFs::new(), catalog, &options, &CancelToken::new()).expect("扫描不该失败")
+    scan::scan(&RealFs::new(), catalog, &options, &Handle::new()).expect("扫描不该失败")
 }
 
 fn 变体数(report: &HealthReport, platform: &str) -> u64 {
@@ -141,14 +142,14 @@ fn psv_那一堆内部资源在真盘上收敛成几个变体() {
 
     // 那 40 个 at9 一个都不许自成条目，但它们属于哪个变体要答得上来。
     let 变体 = catalog
-        .variant_of("PSV/PSVENJP/零之轨迹[PCSG00042][日版]/app/PCSG00042/bgm/7.at9")
+        .variant_of("库/PSV/PSVENJP/零之轨迹[PCSG00042][日版]/app/PCSG00042/bgm/7.at9")
         .expect("读得出")
         .expect("它属于某个变体");
-    assert_eq!(变体.0, "PSV/PSVENJP/零之轨迹[PCSG00042][日版]");
+    assert_eq!(变体.0, "库/PSV/PSVENJP/零之轨迹[PCSG00042][日版]");
     assert_eq!(变体.1, Role::Internal, "at9 是内部资源，不是变体");
     assert!(
         catalog
-            .variant("PSV/PSVENJP/零之轨迹[PCSG00042][日版]/app/PCSG00042/bgm/7.at9")
+            .variant("库/PSV/PSVENJP/零之轨迹[PCSG00042][日版]/app/PCSG00042/bgm/7.at9")
             .expect("读得出")
             .is_none(),
         "内部资源不各自成条目"
@@ -158,7 +159,7 @@ fn psv_那一堆内部资源在真盘上收敛成几个变体() {
     assert_eq!(
         catalog
             .variant_of(
-                "PSV/PSVENJP/零之轨迹[PCSG00042][日版]/addcont/PCSG00042/TWDS20000000DLC2/x.psarc"
+                "库/PSV/PSVENJP/零之轨迹[PCSG00042][日版]/addcont/PCSG00042/TWDS20000000DLC2/x.psarc"
             )
             .expect("读得出")
             .map(|(_, role)| role),
@@ -174,30 +175,30 @@ fn 三种成型规则在真盘上各自聚对() {
 
     // cue 加它的 bin
     let cue = catalog
-        .variant("ps/生化危机/生化危机.cue")
+        .variant("库/ps/生化危机/生化危机.cue")
         .expect("读得出")
         .expect("有这个变体");
     assert_eq!(cue.files, 2);
-    assert_eq!(cue.main_key, "ps/生化危机/生化危机.cue");
+    assert_eq!(cue.main_key, "库/ps/生化危机/生化危机.cue");
 
     // PS3_GAME 所在目录
     let ps3 = catalog
-        .variant("ps3/某游戏")
+        .variant("库/ps3/某游戏")
         .expect("读得出")
         .expect("有这个变体");
     assert_eq!(ps3.files, 4, "PS3_UPDATE 与 PARAM.SFO 也吞进来");
-    assert_eq!(ps3.main_key, "ps3/某游戏");
+    assert_eq!(ps3.main_key, "库/ps3/某游戏");
 
     // 多碟同族
     let 多碟 = catalog
-        .variant("ps/龙骑士传说/传说 (Disc 1).chd")
+        .variant("库/ps/龙骑士传说/传说 (Disc 1).chd")
         .expect("读得出")
         .expect("有这个变体");
     assert_eq!(多碟.files, 3, "三张碟是一个变体");
     assert_eq!(
         多碟.files.min(
             catalog
-                .variant_members("ps/龙骑士传说/传说 (Disc 1).chd")
+                .variant_members("库/ps/龙骑士传说/传说 (Disc 1).chd")
                 .expect("读得出")
                 .len() as u64
         ),
@@ -205,7 +206,7 @@ fn 三种成型规则在真盘上各自聚对() {
     );
     assert!(
         catalog
-            .variant("ps/龙骑士传说/传说 (Disc 2).chd")
+            .variant("库/ps/龙骑士传说/传说 (Disc 2).chd")
             .expect("读得出")
             .is_none(),
         "第二张碟不另成一个变体"
@@ -340,23 +341,23 @@ fn 人工纠正把两个散文件并成一个变体且熬得过重扫() {
     扫(dir.path(), &mut catalog);
     assert!(
         catalog
-            .variant("FC/超级马里奥.zip")
+            .variant("库/FC/超级马里奥.zip")
             .expect("读得出")
             .is_some()
     );
 
     // 维护者说：这个 png 其实是那个变体的一部分。
     catalog
-        .set_shaping_override("FC/封面.png", "FC/超级马里奥.zip")
+        .set_shaping_override("库/FC/封面.png", "库/FC/超级马里奥.zip")
         .expect("记得下");
     catalog
-        .set_shaping_override("FC/超级马里奥.zip", "FC/超级马里奥.zip")
+        .set_shaping_override("库/FC/超级马里奥.zip", "库/FC/超级马里奥.zip")
         .expect("记得下");
 
     // 重扫一遍：纠正要熬得过去。
     let report = 扫(dir.path(), &mut catalog).report;
     let 并起来的 = catalog
-        .variant("FC/超级马里奥.zip")
+        .variant("库/FC/超级马里奥.zip")
         .expect("读得出")
         .expect("还在");
     assert_eq!(并起来的.files, 2);
@@ -392,16 +393,16 @@ fn 加一个平台只要给一份清单() {
     )
     .expect("清单编得出来");
 
-    let mut options = ScanOptions::new(root);
+    let mut options = ScanOptions::named(root, "库");
     options.jobs = Jobs::Fixed(2);
     options.manifest = 清单.clone();
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
     let outcome =
-        scan::scan(&RealFs::new(), &mut catalog, &options, &CancelToken::new()).expect("扫得动");
+        scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
 
     assert_eq!(变体数(&outcome.report, "假想机"), 1, "整棵树是一个变体");
     let variant = catalog
-        .variant("假想机/某游戏")
+        .variant("库/假想机/某游戏")
         .expect("读得出")
         .expect("有这个变体");
     assert_eq!(variant.files, 3);

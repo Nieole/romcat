@@ -13,8 +13,11 @@
 //! - **报告不必扫盘**。报告一律由 [`Catalog::aggregate`] 从中立库折出来，扫描刚跑完
 //!   也一样。于是「扫完出的报告」与「盘不在位时出的报告」不可能是两套数字。
 //!
-//! 平台由目录给出（ADR-0011）：文件的键相对扫描根的第一级目录名就是平台目录。认不出
+//! 平台由目录给出（ADR-0011）：键去掉**根名**之后第一级目录名就是平台目录。认不出
 //! 平台的照常计入报告——平台未知不构成跳过的理由。
+//!
+//! **一趟扫一个根。** 主库是一组根（`CONTEXT.md`），几个根扫进同一份中立库；一趟扫描
+//! 只走其中一个，键上带着它的名字，收尾时也只收它那一支（[`Catalog::sweep`]）。
 
 pub mod aggregate;
 pub mod checkpoint;
@@ -28,7 +31,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
-use crate::catalog::{Baseline, Catalog, CatalogError, EntryRecord, ScanDelta, Traversal, Verdict};
+use crate::catalog::roots::{self, AddRootError, RootScan};
+use crate::catalog::{
+    Baseline, Catalog, CatalogError, EntryRecord, ScanDelta, Traversal, Verdict,
+};
 use crate::classify;
 use crate::container::{self, ContainerKind, Penetration};
 use crate::fs::{DirEntry, EntryKind, EntryMeta, LibraryFs};
@@ -37,6 +43,7 @@ use crate::path;
 use crate::platform::Manifest;
 use crate::report::{HealthReport, ReportMeta};
 use crate::shape;
+use crate::task::Handle;
 
 use aggregate::{Aggregate, Limits, SampleResult};
 use checkpoint::{Checkpoint, CheckpointError};
@@ -49,6 +56,12 @@ const SAME_LIBRARY_OVERLAP: f64 = 0.5;
 
 /// 比对顶层条目时最多取几条。真库的顶层是 73 条，取 512 条绰绰有余。
 const TOP_LEVEL_SAMPLE: usize = 512;
+
+/// 一趟扫描分几步报进度：认根、遍历、收尾、成型。
+///
+/// **中断的那一趟走不到收尾与成型**（半个库上收出来的删除与成出来的变体是错的），
+/// 于是进度条停在第二步——那正是实情。
+const SCAN_STEPS: u32 = 4;
 
 /// 攒够多少条记录写一次中立库。
 ///
@@ -74,27 +87,32 @@ pub enum ScanError {
         /// 出问题的路径。
         path: String,
     },
-    /// 同一份中立库底下换了另一个主库。
+    /// 同一个**根**底下换了另一块盘。
     ///
-    /// 只有 `--library` 给中立库起了名字才可能出现：名字一样、主库不一样。
+    /// 根跟名字走而不跟路径走（挂账 D16），于是换挂载点还找得回同一支记录——这正是要的。
+    /// 代价是「名字一样、盘不一样」变得可能，而那会让两块盘的记录挤进同一串前缀。
     #[error(
-        "中立库 {catalog} 记的主库是 {recorded}，这次要扫的是 {current}——\
-         顶层条目只有 {common}/{recorded_count} 条对得上，两边多半不是同一个主库。\
-         中立库的键是相对主库根的路径（ADR-0020），两个主库挤进同一份库会直接撞车。\
-         换一个 --library 名字，或者删掉那份中立库重扫一遍"
+        "根「{name}」记的是 {recorded}，这次指的是 {current}——\
+         顶层条目只有 {common}/{recorded_count} 条对得上，两边多半不是同一块盘。\
+         中立库的键是「根名 + 相对那个根的路径」（ADR-0020），\
+         两块盘挤进同一个根名会直接撞车。\
+         换个根名把它当成新的一个根加进来，或者先移除「{name}」再重扫"
     )]
     DifferentLibrary {
-        /// 中立库文件。
-        catalog: String,
-        /// 库里记着的主库根。
+        /// 这个根叫什么。
+        name: String,
+        /// 这个根上次记着在哪。
         recorded: String,
-        /// 这次要扫的主库根。
+        /// 这次指的是哪。
         current: String,
         /// 顶层条目对得上几条。
         common: usize,
         /// 库里记着的顶层条目共几条。
         recorded_count: usize,
     },
+    /// 这个根加不进来。
+    #[error(transparent)]
+    AddRoot(#[from] AddRootError),
     /// 断点读写失败。
     #[error(transparent)]
     Checkpoint(#[from] CheckpointError),
@@ -149,8 +167,16 @@ pub enum Jobs {
 /// 扫描参数。
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
-    /// 主库根目录。
+    /// 这一趟扫哪个目录。
     pub root: PathBuf,
+    /// 给这个**根**起的名字，也是它下面所有键的第一段。
+    ///
+    /// `None` 时按目录自己的名字取。这个根还没在中立库里时会被**加进去**（校验走
+    /// [`roots::add_root`]）；已经在了就按名字对上，然后核一下还是不是同一块盘。
+    pub root_name: Option<String>,
+    /// 工作目录。加一个新根时拿它守住「中立库不许被圈进主库」那条线（ADR-0004）；
+    /// `None` 表示这一趟没有工作目录可守（只活在内存里的库）。
+    pub workspace: Option<PathBuf>,
     /// 并发档。
     pub jobs: Jobs,
     /// 每类文件抽样读多少个头部。0 表示不抽样。
@@ -187,11 +213,13 @@ pub struct ScanOptions {
 }
 
 impl ScanOptions {
-    /// 用默认参数扫描 `root`。
+    /// 用默认参数扫描 `root`，根名按目录自己的名字取。
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
+            root_name: None,
+            workspace: None,
             jobs: Jobs::Adaptive,
             samples_per_class: 32,
             limits: Limits::default(),
@@ -200,6 +228,15 @@ impl ScanOptions {
             penetrate_containers: true,
             decompress_zst: false,
             manifest: Manifest::builtin(),
+        }
+    }
+
+    /// 用默认参数扫描 `root`，并**点名**这个根叫什么。
+    #[must_use]
+    pub fn named(root: impl Into<PathBuf>, name: impl Into<String>) -> Self {
+        Self {
+            root_name: Some(name.into()),
+            ..Self::new(root)
         }
     }
 }
@@ -238,17 +275,24 @@ pub struct ScanOutcome {
     pub shaped: bool,
 }
 
-/// 扫一遍主库，把结论写进中立库。
+/// 扫一遍主库里的**一个根**，把结论写进中立库。
+///
+/// `task` 是那个「报进度 + 能停」的把手：这一趟按四步报进度，停下来的地方是干净的
+/// （断点已经写下，续跑接着来）。命令行把 Ctrl-C 接在它的
+/// [`CancelToken`](crate::task::Handle::cancel) 上，界面把「停下」按钮接在它上面。
 ///
 /// # Errors
-/// 扫描根打不开、断点落在主库内、断点读写失败或中立库读写失败时返回错误。
+/// 扫描根打不开、这个根加不进来、断点落在主库内、断点读写失败或中立库读写失败时
+/// 返回错误。
 pub fn scan(
     library: &dyn LibraryFs,
     catalog: &mut Catalog,
     options: &ScanOptions,
-    cancel: &CancelToken,
+    task: &Handle,
 ) -> Result<ScanOutcome, ScanError> {
     let started = Instant::now();
+    let cancel = task.cancel();
+    task.steps(SCAN_STEPS);
     let root = library
         .canonicalize(&options.root)
         .map_err(|source| ScanError::Root {
@@ -274,9 +318,9 @@ pub fn scan(
         }
     }
 
-    // 名字一样、主库不一样的话，两边的记录会挤进同一张表——键是相对的（ADR-0020），
-    // 撞车之后没法分开。开扫之前拦下来。
-    guard_same_library(library, catalog, &root)?;
+    // 这一趟扫的是哪个根：认下名字、拦掉「同一个根名底下换了另一块盘」。
+    let _ = task.step("认根");
+    let root_name = resolve_root(library, catalog, options, &root)?;
 
     // 并发按介质定而不是按 CPU 数猜（挂账 D9）。`-j` 点了名就照办，一个目录都不多读。
     let measured = match options.jobs {
@@ -291,6 +335,7 @@ pub fn scan(
     let mut start = load_start_state(options, &root, catalog)?;
     let mut traversal = Traversal {
         scan: start.scan,
+        root_name: root_name.clone(),
         root: path::display(&root),
         elapsed_ms: elapsed(start.elapsed_base, started),
         jobs: resolved_jobs,
@@ -304,8 +349,9 @@ pub fn scan(
     }
     // 先把这次扫描的行占上，代号才不会因为进程半路被杀而被下次重用。
     catalog.save_traversal(&traversal)?;
-    // 主库根自己也是一条记录，键是空串——「扫过几个目录」是从表里数出来的。
-    catalog.write(start.scan, &[root_record(&root)])?;
+    // 根自己也是一条记录，键就是它的名字——「扫过几个目录」是从表里数出来的。
+    catalog.write(start.scan, &[root_record(&root_name, &root)])?;
+    let _ = task.step("遍历");
 
     let baseline = if options.incremental {
         catalog.baseline()?
@@ -324,11 +370,14 @@ pub fn scan(
             let tx = results_tx.clone();
             let queue = &queue;
             let budget = &budget;
-            let root = &root;
+            let rooted = Rooted {
+                name: root_name.as_str(),
+                path: &root,
+            };
             let baseline = &baseline;
             scope.spawn(move || {
                 while let Some(dir) = queue.pop() {
-                    let result = process_dir(library, root, dir, options, budget, baseline, cancel);
+                    let result = process_dir(library, rooted, dir, options, budget, baseline, cancel);
                     if tx.send(result).is_err() {
                         break;
                     }
@@ -355,6 +404,9 @@ pub fn scan(
                 Ok(result) => {
                     let done = merge(catalog, start.scan, &mut progress, result)?;
                     queue.finish_and_push(done);
+                    // 遍历说不出分母（走完才知道有多少条目），于是只报分子：
+                    // 总数填 0，界面据此画一条来回跑的条而不是一条假装知道进度的条。
+                    task.tick(progress.delta.total(), 0);
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -379,13 +431,25 @@ pub fn scan(
     // 删除只在完整扫完一遍之后判。中断的扫描没走完整个库，「这次没见到」不等于
     // 「不存在」——那时候清一遍会把还没扫到的那半个库当成已删除抹掉。
     if !interrupted {
-        progress.delta.removed = catalog.sweep(start.scan)?;
+        let _ = task.step("收尾");
+        progress.delta.removed = catalog.sweep(start.scan, &root_name)?;
     }
     catalog.save_traversal(&traversal)?;
+    // 这个根上次扫的结果落在它自己那一行上——**盘没挂上时它照样看得见**。
+    catalog.record_root_scan(
+        &root_name,
+        &RootScan {
+            at: crate::catalog::now_secs(),
+            elapsed_ms: traversal.elapsed_ms,
+            entries: catalog.root_stats(&root_name)?.files,
+            interrupted,
+        },
+    )?;
     // **成型也只在完整扫完一遍之后跑**，理由与删除同源：半个库上成出来的变体是错的。
     // 一份 PSV 转储只扫到 `app/` 就成型，`patch/` 那一半会在下一趟变成第二个变体。
     let shaped = !interrupted;
     if shaped {
+        let _ = task.step("成型");
         shape::reshape(catalog, &options.manifest, start.scan)?;
     }
     let checkpoint_path =
@@ -393,6 +457,7 @@ pub fn scan(
 
     let aggregate = catalog.aggregate(&options.limits, &options.manifest)?;
     let meta = ReportMeta {
+        root_name: traversal.root_name.clone(),
         root: traversal.root.clone(),
         scan: start.scan,
         interrupted,
@@ -413,9 +478,9 @@ pub fn scan(
     })
 }
 
-fn root_record(root: &Path) -> EntryRecord {
+fn root_record(root_name: &str, root: &Path) -> EntryRecord {
     EntryRecord {
-        key: String::new(),
+        key: root_name.to_string(),
         kind: EntryKind::Dir,
         meta: EntryMeta::Known {
             len: 0,
@@ -440,38 +505,80 @@ struct StartState {
     resumed: bool,
 }
 
-/// 这份中立库对着的还是不是同一个主库。
+/// 这一趟扫的是哪个**根**：认下名字，再核一遍它还是不是原来那块盘。
 ///
-/// `--library` 让中立库跟名字走而不跟路径走（挂账 D16），于是换挂载点、换盘符都还能找回
-/// 同一份库——这正是要的。代价是「名字一样、主库不一样」这种情况变得可能，而中立库的键
-/// 是**相对**主库根的（ADR-0020），两个主库挤进同一份库不会报错，只会静默撞车。
+/// 名字没给就按目录自己的名字取。库里还没有这个根就**加进来**（校验走
+/// [`roots::add_root`]：不许重名、不许与已有的根套在一起、不许与工作目录纠缠）。
 ///
-/// 判据是顶层条目：库里记着的顶层键，与眼前这个根 `read_dir` 出来的名字比一比。它只花
-/// 一次 `read_dir`（扫描本来也要读这一层），却足够分开「同一块盘换了挂载点」（顶层全对得上）
-/// 与「换了另一个主库」（顶层几乎全不同）。**它认不出的那种情况**：两个主库恰好有过半
-/// 同名的顶层目录——那得是刻意造的巧合，真出现了也还有 `--library` 换个名字这条路。
-fn guard_same_library(
+/// # Errors
+/// 名字不能用、根加不进来、这个根名底下换了另一块盘，或者中立库读写失败时返回错误。
+fn resolve_root(
+    library: &dyn LibraryFs,
+    catalog: &mut Catalog,
+    options: &ScanOptions,
+    root: &Path,
+) -> Result<String, ScanError> {
+    let wanted = match &options.root_name {
+        Some(name) => name.clone(),
+        None => default_root_name(root),
+    };
+    let name = path::root_name(&wanted).map_err(AddRootError::Name)?;
+    let current = path::display(root);
+    let Some(existing) = catalog.root(&name)? else {
+        // 这个路径可能已经是**另一个名字**的根：那不是新根，是同一支记录换了个叫法。
+        // 交给 `add_root` 去拦，它说得出撞上的是哪一个。
+        roots::add_root(catalog, options.workspace.as_deref(), &name, root)?;
+        return Ok(name);
+    };
+    if existing.path == current {
+        return Ok(name);
+    }
+    guard_same_root(library, catalog, &name, &existing.path, root)?;
+    // **改指到别处也要过摆位那三道校验**：把「主库」从 `/盘/Game` 重指到 `/盘`
+    // （而 `/盘/Game/FC` 已经是另一个根）不拦的话，同一批文件从此在两个根下各数一遍。
+    roots::check_placement(catalog, options.workspace.as_deref(), &name, root)?;
+    catalog.set_root_path(&name, &current)?;
+    Ok(name)
+}
+
+/// 没给名字时，一个根默认叫什么：目录自己的名字。
+///
+/// **公开出去，因为断点文件名要带根名**（`workspace::checkpoint_path`），而算断点路径
+/// 那一步在开扫之前。两处各猜一遍的话，`--resume` 会去找一个不存在的断点。
+#[must_use]
+pub fn default_root_name(root: &Path) -> String {
+    root.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "主库".to_string())
+}
+
+/// 这个**根名**对着的还是不是原来那块盘。
+///
+/// 根跟名字走而不跟路径走（挂账 D16），于是换挂载点、换盘符都还能找回同一支记录——
+/// 这正是要的。代价是「名字一样、盘不一样」这种情况变得可能，而这个根下面的键都以它的
+/// 名字打头，两块盘挤进同一个名字不会报错，只会静默撞车。
+///
+/// 判据是顶层条目：库里记着的这个根的顶层名，与眼前这个目录 `read_dir` 出来的名字比一比。
+/// 它只花一次 `read_dir`（扫描本来也要读这一层），却足够分开「同一块盘换了挂载点」
+/// （顶层全对得上）与「指错了盘」（顶层几乎全不同）。**它认不出的那种情况**：两块盘恰好
+/// 有过半同名的顶层目录——那得是刻意造的巧合，真出现了也还有「换个根名」这条路。
+///
+/// **按根生效**：别的根一个字都不受影响，那正是「主库是一组根」要的形状。
+fn guard_same_root(
     library: &dyn LibraryFs,
     catalog: &Catalog,
+    name: &str,
+    recorded: &str,
     root: &Path,
 ) -> Result<(), ScanError> {
-    let current = path::display(root);
-    // 从没记过的库直接认下来：票 29 之前建的中立库都走这条，不该因为升级就打不开。
-    let Some(recorded) = catalog.library_root()? else {
-        catalog.set_library_root(&current)?;
-        return Ok(());
-    };
-    if recorded == current {
-        return Ok(());
-    }
-    let recorded_keys = catalog.top_level_keys(TOP_LEVEL_SAMPLE)?;
-    // 空库没什么可撞的。
+    let recorded_keys = catalog.top_level_keys(name, TOP_LEVEL_SAMPLE)?;
+    // 一条都还没扫过的根没什么可撞的。
     if recorded_keys.is_empty() {
-        catalog.set_library_root(&current)?;
         return Ok(());
     }
     let entries = library.read_dir(root).map_err(|source| ScanError::Root {
-        path: current.clone(),
+        path: path::display(root),
         source,
     })?;
     let actual: std::collections::HashSet<String> = entries
@@ -489,14 +596,13 @@ fn guard_same_library(
     let ratio = common as f64 / recorded_keys.len() as f64;
     if ratio < SAME_LIBRARY_OVERLAP {
         return Err(ScanError::DifferentLibrary {
-            catalog: catalog.location().to_string(),
-            recorded,
-            current,
+            name: name.to_string(),
+            recorded: recorded.to_string(),
+            current: path::display(root),
             common,
             recorded_count: recorded_keys.len(),
         });
     }
-    catalog.set_library_root(&current)?;
     Ok(())
 }
 
@@ -659,9 +765,19 @@ struct DirResult {
     partial: bool,
 }
 
+/// 这一趟扫的那个**根**：名字与它眼下挂在哪。
+///
+/// 两样捆在一起交下去，因为工作线程每算一条键都同时要它们——路径用来剥前缀，
+/// 名字用来当键的第一段（[`path::library_key`]）。
+#[derive(Debug, Clone, Copy)]
+struct Rooted<'a> {
+    name: &'a str,
+    path: &'a Path,
+}
+
 fn process_dir(
     library: &dyn LibraryFs,
-    root: &Path,
+    rooted: Rooted<'_>,
     dir: PathBuf,
     options: &ScanOptions,
     budget: &SampleBudget,
@@ -681,7 +797,7 @@ fn process_dir(
         Ok(entries) => entries,
         Err(error) => {
             result.unlistable.push(UnlistableDir {
-                key: path::catalog_key(root, &result.dir),
+                key: path::library_key(rooted.name, rooted.path, &result.dir),
                 display: path::display(&result.dir),
                 message: error.to_string(),
             });
@@ -708,21 +824,21 @@ fn process_dir(
         // 因为报告要说出库里有几个链接。
         result
             .entries
-            .push(observe(library, root, &entry, options, budget, baseline));
+            .push(observe(library, rooted, &entry, options, budget, baseline));
     }
     result
 }
 
 fn observe(
     library: &dyn LibraryFs,
-    root: &Path,
+    rooted: Rooted<'_>,
     entry: &DirEntry,
     options: &ScanOptions,
     budget: &SampleBudget,
     baseline: &Baseline,
 ) -> EntryRecord {
-    // 键要过 NFC，读盘用的仍是系统给的原始路径（ADR-0020）。
-    let key = path::catalog_key(root, &entry.path);
+    // 键要带根名、要过 NFC，读盘用的仍是系统给的原始路径（ADR-0020）。
+    let key = path::library_key(rooted.name, rooted.path, &entry.path);
     let verdict = baseline.verdict(&key, &entry.meta);
     // 未变的文件不再打开一次：上次抽到的头部结论与内部构成都留在中立库里，
     // 报告照样用得上。容器不必重穿一遍，那正是这条接缝在票 07 之后真正省下的活。
@@ -972,7 +1088,7 @@ mod tests {
         library: &dyn LibraryFs,
         options: &ScanOptions,
     ) -> ScanOutcome {
-        scan(library, catalog, options, &CancelToken::new()).expect("扫描不该失败")
+        scan(library, catalog, options, &Handle::new()).expect("扫描不该失败")
     }
 
     fn 扫(library: &dyn LibraryFs, options: &ScanOptions) -> ScanOutcome {
@@ -995,7 +1111,7 @@ mod tests {
     #[test]
     fn 按平台目录给出文件数与容量() {
         let library = 建库();
-        let outcome = 扫(&library, &ScanOptions::new("/lib"));
+        let outcome = 扫(&library, &ScanOptions::named("/lib", "库"));
         let report = &outcome.report;
 
         let fc = report
@@ -1017,7 +1133,7 @@ mod tests {
     #[test]
     fn 认不出平台的文件照常计入报告() {
         let library = 建库();
-        let outcome = 扫(&library, &ScanOptions::new("/lib"));
+        let outcome = 扫(&library, &ScanOptions::named("/lib", "库"));
         let unknown = outcome
             .report
             .platforms
@@ -1033,7 +1149,7 @@ mod tests {
     #[test]
     fn 三类构成分得开() {
         let library = 建库();
-        let outcome = 扫(&library, &ScanOptions::new("/lib"));
+        let outcome = 扫(&library, &ScanOptions::named("/lib", "库"));
         let 取 = |category: Category| {
             outcome
                 .report
@@ -1054,7 +1170,7 @@ mod tests {
     #[test]
     fn 疑似不该入库的四类都报得出来() {
         let library = 建库();
-        let outcome = 扫(&library, &ScanOptions::new("/lib"));
+        let outcome = 扫(&library, &ScanOptions::named("/lib", "库"));
         let 取 = |reason: SuspectReason| {
             outcome
                 .report
@@ -1077,7 +1193,7 @@ mod tests {
     #[test]
     fn 头部抽样给出各类的解析成功率() {
         let library = 建库();
-        let outcome = 扫(&library, &ScanOptions::new("/lib"));
+        let outcome = 扫(&library, &ScanOptions::named("/lib", "库"));
         let 取 = |class: ProbeClass| {
             outcome
                 .report
@@ -1105,7 +1221,7 @@ mod tests {
         for i in 0..50 {
             library.file(format!("/lib/FC/{i}.zip"), zip(64));
         }
-        let mut options = ScanOptions::new("/lib");
+        let mut options = ScanOptions::named("/lib", "库");
         options.samples_per_class = 5;
         let outcome = 扫(&library, &options);
         assert_eq!(outcome.report.samples[0].sampled, 5);
@@ -1115,7 +1231,7 @@ mod tests {
     #[test]
     fn 关掉抽样就一个头部都不读() {
         let library = 建库();
-        let mut options = ScanOptions::new("/lib");
+        let mut options = ScanOptions::named("/lib", "库");
         options.samples_per_class = 0;
         let outcome = 扫(&library, &options);
         assert!(outcome.report.samples.is_empty());
@@ -1125,7 +1241,7 @@ mod tests {
     #[test]
     fn 符号链接不跟随系统目录整棵跳过() {
         let library = 建库();
-        let outcome = 扫(&library, &ScanOptions::new("/lib"));
+        let outcome = 扫(&library, &ScanOptions::named("/lib", "库"));
         assert_eq!(outcome.report.anomalies.symlinks, 1);
         assert_eq!(
             outcome.report.anomalies.skipped_system_dirs, 1,
@@ -1138,7 +1254,7 @@ mod tests {
     fn 读不动的地方计入报告而不是中断扫描() {
         let mut library = 建库();
         library.unreadable_content("/lib/FC/读不动.zip", 128);
-        let outcome = 扫(&library, &ScanOptions::new("/lib"));
+        let outcome = 扫(&library, &ScanOptions::named("/lib", "库"));
         assert_eq!(outcome.report.totals.files, 12);
         let zip = outcome
             .report
@@ -1152,9 +1268,9 @@ mod tests {
     #[test]
     fn 并发数不影响结论() {
         let library = 建库();
-        let mut single = ScanOptions::new("/lib");
+        let mut single = ScanOptions::named("/lib", "库");
         single.jobs = Jobs::Fixed(1);
-        let mut many = ScanOptions::new("/lib");
+        let mut many = ScanOptions::named("/lib", "库");
         many.jobs = Jobs::Fixed(8);
 
         let mut a = 扫(&library, &single).aggregate;
@@ -1170,7 +1286,7 @@ mod tests {
     fn 第二次扫描按三元组跳过未变的文件() {
         let library = 建库();
         let mut catalog = 新中立库();
-        let options = ScanOptions::new("/lib");
+        let options = ScanOptions::named("/lib", "库");
 
         let 首扫 = 扫入(&mut catalog, &library, &options);
         assert_eq!(首扫.delta.added, 11, "第一次全是新增");
@@ -1191,7 +1307,7 @@ mod tests {
     fn 增量认得出新增删除与内容变化() {
         let mut library = 建库();
         let mut catalog = 新中立库();
-        let options = ScanOptions::new("/lib");
+        let options = ScanOptions::named("/lib", "库");
         扫入(&mut catalog, &library, &options);
 
         library.file("/lib/FC/新来的.zip", zip(64));
@@ -1230,7 +1346,7 @@ mod tests {
         }
         let library = 挂钩::new(库);
         let mut catalog = 新中立库();
-        let options = ScanOptions::new("/lib");
+        let options = ScanOptions::named("/lib", "库");
 
         扫入(&mut catalog, &library, &options);
         let 首扫读了 = library.reads();
@@ -1259,7 +1375,7 @@ mod tests {
         let library = 挂钩::new(库);
         let mut catalog = 新中立库();
         // 关掉头部抽样，读的次数里就只剩下穿透这一项。
-        let mut options = ScanOptions::new("/lib");
+        let mut options = ScanOptions::named("/lib", "库");
         options.samples_per_class = 0;
 
         扫入(&mut catalog, &library, &options);
@@ -1278,7 +1394,7 @@ mod tests {
     fn 全量重扫会把每个文件重新看一遍() {
         let library = 挂钩::new(建库());
         let mut catalog = 新中立库();
-        let mut options = ScanOptions::new("/lib");
+        let mut options = ScanOptions::named("/lib", "库");
 
         扫入(&mut catalog, &library, &options);
         let 首扫读了 = library.reads();
@@ -1303,7 +1419,7 @@ mod tests {
         let mut library = 建库();
         library.unreadable_meta("/lib/Wii/读不到元数据.zip");
         let mut catalog = 新中立库();
-        let options = ScanOptions::new("/lib");
+        let options = ScanOptions::named("/lib", "库");
 
         let 首扫 = 扫入(&mut catalog, &library, &options);
         assert_eq!(首扫.delta.unreadable, 1);
@@ -1319,7 +1435,7 @@ mod tests {
     #[test]
     fn 列不开的目录下面那些记录不算已删除() {
         let mut catalog = 新中立库();
-        let options = ScanOptions::new("/lib");
+        let options = ScanOptions::named("/lib", "库");
         let 首扫 = 扫入(&mut catalog, &建库(), &options);
         assert_eq!(首扫.report.totals.files, 11);
 
@@ -1335,7 +1451,7 @@ mod tests {
         assert_eq!(再扫.report.totals.files, 11, "11 个文件一个都不能少");
         assert_eq!(再扫.report.anomalies.errors, 1, "列不开这件事要报出来");
         assert!(
-            catalog.contains("PS1/模拟器/epsxe.exe").expect("查得到"),
+            catalog.contains("库/PS1/模拟器/epsxe.exe").expect("查得到"),
             "隔了一层的记录也要留着"
         );
 
@@ -1349,7 +1465,7 @@ mod tests {
     #[test]
     fn 主库根都列不开时一条记录都不删() {
         let mut catalog = 新中立库();
-        let options = ScanOptions::new("/lib");
+        let options = ScanOptions::named("/lib", "库");
         扫入(&mut catalog, &建库(), &options);
 
         let mut 空壳 = MemFs::new();
@@ -1366,7 +1482,7 @@ mod tests {
         for i in 0..40 {
             library.file(format!("/lib/FC/{i}.zip"), zip(64));
         }
-        let mut options = ScanOptions::new("/lib");
+        let mut options = ScanOptions::named("/lib", "库");
         options.samples_per_class = 5;
         let mut catalog = 新中立库();
 
@@ -1389,7 +1505,7 @@ mod tests {
     fn 大小未知不等于大小为零() {
         let mut library = 建库();
         library.unreadable_meta("/lib/Wii/读不到元数据.zip");
-        let outcome = 扫(&library, &ScanOptions::new("/lib"));
+        let outcome = 扫(&library, &ScanOptions::named("/lib", "库"));
         assert_eq!(outcome.report.anomalies.zero_length, 1, "只有 空文件.zip");
         assert_eq!(outcome.report.anomalies.unreadable, 1);
     }
@@ -1405,7 +1521,7 @@ mod tests {
             .file(format!("/lib/PSP/{分解}me.iso"), iso());
 
         let mut catalog = 新中立库();
-        let options = ScanOptions::new("/lib");
+        let options = ScanOptions::named("/lib", "库");
         let 首扫 = 扫入(&mut catalog, &library, &options);
         assert_eq!(首扫.delta.added, 1);
         assert!(
@@ -1419,13 +1535,13 @@ mod tests {
 
         assert!(
             catalog
-                .contains(&format!("PSP/{预组合}me.iso"))
+                .contains(&format!("库/PSP/{预组合}me.iso"))
                 .expect("查得到"),
             "入库的键必须是 NFC 形"
         );
         assert!(
             !catalog
-                .contains(&format!("PSP/{分解}me.iso"))
+                .contains(&format!("库/PSP/{分解}me.iso"))
                 .expect("查得到"),
             "分解形不该出现在中立库里"
         );
@@ -1450,14 +1566,14 @@ mod tests {
         let 先 = 扫入(
             &mut catalog,
             &建库于("/Volumes/盘"),
-            &ScanOptions::new("/Volumes/盘"),
+            &ScanOptions::named("/Volumes/盘", "库"),
         );
         assert!(先.delta.added > 0);
 
         let 再 = 扫入(
             &mut catalog,
             &建库于("/Volumes/盘 1"),
-            &ScanOptions::new("/Volumes/盘 1"),
+            &ScanOptions::named("/Volumes/盘 1", "库"),
         );
         assert_eq!(再.delta.added, 0, "换挂载点不该把整个库判成新增");
         assert_eq!(再.delta.removed, 0, "更不该把旧的那份判成已删");
@@ -1466,14 +1582,21 @@ mod tests {
     }
 
     #[test]
-    fn 两个不同的主库共用一份中立库时报错而不是混表() {
-        // 键是相对主库根的（ADR-0020），两个主库挤进同一份库不会报错，只会静默撞车。
+    fn 同一个根名底下换了另一块盘时报错而不是混表_而且按根生效() {
+        // 键的第一段是根名（ADR-0020），两块盘挤进同一个根名不会报错，只会静默撞车。
         let mut catalog = 新中立库();
         扫入(
             &mut catalog,
             &建库于("/Volumes/甲"),
-            &ScanOptions::new("/Volumes/甲"),
+            &ScanOptions::named("/Volumes/甲", "库"),
         );
+        // 另一个根照旧扫得进来——**这道闸按根生效**，不同的根之间互不干涉。
+        let 另一个根 = 扫入(
+            &mut catalog,
+            &建库于("/Volumes/丙"),
+            &ScanOptions::named("/Volumes/丙", "第二个根"),
+        );
+        assert!(另一个根.delta.added > 0, "换个根名就是新的一个根，拦都不该拦");
 
         let mut 另一个主库 = MemFs::new();
         另一个主库
@@ -1483,11 +1606,12 @@ mod tests {
         let 错 = scan(
             &另一个主库,
             &mut catalog,
-            &ScanOptions::new("/Volumes/乙"),
-            &CancelToken::new(),
+            &ScanOptions::named("/Volumes/乙", "库"),
+            &Handle::new(),
         )
         .expect_err("顶层条目全不一样，该拦下来");
         let ScanError::DifferentLibrary {
+            name,
             recorded,
             current,
             common,
@@ -1496,9 +1620,17 @@ mod tests {
         else {
             panic!("该是 DifferentLibrary，实际是 {错:?}");
         };
+        assert_eq!(name, "库");
         assert_eq!(recorded, "/Volumes/甲");
         assert_eq!(current, "/Volumes/乙");
         assert_eq!(*common, 0);
+        assert!(错.to_string().contains("换个根名"), "得说清出路：{错}");
+        // 拦下来那一趟一个字都没写：第二个根那一支原样在。
+        assert!(
+            catalog
+                .contains("第二个根/FC/超级马里奥.zip")
+                .expect("查得到")
+        );
     }
 
     #[test]
@@ -1508,7 +1640,7 @@ mod tests {
         扫入(
             &mut catalog,
             &建库于("/Volumes/甲"),
-            &ScanOptions::new("/Volumes/甲"),
+            &ScanOptions::named("/Volumes/甲", "库"),
         );
 
         let mut 少了一个平台 = 建库于("/Volumes/乙");
@@ -1517,20 +1649,124 @@ mod tests {
         let 再 = 扫入(
             &mut catalog,
             &少了一个平台,
-            &ScanOptions::new("/Volumes/乙"),
+            &ScanOptions::named("/Volumes/乙", "库"),
         );
         assert!(再.delta.added > 0, "新加的那个平台是新增");
         assert!(再.delta.unchanged > 0, "没动的那些还是未变");
     }
 
     #[test]
-    fn 票_29_之前建的中立库照样打得开() {
-        // 老库的 `meta` 里没有主库根这一条，不该因为升级就被当成「另一个主库」拦下。
+    fn 两个根的变体互不覆盖各自的键带得出自己的根名() {
+        // 两块盘上**同名同大小**的东西：只按相对路径当键的话它们是同一条记录，
+        // 一条静默覆盖另一条，而中立库是事实来源（ADR-0001）。
         let mut catalog = 新中立库();
-        扫入(&mut catalog, &建库(), &ScanOptions::new("/lib"));
-        catalog.forget_library_root();
-        let 再 = 扫入(&mut catalog, &建库(), &ScanOptions::new("/lib"));
-        assert_eq!(再.delta.added, 0);
+        let 甲 = 扫入(
+            &mut catalog,
+            &建库于("/Volumes/甲"),
+            &ScanOptions::named("/Volumes/甲", "主库"),
+        );
+        let 乙 = 扫入(
+            &mut catalog,
+            &建库于("/Volumes/乙"),
+            &ScanOptions::named("/Volumes/乙", "元数据库"),
+        );
+
+        assert_eq!(乙.delta.added, 甲.delta.added, "第二个根一条都不该被认成已有");
+        assert_eq!(乙.delta.unchanged, 0);
+        assert_eq!(乙.delta.removed, 0, "扫乙盘绝不许动甲盘那一支");
+
+        for 根 in ["主库", "元数据库"] {
+            assert!(
+                catalog
+                    .contains(&format!("{根}/FC/超级马里奥.zip"))
+                    .expect("查得到"),
+                "{根} 那一支得独立存在"
+            );
+        }
+        // 两个根加起来才是这份库的全部。
+        assert_eq!(
+            乙.report.totals.files,
+            甲.report.totals.files * 2,
+            "报告数的是整份中立库"
+        );
+        assert_eq!(catalog.roots().expect("读得出").len(), 2);
+    }
+
+    #[test]
+    fn 重扫一个根不会把另一个根的记录当成已删() {
+        // `sweep` 删的是「这次没见到的」，而一趟只扫一个根——不划范围的话，
+        // 扫一遍甲盘会把乙盘整支抹掉。
+        let mut catalog = 新中立库();
+        扫入(
+            &mut catalog,
+            &建库于("/Volumes/甲"),
+            &ScanOptions::named("/Volumes/甲", "主库"),
+        );
+        let 乙 = 扫入(
+            &mut catalog,
+            &建库于("/Volumes/乙"),
+            &ScanOptions::named("/Volumes/乙", "元数据库"),
+        );
+        let 全部 = 乙.report.totals.files;
+
+        let 重扫甲 = 扫入(
+            &mut catalog,
+            &建库于("/Volumes/甲"),
+            &ScanOptions::named("/Volumes/甲", "主库"),
+        );
+        assert_eq!(重扫甲.delta.removed, 0, "乙盘那一支一条都不许删");
+        assert_eq!(重扫甲.report.totals.files, 全部);
+        assert!(
+            catalog
+                .contains("元数据库/FC/超级马里奥.zip")
+                .expect("查得到")
+        );
+    }
+
+    #[test]
+    fn 移除一个根时说得出会去掉多少变体并且只去掉它自己那一支() {
+        let mut catalog = 新中立库();
+        扫入(
+            &mut catalog,
+            &建库于("/Volumes/甲"),
+            &ScanOptions::named("/Volumes/甲", "主库"),
+        );
+        扫入(
+            &mut catalog,
+            &建库于("/Volumes/乙"),
+            &ScanOptions::named("/Volumes/乙", "元数据库"),
+        );
+        let 会去掉 = catalog.root_stats("元数据库").expect("数得出").variants;
+        assert!(会去掉 > 0);
+
+        let 去掉了 = catalog.remove_root("元数据库").expect("移得掉");
+        assert_eq!(去掉了, 会去掉, "按下去之前看见的那个数，就是真去掉的那个数");
+        assert_eq!(
+            catalog.root_stats("元数据库").expect("数得出"),
+            crate::catalog::RootStats::default(),
+            "变体与条目一条都不许剩下——剩下的会在浏览屏上变成指不着文件的幽灵行"
+        );
+        assert!(
+            !catalog
+                .contains("元数据库/FC/超级马里奥.zip")
+                .expect("查得到")
+        );
+        assert!(catalog.contains("主库/FC/超级马里奥.zip").expect("查得到"));
+        assert_eq!(catalog.roots().expect("读得出").len(), 1);
+    }
+
+    #[test]
+    fn 盘没挂上时这个根的上次结果仍然看得见() {
+        // 结果住在中立库里而不是跟着盘走（ADR-0009 那条道理）。
+        let mut catalog = 新中立库();
+        扫入(&mut catalog, &建库(), &ScanOptions::named("/lib", "库"));
+        // 这里连 MemFs 都没有了，照样读得出上次扫了什么。
+        let 根 = catalog.root("库").expect("读得出").expect("有这个根");
+        let scan = 根.scan.expect("扫过一趟");
+        assert!(!scan.interrupted);
+        assert_eq!(scan.entries, 11, "上次扫到多少个文件");
+        assert!(scan.at > 0, "上次什么时候扫的");
+        assert_eq!(catalog.root_stats("库").expect("数得出").files, 11);
     }
 
     #[test]
@@ -1538,7 +1774,7 @@ mod tests {
         let mut catalog = 新中立库();
         let 扫出来的 = {
             let library = 建库();
-            扫入(&mut catalog, &library, &ScanOptions::new("/lib")).report
+            扫入(&mut catalog, &library, &ScanOptions::named("/lib", "库")).report
         };
         // 盘拔了：这里连 MemFs 都没有了，中立库照样出得来
         let mut 库里的 = catalog
@@ -1563,7 +1799,7 @@ mod tests {
                 .join("库.sqlite3"),
         )
         .expect("能开中立库");
-        let 之前 = 扫入(&mut catalog, &建库(), &ScanOptions::new("/lib")).report;
+        let 之前 = 扫入(&mut catalog, &建库(), &ScanOptions::named("/lib", "库")).report;
         drop(catalog);
 
         // 关掉再打开：重启工具后结论不丢
@@ -1571,7 +1807,7 @@ mod tests {
             .path()
             .join("库.sqlite3");
         let mut catalog = Catalog::open(&path).expect("能开中立库");
-        扫入(&mut catalog, &建库(), &ScanOptions::new("/lib"));
+        扫入(&mut catalog, &建库(), &ScanOptions::named("/lib", "库"));
         drop(catalog);
         let catalog = Catalog::open(&path).expect("能再打开");
         let aggregate = catalog
@@ -1632,7 +1868,7 @@ mod tests {
     #[test]
     fn 中断再续跑与一次扫完结论相同() {
         let workspace = crate::testing::temp_dir("scan");
-        let mut options = ScanOptions::new("/lib");
+        let mut options = ScanOptions::named("/lib", "库");
         options.jobs = Jobs::Fixed(1);
         options.checkpoint = Some(断点选项(workspace.path()));
         let checkpoint = options.checkpoint.as_ref().expect("有断点").path.clone();
@@ -1641,7 +1877,8 @@ mod tests {
         let mut 对照 = 扫(&建库(), &options).aggregate;
 
         // 扫到第三个目录时按下中断
-        let cancel = CancelToken::new();
+        let task = Handle::new();
+        let cancel = task.cancel().clone();
         let seen = AtomicUsize::new(0);
         let 中断的库 = 挂钩 {
             inner: 建库(),
@@ -1653,7 +1890,7 @@ mod tests {
             reads: AtomicUsize::new(0),
         };
         let mut catalog = 新中立库();
-        let first = scan(&中断的库, &mut catalog, &options, &cancel).expect("中断也算正常返回");
+        let first = scan(&中断的库, &mut catalog, &options, &task).expect("中断也算正常返回");
         assert!(first.interrupted, "应当报告被中断");
         assert!(checkpoint.exists(), "断点应当落盘");
         assert!(
@@ -1664,7 +1901,7 @@ mod tests {
 
         // 续跑，直到扫完
         let mut 续跑结果 =
-            scan(&建库(), &mut catalog, &options, &CancelToken::new()).expect("续跑不该失败");
+            scan(&建库(), &mut catalog, &options, &Handle::new()).expect("续跑不该失败");
         assert!(续跑结果.report.resumed, "应当认出这是续跑");
         assert!(!续跑结果.interrupted);
         assert!(!checkpoint.exists(), "扫完后断点应当被清掉");
@@ -1677,7 +1914,7 @@ mod tests {
     #[test]
     fn 中断落在目录中间时整个目录重扫而不是丢掉半个() {
         let workspace = crate::testing::temp_dir("scan");
-        let mut options = ScanOptions::new("/lib");
+        let mut options = ScanOptions::named("/lib", "库");
         options.jobs = Jobs::Fixed(1);
         options.checkpoint = Some(断点选项(workspace.path()));
 
@@ -1687,7 +1924,8 @@ mod tests {
         // 它让协调线程先把上一个目录并完、进到等结果的状态，中断才落下——于是
         // 「半个目录的结果被送到协调线程手上」这条最危险的路径必然被走到，
         // 而真实的 Ctrl-C 正是这个时序。
-        let cancel = CancelToken::new();
+        let task = Handle::new();
+        let cancel = task.cancel().clone();
         let 中断的库 = 挂钩 {
             inner: 建库(),
             hook: Box::new(|dir: &Path| {
@@ -1699,11 +1937,11 @@ mod tests {
             reads: AtomicUsize::new(0),
         };
         let mut catalog = 新中立库();
-        let first = scan(&中断的库, &mut catalog, &options, &cancel).expect("中断也算正常返回");
+        let first = scan(&中断的库, &mut catalog, &options, &task).expect("中断也算正常返回");
         assert!(first.interrupted);
 
         let mut 续跑结果 =
-            scan(&建库(), &mut catalog, &options, &CancelToken::new()).expect("续跑不该失败");
+            scan(&建库(), &mut catalog, &options, &Handle::new()).expect("续跑不该失败");
         assert!(续跑结果.report.resumed);
         规范化(&mut 对照);
         规范化(&mut 续跑结果.aggregate);
@@ -1716,27 +1954,27 @@ mod tests {
     #[test]
     fn 比中立库旧的断点不会被续跑() {
         let workspace = crate::testing::temp_dir("scan");
-        let mut options = ScanOptions::new("/lib");
+        let mut options = ScanOptions::named("/lib", "库");
         options.jobs = Jobs::Fixed(1);
         options.checkpoint = Some(断点选项(workspace.path()));
         let checkpoint = options.checkpoint.as_ref().expect("有断点").path.clone();
 
         // 中断一次，留下断点
-        let cancel = CancelToken::new();
-        cancel.cancel();
+        let task = Handle::new();
+        task.stop();
         let mut catalog = 新中立库();
-        let first = scan(&建库(), &mut catalog, &options, &cancel).expect("中断也算正常返回");
+        let first = scan(&建库(), &mut catalog, &options, &task).expect("中断也算正常返回");
         assert!(first.interrupted);
         assert!(checkpoint.exists());
 
         // 中间插一次不写断点的完整扫描：中立库整个被刷新了一遍
-        let mut 不写断点 = ScanOptions::new("/lib");
+        let mut 不写断点 = ScanOptions::named("/lib", "库");
         不写断点.jobs = Jobs::Fixed(1);
         扫入(&mut catalog, &建库(), &不写断点);
 
         // 那份断点现在比中立库旧。照它续跑会把上一次完整扫描的记录全删掉。
         let 再扫 =
-            scan(&建库(), &mut catalog, &options, &CancelToken::new()).expect("扫描不该失败");
+            scan(&建库(), &mut catalog, &options, &Handle::new()).expect("扫描不该失败");
         assert!(!再扫.report.resumed, "过期的断点不该被当成续跑");
         assert_eq!(再扫.report.totals.files, 11, "一个文件都不许丢");
         assert_eq!(再扫.delta.removed, 0);
@@ -1745,14 +1983,14 @@ mod tests {
     #[test]
     fn 断点落在主库内直接拒绝开工() {
         let library = 建库();
-        let mut options = ScanOptions::new("/lib");
+        let mut options = ScanOptions::named("/lib", "库");
         options.checkpoint = Some(CheckpointOptions {
             path: PathBuf::from("/lib/.romcat/checkpoint.json"),
             interval: Duration::ZERO,
             resume: false,
         });
         let err =
-            scan(&library, &mut 新中立库(), &options, &CancelToken::new()).expect_err("必须拒绝");
+            scan(&library, &mut 新中立库(), &options, &Handle::new()).expect_err("必须拒绝");
         assert!(matches!(err, ScanError::WritesInsideLibrary { .. }));
     }
 
@@ -1762,8 +2000,8 @@ mod tests {
         let err = scan(
             &library,
             &mut 新中立库(),
-            &ScanOptions::new("/不存在"),
-            &CancelToken::new(),
+            &ScanOptions::named("/不存在", "库"),
+            &Handle::new(),
         )
         .expect_err("必须报错");
         assert!(matches!(err, ScanError::Root { .. }));
@@ -1772,7 +2010,7 @@ mod tests {
     #[test]
     fn 报告能渲染成文本也能存成_json() {
         let library = 建库();
-        let outcome = 扫(&library, &ScanOptions::new("/lib"));
+        let outcome = 扫(&library, &ScanOptions::named("/lib", "库"));
         let text = outcome.report.render_text();
         assert!(text.contains("库体检报告"));
         assert!(text.contains("透明容器"));

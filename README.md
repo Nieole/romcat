@@ -3,6 +3,8 @@
 把一批以 **Pegasus** 方式维护的模拟器资源，从手工维护变成**自动识别、自动刮削、可在主流前端格式间互转**的库。
 
 > **主库只读。** 那是不可再生的资源。工具只写元数据文件、媒体目录与子库，**ROM 文件一个字节都不改**（ADR-0004）。
+>
+> **主库是一组根。** 几块盘、几个目录都能加进同一个主库，扫完收进**同一份中立库**统一管理。
 
 ---
 
@@ -36,7 +38,10 @@ cargo build --release          # 产出 target/release/romcat 与 romcat-gui
 
 ```bash
 # 1. 扫一遍主库，给它起个名字（只读，只算哈希与体积）
-romcat scan /path/to/Game --library 主库
+romcat scan /path/to/Game --library 主库 --root-name 主库
+
+# 1b. 第二块盘加进同一个主库：换个根名，扫进同一份中立库
+romcat scan /path/to/Pegasus --library 主库 --root-name 元数据库
 
 # 2. 取 DAT 与中文离线索引（各几百 MB，取一次）
 romcat dat sync
@@ -86,7 +91,7 @@ romcat-gui --catalog ~/.romcat/catalog/主库-xxxx.sqlite3
 
 ## 现在到哪一步了
 
-**27/29 张票落地**，余下两张是 Windows 真机验证（`ready-for-human`，需要人在 Windows 上跑）。**1,134 条测试全绿。**
+**27/29 张票落地**，余下两张是 Windows 真机验证（`ready-for-human`，需要人在 Windows 上跑）。**1,237 条测试全绿。**
 
 真库实测（`docs/library-facts.md` 记着全部数字与日期）：
 
@@ -117,7 +122,7 @@ CONTEXT.md     词表。动手前先读它，输出用它的词
 
 三份数据分得很清：
 
-- **中立库**（每个主库一份）—— **整份可再生**。结构版本一变就让你删库重扫，那是省下一整套迁移代码的便宜买卖。
+- **中立库**（每个主库一份，一个主库可以有好几个**根**）—— **整份可再生**。结构版本一变就让你删库重扫，那是省下一整套迁移代码的便宜买卖。
 - **沉淀库**（全局一份）—— **不可再生**。你一条条看出来的裁决住在这儿，删掉就没了，所以它走顺序迁移，永不要求删库。键是**内容锚**，两块盘接同一台机器裁决一次两边都受益。
 - **DAT 库 / 中文索引 / 媒体池** —— 本地镜像，取一次用很久。
 
@@ -137,7 +142,7 @@ CONTEXT.md     词表。动手前先读它，输出用它的词
 ```bash
 cargo fmt --all
 cargo clippy --workspace --all-targets --all-features     # 零警告
-cargo test --workspace --all-features                     # 1,134 条
+cargo test --workspace --all-features                     # 1,237 条
 cargo doc --workspace --no-deps
 ```
 
@@ -157,7 +162,7 @@ cargo run -p romcat-gui --features demo -- --demo          # 拿合成数据开�
 ### 几条纪律
 
 - **主库只读。** 测试与实测**一律用本地 fixture 目录**模拟目标设备，绝不去动任何真实设备或 SD 卡。
-- **路径键一律 NFC 归一**，从磁盘读时用原始形态（ADR-0020）。这条被违反过四次。
+- **路径键一律 NFC 归一**，从磁盘读时用原始形态（ADR-0020）。这条被违反过四次。键的第一段是**根名**，拆键走 `path::split_root`。
 - **绝不直连 `datomatic.no-intro.org`**——一次畸形请求已在调研中导致永久 IP 封禁。Redump 走 `redump.info`。
 - **在线源赌的是你的账号与 IP**（ADR-0007）。默认限流，未识别的变体一个请求都不发。
 - `#![forbid(unsafe_code)]`，Rust 1.95，edition 2024。

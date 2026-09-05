@@ -24,9 +24,7 @@
 //! 所以条目顺序与当初落库时一模一样，按序号对位是安全的。条数对不上说明这个文件
 //! **确实变了**——那时该走的是扫描那条路，这一趟一个字都不改并如实报出来。
 
-use std::path::{Path, PathBuf};
-
-use crate::catalog::{Catalog, CatalogError};
+use crate::catalog::{Catalog, CatalogError, Roots};
 use crate::container;
 use crate::fs::LibraryFs;
 
@@ -68,7 +66,7 @@ const SAMPLES: usize = 12;
 pub fn recheck(
     library: &dyn LibraryFs,
     catalog: &mut Catalog,
-    root: &Path,
+    roots: &Roots,
     cancel: &CancelToken,
     progress: &mut dyn FnMut(&Recheck),
 ) -> Result<Recheck, CatalogError> {
@@ -85,7 +83,12 @@ pub fn recheck(
         // **改之前长什么样**要从同一张表、同一个顺序上取（含目录条目），
         // 不然样例会与重读出来的那一列对不上位。
         let before = catalog.container_entries(&key)?;
-        let listing = match container::list(library, &library_path(root, &key)) {
+        let Some(path) = roots.join(&key) else {
+            // 键说的那个根不在这份库里：与「读不动」同一种处置，如实计数不猜。
+            out.unreadable += 1;
+            continue;
+        };
+        let listing = match container::list(library, &path) {
             Ok(listing) => listing,
             Err(_) => {
                 out.unreadable += 1;
@@ -118,11 +121,4 @@ pub fn recheck(
     Ok(out)
 }
 
-/// 主库里那个文件在哪。键是**相对主库根**的路径，分隔符是 `/`（ADR-0020）。
-fn library_path(root: &Path, key: &str) -> PathBuf {
-    let mut path = root.to_path_buf();
-    for part in key.split('/') {
-        path.push(part);
-    }
-    path
-}
+

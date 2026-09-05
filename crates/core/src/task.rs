@@ -124,6 +124,19 @@ impl Handle {
         Self::default()
     }
 
+    /// 接着一个**已经在手的中断信号**开一个把手。
+    ///
+    /// 命令行是这条路的用处：Ctrl-C 早在开工之前就接在一个 [`CancelToken`] 上了，
+    /// 而长入口收的是把手。两者共用同一个信号，于是 Ctrl-C 与界面上那个「停下」
+    /// 按下去是同一件事。
+    #[must_use]
+    pub fn with_cancel(cancel: CancelToken) -> Self {
+        Self(Arc::new(Shared {
+            cancel,
+            progress: Mutex::new(Progress::default()),
+        }))
+    }
+
     /// 声明这一趟一共几步。**开工时说一次**，进度条才画得出「走了几成」。
     pub fn steps(&self, steps: u32) {
         if let Ok(mut progress) = self.0.progress.lock() {
@@ -365,6 +378,16 @@ impl<T> Board<T> {
         self.running.is_some() || !self.queued.is_empty()
     }
 
+    /// 有跑完了**还没被认领**的吗。
+    ///
+    /// 界面拿它决定「这一帧画完之后还要不要再画一帧」：[`Board::run_here`] 就地跑完的
+    /// 那一趟，结果落进这一格的时刻已经在本帧问过任务台之后了。不再画一帧的话，
+    /// 那份产物要等到下一次有输入事件才交得出去——按钮一直禁着，看着像卡住了。
+    #[must_use]
+    pub fn settled(&self) -> bool {
+        !self.finished.is_empty()
+    }
+
     /// 正在跑的那一趟。
     #[must_use]
     pub fn running(&self) -> Option<Live> {
@@ -516,9 +539,15 @@ impl<T: Send + 'static> Board<T> {
     ) {
         // **被按停的那一趟按「停了」记，不按「失败」记。** 两者在界面上长得一样的话，
         // 用户会以为自己按坏了什么。
+        //
+        // 判据是**那句话正是 [`Halted`] 交出来的那一句**，不是「按过停下就算停了」：
+        // 按下停下之后、走到下一个分界处之前，活本身也可能真的出错（卡拔了、盘满了）。
+        // 只看 `handle.stopped()` 的话那条错误文本会被整条丢掉，界面上却说
+        // 「一个字节都没动，再排一次就是」——那是骗人。
+        let halted = Halted.to_string();
         let ended = match result {
             Ok(product) => Done::Product(product),
-            Err(_) if handle.stopped() => Done::Stopped,
+            Err(why) if handle.stopped() && why == halted => Done::Stopped,
             Err(why) => Done::Failed {
                 step: handle.progress().step,
                 why,
@@ -581,6 +610,32 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         panic!("五秒都没跑完");
+    }
+
+    #[test]
+    fn 按下停下之后才真出错的那一趟按失败记而不是按停了记() {
+        // 按下停下到走到下一个分界处之间，活本身也可能真的出错（卡拔了、盘满了）。
+        // 只看「按过停下没有」的话，那条错误文本会被整条丢掉，界面上却说
+        // 「一个字节都没动，再排一次就是」——那是骗人。
+        let mut board: Board<()> = Board::new();
+        board.queue("会出错的一趟", |task| {
+            task.stop();
+            Err("目标看不了：卡拔了".to_string())
+        });
+        let done = 等到跑完(&mut board);
+        let Done::Failed { why, .. } = &done.ended else {
+            panic!("该是失败，实际是 {:?}", done.ended);
+        };
+        assert_eq!(why, "目标看不了：卡拔了");
+
+        // 真在分界处停下的那一趟照旧按「停了」记。
+        board.queue("干净停下的一趟", |task| {
+            task.stop();
+            task.step("下一步")?;
+            Ok(())
+        });
+        let done = 等到跑完(&mut board);
+        assert!(matches!(done.ended, Done::Stopped), "{:?}", done.ended);
     }
 
     #[test]

@@ -61,6 +61,25 @@ pub fn human_duration(ms: u64) -> String {
     }
 }
 
+/// 一个 UNIX 纪元起的秒排成 `YYYY-MM-DD HH:MM`（UTC）。
+///
+/// 公历换算走 [`capability::from_day_number`](crate::capability)——**公式只有一处**。
+/// 抄两遍的两份公式迟早会在闰年上分家，而它们算的本来就是同一件事。
+///
+/// 用 UTC 而不是本地时区：这个数进报告、也进界面，两处得是同一个数，而本地时区
+/// 会让同一份中立库在两台机器上印出不同的时刻。
+#[must_use]
+pub fn human_time(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rest = secs.rem_euclid(86_400);
+    format!(
+        "{} {:02}:{:02}",
+        crate::capability::from_day_number(days),
+        rest / 3_600,
+        (rest % 3_600) / 60,
+    )
+}
+
 /// 给数字加千位分隔符。
 #[must_use]
 pub fn thousands(value: u64) -> String {
@@ -154,7 +173,16 @@ pub(super) fn render(report: &HealthReport) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "库体检报告");
     let _ = writeln!(out, "{}", "═".repeat(20));
-    let _ = writeln!(out, "主库            {}", report.root);
+    // **主库是一组根**：这一行说的是「这一趟扫的那一个」，不是整个主库。
+    if report.root_name.is_empty() {
+        let _ = writeln!(out, "主库            {}", report.root);
+    } else {
+        let _ = writeln!(
+            out,
+            "扫的根          「{}」{}",
+            report.root_name, report.root
+        );
+    }
     let status = if report.interrupted {
         "已中断（断点已保存，可续跑）"
     } else {
