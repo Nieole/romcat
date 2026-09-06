@@ -687,11 +687,17 @@ impl<'a> ChineseSource<'a> {
         let main = subject.main_key?;
         // 指纹要盖住**一切会改变结果的东西**（`Source::probe` 的文档）：名字、平台、
         // 用的是哪一版 dump、**这一版索引从数据源里取了哪几样**、**它建的时候把平台
-        // 折成了什么样**、以及**匹配参数**——门槛从 0.85 调到 0.80 该重采一遍，取的字段
-        // 从五样变成九样也该重采一遍，补一条平台别名重建索引之后同样该重采一遍，
-        // 不盖它们的话缓存会一口咬定「输入没变」而整条跳过。
+        // 折成了什么样**、**剥离规则**、以及**匹配参数**——门槛从 0.85 调到 0.80 该重采
+        // 一遍，取的字段从五样变成九样也该重采一遍，补一条平台别名重建索引之后同样该重采
+        // 一遍，补一条剥离规则之后还是该重采一遍，不盖它们的话缓存会一口咬定「输入没变」
+        // 而整条跳过。
         let platform = subject.platform.unwrap_or("");
         let tuning = self.naming.tuning.fingerprint();
+        // **剥离规则**（`filename::Rules::fingerprint`）：这一层撞的是从文件名里剥出来的
+        // **正题**（上面 `hit` 里那句 `rules.parse(name)`），而剥离规则是配置不是代码，
+        // 用户补一条自己遇到的模式，正题就变了、撞出来的条目也可能跟着变。它算的是规则的
+        // **语义**——给规则文件加一行注释不该让全库重采一遍。
+        let rules = self.naming.rules.fingerprint();
         // 已经撞上的 DAT 条目名也进指纹：年份从它们里读。
         let entries: Vec<&str> = subject
             .entries
@@ -712,6 +718,7 @@ impl<'a> ChineseSource<'a> {
             // 什么**，不是本机那两张表现在长什么样：后者会在「改了别名但还没重建」时
             // 反过来说谎，说这份索引变了——而它一个字都没变。
             self.naming.index.map_or("", zh::Index::platform_fold),
+            rules,
             tuning.as_str(),
             judged.as_deref().unwrap_or(""),
         ];
@@ -739,6 +746,11 @@ impl<'a> ChineseSource<'a> {
                 .index
                 .map_or("", zh::Index::platform_fold)
                 .to_string(),
+            // **剥离规则**（`filename::Rules::fingerprint`）：与变体那一层盖的是同一样
+            // 东西，理由也一样——名下每个变体撞哪一条，撞的都是从它文件名里剥出来的正题，
+            // 规则一换正题就换。少了它，用户补一条剥离规则重跑，这一层会整片复用旧的采集
+            // 记录，新剥得对的那几个作品那四栏永远补不上来。
+            self.naming.rules.fingerprint().to_string(),
             self.naming.tuning.fingerprint(),
             // **这一层产出哪几个字段**（[`WORK_FIELDS`]）：多接一样上来就该重采一遍。
             WORK_FIELDS
@@ -1799,6 +1811,83 @@ mod tests {
             造(松).probe(&subject)
         );
         assert_ne!(造(zh::Tuning::default()).probe(&work), 造(松).probe(&work));
+    }
+
+    /// 一份**补过一条正题噪音词**的剥离规则：`甲组特供版` 内置那份不认。
+    ///
+    /// 走文件那条路（`Rules::load`），因为用户就是这么补的——`--name-rules <文件>`。
+    fn 补过的规则() -> (crate::testing::TempDir, Rules) {
+        let dir = crate::testing::temp_dir("zh-name-rules");
+        let path = dir.path().join("rules.toml");
+        std::fs::write(&path, "\"版本\" = 1\n\"正题噪音词\" = [\"甲组特供版\"]\n")
+            .expect("写得下");
+        let rules = Rules::load(&path).expect("读得进来");
+        (dir, rules)
+    }
+
+    /// 剥离规则改了才撞得上的那个变体键。
+    const 待剥的键: &str = "nds/合金弹头7甲组特供版.7z";
+
+    #[test]
+    fn 剥离规则进两层的输入指纹() {
+        // **这一条是这张票的正题。** 剥离规则决定从文件名里剥出什么**正题**，
+        // 而这一层撞的就是正题。用户照文档补一条自己遇到的模式再跑一趟 `scrape`
+        // ——从前是整片复用旧的采集记录、一条新产出都没有，因为两层锚点的输入指纹
+        // 盖的是 dump、取了哪几样字段、折出来的那张表与匹配参数，唯独没盖规则本身，
+        // 而那几样一个字都没变。
+        let 内置 = Rules::builtin();
+        let (_dir, 补过) = 补过的规则();
+        let index = 索引();
+        let subject = 变体(待剥的键, &[], &[]);
+        assert_ne!(
+            源(&内置, &index).probe(&subject),
+            源(&补过, &index).probe(&subject),
+            "变体那一层：规则变了，指纹就得变"
+        );
+        let 名下变体 = [名下(待剥的键)];
+        let work = 作品(&名下变体);
+        assert_ne!(
+            源(&内置, &index).probe(&work),
+            源(&补过, &index).probe(&work),
+            "作品那一层同样盖得住它"
+        );
+        // **规则没改时两层照旧是同一个指纹**：加这道判据不能让每一趟刮削都从头来。
+        assert_eq!(
+            源(&内置, &index).probe(&subject),
+            源(&Rules::builtin(), &index).probe(&subject)
+        );
+        assert_eq!(
+            源(&内置, &index).probe(&work),
+            源(&Rules::builtin(), &index).probe(&work)
+        );
+    }
+
+    #[test]
+    fn 内置那份规则一条中文名都产不出而补过的产得出() {
+        // 指纹必须跟着变的**理由**：这两份规则的产出真的不一样。
+        // 不钉这一条，上面那条指纹测试只是在比两个字符串。
+        let subject = 变体(待剥的键, &[], &[]);
+        let index = 索引();
+
+        let mut out = Harvest::default();
+        源(&Rules::builtin(), &index)
+            .collect(&subject, &mut out)
+            .expect("本地源不该失败");
+        assert!(
+            out.values.is_empty(),
+            "`甲组特供版` 剥不掉，正题撞不上任何条目，这个源无话可说"
+        );
+
+        let (_dir, 补过) = 补过的规则();
+        let mut out = Harvest::default();
+        源(&补过, &index)
+            .collect(&subject, &mut out)
+            .expect("本地源不该失败");
+        assert_eq!(
+            那一格(&out, Field::Title).map(|it| it.value.clone()),
+            Some("合金弹头7".to_string()),
+            "补上那条噪音词之后，同一个变体撞得上了"
+        );
     }
 
     /// 数据源里那条简介的原样：开头两个**全角空格**、中间一个换行。

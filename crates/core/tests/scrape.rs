@@ -281,7 +281,35 @@ fn 刮削带裁决(
     summaries: Option<&dyn scrape::zh::Summaries>,
     rulings: &scrape::zh::Rulings,
 ) -> scrape::Outcome {
-    let rules = romcat_core::filename::Rules::builtin();
+    刮削带这几样(
+        现场,
+        index,
+        summaries,
+        rulings,
+        &romcat_core::filename::Rules::builtin(),
+    )
+}
+
+/// 再带上一份**自己的剥离规则**跑一趟（票 04）。
+///
+/// `--name-rules <文件>` 换的就是它。剥离规则决定从文件名里剥出什么**正题**，
+/// 而中文离线源撞的正是正题。
+fn 刮削带剥离规则(
+    现场: &mut 现场,
+    index: &romcat_core::zh::Index,
+    rules: &romcat_core::filename::Rules,
+) -> scrape::Outcome {
+    刮削带这几样(现场, index, None, &scrape::zh::Rulings::none(), rules)
+}
+
+/// 最底下那一趟：索引、简介、裁决、剥离规则四样都摆得动。
+fn 刮削带这几样(
+    现场: &mut 现场,
+    index: &romcat_core::zh::Index,
+    summaries: Option<&dyn scrape::zh::Summaries>,
+    rulings: &scrape::zh::Rulings,
+    rules: &romcat_core::filename::Rules,
+) -> scrape::Outcome {
     let options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
     scrape::run(
         &RealFs::new(),
@@ -294,7 +322,7 @@ fn 刮削带裁决(
             cancel: &CancelToken::new(),
             progress: &mut |_| {},
             naming: &fuzzy::Naming {
-                rules: &rules,
+                rules,
                 index: Some(index),
                 tuning: romcat_core::zh::Tuning::default(),
             },
@@ -2845,6 +2873,97 @@ fn 补一条平台别名重建索引之后刮削重采而不是整片复用旧�
     assert!(
         第三趟.reused_probes > 第二趟.reused_probes,
         "第二趟该有锚点因为折出来的那张表变了而重采：首趟 {}、第二趟 {}、第三趟 {}",
+        首趟.reused_probes,
+        第二趟.reused_probes,
+        第三趟.reused_probes
+    );
+}
+
+/// 两条条目的中文索引：`魂斗罗` 与 `斗罗大陆`。
+///
+/// 一个文件名剥成哪个**正题**，决定它撞上哪一条——这正是剥离规则说了算的那件事。
+fn 两条条目的中文索引() -> romcat_core::zh::Index {
+    let mut entries = 中文索引().entries().to_vec();
+    entries.push(romcat_core::zh::Entry {
+        id: 54_321,
+        name: "斗罗".to_string(),
+        name_cn: "斗罗大陆".to_string(),
+        aliases: Vec::new(),
+        year: Some(1988),
+        platforms: vec!["FC".to_string()],
+        platform_text: "FC".to_string(),
+        summary: String::new(),
+        genres: vec!["RPG".to_string()],
+        developers: vec!["另一家".to_string()],
+        publishers: vec!["另一家".to_string()],
+    });
+    romcat_core::zh::Index::build(entries, "dump-2026-09-01".to_string())
+}
+
+#[test]
+fn 补一条剥离规则之后刮削重采而不是整片复用旧记录() {
+    // **这一条是票 04 的正题，照用户那几步一步一步走。**
+    //
+    // 剥离规则决定从文件名里剥出什么**正题**，而中文离线源撞的正是正题。用户遇到一批
+    // 剥不干净的名字，照文档往 `--name-rules` 那份文件里补一条，再跑一趟 `scrape`
+    // ——从前是整片复用旧的采集记录、什么都不重采，因为两层锚点的输入指纹盖的是 dump、
+    // 取了哪几样字段、建索引那一刻折出来的那张表与匹配参数，唯独没盖规则本身。
+    // 而这一趟那几样一个字都没变：**同一份索引，只有规则换了**。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    let index = 两条条目的中文索引();
+
+    // ── 一、内置那份规则剥出来的正题是 `魂斗罗`，撞上 `魂斗罗` 那条。
+    let 内置 = romcat_core::filename::Rules::builtin();
+    let 首趟 = 刮削带剥离规则(&mut 现场, &index, &内置);
+    assert_eq!(
+        各值(&现场, "变体", 汉化变体, "标题", "中文离线源"),
+        vec!["魂斗罗".to_string()]
+    );
+    assert_eq!(
+        值(&现场, "作品", 作品, "类型", "中文离线源").as_deref(),
+        Some("ACT"),
+        "作品那四栏跟着同一次匹配走"
+    );
+
+    // ── 二、补一条正题噪音词：正题从 `魂斗罗` 变成 `斗罗`，撞上的是另一条条目。
+    let 工作区 = temp_dir("zh-name-rules");
+    let 规则文件 = 工作区.path().join("rules.toml");
+    fs::write(&规则文件, "\"版本\" = 1\n\"正题噪音词\" = [\"魂\"]\n").expect("写得下规则");
+    let 补过的规则 = romcat_core::filename::Rules::load(&规则文件).expect("读得进来");
+    // **从前两层指纹就是靠这几样算的，而它们一个字都没变**——这正是那个洞。
+    assert_eq!(
+        内置.parse("魂斗罗[dwt_so 汉化].zip").title,
+        "魂斗罗",
+        "内置那份剥出来是这个"
+    );
+    assert_eq!(
+        补过的规则.parse("魂斗罗[dwt_so 汉化].zip").title,
+        "斗罗",
+        "补一条之后剥出来是另一个正题"
+    );
+
+    // ── 三、再跑一趟刮削：撞上过的那两个锚点真的重采了，撞出来的是另一条条目。
+    let 第二趟 = 刮削带剥离规则(&mut 现场, &index, &补过的规则);
+    assert_eq!(
+        各值(&现场, "变体", 汉化变体, "标题", "中文离线源"),
+        vec!["斗罗大陆".to_string()],
+        "换了规则该重采出另一条中文名，而不是被缓存一口咬定「输入没变」而整条跳过"
+    );
+    assert_eq!(
+        值(&现场, "作品", 作品, "类型", "中文离线源").as_deref(),
+        Some("RPG"),
+        "作品那一层同样跟着重采"
+    );
+
+    // ── 四、**规则没改时照旧整片跳过**：加这道判据不让每一趟刮削都从头来。
+    //
+    // 第三趟规则一个字没改，于是复用数比第二趟多——这一条既拦「一条都没重采」，
+    // 也拦「每一趟都从头来」。
+    let 第三趟 = 刮削带剥离规则(&mut 现场, &index, &补过的规则);
+    assert!(
+        第三趟.reused_probes > 第二趟.reused_probes,
+        "第二趟该有锚点因为规则变了而重采、第三趟该整片跳过：首趟 {}、第二趟 {}、第三趟 {}",
         首趟.reused_probes,
         第二趟.reused_probes,
         第三趟.reused_probes
