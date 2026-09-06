@@ -106,3 +106,24 @@
 这一趟另记了 `Q159`（「结构性损失」词表里还没有）、`Q160`（值**末尾**的空白同样被掐掉，
 本票只声明了开头那一条）、`Q161`（ES gamelist 的清单是空的，空 = 还没查过）、
 `Q163`（`/code-review` 量出来的同族三样：值里那一行 `.`、多值字段里的换行与空串）。
+
+
+## 挂单裁决（第二轮）
+
+从 `.scratch/PARKING-LOT.md` 迁来；编号 `Qn` 留着占号、不复用。
+
+### Q162 — 挂单 Q26 把「能力档位那一套」指到 `crates/core/src/capability.rs`，那是另一样东西
+
+- **来自：** 票 `queue-followups/02`
+- **类别：** 票写错了
+- **在哪：** `.scratch/queue-followups/issues/02-capability-says-what-pegasus-drops.md`
+  第 32 行，Q26 的「在哪」写着「`crates/core/src/capability.rs`（能力档位那一套）」
+- **为什么没停线：** 交接说明里给对了——`assert_capability` 在
+  `crates/core/src/adapter.rs:570`。两个名字只差一个字：`capability.rs` 装的是
+  **能力档案**（目标设备吃得下什么、目标存储放得下什么，ADR-0017），
+  **能力档位**（只读 / 只写 / 双向 / 无损往返，ADR-0003）在 `adapter.rs` 里。
+- **这张票实际做了什么：** **一个字都没动 `capability.rs`。** 改的是 `adapter.rs`、
+  `adapter/pegasus.rs`、`adapter/report.rs`、`adapter/transfer.rs` 与命令行那一处。
+- **谁来裁：** 收尾
+- **状态：** open
+- **收尾裁决（第二轮）：** **noted** —— 核对过、不用改，留作记录。

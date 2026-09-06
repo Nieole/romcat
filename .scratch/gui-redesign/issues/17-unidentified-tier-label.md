@@ -58,3 +58,42 @@
 - [ ] `crates/` 里指向挂单 `Q77`/`Q80`/`Q84` 的四处文档改成指向词表（挂单 `Q148`）
 - [ ] 挂单 `Q146`、`Q148` 标为 resolved
 - [ ] 门禁命令全绿（带 `--all-features`）
+
+
+## 挂单裁决（第二轮）
+
+从 `.scratch/PARKING-LOT.md` 迁来；编号 `Qn` 留着占号、不复用。
+
+### Q146 — 「还没识别」裁成两个词：第二种用法叫「没有候选」，而五屏上仍印着旧词
+
+- **来自：** 票 `gui-redesign/16`（接 `Q84`）
+- **类别：** 两份东西矛盾
+- **在哪：** `CONTEXT.md` 的**还没识别**与新收的**没有候选**两条；
+  `crates/core/src/catalog/identify.rs` 的 `Tier::Unidentified::label()`（返回「还没识别」）
+  与 `NOT_RUN_LABEL`（同样四个字）；`crates/core/src/catalog/browse.rs` 的
+  `WorkRow::confidence_label` 与 `StateFilter::{label, from_label}`；印这一档的界面在
+  `crates/gui/src/{table.rs,queue.rs,look.rs}` 与 `crates/gui/src/browse.rs:1870,1876,2133`。
+  **票 16 的 `Q84` 给的是 `crates/gui/src/browse.rs:976,996`，那两处是 `load_detail` 与
+  `status`，一个字都不印这一档**——本条按实际印的地方重记了一遍。
+- **为什么没停线：** 票 16 把这一裁明写着交给实现者（`Q84`），而它的验收最后一条又明写
+  「代码里一个名字都没改」——裁得动词表，动不了标签。
+- **这张票实际做了什么：** **裁成两个词，不并成一个。** 词表里**还没识别**仍是「一个变体
+  连识别都还没跑过」，另收一条**没有候选**＝「识别跑过了、却一条候选都没有」。
+  并成一个的话，「跑过没跑过」这条界线就没词可说了，而它正是**命中率的分母**那条界线
+  （ADR-0002 那套置信度与待确认队列的账，加上核心里 `not_run` 与 `Unidentified` 已经被
+  刻意分开的 Rust 名字）；ADR-0021 立的正是「不可读是第三态、不许并进已变或已删」这条纪律
+  ——识别这一侧不该反过来把两件事并回一个词。**代码一个字没动**：那一档打给用户的仍是
+  「还没识别」，于是词表与界面眼下对不上。
+- **它不是换个字符串那么简单：** `Tier::of` 收的是 `Option<Confidence>`，
+  **`None` 同时装着「连识别都没跑过」与「跑过了、一条候选都没有」**——
+  `crates/core/tests/works.rs` 里那批散落的行就是拿 `confidence == None` 断言
+  「还没识别」的。直接把 `Tier::Unidentified::label()` 换成「没有候选」，
+  连识别都没跑过的变体也会被印成「没有候选」，当场违背词表新收的那条。
+  同一个坑还有一处：`StateFilter::from_label` 拿的是一个**裸字符串字面量**
+  「还没识别」，不是 `NOT_RUN_LABEL`，换掉 `label()` 那一半而漏了它，筛选器的
+  往返就静默断掉。
+- **要收的话怎么收：** 票 `gui-redesign/17` —— 先让浏览与队列那一侧分得出这两件事
+  （库里已经有 `not_run` 那份账），再各印各的词，五屏与 `spec.md` 一起改。
+- **谁来裁：** 票 `gui-redesign/17`
+- **状态：** open
+- **收尾裁决（第二轮）：** resolved —— **由票 `gui-redesign/17` 承接**。票 17 开头就写着「词表把这四个字裁成了两个词（票 16、挂单 Q146）」，连坑都一样（`Tier::of` 收 `Option<Confidence>`、`None` 装着两件事）。
