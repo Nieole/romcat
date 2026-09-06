@@ -1228,10 +1228,18 @@ pub struct Undone {
     pub kept: u64,
     /// 中立库里放回了几个变体的结论。
     pub variants: u64,
-    /// 中立库那一半回滚得了吗。
+    /// 中立库那一半**真的回去了吗**（也就是 [`Undone::variants`] 大于零）。
     ///
-    /// 为假就是这一批的快照已经随重跑识别清掉了（[`Catalog::clear_identifications`]），
-    /// 那时只回滚得了沉淀库那一半——**该如实说出来**，而不是让人以为队列已经回来了。
+    /// 为假有三种来路，说的都是同一件事「这一批的结论没回到中立库」：
+    ///
+    /// - 这一批的快照已经随重跑识别清掉了（[`Catalog::clear_identifications`]）；
+    /// - 这几个变体改过名、挪过位置，快照跟着旧键一起作废了
+    ///   （`catalog::identify::drop_variant_orphans`），新键上那份内容是**还没识别**；
+    /// - 这一批的裁决眼下一条都不在生效（全记进了 [`Undone::kept`]），本来就没有什么
+    ///   要放回去。
+    ///
+    /// 三种都**该如实说出来**，而不是让人以为队列已经回来了：说「回去了（0 个变体）」
+    /// 再指着 `triage list`，那是许诺队列里有东西。
     pub catalog_rolled_back: bool,
 }
 
@@ -1368,11 +1376,17 @@ pub fn undo_batch(
         }
         rolled_back.push(row.variant_key);
     }
-    account.catalog_rolled_back = catalog.stashed(batch)? > 0;
-    if account.catalog_rolled_back {
+    // 快照还在才轮得到放回去。快照空着还去放的话，[`Catalog::restore_conclusions`]
+    // 会把这几个变体眼下的候选删光、两条链接摘空——那是拿一份不存在的「之前」盖现状。
+    if catalog.stashed(batch)? > 0 {
         let keys: Vec<&str> = rolled_back.iter().map(String::as_str).collect();
         account.variants = catalog.restore_conclusions(batch, &keys)?;
     }
+    // **这一句说的是「真的放回去了」，不是「快照还在」。** 同一份内容改过名、挪过位置
+    // 之后（旧键的快照已随重扫作废、新键上那份内容是**还没识别**），以及这一批的裁决
+    // 眼下一条都不在生效（全记进了 `kept`）时，一个变体都放不回去——那时说「也回去了
+    // （0 个变体）」是许诺队列里有东西，而队列里一条都没有。
+    account.catalog_rolled_back = account.variants > 0;
     store.mark_batch_undone(batch, true)?;
     Ok(account)
 }

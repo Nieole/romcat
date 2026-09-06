@@ -1311,6 +1311,78 @@ fn 跑过识别之后那一批只撤得回沉淀库那一半并如实说出来()
 }
 
 #[test]
+fn 同内容换了路径之后撤销不谎称中立库那一半也回去了() {
+    // 裁一批 → 改名 / 挪目录 → `scan`（**不重跑识别**）→ `undo`。快照上那几个键在库里
+    // 已经找不着了：一个变体都放不回去，而账上那句「中立库那一半也回去了（0 个变体）：
+    // 现在就 `triage list`」是假的——新键上那份内容是**还没识别**，压根不在队列里。
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    let filter = Filter {
+        name_contains: vec!["勇者斗恶龙".to_string()],
+        ..Filter::default()
+    };
+    let applied = 裁(&mut 现场, &filter, &手工("勇者斗恶龙"));
+    assert_eq!(applied.verdicts, 1);
+    assert_eq!(现场.catalog.stashed(applied.batch).expect("数得出"), 1);
+
+    // 同一份内容换个路径：改名加挪目录，再扫一遍。
+    let 旧 = 现场.dir.path().join("FC/勇者斗恶龙 外星科技汉化.zip");
+    let 新 = 现场.dir.path().join("FC/别的目录/换了个名.zip");
+    fs::create_dir_all(新.parent().expect("有上级目录")).expect("能建目录");
+    fs::rename(&旧, &新).expect("改得动名");
+    重扫(&mut 现场);
+    assert!(
+        现场
+            .catalog
+            .variant("库/FC/勇者斗恶龙 外星科技汉化.zip")
+            .expect("读得出")
+            .is_none(),
+        "旧键那个变体已经不在了",
+    );
+
+    // 快照跟着旧键一起作废（**各层各自作废**）：撤销问「回滚得了吗」时得到的是实话。
+    assert_eq!(
+        现场.catalog.stashed(applied.batch).expect("数得出"),
+        0,
+        "指不着任何变体的快照该随重扫一起收掉",
+    );
+
+    let account =
+        triage::undo_batch(&mut 现场.catalog, &mut 现场.store, applied.batch).expect("撤得掉");
+    assert_eq!(account.removed, 1, "沉淀库那一半照样撤得干净");
+    assert_eq!(account.variants, 0);
+    assert!(
+        !account.catalog_rolled_back,
+        "一个变体都没放回去，账上就不该说「中立库那一半也回去了」",
+    );
+
+    // 新键上那份内容眼下是**还没识别**：不在队列里，要跑一趟识别才回得来。
+    let queue = 列队列(&现场);
+    assert_eq!(queue.not_run(), 1, "换了路径的那一份连识别都还没跑过");
+    assert!(
+        !queue
+            .selected()
+            .iter()
+            .any(|item| item.variant.key.contains("换了个名")),
+        "它压根不在队列里：{:?}",
+        keys(queue.selected()),
+    );
+    跑识别(&mut 现场);
+    assert_eq!(
+        队列(
+            &现场,
+            &Filter {
+                name_contains: vec!["换了个名".to_string()],
+                ..Filter::default()
+            },
+        )
+        .len(),
+        1,
+        "跑过识别它才回到待裁决——那是这条路一直都在的出口",
+    );
+}
+
+#[test]
 fn 报告说得出按各个轴一次能覆盖多少() {
     let mut 现场 = 建现场();
     跑识别(&mut 现场);

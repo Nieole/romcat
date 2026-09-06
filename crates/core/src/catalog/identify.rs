@@ -222,6 +222,11 @@ CREATE TABLE IF NOT EXISTS model_call(
 -- 里面装的每一样都**可再生**（识别重跑一遍就有），所以它按中立库的规矩活：
 -- [`Catalog::clear_identifications`] 把它一起清掉。清掉之后那一批的中立库那一半就撤不
 -- 回来了——那是实话，也不是损失：那时该做的本来就是再跑一趟识别。
+--
+-- 它**也跟着变体活**：每一行的主语是一个变体的键，那个变体没了（改名、挪目录）或者
+-- 它的字节换了，这一行说的「之前」就不再是任何人的之前，随 `drop_variant_orphans` /
+-- `drop_stale_conclusions` 一起收掉。留着它只会让撤销的账说「中立库那一半也回去了
+-- （0 个变体）」，而那几份内容眼下是**还没识别**、不在队列里。
 CREATE TABLE IF NOT EXISTS verdict_batch_shadow(
     -- 沉淀库里那一批的编号（`verdict::Batch::id`）。**编号由沉淀库发**——批本身住在
     -- 那边，因为被盖掉的旧裁决除了那儿没有第二份。
@@ -1742,7 +1747,15 @@ impl Catalog {
     }
 
     /// 一批的快照里还剩几个变体。**撤销之前问它**：为 0 就是这一批的中立库那一半
-    /// 已经随重跑识别清掉了，那时只回滚得了沉淀库那一半，该如实说出来。
+    /// 已经回不去了，那时只回滚得了沉淀库那一半，该如实说出来。
+    ///
+    /// 两条来路：重跑识别把它整批清掉了（[`Catalog::clear_identifications`]），
+    /// 或者这几个变体改过名、挪过位置、字节换过，快照跟着旧键一起作废了
+    /// （`drop_variant_orphans` / `drop_stale_conclusions`）。
+    ///
+    /// **它数的是「快照还在几个变体上」，不是「撤销放得回去几个」**：混着读，一批里
+    /// 一半变体改过名时账就说得比做到的多。放回去了几个由
+    /// [`Catalog::restore_conclusions`] 的返回值说了算。
     ///
     /// # Errors
     /// 读库失败时返回错误。
@@ -2593,6 +2606,17 @@ impl Catalog {
 /// [`Catalog::restore_conclusions`] 收尾那两句是同一条路，只是那里按一批划范围，
 /// 这里按整库——重新成型本来就是整库一遍的纯计算。
 ///
+/// ## 一**批**裁决的**快照**也在这份清单里
+///
+/// `verdict_batch_shadow` 那两张表存的是「这一批落下之前，这几个变体是什么样」——
+/// 说的是**某个变体的键**。那个键没了，那句话就没有主语了：同一份内容改过名、挪过目录
+/// 之后，旧键的快照一行都放不回去（[`Catalog::restore_conclusions`] 插不进、改不动），
+/// 而 [`Catalog::stashed`] 照旧数得出它，于是撤销的账上会说「中立库那一半也回去了
+/// （0 个变体）」——那是许诺队列里有东西，而新键上那份内容是**还没识别**、压根不在队列里。
+///
+/// 它跟着这一步走的判据与上面几张表同一条：**可再生**（重跑一趟识别就有）、
+/// **指不着任何变体**。批本身与它盖掉的旧裁决一条都不受影响，那些住在**沉淀库**里。
+///
 /// **`model_answer` 不在这份清单里**：那是唯一花过钱的一张表，键回来了还白拿一次
 /// （见它自己那段表注释）。**人工纠正与合集成员也不在**：那两样明写着不随重新成型消失。
 pub(super) fn drop_variant_orphans(tx: &Transaction<'_>) -> rusqlite::Result<()> {
@@ -2604,6 +2628,15 @@ pub(super) fn drop_variant_orphans(tx: &Transaction<'_>) -> rusqlite::Result<()>
     )?;
     tx.execute(
         "DELETE FROM identification WHERE variant_key NOT IN (SELECT key FROM variant)",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM verdict_batch_shadow_candidate
+         WHERE variant_key NOT IN (SELECT key FROM variant)",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM verdict_batch_shadow WHERE variant_key NOT IN (SELECT key FROM variant)",
         [],
     )?;
     drop_unheld_works(tx)
@@ -2637,6 +2670,12 @@ pub(super) fn drop_variant_orphans(tx: &Transaction<'_>) -> rusqlite::Result<()>
 /// 链接——三样都是**按字节**得出来的，字节换了就都不算数（`CONTEXT.md` 的**识别**）。
 /// 收尾照 [`drop_variant_orphans`] 那两句收一遍没人指的作品与发行版。
 ///
+/// **一批裁决的快照跟着走**（`verdict_batch_shadow` 那两张表，与
+/// [`drop_variant_orphans`] 收的是同几张表）：快照说的是「这一批落下之前这个变体是什么
+/// 样」，而那句话说的是**旧字节**。留着它，撤销会拿一份对着旧字节算出来的结论盖在新
+/// 字节上——正是这一步要治的那种「新字节配旧结论」。撤销那时改说「中立库那一半没回去，
+/// 跑一趟 `romcat identify`」，那是实话。
+///
 /// **刮削的结论不走**：它锚在作品名或变体的键上（`CONTEXT.md` 的**锚点**），
 /// 这一次变的是字节不是名字。作品真成了孤儿的话，它连同挂在上面的东西一起被收掉。
 ///
@@ -2669,10 +2708,16 @@ pub(super) fn drop_stale_conclusions(
             tx.prepare("DELETE FROM identification WHERE variant_key = ?1")?;
         let mut unlink =
             tx.prepare("UPDATE variant SET work_id = NULL, release_id = NULL WHERE key = ?1")?;
+        let mut drop_shadow_candidates =
+            tx.prepare("DELETE FROM verdict_batch_shadow_candidate WHERE variant_key = ?1")?;
+        let mut drop_shadow =
+            tx.prepare("DELETE FROM verdict_batch_shadow WHERE variant_key = ?1")?;
         for variant_key in &variants {
             drop_candidates.execute(params![variant_key])?;
             drop_identification.execute(params![variant_key])?;
             unlink.execute(params![variant_key])?;
+            drop_shadow_candidates.execute(params![variant_key])?;
+            drop_shadow.execute(params![variant_key])?;
         }
     }
     drop_unheld_works(tx)
