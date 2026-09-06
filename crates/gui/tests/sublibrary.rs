@@ -38,6 +38,48 @@ const 存档: &str = "我自己拷进来的存档.sav";
 /// 那份存档里装着什么。同步前后必须一个字节不差。
 const 存档内容: &str = "通关存档，别动";
 
+/// 摆进库里那条**读不懂**的规则，原文长这样。屏上要原样印出来。
+const 坏规则原文: &str = "这不是一条规则";
+
+/// 连画两帧，交出**后一帧**画在屏上的字。
+///
+/// 头一帧 egui 还在量各块占多大，摊开与收起的状态要下一帧才落定
+/// （`这一屏画得出来_摊开与收起都不炸` 也是连跑两帧）。
+fn 画两帧(ctx: &egui::Context, 场: &mut 现场) -> String {
+    let mut out = String::new();
+    for _ in 0..2 {
+        out = 画出来的字(&headless::frame(ctx, headless::input(), |ui| 场.app.ui(ui)));
+    }
+    out
+}
+
+/// 这一帧**真的画在屏上**的那些字。
+///
+/// 「屏上摆得出来」「屏上没了」这两类断言只有看这个才算数：查数据结构里那一条
+/// 是在测别的东西——库里删没删干净另有断言管。egui 每画一段文字留下一个 `Galley`，
+/// 它带着原文。
+fn 画出来的字(output: &egui::FullOutput) -> String {
+    fn 收(shape: &egui::epaint::Shape, out: &mut String) {
+        match shape {
+            egui::epaint::Shape::Text(text) => {
+                out.push_str(text.galley.text());
+                out.push('\n');
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    收(one, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = String::new();
+    for clipped in &output.shapes {
+        收(&clipped.shape, &mut out);
+    }
+    out
+}
+
 fn 写(path: &Path, bytes: &[u8]) {
     fs::create_dir_all(path.parent().expect("有上级目录")).expect("能建目录");
     fs::write(path, bytes).expect("能写文件");
@@ -126,6 +168,23 @@ impl 现场 {
         site.catalog.add_rule(name, &parsed).expect("写得进去");
         screen.reload(site);
         screen.open(site, name);
+    }
+
+    /// 往库里塞一条**读不懂**的规则，跟着把那张卡重读一遍。
+    ///
+    /// 库里怎么会有读不懂的规则？中立库是个 SQLite 文件，人打得开；换一版程序、
+    /// 删掉一个维度之后旧规则也会读不懂（`LoadedSelection::from_stored` 的文档）。
+    /// 这里照那种情形摆一条：原文存的是读不回来的字，`add_rule` 那道「先读懂再写」
+    /// 的闸只好绕过去——真库上它正是这么长出来的。
+    fn 摆一条读不懂的(&mut self, name: &str, text: &str) -> i64 {
+        let 坏的 = Rule {
+            text: text.to_string(),
+            root: Group::new(Join::All, Vec::new()),
+        };
+        let (screen, site) = self.app.sublibrary_and_site();
+        let ordinal = site.catalog.add_rule(name, &坏的).expect("写得进去");
+        screen.open(site, name);
+        ordinal
     }
 
     /// 点「改选择」，跟着让窗口把人送去浏览屏。
@@ -293,7 +352,7 @@ fn 点改选择跳到浏览屏而且筛选器里预填的是这个子库的规�
     assert_eq!(场.app.view(), View::Browse, "没跳去浏览屏");
     let editing = 场.app.browse().editing().expect("正在改一个子库");
     assert_eq!(editing.sublibrary, "掌机");
-    assert_eq!(editing.broken, 0);
+    assert!(editing.broken.is_empty());
 
     // **多条规则之间是并集**，与求值同一条口径——预填的正是那一条。
     let 预填 = 场.app.browse().query().rule.clone().expect("预填了规则");
@@ -443,22 +502,11 @@ fn 选择集在这一屏上只读摆得出规则与例外() {
 
     // **读不懂的那条照旧摆出来**，而且「改选择」不碰它：它没参与求值，
     // 顺手删掉等于拿一次改选择悄悄清掉用户还没来得及修的东西。
-    {
-        // 库里怎么会有读不懂的规则？中立库是个 SQLite 文件，人打得开；换一版程序、
-        // 删掉一个维度之后旧规则也会读不懂（`LoadedSelection::from_stored` 的文档）。
-        // 这里照那种情形摆一条：原文存的是读不回来的字。
-        let 坏的 = Rule {
-            text: "这不是一条规则".to_string(),
-            root: Group::new(Join::All, Vec::new()),
-        };
-        let (screen, site) = 场.app.sublibrary_and_site();
-        site.catalog.add_rule("掌机", &坏的).expect("写得进去");
-        screen.open(site, "掌机");
-    }
+    场.摆一条读不懂的("掌机", 坏规则原文);
     assert_eq!(场.app.sublibrary().broken().len(), 1);
 
     场.改选择();
-    assert_eq!(场.app.browse().editing().expect("在改").broken, 1);
+    assert_eq!(场.app.browse().editing().expect("在改").broken.len(), 1);
     场.更新到子库();
     assert_eq!(
         场.app.sublibrary().broken().len(),
@@ -466,6 +514,88 @@ fn 选择集在这一屏上只读摆得出规则与例外() {
         "「改选择」把读不懂的那条一起换掉了",
     );
     assert_eq!(场.app.sublibrary().rules().len(), 1, "读得懂的那条该被换掉");
+}
+
+#[test]
+fn 读不懂的规则在改选择那条横幅里扔得掉而且别的一条都没动() {
+    // 票 `gui-redesign/14`（挂单 `Q86`）：一条读不回来的规则原先在界面上**改不动也
+    // 删不掉**，只能去命令行。这一票给它一条出路——**开在浏览屏筛选栏顶上那条横幅里**，
+    // 不在子库卡上：子库屏一个写的动作都没有（票 `gui-redesign/11` 的「这一屏不选内容」，
+    // 它把八个概念降到三个靠的就是这条）。
+    //
+    // 这几条断言看的是**这一帧真画出来的字**：查数据结构里那一条是在测别的东西。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    {
+        // 一条**永久记住**的手挑例外（ADR-0016）。这一趟扔规则不许连它一起清掉。
+        let (_, site) = 场.app.sublibrary_and_site();
+        site.catalog
+            .set_exception(
+                "掌机",
+                "库/GBA/口袋妖怪 绿宝石.zip",
+                Exception::Include,
+                Some("小时候玩过"),
+            )
+            .expect("例外写得进");
+    }
+    let 坏的 = 场.摆一条读不懂的("掌机", 坏规则原文);
+
+    // **子库卡上照旧摆得出那一条**（红的，连它错在哪），而下一步说得出在哪儿。
+    let 卡上 = 画两帧(&ctx, &mut 场);
+    assert!(卡上.contains(坏规则原文), "卡上没摆出那条读不懂的：{卡上}");
+    assert!(
+        卡上.contains("按上面「改选择」跳去浏览屏"),
+        "卡上没写清下一步在哪儿——「看不出下一步」正是挂单 Q86 里最贵的那一半：{卡上}",
+    );
+    assert!(
+        !卡上.contains("扔掉这条"),
+        "子库屏上长出了一颗删规则的按钮——票 11 立的「这一屏不选内容」破了：{卡上}",
+    );
+
+    // **出路在浏览屏筛选栏顶上那条横幅里**：原文原样摆着，跟着一颗「扔掉这条」。
+    // 摆在这儿而不是底下那块面板里，是因为那儿要滚一屏才看得见。
+    场.改选择();
+    let 横幅 = 画两帧(&ctx, &mut 场);
+    assert!(横幅.contains(坏规则原文), "横幅里没摆出那条原文：{横幅}");
+    assert!(横幅.contains("扔掉这条"), "横幅里没有扔掉它的那颗按钮：{横幅}");
+
+    // 按下去那一下。
+    {
+        let (browse, site) = 场.app.browse_and_site();
+        browse.discard_broken_rule(site, 坏的);
+        assert!(browse.error().is_none(), "{:?}", browse.error());
+        assert!(
+            browse.editing().expect("还在改").broken.is_empty(),
+            "扔完了，屏上那一栏没重读",
+        );
+    }
+    // 窗口把「这个子库动过了」转告子库屏，那张卡重读一遍。
+    场.app.route();
+    场.app.show_view(View::Sublibraries);
+    let 卡上 = 画两帧(&ctx, &mut 场);
+    assert!(!卡上.contains(坏规则原文), "扔掉了，卡上还印着它：{卡上}");
+
+    // **别的一条都没动。**
+    let 规则: Vec<String> = 场
+        .app
+        .sublibrary()
+        .rules()
+        .iter()
+        .map(|stored| stored.text.clone())
+        .collect();
+    assert_eq!(规则, vec!["平台=SFC".to_string()], "读得懂的那条被顺手带走了");
+    assert!(场.app.sublibrary().broken().is_empty());
+    let 例外 = 场.app.sublibrary().exceptions();
+    assert_eq!(例外.len(), 1, "**例外是永久记住的**（ADR-0016），不许被顺手清掉");
+    assert_eq!(例外[0].note.as_deref(), Some("小时候玩过"));
+    assert_eq!(例外[0].kind, Exception::Include);
+
+    // 扔掉它**不改变这个子库选出什么**——它本来就没参与求值。
+    let 选中 = 场.子库选出来的("掌机");
+    assert_eq!(选中.len(), 3, "两个 SFC 变体加那条收入的例外");
+    assert!(选中.contains("库/GBA/口袋妖怪 绿宝石.zip"), "收入例外没起作用");
 }
 
 #[test]

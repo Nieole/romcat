@@ -41,7 +41,9 @@ use rusqlite::{OptionalExtension, params};
 
 use super::{Catalog, CatalogError};
 use crate::path;
-use crate::sublibrary::{Exception, ExceptionRow, LoadedSelection, Rule, StoredRule, Sublibrary};
+use crate::sublibrary::{
+    Discarded, Exception, ExceptionRow, LoadedSelection, Rule, StoredRule, Sublibrary,
+};
 use crate::sync::{FileKind, Manifest, ManifestFile, Stamp};
 
 /// 子库与选择集的表。
@@ -416,6 +418,51 @@ impl Catalog {
             )
             .map_err(|source| self.err(source))?;
         Ok(gone > 0)
+    }
+
+    /// **扔掉一条读不懂的规则**——读得懂的那几条一条都碰不到。
+    ///
+    /// 与 [`Self::remove_rule`] 的差别只有一条：它按序号删任何一条，这一条**先读一遍
+    /// 再决定删不删**，读得懂就拒绝（[`Discarded::Readable`]）。这一道闸是给界面上
+    /// 那条路准备的（票 `gui-redesign/14`）：读不懂的那几条在界面上处置得掉，而读得懂
+    /// 的那几条只经由「改选择」整批换掉（[`Self::replace_rules`]）——两条路混在一起
+    /// 的话，一次「扔掉这条坏的」就能悄悄删掉一条好的，而屏上写的是「扔掉读不懂的」。
+    ///
+    /// 判「读不懂」用的是与 [`LoadedSelection::from_stored`] **同一条** `Rule::parse`：
+    /// 界面上摆出来的那几条红的，正是这条路删得掉的那几条，两处分歧不了。
+    ///
+    /// 例外一条都不碰：它们与规则各存一张表，而**例外是永久记住的**（ADR-0016）。
+    ///
+    /// # Errors
+    /// 读库或写库失败时返回错误。
+    pub fn discard_broken_rule(
+        &mut self,
+        name: &str,
+        ordinal: i64,
+    ) -> Result<Discarded, CatalogError> {
+        let Some(stored) = self
+            .sublibrary_rules(name)?
+            .into_iter()
+            .find(|stored| stored.ordinal == ordinal)
+        else {
+            return Ok(Discarded::Absent);
+        };
+        if Rule::parse(&stored.text).is_ok() {
+            return Ok(Discarded::Readable);
+        }
+        let gone = self
+            .conn
+            .execute(
+                "DELETE FROM sublibrary_rule WHERE sublibrary = ?1 AND ordinal = ?2",
+                params![name, ordinal],
+            )
+            .map_err(|source| self.err(source))?;
+        // 读到与删掉之间那个缝：另一个进程刚好把它删了，那也算「已经不在了」。
+        Ok(if gone > 0 {
+            Discarded::Gone
+        } else {
+            Discarded::Absent
+        })
     }
 
     /// 读一个子库的规则，按序号排。

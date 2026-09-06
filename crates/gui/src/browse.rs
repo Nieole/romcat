@@ -83,7 +83,9 @@ use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::priority::VERDICT;
 use romcat_core::scrape::{AnchorKind, Field, Priorities};
 use romcat_core::site::Site;
-use romcat_core::sublibrary::{Dimension, Exception, ExceptionRow, Rule, Sublibrary};
+use romcat_core::sublibrary::{
+    BrokenRule, Dimension, Discarded, Exception, ExceptionRow, LoadedSelection, Rule, Sublibrary,
+};
 use romcat_core::title::{Language, TitleKind};
 
 use crate::filter::Filter;
@@ -204,12 +206,20 @@ impl Default for ValueDraft {
 ///
 /// **例外也在这儿加减**：规则表达不了的个人口味落在某一个变体上（ADR-0016），
 /// 而「某一个变体」只有在详情面板里才指得准。
+///
+/// **读不懂的那几条规则也在这儿处置**（票 `gui-redesign/14`）：它们搬不进筛选器
+/// ——那是一棵读得懂的树，一条读不回来的原文在里头没有位置——所以原样摆在筛选栏顶上
+/// 那条横幅里（[`Screen::broken_rules_ui`]），只给一个「扔掉这条」。
+/// 子库屏照旧一个写的动作都没有（票 `gui-redesign/11`）。
 #[derive(Debug, Clone, Default)]
 pub struct Editing {
     /// 改的是哪个子库。
     pub sublibrary: String,
-    /// 这个子库有几条规则**读不懂**。它们没参与求值，「更新到子库」也不会碰它们。
-    pub broken: usize,
+    /// 这个子库**读不懂**的那几条规则，原样带过来的。
+    ///
+    /// 它们没参与求值，「更新到子库」也不会碰它们（`Catalog::replace_rules` 只换
+    /// 读得懂的那几条）；这一栏给的是另一条路——[`Screen::discard_broken_rule`]。
+    pub broken: Vec<BrokenRule>,
     /// 这个子库眼下的例外：变体的键 → 方向与那句话。
     pub exceptions: BTreeMap<String, ExceptionRow>,
     /// 记一条例外时写的那句话。**口味半年后就想不起来了**，留一句话的位置。
@@ -488,7 +498,13 @@ impl Screen {
     ///
     /// 窗口按下「改选择」时走的就是它（[`crate::app::App::route`]），
     /// 实测与测试拿它当那一下。
-    pub fn begin_editing(&mut self, site: &Site, sublibrary: &str, rule: Option<Rule>, broken: usize) {
+    pub fn begin_editing(
+        &mut self,
+        site: &Site,
+        sublibrary: &str,
+        rule: Option<Rule>,
+        broken: Vec<BrokenRule>,
+    ) {
         let (order, descending) = (self.query.order, self.query.descending);
         self.query = WorkQuery {
             order,
@@ -627,6 +643,88 @@ impl Screen {
             }
             Ok(false) => self.notice = Some("那一条已经不在了。".to_string()),
             Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+        }
+    }
+
+    /// **扔掉一条读不懂的规则**——界面上处置它们的那条路（票 `gui-redesign/14`）。
+    ///
+    /// 为什么落在这一屏而不是子库屏：子库屏上**一个写的动作都没有**
+    /// （票 `gui-redesign/11` 把八个概念降到三个靠的就是这条），而这一屏本来就是
+    /// 这个子库的规则唯一改得动的地方。读不懂的那几条搬不进那棵筛选树，
+    /// 于是原样摆在筛选栏顶上那条横幅里（[`Self::broken_rules_ui`]），
+    /// 只给「扔掉」这一个动作。
+    ///
+    /// **只删这一条**：读得懂的那几条与全部例外一个都不碰。判据在核心里
+    /// （[`Catalog::discard_broken_rule`]，先读一遍再决定删不删），这一屏只把序号递
+    /// 过去、把它说的话印出来（ADR-0005）。
+    ///
+    /// 扔掉**不改变这个子库选出什么**——它本来就没参与求值
+    /// （[`LoadedSelection::from_stored`] 早把它挑出来另放了）。但子库屏那张卡上印的
+    /// 正是这几条，所以照旧留一个记号让它重读一遍（[`Self::take_touched`]）。
+    ///
+    /// **代价说清楚**：那个记号同时会把子库屏缓着的差量预览与容量账丢掉
+    /// （`sublibrary::Screen::forget`）——排过一趟预览的人扔掉一条坏规则之后要重排。
+    /// **有意留成这样**：那条通道只有一根，而它挡的是票 `11` 收尾审查报的那一条
+    /// （例外一按就落库、子库屏还攥着旧差量，而「同步」认的正是它，挂单 `Q91` 第 2 条）。
+    /// 为「只重读、不作废」另开一根轻通道，等于给「真改过选择却没作废」留一个新入口，
+    /// 而那一类的代价是把过期的计划传上卡。记在挂单 `Q144`。
+    ///
+    /// 界面上按那个按钮走的就是它，实测与测试拿它当那一下。
+    pub fn discard_broken_rule(&mut self, site: &mut Site, ordinal: i64) {
+        let Some(name) = self.editing.as_ref().map(|editing| editing.sublibrary.clone()) else {
+            return;
+        };
+        match site.catalog.discard_broken_rule(&name, ordinal) {
+            Ok(Discarded::Gone) => {
+                self.notice = Some(format!(
+                    "扔掉了子库「{name}」第 {ordinal} 条读不懂的规则。\
+                     读得懂的那几条与例外一条都没动。"
+                ));
+                self.error = None;
+            }
+            // **也留记号**：库里已经没有这一条了（另一个窗口先删过一遍），
+            // 子库屏那张卡照旧红着印它，不重读一遍人会以为按了没用。
+            Ok(Discarded::Absent) => {
+                self.notice = Some(format!("第 {ordinal} 条已经不在了。"));
+                self.error = None;
+            }
+            // 这一栏列的全是读不懂的，所以界面上摆不出这一种。它是那道闸的回声：
+            // 真撞上了说明屏上这份与库里的对不上了——重读一遍就对上。
+            Ok(Discarded::Readable) => {
+                self.error = Some(format!(
+                    "第 {ordinal} 条读得懂——这条路只扔读不懂的。\
+                     改读得懂的那几条走上面的筛选器，按「更新到子库」。"
+                ));
+            }
+            // **读与写各一趟**（先读一遍再决定删不删），所以这句话不说「写不动」
+            // ——中立库被锁住时头一个失败的是那趟读。
+            Err(error) => {
+                self.error = Some(format!("中立库读写不动：{error}"));
+                return;
+            }
+        }
+        // 屏上这一栏与子库屏那张卡都要跟着库走：那一栏自己重读，卡由窗口转告
+        // （[`Self::take_touched`] → `sublibrary::Screen::forget`）。
+        self.touched = Some(name);
+        self.reload_broken(site);
+    }
+
+    /// 重读正在改的那个子库里**读不懂**的那几条。扔掉一条之后走一趟。
+    ///
+    /// 与 [`Self::reload_exceptions`] 同一条理由：库是事实来源，屏上这份是它的副本，
+    /// 写完不重读的话，那一栏会一直摆着已经不在库里的那一条。
+    fn reload_broken(&mut self, site: &Site) {
+        let Some(name) = self.editing.as_ref().map(|editing| editing.sublibrary.clone()) else {
+            return;
+        };
+        match site.catalog.sublibrary_rules(&name) {
+            Ok(stored) => {
+                let broken = LoadedSelection::from_stored(&stored).broken;
+                if let Some(editing) = &mut self.editing {
+                    editing.broken = broken;
+                }
+            }
+            Err(error) => self.error = Some(format!("中立库读不动：{error}")),
         }
     }
 
@@ -1200,6 +1298,9 @@ impl Screen {
 
     /// 左边那栏：上半五个一按就有的档，下半那棵**条件组**。
     fn filter_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+        // **扔掉一条坏规则那一下不能在画的中途走**：`self.editing` 那会儿还借着。
+        // 记下序号，这一栏画完再动手。
+        let mut 扔掉 = None;
         egui::ScrollArea::vertical()
             .id_salt("筛选栏")
             .show(ui, |ui| {
@@ -1210,6 +1311,7 @@ impl Screen {
                         format!("正在改子库「{}」的选择集", editing.sublibrary),
                     );
                     ui.weak("调完去底下那块面板按「更新到子库」。");
+                    扔掉 = Self::broken_rules_ui(ui, &editing.broken);
                     ui.separator();
                 }
                 ui.horizontal(|ui| {
@@ -1324,6 +1426,70 @@ impl Screen {
 
                 self.save_panel(ui, site);
             });
+        // **这一栏画完了再动手**：搁在中途走的话，这一帧余下的半栏是照旧那份数据画的。
+        if let Some(ordinal) = 扔掉 {
+            self.discard_broken_rule(site, ordinal);
+        }
+    }
+
+    /// **读不懂的那几条规则**：摆出来，各给一个「扔掉这条」。返回按下去的是哪一条。
+    ///
+    /// 票 `gui-redesign/14` 走的是这条路——**横幅摆在筛选栏顶上，点开就处置**。
+    /// 三条能走的路里选它的理由：
+    ///
+    /// - 它**不在子库屏上开口子**。票 `gui-redesign/11` 立的「这一屏不选内容」
+    ///   （规则增删、例外记撤的控件全搬走）一个字没动：出路开在浏览屏，而浏览屏
+    ///   本来就是这个子库的规则唯一改得动的地方。
+    /// - 它**不往筛选树里塞一个读不回来的节点**。那棵树是「读得懂」的具象，
+    ///   加一个不参与求值的异类，`WorkQuery::to_rule` 与「原样带回」两条口径都要跟着开洞。
+    /// - 它**摆在人一进屏就看得见的地方**。同一趟的账（正在改谁）本来就印在这儿；
+    ///   摆到底下那块面板里要滚一屏才看得见，而「看不出下一步」正是挂单 `Q86` 里
+    ///   最贵的那一半。
+    ///
+    /// **只给「扔掉」，不给「改」**：改一条读不回来的原文要的是一个规则语言的文本框，
+    /// 那正是这一版界面拆掉的东西。改对了的那一条走上面的筛选器重筛一遍。
+    fn broken_rules_ui(ui: &mut egui::Ui, broken: &[BrokenRule]) -> Option<i64> {
+        if broken.is_empty() {
+            return None;
+        }
+        let mut 扔掉 = None;
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!(
+                "这个子库另有 {} 条规则**读不懂**：没参与求值，「更新到子库」也不碰它们。",
+                thousands(broken.len() as u64),
+            ),
+        );
+        egui::CollapsingHeader::new(format!("处置读不懂的那 {} 条", broken.len()))
+            .id_salt("读不懂的规则")
+            // **默认摊开**：这一段只在真有坏规则时才出现，而「看不出下一步」正是挂单
+            // `Q86` 里最贵的那一半——收起来等于把出路又藏回一次点击后面。
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.weak(
+                    "它们进不了下面的筛选器——那是一棵**读得懂**的树。这儿只给一个动作：\
+                     扔掉。要的东西改对了再筛一遍，按「更新到子库」带回去。",
+                );
+                for row in broken {
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        format!("{}. {}（读不懂：{}）", row.ordinal, row.text, row.error),
+                    );
+                    if ui
+                        .button("扔掉这条")
+                        .on_hover_text(
+                            "**只删这一条**：读得懂的那几条与全部例外一个都不碰\
+                             （`Catalog::discard_broken_rule` 先读一遍再决定删不删，\
+                             读得懂的它拒绝）。扔掉不改变这个子库选出什么\
+                             ——它本来就没参与求值。",
+                        )
+                        .clicked()
+                    {
+                        扔掉 = Some(row.ordinal);
+                    }
+                }
+            });
+        扔掉
     }
 
     /// 「**收藏与合集**」那一块：取消收藏，以及往自建合集里加减（票 `gui-redesign/06`）。
@@ -1448,14 +1614,17 @@ impl Screen {
         let Some(editing) = &self.editing else {
             return;
         };
-        let (name, broken) = (editing.sublibrary.clone(), editing.broken);
+        let (name, broken) = (editing.sublibrary.clone(), editing.broken.len());
         ui.strong(format!("正在改子库「{name}」的选择集"));
         ui.weak("这个子库的规则已经预填在上面的筛选器里。调完按「更新到子库」原样带回。");
         if broken > 0 {
+            // **处置它们的地方在这一栏顶上**（票 `gui-redesign/14`）：这儿说的是
+            // 「更新到子库」的承诺——那一趟只换读得懂的那几条，坏的一条都不碰。
             ui.colored_label(
                 ui.visuals().warn_fg_color,
                 format!(
-                    "这个子库另有 {} 条规则读不懂：它们没参与求值，也**不会**被这一趟改掉。",
+                    "这个子库另有 {} 条规则读不懂：它们没参与求值，也**不会**被这一趟改掉。\
+                     扔掉它们在这一栏顶上。",
                     thousands(broken as u64),
                 ),
             );

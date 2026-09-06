@@ -281,6 +281,20 @@ pub struct BrokenRule {
     pub error: RuleError,
 }
 
+/// 「**扔掉一条读不懂的规则**」那一下的结果。
+///
+/// 三种结局要分得开：界面上那句回执写的正是它，而**「读得懂」这一种是一道闸**
+/// ——见 [`Catalog::discard_broken_rule`](crate::catalog::Catalog::discard_broken_rule)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Discarded {
+    /// 扔掉了。
+    Gone,
+    /// 库里已经没有这个序号了（别处先删过一遍）。
+    Absent,
+    /// 这一条**读得懂**——这条路删不掉它。
+    Readable,
+}
+
 /// 库里存着的一条规则原文，连它的序号。
 ///
 /// 规则**存原文**而不是存拆开的结构：它要跨进程活着，也要原样印进报告让用户核对

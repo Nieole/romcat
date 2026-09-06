@@ -13,7 +13,7 @@ use romcat_core::platform::Manifest;
 use romcat_core::scrape::Field;
 use romcat_core::shape::{Role, SINGLE_FILE_RULE, Variant};
 use romcat_core::sublibrary::{
-    self, Exception, Gauge, LoadedSelection, Rule, StoredRule, Sublibrary,
+    self, Discarded, Exception, Gauge, LoadedSelection, Rule, StoredRule, Sublibrary,
 };
 
 fn 变体(key: &str, platform: &str, bytes: u64) -> Variant {
@@ -441,6 +441,71 @@ fn 换掉规则时读不懂的那几条原样留着() {
         .map(|stored| stored.ordinal)
         .collect();
     assert_eq!(ordinals, vec![3, 4]);
+}
+
+#[test]
+fn 扔掉读不懂的那一条不碰读得懂的那几条与例外() {
+    // 票 `gui-redesign/14`：一条读不回来的规则在界面上处置得掉，而处置它**只删它自己**。
+    // 这道闸落在核心里而不是界面上（ADR-0005）：界面只递一个序号过来，
+    // 「这个号该不该删」由这儿判——不然一次「扔掉读不懂的」就能删掉一条好的。
+    let mut catalog = 现场();
+    建子库(&mut catalog, "掌机", None);
+    let 好的 = 加规则(&mut catalog, "掌机", "平台=GB");
+    // 中立库是个 SQLite 文件，人打得开；换一版程序、删掉一个维度之后旧规则也会读不懂。
+    let 坏的 = catalog
+        .add_rule(
+            "掌机",
+            &Rule {
+                text: "这不是一条规则".to_string(),
+                root: sublibrary::Group::new(sublibrary::Join::All, Vec::new()),
+            },
+        )
+        .expect("写得进");
+    catalog
+        .set_exception(
+            "掌机",
+            "库/PSV/大作.vpk",
+            Exception::Include,
+            Some("小时候玩过"),
+        )
+        .expect("例外写得进");
+
+    // **读得懂的那条这条路删不掉**：拒绝，而且库里一条都没少。
+    assert_eq!(
+        catalog.discard_broken_rule("掌机", 好的).expect("问得动"),
+        Discarded::Readable,
+    );
+    assert_eq!(catalog.sublibrary_rules("掌机").expect("读得动").len(), 2);
+
+    // 读不懂的那条扔得掉。
+    assert_eq!(
+        catalog.discard_broken_rule("掌机", 坏的).expect("问得动"),
+        Discarded::Gone,
+    );
+    let 剩下的: Vec<(i64, String)> = catalog
+        .sublibrary_rules("掌机")
+        .expect("读得动")
+        .into_iter()
+        .map(|stored| (stored.ordinal, stored.text))
+        .collect();
+    assert_eq!(
+        剩下的,
+        vec![(好的, "平台=GB".to_string())],
+        "该只剩读得懂的那一条",
+    );
+    // **例外是永久记住的**（ADR-0016）：扔一条规则不许顺手把它清掉。
+    let 例外 = catalog.sublibrary_exceptions("掌机").expect("读得动");
+    assert_eq!(例外.len(), 1);
+    assert_eq!(例外[0].variant_key, "库/PSV/大作.vpk");
+    assert_eq!(例外[0].note.as_deref(), Some("小时候玩过"));
+    // 一条读不懂的规则本来就没参与求值——扔掉它**不改变这个子库选出什么**。
+    assert_eq!(求值(&catalog, "掌机").0, 3, "两个 GB 变体加那条收入的例外");
+
+    // 再扔一遍：已经不在了，不是错。两个窗口开着同一份库时就是这个样子。
+    assert_eq!(
+        catalog.discard_broken_rule("掌机", 坏的).expect("问得动"),
+        Discarded::Absent,
+    );
 }
 
 #[test]
