@@ -34,6 +34,16 @@
 //! [`container::read_entries`](crate::container::read_entries) 交出来的是一条流，
 //! 这里一行一行读过去，只把游戏条目留下来（8.7 万条，几十 MB）。
 //! 本机只剩几个 GiB，而这条链路上任何一处「先读进内存再说」都会当场撑爆。
+//!
+//! ## 那一遍流要几分钟：报得出进度、按得停
+//!
+//! **取数与重建走的是同一遍流**（[`read_dump`]），所以「走到哪儿了」与「停下」落在
+//! 这一层，两条路一并有了：[`Context`] 里那个回调每读一批报一次，那个中断信号每读
+//! 一条看一眼。这正是[任务](crate::task)那一层说的「一步内部还想更细的，把
+//! `Handle::cancel` 那个信号往下传」——**不是另造一套**。
+//!
+//! **停下的地方是干净的**：收手在两条记录之间，那时一个字都还没写进库
+//! （换结构与写新数据在 [`Store::replace`] 那一个事务里），手上那份索引原样可用。
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -43,6 +53,8 @@ use crate::dat::fetch::{FetchError, Fetcher};
 use crate::filename::Rules;
 use crate::fs::LibraryFs;
 use crate::platform::Manifest;
+use crate::scan::CancelToken;
+use crate::task::Halted;
 
 use super::store::{Stats, Store, StoreError};
 use super::{Entry, PlatformFold, dump};
@@ -74,6 +86,12 @@ pub enum SyncError {
         /// 底层错误。
         source: std::io::Error,
     },
+    /// **被按停了。** 停在两条记录之间——库里一个字都还没写，手上那份索引原样可用。
+    ///
+    /// 它与别的几样分开一格，是因为**这不是失败**：报成「这份原件读不动」的话，
+    /// 命令行与界面都会劝用户去重下那 435 MB，而它一个字节都没坏。
+    #[error(transparent)]
+    Halted(#[from] Halted),
 }
 
 /// 取数的选项。
@@ -106,6 +124,12 @@ pub struct Synced {
     pub fingerprint: String,
     /// 这一版有多大。
     pub bytes: u64,
+    /// **这一趟真去下载了没有。**
+    ///
+    /// 原件已经在手边时是 `false`（`Options::full` 的文档：文件名带着日期，
+    /// 同名就是同一版）。报告里那句「取回 435 MB」少了这一格就是句假话——
+    /// 而「一个字节都没下」正是重建这条路最要紧的承诺。
+    pub downloaded: bool,
     /// **指纹没变，整件跳过了**。
     pub skipped: bool,
     /// 只排了计划没真干。
@@ -118,13 +142,82 @@ pub struct Synced {
     pub stats: Stats,
 }
 
+/// 读那份原件读到哪儿了。**那几分钟里唯一说得出话的东西。**
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Progress {
+    /// 已经读过几条记录。
+    pub records: u64,
+    /// 其中留下来的游戏条目。
+    pub games: u64,
+    /// 那份条目表已经读了多少字节（**解开之后的**）。
+    pub bytes: u64,
+    /// 它解开一共多少字节。**这才是「还剩多少」的分母**：一共几条记录事先问不出来，
+    /// 而未压缩大小在 zip 的目录里就写着（`InnerEntry::size`），一个字节都不必先解。
+    pub total: u64,
+}
+
+/// 一趟取数或重建的**把手**：报进度、看有没有被叫停。
+///
+/// 两样都可以没有——[`Context::unattended`] 就是「谁也不看着」的那一份。
+/// 界面那一侧把 `progress` 接到 [`Handle::tick`](crate::task::Handle::tick)、
+/// 把 `cancel` 接到 [`Handle::cancel`](crate::task::Handle::cancel)，命令行那一侧
+/// 每隔几秒打一行、接的是 Ctrl-C 那个信号。**两边按的是同一件事。**
+#[derive(Default)]
+pub struct Context<'a> {
+    /// 被叫停就在**两条记录之间**收手，那时一个字都还没写进库。
+    /// `None` 表示这一趟没人叫得停。
+    pub cancel: Option<&'a CancelToken>,
+    /// 每读一批报一次；**开读之前先报一次**（那一下带着分母），
+    /// 于是「读原件真的开始了」这件事说得出口。`None` 表示没人看着。
+    pub progress: Option<&'a mut dyn FnMut(Progress)>,
+}
+
+impl<'a> Context<'a> {
+    /// 谁也不看着的一份：没人叫停，进度也没人收。
+    #[must_use]
+    pub fn unattended() -> Self {
+        Self::default()
+    }
+
+    /// 接着一个**已经在手的中断信号**，进度没人收。
+    #[must_use]
+    pub fn cancelled_by(cancel: &'a CancelToken) -> Self {
+        Self {
+            cancel: Some(cancel),
+            progress: None,
+        }
+    }
+
+    fn report(&mut self, at: Progress) {
+        if let Some(progress) = self.progress.as_deref_mut() {
+            progress(at);
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        self.cancel.is_some_and(CancelToken::is_cancelled)
+    }
+}
+
+/// 读多少条记录报一次进度。
+///
+/// 每条报一次是白花几百万次调用；十万条报一次那几分钟里就又没话说了。
+/// 两千条上下是零点几秒的活，正好是「看着它在动」需要的密度。
+/// （**看有没有被叫停不按这个数走**：那是一次原子读，每条看一眼才停得快。）
+const REPORT_EVERY: u64 = 2_000;
+
 /// 取一次。
 ///
 /// `library` 只用来读**本机缓存目录里那个 zip**——它不是主库，但读法一模一样，
 /// 所以复用同一个只读接缝（`LibraryFs`）而不是另开一套文件读取。
 ///
+/// **等着重建的那一份也走这条**，而且只走这一趟：先取到远端那一版，指纹一样就拿
+/// 本机手上那份原件就地重建，换了新版就取新版——**无论哪一头，那 960 MB 只流一遍**。
+/// 先重建一遍再来问远端的话，远端一有新版，刚解完的那一份当场被盖掉
+/// （挂单 `Q15`、`Q31`）。
+///
 /// # Errors
-/// 取数、解析或写索引失败时返回错误。
+/// 取数、解析或写索引失败时返回错误；被叫停时返回 [`SyncError::Halted`]。
 pub fn sync(
     fetcher: &dyn Fetcher,
     library: &dyn LibraryFs,
@@ -132,6 +225,7 @@ pub fn sync(
     manifest: &Manifest,
     rules: &Rules,
     options: &Options,
+    ctx: &mut Context<'_>,
 ) -> Result<Synced, SyncError> {
     let latest = fetcher.get(LATEST_URL)?;
     let text = String::from_utf8_lossy(&latest.body).into_owned();
@@ -165,8 +259,9 @@ pub fn sync(
     // 同名就是同一版。改一条平台别名重建索引时省的正是这 415 MB。
     if !file.exists() {
         fetcher.download(&release.url, &file)?;
+        out.downloaded = true;
     }
-    let (entries, records, fold) = read_dump(library, &file, manifest, rules)?;
+    let (entries, records, fold) = read_dump(library, &file, manifest, rules, ctx)?;
     out.records = records;
     out.games = u64::try_from(entries.len()).unwrap_or(u64::MAX);
     store.replace(&entries, &release.name, &out.fingerprint, &fold)?;
@@ -223,6 +318,7 @@ fn read_dump(
     file: &Path,
     manifest: &Manifest,
     rules: &Rules,
+    ctx: &mut Context<'_>,
 ) -> Result<(Vec<Entry>, u64, PlatformFold), SyncError> {
     let listing = container::list(library, file).map_err(|error| {
         SyncError::Malformed(format!("{} 读不动：{error}", crate::path::display(file)))
@@ -247,17 +343,45 @@ fn read_dump(
     });
     let mut entries: Vec<Entry> = Vec::new();
     let mut records = 0u64;
+    let mut bytes = 0u64;
+    let mut total = 0u64;
     let mut fold = PlatformFold::default();
-    container::read_entries(library, file, &listing, &plan, &mut |_entry, reader| {
+    // **被叫停不顺着回调那条路回来。** 回调只交得出 `io::Error`，那条路上的一切都会被
+    // 报成「这份原件读不动」——而一次干净的停下，那份原件一个字节都没坏。
+    let mut halted = false;
+    container::read_entries(library, file, &listing, &plan, &mut |entry, reader| {
+        total = entry.size;
+        // **开读之前先报一次。** 命令行那一侧靠这头一下才知道「读原件真的开始了」，
+        // 而不是等到几分钟之后才第一次说话（挂单 `Q25`）；分母也是这一下给的。
+        ctx.report(Progress {
+            total,
+            ..Progress::default()
+        });
         // **一行一行读**：解开是 960 MB，整份读进内存会当场撑爆本机剩下的那几个 GiB。
         let mut lines = BufReader::with_capacity(1 << 20, reader);
         let mut line = String::new();
         loop {
+            // **在读下一条之前看一眼**：收手的地方就在两条记录之间，
+            // 上一条已经整条读完，这一条一个字都还没碰。
+            if ctx.stopped() {
+                halted = true;
+                return Ok(());
+            }
             line.clear();
-            if lines.read_line(&mut line)? == 0 {
+            let read = lines.read_line(&mut line)?;
+            if read == 0 {
                 break;
             }
             records += 1;
+            bytes += u64::try_from(read).unwrap_or(0);
+            if records.is_multiple_of(REPORT_EVERY) {
+                ctx.report(Progress {
+                    records,
+                    games: u64::try_from(entries.len()).unwrap_or(u64::MAX),
+                    bytes,
+                    total,
+                });
+            }
             let Ok(row) = serde_json::from_str::<dump::Row>(line.trim_end()) else {
                 // 一行读不动就跳过这一行。**整份 dump 不该为一行畸形的 JSON 作废**，
                 // 而它确实可能出现——那是一份用户共同维护的 wiki 导出来的东西。
@@ -271,6 +395,16 @@ fn read_dump(
         Ok(())
     })
     .map_err(|error| SyncError::Malformed(format!("{SUBJECTS} 读不动：{error}")))?;
+    if halted {
+        return Err(Halted.into());
+    }
+    // 收尾再报一次，末尾那不足一批的几条不至于永远差着没说。
+    ctx.report(Progress {
+        records,
+        games: u64::try_from(entries.len()).unwrap_or(u64::MAX),
+        bytes,
+        total,
+    });
     Ok((entries, records, fold))
 }
 
@@ -326,17 +460,24 @@ fn entry_of(
 /// 同一件事）。重建完把原来那个指纹记回去，下一趟 `zh sync` 才认得出「本机这份就是
 /// 最新的」而整件跳过。
 ///
-/// 三种结局都不是错误：不必重建、原件不在手边（那时才轮到用户跑一趟 `zh sync`）、
-/// 重建了。
+/// 四种结局都不是错误：不必重建、原件不在手边（那时才轮到用户跑一趟 `zh sync`）、
+/// 重建了、被按停了。
+///
+/// **这一趟要几分钟**（读+解 960 MB 再整份写库），所以它收一份 [`Context`]：
+/// 每读一批报一次进度，每读一条看一眼有没有被叫停。被叫停时收手在两条记录之间，
+/// 那时 [`Store::replace`] 一个字都还没写——那份等着重建的索引原样躺着，
+/// 下一趟接着重建就是。
 ///
 /// # Errors
-/// 原件读不动或者写索引失败时返回错误。
+/// 原件读不动或者写索引失败时返回错误。**被按停不是错误**，它是
+/// [`Rebuilt::Halted`]。
 pub fn rebuild(
     library: &dyn LibraryFs,
     store: &mut Store,
     manifest: &Manifest,
     rules: &Rules,
     cache: &Path,
+    ctx: &mut Context<'_>,
 ) -> Result<Rebuilt, SyncError> {
     let Some(pending) = store.rebuilding().cloned() else {
         return Ok(Rebuilt::NotNeeded);
@@ -348,7 +489,18 @@ pub fn rebuild(
             dump: pending.dump,
         });
     }
-    let (entries, _, fold) = read_dump(library, &file, manifest, rules)?;
+    let (entries, _, fold) = match read_dump(library, &file, manifest, rules, ctx) {
+        Ok(read) => read,
+        // **按停下不叫「重建没成」。** 报成失败的话，命令行与界面都会顺着那句话劝用户
+        // 去跑一趟 `zh sync`——而那正是这条路存在的理由：不必重下那 435 MB。
+        Err(SyncError::Halted(_)) => {
+            return Ok(Rebuilt::Halted {
+                was: pending.was,
+                dump: pending.dump,
+            });
+        }
+        Err(error) => return Err(error),
+    };
     let games = u64::try_from(entries.len()).unwrap_or(u64::MAX);
     store.replace(&entries, &pending.dump, &pending.fingerprint, &fold)?;
     Ok(Rebuilt::Done {
@@ -378,6 +530,14 @@ pub enum Rebuilt {
         dump: String,
         /// 重建出多少条游戏条目。
         games: u64,
+    },
+    /// **被按停了。** 停在两条记录之间，库里一个字都没写——那份索引原样等着，
+    /// 下一趟接着重建。
+    Halted {
+        /// 旧索引的结构版本。
+        was: u32,
+        /// 本来要从哪一份原件重建。
+        dump: String,
     },
 }
 
@@ -444,7 +604,8 @@ mod tests {
         {
             let mut store = Store::open(&path).expect("开得起来");
             let (entries, records, fold) =
-                read_dump(&library, &cache.join(原件名), &manifest, &rules).expect("原件读得动");
+                read_dump(&library, &cache.join(原件名), &manifest, &rules, &mut Context::unattended())
+                    .expect("原件读得动");
             assert_eq!(records, 1, "读到几条记录");
             assert_eq!(entries.len(), 1, "留下几条游戏条目");
             store
@@ -462,7 +623,15 @@ mod tests {
 
         let mut store = Store::open(&path).expect("旧版本照样打得开");
         assert!(store.load().expect("读得回来").is_empty(), "先扫干净");
-        let outcome = rebuild(&library, &mut store, &manifest, &rules, &cache).expect("重建得了");
+        let outcome = rebuild(
+            &library,
+            &mut store,
+            &manifest,
+            &rules,
+            &cache,
+            &mut Context::unattended(),
+        )
+        .expect("重建得了");
         assert_eq!(
             outcome,
             Rebuilt::Done {
@@ -528,14 +697,302 @@ mod tests {
                 full: false,
                 dry_run: false,
             },
+            &mut Context::unattended(),
         )
         .expect("取得动");
         assert!(!outcome.skipped, "指纹一样也不许跳过——那份索引这一版读不了");
         assert_eq!(outcome.games, 1);
         // **原件在手边就没下载**：`CannedFetcher` 根本没备那个下载地址，
-        // 真去下会当场失败。
+        // 真去下会当场失败；`downloaded` 那一格把这件事摆到报告里。
+        assert!(!outcome.downloaded, "原件在手边，一个字节都没下");
         assert_eq!(store.load().expect("读得回来").len(), 1);
         assert!(store.rebuilding().is_none());
+    }
+
+    #[test]
+    fn 远端有新版时不先拿旧原件白重建一遍() {
+        // 挂单 `Q15`、`Q31`：从前是先就地重建一遍再来问远端。远端一有新版，刚解完的
+        // 那一份当场被下回来的新版盖掉——那几分钟（读+解 960 MB）整个白花，`--full`
+        // 更是把同一份原件解两遍。**取数自己这条路只解一遍**：先取到远端那一版，
+        // 再决定读哪份原件。
+        let dir = crate::testing::temp_dir("zh-sync-newer");
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).expect("建得出缓存目录");
+        std::fs::write(cache.join(原件名), 一份原件()).expect("写得下旧原件");
+        std::fs::write(cache.join(新原件名), 另一份原件()).expect("写得下新原件");
+
+        let path = dir.path().join("zh.sqlite3");
+        {
+            let mut store = Store::open(&path).expect("开得起来");
+            store
+                .replace(&[], 原件名, 指纹, &PlatformFold::default())
+                .expect("写得进去");
+        }
+        // 把版本改回上一格：这就是「一份等着重建的索引」。
+        let conn = rusqlite::Connection::open(&path).expect("开得起来");
+        conn.execute(
+            "UPDATE meta SET value = '1' WHERE key = 'schema_version'",
+            [],
+        )
+        .expect("改得动");
+        drop(conn);
+        let mut store = Store::open(&path).expect("旧版本照样打得开");
+        assert!(store.rebuilding().is_some(), "它正等着重建");
+
+        // **数「开读之前那一下」就是数解了几遍原件**：每读一份原件报且只报一次
+        // `records == 0` 的那一下（这两份固件各有一条记录，收尾那一下报的是 1）。
+        let mut 解了几遍 = 0u32;
+        let mut progress = |at: Progress| {
+            if at.records == 0 {
+                解了几遍 += 1;
+            }
+        };
+        let fetcher =
+            crate::dat::CannedFetcher::new().with(LATEST_URL, 一份_latest_json指着(新原件名, "def"));
+        let outcome = sync(
+            &fetcher,
+            &crate::fs::RealFs,
+            &mut store,
+            &Manifest::builtin(),
+            &Rules::builtin(),
+            &Options {
+                cache,
+                full: false,
+                dry_run: false,
+            },
+            &mut Context {
+                cancel: None,
+                progress: Some(&mut progress),
+            },
+        )
+        .expect("取得动");
+
+        assert_eq!(解了几遍, 1, "那份原件只解一遍");
+        assert_eq!(outcome.dump, 新原件名, "读的是新那一版");
+        assert!(!outcome.downloaded, "新原件也在手边，一个字节都没下");
+        let index = store.load().expect("读得回来");
+        assert_eq!(index.entries()[0].id, 7, "库里落的是新那一版的条目");
+        assert_eq!(
+            store.fingerprint().expect("读得到").as_deref(),
+            Some(新指纹),
+            "指纹记的也是新那一版"
+        );
+        assert!(store.rebuilding().is_none(), "不再等着重建了");
+    }
+
+    #[test]
+    fn full_撞上等着重建的索引时原件也只解一遍() {
+        // 挂单 `Q31`：从前 `zh sync --full` 撞上一份等着重建的索引，那 435 MB 原件解两遍
+        // ——先地重建一遍，紧接着 `--full` 永远不走「指纹没变就跳过」，同一个文件又读
+        // 一遍、`replace` 一遍。**取数这条路本身只读一遍**，`--full` 也不例外。
+        let dir = crate::testing::temp_dir("zh-sync-full-pending");
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).expect("建得出缓存目录");
+        std::fs::write(cache.join(原件名), 一份原件()).expect("写得下原件");
+
+        let path = dir.path().join("zh.sqlite3");
+        {
+            let mut store = Store::open(&path).expect("开得起来");
+            store
+                .replace(&[], 原件名, 指纹, &PlatformFold::default())
+                .expect("写得进去");
+        }
+        let conn = rusqlite::Connection::open(&path).expect("开得起来");
+        conn.execute(
+            "UPDATE meta SET value = '1' WHERE key = 'schema_version'",
+            [],
+        )
+        .expect("改得动");
+        drop(conn);
+        let mut store = Store::open(&path).expect("旧版本照样打得开");
+        assert!(store.rebuilding().is_some(), "它正等着重建");
+
+        let mut 解了几遍 = 0u32;
+        let mut progress = |at: Progress| {
+            if at.records == 0 {
+                解了几遍 += 1;
+            }
+        };
+        let fetcher = crate::dat::CannedFetcher::new().with(LATEST_URL, 一份_latest_json());
+        let outcome = sync(
+            &fetcher,
+            &crate::fs::RealFs,
+            &mut store,
+            &Manifest::builtin(),
+            &Rules::builtin(),
+            &Options {
+                cache,
+                full: true,
+                dry_run: false,
+            },
+            &mut Context {
+                cancel: None,
+                progress: Some(&mut progress),
+            },
+        )
+        .expect("取得动");
+
+        assert_eq!(解了几遍, 1, "那份原件只解一遍");
+        assert!(!outcome.skipped, "`--full` 本来就不走「指纹没变就跳过」");
+        assert!(!outcome.downloaded, "原件在手边就不再下一遍，`--full` 也不例外");
+        assert_eq!(store.load().expect("读得回来").len(), 1);
+        assert!(store.rebuilding().is_none(), "不再等着重建了");
+    }
+
+    #[test]
+    fn 读原件时报得出读到第几条与还剩多少() {
+        // 挂单 `Q25`：这一趟要读+解 960 MB，几分钟起步。这几分钟里一个字都不打的话，
+        // 用户看见的是一个像死掉了的进程。
+        let dir = crate::testing::temp_dir("zh-progress");
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).expect("建得出缓存目录");
+        std::fs::write(cache.join(原件名), 一份原件()).expect("写得下原件");
+
+        let mut 报了: Vec<Progress> = Vec::new();
+        let mut progress = |at: Progress| 报了.push(at);
+        let (entries, records, _) = read_dump(
+            &crate::fs::RealFs,
+            &cache.join(原件名),
+            &Manifest::builtin(),
+            &Rules::builtin(),
+            &mut Context {
+                cancel: None,
+                progress: Some(&mut progress),
+            },
+        )
+        .expect("原件读得动");
+        assert_eq!((records, entries.len()), (1, 1));
+
+        // **开读之前那一下**：分母有了，分子还是 0——「读原件真的开始了」这件事
+        // 说得出口，而不是等几分钟之后才第一次说话。
+        let 头一下 = *报了.first().expect("开读之前先报一次");
+        assert_eq!(头一下.records, 0);
+        assert!(
+            头一下.total > 0,
+            "「还剩多少」的分母从 zip 的目录里读，一个字节都不必先解"
+        );
+        // **收尾再报一次**：末尾那不足一批的几条不至于永远差着没说。
+        let 末一下 = *报了.last().expect("收尾再报一次");
+        assert_eq!((末一下.records, 末一下.games), (1, 1));
+        assert!(末一下.bytes > 0 && 末一下.bytes <= 末一下.total);
+        assert_eq!(末一下.total, 头一下.total, "分母一路不变");
+    }
+
+    #[test]
+    fn 重建按得停_停下之后那份索引原样等着下一趟() {
+        // 「能停」比「能取消」严格：停在两条记录之间，`Store::replace` 一个字都还没写。
+        let dir = crate::testing::temp_dir("zh-rebuild-halt");
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).expect("建得出缓存目录");
+        std::fs::write(cache.join(原件名), 一份原件()).expect("写得下原件");
+
+        let path = dir.path().join("zh.sqlite3");
+        {
+            let mut store = Store::open(&path).expect("开得起来");
+            store
+                .replace(&[], 原件名, 指纹, &PlatformFold::default())
+                .expect("写得进去");
+        }
+        let conn = rusqlite::Connection::open(&path).expect("开得起来");
+        conn.execute(
+            "UPDATE meta SET value = '1' WHERE key = 'schema_version'",
+            [],
+        )
+        .expect("改得动");
+        drop(conn);
+        let mut store = Store::open(&path).expect("旧版本照样打得开");
+
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let 停了 = rebuild(
+            &crate::fs::RealFs,
+            &mut store,
+            &Manifest::builtin(),
+            &Rules::builtin(),
+            &cache,
+            &mut Context::cancelled_by(&cancel),
+        )
+        .expect("按停下不是错误");
+        assert_eq!(
+            停了,
+            Rebuilt::Halted {
+                was: 1,
+                dump: 原件名.to_string(),
+            }
+        );
+        assert!(
+            store.rebuilding().is_some(),
+            "那份索引原样等着——报成失败的话，用户会被劝去重下那 435 MB"
+        );
+        assert_eq!(store.fingerprint().expect("读得到").as_deref(), Some(指纹));
+
+        // **停下之后仍然重建得了**，这才叫「什么都没丢」。
+        let 又一趟 = rebuild(
+            &crate::fs::RealFs,
+            &mut store,
+            &Manifest::builtin(),
+            &Rules::builtin(),
+            &cache,
+            &mut Context::unattended(),
+        )
+        .expect("重建得了");
+        assert!(matches!(又一趟, Rebuilt::Done { games: 1, .. }), "{又一趟:?}");
+    }
+
+    #[test]
+    fn 取数读原件时按停_手上那份索引原样可用() {
+        // 库里已经有一份读得出来的索引（旧那一版），远端换了新版。读新原件读到一半
+        // 按停，库里仍然是旧那一份——换结构与写新数据在同一个事务里，中途停就是
+        // 整个没发生。
+        let dir = crate::testing::temp_dir("zh-sync-halt");
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).expect("建得出缓存目录");
+        std::fs::write(cache.join(原件名), 一份原件()).expect("写得下旧原件");
+        std::fs::write(cache.join(新原件名), 另一份原件()).expect("写得下新原件");
+
+        let mut store = Store::open(&dir.path().join("zh.sqlite3")).expect("开得起来");
+        let (entries, _, fold) = read_dump(
+            &crate::fs::RealFs,
+            &cache.join(原件名),
+            &Manifest::builtin(),
+            &Rules::builtin(),
+            &mut Context::unattended(),
+        )
+        .expect("原件读得动");
+        store
+            .replace(&entries, 原件名, 指纹, &fold)
+            .expect("写得进去");
+
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let fetcher =
+            crate::dat::CannedFetcher::new().with(LATEST_URL, 一份_latest_json指着(新原件名, "def"));
+        let error = sync(
+            &fetcher,
+            &crate::fs::RealFs,
+            &mut store,
+            &Manifest::builtin(),
+            &Rules::builtin(),
+            &Options {
+                cache,
+                full: false,
+                dry_run: false,
+            },
+            &mut Context::cancelled_by(&cancel),
+        )
+        .expect_err("按停了");
+        assert!(matches!(error, SyncError::Halted(_)), "{error:?}");
+        // **那句话正是任务台认得的那一句**：任务台按它把「按停了」与「失败」分开记
+        // （`task::Board::settle`），差一个字就会被记成失败。
+        assert_eq!(error.to_string(), Halted.to_string());
+
+        let index = store.load().expect("读得回来");
+        assert_eq!(index.entries()[0].id, 4, "手上那份索引原样可用");
+        assert_eq!(
+            store.fingerprint().expect("读得到").as_deref(),
+            Some(指纹),
+            "指纹也还是旧那一版——下一趟照样认得出该重读"
+        );
     }
 
     #[test]
@@ -562,6 +1019,7 @@ mod tests {
             &Manifest::builtin(),
             &Rules::builtin(),
             dir.path(),
+            &mut Context::unattended(),
         )
         .expect("不是错误");
         assert_eq!(
@@ -579,14 +1037,36 @@ mod tests {
     /// 那一版的指纹，形状与 [`Release::fingerprint`] 一致。
     const 指纹: &str = "dump-2026-09-01.210329Z.zip|sha256:abc";
 
+    /// 下一版 dump 叫什么。文件名里那个日期换了，就是换了一版。
+    const 新原件名: &str = "dump-2026-09-08.210329Z.zip";
+
+    /// 那一版的指纹。
+    const 新指纹: &str = "dump-2026-09-08.210329Z.zip|sha256:def";
+
     /// `aux/latest.json` 说的正是本机手上这一版。
     fn 一份_latest_json() -> Vec<u8> {
+        一份_latest_json指着(原件名, "abc")
+    }
+
+    /// `aux/latest.json` 说远端最新的是哪一版。
+    fn 一份_latest_json指着(name: &str, digest: &str) -> Vec<u8> {
         format!(
             "{{\"browser_download_url\": \
-             \"https://github.com/bangumi/Archive/releases/download/archive/{原件名}\",\
-             \"digest\": \"sha256:abc\", \"name\": \"{原件名}\", \"size\": 1}}"
+             \"https://github.com/bangumi/Archive/releases/download/archive/{name}\",\
+             \"digest\": \"sha256:{digest}\", \"name\": \"{name}\", \"size\": 1}}"
         )
         .into_bytes()
+    }
+
+    /// 另一版 dump：里头那条记录的编号不一样，认得出这一趟读的是哪一份。
+    fn 另一份原件() -> Vec<u8> {
+        let line = r#"{"id":7,"type":4,"name":"メタルスラッグX","name_cn":"合金弹头X","infobox":"{{Infobox Game\r\n|平台= NDS\r\n|游戏类型= ACT\r\n}}","platform":4001,"date":"2009-01-01","meta_tags":["ACT","NDS","游戏"]}"#;
+        crate::testing::container::zip_container(&[
+            crate::testing::container::ZipEntrySpec::stored(
+                SUBJECTS,
+                format!("{line}\n").into_bytes(),
+            ),
+        ])
     }
 
     /// 一份最小的 dump：一个 zip，里头一份 `subject.jsonlines`，一条游戏记录。
@@ -647,6 +1127,7 @@ mod tests {
             &cache.join(原件名),
             &Manifest::builtin(),
             &Rules::builtin(),
+            &mut Context::unattended(),
         )
         .expect("原件读得动");
         assert_eq!(fold.line(), "共 1 对\nNDS=NDS", "折出来的那一对记下了");
@@ -678,7 +1159,14 @@ mod tests {
         std::fs::write(cache.join(原件名), 一份原件写着("任天堂红白机")).expect("写得下原件");
         let manifest = Manifest::builtin();
         let 读一遍 = |rules: &Rules| {
-            read_dump(&crate::fs::RealFs, &cache.join(原件名), &manifest, rules).expect("读得动")
+            read_dump(
+                &crate::fs::RealFs,
+                &cache.join(原件名),
+                &manifest,
+                rules,
+                &mut Context::unattended(),
+            )
+            .expect("读得动")
         };
 
         let (折不动的条目, _, 折不动) = 读一遍(&Rules::builtin());
@@ -709,9 +1197,15 @@ mod tests {
         std::fs::write(cache.join(原件名), 一份原件写着("NDS")).expect("写得下原件");
         let manifest = Manifest::builtin();
         let 读一遍 = |rules: &Rules| {
-            read_dump(&crate::fs::RealFs, &cache.join(原件名), &manifest, rules)
-                .expect("读得动")
-                .2
+            read_dump(
+                &crate::fs::RealFs,
+                &cache.join(原件名),
+                &manifest,
+                rules,
+                &mut Context::unattended(),
+            )
+            .expect("读得动")
+            .2
         };
 
         let 规则文件 = dir.path().join("rules.toml");

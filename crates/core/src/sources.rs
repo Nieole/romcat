@@ -243,10 +243,11 @@ pub const THROTTLE: Duration = Duration::from_millis(500);
 /// 清单、平台清单与剥离规则**先看工作目录里有没有，没有才用内置的那一份**——
 /// 与命令行的取法同一条（`ManifestArgs::load` 那几个）。
 ///
-/// `task` 只用来**报进度**，不接「停下」：`dat::sync::run` / `zh::sync::sync` /
-/// `titledb::sync::sync` 三个入口一个都不收中断信号，所以这一趟**开跑之后停不下来**
-/// ——排着队还没轮到的那一趟停得掉（那一步在 [`Handle::step`] 上），已经在下载的停不掉。
-/// 让它停得下来是三条独立的活，记在挂单 `Q62` 上。这里如实说，不摆一个按了没反应的
+/// `task` 报进度，「停下」只接得动一段：`dat::sync::run` / `titledb::sync::sync`
+/// 两个入口不收中断信号，`zh::sync::sync` 收（[`zh::sync::Context`]），但它接得住的
+/// 只是**读那份原件**那几分钟——下载那 435 MB 照样停不掉。所以这一趟**下载开跑之后
+/// 停不下来**：排着队还没轮到的那一趟停得掉（那一步在 [`Handle::step`] 上），
+/// 正在下载的停不掉。剩下那几段记在挂单 `Q62` 上。这里如实说，不摆一个按了没反应的
 /// 承诺出来。
 ///
 /// # Errors
@@ -286,8 +287,18 @@ pub fn refetch(
                 &manifest,
                 &rules,
                 &options,
+                &mut zh::sync::Context {
+                    cancel: Some(task.cancel()),
+                    progress: Some(&mut |at: zh::sync::Progress| task.tick(at.bytes, at.total)),
+                },
             )
-            .map_err(|error| format!("取中文离线源失败：{error}"))?;
+            // **按停下不折成一句「失败」。** 任务台按「那句话正是 `Halted` 交出来的那一句」
+            // 把「停了」与「失败」分开记（`task::Board::settle`）——前头加一句
+            // 「取中文离线源失败：」，界面上那一趟就成了失败，用户会以为自己按坏了什么。
+            .map_err(|error| match error {
+                zh::sync::SyncError::Halted(halted) => halted.to_string(),
+                error => format!("取中文离线源失败：{error}"),
+            })?;
         }
         Source::Switch => {
             let mut store =

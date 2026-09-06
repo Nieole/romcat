@@ -2783,6 +2783,7 @@ fn 取一趟中文数(
             full,
             dry_run: false,
         },
+        &mut romcat_core::zh::sync::Context::unattended(),
     )
     .expect("取数不该失败");
     store.load().expect("索引读得回来")

@@ -1089,8 +1089,8 @@ fn main() -> ExitCode {
         Command::Dat(DatCommand::Sync(args)) => run_dat_sync(&args),
         Command::Dat(DatCommand::Report(args)) => run_dat_report(&args),
         Command::Dat(DatCommand::Sources(args)) => run_dat_sources(&args),
-        Command::Zh(ZhCommand::Sync(args)) => run_zh_sync(&args),
-        Command::Zh(ZhCommand::Find(args)) => run_zh_find(&args),
+        Command::Zh(ZhCommand::Sync(args)) => run_zh_sync(&args, &cancel),
+        Command::Zh(ZhCommand::Find(args)) => run_zh_find(&args, &cancel),
         Command::Zh(ZhCommand::Matches(args)) => run_zh_matches(&args),
         Command::Zh(ZhCommand::Judge(args)) => run_zh_judge(&args),
         Command::Switch(SwitchCommand::Sync(args)) => run_switch_sync(&args),
@@ -1150,20 +1150,28 @@ fn emit_from_catalog(catalog: &Catalog, manifest: &Manifest, output: &OutputArgs
 ///
 /// 与 [`load_zh_index`] 分成两步，是因为刮削那一趟**两样都要**：撞名字要内存里那份
 /// 索引，取**简介**要留着这个库句柄按条目号点着读（`scrape::zh::Summaries`）。
-fn open_zh_store(workspace: &Path, rules: &Rules) -> Result<Option<zh::store::Store>, String> {
+fn open_zh_store(
+    workspace: &Path,
+    rules: &Rules,
+    cancel: &CancelToken,
+) -> Result<Option<zh::store::Store>, String> {
     let path = workspace::zh_store_path(workspace);
     if !path.exists() {
         return Ok(None);
     }
     let mut store =
         zh::store::Store::open(&path).map_err(|error| format!("中文索引打不开：{error}"))?;
-    heal_zh_store(workspace, &mut store, rules, None);
+    heal_zh_store(workspace, &mut store, rules, cancel);
     Ok(Some(store))
 }
 
 /// 本机那份中文离线索引，装进内存。**没取过数不是错误**——识别照跑，少一层而已。
-fn load_zh_index(workspace: &Path, rules: &Rules) -> Result<Option<zh::Index>, String> {
-    let Some(store) = open_zh_store(workspace, rules)? else {
+fn load_zh_index(
+    workspace: &Path,
+    rules: &Rules,
+    cancel: &CancelToken,
+) -> Result<Option<zh::Index>, String> {
+    let Some(store) = open_zh_store(workspace, rules, cancel)? else {
         return Ok(None);
     };
     let index = store
@@ -1175,42 +1183,72 @@ fn load_zh_index(workspace: &Path, rules: &Rules) -> Result<Option<zh::Index>, S
 /// 结构版本对不上时**从本机那份原件重建**：一个网络请求都不发，也不要用户重下 435 MB。
 ///
 /// 三个用得着中文索引的子命令都走这一条。重建要把数据源写的平台名折成本工具的平台名，
-/// 所以要一份**平台清单**：`zh sync` 手上有它自己那份（`--manifest` 指得了），传进来；
-/// `identify` 与 `scrape` 的参数表里本来就没有这个开关，那时按 `ManifestArgs` 的老规矩
-/// 解析——工作目录里那份 `platforms.toml`，没有就用内置的。
+/// 所以要一份**平台清单**：走这条的三条命令（`identify`、`scrape`、`zh find`）参数表里
+/// 本来就没有 `--manifest` 这个开关，一律按 `ManifestArgs` 的老规矩解析——工作目录里
+/// 那份 `platforms.toml`，没有就用内置的。（`zh sync` 不再走这儿：它自己那一趟取数
+/// 就把重建做了，见 `run_zh_sync`。）
 ///
 /// **重建不成不是错误，只是少一层。** 缓存里那个 zip 截断了、读不动了，都不该让
 /// `romcat identify` 整条命令跑不起来——那与 `load_zh_index` 自己的契约（「没取过数不是
 /// 错误，识别照跑」）直接相抵。何况这时旧索引还原样躺着，什么都没丢
 /// （`zh::store` 的「旧数据一直留到新数据真的写进来那一刻」）。
+///
+/// **这一趟要几分钟，所以它说话、也停得下来**（挂单 `Q25`）：开读那一下先打一句
+/// 「正在重建」，往后每五秒报一次读到第几条；`cancel` 就是 Ctrl-C 那个信号，
+/// 按下去收手在两条记录之间，那份索引原样等着下一趟。
 fn heal_zh_store(
     workspace: &Path,
     store: &mut zh::store::Store,
     rules: &Rules,
-    manifest: Option<&Manifest>,
+    cancel: &CancelToken,
 ) {
-    let Some(pending) = store.rebuilding().map(|it| it.was) else {
+    let Some((pending, 原件)) = store.rebuilding().map(|it| (it.was, it.dump.clone())) else {
         return;
     };
-    let fallback = match manifest {
-        Some(_) => None,
-        None => match (ManifestArgs { manifest: None }).load(workspace) {
-            Ok(manifest) => Some(manifest),
-            Err(message) => {
-                eprintln!("中文索引要重建，但平台清单读不出来：{message}。这一趟先少这一层。");
-                return;
-            }
-        },
+    let manifest = match (ManifestArgs { manifest: None }).load(workspace) {
+        Ok(manifest) => manifest,
+        Err(message) => {
+            eprintln!("中文索引要重建，但平台清单读不出来：{message}。这一趟先少这一层。");
+            return;
+        }
     };
-    let Some(manifest) = manifest.or(fallback.as_ref()) else {
-        return;
+    // **开读那一下才打「正在重建」。** 摆在调用之前打的话，缓存里根本没有那份原件时
+    // 就会先许一句「正在重建」，紧接着又说「找不到原件」——头一句是假的。
+    let mut 说过开工了 = false;
+    let mut last = Instant::now();
+    let mut progress = |at: zh::sync::Progress| {
+        if !说过开工了 {
+            说过开工了 = true;
+            last = Instant::now();
+            eprintln!(
+                "中文索引的结构版本是 {pending}，本程序认得的是 {}——正在从本机那份原件 \
+                 {原件} 就地重建（解开 {}），不会下载任何东西。这要几分钟，Ctrl-C 停得下来。",
+                zh::store::SCHEMA_VERSION,
+                human_bytes(at.total),
+            );
+            return;
+        }
+        if last.elapsed() >= Duration::from_secs(5) {
+            last = Instant::now();
+            eprintln!(
+                "  已读 {} 条记录，留下 {} 条游戏条目，{} / {}",
+                thousands(at.records),
+                thousands(at.games),
+                human_bytes(at.bytes),
+                human_bytes(at.total),
+            );
+        }
     };
     let outcome = zh::sync::rebuild(
         &RealFs,
         store,
-        manifest,
+        &manifest,
         rules,
         &workspace::zh_cache_dir(workspace),
+        &mut zh::sync::Context {
+            cancel: Some(cancel),
+            progress: Some(&mut progress),
+        },
     );
     match outcome {
         Ok(zh::sync::Rebuilt::NotNeeded) => {}
@@ -1219,6 +1257,12 @@ fn heal_zh_store(
              就地重建，{} 条游戏条目，没下载任何东西。",
             zh::store::SCHEMA_VERSION,
             thousands(games),
+        ),
+        Ok(zh::sync::Rebuilt::Halted { was, dump }) => eprintln!(
+            "重建中文索引被中断了（结构版本 {was}，本程序认得的是 {}，原件 {dump}）。\
+             停在两条记录之间，一个字都没写进库——那份索引原样等着，下次接着重建。\
+             这一趟先少这一层。",
+            zh::store::SCHEMA_VERSION,
         ),
         Ok(zh::sync::Rebuilt::NoOriginal { was, dump }) => eprintln!(
             "中文索引的结构版本是 {was}，本程序认得的是 {}，而本机缓存里找不到原件{}——\
@@ -1632,7 +1676,7 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
     let index = if args.no_fuzzy {
         None
     } else {
-        match load_zh_index(&workspace, &rules) {
+        match load_zh_index(&workspace, &rules, cancel) {
             Ok(index) => index,
             Err(message) => return fail(message),
         }
@@ -1651,6 +1695,10 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
             index.dump(),
             naming.tuning.threshold,
         );
+    } else if cancel.is_cancelled() {
+        // **重建被自己按停了，不是「还没取过」。** 数取过，只是这一趟没读完；
+        // 照那句报的话就是把用户推向重下那 435 MB。
+        eprintln!("中文索引这一趟被中断了（它还等着重建），文件名那一层不跑。");
     } else {
         eprintln!("还没取过中文离线数据源，文件名那一层不跑。要它就先跑一次 `romcat zh sync`。");
     }
@@ -2187,7 +2235,7 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
     };
     // **库句柄留着别扔**：撞名字走内存里那份索引，取**简介**要按条目号回库里点名
     // （票 03，`scrape::zh::Summaries`）——简介不跟着索引进内存，那是九十来 MB 常驻。
-    let store = match open_zh_store(&workspace, &rules) {
+    let store = match open_zh_store(&workspace, &rules, cancel) {
         Ok(store) => store,
         Err(message) => return fail(message),
     };
@@ -4668,7 +4716,7 @@ fn run_platforms(args: &PlatformsArgs) -> ExitCode {
 
 /// 取一趟**中文离线数据源**。**这是这个程序里第二个联网的子命令**（另一个是
 /// `dat sync`），走的是同一道取数闸门。
-fn run_zh_sync(args: &ZhSyncArgs) -> ExitCode {
+fn run_zh_sync(args: &ZhSyncArgs, cancel: &CancelToken) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let manifest = match args.manifest.load(&workspace) {
         Ok(manifest) => manifest,
@@ -4682,23 +4730,21 @@ fn run_zh_sync(args: &ZhSyncArgs) -> ExitCode {
         Ok(store) => store,
         Err(error) => return fail(format!("中文索引打不开：{error}")),
     };
-    // **先就地重建再取数**：结构版本一变，本机那份原件就够把索引补回来，
-    // 而重建完指纹也记回去了——下面那句「指纹没变就整件跳过」于是照样成立。
+    // **这一趟不先就地重建。** 从前是先 `heal_zh_store` 一遍再取数：远端一有新版，
+    // 刚解完的那一份当场被下回来的新版盖掉，那几分钟（读+解 960 MB）整个白花；
+    // `--full` 更是把同一份原件解两遍（挂单 `Q15`、`Q31`）。取数自己那条路本来就把
+    // 「等着重建的那一份」排除在「指纹没变就跳过」之外（`zh::sync::sync` 里那道闸），
+    // 所以先取到远端那一版、再决定读哪份原件——**换没换新版，那 960 MB 都只流一遍**。
     //
-    // **`--dry-run` 不重建**：那一档说的是「只说这一趟会干什么，不取也不写」，而重建
-    // 要读一份 435 MB 的原件再整份写回去，是这句话的反面。
-    if args.dry_run {
-        if let Some(pending) = store.rebuilding() {
-            eprintln!(
-                "（这一份索引的结构版本是 {}，本程序认得的是 {}——真跑一趟会先从本机那份\
-                 原件 {} 就地重建。`--dry-run` 不动它。）",
-                pending.was,
-                zh::store::SCHEMA_VERSION,
-                pending.dump,
-            );
-        }
-    } else {
-        heal_zh_store(&workspace, &mut store, &rules, Some(&manifest));
+    // **`--dry-run` 照旧什么都不动**：那一档说的是「只说这一趟会干什么，不取也不写」。
+    let pending = store.rebuilding().map(|it| (it.was, it.dump.clone()));
+    if args.dry_run && let Some((was, dump)) = &pending {
+        eprintln!(
+            "（这一份索引的结构版本是 {was}，本程序认得的是 {}——真跑一趟会先看一眼远端\
+             有没有新版：没换就从本机那份原件 {dump} 就地重建，换了就取新版那一份。\
+             `--dry-run` 不动它。）",
+            zh::store::SCHEMA_VERSION,
+        );
     }
     let options = zh::sync::Options {
         cache: workspace::zh_cache_dir(&workspace),
@@ -4708,9 +4754,73 @@ fn run_zh_sync(args: &ZhSyncArgs) -> ExitCode {
     let fetcher = HttpFetcher::with_throttle(Duration::from_millis(args.throttle_ms));
     let library = RealFs;
     let started = Instant::now();
-    let outcome = match zh::sync::sync(&fetcher, &library, &mut store, &manifest, &rules, &options)
-    {
+    // **读原件那几分钟得说话**（挂单 `Q25`）：开读那一下先打一句，往后每五秒一行。
+    // 头一下才知道「原件真的开始读了」——上面那句「指纹没变就整件跳过」走掉的话，
+    // 一条都不会来。
+    let mut 说过开工了 = false;
+    let mut last = Instant::now();
+    let mut progress = |at: zh::sync::Progress| {
+        if !说过开工了 {
+            说过开工了 = true;
+            last = Instant::now();
+            // **这一下说不出「读的是哪一份原件」，就别说。** 远端换了新版时，读的是刚下
+            // 回来的那一份，而 `pending` 记的是**旧**那一份的名字——照它打就会一边下完
+            // 435 MB 一边宣布「就地重建自原件 <旧名字>」，两处都是假的。
+            // 哪一份、下没下，收尾那一行说得准（`Synced::downloaded`）。
+            if let Some((was, _)) = &pending {
+                eprintln!(
+                    "中文索引的结构版本是 {was}，本程序认得的是 {}——这一趟读完原件就把它\
+                     重建好。",
+                    zh::store::SCHEMA_VERSION,
+                );
+            }
+            eprintln!(
+                "正在读那份条目表（解开 {}），这要几分钟；Ctrl-C 停得下来，停下之后{}。",
+                human_bytes(at.total),
+                // **「原样可用」在等着重建那一档是假话**：那份库这一版读不出来
+                // （`zh::store` 的「代价是这中间 `load` 交出来的是空的」），停下只是
+                // 没变得更糟。
+                if pending.is_some() {
+                    "这份索引照旧等着重建，下一趟接着来"
+                } else {
+                    "手上那份索引原样可用"
+                },
+            );
+            return;
+        }
+        if last.elapsed() >= Duration::from_secs(5) {
+            last = Instant::now();
+            eprintln!(
+                "  已读 {} 条记录，留下 {} 条游戏条目，{} / {}",
+                thousands(at.records),
+                thousands(at.games),
+                human_bytes(at.bytes),
+                human_bytes(at.total),
+            );
+        }
+    };
+    let outcome = match zh::sync::sync(
+        &fetcher,
+        &library,
+        &mut store,
+        &manifest,
+        &rules,
+        &options,
+        &mut zh::sync::Context {
+            cancel: Some(cancel),
+            progress: Some(&mut progress),
+        },
+    ) {
         Ok(outcome) => outcome,
+        // **按停下不是失败。** 停在两条记录之间，库里一个字都没写；退出码走中断那一档
+        // （130），与扫描、识别、刮削同一条口径。
+        Err(zh::sync::SyncError::Halted(_)) => {
+            eprintln!(
+                "这一趟被中断了。停在两条记录之间，一个字都没写进库——手上那份索引\
+                 原样可用，重跑会从头读那份原件。"
+            );
+            return ExitCode::from(130);
+        }
         Err(error) => return fail(format!("取中文数据源失败：{error}")),
     };
     if outcome.dry_run {
@@ -4728,7 +4838,14 @@ fn run_zh_sync(args: &ZhSyncArgs) -> ExitCode {
         );
     } else {
         eprintln!(
-            "取回 {}（{}），读了 {} 条记录，留下 {} 条游戏条目，{:.1} 秒。",
+            "{}{}（{}），读了 {} 条记录，留下 {} 条游戏条目，{:.1} 秒。",
+            // **「取回」是句要负责的话**：原件已经在手边时一个字节都没下
+            // （`Options::full` 的文档：文件名带着日期，同名就是同一版）。
+            if outcome.downloaded {
+                "取回 "
+            } else {
+                "原件在手边，一个字节都没下——重建自 "
+            },
             outcome.dump,
             human_bytes(outcome.bytes),
             thousands(outcome.records),
@@ -5115,7 +5232,7 @@ fn run_zh_judge(args: &ZhJudgeArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run_zh_find(args: &ZhFindArgs) -> ExitCode {
+fn run_zh_find(args: &ZhFindArgs, cancel: &CancelToken) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let rules = match args.rules.load(&workspace) {
         Ok(rules) => rules,
@@ -5125,7 +5242,15 @@ fn run_zh_find(args: &ZhFindArgs) -> ExitCode {
         Ok(store) => store,
         Err(error) => return fail(format!("中文索引打不开：{error}")),
     };
-    heal_zh_store(&workspace, &mut store, &rules, None);
+    heal_zh_store(&workspace, &mut store, &rules, cancel);
+    // **重建被自己按停了，就别劝人去重下那 435 MB。** 停下之后这份库交出来的是空索引
+    // （`zh::store`：旧结构的列读不了，半懂不懂地读比读不出来更糟），照下面那句报的话
+    // 就成了「中文索引是空的，先跑一次 zh sync」——而数取过，只是这一趟被按停了。
+    // 退出码走中断那一档（130），与 `zh sync` 同一条口径。
+    if cancel.is_cancelled() {
+        eprintln!("这一趟被中断了。库里那份索引原样等着重建，什么都没丢。");
+        return ExitCode::from(130);
+    }
     let index = match store.load() {
         Ok(index) => index,
         Err(error) => return fail(format!("中文索引读不出来：{error}")),
