@@ -100,8 +100,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use unicode_normalization::{IsNormalized, is_nfd_quick};
-
 use crate::catalog::identify::{
     Candidate, CartFactRow, Confidence, ContentHash, DiscFactRow, EntryFact, Identification,
     ModelAnswerRow, SwitchFactRow,
@@ -1530,27 +1528,14 @@ fn read_from_container(
 
 /// 主库里那个文件在哪。键是「根名 + 相对那个根的路径」，分隔符是 `/`（ADR-0020）。
 ///
-/// 认不出根名、或者盘上压根没有这条路径时，原样把拼出来的那条交回去：它开不了，于是
-/// 这一条走的还是「读不到」那一支——与盘不在位是同一种处置，不必在这里多长一条岔路。
-///
-/// **键是 NFC 的，而盘上那个名字有 1.99% 是分解形式。** 在**分解敏感**的文件系统上
-/// （Windows 的 NTFS、Linux 的 ext4，而 ADR-0018 说主力机正是 Windows），直接拼出来的
-/// 那条路径根本开不了；识别把这个失败读成**无判据**，于是几百个变体从此认不出来，
-/// 报告里说的却是「拿不到可撞的东西」。所以拼不出来的要折回盘上真实的那条
-/// （[`Roots::real_path_in`]）。macOS 上看不见这条：fskit 的 NTFS 驱动查找不分解敏感。
-///
-/// **只有折得开的键才去折。** 折那一趟要先原样试一次（多一次 `open`），而识别一趟要回盘
-/// 读几万个文件、每份本来就要 open 一次——让 98% 的路径替另外那 2% 多付一次系统调用不
-/// 合算。键里一个字符都分解不开时（纯 ASCII、汉字、不带浊音符的假名都是这一档），盘上
-/// 那个名字折成 NFC 既然等于这条键，就只可能与它逐字节相同，直接拼出来的那条一定对。
+/// 折法在 [`Roots::open_path_in`]（键是 NFC 的、盘上那个名字有 1.99% 是分解形式，
+/// 所以折得开的键要折回盘上真名）。**这里只多做一件事**：认不出根名时原样把那条键
+/// 交回去，好让它照常走「开不了 → 读不到」那一支——识别不必为「哪个根不在」另长一条
+/// 岔路，与盘不在位是同一种处置。
 fn library_path(library: &dyn LibraryFs, roots: &Roots, dirs: &mut DirCache, key: &str) -> PathBuf {
-    let direct = || roots.join(key).unwrap_or_else(|| PathBuf::from(key));
-    if is_nfd_quick(key.chars()) == IsNormalized::Yes {
-        return direct();
-    }
     roots
-        .real_path_in(library, dirs, key)
-        .unwrap_or_else(direct)
+        .open_path_in(library, dirs, key)
+        .unwrap_or_else(|| PathBuf::from(key))
 }
 
 /// 撞一次，并记住**撞上时用的是哪套哈希**。参数顺序跟 [`DatRepo::lookup`] 一致，
