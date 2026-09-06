@@ -23,10 +23,17 @@
 //! 重读的应当是同一个文件（大小与修改时间都没变，不然扫描早把它整条换掉了），
 //! 所以条目顺序与当初落库时一模一样，按序号对位是安全的。条数对不上说明这个文件
 //! **确实变了**——那时该走的是扫描那条路，这一趟一个字都不改并如实报出来。
+//!
+//! ## 开盘走的是折回真名那条
+//!
+//! 库里的键是 NFC 的，盘上那个名字可能是分解形式（ADR-0020），所以这一趟拿键去开
+//! 容器一律走 [`Roots::open_path_in`](crate::catalog::Roots::open_path_in) 而不是
+//! `Roots::join`。拼出来那条在**分解敏感**的文件系统上开不了，而开不了在这里会被
+//! 记成**不可读**、静默跳过——于是那几个名字**永远**解不对，报告说的却是「读不动」。
 
 use crate::catalog::{Catalog, CatalogError, Roots};
 use crate::container;
-use crate::fs::LibraryFs;
+use crate::fs::{DirCache, LibraryFs};
 
 use super::CancelToken;
 
@@ -41,7 +48,12 @@ pub struct Recheck {
     pub renamed: u64,
     /// 改完之后**仍然解不出来**的还有几条（三种编码都不是）。
     pub still_lossy: u64,
-    /// 这一趟读不动的容器（盘不在位、穿不透）。**读不到不是结论**（ADR-0021）。
+    /// 这一趟读不动的容器（盘不在位、穿不透、盘上真的没有这条路径了）。
+    /// **读不到不是结论**（ADR-0021）。
+    ///
+    /// **「开不了」与「找不到」不分开记。** 分开要多一档状态一路传到报告与命令行，
+    /// 而这一趟对两者的处置完全一样：一个字都不改，下一趟扫描各自收拾——盘接回来
+    /// 那条重新读得到，真删了那条被扫描当成已删除。它们在这里是同一件事。
     pub unreadable: u64,
     /// 文件变了、条目对不上位，因此一个字都没改的容器。
     pub moved_on: u64,
@@ -75,6 +87,11 @@ pub fn recheck(
         containers: u64::try_from(keys.len()).unwrap_or(u64::MAX),
         ..Recheck::default()
     };
+    // 把 NFC 的键折回盘上真名那条退路上，每个目录只列一次。**挂在这一趟上**：
+    // 一个目录名是分解形式，它底下整棵子树的键都要走那条退路，真机 7,177 个容器
+    // 会把同一份 listing 读上几百遍。出了这一趟就扔——主库只读（ADR-0004），
+    // 一趟里盘上的名字不会变。
+    let mut dirs = DirCache::default();
     for key in keys {
         if cancel.is_cancelled() {
             out.interrupted = true;
@@ -83,7 +100,7 @@ pub fn recheck(
         // **改之前长什么样**要从同一张表、同一个顺序上取（含目录条目），
         // 不然样例会与重读出来的那一列对不上位。
         let before = catalog.container_entries(&key)?;
-        let Some(path) = roots.join(&key) else {
+        let Some(path) = roots.open_path_in(library, &mut dirs, &key) else {
             // 键说的那个根不在这份库里：与「读不动」同一种处置，如实计数不猜。
             out.unreadable += 1;
             continue;

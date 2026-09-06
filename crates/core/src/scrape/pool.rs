@@ -270,7 +270,14 @@ pub fn ingest(
     }
 
     // 键的第一段是**根名**，得先查出那块盘在哪（`catalog::roots::Roots`）。
-    let Some(path) = roots.join(key) else {
+    // **折回盘上真名再开**（[`Roots::open_path`]）：库里的键是 NFC 的，盘上那个名字
+    // 可能是分解形式（ADR-0020）。直接拼出来那条在**分解敏感**的文件系统上开不了，
+    // 而这里开不了会被报成**读不动**——盘明明好好的，那张封面却从此永远收不进来。
+    //
+    // **这里现开一份 `DirCache` 用完就扔**，不像识别那样挂在一趟上：折那一趟顶多多列
+    // 几层目录，而这一份媒体接下来要被整个读完再算一遍 SHA-256（一张封面几百 KB 到
+    // 几 MB）。两者不在一个量级，为省它把缓存一路穿进来不合算。
+    let Some(path) = roots.open_path(library, key) else {
         return Ok(Ingested::Unreadable {
             why: format!("{key} 说的那个根不在这份库里"),
         });

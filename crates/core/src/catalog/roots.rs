@@ -7,6 +7,18 @@
 //! - **从键回到盘**——[`Roots`] 拿**中立库的键**的第一段（根名）查出那个根在盘上的位置，
 //!   再接上相对路径。识别、刮削、同步都要走它才读得到那个文件。
 //!
+//! ## 从键回到盘有两个入口，别拿错
+//!
+//! 键是 NFC 的，而盘上那个名字可能是分解形式（ADR-0020）。于是：
+//!
+//! - [`Roots::join`] 只是**拼**，不查盘，交回来的是 NFC 那条。算落点、拼给人看的路径
+//!   走它。
+//! - [`Roots::open_path_in`]（以及只开一个文件时的 [`Roots::open_path`]）会在需要时
+//!   **折回盘上真名**。**要 `open` 那个文件的一律走它。**
+//!
+//! 拿错的后果不是「读不到」这么简单：开不了会被每条路各自解释成别的意思——识别读成
+//! 「无判据」、重解名字读成**不可读**、媒体入池读成「读不动」——而盘明明好好的。
+//!
 //! ## 为什么根名进键里而不是另起一列
 //!
 //! 中立库里有二十来张表以「条目的键」或「变体的键」当主键或外键，**沉淀库**的**路径锚**
@@ -27,6 +39,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{OptionalExtension, params};
+use unicode_normalization::{IsNormalized, is_nfd_quick};
 
 use super::{Catalog, CatalogError, now_secs};
 use crate::fs::{DirCache, LibraryFs};
@@ -641,8 +654,16 @@ impl Roots {
 
     /// 把一条**中立库的键**直接拼成盘上的路径。**不查盘**。
     ///
-    /// 拼出来的路径是 NFC 的，而盘上那个名字可能是分解形式——真要开文件走
-    /// [`Roots::real_path`]（ADR-0020）。
+    /// 拼出来的路径是 NFC 的，而盘上那个名字可能是分解形式（ADR-0020）。
+    ///
+    /// # 拿去开文件的一律不许用它
+    ///
+    /// 它只该用在**不碰盘**的那些事上：算落点、拼给人看的路径、把一条键换算成别处的
+    /// 位置。要 `open` / `read_head` / `read_dir` 那个文件的走
+    /// [`Roots::open_path_in`]——直接拼出来的那条在**分解敏感**的文件系统上开不了，
+    /// 而开不了会被每条路各自解释成别的意思（识别读成「无判据」、重解名字读成
+    /// **不可读**、媒体入池读成「读不动」），盘却明明好好的。这条纪律被违反过数次，
+    /// 所以现在只有一处折法（[`Roots::open_path_in`]），三条路都走它。
     #[must_use]
     pub fn join(&self, key: &str) -> Option<PathBuf> {
         let (name, relative) = path::split_root(key);
@@ -677,6 +698,50 @@ impl Roots {
         let (name, relative) = path::split_root(key);
         let root = self.path_of(name)?;
         dirs.real_path(fs, root, relative)
+    }
+
+    /// 把一条**中立库的键**折成**拿得去 `open` 的**那条路径。**要读那个文件就走它。**
+    ///
+    /// 认不出根名时是 `None`——那时压根拼不出任何一条路径，与「路径拼得出但盘上没有」
+    /// 不是一件事，调用方各自照旧计数。
+    ///
+    /// **键是 NFC 的，而盘上那个名字有 1.99% 是分解形式**（ADR-0020）。在**分解敏感**的
+    /// 文件系统上（Windows 的 NTFS、Linux 的 ext4，而 ADR-0018 说主力机正是 Windows），
+    /// [`Roots::join`] 直接拼出来的那条根本开不了；macOS 上看不见这条，fskit 的 NTFS
+    /// 驱动查找不分解敏感。所以折得开的键要折回盘上真实的那一条
+    /// （[`Roots::real_path_in`]）。
+    ///
+    /// **只有折得开的键才去折。** 折那一趟要先原样试一次（多一次 `open`），而这几条路
+    /// 本来每份就要 open 一次——让 98% 的路径替另外那 2% 多付一次系统调用不合算。键里
+    /// 一个字符都分解不开时（纯 ASCII、汉字、不带浊音符的假名都是这一档），盘上那个
+    /// 名字折成 NFC 既然等于这条键，就只可能与它逐字节相同，直接拼出来的那条一定对。
+    ///
+    /// **折不到时交回直接拼的那一条**，而不是 `None`：那时文件是真的不在了，让调用方
+    /// 拿它去 `open` 失败、照旧走自己那条「读不到」的支路——报出来的路径也才是用户
+    /// 认得的那一条。
+    ///
+    /// `dirs` 是逐段列目录那条退路上的记性，**一趟里的几万条键该共用一份**：一个目录名
+    /// 是分解形式，它底下整棵子树都要走那条退路，不共用的话同一份 listing 会被读上几百遍。
+    /// 只开一个文件的地方走 [`Roots::open_path`]。
+    #[must_use]
+    pub fn open_path_in(
+        &self,
+        fs: &dyn LibraryFs,
+        dirs: &mut DirCache,
+        key: &str,
+    ) -> Option<PathBuf> {
+        let direct = self.join(key)?;
+        if is_nfd_quick(key.chars()) == IsNormalized::Yes {
+            return Some(direct);
+        }
+        Some(self.real_path_in(fs, dirs, key).unwrap_or(direct))
+    }
+
+    /// 与 [`Roots::open_path_in`] 同一件事，只开**一个**文件时用它：自己现开一份
+    /// [`DirCache`]，用完就扔。
+    #[must_use]
+    pub fn open_path(&self, fs: &dyn LibraryFs, key: &str) -> Option<PathBuf> {
+        self.open_path_in(fs, &mut DirCache::default(), key)
     }
 
     /// 把一条**中立库的键**还原成给人看的完整路径。认不出根名时原样返回那条键。
