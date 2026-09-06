@@ -98,6 +98,9 @@ pub fn import(
         format: adapter.name().to_string(),
         ceiling: adapter.ceiling().label().to_string(),
         tier: adapter.ceiling().label().to_string(),
+        // **不看这一趟导了什么。** 结构性损失是格式自己的边界，一条都没撞上也照样成立
+        // ——照着文件里的内容去数，说出来的就成了「这一趟丢了 N 条」，那是另一件事。
+        structural_losses: adapter.structural_losses().to_vec(),
         ..ImportReport::default()
     };
     let mut worst = adapter.ceiling();
@@ -427,6 +430,8 @@ pub fn export(
         catalog: catalog.location().to_string(),
         format: adapter.name().to_string(),
         tier: adapter.ceiling().label().to_string(),
+        // 与导入那一侧同一份、同一句（见 `report` 的模块文档）。
+        structural_losses: adapter.structural_losses().to_vec(),
         out: path::display(&out_dir),
         dry_run: options.dry_run,
         ..ExportReport::default()

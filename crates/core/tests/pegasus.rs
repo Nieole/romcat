@@ -22,7 +22,7 @@ use romcat_core::catalog::Roots;
 use romcat_core::task::Handle;
 use romcat_core::adapter::pegasus::Pegasus;
 use romcat_core::adapter::transfer::{self, ExportOptions};
-use romcat_core::adapter::{Capability, assert_capability};
+use romcat_core::adapter::{Adapter, Capability, assert_capability};
 use romcat_core::catalog::Catalog;
 use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
@@ -308,6 +308,49 @@ fn 手工维护的元数据往返一个字节都不差_档位是实测出来的(
         Capability::LosslessRoundTrip,
         "过了才算无损往返"
     );
+}
+
+#[test]
+fn 导出前就说得出这个格式会丢掉哪两样_而且导入那一侧说的是同一句() {
+    // ADR-0003 要的是「导出前就知道这个格式会丢掉什么」，而不是让用户导出一趟、
+    // 发现简介排版变了、以为是刮削出了问题。
+    //
+    // `手写的` 那份 fixture 里**一条带换行的简介都没有**——两条声明照样得在两份报告里，
+    // 因为它们说的是格式**结构上**做不到什么，不是这一趟丢了几条。
+    let mut 现场 = 建现场();
+    跑一遍(&mut 现场);
+    let path = 放一份手写的(&现场);
+    let 导入报告 = transfer::import(
+        &mut 现场.catalog,
+        &Pegasus,
+        std::slice::from_ref(&path),
+        None,
+    )
+    .expect("导得进");
+    let 导出报告 = 导出(&mut 现场, true);
+
+    assert_eq!(
+        导入报告.structural_losses,
+        Pegasus.structural_losses(),
+        "导入这一侧照搬适配器的声明"
+    );
+    assert_eq!(
+        导出报告.structural_losses, 导入报告.structural_losses,
+        "两侧是同一份"
+    );
+
+    for 报告 in [导入报告.render_text(), 导出报告.render_text()] {
+        assert!(报告.contains("换行"), "单个换行折成空格得说出口：{报告}");
+        assert!(报告.contains("空格"), "{报告}");
+        assert!(
+            报告.contains("U+3000"),
+            "开头那两个全角空格得点名——中文离线源的简介就长这样：{报告}"
+        );
+        assert!(
+            报告.contains("段落"),
+            "空行分隔的段落是往返得回来的那一样，别让人以为全丢了：{报告}"
+        );
+    }
 }
 
 #[test]

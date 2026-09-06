@@ -20,13 +20,20 @@
 //! 1. **收敛到什么程度**：多少变体收成了多少条目，其中多少是作品级的。
 //! 2. **谁被挡在外面**：附属内容、非游戏资产、补丁各几个（ADR-0013、ADR-0010）。
 //! 3. **有没有人在外面动过**：检测到就**不静默覆盖**，把冲突逐条列出来（ADR-0001 修订段）。
+//!
+//! ## 结构性损失在两份报告里说的是同一句
+//!
+//! 导入那一节第 3 条数的是**这份文件里**撞上了几处，[`StructuralLoss`] 说的是**格式结构上**
+//! 做不到什么——后者与这一趟有没有撞上无关，一条都没撞上也照样成立。两份报告都印它，
+//! 而且共用 `write_structural_losses` 这一个渲染：导出前读到的那句与导入后读到的那句
+//! **必须是同一句**，各写各的就会漂成两种说法。
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use serde::Serialize;
 
-use crate::adapter::Lossy;
+use crate::adapter::{Lossy, StructuralLoss};
 use crate::report::{heading, human_bytes, pad, thousands};
 
 /// 报告里最多列几个例子。
@@ -34,6 +41,29 @@ use crate::report::{heading, human_bytes, pad, thousands};
 /// 一处定死：`converge` 攒例子、`transfer` 截有损点、这里印，三处要是各写一个数，
 /// 报告里就会出现「列了 10 条」与「其实攒了 8 条」这种对不上。
 pub(super) const EXAMPLES: usize = 10;
+
+/// 把「这个格式结构上装不下什么」写进报告。
+///
+/// **导入与导出共用这一个。** 同一件事在两份报告里各写各的，用户就会读到两种说法，
+/// 而这两句正是他决定要不要导出的依据（票 02 的验收点名）。
+///
+/// 清单是空的就**一个字都不写**：空的意思是「还没查过」，不是「这个格式什么都不丢」
+/// （[`Adapter::structural_losses`](crate::adapter::Adapter::structural_losses)）。
+/// 印一句「无结构性损失」是一句没人核过的保证。
+fn write_structural_losses(out: &mut String, losses: &[StructuralLoss]) {
+    if losses.is_empty() {
+        return;
+    }
+    heading(out, "这个格式结构上装不下什么");
+    let _ = writeln!(
+        out,
+        "**与这一趟撞没撞上无关**：说的是格式本身做不到什么，不是这一趟丢了几条。\n\
+         带**底本**的往返照旧一个字节都不差——变形只落在**新生成**的内容上。"
+    );
+    for loss in losses {
+        let _ = writeln!(out, "  {}", loss.line());
+    }
+}
 
 /// 一份导进来的文件的账。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -85,6 +115,12 @@ pub struct ImportReport {
     pub ceiling: String,
     /// **实测**下来是哪一档——全部文件里最低的那一档。
     pub tier: String,
+    /// 这个格式**结构上**装不下什么。
+    ///
+    /// **与这一趟导了什么无关**：它是格式自己的边界，逐条都是 `&'static`。
+    /// 导入这一侧也印，是因为「导出前就知道会丢什么」得从第一次接触这个格式起就说得出，
+    /// 而不是等到导出那一趟才冒出来。
+    pub structural_losses: Vec<StructuralLoss>,
     /// 逐份文件。
     pub files: Vec<ImportedFile>,
     /// 一共落了多少条字段值进中立库。
@@ -111,6 +147,7 @@ impl ImportReport {
             "档位是**实测**出来的：每份文件都读进来又写回去，逐字节比过。\n\
              没过就自动降一档，并指出第一处分岔在第几行。"
         );
+        write_structural_losses(&mut out, &self.structural_losses);
 
         heading(&mut out, "逐份文件");
         let _ = writeln!(
@@ -256,6 +293,8 @@ pub struct ExportReport {
     pub format: String,
     /// 实测档位。
     pub tier: String,
+    /// 这个格式**结构上**装不下什么。与导入报告里那一份是同一份、印出来是同一句。
+    pub structural_losses: Vec<StructuralLoss>,
     /// 写到哪儿。
     pub out: String,
     /// 只排计划、不写盘吗。
@@ -306,6 +345,7 @@ impl ExportReport {
         if self.dry_run {
             let _ = writeln!(out, "**只排了计划，一个字节都没写盘。**");
         }
+        write_structural_losses(&mut out, &self.structural_losses);
 
         heading(&mut out, "收敛");
         let _ = writeln!(
@@ -411,5 +451,55 @@ impl ExportReport {
             );
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapter::{Adapter, pegasus::Pegasus};
+
+    /// 把「这个格式结构上装不下什么」那一节从渲染出来的报告里抠出来。
+    ///
+    /// 一节由 [`heading`] 起头（空一行、标题、横线），到下一节那个空行为止。
+    fn 那一节(text: &str) -> &str {
+        let start = text.find("这个格式结构上装不下什么").expect("有这一节");
+        let rest = &text[start..];
+        let end = rest.find("\n\n").expect("后面还有别的节");
+        &rest[..end]
+    }
+
+    #[test]
+    fn 导入与导出对结构性损失说的是同一句() {
+        // 用户读到的两句要是不一样，他就得自己猜哪一句算数。
+        //
+        // **它钉的是「两句一字不差」，不是「共用同一个函数」**——真有人在某一侧原样
+        // 抄一份渲染，它照样绿。共用 `write_structural_losses` 是让这条一直绿的做法，
+        // 不是这条测试证得出的事。
+        let losses = Pegasus.structural_losses().to_vec();
+        let 导入 = ImportReport {
+            structural_losses: losses.clone(),
+            ..ImportReport::default()
+        }
+        .render_text();
+        let 导出 = ExportReport {
+            structural_losses: losses,
+            ..ExportReport::default()
+        }
+        .render_text();
+        assert_eq!(那一节(&导入), 那一节(&导出), "两侧说的必须是同一句");
+        assert!(那一节(&导入).contains("换行"), "{}", 那一节(&导入));
+        assert!(那一节(&导入).contains("U+3000"), "{}", 那一节(&导入));
+    }
+
+    #[test]
+    fn 没声明结构性损失的格式一个字都不印() {
+        // 空清单的意思是**还没查过**，不是「这个格式什么都不丢」。印一句
+        // 「无结构性损失」就是替一份没人核过的调研背书。
+        let text = ImportReport::default().render_text();
+        assert!(
+            !text.contains("结构上装不下"),
+            "空清单该一个字都不印：{text}"
+        );
     }
 }

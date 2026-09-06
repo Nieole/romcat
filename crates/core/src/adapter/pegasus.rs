@@ -50,7 +50,7 @@ use crate::scrape::MediaKind;
 
 use super::{
     Adapter, AdapterError, Body, Capability, Collection, Document, Entry, Game, Lossy, LossyNote,
-    MediaPlacement, Parsed, PlayerCount, Preserved, ReleaseDate,
+    MediaPlacement, Parsed, PlayerCount, Preserved, ReleaseDate, StructuralLoss,
 };
 
 /// Pegasus 适配器。
@@ -59,6 +59,46 @@ pub struct Pegasus;
 
 /// 首选文件名（官方原话：the preferred file name）。
 pub const FILE_NAME: &str = "metadata.pegasus.txt";
+
+/// 这个格式**结构上**装不下的那两样（[`Adapter::structural_losses`]）。
+///
+/// 两条都出在**多行文本**上，两条都不是这里的疏漏——是 Pegasus 词法自己的边界，
+/// 换个写法也躲不开，所以能力档位说得出来就是全部能做的（ADR-0003）。
+///
+/// ## 为什么它们避不开
+///
+/// **一、单个换行折成空格。** 读那一侧的 `merge_lines()` 把续行一路拼起来，只有
+/// 内容恰为 `.` 的那一行才还原成段落分隔（`\n\n`）。写的时候真把一个换行写成
+/// 一行 `.`，读回来就成了空行——那是**另一个**意思。所以段落（空行分隔）往返得回来，
+/// 段落**里面**的那个换行回不来。
+///
+/// 「往返得回来」这句要**说准到一个空行**：一个 `.` 读回来固定还原成 `\n\n`，
+/// 所以**恰好一个**空行是等价的，而连着 n 个空行（原文 n+1 个换行）写成 n 个 `.`、
+/// 读回来是 2n 个换行——**每多一个空行就多长出一个换行**。写成无条件的「原样往返」
+/// 就是一句好看的假话，而假话比不说更糟。
+///
+/// **二、开头的空白被掐掉。** 顶格那一行在第一个 `:` 处切开之后两侧各自 `trim`，
+/// 续行则先 `trim_start` 才取值——而这两处都分不出「值本身开头的空白」与
+/// 「续行的缩进」，它们在这个格式里长得一模一样。Rust 的 `trim_start` 连
+/// **U+3000 全角空格**一起吃掉，而中文离线源的简介开头那两个全角空格是那份数据源的常态。
+///
+/// ## 这两条与「往返一个字节都不差」并不打架
+///
+/// 带**底本**的那一趟里，原文那几行原样躺在快照里、原样写回去，逐字节相同照旧成立。
+/// 变形只发生在**新生成**的内容上：库里的值写出去、再让 Pegasus（或我们自己）读回来，
+/// 拿到的就不是原来那个值了。
+pub const STRUCTURAL_LOSSES: &[StructuralLoss] = &[
+    StructuralLoss {
+        what: "值里的单个换行（简介与长描述最常撞上）",
+        becomes: "折成一个空格；**一个**空行分隔的段落原样回得来，连着的空行每多一个多长出一个换行",
+        why: "读那一侧把续行一路拼起来，只有内容恰为 `.` 的一行才算段落分隔，而它一律还原成一个空行",
+    },
+    StructuralLoss {
+        what: "值**开头**的空白，含全角空格 U+3000",
+        becomes: "被掐掉",
+        why: "值开头的空白与续行的缩进在这个格式里长得一模一样，读的时候分不开",
+    },
+];
 
 /// 一行的行尾。**逐字节往返要它**：同一份文件里 CRLF 与 LF 可以混着来。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,6 +255,10 @@ impl Adapter for Pegasus {
 
     fn ceiling(&self) -> Capability {
         Capability::LosslessRoundTrip
+    }
+
+    fn structural_losses(&self) -> &'static [StructuralLoss] {
+        STRUCTURAL_LOSSES
     }
 
     fn file_name(&self) -> &'static str {
@@ -383,6 +427,10 @@ fn classify(raw: &str) -> LineKind {
         return LineKind::Blank(raw.to_string());
     }
     // 三、以空白开头：续行。
+    //
+    // `trim_start` 连**值本身开头的空白**一起吃掉（Rust 把 U+3000 全角空格也算空白）
+    // ——这个格式里那两样长得一模一样，分不开。原样留着的是 `indent`，供逐字节往返用；
+    // 折进中立模型的那个值就是掐过的。这条边界在 [`STRUCTURAL_LOSSES`] 里说出口了。
     if raw.starts_with([' ', '\t']) {
         let trimmed = raw.trim_start();
         let indent = raw[..raw.len() - trimmed.len()].to_string();
@@ -1126,7 +1174,8 @@ fn assets_of(body: &Body) -> &BTreeMap<String, Vec<String>> {
 ///
 /// **段落分隔往返得回来，单个换行折成空格**：读那一侧的 `joined` 认 `.` 为 `\n\n`、
 /// 把普通续行折成空格，这里照它的规矩写，两边就对上了。单个换行折成空格是 Pegasus
-/// 这个格式本身的天花板，不是这里的疏漏——**该由能力档位说出口**（ADR-0003）。
+/// 这个格式本身的天花板，不是这里的疏漏——**能力档位在 [`STRUCTURAL_LOSSES`] 里
+/// 把它说出口了**（ADR-0003），导出前就看得见，不必等用户事后发现。
 fn write_attribute(out: &mut String, key: &str, values: &[String]) {
     if values.is_empty() {
         return;
@@ -1821,5 +1870,80 @@ regex: .*
         assert!(简介.contains("https://例子/a"), "带冒号的那截没丢：{简介:?}");
         // 那个半角 `:` 没有变成一个新属性键。
         assert!(game.unknown.is_empty(), "不该冒出新键：{:?}", game.unknown);
+    }
+
+    /// 把一段文字当简介写出去、再原样读回来。**两条声明都是这么量出来的。**
+    fn 简介往返一趟(原文: &str) -> String {
+        let mut doc = Document::default();
+        doc.entries.push(Entry::new(Body::Game(Game {
+            title: "甲".to_string(),
+            files: vec!["甲.nes".to_string()],
+            summary: Some(原文.to_string()),
+            ..Game::default()
+        })));
+        let written = Pegasus.write(&doc, None).expect("写得出");
+        let back = Pegasus.read(&written).expect("读得回来");
+        let Body::Game(game) = &back.doc.entries[0].body else {
+            panic!("是游戏段");
+        };
+        game.summary.clone().expect("简介还在")
+    }
+
+    #[test]
+    fn 档位声明的那两样是实测出来的_不是写死的一句话() {
+        // [`STRUCTURAL_LOSSES`] 里那两句要是与这个格式的实际行为对不上，它就成了
+        // 一句好看的假话——比不说更糟。这里把两样都在真的写、真的读上量一遍。
+        //
+        // 一份简介同时带齐三样：开头两个**全角空格**（中文离线源的常态）、
+        // 段落**里面**的单个换行、空行分隔的**段落**。
+        let 读回来 = 简介往返一趟("\u{3000}\u{3000}第一段头一行\n第一段第二行\n\n第二段");
+        assert_eq!(
+            读回来, "第一段头一行 第一段第二行\n\n第二段",
+            "开头的全角空格没了、单个换行成了空格、一个空行分隔的段落原样回来了"
+        );
+        assert!(!读回来.starts_with('\u{3000}'), "开头那两个全角空格被掐掉了");
+
+        // **「段落原样往返」只在恰好一个空行上成立**，声明因此不能写成无条件的那一句：
+        // 一个 `.` 读回来固定还原成 `\n\n`，于是连着两个空行（原文三个换行）写成两个
+        // `.`、读回来是四个换行——每多一个空行就多长出一个换行。
+        assert_eq!(
+            简介往返一趟("甲\n\n\n乙"),
+            "甲\n\n\n\n乙",
+            "连着的空行每多一个多长出一个换行"
+        );
+
+        // 量出来的这几样，正是声明里写的那两条。**不钉清单的长度**：将来补第三条
+        // （挂单 Q163）不该让这条测试红——它要钉的是「这两条说得准」。
+        let 换行 = STRUCTURAL_LOSSES
+            .iter()
+            .find(|loss| loss.what.contains("换行"))
+            .expect("单个换行那一条在");
+        assert!(换行.becomes.contains("空格"), "折成空格得说出口：{换行:?}");
+        assert!(换行.becomes.contains("空行"), "段落回得来得说出口：{换行:?}");
+        assert!(
+            换行.becomes.contains("多长出一个换行"),
+            "连着的空行会长出换行，这句不能省：{换行:?}"
+        );
+        let 空白 = STRUCTURAL_LOSSES
+            .iter()
+            .find(|loss| loss.what.contains("开头"))
+            .expect("前导空白那一条在");
+        assert!(空白.what.contains("U+3000"), "全角空格得点名：{空白:?}");
+        assert!(空白.becomes.contains("掐掉"), "{空白:?}");
+    }
+
+    #[test]
+    fn 结构性损失不看库里当下有什么() {
+        // 一份**一个换行都没有**的文档，档位照样说得出这两样——它说的是格式结构上
+        // 做不到什么，不是「这一趟丢了几条」。写成后者就成了报告的活。
+        assert_eq!(
+            简介往返一趟("一行到底，没有换行也没有前导空白"),
+            "一行到底，没有换行也没有前导空白",
+            "这一趟一个字都没丢"
+        );
+        assert!(
+            Pegasus.structural_losses().len() >= 2,
+            "这一趟没撞上，两条声明照样在"
+        );
     }
 }

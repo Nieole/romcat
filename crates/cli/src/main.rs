@@ -2509,6 +2509,21 @@ fn run_adapters() -> ExitCode {
         "\n上限是**声称**的。实测档位在 `romcat import` 时断言出来：\n\
          每份文件读进来又写回去，逐字节比过——过了才算无损往返，没过自动降一档。"
     );
+
+    // **档位那四个词说不出的那一半。** 「无损往返」说的是带**底本**写回去一个字节都不差，
+    // 它答不了「把库里的值交给这个格式存一趟，它自己会把值改成什么样」。后者是
+    // ADR-0003 要的「导出前就知道这个格式会丢掉什么」，得在这里说出口。
+    for adapter in adapter::all() {
+        let losses = adapter.structural_losses();
+        if losses.is_empty() {
+            continue;
+        }
+        println!("\n{} 结构上装不下什么", adapter.name());
+        println!("（与库里当下有什么无关：说的是格式本身做不到什么，不是这一趟丢了几条）");
+        for loss in losses {
+            println!("  {}", loss.line());
+        }
+    }
     ExitCode::SUCCESS
 }
 
