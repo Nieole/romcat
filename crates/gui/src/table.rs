@@ -31,9 +31,11 @@
 
 use egui::{Align, Layout};
 use egui_extras::{Column, TableBuilder};
+use romcat_core::catalog::Catalog;
 use romcat_core::catalog::browse::{Scope, SearchHit, WorkAnchor, WorkOrder, WorkQuery, WorkRow};
-use romcat_core::catalog::{Catalog, Confidence};
 use romcat_core::report::{capacity, thousands};
+
+use crate::look;
 
 /// 一行多高，点。
 ///
@@ -214,7 +216,7 @@ impl Window {
 /// - 全选时，[`rows`](Self::rows) 是**点掉的**那几行——全选本身不是一万个身份，
 ///   它就是当前这个筛选。
 ///
-/// **换筛选就得清空**（[`Screen`](crate::library::Screen) 每帧比一次）：全选说的是
+/// **换筛选就得清空**（[`Screen`](crate::browse::Screen) 每帧比一次）：全选说的是
 /// 「当前筛出来的这一批」，条件一改那批就不是同一批了，留着上一批的选中会让批量操作
 /// 作用到人根本没看见的行上。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -323,6 +325,9 @@ impl Table<'_> {
             scroll_to,
         } = self;
         let mut opened = None;
+        // 行画完之后手上没有那一行的 `Ui` 了（列都加完才拿得到 `response`），
+        // 而焦点那一圈要画在那时——先把上下文留一份。
+        let ctx = ui.ctx().clone();
         let total_rows = window.total();
         let total = usize::try_from(total_rows).unwrap_or(usize::MAX);
         let (sorted_by, descending) = (query.order, query.descending);
@@ -405,7 +410,10 @@ impl Table<'_> {
                         }
                         return;
                     };
+                    // 焦点那一圈要夹在滚动视口里，而只有格子里头拿得到那个裁剪矩形。
+                    let mut 看得见的 = egui::Rect::NOTHING;
                     row.col(|ui| {
+                        看得见的 = ui.clip_rect();
                         let mut on = picked.contains(&work.anchor);
                         if ui.checkbox(&mut on, "").changed() {
                             picked.toggle(&work.anchor);
@@ -450,22 +458,20 @@ impl Table<'_> {
                         ui.label(work.year.as_deref().unwrap_or("—"));
                     });
                     row.col(|ui| {
-                        let line =
-                            format!("{} · {}", work.confidence_label(), work.missing_label());
-                        // 置信度的颜色在五屏里含义一致（规格 69）：高稳、中留神、
-                        // 低与**还没识别**各自一档，四档分得开。
-                        match work.confidence {
-                            Some(Confidence::High) => ui.label(line),
-                            Some(Confidence::Medium) => {
-                                ui.colored_label(ui.visuals().warn_fg_color, line)
-                            }
-                            Some(Confidence::Low) => {
-                                ui.colored_label(ui.visuals().error_fg_color, line)
-                            }
-                            None => ui.weak(line),
-                        };
+                        // 置信度的颜色与词在五屏里同出一处（规格 69、票 `gui-redesign/12`）：
+                        // 哪一档由核心库说（`WorkRow::tier`），什么颜色由 [`crate::look`] 说，
+                        // 这儿一个 `match` 都不写。**词一直在**——颜色不是唯一线索。
+                        ui.colored_label(
+                            look::tier_color(work.tier(), ui.visuals()),
+                            format!("{} · {}", work.confidence_label(), work.missing_label()),
+                        );
                     });
-                    if row.response().clicked() {
+                    // **焦点落在这一行上要看得见**：行是点得中的，于是 Tab 走得到它
+                    // （票 `gui-redesign/12` 验收第 7 条）。行自己画底色，走不了 egui
+                    // 按钮那条路，得自己描一圈。
+                    let response = row.response();
+                    look::focus_ring(&ctx, 看得见的, &response);
+                    if response.clicked() {
                         *focused = Some(index);
                         // **交一份拷贝出去而不是下标**：详情面板要在这一行滚出视口
                         // 之后照样摆得出来。只有真点中的那一帧才复制。

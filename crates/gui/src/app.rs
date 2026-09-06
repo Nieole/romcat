@@ -1,4 +1,4 @@
-//! 窗口本体：**待确认队列**是打开工具后看见的那一屏，变体表是它旁边的另一屏。
+//! 窗口本体：五屏由顶栏切换，**待确认队列**是打开工具后看见的那一屏。
 //!
 //! ## 为什么默认是队列而不是封面墙
 //!
@@ -18,12 +18,19 @@
 //! macOS 上组字过程中直接关窗会 abort（winit#4626），规避办法是**窗口还活着的时候**先
 //! `set_ime_allowed(false)`。所以关窗请求来的第一帧不真的关：先撤销关闭、放掉文本焦点、
 //! 发一条 `IMEAllowed(false)`，下一帧再关。[`App::closing`] 就是这两拍的状态。
+//!
+//! ## 五屏共用的那两样也在这儿接上
+//!
+//! 开窗第一帧装两样：[观感基线](crate::look)——置信度四档的颜色与
+//! 键盘焦点长什么样；以及[上次拖到哪儿的版式](crate::layout)——七条面板边界的宽度，
+//! 从**工作目录**里读出来塞回 egui。画完一帧再问一遍面板现在多宽，手松开了才落盘。
+//! 窗口标题跟着屏走：`romcat — {哪一份库} — {哪一屏}`，**换屏才发一条命令**。
 
 use std::path::PathBuf;
 
 use egui::{Align, Layout};
 
-use crate::{library, queue, roots, sublibrary, task};
+use crate::{browse, layout, look, queue, roots, sublibrary, task};
 use romcat_core::site::Site;
 
 /// 关窗走到哪一拍了。
@@ -48,10 +55,11 @@ pub enum View {
     /// **浏览**：找到这一批，然后对它施加操作——主列表一个作品一行，
     /// 变体在详情面板里挑（票 `gui-redesign/03`）。
     ///
-    /// 名字里还留着 `Variants`，模块也还叫 `library`：改名要连带动
-    /// `crates/gui/tests/library.rs` 与 `Cargo.toml` 里那条 `[[test]]`，
-    /// 留给票 `12` 一起收（挂单 Q61）。
-    Variants,
+    /// 名字与模块名从 `Variants` / `library` 改成了 `Browse` / [`crate::browse`]
+    /// （票 `12`，挂单 Q61）：规格里这一屏叫「浏览」，而 `library` 那个名字在这个仓库里
+    /// 已经归了**库**——`site.library` 是「这份主库叫什么」，`View::Library` 是**库屏**。
+    /// 同一个词指着三样东西，谁读代码都得先猜一遍。
+    Browse,
     /// **子库**：管住这几台设备——一台一张卡，配目标、排差量、同步。
     ///
     /// **这一屏不选内容**（票 `gui-redesign/11`）：选择集在这儿只读，改它点「改选择」
@@ -66,7 +74,7 @@ impl View {
     pub const ALL: [Self; 5] = [
         Self::Queue,
         Self::Library,
-        Self::Variants,
+        Self::Browse,
         Self::Sublibraries,
         Self::Tasks,
     ];
@@ -77,7 +85,7 @@ impl View {
         match self {
             Self::Queue => "待确认队列",
             Self::Library => "库",
-            Self::Variants => "浏览",
+            Self::Browse => "浏览",
             Self::Sublibraries => "子库",
             Self::Tasks => "任务",
         }
@@ -94,13 +102,22 @@ pub struct App {
     /// 库那一屏：一组根 + 数据源。
     roots: roots::Screen,
     /// 浏览那一屏。
-    library: library::Screen,
+    browse: browse::Screen,
     /// 子库那一屏。
     sublibrary: sublibrary::Screen,
     /// 任务那一屏。
     tasks: task::Screen,
     /// **任务台**：长活排在这儿跑，跑在画帧那条线程之外。
     board: task::Tasks,
+    /// 七条**面板边界**各自拖到哪儿了。存**工作目录**，不存中立库。
+    layout: layout::Layout,
+    /// 标题里那个库名。默认就是这份现场的名字；合成数据那一路另给一个
+    /// （[`Self::set_library_label`]），免得一屏假名字看着像真库。
+    library_label: String,
+    /// **观感基线与上次的版式装过了没有。** 只在开窗第一帧装一次。
+    prepared: bool,
+    /// 上一次写进窗口标题的是哪一屏。**换屏才发一条命令**，不是每帧发一条。
+    titled: Option<View>,
     closing: Closing,
 }
 
@@ -113,35 +130,69 @@ impl App {
     pub fn new(site: Site, workspace: PathBuf) -> Self {
         let mut queue = queue::Screen::new();
         queue.reload(&site);
-        let mut library = library::Screen::new(workspace.clone());
-        library.reload(&site);
+        let mut browse = browse::Screen::new(workspace.clone());
+        browse.reload(&site);
         // 优先级表与导出共用一份：面板上写着的显示标题就是同步到掌机上会看见的那个。
         if let Ok(priorities) = romcat_core::sync::prepare::priorities(None, &workspace) {
-            library.set_priorities(priorities);
+            browse.set_priorities(priorities);
         }
         // **媒体池不在就不指**：那时详情面板如实说「没查池子」，而不是报一句
         // 「一张都没有」——后者会把人赶去重跑刮削，而问题其实出在工作目录上。
         let pool_dir = romcat_core::workspace::media_pool_dir(&workspace);
-        library.set_pool(
+        browse.set_pool(
             pool_dir
                 .is_dir()
                 .then(|| romcat_core::scrape::pool::MediaPool::at(&pool_dir)),
         );
         let mut roots = roots::Screen::new(workspace.clone());
         roots.reload(&site);
+        // **版式先读出来**：面板尺寸要赶在开窗第一帧画面板之前塞进 egui 那张表里
+        // （[`layout::Layout::seed`]），晚一帧人就会看见面板从默认宽度跳一下。
+        let layout = layout::Layout::load(&workspace);
         let mut sublibrary = sublibrary::Screen::new(workspace);
         sublibrary.reload(&site);
+        let library_label = site.library.clone();
         Self {
             site,
             view: View::default(),
             queue,
             roots,
-            library,
+            browse,
             sublibrary,
             tasks: task::Screen::new(),
             board: task::Tasks::new(),
+            layout,
+            library_label,
+            prepared: false,
+            titled: None,
             closing: Closing::No,
         }
+    }
+
+    /// 换掉标题里那个库名。
+    ///
+    /// **合成数据那一路要它**：假数据与真库在界面上长得一模一样，标题是唯一一直看得见的
+    /// 区分处（`main.rs` 拿它写「合成数据（演示）」）。真库那一路不必调——默认就是
+    /// 这份现场自己的名字。
+    pub fn set_library_label(&mut self, label: impl Into<String>) {
+        self.library_label = label.into();
+        // 名字变了，标题得重发一次。
+        self.titled = None;
+    }
+
+    /// 窗口标题：**开的是哪一份库、看的是哪一屏**（验收第 6 条）。
+    ///
+    /// 两样都写进去，是因为它们各自回答一个只有标题答得了的问题：任务栏上并排两个
+    /// romcat 时「哪个是哪份库」，以及截图发出来时「这是哪一屏」。
+    #[must_use]
+    pub fn window_title(&self) -> String {
+        format!("romcat — {} — {}", self.library_label, self.view.label())
+    }
+
+    /// 七条面板边界各自拖到哪儿了。测试拿它核对「存在工作目录里」。
+    #[must_use]
+    pub fn layout(&self) -> &layout::Layout {
+        &self.layout
     }
 
     /// 关窗走到哪一拍了。测试拿它核对两拍的次序。
@@ -197,21 +248,21 @@ impl App {
 
     /// 浏览那一屏，供测试查「筛出多少行、点开的那一行是什么」。
     #[must_use]
-    pub fn library(&self) -> &library::Screen {
-        &self.library
+    pub fn browse(&self) -> &browse::Screen {
+        &self.browse
     }
 
     /// 浏览那一屏**连它的库**。改元数据这件事同时要它们俩。
-    pub fn library_and_site(&mut self) -> (&mut library::Screen, &mut Site) {
-        (&mut self.library, &mut self.site)
+    pub fn browse_and_site(&mut self) -> (&mut browse::Screen, &mut Site) {
+        (&mut self.browse, &mut self.site)
     }
 
     /// 浏览那一屏、它的库、**再加任务台**。按「刮削选中…」之后那一下三样都要：
     /// 展开这一批的键、算那本账、把活排到台上去（票 `gui-redesign/10`）。
-    pub fn library_site_and_tasks(
+    pub fn browse_site_and_tasks(
         &mut self,
-    ) -> (&mut library::Screen, &mut Site, &mut task::Tasks) {
-        (&mut self.library, &mut self.site, &mut self.board)
+    ) -> (&mut browse::Screen, &mut Site, &mut task::Tasks) {
+        (&mut self.browse, &mut self.site, &mut self.board)
     }
 
     /// 子库那一屏，供测试查「有几个子库、差量预览长什么样」。
@@ -255,8 +306,8 @@ impl App {
                 continue;
             }
             // **刮削跑完了要重读一遍**：这一屏画的元数据那几栏正是它刚写进去的。
-            if self.library.scrape_mut().settle(&done) {
-                self.library.refresh(&self.site);
+            if self.browse.scrape_mut().settle(&done) {
+                self.browse.refresh(&self.site);
                 continue;
             }
             self.sublibrary.settle(done);
@@ -285,15 +336,15 @@ impl App {
     /// 每帧一次。测试与实测拿它当那一下——**走的是界面上那条一模一样的路**。
     pub fn route(&mut self) {
         if let Some(jump) = self.sublibrary.take_jump() {
-            self.library
+            self.browse
                 .begin_editing(&self.site, &jump.sublibrary, jump.rule, jump.broken);
-            self.view = View::Variants;
+            self.view = View::Browse;
         }
         // **先丢账再换屏**：回程那一下也会留下记号，丢在前面，`open` 重读到的就是新的。
-        if let Some(name) = self.library.take_touched() {
+        if let Some(name) = self.browse.take_touched() {
             self.sublibrary.forget(&self.site, &name);
         }
-        if let Some(name) = self.library.take_return() {
+        if let Some(name) = self.browse.take_return() {
             self.sublibrary.reload(&self.site);
             self.sublibrary.open(&self.site, &name);
             self.view = View::Sublibraries;
@@ -303,11 +354,12 @@ impl App {
     /// 变体表背后那扇窗，供测试查「内存里装了几行」。
     #[must_use]
     pub fn window(&self) -> &crate::table::Window {
-        self.library.window()
+        self.browse.window()
     }
 
     /// 画一帧。`eframe` 与量帧率的那条路走的是同一个函数——量出来的才是这个界面的代价。
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        self.prepare(ui.ctx());
         self.handle_close(ui.ctx());
         // 任务台先问一遍：这一帧要画的进度、要交出去的产物都从这儿来。
         self.poll_tasks();
@@ -326,9 +378,9 @@ impl App {
                 let (roots, site, board) = (&mut self.roots, &mut self.site, &mut self.board);
                 roots.ui(ui, site, board);
             }
-            View::Variants => {
-                let (library, site, board) = (&mut self.library, &mut self.site, &mut self.board);
-                library.ui(ui, site, board);
+            View::Browse => {
+                let (browse, site, board) = (&mut self.browse, &mut self.site, &mut self.board);
+                browse.ui(ui, site, board);
             }
             View::Sublibraries => {
                 let (sublibrary, site, board) =
@@ -348,6 +400,38 @@ impl App {
         if self.board.busy() || self.board.settled() {
             ui.ctx().request_repaint();
         }
+        // **画完了才问面板有多宽**：这一帧的边界是刚才那几句 `show` 定下来的。
+        self.layout.harvest(ui.ctx());
+        // **手松开了才写盘**：拖的过程中每帧写一次是六十次写盘，而那六十次里有
+        // 五十九次的值只是路过。egui 那一侧也照这条办（拖的时候不存尺寸）。
+        if !ui.ctx().input(|input| input.pointer.any_down()) {
+            self.layout.flush();
+        }
+    }
+
+    /// 开窗第一帧装两样：**观感基线**与**上次拖到哪儿的版式**。
+    ///
+    /// 两样都只装一次。观感基线装两次没坏处但白花；版式装两次是真会坏事——人正拖着的
+    /// 那一下会被上一次存下的值按回去。
+    ///
+    /// 装在这儿而不在 `main.rs` 里，是因为**不开窗跑帧那一路也要它**：headless 的一帧
+    /// 走的就是这个函数，两处各装一遍迟早漏一处，而漏的那一处正是测试跑的那一路。
+    fn prepare(&mut self, ctx: &egui::Context) {
+        if self.prepared {
+            return;
+        }
+        self.prepared = true;
+        look::install(ctx);
+        self.layout.seed(ctx);
+    }
+
+    /// 换屏了就把窗口标题改掉。**换屏才发**，不是每帧发一条。
+    fn retitle(&mut self, ctx: &egui::Context) {
+        if self.titled == Some(self.view) {
+            return;
+        }
+        self.titled = Some(self.view);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
@@ -360,7 +444,15 @@ impl App {
                 };
                 ui.selectable_value(&mut self.view, view, label);
             }
+            // 屏名那一排刚画完，`self.view` 已经是这一帧要看的那一屏——标题跟着它改。
+            self.retitle(ui.ctx());
             ui.separator();
+            // **版式存不下来就说一句**：吞掉的话人只看见「拖了半天，下次全忘」，
+            // 而真正的病在工作目录上（写不动的工作目录还会连累中立库与沉淀库）。
+            if let Some(说的) = self.layout.error() {
+                ui.colored_label(ui.visuals().warn_fg_color, format!("版式存不下来：{说的}"));
+                ui.separator();
+            }
             match self.view {
                 View::Queue => {
                     let (queue, site) = (&mut self.queue, &self.site);
@@ -373,11 +465,11 @@ impl App {
                     let (roots, site) = (&mut self.roots, &self.site);
                     roots.status(ui, site);
                 }
-                View::Variants => {
+                View::Browse => {
                     // **抬头上那颗「★ 收藏」真的写库**（票 `gui-redesign/06`），
                     // 所以这一屏的抬头拿的是可变的那一份。
-                    let (library, site) = (&mut self.library, &mut self.site);
-                    library.status(ui, site);
+                    let (browse, site) = (&mut self.browse, &mut self.site);
+                    browse.status(ui, site);
                 }
                 View::Sublibraries => {
                     let (sublibrary, site) = (&mut self.sublibrary, &self.site);

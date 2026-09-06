@@ -786,10 +786,8 @@ impl Screen {
             // 后台在跑，主线程得继续画，不然「停下」按钮按不动。
             ui.ctx().request_repaint();
         }
-        egui::Panel::bottom("配目标")
-            .default_size(190.0)
-            .min_size(110.0)
-            .show(ui, |ui| self.form_ui(ui, site));
+        // 这条边界拖得动也记得住，声明在 [`crate::layout`]（票 `gui-redesign/12`）。
+        crate::layout::TARGET.show(ui, |ui| self.form_ui(ui, site));
         egui::CentralPanel::default().show(ui, |ui| self.cards_ui(ui, site, tasks));
     }
 
@@ -1014,6 +1012,18 @@ impl Screen {
                 ),
             );
         }
+        if !self.broken.is_empty() {
+            // **界面上没有删它的路，那就把有路的那条说出来**（挂单 `Q86`）。
+            // 筛选器摆的是一棵读得懂的树，一条读不回来的原文在那儿没有位置；
+            // 而「改选择」只换读得懂的那几条（不然一次改选择会悄悄清掉人还没来得及修的
+            // 东西）。于是这几条眼下只有命令行改得动——不说的话，人会一直找那颗删除键。
+            ui.weak(format!(
+                "读不懂的这 {} 条**界面上改不动**：按序号去命令行删\
+                 （`romcat sublibrary rule <子库> --remove <序号>`），\
+                 或者改对了再 `--add` 一条。",
+                self.broken.len(),
+            ));
+        }
         let (收入, 排除) = exception_tally(&self.exceptions);
         if self.exceptions.is_empty() {
             ui.weak("一条例外都没有。");
@@ -1196,11 +1206,14 @@ impl Screen {
                 };
                 if ui
                     .add(button)
-                    .on_hover_text(
+                    .on_hover_text(format!(
                         "只删中立库里的这条定义与它的规则、例外、清单；目标设备上的文件\
-                         一个都不碰。**要按两下**：例外是手挑的、永久记住的决定，\
+                         一个都不碰。**要按两下**：{} 条规则与 {} 条例外跟着一起没——\
+                         例外是手挑的、**永久记住**的决定（ADR-0016），\
                          规则也不在这一屏上重打得回来。",
-                    )
+                        self.rules.len() + self.broken.len(),
+                        self.exceptions.len(),
+                    ))
                     .clicked()
                 {
                     if 问过了 {

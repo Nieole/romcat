@@ -56,6 +56,8 @@ use romcat_core::triage::{
 };
 use romcat_core::verdict;
 
+use crate::layout;
+use crate::look;
 use crate::table::ROW_HEIGHT;
 use romcat_core::site::Site;
 
@@ -341,14 +343,9 @@ impl Screen {
                 egui::CentralPanel::default().show(ui, |ui| self.batches_ui(ui, site));
             }
             Mode::OneByOne => {
-                egui::Panel::bottom("裁决面板")
-                    .default_size(268.0)
-                    .min_size(120.0)
-                    .show(ui, |ui| self.decide_panel(ui, site));
-                egui::Panel::left("批量")
-                    .default_size(320.0)
-                    .min_size(180.0)
-                    .show(ui, |ui| self.batch_panel(ui));
+                // 两条边界拖得动也记得住，声明在 [`crate::layout`]（票 `gui-redesign/12`）。
+                layout::DECIDE.show(ui, |ui| self.decide_panel(ui, site));
+                layout::BATCHES.show(ui, |ui| self.batch_panel(ui));
                 egui::CentralPanel::default().show(ui, |ui| self.table(ui));
                 self.keyboard(ui.ctx(), site);
             }
@@ -460,7 +457,7 @@ impl Screen {
         // （[`tier_color`]、[`Tier::label`]），五屏对齐是票 `gui-redesign/12` 的活。
         for (tier, count) in self.queue.tiers() {
             ui.colored_label(
-                tier_color(*tier, ui.visuals()),
+                look::tier_color(*tier, ui.visuals()),
                 format!("{} {}", tier.label(), thousands(*count)),
             );
         }
@@ -546,12 +543,8 @@ impl Screen {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 // **置信度色条**：带置信度的行与卡，左边缘一条色带（规格 69）。
-                let (rect, _) = ui.allocate_exact_size(
-                    egui::vec2(3.0, ui.text_style_height(&egui::TextStyle::Body)),
-                    egui::Sense::hover(),
-                );
-                ui.painter()
-                    .rect_filled(rect, 1.0, tier_color(batch.tier(), ui.visuals()));
+                // 那个词摆在这一行的右头（底下 `tier_label` 那一句）——**色条从不单独出现**。
+                look::tier_bar(ui, batch.tier());
                 let title = egui::RichText::new(thousands(batch.count)).strong();
                 hit |= ui
                     .selectable_label(open, title)
@@ -559,10 +552,7 @@ impl Screen {
                     .clicked();
                 hit |= ui.selectable_label(open, batch.why()).clicked();
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.colored_label(
-                        tier_color(batch.tier(), ui.visuals()),
-                        batch.tier().label(),
-                    );
+                    look::tier_label(ui, batch.tier());
                 });
             });
             if open {
@@ -767,6 +757,8 @@ impl Screen {
         }
         let mut picked = None;
         let at = self.at;
+        // 行画完之后手上没有那一行的 `Ui` 了——先把上下文留一份，焦点那一圈要用。
+        let ctx = ui.ctx().clone();
         let mut builder = TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
@@ -774,14 +766,15 @@ impl Screen {
             .column(Column::initial(420.0).at_least(180.0).clip(true))
             .column(Column::initial(70.0).at_least(50.0).clip(true))
             .column(Column::initial(90.0).at_least(60.0).clip(true))
-            .column(Column::initial(60.0).at_least(50.0))
+            // 「候选」那一栏画的是「3 · 高置信」而不是光一个数——摆得下那个词才行。
+            .column(Column::initial(120.0).at_least(84.0).clip(true))
             .column(Column::remainder().at_least(90.0));
         if let Some(offset) = self.scroll_to {
             builder = builder.vertical_scroll_offset(offset);
         }
         builder
             .header(24.0, |mut header| {
-                for title in ["变体", "结论", "平台", "候选", "容量"] {
+                for title in ["变体", "结论", "平台", "候选 · 置信度", "容量"] {
                     header.col(|ui| {
                         ui.strong(title);
                     });
@@ -795,7 +788,10 @@ impl Screen {
                         return;
                     };
                     row.set_selected(at == index);
+                    // 焦点那一圈要夹在滚动视口里，而只有格子里头拿得到那个裁剪矩形。
+                    let mut 看得见的 = egui::Rect::NOTHING;
                     row.col(|ui| {
+                        看得见的 = ui.clip_rect();
                         ui.label(&item.variant.key);
                     });
                     row.col(|ui| {
@@ -808,15 +804,22 @@ impl Screen {
                         // 候选那一栏也上四档的色：一眼看得出哪一条稳。
                         // **哪一档由核心库说**（`Item::tier`）——「看第一条候选」那条规则
                         // 只该有一份，界面再写一遍迟早与分批的键指着不同的候选。
+                        //
+                        // **数字后面跟着那一档的词**：只染色的话，色觉障碍下这一栏就只剩
+                        // 一个孤零零的数（票 `gui-redesign/12` 验收第 5 条）。
                         ui.colored_label(
-                            tier_color(item.tier(), ui.visuals()),
-                            item.candidates.len().to_string(),
+                            look::tier_color(item.tier(), ui.visuals()),
+                            format!("{} · {}", item.candidates.len(), item.tier().label()),
                         );
                     });
                     row.col(|ui| {
                         ui.label(capacity(item.variant.bytes, item.variant.unreadable_files));
                     });
-                    if row.response().clicked() {
+                    // 焦点落在这一行上要看得见：行是点得中的，Tab 走得到它
+                    // （票 `gui-redesign/12` 验收第 7 条）。
+                    let response = row.response();
+                    look::focus_ring(&ctx, 看得见的, &response);
+                    if response.clicked() {
                         picked = Some((index, item.variant.key.clone()));
                     }
                 });
@@ -975,7 +978,7 @@ impl Screen {
                 );
             }
             for (index, (tier, line)) in candidates.iter().enumerate() {
-                let color = tier_color(*tier, ui.visuals());
+                let color = look::tier_color(*tier, ui.visuals());
                 if index == nth {
                     ui.colored_label(color, egui::RichText::new(line).strong());
                 } else {
@@ -1461,20 +1464,6 @@ struct Opened {
     samples: Vec<Sample>,
 }
 
-/// **置信度四档**画成什么颜色。
-///
-/// 四档各一个色，含义与 [`Tier::label`] 一一对应。**颜色从 `Visuals` 里取**而不是写死：
-/// 亮色与暗色主题下同一串 RGB 不是同一个可读性。**把五屏对齐到这一份上是票
-/// `gui-redesign/12` 的活**，这一票只管自己这一屏四档不串。
-fn tier_color(tier: Tier, visuals: &egui::Visuals) -> egui::Color32 {
-    match tier {
-        Tier::High => visuals.selection.bg_fill,
-        Tier::Medium => visuals.warn_fg_color,
-        Tier::Low => visuals.error_fg_color,
-        Tier::Unidentified => visuals.weak_text_color(),
-    }
-}
-
 /// 屏底那句「前几批盖住多少」。
 ///
 /// 这句话是这一屏存在的理由本身：18,241 条按 5 秒一条是 25 小时，而**前几批就能清掉
@@ -1866,7 +1855,7 @@ mod tests {
         let visuals = egui::Visuals::dark();
         let 颜色: Vec<egui::Color32> = Tier::ALL
             .into_iter()
-            .map(|tier| tier_color(tier, &visuals))
+            .map(|tier| look::tier_color(tier, &visuals))
             .collect();
         for (at, one) in 颜色.iter().enumerate() {
             for (other_at, other) in 颜色.iter().enumerate() {

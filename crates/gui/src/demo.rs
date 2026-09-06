@@ -570,7 +570,7 @@ pub fn site(catalog: Catalog) -> Result<Site, String> {
     let store = Store::in_memory().map_err(|error| format!("开不出沉淀库：{error}"))?;
     let mut site = Site::in_memory(catalog, store, LIBRARY);
     // **合集要落进沉淀库，不能只摆在中立库的投影上**（票 `gui-redesign/06`）。
-    // 造数据那一步（[`library`]）图省事直接写了投影——那样筛选栏那一维有得选，
+    // 造数据那一步（[`browse`]）图省事直接写了投影——那样筛选栏那一维有得选，
     // 可详情面板上那块「收藏与合集」是**现问沉淀库**的，于是同一个变体在左栏算它
     // 在「我通关过的」里、右栏却写「一个都没进」。**这一屏正是这一票要给人看的东西。**
     //
@@ -593,7 +593,7 @@ pub fn site(catalog: Catalog) -> Result<Site, String> {
     Ok(site)
 }
 
-// ── 库浏览与子库那两屏的合成数据 ────────────────────────────────────────────
+// ── 浏览与子库那两屏的合成数据 ────────────────────────────────────────────
 
 /// 合成数据里的**合集**。与平台正交（ADR-0011）：「我通关过的」是合集，「SFC」是平台。
 const COLLECTIONS: &[(&str, u64)] = &[
@@ -616,7 +616,7 @@ const REGIONS: &[(&str, &str)] = &[
     ("Asia", "Ja,Zh-Hant,En"),
 ];
 
-/// 一份**库浏览**与**子库**用的中立库：`rows` 个变体，连作品、发行版、合集、
+/// 一份**浏览**与**子库**用的中立库：`rows` 个变体，连作品、发行版、合集、
 /// 识别结论、**标题集合**与**媒体**引用，而且每个变体真的有一个**文件成员**。
 ///
 /// [`synthetic`] 只造变体（那一份是给十万行表格量帧率的）。这一份多造五样，因为票 25
@@ -630,7 +630,7 @@ const REGIONS: &[(&str, &str)] = &[
 /// # Errors
 /// 建库或写库失败时返回错误。
 #[allow(clippy::too_many_lines)]
-pub fn library(rows: u64) -> Result<Catalog, CatalogError> {
+pub fn browse(rows: u64) -> Result<Catalog, CatalogError> {
     use romcat_core::catalog::identify::Provenance;
     use romcat_core::catalog::scrape::{Harvested, HarvestedMedia, HarvestedValue};
     use romcat_core::catalog::title::TitleRow;

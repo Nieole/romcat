@@ -78,7 +78,7 @@
 use rusqlite::{ToSql, params_from_iter};
 
 use super::content::{VARIANT_COLUMNS, VariantRow, read_variant_row};
-use super::identify::{Candidate, Confidence, State};
+use super::identify::{Candidate, Confidence, State, Tier};
 use super::{Catalog, CatalogError};
 use crate::scrape::{AnchorKind, Field};
 use crate::sublibrary::{Clause, Dimension, Group, Join, Node, Op, Rule};
@@ -762,14 +762,19 @@ impl WorkRow {
     }
 
     /// 置信度那一栏画成什么。**「还没识别」是独立的一档**（ADR-0002）。
+    ///
+    /// **词一个字都不自己写**，全走 [`Tier::label`]（票 `gui-redesign/12`）：这一栏从前
+    /// 印的是「高 / 中 / 低」，而待确认屏印的是「高置信 / 中置信 / 低置信」——同一件事
+    /// 在两屏上是两个词，用户会以为那是两回事。
     #[must_use]
     pub fn confidence_label(&self) -> &'static str {
-        match self.confidence {
-            Some(Confidence::High) => "高",
-            Some(Confidence::Medium) => "中",
-            Some(Confidence::Low) => "低",
-            None => "还没识别",
-        }
+        Tier::of(self.confidence).label()
+    }
+
+    /// 这一行落在**置信度四档**的哪一档。屏上要上色的地方拿它，不自己 `match`。
+    #[must_use]
+    pub fn tier(&self) -> Tier {
+        Tier::of(self.confidence)
     }
 }
 

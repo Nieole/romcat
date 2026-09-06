@@ -13,11 +13,20 @@ use romcat_gui::bench::{self, Sweep};
 use romcat_gui::demo;
 use romcat_gui::table::SPAN;
 
+/// 这几条测试自己的**工作目录**。
+///
+/// **不共用 `demo::workspace()`**：那是 `--demo` 那个演示窗口用的目录，而窗口会往里写
+/// **版式偏好**（面板拖到哪儿）。共用的话，维护者开一次演示窗口把某块面板拖高一截，
+/// 下一次跑这几条测试屏上就少了几行——而断言数的正好是行数。
+fn 工作目录() -> std::path::PathBuf {
+    std::env::temp_dir().join("romcat-测试-表格")
+}
+
 fn 界面(rows: u64) -> App {
     let site = demo::site(demo::synthetic(rows).expect("造得出合成数据")).expect("开得出现场");
-    let mut app = App::new(site, demo::workspace());
+    let mut app = App::new(site, 工作目录());
     // 这几条量的是**变体表**；打开工具看见的那一屏是待确认队列（ADR-0002）。
-    app.show_view(View::Variants);
+    app.show_view(View::Browse);
     app
 }
 

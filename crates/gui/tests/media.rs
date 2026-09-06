@@ -27,6 +27,15 @@ use romcat_gui::{demo, headless};
 /// 合成数据的规模。这几条测的是媒体那一块，不必照真库那四万多行来。
 const ROWS: u64 = 2_000;
 
+/// 这几条测试自己的**工作目录**。
+///
+/// **不共用 `demo::workspace()`**：那是 `--demo` 那个演示窗口用的目录，而窗口会往里写
+/// **版式偏好**（面板拖到哪儿）。共用的话，维护者开一次演示窗口把某块面板拖高一截，
+/// 下一次跑这几条测试屏上就少了几行——而断言数的正好是行数。
+fn 工作目录() -> std::path::PathBuf {
+    std::env::temp_dir().join("romcat-测试-媒体")
+}
+
 /// 一张纯色 PNG 的字节。3:4 是详情面板里封面那一格的比例。
 fn png(width: u32, height: u32) -> Vec<u8> {
     let buf = image::RgbImage::from_pixel(width, height, image::Rgb([30, 90, 160]));
@@ -55,13 +64,13 @@ struct 现场 {
 
 /// 一份**带真媒体池**的现场：池里一张真 png、一份假 mp4，中立库上挂好引用。
 ///
-/// 合成数据自己那几条媒体引用**池里没有对应文件**（`demo::library` 只记库不落盘），
+/// 合成数据自己那几条媒体引用**池里没有对应文件**（`demo::browse` 只记库不落盘），
 /// 那是有意的——它撑的是「缺哪些媒体」那条验收。这里另加两条真的。
 fn 现场(tag: &str) -> 现场 {
     let dir = temp_dir(tag);
     let pool = MediaPool::open(&romcat_core::workspace::media_pool_dir(dir.path()))
         .expect("开得出媒体池");
-    let mut catalog = demo::library(ROWS).expect("造得出合成数据");
+    let mut catalog = demo::browse(ROWS).expect("造得出合成数据");
 
     // 挂在**作品锚点**上：封面本来就锚在作品这一层（ADR-0009），而详情面板把作品锚点
     // 与变体锚点合起来看——于是点开这一行的任何一个变体，这张封面都在。
@@ -99,12 +108,12 @@ fn 现场(tag: &str) -> 现场 {
 
     let site = demo::site(catalog).expect("开得出现场");
     let mut app = App::new(site, dir.path().to_path_buf());
-    app.show_view(View::Variants);
+    app.show_view(View::Browse);
     // 点开那一行——**这一下顺带选中它底下第一个变体**，于是详情面板三层都有东西摆，
     // 媒体那几格才真的画得到（`Gallery::cell`）。
     {
-        let (library, site) = app.library_and_site();
-        library.open_work(&site.catalog, &一行.anchor);
+        let (browse, site) = app.browse_and_site();
+        browse.open_work(&site.catalog, &一行.anchor);
     }
     现场 {
         目录: dir.path().to_path_buf(),
@@ -136,7 +145,7 @@ fn 等图(ctx: &egui::Context, app: &mut App, 最多: Duration) {
     let 截止 = Instant::now() + 最多;
     loop {
         跑(ctx, app, 1);
-        if app.library().gallery().busy() == 0 || Instant::now() >= 截止 {
+        if app.browse().gallery().busy() == 0 || Instant::now() >= 截止 {
             return;
         }
         std::thread::sleep(Duration::from_millis(2));
@@ -145,7 +154,7 @@ fn 等图(ctx: &egui::Context, app: &mut App, 最多: Duration) {
 
 /// 详情里那条封面。
 fn 封面条(app: &App, hash: &str) -> romcat_core::catalog::detail::MediaItem {
-    app.library()
+    app.browse()
         .detail()
         .expect("点开得了")
         .media_items
@@ -163,7 +172,7 @@ fn 封面在详情面板里画得出来而且纵横比一个像素都不歪() {
     等图(&ctx, &mut 场.app, Duration::from_secs(20));
 
     let item = 封面条(&场.app, &场.封面);
-    let look = 场.app.library().gallery().look(&item);
+    let look = 场.app.browse().gallery().look(&item);
     let Look::Ready(texture) = look else {
         panic!("封面该画得出来，实际是 {look:?}");
     };
@@ -172,11 +181,11 @@ fn 封面在详情面板里画得出来而且纵横比一个像素都不歪() {
         (size.x / size.y - 0.75).abs() < 0.01,
         "原图是 3:4，传上去的这张成了 {size:?}",
     );
-    assert!(场.app.library().gallery().ready() >= 1);
+    assert!(场.app.browse().gallery().ready() >= 1);
     assert!(
-        场.app.library().gallery().error().is_none(),
+        场.app.browse().gallery().error().is_none(),
         "不该出错：{:?}",
-        场.app.library().gallery().error(),
+        场.app.browse().gallery().error(),
     );
 }
 
@@ -187,37 +196,37 @@ fn ffmpeg不在时视频那一格是占位而不是报错() {
     let ctx = headless::context();
     let mut 场 = 现场("gui-媒体-没有ffmpeg");
     场.app
-        .library_and_site()
+        .browse_and_site()
         .0
         .gallery_mut()
         .set_program(preview::NO_SUCH_PROGRAM);
     等图(&ctx, &mut 场.app, Duration::from_secs(20));
 
-    let detail = 场.app.library().detail().expect("点开得了");
+    let detail = 场.app.browse().detail().expect("点开得了");
     let 视频 = detail
         .media_items
         .iter()
         .find(|item| item.kind == MediaKind::Video)
         .expect("那条视频该列出来");
-    let look = 场.app.library().gallery().look(视频);
+    let look = 场.app.browse().gallery().look(视频);
     let Look::Missing(why) = look else {
         panic!("没有 ffmpeg 就该是占位，实际是 {look:?}");
     };
     assert!(why.is_no_ffmpeg(), "该说的是「没这个程序」，实际是 {why:?}");
     assert!(
-        场.app.library().gallery().lacks_ffmpeg(),
+        场.app.browse().gallery().lacks_ffmpeg(),
         "面板该说得出这台机器上没有 ffmpeg",
     );
     // **不是错误**：一台没装 ffmpeg 的机器上这个窗口照常可用。
-    assert!(场.app.library().gallery().error().is_none());
+    assert!(场.app.browse().gallery().error().is_none());
     // 而封面照旧画得出来——一格没有图，不该把整块拖下水。
     assert!(matches!(
-        场.app.library().gallery().look(&封面条(&场.app, &场.封面)),
+        场.app.browse().gallery().look(&封面条(&场.app, &场.封面)),
         Look::Ready(_)
     ));
     // 再跑几帧，确认它不会因为「没有 ffmpeg」每帧重试一次。
     跑(&ctx, &mut 场.app, 3);
-    assert_eq!(场.app.library().gallery().busy(), 0, "不该反复重排");
+    assert_eq!(场.app.browse().gallery().busy(), 0, "不该反复重排");
 }
 
 #[test]
@@ -231,30 +240,30 @@ fn 切换选中那一帧不解码() {
     let 头一帧 = 起.elapsed();
 
     assert_eq!(
-        场.app.library().gallery().ready(),
+        场.app.browse().gallery().ready(),
         0,
         "头一帧就把图解出来了，那说明解码在画帧这条线程上",
     );
-    assert!(场.app.library().gallery().busy() > 0, "该有活排出去了");
+    assert!(场.app.browse().gallery().busy() > 0, "该有活排出去了");
     assert!(
         头一帧 < Duration::from_secs(1),
         "头一帧花了 {头一帧:?}，翻行会看得出来",
     );
 
     等图(&ctx, &mut 场.app, Duration::from_secs(20));
-    assert!(场.app.library().gallery().ready() >= 1, "后来该解出来");
+    assert!(场.app.browse().gallery().ready() >= 1, "后来该解出来");
 }
 
 #[test]
 fn 媒体池不在位时如实说没查而不是说没有() {
     // 与 ADR-0021 同一条规矩：「没查」与「查了、没有」是两件事。
-    // 合成数据那份工作目录**故意不存在**，走的正是这条路。
+    // 这一趟的工作目录**故意不存在**（里头没有 `media/`），走的正是这条路。
     let ctx = headless::context();
-    let site = demo::site(demo::library(ROWS).expect("造得出合成数据")).expect("开得出现场");
-    let mut app = App::new(site, demo::workspace());
-    app.show_view(View::Variants);
+    let site = demo::site(demo::browse(ROWS).expect("造得出合成数据")).expect("开得出现场");
+    let mut app = App::new(site, 工作目录());
+    app.show_view(View::Browse);
     {
-        let (library, site) = app.library_and_site();
+        let (browse, site) = app.browse_and_site();
         let 一行 = site
             .catalog
             .work_page(&WorkQuery::default(), 0, 1)
@@ -262,16 +271,16 @@ fn 媒体池不在位时如实说没查而不是说没有() {
             .into_iter()
             .next()
             .expect("总该有一行");
-        library.open_work(&site.catalog, &一行.anchor);
+        browse.open_work(&site.catalog, &一行.anchor);
     }
     跑(&ctx, &mut app, 2);
 
-    assert!(!app.library().gallery().has_pool(), "这一趟本来就没指池子");
-    for item in &app.library().detail().expect("点开得了").media_items {
+    assert!(!app.browse().gallery().has_pool(), "这一趟本来就没指池子");
+    for item in &app.browse().detail().expect("点开得了").media_items {
         assert!(
-            matches!(app.library().gallery().look(item), Look::NoPool),
+            matches!(app.browse().gallery().look(item), Look::NoPool),
             "没指池子时该说「没查」，实际是 {:?}",
-            app.library().gallery().look(item),
+            app.browse().gallery().look(item),
         );
     }
 }
@@ -285,16 +294,16 @@ fn 一屏媒体都画完之后别的屏照常切得动() {
     跑(&ctx, &mut 场.app, 1);
     场.app.show_view(View::Queue);
     跑(&ctx, &mut 场.app, 2);
-    场.app.show_view(View::Variants);
+    场.app.show_view(View::Browse);
     等图(&ctx, &mut 场.app, Duration::from_secs(20));
 
     assert_eq!(
-        场.app.library().work().expect("还开着").anchor,
+        场.app.browse().work().expect("还开着").anchor,
         场.anchor,
         "切出去再切回来，点开的还是那一行",
     );
     assert!(matches!(
-        场.app.library().gallery().look(&封面条(&场.app, &场.封面)),
+        场.app.browse().gallery().look(&封面条(&场.app, &场.封面)),
         Look::Ready(_)
     ));
 }
@@ -309,29 +318,29 @@ fn 抽过的首帧第二次打开一个进程都不拉() {
     let ctx = headless::context();
     let mut 场 = 现场("gui-媒体-不重抽");
     let 首帧 = {
-        let (_, site) = 场.app.library_and_site();
+        let (_, site) = 场.app.browse_and_site();
         入池(&场.pool, &mut site.catalog, &png(640, 480), "png")
     };
     {
-        let (_, site) = 场.app.library_and_site();
+        let (_, site) = 场.app.browse_and_site();
         site.catalog
             .put_media_frame(&场.片子, &首帧)
             .expect("记得进库");
     }
     场.app
-        .library_and_site()
+        .browse_and_site()
         .0
         .gallery_mut()
         .set_program(preview::NO_SUCH_PROGRAM);
     等图(&ctx, &mut 场.app, Duration::from_secs(20));
 
-    let detail = 场.app.library().detail().expect("点开得了");
+    let detail = 场.app.browse().detail().expect("点开得了");
     let 视频 = detail
         .media_items
         .iter()
         .find(|item| item.hash == 场.片子)
         .expect("那条视频该列出来");
-    let look = 场.app.library().gallery().look(视频);
+    let look = 场.app.browse().gallery().look(视频);
     let Look::Ready(texture) = look else {
         panic!("记过首帧就该直接画得出来，实际是 {look:?}");
     };
@@ -341,7 +350,7 @@ fn 抽过的首帧第二次打开一个进程都不拉() {
         "画出来的该是那一帧，实际 {size:?}",
     );
     // 一格都没拉进程，因此「这台机器没 ffmpeg」那句提示也不该冒出来。
-    assert!(!场.app.library().gallery().lacks_ffmpeg());
+    assert!(!场.app.browse().gallery().lacks_ffmpeg());
 }
 
 #[test]
@@ -351,14 +360,14 @@ fn 没解出来的那几件面板上说得清是哪一件为什么() {
     let ctx = headless::context();
     let mut 场 = 现场("gui-媒体-说得清");
     场.app
-        .library_and_site()
+        .browse_and_site()
         .0
         .gallery_mut()
         .set_program(preview::NO_SUCH_PROGRAM);
     等图(&ctx, &mut 场.app, Duration::from_secs(20));
 
-    let items = 场.app.library().detail().expect("点开得了").media_items.clone();
-    let 说的 = 场.app.library().gallery().troubles(&items);
+    let items = 场.app.browse().detail().expect("点开得了").media_items.clone();
+    let 说的 = 场.app.browse().gallery().troubles(&items);
     assert!(!说的.is_empty(), "合成数据那几条池里都没有文件，该说得出来");
     for (是哪一件, 为什么) in &说的 {
         assert!(!是哪一件.is_empty(), "得说清是哪一件");
@@ -370,7 +379,7 @@ fn 没解出来的那几件面板上说得清是哪一件为什么() {
         !说的.iter().any(|(_, 为什么)| 为什么.contains(preview::NO_SUCH_PROGRAM)),
         "没装 ffmpeg 那一档不该逐件重复：{说的:?}",
     );
-    assert!(场.app.library().gallery().lacks_ffmpeg(), "它该由那一句单说");
+    assert!(场.app.browse().gallery().lacks_ffmpeg(), "它该由那一句单说");
     // 而真摆进池里的那张封面不该出现在这张单子上——它好好的。
     assert!(
         !说的.iter().any(|(是哪一件, _)| 是哪一件.starts_with("封面 · 测试")),
@@ -386,22 +395,22 @@ fn 没选中变体时后台跑完的那几件照样收得回来() {
     let ctx = headless::context();
     let mut 场 = 现场("gui-媒体-没选中也收账");
     跑(&ctx, &mut 场.app, 1);
-    assert!(场.app.library().gallery().busy() > 0, "该有活排出去了");
+    assert!(场.app.browse().gallery().busy() > 0, "该有活排出去了");
 
     // 把选中的那个变体撤掉：详情面板整块没得画了。
     {
-        let (library, site) = 场.app.library_and_site();
-        library.pick(&site.catalog, "这个键谁也不是");
+        let (browse, site) = 场.app.browse_and_site();
+        browse.pick(&site.catalog, "这个键谁也不是");
     }
-    assert!(场.app.library().detail().is_none(), "该没得画了");
+    assert!(场.app.browse().detail().is_none(), "该没得画了");
 
     等图(&ctx, &mut 场.app, Duration::from_secs(20));
     assert_eq!(
-        场.app.library().gallery().busy(),
+        场.app.browse().gallery().busy(),
         0,
         "没选中变体时收账那一步没跑，后台那几件永远挂着",
     );
-    assert_eq!(场.app.library().gallery().pending(), 0, "没有首帧欠着记库");
+    assert_eq!(场.app.browse().gallery().pending(), 0, "没有首帧欠着记库");
 }
 
 /// 一个**冒充 ffmpeg 的脚本**：不管收到什么参数，都把这份 PNG 原样吐到标准输出。
@@ -435,7 +444,7 @@ fn 任务在跑时首帧先攒着不去跟别人抢写锁() {
     std::fs::write(&样张, png(320, 240)).expect("写得出样张");
     let 程序 = 假ffmpeg(&场.目录, &样张);
     场.app
-        .library_and_site()
+        .browse_and_site()
         .0
         .gallery_mut()
         .set_program(程序.to_string_lossy().as_ref());
@@ -445,7 +454,7 @@ fn 任务在跑时首帧先攒着不去跟别人抢写锁() {
     let 放行 = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
         let 它 = std::sync::Arc::clone(&放行);
-        let (_, _, tasks) = 场.app.library_site_and_tasks();
+        let (_, _, tasks) = 场.app.browse_site_and_tasks();
         tasks.queue("占着台子", move |_| {
             while !它.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(5));
@@ -457,11 +466,11 @@ fn 任务在跑时首帧先攒着不去跟别人抢写锁() {
     // 跑到首帧抽完（后台那条解码线程不受任务台影响）。
     等图(&ctx, &mut 场.app, Duration::from_secs(20));
     assert!(
-        场.app.library().gallery().pending() > 0,
+        场.app.browse().gallery().pending() > 0,
         "任务在跑时该先攒着，而不是去跟它抢写锁",
     );
     {
-        let (_, site) = 场.app.library_and_site();
+        let (_, site) = 场.app.browse_and_site();
         assert_eq!(
             site.catalog.media_frame(&场.片子).expect("读得出"),
             None,
@@ -472,13 +481,13 @@ fn 任务在跑时首帧先攒着不去跟别人抢写锁() {
     // 放它走，再跑几帧——这时候才记进去。
     放行.store(true, std::sync::atomic::Ordering::Relaxed);
     let 截止 = Instant::now() + Duration::from_secs(20);
-    while 场.app.library().gallery().pending() > 0 && Instant::now() < 截止 {
+    while 场.app.browse().gallery().pending() > 0 && Instant::now() < 截止 {
         跑(&ctx, &mut 场.app, 1);
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(场.app.library().gallery().pending(), 0, "该记进去了");
-    assert!(场.app.library().gallery().error().is_none());
-    let (_, site) = 场.app.library_and_site();
+    assert_eq!(场.app.browse().gallery().pending(), 0, "该记进去了");
+    assert!(场.app.browse().gallery().error().is_none());
+    let (_, site) = 场.app.browse_and_site();
     let 记着的 = site.catalog.media_frame(&场.片子).expect("读得出");
     assert!(记着的.is_some(), "首帧该记进中立库了");
     // 而池里那一份也在——落盘那一半后台早做完了（ADR-0009）。

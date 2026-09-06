@@ -349,8 +349,12 @@ impl Confidence {
 /// 而实情是工具**一个字都没说**。
 ///
 /// 收在核心库里而不是各屏各写一份：五屏都要标这四档，含义漂开一点点，用户就再也
-/// 认不出颜色的意思。**把五屏都换到这一份上是票 `gui-redesign/12` 的活**，
-/// 眼下用它的是待确认屏。
+/// 认不出颜色的意思。**票 `gui-redesign/12` 把界面那一侧全换到了这一份上**——
+/// 那个词只有 [`Tier::label`] 一处写（[`super::browse::WorkRow::confidence_label`] 也转发给它），
+/// 那个颜色只有 `romcat_gui::look::tier_color` 一处写。
+///
+/// 五屏里真会标置信度的是**浏览**与**待确认**两屏：库屏摆的是根与数据源、子库屏摆的是
+/// 设备与差量、任务屏摆的是队列与历史，那三屏上没有一个变体级的结论可标。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Tier {
     /// **高置信**：精确哈希命中。

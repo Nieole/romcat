@@ -75,7 +75,8 @@ use egui::{Align, Layout};
 use romcat_core::catalog::browse::{
     Facets, PlatformFilter, Scope, WorkAnchor, WorkDetail, WorkQuery, WorkVariant,
 };
-use romcat_core::catalog::{Catalog, Confidence, VariantDetail};
+use romcat_core::catalog::identify::Tier;
+use romcat_core::catalog::{Catalog, VariantDetail};
 use romcat_core::collection::{self, Applied, FAVORITE};
 use romcat_core::report::{capacity, human_bytes, thousands};
 use romcat_core::scrape::pool::MediaPool;
@@ -86,6 +87,8 @@ use romcat_core::sublibrary::{Dimension, Exception, ExceptionRow, Rule, Sublibra
 use romcat_core::title::{Language, TitleKind};
 
 use crate::filter::Filter;
+use crate::layout;
+use crate::look;
 use crate::font;
 use crate::media::Gallery;
 use crate::scrape;
@@ -910,7 +913,9 @@ impl Screen {
             .on_hover_text(
                 "把勾中的那一批全放进**收藏**。落**沉淀库**、锚在**内容**上——\
                  删掉中立库重扫、改名、挪目录都还在。**无判据**的那些只钉得住本机路径，\
-                 按完的回执里会点名说有几个。",
+                 按完的回执里会点名说有几个。\n\n\
+                 **取消收藏**与自建合集在左栏底下那块「收藏与合集」里：\
+                 加收藏按得最勤，所以只有它在抬头（挂单 Q117）。",
             )
             .clicked()
         {
@@ -1161,28 +1166,18 @@ impl Screen {
         // **任务台上有活在跑就先不写库**：那时后台正拿着另一份写得动的连接（扫描），
         // 这条线程上的写会在 `busy_timeout` 上等最长十秒——那是画帧线程的十秒。
         self.sync_media(ui.ctx(), site, !tasks.busy());
+        // **四条边界都拖得动，四条都记得住**：怎么拖、拖到哪儿为止、拖到哪儿记在哪儿，
+        // 全在 [`crate::layout`] 那一份声明里（票 `gui-redesign/12`）。
         if self.scrape.is_open() {
-            egui::Panel::bottom("刮削面板")
-                .default_size(300.0)
-                .min_size(160.0)
-                .show(ui, |ui| {
-                    egui::ScrollArea::vertical()
-                        .id_salt("刮削面板")
-                        .show(ui, |ui| self.scrape.ui(ui, site, tasks));
-                });
+            layout::SCRAPE.show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("刮削面板")
+                    .show(ui, |ui| self.scrape.ui(ui, site, tasks));
+            });
         }
-        egui::Panel::bottom("浏览编辑")
-            .default_size(260.0)
-            .min_size(110.0)
-            .show(ui, |ui| self.edit_panel(ui, site));
-        egui::Panel::left("筛选")
-            .default_size(230.0)
-            .min_size(150.0)
-            .show(ui, |ui| self.filter_panel(ui, site));
-        egui::Panel::right("浏览详情")
-            .default_size(360.0)
-            .min_size(200.0)
-            .show(ui, |ui| self.detail_panel(ui, site));
+        layout::EDIT.show(ui, |ui| self.edit_panel(ui, site));
+        layout::FILTER.show(ui, |ui| self.filter_panel(ui, site));
+        layout::DETAIL.show(ui, |ui| self.detail_panel(ui, site));
         egui::CentralPanel::default().show(ui, |ui| {
             if self.sample {
                 self.font_sample(ui);
@@ -1240,6 +1235,19 @@ impl Screen {
                     );
                 ui.separator();
 
+                // **两半各管一段，屏上说清**（挂单 `Q73`）：上半那五个档，条件组里
+                // 大多也写得出来（`平台=GB`……），两套并存看着像同一件事有两个地方点。
+                // 留着两套是因为它们回答的不是同一个问题——上半**各自带着条数**
+                // （`Catalog::facets` 一次 `GROUP BY` 问出来的），那是用来**摸清库里有
+                // 什么**的；条件组里的值要打出来，那是用来**说清楚要哪一批**的。
+                // 没有条数的下拉框，人只能一个个点开试。
+                ui.strong("一按就有的档").on_hover_text(
+                    "**探索用的那一半**：五个维度各带着条数，点一下就收窄一层，\
+                     不必先知道值长什么样。「识别状态」这一维只在这儿有，\
+                     条件组里写不出来。",
+                );
+                ui.weak("各带着条数——点一下就知道库里有多少。");
+
                 platform_picker(ui, &self.facets.platforms, &mut self.query.platform);
                 ui.separator();
                 facet_picker(
@@ -1284,11 +1292,14 @@ impl Screen {
                 self.query.state = state;
                 ui.separator();
 
-                ui.strong("筛选器")
+                ui.strong("条件组")
                     .on_hover_text(
-                        "可嵌套的**条件组**：每组选「全部满足 / 任一满足 / 都不满足」，\
-                         组里还能再套组。**这就是子库的规则**。",
+                        "**表达用的那一半**：可嵌套的条件组，每组选「全部满足 / 任一满足 /\
+                         都不满足」，组里还能再套组，九个运算符。**这就是子库的规则**——\
+                         上头那五个档存成子库时也会折进同一条规则里\
+                         （「识别状态」那一维折不进去，挂单 Q70）。",
                     );
+                ui.weak("值要自己打——说得清楚，也存得成子库的规则。");
                 if self.filter.ui(ui) {
                     // 条件组一改就是换了一批行——同步进查询，`sync_window` 那一趟
                     // 会把窗口作废重取，选中也跟着清掉。
@@ -1323,7 +1334,12 @@ impl Screen {
     ///
     /// **加收藏那一下不在这儿，在抬头**（原型钉的位置）：它按得最勤，不该藏在左栏底下。
     fn collection_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
-        ui.strong("收藏与合集");
+        ui.strong("收藏与合集")
+            .on_hover_text(
+                "**加收藏那一下在抬头**（「★ 收藏」），因为它按得最勤：\
+                 勾一批、按一下、接着筛下一批。这儿是它的另一半——取消，\
+                 以及自己起名的合集（挂单 Q117）。",
+            );
         ui.weak("作用范围是**勾中的那一批**（不是筛出来的全部）。落沉淀库，删掉中立库重扫也不丢。")
             .on_hover_text(
                 "收藏走的就是合集那套成员关系——收藏是名字定死的那一组，\
@@ -1655,20 +1671,27 @@ impl Screen {
     }
 
     /// 详情面板里的一个变体：置信度、**依据**、点得中。点中了返回 `true`。
+    ///
+    /// **置信度那一档走五屏共用的那一份**（[`crate::look`]，票 `gui-redesign/12`）：
+    /// 从前这儿手写「高 / 中 / 低」，而中间那张表与待确认屏写的是「高置信 / 中置信 /
+    /// 低置信」——同一个变体在两处是两个词。眼下色条与词都出自一处，
+    /// 而且**两样一起出现**：色觉障碍下读得出来的只有词。
     fn variant_row(&self, ui: &mut egui::Ui, variant: &WorkVariant) -> bool {
         let on = self.variant.as_deref() == Some(variant.row.key.as_str());
-        let confidence = match variant.confidence() {
-            Some(Confidence::High) => "高",
-            Some(Confidence::Medium) => "中",
-            Some(Confidence::Low) => "低",
-            None => "还没识别",
-        };
+        let tier = Tier::of(variant.confidence());
         let line = format!(
-            "{confidence}｜{}｜{}",
+            "{}｜{}｜{}",
+            tier.label(),
             variant.row.key,
             capacity(variant.row.bytes, variant.row.unreadable_files),
         );
-        let response = ui.selectable_label(on, line);
+        // 色条与那一行摆在同一条横排里：条在左边缘，与主列表、待确认屏的卡一个样子。
+        let response = ui
+            .horizontal(|ui| {
+                look::tier_bar(ui, tier);
+                ui.selectable_label(on, line)
+            })
+            .inner;
         // **依据挂在悬停里**：没有依据的候选事后无法复核（ADR-0002），
         // 而一条依据能有一整句话，摆在行上会把这一栏撑开。
         let response = response.on_hover_ui(|ui| {
@@ -1773,10 +1796,13 @@ impl Screen {
         let detail = self.detail.as_ref()?;
         ui.strong(format!("媒体 · {} 件", detail.media_items.len()));
         // **几格图**：一行摆得下几格摆几格，照原型 `prototype.html` 那张 `.thumbs` 网格。
+        // 格子的大小跟着这块面板的宽度走（[`crate::media::cell_size`]，挂单 `Q126`）——
+        // 拖宽了就每格大一点，而不是右边空出一条。
+        let size = crate::media::cell_size(ui.available_width(), ui.spacing().item_spacing.x);
         let mut open = None;
         ui.horizontal_wrapped(|ui| {
             for item in &detail.media_items {
-                if let Some(点的) = self.gallery.cell(ui, item) {
+                if let Some(点的) = self.gallery.cell(ui, item, size) {
                     open = Some(点的);
                 }
             }

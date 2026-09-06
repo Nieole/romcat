@@ -16,11 +16,20 @@ use romcat_core::task::Ending;
 use romcat_gui::app::{App, View};
 use romcat_gui::{demo, headless};
 
+/// 这几条测试自己的**工作目录**。
+///
+/// **不共用 `demo::workspace()`**：那是 `--demo` 那个演示窗口用的目录，而窗口会往里写
+/// **版式偏好**（面板拖到哪儿）。共用的话，维护者开一次演示窗口把某块面板拖高一截，
+/// 下一次跑这几条测试屏上就少了几行——而断言数的正好是行数。
+fn 工作目录() -> std::path::PathBuf {
+    std::env::temp_dir().join("romcat-测试-任务")
+}
+
 /// 一个装着合成数据的界面。
 fn 开一个() -> App {
     App::new(
         demo::site(demo::synthetic(200).expect("造得出合成数据")).expect("开得出现场"),
-        demo::workspace(),
+        工作目录(),
     )
 }
 
@@ -76,7 +85,7 @@ fn 画到台上空了(ctx: &egui::Context, app: &mut App) {
 fn 任务跑着的时候别的屏照常画得出来() {
     let ctx = headless::context();
     let mut app = 开一个();
-    app.show_view(View::Variants);
+    app.show_view(View::Browse);
     let id = 排一趟占位的(&mut app);
 
     // **这一趟活要跑两秒，而它在画帧那条线程上的话，`queue` 那一下就整整两秒地跑完了

@@ -14,9 +14,18 @@ use romcat_gui::queue::Mode;
 use romcat_gui::table::ROW_HEIGHT;
 use romcat_gui::{demo, headless};
 
+/// 这几条测试自己的**工作目录**。
+///
+/// **不共用 `demo::workspace()`**：那是 `--demo` 那个演示窗口用的目录，而窗口会往里写
+/// **版式偏好**（面板拖到哪儿）。共用的话，维护者开一次演示窗口把某块面板拖高一截，
+/// 下一次跑这几条测试屏上就少了几行——而断言数的正好是行数。
+fn 工作目录() -> std::path::PathBuf {
+    std::env::temp_dir().join("romcat-测试-队列")
+}
+
 fn 界面(rows: u64) -> App {
     let site = demo::site(demo::queue(rows).expect("造得出合成数据")).expect("开得出现场");
-    App::new(site, demo::workspace())
+    App::new(site, 工作目录())
 }
 
 /// 跑几帧，返回这个上下文。

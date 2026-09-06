@@ -8,6 +8,15 @@ use egui::{RawInput, ViewportCommand, ViewportEvent, ViewportId, ViewportInfo};
 use romcat_gui::app::{App, Closing};
 use romcat_gui::{demo, headless};
 
+/// 这几条测试自己的**工作目录**。
+///
+/// **不共用 `demo::workspace()`**：那是 `--demo` 那个演示窗口用的目录，而窗口会往里写
+/// **版式偏好**（面板拖到哪儿）。共用的话，维护者开一次演示窗口把某块面板拖高一截，
+/// 下一次跑这几条测试屏上就少了几行——而断言数的正好是行数。
+fn 工作目录() -> std::path::PathBuf {
+    std::env::temp_dir().join("romcat-测试-关窗")
+}
+
 /// 一帧的输入：`closing` 为真时带上「窗口被要求关闭」这个事件。
 fn 输入(closing: bool) -> RawInput {
     let mut input = headless::input();
@@ -33,7 +42,7 @@ fn 关窗分两拍先关输入法再关窗() {
     let ctx = headless::context();
     let mut app = App::new(
         demo::site(demo::synthetic(200).expect("造得出合成数据")).expect("开得出现场"),
-        demo::workspace(),
+        工作目录(),
     );
 
     // 第 0 帧：没人要关，什么都不该发。

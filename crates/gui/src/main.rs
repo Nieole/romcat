@@ -46,7 +46,7 @@ const NO_LIBRARY: &str = "说清要开哪份库：\n\
 #[command(
     name = "romcat-gui",
     version,
-    about = "romcat 界面：待确认队列与变体表"
+    about = "romcat 界面：库 / 浏览 / 待确认 / 子库 / 任务，五屏"
 )]
 struct Args {
     /// 主库根目录。**只用来找到对应的中立库，一个字节都不读它**
@@ -235,13 +235,15 @@ fn main() -> ExitCode {
     };
 
     // 标题里说清开的是哪一份。合成数据与真库在界面上长得一模一样，标题是唯一
-    // 一直看得见的区分处。
-    let title = if args.locate().given() {
-        format!("romcat — {}", site.library)
-    } else {
-        "romcat — 合成数据（演示）".to_string()
-    };
-    let app = App::new(site, args.workspace_dir());
+    // 一直看得见的区分处。**开的是哪一屏也写进去**（票 `gui-redesign/12` 验收第 6 条）
+    // ——那一半跟着屏变，所以由 [`App::window_title`] 每次换屏时重发一条。
+    let mut app = App::new(site, args.workspace_dir());
+    if !args.locate().given() {
+        app.set_library_label("合成数据（演示）");
+    }
+    // 这一句只管**开窗到第一帧之间**那一小会儿：第一帧一画，`App` 就把带屏名的那个
+    // 标题发下来了。
+    let title = app.window_title();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0])
@@ -312,7 +314,7 @@ fn bench_scroll(args: &Args, frames: u32) -> ExitCode {
         Err(message) => return fail(&message),
     };
     let mut app = App::new(site, args.workspace_dir());
-    app.show_view(View::Variants);
+    app.show_view(View::Browse);
     let sweep = args.rows_per_frame.map_or(Sweep::Whole, Sweep::Rows);
     let cost = bench::scroll(&mut app, frames, sweep);
     println!(
@@ -343,7 +345,7 @@ fn fail(message: &str) -> ExitCode {
 fn bench_browse(args: &Args, frames: u32) -> ExitCode {
     let rows = args.rows;
     let site = match args
-        .open_for_bench(|| demo::library(rows).map_err(|error| format!("造不出合成数据：{error}")))
+        .open_for_bench(|| demo::browse(rows).map_err(|error| format!("造不出合成数据：{error}")))
     {
         Ok(site) => site,
         Err(message) => return fail(&message),
@@ -366,7 +368,7 @@ fn bench_sublibrary(args: &Args) -> ExitCode {
         );
     }
     let rows = args.rows;
-    let site = match demo::site(match demo::library(rows) {
+    let site = match demo::site(match demo::browse(rows) {
         Ok(catalog) => catalog,
         Err(error) => return fail(&format!("造不出合成数据：{error}")),
     }) {

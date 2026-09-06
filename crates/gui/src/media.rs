@@ -28,11 +28,33 @@ use romcat_core::scrape::preview::{
     self, EDGE, Frame, Key, Loader, Missing, Preview, Thumbnail,
 };
 
-/// 一格多宽，点。照原型 `prototype.html` 里 `.thumb` 那条 `minmax(78px, 1fr)`。
+/// 一格**最少**多宽，点。照原型 `prototype.html` 里 `.thumb` 那条 `minmax(78px, 1fr)`
+/// 的**前半截**。
+///
+/// 后半截那个 `1fr` 归 [`cell_size`] 管：**格子跟着详情面板的宽度长**。这一栏从前把
+/// 78 点定死了（挂单 `Q126`），于是把面板拖宽一倍，多出来的地方全空着——而这一票的
+/// 头一条验收正是「面板边界拖得动」。
 pub const CELL: f32 = 78.0;
 
-/// 一格多高。原型上那格是 `aspect-ratio: 3/4`——竖着的封面是这一栏里最常见的形状。
-pub const CELL_H: f32 = CELL * 4.0 / 3.0;
+/// 一格的高宽比。原型上那格是 `aspect-ratio: 3/4`——竖着的封面是这一栏里最常见的形状。
+const RATIO: f32 = 4.0 / 3.0;
+
+/// 这么宽的一栏里，一格该多大。
+///
+/// 就是 CSS 那条 `repeat(auto-fill, minmax(78px, 1fr))`：先看这一栏摆得下几列
+/// （每列至少 [`CELL`] 宽，列与列之间空 `spacing`），再把剩下的宽度均分给这几列。
+/// 于是**面板拖宽一点，格子跟着大一点**，而不是右边空出一条。
+///
+/// 宽度**向下取整**：算出来的几列加上几个间隙必须摆得进这一栏，多出零点几个点就会
+/// 少掉一列，那一列会掉到下一行去。
+#[must_use]
+pub fn cell_size(available: f32, spacing: f32) -> egui::Vec2 {
+    let columns = ((available + spacing) / (CELL + spacing)).floor().max(1.0);
+    let width = ((available - spacing * (columns - 1.0)) / columns)
+        .floor()
+        .max(CELL);
+    egui::vec2(width, width * RATIO)
+}
 
 /// 缓存里最多攒几份图。
 ///
@@ -288,14 +310,17 @@ impl Gallery {
         }
     }
 
-    /// 画一格。点了就返回[这一下算什么](Clicked)。
+    /// 画一格，`size` 那么大（[`cell_size`] 算出来的）。点了就返回[这一下算什么](Clicked)。
     ///
     /// 图片也点得开：缩略图长边只有 [`EDGE`] 像素，而池里那些封面动辄两千——
     /// 「想看清楚点」与「想放这段视频」是同一下动作，没道理只给视频。
-    pub fn cell(&self, ui: &mut egui::Ui, item: &MediaItem) -> Option<Clicked> {
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(CELL, CELL_H), egui::Sense::click());
+    pub fn cell(&self, ui: &mut egui::Ui, item: &MediaItem, size: egui::Vec2) -> Option<Clicked> {
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
         let visuals = ui.visuals().clone();
+        // **键盘焦点在这一格上也得看得见。** 这一格是自己画的，不走 egui 的按钮那条路，
+        // 所以 [`crate::look::install`] 换的那圈强调色到不了这儿——得自己照它描一圈
+        // （票 `gui-redesign/12` 验收第 7 条）。
+        let focused = response.has_focus();
         let painter = ui.painter();
         let radius = 4.0;
         painter.rect_filled(rect, radius, visuals.extreme_bg_color);
@@ -309,6 +334,16 @@ impl Gallery {
             _ => visuals.widgets.noninteractive.bg_stroke,
         };
         painter.rect_stroke(rect, radius, 边框, egui::StrokeKind::Inside);
+        if focused {
+            // **焦点那一圈画在里面一点，不顶掉原来那道边框**：那道边框是「池里没这个
+            // 文件」的警告，被焦点顶掉的话，Tab 走过去的那一格就不再警告了。
+            painter.rect_stroke(
+                rect.shrink(2.0),
+                radius,
+                egui::Stroke::new(2.0, visuals.selection.stroke.color),
+                egui::StrokeKind::Inside,
+            );
+        }
 
         match look {
             Look::Ready(texture) => {

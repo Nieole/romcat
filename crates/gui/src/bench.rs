@@ -75,7 +75,7 @@ pub fn scroll(app: &mut App, frames: u32, sweep: Sweep) -> FrameCost {
     let ctx = headless::context();
 
     // 先跑一帧把总行数问出来，滚动的行程要按它算。
-    app.library_and_site().0.scroll_to = Some(0.0);
+    app.browse_and_site().0.scroll_to = Some(0.0);
     headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
     let before = app.window().reads();
     let travel = (app.window().total() as f32 * row_pitch() - VIEWPORT[1]).max(0.0);
@@ -87,7 +87,7 @@ pub fn scroll(app: &mut App, frames: u32, sweep: Sweep) -> FrameCost {
             Sweep::Whole => 0.0,
             Sweep::Rows(step) => (frame as f32 * step * row_pitch()).min(travel),
         };
-        app.library_and_site().0.scroll_to = Some(at);
+        app.browse_and_site().0.scroll_to = Some(at);
         let started = Instant::now();
         let output = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
         let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
@@ -97,7 +97,7 @@ pub fn scroll(app: &mut App, frames: u32, sweep: Sweep) -> FrameCost {
             costs.push(elapsed);
         }
     }
-    app.library_and_site().0.scroll_to = None;
+    app.browse_and_site().0.scroll_to = None;
 
     let reads = app.window().reads() - before;
     costs.sort_by(f64::total_cmp);
@@ -383,22 +383,22 @@ impl BrowseCost {
 /// 量一遍**浏览屏**：列筛选面板、换一次筛选、点开一行、全选展开、滚一趟。
 ///
 /// 走的是界面上那条一模一样的路——[`App::ui`] 本人、
-/// [`crate::library::Screen::open_work`] 本人。**一个字节都不写库。**
+/// [`crate::browse::Screen::open_work`] 本人。**一个字节都不写库。**
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn browse(app: &mut App, frames: u32) -> BrowseCost {
     let ctx = headless::context();
-    app.show_view(crate::app::View::Variants);
+    app.show_view(crate::app::View::Browse);
 
     // 一、列一次筛选面板。
     let started = Instant::now();
     {
-        let (library, site) = app.library_and_site();
-        library.reload(site);
+        let (browse, site) = app.browse_and_site();
+        browse.reload(site);
     }
     let facets_ms = started.elapsed().as_secs_f64() * 1000.0;
     let counts = {
-        let facets = app.library().facets();
+        let facets = app.browse().facets();
         (
             facets.platforms.len(),
             facets.collections.len(),
@@ -414,14 +414,14 @@ pub fn browse(app: &mut App, frames: u32) -> BrowseCost {
     // 二、换一次筛选：挑**最大的那个平台**——量的该是「筛完还剩上万行」那种，
     //     不是最小的那种。
     let biggest = app
-        .library()
+        .browse()
         .facets()
         .platforms
         .first()
         .map(|facet| facet.value.clone());
     let started = Instant::now();
     if let Some(platform) = biggest.clone() {
-        app.library_and_site().0.query_mut().platform =
+        app.browse_and_site().0.query_mut().platform =
             Some(romcat_core::catalog::PlatformFilter::from_label(&platform));
     }
     // 换筛选是**下一帧**才兑现的（界面每帧把查询写进窗口），所以这一帧要跑完才算数。
@@ -431,36 +431,36 @@ pub fn browse(app: &mut App, frames: u32) -> BrowseCost {
 
     // 三、点开一行：作品、它底下那几个变体、每个变体的候选与依据一次折齐。
     let first = {
-        let (library, site) = app.library_and_site();
+        let (browse, site) = app.browse_and_site();
         site.catalog
-            .work_page(library.query(), 0, 1)
+            .work_page(browse.query(), 0, 1)
             .ok()
             .and_then(|rows| rows.into_iter().next())
             .map(|row| row.anchor)
     };
     let started = Instant::now();
     if let Some(anchor) = &first {
-        let (library, site) = app.library_and_site();
-        library.open_work(&site.catalog, anchor);
+        let (browse, site) = app.browse_and_site();
+        browse.open_work(&site.catalog, anchor);
     }
     let detail_ms = started.elapsed().as_secs_f64() * 1000.0;
 
     // 四、**全选**，再把作用范围展开成一串变体的键——批量操作按下去要动的就是这一批。
     {
-        let (library, _) = app.library_and_site();
-        library.picked_mut().select_all();
+        let (browse, _) = app.browse_and_site();
+        browse.picked_mut().select_all();
     }
     let started = Instant::now();
     let variants = {
-        let (library, site) = app.library_and_site();
-        library
+        let (browse, site) = app.browse_and_site();
+        browse
             .batch_variants(&site.catalog)
             .map_or(0, |keys| keys.len() as u64)
     };
     let scope_ms = started.elapsed().as_secs_f64() * 1000.0;
     {
-        let (library, _) = app.library_and_site();
-        library.picked_mut().clear();
+        let (browse, _) = app.browse_and_site();
+        browse.picked_mut().clear();
     }
 
     // 五、滚一趟：表格是虚拟化的，代价该与总行数无关。
@@ -473,7 +473,7 @@ pub fn browse(app: &mut App, frames: u32) -> BrowseCost {
         } else {
             0.0
         };
-        app.library_and_site().0.scroll_to = Some(at);
+        app.browse_and_site().0.scroll_to = Some(at);
         let started = Instant::now();
         let output = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
         let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
@@ -483,7 +483,7 @@ pub fn browse(app: &mut App, frames: u32) -> BrowseCost {
             costs.push(elapsed);
         }
     }
-    app.library_and_site().0.scroll_to = None;
+    app.browse_and_site().0.scroll_to = None;
     costs.sort_by(f64::total_cmp);
 
     BrowseCost {
