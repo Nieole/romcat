@@ -2565,6 +2565,10 @@ impl Catalog {
 /// 于是这一步跟着 [`Catalog::replace_variants`] 走：那是变体表唯一的写入口，
 /// 在它那个事务里跑，收不干净就跟着一起回滚。
 ///
+/// **「变体没了」与「变体的字节变了」还是两件事**：后者键一个字没变，落不进这张网，
+/// 由 [`drop_stale_conclusions`] 在扫描写库那一步收——两者收的是同几张表，
+/// 判据一个问「键还在不在」，一个问「那份字节还是不是原来那份」。
+///
 /// ## 为什么不怕把结论清光
 ///
 /// 判据是**键还在不在**，不是「这一趟有没有重新成型」。成型只是把散落的文件重聚一遍，
@@ -2594,6 +2598,83 @@ pub(super) fn drop_variant_orphans(tx: &Transaction<'_>) -> rusqlite::Result<()>
         "DELETE FROM identification WHERE variant_key NOT IN (SELECT key FROM variant)",
         [],
     )?;
+    drop_unheld_works(tx)
+}
+
+/// 这几个**条目**的字节变了，挂在它们所属**变体**上的识别结论就此作废。
+///
+/// ## 判据是「成员的三元组变了」
+///
+/// 扫描这一层拿得到的只有 `(路径, 大小, 修改时间)`——内容哈希要到识别那一趟才算，
+/// 而它本身正是这一步要作废的东西之一。于是「内容变了」在这里就是
+/// [`Verdict::Changed`](crate::catalog::Verdict)：变体的任一成员的三元组变了，
+/// 这个变体那份结论就不再是「这份字节」的结论。
+///
+/// **成员集合变了不走这条路**：加进来的是一个新键，它这一趟还不属于任何变体；
+/// 少掉的那个由重新成型之后的 [`drop_variant_orphans`] 按「键还在不在」收。
+///
+/// ## 为什么落在 [`Catalog::write`] 而不是 `replace_variants`
+///
+/// **只有这一处看得见「变体级的变化」。** 成型是键的纯函数（ADR-0022），它看得见
+/// 哪个变体没了，看不见哪个变体的字节换了——`replace_variants` 拿到的是一份变体清单，
+/// 里面没有「这一趟哪几个条目变了」。而扫描写库这一步手里正好有那份判断，
+/// 与它作废 `content_hash` 那几张内容表是同一个分支、同一个事务。
+///
+/// **中断的扫描也走到这里**，那正是要的：成型与删除都只在完整扫完一遍之后跑，
+/// 而这条结论已经确定对不上盘上的字节了，早一步作废好过在库里多躺半趟。
+///
+/// ## 作废哪几样，不作废哪几样
+///
+/// 走的是 `candidate`、`identification`，以及变体身上那两条 `work_id` / `release_id`
+/// 链接——三样都是**按字节**得出来的，字节换了就都不算数（`CONTEXT.md` 的**识别**）。
+/// 收尾照 [`drop_variant_orphans`] 那两句收一遍没人指的作品与发行版。
+///
+/// **刮削的结论不走**：它锚在作品名或变体的键上（`CONTEXT.md` 的**锚点**），
+/// 这一次变的是字节不是名字。作品真成了孤儿的话，它连同挂在上面的东西一起被收掉。
+///
+/// **沉淀库里那条裁决更不动**：那是人定的、不可再生的（ADR-0008），中立库里这几行
+/// 只是它的投影。下一趟识别按锚重新投影一遍——新字节撞不上旧锚，本来就该撞不上。
+pub(super) fn drop_stale_conclusions(
+    tx: &Transaction<'_>,
+    changed: &BTreeSet<String>,
+) -> rusqlite::Result<()> {
+    let mut variants: BTreeSet<String> = BTreeSet::new();
+    {
+        // 一个条目只属于一个变体（`variant_member.key` 就是主键），因此这是一次索引命中。
+        let mut owner = tx.prepare("SELECT variant_key FROM variant_member WHERE key = ?1")?;
+        for key in changed {
+            if let Some(variant_key) = owner
+                .query_row(params![key], |row| row.get::<_, String>(0))
+                .optional()?
+            {
+                variants.insert(variant_key);
+            }
+        }
+    }
+    if variants.is_empty() {
+        return Ok(());
+    }
+    {
+        // 顺序与 `drop_variant_orphans` 同源：从引用方往被引用方走。
+        let mut drop_candidates = tx.prepare("DELETE FROM candidate WHERE variant_key = ?1")?;
+        let mut drop_identification =
+            tx.prepare("DELETE FROM identification WHERE variant_key = ?1")?;
+        let mut unlink =
+            tx.prepare("UPDATE variant SET work_id = NULL, release_id = NULL WHERE key = ?1")?;
+        for variant_key in &variants {
+            drop_candidates.execute(params![variant_key])?;
+            drop_identification.execute(params![variant_key])?;
+            unlink.execute(params![variant_key])?;
+        }
+    }
+    drop_unheld_works(tx)
+}
+
+/// 收掉眼下没人指着的作品与发行版。
+///
+/// 闸是「还有没有人指着它」，而不是「它是怎么来的」——这两张表每一行都可再生，
+/// 判据写在 [`drop_variant_orphans`] 的「作品与发行版凭什么也删得」那一段。
+fn drop_unheld_works(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     tx.execute(
         "DELETE FROM release
          WHERE NOT EXISTS(SELECT 1 FROM variant v WHERE v.release_id = release.id)
