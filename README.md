@@ -94,7 +94,7 @@ romcat-gui --catalog ~/.romcat/catalog/主库-xxxx.sqlite3
 
 ## 现在到哪一步了
 
-**27/29 张票落地**，余下两张是 Windows 真机验证（`ready-for-human`，需要人在 Windows 上跑）。**1,581 条测试全绿。**
+**59/63 张票落地**（四条队列合计）。余下四张：三张是 Windows 真机验证（`ready-for-human`，需要人在 Windows 上跑），一张还没接（`ready-for-agent`）。**1,581 条测试全绿。**
 
 真库实测（`docs/library-facts.md` 记着全部数字与日期）：
 

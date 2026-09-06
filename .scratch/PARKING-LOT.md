@@ -1136,3 +1136,44 @@
   漏跑了不会有人拦。
 - **谁来裁：** 拿主意的人（要不要给这四条配一个真会拦人的地方——CI 或 pre-commit hook）
 - **状态：** open
+
+### Q188 — `cargo fmt --check` 上了门禁，但**没有任何东西钉住是哪一版 `rustfmt`**
+
+- **来自：** 票 `queue-followups/11`（`/code-review` 抓的）
+- **类别：** 票没想到的第三种情况
+- **在哪：** 仓库根下**没有 `rust-toolchain.toml`**（`find` 全仓 0 个）；`Cargo.toml` 里的
+  `rust-version = "1.95"` 是给 cargo 解析器用的 MSRV 声明，**它不钉工具链**。
+  本票实测用的是 `rustfmt 1.9.0-stable (48a229ceae 2026-09-01)`。
+- **为什么没停线：** 眼下只有一台机器在跑，门禁绿的；而且钉工具链是**仓库级的决定**
+  （落一份 `rust-toolchain.toml`，rustup 从此给每个人下那一版），有不止一个方向站得住
+  （钉死一版 / 只钉 `channel = "stable"` / 干脆不钉，靠人对齐），不该由一张格式化票顺手定。
+- **这张票实际走了哪条路：** **没钉**，把口子记在这儿。风险是实的：`rustfmt` 的产出
+  **跨版本会变**，`style_edition = "2024"` 只钉住《风格指南》那一层、钉不住实现的改动。
+  一个人拿另一版 `rustfmt` 照 README 新写的「提交前跑 `cargo fmt --all`」跑一趟，
+  要么门禁莫名其妙红、要么提交里多出一大片与他那张票无关的重排——**正是票 `10`/`11`
+  这两张票要终结的那一幕（`Q53`）**。「排版归机器管」没说是哪台机器。
+  没顺手落 `rust-toolchain.toml` 的另一个具体理由：它会把 `rustup` 的行为改掉
+  （每次进目录可能触发一次工具链下载），这个副作用得由拿主意的人认。
+- **谁来裁：** 拿主意的人（钉不钉工具链；与 `Q187`「给这四条配一个真会拦人的地方」是同一个话题的两半）
+- **状态：** open
+
+### Q189 — 门禁第四条 `cargo doc` 从来就不是绿的：68 条 rustdoc 告警，全是既有的
+
+- **来自：** 票 `queue-followups/11`
+- **类别：** 路过发现，不在范围内
+- **在哪：** `cargo doc --workspace --no-deps` —— `romcat-core` 56 条、`romcat-gui` 8 条、
+  `romcat`（bin）几条。最常见的三类：`redundant explicit link target`（7 条）、
+  `unresolved link to ...`（`workspace::verdict_store_path`、`sync::execute::Sources`、
+  `Self::for_number`、`fingerprint` 等）、`X is both a function and a module`
+  （`sync::prepare`、`observe`）、以及「公开文档链到私有条目」（`Picked::rows`、`best_chinese` → `rank`）。
+- **为什么没停线：** **和格式化一点关系都没有，是既有状态。** 判据：格式化那条提交里
+  **文档注释被改动的行数是 0**（`git diff HEAD~1 HEAD -- '*.rs' | grep -cE '^[+-]\s*(///|//!)'`），
+  被碰到的普通注释只有 4 行、且只是跟着代码块换缩进——`rustfmt` 的 `wrap_comments`
+  稳定版设不了、默认 `false`，它根本不重排注释文本，造不出一条 rustdoc 告警。
+  `cargo doc` 退出码是 0，所以门禁「跑绿」这个说法在字面上仍然成立。
+- **这张票实际走了哪条路：** **没修，只把数记下来。** 本票是格式化票，硬约束是「不改变任何行为」；
+  修 68 条 intra-doc 链接要逐条改文档注释文本，那是实打实的内容改动，不该混进这两条提交
+  （尤其不该混进那条 2,252 行的纯 fmt 产出）。`clippy` 那条门禁是明写「零警告」的，
+  `cargo doc` 那条从来没写过——这个不对称也一并记在这儿。
+- **谁来裁：** 拿主意的人（要不要给 `cargo doc` 也定「零警告」，那就得先清这 68 条）
+- **状态：** open
