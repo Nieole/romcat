@@ -372,6 +372,23 @@ fn 筛选下推之后行与聚合一起收窄() {
         LOOSE,
         "没认出作品的那一行按它自己的键搜不出来",
     );
+
+    // **筛选与搜索叠加时，收窄聚合的只有筛选那一半。** 这条查询分两趟走
+    // （票 `gui-redesign/13`）：第一趟按筛选加搜索挑出这一页是哪几行，第二趟
+    // **只按筛选**给这几行算聚合——搜索那三条组内恒定，第二趟再判一遍答案一样。
+    // 两趟若在这儿分了家，屏上「变体数」就会跟着搜索词变，而批量操作照着它动手。
+    let 又筛又搜 = WorkQuery {
+        platform: Some(romcat_core::catalog::PlatformFilter::Named("GB".into())),
+        search: "作品0".to_string(),
+        ..WorkQuery::default()
+    };
+    let rows = catalog.work_page(&又筛又搜, 0, 64).expect("取得出一页");
+    assert_eq!(rows.len(), WORKS, "又筛又搜之后行数不对");
+    for row in &rows {
+        assert_eq!(row.variants, 1, "搜索把这一行的变体数改了");
+        assert_eq!(row.platforms, vec!["GB".to_string()], "搜索把平台集合改了");
+        assert_eq!(row.bytes, 1_000, "搜索把容量改了");
+    }
 }
 
 #[test]
@@ -530,6 +547,38 @@ fn 年份取的是裁决那一条而且列表与详情写的是同一个数() {
     let 那一行 = rows.iter().find(|row| row.name == "作品00").expect("有这一行");
     assert_eq!(那一行.year.as_deref(), Some("1970"));
     assert_ne!(VERDICT, "某个数据源");
+}
+
+#[test]
+fn 换一种排法画出来的那一行一个字都不变() {
+    // 票 `gui-redesign/13` 把主列表那条查询拆成两趟——第一趟只挑「这一页是哪几行」，
+    // 第二趟才给这几百行算聚合；年份那张 `LEFT JOIN` 也只在**按年份排**时才连，
+    // 平时由补刮削值那一趟带回来。于是这里钉住一件事：**换排法只换次序，不换内容**。
+    // 两趟若在哪儿分了家，最先看得出来的就是「按年份排之后年份那一栏变了」。
+    let catalog = 建库();
+    let 基准: Vec<WorkRow> = catalog
+        .work_page(&WorkQuery::default(), 0, 1_000)
+        .expect("取得出一页");
+    assert!(!基准.is_empty(), "fixture 里得有行");
+
+    for order in WorkOrder::ALL {
+        for descending in [false, true] {
+            let query = WorkQuery {
+                order,
+                descending,
+                ..WorkQuery::default()
+            };
+            let 这一趟 = catalog.work_page(&query, 0, 1_000).expect("取得出一页");
+            assert_eq!(这一趟.len(), 基准.len(), "{order:?} 排出来的行数不对");
+            for row in &这一趟 {
+                let 原样 = 基准
+                    .iter()
+                    .find(|had| had.anchor == row.anchor)
+                    .expect("这一行在默认排法里也在");
+                assert_eq!(row, 原样, "{order:?} / 倒序 {descending} 把这一行画的东西改了");
+            }
+        }
+    }
 }
 
 #[test]

@@ -51,10 +51,23 @@
 //!
 //! **它比变体表贵，而且贵得有理由**：变体表的每一条 `ORDER BY` 都有一条索引正好接住
 //! （`variant_bytes_key` 那几条），一次翻页是索引倒着扫；作品级那一条要先 `GROUP BY`
-//! 把全表折成行，再按聚合出来的列排序——两步都没有索引接得住，代价与**库有多大**
-//! 成正比，不与视口成正比。这不是可以绕开的实现细节：「这个作品有几个变体」这件事
-//! 本身就要看过它的每一个变体。内存那一半照旧只有视口那几十行（[`MAX_PAGE`] 还在），
-//! 涨的是每次翻页的时间。数字见 `docs/library-facts.md` 与挂单 Q64。
+//! 把全表折成行，再按聚合出来的列排序。这不是可以绕开的实现细节：「这个作品有几个变体」
+//! 这件事本身就要看过它的每一个变体。内存那一半照旧只有视口那几十行（[`MAX_PAGE`] 还在），
+//! 涨的是每次翻页的时间。
+//!
+//! **票 `gui-redesign/13` 把这份代价量开、削掉了三分之二**（数字与量法见
+//! `docs/library-facts.md`，量的命令是 `--bench-paging`）。三样各治一处：
+//!
+//! - **`GROUP BY` 那口临时 b 树**：分组键的第二项是个表达式（没认出作品时那个变体自己的
+//!   键），索引里没有，于是四万多行要整个塞进一口临时 b 树才分得出组。把那个表达式
+//!   原样写进索引（`variant_group`，见 `catalog::content`）之后那口 b 树就没了。
+//! - **`ORDER BY` 那口临时 b 树**：它要把每一组连同 `SELECT` 里那一堆聚合一起搬进去排。
+//!   于是**分两趟**：第一趟只挑「这一页是哪几行」（[`Catalog::work_page_anchors`]，
+//!   按哪一列排就多算哪一列），第二趟只给这几百行算聚合
+//!   （[`Catalog::work_page_totals`]）。搬得轻，排得快。
+//! - **年份那张 `LEFT JOIN`**：它是一趟 `scrape_value` 全表扫加一次分组，而屏上那个年份
+//!   与「元数据齐不齐」读的是同一张表的同一批行——并进 [`Catalog::fill_scraped`] 那一趟。
+//!   **只有按年份排时才连它**：排序需要它，画不需要它。
 //!
 //! ## 搜索框：**它管排序，筛选器管集合**
 //!
@@ -74,6 +87,12 @@
 //! 收窄这件事搜索框也做（不然「打几个字就找到那个游戏」无从谈起），但它收窄的依据
 //! 是**三条命中路**（屏上那个名字、标题集合里别的叫法、简介），而这三条一条都写不成
 //! 规则语言里的子句——那正是 Q70 挡住它的理由。
+//!
+//! **三条里有两条写成集合成员判定而不是相关子查询**（[`Search::alias`]、
+//! [`Search::description`]，票 `gui-redesign/13`）：`EXISTS (… WHERE t.work = work.name …)`
+//! 与外层绑死，SQLite 只能逐个变体行去探一次——真库形状上那是四万多次。写成
+//! `IN (SELECT …)` 之后子查询与外层无关，一次算完存进一张临时索引，
+//! 筛出来的**是同一批行**。数字见 `docs/library-facts.md` 与挂单 Q108。
 
 use rusqlite::{ToSql, params_from_iter};
 
@@ -681,7 +700,7 @@ impl WorkOrder {
     }
 
     /// 拼进 `ORDER BY` 的那个名字。**只有这个函数认得它们**，而且它们全是
-    /// [`WORK_COLUMNS`] 里自己起的别名，一个字都不来自外面。
+    /// [`WORK_ANCHOR_COLUMNS`] 与 [`Self::select`] 里自己起的别名，一个字都不来自外面。
     fn column(self) -> &'static str {
         match self {
             Self::Name => "name",
@@ -689,6 +708,25 @@ impl WorkOrder {
             Self::Variants => "variants",
             Self::Bytes => "bytes",
             Self::Year => "year",
+        }
+    }
+
+    /// 挑这一页那一趟要**多算的那一列**，连前面那个逗号。
+    ///
+    /// 排序要有值可比，所以按哪一列排就得算哪一列——但**一次只算一列**：
+    /// 别的几样等挑完这一页再算（[`Catalog::work_page_totals`]），
+    /// 那时只剩几百行，不是一万多组。
+    ///
+    /// 作品名那一档是空的：它本来就在 [`WORK_ANCHOR_COLUMNS`] 里。
+    fn select(self) -> &'static str {
+        match self {
+            Self::Name => "",
+            Self::Platform => ",\n    MIN(variant.platform) AS platform",
+            Self::Variants => ",\n    COUNT(*) AS variants",
+            Self::Bytes => ",\n    SUM(variant.bytes) AS bytes",
+            // `MIN(year.value)` 只是个取值器：同一行里 `year` 是常数（作品名一样，
+            // join 出来的就是同一条）。**只有这一档才连年份那张表**。
+            Self::Year => ",\n    MIN(year.value) AS year",
         }
     }
 }
@@ -780,9 +818,9 @@ impl WorkRow {
 
 /// 主列表这一行**画出来的那个名字**在 SQL 里怎么取。
 ///
-/// **只有这一处写它**：[`WORK_COLUMNS`] 里那一列、[`WORK_FROM`] 里年份那张 join、
-/// 搜索框收窄那三条、匹配质量那一档，全都从这儿展开——排的、画的、搜的不是同一串字
-/// 的话，屏上会出现一行「凭什么排在这儿」看不出答案的结果。
+/// **只有这一处写它**：[`WORK_ANCHOR_COLUMNS`] 里那一列、[`WORK_FROM`] 里年份那张
+/// join、搜索框那条名字命中路（[`Search::name`]），全都从这儿展开——排的、画的、搜的
+/// 不是同一串字的话，屏上会出现一行「凭什么排在这儿」看不出答案的结果。
 ///
 /// **是个宏而不是常量**，因为那几处里有两处是 `const &str`：`const` 里拼不了
 /// `format!`，而 `concat!` 只吃字面量与展开成字面量的宏。写成常量的话那两处只能各自
@@ -794,7 +832,7 @@ macro_rules! row_name {
 }
 
 /// 主列表这一行的**刮削锚点**在 SQL 里怎么取：认出作品的挂**作品名**，
-/// 没认出来的挂**变体的键**（与 `converge`、[`Catalog::fill_missing`] 同一条口径）。
+/// 没认出来的挂**变体的键**（与 `converge`、[`Catalog::fill_scraped`] 同一条口径）。
 ///
 /// 两个 `?` 按出现次序是**变体**、**作品**——与 [`WORK_FROM`] 里年份那张 join 写法一样。
 macro_rules! row_anchor {
@@ -899,10 +937,17 @@ impl Search {
     ///
     /// 锚点是**作品名**（`catalog::title` 的模块文档），于是**还没认出作品**的那些行
     /// 天然够不着这一条——它们压根没有标题集合，屏上那个名字就是它自己的键。
+    /// `NULL IN (…)` 不成立，那一支自己就落了空，不必再写一句。
+    ///
+    /// **写成集合成员判定而不是相关子查询**（挂单 Q108）：`EXISTS` 里带着
+    /// `t.work = work.name` 就与外层绑死了，SQLite 只能**逐个变体行**去 `title` 里探一次
+    /// ——真库形状上那是 46,428 次探查，实测单这一条 52 毫秒。写成
+    /// `work.name IN (SELECT …)` 之后子查询与外层无关，一次算完存进一张临时索引，
+    /// 每一行只剩一次查表。**筛出来的是同一批行**：两种写法对每一行的真假完全一致。
     fn alias(pattern: &str) -> (String, Box<dyn ToSql>) {
         (
-            "EXISTS (SELECT 1 FROM title t
-                     WHERE t.work = work.name AND lower(t.value) LIKE ? ESCAPE '\\')"
+            "work.name IN (SELECT t.work FROM title t
+                            WHERE lower(t.value) LIKE ? ESCAPE '\\')"
                 .to_string(),
             Box::new(pattern.to_string()),
         )
@@ -910,9 +955,11 @@ impl Search {
 
     /// 「这一行的**简介**里有这段文字」。
     ///
-    /// **锚点走主列表自己那条口径**（[`row_anchor!`]：认出作品的看作品锚点，
-    /// 没认出来的看它自己的变体锚点），而**不是** `catalog::filter` 那条
-    /// 「两个锚点合起来看」。两条口径不一样，这里必须挑主列表这一条，有两个理由：
+    /// **锚点走主列表自己那条口径**：认出作品的看**作品**锚点、比作品名，没认出来的看
+    /// 它自己的**变体**锚点、比那个键——下面那两支就是这条口径摊开写的（它不再展开
+    /// [`row_anchor!`]，那个宏如今只剩 [`WORK_FROM`] 一个用户）。而**不是**
+    /// `catalog::filter` 那条「两个锚点合起来看」。两条口径不一样，这里必须挑主列表
+    /// 这一条，有两个理由：
     ///
     /// 1. **它得是组内恒定的。** 收窄落在 `WHERE` 上、逐个变体行判，而
     ///    `catalog::filter` 那条的变体分支比的是 `sv.subject = variant.key`
@@ -921,28 +968,36 @@ impl Search {
     ///    容量与平台集合跟着缩水，随后「全选 → 批量刮削」也只作用到那一个。
     ///    搜索是**找这一行**，不该顺手改掉这一行有几个变体。
     /// 2. **它得与同一屏上别处说的话一致。** 那一行「元数据齐不齐」里的**简介**
-    ///    正是按这条锚点判的（[`Catalog::fill_missing`]），年份那一列也是
+    ///    正是按这条锚点判的（[`Catalog::fill_scraped`]），年份那一列也是
     ///    （[`WORK_FROM`]）。挑另一条口径的话，屏上一行写着「缺简介」，
     ///    搜索却说它「简介里提到它」。
     ///
-    /// 参数按出现次序：字段、变体锚点、作品锚点、那条模板。
+    /// **两支各自写成集合成员判定**，理由同 [`alias`](Self::alias)：相关子查询要
+    /// 逐个变体行去 `scrape_value` 里探一次（实测单这一条 32 毫秒），
+    /// 而这两条子查询与外层无关，各扫一遍那张表就算完。
+    ///
+    /// 两支合起来与原先那一条**逐行等价**：认出作品的行 `work.name` 非空、锚点是作品，
+    /// 只可能落进前一支；没认出作品的行 `work.name` 是 `NULL`，前一支不成立，
+    /// 由后一支按变体锚点判。后一支那句 `variant.work_id IS NULL` **不能省**——
+    /// 一个挂在作品下的变体身上也可以写着变体锚点的简介，而屏上那一行看的是作品那一条。
+    ///
+    /// 参数按出现次序：字段、作品锚点、模板、字段、变体锚点、模板。
     fn description(pattern: &str) -> (String, Vec<Box<dyn ToSql>>) {
         (
-            concat!(
-                "EXISTS (SELECT 1 FROM scrape_value sv
-                         WHERE sv.field = ? AND sv.anchor = ",
-                row_anchor!(),
-                "
-                           AND sv.subject = ",
-                row_name!(),
-                "
-                           AND lower(sv.value) LIKE ? ESCAPE '\\')"
-            )
-            .to_string(),
+            "(work.name IN (SELECT sv.subject FROM scrape_value sv
+                             WHERE sv.field = ? AND sv.anchor = ?
+                               AND lower(sv.value) LIKE ? ESCAPE '\\')
+              OR (variant.work_id IS NULL
+                  AND variant.key IN (SELECT sv.subject FROM scrape_value sv
+                                       WHERE sv.field = ? AND sv.anchor = ?
+                                         AND lower(sv.value) LIKE ? ESCAPE '\\')))"
+                .to_string(),
             vec![
                 Box::new(Field::Description.label().to_string()),
-                Box::new(AnchorKind::Variant.label().to_string()),
                 Box::new(AnchorKind::Work.label().to_string()),
+                Box::new(pattern.to_string()),
+                Box::new(Field::Description.label().to_string()),
+                Box::new(AnchorKind::Variant.label().to_string()),
                 Box::new(pattern.to_string()),
             ],
         )
@@ -952,12 +1007,16 @@ impl Search {
     ///
     /// 三条一律用「含有」那条模板——以词开头的必然也含有它，多写一条只是白扫一遍。
     ///
-    /// **三条都是组内恒定的**：名字与简介读的是 [`row_name!`]（作品名，或者没认出作品时
-    /// 那一个变体自己的键），别名读的是 `work.name`。这一条是 [`rank`](Self::rank)
-    /// 那层 `MIN` 成立的前提，也是「搜索不改这一行有几个变体」成立的前提。
+    /// **三条都是组内恒定的**：名字读的是 [`row_name!`]（作品名，或者没认出作品时那一个
+    /// 变体自己的键），别名读的是 `work.name`，简介两支读的是 `work.name` 与
+    /// `variant.key`——**全是这一组的身份本身**。这一条是 [`rank`](Self::rank) 那层
+    /// `MIN` 成立的前提，是「搜索不改这一行有几个变体」成立的前提，也是
+    /// [`Catalog::work_page_totals`] 那一趟敢不带搜索谓词的前提。
     ///
-    /// **次序是从便宜排到贵的**：SQLite 的 `OR` 短路求值，名字就命中的行根本走不到
-    /// 后两条子查询上（挂单 Q108）。
+    /// **次序是从便宜排到贵的**：SQLite 的 `OR` 短路求值，名字就命中的行不必再去查
+    /// 后两条那两张临时索引。**这只值一点点**——后两条如今是非相关子查询
+    /// （[`alias`](Self::alias)、[`description`](Self::description)），临时索引一次就建好，
+    /// 短路省下的只是每行一次查表，不是整趟扫描。次序照旧这么摆，因为它不花钱。
     fn filter(&self) -> (String, Vec<Box<dyn ToSql>>) {
         let (name_sql, name_arg) = Self::name(&self.contains);
         let (alias_sql, alias_arg) = Self::alias(&self.contains);
@@ -974,9 +1033,9 @@ impl Search {
     /// [`filter`](Self::filter) 那三条同样如此——两处若有一条逐行不同，
     /// 这一行有几个变体就会跟着搜索词变，见 [`description`](Self::description)。
     ///
-    /// **落到最后一档的只可能是简介命中**，所以那一路不必再写一遍 `EXISTS`：
+    /// **落到最后一档的只可能是简介命中**，所以那一路不必再写一遍：
     /// [`filter`](Self::filter) 已经保证了三条里至少一条成立，前四支都没接住，
-    /// 剩下的就只有简介。省下的是一遍 `scrape_value` 的扫。
+    /// 剩下的就只有简介。省下的是 `scrape_value` 那两张临时索引再建一遍。
     fn rank(&self) -> (String, Vec<Box<dyn ToSql>>) {
         let mut parts = String::new();
         let mut args: Vec<Box<dyn ToSql>> = Vec::new();
@@ -1120,7 +1179,23 @@ pub enum Scope<'a> {
     AllExcept(&'a [WorkAnchor]),
 }
 
-/// 主列表那条查询的 `SELECT` 列表。**只有这一处写这些别名**——`ORDER BY` 拼的就是它们。
+/// 主列表**第一趟**（挑这一页是哪几行）的 `SELECT` 列表。
+///
+/// **只有身份与名字，一个聚合都不算**：`ORDER BY` 那口临时 b 树要把每一组连同它的
+/// `SELECT` 列表一起搬进去排，搬得越轻越快（票 `gui-redesign/13`，实测
+/// 40.6 → 17.3 毫秒）。按哪一列排就由 [`WorkOrder::select`] 多添哪一列。
+///
+/// **只有这一处与 [`WORK_TOTAL_COLUMNS`] 写那些别名**——`ORDER BY` 拼的就是它们。
+const WORK_ANCHOR_COLUMNS: &str = concat!(
+    "\
+    variant.work_id AS work_id,
+    CASE WHEN variant.work_id IS NULL THEN variant.key END AS loose,
+    ",
+    row_name!(),
+    " AS name",
+);
+
+/// 主列表**第二趟**（只给这一页那几百行算聚合）的 `SELECT` 列表。
 ///
 /// 几处值得说明的写法：
 ///
@@ -1128,24 +1203,17 @@ pub enum Scope<'a> {
 ///   （[`platform_set`] 排序定序——`group_concat` 不保证次序，而同一份库问两次必须
 ///   一样），SQLite 那一侧的 `DISTINCT` 聚合要为每一组多建一棵临时 b 树，白花的。
 ///   平台名里没有逗号（它来自平台清单），所以逗号拆得回来。
-/// - 平台未知那一档**不塞一个约定字符串进 SQL**：`MIN` 与 `group_concat` 都跳过 `NULL`，
+/// - 平台未知那一档**不塞一个约定字符串进 SQL**：`group_concat` 跳过 `NULL`，
 ///   另数一列 `unknowns` 出来，标签在 Rust 那边补（同 [`PlatformFilter`] 的道理）。
-/// - `MIN(year)` 只是个取值器：同一行里 `year` 是常数（作品名一样，join 出来的就是同一条）。
-const WORK_COLUMNS: &str = concat!(
-    "\
+/// - **年份不在这里**：它由 [`Catalog::fill_scraped`] 顺路带回来。
+const WORK_TOTAL_COLUMNS: &str = "\
     variant.work_id AS work_id,
     CASE WHEN variant.work_id IS NULL THEN variant.key END AS loose,
-    ",
-    row_name!(),
-    " AS name,
     COUNT(*) AS variants,
     SUM(variant.bytes) AS bytes,
     SUM(variant.unreadable) AS unreadable,
-    MIN(variant.platform) AS platform,
     group_concat(variant.platform) AS platforms,
-    SUM(variant.platform IS NULL) AS unknowns,
-    MIN(year.value) AS year",
-);
+    SUM(variant.platform IS NULL) AS unknowns";
 
 /// 主列表那条查询的 `FROM` 的头一半：变体连它的作品。
 ///
@@ -1157,8 +1225,14 @@ const WORK_FROM_BASE: &str = "
 
 /// 主列表那条查询的 `FROM`：变体、它的作品、以及**年份**那一列。
 ///
-/// 年份要能排序，所以它必须在这条查询里，不能留到取回来之后再补。它挂的锚点两支
-/// 不同——认出作品的挂**作品名**，没认出来的挂**变体的键**（与 `converge` 同一条口径）。
+/// **只有按年份排时才用它**（票 `gui-redesign/13`）。这张 join 是一趟 `scrape_value`
+/// 全表扫加一次分组（查询计划里那句 `MATERIALIZE year`），真库形状上每翻一页多花
+/// 十几毫秒；而屏上画的那个年份**由 [`Catalog::fill_scraped`] 顺路带回来**——那一趟
+/// 本来就在读同一张表、同一批锚点、同一批 subject。**排序需要它，画不需要它。**
+///
+/// 年份要能排序，所以按年份排时它必须在这条查询里，不能留到取回来之后再补。它挂的
+/// 锚点两支不同——认出作品的挂**作品名**，没认出来的挂**变体的键**（与 `converge`
+/// 同一条口径）。
 ///
 /// 同一个作品的年份可以有好几条（一个源一条，三元组并存不互相覆盖）。这里的取法是
 /// **裁决优先，其次取最早的那一个**：裁决排在每个字段的最前是优先级表的第一条规则
@@ -1334,8 +1408,9 @@ impl WorkQuery {
 
     /// 折出 `SELECT` 里那一列**匹配质量的名次**，连它的参数。没搜索时是空的。
     ///
-    /// 它拼在 [`WORK_COLUMNS`] 后面，所以它的参数排在整条查询的**最前面**
-    /// （`SELECT` 在 `FROM` 与 `WHERE` 之前）——[`Catalog::work_page`] 按这个次序绑。
+    /// 它拼在 [`WORK_ANCHOR_COLUMNS`] 与 [`WorkOrder::select`] 后面，所以它的参数排在
+    /// 整条查询的**最前面**（`SELECT` 在 `FROM` 与 `WHERE` 之前）——
+    /// [`Catalog::work_page_anchors`] 按这个次序绑。
     fn rank_column(&self) -> (String, Vec<Box<dyn ToSql>>) {
         match Search::new(&self.search) {
             None => (String::new(), Vec::new()),
@@ -1437,9 +1512,9 @@ impl Catalog {
     /// `limit` 会被夹到 [`MAX_PAGE`]——这个入口同样不接受「把全库读出来」。
     ///
     /// **两趟**：一趟 `GROUP BY` 出这一页的骨架，再拿这一页那几十行去补
-    /// 「元数据齐不齐」与「最高置信度」。后两样各要连一张大表，摊在整库上做的话
-    /// 每翻一页都要多扫两遍；而它们**排不了序**（表头上没有这两列），所以补在后面
-    /// 不会让这一页的次序变。
+    /// 「元数据齐不齐」「年份」与「最高置信度」。这几样各要连一张大表，摊在整库上做的话
+    /// 每翻一页都要多扫两遍；而它们**这一页排不到**（前两样表头上压根没有；年份只有
+    /// 按年份排时才要，那时才连那张表），所以补在后面不会让这一页的次序变。
     ///
     /// # Errors
     /// 读库失败时返回错误。
@@ -1453,71 +1528,225 @@ impl Catalog {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let picked = self.work_page_anchors(query, offset, limit)?;
+        if picked.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out = self.work_page_totals(query, picked)?;
+        self.fill_scraped(&mut out)?;
+        self.fill_confidence(query, &mut out)?;
+        Ok(out)
+    }
+
+    /// 第一趟：**这一页是哪几行、按什么次序**。
+    ///
+    /// 只挑得出身份就够了，聚合一列都不算——那正是这一趟便宜的原因：`ORDER BY` 那口
+    /// 临时 b 树要把每一组连同它的聚合结果一起搬进去排，而搬的若只是
+    /// 「`work_id` + 那个键 + 名字」，同一份数据上实测 **40.6 → 17.3 毫秒**
+    /// （票 `gui-redesign/13`）。
+    ///
+    /// 例外是**按哪一列排就多算哪一列**（[`WorkOrder::select`]）：按容量排就得有
+    /// `SUM(bytes)`，不然排不出来。一次只多算一列，不是十列。
+    fn work_page_anchors(
+        &self,
+        query: &WorkQuery,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<(WorkAnchor, String, Option<SearchHit>)>, CatalogError> {
         let (rank_sql, rank_args) = query.rank_column();
         // 搜索着没有。**这一个布尔量决定下面那一列取不取**，而不是拿
         // 「取不到就算了」去猜——那样「没搜索」与「这一列读不出来」会混成一档。
         let searching = !rank_sql.is_empty();
+        // **年份那张表只在按年份排时才连**（票 `gui-redesign/13`）：它是一趟
+        // `scrape_value` 全表扫加一次分组，而画出来的那个年份由 [`Self::fill_scraped`]
+        // 顺路带回来——排序需要它，画不需要它。
+        let by_year = query.order == WorkOrder::Year;
+        let (from_sql, year_binds) = if by_year {
+            (WORK_FROM, year_args())
+        } else {
+            (WORK_FROM_BASE, Vec::new())
+        };
+        let order_column = query.order.select();
         let (where_sql, where_args) = query.where_clause();
         let order_sql = query.order_clause();
         // **参数按它们在这条 SQL 里出现的次序绑**：名次那一列在 `SELECT` 里，
         // 年份那张 join 在 `FROM` 里，筛选在 `WHERE` 里，翻页在最后。
         let mut args = rank_args;
-        args.extend(year_args());
+        args.extend(year_binds);
         args.extend(where_args);
         args.push(Box::new(i64::try_from(limit).unwrap_or(i64::MAX)));
         args.push(Box::new(i64::try_from(offset).unwrap_or(i64::MAX)));
         let sql = format!(
-            "SELECT {WORK_COLUMNS}{rank_sql}{WORK_FROM}{where_sql}{WORK_GROUP_BY}{order_sql} \
-             LIMIT ? OFFSET ?"
+            "SELECT {WORK_ANCHOR_COLUMNS}{order_column}{rank_sql}{from_sql}{where_sql}\
+             {WORK_GROUP_BY}{order_sql} LIMIT ? OFFSET ?"
         );
         let mut statement = self.conn.prepare(&sql).map_err(|source| self.err(source))?;
         let rows = statement
             .query_map(params_from_iter(args.iter()), |row| {
                 let work_id: Option<i64> = row.get(0)?;
                 let loose: Option<String> = row.get(1)?;
-                let unknowns = u64::try_from(row.get::<_, i64>(8)?).unwrap_or(0);
-                // 名次那一列**按名字取**：写死一个下标的话，往 [`WORK_COLUMNS`] 里
-                // 插一列就会静默指到别人身上。没搜索时它压根不在 `SELECT` 里，
-                // 那时一次都不问。
+                // 名次那一列**按名字取**：写死一个下标的话，往
+                // [`WORK_ANCHOR_COLUMNS`] 里插一列就会静默指到别人身上。没搜索时
+                // 它压根不在 `SELECT` 里，那时一次都不问。
                 let hit = if searching {
                     SearchHit::from_rank(row.get::<_, i64>("hit")?)
                 } else {
                     None
                 };
-                Ok(WorkRow {
-                    anchor: match (work_id, loose) {
+                Ok((
+                    match (work_id, loose) {
                         (Some(id), _) => WorkAnchor::Work(id),
                         (None, Some(key)) => WorkAnchor::Loose(key),
                         // 分组键的两支必有其一；真到不了这里，兜个不会撞上的值。
                         (None, None) => WorkAnchor::Loose(String::new()),
                     },
-                    name: row.get(2)?,
-                    variants: u64::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
-                    bytes: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
-                    unreadable_files: u64::try_from(row.get::<_, i64>(5)?).unwrap_or(0),
-                    platforms: platform_set(row.get(7)?, unknowns),
-                    year: row.get(9)?,
+                    row.get::<_, String>(2)?,
                     hit,
-                    // 这两样下面补。
-                    missing: WORK_FIELDS.to_vec(),
-                    confidence: None,
-                })
+                ))
             })
             .map_err(|source| self.err(source))?;
-        let mut out: Vec<WorkRow> = rows
-            .collect::<Result<_, _>>()
-            .map_err(|source| self.err(source))?;
-        self.fill_missing(&mut out)?;
-        self.fill_confidence(query, &mut out)?;
-        Ok(out)
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
     }
 
-    /// 补上这一页每一行「**元数据齐不齐**」。
+    /// 第二趟：**只给这一页那几百行算聚合**——变体数、容量、读不到的成员、平台集合。
+    ///
+    /// **筛的是同一批变体**：这一行底下挂着几个变体是**按当前筛选算**的，屏上写的、
+    /// 详情面板列的、批量操作动的是同一个数（票 `gui-redesign/03`）。所以这一趟原样
+    /// 用那六维加那棵条件树（[`WorkQuery::variant_filter`]）。摊到全库上算的话每翻一页
+    /// 都要给一万多组各算一遍，而其中一万组当场就被 `LIMIT` 扔了。
+    ///
+    /// **搜索那三条不带**，而这不是漏了一条：它们**组内恒定**——三条读的都是
+    /// `work.name` 或者没认出作品时那个变体自己的键，也就是这一组的身份本身
+    /// （见 [`Search::filter`]）。第一趟已经按它挑过了，这一趟再判一遍，
+    /// 每一行的答案都一样，只是白扫一遍（实测那一遍要 36 毫秒）。
+    /// 反过来说，若哪天有一条搜索路变成逐行不同的，屏上「变体数」就会跟着搜索词变
+    /// ——那正是 [`Search::description`] 挑锚点时挡下的事，也是
+    /// 「靠简介命中的那一行变体数一个都不少」那条测试钉住的事。
+    ///
+    /// 出来的次序照**第一趟**排好的那个，不看这一趟的：这一趟是按身份查回来的，
+    /// 它自己没有次序。
+    fn work_page_totals(
+        &self,
+        query: &WorkQuery,
+        picked: Vec<(WorkAnchor, String, Option<SearchHit>)>,
+    ) -> Result<Vec<WorkRow>, CatalogError> {
+        // 一行都没挑着就没什么可算的。**这一句同时是下面那段 SQL 的前提**：
+        // 两支都空的话拼出来的是 `AND ()`，那不是一条读得懂的 SQL。
+        if picked.is_empty() {
+            return Ok(Vec::new());
+        }
+        let works: Vec<i64> = picked
+            .iter()
+            .filter_map(|(anchor, _, _)| match anchor {
+                WorkAnchor::Work(id) => Some(*id),
+                WorkAnchor::Loose(_) => None,
+            })
+            .collect();
+        let loose: Vec<&str> = picked
+            .iter()
+            .filter_map(|(anchor, _, _)| match anchor {
+                WorkAnchor::Loose(key) => Some(key.as_str()),
+                WorkAnchor::Work(_) => None,
+            })
+            .collect();
+        let (where_sql, where_args) = query.variant_filter().where_clause();
+        // 两支各挑各的：认出作品的按 `work_id`，没认出来的按它自己的键。
+        // **空的那一支不写进去**——`IN ()` 恒不成立，写了只是让计划多一支。
+        let mut branches: Vec<String> = Vec::new();
+        if !works.is_empty() {
+            branches.push(format!("variant.work_id IN ({})", placeholders(works.len())));
+        }
+        if !loose.is_empty() {
+            branches.push(format!(
+                "(variant.work_id IS NULL AND variant.key IN ({}))",
+                placeholders(loose.len())
+            ));
+        }
+        let sql = format!(
+            "SELECT {WORK_TOTAL_COLUMNS}{WORK_FROM_BASE}{where_sql}{glue} ({branch})\
+             {WORK_GROUP_BY}",
+            glue = if where_sql.is_empty() { " WHERE" } else { " AND" },
+            branch = branches.join(" OR "),
+        );
+        let mut args = where_args;
+        for id in &works {
+            args.push(Box::new(*id));
+        }
+        for key in &loose {
+            args.push(Box::new((*key).to_string()));
+        }
+        let mut statement = self.conn.prepare(&sql).map_err(|source| self.err(source))?;
+        let found = statement
+            .query_map(params_from_iter(args.iter()), |row| {
+                let work_id: Option<i64> = row.get(0)?;
+                let key: Option<String> = row.get(1)?;
+                let anchor = match (work_id, key) {
+                    (Some(id), _) => WorkAnchor::Work(id),
+                    (None, Some(key)) => WorkAnchor::Loose(key),
+                    (None, None) => WorkAnchor::Loose(String::new()),
+                };
+                let unknowns = u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0);
+                Ok((
+                    anchor,
+                    (
+                        u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+                        u64::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
+                        u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
+                        platform_set(row.get(5)?, unknowns),
+                    ),
+                ))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut totals: std::collections::BTreeMap<WorkAnchor, (u64, u64, u64, Vec<String>)> =
+            std::collections::BTreeMap::new();
+        for row in found {
+            let (anchor, total) = row.map_err(|source| self.err(source))?;
+            totals.insert(anchor, total);
+        }
+        Ok(picked
+            .into_iter()
+            .map(|(anchor, name, hit)| {
+                // 挑着了却算不出聚合，只有一种可能：**两趟之间有人把这一组写没了**
+                // （扫描跑在另一条连接上，WAL 允许一写多读）。那时这一行画成
+                // 「0 个变体」——下一次读库就没有它了。同一份暴露面
+                // [`Self::fill_scraped`] 与 [`Self::fill_confidence`] 本来就有：
+                // 这一层从来不是一条 SQL 出一整页。
+                let (variants, bytes, unreadable_files, platforms) =
+                    totals.remove(&anchor).unwrap_or_default();
+                WorkRow {
+                    anchor,
+                    name,
+                    platforms,
+                    variants,
+                    bytes,
+                    unreadable_files,
+                    hit,
+                    // 这三样下面补。
+                    year: None,
+                    missing: WORK_FIELDS.to_vec(),
+                    confidence: None,
+                }
+            })
+            .collect())
+    }
+
+    /// 补上这一页每一行「**元数据齐不齐**」与那一列**年份**。
     ///
     /// 锚点两支分开问：认出作品的看**作品**锚点，没认出来的看**变体**锚点——
     /// 与 `converge` 挑值时走的是同一条岔路，于是屏上写着「齐」的那一行，导出时
     /// 真的填得满。
-    fn fill_missing(&self, rows: &mut [WorkRow]) -> Result<(), CatalogError> {
+    ///
+    /// **年份跟这一趟一起回来**（票 `gui-redesign/13`）：它本来是主查询里一张
+    /// `LEFT JOIN`，而那张 join 是一趟 `scrape_value` 全表扫加一次分组——每翻一页都做
+    /// 一遍。可这一趟读的**是同一张表、同一批锚点、同一批 subject**，年份又已经在
+    /// [`WORK_FIELDS`] 里，多取一列值就有了。取法与那张 join 一字不差：
+    /// **裁决优先，其次取最早的那一个**（ADR-0001；一部作品跨地区先后发行好几次，
+    /// 最早的那次才是它的年份）。
+    ///
+    /// 按年份排时主查询照旧连那张表——`ORDER BY` 要有个 `year` 可指——但**画出来的
+    /// 那一个一律是这里补的这个**：两处取法相同，屏上不会因为换了排序就换个年份。
+    fn fill_scraped(&self, rows: &mut [WorkRow]) -> Result<(), CatalogError> {
         for anchor in [AnchorKind::Work, AnchorKind::Variant] {
             let subjects: Vec<&str> = rows
                 .iter()
@@ -1528,13 +1757,18 @@ impl Catalog {
                 continue;
             }
             let sql = format!(
-                "SELECT subject, field FROM scrape_value
+                "SELECT subject, field,
+                        COALESCE(MIN(CASE WHEN source = ? THEN value END), MIN(value)) AS value
+                   FROM scrape_value
                   WHERE anchor = ? AND field IN ({}) AND subject IN ({})
                   GROUP BY subject, field",
                 placeholders(WORK_FIELDS.len()),
                 placeholders(subjects.len()),
             );
-            let mut args: Vec<Box<dyn ToSql>> = vec![Box::new(anchor.label().to_string())];
+            let mut args: Vec<Box<dyn ToSql>> = vec![
+                Box::new(crate::scrape::priority::VERDICT.to_string()),
+                Box::new(anchor.label().to_string()),
+            ];
             for field in WORK_FIELDS {
                 args.push(Box::new(field.label().to_string()));
             }
@@ -1544,13 +1778,25 @@ impl Catalog {
             let mut statement = self.conn.prepare(&sql).map_err(|source| self.err(source))?;
             let found = statement
                 .query_map(params_from_iter(args.iter()), |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
                 })
                 .map_err(|source| self.err(source))?;
             let mut have: std::collections::BTreeSet<(String, String)> =
                 std::collections::BTreeSet::new();
+            let mut years: std::collections::BTreeMap<String, String> =
+                std::collections::BTreeMap::new();
             for row in found {
-                have.insert(row.map_err(|source| self.err(source))?);
+                let (subject, field, value) = row.map_err(|source| self.err(source))?;
+                if field == Field::Year.label()
+                    && let Some(value) = value
+                {
+                    years.insert(subject.clone(), value);
+                }
+                have.insert((subject, field));
             }
             for row in rows
                 .iter_mut()
@@ -1562,6 +1808,7 @@ impl Catalog {
                         !have.contains(&(row.name.clone(), field.label().to_string()))
                     })
                     .collect();
+                row.year = years.get(&row.name).cloned();
             }
         }
         Ok(())

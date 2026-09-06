@@ -105,6 +105,27 @@ CREATE INDEX IF NOT EXISTS variant_rule_key ON variant(rule, key);
 CREATE INDEX IF NOT EXISTS variant_files_key ON variant(files, key);
 CREATE INDEX IF NOT EXISTS variant_bytes_key ON variant(bytes, key);
 
+-- **作品级主列表那一条 `GROUP BY` 走的索引**（票 `gui-redesign/13`）。
+--
+-- 上面四条接的是变体表的 `ORDER BY`；这一条接的是**分组**。主列表按「一个作品一行」
+-- 出行，分组键是 `(work_id, 没认出作品时那个变体自己的键)`——`work_id` 上虽然已经有
+-- `variant_work`，但第二项是个**表达式**，索引里没有，于是 SQLite 只能把 46,428 行
+-- 全塞进一口临时 b 树里排一遍才分得出组。把那个表达式原样写进索引，那口 b 树就没了
+-- （查询计划从 `USE TEMP B-TREE FOR GROUP BY` 变成 `SCAN variant USING INDEX`）。
+--
+-- 单把这一条加上、别的都不动，实测（release，46,428 个变体收敛成 10,978 行）：
+-- 数一次总行数与取一页那条查询**各快一倍以上**。整条路的改前改后见
+-- `docs/library-facts.md`「作品级主列表翻一页要多久」，量的命令是 `--bench-paging`。
+--
+-- ⚠️ 表达式要与查询里那一条**是同一个表达式**（`catalog::browse` 的 `WORK_GROUP_BY`）。
+-- 「同一个」比的是名字解析之后那棵树，不是字面：这里写 `work_id` / `key`，查询里写
+-- `variant.work_id` / `variant.key`，解析到同一列，认得上（索引定义里反倒不许带表名）。
+-- 但**换一个写法就认不上了**——比如把 `CASE` 改成 `iif`、或者调换两支——
+-- 而且不会报错，只是悄悄慢回去。改动那一句时用 `EXPLAIN QUERY PLAN` 看一眼：
+-- 认上了是 `SCAN variant USING INDEX variant_group`，认不上是 `USE TEMP B-TREE FOR GROUP BY`。
+CREATE INDEX IF NOT EXISTS variant_group
+    ON variant(work_id, CASE WHEN work_id IS NULL THEN key END);
+
 -- 变体的成员：一个条目只属于一个变体，因此键就是主键。
 -- `role` 是**主文件 / 附属文件 / 内部资源 / 附属内容**之一。
 -- 目录树成型出来的变体，它的主文件成员是**那个目录本身**。

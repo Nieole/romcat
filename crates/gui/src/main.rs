@@ -33,6 +33,23 @@ use romcat_gui::site::Locate;
 use romcat_gui::{bench, demo};
 use romcat_gui::{font, headless};
 
+/// 实测那几条不给 `--rows` 时造多少个变体。**十万行是变体表那条线的量级**（票 22）。
+#[cfg(feature = "demo")]
+const BENCH_ROWS: u64 = 100_000;
+
+/// `--bench-paging` 不给 `--rows` 时造多少个变体。
+///
+/// **它与 [`PAGING_WORKS`] 是一对**：46,428 个变体、7,407 个作品，加上 1/13 那批
+/// 「还没识别」的（一个变体一行），正好收出真库的形状——**10,978 行**。
+/// 别的实测量的是帧率与面板，与收敛成多少行无关，所以它们照旧用 [`BENCH_ROWS`]。
+/// 数字的出处见 `docs/library-facts.md`（票 `gui-redesign/13`）。
+#[cfg(feature = "demo")]
+const PAGING_ROWS: u64 = 46_428;
+
+/// `--bench-paging` 不给 `--bench-works` 时造多少个作品。见 [`PAGING_ROWS`]。
+#[cfg(feature = "demo")]
+const PAGING_WORKS: usize = 7_407;
+
 /// 没说开哪份库时说的那句话。**不擅自造一份假的**。
 const NO_LIBRARY: &str = "说清要开哪份库：\n\
      \x20 romcat-gui <主库根>\n\
@@ -80,10 +97,12 @@ struct Args {
     #[arg(long, value_name = "条数", default_value_t = demo::QUEUE_ROWS)]
     queue_rows: u64,
 
-    /// `--bench` 用的合成变体数（那一条量的是变体表，不是队列）
+    /// 合成变体数（`--bench` / `--bench-browse` / `--bench-paging` / `--bench-sublibrary` 共用）
+    ///
+    /// 不给就按各条自己的默认：`--bench-paging` 是 46,428（真库的规模），其余是 100,000
     #[cfg(feature = "demo")]
-    #[arg(long, value_name = "行数", default_value_t = 100_000)]
-    rows: u64,
+    #[arg(long, value_name = "行数")]
+    rows: Option<u64>,
 
     /// 不开窗，滚一遍变体表量每帧的代价，打印中位数与最慢的一帧
     #[cfg(feature = "demo")]
@@ -101,6 +120,21 @@ struct Args {
     #[cfg(feature = "demo")]
     #[arg(long, value_name = "帧数", num_args = 0..=1, default_missing_value = "240")]
     bench_browse: Option<u32>,
+
+    /// 不开窗，量**主列表翻页**：`work_total` 与 `work_page` 在三种排法、三种搜法与筛着时各多久
+    ///
+    /// 量的是**核心库那两条查询本身**，不是一帧画多久——翻页贵在库里
+    #[cfg(feature = "demo")]
+    #[arg(long)]
+    bench_paging: bool,
+
+    /// `--bench-paging` 那份合成数据里有几个作品，也就是那些变体收敛成多少行
+    ///
+    /// 默认 7,407，配上默认的 46,428 个变体（其中 1/13 是「还没识别」，一个变体一行），
+    /// **正好收出真库的形状：46,428 变体 → 10,978 行**。两个数是一对，动一个就得动另一个
+    #[cfg(feature = "demo")]
+    #[arg(long, value_name = "个数", default_value_t = PAGING_WORKS)]
+    bench_works: usize,
 
     /// 不开窗，量**子库**：建一个、写一条规则、排一次差量预览
     ///
@@ -137,6 +171,20 @@ impl Args {
         }
     }
 
+    /// 这一趟造多少个变体：`--rows` 说了就听它的，没说就是 [`BENCH_ROWS`]。
+    #[cfg(feature = "demo")]
+    fn rows(&self) -> u64 {
+        self.rows.unwrap_or(BENCH_ROWS)
+    }
+
+    /// 同上，但 `--bench-paging` 那条的默认是 [`PAGING_ROWS`]——**它量的是收敛成多少行，
+    /// 而那正是真库形状的那一半**，拿十万行量出来的数与 `docs/library-facts.md` 那张表
+    /// 不可比。
+    #[cfg(feature = "demo")]
+    fn paging_rows(&self) -> u64 {
+        self.rows.unwrap_or(PAGING_ROWS)
+    }
+
     /// 说了要开合成数据吗。没编进 `demo` feature 时**永远是否**。
     #[cfg(feature = "demo")]
     fn wants_demo(&self) -> bool {
@@ -155,6 +203,7 @@ impl Args {
         self.bench.is_some()
             || self.bench_queue.is_some()
             || self.bench_browse.is_some()
+            || self.bench_paging
             || self.bench_sublibrary
     }
 
@@ -297,6 +346,9 @@ fn benches(args: &Args) -> Option<ExitCode> {
     if let Some(frames) = args.bench_browse {
         return Some(bench_browse(args, frames));
     }
+    if args.bench_paging {
+        return Some(bench_paging(args));
+    }
     if args.bench_sublibrary {
         return Some(bench_sublibrary(args));
     }
@@ -306,7 +358,7 @@ fn benches(args: &Args) -> Option<ExitCode> {
 /// 量一遍**变体表**：十万行虚拟滚动的代价（票 22）。
 #[cfg(feature = "demo")]
 fn bench_scroll(args: &Args, frames: u32) -> ExitCode {
-    let rows = args.rows;
+    let rows = args.rows();
     let site = match args.open_for_bench(|| {
         demo::synthetic(rows).map_err(|error| format!("造不出合成数据：{error}"))
     }) {
@@ -343,7 +395,7 @@ fn fail(message: &str) -> ExitCode {
 /// 量一遍**浏览屏**。开了现成的库就量真库，不然量合成数据。
 #[cfg(feature = "demo")]
 fn bench_browse(args: &Args, frames: u32) -> ExitCode {
-    let rows = args.rows;
+    let rows = args.rows();
     let site = match args
         .open_for_bench(|| demo::browse(rows).map_err(|error| format!("造不出合成数据：{error}")))
     {
@@ -353,6 +405,23 @@ fn bench_browse(args: &Args, frames: u32) -> ExitCode {
     let mut app = App::new(site, args.workspace_dir());
     let cost = bench::browse(&mut app, frames);
     print!("{}", cost.render());
+    ExitCode::SUCCESS
+}
+
+/// 量一遍**主列表翻页**。开了现成的库就量真库，不然量合成数据。
+///
+/// 合成数据的**作品数**由 `--bench-works` 定：主列表那条查询的代价跟着分出来多少组走，
+/// 二十个作品收出来的 3,596 行不是真库的形状（票 `gui-redesign/13`）。
+#[cfg(feature = "demo")]
+fn bench_paging(args: &Args) -> ExitCode {
+    let (rows, works) = (args.paging_rows(), args.bench_works);
+    let site = match args.open_for_bench(|| {
+        demo::browse_shaped(rows, works).map_err(|error| format!("造不出合成数据：{error}"))
+    }) {
+        Ok(site) => site,
+        Err(message) => return fail(&message),
+    };
+    print!("{}", bench::paging(&site.catalog).render());
     ExitCode::SUCCESS
 }
 
@@ -367,7 +436,7 @@ fn bench_sublibrary(args: &Args) -> ExitCode {
             "`--bench-sublibrary` 会往中立库里建一个子库，只能在合成数据上跑。\n             去掉 `--catalog` / `--library` / 主库根。",
         );
     }
-    let rows = args.rows;
+    let rows = args.rows();
     let site = match demo::site(match demo::browse(rows) {
         Ok(catalog) => catalog,
         Err(error) => return fail(&format!("造不出合成数据：{error}")),

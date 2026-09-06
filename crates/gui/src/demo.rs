@@ -616,6 +616,19 @@ const REGIONS: &[(&str, &str)] = &[
     ("Asia", "Ja,Zh-Hant,En"),
 ];
 
+/// 合成数据里第 `at` 个作品叫什么。
+///
+/// 头 [`WORKS`] 条是那批手写的名字——繁简、假名、罗马数字、符号各占几条，字体那条
+/// 验收靠它们。再往后**按真库的形状补出来**：真库上 46,428 个变体收敛成 10,978 行，
+/// 二十个作品收不出那个形状，而主列表那条查询贵在**分出来多少组**，组数不对量出来的
+/// 就不是真库的代价（票 `gui-redesign/13`）。
+fn 作品名(at: usize) -> String {
+    match WORKS.get(at) {
+        Some(name) => (*name).to_string(),
+        None => format!("{} 第{at}作", WORKS[at % WORKS.len()]),
+    }
+}
+
 /// 一份**浏览**与**子库**用的中立库：`rows` 个变体，连作品、发行版、合集、
 /// 识别结论、**标题集合**与**媒体**引用，而且每个变体真的有一个**文件成员**。
 ///
@@ -629,8 +642,19 @@ const REGIONS: &[(&str, &str)] = &[
 ///
 /// # Errors
 /// 建库或写库失败时返回错误。
-#[allow(clippy::too_many_lines)]
 pub fn browse(rows: u64) -> Result<Catalog, CatalogError> {
+    browse_shaped(rows, WORKS.len())
+}
+
+/// 同 [`browse`]，但**作品有几个由调用方定**——也就是那 `rows` 个变体收敛成多少行。
+///
+/// 主列表那条查询的代价跟着**组数**走，而 [`browse`] 那二十个作品收出来的是
+/// 3,596 行：真库是 10,978 行。量翻页要的是后者（票 `gui-redesign/13`）。
+///
+/// # Errors
+/// 建库或写库失败时返回错误。
+#[allow(clippy::too_many_lines)]
+pub fn browse_shaped(rows: u64, works_count: usize) -> Result<Catalog, CatalogError> {
     use romcat_core::catalog::identify::Provenance;
     use romcat_core::catalog::scrape::{Harvested, HarvestedMedia, HarvestedValue};
     use romcat_core::catalog::title::TitleRow;
@@ -641,9 +665,10 @@ pub fn browse(rows: u64) -> Result<Catalog, CatalogError> {
     use romcat_core::scrape::{AnchorKind, Field, MediaKind};
     use romcat_core::title::{Language, TitleKind};
 
+    let works_count = works_count.max(1);
     let key_of = |i: u64| {
         let platform = PLATFORMS[(i as usize) % PLATFORMS.len()];
-        let work = WORKS[(i as usize / 3) % WORKS.len()];
+        let work = 作品名((i as usize / 3) % works_count);
         let mark = MARKS[(i as usize / 7) % MARKS.len()];
         format!("{DEMO_ROOT}/{platform}/{work}（{mark}）#{i:06}.zip")
     };
@@ -716,10 +741,10 @@ pub fn browse(rows: u64) -> Result<Catalog, CatalogError> {
     catalog.write(1, &entries)?;
     catalog.replace_variants(&variants, 1, &Manifest::default())?;
 
-    // 一、作品与发行版。作品 20 个，发行版是「作品 × 平台 × 地区」里真用得上的那些。
-    let mut works = Vec::with_capacity(WORKS.len());
-    for name in WORKS {
-        works.push(catalog.add_work(name, Provenance::Identified)?);
+    // 一、作品与发行版。发行版是「作品 × 平台 × 地区」里真用得上的那些。
+    let mut works = Vec::with_capacity(works_count);
+    for at in 0..works_count {
+        works.push(catalog.add_work(&作品名(at), Provenance::Identified)?);
     }
     let mut releases: Vec<i64> = Vec::new();
     for (at, work) in works.iter().enumerate() {
@@ -778,7 +803,7 @@ pub fn browse(rows: u64) -> Result<Catalog, CatalogError> {
                         platform: PLATFORMS[(i as usize) % PLATFORMS.len()].to_string(),
                         game: format!(
                             "{} ({})",
-                            WORKS[(i as usize / 3) % WORKS.len()],
+                            作品名((i as usize / 3) % works_count),
                             mark.label()
                         ),
                         rom: "rom.bin".to_string(),
@@ -832,7 +857,8 @@ pub fn browse(rows: u64) -> Result<Catalog, CatalogError> {
     // 四、**标题集合**：每个作品三条叫法。中文那条是**官中版的官方译名**——
     //     ADR-0012 那句「首选变体与标题来源解耦」要看得见，就得真有这么一条。
     let mut titles = Vec::new();
-    for (at, work) in WORKS.iter().enumerate() {
+    for at in 0..works_count {
+        let work = 作品名(at);
         for (value, language, kind, source, region) in [
             (
                 format!("Work {at:02} (USA)"),
@@ -849,7 +875,7 @@ pub fn browse(rows: u64) -> Result<Catalog, CatalogError> {
                 Some("Japan"),
             ),
             (
-                (*work).to_string(),
+                work.clone(),
                 Language::Chinese,
                 TitleKind::Translated,
                 "Redump",
@@ -857,7 +883,7 @@ pub fn browse(rows: u64) -> Result<Catalog, CatalogError> {
             ),
         ] {
             titles.push(TitleRow {
-                work: (*work).to_string(),
+                work: work.clone(),
                 value,
                 language,
                 kind,
@@ -890,7 +916,8 @@ pub fn browse(rows: u64) -> Result<Catalog, CatalogError> {
     // 五、**媒体**：封面每个作品都有，截图只有一半有，视频一个都没有——
     //     「这条缺哪些媒体」那条验收要有东西可缺。
     let mut harvested = Vec::new();
-    for (at, work) in WORKS.iter().enumerate() {
+    for at in 0..works_count {
+        let work = 作品名(at);
         let mut media = Vec::new();
         for (kind, salt) in [(MediaKind::Cover, 0), (MediaKind::Screenshot, 1)] {
             if kind == MediaKind::Screenshot && !at.is_multiple_of(2) {
@@ -906,7 +933,7 @@ pub fn browse(rows: u64) -> Result<Catalog, CatalogError> {
         }
         harvested.push(Harvested {
             anchor: AnchorKind::Work.label().to_string(),
-            subject: (*work).to_string(),
+            subject: work,
             source: "合成数据".to_string(),
             input: format!("合成 {at}"),
             values: vec![HarvestedValue {

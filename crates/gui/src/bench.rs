@@ -20,12 +20,14 @@
 
 use std::time::Instant;
 
+use romcat_core::catalog::browse::{WorkOrder, WorkQuery};
+use romcat_core::catalog::{Catalog, PlatformFilter, VariantQuery};
 use romcat_core::report::thousands;
 use romcat_core::triage::{Axis, Draft, Overrides};
 
 use crate::app::App;
 use crate::headless::{self, VIEWPORT};
-use crate::table::ROW_HEIGHT;
+use crate::table::{ROW_HEIGHT, SPAN};
 
 /// 一次实测的结果，毫秒。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -631,5 +633,189 @@ pub fn sublibrary(
             over_capacity: prepared.plan.over_capacity,
             trims: prepared.plan.trim_suggestions.len(),
         },
+    }
+}
+
+/// **主列表翻页**量出来的代价，毫秒。
+///
+/// 量的不是「一帧多少毫秒」——那一半 [`scroll`] 与 [`browse`] 已经量过了。
+/// 这一条量的是**核心库那两条查询本身**：`work_total`（滚动条的长度）与
+/// `work_page`（屏上那一窗 512 行）。两件事分开量，才分得清慢的是
+/// `GROUP BY`、`ORDER BY`，还是搜索那三条 `OR`（票 `gui-redesign/13`）。
+///
+/// **一个字节都不写库。**
+#[derive(Debug, Clone, PartialEq)]
+pub struct PagingCost {
+    /// 库里一共多少个变体。
+    pub variants: u64,
+    /// 收敛成多少行。
+    pub rows: u64,
+    /// 一窗几行。
+    pub page: u64,
+    /// 各量了一趟。
+    pub probes: Vec<PagingProbe>,
+}
+
+/// 一趟翻页的量法与量出来的数。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PagingProbe {
+    /// 这一趟量的是什么（搜没搜、按哪一列排）。
+    pub label: String,
+    /// 这个筛选下剩多少行。
+    pub matched: u64,
+    /// **数一次总行数**要多久（`work_total`）。
+    pub total_ms: f64,
+    /// **取第一页**要多久（`work_page`，`OFFSET 0`）。
+    pub first_ms: f64,
+    /// **翻到最后一页**要多久（`OFFSET` 顶到底）。**滚动条一拖到底就是它。**
+    pub last_ms: f64,
+}
+
+impl PagingCost {
+    /// 排成给人看的几行。
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut out = format!(
+            "主列表翻页：{} 个变体收敛成 {} 行，一窗 {} 行\n\
+             {:<30}{:>10}{:>12}{:>12}{:>12}\n",
+            thousands(self.variants),
+            thousands(self.rows),
+            self.page,
+            "量的是什么",
+            "命中行数",
+            "数总行数",
+            "第一页",
+            "最后一页",
+        );
+        for probe in &self.probes {
+            out.push_str(&format!(
+                "{:<30}{:>10}{:>9.1} ms{:>9.1} ms{:>9.1} ms\n",
+                probe.label,
+                thousands(probe.matched),
+                probe.total_ms,
+                probe.first_ms,
+                probe.last_ms,
+            ));
+        }
+        out
+    }
+}
+
+/// 一窗几行：与界面上那扇窗**同一个数**（[`SPAN`]）。这张票只治时间，
+/// 内存那一半一点不许退。
+const PAGING_WINDOW: u64 = SPAN;
+
+/// 同一条查询跑几趟取中位数。头一趟连页缓存与临时表一起热身，不计。
+const PAGING_RUNS: usize = 5;
+
+/// 跑几趟取中位数。
+fn median_ms(mut runs: impl FnMut()) -> f64 {
+    let mut costs: Vec<f64> = Vec::with_capacity(PAGING_RUNS);
+    for at in 0..=PAGING_RUNS {
+        let started = Instant::now();
+        runs();
+        let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+        if at > 0 {
+            costs.push(elapsed);
+        }
+    }
+    costs.sort_by(f64::total_cmp);
+    costs[costs.len() / 2]
+}
+
+/// 量一趟：数总行数、取第一页、翻到最后一页。
+fn probe(catalog: &Catalog, label: &str, query: &WorkQuery) -> PagingProbe {
+    let matched = catalog.work_total(query).unwrap_or(0);
+    let last = matched.saturating_sub(PAGING_WINDOW);
+    PagingProbe {
+        label: label.to_string(),
+        matched,
+        total_ms: median_ms(|| {
+            let _ = catalog.work_total(query);
+        }),
+        first_ms: median_ms(|| {
+            let _ = catalog.work_page(query, 0, PAGING_WINDOW);
+        }),
+        last_ms: median_ms(|| {
+            let _ = catalog.work_page(query, last, PAGING_WINDOW);
+        }),
+    }
+}
+
+/// 量一遍**主列表翻页**：三种排法、三种搜法、外加筛着的那两趟，各量一趟。
+///
+/// 搜索那三个词各挑一条命中路（名字 / 别名 / 一条都不命中），因为它们在
+/// `WHERE` 里是三条 `OR` 且**短路求值**：名字就命中的行走不到后两条，
+/// 一条都不命中的那一行三条全跑满——那是这条代价的上界（挂单 Q108）。
+///
+/// **筛着的那两趟不是凑数**：搜索那三条改成非相关子查询之后，扫表那笔开销是
+/// **固定的**，与筛剩几行无关——筛得很窄时它就显出来（挂单 Q155）。
+/// 那一格在这张表里常驻，以后谁再动搜索那一层，它会自己说话。
+#[must_use]
+pub fn paging(catalog: &Catalog) -> PagingCost {
+    let variants = catalog.variant_total(&VariantQuery::default()).unwrap_or(0);
+    let rows = catalog.work_total(&WorkQuery::default()).unwrap_or(0);
+    let mut probes = Vec::new();
+    for (label, order) in [
+        ("不搜、按作品名（默认）", WorkOrder::Name),
+        ("不搜、按容量", WorkOrder::Bytes),
+        ("不搜、按年份", WorkOrder::Year),
+    ] {
+        probes.push(probe(
+            catalog,
+            label,
+            &WorkQuery {
+                order,
+                ..WorkQuery::default()
+            },
+        ));
+    }
+    for (label, needle) in [
+        ("搜「幻想」（名字命中）", "幻想"),
+        ("搜「Sakuhin 1」（别名命中）", "Sakuhin 1"),
+        ("搜「外星人」（一条不中）", "外星人"),
+    ] {
+        probes.push(probe(
+            catalog,
+            label,
+            &WorkQuery {
+                search: needle.to_string(),
+                ..WorkQuery::default()
+            },
+        ));
+    }
+    // **筛着的时候也量一趟**：筛选把行收窄之后，`WHERE` 上那一维自己有索引
+    // （`variant_platform_key`），而分组那条又有 `variant_group`——两条索引摆在一起，
+    // SQLite 挑哪一条不是想当然的事，得量出来（票 `gui-redesign/13`）。
+    // 挑**最大的那个平台**：量的该是「筛完还剩不少」那种，不是最小的那种。
+    if let Some(platform) = catalog
+        .facets()
+        .ok()
+        .and_then(|facets| facets.platforms.first().map(|facet| facet.value.clone()))
+    {
+        let picked = Some(PlatformFilter::from_label(&platform));
+        probes.push(probe(
+            catalog,
+            &format!("按平台筛（{platform}）"),
+            &WorkQuery {
+                platform: picked.clone(),
+                ..WorkQuery::default()
+            },
+        ));
+        probes.push(probe(
+            catalog,
+            &format!("按平台筛（{platform}）+ 搜"),
+            &WorkQuery {
+                platform: picked,
+                search: "幻想".to_string(),
+                ..WorkQuery::default()
+            },
+        ));
+    }
+    PagingCost {
+        variants,
+        rows,
+        page: PAGING_WINDOW,
+        probes,
     }
 }
