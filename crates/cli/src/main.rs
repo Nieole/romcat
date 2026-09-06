@@ -4466,13 +4466,16 @@ fn run_sublibrary_sync(args: &SubSyncArgs, cancel: &CancelToken) -> ExitCode {
         // **默认不缓存**（ADR-0017）：不给 `--convert-cache` 就边转边流式写进目标。
         convert_cache: args.convert_cache.as_deref(),
     };
+    // 把手与 Ctrl-C 共用同一个中断信号：按下去的是同一件事（`scan` 那一条也是这么接的）。
+    // 命令行这一侧没人看进度条，把手在这儿只管「按了 Ctrl-C 就停在两个文件之间」。
+    let task = romcat_core::task::Handle::with_cancel(cancel.clone());
     let outcome = match sync::execute::run(
         &ready.plan,
         &ready.desired,
         &ready.actual,
         &ready.manifest,
         &sources,
-        cancel,
+        &task,
     ) {
         Ok(outcome) => outcome,
         Err(error) => return fail(format!("目标写不了：{error}")),

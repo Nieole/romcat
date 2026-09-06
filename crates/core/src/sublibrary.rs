@@ -49,6 +49,7 @@ use serde::Serialize;
 
 use crate::catalog::{Catalog, CatalogError};
 use crate::scrape::{AnchorKind, Field};
+use crate::task::Handle;
 
 pub use rule::{Bound, Clause, Dimension, Group, Join, Node, Op, Rule, RuleError};
 
@@ -770,6 +771,54 @@ pub fn facts(catalog: &Catalog) -> Result<Vec<VariantFacts>, CatalogError> {
         row.work = work;
         row.key = variant.key;
         out.push(row);
+    }
+    Ok(out)
+}
+
+/// **算一遍容量**：每台设备各求一次选择集，折出各自的[选择集报告](report::SelectionReport)。
+///
+/// ## 折一趟事实，全部设备共用
+///
+/// 大头是 [`facts`] 走一遍全库（真机量级上 343 毫秒，挂账 D156），而按选择集求值是
+/// 内存里的事。一台一折的话，五张卡就是五趟全库。
+///
+/// ## 不碰目标设备
+///
+/// 「这套规则选出多少、装不装得下」只要中立库——卡不在手边也算得出来（ADR-0009）。
+/// 要目标设备在位的是**差量预览**（[`sync::prepare`](fn@crate::sync::prepare)），那是另一趟活。
+///
+/// `task` 是这一趟的**把手**：折事实一步，此后一台设备一步。**整条只读**，
+/// 所以被叫停时停在哪儿都是干净的——一个字节都没写，再算一次就是。
+///
+/// # Errors
+/// 中立库读不动时返回一句给人看的话；被叫停时返回
+/// [`Halted`](crate::task::Halted) 那句话。
+pub fn survey(
+    catalog: &Catalog,
+    sublibraries: &[Sublibrary],
+    task: &Handle,
+) -> Result<BTreeMap<String, report::SelectionReport>, String> {
+    // 折事实那一步 + 一台设备一步。
+    task.steps(u32::try_from(sublibraries.len() + 1).unwrap_or(u32::MAX));
+    task.step("折事实")?;
+    let facts = facts(catalog).map_err(|error| format!("中立库读不动：{error}"))?;
+    let mut out = BTreeMap::new();
+    for sublibrary in sublibraries {
+        task.step(&format!("算「{}」", sublibrary.name))?;
+        let loaded = catalog
+            .selection(&sublibrary.name)
+            .map_err(|error| format!("中立库读不动：{error}"))?;
+        let selected = select(&loaded.selection, &facts);
+        out.insert(
+            sublibrary.name.clone(),
+            report::SelectionReport::build(
+                catalog.location(),
+                sublibrary,
+                &loaded,
+                &facts,
+                &selected,
+            ),
+        );
     }
     Ok(out)
 }

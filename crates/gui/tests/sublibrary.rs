@@ -10,6 +10,9 @@
 //! - **只碰清单里记录过的文件**（ADR-0015）：维护者自己拷进卡里的东西，同步前后
 //!   连修改时间都一样。
 //! - **目标不许落在主库里**（ADR-0004）：存下来那一步就拦，不等到点同步。
+//! - **三条长活全走任务台**（票 `gui-redesign/15`）：排差量预览、算一遍容量、同步。
+//!   而**台上排着的那一趟认的是排它时那份计划**——破了这一条，人改完规则、台上那趟旧活
+//!   跑起来，往卡上写的就是他已经改掉的那一批。
 //!
 //! 目标设备**一律拿本地 fixture 目录模拟**：绝不去动任何真实设备或 SD 卡。
 
@@ -97,7 +100,7 @@ fn 建库() -> TempDir {
 /// 一整套现场：fixture 主库、工作目录、当目标用的那个 fixture 目录、界面。
 struct 现场 {
     库: TempDir,
-    _工作区: TempDir,
+    工作区: TempDir,
     卡: TempDir,
     app: App,
 }
@@ -137,7 +140,7 @@ impl 现场 {
         app.show_view(View::Sublibraries);
         Self {
             库,
-            _工作区: 工作区,
+            工作区,
             卡,
             app,
         }
@@ -248,28 +251,46 @@ impl 现场 {
         panic!("任务六秒都没跑完");
     }
 
-    fn 求值(&mut self) {
+    /// 按一下「算一遍容量」，然后等它跑完。**它进任务队列**，与排差量预览同一条路。
+    /// 摊开某一张卡（读它的规则与例外）。**这一下会把摆着的那份差量作废**——
+    /// 换了子库还留着上一个的差量，是这一屏最容易骗到人的一种写法。
+    fn 摊开(&mut self, name: &str) {
         let (screen, site) = self.app.sublibrary_and_site();
-        screen.evaluate(site);
+        screen.open(site, name);
     }
 
-    /// 点同步，然后等它跑完。**后台线程**跑的，所以要一直问。
+    /// 排一趟**占着位子**的活上去。台上一次只跑一趟，于是这之后排上去的那些都在队里
+    /// 等着——「排上去之后再改规则」这类事情因此不带竞态。
+    ///
+    /// **步数给得足够多**，多到它绝不可能在测试看完之前自己跑完：早先写死的
+    /// 400 步 × 5 ms 正好两秒，机器一忙（全量测试并排跑）就自己先结束了、测试假失败
+    /// （`tests/task.rs` 里那个占位任务栽过同一跤）。用它的每一条都自己按停下。
+    fn 占住位子(&mut self) -> u64 {
+        self.app.tasks_mut().queue("占着位子", |task| {
+            for _ in 0..40_000 {
+                task.check()?;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err("这一趟本来就只是占着位子".to_string())
+        })
+    }
+
+    fn 求值(&mut self) {
+        {
+            let (screen, site, tasks) = self.app.sublibrary_site_and_tasks();
+            screen.evaluate(site, tasks);
+        }
+        self.等任务跑完();
+    }
+
+    /// 点同步，然后等它跑完。**它也进任务队列**（票 `gui-redesign/15`），
+    /// 所以等法与排差量预览、算一遍容量三条一模一样。
     fn 同步到底(&mut self) {
         {
-            let (screen, site) = self.app.sublibrary_and_site();
-            screen.sync(site);
+            let (screen, site, tasks) = self.app.sublibrary_site_and_tasks();
+            screen.sync(site, tasks);
         }
-        for _ in 0..600 {
-            {
-                let (screen, site) = self.app.sublibrary_and_site();
-                screen.poll(site);
-                if screen.outcome().is_some() || screen.error().is_some() {
-                    return;
-                }
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        panic!("同步十几秒都没跑完");
+        self.等任务跑完();
     }
 }
 
@@ -605,8 +626,10 @@ fn 没排过差量预览就同步不了() {
     场.建子库("掌机", "");
     场.加规则("掌机", "平台=SFC");
     {
-        let (screen, site) = 场.app.sublibrary_and_site();
-        screen.sync(site);
+        let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
+        screen.sync(site, tasks);
+        assert_eq!(tasks.queued().len(), 0, "没预览却往任务台上排了一趟");
+        assert!(tasks.running().is_none(), "没预览却往任务台上排了一趟");
         let message = screen.error().expect("该被拦下来");
         assert!(
             message.contains("预览"),
@@ -822,7 +845,7 @@ fn 卡不在手边也算得出选中多少与超限多少() {
     assert!(screen.error().is_none(), "{:?}", screen.error());
     // 报告本身由核心折（`SelectionReport::build`），与 `romcat sublibrary show`
     // 印出来的是同一个值——界面上另算一遍就会长出「这份说装得下、那份说砍这几个」。
-    let report = &screen.evaluated("小卡").expect("求得出来").report;
+    let report = screen.evaluated("小卡").expect("求得出来");
     assert_eq!(report.picked, 2);
     assert_eq!(report.rules.len(), 1);
     assert_eq!(report.rules[0].hits, 2);
@@ -855,11 +878,8 @@ fn 折一趟事实全部设备共用() {
 
     场.求值();
     let screen = 场.app.sublibrary();
-    assert_eq!(screen.evaluated("掌机").expect("求得出来").report.picked, 2);
-    assert_eq!(
-        screen.evaluated("备份卡").expect("求得出来").report.picked,
-        1,
-    );
+    assert_eq!(screen.evaluated("掌机").expect("求得出来").picked, 2);
+    assert_eq!(screen.evaluated("备份卡").expect("求得出来").picked, 1);
     assert!(screen.gauge("掌机").picked > screen.gauge("备份卡").picked);
 }
 
@@ -977,13 +997,7 @@ fn 排差量预览按停之后一个字节都没写而且再排一次照样排�
     场.加规则("掌机", "平台=SFC");
     let 卡上原样 = 卡上有什么(场.卡.path());
 
-    let 占位 = 场.app.tasks_mut().queue("占着位子", |task| {
-        for _ in 0..400 {
-            task.check()?;
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        Err("这一趟只是占着位子".to_string())
-    });
+    let 占位 = 场.占住位子();
     {
         let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
         screen.preview(site, tasks);
@@ -1065,23 +1079,422 @@ fn 这一屏画得出来_摊开与收起都不炸() {
     assert_eq!(场.app.view(), View::Browse);
 }
 
-/// 目标设备上眼下有什么：每个文件的名字、内容、修改时间。
-fn 卡上有什么(dir: &Path) -> Vec<(String, Vec<u8>, Option<std::time::SystemTime>)> {
-    let mut out = Vec::new();
-    for entry in fs::read_dir(dir).expect("列得开").flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            continue;
-        }
-        out.push((
-            path.file_name()
-                .expect("有名字")
+/// 一棵目录树底下每个文件的**相对路径、内容、修改时间**，递归到底，按路径排好。
+///
+/// **「一处不差」要的是逐文件比对**：只列顶上那一层的话，`SFC/` 底下多出来的半份文件、
+/// 卡上剩下的 `.romcat-part` 都看不见——而那正是「停下来的地方是干净的」要钉的东西。
+///
+/// `跳过` 是相对路径前缀。**中立库那个目录得跳过**：SQLite 读一遍就可能动 `-wal`、
+/// `-shm` 两个旁支文件，那与「这一趟往盘上写没写东西」是两回事。
+fn 目录树(dir: &Path, 跳过: &[&str]) -> Vec<(String, Vec<u8>, Option<std::time::SystemTime>)> {
+    fn 收(
+        根: &Path,
+        at: &Path,
+         跳过: &[&str],
+        out: &mut Vec<(String, Vec<u8>, Option<std::time::SystemTime>)>,
+    ) {
+        let Ok(entries) = fs::read_dir(at) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let rel = path
+                .strip_prefix(根)
+                .expect("在这棵树里")
                 .to_string_lossy()
-                .into_owned(),
-            fs::read(&path).expect("读得到"),
-            entry.metadata().expect("读得到元数据").modified().ok(),
-        ));
+                .replace('\\', "/");
+            if 跳过.iter().any(|skip| rel.starts_with(skip)) {
+                continue;
+            }
+            if path.is_dir() {
+                收(根, &path, 跳过, out);
+                continue;
+            }
+            out.push((
+                rel,
+                fs::read(&path).expect("读得到"),
+                entry.metadata().expect("读得到元数据").modified().ok(),
+            ));
+        }
     }
+    let mut out = Vec::new();
+    收(dir, dir, 跳过, &mut out);
     out.sort();
     out
+}
+
+/// 目标设备上眼下有什么。
+fn 卡上有什么(dir: &Path) -> Vec<(String, Vec<u8>, Option<std::time::SystemTime>)> {
+    目录树(dir, &[])
+}
+
+#[test]
+fn 同步进任务台跑完之后留一条带耗时的历史而且清单写在认领那一步() {
+    // 挂单 Q89：票 11 验收第 6 条要的是「排差量与同步走任务台」，而当时只兑现了排差量
+    // 那一半。同步照旧走它自己那条后台线程，于是「上次同步花了多久」这个问题任务屏
+    // 答不了——那句回执一换屏就没了。
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+
+    {
+        let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
+        screen.sync(site, tasks);
+        assert!(screen.syncing().is_some(), "同步没排上任务台");
+        // **`sync()` 那一下自己不干活**：干了的话它跑的就是画帧那条线程。
+        assert!(
+            screen.outcome().is_none(),
+            "点一下同步就把账收了——那趟活跑在画帧这条线程上",
+        );
+        assert!(tasks.busy(), "任务台上没有这一趟");
+    }
+    // **清单要等认领那一步才落库**：台上那条线拿的是只读连接，写不动。
+    assert!(
+        场.app
+            .site()
+            .catalog
+            .manifest("掌机")
+            .expect("读得出清单")
+            .files
+            .is_empty(),
+        "台上那条线就把清单写了——它写不动才对",
+    );
+
+    场.等任务跑完();
+
+    let screen = 场.app.sublibrary();
+    assert!(screen.error().is_none(), "{:?}", screen.error());
+    assert!(screen.syncing().is_none(), "跑完了却还记着一趟在同步");
+    let outcome = screen.outcome().expect("跑完了");
+    assert!(outcome.touched() > 0, "一步都没做，这条断言等于没测");
+    let notice = screen.notice().expect("有回执");
+    assert!(notice.contains("同步用了"), "回执没说耗时：{notice}");
+    // **说得出是哪一台**：这句话可能是几十分钟前排上去的那一趟交回来的，
+    // 而那会儿摊开的多半已经是另一张卡了。
+    assert!(notice.contains("掌机"), "回执没说是哪一台：{notice}");
+
+    // **任务屏上留得下这一趟**：名字说得出是哪个子库，历史那一行带着耗时。
+    let history = 场.app.tasks().history();
+    assert_eq!(history.len(), 2, "该有排差量与同步两条");
+    assert!(
+        history[0].name.contains("同步") && history[0].name.contains("掌机"),
+        "历史那条说不清是给哪个子库同步的：{}",
+        history[0].name,
+    );
+    assert_eq!(history[0].ending, Ending::Done);
+    assert!(history[0].elapsed > Duration::ZERO, "历史那条没带耗时");
+
+    // **清单落回了中立库**，而且是在认领那一步落的——下一趟增量才接得上。
+    let manifest = 场.app.site().catalog.manifest("掌机").expect("读得出清单");
+    assert!(!manifest.files.is_empty(), "清单是空的，下一趟就接不上了");
+}
+
+#[test]
+fn 同步跑着的时候别的屏照常画得出来() {
+    // 一趟真同步几十 GiB、可能几十分钟。跑在画帧那条线程上的话，窗口就是几分钟的白板
+    // ——期间切不了屏、滚不动列表、连「停下」都点不着。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+    {
+        let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
+        screen.sync(site, tasks);
+    }
+    // **这一下没把活干完**：干完了就说明它跑在画帧这条线程上。
+    assert!(场.app.sublibrary().outcome().is_none());
+
+    // 换到浏览屏接着画。**画的这几帧与那趟同步是同时的**，而每一帧浏览屏都答得上话。
+    场.app.show_view(View::Browse);
+    let mut 画了 = 0;
+    for _ in 0..600 {
+        headless::frame(&ctx, headless::input(), |ui| 场.app.ui(ui));
+        画了 += 1;
+        assert!(
+            场.app.window().retained() > 0,
+            "同步跑着的时候浏览屏空了",
+        );
+        if 场.app.sublibrary().outcome().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(画了 > 0);
+    let screen = 场.app.sublibrary();
+    assert!(screen.error().is_none(), "{:?}", screen.error());
+    assert!(screen.outcome().is_some(), "六秒了同步还没跑完");
+    // 画帧那条路自己就把产物认领了（`App::ui` 每帧问一次任务台）。
+    assert!(screen.syncing().is_none());
+}
+
+#[test]
+fn 台上排着的那一趟同步认的是排它时那份计划() {
+    // ADR-0016 那句「同步前必须预览差量」在这一屏上是**构造上的事实**：同步按钮只认屏上
+    // 正摆着的那份计划，规则一改它当场作废。搬上任务台之后这条还得成立——**台上排着的
+    // 那一趟要认的仍是排它时那份计划**，而不是「跑到的时候屏上摆着的那份」。
+    // 破了这一条，人改完规则、台上那趟旧活跑起来，往卡上写的就是他已经改掉的那一批。
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+
+    // 先把台上那个位子占住，于是同步是**排着队**的那一趟——「排上去之后再改规则」
+    // 这件事就不带竞态。
+    let 占位 = 场.占住位子();
+    {
+        let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
+        screen.sync(site, tasks);
+    }
+    assert!(场.app.sublibrary().syncing().is_some(), "同步没排上队");
+
+    // **趁它还排着队，把规则整个换掉**：SFC 换成 GBA。
+    场.改选择();
+    {
+        let (browse, _) = 场.app.browse_and_site();
+        browse.set_filter_rule(Some(Rule::parse("平台=GBA").expect("读得懂")));
+    }
+    场.更新到子库();
+    assert!(
+        场.app.sublibrary().prepared().is_none(),
+        "改过规则那份预览就该当场作废（ADR-0016）",
+    );
+
+    // 放行，让排着的那一趟跑完。
+    场.app.tasks_mut().stop(占位);
+    场.等任务跑完();
+
+    let screen = 场.app.sublibrary();
+    assert!(screen.error().is_none(), "{:?}", screen.error());
+    assert!(screen.outcome().is_some(), "那一趟没跑");
+
+    // **卡上是排它时那两个 SFC 变体，不是改完之后那个 GBA 的。**
+    let 卡上: BTreeSet<String> = 卡上有什么(场.卡.path())
+        .into_iter()
+        .map(|(path, _, _)| path)
+        .collect();
+    assert!(
+        卡上.iter().any(|path| path.starts_with("SFC/")),
+        "排它时那份计划要传的 SFC 一个都没上卡：{卡上:?}",
+    );
+    assert!(
+        !卡上.iter().any(|path| path.starts_with("GBA/")),
+        "台上那一趟认了改完之后的规则——那是人已经改掉的那一批：{卡上:?}",
+    );
+
+    // 而屏上仍然没有差量预览：**要把改完的那一批传上去，得重排一次**。
+    assert!(场.app.sublibrary().prepared().is_none());
+}
+
+#[test]
+fn 排着队的那一趟同步撤得掉而且撤完目标与工作目录一处不差() {
+    // 「能停」比「能取消」严格：**要停在干净的地方**。还没轮到就撤掉的那一趟一个字节
+    // 都没写，所以它的干净可以照字面核对——目标设备与工作目录逐文件比对一处不差。
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+
+    let 占位 = 场.占住位子();
+    {
+        let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
+        screen.sync(site, tasks);
+    }
+    let 号 = 场.app.sublibrary().syncing().expect("排上队了");
+    // 中立库那个目录跳过：SQLite 读一遍就可能动 `-wal`、`-shm`，那与「往盘上写没写
+    // 东西」是两回事。
+    let 卡上原样 = 卡上有什么(场.卡.path());
+    let 工作目录原样 = 目录树(场.工作区.path(), &["catalog"]);
+
+    场.app.tasks_mut().stop(号);
+    场.app.poll_tasks();
+
+    let screen = 场.app.sublibrary();
+    assert!(screen.syncing().is_none(), "撤掉了却还记着一趟在同步");
+    assert!(screen.outcome().is_none(), "撤掉了却记了一趟同步的账");
+    assert!(screen.error().is_none(), "撤掉不是出错：{:?}", screen.error());
+    let notice = screen.notice().expect("该说一句它被撤掉了");
+    assert!(notice.contains("撤掉"), "回执没说清是被撤掉了：{notice}");
+    assert_eq!(
+        场.app.tasks().history()[0].ending,
+        Ending::Stopped,
+        "撤掉了却记成了别的",
+    );
+
+    // **目标设备与工作目录逐文件比对一处不差。**
+    assert_eq!(卡上有什么(场.卡.path()), 卡上原样, "撤掉了却动了卡上的文件");
+    assert_eq!(
+        目录树(场.工作区.path(), &["catalog"]),
+        工作目录原样,
+        "撤掉了却在工作目录里留了东西",
+    );
+
+    // **那份差量还摆着，再按一次照样传得出去。**
+    assert!(场.app.sublibrary().prepared().is_some(), "撤掉同步不该连差量一起丢");
+    场.app.tasks_mut().stop(占位);
+    场.等任务跑完();
+    场.同步到底();
+    let screen = 场.app.sublibrary();
+    assert!(screen.error().is_none(), "{:?}", screen.error());
+    assert!(
+        screen.outcome().expect("跑完了").touched() > 0,
+        "撤过一次之后再同步一趟什么都没做",
+    );
+}
+
+#[test]
+fn 算一遍容量进任务台跑完之后留一条带耗时的历史() {
+    // 挂单 Q87：它原先跑在画帧那条线程上，真机量级上按一下窗口僵 343 毫秒（挂账 D156），
+    // 期间连「停下」都没有。
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.建子库("备份卡", "");
+    场.加规则("掌机", "平台=SFC");
+    场.加规则("备份卡", "平台=GBA");
+
+    {
+        let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
+        screen.evaluate(site, tasks);
+        assert!(screen.evaluating().is_some(), "没排上任务台");
+        // **这一下自己不算**：算了的话它跑的就是画帧那条线程。
+        assert!(
+            screen.evaluated("掌机").is_none(),
+            "按一下就把数算出来了——那趟活跑在画帧这条线程上",
+        );
+    }
+    场.等任务跑完();
+
+    let screen = 场.app.sublibrary();
+    assert!(screen.error().is_none(), "{:?}", screen.error());
+    assert!(screen.evaluating().is_none(), "跑完了却还记着一趟在算");
+    assert_eq!(screen.evaluated("掌机").expect("算得出来").picked, 2);
+    assert_eq!(screen.evaluated("备份卡").expect("算得出来").picked, 1);
+
+    let history = 场.app.tasks().history();
+    assert_eq!(history.len(), 1, "任务台上没留下这一趟");
+    assert!(
+        history[0].name.contains("算一遍容量"),
+        "历史那条说不清跑的是什么：{}",
+        history[0].name,
+    );
+    assert_eq!(history[0].ending, Ending::Done);
+    assert!(history[0].elapsed > Duration::ZERO, "历史那条没带耗时");
+}
+
+#[test]
+fn 算一遍容量按停之后那几个数没长出来而且一个字节都没写() {
+    // 它整条只读——只问中立库，连目标设备都不看（ADR-0009：卡不在手边也算得出来）。
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    let 卡上原样 = 卡上有什么(场.卡.path());
+
+    let 占位 = 场.占住位子();
+    {
+        let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
+        screen.evaluate(site, tasks);
+    }
+    let 号 = 场.app.sublibrary().evaluating().expect("排上队了");
+    场.app.tasks_mut().stop(号);
+    场.app.poll_tasks();
+
+    let screen = 场.app.sublibrary();
+    assert!(screen.evaluating().is_none(), "按停了却还记着一趟在算");
+    assert!(screen.evaluated("掌机").is_none(), "按停了却算出了一份");
+    assert!(
+        screen.error().is_none(),
+        "按停下不是出错：{:?}",
+        screen.error()
+    );
+    let notice = screen.notice().expect("该说一句它被停了");
+    assert!(notice.contains("停"), "回执没说清是被停了：{notice}");
+    assert_eq!(场.app.tasks().history()[0].ending, Ending::Stopped);
+    assert_eq!(卡上有什么(场.卡.path()), 卡上原样, "按停了却动了卡上的文件");
+
+    // 再算一次照样算得出来：它没有半截状态要收拾。
+    场.app.tasks_mut().stop(占位);
+    场.等任务跑完();
+    场.求值();
+    assert_eq!(
+        场.app.sublibrary().evaluated("掌机").expect("算得出来").picked,
+        2,
+    );
+}
+
+#[test]
+fn 存过子库之后台上那趟还没认领的容量不认了() {
+    // 那一趟折报告用的是**排它时**那份子库——上限、目标、能力档案全在里头。
+    // 改完上限再把它收回来，卡上就会摆出「上限写着 4KB、旁边说没超」这种对不上的账。
+    // 而**丢得不吭声也不行**：人按过那个按钮、等了一趟，屏上一个数都没长出来。
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "1TB");
+    场.加规则("掌机", "平台=SFC");
+
+    let 占位 = 场.占住位子();
+    {
+        let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
+        screen.evaluate(site, tasks);
+    }
+    assert!(场.app.sublibrary().evaluating().is_some(), "没排上队");
+
+    // 趁它还排着队，把容量上限从 1TB 改成 4KB。
+    场.建子库("掌机", "4KB");
+    assert!(
+        场.app.sublibrary().evaluating().is_none(),
+        "存过子库之后那一趟还认着——它算的是改之前那个上限",
+    );
+    let notice = 场.app.sublibrary().notice().expect("该说一句");
+    assert!(
+        notice.contains("算一遍容量"),
+        "把那一趟丢了却不吭声：{notice}",
+    );
+
+    场.app.tasks_mut().stop(占位);
+    场.等任务跑完();
+    assert!(
+        场.app.sublibrary().evaluated("掌机").is_none(),
+        "按旧上限算出来的那份被收回来了",
+    );
+
+    // **再算一次报的是新上限**：4KB 装不下那两个 SFC 变体。
+    场.求值();
+    assert!(
+        场.app
+            .sublibrary()
+            .evaluated("掌机")
+            .expect("算得出来")
+            .over_capacity
+            .is_some(),
+        "改完上限重算一遍，该报超限",
+    );
+}
+
+#[test]
+fn 删掉一个子库之后台上那趟还没认领的容量不认了() {
+    // 认领是**整份替换**：刚删掉那一台的报告会又长回来，卡片没了、账还在。
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.建子库("备份卡", "");
+    场.加规则("掌机", "平台=SFC");
+    场.摊开("掌机");
+
+    let 占位 = 场.占住位子();
+    {
+        let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
+        screen.evaluate(site, tasks);
+    }
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        screen.remove(site);
+    }
+    assert!(场.app.sublibrary().evaluating().is_none(), "删掉之后那趟还认着");
+
+    场.app.tasks_mut().stop(占位);
+    场.等任务跑完();
+    assert_eq!(场.app.sublibrary().list().len(), 1, "该只剩一台");
+    assert!(
+        场.app.sublibrary().evaluated("掌机").is_none(),
+        "删掉的那一台，它的账又长回来了",
+    );
 }

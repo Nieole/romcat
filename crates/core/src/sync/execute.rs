@@ -96,6 +96,7 @@ use crate::convert::{self, ConvertError};
 use crate::fs::{LibraryFs, real_path};
 use crate::scan::CancelToken;
 use crate::scrape::pool::hex;
+use crate::task::Handle;
 
 use super::{Act, Desired, FileKind, Manifest, ManifestFile, Plan, Stamp, Step, TargetState};
 
@@ -244,6 +245,20 @@ pub struct Sources<'a> {
 /// 调用方负责把它写回中立库——包括**被中断**的那一趟，那份清单描述的是「到中断为止
 /// 目标上真实有什么」，于是下一趟接着跑就是。
 ///
+/// ## 报进度、能停
+///
+/// `task` 是这一趟的**把手**（[`Handle`]）：**计划里一步就报一步**，报的正是眼下这个
+/// 落点（`新增 GB/口袋妖怪.zip`）。一趟同步几十 GiB、几十分钟，只说「正在同步」等于
+/// 什么都没说。
+///
+/// **被叫停不是错误**：这一层照旧把这一趟收完——清单要重折、要交给调用方写回中立库
+/// （那份清单记的是「到中断为止目标上真实有什么」，下一趟才接得上）。
+/// 于是这条线不像**差量预览**那样把 [`Halted`](crate::task::Halted) 抛出去，
+/// 而是记一笔 [`Outcome::interrupted`] 照常返回——**与扫描同一条**（`scan::scan` 那几处
+/// `let _ = task.step(…)` 也是这个道理：写过东西的活得留下续跑的依据才停得干净）。
+///
+/// 不想要把手的调用方给一个 [`Handle::new`](crate::task::Handle::new) 就行。
+///
 /// # Errors
 /// 目标根建不出来时返回错误。单个文件写不进去**不是错误**：那一步记进
 /// [`Outcome::failures`]，整趟继续（连着失败太多次才停，见 [`GIVE_UP_AFTER`]）。
@@ -253,18 +268,35 @@ pub fn run(
     actual: &TargetState,
     previous: &Manifest,
     sources: &Sources<'_>,
-    cancel: &CancelToken,
+    task: &Handle,
 ) -> io::Result<Outcome> {
-    std::fs::create_dir_all(sources.target_root)?;
+    // **一步内部也停得动**：转一个 40 GiB 的镜像、拷一份 8 GiB 的 ISO 都在一步里头，
+    // 只在两步之间看一眼的话，「停下」按下去要等上几分钟。
+    let cancel = task.cancel();
+    task.steps(u32::try_from(plan.steps.len()).unwrap_or(u32::MAX));
+
+    // **一个字节都没写之前先看一眼有没有被叫停。** 底下这两样都排在第一步之前，
+    // 而它们都在目标设备上留痕：建目标根会在卡上留一个空目录（子库根还不存在时），
+    // 硬链接探测会在卡上建一份探针文件再删掉（删不掉就留下了）。
+    // 「停下来的地方是干净的」得从这儿算起，不是从第一步算起。
+    let 已经叫停了 = task.check().is_err();
+    if !已经叫停了 {
+        std::fs::create_dir_all(sources.target_root)?;
+    }
 
     let wants_media = plan
         .steps
         .iter()
         .any(|step| step.kind == FileKind::Media && step.act != Act::Delete);
-    let placement = match (wants_media, sources.link_probe_dir) {
-        (true, Some(from)) => Some(probe(from, sources.target_root)),
-        (true, None) => Some(Placement::Copy),
-        (false, _) => None,
+    let placement = if 已经叫停了 {
+        // 一步都不会做，就别为了「用链接还是复制」去碰那张卡。
+        None
+    } else {
+        match (wants_media, sources.link_probe_dir) {
+            (true, Some(from)) => Some(probe(from, sources.target_root)),
+            (true, None) => Some(Placement::Copy),
+            (false, _) => None,
+        }
     };
 
     let mut out = Outcome {
@@ -291,7 +323,12 @@ pub fn run(
     let mut consecutive = 0_u64;
 
     for step in &plan.steps {
-        if cancel.is_cancelled() {
+        // **报的是这一个落点，不是一句「正在同步」。** `step` 顺带就是那个分界处：
+        // 被叫停时这一步一件事都还没做，于是停下来的地方永远在两个文件之间。
+        if task
+            .step(&format!("{} {}", step.act.label(), step.path))
+            .is_err()
+        {
             out.interrupted = true;
             break;
         }

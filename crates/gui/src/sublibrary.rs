@@ -24,7 +24,8 @@
 //! [`Screen::sync`] 只认 [`Screen::prepared`] 里那份计划，而那份计划是
 //! [`romcat_core::sync::prepare`](fn@romcat_core::sync::prepare) 排出来的、界面上正摆着的同一个值。**没预览就没有可传的
 //! 东西**；改过选择、改过目标之后那份预览当场作废（[`Screen::invalidate`]），
-//! 「同步」按钮跟着灰掉。
+//! 「同步」按钮跟着灰掉。**搬上任务台之后这条一个字都没松**——台上排着的那一趟认的仍是
+//! 排它时那份计划，见底下「三条长活全走任务台」。
 //!
 //! ## 容量条三段：选中的、清单之外的、上限
 //!
@@ -43,34 +44,39 @@
 //! ——全在核心。这一层只做三件事：把要来的画出来、把点的那一下写回去、把中文输入放在
 //! 对的位置上。
 //!
-//! ## 同步与排差量预览都跑在画帧那条线程之外
+//! ## 三条长活全走任务台
 //!
-//! 一趟同步要搬的可能是几十 GiB。搬在画帧那条线程上，窗口就是几分钟的白板，连
-//! 「停下」都点不动。所以计划一旦点头就整个搬进一条后台线程，主线程每帧只问一句
-//! 「跑完没有」，外加一个真的按得动的**停下**（[`CancelToken`]）。中断的那一趟照样落清单
-//! ——那份清单记的是「到中断为止目标上真实有什么」，下一趟才接得上。
+//! 这一屏上会跑一会儿的有三条：**排差量预览**（真机量级 343 毫秒）、**算一遍容量**
+//! （同一趟全库事实，343 毫秒）、**同步**（几十 GiB、可能几十分钟）。三条都跑在画帧
+//! 那条线程之外，而且都走同一张[任务台](crate::task)——点那三个按钮等于各往台上排一趟活，
+//! 跑完了台上按号把产物交回来（[`Screen::settle`]）。于是规格里那句「扫描、识别、刮削、
+//! 同步统一排队，一处看得见」在这一屏上是真的：名字、进度、已用时间、按得停、跑完那条
+//! 带耗时的历史，五样都在任务屏上，而这一屏在按钮旁边摆的是**同一份**快照。
 //!
-//! **排差量预览也一样，只是它走[任务台](crate::task)**：真机量级上它 343 毫秒，
-//! 大头是走一遍全库折事实（挂账 D156）。这一屏点那个按钮，等于往任务台上排一趟活；
-//! 跑完了台上把那份 [`Prepared`] 交回来（[`Screen::settle`]）。它整条只读，
-//! 所以中途按停下**停在哪儿都是干净的**：一个字节都没写，再排一次就是。
+//! **台上那一趟认的是排它时那份计划。** 按下同步的那一刻，那份 [`Prepared`] 就整份交给
+//! 了台上那趟活（闭包自己拿着一份，不是屏上这一份的借用）。此后规则怎么改、屏上那份
+//! 预览怎么作废，都动不了已经排出去的那一趟——ADR-0016 那句「同步前必须预览差量」
+//! 因此照旧是**构造上的事实**：跑的正是人点头时看过的那一份。反过来也说得通：改过规则
+//! 之后屏上那份预览当场作废，想把改完的那一批传上去就得**重排一次差量**。
+//!
+//! **要写中立库的那一步在认领里做，不在台上。** 台上那条线拿的是同一个库文件的
+//! **只读**连接，写不动；而一趟同步跑完——**包括被按停的那一趟**——必须把**清单**落回
+//! 库里：那份清单记的是「到中断为止目标上真实有什么」，下一趟才接得上。所以它是当作
+//! 产物交回来的（[`Product::Synced`]），落库发生在 [`Screen::settle`]。
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::thread::JoinHandle;
-use std::time::Instant;
 
 use egui::{Align, Layout};
 use romcat_core::catalog::CatalogError;
 use romcat_core::report::{human_bytes, thousands};
-use romcat_core::scan::CancelToken;
 use romcat_core::site::Site;
 use romcat_core::sublibrary::report::SelectionReport;
 use romcat_core::sublibrary::{
     BrokenRule, ExceptionRow, Gauge, LoadedSelection, Rule, StoredRule, Sublibrary, Trim, rule,
 };
 use romcat_core::sync::{self, Act, Outcome, Prepared};
-use romcat_core::task::{Done, Finished};
+use romcat_core::task::{Done, Finished, Handle};
 
 use crate::table::ROW_HEIGHT;
 use crate::task::{Product, Tasks};
@@ -139,31 +145,6 @@ pub struct Jump {
     pub broken: Vec<BrokenRule>,
 }
 
-/// 一趟正在后台跑的同步。
-struct Running {
-    /// 哪个子库。
-    name: String,
-    /// 停下用的那个信号。
-    cancel: CancelToken,
-    /// 什么时候开始的。
-    started: Instant,
-    /// 后台那条线程。
-    handle: JoinHandle<Result<Outcome, String>>,
-}
-
-/// 只求了一次**选择集**的那份结果，连它花了多久。
-///
-/// 报告本身由核心折（[`SelectionReport::build`]）——超没超、砍谁、每条规则命中多少，
-/// 与 `romcat sublibrary show` 印的是**同一个值**。这一屏另写一遍的话，
-/// 「这份报告说装得下、那份说砍这几个」这种对不上的账迟早会出现
-/// （`sublibrary::report` 的模块注释说的就是这件事）。
-pub struct Evaluated {
-    /// 报告本身。
-    pub report: SelectionReport,
-    /// 求它用了多久，毫秒。
-    pub elapsed_ms: f64,
-}
-
 /// 子库这个屏幕。
 pub struct Screen {
     /// 工作目录：中立库、**媒体池**、能力档案名册都在这儿。
@@ -196,12 +177,17 @@ pub struct Screen {
     ///
     /// **一趟折一次事实，全部子库共用**——折事实是走一遍全库（343 ms，挂账 D156），
     /// 而按选择集求值是内存里的事。一台一折的话，五张卡就是五趟全库。
+    /// 整趟活在核心里（`sublibrary::survey`），于是屏上摆着的与 `romcat sublibrary show`
+    /// 印出来的是同一个值。
     ///
     /// **与差量预览分开**，因为它们要的东西不一样：差量预览要目标设备在位（三方对比的
     /// 第三方就是目标上实际有什么），而「这套规则选出多少、装不装得下」只要中立库。
     /// 子库是持久实体，不是「插上卡才存在的东西」（ADR-0009）——卡不在手边时照样该
     /// 看得见容量账。
-    evaluated: BTreeMap<String, Evaluated>,
+    evaluated: BTreeMap<String, SelectionReport>,
+    /// 正在算的那一趟容量是任务台上的第几号。**它同时是认领凭据**
+    /// （与 [`Self::previewing`] 一个写法）。
+    evaluating: Option<u64>,
     /// 计划里有删除时，要先勾这一格才动得了手。
     acknowledged: bool,
     /// 「改选择」按下去了，等窗口把它送去浏览屏（[`crate::app::App::route`]）。
@@ -212,8 +198,12 @@ pub struct Screen {
     /// **永久记住**的手挑决定（ADR-0016），而这一票之后规则也不在这一屏上重打得回来
     /// ——一下点掉太贵，所以要两下。
     confirm_remove: Option<String>,
-    /// 正在跑的那一趟同步。
-    running: Option<Running>,
+    /// 排上任务台的那一趟同步是第几号。
+    ///
+    /// **它同时是认领凭据**：跑完的那一趟按号对得上才收（[`Screen::settle`]）。
+    /// **但它不是「那一趟认哪份计划」的凭据**——计划在排它那一刻就整份交给了台上那趟活，
+    /// 屏上这一份此后怎么变都影响不到它（模块文档「台上那一趟认的是排它时那份计划」）。
+    syncing: Option<u64>,
     /// 上一趟同步的账。
     outcome: Option<Outcome>,
     /// 上一次动作的回执。
@@ -241,10 +231,11 @@ impl Screen {
             prepare_ms: 0.0,
             expanded: false,
             evaluated: BTreeMap::new(),
+            evaluating: None,
             acknowledged: false,
             jump: None,
             confirm_remove: None,
-            running: None,
+            syncing: None,
             outcome: None,
             notice: None,
             failed: false,
@@ -332,10 +323,22 @@ impl Screen {
         self.previewing
     }
 
-    /// 某一台设备那份求过的选择集。
+    /// 某一台设备那份求过的**选择集报告**：选出多少、多大、超限多少、砍谁。
     #[must_use]
-    pub fn evaluated(&self, name: &str) -> Option<&Evaluated> {
+    pub fn evaluated(&self, name: &str) -> Option<&SelectionReport> {
         self.evaluated.get(name)
+    }
+
+    /// 正在算的那一趟容量是任务台上的第几号。
+    #[must_use]
+    pub fn evaluating(&self) -> Option<u64> {
+        self.evaluating
+    }
+
+    /// 排上任务台的那一趟同步是第几号。
+    #[must_use]
+    pub fn syncing(&self) -> Option<u64> {
+        self.syncing
     }
 
     /// 某一台设备卡上那根**容量条**：选中的、清单之外的、上限。
@@ -368,9 +371,7 @@ impl Screen {
         Gauge {
             picked: plan.map_or_else(
                 || {
-                    self.evaluated
-                        .get(name)
-                        .map_or(0, |evaluated| evaluated.report.bytes)
+                    self.evaluated.get(name).map_or(0, |report| report.bytes)
                 },
                 |plan| plan.after_bytes.saturating_sub(plan.stranger_bytes),
             ),
@@ -451,6 +452,9 @@ impl Screen {
     /// 只丢这一台的：折一趟事实全部设备共用，别人那几张卡的数还是好的。
     pub fn forget(&mut self, site: &Site, name: &str) {
         self.evaluated.remove(name);
+        if let Some(说一句) = self.drop_survey() {
+            self.notice = Some(说一句.to_string());
+        }
         // 摊开的正是它的话，规则与例外也要重读一遍——卡上那几行印的就是它们。
         // `open` 自己会把差量预览作废（那份差量只可能是摊开这一台的）。
         if self.picked.as_deref() == Some(name) {
@@ -476,51 +480,67 @@ impl Screen {
         self.outcome = None;
     }
 
+    /// **台上那趟还没认领的「算一遍容量」一并不认了**，返回要对人说的那半句话。
+    ///
+    /// 三处要走它：改过某一台的选择集（[`Self::forget`]）、存过一个子库
+    /// （[`Self::save`]）、删掉一个子库（[`Self::remove`]）。理由是同一条：**那一趟折
+    /// 报告用的是排它时那份子库与那时候的规则**——上限、目标、能力档案全在里头。改完之后
+    /// 把它收回来，卡上就会摆出「上限写着 64 GB、旁边说超了 200 GiB」，那正是 [`Gauge`]
+    /// 的文档说不该发生的事。删掉一台之后收回来更糟：认领是**整份替换**，
+    /// 刚删掉那一台的报告会又长回来。
+    ///
+    /// **丢得不吭声是不行的**：人按过那个按钮、可能等了几分钟（真库上它排在扫描后面），
+    /// 屏上却一个数都没长出来，那看着就像按钮坏了。
+    ///
+    /// 被弃认的那趟活自己会跑完——它整条只读，跑完也没有副作用，只是没人认领它。
+    /// **弃认的是整趟而不是那一台**：产物是一份「全部设备」的表，按台拆开认领要多立一种
+    /// 合并口径（「这一台按新的、那几台按旧的」），而那份账本来就是一趟折出来的
+    /// ——多算一遍全库比多等一趟诚实。
+    fn drop_survey(&mut self) -> Option<&'static str> {
+        self.evaluating.take().map(|_| {
+            "正在算的那一趟容量不认了——它算的是改之前那一套；再按一次「算一遍容量」。"
+        })
+    }
+
     /// **每台设备各求一次选择集**：这套规则加例外选出什么、多大、装不装得下。
+    /// 往[任务台](crate::task)上排一趟，跑在画帧那条线程之外。
     ///
     /// **不碰目标设备**——卡不在手边时照样看得见容量账（ADR-0009）。折事实那一趟走一遍
-    /// 全库，**全部子库共用它**：一台一折的话，五张卡就是五趟全库。折报告那一步整份交给
-    /// 核心（[`SelectionReport::build`]），于是界面上摆着的与 `romcat sublibrary show`
-    /// 印出来的是同一个值。容量超限时**只给建议，一个都不砍**（ADR-0016）。
+    /// 全库，**全部子库共用它**：一台一折的话，五张卡就是五趟全库。整趟活整份交给核心
+    /// （[`survey`](romcat_core::sublibrary::survey)），于是界面上摆着的与
+    /// `romcat sublibrary show` 印出来的是同一个值。容量超限时**只给建议，一个都不砍**
+    /// （ADR-0016）。
+    ///
+    /// **它原先跑在画帧那条线程上**：真机量级上按一下窗口僵 343 毫秒，期间连「停下」
+    /// 都没有（挂单 Q87、挂账 D156）。搬上任务台之后进度看得见、停得动，而它整条只读，
+    /// 所以停在哪儿都是干净的——一个字节都没写，再算一次就是。
+    ///
+    /// 后台那条线程读的是同一个库文件的**第二份只读连接**，与 [`Self::preview`] 同一条路
+    /// （分不出来的那种库就地跑完，理由见那一处）。
     ///
     /// 界面上按那个按钮走的就是它，实测与测试拿它当那一下。
-    pub fn evaluate(&mut self, site: &Site) {
-        let started = Instant::now();
-        let facts = match romcat_core::sublibrary::facts(&site.catalog) {
-            Ok(facts) => facts,
-            Err(error) => {
-                self.error = Some(format!("中立库读不动：{error}"));
-                return;
-            }
-        };
-        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-        self.evaluated.clear();
-        for sublibrary in &self.list {
-            let loaded = match site.catalog.selection(&sublibrary.name) {
-                Ok(loaded) => loaded,
-                Err(error) => {
-                    self.error = Some(format!("中立库读不动：{error}"));
-                    return;
-                }
-            };
-            let selected = romcat_core::sublibrary::select(&loaded.selection, &facts);
-            self.evaluated.insert(
-                sublibrary.name.clone(),
-                Evaluated {
-                    report: SelectionReport::build(
-                        site.catalog.location(),
-                        sublibrary,
-                        &loaded,
-                        &facts,
-                        &selected,
-                    ),
-                    // **摊在每一台头上的是同一趟折事实**：那才是这件事真花掉的时间，
-                    // 按台数分摊或者各记一遍全程，两种写法印出来的都不是实情。
-                    elapsed_ms,
-                },
-            );
+    pub fn evaluate(&mut self, site: &Site, tasks: &mut Tasks) {
+        if self.evaluating.is_some() {
+            return;
         }
         self.error = None;
+        // **算的是排它这一刻库里摆着的那几台设备**，这一份名单跟着那趟活走。
+        let list = self.list.clone();
+        let title = "算一遍容量".to_string();
+        self.evaluating = Some(match site.catalog.read_only() {
+            Ok(reader) => tasks.queue(title, move |task| {
+                romcat_core::sublibrary::survey(&reader, &list, task)
+                    .map(|reports| Product::Evaluated(Box::new(reports)))
+            }),
+            Err(CatalogError::NotOnDisk { .. }) => tasks.run_here(title, |task| {
+                romcat_core::sublibrary::survey(&site.catalog, &list, task)
+                    .map(|reports| Product::Evaluated(Box::new(reports)))
+            }),
+            Err(why) => {
+                self.error = Some(no_second_connection("算一遍容量", &why));
+                return;
+            }
+        });
     }
 
     /// **排一次差量预览**：往[任务台](crate::task)上排一趟，跑在画帧那条线程之外。
@@ -574,22 +594,32 @@ impl Screen {
             // 对不上。这时**直说，不要退到画帧这条线程上偷偷跑一趟**：那既会僵住窗口，
             // 又把真正的问题盖在一句「怎么卡了一下」底下。
             Err(why) => {
-                self.error = Some(format!(
-                    "分不出第二份只读连接：{why}\n\
-                     排差量预览要在画帧那条线程之外跑，而它读的是同一份中立库文件。\
-                     先确认那个文件还在、版本还对得上。"
-                ));
+                self.error = Some(no_second_connection("排差量预览", &why));
                 return;
             }
         });
     }
 
     /// 任务台交回来一趟跑完的活。**不是自己那一趟就放过去。**
-    pub fn settle(&mut self, done: Finished<Product>) {
-        if self.previewing != Some(done.id) {
-            return;
+    ///
+    /// 这一屏在台上排三种活——排差量预览、算一遍容量、同步——各按自己那个号认领。
+    /// **同步那一支要写中立库**（把**清单**落回去），所以这一层收的是可写的那份现场：
+    /// 台上那条线拿的是只读连接，写不动。
+    pub fn settle(&mut self, site: &mut Site, done: Finished<Product>) {
+        if self.previewing == Some(done.id) {
+            self.previewing = None;
+            self.settle_preview(done);
+        } else if self.evaluating == Some(done.id) {
+            self.evaluating = None;
+            self.settle_evaluate(done);
+        } else if self.syncing == Some(done.id) {
+            self.syncing = None;
+            self.settle_sync(site, done);
         }
-        self.previewing = None;
+    }
+
+    /// 排差量预览那一趟回来了。
+    fn settle_preview(&mut self, done: Finished<Product>) {
         match done.ended {
             Done::Product(Product::Preview(prepared)) => {
                 // **只有真排出来那一趟才记耗时。** 被停下、出错的那趟什么都没排出来，
@@ -621,6 +651,93 @@ impl Screen {
         }
     }
 
+    /// 算一遍容量那一趟回来了。
+    fn settle_evaluate(&mut self, done: Finished<Product>) {
+        match done.ended {
+            Done::Product(Product::Evaluated(reports)) => {
+                self.evaluated = *reports;
+                self.error = None;
+            }
+            Done::Product(_) => {}
+            // **停下来的地方是干净的，就得这么说。** 上一趟算出来的那几个数照旧摆着
+            // ——它们没有因为这一趟被停而变得不对。
+            Done::Stopped => {
+                self.notice = Some(
+                    "算容量按停了。这一趟整条只读——中立库、主库、目标设备一个字节都没动，\
+                     再算一次就是。"
+                        .to_string(),
+                );
+                self.failed = false;
+            }
+            Done::Failed { step, why } => {
+                self.error = Some(if step.is_empty() {
+                    why
+                } else {
+                    format!("算一遍容量在「{step}」这一步停下了：{why}")
+                });
+            }
+        }
+    }
+
+    /// 同步那一趟回来了：**清单落回中立库**，然后把这一趟的账摆出来。
+    ///
+    /// **清单要在这一步写**——台上那条线拿的是只读连接，写不动（[`Product::Synced`]
+    /// 的文档）。**被按停的那一趟也要落清单**：那份清单记的是「到中断为止目标上真实有
+    /// 什么」，下一趟才接得上。
+    fn settle_sync(&mut self, site: &mut Site, done: Finished<Product>) {
+        let elapsed = done.elapsed.as_secs_f64();
+        match done.ended {
+            Done::Product(Product::Synced(outcome)) => {
+                if let Err(error) = site
+                    .catalog
+                    .put_manifest(&outcome.sublibrary, &outcome.manifest)
+                {
+                    self.error = Some(format!(
+                        "⚠️ 清单写不回中立库：{error}\n\
+                         目标上的文件已经动过了，而清单还是旧的那一份——下一趟同步会把这次\n\
+                         放上去的东西当成「清单之外」，于是碰都不敢碰。先修好中立库再跑一次。"
+                    ));
+                }
+                self.notice = Some(sync_notice(&outcome, elapsed));
+                self.failed =
+                    outcome.interrupted || outcome.gave_up || !outcome.failures.is_empty();
+                // 传完之后那份预览说的已经是过去时了：目标现在是另一个样子。
+                //
+                // **只清掉这一台的那一份。** 台上排着队可能排上几十分钟，认领回来的时候
+                // 屏上摊开的多半已经是另一台、摆着的是那一台刚排好的差量——那一份还没传呢，
+                // 一并清掉等于让人白排一趟。
+                if self
+                    .prepared
+                    .as_ref()
+                    .is_some_and(|prepared| prepared.sublibrary.name == outcome.sublibrary)
+                {
+                    self.prepared = None;
+                    self.acknowledged = false;
+                }
+                self.outcome = Some(*outcome);
+            }
+            Done::Product(_) => {}
+            // **走到这儿的只有「还排着队就被撤掉」那一种**：真跑起来的那一趟被按停时
+            // 照旧交出产物（[`Product::Synced`] 的文档），因为那份清单非落库不可。
+            // 于是这一句敢说「一个字节都没动」——它说的正是那一种。
+            Done::Stopped => {
+                self.notice = Some(
+                    "同步还没轮到就被撤掉了。目标设备上一个字节都没动，那份差量还摆着，\
+                     再按一次同步就是。"
+                        .to_string(),
+                );
+                self.failed = false;
+            }
+            Done::Failed { step, why } => {
+                self.error = Some(if step.is_empty() {
+                    why
+                } else {
+                    format!("同步在「{step}」这一步停下了：{why}")
+                });
+            }
+        }
+    }
+
     /// 「**改选择**」：把这个子库的规则并成一条，交给窗口送去浏览屏。
     ///
     /// 这一屏不改选择集，所以这一下**什么都没写**——它只是把要改的东西装好。
@@ -646,12 +763,22 @@ impl Screen {
         self.jump.take()
     }
 
-    /// **同步**：把差量真正落到目标设备上，跑在后台线程里。
+    /// **同步**：把差量真正落到目标设备上，往[任务台](crate::task)上排一趟。
     ///
     /// 三道闸一道都不能少：**得先有预览**（ADR-0016）、**有删除就得先点头**（ADR-0015）、
-    /// **目标不许落在主库里**（ADR-0004，判据在核心里）。
-    pub fn sync(&mut self, site: &Site) {
-        if self.running.is_some() {
+    /// **目标不许落在主库里**（ADR-0004，判据在核心里）。三道都过在**排它之前**——
+    /// 排上去之后没人再看第二眼。
+    ///
+    /// ## 台上那一趟认的是排它时那份计划
+    ///
+    /// 那份 [`Prepared`] 与主库那一组根都是**整份交给**台上那趟活的（闭包自己拿着一份，
+    /// 不是屏上这一份的借用）。于是排上去之后规则怎么改、屏上那份预览怎么作废，跑的仍然
+    /// 是人点头时看过的那一份——ADR-0016 那句「同步前必须预览差量」因此照旧是构造上的
+    /// 事实。**要把改过规则之后的那一批传上去，就得重排一次差量预览再按一次。**
+    ///
+    /// 界面上按那个按钮走的就是它，实测与测试拿它当那一下。
+    pub fn sync(&mut self, site: &Site, tasks: &mut Tasks) {
+        if self.syncing.is_some() {
             return;
         }
         let Some(prepared) = self.prepared.clone() else {
@@ -696,124 +823,89 @@ impl Screen {
         };
 
         let name = prepared.sublibrary.name.clone();
-        let cancel = CancelToken::new();
-        let token = cancel.clone();
-        let handle =
-            std::thread::spawn(move || run_sync(&prepared, library_roots.as_ref(), &token));
-        self.running = Some(Running {
-            name,
-            cancel,
-            started: Instant::now(),
-            handle,
-        });
+        // **计划在这一刻整份交出去。** 闭包拿的是它自己那一份，屏上那一份此后作废也好、
+        // 重排也好，都改不了台上这一趟要做的事（这条正是 ADR-0016 在搬上任务台之后
+        // 还成立的原因）。
+        self.syncing = Some(tasks.queue(format!("同步「{name}」"), move |task| {
+            run_sync(&prepared, library_roots.as_ref(), task)
+                .map(|outcome| Product::Synced(Box::new(outcome)))
+        }));
         self.error = None;
         self.notice = None;
         self.failed = false;
     }
 
-    /// 正在跑的那一趟同步跑完没有。跑完了就收账、把**清单**落回中立库。
-    ///
-    /// 每帧问一次。**中断的那一趟也要落清单**——那份清单记的是「到中断为止目标上真实有
-    /// 什么」，下一趟才接得上。
-    pub fn poll(&mut self, site: &mut Site) {
-        let Some(running) = &self.running else {
-            return;
-        };
-        if !running.handle.is_finished() {
-            return;
-        }
-        let Some(running) = self.running.take() else {
-            return;
-        };
-        let elapsed = running.started.elapsed().as_secs_f64();
-        match running.handle.join() {
-            Ok(Ok(outcome)) => {
-                if let Err(error) = site.catalog.put_manifest(&running.name, &outcome.manifest) {
-                    self.error = Some(format!(
-                        "⚠️ 清单写不回中立库：{error}\n\
-                         目标上的文件已经动过了，而清单还是旧的那一份——下一趟同步会把这次\n\
-                         放上去的东西当成「清单之外」，于是碰都不敢碰。先修好中立库再跑一次。"
-                    ));
-                }
-                // **中断、失败、主动停了，一样都不许吞。** 全成功的一趟与半数写失败的
-                // 一趟若在界面上长得一样，那句「同步用了 X 秒」就是在骗人
-                // （命令行那一侧靠 `Outcome::render_text` 把这几样印全）。
-                let mut line = format!(
-                    "同步用了 {elapsed:.1} 秒：动了 {} 个文件（新增 {}、更新 {}、删除 {}）。",
-                    thousands(outcome.touched()),
-                    thousands(outcome.added.files),
-                    thousands(outcome.updated.files),
-                    thousands(outcome.deleted.files),
-                );
-                if outcome.interrupted {
-                    line.push_str(
-                        "\n⚠️ **这一趟被你按停了**：目标上没有半份文件，清单记的是\
-                                   到中断为止真实有什么，再跑一趟就接上。",
-                    );
-                }
-                if outcome.gave_up {
-                    line.push_str("\n⚠️ **连着失败太多次，主动停了**：多半是卡拔了或者写满了。");
-                }
-                if !outcome.failures.is_empty() {
-                    line.push_str(&format!(
-                        "\n⚠️ **有 {} 步没做成**：",
-                        thousands(outcome.failures.len() as u64),
-                    ));
-                    for failure in outcome.failures.iter().take(TOP_NOTES) {
-                        line.push_str(&format!("\n  {}：{}", failure.path, failure.why));
-                    }
-                    if outcome.failures.len() > TOP_NOTES {
-                        line.push_str(&format!(
-                            "\n  ……另有 {} 步没列",
-                            outcome.failures.len() - TOP_NOTES,
-                        ));
-                    }
-                }
-                self.failed =
-                    outcome.interrupted || outcome.gave_up || !outcome.failures.is_empty();
-                self.notice = Some(line);
-                self.outcome = Some(outcome);
-                // 传完之后那份预览说的已经是过去时了：目标现在是另一个样子。
-                self.prepared = None;
-                self.acknowledged = false;
-            }
-            Ok(Err(message)) => self.error = Some(message),
-            Err(_) => self.error = Some("同步那条线程炸了。".to_string()),
-        }
-    }
-
     /// 画一帧。
+    ///
+    /// **不必在这儿问「跑完没有」**：三条长活全在任务台上，窗口每帧问它一次
+    /// （`App::poll_tasks`），台上有活时那一帧自己会请求下一帧。
     pub fn ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
-        self.poll(site);
-        if self.running.is_some() {
-            // 后台在跑，主线程得继续画，不然「停下」按钮按不动。
-            ui.ctx().request_repaint();
-        }
         // 这条边界拖得动也记得住，声明在 [`crate::layout`]（票 `gui-redesign/12`）。
         crate::layout::TARGET.show(ui, |ui| self.form_ui(ui, site));
         egui::CentralPanel::default().show(ui, |ui| self.cards_ui(ui, site, tasks));
     }
 
     /// 顶栏上属于这一屏的那一段。
-    pub fn status(&mut self, ui: &mut egui::Ui, site: &Site) {
+    ///
+    /// **这一屏排上去的那趟活正跑着的话，顶栏上说得出**——名字与已用时间取的是任务台
+    /// 那一份快照，与任务屏上那一条同一个来源。两处各掐一次表的话，同一趟活会在两屏上
+    /// 报出两个数。
+    pub fn status(&mut self, ui: &mut egui::Ui, site: &Site, tasks: &mut Tasks) {
         if ui.button("重新列一遍").clicked() {
             self.reload(site);
         }
         ui.separator();
         ui.label(format!("{} 台设备", self.list.len()));
-        if let Some(running) = &self.running {
+        if let Some(live) = self.mine(tasks) {
             ui.separator();
             ui.colored_label(
                 ui.visuals().warn_fg_color,
-                format!(
-                    "正在同步「{}」，{:.0} 秒",
-                    running.name,
-                    running.started.elapsed().as_secs_f64()
-                ),
+                format!("正在{}，{:.0} 秒", live.name, live.elapsed.as_secs_f64()),
             );
-            if ui.button("停下").clicked() {
-                running.cancel.cancel();
+            // **停下在顶栏上也按得着**：那张卡收起来之后，卡上那一行就不在屏上了，
+            // 而人未必愿意为了按一下停下先切去任务屏。
+            if live.stopping {
+                ui.colored_label(ui.visuals().warn_fg_color, "正在停……");
+            } else if ui.button("停下").clicked() {
+                tasks.stop(live.id);
             }
+        }
+    }
+
+    /// 台上正跑着的那一趟是不是这一屏排上去的。
+    fn mine(&self, tasks: &Tasks) -> Option<romcat_core::task::Live> {
+        tasks.running().filter(|live| {
+            [self.previewing, self.evaluating, self.syncing].contains(&Some(live.id))
+        })
+    }
+
+    /// 台上那一趟的进度与「停下」，摆在按下它的那个按钮旁边。
+    ///
+    /// **人是在这一屏点的，不该逼他先切去任务屏才知道跑到哪儿了。** 摆的是任务台那一份
+    /// 快照（与任务屏上那一条同一个来源）；还排着队没轮到时说清它在等——不然按钮灰着、
+    /// 屏上一个字没有，看着就像按坏了。
+    fn live_ui(ui: &mut egui::Ui, tasks: &mut Tasks, id: Option<u64>, 干什么: &str) {
+        let Some(id) = id else {
+            return;
+        };
+        let Some(live) = tasks.running().filter(|live| live.id == id) else {
+            if tasks.queued().iter().any(|(queued, _)| *queued == id) {
+                ui.weak(format!("{干什么}排在任务台上等着（第 {id} 号）"));
+                if ui.button("撤掉").clicked() {
+                    tasks.stop(id);
+                }
+            }
+            return;
+        };
+        ui.weak(format!(
+            "正在{干什么}：{}（已用 {:.1} 秒）",
+            live.progress.render(),
+            live.elapsed.as_secs_f64(),
+        ));
+        if live.stopping {
+            ui.colored_label(ui.visuals().warn_fg_color, "正在停……");
+        } else if ui.button("停下").clicked() {
+            tasks.stop(id);
         }
     }
 
@@ -845,15 +937,20 @@ impl Screen {
                     self.invalidate();
                 }
                 if ui
-                    .button("算一遍容量")
+                    .add_enabled(
+                        self.evaluating.is_none(),
+                        egui::Button::new("算一遍容量"),
+                    )
                     .on_hover_text(
                         "只问中立库：每台设备的选择集各选出多少、多大、装不装得下。\
-                         **卡不在手边也算得出来**。折一次事实，全部设备共用。",
+                         **卡不在手边也算得出来**。折一次事实，全部设备共用。\
+                         它进**任务队列**跑，期间这一屏照常用。",
                     )
                     .clicked()
                 {
-                    self.evaluate(site);
+                    self.evaluate(site, tasks);
                 }
+                Self::live_ui(ui, tasks, self.evaluating, "算容量");
             });
         });
         ui.separator();
@@ -972,7 +1069,7 @@ impl Screen {
                      在这儿改只看得见一行字。这一屏管的是「送到哪」。",
                 );
         });
-        let report = self.evaluated.get(name).map(|evaluated| &evaluated.report);
+        let report = self.evaluated.get(name);
         if let Some(report) = report {
             ui.label(format!(
                 "选出 {} / {} 个变体，分属 {} 个「作品 × 平台」",
@@ -1142,7 +1239,7 @@ impl Screen {
             || {
                 self.evaluated
                     .get(name)
-                    .and_then(|evaluated| evaluated.report.over_capacity)
+                    .and_then(|report| report.over_capacity)
             },
             |plan| plan.over_capacity,
         );
@@ -1151,7 +1248,7 @@ impl Screen {
                 || {
                     self.evaluated
                         .get(name)
-                        .map(|evaluated| evaluated.report.trim_suggestions.clone())
+                        .map(|report| report.trim_suggestions.clone())
                         .unwrap_or_default()
                 },
                 |plan| plan.trim_suggestions.clone(),
@@ -1166,7 +1263,7 @@ impl Screen {
             let 排着 = self.previewing.is_some();
             if ui
                 .add_enabled(
-                    self.running.is_none() && !排着,
+                    self.syncing.is_none() && !排着,
                     egui::Button::new(if self.prepared.is_some() {
                         "重排差量"
                     } else {
@@ -1184,20 +1281,7 @@ impl Screen {
             }
             // 正排着的时候把进度摆在按钮旁边：人是在这一屏点的，不该逼他先切去任务屏
             // 才知道排到哪儿了。**停下也在这儿按得着。**
-            if let Some(id) = self.previewing
-                && let Some(live) = tasks.running().filter(|live| live.id == id)
-            {
-                ui.weak(format!(
-                    "正在排：{}（已用 {:.1} 秒）",
-                    live.progress.render(),
-                    live.elapsed.as_secs_f64(),
-                ));
-                if live.stopping {
-                    ui.colored_label(ui.visuals().warn_fg_color, "正在停……");
-                } else if ui.button("停下").clicked() {
-                    tasks.stop(id);
-                }
-            }
+            Self::live_ui(ui, tasks, self.previewing, "排差量");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let name = self.picked.clone().unwrap_or_default();
                 let 问过了 = self.confirm_remove.as_deref() == Some(name.as_str());
@@ -1235,23 +1319,26 @@ impl Screen {
             });
         });
         let Some(prepared) = self.prepared.clone() else {
+            // 差量作废了、而同步还在台上跑着的话，这一句底下还得摆得出那一趟的进度
+            // ——不然人一按下同步，屏上就什么都没有了。
+            Self::live_ui(ui, tasks, self.syncing, "同步");
             ui.weak(
                 "还没有差量预览。**同步前必须先看一遍它要做什么**——那是硬要求，\
                  不是可以跳过的一步（ADR-0016）。",
             );
             return;
         };
-        self.plan_ui(ui, site, &prepared);
+        self.plan_ui(ui, site, tasks, &prepared);
     }
 
     /// 那份计划本身：账、要说出口的怪事、步骤，以及「真的传」。
-    fn plan_ui(&mut self, ui: &mut egui::Ui, site: &Site, prepared: &Prepared) {
+    fn plan_ui(&mut self, ui: &mut egui::Ui, site: &Site, tasks: &mut Tasks, prepared: &Prepared) {
         let plan = &prepared.plan;
         ui.separator();
         tally_ui(ui, plan, self.prepare_ms);
         concerns_ui(ui, prepared);
         self.steps_ui(ui, plan);
-        self.sync_ui(ui, site, plan);
+        self.sync_ui(ui, site, tasks, plan);
     }
 
     /// 步骤那一段：收起来时摆头几条，摊开是那张虚拟化的表。
@@ -1300,7 +1387,13 @@ impl Screen {
     }
 
     /// 「真的传」那一行，连**有删除就得先点头**那一格（ADR-0015）。
-    fn sync_ui(&mut self, ui: &mut egui::Ui, site: &Site, plan: &romcat_core::sync::Plan) {
+    fn sync_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        site: &Site,
+        tasks: &mut Tasks,
+        plan: &romcat_core::sync::Plan,
+    ) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             if plan.deletes.files > 0 {
@@ -1313,16 +1406,21 @@ impl Screen {
                     ),
                 );
             }
-            let ready = self.running.is_none()
+            let ready = self.syncing.is_none()
                 && plan.touched() > 0
                 && (plan.deletes.files == 0 || self.acknowledged);
             if ui
                 .add_enabled(ready, egui::Button::new("同步"))
-                .on_hover_text("把上面这份差量真的落到目标设备上。只碰清单里记录过的文件。")
+                .on_hover_text(
+                    "把上面这份差量真的落到目标设备上。只碰清单里记录过的文件。\
+                     它进**任务队列**跑：进度、已用时间、停下都在任务屏上，\
+                     **跑的是这一刻摆着的这一份计划**——排上去之后改规则也改不了它。",
+                )
                 .clicked()
             {
-                self.sync(site);
+                self.sync(site, tasks);
             }
+            Self::live_ui(ui, tasks, self.syncing, "同步");
             if plan.touched() == 0 {
                 ui.label("一步都不用做：目标已经和选择集对齐了。");
             }
@@ -1547,10 +1645,17 @@ impl Screen {
             Some(self.form.capability.trim().to_string()).filter(|value| !value.is_empty());
         match site.catalog.put_sublibrary(&sublibrary) {
             Ok(()) => {
-                self.notice = Some(format!("存下了子库「{name}」。"));
                 // **算过的那份跟着作废**：容量上限改了，报告里的「超出多少、砍谁」
                 // 说的还是上一个上限——卡上会出现「上限写着 1 TB、旁边说超了 200 GiB」。
+                // **台上那趟还没认领的也一样**（[`Self::drop_survey`]）：它折报告用的正是
+                // 改之前那份子库，收回来等于把刚改掉的上限又摆回屏上。
                 self.evaluated.remove(&name);
+                let mut line = format!("存下了子库「{name}」。");
+                if let Some(说一句) = self.drop_survey() {
+                    line.push(' ');
+                    line.push_str(说一句);
+                }
+                self.notice = Some(line);
                 self.reload(site);
                 self.open(site, &name);
             }
@@ -1565,12 +1670,18 @@ impl Screen {
         };
         match site.catalog.remove_sublibrary(&name) {
             Ok(true) => {
-                self.notice = Some(format!(
-                    "删掉了子库「{name}」的定义。目标设备上的文件一个都没动。"
-                ));
                 self.picked = None;
                 self.confirm_remove = None;
                 self.evaluated.remove(&name);
+                // 台上那趟还没认领的也不认了——认领是整份替换，刚删掉这一台的报告会
+                // 又长回来（[`Self::drop_survey`]）。
+                let mut line =
+                    format!("删掉了子库「{name}」的定义。目标设备上的文件一个都没动。");
+                if let Some(说一句) = self.drop_survey() {
+                    line.push(' ');
+                    line.push_str(说一句);
+                }
+                self.notice = Some(line);
                 self.invalidate();
                 self.reload(site);
             }
@@ -1645,13 +1756,72 @@ fn steps_table(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan) {
     }
 }
 
-/// 后台那条线程干的活：把计划落到目标上。
+/// 「分不出第二份只读连接」那句话。
+///
+/// **不退到画帧那条线程上偷偷跑一趟**：那既会僵住窗口，又把真正的问题盖在一句
+/// 「怎么卡了一下」底下。排差量预览与算一遍容量两处说的是同一件事，所以话也只写一处。
+fn no_second_connection(什么活: &str, why: &CatalogError) -> String {
+    format!(
+        "分不出第二份只读连接：{why}\n\
+         {什么活}要在画帧那条线程之外跑，而它读的是同一份中立库文件。\
+         先确认那个文件还在、版本还对得上。"
+    )
+}
+
+/// 一趟同步跑完之后摆在屏上的那句回执。
+///
+/// **中断、失败、主动停了，一样都不许吞。** 全成功的一趟与半数写失败的一趟若在界面上
+/// 长得一样，那句「同步用了 X 秒」就是在骗人（命令行那一侧靠 `Outcome::render_text`
+/// 把这几样印全）。
+///
+/// 耗时取的是**任务台记下的那个数**——与任务屏历史里那一行同一个来源，两处各掐一次表的话，
+/// 同一趟活会在两屏上报出两个数。
+fn sync_notice(outcome: &Outcome, elapsed: f64) -> String {
+    let mut line = format!(
+        // **说得出是哪一台**：这句话可能是几十分钟前排上去的那一趟交回来的，
+        // 而那会儿摊开的多半是另一张卡了。
+        "「{}」同步用了 {elapsed:.1} 秒：动了 {} 个文件（新增 {}、更新 {}、删除 {}）。",
+        outcome.sublibrary,
+        thousands(outcome.touched()),
+        thousands(outcome.added.files),
+        thousands(outcome.updated.files),
+        thousands(outcome.deleted.files),
+    );
+    if outcome.interrupted {
+        line.push_str(
+            "\n⚠️ **这一趟被你按停了**：目标上没有半份文件，清单记的是\
+             到中断为止真实有什么，再跑一趟就接上。",
+        );
+    }
+    if outcome.gave_up {
+        line.push_str("\n⚠️ **连着失败太多次，主动停了**：多半是卡拔了或者写满了。");
+    }
+    if !outcome.failures.is_empty() {
+        line.push_str(&format!(
+            "\n⚠️ **有 {} 步没做成**：",
+            thousands(outcome.failures.len() as u64),
+        ));
+        for failure in outcome.failures.iter().take(TOP_NOTES) {
+            line.push_str(&format!("\n  {}：{}", failure.path, failure.why));
+        }
+        if outcome.failures.len() > TOP_NOTES {
+            line.push_str(&format!(
+                "\n  ……另有 {} 步没列",
+                outcome.failures.len() - TOP_NOTES,
+            ));
+        }
+    }
+    line
+}
+
+/// 任务台上那趟同步干的活：把计划落到目标上。
 ///
 /// **它拿到的只有计划里那些步骤**——清单之外的路径连进来的门都没有（ADR-0015）。
+/// 那份计划是**排它时**那一份：整份搬进了这个闭包，屏上那一份后来怎么变都够不着它。
 fn run_sync(
     prepared: &Prepared,
     library_roots: Option<&romcat_core::catalog::Roots>,
-    cancel: &CancelToken,
+    task: &Handle,
 ) -> Result<Outcome, String> {
     let sources = sync::Sources {
         library: &romcat_core::fs::RealFs,
@@ -1671,7 +1841,7 @@ fn run_sync(
         &prepared.actual,
         &prepared.manifest,
         &sources,
-        cancel,
+        task,
     )
     .map_err(|error| format!("目标写不了：{error}"))
 }

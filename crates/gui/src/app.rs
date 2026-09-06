@@ -310,7 +310,9 @@ impl App {
                 self.browse.refresh(&self.site);
                 continue;
             }
-            self.sublibrary.settle(done);
+            // **同步那一趟要把清单写回中立库**，所以子库屏认领时拿的是可写的那份现场
+            // ——台上那条线拿的是只读连接，写不动（`task::Product` 的文档）。
+            self.sublibrary.settle(&mut self.site, done);
         }
     }
 
@@ -472,8 +474,10 @@ impl App {
                     browse.status(ui, site);
                 }
                 View::Sublibraries => {
-                    let (sublibrary, site) = (&mut self.sublibrary, &self.site);
-                    sublibrary.status(ui, site);
+                    // **顶栏上那个「停下」按得动**，所以任务台拿的是可变的那一份。
+                    let (sublibrary, site, board) =
+                        (&mut self.sublibrary, &self.site, &mut self.board);
+                    sublibrary.status(ui, site, board);
                 }
                 View::Tasks => {
                     let (tasks, board) = (&mut self.tasks, &self.board);

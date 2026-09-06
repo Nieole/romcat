@@ -200,13 +200,16 @@ impl 现场 {
             link_probe_dir: Some(&self.pool.scratch()),
             convert_cache: 缓存,
         };
+        // 把手与这几条测试手里那个中断信号共用同一个信号：`execute::run` 从票
+        // `gui-redesign/15` 起收的是**把手**（它得报得出正在传哪个文件），
+        // 而「按停下」照旧是同一件事。
         sync::execute::run(
             &这趟.plan,
             &这趟.desired,
             &这趟.actual,
             清单,
             &sources,
-            cancel,
+            &Handle::with_cancel(cancel.clone()),
         )
         .expect("执行得动")
     }
@@ -397,7 +400,7 @@ fn 探不动硬链接就复制_降级路径在任何文件系统上都成立() {
         &这趟.actual,
         &Manifest::empty(),
         &sources,
-        &CancelToken::new(),
+        &Handle::new(),
     )
     .expect("执行得动");
     assert_eq!(outcome.placement, Some(Placement::Copy));

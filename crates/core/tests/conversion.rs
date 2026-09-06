@@ -22,7 +22,7 @@ use romcat_core::task::Handle;
 use romcat_core::catalog::Catalog;
 use romcat_core::container::{self, ReadPlan};
 use romcat_core::fs::RealFs;
-use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
+use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::sublibrary::{self, Rule, Selection, Sublibrary};
 use romcat_core::sync::{self, Act, Manifest, Sources};
 use romcat_core::testing::{TempDir, temp_dir};
@@ -173,7 +173,7 @@ impl 现场 {
             &actual,
             &Manifest::empty(),
             &sources,
-            &CancelToken::new(),
+            &Handle::new(),
         )
         .expect("执行得动")
     }
@@ -546,7 +546,7 @@ fn 默认不缓存_给了目录才落第三份而且第二趟直接命中() {
         &actual2,
         &Manifest::empty(),
         &sources,
-        &CancelToken::new(),
+        &Handle::new(),
     )
     .expect("执行得动");
     assert_eq!(第二趟.convert_cached, 1, "第二台设备直接从缓存取");

@@ -7,8 +7,8 @@
 //! 白板：期间切不了屏、滚不动列表、连「停下」都点不着。所以它们统统搬到画帧线程之外，
 //! 这一屏是那件事在界面上的落点。
 //!
-//! **眼下接上来的是排差量预览、扫描、取数据源与刮削**。识别与同步各在各自的票里接
-//! ——接的办法与这里一模一样：核心那一侧收一个
+//! **眼下接上来的是排差量预览、算一遍容量、同步、扫描、取数据源与刮削**。识别在它自己
+//! 那张票里接——接的办法与这里一模一样：核心那一侧收一个
 //! [`Handle`](romcat_core::task::Handle)，界面这一侧往 [`Board`] 上排一趟。
 //!
 //! ## 领域判断一条都不在这里
@@ -17,19 +17,28 @@
 //! [`romcat_core::task`]。这一层只做两件事：把任务台上的账画出来，把「停下」那一下
 //! 转发回去。
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use romcat_core::report::human_duration;
 use romcat_core::scan::ScanOutcome;
 use romcat_core::scrape::Outcome as ScrapeOutcome;
 use romcat_core::sources::SourceStatus;
-use romcat_core::sync::Prepared;
+use romcat_core::sublibrary::report::SelectionReport;
+use romcat_core::sync::{Outcome as SyncOutcome, Prepared};
 use romcat_core::task::{Board, Ending, Live, Record};
 
 /// 一趟任务跑完之后交出来的东西。
 ///
-/// **识别与同步在各自的票里接上来时，各自往这里加一支**——这个枚举就是「任务台上会跑
-/// 哪几种活」的清单。
+/// **识别在它自己那张票里接上来时往这里加一支**——这个枚举就是「任务台上会跑哪几种活」
+/// 的清单。
+///
+/// ## 要写库的那几支，写在**认领**那一步
+///
+/// 台上那条线拿的是中立库的**只读**连接（`Catalog::read_only`），写不动。所以
+/// [`Synced`](Self::Synced) 那份**清单**是当作产物交回来、由认领它的那一屏落库的
+/// （`sublibrary::Screen::settle`）。台上那条线自己写的话，两份连接会在同一个 SQLite
+/// 文件上撞车。
 #[derive(Debug)]
 pub enum Product {
     /// 一份排好的**差量预览**。
@@ -43,6 +52,13 @@ pub enum Product {
     Fetched(SourceStatus),
     /// 跑完了一趟**刮削**。装箱同上：一趟刮削的产物里带着整份报告。
     Scraped(Box<ScrapeOutcome>),
+    /// 跑完了一趟**同步**。装箱同上：这份账里带着同步完之后的整份**清单**。
+    ///
+    /// **被按停的那一趟也会走到这儿**（`Outcome::interrupted` 记着），而且**必须**走到
+    /// ——那份清单记的是「到中断为止目标上真实有什么」，认领时落回中立库，下一趟才接得上。
+    Synced(Box<SyncOutcome>),
+    /// 算了一遍**每台设备的容量**：一台一份[选择集报告](SelectionReport)，按子库名。
+    Evaluated(Box<BTreeMap<String, SelectionReport>>),
 }
 
 /// 这个界面上那张**任务台**。
