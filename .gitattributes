@@ -1,0 +1,15 @@
+# 换行一律 LF —— 入库与检出都是。
+#
+# 为什么要这份文件：门禁里的 `cargo fmt --all --check` 只认 `rustfmt` 的
+# `newline_style`，而它是默认的 `Auto`（按每个文件自己的首个换行符走）。`Auto` 挡得住
+# 「CRLF 检出的工作区整仓库 `--check` 全红」，但**拦不住一份带 CRLF 的新文件混进来**
+# ——对每个文件照单全收，门禁不会响，统一的 LF 就这么被啃掉一块（挂单 `Q184`）。
+# 堵这一手是仓库级的设置，不是 `rustfmt` 的旋钮。
+#
+# 主力机是 Windows（ADR-0018），`core.autocrlf` 与 `core.eol` 都没设过；`eol=lf` 把
+# 检出形态也钉成 LF，免得换台机器门禁就换个结果。落这份文件时 HEAD 上 0 个 CRLF 文件，
+# 所以它不重整任何既有文件。
+*           text=auto eol=lf
+
+# 界面内嵌的中文字体子集，别当文本碰。
+*.ttf       binary

@@ -1,14 +1,3 @@
-# ⚠️ **仓库还没按这份配置格式化过。** 这份文件先落地、格式化后落——整仓库跑一遍
-# 与「把 `cargo fmt --check` 加进门禁」是票 `queue-followups/11` 的活，它排在那一批最后，
-# 因为它一落地所有在飞的改动都冲突。**在那之前别跑 `cargo fmt --all`**：眼下它会动 77 个
-# 文件、2,252 行，全是与你手上那张票无关的改动（这一下已经发生过一次，挂单 `Q53`）。
-# `cargo fmt --all --check` 是只读的，随便跑；现在它 exit 1，那是应该的。
-#
-# **票 `queue-followups/11` 落地时连这一段（到下面那条 `#` 分隔线为止）一起删掉**，
-# 连同 `README.md` 里那一节同样的告示——格式化跑过之后这段话就反了：门禁从此**要求**
-# 仓库是 fmt 格式，而这里还在劝人别跑。配置本身（三个键与「量过但不设的项」）留着。
-# ─────────────────────────────────────────────────────────────────────────
-
 # `rustfmt` 配置。**这份文件只有三项**——那不是偷懒，是量出来的结论：
 # 这个仓库的手工排版本来就贴着 rustfmt 的默认值，**试过的每一处偏离都让 diff 变大**——
 # 唯一的例外是关掉 `reorder_imports`，而那一处不值得换。整份矩阵的实测数
@@ -64,16 +53,20 @@ max_width = 100
 #   人手写成一行一个的短元素数组**并**成紧凑表（删除侧 768 → 943 行）。
 #   **不设**：一个全局阈值既救表也改别处的表，而 `#[rustfmt::skip]` 是**就地、显式**的，
 #   仓库里已有先例且实测有效（`crates/gui/src/layout.rs` 的 `ALL`，试跑跑完原样未动）。
-#   这 7 张表怎么办交给票 `queue-followups/11`（挂单 `Q182`）。
+#   票 `queue-followups/11` 的裁决：**接受摊开**，7 张表照默认配置打散成一行一个，
+#   一处 `#[rustfmt::skip]` 都不加（挂单 `Q182`）——理由是这一步的目的就是「从此机器管格式」，
+#   而落地当天就开七个豁免，等于把「手工排版可以申请例外」写成先例；换来的是那条
+#   格式化提交是一趟纯 `cargo fmt --all` 的产出，谁都复现得出。
 #   注意阈值救不回带长元素的那一类（`&workspace.path().to_string_lossy()` 是 35 个字符），
 #   那一类只有 `#[rustfmt::skip]` 一条路。
 # `reorder_imports`：唯一一个关掉能让 diff 变小的（77 → 71 个文件），但只省 52 行，
 #   而它换来的是 `use` 永远排好序。**保持默认 `true`。**
 # `newline_style`：保持默认 `Auto`（按文件首个换行符走）。主力机是 Windows（ADR-0018），
-#   仓库里没有 `.gitattributes`、`core.autocrlf` 与 `core.eol` 都没设、HEAD 上 0 个 CRLF 文件；
-#   钉成 `Unix` 会让 CRLF 检出的工作区整仓库 `--check` 失败。**但 `Auto` 的另一面是**：
-#   它对每个文件照单全收，于是哪天一份在 Windows 上新写的文件带着 CRLF 进来，
-#   门禁也不会响。这一条交给票 `11`（它才是上 `cargo fmt --check` 门禁的那张）——挂单 `Q184`。
+#   `core.autocrlf` 与 `core.eol` 都没设、HEAD 上 0 个 CRLF 文件；钉成 `Unix` 会让 CRLF 检出的
+#   工作区整仓库 `--check` 失败。**但 `Auto` 的另一面是**：它对每个文件照单全收，于是哪天一份
+#   在 Windows 上新写的文件带着 CRLF 进来，门禁也不会响。**堵这一手的是仓库根下的
+#   `.gitattributes`（`* text=auto eol=lf`），不是这里的旋钮**——票 `queue-followups/11`
+#   与 `cargo fmt --check` 门禁一起落的（挂单 `Q184`）。
 # `wrap_comments` / `error_on_line_overflow` / `format_strings` / `imports_granularity`：
 #   **稳定版根本设不了**（写进来只会让每次 `cargo fmt` 打一行 "unstable features are only
 #   available in nightly channel" 的警告）。它们的默认值恰好都是我们要的——

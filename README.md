@@ -94,7 +94,7 @@ romcat-gui --catalog ~/.romcat/catalog/主库-xxxx.sqlite3
 
 ## 现在到哪一步了
 
-**27/29 张票落地**，余下两张是 Windows 真机验证（`ready-for-human`，需要人在 Windows 上跑）。**1,237 条测试全绿。**
+**27/29 张票落地**，余下两张是 Windows 真机验证（`ready-for-human`，需要人在 Windows 上跑）。**1,581 条测试全绿。**
 
 真库实测（`docs/library-facts.md` 记着全部数字与日期）：
 
@@ -143,25 +143,33 @@ CONTEXT.md     词表。动手前先读它，输出用它的词
 ## 开发
 
 ```bash
+cargo fmt --all --check                                   # 排版归机器管
 cargo clippy --workspace --all-targets --all-features     # 零警告
-cargo test --workspace --all-features                     # 1,237 条
+cargo test --workspace --all-features                     # 1,581 条
 cargo doc --workspace --no-deps
 ```
 
-### ⚠️ 眼下别跑 `cargo fmt --all`
+### 排版归机器管
 
-仓库根下有一份 `rustfmt.toml`（每一项为什么这么定都写在里面），但**仓库还没按它格式化过**
-——整仓库跑一遍与「把 `cargo fmt --check` 加进门禁」是同一张票的活，它排在队列最后，
-因为一落地所有在飞的改动都冲突。在那之前跑 `cargo fmt --all` 会动 77 个文件、2,252 行，
-全是与你手上那张票无关的改动（这一下已经发生过一次，只能手工撤回去）。
+**提交前跑 `cargo fmt --all`。** 门禁第一条就是 `cargo fmt --all --check`，红了就是没跑。
 
-`cargo fmt --all --check` 是只读的，随便跑；现在它 exit 1，那是应该的。这一段等格式化落地后删掉。
+配置在仓库根下的 `rustfmt.toml`，只有三项（`edition` / `style_edition` / `max_width`），
+每一项为什么这么定、以及**量过但故意不设**的那十来个旋钮各自的实测代价，都写在文件里。
+**别凭手感调它**——那份矩阵是整仓库跑出来的：试过的每一处偏离都让 diff 变大。
+
+两件反直觉的，先说在这儿免得你重量一遍：
+
+- `rustfmt` 按**显示列宽**算，不按字符数算，所以 `max_width = 100` 是一百列，一行 50 个汉字就到顶。
+- **中文注释不会被重新折行**（`wrap_comments` 在稳定版设不了、默认 `false`），注释里的对齐表格是安全的。
+  会被动的只有代码行。
+
+换行一律 LF，由 `.gitattributes` 钉住——`rustfmt` 自己拦不住 CRLF 混进来。
 
 ### ⚠️ 门禁必须带 `--all-features`
 
 `romcat-gui` 有一个默认关掉的 **`demo` feature**：合成数据、`--demo`、以及 `--bench*` 那几条实测开关全在它后面。**关掉之后它们一个字节都不进交付出去的二进制**——假数据与真库在界面上长得一模一样，看见一屏假名字的第一反应会是「我的库怎么了」，那比起不来更坏。
 
-代价是：**不带 `--all-features` 跑测试，会有 22 条被静默跳过**（1,112 而不是 1,134）。跳过不报错，所以命令得记牢。
+代价是：**不带 `--all-features` 跑测试，会少跑 101 条**（1,480 而不是 1,581）——其中 7 个测试文件（`browse` / `close` / `layout` / `media` / `queue` / `table` / `task`）整份都不编译，剩下的散在别的文件里被 `cfg` 掐掉。**少跑不报错**，退出码照样是 0，所以命令得记牢。
 
 ```bash
 # 跑实测（那几条都不开窗，没显示器也跑得起来）
