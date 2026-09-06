@@ -13,6 +13,7 @@ use std::fmt::Write as _;
 
 use serde::Serialize;
 
+use super::batch;
 use super::{Axis, Item, tally, tally_by};
 use crate::catalog::identify::NOT_RUN_LABEL;
 use crate::report::{heading, human_bytes, pad, thousands};
@@ -35,6 +36,24 @@ pub struct CandidateRow {
     pub chinese: Option<String>,
     /// **依据**：这条候选是怎么来的。
     pub evidence: String,
+}
+
+/// 报告里印出来的**一批变体**：待确认屏上那张卡片，连它照着抄得走的那串字。
+///
+/// 三个轴那几张表印的是 [`GroupRow`]（一个标签一个数），这一张多一样东西：**选择器
+/// 本身**。按目录那个轴的标签就是 `--under` 的值，抄下来即可；依据形状不是——它是个
+/// 五段的结构，屏上写的那半截（`源 / DAT / 哈希口径`）不够折回一个选择器。所以这里
+/// 把 [`Shape::selector`](super::Shape::selector) 折出来的整串字单摆一列。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ShapeRow {
+    /// `--shape` 收的那串字。**它就是屏上那张卡片的身份**。
+    pub selector: String,
+    /// 那句**共同依据**：整批通过时人验证的正是它。
+    pub why: String,
+    /// 多少条。
+    pub count: u64,
+    /// 这一批**整批通过**说得成立吗（只有单候选那一档算数）。
+    pub passable: bool,
 }
 
 /// 报告里印出来的一条队列条目。
@@ -92,6 +111,13 @@ pub struct QueueReport {
     pub by_candidate_work: Vec<GroupRow>,
     /// **按命名规律**分——第三个轴：名字里 `[…]` `(…)` 括起来的那几段带几条。
     pub by_name_mark: Vec<GroupRow>,
+    /// **按依据形状**分——待确认屏一级分批的那几批（[`batch::batches`]）。
+    ///
+    /// 它与上面三个轴不是同一件事：那三个是**批量裁决的轴**（ADR-0002 点名的），
+    /// 这一张是**队列自己的分法**——「工具凭什么这么认为」相同的聚成一批，
+    /// 而整批通过时人验证的正是那句共同依据。屏上那一列卡片与这张表出自同一个函数，
+    /// 所以照着抄一条 `--shape` 选中的就是屏上点那张卡片的同一批（ADR-0005）。
+    pub by_shape: Vec<ShapeRow>,
     /// 「无判据 / 跳过」的理由分布：**为什么没定下来**。
     pub by_reason: Vec<GroupRow>,
     /// 印出来的那几条。
@@ -149,6 +175,17 @@ impl QueueReport {
         report.by_directory = tally(items, Axis::Directory);
         report.by_candidate_work = tally(items, Axis::CandidateWork);
         report.by_name_mark = tally(items, Axis::NameMark);
+        // **一级分批走的是与屏上同一个函数**（`batch::batches`）：报告印出来的那串字
+        // 与屏上那张卡片必须是同一批，各算一份迟早会漂开（ADR-0005）。
+        report.by_shape = batch::batches(items)
+            .into_iter()
+            .map(|one| ShapeRow {
+                selector: one.shape.selector(),
+                why: one.why(),
+                count: one.count,
+                passable: one.passable(),
+            })
+            .collect();
         report.by_reason = tally_by(items, |item| {
             item.reason.clone().map(|r| vec![r]).unwrap_or_default()
         });
@@ -234,6 +271,8 @@ impl QueueReport {
         } else {
             table(&mut out, &self.by_name_mark, self.selected);
         }
+        heading(&mut out, "按依据形状——一条 `--shape` 覆盖多少（屏上那一列卡片）");
+        shape_table(&mut out, &self.by_shape, self.selected);
         if !self.by_reason.is_empty() {
             heading(&mut out, "为什么没定下来");
             table(&mut out, &self.by_reason, self.selected);
@@ -382,6 +421,37 @@ fn table(out: &mut String, rows: &[GroupRow], total: u64) {
     }
     if rows.len() > TOP {
         let _ = writeln!(out, "……另有 {} 组没印", thousands_len(rows.len() - TOP));
+    }
+}
+
+/// 一级分批那张表：**一行说这一批有多大，下一行给出照着抄的那串字**。
+///
+/// 不塞进 [`table`]：那张表一行一个标签，而这里一行要摆两样长东西——那句共同依据
+/// （一句完整的话）与整串选择器（五段）。挤成一行的话两样都会被截断，而选择器截断了
+/// 就是不能抄。**加了单引号**：那串字里有空格，不引起来粘过去就散了。
+fn shape_table(out: &mut String, rows: &[ShapeRow], total: u64) {
+    for row in rows.iter().take(TOP) {
+        #[allow(clippy::cast_precision_loss)]
+        let share = if total == 0 {
+            0.0
+        } else {
+            row.count as f64 * 100.0 / total as f64
+        };
+        let _ = writeln!(
+            out,
+            "{:>8}  {share:5.1}%  {}{}",
+            thousands(row.count),
+            row.why,
+            if row.passable {
+                ""
+            } else {
+                "（**整批通过说不成立**：候选不是恰好一条）"
+            },
+        );
+        let _ = writeln!(out, "                  --shape '{}'", row.selector);
+    }
+    if rows.len() > TOP {
+        let _ = writeln!(out, "……另有 {} 批没印", thousands_len(rows.len() - TOP));
     }
 }
 

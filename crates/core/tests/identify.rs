@@ -503,6 +503,81 @@ fn 逐芯片的命中通过但标记不自动过() {
     assert!(芯片.evidence.contains("逐芯片"), "{}", 芯片.evidence);
 }
 
+/// 给那份「谁也不认得」的 zip 摆两条候选，**可信程度与源的先后故意反着来**：
+/// 高置信那条出自源那一列排第五的 GoodNES，中置信那条出自排头一个的 No-Intro。
+///
+/// 反着摆才验得出「先按可信程度排」这句话：顺着摆的话，两种排法给出同一个次序，
+/// 那条断言就是恒真的。
+fn 装_两条可信程度与源反着来的候选(现场: &mut 现场) {
+    let 陌生 = ines(0xEE, 4_096);
+    // **中置信那条先写进去**：不这么摆的话，「按可信程度排」与「照写入顺序原样交回」
+    // 给出同一个次序，那条断言就分不出排序在不在。
+    装(
+        &mut 现场.repo,
+        "No-Intro",
+        "Nintendo - Nintendo Entertainment System (Headered)",
+        "FC",
+        Convention::AsIs,
+        // 这份 DAT **没记大小**，只凭 CRC-32 撞上——通过但标记，中置信（ADR-0002）。
+        &[GameRecord {
+            name: "Unknown Thing".to_string(),
+            roms: vec![RomRecord {
+                name: "unknown.nes".to_string(),
+                size: None,
+                crc32: Some(crc32(&陌生)),
+                ..RomRecord::default()
+            }],
+            ..GameRecord::default()
+        }],
+    );
+    装(
+        &mut 现场.repo,
+        "GoodNES",
+        "GoodNES 3.23",
+        "FC",
+        Convention::AsIs,
+        &[条目(
+            "Unknown Thing [T+Chi]",
+            "unknown.nes",
+            陌生.len() as u64,
+            crc32(&陌生),
+        )],
+    );
+}
+
+#[test]
+fn 中立库交回候选的次序就是按可信程度排的那一个() {
+    // **这条钉的是待确认屏一级分批的键。** 分批取的是**第一条候选**
+    // （`triage::batch::Shape::of`——「整批通过」就是 `--pick 1`，采用的正是第一条），
+    // 而候选从中立库出来是**按写入顺序**（`candidates_of` 的 `ORDER BY id`），
+    // 也就是识别当初产出它们的顺序。于是「第一条就是最可信的那条」这句话，
+    // 整条链上只由 `identify` 那一次排序担着——写入这一侧再没有第二道闸（挂单 Q82）。
+    let mut 现场 = 建现场();
+    装_两条可信程度与源反着来的候选(&mut 现场);
+    跑(&mut 现场);
+
+    let 候选 = 现场
+        .catalog
+        .candidates_of("库/FC/谁也不认得.zip")
+        .expect("读得出");
+    assert_eq!(
+        候选.iter()
+            .map(|one| (one.source.as_str(), one.confidence))
+            .collect::<Vec<_>>(),
+        vec![
+            ("GoodNES", Confidence::High),
+            ("No-Intro", Confidence::Medium),
+        ],
+        "**可信程度压过源的先后**，而中立库按写入顺序原样交回：{候选:#?}",
+    );
+    assert!(候选[0].accepted, "第一条正是自动通过的那条");
+    assert!(
+        候选[1].evidence.contains("这份 DAT 没记大小"),
+        "{}",
+        候选[1].evidence
+    );
+}
+
 #[test]
 fn 补丁与没有发行版链接的变体不去撞_dat() {
     let mut 现场 = 建现场();

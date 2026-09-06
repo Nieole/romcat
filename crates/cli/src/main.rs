@@ -39,7 +39,7 @@ use romcat_core::sublibrary::{self, Sublibrary};
 use romcat_core::sync;
 use romcat_core::title;
 use romcat_core::titledb;
-use romcat_core::triage::{self, Filter};
+use romcat_core::triage::{self, Filter, Shape};
 use romcat_core::verdict::{self, Store};
 use romcat_core::workspace::{self, Slug};
 use romcat_core::zh;
@@ -2807,6 +2807,13 @@ struct TriageFilterArgs {
     /// **按候选作品**：候选里有一条指着这部作品。可重复给
     #[arg(long, value_name = "作品")]
     candidate_work: Vec<String>,
+    /// **按依据形状**：待确认屏一级分批的那一批。可重复给
+    ///
+    /// 写成 `<源> / <DAT> / <置信度> / <哈希口径> / <候选数>`，一条候选都没有的那一批
+    /// 写成 `一条候选都没有 / <结论>`。**别手打**——`romcat triage list` 把每一批连它
+    /// 这串字一起印出来，照着抄一行就是屏上点那张卡片的同一批（ADR-0005）
+    #[arg(long, value_name = "依据形状")]
+    shape: Vec<String>,
     /// 点名这个变体（用它的键）。可重复给
     #[arg(long, value_name = "变体键")]
     key: Vec<String>,
@@ -2821,17 +2828,47 @@ impl TriageFilterArgs {
             })?;
             states.push(state);
         }
+        // **认那串字的活在核心库里**（`Shape::parse`）：屏上点一张卡片与这里敲一条
+        // `--shape` 说的是同一件事，命令行另写一份认法迟早会与屏上漂开（ADR-0005）。
+        let mut shape = Vec::new();
+        for text in &self.shape {
+            shape.push(Shape::parse(text)?);
+        }
         Ok(Filter {
             under: self.under.clone(),
             platform: self.platform.clone(),
             states,
             name_contains: self.name.clone(),
             candidate_work: self.candidate_work.clone(),
+            shape,
             keys: self.key.clone(),
-            // **按依据形状**眼下只有界面上点得到（票 `gui-redesign/09`）：
-            // 命令行上它要一串「源 / DAT / 置信度 / 哈希口径」的写法，那是另一张票的事。
-            ..Filter::default()
         })
+    }
+
+    /// 把这一趟用的**队列选择器**原样折回一段命令行片段。
+    ///
+    /// 与 [`TriageCommonArgs::选择器`] 是同一件事，管的是另一半。用处也只有一个：报告
+    /// 末尾那条**拿来复制粘贴的**命令说「这一批 120 条」，而那个 120 是**这一趟的选择器
+    /// 筛过之后**数出来的——只带 `--shape` 粘过去跑的是全库那一批（可能三千条），
+    /// 旁边写的数当场变成假的。`--state 跳过` 那一路更糟：报告印得出跳过那一批，
+    /// 抄走却因为默认三档里没有它而选中零条。
+    ///
+    /// **不带 `--shape`**：那一段由报告上每一行自己给（一批一串）。
+    /// 值都**加单引号**：目录名与汉化组记号带空格是常态。
+    fn 选择器(&self) -> String {
+        let mut out = String::new();
+        let mut 接上 = |flag: &str, values: &[String]| {
+            for value in values {
+                out.push_str(&format!(" {flag} '{value}'"));
+            }
+        };
+        接上("--under", &self.under);
+        接上("--platform", &self.platform);
+        接上("--state", &self.state);
+        接上("--name", &self.name);
+        接上("--candidate-work", &self.candidate_work);
+        接上("--key", &self.key);
+        out
     }
 }
 
@@ -3293,6 +3330,23 @@ fn run_triage_list(args: &TriageListArgs) -> ExitCode {
     if !args.quiet {
         let mut stdout = io::stdout().lock();
         let _ = stdout.write_all(report.render_text().as_bytes());
+        // **最值钱的那一批，连整条命令一起给。** 上面那张表给的是选择器本身；这一行
+        // 把它接成一条粘过去就能跑的命令。**这一趟的选择器一样不少地带上**：
+        // 库选择器不带，粘到另一台机器上开的是另一份库；队列选择器不带，那张表上的条数是
+        // 筛过之后数出来的，而命令跑的是全库那一批——旁边写的数当场变成假的。
+        // 挑的是最大的那一批**里按批答得了的**——`--pick 1` 只在候选恰好一条时说得成立
+        // （`Batch::passable`）。
+        if let Some(row) = report.by_shape.iter().find(|row| row.passable) {
+            let _ = writeln!(
+                stdout,
+                "\n从最值钱的那一批下手（{} 条）：\n  \
+                 romcat triage decide --shape '{}'{}{} --pick 1 --dry-run",
+                thousands(row.count),
+                row.selector,
+                args.filter.选择器(),
+                args.common.选择器(),
+            );
+        }
         let _ = stdout.flush();
     }
     if !write_json(args.json.as_deref(), &report) {

@@ -560,3 +560,205 @@ fn 按批撤销之后当场列队列就看得见它们回来了() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+/// 再装一份 GoodNES：给「甲」那份汉化版一条**只凭 CRC-32 撞上**的候选（中置信）。
+///
+/// 队列于是分成两批——一批带候选、一批一条候选都没有。一批的时候 `--shape` 选中的
+/// 恒等于整个队列，那条断言就分不出它到底筛没筛。
+fn 装_goodnes(workspace: &Path) {
+    let mut repo = DatRepo::open(&workspace::dat_repo_path(workspace)).expect("开得出来");
+    let mut writer = repo
+        .begin(&Unit {
+            source: "GoodNES".to_string(),
+            name: "good.dat".to_string(),
+            url: "https://example.invalid/z".to_string(),
+            fingerprint: "sha3".to_string(),
+        })
+        .expect("事务");
+    writer
+        .write_dat(
+            &DatMeta {
+                name: "GoodNES 3.23".to_string(),
+                platform: "FC".to_string(),
+                convention: Convention::AsIs,
+                header: DatHeader::default(),
+            },
+            // **没记大小**，只凭 CRC-32 撞上——通过但标记，中置信（ADR-0002）。
+            &[GameRecord {
+                name: "Jia [T+Chi]".to_string(),
+                roms: vec![RomRecord {
+                    name: "jia.nes".to_string(),
+                    size: None,
+                    crc32: Some(crc32(&卡带(0xB0))),
+                    ..RomRecord::default()
+                }],
+                ..GameRecord::default()
+            }],
+        )
+        .expect("写");
+    writer.commit().expect("提交");
+}
+
+/// 报告里那几条 `--shape '…'`，照抄的次序，去重。
+fn 抄下那几串字(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for part in text.split("--shape '").skip(1) {
+        let 一串 = part.split('\'').next().unwrap_or_default().to_string();
+        if !一串.is_empty() && !out.contains(&一串) {
+            out.push(一串);
+        }
+    }
+    out
+}
+
+#[test]
+fn 报告印出来的那串字照抄一条就选中同一批() {
+    // 票 `queue-followups/08` 的验收第 2 条。**按依据形状**从前只有界面上点得到，
+    // 命令行选不出同一批。这条走的是完整一趟：报告把每一批连它那串字一起印出来，
+    // 照抄一条 `--shape` 回去，选中的条数与报告上写的那一批**一个数都不差**。
+    let (library, workspace) = 现场();
+    装_goodnes(workspace.path());
+    扫并识别(library.path(), workspace.path());
+    let 工作目录 = workspace.path().to_string_lossy().into_owned();
+    let 账本 = workspace.path().join("账.json");
+    let 账本路径 = 账本.to_string_lossy().into_owned();
+
+    let out = 跑(&[
+        "triage",
+        "list",
+        "--library",
+        "小库",
+        "--workspace",
+        &工作目录,
+        "--json",
+        &账本路径,
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let 文本 = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(文本.contains("按依据形状——一条 `--shape` 覆盖多少"), "{文本}");
+    // **最值钱的那一批连整条命令一起给**，而且带着这一趟用的库选择器——
+    // 不带的话粘到别处开的是另一份库。
+    assert!(
+        文本.contains(
+            "romcat triage decide --shape 'GoodNES / GoodNES 3.23 / 中置信 / 含头 / 只有一个候选' \
+             --library '小库' --pick 1 --dry-run"
+        ),
+        "{文本}"
+    );
+
+    let 报告: serde_json::Value =
+        serde_json::from_slice(&fs::read(&账本).expect("报告该写出来")).expect("是 JSON");
+    let 几批 = 报告["by_shape"].as_array().expect("报告里该有这张表").clone();
+    assert_eq!(几批.len(), 2, "一批带候选、一批一条候选都没有：{几批:#?}");
+    assert_eq!(
+        几批.iter().map(|one| one["count"].as_u64().expect("是数")).sum::<u64>(),
+        3,
+        "各批加起来就是整个队列",
+    );
+    assert_eq!(
+        抄下那几串字(&文本)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        几批
+            .iter()
+            .map(|one| one["selector"].as_str().expect("是串字").to_string())
+            .collect::<std::collections::BTreeSet<_>>(),
+        "屏上印出来的与报告里记着的不是同一批串字：{文本}",
+    );
+
+    // 照抄每一批那串字回去：选中的必须正好是报告上写的那个数。
+    for 一批 in &几批 {
+        let 那串字 = 一批["selector"].as_str().expect("是串字").to_string();
+        let 该有几条 = 一批["count"].as_u64().expect("是数");
+        let 再一份 = workspace.path().join("再.json");
+        let 再一份路径 = 再一份.to_string_lossy().into_owned();
+        let out = 跑(&[
+            "triage",
+            "list",
+            "--library",
+            "小库",
+            "--workspace",
+            &工作目录,
+            "--shape",
+            &那串字,
+            "--json",
+            &再一份路径,
+            "--quiet",
+        ]);
+        assert!(
+            out.status.success(),
+            "{那串字}：{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let 这一份: serde_json::Value =
+            serde_json::from_slice(&fs::read(&再一份).expect("写得出")).expect("是 JSON");
+        assert_eq!(这一份["selected"].as_u64(), Some(该有几条), "{那串字}");
+        assert!(该有几条 < 3, "选中的与整个队列一样多，这条就分不出它筛没筛");
+        assert_eq!(
+            这一份["by_shape"].as_array().map(Vec::len),
+            Some(1),
+            "选一批出来该只剩这一批：{那串字}"
+        );
+    }
+
+    // **那条可粘贴的命令得把这一趟的选择器一样不少地带上。** 那张表上的条数是选择器
+    // 筛过之后数出来的；只带 `--shape` 粘过去跑的是全库那一批，旁边写的数当场变成假的。
+    let out = 跑(&[
+        "triage",
+        "list",
+        "--library",
+        "小库",
+        "--workspace",
+        &工作目录,
+        "--name",
+        "甲",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let 筛过的 = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(筛过的.contains("从最值钱的那一批下手（1 条）"), "{筛过的}");
+    assert!(
+        筛过的.contains("只有一个候选' --name '甲' --library '小库' --pick 1 --dry-run"),
+        "这一趟的 `--name` 没带上，粘过去跑的就是另一批：{筛过的}"
+    );
+}
+
+#[test]
+fn 依据形状写岔了当场说清该怎么写() {
+    // 静悄悄选中零条是最坏的一种：人会以为这一批真的空了。
+    let (library, workspace) = 现场();
+    扫并识别(library.path(), workspace.path());
+    let 工作目录 = workspace.path().to_string_lossy().into_owned();
+    let 敲 = |shape: &str| {
+        跑(&[
+            "triage", "list", "--library", "小库", "--workspace", &工作目录, "--shape", shape,
+        ])
+    };
+
+    let out = 敲("MAME / nes.xml");
+    assert!(!out.status.success());
+    let 抱怨 = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(抱怨.contains("不是一个依据形状"), "{抱怨}");
+    assert!(抱怨.contains("romcat triage list"), "得说清上哪儿抄：{抱怨}");
+
+    // 形状认得下来、库里却没有这一批：那**不是写错**，是真的一条都没有——两句话不一样，
+    // 所以这一趟照样算跑成了，只是报告上写着一条都没选中。
+    let out = 敲("一条候选都没有 / 无判据");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("一条都没选中"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}

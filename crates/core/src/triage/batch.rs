@@ -17,8 +17,8 @@
 //! - [`verdict::Batch`](crate::verdict::Batch)：一次 [`apply`](super::apply) 落下的
 //!   那些**裁决**，**撤销以它为粒度**。
 //!
-//! 两者在按下「整批通过」那一刻一一对应：这一批变体落成那一批裁决。词表眼下两个都
-//! 没收（挂单 Q77、Q80）。
+//! 两者在按下「整批通过」那一刻一一对应：这一批变体落成那一批裁决。词表**两个都收了**
+//! （`CONTEXT.md` 的「批」那一条，连「一批变体」这个叫法一起）。
 //!
 //! ## 一条只落一个形状
 //!
@@ -36,6 +36,18 @@ use crate::catalog::identify::{Confidence, Tier};
 use crate::dat::Convention;
 
 use super::{Axis, GroupRow, Item};
+
+/// **选择器**那串字里各段之间的分隔。
+///
+/// 两边留空格：源与 DAT 的名字里塞满了 `-`、`(`、`)`，一个光秃秃的 `/` 贴着字，
+/// 人一眼分不出哪儿是段界。
+const SEP: &str = " / ";
+
+/// [`Shape::Bare`] 那一支的头一段。
+///
+/// **与 [`Fanout::None`] 那个词不是同一句话**：那个说的是「这一批的候选数落在零那一档」，
+/// 这一个说的是「这一批根本不走候选那条路，它说的是为什么没定下来」。
+const BARE: &str = "一条候选都没有";
 
 /// 一批的**候选数**落在哪一档。
 ///
@@ -56,6 +68,15 @@ pub enum Fanout {
 }
 
 impl Fanout {
+    /// 五档全在这儿。
+    pub const ALL: [Self; 5] = [
+        Self::None,
+        Self::One,
+        Self::Few,
+        Self::Several,
+        Self::Many,
+    ];
+
     /// 有这么多条候选，落在哪一档。
     #[must_use]
     pub fn of(candidates: usize) -> Self {
@@ -78,6 +99,12 @@ impl Fanout {
             Self::Several => "有 4–10 个候选",
             Self::Many => "有 10 个以上候选",
         }
+    }
+
+    /// 从词认回来。[`Shape::parse`] 认末一段靠它。
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|one| one.label() == label)
     }
 
     /// 这一档按批回答得了吗。
@@ -201,8 +228,135 @@ impl Shape {
                 convention,
                 ..
             } => format!("{source} / {dat} / {}", convention.label()),
-            Self::Bare { state, .. } => format!("一条候选都没有 · {}", state.label()),
+            Self::Bare { state, .. } => format!("{BARE} · {}", state.label()),
         }
+    }
+
+    /// 折成**命令行上那串字**：`romcat triage --shape` 收的就是它。
+    ///
+    /// 屏上点一张卡片、命令行敲一条 `--shape`，选中的必须是同一批（ADR-0005）。
+    /// 形状是个结构，命令行只收得下一串字——所以这一对折算（连同 [`Shape::parse`]）
+    /// 就是那句话在字面上的落点，而**两边都只有这一处**。报告把每一批连它这串字一起
+    /// 印出来（`triage::report`），人照着抄一行就是一条覆盖几千条的命令。
+    ///
+    /// 有候选的写成五段 `<源> / <DAT> / <置信度> / <哈希口径> / <候选数>`；
+    /// 一条候选都没有的写成 `一条候选都没有 / <结论>`，有理由时理由跟在第三段。
+    ///
+    /// ## 这串字认得回来的前提：**源那一段里不许出现 `SEP`**
+    ///
+    /// [`Shape::parse`] 的段界靠两头：末三段是闭合词表，认不出就当场说不认得；
+    /// **头一段没有这层兜底**。源名里一旦出现一个 ` / `，认回来的是另一个形状——源短了
+    /// 一截、DAT 长了一截——它一条都选不中，而且**不报错**。所以这不是风格问题，是那条
+    /// 认法成立的前提；`源那一段里不许出现分隔符` 那条测试把它钉在真的源名上（内置数据源
+    /// 清单里那几个，加代码里写死的那四个）。DAT 与理由不受这条约束，它们自带 `/` 照样
+    /// 认得回来——中间那一段是整取的。
+    #[must_use]
+    pub fn selector(&self) -> String {
+        match self {
+            Self::Candidates {
+                source,
+                dat,
+                confidence,
+                convention,
+                fanout,
+            } => [
+                source.as_str(),
+                dat.as_str(),
+                confidence.label(),
+                convention.label(),
+                fanout.label(),
+            ]
+            .join(SEP),
+            Self::Bare { state, reason } => match reason {
+                Some(reason) => [BARE, state.label(), reason.as_str()].join(SEP),
+                None => [BARE, state.label()].join(SEP),
+            },
+        }
+    }
+
+    /// 把 [`Shape::selector`] 折出来的那串字认回一个形状。
+    ///
+    /// ## 两头对着认，中间那段整个留给 DAT
+    ///
+    /// DAT 的名字与「为什么没定下来」那句理由**都可能自带 `/`**。认错一段的后果不是
+    /// 报错——是**静悄悄选中另一批**，而人按下去的那一下就不是他看过的那一批。所以段界
+    /// 不靠数分隔符：源取头一段，置信度 / 哈希口径 / 候选数取**末三段**（三个都是闭合的
+    /// 词表，认不出就当场说不认得），剩下的中间原样拼回去当 DAT。理由那一支同理，
+    /// 第三段往后整个是理由。
+    ///
+    /// 两头的空白先剪掉——那串字是从报告上抄来的，行尾多个空格是常事。代价是
+    /// **理由恰好是空串**的那一批（`Some("")`）折出来的字末尾那个分隔符会被剪掉，
+    /// 认回来时报「认不出结论」。眼下理由的几个产地一个都给不出空串，而这条路失手的
+    /// 样子是**当场报错**、不是静悄悄选中别的一批，所以留着（挂单 Q179）。
+    ///
+    /// # Errors
+    /// 段数不够，或者哪一段的词认不出来时，交回一句说得清哪儿不对、该怎么写的话。
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let text = text.trim();
+        let parts: Vec<&str> = text.split(SEP).collect();
+        if parts[0] == BARE {
+            let label = parts.get(1).ok_or_else(|| {
+                format!(
+                    "「{text}」少了识别结论。一条候选都没有的那一批写成 \
+                     `{BARE}{SEP}<结论>`，理由（有的话）跟在第三段。"
+                )
+            })?;
+            let state = State::from_label(label).ok_or_else(|| {
+                format!("认不出结论「{label}」。写 `命中` / `未命中` / `无判据` / `跳过` 之一。")
+            })?;
+            return Ok(Self::Bare {
+                state,
+                reason: (parts.len() > 2).then(|| parts[2..].join(SEP)),
+            });
+        }
+        if parts.len() < 5 {
+            return Err(format!(
+                "「{text}」不是一个依据形状。有候选的那一批写成 \
+                 `<源>{SEP}<DAT>{SEP}<置信度>{SEP}<哈希口径>{SEP}<候选数>`，\
+                 一条候选都没有的写成 `{BARE}{SEP}<结论>`。\
+                 `romcat triage list` 把每一批连它这串字一起印出来，照着抄。"
+            ));
+        }
+        let tail = parts.len() - 3;
+        let confidence = Confidence::from_label(parts[tail]).ok_or_else(|| {
+            format!(
+                "认不出置信度「{}」。写 `高置信` / `中置信` / `低置信` 之一。",
+                parts[tail]
+            )
+        })?;
+        let convention = Convention::from_label(parts[tail + 1]).ok_or_else(|| {
+            format!(
+                "认不出哈希口径「{}」。写 `含头` / `去头` / `逐芯片` 之一。",
+                parts[tail + 1]
+            )
+        })?;
+        let fanout = Fanout::from_label(parts[tail + 2]).ok_or_else(|| {
+            format!(
+                "认不出候选数那一档「{}」。写 `{}` 之一。",
+                parts[tail + 2],
+                Fanout::ALL
+                    .iter()
+                    .map(|one| one.label())
+                    .collect::<Vec<_>>()
+                    .join("` / `"),
+            )
+        })?;
+        // **有候选的那一支永远不是「没有候选」那一档。** 放它过去的话选择器一条都选不中，
+        // 而屏上根本折不出这串字——那只可能是手打错了，当场说清比静悄悄选中零条强。
+        if fanout == Fanout::None {
+            return Err(format!(
+                "「{}」这一档只属于一条候选都没有的那一批，而这串字写着源与 DAT。\
+                 那一批写成 `{BARE}{SEP}<结论>`。",
+                Fanout::None.label(),
+            ));
+        }
+        Ok(Self::Candidates {
+            source: parts[0].to_string(),
+            dat: parts[1..tail].join(SEP),
+            confidence,
+            convention,
+            fanout,
+        })
     }
 }
 
@@ -789,6 +943,112 @@ mod tests {
             .map(|one| one.directory.as_str())
             .collect();
         assert!(目录.len() > 1, "五条样本全落在同一个目录里");
+    }
+
+    #[test]
+    fn 依据形状与命令行那串字来回折得动() {
+        // 屏上点一张卡片、命令行敲一条 `--shape`，选中的必须是同一批（ADR-0005）——
+        // 而两边之间只有这一串字。折过去再认回来不是同一个形状，那句话当场就是假的。
+        let items = {
+            let mut items = 一批(30);
+            items.push(条目("库/FC/光秃.zip", vec![]));
+            let mut 穿不透 = 条目("库/FC/穿不透.zip", vec![]);
+            穿不透.state = State::NoEvidence;
+            穿不透.reason = Some("容器穿不透：格式不认".to_string());
+            items.push(穿不透);
+            items.push(条目(
+                "库/FC/多候选.zip",
+                vec![
+                    候选("No-Intro", "nes.dat", "CRC-32 加大小撞上"),
+                    候选("TOSEC", "nes.dat", "CRC-32 加大小撞上"),
+                ],
+            ));
+            items
+        };
+        let batches = batches(&items);
+        assert_eq!(batches.len(), 4, "四种依据形状");
+        for batch in &batches {
+            let 那串字 = batch.shape.selector();
+            let 认回来 = Shape::parse(&那串字).unwrap_or_else(|why| panic!("{那串字}：{why}"));
+            assert_eq!(认回来, batch.shape, "{那串字}");
+            // 真正要的不是结构相等，是**选中同样这些条**。
+            let 原来选中: Vec<&str> = items
+                .iter()
+                .filter(|item| batch.shape.holds(item))
+                .map(|item| item.variant.key.as_str())
+                .collect();
+            let 认回来选中: Vec<&str> = items
+                .iter()
+                .filter(|item| 认回来.holds(item))
+                .map(|item| item.variant.key.as_str())
+                .collect();
+            assert_eq!(原来选中.len() as u64, batch.count, "{那串字}");
+            assert_eq!(原来选中, 认回来选中, "{那串字}");
+        }
+    }
+
+    #[test]
+    fn 名字里自带斜杠的照样认得回来() {
+        // 段界不靠数分隔符：DAT 的名字与那句理由都可能自带 `/`，而认错一段的后果
+        // 是**静悄悄选中另一批**。
+        let 有斜杠 = Shape::Candidates {
+            source: "MAME".to_string(),
+            dat: "Sony - PlayStation / PSX (Aftermarket)".to_string(),
+            confidence: Confidence::Medium,
+            convention: Convention::PerChip,
+            fanout: Fanout::Several,
+        };
+        assert_eq!(Shape::parse(&有斜杠.selector()), Ok(有斜杠));
+        let 理由带斜杠 = Shape::Bare {
+            state: State::NoEvidence,
+            reason: Some("容器穿不透：7z / rar 都解不开".to_string()),
+        };
+        assert_eq!(Shape::parse(&理由带斜杠.selector()), Ok(理由带斜杠));
+    }
+
+    #[test]
+    fn 源那一段里不许出现分隔符() {
+        // **段界只有头一段没有兜底。** 末三段是闭合词表，认不出就当场说不认得；源名里
+        // 一旦出现一个 ` / `，`Shape::parse` 认回来的是另一个形状（源短一截、DAT 长一截），
+        // 它一条都选不中而且**不报错**——正是这一票最该防的那种失手。所以把这条前提钉在
+        // **真的源名**上：内置数据源清单里那几个，加代码里写死的那四个。
+        let mut 全部: Vec<String> = crate::dat::registry::Registry::builtin()
+            .sources()
+            .iter()
+            .map(|one| one.name.clone())
+            .collect();
+        assert!(全部.len() >= 4, "内置清单里该有好几个源：{全部:?}");
+        全部.extend(
+            [
+                crate::identify::fuzzy::SOURCE,
+                crate::identify::model::SOURCE,
+                crate::identify::switch::SOURCE_TITLEDB,
+                crate::identify::switch::SOURCE_CONTAINER,
+            ]
+            .map(ToString::to_string),
+        );
+        for name in 全部 {
+            assert!(
+                !name.contains(SEP),
+                "源「{name}」里有分隔符，它那一批折出来的 `--shape` 认回去会选中零条",
+            );
+        }
+    }
+
+    #[test]
+    fn 认不出的那串字当场说清哪儿不对() {
+        // 静悄悄选中零条是最坏的一种：人会以为这一批真的空了。
+        let 说了什么 = |text: &str| Shape::parse(text).expect_err("这串字不该认得下来");
+        assert!(说了什么("MAME / nes.xml / 含头").contains("不是一个依据形状"));
+        assert!(说了什么("MAME / nes.xml / 很确信 / 含头 / 只有一个候选").contains("置信度"));
+        assert!(说了什么("MAME / nes.xml / 中置信 / 原样 / 只有一个候选").contains("哈希口径"));
+        assert!(说了什么("MAME / nes.xml / 中置信 / 含头 / 三个候选").contains("候选数"));
+        assert!(说了什么("一条候选都没有").contains("少了识别结论"));
+        assert!(说了什么("一条候选都没有 / 说不清").contains("认不出结论"));
+        // 「没有候选」那一档只属于另一支：放它过去等于选中零条。
+        assert!(
+            说了什么("MAME / nes.xml / 中置信 / 含头 / 没有候选").contains("一条候选都没有"),
+        );
     }
 
     #[test]

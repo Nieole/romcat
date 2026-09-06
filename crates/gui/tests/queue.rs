@@ -10,8 +10,8 @@ use egui::widgets::text_edit::TextEditState;
 use romcat_core::catalog::State;
 use romcat_core::scrape::AnchorKind;
 use romcat_core::scrape::zh::{judge, matched_groups};
-use romcat_core::triage::{Axis, Draft, Overrides, Scope};
-use romcat_core::verdict::{Anchor, MatchVerdict};
+use romcat_core::triage::{self, Axis, Draft, Filter, Overrides, Scope, Shape};
+use romcat_core::verdict::{self, Anchor, MatchVerdict};
 use romcat_gui::app::{App, View};
 use romcat_gui::queue::Mode;
 use romcat_gui::table::ROW_HEIGHT;
@@ -919,6 +919,74 @@ fn 识别与刮削的待确认在同一条队列里() {
             if source == "MAME")
     });
     assert!(有中文源 && 有dat, "两侧的待确认该在同一条队列里");
+}
+
+#[test]
+fn 界面点开的那一批与命令行按同一串字选出来的一条不差() {
+    // 验收第 3 条（票 `queue-followups/08`）。屏上点一张卡片、命令行敲一条 `--shape`，
+    // 选中的必须是**同一批**（ADR-0005）。两边之间只有那一串字：界面把形状折成它
+    // （`Shape::selector`），命令行把它认回一个形状（`Shape::parse`，`TriageFilterArgs`
+    // 调的就是这个）——所以这条比的不是「两处各写一份逻辑碰巧一致」，是那一对折算
+    // 在**每一批**上都不丢东西。
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    跑(&ctx, &mut app, 1);
+    let batches = app.queue().queue().batches().to_vec();
+    assert!(batches.len() > 3, "只分出 {} 批，比不出什么", batches.len());
+    // 两支都得比到：有候选的那一支五段，一条候选都没有的那一支两到三段，认法不是同一条。
+    assert!(
+        batches
+            .iter()
+            .any(|one| matches!(one.shape, Shape::Candidates { .. })),
+        "合成数据里该有带候选的批",
+    );
+    assert!(
+        batches
+            .iter()
+            .any(|one| matches!(one.shape, Shape::Bare { .. })),
+        "合成数据里该有一条候选都没有的批",
+    );
+
+    let index = verdict::Index::load(&app.site().store, &app.site().library).expect("读得出沉淀库");
+    for batch in &batches {
+        // 界面这一侧：屏上点开这张卡片，作用范围盖住的那些条。
+        展开(&mut app, &batch.shape);
+        跑(&ctx, &mut app, 1);
+        let scope = app.queue().scope().expect("展开了就该有作用范围");
+        assert_eq!(scope.shape, batch.shape);
+        let mut 界面这批: Vec<String> = app
+            .queue()
+            .queue()
+            .members(&scope)
+            .iter()
+            .map(|item| item.variant.key.clone())
+            .collect();
+        界面这批.sort();
+        assert_eq!(界面这批.len() as u64, batch.count);
+        // **空对空是恒真的废话**：每一批都得真盖住东西，比的才是真的一批。
+        assert!(!界面这批.is_empty(), "这一批一条都没盖住：{:?}", batch.shape);
+
+        // 命令行那一侧：只拿到那一串字，从中立库重折一遍队列。
+        let 那串字 = batch.shape.selector();
+        let 认回来 = Shape::parse(&那串字).unwrap_or_else(|why| panic!("{那串字}：{why}"));
+        let mut 命令行这批: Vec<String> = triage::survey(
+            &app.site().catalog,
+            &index,
+            &Filter {
+                shape: vec![认回来],
+                ..Filter::default()
+            },
+        )
+        .expect("折得出队列")
+        .items
+        .into_iter()
+        .map(|item| item.variant.key)
+        .collect();
+        // 比的是**哪些条**，不是它们排第几：两边各按各的次序走一遍队列，先后不是这条要钉的。
+        命令行这批.sort();
+
+        assert_eq!(命令行这批, 界面这批, "两边拿到的不是同一批：{那串字}");
+    }
 }
 
 #[test]

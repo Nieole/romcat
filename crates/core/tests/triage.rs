@@ -14,7 +14,7 @@
 use std::fs;
 use std::path::Path;
 
-use romcat_core::catalog::{Catalog, State, Roots};
+use romcat_core::catalog::{Catalog, Confidence, State, Roots};
 use romcat_core::task::Handle;
 use romcat_core::dat::Convention;
 use romcat_core::dat::chinese::ChineseMark;
@@ -26,7 +26,7 @@ use romcat_core::identify::{self, Options};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
-use romcat_core::triage::{self, Decide, DecisionSpec, Filter, Overrides};
+use romcat_core::triage::{self, Decide, DecisionSpec, Fanout, Filter, Overrides, Shape, batch};
 use romcat_core::verdict::{self, Anchor, Decision, Store};
 
 const 库名: &str = "小库";
@@ -266,6 +266,125 @@ fn 装_goodnes(现场: &mut 现场) {
         )
         .expect("写得进");
     writer.commit().expect("提交");
+}
+
+/// 再装一份 No-Intro：同一份汉化版上第二条中置信候选，**写在 GoodNES 后面**。
+///
+/// 顺序是故意的。No-Intro 在源那一列排头一个、GoodNES 排第五，而候选从中立库出来是
+/// **按写入顺序**（`candidates_of` 的 `ORDER BY id`）——两者反着摆，第一条是谁才分得出
+/// 识别到底排没排过序。
+fn 装_no_intro_只凭_crc(现场: &mut 现场) {
+    let mut writer = 现场
+        .repo
+        .begin(&Unit {
+            source: "No-Intro".to_string(),
+            name: "nes-headered.dat".to_string(),
+            url: "https://example.invalid/w".to_string(),
+            fingerprint: "sha4".to_string(),
+        })
+        .expect("开得了事务");
+    writer
+        .write_dat(
+            &DatMeta {
+                name: "Nintendo - Nintendo Entertainment System (Headered)".to_string(),
+                platform: "FC".to_string(),
+                convention: Convention::AsIs,
+                header: DatHeader::default(),
+            },
+            &[GameRecord {
+                name: "Dragon Quest (Japan)".to_string(),
+                roms: vec![RomRecord {
+                    name: "dq.nes".to_string(),
+                    size: None,
+                    crc32: Some(crc32(&汉化版(0xB0))),
+                    ..RomRecord::default()
+                }],
+                ..GameRecord::default()
+            }],
+        )
+        .expect("写得进");
+    writer.commit().expect("提交");
+}
+
+#[test]
+fn 一级分批的键取的是最可信的那条候选() {
+    // **候选按可信程度排，这件事到了这一层才有后果**：一级分批取的是**第一条候选**
+    // （`Shape::of`——「整批通过」就是 `--pick 1`，采用的正是第一条），于是屏上那张
+    // 卡片写的共同依据说的是谁，全看第一条是谁。写入顺序与源的先后**反着摆**（先写
+    // GoodNES、后写 No-Intro），排序一松这张卡片当场写成另一个源（挂单 Q82）。
+    //
+    // 可信程度那一层由另外两条钉着（`identify::rank` 的单元测试，与
+    // `tests/identify.rs` 那条走中立库的）——队列里高置信的早自动通过走了，
+    // 这一层看得见的只有中置信与低置信。
+    let mut 现场 = 建现场();
+    装_goodnes(&mut 现场);
+    装_no_intro_只凭_crc(&mut 现场);
+    跑识别(&mut 现场);
+
+    let items = 队列(&现场, &Filter::default());
+    let 那条 = items
+        .iter()
+        .find(|item| item.variant.key.contains("勇者斗恶龙"))
+        .expect("该在队列里");
+    assert_eq!(
+        那条.candidates
+            .iter()
+            .map(|one| (one.source.as_str(), one.confidence))
+            .collect::<Vec<_>>(),
+        vec![
+            ("No-Intro", Confidence::Medium),
+            ("GoodNES", Confidence::Medium),
+        ],
+        "写进去的次序是反的，交回来的次序得是排过的那个：{:#?}",
+        那条.candidates,
+    );
+
+    let batches = batch::batches(&items);
+    let 这一批 = batches
+        .iter()
+        .find(|one| one.shape.holds(那条))
+        .expect("它总得落进一批");
+    let Shape::Candidates {
+        source,
+        dat,
+        confidence,
+        convention,
+        fanout,
+    } = &这一批.shape
+    else {
+        panic!("有候选的那一批不该落进「一条候选都没有」那一支：{:?}", 这一批.shape);
+    };
+    let 头一条 = &那条.candidates[0];
+    assert_eq!(
+        (source.as_str(), dat.as_str(), *confidence, *convention),
+        (
+            头一条.source.as_str(),
+            头一条.dat.as_str(),
+            头一条.confidence,
+            头一条.hashed_as,
+        ),
+        "分批的键取的就是第一条候选",
+    );
+    assert_eq!(*fanout, Fanout::Few, "两条候选落在 2–3 个那一档");
+    assert!(
+        !这一批.passable(),
+        "两条候选问的是「选哪个」，整批通过在这一批上说不成立",
+    );
+
+    // **命令行那一侧拿到的是同一批**（ADR-0005）：把这张卡片折成 `--shape` 收的那串字，
+    // 再原样认回来，选中的必须一条不差。
+    let 那串字 = 这一批.shape.selector();
+    assert!(那串字.contains("No-Intro"), "{那串字}");
+    let 认回来 = Shape::parse(&那串字).unwrap_or_else(|why| panic!("{那串字}：{why}"));
+    let 选中 = 队列(
+        &现场,
+        &Filter {
+            shape: vec![认回来],
+            ..Filter::default()
+        },
+    );
+    assert_eq!(keys(&选中), vec![那条.variant.key.clone()], "{那串字}");
+    assert_eq!(选中.len() as u64, 这一批.count);
 }
 
 #[test]

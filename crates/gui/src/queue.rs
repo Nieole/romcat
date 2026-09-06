@@ -1927,8 +1927,11 @@ pub struct Picks {
     states: [bool; State::ALL.len()],
     /// **按依据形状**：一级分批点「逐条看」时填进来。
     ///
-    /// 它**没有文本框**——「MAME / gameboy.xml / 含头 / 中置信 / 单候选」不是人打得出来
-    /// 的东西，它只能从卡片上点。
+    /// 它**没有文本框**——「MAME / gameboy.xml / 中置信 / 含头 / 只有一个候选」不是人
+    /// 打得出来的东西，屏上它只能从卡片上点。命令行那一侧收得下同一批
+    /// （`romcat triage --shape`），但走的也不是手打：报告把每一批连
+    /// [`Shape::selector`] 折出来的那串字一起印出来，人**照着抄**（票
+    /// `queue-followups/08`）。
     shape: Option<Shape>,
 }
 

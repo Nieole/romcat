@@ -3294,6 +3294,73 @@ mod tests {
         assert_eq!(platform_of(&变体("游戏.7z", None), &units), None);
     }
 
+    fn 一条候选(source: &str, confidence: Confidence, platform: &str) -> Candidate {
+        Candidate {
+            member_key: String::new(),
+            inner: String::new(),
+            confidence,
+            accepted: false,
+            source: source.to_string(),
+            dat: "某份 DAT".to_string(),
+            platform: platform.to_string(),
+            game: "某条".to_string(),
+            rom: "rom.nes".to_string(),
+            hashed_as: Convention::AsIs,
+            dat_convention: Convention::AsIs,
+            evidence: String::new(),
+            chinese: None,
+            serial: None,
+            release_id: None,
+        }
+    }
+
+    #[test]
+    fn 候选先按可信程度排再论平台与源的先后() {
+        // **这不是排版偏好，是分批的键本身。** 待确认屏一级分批取的是**第一条候选**
+        // （`triage::batch::Shape::of`——「整批通过」就是 `--pick 1`，它采用的正是
+        // 第一条），而候选从中立库出来是**按写入顺序**（`candidates_of` 的
+        // `ORDER BY id`）。于是「第一条就是最可信的那条」这句话只由这里的排序担着：
+        // 它一松，屏上那张卡片写的共同依据就与按下去做的事对不上（挂单 Q82）。
+        let variant = 变体("库/FC/某游戏.zip", Some("FC"));
+        let 排在前面 = |a: &Candidate, b: &Candidate| rank(&variant, a) < rank(&variant, b);
+
+        // 第一层：**可信程度压过源的先后**。中文离线源排在源那一列的最末（它一个字节
+        // 都没看），可它中置信那一条照样排在 No-Intro 低置信那一条前面。
+        assert!(排在前面(
+            &一条候选(fuzzy::SOURCE, Confidence::Medium, "FC"),
+            &一条候选("No-Intro", Confidence::Low, "FC"),
+        ));
+        assert!(排在前面(
+            &一条候选("模型推断", Confidence::Medium, "FC"),
+            &一条候选("Redump", Confidence::Low, "FC"),
+        ));
+        // 第二层：同一档里**平台对得上的在前**。TOSEC 排在 No-Intro 后面，可平台
+        // 对得上时它照样赢——平台对不上的那条几乎一定是撞错了。
+        assert!(排在前面(
+            &一条候选("TOSEC", Confidence::Medium, "FC"),
+            &一条候选("No-Intro", Confidence::Medium, "GBA"),
+        ));
+        // 第三层：都一样时才论源。这一列说的是**元数据质量**，不是 `sources.toml`
+        // 那份「先取哪一个」的清单。
+        let 按源: Vec<&str> = ["No-Intro", "Redump", "TOSEC", "MAME", "GoodNES"].to_vec();
+        for pair in 按源.windows(2) {
+            assert!(
+                排在前面(
+                    &一条候选(pair[0], Confidence::Medium, "FC"),
+                    &一条候选(pair[1], Confidence::Medium, "FC"),
+                ),
+                "{} 该排在 {} 前面",
+                pair[0],
+                pair[1],
+            );
+        }
+        // 认不出的源垫底——连一个字节都没看的那一层都排在它前面。
+        assert!(排在前面(
+            &一条候选(fuzzy::SOURCE, Confidence::Medium, "FC"),
+            &一条候选("某个没听说过的源", Confidence::Medium, "FC"),
+        ));
+    }
+
     #[test]
     fn 独占目录才拿目录名去撞() {
         // 判据与刮削那一侧认本地媒体的规则同源：一个装着三千个 zip 的目录，
