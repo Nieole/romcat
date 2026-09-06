@@ -359,18 +359,22 @@ pub enum Tier {
     Medium,
     /// **低置信**：文件名规则、模糊匹配与模型推断那几层的产物。
     Low,
-    /// **还没识别**：一条候选都没有，谈不上置信度。它不是「猜得不准」，是**一个字都没说**。
+    /// **没有候选**：一条候选都没有，谈不上置信度。它不是「猜得不准」，是**一个字都没说**。
     ///
-    /// ⚠️ 这个词与词表里那条「**还没识别**：一个变体连识别都还没跑过」**不是一回事**。
-    /// 界面上「这一格没有置信度可标」一直写的就是这四个字（`browse::WorkRow::confidence_label`
-    /// 与浏览屏的变体行都是），这里跟着它，为的是同一个东西在五屏里说同一个词
-    /// ——那正是票 `gui-redesign/09` 验收第 6 条要的。**两个用法该并成一个还是分成两个词，
-    /// 记在挂单 `Q84` 上交给 `/domain-modeling`。**
+    /// ⚠️ 这一档**曾经也叫「还没识别」**，与词表里那条「**还没识别**：一个变体连识别都
+    /// 还没跑过」撞词（挂单 `Q84`）。撞词在待确认屏上撞出了一个真的错账：屏头同时要说
+    /// 这一档有几条、又要说库里**连识别都没跑过**的有几个（[`NOT_RUN_LABEL`]），
+    /// 两句话写的是同四个字、数的是两回事，于是后一句一直没人敢加。按 `Q84` 给的第一条
+    /// 路——**给这一档另起一个词**——改成「没有候选」，两句话这才并得进同一屏。
     ///
     /// 词表那一条在核心里落成 [`NOT_RUN_LABEL`] 与各处的 `not_run` 计数
     /// （[`Catalog::not_run_count`](super::Catalog::not_run_count)）。**这一档里的条目
     /// 全都跑过识别**——它们进得了[待确认队列](crate::triage)，只是一条候选都没有；
     /// 那一条里的变体**连队列都进不去**，因为库里根本没有它们的结论。
+    ///
+    /// **浏览屏那一半还没跟上**：`browse::WorkRow::confidence_label` 与浏览屏的变体行
+    /// 仍写着「还没识别」，说的却是这一档的意思。`Q84` 因此仍然开着，收口是票
+    /// `gui-redesign/12`「五屏一起改」的活。
     Unidentified,
 }
 
@@ -378,7 +382,7 @@ impl Tier {
     /// 四档全在这儿，屏上照这个次序摆。
     pub const ALL: [Self; 4] = [Self::High, Self::Medium, Self::Low, Self::Unidentified];
 
-    /// 从一条候选的置信度折过来；`None` 就是**还没识别**。
+    /// 从一条候选的置信度折过来；`None` 就是**没有候选**。
     #[must_use]
     pub fn of(confidence: Option<Confidence>) -> Self {
         match confidence {
@@ -391,13 +395,17 @@ impl Tier {
 
     /// 打给用户的那个词。前三档与 [`Confidence::label`] **逐字一样**——
     /// 同一件事在两处写成两个词，用户会以为那是两件事。
+    ///
+    /// 第四档**故意不叫 [`NOT_RUN_LABEL`]**：那四个字归词表那条「连识别都还没跑过」，
+    /// 而这一档说的是「跑过了，只是一条候选都没有」。同屏要把两个数并排说出来
+    /// （待确认屏的屏头），它们就不能是同一串字。
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::High => Confidence::High.label(),
             Self::Medium => Confidence::Medium.label(),
             Self::Low => Confidence::Low.label(),
-            Self::Unidentified => "还没识别",
+            Self::Unidentified => "没有候选",
         }
     }
 }

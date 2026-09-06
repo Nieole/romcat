@@ -11,7 +11,7 @@
 //! 界面看不见，反过来也一样。把「开哪份中立库」「开哪份沉淀库」「这份主库叫什么」捏成
 //! 一个类型，就是不让第二份算法长出来。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::catalog::{Catalog, CatalogError};
 use crate::path;
@@ -93,6 +93,19 @@ impl Site {
         Self::at(workspace, catalog, library, root)
     }
 
+    /// 这份现场里**某一个根**的**断点**文件在哪。
+    ///
+    /// 与 [`workspace::checkpoint_path`] 折出来的**是同一条路径**，只是不再要一个
+    /// [`Slug`]：开完现场的人手上只剩 [`Site::library`]，而它**就是** `Slug::text()`
+    /// 交出来的那一串（[`Site::open`] 与 [`Site::open_file`] 两条路都保证，底下那条
+    /// 单元测试钉着）。再拿它包一次 `Slug::Named` 会哈希两遍，折出第二个文件名——
+    /// 于是界面停下来的那一趟，命令行 `romcat scan --resume` 就接不上了，
+    /// 而「命令行裁的界面看得见，反过来也一样」是这个仓库的判据。
+    #[must_use]
+    pub fn checkpoint_path(&self, workspace: &Path, root_name: &str) -> PathBuf {
+        workspace::checkpoint_path_of(workspace, &self.library, root_name)
+    }
+
     /// 一份**全在内存里**的现场。演示与实测走这条，连磁盘都不碰。
     #[must_use]
     pub fn in_memory(catalog: Catalog, store: Store, library: &str) -> Self {
@@ -145,6 +158,30 @@ mod tests {
                 path.file_stem().expect("有主文件名").to_string_lossy(),
                 slug.text(),
             );
+        }
+    }
+
+    #[test]
+    fn 界面折出来的断点路径与命令行找的是同一个文件() {
+        // 界面手上只有 `Site::library`，命令行手上是 `Slug`。两条路折出两个文件名的话，
+        // 界面停下来的那一趟，`romcat scan --resume` 就接不上——而「命令行裁的界面
+        // 看得见，反过来也一样」是这个仓库的判据。
+        let workspace = PathBuf::from("/work");
+        for slug in [
+            Slug::Named("主库"),
+            Slug::AtPath(Path::new("/Volumes/甲/Game")),
+        ] {
+            let site = Site {
+                catalog: Catalog::open_in_memory().expect("开得出"),
+                store: crate::verdict::Store::in_memory().expect("开得出"),
+                library: slug.text(),
+            };
+            for root_name in ["主库", "元数据库", "带 / 斜杠的根名"] {
+                assert_eq!(
+                    site.checkpoint_path(&workspace, root_name),
+                    workspace::checkpoint_path(&workspace, slug, root_name),
+                );
+            }
         }
     }
 }

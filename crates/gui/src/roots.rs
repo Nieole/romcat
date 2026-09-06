@@ -25,16 +25,22 @@
 //! **只活在内存里的库（合成数据）没有文件**，那时候直说扫不了——不偷偷开一份空库。
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use romcat_core::catalog::roots::{self, LibraryRoot, RootStats};
 use romcat_core::catalog::Catalog;
 use romcat_core::report::{human_bytes, human_duration, human_time, thousands};
 use romcat_core::fs::RealFs;
-use romcat_core::scan::{self, Jobs, ScanOptions};
+use romcat_core::scan::{self, CheckpointOptions, Jobs, ScanOptions};
 use romcat_core::site::Site;
 use romcat_core::sources::{self, Source, SourceState, SourceStatus};
+use romcat_core::task::Halted;
 
 use crate::task::{Product, Tasks};
+
+/// 两次存**断点**的最小间隔。**与命令行同一个数**（`romcat scan` 默认 15 秒）：
+/// 界面停下的那一趟与命令行 `--resume` 接的是同一个文件，两边攒的活也该一样多。
+const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(15);
 
 /// 一个根在这一屏上要画的那几格。
 #[derive(Debug, Clone)]
@@ -211,6 +217,19 @@ impl Screen {
     ///
     /// 后台那条线程按文件路径自己开一份中立库：`rusqlite::Connection` 不是 `Sync`，
     /// 界面这条线程手里那一份交不过去。只活在内存里的库没有文件，那时直说扫不了。
+    ///
+    /// ## 两件事与命令行折齐
+    ///
+    /// - **写断点**（[`CheckpointOptions`]）：按停之后那句「下次接着跑」得有依据，
+    ///   而依据只能是断点文件。路径由 [`Site::checkpoint_path`] 折，与
+    ///   `romcat scan --resume` 找的是同一个文件。
+    /// - **被按停的那一趟折成 [`Halted`]**：`scan` 中断时交出来的仍是
+    ///   `Ok(ScanOutcome { interrupted: true, .. })`——那份「到目前为止」的体检报告
+    ///   命令行还要拿去印，它退 130 也靠这一位，所以核心那边不动。任务台认「停了」
+    ///   的判据是**那句话正是 [`Halted`] 交出来的那一句**
+    ///   （`romcat_core::task::Board::settle`），于是折这一下的活落在这里：
+    ///   不折的话，按停的那一趟会在任务屏历史里记成「完成」、库屏说「跑完了」，
+    ///   而根那一行写着「那一趟被中断」——同一趟活三处各说各的。
     pub fn scan(&mut self, site: &Site, tasks: &mut Tasks, name: &str) {
         if self.job_of(name).is_some() {
             return;
@@ -239,6 +258,8 @@ impl Screen {
         let workspace = self.workspace.clone();
         let owned = name.to_string();
         let title = format!("扫描 · {owned}");
+        // **断点路径在这条线程上折**：后台那条线程手里没有现场（`Site` 交不过去）。
+        let checkpoint = site.checkpoint_path(&self.workspace, name);
         let id = tasks.queue(title, move |task| {
             // 后台这条线程自己开一份写得动的中立库：`rusqlite::Connection` 不是 `Sync`，
             // 界面那条线程手里那一份交不过来。
@@ -248,9 +269,21 @@ impl Screen {
             // 界面上不给并发档：开扫前探一探介质自己定，与命令行默认那条路一样
             // （挂账 D9）。
             options.jobs = Jobs::Adaptive;
-            scan::scan(&RealFs::new(), &mut catalog, &options, task)
-                .map(|outcome| Product::Scanned(Box::new(outcome)))
-                .map_err(|error| error.to_string())
+            // **按停之后停在的地方要是干净的**（规格 58）：干净的依据就是这个文件。
+            // `resume: true` 是界面上「重扫」的意思——上一趟停在哪儿，这一趟接着走；
+            // 完整扫完的那一趟会把它删掉（`scan::finish_checkpoint`），所以它不会
+            // 让下一趟误以为还有活没干完。
+            options.checkpoint = Some(CheckpointOptions {
+                path: checkpoint,
+                interval: CHECKPOINT_INTERVAL,
+                resume: true,
+            });
+            match scan::scan(&RealFs::new(), &mut catalog, &options, task) {
+                // 中断的那一趟折成 [`Halted`] 那句话——任务台认的正是它。
+                Ok(outcome) if outcome.interrupted => Err(Halted.to_string()),
+                Ok(outcome) => Ok(Product::Scanned(Box::new(outcome))),
+                Err(error) => Err(error.to_string()),
+            }
         });
         self.error = None;
         self.running.push((id, Job::Scan(name.to_string())));
@@ -278,23 +311,33 @@ impl Screen {
             return false;
         };
         let (_, job) = self.running.remove(at);
-        match &done.ended {
-            romcat_core::task::Done::Product(_) => {
+        match (&done.ended, &job) {
+            // **「跑完了」只说给真的跑完的那一趟听。** 被按停的那一趟在
+            // [`Screen::scan`] 里就折成了 [`Halted`]，落到这儿是 `Stopped` 那一支
+            // ——不折的话它会长着 `Product` 的样子走这一支，屏上说「跑完了」，
+            // 而根那一行同时写着「那一趟被中断」。
+            (romcat_core::task::Done::Product(_), _) => {
                 self.notice = Some(format!("{} 跑完了。", done.name));
             }
-            romcat_core::task::Done::Stopped => {
+            // 扫描停下来的地方是干净的，依据是那个**断点**文件（[`Screen::scan`] 设的）：
+            // 再按一次「重扫」从停下的地方接着走，命令行 `romcat scan --resume` 也认它。
+            (romcat_core::task::Done::Stopped, Job::Scan(_)) => {
                 self.notice = Some(format!(
-                    "{} 被按停了。停下来的地方是干净的，下次接着跑。",
+                    "{} 被按停了。停下来的地方是干净的：断点已经写下，\
+                     再按「重扫」从那儿接着跑。",
                     done.name
                 ));
             }
-            romcat_core::task::Done::Failed { step, why } => {
+            (romcat_core::task::Done::Stopped, Job::Fetch(_)) => {
+                self.notice = Some(format!("{} 被按停了。", done.name));
+            }
+            (romcat_core::task::Done::Failed { step, why }, _) => {
                 self.error = Some(format!("{} 在「{step}」这一步失败了：{why}", done.name));
             }
         }
         // 扫完与取完都会改库或改数据源，两样都重读一遍。**认领哪一种都一样**：
         // 这一屏画的两张表各有一半靠对方那一趟才准（扫完变体数变了，取完记录数变了）。
-        drop(job);
+        // **被按停的那一趟照样要重读**：它写进中立库的那半份记录是真的。
         self.reload(site);
         true
     }
