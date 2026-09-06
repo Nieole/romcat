@@ -410,11 +410,11 @@ fn 扫完一个根之后浏览屏当场看得见新扫进来的那几行() {
     let mut 现场 = 现场::摆好();
 
     // 先看一眼浏览屏：空库，0 行、筛选面板上一个平台都没有。
-    现场.app.show_view(View::Variants);
+    现场.app.show_view(View::Browse);
     跑一帧(&ctx, &mut 现场.app);
     assert_eq!(现场.app.window().total(), 0, "空库上浏览屏本该是 0 行");
     assert!(
-        现场.app.library().facets().platforms.is_empty(),
+        现场.app.browse().facets().platforms.is_empty(),
         "空库上筛选面板本该是空的",
     );
 
@@ -424,14 +424,14 @@ fn 扫完一个根之后浏览屏当场看得见新扫进来的那几行() {
     let 库屏上的变体数 = 现场.app.roots().roots()[0].stats.variants;
     assert!(库屏上的变体数 > 0, "这一趟本该扫出东西来");
 
-    现场.app.show_view(View::Variants);
+    现场.app.show_view(View::Browse);
     跑一帧(&ctx, &mut 现场.app);
     assert!(
         现场.app.window().total() > 0,
         "库屏说 {库屏上的变体数} 个变体，浏览屏还画着 0 行",
     );
     assert!(
-        !现场.app.library().facets().platforms.is_empty(),
+        !现场.app.browse().facets().platforms.is_empty(),
         "扫进来两个平台，筛选面板上一个都没有",
     );
 }

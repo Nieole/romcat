@@ -722,7 +722,10 @@ struct ScrapeArgs {
     #[arg(long, value_name = "MiB")]
     max_media_mib: Option<u64>,
 
-    /// 无视采集记录全部重采。**媒体池里的文件一个都不删**
+    /// **重采**：无视采集记录（输入指纹）全部重来。不给就是**补缺**——指纹没变的整条跳过。
+    ///
+    /// 界面上那个「采法」旋钮换的是同一样东西（`scrape::Gather`）。
+    /// **媒体池里的文件一个都不删**
     #[arg(long)]
     refresh: bool,
 
@@ -1927,6 +1930,23 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
             eprintln!(
                 "  剥离规则认不出的记号（照着往 name-rules.toml 里补，补完重跑一遍就看得见效果）：{}",
                 top.join("、"),
+            );
+        }
+    }
+    if outcome.collections.members > 0 || outcome.collections.unresolved > 0 {
+        // **合集是沉淀库的投影**（票 `gui-redesign/06`）：识别跑完照它重建一遍。
+        // 落不了地的那几条要说出来——那多半是「那块盘这一趟没扫」，
+        // 而静静少掉几颗星比说出来更坏。
+        eprintln!(
+            "合集照沉淀库重建了 {} 个、{} 条成员关系（收藏是其中名字定死的那一组）。",
+            thousands(outcome.collections.collections as u64),
+            thousands(outcome.collections.members as u64),
+        );
+        if outcome.collections.unresolved > 0 {
+            eprintln!(
+                "  另有 {} 条成员关系在这份中立库里落不了地（那份内容不在这儿：盘没插、\
+                 或者还没扫到）。**它们一条都没删**——沉淀库不可再生，落不了地不等于不该留着。",
+                thousands(outcome.collections.unresolved as u64),
             );
         }
     }

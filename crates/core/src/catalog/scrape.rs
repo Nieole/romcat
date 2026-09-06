@@ -37,7 +37,7 @@
 //! 所以锚点是**自然键**：作品锚点是**作品名**（那正是识别给作品去重用的键），变体锚点是
 //! **变体的键**（相对主库根的路径，ADR-0020）。两者都不随识别重跑而变。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::{OptionalExtension, params};
 
@@ -103,6 +103,21 @@ CREATE TABLE IF NOT EXISTS media_remote(
     url   TEXT PRIMARY KEY,
     bytes INTEGER NOT NULL,
     hash  TEXT    NOT NULL
+) STRICT;
+
+-- 一份**视频**抽出来的首帧是池里的哪一份内容（票 `gui-redesign/07`）。
+-- **抽帧要外部 ffmpeg，一份视频抽一次就够了**：真库的媒体池里有 178 个 mp4，
+-- 每开一次详情面板重抽一遍，等于每次翻库都拉起一百多个进程。
+--
+-- 键是**视频自己的内容哈希**而不是它的键：媒体池按内容哈希存（ADR-0009），
+-- 同一段视频被几个锚点引用时池里只有一份，它的首帧当然也只该抽一次。
+--
+-- **与 media_blob、media_remote 各分一张表**，理由同它们那两条——作废的方式不一样：
+-- 这一行只在池里那份视频没了才失效，而扫描扫的是主库、动不着它。
+CREATE TABLE IF NOT EXISTS media_frame(
+    video TEXT PRIMARY KEY REFERENCES media(hash),
+    frame TEXT NOT NULL    REFERENCES media(hash),
+    at    INTEGER NOT NULL
 ) STRICT;
 
 -- 一个源对一个锚点采集过了没有。`input` 是当时的**输入指纹**，一样就整条跳过。
@@ -239,6 +254,12 @@ pub struct FieldCount {
     pub subjects: u64,
 }
 
+/// 一句 `IN (…)` 里最多塞多少个键。
+///
+/// SQLite 的绑定变量有上限：新版 32,766，老版 999。往小里设，因为**超上限的后果是
+/// 一句读不懂的错**（「too many SQL variables」），而分批的代价只是多几趟查询。
+const KEYS_PER_QUERY: usize = 900;
+
 impl Catalog {
     /// 一个锚点上、各个源上次采集的**输入指纹**：源 → 指纹。
     ///
@@ -277,6 +298,28 @@ impl Catalog {
     /// # Errors
     /// 写库失败时返回错误。
     pub fn put_scraped(&mut self, batch: &[Harvested]) -> Result<(), CatalogError> {
+        let all: BTreeSet<Field> = Field::all().into_iter().collect();
+        self.put_scraped_within(batch, &all, true)
+    }
+
+    /// 把一批采集结果写进去，**只在这几个字段之内替换**。
+    ///
+    /// 与 [`put_scraped`](Self::put_scraped) 的差别只有一条：那一条是「这个源在这个锚点上
+    /// 说的全部话」，这一条是「这个源在这个锚点上、**这几个字段上**说的话」。
+    ///
+    /// 差别要命在哪：界面上那个「字段」旋钮（票 `gui-redesign/10`）能只勾简介跑一趟，
+    /// 而删得太宽的话，这一趟就会把上一趟采到的类型、开发商、发行商一起抹掉——
+    /// 那正是「三元组并存、没有覆盖」要防的事。**不收媒体时同理**：媒体引用一条都不删，
+    /// 否则「这趟不收媒体」会把收过的媒体扔了。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn put_scraped_within(
+        &mut self,
+        batch: &[Harvested],
+        fields: &BTreeSet<Field>,
+        media: bool,
+    ) -> Result<(), CatalogError> {
         if batch.is_empty() {
             return Ok(());
         }
@@ -288,11 +331,21 @@ impl Catalog {
         let at = super::now_secs();
         let tx = self.conn.transaction().map_err(to_err)?;
         {
+            // **删得多窄由这一趟要什么说了算。** 名单是全的就一句删完（那是命令行走的
+            // 那条，也是既有行为）；名单收窄了就一个字段一句——多出来的那几句只在
+            // 界面按窄名单跑的时候执行，而它换来的是「不在名单里的字段一个字都不动」。
             let mut drop_values = tx
                 .prepare(
                     "DELETE FROM scrape_value WHERE anchor = ?1 AND subject = ?2 AND source = ?3",
                 )
                 .map_err(to_err)?;
+            let mut drop_field = tx
+                .prepare(
+                    "DELETE FROM scrape_value
+                     WHERE anchor = ?1 AND subject = ?2 AND source = ?3 AND field = ?4",
+                )
+                .map_err(to_err)?;
+            let everything = Field::all().iter().all(|field| fields.contains(field));
             let mut drop_media = tx
                 .prepare("DELETE FROM media_ref WHERE anchor = ?1 AND subject = ?2 AND source = ?3")
                 .map_err(to_err)?;
@@ -322,12 +375,22 @@ impl Catalog {
                 )
                 .map_err(to_err)?;
             for got in batch {
-                drop_values
-                    .execute(params![got.anchor, got.subject, got.source])
-                    .map_err(to_err)?;
-                drop_media
-                    .execute(params![got.anchor, got.subject, got.source])
-                    .map_err(to_err)?;
+                if everything {
+                    drop_values
+                        .execute(params![got.anchor, got.subject, got.source])
+                        .map_err(to_err)?;
+                } else {
+                    for field in fields {
+                        drop_field
+                            .execute(params![got.anchor, got.subject, got.source, field.label()])
+                            .map_err(to_err)?;
+                    }
+                }
+                if media {
+                    drop_media
+                        .execute(params![got.anchor, got.subject, got.source])
+                        .map_err(to_err)?;
+                }
                 for found in &got.values {
                     insert_value
                         .execute(params![
@@ -468,6 +531,41 @@ impl Catalog {
                     .query_row(params![hash], |row| row.get(0))
                     .optional()
             })
+            .map_err(|source| self.err(source))
+    }
+
+    /// 这份**视频**抽过的首帧是池里的哪一份；没抽过就是 `None`。
+    ///
+    /// **第二次打开不重抽**靠的就是它（票 `gui-redesign/07` 的第四条验收）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn media_frame(&self, video: &str) -> Result<Option<String>, CatalogError> {
+        self.conn
+            .prepare_cached("SELECT frame FROM media_frame WHERE video = ?1")
+            .and_then(|mut statement| {
+                statement
+                    .query_row(params![video], |row| row.get(0))
+                    .optional()
+            })
+            .map_err(|source| self.err(source))
+    }
+
+    /// 记下「这份视频的首帧抽出来是那一份内容」。
+    ///
+    /// **后写的盖掉先写的**：换了一版 ffmpeg 重抽出来的那一帧才是眼下池里那一份，
+    /// 留着旧的等于指着一个可能已经不在的文件。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn put_media_frame(&mut self, video: &str, frame: &str) -> Result<(), CatalogError> {
+        self.conn
+            .execute(
+                "INSERT INTO media_frame(video, frame, at) VALUES(?1,?2,?3)
+                 ON CONFLICT(video) DO UPDATE SET frame = excluded.frame, at = excluded.at",
+                params![video, frame, super::now_secs()],
+            )
+            .map(|_| ())
             .map_err(|source| self.err(source))
     }
 
@@ -924,7 +1022,11 @@ impl Catalog {
         Ok(())
     }
 
-    /// 把刮削结论整批清掉。`--refresh` 之外还有一个用处：换一套源之后重来。
+    /// 把刮削结论整批清掉。**换一套源之后整份重来**走它。
+    ///
+    /// **`--refresh` 不走这一条**（它只是不看那道输入指纹，见 `scrape::run`）：清空跑在
+    /// 采集**之前**，中途按停下或者撞上配额就会只剩一个空壳；而它无条件删掉的
+    /// `media_ref` 在「这趟不收媒体」那一档根本写不回来。
     ///
     /// **裁决那一行不碰**（`source = ` [`VERDICT`]）：刮削结论整份可再生，人在详情面板上
     /// 亲手写下的那句不是——中立库之外没有第二份（沉淀库导出的是裁决与匹配两张表，
@@ -938,6 +1040,11 @@ impl Catalog {
     ///
     /// **媒体池里的文件一个都不删**——池是内容寻址的，删文件要先确认没人再引用它，
     /// 那是 `vacuum` 那一档的活（调研 13.3(10)），不该混在这里顺手做掉。
+    ///
+    /// **[`裁决`](VERDICT)那一源的值一条都不删。** 它与刮削结论住在同一张表里，
+    /// 但它不是采来的——那是人在界面上一个字一个字敲进去的，重采一趟数据源不该把它
+    /// 冲掉（`priorities.toml` 的第一条规则、ADR-0001）。`media_ref` 与 `scrape_probe`
+    /// 上没有裁决那一源的行（人写的是值，不是采集记录），所以只有这一张表要设这道闸。
     ///
     /// # Errors
     /// 写库失败时返回错误。
@@ -957,6 +1064,116 @@ impl Catalog {
         tx.execute("DELETE FROM scrape_probe", []).map_err(to_err)?;
         tx.commit().map_err(to_err)
     }
+
+    /// 这一批变体牵动的**作品锚点**：作品名，连它的**代表变体**。
+    ///
+    /// 代表变体是「一部作品发一次在线查询」时拿去取**判据**的那一个，取的是键最小的
+    /// 那一个（`Plan::build` 按键遍历，挑中的就是它）。**它在全部变体里选，不在这一批
+    /// 里选**：范围收窄不该让同一部作品换一份判据去查——那会把配额花在两条不同的
+    /// 查询上，也会让**输入指纹**跟着范围抖动。
+    ///
+    /// `only` 是变体的键；`None` 是全库。这一条是[刮削估算](crate::scrape::estimate)
+    /// 的入口：它要在按下去之前答出「会发多少个请求」，而把整份计划立起来
+    /// （四万多个变体、二十万条候选、全库的文件表）在画帧那条线程上是走不通的。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn work_representatives(
+        &self,
+        only: Option<&BTreeSet<String>>,
+    ) -> Result<Vec<(String, String)>, CatalogError> {
+        let Some(keys) = only else {
+            return self.representatives_where("", &[]);
+        };
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        // **一次绑不下四万多个键。** SQLite 的绑定变量有上限（新版 32,766，老版 999），
+        // 而真库全选就是 46,444 个——超过上限时它报的是「too many SQL variables」，
+        // 在屏上会变成一句莫名其妙的「中立库读不动」。所以分批问，答案在 Rust 这边并起来。
+        //
+        // **分批不改结果**：`MIN(key)` 取的是作品名归组之后的最小键，而那一组里装的是
+        // **这部作品的全部变体**（`only` 只出现在子查询里，管的是「哪几部作品要采」）
+        // ——同一部作品落在哪一批里，代表变体都是同一个。
+        let mut out: BTreeMap<String, String> = BTreeMap::new();
+        for chunk in keys.iter().collect::<Vec<_>>().chunks(KEYS_PER_QUERY) {
+            let holes = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let where_sql = format!(
+                "WHERE work.name IN (
+                     SELECT 名下.name FROM variant AS 那批
+                     JOIN work AS 名下 ON 名下.id = 那批.work_id
+                     WHERE 那批.key IN ({holes}))"
+            );
+            let args: Vec<&str> = chunk.iter().map(|key| key.as_str()).collect();
+            for (name, representative) in self.representatives_where(&where_sql, &args)? {
+                out.insert(name, representative);
+            }
+        }
+        Ok(out.into_iter().collect())
+    }
+
+    /// [`work_representatives`](Self::work_representatives) 的那一句 SQL，
+    /// `WHERE` 与它的参数由调用方给。**两条路共用一句**，免得全库那一条与分批那一条
+    /// 在 `MIN(key)` 的归组上悄悄分家。
+    fn representatives_where(
+        &self,
+        where_sql: &str,
+        args: &[&str],
+    ) -> Result<Vec<(String, String)>, CatalogError> {
+        // **按作品名归组，不按 `work_id`。** `work.name` 上没有 UNIQUE，重跑识别造出
+        // 两行同名的作品是可能的；而 `Plan::build` 的作品锚点是**按名字**攒的
+        // （`work_entries` 那张 `BTreeMap<String, WorkSlot>`）。两边归组的键不一样时，
+        // 同名那两行会被这边数成两个作品、代表变体也可能挑到 `Plan` 没挑的那一个
+        // ——判据不同、指纹不同、请求数与真跑漂开，而那正是这块面板最怕的方向。
+        let sql = format!(
+            "SELECT work.name, MIN(variant.key)
+             FROM variant JOIN work ON work.id = variant.work_id
+             {where_sql}
+             GROUP BY work.name
+             ORDER BY work.name"
+        );
+        let mut statement = self.conn.prepare(&sql).map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(args.iter()), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
+    /// **一个源在某一层上的全部采集记录**：锚点 → 上次的输入指纹。
+    ///
+    /// 与 [`scrape_inputs`](Self::scrape_inputs) 的差别是问法：那一条问「这个锚点上各源
+    /// 说过什么」，这一条问「这个源在这一层上对哪些锚点说过话」。估算要的是后者——
+    /// 一次问回来，而不是几千个锚点各问一次。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn scrape_inputs_of(
+        &self,
+        anchor: &str,
+        source: &str,
+    ) -> Result<BTreeMap<String, String>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare_cached(
+                "SELECT subject, input FROM scrape_probe WHERE anchor = ?1 AND source = ?2",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![anchor, source], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (subject, input) = row.map_err(|source| self.err(source))?;
+            out.insert(subject, input);
+        }
+        Ok(out)    }
 }
 
 #[cfg(test)]
@@ -1059,6 +1276,60 @@ mod tests {
             unreadable_files: 0,
             members: vec![(key.to_string(), crate::shape::Role::Main)],
         }
+    }
+
+    #[test]
+    fn 整份清掉刮削结论时裁决一条都不删() {
+        // **裁决与刮削结论住在同一张表里**（源名是「裁决」），而它不是采来的
+        // ——那是人在界面上一个字一个字敲进去的，重建不出来。
+        // 一句光秃秃的 `DELETE FROM scrape_value` 会把它一起带走。
+        let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+        catalog
+            .put_verdict_value(AnchorKind::Work, "魂斗罗", Field::Title, "魂斗罗", "人定的")
+            .expect("写得进");
+        catalog
+            .put_scraped(&[Harvested {
+                anchor: AnchorKind::Work.label().to_string(),
+                subject: "魂斗罗".to_string(),
+                source: "TOSEC".to_string(),
+                input: "指纹".to_string(),
+                values: vec![HarvestedValue {
+                    field: Field::Year.label().to_string(),
+                    value: "1988".to_string(),
+                    evidence: "条目名".to_string(),
+                }],
+                media: Vec::new(),
+            }])
+            .expect("写得进");
+
+        catalog.clear_scraped().expect("清得掉");
+
+        let 剩下的 = catalog.scraped_values("作品", "魂斗罗").expect("读得出");
+        assert_eq!(剩下的.len(), 1, "该只剩裁决那一条");
+        assert_eq!(剩下的[0].source, VERDICT);
+        assert_eq!(剩下的[0].value, "魂斗罗");
+    }
+
+    #[test]
+    fn 作品代表变体这一问吃得下四万多个键() {
+        // **真库全选就是 46,444 个键**，而 SQLite 的绑定变量有上限（新版 32,766）。
+        // 一句塞完的写法在这个量级上报的是「too many SQL variables」，
+        // 而那句错在刮削面板上会变成一句莫名其妙的「中立库读不动」——
+        // 屏上于是既没有估算也没有原因。分批之后它只是多几趟查询。
+        let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+        let variants: Vec<crate::shape::Variant> = (0..40_000)
+            .map(|i| 变体(&format!("库/FC/第{i:06}个.zip"), Some("FC")))
+            .collect();
+        catalog
+            .replace_variants(&variants, 1, &crate::platform::Manifest::builtin())
+            .expect("写得进");
+        let keys: BTreeSet<String> = variants.iter().map(|v| v.key.clone()).collect();
+
+        // 一个都没认出作品，所以答案是空的——**这一条钉的是「问得出去」不是「答什么」**。
+        let works = catalog
+            .work_representatives(Some(&keys))
+            .expect("四万多个键也该问得出去");
+        assert!(works.is_empty(), "这些变体一个作品都没挂上");
     }
 
     #[test]

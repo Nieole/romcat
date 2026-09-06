@@ -265,7 +265,7 @@ fn 每行看得见平台变体数容量年份元数据齐不齐与最高置信�
     {
         assert_eq!(row.variants, 1, "没认出作品的那一行就该只有它自己");
         assert_eq!(row.confidence, None);
-        assert_eq!(row.confidence_label(), "还没识别");
+        assert_eq!(row.confidence_label(), "没有候选");
         assert_eq!(row.missing_label(), "缺全部");
     }
 }
@@ -352,24 +352,25 @@ fn 筛选下推之后行与聚合一起收窄() {
     }
     assert!(catalog.work_total(&query).expect("数得出来") <= 全部);
 
-    // 名字里含：主列表筛的是**这一行的名字**，不是变体的键。
+    // **搜索框**：找的是**这一行画出来的那个名字**，不是变体的键——认出作品的按
+    // 作品名找，没认出来的按它自己的键找（票 `gui-redesign/05` 的排序另见 `search.rs`）。
     let query = WorkQuery {
-        contains: "作品0".to_string(),
+        search: "作品0".to_string(),
         ..WorkQuery::default()
     };
     assert_eq!(
         catalog.work_total(&query).expect("数得出总数"),
         WORKS as u64,
-        "按作品名筛不出来",
+        "按作品名搜不出来",
     );
     let query = WorkQuery {
-        contains: "散落".to_string(),
+        search: "散落".to_string(),
         ..WorkQuery::default()
     };
     assert_eq!(
         catalog.work_total(&query).expect("数得出总数"),
         LOOSE,
-        "没认出作品的那一行按它自己的键筛不出来",
+        "没认出作品的那一行按它自己的键搜不出来",
     );
 }
 

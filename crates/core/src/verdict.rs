@@ -27,8 +27,9 @@
 //! 打开时把没跑过的接着跑完。**往前迁得动，往后（库比程序新）如实拒绝并说清**——
 //! 那时该换新程序，而不是删库。
 //!
-//! 眼下三条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
-//! 第 3 条建 `verdict_batch` 与 `verdict_batch_row` 两张表（**批**，见下一节）。
+//! 眼下四条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
+//! 第 3 条建 `verdict_batch` 与 `verdict_batch_row` 两张表（**批**，见下一节），
+//! 第 4 条建 `collection_member` 表（**合集**与**收藏**，见再下一节）。
 //! 加这几条时库还是空的，但那不改变纪律——**永远不要求删库**，中立库那条「版本一变就
 //! 重建」的便宜路子在这份库上不许走。
 //!
@@ -45,6 +46,20 @@
 //!
 //! 中立库那一半的撤销原料**不在这里**：那是候选与结论，可再生，住在中立库自己的
 //! `verdict_batch_shadow`（`catalog::identify`）。两半分开住，各按各的身份。
+//!
+//! ## **合集**与**收藏**：为什么它们也住这儿
+//!
+//! 一条**合集成员关系**（[`Membership`]）说的是「这份内容属于我起名叫某某的那一组」。
+//! 收藏是其中名字定死的那一组（[`crate::collection::FAVORITE`]）——`CONTEXT.md` 的词条
+//! 写着「合集是一组自己起名的，收藏是那个默认的一组」，所以这里只有一张表。
+//!
+//! 它住这儿的理由与裁决同一条，而且更硬：**这是用户亲手点的，一份只有一处，
+//! 删掉就没了**。中立库整份可再生（结构一变就让人删掉重扫），把收藏放进去等于说
+//! 「下一次改结构时你那几百颗星归零」。
+//!
+//! 中立库里 `collection` / `collection_variant` 那两张表因此是**这份库的投影**——与
+//! 那几行 `origin = 裁决` 的作品和发行版一模一样的身份：识别跑完照沉淀库重建一遍，
+//! 结果一致（[`crate::collection::project`]）。
 //!
 //! ## 两种锚，如实分开
 //!
@@ -234,6 +249,37 @@ CREATE TABLE IF NOT EXISTS verdict_batch_row(
     before      TEXT,
     PRIMARY KEY (batch, variant_key)
 ) STRICT;
+",
+    // 4：**合集成员关系**（票 gui-redesign/06）。**收藏是名字定死的那一组**，
+    // 与自建合集同一张表——`CONTEXT.md` 说的「合集是一组自己起名的，收藏是那个默认的
+    // 一组」，两张表会让「按合集筛」与「按收藏筛」变成两套算法。
+    "\
+-- 一条**合集成员关系**：这份内容属于叫这个名字的那一组。锚与 `verdict` 那张表是
+-- 同一套两种（见模块文档），理由也同一条：**内容锚换台机器、改过名字之后仍然认得出**。
+--
+-- **没有单独的「合集」表**：一个合集就是它那些成员关系，成员一条不剩它就没了。
+-- 立一张空合集表的话，屏上「合集 3 个」里可能有两个一条东西都选不出来，而这一票的
+-- 正题恰恰是把「合集 0 个」那句话收掉（挂账 D74）。
+CREATE TABLE IF NOT EXISTS collection_member(
+    id          INTEGER PRIMARY KEY,
+    -- 合集的名字。原样存人打的那串字（前后空白由上一层修掉）。
+    name        TEXT    NOT NULL,
+    anchor      TEXT    NOT NULL,
+    -- 内容锚。
+    crc32       INTEGER,
+    size        INTEGER,
+    sha1        TEXT,
+    -- 路径锚：哪份主库的哪个变体。只在本机成立，**挪了位置会飘**。
+    library     TEXT,
+    variant_key TEXT,
+    added_at    INTEGER NOT NULL
+) STRICT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS collection_member_content
+    ON collection_member(name, crc32, size) WHERE anchor = '内容';
+CREATE UNIQUE INDEX IF NOT EXISTS collection_member_path
+    ON collection_member(name, library, variant_key) WHERE anchor = '路径';
+CREATE INDEX IF NOT EXISTS collection_member_name ON collection_member(name);
 ",
 ];
 
@@ -575,6 +621,31 @@ impl BatchRow {
     #[must_use]
     pub fn anchor(&self) -> &Anchor {
         &self.after.anchor
+    }
+}
+
+/// 一条**合集成员关系**：这份内容属于叫这个名字的那一组（票 `gui-redesign/06`）。
+///
+/// **收藏是名字定死的那一组**（[`crate::collection::FAVORITE`]），不另立一种。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Membership {
+    /// 哪个合集。
+    pub name: String,
+    /// 钉在什么上。**内容锚认得出改名与挪目录，路径锚不认得**。
+    pub anchor: Anchor,
+    /// 什么时候放进去的（Unix 秒）。
+    pub added_at: i64,
+}
+
+impl Membership {
+    /// 现在把这条锚放进这个合集。
+    #[must_use]
+    pub fn now(name: &str, anchor: Anchor) -> Self {
+        Self {
+            name: name.to_string(),
+            anchor,
+            added_at: now_secs(),
+        }
     }
 }
 
@@ -1275,6 +1346,209 @@ impl Store {
         rows.collect::<Result<_, _>>()
             .map_err(|source| self.err(source))
     }
+
+    // ── 合集与收藏：同一套成员关系（票 gui-redesign/06） ──────────────────────
+
+    /// 把一批锚放进合集。返回其中**本来不在里面**的有几条。
+    ///
+    /// 同一条锚放两次是空操作而不是攒出两行：成员关系是个是非题，「在里面」没有第二种
+    /// 程度。**一整批一个事务**：界面上「全选 → 收藏」一下就是四万多条，一条一个事务
+    /// 等于四万多次提交（这份库是 WAL，那是四万多次写日志）。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn join(&mut self, memberships: &[Membership]) -> Result<usize, VerdictError> {
+        let path = self.path.clone();
+        let to_err = |source| VerdictError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        let mut changed = 0;
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO collection_member(name, anchor, crc32, size, sha1,
+                         library, variant_key, added_at)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+                     ON CONFLICT DO NOTHING",
+                )
+                .map_err(to_err)?;
+            for membership in memberships {
+                let (crc32, size, library, variant_key) = match_columns(&membership.anchor);
+                let sha1 = match &membership.anchor {
+                    Anchor::Content { sha1, .. } => sha1.clone(),
+                    Anchor::Path { .. } => None,
+                };
+                changed += insert
+                    .execute(params![
+                        membership.name,
+                        membership.anchor.label(),
+                        crc32,
+                        size,
+                        sha1,
+                        library,
+                        variant_key,
+                        membership.added_at,
+                    ])
+                    .map_err(to_err)?;
+            }
+        }
+        tx.commit().map_err(to_err)?;
+        Ok(changed)
+    }
+
+    /// 把一批锚从一个合集里拿出来。返回真的拿出来了几条。
+    ///
+    /// **一整批一个事务**，理由同 [`Self::join`]。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn leave(&mut self, name: &str, anchors: &[Anchor]) -> Result<usize, VerdictError> {
+        let path = self.path.clone();
+        let to_err = |source| VerdictError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        let mut changed = 0;
+        {
+            let mut by_content = tx
+                .prepare(
+                    "DELETE FROM collection_member
+                     WHERE name = ?1 AND anchor = ?2 AND crc32 = ?3 AND size = ?4",
+                )
+                .map_err(to_err)?;
+            let mut by_path = tx
+                .prepare(
+                    "DELETE FROM collection_member
+                     WHERE name = ?1 AND anchor = ?2 AND library = ?3 AND variant_key = ?4",
+                )
+                .map_err(to_err)?;
+            for anchor in anchors {
+                changed += match anchor {
+                    Anchor::Content { crc32, size, .. } => by_content.execute(params![
+                        name,
+                        ANCHOR_CONTENT,
+                        i64::from(*crc32),
+                        size_column(*size)
+                    ]),
+                    Anchor::Path {
+                        library,
+                        variant_key,
+                    } => by_path.execute(params![name, ANCHOR_PATH, library, variant_key]),
+                }
+                .map_err(to_err)?;
+            }
+        }
+        tx.commit().map_err(to_err)?;
+        Ok(changed)
+    }
+
+    /// 这条锚在哪几个合集里，按名字排。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn joined(&self, anchor: &Anchor) -> Result<Vec<String>, VerdictError> {
+        let mut statement = self
+            .conn
+            .prepare(match anchor {
+                Anchor::Content { .. } => {
+                    "SELECT name FROM collection_member
+                     WHERE anchor = ?1 AND crc32 = ?2 AND size = ?3 ORDER BY name"
+                }
+                Anchor::Path { .. } => {
+                    "SELECT name FROM collection_member
+                     WHERE anchor = ?1 AND library = ?2 AND variant_key = ?3 ORDER BY name"
+                }
+            })
+            .map_err(|source| self.err(source))?;
+        let read = |row: &rusqlite::Row<'_>| row.get::<_, String>(0);
+        let rows = match anchor {
+            Anchor::Content { crc32, size, .. } => statement.query_map(
+                params![ANCHOR_CONTENT, i64::from(*crc32), size_column(*size)],
+                read,
+            ),
+            Anchor::Path {
+                library,
+                variant_key,
+            } => statement.query_map(params![ANCHOR_PATH, library, variant_key], read),
+        }
+        .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
+    /// 整份成员关系。**投影**要它（[`crate::collection::project`]）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn memberships(&self) -> Result<Vec<Membership>, VerdictError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT name, anchor, crc32, size, sha1, library, variant_key, added_at
+                 FROM collection_member ORDER BY name, added_at, id",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map([], |row| {
+                let anchor: String = row.get(1)?;
+                let anchor = if anchor == ANCHOR_CONTENT {
+                    Anchor::Content {
+                        crc32: u32::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+                        size: u64::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
+                        sha1: row.get(4)?,
+                    }
+                } else {
+                    Anchor::Path {
+                        library: row.get(5)?,
+                        variant_key: row.get(6)?,
+                    }
+                };
+                Ok(Membership {
+                    name: row.get(0)?,
+                    anchor,
+                    added_at: row.get(7)?,
+                })
+            })
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
+    /// 库里有哪几个合集，各有多少条成员关系。按条数从多到少、同数按名字排。
+    ///
+    /// **数的是成员关系不是变体**：一条内容锚可能在本机对应好几个变体（同一份内容
+    /// 存了两处），而这个数说的是「用户点过多少下」。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn collections(&self) -> Result<Vec<(String, u64)>, VerdictError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT name, COUNT(*) FROM collection_member
+                 GROUP BY name ORDER BY COUNT(*) DESC, name",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+                ))
+            })
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+}
+
+/// 大小落进 SQLite 那一列时的样子。装不下就钉在上限——**这条路走不到**：
+/// `i64::MAX` 字节是 8 EiB。
+fn size_column(size: u64) -> i64 {
+    i64::try_from(size).unwrap_or(i64::MAX)
 }
 
 /// 一条匹配裁决那四列锚，两处共用。
@@ -1382,10 +1656,17 @@ fn mark_of_label(label: &str) -> Option<ChineseMark> {
 /// 是一份**内存里的快照**而不是一个连接：识别要为 46,444 个变体各查一次，逐次开库查
 /// 是把一件常数时间的事做成 46,444 次 I/O。库里的条数与裁决的条数同阶（几万），
 /// 整份读进来不值一提。
+///
+/// **[`Membership`] 也在这份快照里**，不是因为识别要拿它撞什么——它一次都不参与识别。
+/// 它跟着走，是因为识别那一趟**末尾**要照沉淀库把中立库里的合集重建一遍
+/// （[`crate::collection::project`]），而那与作品、发行版那几行 `origin = 裁决` 是同一件事：
+/// 中立库里那些行是这份库的投影。同一份快照拿着走，就不必为它再开一次库，
+/// 也不会出现「裁决照的是这一刻、合集照的是另一刻」。
 #[derive(Debug, Default)]
 pub struct Index {
     content: BTreeMap<(u32, u64), Verdict>,
     path: BTreeMap<String, Verdict>,
+    memberships: Vec<Membership>,
 }
 
 impl Index {
@@ -1416,19 +1697,36 @@ impl Index {
                 Anchor::Path { .. } => {}
             }
         }
+        index.memberships = store
+            .memberships()?
+            .into_iter()
+            .filter(|one| match &one.anchor {
+                Anchor::Content { .. } => true,
+                Anchor::Path { library: owner, .. } => owner == library,
+            })
+            .collect();
         Ok(index)
     }
 
-    /// 一条都没有吗。
+    /// 一条**裁决**都没有吗。
+    ///
+    /// **只算裁决，不算合集成员关系**：这个数是拿来说「这份库里人裁过多少」的
+    /// （报告里那一行），而合集是另一回事。
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.content.is_empty() && self.path.is_empty()
     }
 
-    /// 一共几条（只算这一趟用得上的）。
+    /// 一共几条**裁决**（只算这一趟用得上的）。
     #[must_use]
     pub fn len(&self) -> usize {
         self.content.len() + self.path.len()
+    }
+
+    /// 这一趟用得上的**合集成员关系**：内容锚全要，路径锚只要这份主库的。
+    #[must_use]
+    pub fn memberships(&self) -> &[Membership] {
+        &self.memberships
     }
 
     /// 拿判据查一条内容锚的裁决。
@@ -1934,7 +2232,7 @@ mod tests {
     fn 第一版的老库带着裁决升上来_一条都不丢() {
         // **这份库不可再生**，所以「迁移只许往后追加」不能只写在模块文档里——要有一条
         // 测试真的走一遍「第 1 版的库 → 最新版」，并且看着老裁决原样还在。
-        // 眼下第 2、3 条迁移都是 `CREATE TABLE IF NOT EXISTS`，本来就动不了老数据；
+        // 眼下第 2、3、4 条迁移都是 `CREATE TABLE IF NOT EXISTS`，本来就动不了老数据；
         // 这一条钉的是**将来**：等哪天有一条迁移改的是已有的表，它会先炸，
         // 而不是等用户丢了裁决才发现。
         let conn = Connection::open_in_memory().expect("开得出来");
@@ -1964,6 +2262,121 @@ mod tests {
             .expect("读得到")
             .expect("老裁决还在");
         assert_eq!(back.decision, verdict.decision, "一个字都没变");
+    }
+
+    #[test]
+    fn 第三版的老库带着裁决和批升上来_一条都不丢() {
+        // 与上一条同一个形状、同一条理由，钉的是**第 4 条迁移**（合集，票
+        // `gui-redesign/06`）。**每加一条迁移就照这个形状补一条**：这份库不可再生，
+        // 「升上来之后老东西还在」是它唯一不能出错的地方。
+        //
+        // 从第 3 版起头而不是第 1 版，是因为第 1 版那条已经把「1 → 最新」走过一遍了；
+        // 这一条要看的是**跨过第 4 条那一步**——升上来之后老库里的裁决与批照旧读得回来，
+        // 而新的那张表也真的建出来了。
+        let conn = Connection::open_in_memory().expect("开得出来");
+        for sql in &MIGRATIONS[..3] {
+            conn.execute_batch(sql).expect("建得出第三版");
+        }
+        conn.execute_batch("PRAGMA user_version = 3")
+            .expect("盖得上第三版的版本号");
+        let mut store = Store {
+            conn,
+            path: "（内存）".to_string(),
+        };
+        let verdict = 汉化裁决();
+        store.put(&verdict).expect("第三版里就存得进");
+        let batch = store
+            .put_batch(
+                "小库",
+                "作品《魂斗罗》",
+                None,
+                &[BatchRow {
+                    variant_key: "库/FC/某.zip".to_string(),
+                    member: "库/FC/某.zip".to_string(),
+                    inner: "rom.nes".to_string(),
+                    after: verdict.clone(),
+                    before: None,
+                }],
+            )
+            .expect("第三版里就记得下批");
+
+        store.migrate().expect("升得上来");
+
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("读得到");
+        assert_eq!(
+            u32::try_from(version).expect("装得下"),
+            schema_version(),
+            "升到最新一版"
+        );
+        let back = store
+            .find(&verdict.anchor)
+            .expect("读得到")
+            .expect("老裁决还在");
+        assert_eq!(back.decision, verdict.decision, "裁决一个字都没变");
+        assert_eq!(
+            store.batch_rows(batch).expect("读得到").len(),
+            1,
+            "那一批里的行也还在",
+        );
+        // 新那张表真的建出来了，而且是空的——升级不会凭空长出成员关系。
+        assert!(store.memberships().expect("读得到").is_empty());
+    }
+
+    #[test]
+    fn 同一条锚放两次进同一个合集只算一条() {
+        // 成员关系是个是非题：「在里面」没有第二种程度。攒出两行的话，
+        // 取消收藏点一下会只去掉一半。
+        let mut store = Store::in_memory().expect("开得出来");
+        let anchor = Anchor::Content {
+            crc32: 0x1234_5678,
+            size: 1024,
+            sha1: None,
+        };
+        let 一条 = [Membership::now("收藏", anchor.clone())];
+        assert_eq!(store.join(&一条).expect("放得进"), 1);
+        assert_eq!(store.join(&一条).expect("放得进"), 0, "第二次不是新的一条");
+        assert_eq!(store.memberships().expect("读得到").len(), 1);
+        assert_eq!(
+            store.joined(&anchor).expect("读得到"),
+            vec!["收藏".to_string()]
+        );
+        assert_eq!(
+            store.leave("收藏", std::slice::from_ref(&anchor)).expect("拿得出"),
+            1
+        );
+        assert!(store.joined(&anchor).expect("读得到").is_empty());
+    }
+
+    #[test]
+    fn 路径锚的成员关系只在自己那份主库里算数() {
+        // 与裁决同一条：路径锚记的是「主库『某某』里的某某变体」，换一份主库那条锚
+        // 说的就不是同一个东西了。快照按主库名筛，投影才不会把甲库的收藏落到乙库上。
+        let mut store = Store::in_memory().expect("开得出来");
+        let 两条: Vec<Membership> = ["甲", "乙"]
+            .into_iter()
+            .map(|library| {
+                Membership::now(
+                    "收藏",
+                    Anchor::Path {
+                        library: library.to_string(),
+                        variant_key: "FC/某.zip".to_string(),
+                    },
+                )
+            })
+            .collect();
+        store.join(&两条).expect("放得进");
+        let index = Index::load(&store, "甲").expect("读得出快照");
+        assert_eq!(index.memberships().len(), 1);
+        assert_eq!(
+            index.memberships()[0].anchor,
+            Anchor::Path {
+                library: "甲".to_string(),
+                variant_key: "FC/某.zip".to_string(),
+            },
+        );
     }
 
     #[test]

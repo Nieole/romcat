@@ -119,7 +119,7 @@ impl 现场 {
     ///
     /// **这一屏上写不了规则了**（票 `gui-redesign/11`：选择集在这儿只读），
     /// 所以这个前提直接摆进中立库——界面上那条路是「浏览屏筛好按存成子库」，
-    /// 它自己在 `tests/library.rs` 里验。
+    /// 它自己在 `tests/browse.rs` 里验。
     fn 加规则(&mut self, name: &str, rule: &str) {
         let parsed = Rule::parse(rule).expect("读得懂");
         let (screen, site) = self.app.sublibrary_and_site();
@@ -137,17 +137,17 @@ impl 现场 {
     /// 在浏览屏上点「更新到子库」，跟着让窗口把人送回子库屏。
     fn 更新到子库(&mut self) {
         {
-            let (library, site) = self.app.library_and_site();
-            library.update_sublibrary(site);
-            assert!(library.error().is_none(), "{:?}", library.error());
+            let (browse, site) = self.app.browse_and_site();
+            browse.update_sublibrary(site);
+            assert!(browse.error().is_none(), "{:?}", browse.error());
         }
         self.app.route();
     }
 
     /// 眼下浏览屏那份筛选展开出来是哪一批变体。
     fn 屏上筛出来的(&mut self) -> BTreeSet<String> {
-        let (library, site) = self.app.library_and_site();
-        let query = library.query().clone();
+        let (browse, site) = self.app.browse_and_site();
+        let query = browse.query().clone();
         site.catalog
             .scoped_variants(&query, Scope::AllExcept(&[]))
             .expect("展得开")
@@ -290,13 +290,13 @@ fn 点改选择跳到浏览屏而且筛选器里预填的是这个子库的规�
     场.加规则("掌机", "中文=汉化");
 
     场.改选择();
-    assert_eq!(场.app.view(), View::Variants, "没跳去浏览屏");
-    let editing = 场.app.library().editing().expect("正在改一个子库");
+    assert_eq!(场.app.view(), View::Browse, "没跳去浏览屏");
+    let editing = 场.app.browse().editing().expect("正在改一个子库");
     assert_eq!(editing.sublibrary, "掌机");
     assert_eq!(editing.broken, 0);
 
     // **多条规则之间是并集**，与求值同一条口径——预填的正是那一条。
-    let 预填 = 场.app.library().query().rule.clone().expect("预填了规则");
+    let 预填 = 场.app.browse().query().rule.clone().expect("预填了规则");
     let 并 = Rule::any_of(vec![
         Rule::parse("平台=SFC").expect("读得懂"),
         Rule::parse("中文=汉化").expect("读得懂"),
@@ -330,8 +330,8 @@ fn 在浏览屏调完更新到子库规则原样带回而且选出来的与屏�
     // 再来一趟，这次在浏览屏上真的改：多要一个平台。
     场.改选择();
     {
-        let (library, _) = 场.app.library_and_site();
-        library.set_filter_rule(Some(
+        let (browse, _) = 场.app.browse_and_site();
+        browse.set_filter_rule(Some(
             Rule::parse("平台=SFC 或 平台=GBA").expect("读得懂"),
         ));
     }
@@ -364,11 +364,11 @@ fn 例外在浏览屏上加减子库屏如实显示有几条() {
 
     场.改选择();
     {
-        let (library, site) = 场.app.library_and_site();
-        library.set_exception(site, "库/GBA/口袋妖怪 绿宝石.zip", Exception::Include);
-        library.set_exception(site, "库/SFC/幻想传说 汉化版.zip", Exception::Exclude);
-        assert!(library.error().is_none(), "{:?}", library.error());
-        let editing = library.editing().expect("还在改");
+        let (browse, site) = 场.app.browse_and_site();
+        browse.set_exception(site, "库/GBA/口袋妖怪 绿宝石.zip", Exception::Include);
+        browse.set_exception(site, "库/SFC/幻想传说 汉化版.zip", Exception::Exclude);
+        assert!(browse.error().is_none(), "{:?}", browse.error());
+        let editing = browse.editing().expect("还在改");
         assert_eq!(editing.exceptions.len(), 2, "例外没落库");
     }
     场.更新到子库();
@@ -391,8 +391,8 @@ fn 例外在浏览屏上加减子库屏如实显示有几条() {
     // 撤掉之后重新由规则说了算。
     场.改选择();
     {
-        let (library, site) = 场.app.library_and_site();
-        library.clear_exception(site, "库/SFC/幻想传说 汉化版.zip");
+        let (browse, site) = 场.app.browse_and_site();
+        browse.clear_exception(site, "库/SFC/幻想传说 汉化版.zip");
     }
     场.更新到子库();
     assert_eq!(场.app.sublibrary().exceptions().len(), 1);
@@ -458,7 +458,7 @@ fn 选择集在这一屏上只读摆得出规则与例外() {
     assert_eq!(场.app.sublibrary().broken().len(), 1);
 
     场.改选择();
-    assert_eq!(场.app.library().editing().expect("在改").broken, 1);
+    assert_eq!(场.app.browse().editing().expect("在改").broken, 1);
     场.更新到子库();
     assert_eq!(
         场.app.sublibrary().broken().len(),
@@ -538,9 +538,9 @@ fn 别处改过选择集之后这一屏缓着的差量与容量账当场作废()
     // ——那两条路上都没有「更新到子库」。
     场.改选择();
     {
-        let (library, site) = 场.app.library_and_site();
-        library.set_exception(site, "库/SFC/幻想传说 汉化版.zip", Exception::Exclude);
-        library.cancel_editing();
+        let (browse, site) = 场.app.browse_and_site();
+        browse.set_exception(site, "库/SFC/幻想传说 汉化版.zip", Exception::Exclude);
+        browse.cancel_editing();
     }
     场.app.route();
     场.app.show_view(View::Sublibraries);
@@ -744,8 +744,8 @@ fn 改过选择那份预览当场作废() {
 
     场.改选择();
     {
-        let (library, _) = 场.app.library_and_site();
-        library.set_filter_rule(Some(Rule::parse("平台=GBA").expect("读得懂")));
+        let (browse, _) = 场.app.browse_and_site();
+        browse.set_filter_rule(Some(Rule::parse("平台=GBA").expect("读得懂")));
     }
     场.更新到子库();
     assert!(
@@ -916,23 +916,23 @@ fn 这一屏画得出来_摊开与收起都不炸() {
     // 「改选择」跳去浏览屏之后那一屏照样画得出来——例外那一栏是新长出来的。
     场.改选择();
     {
-        let (library, site) = 场.app.library_and_site();
+        let (browse, site) = 场.app.browse_and_site();
         let anchor = site
             .catalog
-            .work_page(library.query(), 0, 1)
+            .work_page(browse.query(), 0, 1)
             .expect("取得出一页")
             .into_iter()
             .next()
             .expect("有行")
             .anchor;
-        library.open_work(&site.catalog, &anchor);
-        let key = library.work().expect("开了").variants[0].row.key.clone();
-        library.pick(&site.catalog, &key);
+        browse.open_work(&site.catalog, &anchor);
+        let key = browse.work().expect("开了").variants[0].row.key.clone();
+        browse.pick(&site.catalog, &key);
     }
     for _ in 0..2 {
         headless::frame(&ctx, headless::input(), |ui| 场.app.ui(ui));
     }
-    assert_eq!(场.app.view(), View::Variants);
+    assert_eq!(场.app.view(), View::Browse);
 }
 
 /// 目标设备上眼下有什么：每个文件的名字、内容、修改时间。

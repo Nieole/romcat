@@ -34,7 +34,7 @@ romcat 做四件事：
 cargo build --release          # 产出 target/release/romcat 与 romcat-gui
 ```
 
-**工作目录**按这条链定：`$ROMCAT_HOME` → `%APPDATA%\romcat` → `$XDG_DATA_HOME/romcat` → `~/.local/share/romcat`，也可以每条命令 `--workspace` 单指。中立库、沉淀库、DAT 库、媒体池都住在这儿——**一样都不落在主库里**（落进去会被当场拦下）。
+**工作目录**按这条链定：`$ROMCAT_HOME` → `%APPDATA%\romcat` → `$XDG_DATA_HOME/romcat` → `~/.local/share/romcat`，也可以每条命令 `--workspace` 单指。中立库、沉淀库、DAT 库、媒体池、界面的版式偏好都住在这儿——**一样都不落在主库里**（落进去会被当场拦下）。
 
 ```bash
 # 1. 扫一遍主库，给它起个名字（只读，只算哈希与体积）

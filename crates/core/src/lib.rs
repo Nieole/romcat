@@ -13,6 +13,7 @@ pub mod adapter;
 pub mod capability;
 pub mod catalog;
 pub mod classify;
+pub mod collection;
 pub mod container;
 pub mod convert;
 pub mod dat;

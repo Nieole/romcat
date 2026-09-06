@@ -468,16 +468,20 @@ impl Catalog {
 
     /// 一条变体记录。
     ///
+    /// **走 `prepare_cached`**：这一条会被逐个变体地问上几万遍（`collection::add` 把
+    /// 全选那一批展开之后一个一个问，`scrape::zh::Rulings::resolve` 也是），
+    /// 每次重新解析一遍 SQL 就是白花几万次。
+    ///
     /// # Errors
     /// 读库失败时返回错误。
     pub fn variant(&self, key: &str) -> Result<Option<VariantRow>, CatalogError> {
         self.conn
-            .query_row(
-                &format!("SELECT {VARIANT_COLUMNS} FROM variant WHERE key = ?1"),
-                params![key],
-                read_variant_row,
-            )
-            .optional()
+            .prepare_cached(&format!("SELECT {VARIANT_COLUMNS} FROM variant WHERE key = ?1"))
+            .and_then(|mut statement| {
+                statement
+                    .query_row(params![key], read_variant_row)
+                    .optional()
+            })
             .map_err(|source| self.err(source))
     }
 
@@ -488,7 +492,9 @@ impl Catalog {
     pub fn variant_members(&self, key: &str) -> Result<Vec<(String, Role)>, CatalogError> {
         let mut statement = self
             .conn
-            .prepare("SELECT key, role FROM variant_member WHERE variant_key = ?1 ORDER BY key")
+            .prepare_cached(
+                "SELECT key, role FROM variant_member WHERE variant_key = ?1 ORDER BY key",
+            )
             .map_err(|source| self.err(source))?;
         let mut rows = statement
             .query(params![key])
@@ -882,6 +888,8 @@ impl Catalog {
 
     /// 把一个变体放进一个合集。
     ///
+    /// **一批一起放走 [`Self::add_all_to_collection`]**：那一条是一个事务，这一条是一个。
+    ///
     /// # Errors
     /// 写库失败时返回错误。
     pub fn add_to_collection(
@@ -897,6 +905,155 @@ impl Catalog {
             )
             .map(|_| ())
             .map_err(|source| self.err(source))
+    }
+
+    /// 把一批变体放进一个合集，**一个事务**。
+    ///
+    /// 界面上「全选 → 收藏」一下就是四万多条（`collection::add`），一条一个事务等于
+    /// 四万多次提交。逐条那一版留着给只放一个的场合。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn add_all_to_collection(
+        &mut self,
+        collection_id: i64,
+        variant_keys: &[String],
+    ) -> Result<(), CatalogError> {
+        let to_err = |source| CatalogError::Sqlite {
+            path: self.path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO collection_variant(collection_id, variant_key) VALUES(?1, ?2)
+                     ON CONFLICT DO NOTHING",
+                )
+                .map_err(to_err)?;
+            for key in variant_keys {
+                insert.execute(params![collection_id, key]).map_err(to_err)?;
+            }
+        }
+        tx.commit().map_err(to_err)
+    }
+
+    /// 把一个变体从一个合集里拿出来（按**合集名**找）。返回真的拿出来了没有。
+    ///
+    /// 按名字而不是按 id：调用方手里是**沉淀库**那条成员关系，它记的是名字
+    /// （`collection::apply`）。让调用方先查一次 id 只是把同一次查询挪个地方。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn remove_from_collection(
+        &mut self,
+        name: &str,
+        variant_key: &str,
+    ) -> Result<bool, CatalogError> {
+        self.conn
+            .execute(
+                "DELETE FROM collection_variant
+                 WHERE variant_key = ?2
+                   AND collection_id IN (SELECT id FROM collection WHERE name = ?1)",
+                params![name, variant_key],
+            )
+            .map(|changed| changed > 0)
+            .map_err(|source| self.err(source))
+    }
+
+    /// 把一批变体从一个合集里拿出来，**一个事务**。理由同 [`Self::add_all_to_collection`]。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn remove_all_from_collection(
+        &mut self,
+        name: &str,
+        variant_keys: &[String],
+    ) -> Result<(), CatalogError> {
+        let to_err = |source| CatalogError::Sqlite {
+            path: self.path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        {
+            let mut delete = tx
+                .prepare(
+                    "DELETE FROM collection_variant
+                     WHERE variant_key = ?2
+                       AND collection_id IN (SELECT id FROM collection WHERE name = ?1)",
+                )
+                .map_err(to_err)?;
+            for key in variant_keys {
+                delete.execute(params![name, key]).map_err(to_err)?;
+            }
+        }
+        tx.commit().map_err(to_err)
+    }
+
+    /// 把一条成员都不剩的合集从这份投影里去掉。返回去掉了几个。
+    ///
+    /// **屏上「合集 N 个」里不该有一个一件东西都选不出来的**：那是这一票要消灭的东西
+    /// （挂账 D74 说的「合集 0 个」是它的极端情形）。合集本身住在沉淀库里，
+    /// 这里去掉的只是投影上那一行。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn drop_empty_collections(&mut self) -> Result<usize, CatalogError> {
+        self.conn
+            .execute(
+                "DELETE FROM collection
+                 WHERE id NOT IN (SELECT collection_id FROM collection_variant)",
+                [],
+            )
+            .map_err(|source| self.err(source))
+    }
+
+    /// 把这份投影**整份换成**给的这几组，**一个事务**（`collection::project`）。
+    ///
+    /// 换的是投影不是合集本身——合集住在沉淀库里，那份不可再生，一条都不许删。
+    ///
+    /// **先清后写必须在一个事务里。** 中途出错或者进程被杀的话，投影会停在空的或者
+    /// 半份的样子：屏上、筛选栏那一维、子库的选择集上所有的星一起消失，而人看不出
+    /// 那是「沉淀库里没了」还是「重建跑到一半」——那正是这一票要消灭的东西。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn replace_collections(
+        &mut self,
+        groups: &[(&str, Vec<String>)],
+    ) -> Result<(), CatalogError> {
+        let to_err = |source| CatalogError::Sqlite {
+            path: self.path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        tx.execute_batch(
+            "DELETE FROM collection_variant;
+             DELETE FROM collection;",
+        )
+        .map_err(to_err)?;
+        {
+            let mut insert_name = tx
+                .prepare("INSERT INTO collection(name) VALUES(?1)")
+                .map_err(to_err)?;
+            let mut insert_member = tx
+                .prepare(
+                    "INSERT INTO collection_variant(collection_id, variant_key) VALUES(?1, ?2)
+                     ON CONFLICT DO NOTHING",
+                )
+                .map_err(to_err)?;
+            for (name, keys) in groups {
+                if keys.is_empty() {
+                    continue;
+                }
+                insert_name.execute(params![name]).map_err(to_err)?;
+                let id = tx.last_insert_rowid();
+                for key in keys {
+                    insert_member.execute(params![id, key]).map_err(to_err)?;
+                }
+            }
+        }
+        tx.commit().map_err(to_err)
     }
 
     /// 一个合集里现在有哪些变体。

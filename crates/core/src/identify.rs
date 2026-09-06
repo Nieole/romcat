@@ -291,6 +291,12 @@ pub struct Outcome {
     /// **它是这一层的主要产出之一**：维护者照着它往剥离规则里补，补完重跑一遍就看得见
     /// 效果——那正是「规则是配置而不是硬编码」真正兑现的地方。
     pub unknown_marks: Vec<(String, u64)>,
+    /// **合集与收藏**照沉淀库重建成什么样（票 `gui-redesign/06`）。
+    ///
+    /// 中立库里那两张合集表是沉淀库的投影，与那几行 `origin = 裁决` 的作品和发行版
+    /// 同一个身份，所以它们在同一趟里一起重建（[`crate::collection::project`]）。
+    /// **这就是「删掉中立库重扫之后收藏还在」那句话的兑现处。**
+    pub collections: crate::collection::Projected,
 }
 
 /// 一份拿去撞 DAT 的内容：容器里的一个内部文件，或者一个裸文件。
@@ -417,6 +423,18 @@ pub fn run(
         ask_model(catalog, ammo, &variants, &mut state, cancel)?;
     }
 
+    // **合集与收藏照沉淀库重建**（票 `gui-redesign/06`）。摆在这儿而不是别处，理由与
+    // 上面 `clear_identifications` 那一句同源：中立库里的合集是沉淀库的**投影**，
+    // 与 `origin = 裁决` 那几行一样，重跑识别就该照着重建一遍。
+    //
+    // **被中断时不重建**：那时判据只算了一半，照半份算出来的投影会让一批收藏凭空消失
+    // ——而屏上看不出那是「没跑完」还是「真没了」。上一轮那份原样留着，下次跑完再说。
+    let collections = if interrupted {
+        crate::collection::Projected::default()
+    } else {
+        crate::collection::project(catalog, ammo.verdicts.memberships())?
+    };
+
     let mut report = IdentifyReport::build(catalog, ammo.repo)?;
     // 花费要留得下痕迹：`--json` 存的是这份报告，只在标准错误上说一句的话，跑完就没了。
     if state.model.residue > 0 {
@@ -443,6 +461,7 @@ pub fn run(
         switch_only: state.switch_only,
         unknown_marks: rank_marks(state.unknown_marks),
         model: state.model,
+        collections,
     })
 }
 

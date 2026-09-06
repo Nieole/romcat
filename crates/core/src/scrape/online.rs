@@ -655,6 +655,24 @@ impl<'a> ScreenScraper<'a> {
     }
 }
 
+/// 一次条目查询的**输入指纹**。
+///
+/// 它是公开的，而且[估算](super::estimate)与 [`ScreenScraper::probe`] **共用这一个**：
+/// 估算要答的正是「这一趟会发多少个请求」，而那个数等于「有几个作品锚点的指纹与库里
+/// 记着的不一样」。两处各写一遍指纹的话，两个数迟早漂开——而漂开的方向是「屏上说
+/// 0 个请求，按下去发了九千个」，赌的是用户的账号与 IP（ADR-0007）。
+///
+/// 指纹盖住全部会改变结果的输入：换了判据要重查，改了媒体上限要重收。
+#[must_use]
+pub fn query_fingerprint(basis: &Basis, media_limit: Option<u64>) -> String {
+    super::fingerprint(&[
+        &format!("{:08X}", basis.crc32),
+        &basis.bytes.to_string(),
+        &basis.rom_name,
+        &media_limit.map_or("无上限".to_string(), |cap| cap.to_string()),
+    ])
+}
+
 impl Source for ScreenScraper<'_> {
     fn name(&self) -> &str {
         SCREEN_SCRAPER
@@ -670,16 +688,7 @@ impl Source for ScreenScraper<'_> {
         if subject.kind != AnchorKind::Work || !subject.confirmed {
             return None;
         }
-        let basis = subject.basis?;
-        // 指纹盖住全部会改变结果的输入：换了判据要重查，改了媒体上限要重收。
-        Some(super::fingerprint(&[
-            &format!("{:08X}", basis.crc32),
-            &basis.bytes.to_string(),
-            &basis.rom_name,
-            &subject
-                .media_limit
-                .map_or("无上限".to_string(), |cap| cap.to_string()),
-        ]))
+        Some(query_fingerprint(subject.basis?, subject.media_limit))
     }
 
     fn collect(&self, subject: &Subject<'_>, out: &mut Harvest) -> Result<(), Failure> {

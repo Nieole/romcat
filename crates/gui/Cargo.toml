@@ -1,6 +1,6 @@
 [package]
 name = "romcat-gui"
-description = "romcat 界面：待确认队列与库浏览的窗口壳"
+description = "romcat 界面：五屏（库 / 浏览 / 待确认 / 子库 / 任务）的窗口壳"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,20 +13,28 @@ rust-version.workspace = true
 # 关掉之后 `demo` 模块与 `--demo` / `--bench*` 全部不进二进制。
 #
 # 测试与实测：`cargo test --features demo`；门禁一律用 `--all-features`，
-# 否则下面那四个测试会被**静默跳过**。
+# 否则下面那六个测试会被**静默跳过**。
 demo = []
 
 [[bin]]
 name = "romcat-gui"
 path = "src/main.rs"
 
-# 这五个测试要合成数据撑场面，因此声明依赖。门禁不带 `--all-features` 就跑不到它们。
+# 这七个测试要合成数据撑场面，因此声明依赖。门禁不带 `--all-features` 就跑不到它们。
 [[test]]
 name = "close"
 required-features = ["demo"]
 
 [[test]]
-name = "library"
+name = "browse"
+required-features = ["demo"]
+
+[[test]]
+name = "media"
+required-features = ["demo"]
+
+[[test]]
+name = "layout"
 required-features = ["demo"]
 
 [[test]]
@@ -49,6 +57,11 @@ eframe.workspace = true
 egui.workspace = true
 egui_extras.workspace = true
 romcat-core.workspace = true
+
+[dev-dependencies]
+# **只有测试用它**：媒体那几条要造真的 png 才验得了「画得出来、纵横比不歪」。
+# 界面这一层自己一个字节都不解码——那在核心库里（`romcat_core::scrape::preview`）。
+image.workspace = true
 
 [lints]
 workspace = true
