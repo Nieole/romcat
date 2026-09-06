@@ -84,6 +84,10 @@
 //!
 //! `都不满足` 落在这条约定之上而不是绕过它：`都不(年份>=1990)` 对一个没刮到年份的变体
 //! **成立**，因为里面那句本来就不成立。
+//!
+//! **读不成的值与没有值是同一档**：刮来的年份是一列文本，里面会出现 `199X`、`一九九六`、
+//! 人手打进裁决的 `+1996`。这些一律不是年份（[`parse_year`]），于是那个变体在年份这一维上
+//! 就是取不到值，上面那条约定原样管用。
 
 use std::fmt;
 
@@ -1046,10 +1050,11 @@ fn parse_number(dimension: Dimension, value: &str) -> Result<f64, RuleError> {
         value: value.to_string(),
     };
     match dimension {
-        Dimension::Year => value
-            .parse::<i32>()
+        // **与库里那些年份值同一份判据**（[`parse_year`]）：规则里写 `年份>=199` 时
+        // 当场说不认得，好过悄悄比一个库里根本不会有的数。
+        Dimension::Year => parse_year(value)
             .map(f64::from)
-            .map_err(|_| bad("一个年份，如 1990")),
+            .ok_or_else(|| bad("一个年份，如 1990")),
         Dimension::Rating => parse_rating(value).ok_or_else(|| bad("0 到 1 的小数，或 `80%`")),
         Dimension::Size => parse_size(value)
             .map(|bytes| {
@@ -1061,6 +1066,36 @@ fn parse_number(dimension: Dimension, value: &str) -> Result<f64, RuleError> {
             .ok_or_else(|| bad("一个容量，如 `64MiB`、`1.5GiB`、`512GB`")),
         _ => Err(bad("一个数")),
     }
+}
+
+/// 读一个年份：**前后的空格去掉之后恰好四位 ASCII 数字**，别的一概不是年份。
+///
+/// ## 这是「什么算一个年份」的唯一一份定义
+///
+/// 年份在库里是一列**文本**，两个求值器都要从它读出一个数来比：内存那一侧
+/// （[`sublibrary::facts`](crate::sublibrary::facts)）与 SQL 那一侧
+/// （`catalog::filter` 的 `YEAR_VALUE`）。两处各写一遍判据的下场是这个函数的来历——
+/// 从前 SQL 拿 `CAST` 往返比原文、内存拿 `parse::<i32>()`，于是 `01996` 与 `+1996`
+/// 在屏上不算年份、按下同步却算，**筛出来的那批与搬过去的那批不是同一批**。
+/// SQL 那一侧眼下逐字照这里写成一句 `GLOB '[0-9][0-9][0-9][0-9]'`。
+///
+/// ## 为什么是「恰好四位」
+///
+/// 会产年份的源本来就只产四位数字，而且都写着为什么：
+/// [`tosec_year`](crate::identify::naming::tosec_year) 对 `199x` 的处置是「只认得出
+/// 四位数字才产出——把『不知道』伪装成『知道』等于骗人」，在线源那一侧一字不差。
+/// 能写出别的形态的只剩人手打进裁决的那条路，而 `01996`、`+1996`、`196`、`19960`
+/// 都不是这个库里年份的写法：与其猜一个，不如当这个变体在年份这一维上没有值
+/// （那时 `!=` 成立、别的运算符一律不成立，见模块文档）。
+///
+/// **只去空格，不是 [`str::trim`]**：SQLite 的 `trim()` 只去空格，而这一条判据在两侧
+/// 必须逐字对得上——制表符去不去这种事上分家，与当初 `CAST` 那次分家是同一个错。
+#[must_use]
+pub fn parse_year(text: &str) -> Option<i32> {
+    let text = text.trim_matches(' ');
+    (text.len() == 4 && text.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| text.parse().ok())
+        .flatten()
 }
 
 /// 读一个评分：`0.85` 或 `85%`，都折成 0–1。
@@ -1628,6 +1663,33 @@ mod tests {
         // 光写一个字母说不清是哪一种，拒绝。
         assert_eq!(parse_size("512G"), None);
         assert_eq!(parse_size("大"), None);
+    }
+
+    #[test]
+    fn 年份只认四位数字() {
+        assert_eq!(parse_year("1996"), Some(1996));
+        // 前后的空格去掉再看——**只去空格**，与 SQLite 的 `trim()` 逐字对齐。
+        assert_eq!(parse_year(" 1996 "), Some(1996));
+        assert_eq!(parse_year("\t1996"), None);
+        // 前导 `0` 与前导 `+`：`parse::<i32>()` 收得下，而它们不是年份的写法。
+        assert_eq!(parse_year("01996"), None);
+        assert_eq!(parse_year("+1996"), None);
+        // 位数不对、半截日期、说不出是哪一年、汉字数字，一概不是年份。
+        assert_eq!(parse_year("196"), None);
+        assert_eq!(parse_year("19960"), None);
+        assert_eq!(parse_year("1996-12"), None);
+        assert_eq!(parse_year("199X"), None);
+        assert_eq!(parse_year("一九九六"), None);
+        assert_eq!(parse_year(""), None);
+        // 规则里写的那个数走的是同一份判据。
+        assert_eq!(
+            子句(&Rule::parse("年份>=1990").expect("读得懂"), 0).bound,
+            Bound::Number(1990.0)
+        );
+        assert!(matches!(
+            Rule::parse("年份>=199"),
+            Err(RuleError::BadNumber { .. })
+        ));
     }
 
     #[test]
