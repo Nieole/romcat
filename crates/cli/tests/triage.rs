@@ -294,7 +294,9 @@ fn 沉淀库不跟中立库走删掉中立库重扫也不丢裁决() {
         .expect("读得出")
         .expect("有结论");
     assert_eq!(state, State::Matched, "裁决活了下来");
-    let 候选 = catalog.candidates_of("库/FC/丙 别家汉化.zip").expect("读得出");
+    let 候选 = catalog
+        .candidates_of("库/FC/丙 别家汉化.zip")
+        .expect("读得出");
     assert_eq!(候选.len(), 1);
     assert_eq!(候选[0].source, "沉淀库");
     assert!(候选[0].accepted);
@@ -495,21 +497,43 @@ fn 按批撤销之后当场列队列就看得见它们回来了() {
     );
     let 落下 = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(落下.contains("这是第 1 批"), "{落下}");
-    assert!(落下.contains("undo --batch 1"), "按错了怎么走回来要印在这儿：{落下}");
+    assert!(
+        落下.contains("undo --batch 1"),
+        "按错了怎么走回来要印在这儿：{落下}"
+    );
 
     // `batches` 列得出这一批：编号、条数、裁成什么。
     let out = 跑(&[
-        "triage", "batches", "--library", "小库", "--workspace", &工作目录,
+        "triage",
+        "batches",
+        "--library",
+        "小库",
+        "--workspace",
+        &工作目录,
     ]);
     let 列表 = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(列表.contains("#1"), "{列表}");
     assert!(列表.contains("2 条"), "{列表}");
-    assert!(列表.contains("作品《某部作品》"), "摘要要与计划书上那句话对得上：{列表}");
+    assert!(
+        列表.contains("作品《某部作品》"),
+        "摘要要与计划书上那句话对得上：{列表}"
+    );
 
     // 一次撤不止一条要点头。
     let out = 跑(&[
-        "triage", "undo", "--library", "小库", "--workspace", &工作目录, "--batch", "1",
+        "triage",
+        "undo",
+        "--library",
+        "小库",
+        "--workspace",
+        &工作目录,
+        "--batch",
+        "1",
     ]);
     assert!(!out.status.success());
     assert!(
@@ -519,7 +543,15 @@ fn 按批撤销之后当场列队列就看得见它们回来了() {
     );
 
     let out = 跑(&[
-        "triage", "undo", "--library", "小库", "--workspace", &工作目录, "--batch", "1", "--yes",
+        "triage",
+        "undo",
+        "--library",
+        "小库",
+        "--workspace",
+        &工作目录,
+        "--batch",
+        "1",
+        "--yes",
     ]);
     assert!(
         out.status.success(),
@@ -532,14 +564,30 @@ fn 按批撤销之后当场列队列就看得见它们回来了() {
 
     // **不重跑识别**，当场列队列：那两条回来了。
     let out = 跑(&[
-        "triage", "list", "--library", "小库", "--workspace", &工作目录, "--limit", "0",
+        "triage",
+        "list",
+        "--library",
+        "小库",
+        "--workspace",
+        &工作目录,
+        "--limit",
+        "0",
     ]);
     let 队列 = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(队列.contains("队列            3 条待裁决"), "撤完该回到裁决之前的 3 条：{队列}");
+    assert!(
+        队列.contains("队列            3 条待裁决"),
+        "撤完该回到裁决之前的 3 条：{队列}"
+    );
 
     // 撤销本身撤得回来。
     let out = 跑(&[
-        "triage", "redo", "--library", "小库", "--workspace", &工作目录, "--last",
+        "triage",
+        "redo",
+        "--library",
+        "小库",
+        "--workspace",
+        &工作目录,
+        "--last",
     ]);
     assert!(
         out.status.success(),
@@ -552,7 +600,14 @@ fn 按批撤销之后当场列队列就看得见它们回来了() {
         String::from_utf8_lossy(&out.stdout)
     );
     let out = 跑(&[
-        "triage", "list", "--library", "小库", "--workspace", &工作目录, "--limit", "0",
+        "triage",
+        "list",
+        "--library",
+        "小库",
+        "--workspace",
+        &工作目录,
+        "--limit",
+        "0",
     ]);
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("队列            1 条待裁决"),
@@ -639,7 +694,10 @@ fn 报告印出来的那串字照抄一条就选中同一批() {
         String::from_utf8_lossy(&out.stderr)
     );
     let 文本 = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(文本.contains("按依据形状——一条 `--shape` 覆盖多少"), "{文本}");
+    assert!(
+        文本.contains("按依据形状——一条 `--shape` 覆盖多少"),
+        "{文本}"
+    );
     // **最值钱的那一批连整条命令一起给**，而且带着这一趟用的库选择器——
     // 不带的话粘到别处开的是另一份库。
     assert!(
@@ -652,10 +710,16 @@ fn 报告印出来的那串字照抄一条就选中同一批() {
 
     let 报告: serde_json::Value =
         serde_json::from_slice(&fs::read(&账本).expect("报告该写出来")).expect("是 JSON");
-    let 几批 = 报告["by_shape"].as_array().expect("报告里该有这张表").clone();
+    let 几批 = 报告["by_shape"]
+        .as_array()
+        .expect("报告里该有这张表")
+        .clone();
     assert_eq!(几批.len(), 2, "一批带候选、一批一条候选都没有：{几批:#?}");
     assert_eq!(
-        几批.iter().map(|one| one["count"].as_u64().expect("是数")).sum::<u64>(),
+        几批
+            .iter()
+            .map(|one| one["count"].as_u64().expect("是数"))
+            .sum::<u64>(),
         3,
         "各批加起来就是整个队列",
     );
@@ -738,7 +802,14 @@ fn 依据形状写岔了当场说清该怎么写() {
     let 工作目录 = workspace.path().to_string_lossy().into_owned();
     let 敲 = |shape: &str| {
         跑(&[
-            "triage", "list", "--library", "小库", "--workspace", &工作目录, "--shape", shape,
+            "triage",
+            "list",
+            "--library",
+            "小库",
+            "--workspace",
+            &工作目录,
+            "--shape",
+            shape,
         ])
     };
 
@@ -746,7 +817,10 @@ fn 依据形状写岔了当场说清该怎么写() {
     assert!(!out.status.success());
     let 抱怨 = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(抱怨.contains("不是一个依据形状"), "{抱怨}");
-    assert!(抱怨.contains("romcat triage list"), "得说清上哪儿抄：{抱怨}");
+    assert!(
+        抱怨.contains("romcat triage list"),
+        "得说清上哪儿抄：{抱怨}"
+    );
 
     // 形状认得下来、库里却没有这一批：那**不是写错**，是真的一条都没有——两句话不一样，
     // 所以这一趟照样算跑成了，只是报告上写着一条都没选中。

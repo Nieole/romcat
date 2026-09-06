@@ -1182,7 +1182,11 @@ pub fn apply(
 fn stale_plan(missing: &BTreeSet<&str>) -> TriageError {
     // 只点三条名：过期的可能是整整一批，把一万八千个键印在一句话里没人读得下去。
     let head = 3;
-    let mut names: Vec<String> = missing.iter().take(head).map(|key| (*key).to_string()).collect();
+    let mut names: Vec<String> = missing
+        .iter()
+        .take(head)
+        .map(|key| (*key).to_string())
+        .collect();
     if missing.len() > head {
         names.push(format!("……还有 {} 条", missing.len() - head));
     }

@@ -258,7 +258,10 @@ fn 同步一路报得出正在传哪个文件() {
     // 计划里一步就报一步，报的正是眼下这个落点。
     let 场 = 现场::摆好();
     let prepared = 场.排一次(&Handle::new()).expect("排得出来");
-    assert!(prepared.plan.touched() > 0, "一步都不用做，这条断言等于没测");
+    assert!(
+        prepared.plan.touched() > 0,
+        "一步都不用做，这条断言等于没测"
+    );
 
     let task = Handle::new();
     let outcome = 场.同步一次(&prepared, &task).expect("传得动");
@@ -272,15 +275,15 @@ fn 同步一路报得出正在传哪个文件() {
         "报的总步数与计划里的步数对不上，进度条会走过头或者走不满",
     );
     assert_eq!(
-        progress.at, progress.steps,
+        progress.at,
+        progress.steps,
         "走到底了却没报满：{}",
         progress.render(),
     );
     // **报的是这一个落点**：最后那一步的名字里带着它干什么、动的是哪一条路径。
     let 最后一步 = prepared.plan.steps.last().expect("有步骤");
     assert!(
-        progress.step.contains(&最后一步.path)
-            && progress.step.contains(最后一步.act.label()),
+        progress.step.contains(&最后一步.path) && progress.step.contains(最后一步.act.label()),
         "进度那句话说不出正在动哪个文件：{}",
         progress.step,
     );
@@ -315,8 +318,7 @@ fn 算一遍容量一路报得出算到哪一台() {
     let 场 = 现场::摆好();
     let task = Handle::new();
     let list = 场.catalog.sublibraries().expect("读得出子库");
-    let reports =
-        romcat_core::sublibrary::survey(&场.catalog, &list, &task).expect("算得出来");
+    let reports = romcat_core::sublibrary::survey(&场.catalog, &list, &task).expect("算得出来");
 
     assert_eq!(reports.len(), 1, "一台设备一份报告");
     assert_eq!(reports["掌机"].picked, 2, "选出来的与规则说的对不上");
@@ -324,7 +326,8 @@ fn 算一遍容量一路报得出算到哪一台() {
     let progress = task.progress();
     assert_eq!(progress.steps, 2, "折事实一步，一台设备各一步");
     assert_eq!(
-        progress.at, progress.steps,
+        progress.at,
+        progress.steps,
         "走到底了却没报满：{}",
         progress.render(),
     );
@@ -351,7 +354,11 @@ fn 算一遍容量按停之后一个字节都没动() {
         message.contains("停"),
         "停下来的理由该说清是被按停了：{message}",
     );
-    assert_eq!(场.快照(), 停之前, "按停了却动了目标设备或者工作目录里的文件");
+    assert_eq!(
+        场.快照(),
+        停之前,
+        "按停了却动了目标设备或者工作目录里的文件"
+    );
 }
 
 #[test]
@@ -376,5 +383,8 @@ fn 已经按了停下就不在目标设备上建目标根() {
         !场.卡.path().exists(),
         "已经按了停下，却还是在目标设备上建出了目标根",
     );
-    assert_eq!(outcome.placement, None, "一步都不做，就不该为了探测去碰那张卡");
+    assert_eq!(
+        outcome.placement, None,
+        "一步都不做，就不该为了探测去碰那张卡"
+    );
 }

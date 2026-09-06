@@ -505,7 +505,10 @@ fn 扫(library: &MemFs, options: &romcat_core::scan::ScanOptions) -> romcat_core
 #[test]
 fn 扫描默认不为_zst_付全量解压的代价() {
     let library = 建一个_zst_库();
-    let catalog = 扫(&library, &romcat_core::scan::ScanOptions::named("/lib", "库"));
+    let catalog = 扫(
+        &library,
+        &romcat_core::scan::ScanOptions::named("/lib", "库"),
+    );
     let totals = catalog
         .aggregate(&Default::default(), &Manifest::builtin())
         .expect("能折出统计")
@@ -592,7 +595,10 @@ fn 内容变了就重解一遍而不是沿用旧清单() {
 #[test]
 fn 头部抽样也说得出_zst_里装着什么() {
     let library = 建一个_zst_库();
-    let catalog = 扫(&library, &romcat_core::scan::ScanOptions::named("/lib", "库"));
+    let catalog = 扫(
+        &library,
+        &romcat_core::scan::ScanOptions::named("/lib", "库"),
+    );
     let aggregate = catalog
         .aggregate(&Default::default(), &Manifest::builtin())
         .expect("能折出统计");

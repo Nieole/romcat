@@ -20,7 +20,6 @@ use std::path::Path;
 
 use romcat_core::catalog::Catalog;
 use romcat_core::catalog::Roots;
-use romcat_core::task::Handle;
 use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
 use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
@@ -31,6 +30,7 @@ use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::priority::VERDICT;
 use romcat_core::scrape::{self, AnchorKind, Field, Priorities};
+use romcat_core::task::Handle;
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
 
@@ -235,7 +235,8 @@ fn 刮削一趟(现场: &mut 现场, refresh: bool) -> scrape::Outcome {
 }
 
 fn 刮削带上限(现场: &mut 现场, refresh: bool, cap: Option<u64>) -> scrape::Outcome {
-    let mut options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
+    let mut options =
+        scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
     options.refresh = refresh;
     options.max_media_bytes = cap;
     scrape::run(
@@ -421,7 +422,12 @@ fn 撞上中文条目的变体在变体锚点上多出别名而且进了标题�
 
     // 一、**这一趟的网络请求数是 0**：两个中文源都自报本地，档案那道闸门只放本地源进来，
     // 而 `scrape::run` 拿到的网络句柄是 `None`。
-    assert!(!outcome.report.sources.contains(&"ScreenScraper".to_string()));
+    assert!(
+        !outcome
+            .report
+            .sources
+            .contains(&"ScreenScraper".to_string())
+    );
     assert!(outcome.report.sources.contains(&"中文离线源".to_string()));
     assert!(
         outcome
@@ -496,7 +502,14 @@ fn 撞上中文条目的变体在变体锚点上多出别名而且进了标题�
     // 六、**撞不上中文条目的变体一个新字段都不产出。**
     assert!(各值(&现场, "变体", "库/FC/一堆/甲.zip", "标题", "中文离线源").is_empty());
     assert!(
-        各值(&现场, "变体", "库/FC/一堆/甲.zip", "标题", "中文离线源·别名").is_empty()
+        各值(
+            &现场,
+            "变体",
+            "库/FC/一堆/甲.zip",
+            "标题",
+            "中文离线源·别名"
+        )
+        .is_empty()
     );
 }
 
@@ -510,7 +523,12 @@ fn 类型落在作品锚点上而且同一条条目只留一份() {
     let outcome = 刮削带中文索引(&mut 现场, &index);
 
     // 一、**这一趟的网络请求数是 0**：网络句柄压根没传，档案那道闸门也只放本地源进来。
-    assert!(!outcome.report.sources.contains(&"ScreenScraper".to_string()));
+    assert!(
+        !outcome
+            .report
+            .sources
+            .contains(&"ScreenScraper".to_string())
+    );
     assert!(outcome.report.sources.contains(&"中文离线源".to_string()));
 
     // 二、类型落在**作品**锚点上，源是中文离线源，而且只有一份。
@@ -535,7 +553,10 @@ fn 类型落在作品锚点上而且同一条条目只留一份() {
     assert!(依据.contains("年份交叉校验对得上"), "{依据}");
     // **写全那个键**：名下两个汉化变体都以 `FC/魂斗罗汉化` 打头，只写前缀的话
     // 换成哪一个断言都照绿。代表取的是变体键最小的那个。
-    assert!(依据.contains(&format!("名下的变体「{汉化变体}」")), "{依据}");
+    assert!(
+        依据.contains(&format!("名下的变体「{汉化变体}」")),
+        "{依据}"
+    );
     assert!(
         依据.contains("名下 2 个变体撞上了中文条目，其中 2 个撞的是这一条"),
         "{依据}"
@@ -575,7 +596,10 @@ fn 类型落在作品锚点上而且同一条条目只留一份() {
     // 决定的验收：第二趟变体那一层整片命中缓存、`collect` 一次都不跑，若作品层读的是
     // 变体撞完的结果，这里就会空手而归，把上一趟好好的类型当成「这个源改主意了」清掉。
     let 再跑 = 刮削带中文索引(&mut 现场, &index);
-    assert!(再跑.reused_probes > 0, "第二趟该有锚点因为输入指纹没变而跳过");
+    assert!(
+        再跑.reused_probes > 0,
+        "第二趟该有锚点因为输入指纹没变而跳过"
+    );
     assert_eq!(再跑.forgotten, 0, "一条结论都不该被当成作废清掉");
     assert_eq!(各值(&现场, "作品", 作品, "类型", "中文离线源"), vec!["ACT"]);
 }
@@ -666,9 +690,17 @@ fn 开发商与发行商落在作品锚点上而且一个键写了几个值就�
     let outcome = 刮削带中文索引(&mut 现场, &index);
 
     // 一、**这一趟的网络请求数是 0**：网络句柄压根没传，档案那道闸门也只放本地源进来。
-    assert!(!outcome.report.sources.contains(&"ScreenScraper".to_string()));
+    assert!(
+        !outcome
+            .report
+            .sources
+            .contains(&"ScreenScraper".to_string())
+    );
     assert!(outcome.report.sources.contains(&"中文离线源".to_string()));
-    assert!(outcome.report.online.is_none(), "离线档不该有在线那一侧的账");
+    assert!(
+        outcome.report.online.is_none(),
+        "离线档不该有在线那一侧的账"
+    );
 
     // 二、**顿号分隔的一行拆成两条**（`|开发= 科乐美、KCE东京`）。
     assert_eq!(
@@ -705,7 +737,10 @@ fn 开发商与发行商落在作品锚点上而且一个键写了几个值就�
         assert!(依据.contains("平台交叉校验对得上"), "{依据}");
         assert!(依据.contains("年份交叉校验对得上"), "{依据}");
         assert!(依据.contains("而开发商跨平台跨地区都成立"), "{依据}");
-        assert!(依据.contains(&format!("名下的变体「{汉化变体}」")), "{依据}");
+        assert!(
+            依据.contains(&format!("名下的变体「{汉化变体}」")),
+            "{依据}"
+        );
         // **中置信、照旧进待确认队列**：多两栏不等于自动通过（票 05 才管裁决那一侧）。
         assert!(依据.contains("一律进待确认队列"), "{依据}");
     }
@@ -759,7 +794,10 @@ fn 数据源缺开发这个键的条目照常产出它有的那些字段() {
         "没写的键不该凭空冒出一条",
     );
     // **只有一个值时就是一条**，没有多出空条目。
-    assert_eq!(各值(&现场, "作品", 作品, "发行商", "中文离线源"), vec!["科乐美"]);
+    assert_eq!(
+        各值(&现场, "作品", 作品, "发行商", "中文离线源"),
+        vec!["科乐美"]
+    );
     // **整条不跳过**：它写了的那几样照样落库。
     assert_eq!(各值(&现场, "作品", 作品, "类型", "中文离线源"), vec!["ACT"]);
     assert_eq!(
@@ -785,9 +823,17 @@ fn 简介落在作品锚点上而且换行与全角空格逐字保留() {
     let outcome = 刮削带中文简介(&mut 现场, &index, Some(&简介));
 
     // 一、**这一趟的网络请求数是 0**：网络句柄压根没传，档案那道闸门也只放本地源进来。
-    assert!(!outcome.report.sources.contains(&"ScreenScraper".to_string()));
+    assert!(
+        !outcome
+            .report
+            .sources
+            .contains(&"ScreenScraper".to_string())
+    );
     assert!(outcome.report.sources.contains(&"中文离线源".to_string()));
-    assert!(outcome.report.online.is_none(), "离线档不该有在线那一侧的账");
+    assert!(
+        outcome.report.online.is_none(),
+        "离线档不该有在线那一侧的账"
+    );
 
     // 二、简介落在**作品**锚点上，源是中文离线源，而且**只有一份**——同一部作品名下
     // 两个汉化变体各撞了一次，撞到的是同一条条目。
@@ -800,7 +846,10 @@ fn 简介落在作品锚点上而且换行与全角空格逐字保留() {
     // 三、**逐字保留**：开头那两个全角空格与中间那个换行都是内容的一部分，
     // 掐掉两头（`str::trim` 那一档）就违反规格 18。
     let 落库 = 值(&现场, "作品", 作品, "简介", "中文离线源").expect("有这一条");
-    assert!(落库.starts_with('\u{3000}'), "开头那两个全角空格被吃掉了：{落库:?}");
+    assert!(
+        落库.starts_with('\u{3000}'),
+        "开头那两个全角空格被吃掉了：{落库:?}"
+    );
     assert!(落库.contains('\n'), "中间那个换行被压掉了：{落库:?}");
     assert_eq!(落库.chars().count(), 简介原文.chars().count(), "长度都变了");
 
@@ -823,7 +872,10 @@ fn 简介落在作品锚点上而且换行与全角空格逐字保留() {
     assert!(依据.contains("的中文名「魂斗罗」"), "{依据}");
     assert!(依据.contains("平台交叉校验对得上"), "{依据}");
     assert!(依据.contains("而简介跨平台跨地区都成立"), "{依据}");
-    assert!(依据.contains(&format!("名下的变体「{汉化变体}」")), "{依据}");
+    assert!(
+        依据.contains(&format!("名下的变体「{汉化变体}」")),
+        "{依据}"
+    );
     // **中置信、照旧进待确认队列**：多一个字段不等于自动通过（票 05 才管裁决那一侧）。
     assert!(依据.contains("一律进待确认队列"), "{依据}");
     // 没超闸的那一条**不该**说自己被截断了。
@@ -850,7 +902,10 @@ fn 简介落在作品锚点上而且换行与全角空格逐字保留() {
     // 第二趟变体那一层整片命中缓存，作品层照样自己现撞一遍。
     let 再跑 = 刮削带中文简介(&mut 现场, &index, Some(&简介));
     assert_eq!(再跑.forgotten, 0, "一条结论都不该被当成作废清掉");
-    assert_eq!(各值(&现场, "作品", 作品, "简介", "中文离线源"), vec![简介原文]);
+    assert_eq!(
+        各值(&现场, "作品", 作品, "简介", "中文离线源"),
+        vec![简介原文]
+    );
 }
 
 #[test]
@@ -926,7 +981,10 @@ fn 简介那条路没接上时一条简介都不产出而接上之后重跑真�
     // 二、接上之后重跑，简介**真的补上来了**，而且没有 `--refresh`。
     let 简介 = 简介表::一条(12_345, 简介原文);
     刮削带中文简介(&mut 现场, &index, Some(&简介));
-    assert_eq!(各值(&现场, "作品", 作品, "简介", "中文离线源"), vec![简介原文]);
+    assert_eq!(
+        各值(&现场, "作品", 作品, "简介", "中文离线源"),
+        vec![简介原文]
+    );
 }
 
 #[test]
@@ -992,7 +1050,10 @@ fn 简介读不出来时这一对不写库而不是当成没有简介() {
     // 下一趟路通了就补得上：上一趟没写库，也就没有指纹把它挡在外面。
     let 简介 = 简介表::一条(12_345, 简介原文);
     刮削带中文简介(&mut 现场, &index, Some(&简介));
-    assert_eq!(各值(&现场, "作品", 作品, "简介", "中文离线源"), vec![简介原文]);
+    assert_eq!(
+        各值(&现场, "作品", 作品, "简介", "中文离线源"),
+        vec![简介原文]
+    );
 }
 
 #[test]
@@ -1424,7 +1485,10 @@ fn 报告按平台报中文离线源的覆盖() {
     let text = outcome.report.render_text();
     assert!(text.contains("中文离线源按平台的覆盖"), "{text}");
     assert!(text.contains("40.0%"), "{text}");
-    assert!(text.contains("**老平台覆盖低多半是数据源本身浅**"), "{text}");
+    assert!(
+        text.contains("**老平台覆盖低多半是数据源本身浅**"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -1486,7 +1550,8 @@ fn 不收媒体不会把收过的媒体扔掉() {
 }
 
 fn 不收媒体(现场: &mut 现场) -> scrape::Outcome {
-    let mut options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
+    let mut options =
+        scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
     options.media = false;
     scrape::run(
         &RealFs::new(),
@@ -1662,20 +1727,14 @@ fn 裁(
     entry: u32,
     accepted: bool,
 ) -> scrape::zh::Judged {
-    scrape::zh::judge(
-        &mut 现场.catalog,
-        store,
-        "主库",
-        key,
-        entry,
-        accepted,
-        None,
-    )
-    .expect("裁得下去")
+    scrape::zh::judge(&mut 现场.catalog, store, "主库", key, entry, accepted, None)
+        .expect("裁得下去")
 }
 
 /// 一个锚点上某个源留下的全部字段值。
-fn 某个源的全部值(现场: &现场, anchor: &str, subject: &str, source: &str) -> Vec<String> {
+fn 某个源的全部值(
+    现场: &现场, anchor: &str, subject: &str, source: &str
+) -> Vec<String> {
     现场
         .catalog
         .scraped_values(anchor, subject)
@@ -1720,7 +1779,10 @@ fn 一条否定裁决管住同一次匹配带来的全部字段() {
     assert!(某个源的全部值(&现场, "作品", 作品, "中文离线源").is_empty());
     assert!(judged.cleared >= 4, "清掉的条数该报出来：{judged:?}");
     assert!(judged.from_variant, "这个变体自己撞的就是这一条");
-    assert!(judged.cleared_work > 0, "作品那一层动过了才该报动过：{judged:?}");
+    assert!(
+        judged.cleared_work > 0,
+        "作品那一层动过了才该报动过：{judged:?}"
+    );
 
     // 三、**别的源产出的同名字段不受影响**——这条裁决只管这一次匹配。
     // 发行商这一栏两个源都说过话：中文离线源那条没了，TOSEC 那条一个字都没动。
@@ -1797,7 +1859,11 @@ fn 一条肯定裁决管住同一次匹配带来的全部字段() {
                 value.field,
                 value.evidence
             );
-            assert!(!value.evidence.contains("一律进待确认队列"), "{}", value.evidence);
+            assert!(
+                !value.evidence.contains("一律进待确认队列"),
+                "{}",
+                value.evidence
+            );
         }
     };
     盖过章("变体", 汉化变体, "中文离线源");
@@ -1863,7 +1929,12 @@ fn 队列看得出哪几个字段来自同一次匹配() {
         assert!(摘要.contains(该有), "{该有} 该在这一堆里：{摘要:?}");
     }
     // **别的源不混进来**：这一堆说的是「中文离线源那一次匹配」。
-    assert!(group.values.iter().all(|value| value.source.starts_with("中文离线源")));
+    assert!(
+        group
+            .values
+            .iter()
+            .all(|value| value.source.starts_with("中文离线源"))
+    );
 
     // 裁过之后这一堆**看得出已经定下了**。
     let mut store = 沉淀库();
@@ -1927,13 +1998,7 @@ fn 裁决记的是内容锚换台机器与改过名字之后仍然认得出() {
     fs::rename(root.join("FC/魂斗罗汉化"), root.join("FC/魂斗罗汉化甲")).expect("改得动名字");
     let mut options = ScanOptions::named(&root, "库");
     options.jobs = Jobs::Fixed(2);
-    scan::scan(
-        &RealFs::new(),
-        &mut 现场.catalog,
-        &options,
-        &Handle::new(),
-    )
-    .expect("扫得动");
+    scan::scan(&RealFs::new(), &mut 现场.catalog, &options, &Handle::new()).expect("扫得动");
     识别(&mut 现场);
 
     let 新键 = "库/FC/魂斗罗汉化甲/魂斗罗[dwt_so 汉化].zip";
@@ -1942,8 +2007,14 @@ fn 裁决记的是内容锚换台机器与改过名字之后仍然认得出() {
         "改过名字之后该有这个变体"
     );
     let rulings = 摊平(&现场, &store);
-    assert!(rulings.for_variant(新键).is_some(), "裁决该跟着字节走到新键上");
-    assert!(rulings.for_variant(汉化变体).is_none(), "老那个键已经不在库里了");
+    assert!(
+        rulings.for_variant(新键).is_some(),
+        "裁决该跟着字节走到新键上"
+    );
+    assert!(
+        rulings.for_variant(汉化变体).is_none(),
+        "老那个键已经不在库里了"
+    );
 
     // 三、跑一趟刮削，那个变体照旧一个字段都不产出——**结论稳定**。
     刮削带裁决(&mut 现场, &index, None, &rulings);
@@ -2492,7 +2563,8 @@ fn 范围之外的变体这一趟一个字都不动() {
     let mut 现场 = 建现场();
     识别(&mut 现场);
 
-    let mut options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
+    let mut options =
+        scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
     options.only = Some(范围(&[汉化变体]));
     scrape::run(
         &RealFs::new(),
@@ -2560,7 +2632,8 @@ fn 重采不碰裁决与手工维护的元数据() {
     );
 
     // 范围收窄的那一趟同理。
-    let mut options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
+    let mut options =
+        scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
     options.refresh = true;
     options.only = Some(范围(&[汉化变体]));
     scrape::run(
@@ -2603,7 +2676,8 @@ fn 重采不收媒体时上一趟收进来的媒体引用还在() {
         .expect("读得出");
     assert!(!收过的.is_empty(), "第一趟该收到媒体");
 
-    let mut options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
+    let mut options =
+        scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
     options.refresh = true;
     options.media = false;
     scrape::run(
@@ -2644,7 +2718,8 @@ fn 重采半路被按停也不会把没走到的锚点清空() {
 
     let 停 = CancelToken::new();
     停.cancel();
-    let mut options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
+    let mut options =
+        scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
     options.refresh = true;
     let outcome = scrape::run(
         &RealFs::new(),
@@ -2685,7 +2760,8 @@ fn 字段选窄了不抹掉上一趟采到的别的字段() {
     );
 
     // 只要年份跑一趟。**没有覆盖这回事**：三元组并存，这一趟只管它点名的那几个字段。
-    let mut options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
+    let mut options =
+        scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
     options.fields = [scrape::Field::Year].into_iter().collect();
     options.media = false;
     scrape::run(
@@ -2805,8 +2881,8 @@ fn 补一条平台别名重建索引之后刮削重采而不是整片复用旧�
     let cache = 工作区.path().join("cache");
     fs::create_dir_all(&cache).expect("建得出缓存目录");
     写(&cache.join(中文原件名), &一份中文原件());
-    let mut store = romcat_core::zh::store::Store::open(&工作区.path().join("zh.sqlite3"))
-        .expect("开得起来");
+    let mut store =
+        romcat_core::zh::store::Store::open(&工作区.path().join("zh.sqlite3")).expect("开得起来");
 
     // ── 一、内置那两张表折不动 `任天堂红白机`：条目身上那一串是空的。
     let 折不动 = 取一趟中文数(

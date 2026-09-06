@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use romcat_core::catalog::Catalog;
-use romcat_core::task::Handle;
 use romcat_core::classify::{Category, SuspectReason};
 use romcat_core::fs::RealFs;
 use romcat_core::header::ProbeClass;
@@ -18,6 +17,7 @@ use romcat_core::platform::Manifest;
 use romcat_core::report::DuplicateDetails;
 use romcat_core::scan::aggregate::Limits;
 use romcat_core::scan::{self, CheckpointOptions, Jobs, ScanOptions, ScanOutcome};
+use romcat_core::task::Handle;
 use romcat_core::testing::sample::{chd, gba, iso, nes, zip};
 use romcat_core::testing::{TempDir, temp_dir};
 
@@ -324,8 +324,8 @@ fn 断点绝不落在主库里() {
         interval: std::time::Duration::ZERO,
         resume: false,
     });
-    let err = scan::scan(&RealFs::new(), &mut 中立库(), &options, &Handle::new())
-        .expect_err("必须拒绝");
+    let err =
+        scan::scan(&RealFs::new(), &mut 中立库(), &options, &Handle::new()).expect_err("必须拒绝");
     assert!(err.to_string().contains("主库只读"));
 }
 
@@ -337,8 +337,8 @@ fn 中立库绝不落在主库里() {
     let mut catalog =
         Catalog::open(&library.path().join(".romcat").join("库.sqlite3")).expect("能开中立库");
     let options = ScanOptions::named(library.path(), "库");
-    let err = scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new())
-        .expect_err("必须拒绝");
+    let err =
+        scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect_err("必须拒绝");
     assert!(err.to_string().contains("中立库"), "{err}");
     assert!(err.to_string().contains("主库只读"), "{err}");
 }
@@ -403,8 +403,8 @@ fn 中断后能从断点接着扫() {
     assert!(checkpoint.exists(), "断点应当落在工作目录里");
 
     // 续跑，扫完，断点被清掉
-    let second = scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new())
-        .expect("续跑不该失败");
+    let second =
+        scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("续跑不该失败");
     assert!(second.report.resumed);
     assert!(!second.interrupted);
     assert_eq!(second.report.totals.files, 16);

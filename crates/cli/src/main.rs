@@ -31,12 +31,12 @@ use romcat_core::platform::Manifest;
 use romcat_core::report::{DuplicateDetails, HealthReport, human_bytes, pad, thousands};
 use romcat_core::scan::aggregate::{Aggregate, Limits};
 use romcat_core::scan::{self, CancelToken, CheckpointOptions, Jobs, ScanOptions};
-use romcat_core::task::Handle;
 use romcat_core::scrape::{self, Priorities};
 use romcat_core::shape;
 use romcat_core::site::Site;
 use romcat_core::sublibrary::{self, Sublibrary};
 use romcat_core::sync;
+use romcat_core::task::Handle;
 use romcat_core::title;
 use romcat_core::titledb;
 use romcat_core::triage::{self, Filter, Shape};
@@ -3716,12 +3716,7 @@ fn run_triage_redo(args: &TriageRedoArgs) -> ExitCode {
 ///
 /// `undone` 说的是要挑「已经撤掉的」还是「还在册的」那一批——`--last` 两边挑的不是
 /// 同一个：撤销要最近落下的那一批，放回去要最近撤掉的那一批。
-fn pick_batch(
-    site: &Site,
-    batch: Option<i64>,
-    last: bool,
-    undone: bool,
-) -> Result<i64, String> {
+fn pick_batch(site: &Site, batch: Option<i64>, last: bool, undone: bool) -> Result<i64, String> {
     if let Some(batch) = batch {
         return Ok(batch);
     }
@@ -3808,7 +3803,10 @@ fn run_triage_undo_batch(args: &TriageUndoArgs) -> ExitCode {
              要让它们回到队列，再跑一趟 `romcat identify`。",
         );
     }
-    println!("放回去：`romcat triage redo --batch {batch}{}`。", args.common.选择器());
+    println!(
+        "放回去：`romcat triage redo --batch {batch}{}`。",
+        args.common.选择器()
+    );
     ExitCode::SUCCESS
 }
 
@@ -4810,7 +4808,9 @@ fn run_zh_sync(args: &ZhSyncArgs, cancel: &CancelToken) -> ExitCode {
     //
     // **`--dry-run` 照旧什么都不动**：那一档说的是「只说这一趟会干什么，不取也不写」。
     let pending = store.rebuilding().map(|it| (it.was, it.dump.clone()));
-    if args.dry_run && let Some((was, dump)) = &pending {
+    if args.dry_run
+        && let Some((was, dump)) = &pending
+    {
         eprintln!(
             "（这一份索引的结构版本是 {was}，本程序认得的是 {}——真跑一趟会先看一眼远端\
              有没有新版：没换就从本机那份原件 {dump} 就地重建，换了就取新版那一份。\
@@ -5252,7 +5252,11 @@ fn run_zh_judge(args: &ZhJudgeArgs) -> ExitCode {
         "{}：条目 {} {}。锚是{}——{}。",
         key,
         args.entry,
-        if args.yes { "就是这条" } else { "不是这条" },
+        if args.yes {
+            "就是这条"
+        } else {
+            "不是这条"
+        },
         judged.anchor.label(),
         judged.anchor.describe(),
     );

@@ -60,10 +60,7 @@ fn 写(path: &Path, bytes: &[u8]) {
 fn 摆好主库(root: &Path) {
     写(
         &root.join("FC/超级马里奥.zip"),
-        &zip_container(&[ZipEntrySpec::stored(
-            "Super Mario (Japan).nes",
-            卡带(0xA1),
-        )]),
+        &zip_container(&[ZipEntrySpec::stored("Super Mario (Japan).nes", 卡带(0xA1))]),
     );
     写(
         &root.join("FC/勇者斗恶龙 汉化.zip"),
@@ -90,11 +87,7 @@ fn 建现场() -> 现场 {
     现场 {
         dir,
         副,
-        site: Site::in_memory(
-            catalog,
-            Store::in_memory().expect("开得出沉淀库"),
-            库名,
-        ),
+        site: Site::in_memory(catalog, Store::in_memory().expect("开得出沉淀库"), 库名),
         repo: DatRepo::in_memory().expect("开得出 DAT 库"),
     }
 }
@@ -192,7 +185,12 @@ fn 勾一批按一下星_屏上当场筛得出来而且两种锚各数各的() {
         .expect("加得进收藏");
     // **两种锚各数一个数**（验收第 7 条）：屏上要写得出「其中 N 个挪了位置会飘」。
     assert_eq!(
-        (applied.content, applied.path, applied.changed, applied.missing),
+        (
+            applied.content,
+            applied.path,
+            applied.changed,
+            applied.missing
+        ),
         (2, 1, 3, 0),
         "两个 zip 拿得到内容判据，裸文件这一趟拿不到——那一个只钉得住本机路径",
     );
@@ -311,8 +309,11 @@ fn 改了名或挪到另一个根_内容锚认得出而路径锚如实地飘了(
     // 主盘上：马里奥**改个名**；勇者**挪到另一个根上**；裸卡带也改个名。
     let 主 = 现场.dir.path().to_path_buf();
     let 副 = 现场.副.path().to_path_buf();
-    fs::rename(主.join("FC/超级马里奥.zip"), 主.join("FC/马里奥 改过名.zip"))
-        .expect("改得了名");
+    fs::rename(
+        主.join("FC/超级马里奥.zip"),
+        主.join("FC/马里奥 改过名.zip"),
+    )
+    .expect("改得了名");
     fs::create_dir_all(副.join("FC")).expect("建得出目录");
     fs::rename(
         主.join("FC/勇者斗恶龙 汉化.zip"),
@@ -358,7 +359,11 @@ fn 中立库里的合集是投影_照沉淀库重建一遍结果一致() {
     let 重建前 = 筛(&现场.site.catalog, "合集=送朋友的");
 
     // 往投影里手塞一个沉淀库里没有的合集，再把一个真成员从投影里抠掉。
-    let 冒牌 = 现场.site.catalog.add_collection("冒牌合集").expect("建得出");
+    let 冒牌 = 现场
+        .site
+        .catalog
+        .add_collection("冒牌合集")
+        .expect("建得出");
     现场
         .site
         .catalog
@@ -374,7 +379,11 @@ fn 中立库里的合集是投影_照沉淀库重建一遍结果一致() {
     let 成员 = 现场.site.store.memberships().expect("读得到");
     let projected = collection::project(&mut 现场.site.catalog, &成员).expect("投影得出来");
 
-    assert_eq!(筛(&现场.site.catalog, "合集=送朋友的"), 重建前, "照沉淀库回来了");
+    assert_eq!(
+        筛(&现场.site.catalog, "合集=送朋友的"),
+        重建前,
+        "照沉淀库回来了"
+    );
     assert!(
         筛(&现场.site.catalog, "合集=冒牌合集").is_empty(),
         "沉淀库里没有的那个合集，重建之后一条都不剩",
@@ -407,10 +416,7 @@ fn 同一份内容存了两处_一处点星两处一起亮_而且重扫之后还
     let 备份 = "主盘/FC/超级马里奥 备份.zip";
     写(
         &现场.dir.path().join("FC/超级马里奥 备份.zip"),
-        &zip_container(&[ZipEntrySpec::stored(
-            "Super Mario (Japan).nes",
-            卡带(0xA1),
-        )]),
+        &zip_container(&[ZipEntrySpec::stored("Super Mario (Japan).nes", 卡带(0xA1))]),
     );
     扫(&mut 现场.site.catalog, 主根, 现场.dir.path());
     跑识别(&mut 现场);

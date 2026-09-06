@@ -14,8 +14,7 @@
 use std::fs;
 use std::path::Path;
 
-use romcat_core::catalog::{Catalog, Confidence, State, Roots};
-use romcat_core::task::Handle;
+use romcat_core::catalog::{Catalog, Confidence, Roots, State};
 use romcat_core::dat::Convention;
 use romcat_core::dat::chinese::ChineseMark;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
@@ -24,6 +23,7 @@ use romcat_core::fs::RealFs;
 use romcat_core::identify::fuzzy;
 use romcat_core::identify::{self, Options};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
+use romcat_core::task::Handle;
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::triage::{self, Decide, DecisionSpec, Fanout, Filter, Overrides, Shape, batch};
@@ -327,7 +327,8 @@ fn 一级分批的键取的是最可信的那条候选() {
         .find(|item| item.variant.key.contains("勇者斗恶龙"))
         .expect("该在队列里");
     assert_eq!(
-        那条.candidates
+        那条
+            .candidates
             .iter()
             .map(|one| (one.source.as_str(), one.confidence))
             .collect::<Vec<_>>(),
@@ -352,7 +353,10 @@ fn 一级分批的键取的是最可信的那条候选() {
         fanout,
     } = &这一批.shape
     else {
-        panic!("有候选的那一批不该落进「一条候选都没有」那一支：{:?}", 这一批.shape);
+        panic!(
+            "有候选的那一批不该落进「一条候选都没有」那一支：{:?}",
+            这一批.shape
+        );
     };
     let 头一条 = &那条.candidates[0];
     assert_eq!(
@@ -831,7 +835,10 @@ fn 忘掉裁决之后重跑识别就回到队列里() {
 
 /// 一个变体眼下在中立库里长什么样：结论、理由、候选、挂在哪个作品与发行版上。
 /// **撤销要证的就是这一整份原样回来了**，只比状态是骗自己。
-fn 中立库快照(现场: &现场, key: &str) -> (State, Option<String>, Vec<String>, Option<i64>, Option<i64>) {
+fn 中立库快照(
+    现场: &现场,
+    key: &str,
+) -> (State, Option<String>, Vec<String>, Option<i64>, Option<i64>) {
     let (state, reason) = 现场
         .catalog
         .identification_of(key)
@@ -842,10 +849,21 @@ fn 中立库快照(现场: &现场, key: &str) -> (State, Option<String>, Vec<St
         .candidates_of(key)
         .expect("读得出候选")
         .into_iter()
-        .map(|candidate| format!("{}|{}|{}", candidate.source, candidate.game, candidate.evidence))
+        .map(|candidate| {
+            format!(
+                "{}|{}|{}",
+                candidate.source, candidate.game, candidate.evidence
+            )
+        })
         .collect();
     let variant = 现场.catalog.variant(key).expect("读得出").expect("变体在");
-    (state, reason, candidates, variant.work_id, variant.release_id)
+    (
+        state,
+        reason,
+        candidates,
+        variant.work_id,
+        variant.release_id,
+    )
 }
 
 /// 撤销的**对拍**：一批落下**之前**与撤完**之后**必须一模一样。
@@ -1019,11 +1037,18 @@ fn 一批里有几份同内容的拷贝时撤销把它们全都放回队列() {
 
     let applied = 裁(&mut 现场, &filter, &手工("同一部作品"));
     assert_eq!(applied.verdicts, 2, "两个变体各记一条，锚是同一条");
-    assert_eq!(现场.store.counts().expect("数得出").total, 1, "同一条锚只有一条裁决");
+    assert_eq!(
+        现场.store.counts().expect("数得出").total,
+        1,
+        "同一条锚只有一条裁决"
+    );
 
     let account =
         triage::undo_batch(&mut 现场.catalog, &mut 现场.store, applied.batch).expect("撤得掉");
-    assert_eq!(account.kept, 0, "第二份不是「别人的账」，是我们自己刚删的那条");
+    assert_eq!(
+        account.kept, 0,
+        "第二份不是「别人的账」，是我们自己刚删的那条"
+    );
     assert_eq!(account.variants, 2, "两个变体的结论都该放回去");
     assert_eq!(现场.store.counts().expect("数得出").total, 0);
     assert_eq!(队列(&现场, &filter).len(), 2, "两份拷贝都该回到队列里");
@@ -1058,7 +1083,11 @@ fn 几份同内容的拷贝盖掉过旧裁决时撤销照样把它们全都放�
     现场.store.put(&旧的).expect("写得进");
 
     let applied = 裁(&mut 现场, &filter, &手工("改成那个"));
-    assert_eq!((applied.verdicts, applied.replaced), (2, 2), "两条都盖在同一条锚上");
+    assert_eq!(
+        (applied.verdicts, applied.replaced),
+        (2, 2),
+        "两条都盖在同一条锚上"
+    );
 
     let account =
         triage::undo_batch(&mut 现场.catalog, &mut 现场.store, applied.batch).expect("撤得掉");
@@ -1104,7 +1133,11 @@ fn 一批里两份重复拷贝的裁决跨了秒界时撤销照样把它们全�
     );
     assert_eq!(account.variants, 2, "两个变体的结论都该放回去");
     assert_eq!(现场.store.counts().expect("数得出").total, 0);
-    assert_eq!(对拍快照(&现场, &那两条), 原样, "撤完两边都该回到这一批落下之前");
+    assert_eq!(
+        对拍快照(&现场, &那两条),
+        原样,
+        "撤完两边都该回到这一批落下之前"
+    );
     assert_eq!(队列(&现场, &filter).len(), 2, "两份拷贝都该回到队列里");
 
     // 放回去那一侧同样：两份拷贝一起回到命中，队列一条不剩。
@@ -1129,7 +1162,10 @@ fn 后一批盖住了前一批时先撤前一批被拒绝并说清是哪一批�
 
     let 批一 = 裁(&mut 现场, &点名(&["甲 某汉化.zip"]), &手工("作品一"));
     let 批二 = 裁(&mut 现场, &点名(&["乙 某汉化.zip"]), &手工("作品二"));
-    assert_eq!(批二.replaced, 1, "两份重复拷贝钉的是同一条锚，后一批盖住了前一批");
+    assert_eq!(
+        批二.replaced, 1,
+        "两份重复拷贝钉的是同一条锚，后一批盖住了前一批"
+    );
 
     let 话 = triage::undo_batch(&mut 现场.catalog, &mut 现场.store, 批一.batch)
         .expect_err("被后来的批盖住了就不该撤得动")
@@ -1140,7 +1176,12 @@ fn 后一批盖住了前一批时先撤前一批被拒绝并说清是哪一批�
     );
     // 拒绝了就一个字都不动：批一照旧在册，沉淀库照旧是批二那条。
     assert!(
-        !现场.store.batch(批一.batch).expect("读得出").expect("在册").undone(),
+        !现场
+            .store
+            .batch(批一.batch)
+            .expect("读得出")
+            .expect("在册")
+            .undone(),
         "撤不动的一批不该被标成已撤",
     );
     assert_eq!(现场.store.counts().expect("数得出").total, 1);
@@ -1180,7 +1221,12 @@ fn 锚上是别处写下的裁决时撤销不动它并如实报出没动几条()
         triage::undo_batch(&mut 现场.catalog, &mut 现场.store, applied.batch).expect("撤得掉");
     assert_eq!((account.removed, account.kept), (1, 1));
     assert!(
-        现场.store.batch(applied.batch).expect("读得出").expect("在册").undone(),
+        现场
+            .store
+            .batch(applied.batch)
+            .expect("读得出")
+            .expect("在册")
+            .undone(),
         "这一批落下的裁决一条都不在生效了，就该记成已撤",
     );
     let 现在 = 现场.store.all().expect("读得出");
@@ -1340,7 +1386,10 @@ fn 队列列一次之后换选择器不再读库() {
     let fc = queue.selected().len();
     assert!(fc > 0 && fc < 整个队列, "FC 该是队列的一部分而不是全部");
     assert!(
-        queue.selected().iter().all(|item| item.directory() == "库/FC"),
+        queue
+            .selected()
+            .iter()
+            .all(|item| item.directory() == "库/FC"),
         "选中的里面混进了别的目录",
     );
 
@@ -1402,7 +1451,10 @@ fn 装_中文名撞得上的一份(现场: &mut 现场) {
     // **不摆 iNES 头**：卡带内部头说了算（`identify::platform_of`），摆一份 FC 的头
     // 会让这份 GBA 卡的平台被判成 FC，中文离线源那条平台交叉校验当场判冲突。
     写(
-        &现场.dir.path().join("GBA/超级机器人大战R[星组](v1.2+)(简)(JP)(68.92Mb).zip"),
+        &现场
+            .dir
+            .path()
+            .join("GBA/超级机器人大战R[星组](v1.2+)(简)(JP)(68.92Mb).zip"),
         &zip_container(&[ZipEntrySpec::stored("srwr.gba", vec![0xD0; 40_960])]),
     );
     let mut options = ScanOptions::named(现场.dir.path(), "库");
@@ -1533,7 +1585,10 @@ fn 一级分批按依据形状分而且各批加起来就是整个队列() {
     let queue = 列队列(&现场);
 
     let batches = queue.batches();
-    assert!(batches.len() >= 2, "至少该分出「撞上了的」与「一条候选都没有的」两批");
+    assert!(
+        batches.len() >= 2,
+        "至少该分出「撞上了的」与「一条候选都没有的」两批"
+    );
     assert_eq!(
         batches.iter().map(|batch| batch.count).sum::<u64>(),
         queue.selected().len() as u64,
@@ -1563,9 +1618,20 @@ fn 一级分批按依据形状分而且各批加起来就是整个队列() {
         .expect("该有一批是 GoodNES 撞出来的");
     assert_eq!(撞上的.count, 1);
     assert_eq!(撞上的.shape.fanout(), triage::Fanout::One);
-    assert!(撞上的.passable(), "单候选那一批问的是「对不对」，按批答得了");
-    assert!(撞上的.why().contains("GoodNES / GoodNES / 含头"), "{}", 撞上的.why());
-    assert!(撞上的.why().contains("这份 DAT 没记大小"), "{}", 撞上的.why());
+    assert!(
+        撞上的.passable(),
+        "单候选那一批问的是「对不对」，按批答得了"
+    );
+    assert!(
+        撞上的.why().contains("GoodNES / GoodNES / 含头"),
+        "{}",
+        撞上的.why()
+    );
+    assert!(
+        撞上的.why().contains("这份 DAT 没记大小"),
+        "{}",
+        撞上的.why()
+    );
 
     // 一条候选都没有那一批说的是**为什么没定下来**，而且整批通过说不出口。
     let 光秃的 = batches
@@ -1583,11 +1649,7 @@ fn 二级下钻的条数加起来等于它所属的一级() {
     let mut 现场 = 建现场();
     跑识别(&mut 现场);
     let queue = 列队列(&现场);
-    let batch = queue
-        .batches()
-        .first()
-        .cloned()
-        .expect("该分得出至少一批");
+    let batch = queue.batches().first().cloned().expect("该分得出至少一批");
     let scope = triage::Scope::whole(batch.shape.clone());
     assert_eq!(queue.count(&scope), batch.count);
 
@@ -1675,9 +1737,16 @@ fn 整批通过之后按批整个撤回() {
     let undone = queue
         .undo(&mut 现场.catalog, &mut 现场.store, 库名, applied.batch)
         .expect("撤得掉");
-    assert_eq!((undone.batch, undone.removed, undone.kept), (applied.batch, 这一批, 0));
+    assert_eq!(
+        (undone.batch, undone.removed, undone.kept),
+        (applied.batch, 这一批, 0)
+    );
     assert!(undone.catalog_rolled_back, "中立库那一半没回去");
-    assert_eq!(queue.pending(), 原有, "撤回之后队列该回到整批通过之前那么多条");
+    assert_eq!(
+        queue.pending(),
+        原有,
+        "撤回之后队列该回到整批通过之前那么多条"
+    );
     assert_eq!(现场.store.counts().expect("读得出").total, 0);
     // 那一批照旧数得出来——形状没变，卡片回到屏上。
     assert_eq!(queue.count(&scope), 这一批);
@@ -1846,4 +1915,3 @@ fn 排完计划之后先裁掉其中一条再落下整份被拒那一条照旧�
         None,
     );
 }
-

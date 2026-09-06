@@ -889,7 +889,10 @@ impl SearchHit {
 
     /// SQL 里那个名次折回来；认不出（真到不了）就是 `None`。
     fn from_rank(rank: i64) -> Option<Self> {
-        usize::try_from(rank).ok().and_then(|at| Self::ALL.get(at)).copied()
+        usize::try_from(rank)
+            .ok()
+            .and_then(|at| Self::ALL.get(at))
+            .copied()
     }
 }
 
@@ -1470,7 +1473,8 @@ fn platform_set(joined: Option<String>, unknowns: u64) -> Vec<String> {
 ///
 /// 那两个词**照旧走参数**（[`confidence_rank_args`]），与这一层别处一个规矩：
 /// 拼进 SQL 的只有这个文件里写死的那些字。
-const CONFIDENCE_RANK: &str = "MIN(CASE candidate.confidence WHEN ? THEN 0 WHEN ? THEN 1 ELSE 2 END)";
+const CONFIDENCE_RANK: &str =
+    "MIN(CASE candidate.confidence WHEN ? THEN 0 WHEN ? THEN 1 ELSE 2 END)";
 
 /// [`CONFIDENCE_RANK`] 的两个参数，按出现次序。
 fn confidence_rank_args() -> Vec<Box<dyn ToSql>> {
@@ -1655,7 +1659,10 @@ impl Catalog {
         // **空的那一支不写进去**——`IN ()` 恒不成立，写了只是让计划多一支。
         let mut branches: Vec<String> = Vec::new();
         if !works.is_empty() {
-            branches.push(format!("variant.work_id IN ({})", placeholders(works.len())));
+            branches.push(format!(
+                "variant.work_id IN ({})",
+                placeholders(works.len())
+            ));
         }
         if !loose.is_empty() {
             branches.push(format!(
@@ -1666,7 +1673,11 @@ impl Catalog {
         let sql = format!(
             "SELECT {WORK_TOTAL_COLUMNS}{WORK_FROM_BASE}{where_sql}{glue} ({branch})\
              {WORK_GROUP_BY}",
-            glue = if where_sql.is_empty() { " WHERE" } else { " AND" },
+            glue = if where_sql.is_empty() {
+                " WHERE"
+            } else {
+                " AND"
+            },
             branch = branches.join(" OR "),
         );
         let mut args = where_args;
@@ -1750,7 +1761,9 @@ impl Catalog {
         for anchor in [AnchorKind::Work, AnchorKind::Variant] {
             let subjects: Vec<&str> = rows
                 .iter()
-                .filter(|row| matches!(row.anchor, WorkAnchor::Work(_)) == (anchor == AnchorKind::Work))
+                .filter(|row| {
+                    matches!(row.anchor, WorkAnchor::Work(_)) == (anchor == AnchorKind::Work)
+                })
                 .map(|row| row.name.as_str())
                 .collect();
             if subjects.is_empty() {
@@ -1798,15 +1811,12 @@ impl Catalog {
                 }
                 have.insert((subject, field));
             }
-            for row in rows
-                .iter_mut()
-                .filter(|row| matches!(row.anchor, WorkAnchor::Work(_)) == (anchor == AnchorKind::Work))
-            {
+            for row in rows.iter_mut().filter(|row| {
+                matches!(row.anchor, WorkAnchor::Work(_)) == (anchor == AnchorKind::Work)
+            }) {
                 row.missing = WORK_FIELDS
                     .into_iter()
-                    .filter(|field| {
-                        !have.contains(&(row.name.clone(), field.label().to_string()))
-                    })
+                    .filter(|field| !have.contains(&(row.name.clone(), field.label().to_string())))
                     .collect();
                 row.year = years.get(&row.name).cloned();
             }
@@ -1845,7 +1855,11 @@ impl Catalog {
                    LEFT JOIN work ON work.id = variant.work_id
                   {where_sql}{glue} variant.work_id IN ({ids})
                   GROUP BY variant.work_id",
-                glue = if where_sql.is_empty() { " WHERE" } else { " AND" },
+                glue = if where_sql.is_empty() {
+                    " WHERE"
+                } else {
+                    " AND"
+                },
                 ids = placeholders(works.len()),
             );
             let mut args = confidence_rank_args();
@@ -2013,7 +2027,11 @@ fn scoped_sql(
                     args.push(Box::new((*key).to_string()));
                 }
             }
-            sql.push_str(if where_sql.is_empty() { " WHERE " } else { " AND " });
+            sql.push_str(if where_sql.is_empty() {
+                " WHERE "
+            } else {
+                " AND "
+            });
             if negated {
                 sql.push_str("NOT ");
             }

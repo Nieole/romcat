@@ -68,8 +68,8 @@ struct 现场 {
 /// 那是有意的——它撑的是「缺哪些媒体」那条验收。这里另加两条真的。
 fn 现场(tag: &str) -> 现场 {
     let dir = temp_dir(tag);
-    let pool = MediaPool::open(&romcat_core::workspace::media_pool_dir(dir.path()))
-        .expect("开得出媒体池");
+    let pool =
+        MediaPool::open(&romcat_core::workspace::media_pool_dir(dir.path())).expect("开得出媒体池");
     let mut catalog = demo::browse(ROWS).expect("造得出合成数据");
 
     // 挂在**作品锚点**上：封面本来就锚在作品这一层（ADR-0009），而详情面板把作品锚点
@@ -366,7 +366,13 @@ fn 没解出来的那几件面板上说得清是哪一件为什么() {
         .set_program(preview::NO_SUCH_PROGRAM);
     等图(&ctx, &mut 场.app, Duration::from_secs(20));
 
-    let items = 场.app.browse().detail().expect("点开得了").media_items.clone();
+    let items = 场
+        .app
+        .browse()
+        .detail()
+        .expect("点开得了")
+        .media_items
+        .clone();
     let 说的 = 场.app.browse().gallery().troubles(&items);
     assert!(!说的.is_empty(), "合成数据那几条池里都没有文件，该说得出来");
     for (是哪一件, 为什么) in &说的 {
@@ -376,13 +382,17 @@ fn 没解出来的那几件面板上说得清是哪一件为什么() {
     // **「这台机器没装 ffmpeg」不在这张单子里**：面板另说一句就够了，
     // 真库里 178 个视频各摆一行是噪音。
     assert!(
-        !说的.iter().any(|(_, 为什么)| 为什么.contains(preview::NO_SUCH_PROGRAM)),
+        !说的
+            .iter()
+            .any(|(_, 为什么)| 为什么.contains(preview::NO_SUCH_PROGRAM)),
         "没装 ffmpeg 那一档不该逐件重复：{说的:?}",
     );
     assert!(场.app.browse().gallery().lacks_ffmpeg(), "它该由那一句单说");
     // 而真摆进池里的那张封面不该出现在这张单子上——它好好的。
     assert!(
-        !说的.iter().any(|(是哪一件, _)| 是哪一件.starts_with("封面 · 测试")),
+        !说的
+            .iter()
+            .any(|(是哪一件, _)| 是哪一件.starts_with("封面 · 测试")),
         "解出来了的不该报成没解出来：{说的:?}",
     );
 }
@@ -421,8 +431,7 @@ fn 没选中变体时后台跑完的那几件照样收得回来() {
 fn 假ffmpeg(dir: &std::path::Path, 吐出来的: &std::path::Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt as _;
     let at = dir.join("假ffmpeg");
-    std::fs::write(&at, format!("#!/bin/sh\ncat '{}'\n", 吐出来的.display()))
-        .expect("写得出脚本");
+    std::fs::write(&at, format!("#!/bin/sh\ncat '{}'\n", 吐出来的.display())).expect("写得出脚本");
     let mut perm = std::fs::metadata(&at).expect("读得到").permissions();
     perm.set_mode(0o755);
     std::fs::set_permissions(&at, perm).expect("改得动权限");

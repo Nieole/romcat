@@ -26,10 +26,10 @@
 
 use std::path::PathBuf;
 
-use romcat_core::catalog::roots::{self, LibraryRoot, RootStats};
 use romcat_core::catalog::Catalog;
-use romcat_core::report::{human_bytes, human_duration, human_time, thousands};
+use romcat_core::catalog::roots::{self, LibraryRoot, RootStats};
 use romcat_core::fs::RealFs;
+use romcat_core::report::{human_bytes, human_duration, human_time, thousands};
 use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::site::Site;
 use romcat_core::sources::{self, Source, SourceState, SourceStatus};
@@ -168,12 +168,7 @@ impl Screen {
         } else {
             name.trim().to_string()
         };
-        match roots::add_root(
-            &site.catalog,
-            Some(&self.workspace),
-            &name,
-            &normalized,
-        ) {
+        match roots::add_root(&site.catalog, Some(&self.workspace), &name, &normalized) {
             Ok(root) => {
                 self.error = None;
                 self.notice = Some(format!(
@@ -258,7 +253,11 @@ impl Screen {
 
     /// 取回一个数据源，**排到任务台上**。
     pub fn fetch(&mut self, tasks: &mut Tasks, source: Source) {
-        if self.running.iter().any(|(_, job)| *job == Job::Fetch(source)) {
+        if self
+            .running
+            .iter()
+            .any(|(_, job)| *job == Job::Fetch(source))
+        {
             return;
         }
         let workspace = self.workspace.clone();
@@ -368,59 +367,62 @@ impl Screen {
         // （借用检查器要的，也让「按一下发生什么」读起来是一条直线）。
         let roots = self.roots.clone();
         let 忙的 = self.busy_roots();
-        egui::Grid::new("根").num_columns(6).striped(true).show(ui, |ui| {
-            for header in ["根名", "路径", "变体", "容量", "上次扫描", ""] {
-                ui.strong(header);
-            }
-            ui.end_row();
-            for row in &roots {
-                ui.label(&row.root.name);
-                if row.mounted {
-                    ui.weak(&row.root.path);
-                } else {
-                    // **盘没挂上照样看得见上次结果**——那是这一行存在的一半理由。
-                    ui.colored_label(
-                        ui.visuals().warn_fg_color,
-                        format!("{}（不在位）", row.root.path),
-                    );
+        egui::Grid::new("根")
+            .num_columns(6)
+            .striped(true)
+            .show(ui, |ui| {
+                for header in ["根名", "路径", "变体", "容量", "上次扫描", ""] {
+                    ui.strong(header);
                 }
-                ui.label(thousands(row.stats.variants));
-                ui.label(human_bytes(row.stats.bytes));
-                ui.label(last_scan(row));
-                ui.horizontal(|ui| {
-                    let 忙 = 忙的.contains(&row.root.name);
-                    let 标签 = if row.root.scan.is_some() {
-                        "重扫"
+                ui.end_row();
+                for row in &roots {
+                    ui.label(&row.root.name);
+                    if row.mounted {
+                        ui.weak(&row.root.path);
                     } else {
-                        "扫描"
-                    };
-                    if ui
-                        .add_enabled(!忙, egui::Button::new(标签))
-                        .on_hover_text("排到任务台上跑，期间照常用别的屏")
-                        .clicked()
-                    {
-                        要扫 = Some(row.root.name.clone());
-                    }
-                    if self.removing.as_deref() == Some(row.root.name.as_str()) {
+                        // **盘没挂上照样看得见上次结果**——那是这一行存在的一半理由。
                         ui.colored_label(
                             ui.visuals().warn_fg_color,
-                            format!("会去掉 {} 个变体", thousands(row.stats.variants)),
+                            format!("{}（不在位）", row.root.path),
                         );
-                        if ui.button("确认移除").clicked() {
-                            要移除 = Some(row.root.name.clone());
-                        }
-                        // **「算了」得真的算了。** 一个只能前进不能后退的破坏性确认，
-                        // 比不加确认更坏。
-                        if ui.button("算了").clicked() {
-                            要收回 = true;
-                        }
-                    } else if ui.add_enabled(!忙, egui::Button::new("移除")).clicked() {
-                        要点头 = Some(row.root.name.clone());
                     }
-                });
-                ui.end_row();
-            }
-        });
+                    ui.label(thousands(row.stats.variants));
+                    ui.label(human_bytes(row.stats.bytes));
+                    ui.label(last_scan(row));
+                    ui.horizontal(|ui| {
+                        let 忙 = 忙的.contains(&row.root.name);
+                        let 标签 = if row.root.scan.is_some() {
+                            "重扫"
+                        } else {
+                            "扫描"
+                        };
+                        if ui
+                            .add_enabled(!忙, egui::Button::new(标签))
+                            .on_hover_text("排到任务台上跑，期间照常用别的屏")
+                            .clicked()
+                        {
+                            要扫 = Some(row.root.name.clone());
+                        }
+                        if self.removing.as_deref() == Some(row.root.name.as_str()) {
+                            ui.colored_label(
+                                ui.visuals().warn_fg_color,
+                                format!("会去掉 {} 个变体", thousands(row.stats.variants)),
+                            );
+                            if ui.button("确认移除").clicked() {
+                                要移除 = Some(row.root.name.clone());
+                            }
+                            // **「算了」得真的算了。** 一个只能前进不能后退的破坏性确认，
+                            // 比不加确认更坏。
+                            if ui.button("算了").clicked() {
+                                要收回 = true;
+                            }
+                        } else if ui.add_enabled(!忙, egui::Button::new("移除")).clicked() {
+                            要点头 = Some(row.root.name.clone());
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
 
         if 要收回 {
             self.removing = None;
@@ -476,10 +478,7 @@ impl Screen {
                             fetched_at,
                         } => {
                             ui.label(thousands(*records));
-                            ui.label(fetched_at.map_or_else(
-                                || "——".to_string(),
-                                human_time,
-                            ));
+                            ui.label(fetched_at.map_or_else(|| "——".to_string(), human_time));
                             ui.weak(&status.coverage);
                         }
                         // **还没取回的要被明确标出来**：那正是「扫完了怎么没认出来」
@@ -496,7 +495,10 @@ impl Screen {
                             ui.colored_label(ui.visuals().error_fg_color, why);
                         }
                     }
-                    let 忙 = self.running.iter().any(|(_, job)| *job == Job::Fetch(source));
+                    let 忙 = self
+                        .running
+                        .iter()
+                        .any(|(_, job)| *job == Job::Fetch(source));
                     let 标签 = if status.ready() { "重取" } else { "取回" };
                     if ui
                         .add_enabled(!忙, egui::Button::new(标签))

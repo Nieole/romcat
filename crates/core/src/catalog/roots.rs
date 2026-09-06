@@ -487,7 +487,10 @@ pub fn check_placement(
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RelocateError {
     /// 库里没有叫这个名字的根。
-    #[error("这份中立库里没有叫「{name}」的根。加一个根是 `scan` 的活。{}", known_roots(known))]
+    #[error(
+        "这份中立库里没有叫「{name}」的根。加一个根是 `scan` 的活。{}",
+        known_roots(known)
+    )]
     Unknown {
         /// 点到的那个名字。
         name: String,
@@ -744,8 +747,7 @@ mod tests {
     fn 新根落在已有根内部时被拒绝并说清是哪一个() {
         let catalog = 一份库();
         catalog.insert_root("主库", "/盘/Game").expect("记得下");
-        let error =
-            add_root(&catalog, None, "子集", Path::new("/盘/Game/FC")).expect_err("该被拒");
+        let error = add_root(&catalog, None, "子集", Path::new("/盘/Game/FC")).expect_err("该被拒");
         let AddRootError::Inside { name, .. } = &error else {
             panic!("该报「落在里面」，实际是 {error}");
         };
@@ -822,8 +824,8 @@ mod tests {
         // 这一条各平台都跑得了：折叠在**字符串层**，不靠 `Path` 拆盘符。
         let catalog = 一份库();
         catalog.insert_root("主库", r"D:\Game").expect("记得下");
-        let error =
-            check_placement(&catalog, None, "元数据", Path::new(r"\\?\D:\Game")).expect_err("该被拒");
+        let error = check_placement(&catalog, None, "元数据", Path::new(r"\\?\D:\Game"))
+            .expect_err("该被拒");
         let AddRootError::SamePath { name, .. } = &error else {
             panic!("该报「同一个地方」，实际是 {error}");
         };
@@ -852,7 +854,9 @@ mod tests {
         let mut roots = Roots::single("主库", "/盘甲/Game");
         roots.set("元数据库", "/盘甲/Game/FC");
         assert_eq!(
-            roots.key_of(Path::new("/盘甲/Game/FC/魂斗罗.zip")).as_deref(),
+            roots
+                .key_of(Path::new("/盘甲/Game/FC/魂斗罗.zip"))
+                .as_deref(),
             Some("元数据库/魂斗罗.zip")
         );
         assert_eq!(roots.key_of(Path::new("/别处/魂斗罗.zip")), None);

@@ -488,7 +488,9 @@ impl Catalog {
     /// 读库失败时返回错误。
     pub fn variant(&self, key: &str) -> Result<Option<VariantRow>, CatalogError> {
         self.conn
-            .prepare_cached(&format!("SELECT {VARIANT_COLUMNS} FROM variant WHERE key = ?1"))
+            .prepare_cached(&format!(
+                "SELECT {VARIANT_COLUMNS} FROM variant WHERE key = ?1"
+            ))
             .and_then(|mut statement| {
                 statement
                     .query_row(params![key], read_variant_row)
@@ -944,7 +946,9 @@ impl Catalog {
                 )
                 .map_err(to_err)?;
             for key in variant_keys {
-                insert.execute(params![collection_id, key]).map_err(to_err)?;
+                insert
+                    .execute(params![collection_id, key])
+                    .map_err(to_err)?;
             }
         }
         tx.commit().map_err(to_err)

@@ -418,13 +418,7 @@ impl Match {
         )
     }
 
-    fn evidence_with(
-        &self,
-        dump: &str,
-        query_label: &str,
-        query_text: &str,
-        tail: &str,
-    ) -> String {
+    fn evidence_with(&self, dump: &str, query_label: &str, query_text: &str, tail: &str) -> String {
         let mut text = format!(
             "中文离线数据源（Bangumi 离线 dump {dump}）{ENTRY_MARK}{} 「{}」的{}「{}」，\
              与文件名剥出来的{}「{}」相似度 {:.2}",
@@ -489,7 +483,10 @@ const FUZZY_TAIL: &str = "。**这是模糊匹配不是命中**：它只看名�
 #[must_use]
 pub fn entry_in(evidence: &str) -> Option<u32> {
     let at = evidence.find(ENTRY_MARK)? + ENTRY_MARK.len();
-    let digits: String = evidence[at..].chars().take_while(char::is_ascii_digit).collect();
+    let digits: String = evidence[at..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
     digits.parse().ok()
 }
 

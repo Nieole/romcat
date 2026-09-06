@@ -1166,7 +1166,8 @@ impl Catalog {
             let (subject, input) = row.map_err(|source| self.err(source))?;
             out.insert(subject, input);
         }
-        Ok(out)    }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -1179,10 +1180,22 @@ mod tests {
         // 第二行，旧的那条还在。人改了主意就是改了主意，不是又添了一句。
         let mut catalog = Catalog::open_in_memory().expect("能开中立库");
         catalog
-            .put_verdict_value(AnchorKind::Variant, "FC/甲.zip", Field::Title, "魂斗罗", "人定的")
+            .put_verdict_value(
+                AnchorKind::Variant,
+                "FC/甲.zip",
+                Field::Title,
+                "魂斗罗",
+                "人定的",
+            )
             .expect("写得进去");
         catalog
-            .put_verdict_value(AnchorKind::Variant, "FC/甲.zip", Field::Title, "魂斗罗改", "改主意了")
+            .put_verdict_value(
+                AnchorKind::Variant,
+                "FC/甲.zip",
+                Field::Title,
+                "魂斗罗改",
+                "改主意了",
+            )
             .expect("写得进去");
         let values = catalog.scraped_values("变体", "FC/甲.zip").expect("读得出");
         let 裁决: Vec<&str> = values

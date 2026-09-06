@@ -235,8 +235,14 @@ fn 以搜索词开头的排在含有那个词的前面() {
     // 中文那一趟。「弹头对策室」以它开头，「合金弹头 2」只是含有它。
     let 中文 = 搜词(&catalog, 中文词);
     let 名字: Vec<&str> = 中文.iter().map(|(name, _)| name.as_str()).collect();
-    let 开头 = 名字.iter().position(|n| *n == "弹头对策室").expect("搜得到");
-    let 含有 = 名字.iter().position(|n| *n == "合金弹头 2").expect("搜得到");
+    let 开头 = 名字
+        .iter()
+        .position(|n| *n == "弹头对策室")
+        .expect("搜得到");
+    let 含有 = 名字
+        .iter()
+        .position(|n| *n == "合金弹头 2")
+        .expect("搜得到");
     assert!(开头 < 含有, "以搜索词开头的没排在含有它的前面：{名字:?}");
 
     // 拉丁那一趟，而且**大小写不敏感**：打的是小写 `slug`，库里是 `Slug`。
@@ -268,7 +274,10 @@ fn 别名命中与简介命中排在标题命中之后而且各自的次序确�
     // **五档的次序就是屏上的次序**：`hit` 一路不减。
     let mut 上一档 = SearchHit::TitleStart;
     for (name, hit) in &结果 {
-        assert!(*hit >= 上一档, "「{name}」排到了比它更好的一档前面：{结果:?}");
+        assert!(
+            *hit >= 上一档,
+            "「{name}」排到了比它更好的一档前面：{结果:?}"
+        );
         上一档 = *hit;
     }
 
@@ -394,7 +403,10 @@ fn 搜索与筛选叠加时结果既满足条件又按质量排() {
         .into_iter()
         .map(|row| row.name)
         .collect();
-    assert!(!筛出来的.contains(&"合金弹头 2".to_string()), "规则没起作用");
+    assert!(
+        !筛出来的.contains(&"合金弹头 2".to_string()),
+        "规则没起作用"
+    );
 
     // 再搜：结果**既满足条件**（是筛出来那批的子集）**又按质量排**。
     let 又搜 = WorkQuery {
@@ -495,14 +507,16 @@ fn 搜索着的时候年份那一列照样读得对() {
     let mut 读到过年份 = false;
     for row in &搜着 {
         assert_eq!(
-            row.year,
-            不搜[&row.name],
+            row.year, 不搜[&row.name],
             "「{}」搜着的时候年份读出来变了",
             row.name,
         );
         读到过年份 |= row.year.is_some();
     }
-    assert!(读到过年份, "这份 fixture 里该有年份可读，否则这条断言等于没测");
+    assert!(
+        读到过年份,
+        "这份 fixture 里该有年份可读，否则这条断言等于没测"
+    );
 }
 
 #[test]

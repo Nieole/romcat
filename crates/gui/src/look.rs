@@ -109,12 +109,10 @@ pub fn focus_ring(ctx: &egui::Context, visible: egui::Rect, response: &egui::Res
     if !response.has_focus() {
         return;
     }
-    let rect = response
-        .rect
-        .intersect(egui::Rect::from_x_y_ranges(
-            response.rect.x_range(),
-            visible.y_range(),
-        ));
+    let rect = response.rect.intersect(egui::Rect::from_x_y_ranges(
+        response.rect.x_range(),
+        visible.y_range(),
+    ));
     if !rect.is_positive() {
         return;
     }
@@ -142,7 +140,8 @@ mod tests {
             for at in 0..颜色.len() {
                 for other in (at + 1)..颜色.len() {
                     assert_ne!(
-                        颜色[at], 颜色[other],
+                        颜色[at],
+                        颜色[other],
                         "{} 与 {} 撞了同一个颜色",
                         Tier::ALL[at].label(),
                         Tier::ALL[other].label(),
@@ -160,10 +159,7 @@ mod tests {
         // 另外三档取的是 egui 自己的 `warn` / `error` / `weak`，这一票不动它们。
         for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
             let 对比度 = contrast(tier_color(Tier::High, &visuals), visuals.panel_fill);
-            assert!(
-                对比度 >= 4.5,
-                "高置信在这套主题下对比度只有 {对比度:.2}",
-            );
+            assert!(对比度 >= 4.5, "高置信在这套主题下对比度只有 {对比度:.2}",);
         }
     }
 

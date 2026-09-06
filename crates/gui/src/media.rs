@@ -24,9 +24,7 @@ use std::path::PathBuf;
 use romcat_core::catalog::Catalog;
 use romcat_core::catalog::detail::MediaItem;
 use romcat_core::scrape::pool::MediaPool;
-use romcat_core::scrape::preview::{
-    self, EDGE, Frame, Key, Loader, Missing, Preview, Thumbnail,
-};
+use romcat_core::scrape::preview::{self, EDGE, Frame, Key, Loader, Missing, Preview, Thumbnail};
 
 /// 一格**最少**多宽，点。照原型 `prototype.html` 里 `.thumb` 那条 `minmax(78px, 1fr)`
 /// 的**前半截**。

@@ -413,12 +413,7 @@ fn read_dump(
 /// 折出来的每一对都记进 `fold`——**那是这份索引与「当时那两张表」之间唯一留得下来的
 /// 凭据**，刮削那一侧靠它认出「补过别名了，这些条目该重采」。`platform_of` 折不动的
 /// 一个都不记（[`PlatformFold`] 的文档说了为什么够用、为什么有界）。
-fn entry_of(
-    row: &dump::Row,
-    manifest: &Manifest,
-    rules: &Rules,
-    fold: &mut PlatformFold,
-) -> Entry {
+fn entry_of(row: &dump::Row, manifest: &Manifest, rules: &Rules, fold: &mut PlatformFold) -> Entry {
     let raw = row.platforms();
     let mut platforms: Vec<String> = Vec::new();
     for text in &raw {
@@ -603,9 +598,14 @@ mod tests {
         let library = crate::fs::RealFs;
         {
             let mut store = Store::open(&path).expect("开得起来");
-            let (entries, records, fold) =
-                read_dump(&library, &cache.join(原件名), &manifest, &rules, &mut Context::unattended())
-                    .expect("原件读得动");
+            let (entries, records, fold) = read_dump(
+                &library,
+                &cache.join(原件名),
+                &manifest,
+                &rules,
+                &mut Context::unattended(),
+            )
+            .expect("原件读得动");
             assert_eq!(records, 1, "读到几条记录");
             assert_eq!(entries.len(), 1, "留下几条游戏条目");
             store
@@ -650,10 +650,7 @@ mod tests {
             Some("　　以细腻的画风…")
         );
         // **指纹记回去了**：下一趟 `zh sync` 才认得出「本机这份就是最新的」而整件跳过。
-        assert_eq!(
-            store.fingerprint().expect("读得到").as_deref(),
-            Some(指纹)
-        );
+        assert_eq!(store.fingerprint().expect("读得到").as_deref(), Some(指纹));
         assert_eq!(store.rebuilding(), None, "重建完就不再等着重建了");
     }
 
@@ -747,8 +744,8 @@ mod tests {
                 解了几遍 += 1;
             }
         };
-        let fetcher =
-            crate::dat::CannedFetcher::new().with(LATEST_URL, 一份_latest_json指着(新原件名, "def"));
+        let fetcher = crate::dat::CannedFetcher::new()
+            .with(LATEST_URL, 一份_latest_json指着(新原件名, "def"));
         let outcome = sync(
             &fetcher,
             &crate::fs::RealFs,
@@ -834,7 +831,10 @@ mod tests {
 
         assert_eq!(解了几遍, 1, "那份原件只解一遍");
         assert!(!outcome.skipped, "`--full` 本来就不走「指纹没变就跳过」");
-        assert!(!outcome.downloaded, "原件在手边就不再下一遍，`--full` 也不例外");
+        assert!(
+            !outcome.downloaded,
+            "原件在手边就不再下一遍，`--full` 也不例外"
+        );
         assert_eq!(store.load().expect("读得回来").len(), 1);
         assert!(store.rebuilding().is_none(), "不再等着重建了");
     }
@@ -936,7 +936,10 @@ mod tests {
             &mut Context::unattended(),
         )
         .expect("重建得了");
-        assert!(matches!(又一趟, Rebuilt::Done { games: 1, .. }), "{又一趟:?}");
+        assert!(
+            matches!(又一趟, Rebuilt::Done { games: 1, .. }),
+            "{又一趟:?}"
+        );
     }
 
     #[test]
@@ -965,8 +968,8 @@ mod tests {
 
         let cancel = CancelToken::new();
         cancel.cancel();
-        let fetcher =
-            crate::dat::CannedFetcher::new().with(LATEST_URL, 一份_latest_json指着(新原件名, "def"));
+        let fetcher = crate::dat::CannedFetcher::new()
+            .with(LATEST_URL, 一份_latest_json指着(新原件名, "def"));
         let error = sync(
             &fetcher,
             &crate::fs::RealFs,
@@ -1002,7 +1005,12 @@ mod tests {
         {
             let mut store = Store::open(&path).expect("开得起来");
             store
-                .replace(&[], "dump-2026-09-01.210329Z.zip", "sha256:abc", &PlatformFold::default())
+                .replace(
+                    &[],
+                    "dump-2026-09-01.210329Z.zip",
+                    "sha256:abc",
+                    &PlatformFold::default(),
+                )
                 .expect("写得进去");
         }
         let conn = rusqlite::Connection::open(&path).expect("开得起来");
@@ -1075,8 +1083,11 @@ mod tests {
         crate::testing::container::zip_container(&[
             crate::testing::container::ZipEntrySpec::stored(
                 SUBJECTS,
-                format!("{line}
-").into_bytes(),
+                format!(
+                    "{line}
+"
+                )
+                .into_bytes(),
             ),
         ])
     }
@@ -1106,10 +1117,12 @@ mod tests {
         let line = format!(
             r#"{{"id":4,"type":4,"name":"メタルスラッグ7","name_cn":"合金弹头7","infobox":"{{{{Infobox Game\r\n|平台= {平台}\r\n|游戏类型= ACT\r\n}}}}","platform":4001,"date":"2008-07-17","meta_tags":["ACT","游戏"]}}"#
         );
-        crate::testing::container::zip_container(&[crate::testing::container::ZipEntrySpec::stored(
-            SUBJECTS,
-            format!("{line}\n").into_bytes(),
-        )])
+        crate::testing::container::zip_container(&[
+            crate::testing::container::ZipEntrySpec::stored(
+                SUBJECTS,
+                format!("{line}\n").into_bytes(),
+            ),
+        ])
     }
 
     #[test]
@@ -1137,9 +1150,7 @@ mod tests {
 
         // 落进 `meta`，而且**索引读回来时带在身上**——刮削那一侧拿它当输入指纹。
         assert_eq!(
-            store
-                .meta(crate::zh::store::PLATFORM_FOLD)
-                .expect("读得到"),
+            store.meta(crate::zh::store::PLATFORM_FOLD).expect("读得到"),
             Some("共 1 对\nNDS=NDS".to_string())
         );
         assert_eq!(

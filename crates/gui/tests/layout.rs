@@ -47,8 +47,7 @@ fn 浏览(workspace: &std::path::Path) -> App {
 
 /// 待确认屏那一路的界面。
 fn 待确认(workspace: &std::path::Path) -> App {
-    let site =
-        demo::site(demo::queue(QUEUE_ROWS).expect("造得出合成数据")).expect("开得出现场");
+    let site = demo::site(demo::queue(QUEUE_ROWS).expect("造得出合成数据")).expect("开得出现场");
     let mut app = App::new(site, workspace.to_path_buf());
     app.show_view(View::Queue);
     app
@@ -228,10 +227,7 @@ fn 拖动后的位置存在工作目录里不存在中立库里() {
     );
     // **中立库那一侧一个字节都不多**：合成数据那份库整个在内存里，
     // 而工作目录里除了版式那一份，这一趟没建过别的东西。
-    assert!(
-        !写下的.contains("sqlite"),
-        "版式偏好不该跟中立库住在一起",
-    );
+    assert!(!写下的.contains("sqlite"), "版式偏好不该跟中立库住在一起",);
 }
 
 #[test]
@@ -281,7 +277,10 @@ fn 拖到极限时不塌陷也不把正中那块挤没() {
     // 那三块的内容还在：塌陷了的话这几句抬头一个都画不出来。
     let 屏上 = 画出来的字(&跑一帧(&ctx, &mut app, Vec::new()));
     for 抬头 in ["一按就有的档", "变体", "元数据"] {
-        assert!(屏上.contains(抬头), "往里拖到底之后「{抬头}」那一块没了：\n{屏上}");
+        assert!(
+            屏上.contains(抬头),
+            "往里拖到底之后「{抬头}」那一块没了：\n{屏上}"
+        );
     }
 
     for boundary in [layout::FILTER, layout::DETAIL, layout::EDIT] {
@@ -341,7 +340,10 @@ fn 窗口变小再变回来不会把拖出来的宽度削掉() {
     let ctx = headless::context();
     跑(&ctx, &mut app, 3);
     let 拖出来的 = 拖到(&ctx, &mut app, layout::DETAIL, 500.0);
-    assert!((拖出来的 - 500.0).abs() <= 4.0, "先拖到 500，实际 {拖出来的}");
+    assert!(
+        (拖出来的 - 500.0).abs() <= 4.0,
+        "先拖到 500，实际 {拖出来的}"
+    );
 
     // 把视口缩到最小窗口那么大，连画几帧：「浏览详情」会被上限夹到 500 以下。
     let 小 = |ctx: &egui::Context, app: &mut App| {
@@ -508,10 +510,7 @@ fn 拿到键盘焦点的控件画得不一样() {
     let 没焦点 = headless::frame(&ctx, headless::input(), |ui| {
         按钮 = Some(ui.button("按一下").id);
     });
-    assert!(
-        !描边(&没焦点).contains(&强调色),
-        "没焦点的时候不该画那一圈",
-    );
+    assert!(!描边(&没焦点).contains(&强调色), "没焦点的时候不该画那一圈",);
 
     let mut input = headless::input();
     input.events = vec![跳格键()];
@@ -551,13 +550,14 @@ fn 自己画底色的可点件也描得出焦点那一圈() {
         })
     };
     let 没焦点 = 画(&ctx, Vec::new());
-    assert!(
-        !描边(&没焦点).contains(&强调色),
-        "没焦点的时候不该画那一圈",
-    );
+    assert!(!描边(&没焦点).contains(&强调色), "没焦点的时候不该画那一圈",);
     画(&ctx, vec![跳格键()]);
     let 有焦点 = 画(&ctx, Vec::new());
-    assert_eq!(ctx.memory(egui::Memory::focused), Some(id), "Tab 该走得到它");
+    assert_eq!(
+        ctx.memory(egui::Memory::focused),
+        Some(id),
+        "Tab 该走得到它"
+    );
     assert!(
         描边(&有焦点).contains(&强调色),
         "拿到焦点的那一行上没描出那一圈",

@@ -69,13 +69,7 @@ pub enum Fanout {
 
 impl Fanout {
     /// 五档全在这儿。
-    pub const ALL: [Self; 5] = [
-        Self::None,
-        Self::One,
-        Self::Few,
-        Self::Several,
-        Self::Many,
-    ];
+    pub const ALL: [Self; 5] = [Self::None, Self::One, Self::Few, Self::Several, Self::Many];
 
     /// 有这么多条候选，落在哪一档。
     #[must_use]
@@ -193,9 +187,7 @@ impl Shape {
                     && lead.hashed_as == *convention
                     && Fanout::of(item.candidates.len()) == *fanout
             }
-            (Self::Bare { state, reason }, None) => {
-                item.state == *state && item.reason == *reason
-            }
+            (Self::Bare { state, reason }, None) => item.state == *state && item.reason == *reason,
             _ => false,
         }
     }
@@ -827,7 +819,11 @@ mod tests {
         items.push(条目("库/FC/别的.zip", vec![]));
         items.push(条目(
             "库/GBA/另一个源.zip",
-            vec![候选("中文离线源", "dump-2026-09-01", "正题模糊匹配上的中文名")],
+            vec![候选(
+                "中文离线源",
+                "dump-2026-09-01",
+                "正题模糊匹配上的中文名",
+            )],
         ));
         let batches = batches(&items);
         assert_eq!(
@@ -865,14 +861,21 @@ mod tests {
     #[test]
     fn 共同依据是原话不是概括() {
         let batches = batches(&一批(30));
-        let 依据 = batches[0].evidence.as_deref().expect("该数得出共同的那一段");
+        let 依据 = batches[0]
+            .evidence
+            .as_deref()
+            .expect("该数得出共同的那一段");
         assert_eq!(依据, "名字一字不差 + 平台对得上", "{依据}");
         assert!(
             batches[0].why().contains("MAME / nes.xml / 含头"),
             "{}",
             batches[0].why(),
         );
-        assert!(batches[0].why().contains("都只有一个候选"), "{}", batches[0].why());
+        assert!(
+            batches[0].why().contains("都只有一个候选"),
+            "{}",
+            batches[0].why()
+        );
     }
 
     #[test]
@@ -887,7 +890,11 @@ mod tests {
             !batches[0].passable(),
             "一条候选都没有却说得出「整批通过」，那是假的一键搞定",
         );
-        assert!(batches[0].why().contains("容器穿不透"), "{}", batches[0].why());
+        assert!(
+            batches[0].why().contains("容器穿不透"),
+            "{}",
+            batches[0].why()
+        );
     }
 
     #[test]
@@ -938,10 +945,8 @@ mod tests {
             上一组 = 这一组;
         }
         // 抽的不是连着的五条——条目按键排序，连着五条全在同一个目录里那不是样本。
-        let 目录: std::collections::BTreeSet<&str> = 上一组
-            .iter()
-            .map(|one| one.directory.as_str())
-            .collect();
+        let 目录: std::collections::BTreeSet<&str> =
+            上一组.iter().map(|one| one.directory.as_str()).collect();
         assert!(目录.len() > 1, "五条样本全落在同一个目录里");
     }
 
@@ -1046,9 +1051,7 @@ mod tests {
         assert!(说了什么("一条候选都没有").contains("少了识别结论"));
         assert!(说了什么("一条候选都没有 / 说不清").contains("认不出结论"));
         // 「没有候选」那一档只属于另一支：放它过去等于选中零条。
-        assert!(
-            说了什么("MAME / nes.xml / 中置信 / 含头 / 没有候选").contains("一条候选都没有"),
-        );
+        assert!(说了什么("MAME / nes.xml / 中置信 / 含头 / 没有候选").contains("一条候选都没有"),);
     }
 
     #[test]

@@ -21,8 +21,8 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use romcat_core::catalog::Catalog;
 use romcat_core::capability::RejectReason;
+use romcat_core::catalog::Catalog;
 use romcat_core::catalog::browse::Scope;
 use romcat_core::fs::RealFs;
 use romcat_core::scan::{self, Jobs, ScanOptions};
@@ -107,8 +107,7 @@ impl 现场 {
             for (name, root) in roots {
                 let mut options = ScanOptions::named(root, name);
                 options.jobs = Jobs::Fixed(2);
-                scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new())
-                    .expect("扫得动");
+                scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
             }
         }
         let site = Site::open_file(工作区.path(), &库文件, None).expect("开得出现场");
@@ -387,9 +386,7 @@ fn 在浏览屏调完更新到子库规则原样带回而且选出来的与屏�
     场.改选择();
     {
         let (browse, _) = 场.app.browse_and_site();
-        browse.set_filter_rule(Some(
-            Rule::parse("平台=SFC 或 平台=GBA").expect("读得懂"),
-        ));
+        browse.set_filter_rule(Some(Rule::parse("平台=SFC 或 平台=GBA").expect("读得懂")));
     }
     let 屏上 = 场.屏上筛出来的();
     assert_eq!(屏上.len(), 3, "这份筛选该选中全部三个变体");
@@ -404,7 +401,11 @@ fn 在浏览屏调完更新到子库规则原样带回而且选出来的与屏�
         .map(|stored| stored.text.clone())
         .collect();
     assert_eq!(规则, vec!["平台=SFC 或 平台=GBA".to_string()]);
-    assert_eq!(场.子库选出来的("掌机"), 屏上, "带回去之后选出来的与屏上不是同一批");
+    assert_eq!(
+        场.子库选出来的("掌机"),
+        屏上,
+        "带回去之后选出来的与屏上不是同一批"
+    );
     // 回到子库屏时那份差量预览当场作废：选择集变了。
     assert!(场.app.sublibrary().prepared().is_none());
 }
@@ -441,8 +442,14 @@ fn 例外在浏览屏上加减子库屏如实显示有几条() {
     );
     // 例外真的起了作用：规则说要的那个被排除了，规则没说的那个被含了进来。
     let 选中 = 场.子库选出来的("掌机");
-    assert!(!选中.contains("库/SFC/幻想传说 汉化版.zip"), "排除例外没起作用");
-    assert!(选中.contains("库/GBA/口袋妖怪 绿宝石.zip"), "收入例外没起作用");
+    assert!(
+        !选中.contains("库/SFC/幻想传说 汉化版.zip"),
+        "排除例外没起作用"
+    );
+    assert!(
+        选中.contains("库/GBA/口袋妖怪 绿宝石.zip"),
+        "收入例外没起作用"
+    );
 
     // 撤掉之后重新由规则说了算。
     场.改选择();
@@ -452,7 +459,10 @@ fn 例外在浏览屏上加减子库屏如实显示有几条() {
     }
     场.更新到子库();
     assert_eq!(场.app.sublibrary().exceptions().len(), 1);
-    assert!(场.子库选出来的("掌机").contains("库/SFC/幻想传说 汉化版.zip"));
+    assert!(
+        场.子库选出来的("掌机")
+            .contains("库/SFC/幻想传说 汉化版.zip")
+    );
 }
 
 #[test]
@@ -556,7 +566,10 @@ fn 读不懂的规则在改选择那条横幅里扔得掉而且别的一条都�
     场.改选择();
     let 横幅 = 画两帧(&ctx, &mut 场);
     assert!(横幅.contains(坏规则原文), "横幅里没摆出那条原文：{横幅}");
-    assert!(横幅.contains("扔掉这条"), "横幅里没有扔掉它的那颗按钮：{横幅}");
+    assert!(
+        横幅.contains("扔掉这条"),
+        "横幅里没有扔掉它的那颗按钮：{横幅}"
+    );
 
     // 按下去那一下。
     {
@@ -582,17 +595,28 @@ fn 读不懂的规则在改选择那条横幅里扔得掉而且别的一条都�
         .iter()
         .map(|stored| stored.text.clone())
         .collect();
-    assert_eq!(规则, vec!["平台=SFC".to_string()], "读得懂的那条被顺手带走了");
+    assert_eq!(
+        规则,
+        vec!["平台=SFC".to_string()],
+        "读得懂的那条被顺手带走了"
+    );
     assert!(场.app.sublibrary().broken().is_empty());
     let 例外 = 场.app.sublibrary().exceptions();
-    assert_eq!(例外.len(), 1, "**例外是永久记住的**（ADR-0016），不许被顺手清掉");
+    assert_eq!(
+        例外.len(),
+        1,
+        "**例外是永久记住的**（ADR-0016），不许被顺手清掉"
+    );
     assert_eq!(例外[0].note.as_deref(), Some("小时候玩过"));
     assert_eq!(例外[0].kind, Exception::Include);
 
     // 扔掉它**不改变这个子库选出什么**——它本来就没参与求值。
     let 选中 = 场.子库选出来的("掌机");
     assert_eq!(选中.len(), 3, "两个 SFC 变体加那条收入的例外");
-    assert!(选中.contains("库/GBA/口袋妖怪 绿宝石.zip"), "收入例外没起作用");
+    assert!(
+        选中.contains("库/GBA/口袋妖怪 绿宝石.zip"),
+        "收入例外没起作用"
+    );
 }
 
 #[test]
@@ -644,7 +668,10 @@ fn 差量预览摆得出新增与净变化而且步骤全部展开得了() {
     );
 
     // **超长时能全部展开**：默认只摆头几条，按一下摊开全部；重排一次又收回去。
-    assert!(!场.app.sublibrary().expanded(), "一进来就摊开会把同步按钮挤没了");
+    assert!(
+        !场.app.sublibrary().expanded(),
+        "一进来就摊开会把同步按钮挤没了"
+    );
     场.app.sublibrary_and_site().0.expand(true);
     assert!(场.app.sublibrary().expanded());
     场.排预览();
@@ -706,10 +733,7 @@ fn 两个根撞在卡上同一条路径时差量预览当场报出来() {
     // **撞上的一个都不放行**（`RejectReason::Collision`），而这一屏得把它说出口
     // ——不说的话，人会对着「明明选中了却没传过去」发呆。
     let 另一块盘 = temp_dir("gui-sub-lib2");
-    写(
-        &另一块盘.path().join("SFC/幻想传说 汉化版.zip"),
-        &zip(9999),
-    );
+    写(&另一块盘.path().join("SFC/幻想传说 汉化版.zip"), &zip(9999));
     let mut 场 = 现场::摆好带(Some(&另一块盘));
     场.建子库("掌机", "");
     场.加规则("掌机", "平台=SFC");
@@ -722,7 +746,11 @@ fn 两个根撞在卡上同一条路径时差量预览当场报出来() {
         .filter(|row| row.reason == RejectReason::Collision)
         .collect();
     assert_eq!(撞上的.len(), 2, "两条都该被挡下：{:?}", plan.rejected);
-    assert!(撞上的.iter().all(|row| row.path == "SFC/幻想传说 汉化版.zip"));
+    assert!(
+        撞上的
+            .iter()
+            .all(|row| row.path == "SFC/幻想传说 汉化版.zip")
+    );
     // 那句话里印的是**完整的键**：不带根名的话两行长得一模一样，
     // 人看不出撞的是哪两块盘。
     assert!(
@@ -1066,7 +1094,7 @@ fn 目录树(dir: &Path, 跳过: &[&str]) -> Vec<(String, Vec<u8>, Option<std::t
     fn 收(
         根: &Path,
         at: &Path,
-         跳过: &[&str],
+        跳过: &[&str],
         out: &mut Vec<(String, Vec<u8>, Option<std::time::SystemTime>)>,
     ) {
         let Ok(entries) = fs::read_dir(at) else {
@@ -1188,10 +1216,7 @@ fn 同步跑着的时候别的屏照常画得出来() {
     for _ in 0..600 {
         headless::frame(&ctx, headless::input(), |ui| 场.app.ui(ui));
         画了 += 1;
-        assert!(
-            场.app.window().retained() > 0,
-            "同步跑着的时候浏览屏空了",
-        );
+        assert!(场.app.window().retained() > 0, "同步跑着的时候浏览屏空了",);
         if 场.app.sublibrary().outcome().is_some() {
             break;
         }
@@ -1289,7 +1314,11 @@ fn 排着队的那一趟同步撤得掉而且撤完目标与工作目录一处�
     let screen = 场.app.sublibrary();
     assert!(screen.syncing().is_none(), "撤掉了却还记着一趟在同步");
     assert!(screen.outcome().is_none(), "撤掉了却记了一趟同步的账");
-    assert!(screen.error().is_none(), "撤掉不是出错：{:?}", screen.error());
+    assert!(
+        screen.error().is_none(),
+        "撤掉不是出错：{:?}",
+        screen.error()
+    );
     let notice = screen.notice().expect("该说一句它被撤掉了");
     assert!(notice.contains("撤掉"), "回执没说清是被撤掉了：{notice}");
     assert_eq!(
@@ -1307,7 +1336,10 @@ fn 排着队的那一趟同步撤得掉而且撤完目标与工作目录一处�
     );
 
     // **那份差量还摆着，再按一次照样传得出去。**
-    assert!(场.app.sublibrary().prepared().is_some(), "撤掉同步不该连差量一起丢");
+    assert!(
+        场.app.sublibrary().prepared().is_some(),
+        "撤掉同步不该连差量一起丢"
+    );
     场.app.tasks_mut().stop(占位);
     场.等任务跑完();
     场.同步到底();
@@ -1393,7 +1425,11 @@ fn 算一遍容量按停之后那几个数没长出来而且一个字节都没�
     场.等任务跑完();
     场.求值();
     assert_eq!(
-        场.app.sublibrary().evaluated("掌机").expect("算得出来").picked,
+        场.app
+            .sublibrary()
+            .evaluated("掌机")
+            .expect("算得出来")
+            .picked,
         2,
     );
 }
@@ -1464,7 +1500,10 @@ fn 删掉一个子库之后台上那趟还没认领的容量不认了() {
         let (screen, site) = 场.app.sublibrary_and_site();
         screen.remove(site);
     }
-    assert!(场.app.sublibrary().evaluating().is_none(), "删掉之后那趟还认着");
+    assert!(
+        场.app.sublibrary().evaluating().is_none(),
+        "删掉之后那趟还认着"
+    );
 
     场.app.tasks_mut().stop(占位);
     场.等任务跑完();

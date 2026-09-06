@@ -588,7 +588,8 @@ impl ScrapeReport {
                         "**这不等于「离线档补不上」**：{}撞上一条中文条目就有（上一节）。\n\
                          空着说的是这些锚点名下的变体一个都没撞上，或者索引还没取\
                          ——那就先跑一次 `romcat zh sync`。",
-                        可补.iter()
+                        可补
+                            .iter()
                             .map(|label| label.as_str())
                             .collect::<Vec<_>>()
                             .join("、"),

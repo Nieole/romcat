@@ -263,7 +263,10 @@ mod tests {
         };
         let mut agg = Aggregate::default();
         for copy in 0..25 {
-            agg.record_file(&观察(&format!("库/FC/备份{copy}/魂斗罗.zip"), 4096), &limits);
+            agg.record_file(
+                &观察(&format!("库/FC/备份{copy}/魂斗罗.zip"), 4096),
+                &limits,
+            );
         }
         let details = 明细(&agg);
         assert_eq!(details.groups_with_missing_paths, 0);
@@ -287,7 +290,10 @@ mod tests {
         };
         let mut agg = Aggregate::default();
         for copy in 0..25 {
-            agg.record_file(&观察(&format!("库/FC/备份{copy}/魂斗罗.zip"), 4096), &limits);
+            agg.record_file(
+                &观察(&format!("库/FC/备份{copy}/魂斗罗.zip"), 4096),
+                &limits,
+            );
         }
         let report = 报告(&agg, false, false);
         let details = DuplicateDetails::build(&agg, &report);
@@ -309,7 +315,10 @@ mod tests {
         };
         let mut agg = Aggregate::default();
         for copy in 0..10 {
-            agg.record_file(&观察(&format!("库/FC/备份{copy}/魂斗罗.zip"), 4096), &limits);
+            agg.record_file(
+                &观察(&format!("库/FC/备份{copy}/魂斗罗.zip"), 4096),
+                &limits,
+            );
         }
         let details = 明细(&agg);
         assert_eq!(details.groups_with_missing_paths, 1);

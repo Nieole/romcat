@@ -239,7 +239,10 @@ fn favorite_any(clause: &Clause) -> Predicate {
                           WHERE cv.variant_key = variant.key AND c.name = ?)";
     match (hit("是"), hit("否")) {
         (true, true) => ("1".to_string(), Vec::new()),
-        (true, false) => (joined.to_string(), vec![Box::new(FAVORITE.to_string()) as _]),
+        (true, false) => (
+            joined.to_string(),
+            vec![Box::new(FAVORITE.to_string()) as _],
+        ),
         (false, true) => (
             format!("(NOT {joined})"),
             vec![Box::new(FAVORITE.to_string()) as _],

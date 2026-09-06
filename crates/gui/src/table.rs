@@ -434,12 +434,9 @@ impl Table<'_> {
                                 // 截掉的是名字，而名字还挂在悬停里。
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     ui.weak(hit.label());
-                                    ui.with_layout(
-                                        Layout::left_to_right(Align::Center),
-                                        |ui| {
-                                            ui.label(&work.name).on_hover_text(&work.name);
-                                        },
-                                    );
+                                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                        ui.label(&work.name).on_hover_text(&work.name);
+                                    });
                                 });
                             }
                         }

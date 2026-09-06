@@ -352,7 +352,11 @@ impl Screen {
                 // **头一批默认是展开的**（设计稿上就是这样）：那一批盖住的最多，
                 // 而屏上常驻的三样里第三样——随机样本——只在展开的那张卡片上。
                 // 一张都不展开的话，人打开这一屏一条样本都看不见。
-                self.open = self.queue.batches().first().map(|batch| batch.shape.clone());
+                self.open = self
+                    .queue
+                    .batches()
+                    .first()
+                    .map(|batch| batch.shape.clone());
                 self.drill = None;
                 self.seed = 0;
                 self.refresh_opened();
@@ -456,7 +460,11 @@ impl Screen {
         self.resolve_cursor();
         // 展开的那一批可能已经被裁光了——卡片没了，展开状态跟着收起来。
         if let Some(shape) = &self.open
-            && !self.queue.batches().iter().any(|batch| batch.shape == *shape)
+            && !self
+                .queue
+                .batches()
+                .iter()
+                .any(|batch| batch.shape == *shape)
         {
             self.open = None;
         }
@@ -554,22 +562,20 @@ impl Screen {
         ui.label(头一句);
         ui.separator();
         let mut clicked: Option<Shape> = None;
-        egui::ScrollArea::vertical()
-            .id_salt("分批")
-            .show(ui, |ui| {
-                for batch in &batches {
-                    if self.card(ui, site, batch) {
-                        clicked = Some(batch.shape.clone());
-                    }
+        egui::ScrollArea::vertical().id_salt("分批").show(ui, |ui| {
+            for batch in &batches {
+                if self.card(ui, site, batch) {
+                    clicked = Some(batch.shape.clone());
                 }
-                if 没列的.rest_batches > 0 {
-                    ui.weak(format!(
-                        "……另有 {} 批没列（共 {} 条）。先把上面这几批过完——它们盖住的最多。",
-                        thousands_len(没列的.rest_batches),
-                        thousands(没列的.rest),
-                    ));
-                }
-            });
+            }
+            if 没列的.rest_batches > 0 {
+                ui.weak(format!(
+                    "……另有 {} 批没列（共 {} 条）。先把上面这几批过完——它们盖住的最多。",
+                    thousands_len(没列的.rest_batches),
+                    thousands(没列的.rest),
+                ));
+            }
+        });
         if let Some(shape) = clicked {
             self.open_batch(&shape);
         }
@@ -900,7 +906,9 @@ impl Screen {
                 ui.colored_label(ui.visuals().warn_fg_color, undone_text(undone));
                 redo = ui
                     .button(format!("放回第 {batch} 批"))
-                    .on_hover_text("把这一批原样放回去：当初落下的每一条都记在批里，一个字都不必重打。")
+                    .on_hover_text(
+                        "把这一批原样放回去：当初落下的每一条都记在批里，一个字都不必重打。",
+                    )
                     .clicked();
             });
         }
@@ -1305,10 +1313,13 @@ impl Screen {
         }
         if pass {
             if candidates > 0 {
-                self.decide_here(site, &Draft {
-                    pick: Some(self.nth + 1),
-                    ..Draft::default()
-                });
+                self.decide_here(
+                    site,
+                    &Draft {
+                        pick: Some(self.nth + 1),
+                        ..Draft::default()
+                    },
+                );
             } else {
                 // **不许什么都不做还不吭声**：队列里一条候选都没有的是常态，
                 // 那时 `Y` 无从采用——说清楚该走哪条路，而不是让人以为键盘坏了。
@@ -1320,10 +1331,13 @@ impl Screen {
             }
         }
         if reject {
-            self.decide_here(site, &Draft {
-                unknown: true,
-                ..Draft::default()
-            });
+            self.decide_here(
+                site,
+                &Draft {
+                    unknown: true,
+                    ..Draft::default()
+                },
+            );
         }
         if undo {
             self.undo_last(site);
@@ -1834,7 +1848,8 @@ fn judged_text(judged: &MatchJudged) -> String {
             thousands(账.cleared),
             match (&账.work, 账.cleared_work) {
                 // **动过才说动过**：作品那一层一个字没动时，这半句一个字都不该印。
-                (Some(work), n) if n > 0 => format!("（其中作品「{work}」那一层 {} 条）", thousands(n)),
+                (Some(work), n) if n > 0 =>
+                    format!("（其中作品「{work}」那一层 {} 条）", thousands(n)),
                 _ => String::new(),
             },
         );

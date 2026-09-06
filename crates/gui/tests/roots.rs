@@ -116,7 +116,10 @@ fn 两个根扫进同一份中立库而且互不覆盖() {
         );
     }
     let rows = 现场.app.roots().roots();
-    assert!(rows.iter().all(|row| row.stats.variants > 0), "两个根都扫出了变体");
+    assert!(
+        rows.iter().all(|row| row.stats.variants > 0),
+        "两个根都扫出了变体"
+    );
     assert!(
         rows.iter().all(|row| row.root.scan.is_some()),
         "两个根各自记下了上次扫描的结果"
@@ -214,7 +217,10 @@ fn 盘没挂上时这个根的上次结果仍然看得见() {
     let row = &现场.app.roots().roots()[0];
     assert!(!row.mounted, "那块盘确实不在位了");
     assert_eq!(row.stats, 扫出来的, "上次扫出来的账照样在——它住在中立库里");
-    assert!(row.root.scan.is_some(), "上次什么时候扫的、扫了多久，都还看得见");
+    assert!(
+        row.root.scan.is_some(),
+        "上次什么时候扫的、扫了多久，都还看得见"
+    );
 
     // 不在位就别去读盘，直说。
     {
@@ -234,7 +240,10 @@ fn 加根与扫描一个字节都不写主库_也不_touch_时间戳() {
     let mut 现场 = 现场::摆好();
     现场.加根(库.path(), "主库");
     现场.扫("主库");
-    assert!(现场.app.roots().roots()[0].stats.variants > 0, "确实扫出了东西");
+    assert!(
+        现场.app.roots().roots()[0].stats.variants > 0,
+        "确实扫出了东西"
+    );
 
     let 之后 = 目录快照(库.path());
     assert_eq!(之前, 之后, "主库里一个字节、一个时间戳都不许变");
@@ -284,7 +293,11 @@ fn 还没取回的数据源被明确标出来() {
             "{} 该明说还没取回",
             status.name
         );
-        assert!(!status.cost.is_empty(), "{} 得说清没取回的代价", status.name);
+        assert!(
+            !status.cost.is_empty(),
+            "{} 得说清没取回的代价",
+            status.name
+        );
     }
 }
 

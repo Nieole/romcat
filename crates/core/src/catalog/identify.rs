@@ -1685,11 +1685,7 @@ impl Catalog {
     ///
     /// # Errors
     /// 写库失败时返回错误。
-    pub fn stash_conclusions(
-        &mut self,
-        batch: i64,
-        keys: &[&str],
-    ) -> Result<u64, CatalogError> {
+    pub fn stash_conclusions(&mut self, batch: i64, keys: &[&str]) -> Result<u64, CatalogError> {
         let path = self.path.clone();
         let to_err = |source| CatalogError::Sqlite {
             path: path.clone(),
@@ -1727,8 +1723,8 @@ impl Catalog {
                 )
                 .map_err(to_err)?;
             for key in keys {
-                stashed += u64::try_from(one.execute(params![batch, key]).map_err(to_err)?)
-                    .unwrap_or(0);
+                stashed +=
+                    u64::try_from(one.execute(params![batch, key]).map_err(to_err)?).unwrap_or(0);
                 drop_old.execute(params![batch, key]).map_err(to_err)?;
                 candidates.execute(params![batch, key]).map_err(to_err)?;
             }
@@ -1767,11 +1763,7 @@ impl Catalog {
     ///
     /// # Errors
     /// 写库失败时返回错误。
-    pub fn restore_conclusions(
-        &mut self,
-        batch: i64,
-        keys: &[&str],
-    ) -> Result<u64, CatalogError> {
+    pub fn restore_conclusions(&mut self, batch: i64, keys: &[&str]) -> Result<u64, CatalogError> {
         let path = self.path.clone();
         let to_err = |source| CatalogError::Sqlite {
             path: path.clone(),
@@ -1857,7 +1849,9 @@ impl Catalog {
                     .execute(params![batch, key])
                     .map_err(to_err)?;
                 relink.execute(params![batch, key]).map_err(to_err)?;
-                put_candidates.execute(params![batch, key]).map_err(to_err)?;
+                put_candidates
+                    .execute(params![batch, key])
+                    .map_err(to_err)?;
             }
             for id in &releases {
                 tx.execute(

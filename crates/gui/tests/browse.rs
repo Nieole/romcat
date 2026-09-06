@@ -13,8 +13,8 @@
 //! - **首选变体与标题来源解耦**（ADR-0012）：首选换成汉化版，中文标题的来源一个字不变。
 
 use egui::widgets::text_edit::TextEditState;
-use romcat_core::catalog::browse::{PlatformFilter, StateFilter, WorkAnchor, WorkOrder, WorkQuery};
 use romcat_core::catalog::State;
+use romcat_core::catalog::browse::{PlatformFilter, StateFilter, WorkAnchor, WorkOrder, WorkQuery};
 use romcat_core::dat::chinese::ChineseMark;
 use romcat_core::scrape::priority::VERDICT;
 use romcat_core::scrape::{AnchorKind, Field, Gather, MediaKind};
@@ -23,7 +23,7 @@ use romcat_core::title::{Language, TitleKind};
 use romcat_gui::app::{App, View};
 use romcat_gui::bench::{self, Sweep};
 use romcat_gui::table::{ROW_HEIGHT, SPAN};
-use romcat_gui::{demo, headless, browse};
+use romcat_gui::{browse, demo, headless};
 
 mod shared;
 use shared::画出来的字;
@@ -166,7 +166,11 @@ fn 五列都排得了序而且换排序真的换了次序() {
             query.descending = true;
         }
         跑(&ctx, &mut app, 1);
-        assert!(app.window().total() > 0, "按{}排完一行都不剩", order.label());
+        assert!(
+            app.window().total() > 0,
+            "按{}排完一行都不剩",
+            order.label()
+        );
         见过.push(头一行(&mut app));
     }
     assert!(
@@ -439,7 +443,11 @@ fn 换筛选之后选中的那个变体跟着归位() {
         let (browse, site) = app.browse_and_site();
         browse.open_work(&site.catalog, &一行);
     }
-    let 原先 = app.browse().variant_key().expect("点开就该选中一个").to_string();
+    let 原先 = app
+        .browse()
+        .variant_key()
+        .expect("点开就该选中一个")
+        .to_string();
     let 那个平台 = app
         .browse()
         .detail()
@@ -495,10 +503,7 @@ fn 详情面板列得出全部变体每个带置信度与依据() {
         assert!(!variant.row.key.is_empty());
         for candidate in &variant.candidates {
             有候选 += 1;
-            assert!(
-                !candidate.evidence.is_empty(),
-                "候选没有依据，事后没法复核",
-            );
+            assert!(!candidate.evidence.is_empty(), "候选没有依据，事后没法复核",);
             // 行上那一档是**最高**的那一档（`Confidence` 的 `Ord` 里 `High` 最小），
             // 所以它只该比每一条候选更靠前——一个变体撞上一条高一条低是真库的常态。
             assert!(
@@ -907,7 +912,9 @@ fn 元数据栏滚一趟(ctx: &egui::Context, app: &mut App) -> String {
                 modifiers: egui::Modifiers::NONE,
             });
         }
-        out.push_str(&画出来的字(&headless::frame(ctx, input, |ui| app.ui(ui))));
+        out.push_str(&画出来的字(
+            &headless::frame(ctx, input, |ui| app.ui(ui)),
+        ));
     }
     out
 }
@@ -918,12 +925,15 @@ fn 元数据栏滚一趟(ctx: &egui::Context, app: &mut App) -> String {
 /// 「屏上那一行写的是什么」问得出来。**挑得准靠的是开头那几个字**（「字段 · 哪一层」）
 /// ——同一趟里还画着挂在悬停里的那份原文，它没有这个开头。
 fn 屏上那一行<'a>(屏上: &'a str, 开头: &str) -> &'a str {
-    屏上.lines().find(|line| line.starts_with(开头)).unwrap_or_else(|| {
-        panic!(
-            "滚下来画出的 {} 段字里没有以「{开头}」开头的那一段",
-            屏上.lines().count(),
-        )
-    })
+    屏上
+        .lines()
+        .find(|line| line.starts_with(开头))
+        .unwrap_or_else(|| {
+            panic!(
+                "滚下来画出的 {} 段字里没有以「{开头}」开头的那一段",
+                屏上.lines().count(),
+            )
+        })
 }
 
 #[test]
@@ -995,10 +1005,7 @@ fn 一条顶到闸上的简介收成一行画得下的那一截() {
         折平的.ends_with("第二段：外星人赢了。"),
         "换行那条没折平：屏上那一行断在换行处，后半段没跟上来｜{折平的}",
     );
-    assert!(
-        折平的.starts_with('\u{3000}'),
-        "折平不等于掐两头：{折平的}",
-    );
+    assert!(折平的.starts_with('\u{3000}'), "折平不等于掐两头：{折平的}",);
 
     // 原样画得下的**一个字都不动**——这一条只有从函数那一侧看得见：屏上画的是同一串字，
     // 中间换没换过一份字符串出去，看画出来的那一帧看不出来。
@@ -1141,7 +1148,10 @@ fn 筛出来的条数与真正命中的条数一致() {
 
     let 行数 = app.window().total();
     let 变体数 = app.browse().filtered_total().expect("数得出来");
-    assert!(行数 > 0 && 变体数 >= 行数, "{变体数} 个变体撑不起 {行数} 行");
+    assert!(
+        行数 > 0 && 变体数 >= 行数,
+        "{变体数} 个变体撑不起 {行数} 行"
+    );
 
     // 屏上写着几个变体，按下批量操作就该动几个——**三处同一个数**。
     let (库里, 屏上) = {
@@ -1190,7 +1200,10 @@ fn 存成子库把当前条件原样变成规则() {
             .into_iter()
             .collect()
     };
-    assert!(!屏上.is_empty(), "这份筛选该选得中东西，否则这条断言等于没测");
+    assert!(
+        !屏上.is_empty(),
+        "这份筛选该选得中东西，否则这条断言等于没测"
+    );
 
     {
         let (browse, site) = app.browse_and_site();
@@ -1216,7 +1229,10 @@ fn 存成子库把当前条件原样变成规则() {
                 .collect();
         (loaded.selection.rules[0].text.clone(), picked)
     };
-    assert_eq!(子库选出来的, 屏上, "存成子库之后选出来的与屏上筛出来的不是同一批");
+    assert_eq!(
+        子库选出来的, 屏上,
+        "存成子库之后选出来的与屏上筛出来的不是同一批"
+    );
     // 那条规则就是屏上那几条，一条不多一条不少。
     assert_eq!(
         库里那条,
@@ -1255,7 +1271,9 @@ fn 写不成规则的筛选条件当场挡住() {
         let (browse, site) = app.browse_and_site();
         browse.save_as_sublibrary(site);
         assert!(
-            browse.error().is_some_and(|error| error.contains("识别状态")),
+            browse
+                .error()
+                .is_some_and(|error| error.contains("识别状态")),
             "少写一条就存下去了：那样子库选出来的会比屏上多",
         );
         assert!(
@@ -1481,7 +1499,11 @@ fn 刮削面板四个旋钮的默认位置() {
     assert!(!panel.online(), "联网源默认不该勾上");
     // 字段那一栏答的是「我要什么」，几样本来就是一次撞完一起带回来的，默认全勾。
     for field in romcat_gui::scrape::KNOBS {
-        assert!(panel.fields().contains(&field), "{} 默认该勾着", field.label());
+        assert!(
+            panel.fields().contains(&field),
+            "{} 默认该勾着",
+            field.label()
+        );
     }
     // 媒体默认不收：真库那块盘 10 TB，收媒体要回盘把图读一遍。
     assert!(!panel.media(), "媒体默认不该勾上");
@@ -1492,7 +1514,10 @@ fn 刮削面板四个旋钮的默认位置() {
     let (browse, site) = app.browse_and_site();
     browse.scrape_mut().toggle_field(Field::Description);
     let options = browse.scrape().options(&site.catalog).expect("折得出选项");
-    assert!(!options.fields.contains(&Field::Description), "取消勾选没生效");
+    assert!(
+        !options.fields.contains(&Field::Description),
+        "取消勾选没生效"
+    );
     assert!(options.fields.contains(&Field::Genre), "别的字段不该跟着掉");
     // **标题与汉化组不在旋钮上，因此永远采**：中文名与别名落在标题集合里，
     // 而这个库最要紧的产出就是它们。
@@ -1589,11 +1614,17 @@ fn 勾联网源先弹配额提醒_说清赌的是账号与地址() {
     }
 
     panel.decline_online();
-    assert!(!panel.online() && !panel.quota_prompt(), "「算了」该把这一下整个撤掉");
+    assert!(
+        !panel.online() && !panel.quota_prompt(),
+        "「算了」该把这一下整个撤掉"
+    );
 
     panel.toggle_online();
     panel.confirm_online();
-    assert!(panel.online() && !panel.quota_prompt(), "点过头之后才算勾上");
+    assert!(
+        panel.online() && !panel.quota_prompt(),
+        "点过头之后才算勾上"
+    );
 }
 
 #[test]

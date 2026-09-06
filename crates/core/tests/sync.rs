@@ -13,16 +13,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use romcat_core::capability::Profile;
-use romcat_core::task::Handle;
+use romcat_core::capability::{Filesystem, RejectReason};
 use romcat_core::catalog::{Catalog, roots};
 use romcat_core::fs::RealFs;
 use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::sublibrary::{self, Rule, Selection, Sublibrary};
-use romcat_core::capability::{Filesystem, RejectReason};
 use romcat_core::sync::{
     self, Act, Desired, DesiredFile, FileKind, Manifest, ManifestFile, Options, Rejected, Stamp,
     SurpriseKind, TargetFile, TargetState,
 };
+use romcat_core::task::Handle;
 use romcat_core::testing::sample::zip;
 use romcat_core::testing::{TempDir, temp_dir};
 
@@ -461,9 +461,9 @@ fn 手动拷进目标的存档在整条链路上绝对安全() {
     // **报告，而不是当作删掉了**。
     assert_eq!(plan.deletes.files, 0);
     assert!(
-        plan.surprises
-            .iter()
-            .any(|s| s.path == "库/FC/魂斗罗.zip" && s.kind == SurpriseKind::Gone && !s.still_wanted)
+        plan.surprises.iter().any(|s| s.path == "库/FC/魂斗罗.zip"
+            && s.kind == SurpriseKind::Gone
+            && !s.still_wanted)
     );
     let text = plan.render_text();
     assert!(text.contains("清单之外"), "{text}");
@@ -569,7 +569,10 @@ fn 覆盖一个不存在的根名要报错并列出库里有哪些根() {
         话.contains("主库") && 话.contains("元数据库"),
         "库里有哪些根要列出来：{话}"
     );
-    assert!(话.contains("`scan`"), "加一个根是 scan 的活，得说出来：{话}");
+    assert!(
+        话.contains("`scan`"),
+        "加一个根是 scan 的活，得说出来：{话}"
+    );
 }
 
 #[test]
@@ -674,8 +677,12 @@ fn 两个根里同一条相对路径落在卡上同一个文件上_排计划时�
     // **那句话里印的是完整的键**（带根名）：不带的话两行长得一模一样，
     // 人看不出撞的是哪两块盘（挂单 Q57）。
     assert!(
-        撞上的.iter().any(|row| row.detail.contains("甲/FC/魂斗罗.zip"))
-            && 撞上的.iter().any(|row| row.detail.contains("乙/FC/魂斗罗.zip")),
+        撞上的
+            .iter()
+            .any(|row| row.detail.contains("甲/FC/魂斗罗.zip"))
+            && 撞上的
+                .iter()
+                .any(|row| row.detail.contains("乙/FC/魂斗罗.zip")),
         "{:?}",
         撞上的,
     );

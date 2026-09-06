@@ -12,9 +12,7 @@
 
 use std::collections::BTreeSet;
 
-use romcat_core::catalog::browse::{
-    Scope, WORK_FIELDS, WorkAnchor, WorkOrder, WorkQuery, WorkRow,
-};
+use romcat_core::catalog::browse::{Scope, WORK_FIELDS, WorkAnchor, WorkOrder, WorkQuery, WorkRow};
 use romcat_core::catalog::identify::{Candidate, Identification, Provenance};
 use romcat_core::catalog::{Catalog, Confidence, State};
 use romcat_core::dat::Convention;
@@ -256,7 +254,11 @@ fn 每行看得见平台变体数容量年份元数据齐不齐与最高置信�
         .expect("有缺的那一行");
     assert!(!缺.missing.contains(&Field::Year), "年份明明刮到了");
     assert_eq!(缺.missing.len(), WORK_FIELDS.len() - 1);
-    assert!(缺.missing_label().starts_with('缺'), "{}", 缺.missing_label());
+    assert!(
+        缺.missing_label().starts_with('缺'),
+        "{}",
+        缺.missing_label()
+    );
 
     // **还没认出作品**的那些：一条候选都没有，那不是「撞过没撞上」（ADR-0002）。
     for row in rows
@@ -410,13 +412,21 @@ fn 选中作品时批量操作作用于它的全部变体() {
         )
         .expect("展开得了");
     assert_eq!(作用范围.len() as u64, 一个作品.variants);
-    assert_eq!(作用范围.len() as u64, PER_WORK, "不筛的时候就是它的全部变体");
+    assert_eq!(
+        作用范围.len() as u64,
+        PER_WORK,
+        "不筛的时候就是它的全部变体"
+    );
     let 详情 = catalog
         .work_detail(&WorkQuery::default(), &一个作品.anchor)
         .expect("读得出详情")
         .expect("这一行有变体");
     assert_eq!(
-        详情.variants.iter().map(|v| v.row.key.clone()).collect::<Vec<_>>(),
+        详情
+            .variants
+            .iter()
+            .map(|v| v.row.key.clone())
+            .collect::<Vec<_>>(),
         作用范围,
         "详情面板列的那几个变体，与批量操作作用的那几个不是同一批",
     );
@@ -469,10 +479,7 @@ fn 选中一个变体时变体级的东西只关它自己() {
         assert!(variant.confidence().is_some(), "这个变体一条候选都没有");
         assert!(!variant.candidates.is_empty());
         for candidate in &variant.candidates {
-            assert!(
-                !candidate.evidence.is_empty(),
-                "候选没有依据，事后没法复核",
-            );
+            assert!(!candidate.evidence.is_empty(), "候选没有依据，事后没法复核",);
         }
     }
 
@@ -497,7 +504,9 @@ fn 选中一个变体时变体级的东西只关它自己() {
         .variant_members(&详情.variants[1].row.key)
         .expect("列得出文件成员");
     assert!(
-        另一个.iter().all(|(key, _)| !文件.iter().any(|(k, _)| k == key)),
+        另一个
+            .iter()
+            .all(|(key, _)| !文件.iter().any(|(k, _)| k == key)),
         "两个变体的文件混在一起了",
     );
 }
@@ -525,7 +534,10 @@ fn 年份取的是裁决那一条而且列表与详情写的是同一个数() {
     let rows = catalog
         .work_page(&WorkQuery::default(), 0, 64)
         .expect("取得出一页");
-    let 那一行 = rows.iter().find(|row| row.name == "作品00").expect("有这一行");
+    let 那一行 = rows
+        .iter()
+        .find(|row| row.name == "作品00")
+        .expect("有这一行");
     assert_eq!(那一行.year.as_deref(), Some("1990"), "裁决那一条没排在最前");
 
     let 详情 = catalog
@@ -544,7 +556,10 @@ fn 年份取的是裁决那一条而且列表与详情写的是同一个数() {
     let rows = catalog
         .work_page(&WorkQuery::default(), 0, 64)
         .expect("取得出一页");
-    let 那一行 = rows.iter().find(|row| row.name == "作品00").expect("有这一行");
+    let 那一行 = rows
+        .iter()
+        .find(|row| row.name == "作品00")
+        .expect("有这一行");
     assert_eq!(那一行.year.as_deref(), Some("1970"));
     assert_ne!(VERDICT, "某个数据源");
 }
@@ -575,7 +590,10 @@ fn 换一种排法画出来的那一行一个字都不变() {
                     .iter()
                     .find(|had| had.anchor == row.anchor)
                     .expect("这一行在默认排法里也在");
-                assert_eq!(row, 原样, "{order:?} / 倒序 {descending} 把这一行画的东西改了");
+                assert_eq!(
+                    row, 原样,
+                    "{order:?} / 倒序 {descending} 把这一行画的东西改了"
+                );
             }
         }
     }

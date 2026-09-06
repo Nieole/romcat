@@ -31,9 +31,9 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use super::pool::{MediaPool, PoolError, normalized_ext};
@@ -575,8 +575,7 @@ impl Loader {
     /// 跑在画帧线程上，还要跟别处的写者抢锁。
     #[must_use]
     pub fn inflight(&self, hash: &str, ext: &str) -> bool {
-        self.inflight
-            .contains(&(hash.to_string(), ext.to_string()))
+        self.inflight.contains(&(hash.to_string(), ext.to_string()))
     }
 
     /// 缓存里眼下有几份。

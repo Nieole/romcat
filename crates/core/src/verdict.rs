@@ -1775,7 +1775,11 @@ impl MatchIndex {
         for verdict in store.all_matches()? {
             match &verdict.anchor {
                 Anchor::Content { crc32, size, .. } => {
-                    index.content.entry((*crc32, *size)).or_default().push(verdict);
+                    index
+                        .content
+                        .entry((*crc32, *size))
+                        .or_default()
+                        .push(verdict);
                 }
                 Anchor::Path {
                     library: owner,
@@ -1805,7 +1809,9 @@ impl MatchIndex {
 
     /// 一条条走过全部**内容锚**上的匹配裁决：`((CRC-32, 大小), 那一批)`。
     pub fn by_content(&self) -> impl Iterator<Item = (&(u32, u64), &[MatchVerdict])> {
-        self.content.iter().map(|(key, list)| (key, list.as_slice()))
+        self.content
+            .iter()
+            .map(|(key, list)| (key, list.as_slice()))
     }
 
     /// 一条条走过全部**路径锚**上的匹配裁决：`(变体的键, 那一批)`。
@@ -1853,7 +1859,11 @@ impl Export {
     /// 程序拒收，而它其实一个字都读得懂。**装着新东西的才该拦下，空的不该。**
     #[must_use]
     pub fn version_for(matches: &[MatchRow]) -> u32 {
-        if matches.is_empty() { 1 } else { EXPORT_VERSION }
+        if matches.is_empty() {
+            1
+        } else {
+            EXPORT_VERSION
+        }
     }
 }
 
@@ -2344,7 +2354,9 @@ mod tests {
             vec!["收藏".to_string()]
         );
         assert_eq!(
-            store.leave("收藏", std::slice::from_ref(&anchor)).expect("拿得出"),
+            store
+                .leave("收藏", std::slice::from_ref(&anchor))
+                .expect("拿得出"),
             1
         );
         assert!(store.joined(&anchor).expect("读得到").is_empty());
@@ -2548,7 +2560,12 @@ mod tests {
         let 锚 = 内容锚(0x1111_2222, 512);
         for (entry, accepted) in [("4", false), ("9", true)] {
             store
-                .put_match(&MatchVerdict::now(锚.clone(), "中文离线源", entry, accepted))
+                .put_match(&MatchVerdict::now(
+                    锚.clone(),
+                    "中文离线源",
+                    entry,
+                    accepted,
+                ))
                 .expect("写得进");
         }
         // 同一条条目上改主意：覆盖，不是攒第二条。
@@ -2652,7 +2669,10 @@ mod tests {
             ))
             .expect("写得进");
         assert_eq!(只有路径锚.export(false).expect("导得出").version, 1);
-        assert_eq!(只有路径锚.export(true).expect("导得出").version, EXPORT_VERSION);
+        assert_eq!(
+            只有路径锚.export(true).expect("导得出").version,
+            EXPORT_VERSION
+        );
     }
 
     #[test]
@@ -2662,7 +2682,10 @@ mod tests {
         let text = r#"{"format":"romcat-沉淀库","version":1,"exported_at":0,
              "verdicts":[{"crc32":"12345678","size":40976,"kind":"认不出","decided_at":0}]}"#;
         let account = store.import(text).expect("收得下");
-        assert_eq!((account.read, account.added, account.matches_read), (1, 1, 0));
+        assert_eq!(
+            (account.read, account.added, account.matches_read),
+            (1, 1, 0)
+        );
     }
 
     #[test]

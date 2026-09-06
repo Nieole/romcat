@@ -1625,8 +1625,8 @@ mod tests {
     fn 离线档那七个源全是本地的() {
         let 关掉 = fuzzy::Naming::off();
         let 无裁决 = zh::Rulings::none();
-        let sources =
-            sources(Profile::Offline, true, None, &关掉, None, &无裁决).expect("离线档该收得下这七个源");
+        let sources = sources(Profile::Offline, true, None, &关掉, None, &无裁决)
+            .expect("离线档该收得下这七个源");
         assert_eq!(sources.len(), 7);
         assert!(sources.iter().all(|s| s.locality() == Locality::Local));
     }
@@ -1651,7 +1651,8 @@ mod tests {
         );
         let 关掉 = fuzzy::Naming::off();
         let 无裁决 = zh::Rulings::none();
-        let sources = sources(Profile::Offline, true, Some(&net), &关掉, None, &无裁决).expect("收得下");
+        let sources =
+            sources(Profile::Offline, true, Some(&net), &关掉, None, &无裁决).expect("收得下");
         assert!(sources.iter().all(|s| s.locality() == Locality::Local));
         assert!(fetcher.asked().is_empty());
     }

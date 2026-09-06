@@ -11,7 +11,6 @@ use std::fs;
 use std::path::Path;
 
 use romcat_core::capability::{self, Roster};
-use romcat_core::task::Handle;
 use romcat_core::catalog::identify::State;
 use romcat_core::catalog::{Catalog, Confidence, Roots};
 use romcat_core::dat::repo::DatRepo;
@@ -19,6 +18,7 @@ use romcat_core::fs::RealFs;
 use romcat_core::identify::fuzzy;
 use romcat_core::identify::{self, Options};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
+use romcat_core::task::Handle;
 use romcat_core::testing::switch as sample;
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::titledb::store::Store as TitleDb;
@@ -460,7 +460,11 @@ fn 删掉一份重扫之后内容分布不再数那份已删的() {
         读出的份数 - 1,
         "分母要跟着少一份"
     );
-    assert_eq!(数一档(&现场, "patch"), 0, "补丁那一档数的就是刚删掉的那一份");
+    assert_eq!(
+        数一档(&现场, "patch"),
+        0,
+        "补丁那一档数的就是刚删掉的那一份"
+    );
     assert_eq!(数一档(&现场, "addon"), 1, "别的档一个都不许受牵连");
 }
 

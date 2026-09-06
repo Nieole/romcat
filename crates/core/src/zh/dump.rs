@@ -311,10 +311,16 @@ mod tests {
     #[test]
     fn infobox_单值多值块与顿号三种写法都拆得开() {
         // 单值。
-        assert_eq!(values("{{Infobox Game\n|开发= 任天堂\n}}", "开发"), vec!["任天堂"]);
+        assert_eq!(
+            values("{{Infobox Game\n|开发= 任天堂\n}}", "开发"),
+            vec!["任天堂"]
+        );
         // 多值块。
         assert_eq!(
-            values("{{Infobox Game\n|开发={\n[任天堂]\n[HAL研究所]\n}\n}}", "开发"),
+            values(
+                "{{Infobox Game\n|开发={\n[任天堂]\n[HAL研究所]\n}\n}}",
+                "开发"
+            ),
             vec!["任天堂", "HAL研究所"]
         );
         // 顿号分隔——真库里比多值块常见。

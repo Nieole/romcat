@@ -1420,15 +1420,7 @@ impl Catalog {
                 len.map(|len| u64::try_from(len).unwrap_or(0))
             };
             aggregate.record_file(
-                &FileObservation::derive(
-                    manifest,
-                    &roots,
-                    &key,
-                    len,
-                    non_utf8 != 0,
-                    sample,
-                    role,
-                ),
+                &FileObservation::derive(manifest, &roots, &key, len, non_utf8 != 0, sample, role),
                 limits,
             );
         }

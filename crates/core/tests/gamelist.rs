@@ -16,7 +16,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use romcat_core::adapter::gamelist::Gamelist;
-use romcat_core::task::Handle;
 use romcat_core::adapter::transfer::{self, ExportOptions};
 use romcat_core::adapter::{Capability, assert_capability};
 use romcat_core::catalog::Catalog;
@@ -28,6 +27,7 @@ use romcat_core::scrape::priority::Priorities;
 use romcat_core::scrape::{AnchorKind, MediaKind};
 use romcat_core::sublibrary::{self, Rule, Selection};
 use romcat_core::sync;
+use romcat_core::task::Handle;
 use romcat_core::testing::sample::zip;
 use romcat_core::testing::{TempDir, temp_dir};
 

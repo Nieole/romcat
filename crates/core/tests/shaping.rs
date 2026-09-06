@@ -12,13 +12,13 @@ use std::fs;
 use std::path::Path;
 
 use romcat_core::catalog::Catalog;
-use romcat_core::task::Handle;
 use romcat_core::fs::RealFs;
 use romcat_core::platform::Manifest;
 use romcat_core::report::HealthReport;
 use romcat_core::scan::aggregate::{ConflictEvidence, Limits};
 use romcat_core::scan::{self, Jobs, ScanOptions, ScanOutcome};
 use romcat_core::shape::Role;
+use romcat_core::task::Handle;
 use romcat_core::testing::sample::{chd, gba, iso, nds, zip};
 use romcat_core::testing::{TempDir, temp_dir};
 

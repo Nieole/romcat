@@ -107,7 +107,9 @@ fn 详情滚一趟(ctx: &egui::Context, app: &mut App) -> String {
                 modifiers: egui::Modifiers::NONE,
             });
         }
-        out.push_str(&画出来的字(&headless::frame(ctx, input, |ui| app.ui(ui))));
+        out.push_str(&画出来的字(
+            &headless::frame(ctx, input, |ui| app.ui(ui)),
+        ));
     }
     out
 }
@@ -490,7 +492,11 @@ fn 打开看见的是分好的批而不是一万八千行的表() {
     // 每张卡片上**条数与那句共同依据**都得有——三样里的前两样。
     for batch in batches {
         assert!(batch.count > 0);
-        assert!(!batch.why().trim().is_empty(), "{:?} 说不出共同依据", batch.shape);
+        assert!(
+            !batch.why().trim().is_empty(),
+            "{:?} 说不出共同依据",
+            batch.shape
+        );
     }
     // 单候选那几批是**按批答得了**的；一条候选都没有的与多候选的都不给「整批通过」。
     assert!(
@@ -536,7 +542,12 @@ fn 二级下钻的条数加起来等于它所属的一级() {
     }
     跑(&ctx, &mut app, 1);
     let 那一组 = app.queue().scope().expect("下钻了还该有作用范围");
-    assert_eq!(app.queue().queue().count(&那一组), row.count, "{}", row.label);
+    assert_eq!(
+        app.queue().queue().count(&那一组),
+        row.count,
+        "{}",
+        row.label
+    );
 }
 
 #[test]
@@ -564,7 +575,10 @@ fn 每批都有随机样本换一组每次不同但都在批内() {
             screen.resample();
         }
         let 这一组 = app.queue().samples();
-        assert_ne!(这一组, 上一组, "第 {round} 次「换一组样本」按下去还是同一组");
+        assert_ne!(
+            这一组, 上一组,
+            "第 {round} 次「换一组样本」按下去还是同一组"
+        );
         assert!(
             这一组.iter().all(|one| 批内.contains(&one.key)),
             "样本跑到批外面去了",
@@ -712,7 +726,10 @@ fn 二级下钻之后整批拒绝只作用于那一组() {
         screen.commit(site);
     }
     assert!(app.queue().error().is_none(), "{:?}", app.queue().error());
-    assert_eq!(app.site().store.counts().expect("读得出").unknown, row.count);
+    assert_eq!(
+        app.site().store.counts().expect("读得出").unknown,
+        row.count
+    );
     assert_eq!(app.queue().queue().pending(), 原有 - row.count);
 }
 
@@ -817,14 +834,21 @@ fn 逐条时屏上真的摆着文件名路径与候选的完整依据() {
     assert!(!item.candidates.is_empty(), "这一批该是带候选的");
 
     let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
-    assert!(屏上.contains(item.name()), "屏上没有文件名：{}", item.name());
+    assert!(
+        屏上.contains(item.name()),
+        "屏上没有文件名：{}",
+        item.name()
+    );
     assert!(
         屏上.contains(item.directory()),
         "屏上没有路径：{}",
         item.directory(),
     );
     let 依据 = &item.candidates[0].evidence;
-    assert!(屏上.contains(依据.as_str()), "屏上没有那条候选的完整依据：{依据}");
+    assert!(
+        屏上.contains(依据.as_str()),
+        "屏上没有那条候选的完整依据：{依据}"
+    );
     assert!(
         屏上.contains(item.candidates[0].confidence.label()),
         "屏上没标出这条候选的置信度",
@@ -863,7 +887,10 @@ fn 下钻只收窄整批操作不把别的批从屏上筛掉() {
     跑(&ctx, &mut app, 1);
     let 原有批数 = app.queue().queue().batches().len();
     let 原有条数 = app.queue().queue().selected().len();
-    let 整批 = app.queue().queue().drill(&Scope::whole(batch.shape.clone()), Axis::Directory);
+    let 整批 = app
+        .queue()
+        .queue()
+        .drill(&Scope::whole(batch.shape.clone()), Axis::Directory);
     let row = drilled_first(&整批);
 
     {
@@ -964,7 +991,11 @@ fn 界面点开的那一批与命令行按同一串字选出来的一条不差()
         界面这批.sort();
         assert_eq!(界面这批.len() as u64, batch.count);
         // **空对空是恒真的废话**：每一批都得真盖住东西，比的才是真的一批。
-        assert!(!界面这批.is_empty(), "这一批一条都没盖住：{:?}", batch.shape);
+        assert!(
+            !界面这批.is_empty(),
+            "这一批一条都没盖住：{:?}",
+            batch.shape
+        );
 
         // 命令行那一侧：只拿到那一串字，从中立库重折一遍队列。
         let 那串字 = batch.shape.selector();
@@ -1055,8 +1086,7 @@ fn 计划书开着时键盘一个字都不接落下的还是屏上那一份() {
     let applied = *app.queue().applied().expect("落下了就该有账");
     assert_eq!(applied.verdicts as usize, 这一批);
     assert_eq!(
-        applied.matched as usize,
-        这一批,
+        applied.matched as usize, 这一批,
         "沉淀库落了几条，中立库就该当场兑现几条",
     );
     let counts = app.site().store.counts().expect("读得出沉淀库");
@@ -1195,7 +1225,10 @@ fn 就地下一次否定裁决同一次匹配带来的全部字段一并失效()
 
     let 账 = app.queue().judged().expect("按下去该交回一本账").clone();
     assert!(账.from_variant, "这个变体自己撞的就是这条");
-    assert!(账.cleared >= 6, "同一次匹配带来的六个字段该一条不剩：{账:?}");
+    assert!(
+        账.cleared >= 6,
+        "同一次匹配带来的六个字段该一条不剩：{账:?}"
+    );
     assert!(账.cleared_work > 0, "作品那一层也该跟着清");
     // **裁决落沉淀库、锚在内容锚上**（验收第 5 条）：删掉中立库重扫也不丢。
     assert!(

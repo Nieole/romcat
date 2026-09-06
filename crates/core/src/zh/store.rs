@@ -498,8 +498,10 @@ impl Store {
         if rebuilding {
             Self::reshape(&tx).map_err(failed)?;
         }
-        tx.execute_batch("DELETE FROM subject_fact; DELETE FROM subject_name; DELETE FROM subject;")
-            .map_err(failed)?;
+        tx.execute_batch(
+            "DELETE FROM subject_fact; DELETE FROM subject_name; DELETE FROM subject;",
+        )
+        .map_err(failed)?;
         {
             let mut subject = tx
                 .prepare(

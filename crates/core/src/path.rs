@@ -572,7 +572,10 @@ pub fn is_inside_place(outer: &Path, inner: &Path) -> bool {
     if windows_shaped(&outer_text) || windows_shaped(&inner_text) {
         return inside_windows_text(&outer_text, &inner_text);
     }
-    is_inside(Path::new(outer_text.as_ref()), Path::new(inner_text.as_ref()))
+    is_inside(
+        Path::new(outer_text.as_ref()),
+        Path::new(inner_text.as_ref()),
+    )
 }
 
 /// 两条**折好的** Windows 形状路径之间的包含关系，按段比而不是按字符前缀比：
@@ -698,7 +701,10 @@ mod tests {
         // 第一段是**根名**，平台在它后面（`library_key`）。
         assert_eq!(platform_of_key("库/FC/超级马里奥.zip"), Some("FC"));
         assert_eq!(platform_of_key("库/PS1/某游戏/disc.cue"), Some("PS1"));
-        assert_eq!(platform_dir_of_key("库/PS1/某游戏/disc.cue"), Some("库/PS1"));
+        assert_eq!(
+            platform_dir_of_key("库/PS1/某游戏/disc.cue"),
+            Some("库/PS1")
+        );
         // 直接躺在某个根下面的文件没有平台目录；根自己那条键也没有。
         assert_eq!(platform_of_key("库/散落的游戏.gba"), None);
         assert_eq!(platform_of_key("库"), None);
@@ -730,7 +736,11 @@ mod tests {
 
     #[test]
     fn 中立库的键带着根名而且拆得回来() {
-        let key = library_key("元数据库", Path::new("/盘乙"), Path::new("/盘乙/FC/魂斗罗.zip"));
+        let key = library_key(
+            "元数据库",
+            Path::new("/盘乙"),
+            Path::new("/盘乙/FC/魂斗罗.zip"),
+        );
         assert_eq!(key, "元数据库/FC/魂斗罗.zip");
         assert_eq!(split_root(&key), ("元数据库", "FC/魂斗罗.zip"));
         // 根自己那条键就是它的名字。
@@ -1000,7 +1010,10 @@ mod tests {
             Path::new(r"\\?\D:\Game")
         ));
         // 盘的根圈得住盘上的一切。
-        assert!(is_inside_place(Path::new(r"D:\"), Path::new(r"\\?\D:\Game")));
+        assert!(is_inside_place(
+            Path::new(r"D:\"),
+            Path::new(r"\\?\D:\Game")
+        ));
     }
 
     #[test]

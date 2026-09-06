@@ -31,8 +31,8 @@ use super::{
     Applied, Axis, Decide, Filter, GroupRow, Item, Plan, State, TriageError, Undone, apply,
     fill_prints, plan, plan_each, redo_batch, survey, tally, undo_batch,
 };
-use crate::catalog::identify::Tier;
 use crate::catalog::Catalog;
+use crate::catalog::identify::Tier;
 use crate::verdict::{self, Store};
 
 /// 一次**待确认队列**的会话。

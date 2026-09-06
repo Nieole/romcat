@@ -87,7 +87,11 @@ fn 读不动的那些说得清是哪一件为什么() {
     let 出来的 = preview::from_pool(&pool, &幽灵, "png", EDGE);
     let why = 出来的.missing().expect("池里没有这个文件");
     assert!(matches!(why, Missing::NotInPool { .. }), "{why:?}");
-    assert!(why.render().contains(&幽灵), "那句话得指名道姓：{}", why.render());
+    assert!(
+        why.render().contains(&幽灵),
+        "那句话得指名道姓：{}",
+        why.render()
+    );
 
     // 二、**字节在，解不开**：半截文件。
     let mut 半截 = png(64, 64);
@@ -126,7 +130,11 @@ fn ffmpeg不在的机器上视频是占位而不是报错() {
         .expect("该是一档占位");
     assert!(why.is_no_ffmpeg(), "该说的是「没这个程序」，实际是 {why:?}");
     // 那句话要说得出**该去干什么**：装 ffmpeg，或者直接点开用系统播放器。
-    assert!(why.render().contains(preview::NO_SUCH_PROGRAM), "{}", why.render());
+    assert!(
+        why.render().contains(preview::NO_SUCH_PROGRAM),
+        "{}",
+        why.render()
+    );
 }
 
 #[test]
@@ -245,11 +253,7 @@ fn 问一份图当场就返回解码不在这条线程上() {
 fn 假ffmpeg(dir: &Path, 吐出来的: &Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt as _;
     let at = dir.join("假ffmpeg");
-    std::fs::write(
-        &at,
-        format!("#!/bin/sh\ncat '{}'\n", 吐出来的.display()),
-    )
-    .expect("写得出脚本");
+    std::fs::write(&at, format!("#!/bin/sh\ncat '{}'\n", 吐出来的.display())).expect("写得出脚本");
     let mut perm = std::fs::metadata(&at).expect("读得到").permissions();
     perm.set_mode(0o755);
     std::fs::set_permissions(&at, perm).expect("改得动权限");
@@ -286,7 +290,10 @@ fn 抽出来的首帧落进池里再交回来等着记库() {
         .put_media(&frame.hash, "png", frame.bytes)
         .expect("记得进");
     catalog.put_media_frame(&片子, &frame.hash).expect("记得进");
-    assert_eq!(catalog.media_frame(&片子).expect("读得出"), Some(frame.hash.clone()));
+    assert_eq!(
+        catalog.media_frame(&片子).expect("读得出"),
+        Some(frame.hash.clone())
+    );
 
     let thumb = loader
         .want(&片子, "mp4", None)
@@ -324,7 +331,9 @@ fn 缓存攒过头就只留还看得见的那几份() {
     assert_eq!(loader.cached(), 2);
     for hash in &几张[..2] {
         assert!(
-            loader.want(hash, "png", None).is_some_and(|p| p.ready().is_some()),
+            loader
+                .want(hash, "png", None)
+                .is_some_and(|p| p.ready().is_some()),
             "留着的那两份该还在缓存里（问一次就给，不必再排一趟）",
         );
     }

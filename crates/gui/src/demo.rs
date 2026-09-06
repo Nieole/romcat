@@ -716,26 +716,27 @@ fn 形状_of(at: u64) -> &'static 形状 {
 /// 多候选那几档后面跟着别的源的候选：那正是「选哪个」而不是「对不对」的样子。
 fn candidates_of(work: &str, bucket: &Bucket, mark: &str, at: u64) -> Vec<Candidate> {
     let 形状 = 形状_of(at);
-    let one = |source: &str, dat: &str, confidence, convention, why: &str, game: String| Candidate {
-        member_key: String::new(),
-        inner: String::new(),
-        confidence,
-        accepted: false,
-        source: source.to_string(),
-        dat: dat.to_string(),
-        platform: bucket.platform.unwrap_or("未知").to_string(),
-        game,
-        rom: format!("rom.{}", bucket.ext),
-        hashed_as: convention,
-        dat_convention: convention,
-        // 前半截逐字一样、后半截各条不同——**那一段共同的正是卡片上要印的那句共同依据**。
-        evidence: format!("{why}；名字里的记号是「{mark}」"),
-        chinese: bucket
-            .translated
-            .then_some(romcat_core::dat::chinese::ChineseMark::FanTranslated),
-        serial: None,
-        release_id: None,
-    };
+    let one =
+        |source: &str, dat: &str, confidence, convention, why: &str, game: String| Candidate {
+            member_key: String::new(),
+            inner: String::new(),
+            confidence,
+            accepted: false,
+            source: source.to_string(),
+            dat: dat.to_string(),
+            platform: bucket.platform.unwrap_or("未知").to_string(),
+            game,
+            rom: format!("rom.{}", bucket.ext),
+            hashed_as: convention,
+            dat_convention: convention,
+            // 前半截逐字一样、后半截各条不同——**那一段共同的正是卡片上要印的那句共同依据**。
+            evidence: format!("{why}；名字里的记号是「{mark}」"),
+            chinese: bucket
+                .translated
+                .then_some(romcat_core::dat::chinese::ChineseMark::FanTranslated),
+            serial: None,
+            release_id: None,
+        };
     let mut out = vec![one(
         形状.source,
         形状.dat,

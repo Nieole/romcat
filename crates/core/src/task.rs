@@ -518,10 +518,7 @@ impl<T: Send + 'static> Board<T> {
             Ok(pair) => pair,
             // 线程炸了。**不静默结束**：这也是一种失败，得说出口。
             // 它没能带回自己量的耗时，只好退回主线程这边的表。
-            Err(_) => (
-                Err("那条线程炸了。".to_string()),
-                running.started.elapsed(),
-            ),
+            Err(_) => (Err("那条线程炸了。".to_string()), running.started.elapsed()),
         };
         self.settle(running.id, running.name, elapsed, &running.handle, result);
         self.start_next();
@@ -680,10 +677,7 @@ mod tests {
         // **等它真的走出两步再叫停**，不靠「睡三十毫秒它总该走几步了」——
         // 机器一忙那条线程可能一步都还没排上，那样这条测试就会偶发红。
         for _ in 0..1_000 {
-            if board
-                .running()
-                .is_some_and(|live| live.progress.at >= 2)
-            {
+            if board.running().is_some_and(|live| live.progress.at >= 2) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(2));

@@ -271,7 +271,10 @@ impl QueueReport {
         } else {
             table(&mut out, &self.by_name_mark, self.selected);
         }
-        heading(&mut out, "按依据形状——一条 `--shape` 覆盖多少（屏上那一列卡片）");
+        heading(
+            &mut out,
+            "按依据形状——一条 `--shape` 覆盖多少（屏上那一列卡片）",
+        );
         shape_table(&mut out, &self.by_shape, self.selected);
         if !self.by_reason.is_empty() {
             heading(&mut out, "为什么没定下来");

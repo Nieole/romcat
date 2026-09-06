@@ -423,7 +423,9 @@ impl Hit {
     /// 这一条的**依据**，写成给人看的一句。
     fn evidence(&self, dump: &str) -> String {
         match &self.confirmed {
-            Some(anchor) => self.one.evidence_confirmed(dump, self.label, &self.text, anchor),
+            Some(anchor) => self
+                .one
+                .evidence_confirmed(dump, self.label, &self.text, anchor),
             None => self.one.evidence(dump, self.label, &self.text),
         }
     }
@@ -711,7 +713,9 @@ impl<'a> ChineseSource<'a> {
             .collect();
         // **人裁过什么也是一样输入**（票 05）：不进指纹的话，人裁完重跑一趟，
         // 缓存会一口咬定「输入没变」而整条跳过——那条被否定掉的中文名就永远撞回来。
-        let judged = self.rulings.map(|rulings| rulings.fingerprint_of(subject.id));
+        let judged = self
+            .rulings
+            .map(|rulings| rulings.fingerprint_of(subject.id));
         let mut parts = vec![
             main,
             platform,
@@ -1028,9 +1032,7 @@ pub fn judge(
     let from_variant = catalog
         .scraped_values(AnchorKind::Variant.label(), variant_key)?
         .iter()
-        .any(|value| {
-            value.source == fuzzy::SOURCE && zh::entry_in(&value.evidence) == Some(entry)
-        });
+        .any(|value| value.source == fuzzy::SOURCE && zh::entry_in(&value.evidence) == Some(entry));
     let mut cleared = 0;
     let mut cleared_work = 0;
     if !accepted {
@@ -1536,7 +1538,11 @@ mod tests {
         ]);
         // 这一层现在产出四样（类型、简介、开发商、发行商），所以按**字段**数，
         // 不按整个 `Harvest` 的条数——「只有一份类型」才是这条测试要钉的话。
-        assert_eq!(那几条(&out, Field::Genre), vec!["ACT"], "两个变体撞到同一条，只该有一份类型");
+        assert_eq!(
+            那几条(&out, Field::Genre),
+            vec!["ACT"],
+            "两个变体撞到同一条，只该有一份类型"
+        );
         let 依据 = &那一格(&out, Field::Genre).expect("有这一条").evidence;
         // **依据**四样齐全：条目号、撞上的是哪个名字、两道校验各是什么。
         assert!(依据.contains("条目 4"), "{依据}");
@@ -1575,7 +1581,11 @@ mod tests {
         let rules = Rules::builtin();
         let index = 索引();
         assert!(源(&rules, &index).probe(&作品(&[])).is_none());
-        assert!(源(&rules, &index).probe(&作品(&[名下("nds/x.7z")])).is_some());
+        assert!(
+            源(&rules, &index)
+                .probe(&作品(&[名下("nds/x.7z")]))
+                .is_some()
+        );
     }
 
     #[test]
@@ -1700,7 +1710,10 @@ mod tests {
         // 作品那一层同样盖得住它。
         let 名下变体 = [名下("nds/合金弹头7.7z")];
         let work = 作品(&名下变体);
-        assert_ne!(源(&rules, &现在).probe(&work), 源(&rules, &上一版).probe(&work));
+        assert_ne!(
+            源(&rules, &现在).probe(&work),
+            源(&rules, &上一版).probe(&work)
+        );
     }
 
     /// 同一份 dump、同一批字段，只是**建索引时平台折得动与折不动**的两份索引。
@@ -1833,8 +1846,7 @@ mod tests {
     fn 补过的规则() -> (crate::testing::TempDir, Rules) {
         let dir = crate::testing::temp_dir("zh-name-rules");
         let path = dir.path().join("rules.toml");
-        std::fs::write(&path, "\"版本\" = 1\n\"正题噪音词\" = [\"甲组特供版\"]\n")
-            .expect("写得下");
+        std::fs::write(&path, "\"版本\" = 1\n\"正题噪音词\" = [\"甲组特供版\"]\n").expect("写得下");
         let rules = Rules::load(&path).expect("读得进来");
         (dir, rules)
     }
@@ -1911,11 +1923,17 @@ mod tests {
     fn 简介一个字都不改地落在作品锚点上() {
         // 规格 18 与挂单 Q3：换行、开头那两个全角空格、以及数据源自带的排版**原样保留**。
         // `str::trim` 把 U+3000 当空白扫掉，照仓库里别的字段那条惯例写就违反规格。
-        let out = 采作品带简介(&[名下("nds/合金弹头7.7z")], &简介表(Some(简介原文.to_string())))
-            .expect("读得出来就不该失败");
+        let out = 采作品带简介(
+            &[名下("nds/合金弹头7.7z")],
+            &简介表(Some(简介原文.to_string())),
+        )
+        .expect("读得出来就不该失败");
         let got = 那一格(&out, Field::Description).expect("有这一条");
         assert_eq!(got.value, 简介原文, "简介被改动了");
-        assert!(got.value.starts_with('\u{3000}'), "开头那两个全角空格被吃掉了");
+        assert!(
+            got.value.starts_with('\u{3000}'),
+            "开头那两个全角空格被吃掉了"
+        );
         // 依据说得出这条结论为什么挂在作品这一层。
         assert!(got.evidence.contains("条目 4"), "{}", got.evidence);
         assert!(
@@ -1924,7 +1942,11 @@ mod tests {
             got.evidence
         );
         // 没超闸的那一条**不该**说自己被截断了。
-        assert!(!got.evidence.contains("这条简介被截断了"), "{}", got.evidence);
+        assert!(
+            !got.evidence.contains("这条简介被截断了"),
+            "{}",
+            got.evidence
+        );
         // 类型照旧在同一趟里产出——两个字段跟着同一次匹配走。
         assert_eq!(那一格(&out, Field::Genre).expect("有这一条").value, "ACT");
     }
@@ -1933,7 +1955,10 @@ mod tests {
     fn 同一条条目只留一份简介() {
         // 同一部作品的两个变体撞到同一条条目，作品锚点上**只有一份**简介，不是两份。
         let out = 采作品带简介(
-            &[名下("nds/合金弹头7[某汉化组](简).7z"), 名下("nds/合金弹头7.7z")],
+            &[
+                名下("nds/合金弹头7[某汉化组](简).7z"),
+                名下("nds/合金弹头7.7z"),
+            ],
             &简介表(Some(简介原文.to_string())),
         )
         .expect("读得出来就不该失败");
@@ -1968,7 +1993,12 @@ mod tests {
         assert!(got.value.contains(TRUNCATED_MARK), "记号丢了");
         // **按字取尾**：这一串是汉字，按字节切多半落在字符中间，一 panic 就顶掉了
         // 本该看见的那句说明。
-        let 尾巴: String = got.value.chars().rev().take(40).collect::<Vec<_>>()
+        let 尾巴: String = got
+            .value
+            .chars()
+            .rev()
+            .take(40)
+            .collect::<Vec<_>>()
             .into_iter()
             .rev()
             .collect();
@@ -1978,14 +2008,17 @@ mod tests {
         );
         // 正文那一段截到闸上，剩下的是那句说明——**总长有个死上界**。
         assert!(got.value.chars().count() < DESCRIPTION_LIMIT + 100);
-        assert!(got.evidence.contains("这条简介被截断了"), "{}", got.evidence);
+        assert!(
+            got.evidence.contains("这条简介被截断了"),
+            "{}",
+            got.evidence
+        );
     }
 
     #[test]
     fn 数据源没写简介时无话可说而别的字段照旧产出() {
         // 缺一格不是错误——「照常产出它有的那些字段」（规格 21）。
-        let out =
-            采作品带简介(&[名下("nds/合金弹头7.7z")], &简介表(None)).expect("不该失败");
+        let out = 采作品带简介(&[名下("nds/合金弹头7.7z")], &简介表(None)).expect("不该失败");
         assert!(那一格(&out, Field::Description).is_none());
         assert_eq!(那一格(&out, Field::Genre).expect("有这一条").value, "ACT");
     }
@@ -2031,7 +2064,11 @@ mod tests {
                 found.evidence
             );
             // **中置信、照旧进待确认队列**：多两栏不等于自动通过（票 05 才管裁决）。
-            assert!(found.evidence.contains("一律进待确认队列"), "{}", found.evidence);
+            assert!(
+                found.evidence.contains("一律进待确认队列"),
+                "{}",
+                found.evidence
+            );
         }
         // **不挂在变体上**：这两样跨平台跨地区都成立，挂到变体上就是每个变体各存一份。
         let 变体上的 = 采("nds/合金弹头7.7z", &[]);
@@ -2050,7 +2087,10 @@ mod tests {
         // 规格 21：**缺键就是没有，不是错误**。条目 6 写了开发没写发行。
         let out = 采作品(&[名下("nds/恶魔城.7z")]);
         assert_eq!(那几条(&out, Field::Developer), vec!["科乐美"]);
-        assert!(那几条(&out, Field::Publisher).is_empty(), "缺的键就该是缺的");
+        assert!(
+            那几条(&out, Field::Publisher).is_empty(),
+            "缺的键就该是缺的"
+        );
         assert_eq!(那一格(&out, Field::Genre).expect("有这一条").value, "AVG");
     }
 
@@ -2089,8 +2129,11 @@ mod tests {
     fn 这一层产出的字段与进指纹的那一行对得上() {
         // `WORK_FIELDS` 进作品锚点的输入指纹。它与这一层**真的产出**的那几样一旦漂开，
         // 新接上来的字段就永远补不到已经采过的作品上——缓存会一口咬定「输入没变」。
-        let out = 采作品带简介(&[名下("nds/合金弹头7.7z")], &简介表(Some(简介原文.to_string())))
-            .expect("读得出来就不该失败");
+        let out = 采作品带简介(
+            &[名下("nds/合金弹头7.7z")],
+            &简介表(Some(简介原文.to_string())),
+        )
+        .expect("读得出来就不该失败");
         let mut 产出: Vec<Field> = out.values.iter().map(|it| it.field).collect();
         产出.sort_unstable();
         产出.dedup();
@@ -2165,7 +2208,11 @@ mod tests {
         let out = 采带裁决(key, &裁过(key, 4, false));
         assert_eq!(out.values.len(), 1);
         assert_eq!(out.values[0].value, "恶魔城");
-        assert!(out.values[0].evidence.contains("条目 6"), "{:?}", out.values[0]);
+        assert!(
+            out.values[0].evidence.contains("条目 6"),
+            "{:?}",
+            out.values[0]
+        );
         assert!(out.values[0].evidence.contains("一律进待确认队列"));
     }
 
@@ -2203,7 +2250,11 @@ mod tests {
         let out = 采带裁决(key, &裁过(key, 6, true));
         // 条目 6 在这个变体上够不着中置信，所以它进不了候选——人说了也白说，
         // 这一条钉的是**不许凭空造一条匹配出来**。
-        assert!(out.values[0].evidence.contains("条目 4"), "{:?}", out.values[0]);
+        assert!(
+            out.values[0].evidence.contains("条目 4"),
+            "{:?}",
+            out.values[0]
+        );
     }
 
     #[test]

@@ -89,13 +89,13 @@ use romcat_core::sublibrary::{
 use romcat_core::title::{Language, TitleKind};
 
 use crate::filter::Filter;
+use crate::font;
 use crate::layout;
 use crate::look;
-use crate::font;
 use crate::media::Gallery;
 use crate::scrape;
-use crate::task::Tasks;
 use crate::table::{Picked, SPAN, Table, Window};
+use crate::task::Tasks;
 
 /// 界面上人工写下的叫法，**依据**里写这一句。
 ///
@@ -564,7 +564,11 @@ impl Screen {
     ///
     /// 界面上按那个按钮走的就是它，实测与测试拿它当那一下。
     pub fn update_sublibrary(&mut self, site: &mut Site) {
-        let Some(name) = self.editing.as_ref().map(|editing| editing.sublibrary.clone()) else {
+        let Some(name) = self
+            .editing
+            .as_ref()
+            .map(|editing| editing.sublibrary.clone())
+        else {
             return;
         };
         let rule = match self.query.to_rule() {
@@ -636,7 +640,11 @@ impl Screen {
 
     /// 撤掉这个变体上那条例外。
     pub fn clear_exception(&mut self, site: &mut Site, key: &str) {
-        let Some(name) = self.editing.as_ref().map(|editing| editing.sublibrary.clone()) else {
+        let Some(name) = self
+            .editing
+            .as_ref()
+            .map(|editing| editing.sublibrary.clone())
+        else {
             return;
         };
         match site.catalog.clear_exception(&name, key) {
@@ -675,7 +683,11 @@ impl Screen {
     ///
     /// 界面上按那个按钮走的就是它，实测与测试拿它当那一下。
     pub fn discard_broken_rule(&mut self, site: &mut Site, ordinal: i64) {
-        let Some(name) = self.editing.as_ref().map(|editing| editing.sublibrary.clone()) else {
+        let Some(name) = self
+            .editing
+            .as_ref()
+            .map(|editing| editing.sublibrary.clone())
+        else {
             return;
         };
         match site.catalog.discard_broken_rule(&name, ordinal) {
@@ -718,7 +730,11 @@ impl Screen {
     /// 与 [`Self::reload_exceptions`] 同一条理由：库是事实来源，屏上这份是它的副本，
     /// 写完不重读的话，那一栏会一直摆着已经不在库里的那一条。
     fn reload_broken(&mut self, site: &Site) {
-        let Some(name) = self.editing.as_ref().map(|editing| editing.sublibrary.clone()) else {
+        let Some(name) = self
+            .editing
+            .as_ref()
+            .map(|editing| editing.sublibrary.clone())
+        else {
             return;
         };
         match site.catalog.sublibrary_rules(&name) {
@@ -1398,13 +1414,12 @@ impl Screen {
                 self.query.state = state;
                 ui.separator();
 
-                ui.strong("条件组")
-                    .on_hover_text(
-                        "**表达用的那一半**：可嵌套的条件组，每组选「全部满足 / 任一满足 /\
+                ui.strong("条件组").on_hover_text(
+                    "**表达用的那一半**：可嵌套的条件组，每组选「全部满足 / 任一满足 /\
                          都不满足」，组里还能再套组，九个运算符。**这就是子库的规则**——\
                          上头那五个档存成子库时也会折进同一条规则里\
                          （「识别状态」那一维折不进去，挂单 Q70）。",
-                    );
+                );
                 ui.weak("值要自己打——说得清楚，也存得成子库的规则。");
                 if self.filter.ui(ui) {
                     // 条件组一改就是换了一批行——同步进查询，`sync_window` 那一趟
@@ -1504,12 +1519,11 @@ impl Screen {
     ///
     /// **加收藏那一下不在这儿，在抬头**（原型钉的位置）：它按得最勤，不该藏在左栏底下。
     fn collection_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
-        ui.strong("收藏与合集")
-            .on_hover_text(
-                "**加收藏那一下在抬头**（「★ 收藏」），因为它按得最勤：\
+        ui.strong("收藏与合集").on_hover_text(
+            "**加收藏那一下在抬头**（「★ 收藏」），因为它按得最勤：\
                  勾一批、按一下、接着筛下一批。这儿是它的另一半——取消，\
                  以及自己起名的合集（挂单 Q117）。",
-            );
+        );
         ui.weak("作用范围是**勾中的那一批**（不是筛出来的全部）。落沉淀库，删掉中立库重扫也不丢。")
             .on_hover_text(
                 "收藏走的就是合集那套成员关系——收藏是名字定死的那一组，\
@@ -1664,7 +1678,9 @@ impl Screen {
             }
             if ui
                 .button("不改了")
-                .on_hover_text("放下这一趟，筛选留在屏上不动。**已经记下的例外不撤**——那是各自独立的决定。")
+                .on_hover_text(
+                    "放下这一趟，筛选留在屏上不动。**已经记下的例外不撤**——那是各自独立的决定。",
+                )
                 .clicked()
             {
                 self.cancel_editing();
@@ -1733,7 +1749,9 @@ impl Screen {
                 // 重名检查挡住。所以退回去，把名字还回来。
                 let 退回 = site.catalog.remove_sublibrary(&name);
                 self.error = Some(match 退回 {
-                    Ok(_) => format!("规则写不进中立库：{error}。刚建的子库「{name}」已经退掉，这个名字还能用。"),
+                    Ok(_) => format!(
+                        "规则写不进中立库：{error}。刚建的子库「{name}」已经退掉，这个名字还能用。"
+                    ),
                     Err(second) => format!(
                         "规则写不进中立库：{error}。而刚建的子库「{name}」也退不掉（{second}）\
                          ——它眼下一条规则都没有，同步过去会是空的，去子库屏删掉它。"
@@ -1992,10 +2010,7 @@ impl Screen {
         // **一件一件说清**：哪一格没有图、为什么。汇总的那句「有 N 条引用找不到文件」
         // 说不出是哪一件，而这条验收要的正是后者。
         for (是哪一件, 为什么) in self.gallery.troubles(&detail.media_items) {
-            ui.colored_label(
-                ui.visuals().warn_fg_color,
-                format!("{是哪一件}：{为什么}"),
-            );
+            ui.colored_label(ui.visuals().warn_fg_color, format!("{是哪一件}：{为什么}"));
         }
         if let Some(说的) = self.gallery.error() {
             ui.colored_label(ui.visuals().error_fg_color, 说的);
@@ -2223,8 +2238,7 @@ impl Screen {
                         row.kind.label(),
                         row.note
                             .as_deref()
-                            .map(|note| format!("（{note}）")
-                            )
+                            .map(|note| format!("（{note}）"))
                             .unwrap_or_default(),
                     ),
                 );

@@ -440,7 +440,9 @@ pub struct Clause {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RuleError {
     /// 空规则。
-    #[error("规则是空的。写法是 `维度 运算符 值`，多个子句用 ` 且 `（全部满足）或 ` 或 `（任一满足）连起来")]
+    #[error(
+        "规则是空的。写法是 `维度 运算符 值`，多个子句用 ` 且 `（全部满足）或 ` 或 `（任一满足）连起来"
+    )]
     Empty,
     /// 认不出这个维度。
     #[error("认不出维度「{text}」。能筛的是：{known}")]
@@ -493,7 +495,9 @@ pub enum RuleError {
         count: usize,
     },
     /// 同一层里既写了 `且` 又写了 `或`。
-    #[error("「{text}」这一层里既有 ` 且 ` 又有 ` 或 `。哪个先算说不清，用括号分组：`A 且 (B 或 C)`")]
+    #[error(
+        "「{text}」这一层里既有 ` 且 ` 又有 ` 或 `。哪个先算说不清，用括号分组：`A 且 (B 或 C)`"
+    )]
     MixedJoin {
         /// 那一层的原文。
         text: String,
@@ -585,7 +589,10 @@ impl Rule {
             1 => rules.pop(),
             _ => Some(Self::from_group(Group {
                 join: Join::Any,
-                nodes: rules.into_iter().map(|rule| Node::Group(rule.root)).collect(),
+                nodes: rules
+                    .into_iter()
+                    .map(|rule| Node::Group(rule.root))
+                    .collect(),
             })),
         }
     }
@@ -608,7 +615,13 @@ impl fmt::Display for Rule {
 
 impl fmt::Display for Clause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}{}", self.dimension.label(), self.op.label(), self.raw)
+        write!(
+            f,
+            "{}{}{}",
+            self.dimension.label(),
+            self.op.label(),
+            self.raw
+        )
     }
 }
 
@@ -740,7 +753,10 @@ fn opens_group(text: &str, item_start: usize, at: usize) -> bool {
 /// 要求两侧有空白不是挑剔：作品名里完全可能有这两个字（「一将功成万骨枯」
 /// 「生存或毁灭」那类），见字就切会把它劈成两半。
 fn padded_at(text: &str, index: usize, ch: char) -> bool {
-    text[..index].chars().next_back().is_some_and(char::is_whitespace)
+    text[..index]
+        .chars()
+        .next_back()
+        .is_some_and(char::is_whitespace)
         && text[index + ch.len_utf8()..]
             .chars()
             .next()
@@ -1155,11 +1171,7 @@ mod tests {
             "值里那对括号要原样留着：{clause:?}"
         );
         // 整条读回来还是它自己。
-        assert!(
-            Rule::parse(&rule.text).is_ok(),
-            "读得回来：{}",
-            rule.text
-        );
+        assert!(Rule::parse(&rule.text).is_ok(), "读得回来：{}", rule.text);
     }
 
     #[test]
@@ -1333,7 +1345,8 @@ mod tests {
     fn 造出来的子句套进组里印回去还是它自己() {
         // 值里带一对括号、又套在组里——两条规矩（项开头才是括号、造的时候要配对）
         // 合起来才保得住这一条。
-        let clause = Clause::build(Dimension::Work, Op::Contains, "Pocket (Japan)").expect("造得出");
+        let clause =
+            Clause::build(Dimension::Work, Op::Contains, "Pocket (Japan)").expect("造得出");
         let rule = Rule::from_group(Group::new(
             Join::Any,
             vec![
@@ -1381,19 +1394,13 @@ mod tests {
             ("子组里·后面有兄弟", |新| {
                 Group::new(
                     Join::All,
-                    vec![
-                        Node::Group(Group::new(Join::Any, vec![新, 平台()])),
-                        中文(),
-                    ],
+                    vec![Node::Group(Group::new(Join::Any, vec![新, 平台()])), 中文()],
                 )
             }),
             ("子组里·收尾那一条", |新| {
                 Group::new(
                     Join::All,
-                    vec![
-                        Node::Group(Group::new(Join::Any, vec![平台(), 新])),
-                        中文(),
-                    ],
+                    vec![Node::Group(Group::new(Join::Any, vec![平台(), 新])), 中文()],
                 )
             }),
             ("都不组里·后面有兄弟", |新| {
@@ -1412,10 +1419,7 @@ mod tests {
                         平台(),
                         Node::Group(Group::new(
                             Join::Any,
-                            vec![
-                                中文(),
-                                Node::Group(Group::new(Join::All, vec![平台(), 新])),
-                            ],
+                            vec![中文(), Node::Group(Group::new(Join::All, vec![平台(), 新]))],
                         )),
                     ],
                 )

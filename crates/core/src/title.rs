@@ -1073,7 +1073,10 @@ mod tests {
         );
         汉化.confidence = Confidence::Medium;
         let 有汉化 = 集合(vec![那条条目还叫什么, 汉化, 正名]);
-        assert_eq!(choose(&有汉化, &priorities).display, "我的世界 某某汉化组版");
+        assert_eq!(
+            choose(&有汉化, &priorities).display,
+            "我的世界 某某汉化组版"
+        );
     }
 
     #[test]

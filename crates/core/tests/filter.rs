@@ -15,7 +15,9 @@
 
 use std::collections::BTreeSet;
 
-use romcat_core::catalog::browse::{MAX_PAGE, PlatformFilter, StateFilter, Unruly, VariantQuery, WorkQuery};
+use romcat_core::catalog::browse::{
+    MAX_PAGE, PlatformFilter, StateFilter, Unruly, VariantQuery, WorkQuery,
+};
 use romcat_core::catalog::scrape::{Harvested, HarvestedValue};
 use romcat_core::catalog::{Candidate, Catalog, Confidence, Identification, Provenance, State};
 use romcat_core::dat::Convention;
@@ -81,7 +83,13 @@ fn 认出来(
         .expect("识别结论写得进");
 }
 
-fn 刮一条(catalog: &mut Catalog, anchor: AnchorKind, subject: &str, source: &str, values: &[(Field, &str)]) {
+fn 刮一条(
+    catalog: &mut Catalog,
+    anchor: AnchorKind,
+    subject: &str,
+    source: &str,
+    values: &[(Field, &str)],
+) {
     catalog
         .put_scraped(&[Harvested {
             anchor: anchor.label().to_string(),
@@ -137,16 +145,43 @@ fn 建库() -> Catalog {
         .expect("建得出作品");
 
     let 日版 = catalog
-        .add_release(口袋, Some("GB"), Some("JP"), None, Some("Ja"), Provenance::Identified)
+        .add_release(
+            口袋,
+            Some("GB"),
+            Some("JP"),
+            None,
+            Some("Ja"),
+            Provenance::Identified,
+        )
         .expect("建得出发行版");
     let 多语 = catalog
-        .add_release(火纹, Some("GBA"), Some("EU"), None, Some("En, Danish"), Provenance::Identified)
+        .add_release(
+            火纹,
+            Some("GBA"),
+            Some("EU"),
+            None,
+            Some("En, Danish"),
+            Provenance::Identified,
+        )
         .expect("建得出发行版");
     let 无语言 = catalog
-        .add_release(圣剑, Some("SFC"), Some("JP"), None, None, Provenance::Identified)
+        .add_release(
+            圣剑,
+            Some("SFC"),
+            Some("JP"),
+            None,
+            None,
+            Provenance::Identified,
+        )
         .expect("建得出发行版");
 
-    认出来(&mut catalog, "卡一/GB/口袋妖怪 红.zip", Some(口袋), Some(日版), None);
+    认出来(
+        &mut catalog,
+        "卡一/GB/口袋妖怪 红.zip",
+        Some(口袋),
+        Some(日版),
+        None,
+    );
     认出来(
         &mut catalog,
         "卡一/GB/口袋妖怪 红 汉化.zip",
@@ -154,7 +189,13 @@ fn 建库() -> Catalog {
         Some(日版),
         Some(ChineseMark::FanTranslated),
     );
-    认出来(&mut catalog, "卡一/GBA/火焰纹章.gba", Some(火纹), Some(多语), None);
+    认出来(
+        &mut catalog,
+        "卡一/GBA/火焰纹章.gba",
+        Some(火纹),
+        Some(多语),
+        None,
+    );
     认出来(
         &mut catalog,
         "卡二/SFC/圣剑传说2.sfc",
@@ -163,7 +204,13 @@ fn 建库() -> Catalog {
         Some(ChineseMark::Official),
     );
     // 「来路不明」认出了作品但没有发行版；「散落一个」压根没识别过。
-    认出来(&mut catalog, "卡二/未知/来路不明.bin", Some(圣剑), None, None);
+    认出来(
+        &mut catalog,
+        "卡二/未知/来路不明.bin",
+        Some(圣剑),
+        None,
+        None,
+    );
 
     let 通关过的 = catalog.add_collection("通关过的").expect("建得出合集");
     for key in ["卡一/GB/口袋妖怪 红 汉化.zip", "卡二/SFC/圣剑传说2.sfc"] {
@@ -197,7 +244,13 @@ fn 建库() -> Catalog {
             (Field::Description, "一部关于收集怪物的勇者故事 RED VERSION"),
         ],
     );
-    刮一条(&mut catalog, AnchorKind::Work, "口袋妖怪 红", "ScreenScraper", &[(Field::Year, "1998")]);
+    刮一条(
+        &mut catalog,
+        AnchorKind::Work,
+        "口袋妖怪 红",
+        "ScreenScraper",
+        &[(Field::Year, "1998")],
+    );
     刮一条(
         &mut catalog,
         AnchorKind::Work,
@@ -426,7 +479,10 @@ fn 三种连接各自成立而且组嵌得动() {
     );
 
     // 嵌三层。
-    let 三层 = 两边一致(&catalog, "平台=GB 且 (中文=汉化 或 (类型=RPG 且 年份>=1998))");
+    let 三层 = 两边一致(
+        &catalog,
+        "平台=GB 且 (中文=汉化 或 (类型=RPG 且 年份>=1998))",
+    );
     assert_eq!(
         三层,
         BTreeSet::from([
@@ -462,7 +518,13 @@ fn 以开始与以结束各自成立() {
     // **中英混排的值也照折。** 两个求值器有一处只在「整串是不是纯 ASCII」上分家过：
     // 一边非纯 ASCII 就退成逐字节比、另一边 `lower()` 照折 ASCII——而这个库里
     // 中英混排的名字到处都是。下面这几条空集合==空集合就验不出东西，所以各断言非空。
-    for text in ["简介~red", "简介$VERSION", "类型~ACTION", "类型^action", "类型$rpg"] {
+    for text in [
+        "简介~red",
+        "简介$VERSION",
+        "类型~ACTION",
+        "类型^action",
+        "类型$rpg",
+    ] {
         assert!(
             !两边一致(&catalog, text).is_empty(),
             "「{text}」两边都是空的，这条断言等于没测",
@@ -506,7 +568,11 @@ fn 旧的平铺规则原样解析() {
     let 老规则 = Rule::parse("平台=GB,GBA 且 中文=汉化").expect("读得懂");
     catalog.add_rule("掌机", &老规则).expect("规则写得进");
     let loaded = catalog.selection("掌机").expect("选择集读得回来");
-    assert!(loaded.broken.is_empty(), "老规则被这一票读坏了：{:?}", loaded.broken);
+    assert!(
+        loaded.broken.is_empty(),
+        "老规则被这一票读坏了：{:?}",
+        loaded.broken
+    );
     assert_eq!(loaded.selection.rules[0].text, "平台=GB,GBA 且 中文=汉化");
 }
 
@@ -525,14 +591,14 @@ fn 当前筛选原样变成规则() {
         .expect("这几条都写得成规则")
         .expect("有条件在筛，不该是空的");
     // 印出来的那行字就是屏上那几条，一条不多一条不少。
-    assert_eq!(rule.text, "平台=GB 且 中文=汉化 且 (类型~RPG 或 年份>=1996)");
+    assert_eq!(
+        rule.text,
+        "平台=GB 且 中文=汉化 且 (类型~RPG 或 年份>=1996)"
+    );
 
     // **存成子库之后选出来的，与屏上筛出来的是同一批。**
     let 屏上: BTreeSet<String> = catalog
-        .scoped_variants(
-            &query,
-            romcat_core::catalog::browse::Scope::AllExcept(&[]),
-        )
+        .scoped_variants(&query, romcat_core::catalog::browse::Scope::AllExcept(&[]))
         .expect("展得开当前筛选")
         .into_iter()
         .collect();
@@ -706,7 +772,10 @@ fn 筛选结果的条数与真正命中的条数一致() {
     assert_eq!(u64::try_from(键.len()).expect("装得下"), 变体数);
     assert_eq!(
         键.iter().cloned().collect::<BTreeSet<_>>(),
-        选择集选(&catalog, &query.to_rule().expect("写得成").expect("不是空的")),
+        选择集选(
+            &catalog,
+            &query.to_rule().expect("写得成").expect("不是空的")
+        ),
     );
 
     // 口径照票 03 那条：**作品数 ＋ 还没认出作品的变体数**。

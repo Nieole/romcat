@@ -645,7 +645,9 @@ fn satisfies(condition: &Clause, facts: &VariantFacts) -> bool {
     let any = match &condition.bound {
         Bound::Text(wanted) => facts.any_text(condition.dimension, |value| match condition.op {
             Op::Contains => wanted.iter().any(|want| contains_ignore_case(value, want)),
-            Op::StartsWith => wanted.iter().any(|want| starts_with_ignore_case(value, want)),
+            Op::StartsWith => wanted
+                .iter()
+                .any(|want| starts_with_ignore_case(value, want)),
             Op::EndsWith => wanted.iter().any(|want| ends_with_ignore_case(value, want)),
             _ => wanted.iter().any(|want| value.eq_ignore_ascii_case(want)),
         }),
@@ -753,7 +755,9 @@ pub fn facts(catalog: &Catalog) -> Result<Vec<VariantFacts>, CatalogError> {
                 .unwrap_or_default(),
             // **收藏就是那个名字定死的合集**：两样从同一份成员关系里折出来，
             // 不给它们留下各说各的余地（`catalog::filter` 那一侧也是同一条判据）。
-            favorite: joined.iter().any(|name| name == crate::collection::FAVORITE),
+            favorite: joined
+                .iter()
+                .any(|name| name == crate::collection::FAVORITE),
             collections: joined,
             ..VariantFacts::default()
         };

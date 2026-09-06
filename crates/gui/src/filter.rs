@@ -134,7 +134,9 @@ impl Filter {
                 ui.visuals().error_fg_color,
                 format!("还有 {} 条没生效：", self.pending.len()),
             )
-            .on_hover_text("没填完或者填错了的子句**不进筛选**。悄悄扔掉不说的话，筛出来的会比你以为的宽。");
+            .on_hover_text(
+                "没填完或者填错了的子句**不进筛选**。悄悄扔掉不说的话，筛出来的会比你以为的宽。",
+            );
             for line in &self.pending {
                 ui.colored_label(ui.visuals().error_fg_color, format!("　{line}"));
             }

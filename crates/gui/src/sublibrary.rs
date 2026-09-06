@@ -370,9 +370,7 @@ impl Screen {
             .map(|prepared| &prepared.plan);
         Gauge {
             picked: plan.map_or_else(
-                || {
-                    self.evaluated.get(name).map_or(0, |report| report.bytes)
-                },
+                || self.evaluated.get(name).map_or(0, |report| report.bytes),
                 |plan| plan.after_bytes.saturating_sub(plan.stranger_bytes),
             ),
             strangers: plan.map(|plan| plan.stranger_bytes),
@@ -497,9 +495,9 @@ impl Screen {
     /// 合并口径（「这一台按新的、那几台按旧的」），而那份账本来就是一趟折出来的
     /// ——多算一遍全库比多等一趟诚实。
     fn drop_survey(&mut self) -> Option<&'static str> {
-        self.evaluating.take().map(|_| {
-            "正在算的那一趟容量不认了——它算的是改之前那一套；再按一次「算一遍容量」。"
-        })
+        self.evaluating
+            .take()
+            .map(|_| "正在算的那一趟容量不认了——它算的是改之前那一套；再按一次「算一遍容量」。")
     }
 
     /// **每台设备各求一次选择集**：这套规则加例外选出什么、多大、装不装得下。
@@ -1063,11 +1061,10 @@ impl Screen {
     fn selection_ui(&mut self, ui: &mut egui::Ui, name: &str) {
         ui.horizontal(|ui| {
             ui.strong("选择集");
-            ui.weak("只读——改它按上面「改选择」")
-                .on_hover_text(
-                    "规则与例外都在**浏览屏**上改：在那儿改得见它真的筛出了什么，\
+            ui.weak("只读——改它按上面「改选择」").on_hover_text(
+                "规则与例外都在**浏览屏**上改：在那儿改得见它真的筛出了什么，\
                      在这儿改只看得见一行字。这一屏管的是「送到哪」。",
-                );
+            );
         });
         let report = self.evaluated.get(name);
         if let Some(report) = report {
@@ -1350,7 +1347,11 @@ impl Screen {
                 thousands(plan.touched())
             ));
             if plan.steps.len() > STEP_SAMPLE {
-                let label = if self.expanded { "收起来" } else { "全部展开" };
+                let label = if self.expanded {
+                    "收起来"
+                } else {
+                    "全部展开"
+                };
                 if ui.button(label).clicked() {
                     self.expanded = !self.expanded;
                 }
@@ -1501,10 +1502,7 @@ fn concerns_ui(ui: &mut egui::Ui, prepared: &Prepared) {
             .on_hover_text(&row.detail);
         }
         if plan.rejected.len() > TOP_NOTES {
-            ui.weak(format!(
-                "……另有 {} 份没列",
-                plan.rejected.len() - TOP_NOTES
-            ));
+            ui.weak(format!("……另有 {} 份没列", plan.rejected.len() - TOP_NOTES));
         }
     }
     if !plan.unsupported.is_empty() {
@@ -1518,8 +1516,13 @@ fn concerns_ui(ui: &mut egui::Ui, prepared: &Prepared) {
             ),
         );
         for row in plan.unsupported.iter().take(TOP_NOTES) {
-            ui.label(format!("{}｜{}｜要的是 {}", row.path, human_bytes(row.bytes), row.want))
-                .on_hover_text(&row.why);
+            ui.label(format!(
+                "{}｜{}｜要的是 {}",
+                row.path,
+                human_bytes(row.bytes),
+                row.want
+            ))
+            .on_hover_text(&row.why);
         }
         if plan.unsupported.len() > TOP_NOTES {
             ui.weak(format!(
@@ -1628,9 +1631,7 @@ impl Screen {
         };
         let name = self.form.name.trim().to_string();
         let target = std::path::PathBuf::from(self.form.target.trim());
-        if let Err(message) =
-            sync::prepare::refuse_target_in_library(&site.catalog, &[], &target)
-        {
+        if let Err(message) = sync::prepare::refuse_target_in_library(&site.catalog, &[], &target) {
             self.error = Some(message);
             return;
         }
@@ -1675,8 +1676,7 @@ impl Screen {
                 self.evaluated.remove(&name);
                 // 台上那趟还没认领的也不认了——认领是整份替换，刚删掉这一台的报告会
                 // 又长回来（[`Self::drop_survey`]）。
-                let mut line =
-                    format!("删掉了子库「{name}」的定义。目标设备上的文件一个都没动。");
+                let mut line = format!("删掉了子库「{name}」的定义。目标设备上的文件一个都没动。");
                 if let Some(说一句) = self.drop_survey() {
                     line.push(' ');
                     line.push_str(说一句);

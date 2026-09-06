@@ -252,11 +252,7 @@ pub const THROTTLE: Duration = Duration::from_millis(500);
 ///
 /// # Errors
 /// 取数、解析或写库失败时返回一句给人看的话。
-pub fn refetch(
-    source: Source,
-    workspace: &Path,
-    task: &Handle,
-) -> Result<SourceStatus, String> {
+pub fn refetch(source: Source, workspace: &Path, task: &Handle) -> Result<SourceStatus, String> {
     task.steps(1);
     task.step(&format!("取 {}", source.label()))
         .map_err(|halted| halted.to_string())?;

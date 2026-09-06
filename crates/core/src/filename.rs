@@ -1336,7 +1336,11 @@ mod tests {
         // `V#*` 与 `v#*` 是同一条模式——整理一下配置里的大小写风格不该让全库重采一遍。
         let 小写 = 补一份("\"版本\" = 1\n\"版本模式\" = [\"v#*\"]\n");
         let 大写 = 补一份("\"版本\" = 1\n\"版本模式\" = [\"V#*\"]\n");
-        assert_eq!(小写.fingerprint(), 大写.fingerprint(), "同一条模式换个大小写写法");
+        assert_eq!(
+            小写.fingerprint(),
+            大写.fingerprint(),
+            "同一条模式换个大小写写法"
+        );
         assert_eq!(
             小写.parse("塞尔达传说(V1.2).zip").title,
             大写.parse("塞尔达传说(V1.2).zip").title,
@@ -1363,7 +1367,10 @@ mod tests {
         let 乙 = 补一份("\"版本\" = 1\n\"继承内置\" = false\n\"汉化组名\" = [\"汉化组名\"]\n");
         assert_ne!(甲.fingerprint(), 乙.fingerprint());
         // 指纹该不一样的理由：这两份规则剥出来的东西真的不一样。
-        assert_eq!(甲.parse("塞尔达传说[某某汉化组名义].zip").team.as_deref(), Some("某某汉化组名义"));
+        assert_eq!(
+            甲.parse("塞尔达传说[某某汉化组名义].zip").team.as_deref(),
+            Some("某某汉化组名义")
+        );
         assert_eq!(乙.parse("塞尔达传说[某某汉化组名义].zip").team, None);
     }
 
@@ -1376,7 +1383,11 @@ mod tests {
         let 补别名 = 补一份(
             "\"版本\" = 1\n[[\"中文源平台别名\"]]\n\"叫\" = \"任天堂红白机\"\n\"是\" = \"FC\"\n",
         );
-        assert_eq!(补别名.platform_alias("任天堂红白机"), Some("FC"), "别名真补上了");
+        assert_eq!(
+            补别名.platform_alias("任天堂红白机"),
+            Some("FC"),
+            "别名真补上了"
+        );
         assert_eq!(
             Rules::builtin().fingerprint(),
             补别名.fingerprint(),

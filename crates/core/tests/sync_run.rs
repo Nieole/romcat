@@ -17,10 +17,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use romcat_core::adapter;
-use romcat_core::catalog::Roots;
-use romcat_core::task::Handle;
 use romcat_core::capability::Profile;
 use romcat_core::catalog::Catalog;
+use romcat_core::catalog::Roots;
 use romcat_core::catalog::scrape::{Harvested, HarvestedMedia};
 use romcat_core::fs::RealFs;
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
@@ -29,6 +28,7 @@ use romcat_core::scrape::priority::Priorities;
 use romcat_core::scrape::{AnchorKind, MediaKind};
 use romcat_core::sublibrary::{self, Rule, Selection, Sublibrary};
 use romcat_core::sync::{self, Act, FileKind, Manifest, Placement, Sources};
+use romcat_core::task::Handle;
 use romcat_core::testing::sample::zip;
 use romcat_core::testing::{TempDir, temp_dir};
 
@@ -602,7 +602,8 @@ fn 大小写不敏感的目标上_清单之外只差大小写的文件不被顶�
 
     let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
     assert!(
-        这趟.plan
+        这趟
+            .plan
             .surprises
             .iter()
             .any(|s| s.kind == sync::SurpriseKind::Occupied),
@@ -610,7 +611,8 @@ fn 大小写不敏感的目标上_清单之外只差大小写的文件不被顶�
         这趟.plan.surprises
     );
     assert!(
-        !这趟.plan
+        !这趟
+            .plan
             .steps
             .iter()
             .any(|step| step.path.eq_ignore_ascii_case("GB/tetris.zip")),
@@ -646,7 +648,8 @@ fn 计划算完之后才出现的落点占用_执行这一层也挡得住() {
     let 现场 = 现场::摆在(建个只差大小写的库());
     let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
     assert!(
-        这趟.plan
+        这趟
+            .plan
             .steps
             .iter()
             .any(|step| step.act == Act::Add && step.path == "GB/tetris.zip"),
@@ -794,7 +797,10 @@ fn 落点被占再多也不算系统性故障_不触发连着失败就停下来(
     assert!(!outcome.interrupted);
     assert_eq!(outcome.failures.len(), 11, "{:?}", outcome.failures);
     assert!(
-        outcome.failures.iter().all(|failure| failure.act == Act::Add),
+        outcome
+            .failures
+            .iter()
+            .all(|failure| failure.act == Act::Add),
         "{:?}",
         outcome.failures
     );

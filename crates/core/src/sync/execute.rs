@@ -482,12 +482,14 @@ fn place(
             let roots = sources
                 .library_roots
                 .ok_or_else(|| io::Error::other("这一趟要搬 ROM，可调用方没说主库在哪"))?;
-            let from = roots.real_path(sources.library, &step.source).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("主库里找不到 {}", step.source),
-                )
-            })?;
+            let from = roots
+                .real_path(sources.library, &step.source)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("主库里找不到 {}", step.source),
+                    )
+                })?;
             match &step.convert {
                 // 要转格式：读主库那份原始形态，写出一份**新文件**（ADR-0004）。
                 Some(conversion) => {

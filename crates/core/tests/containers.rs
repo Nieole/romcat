@@ -647,13 +647,7 @@ fn 扫一遍(
     options: &romcat_core::scan::ScanOptions,
 ) -> romcat_core::catalog::Catalog {
     let mut catalog = romcat_core::catalog::Catalog::open_in_memory().expect("能开中立库");
-    romcat_core::scan::scan(
-        library,
-        &mut catalog,
-        options,
-        &Handle::new(),
-    )
-    .expect("扫描不该失败");
+    romcat_core::scan::scan(library, &mut catalog, options, &Handle::new()).expect("扫描不该失败");
     catalog
 }
 

@@ -12,8 +12,7 @@ use std::fs;
 use std::path::Path;
 
 use romcat_core::catalog::identify::State;
-use romcat_core::task::Handle;
-use romcat_core::catalog::{Catalog, Confidence, EntryRecord, Verdict, Roots};
+use romcat_core::catalog::{Catalog, Confidence, EntryRecord, Roots, Verdict};
 use romcat_core::container::{ContainerKind, Contents, InnerEntry, Penetration};
 use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
@@ -23,6 +22,7 @@ use romcat_core::fs::{EntryKind, EntryMeta, RealFs};
 use romcat_core::identify::fuzzy;
 use romcat_core::identify::{self, Options};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
+use romcat_core::task::Handle;
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::triage::{self, Filter};

@@ -396,7 +396,11 @@ impl Panel {
             "刮削 · {} 个变体（{} · {}）",
             thousands(self.scope_total()),
             self.sweep.label(),
-            if self.online { "含联网源" } else { "仅本地源" },
+            if self.online {
+                "含联网源"
+            } else {
+                "仅本地源"
+            },
         );
         self.error = None;
         self.notice = None;
@@ -541,7 +545,10 @@ impl Panel {
         ui.strong("采法 · 跑多久");
         for sweep in Gather::all() {
             if ui
-                .radio(self.sweep == sweep, format!("{}（{}）", sweep.label(), sweep.why()))
+                .radio(
+                    self.sweep == sweep,
+                    format!("{}（{}）", sweep.label(), sweep.why()),
+                )
                 .clicked()
             {
                 self.sweep = sweep;
@@ -619,8 +626,7 @@ impl Panel {
             // **账算不出来就不许按。** 屏上写着「这本账算不出来」而按钮照旧按得下去的话，
             // 勾了联网源就是在零估算下拿账号与 IP 发几千个请求——那正是这块面板要防的
             // 那一件事（ADR-0007）。
-            let ready =
-                self.running.is_none() && !self.scope.is_empty() && self.estimate.is_some();
+            let ready = self.running.is_none() && !self.scope.is_empty() && self.estimate.is_some();
             go = ui
                 .add_enabled(ready, egui::Button::new("加入任务队列"))
                 .on_hover_text(
@@ -695,7 +701,8 @@ fn run(
     task.step("读优先级表").map_err(|_| "按停了".to_string())?;
     let priorities = romcat_core::sync::prepare::priorities(None, workspace)?;
 
-    task.step("开中文离线源").map_err(|_| "按停了".to_string())?;
+    task.step("开中文离线源")
+        .map_err(|_| "按停了".to_string())?;
     // **剥离规则读工作目录里那份**（`sources::rules`，与命令行同一条查法）：正题正是
     // 拿去撞中文离线源的那一串字，两条路各用一份规则的话，同一个变体在命令行与界面上
     // 会撞到不同的条目——而那是写进库里的结论，不是显示上的差别。
@@ -717,7 +724,8 @@ fn run(
 
     // **匹配裁决读不到就停下，不降级成「没人裁过」。** 当成没裁过跑下去，会把人否定掉
     // 的中文名整片撞回来——那正是沉淀库那条「宁可如实拒绝、绝不将就」要拦的事。
-    task.step("摊平匹配裁决").map_err(|_| "按停了".to_string())?;
+    task.step("摊平匹配裁决")
+        .map_err(|_| "按停了".to_string())?;
     let rulings = verdict::MatchIndex::load(&site.store, &site.library)
         .map_err(|error| format!("沉淀库读不动：{error}"))
         .and_then(|index| {
@@ -730,12 +738,9 @@ fn run(
         .as_ref()
         .map(|_| HttpFetcher::with_throttle(limits().interval));
     let net = match (fetcher.as_ref(), credentials) {
-        (Some(fetcher), Some(credentials)) => Some(Net::new(
-            fetcher,
-            limits(),
-            credentials,
-            task.cancel(),
-        )),
+        (Some(fetcher), Some(credentials)) => {
+            Some(Net::new(fetcher, limits(), credentials, task.cancel()))
+        }
         _ => None,
     };
     let mut progress = |done: scrape::Progress| task.tick(done.done, done.total);
@@ -777,8 +782,8 @@ fn open_zh(
     if !path.exists() {
         return Ok(None);
     }
-    let mut store = zh::store::Store::open(&path)
-        .map_err(|error| format!("中文索引打不开：{error}"))?;
+    let mut store =
+        zh::store::Store::open(&path).map_err(|error| format!("中文索引打不开：{error}"))?;
     if store.rebuilding().is_some() {
         // 平台清单同样读工作目录里那份：重建要把数据源写的平台名折成本工具的平台名。
         let manifest = romcat_core::sources::manifest(workspace)?;

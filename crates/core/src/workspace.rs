@@ -374,7 +374,11 @@ mod tests {
         assert_eq!(挂在甲, 盘符);
         assert_eq!(
             checkpoint_path(&workspace, Slug::Named("主库"), "根"),
-            checkpoint_path(&workspace, Slug::pick(Some("主库"), Path::new("E:\\Game")), "根")
+            checkpoint_path(
+                &workspace,
+                Slug::pick(Some("主库"), Path::new("E:\\Game")),
+                "根"
+            )
         );
     }
 

@@ -13,7 +13,6 @@ use std::fs;
 use std::path::Path;
 
 use romcat_core::catalog::identify::State;
-use romcat_core::task::Handle;
 use romcat_core::catalog::{Catalog, Confidence, Roots};
 use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
@@ -23,6 +22,7 @@ use romcat_core::identify::fuzzy;
 use romcat_core::identify::report::IdentifyReport;
 use romcat_core::identify::{self, Options};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
+use romcat_core::task::Handle;
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::verdict;
@@ -279,13 +279,7 @@ fn 结论(现场: &现场, key: &str) -> (State, Option<String>) {
 fn 重扫(现场: &mut 现场) {
     let mut options = ScanOptions::named(现场.dir.path(), "库");
     options.jobs = Jobs::Fixed(2);
-    scan::scan(
-        &RealFs::new(),
-        &mut 现场.catalog,
-        &options,
-        &Handle::new(),
-    )
-    .expect("扫得动");
+    scan::scan(&RealFs::new(), &mut 现场.catalog, &options, &Handle::new()).expect("扫得动");
 }
 
 #[test]
@@ -561,7 +555,8 @@ fn 中立库交回候选的次序就是按可信程度排的那一个() {
         .candidates_of("库/FC/谁也不认得.zip")
         .expect("读得出");
     assert_eq!(
-        候选.iter()
+        候选
+            .iter()
             .map(|one| (one.source.as_str(), one.confidence))
             .collect::<Vec<_>>(),
         vec![
@@ -822,7 +817,6 @@ fn 目录名是分解形式时它底下整棵子树都还认得出() {
     }
 }
 
-
 #[test]
 fn 还没识别的变体照样占着变体总数与全部变体里那个分母() {
     // 词表「还没识别」：一个变体**连识别都还没跑过**。它既不是「未命中」（撞过没撞上，
@@ -945,7 +939,11 @@ fn 命中的那份删掉重扫之后结论与候选不再交出() {
         "前提：重新成型之后这个变体已经不在了"
     );
     assert!(
-        现场.catalog.identification_of(键).expect("读得出").is_none(),
+        现场
+            .catalog
+            .identification_of(键)
+            .expect("读得出")
+            .is_none(),
         "结论跟着变体走"
     );
     assert!(
@@ -990,8 +988,7 @@ fn 作品与发行版表里不留指不着任何变体的行() {
         })
         .expect("走得动");
     for (id, release) in &发行版们 {
-        let 有人指 = 变体们.iter().any(|it| it.release_id == Some(*id))
-            || 候选指着的.contains(id);
+        let 有人指 = 变体们.iter().any(|it| it.release_id == Some(*id)) || 候选指着的.contains(id);
         assert!(有人指, "发行版 {id} 指不着任何变体：{release:?}");
         assert!(作品们.contains_key(&release.work_id), "它的作品还在");
     }

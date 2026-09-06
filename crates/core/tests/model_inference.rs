@@ -17,7 +17,6 @@ use std::fs;
 use std::path::Path;
 
 use romcat_core::catalog::identify::State;
-use romcat_core::task::Handle;
 use romcat_core::catalog::{Candidate, Catalog, Confidence, Roots};
 use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
@@ -28,6 +27,7 @@ use romcat_core::fs::RealFs;
 use romcat_core::identify::model::{self, Credentials, Guessing, Inference, Limits, Pricing};
 use romcat_core::identify::{self, Options, fuzzy};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
+use romcat_core::task::Handle;
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::triage::{self, Filter};

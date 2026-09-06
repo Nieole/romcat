@@ -122,7 +122,10 @@ fn 识别跑通并把命中率打出来() {
     assert_eq!(候选.len(), 1);
     assert!(候选[0].accepted, "精确命中自动通过");
     assert!(候选[0].evidence.contains("CRC-32"), "{}", 候选[0].evidence);
-    let 变体 = catalog.variant("库/FC/游戏.zip").expect("读得出").expect("在");
+    let 变体 = catalog
+        .variant("库/FC/游戏.zip")
+        .expect("读得出")
+        .expect("在");
     assert!(变体.work_id.is_some() && 变体.release_id.is_some());
 }
 

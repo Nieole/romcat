@@ -35,9 +35,7 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use crate::catalog::roots::{self, AddRootError, RootScan};
-use crate::catalog::{
-    Baseline, Catalog, CatalogError, EntryRecord, ScanDelta, Traversal, Verdict,
-};
+use crate::catalog::{Baseline, Catalog, CatalogError, EntryRecord, ScanDelta, Traversal, Verdict};
 use crate::classify;
 use crate::container::{self, ContainerKind, Penetration};
 use crate::fs::{DirEntry, EntryKind, EntryMeta, LibraryFs};
@@ -414,7 +412,8 @@ pub fn scan(
             let baseline = &baseline;
             scope.spawn(move || {
                 while let Some(dir) = queue.pop() {
-                    let result = process_dir(library, rooted, dir, options, budget, baseline, cancel);
+                    let result =
+                        process_dir(library, rooted, dir, options, budget, baseline, cancel);
                     if tx.send(result).is_err() {
                         break;
                     }
@@ -1711,7 +1710,10 @@ mod tests {
             &建库于("/Volumes/丙"),
             &ScanOptions::named("/Volumes/丙", "第二个根"),
         );
-        assert!(另一个根.delta.added > 0, "换个根名就是新的一个根，拦都不该拦");
+        assert!(
+            另一个根.delta.added > 0,
+            "换个根名就是新的一个根，拦都不该拦"
+        );
 
         let mut 另一个主库 = MemFs::new();
         另一个主库
@@ -1800,11 +1802,17 @@ mod tests {
         assert_eq!(*present, 0, "这一层什么都没有");
         assert!(*recorded_count > 0);
         // 措辞要让用户去插盘，而不是去换根名——那是另一档（`DifferentLibrary`）的出路。
-        assert!(错.to_string().contains("插上那块盘再扫"), "得说清出路：{错}");
+        assert!(
+            错.to_string().contains("插上那块盘再扫"),
+            "得说清出路：{错}"
+        );
         assert!(!错.to_string().contains("换个根名"), "别把人指错路：{错}");
 
         // 拦下来那一趟中立库一个字都没动。
-        assert_eq!(catalog.root_stats("主库").expect("数得出").files, 扫到的文件);
+        assert_eq!(
+            catalog.root_stats("主库").expect("数得出").files,
+            扫到的文件
+        );
         assert!(
             catalog.contains("主库/FC/超级马里奥.zip").expect("查得到"),
             "整个根不许凭空消失"
@@ -1843,7 +1851,10 @@ mod tests {
         catalog.remove_root("主库").expect("移得掉");
         let 再扫 = 扫入(&mut catalog, &清空了, &options);
         assert_eq!(再扫.report.totals.files, 0, "加回来是个空的根，扫得动");
-        assert_eq!(再扫.delta.removed, 0, "库里已经没有它那一支了，不该再数一遍");
+        assert_eq!(
+            再扫.delta.removed, 0,
+            "库里已经没有它那一支了，不该再数一遍"
+        );
     }
 
     #[test]
@@ -1887,7 +1898,10 @@ mod tests {
             &ScanOptions::named("/Volumes/乙", "元数据库"),
         );
 
-        assert_eq!(乙.delta.added, 甲.delta.added, "第二个根一条都不该被认成已有");
+        assert_eq!(
+            乙.delta.added, 甲.delta.added,
+            "第二个根一条都不该被认成已有"
+        );
         assert_eq!(乙.delta.unchanged, 0);
         assert_eq!(乙.delta.removed, 0, "扫乙盘绝不许动甲盘那一支");
 
@@ -2189,8 +2203,7 @@ mod tests {
         扫入(&mut catalog, &建库(), &不写断点);
 
         // 那份断点现在比中立库旧。照它续跑会把上一次完整扫描的记录全删掉。
-        let 再扫 =
-            scan(&建库(), &mut catalog, &options, &Handle::new()).expect("扫描不该失败");
+        let 再扫 = scan(&建库(), &mut catalog, &options, &Handle::new()).expect("扫描不该失败");
         assert!(!再扫.report.resumed, "过期的断点不该被当成续跑");
         assert_eq!(再扫.report.totals.files, 11, "一个文件都不许丢");
         assert_eq!(再扫.delta.removed, 0);
@@ -2205,8 +2218,7 @@ mod tests {
             interval: Duration::ZERO,
             resume: false,
         });
-        let err =
-            scan(&library, &mut 新中立库(), &options, &Handle::new()).expect_err("必须拒绝");
+        let err = scan(&library, &mut 新中立库(), &options, &Handle::new()).expect_err("必须拒绝");
         assert!(matches!(err, ScanError::WritesInsideLibrary { .. }));
     }
 
@@ -2237,8 +2249,7 @@ mod tests {
             resume: false,
         });
 
-        let err =
-            scan(&library, &mut 新中立库(), &options, &Handle::new()).expect_err("必须拒绝");
+        let err = scan(&library, &mut 新中立库(), &options, &Handle::new()).expect_err("必须拒绝");
         assert!(
             matches!(err, ScanError::WritesInsideLibrary { .. }),
             "断点写在主库里，闸必须响；实际是 {err}"
@@ -2376,7 +2387,11 @@ mod tests {
         let mut catalog = 新中立库();
         let mut 甲 = 建库于("/Volumes/甲");
         甲.unlistable_dir("/Volumes/甲/PS1/进不去");
-        let 扫甲 = 扫入(&mut catalog, &甲, &ScanOptions::named("/Volumes/甲", "甲盘"));
+        let 扫甲 = 扫入(
+            &mut catalog,
+            &甲,
+            &ScanOptions::named("/Volumes/甲", "甲盘"),
+        );
         assert_eq!(扫甲.report.anomalies.errors, 1, "甲盘那个目录列不开");
 
         let 扫乙 = 扫入(
@@ -2424,7 +2439,10 @@ mod tests {
         );
 
         let 再扫 = 扫入(&mut catalog, &建库于("/Volumes/甲"), &options);
-        assert!(!再扫.report.resumed, "加回来的是新的一个根，旧断点不许接着跑");
+        assert!(
+            !再扫.report.resumed,
+            "加回来的是新的一个根，旧断点不许接着跑"
+        );
         assert!(!再扫.interrupted);
         assert!(再扫.shaped);
         assert_eq!(

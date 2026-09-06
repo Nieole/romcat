@@ -17,14 +17,14 @@ use std::path::{Path, PathBuf};
 use std::{fs, io};
 
 use romcat_core::capability::{Filesystem, Profile, RejectReason, Roster};
-use romcat_core::catalog::Roots;
-use romcat_core::task::Handle;
 use romcat_core::catalog::Catalog;
+use romcat_core::catalog::Roots;
 use romcat_core::container::{self, ReadPlan};
 use romcat_core::fs::RealFs;
 use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::sublibrary::{self, Rule, Selection, Sublibrary};
 use romcat_core::sync::{self, Act, Manifest, Sources};
+use romcat_core::task::Handle;
 use romcat_core::testing::{TempDir, temp_dir};
 use sevenz_rust2::{ArchiveEntry, ArchiveWriter};
 
@@ -249,8 +249,14 @@ fn 卡带的_7z_重打包成_zip_而且产物零解压读得回去() {
         .find(|step| step.convert.is_some())
         .expect("有一条转换步骤");
     assert_eq!(那一步.act, Act::Add);
-    assert_eq!(那一步.source, "库/SFC/魂斗罗.7z", "源仍然指着主库里的原始形态");
-    assert_eq!(那一步.path, "SFC/魂斗罗.zip", "落点是产物——相对子库根，不带根名");
+    assert_eq!(
+        那一步.source, "库/SFC/魂斗罗.7z",
+        "源仍然指着主库里的原始形态"
+    );
+    assert_eq!(
+        那一步.path, "SFC/魂斗罗.zip",
+        "落点是产物——相对子库根，不带根名"
+    );
 
     let 转之前 = 取证(&现场.库根.join("SFC/魂斗罗.7z"));
     let outcome = 现场.跑(&desired, &plan, None);

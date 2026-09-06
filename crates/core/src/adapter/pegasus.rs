@@ -1857,7 +1857,9 @@ regex: .*
 
         let back = Pegasus.read(text.as_bytes()).expect("读得回来");
         assert!(
-            back.lossy.iter().all(|note| !format!("{note:?}").contains("Malformed")),
+            back.lossy
+                .iter()
+                .all(|note| !format!("{note:?}").contains("Malformed")),
             "读回来不该有坏行：{:?}",
             back.lossy
         );
@@ -1866,8 +1868,14 @@ regex: .*
         };
         // **段落分隔往返得回来**；单个换行折成空格是 Pegasus 这个格式自己的天花板。
         let 简介 = game.description.as_deref().expect("简介还在");
-        assert!(简介.starts_with("第一段\n\n第二段"), "段落分隔还在：{简介:?}");
-        assert!(简介.contains("https://例子/a"), "带冒号的那截没丢：{简介:?}");
+        assert!(
+            简介.starts_with("第一段\n\n第二段"),
+            "段落分隔还在：{简介:?}"
+        );
+        assert!(
+            简介.contains("https://例子/a"),
+            "带冒号的那截没丢：{简介:?}"
+        );
         // 那个半角 `:` 没有变成一个新属性键。
         assert!(game.unknown.is_empty(), "不该冒出新键：{:?}", game.unknown);
     }
@@ -1901,7 +1909,10 @@ regex: .*
             读回来, "第一段头一行 第一段第二行\n\n第二段",
             "开头的全角空格没了、单个换行成了空格、一个空行分隔的段落原样回来了"
         );
-        assert!(!读回来.starts_with('\u{3000}'), "开头那两个全角空格被掐掉了");
+        assert!(
+            !读回来.starts_with('\u{3000}'),
+            "开头那两个全角空格被掐掉了"
+        );
 
         // **「段落原样往返」只在恰好一个空行上成立**，声明因此不能写成无条件的那一句：
         // 一个 `.` 读回来固定还原成 `\n\n`，于是连着两个空行（原文三个换行）写成两个
@@ -1919,7 +1930,10 @@ regex: .*
             .find(|loss| loss.what.contains("换行"))
             .expect("单个换行那一条在");
         assert!(换行.becomes.contains("空格"), "折成空格得说出口：{换行:?}");
-        assert!(换行.becomes.contains("空行"), "段落回得来得说出口：{换行:?}");
+        assert!(
+            换行.becomes.contains("空行"),
+            "段落回得来得说出口：{换行:?}"
+        );
         assert!(
             换行.becomes.contains("多长出一个换行"),
             "连着的空行会长出换行，这句不能省：{换行:?}"

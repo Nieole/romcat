@@ -20,7 +20,6 @@ use std::path::Path;
 
 use romcat_core::catalog::Catalog;
 use romcat_core::catalog::Roots;
-use romcat_core::task::Handle;
 use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
 use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
@@ -29,6 +28,7 @@ use romcat_core::identify;
 use romcat_core::identify::fuzzy;
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::scrape::{self, Priorities};
+use romcat_core::task::Handle;
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::title::{self, Language, Seam, SortFrom, TitleKind};
@@ -217,7 +217,8 @@ fn 跑一遍(现场: &mut 现场) -> title::TitleReport {
         &mut |_| {},
     )
     .expect("识别不该失败");
-    let mut options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
+    let mut options =
+        scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场.pool_dir.path());
     options.media = false;
     scrape::run(
         &RealFs::new(),
@@ -431,13 +432,7 @@ fn 中文名带置信度低的那些进得了队列() {
     );
     let mut options = ScanOptions::named(现场.dir.path(), "库");
     options.jobs = Jobs::Fixed(2);
-    scan::scan(
-        &RealFs::new(),
-        &mut 现场.catalog,
-        &options,
-        &Handle::new(),
-    )
-    .expect("扫得动");
+    scan::scan(&RealFs::new(), &mut 现场.catalog, &options, &Handle::new()).expect("扫得动");
     let report2 = 跑一遍(&mut 现场);
 
     assert!(

@@ -240,9 +240,7 @@ impl App {
     }
 
     /// 库那一屏、它的库、**再加任务台**。加根、扫描、取数据源这三下都要它们。
-    pub fn roots_site_and_tasks(
-        &mut self,
-    ) -> (&mut roots::Screen, &mut Site, &mut task::Tasks) {
+    pub fn roots_site_and_tasks(&mut self) -> (&mut roots::Screen, &mut Site, &mut task::Tasks) {
         (&mut self.roots, &mut self.site, &mut self.board)
     }
 
@@ -259,9 +257,7 @@ impl App {
 
     /// 浏览那一屏、它的库、**再加任务台**。按「刮削选中…」之后那一下三样都要：
     /// 展开这一批的键、算那本账、把活排到台上去（票 `gui-redesign/10`）。
-    pub fn browse_site_and_tasks(
-        &mut self,
-    ) -> (&mut browse::Screen, &mut Site, &mut task::Tasks) {
+    pub fn browse_site_and_tasks(&mut self) -> (&mut browse::Screen, &mut Site, &mut task::Tasks) {
         (&mut self.browse, &mut self.site, &mut self.board)
     }
 
