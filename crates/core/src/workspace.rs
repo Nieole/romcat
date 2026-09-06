@@ -281,9 +281,19 @@ pub fn media_pool_dir(workspace: &Path) -> PathBuf {
 /// 根名先过 [`Slug::Named`] 那套过滤：它落到文件名上，`/ \ : * ? " < > |` 一个都过不去。
 #[must_use]
 pub fn checkpoint_path(workspace: &Path, slug: Slug<'_>, root_name: &str) -> PathBuf {
+    checkpoint_path_of(workspace, &slug.text(), root_name)
+}
+
+/// 同上，只是主库那一半**已经折成了名字**（[`Slug::text`] 的产物）。
+///
+/// 开完一份现场之后，手上剩的就是那串名字而不是 [`Slug`]
+/// （`site::Site::library`）。再包一次 [`Slug::Named`] 会哈希两遍、折出第二个文件名，
+/// 于是界面写下的断点与命令行 `--resume` 要找的那一个对不上。拼法只此一处，两个入口
+/// 走的是同一行代码。
+#[must_use]
+pub fn checkpoint_path_of(workspace: &Path, library: &str, root_name: &str) -> PathBuf {
     workspace.join("scans").join(format!(
-        "{}.{}.checkpoint.json",
-        slug.text(),
+        "{library}.{}.checkpoint.json",
         Slug::Named(root_name).text()
     ))
 }

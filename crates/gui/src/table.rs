@@ -105,6 +105,20 @@ impl Window {
         }
     }
 
+    /// **库变了**：窗里缓着的那一段整个作废，下一帧重新问中立库要。
+    ///
+    /// 与 [`Window::set_query`] 是两件事：那一个说「要的不是这一批了」，这一个说
+    /// 「要的还是这一批，但库底下已经不是刚才那份了」。扫完一个根、裁完一批都走这条
+    /// ——查询一个字没改，所以 `set_query` 一律是空操作，而窗里那 512 行连同总数、
+    /// 连同**筛选面板上那几档**全是旧的（[`crate::library::Screen::invalidate`]）。
+    pub fn invalidate(&mut self) {
+        self.rows.clear();
+        self.first = 0;
+        // 上一次读不动的理由可能已经不在了（那一趟扫描正是去补它的）。
+        self.error = None;
+        self.stale = true;
+    }
+
     /// 满足筛选条件的总行数。
     #[must_use]
     pub fn total(&self) -> u64 {
