@@ -423,6 +423,84 @@ pub fn over_capacity(capacity: Option<u64>, bytes: u64) -> Option<u64> {
         .filter(|over| *over > 0)
 }
 
+/// **容量条**那三段：**选中的**、**清单之外的**、**上限**。
+///
+/// 子库屏一台设备一张卡，卡上那根条子画的就是它（票 `gui-redesign/11`）。
+/// 三个数各有各的出处，而且**出处不同这件事本身要说得出口**：
+///
+/// - **选中**——这个子库在卡上占的地方。**卡不在手边时**是选择集选出来的那批变体一共
+///   多大（只问中立库）；**排过差量预览之后**换成计划里那个数，因为那时算得准了
+///   （元数据与媒体也要占地方、转换又省下来一些）。
+/// - **清单之外**——目标上工具没放过的那些文件一共多大（[`Plan::stranger_bytes`]）。
+///   它要**目标设备在位**才知道，所以没排过差量预览时是 `None`——那是「还不知道」，
+///   不是「一个字节都没有」。两者在卡上画成同一个 0 的话，人会以为卡上是空的。
+/// - **上限**——子库自己记着的容量上限。`None` 是不设限。
+///
+/// **这里不算「超没超」。** 超出量与裁剪建议由 [`over_capacity`] 与
+/// [`trim_suggestions`] 一处算（ADR-0016），报告与计划各自摆的都是那一份；
+/// 条子再算一遍就会出现「条子说满了、旁边那行字说没超」这种对不上的账。
+///
+/// **不算，也就必须对得上**，而对得上是一条能写下来的规矩：填这三个数的人要保证
+/// `over_capacity(capacity, taken())` 等于旁边那行字用的那个超出量。
+/// 排过差量的那一台照 [`Plan::over_capacity`] 那条口径填
+/// （`选中 = after_bytes − stranger_bytes`，于是 [`Self::taken`] 正好是 `after_bytes`）；
+/// 没排过的照 [`SelectionReport::over_capacity`] 那条填（`选中 = report.bytes`、
+/// 清单之外是 `None`，于是 `taken()` 正好是 `report.bytes`）。两条都是恒等式，
+/// 不是「差不多」。
+///
+/// [`Plan::stranger_bytes`]: crate::sync::Plan::stranger_bytes
+/// [`Plan::over_capacity`]: crate::sync::Plan::over_capacity
+/// [`SelectionReport::over_capacity`]: report::SelectionReport::over_capacity
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Gauge {
+    /// 选择集选中的那批变体一共多大。
+    pub picked: u64,
+    /// 目标上**清单之外**的文件一共多大；`None` 是还没排过差量预览，不知道。
+    pub strangers: Option<u64>,
+    /// 容量上限；`None` 是不设限。
+    pub capacity: Option<u64>,
+}
+
+impl Gauge {
+    /// 条子画满对应多少字节。
+    ///
+    /// 有上限就是上限；**超了上限就照实际占用画满**，不然超出去的那一截无处可画，
+    /// 一根画满的条子会同时表示「正好装满」与「超了三倍」。没上限时就照占用本身画，
+    /// 于是两段的比例仍然看得出谁大谁小。
+    #[must_use]
+    pub fn scale(&self) -> u64 {
+        self.taken().max(self.capacity.unwrap_or(0))
+    }
+
+    /// 卡上一共占掉多少：选中的加上清单之外的。
+    #[must_use]
+    pub fn taken(&self) -> u64 {
+        self.picked.saturating_add(self.strangers.unwrap_or(0))
+    }
+
+    /// **选中**那一段占条子的几成，0.0–1.0。
+    #[must_use]
+    pub fn picked_share(&self) -> f32 {
+        share(self.picked, self.scale())
+    }
+
+    /// **清单之外**那一段占条子的几成，0.0–1.0。
+    #[must_use]
+    pub fn stranger_share(&self) -> f32 {
+        share(self.strangers.unwrap_or(0), self.scale())
+    }
+}
+
+/// 一段占整条的几成。分母是 0 时是 0——画一根空条子，不是除以零。
+fn share(part: u64, whole: u64) -> f32 {
+    if whole == 0 {
+        return 0.0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let value = part as f32 / whole as f32;
+    value.clamp(0.0, 1.0)
+}
+
 /// 按体积排序的**裁剪建议**：最大的那几个变体。
 ///
 /// **只建议，绝不自动截断**（ADR-0016）——同一套规则在两张不同容量的卡上会选出

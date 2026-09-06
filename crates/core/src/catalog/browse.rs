@@ -823,7 +823,8 @@ impl Unruly {
                 dimension.label()
             ),
             Self::Unwritable(dimension) => format!(
-                "选中的那个{}里有规则语言的记号（两侧带空白的「且」「或」，                 或者没配对的括号），写进规则读回来就不是它自己了。",
+                "选中的那个{}里有规则语言的记号（两侧带空白的「且」「或」，\
+                 或者没配对的括号），写进规则读回来就不是它自己了。",
                 dimension.label()
             ),
         }
@@ -995,6 +996,14 @@ impl WorkQuery {
         }
         if nodes.is_empty() {
             return Ok(None);
+        }
+        // 只剩一个组时**就是那个组**，不再往外套一层「全部满足」——套了的话印出来
+        // 多一对括号（`(平台=GB 或 平台=SFC)`），而这行字是用户要照着核对的东西。
+        // 与上面那条「顶层本来就是全部满足就摊进来」是同一条理由。
+        if nodes.len() == 1
+            && let Some(Node::Group(group)) = nodes.first()
+        {
+            return Ok(Some(Rule::from_group(group.clone())));
         }
         Ok(Some(Rule::from_group(Group::new(Join::All, nodes))))
     }
