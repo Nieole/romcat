@@ -705,3 +705,58 @@ fn 一个文件一个合集_而且合集就是平台() {
             .any(|file| file.collection == "FC" && file.path.ends_with("FC.metadata.pegasus.txt"))
     );
 }
+
+/// 维护者用**续行**写的多值：两家开发商、两家发行商、两个类型。
+///
+/// 这是 Pegasus 官方文档里 `files:` 那种写法，手工维护的文件里到处都是。
+const 手写的多值: &str = "\
+# 开发商写了两家，别给我丢掉一家
+collection: FC
+
+game: 我给它起的名字
+file: FC/魂斗罗台版/魂斗罗.zip
+developers:
+  甲公司
+  乙公司
+publishers:
+  丙公司
+  丁公司
+genres:
+  动作
+  射击
+";
+
+#[test]
+fn 维护者用续行写的多值_一次往返一家都不少() {
+    // **一次往返不蒸发心血**（ADR-0001）落到集合字段上：`developers` 写了两家，
+    // 导入只落头一家的话，导出那一趟会「合法地」把他两行覆盖成一行——第二家没了，
+    // 键还从 `developers` 缩成了 `developer`，而报告一个字都不说。
+    let mut 现场 = 建现场();
+    let path = 现场.out().join("FC.metadata.pegasus.txt");
+    fs::write(&path, 手写的多值).expect("写得进");
+    let report = transfer::import(
+        &mut 现场.catalog,
+        &Pegasus,
+        std::slice::from_ref(&path),
+        None,
+    )
+    .expect("导得进");
+
+    // **报告数的是落进中立库的值的条数**，不是字段数：两家开发商就是两条。
+    // 数成一条的话，「丢掉的那一条」在账面上根本看不出来。
+    assert_eq!(
+        report.values, 7,
+        "标题 1 + 开发商 2 + 发行商 2 + 类型 2：{report:#?}"
+    );
+
+    导出(&mut 现场, false);
+    let text = 读出(&现场, "FC.metadata.pegasus.txt");
+    // 他写的那三段续行一个字都没动——**键也还是他写的那个复数形式**。
+    assert!(text.contains("developers:\n  甲公司\n  乙公司\n"), "{text}");
+    assert!(text.contains("publishers:\n  丙公司\n  丁公司\n"), "{text}");
+    assert!(text.contains("genres:\n  动作\n  射击\n"), "{text}");
+    assert!(
+        !text.contains("developer: "),
+        "库里与他写的是同一批，就不该重写这一行：{text}"
+    );
+}

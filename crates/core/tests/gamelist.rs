@@ -18,14 +18,14 @@ use std::path::{Path, PathBuf};
 use romcat_core::adapter::gamelist::Gamelist;
 use romcat_core::task::Handle;
 use romcat_core::adapter::transfer::{self, ExportOptions};
-use romcat_core::adapter::{Capability, assert_capability};
+use romcat_core::adapter::{Adapter, Capability, assert_capability};
 use romcat_core::catalog::Catalog;
-use romcat_core::catalog::scrape::{Harvested, HarvestedMedia};
+use romcat_core::catalog::scrape::{Harvested, HarvestedMedia, HarvestedValue};
 use romcat_core::fs::RealFs;
 use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::priority::Priorities;
-use romcat_core::scrape::{AnchorKind, MediaKind};
+use romcat_core::scrape::{AnchorKind, Field, MediaKind};
 use romcat_core::sublibrary::{self, Rule, Selection};
 use romcat_core::sync;
 use romcat_core::testing::sample::zip;
@@ -456,5 +456,74 @@ fn 落点上有一份工具没见过的文件时不静默覆盖() {
         fs::read_to_string(现场.包的落点()).expect("读得出"),
         分享包,
         "一个字节都没覆盖过去"
+    );
+}
+
+#[test]
+fn 多家开发商合成一条写出去_一家都不少() {
+    // 中文离线源一个键写了两家（`|开发= 科乐美、KCE东京`），中立库里就是两行。
+    // 这个格式的 `<developer>` 是**一个字符串**，装不下两条——但「装不下」的出路是
+    // 合成一条，不是静默扔掉一家：留下哪一家由码位序决定，那是换掉一家公司。
+    let mut 现场 = 建现场();
+    现场
+        .catalog
+        .put_scraped(&[Harvested {
+            anchor: AnchorKind::Variant.label().to_string(),
+            subject: 台版.to_string(),
+            source: "中文离线源".to_string(),
+            input: format!("{台版}#两家开发商"),
+            values: vec![
+                HarvestedValue {
+                    field: Field::Developer.label().to_string(),
+                    value: "科乐美".to_string(),
+                    evidence: "测试".to_string(),
+                },
+                HarvestedValue {
+                    field: Field::Developer.label().to_string(),
+                    value: "KCE东京".to_string(),
+                    evidence: "测试".to_string(),
+                },
+            ],
+            media: Vec::new(),
+        }])
+        .expect("值写得进");
+
+    导出(&mut 现场);
+    let text = fs::read_to_string(现场.包的落点()).expect("读得出");
+    let 那一条 = text
+        .split("<developer>")
+        .nth(1)
+        .and_then(|it| it.split("</developer>").next())
+        .expect("有 <developer>");
+    let mut 家: Vec<&str> = 那一条.split(", ").collect();
+    家.sort_unstable();
+    assert_eq!(家, ["KCE东京", "科乐美"], "少一家就是换掉一家公司：{text}");
+}
+
+#[test]
+fn 带逗号的公司名是一整条_读的那一侧不拆() {
+    // 写的那一侧按 `, ` 把多家拼成一条，读的那一侧**不拆**——真的 gamelist 里
+    // `Sunsoft, Inc.` 这种带逗号的单值到处都是，拆开是**改内容**，比合成一条坏得多。
+    // 代价是「库 → 文件 → 库」这一趟把两家压成一条；`文件 → 库 → 文件` 那条
+    // 无损往返仍旧逐字节成立，而档位说的正是后者。
+    let 包 = "<?xml version=\"1.0\"?>\n\
+        <gameList>\n\
+        \x20   <game>\n\
+        \x20       <path>./魂斗罗台版/魂斗罗.zip</path>\n\
+        \x20       <developer>Sunsoft, Inc.</developer>\n\
+        \x20   </game>\n\
+        </gameList>\n";
+    let parsed = Gamelist.read(包.as_bytes()).expect("读得动");
+    let game = parsed.doc.entries[0].game().expect("是一个游戏");
+    assert_eq!(
+        game.developers,
+        vec!["Sunsoft, Inc.".to_string()],
+        "一整条，不按逗号拆"
+    );
+    assert!(
+        assert_capability(&Gamelist, 包.as_bytes())
+            .expect("读得动")
+            .identical,
+        "写回去逐字节相同"
     );
 }

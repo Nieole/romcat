@@ -42,6 +42,15 @@
 //!   避不开）；但**绝不能因为它反正要补，就干脆自己写一个不知道的 1 月 1 日**。
 //!
 //! 用户手写的文件里已经有的这类写法，[`Parsed::lossy`] 逐条点名——那一行本来就没生效。
+//!
+//! ## 集合字段比的是集合，不是列表（导出时）
+//!
+//! `developer` / `publisher` / `genre` / `tag` 用**续行**写得下好几条，而中立库里它们
+//! 正是一组并存的值——只是**原次序一层都没存**，读回来是码位序（挂单 Q27）。基线合并
+//! 那一步若按列表比，维护者写的「甲公司 / 乙公司」与库里读回来的「乙公司 / 甲公司」
+//! 会被判成「变了」，于是他那两行被重写：排版没了，键还从他写的 `developers` 缩成
+//! `developer`。所以那一步比的是**有哪几条**（`same_values`）——次序这件事我们表达
+//! 不了，就不该拿它去覆盖维护者的排版。
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -1000,6 +1009,20 @@ impl Field {
             Self::Extra => "x-",
         }
     }
+
+    /// 这个字段是**集合**吗——里面摆着哪几条有意义，摆的先后没有意义。
+    ///
+    /// 开发商、发行商、类型与标签都是：中立库里它们是一组并存的值，而**原次序一层都
+    /// 没存**（挂单 Q27）。[`same_values`] 拿它决定比集合还是比列表。
+    ///
+    /// `files` 与 `directories` 不算：`files` 的第一条是**首选变体**（ADR-0012），
+    /// `directories` 是目录清单，两者的先后都是维护者说了算的东西。
+    fn is_set(self) -> bool {
+        matches!(
+            self,
+            Self::Developers | Self::Publishers | Self::Genres | Self::Tags
+        )
+    }
 }
 
 /// 一个键落到哪个字段上。认不出（未知键）是 `None`。
@@ -1292,7 +1315,7 @@ fn merge_block(out: &mut String, snapshot: &Snapshot, span: Span, was: &Entry, n
     let mut consider = |field: Field, extra: Option<String>| {
         let before = values_of(&was.body, field, extra.as_deref());
         let after = values_of(&now.body, field, extra.as_deref());
-        if before != after && !after.is_empty() {
+        if !after.is_empty() && !same_values(field, &before, &after) {
             changed.push((field, extra));
         }
     };
@@ -1391,6 +1414,32 @@ fn merge_block(out: &mut String, snapshot: &Snapshot, span: Span, was: &Entry, n
     for index in content_end..span.end {
         snapshot.lines[index].render(out);
     }
+}
+
+/// 基线上那几个值与库里这几个值，算同一批吗。
+///
+/// **集合字段比的是「有哪几条」，不是「按什么次序摆」。** 开发商、发行商与类型在
+/// 中立库里是一组并存的值（`scrape_value` 的主键里带着值本身），而库里没有存过
+/// 数据源的**原次序**——读回来是**码位序**（`Catalog::for_each_scraped_value` 的
+/// 排序键，挂单 Q27）。按列表比的话，维护者写的 `甲公司 / 乙公司` 与库里读回来的
+/// `乙公司 / 甲公司` 是同一批人，却会被判成「变了」，于是他那两行被重写——排版没了，
+/// 键还从他写的 `developers` 缩成 `developer`。**次序这件事我们表达不了，就不该拿它
+/// 去覆盖维护者的排版。**
+///
+/// 真的多一家少一家时两个集合当然不等，那一趟照旧重写——写出去的是库里那**全部**几条
+/// （[`write_attribute`]），次序则只能是码位序。
+///
+/// `files:` **不在这一档**：它的第一条是**首选变体**（ADR-0012），次序本身有语义。
+fn same_values(field: Field, before: &[String], after: &[String]) -> bool {
+    if !field.is_set() {
+        return before == after;
+    }
+    let sorted = |values: &[String]| {
+        let mut values = values.to_vec();
+        values.sort_unstable();
+        values
+    };
+    sorted(before) == sorted(after)
 }
 
 /// 这个键落在哪个资源槽上（`assets.boxfront` → `assets.boxFront`）。

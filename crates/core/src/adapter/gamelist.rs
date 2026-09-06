@@ -44,6 +44,17 @@
 //! - **`<path>` 必须带前导 `./`**（源码 `createRelativePath()` 返回 `"./" + rel`），
 //!   USERGUIDE 明确警告从旧版 ES 搬来的文件常常没有这个前缀。
 //!
+//! ## `<developer>` 只装得下一条字符串
+//!
+//! 中立库里开发商、发行商与类型都是**集合**（数据源一个键写了几家就是几家），而这个
+//! 格式一个 `<game>` 里这三个元素各只有一份。写的那一侧按 `, ` **合成一条**
+//! （`joined`），读的那一侧**不拆**——真的 gamelist 里 `Sunsoft, Inc.` 这种带逗号的
+//! 单值到处都是，拆开是**改内容**。
+//!
+//! 两侧因此不对称，代价说清楚：**「库 → 文件 → 库」这一趟两家会压成一条**；而能力档位
+//! 说的是**「文件 → 库 → 文件」**（[`Capability::LosslessRoundTrip`] 的定义），那一条
+//! 仍旧逐字节成立。留头一条把其余的丢掉才是真的坏——那是**静默换掉一家公司**。
+//!
 //! ## 布局：`gamelists/<平台目录>/` 与 `downloaded_media/<平台目录>/<类型>/`
 //!
 //! 与 Pegasus 的 `media/` 完全不同，也与 Batocera 的 `images|videos/` 加文件名后缀
@@ -832,6 +843,9 @@ fn fold_game(
             "name" => out.title = value,
             "sortname" => out.sort_title = non_empty(&value),
             "desc" => out.description = Some(kid.text.clone()).filter(|t| !t.trim().is_empty()),
+            // **一整条，不按逗号拆。** 写的那一侧把多家拼成一条（[`joined`]），
+            // 但读回来不拆——`Sunsoft, Inc.` 这种带逗号的单值在真的 gamelist 里
+            // 到处都是，拆开是改内容。两侧的不对称与它的代价见 [`joined`]。
             "developer" => push_non_empty(&mut out.developers, &value),
             "publisher" => push_non_empty(&mut out.publishers, &value),
             "genre" => push_non_empty(&mut out.genres, &value),
@@ -1196,11 +1210,30 @@ fn value_of(game: &Game, field: Field, file: &str) -> Option<String> {
         Field::Description => game.description.clone(),
         Field::Rating => game.rating.map(format_rating),
         Field::Release => game.release.map(format_datetime),
-        Field::Developer => game.developers.first().cloned(),
-        Field::Publisher => game.publishers.first().cloned(),
-        Field::Genre => game.genres.first().cloned(),
+        Field::Developer => joined(&game.developers),
+        Field::Publisher => joined(&game.publishers),
+        Field::Genre => joined(&game.genres),
         Field::Players => game.players.map(format_players),
     }
+}
+
+/// 多家合成一条：这三个元素在这个格式里是**一个字符串**，一个 `<game>` 里只有一份。
+///
+/// 中立库里开发商是**集合**（数据源一个键写了几家就是几家）。装不下的出路只有两条，
+/// 这里选的是**合成一条**：
+///
+/// - 留头一条、把其余的丢掉，等于**换掉一家公司**——留下哪一家由码位序决定
+///   （`Priorities::pick_all` 交出来的先后，挂单 Q27），既不是第一家也不是主要那家。
+/// - 合成一条，前端上显示得出全部几家，用户按开发商筛的时候至少还含得住
+///   （`contains` 那个运算符）。
+///
+/// **读的那一侧不拆**（见 [`fold_game`] 里那三个元素）：真的 gamelist 里
+/// `Sunsoft, Inc.` 这种带逗号的单值到处都是，按 `, ` 拆等于**改内容**，比合成一条坏
+/// 得多。两侧因此不对称，代价说清楚：**「库 → 文件 → 库」这一趟两家会压成一条**，
+/// 而档位（无损往返）说的是**「文件 → 库 → 文件」**，那一条仍旧逐字节成立
+/// ——原文里的一整条读进来是一整条、写回去还是那一整条。
+fn joined(values: &[String]) -> Option<String> {
+    (!values.is_empty()).then(|| values.join(", "))
 }
 
 /// 一个条目要写成哪几条 `<path>`。

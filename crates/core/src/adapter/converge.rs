@@ -630,11 +630,15 @@ fn build_game(
             .iter()
             .map(|v| crate::path::relative_of_key(&v.main_key).to_string())
             .collect(),
-        // **开发商与发行商按集合读**：数据源一个键写了几家就是几家，挑一条等于换掉
+        // **开发商、发行商与类型按集合读**：数据源一个键写了几家就是几家，挑一条等于换掉
         // 一家公司（`Priorities::pick_all` 的文档、挂单 Q27）。
+        //
+        // **类型同一条路**：维护者的 `genres:` 底下写了两行，导出只读得出一条的话，
+        // 基线合并那一步会拿这一条去比他那两条、判成「变了」，再把整段续行重写成一行
+        // ——与开发商那一处是同一个错，所以是同一个修法。
         developers: pick_all(Field::Developer),
         publishers: pick_all(Field::Publisher),
-        genres: pick(Field::Genre).into_iter().collect(),
+        genres: pick_all(Field::Genre),
         tags: Vec::new(),
         players: None,
         summary: None,
