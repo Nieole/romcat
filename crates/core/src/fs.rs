@@ -126,9 +126,146 @@ pub struct DirEntry {
 /// 找不到时返回 `None`：**这是「盘上没有这条路径」的意思**，不是「读不动」。
 ///
 /// 一趟里要还原成千上万条路径时走 [`DirCache::real_path`]：同一个目录只列一次。
+///
+/// # 交回来的不保证是**字节级的真名**
+///
+/// 第一步「原样试一次」一旦中了，交回来的就是**我们要的那个写法**，而不是盘上那一条。
+/// 在**大小写不敏感**的目标上（exFAT / FAT32 / Windows / 默认 APFS）这两者会真的不同：
+/// 盘上叫 `GB`，拿 `gb` 也开得了，交回来的却是 `gb`。
+///
+/// 它的契约因此是「**一条解析得到同一个东西的路径**」——拿去 `open` / `remove` /
+/// `rename` 都对，拿去**当键**就错了。要字节级的真名走 [`real_dir`]。
 #[must_use]
 pub fn real_path(fs: &dyn LibraryFs, root: &Path, key: &str) -> Option<PathBuf> {
     DirCache::default().real_path(fs, root, key)
+}
+
+/// 把一个**目录**的键还原成盘上**字节级真实**的那条路径。
+///
+/// 与 [`real_path`] 是两件事，别混用：那一条只保证「解析得到同一个东西」，这一条保证
+/// 「盘上就这么拼」。差别在**大小写不敏感**的文件系统上会咬人——子库同步拿落点的目录段
+/// 去拼**清单的键**，而下一趟 [`observe`](fn@crate::sync::observe) 交出来的是 `read_dir`
+/// 给的真名：两边不是同一个写法的话，工具从第二趟起就认不出自己放的那一份。
+///
+/// 判据一律**按 `read_dir` 的真实结果走**，逐段认下去：
+///
+/// 1. NFC 形式**一模一样**的那个名字——两种文件系统上都是它，先认它。
+/// 2. 没有，但**只差大小写**的恰好有一个：那到底是不是我们要的这个目录，**问文件系统**
+///    ——`read_dir` 那条我们要的路径。开得了就说明它认不出大小写，那一个就是；开不了
+///    就说明它分大小写，我们要的那个目录**真的不存在**（`GB/` 与 `gb/` 在 ext4 上是两个
+///    目录，这一条把它们守住）。
+/// 3. 都不是就 `None`。
+///
+/// **不做「先原样试一次」那一步**：那一步在 Unix 上对目录是**假阳性**——`File::open`
+/// 打得开目录，`take(0)` 一个字节都不读于是照样成功，交回来的就成了「我们要的写法」。
+#[must_use]
+pub fn real_dir(fs: &dyn LibraryFs, root: &Path, key: &str) -> Option<PathBuf> {
+    let mut at = root.to_path_buf();
+    for segment in key.split('/') {
+        if segment.is_empty() {
+            continue;
+        }
+        at = real_segment(fs, &at, segment)?;
+    }
+    Some(at)
+}
+
+/// [`real_dir`] 的一段。
+fn real_segment(fs: &dyn LibraryFs, dir: &Path, segment: &str) -> Option<PathBuf> {
+    let wanted = crate::path::nfc(segment);
+    let folded = crate::path::fold(segment);
+    let mut only_case: Option<PathBuf> = None;
+    let mut how_many = 0_usize;
+    for entry in fs.read_dir(dir).ok()? {
+        if entry.kind != EntryKind::Dir {
+            continue;
+        }
+        let Some(name) = entry.path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if crate::path::nfc(name) == wanted {
+            return Some(entry.path);
+        }
+        if crate::path::fold(name) == folded {
+            how_many += 1;
+            only_case = Some(entry.path);
+        }
+    }
+    // 只差大小写的不止一个：那一层装得下它们，于是这个文件系统分大小写，而我们要的
+    // 那一个既然没逐字出现过就是真的不在。
+    let one = only_case.filter(|_| how_many == 1)?;
+    fs.read_dir(&dir.join(segment)).is_ok().then_some(one)
+}
+
+/// 这个目录所在的文件系统**认不认大小写**。
+///
+/// `Some(true)` 是「不认」（exFAT / FAT32 / NTFS / 默认 APFS——ADR-0015 定的目标设备
+/// 与 ADR-0018 定的主力机全在这一档），`Some(false)` 是「认」（ext4、大小写敏感的
+/// APFS），`None` 是**问不出来**。三态分开是因为「问不出来」不许当成任何一边：判成
+/// 「不认」会在 ext4 上把两个真能并存的目录折成一个，判成「认」则是眼下这个 bug。
+///
+/// 三步，都只读：
+///
+/// 1. 这一层里有两个名字**折起来一样**吗。有就证完了：装得下它们的文件系统分大小写。
+/// 2. 没有就挑一个带 ASCII 字母的名字，**把大小写翻过来问一次**。原样那条先确认问得通
+///    （读不动的条目答出来的是「没有」而不是「分大小写」），翻过来那条开得了就是不认。
+/// 3. 这一层一个带字母的名字都没有（空目录也算）：拿**这个目录自己**那一段名字去翻。
+#[must_use]
+pub fn case_insensitive(fs: &dyn LibraryFs, dir: &Path) -> Option<bool> {
+    let entries = fs.read_dir(dir).ok()?;
+    let mut seen: HashMap<String, ()> = HashMap::new();
+    for entry in &entries {
+        let Some(name) = entry.path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if seen.insert(crate::path::fold(name), ()).is_some() {
+            return Some(false);
+        }
+    }
+    for entry in &entries {
+        let Some(name) = entry.path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(flipped) = flip_case(name) else {
+            continue;
+        };
+        let flipped = dir.join(flipped);
+        match entry.kind {
+            EntryKind::Dir if fs.read_dir(&entry.path).is_ok() => {
+                return Some(fs.read_dir(&flipped).is_ok());
+            }
+            EntryKind::File if fs.read_head(&entry.path, 0).is_ok() => {
+                return Some(fs.read_head(&flipped, 0).is_ok());
+            }
+            _ => continue,
+        }
+    }
+    let name = dir.file_name().and_then(|name| name.to_str())?;
+    let flipped = dir.parent()?.join(flip_case(name)?);
+    Some(fs.read_dir(&flipped).is_ok())
+}
+
+/// 把一个名字里每个 ASCII 字母的大小写翻过来；一个字母都没有时是 `None`。
+///
+/// **只翻 ASCII**：非 ASCII 的大小写映射不保证一一对应（`ß` 变 `SS`、土耳其语的 `i`
+/// 另有一套），拿它去问文件系统问的就不是同一个名字了。
+fn flip_case(name: &str) -> Option<String> {
+    if !name.chars().any(|one| one.is_ascii_alphabetic()) {
+        return None;
+    }
+    Some(
+        name.chars()
+            .map(|one| {
+                if one.is_ascii_uppercase() {
+                    one.to_ascii_lowercase()
+                } else if one.is_ascii_lowercase() {
+                    one.to_ascii_uppercase()
+                } else {
+                    one
+                }
+            })
+            .collect(),
+    )
 }
 
 /// 逐段列目录那条退路上，**每个目录只列一次**的那份记性。
@@ -152,7 +289,11 @@ impl DirCache {
     pub fn real_path(&mut self, fs: &dyn LibraryFs, root: &Path, key: &str) -> Option<PathBuf> {
         let direct = root.join(key.replace('/', std::path::MAIN_SEPARATOR_STR));
         // `read_head` 读 0 字节：只要开得了就说明这条路径在。比 `metadata` 更贴近
-        // 「等下真要读它」这件事，而目录上它会失败——目录会掉到下面逐段那条路上认。
+        // 「等下真要读它」这件事。
+        //
+        // **对目录它在 Unix 上也成功**（`File::open` 打得开目录，`take(0)` 一个字节都
+        // 不读），于是交回来的是「我们要的写法」而不是盘上那一条——见函数文档那一节。
+        // 要目录的字节级真名走 [`real_dir`]，别指望这一步会掉到下面逐段那条路上。
         if fs.read_head(&direct, 0).is_ok() {
             return Some(direct);
         }
@@ -251,6 +392,92 @@ mod tests {
             real_path(&fs, Path::new("/库"), 预组合),
             Some(PathBuf::from(format!("/库/{分解形}"))),
         );
+    }
+
+    #[test]
+    fn 目录上先原样试一次是个假阳性_所以目录段另走一条() {
+        // Unix 上 `File::open` 打得开目录、`take(0)` 一个字节都不读，于是
+        // `real_path` 的第一步在**目录**上照样成功，交回来的是我们要的写法。
+        // `MemFs` 照着这个语义来（`read_head` 对目录报错），可真盘不是——
+        // 这条测试钉住的是**两个函数的分工**：要字节级真名只能走 `real_dir`。
+        let mut fs = MemFs::insensitive();
+        fs.dir("/卡/gb");
+        fs.file("/卡/gb/存档.sav", vec![0; 8]);
+        assert_eq!(
+            real_dir(&fs, Path::new("/卡"), "GB"),
+            Some(PathBuf::from("/卡/gb")),
+            "盘上叫 gb，交回来的就得是 gb",
+        );
+    }
+
+    #[test]
+    fn 分大小写的盘上_只差大小写的目录不算认得出来() {
+        // ext4 上 `GB/` 与 `gb/` 是**两个目录**。折过去认等于把两棵树并成一棵。
+        let mut fs = MemFs::new();
+        fs.dir("/卡/gb");
+        assert_eq!(real_dir(&fs, Path::new("/卡"), "gb"), Some("/卡/gb".into()));
+        assert_eq!(
+            real_dir(&fs, Path::new("/卡"), "GB"),
+            None,
+            "那个目录真的不在"
+        );
+    }
+
+    #[test]
+    fn 多层目录逐段折回真名() {
+        let mut fs = MemFs::insensitive();
+        fs.dir("/卡/roms/gb");
+        assert_eq!(
+            real_dir(&fs, Path::new("/卡"), "ROMS/GB"),
+            Some(PathBuf::from("/卡/roms/gb")),
+        );
+    }
+
+    #[test]
+    fn 认不认大小写_两种盘都问得出来() {
+        let mut 不认 = MemFs::insensitive();
+        不认.file("/卡/gb/存档.sav", vec![0; 8]);
+        assert_eq!(case_insensitive(&不认, Path::new("/卡")), Some(true));
+
+        let mut 认 = MemFs::new();
+        认.file("/卡/gb/存档.sav", vec![0; 8]);
+        assert_eq!(case_insensitive(&认, Path::new("/卡")), Some(false));
+    }
+
+    #[test]
+    fn 同一层装得下两个折起来一样的名字_那就是分大小写() {
+        // 不必再问文件系统：装得下它们这件事本身就是证据。
+        let mut fs = MemFs::new();
+        fs.dir("/卡/gb");
+        fs.dir("/卡/GB");
+        assert_eq!(case_insensitive(&fs, Path::new("/卡")), Some(false));
+    }
+
+    #[test]
+    fn 这一层没有带字母的名字时_拿目录自己那一段去问() {
+        // 头一趟同步到一张空卡上就是这样：底下什么都没有，只剩子库根自己那个名字。
+        let mut 不认 = MemFs::insensitive();
+        不认.dir("/Volumes/SDCARD");
+        assert_eq!(
+            case_insensitive(&不认, Path::new("/Volumes/SDCARD")),
+            Some(true)
+        );
+
+        let mut 认 = MemFs::new();
+        认.dir("/Volumes/SDCARD");
+        assert_eq!(
+            case_insensitive(&认, Path::new("/Volumes/SDCARD")),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn 一个字母都没有就是问不出来_而问不出来不许当成任何一边() {
+        // 子库根与它底下的东西全是中文：翻不动大小写，也就问不出这个文件系统认不认。
+        // 这一态**不许**当成任何一边——`sync::align` 见到它就一条都不折。
+        let mut fs = MemFs::insensitive();
+        fs.file("/卡/中文/一.zip", vec![0; 8]);
+        assert_eq!(case_insensitive(&fs, Path::new("/卡")), None);
     }
 
     #[test]

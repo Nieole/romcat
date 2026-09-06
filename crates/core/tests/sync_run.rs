@@ -17,10 +17,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use romcat_core::adapter;
-use romcat_core::catalog::Roots;
-use romcat_core::task::Handle;
 use romcat_core::capability::Profile;
 use romcat_core::catalog::Catalog;
+use romcat_core::catalog::Roots;
 use romcat_core::catalog::scrape::{Harvested, HarvestedMedia};
 use romcat_core::fs::RealFs;
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
@@ -29,6 +28,7 @@ use romcat_core::scrape::priority::Priorities;
 use romcat_core::scrape::{AnchorKind, MediaKind};
 use romcat_core::sublibrary::{self, Rule, Selection, Sublibrary};
 use romcat_core::sync::{self, Act, FileKind, Manifest, Placement, Sources};
+use romcat_core::task::Handle;
 use romcat_core::testing::sample::zip;
 use romcat_core::testing::{TempDir, temp_dir};
 
@@ -160,13 +160,19 @@ impl 现场 {
         let mut 子库 = Sublibrary::at("掌机", self.卡.path(), "Pegasus", None);
         子库.capability = Some(profile.name.clone());
         let actual = sync::observe(&RealFs, self.卡.path()).expect("看得见目标");
+        // 与 `sync::prepare` 同一条线：落点的目录段先与目标折齐，再排计划。
+        let mut from_pool = media.from_pool;
+        let mut generated = frontend.bytes;
+        let realign = sync::align(&mut desired, &actual);
+        realign.apply(&mut from_pool);
+        realign.apply(&mut generated);
         let plan = sync::plan(&子库, &desired, manifest, &actual, sync::Options::default());
         一趟 {
             desired,
             actual,
             plan,
-            from_pool: media.from_pool,
-            generated: frontend.bytes,
+            from_pool,
+            generated,
         }
     }
 }
@@ -599,7 +605,8 @@ fn 大小写不敏感的目标上_清单之外只差大小写的文件不被顶�
 
     let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
     assert!(
-        这趟.plan
+        这趟
+            .plan
             .surprises
             .iter()
             .any(|s| s.kind == sync::SurpriseKind::Occupied),
@@ -607,7 +614,8 @@ fn 大小写不敏感的目标上_清单之外只差大小写的文件不被顶�
         这趟.plan.surprises
     );
     assert!(
-        !这趟.plan
+        !这趟
+            .plan
             .steps
             .iter()
             .any(|step| step.path.eq_ignore_ascii_case("GB/tetris.zip")),
@@ -643,7 +651,8 @@ fn 计划算完之后才出现的落点占用_执行这一层也挡得住() {
     let 现场 = 现场::摆在(建个只差大小写的库());
     let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
     assert!(
-        这趟.plan
+        这趟
+            .plan
             .steps
             .iter()
             .any(|step| step.act == Act::Add && step.path == "GB/tetris.zip"),
@@ -676,5 +685,54 @@ fn 计划算完之后才出现的落点占用_执行这一层也挡得住() {
             .iter()
             .any(|file| file.path.eq_ignore_ascii_case("GB/tetris.zip")),
         "没写成的不许进清单"
+    );
+}
+
+#[test]
+fn 卡上那个目录只差大小写_第二趟照样认得出自己放的那一份() {
+    // 触发路 A：卡上已经有一个 `gb/`（前端或维护者建的，里面还躺着存档），而主库
+    // 那边的键写作 `GB/`。目标大小写不敏感（exFAT / FAT32 / Windows / 默认 APFS）时
+    // 两者**就是同一个目录**——第一趟的文件其实落在 `gb/` 里，清单却记成 `GB/`，
+    // 于是从第二趟起它每一趟都被报成「没了」，同时又被数进「清单之外」。
+    let 现场 = 现场::摆好();
+    写(&现场.卡.path().join("gb/存档.sav"), &[9u8; 64]);
+
+    let 第一趟 = 现场.排一趟("平台=GB", &Manifest::empty());
+    assert!(第一趟.plan.adds.files > 0, "头一趟总得放点什么上去");
+    let 一 = 现场.执行(&第一趟, &Manifest::empty(), &CancelToken::new());
+    assert!(一.failures.is_empty(), "{:?}", 一.failures);
+
+    // **清单记的必须是盘上真实的那条路径**：目标怎么拼那个目录名，由目标说了算。
+    for file in &一.manifest.files {
+        let 名 = file.path.replace('/', std::path::MAIN_SEPARATOR_STR);
+        assert!(
+            现场.卡.path().join(&名).is_file(),
+            "清单记着 {}，盘上却没有这条路径",
+            file.path
+        );
+    }
+
+    // 第二趟：一步都不用做，一句意外都不该有，清单之外的只有维护者那份存档。
+    let 第二趟 = 现场.排一趟("平台=GB", &一.manifest);
+    assert_eq!(
+        第二趟.plan.touched(),
+        0,
+        "第二趟不该有任何一步：\n{}",
+        第二趟.plan.render_text()
+    );
+    assert!(
+        第二趟.plan.surprises.is_empty(),
+        "自己放的那一份不该被报成意外：{:?}",
+        第二趟.plan.surprises
+    );
+    assert_eq!(
+        第二趟.plan.strangers, 1,
+        "清单之外只有维护者那份存档，不该把自己放的也数进去"
+    );
+
+    // 维护者那份存档一个字节都没动。
+    assert_eq!(
+        fs::read(现场.卡.path().join("gb/存档.sav")).expect("还在"),
+        vec![9u8; 64]
     );
 }

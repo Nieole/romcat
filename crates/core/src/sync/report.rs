@@ -780,7 +780,7 @@ mod tests {
                     mtime_ns: Some(2),
                 }),
             }],
-            unlistable_dirs: 0,
+            ..TargetState::default()
         };
         let text = plan(
             &子库(),

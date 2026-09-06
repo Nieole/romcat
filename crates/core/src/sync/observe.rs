@@ -17,6 +17,7 @@
 //! 把「盘没插」读成「目标上什么都没有」，会让计划变成「清单里的每一条都意外消失了、
 //! 期望里的每一条都要重传」——一份灾难性的预览。所以根目录不在时**直接失败**。
 
+use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -61,6 +62,15 @@ pub enum ObserveError {
 ///
 /// 列不开的目录数出来即可：那一枝底下的东西全部说不清，而说不清的一律不碰。
 ///
+/// ## 顺手把两件**目录**的事也带回来
+///
+/// - **走过的每一个目录**（[`TargetState::dirs`]），键是 `read_dir` 给的**真名**折成
+///   NFC 的那一条。落点的目录段要拿它去折齐（[`align`](crate::sync::align)）——
+///   卡上那个 `gb/` 与我们键里的 `GB/`，在不分大小写的目标上是同一个目录。
+/// - **这个文件系统认不认大小写**（[`TargetState::case_insensitive`]）。走一遍本来就
+///   把每一层都列了，同一层里两个名字折起来一样就当场证完；证不出来才多问一次
+///   （[`fs::case_insensitive`](crate::fs::case_insensitive)）。仍然只读。
+///
 /// # Errors
 /// 子库根不在位或列不开时返回错误。
 pub fn observe(fs: &dyn LibraryFs, root: &Path) -> Result<TargetState, ObserveError> {
@@ -80,9 +90,19 @@ pub fn observe(fs: &dyn LibraryFs, root: &Path) -> Result<TargetState, ObserveEr
     let mut out = TargetState::default();
     let mut stack: Vec<PathBuf> = Vec::new();
     let mut pending = top;
+    // 同一层里两个名字折起来一样：这一层装得下它们，于是这个文件系统**分大小写**。
+    // 走一遍本来就要列每一层，这个证据不花任何额外的系统调用。
+    let mut case_sensitive = false;
     loop {
+        let mut folded: BTreeSet<String> = BTreeSet::new();
         for entry in pending {
+            if let Some(name) = entry.path.file_name().and_then(|name| name.to_str())
+                && !folded.insert(path::fold(name))
+            {
+                case_sensitive = true;
+            }
             if entry.kind == EntryKind::Dir && !entry.meta.is_unreadable() {
+                out.dirs.insert(path::catalog_key(&root, &entry.path));
                 stack.push(entry.path);
                 continue;
             }
@@ -109,6 +129,11 @@ pub fn observe(fs: &dyn LibraryFs, root: &Path) -> Result<TargetState, ObserveEr
         }
     }
     out.files.sort_by(|a, b| a.path.cmp(&b.path));
+    out.case_insensitive = if case_sensitive {
+        Some(false)
+    } else {
+        crate::fs::case_insensitive(fs, &root)
+    };
     Ok(out)
 }
 
@@ -158,6 +183,42 @@ mod tests {
         let state = observe(&fs, Path::new("/卡")).expect("看得见");
         assert_eq!(state.unlistable_dirs, 1);
         assert_eq!(state.files.len(), 1);
+    }
+
+    #[test]
+    fn 走过的目录也记下来() {
+        // 落点的目录段要拿它去折齐：卡上那个目录到底怎么拼，只有 `read_dir` 说得清。
+        let mut fs = MemFs::new();
+        fs.file("/卡/gb/一.zip", vec![0; 8]);
+        fs.dir("/卡/Media/box");
+        let state = observe(&fs, Path::new("/卡")).expect("看得见");
+        assert_eq!(
+            state.dirs.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["Media", "Media/box", "gb"],
+        );
+    }
+
+    #[test]
+    fn 认不认大小写_看一眼目标就带回来() {
+        let mut 不认 = MemFs::insensitive();
+        不认.file("/卡/gb/一.zip", vec![0; 8]);
+        let state = observe(&不认, Path::new("/卡")).expect("看得见");
+        assert_eq!(state.case_insensitive, Some(true));
+
+        let mut 认 = MemFs::new();
+        认.file("/卡/gb/一.zip", vec![0; 8]);
+        let state = observe(&认, Path::new("/卡")).expect("看得见");
+        assert_eq!(state.case_insensitive, Some(false));
+    }
+
+    #[test]
+    fn 同一层里两个只差大小写的目录_不必再问就知道它分大小写() {
+        // 装得下 `GB/` 与 `gb/` 这件事本身就是证据，一次额外的系统调用都不用花。
+        let mut fs = MemFs::new();
+        fs.file("/卡/GB/一.zip", vec![0; 8]);
+        fs.file("/卡/gb/二.zip", vec![0; 8]);
+        let state = observe(&fs, Path::new("/卡")).expect("看得见");
+        assert_eq!(state.case_insensitive, Some(false));
     }
 
     #[test]

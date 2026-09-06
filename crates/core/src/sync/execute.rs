@@ -55,6 +55,17 @@
 //! 清单里记的戳是**写完之后 stat 目标**得到的那一个，不是主库侧那份的。于是 FAT32
 //! 那 2 秒的时间戳刻度不构成问题：下一趟读到的是同一个被截断过的值。
 //!
+//! **清单里记的那条路径同理，是盘上真实的落点折出来的键**，不是步骤里那一条。
+//! 目标不分大小写时，我们要的 `GB/` 可能就是卡上那个 `gb/`——`create_dir_all` 一个
+//! 目录都没建，字节实实在在落在 `gb/` 里。照步骤那一条记，清单从这一刻起就在说谎，
+//! 而下一趟 [`observe`](fn@super::observe) 交出来的是 `read_dir` 给的真名，于是工具
+//! **认不出自己放的那一份**：报成「没了」、同时被数进清单之外。目录段折准的办法见
+//! `settled`——`create_dir_all` 刚回来那一刻，列一次上一层就够，不必探文件系统。
+//!
+//! 排计划那一侧还有配套的一半（`sync` 模块文档「落点的目录段先与目标折齐」）：
+//! 期望状态里的落点先折到盘上真实的写法，不然第二趟 `wanted` 与清单对不上，
+//! 会长出「删了再加」的抖动。**这一层只保证清单不说谎**，两边都做齐才收敛。
+//!
 //! ## 七、新增这一步，落点上**必须是空的**
 //!
 //! 计划那一侧已经把「落点被占」判掉了（[`plan`](super::plan) 的函数文档），这里还要
@@ -87,7 +98,7 @@ use ring::digest::{Context, SHA256};
 use crate::capability::Conversion;
 use crate::catalog::{Roots, mtime_ns};
 use crate::convert::{self, ConvertError};
-use crate::fs::{LibraryFs, real_path};
+use crate::fs::{LibraryFs, real_dir, real_path};
 use crate::scan::CancelToken;
 use crate::scrape::pool::hex;
 
@@ -278,6 +289,8 @@ pub fn run(
     let mut done: BTreeMap<String, ManifestFile> = BTreeMap::new();
     let mut removed: BTreeSet<String> = BTreeSet::new();
     let mut consecutive = 0_u64;
+    // 认出来的目录真名（[`settled`]）：一个平台目录只列一次。
+    let mut dirs: BTreeMap<String, PathBuf> = BTreeMap::new();
 
     for step in &plan.steps {
         if cancel.is_cancelled() {
@@ -286,8 +299,9 @@ pub fn run(
         }
         let outcome = match step.act {
             Act::Delete => erase(sources, step).map(|()| None),
-            Act::Add | Act::Update => place(sources, step, placement, cancel, &mut out)
-                .map(|(stamp, how)| Some((stamp, how))),
+            Act::Add | Act::Update => {
+                place(sources, &mut dirs, step, placement, cancel, &mut out).map(Some)
+            }
         };
         match outcome {
             Ok(None) => {
@@ -296,7 +310,7 @@ pub fn run(
                 out.deleted.files += 1;
                 out.deleted.bytes += step.was;
             }
-            Ok(Some((stamp, how))) => {
+            Ok(Some((path, stamp, how))) => {
                 consecutive = 0;
                 if step.convert.is_some() {
                     out.converted.files += 1;
@@ -315,7 +329,7 @@ pub fn run(
                 };
                 account.files += 1;
                 account.bytes += stamp.bytes;
-                done.insert(step.path.clone(), recorded(step, stamp));
+                done.insert(path.clone(), recorded(step, path, stamp));
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {
                 // 写到一半收到中断：临时文件已经清掉了，落点上还是原来那一份。
@@ -353,15 +367,17 @@ fn erase(sources: &Sources<'_>, step: &Step) -> io::Result<()> {
     std::fs::remove_file(&at)
 }
 
-/// 把一份文件放到目标上。返回**从目标上读回来的**戳，以及实际用的办法。
+/// 把一份文件放到目标上。返回**盘上真实落点**折出来的键、**从目标上读回来的**戳，
+/// 以及实际用的办法。
 fn place(
     sources: &Sources<'_>,
+    dirs: &mut BTreeMap<String, PathBuf>,
     step: &Step,
     placement: Option<Placement>,
     cancel: &CancelToken,
     out: &mut Outcome,
-) -> io::Result<(Stamp, Placement)> {
-    let (target, taken) = landing(sources, &step.path);
+) -> io::Result<(String, Stamp, Placement)> {
+    let (target, taken) = landing(sources, dirs, &step.path);
     // **最后一道防线**（模块文档七）：新增这一步的落点上不该有任何东西。
     if taken && step.act == Act::Add {
         return Err(io::Error::new(
@@ -375,6 +391,13 @@ fn place(
     }
     let parent = target.parent().unwrap_or(sources.target_root).to_path_buf();
     std::fs::create_dir_all(&parent)?;
+    // 目录这一刻一定在盘上了：把落点的目录段换成它真实的那个名字（见 [`settled`]）。
+    // **已经占着的那一份不动**：那条路径是 [`on_target`] 从盘上认回来的，它自己就是真的。
+    let target = if taken {
+        target
+    } else {
+        settled(sources, dirs, &step.path, target)
+    };
     let temp = part_path(&target);
     // 上一趟被打断留下的半份：`create` 会截断它，但 `hard_link` 不会——先清掉。
     let _ = std::fs::remove_file(&temp);
@@ -415,12 +438,14 @@ fn place(
             let roots = sources
                 .library_roots
                 .ok_or_else(|| io::Error::other("这一趟要搬 ROM，可调用方没说主库在哪"))?;
-            let from = roots.real_path(sources.library, &step.source).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("主库里找不到 {}", step.source),
-                )
-            })?;
+            let from = roots
+                .real_path(sources.library, &step.source)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("主库里找不到 {}", step.source),
+                    )
+                })?;
             match &step.convert {
                 // 要转格式：读主库那份原始形态，写出一份**新文件**（ADR-0004）。
                 Some(conversion) => {
@@ -443,6 +468,7 @@ fn place(
     }
     let meta = std::fs::metadata(&target)?;
     Ok((
+        crate::path::catalog_key(sources.target_root, &target),
         Stamp {
             bytes: meta.len(),
             mtime_ns: meta.modified().ok().and_then(mtime_ns),
@@ -592,34 +618,70 @@ fn on_target(sources: &Sources<'_>, key: &str) -> Option<PathBuf> {
 /// - **已经在了就用它自己在盘上的名字**。目标把名字存成分解形式（HFS+ 就会）而查找
 ///   又分解敏感时，拿 NFC 的键去 `rename`，会在维护者那份**旁边新造一份**，旧那份留在
 ///   卡上从此变成「清单之外」——票 16 刚被这个 bug 咬过（挂账 D82）。
-/// - **还不在就用我们自己选的那个名字**（NFC 的键），但**目录要用盘上真实那个**：
-///   上级目录若已存在且是分解形式，照键拼会在它旁边再建一个同名目录。
+/// - **还不在就用我们自己选的那个名字**（NFC 的键），目录先用 `dirs` 里已经认出来的
+///   那个真名，没认过就照键拼——目录这一段真正折准是在 `create_dir_all` **之后**，
+///   见 [`settled`]。这里拼出来的只是「往哪儿建目录」。
 ///
-/// 第二格就是那道最后防线的依据：[`real_path`] 在**大小写不敏感**的目标上，
+/// 第一格就是那道最后防线的依据：[`real_path`] 在**大小写不敏感**的目标上，
 /// 拿 `GB/tetris.zip` 也开得了别人那份 `GB/Tetris.zip`，于是它答的正是
 /// 「这条键会落到一个已经存在的文件上吗」——[`place`] 拿它挡住新增（模块文档七）。
-fn landing(sources: &Sources<'_>, key: &str) -> (PathBuf, bool) {
+fn landing(sources: &Sources<'_>, dirs: &BTreeMap<String, PathBuf>, key: &str) -> (PathBuf, bool) {
     if let Some(at) = on_target(sources, key) {
         return (at, true);
     }
-    let (dir, name) = match key.rsplit_once('/') {
-        Some((dir, name)) => (Some(dir), name),
-        None => (None, key),
+    let Some((dir, name)) = key.rsplit_once('/') else {
+        return (sources.target_root.join(key), false);
     };
-    let parent = dir.map_or_else(
-        || sources.target_root.to_path_buf(),
-        |dir| {
-            on_target(sources, dir)
-                .unwrap_or_else(|| sources.target_root.join(dir.replace('/', SEPARATOR)))
-        },
-    );
+    let parent = dirs
+        .get(dir)
+        .cloned()
+        .unwrap_or_else(|| sources.target_root.join(dir.replace('/', SEPARATOR)));
     (parent.join(name), false)
 }
 
+/// 目录建好之后，把落点的**目录段**换成盘上**字节级真实**的那个名字。
+///
+/// 只有走到这里才答得准，而这一刻答得准是**免费**的：`create_dir_all` 刚刚回来，
+/// 那个目录**一定在盘上**了，于是列一次它的上一层就够——
+///
+/// - 大小写敏感的目标上，`create_dir_all` 真的建出了 `GB/`，逐字那个名字就在那儿；
+/// - 不分大小写的目标上它一个目录都没建（`gb/` 本来就在），列出来只有 `gb`，
+///   那就是我们这一份真正的落点。
+///
+/// 判据因此**不必探文件系统、也不必猜**：[`real_dir`] 按 `read_dir` 的真实结果走。
+///
+/// 这一段答准了，[`place`] 才有资格拿落点去折**清单的键**——而清单的键必须与下一趟
+/// [`observe`](super::observe) 交出来的那条一模一样，不然工具从第二趟起就认不出自己
+/// 放的那一份（`sync` 模块文档「落点的目录段先与目标折齐」）。
+///
+/// 认出来的真名记在 `dirs` 里：一个子库几千份文件挤在同几个平台目录下，
+/// 不记的话同一层会被列上几千遍。**这一趟里目录不会改名**，于是这份记性只增不改。
+fn settled(
+    sources: &Sources<'_>,
+    dirs: &mut BTreeMap<String, PathBuf>,
+    key: &str,
+    fallback: PathBuf,
+) -> PathBuf {
+    let Some((dir, name)) = key.rsplit_once('/') else {
+        return fallback;
+    };
+    if let Some(at) = dirs.get(dir) {
+        return at.join(name);
+    }
+    let Some(at) = real_dir(&crate::fs::RealFs, sources.target_root, dir) else {
+        return fallback;
+    };
+    dirs.insert(dir.to_string(), at.clone());
+    at.join(name)
+}
+
 /// 一条写成了的步骤在清单里长什么样。
-fn recorded(step: &Step, stamp: Stamp) -> ManifestFile {
+///
+/// `path` 是**盘上真实落点**折出来的键，不一定是 [`Step::path`](super::Step)——
+/// 见 [`settled`]。
+fn recorded(step: &Step, path: String, stamp: Stamp) -> ManifestFile {
     ManifestFile {
-        path: step.path.clone(),
+        path,
         kind: step.kind,
         stamp,
         source: step.source.clone(),

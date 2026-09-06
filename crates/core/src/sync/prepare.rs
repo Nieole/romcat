@@ -253,10 +253,10 @@ pub fn prepare(
     let mut desired = super::desired(catalog, &selected, &profile)
         .map_err(|error| format!("中立库读不动：{error}"))?;
     task.step("铺媒体")?;
-    let media = super::media::lay(catalog, adapter.as_ref(), &pool, &selected)
+    let mut media = super::media::lay(catalog, adapter.as_ref(), &pool, &selected)
         .map_err(|error| format!("中立库读不动：{error}"))?;
     task.step("折前端元数据")?;
-    let frontend = super::frontend::lay(
+    let mut frontend = super::frontend::lay(
         catalog,
         adapter.as_ref(),
         &priorities,
@@ -284,6 +284,13 @@ pub fn prepare(
         .map_err(|error| format!("中立库读不动：{error}"))?;
     task.step("看一眼目标")?;
     let actual = super::observe(&RealFs, &root).map_err(|error| format!("{error}"))?;
+    // **落点的目录段先与目标折齐**（`sync::align`）。卡上那个 `gb/` 与我们键里的
+    // `GB/`，在不分大小写的目标上是同一个目录：不折的话文件落进 `gb/`、清单记成
+    // `GB/`，第二趟起工具就认不出自己放的那一份。改名表要原样落到媒体与生成物那两张
+    // 以落点为键的表上——挪了这边不挪那边，执行时会报「在媒体池里找不到落点」。
+    let realign = super::align(&mut desired, &actual);
+    realign.apply(&mut media.from_pool);
+    realign.apply(&mut frontend.bytes);
     task.step("排计划")?;
     let plan = super::plan(
         &sublibrary,
