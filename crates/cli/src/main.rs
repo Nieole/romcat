@@ -985,8 +985,11 @@ struct ScanArgs {
     #[arg(long, value_name = "目录")]
     workspace: Option<PathBuf>,
 
-    /// 从上次中断的地方接着扫
-    #[arg(long)]
+    /// 从上次**断点**接着扫。断点按 (库, 根) 分，找的是这个根自己那一份
+    ///
+    /// 与 `--no-checkpoint` 互斥：不写断点也就没有断点可续，两个一起给必是手滑。
+    /// 断点对不上这一趟（换了挂载点、这个根被移除又加回来）时不报错，从头扫一遍
+    #[arg(long, conflicts_with = "no_checkpoint")]
     resume: bool,
 
     /// 不写断点（也就不能续跑）
@@ -1270,8 +1273,33 @@ fn checkpoint_root_name(explicit: Option<&str>, root: &Path) -> String {
     }
 }
 
+/// 开库之前先看一眼这个**根**在不在。
+///
+/// **建库这件事本身就是开工。** [`Catalog::open`] 会当场把中立库文件建出来、把表建好，
+/// 而它的调用方是这一层（`open_catalog`）——核心的 `scan::scan` 接手时库早就开着了，
+/// 所以那道「盘不在位」的闸（`scan::resolve_root`）再往前挪也挡不住这一件。判据只好
+/// 留在这儿：一条打错的路径不该在工作目录里留下一份空中立库，让往后的 `report` /
+/// `triage list` 都把它当成一份真库——中立库是**每个主库一份**（`CONTEXT.md`）。
+///
+/// 这不是把核心那道闸搬过来：核心照旧自己化开、自己核一遍（`ScanError::Root`），
+/// 这里只是抢在建文件之前多问一次 `stat`。
+fn ensure_root_is_dir(root: &Path) -> Result<(), String> {
+    match fs::metadata(root) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(format!(
+            "扫描根不可用：{}（不是一个目录）",
+            path::display(root)
+        )),
+        Err(error) => Err(format!("扫描根不可用：{}（{error}）", path::display(root))),
+    }
+}
+
 fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
     // 先拦，再扫：10T 扫上几个钟头才发现文件写不出去，代价太大。
+    // 根在不在排在最前面——它一句话就能问出来，而后面每一步都在往工作目录里留东西。
+    if let Err(message) = ensure_root_is_dir(&args.root) {
+        return fail(message);
+    }
     if let Err(message) = args.output.refuse_targets_in_library(&args.root) {
         return fail(message);
     }
@@ -1343,6 +1371,15 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
         }
     };
 
+    if let Some(declined) = &outcome.resume_declined {
+        // 点名要了 `--resume` 却从头扫了一遍，这事得说出来：10T 库上那是几十分钟，
+        // 而用户以为自己接着上一趟跑。说出口也顺带指明了原因是盘换了挂载点。
+        eprintln!(
+            "断点记的扫描根是 {}，这一趟扫的是 {}——盘换了挂载点，\
+             断点里记着的目录接不下去，于是从头扫了一遍。",
+            declined.recorded, declined.current
+        );
+    }
     if outcome.shaped {
         eprintln!(
             "成型完毕：{} 个变体。",
