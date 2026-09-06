@@ -1100,6 +1100,12 @@ pub struct MatchedValue {
     pub value: String,
     /// 哪个源产出的（中文名那一路，还是别名那一路）。
     pub source: String,
+    /// **依据**：这条值是怎么来的，那句话原样。
+    ///
+    /// 带着它而不是让读的那一侧自己再去库里捞一遍：队列要在**堆上写出依据**
+    /// （票 `queue-followups/06`），而捞回来之后还得再按条目号认一遍谁属于这一堆
+    /// ——那正是[归堆](matched_groups)这件事本身，第二处认法迟早与这一处漂开。
+    pub evidence: String,
 }
 
 /// **同一次匹配带来的那一堆字段**：一个条目号，一堆值（票 05）。
@@ -1168,6 +1174,7 @@ pub fn matched_groups(
                 field,
                 value: value.value,
                 source: value.source,
+                evidence: value.evidence,
             });
         }
     }

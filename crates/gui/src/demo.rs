@@ -10,10 +10,14 @@
 
 use std::collections::BTreeMap;
 
-use romcat_core::catalog::identify::{ContentHash, Identification};
-use romcat_core::catalog::{Candidate, Catalog, CatalogError, Confidence, State};
+use romcat_core::catalog::identify::{ContentHash, Identification, Provenance};
+use romcat_core::catalog::scrape::{Harvested, HarvestedValue};
+use romcat_core::catalog::{
+    Candidate, Catalog, CatalogError, Confidence, EntryRecord, State, Verdict,
+};
 use romcat_core::collection;
 use romcat_core::dat::Convention;
+use romcat_core::fs::{EntryKind, EntryMeta};
 use romcat_core::platform::Manifest;
 use romcat_core::shape::{Role, SINGLE_FILE_RULE, SPLIT_VOLUME_RULE, Variant};
 use romcat_core::site::Site;
@@ -276,6 +280,34 @@ const REASONS: &[&str] = &[
     "这个平台没有可撞的 DAT",
 ];
 
+/// 合成数据里那份**中文离线 dump** 叫什么。依据那句话里写的就是它。
+const ZH_DUMP: &str = "dump-2026-09-01";
+
+/// 合成数据里那一次中文离线源匹配撞上的**条目号**。
+///
+/// **它就是「同一次匹配」的判据**：中文名与别名挂在变体上、类型简介开发商发行商挂在
+/// 作品上，四处的值、字段名、锚点全不同，共通的只有各自**依据**里这个号
+/// （`scrape::zh::matched_groups`）。
+const ZH_ENTRY: u32 = 12_345;
+
+/// 合成数据里那次**中文离线源匹配**落在谁身上（票 `queue-followups/06`）。
+///
+/// 待确认屏上「一条裁决管住同一次匹配带来的全部字段」要有东西可看、可裁，而那件事
+/// 有**两种**样子，缺一种就有半块屏画不出来：撞上那条条目的那个变体自己看得见全部
+/// 字段、裁得动；名下**没撞上**的那个看见的是同一堆里作品那一层的几栏，而它裁不动
+/// （裁决钉在内容上，[`romcat_core::scrape::zh::judge`] 的文档说的就是这件事）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZhMatch {
+    /// **自己撞上**那条条目的变体：变体层那两条与作品层那几栏都是它带来的。
+    pub variant: String,
+    /// 名下**另一个**变体：它自己没撞上，屏上那一堆全在作品那一层。
+    pub sibling: String,
+    /// 这两个变体属于哪部作品。
+    pub work: String,
+    /// 撞上的**条目号**。一条裁决管住的就是它带来的全部字段。
+    pub entry: u32,
+}
+
 /// 造一份**待确认队列**用的中立库：`rows` 条待裁决，形状照真机来。
 ///
 /// **主库只读**（ADR-0004），这条路一个字节都不碰真库；库本身在内存里。
@@ -284,6 +316,18 @@ const REASONS: &[&str] = &[
 /// # Errors
 /// 建库或写库失败时返回错误。
 pub fn queue(rows: u64) -> Result<Catalog, CatalogError> {
+    queue_with_zh(rows).map(|(catalog, _)| catalog)
+}
+
+/// 同 [`queue`]，另外交出那次**中文离线源匹配**落在谁身上。
+///
+/// 摆得出来要**同一部作品底下挨着的两个**、而且**拿得到内容判据**的变体（裁决钉在
+/// 内容锚上，无判据那一档只钉得住本机路径），`rows` 小到凑不齐时是 `None`——那时
+/// 队列照样列得出来，只是没有那一堆可裁的东西。
+///
+/// # Errors
+/// 建库或写库失败时返回错误。
+pub fn queue_with_zh(rows: u64) -> Result<(Catalog, Option<ZhMatch>), CatalogError> {
     let mut catalog = Catalog::open_in_memory()?;
     记下合成的根(&catalog);
     let scale = |count: u64| count.saturating_mul(rows) / QUEUE_ROWS;
@@ -330,7 +374,9 @@ pub fn queue(rows: u64) -> Result<Catalog, CatalogError> {
                 key: key.clone(),
             });
             // **无判据那一档拿不到内容判据**——那正是它落进这一档的原因，
-            // 于是它的裁决只钉得住本机路径。别的都有 CRC-32 加大小，钉在内容上。
+            // 于是它的裁决只钉得住本机路径。别的都有 CRC-32 加大小。
+            // （**折得出内容锚的只有底下那两个**：`identify::content_print` 还要问一句
+            //  `entry_fact`，而这份数据只给那两个写了 `entry` 行——挂单 Q168。）
             if state != State::NoEvidence {
                 hashes.push(ContentHash {
                     key: key.clone(),
@@ -372,10 +418,172 @@ pub fn queue(rows: u64) -> Result<Catalog, CatalogError> {
         }
     }
 
+    // **中文离线源那一次匹配**：挑**挨着的两个**变体，两条都要**拿得到内容判据**
+    // （无判据那一档只钉得住本机路径，而这一堆的正事之一就是「锚在内容上」），
+    // 而且要落在**同一部作品**底下——作品那一层那几栏本来就是名下变体投票投出来的
+    // （票 02），一个变体一部作品就只剩半堆。
+    //
+    // **作品名从下标反推，不硬写第 0 个**：文件名里那个作品名是 `QUEUE_WORKS[n / 3]`，
+    // 而 `--queue-rows` 小的时候头两个够格的根本不是 `n = 0, 1`（命中那一档按比例缩到
+    // 零，够格的从「未命中」那一段起头）。硬写的话，屏上那一堆说的作品与文件名对不上
+    // ——正是这份合成数据最不该出的错。
+    let zh = records
+        .windows(2)
+        .enumerate()
+        .find(|(at, pair)| {
+            pair[0].state != State::NoEvidence
+                && pair[1].state != State::NoEvidence
+                && at / 3 == (at + 1) / 3
+        })
+        .map(|(at, pair)| ZhMatch {
+            variant: pair[0].variant_key.clone(),
+            sibling: pair[1].variant_key.clone(),
+            work: QUEUE_WORKS[(at / 3) % QUEUE_WORKS.len()].to_string(),
+            entry: ZH_ENTRY,
+        });
+    // **这两个变体要有 `entry` 行**：内容判据走的是 `identify::content_print`，而那条路
+    // 先问「这个成员在库里是个什么」（`entry_fact`）——没有那一行就答「压根没有」，
+    // 于是那条裁决只钉得住本机路径。**写在前头**：那一趟会把这几个键上算过的东西
+    // 当成重扫来的一起清掉（`Catalog::write`），摆在内容判据后面的话刚写的就没了。
+    let entries: Vec<EntryRecord> = zh
+        .iter()
+        .flat_map(|zh| [zh.variant.clone(), zh.sibling.clone()])
+        .map(|key| EntryRecord {
+            meta: EntryMeta::Known {
+                len: variants
+                    .iter()
+                    .find(|variant| variant.key == key)
+                    .map_or(0, |variant| variant.bytes),
+                modified: None,
+            },
+            key,
+            kind: EntryKind::File,
+            non_utf8: false,
+            verdict: Verdict::Added,
+            sample: None,
+            container: None,
+        })
+        .collect();
+    catalog.write(1, &entries)?;
     catalog.replace_variants(&variants, 1, &Manifest::default())?;
     catalog.put_content_hashes(&hashes)?;
+    if let Some(zh) = &zh {
+        let work = catalog.add_work(&zh.work, Provenance::Identified)?;
+        for record in &mut records {
+            if record.variant_key == zh.variant || record.variant_key == zh.sibling {
+                record.work_id = Some(work);
+            }
+        }
+    }
     catalog.write_identifications(&records)?;
-    Ok(catalog)
+    if let Some(zh) = &zh {
+        catalog.put_scraped(&中文离线源采到的(zh))?;
+    }
+    Ok((catalog, zh))
+}
+
+/// 合成数据里那一次匹配本身：撞上了哪条条目、撞的是它的哪个叫法、几分。
+///
+/// **它得够得着「中置信」**（[`romcat_core::zh::Match::strong`]：名字一字不差，或者
+/// 相似度够高**而且**年份对得上）。够不着的话 `ChineseSource::hit` 当场就把它跳过去
+/// ——真库里这次匹配一个字段都不会产出，而待确认屏上就写在它旁边的那句
+/// 「模糊匹配来的，中置信，不自动通过」也就成了假话。底下一条单元测试钉着这件事。
+fn 那一次匹配(entry: u32) -> romcat_core::zh::Match {
+    use romcat_core::zh::{Check, Entry, Match, NameKind};
+
+    let 中文名 = QUEUE_WORKS[0];
+    Match {
+        entry: Entry {
+            id: entry,
+            name: "Tales of Phantasia".to_string(),
+            name_cn: 中文名.to_string(),
+            aliases: vec!["幻想傳說".to_string()],
+            year: Some(1995),
+            platforms: vec!["SFC".to_string()],
+            platform_text: "SFC".to_string(),
+            summary: String::new(),
+            genres: vec!["角色扮演".to_string()],
+            developers: vec!["南梦宫".to_string()],
+            publishers: vec!["南梦宫".to_string()],
+        },
+        matched: 中文名.to_string(),
+        kind: NameKind::Chinese,
+        score: 0.93,
+        exact: false,
+        platform: Check::Agrees,
+        year: Check::Agrees,
+    }
+}
+
+/// 那一次匹配采到的东西，摆成写库前的样子。
+///
+/// **依据那句话由核心库自己写**（[`romcat_core::zh::Match::evidence`]）：队列按依据里
+/// 那个**条目号**归堆（`scrape::zh::matched_groups`），这儿自己拼一句的话，合成数据与
+/// 真库在同一件事上会有两种写法，而归堆那一侧只认核心库那一种。
+fn 中文离线源采到的(zh: &ZhMatch) -> Vec<Harvested> {
+    use romcat_core::identify::fuzzy;
+    use romcat_core::scrape::{AnchorKind, Field};
+
+    let one = 那一次匹配(zh.entry);
+    let 中文名 = one.entry.name_cn.clone();
+    let 别名 = one.entry.aliases[0].clone();
+    // **模糊匹配来的一律进待确认队列**（ADR-0002），所以这里是没人裁过的那一句尾巴。
+    let 依据 = one.evidence(ZH_DUMP, "正题", &中文名);
+    // 作品那一层那句话真库里由 `WorkHit::evidence` 写，多的半句说的是「撞是名下哪个
+    // 变体撞的」——这儿只留那半句的意思，前半句原样是核心库写的那一条。
+    let 作品依据 = |field: Field| {
+        format!(
+            "{依据}；这条结论挂在作品这一层：撞是名下的变体「{}」撞的，\
+             而{}跨平台跨地区都成立",
+            zh.variant,
+            field.label(),
+        )
+    };
+    let 值 = |field: Field, value: &str, evidence: String| HarvestedValue {
+        field: field.label().to_string(),
+        value: value.to_string(),
+        evidence,
+    };
+    vec![
+        // 变体那一层：中文名一路、别名一路。**两路同生共死**，同一个条目号。
+        Harvested {
+            anchor: AnchorKind::Variant.label().to_string(),
+            subject: zh.variant.clone(),
+            source: fuzzy::SOURCE.to_string(),
+            input: format!("合成 {}", zh.entry),
+            values: vec![值(Field::Title, &中文名, 依据.clone())],
+            media: Vec::new(),
+        },
+        Harvested {
+            anchor: AnchorKind::Variant.label().to_string(),
+            subject: zh.variant.clone(),
+            source: fuzzy::ALIAS_SOURCE.to_string(),
+            input: format!("合成 {}", zh.entry),
+            values: vec![值(Field::Title, &别名, 依据.clone())],
+            media: Vec::new(),
+        },
+        // 作品那一层：类型、简介、开发商、发行商。**简介故意长**——一条 4,000 字的
+        // 简介在真库里是常态，而这一堆画在详情面板里，收不收得住那一行要有得测。
+        Harvested {
+            anchor: AnchorKind::Work.label().to_string(),
+            subject: zh.work.clone(),
+            source: fuzzy::SOURCE.to_string(),
+            input: format!("合成 {}", zh.entry),
+            values: vec![
+                值(Field::Genre, "角色扮演", 作品依据(Field::Genre)),
+                值(
+                    Field::Description,
+                    "克雷斯的村子被毁，他与同伴穿越时空去阻止魔王。\n\
+                     这一段是合成数据，故意写得长一点、还带着换行——数据源的排版原样\
+                     留在值里（规格 18），而详情面板那一行要收得住它。",
+                    作品依据(Field::Description),
+                ),
+                值(Field::Developer, "南梦宫", 作品依据(Field::Developer)),
+                值(Field::Publisher, "南梦宫", 作品依据(Field::Publisher)),
+            ],
+            media: Vec::new(),
+        },
+    ]
 }
 
 /// 这一条名字里带哪个记号。
@@ -453,7 +661,7 @@ const 候选形状: &[形状] = &[
     },
     形状 {
         source: "中文离线源",
-        dat: "dump-2026-09-01",
+        dat: ZH_DUMP,
         confidence: Confidence::Medium,
         convention: Convention::AsIs,
         fanout: 1,
@@ -462,7 +670,7 @@ const 候选形状: &[形状] = &[
     },
     形状 {
         source: "中文离线源",
-        dat: "dump-2026-09-01",
+        dat: ZH_DUMP,
         confidence: Confidence::Low,
         convention: Convention::AsIs,
         fanout: 1,
@@ -655,12 +863,9 @@ pub fn browse(rows: u64) -> Result<Catalog, CatalogError> {
 /// 建库或写库失败时返回错误。
 #[allow(clippy::too_many_lines)]
 pub fn browse_shaped(rows: u64, works_count: usize) -> Result<Catalog, CatalogError> {
-    use romcat_core::catalog::identify::Provenance;
-    use romcat_core::catalog::scrape::{Harvested, HarvestedMedia, HarvestedValue};
+    use romcat_core::catalog::scrape::HarvestedMedia;
     use romcat_core::catalog::title::TitleRow;
-    use romcat_core::catalog::{EntryRecord, Verdict};
     use romcat_core::dat::chinese::ChineseMark;
-    use romcat_core::fs::{EntryKind, EntryMeta};
     use romcat_core::scrape::priority::VERDICT;
     use romcat_core::scrape::{AnchorKind, Field, MediaKind};
     use romcat_core::title::{Language, TitleKind};
@@ -947,4 +1152,31 @@ pub fn browse_shaped(rows: u64, works_count: usize) -> Result<Catalog, CatalogEr
     catalog.put_scraped(&harvested)?;
 
     Ok(catalog)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 合成的那一次中文匹配够得着中置信() {
+        // 够不着的话，`ChineseSource::hit` 真跑一趟时当场把它跳过去——这份合成数据
+        // 代表的匹配在真库里一个字段都不会产出，而待确认屏上就写在它旁边的那句
+        // 「模糊匹配来的，中置信，不自动通过」也就成了假话（`/code-review` 报的第 2 条）。
+        let one = 那一次匹配(ZH_ENTRY);
+        assert!(
+            one.strong(&romcat_core::zh::Tuning::default()),
+            "这一次匹配够不着中置信：相似度 {}、平台{}、年份{}",
+            one.score,
+            one.platform.label(),
+            one.year.label(),
+        );
+        // **仍旧不自动通过**：中置信是「进待确认队列」那一档，不是「自动过」
+        // （ADR-0002，这一票的硬约束之一）。
+        assert!(
+            one.evidence(ZH_DUMP, "正题", &one.entry.name_cn)
+                .contains("一律进待确认队列"),
+            "依据里那句尾巴不见了",
+        );
+    }
 }

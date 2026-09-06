@@ -34,12 +34,22 @@
 //! 视口，那个控件就不存在了，输入法上屏时会没人接（ADR-0005 的修订段）。
 //! `tests/queue.rs::表格里画多少行文本输入框都是那几个` 钉住这一条。
 //!
+//! ## 逐条时顺带裁得动**那一次匹配**
+//!
+//! 一条误撞的中文名带来的不只是中文名：简介、类型、开发商、发行商都来自变体那一次
+//! 匹配、同一个条目号，它们**同生共死**。所以详情面板底下摆着这个变体身上那几堆
+//! ——一堆一个条目号，堆上写着条目号与**依据**——就地裁一次，那一堆一并定下或一并
+//! 失效（票 `queue-followups/06`）。**归堆与落裁决都在核心库**
+//! （[`matched_groups`] 与 [`judge`]），命令行 `romcat zh matches` / `romcat zh judge`
+//! 走的是同两条路。
+//!
 //! ## 领域判断一条都不在这里
 //!
 //! 队列怎么分批、二级怎么下钻、样本怎么抽、一次裁决说得成不成立、落下之后哪些该从
 //! 队列里消失——全在 [`romcat_core::triage`]（[`Queue`]、[`Batch`]、[`Scope`]、
-//! [`Axis`]、[`Draft`]）。这一层只做三件事：把要来的画出来、把点的那一下写回去、
-//! 把中文输入放在对的位置上（ADR-0005）。
+//! [`Axis`]、[`Draft`]）；哪几个字段来自同一次匹配、一条匹配裁决要清掉什么，
+//! 在 [`romcat_core::scrape::zh`]。这一层只做三件事：把要来的画出来、把点的那一下
+//! 写回去、把中文输入放在对的位置上（ADR-0005）。
 
 use std::fmt::Write as _;
 
@@ -49,6 +59,8 @@ use romcat_core::catalog::State;
 use romcat_core::catalog::identify::Tier;
 use romcat_core::dat::chinese::ChineseMark;
 use romcat_core::report::{capacity, thousands};
+use romcat_core::scrape::AnchorKind;
+use romcat_core::scrape::zh::{Judged, MatchGroup, judge, matched_groups};
 use romcat_core::triage::batch::Coverage;
 use romcat_core::triage::{
     Applied, Axis, Batch, Draft, Drill, Filter, Overrides, Plan, Queue, Sample, Scope, Shape,
@@ -56,6 +68,9 @@ use romcat_core::triage::{
 };
 use romcat_core::verdict;
 
+// **一行画得下的那一截**收在浏览屏那一处：一条简介在中立库里最多 4,000 字
+// （`scrape::zh::DESCRIPTION_LIMIT`），两屏碰到的是同一个问题，各写一份迟早两种收法。
+use crate::browse::one_line;
 use crate::layout;
 use crate::look;
 use crate::table::ROW_HEIGHT;
@@ -136,6 +151,15 @@ pub struct Screen {
     applied: Option<Applied>,
     /// 上一次撤回的账。
     undone: Option<Undone>,
+    /// 光标底下那个变体身上，**中文离线源那几次匹配**各带来了哪些字段。
+    ///
+    /// **缓着而不是每帧重问**：归堆一趟要读两个锚点（变体与作品各一次查库），
+    /// 而这一屏每秒画几十帧。
+    matches: Option<Matched>,
+    /// 上一次落下的那条**匹配裁决**的账。
+    judged: Option<MatchJudged>,
+    /// 匹配裁决那一格备注。**它会碰到输入法**，所以与别的文本框一样长在面板里。
+    match_note: String,
     /// 上一次出的错。
     error: Option<String>,
     /// **只裁选中的那一条**。
@@ -169,6 +193,9 @@ impl Screen {
             pending: None,
             applied: None,
             undone: None,
+            matches: None,
+            judged: None,
+            match_note: String::new(),
             error: None,
             only_picked: false,
             scroll_to: None,
@@ -334,6 +361,10 @@ impl Screen {
         }
         self.pending = None;
         self.cursor = None;
+        // 这两样都跟着光标那一条走，而光标刚放掉了。留着的话，人再走回那一条上时
+        // 看见的是上一份库上的账。
+        self.matches = None;
+        self.judged = None;
     }
 
     /// 画一帧。
@@ -377,6 +408,12 @@ impl Screen {
     /// 裁决表单，供实测与测试填。
     pub fn form_mut(&mut self) -> &mut Form {
         &mut self.form
+    }
+
+    /// **匹配裁决**那一格备注，供实测与测试填。界面上是那一栏里的文本框
+    /// （命令行上是 `romcat zh judge --note`）。
+    pub fn match_note_mut(&mut self) -> &mut String {
+        &mut self.match_note
     }
 
     /// 点中分组表的一行。**界面上点下去走的就是它**，实测与测试拿它当那一下。
@@ -899,8 +936,9 @@ impl Screen {
         });
     }
 
-    /// 左半：这一条的**文件名、路径**与全部**候选**、**置信度**、**依据**。
-    fn detail(&mut self, ui: &mut egui::Ui, site: &Site) {
+    /// 左半：这一条的**文件名、路径**与全部**候选**、**置信度**、**依据**，
+    /// 底下接着这个变体身上**中文离线源那几次匹配**（[`Screen::matches_ui`]）。
+    fn detail(&mut self, ui: &mut egui::Ui, site: &mut Site) {
         let at = self.at;
         let detail = match self.queue.detail(&site.catalog, at) {
             Ok(item) => item,
@@ -919,7 +957,11 @@ impl Screen {
         } else {
             format!("{}——只在本机成立", verdict::ANCHOR_PATH)
         };
-        let (name, directory) = (item.name().to_string(), item.directory().to_string());
+        let (key, name, directory) = (
+            item.variant.key.clone(),
+            item.name().to_string(),
+            item.directory().to_string(),
+        );
         let (state, platform, bytes) = (
             item.state.label(),
             item.variant.platform.clone(),
@@ -987,7 +1029,150 @@ impl Screen {
                     ui.colored_label(color, line);
                 }
             }
+            self.matches_ui(ui, site, &key);
         });
+    }
+
+    /// 详情底下那一块：**中文离线源那几次匹配**，一堆一次裁决。
+    ///
+    /// 归堆、落裁决、就地清库全在核心库（[`matched_groups`] 与 [`judge`]，
+    /// 票 `offline-chinese-fields/05`）——这一层只把要来的那几堆画出来、把按下的那一下
+    /// 转过去（ADR-0005）。命令行 `romcat zh matches` / `romcat zh judge` 走的是同两条路。
+    ///
+    /// **一堆都没有就一个字都不画**：绝大多数变体身上中文离线源一个字段都没产出，
+    /// 画一句「没有」只是每一条都多一行废话。刚裁过的那一条例外——否定那一档当场把
+    /// 那一堆清掉了，账那一行还得留在屏上，不然人按完什么都看不见。
+    fn matches_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, key: &str) {
+        self.refresh_matches(site, key);
+        // 账先折成一句话，再去借那几堆：两样一个借 `self.judged`、一个借
+        // `self.matches`，而底下那格备注还要 `&mut self.match_note`。
+        let 账 = self
+            .judged
+            .as_ref()
+            .filter(|judged| judged.key == key)
+            .map(judged_text);
+        let 空 = self
+            .matches
+            .as_ref()
+            .is_none_or(|matched| matched.groups.is_empty());
+        if 空 && 账.is_none() {
+            return;
+        }
+        ui.separator();
+        ui.strong("中文离线源那几次匹配");
+        ui.weak(
+            "一条裁决管住同一次匹配带来的全部字段——中文名、别名、类型、简介、\
+             开发商、发行商同生共死，不必对同一次误撞裁五遍。",
+        );
+        if let Some(账) = &账 {
+            ui.colored_label(ui.visuals().warn_fg_color, 账);
+        }
+        if 空 {
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.label("备注");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.match_note)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("半年后你会想知道当初凭什么这么定"),
+            )
+            .on_hover_text("写在这里的话跟着你按下的那一下记进裁决；命令行上是 `--note`。");
+        });
+        let 按下 = self
+            .matches
+            .as_ref()
+            .and_then(|matched| match_groups_ui(ui, &matched.groups));
+        if let Some((entry, accepted)) = 按下 {
+            self.judge_match(site, key, entry, accepted);
+        }
+    }
+
+    /// 把那几堆对齐到光标底下这一条上。**算过的不再算。**
+    ///
+    /// 钥匙是「哪个变体」加 [`Queue::revision`]（裁完一批、撤回一批、换个选择器它都会
+    /// 变）。落下一条**匹配裁决**改的是库、队列的版号不动，所以那一下由
+    /// [`Screen::judge_match`] 自己把这份缓存作废。
+    ///
+    /// **别处跑完一趟刮削它不会自己知道**：那一趟改的是中立库，队列的版号一个数都没动。
+    /// 光标挪一下或者「重新列队列」就回来了——而跑刮削本来就是从别的屏出发的一趟长活。
+    ///
+    /// ⚠️ **版号本身不是单调的**（[`Queue::reload`] 会把它归零再由选择器推回 1）。
+    /// 这份缓存作数，靠的是「按批裁决那条路一个字都不碰刮削那张表」，不是靠钥匙不重复；
+    /// 真会改到那张表的那一下（[`Screen::judge_match`]）自己把它作废。
+    fn refresh_matches(&mut self, site: &Site, key: &str) {
+        let revision = self.queue.revision();
+        if self
+            .matches
+            .as_ref()
+            .is_some_and(|matched| matched.key == key && matched.revision == revision)
+        {
+            return;
+        }
+        match matched_groups(&site.catalog, key) {
+            Ok(groups) => {
+                self.matches = Some(Matched {
+                    key: key.to_string(),
+                    revision,
+                    groups,
+                });
+            }
+            Err(error) => {
+                // **读不动也缓下来**：不缓的话下一帧再问一次注定失败的库，而那句
+                // 「中立库读不动」会把屏上别的话（「裁不下去：……」，连同裁成功之后那次
+                // 清错误）每帧盖掉一次——人看不见自己刚按的那一下到底怎么了。
+                // 缓成空的，重试就跟着光标与版号走，不跟着帧走。
+                self.matches = Some(Matched {
+                    key: key.to_string(),
+                    revision,
+                    groups: Vec::new(),
+                });
+                self.error = Some(format!("中立库读不动：{error}"));
+            }
+        }
+    }
+
+    /// 落下一条**匹配裁决**：说这一次匹配就是它（`accepted`），或者说它不对。
+    ///
+    /// **界面上按那两颗按钮走的就是它。** 判断一条都不在这里——[`judge`] 就是命令行
+    /// `romcat zh judge` 走的那一个函数（ADR-0005）：落沉淀库、锚在**内容锚**上、
+    /// 否定那一档就地清库，全在核心库里。
+    pub fn judge_match(&mut self, site: &mut Site, key: &str, entry: u32, accepted: bool) {
+        let note = {
+            let text = self.match_note.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        };
+        match judge(
+            &mut site.catalog,
+            &mut site.store,
+            &site.library,
+            key,
+            entry,
+            accepted,
+            note,
+        ) {
+            Ok(judged) => {
+                self.error = None;
+                // **收下就用掉**：留着的话，下一条裁决会悄悄带上一句写给别人的话。
+                self.match_note.clear();
+                // 否定那一档当场清了库，而队列的版号一个数都没动——缓着的那几堆
+                // 得重问一遍，不然屏上还摆着刚被清掉的那些值。
+                self.matches = None;
+                self.judged = Some(MatchJudged {
+                    key: key.to_string(),
+                    entry,
+                    accepted,
+                    judged,
+                });
+            }
+            Err(error) => self.error = Some(format!("裁不下去：{error}")),
+        }
+    }
+
+    /// 上一次落下的那条**匹配裁决**的账。
+    #[must_use]
+    pub fn judged(&self) -> Option<&Judged> {
+        self.judged.as_ref().map(|judged| &judged.judged)
     }
 
     /// 右半：选择器与裁决表单。**这一栏里的每一个文本框都会碰到输入法。**
@@ -1526,6 +1711,187 @@ struct Opened {
     drill: Drill,
     /// 作用范围里的随机样本。
     samples: Vec<Sample>,
+}
+
+/// **一堆来自同一次匹配的字段**：条目号、依据、那几个值，连底下那两颗按钮。
+///
+/// 返回「这一帧按下了哪一堆的哪一档」——`(条目号, 就是这条吗)`。
+///
+/// 收成自由函数是因为借用：这一块要**读**缓着的那几堆（`&self.matches`），而按下去
+/// 之后要**改**两份库；一个 `&mut self` 上过不去，也不该为了过去而把那几堆整份克隆
+/// 一遍（一条简介 4,000 字，每帧一份）。
+fn match_groups_ui(ui: &mut egui::Ui, groups: &[MatchGroup]) -> Option<(u32, bool)> {
+    let mut 按下 = None;
+    for group in groups {
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            // **条目号写在堆上**：它就是「同一次匹配」的判据，人要去数据源核对时，
+            // 那也是唯一查得回去的东西。
+            ui.strong(format!("条目 {}", group.entry));
+            if group.confirmed {
+                ui.label("已由人裁决确认");
+            } else {
+                // **口径不放松**：模糊匹配来的仍是中置信、仍进待确认队列（ADR-0002）。
+                ui.label("还等着裁：模糊匹配来的，中置信，不自动通过");
+            }
+            ui.weak(format!("{} 个字段，一条裁决全管", group.values.len()));
+        });
+        for value in &group.values {
+            // **锚点那一层写出来**：同一堆里变体那几条与作品那几条，下一趟重跑时的
+            // 去向完全不同（作品那一层按名下变体数票，见 `zh::judge` 的文档）。
+            let 落在 = match value.kind {
+                AnchorKind::Variant => "变体".to_string(),
+                AnchorKind::Work => format!("作品「{}」", value.subject),
+            };
+            let 值 = one_line(&value.value);
+            ui.label(format!(
+                "{落在} · {}｜{} = {}\n    依据：{}",
+                value.source,
+                value.field.label(),
+                值.as_deref().unwrap_or(value.value.as_str()),
+                value.evidence,
+            ))
+            .on_hover_text(&value.value);
+        }
+        if group.from_variant {
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .button("就是这条")
+                    .on_hover_text(
+                        "这一次匹配带来的全部字段一并定下：下一趟刮削把它们的依据改写成\
+                         「由人工裁决确认过」，不再进待确认队列。一个字都不清。",
+                    )
+                    .clicked()
+                {
+                    按下 = Some((group.entry, true));
+                }
+                if ui
+                    .button("不是这条")
+                    .on_hover_text(
+                        "这一次匹配带来的全部字段一并失效，就地清掉——错的东西不该在库里\
+                         多躺一秒。这个变体重跑刮削也不会再撞回这条条目。",
+                    )
+                    .clicked()
+                {
+                    按下 = Some((group.entry, false));
+                }
+            });
+        } else {
+            // **裁决钉在内容上**：这一堆全在作品锚点上，撞它的是名下别的变体。钉在
+            // 这个变体身上管不到那一层——下一趟那些变体照旧投它们的票（`zh::judge`）。
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                "⚠️ 这一堆全在作品那一层：撞它的是名下别的变体，不是这一个。\
+                 裁它要去裁那个变体。",
+            );
+        }
+    }
+    按下
+}
+
+/// 落下一条**匹配裁决**之后那一句账。
+///
+/// 命令行 `romcat zh judge` 印的是同一本账（`Judged` 那几栏一处说了算）：钉在什么上、
+/// 是不是改主意、清掉了几条、作品那一层会不会自己回来。**一句都不许省**——省掉的每
+/// 一句都是一次「按下去之后什么都没发生」。
+fn judged_text(judged: &MatchJudged) -> String {
+    let 账 = &judged.judged;
+    let mut text = format!(
+        "条目 {} {}。锚是{}——{}",
+        judged.entry,
+        if judged.accepted {
+            "就是这条"
+        } else {
+            "不是这条"
+        },
+        账.anchor.label(),
+        账.anchor.describe(),
+    );
+    if !账.anchor.is_shareable() {
+        text.push_str(
+            "。⚠️ 这一条只在本机成立：拿不到内容判据，退到了路径锚——改个名字、\
+             换台机器就认不出了",
+        );
+    }
+    if !账.fresh {
+        text.push_str("。（这条锚上本来就裁过，这次是改主意——覆盖掉了老的那一条。）");
+    }
+    if !账.from_variant {
+        text.push_str(
+            "。⚠️ 这个变体自己撞的不是这条条目：裁决记下了，但它钉在这个变体的内容上，\
+             作品那一层若是名下别的变体撞出来的，下一趟刮削它们照旧投回来",
+        );
+    }
+    if judged.accepted {
+        text.push_str(
+            "。这一次匹配带来的字段一并定下，一个字都不清。\
+             屏上那一堆仍写着「还等着裁」——那句话在依据里，下一趟 `romcat scrape` 才改写",
+        );
+    } else {
+        let _ = write!(
+            text,
+            "。就地清掉了 {} 条字段值{}",
+            thousands(账.cleared),
+            match (&账.work, 账.cleared_work) {
+                // **动过才说动过**：作品那一层一个字没动时，这半句一个字都不该印。
+                (Some(work), n) if n > 0 => format!("（其中作品「{work}」那一层 {} 条）", thousands(n)),
+                _ => String::new(),
+            },
+        );
+        if 账.cleared_work > 0 {
+            text.push_str(
+                "。⚠️ 作品那一层可能自己回来：那几栏按名下变体数票定，\
+                 名下还有别的变体撞着这条条目的话，下一趟它们照样投这一票——而那时它是对的",
+            );
+        }
+    }
+    // **走回来那一下要说清楚**：按批撤销（[`Screen::undo_last`]）管的是**识别**那一批
+    // 裁决，匹配裁决不在那条路上——改主意的路是再裁一次，同一条锚上后一条盖掉前一条。
+    text.push_str(
+        "。改主意就再裁一次：这一条不在「撤回第 N 批」那条路上（那条管的是识别那一批），\
+         同一条锚上后一条盖掉前一条",
+    );
+    // **「采得回来」有前提，说全它**。否定之后重跑刮削照旧不会撞回这条条目
+    // （那条裁决进了输入指纹，`ChineseSource::hit` 当场跳过它）——值要回来，
+    // 得先把这一条改判成「就是这条」。半句话会与那颗按钮的说明当场打架。
+    if judged.accepted {
+        text.push('。');
+    } else {
+        text.push_str(
+            "；清掉的那些值要回来，得先改判成「就是这条」，\
+             再跑一趟 `romcat scrape`。",
+        );
+    }
+    text
+}
+
+/// 光标底下那个变体身上那几堆，连**它是照着什么读出来的**。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Matched {
+    /// 哪个变体。
+    key: String,
+    /// 读它的时候队列是第几版（[`Queue::revision`]）。
+    revision: u64,
+    /// 按**条目号**归好的那几堆。**归堆在核心库**（[`matched_groups`]）。
+    groups: Vec<MatchGroup>,
+}
+
+/// 上一次落下的那条**匹配裁决**：裁的是谁的哪一条，连核心库交回来的那本账。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MatchJudged {
+    /// 裁的是哪个变体。**账只画在它自己那一条上**——光标挪走之后还挂着，
+    /// 那句话说的就是另一个变体了。
+    ///
+    /// 它跟着「重新列队列」一起放掉（[`Screen::reload`]），别的路不清：光标绕一圈
+    /// 回到同一个变体，那句账原样回来。那句话仍旧是真的（这条裁决确实落下过），
+    /// 所以留着比抹掉好。
+    key: String,
+    /// 哪一次匹配（条目号）。
+    entry: u32,
+    /// 说的是「就是这条」还是「不是这条」。
+    accepted: bool,
+    /// 核心库交回来的账。
+    judged: Judged,
 }
 
 /// 屏底那句「前几批盖住多少」。

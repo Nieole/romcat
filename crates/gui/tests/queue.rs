@@ -8,7 +8,10 @@
 
 use egui::widgets::text_edit::TextEditState;
 use romcat_core::catalog::State;
+use romcat_core::scrape::AnchorKind;
+use romcat_core::scrape::zh::{judge, matched_groups};
 use romcat_core::triage::{Axis, Draft, Overrides, Scope};
+use romcat_core::verdict::{Anchor, MatchVerdict};
 use romcat_gui::app::{App, View};
 use romcat_gui::queue::Mode;
 use romcat_gui::table::ROW_HEIGHT;
@@ -68,6 +71,67 @@ fn 画出来的字(output: &egui::FullOutput) -> String {
     let mut out = String::new();
     for clipped in &output.shapes {
         收(&clipped.shape, &mut out);
+    }
+    out
+}
+
+/// 造一份带着**那一次中文离线源匹配**的界面，连它落在谁身上（票 `queue-followups/06`）。
+fn 带中文匹配的界面(rows: u64) -> (App, demo::ZhMatch) {
+    let (catalog, zh) = demo::queue_with_zh(rows).expect("造得出合成数据");
+    let zh = zh.expect("合成数据里该摆着那一次中文离线源匹配");
+    let site = demo::site(catalog).expect("开得出现场");
+    (App::new(site, 工作目录()), zh)
+}
+
+/// 「逐条看整个队列」那一下，再把**光标**停在这一条上。
+///
+/// 前两下就是屏上那颗按钮做的事（`batches_ui` 里那句「收起展开的那一批、切到逐条」）：
+/// 不收起来的话逐条只看得见展开的那一批，而这几条要停的那个变体未必在里头。
+fn 停在(ctx: &egui::Context, app: &mut App, key: &str) {
+    {
+        let (screen, _) = app.queue_and_site();
+        if let Some(scope) = screen.scope() {
+            screen.open_batch(&scope.shape);
+        }
+        screen.show_one_by_one();
+        screen.pick_row(key);
+    }
+    跑(ctx, app, 1);
+    assert_eq!(
+        app.queue()
+            .queue()
+            .selected()
+            .get(app.queue().at())
+            .map(|item| item.variant.key.as_str()),
+        Some(key),
+        "光标没停在这一条上，底下那几条断言就全在测别人",
+    );
+}
+
+/// 详情那一栏**滚一趟**，把这一路上画出来的字都收起来。
+///
+/// 底下那块面板默认 268 点高，而一堆匹配有六个字段、每条各带一整句**依据**——
+/// 一屏摆不下是必然的，而 egui 不画视口之外的东西。所以这里滚的是**真的滚轮事件**
+/// （`表格里画多少行文本输入框都是那几个` 也是这么滚一趟的），每一帧收的仍旧是
+/// 那一帧真的画出来的字。
+fn 详情滚一趟(ctx: &egui::Context, app: &mut App) -> String {
+    const STEPS: u32 = 12;
+    let mut out = String::new();
+    for step in 0..=STEPS {
+        let mut input = headless::input();
+        // 指针停在底下那块面板的左半栏里——滚轮归指针底下那块滚动区。
+        input
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(300.0, 700.0)));
+        if step > 0 {
+            input.events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -150.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        out.push_str(&画出来的字(&headless::frame(ctx, input, |ui| app.ui(ui))));
     }
     out
 }
@@ -1022,4 +1086,327 @@ fn 换过选择器之后那份计划书作废而不是照旧落下() {
         0,
         "作废掉的那份计划不该写进任何一份库",
     );
+}
+
+/// 这几条中文匹配的测试摆多少条队列。
+///
+/// **不用整份 16,656 条**：这一块要的只是「那一堆摆在屏上、裁得动」，而摆得出那一堆
+/// 要的是两个拿得到内容判据的变体——命中那一档在这个规模上有 3 条，够了。
+const 中文匹配用的条数: u64 = 200;
+
+#[test]
+fn 待确认屏上看得出哪几个字段来自同一次匹配() {
+    // 票 `queue-followups/06` 验收第 1 条。**断言看的是这一帧真的画出来的字**：
+    // 查库里有没有这几条是恒真的废话，这一屏要证的是那一堆摆出来了没有。
+    let ctx = headless::context();
+    let (mut app, zh) = 带中文匹配的界面(中文匹配用的条数);
+    停在(&ctx, &mut app, &zh.variant);
+
+    // 归堆在核心库（`scrape::zh::matched_groups`），界面一条领域逻辑都没写。
+    let groups = matched_groups(&app.site().catalog, &zh.variant).expect("读得出");
+    assert_eq!(groups.len(), 1, "只撞了一次，就只有一堆");
+    let group = &groups[0];
+    assert_eq!(group.entry, zh.entry);
+    assert!(group.from_variant, "这个变体自己撞的就是这条");
+    assert_eq!(
+        group.values.len(),
+        6,
+        "变体那两条（中文名、别名）加作品那四栏（类型、简介、开发商、发行商）",
+    );
+
+    let 屏上 = 详情滚一趟(&ctx, &mut app);
+    assert!(
+        屏上.contains(&format!("条目 {}", zh.entry)),
+        "堆上没写条目号——那是「同一次匹配」唯一的判据",
+    );
+    // **依据**：没有依据的结论事后无法复核（ADR-0002）。
+    let 依据 = &group.values[0].evidence;
+    assert!(屏上.contains(依据.as_str()), "堆上没写依据：{依据}");
+    // 同一堆里**两层锚点**上的字段都摆着——这一条就是「看得出它们来自同一次匹配」。
+    assert!(屏上.contains("幻想傳說"), "变体那一层的别名没摆出来");
+    assert!(屏上.contains("角色扮演"), "作品那一层的类型没摆出来");
+    for field in ["标题", "类型", "简介", "开发商", "发行商"] {
+        assert!(屏上.contains(field), "这一堆里没写着「{field}」这一栏");
+    }
+    // **就地裁得动**：不必切到终端把变体键拷过去。
+    assert!(屏上.contains("就是这条"), "屏上没有下肯定裁决那一下");
+    assert!(屏上.contains("不是这条"), "屏上没有下否定裁决那一下");
+}
+
+#[test]
+fn 就地下一次否定裁决同一次匹配带来的全部字段一并失效() {
+    // 验收第 2 条。清库在核心库（`scrape::zh::judge`），界面只把按下的那一下转过去。
+    let ctx = headless::context();
+    let (mut app, zh) = 带中文匹配的界面(中文匹配用的条数);
+    停在(&ctx, &mut app, &zh.variant);
+    let 依据 = matched_groups(&app.site().catalog, &zh.variant).expect("读得出")[0].values[0]
+        .evidence
+        .clone();
+    {
+        let (screen, site) = app.queue_and_site();
+        *screen.match_note_mut() = "抽样核对过，撞的是同名的另一部".to_string();
+        screen.judge_match(site, &zh.variant, zh.entry, false);
+    }
+    assert!(app.queue().error().is_none(), "{:?}", app.queue().error());
+
+    let 账 = app.queue().judged().expect("按下去该交回一本账").clone();
+    assert!(账.from_variant, "这个变体自己撞的就是这条");
+    assert!(账.cleared >= 6, "同一次匹配带来的六个字段该一条不剩：{账:?}");
+    assert!(账.cleared_work > 0, "作品那一层也该跟着清");
+    // **裁决落沉淀库、锚在内容锚上**（验收第 5 条）：删掉中立库重扫也不丢。
+    assert!(
+        matches!(账.anchor, Anchor::Content { .. }) && 账.anchor.is_shareable(),
+        "锚不是内容锚：{:?}",
+        账.anchor,
+    );
+
+    // 库里一条不剩——错的东西不许在库里多躺一秒。
+    assert!(
+        matched_groups(&app.site().catalog, &zh.variant)
+            .expect("读得出")
+            .is_empty(),
+        "变体那一层还留着这一次匹配的产出",
+    );
+    assert!(
+        matched_groups(&app.site().catalog, &zh.sibling)
+            .expect("读得出")
+            .is_empty(),
+        "作品那一层还留着这一次匹配的产出——名下别的变体照旧看得见它",
+    );
+    let 全部 = app.site().store.all_matches().expect("读得出沉淀库");
+    assert_eq!(全部.len(), 1);
+    assert!(!全部[0].accepted, "落下的该是「不是这条」");
+    assert_eq!(全部[0].entry, zh.entry.to_string());
+    assert_eq!(
+        全部[0].note.as_deref(),
+        Some("抽样核对过，撞的是同名的另一部"),
+        "备注那一格没跟着按下的那一下记进去",
+    );
+
+    // **屏上那一堆当场没了，而账留着**：不然人按完什么都看不见。
+    let 屏上 = 详情滚一趟(&ctx, &mut app);
+    assert!(屏上.contains("就地清掉了"), "账没画出来：{屏上}");
+    assert!(!屏上.contains(依据.as_str()), "那一堆该从屏上没了");
+}
+
+#[test]
+fn 就地下一次肯定裁决那一堆的值一个字都不清() {
+    // 验收第 3 条。**肯定那一档一个字都不清**：值是对的，变的只是它们的依据，
+    // 而那靠输入指纹在下一趟刮削改写（`scrape::zh::judge` 的文档）。
+    let ctx = headless::context();
+    let (mut app, zh) = 带中文匹配的界面(中文匹配用的条数);
+    停在(&ctx, &mut app, &zh.variant);
+    let 原有 = matched_groups(&app.site().catalog, &zh.variant).expect("读得出");
+    {
+        let (screen, site) = app.queue_and_site();
+        screen.judge_match(site, &zh.variant, zh.entry, true);
+    }
+    assert!(app.queue().error().is_none(), "{:?}", app.queue().error());
+    let 账 = app.queue().judged().expect("按下去该交回一本账").clone();
+    assert_eq!(账.cleared, 0, "肯定那一档一个字都不该清");
+    assert!(账.fresh, "这条锚上本来没裁过");
+    assert!(
+        matches!(账.anchor, Anchor::Content { .. }) && 账.anchor.is_shareable(),
+        "锚不是内容锚：{:?}",
+        账.anchor,
+    );
+    assert_eq!(
+        matched_groups(&app.site().catalog, &zh.variant).expect("读得出"),
+        原有,
+        "值被动过了",
+    );
+
+    // 沉淀库里那一条说的是「就是这条」。**下一趟不被分数更高的候选顶掉**那一半靠它：
+    // 排序键上「人说过就是它」排在相似度前面（核心库 `人说过的那一条排在机器挑的前面`
+    // 与 `作品那一层的章盖在人裁过的那个变体上而不是分数最高的那个`）。
+    let 全部 = app.site().store.all_matches().expect("读得出沉淀库");
+    assert_eq!(全部.len(), 1);
+    assert!(全部[0].accepted);
+    assert_eq!(全部[0].source, "中文离线源");
+    assert_eq!(全部[0].entry, zh.entry.to_string());
+
+    // **屏上不许把话说满**：那一堆仍写着「还等着裁」，因为那句话在依据里，
+    // 下一趟刮削才改写——不说清楚，人会以为自己白按了。
+    let 屏上 = 详情滚一趟(&ctx, &mut app);
+    assert!(屏上.contains("一并定下"), "账没画出来：{屏上}");
+    assert!(
+        屏上.contains("下一趟 `romcat scrape` 才改写"),
+        "没说清屏上那一堆为什么还写着「还等着裁」",
+    );
+}
+
+#[test]
+fn 界面与命令行裁同一条匹配落下的东西一模一样() {
+    // 验收第 4 条。两边走的是**同一个函数**（`scrape::zh::judge`，命令行那侧是
+    // `romcat zh judge`）；这条钉的是「同一条路」这句话在结果上成立。
+    let ctx = headless::context();
+    let (mut app, zh) = 带中文匹配的界面(中文匹配用的条数);
+    停在(&ctx, &mut app, &zh.variant);
+    let 一句 = "两边记同一句为什么";
+    {
+        let (screen, site) = app.queue_and_site();
+        *screen.match_note_mut() = 一句.to_string();
+        screen.judge_match(site, &zh.variant, zh.entry, false);
+    }
+    let 界面账 = app.queue().judged().expect("界面这一侧该有账").clone();
+    // 作品那一层裁之前有几栏。**先钉住这个数**：底下那条比的是两边清完之后剩下什么，
+    // 而拿两个空的比是恒真的废话（`/code-review` 报的第 1 条——早先那条把**作品名**
+    // 递给了 `matched_groups`，那个函数收的是**变体键**，于是两边都读回空 vec）。
+    let 作品那一层 = |catalog: &romcat_core::catalog::Catalog| -> Vec<(String, String, String)> {
+        catalog
+            .scraped_values(AnchorKind::Work.label(), &zh.work)
+            .expect("读得出")
+            .into_iter()
+            .map(|value| (value.field, value.source, value.value))
+            .collect()
+    };
+
+    // 命令行那一侧：同一份合成数据，同一个函数，参数是它从命令行收来的那几样。
+    let (catalog, 另一份) = demo::queue_with_zh(中文匹配用的条数).expect("造得出合成数据");
+    let 另一份 = 另一份.expect("合成数据里该摆着那一次匹配");
+    assert_eq!(另一份, zh, "两份合成数据该一模一样，不然这条比的是两件事");
+    let mut site = demo::site(catalog).expect("开得出现场");
+    let 命令行账 = judge(
+        &mut site.catalog,
+        &mut site.store,
+        &site.library,
+        &zh.variant,
+        zh.entry,
+        false,
+        Some(一句.to_string()),
+    )
+    .expect("裁得下去");
+
+    assert_eq!(界面账, 命令行账, "两边交回来的账不一样");
+    assert!(
+        界面账.cleared >= 6 && 界面账.cleared_work > 0,
+        "两边比的得是真清过的那一趟：{界面账:?}",
+    );
+    assert_eq!(
+        作品那一层(&app.site().catalog),
+        作品那一层(&site.catalog),
+        "两边清完之后作品那一层剩下的东西不一样",
+    );
+    assert!(
+        作品那一层(&app.site().catalog).is_empty(),
+        "否定那一档该把作品那一层这一次匹配的产出清光",
+    );
+    assert_eq!(
+        matched_groups(&app.site().catalog, &zh.variant).expect("读得出"),
+        matched_groups(&site.catalog, &zh.variant).expect("读得出"),
+        "两边清完之后那个变体身上剩下的东西不一样",
+    );
+    // 沉淀库里那一条也该一模一样。**时刻抹掉再比**：两次落下差了几毫秒是必然的，
+    // 而这条要证的不是它们同一秒发生。
+    let 抹掉时刻 = |mut rows: Vec<MatchVerdict>| {
+        for one in &mut rows {
+            one.decided_at = 0;
+        }
+        rows
+    };
+    assert_eq!(
+        抹掉时刻(app.site().store.all_matches().expect("读得出")),
+        抹掉时刻(site.store.all_matches().expect("读得出")),
+        "两边落进沉淀库的不一样",
+    );
+}
+
+#[test]
+fn 自己没撞上那条条目的变体在屏上裁不动那一堆() {
+    // 裁决钉在**这个变体的内容**上，而这一堆全在作品那一层——它是名下别的变体撞出来、
+    // 在那一层数票胜出的。给它两颗按钮就是让人按一下、然后什么都不发生
+    // （`scrape::zh::judge` 的文档：那一档一个字都不清）。
+    let ctx = headless::context();
+    let (mut app, zh) = 带中文匹配的界面(中文匹配用的条数);
+    停在(&ctx, &mut app, &zh.sibling);
+
+    let groups = matched_groups(&app.site().catalog, &zh.sibling).expect("读得出");
+    assert_eq!(groups.len(), 1);
+    assert!(!groups[0].from_variant, "这个变体自己不该撞上那条条目");
+
+    let 屏上 = 详情滚一趟(&ctx, &mut app);
+    assert!(
+        屏上.contains(&format!("条目 {}", zh.entry)),
+        "同一堆照旧看得见：名下变体看见的是同一堆作品级的值",
+    );
+    assert!(
+        屏上.contains("裁它要去裁那个变体"),
+        "没说清这一堆为什么在这儿裁不动：{屏上}",
+    );
+    assert!(!屏上.contains("就是这条"), "这一档不该给出裁决的按钮");
+    assert!(!屏上.contains("不是这条"), "这一档不该给出裁决的按钮");
+}
+
+#[test]
+fn 匹配裁决不另起一条撤销路() {
+    // 验收第 6 条。**按批撤销**（票 `gui-redesign/08`）管的是**识别**那一批裁决：
+    // 一次 `triage::apply` 就是一批，撤销把中立库与沉淀库两边一起放回去。匹配裁决
+    // 不在那条路上——它落的是沉淀库里另一张表（挂单 Q33），一条批都不建。
+    // 走回来那一下是**再裁一次**（同一条锚上后一条盖掉前一条），账那一行说的就是它。
+    let ctx = headless::context();
+    let (mut app, zh) = 带中文匹配的界面(中文匹配用的条数);
+    停在(&ctx, &mut app, &zh.variant);
+    {
+        let (screen, site) = app.queue_and_site();
+        screen.judge_match(site, &zh.variant, zh.entry, false);
+    }
+    assert!(app.queue().error().is_none(), "{:?}", app.queue().error());
+    let library = app.site().library.clone();
+    assert!(
+        app.site()
+            .store
+            .batches(&library, 10)
+            .expect("读得出")
+            .is_empty(),
+        "匹配裁决建出了一批——那会让「撤回第 N 批」去撤一件它管不了的事",
+    );
+    assert!(
+        app.queue().applied().is_none(),
+        "屏上不该冒出一颗撤回按钮：那颗按的是识别那一批",
+    );
+    let 屏上 = 详情滚一趟(&ctx, &mut app);
+    assert!(
+        屏上.contains("改主意就再裁一次"),
+        "没说清走回来那一下该怎么走：{屏上}",
+    );
+
+    // 再裁一次，改主意那一条**盖掉**前一条：沉淀库里照旧只有一条。
+    {
+        let (screen, site) = app.queue_and_site();
+        screen.judge_match(site, &zh.variant, zh.entry, true);
+    }
+    let 账 = app.queue().judged().expect("该有账").clone();
+    assert!(!账.fresh, "这条锚上本来就裁过，这次该是覆盖");
+    let 全部 = app.site().store.all_matches().expect("读得出");
+    assert_eq!(全部.len(), 1, "同一条锚上攒出了两条打架的记录");
+    assert!(全部[0].accepted);
+}
+
+#[test]
+fn 队列缩到很小时那一堆的作品名照旧对得上文件名() {
+    // `/code-review` 报的第 4 条：作品名硬写成头一个（`QUEUE_WORKS[0]`）的话，
+    // `--queue-rows` 小的时候头两个够格的变体根本不是 n = 0、1——命中那一档按比例缩到
+    // 零，够格的从「未命中」那一段起头，而那一段的文件名里带的是别的作品。
+    // 屏上那一堆于是说着一部与文件名对不上的作品，正是这份合成数据最不该出的错。
+    for rows in [50, 200, 2_000] {
+        let (catalog, zh) = demo::queue_with_zh(rows).expect("造得出合成数据");
+        let zh = zh.expect("这个规模上该摆得出那一次匹配");
+        for key in [&zh.variant, &zh.sibling] {
+            assert!(
+                key.contains(&zh.work),
+                "{rows} 条时 {key} 的文件名里没有作品「{}」",
+                zh.work,
+            );
+            assert_eq!(
+                catalog.work_of_variant(key).expect("读得出").as_deref(),
+                Some(zh.work.as_str()),
+                "{rows} 条时 {key} 没挂在那部作品底下",
+            );
+        }
+        // 那一堆真的摆得出来：变体那两条加作品那四栏，归在同一个条目号底下。
+        let groups = matched_groups(&catalog, &zh.variant).expect("读得出");
+        assert_eq!(groups.len(), 1, "{rows} 条时那一堆没了");
+        assert_eq!(groups[0].entry, zh.entry);
+        assert_eq!(groups[0].values.len(), 6, "{rows} 条");
+    }
 }
