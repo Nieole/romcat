@@ -678,3 +678,125 @@ fn 计划算完之后才出现的落点占用_执行这一层也挡得住() {
         "没写成的不许进清单"
     );
 }
+
+#[test]
+fn 只差大小写的是上一级目录_执行这一层照样挡得住() {
+    // 折的是**整条键**，不是最后那一段：计划那一侧拿 `path::fold` 折 `gb/Tetris.zip`
+    // 一整条，执行这一侧只折文件名的话，上一级目录换个大小写就从缝里漏过去了——
+    // 而卡上那个 `gb` 与我们要建的 `GB` 在不敏感的卡上本来就是同一个目录。
+    let 现场 = 现场::摆在(建个只差大小写的库());
+    let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
+
+    // 同样是排完计划之后才出现的：目录这一级也只差大小写。
+    //
+    // 卡上顺手再摆一个 `GB/`：大小写敏感的盘上它与 `gb/` 能并存，而 `GB` 排在 `gb`
+    // 前面。一层只跟排在前面那个候选的话，`gb/` 底下挡路的那份就从缝里漏过去了。
+    写(
+        &现场.卡.path().join("GB/别的.txt"),
+        "维护者自己的东西".as_bytes(),
+    );
+    let 维护者那份 = 现场.卡.path().join("gb/Tetris.zip");
+    写(&维护者那份, "这是我自己拷进去的".as_bytes());
+    let 原样 = fs::read(&维护者那份).expect("读得出");
+
+    let outcome = 现场.执行(&这趟, &Manifest::empty(), &CancelToken::new());
+    assert_eq!(
+        fs::read(&维护者那份).expect("还在"),
+        原样,
+        "维护者自己那份连一个字节都不许动",
+    );
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .any(|failure| failure.path == "GB/tetris.zip" && failure.act == Act::Add),
+        "上一级目录只差大小写也要挡下来：{:?}",
+        outcome.failures
+    );
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .any(|failure| failure.why.contains("Tetris.zip")),
+        "报告要说得出是哪个落点被占着：{:?}",
+        outcome.failures
+    );
+}
+
+/// 一份主库，`GB` 底下除了那个只差大小写的，还有别的东西。
+fn 建个只差大小写又不止一件的库() -> TempDir {
+    let dir = temp_dir("run-case-lib-more");
+    写(&dir.path().join("GB/tetris.zip"), &zip(2048));
+    写(&dir.path().join("GB/口袋妖怪.zip"), &zip(4096));
+    dir
+}
+
+#[test]
+fn 落点被占只挡那一条_其余几步照常做完() {
+    // 一条挡下来不许拖累整趟：与「单个文件写不进去不中断整趟」同一条纪律。
+    let 现场 = 现场::摆在(建个只差大小写又不止一件的库());
+    let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
+    let 一共 = 这趟.plan.steps.len();
+    assert!(一共 >= 2, "这一趟得有别的步可做：{:?}", 这趟.plan.steps);
+
+    写(
+        &现场.卡.path().join("GB/Tetris.zip"),
+        "这是我自己拷进去的".as_bytes(),
+    );
+
+    let outcome = 现场.执行(&这趟, &Manifest::empty(), &CancelToken::new());
+    assert!(!outcome.interrupted && !outcome.gave_up, "不该整趟停住");
+    assert_eq!(outcome.failures.len(), 1, "{:?}", outcome.failures);
+    assert_eq!(
+        outcome.manifest.files.len(),
+        一共 - 1,
+        "其余几步都该写成、都该进清单：{:?}",
+        outcome.manifest.files
+    );
+    assert_eq!(
+        fs::read(现场.卡.path().join("GB/口袋妖怪.zip")).expect("读得出"),
+        fs::read(现场.库根.join("GB/口袋妖怪.zip")).expect("读得出"),
+        "同一趟里别的那份照常落到卡上",
+    );
+}
+
+/// 一份主库，`GB` 底下摆着 12 份，够把「连着失败就停下来」那个计数顶过去。
+fn 建个够多的库() -> TempDir {
+    let dir = temp_dir("run-case-lib-many");
+    for i in 1..=12 {
+        写(&dir.path().join(format!("GB/g{i:02}.zip")), &zip(2048 + i));
+    }
+    dir
+}
+
+#[test]
+fn 落点被占再多也不算系统性故障_不触发连着失败就停下来() {
+    // `GIVE_UP_AFTER` 是 10，防的是「卡满了、卡被拔了、目标变成只读」那一类——
+    // 接着往下试没有意义的那种。落点被占不是那一类：它是**这一个落点**的确定性条件。
+    // 而计划里新增是**连在一起**的（`steps` 按 `Act` 排过），一算进那个计数，
+    // 维护者往卡里拷十来个只差大小写的文件就能让其余几百步一步都不做。
+    let 现场 = 现场::摆在(建个够多的库());
+    let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
+
+    // 排完计划之后，前 11 份的落点全被占上——比那个计数多一个。
+    for i in 1..=11 {
+        写(
+            &现场.卡.path().join(format!("GB/G{i:02}.zip")),
+            "这是我自己拷进去的".as_bytes(),
+        );
+    }
+
+    let outcome = 现场.执行(&这趟, &Manifest::empty(), &CancelToken::new());
+    assert!(!outcome.gave_up, "落点被占不该被当成系统性故障");
+    assert!(!outcome.interrupted);
+    assert_eq!(outcome.failures.len(), 11, "{:?}", outcome.failures);
+    assert!(
+        outcome.failures.iter().all(|failure| failure.act == Act::Add),
+        "{:?}",
+        outcome.failures
+    );
+    assert_eq!(
+        fs::read(现场.卡.path().join("GB/g12.zip")).expect("排在最后那一份照样落得下"),
+        fs::read(现场.库根.join("GB/g12.zip")).expect("读得出"),
+    );
+}

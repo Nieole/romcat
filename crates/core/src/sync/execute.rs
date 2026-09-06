@@ -68,9 +68,15 @@
 //! 而只做这一层也不行：ADR-0016 定死**差量预览是硬要求**，一份写着「新增」、执行时
 //! 却整批失败的预览本身就是谎。所以计划那一层负责**说真话**，这一层负责**兜住**。
 //!
-//! 判据是 [`landing`] 那一格：[`real_path`] 在大小写不敏感的目标上，拿
-//! `GB/tetris.zip` 也开得了别人那份 `GB/Tetris.zip`。挡下来记成一条
-//! [`Failure`] 而不是让整趟停住——与「单个文件写不进去不中断整趟」同一条纪律。
+//! 判据问两遍，因为一遍答不全。[`landing`] 那一格走 [`real_path`]，而 `real_path`
+//! 只折 NFC，大小写归目标文件系统自己认：**不敏感**的目标（卡上的 exFAT / FAT32、
+//! Windows、macOS 默认的 APFS）上它顺带把别人那份 `GB/Tetris.zip` 也认了出来，
+//! 敏感的 ext4 上它答「空的」。于是 [`occupied_by`] 折起来再问一次——折法与计划那一层
+//! 同一个函数（[`path::fold`](crate::path::fold)：小写 + NFC）。**同一张卡换台机器插，
+//! 行为得是同一个**：挡不住的那一边会在维护者那份旁边另写一份并报「成功」。
+//!
+//! 挡下来记成一条 [`Failure`] 而不是让整趟停住——与「单个文件写不进去不中断整趟」
+//! 同一条纪律。
 //!
 //! **没有改掉 `rename` 的覆盖语义**：更新那一条要的正是「原子地换掉我们自己那一份」，
 //! 而 `rename` 在 Unix 与 Windows 上都替换，那是这条链路想要的性质。`create_new`
@@ -107,6 +113,11 @@ const SEPARATOR: &str = std::path::MAIN_SEPARATOR_STR;
 /// 卡满了、卡被拔了、目标变成只读——这几种不是「这一个文件的问题」，一个一个试过去
 /// 只会把同一句错误印上几百遍。单个文件失败照常跳过并记账（与扫描那一侧
 /// 「读不到某个目录不中断整趟」同一条纪律），**连着**失败才是系统性故障的信号。
+///
+/// **落点被占不算进来**（[`io::ErrorKind::AlreadyExists`]）：那是**这一个落点**的确定性
+/// 条件，不是「接着试也没用」的那一类。计划里新增是连在一起的（`steps` 按
+/// [`Act`] 排过），维护者往卡里拷了十几个只差大小写的文件，一算进来第十条就
+/// `gave_up`，其余几百步一步都不做——而那正是「撞上不许整趟停住」要防的事。
 pub(super) const GIVE_UP_AFTER: u64 = 10;
 
 /// 一份文件放到目标上的办法。
@@ -323,7 +334,12 @@ pub fn run(
                 break;
             }
             Err(error) => {
-                consecutive += 1;
+                // 落点被占**不进这个计数**（见 [`GIVE_UP_AFTER`]）：它是这一个落点的
+                // 确定性条件，接着往下试是有意义的。也不清零——清零会让真正的系统性
+                // 故障被夹在中间的占用冲淡，而「连着」这个词说的正是不被冲淡。
+                if error.kind() != io::ErrorKind::AlreadyExists {
+                    consecutive += 1;
+                }
                 out.failures.push(Failure {
                     path: step.path.clone(),
                     act: step.act,
@@ -363,15 +379,29 @@ fn place(
 ) -> io::Result<(Stamp, Placement)> {
     let (target, taken) = landing(sources, &step.path);
     // **最后一道防线**（模块文档七）：新增这一步的落点上不该有任何东西。
-    if taken && step.act == Act::Add {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!(
-                "{} 的落点上已经有东西了（{}）：清单之外的文件一律不碰（ADR-0015）",
-                step.path,
-                crate::path::display(&target),
-            ),
-        ));
+    //
+    // 问两遍，因为一遍答不全：`landing` 那一问在**大小写不敏感**的目标上连别人那份
+    // 也认得出（`real_path` 拿 `GB/tetris.zip` 就开得了 `GB/Tetris.zip`），可在
+    // **大小写敏感**的盘上它一无所知——同一张卡插在 Windows 上挡得住、插在 Linux 上
+    // 就在维护者那份旁边另写一份并报「成功」。于是折起来再问一次（`occupied_by`）。
+    //
+    // **先问折起来那一问，哪怕逐字那一问已经说「占着了」**：`landing` 交回来的路径是
+    // `根 + 键` 拼出来的（`real_path` 的快路径就是直接拼），大小写还是我们自己那份，
+    // 于是在**卡上**——正是这条缺陷的主场景——报出来会是「`GB/tetris.zip` 的落点上
+    // 已经有东西了（…/GB/tetris.zip）」，两条一模一样，等于没说出是谁占着。
+    // `occupied_by` 的答案来自 listing，那才是盘上真实那个名字。
+    if step.act == Act::Add {
+        let blocking = occupied_by(sources, &step.path).or_else(|| taken.then(|| target.clone()));
+        if let Some(at) = blocking {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "{} 的落点上已经有东西了（{}）：清单之外的文件一律不碰（ADR-0015）",
+                    step.path,
+                    crate::path::display(&at),
+                ),
+            ));
+        }
     }
     let parent = target.parent().unwrap_or(sources.target_root).to_path_buf();
     std::fs::create_dir_all(&parent)?;
@@ -614,6 +644,83 @@ fn landing(sources: &Sources<'_>, key: &str) -> (PathBuf, bool) {
         },
     );
     (parent.join(name), false)
+}
+
+/// 目标上有没有一个东西**折起来**占着这条落点；有的话，它在盘上真实的那条路径。
+///
+/// [`landing`] 那一问答不全这件事：它走 [`real_path`]，而 `real_path` 只折 NFC
+/// （ADR-0020），大小写归目标文件系统自己认。卡是 exFAT / FAT32、主力机是 Windows、
+/// macOS 默认的 APFS 也一样——**这几个都不敏感**，于是那一问在它们上面顺带把
+/// `GB/Tetris.zip` 也认了出来；可同一份代码也跑在 ext4 上（ADR-0018），那儿
+/// `GB/tetris.zip` 与 `GB/Tetris.zip` 是两个文件，那一问答「空的」，工具就在维护者
+/// 那份旁边另写一份并报「成功」——**同一张卡换台机器插就换个行为**。
+///
+/// 这里补上的正是那半边：折法用 [`path::fold`](crate::path::fold)（小写 + NFC），
+/// 与[计划那一层](super::plan)**同一个**函数。两处各写一套折法的话，会长出
+/// 「计划说没事、执行却顶掉了」——那正是这条缺陷的形状。
+///
+/// **折的是整条键，不是最后那一段**：计划那一侧折的是 `gb/Tetris.zip` 这一整条，
+/// 上一级目录只差大小写照样算撞上，于是这里也逐段折着往下走。
+///
+/// 大小写敏感的目标上这是**保守误报**（两份真能并存的文件只落一份），取舍与计划那一层
+/// 同一笔账：误报的代价是少放一个文件加一条没做成，判反了的代价是维护者的东西没了。
+///
+/// **只用来发现挡路的东西，绝不用来认领它**：这个答案只挡[新增](Act::Add)。更新与删除
+/// 照旧要求一模一样的键——那两条会动别人的文件，而「折起来一样」证明不了「就是我们放的
+/// 那一份」。改大小写重落一份那种改名不会被它误伤：计划里删除排在新增前面
+/// （`steps` 按 [`Act`] 排过），轮到新增时旧那份已经删掉了。
+///
+/// **一层里折起来一样的可能不止一个，于是每一层都得全都跟下去**：大小写敏感的盘上
+/// `GB/` 与 `gb/` 能同时在（一个是工具写的，一个是维护者建的），只跟排在前面那个的话，
+/// 另一枝底下挡路的那份就看不见了。挡路的答案取全部候选里排下来最先那个：报出来的是
+/// 挡路的证据，谁挡的都一样，而这个选择要是确定的（与 [`plan`](super::plan) 那一侧
+/// 「留最先那个」同一条口径）。
+fn occupied_by(sources: &Sources<'_>, key: &str) -> Option<PathBuf> {
+    let mut at = vec![sources.target_root.to_path_buf()];
+    for segment in key.split('/') {
+        if segment.is_empty() {
+            continue;
+        }
+        let mut next: Vec<PathBuf> = at
+            .iter()
+            .flat_map(|dir| folded_children(dir, segment))
+            .collect();
+        if next.is_empty() {
+            return None;
+        }
+        next.sort();
+        next.dedup();
+        at = next;
+    }
+    at.into_iter().next()
+}
+
+/// `dir` 这一层里，折起来与 `segment` 一样的那些名字，在盘上真实的那几条路径。
+///
+/// 一律整层列出来：要认的正是「盘上那个名字与我们要写的只差大小写」，而只有 listing
+/// 交得出盘上真实那个名字。名字读不出 UTF-8 的条目跳过——折不了的东西也就无从比对。
+///
+/// **列不开就当这一层没有挡路的，而这是一个已知的洞**：Unix 上一个 `0300` 的目录列不开
+/// 却写得进（`read_dir` 失败，按名字 `open` 照样成功），而模块文档七点名
+/// [`TargetState::unlistable_dirs`](super::TargetState) 正是执行这一层非有不可的头号
+/// 理由。漏的那一格窄得很，也**不丢数据**：逐字那半边不受影响（`real_path` 直接拼那一下
+/// 在列不开的目录里照样开得了文件），于是大小写不敏感的目标——卡、Windows、APFS
+/// ——上挡得住；剩下的只有「大小写敏感的盘 + 列不开的目录 + 只差大小写的占用」那一种，
+/// 后果是在维护者那份**旁边**多写一份（那盘上两份本来就能并存），不是顶掉它。
+/// 要补上只能把「列不开」与「列开了没找到」分成两态一路带上来，那是另一张票的形状。
+fn folded_children(dir: &Path, segment: &str) -> Vec<PathBuf> {
+    let wanted = crate::path::fold(segment);
+    crate::fs::RealFs
+        .read_dir(dir)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| entry.path)
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| crate::path::fold(name) == wanted)
+        })
+        .collect()
 }
 
 /// 一条写成了的步骤在清单里长什么样。
