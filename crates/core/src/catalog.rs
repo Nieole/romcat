@@ -1024,6 +1024,11 @@ impl Catalog {
 
     /// 写一批记录。
     ///
+    /// **「文件变了」是一整套作废**，不只是把 `entry` 那一行改掉：上一趟算出来的哈希、
+    /// 光盘 / 卡带 / Switch 的内部事实、容器的内部构成，以及挂在这个条目所属**变体**上的
+    /// 识别结论，全都是**按那份字节**得出来的，字节换了就一条都不算数
+    /// （`identify::drop_stale_conclusions` 上写着为什么变体那一层也落在这里）。
+    ///
     /// # Errors
     /// 写库或序列化抽样结果失败时返回错误。
     pub fn write(&mut self, scan: i64, records: &[EntryRecord]) -> Result<(), CatalogError> {
@@ -1036,6 +1041,9 @@ impl Catalog {
             source,
         };
         let tx = self.conn.transaction().map_err(to_err)?;
+        // 这一批里字节变了的那些键。攒起来一次问完，是因为一个变体常有好几个成员
+        // （三块 `.bin` 一个变体），逐条去问等于把同一个变体的结论删上三遍。
+        let mut changed_keys: BTreeSet<String> = BTreeSet::new();
         {
             // 未变的只更新「这次见过」，其余字段一律不碰——上次抽的头部样本要留着。
             let mut touch = tx
@@ -1064,9 +1072,6 @@ impl Catalog {
                         seen     = excluded.seen",
                 )
                 .map_err(to_err)?;
-            // 容器的内部构成随容器本身一起更新。**先清后插**：容器变了而这次没穿透
-            // （比如关掉了穿透），旧的内部条目就该消失，不能拿一份对不上的清单
-            // 冒充新的。
             // 文件变了，上一趟算出来的哈希就作废了——留着它，识别会拿一份对不上的
             // CRC-32 去撞 DAT，撞出来的候选还带着「精确命中」的置信度。
             // 与容器内部构成的作废方式是同一条（挂账 D14）。
@@ -1093,12 +1098,19 @@ impl Catalog {
             let mut clear_media = tx
                 .prepare("DELETE FROM media_blob WHERE key = ?1")
                 .map_err(to_err)?;
+            // 容器的内部构成同理，只是它多一半：这次穿透了就得**先清后插**。
+            // 容器变了而这次没穿透（比如关掉了穿透），旧的内部条目照样该消失——
+            // 拿一份对不上的清单冒充新的，比没有清单更糟。
             let mut clear_container = tx
                 .prepare("DELETE FROM container WHERE key = ?1")
                 .map_err(to_err)?;
             let mut clear_inner = tx
                 .prepare("DELETE FROM container_entry WHERE key = ?1")
                 .map_err(to_err)?;
+            // **裸 `INSERT`，不加 `ON CONFLICT`。** 每一条插入之前那两句 `DELETE` 一定
+            // 跑过（见下面那个分支），所以撞上主键只可能是这条不变式破了，
+            // 那时该当场炸而不是被一句 `DO UPDATE` 抹平——把撞车咽下去，
+            // 换来的是一份说不清是哪一趟穿出来的内部构成。
             let mut insert_container = tx
                 .prepare(
                     "INSERT INTO container(key, kind, reason, detail, files, bytes, blocks,
@@ -1157,10 +1169,6 @@ impl Catalog {
                     }
                 }
 
-                // 容器的内部构成。**先清后插**，而且清这一步在
-                // 「容器变了但这次没穿透」时也要做——留着一份对不上的旧清单，
-                // 比没有清单更糟。
-                let is_container = ContainerKind::for_path(Path::new(&record.key)).is_some();
                 let changed = matches!(record.verdict, Verdict::Added | Verdict::Changed);
                 if changed {
                     clear_hashes.execute(params![record.key]).map_err(to_err)?;
@@ -1168,8 +1176,17 @@ impl Catalog {
                     clear_cart.execute(params![record.key]).map_err(to_err)?;
                     clear_switch.execute(params![record.key]).map_err(to_err)?;
                     clear_media.execute(params![record.key]).map_err(to_err)?;
+                    changed_keys.insert(record.key.clone());
                 }
-                if is_container && (changed || record.container.is_some()) {
+                // **「是不是容器」这个判断不从键上推。** 键里非 UTF-8 的那一段缀着一段
+                // 指纹（[`path::catalog_key`]），而它缀在扩展名**之后**——
+                // `Path::extension` 读出来是 `zip#0123…`，于是同一个文件在扫描那一侧
+                // 是容器、在这一侧不是，「先清后插」整个跳过，第二趟插入撞上主键，
+                // 一份读不出内部构成的容器让整趟扫描失败。
+                //
+                // 这一句压根不问那个问题：不是容器的键，这两句 `DELETE` 本来就删不到
+                // 任何一行（键是主键，一次索引落空），代价与另外五张内容表同一档。
+                if changed || record.container.is_some() {
                     clear_inner.execute(params![record.key]).map_err(to_err)?;
                     clear_container
                         .execute(params![record.key])
@@ -1207,6 +1224,10 @@ impl Catalog {
                 }
             }
         }
+        // 字节变了的那些条目，挂在它们所属**变体**上的识别结论也跟着作废。
+        // **在同一个事务里**：条目变了与它的结论跟着走必须一起落盘，分两次提交
+        // 中间被打断，就正好留下一份「新字节配旧结论」的库。
+        identify::drop_stale_conclusions(&tx, &changed_keys).map_err(to_err)?;
         tx.commit().map_err(to_err)
     }
 

@@ -494,7 +494,21 @@ pub fn scan(
     let shaped = !interrupted;
     if shaped {
         let _ = task.step("成型");
-        shape::reshape(catalog, &options.manifest, start.scan)?;
+        // **成型对着的是整份库，代号也就该是整份库的**（ADR-0022：成型是中立库上的
+        // 一遍纯计算，输入是 `entry` 表的全部键，不分根）。
+        //
+        // 这里不能用 `start.scan`：续跑沿用的是断点里那个**旧代号**——那对收尾是对的
+        // （删的是「这个根这一趟没见到的」），但中间要是扫过别的根，全局代号早被推走，
+        // 拿它去记「成型跑到哪一趟为止」就是把 `shaped_scan` 往回退，而报告比的是
+        // `last_traversal()`（全库最后一趟），于是刚成完型就被说成「成型比库旧」。
+        //
+        // 本趟那一行上面刚 `save_traversal` 过，所以全局最大**一定**不小于本趟；
+        // `max` 那一下只是把这句话写死在代码里，省得读的人回头去数调用顺序。
+        let shaped_scan = catalog
+            .last_traversal()?
+            .map_or(start.scan, |latest| latest.scan)
+            .max(start.scan);
+        shape::reshape(catalog, &options.manifest, shaped_scan)?;
     }
     let checkpoint_path =
         finish_checkpoint(options, &root, &queue, start.scan, &traversal, interrupted)?;
