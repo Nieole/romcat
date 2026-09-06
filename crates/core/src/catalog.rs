@@ -112,7 +112,18 @@ pub use title::TitleRow;
 /// （[`verdict::MIGRATIONS`](crate::verdict)）。这次换键的代价落在它身上的那一份是：
 /// **路径锚**（`(主库名, 变体的键)`）里存的键是旧形状，从此撞不上——那些行原样留着，
 /// 一条都不删，也不改。**内容锚一条都不受影响**，而那正是它存在的理由。
-pub const SCHEMA_VERSION: u32 = 6;
+///
+/// ## 7：**遍历也按根记**
+///
+/// 6 只把**条目**按根分开了，遍历那两张表还是「整份库一份」：`traversal` 每开一次新
+/// 扫描就把别的行删光，`traversal_note` 更是整张清空。主库变成一组根之后这是错的——
+/// 扫一遍乙盘会把甲盘那条「这个目录列不开」从报告里抹掉，而它的子树还被
+/// [`Catalog::keep_subtree`] 保在库里（ADR-0021），报告与中立库从此各说各话。
+///
+/// 于是 `traversal_note` 多一列 `root_name`，主键从 `(kind, path)` 变成
+/// `(root_name, kind, path)`：**改了已有表的键**，按上面那条判据加 1。
+/// 照旧不写迁移代码。
+pub const SCHEMA_VERSION: u32 = 7;
 
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS meta(
@@ -157,12 +168,17 @@ CREATE TABLE IF NOT EXISTS traversal(
 ) STRICT;
 
 -- 遍历路上的事件：读不到的目录、整棵跳过的系统目录。
--- 主键是 (类别, 路径) 而不是自增 id，于是续跑时重扫同一个目录只会覆盖，不会数两遍。
+-- 主键是 (根名, 类别, 路径) 而不是自增 id，于是续跑时重扫同一个目录只会覆盖，不会数两遍。
+--
+-- **根名也在主键里**，是因为开一次新扫描要清掉的只是**这一个根**上一趟留下的批注：
+-- 一趟扫描只走一个根，把整张表清空等于让扫甲盘的报告说不出乙盘那个目录列不开，
+-- 而那棵子树还好端端地保在 `entry` 里（ADR-0021）。
 CREATE TABLE IF NOT EXISTS traversal_note(
-    kind   TEXT NOT NULL,
-    path   TEXT NOT NULL,
-    detail TEXT,
-    PRIMARY KEY (kind, path)
+    root_name TEXT NOT NULL,
+    kind      TEXT NOT NULL,
+    path      TEXT NOT NULL,
+    detail    TEXT,
+    PRIMARY KEY (root_name, kind, path)
 ) STRICT;
 
 -- 穿透一个**透明容器**的结论，一个容器一行。`reason` 非空就是没穿透：那一列是分好类的
@@ -799,31 +815,60 @@ impl Catalog {
 
     /// 上一次遍历留下的记录；从没扫过时是 `None`。
     ///
+    /// **一份中立库里每个根各留一行**（[`Catalog::begin_scan`]），所以这里给出的是
+    /// **最后走的那个根**那一趟。报告的抬头眼下取的就是它，而正文数的是整份库——
+    /// 那条账挂在后续清单上，要的是报告结构上的改动，不是这里多一句 `ORDER BY`。
+    ///
     /// # Errors
     /// 读库失败时返回错误。
     pub fn last_traversal(&self) -> Result<Option<Traversal>, CatalogError> {
-        self.conn
-            .query_row(
+        self.traversal_row(None)
+    }
+
+    /// **这一个根**最后一趟遍历的记录；这个根从没扫过时是 `None`。
+    ///
+    /// 它是断点身份的判据：断点说的那一趟，得就是这个根在中立库里最后走的那一趟
+    /// （[`scan::load_start_state`](crate::scan)）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn last_traversal_of(&self, root_name: &str) -> Result<Option<Traversal>, CatalogError> {
+        self.traversal_row(Some(root_name))
+    }
+
+    /// `root_name` 是 `None` 就取整份库最后那一行，给了名字就只在那个根的行里取。
+    fn traversal_row(&self, root_name: Option<&str>) -> Result<Option<Traversal>, CatalogError> {
+        let read = |row: &rusqlite::Row<'_>| {
+            Ok(Traversal {
+                scan: row.get(0)?,
+                root_name: row.get(1)?,
+                root: row.get(2)?,
+                elapsed_ms: u64::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
+                jobs: usize::try_from(row.get::<_, i64>(4)?).unwrap_or(1),
+                samples_per_class: usize::try_from(row.get::<_, i64>(5)?).unwrap_or(0),
+                penetrated_containers: row.get::<_, i64>(6)? != 0,
+                interrupted: row.get::<_, i64>(7)? != 0,
+                resumed: row.get::<_, i64>(8)? != 0,
+            })
+        };
+        match root_name {
+            Some(name) => self.conn.query_row(
+                "SELECT scan, root_name, root, elapsed_ms, jobs, samples_per_class, containers,
+                        interrupted, resumed
+                 FROM traversal WHERE root_name = ?1 ORDER BY scan DESC LIMIT 1",
+                params![name],
+                read,
+            ),
+            None => self.conn.query_row(
                 "SELECT scan, root_name, root, elapsed_ms, jobs, samples_per_class, containers,
                         interrupted, resumed
                  FROM traversal ORDER BY scan DESC LIMIT 1",
                 [],
-                |row| {
-                    Ok(Traversal {
-                        scan: row.get(0)?,
-                        root_name: row.get(1)?,
-                        root: row.get(2)?,
-                        elapsed_ms: u64::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
-                        jobs: usize::try_from(row.get::<_, i64>(4)?).unwrap_or(1),
-                        samples_per_class: usize::try_from(row.get::<_, i64>(5)?).unwrap_or(0),
-                        penetrated_containers: row.get::<_, i64>(6)? != 0,
-                        interrupted: row.get::<_, i64>(7)? != 0,
-                        resumed: row.get::<_, i64>(8)? != 0,
-                    })
-                },
-            )
-            .optional()
-            .map_err(|source| self.err(source))
+                read,
+            ),
+        }
+        .optional()
+        .map_err(|source| self.err(source))
     }
 
     /// 库里记了多少个文件。目录与链接不算——`entry` 表里三种都有。
@@ -921,6 +966,15 @@ impl Catalog {
 
     /// 这次扫描的代号：比库里记过的最大代号大 1。
     ///
+    /// **代号全局单调递增，不按根分。** `entry.seen` 是全局一列，存的是「最后一次见到
+    /// 这条记录的那一趟的代号」；代号按根算的话甲盘的第二趟与乙盘的第二趟共用数字 2，
+    /// 那一列从此再也说不出「上一次是谁见到的」，任何一处忘了划根名范围的查询都会
+    /// 静默混淆两个根。全局递增下「`seen` 不等于这一趟的代号」在任何范围里都只有一个
+    /// 意思：这一趟没见到它——[`Catalog::sweep`] 靠的正是这句话。
+    ///
+    /// 遍历行按根各留最后一条（[`Catalog::begin_scan`]），于是这里的 `MAX` 天然就是
+    /// 全局最大值。
+    ///
     /// # Errors
     /// 读库失败时返回错误。
     pub fn next_scan(&self) -> Result<i64, CatalogError> {
@@ -933,22 +987,38 @@ impl Catalog {
         Ok(last + 1)
     }
 
-    /// 开一次新扫描：清掉上一次的遍历记录与样例。
+    /// 开一次新扫描：清掉**这个根**上一趟的遍历记录与批注。
+    ///
+    /// **只清这一个根，不是优化是正确性。** 一趟扫描只走一个根（`CONTEXT.md` 的**根**），
+    /// 别的根那几行说的是别的盘上次走了一遍留下的账：清掉它们，报告的抬头与耗时就只剩
+    /// 最后一根的，而正文数的是整份中立库；连同批注一起清掉，扫一遍乙盘还会让甲盘那条
+    /// 「这个目录列不开」从报告里消失——而那棵子树还被 [`Catalog::keep_subtree`]
+    /// 保在 `entry` 里（ADR-0021）。
     ///
     /// **不动 `entry`**——那正是增量要比对的基线，清了就等于每次都全扫。
     ///
+    /// **中断续跑不调它**：续跑沿用同一个代号，这一趟的行就是断点那一趟的行。
+    ///
     /// # Errors
     /// 写库失败时返回错误。
-    pub fn begin_scan(&mut self, scan: i64) -> Result<(), CatalogError> {
+    pub fn begin_scan(&mut self, scan: i64, root_name: &str) -> Result<(), CatalogError> {
         let path = self.path.clone();
         let to_err = |source| CatalogError::Sqlite {
             path: path.clone(),
             source,
         };
         let tx = self.conn.transaction().map_err(to_err)?;
-        tx.execute("DELETE FROM traversal WHERE scan <> ?1", params![scan])
-            .and_then(|_| tx.execute("DELETE FROM traversal_note", []))
-            .map_err(to_err)?;
+        tx.execute(
+            "DELETE FROM traversal WHERE root_name = ?1 AND scan <> ?2",
+            params![root_name, scan],
+        )
+        .and_then(|_| {
+            tx.execute(
+                "DELETE FROM traversal_note WHERE root_name = ?1",
+                params![root_name],
+            )
+        })
+        .map_err(to_err)?;
         tx.commit().map_err(to_err)
     }
 
@@ -1011,6 +1081,12 @@ impl Catalog {
             // 卡带内部头同理（票 10）。
             let mut clear_cart = tx
                 .prepare("DELETE FROM content_cart WHERE key = ?1")
+                .map_err(to_err)?;
+            // Switch 容器的明文文件名表同理（票 27）。**它一度漏在这份清单外**，于是
+            // 换掉一份 `.nsp` 之后，库体检的「Switch 的内容分布」照着旧容器的
+            // TitleID 与本体 / 补丁 / 附属内容分档数，数的是一份已经不在盘上的东西。
+            let mut clear_switch = tx
+                .prepare("DELETE FROM content_switch WHERE key = ?1")
                 .map_err(to_err)?;
             // 媒体文件变了，上一趟算出来的内容哈希同样作废——留着它，刮削会拿一个
             // 对不上的哈希去引用**媒体池**里另一份内容的图。与 content_hash 同一条路。
@@ -1090,6 +1166,7 @@ impl Catalog {
                     clear_hashes.execute(params![record.key]).map_err(to_err)?;
                     clear_disc.execute(params![record.key]).map_err(to_err)?;
                     clear_cart.execute(params![record.key]).map_err(to_err)?;
+                    clear_switch.execute(params![record.key]).map_err(to_err)?;
                     clear_media.execute(params![record.key]).map_err(to_err)?;
                 }
                 if is_container && (changed || record.container.is_some()) {
@@ -1133,28 +1210,40 @@ impl Catalog {
         tx.commit().map_err(to_err)
     }
 
-    /// 记一条「这个目录读不到」。
+    /// 记一条「这个目录读不到」。`root_name` 是这一趟扫的那个根——批注跟着根走，
+    /// 下一趟扫别的根不许把它清掉。
     ///
     /// # Errors
     /// 写库失败时返回错误。
-    pub fn note_error(&mut self, path: &str, detail: &str) -> Result<(), CatalogError> {
-        self.note(NOTE_ERROR, path, Some(detail))
+    pub fn note_error(
+        &mut self,
+        root_name: &str,
+        path: &str,
+        detail: &str,
+    ) -> Result<(), CatalogError> {
+        self.note(root_name, NOTE_ERROR, path, Some(detail))
     }
 
     /// 记一条「这棵系统目录整棵跳过了」。跳过什么都要说出来，不能悄悄少扫。
     ///
     /// # Errors
     /// 写库失败时返回错误。
-    pub fn note_skipped_dir(&mut self, path: &str) -> Result<(), CatalogError> {
-        self.note(NOTE_SKIPPED, path, None)
+    pub fn note_skipped_dir(&mut self, root_name: &str, path: &str) -> Result<(), CatalogError> {
+        self.note(root_name, NOTE_SKIPPED, path, None)
     }
 
-    fn note(&mut self, kind: &str, path: &str, detail: Option<&str>) -> Result<(), CatalogError> {
+    fn note(
+        &mut self,
+        root_name: &str,
+        kind: &str,
+        path: &str,
+        detail: Option<&str>,
+    ) -> Result<(), CatalogError> {
         self.conn
             .execute(
-                "INSERT INTO traversal_note(kind, path, detail) VALUES(?1, ?2, ?3)
-                 ON CONFLICT(kind, path) DO UPDATE SET detail = excluded.detail",
-                params![kind, path, detail],
+                "INSERT INTO traversal_note(root_name, kind, path, detail) VALUES(?1, ?2, ?3, ?4)
+                 ON CONFLICT(root_name, kind, path) DO UPDATE SET detail = excluded.detail",
+                params![root_name, kind, path, detail],
             )
             .map(|_| ())
             .map_err(|source| self.err(source))
@@ -1259,6 +1348,12 @@ impl Catalog {
 
     /// 条目没了，挂在它身上的那几张表也就没了——留着会让报告数出一批不存在的内部文件。
     ///
+    /// **这里收的是挂在条目（文件）上的那一层。** 挂在**变体**上的那一层（候选、结论、
+    /// 标题）不在这儿收：变体不是文件，它由成型算出来，删一个文件不等于删一个变体
+    /// ——三块 `.bin` 少了一块，那个变体还在。那一层由
+    /// [`Catalog::replace_variants`](crate::catalog::Catalog::replace_variants) 在
+    /// 重新成型之后收，那是变体表唯一的写入口。
+    ///
     /// # Errors
     /// 写库失败时返回错误。
     pub(crate) fn drop_orphans(&self) -> Result<(), CatalogError> {
@@ -1268,6 +1363,7 @@ impl Catalog {
              DELETE FROM content_hash    WHERE key NOT IN (SELECT key FROM entry);
              DELETE FROM content_disc    WHERE key NOT IN (SELECT key FROM entry);
              DELETE FROM content_cart    WHERE key NOT IN (SELECT key FROM entry);
+             DELETE FROM content_switch  WHERE key NOT IN (SELECT key FROM entry);
              DELETE FROM media_blob      WHERE key NOT IN (SELECT key FROM entry);",
         )
     }
@@ -1451,7 +1547,7 @@ impl Catalog {
 
         let mut statement = self
             .conn
-            .prepare("SELECT kind, path, detail FROM traversal_note ORDER BY kind, path")
+            .prepare("SELECT kind, path, detail FROM traversal_note ORDER BY kind, path, root_name")
             .map_err(|source| self.err(source))?;
         let mut rows = statement.query([]).map_err(|source| self.err(source))?;
         while let Some(row) = rows.next().map_err(|source| self.err(source))? {

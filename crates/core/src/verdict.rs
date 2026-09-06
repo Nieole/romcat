@@ -112,7 +112,7 @@
 //! 它与 [`Verdict`] 共用同一套两种锚，理由也是同一条：**内容锚换台机器、改过名字之后
 //! 仍然认得出**，两块盘接同一台机器裁决一次两边都受益。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -128,6 +128,23 @@ use crate::dat::chinese::ChineseMark;
 pub fn schema_version() -> u32 {
     u32::try_from(MIGRATIONS.len()).unwrap_or(u32::MAX)
 }
+
+/// 撞上写锁时**等多久**（毫秒）。**与中立库同一个数**，理由也同源。
+///
+/// **不是调优，是两机流程（ADR-0018）的前提**：命令行与界面常常同时开着，两边都往
+/// 这一份库里落裁决，撞上就报错的话，用户看见的是「沉淀库打不开：…
+/// database is locked」。落一条裁决是几毫秒的事，十秒是很宽的余量。
+///
+/// **明写出来，是因为不写也有一个数，而那个数不是谁挑的**：`rusqlite` 的
+/// `Connection::open` 自己塞了 5 秒（`inner_connection.rs` 里那句
+/// `sqlite3_busy_timeout(db, 5000)`）。中立库那一侧早已把 10 秒明写出来并说清了理由
+/// （`Catalog::open`）；同一台机器上一份库等 10 秒、另一份等一个第三方库默认的、
+/// 没有人裁过的 5 秒，说不出道理，而且它改版就没了。
+///
+/// **这份取 10 秒而三份镜像取 3 秒**，差别只在等在哪条线程上：镜像库的 `open` 有一路
+/// 是 `sources::survey`，眼下跑在画帧线程上，等 10 秒等于把界面挂死；这一份是
+/// `Site::open` 一次开好一直用着，不在画帧线程上。
+const BUSY_TIMEOUT_MS: u32 = 10_000;
 
 /// 顺序迁移。**只许往后追加，已经发出去的一条一个字都不许改**——改了的话，早先按旧
 /// 语句建出来的库与新装的程序建出来的库形状不同，而 `user_version` 说它们是同一版。
@@ -447,11 +464,22 @@ impl Verdict {
     /// 立一条**现在**定下来的裁决。
     #[must_use]
     pub fn now(anchor: Anchor, decision: Decision) -> Self {
+        Self::at(anchor, decision, now_secs())
+    }
+
+    /// 立一条**在这个时刻**定下来的裁决。
+    ///
+    /// **一批裁决共用一个时刻走的是它**（`triage::plan_each`）：一批是一次落下，
+    /// 也就是一个时刻。逐条各取一次的话，一批三千条会跨过秒界，而同一条锚上的几份
+    /// **重复拷贝**本该落成同一条裁决——差一秒就成了两条，撤销那一侧再也认不出
+    /// 「锚上眼下这条是不是这一批自己落下的」。
+    #[must_use]
+    pub fn at(anchor: Anchor, decision: Decision, decided_at: i64) -> Self {
         Self {
             anchor,
             decision,
             note: None,
-            decided_at: now_secs(),
+            decided_at,
         }
     }
 
@@ -701,8 +729,24 @@ impl Store {
     ///
     /// **绝不倒着迁，也绝不叫用户删库。** 库比程序新时如实说清并停下——那时该换程序。
     fn migrate(&self) -> Result<(), VerdictError> {
+        // **这条余量要排在最前面**，后面每一句才等得起（为什么是 10 秒见
+        // `BUSY_TIMEOUT_MS`）。
         self.conn
-            .execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
+            .execute_batch(&format!("PRAGMA busy_timeout = {BUSY_TIMEOUT_MS};"))
+            .map_err(|source| self.err(source))?;
+        // **偏偏转日志模式这一句不认忙等待**：它要的是独占，走的不是忙等待那条路
+        // ——实测把余量设成 300 毫秒、另一份连接占着写锁，这一句 337 微秒就当场
+        // `SQLITE_BUSY`，而建表与写 `user_version` 都老老实实等满了 300 毫秒。
+        // **撞上就放过**——能撞上只有一种情形：另一份连接正在建这同一份空库；而 WAL
+        // 记在库文件头里，谁转成了所有连接都按 WAL 走，这一份不必去争。已经是 WAL 的
+        // 库上它本来就是空操作（实测 2.4 微秒，写锁占着也不报忙）。
+        if let Err(source) = self.conn.execute_batch("PRAGMA journal_mode = WAL;")
+            && source.sqlite_error_code() != Some(rusqlite::ErrorCode::DatabaseBusy)
+        {
+            return Err(self.err(source));
+        }
+        self.conn
+            .execute_batch("PRAGMA synchronous = NORMAL;")
             .map_err(|source| self.err(source))?;
         let found: u32 = self
             .conn
@@ -717,16 +761,44 @@ impl Store {
                 expected: target,
             });
         }
-        for sql in &MIGRATIONS[found as usize..] {
-            self.conn
-                .execute_batch(sql)
-                .map_err(|source| self.err(source))?;
+        // **版本号只在真的变了才写。** `PRAGMA user_version = N` 是一次**写事务**，
+        // **同值重写照样要拿写锁**（实测：另一份连接占着写锁时，同值那一句等满了余量
+        // 才报忙）。而它原来每次开库都跑一遍——于是「开一下当前版本的沉淀库」这件本该
+        // 只读的事成了一次写：命令行那一侧开个库，就跟界面正在落的那条裁决抢同一把锁，
+        // 抢不过就是用户看见的那句「沉淀库打不开：… database is locked」。
+        // **当前版本的库开起来该是一个字都不写**，那样两边根本不必相遇。
+        if found == target {
+            return Ok(());
+        }
+        Self::apply(&self.conn, found, MIGRATIONS, target).map_err(|source| self.err(source))
+    }
+
+    /// 把 `from` 之后那几条迁移与新版本号**一起**落下去。
+    ///
+    /// **同一个事务。** 中途断电要么整批迁移带着新版本号一起落下，要么一个字都没落下、
+    /// 下次开库从 `from` 接着跑。分成两笔写会留下「表已经改了、版本号还写着旧的」那种
+    /// 库——眼下几条都是 `CREATE TABLE IF NOT EXISTS`，重跑无害，但这份库**不可再生**，
+    /// 纪律得在第一条会改已有表的迁移出现之前就立住。
+    ///
+    /// 走 `BEGIN IMMEDIATE` 而不是默认的延迟事务：延迟事务先拿读锁、写第一句时才想升级
+    /// 成写锁，而这一升在 WAL 下撞上别的写者是**不走忙等待**的，上面那条余量就白设了。
+    ///
+    /// `migrations` 与 `target` 是参数而不是直接读常量，为的是测试能塞一条炸的进来，
+    /// 把「半途炸了什么都不留下」真的走一遍。
+    fn apply(
+        conn: &Connection,
+        from: u32,
+        migrations: &[&str],
+        target: u32,
+    ) -> Result<(), rusqlite::Error> {
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        for sql in &migrations[from as usize..] {
+            tx.execute_batch(sql)?;
         }
         // `PRAGMA` 不吃占位符，而 `target` 是本程序自己的常量，不是外面来的数。
-        self.conn
-            .execute_batch(&format!("PRAGMA user_version = {target}"))
-            .map_err(|source| self.err(source))?;
-        Ok(())
+        tx.execute_batch(&format!("PRAGMA user_version = {target}"))?;
+        tx.commit()
     }
 
     fn err(&self, source: rusqlite::Error) -> VerdictError {
@@ -1066,6 +1138,59 @@ impl Store {
             });
         }
         Ok(out)
+    }
+
+    /// 这一批之后落下、**眼下还在册**的那些批里，头一个碰过这些锚的是第几批，
+    /// 连它在这些锚上占了几条。都没碰过就是 `None`。
+    ///
+    /// **撤销与放回都要先问它一句。** 批与批在同一条锚上是**叠着的**：后一批的
+    /// [`BatchRow::before`] 里存着前一批落下的那条，撤后一批就会把它放回来。所以前一批
+    /// 被后一批盖住时根本回不到「它落下之前」——硬撤的话它被标成已撤，而它的裁决
+    /// 过一会儿又活了。
+    ///
+    /// 问的是**册子**而不是「锚上眼下那条长什么样」：两批落下的裁决**值可以一模一样**
+    /// （同一秒、同一部作品），按值比对认不出这件事。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn batch_covering(
+        &self,
+        after: i64,
+        anchors: &BTreeSet<Anchor>,
+    ) -> Result<Option<(i64, u64)>, VerdictError> {
+        if anchors.is_empty() {
+            return Ok(None);
+        }
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT r.batch, r.after FROM verdict_batch_row r
+                 JOIN verdict_batch b ON b.id = r.batch
+                 WHERE r.batch > ?1 AND b.undone_at IS NULL
+                 ORDER BY r.batch",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![after], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut found: Option<(i64, u64)> = None;
+        for row in rows {
+            let (batch, blob) = row.map_err(|source| self.err(source))?;
+            // 按批号排着，所以头一批的行是连在一起的：换了批号就已经数完了。
+            if found.is_some_and(|(id, _)| id != batch) {
+                break;
+            }
+            if !decode(&blob).is_some_and(|verdict| anchors.contains(&verdict.anchor)) {
+                continue;
+            }
+            match &mut found {
+                Some((_, count)) => *count += 1,
+                None => found = Some((batch, 1)),
+            }
+        }
+        Ok(found)
     }
 
     /// 把一批标成撤掉的（或者标回没撤）。
@@ -2588,5 +2713,104 @@ mod tests {
         assert_eq!(index.len(), 2, "乙那一条路径锚不算数，内容锚那条算");
         assert_eq!(index.by_path().count(), 1);
         assert_eq!(index.by_content().count(), 1);
+    }
+
+    #[test]
+    fn 沉淀库的连接设了等锁的余量() {
+        let dir = crate::testing::temp_dir("verdict-timeout");
+        let store = Store::open(&dir.path().join("verdict.sqlite3")).expect("开得起来");
+        let 余量: i64 = store
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .expect("读得回来");
+        assert_eq!(余量, i64::from(BUSY_TIMEOUT_MS), "设进去的读得回来");
+    }
+
+    /// 拿一份**还没建起来的空库**当现场：第二份连接 `BEGIN IMMEDIATE` 占住写锁，
+    /// 这时候开库要把它转成 WAL、还要跑迁移，两样都得拿写锁。而**转日志模式那一句不认
+    /// 忙等待**，旧代码在这儿当场「沉淀库打不开：… database is locked」。
+    ///
+    /// **钉不成 flaky**：断言只说「等得到、开得出来」，锁放得早放得晚它都成立。
+    /// 中间那一小段停顿不参与判定，只是让**没设余量**的旧代码必定撞上那一下。
+    #[test]
+    fn 写锁占着时沉淀库等得到而不是当场报忙() {
+        let dir = crate::testing::temp_dir("verdict-busy");
+        let path = dir.path().join("verdict.sqlite3");
+        let blocker = Connection::open(&path).expect("开得起来");
+        blocker
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("拿得到写锁");
+
+        let (报开工, 等开工) = std::sync::mpsc::channel();
+        let (交结果, 等结果) = std::sync::mpsc::channel();
+        let 那份路径 = path.clone();
+        let 那条线程 = std::thread::spawn(move || {
+            报开工.send(()).expect("说得出去");
+            let 结果 = Store::open(&那份路径)
+                .and_then(|store| store.counts())
+                .map(|counts| counts.total)
+                .map_err(|error| error.to_string());
+            交结果.send(结果).expect("交得回去");
+        });
+        等开工.recv().expect("那条线程起来了");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        blocker.execute_batch("ROLLBACK").expect("放得开");
+
+        let 拿到 = 等结果
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("等得到那条线程交回来的结果");
+        那条线程.join().expect("收得回来");
+        assert_eq!(拿到, Ok(0), "撞上写锁该等着，不该当场报忙");
+    }
+
+    #[test]
+    fn 当前版本的沉淀库打开时一个字都不写() {
+        // 根因就在这一句上：`PRAGMA user_version = N` 是一次写事务，**同值重写照样要拿
+        // 写锁**，而它原来每次开库都跑一遍——「开一下当前版本的沉淀库」这件本该只读的
+        // 事成了一次写，于是命令行开个库就跟界面正在落的那条裁决抢同一把锁。
+        //
+        // **怎么钉住「没写」而不碰时钟**：`PRAGMA data_version` 这个数只在**别的连接**
+        // 提交过写事务之后才会变。旁观的那份连接**先开好、全程开着**——它一直在，
+        // 被观察的那份就不是最后一份连接，关掉时不会顺手做一次 WAL 收尾（那本身是写）。
+        let dir = crate::testing::temp_dir("verdict-idle-open");
+        let path = dir.path().join("verdict.sqlite3");
+        drop(Store::open(&path).expect("建得出来"));
+
+        let 旁观 = Connection::open(&path).expect("开得起来");
+        let 之前: i64 = 旁观
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .expect("读得到");
+        drop(Store::open(&path).expect("再开一次"));
+        let 之后: i64 = 旁观
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .expect("读得到");
+        assert_eq!(之前, 之后, "当前版本的沉淀库开一次不该写任何东西");
+    }
+
+    #[test]
+    fn 一条迁移半途炸了_版本号与建到一半的表一起退回去() {
+        // 迁移语句与版本号在**同一个事务**里，不然会留下「表已经改了、版本号还写着旧的」
+        // 那种库。眼下三条都是 `CREATE TABLE IF NOT EXISTS`，重跑无害——这一条钉的是
+        // **将来**：等哪天有一条迁移改的是已有的表，它得先炸，而不是等用户丢了裁决。
+        let conn = Connection::open_in_memory().expect("开得出来");
+        conn.execute_batch(MIGRATIONS[0]).expect("建得出第一版");
+        conn.execute_batch("PRAGMA user_version = 1")
+            .expect("盖得上第一版的版本号");
+        let 掺了一条炸的 = [MIGRATIONS[0], MIGRATIONS[1], "这不是一句 SQL"];
+
+        Store::apply(&conn, 1, &掺了一条炸的, 3).expect_err("最后那条该炸");
+
+        let 版本: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("读得到");
+        assert_eq!(版本, 1, "版本号跟着退回去，下次开库还从第一版接着跑");
+        let 建出来了吗: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'match_verdict'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("数得出");
+        assert_eq!(建出来了吗, 0, "半路建出来的表也跟着退回去");
     }
 }

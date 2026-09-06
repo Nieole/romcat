@@ -100,6 +100,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use unicode_normalization::{IsNormalized, is_nfd_quick};
+
 use crate::catalog::identify::{
     Candidate, CartFactRow, Confidence, ContentHash, DiscFactRow, EntryFact, Identification,
     ModelAnswerRow, SwitchFactRow,
@@ -109,7 +111,7 @@ use crate::classify::{self, Category};
 use crate::container::{self, ContainerKind, Demand, ReadPlan, volume};
 use crate::dat::chinese::ChineseMark;
 use crate::dat::{Convention, DatRepo, Hit, Matched, RepoError};
-use crate::fs::LibraryFs;
+use crate::fs::{DirCache, LibraryFs};
 use crate::path::file_name_of_key;
 use crate::report::thousands;
 use crate::scan::CancelToken;
@@ -705,6 +707,12 @@ fn rank_marks(marks: BTreeMap<String, u64>) -> Vec<(String, u64)> {
 #[derive(Default)]
 struct Run {
     progress: Progress,
+    /// 把 NFC 的键折回盘上真名那条退路上，每个目录只列一次（[`library_path`]）。
+    ///
+    /// **住在这儿而不是每次现开一份**：一个目录名是分解形式，它底下整棵子树的键都要
+    /// 走那条退路，几百个变体会把同一份 listing 读上几百遍。挂在这一趟上也就够了——
+    /// 主库只读（ADR-0004），一趟里盘上的名字不会变。
+    dirs: DirCache,
     /// DAT 库覆盖到的平台。
     ammo: BTreeSet<String>,
     /// **值得为它算 SHA-1** 的平台：库里有第一命中层够不着的记录的那几个（票 10）。
@@ -1291,7 +1299,7 @@ fn fill_in(
     }
 
     for (member, indexes) in wanted {
-        let path = library_path(&options.roots, &member);
+        let path = library_path(library, &options.roots, &mut state.dirs, &member);
         if units[indexes[0].0].in_container {
             read_bytes += read_from_container(library, &path, units, &indexes, want, state);
         } else {
@@ -1513,10 +1521,27 @@ fn read_from_container(
 
 /// 主库里那个文件在哪。键是「根名 + 相对那个根的路径」，分隔符是 `/`（ADR-0020）。
 ///
-/// 认不出根名时原样把键当路径返回：那条路径开不了，于是这一条走的还是「读不到」
-/// 那一支——与盘不在位是同一种处置，不必在这里多长一条岔路。
-fn library_path(roots: &Roots, key: &str) -> PathBuf {
-    roots.join(key).unwrap_or_else(|| PathBuf::from(key))
+/// 认不出根名、或者盘上压根没有这条路径时，原样把拼出来的那条交回去：它开不了，于是
+/// 这一条走的还是「读不到」那一支——与盘不在位是同一种处置，不必在这里多长一条岔路。
+///
+/// **键是 NFC 的，而盘上那个名字有 1.99% 是分解形式。** 在**分解敏感**的文件系统上
+/// （Windows 的 NTFS、Linux 的 ext4，而 ADR-0018 说主力机正是 Windows），直接拼出来的
+/// 那条路径根本开不了；识别把这个失败读成**无判据**，于是几百个变体从此认不出来，
+/// 报告里说的却是「拿不到可撞的东西」。所以拼不出来的要折回盘上真实的那条
+/// （[`Roots::real_path_in`]）。macOS 上看不见这条：fskit 的 NTFS 驱动查找不分解敏感。
+///
+/// **只有折得开的键才去折。** 折那一趟要先原样试一次（多一次 `open`），而识别一趟要回盘
+/// 读几万个文件、每份本来就要 open 一次——让 98% 的路径替另外那 2% 多付一次系统调用不
+/// 合算。键里一个字符都分解不开时（纯 ASCII、汉字、不带浊音符的假名都是这一档），盘上
+/// 那个名字折成 NFC 既然等于这条键，就只可能与它逐字节相同，直接拼出来的那条一定对。
+fn library_path(library: &dyn LibraryFs, roots: &Roots, dirs: &mut DirCache, key: &str) -> PathBuf {
+    let direct = || roots.join(key).unwrap_or_else(|| PathBuf::from(key));
+    if is_nfd_quick(key.chars()) == IsNormalized::Yes {
+        return direct();
+    }
+    roots
+        .real_path_in(library, dirs, key)
+        .unwrap_or_else(direct)
 }
 
 /// 撞一次，并记住**撞上时用的是哪套哈希**。参数顺序跟 [`DatRepo::lookup`] 一致，
@@ -1843,7 +1868,7 @@ fn probe_discs(
         &|catalog, member| catalog.disc_facts(member),
     )?;
     for (member, indexes) in todo {
-        let path = library_path(&options.roots, &member);
+        let path = library_path(library, &options.roots, &mut state.dirs, &member);
         // **壳子认不出来的一条都不读**——那不是光盘形态的东西。
         let (got, read) = fetch_prefixes(library, &path, &wanted, &indexes, &|it| {
             disc::by_name(&it.name).map(disc::probe_len)
@@ -2024,7 +2049,7 @@ fn probe_carts(
         &|catalog, member| catalog.cart_facts(member),
     )?;
     for (member, indexes) in todo {
-        let path = library_path(&options.roots, &member);
+        let path = library_path(library, &options.roots, &mut state.dirs, &member);
         let (got, read) = fetch_prefixes(library, &path, &wanted, &indexes, &|it| {
             cart::by_name(&it.name, hint).map(|kind| cart::probe_len(kind, it.size))
         });
@@ -2207,7 +2232,7 @@ fn probe_switch(
         &|catalog, member| catalog.switch_facts(member),
     )?;
     for (member, indexes) in todo {
-        let path = library_path(&options.roots, &member);
+        let path = library_path(library, &options.roots, &mut state.dirs, &member);
         // **裸文件走 seek，容器里那一条只给前缀。** 两条路的差别只在取字节的办法上，
         // 解析器是同一份（`switch::Source` 的两个实现）。
         if wanted[indexes[0]].in_container {

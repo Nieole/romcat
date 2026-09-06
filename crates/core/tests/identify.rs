@@ -18,8 +18,9 @@ use romcat_core::catalog::{Catalog, Confidence, Roots};
 use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
 use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
-use romcat_core::fs::RealFs;
+use romcat_core::fs::{MemFs, RealFs};
 use romcat_core::identify::fuzzy;
+use romcat_core::identify::report::IdentifyReport;
 use romcat_core::identify::{self, Options};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
@@ -271,6 +272,20 @@ fn 结论(现场: &现场, key: &str) -> (State, Option<String>) {
         .identification_of(key)
         .expect("读得出")
         .unwrap_or_else(|| panic!("{key} 没有识别结论"))
+}
+
+/// 完整重扫一遍这个根。**删除与成型都只在完整扫完一遍之后才做**，所以要走整条流程，
+/// 不能只写几条记录（ADR-0022）。
+fn 重扫(现场: &mut 现场) {
+    let mut options = ScanOptions::named(现场.dir.path(), "库");
+    options.jobs = Jobs::Fixed(2);
+    scan::scan(
+        &RealFs::new(),
+        &mut 现场.catalog,
+        &options,
+        &Handle::new(),
+    )
+    .expect("扫得动");
 }
 
 #[test]
@@ -624,4 +639,300 @@ fn 快照(root: &Path) -> Vec<(String, u64, std::time::SystemTime)> {
     }
     out.sort();
     out
+}
+
+// ───────── 盘上的名字是分解形式：回盘读那一趟不能落成「无判据」 ─────────
+//
+// 中立库的键一律是 NFC（ADR-0020），而主库里 1.99% 的名字在盘上是**分解形式**。
+// 在**分解敏感**的文件系统上（Windows 的 NTFS、Linux 的 ext4——ADR-0018 说主力机
+// 是 Windows），拿 NFC 的键直接拼出来的那条路径根本开不了，而识别把「开不了」读成
+// **无判据**：几百个变体从此认不出来，报告里说的却是「拿不到可撞的东西」。
+
+/// 同一个名字的两种规范化形式。`ゲ` 预组合 vs `ケ` + 组合浊音符（U+3099）。
+const 预组合名: &str = "ゲーム.nes";
+const 分解形名: &str = "\u{30b1}\u{3099}ーム.nes";
+
+/// 一份**分解敏感**的主库：[`MemFs`] 按字节精确认路径，正是 NTFS 与 ext4 的样子。
+/// macOS 的 fskit 驱动查找**不**分解敏感（ADR-0020 修订段实测 383/383 两种形式都开得了），
+/// 所以真机上今天看不见这条——这份 fixture 是它唯一能在 macOS 上变红的地方。
+fn 建一份分解形名字的主库() -> (MemFs, Catalog) {
+    let mut library = MemFs::new();
+    library.file(format!("/lib/FC/{分解形名}"), 原版());
+    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+    scan::scan(
+        &library,
+        &mut catalog,
+        &ScanOptions::named("/lib", "库"),
+        &Handle::new(),
+    )
+    .expect("扫得动");
+    (library, catalog)
+}
+
+fn 跑一趟(library: &MemFs, catalog: &mut Catalog, repo: &DatRepo) {
+    identify::run(
+        library,
+        catalog,
+        &identify::Ammo {
+            repo,
+            verdicts: &verdict::Index::empty(),
+            naming: &fuzzy::Naming::off(),
+            guessing: &identify::model::Guessing::off(),
+            titledb: None,
+        },
+        &Options::new(Roots::single("库", "/lib")),
+        &CancelToken::new(),
+        &mut |_| {},
+    )
+    .expect("识别不该失败");
+}
+
+#[test]
+fn 盘上的名字是分解形式时照样读得到字节而不是落成无判据() {
+    let (library, mut catalog) = 建一份分解形名字的主库();
+    let 键 = format!("库/FC/{预组合名}");
+
+    // 前提：键是 NFC 的那一份，与盘上那串字节**不同**。
+    assert_ne!(预组合名, 分解形名, "两串字节本来就不一样");
+    assert!(
+        catalog.identification_of(&键).expect("读得出").is_none(),
+        "跑之前这条还没识别",
+    );
+
+    跑一趟(&library, &mut catalog, &建_dat());
+
+    let (结论, 为什么) = catalog
+        .identification_of(&键)
+        .expect("读得出")
+        .unwrap_or_else(|| panic!("{键} 没有识别结论"));
+    assert_eq!(
+        结论,
+        State::Matched,
+        "分解形式的名字照样该读得到字节：{为什么:?}",
+    );
+    let 候选 = catalog.candidates_of(&键).expect("读得出");
+    assert!(
+        候选.iter().any(|c| c.source == "No-Intro"),
+        "去头那套撞得上 No-Intro：{候选:#?}",
+    );
+}
+
+#[test]
+fn 目录名是分解形式时它底下整棵子树都还认得出() {
+    // 一个**目录名**中招，整棵子树的键全跟着走折回去那条退路——主库实测有 5 个目录名
+    // 是分解形式（ADR-0020）。这里还顺带证同一层的两条只列一次目录就都认得出。
+    let mut library = MemFs::new();
+    let 分解形目录 = "\u{30b1}\u{3099}ーム";
+    let 预组合目录 = "ゲーム";
+    library.file(format!("/lib/FC/{分解形目录}/原版.nes"), 原版());
+    library.file(format!("/lib/FC/{分解形目录}/汉化.nes"), 汉化版());
+    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+    scan::scan(
+        &library,
+        &mut catalog,
+        &ScanOptions::named("/lib", "库"),
+        &Handle::new(),
+    )
+    .expect("扫得动");
+
+    跑一趟(&library, &mut catalog, &建_dat());
+
+    for 文件名 in ["原版.nes", "汉化.nes"] {
+        let 键 = format!("库/FC/{预组合目录}/{文件名}");
+        let (结论, 为什么) = catalog
+            .identification_of(&键)
+            .expect("读得出")
+            .unwrap_or_else(|| panic!("{键} 没有识别结论"));
+        assert_eq!(结论, State::Matched, "{键}：{为什么:?}");
+    }
+}
+
+
+#[test]
+fn 还没识别的变体照样占着变体总数与全部变体里那个分母() {
+    // 词表「还没识别」：一个变体**连识别都还没跑过**。它既不是「未命中」（撞过没撞上，
+    // 是结论），也不是「无判据」（拿不到可撞的东西）。三者混在一起，命中率就失真。
+    //
+    // 报告从前是 `identification JOIN variant` 折出来的，于是一行结论都没有的变体
+    // **连分母都进不去**：识别完再扫进一个新文件，报告照旧说「变体 8」、覆盖率按 8 算。
+    let mut 现场 = 建现场();
+    let 第一趟 = 跑(&mut 现场);
+    let 跑过的 = 第一趟.report.total.variants;
+    assert_eq!(跑过的, 8, "fixture 里八个变体");
+    assert_eq!(第一趟.report.total.not_run, 0, "跑完一整趟，一个都不剩");
+
+    // 再扫进一个新文件，**不重跑识别**。
+    写(
+        &现场.dir.path().join("FC/后来才放进来的.zip"),
+        &zip_container(&[ZipEntrySpec::stored("新的.nes", ines(0x5A, 4_096))]),
+    );
+    重扫(&mut 现场);
+
+    let report = IdentifyReport::build(&现场.catalog, &现场.repo).expect("折得出报告");
+    assert_eq!(report.total.variants, 跑过的 + 1, "新来的那个也是一个变体");
+    assert_eq!(report.total.not_run, 1, "它还没识别");
+    // **四档一档都没多**：还没识别既不是未命中也不是无判据，更不是跳过。
+    assert_eq!(report.total.matched, 第一趟.report.total.matched);
+    assert_eq!(report.total.unmatched, 第一趟.report.total.unmatched);
+    assert_eq!(report.total.no_evidence, 第一趟.report.total.no_evidence);
+    assert_eq!(report.total.skipped, 第一趟.report.total.skipped);
+
+    // 「撞了 DAT 的里面」那个分母不动——它一次都没撞过。
+    assert!(
+        (report.total.hit_rate() - 第一趟.report.total.hit_rate()).abs() < 1e-9,
+        "{:.3}% vs {:.3}%",
+        report.total.hit_rate(),
+        第一趟.report.total.hit_rate(),
+    );
+    // 「全部变体里」那个分母跟着涨，于是覆盖率降下来——那才是实话。
+    assert!(
+        report.total.coverage() < 第一趟.report.total.coverage(),
+        "分母多了一个还没识别的，覆盖率该降：{:.1}% vs {:.1}%",
+        report.total.coverage(),
+        第一趟.report.total.coverage(),
+    );
+
+    // 按平台那一行加得起来：变体 = 命中 + 未命中 + 无判据 + 跳过 + 还没识别。
+    let fc = report
+        .platforms
+        .iter()
+        .find(|row| row.platform == "FC")
+        .expect("有 FC");
+    assert_eq!(fc.not_run, 1);
+    assert_eq!(
+        fc.variants,
+        fc.matched + fc.unmatched + fc.no_evidence + fc.skipped + fc.not_run,
+        "{fc:?}"
+    );
+
+    // 报告嘴上说得出这个数——三处没有一处说得出，正是这一票的病根。
+    let text = report.render_text();
+    assert!(text.contains("还没识别 1"), "总数那一行要点名：{text}");
+    assert!(text.contains("其中 1 个**还没识别**"), "{text}");
+}
+
+#[test]
+fn 识别被中断后报告说的是全部变体而不是跑完的那几个() {
+    // 现象：识别只跑完一部分就被中断，报告说「变体 1 个，全部变体里 100.0%」，
+    // 而库里躺着 5 个。没轮到的那些是**还没识别**，它们照样是这个库的一部分。
+    let mut 现场 = 建现场();
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let outcome = identify::run(
+        &RealFs::new(),
+        &mut 现场.catalog,
+        &identify::Ammo {
+            repo: &现场.repo,
+            verdicts: &verdict::Index::empty(),
+            naming: &fuzzy::Naming::off(),
+            guessing: &identify::model::Guessing::off(),
+            titledb: None,
+        },
+        &Options::new(Roots::single("库", 现场.dir.path())),
+        &cancel,
+        &mut |_| {},
+    )
+    .expect("中断不是错误");
+
+    assert!(outcome.interrupted, "这一趟是被中断的");
+    let report = &outcome.report;
+    assert_eq!(report.total.variants, 8, "库里有八个变体，中断不改变这件事");
+    assert_eq!(report.total.not_run, 8, "一个都还没轮到");
+    assert_eq!(report.total.matched, 0);
+    assert_eq!(report.total.unmatched, 0);
+    // 一次都没撞过 DAT：命中率的分母是 0，按报告的规矩算 0，**不许算成 100%**。
+    assert!((report.total.hit_rate() - 0.0).abs() < 1e-9);
+    assert!((report.total.coverage() - 0.0).abs() < 1e-9);
+    let text = report.render_text();
+    assert!(text.contains("还没识别 8"), "{text}");
+}
+
+#[test]
+fn 命中的那份删掉重扫之后结论与候选不再交出() {
+    // ⭐ **变体没了，挂在它身上的结论也就没了。** 窗口是「重扫到下一趟识别之间」：
+    // 那期间报告、标题集合与导出都还在读这几张表，读到的是一个盘上已经不存在的东西。
+    let mut 现场 = 建现场();
+    跑(&mut 现场);
+    let 键 = "库/FC/超级马里奥.zip";
+    assert_eq!(结论(&现场, 键).0, State::Matched, "先得真命中一次");
+    assert_eq!(
+        现场.catalog.candidates_of(键).expect("读得出").len(),
+        2,
+        "含头与去头两套口径各一条"
+    );
+    let 发行版数 = 现场.catalog.releases().expect("读得出").len();
+
+    fs::remove_file(现场.dir.path().join("FC/超级马里奥.zip")).expect("删得掉");
+    重扫(&mut 现场);
+
+    assert!(
+        现场.catalog.variant(键).expect("读得出").is_none(),
+        "前提：重新成型之后这个变体已经不在了"
+    );
+    assert!(
+        现场.catalog.identification_of(键).expect("读得出").is_none(),
+        "结论跟着变体走"
+    );
+    assert!(
+        现场.catalog.candidates_of(键).expect("读得出").is_empty(),
+        "候选跟着变体走"
+    );
+    let mut 交出的 = Vec::new();
+    现场
+        .catalog
+        .for_each_accepted_candidate(&mut |candidate| {
+            交出的.push(candidate.variant_key.to_string());
+        })
+        .expect("走得动");
+    assert!(
+        !交出的.contains(&键.to_string()),
+        "刮削那一侧不许再收到这个键：{交出的:?}"
+    );
+    assert_eq!(
+        现场.catalog.releases().expect("读得出").len(),
+        发行版数 - 1,
+        "只剩那份候选独家撑着的发行版跟着收掉"
+    );
+}
+
+#[test]
+fn 作品与发行版表里不留指不着任何变体的行() {
+    // 留着的话，「识别建出来的作品数」会一直虚高，浏览屏上还会长出指不着任何文件的行。
+    let mut 现场 = 建现场();
+    跑(&mut 现场);
+    fs::remove_file(现场.dir.path().join("FC/超级马里奥.zip")).expect("删得掉");
+    fs::remove_file(现场.dir.path().join("FC/某游戏 汉化版.zip")).expect("删得掉");
+    重扫(&mut 现场);
+
+    let 变体们 = 现场.catalog.variants().expect("读得出变体");
+    let 发行版们 = 现场.catalog.releases().expect("读得出发行版");
+    let 作品们 = 现场.catalog.work_names().expect("读得出作品");
+    let mut 候选指着的 = Vec::new();
+    现场
+        .catalog
+        .for_each_accepted_candidate(&mut |candidate| {
+            候选指着的.extend(candidate.release_id);
+        })
+        .expect("走得动");
+    for (id, release) in &发行版们 {
+        let 有人指 = 变体们.iter().any(|it| it.release_id == Some(*id))
+            || 候选指着的.contains(id);
+        assert!(有人指, "发行版 {id} 指不着任何变体：{release:?}");
+        assert!(作品们.contains_key(&release.work_id), "它的作品还在");
+    }
+    for id in 作品们.keys() {
+        assert!(
+            变体们.iter().any(|it| it.work_id == Some(*id))
+                || 发行版们.values().any(|it| it.work_id == *id),
+            "作品 {id} 指不着任何变体、也没有发行版挂在它下面"
+        );
+    }
+    // **标题集合是这几张表的直接消费者**：孤儿发行版留着，`title::fold` 就照它的
+    // 官方条目名折出一条指不着任何文件的标题。
+    let 折出来 = romcat_core::title::fold(&现场.catalog).expect("折得出标题集合");
+    assert!(
+        !折出来.iter().any(|row| row.value.contains("Super Mario")),
+        "那份已删文件的官方名不许再进标题集合：{:?}",
+        折出来.iter().map(|row| &row.value).collect::<Vec<_>>()
+    );
 }

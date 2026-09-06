@@ -331,12 +331,20 @@ impl Prepared {
 
 /// 这份中立库对着的**一组根**：先按扫描时记下的那份，再让 `overrides` 覆盖上去。
 ///
-/// `overrides` 是 `(根名, 路径)`：命令行的 `--library-root 名字=路径` 走这条。根名给
+/// `overrides` 是 `(根名, 路径)`：命令行的 `--library-root [根名=]路径` 走这条。根名给
 /// `None` 时只在**这份库只有一个根**的时候算数——那时「哪个根」没有歧义；多于一个根
 /// 却不说名字，覆盖谁都是猜。
 ///
+/// **覆盖只换得动已有的根**（[`Roots::relocate`]）：点到一个库里没有的名字就当场说
+/// 「没有这个根」并把有的那几个列出来。加一个根是 `scan` 的活——从这条缝溜进来的话，
+/// `--library-root 主庫=/新位置`（打错一个字）会静默多出一个根，而后面报的是
+/// 「根『主库』不在位」，指的是另一件事。
+///
+/// 一个根都还没有时是唯一的例外：那份库从没扫过，`--library-root 路径` 就是在说
+/// 主库在哪，收下它没有任何歧义。
+///
 /// # Errors
-/// 中立库读不动、或者不说名字却有不止一个根时返回一句给人看的话。
+/// 中立库读不动、点了一个不存在的根名、或者不说名字却有不止一个根时返回一句给人看的话。
 pub fn library_roots(
     catalog: &Catalog,
     overrides: &[(Option<String>, PathBuf)],
@@ -344,25 +352,13 @@ pub fn library_roots(
     let mut roots = Roots::load(catalog).map_err(|error| format!("中立库读不动：{error}"))?;
     for (name, path) in overrides {
         let path = path::normalize_existing(path);
-        match name {
-            Some(name) => roots.set(name, path),
-            None => match roots.only().map(str::to_string) {
-                Some(only) => roots.set(&only, path),
-                None if roots.is_empty() => roots.set("主库", path),
-                None => {
-                    return Err(format!(
-                        "这份中立库有 {} 个根，`--library-root` 得说清是哪一个：\n\
-                         `--library-root 根名=路径`。这份库里的根是：{}",
-                        roots.len(),
-                        roots
-                            .iter()
-                            .map(|(name, _)| name.to_string())
-                            .collect::<Vec<_>>()
-                            .join("、")
-                    ));
-                }
-            },
+        if name.is_none() && roots.is_empty() {
+            roots.set("主库", path);
+            continue;
         }
+        roots
+            .relocate(name.as_deref(), path)
+            .map_err(|error| error.hint("点名换位置：`--library-root 根名=路径`"))?;
     }
     Ok(roots)
 }
@@ -407,6 +403,10 @@ pub fn missing_roots_message(missing: &[String]) -> String {
 /// 它在核心里而不在命令行里，是因为**界面也有一个「同步」按钮**——这道红线不能靠
 /// 每个壳自己记得写一遍。
 ///
+/// **判据先把两边折成可比形态**（[`path::is_inside_place`]）：目标过了
+/// [`path::normalize_existing`]，Windows 上于是是 `\\?\D:\…`，而库里的根存的是
+/// display 形态 `D:\…`——不折的话这道红线恒为 false，等于没有。
+///
 /// # Errors
 /// 目标落在主库里、或者中立库读不动时返回一句给人看的话。
 pub fn refuse_target_in_library(
@@ -418,7 +418,7 @@ pub fn refuse_target_in_library(
     let target = path::normalize_existing(target);
     // **每个根都要拦。** 一份中立库装着几块盘，只拦其中一块等于另外几块没人守。
     for (name, root) in roots.iter() {
-        if path::is_inside(root, &target) {
+        if path::is_inside_place(root, &target) {
             return Err(format!(
                 "目标 {} 落在主库的根「{name}」（{}）里。**主库只读**（ADR-0004）：\n\
                  同步会往目标上写文件、删文件，绝不能指着那块盘。\n\

@@ -22,13 +22,14 @@
 //! 而**变体数与容量**照旧从库里现折（[`Catalog::root_stats`]）——那两个数在成型之后才准，
 //! 扫描当时的数字反而是过时的。
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{OptionalExtension, params};
 
 use super::{Catalog, CatalogError, now_secs};
-use crate::fs::LibraryFs;
+use crate::fs::{DirCache, LibraryFs};
 use crate::path;
 
 /// 主库那一组根的表。
@@ -290,6 +291,16 @@ impl Catalog {
     /// 丢掉的全是可再生的（中立库整份可再生，`CONTEXT.md`）；**沉淀库一个字都不动**，
     /// 那里面是用户亲手定的东西。
     ///
+    /// **这个根那一趟遍历也一起删掉。** 移除说的是「这个根在中立库里的一切都不算数了」，
+    /// 遍历与它的批注是那个「一切」的一部分：留着遍历行，报告会继续替一个已经不在的根
+    /// 报抬头与耗时；更要紧的是**断点的身份靠它**——同名同路径加回来时，工作目录里那份
+    /// 按根名取的旧断点会重新对上，于是只扫 `pending` 那一半，收尾还什么都删不到，
+    /// 扫完报「完整」却少文件。删掉这一行，那份旧断点就再也对不上谁
+    /// （[`scan`](crate::scan) 那道守卫），加回来的根从头扫一遍。
+    ///
+    /// **断点文件本身不在这里删**：核心不知道工作目录在哪，而删不删在行为上没有区别
+    /// ——留着它，`--resume` 也是读到、对不上、从头扫。
+    ///
     /// # Errors
     /// 写库失败时返回错误。
     pub fn remove_root(&mut self, name: &str) -> Result<u64, CatalogError> {
@@ -335,9 +346,16 @@ impl Catalog {
                 .execute(sql, params![prefix])
                 .map_err(|source| self.err(source))?;
         }
-        self.conn
-            .execute("DELETE FROM library_root WHERE name = ?1", params![name])
-            .map_err(|source| self.err(source))?;
+        // 遍历与它的批注按**根名**记（`catalog::SCHEMA_VERSION` 的 7），跟着这个根一起走。
+        for sql in [
+            "DELETE FROM traversal WHERE root_name = ?1",
+            "DELETE FROM traversal_note WHERE root_name = ?1",
+            "DELETE FROM library_root WHERE name = ?1",
+        ] {
+            self.conn
+                .execute(sql, params![name])
+                .map_err(|source| self.err(source))?;
+        }
         self.drop_orphans()?;
         Ok(removed)
     }
@@ -408,6 +426,11 @@ pub fn add_root(
 ///
 /// `name` 是这个根自己的名字：**与自己比不算套在一起**。
 ///
+/// **三道比较都先把两边折成可比形态**（[`path::is_same_place`]、[`path::is_inside_place`]）：
+/// 库里存的是 display 形态 `D:\…`，手上这条可能是 `canonicalize` 交出来的 `\\?\D:\…`，
+/// 直接比恒为 false——套叠的根会静默放行，同路径改名则一路撞到 UNIQUE 索引上去
+/// （见 [`path::comparable_text`]）。
+///
 /// # Errors
 /// 与工作目录纠缠、与别的根套在一起、或者中立库读不动时返回 [`AddRootError`]。
 pub fn check_placement(
@@ -419,7 +442,7 @@ pub fn check_placement(
     let display = path::display(root);
     if let Some(workspace) = workspace {
         let workspace = path::normalize_existing(workspace);
-        if path::is_inside(root, &workspace) || path::is_inside(&workspace, root) {
+        if path::is_inside_place(root, &workspace) || path::is_inside_place(&workspace, root) {
             return Err(AddRootError::Workspace {
                 path: display,
                 workspace: path::display(&workspace),
@@ -431,20 +454,20 @@ pub fn check_placement(
             continue;
         }
         let other = PathBuf::from(&existing.path);
-        if other == root {
+        if path::is_same_place(&other, root) {
             return Err(AddRootError::SamePath {
                 name: existing.name,
                 path: existing.path,
             });
         }
-        if path::is_inside(&other, root) {
+        if path::is_inside_place(&other, root) {
             return Err(AddRootError::Inside {
                 path: display,
                 name: existing.name,
                 outer: existing.path,
             });
         }
-        if path::is_inside(root, &other) {
+        if path::is_inside_place(root, &other) {
             return Err(AddRootError::Contains {
                 path: display,
                 name: existing.name,
@@ -453,6 +476,50 @@ pub fn check_placement(
         }
     }
     Ok(())
+}
+
+/// **换一个根的位置**换不动的两种理由。
+///
+/// 两条都只说**诊断**那一半——库里有哪些根、错在哪。**怎么写才对**那一句由壳补
+/// （[`RelocateError::hint`]）：命令行上换位置的选项有两个名字（`sublibrary sync`
+/// 的 `--library-root` 与 `identify` / `scrape` / `names` 的 `--root`），
+/// 而将来界面上那一下一个选项名都没有。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RelocateError {
+    /// 库里没有叫这个名字的根。
+    #[error("这份中立库里没有叫「{name}」的根。加一个根是 `scan` 的活。{}", known_roots(known))]
+    Unknown {
+        /// 点到的那个名字。
+        name: String,
+        /// 库里真有的那几个根。
+        known: Vec<String>,
+    },
+    /// 不点名，而库里的根不止一个（或者一个都没有）。
+    #[error("这份中立库有 {} 个根，得说清换的是哪一个。{}", known.len(), known_roots(known))]
+    Ambiguous {
+        /// 库里真有的那几个根。
+        known: Vec<String>,
+    },
+}
+
+/// 「这份库里的根是：……」那半句。**两条错误共用**，于是列法只有一种。
+fn known_roots(known: &[String]) -> String {
+    if known.is_empty() {
+        return "这份库里一个根都还没有——先 `romcat scan <目录>` 扫一趟".to_string();
+    }
+    format!("这份库里的根是：{}", known.join("、"))
+}
+
+impl RelocateError {
+    /// 诊断后面再补一句**这个壳该怎么写才对**。
+    ///
+    /// 诊断这一半在核心里，于是「没有这个根」「有几个根、分别叫什么」在
+    /// `sublibrary sync`、`identify` 与将来界面上那一下是同一句话；出路那一半各写各的
+    /// ——`--library-root` 点得了名，`--root` 只是一条路径，点不了。
+    #[must_use]
+    pub fn hint(&self, remedy: &str) -> String {
+        format!("{self}\n{remedy}")
+    }
 }
 
 /// **从键回到盘**：一份「根名 → 那个根在哪」的对照表。
@@ -490,9 +557,52 @@ impl Roots {
         roots
     }
 
-    /// 换掉（或加上）一个根的位置。命令行的 `--library-root 名字=路径` 走这条。
+    /// 摆一个根进这份表里。**insert 语义**：这个名字没有就加上，有就换掉。
+    ///
+    /// 它是**搭一份 `Roots` 出来**用的（[`Roots::single`]、扫描那一侧），不是
+    /// 「盘换了位置」那一下——那条走 [`Roots::relocate`]。两条分开，是因为
+    /// 「换位置」写错一个字时该当场说出来，而不是凭空多出一个根（见 `relocate` 的文档）。
     pub fn set(&mut self, name: &str, path: impl Into<PathBuf>) {
         self.by_name.insert(name.to_string(), path.into());
+    }
+
+    /// **盘换了位置**：把一个**已有的根**改指到别处，只管这一趟。
+    ///
+    /// `name` 给 `None` 是不点名的那一种，只在**恰好一个根**时算数——那时「哪个根」
+    /// 没有歧义；多于一个却不说名字，覆盖谁都是猜。
+    ///
+    /// **只认已有的名字。** 用 [`Roots::set`] 的话，`--library-root 主庫=/新位置`
+    /// （打错一个字）会凭空多出一个根，而后面报出来的是「根『主库』不在位」——
+    /// 说的是另一件事，用户照着它去插盘、去核对挂载点，一路查不到自己打错了字。
+    /// **加一个根是 `scan` 的活**（`scan::resolve_root` 那一套重名、套叠、工作目录
+    /// 三道校验），不该从「换位置」这条缝里溜进来。
+    ///
+    /// 判据在这一层而不在命令行，是因为**界面上也有「盘换了位置」这一下**——
+    /// 哪些名字算数是这份表自己知道的事，不该靠每个壳自己记得查一遍。
+    ///
+    /// # Errors
+    /// 库里没有这个名字的根、或者不点名却有不止一个根时返回 [`RelocateError`]。
+    pub fn relocate(
+        &mut self,
+        name: Option<&str>,
+        path: impl Into<PathBuf>,
+    ) -> Result<(), RelocateError> {
+        let known = || self.by_name.keys().cloned().collect::<Vec<_>>();
+        let target = match name {
+            Some(name) if self.by_name.contains_key(name) => name.to_string(),
+            Some(name) => {
+                return Err(RelocateError::Unknown {
+                    name: name.to_string(),
+                    known: known(),
+                });
+            }
+            None => match self.only() {
+                Some(only) => only.to_string(),
+                None => return Err(RelocateError::Ambiguous { known: known() }),
+            },
+        };
+        self.by_name.insert(target, path.into());
+        Ok(())
     }
 
     /// 一个根都没有。
@@ -552,9 +662,21 @@ impl Roots {
     /// 与「读得到但是空的」不是一件事（ADR-0021）。
     #[must_use]
     pub fn real_path(&self, fs: &dyn LibraryFs, key: &str) -> Option<PathBuf> {
+        self.real_path_in(fs, &mut DirCache::default(), key)
+    }
+
+    /// 与 [`Roots::real_path`] 同一件事，只是一趟里的几万条键共用一份 [`DirCache`]——
+    /// 逐段列目录那条退路上，同一个目录只列一次。
+    #[must_use]
+    pub fn real_path_in(
+        &self,
+        fs: &dyn LibraryFs,
+        dirs: &mut DirCache,
+        key: &str,
+    ) -> Option<PathBuf> {
         let (name, relative) = path::split_root(key);
         let root = self.path_of(name)?;
-        crate::fs::real_path(fs, root, relative)
+        dirs.real_path(fs, root, relative)
     }
 
     /// 把一条**中立库的键**还原成给人看的完整路径。认不出根名时原样返回那条键。
@@ -571,20 +693,32 @@ impl Roots {
     /// 导入前端元数据时要走它——那些文件里写的是绝对路径，得先折回键才对得上变体
     /// （`adapter::transfer`）。**最长的根赢**：根之间本来不许套在一起，但命令行
     /// 给的覆盖路径管不住，取最长的那条至少不会把 `/盘/Game/FC` 判给 `/盘`。
+    ///
+    /// **两边都先折成可比形态**（[`path::comparable`]）：[`path::normalize_existing`]
+    /// 在 Windows 上交出 `\\?\D:\…`，而库里的根是 display 形态 `D:\…`，不折的话
+    /// 圈不住、也切不出相对根的那一段——**一条都对不回键**。
     #[must_use]
     pub fn key_of(&self, path: &Path) -> Option<String> {
-        let path = path::normalize_existing(path);
-        let mut best: Option<(&str, &Path)> = None;
+        let normalized = path::normalize_existing(path);
+        // 两边都折成**可比形态**再比、再切：手上这条是 `canonicalize` 的产物
+        // （Windows 上带 `\\?\`），库里那条是 display 形态，直接比恒不相等，
+        // 直接 `strip_prefix` 也切不动（见 [`path::comparable_text`]）。
+        let path = path::comparable(&normalized);
+        let mut best: Option<(&str, Cow<'_, Path>)> = None;
         for (name, root) in self.iter() {
-            if !path::is_inside(root, &path) {
+            let root = path::comparable(root);
+            if !path::is_inside_place(&root, &path) {
                 continue;
             }
-            if best.is_none_or(|(_, chosen)| root.as_os_str().len() > chosen.as_os_str().len()) {
+            if best
+                .as_ref()
+                .is_none_or(|(_, chosen)| root.as_os_str().len() > chosen.as_os_str().len())
+            {
                 best = Some((name, root));
             }
         }
         let (name, root) = best?;
-        Some(path::library_key(name, root, &path))
+        Some(path::library_key(name, &root, &path))
     }
 }
 
@@ -679,6 +813,67 @@ mod tests {
     }
 
     #[test]
+    fn 扩展长度形式的根与库里存的那一条算同一个地方() {
+        // Windows 上 `canonicalize` 交出 `\\?\D:\Game`，而 `library_root.path` 存的是
+        // display 形态 `D:\Game`。两种写法按 `Path` 的分量比恒不相等（`VerbatimDisk`
+        // 与 `Disk` 不是同一个分量），于是同路径改名一路走到 `library_root_path` 的
+        // UNIQUE 索引上，撞出一句裸 SQLite 错。判据折成可比形态之后才说得出人话。
+        //
+        // 这一条各平台都跑得了：折叠在**字符串层**，不靠 `Path` 拆盘符。
+        let catalog = 一份库();
+        catalog.insert_root("主库", r"D:\Game").expect("记得下");
+        let error =
+            check_placement(&catalog, None, "元数据", Path::new(r"\\?\D:\Game")).expect_err("该被拒");
+        let AddRootError::SamePath { name, .. } = &error else {
+            panic!("该报「同一个地方」，实际是 {error}");
+        };
+        assert_eq!(name, "主库");
+    }
+
+    #[test]
+    fn 扩展长度形式的根套在库里那个根里也拦得住() {
+        // 套叠的根静默放行的代价是同一批文件被数两遍。
+        let catalog = 一份库();
+        catalog.insert_root("主库", r"D:\Game").expect("记得下");
+        let error = check_placement(&catalog, None, "元数据", Path::new(r"\\?\D:\Game\FC"))
+            .expect_err("该被拒");
+        assert!(matches!(error, AddRootError::Inside { .. }), "{error}");
+        // 反过来：新的那个把老的圈进去。
+        let error =
+            check_placement(&catalog, None, "元数据", Path::new(r"\\?\D:\")).expect_err("该被拒");
+        assert!(matches!(error, AddRootError::Contains { .. }), "{error}");
+        // 前缀撞上一半不算套在一起，照旧放行。
+        check_placement(&catalog, None, "元数据", Path::new(r"\\?\D:\GameOther"))
+            .expect("两个互不相干的根");
+    }
+
+    #[test]
+    fn 从盘上的路径折回键挑最长的那个根() {
+        let mut roots = Roots::single("主库", "/盘甲/Game");
+        roots.set("元数据库", "/盘甲/Game/FC");
+        assert_eq!(
+            roots.key_of(Path::new("/盘甲/Game/FC/魂斗罗.zip")).as_deref(),
+            Some("元数据库/魂斗罗.zip")
+        );
+        assert_eq!(roots.key_of(Path::new("/别处/魂斗罗.zip")), None);
+    }
+
+    /// 导入前端元数据时要从绝对路径折回键（`adapter::transfer`）：
+    /// [`path::normalize_existing`] 在 Windows 上交出 `\\?\D:\…`，而库里的根是
+    /// `D:\…`——从前**一条都对不回去**。**本机是 macOS，这条没跑过。**
+    #[cfg(windows)]
+    #[test]
+    fn 扩展长度形式的绝对路径也折得回键() {
+        let roots = Roots::single("主库", r"D:\Game");
+        assert_eq!(
+            roots
+                .key_of(Path::new(r"\\?\D:\Game\FC\魂斗罗.zip"))
+                .as_deref(),
+            Some("主库/FC/魂斗罗.zip")
+        );
+    }
+
+    #[test]
     fn 从键回到盘要认根名() {
         let roots = Roots::single("元数据库", "/盘乙/Pegasus");
         assert_eq!(
@@ -686,5 +881,66 @@ mod tests {
             Some(PathBuf::from("/盘乙/Pegasus/FC/魂斗罗.zip"))
         );
         assert_eq!(roots.join("没这个根/FC/魂斗罗.zip"), None);
+    }
+
+    fn 两个根() -> Roots {
+        let mut roots = Roots::single("主库", "/盘甲/Game");
+        roots.set("元数据库", "/盘乙/Pegasus");
+        roots
+    }
+
+    #[test]
+    fn 换一个不存在的根的位置要报错并列出库里有哪些根() {
+        // 打错一个字：`主庫`。从前它被静默收下，凭空多出第三个根，
+        // 而后面报的是「根『主库』不在位」——说的是另一件事。
+        let mut roots = 两个根();
+        let error = roots
+            .relocate(Some("主庫"), "/盘甲搬走了/Game")
+            .expect_err("该被拒");
+        let RelocateError::Unknown { name, .. } = &error else {
+            panic!("该报「没有这个根」，实际是 {error}");
+        };
+        assert_eq!(name, "主庫");
+        let 话 = error.to_string();
+        assert!(话.contains("主库") && 话.contains("元数据库"), "{话}");
+        assert!(话.contains("`scan`"), "加根是 scan 的活，得说出来：{话}");
+        // **一个根都没多出来**，而且原来那个根还指着原处。
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots.path_of("主库"), Some(Path::new("/盘甲/Game")));
+    }
+
+    #[test]
+    fn 多于一个根时不点名换不动位置() {
+        let mut roots = 两个根();
+        let error = roots.relocate(None, "/别处").expect_err("该被拒");
+        assert!(matches!(error, RelocateError::Ambiguous { .. }));
+        let 话 = error.to_string();
+        assert!(话.contains("2 个根"), "{话}");
+        assert!(话.contains("主库") && 话.contains("元数据库"), "{话}");
+    }
+
+    #[test]
+    fn 只有一个根时不点名照旧换得动() {
+        // 这条便利不能丢：真库上大多数人只有一个根。
+        let mut roots = Roots::single("主库", "/盘甲/Game");
+        roots.relocate(None, "/盘甲搬走了/Game").expect("换得动");
+        assert_eq!(
+            roots.path_of("主库"),
+            Some(Path::new("/盘甲搬走了/Game")),
+            "换的是那个独苗，名字不变"
+        );
+        // 点名也换得动，而且换的是同一个。
+        roots.relocate(Some("主库"), "/又搬了").expect("换得动");
+        assert_eq!(roots.path_of("主库"), Some(Path::new("/又搬了")));
+    }
+
+    #[test]
+    fn 一个根都没有时说清是一个根都没有() {
+        let mut roots = Roots::default();
+        let error = roots.relocate(None, "/盘甲/Game").expect_err("该被拒");
+        assert!(
+            error.to_string().contains("一个根都还没有"),
+            "别印成「有 0 个根，得说清是哪一个」：{error}"
+        );
     }
 }

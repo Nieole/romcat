@@ -18,6 +18,9 @@
 //!
 //! **一趟扫一个根。** 主库是一组根（`CONTEXT.md`），几个根扫进同一份中立库；一趟扫描
 //! 只走其中一个，键上带着它的名字，收尾时也只收它那一支（[`Catalog::sweep`]）。
+//! **遍历那条记录、它的批注、以及断点的身份也一样按根分**：扫一遍乙盘不许动甲盘那一支
+//! 的任何一样东西——不然甲盘的断点会被悄悄作废，甲盘那条「这个目录列不开」也会从
+//! 报告里消失（[`Catalog::begin_scan`]、本模块的 `load_start_state`）。
 
 pub mod aggregate;
 pub mod checkpoint;
@@ -107,6 +110,33 @@ pub enum ScanError {
         current: String,
         /// 顶层条目对得上几条。
         common: usize,
+        /// 库里记着的顶层条目共几条。
+        recorded_count: usize,
+    },
+    /// 这个**根**不在位：目录还在，库里记着的顶层条目却一条都不在。
+    ///
+    /// **挂载点目录永远都在**——Linux 的 `/mnt/x` 是先建出来的，macOS 卸盘之后
+    /// `/Volumes/x` 也偶尔残留一个空目录。于是路径一个字没变、`is_dir()` 照样为真，
+    /// 而遍历会顺利跑完、收尾把整个根当成「这次没见到」抹掉。看不见不等于不存在
+    /// （ADR-0021），所以这一趟根本不该开工。
+    ///
+    /// 它与 [`DifferentLibrary`](Self::DifferentLibrary) **不是同一档**：那边是用户
+    /// 主动把根指到了别处、指错了盘，出路是换个根名；这边用户什么都没改，是那块盘
+    /// 自己不在，出路是插上盘。
+    #[error(
+        "根「{name}」记在 {path}，可库里记着的 {recorded_count} 条顶层条目\
+         一条都不在（这一层眼下只有 {present} 条）。\
+         挂载点目录一直都在，盘一拔它就剩个空壳——那块盘多半没挂上。插上那块盘再扫。\
+         上次扫出来的东西照样看得见：它住在中立库里，不跟着盘走。\
+         真是自己把这个根清空了的话，先把这个根移除再加回来"
+    )]
+    RootNotInPlace {
+        /// 这个根叫什么。
+        name: String,
+        /// 这一趟指的是哪个目录。
+        path: String,
+        /// 这一层眼下有几条。
+        present: usize,
         /// 库里记着的顶层条目共几条。
         recorded_count: usize,
     },
@@ -302,6 +332,12 @@ pub fn scan(
 
     // 断点是这条流程里唯一写进文件系统的东西，它必须落在主库之外。比较前两边都化成
     // 绝对形态，否则 `/var` 与 `/private/var` 这类链接会让守卫形同虚设。
+    //
+    // **两边化开走的必须是同一套文件系统**：扫描根上面刚过了 `library.canonicalize`，
+    // 断点这一侧就也得问 `library`。问两套的话，`/lib` 是指向 `usr/lib` 的符号链接
+    // （一切 merged-usr 的发行版）时，根折出来还是 `/lib`、断点折出来成了
+    // `/usr/lib/…`，`is_inside` 只比前缀，于是这道闸静默失效——扫描照跑，带着断点
+    // 往只读的主库里写（ADR-0004）。
     let mut guarded: Vec<(&'static str, &Path)> = Vec::new();
     if let Some(config) = &options.checkpoint {
         guarded.push(("断点文件", &config.path));
@@ -310,7 +346,8 @@ pub fn scan(
         guarded.push(("中立库", file));
     }
     for (what, target) in guarded {
-        if path::is_inside(&root, &path::normalize_existing(target)) {
+        let folded = path::normalize_existing_in(target, |p| library.canonicalize(p));
+        if path::is_inside(&root, &folded) {
             return Err(ScanError::WritesInsideLibrary {
                 what,
                 path: path::display(target),
@@ -332,7 +369,7 @@ pub fn scan(
         Jobs::Adaptive => measured.map_or_else(default_jobs, |probe| probe.jobs),
     };
 
-    let mut start = load_start_state(options, &root, catalog)?;
+    let mut start = load_start_state(options, &root, &root_name, catalog)?;
     let mut traversal = Traversal {
         scan: start.scan,
         root_name: root_name.clone(),
@@ -345,7 +382,7 @@ pub fn scan(
         resumed: start.resumed,
     };
     if !start.resumed {
-        catalog.begin_scan(start.scan)?;
+        catalog.begin_scan(start.scan, &root_name)?;
     }
     // 先把这次扫描的行占上，代号才不会因为进程半路被杀而被下次重用。
     catalog.save_traversal(&traversal)?;
@@ -387,40 +424,47 @@ pub fn scan(
         drop(results_tx);
 
         let mut last_save = Instant::now();
-        let mut interrupted = false;
-        loop {
-            if cancel.is_cancelled() {
-                interrupted = true;
-                break;
-            }
-            if queue.is_drained() {
-                break;
-            }
-            match results_rx.recv_timeout(Duration::from_millis(100)) {
-                // 被中断打断的目录只扫了一半，整份丢掉：它仍留在 `active` 里，
-                // 会原样进断点，续跑时重扫一遍。合并半份结果会让那个目录里剩下的
-                // 文件与子目录**永久消失**——重做一个目录，好过少算一个目录。
-                Ok(result) if result.partial => {}
-                Ok(result) => {
-                    let done = merge(catalog, start.scan, &mut progress, result)?;
-                    queue.finish_and_push(done);
-                    // 遍历说不出分母（走完才知道有多少条目），于是只报分子：
-                    // 总数填 0，界面据此画一条来回跑的条而不是一条假装知道进度的条。
-                    task.tick(progress.delta.total(), 0);
+        let outcome = (|| -> Result<bool, ScanError> {
+            let mut interrupted = false;
+            loop {
+                if cancel.is_cancelled() {
+                    interrupted = true;
+                    break;
                 }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break,
+                if queue.is_drained() {
+                    break;
+                }
+                match results_rx.recv_timeout(Duration::from_millis(100)) {
+                    // 被中断打断的目录只扫了一半，整份丢掉：它仍留在 `active` 里，
+                    // 会原样进断点，续跑时重扫一遍。合并半份结果会让那个目录里剩下的
+                    // 文件与子目录**永久消失**——重做一个目录，好过少算一个目录。
+                    Ok(result) if result.partial => {}
+                    Ok(result) => {
+                        let done = merge(catalog, start.scan, &root_name, &mut progress, result)?;
+                        queue.finish_and_push(done);
+                        // 遍历说不出分母（走完才知道有多少条目），于是只报分子：
+                        // 总数填 0，界面据此画一条来回跑的条而不是一条假装知道进度的条。
+                        task.tick(progress.delta.total(), 0);
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+                if let Some(config) = &options.checkpoint
+                    && last_save.elapsed() >= config.interval
+                {
+                    traversal.elapsed_ms = elapsed(start.elapsed_base, started);
+                    save_progress(catalog, options, &root, &queue, &mut progress, &traversal)?;
+                    last_save = Instant::now();
+                }
             }
-            if let Some(config) = &options.checkpoint
-                && last_save.elapsed() >= config.interval
-            {
-                traversal.elapsed_ms = elapsed(start.elapsed_base, started);
-                save_progress(catalog, options, &root, &queue, &mut progress, &traversal)?;
-                last_save = Instant::now();
-            }
-        }
+            Ok(interrupted)
+        })();
+        // **出错这条路也要关队列。** 工作线程阻塞在 `Queue::pop` 的条件变量上，只有
+        // `close` 叫得醒它们；而 `thread::scope` 退出前一定要 join。协调这一头带着
+        // `?` 直接跳出去的话，谁都不再 `close`，于是「断点写不进去」这条本该说出口的
+        // 错误变成整个进程挂住——挂单 Q8 的第二个症状正是这个。
         queue.close();
-        Ok(interrupted)
+        outcome
     })?;
 
     traversal.elapsed_ms = elapsed(start.elapsed_base, started);
@@ -510,8 +554,14 @@ struct StartState {
 /// 名字没给就按目录自己的名字取。库里还没有这个根就**加进来**（校验走
 /// [`roots::add_root`]：不许重名、不许与已有的根套在一起、不许与工作目录纠缠）。
 ///
+/// **守卫每一趟都跑，路径变没变都跑。** 它只花一次 `read_dir`，而扫描本来就要读根
+/// 这一层——真机上那是 27 分钟里的一次目录读取。反过来「路径没变就直接放行」看着
+/// 省事，代价是这条最常走的路上一道闸都没有：盘不在位时挂载点目录还在、路径一个字
+/// 没变，于是遍历顺利跑完、收尾把整个根抹掉。
+///
 /// # Errors
-/// 名字不能用、根加不进来、这个根名底下换了另一块盘，或者中立库读写失败时返回错误。
+/// 名字不能用、根加不进来、这个根不在位、这个根名底下换了另一块盘，或者中立库
+/// 读写失败时返回错误。
 fn resolve_root(
     library: &dyn LibraryFs,
     catalog: &mut Catalog,
@@ -530,10 +580,11 @@ fn resolve_root(
         roots::add_root(catalog, options.workspace.as_deref(), &name, root)?;
         return Ok(name);
     };
-    if existing.path == current {
+    let moved = existing.path != current;
+    guard_same_root(library, catalog, &name, &existing.path, root, moved)?;
+    if !moved {
         return Ok(name);
     }
-    guard_same_root(library, catalog, &name, &existing.path, root)?;
     // **改指到别处也要过摆位那三道校验**：把「主库」从 `/盘/Game` 重指到 `/盘`
     // （而 `/盘/Game/FC` 已经是另一个根）不拦的话，同一批文件从此在两个根下各数一遍。
     roots::check_placement(catalog, options.workspace.as_deref(), &name, root)?;
@@ -545,6 +596,11 @@ fn resolve_root(
 ///
 /// **公开出去，因为断点文件名要带根名**（`workspace::checkpoint_path`），而算断点路径
 /// 那一步在开扫之前。两处各猜一遍的话，`--resume` 会去找一个不存在的断点。
+///
+/// **传进来的必须是化开之后的根**（[`path::normalize_existing`]，或者
+/// [`LibraryFs::canonicalize`] 的结果——`resolve_root` 走的就是后者）。用户敲的原串
+/// 没有末级名字的写法不止一种：`.`、`x/..`、单独一个 `/`，`file_name()` 一律给 `None`，
+/// 这里就退成「主库」——于是两个毫不相干的目录用 `scan .` 扫会共用一个断点文件。
 #[must_use]
 pub fn default_root_name(root: &Path) -> String {
     root.file_name()
@@ -553,16 +609,28 @@ pub fn default_root_name(root: &Path) -> String {
         .unwrap_or_else(|| "主库".to_string())
 }
 
-/// 这个**根名**对着的还是不是原来那块盘。
+/// 这个**根名**对着的那块盘还在不在、还是不是原来那一块。
 ///
 /// 根跟名字走而不跟路径走（挂账 D16），于是换挂载点、换盘符都还能找回同一支记录——
-/// 这正是要的。代价是「名字一样、盘不一样」这种情况变得可能，而这个根下面的键都以它的
-/// 名字打头，两块盘挤进同一个名字不会报错，只会静默撞车。
+/// 这正是要的。代价是两件事变得可能，而两件事都不会报错、只会静默撞车或静默抹掉：
+///
+/// - **盘不在位**：挂载点目录永远都在，盘一拔它就剩个空壳。路径一个字没变，遍历
+///   顺利跑完，收尾把整个根当成「这次没见到」删光。
+/// - **名字一样、盘不一样**：这个根下面的键都以它的名字打头，两块盘的记录会挤进
+///   同一串前缀。
 ///
 /// 判据是顶层条目：库里记着的这个根的顶层名，与眼前这个目录 `read_dir` 出来的名字比一比。
-/// 它只花一次 `read_dir`（扫描本来也要读这一层），却足够分开「同一块盘换了挂载点」
-/// （顶层全对得上）与「指错了盘」（顶层几乎全不同）。**它认不出的那种情况**：两块盘恰好
-/// 有过半同名的顶层目录——那得是刻意造的巧合，真出现了也还有「换个根名」这条路。
+/// 它只花一次 `read_dir`（扫描本来也要读这一层），却足够把三种形状分开。**分开它们靠的
+/// 是「路径变没变」**，因为那说的是用户改没改主意：
+///
+/// - **路径没变、顶层一条都对不上** → 盘不在位。用户什么都没改，是那块盘自己不在。
+///   判据是绝对的「一条都不剩」而不是比例——顶层只有两三个目录、用户合法删了其中
+///   大半时，只要还认得出一条就照常放行，不该拿阈值去拦用户自己动的手。
+/// - **路径变了、顶层大半对不上** → 指错了盘（[`ScanError::DifferentLibrary`]）。
+/// - 其余照常放行。
+///
+/// **它认不出的那种情况**：两块盘恰好有过半同名的顶层目录——那得是刻意造的巧合，真出现
+/// 了也还有「换个根名」这条路。
 ///
 /// **按根生效**：别的根一个字都不受影响，那正是「主库是一组根」要的形状。
 fn guard_same_root(
@@ -571,16 +639,27 @@ fn guard_same_root(
     name: &str,
     recorded: &str,
     root: &Path,
+    moved: bool,
 ) -> Result<(), ScanError> {
     let recorded_keys = catalog.top_level_keys(name, TOP_LEVEL_SAMPLE)?;
     // 一条都还没扫过的根没什么可撞的。
     if recorded_keys.is_empty() {
         return Ok(());
     }
-    let entries = library.read_dir(root).map_err(|source| ScanError::Root {
-        path: path::display(root),
-        source,
-    })?;
+    let entries = match library.read_dir(root) {
+        Ok(entries) => entries,
+        // **列不开给不出任何判据**，而遍历本来就会照实记一条错误、把整棵子树原样留着
+        // （`Catalog::keep_subtree`，ADR-0021）——守卫不该抢在它前面把扫描打断。
+        // 路径变了那一趟例外：那时还要往库里改「这个根现在挂在哪」，一个列都列不开的
+        // 目录不配当那个答案。
+        Err(_) if !moved => return Ok(()),
+        Err(source) => {
+            return Err(ScanError::Root {
+                path: path::display(root),
+                source,
+            });
+        }
+    };
     let actual: std::collections::HashSet<String> = entries
         .iter()
         .map(|entry| path::catalog_key(root, &entry.path))
@@ -589,6 +668,21 @@ fn guard_same_root(
         .iter()
         .filter(|key| actual.contains(*key))
         .count();
+    // **盘不在位**。两种形状：这一层什么都没有（不论路径变没变——指到一个空目录上去
+    // 从来不是「换了另一块盘」），或者路径压根没变而库里记着的顶层一条都不在。
+    if entries.is_empty() || (!moved && common == 0) {
+        return Err(ScanError::RootNotInPlace {
+            name: name.to_string(),
+            path: path::display(root),
+            present: entries.len(),
+            recorded_count: recorded_keys.len(),
+        });
+    }
+    // 路径没变、顶层还认得出几条：盘在位，剩下的差异是用户自己在这块盘上动的手，
+    // 照常扫、照常收尾。
+    if !moved {
+        return Ok(());
+    }
     #[expect(
         clippy::cast_precision_loss,
         reason = "顶层条目至多 512 条，转 f64 精确"
@@ -606,9 +700,26 @@ fn guard_same_root(
     Ok(())
 }
 
+/// 这一趟从哪儿开始：接着断点跑，还是从根重来。
+///
+/// **断点的身份是「这个根在中立库里最后走的那一趟，就是断点说的那一趟」。**
+/// 它守的是一件很具体的事：续跑沿用断点里的代号收尾，而收尾删的是「这个根底下这次
+/// 没见到的」——断点写下之后这个根要是又被扫过一趟，那一趟记下的东西就会被当成
+/// 没见到整批删掉。判据直接说这句话，两种对不上的情况因此都落在同一条线上：
+///
+/// - 中间**扫过别的根**：甲那一支从中断之后一个字节都没动过，甲最后一趟就是断点那一趟
+///   ——照旧续跑。老判据是「断点的代号 + 1 等于下一个代号」，主库变成一组根之后
+///   （`CONTEXT.md` 的**根**）扫一遍乙盘就把代号推走了，于是甲整根重扫。
+/// - **移除再加回**同名同路径的根：那个根的遍历行随 [`Catalog::remove_root`] 一起没了，
+///   断点再也对不上谁——从头扫一遍。老判据在这里恰好放行，只扫 `pending` 那一半，
+///   收尾什么都删不到，扫完却报「完整」。
+///
+/// 对不上一律**从头扫**而不是报错：移除再加回本来就是「当它是新的」的意思，加回来
+/// 第一趟本该从头走；报错只会逼用户去找一个他不知道在哪的断点文件。
 fn load_start_state(
     options: &ScanOptions,
     root: &Path,
+    root_name: &str,
     catalog: &Catalog,
 ) -> Result<StartState, ScanError> {
     let next = catalog.next_scan()?;
@@ -629,10 +740,10 @@ fn load_start_state(
     if pending.is_empty() {
         return Ok(fresh());
     }
-    // 断点比中立库旧就当它不存在。这种断点只可能来自「中断之后又跑过一次不写断点的
-    // 完整扫描」：照着它续跑会以那个旧代号收尾，于是那次完整扫描记下的东西会被当成
-    // 「这次没见到」整批删掉。宁可重扫一遍。
-    if checkpoint.scan + 1 != next {
+    // 这个根在中立库里最后走的那一趟，得就是断点说的那一趟。这个根还没有遍历行
+    // （从没扫过，或者刚被移除又加回来）时一样对不上——那就是从头扫。
+    let last = catalog.last_traversal_of(root_name)?;
+    if last.is_none_or(|traversal| traversal.scan != checkpoint.scan) {
         return Ok(fresh());
     }
     Ok(StartState {
@@ -708,14 +819,15 @@ struct Progress {
 fn merge(
     catalog: &mut Catalog,
     scan: i64,
+    root_name: &str,
     progress: &mut Progress,
     result: DirResult,
 ) -> Result<DirDone, CatalogError> {
     for dir in &result.skipped_system_dirs {
-        catalog.note_skipped_dir(dir)?;
+        catalog.note_skipped_dir(root_name, dir)?;
     }
     for failed in &result.unlistable {
-        catalog.note_error(&failed.display, &failed.message)?;
+        catalog.note_error(root_name, &failed.display, &failed.message)?;
         // 列不开的目录下面那些记录这一趟一条也写不到。不在这儿把它们标成「见过」，
         // 收尾时就会被当成已删除抹掉——一次拒绝访问抹掉整棵子树（ADR-0021）。
         catalog.keep_subtree(scan, &failed.key)?;
@@ -1100,9 +1212,12 @@ mod tests {
         aggregate.elapsed_ms = 0;
     }
 
-    fn 断点选项(dir: &Path) -> CheckpointOptions {
+    /// 断点按**根**分文件（`workspace::checkpoint_path`），测试里也照这个形状取。
+    fn 断点选项(dir: &Path, root_name: &str) -> CheckpointOptions {
         CheckpointOptions {
-            path: dir.join("scans").join("checkpoint.json"),
+            path: dir
+                .join("scans")
+                .join(format!("{root_name}.checkpoint.json")),
             interval: Duration::ZERO,
             resume: true,
         }
@@ -1656,6 +1771,107 @@ mod tests {
     }
 
     #[test]
+    fn 根还记在原地而盘不在位时一趟扫描不许抹掉整个根() {
+        // 挂载点目录永远都在：Linux 的 `/mnt/x` 是先建出来的，macOS 卸盘之后
+        // `/Volumes/x` 也偶尔残留一个空目录。**路径一个字没变**，于是遍历顺利跑完、
+        // 收尾把整个根当成「这次没见到」抹掉——看不见不等于不存在（ADR-0021）。
+        let mut catalog = 新中立库();
+        let options = ScanOptions::named("/Volumes/主库", "主库");
+        let 首扫 = 扫入(&mut catalog, &建库于("/Volumes/主库"), &options);
+        let 扫到的文件 = 首扫.report.totals.files;
+        assert!(扫到的文件 > 0);
+
+        // 盘拔了：挂载点还在，里面什么都没有。
+        let mut 空壳 = MemFs::new();
+        空壳.dir("/Volumes/主库");
+        let 错 = scan(&空壳, &mut catalog, &options, &Handle::new())
+            .expect_err("盘不在位该拦下来，而不是把整个根当成删光了");
+        let ScanError::RootNotInPlace {
+            name,
+            path,
+            present,
+            recorded_count,
+        } = &错
+        else {
+            panic!("该是 RootNotInPlace，实际是 {错:?}");
+        };
+        assert_eq!(name, "主库");
+        assert_eq!(path, "/Volumes/主库");
+        assert_eq!(*present, 0, "这一层什么都没有");
+        assert!(*recorded_count > 0);
+        // 措辞要让用户去插盘，而不是去换根名——那是另一档（`DifferentLibrary`）的出路。
+        assert!(错.to_string().contains("插上那块盘再扫"), "得说清出路：{错}");
+        assert!(!错.to_string().contains("换个根名"), "别把人指错路：{错}");
+
+        // 拦下来那一趟中立库一个字都没动。
+        assert_eq!(catalog.root_stats("主库").expect("数得出").files, 扫到的文件);
+        assert!(
+            catalog.contains("主库/FC/超级马里奥.zip").expect("查得到"),
+            "整个根不许凭空消失"
+        );
+
+        // 顺手把这个根改指到另一个还没挂上的挂载点：**指到一个空目录上去**从来不是
+        // 「换了另一块盘」，出路照旧是插盘。
+        let mut 另一个空壳 = MemFs::new();
+        另一个空壳.dir("/Volumes/主库 1");
+        let 换个挂载点 = scan(
+            &另一个空壳,
+            &mut catalog,
+            &ScanOptions::named("/Volumes/主库 1", "主库"),
+            &Handle::new(),
+        )
+        .expect_err("空的挂载点照样拦");
+        assert!(
+            matches!(换个挂载点, ScanError::RootNotInPlace { .. }),
+            "该是 RootNotInPlace，实际是 {换个挂载点:?}"
+        );
+    }
+
+    #[test]
+    fn 用户真把根清空了就先移除这个根再加回来() {
+        // 「盘不在位」拦下来之后得留一条出路，否则用户真清空了一个根就再也扫不动它。
+        // 出路是**移除这个根**：那是唯一一处工具会主动丢掉扫描结果的地方，由用户按下、
+        // 事先看得见会去掉多少变体，而不是一趟扫描替他决定。
+        let mut catalog = 新中立库();
+        let options = ScanOptions::named("/主库", "主库");
+        扫入(&mut catalog, &建库于("/主库"), &options);
+
+        let mut 清空了 = MemFs::new();
+        清空了.dir("/主库");
+        scan(&清空了, &mut catalog, &options, &Handle::new()).expect_err("先拦一道");
+
+        catalog.remove_root("主库").expect("移得掉");
+        let 再扫 = 扫入(&mut catalog, &清空了, &options);
+        assert_eq!(再扫.report.totals.files, 0, "加回来是个空的根，扫得动");
+        assert_eq!(再扫.delta.removed, 0, "库里已经没有它那一支了，不该再数一遍");
+    }
+
+    #[test]
+    fn 顶层还认得出一条就放行而不看比例() {
+        // 判据是绝对的「一条都不剩」而不是重叠比例：顶层只有三个目录、用户合法删掉
+        // 其中两个时，重叠率掉到 1/3、远低于阈值，可盘明明在位——拿阈值去拦用户
+        // 自己动的手是误伤。
+        let mut library = MemFs::new();
+        library
+            .dir("/lib")
+            .file("/lib/FC/超级马里奥.zip", zip(64))
+            .file("/lib/PS1/最终幻想.chd", chd())
+            .file("/lib/PSP/游戏.iso", iso());
+        let mut catalog = 新中立库();
+        let options = ScanOptions::named("/lib", "主库");
+        扫入(&mut catalog, &library, &options);
+
+        library
+            .remove("/lib/PS1/最终幻想.chd")
+            .remove("/lib/PS1")
+            .remove("/lib/PSP/游戏.iso")
+            .remove("/lib/PSP");
+        let 再扫 = 扫入(&mut catalog, &library, &options);
+        assert_eq!(再扫.delta.removed, 2, "用户自己删的照常收掉");
+        assert_eq!(再扫.report.totals.files, 1);
+    }
+
+    #[test]
     fn 两个根的变体互不覆盖各自的键带得出自己的根名() {
         // 两块盘上**同名同大小**的东西：只按相对路径当键的话它们是同一条记录，
         // 一条静默覆盖另一条，而中立库是事实来源（ADR-0001）。
@@ -1870,7 +2086,7 @@ mod tests {
         let workspace = crate::testing::temp_dir("scan");
         let mut options = ScanOptions::named("/lib", "库");
         options.jobs = Jobs::Fixed(1);
-        options.checkpoint = Some(断点选项(workspace.path()));
+        options.checkpoint = Some(断点选项(workspace.path(), "库"));
         let checkpoint = options.checkpoint.as_ref().expect("有断点").path.clone();
 
         // 一次扫完，作为对照
@@ -1916,7 +2132,7 @@ mod tests {
         let workspace = crate::testing::temp_dir("scan");
         let mut options = ScanOptions::named("/lib", "库");
         options.jobs = Jobs::Fixed(1);
-        options.checkpoint = Some(断点选项(workspace.path()));
+        options.checkpoint = Some(断点选项(workspace.path(), "库"));
 
         let mut 对照 = 扫(&建库(), &options).aggregate;
 
@@ -1956,7 +2172,7 @@ mod tests {
         let workspace = crate::testing::temp_dir("scan");
         let mut options = ScanOptions::named("/lib", "库");
         options.jobs = Jobs::Fixed(1);
-        options.checkpoint = Some(断点选项(workspace.path()));
+        options.checkpoint = Some(断点选项(workspace.path(), "库"));
         let checkpoint = options.checkpoint.as_ref().expect("有断点").path.clone();
 
         // 中断一次，留下断点
@@ -1994,6 +2210,85 @@ mod tests {
         assert!(matches!(err, ScanError::WritesInsideLibrary { .. }));
     }
 
+    /// 这道闸曾经在一切 **merged-usr** 的发行版上静默失效：那里 `/lib` 是指向
+    /// `usr/lib` 的符号链接，而闸的两边问的是两套文件系统——扫描根走
+    /// `LibraryFs::canonicalize` 折出来还是 `/lib`，断点走真文件系统折出来成了
+    /// `/usr/lib/…`，`is_inside` 只比前缀，于是判成「断点不在主库里」，扫描照跑
+    /// （挂单 Q8）。
+    ///
+    /// 这里在临时目录里造出同一副形状——一个指向别处的根——好让这条回归在任何机器上
+    /// 都成立，而不是碰运气看跑测试的这台机器上恰好有没有 `/lib`。
+    #[cfg(unix)]
+    #[test]
+    fn 根在真盘上是符号链接时断点落在主库内照样拦得下() {
+        let temp = crate::testing::temp_dir("scan-链接根");
+        let 真身 = temp.path().join("usr").join("lib");
+        let 链接 = temp.path().join("lib");
+        std::fs::create_dir_all(&真身).expect("能建真身目录");
+        std::os::unix::fs::symlink(&真身, &链接).expect("能建符号链接");
+
+        // 主库这一侧只认 `链接` 这条路径——`LibraryFs` 不跟随符号链接。
+        let library = 建库于(&链接.to_string_lossy());
+        let mut options = ScanOptions::named(&链接, "库");
+        options.jobs = Jobs::Fixed(1);
+        options.checkpoint = Some(CheckpointOptions {
+            path: 链接.join(".romcat").join("checkpoint.json"),
+            interval: Duration::ZERO,
+            resume: false,
+        });
+
+        let err =
+            scan(&library, &mut 新中立库(), &options, &Handle::new()).expect_err("必须拒绝");
+        assert!(
+            matches!(err, ScanError::WritesInsideLibrary { .. }),
+            "断点写在主库里，闸必须响；实际是 {err}"
+        );
+        assert!(
+            !链接.join(".romcat").exists(),
+            "主库只读（ADR-0004）：连断点的那个目录都不许建出来"
+        );
+    }
+
+    /// 断点写不进去要**报错**，不是挂住。
+    ///
+    /// 协调这一头带着 `?` 跳出 `thread::scope` 而没人 `close` 队列时，工作线程会永远
+    /// 卡在 `Queue::pop` 的条件变量上，`scope` 又非等它们不可——一次写失败于是变成
+    /// 整个进程挂死（挂单 Q8 的第二个症状）。这条测试自己带表：真挂住的话它超时失败，
+    /// 而不是把整趟门禁拖住。
+    #[test]
+    fn 断点写不进去时报错而不是挂住() {
+        let temp = crate::testing::temp_dir("scan-断点写不进去");
+        // 拿一个**普通文件**当断点的上级目录：`create_dir_all` 到这一级必然失败，
+        // 而这条路径在主库之外，闸不会抢在前面把它拦下来。
+        let 挡路的文件 = temp.path().join("这是个文件");
+        std::fs::write(&挡路的文件, b"x").expect("能写临时文件");
+        let 断点 = 挡路的文件.join("checkpoint.json");
+
+        let (tx, rx) = mpsc::channel();
+        let 跑 = thread::spawn(move || {
+            let mut options = ScanOptions::named("/lib", "库");
+            options.jobs = Jobs::Fixed(1);
+            options.checkpoint = Some(CheckpointOptions {
+                path: 断点,
+                // 每转一圈都存一次：写失败要在第一圈就撞上，不必等 15 秒。
+                interval: Duration::ZERO,
+                resume: false,
+            });
+            let result = scan(&建库(), &mut 新中立库(), &options, &Handle::new());
+            let _ = tx.send(result.err().map(|error| error.to_string()));
+        });
+
+        let err = rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("扫描挂住了：断点写不进去该停下并说清，不该等在这里")
+            .expect("断点写不进去必须报错，不能当没事发生");
+        跑.join().expect("跑测试的那个线程正常结束");
+        assert!(
+            err.contains("断点文件读写失败"),
+            "错误得说清是断点写不进去；实际是 {err}"
+        );
+    }
+
     #[test]
     fn 扫描根不存在时报得明白() {
         let library = 建库();
@@ -2020,5 +2315,122 @@ mod tests {
         let json = serde_json::to_string(&outcome.report).expect("能序列化");
         let back: crate::report::HealthReport = serde_json::from_str(&json).expect("能读回");
         assert_eq!(back, outcome.report);
+    }
+
+    /// 一个中途停下的甲盘：断点落在盘上，队列里还剩东西。
+    fn 中断一趟(catalog: &mut Catalog, options: &ScanOptions, root: &str) -> ScanOutcome {
+        let task = Handle::new();
+        let cancel = task.cancel().clone();
+        let seen = AtomicUsize::new(0);
+        let 中断的库 = 挂钩 {
+            inner: 建库于(root),
+            hook: Box::new(|_: &Path| {
+                if seen.fetch_add(1, Ordering::SeqCst) >= 2 {
+                    cancel.cancel();
+                }
+            }),
+            reads: AtomicUsize::new(0),
+        };
+        let outcome = scan(&中断的库, catalog, options, &task).expect("中断也算正常返回");
+        assert!(outcome.interrupted, "这一趟本该被中断");
+        outcome
+    }
+
+    #[test]
+    fn 扫过另一个根之后前一个根的断点还认得出是续跑() {
+        // 主库是一组根：扫甲盘中途停下 → 整整扫完一遍乙盘 → 回来续甲盘。
+        // 甲那一支从中断之后一个字节都没动过，断点一点都不旧;
+        // 「扫描代号相邻」这条身份判据主库变成一组根之后不再成立，
+        // 拿它当判据会把甲整根重扫（真机 27 分钟）。
+        let workspace = crate::testing::temp_dir("scan");
+        let mut catalog = 新中立库();
+
+        let mut 甲 = ScanOptions::named("/Volumes/甲", "甲盘");
+        甲.jobs = Jobs::Fixed(1);
+        甲.checkpoint = Some(断点选项(workspace.path(), "甲盘"));
+        let 中断 = 中断一趟(&mut catalog, &甲, "/Volumes/甲");
+        assert!(中断.report.totals.files < 11, "中断时只扫了一部分");
+
+        let mut 乙 = ScanOptions::named("/Volumes/乙", "乙盘");
+        乙.jobs = Jobs::Fixed(1);
+        乙.checkpoint = Some(断点选项(workspace.path(), "乙盘"));
+        let 扫乙 = 扫入(&mut catalog, &建库于("/Volumes/乙"), &乙);
+        assert!(!扫乙.interrupted, "乙盘这一趟完整跑完");
+
+        let 续甲 = 扫入(&mut catalog, &建库于("/Volumes/甲"), &甲);
+        assert!(续甲.report.resumed, "中间扫过别的根不该让甲盘的断点作废");
+        assert!(!续甲.interrupted);
+        assert_eq!(
+            catalog.root_stats("甲盘").expect("数得出").files,
+            11,
+            "续跑接着扫完，甲盘一个文件都不许少"
+        );
+        assert_eq!(续甲.report.totals.files, 22, "两个根合起来才是这份库的全部");
+    }
+
+    #[test]
+    fn 扫过另一个根不清掉前一个根的遍历批注() {
+        // 报告里的异常是从遍历的批注折出来的。开一次新扫描把**全部**批注清掉的话，
+        // 扫完乙盘的报告会说甲盘那个列不开的目录不存在——而它的子树还被
+        // `keep_subtree` 保在库里（ADR-0021）。报告与中立库从此各说各话。
+        let mut catalog = 新中立库();
+        let mut 甲 = 建库于("/Volumes/甲");
+        甲.unlistable_dir("/Volumes/甲/PS1/进不去");
+        let 扫甲 = 扫入(&mut catalog, &甲, &ScanOptions::named("/Volumes/甲", "甲盘"));
+        assert_eq!(扫甲.report.anomalies.errors, 1, "甲盘那个目录列不开");
+
+        let 扫乙 = 扫入(
+            &mut catalog,
+            &建库于("/Volumes/乙"),
+            &ScanOptions::named("/Volumes/乙", "乙盘"),
+        );
+        assert_eq!(扫乙.report.totals.files, 22, "报告数的是整份中立库");
+        assert_eq!(
+            扫乙.report.anomalies.errors, 1,
+            "扫乙盘不许让甲盘那条「列不开」从报告里消失"
+        );
+        assert!(
+            扫乙
+                .report
+                .anomalies
+                .error_examples
+                .iter()
+                .any(|例| 例.contains("进不去")),
+            "说得出是哪个目录：{:?}",
+            扫乙.report.anomalies.error_examples
+        );
+    }
+
+    #[test]
+    fn 一个根移除再加回来之后旧断点不许被当成续跑() {
+        // 移除一个根是「它在中立库里的一切都不算数了」。同名同路径加回来是**新的一个根**，
+        // 而工作目录里那份断点是按根名取的、还躺在原地：认它当续跑就只扫 `pending`
+        // 那一半，收尾还什么都删不到——扫完报「完整」却少文件。
+        let workspace = crate::testing::temp_dir("scan");
+        let mut catalog = 新中立库();
+        let mut options = ScanOptions::named("/Volumes/甲", "甲盘");
+        options.jobs = Jobs::Fixed(1);
+        options.checkpoint = Some(断点选项(workspace.path(), "甲盘"));
+        let checkpoint = options.checkpoint.as_ref().expect("有断点").path.clone();
+
+        中断一趟(&mut catalog, &options, "/Volumes/甲");
+        assert!(checkpoint.exists(), "断点落在工作目录里");
+
+        catalog.remove_root("甲盘").expect("移得掉");
+        assert_eq!(
+            catalog.root_stats("甲盘").expect("数得出"),
+            crate::catalog::RootStats::default(),
+            "移除之后这个根下面一条记录都不剩"
+        );
+
+        let 再扫 = 扫入(&mut catalog, &建库于("/Volumes/甲"), &options);
+        assert!(!再扫.report.resumed, "加回来的是新的一个根，旧断点不许接着跑");
+        assert!(!再扫.interrupted);
+        assert!(再扫.shaped);
+        assert_eq!(
+            再扫.report.totals.files, 11,
+            "扫完就得与一次扫完的对照相等，一个文件都不许少"
+        );
+        assert_eq!(catalog.root_stats("甲盘").expect("数得出").files, 11);
     }
 }

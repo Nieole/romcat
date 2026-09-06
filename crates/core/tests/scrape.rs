@@ -30,7 +30,7 @@ use romcat_core::identify::fuzzy;
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::priority::VERDICT;
-use romcat_core::scrape::{self, Priorities};
+use romcat_core::scrape::{self, AnchorKind, Field, Priorities};
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
 
@@ -1173,6 +1173,58 @@ fn refresh_把结论重采一遍但池里的文件一个都不删() {
         "但**算过的媒体哈希还在**——重采的是结论，不是重读一遍盘"
     );
     assert_eq!(现场.catalog.pool_counts().expect("数得出").blobs, 2);
+    assert_eq!(
+        值(&现场, "作品", 作品, "年份", "TOSEC").as_deref(),
+        Some("1988")
+    );
+}
+
+#[test]
+fn refresh_把裁决写下的值原样留着() {
+    // 人在浏览屏的详情面板上按下「写下」，来源记作**裁决**（`put_verdict_value`）。
+    // 优先级表把裁决排在每个字段最前，导出真会用它；而**沉淀库里没有第二份**
+    // ——`verdict.rs` 只导出裁决与匹配两张表，中立库里这条一没就永远没了。
+    // 同一层的 `clear_titles` 早就写着「裁决定下来的一行都不碰」，这里要的是同一条纪律。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    刮削(&mut 现场);
+
+    现场
+        .catalog
+        .put_verdict_value(
+            AnchorKind::Work,
+            作品,
+            Field::Year,
+            "1987",
+            "浏览屏的详情面板上人工写的",
+        )
+        .expect("写得下");
+    现场
+        .catalog
+        .put_verdict_value(
+            AnchorKind::Variant,
+            原版变体,
+            Field::Title,
+            "魂斗罗",
+            "浏览屏的详情面板上人工写的",
+        )
+        .expect("写得下");
+
+    let 重来 = 刮削一趟(&mut 现场, true);
+
+    assert_eq!(
+        值(&现场, "作品", 作品, "年份", VERDICT).as_deref(),
+        Some("1987"),
+        "作品锚点上人写下的年份该原样在着"
+    );
+    assert_eq!(
+        值(&现场, "变体", 原版变体, "标题", VERDICT).as_deref(),
+        Some("魂斗罗"),
+        "变体锚点上人写下的标题同样"
+    );
+
+    // **只留裁决，不留别的**：采集记录照旧清空（一条都跳不过），数据源的值重采一遍。
+    assert_eq!(重来.reused_probes, 0, "--refresh 之后没有一条能跳过");
     assert_eq!(
         值(&现场, "作品", 作品, "年份", "TOSEC").as_deref(),
         Some("1988")
@@ -2640,5 +2692,161 @@ fn 字段选窄了不抹掉上一趟采到的别的字段() {
             .expect("读得出")
             .is_empty(),
         "不收媒体不该把上一趟收进来的媒体引用删掉",
+    );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 补一条平台别名之后重建中文索引，刮削那一侧跟着重采
+// ══════════════════════════════════════════════════════════════════════════
+
+/// 缓存目录里那份 dump 原件叫什么。文件名里带着这一版的日期，**同名就是同一版**。
+const 中文原件名: &str = "dump-2026-09-01.210329Z.zip";
+
+/// 一份最小的中文离线源原件：魂斗罗那一条，**平台写的是 `任天堂红白机`**。
+///
+/// 这个写法平台清单那张目录别名表（`fc` / `nes` / `famicom`）与内置剥离规则里那张
+/// 中文源平台别名表都不认——那正是用户遇到的场景：一个折不动的平台名。
+fn 一份中文原件() -> Vec<u8> {
+    let line = concat!(
+        r#"{"id":12345,"type":4,"name":"魂斗羅","name_cn":"魂斗罗","#,
+        r#""infobox":"{{Infobox Game\r\n|别名={\r\n[Probotector]\r\n}\r\n"#,
+        r#"|平台= 任天堂红白机\r\n|游戏类型= ACT\r\n|开发= Konami\r\n|发行= Konami\r\n}}","#,
+        r#""platform":4001,"summary":"　　丛林里的两个兵。","date":"1988-02-09","#,
+        r#""meta_tags":["ACT","游戏"]}"#,
+    );
+    zip_container(&[ZipEntrySpec::stored(
+        romcat_core::zh::sync::SUBJECTS,
+        format!("{line}\n").into_bytes(),
+    )])
+}
+
+/// `aux/latest.json` 说的正是缓存目录里手上这一版——于是取数那一趟一个字节都不下。
+fn 一份中文_latest_json() -> Vec<u8> {
+    format!(
+        "{{\"browser_download_url\": \
+         \"https://github.com/bangumi/Archive/releases/download/archive/{中文原件名}\",\
+         \"digest\": \"sha256:abc\", \"name\": \"{中文原件名}\", \"size\": 1}}"
+    )
+    .into_bytes()
+}
+
+/// 跑一趟中文离线源取数，把索引整份读回来。
+///
+/// 走的是**真的那条路**：`zh sync` → 建索引时折平台 → 落库 → `Store::load`。
+/// **折叠只在建索引那一刻发生**，所以这条测试必须从原件建起，手捏一份索引证不了这件事。
+fn 取一趟中文数(
+    store: &mut romcat_core::zh::store::Store,
+    rules: &romcat_core::filename::Rules,
+    cache: &Path,
+    full: bool,
+) -> romcat_core::zh::Index {
+    let fetcher = romcat_core::dat::CannedFetcher::new()
+        .with(romcat_core::zh::sync::LATEST_URL, 一份中文_latest_json());
+    romcat_core::zh::sync::sync(
+        &fetcher,
+        &RealFs::new(),
+        store,
+        &romcat_core::platform::Manifest::builtin(),
+        rules,
+        &romcat_core::zh::sync::Options {
+            cache: cache.to_path_buf(),
+            full,
+            dry_run: false,
+        },
+    )
+    .expect("取数不该失败");
+    store.load().expect("索引读得回来")
+}
+
+#[test]
+fn 补一条平台别名重建索引之后刮削重采而不是整片复用旧记录() {
+    // **这一条是这次修复的正题，照用户那几步一步一步走。**
+    //
+    // 中文索引在**建索引时**把条目的平台名折成本工具的平台名，折出来的那一串决定
+    // 交叉校验、进而决定这个源说不说得出话。用户遇到一个折不动的平台名，照文档补一条
+    // 别名、`zh sync --full` 重建索引，再跑 `scrape`——从前是整片复用旧的采集记录、
+    // 一条新产出都没有，因为两层锚点的输入指纹盖的是 dump 名与取了哪几样字段，
+    // 而重建前后这两样一个字都没变。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+
+    let 工作区 = temp_dir("zh-fold");
+    let cache = 工作区.path().join("cache");
+    fs::create_dir_all(&cache).expect("建得出缓存目录");
+    写(&cache.join(中文原件名), &一份中文原件());
+    let mut store = romcat_core::zh::store::Store::open(&工作区.path().join("zh.sqlite3"))
+        .expect("开得起来");
+
+    // ── 一、内置那两张表折不动 `任天堂红白机`：条目身上那一串是空的。
+    let 折不动 = 取一趟中文数(
+        &mut store,
+        &romcat_core::filename::Rules::builtin(),
+        &cache,
+        false,
+    );
+    assert_eq!(折不动.len(), 1, "索引里就这一条");
+    assert!(
+        折不动.entries()[0].platforms.is_empty(),
+        "两张表都不认 `任天堂红白机`——**认不出就留空**，硬折一个平台出来会让交叉校验说谎"
+    );
+    assert_eq!(
+        折不动.entries()[0].platform_text,
+        "任天堂红白机",
+        "原文原样留着：人去核对时看的是它"
+    );
+
+    let 首趟 = 刮削带中文索引(&mut 现场, &折不动);
+    assert!(
+        值(&现场, "变体", 汉化变体, "标题", "中文离线源").is_none(),
+        "平台折不动，交叉校验说不出话，够不着中置信那一档——这个源无话可说"
+    );
+
+    // ── 二、照文档补一条平台别名，`zh sync --full` 重建索引。
+    let 规则文件 = 工作区.path().join("rules.toml");
+    fs::write(
+        &规则文件,
+        "\"版本\" = 1\n[[\"中文源平台别名\"]]\n\"叫\" = \"任天堂红白机\"\n\"是\" = \"FC\"\n",
+    )
+    .expect("写得下规则");
+    let 补过的规则 = romcat_core::filename::Rules::load(&规则文件).expect("读得进来");
+    let 折得动 = 取一趟中文数(&mut store, &补过的规则, &cache, true);
+    assert_eq!(
+        折得动.entries()[0].platforms,
+        vec!["FC".to_string()],
+        "补上那条别名之后折得动了"
+    );
+    // **从前两层指纹就是靠这两样算的，而它们一个字都没变**——这正是那个洞。
+    assert_eq!(折不动.dump(), 折得动.dump(), "同一版 dump");
+    assert_eq!(折不动.fields(), 折得动.fields(), "取的字段一样");
+    assert_ne!(
+        折不动.platform_fold(),
+        折得动.platform_fold(),
+        "变的只有建索引那一刻折出来的那张表"
+    );
+
+    // ── 三、再跑一趟刮削：新折得动的那条真的产出来了。
+    let 第二趟 = 刮削带中文索引(&mut 现场, &折得动);
+    assert_eq!(
+        值(&现场, "变体", 汉化变体, "标题", "中文离线源").as_deref(),
+        Some("魂斗罗"),
+        "重建之后这一条该重采出来，而不是被缓存一口咬定「输入没变」而整条跳过"
+    );
+    assert_eq!(
+        值(&现场, "作品", 作品, "类型", "中文离线源").as_deref(),
+        Some("ACT"),
+        "作品那一层同样跟着重采"
+    );
+
+    // ── 四、**不是全片复用**：第二趟真的重算了几个锚点。
+    //
+    // 索引再没变的第三趟才把它们也跳过，于是复用数比第二趟多——这一条要拦的是
+    // 「一条都没重采」。别的源（TOSEC、文件名那几路）输入确实没变，照旧跳过是对的。
+    let 第三趟 = 刮削带中文索引(&mut 现场, &折得动);
+    assert!(
+        第三趟.reused_probes > 第二趟.reused_probes,
+        "第二趟该有锚点因为折出来的那张表变了而重采：首趟 {}、第二趟 {}、第三趟 {}",
+        首趟.reused_probes,
+        第二趟.reused_probes,
+        第三趟.reused_probes
     );
 }

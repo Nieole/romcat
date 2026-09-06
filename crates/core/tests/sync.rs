@@ -10,11 +10,11 @@
 //! 3. **整条链路串得起来**：选择集 → 期望状态 → 看一遍目标 → 计划，一个文件都不写。
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use romcat_core::capability::Profile;
 use romcat_core::task::Handle;
-use romcat_core::catalog::Catalog;
+use romcat_core::catalog::{Catalog, roots};
 use romcat_core::fs::RealFs;
 use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::sublibrary::{self, Rule, Selection, Sublibrary};
@@ -545,6 +545,93 @@ fn 清单跟着子库一起没() {
         .expect("清单写得进");
     assert!(catalog.remove_sublibrary("掌机").expect("删得掉"));
     assert!(catalog.manifest("掌机").expect("读得回").files.is_empty());
+}
+
+// ───────────────────────── 四、`--library-root` 只换得动库里**已有**的根
+
+fn 两个根的库() -> Catalog {
+    let catalog = Catalog::open_in_memory().expect("能开中立库");
+    roots::add_root(&catalog, None, "主库", Path::new("/盘甲/Game")).expect("加得上");
+    roots::add_root(&catalog, None, "元数据库", Path::new("/盘乙/Pegasus")).expect("加得上");
+    catalog
+}
+
+#[test]
+fn 覆盖一个不存在的根名要报错并列出库里有哪些根() {
+    // 用户那一幕：盘换了位置，拿 `--library-root` 指过去，根名打错一个字（`主庫`）。
+    // 从前它被静默收下，一组根里凭空多出第三个，而后面报出来的是
+    // 「主库这几个根不在位：主库」——说的是另一件事，照着它去插盘一辈子查不出打错了字。
+    let catalog = 两个根的库();
+    let 打错一个字 = vec![(Some("主庫".to_string()), PathBuf::from("/盘甲搬走了/Game"))];
+    let 话 = sync::prepare::library_roots(&catalog, &打错一个字).expect_err("该被拒");
+    assert!(话.contains("主庫"), "得说出点错的是哪个名字：{话}");
+    assert!(
+        话.contains("主库") && 话.contains("元数据库"),
+        "库里有哪些根要列出来：{话}"
+    );
+    assert!(话.contains("`scan`"), "加一个根是 scan 的活，得说出来：{话}");
+}
+
+#[test]
+fn 带等号的相对路径不会被切成一个不存在的根() {
+    // `roms=2024` 是一条相对路径，左半 `roms` 语法上像个根名，从前就被切成
+    // 根名 `roms` + 路径 `2024`，凭空多出一个根。这一刀切得对不对要看库里有没有
+    // 这个根，判据因此在核心里而不在命令行的解析里。
+    let catalog = 两个根的库();
+    let 相对路径 = vec![(Some("roms".to_string()), PathBuf::from("2024"))];
+    let 话 = sync::prepare::library_roots(&catalog, &相对路径).expect_err("该被拒");
+    assert!(话.contains("roms"), "{话}");
+    assert!(话.contains("主库") && 话.contains("元数据库"), "{话}");
+}
+
+#[test]
+fn 多于一个根时不点名照旧要求点名() {
+    let catalog = 两个根的库();
+    let 不点名 = vec![(None, PathBuf::from("/盘甲搬走了/Game"))];
+    let 话 = sync::prepare::library_roots(&catalog, &不点名).expect_err("该被拒");
+    assert!(话.contains("2 个根"), "{话}");
+    assert!(
+        话.contains("--library-root 根名=路径"),
+        "怎么写才对要说出来：{话}"
+    );
+}
+
+#[test]
+fn 只有一个根时不点名照旧换得动位置() {
+    // **这条便利不能丢。** 真库上大多数人只有一个根，那时「哪个根」没有歧义。
+    let catalog = Catalog::open_in_memory().expect("能开中立库");
+    roots::add_root(&catalog, None, "主库", Path::new("/盘甲/Game")).expect("加得上");
+    let 不点名 = vec![(None, PathBuf::from("/盘甲搬走了/Game"))];
+    let roots = sync::prepare::library_roots(&catalog, &不点名).expect("换得动");
+    assert_eq!(roots.len(), 1);
+    assert_eq!(
+        roots.path_of("主库"),
+        Some(Path::new("/盘甲搬走了/Game")),
+        "换的是那个独苗，名字不变"
+    );
+    // 点名换的是同一个根，不是再多出一个。
+    let 点名 = vec![(Some("主库".to_string()), PathBuf::from("/又搬了"))];
+    let roots = sync::prepare::library_roots(&catalog, &点名).expect("换得动");
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots.path_of("主库"), Some(Path::new("/又搬了")));
+}
+
+/// 目标落在主库里那道 ADR-0004 的红线：Windows 上 `normalize_existing` 把目标化成
+/// `\\?\D:\…`，而库里的根存的是 display 形态 `D:\…`，两种写法按 `Path` 的分量比
+/// 恒不相等——**红线从此形同虚设**，同步会往那块 10 TiB 不可再生的盘上写文件、删文件。
+/// 判据折成可比形态（`path::is_inside_place`）之后才拦得住。
+///
+/// **本机是 macOS，这条没跑过**：Unix 上 `D:\Game\子库` 不是绝对路径，
+/// `normalize_existing` 会把它接到工作目录后面去，这一幕在 macOS 上摆不出来。
+#[cfg(windows)]
+#[test]
+fn 扩展长度形式的目标落在主库里照样拦得住() {
+    let catalog = Catalog::open_in_memory().expect("能开中立库");
+    roots::add_root(&catalog, None, "主库", Path::new(r"D:\Game")).expect("加得上");
+    let 话 = sync::prepare::refuse_target_in_library(&catalog, &[], Path::new(r"D:\Game\子库"))
+        .expect_err("该被拒");
+    assert!(话.contains("主库"), "哪个根拦下的要说出来：{话}");
+    assert!(话.contains("ADR-0004"), "红线的出处要说出来：{话}");
 }
 
 #[test]

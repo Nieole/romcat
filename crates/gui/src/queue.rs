@@ -52,7 +52,7 @@ use romcat_core::report::{capacity, thousands};
 use romcat_core::triage::batch::Coverage;
 use romcat_core::triage::{
     Applied, Axis, Batch, Draft, Drill, Filter, Overrides, Plan, Queue, Sample, Scope, Shape,
-    Undone,
+    TriageError, Undone,
 };
 use romcat_core::verdict;
 
@@ -129,8 +129,9 @@ pub struct Screen {
     picks: Picks,
     /// 界面上那份裁决草稿。
     form: Form,
-    /// 排出来还没落下的计划。**先出计划再动手**（与同步那一侧的差量预览同源）。
-    pending: Option<Plan>,
+    /// 排出来还没落下的计划，连**它是照着哪一版队列排的**。
+    /// **先出计划再动手**（与同步那一侧的差量预览同源）。
+    pending: Option<Pending>,
     /// 上一次落下的账。
     applied: Option<Applied>,
     /// 上一次撤回的账。
@@ -358,7 +359,7 @@ impl Screen {
     /// 排出来还没落下的那份计划。
     #[must_use]
     pub fn pending(&self) -> Option<&Plan> {
-        self.pending.as_ref()
+        self.pending.as_ref().map(|pending| &pending.plan)
     }
 
     /// 上一次撤回的账。
@@ -414,6 +415,7 @@ impl Screen {
             _ => self.picks.filter(),
         };
         self.queue.set_filter(filter);
+        self.drop_stale_plan();
         self.resolve_cursor();
         // 展开的那一批可能已经被裁光了——卡片没了，展开状态跟着收起来。
         if let Some(shape) = &self.open
@@ -1080,8 +1082,14 @@ impl Screen {
     /// **逐条键盘流**：`←` `→` 切候选、`Y` 过、`N` 拒、`空格` 先放着、`U` 撤销上一条。
     ///
     /// 光标在文本框里时一个键都不接——那一栏里正打着中文，`Y` 是用户要的字母不是命令。
+    ///
+    /// **计划书开着时也一个键都不接。** egui 的 [`egui::Modal`] 只拦得住指针、拦不住
+    /// 键盘（0.36），于是计划书开着按 `N` 会当场落下光标那一条——而屏上那份计划书还
+    /// 写着排它时的那一批，人再点「落下」时它已经过期了。模态框是这一层自己的东西，
+    /// 所以这一道门也在这一层（[`Screen::drop_stale_plan`] 说了它与核心库那道门各管
+    /// 各的什么）。
     fn keyboard(&mut self, ctx: &egui::Context, site: &mut Site) {
-        if ctx.egui_wants_keyboard_input() {
+        if self.pending.is_some() || ctx.egui_wants_keyboard_input() {
             return;
         }
         let (mut pass, mut reject, mut skip, mut undo, mut back, mut forth) =
@@ -1216,7 +1224,7 @@ impl Screen {
         }) {
             Ok(plan) => {
                 self.error = None;
-                self.pending = Some(plan);
+                self.pending = Some(self.hold(plan));
             }
             Err(message) => self.error = Some(message),
         }
@@ -1232,17 +1240,54 @@ impl Screen {
         }) {
             Ok(plan) => {
                 self.error = None;
-                self.pending = Some(plan);
+                self.pending = Some(self.hold(plan));
             }
             Err(message) => self.error = Some(message),
         }
     }
 
+    /// 把刚排出来的计划挂起来，**记下它是照着哪一版队列排的**。
+    fn hold(&self, plan: Plan) -> Pending {
+        Pending {
+            plan,
+            revision: self.queue.revision(),
+        }
+    }
+
+    /// 队列变了样就把还没落下的那份计划**作废**。
+    ///
+    /// 计划书上那几行说的是**排它那一刻**队列里的那一批条目；逐条流里裁掉过其中一条、
+    /// 换过一套选择器、撤回过一批之后，它描述的已经不是屏上这一批了
+    /// （[`Queue::revision`] 三样都会变）。
+    ///
+    /// **作废而不是照着新的重排**：重排出来的是另一份承诺，而人点「落下」点的是他看过
+    /// 的那一份（ADR-0016：先出计划再动手）。
+    ///
+    /// 这一道门与核心库那一道**各管各的**：核心库那道拦的是「发生了也不能两边各说各的」
+    /// （`triage::apply` 整份拒掉，命令行与日后别的壳照样归它管）；这一道拦的是
+    /// **别让人走到那一步**——过期的计划书留在屏上，人按下去才知道白按了。
+    fn drop_stale_plan(&mut self) {
+        let revision = self.queue.revision();
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.revision != revision)
+        {
+            self.pending = None;
+            self.error = Some(
+                "队列在排完计划之后变过样，那份计划书说的已经不是眼下这一批了。\
+                 两份库一个字都没动——重排一份计划再落下。"
+                    .to_string(),
+            );
+        }
+    }
+
     /// **差量预览**：这一趟会改什么，看过了才落得下去。
     fn plan_modal(&mut self, ctx: &egui::Context, site: &mut Site) {
-        let Some(plan) = self.pending.take() else {
+        let Some(pending) = self.pending.take() else {
             return;
         };
+        let plan = pending.plan;
         let mut keep = true;
         let mut go = false;
         egui::Modal::new(egui::Id::new("裁决计划")).show(ctx, |ui| {
@@ -1307,14 +1352,17 @@ impl Screen {
         if go {
             self.apply_plan(site, &plan);
         } else if keep {
-            self.pending = Some(plan);
+            self.pending = Some(Pending {
+                plan,
+                revision: pending.revision,
+            });
         }
     }
 
     /// 落下等着的那份计划。**模态框里「落下」按下去走的就是它。**
     pub fn commit(&mut self, site: &mut Site) {
-        if let Some(plan) = self.pending.take() {
-            self.apply_plan(site, &plan);
+        if let Some(pending) = self.pending.take() {
+            self.apply_plan(site, &pending.plan);
         }
     }
 
@@ -1327,6 +1375,9 @@ impl Screen {
                 self.undone = None;
                 self.cursor = None;
             }
+            // 计划过期那一句核心库已经说全了（连「两份库一个字都没动」都在里面），
+            // 再前缀一句「写不进去」反而让人以为是库出了毛病。
+            Err(error @ TriageError::StalePlan { .. }) => self.error = Some(error.to_string()),
             Err(error) => self.error = Some(format!("裁决写不进去：{error}")),
         }
     }
@@ -1433,6 +1484,19 @@ impl Default for Screen {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 排出来还没落下的那份计划，连**它是照着哪一版队列排的**。
+///
+/// 两样收在一处，因为「这份计划还作不作数」只有它们凑齐了才答得上来
+/// （[`Screen::drop_stale_plan`]）——与 [`Basis`] 缓那三样是同一个道理。
+#[derive(Debug, Clone)]
+struct Pending {
+    /// 计划本身。屏上那张计划书画的就是它。
+    plan: Plan,
+    /// 排它的时候队列是第几版（[`Queue::revision`]）：裁完一批、撤回一批、换个选择器
+    /// 它都会变，而那三样每一样都让这份计划书不再描述屏上这一批。
+    revision: u64,
 }
 
 /// 展开那一批算出来的三样是**照着什么**算的。四样凑齐才认得出「这一份还作数吗」。

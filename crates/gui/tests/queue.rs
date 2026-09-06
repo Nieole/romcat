@@ -880,3 +880,146 @@ fn 识别与刮削的待确认在同一条队列里() {
     });
     assert!(有中文源 && 有dat, "两侧的待确认该在同一条队列里");
 }
+
+#[test]
+fn 计划书开着时键盘一个字都不接落下的还是屏上那一份() {
+    // egui 的 `Modal` 只拦得住指针、**拦不住键盘**（0.36）。从前计划书开着按 `N` 会当场
+    // 落下光标那一条，人再点「落下」时那份计划已经过期——沉淀库照着它写下了，中立库那
+    // 一半却不投影，同一条变体两边各说各的，直到下一趟识别才收得回来。
+    //
+    // 敲的是**真的键盘事件**（`egui::Event::Key` 进 `RawInput`），逐条流那几下走的就是它。
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    let 多候选 = app
+        .queue()
+        .queue()
+        .batches()
+        .iter()
+        .find(|batch| batch.shape.fanout() == romcat_core::triage::Fanout::Several)
+        .cloned()
+        .expect("合成数据里该有 4–10 个候选那一档");
+    展开(&mut app, &多候选.shape);
+    {
+        let (screen, _) = app.queue_and_site();
+        screen.show_one_by_one();
+    }
+    跑(&ctx, &mut app, 1);
+    assert_eq!(app.queue().mode(), Mode::OneByOne);
+    let 这一批 = app.queue().queue().selected().len();
+    let 光标那条 = app.queue().queue().selected()[0].variant.key.clone();
+
+    // 整批手工指定作品——计划书弹出来。
+    {
+        let (screen, site) = app.queue_and_site();
+        screen.preview(
+            site,
+            &Draft {
+                work: Some("某作".to_string()),
+                ..Draft::default()
+            },
+        );
+    }
+    跑(&ctx, &mut app, 1);
+    assert_eq!(
+        app.queue().pending().expect("计划书挂着").decided.len(),
+        这一批,
+    );
+
+    // **计划书开着，按 `N`**：一个字都不该写进去，计划书自己也不该跟着没了。
+    按(&ctx, &mut app, egui::Key::N);
+    assert!(
+        app.queue().applied().is_none(),
+        "计划书开着时按 N 当场落下了一条",
+    );
+    assert_eq!(
+        app.site().store.counts().expect("读得出沉淀库").total,
+        0,
+        "计划书开着时按 N 写了沉淀库",
+    );
+    assert!(app.queue().pending().is_some(), "那份计划书自己没了");
+
+    // 再点「落下」：落下的还是屏上那一份，而且**两库对得上**。
+    {
+        let (screen, site) = app.queue_and_site();
+        screen.commit(site);
+    }
+    assert!(app.queue().error().is_none(), "{:?}", app.queue().error());
+    let applied = *app.queue().applied().expect("落下了就该有账");
+    assert_eq!(applied.verdicts as usize, 这一批);
+    assert_eq!(
+        applied.matched as usize,
+        这一批,
+        "沉淀库落了几条，中立库就该当场兑现几条",
+    );
+    let counts = app.site().store.counts().expect("读得出沉淀库");
+    assert_eq!((counts.unknown, counts.releases as usize), (0, 这一批));
+    let (_, reason) = app
+        .site()
+        .catalog
+        .identification_of(&光标那条)
+        .expect("读得出")
+        .expect("有结论");
+    assert_eq!(reason, None, "中立库那条还写着「认不出」，两边各说各的");
+    assert!(
+        app.site()
+            .catalog
+            .variant(&光标那条)
+            .expect("读得出")
+            .expect("变体在")
+            .work_id
+            .is_some(),
+        "沉淀库写下了、中立库没投影",
+    );
+}
+
+#[test]
+fn 换过选择器之后那份计划书作废而不是照旧落下() {
+    // 队列一变样，计划书上那几行说的就不再是屏上这一批。**作废而不是照着新的重排**：
+    // 重排出来的是另一份承诺，而人点「落下」点的是他看过的那一份（ADR-0016）。
+    // 核心库那道门照旧在（`triage::apply` 把过期的整份拒回来，命令行归它管），
+    // 这一道管的是**别让人走到那一步**。
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    {
+        let (screen, _) = app.queue_and_site();
+        screen.pick(Axis::NameMark, "ACG汉化组");
+    }
+    跑(&ctx, &mut app, 1);
+    let 这一批 = app.queue().queue().selected().len();
+    {
+        let (screen, site) = app.queue_and_site();
+        screen.preview(
+            site,
+            &Draft {
+                work: Some("某作".to_string()),
+                ..Draft::default()
+            },
+        );
+    }
+    assert_eq!(
+        app.queue().pending().expect("排得出计划").decided.len(),
+        这一批,
+    );
+
+    // 换一套选择器——再点一次那一行就回到整个队列。
+    {
+        let (screen, _) = app.queue_and_site();
+        screen.pick(Axis::NameMark, "ACG汉化组");
+    }
+    跑(&ctx, &mut app, 1);
+    assert!(
+        app.queue().queue().selected().len() > 这一批,
+        "选择器没真的换过，这条断言等于没测",
+    );
+    assert!(
+        app.queue().pending().is_none(),
+        "队列换过样子，那份过期的计划书还挂在屏上",
+    );
+    let 话 = app.queue().error().expect("作废了该说一句").to_string();
+    assert!(话.contains("重排一份计划"), "这句话要让人去重排计划：{话}");
+    assert_eq!(
+        app.site().store.counts().expect("读得出沉淀库").total,
+        0,
+        "作废掉的那份计划不该写进任何一份库",
+    );
+}

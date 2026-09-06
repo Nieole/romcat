@@ -10,6 +10,7 @@
 pub mod mem;
 pub mod real;
 
+use std::collections::HashMap;
 use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -123,36 +124,70 @@ pub struct DirEntry {
 ///    才走到这里。
 ///
 /// 找不到时返回 `None`：**这是「盘上没有这条路径」的意思**，不是「读不动」。
+///
+/// 一趟里要还原成千上万条路径时走 [`DirCache::real_path`]：同一个目录只列一次。
 #[must_use]
 pub fn real_path(fs: &dyn LibraryFs, root: &Path, key: &str) -> Option<PathBuf> {
-    let direct = root.join(key.replace('/', std::path::MAIN_SEPARATOR_STR));
-    // `read_head` 读 0 字节：只要开得了就说明这条路径在。比 `metadata` 更贴近
-    // 「等下真要读它」这件事，而目录上它会失败——目录也确实不该走这条路。
-    if fs.read_head(&direct, 0).is_ok() {
-        return Some(direct);
-    }
-    let mut at = root.to_path_buf();
-    for segment in key.split('/') {
-        if segment.is_empty() {
-            continue;
+    DirCache::default().real_path(fs, root, key)
+}
+
+/// 逐段列目录那条退路上，**每个目录只列一次**的那份记性。
+///
+/// 退路要把一层目录整个列出来、按 NFC 折过去认名字。同一个目录下有几百个分解形式的
+/// 名字时——主库实测有 **5 个目录名**本身就是分解形式，一个目录中招整棵子树都跟着走
+/// 退路（ADR-0020）——不记的话同一份 listing 会被反复读上几百遍。
+///
+/// **一趟识别的生命周期内有效就够了**：主库只读（ADR-0004），一趟里名字不会变；出了
+/// 那一趟就把它扔掉，免得手里攥着一份过期的盘。
+#[derive(Debug, Default)]
+pub struct DirCache {
+    /// 目录 → 「那一层每个名字的 NFC 形式 → 盘上真实的那条路径」。
+    /// 列不开的目录记一份空的：列不开这件事也不必再问第二遍。
+    by_dir: HashMap<PathBuf, HashMap<String, PathBuf>>,
+}
+
+impl DirCache {
+    /// 与 [`real_path`] 同一件事，只是逐段列目录那条退路上每个目录只列一次。
+    #[must_use]
+    pub fn real_path(&mut self, fs: &dyn LibraryFs, root: &Path, key: &str) -> Option<PathBuf> {
+        let direct = root.join(key.replace('/', std::path::MAIN_SEPARATOR_STR));
+        // `read_head` 读 0 字节：只要开得了就说明这条路径在。比 `metadata` 更贴近
+        // 「等下真要读它」这件事，而目录上它会失败——目录会掉到下面逐段那条路上认。
+        if fs.read_head(&direct, 0).is_ok() {
+            return Some(direct);
         }
-        let joined = at.join(segment);
-        // 逐段也先原样试：整条路径开不了可能只是因为最后一段是目录。
-        if fs.read_dir(&joined).is_ok() || fs.read_head(&joined, 0).is_ok() {
-            at = joined;
-            continue;
+        let mut at = root.to_path_buf();
+        for segment in key.split('/') {
+            if segment.is_empty() {
+                continue;
+            }
+            at = self.lookup(fs, &at, segment)?;
         }
-        let entries = fs.read_dir(&at).ok()?;
-        let found = entries.into_iter().find(|entry| {
-            entry
-                .path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| crate::path::nfc(name) == crate::path::nfc(segment))
-        })?;
-        at = found.path;
+        Some(at)
     }
-    Some(at)
+
+    /// `dir` 这一层里，NFC 形式是 `segment` 的那个名字，在盘上真实的那条路径。
+    ///
+    /// 一律走 listing 而不再逐段「先原样试一次」：那个试探对目录是一次整层 `read_dir`，
+    /// 与直接列出来一样贵，而列出来的这一份还留得住给同一层的下一条用。名字读不出
+    /// UTF-8 的条目跳过——折不了 NFC 的东西也就无从比对。
+    fn lookup(&mut self, fs: &dyn LibraryFs, dir: &Path, segment: &str) -> Option<PathBuf> {
+        let listing = self.by_dir.entry(dir.to_path_buf()).or_insert_with(|| {
+            let mut index: HashMap<String, PathBuf> = HashMap::new();
+            for entry in fs.read_dir(dir).unwrap_or_default() {
+                let folded = entry
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| crate::path::nfc(name).into_owned());
+                let Some(folded) = folded else { continue };
+                // 同一层里两个名字折成同一个 NFC 时按 `read_dir` 的次序取头一个。
+                index.entry(folded).or_insert(entry.path);
+            }
+            index
+        });
+        listing.get(crate::path::nfc(segment).as_ref()).cloned()
+    }
 }
 
 /// 主库的只读视图。

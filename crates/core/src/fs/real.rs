@@ -23,6 +23,11 @@ impl LibraryFs for RealFs {
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
         // Windows 上 `canonicalize` 本身就返回 `\\?\` 形式；其他平台返回绝对路径。
         // 再过一道 `long_path` 是为了不依赖标准库的这个实现细节。
+        //
+        // **交出来的这一条不许直接拿去与库里存的路径比。** `library_root.path` 存的是
+        // `path::display` 剥掉前缀之后的形态，而 `Path` 的 `==` 与 `starts_with` 按分量
+        // 比，`Prefix::VerbatimDisk` 与 `Prefix::Disk` 不是同一个分量——比较一律走
+        // `path::is_same_place` / `path::is_inside_place`，它们先把两边折齐。
         let absolute = fs::canonicalize(long_path(path).as_ref())?;
         Ok(long_path(&absolute).into_owned())
     }

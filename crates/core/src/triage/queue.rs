@@ -55,6 +55,19 @@ pub struct Queue {
     skipped: u64,
     /// 跑过识别没有。没跑过时队列是空的，**但那不是「没什么可裁的」**。
     identified: bool,
+    /// 库里有多少个变体**还没识别**（`catalog::identify::NOT_RUN_LABEL`）。
+    ///
+    /// 它们**一条都不在这份队列里**，而且是对的：队列装的是「识别拿不定主意的那些」，
+    /// 而它们连一行结论都没有——没有候选、裁不了，混进 `pending` 会让「还剩多少要人裁」
+    /// 变成一个虚数（那正是这一票要消掉的东西）。
+    ///
+    /// **但它们得有人报数。** 只说「队列 2 条待裁决」，用户会读成「库里只剩 2 条没定
+    /// 下来」，而实情是另有 N 个连问都还没问过。屏头与报告在旁边单说一句，
+    /// 该做的事也不一样：那一句是「先跑一趟 `romcat identify`」，不是「去裁决」。
+    ///
+    /// **选择器不筛它**（`Filter::under` 那些也不筛）：它们压根没有
+    /// [`Item`] 可筛。这个数说的始终是**整个库**，与 [`Queue::pending`] 同一个口径。
+    not_run: u64,
     /// 眼下的选择器。
     filter: Filter,
     /// 选中的那些按三个轴分出来的组，与 [`Axis::ALL`] 同序。
@@ -104,6 +117,10 @@ impl Queue {
             taken: 0,
             pending: survey.queue,
             skipped: skipped as u64,
+            // **另问一次库**：`survey` 走的是 `queue_rows`，那是
+            // `variant JOIN identification`——还没识别的变体一行都进不去，
+            // 从它身上无论如何数不出这个数。
+            not_run: catalog.not_run_count()?,
             identified: survey.identified,
             filter: Filter::default(),
             groups: Default::default(),
@@ -124,6 +141,7 @@ impl Queue {
             taken: 0,
             pending: 0,
             skipped: 0,
+            not_run: 0,
             identified: false,
             filter: Filter::default(),
             groups: Default::default(),
@@ -150,6 +168,13 @@ impl Queue {
     #[must_use]
     pub fn skipped(&self) -> u64 {
         self.skipped
+    }
+
+    /// 库里有多少个变体**还没识别**。见这个字段的文档：它们不在队列里、也不算待裁决，
+    /// 但屏头要说得出「另有 N 个还没识别」，否则那个 N 就被整个抹掉了。
+    #[must_use]
+    pub fn not_run(&self) -> u64 {
+        self.not_run
     }
 
     /// 眼下的选择器。
@@ -330,8 +355,13 @@ impl Queue {
     /// 条目会被再问一遍。下一趟 `romcat identify` 重放沉淀库之后，结果与这里一模一样
     /// （[`apply`] 与识别共用同一个投影器）。
     ///
+    /// **收下的必须是对着眼下这批选中的条目排出来的计划。** 排完计划之后换过选择器、
+    /// 逐条流里裁掉过其中一条、或者重列过一次，那份计划就过期了——[`apply`] 会整份
+    /// 把它拒回来（`TriageError::StalePlan`），两份库一个字都不动，人重排一份再落下。
+    /// 这一条为什么不由界面独自把门，写在 [`apply`] 的文档里。
+    ///
     /// # Errors
-    /// 写中立库或沉淀库失败时返回错误。
+    /// 计划过期、或者写中立库、沉淀库失败时返回错误。
     pub fn apply(
         &mut self,
         catalog: &mut Catalog,

@@ -349,6 +349,12 @@ impl Catalog {
     /// 那两列是裁决攒出来的（票 08 之后是**沉淀库**的一部分），改一条成型规则不该把它们
     /// 冲掉。合集的关系表根本不动——变体暂时消失再回来，它还在原来的合集里。
     ///
+    /// **换完顺手收一遍孤儿**：识别的结论与候选挂在**变体**上，而变体只在这里换——
+    /// 不在这一步收，删掉一个文件重扫之后，那个变体的结论、候选与它独家撑着的作品、
+    /// 发行版会一直留在库里交给报告与导出，直到下一趟识别才被清掉
+    /// （[`drop_variant_orphans`](super::identify::drop_variant_orphans) 上写着判据与
+    /// 那份清单为什么是这几张表）。
+    ///
     /// `scan` 是这次成型对着的遍历代号，记进 `meta`，报告据此说得出「成型是不是比库旧」。
     ///
     /// # Errors
@@ -421,6 +427,11 @@ impl Catalog {
                 }
             }
         }
+        // 换完了才收孤儿：这时 `variant` 里正好是新的那一批，「指不着任何变体」才问得准。
+        // 在**同一个事务里**跑，是因为「变体没了」与「它的结论也没了」必须一起落盘——
+        // 分两次提交的话，中间被打断就留下一份变体已经换掉、结论还指着旧键的库，
+        // 而那正是这一趟要治的病。
+        super::identify::drop_variant_orphans(&tx).map_err(to_err)?;
         tx.commit().map_err(to_err)?;
         self.meta_set(META_SHAPED_SCAN, &scan.to_string())?;
         self.meta_set(META_SHAPED_MANIFEST, &manifest.fingerprint().to_string())

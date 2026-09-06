@@ -47,10 +47,24 @@
 //! 落单的括号也照样读得懂，一条都不许因为这一票失效。
 //!
 //! [`Clause::build`] 造的是**一条新的**（界面上点出来的、或者从筛选器折出来的），
-//! 于是它多两道闸：**值里不许有两侧带空白的连接词**，**括号得配对**。理由是它造出来的
+//! 于是它多两道闸：**值里不许有会被读成分隔符的连接词**，**括号得配对**。理由是它造出来的
 //! 东西马上要被 [`Rule::from_group`] 印成一行字存进中立库——`作品~RPG 且 平台=GB`
 //! 打在一个值格子里，印出来那行字下次读回来是**两个**子句，而屏上筛的是一个。
 //! 那种走样是静默的，所以在造它的那一步就挡住。
+//!
+//! **「会被读成分隔符」比「两侧带空白」宽一点，宽的是末尾那一头**：值印出去时，
+//! 后面紧跟的可能就是 `" 且 "` / `" 或 "` 这个分隔符，**它把值末尾那个连接词缺的空白
+//! 补上了**。于是 `作品~RPG 且` 这个值后面一接兄弟子句就成了
+//! `作品~RPG 且 且 平台=GB`：读回来值被截成 `RPG`，选出来的比屏上多，**一声不响**；
+//! 后面接的是 ` 或 ` 时整条落成 `MixedJoin`，那个子库一条都选不中。值**开头**那个连接词
+//! 反过来不用管——值左边紧挨着的永远是运算符（`作品~` 那个 `~`），绝不是空白，
+//! 所以 `作品~且 RPG`、甚至值恰好就是一个 `且` 字，印出去都读得回来，照收。
+//!
+//! **闸只有这一道，印那一侧不设第二道。** [`Rule::from_group`] 拿到的树未必都出自
+//! `build`：[`Rule::any_of`] 印的就是从中立库里 [`Rule::parse`] 读出来的老规则，
+//! 而读那一侧是**故意宽的**（下一节）。在印的时候再收一次紧，等于让那些老规则印不出来
+//! ——那正是「一条都不许失效」要挡的事。所以分工是：**造新的那一步挡住走样**
+//! （错误还能指回用户刚打字的那个格子），**印那一步只管照实印**。
 //!
 //! ## 为什么是文本而不是一棵存进库的树
 //!
@@ -502,9 +516,12 @@ pub enum RuleError {
         /// 那一段原文。
         text: String,
     },
-    /// 值里有两侧带空白的连接词。
+    /// 值里有会被读成分隔符的连接词：前面是空白，后面是空白或者正好到值的末尾。
     #[error(
-        "{dimension} 的值「{value}」里有两侧带空白的 `{joiner}`——那是连接词，         写进规则会被读成两个子句。去掉它两边的空格，或者本来就该拆成两条子句"
+        "{dimension} 的值「{value}」里的 `{joiner}` 会被读成连接词——它前面是空白，\
+         后面是空白或者正好到值的末尾（末尾那个空白由分隔符补上）。\
+         写进规则读回来会少一截，甚至整条读不回来。\
+         去掉 `{joiner}` 前面那个空白，或者本来就该拆成两条子句"
     )]
     JoinerInValue {
         /// 哪个维度。
@@ -730,6 +747,31 @@ fn padded_at(text: &str, index: usize, ch: char) -> bool {
             .is_some_and(char::is_whitespace)
 }
 
+/// 一个**值里**的连接词，印进规则之后会被 [`padded_at`] 认成分隔符吗。
+///
+/// 与 [`padded_at`] 差在两头，差的理由都在 [`render_group`] 印出来的那行字里：
+///
+/// - **右边到头也算一侧空白。** 值印出去后面紧跟的可能就是 `" 且 "` / `" 或 "` 这个
+///   分隔符——**它把值末尾那个连接词缺的空白补上了**。于是 `作品~RPG 且` 后面一接
+///   兄弟就成了 `作品~RPG 且 且 平台=GB`，读回来值被截成 `RPG`（子库比屏上多选，
+///   **一声不响**），后面接的是 ` 或 ` 时整条落成 [`RuleError::MixedJoin`]。
+/// - **左边到头不算。** 值左边紧挨着的永远是运算符（`作品~` 那个 `~`，见
+///   [`Clause`] 的 `Display`），**绝不是空白**，所以值开头那个连接词读不成分隔符
+///   ——值恰好就是一个 `且` 字也一样，照收。
+///
+/// [`padded_at`] 看的是**整行**规则，那里右边到头就是真的到头、后面不会再有分隔符，
+/// 所以那一侧不能这么算。两处规矩不同是因为看的东西不同，不是两套写法没对齐。
+fn reads_as_joiner(value: &str, index: usize, ch: char) -> bool {
+    value[..index]
+        .chars()
+        .next_back()
+        .is_some_and(char::is_whitespace)
+        && value[index + ch.len_utf8()..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
+}
+
 /// 从 `at` 处那个 `(` 找出与它配对的 `)`；配不上就是 `None`。
 ///
 /// **数括号的规矩与 [`split_items`] 逐字一致**（[`opens_group`]）：两处不一致的话，
@@ -893,21 +935,27 @@ impl Clause {
     /// 从**三样东西**造一个子句：界面上那三个控件各交出一样。
     ///
     /// 与 [`Self::parse`] 同一条读法，但**多两道闸**：造出来的东西马上要被
-    /// [`Rule::from_group`] 印成一行字存进中立库，所以它必须**印出去再读回来还是它自己**。
-    /// 两道闸各挡一种走样（见模块文档）：
+    /// [`Rule::from_group`] 印成一行字存进中立库，所以它必须**摆在组里哪个位置都
+    /// 印出去再读回来还是它自己**。两道闸各挡一种走样（见模块文档）：
     ///
-    /// - 值里有两侧带空白的连接词——`作品~RPG 且 平台=GB` 打在一个值格子里，
-    ///   印出来那行字读回来是**两个**子句，而屏上筛的是一个。
+    /// - 值里有会被读成分隔符的连接词（`reads_as_joiner`）——`作品~RPG 且 平台=GB`
+    ///   打在一个值格子里，印出来那行字读回来是**两个**子句，而屏上筛的是一个；
+    ///   `作品~RPG 且` 这种结在末尾的一样走样，**缺的那个空白由分隔符补上**。
     /// - 值里的括号不配对——这个子句套进一个组里之后，那半个括号会把组提前收尾。
+    ///
+    /// **两道闸都看 `value.trim()`**，因为存进 [`Self::raw`]、将来印出去的正是它：
+    /// 值两端的空白 trim 掉就不存在了，「结在末尾」说的也是 trim 之后的末尾。
     ///
     /// # Errors
     /// 见 [`RuleError`]。
     pub fn build(dimension: Dimension, op: Op, value: &str) -> Result<Self, RuleError> {
+        // 闸看的是 trim 过的那份——存进去、印出去的就是它。
+        let value = value.trim();
         for (index, ch) in value.char_indices() {
-            if matches!(ch, AND | OR) && padded_at(value, index, ch) {
+            if matches!(ch, AND | OR) && reads_as_joiner(value, index, ch) {
                 return Err(RuleError::JoinerInValue {
                     dimension: dimension.label(),
-                    value: value.trim().to_string(),
+                    value: value.to_string(),
                     joiner: ch,
                 });
             }
@@ -925,7 +973,7 @@ impl Clause {
         }
         if depth != 0 {
             return Err(RuleError::UnbalancedParen {
-                text: value.trim().to_string(),
+                text: value.to_string(),
             });
         }
         Self::assemble(dimension, op, value)
@@ -1296,6 +1344,196 @@ mod tests {
         let back = Rule::parse(&rule.text).expect("印回去还读得懂");
         assert_eq!(back.root, rule.root, "「{}」印回去变了棵树", rule.text);
         assert_eq!(back.clauses()[0], &clause);
+    }
+
+    /// 对拍表里那两条填充子句：摆在新造的那条**前面**与**后面**当兄弟。
+    fn 平台() -> Node {
+        Node::Clause(Clause::build(Dimension::Platform, Op::Is, "GB").expect("造得出"))
+    }
+
+    fn 中文() -> Node {
+        Node::Clause(Clause::build(Dimension::Chinese, Op::Is, "汉化").expect("造得出"))
+    }
+
+    /// 一种**组形**：报错时印的那个名字，加上把新造的那条子句摆进去的办法。
+    type 一种组形 = (&'static str, fn(Node) -> Group);
+
+    /// 九种**组形**：把新造的那条子句摆在各个位置——独自一条、后面有兄弟、前面有兄弟、
+    /// 夹在中间、在子组里、在 `都不` 组里、在第三层。
+    ///
+    /// **位置要紧**：值末尾那个连接词只在**后面还接着分隔符**时才现形，一条子句
+    /// 自己印出去看不出任何毛病。
+    fn 组形() -> Vec<一种组形> {
+        vec![
+            ("独自一条", |新| Group::new(Join::All, vec![新])),
+            ("且·后面有兄弟", |新| {
+                Group::new(Join::All, vec![新, 平台()])
+            }),
+            ("且·前面有兄弟", |新| {
+                Group::new(Join::All, vec![平台(), 新])
+            }),
+            ("且·夹在中间", |新| {
+                Group::new(Join::All, vec![平台(), 新, 中文()])
+            }),
+            ("或·后面有兄弟", |新| {
+                Group::new(Join::Any, vec![新, 平台()])
+            }),
+            ("子组里·后面有兄弟", |新| {
+                Group::new(
+                    Join::All,
+                    vec![
+                        Node::Group(Group::new(Join::Any, vec![新, 平台()])),
+                        中文(),
+                    ],
+                )
+            }),
+            ("子组里·收尾那一条", |新| {
+                Group::new(
+                    Join::All,
+                    vec![
+                        Node::Group(Group::new(Join::Any, vec![平台(), 新])),
+                        中文(),
+                    ],
+                )
+            }),
+            ("都不组里·后面有兄弟", |新| {
+                Group::new(
+                    Join::All,
+                    vec![
+                        Node::Group(Group::new(Join::None, vec![新, 平台()])),
+                        中文(),
+                    ],
+                )
+            }),
+            ("第三层最里那一条", |新| {
+                Group::new(
+                    Join::All,
+                    vec![
+                        平台(),
+                        Node::Group(Group::new(
+                            Join::Any,
+                            vec![
+                                中文(),
+                                Node::Group(Group::new(Join::All, vec![平台(), 新])),
+                            ],
+                        )),
+                    ],
+                )
+            }),
+        ]
+    }
+
+    /// 对拍表里的值：走样过的那一类，加上看着就刁钻的那些（括号、逗号、运算符的字面、
+    /// `都不`、全角空白）。
+    fn 刁钻的值() -> [&'static str; 36] {
+        [
+            "GB",
+            "GB,GBA",
+            "RPG",
+            "Pocket Monsters (Japan)",
+            "魂斗罗 (J)",
+            "一将功成万骨枯",
+            "生存或毁灭",
+            "a且",
+            "且a",
+            "a且b",
+            "且",
+            "或",
+            "且 RPG",
+            "RPG 且",
+            "RPG 或",
+            "RPG　且",
+            "(a) 且",
+            "RPG 且 平台=GB",
+            "生存 或 毁灭",
+            "((a))",
+            "(a)(b)",
+            "a (b) c",
+            "a,,b",
+            "a, ,b",
+            "=",
+            "!=x",
+            "~x",
+            "平台=GB",
+            "都不(x)",
+            "x 都不(y)",
+            "口袋妖怪(日",
+            "笑)",
+            "64MiB",
+            "1990",
+            "0.8",
+            "80%",
+        ]
+    }
+
+    #[test]
+    fn 新造的子句摆在组里哪个位置印出去都读得回来() {
+        // **屏上筛出来那批与存进子库那批必须是同一批**（票 04 立的那条硬约束）。两者之间
+        // 只隔着「印成一行字再读回来」这一道，所以这里逐个值、逐种组形对拍：
+        // `Clause::build` 放行的东西，`Rule::from_group` 印出去必须被 `Rule::parse`
+        // 读回同一棵树。挡下来的不算数——那正是闸该干的活，另有测试钉它挡了什么。
+        let 维度与运算符 = [
+            (Dimension::Work, Op::Contains),
+            (Dimension::Work, Op::Is),
+            (Dimension::Work, Op::IsNot),
+            (Dimension::Genre, Op::StartsWith),
+            (Dimension::Developer, Op::EndsWith),
+            (Dimension::Year, Op::Ge),
+            (Dimension::Size, Op::Le),
+            (Dimension::Rating, Op::Lt),
+        ];
+        let mut 对拍过 = 0_usize;
+        for (dimension, op) in 维度与运算符 {
+            for value in 刁钻的值() {
+                let Ok(clause) = Clause::build(dimension, op, value) else {
+                    continue;
+                };
+                for (形, 搭) in 组形() {
+                    let root = 搭(Node::Clause(clause.clone()));
+                    let rule = Rule::from_group(root.clone());
+                    let back = Rule::parse(&rule.text).unwrap_or_else(|error| {
+                        panic!("{形}｜值「{value}」印成「{}」读不回来：{error}", rule.text)
+                    });
+                    assert_eq!(
+                        back.root, root,
+                        "{形}｜值「{value}」印成「{}」读回来变了棵树",
+                        rule.text
+                    );
+                    对拍过 += 1;
+                }
+            }
+        }
+        assert!(对拍过 > 200, "对拍表缩水了，只对了 {对拍过} 条");
+    }
+
+    #[test]
+    fn 值以空白加连接词结尾时当场挡住() {
+        // **末尾那个连接词后面缺的空白由分隔符补上**：`render_group` 拼的是 " 且 " / " 或 "，
+        // 于是 `作品~RPG 且` 后面一接兄弟就成了 `作品~RPG 且 且 平台=GB`——读回来值被截成
+        // `RPG`，子库比屏上多选，**一声不响**；后面接的是 ` 或 ` 的话整条落成 `MixedJoin`，
+        // 那个子库一条都选不中。两样都是「屏上那批 ≠ 存进去那批」，在造它的那一步就挡住。
+        for (value, joiner) in [
+            ("RPG 且", '且'),
+            ("RPG 或", '或'),
+            ("RPG　且", '且'),
+            ("(a) 且", '且'),
+            ("RPG 且 ", '且'),
+            (" x 或\u{3000}", '或'),
+        ] {
+            let built = Clause::build(Dimension::Work, Op::Contains, value);
+            assert!(
+                matches!(&built, Err(RuleError::JoinerInValue { joiner: 撞上, .. }) if *撞上 == joiner),
+                "「{value}」该被挡住：{built:?}"
+            );
+        }
+        // **值开头那个连接词照收**：印出去它左边紧挨着的永远是运算符（`作品~` 那个 `~`），
+        // 不是空白，读不成分隔符。值恰好就是一个连接词也一样。
+        for value in ["且", "或", "且 RPG", "或 毁灭", "a且", "RPG或"] {
+            assert!(
+                Clause::build(Dimension::Work, Op::Contains, value).is_ok(),
+                "「{value}」印出去读得回来，不该挡"
+            );
+        }
     }
 
     #[test]

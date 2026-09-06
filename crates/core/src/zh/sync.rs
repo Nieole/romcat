@@ -14,6 +14,20 @@
 //! `aux/latest.json` 里那个 `digest`（官方算好的 sha256）加文件名——**用官方给的那个数
 //! 而不是自己算**：自己算要先把 435 MB 下回来，而增量的全部意义正是不下那 435 MB。
 //!
+//! **这个指纹只盯着远端那份 dump**，盯不住本机这两张表（平台清单与剥离规则）。
+//! 补一条平台别名之后再跑一趟不带 `--full` 的 `zh sync`，会如实报「本机这份就是最新的」
+//! 而整件跳过——dump 确实没换。要让新补的那条别名生效**得走 `--full`**
+//! （[`Options::full`]）。这不是遗漏：本机那两张表变没变，不下那 435 MB 是问不出来的，
+//! 而拿「那两张表现在长什么样」当依据，会在「改了别名但还没重建」时反过来说谎。
+//!
+//! ## 折出来的那张表跟着索引一起落库
+//!
+//! 建索引时每条条目的平台名都折成本工具的平台名（`entry_of` → [`platform_of`]），
+//! 折出来的那一串决定交叉校验。**折叠发生在建索引那一刻**，所以「这一趟折出来了什么」
+//! 要跟着索引一起记进库（[`zh::PlatformFold`](crate::zh::PlatformFold)），
+//! 由刮削那一侧当输入指纹使。少了它，补一条别名重建之后刮削会整片复用旧的采集记录，
+//! 新折得动的条目永远不产出。
+//!
 //! ## 一次 435 MB 的下载，一次 960 MB 的流
 //!
 //! zip 里那份 `subject.jsonlines` 解开是 960 MB，**绝不整份读进内存**：
@@ -31,7 +45,7 @@ use crate::fs::LibraryFs;
 use crate::platform::Manifest;
 
 use super::store::{Stats, Store, StoreError};
-use super::{Entry, dump};
+use super::{Entry, PlatformFold, dump};
 
 /// 最新那一版 dump 的地址索引。官方仓库里的一个文件，几百字节。
 pub const LATEST_URL: &str =
@@ -73,6 +87,11 @@ pub struct Options {
     /// **它不等于「重下」**：原件的文件名里带着这一版的日期（`dump-2026-09-01.…zip`），
     /// 同名就是同一版，手边有就直接用。改一条平台别名之后要重建索引，走的正是这条——
     /// 那时再下一遍 415 MB 纯属白花。
+    ///
+    /// **它也是那条别名唯一的生效途径**：不带 `--full` 的那一趟只比远端那份 dump 的
+    /// 指纹，本机这两张表变没变它一个字都不知道（见模块文档「增量」那一节）。
+    /// 重建之后刮削那一侧会跟着重采——折出来的那张表进了输入指纹
+    /// （[`zh::PlatformFold`](crate::zh::PlatformFold)），而不是像从前那样整片跳过。
     pub full: bool,
     /// 只说这一趟会干什么，不取也不写。
     pub dry_run: bool,
@@ -147,10 +166,10 @@ pub fn sync(
     if !file.exists() {
         fetcher.download(&release.url, &file)?;
     }
-    let (entries, records) = read_dump(library, &file, manifest, rules)?;
+    let (entries, records, fold) = read_dump(library, &file, manifest, rules)?;
     out.records = records;
     out.games = u64::try_from(entries.len()).unwrap_or(u64::MAX);
-    store.replace(&entries, &release.name, &out.fingerprint)?;
+    store.replace(&entries, &release.name, &out.fingerprint, &fold)?;
     out.stats = store.stats()?;
     Ok(out)
 }
@@ -194,12 +213,17 @@ impl Release {
 }
 
 /// 把 dump 里那份条目表流一遍，留下游戏条目。
+///
+/// 交出来的第三样是**这一趟平台折叠实际折出来的那张表**（[`PlatformFold`]）：它得跟着
+/// 索引一起落库，刮削那一侧拿它当输入指纹。攒在这儿而不是事后从条目上倒推——
+/// 条目身上只剩折完的那一串与原文拼成的一行（`Entry::platform_text`），
+/// 哪个原文折出了哪个平台名已经看不出来了。
 fn read_dump(
     library: &dyn LibraryFs,
     file: &Path,
     manifest: &Manifest,
     rules: &Rules,
-) -> Result<(Vec<Entry>, u64), SyncError> {
+) -> Result<(Vec<Entry>, u64, PlatformFold), SyncError> {
     let listing = container::list(library, file).map_err(|error| {
         SyncError::Malformed(format!("{} 读不动：{error}", crate::path::display(file)))
     })?;
@@ -223,6 +247,7 @@ fn read_dump(
     });
     let mut entries: Vec<Entry> = Vec::new();
     let mut records = 0u64;
+    let mut fold = PlatformFold::default();
     container::read_entries(library, file, &listing, &plan, &mut |_entry, reader| {
         // **一行一行读**：解开是 960 MB，整份读进内存会当场撑爆本机剩下的那几个 GiB。
         let mut lines = BufReader::with_capacity(1 << 20, reader);
@@ -241,23 +266,35 @@ fn read_dump(
             if !row.is_game() {
                 continue;
             }
-            entries.push(entry_of(&row, manifest, rules));
+            entries.push(entry_of(&row, manifest, rules, &mut fold));
         }
         Ok(())
     })
     .map_err(|error| SyncError::Malformed(format!("{SUBJECTS} 读不动：{error}")))?;
-    Ok((entries, records))
+    Ok((entries, records, fold))
 }
 
 /// 把一条记录折成索引里的一条。
-fn entry_of(row: &dump::Row, manifest: &Manifest, rules: &Rules) -> Entry {
+///
+/// 折出来的每一对都记进 `fold`——**那是这份索引与「当时那两张表」之间唯一留得下来的
+/// 凭据**，刮削那一侧靠它认出「补过别名了，这些条目该重采」。`platform_of` 折不动的
+/// 一个都不记（[`PlatformFold`] 的文档说了为什么够用、为什么有界）。
+fn entry_of(
+    row: &dump::Row,
+    manifest: &Manifest,
+    rules: &Rules,
+    fold: &mut PlatformFold,
+) -> Entry {
     let raw = row.platforms();
     let mut platforms: Vec<String> = Vec::new();
     for text in &raw {
-        if let Some(platform) = platform_of(manifest, rules, text)
-            && !platforms.iter().any(|it| it == platform)
-        {
-            platforms.push(platform.to_string());
+        if let Some(platform) = platform_of(manifest, rules, text) {
+            // **去重之前就记**：同一条条目里写了两遍的那一次也是一次实实在在的折叠，
+            // 而这张表本来就按对去重。
+            fold.record(text, platform);
+            if !platforms.iter().any(|it| it == platform) {
+                platforms.push(platform.to_string());
+            }
         }
     }
     Entry {
@@ -311,9 +348,9 @@ pub fn rebuild(
             dump: pending.dump,
         });
     }
-    let (entries, _) = read_dump(library, &file, manifest, rules)?;
+    let (entries, _, fold) = read_dump(library, &file, manifest, rules)?;
     let games = u64::try_from(entries.len()).unwrap_or(u64::MAX);
-    store.replace(&entries, &pending.dump, &pending.fingerprint)?;
+    store.replace(&entries, &pending.dump, &pending.fingerprint, &fold)?;
     Ok(Rebuilt::Done {
         was: pending.was,
         dump: pending.dump,
@@ -406,12 +443,12 @@ mod tests {
         let library = crate::fs::RealFs;
         {
             let mut store = Store::open(&path).expect("开得起来");
-            let (entries, records) = read_dump(&library, &cache.join(原件名), &manifest, &rules)
-                .expect("原件读得动");
+            let (entries, records, fold) =
+                read_dump(&library, &cache.join(原件名), &manifest, &rules).expect("原件读得动");
             assert_eq!(records, 1, "读到几条记录");
             assert_eq!(entries.len(), 1, "留下几条游戏条目");
             store
-                .replace(&entries, 原件名, 指纹)
+                .replace(&entries, 原件名, 指纹, &fold)
                 .expect("写得进去");
         }
         // 把版本改回上一格：这就是「拿一份旧结构版本的索引打开」。
@@ -464,7 +501,7 @@ mod tests {
         {
             let mut store = Store::open(&path).expect("开得起来");
             store
-                .replace(&[], 原件名, 指纹)
+                .replace(&[], 原件名, 指纹, &PlatformFold::default())
                 .expect("写得进去");
         }
         let conn = rusqlite::Connection::open(&path).expect("开得起来");
@@ -508,7 +545,7 @@ mod tests {
         {
             let mut store = Store::open(&path).expect("开得起来");
             store
-                .replace(&[], "dump-2026-09-01.210329Z.zip", "sha256:abc")
+                .replace(&[], "dump-2026-09-01.210329Z.zip", "sha256:abc", &PlatformFold::default())
                 .expect("写得进去");
         }
         let conn = rusqlite::Connection::open(&path).expect("开得起来");
@@ -582,5 +619,111 @@ mod tests {
         // 两张表都不认的一律留空——**认不出就留空**，硬折一个平台出来会让交叉校验说谎。
         assert_eq!(platform_of(&manifest, &rules, "iOS"), None);
         assert_eq!(platform_of(&manifest, &rules, ""), None);
+    }
+
+    /// 一份最小的 dump，平台那一格写什么由调用方定。
+    fn 一份原件写着(平台: &str) -> Vec<u8> {
+        let line = format!(
+            r#"{{"id":4,"type":4,"name":"メタルスラッグ7","name_cn":"合金弹头7","infobox":"{{{{Infobox Game\r\n|平台= {平台}\r\n|游戏类型= ACT\r\n}}}}","platform":4001,"date":"2008-07-17","meta_tags":["ACT","游戏"]}}"#
+        );
+        crate::testing::container::zip_container(&[crate::testing::container::ZipEntrySpec::stored(
+            SUBJECTS,
+            format!("{line}\n").into_bytes(),
+        )])
+    }
+
+    #[test]
+    fn 建索引时折出来的那张表跟着索引一起落库() {
+        // 折叠发生在**建索引那一刻**，用的是那一刻的平台清单与别名表。所以「这一趟
+        // 折出来了什么」得记进库——本机那两张表事后再变，也改不了库里这一份是怎么折的。
+        let dir = crate::testing::temp_dir("zh-fold-meta");
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).expect("建得出缓存目录");
+        std::fs::write(cache.join(原件名), 一份原件写着("NDS")).expect("写得下原件");
+
+        let mut store = Store::open(&dir.path().join("zh.sqlite3")).expect("开得起来");
+        let (entries, _, fold) = read_dump(
+            &crate::fs::RealFs,
+            &cache.join(原件名),
+            &Manifest::builtin(),
+            &Rules::builtin(),
+        )
+        .expect("原件读得动");
+        assert_eq!(fold.line(), "共 1 对\nNDS=NDS", "折出来的那一对记下了");
+        store
+            .replace(&entries, 原件名, 指纹, &fold)
+            .expect("写得进去");
+
+        // 落进 `meta`，而且**索引读回来时带在身上**——刮削那一侧拿它当输入指纹。
+        assert_eq!(
+            store
+                .meta(crate::zh::store::PLATFORM_FOLD)
+                .expect("读得到"),
+            Some("共 1 对\nNDS=NDS".to_string())
+        );
+        assert_eq!(
+            store.load().expect("读得回来").platform_fold(),
+            "共 1 对\nNDS=NDS"
+        );
+    }
+
+    #[test]
+    fn 补一条平台别名重建之后折出来的那张表跟着变() {
+        // 用户的原话。`--full` 是那条别名唯一的生效途径（`Options::full` 的文档），
+        // 而重建之后刮削那一侧认得出「这份索引不是原来那份」，靠的就是这张表变了。
+        let dir = crate::testing::temp_dir("zh-fold-alias");
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).expect("建得出缓存目录");
+        // 两张表都不认的一个平台名。
+        std::fs::write(cache.join(原件名), 一份原件写着("任天堂红白机")).expect("写得下原件");
+        let manifest = Manifest::builtin();
+        let 读一遍 = |rules: &Rules| {
+            read_dump(&crate::fs::RealFs, &cache.join(原件名), &manifest, rules).expect("读得动")
+        };
+
+        let (折不动的条目, _, 折不动) = 读一遍(&Rules::builtin());
+        assert!(折不动的条目[0].platforms.is_empty(), "折不动");
+        assert!(折不动.is_empty());
+        assert_eq!(折不动.line(), "共 0 对");
+
+        let 规则文件 = dir.path().join("rules.toml");
+        std::fs::write(
+            &规则文件,
+            "\"版本\" = 1\n[[\"中文源平台别名\"]]\n\"叫\" = \"任天堂红白机\"\n\"是\" = \"FC\"\n",
+        )
+        .expect("写得下规则");
+        let (折得动的条目, _, 折得动) = 读一遍(&Rules::load(&规则文件).expect("读得进来"));
+        assert_eq!(折得动的条目[0].platforms, vec!["FC".to_string()]);
+        assert_eq!(折得动.line(), "共 1 对\n任天堂红白机=FC");
+        assert_ne!(折不动.line(), 折得动.line(), "两趟折出来的表不一样");
+    }
+
+    #[test]
+    fn 与这份_dump_无关的那些别名不进折出来的那张表() {
+        // **多盖会误伤。** 平台清单里加一个这份 dump 里根本没人写的平台、或者补一条
+        // 谁都没用上的别名，折出来的东西一个字都没变，就不该引发全片重采——
+        // 盖的是**折叠真发生了什么**，不是那两张表现在长什么样。
+        let dir = crate::testing::temp_dir("zh-fold-unrelated");
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).expect("建得出缓存目录");
+        std::fs::write(cache.join(原件名), 一份原件写着("NDS")).expect("写得下原件");
+        let manifest = Manifest::builtin();
+        let 读一遍 = |rules: &Rules| {
+            read_dump(&crate::fs::RealFs, &cache.join(原件名), &manifest, rules)
+                .expect("读得动")
+                .2
+        };
+
+        let 规则文件 = dir.path().join("rules.toml");
+        std::fs::write(
+            &规则文件,
+            "\"版本\" = 1\n[[\"中文源平台别名\"]]\n\"叫\" = \"世嘉土星\"\n\"是\" = \"SS\"\n",
+        )
+        .expect("写得下规则");
+        assert_eq!(
+            读一遍(&Rules::builtin()).line(),
+            读一遍(&Rules::load(&规则文件).expect("读得进来")).line(),
+            "这份 dump 里没人写「世嘉土星」，补它不改变这一趟折出来的东西"
+        );
     }
 }

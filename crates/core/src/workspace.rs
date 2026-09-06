@@ -7,11 +7,17 @@
 //! 混进同一张表会直接撞车。文件名里既留原目录名（人能认出是哪块盘）又带路径的哈希
 //! （两块盘的最后一级恰好同名时不会互相覆盖）。
 //!
+//! 那个哈希取的是**化开之后的绝对路径**，不是用户敲进来的那一串字：尾斜杠、`.`、
+//! `..`、相对路径、符号链接一律先化开（[`path::normalize_existing`]），再剥掉 Windows
+//! 的 `\\?\` 前缀、折成 NFC。同一个目录换个写法就另开一份中立库、而 `.` 又在任何目录下
+//! 都指向同一份，是这一步没做时的两个症状。
+//!
 //! ## 名字优先于路径
 //!
-//! 按**绝对路径**取文件名有一个致命处：macOS 重挂一次盘就可能从 `/Volumes/新加卷`
-//! 变成 `/Volumes/新加卷 1`，Windows 上盘符也会变——换了挂载点就找不到原来那份中立库，
-//! 全库白扫一遍。而 ADR-0018 定的工作方式正是盘在两台机器之间来回接，所以这事会反复发生。
+//! 但跟着路径走本身还有一个致命处，化开也治不了：macOS 重挂一次盘就可能从
+//! `/Volumes/新加卷` 变成 `/Volumes/新加卷 1`，Windows 上盘符也会变——换了挂载点就找不到
+//! 原来那份中立库，全库白扫一遍。而 ADR-0018 定的工作方式正是盘在两台机器之间来回接，
+//! 所以这事会反复发生。
 //!
 //! 于是加了 [`Slug::Named`]：`--library <名字>` 一给，中立库就跟名字走而不跟路径走。
 //! 键本来就是相对的（ADR-0020），换挂载点对键没有任何影响，只有「找得到那份库」这一步
@@ -53,12 +59,17 @@ pub fn default_dir() -> PathBuf {
 /// 一份中立库在工作目录里叫什么。
 ///
 /// 两种取法，差别只在「跟什么走」：[`Slug::Named`] 跟用户起的名字走，
-/// [`Slug::AtPath`] 跟主库的绝对路径走。名字那条是为了换挂载点还能找回同一份库。
+/// [`Slug::AtPath`] 跟主库那个目录走。名字那条是为了换挂载点还能找回同一份库。
+///
+/// **两个 [`Slug`] 相等与它们开的是不是同一份中立库是两回事**：`AtPath` 存的是用户
+/// 敲进来的那一串字，`x`、`x/`、`.` 各不相等却指着同一个目录，[`Slug::text`] 会把它们
+/// 折成同一个名字。要判「是不是同一份库」，比 [`Slug::text`]，别比 [`Slug`] 本身。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slug<'a> {
     /// 用户用 `--library` 起的名字。换挂载点、换盘符都不影响。
     Named(&'a str),
-    /// 没起名字时的老办法：跟主库的绝对路径走。
+    /// 没起名字时的老办法：跟主库那个目录走。存的是用户敲进来的原串，
+    /// 化成唯一的绝对路径是 [`Slug::text`] 的事。
     AtPath(&'a Path),
 }
 
@@ -74,9 +85,17 @@ impl<'a> Slug<'a> {
 
     /// 落到文件名上的那一串：`{认得出的那一半}-{哈希}`。
     ///
-    /// 哈希取自完整的键（名字，或主库的绝对路径），保证「不同的键几乎必然不同名」；
-    /// 前半截只为人能一眼认出是哪份库。**哈希后缀还顺带挡掉 Windows 的保留设备名**
-    /// ——`CON` 会变成 `CON-xxxxxxxx`，不再是保留名。
+    /// 哈希取自完整的键（名字，或主库那个目录**化开之后**的绝对路径），保证「不同的键
+    /// 几乎必然不同名、同一个键无论怎么敲都同名」；前半截只为人能一眼认出是哪份库。
+    /// **哈希后缀还顺带挡掉 Windows 的保留设备名**——`CON` 会变成 `CON-xxxxxxxx`，
+    /// 不再是保留名。
+    ///
+    /// **[`Self::AtPath`] 这一支会碰磁盘**（`canonicalize` 与**工作目录**），所以它既不是
+    /// 纯函数，同一个 [`Slug`] 在盘挂上前后也可能给出不同答案。规范化落在这里而不落在
+    /// 各个调用方，是因为调用方有三处（命令行两处、界面一处），漏一处就又是一份对不上的
+    /// 中立库；而这里一处改完，连**沉淀库**里那些**路径锚**记的主库名也跟着一起对上了
+    /// （`site::Site::open`）。代价是每次调用一趟系统调用，而它只在开一份现场、拼一个
+    /// **断点**文件名时走到，不在任何热路径上。
     ///
     /// 两条路的**可读那一半用的过滤不一样**，这不是疏忽：
     ///
@@ -99,12 +118,32 @@ impl<'a> Slug<'a> {
                 let name = path::nfc(name);
                 slug_from(&name, &readable(&name, char::is_alphanumeric))
             }
+            // 路径先化成**一条唯一的绝对路径**再取哈希。同一个根用户敲得出好几种写法
+            // ——`$S/lib`、补全补上尾斜杠的 `$S/lib/`、`cd` 进去之后的 `.`、以及夹了
+            // `..` 的绕法——直接哈希那一串字的话，每一种写法都是一份新的中立库，
+            // 扫完再开一次是空的。更糟的是 `.`：它在**任何**目录下都是同一个字符，
+            // 于是几个毫不相干的目录被收成同一个主库底下的几个根，而中立库是事实来源
+            // （ADR-0001）。
+            //
+            // 化开这一步顺带解掉符号链接（macOS 的 `/var` → `/private/var`），
+            // 与只读边界那道守卫看的是同一条形态（`path::normalize_existing`）。
+            // 根还不存在时只化得开已存在的那一段，余下原样接回去——打错字、盘没挂上
+            // 都走这条，不能炸。
             Self::AtPath(root) => {
-                let text = root.to_string_lossy();
+                let root = path::normalize_existing(root);
+                // Windows 上 `canonicalize` 交出来的是 `\\?\D:\…`，那个前缀是工具与
+                // 系统之间的事，不该进文件名：剥掉之后 `D:\ROMs` 无论用户敲哪种形式
+                // 递进来都折出同一份库。NFC 与 `Self::Named` 那支同源（ADR-0020）
+                // ——盘在 macOS 与 Windows 之间来回接，同一个目录名一台交出 NFD、
+                // 一台交出 NFC，不折一下就是两份中立库。
+                let text = path::nfc(&path::display(&root)).into_owned();
+                // 人认得出的那一半取**化开之后**的末级目录名：`.` 与尾斜杠自己没有
+                // 名字，化开之后才拿得到真正那个目录叫什么。
                 let last = root
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
+                let last = path::nfc(&last);
                 slug_from(&text, &readable(&last, |c| c.is_ascii_alphanumeric()))
             }
         }
@@ -341,25 +380,107 @@ mod tests {
 
     #[test]
     fn 不给名字时维持老行为() {
-        // 已有的库不能因为这次改动就打不开了：**这几串是票 01 那版算法的输出，钉死**。
-        // 换一个字符，那份中立库就再也找不到——而那正是这张票要治的病。
-        let workspace = PathBuf::from("/work");
         let root = Path::new("/Volumes/新加卷/Game");
         assert_eq!(Slug::pick(None, root), Slug::AtPath(root));
-        assert_eq!(
-            catalog_path(&workspace, Slug::AtPath(root)),
-            PathBuf::from("/work/catalog/Game-3a0183855885f3a5.sqlite3")
+        // 已有的库不能因为这次改动就打不开了：**这几串是票 01 那版算法的输出，钉死**。
+        // 化开路径这一步没把它们动掉，因为它们本来就已经是**绝对、规范、无尾斜杠、
+        // 不经符号链接**的写法——化开之后还是它自己。老库对得上的正好就是这一类；
+        // 当初拿尾斜杠、`.` 或相对路径开出来的那些库，名字会变，得手动改文件名。
+        //
+        // 只在 Unix 上钉：`/Volumes/…` 在 Windows 上压根不是绝对路径（没有盘符前缀），
+        // 会被接到当前**工作目录**后面，钉一个跟着机器变的串没有意义。
+        #[cfg(unix)]
+        {
+            let workspace = PathBuf::from("/work");
+            assert_eq!(
+                catalog_path(&workspace, Slug::AtPath(root)),
+                PathBuf::from("/work/catalog/Game-3a0183855885f3a5.sqlite3")
+            );
+            // 末级目录名不含 ASCII 字母数字的老库：可读那一半整个被滤光，退成 `library`。
+            // 名字那条放汉字过去，路径这条**不许跟着放**——放了就是另一个文件名。
+            assert_eq!(
+                Slug::AtPath(Path::new("/Volumes/新加卷/漫画")).text(),
+                "library-39a9fc87af2531b6"
+            );
+            assert_eq!(
+                Slug::AtPath(Path::new("/Volumes/新加卷")).text(),
+                "library-f88dd3e91cc9873a"
+            );
+        }
+    }
+
+    #[test]
+    fn 同一个根的几种写法开的是同一份中立库() {
+        // 用户敲同一个根有很多种敲法：zsh 补全给目录补一个尾斜杠、路径里夹一段 `.`
+        // 或 `..`。哈希取的是**那一串字**的话，每一种写法都折出一份新的中立库——
+        // 扫完再开一次发现是空的，8.6 TiB 白扫一遍。所以哈希取的必须是化开之后的
+        // 绝对路径。
+        let 临时 = crate::testing::temp_dir("slug-写法");
+        let 根 = 临时.path().join("x");
+        std::fs::create_dir_all(&根).expect("能建根目录");
+
+        let 原样 = Slug::AtPath(&根).text();
+        let 带尾斜杠 = 接一个分隔符(&根);
+        let 夹一个点 = 临时.path().join(".").join("x");
+        let 绕一圈 = 根.join("..").join("x");
+
+        assert_eq!(原样, Slug::AtPath(&带尾斜杠).text(), "尾斜杠不该另开一份");
+        assert_eq!(原样, Slug::AtPath(&夹一个点).text(), "夹一个点不该另开一份");
+        assert_eq!(原样, Slug::AtPath(&绕一圈).text(), "绕一圈不该另开一份");
+        assert!(
+            原样.starts_with("x-"),
+            "人认得出的那一半要取真实的目录名，实得 {原样}"
         );
-        // 末级目录名不含 ASCII 字母数字的老库：可读那一半整个被滤光，退成 `library`。
-        // 名字那条放汉字过去，路径这条**不许跟着放**——放了就是另一个文件名。
+    }
+
+    #[test]
+    fn 点号跟着工作目录走而不是把无关目录合成一个主库() {
+        // `cd 甲 && romcat scan .` 与 `cd 乙 && romcat scan .` 曾经开的是同一份中立库
+        // ——哈希取的是 `.` 这一个字符，与在哪儿敲的无关。于是两个毫不相干的目录成了
+        // 同一个**主库**底下的两个**根**，而中立库是事实来源（ADR-0001）。
+        //
+        // 测试里不真的去换**工作目录**：那是进程全局的，并行跑的别的用例会跟着遭殃。
+        // 换个说法证同一件事——`.` 折出来的必须等于**当前**工作目录折出来的，
+        // 于是换个地方敲 `.` 必然是另一份中立库。
+        let 工作目录 = std::env::current_dir().expect("拿得到工作目录");
+        let 点号 = Slug::AtPath(Path::new(".")).text();
+        assert_eq!(点号, Slug::AtPath(&工作目录).text(), "`.` 就是当前工作目录");
+
+        let 上一级再拐回来 = Path::new("..").join(工作目录.file_name().expect("工作目录有名字"));
         assert_eq!(
-            Slug::AtPath(Path::new("/Volumes/新加卷/漫画")).text(),
-            "library-39a9fc87af2531b6"
+            点号,
+            Slug::AtPath(&上一级再拐回来).text(),
+            "相对路径开的也是同一份"
         );
+
+        let 另一个目录 = crate::testing::temp_dir("slug-另一个");
+        assert_ne!(
+            点号,
+            Slug::AtPath(另一个目录.path()).text(),
+            "两个无关目录不该合成一个主库"
+        );
+    }
+
+    #[test]
+    fn 根还不存在时照样折得出名字() {
+        // 化开只化得开**已存在**的那一段（`path::normalize_existing`）。根打错字、盘还
+        // 没挂上都会走到这里：原样接回去，绝不能炸。尾斜杠这一下不靠 `canonicalize`
+        // 也得抹掉，否则补全给的那个斜杠照样开出第二份。
+        let 临时 = crate::testing::temp_dir("slug-不存在");
+        let 没有的根 = 临时.path().join("还没有这个目录");
+        let 名字 = Slug::AtPath(&没有的根).text();
+        assert!(!名字.is_empty());
         assert_eq!(
-            Slug::AtPath(Path::new("/Volumes/新加卷")).text(),
-            "library-f88dd3e91cc9873a"
+            名字,
+            Slug::AtPath(&接一个分隔符(&没有的根)).text(),
+            "尾斜杠不该另开一份"
         );
+    }
+
+    fn 接一个分隔符(path: &Path) -> PathBuf {
+        let mut 串 = path.to_path_buf().into_os_string();
+        串.push(std::path::MAIN_SEPARATOR_STR);
+        PathBuf::from(串)
     }
 
     #[test]
