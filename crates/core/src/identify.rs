@@ -805,22 +805,18 @@ fn identify_variant(
     let cached = restore_cached(catalog, &mut units, state)?;
 
     // 零、**沉淀库先说话**：裁决过的内容直接精确命中，不再进队列（ADR-0008）。
-    let found = find_verdict(verdicts, variant, &units);
+    //
+    // 这一问排在读盘之前，为的正是那句「裁决过的东西一个字节都不必再读」——判据已经
+    // 在手上的时候（容器里那套零解压白拿，上一趟识别算过的存在中立库里）它就答得出来。
+    // 答不出来的那些，第一之二步读完盘还要再问一次。
     let mut unknown = false;
-    if let Some(found) = &found {
-        state.from_verdicts += 1;
-        match state.projector.project(
-            catalog,
-            variant,
-            found.verdict,
-            &found.member,
-            &found.inner,
-        )? {
-            Some(record) => return Ok(record),
-            // 「都不对而且认不出」不短路：它照常走完下面的流程，只在结论上盖一句
-            // [`VERDICT_UNKNOWN_REASON`]，队列据此不再问它。
-            None => unknown = true,
-        }
+    let mut silent = false;
+    match ask_verdicts(catalog, verdicts, variant, &units, state)? {
+        Said::Conclusion(record) => return Ok(record),
+        // 「都不对而且认不出」不短路：它照常走完下面的流程，只在结论上盖一句
+        // [`VERDICT_UNKNOWN_REASON`]，队列据此不再问它。
+        Said::Unknown => unknown = true,
+        Said::Nothing => silent = true,
     }
 
     if let Some(skip) = scope::decide(variant, &visible) {
@@ -863,6 +859,33 @@ fn identify_variant(
         }
         0
     };
+
+    // 一之二、**判据刚从盘上读出来，沉淀库再问一次**（ADR-0008）。
+    //
+    // 上面那一问对**裸文件**答不出来：它的 CRC-32 只有读过盘才有，而裁决的锚正是
+    // **CRC-32 加大小**（ADR-0008 的修订段），一份新扫出来的中立库里 `content_hash`
+    // 那张表又是空的。容器里那套是零解压白拿的，所以这条缝**只对裸文件张着**——
+    // 少问这一次，「重装、换机、同一份文件换个路径直接精确命中」这三件事在裸文件上
+    // 就要等到第二趟识别（哈希缓存下来了）才成立，而第一趟已经把它放回了待确认队列，
+    // 用户照计划书重裁时还会被告知一句「会盖掉已有裁决」。
+    //
+    // **只在上面那一问一个字都没问着的时候才问第二次**，而这笔钱本来就便宜：沉淀库
+    // 整份在内存里（[`verdict::Index`]），一问就是一次查表，与撞 DAT、读几百 KB 找
+    // 序列号差着数量级。撞库那几层还在后面，所以这一问问着了，省下的照样是整段。
+    //
+    // 排在这一步而不是 SHA-1 那一趟之后，是因为**锚不看 SHA-1**：CRC-32 加大小到这儿
+    // 已经齐了，往后再等只是白撞一遍 DAT。
+    if silent {
+        match ask_verdicts(catalog, verdicts, variant, &units, state)? {
+            Said::Conclusion(mut record) => {
+                // 这一趟盘是真读了，报告里的花费不该少记一笔。
+                record.read_bytes = read_bytes;
+                return Ok(record);
+            }
+            Said::Unknown => unknown = true,
+            Said::Nothing => {}
+        }
+    }
 
     // 二、撞 CRC。含头那套一律撞一次——容器里的它零解压就有，裸文件的它刚算出来。
     // **它排在光盘那一层之前**，不是因为更可信，而是因为它免费：撞上了就不必再为
@@ -1203,6 +1226,11 @@ fn worth_matching(inner: &str) -> bool {
 /// 抽出来单开一步，是因为它有**两个**消费者：回盘那一步（算过的不必再算，挂账 D14），
 /// 以及**沉淀库**那一步（裁决按内容哈希钉，取不到判据就查不着）。塞在回盘里面的话，
 /// 沉淀库就只能在读完盘之后才查得起来——而那正是它要省下的那笔钱。
+///
+/// 它装不回来的那些**不等于查不着裁决**，只是那一次查得晚一点：一份新扫出来的中立库里
+/// `content_hash` 是空的，裸文件的判据要回盘算出来才有，
+/// [`identify_variant`] 因此在回盘之后**再问一次**沉淀库。这一步省下的是**读盘那笔钱**，
+/// 不是那次查询。
 fn restore_cached(
     catalog: &Catalog,
     units: &mut [ContentUnit],
@@ -1643,6 +1671,10 @@ pub struct ContentPrint {
 /// 算过之后存在中立库里的（挂账 D14）。取不到就如实说没有——**待确认队列**据此告诉
 /// 用户「这一条的裁决只钉得住本机的路径」。
 ///
+/// 拿的是**代表成员**那一份（`representative`），而识别回头查沉淀库（`find_verdict`）
+/// 认的也是同一份：**换了锚点就是换了一条结论管多大范围**（`CONTEXT.md`），
+/// 钉进去的与读回来的必须是同一串字节。
+///
 /// # Errors
 /// 读中立库失败时返回错误。
 pub fn content_print(
@@ -1668,6 +1700,11 @@ pub fn content_print(
 /// **主文件那一份优先，同为主文件的取大的**。一个变体可以是好几份内容（`cue` 加几条
 /// `bin`、一个包里装着 ROM 和说明书），拿说明书的哈希去当这个变体的锚，换台机器就再也
 /// 对不上了。顺序还要**定死**：同一份库跑两次，锚必须是同一份。
+///
+/// **三处共用这一个说法**：队列往沉淀库里钉裁决走 [`content_print`]，识别回头查沉淀库
+/// 走 [`find_verdict`]，两处都只认它返回的那一份。**锚点说的是「一条结论管多大范围」**
+/// （`CONTEXT.md`），两边说岔了，一条钉在附属成员上的裁决就会管到整个变体，
+/// 而队列那一侧永远够不着它。
 fn representative<'a>(variant: &VariantRow, units: &'a [ContentUnit]) -> Option<&'a ContentUnit> {
     ordered(variant, units).first().map(|index| &units[*index])
 }
@@ -1695,7 +1732,30 @@ struct Found<'a> {
     inner: String,
 }
 
+/// 判据凑齐了吗——每一份内容要么算得出判据，要么**明说了**为什么算不出。
+///
+/// **凑不齐的时候「谁代表这个变体」还没定。** [`ordered`] 只把算得出判据的那几份排进去，
+/// 而回盘那一步会让更多份算得出来，代表就可能换人：`合集.zip = [big.nes, small.nes]`
+/// 里只有 small 那一条的哈希缓存着时，代表是 small，读完盘之后是 big。那时候查出来的
+/// 内容锚与队列侧 [`content_print`] 说的不是同一份——而两边必须是同一份。
+///
+/// 路径锚不受它管：那一条本来就与谁代表这个变体无关。
+fn settled(units: &[ContentUnit]) -> bool {
+    units
+        .iter()
+        .all(|unit| unit.print.is_some() || unit.blocked.is_some())
+}
+
 /// 查沉淀库。**内容锚优先于路径锚**：前者说的是「这串字节是什么」，后者只是本机的退路。
+///
+/// 内容锚**只认代表成员那一份**（[`representative`]），与队列往沉淀库里钉裁决时用的
+/// [`content_print`] 是同一份。**锚点说的是「一条结论管多大范围」**（`CONTEXT.md`），
+/// 两边必须同一口径：这一侧要是遍历全部成员、谁先撞上算谁，一条钉在附赠小 ROM 上的
+/// 裁决就会把整个变体标成那部作品、高置信、自动通过、**退出待确认队列**——而队列那一侧
+/// 只把裁决钉到代表成员上，用户在队列里再也够不着它去纠正，只能去 `forget` 那条裁决，
+/// 那又会伤到真正的那个小变体。
+///
+/// 判据没凑齐时**内容锚整个不问**（[`settled`]）：那时代表成员还可能换人。
 ///
 /// [`Decision::Unknown`] 也查得出来，但它**不短路**——「都不对，我也认不出」是一条
 /// 记下来别再问第二遍的裁决，不是一个结论。把它变成「命中」或者「跳过」都会让命中率
@@ -1709,22 +1769,63 @@ fn find_verdict<'a>(
     if verdicts.is_empty() {
         return None;
     }
-    for index in ordered(variant, units) {
-        let unit = &units[index];
-        if let Some(print) = unit.print
-            && let Some(found) = verdicts.by_content(print.crc32, print.size)
-        {
-            return Some(Found {
-                verdict: found,
-                member: unit.member.clone(),
-                inner: unit.inner.clone(),
-            });
-        }
+    if settled(units)
+        && let Some(unit) = representative(variant, units)
+        && let Some(print) = unit.print
+        && let Some(found) = verdicts.by_content(print.crc32, print.size)
+    {
+        return Some(Found {
+            verdict: found,
+            member: unit.member.clone(),
+            inner: unit.inner.clone(),
+        });
     }
     verdicts.by_path(&variant.key).map(|found| Found {
         verdict: found,
         member: variant.main_key.clone(),
         inner: String::new(),
+    })
+}
+
+/// 沉淀库对这个变体说了什么。
+///
+/// **三档而不是一个 `Option`**：「一个字都没说过」与「说的是『都不对，而且认不出』」
+/// 往下走的路不一样。后者照常撞库，只在结论上多盖一句 [`VERDICT_UNKNOWN_REASON`]；
+/// 而前者是**还可以再问一次**的那一档（裸文件的判据要读过盘才有）。混成一个 `Option`，
+/// 这两件事就分不开了。
+enum Said {
+    /// 一个字都没说过。
+    Nothing,
+    /// 说了，结论就是这一条。
+    Conclusion(Identification),
+    /// 说的是「都不对，而且认不出」——**不短路**。
+    Unknown,
+}
+
+/// 问一次沉淀库；说得上话就当场把那条**裁决**投影成结论。
+///
+/// **抽出来是因为一趟识别里要问两次**（[`identify_variant`] 的第零步与第一之二步）：
+/// 一次在读盘之前——判据在手上的时候，裁决过的东西一个字节都不必再读；一次在回盘算完
+/// 哈希之后——**裸文件的判据只有那时候才有**。两处各写一遍的话，`from_verdicts` 这个数
+/// 与「都不对」那一档的处置迟早会在两处走岔。
+fn ask_verdicts(
+    catalog: &mut Catalog,
+    verdicts: &verdict::Index,
+    variant: &VariantRow,
+    units: &[ContentUnit],
+    state: &mut Run,
+) -> Result<Said, CatalogError> {
+    let Some(found) = find_verdict(verdicts, variant, units) else {
+        return Ok(Said::Nothing);
+    };
+    state.from_verdicts += 1;
+    let projected =
+        state
+            .projector
+            .project(catalog, variant, found.verdict, &found.member, &found.inner)?;
+    Ok(match projected {
+        Some(record) => Said::Conclusion(record),
+        None => Said::Unknown,
     })
 }
 

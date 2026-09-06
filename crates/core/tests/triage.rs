@@ -27,7 +27,7 @@ use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::triage::{self, Decide, DecisionSpec, Filter, Overrides};
-use romcat_core::verdict::{self, Anchor, Decision, Store};
+use romcat_core::verdict::{self, Anchor, Decision, Facts, Store, Verdict};
 
 const 库名: &str = "小库";
 
@@ -651,6 +651,121 @@ fn 换一份中立库换一个路径同一个文件照样直接命中() {
         .expect("读得出")
         .expect("有结论");
     assert_eq!(state, State::Matched);
+}
+
+/// 一份**新扫出来的**中立库。「重装」「换机」都是这个形状：盘上的字节没变，
+/// 而 `content_hash` 那张表从零开始。
+fn 扫成中立库(root: &Path) -> Catalog {
+    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+    let mut options = ScanOptions::named(root, "库");
+    options.jobs = Jobs::Fixed(1);
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
+    catalog
+}
+
+#[test]
+fn 裸文件的内容锚裁决在新中立库上第一趟识别就生效() {
+    // ADR-0008 那句「重装、换机、日后拷进来的同一文件直接精确命中」**对裸文件也算数**。
+    //
+    // 上面那条用的是 zip，而容器里那套 CRC-32 是零解压白拿的、一扫完就躺在容器构成里；
+    // **裸文件的判据只有读过盘才有**，一份新扫出来的中立库里 `content_hash` 是空的。
+    // 沉淀库只在读盘之前问一次的话，第一趟拿不出判据也就查不着裁决，那个变体被放回
+    // 待确认队列，要等第二趟（哈希缓存下来了）才命中——而用户照计划书重裁时，
+    // 计划书还会报一句「会盖掉已有裁决」误导人。
+    let dir = temp_dir("triage-裸文件重装");
+    写(&dir.path().join("FC/某汉化.nes"), &汉化版(0xB0));
+    let mut 甲 = 现场 {
+        catalog: 扫成中立库(dir.path()),
+        repo: 建_dat(),
+        store: Store::in_memory().expect("开得出沉淀库"),
+        dir,
+    };
+    跑识别(&mut 甲);
+    let applied = 裁(&mut 甲, &Filter::default(), &手工("某汉化的作品"));
+    assert_eq!(
+        (applied.content_anchored, applied.path_anchored),
+        (1, 0),
+        "第一趟识别把它整份读过了，这条裁决钉得住内容"
+    );
+
+    // 「重装」：同一块盘、同一份沉淀库，换一份新扫出来的中立库。
+    let mut 乙 = 现场 {
+        catalog: 扫成中立库(甲.dir.path()),
+        repo: 建_dat(),
+        store: 甲.store,
+        dir: 甲.dir,
+    };
+    let outcome = 跑识别(&mut 乙);
+    assert_eq!(
+        outcome.from_verdicts, 1,
+        "第一趟就该直接命中，不该等到第二趟才认得出"
+    );
+    let (state, _) = 乙
+        .catalog
+        .identification_of("库/FC/某汉化.nes")
+        .expect("读得出")
+        .expect("有结论");
+    assert_eq!(state, State::Matched);
+    // 命中了就不该再占人的时间（ADR-0002）。
+    assert!(
+        队列(&乙, &Filter::default()).is_empty(),
+        "裁决过的不该回队列"
+    );
+}
+
+#[test]
+fn 内容锚只管代表成员_附属成员上的裁决不盖住整个变体() {
+    // **锚点说的是「一条结论管多大范围」**（`CONTEXT.md`），识别与队列两侧必须同一口径。
+    // 队列那一侧只把裁决钉到**代表成员**上（`identify::content_print`：主文件优先、
+    // 同为主文件取大的）。识别这一侧要是从**任一成员**读回裁决，一条钉在附赠小 ROM
+    // 上的裁决就会把整个变体标成那部作品、自动通过、退出队列——而用户在队列里
+    // 再也够不着它去纠正，只能去 `forget` 那条裁决，那又会伤到真正的那个小变体。
+    let dir = temp_dir("triage-代表成员");
+    let 小的 = 卡带(0xB2, 4_096);
+    写(
+        &dir.path().join("FC/合集.zip"),
+        &zip_container(&[
+            ZipEntrySpec::stored("big.nes", 汉化版(0xB1)),
+            ZipEntrySpec::stored("small.nes", 小的.clone()),
+        ]),
+    );
+    let mut 现场 = 现场 {
+        catalog: 扫成中立库(dir.path()),
+        repo: 建_dat(),
+        store: Store::in_memory().expect("开得出沉淀库"),
+        dir,
+    };
+    // 别处裁过那串字节：一份单独躺着的 `small.nes` 被判成《小的作品》。
+    现场
+        .store
+        .put(&Verdict::now(
+            Anchor::Content {
+                crc32: crc32(&小的),
+                size: u64::try_from(小的.len()).expect("装得下"),
+                sha1: None,
+            },
+            Decision::Release(Facts {
+                work: "小的作品".to_string(),
+                ..Facts::default()
+            }),
+        ))
+        .expect("写得进");
+
+    let outcome = 跑识别(&mut 现场);
+    assert_eq!(
+        outcome.from_verdicts, 0,
+        "裁决钉的是 small.nes 那串字节，而这个变体的代表成员是 big.nes"
+    );
+    let items = 队列(&现场, &Filter::default());
+    let 那条 = items
+        .iter()
+        .find(|item| item.variant.key.contains("合集"))
+        .expect("它该还留在队列里等人裁");
+    assert_eq!(
+        那条.print.as_ref().expect("有判据").inner,
+        "big.nes",
+        "队列钉得住的锚是代表成员那一份，识别侧读的必须是同一份"
+    );
 }
 
 #[test]
