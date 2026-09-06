@@ -1150,8 +1150,9 @@ fn sources<'a>(
             chinese = chinese.with_summaries(summaries);
         }
         sources.push(Box::new(chinese));
-        // **别名那一路单开一个源名**，好让优先级表把它排在标题那条链的最后：
-        // 别名只进标题集合、只管搜得到，永不当显示标题（`zh::ChineseAliasSource`）。
+        // **别名那一路单开一个源名**：它只进标题集合、只管搜得到，集合里还有别的叫法时
+        // 轮不到它当显示标题（`zh::ChineseAliasSource`）。垫底那件事由 `title::rank` 按
+        // 这个源名办到，优先级表只管同一档之内的定序。
         sources.push(Box::new(
             zh::ChineseAliasSource::new(*naming).with_rulings(rulings),
         ));

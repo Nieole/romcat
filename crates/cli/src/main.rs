@@ -2048,7 +2048,7 @@ fn report_model(count: &identify::model::ModelCount, catalog: &Catalog) {
     if count.unanswered() > 0 {
         eprintln!(
             "  ⚠ 另有 {} 个问出去了却一个字都没答回来（一批被截断，或者响应的形状认不出来）。\
-             钱已经付了，而它们下一趟会被再问一遍——`--model-batch` 调小或者
+             钱已经付了，而它们下一趟会被再问一遍——`--model-batch` 调小或者\
              `--model-max-tokens` 调大再来。",
             thousands(count.unanswered()),
         );
