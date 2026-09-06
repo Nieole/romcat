@@ -33,6 +33,7 @@ use romcat_core::scrape::priority::VERDICT;
 use romcat_core::scrape::{self, AnchorKind, Field, Priorities};
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
+use romcat_core::title;
 
 /// 原版魂斗罗的字节。
 fn 原版() -> Vec<u8> {
@@ -1732,6 +1733,101 @@ fn 一条否定裁决管住同一次匹配带来的全部字段() {
     let rulings = 摊平(&现场, &store);
     刮削带裁决(&mut 现场, &index, None, &rulings);
     assert!(某个源的全部值(&现场, "作品", 作品, "中文离线源").is_empty());
+}
+
+/// 一个作品的**标题集合**里现在有哪几条叫法，写成「源|叫法|类型」。
+fn 叫法(现场: &现场) -> Vec<String> {
+    现场
+        .catalog
+        .titles_of(作品)
+        .expect("读得出")
+        .into_iter()
+        .map(|row| format!("{}|{}|{}", row.source, row.value, row.kind.label()))
+        .collect()
+}
+
+/// 这个作品眼下的**显示标题**——详情面板与导出挑的是同一份（`title::choose`）。
+fn 显示标题(现场: &现场) -> title::Chosen {
+    let set = title::TitleSet {
+        work: 作品.to_string(),
+        entries: 现场.catalog.titles_of(作品).expect("读得出"),
+    };
+    title::choose(&set, &Priorities::builtin())
+}
+
+#[test]
+fn 否定裁决把那条叫法从标题集合里也退出去() {
+    // 就地清掉 `scrape_value` 只做了一半：中文名与别名同时是**标题集合**里的叫法，
+    // 而详情面板与导出读的是 `title` 表、不是现折。集合不跟着折的话，人裁完看见的
+    // **显示标题**照旧是刚被他否掉的那一条，来源依据还指着那条条目。
+    let mut 现场 = 建现场();
+    识别(&mut 现场);
+    let index = 中文索引();
+    刮削带中文索引(&mut 现场, &index);
+    // 真跑一趟的次序：`romcat scrape` 之后 `romcat titles`。
+    title::run(&mut 现场.catalog, &Priorities::builtin()).expect("折得动");
+
+    let 裁决前 = 叫法(&现场);
+    assert!(
+        裁决前.iter().any(|it| it.starts_with("中文离线源|魂斗罗|")),
+        "{裁决前:?}"
+    );
+    assert!(
+        裁决前.iter().any(|it| it.starts_with("中文离线源·别名|")),
+        "{裁决前:?}"
+    );
+    assert_eq!(显示标题(&现场).display, "魂斗罗");
+
+    // ── 一、否掉一个变体：那一行**还在**，名下另一个变体还这么叫。
+    // 集合是那批值折出来的一份投影，按变体键去删会删掉别人还在背书的那一行。
+    let mut store = 沉淀库();
+    裁(&mut 现场, &mut store, 汉化变体, 12_345, false);
+    let 只裁了一个 = 叫法(&现场);
+    assert!(
+        只裁了一个
+            .iter()
+            .any(|it| it.starts_with("中文离线源|魂斗罗|")),
+        "另一个变体还这么叫，这一行该留着：{只裁了一个:?}"
+    );
+    let 几个变体这么叫 = 现场
+        .catalog
+        .titles_of(作品)
+        .expect("读得出")
+        .into_iter()
+        .find(|row| row.source == "中文离线源")
+        .expect("有这一条")
+        .seen;
+    assert_eq!(几个变体这么叫, 1, "背书的少了一个，`seen` 该跟着少");
+
+    // ── 二、名下另一个变体也否掉：**没再跑 `romcat titles`**，集合这一刻就该干净。
+    let judged = 裁(&mut 现场, &mut store, 汉化变体二, 12_345, false);
+    let 裁决后 = 叫法(&现场);
+    assert!(
+        !裁决后.iter().any(|it| it.starts_with("中文离线源")),
+        "被否掉的那条条目还在标题集合里：{裁决后:?}"
+    );
+    assert!(judged.untitled > 0, "退出去几条该报得出来：{judged:?}");
+
+    // ── 三、**显示标题不再挑到被否掉的那一条**——这才是用户看得见的那一半。
+    let 挑出来的 = 显示标题(&现场);
+    assert_eq!(挑出来的.display, "魂斗罗", "文件名那条汉化组自取的名顶上来");
+    assert_eq!(挑出来的.kind, Some(title::TitleKind::FanName));
+    assert!(
+        !挑出来的.evidence.contains("中文离线源"),
+        "来源依据还指着被否掉的条目：{}",
+        挑出来的.evidence
+    );
+
+    // ── 四、**裁决定下的叫法一条都不许冲掉**（`clear_titles` 的纪律）：重折是重折，
+    // 不是把人说过的话一起扫了。
+    assert!(
+        !裁决后.iter().any(|it| it.starts_with(VERDICT)),
+        "这个 fixture 本来就没有裁决来的叫法：{裁决后:?}"
+    );
+    assert!(
+        裁决后.iter().any(|it| it.starts_with("文件名|")),
+        "别的源折出来的叫法一条都不该少：{裁决后:?}"
+    );
 }
 
 #[test]

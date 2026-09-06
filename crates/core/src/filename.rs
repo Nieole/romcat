@@ -261,6 +261,72 @@ impl Rules {
         })
     }
 
+    /// **剥一个名字这件事**折成一串，进[输入指纹](crate::scrape::Source::probe)。
+    ///
+    /// 规则是**配置不是代码**（模块文档开头那一节），所以它是刮削的一样**输入**：
+    /// 补一条正题噪音词重跑一趟，同一个变体从「撞不上」变成「撞得上」，那一趟就该
+    /// 真的重采。不进指纹的话，缓存会一口咬定「输入没变」而整条跳过，用户照着
+    /// [`crate::zh`] 的模块文档补完配置重跑，一条新产出都没有。
+    ///
+    /// ## 折的是**合并之后**那几张表，不是规则文件的文本
+    ///
+    /// - **真正生效的是合并完的那一份。** 内置那份（[`BUILTIN`](Self::BUILTIN)）改一个字，
+    ///   同样该重采，而文件文本对它一无所知——`--name-rules` 压根没给时更是连文本都没有。
+    /// - **「没有规则文件」与「有一份什么都不补的规则文件」行为完全一样**，指纹也就该
+    ///   一样。按文本折，两者分家，白重采一遍。空表与缺表同理：合并完都是空的。
+    /// - **TOML 里键怎么排、表怎么分块与结果无关。** 按文本折会把排版当成输入。
+    ///
+    /// ## 平台别名那一张**不在里面**
+    ///
+    /// 它不参加 [`parse`](Self::parse)，只在**建中文索引那一刻**起作用，而那件事由索引
+    /// 自己记着的那张折叠表盖住（`zh::Index::platform_fold`）。搬到这里来会把
+    /// 「改了别名但还没重建索引」说成「这份索引变了」——而它一个字都没变。
+    #[must_use]
+    pub fn fingerprint(&self) -> String {
+        let numbering: Vec<String> = self.numbering.iter().map(char::to_string).collect();
+        // **每张表都带着自己的名字进去**，而且顺序是死的：少了名字，把一条从
+        // `分类词` 挪到 `记号噪音` 会折出同一串，而那两张表剥出来的正题不一样。
+        let tables: [(&str, Vec<&str>); 10] = [
+            (
+                "汉化组词",
+                self.team_words.iter().map(String::as_str).collect(),
+            ),
+            (
+                "汉化组名",
+                self.team_names.iter().map(String::as_str).collect(),
+            ),
+            (
+                "语言地区",
+                self.languages.iter().map(String::as_str).collect(),
+            ),
+            (
+                "版本模式",
+                self.versions.iter().map(Pattern::source).collect(),
+            ),
+            ("容量模式", self.sizes.iter().map(Pattern::source).collect()),
+            (
+                "记号噪音",
+                self.marker_noise.iter().map(String::as_str).collect(),
+            ),
+            (
+                "正题噪音词",
+                self.title_noise.iter().map(String::as_str).collect(),
+            ),
+            ("分类词", self.genres.iter().map(String::as_str).collect()),
+            (
+                "平台前缀",
+                self.platform_prefixes.iter().map(String::as_str).collect(),
+            ),
+            ("编号分隔", numbering.iter().map(String::as_str).collect()),
+        ];
+        let mut parts: Vec<&str> = Vec::new();
+        for (name, list) in &tables {
+            parts.push(name);
+            parts.extend(list.iter().copied());
+        }
+        crate::scrape::fingerprint(&parts)
+    }
+
     /// 中文数据源写的那个平台名，在本工具里叫什么。认不出就是 `None`。
     ///
     /// 只补平台清单那张 `目录` 别名表折不动的那些（`Nintendo Switch`、
