@@ -1220,6 +1220,74 @@ fn 撤销本身撤得回来() {
 }
 
 #[test]
+fn 乱序放回一批时放不回去就一条都不放也不标成在册() {
+    // **「在册」说的是「这一批的裁决现在生效」**——`Store::batch_covering` 拿它去挡别的
+    // 批的撤销与放回，读的正是这个意思。所以放回是**整份**的事：一条都没放回去却把批
+    // 标回在册，那个空批会把更早的一批「盖住」，人得撤一个空批才走得回来。
+    //
+    // 形状是真机上的常态：同一条内容锚上叠着两批（两份**重复拷贝**各裁一批），倒序撤
+    // 干净，然后**先**放回后一批——它的 `before` 是前一批那条，而眼下锚上空着。
+    let mut 现场 = 建重复拷贝现场("triage-乱序放回", 0xDB);
+    跑识别(&mut 现场);
+    let 两份 = 点名(&["甲 某汉化.zip", "乙 某汉化.zip"]);
+    let 那两条 = keys(&队列(&现场, &两份));
+    assert_eq!(那两条.len(), 2);
+
+    let 批一 = 裁(&mut 现场, &点名(&["甲 某汉化.zip"]), &手工("作品一"));
+    let 批二 = 裁(&mut 现场, &点名(&["乙 某汉化.zip"]), &手工("作品二"));
+    assert_eq!(
+        批二.replaced, 1,
+        "两份重复拷贝钉的是同一条锚，后一批盖住了前一批"
+    );
+    triage::undo_batch(&mut 现场.catalog, &mut 现场.store, 批二.batch).expect("撤得掉");
+    triage::undo_batch(&mut 现场.catalog, &mut 现场.store, 批一.batch).expect("撤得掉");
+    assert_eq!(现场.store.counts().expect("数得出").total, 0);
+    let 撤干净 = 对拍快照(&现场, &那两条);
+
+    let 话 = triage::redo_batch(&mut 现场.catalog, &mut 现场.store, 批二.batch)
+        .expect_err("锚上不是撤销留下的那个样子，放不回去就不该放")
+        .to_string();
+    assert!(话.contains("放不回去"), "错误要说清是放不回去：{话}");
+    assert!(
+        现场
+            .store
+            .batch(批二.batch)
+            .expect("读得出")
+            .expect("在")
+            .undone(),
+        "一条都没放回去就不该标回在册——那个空批会把更早的一批挡住",
+    );
+    assert_eq!(
+        对拍快照(&现场, &那两条),
+        撤干净,
+        "整份拒掉就两份库一个字都不动"
+    );
+
+    // 按落下的顺序放回去，两批都回得来：先更早的那一批，再后一批。
+    assert_eq!(
+        triage::redo_batch(&mut 现场.catalog, &mut 现场.store, 批一.batch)
+            .expect("先放回更早的那一批")
+            .verdicts,
+        1,
+    );
+    assert_eq!(
+        triage::redo_batch(&mut 现场.catalog, &mut 现场.store, 批二.batch)
+            .expect("再放回后一批")
+            .verdicts,
+        1,
+    );
+    assert_eq!(
+        现场.store.counts().expect("数得出").total,
+        1,
+        "同一条锚，后一批照旧盖着前一批",
+    );
+    assert!(
+        队列(&现场, &两份).is_empty(),
+        "两份都裁过了，一条都不该回到队列"
+    );
+}
+
+#[test]
 fn 跑过识别之后那一批只撤得回沉淀库那一半并如实说出来() {
     // 中立库那一半的快照**可再生**，所以它跟着中立库活：重跑一趟识别就清掉了
     // （`Catalog::clear_identifications`）。那时撤销只回滚得了沉淀库那一半——

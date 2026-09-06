@@ -48,6 +48,8 @@
 //! 照旧只有一个答案，[`undo_batch`] 的文档把这笔账算全了（原挂账 D102）。
 //!
 //! 撤销本身也撤得回来：[`redo_batch`] 把那一批原样放回去，一个字都不必用户重打。
+//! 放回也**按落下的顺序**：叠在同一条锚上的几批，先放回更早的那一批，不然后一批要放回
+//! 的那条「之前」根本不在锚上——**放不回去就一条都不放**，也不把它标回在册。
 //!
 //! **批与批在同一条锚上是叠着的**，于是撤销按落下的**倒序**走：重复拷贝是真机上的常态，
 //! 同一条内容锚上的两份分在两批里是常事，而后一批记着的「它盖掉了什么」正是前一批落下的
@@ -119,6 +121,25 @@ pub enum TriageError {
         by: i64,
         /// 被盖住了几条。
         rows: u64,
+    },
+    /// 这一批**放不回去**：锚上眼下不是它撤掉时留下的那个样子。
+    ///
+    /// 口气与 [`StalePlan`](TriageError::StalePlan) 同一种：不是「数据坏了」，是
+    /// 「**这一下做不成**」——两份库一个字都没动，人换个顺序再来一次就行。
+    #[error(
+        "第 {batch} 批放不回去：其中 {rows} 条的锚上眼下不是这一批撤掉时留下的那个样子\
+         （{names}）。要么是它盖掉过的那一批眼下也撤着——**放回去按落下的顺序来**，\
+         先放回更早的那一批；要么是那几条锚上后来另有人裁过（别人分享来、\
+         `triage import` 收下的那些不属于任何一批），那就先把那几条忘掉。\
+         放回是整份的事，**放不回去就一条都不放**，两份库一个字都没动"
+    )]
+    CannotRedo {
+        /// 点名的那一批。
+        batch: i64,
+        /// 有几条放不回去。
+        rows: usize,
+        /// 头几条的键，够人认出是哪些。
+        names: String,
     },
 }
 
@@ -1233,6 +1254,42 @@ fn covered_by(store: &Store, batch: i64, rows: &[verdict::BatchRow]) -> Result<(
     Ok(())
 }
 
+/// 这一批的每一条**眼下都放得回去吗**——凑不齐就一条都不放。
+///
+/// 它与 [`covered_by`] 是一前一后两道**不同**的闸：那一道问**册子**（后来还在册的哪一
+/// 批在这条锚上说了算），这一道问**锚上眼下那条长什么样**。乱序放回时头一道拦不下来
+/// ——把这一批盖住的那一批自己也撤着，册子上没人挡它——而它当初盖掉的那条早已不在锚上，
+/// 一条也放不回去。那时若照旧把批标回在册，一个**空批**就把更早的那一批挡住了。
+///
+/// 对的是**写之前**那个样子，所以同一条锚上的几份**重复拷贝**各自都对得上：一批里它们
+/// 记的是同一条 `before`（[`apply`] 按锚归过），不必像放回那一步那样记住「刚写过谁」。
+fn restorable(store: &Store, batch: i64, rows: &[verdict::BatchRow]) -> Result<(), TriageError> {
+    // 只点三条名，与 [`stale_plan`] 同一个分寸：放不回去的可能是整整一批。
+    let head = 3;
+    let mut names: Vec<String> = Vec::new();
+    let mut blocked = 0;
+    for row in rows {
+        if store.find(row.anchor())? == row.before {
+            continue;
+        }
+        blocked += 1;
+        if names.len() < head {
+            names.push(row.variant_key.clone());
+        }
+    }
+    if blocked == 0 {
+        return Ok(());
+    }
+    if blocked > names.len() {
+        names.push(format!("……还有 {} 条", blocked - names.len()));
+    }
+    Err(TriageError::CannotRedo {
+        batch,
+        rows: blocked,
+        names: names.join("、"),
+    })
+}
+
 /// 撤掉一**批**：**沉淀库与中立库两边都回到这一批落下之前的样子**。
 ///
 /// ## 它凭什么不算「当场手改投影」
@@ -1326,10 +1383,18 @@ pub fn undo_batch(
 /// [`verdict::BatchRow::after`] 里，放回去就是把它们重新写进沉淀库，再走
 /// [`Projector`] 那条**与识别共用的**路投影回中立库。
 ///
-/// 与 [`undo_batch`] 对称，它也只动这一批，而且**放不回去就不放**：先问同一句
-/// 「被后来还在册的哪一批盖住了没有」（[`covered_by`]）——放回去要写的正是那条锚，
-/// 硬写下去会把那一批的裁决顶掉，而顶掉了什么一处也没记。剩下每条再核对
-/// 「这条锚上眼下还是撤销之后留下的那个样子吗」，不是就不动。
+/// ## 放回是**整份**的事：凑不齐就一条都不放
+///
+/// 先问同一句「被后来还在册的哪一批盖住了没有」（[`covered_by`]）——放回去要写的正是
+/// 那条锚，硬写下去会把那一批的裁决顶掉，而顶掉了什么一处也没记。再整份核对一遍
+/// 「每条锚上眼下还是这一批撤掉时留下的那个样子吗」（`restorable`），凑不齐就整份
+/// 拒掉（[`TriageError::CannotRedo`]），与 [`apply`] 遇上过期的计划是同一种口气。
+///
+/// **「在册」说的是「这一批的裁决现在生效」**，不是「这一批没被撤过」——
+/// [`Store::batch_covering`] 拿它去挡别的批的撤销与放回，读的正是前一个意思。两件事
+/// 只在**部分放回**时分家，而那时把批标回在册就是账做乱的那一下：乱序放回（先放后一批）
+/// 一条也放不回去，标回在册之后这个**空批**把更早的一批挡在 [`TriageError::CoveredBy`]
+/// 外面，人得先撤一个空批才走得回来。所以这里不留「放回一半」这个形状。
 ///
 /// **中立库那一半的快照不重新收一遍。** 快照说的是「这一批第一次落下之前是什么样」，
 /// 那句话不因为撤了又放回去而改变；重新收一遍反而会把撤销刚放回去的那一份当成
@@ -1348,29 +1413,27 @@ pub fn redo_batch(
     }
     let rows = store.batch_rows(batch)?;
     covered_by(store, batch, &rows)?;
+    restorable(store, batch, &rows)?;
     let mut account = Applied {
         batch,
         ..Applied::default()
     };
     let mut projector = Projector::new();
     let mut records = Vec::new();
-    // 与撤销那一侧对称：**重复拷贝是真机上的常态**，一批里可能有好几份同内容的拷贝。
-    // 第二份走到这儿时锚上那条已经是这一批自己刚放回去的了——那不是「别人裁过」，
-    // 不写第二遍，但它的中立库那一半照样要补上。
+    // 与撤销那一侧对称：**重复拷贝是真机上的常态**，一批里可能有好几份同内容的拷贝，
+    // 它们记的是同一条锚、同一条 `after`（[`apply`] 按锚归过）。第二份走到这儿时锚上
+    // 那条已经是这一批自己刚放回去的了——不写第二遍，但它的中立库那一半照样要补上。
+    //
+    // 每条锚上「眼下是不是撤销留下的那个样子」在 [`restorable`] 里整份问过了，这里不再
+    // 一条条问第二遍：那一问的答案是**整份**的，问出不一样的答案来只说明中途有人在写。
     let mut mine: BTreeSet<Anchor> = BTreeSet::new();
     for row in rows {
-        let current = store.find(row.anchor())?;
-        let already = mine.contains(row.anchor()) && current.as_ref() == Some(&row.after);
-        if current != row.before && !already {
-            continue;
-        }
-        if !already {
+        if mine.insert(row.after.anchor.clone()) {
             if store.put(&row.after)? {
                 account.added += 1;
             } else {
                 account.replaced += 1;
             }
-            mine.insert(row.after.anchor.clone());
             account.verdicts += 1;
             if row.after.anchor.is_shareable() {
                 account.content_anchored += 1;
