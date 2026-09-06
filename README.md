@@ -143,11 +143,19 @@ CONTEXT.md     词表。动手前先读它，输出用它的词
 ## 开发
 
 ```bash
-cargo fmt --all
 cargo clippy --workspace --all-targets --all-features     # 零警告
 cargo test --workspace --all-features                     # 1,237 条
 cargo doc --workspace --no-deps
 ```
+
+### ⚠️ 眼下别跑 `cargo fmt --all`
+
+仓库根下有一份 `rustfmt.toml`（每一项为什么这么定都写在里面），但**仓库还没按它格式化过**
+——整仓库跑一遍与「把 `cargo fmt --check` 加进门禁」是同一张票的活，它排在队列最后，
+因为一落地所有在飞的改动都冲突。在那之前跑 `cargo fmt --all` 会动 77 个文件、2,252 行，
+全是与你手上那张票无关的改动（这一下已经发生过一次，只能手工撤回去）。
+
+`cargo fmt --all --check` 是只读的，随便跑；现在它 exit 1，那是应该的。这一段等格式化落地后删掉。
 
 ### ⚠️ 门禁必须带 `--all-features`
 
