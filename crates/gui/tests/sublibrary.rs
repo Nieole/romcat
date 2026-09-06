@@ -35,6 +35,9 @@ use romcat_core::testing::{TempDir, temp_dir};
 use romcat_gui::app::{App, View};
 use romcat_gui::headless;
 
+mod shared;
+use shared::画出来的字;
+
 /// 这一趟拿来当目标的那个 fixture 目录里，维护者自己拷进去的东西叫什么。
 const 存档: &str = "我自己拷进来的存档.sav";
 
@@ -52,33 +55,6 @@ fn 画两帧(ctx: &egui::Context, 场: &mut 现场) -> String {
     let mut out = String::new();
     for _ in 0..2 {
         out = 画出来的字(&headless::frame(ctx, headless::input(), |ui| 场.app.ui(ui)));
-    }
-    out
-}
-
-/// 这一帧**真的画在屏上**的那些字。
-///
-/// 「屏上摆得出来」「屏上没了」这两类断言只有看这个才算数：查数据结构里那一条
-/// 是在测别的东西——库里删没删干净另有断言管。egui 每画一段文字留下一个 `Galley`，
-/// 它带着原文。
-fn 画出来的字(output: &egui::FullOutput) -> String {
-    fn 收(shape: &egui::epaint::Shape, out: &mut String) {
-        match shape {
-            egui::epaint::Shape::Text(text) => {
-                out.push_str(text.galley.text());
-                out.push('\n');
-            }
-            egui::epaint::Shape::Vec(shapes) => {
-                for one in shapes {
-                    收(one, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut out = String::new();
-    for clipped in &output.shapes {
-        收(&clipped.shape, &mut out);
     }
     out
 }

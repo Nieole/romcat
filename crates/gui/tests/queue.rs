@@ -17,6 +17,9 @@ use romcat_gui::queue::Mode;
 use romcat_gui::table::ROW_HEIGHT;
 use romcat_gui::{demo, headless};
 
+mod shared;
+use shared::画出来的字;
+
 /// 这几条测试自己的**工作目录**。
 ///
 /// **不共用 `demo::workspace()`**：那是 `--demo` 那个演示窗口用的目录，而窗口会往里写
@@ -46,33 +49,6 @@ fn 展开(app: &mut App, shape: &romcat_core::triage::Shape) {
     if app.queue().scope().map(|scope| scope.shape).as_ref() != Some(shape) {
         app.queue_and_site().0.open_batch(shape);
     }
-}
-
-/// 这一帧**真的画在屏上**的那些字。
-///
-/// 断言「屏上看得见文件名」只有看这个才算数：查队列里有没有这条数据是恒真的废话，
-/// 而这一屏要证的正是那几样摆出来了没有。egui 每画一段文字就留下一个 `Galley`，
-/// 它带着原文。
-fn 画出来的字(output: &egui::FullOutput) -> String {
-    fn 收(shape: &egui::epaint::Shape, out: &mut String) {
-        match shape {
-            egui::epaint::Shape::Text(text) => {
-                out.push_str(text.galley.text());
-                out.push('\n');
-            }
-            egui::epaint::Shape::Vec(shapes) => {
-                for one in shapes {
-                    收(one, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut out = String::new();
-    for clipped in &output.shapes {
-        收(&clipped.shape, &mut out);
-    }
-    out
 }
 
 /// 造一份带着**那一次中文离线源匹配**的界面，连它落在谁身上（票 `queue-followups/06`）。

@@ -17,6 +17,9 @@ use romcat_gui::app::{App, View};
 use romcat_gui::layout::{self, Boundary, Side};
 use romcat_gui::{demo, headless, look};
 
+mod shared;
+use shared::画出来的字;
+
 /// 合成数据的规模。真库是 46,483 个变体（`docs/library-facts.md`），照它来。
 const ROWS: u64 = 46_483;
 
@@ -131,32 +134,6 @@ fn 跳格键() -> egui::Event {
 /// 这条边界在这个视口上的上限：**整个窗口那一维的几成**（`Boundary::share`）。
 fn 上限(boundary: Boundary) -> f32 {
     (boundary.side.of(egui::Vec2::from(headless::VIEWPORT)) * boundary.share).max(boundary.min)
-}
-
-/// 这一帧**真的画在屏上**的那些字。
-///
-/// 断言「屏上写的是同一个词」只有看这个才算数：查数据结构里那个词是恒真的废话，
-/// 而这几条要证的正是它**画出来了**。egui 每画一段文字就留下一个 `Galley`，它带着原文。
-fn 画出来的字(output: &egui::FullOutput) -> String {
-    fn 收(shape: &egui::epaint::Shape, out: &mut String) {
-        match shape {
-            egui::epaint::Shape::Text(text) => {
-                out.push_str(text.galley.text());
-                out.push('\n');
-            }
-            egui::epaint::Shape::Vec(shapes) => {
-                for one in shapes {
-                    收(one, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut out = String::new();
-    for clipped in &output.shapes {
-        收(&clipped.shape, &mut out);
-    }
-    out
 }
 
 /// 这一帧画出来的那些**框的描边颜色**。焦点看不看得见就看它。

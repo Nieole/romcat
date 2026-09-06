@@ -25,6 +25,9 @@ use romcat_gui::bench::{self, Sweep};
 use romcat_gui::table::{ROW_HEIGHT, SPAN};
 use romcat_gui::{demo, headless, browse};
 
+mod shared;
+use shared::画出来的字;
+
 /// 合成数据的规模。真库是 46,483 个变体（`docs/library-facts.md`），照它来。
 const ROWS: u64 = 46_483;
 
@@ -879,28 +882,126 @@ fn 一条有兄弟的(app: &mut App) -> String {
     panic!("合成数据里该有同作品同平台的两个变体");
 }
 
+/// 底下那块编辑面板的**右半栏**滚一趟，把这一路上画出来的字都收起来。
+///
+/// 刮削字段那一栏排在标题集合与首选变体之后，而那块面板默认 260 点高
+/// （`layout::EDIT`）——一屏摆不下是必然的，而 egui 不画视口之外的文字
+/// （`ui.is_rect_visible`）。所以这里滚的是**真的滚轮事件**，而且**指针先停进那一栏**：
+/// 滚轮归指针底下那块滚动区，少了这一下滚的就是别处——挂单 Q20 试过的三条路里，
+/// 滚轮那条栽的正是这里（待确认屏的 `详情滚一趟` 走的也是这条路，挂单 Q169）。
+fn 元数据栏滚一趟(ctx: &egui::Context, app: &mut App) -> String {
+    const STEPS: u32 = 24;
+    let mut out = String::new();
+    for step in 0..=STEPS {
+        let mut input = headless::input();
+        // 指针停在底下那块面板的**右半栏**：左边那 42% 是「它是什么」那一栏
+        // （`facts_column`），改元数据的在右边。
+        input
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(900.0, 700.0)));
+        if step > 0 {
+            input.events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -150.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        out.push_str(&画出来的字(&headless::frame(ctx, input, |ui| app.ui(ui))));
+    }
+    out
+}
+
+/// 这一趟画出来的字里，**以这几个字开头的那一段**。
+///
+/// 一段一行（见 `shared::画出来的字`），而刮削字段那一栏一条值就画成一段：于是
+/// 「屏上那一行写的是什么」问得出来。**挑得准靠的是开头那几个字**（「字段 · 哪一层」）
+/// ——同一趟里还画着挂在悬停里的那份原文，它没有这个开头。
+fn 屏上那一行<'a>(屏上: &'a str, 开头: &str) -> &'a str {
+    屏上.lines().find(|line| line.starts_with(开头)).unwrap_or_else(|| {
+        panic!(
+            "滚下来画出的 {} 段字里没有以「{开头}」开头的那一段",
+            屏上.lines().count(),
+        )
+    })
+}
+
 #[test]
 fn 一条顶到闸上的简介收成一行画得下的那一截() {
     // 票 03 的第二处边界的界面这一半。中立库里一条简介最多 4,000 字
     // （`scrape::zh::DESCRIPTION_LIMIT`），而刮削字段那一栏画在一条**横排**里——
     // 横排不折行，整段原样排进去就是四五万点宽的一行，面板跟着长出一条横向滚动条。
+    //
+    // **断言看的是这一帧真的画出来的字。** 钉在 `one_line` 那个纯函数上只证得了
+    // 「算出来的那一截是对的」，证不了「屏上摆的就是它」——那是挂单 Q20 记着的缺口。
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    跑(&ctx, &mut app, 2);
+    let key = 一条认出作品的(&mut app);
     let 顶到闸上 = "外".repeat(romcat_core::scrape::zh::DESCRIPTION_LIMIT);
-    let 一行 = browse::one_line(&顶到闸上).expect("这么长该收窄");
-    assert!(
-        一行.chars().count() < 80,
-        "收成了 {} 个字，那一行还是画不下",
-        一行.chars().count(),
-    );
-    assert!(一行.ends_with('…'), "收窄过要看得出来：{一行}");
-
     // **换行也要管**：数据源的排版原样留在值里（规格 18），可横排里一个换行就把那
-    // 一行撑高，底下几条就被挤出视口。
-    let 带换行 = browse::one_line("　　两个人一起打外星人。\n第二段：外星人赢了。")
-        .expect("带换行的该折平");
-    assert!(!带换行.contains('\n'));
-    assert!(带换行.starts_with('\u{3000}'), "折平不等于掐两头：{带换行}");
+    // 一行撑高，底下几条就被挤出视口。摆在**作品**那一层，与变体那一层那条长的分得开。
+    let 带换行 = "　　两个人一起打外星人。\n第二段：外星人赢了。";
+    {
+        let (browse, site) = app.browse_and_site();
+        let work = site
+            .catalog
+            .work_of_variant(&key)
+            .expect("读得出")
+            .expect("这一条认出了作品");
+        site.catalog
+            .put_verdict_value(
+                AnchorKind::Variant,
+                &key,
+                Field::Description,
+                &顶到闸上,
+                "测试摆进去的",
+            )
+            .expect("写得进去");
+        site.catalog
+            .put_verdict_value(
+                AnchorKind::Work,
+                &work,
+                Field::Description,
+                带换行,
+                "测试摆进去的",
+            )
+            .expect("写得进去");
+        browse.pick(&site.catalog, &key);
+    }
 
-    // 原样画得下的**一个字都不动**——不动就不必换一份字符串出去。
+    let 屏上 = 元数据栏滚一趟(&ctx, &mut app);
+    // `values_ui` 拼的是「字段 · 哪一层｜来源｜值」：开头那几个字挑得出是哪一条，
+    // 而**值那一段**是最后一个 `｜` 之后那一截——量长度要量它，前头那十一个字是固定开销。
+    let 开头 = |anchor: AnchorKind| format!("{} · {}", Field::Description.label(), anchor.label());
+    let 值那一段 = |line: &str| {
+        line.rsplit('｜')
+            .next()
+            .expect("屏上那一行是「字段 · 哪一层｜来源｜值」")
+            .to_string()
+    };
+    // ——— 长度：屏上摆的是**省略号收住的那一截** ———
+    let 那一截 = 值那一段(屏上那一行(&屏上, &开头(AnchorKind::Variant)));
+    assert!(那一截.ends_with('…'), "收窄过要看得出来：{那一截}");
+    assert!(
+        那一截.chars().count() < 80,
+        "库里那条 {} 个字，屏上这一截画了 {} 个——横排里不折行，面板照旧被撑出去",
+        顶到闸上.chars().count(),
+        那一截.chars().count(),
+    );
+    // ——— 换行：折平成一段画出来，而不是掐掉两头 ———
+    let 折平的 = 值那一段(屏上那一行(&屏上, &开头(AnchorKind::Work)));
+    assert!(
+        折平的.ends_with("第二段：外星人赢了。"),
+        "换行那条没折平：屏上那一行断在换行处，后半段没跟上来｜{折平的}",
+    );
+    assert!(
+        折平的.starts_with('\u{3000}'),
+        "折平不等于掐两头：{折平的}",
+    );
+
+    // 原样画得下的**一个字都不动**——这一条只有从函数那一侧看得见：屏上画的是同一串字，
+    // 中间换没换过一份字符串出去，看画出来的那一帧看不出来。
     assert_eq!(browse::one_line("两个人一起打外星人。"), None);
 }
 
