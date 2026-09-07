@@ -1283,6 +1283,53 @@ fn 写不成规则的筛选条件当场挡住() {
     }
 }
 
+#[test]
+fn 裁完一批之后浏览屏缓着的那几行也重取() {
+    // 待确认屏改的是识别结论与作品链接，而浏览屏那一列画的正是它们
+    // （`WorkRow::confidence`）。窗里缓着的 512 行只在**换筛选**时才作废，裁决一个字都
+    // 没改筛选——于是裁完回浏览屏，看见的还是裁之前那几行。与库屏扫完一个根走的是同一个
+    // 入口（`browse::Screen::invalidate`），只是那一趟由任务台交回来，这一趟发生在
+    // 本进程的这一帧里，由窗口转告（`App::route`）。
+    let ctx = headless::context();
+    let mut app = 界面(4_000);
+    跑(&ctx, &mut app, 2);
+    let 读过 = app.window().reads();
+    assert!(读过 > 0, "浏览屏本该已经取过一段行");
+    // **没人动过库就一次都不该再读**——窗存在的理由正是这个。这一条同时钉住下面那条
+    // 断言不是「每帧都在重取」蒙出来的。
+    跑(&ctx, &mut app, 3);
+    assert_eq!(app.window().reads(), 读过, "没人动过库，窗不该重新取一遍");
+
+    // ——— 到待确认屏整批裁一批 ———
+    // 「整批拒绝」（记成「我看过了，认不出」）：这份合成数据里的队列条目一条候选都没有
+    // ——真机上 98.2% 正是这个样子——所以走得通的是这一条，不是「整批通过」。
+    let batch = app
+        .queue()
+        .queue()
+        .batches()
+        .first()
+        .cloned()
+        .expect("合成数据里该有分好的批");
+    if app.queue().scope().map(|scope| scope.shape).as_ref() != Some(&batch.shape) {
+        app.queue_and_site().0.open_batch(&batch.shape);
+    }
+    let scope = app.queue().scope().expect("展开了就该有作用范围");
+    {
+        let (screen, site) = app.queue_and_site();
+        screen.reject(site, &scope);
+        screen.commit(site);
+    }
+    assert!(app.queue().error().is_none(), "{:?}", app.queue().error());
+    assert!(app.queue().applied().is_some(), "这一批该落下了");
+
+    // ——— 回浏览屏：窗得照裁完之后的库重取 ———
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 2);
+    assert!(
+        app.window().reads() > 读过,
+        "裁完一批，浏览屏还画着裁之前缓下来的那几行",
+    );
+}
 // ── 搜索框与匹配质量排序（票 `gui-redesign/05`）──────────────────────────
 //
 // 排序本身在核心库里（`crates/core/tests/search.rs` 把五档一条条钉着）。这一组钉的是

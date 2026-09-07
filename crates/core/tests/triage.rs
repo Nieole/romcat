@@ -27,7 +27,7 @@ use romcat_core::task::Handle;
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::triage::{self, Decide, DecisionSpec, Fanout, Filter, Overrides, Shape, batch};
-use romcat_core::verdict::{self, Anchor, Decision, Store};
+use romcat_core::verdict::{self, Anchor, Decision, Facts, Store, Verdict};
 
 const 库名: &str = "小库";
 
@@ -776,6 +776,121 @@ fn 换一份中立库换一个路径同一个文件照样直接命中() {
     assert_eq!(state, State::Matched);
 }
 
+/// 一份**新扫出来的**中立库。「重装」「换机」都是这个形状：盘上的字节没变，
+/// 而 `content_hash` 那张表从零开始。
+fn 扫成中立库(root: &Path) -> Catalog {
+    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+    let mut options = ScanOptions::named(root, "库");
+    options.jobs = Jobs::Fixed(1);
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
+    catalog
+}
+
+#[test]
+fn 裸文件的内容锚裁决在新中立库上第一趟识别就生效() {
+    // ADR-0008 那句「重装、换机、日后拷进来的同一文件直接精确命中」**对裸文件也算数**。
+    //
+    // 上面那条用的是 zip，而容器里那套 CRC-32 是零解压白拿的、一扫完就躺在容器构成里；
+    // **裸文件的判据只有读过盘才有**，一份新扫出来的中立库里 `content_hash` 是空的。
+    // 沉淀库只在读盘之前问一次的话，第一趟拿不出判据也就查不着裁决，那个变体被放回
+    // 待确认队列，要等第二趟（哈希缓存下来了）才命中——而用户照计划书重裁时，
+    // 计划书还会报一句「会盖掉已有裁决」误导人。
+    let dir = temp_dir("triage-裸文件重装");
+    写(&dir.path().join("FC/某汉化.nes"), &汉化版(0xB0));
+    let mut 甲 = 现场 {
+        catalog: 扫成中立库(dir.path()),
+        repo: 建_dat(),
+        store: Store::in_memory().expect("开得出沉淀库"),
+        dir,
+    };
+    跑识别(&mut 甲);
+    let applied = 裁(&mut 甲, &Filter::default(), &手工("某汉化的作品"));
+    assert_eq!(
+        (applied.content_anchored, applied.path_anchored),
+        (1, 0),
+        "第一趟识别把它整份读过了，这条裁决钉得住内容"
+    );
+
+    // 「重装」：同一块盘、同一份沉淀库，换一份新扫出来的中立库。
+    let mut 乙 = 现场 {
+        catalog: 扫成中立库(甲.dir.path()),
+        repo: 建_dat(),
+        store: 甲.store,
+        dir: 甲.dir,
+    };
+    let outcome = 跑识别(&mut 乙);
+    assert_eq!(
+        outcome.from_verdicts, 1,
+        "第一趟就该直接命中，不该等到第二趟才认得出"
+    );
+    let (state, _) = 乙
+        .catalog
+        .identification_of("库/FC/某汉化.nes")
+        .expect("读得出")
+        .expect("有结论");
+    assert_eq!(state, State::Matched);
+    // 命中了就不该再占人的时间（ADR-0002）。
+    assert!(
+        队列(&乙, &Filter::default()).is_empty(),
+        "裁决过的不该回队列"
+    );
+}
+
+#[test]
+fn 内容锚只管代表成员_附属成员上的裁决不盖住整个变体() {
+    // **锚点说的是「一条结论管多大范围」**（`CONTEXT.md`），识别与队列两侧必须同一口径。
+    // 队列那一侧只把裁决钉到**代表成员**上（`identify::content_print`：主文件优先、
+    // 同为主文件取大的）。识别这一侧要是从**任一成员**读回裁决，一条钉在附赠小 ROM
+    // 上的裁决就会把整个变体标成那部作品、自动通过、退出队列——而用户在队列里
+    // 再也够不着它去纠正，只能去 `forget` 那条裁决，那又会伤到真正的那个小变体。
+    let dir = temp_dir("triage-代表成员");
+    let 小的 = 卡带(0xB2, 4_096);
+    写(
+        &dir.path().join("FC/合集.zip"),
+        &zip_container(&[
+            ZipEntrySpec::stored("big.nes", 汉化版(0xB1)),
+            ZipEntrySpec::stored("small.nes", 小的.clone()),
+        ]),
+    );
+    let mut 现场 = 现场 {
+        catalog: 扫成中立库(dir.path()),
+        repo: 建_dat(),
+        store: Store::in_memory().expect("开得出沉淀库"),
+        dir,
+    };
+    // 别处裁过那串字节：一份单独躺着的 `small.nes` 被判成《小的作品》。
+    现场
+        .store
+        .put(&Verdict::now(
+            Anchor::Content {
+                crc32: crc32(&小的),
+                size: u64::try_from(小的.len()).expect("装得下"),
+                sha1: None,
+            },
+            Decision::Release(Facts {
+                work: "小的作品".to_string(),
+                ..Facts::default()
+            }),
+        ))
+        .expect("写得进");
+
+    let outcome = 跑识别(&mut 现场);
+    assert_eq!(
+        outcome.from_verdicts, 0,
+        "裁决钉的是 small.nes 那串字节，而这个变体的代表成员是 big.nes"
+    );
+    let items = 队列(&现场, &Filter::default());
+    let 那条 = items
+        .iter()
+        .find(|item| item.variant.key.contains("合集"))
+        .expect("它该还留在队列里等人裁");
+    assert_eq!(
+        那条.print.as_ref().expect("有判据").inner,
+        "big.nes",
+        "队列钉得住的锚是代表成员那一份，识别侧读的必须是同一份"
+    );
+}
+
 #[test]
 fn 拿不到内容判据时退到路径锚并如实说出来() {
     // 真机上无判据那一档有 4,537 条（容器穿不透、压缩镜像、目录树转储）。
@@ -1270,6 +1385,74 @@ fn 撤销本身撤得回来() {
 }
 
 #[test]
+fn 乱序放回一批时放不回去就一条都不放也不标成在册() {
+    // **「在册」说的是「这一批的裁决现在生效」**——`Store::batch_covering` 拿它去挡别的
+    // 批的撤销与放回，读的正是这个意思。所以放回是**整份**的事：一条都没放回去却把批
+    // 标回在册，那个空批会把更早的一批「盖住」，人得撤一个空批才走得回来。
+    //
+    // 形状是真机上的常态：同一条内容锚上叠着两批（两份**重复拷贝**各裁一批），倒序撤
+    // 干净，然后**先**放回后一批——它的 `before` 是前一批那条，而眼下锚上空着。
+    let mut 现场 = 建重复拷贝现场("triage-乱序放回", 0xDB);
+    跑识别(&mut 现场);
+    let 两份 = 点名(&["甲 某汉化.zip", "乙 某汉化.zip"]);
+    let 那两条 = keys(&队列(&现场, &两份));
+    assert_eq!(那两条.len(), 2);
+
+    let 批一 = 裁(&mut 现场, &点名(&["甲 某汉化.zip"]), &手工("作品一"));
+    let 批二 = 裁(&mut 现场, &点名(&["乙 某汉化.zip"]), &手工("作品二"));
+    assert_eq!(
+        批二.replaced, 1,
+        "两份重复拷贝钉的是同一条锚，后一批盖住了前一批"
+    );
+    triage::undo_batch(&mut 现场.catalog, &mut 现场.store, 批二.batch).expect("撤得掉");
+    triage::undo_batch(&mut 现场.catalog, &mut 现场.store, 批一.batch).expect("撤得掉");
+    assert_eq!(现场.store.counts().expect("数得出").total, 0);
+    let 撤干净 = 对拍快照(&现场, &那两条);
+
+    let 话 = triage::redo_batch(&mut 现场.catalog, &mut 现场.store, 批二.batch)
+        .expect_err("锚上不是撤销留下的那个样子，放不回去就不该放")
+        .to_string();
+    assert!(话.contains("放不回去"), "错误要说清是放不回去：{话}");
+    assert!(
+        现场
+            .store
+            .batch(批二.batch)
+            .expect("读得出")
+            .expect("在")
+            .undone(),
+        "一条都没放回去就不该标回在册——那个空批会把更早的一批挡住",
+    );
+    assert_eq!(
+        对拍快照(&现场, &那两条),
+        撤干净,
+        "整份拒掉就两份库一个字都不动"
+    );
+
+    // 按落下的顺序放回去，两批都回得来：先更早的那一批，再后一批。
+    assert_eq!(
+        triage::redo_batch(&mut 现场.catalog, &mut 现场.store, 批一.batch)
+            .expect("先放回更早的那一批")
+            .verdicts,
+        1,
+    );
+    assert_eq!(
+        triage::redo_batch(&mut 现场.catalog, &mut 现场.store, 批二.batch)
+            .expect("再放回后一批")
+            .verdicts,
+        1,
+    );
+    assert_eq!(
+        现场.store.counts().expect("数得出").total,
+        1,
+        "同一条锚，后一批照旧盖着前一批",
+    );
+    assert!(
+        队列(&现场, &两份).is_empty(),
+        "两份都裁过了，一条都不该回到队列"
+    );
+}
+
+#[test]
 fn 跑过识别之后那一批只撤得回沉淀库那一半并如实说出来() {
     // 中立库那一半的快照**可再生**，所以它跟着中立库活：重跑一趟识别就清掉了
     // （`Catalog::clear_identifications`）。那时撤销只回滚得了沉淀库那一半——
@@ -1290,6 +1473,78 @@ fn 跑过识别之后那一批只撤得回沉淀库那一半并如实说出来()
     // 再跑一趟识别，它们照样回到队列——那是这条路一直都在的出口。
     跑识别(&mut 现场);
     assert_eq!(队列(&现场, &filter).len(), 2);
+}
+
+#[test]
+fn 同内容换了路径之后撤销不谎称中立库那一半也回去了() {
+    // 裁一批 → 改名 / 挪目录 → `scan`（**不重跑识别**）→ `undo`。快照上那几个键在库里
+    // 已经找不着了：一个变体都放不回去，而账上那句「中立库那一半也回去了（0 个变体）：
+    // 现在就 `triage list`」是假的——新键上那份内容是**还没识别**，压根不在队列里。
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    let filter = Filter {
+        name_contains: vec!["勇者斗恶龙".to_string()],
+        ..Filter::default()
+    };
+    let applied = 裁(&mut 现场, &filter, &手工("勇者斗恶龙"));
+    assert_eq!(applied.verdicts, 1);
+    assert_eq!(现场.catalog.stashed(applied.batch).expect("数得出"), 1);
+
+    // 同一份内容换个路径：改名加挪目录，再扫一遍。
+    let 旧 = 现场.dir.path().join("FC/勇者斗恶龙 外星科技汉化.zip");
+    let 新 = 现场.dir.path().join("FC/别的目录/换了个名.zip");
+    fs::create_dir_all(新.parent().expect("有上级目录")).expect("能建目录");
+    fs::rename(&旧, &新).expect("改得动名");
+    重扫(&mut 现场);
+    assert!(
+        现场
+            .catalog
+            .variant("库/FC/勇者斗恶龙 外星科技汉化.zip")
+            .expect("读得出")
+            .is_none(),
+        "旧键那个变体已经不在了",
+    );
+
+    // 快照跟着旧键一起作废（**各层各自作废**）：撤销问「回滚得了吗」时得到的是实话。
+    assert_eq!(
+        现场.catalog.stashed(applied.batch).expect("数得出"),
+        0,
+        "指不着任何变体的快照该随重扫一起收掉",
+    );
+
+    let account =
+        triage::undo_batch(&mut 现场.catalog, &mut 现场.store, applied.batch).expect("撤得掉");
+    assert_eq!(account.removed, 1, "沉淀库那一半照样撤得干净");
+    assert_eq!(account.variants, 0);
+    assert!(
+        !account.catalog_rolled_back,
+        "一个变体都没放回去，账上就不该说「中立库那一半也回去了」",
+    );
+
+    // 新键上那份内容眼下是**还没识别**：不在队列里，要跑一趟识别才回得来。
+    let queue = 列队列(&现场);
+    assert_eq!(queue.not_run(), 1, "换了路径的那一份连识别都还没跑过");
+    assert!(
+        !queue
+            .selected()
+            .iter()
+            .any(|item| item.variant.key.contains("换了个名")),
+        "它压根不在队列里：{:?}",
+        keys(queue.selected()),
+    );
+    跑识别(&mut 现场);
+    assert_eq!(
+        队列(
+            &现场,
+            &Filter {
+                name_contains: vec!["换了个名".to_string()],
+                ..Filter::default()
+            },
+        )
+        .len(),
+        1,
+        "跑过识别它才回到待裁决——那是这条路一直都在的出口",
+    );
 }
 
 #[test]

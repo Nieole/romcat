@@ -97,7 +97,12 @@
 //!   于是中文名、别名一个都不产出，作品那一层数票时这个变体也不再投它的票——
 //!   同一次匹配带来的其余字段跟着一起没了。
 //! - **肯定**：那条条目在这个变体的候选里**排到最前**，依据的末尾从「一律进待确认队列」
-//!   换成「由人工裁决确认过」（[`zh::Match::evidence_confirmed`]）。
+//!   换成「由人工裁决确认过」（[`zh::Match::evidence_confirmed`]）。而且它**够得着**：
+//!   机器够不着中置信那一档的（平台说不出、年份说不出、相似度差着一档）、以及被
+//!   [`zh::Tuning::limit`] 截在候选之外的，人说过之后照样产出——那两道闸说的是
+//!   「机器有没有把握」，人的话压得过它们（ADR-0008：人说过的排在机器挑的前面）。
+//!   压不过的只有 [`zh::Index::lookup`] 那两道硬校验（平台冲突、年份冲突）与相似度
+//!   门槛：那说的是「这两串字压根不是一回事」，让开它，`--yes` 就成了手工录入。
 //!
 //! **裁决进输入指纹**（两层的 `probe` 都进）：不进的话，人裁完重跑一趟，缓存会一口咬定
 //! 「输入没变」而整条跳过——那条错的中文名就永远撞回来。
@@ -115,13 +120,13 @@
 //!
 //! **这与类型那一栏的处置正好相反**（挂单 Q11：一条条目写了好几个类型时只取头一个），
 //! 两者并不打架：那是票 02 拿类型跑通「撞在变体层、挂在作品层」时的最小做法，而这一票
-//! 的验收明写着「拆成多条」。**代价说清楚**：同一个字段上并存好几条时，导出那一侧眼下
-//! 只读得出一条（`adapter::converge::build_game` 里那个 `pick`），而胜出的是
-//! `Priorities::pick` 第四层排序键挑的那条——那一层比的是**值本身**，也就是**码位序**。
-//! 于是 `|开发= 科乐美、KCE东京` 导到前端里写的是 `KCE东京`：**换的不是次序，是换了
-//! 一家公司**。数据源的原次序在中立库的上一层（`zh::store` 那张 `subject_fact` 的 `ord`）
-//! 好好留着，只是导出那条链上还没有人读它。让前端拿到整组、或者把 `ord` 折进那层排序键，
-//! 都是导出那一侧的活——「导出侧一行不改」是这一票的硬约束，所以记在挂单 Q27，不在这儿改。
+//! 的验收明写着「拆成多条」。**导出那一侧现在按集合读**（`adapter::converge::build_game`
+//! 里那个 `pick_all`）：`|开发= 科乐美、KCE东京` 两家都写得到前端里去，「换了一家公司」
+//! 那个错已经没了。所以 Q11 眼下只是这一处还没跟上，不再是导出侧的限制。
+//!
+//! **剩下的代价说清楚**：先后仍是**码位序**（`Catalog::for_each_scraped_value` 的排序键）
+//! ——数据源的原次序在中立库的上一层（`zh::store` 那张 `subject_fact` 的 `ord`）好好留着，
+//! 但跨不过中立库那一层，`scrape_value` 上没有对应的一列。记在挂单 Q27。
 
 use std::collections::BTreeMap;
 
@@ -264,6 +269,21 @@ impl Ruling {
         self.by_entry
             .get(&entry)
             .map(|(accepted, anchor)| (*accepted, anchor.as_str()))
+    }
+
+    /// 人对这条条目说过「**就是这条**」吗。
+    #[must_use]
+    pub fn affirms(&self, entry: u32) -> bool {
+        self.stance(entry).is_some_and(|(accepted, _)| accepted)
+    }
+
+    /// 这个变体身上，人**肯定**过哪怕一条吗。
+    ///
+    /// 候选那一步靠它决定要不要走不截断的那条路（`ChineseSource::candidates`）：
+    /// 全是否定裁决时不必多花那一趟——否定只做减法，够不着的那几条本来就不产出。
+    #[must_use]
+    pub fn any_affirmed(&self) -> bool {
+        self.by_entry.values().any(|(accepted, _)| *accepted)
     }
 
     /// 进**输入指纹**的那一行。
@@ -530,6 +550,41 @@ impl<'a> ChineseSource<'a> {
         )
     }
 
+    /// 一次查询交出来的候选，**人肯定过的那些不受 [`zh::Tuning::limit`] 截断**。
+    ///
+    /// [`zh::Index::lookup`] 只交出分最高的前 `limit` 条（默认 3）。那把刀是「机器挑得
+    /// 准不准」的闸：同名同平台的条目在数据源里真的会有好几条，而机器分不出哪条对，
+    /// 于是只看前几名。人拿着条目号说「就是这条」时，那一条可能排在第四位——截断发生
+    /// 在裁决那道闸之前，人的话于是够不着它：裁决落了库、什么都不产出。
+    ///
+    /// **没有人肯定过任何条目时，这里与从前一模一样**（连 `lookup` 都是同一个调用），
+    /// 所以这条豁免只在人开过口的那些变体上花钱。有人肯定过时才多走一趟不截断的
+    /// `lookup`，然后自己截：前 `limit` 条照旧留，加上人肯定过的那几条——**只是把够不着
+    /// 的那几条捞回候选**，谁胜出仍旧由下面那个排序键说了算。
+    fn candidates(
+        &self,
+        index: &zh::Index,
+        query: &zh::Query<'_>,
+        ruling: Option<&Ruling>,
+    ) -> Vec<zh::Match> {
+        if !ruling.is_some_and(Ruling::any_affirmed) {
+            return index.lookup(query, &self.naming.tuning);
+        }
+        let 不截断 = zh::Tuning {
+            limit: usize::MAX,
+            ..self.naming.tuning
+        };
+        let mut out = index.lookup(query, &不截断);
+        let mut at = 0;
+        out.retain(|one| {
+            let keep = at < self.naming.tuning.limit
+                || ruling.is_some_and(|ruling| ruling.affirms(one.entry.id));
+            at += 1;
+            keep
+        });
+        out
+    }
+
     /// 拿一个变体的那几样撞一次。
     ///
     /// 参数表摊开成四样而不是收一个 [`Subject`]：作品那一层撞的是[名下的变体](
@@ -561,19 +616,15 @@ impl<'a> ChineseSource<'a> {
             .or_else(|| naming::year_in(entries.iter().map(|entry| entry.game.as_str())));
         let mut best: Option<Hit> = None;
         for (label, text) in parsed.queries() {
-            for one in index.lookup(
+            for one in self.candidates(
+                index,
                 &zh::Query {
                     text,
                     platform,
                     year,
                 },
-                &self.naming.tuning,
+                ruling,
             ) {
-                // **只收够得着中置信的那一档**，而且它得真有一个中文名——
-                // 条目自己都没写中文名时，这个源无话可说。
-                if !one.strong(&self.naming.tuning) || one.entry.name_cn.trim().is_empty() {
-                    continue;
-                }
                 let stance = ruling.and_then(|ruling| ruling.stance(one.entry.id));
                 // **人说了「不是这条」，这条条目就从这个变体的候选里划掉**（票 05）。
                 // 不是「这个变体从此没有中文条目」——那是两句不同的话，而人只说了前一句。
@@ -583,6 +634,28 @@ impl<'a> ChineseSource<'a> {
                 let confirmed = stance
                     .filter(|(accepted, _)| *accepted)
                     .map(|(_, anchor)| anchor.to_string());
+                // 这个源得真有一个中文名可说——条目自己都没写中文名时它无话可说。
+                // **这一条人也压不过**：那不是「机器有没有把握」，是这个源手里根本没有
+                // 变体那一层要产出的那样东西。
+                if one.entry.name_cn.trim().is_empty() {
+                    continue;
+                }
+                // **只收够得着中置信的那一档**，除非**人亲口说过就是这条**。
+                //
+                // 这一句的次序是有讲究的：`strong` 说的是「平台与年份两道交叉校验对不
+                // 对得上、名字够不够像」，也就是**机器有没有把握**；而人的肯定裁决说的
+                // 是「就是它」。让机器的把握挡在人的话前面，`romcat zh judge --yes` 就
+                // 只在机器本来就够得着的那几条上起作用——人拿着条目号盖了章、裁决落了
+                // 库，却一个字段都不产出，而命令行还许诺「一并定下」。ADR-0008 的口径
+                // 是**人说过的排在机器挑的前面**，这里正是它。
+                //
+                // **人压不过 [`zh::Index::lookup`] 那两道硬校验**（平台冲突、年份冲突、
+                // 相似度门槛）：那不是「机器有没有把握」，那是「这两串字压根不是一回
+                // 事」。连它也让开的话，`--yes` 就成了把任意条目焊到任意变体上的手工
+                // 录入，而这一层的定位是**匹配**。够不着那一档由命令行当场说清。
+                if confirmed.is_none() && !one.strong(&self.naming.tuning) {
+                    continue;
+                }
                 // 排序键是`（人说过就是它, 相似度）`：**人说过的排在机器挑的前面**。
                 // 这不是改匹配算法（候选还是它算出来的那一批），是在它交出来的那一批上
                 // 认人说过的话——否则「肯定」这一档在下一趟就被一个分数更高的候选顶掉了。
@@ -704,6 +777,11 @@ impl<'a> ChineseSource<'a> {
         // **正题**（上面 `hit` 里那句 `rules.parse(name)`），而剥离规则是配置不是代码，
         // 用户补一条自己遇到的模式，正题就变了、撞出来的条目也可能跟着变。它算的是规则的
         // **语义**——给规则文件加一行注释不该让全库重采一遍。
+        // **剥离规则是数据不是代码**：拿去撞的那串正题正是它剥出来的
+        // （[`hit`](Self::hit) 里那行 `rules.parse`）。补一条正题噪音词重跑，同一个
+        // 文件名剥出来的正题就变了，撞出来的东西也跟着变——那正是 `zh` 模块文档许诺
+        // 的那条出口（「补进配置，重跑一遍就撞上了」）。`Source::probe` 那个「源自己的
+        // 解析逻辑不进指纹」的例外管不到它：规则住在用户编得动的 `name-rules.toml` 里。
         let rules = self.naming.rules.fingerprint();
         // 已经撞上的 DAT 条目名也进指纹：年份从它们里读。
         let entries: Vec<&str> = subject
@@ -823,9 +901,12 @@ impl<'a> ChineseSource<'a> {
             return Ok(());
         };
         let dump = self.naming.index.map_or("", zh::Index::dump);
-        // **类型是单值字段**：`Priorities::merge` 一个字段只回一个值，而集合那条路
-        // （`Harvest::each` 加 `title::fold`）眼下只有标题走得通。条目的 infobox 里
-        // 写了好几个类型时取头一个——数据源里的原次序，同一份库跑两次取的是同一个。
+        // **这一层只产出头一个类型**（挂单 Q11）：条目的 infobox 里写了好几个类型时取
+        // 数据源里的原次序头一条，同一份库跑两次取的是同一个。
+        //
+        // ⚠️ **这不再是导出侧的限制**：导出那一侧类型与开发商走同一条集合路了
+        // （`converge::build_game` 的 `pick_all`），并存几条就写得出几条。要放开这里，
+        // 改的是 `first()` 与 `value` 这两处，不是导出侧。
         if let Some(genre) = won.hit.one.entry.genres.first() {
             out.value(
                 Field::Genre,
@@ -847,9 +928,9 @@ impl<'a> ChineseSource<'a> {
     /// **两栏同一条路**：它们在数据源里是一对孪生的键（`|开发=` 与 `|发行=`），
     /// 形状、拆法与依据一模一样。各写一遍的话，将来改依据最容易漏掉的正是后一栏。
     ///
-    /// ⚠️ **产出的次序不是导出的次序。** 这里按数据源的原次序一条条产出，可导出那一侧
-    /// 只挑得出一条、而且按码位挑（见模块文档那一节与挂单 Q27）。要靠次序的人别指望
-    /// 这个函数。
+    /// ⚠️ **产出的次序不是导出的次序。** 这里按数据源的原次序一条条产出，可中立库那一层
+    /// 没有原次序这一列——导出那一侧几条都写得出去（`converge::build_game` 的 `pick_all`），
+    /// 但先后是**码位序**（见模块文档那一节与挂单 Q27）。要靠次序的人别指望这个函数。
     fn collect_facts(&self, won: &WorkHit, dump: &str, out: &mut Harvest) {
         for (field, values) in [
             (Field::Developer, &won.hit.one.entry.developers),
@@ -955,6 +1036,15 @@ pub struct Judged {
     pub from_variant: bool,
     /// 就地清掉了几条字段值，一共。**只有否定那一档会清**，见 [`judge`]。
     pub cleared: u64,
+    /// **标题集合**里跟着退出去了几条叫法。
+    ///
+    /// 清掉的那批值里有中文名与别名，而它们同时是标题集合里的**叫法**——集合是那批值
+    /// 折出来的一份投影（[`title::refold`](crate::title::refold)）。不跟着折的话，
+    /// 详情面板与导出读到的仍是被否掉的那一条，**显示标题照旧挑它**。
+    ///
+    /// 为 0 有两种：这个变体的中文名本来就没进过集合，或者同一串字名下别的变体还叫着
+    /// ——后一种是对的，集合里那一行是它们背书的。
+    pub untitled: u64,
     /// 其中**作品**那一层几条。为 0 就是那一层一个字都没动。
     pub cleared_work: u64,
     /// 这个变体属于哪个作品；识别还没认出来时是 `None`。
@@ -977,6 +1067,9 @@ pub struct Judged {
 ///   作品锚点上中文离线源的行，一条不留。错的东西不许在库里多躺一秒，而它带着的
 ///   **依据**指着一条人已经说了不对的条目。作品那一层下一趟重跑刮削时按**剩下的变体**
 ///   重新数票：名下还有别的变体撞着同一条条目的话，那几栏会照样回来，而且是对的。
+///   **标题集合跟着折一遍**（[`title::refold`](crate::title::refold)）：中文名与别名
+///   同时是集合里的叫法，而详情面板与导出读的是那张表、不是现折——不折的话，人裁完
+///   看见的显示标题照旧是刚被他否掉的那一条。
 /// - **肯定**：**一个字都不清**。那些值是对的，留着；变的只是它们的**依据**——
 ///   下一趟重跑时末尾那句从「一律进待确认队列」换成「由人工裁决确认过」。
 ///   靠的是输入指纹（[`Ruling::fingerprint`] 进了两层的 `probe`），不是靠清库。
@@ -1035,6 +1128,7 @@ pub fn judge(
         .any(|value| value.source == fuzzy::SOURCE && zh::entry_in(&value.evidence) == Some(entry));
     let mut cleared = 0;
     let mut cleared_work = 0;
+    let mut untitled = 0;
     if !accepted {
         for source in [fuzzy::SOURCE, fuzzy::ALIAS_SOURCE] {
             cleared += clear_source(catalog, AnchorKind::Variant, variant_key, source, entry)?;
@@ -1043,6 +1137,19 @@ pub fn judge(
             cleared_work = clear_source(catalog, AnchorKind::Work, work, fuzzy::SOURCE, entry)?;
             cleared += cleared_work;
         }
+        // **标题集合跟着折回来。** 中文名与别名不只躺在 `scrape_value` 里，它们同时是
+        // 标题集合里的**叫法**，而详情面板与导出读的是那张表、不是现折。就地清掉值却
+        // 不动集合，人裁完看见的显示标题照旧是被他否掉的那一条，来源依据还指着那条
+        // 条目——「就地清掉了 N 条」于是成了一句半真的话。
+        //
+        // 折在这儿而不是让命令行提一句「记得再跑一次 `romcat titles`」：集合是这批值
+        // 的投影，谁改了值谁负责把投影折回来；提示只对看得见提示的那条入口有效，而
+        // 界面那一侧迟早也要接上 `judge`（挂单 Q39）。
+        if cleared > 0 {
+            let before = catalog.title_count()?;
+            crate::title::refold(catalog)?;
+            untitled = before.saturating_sub(catalog.title_count()?);
+        }
     }
     Ok(Judged {
         anchor,
@@ -1050,6 +1157,7 @@ pub fn judge(
         from_variant,
         cleared,
         cleared_work,
+        untitled,
         work,
     })
 }
@@ -2248,12 +2356,110 @@ mod tests {
         // 没人裁过时撞的是条目 4；把条目 6 说成「就是它」，撞出来的就该是 6。
         assert!(采(key, &[]).values[0].evidence.contains("条目 4"));
         let out = 采带裁决(key, &裁过(key, 6, true));
-        // 条目 6 在这个变体上够不着中置信，所以它进不了候选——人说了也白说，
-        // 这一条钉的是**不许凭空造一条匹配出来**。
+        // 条目 6 是**另一个游戏**：`合金弹头7` 与 `恶魔城` 连数字与拉丁字母那道硬闸
+        // 都过不去（`zh::alnum_of`），`Index::lookup` 一开始就不产出它。人压得过
+        // 「机器有没有把握」那两道闸，压不过这一道——这一条钉的是**不许凭空造一条
+        // 匹配出来**，`--yes` 不是手工录入。
+        assert!(out.values[0].evidence.contains("条目 4"), "{:?}", out.values[0]);
+    }
+
+    /// **平台这一栏空着**的一份索引：名字撞得上，可交叉校验说不出，
+    /// [`zh::Match::strong`] 于是永远是假——机器够不着中置信的那一档。
+    fn 平台说不出那一版() -> zh::Index {
+        zh::Index::build(
+            vec![zh::Entry {
+                id: 9,
+                name: "メタルスラッグ7".to_string(),
+                name_cn: "合金弹头7".to_string(),
+                year: Some(2008),
+                platforms: Vec::new(),
+                platform_text: String::new(),
+                genres: vec!["ACT".to_string()],
+                ..zh::Entry::default()
+            }],
+            "dump-2026-09-01".to_string(),
+        )
+    }
+
+    /// **同名同平台四条**的一份索引：真库里少见，wiki 里的重复条目就是这个样子。
+    /// 四条分数完全平手，`Tuning::limit` 默认 3 —— 第四条被截在候选之外。
+    fn 同名四条那一版() -> zh::Index {
+        zh::Index::build(
+            (11..=14u32)
+                .map(|id| zh::Entry {
+                    id,
+                    // 名字各不相同，**别名一模一样**：撞的是那条别名，四条一字不差。
+                    name: format!("メタルスラッグ7 第{id}版"),
+                    name_cn: format!("合金弹头7·{id}"),
+                    aliases: vec!["合金弹头7".to_string()],
+                    year: Some(2008),
+                    platforms: vec!["NDS".to_string()],
+                    platform_text: "NDS".to_string(),
+                    genres: vec!["ACT".to_string()],
+                    ..zh::Entry::default()
+                })
+                .collect(),
+            "dump-2026-09-01".to_string(),
+        )
+    }
+
+    /// 带一份自备索引与一份匹配裁决，在**变体**锚点上采一趟。
+    fn 采带索引与裁决(index: &zh::Index, key: &str, rulings: &Rulings) -> Harvest {
+        let rules = Rules::builtin();
+        let mut out = Harvest::default();
+        源(&rules, index)
+            .with_rulings(rulings)
+            .collect(&变体(key, &[], &[]), &mut out)
+            .expect("本地源不会失败");
+        out
+    }
+
+    #[test]
+    fn 肯定裁决够得着机器够不着的那些候选() {
+        // 人拿着条目号说「就是这条」，裁决落了库，却一个字段都不产出——而命令行还许诺
+        // 「这一次匹配带来的字段一并定下」。两道闸各挡住一半，两道说的都是**机器有没有
+        // 把握**，而 ADR-0008 的口径是「人说过的排在机器挑的前面」。
+        let key = "nds/合金弹头7.7z";
+        let 没人裁过 = Rulings::none();
+
+        // ── 一、**够不着中置信那一档**：平台这一栏空着，交叉校验说不出。
+        let 平台空 = 平台说不出那一版();
         assert!(
-            out.values[0].evidence.contains("条目 4"),
-            "{:?}",
-            out.values[0]
+            采带索引与裁决(&平台空, key, &没人裁过).values.is_empty(),
+            "没人裁过时够不着中置信，本来就该一个字段都不产出"
+        );
+        let out = 采带索引与裁决(&平台空, key, &裁过(key, 9, true));
+        assert_eq!(
+            那一格(&out, Field::Title).map(|it| it.value.clone()),
+            Some("合金弹头7".to_string()),
+            "人说了「就是这条」，这一条就该产出"
+        );
+        assert!(
+            zh::is_confirmed(&out.values[0].evidence),
+            "依据末尾该写「人裁决确认过」：{}",
+            out.values[0].evidence
+        );
+
+        // ── 二、**被 `limit` 截在候选之外**：四条同名同平台，人肯定的是第四条。
+        let 四条 = 同名四条那一版();
+        assert_eq!(
+            那一格(&采带索引与裁决(&四条, key, &没人裁过), Field::Title).map(|it| it.value.clone()),
+            Some("合金弹头7·11".to_string()),
+            "没人裁过时取排在最前的那一条"
+        );
+        let out = 采带索引与裁决(&四条, key, &裁过(key, 14, true));
+        assert_eq!(
+            那一格(&out, Field::Title).map(|it| it.value.clone()),
+            Some("合金弹头7·14".to_string()),
+            "截断发生在裁决那道闸之前，人肯定过的第四条够不着"
+        );
+
+        // ── 三、**闸只对人说过的那一条让开**：没被裁决点名的那些照旧受两道闸管。
+        let 别的条目 = 采带索引与裁决(&平台空, key, &裁过("nds/别的变体.7z", 9, true));
+        assert!(
+            别的条目.values.is_empty(),
+            "裁决钉在**那个**变体身上，管不到这一个：{:?}",
+            别的条目.values
         );
     }
 

@@ -56,7 +56,7 @@ use std::fmt::Write as _;
 use egui::{Align, Layout};
 use egui_extras::{Column, TableBuilder};
 use romcat_core::catalog::State;
-use romcat_core::catalog::identify::Tier;
+use romcat_core::catalog::identify::{NOT_RUN_LABEL, Tier};
 use romcat_core::dat::chinese::ChineseMark;
 use romcat_core::report::{capacity, thousands};
 use romcat_core::scrape::AnchorKind;
@@ -162,6 +162,13 @@ pub struct Screen {
     match_note: String,
     /// 上一次出的错。
     error: Option<String>,
+    /// **这一屏刚动过中立库**（落下一批、撤回一批、放回一批），等窗口转告浏览屏。
+    ///
+    /// 裁决改的是结论与作品链接，而浏览屏那一列画的正是它们——不告诉它一声，它会一直
+    /// 画着裁之前缓下来的那几行。与库屏扫完一个根走的是同一条路
+    /// （[`crate::browse::Screen::invalidate`]），只是那一趟由任务台交回来，
+    /// 这一趟就发生在本屏里，所以自己留个记号。
+    changed: bool,
     /// **只裁选中的那一条**。
     ///
     /// 批量是这件事成不成立的分界（ADR-0002），但「采用第 N 条候选」天生是逐条的动作
@@ -197,9 +204,16 @@ impl Screen {
             judged: None,
             match_note: String::new(),
             error: None,
+            changed: false,
             only_picked: false,
             scroll_to: None,
         }
+    }
+
+    /// 取走「**刚动过中立库**」那个记号。窗口每帧问一次，问到就转告浏览屏
+    /// （`crate::app::App::route`）。
+    pub fn take_changed(&mut self) -> bool {
+        std::mem::take(&mut self.changed)
     }
 
     /// 队列本身，供测试查「列出多少条、分成几批」。
@@ -471,7 +485,14 @@ impl Screen {
         self.refresh_opened();
     }
 
-    /// 顶栏上属于队列的那一段：队列多少条、多少条候选、**四档各多少**、重新列一次。
+    /// 顶栏上属于队列的那一段：队列多少条、多少条候选、**库里还有多少个连识别都没跑过**、
+    /// **四档各多少**、重新列一次。
+    ///
+    /// 「还没识别」那一句与命令行 `triage list` 印的是同一句话
+    /// （[`romcat_core::triage::report::QueueReport`]）：那些变体一条候选都没有、
+    /// **队列里根本没有它们**，选择器也筛不到。不说出来的话，「队列 N 条」会被读成
+    /// 「库里只剩 N 条没定下来」，而该做的事也不一样——这一句指向 `identify`，
+    /// 不是指向裁决。
     pub fn status(&mut self, ui: &mut egui::Ui, site: &Site) {
         self.sync();
         if ui
@@ -499,9 +520,27 @@ impl Screen {
             thousands(self.queue.candidates()),
         );
         ui.label(line);
+        // **还没识别的那些单说一句**（词表「还没识别」条、[`NOT_RUN_LABEL`]）。
+        // 它们不在上面那个数里——`variant JOIN identification` 一行都进不去，所以既不是
+        // 「拿不定主意」，也不是底下四档里的任何一档。措辞照命令行那份报告来
+        // （`romcat_core::triage::report`），同一份库两处印出来的是同一句话。
+        if self.queue.not_run() > 0 {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!(
+                    "{NOT_RUN_LABEL} 另有 {} 个变体连识别都还没跑过",
+                    thousands(self.queue.not_run())
+                ),
+            )
+            .on_hover_text(
+                "它们一条候选都没有，队列里根本没有它们，选择器也筛不到。\
+                 先跑一趟 `romcat identify` 把它们补上。",
+            );
+        }
         ui.separator();
         // **四档一眼看得出哪批稳、哪批悬**（规格 37）。颜色与标签同出一处
         // （[`tier_color`]、[`Tier::label`]），五屏对齐是票 `gui-redesign/12` 的活。
+        // 第四档叫「**没有候选**」而不叫「还没识别」——上面那一句说的才是后者（挂单 Q84）。
         for (tier, count) in self.queue.tiers() {
             ui.colored_label(
                 look::tier_color(*tier, ui.visuals()),
@@ -1382,6 +1421,7 @@ impl Screen {
                 self.error = None;
                 self.applied = Some(applied);
                 self.undone = None;
+                self.changed = true;
                 // 裁完这一条，**下一条自己滑到光标底下**——手不必动。
                 self.move_to(self.at);
             }
@@ -1572,6 +1612,7 @@ impl Screen {
                 self.error = None;
                 self.applied = Some(applied);
                 self.undone = None;
+                self.changed = true;
                 self.cursor = None;
             }
             // 计划过期那一句核心库已经说全了（连「两份库一个字都没动」都在里面），
@@ -1585,8 +1626,18 @@ impl Screen {
     ///
     /// 领域判断一条都不在这里——[`Queue::undo`] 走的是命令行 `romcat triage undo --batch`
     /// 那条同一条路（ADR-0005）。这一层只负责把按下去的那一下转过去，再把账画出来。
+    ///
+    /// 没有可撤的那一批时**报一句**再回来。屏上那个「撤回第 N 批」的按钮只在有批的时候
+    /// 才画得出来，所以走到这一支的一定是逐条流里按下的 `U`；一声不吭地返回，人只会
+    /// 以为键盘坏了（`Y` 那一支写着同一句话，命令行 `undo --last` 无批时也报错退 1）。
     pub fn undo_last(&mut self, site: &mut Site) {
         let Some(batch) = self.applied.map(|applied| applied.batch) else {
+            self.error = Some(
+                "这一趟还没落下过一批裁决，`U` 没什么可撤的——先 `Y` 采用或 `N` 拒绝一条。\
+                 更早落下的那些在命令行上撤：`romcat triage batches` 看有哪几批，\
+                 `romcat triage undo --batch <号>` 撤其中一批。"
+                    .to_string(),
+            );
             return;
         };
         match self
@@ -1597,6 +1648,7 @@ impl Screen {
                 self.error = None;
                 self.applied = None;
                 self.undone = Some(account);
+                self.changed = true;
                 self.cursor = None;
                 self.queue.set_filter(self.picks.filter());
             }
@@ -1617,6 +1669,7 @@ impl Screen {
                 self.error = None;
                 self.undone = None;
                 self.applied = Some(account);
+                self.changed = true;
                 self.cursor = None;
                 self.queue.set_filter(self.picks.filter());
             }
@@ -2316,10 +2369,13 @@ mod tests {
             }
         }
         // 四档的词与核心库同出一处——别处写「高置信」这里写「高」，用户会以为是两件事。
+        // 第四档**不许叫「还没识别」**：那四个字归词表那条「连识别都还没跑过」，
+        // 而屏头上两句话是并排印的（挂单 Q84）。
         assert_eq!(
             Tier::ALL.map(Tier::label).to_vec(),
-            vec!["高置信", "中置信", "低置信", "还没识别"],
+            vec!["高置信", "中置信", "低置信", "没有候选"],
         );
+        assert_ne!(Tier::Unidentified.label(), NOT_RUN_LABEL);
     }
 
     #[test]

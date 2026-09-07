@@ -421,6 +421,28 @@ impl Screen {
         }
     }
 
+    /// **中立库底下变了**：这一屏缓着的东西全部作废，下一帧照新的库重取。
+    ///
+    /// [`Screen::reload`] 只补筛选面板那几档；这一屏另外三样也是缓着的，一样会过期：
+    ///
+    /// - **窗**里那 512 行连同总行数（[`Window::invalidate`]）。它们平时只在**换查询**
+    ///   时作废，而扫完一个根、裁完一批的时候查询一个字都没改——于是库屏说 3 个变体，
+    ///   浏览屏还画着 0 行。
+    /// - 「筛出来多少」与「作用于多少个变体」这两个数。
+    /// - 点开那一行的详情（置信度、结论那几栏正是裁决改的东西）。
+    ///
+    /// **谁来调**：不由这一屏自己判断——它没法知道后台那条线程写完了没有。窗口那一层
+    /// 认领完一趟任务、或者取到队列那一屏「刚落下一批」的记号之后转告它
+    /// （`crate::app::App::poll_tasks` 与 `App::route`）。屏与屏之间不互相拿着对方
+    /// （ADR-0005）。
+    pub fn invalidate(&mut self, site: &Site) {
+        self.reload(site);
+        self.window.invalidate();
+        self.filtered = None;
+        self.scoped = None;
+        self.load_work(&site.catalog);
+    }
+
     /// 窗口，供测试查「内存里装了几行」。
     #[must_use]
     pub fn window(&self) -> &Window {

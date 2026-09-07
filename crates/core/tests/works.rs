@@ -267,7 +267,7 @@ fn 每行看得见平台变体数容量年份元数据齐不齐与最高置信�
     {
         assert_eq!(row.variants, 1, "没认出作品的那一行就该只有它自己");
         assert_eq!(row.confidence, None);
-        assert_eq!(row.confidence_label(), "还没识别");
+        assert_eq!(row.confidence_label(), "没有候选");
         assert_eq!(row.missing_label(), "缺全部");
     }
 }

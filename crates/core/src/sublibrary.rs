@@ -204,6 +204,9 @@ pub struct VariantFacts {
     /// 刮削来的类型。
     pub genres: Vec<String>,
     /// 刮削来的年份。**可能不止一个**——几个源各给一个，规则按「有一个落在范围里就算」。
+    ///
+    /// 只有[读得成年份的值](rule::parse_year)进得来。读不成的（`199X`、`一九九六`、
+    /// `+1996`）不在这儿，于是那个变体在这一维上就是取不到值。
     pub years: Vec<f64>,
     /// 刮削来的评分，0–1。眼下没有源（见 [`RATING_FIELD`]）。
     pub ratings: Vec<f64>,
@@ -863,11 +866,16 @@ impl ScrapedInto {
 
     /// 把一条刮削值收进事实里。**读不成数的值直接扔掉**——刮来的年份是字符串，
     /// 里面出现 `199X` 这种写法时，与其猜一个不如当它没有（取不到值的算法是定死的）。
+    ///
+    /// 年份与评分各自读法只有**一份定义**（[`rule::parse_year`] / [`rule::parse_rating`]），
+    /// SQL 那一侧（`catalog::filter`）逐字照它写。这里从前是 `parse::<i32>()`，
+    /// 它收下前导 `0` 与前导 `+` 而 SQL 那句不收，于是 `01996` 在屏上不算年份、
+    /// 按下同步却算——**筛出来的那批与搬过去的那批不是同一批**。
     fn absorb(self, facts: &mut VariantFacts, value: &str) {
         match self {
             Self::Genre => facts.genres.push(value.to_string()),
             Self::Year => {
-                if let Ok(year) = value.trim().parse::<i32>() {
+                if let Some(year) = rule::parse_year(value) {
                     facts.years.push(f64::from(year));
                 }
             }

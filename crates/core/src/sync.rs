@@ -45,6 +45,15 @@
 //!
 //! 格式转换要等票 21，它进来时改的仍然只是折期望状态那一步。
 //!
+//! ## 落点的目录段先与目标折齐
+//!
+//! [`plan`] 逐字比键，而目标上那个目录可能只差大小写——卡上是 `gb/`，我们的键写着
+//! `GB/`。不分大小写的目标（exFAT / FAT32 / Windows / 默认 APFS）上那**是同一个目录**，
+//! 于是文件落在 `gb/` 里、清单记成 `GB/`，第二趟起工具就认不出自己放的那一份。
+//! [`align`] 在排计划**之前**把期望状态那一侧的目录段折到盘上真实的写法上；
+//! 折不折由文件系统说了算（[`TargetState::case_insensitive`]），大小写敏感的目标上
+//! 一条都不动。
+//!
 //! ## 落到目标上的是 [`execute::run`]
 //!
 //! 计划是纯的，执行不是。两者分开，于是「只碰清单里记录过的文件」这条硬约束由计划
@@ -338,6 +347,17 @@ pub struct TargetState {
     pub files: Vec<TargetFile>,
     /// 列不开的目录数。列不开就意味着这一枝底下的东西**全部说不清**。
     pub unlistable_dirs: u64,
+    /// 走过的每一个**目录**，相对子库根的键——**`read_dir` 给的真名**折成 NFC。
+    ///
+    /// 落点的目录段拿它去折齐（[`align`]）。目录自己从不进[`清单`](Manifest)、
+    /// 也从不被删，它只回答一个问题：**卡上那个目录到底怎么拼**。
+    pub dirs: BTreeSet<String>,
+    /// 目标文件系统**认不认大小写**；`None` 是问不出来。
+    ///
+    /// `Some(true)` 是「不认」——exFAT / FAT32 / NTFS / 默认 APFS，也就是 ADR-0015 定的
+    /// 目标设备与 ADR-0018 定的主力机。只有这一态才允许 [`align`] 把 `GB/` 折到卡上那个
+    /// `gb/` 上：**折不折由文件系统说了算，不由我们猜**。
+    pub case_insensitive: Option<bool>,
 }
 
 /// 排计划时的几个开关。
@@ -567,6 +587,133 @@ impl Plan {
     pub fn touched(&self) -> u64 {
         self.steps.len() as u64
     }
+}
+
+/// [`align`] 挪动了哪几条落点：原来的键 → 折齐之后的键。
+///
+/// 期望状态里的路径同时还是**媒体池落点表**与**生成物表**的键
+/// （[`Sources::from_pool`](execute::Sources::from_pool)、
+/// [`Sources::generated`](execute::Sources::generated)），挪了这边不挪那边，
+/// 执行时就会报「在媒体池里找不到落点」。所以折齐这件事交回一份改名表，
+/// 由调用方原样落到那两张表上。
+#[derive(Debug, Clone, Default)]
+pub struct Realign {
+    moved: BTreeMap<String, String>,
+}
+
+impl Realign {
+    /// 一条都没挪吗。
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.moved.is_empty()
+    }
+
+    /// 挪了几条。
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.moved.len()
+    }
+
+    /// 把这份改名表落到一张**以落点为键**的表上。
+    pub fn apply<T>(&self, map: &mut BTreeMap<String, T>) {
+        for (from, to) in &self.moved {
+            if let Some(value) = map.remove(from) {
+                map.insert(to.clone(), value);
+            }
+        }
+    }
+}
+
+/// 把**期望状态**里那些落点的**目录段**，折到目标上真实的那个写法上。
+///
+/// ## 它挡的是哪一种损坏
+///
+/// 卡上已经有一个 `gb/`（前端建的、维护者建的，里面还躺着存档），而主库那边的键写作
+/// `GB/`。目标**不分大小写**时两者就是同一个目录：第一趟的文件其实落进了 `gb/`，清单
+/// 却记着 `GB/`。从第二趟起，[`plan`] 拿逐字键去比就再也认不出自己放的那一份——
+/// 它被报成 `Gone`、同时被数进**清单之外**，于是主库那份更新不重传、规则不要它了也不删。
+/// 目标从此不再镜像选择集。
+///
+/// 两个**根**里同一条相对路径只差大小写（`甲/GB/x.zip` 与 `乙/gb/y.zip`）走的是同一条缝：
+/// 谁先建目录谁的写法说了算，另一条的清单键当场就是假的。
+///
+/// ## 为什么折**目录**是安全的，而折**文件名**不是
+///
+/// [`plan`] 那句「**折叠只用来发现挡路的东西，绝不用来认领它**」一个字都没松：那说的是
+/// 文件——认领一个文件意味着有权更新它、删除它，而「折起来一样」证明不了「就是我们放的
+/// 那一份」。目录不一样：**目录从不进清单、也从不被删**，折它只回答「卡上那个目录怎么拼」。
+/// 何况在不分大小写的目标上，`GB/` 与 `gb/` 本来就**是同一个目录**——不折，写下去的字节
+/// 也一样落在那儿，只是清单里留下一行谎。
+///
+/// ## 判据不猜，由文件系统说了算
+///
+/// 只有 [`TargetState::case_insensitive`] 是 `Some(true)`（有正面证据说它不分大小写）
+/// 时才折。**大小写敏感的目标上一条都不动**——那儿 `GB/` 与 `gb/` 真的是两个目录，
+/// 折了就是把两棵树并成一棵。问不出来（`None`）时同样不折：保持今天的行为，而执行那一侧
+/// 记的是**盘上真实的落点**（[`execute`] 模块文档），于是即便这一趟没折齐，下一趟目录
+/// 已经在盘上了，那时折得出来。
+///
+/// 目标上还没有的目录按**第一个见到的写法**定下来（输入按路径排过，于是这个选择是
+/// 确定的），后面折起来一样的都跟着它——不然两条落点会各建各的，而卡上只会有一个。
+///
+/// **不在 [`Desired::screen`] 里报成「撞车」**：那两份内容落的是两条**不同**的路径，
+/// 卡上装得下它们。报成撞车等于为了一个拼写问题丢掉用户亲手挑中的两个文件。
+#[must_use]
+pub fn align(desired: &mut Desired, actual: &TargetState) -> Realign {
+    let mut out = Realign::default();
+    if actual.case_insensitive != Some(true) {
+        return out;
+    }
+    // 折起来的目录键 → 说了算的那个写法。先摆上目标那一侧的真名。
+    let mut canonical: BTreeMap<String, String> = actual
+        .dirs
+        .iter()
+        .map(|dir| (path::fold(dir), dir.clone()))
+        .collect();
+    for file in &mut desired.files {
+        if let Some(next) = settle(&mut canonical, &file.path) {
+            out.moved.insert(file.path.clone(), next.clone());
+            file.path = next;
+        }
+    }
+    // 拦下来的那些照样折：报告里印的是它本来要落在哪儿，那也该是卡上真实的写法。
+    for file in &mut desired.rejected {
+        if let Some(next) = settle(&mut canonical, &file.path) {
+            file.path = next;
+        }
+    }
+    desired.files.sort_by(|a, b| a.path.cmp(&b.path));
+    desired
+        .rejected
+        .sort_by(|a, b| a.reason.cmp(&b.reason).then_with(|| a.path.cmp(&b.path)));
+    out
+}
+
+/// 一条落点的目录段逐段折到 `canonical` 说了算的那个写法上；改了才给一条新的键。
+///
+/// 没记过的那一段**当场记下它自己**：后面折起来一样的都跟着头一个，于是同一批期望状态
+/// 内部先自洽，不必等目录真的建到盘上。
+fn settle(canonical: &mut BTreeMap<String, String>, path: &str) -> Option<String> {
+    let (dir, name) = path.rsplit_once('/')?;
+    let mut real = String::new();
+    let mut folded = String::new();
+    for segment in dir.split('/') {
+        if !folded.is_empty() {
+            folded.push('/');
+        }
+        folded.push_str(&path::fold(segment));
+        match canonical.get(&folded) {
+            Some(seen) => real = seen.clone(),
+            None => {
+                if !real.is_empty() {
+                    real.push('/');
+                }
+                real.push_str(segment);
+                canonical.insert(folded.clone(), real.clone());
+            }
+        }
+    }
+    (real != dir).then(|| format!("{real}/{name}"))
 }
 
 /// 三方对比，排出计划。**纯函数**：不碰磁盘、不碰中立库、不看时钟。
@@ -1302,7 +1449,7 @@ mod tests {
     fn 实际状态(files: Vec<TargetFile>) -> TargetState {
         TargetState {
             files,
-            unlistable_dirs: 0,
+            ..TargetState::default()
         }
     }
 
@@ -1888,6 +2035,90 @@ mod tests {
         );
         assert_eq!(plan.updates.files, 1);
         assert!(plan.surprises.is_empty(), "{:?}", plan.surprises);
+    }
+
+    /// 一份实际状态：走过这几个目录，而目标**不分大小写**。
+    fn 不认大小写(dirs: &[&str]) -> TargetState {
+        TargetState {
+            dirs: dirs.iter().map(|dir| (*dir).to_string()).collect(),
+            case_insensitive: Some(true),
+            ..TargetState::default()
+        }
+    }
+
+    #[test]
+    fn 卡上那个目录只差大小写_落点折到盘上那个写法() {
+        // 触发路 A：卡上已经有一个 `gb/`（前端或维护者建的），键里写的是 `GB/`。
+        let mut desired = 期望状态(vec![期望("GB/一.zip", 1024)]);
+        let moved = align(&mut desired, &不认大小写(&["gb"]));
+        assert_eq!(desired.files[0].path, "gb/一.zip");
+        assert_eq!(moved.len(), 1, "改名表要交出去，媒体与生成物那两张表跟着改");
+    }
+
+    #[test]
+    fn 分大小写的目标上一条都不折_那儿是两个目录() {
+        // ext4 / 大小写敏感的 APFS：`GB/` 与 `gb/` 真的是两个目录，折了就是并成一棵树。
+        let mut desired = 期望状态(vec![期望("GB/一.zip", 1024)]);
+        let actual = TargetState {
+            dirs: ["gb".to_string()].into_iter().collect(),
+            case_insensitive: Some(false),
+            ..TargetState::default()
+        };
+        let moved = align(&mut desired, &actual);
+        assert!(moved.is_empty());
+        assert_eq!(desired.files[0].path, "GB/一.zip");
+    }
+
+    #[test]
+    fn 问不出来认不认大小写时也一条都不折() {
+        // 子库根与它底下全是中文，翻不动大小写。**问不出来不许当成任何一边**：
+        // 保持今天的行为，而执行那一侧记的是盘上真实的落点，下一趟就折得出来了。
+        let mut desired = 期望状态(vec![期望("GB/一.zip", 1024)]);
+        let actual = TargetState {
+            dirs: ["gb".to_string()].into_iter().collect(),
+            case_insensitive: None,
+            ..TargetState::default()
+        };
+        assert!(align(&mut desired, &actual).is_empty());
+        assert_eq!(desired.files[0].path, "GB/一.zip");
+    }
+
+    #[test]
+    fn 两个根的目录段只差大小写_先在期望这一侧折成一个() {
+        // 触发路 B：`甲/GB/一.zip` 与 `乙/gb/二.zip` 剥掉根名之后要落进**同一个**目录。
+        // 卡上还没有那个目录，于是**头一个写法说了算**——不折的话先建的那个赢，
+        // 另一条的清单键当场就是假的。
+        let mut 甲 = 期望("GB/一.zip", 1024);
+        甲.source = "甲/GB/一.zip".to_string();
+        let mut 乙 = 期望("gb/二.zip", 2048);
+        乙.source = "乙/gb/二.zip".to_string();
+        let mut desired = 期望状态(vec![甲, 乙]);
+        desired.screen(&Filesystem::unlimited(), 0);
+        assert_eq!(desired.files.len(), 2, "两条落点不同，装得下，一个都不该拦");
+
+        let _ = align(&mut desired, &不认大小写(&[]));
+        let 落点: Vec<&str> = desired.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(落点, ["GB/一.zip", "GB/二.zip"], "折成同一个目录");
+    }
+
+    #[test]
+    fn 多层目录逐段折_而且认卡上那一层() {
+        let mut desired = 期望状态(vec![期望("Roms/GB/一.zip", 1024)]);
+        let _ = align(&mut desired, &不认大小写(&["roms", "roms/gb"]));
+        assert_eq!(desired.files[0].path, "roms/gb/一.zip");
+    }
+
+    #[test]
+    fn 拦下来的那些也跟着折_报告里印的该是卡上真实的写法() {
+        let mut desired = 期望状态(vec![期望("GB/大.iso", 8 * 1024 * 1024 * 1024)]);
+        let fat32 = Filesystem {
+            max_file_bytes: Some(4 * 1024 * 1024 * 1024 - 1),
+            ..Filesystem::unlimited()
+        };
+        desired.screen(&fat32, 0);
+        assert_eq!(desired.rejected.len(), 1, "FAT32 装不下 8 GiB");
+        let _ = align(&mut desired, &不认大小写(&["gb"]));
+        assert_eq!(desired.rejected[0].path, "gb/大.iso");
     }
 
     #[test]

@@ -301,6 +301,27 @@ pub struct ScanOutcome {
     pub probe: Option<probe::Probe>,
     /// 这一趟有没有重新**成型**。中断的扫描不成型——半个库成出来的变体是错的。
     pub shaped: bool,
+    /// 要了续跑却没续上：断点在，可它记的扫描根不是这一趟这个。
+    ///
+    /// 只在这时候有值，别的「没续上」（压根没断点、断点的身份对不上）都是 `None`——
+    /// 那些是常态，说出来只会变成噪音。
+    pub resume_declined: Option<ResumeDeclined>,
+}
+
+/// 断点在，却续不上，于是这一趟**从头扫**。
+///
+/// 只有一种形状会走到这儿：断点记的扫描根与这一趟要扫的不是同一个——盘换了挂载点，
+/// 而 ADR-0018 定的工作方式（一块盘在两台机器之间来回接）加上 ADR-0020 记的
+/// `/Volumes/甲` → `/Volumes/甲 1`，让这成了主路径而不是边缘情况。
+///
+/// 从头扫是**正确结果**：断点里的 `pending` 全是旧挂载点下的绝对路径，换了根接不下去。
+/// 但它值一句话——用户点名要了续跑，而 10T 库上从头走一趟是几十分钟。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeDeclined {
+    /// 断点记的扫描根。
+    pub recorded: String,
+    /// 这一趟要扫的根。
+    pub current: String,
 }
 
 /// 扫一遍主库里的**一个根**，把结论写进中立库。
@@ -493,7 +514,21 @@ pub fn scan(
     let shaped = !interrupted;
     if shaped {
         let _ = task.step("成型");
-        shape::reshape(catalog, &options.manifest, start.scan)?;
+        // **成型对着的是整份库，代号也就该是整份库的**（ADR-0022：成型是中立库上的
+        // 一遍纯计算，输入是 `entry` 表的全部键，不分根）。
+        //
+        // 这里不能用 `start.scan`：续跑沿用的是断点里那个**旧代号**——那对收尾是对的
+        // （删的是「这个根这一趟没见到的」），但中间要是扫过别的根，全局代号早被推走，
+        // 拿它去记「成型跑到哪一趟为止」就是把 `shaped_scan` 往回退，而报告比的是
+        // `last_traversal()`（全库最后一趟），于是刚成完型就被说成「成型比库旧」。
+        //
+        // 本趟那一行上面刚 `save_traversal` 过，所以全局最大**一定**不小于本趟；
+        // `max` 那一下只是把这句话写死在代码里，省得读的人回头去数调用顺序。
+        let shaped_scan = catalog
+            .last_traversal()?
+            .map_or(start.scan, |latest| latest.scan)
+            .max(start.scan);
+        shape::reshape(catalog, &options.manifest, shaped_scan)?;
     }
     let checkpoint_path =
         finish_checkpoint(options, &root, &queue, start.scan, &traversal, interrupted)?;
@@ -518,6 +553,7 @@ pub fn scan(
         checkpoint_path,
         probe: measured,
         shaped,
+        resume_declined: start.declined,
     })
 }
 
@@ -546,6 +582,7 @@ struct StartState {
     scan: i64,
     elapsed_base: Duration,
     resumed: bool,
+    declined: Option<ResumeDeclined>,
 }
 
 /// 这一趟扫的是哪个**根**：认下名字，再核一遍它还是不是原来那块盘。
@@ -712,9 +749,21 @@ fn guard_same_root(
 /// - **移除再加回**同名同路径的根：那个根的遍历行随 [`Catalog::remove_root`] 一起没了，
 ///   断点再也对不上谁——从头扫一遍。老判据在这里恰好放行，只扫 `pending` 那一半，
 ///   收尾什么都删不到，扫完却报「完整」。
+/// - **换了挂载点**：断点记的扫描根是 `/Volumes/甲`，这一趟扫的是 `/Volumes/甲 1`
+///   （[`CheckpointError::RootMismatch`]）。`pending` 里全是旧挂载点下的**绝对路径**，
+///   接着扫本来就接不下去——从头扫一遍，并在 [`ScanOutcome::resume_declined`] 上
+///   说清是为什么。
 ///
-/// 对不上一律**从头扫**而不是报错：移除再加回本来就是「当它是新的」的意思，加回来
-/// 第一趟本该从头走；报错只会逼用户去找一个他不知道在哪的断点文件。
+/// 对不上一律**从头扫**而不是报错，三种都一样：移除再加回本来就是「当它是新的」的
+/// 意思；换挂载点是 ADR-0018 那套两机工作流的主路径，而命令行中断时提示的正是
+/// 「加 `--resume` 接着扫」，那句提示不该在盘重挂一次之后变成一句死错误。报错只会逼
+/// 用户去找一个他不知道在哪的断点文件，而且报错**发生在 `resolve_root` 之后**——库里
+/// 根的位置早改成了新挂载点，用户手上剩一个改了一半的库。折成从头扫之后这个顺序
+/// 反倒是对的：根确实搬了家，改掉它、再把新位置整个扫一遍，正是这一趟该做的事。
+///
+/// **旧断点留着不删**。这一趟一开工就会把它覆盖成新根那一份（`save_checkpoint`），
+/// 完整扫完则直接删掉（`finish_checkpoint`）——两条路都收敛。抢在开工前删反而是净损失：
+/// 刚要开扫就被 Ctrl-C 的话，那份对着旧挂载点、把盘挂回去还能用的断点白丢了。
 fn load_start_state(
     options: &ScanOptions,
     root: &Path,
@@ -727,6 +776,7 @@ fn load_start_state(
         scan: next,
         elapsed_base: Duration::ZERO,
         resumed: false,
+        declined: None,
     };
     let Some(config) = &options.checkpoint else {
         return Ok(fresh());
@@ -734,7 +784,22 @@ fn load_start_state(
     if !config.resume || !config.path.exists() {
         return Ok(fresh());
     }
-    let checkpoint = Checkpoint::load(&config.path, root)?;
+    let checkpoint = match Checkpoint::load(&config.path, root) {
+        Ok(checkpoint) => checkpoint,
+        // 换挂载点。**断点已经按根名分文件**，身份也由中立库里那条遍历行守着，所以
+        // 这道检查剩下的用处只是拦「拿甲盘的断点去续乙盘」——而同一个根名底下换了
+        // 另一块盘，`guard_same_root` 早在这之前就拦住了。
+        Err(CheckpointError::RootMismatch { stored, current }) => {
+            return Ok(StartState {
+                declined: Some(ResumeDeclined {
+                    recorded: stored,
+                    current,
+                }),
+                ..fresh()
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
     let pending = checkpoint.pending();
     if pending.is_empty() {
         return Ok(fresh());
@@ -751,6 +816,7 @@ fn load_start_state(
         scan: checkpoint.scan,
         elapsed_base: Duration::from_millis(checkpoint.elapsed_ms),
         resumed: true,
+        declined: None,
     })
 }
 

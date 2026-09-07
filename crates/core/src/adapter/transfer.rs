@@ -272,6 +272,12 @@ fn resolve_in(
 /// 标题值折出标题集合的，挂到作品上它看不见。其余字段挂在作品上——简介、年份、
 /// 发行商跨平台跨地区都成立（`CONTEXT.md` 的「作品」词条）；作品还没认出来时
 /// 一并挂在变体上，否则那几个值无处安放。
+///
+/// **开发商、发行商与类型是集合字段：有几条落几条。** 维护者用续行写了两家开发商
+/// （Pegasus 官方文档里 `files:` 那种写法），只落头一家的话，导出那一趟会拿库里
+/// 那一条去比他手里那两条，判成「变了」再把整段续行重写成一行——第二家当场蒸发，
+/// 而 `scrape_value` 的主键里带着值本身，本来就装得下几条（`catalog::scrape` 的
+/// 表注释）。一条都不许少，这正是「一次往返不蒸发心血」（ADR-0001）。
 fn landed(
     source: &str,
     fingerprint: &str,
@@ -298,9 +304,16 @@ fn landed(
             });
         }
     };
-    push(Field::Developer, game.developers.first().cloned());
-    push(Field::Publisher, game.publishers.first().cloned());
-    push(Field::Genre, game.genres.first().cloned());
+    // 集合字段：**一个值一条**，与中文离线源那一侧（`scrape::zh::collect_facts`）同一个形状。
+    for (field, values) in [
+        (Field::Developer, &game.developers),
+        (Field::Publisher, &game.publishers),
+        (Field::Genre, &game.genres),
+    ] {
+        for value in values {
+            push(field, Some(value.clone()));
+        }
+    }
     push(Field::Description, game.description.clone());
     push(
         Field::Year,

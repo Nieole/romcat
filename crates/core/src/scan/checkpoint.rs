@@ -18,6 +18,12 @@
 //!   断点写下之后中立库那边发生过什么——别的根扫过一遍、这个根被移除又加回来——
 //!   只有中立库知道。一份断点跟一个根走（[`workspace::checkpoint_path`](crate::workspace::checkpoint_path)），
 //!   所以这里存的 `root` 只够拦「拿甲盘的断点去续乙盘」那一种用错。
+//!
+//! **对不上不是错误，是「从头扫」。** [`Checkpoint::load`] 照旧把
+//! [`CheckpointError::RootMismatch`] 抛出来——这个类型说得清是哪两条路径对不上——
+//! 但 `scan::load_start_state` 收到它之后折成从头扫，不把整趟扫描打断：换挂载点是
+//! ADR-0018 那套两机工作流的主路径，而断点里的 `pending` 是旧挂载点下的绝对路径，
+//! 换了根本来就续不下去。
 
 use std::ffi::OsString;
 use std::fs;
@@ -281,7 +287,9 @@ mod tests {
     }
 
     #[test]
-    fn 扫描根对不上时拒绝续跑() {
+    fn 扫描根对不上时读出来的是一句说得清的错() {
+        // 它只是把「哪两条路径对不上」说清楚，**不代表整趟扫描要失败**：
+        // `scan::load_start_state` 收到它折成从头扫（见 `tests/checkpoint_root.rs`）。
         let dir = crate::testing::temp_dir("checkpoint");
         let file = dir.path().join("checkpoint.json");
         Checkpoint::new(Path::new("/lib"), 32, &[], 1, 0)

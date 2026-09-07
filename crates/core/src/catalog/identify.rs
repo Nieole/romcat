@@ -222,6 +222,11 @@ CREATE TABLE IF NOT EXISTS model_call(
 -- 里面装的每一样都**可再生**（识别重跑一遍就有），所以它按中立库的规矩活：
 -- [`Catalog::clear_identifications`] 把它一起清掉。清掉之后那一批的中立库那一半就撤不
 -- 回来了——那是实话，也不是损失：那时该做的本来就是再跑一趟识别。
+--
+-- 它**也跟着变体活**：每一行的主语是一个变体的键，那个变体没了（改名、挪目录）或者
+-- 它的字节换了，这一行说的「之前」就不再是任何人的之前，随 `drop_variant_orphans` /
+-- `drop_stale_conclusions` 一起收掉。留着它只会让撤销的账说「中立库那一半也回去了
+-- （0 个变体）」，而那几份内容眼下是**还没识别**、不在队列里。
 CREATE TABLE IF NOT EXISTS verdict_batch_shadow(
     -- 沉淀库里那一批的编号（`verdict::Batch::id`）。**编号由沉淀库发**——批本身住在
     -- 那边，因为被盖掉的旧裁决除了那儿没有第二份。
@@ -363,18 +368,22 @@ pub enum Tier {
     Medium,
     /// **低置信**：文件名规则、模糊匹配与模型推断那几层的产物。
     Low,
-    /// **还没识别**：一条候选都没有，谈不上置信度。它不是「猜得不准」，是**一个字都没说**。
+    /// **没有候选**：一条候选都没有，谈不上置信度。它不是「猜得不准」，是**一个字都没说**。
     ///
-    /// ⚠️ 这个词与词表里那条「**还没识别**：一个变体连识别都还没跑过」**不是一回事**。
-    /// 界面上「这一格没有置信度可标」一直写的就是这四个字（`browse::WorkRow::confidence_label`
-    /// 与浏览屏的变体行都是），这里跟着它，为的是同一个东西在五屏里说同一个词
-    /// ——那正是票 `gui-redesign/09` 验收第 6 条要的。**两个用法该并成一个还是分成两个词，
-    /// 记在挂单 `Q84` 上交给 `/domain-modeling`。**
+    /// ⚠️ 这一档**曾经也叫「还没识别」**，与词表里那条「**还没识别**：一个变体连识别都
+    /// 还没跑过」撞词（挂单 `Q84`）。撞词在待确认屏上撞出了一个真的错账：屏头同时要说
+    /// 这一档有几条、又要说库里**连识别都没跑过**的有几个（[`NOT_RUN_LABEL`]），
+    /// 两句话写的是同四个字、数的是两回事，于是后一句一直没人敢加。按 `Q84` 给的第一条
+    /// 路——**给这一档另起一个词**——改成「没有候选」，两句话这才并得进同一屏。
     ///
     /// 词表那一条在核心里落成 [`NOT_RUN_LABEL`] 与各处的 `not_run` 计数
     /// （[`Catalog::not_run_count`](super::Catalog::not_run_count)）。**这一档里的条目
     /// 全都跑过识别**——它们进得了[待确认队列](crate::triage)，只是一条候选都没有；
     /// 那一条里的变体**连队列都进不去**，因为库里根本没有它们的结论。
+    ///
+    /// **浏览屏那一半还没跟上**：`browse::WorkRow::confidence_label` 与浏览屏的变体行
+    /// 仍写着「还没识别」，说的却是这一档的意思。`Q84` 因此仍然开着，收口是票
+    /// `gui-redesign/12`「五屏一起改」的活。
     Unidentified,
 }
 
@@ -382,7 +391,7 @@ impl Tier {
     /// 四档全在这儿，屏上照这个次序摆。
     pub const ALL: [Self; 4] = [Self::High, Self::Medium, Self::Low, Self::Unidentified];
 
-    /// 从一条候选的置信度折过来；`None` 就是**还没识别**。
+    /// 从一条候选的置信度折过来；`None` 就是**没有候选**。
     #[must_use]
     pub fn of(confidence: Option<Confidence>) -> Self {
         match confidence {
@@ -395,13 +404,17 @@ impl Tier {
 
     /// 打给用户的那个词。前三档与 [`Confidence::label`] **逐字一样**——
     /// 同一件事在两处写成两个词，用户会以为那是两件事。
+    ///
+    /// 第四档**故意不叫 [`NOT_RUN_LABEL`]**：那四个字归词表那条「连识别都还没跑过」，
+    /// 而这一档说的是「跑过了，只是一条候选都没有」。同屏要把两个数并排说出来
+    /// （待确认屏的屏头），它们就不能是同一串字。
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::High => Confidence::High.label(),
             Self::Medium => Confidence::Medium.label(),
             Self::Low => Confidence::Low.label(),
-            Self::Unidentified => "还没识别",
+            Self::Unidentified => "没有候选",
         }
     }
 }
@@ -422,10 +435,10 @@ impl Tier {
 /// 混在一起，命中率就失真——真机上那正是「4 个变体识别完、又扫进 1 个新文件」之后
 /// 报告说「变体 4」的那个坑：第 5 个连分母都进不去，覆盖率虚高。
 ///
-/// ⚠️ **与 [`Tier::Unidentified`] 撞词**：那一档的标签也是这四个字，说的却是
-/// 「这一格没有置信度可标」（一条候选都没有，但**识别跑过了**）。两个用法的取舍记在
-/// 挂单 `Q84` 上，交给 `/domain-modeling`；在那之前，**核心里这两件事的 Rust 名字
-/// 必须分得开**：`not_run` 是「识别还没跑」，`Unidentified` 是「没有候选」。
+/// **与 [`Tier::Unidentified`] 分得开**：那一档从前也叫这四个字，说的却是
+/// 「这一格没有置信度可标」（一条候选都没有，但**识别跑过了**），同屏并排说两个数时
+/// 撞在一起。现在那一档叫「**没有候选**」，五屏同用一个词（`Tier::label`）；
+/// 词表要不要为它另立词条，记在票 `gui-redesign/16`（挂单 `Q84`）。
 pub const NOT_RUN_LABEL: &str = "还没识别";
 
 /// 一个变体这一轮识别的结论。
@@ -1734,7 +1747,15 @@ impl Catalog {
     }
 
     /// 一批的快照里还剩几个变体。**撤销之前问它**：为 0 就是这一批的中立库那一半
-    /// 已经随重跑识别清掉了，那时只回滚得了沉淀库那一半，该如实说出来。
+    /// 已经回不去了，那时只回滚得了沉淀库那一半，该如实说出来。
+    ///
+    /// 两条来路：重跑识别把它整批清掉了（[`Catalog::clear_identifications`]），
+    /// 或者这几个变体改过名、挪过位置、字节换过，快照跟着旧键一起作废了
+    /// （`drop_variant_orphans` / `drop_stale_conclusions`）。
+    ///
+    /// **它数的是「快照还在几个变体上」，不是「撤销放得回去几个」**：混着读，一批里
+    /// 一半变体改过名时账就说得比做到的多。放回去了几个由
+    /// [`Catalog::restore_conclusions`] 的返回值说了算。
     ///
     /// # Errors
     /// 读库失败时返回错误。
@@ -2563,6 +2584,10 @@ impl Catalog {
 /// 于是这一步跟着 [`Catalog::replace_variants`] 走：那是变体表唯一的写入口，
 /// 在它那个事务里跑，收不干净就跟着一起回滚。
 ///
+/// **「变体没了」与「变体的字节变了」还是两件事**：后者键一个字没变，落不进这张网，
+/// 由 [`drop_stale_conclusions`] 在扫描写库那一步收——两者收的是同几张表，
+/// 判据一个问「键还在不在」，一个问「那份字节还是不是原来那份」。
+///
 /// ## 为什么不怕把结论清光
 ///
 /// 判据是**键还在不在**，不是「这一趟有没有重新成型」。成型只是把散落的文件重聚一遍，
@@ -2579,6 +2604,17 @@ impl Catalog {
 /// [`Catalog::restore_conclusions`] 收尾那两句是同一条路，只是那里按一批划范围，
 /// 这里按整库——重新成型本来就是整库一遍的纯计算。
 ///
+/// ## 一**批**裁决的**快照**也在这份清单里
+///
+/// `verdict_batch_shadow` 那两张表存的是「这一批落下之前，这几个变体是什么样」——
+/// 说的是**某个变体的键**。那个键没了，那句话就没有主语了：同一份内容改过名、挪过目录
+/// 之后，旧键的快照一行都放不回去（[`Catalog::restore_conclusions`] 插不进、改不动），
+/// 而 [`Catalog::stashed`] 照旧数得出它，于是撤销的账上会说「中立库那一半也回去了
+/// （0 个变体）」——那是许诺队列里有东西，而新键上那份内容是**还没识别**、压根不在队列里。
+///
+/// 它跟着这一步走的判据与上面几张表同一条：**可再生**（重跑一趟识别就有）、
+/// **指不着任何变体**。批本身与它盖掉的旧裁决一条都不受影响，那些住在**沉淀库**里。
+///
 /// **`model_answer` 不在这份清单里**：那是唯一花过钱的一张表，键回来了还白拿一次
 /// （见它自己那段表注释）。**人工纠正与合集成员也不在**：那两样明写着不随重新成型消失。
 pub(super) fn drop_variant_orphans(tx: &Transaction<'_>) -> rusqlite::Result<()> {
@@ -2592,6 +2628,104 @@ pub(super) fn drop_variant_orphans(tx: &Transaction<'_>) -> rusqlite::Result<()>
         "DELETE FROM identification WHERE variant_key NOT IN (SELECT key FROM variant)",
         [],
     )?;
+    tx.execute(
+        "DELETE FROM verdict_batch_shadow_candidate
+         WHERE variant_key NOT IN (SELECT key FROM variant)",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM verdict_batch_shadow WHERE variant_key NOT IN (SELECT key FROM variant)",
+        [],
+    )?;
+    drop_unheld_works(tx)
+}
+
+/// 这几个**条目**的字节变了，挂在它们所属**变体**上的识别结论就此作废。
+///
+/// ## 判据是「成员的三元组变了」
+///
+/// 扫描这一层拿得到的只有 `(路径, 大小, 修改时间)`——内容哈希要到识别那一趟才算，
+/// 而它本身正是这一步要作废的东西之一。于是「内容变了」在这里就是
+/// [`Verdict::Changed`](crate::catalog::Verdict)：变体的任一成员的三元组变了，
+/// 这个变体那份结论就不再是「这份字节」的结论。
+///
+/// **成员集合变了不走这条路**：加进来的是一个新键，它这一趟还不属于任何变体；
+/// 少掉的那个由重新成型之后的 [`drop_variant_orphans`] 按「键还在不在」收。
+///
+/// ## 为什么落在 [`Catalog::write`] 而不是 `replace_variants`
+///
+/// **只有这一处看得见「变体级的变化」。** 成型是键的纯函数（ADR-0022），它看得见
+/// 哪个变体没了，看不见哪个变体的字节换了——`replace_variants` 拿到的是一份变体清单，
+/// 里面没有「这一趟哪几个条目变了」。而扫描写库这一步手里正好有那份判断，
+/// 与它作废 `content_hash` 那几张内容表是同一个分支、同一个事务。
+///
+/// **中断的扫描也走到这里**，那正是要的：成型与删除都只在完整扫完一遍之后跑，
+/// 而这条结论已经确定对不上盘上的字节了，早一步作废好过在库里多躺半趟。
+///
+/// ## 作废哪几样，不作废哪几样
+///
+/// 走的是 `candidate`、`identification`，以及变体身上那两条 `work_id` / `release_id`
+/// 链接——三样都是**按字节**得出来的，字节换了就都不算数（`CONTEXT.md` 的**识别**）。
+/// 收尾照 [`drop_variant_orphans`] 那两句收一遍没人指的作品与发行版。
+///
+/// **一批裁决的快照跟着走**（`verdict_batch_shadow` 那两张表，与
+/// [`drop_variant_orphans`] 收的是同几张表）：快照说的是「这一批落下之前这个变体是什么
+/// 样」，而那句话说的是**旧字节**。留着它，撤销会拿一份对着旧字节算出来的结论盖在新
+/// 字节上——正是这一步要治的那种「新字节配旧结论」。撤销那时改说「中立库那一半没回去，
+/// 跑一趟 `romcat identify`」，那是实话。
+///
+/// **刮削的结论不走**：它锚在作品名或变体的键上（`CONTEXT.md` 的**锚点**），
+/// 这一次变的是字节不是名字。作品真成了孤儿的话，它连同挂在上面的东西一起被收掉。
+///
+/// **沉淀库里那条裁决更不动**：那是人定的、不可再生的（ADR-0008），中立库里这几行
+/// 只是它的投影。下一趟识别按锚重新投影一遍——新字节撞不上旧锚，本来就该撞不上。
+pub(super) fn drop_stale_conclusions(
+    tx: &Transaction<'_>,
+    changed: &BTreeSet<String>,
+) -> rusqlite::Result<()> {
+    let mut variants: BTreeSet<String> = BTreeSet::new();
+    {
+        // 一个条目只属于一个变体（`variant_member.key` 就是主键），因此这是一次索引命中。
+        let mut owner = tx.prepare("SELECT variant_key FROM variant_member WHERE key = ?1")?;
+        for key in changed {
+            if let Some(variant_key) = owner
+                .query_row(params![key], |row| row.get::<_, String>(0))
+                .optional()?
+            {
+                variants.insert(variant_key);
+            }
+        }
+    }
+    if variants.is_empty() {
+        return Ok(());
+    }
+    {
+        // 顺序与 `drop_variant_orphans` 同源：从引用方往被引用方走。
+        let mut drop_candidates = tx.prepare("DELETE FROM candidate WHERE variant_key = ?1")?;
+        let mut drop_identification =
+            tx.prepare("DELETE FROM identification WHERE variant_key = ?1")?;
+        let mut unlink =
+            tx.prepare("UPDATE variant SET work_id = NULL, release_id = NULL WHERE key = ?1")?;
+        let mut drop_shadow_candidates =
+            tx.prepare("DELETE FROM verdict_batch_shadow_candidate WHERE variant_key = ?1")?;
+        let mut drop_shadow =
+            tx.prepare("DELETE FROM verdict_batch_shadow WHERE variant_key = ?1")?;
+        for variant_key in &variants {
+            drop_candidates.execute(params![variant_key])?;
+            drop_identification.execute(params![variant_key])?;
+            unlink.execute(params![variant_key])?;
+            drop_shadow_candidates.execute(params![variant_key])?;
+            drop_shadow.execute(params![variant_key])?;
+        }
+    }
+    drop_unheld_works(tx)
+}
+
+/// 收掉眼下没人指着的作品与发行版。
+///
+/// 闸是「还有没有人指着它」，而不是「它是怎么来的」——这两张表每一行都可再生，
+/// 判据写在 [`drop_variant_orphans`] 的「作品与发行版凭什么也删得」那一段。
+fn drop_unheld_works(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     tx.execute(
         "DELETE FROM release
          WHERE NOT EXISTS(SELECT 1 FROM variant v WHERE v.release_id = release.id)

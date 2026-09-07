@@ -863,6 +863,13 @@ impl Catalog {
     /// 报告拿它跑一遍**真正的合并**——不跑的话，「按字段级优先级合并」就只是一个
     /// 库函数，产品里没有任何地方证明它在工作。
     ///
+    /// **次序按主键排到底**（锚点、主体、字段、源、值），不只排到主体。集合字段
+    /// （开发商、发行商、类型）在同一个锚点上并存好几条，导出那一侧原样交给前端
+    /// （[`Priorities::pick_all`](crate::scrape::priority::Priorities::pick_all)），
+    /// 只排到主体的话，同一份库跑两次交出来的先后可能不一样——查询计划换一个索引就够了。
+    /// 于是排到底：先后是**码位序**，稳定、说得出口。数据源里的**原次序**这一层拿不到
+    /// （`scrape_value` 上没有那一列，挂单 Q27），所以拿次序说事的人别指望这里。
+    ///
     /// # Errors
     /// 读库失败时返回错误。
     pub fn for_each_scraped_value(&self, each: &mut ScrapedVisitor) -> Result<(), CatalogError> {
@@ -870,7 +877,7 @@ impl Catalog {
             .conn
             .prepare(
                 "SELECT anchor, subject, field, source, value, at FROM scrape_value
-                 ORDER BY anchor, subject",
+                 ORDER BY anchor, subject, field, source, value",
             )
             .map_err(|source| self.err(source))?;
         let mut rows = statement.query([]).map_err(|source| self.err(source))?;

@@ -988,8 +988,11 @@ struct ScanArgs {
     #[arg(long, value_name = "目录")]
     workspace: Option<PathBuf>,
 
-    /// 从上次中断的地方接着扫
-    #[arg(long)]
+    /// 从上次**断点**接着扫。断点按 (库, 根) 分，找的是这个根自己那一份
+    ///
+    /// 与 `--no-checkpoint` 互斥：不写断点也就没有断点可续，两个一起给必是手滑。
+    /// 断点对不上这一趟（换了挂载点、这个根被移除又加回来）时不报错，从头扫一遍
+    #[arg(long, conflicts_with = "no_checkpoint")]
     resume: bool,
 
     /// 不写断点（也就不能续跑）
@@ -1317,8 +1320,33 @@ fn checkpoint_root_name(explicit: Option<&str>, root: &Path) -> String {
     }
 }
 
+/// 开库之前先看一眼这个**根**在不在。
+///
+/// **建库这件事本身就是开工。** [`Catalog::open`] 会当场把中立库文件建出来、把表建好，
+/// 而它的调用方是这一层（`open_catalog`）——核心的 `scan::scan` 接手时库早就开着了，
+/// 所以那道「盘不在位」的闸（`scan::resolve_root`）再往前挪也挡不住这一件。判据只好
+/// 留在这儿：一条打错的路径不该在工作目录里留下一份空中立库，让往后的 `report` /
+/// `triage list` 都把它当成一份真库——中立库是**每个主库一份**（`CONTEXT.md`）。
+///
+/// 这不是把核心那道闸搬过来：核心照旧自己化开、自己核一遍（`ScanError::Root`），
+/// 这里只是抢在建文件之前多问一次 `stat`。
+fn ensure_root_is_dir(root: &Path) -> Result<(), String> {
+    match fs::metadata(root) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(format!(
+            "扫描根不可用：{}（不是一个目录）",
+            path::display(root)
+        )),
+        Err(error) => Err(format!("扫描根不可用：{}（{error}）", path::display(root))),
+    }
+}
+
 fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
     // 先拦，再扫：10T 扫上几个钟头才发现文件写不出去，代价太大。
+    // 根在不在排在最前面——它一句话就能问出来，而后面每一步都在往工作目录里留东西。
+    if let Err(message) = ensure_root_is_dir(&args.root) {
+        return fail(message);
+    }
     if let Err(message) = args.output.refuse_targets_in_library(&args.root) {
         return fail(message);
     }
@@ -1390,6 +1418,15 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
         }
     };
 
+    if let Some(declined) = &outcome.resume_declined {
+        // 点名要了 `--resume` 却从头扫了一遍，这事得说出来：10T 库上那是几十分钟，
+        // 而用户以为自己接着上一趟跑。说出口也顺带指明了原因是盘换了挂载点。
+        eprintln!(
+            "断点记的扫描根是 {}，这一趟扫的是 {}——盘换了挂载点，\
+             断点里记着的目录接不下去，于是从头扫了一遍。",
+            declined.recorded, declined.current
+        );
+    }
     if outcome.shaped {
         eprintln!(
             "成型完毕：{} 个变体。",
@@ -3796,11 +3833,15 @@ fn run_triage_undo_batch(args: &TriageUndoArgs) -> ExitCode {
              它们已经回到待裁决，不必重跑识别。**",
             thousands(account.variants),
         );
-    } else {
+    } else if account.removed > 0 {
+        // **一个变体都没回去时不许指着队列说话。** 两条来路：这一批之后跑过识别
+        // （快照随那一趟清掉了），或者那几份内容改过名、挪过位置——快照跟着旧键作废，
+        // 新键上那份内容是**还没识别**，不在队列里，`triage list` 一条都列不出来。
         println!(
-            "⚠️ 这一批落下之后跑过识别（或者中立库重建过），\n\
-             中立库那一半的快照已经随那一趟清掉了。沉淀库这一半撤干净了；\n\
-             要让它们回到队列，再跑一趟 `romcat identify`。",
+            "⚠️ 中立库那一半**没有**回去：这一批落下之后跑过识别（或者中立库重建过），\n\
+             快照已经随那一趟清掉了；也可能那几份内容改过名、挪过位置，\n\
+             快照上那几个键在库里已经找不着了。沉淀库这一半撤干净了；\n\
+             那几份内容眼下是**还没识别**，不在待裁决里——跑一趟 `romcat identify` 才回得来。",
         );
     }
     println!(
@@ -5278,10 +5319,24 @@ fn run_zh_judge(args: &ZhJudgeArgs) -> ExitCode {
         );
     }
     if args.yes {
-        println!(
-            "  这一次匹配带来的字段**一并定下**：下一趟 `romcat scrape` 会把它们的依据\
-             改写成「由人工裁决确认过」，不再进待确认队列。一个字都不必清。"
-        );
+        if judged.from_variant {
+            println!(
+                "  这一次匹配带来的字段**一并定下**：下一趟 `romcat scrape` 会把它们的依据\
+                 改写成「由人工裁决确认过」，不再进待确认队列。一个字都不必清。"
+            );
+        } else {
+            // **许诺要说得准**：库里眼下没有这个变体从这条条目撞出来的字段，「一并定下」
+            // 当场没有东西可定。下一趟撞不撞得出来是另一件事，而它取决于两道闸——
+            // 说清楚是哪两道，人才知道下一步该看什么。
+            println!(
+                "  库里眼下**没有这个变体从这条条目撞出来的字段**，所以「一并定下」这一刻\
+                 没有东西可定。下一趟 `romcat scrape` 撞得出这条条目的话，人裁过的这一条\
+                 会排到最前、依据写「由人工裁决确认过」——**够不着中置信那一档、或者被\
+                 候选条数截在外面的，人说过就够得着了**。仍旧撞不出来的只剩一种：正题与\
+                 这条条目的名字压根不是一回事（数字与拉丁字母对不上，或者平台/年份两道\
+                 交叉校验直接冲突）。`romcat zh find <文件名>` 看得见这个变体撞得出哪几条。"
+            );
+        }
     } else {
         println!(
             "  就地清掉了 {} 条字段值{}。**这个变体**重跑 `romcat scrape` 不会再撞回\
@@ -5294,6 +5349,14 @@ fn run_zh_judge(args: &ZhJudgeArgs) -> ExitCode {
                 _ => String::new(),
             },
         );
+        if judged.cleared > 0 {
+            // **标题集合是跟着折过的**，不必再叫人去跑一次 `romcat titles`。
+            println!(
+                "  标题集合跟着重折了一遍，退出去 {} 条叫法——详情面板与导出的**显示标题**\
+                 这一刻就不会再挑到这条条目了。",
+                thousands(judged.untitled),
+            );
+        }
         // **作品那一层不许跟着一起许诺。** 那几栏是名下变体**数票**数出来的
         // （`zh::judge` 的文档），别的变体还撞着同一条条目时，下一趟它们照样投这一票。
         // 上面那句话把「不会再撞回来」许到作品头上，就是又一句报告说的假话（票 06）。

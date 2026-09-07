@@ -380,7 +380,7 @@ fn 置信度四档在两屏上是同一个词() {
         .iter()
         .map(|tier| tier.label())
         .collect();
-    assert_eq!(词, vec!["高置信", "中置信", "低置信", "还没识别"]);
+    assert_eq!(词, vec!["高置信", "中置信", "低置信", "没有候选"]);
 
     let workspace = 工作目录("四档");
     let mut app = 浏览(&workspace);

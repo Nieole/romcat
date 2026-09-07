@@ -1487,3 +1487,150 @@ fn 队列缩到很小时那一堆的作品名照旧对得上文件名() {
         assert_eq!(groups[0].values.len(), 6, "{rows} 条");
     }
 }
+
+/// 一份**手搭的**中立库，形状照排查报告里那份现场来：3 个变体，2 个跑过识别
+/// （1 个命中、自动通过，1 个未命中、带一条低置信候选进队列），**1 个连识别都还没跑过**。
+///
+/// 合成数据造不出第三种——`demo::queue` 给每个变体都写了一行结论。而这一屏最该说清的
+/// 正是它：同一份库，命令行 `triage list` 印「另有 1 个变体连识别都还没跑过」。
+fn 有一个连识别都没跑过的库() -> App {
+    use romcat_core::catalog::identify::Identification;
+    use romcat_core::catalog::{Candidate, Catalog, Confidence, State};
+    use romcat_core::dat::Convention;
+    use romcat_core::platform::Manifest;
+    use romcat_core::shape::{Role, SINGLE_FILE_RULE, Variant};
+    use romcat_core::site::Site;
+    use romcat_core::verdict::Store;
+
+    let catalog = Catalog::open_in_memory().expect("开得出中立库");
+    let _ = romcat_core::catalog::roots::add_root(
+        &catalog,
+        None,
+        "主库",
+        std::path::Path::new("/主库"),
+    );
+    let 变体 = |name: &str, platform: &str| {
+        let key = format!("主库/{platform}/{name}");
+        Variant {
+            main_key: key.clone(),
+            platform: Some(platform.to_string()),
+            rule: SINGLE_FILE_RULE.to_string(),
+            manual: false,
+            files: 1,
+            bytes: 4096,
+            unreadable_files: 0,
+            members: vec![(key.clone(), Role::Main)],
+            key,
+        }
+    };
+    let mut catalog = catalog;
+    let variants = vec![
+        变体("命中.zip", "SFC"),
+        变体("未命中.zip", "FC"),
+        变体("还没轮到它.zip", "GB"),
+    ];
+    catalog
+        .replace_variants(&variants, 1, &Manifest::default())
+        .expect("写得进变体");
+    let 候选 = |accepted: bool, confidence| Candidate {
+        member_key: String::new(),
+        inner: String::new(),
+        confidence,
+        accepted,
+        source: "合成".to_string(),
+        dat: "合成.dat".to_string(),
+        platform: "SFC".to_string(),
+        game: "幻想传说 (Japan)".to_string(),
+        rom: "rom.bin".to_string(),
+        hashed_as: Convention::AsIs,
+        dat_convention: Convention::AsIs,
+        evidence: "精确哈希命中".to_string(),
+        chinese: None,
+        serial: None,
+        release_id: None,
+    };
+    catalog
+        .write_identifications(&[
+            Identification {
+                variant_key: variants[0].key.clone(),
+                state: State::Matched,
+                reason: None,
+                units: 1,
+                nkit: 0,
+                read_bytes: 0,
+                work_id: None,
+                release_id: None,
+                candidates: vec![候选(true, Confidence::High)],
+            },
+            Identification {
+                variant_key: variants[1].key.clone(),
+                state: State::Unmatched,
+                reason: None,
+                units: 1,
+                nkit: 0,
+                read_bytes: 0,
+                work_id: None,
+                release_id: None,
+                candidates: vec![候选(false, Confidence::Low)],
+            },
+            // 第三个变体**一行都不写**——那就是「还没识别」。
+        ])
+        .expect("写得进结论");
+    let store = Store::in_memory().expect("开得出沉淀库");
+    App::new(Site::in_memory(catalog, store, "主库"), demo::workspace())
+}
+
+#[test]
+fn 待确认屏说得出库里还有几个变体连识别都没跑过() {
+    // 词表「还没识别」：一个变体**连识别都还没跑过**。它一条候选都没有、裁不了，
+    // 队列里根本没有它——不说出来的话，「队列 1 条」会被读成「库里只剩 1 条没定下来」，
+    // 而那 1 个变体连命中率的分母都进不去。同一份库命令行印的就是这句话。
+    let ctx = headless::context();
+    let mut app = 有一个连识别都没跑过的库();
+    assert_eq!(
+        app.queue().queue().not_run(),
+        1,
+        "库里该有 1 个没跑过识别的"
+    );
+    assert_eq!(app.queue().queue().pending(), 1, "队列里该有 1 条待裁决");
+
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    assert!(
+        屏上.contains("连识别都还没跑过"),
+        "屏头一个字都没提库里那 1 个还没识别的：\n{屏上}",
+    );
+    // **两句话不许长得一样**：底下四档里「一条候选都没有」那一档曾经也叫「还没识别」
+    // （挂单 Q84），于是屏上会同时出现两个「还没识别」，一个说 1、一个说 0。
+    assert!(
+        屏上.contains("没有候选"),
+        "四档里那一档该叫「没有候选」：\n{屏上}",
+    );
+    assert!(
+        !屏上.contains("还没识别 0"),
+        "「还没识别」这四个字被四档那一行拿去说了另一件事：\n{屏上}",
+    );
+}
+
+#[test]
+fn 逐条流按_u_无可撤时说清楚而不是一声不吭() {
+    // 同一个函数里 `Y` 那一支写着「不许什么都不做还不吭声」；命令行 `undo --last`
+    // 无批时报错退 1。这一支一声不吭地返回，人只会以为键盘坏了。
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    {
+        let (screen, _) = app.queue_and_site();
+        screen.show_one_by_one();
+    }
+    跑(&ctx, &mut app, 1);
+    assert_eq!(app.queue().mode(), Mode::OneByOne);
+    assert!(app.queue().applied().is_none(), "这一趟还没落下过任何一批");
+
+    按(&ctx, &mut app, egui::Key::U);
+    let 错 = app.queue().error().expect("`U` 无可撤时得说一句");
+    assert!(错.contains("没什么可撤"), "得说清什么都没发生：{错}");
+    assert!(
+        错.contains("romcat triage undo"),
+        "更早那些批得指条路出去：{错}",
+    );
+    assert!(app.queue().undone().is_none(), "什么都没撤，账上不许多一笔");
+}

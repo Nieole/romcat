@@ -160,13 +160,19 @@ impl 现场 {
         let mut 子库 = Sublibrary::at("掌机", self.卡.path(), "Pegasus", None);
         子库.capability = Some(profile.name.clone());
         let actual = sync::observe(&RealFs, self.卡.path()).expect("看得见目标");
+        // 与 `sync::prepare` 同一条线：落点的目录段先与目标折齐，再排计划。
+        let mut from_pool = media.from_pool;
+        let mut generated = frontend.bytes;
+        let realign = sync::align(&mut desired, &actual);
+        realign.apply(&mut from_pool);
+        realign.apply(&mut generated);
         let plan = sync::plan(&子库, &desired, manifest, &actual, sync::Options::default());
         一趟 {
             desired,
             actual,
             plan,
-            from_pool: media.from_pool,
-            generated: frontend.bytes,
+            from_pool,
+            generated,
         }
     }
 }
@@ -686,6 +692,8 @@ fn 计划算完之后才出现的落点占用_执行这一层也挡得住() {
 }
 
 #[test]
+
+#[test]
 fn 只差大小写的是上一级目录_执行这一层照样挡得住() {
     // 折的是**整条键**，不是最后那一段：计划那一侧拿 `path::fold` 折 `gb/Tetris.zip`
     // 一整条，执行这一侧只折文件名的话，上一级目录换个大小写就从缝里漏过去了——
@@ -807,5 +815,54 @@ fn 落点被占再多也不算系统性故障_不触发连着失败就停下来(
     assert_eq!(
         fs::read(现场.卡.path().join("GB/g12.zip")).expect("排在最后那一份照样落得下"),
         fs::read(现场.库根.join("GB/g12.zip")).expect("读得出"),
+    );
+}
+
+#[test]
+fn 卡上那个目录只差大小写_第二趟照样认得出自己放的那一份() {
+    // 触发路 A：卡上已经有一个 `gb/`（前端或维护者建的，里面还躺着存档），而主库
+    // 那边的键写作 `GB/`。目标大小写不敏感（exFAT / FAT32 / Windows / 默认 APFS）时
+    // 两者**就是同一个目录**——第一趟的文件其实落在 `gb/` 里，清单却记成 `GB/`，
+    // 于是从第二趟起它每一趟都被报成「没了」，同时又被数进「清单之外」。
+    let 现场 = 现场::摆好();
+    写(&现场.卡.path().join("gb/存档.sav"), &[9u8; 64]);
+
+    let 第一趟 = 现场.排一趟("平台=GB", &Manifest::empty());
+    assert!(第一趟.plan.adds.files > 0, "头一趟总得放点什么上去");
+    let 一 = 现场.执行(&第一趟, &Manifest::empty(), &CancelToken::new());
+    assert!(一.failures.is_empty(), "{:?}", 一.failures);
+
+    // **清单记的必须是盘上真实的那条路径**：目标怎么拼那个目录名，由目标说了算。
+    for file in &一.manifest.files {
+        let 名 = file.path.replace('/', std::path::MAIN_SEPARATOR_STR);
+        assert!(
+            现场.卡.path().join(&名).is_file(),
+            "清单记着 {}，盘上却没有这条路径",
+            file.path
+        );
+    }
+
+    // 第二趟：一步都不用做，一句意外都不该有，清单之外的只有维护者那份存档。
+    let 第二趟 = 现场.排一趟("平台=GB", &一.manifest);
+    assert_eq!(
+        第二趟.plan.touched(),
+        0,
+        "第二趟不该有任何一步：\n{}",
+        第二趟.plan.render_text()
+    );
+    assert!(
+        第二趟.plan.surprises.is_empty(),
+        "自己放的那一份不该被报成意外：{:?}",
+        第二趟.plan.surprises
+    );
+    assert_eq!(
+        第二趟.plan.strangers, 1,
+        "清单之外只有维护者那份存档，不该把自己放的也数进去"
+    );
+
+    // 维护者那份存档一个字节都没动。
+    assert_eq!(
+        fs::read(现场.卡.path().join("gb/存档.sav")).expect("还在"),
+        vec![9u8; 64]
     );
 }

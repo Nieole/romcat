@@ -294,11 +294,22 @@ impl App {
     /// 问一遍任务台：跑完的那几趟把产物交给该拿它的那一屏。
     ///
     /// 每帧一次。测试与实测在等一趟活跑完时也调它——**走的是界面上那条一模一样的路**。
+    ///
+    /// ## 认领完还要转告浏览屏
+    ///
+    /// 库屏认领的那两种活（扫描、取数据源）**动的是中立库本身**，而浏览屏缓着的东西
+    /// ——窗里那 512 行、总行数、筛选面板上那几档——只在**换查询**时才作废。扫完一个根
+    /// 查询一个字都没改，于是库屏说 3 个变体、浏览屏还画着 0 行，同一个窗口里两个数
+    /// 对不上。所以认领完就告诉它一声（[`browse::Screen::invalidate`]）。
+    ///
+    /// **被按停的那一趟也算**：它写进中立库的那半份记录是真的。这里因此不看是哪一种
+    /// 收场，只看「库屏认领了没有」。
     pub fn poll_tasks(&mut self) {
         while let Some(done) = self.board.poll() {
             // **各屏按任务号认领自己那一趟，不是它的就放过去。** 将来识别与刮削接上来
             // 时，各自在这儿多认一次。
             if self.roots.settle(&self.site, &done) {
+                self.browse.invalidate(&self.site);
                 continue;
             }
             // **刮削跑完了要重读一遍**：这一屏画的元数据那几栏正是它刚写进去的。
@@ -331,8 +342,17 @@ impl App {
     /// 只认回程的话，子库屏会摆着一份按旧选择集排出来的差量，而「同步」认的正是它
     /// （ADR-0016）。
     ///
+    /// **还有一条与跳转无关、但同样只有这儿够得着两屏的**：待确认屏落下一批、撤回一批
+    /// 之后，浏览屏缓着的那几行（置信度那一列画的正是裁决改的东西）也过期了。队列那一屏
+    /// 留一个记号（`queue::Screen::take_changed`），由这一趟转告浏览屏——与库屏扫完一个根
+    /// 走的是同一个入口（[`browse::Screen::invalidate`]），只是那一趟由任务台交回来，
+    /// 这一趟就发生在本进程的这一帧里。
+    ///
     /// 每帧一次。测试与实测拿它当那一下——**走的是界面上那条一模一样的路**。
     pub fn route(&mut self) {
+        if self.queue.take_changed() {
+            self.browse.invalidate(&self.site);
+        }
         if let Some(jump) = self.sublibrary.take_jump() {
             self.browse
                 .begin_editing(&self.site, &jump.sublibrary, jump.rule, jump.broken);

@@ -864,10 +864,31 @@ impl Tally {
 /// # Errors
 /// 读写中立库失败时返回错误。
 pub fn run(catalog: &mut Catalog, priorities: &Priorities) -> Result<TitleReport, CatalogError> {
+    refold(catalog)?;
+    TitleReport::build(catalog, priorities)
+}
+
+/// **把标题集合重折一遍**，不出报告。
+///
+/// 标题集合是[刮削那一侧的值与自动通过的候选](fold)**折出来的一份投影**，不是另一份
+/// 事实：`scrape_value` 一变，它就旧了。所以改动那批值的人有责任把它折回来——
+/// 详情面板与导出读的是 `title` 表，不是现折（`catalog::detail`、`adapter::converge`），
+/// 集合旧着的那一段里，**显示标题会挑到一条已经不成立的叫法**。
+///
+/// 单独摆出来是给 [`scrape::zh::judge`](crate::scrape::zh::judge) 用的：一条否定裁决
+/// 就地清掉那批值之后，得有人把集合折回来。它调这一段而不是自己删几行，理由是
+/// **不重复领域逻辑**——「哪些值折成哪几条叫法」只有 [`fold`] 一份说法，另写一份
+/// 「反过来删哪几行」迟早会与它漂开（`seen` 那一列尤其：同一串字被两个变体叫着时，
+/// 集合里是**一行**，按变体键去删会删掉另一个变体还在背书的那一行）。
+///
+/// 命令行与界面因此是同一个口径：不论谁调 `judge`，标题集合都跟着折。
+///
+/// # Errors
+/// 读写中立库失败时返回错误。
+pub fn refold(catalog: &mut Catalog) -> Result<(), CatalogError> {
     let rows = fold(catalog)?;
     catalog.clear_titles()?;
-    catalog.put_titles(&rows)?;
-    TitleReport::build(catalog, priorities)
+    catalog.put_titles(&rows)
 }
 
 /// 一个作品在标题集合之外还有一条兜底的叫法：**作品名**。

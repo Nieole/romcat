@@ -287,9 +287,13 @@ pub fn candidates(
         if picked.one.strong(&naming.tuning) {
             found.strong += 1;
         }
-        found
-            .candidates
-            .push(candidate_of(variant, &picked, index.dump(), &naming.tuning));
+        found.candidates.push(candidate_of(
+            variant,
+            &picked,
+            index.dump(),
+            platform,
+            &naming.tuning,
+        ));
     }
     found
 }
@@ -321,6 +325,7 @@ fn candidate_of(
     variant: &VariantRow,
     picked: &Picked,
     dump: &str,
+    queried: Option<&str>,
     tuning: &zh::Tuning,
 ) -> Candidate {
     let one = &picked.one;
@@ -346,15 +351,7 @@ fn candidate_of(
         accepted: false,
         source: SOURCE.to_string(),
         dat: dump.to_string(),
-        // 平台取条目自己说的那个（交叉校验已经保证它与变体的平台不冲突）；
-        // 条目没说平台时退回变体的平台——候选表这一列不许空着，报告按它分组。
-        platform: one
-            .entry
-            .platforms
-            .first()
-            .cloned()
-            .or_else(|| variant.platform.clone())
-            .unwrap_or_default(),
+        platform: platform_column(variant, one, queried),
         game: one.entry.shown().to_string(),
         // 这一列在别的层里是「DAT 里那条 `<rom>` 记录的名字」。这一层没有文件记录，
         // 写**撞上的那个叫法**——编一个文件名顶上去，事后复核的人会以为真有那么一条记录
@@ -371,6 +368,37 @@ fn candidate_of(
         serial: None,
         release_id: None,
     }
+}
+
+/// 候选表那一列**平台**写哪一个。
+///
+/// 一条中文离线源条目可以写着好几个平台（`platforms = ["GBA","NDS"]`，顺序按 dump 来），
+/// 而平台那道交叉校验**任一个对上就放行**（[`zh::Index::lookup`]）。于是「对上的是哪一个」
+/// 与「列表里的第一个」是两件事：一份躺在 `nds/` 的变体撞上那条条目，依据会说
+/// 「平台交叉校验对得上」，这一列却写着 GBA。
+///
+/// **这一列不是装饰**：[`rank`](crate::identify) 拿它与变体的平台比、`--pick` 把它原样
+/// 落进**沉淀库**、`Projector::verdict_release` 据此建**发行版**。让条目里那份任意顺序
+/// 推翻变体所在的目录，正是 ADR-0011 不许的事——目录是强先验，推翻它的只能是字节。
+///
+/// 于是三档：
+///
+/// - **对得上**：写查询用的那一个。依据里说「对得上」的就是它。
+/// - **说不出**：条目只写了一个平台时那一个不含糊，就写它；写了好几个就**无从挑起**
+///   ——退回变体所在目录说的那个，它也说不出就留空。宁可留空也不要从一份任意顺序里
+///   挑一个写进候选，那一列会一路落进裁决与发行版。
+/// - **对不上**：走不到这儿，[`zh::Index::lookup`] 那一层就整条不产出了。
+fn platform_column(variant: &VariantRow, one: &zh::Match, queried: Option<&str>) -> String {
+    let picked = match one.platform {
+        zh::Check::Agrees => queried.map(ToString::to_string),
+        zh::Check::Unknown | zh::Check::Conflicts => match one.entry.platforms.as_slice() {
+            [only] => Some(only.clone()),
+            _ => None,
+        },
+    };
+    picked
+        .or_else(|| variant.platform.clone())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -404,6 +432,19 @@ mod tests {
                     year: Some(2008),
                     platforms: vec!["NDS".to_string()],
                     platform_text: "NDS".to_string(),
+                    ..zh::Entry::default()
+                },
+                // **一条条目写着好几个平台**，顺序按 dump 来（`zh/sync.rs` 的生产路径
+                // 就会折出多项）。交叉校验只要有一个对上就放行，于是「对上的是哪一个」
+                // 与「列表里的第一个」不是同一件事。
+                zh::Entry {
+                    id: 31,
+                    name: "ロックマンエグゼ".to_string(),
+                    name_cn: "洛克人EXE".to_string(),
+                    aliases: Vec::new(),
+                    year: Some(2001),
+                    platforms: vec!["GBA".to_string(), "NDS".to_string()],
+                    platform_text: "GBA / NDS".to_string(),
                     ..zh::Entry::default()
                 },
                 zh::Entry {
@@ -528,6 +569,50 @@ mod tests {
         );
         assert!(found.candidates.is_empty());
         assert_eq!(found.tried, 0);
+    }
+
+    #[test]
+    fn 多平台条目的候选平台是交叉校验对上的那一个() {
+        // 条目写着「GBA / NDS」，变体在 `nds/`，对上的是 NDS。取列表里的第一个，
+        // 这一列写的就成了 GBA——而依据在同一句话里说着「平台交叉校验对得上」。
+        // 这一列不是装饰：`identify::rank` 按它与变体的平台比、`--pick` 把它原样
+        // 落进沉淀库、`Projector::verdict_release` 据此建发行版。让条目里那份任意
+        // 顺序推翻变体所在的目录，正是 ADR-0011 不许的事。
+        let found = 撞("洛克人EXE[某汉化组].7z", Some("NDS"), None);
+        assert_eq!(found.candidates.len(), 1);
+        let candidate = &found.candidates[0];
+        assert_eq!(candidate.platform, "NDS");
+        // 依据照旧把条目原文摆出来——这一列取哪一个，与条目写了哪几个是两件事。
+        assert!(
+            candidate
+                .evidence
+                .contains("平台交叉校验对得上（条目写的是「GBA / NDS」）"),
+            "{}",
+            candidate.evidence
+        );
+    }
+
+    #[test]
+    fn 平台说不出时不从条目那份任意顺序里挑一个() {
+        // 变体的平台说不出、条目又写着好几个——这时**没有任何判据**说该是哪一个。
+        // 宁可留空也不要挑一个写进候选：它会一路落进裁决与发行版。
+        let rules = Rules::builtin();
+        let index = 索引();
+        let naming = Naming {
+            rules: &rules,
+            index: Some(&index),
+            tuning: zh::Tuning::default(),
+        };
+        let found = candidates(
+            &naming,
+            &变体("未分类/洛克人EXE.7z", None),
+            &[Named::own("洛克人EXE.7z")],
+            None,
+            None,
+        );
+        assert_eq!(found.candidates.len(), 1);
+        assert_eq!(found.candidates[0].platform, "");
+        assert!(found.candidates[0].evidence.contains("平台交叉校验说不出"));
     }
 
     #[test]
