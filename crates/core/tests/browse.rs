@@ -7,8 +7,11 @@
 //! 2. **筛选用的是子串，不是通配符**。用户在筛选框里打一个 `%` 是在找文件名里的百分号，
 //!    不是在写模式。
 //! 3. **一页取不出全库**。`limit` 有硬上界，堵住「把四万行读进内存」这条路。
+//! 4. **筛选面板印出去的那个词认得回来**。面板上一档只有一串字可点，印与认两处各抄
+//!    一遍的话，改一处就静默断掉一档——断了的样子是「点了没反应」。
 
-use romcat_core::catalog::browse::{MAX_PAGE, VariantOrder, VariantQuery};
+use romcat_core::catalog::browse::{MAX_PAGE, StateFilter, VariantOrder, VariantQuery};
+use romcat_core::catalog::identify::{NOT_RUN_LABEL, Tier};
 use romcat_core::catalog::{Catalog, VariantRow};
 use romcat_core::platform::Manifest;
 use romcat_core::shape::Variant;
@@ -198,4 +201,38 @@ fn 越过末尾取一页得到空表() {
         .variant_page(&VariantQuery::default(), 1_000, 10)
         .expect("取得出");
     assert!(rows.is_empty(), "越过末尾还取出了行");
+}
+
+/// **筛选面板那五档的往返**：印出去的那个词，认得回来同一档。
+///
+/// 面板上每一档只有一串字可点，点中之后靠 [`StateFilter::from_label`] 认回是哪一档。
+/// 两处各抄一遍那几个字的话，改一处、断一处——而断了的样子是「点了没反应」，
+/// 一条编译错误都没有（票 `gui-redesign/17`）。
+#[test]
+fn 识别状态那五档印出去的词认得回来() {
+    for filter in StateFilter::ALL {
+        assert_eq!(
+            StateFilter::from_label(filter.label()),
+            Some(filter),
+            "「{}」这一档认不回来",
+            filter.label(),
+        );
+    }
+
+    // **还没识别那一档印的就是词表那个词**（`CONTEXT.md` 的**还没识别**条，
+    // 落在 `NOT_RUN_LABEL` 上）。它与置信度第四档「没有候选」**不是同一件事**：
+    // 那一档说的是「识别跑过了、一条候选都没有」。
+    assert_eq!(StateFilter::Unidentified.label(), NOT_RUN_LABEL);
+    assert_eq!(
+        StateFilter::from_label(NOT_RUN_LABEL),
+        Some(StateFilter::Unidentified)
+    );
+    assert_ne!(
+        StateFilter::Unidentified.label(),
+        Tier::Unidentified.label()
+    );
+
+    // 认不出的字不许折成某一档——那会让筛选器悄悄换一批行。
+    assert_eq!(StateFilter::from_label("还没识别过"), None);
+    assert_eq!(StateFilter::from_label(""), None);
 }

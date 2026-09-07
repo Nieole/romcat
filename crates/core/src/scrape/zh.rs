@@ -2360,7 +2360,11 @@ mod tests {
         // 都过不去（`zh::alnum_of`），`Index::lookup` 一开始就不产出它。人压得过
         // 「机器有没有把握」那两道闸，压不过这一道——这一条钉的是**不许凭空造一条
         // 匹配出来**，`--yes` 不是手工录入。
-        assert!(out.values[0].evidence.contains("条目 4"), "{:?}", out.values[0]);
+        assert!(
+            out.values[0].evidence.contains("条目 4"),
+            "{:?}",
+            out.values[0]
+        );
     }
 
     /// **平台这一栏空着**的一份索引：名字撞得上，可交叉校验说不出，

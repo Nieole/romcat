@@ -47,17 +47,66 @@
 
 **Blocked by:** 无 —— 可立即开工
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] 连识别都没跑过的变体印**还没识别**，跑过了却一条候选都没有的印**没有候选**，
+- [x] 连识别都没跑过的变体印**还没识别**，跑过了却一条候选都没有的印**没有候选**，
       两者在同一张表上并存也分得开（一条测试同时造出这两种行）
-- [ ] `StateFilter` 的筛选器往返照旧：`from_label(label(x)) == Some(x)` 五档全过
-- [ ] 五屏（**库 / 浏览 / 待确认 / 子库 / 任务**）里印这一档的地方一处不漏
-- [ ] 报告与队列里的 `not_run` 口径一个字没变，那张加得起来的表照旧加得起来
-- [ ] `spec.md` 那句「高 / 中 / 低 / 还没识别」跟着改
-- [ ] `crates/` 里指向挂单 `Q77`/`Q80`/`Q84` 的四处文档改成指向词表（挂单 `Q148`）
-- [ ] 挂单 `Q146`、`Q148` 标为 resolved
-- [ ] 门禁命令全绿（带 `--all-features`）
+      —— 核心那一侧两条：
+      `crates/core/tests/works.rs::连识别都没跑过的与跑过了没候选的在同一张表上印两个词`
+      （同一页上两行，`confidence` 都是 `None`，一行 `identified == true` 印「没有候选」、
+      另一行 `false` 印「还没识别」；同一条还顺着点开详情面板，断了
+      `WorkVariant::confidence_label` 与 `no_candidate_hint` 两种分岔各说各的话）；
+      `crates/core/tests/works.rs::一行底下只要还剩一个变体没跑过识别这一行就说还没识别`
+      （一行是一批变体时折的方向——实测把 SQL 里的 `MIN` 换回 `MAX`，这一条当场红）。
+      界面那一侧 `crates/gui/tests/browse.rs::浏览屏把还没识别与没有候选印成两个词`：
+      三个变体的库，屏上断的是**整句**——「高置信｜…命中.zip」「没有候选｜…一条候选都没有.zip」
+      「还没识别｜…还没轮到它.zip」（只断那几个字的话，左边筛选面板里那一档的名字就够让它通过）。
+- [x] `StateFilter` 的筛选器往返照旧：`from_label(label(x)) == Some(x)` 五档全过
+      —— `crates/core/tests/browse.rs::识别状态那五档印出去的词认得回来`：五档循环全过，
+      另断 `StateFilter::Unidentified.label() == NOT_RUN_LABEL`、它 `!=` `Tier::Unidentified.label()`、
+      认不出的字折成 `None`。`from_label` 里那个裸字面量已换成 `NOT_RUN_LABEL` 常量引用。
+      ⚠️ **票正文那句「只改 `label()` 会让筛选器的往返静默断掉」是错的**：
+      `StateFilter::from_label` **眼下一个生产调用方都没有**——筛选面板拿的是
+      `StateFilter` 值本身（`romcat_gui::browse` 那一段直接比、直接赋回），一个字符串
+      都不经手；真走字符串往返的是 `PlatformFilter::from_label`。换成常量仍然该做
+      （那一对是公开 API，断了没有一条编译错误会说话），但**断了不会在屏上冒出来**，
+      只有这条新测试守着。文档已按实情改写。
+- [x] 五屏（**库 / 浏览 / 待确认 / 子库 / 任务**）里印这一档的地方一处不漏
+      —— 真会印一个变体级结论的只有**浏览**与**待确认**两屏（`Tier` 的文档原话：库屏摆根与
+      数据源、子库屏摆设备与差量、任务屏摆队列与历史，那三屏上没有变体级结论可标）。
+      清点：浏览屏两处（`table.rs` 主列表那一栏走 `WorkRow::confidence_label`、
+      `browse.rs::variant_row` 走 `WorkVariant::confidence_label`），待确认屏四处
+      （屏头四档、卡片 `tier_label`、逐条那张表、候选那一栏）——后者全都是**跑过识别**的条目，
+      不必分辨。判据：`grep -rn "Tier" crates/gui/src` 之后逐处核过，`crates/gui/src` 里
+      再没有第三个印这一档的地方。另外详情面板里两句「识别结论：还没识别」的裸字面量
+      也换成了 `NOT_RUN_LABEL`；变体行悬停里那句「接下来该干什么」也收进了核心库
+      （`WorkVariant::no_candidate_hint`）——它与印哪个词是同一条判据的两面，
+      分家写两处就会改一处、指错一处（ADR-0005）。
+- [x] 报告与队列里的 `not_run` 口径一个字没变，那张加得起来的表照旧加得起来
+      —— `not_run` 那一族代码**一行都没动**（只改了 `report.rs` 里 `not_run` 字段的一段文档，
+      把它指向词表）。钉着它的两条测试照旧绿：
+      `crates/core/tests/identify.rs::还没识别的变体照样占着变体总数与全部变体里那个分母`
+      （含「变体 = 命中 + 未命中 + 无判据 + 跳过 + 还没识别」那一行加得起来）与
+      `crates/core/tests/triage.rs::还没识别的变体不算待裁决但队列报得出有几个`。
+- [x] `spec.md` 那句「高 / 中 / 低 / 还没识别」跟着改
+      —— `.scratch/gui-redesign/spec.md:200` 改成「高置信 / 中置信 / 低置信 / **没有候选**」，
+      **还没识别**另起一条（那一节每条一句话，塞成一长句会跟周围的密度对不上）。
+- [x] `crates/` 里指向挂单 `Q77`/`Q80`/`Q84` 的四处文档改成指向词表（挂单 `Q148`）
+      —— **实际是五处 src 加两处测试注释，而票与 `Q148` 都点错了一处**：
+      `crates/core/src/triage/batch.rs` 本来就已经写着「词表**两个都收了**」，核过之后没动。
+      详见挂单 `Q148` 的「收的时候实际改了几处」。
+- [x] 挂单 `Q146`、`Q148` 标为 resolved —— `Q146` 见本文件末尾、`Q148` 见 `.scratch/PARKING-LOT.md`。
+- [x] 门禁命令全绿（带 `--all-features`）—— 四条最后一行：
+      `cargo fmt --all --check` exit 0；clippy `Finished dev profile`（一条 `duplicated attribute`
+      告警，来自 `main` 上本来就有的重复 `#[test]`，见挂单 `Q191`）；
+      `cargo test --no-run` 编译通过；一趟全量 **62 个 `test result: ok`、1,631 条通过、0 失败**
+      （基线 1,628，本票新增 3 条）。
+      ⚠️ **保留一条**：`cargo fmt --all` 顺手改了两个不属于本票的文件
+      （`crates/core/src/scrape/zh.rs`、`crates/core/tests/sync_run.rs`）——它们在 `main` 上
+      **本来就不 fmt-clean**（判据：`git show HEAD:<路径> | rustfmt --check` 两处都报 diff）。
+      按协调者收尾指示里那句「上面那 17 个都是你的」一起提交了，只为让**提交出来的树**上
+      第一条门禁也是 0；本票没有主动改过这两个文件一个字。`sync_run.rs` 里那条重复的
+      `#[test]`（clippy 报 `duplicated attribute`）**没修**，它不是排版问题。记在挂单 `Q191`。
 
 
 ## 挂单裁决（第二轮）
@@ -95,5 +144,11 @@
 - **要收的话怎么收：** 票 `gui-redesign/17` —— 先让浏览与队列那一侧分得出这两件事
   （库里已经有 `not_run` 那份账），再各印各的词，五屏与 `spec.md` 一起改。
 - **谁来裁：** 票 `gui-redesign/17`
-- **状态：** open
+- **状态：** resolved（票 `gui-redesign/17`）
 - **收尾裁决（第二轮）：** resolved —— **由票 `gui-redesign/17` 承接**。票 17 开头就写着「词表把这四个字裁成了两个词（票 16、挂单 Q146）」，连坑都一样（`Tier::of` 收 `Option<Confidence>`、`None` 装着两件事）。
+- **票 17 实际怎么收的：** **给行加一个「跑过没跑过」的标记，`Tier` 四档一动不动**
+  （`WorkRow::identified`、`WorkVariant::state`；挑这条路的三条理由记在挂单 `Q190`）。
+  五屏上两个词分开印：待确认屏那一半（屏头两句并排）另一条线已经做对，本票照它的形状
+  办了浏览屏那一半——主列表那一栏与详情面板的变体行都先问一句「跑过没跑过」再挑词，
+  而挑词这件事落在核心库里（ADR-0005）。`StateFilter::from_label` 那个裸字面量也换成了
+  `NOT_RUN_LABEL`，往返有测试钉着。

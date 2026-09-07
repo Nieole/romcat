@@ -512,8 +512,17 @@ fn 详情面板列得出全部变体每个带置信度与依据() {
             );
         }
         if variant.candidates.is_empty() {
-            // 一条候选都没有是**还没识别**，不是「撞过没撞上」。
+            // 一条候选都没有不是「撞过没撞上」，而它自己还分两种：连识别都还没跑过是
+            // **还没识别**，跑过了却一个字都没说得出来是**没有候选**（词表两条词条）。
             assert_eq!(variant.confidence(), None);
+            assert_eq!(
+                variant.confidence_label(),
+                if variant.state.is_none() {
+                    romcat_core::catalog::identify::NOT_RUN_LABEL
+                } else {
+                    "没有候选"
+                },
+            );
         }
     }
     assert!(有候选 > 0, "合成数据里该有带候选的变体");
@@ -2001,4 +2010,149 @@ fn 一行都没勾就按星_说清而不是静静什么都不做() {
     let 话 = app.browse().error().expect("该说一句").to_string();
     assert!(话.contains("一行都没勾"), "{话}");
     assert!(按规则数(&mut app, "收藏=是").is_empty(), "什么都不该动");
+}
+
+/// 三个变体各落一档的一份小库：**命中**、**跑过了一条候选都没有**、**连识别都没跑过**。
+///
+/// 用手搭的而不是合成数据：这一条要看的是**同一张表上三个词并排**，而合成数据里
+/// 哪一行落哪一档随规模变。
+fn 三档并排的库() -> App {
+    use romcat_core::catalog::identify::{Candidate, Identification};
+    use romcat_core::catalog::{Catalog, Confidence};
+    use romcat_core::dat::Convention;
+    use romcat_core::platform::Manifest;
+    use romcat_core::shape::{SINGLE_FILE_RULE, Variant};
+    use romcat_core::site::Site;
+    use romcat_core::verdict::Store;
+
+    let mut catalog = Catalog::open_in_memory().expect("开得出中立库");
+    // **建不出根就当场炸**：吞掉它的话，变体会挂在一个不存在的根上，
+    // 而失败会以「屏上少了一行」的样子冒出来——一个夹具搭错报成一个界面缺陷。
+    romcat_core::catalog::roots::add_root(&catalog, None, "主库", std::path::Path::new("/主库"))
+        .expect("建得出根");
+    let 变体 = |name: &str| {
+        let key = format!("主库/SFC/{name}");
+        Variant {
+            main_key: key.clone(),
+            platform: Some("SFC".to_string()),
+            rule: SINGLE_FILE_RULE.to_string(),
+            manual: false,
+            files: 1,
+            bytes: 4096,
+            unreadable_files: 0,
+            members: vec![(key.clone(), Role::Main)],
+            key,
+        }
+    };
+    let variants = vec![
+        变体("命中.zip"),
+        变体("一条候选都没有.zip"),
+        变体("还没轮到它.zip"),
+    ];
+    catalog
+        .replace_variants(&variants, 1, &Manifest::default())
+        .expect("写得进变体");
+    catalog
+        .write_identifications(&[
+            Identification {
+                variant_key: variants[0].key.clone(),
+                state: State::Matched,
+                reason: None,
+                units: 1,
+                nkit: 0,
+                read_bytes: 0,
+                work_id: None,
+                release_id: None,
+                candidates: vec![Candidate {
+                    member_key: variants[0].key.clone(),
+                    inner: String::new(),
+                    confidence: Confidence::High,
+                    accepted: true,
+                    source: "合成".to_string(),
+                    dat: "合成.dat".to_string(),
+                    platform: "SFC".to_string(),
+                    game: "幻想传说 (Japan)".to_string(),
+                    rom: "rom.bin".to_string(),
+                    hashed_as: Convention::AsIs,
+                    dat_convention: Convention::AsIs,
+                    evidence: "精确哈希命中".to_string(),
+                    chinese: None,
+                    serial: None,
+                    release_id: None,
+                }],
+            },
+            // **跑过了，却一条候选都没有**——那是「没有候选」。
+            Identification {
+                variant_key: variants[1].key.clone(),
+                state: State::Unmatched,
+                reason: None,
+                units: 1,
+                nkit: 0,
+                read_bytes: 0,
+                work_id: None,
+                release_id: None,
+                candidates: Vec::new(),
+            },
+            // 第三个变体**一行都不写**——那是「还没识别」。
+        ])
+        .expect("写得进结论");
+    let store = Store::in_memory().expect("开得出沉淀库");
+    let mut app = App::new(Site::in_memory(catalog, store, "主库"), 工作目录());
+    app.show_view(View::Browse);
+    app
+}
+
+#[test]
+fn 浏览屏把还没识别与没有候选印成两个词() {
+    // 词表两条（`CONTEXT.md`）：**还没识别**是「连识别都还没跑过」，
+    // **没有候选**是「识别跑过了、却一条候选都没有」。两件事折进
+    // `WorkRow::confidence` 都是 `None`，印同一个词的话，这一栏就会对着一整批
+    // 压根没识别过的变体说「识别跑过了、没找着」，而该做的事也不一样——
+    // 前者去跑 `romcat identify`，后者得人自己来（票 `gui-redesign/17`）。
+    let ctx = headless::context();
+    let mut app = 三档并排的库();
+    跑(&ctx, &mut app, 2);
+
+    // **三行一行行点开**：变体行在详情面板里，那正是从前手写这几个词的地方。
+    let anchors: Vec<WorkAnchor> = {
+        let (browse, site) = app.browse_and_site();
+        site.catalog
+            .work_page(browse.query(), 0, 16)
+            .expect("读得动")
+            .into_iter()
+            .map(|row| row.anchor)
+            .collect()
+    };
+    assert_eq!(anchors.len(), 3, "三个变体各自成一行");
+    let mut 屏上 = String::new();
+    for anchor in &anchors {
+        {
+            let (browse, site) = app.browse_and_site();
+            browse.open_work(&site.catalog, anchor);
+        }
+        跑(&ctx, &mut app, 1);
+        屏上.push_str(&画出来的字(&headless::frame(
+            &ctx,
+            headless::input(),
+            |ui| app.ui(ui),
+        )));
+        屏上.push('\n');
+    }
+
+    // 断的是**那一行整句**而不是光那几个字：光看那几个字的话，左边筛选面板里
+    // 「还没识别」那一档的名字就足以让断言通过，而它说的是另一件事。
+    for 那一行 in [
+        "高置信｜主库/SFC/命中.zip",
+        "没有候选｜主库/SFC/一条候选都没有.zip",
+        "还没识别｜主库/SFC/还没轮到它.zip",
+    ] {
+        assert!(
+            屏上.contains(那一行),
+            "详情面板里没有「{那一行}」这一行：\n{屏上}",
+        );
+    }
+    // 悬停里跟着说的那一句**这儿验不了**：它在 `on_hover_ui` 里，而这几帧没有指针，
+    // egui 一个字都不画。那一句的两个分岔由核心库那条测试钉着
+    // （`WorkVariant::no_candidate_hint`，`crates/core/tests/works.rs`）——
+    // 判据收在核心库里的好处正是这个：它验得了，而这一层只是印。
 }

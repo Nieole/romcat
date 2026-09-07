@@ -65,7 +65,8 @@ pub struct PlatformRow {
     /// [`hit_rate`](Self::hit_rate) 的分母**——它一次都没撞过 DAT，混进未命中是撒谎。
     /// 名字不叫 `unidentified`：那四个字在
     /// [`Tier::Unidentified`](crate::catalog::identify::Tier::Unidentified) 上另有一个
-    /// 用法（「没有置信度可标」，而那些条目**跑过**识别），挂单 `Q84` 记着这笔账。
+    /// 用法（「没有置信度可标」，而那些条目**跑过**识别）。词表把这两件事**裁成了两个词**
+    /// （`CONTEXT.md` 的**还没识别**与**没有候选**），这一栏数的是前一个。
     pub not_run: u64,
     /// DAT 库里这个平台有多少条条目——**没有弹药的平台命中率低是另一回事**。
     pub dat_games: u64,

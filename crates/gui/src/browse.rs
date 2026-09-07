@@ -75,7 +75,7 @@ use egui::{Align, Layout};
 use romcat_core::catalog::browse::{
     Facets, PlatformFilter, Scope, WorkAnchor, WorkDetail, WorkQuery, WorkVariant,
 };
-use romcat_core::catalog::identify::Tier;
+use romcat_core::catalog::identify::{NOT_RUN_LABEL, Tier};
 use romcat_core::catalog::{Catalog, VariantDetail};
 use romcat_core::collection::{self, Applied, FAVORITE};
 use romcat_core::report::{capacity, human_bytes, thousands};
@@ -1889,12 +1889,18 @@ impl Screen {
     /// 从前这儿手写「高 / 中 / 低」，而中间那张表与待确认屏写的是「高置信 / 中置信 /
     /// 低置信」——同一个变体在两处是两个词。眼下色条与词都出自一处，
     /// 而且**两样一起出现**：色觉障碍下读得出来的只有词。
+    ///
+    /// **那个词由核心库挑**（[`WorkVariant::confidence_label`]，票 `gui-redesign/17`）：
+    /// 一条候选都没有时它是**没有候选**还是**还没识别**，取决于这个变体跑没跑过识别，
+    /// 而那是一条领域判断，不是画法（ADR-0005）。悬停里跟着说的那一句同理，
+    /// 走 [`WorkVariant::no_candidate_hint`]。色条照旧只认四档——两者的区别由词说，
+    /// 不由颜色说。
     fn variant_row(&self, ui: &mut egui::Ui, variant: &WorkVariant) -> bool {
         let on = self.variant.as_deref() == Some(variant.row.key.as_str());
         let tier = Tier::of(variant.confidence());
         let line = format!(
             "{}｜{}｜{}",
-            tier.label(),
+            variant.confidence_label(),
             variant.row.key,
             capacity(variant.row.bytes, variant.row.unreadable_files),
         );
@@ -1911,13 +1917,18 @@ impl Screen {
             ui.set_max_width(420.0);
             ui.label(format!(
                 "识别结论：{}",
-                variant.state.map_or("还没识别", |state| state.label()),
+                variant.state.map_or(NOT_RUN_LABEL, |state| state.label()),
             ));
             if let Some(reason) = &variant.reason {
                 ui.label(format!("为什么没定下来：{reason}"));
             }
-            if variant.candidates.is_empty() {
-                ui.label("一条候选都没有——那是**还没识别**，不是「撞过没撞上」。");
+            // **一条候选都没有分两种**（`CONTEXT.md` 的**还没识别**与**没有候选**）：
+            // 连识别都还没跑过，该做的事是跑一趟识别；跑过了却一个字都没说得出来，
+            // 该做的事是人自己来。两种印同一句话的话，屏上就指错了下一步。
+            // **哪一句由核心库挑**（`WorkVariant::no_candidate_hint`）——与那一行印哪个词
+            // 同一条判据，这儿一个 `if` 都不写（ADR-0005）。
+            if let Some(说一句) = variant.no_candidate_hint() {
+                ui.label(说一句);
             }
             for candidate in variant.candidates.iter().take(TOP_CANDIDATES) {
                 ui.separator();
@@ -2171,7 +2182,8 @@ impl Screen {
                 ));
                 ui.label(match detail.state {
                     Some(state) => format!("识别结论：{}", state.label()),
-                    None => "识别结论：还没识别".to_string(),
+                    // 那四个字走常量而不是抄一遍（词表**还没识别**条）。
+                    None => format!("识别结论：{NOT_RUN_LABEL}"),
                 });
                 if let Some(reason) = &detail.reason {
                     ui.label(format!("为什么没定下来：{reason}"));

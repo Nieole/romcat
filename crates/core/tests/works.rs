@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 
 use romcat_core::catalog::browse::{Scope, WORK_FIELDS, WorkAnchor, WorkOrder, WorkQuery, WorkRow};
-use romcat_core::catalog::identify::{Candidate, Identification, Provenance};
+use romcat_core::catalog::identify::{Candidate, Identification, NOT_RUN_LABEL, Provenance};
 use romcat_core::catalog::{Catalog, Confidence, State};
 use romcat_core::dat::Convention;
 use romcat_core::dat::chinese::ChineseMark;
@@ -261,15 +261,188 @@ fn 每行看得见平台变体数容量年份元数据齐不齐与最高置信�
     );
 
     // **还没认出作品**的那些：一条候选都没有，那不是「撞过没撞上」（ADR-0002）。
+    // 这份 fixture 里它们**一行结论都不写**，所以那一栏印的是**还没识别**——
+    // 印「没有候选」是撒谎：那句话说的是「识别跑过了、只是一个字都没说」，
+    // 而这些变体连跑都还没跑过（词表两条词条、票 `gui-redesign/17`）。
     for row in rows
         .iter()
         .filter(|row| matches!(row.anchor, WorkAnchor::Loose(_)))
     {
         assert_eq!(row.variants, 1, "没认出作品的那一行就该只有它自己");
         assert_eq!(row.confidence, None);
-        assert_eq!(row.confidence_label(), "没有候选");
+        assert!(!row.identified, "这一行底下那个变体一行结论都没写过");
+        assert_eq!(row.confidence_label(), NOT_RUN_LABEL);
         assert_eq!(row.missing_label(), "缺全部");
     }
+}
+
+/// **「还没识别」与「没有候选」在同一张表上分得开**（票 `gui-redesign/17`）。
+///
+/// 两者折进 [`WorkRow::confidence`] 都是 `None`：一个是连识别都还没跑过（库里连它的
+/// 结论都没有），一个是识别跑过了、却一条候选都没有。这条界线正是**命中率的分母**
+/// 那条界线（ADR-0002），并成一个词的话屏上就得挑一件事去撒谎——而它指的下一步也不同：
+/// 前者去跑 `romcat identify`，后者得人自己来。
+#[test]
+fn 连识别都没跑过的与跑过了没候选的在同一张表上印两个词() {
+    let mut catalog = 建库();
+    // 散落那批**本来就一行结论都不写**。给其中一个补一条结论、但**一条候选都没有**：
+    // 于是同一页上两种行并存，两者的 `confidence` 都是 `None`。
+    let 跑过了 = 散键(0);
+    catalog
+        .write_identifications(&[Identification {
+            variant_key: 跑过了.clone(),
+            state: State::Unmatched,
+            reason: None,
+            units: 1,
+            nkit: 0,
+            read_bytes: 0,
+            work_id: None,
+            release_id: None,
+            candidates: Vec::new(),
+        }])
+        .expect("写得进识别结论");
+
+    let rows = catalog
+        .work_page(&WorkQuery::default(), 0, 64)
+        .expect("取得出一页");
+    let 那一行 = |key: &str| {
+        rows.iter()
+            .find(|row| row.anchor == WorkAnchor::Loose(key.to_string()))
+            .unwrap_or_else(|| panic!("{key} 那一行没了"))
+    };
+
+    let 有结论 = 那一行(&跑过了);
+    assert_eq!(有结论.confidence, None, "它一条候选都没有");
+    assert!(有结论.identified, "它有一行结论");
+    assert_eq!(有结论.confidence_label(), "没有候选");
+
+    let 没结论 = 那一行(&散键(1));
+    assert_eq!(没结论.confidence, None, "它也一条候选都没有");
+    assert!(!没结论.identified, "它一行结论都没有");
+    assert_eq!(没结论.confidence_label(), NOT_RUN_LABEL);
+
+    // **详情面板那一层同一条口径**：那里手上就是一个变体，不必折。
+    // 连那句「接下来该干什么」也在核心库里挑（`no_candidate_hint`），
+    // 因为它与印哪个词是同一条判据的两面——分家写两处，改一处就指错一处。
+    let 一个变体 = |row: &WorkRow| {
+        let detail = catalog
+            .work_detail(&WorkQuery::default(), &row.anchor)
+            .expect("读得动")
+            .expect("点得开");
+        let mut variants = detail.variants;
+        assert_eq!(variants.len(), 1, "没认出作品的那一行就该只有它自己");
+        variants.remove(0)
+    };
+
+    let 跑过的那个 = 一个变体(有结论);
+    assert_eq!(跑过的那个.confidence_label(), "没有候选");
+    assert_eq!(
+        跑过的那个.no_candidate_hint(),
+        Some("识别跑过了，一条候选都没有——那是**没有候选**，不是「撞过没撞上」。"),
+    );
+
+    let 没跑过的那个 = 一个变体(没结论);
+    assert_eq!(没跑过的那个.confidence_label(), NOT_RUN_LABEL);
+    let 那一句 = 没跑过的那个.no_candidate_hint().expect("该说一句");
+    assert!(那一句.contains(NOT_RUN_LABEL), "{那一句}");
+    assert!(
+        那一句.contains("romcat identify"),
+        "还没识别那一句该指向下一步该干什么：{那一句}",
+    );
+
+    // **有候选就不必说这一句**：那时屏上摆的是候选本身。作品那几行底下的变体
+    // 各带一条候选（见 `建库`）。
+    let 有候选的 = catalog
+        .work_detail(
+            &WorkQuery::default(),
+            &rows
+                .iter()
+                .find(|row| row.confidence.is_some())
+                .expect("有一行是有候选的")
+                .anchor,
+        )
+        .expect("读得动")
+        .expect("点得开")
+        .variants
+        .remove(0);
+    assert!(!有候选的.candidates.is_empty(), "这个变体该有候选");
+    assert_eq!(有候选的.no_candidate_hint(), None);
+}
+
+/// **一行是一批变体时，`identified` 问的是「是不是全都跑过」，不是「有没有一个」**
+/// （票 `gui-redesign/17`、挂单 `Q190`）。
+///
+/// 上面那条断的全是**没认出作品**的行，而那种行只有一个变体——「一批」这件事它验不到。
+/// 折的方向反了（SQL 里 `MIN` 写成 `MAX`）在那条测试上一点动静都没有，可屏上会出这样一行：
+/// 十个变体里一个跑过识别、九个还没轮到，那一栏说「没有候选」——
+/// 意思是「识别跑过了、只是一个字都没说，接下来得你自己来」，
+/// 而这一行真正该做的事是**先跑一趟 `romcat identify`**。
+#[test]
+fn 一行底下只要还剩一个变体没跑过识别这一行就说还没识别() {
+    // 两个作品各挂两个变体，两边都**一条候选都没有**，差别只在跑没跑过：
+    // 「剩一个」那边的第二个变体走 `link_variant` 挂上作品、**不写结论行**
+    // ——真机上「识别跑完之后又扫进一个新文件」就是这个形状。
+    let mut catalog = Catalog::open_in_memory().expect("开得出中立库");
+    let 键 = |作品: &str, n: u64| format!("主库/GB/{作品}{n}.zip");
+    let variants: Vec<Variant> = ["剩一个", "全跑过"]
+        .into_iter()
+        .flat_map(|作品| (0..2).map(move |n| 变体(&键(作品, n), Some("GB"), 1_000)))
+        .collect();
+    catalog
+        .replace_variants(&variants, 1, &Manifest::default())
+        .expect("写得进去");
+    let 剩一个 = catalog
+        .add_work("剩一个", Provenance::Identified)
+        .expect("建得出作品");
+    let 全跑过 = catalog
+        .add_work("全跑过", Provenance::Identified)
+        .expect("建得出作品");
+    let 一条不带候选的 = |key: String, work: i64| Identification {
+        variant_key: key,
+        state: State::Unmatched,
+        reason: None,
+        units: 1,
+        nkit: 0,
+        read_bytes: 0,
+        work_id: Some(work),
+        release_id: None,
+        candidates: Vec::new(),
+    };
+    catalog
+        .write_identifications(&[
+            一条不带候选的(键("剩一个", 0), 剩一个),
+            一条不带候选的(键("全跑过", 0), 全跑过),
+            一条不带候选的(键("全跑过", 1), 全跑过),
+        ])
+        .expect("写得进识别结论");
+    // 这一个**只挂作品、不写结论**：它就是那个「还没轮到它」的变体。
+    catalog
+        .link_variant(&键("剩一个", 1), Some(剩一个), None)
+        .expect("挂得上作品");
+
+    let rows = catalog
+        .work_page(&WorkQuery::default(), 0, 64)
+        .expect("取得出一页");
+    let 那一行 = |name: &str| {
+        rows.iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("{name} 那一行没了"))
+    };
+
+    let 剩一个没跑过 = 那一行("剩一个");
+    assert_eq!(剩一个没跑过.variants, 2, "这一行底下该有两个变体");
+    assert_eq!(剩一个没跑过.confidence, None, "它们一条候选都没有");
+    assert!(
+        !剩一个没跑过.identified,
+        "两个变体里还有一个连结论行都没有，这一行不算「全都跑过」",
+    );
+    assert_eq!(剩一个没跑过.confidence_label(), NOT_RUN_LABEL);
+
+    let 全跑过了 = 那一行("全跑过");
+    assert_eq!(全跑过了.variants, 2);
+    assert_eq!(全跑过了.confidence, None, "它们也一条候选都没有");
+    assert!(全跑过了.identified, "两个变体一个不落全都有结论行");
+    assert_eq!(全跑过了.confidence_label(), "没有候选");
 }
 
 #[test]

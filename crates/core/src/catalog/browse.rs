@@ -97,7 +97,7 @@
 use rusqlite::{ToSql, params_from_iter};
 
 use super::content::{VARIANT_COLUMNS, VariantRow, read_variant_row};
-use super::identify::{Candidate, Confidence, State, Tier};
+use super::identify::{Candidate, Confidence, NOT_RUN_LABEL, State, Tier};
 use super::{Catalog, CatalogError};
 use crate::scrape::{AnchorKind, Field};
 use crate::sublibrary::{Clause, Dimension, Group, Join, Node, Op, Rule};
@@ -178,19 +178,30 @@ impl StateFilter {
         Self::Unidentified,
     ];
 
-    /// 打给用户的那个词。用**词表**里的词。
+    /// 打给用户的那个词。用**词表**里的词（`CONTEXT.md` 的**还没识别**条，
+    /// 落在 [`NOT_RUN_LABEL`] 上）。
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Concluded(state) => state.label(),
-            Self::Unidentified => "还没识别",
+            Self::Unidentified => NOT_RUN_LABEL,
         }
     }
 
     /// 从词认回来；认不出是 `None`。
+    ///
+    /// **认的是 [`NOT_RUN_LABEL`] 那个常量，不是抄一遍那四个字**（票 `gui-redesign/17`）：
+    /// 它与 [`label`](Self::label) 是一对，抄一遍的话改一处、断一处，而断了**没有
+    /// 一条编译错误会说话**——`&str` 比 `&str` 永远编得过。
+    ///
+    /// ⚠️ **眼下这个函数没有生产调用方**：筛选面板拿的是 `StateFilter` 值本身
+    /// （`romcat_gui::browse` 那一段直接比、直接赋回），一个字符串都不经手；
+    /// 真走字符串往返的是 [`PlatformFilter::from_label`]。所以这一对的一致性
+    /// **只有测试守着**（`crates/core/tests/browse.rs`），而不是「屏上点了没反应」
+    /// 会自己冒出来——那正是它更该由常量而不是字面量钉住的理由。
     #[must_use]
     pub fn from_label(label: &str) -> Option<Self> {
-        if label == "还没识别" {
+        if label == NOT_RUN_LABEL {
             return Some(Self::Unidentified);
         }
         State::from_label(label).map(Self::Concluded)
@@ -764,8 +775,28 @@ pub struct WorkRow {
     /// [`WORK_FIELDS`] 里**一个值都没有**的那几样。空着就是齐了。
     pub missing: Vec<Field>,
     /// 底下那些变体里**最高的那档置信度**（ADR-0002）；
-    /// 一条候选都没有时是 `None`，那是**还没识别**，不是「没撞上」。
+    /// 一条候选都没有时是 `None`，那不是「没撞上」——是**没有候选**或者**还没识别**，
+    /// 哪一个由 [`identified`](Self::identified) 分辨。
     pub confidence: Option<Confidence>,
+    /// 底下那些变体**是不是全都跑过识别**（按当前筛选）。
+    ///
+    /// **它是「还没识别」与「没有候选」之间那条界线**（`CONTEXT.md` 两条词条）：
+    /// [`confidence`](Self::confidence) 那个 `None` 一个人装着两件事——一个变体连识别都
+    /// 还没跑过（库里连它的结论都没有），和一个跑过了却一条候选都没有。这条界线正是
+    /// **命中率的分母**那条界线（ADR-0002），分不出来，屏上就得挑一件事去撒谎。
+    ///
+    /// **一行是一批变体，所以这里问的是「是不是全都」而不是「有没有一个」**，
+    /// 而这与 [`confidence`](Self::confidence) 取最高的那一档**不是同一条道理**：
+    /// 候选是**正面事实**（有一条就是有，取最好的那条不冤枉谁），而「跑过没跑过」是
+    /// **覆盖度**——折成「最好的那个」等于让跑过的那一条替还没跑过的那九条说话。
+    /// 十个变体里一个跑过、九个还没轮到，屏上说「没有候选」就是在说
+    /// 「识别跑过了、只是一个字都没说，接下来得你自己来」，而这一行真正该做的事是
+    /// **先跑一趟 `romcat identify`**。所以**只要还剩一个没跑过，这一行就说还没识别**。
+    ///
+    /// 库里一共还剩多少个变体没跑过，另有一份按变体数的账
+    /// （[`Catalog::not_run_count`](super::Catalog::not_run_count)），队列屏在屏头单说
+    /// 一句，两处谁也不替谁说话。
+    pub identified: bool,
     /// 搜索框打的那几个字**命中在哪儿**；没搜的时候是 `None`。
     ///
     /// 屏上要印得出来：一行名字里一个搜索词都没有的作品冒在前面，不说清它是**别名**
@@ -801,15 +832,31 @@ impl WorkRow {
 
     /// 置信度那一栏画成什么。**「还没识别」是独立的一档**（ADR-0002）。
     ///
-    /// **词一个字都不自己写**，全走 [`Tier::label`]（票 `gui-redesign/12`）：这一栏从前
-    /// 印的是「高 / 中 / 低」，而待确认屏印的是「高置信 / 中置信 / 低置信」——同一件事
-    /// 在两屏上是两个词，用户会以为那是两回事。
+    /// **词一个字都不自己写**（票 `gui-redesign/12`）：这一栏从前印的是「高 / 中 / 低」，
+    /// 而待确认屏印的是「高置信 / 中置信 / 低置信」——同一件事在两屏上是两个词，
+    /// 用户会以为那是两回事。三档置信度与「没有候选」走 [`Tier::label`]，
+    /// 「还没识别」走 [`NOT_RUN_LABEL`]，两个常量各在核心库里只写一处。
+    ///
+    /// **两个词分开印**（票 `gui-redesign/17`）：一条候选都没有时，
+    /// [`identified`](Self::identified) 说这一行底下的变体**是不是全都跑过识别**——
+    /// 全都跑过了是**没有候选**（识别说完话了，只是一个字都没说得出来，接下来得人自己来），
+    /// 还剩一个没跑过就是**还没识别**（该做的事是先跑一趟 `romcat identify`）。
+    /// 两件事印同一个词的话，这一栏就会对着一整批压根没识别过的变体说
+    /// 「识别跑过了、没找着」。
     #[must_use]
     pub fn confidence_label(&self) -> &'static str {
+        if self.confidence.is_none() && !self.identified {
+            return NOT_RUN_LABEL;
+        }
         Tier::of(self.confidence).label()
     }
 
     /// 这一行落在**置信度四档**的哪一档。屏上要上色的地方拿它，不自己 `match`。
+    ///
+    /// **还没识别的那一行与没有候选的那一行同一个颜色**：那两件事的区别由
+    /// [`confidence_label`](Self::confidence_label) 那个**词**说，不由颜色说。
+    /// 色觉障碍下颜色全糊成一片，读得出来的只有字（`romcat_gui::look` 的
+    /// 「颜色不是唯一线索」）——所以这一档没必要、也不该再分出第五个颜色来。
     #[must_use]
     pub fn tier(&self) -> Tier {
         Tier::of(self.confidence)
@@ -1209,6 +1256,15 @@ const WORK_ANCHOR_COLUMNS: &str = concat!(
 /// - 平台未知那一档**不塞一个约定字符串进 SQL**：`group_concat` 跳过 `NULL`，
 ///   另数一列 `unknowns` 出来，标签在 Rust 那边补（同 [`PlatformFilter`] 的道理）。
 /// - **年份不在这里**：它由 [`Catalog::fill_scraped`] 顺路带回来。
+/// - `identified` 那一列是**「还没识别」与「没有候选」之间那条界线**
+///   （[`WorkRow::identified`]）：`EXISTS` 一行一行答「这个变体跑过识别没有」，
+///   外面套 **`MIN`** 折成「这一组**是不是全都**跑过」。**是 `MIN` 不是 `MAX`**——
+///   组里剩一个没跑过，这一行就该说还没识别，理由见 [`WorkRow::identified`]。
+///   走相关子查询而不是多连一张 `identification`，是因为 `FROM` 那一段
+///   （[`WORK_FROM_BASE`]）是**三条查询共用的常量**（还有[数总行数](Catalog::work_total)
+///   与第一趟挑行），为这一列去动它等于让另外两条也多连一张表；这个 `SELECT` 列表
+///   只有这一趟用，改动就关在这儿。`identification.variant_key` 是主键，
+///   两种写法都是一次索引查，快慢上不分伯仲。
 const WORK_TOTAL_COLUMNS: &str = "\
     variant.work_id AS work_id,
     CASE WHEN variant.work_id IS NULL THEN variant.key END AS loose,
@@ -1216,7 +1272,9 @@ const WORK_TOTAL_COLUMNS: &str = "\
     SUM(variant.bytes) AS bytes,
     SUM(variant.unreadable) AS unreadable,
     group_concat(variant.platform) AS platforms,
-    SUM(variant.platform IS NULL) AS unknowns";
+    SUM(variant.platform IS NULL) AS unknowns,
+    MIN(EXISTS (SELECT 1 FROM identification i WHERE i.variant_key = variant.key))
+        AS identified";
 
 /// 主列表那条查询的 `FROM` 的头一半：变体连它的作品。
 ///
@@ -1705,11 +1763,12 @@ impl Catalog {
                         u64::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
                         u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
                         platform_set(row.get(5)?, unknowns),
+                        row.get::<_, i64>(7)? != 0,
                     ),
                 ))
             })
             .map_err(|source| self.err(source))?;
-        let mut totals: std::collections::BTreeMap<WorkAnchor, (u64, u64, u64, Vec<String>)> =
+        let mut totals: std::collections::BTreeMap<WorkAnchor, (u64, u64, u64, Vec<String>, bool)> =
             std::collections::BTreeMap::new();
         for row in found {
             let (anchor, total) = row.map_err(|source| self.err(source))?;
@@ -1723,8 +1782,14 @@ impl Catalog {
                 // 「0 个变体」——下一次读库就没有它了。同一份暴露面
                 // [`Self::fill_scraped`] 与 [`Self::fill_confidence`] 本来就有：
                 // 这一层从来不是一条 SQL 出一整页。
-                let (variants, bytes, unreadable_files, platforms) =
-                    totals.remove(&anchor).unwrap_or_default();
+                //
+                // **这一格的 `identified` 不走 `Default`**（那是 `false`，也就是
+                // 「还有变体没跑过识别」）：一组零个变体，「全都跑过了」是**空真**，
+                // 而 `false` 会让这一行印出「还没识别」——对一份刚被删掉的内容说
+                // 「先跑一趟 `romcat identify`」，是这一票专门要消灭的那种指错下一步。
+                let (variants, bytes, unreadable_files, platforms, identified) = totals
+                    .remove(&anchor)
+                    .unwrap_or((0, 0, 0, Vec::new(), true));
                 WorkRow {
                     anchor,
                     name,
@@ -1732,6 +1797,7 @@ impl Catalog {
                     variants,
                     bytes,
                     unreadable_files,
+                    identified,
                     hit,
                     // 这三样下面补。
                     year: None,
@@ -1827,8 +1893,9 @@ impl Catalog {
     /// 补上这一页每一行的**最高置信度**。
     ///
     /// 算的是**当前筛选下**那些变体上的候选：屏上那一行写着几个变体，这一档就是那几个
-    /// 变体里最有把握的那条结论。一条候选都没有就留 `None`——那是**还没识别**，
-    /// 与「撞过没撞上」不是一回事（ADR-0002）。
+    /// 变体里最有把握的那条结论。一条候选都没有就留 `None`——那不是「撞过没撞上」
+    /// （ADR-0002）；那一行印**没有候选**还是**还没识别**，由
+    /// [`WorkRow::identified`] 那一列分辨，不由这一趟说。
     fn fill_confidence(&self, query: &WorkQuery, rows: &mut [WorkRow]) -> Result<(), CatalogError> {
         let works: Vec<i64> = rows
             .iter()
@@ -2058,13 +2125,55 @@ pub struct WorkVariant {
 }
 
 impl WorkVariant {
-    /// 这个变体最高的那档置信度；一条候选都没有时是 `None`（**还没识别**）。
+    /// 这个变体最高的那档置信度；一条候选都没有时是 `None`——**没有候选**或者
+    /// **还没识别**，哪一个由 [`state`](Self::state) 分辨。
     #[must_use]
     pub fn confidence(&self) -> Option<Confidence> {
         self.candidates
             .iter()
             .map(|candidate| candidate.confidence)
             .min()
+    }
+
+    /// 详情面板里这一行印哪个词。与主列表那一栏
+    /// （[`WorkRow::confidence_label`]）同一条口径，只是这里手上就是一个变体，
+    /// 「跑过没跑过」直接由 [`state`](Self::state) 说：一行结论都没有就是
+    /// **还没识别**，有结论而一条候选都没有就是**没有候选**。
+    ///
+    /// **词落在核心库里**（ADR-0005）：界面只把它印出来，不自己判这一格该说哪个词。
+    ///
+    /// 判的次序与主列表那一栏一字不差：**先看有没有候选**，一条都没有才去问跑没跑过。
+    /// 反过来先问跑没跑过的话，一个「没有结论行、却有候选」的变体（真机上写不出来
+    /// ——两张表同进同出——但这一层收的是两个独立的字段）会被印成还没识别，
+    /// 而它的候选就摆在旁边的悬停里。
+    #[must_use]
+    pub fn confidence_label(&self) -> &'static str {
+        let confidence = self.confidence();
+        if confidence.is_none() && self.state.is_none() {
+            return NOT_RUN_LABEL;
+        }
+        Tier::of(confidence).label()
+    }
+
+    /// 一条候选都没有时，**该说哪一句、指向哪一步**；有候选就是 `None`（不必说）。
+    ///
+    /// 与 [`confidence_label`](Self::confidence_label) 是同一条判据的两面：那边给一个词，
+    /// 这边给一句话。**两处必须同进同出**，所以判据只写在这一处——界面照着印就行
+    /// （ADR-0005）。从前这一句是界面自己 `if variant.state.is_none()` 判出来的，
+    /// 而哪天判据变了（比如再加上「这条结论是不是这一份字节的」），核心改了、
+    /// 界面没跟上，屏上那句「先跑一趟 `romcat identify`」就会指错，
+    /// 而没有一条编译错误会说话。
+    #[must_use]
+    pub fn no_candidate_hint(&self) -> Option<&'static str> {
+        if !self.candidates.is_empty() {
+            return None;
+        }
+        Some(if self.state.is_none() {
+            "连识别都还没跑过——那是**还没识别**，不是「撞过没撞上」。\
+             先跑一趟 `romcat identify`。"
+        } else {
+            "识别跑过了，一条候选都没有——那是**没有候选**，不是「撞过没撞上」。"
+        })
     }
 }
 

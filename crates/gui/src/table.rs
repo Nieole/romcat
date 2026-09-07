@@ -461,8 +461,11 @@ impl Table<'_> {
                     });
                     row.col(|ui| {
                         // 置信度的颜色与词在五屏里同出一处（规格 69、票 `gui-redesign/12`）：
-                        // 哪一档由核心库说（`WorkRow::tier`），什么颜色由 [`crate::look`] 说，
-                        // 这儿一个 `match` 都不写。**词一直在**——颜色不是唯一线索。
+                        // 哪一档由核心库说（`WorkRow::tier`），印哪个词也由核心库说
+                        // （`WorkRow::confidence_label`——一条候选都没有时它还要分辨
+                        // **没有候选**与**还没识别**，票 `gui-redesign/17`），
+                        // 什么颜色由 [`crate::look`] 说，这儿一个 `match` 都不写。
+                        // **词一直在**——颜色不是唯一线索。
                         ui.colored_label(
                             look::tier_color(work.tier(), ui.visuals()),
                             format!("{} · {}", work.confidence_label(), work.missing_label()),
