@@ -68,7 +68,7 @@ enum Command {
     Identify(IdentifyArgs),
     /// 在识别结论上取元数据与媒体。离线档一个网络请求都不发，中文名、类型、简介、开发商与发行商都补得上；在线档补封面，默认限流
     Scrape(ScrapeArgs),
-    /// 折出标题集合，挑出显示标题与排序标题，并报出多少个作品拿到了中文标题
+    /// 折出标题集合，挑出显示标题与排序标题，并报出多少个作品的标题集合里有中文叫法
     Titles(TitlesArgs),
     /// 把维护者手工维护的前端元数据导进中立库。原文逐字节留存，往返实测当场报出档位
     Import(ImportArgs),
@@ -2510,7 +2510,7 @@ fn run_titles(args: &TitlesArgs) -> ExitCode {
         let _ = stdout.flush();
     }
     eprintln!(
-        "折标题用了 {:.1} 秒，一个字节都没读主库。{} 个作品拿到了中文显示标题。",
+        "折标题用了 {:.1} 秒，一个字节都没读主库。{} 个作品的标题集合里有中文叫法。",
         started.elapsed().as_secs_f64(),
         thousands(report.chinese_works),
     );
