@@ -69,10 +69,15 @@ pub struct Pegasus;
 /// 首选文件名（官方原话：the preferred file name）。
 pub const FILE_NAME: &str = "metadata.pegasus.txt";
 
-/// 这个格式**结构上**装不下的那两样（[`Adapter::structural_losses`]）。
+/// 这个格式的**结构性损失**（[`Adapter::structural_losses`]）。
 ///
-/// 两条都出在**多行文本**上，两条都不是这里的疏漏——是 Pegasus 词法自己的边界，
-/// 换个写法也躲不开，所以能力档位说得出来就是全部能做的（ADR-0003）。
+/// 这份清单说的是这个格式在**值的文本形状**上的全部天花板，不是碰巧撞见的那几样：
+/// 值的两端各一条、多行文本里两条、多值字段一条。没有一条是这里的疏漏——都是 Pegasus
+/// 词法自己的边界，换个写法也躲不开，所以说得出口就是全部能做的（ADR-0003）。
+///
+/// **值的文本形状之外还有一族**：`rating` 写 `85` 被静默丢弃、`players` 的 `1-4`
+/// 存成 `4`、`release` 写 `1985` 读回来是 `1985-01-01`。那一族眼下走的是
+/// [`LossyNote`] 那条按行数得出来的路（`fold_game` 里那三个分支），不在这份清单里。
 ///
 /// ## 为什么它们避不开
 ///
@@ -91,7 +96,30 @@ pub const FILE_NAME: &str = "metadata.pegasus.txt";
 /// 「续行的缩进」，它们在这个格式里长得一模一样。Rust 的 `trim_start` 连
 /// **U+3000 全角空格**一起吃掉，而中文离线源的简介开头那两个全角空格是那份数据源的常态。
 ///
-/// ## 这两条与「往返一个字节都不差」并不打架
+/// **三、末尾的空白也被掐掉，而且掐的是每一行。** 开头那一半有「与续行缩进分不开」
+/// 的理由，末尾这一半更简单：这个格式没有引号一类的界定符，末尾那点空白**根本写不出来**。
+///
+/// 两头都要**说准到「每一行」**：`classify` 对续行先 `trim_start` 再 `trim_end`，
+/// 掐的是**那一行**的两头，不是整个值的两端。于是 `"甲\n    乙"` 与 `"甲  \n乙"` 往返
+/// 回来都是 `"甲 乙"`——行内的缩进与行末的空白一并没了。写成「值的两端」就漏掉了
+/// 中间那些行。掐完整个值不剩东西的（`"   "`，或本来就是 `""`），`collect` 连一个值
+/// 都不收，`single` 于是交出 `None`：**那个字段整条消失**。
+///
+/// **四、值里那一行 `.` 读回来是段落分隔。** 写的时候空行写成缩进加一个 `.`，
+/// 而**内容恰为 `.` 的一行**原样写出去也是缩进加一个 `.`——两者在文件里长得一模一样。
+/// 读回来 `joined` 一律把 `.` 还原成 `\n\n`，于是字面量那一行 `.` 回不来了。
+/// 整个值就是一行 `.` 的更狠：`joined` 先把它还成 `\n\n`，自己末尾那个 `trim` 又把它
+/// 抹成空串，`single` 于是交出 `None`——**那个字段整条消失**。
+///
+/// **五、多值字段装不下值里的换行，也装不下空串。** 多值走续行形式，一行一个值：
+/// 值里那个 `\n` 于是把它拆成多个值（`["动作\n冒险"]` 出去、`["动作", "冒险"]` 回来）。
+/// 空串（与只剩空白的值）写出去是一行 `.`，而多值那一侧读的是 `attribute.values.clone()`、
+/// 不走 `joined`，于是拿回来的是**字面量** `.`——与本来就是 `.` 的那个值再也分不开。
+///
+/// **只有一个值时不走这条路**：`write_attribute` 那时取的是单值分支、写的是
+/// `genre: `，读回来整条属性都没了。那一格归第三条（值掐空了字段就消失），不归这里。
+///
+/// ## 这几条与「往返一个字节都不差」并不打架
 ///
 /// 带**底本**的那一趟里，原文那几行原样躺在快照里、原样写回去，逐字节相同照旧成立。
 /// 变形只发生在**新生成**的内容上：库里的值写出去、再让 Pegasus（或我们自己）读回来，
@@ -103,9 +131,28 @@ pub const STRUCTURAL_LOSSES: &[StructuralLoss] = &[
         why: "读那一侧把续行一路拼起来，只有内容恰为 `.` 的一行才算段落分隔，而它一律还原成一个空行",
     },
     StructuralLoss {
-        what: "值**开头**的空白，含全角空格 U+3000",
-        becomes: "被掐掉",
-        why: "值开头的空白与续行的缩进在这个格式里长得一模一样，读的时候分不开",
+        what: "值里**每一行**开头的空白，含全角空格 U+3000",
+        becomes: "被掐掉——不只是值的头一行，多行值里每一行的缩进都留不住",
+        why: "行首的空白与续行的缩进在这个格式里长得一模一样，读的时候分不开",
+    },
+    StructuralLoss {
+        what: "值里**每一行**末尾的空白，含全角空格 U+3000",
+        becomes: "被掐掉，与行首那一样；掐完整个值不剩东西的（本来就是空串的也一样），\
+                  那个字段整条消失",
+        why: "读的时候每一行的两头都被掐，而这个格式没有引号一类的界定符能把末尾那点空白\
+              圈起来——写不出来，也读不回来",
+    },
+    StructuralLoss {
+        what: "值里**内容恰为 `.` 的一行**",
+        becomes: "读回来成了段落分隔（一个空行）；整个值就是一行 `.` 的，读回来是空的\
+                  ——那个字段整条消失",
+        why: "写出去它与空行长得一模一样，而读那一侧一律把 `.` 当段落分隔还原，两者再也分不开",
+    },
+    StructuralLoss {
+        what: "多值字段（写出去是 `files` `genre` `developer` 这一族）里带换行的值与空串",
+        becomes: "带换行的那个值按行拆成多个值；空串与只有空白的值写成一行 `.`、\
+                  读回来是字面量 `.`，与本来就是 `.` 的那个值再也分不开",
+        why: "多值在这个格式里就是**一行一个值**，一行装不下换行，也没有一个写法能表示空串",
     },
 ];
 
@@ -1929,25 +1976,13 @@ regex: .*
         assert!(game.unknown.is_empty(), "不该冒出新键：{:?}", game.unknown);
     }
 
-    /// 把一段文字当简介写出去、再原样读回来。**两条声明都是这么量出来的。**
+    /// 把一段文字当简介写出去、再原样读回来。**每一条声明都是这么量出来的。**
     fn 简介往返一趟(原文: &str) -> String {
-        let mut doc = Document::default();
-        doc.entries.push(Entry::new(Body::Game(Game {
-            title: "甲".to_string(),
-            files: vec!["甲.nes".to_string()],
-            summary: Some(原文.to_string()),
-            ..Game::default()
-        })));
-        let written = Pegasus.write(&doc, None).expect("写得出");
-        let back = Pegasus.read(&written).expect("读得回来");
-        let Body::Game(game) = &back.doc.entries[0].body else {
-            panic!("是游戏段");
-        };
-        game.summary.clone().expect("简介还在")
+        简介往返一趟或没了(原文).expect("简介还在")
     }
 
     #[test]
-    fn 档位声明的那两样是实测出来的_不是写死的一句话() {
+    fn 换行与前导空白那两条是实测出来的_不是写死的一句话() {
         // [`STRUCTURAL_LOSSES`] 里那两句要是与这个格式的实际行为对不上，它就成了
         // 一句好看的假话——比不说更糟。这里把两样都在真的写、真的读上量一遍。
         //
@@ -1972,11 +2007,13 @@ regex: .*
             "连着的空行每多一个多长出一个换行"
         );
 
-        // 量出来的这几样，正是声明里写的那两条。**不钉清单的长度**：将来补第三条
-        // （挂单 Q163）不该让这条测试红——它要钉的是「这两条说得准」。
+        // 量出来的这几样，正是声明里写的那两条。**不钉清单的长度**：清单后来补到了
+        // 五条，这条测试照样绿——它要钉的是「这两条说得准」，不是「一共有几条」。
         let 换行 = STRUCTURAL_LOSSES
             .iter()
-            .find(|loss| loss.what.contains("换行"))
+            // **按 `单个换行` 找，不是按 `换行`**：多值那一条的 `what` 里也有「换行」，
+            // 只按「换行」找就成了「谁排在前面找到谁」，清单一重排这条测试就指错。
+            .find(|loss| loss.what.contains("单个换行"))
             .expect("单个换行那一条在");
         assert!(换行.becomes.contains("空格"), "折成空格得说出口：{换行:?}");
         assert!(
@@ -2006,7 +2043,176 @@ regex: .*
         );
         assert!(
             Pegasus.structural_losses().len() >= 2,
-            "这一趟没撞上，两条声明照样在"
+            "这一趟没撞上，声明照样在"
+        );
+    }
+
+    /// 把一组值当**多值字段**（这里用 `genres`）写出去、再原样读回来。
+    fn 多值往返一趟(原值: Vec<String>) -> Vec<String> {
+        let mut doc = Document::default();
+        doc.entries.push(Entry::new(Body::Game(Game {
+            title: "甲".to_string(),
+            files: vec!["甲.nes".to_string()],
+            genres: 原值,
+            ..Game::default()
+        })));
+        let written = Pegasus.write(&doc, None).expect("写得出");
+        let back = Pegasus.read(&written).expect("读得回来");
+        let Body::Game(game) = &back.doc.entries[0].body else {
+            panic!("是游戏段");
+        };
+        game.genres.clone()
+    }
+
+    /// 同 [`简介往返一趟`]，但**允许整个字段消失**——有些值往返一趟就没了，
+    /// 掐完不剩东西的那几样（`"   "`、`""`、只有一行 `.` 的）都走这一个。
+    fn 简介往返一趟或没了(原文: &str) -> Option<String> {
+        let mut doc = Document::default();
+        doc.entries.push(Entry::new(Body::Game(Game {
+            title: "甲".to_string(),
+            files: vec!["甲.nes".to_string()],
+            summary: Some(原文.to_string()),
+            ..Game::default()
+        })));
+        let written = Pegasus.write(&doc, None).expect("写得出");
+        let back = Pegasus.read(&written).expect("读得回来");
+        let Body::Game(game) = &back.doc.entries[0].body else {
+            panic!("是游戏段");
+        };
+        game.summary.clone()
+    }
+
+    #[test]
+    fn 值末尾的空白与开头那一样被掐掉() {
+        // 半角、制表符、**全角空格**三样都量一遍——中文离线源那份简介两头都带全角空格，
+        // 声明里只说了开头，末尾这一半一直没说出口（挂单 `Q160`）。
+        assert_eq!(简介往返一趟("甲  "), "甲", "半角空白");
+        assert_eq!(简介往返一趟("甲\t"), "甲", "制表符");
+        assert_eq!(简介往返一趟("甲\u{3000}\u{3000}"), "甲", "全角空格 U+3000");
+        // **掐的是每一行的两头，不是整个值的两端。** 多行值里中间那些行照样被掐——
+        // 行内的缩进与行末的空白一起没了。声明因此说的是「每一行」。
+        assert_eq!(简介往返一趟("甲\n乙  "), "甲 乙", "多行值最后一行的末尾");
+        assert_eq!(简介往返一趟("甲  \n乙"), "甲 乙", "多行值中间那一行的末尾");
+        assert_eq!(简介往返一趟("甲\n    乙"), "甲 乙", "多行值里那一行的缩进");
+        // 多值字段里每个值各自被掐两头。
+        assert_eq!(
+            多值往返一趟(vec!["动作 ".to_string(), " 解谜".to_string()]),
+            vec!["动作".to_string(), "解谜".to_string()],
+            "多值里每个值的两端都掐"
+        );
+        // 掐完不剩东西的，**那个字段整条消失**——不是读回来一个空串。
+        assert_eq!(
+            简介往返一趟或没了("   "),
+            None,
+            "只有空白的值：字段整条没了"
+        );
+        assert_eq!(简介往返一趟或没了(""), None, "本来就是空串的：一样没了");
+
+        let 末尾 = STRUCTURAL_LOSSES
+            .iter()
+            .find(|loss| loss.what.contains("末尾"))
+            .expect("值末尾的空白那一条在");
+        assert!(末尾.what.contains("U+3000"), "全角空格得点名：{末尾:?}");
+        assert!(末尾.becomes.contains("掐掉"), "{末尾:?}");
+        assert!(
+            末尾.becomes.contains("整条消失"),
+            "掐空了字段就没了，这句不能省：{末尾:?}"
+        );
+        let 开头 = STRUCTURAL_LOSSES
+            .iter()
+            .find(|loss| loss.what.contains("开头"))
+            .expect("值开头的空白那一条在");
+        for loss in [开头, 末尾] {
+            assert!(
+                loss.what.contains("每一行"),
+                "掐的是每一行、不是值的两端，这句不能省：{loss:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn 值里那一行点读回来成了段落分隔() {
+        // 写的时候「内容恰为 `.` 的一行」与「空行」写出去**一模一样**（都是缩进加一个
+        // `.`），读的时候 `joined` 一律把 `.` 还原成段落分隔——字面量那一行 `.` 回不来了。
+        assert_eq!(
+            简介往返一趟("甲\n.\n乙"),
+            "甲\n\n乙",
+            "那一行 `.` 成了段落分隔"
+        );
+        // 整个值就是一行 `.` 的更狠：读回来是空的，**那个字段整条消失**。
+        assert_eq!(简介往返一趟或没了("."), None, "字段整条没了");
+
+        let 点 = STRUCTURAL_LOSSES
+            .iter()
+            .find(|loss| loss.what.contains("恰为 `.`"))
+            .expect("那一行 `.` 那一条在");
+        assert!(点.becomes.contains("段落"), "成了段落分隔得说出口：{点:?}");
+        assert!(
+            点.becomes.contains("整条"),
+            "字段会整条消失，这句不能省：{点:?}"
+        );
+    }
+
+    #[test]
+    fn 多值字段装不下值里的换行也装不下空串() {
+        // 多值在这个格式里就是**一行一个值**：值里那个换行于是把它拆成了两个值。
+        assert_eq!(
+            多值往返一趟(vec!["动作\n冒险".to_string(), "解谜".to_string()]),
+            vec!["动作".to_string(), "冒险".to_string(), "解谜".to_string()],
+            "带换行的那个值按行拆成了两个"
+        );
+        // 空串写出去是一行 `.`（那是段落分隔记号），多值那一侧不走 `joined`，
+        // 于是读回来是**字面量** `.`。
+        assert_eq!(
+            多值往返一趟(vec!["动作".to_string(), String::new(), "解谜".to_string()]),
+            vec!["动作".to_string(), ".".to_string(), "解谜".to_string()],
+            "空串读回来是字面量 `.`"
+        );
+        // 而本来就是 `.` 的值原样回得来——**两个不同的输入落到同一个结果上**，
+        // 读回来再也分不出原先是哪一个。
+        assert_eq!(
+            多值往返一趟(vec![
+                "动作".to_string(),
+                ".".to_string(),
+                "解谜".to_string()
+            ]),
+            vec!["动作".to_string(), ".".to_string(), "解谜".to_string()],
+            "本来就是 `.` 的值原样回来"
+        );
+        // 只有空白的值走的是同一条路——写出去也是一行 `.`。
+        assert_eq!(
+            多值往返一趟(vec![
+                "动作".to_string(),
+                "  ".to_string(),
+                "解谜".to_string()
+            ]),
+            vec!["动作".to_string(), ".".to_string(), "解谜".to_string()],
+            "只有空白的值也成了字面量 `.`"
+        );
+        // **只有一个值的时候不走这条路**：`write_attribute` 取的是单值分支、写的是
+        // `genre: `，读回来整条属性都没了。那一格归「掐空了字段就消失」那一条声明。
+        assert!(
+            多值往返一趟(vec![String::new()]).is_empty(),
+            "只有一个空串时走单值分支，整条属性消失"
+        );
+        assert_eq!(
+            多值往返一趟(vec!["动作".to_string(), String::new()]),
+            vec!["动作".to_string(), ".".to_string()],
+            "有第二个值时才走续行分支，空串才成 `.`"
+        );
+
+        let 多值 = STRUCTURAL_LOSSES
+            .iter()
+            .find(|loss| loss.what.contains("多值"))
+            .expect("多值字段那一条在");
+        assert!(多值.becomes.contains("拆"), "按行拆开得说出口：{多值:?}");
+        assert!(
+            多值.becomes.contains("字面量"),
+            "空串成了字面量 `.`：{多值:?}"
+        );
+        assert!(
+            多值.becomes.contains("分不开"),
+            "两个输入撞成一个：{多值:?}"
         );
     }
 }

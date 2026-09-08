@@ -2555,7 +2555,7 @@ fn run_adapters() -> ExitCode {
         if losses.is_empty() {
             continue;
         }
-        println!("\n{} 结构上装不下什么", adapter.name());
+        println!("\n{} 的结构性损失", adapter.name());
         println!("（与库里当下有什么无关：说的是格式本身做不到什么，不是这一趟丢了几条）");
         for loss in losses {
             println!("  {}", loss.line());

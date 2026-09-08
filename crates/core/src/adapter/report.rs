@@ -42,7 +42,7 @@ use crate::report::{heading, human_bytes, pad, thousands};
 /// 报告里就会出现「列了 10 条」与「其实攒了 8 条」这种对不上。
 pub(super) const EXAMPLES: usize = 10;
 
-/// 把「这个格式结构上装不下什么」写进报告。
+/// 把这个格式的**结构性损失**写进报告。
 ///
 /// **导入与导出共用这一个。** 同一件事在两份报告里各写各的，用户就会读到两种说法，
 /// 而这两句正是他决定要不要导出的依据（票 02 的验收点名）。
@@ -54,7 +54,7 @@ fn write_structural_losses(out: &mut String, losses: &[StructuralLoss]) {
     if losses.is_empty() {
         return;
     }
-    heading(out, "这个格式结构上装不下什么");
+    heading(out, "这个格式的结构性损失");
     let _ = writeln!(
         out,
         "**与这一趟撞没撞上无关**：说的是格式本身做不到什么，不是这一趟丢了几条。\n\
@@ -115,7 +115,7 @@ pub struct ImportReport {
     pub ceiling: String,
     /// **实测**下来是哪一档——全部文件里最低的那一档。
     pub tier: String,
-    /// 这个格式**结构上**装不下什么。
+    /// 这个格式的**结构性损失**。
     ///
     /// **与这一趟导了什么无关**：它是格式自己的边界，逐条都是 `&'static`。
     /// 导入这一侧也印，是因为「导出前就知道会丢什么」得从第一次接触这个格式起就说得出，
@@ -293,7 +293,7 @@ pub struct ExportReport {
     pub format: String,
     /// 实测档位。
     pub tier: String,
-    /// 这个格式**结构上**装不下什么。与导入报告里那一份是同一份、印出来是同一句。
+    /// 这个格式的**结构性损失**。与导入报告里那一份是同一份、印出来是同一句。
     pub structural_losses: Vec<StructuralLoss>,
     /// 写到哪儿。
     pub out: String,
@@ -459,11 +459,11 @@ mod tests {
     use super::*;
     use crate::adapter::{Adapter, pegasus::Pegasus};
 
-    /// 把「这个格式结构上装不下什么」那一节从渲染出来的报告里抠出来。
+    /// 把**结构性损失**那一节从渲染出来的报告里抠出来。
     ///
     /// 一节由 [`heading`] 起头（空一行、标题、横线），到下一节那个空行为止。
     fn 那一节(text: &str) -> &str {
-        let start = text.find("这个格式结构上装不下什么").expect("有这一节");
+        let start = text.find("这个格式的结构性损失").expect("有这一节");
         let rest = &text[start..];
         let end = rest.find("\n\n").expect("后面还有别的节");
         &rest[..end]
@@ -497,9 +497,6 @@ mod tests {
         // 空清单的意思是**还没查过**，不是「这个格式什么都不丢」。印一句
         // 「无结构性损失」就是替一份没人核过的调研背书。
         let text = ImportReport::default().render_text();
-        assert!(
-            !text.contains("结构上装不下"),
-            "空清单该一个字都不印：{text}"
-        );
+        assert!(!text.contains("结构性损失"), "空清单该一个字都不印：{text}");
     }
 }
