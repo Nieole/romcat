@@ -272,6 +272,97 @@ impl Item {
     }
 }
 
+/// **待确认队列那张表按哪一列排。**
+///
+/// ## 它排在内存里，而主列表排在 `ORDER BY` 里——两条路是有意的
+///
+/// [`WorkOrder`](crate::catalog::browse::WorkOrder) 那一列下推到 SQLite，因为主列表的行
+/// 躺在中立库里：在内存里排它等于先要把全库读进来（ADR-0005、`catalog::browse`）。
+/// 队列不是那样——它**整份就在内存里**（[`Queue`] 的模块文档说了为什么：分组本来就要
+/// 走完全部条目），于是**数据在哪就在哪排**。为它另开一条查询，等于把已经在手上的一万
+/// 六千条再从库里读一遍，还得让 [`Filter`] 那七个轴各长出一份 SQL。
+///
+/// ## 同值时一律拿变体的键收尾
+///
+/// [`cmp_items`](Self::cmp_items) 每一档最后都比一次键，而键在中立库里是唯一的——于是这是个
+/// **全序**：同一批条目排出来的次序只有一个，与它们进来时的次序、与排过几次都无关。
+/// 少了这一条，「按结论排」在一万六千条里只分得出四个值，剩下的次序就是上一次排序留下的
+/// 残影，人点两次表头看见的是两副样子。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ItemOrder {
+    /// 变体的**键**。**列一次队列拿到的就是这个次序**
+    /// （`Catalog::queue_rows` 的 `ORDER BY v.key`），所以它是默认那一档。
+    #[default]
+    Key,
+    /// 这一轮识别的**结论**，照 [`State::ALL`] 的次序。
+    State,
+    /// 变体落在哪个**平台**上。**没有平台的排在最后**：那是「还不知道」，
+    /// 不是一个排在字母表最前面的平台。
+    Platform,
+    /// 有几条**候选**；一样多的按**档**（[`Item::tier`]）。屏上那一栏画的正是这两样。
+    Candidates,
+    /// 变体占多少字节（下界，ADR-0021）。
+    Bytes,
+}
+
+impl ItemOrder {
+    /// 五列，界面照这个次序摆表头。
+    pub const ALL: [Self; 5] = [
+        Self::Key,
+        Self::State,
+        Self::Platform,
+        Self::Candidates,
+        Self::Bytes,
+    ];
+
+    /// 这一列在界面上叫什么。用**词表**里的词。
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Key => "变体",
+            Self::State => "结论",
+            Self::Platform => "平台",
+            Self::Candidates => "候选 · 置信度",
+            Self::Bytes => "容量",
+        }
+    }
+
+    /// 这两条谁排前面。见这个枚举的文档：**每一档都拿键收尾**，于是它是个全序。
+    fn compare(self, a: &Item, b: &Item) -> std::cmp::Ordering {
+        let tie = a.variant.key.cmp(&b.variant.key);
+        match self {
+            Self::Key => tie,
+            Self::State => a.state.cmp(&b.state).then(tie),
+            // `Option` 自己的次序把 `None` 排在最前面，而「还不知道是哪个平台」
+            // 该排在最后——所以先比一次「有没有」。
+            Self::Platform => a
+                .variant
+                .platform
+                .is_none()
+                .cmp(&b.variant.platform.is_none())
+                .then_with(|| a.variant.platform.cmp(&b.variant.platform))
+                .then(tie),
+            Self::Candidates => a
+                .candidates
+                .len()
+                .cmp(&b.candidates.len())
+                .then_with(|| a.tier().cmp(&b.tier()))
+                .then(tie),
+            Self::Bytes => a.variant.bytes.cmp(&b.variant.bytes).then(tie),
+        }
+    }
+
+    /// 这两条谁排前面，`descending` 说的是**倒着排**。
+    ///
+    /// 倒着排是把整个次序翻过来，**收尾那一条也翻**——于是「倒一次再正一次」还是原来
+    /// 那份次序，而不是一份键倒着、别的正着的第三种样子。
+    #[must_use]
+    pub fn cmp_items(self, a: &Item, b: &Item, descending: bool) -> std::cmp::Ordering {
+        let out = self.compare(a, b);
+        if descending { out.reverse() } else { out }
+    }
+}
+
 /// 从队列里挑哪些。**几个条件之间是交集**，同一个条件里给了几个值是并集。
 ///
 /// 全空表示「整个队列」。

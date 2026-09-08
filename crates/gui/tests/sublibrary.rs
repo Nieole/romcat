@@ -676,6 +676,22 @@ fn 差量预览摆得出新增与净变化而且步骤全部展开得了() {
     assert!(场.app.sublibrary().expanded());
     场.排预览();
     assert!(!场.app.sublibrary().expanded(), "重排一次没收回去");
+
+    // **摊开之后那张表真的画了几行**，而且一步都没截：这一份计划只有两步，两步全画。
+    let ctx = headless::context();
+    场.app.sublibrary_and_site().0.expand(true);
+    画两帧(&ctx, &mut 场);
+    assert_eq!(
+        场.app.sublibrary().steps_drawn(),
+        场.app
+            .sublibrary()
+            .prepared()
+            .expect("排得出来")
+            .plan
+            .steps
+            .len(),
+        "摊开之后画出来的行数与计划的步数对不上",
+    );
 }
 
 #[test]
@@ -1583,4 +1599,128 @@ fn 按停一趟同步之后子库屏与任务屏说的是同一件事() {
         !这一趟的收场.contains("完成"),
         "任务屏历史把被按停的那一趟记成了「完成」：{这一趟的收场}",
     );
+}
+
+// ——— 步骤表列得全（票 `parking-3/08`，挂账 `D158`）———
+
+/// 造一份 `steps` 步的差量计划。
+///
+/// **只填屏上那张表画得出来的那几样**：这几条要看的是那张表**画多少行**，
+/// 计划本身排得对不对由 `crates/core/tests/sync.rs` 管。造而不是排，是因为真机量级的
+/// 一份计划要一万多个变体才排得出来，而这几条要的只是「它有一万步」这一个性质。
+fn 造计划(name: &str, steps: usize) -> romcat_core::sync::Plan {
+    use romcat_core::sync::{Act, FileKind, Plan, Stamp, Step};
+    Plan {
+        // **各叫各的名字**：那张表的 id 是照子库名折出来的（`id_salt`），
+        // 同一个上下文里画两份同名的计划会共用一份滚动状态。
+        sublibrary: name.to_string(),
+        steps: (0..steps)
+            .map(|at| {
+                let source = format!("库/GBA/第{at:06}个.gba");
+                Step {
+                    act: Act::Add,
+                    path: format!("GBA/第{at:06}个.gba"),
+                    kind: FileKind::Rom,
+                    bytes: 4096,
+                    was: 0,
+                    source: source.clone(),
+                    source_stamp: Stamp {
+                        bytes: 4096,
+                        mtime_ns: None,
+                    },
+                    variant: source,
+                    restore: false,
+                    convert: None,
+                }
+            })
+            .collect(),
+        ..Plan::default()
+    }
+}
+
+/// 把滚动位置按到「第 `at` 步」那一行上，像素。
+///
+/// 一行的行距在 `egui_extras` 里是 `行高 + item_spacing.y`，**照样式算而不是写死一个
+/// 数**——样式一动，写死的那个数会悄悄滚到别处去。这一份上下文没改过间距
+/// （`headless::context` 只装字体），所以拿的就是默认那套，与 `bench::row_pitch` 同一条。
+fn 滚到第几步(at: usize) -> f32 {
+    at as f32 * (romcat_gui::table::ROW_HEIGHT + egui::Style::default().spacing.item_spacing.y)
+}
+
+/// 画三帧那张步骤表，返回（这一帧画了几行，这一帧画出来的字）。
+///
+/// 三帧：头一帧 egui 还在量滚动区有多大，列宽与滚动位置要下一帧才落定。
+fn 画步骤表(
+    ctx: &egui::Context,
+    plan: &romcat_core::sync::Plan,
+    scroll_to: Option<f32>,
+) -> (usize, String) {
+    let mut 画了 = 0;
+    let mut 屏上 = String::new();
+    for _ in 0..3 {
+        let out = headless::frame(ctx, headless::input(), |ui| {
+            画了 = romcat_gui::sublibrary::steps_table(ui, plan, scroll_to);
+        });
+        屏上 = 画出来的字(&out);
+    }
+    (画了, 屏上)
+}
+
+#[test]
+fn 八千步的计划滚到第五千步那一行照样摆得出来() {
+    // 挂账 `D158`：真机量级上一次同步动上万个文件（实测合成数据 8,206 步），而表列满
+    // 2,000 条就打住——想在界面上确认第 5,000 步是什么就得转去命令行，
+    // 而**同步前必须看一遍它要做什么**是 ADR-0016 的硬要求。
+    let ctx = headless::context();
+    let plan = 造计划("八千步", 8_206);
+    let 第五千步 = plan.steps[5_000].path.clone();
+
+    let (画了, 屏上) = 画步骤表(&ctx, &plan, Some(滚到第几步(5_000)));
+    assert!(
+        屏上.contains(&第五千步),
+        "第 5,000 步（{第五千步}）没摆在屏上：\n{屏上}",
+    );
+    assert!(
+        !屏上.contains("步没列"),
+        "还留着那句「另有 N 步没列」：\n{屏上}",
+    );
+    // 摆得出第 5,000 步，靠的**不是**把八千行都画出来。
+    assert!(
+        (1..100).contains(&画了),
+        "这一帧画了 {画了} 行——一屏摆得下的只有几十行",
+    );
+
+    // 最后一步也滚得到：截断是从末尾开始丢的，只验中间那一行验不出「一步都不截」。
+    // 按到**最后一行**上而不是它后头——真界面上滚动条到底就停了，滚不过去；
+    // 这里强按一个越界的偏移，`body.rows` 算出来的头一行会落在总数之外，一行都不画。
+    let 末 = plan.steps.len() - 1;
+    let 最后一步 = plan.steps[末].path.clone();
+    let (_, 屏上) = 画步骤表(&ctx, &plan, Some(滚到第几步(末)));
+    assert!(
+        屏上.contains(&最后一步),
+        "最后一步（{最后一步}）滚不到：\n{屏上}",
+    );
+}
+
+#[test]
+fn 翻行画几行只跟视口有多高有关与总步数无关() {
+    // **判据不是秒表**（票 `parking-3/17` 给主列表立的也是这条）：挂钟在门禁上是一张
+    // 彩票，而「这一帧真的画了几行」机器忙不忙一个字都不影响。
+    //
+    // 两份**同样合法、只是长短不同**的计划，滚到同一个位置上画出来的行数必须一样——
+    // 不一样就说明代价跟着总步数走，那时「去掉上限」就是把卡顿放进来。
+    let ctx = headless::context();
+    let 短 = 造计划("两千步", 2_000);
+    let 长 = 造计划("八千步", 8_206);
+    for 第几步 in [0, 500, 1_500] {
+        let offset = Some(滚到第几步(第几步));
+        let (短画了, _) = 画步骤表(&ctx, &短, offset);
+        let (长画了, _) = 画步骤表(&ctx, &长, offset);
+        assert!(短画了 > 0, "滚到第 {第几步} 步一行都没画");
+        assert_eq!(
+            短画了, 长画了,
+            "滚到第 {第几步} 步：2,000 步的计划画 {短画了} 行、8,206 步的画 {长画了} 行——\
+             代价跟着总步数走了",
+        );
+    }
 }

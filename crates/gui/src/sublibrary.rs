@@ -27,6 +27,14 @@
 //! 「同步」按钮跟着灰掉。**搬上任务台之后这条一个字都没松**——台上排着的那一趟认的仍是
 //! 排它时那份计划，见底下「三条长活全走任务台」。
 //!
+//! ## 差量步骤一步都不截
+//!
+//! 摊开之后那张表（[`steps_table`]）**列得全**：真机量级上一次同步动上万个文件（实测
+//! 合成数据 **21,571 步**，`docs/library-facts.md`），而 ADR-0016 那句「同步前必须看一遍
+//! 它要做什么」不该有一半落在界面之外。不截的代价是零——计划整份本来就在 [`Screen::prepared`] 里，而
+//! `TableBody::rows` 只画视口里那几十行；[`Screen::steps_drawn`] 把「这一帧真的画了
+//! 几行」数出来，于是这句话是被数出来的（挂账 `D158`）。
+//!
 //! ## 容量条三段：选中的、清单之外的、上限
 //!
 //! 三个数各有各的出处，而且**出处不同这件事要说得出口**（[`Gauge`]）：**选中**只问
@@ -80,9 +88,6 @@ use romcat_core::task::{Ending, Finished, Handle};
 
 use crate::table::ROW_HEIGHT;
 use crate::task::{Product, Tasks};
-
-/// 差量预览摊开之后最多列几条步骤。再多就不是给人看的了——总数照旧在账上。
-const TOP_STEPS: usize = 2_000;
 
 /// 没摊开时卡上先摆几条步骤。**摆得出样子就够**：这几条回答的是「它大概要干什么」，
 /// 「一共几步」那个数写在旁边，「到底哪几步」按「全部展开」。
@@ -173,6 +178,12 @@ pub struct Screen {
     prepare_ms: f64,
     /// 差量步骤摊开了没有。**默认不摊**：几百上千步铺满一屏，把它下面的按钮挤没了。
     expanded: bool,
+    /// 上一帧那张步骤表**真的画了几行**。
+    ///
+    /// 它是「翻行的代价与总步数无关」那句话的**量具**，与 [`crate::table::Window::reads`]
+    /// 同一个路子：不掐表，数一帧真的做了多少事。挂钟在门禁上是一张彩票
+    /// （票 `parking-3/01` 拿掉过一条挂钟断言），而这个数机器忙不忙一个字都不影响。
+    steps_drawn: usize,
     /// 每台设备各求一次**选择集**的结果：选中哪些、多大、超限多少、砍谁。
     ///
     /// **一趟折一次事实，全部子库共用**——折事实是走一遍全库（343 ms，挂账 D156），
@@ -230,6 +241,7 @@ impl Screen {
             previewing: None,
             prepare_ms: 0.0,
             expanded: false,
+            steps_drawn: 0,
             evaluated: BTreeMap::new(),
             evaluating: None,
             acknowledged: false,
@@ -312,9 +324,17 @@ impl Screen {
     /// 摊开或收起差量步骤。**界面上按「全部展开」走的就是它**，测试拿它当那一下。
     ///
     /// 收起来的时候卡上只摆头几条（[`STEP_SAMPLE`]）——几百上千步铺满一屏，
-    /// 会把它下面的「同步」挤到看不见的地方。摊开之后那张表是**虚拟化**的。
+    /// 会把它下面的「同步」挤到看不见的地方。摊开之后那张表是**虚拟化**的，
+    /// **一步都不截**（[`steps_table`]）。
     pub fn expand(&mut self, on: bool) {
         self.expanded = on;
+    }
+
+    /// 上一帧那张步骤表真的画了几行。见这个字段的文档：它是那句「翻行的代价与总步数
+    /// 无关」的量具。摊开着才有值，没摊开是 0。
+    #[must_use]
+    pub fn steps_drawn(&self) -> usize {
+        self.steps_drawn
     }
 
     /// 正在排的那一趟差量预览是任务台上的第几号；没排着就是 `None`。
@@ -1377,9 +1397,12 @@ impl Screen {
             }
         });
         if self.expanded {
-            steps_table(ui, plan);
+            // **界面上不按滚动位置**：人自己滚。`scroll_to` 是给实测与测试的
+            // （[`steps_table`]）。
+            self.steps_drawn = steps_table(ui, plan, None);
             return;
         }
+        self.steps_drawn = 0;
         for step in plan.steps.iter().take(STEP_SAMPLE) {
             ui.horizontal(|ui| {
                 if step.act == Act::Delete {
@@ -1723,10 +1746,29 @@ fn exception_tally(rows: &[ExceptionRow]) -> (u64, u64) {
     (收入, 排除)
 }
 
-/// 摊开之后那张步骤表。**虚拟化**：几千步滚起来的代价与总步数无关。
-fn steps_table(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan) {
-    let shown = plan.steps.len().min(TOP_STEPS);
-    egui_extras::TableBuilder::new(ui)
+/// 摊开之后那张步骤表。**虚拟化，而且一步都不截**；返回这一帧真的画了几行。
+///
+/// ## 为什么不再截在 2,000 步（挂账 `D158`）
+///
+/// 真机量级上一次同步动上万个文件（实测合成数据 **21,571 步**，`--bench-sublibrary`
+/// 跑出来的；挂账 `D158` 记的 8,206 是票 `parking-3/17` 换合成数据形状之前那个数）。
+/// 截断的代价不是「少看几行」——是「想确认第 5,000 步是什么就得转去命令行」，
+/// 而**同步前必须看一遍它要做什么**是 ADR-0016 的硬要求，那一眼不该有一半落在界面之外。
+///
+/// 不截的代价是零：计划整份本来就在界面状态里（[`Screen::prepared`]），而
+/// `TableBody::rows` 只调用视口里那几十行的闭包——**一帧画几行只跟视口有多高有关，
+/// 与总步数无关**。返回的正是这个数，[`Screen::steps_drawn`] 把它交给实测与测试，
+/// 于是这句话是被数出来的，不是被相信的。
+///
+/// `scroll_to` 把滚动位置强按到某个像素偏移，**只有量帧率与测试才给**。
+pub fn steps_table(
+    ui: &mut egui::Ui,
+    plan: &romcat_core::sync::Plan,
+    scroll_to: Option<f32>,
+) -> usize {
+    let shown = plan.steps.len();
+    let mut drawn = 0;
+    let mut builder = egui_extras::TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
         .id_salt(format!("差量步骤 · {}", plan.sublibrary))
@@ -1734,7 +1776,11 @@ fn steps_table(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan) {
         .column(egui_extras::Column::initial(60.0).at_least(50.0))
         .column(egui_extras::Column::initial(70.0).at_least(50.0))
         .column(egui_extras::Column::initial(90.0).at_least(70.0))
-        .column(egui_extras::Column::remainder().at_least(160.0).clip(true))
+        .column(egui_extras::Column::remainder().at_least(160.0).clip(true));
+    if let Some(offset) = scroll_to {
+        builder = builder.vertical_scroll_offset(offset);
+    }
+    builder
         .header(22.0, |mut header| {
             for title in ["干什么", "类别", "容量", "目标上的路径"] {
                 header.col(|ui| {
@@ -1748,6 +1794,7 @@ fn steps_table(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan) {
                 let Some(step) = plan.steps.get(index) else {
                     return;
                 };
+                drawn += 1;
                 row.col(|ui| {
                     if step.act == Act::Delete {
                         ui.colored_label(ui.visuals().error_fg_color, step.act.label());
@@ -1770,9 +1817,7 @@ fn steps_table(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan) {
                 });
             });
         });
-    if plan.steps.len() > shown {
-        ui.weak(format!("……另有 {} 步没列", plan.steps.len() - shown));
-    }
+    drawn
 }
 
 /// 「分不出第二份只读连接」那句话。

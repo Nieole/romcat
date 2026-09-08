@@ -23,13 +23,24 @@
 //! 换选择器时做的是一次**稳定分区**：选中的挪到前面，键的次序不变。于是
 //! [`Queue::selected`] 是一段真的切片，[`plan`] 与 [`apply`] 直接拿它，不必为了
 //! 「凑出一段连续的条目」把几百条 [`Item`] 复制一遍。
+//!
+//! ## 排序也在这儿，不下推
+//!
+//! 界面上点一下表头（[`Queue::set_order`]）排的是**这一份 `Vec`**，不是另开一条查询
+//! ——数据在哪就在哪排（[`ItemOrder`] 的文档把它与主列表那条 `ORDER BY` 的分界写清了）。
+//!
+//! **排序与分区是同一步，不是两步**（[`Queue::refresh`]）：先把整份 `items` 排好，再分区。
+//! 反过来（分好区再整份排一遍）会当场把 `taken` 那条线弄错位——`selected()` 从「选择器
+//! 选中的那些」变成「排完之后的前 `taken` 条」，屏上写着「这一批 1,396 条」，按下整批通过
+//! 落下的却是人从没选过的变体。只排前 `taken` 条也不行：下一次分区会从两段里各挑一些
+//! 拼起来，拼出来的那一段不再有序，而表头上那个 ▲ 还挂着。
 
 use std::collections::BTreeSet;
 
 use super::batch::{self, Batch, Coverage, Drill, Sample, Scope};
 use super::{
-    Applied, Axis, Decide, Filter, GroupRow, Item, Plan, State, TriageError, Undone, apply,
-    fill_prints, plan, plan_each, redo_batch, survey, tally, undo_batch,
+    Applied, Axis, Decide, Filter, GroupRow, Item, ItemOrder, Plan, State, TriageError, Undone,
+    apply, fill_prints, plan, plan_each, redo_batch, survey, tally, undo_batch,
 };
 use crate::catalog::Catalog;
 use crate::catalog::identify::Tier;
@@ -70,6 +81,10 @@ pub struct Queue {
     not_run: u64,
     /// 眼下的选择器。
     filter: Filter,
+    /// 这张表**按哪一列排**。见模块文档「排序也在这儿，不下推」。
+    order: ItemOrder,
+    /// 正着排还是倒着排。
+    descending: bool,
     /// 选中的那些按三个轴分出来的组，与 [`Axis::ALL`] 同序。
     groups: [Vec<GroupRow>; Axis::ALL.len()],
     /// 选中的那些按**依据形状**分出来的一级批，多的排前面。
@@ -79,7 +94,7 @@ pub struct Queue {
     batches: Vec<Batch>,
     /// 选中的那些按**四档**各有多少条。屏头上那几个数。
     tiers: [(Tier, u64); Tier::ALL.len()],
-    /// 队列**换过几次样子**：换选择器、裁完一批、撤回一批，各算一次。
+    /// 队列**换过几次样子**：换选择器、换排序、裁完一批、撤回一批，各算一次。
     ///
     /// 界面拿它当**缓存的钥匙**：展开那一批的二级分组与随机样本只在这个数变了之后
     /// 才要重算，而它们各要走一遍这一批的全部条目——一批一万两千条上，每帧重算一次
@@ -123,6 +138,8 @@ impl Queue {
             not_run: catalog.not_run_count()?,
             identified: survey.identified,
             filter: Filter::default(),
+            order: ItemOrder::default(),
+            descending: false,
             groups: Default::default(),
             batches: Vec::new(),
             tiers: batch::by_tier(&[]),
@@ -144,6 +161,8 @@ impl Queue {
             not_run: 0,
             identified: false,
             filter: Filter::default(),
+            order: ItemOrder::default(),
+            descending: false,
             groups: Default::default(),
             batches: Vec::new(),
             tiers: batch::by_tier(&[]),
@@ -181,6 +200,33 @@ impl Queue {
     #[must_use]
     pub fn filter(&self) -> &Filter {
         &self.filter
+    }
+
+    /// 眼下按哪一列排、是不是倒着排。**界面拿它画表头上那个 ▲▼**，不自己再存一份
+    /// ——存两份的下场是屏上那个箭头与真排出来的次序漂开。
+    #[must_use]
+    pub fn order(&self) -> (ItemOrder, bool) {
+        (self.order, self.descending)
+    }
+
+    /// 换一套排序。和现在这套一样就什么都不做——界面每帧都会调它。
+    ///
+    /// **走的是整条 [`refresh`](Queue::refresh)**，也就是「排一遍再分一次区」：
+    /// 光排不分区会把 `taken` 那条线弄错位，见模块文档。顺带把三个轴的分组、一级分批与
+    /// 四档一起重算——那三样与次序无关，重算是白花的，但换来的是**这一层只有一条把
+    /// 「整份有序」与「前 `taken` 条是选中的」同时立住的路**，而这一下一趟只在人真的
+    /// 点表头时发生。
+    ///
+    /// 队列**换过一次样子**（[`Queue::revision`] 加一，由 `refresh` 加）：屏上摆着的那组
+    /// 随机样本是照次序抽的，次序换了它得跟着重抽，不然人看见的样本与他刚排出来的
+    /// 这一批对不上。
+    pub fn set_order(&mut self, order: ItemOrder, descending: bool) {
+        if self.order == order && self.descending == descending {
+            return;
+        }
+        self.order = order;
+        self.descending = descending;
+        self.refresh();
     }
 
     /// 选择器选中的那些。**它是一段真的切片**，[`Queue::plan`] 直接拿它去排计划。
@@ -428,7 +474,11 @@ impl Queue {
         Ok(account)
     }
 
-    /// 整份重列一次，**选择器原样留着**。
+    /// 整份重列一次，**选择器与排序都原样留着**。
+    ///
+    /// 排序跟着一起带过来，理由与选择器同一条：撤回一批走的就是这里
+    /// （[`Queue::undo`]），而人撤回之前是按容量排着看的——重列一次把他排的那一下抹掉，
+    /// 屏上那张表会在他手不动的情况下跳回按键排。
     fn reload(
         &mut self,
         catalog: &Catalog,
@@ -436,14 +486,27 @@ impl Queue {
         library: &str,
     ) -> Result<(), TriageError> {
         let filter = std::mem::take(&mut self.filter);
+        let (order, descending) = self.order();
         let index = verdict::Index::load(store, library)?;
         *self = Self::load(catalog, &index)?;
+        self.set_order(order, descending);
         self.set_filter(filter);
         Ok(())
     }
 
-    /// 重新过一遍选择器：选中的挪到前面，再按三个轴数一遍。
+    /// **先排一遍，再重新过一遍选择器**：选中的挪到前面，然后按三个轴数一遍。
+    ///
+    /// 两步的先后是有讲究的（模块文档「排序也在这儿，不下推」写了反过来会出什么事）：
+    /// 整份有序进去 → 分区是稳定的 → 出来那两段各自有序，而 `selected()` 恰是前一段。
+    ///
+    /// **这一遍排序不贵**：`items` 进来时本就是两段各自有序的（上一次分区留下的），
+    /// 而 Rust 的稳定排序认得现成的有序段，这种输入上它就是一趟归并。列进来的头一次
+    /// 是 `queue_rows` 那条 `ORDER BY v.key` 给的次序——与 [`ItemOrder::Key`] 眼下恰好
+    /// 一致，可这条不变式不押在那句 SQL 上：改一天那句 SQL，坏的会是界面上的次序，
+    /// 而没有一条编译错误会说话。
     fn refresh(&mut self) {
+        let (order, descending) = (self.order, self.descending);
+        self.items.sort_by(|a, b| order.cmp_items(a, b, descending));
         let items = std::mem::take(&mut self.items);
         let (mut taken, rest): (Vec<Item>, Vec<Item>) = items
             .into_iter()

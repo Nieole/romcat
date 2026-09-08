@@ -63,8 +63,8 @@ use romcat_core::scrape::AnchorKind;
 use romcat_core::scrape::zh::{Judged, MatchGroup, judge, matched_groups};
 use romcat_core::triage::batch::Coverage;
 use romcat_core::triage::{
-    Applied, Axis, Batch, Draft, Drill, Filter, Overrides, Plan, Queue, Sample, Scope, Shape,
-    TriageError, Undone,
+    Applied, Axis, Batch, Draft, Drill, Filter, ItemOrder, Overrides, Plan, Queue, Sample, Scope,
+    Shape, TriageError, Undone,
 };
 use romcat_core::verdict;
 
@@ -438,6 +438,13 @@ impl Screen {
     pub fn pick(&mut self, axis: Axis, label: &str) {
         self.axis = axis;
         self.picks.pick(axis, label);
+    }
+
+    /// 点一下表头：**换一列排**。界面上点那一下走的就是它，实测与测试拿它当那一下。
+    ///
+    /// 排在内存里（[`ItemOrder`]），**一次库都不读**。
+    pub fn sort_by(&mut self, order: ItemOrder, descending: bool) {
+        self.queue.set_order(order, descending);
     }
 
     /// 点中表里的一行：**把光标挪过去**。界面上点那一下之后剩下的那半段就是它。
@@ -833,6 +840,10 @@ impl Screen {
     }
 
     /// 中间那张表。**一个文本框都没有**：见模块文档。
+    ///
+    /// **点表头就换排序，而排在内存里**（[`ItemOrder`]）——队列本来就整份在内存里，
+    /// 不为它另开一条查询。这与主列表那张表（[`crate::table::Table`]，排序下推到
+    /// `ORDER BY`）是两条路，**分界在数据躺在哪**，不在哪张表更讲究。
     fn table(&mut self, ui: &mut egui::Ui) {
         if !self.queue.identified() {
             ui.vertical_centered(|ui| {
@@ -865,11 +876,31 @@ impl Screen {
         if let Some(offset) = self.scroll_to {
             builder = builder.vertical_scroll_offset(offset);
         }
+        // **表头上那个箭头照队列自己那份排序画**，界面不另存一份：存两份的下场是屏上
+        // 的箭头与真排出来的次序漂开（主列表那张表同一条理由，`table::Table` 的文档）。
+        let (sorted_by, descending) = self.queue.order();
+        let mut 换排序 = None;
         builder
             .header(24.0, |mut header| {
-                for title in ["变体", "结论", "平台", "候选 · 置信度", "容量"] {
+                for order in ItemOrder::ALL {
                     header.col(|ui| {
-                        ui.strong(title);
+                        let active = sorted_by == order;
+                        let mark = match (active, descending) {
+                            (false, _) => "",
+                            (true, true) => " ▼",
+                            (true, false) => " ▲",
+                        };
+                        if ui
+                            .selectable_label(active, format!("{}{mark}", order.label()))
+                            .on_hover_text(
+                                "点它换成按这一列排；再点一下翻方向。队列本来就整份在内存里，\
+                                 这一下**一次库都不读**。",
+                            )
+                            .clicked()
+                        {
+                            // 再点一次同一列就翻方向。
+                            换排序 = Some((order, active && !descending));
+                        }
                     });
                 }
             })
@@ -921,6 +952,15 @@ impl Screen {
             self.at = index;
             self.cursor = Some(key);
             self.nth = 0;
+        }
+        // **排完当场把光标捞回来**：`at` 是「排在第几位」，排序一换它就指到别人身上了。
+        // 不能等下一帧的 `sync`——`Screen::ui` 里键盘那一下排在这张表**之后**，同一帧里
+        // 既点了表头又按了 `Y` 的话，`decide_here` 拿的 `at` 是按旧次序算的下标，
+        // 裁的就不是屏上那一条。光标记的是键，所以捞得回来：人点表头之前停在哪一条，
+        // 点完还停在同一条。
+        if let Some((order, descending)) = 换排序 {
+            self.queue.set_order(order, descending);
+            self.resolve_cursor();
         }
     }
 

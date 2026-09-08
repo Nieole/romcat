@@ -1688,7 +1688,8 @@ grep -rhoE '\bD[0-9]+\b' .scratch/rom-metadata-automation/ | sort -uV | tail -1
   ADR-0002 说的正路；排序是逐条浏览的工具，而逐条浏览在这个规模下本来就不是主路径）｜
   B 在内存里对 `Queue::selected()` 排一下（几千条的 `sort_by`，代价可接受）
 - **不处理会怎样：** 想按容量找出最大的那几条待裁决变体时，只能靠选择器缩小范围。
-- **状态：** open
+- **状态：** settled —— **走 B（在内存里排）**，由票 `parking-3/08` 落地。
+  裁决与证据迁回票 `rom-metadata-automation/24` 末尾「挂账裁决（第三轮收口迁回）」一节。
 
 ## D154 · 票 25 · 库浏览的五个筛选之间是「且」不是「或」
 
@@ -1794,7 +1795,8 @@ grep -rhoE '\bD[0-9]+\b' .scratch/rom-metadata-automation/ | sort -uV | tail -1
   完整清单走 `romcat sublibrary plan --json`）｜B 把步骤表也做成虚拟化的
   （`TableBuilder` 本来就支持，代价是要把 `Plan` 整份留在界面状态里——它已经在了）
 - **不处理会怎样：** 想在界面上确认第 5,000 步是什么时看不到，得转去命令行。
-- **状态：** open
+- **状态：** settled —— **走 B（把步骤表也做成虚拟化的、去掉上限）**，由票 `parking-3/08`
+  落地。裁决与证据迁回票 `rom-metadata-automation/25` 末尾「挂账裁决（第三轮收口迁回）」一节。
 
 ## D159 · 票 25 · 「还没识别」这一档不在词表里
 

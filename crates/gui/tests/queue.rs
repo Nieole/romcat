@@ -10,7 +10,7 @@ use egui::widgets::text_edit::TextEditState;
 use romcat_core::catalog::State;
 use romcat_core::scrape::AnchorKind;
 use romcat_core::scrape::zh::{judge, matched_groups};
-use romcat_core::triage::{self, Axis, Draft, Filter, Overrides, Scope, Shape};
+use romcat_core::triage::{self, Axis, Draft, Filter, ItemOrder, Overrides, Scope, Shape};
 use romcat_core::verdict::{self, Anchor, MatchVerdict};
 use romcat_gui::app::{App, View};
 use romcat_gui::queue::Mode;
@@ -1678,4 +1678,258 @@ fn 逐条流按_u_无可撤时说清楚而不是一声不吭() {
         "更早那些批得指条路出去：{错}",
     );
     assert!(app.queue().undone().is_none(), "什么都没撤，账上不许多一笔");
+}
+
+// ——— 点表头换排序（票 `parking-3/08`，挂账 `D153`）———
+
+/// 切到**逐条**那一屏（表在那儿），并把展开的那一批收起来——不收的话逐条只看得见
+/// 那一批，而这几条要看的是整个队列排出来什么样。
+fn 逐条看整个队列(ctx: &egui::Context, app: &mut App) {
+    {
+        let (screen, _) = app.queue_and_site();
+        if let Some(scope) = screen.scope() {
+            screen.open_batch(&scope.shape);
+        }
+        screen.show_one_by_one();
+    }
+    跑(ctx, app, 2);
+}
+
+/// 屏上那张表**画出来的第一行**是哪个变体。
+///
+/// 表头最后一格写的就是「容量」两个字（[`ItemOrder::Bytes`] 的标签），而这一屏上
+/// 光是这两个字的那一段只有它一处——别处印的是「…｜容量 4.0 KiB」那种整句。
+/// 紧跟着画出来的那一段就是第一行的变体键：表格按列画，那一列是第一列。
+///
+/// **看屏上而不是看 `selected()[0]`**：这一条要证的正是「画出来的换了」。
+fn 表上第一行(屏上: &str) -> String {
+    let mut lines = 屏上.lines();
+    lines
+        .by_ref()
+        .position(|line| line == ItemOrder::Bytes.label())
+        .unwrap_or_else(|| panic!("屏上没有那张表的表头：\n{屏上}"));
+    lines
+        .next()
+        .unwrap_or_else(|| panic!("表头底下一行都没画：\n{屏上}"))
+        .to_string()
+}
+
+/// 按一下屏上写着 `那一段` 的地方（移过去、按下、松开），返回**松开那一帧**画出来的字。
+fn 点一下(ctx: &egui::Context, app: &mut App, 那一段: &str) -> String {
+    let 头一帧 = headless::frame(ctx, headless::input(), |ui| app.ui(ui));
+    let Some(位置) = shared::那一段画在哪儿(&头一帧, 那一段) else {
+        panic!("屏上没有「{那一段}」，没处点：\n{}", 画出来的字(&头一帧));
+    };
+    let 按 = |pressed: bool| egui::Event::PointerButton {
+        pos: 位置,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let mut input = headless::input();
+    input.events.push(egui::Event::PointerMoved(位置));
+    input.events.push(按(true));
+    headless::frame(ctx, input, |ui| app.ui(ui));
+    let mut input = headless::input();
+    input.events.push(按(false));
+    headless::frame(ctx, input, |ui| app.ui(ui));
+    // 换排序是这一帧末尾写回去的，屏上那张表下一帧才照新次序画。
+    画出来的字(&headless::frame(ctx, headless::input(), |ui| app.ui(ui)))
+}
+
+#[test]
+fn 点一下表头屏上画出来的第一行就换了() {
+    // 挂账 `D153`：真机上 16,656 条待裁决，而次序**永远是变体的键**——想按容量或按
+    // 结论找出该先动的那几条，从前只能靠选择器缩小范围。
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    逐条看整个队列(&ctx, &mut app);
+
+    let 先 = 表上第一行(&画出来的字(&headless::frame(
+        &ctx,
+        headless::input(),
+        |ui| app.ui(ui),
+    )));
+    assert_eq!(
+        app.queue().queue().order(),
+        (ItemOrder::Key, false),
+        "列出来那一下就是按变体的键正着排（`queue_rows` 的 `ORDER BY v.key`）",
+    );
+
+    // 点「变体 ▲」——正在排的那一列再点一次就**翻方向**。
+    let 屏上 = 点一下(&ctx, &mut app, &format!("{} ▲", ItemOrder::Key.label()));
+    assert_eq!(
+        app.queue().queue().order(),
+        (ItemOrder::Key, true),
+        "点的是正在排的那一列，该翻方向：\n{屏上}",
+    );
+    let 后 = 表上第一行(&屏上);
+    assert_ne!(先, 后, "屏上画出来的第一行没换：\n{屏上}");
+    assert!(
+        屏上.contains(&format!("{} ▼", ItemOrder::Key.label())),
+        "表头上那个箭头没跟着翻：\n{屏上}",
+    );
+
+    // **屏上那一行就是排出来的第一条**：两处对不上的话，人按 Y/N 裁的不是他看的那一条。
+    let items = app.queue().queue().selected();
+    assert_eq!(
+        后, items[0].variant.key,
+        "画出来的第一行不是排在第一位的那条"
+    );
+    assert_eq!(
+        先,
+        items[items.len() - 1].variant.key,
+        "倒过来之后，原来的第一条该落到最后一条",
+    );
+}
+
+#[test]
+fn 五列每一列都排得出一个全序而且一条都不少() {
+    // **换一份同样合法的数据，它还成立吗**：这一条不断言「第一行是某个名字」——
+    // 那种断言只在这一批合成数据上成立。它断言的是次序本身的性质：**相邻两条都不逆**、
+    // 而且**一条都不多一条都不少**。
+    //
+    // 只比相邻的那 n−1 对，**不两两比**：反对称与传递性是 `ItemOrder::cmp_items` 自己
+    // 保证的（每一档都拿唯一的键收尾），拿 16,656 条去穷举 1.38 亿对既证不出更多东西，
+    // 又会把门禁拖垮。
+    let mut app = 界面(demo::QUEUE_ROWS);
+    let 原有: Vec<String> = {
+        let items = app.queue().queue().selected();
+        let mut keys: Vec<String> = items.iter().map(|item| item.variant.key.clone()).collect();
+        keys.sort_unstable();
+        keys
+    };
+    assert_eq!(原有.len() as u64, demo::QUEUE_ROWS);
+
+    for order in ItemOrder::ALL {
+        for descending in [false, true] {
+            app.queue_and_site().0.sort_by(order, descending);
+            let items = app.queue().queue().selected();
+            assert_eq!(items.len() as u64, demo::QUEUE_ROWS, "排一次少了几条");
+            // `is_lt` 而不是 `!is_gt`：**同值时按键收尾**，于是相邻两条永远分得出先后
+            // ——出现一对 `Equal` 就说明那一档漏了收尾那一比，这一列上的次序就不唯一了。
+            let 逆了 = items
+                .windows(2)
+                .position(|pair| !order.cmp_items(&pair[0], &pair[1], descending).is_lt());
+            if let Some(at) = 逆了 {
+                panic!(
+                    "按「{}」{}排，第 {at} 对没排好：{} 在 {} 前面",
+                    order.label(),
+                    if descending { "倒着" } else { "正着" },
+                    items[at].variant.key,
+                    items[at + 1].variant.key,
+                );
+            }
+            let mut 键: Vec<&str> = items.iter().map(|item| item.variant.key.as_str()).collect();
+            键.sort_unstable();
+            assert!(
+                键.iter().copied().eq(原有.iter().map(String::as_str)),
+                "排一次之后条目变了一批",
+            );
+        }
+    }
+}
+
+#[test]
+fn 按容量倒着排头一条就是最大的那一条() {
+    // 挂账 `D153` 里那句「人可能想按容量或按结论排」——按容量倒着排，头一条就是
+    // 真机上该先动的那一条。**拿全队列自己数出来的最大值比**，不写死一个数字；
+    // 而且**换一份同样合法的数据**跑：这一条与上面那条走的是同一段代码、不同的规模。
+    let mut app = 界面(2_000);
+    let 最大 = app
+        .queue()
+        .queue()
+        .selected()
+        .iter()
+        .map(|item| item.variant.bytes)
+        .max()
+        .expect("队列不空");
+    let 最小 = app
+        .queue()
+        .queue()
+        .selected()
+        .iter()
+        .map(|item| item.variant.bytes)
+        .min()
+        .expect("队列不空");
+    assert!(最大 > 最小, "这批数据里容量全一样，这一条就没在测排序");
+
+    app.queue_and_site().0.sort_by(ItemOrder::Bytes, true);
+    assert_eq!(app.queue().queue().selected()[0].variant.bytes, 最大);
+    app.queue_and_site().0.sort_by(ItemOrder::Bytes, false);
+    assert_eq!(app.queue().queue().selected()[0].variant.bytes, 最小);
+}
+
+#[test]
+fn 换排序之后换选择器不必重排而且光标还停在同一条上() {
+    // 排的是**整份条目**，而换选择器那一次分区是稳定的——于是换个选择器，选中的那一段
+    // 照旧是排好的。光标记的是键不是下标（`Screen::resolve_cursor`），排序一换它得
+    // 自己找回新位置：不然人点表头之前停在哪一条，点完就换成了别人。
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    逐条看整个队列(&ctx, &mut app);
+    let 停在的 = app.queue().queue().selected()[7].variant.key.clone();
+    app.queue_and_site().0.pick_row(&停在的);
+    跑(&ctx, &mut app, 1);
+    assert_eq!(app.queue().at(), 7);
+
+    app.queue_and_site().0.sort_by(ItemOrder::Bytes, true);
+    跑(&ctx, &mut app, 1);
+    let at = app.queue().at();
+    assert_eq!(
+        app.queue().queue().selected()[at].variant.key,
+        停在的,
+        "排完之后光标落到别人身上了",
+    );
+
+    // 换个选择器：那一段照旧按容量倒着排，**没有重排一遍**。
+    let (axis, label) = {
+        let queue = app.queue().queue();
+        let row = queue.groups(Axis::Directory).first().expect("有分组");
+        (Axis::Directory, row.label.clone())
+    };
+    app.queue_and_site().0.pick(axis, &label);
+    跑(&ctx, &mut app, 1);
+    let items = app.queue().queue().selected();
+    assert!(!items.is_empty(), "这一组该选中一批");
+    assert!(
+        items
+            .windows(2)
+            .all(|pair| pair[0].variant.bytes >= pair[1].variant.bytes),
+        "换完选择器那一段不是排好的",
+    );
+    assert_eq!(app.queue().queue().order(), (ItemOrder::Bytes, true));
+
+    // ⭐ **筛着的时候再换一列排，选中的还得是同一批**。
+    //
+    // `selected()` 是内存里那份 `Vec` 前 N 条那一段。排完整份而不重新分一次区的话，
+    // 那条线当场错位——那一段从「选择器选中的那些」变成「排完之后的前 N 条」，
+    // 于是屏上写着「这一批 N 条」，按下整批通过落下的却是人从没选过的变体。
+    let 这一批: std::collections::BTreeSet<String> =
+        items.iter().map(|item| item.variant.key.clone()).collect();
+    assert!(
+        (这一批.len() as u64) < demo::QUEUE_ROWS,
+        "这一组该是队列的一部分而不是全部，不然下面那条断言是句空话",
+    );
+    for (order, descending) in [(ItemOrder::State, false), (ItemOrder::Key, true)] {
+        app.queue_and_site().0.sort_by(order, descending);
+        跑(&ctx, &mut app, 1);
+        let items = app.queue().queue().selected();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.variant.key.clone())
+                .collect::<std::collections::BTreeSet<_>>(),
+            这一批,
+            "按「{}」排完，选中的不再是选择器选出来的那一批",
+            order.label(),
+        );
+        assert!(
+            items
+                .windows(2)
+                .all(|pair| order.cmp_items(&pair[0], &pair[1], descending).is_lt()),
+            "按「{}」排完，选中的那一段不是排好的",
+            order.label(),
+        );
+    }
 }

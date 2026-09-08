@@ -2171,3 +2171,121 @@ fn 排完计划之后先裁掉其中一条再落下整份被拒那一条照旧�
         None,
     );
 }
+
+#[test]
+fn 换排序排在内存里而且撤回一批之后那一下还留着() {
+    // 票 `parking-3/08`（挂账 `D153`）：队列那张表点表头就换排序，而**排在内存里**
+    // ——队列本来就整份在手上（`triage::queue` 的模块文档），不为它另开一条查询。
+    // 撤回一批走的是「整份重列」（`Queue::undo`），排序得跟着回来：不然人撤回之前
+    // 按容量排着看，撤完手不动，表自己跳回按键排。
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    let mut queue = 列队列(&现场);
+
+    let 正着 = keys(queue.selected());
+    assert!(正着.len() >= 3, "这份 fixture 得有几条才排得出次序");
+    assert_eq!(
+        queue.order(),
+        (triage::ItemOrder::Key, false),
+        "列出来那一下就是按变体的键正着排",
+    );
+    assert!(
+        正着.windows(2).all(|pair| pair[0] < pair[1]),
+        "列出来的次序不是按键正着的：{正着:?}",
+    );
+
+    // 点一下「变体」表头：正在排的那一列再点一次就翻方向。
+    queue.set_order(triage::ItemOrder::Key, true);
+    let mut 倒着 = 正着.clone();
+    倒着.reverse();
+    assert_eq!(keys(queue.selected()), 倒着);
+
+    // 换个选择器，选中的那一段照旧是排好的。
+    queue.set_filter(triage::Axis::Directory.filter("库/FC"));
+    let fc = keys(queue.selected());
+    assert!(
+        !fc.is_empty() && fc.len() < 正着.len(),
+        "FC 该是队列的一部分而不是全部"
+    );
+    assert!(
+        fc.windows(2).all(|pair| pair[0] > pair[1]),
+        "换完选择器那一段不是排好的：{fc:?}",
+    );
+
+    // ⭐ **筛着的时候换排序，选中的还得是同一批**。
+    //
+    // `selected()` 是 `items[..taken]` 那一段。排整份而不重新分区的话，那条 `taken` 线
+    // 当场错位——那一段从「选择器选中的那些」变成「排完之后的前 N 条」，于是屏上写着
+    // 「这一批 3 条」，按下整批通过时 `plan()` 拿的却是人从没选过的变体（还可能把默认
+    // 选择器筛掉的**跳过**那一档卷进来）。这一条是那个错位的回归测试。
+    let fc_集合: std::collections::BTreeSet<String> = fc.iter().cloned().collect();
+    for (order, descending) in [
+        (triage::ItemOrder::Bytes, true),
+        (triage::ItemOrder::State, false),
+        (triage::ItemOrder::Key, false),
+    ] {
+        queue.set_order(order, descending);
+        let 眼下 = queue.selected();
+        assert_eq!(
+            眼下
+                .iter()
+                .map(|item| item.variant.key.clone())
+                .collect::<std::collections::BTreeSet<_>>(),
+            fc_集合,
+            "按「{}」排完，选中的不再是选择器选出来的那一批",
+            order.label(),
+        );
+        assert!(
+            眼下
+                .windows(2)
+                .all(|pair| order.cmp_items(&pair[0], &pair[1], descending).is_lt()),
+            "按「{}」排完，选中的那一段不是排好的",
+            order.label(),
+        );
+    }
+
+    // ⭐ **下一个选择器跨着上一次那两段挑，次序照旧**。
+    //
+    // 分区只对**当前**次序稳定，而当前次序在上一次分区之后已经是「选中的在前、
+    // 没选的在后」。所以「只把选中那一段排一遍」是不够的：这里点名两条——一条来自
+    // 上一批选中的（FC），一条来自被排掉的（GBA）——拼出来的那一段会照上一次的分区
+    // 次序摆着，而表头上那个 ▼ 还挂着。整份先归位再分区才对得上。
+    queue.set_order(triage::ItemOrder::Key, true);
+    let (头一条, 最后一条) = (正着[0].clone(), 正着[正着.len() - 1].clone());
+    queue.set_filter(Filter {
+        keys: vec![头一条.clone(), 最后一条.clone()],
+        ..Filter::default()
+    });
+    assert_eq!(
+        keys(queue.selected()),
+        vec![最后一条, 头一条],
+        "跨着上一次那两段挑出来的这一批，次序散了",
+    );
+
+    // 再换回整个队列，次序照旧。
+    queue.set_filter(Filter::default());
+    assert_eq!(keys(queue.selected()), 倒着, "换回整个队列之后次序散了");
+
+    // 落一批 GBA 的，再撤回来——`undo` 是整份重列。
+    assert_eq!(queue.order(), (triage::ItemOrder::Key, true));
+    queue.set_filter(triage::Axis::Directory.filter("库/GBA"));
+    assert!(!queue.selected().is_empty());
+    let decide = 手工("某掌机游戏");
+    let plan = queue
+        .plan(&现场.catalog, &现场.store, &decide)
+        .expect("排得出计划");
+    let applied = queue
+        .apply(&mut 现场.catalog, &mut 现场.store, &plan)
+        .expect("落得下");
+    queue
+        .undo(&mut 现场.catalog, &mut 现场.store, 库名, applied.batch)
+        .expect("撤得回");
+
+    assert_eq!(
+        queue.order(),
+        (triage::ItemOrder::Key, true),
+        "重列一次把人排的那一下抹掉了",
+    );
+    queue.set_filter(Filter::default());
+    assert_eq!(keys(queue.selected()), 倒着, "撤回之后次序该原样回来");
+}

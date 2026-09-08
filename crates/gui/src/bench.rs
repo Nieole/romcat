@@ -23,7 +23,7 @@ use std::time::Instant;
 use romcat_core::catalog::browse::{WorkOrder, WorkQuery};
 use romcat_core::catalog::{Catalog, PlatformFilter, VariantQuery};
 use romcat_core::report::thousands;
-use romcat_core::triage::{Axis, Draft, Overrides};
+use romcat_core::triage::{Axis, Draft, ItemOrder, Overrides};
 
 use crate::app::App;
 use crate::headless::{self, VIEWPORT};
@@ -126,6 +126,18 @@ pub struct QueueCost {
     pub load_ms: f64,
     /// **点一行分组表**要多久：就地重筛加按三个轴重新分组，**一次都不读库**。
     pub filter_ms: f64,
+    /// **点一下表头**要多久：整份在内存里重排一遍再重新分一次区，**一次都不读库**。
+    ///
+    /// 量的是**整个队列**那一次，不是筛完之后那一小批：排序排的是手上这份 `Vec` 的
+    /// 全部条目（`Queue::set_order`），换个选择器不会让它变便宜。
+    pub sort_ms: f64,
+    /// 那一下排的是几条——**整份**，见 [`sort_ms`](Self::sort_ms)。
+    ///
+    /// 它比 [`selected`](Self::selected) 大：选中的那些不含**跳过**（默认选择器筛掉了
+    /// 它们），而排序排的是内存里全部条目，跳过的那些也在里头。
+    pub sorted: u64,
+    /// 排的是哪一列，倒着还是正着。
+    pub sort_label: String,
     /// 点中的那一批有多少条。
     pub batch: u64,
     /// 点的是哪个轴上的哪一组。
@@ -163,6 +175,7 @@ impl QueueCost {
         format!(
             "待确认队列 {} 条；选中 {} 条\n\
              列一次队列      {:.1} ms\n\
+             点一下表头      {:.1} ms（{}，整份 {} 条重排再分区，一次都不读库）\n\
              点一行分组表    {:.2} ms（{}，选中 {} 条，一次都不读库）\n\
              每帧            中位 {:.2} ms（{:.0} fps），最慢 {:.2} ms，共 {} 帧\n\
              排一次计划      {:.1} ms（{} 条）\n\
@@ -170,6 +183,9 @@ impl QueueCost {
             thousands(self.queue),
             thousands(self.selected),
             self.load_ms,
+            self.sort_ms,
+            self.sort_label,
+            thousands(self.sorted),
             self.filter_ms,
             self.batch_label,
             thousands(self.batch),
@@ -210,7 +226,23 @@ pub fn queue(app: &mut App, frames: u32) -> QueueCost {
         (queue.pending(), queue.selected().len() as u64)
     };
 
-    // 二、点一行分组表：挑三个轴上**最大的那一组**——ADR-0002 说队列只能逐条点就等于
+    // 二、点一下表头：**按容量倒着排**。那正是这一票要给人的动作——「16,656 条里
+    //     哪几条最大」，从前只能靠选择器缩小范围。排的是整份条目，一次都不读库。
+    let sort = (ItemOrder::Bytes, true);
+    // 排的是**内存里全部条目**，跳过的那些也在里头——报出去的得是这个数，
+    // 不是「选中多少条」（那个不含跳过）。
+    let sorted = {
+        let queue = app.queue().queue();
+        queue.pending() + queue.skipped()
+    };
+    let started = Instant::now();
+    {
+        let (screen, _) = app.queue_and_site();
+        screen.sort_by(sort.0, sort.1);
+    }
+    let sort_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+    // 三、点一行分组表：挑三个轴上**最大的那一组**——ADR-0002 说队列只能逐条点就等于
     //     没有，所以量的该是「一次盖住几百上千条」那种批，不是最小的那种。
     let biggest = Axis::ALL
         .iter()
@@ -232,7 +264,7 @@ pub fn queue(app: &mut App, frames: u32) -> QueueCost {
     let filter_ms = started.elapsed().as_secs_f64() * 1000.0;
     let batch = app.queue().queue().selected().len() as u64;
 
-    // 三、滚一趟：表格是虚拟化的，代价该与队列有多少条无关。
+    // 四、滚一趟：表格是虚拟化的，代价该与队列有多少条无关。
     let travel = (batch as f32 * row_pitch() - VIEWPORT[1]).max(0.0);
     let mut costs: Vec<f64> = Vec::with_capacity(frames as usize);
     for frame in 0..frames {
@@ -260,7 +292,7 @@ pub fn queue(app: &mut App, frames: u32) -> QueueCost {
     }
     costs.sort_by(f64::total_cmp);
 
-    // 四、排一次计划：**手工指定作品**外加一个汉化组——队列里绝大多数条目一条候选
+    // 五、排一次计划：**手工指定作品**外加一个汉化组——队列里绝大多数条目一条候选
     //     都没有，那是主路径。
     let draft = Draft {
         work: Some("实测作品".to_string()),
@@ -281,7 +313,7 @@ pub fn queue(app: &mut App, frames: u32) -> QueueCost {
         .pending()
         .map_or(0, |plan| plan.decided.len() as u64);
 
-    // 五、落下。
+    // 六、落下。
     let started = Instant::now();
     {
         let (screen, site) = app.queue_and_site();
@@ -293,6 +325,9 @@ pub fn queue(app: &mut App, frames: u32) -> QueueCost {
         queue: queue_total,
         selected,
         load_ms,
+        sort_ms,
+        sorted,
+        sort_label: format!("{}{}", sort.0.label(), if sort.1 { " ▼" } else { " ▲" }),
         filter_ms,
         batch,
         batch_label: biggest
@@ -589,7 +624,23 @@ pub struct SubCost {
     pub over_capacity: Option<u64>,
     /// 给了几条裁剪建议。
     pub trims: usize,
+    /// 摊开那张**步骤表**滚一趟，每帧最多真的画了几行。
+    ///
+    /// **这是「翻行的代价与总步数无关」那句话的量具**，不是秒表：`steps` 从几百涨到
+    /// 上万，这个数一动不动（视口就那么高）。挂钟在门禁上是一张彩票，这个数机器忙不忙
+    /// 一个字都不影响（票 `parking-3/17` 给主列表立的也是这条判据）。
+    pub steps_rows: usize,
+    /// 滚那一趟每帧的中位数，毫秒。
+    pub steps_median_ms: f64,
+    /// 滚那一趟最慢的一帧，毫秒。
+    pub steps_worst_ms: f64,
+    /// 滚那一趟量了几帧。
+    pub steps_frames: u32,
 }
+
+/// 摊开步骤表之后滚几帧。头两帧是热身（字体图集与列宽在那两帧里定下来），所以取的
+/// 帧数得比热身多得多。
+const STEP_FRAMES: u32 = 60;
 
 impl SubCost {
     /// 排成给人看的几行。
@@ -606,6 +657,11 @@ impl SubCost {
             thousands(self.adds.0),
             romcat_core::report::human_bytes(self.adds.1),
         );
+        out.push_str(&format!(
+            "摊开步骤表滚一趟  每帧画 {} 行（与总步数无关）；\
+             中位 {:.2} ms，最慢 {:.2} ms，共 {} 帧\n",
+            self.steps_rows, self.steps_median_ms, self.steps_worst_ms, self.steps_frames,
+        ));
         match self.over_capacity {
             Some(over) => out.push_str(&format!(
                 "容量            超出 {}，给了 {} 条裁剪建议（**绝不自动截断**）\n",
@@ -676,10 +732,9 @@ pub fn sublibrary(
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    let screen = app.sublibrary();
-    let prepare_ms = screen.prepare_ms();
-    match screen.prepared() {
-        None => SubCost {
+    let prepare_ms = app.sublibrary().prepare_ms();
+    let Some(prepared) = app.sublibrary().prepared().cloned() else {
+        return SubCost {
             picked: 0,
             bytes: 0,
             prepare_ms,
@@ -687,16 +742,61 @@ pub fn sublibrary(
             adds: (0, 0),
             over_capacity: None,
             trims: 0,
-        },
-        Some(prepared) => SubCost {
-            picked: prepared.selected.picked.len() as u64,
-            bytes: prepared.selected.bytes,
-            prepare_ms,
-            steps: prepared.plan.touched(),
-            adds: (prepared.plan.adds.files, prepared.plan.adds.bytes),
-            over_capacity: prepared.plan.over_capacity,
-            trims: prepared.plan.trim_suggestions.len(),
-        },
+            steps_rows: 0,
+            steps_median_ms: 0.0,
+            steps_worst_ms: 0.0,
+            steps_frames: 0,
+        };
+    };
+
+    // **摊开那张步骤表滚一趟**：计划整份在界面状态里，而一帧画几行只跟视口有多高有关
+    // （票 `parking-3/08` 去掉了那个 2,000 条的上限）。量的正是这一条——每帧真的画了
+    // 几行，连带每帧的 CPU 代价。
+    //
+    // **这一趟单独画那张表，不走 [`App::ui`]**，与这个模块别处的规矩不一样，理由是
+    // 真机量级上量出来的会是别的东西：一份两万步的计划，卡头、容量条、四行汇总与
+    // 「要说出口的怪事」那几段加起来就比一屏高，于是那张表**整个落在视口之外、一行都
+    // 不画**（实测：300 个变体那份画 5 行，默认那份画 0 行）。那时「每帧多少毫秒」量的
+    // 是这一屏别的东西多贵，而这一条要量的是**翻行本身**。屏上那张表画的是同一个
+    // [`steps_table`](crate::sublibrary::steps_table)，一个字都不另写。
+    let ctx = headless::context();
+    let plan = &prepared.plan;
+    let travel = (plan.steps.len() as f32 * row_pitch() - VIEWPORT[1]).max(0.0);
+    let mut steps_rows = 0;
+    let mut costs: Vec<f64> = Vec::with_capacity(STEP_FRAMES as usize);
+    for frame in 0..STEP_FRAMES {
+        let at = if STEP_FRAMES > 1 {
+            travel * frame as f32 / (STEP_FRAMES - 1) as f32
+        } else {
+            0.0
+        };
+        let mut drawn = 0;
+        let started = Instant::now();
+        let output = headless::frame(&ctx, headless::input(), |ui| {
+            drawn = crate::sublibrary::steps_table(ui, plan, Some(at));
+        });
+        let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
+        let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+        // 前两帧是热身：字体图集与列宽都在这两帧里定下来。
+        if frame >= 2 {
+            costs.push(elapsed);
+            steps_rows = steps_rows.max(drawn);
+        }
+    }
+    costs.sort_by(f64::total_cmp);
+
+    SubCost {
+        picked: prepared.selected.picked.len() as u64,
+        bytes: prepared.selected.bytes,
+        prepare_ms,
+        steps: prepared.plan.touched(),
+        adds: (prepared.plan.adds.files, prepared.plan.adds.bytes),
+        over_capacity: prepared.plan.over_capacity,
+        trims: prepared.plan.trim_suggestions.len(),
+        steps_rows,
+        steps_median_ms: costs.get(costs.len() / 2).copied().unwrap_or(0.0),
+        steps_worst_ms: costs.last().copied().unwrap_or(0.0),
+        steps_frames: u32::try_from(costs.len()).unwrap_or(u32::MAX),
     }
 }
 
