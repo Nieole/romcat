@@ -30,6 +30,14 @@
 //!   `open` 却照样成功，相片只留得下「这一格列不开」（[`MemFs::unlistable_dir`]），
 //!   底下那些文件留不下来。要那一格连着底下的东西一起造，直接手捏一个 `MemFs`：
 //!   先 `unlistable_dir` 再往底下 `file`，那正是真盘的语义。
+//! - **`read_head` 对**目录**答得与真盘不一样。** Unix 上 `File::open` 打得开目录、
+//!   `take(0)` 一个字节都不读于是照样成功，`MemFs` 却报错（`crate::fs` 那条
+//!   `目录上先原样试一次是个假阳性_所以目录段另走一条` 钉的就是这个差别）。落点闸问的
+//!   键全是文件，够不着；要验「该建目录的位置上躺着一个文件」这类分支，得先想清楚
+//!   这一格。
+//! - **删除那一步会被它骗。** `erase` 从这道接缝上认盘上真名，却用 `std::fs` 真删。
+//!   相片说「在」而真盘上没有时，`remove_file` 会报一条本不存在的失败。往**带删除步骤**
+//!   的计划里塞视图之前，先确认相片与真卡对得上。
 //!
 //! [`MemFs::unlistable_dir`]: crate::fs::MemFs::unlistable_dir
 
@@ -165,6 +173,26 @@ mod tests {
         assert_eq!(名字, vec!["GB".to_string()], "两层并成了一层");
         assert!(相.read_head(&卡.path().join("GB/Tetris.zip"), 0).is_ok());
         assert!(相.read_head(&卡.path().join("GB/别的.txt"), 0).is_ok());
+    }
+
+    #[test]
+    fn 相片存的是盘上原始那个形态_不做_nfc_归一() {
+        // ADR-0020 的红线：**读盘用系统给的原始形式，入库与比较才用 NFC**。
+        // 相片是拿去读的那一头，归一了就等于凭空造出一块「查找不分解敏感」的盘，
+        // 而 SD 卡的 exFAT / FAT32 是不是那样没人查过（挂账 D82）。
+        const 分解形: &str = "\u{30b1}\u{3099}ーム";
+        let 卡 = temp_dir("snap-nfd");
+        写(&卡.path().join(分解形).join("一.zip"), b"x");
+        let 相 = snapshot(卡.path(), Folding::Sensitive);
+        assert!(
+            相.read_head(&卡.path().join(分解形).join("一.zip"), 0)
+                .is_ok(),
+            "盘上是哪个形态，相片里就得是哪个",
+        );
+        assert!(
+            相.read_head(&卡.path().join("ゲーム/一.zip"), 0).is_err(),
+            "预组合那一条打不开——真盘上分解敏感时正是这样，归一了这条就假绿了",
+        );
     }
 
     #[test]

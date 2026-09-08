@@ -788,7 +788,45 @@ fn 计划算完之后才出现的落点占用_执行这一层也挡得住() {
                 .any(|file| file.path.eq_ignore_ascii_case("GB/tetris.zip")),
             "{说}：没写成的不许进清单"
         );
+        // 上面那条「维护者那份一个字节没动」在**不分大小写**那一档上咬不动：闸真漏了，
+        // 字节会落到真卡（ext4）上另一个 inode 的 `GB/tetris.zip` 里，维护者那份照样
+        // 完好。所以还得断这一条——挡下来就是一个字节都没写。
+        assert!(
+            !现场.卡.path().join("GB/tetris.zip").exists(),
+            "{说}：挡下来就一个字节都不写"
+        );
     }
+}
+
+#[test]
+fn 不注入时闸在真盘上照样挡得住() {
+    // 上面那四条两档跑的都是**假视图**。真盘那一档不能只剩「盘上没有就放行」
+    // （`塞得进一个假目标_不塞就是真盘` 的后半段）——**挡住**那条路也得有人在真实
+    // 文件系统上钉着，不然接缝一接错，四条假视图测试照样全绿。
+    let 现场 = 现场::摆在(建个只差大小写的库());
+    let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
+    let 维护者那份 = 现场.卡.path().join("GB/Tetris.zip");
+    写(&维护者那份, "这是我自己拷进去的".as_bytes());
+    let 原样 = fs::read(&维护者那份).expect("读得出");
+
+    let outcome = 现场.执行(&这趟, &Manifest::empty(), &CancelToken::new());
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .any(|failure| failure.path == "GB/tetris.zip" && failure.act == Act::Add),
+        "真盘上也得挡下来：{:?}",
+        outcome.failures
+    );
+    assert_eq!(
+        fs::read(&维护者那份).expect("还在"),
+        原样,
+        "维护者自己那份连一个字节都不许动",
+    );
+    assert!(
+        !现场.卡.path().join("GB/tetris.zip").exists(),
+        "挡下来就一个字节都不写"
+    );
 }
 
 #[test]
