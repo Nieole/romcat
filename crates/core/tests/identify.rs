@@ -12,8 +12,11 @@
 use std::fs;
 use std::path::Path;
 
+use romcat_core::catalog::browse::{WorkAnchor, WorkQuery};
 use romcat_core::catalog::identify::State;
-use romcat_core::catalog::{Catalog, Confidence, Roots};
+use romcat_core::catalog::scrape::{Harvested, HarvestedMedia, HarvestedValue};
+use romcat_core::catalog::{Catalog, Confidence, Provenance, Roots};
+use romcat_core::collection::FAVORITE;
 use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
 use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
@@ -22,10 +25,11 @@ use romcat_core::identify::fuzzy;
 use romcat_core::identify::report::IdentifyReport;
 use romcat_core::identify::{self, Options};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
+use romcat_core::scrape::{AnchorKind, Field};
 use romcat_core::task::Handle;
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
-use romcat_core::verdict;
+use romcat_core::verdict::{self, Anchor, Decision, Facts, Membership, Store, Verdict};
 
 /// 一份带 iNES 头的 FC 卡带：前 16 字节是外挂头，后面才是内容。
 fn ines(fill: u8, payload: usize) -> Vec<u8> {
@@ -60,6 +64,9 @@ struct 现场 {
     dir: TempDir,
     catalog: Catalog,
     repo: DatRepo,
+    /// **沉淀库**。多数测试用不上它（空的等于 `Index::empty()`），
+    /// 作品那几条要靠它证「裁决造的那一行重跑识别之后原样还在」。
+    store: Store,
 }
 
 /// 原版 FC 卡带（含头 40,976 字节），No-Intro 按去头收、TOSEC 按含头收。
@@ -77,6 +84,11 @@ fn 拷贝机头版() -> Vec<u8> {
     smc(0xC3, 32_768)
 }
 
+/// 谁也不认得的那一份：DAT 里一条都没有，识别只说得出「未命中」。
+fn 陌生() -> Vec<u8> {
+    ines(0xEE, 4_096)
+}
+
 fn 建现场() -> 现场 {
     let dir = temp_dir("identify");
     let root = dir.path();
@@ -92,7 +104,7 @@ fn 建现场() -> 现场 {
     );
     写(
         &root.join("FC/谁也不认得.zip"),
-        &zip_container(&[ZipEntrySpec::stored("陌生.nes", ines(0xEE, 4_096))]),
+        &zip_container(&[ZipEntrySpec::stored("陌生.nes", 陌生())]),
     );
 
     // ── SFC：带拷贝机头的裸文件。只有**去头**那套撞得上 No-Intro。
@@ -128,6 +140,7 @@ fn 建现场() -> 现场 {
         dir,
         catalog,
         repo: 建_dat(),
+        store: Store::in_memory().expect("开得出沉淀库"),
     }
 }
 
@@ -249,12 +262,13 @@ fn 建_dat() -> DatRepo {
 
 fn 跑(现场: &mut 现场) -> identify::Outcome {
     let options = Options::new(Roots::single("库", 现场.dir.path()));
+    let verdicts = verdict::Index::load(&现场.store, "库").expect("读得出沉淀库");
     identify::run(
         &RealFs::new(),
         &mut 现场.catalog,
         &identify::Ammo {
             repo: &现场.repo,
-            verdicts: &verdict::Index::empty(),
+            verdicts: &verdicts,
             naming: &fuzzy::Naming::off(),
             guessing: &identify::model::Guessing::off(),
             titledb: None,
@@ -1006,5 +1020,428 @@ fn 作品与发行版表里不留指不着任何变体的行() {
         !折出来.iter().any(|row| row.value.contains("Super Mario")),
         "那份已删文件的官方名不许再进标题集合：{:?}",
         折出来.iter().map(|row| &row.value).collect::<Vec<_>>()
+    );
+}
+
+// ───── 重跑识别复用同名的现成行（票 parking-3/10） ─────────────────────────────
+//
+// 老路子是**删了重建**：`clear_identifications` 把 `work` 整张清掉，下一趟照名字再
+// 建一遍。于是 `work.id` 每跑一趟就换一批——挂在旧 id 上的东西集体失联（挂单 `Q193`），
+// 同名的作品还可能攒出两行（挂账 `D162`）。这几条钉的是新的口径：**按名字找现成的
+// 那一行复用，找不到才新建**。
+
+/// 把一条**裁决**落进沉淀库，钉在这份字节的**内容锚**上。
+fn 裁(现场: &mut 现场, bytes: &[u8], work: &str) {
+    现场
+        .store
+        .put(&Verdict::now(
+            Anchor::Content {
+                crc32: crc32(bytes),
+                size: u64::try_from(bytes.len()).expect("装得下"),
+                sha1: None,
+            },
+            Decision::Release(Facts {
+                work: work.to_string(),
+                platform: Some("FC".to_string()),
+                ..Facts::default()
+            }),
+        ))
+        .expect("落得进沉淀库");
+}
+
+/// 跑一趟**起手就被按停**的识别：`clear_identifications` 已经跑过，而一个变体都没轮到。
+fn 按停着跑(现场: &mut 现场) -> identify::Outcome {
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let verdicts = verdict::Index::load(&现场.store, "库").expect("读得出沉淀库");
+    identify::run(
+        &RealFs::new(),
+        &mut 现场.catalog,
+        &identify::Ammo {
+            repo: &现场.repo,
+            verdicts: &verdicts,
+            naming: &fuzzy::Naming::off(),
+            guessing: &identify::model::Guessing::off(),
+            titledb: None,
+        },
+        &Options::new(Roots::single("库", 现场.dir.path())),
+        &cancel,
+        &mut |_| {},
+    )
+    .expect("中断不是错误")
+}
+
+/// 这个变体眼下挂在哪一条发行版上。
+fn 挂着的发行版(现场: &现场, key: &str) -> i64 {
+    现场
+        .catalog
+        .variant(key)
+        .expect("读得出")
+        .unwrap_or_else(|| panic!("{key} 这个变体不在"))
+        .release_id
+        .unwrap_or_else(|| panic!("{key} 认出了它基于的那次发行"))
+}
+
+/// 这个变体眼下挂在哪一行作品上。
+fn 挂着的作品(现场: &现场, key: &str) -> Option<i64> {
+    现场
+        .catalog
+        .variant(key)
+        .expect("读得出")
+        .unwrap_or_else(|| panic!("{key} 这个变体不在"))
+        .work_id
+}
+
+#[test]
+fn 连跑两趟识别作品行不涨也不换一批_id() {
+    let mut 现场 = 建现场();
+    跑(&mut 现场);
+    let 第一趟 = 现场.catalog.work_names().expect("读得出作品");
+    assert!(!第一趟.is_empty(), "前提：第一趟真的建出了作品行");
+    let 马里奥 = 挂着的作品(&现场, "库/FC/超级马里奥.zip").expect("挂上了作品");
+
+    跑(&mut 现场);
+
+    assert_eq!(
+        现场.catalog.work_names().expect("读得出作品"),
+        第一趟,
+        "作品行数不涨，id 一个都不换"
+    );
+    assert_eq!(
+        挂着的作品(&现场, "库/FC/超级马里奥.zip"),
+        Some(马里奥),
+        "变体照旧指着同一行"
+    );
+
+    // ⚠️ 上面两条是**形状断言，不是回归闸**：删了重建那条老路子在这儿也过得去——
+    // 表清空之后 rowid 从 1 重发，变体次序不变时发出来的号逐字相同。真正钉住这一票的
+    // 是下面第三趟。
+    //
+    // ⭐ 库里多出一部作品的那一趟才是要害：删了重建的老路子按变体的次序重新发号，
+    // 中间插进来一行，它**后面**的作品全体换号。复用不发新号——新的那一行拿新号，
+    // 现成的一个都不动。
+    裁(&mut 现场, &陌生(), "一部新作品");
+    跑(&mut 现场);
+
+    let 第三趟 = 现场.catalog.work_names().expect("读得出作品");
+    for (id, name) in &第一趟 {
+        assert_eq!(
+            第三趟.get(id),
+            Some(name),
+            "现成的作品 {id}「{name}」换号了：{第三趟:?}"
+        );
+    }
+    assert_eq!(第三趟.len(), 第一趟.len() + 1, "只多出裁决新点名的那一行");
+}
+
+#[test]
+fn 作品锚点在重跑识别之后仍然指得中() {
+    // ⭐ 挂单 `Q193`：`WorkAnchor::Work(id)` 攒下来的那些东西（收藏、媒体、刮削结论）
+    // 全靠这个 id 指得中。id 一换，挂在旧 id 上的东西集体失联。
+    let mut 现场 = 建现场();
+    跑(&mut 现场);
+    let 锚 = WorkAnchor::Work(挂着的作品(&现场, "库/FC/超级马里奥.zip").expect("挂上了作品"));
+    let 名字 = 现场
+        .catalog
+        .work_detail(&WorkQuery::default(), &锚)
+        .expect("读得出")
+        .expect("这一行在")
+        .name;
+
+    // 往作品锚点上挂两样东西：一条刮削值（年份）与一份媒体。
+    现场
+        .catalog
+        .put_media("deadbeef", "png", 1)
+        .expect("媒体池收得下");
+    现场
+        .catalog
+        .put_scraped(&[Harvested {
+            anchor: AnchorKind::Work.label().to_string(),
+            subject: 名字.clone(),
+            source: "某源".to_string(),
+            input: "指纹".to_string(),
+            values: vec![HarvestedValue {
+                field: Field::Year.label().to_string(),
+                value: "1985".to_string(),
+                evidence: "测试".to_string(),
+            }],
+            media: vec![HarvestedMedia {
+                kind: "封面".to_string(),
+                hash: "deadbeef".to_string(),
+                evidence: "测试".to_string(),
+            }],
+        }])
+        .expect("写得进");
+
+    // **收藏**走的是另一条路：它落**沉淀库**、锚在**内容锚**上，每趟识别照那份库重投
+    // 一遍。这里一起钉着，是因为界面上「★ 收藏」这个动作瞄的正是作品锚点那一行
+    // ——id 换了，星就按在别人身上了。
+    现场
+        .store
+        .join(&[Membership::now(
+            FAVORITE,
+            Anchor::Content {
+                crc32: crc32(&原版()),
+                size: u64::try_from(原版().len()).expect("装得下"),
+                sha1: None,
+            },
+        )])
+        .expect("收藏落得进沉淀库");
+
+    // 库里少掉一部作品，剩下的那些在老路子上会整体换号——那正是 `Q193` 说的
+    // 「作品锚点里的那个 id 会被重跑识别换掉」。
+    fs::remove_file(现场.dir.path().join("FC/某游戏 汉化版.zip")).expect("删得掉");
+    重扫(&mut 现场);
+    跑(&mut 现场);
+
+    let 再看 = 现场
+        .catalog
+        .work_detail(&WorkQuery::default(), &锚)
+        .expect("读得出")
+        .expect("重跑识别之后这条作品锚点还指得中");
+    assert_eq!(再看.name, 名字, "指着的还是同一部作品");
+    assert_eq!(
+        再看.year.as_deref(),
+        Some("1985"),
+        "挂在作品锚点上的刮削值一条不丢"
+    );
+    assert!(
+        !现场
+            .catalog
+            .scraped_media(AnchorKind::Work.label(), &再看.name)
+            .expect("读得出")
+            .is_empty(),
+        "挂在作品锚点上的媒体一条不丢"
+    );
+
+    let 合集 = 现场
+        .catalog
+        .collection_memberships()
+        .expect("读得出合集成员");
+    assert!(
+        再看.variants.iter().any(|it| 合集
+            .get(&it.row.key)
+            .is_some_and(|names| names.iter().any(|name| name == FAVORITE))),
+        "这一行底下那个收藏还在：库里收着 {合集:?}，这一行是 {:?}",
+        再看
+            .variants
+            .iter()
+            .map(|it| &it.row.key)
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn 被叫停之后重扫再跑一趟作品锚点照样指得中() {
+    // ⭐ 这条守的是「按名字复用」最容易漏的那条缝：**被叫停的那一趟不收作品**，可紧接着
+    // 的一次**重新成型**收作品走的是另一张网（`drop_unheld_works`），判据是「还有没有人
+    // 指着」、**不看来路**。识别起手要是把 `variant.work_id` 整列摘空，没轮到的变体就从此
+    // 挂着空，那张网会把整库的作品连同 id 一起扫掉——下一趟回来全是新号。
+    //
+    // 「被叫停之后接着重扫」是常规动作，不是边角。
+    let mut 现场 = 建现场();
+    跑(&mut 现场);
+    let 第一趟 = 现场.catalog.work_names().expect("读得出作品");
+    assert!(!第一趟.is_empty(), "前提：第一趟真的建出了作品行");
+    let 马里奥 = 挂着的作品(&现场, "库/FC/超级马里奥.zip").expect("挂上了作品");
+
+    assert!(按停着跑(&mut 现场).interrupted, "前提：这一趟是被按停的");
+    重扫(&mut 现场);
+
+    assert_eq!(
+        现场.catalog.work_names().expect("读得出作品"),
+        第一趟,
+        "没轮到的变体照旧指着它们的作品，那几行一个都不该被重新成型收掉"
+    );
+
+    跑(&mut 现场);
+    assert_eq!(
+        挂着的作品(&现场, "库/FC/超级马里奥.zip"),
+        Some(马里奥),
+        "跑完一整趟之后，作品锚点还是原来那一个"
+    );
+}
+
+#[test]
+fn 同名的两条发行版线不会被并成一条() {
+    // ⭐ 同名异作是真实存在的（1988 与 2004 两部 Ninja Gaiden）。工具手上只有名字，
+    // 所以**作品**那一层它们仍旧共用一行——那正是 `work.name` 上**不补 `UNIQUE`** 的
+    // 理由：门留着，日后把其中一部改个名（一条裁决就够）就是两行，而重跑识别不会把
+    // 裁决那一行抹掉（见上一条）。
+    //
+    // **分得开的那一层是发行版**：两条发行版线各自成行，按名字复用作品那一行不把它们
+    // 并成一条，重跑一趟也不多攒出第三条。
+    let dir = temp_dir("identify-同名异作");
+    let root = dir.path();
+    let 卡带版 = ines(0x11, 4_096);
+    let 另一部 = smc(0x44, 32_768);
+    写(
+        &root.join("FC/忍者龙剑传.zip"),
+        &zip_container(&[ZipEntrySpec::stored("ng.nes", 卡带版.clone())]),
+    );
+    写(&root.join("SFC/忍者龙剑传 另一部.smc"), &另一部);
+
+    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+    let mut options = ScanOptions::named(root, "库");
+    options.jobs = Jobs::Fixed(2);
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
+
+    let mut repo = DatRepo::in_memory().expect("开得出来");
+    装(
+        &mut repo,
+        "TOSEC",
+        "Nintendo Famicom - Games",
+        "FC",
+        Convention::AsIs,
+        &[条目(
+            "Ninja Gaiden (1988)(Tecmo)",
+            "Ninja Gaiden (1988)(Tecmo).nes",
+            u64::try_from(卡带版.len()).expect("装得下"),
+            crc32(&卡带版),
+        )],
+    );
+    装(
+        &mut repo,
+        "No-Intro",
+        "Nintendo - Super Nintendo Entertainment System",
+        "SFC",
+        Convention::Headerless,
+        &[条目(
+            "Ninja Gaiden (USA)",
+            "Ninja Gaiden (USA).sfc",
+            32_768,
+            crc32(&另一部[512..]),
+        )],
+    );
+    let mut 现场 = 现场 {
+        dir,
+        catalog,
+        repo,
+        store: Store::in_memory().expect("开得出沉淀库"),
+    };
+    跑(&mut 现场);
+
+    let 甲 = "库/FC/忍者龙剑传.zip";
+    let 乙 = "库/SFC/忍者龙剑传 另一部.smc";
+    assert_eq!(
+        现场.catalog.work_of_variant(甲).expect("读得出"),
+        现场.catalog.work_of_variant(乙).expect("读得出"),
+        "前提：两条 DAT 记录折出来的是同一个作品名"
+    );
+    let 作品 = 挂着的作品(&现场, 甲).expect("认出了作品");
+    assert_eq!(
+        挂着的作品(&现场, 乙),
+        Some(作品),
+        "作品是跨平台跨地区的**游戏概念**，同名的这两条在这一层共用一行"
+    );
+
+    assert_ne!(
+        挂着的发行版(&现场, 甲),
+        挂着的发行版(&现场, 乙),
+        "两条发行版线各是各的，没被并成一条"
+    );
+    let 发行版们 = 现场.catalog.releases().expect("读得出发行版");
+    assert_eq!(发行版们.len(), 2, "一共就这两条：{发行版们:?}");
+    assert_eq!(
+        发行版们[&挂着的发行版(&现场, 甲)].platform.as_deref(),
+        Some("FC")
+    );
+    assert_eq!(
+        发行版们[&挂着的发行版(&现场, 乙)].platform.as_deref(),
+        Some("SFC")
+    );
+
+    跑(&mut 现场);
+
+    assert_eq!(
+        挂着的作品(&现场, 甲),
+        Some(作品),
+        "重跑之后作品那一行还是它"
+    );
+    assert_eq!(挂着的作品(&现场, 乙), Some(作品));
+    assert_ne!(
+        挂着的发行版(&现场, 甲),
+        挂着的发行版(&现场, 乙),
+        "重跑之后两条线照旧分得开"
+    );
+    assert_eq!(
+        现场.catalog.releases().expect("读得出发行版").len(),
+        2,
+        "重跑不多攒出第三条发行版"
+    );
+}
+
+#[test]
+fn 重跑识别认领裁决造的那一行而不是新建一行() {
+    let mut 现场 = 建现场();
+    跑(&mut 现场);
+    let 作品名 = 现场
+        .catalog
+        .work_of_variant("库/FC/超级马里奥.zip")
+        .expect("读得出")
+        .expect("认出了作品");
+    let 那一行 = 挂着的作品(&现场, "库/FC/超级马里奥.zip").expect("挂上了作品");
+    let 汉化那一行 = 挂着的作品(&现场, "库/FC/某游戏 汉化版.zip").expect("汉化版也认出了作品");
+    assert_ne!(那一行, 汉化那一行, "前提：这一趟它们是两部作品");
+
+    // 一条裁决把汉化版那一份也钉在**同一部作品**上：识别与裁决共用同一张作品表。
+    裁(&mut 现场, &汉化版(), &作品名);
+    跑(&mut 现场);
+
+    assert_eq!(
+        挂着的作品(&现场, "库/FC/超级马里奥.zip"),
+        Some(那一行),
+        "识别这一趟认领的是现成的那一行，不是新建的"
+    );
+    assert_eq!(
+        挂着的作品(&现场, "库/FC/某游戏 汉化版.zip"),
+        Some(那一行),
+        "裁决落在同一行上——两行同名的作品会让导出时的收敛拆成两个条目"
+    );
+
+    // 再跑一趟：裁决造出来的结果不会被下一趟识别抹掉。
+    跑(&mut 现场);
+    assert_eq!(
+        挂着的作品(&现场, "库/FC/某游戏 汉化版.zip"),
+        Some(那一行),
+        "裁决过的结果原样还在"
+    );
+}
+
+#[test]
+fn 同名异作插得进两行而重跑识别不抹掉裁决造的那一行() {
+    // **作品是跨平台、跨地区的游戏概念**（平台在发行版那一层），同名异作是真实存在的
+    // （1988 与 2004 两部 Ninja Gaiden）。所以 `work.name` 上**没有 `UNIQUE`**：
+    // 裸约束会把它们强行并成一部，连人工把其中一部拆出来的路都堵死。
+    let mut 现场 = 建现场();
+    let 识别造的 = 现场
+        .catalog
+        .add_work("Ninja Gaiden", Provenance::Identified)
+        .expect("插得进");
+    let 裁决造的 = 现场
+        .catalog
+        .add_work("Ninja Gaiden", Provenance::Verdict)
+        .expect("同名的第二行照样插得进——库里没有拦它的约束");
+    assert_ne!(识别造的, 裁决造的, "两行同名的作品各是各的");
+
+    // 复用挑的是**裁决造的**那一行：人定下来的优先于机器撞出来的。**直接断在
+    // `Catalog::work_named` 上**是有意的——它是核心库的公开接缝，而这条口径（票里那句
+    // 「裁决来源的优先」）只在库里同名有好几行时才看得出来，而那种库识别自己造不出来。
+    assert_eq!(
+        现场.catalog.work_named("Ninja Gaiden").expect("读得出"),
+        Some(裁决造的),
+    );
+
+    跑(&mut 现场);
+
+    let 作品们 = 现场.catalog.work_names().expect("读得出作品");
+    assert_eq!(
+        作品们.get(&裁决造的).map(String::as_str),
+        Some("Ninja Gaiden"),
+        "裁决造的那一行不会被下一趟识别抹掉——重跑识别只清「识别自己造的」那些"
+    );
+    assert!(
+        !作品们.contains_key(&识别造的),
+        "识别自己造的、如今没人指着的那一行跟着这一趟收掉"
     );
 }
