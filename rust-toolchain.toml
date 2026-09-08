@@ -1,0 +1,43 @@
+# **钉住工具链。**
+#
+# 在这份文件之前，仓库里没有任何东西说得出「门禁跑的是哪一版 rustfmt」（挂单 `Q188`）。
+# `rustfmt.toml` 钉的是**风格**，钉不住**实现**：`style_edition = "2024"` 只保证按
+# 《风格指南》的哪一版排，不保证 rustfmt 自己的哪一版——同一份配置换一版 rustfmt，
+# 产出就可能变。于是换一台机器提交，`cargo fmt --all` 会顺手重排一大片与手上这件事
+# 无关的代码，而门禁第一条（`cargo fmt --all --check`）在那台机器上照样是绿的。
+#
+# 落这一版时**实测**：`rustc 1.98.1 (48a229cea 2026-09-01)`、`rustfmt 1.9.0-stable`、
+# `clippy 0.1.98`、`cargo 1.98.1`。
+#
+# ## ⚠️ 副作用，认了才落
+#
+# rustup 从此在这个目录下**只认这一版**。机器上没有它时，第一次进目录跑任何 cargo 命令
+# 都会**触发一次下载**（要联网，`profile = "minimal"` 那一档大约一两百 MB）。
+# 这是拿「每台机器多下一次」换「谁提交都不会多出一片重排」。
+#
+# CI 上同一笔代价照付一次，所以 `.github/workflows/gate.yml` 里让 `rustup` 显式装这一版
+# 而不是靠 runner 预装的 stable——runner 上的 stable 会自己往前走，那正是要堵的那道缝。
+#
+# ## 它与 `Cargo.toml` 的 `rust-version = "1.95"` **并存、互不替代**
+#
+# 两件事，别当成一件：
+#
+# - `Cargo.toml` 的 `rust-version`（MSRV）是**给 cargo 解析器看的声明**：这个包最低
+#   要什么版本才编得动。它是**下界**，管的是依赖解析与「别人拿多老的 rustc 也能编」，
+#   一版工具链都钉不住——1.95 到最新之间任何一版都满足它。
+# - 这份 `rust-toolchain.toml` 是**给 rustup 看的指定**：在这个目录下就用这一版。
+#   它是**定值**，管的是「产出逐字节一致」。
+#
+# 所以两个数不同不是矛盾：**门禁跑 1.98.1，而这套代码声明自己 1.95 就编得动。**
+# 往上挪 MSRV 是一次会波及使用者的决定，往上挪这里只是「大家一起换一版」——
+# 不要因为这里改了就顺手去动那边。
+
+[toolchain]
+channel = "1.98.1"
+# 门禁四条里 `fmt` 要 rustfmt、`clippy` 要 clippy，两个都不是 `minimal` 自带的，
+# 在这儿点名。`doc` 那条只要 rustdoc（随 rustc 走），`test` 只要 cargo。
+components = ["rustfmt", "clippy"]
+# `minimal` 而不是默认的 `default`：差的那一份是 `rust-docs`（离线的标准库文档，
+# 几十 MB），门禁四条一条都用不到它。少下这一份，是上面那笔「每台机器多下一次」
+# 里能省的部分。本地想要就 `rustup component add rust-docs`，不影响这份文件。
+profile = "minimal"

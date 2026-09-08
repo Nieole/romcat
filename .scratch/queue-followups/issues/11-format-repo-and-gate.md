@@ -87,3 +87,16 @@
 一趟全量仍是 **58 个 `test result: ok`、1,581 条通过、0 失败**、`cargo doc` exit 0。
 **这一轮改的全是 `.md` / `.toml` / `.gitattributes`，一个 `.rs` 都没动**，
 所以那条格式化提交仍然是逐字节可复现的纯 fmt 产出。
+
+## 挂单裁决（第三轮）
+
+本票记下的两条，由票 `parking-3/01`（「门禁真的会拦人」）落地，均 **settled**。
+
+| 挂单 | 它说的 | 裁决 |
+|---|---|---|
+| `Q187` | 「门禁」没有任何机器执行的地方——四条命令只写在 `README.md` 的开发一节里，漏跑了没有人拦 | **settled。** 四条落成仓库里一个真实可跑的子命令 `cargo xtask gate`（`xtask/src/gate.rs` 的 `steps()` 是**唯一**定义，`.cargo/config.toml` 给别名）；`.github/workflows/gate.yml` 只调这一句、一条门禁命令都不抄；`README.md` 的门禁块改成指向它。「它跑哪四条」由 `cargo xtask gate --list` 当场答，不再有第二份会漂的清单。**红得动这件事有测试钉着**：`xtask/tests/gate.rs` 的 `排版不干净就红改回来就绿` 拿一份丢弃 crate 真的起子进程验红绿。 |
+| `Q188` | 没有任何东西钉住是哪一版 `rustfmt`——换台机器提交就会多出一大片无关重排 | **settled。** 仓库根落 `rust-toolchain.toml`，`channel = "1.98.1"`（落它时实测 `rustfmt 1.9.0-stable`）、`components = ["rustfmt", "clippy"]`、`profile = "minimal"`。本票当年转挂单时说的顾虑（「钉工具链是仓库级决定、有不止一个方向，还会改掉 `rustup` 的行为」）在那份文件里逐条写明并认下了：rustup 从此在这个目录下只认这一版，机器上没有它时第一次进目录会触发一次下载。同时写清它与 `Cargo.toml` 的 `rust-version = "1.95"` **并存、互不替代**——前者是给 cargo 解析器的 MSRV 下界，钉不住任何一版。 |
+
+**顺带更正本票的一处记录：** 本票收尾写的「**58 个 `test result: ok`、1,581 条通过**」，
+到 `parking-3/01` 落门禁时实测已是 **66 个 `test result: ok`、1,635 条通过**
+（`cargo xtask gate --throttle`，四条全绿）。原句不改——那是当时的实测，改掉就没有对照了。

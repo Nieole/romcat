@@ -1,0 +1,85 @@
+# **门禁。** 推一次代码就跑，跑的是仓库里那一条子命令 `cargo xtask gate`。
+#
+# ⭐ **这份文件里一条门禁命令都不写。** 四条（fmt / clippy / test / doc）的唯一定义在
+# `xtask/src/gate.rs`，本地与 CI 调的是同一句话——把命令抄一份到这里，就等于给自己造了
+# 一处会慢慢漂的第二定义，而「我这儿绿的、CI 红的」这种分歧只能靠猜。
+# 想知道它跑哪四条：`cargo xtask gate --list`。
+name: 门禁
+
+# ⚠️ **`push` 限在 `main` 上，不是漏写。** 两个事件都不加分支过滤时，同仓库的分支推一次
+# `push` 与 `pull_request` **都会触发**，而下面 `concurrency` 的组用的是 `github.ref`
+# ——push 那趟是 `refs/heads/x`、PR 那趟是 `refs/pull/N/merge`，**两个组不同，谁也掐不掉谁**。
+# 一趟门禁是十分钟量级，那等于每次推白烧一倍。分支上的改动由 `pull_request` 盖，
+# `main` 上的直推由 `push` 盖。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一条分支上连推两次，前一趟没跑完就掐掉——门禁看的是**最新那一版**绿不绿。
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+# 这趟门禁一个 GitHub API 都不调，令牌该是什么都拿不到。
+permissions: {}
+
+jobs:
+  gate:
+    name: 门禁四条
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ⚠️ **这里不装任何系统库，是量过的，不是漏了。** `romcat-gui` 用 egui/eframe，
+      # 直觉上会以为 Linux 上要一串 X11 / wayland / xkbcommon 的 dev 包。实测本机
+      # `ldd target/debug/romcat-gui` 只链到 **libc / libm / libgcc_s / ld-linux**
+      # ——winit 与 wgpu 那一层是运行时 `dlopen`，编译期一个都不需要；而门禁跑的界面测试
+      # 全是 headless（`romcat_gui::headless`），压根不开窗、不要显示服务器。
+      # 真在 runner 上撞红了，把实测的缺失库名补一个 `apt-get install` 步骤——
+      # **别照着教程猜一串包名**。
+
+      # 装 `rust-toolchain.toml` 钉的那一版，**不用 runner 预装的 stable**：
+      # runner 上的 stable 会自己往前走，那正是这个仓库钉工具链要堵的那道缝。
+      # 不给参数时 `rustup toolchain install` 读的就是 `rust-toolchain.toml`。
+      - name: 装工具链
+        run: |
+          rustup toolchain install
+          rustc --version && cargo fmt --version && cargo clippy --version
+
+      # 缓存 `~/.cargo` 与 `target/`。
+      #
+      # `~/.cargo` 只存 index / cache / git，**不存 `registry/src`**：那是解包出来的源码，
+      # 缓存它等于把同一份东西存两遍，cargo 从 `cache` 里的 `.crate` 解包很快。
+      #
+      # ⭐ **key 尾巴上那个 `run_id` 是为了让缓存会滚。** `actions/cache` **只在主 key 未命中时
+      # 才写回**，所以 key 要是只含 `Cargo.lock` 与 `rust-toolchain.toml` 的哈希，
+      # 依赖一稳定下来 `target/` 就永远冻在第一趟的状态，之后每次源码改动的增量产物一律不进缓存。
+      # 每趟一个新 key（必不命中 → 必写回）＋ 拿前缀 `restore-keys` 捞上一趟，才是滚动更新。
+      #
+      # ⭐ **`restore-keys` 的前缀里必须带上那个哈希。** 只写 `-gate-` 会把**旧工具链**建出来的
+      # `target/` 拉回来，cargo 一认出 rustc 变了就整棵重建——那几个 G 纯粹是下载加解包的开销、
+      # 零复用。作废是 key 的行为，得让 restore 也照着来。
+      - name: 缓存 ~/.cargo 与 target/
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-gate-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-gate-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}-
+
+      # `--keep-going`：红了也把剩下几条跑完。本地默认在第一处红上就停（省时间），
+      # CI 上反过来——一趟就把四条的结论都给出来，省的是**人**来回推一次的时间。
+      #
+      # ⚠️ **不给 `--throttle`。** 那一档（`-j 1` / `--test-threads=2`）是为一台 15 GB 的
+      # 开发机留的，runner 没有这个约束，限流只会让它白白慢上几倍。
+      - name: 跑门禁
+        run: cargo xtask gate --keep-going
