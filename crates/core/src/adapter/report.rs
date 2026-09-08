@@ -492,11 +492,69 @@ mod tests {
         assert!(那一节(&导入).contains("U+3000"), "{}", 那一节(&导入));
     }
 
+    /// 一个**还没量过**的格式：它没有覆写 [`Adapter::structural_losses`]。
+    ///
+    /// 两个真适配器现在都量过了（Pegasus 五条、ES gamelist 八条），拿它们当被测对象
+    /// 证不了「空清单一个字都不印」这条口径还在。所以留一个没量过的在这儿——它同时
+    /// 钉住两样：**默认实现交出来的是空清单**，以及**渲染那一侧对空清单只字不提**。
+    #[derive(Debug, Clone, Copy)]
+    struct 还没量过的格式;
+
+    impl Adapter for 还没量过的格式 {
+        fn name(&self) -> &'static str {
+            "还没量过的格式"
+        }
+        fn ceiling(&self) -> crate::adapter::Capability {
+            crate::adapter::Capability::WriteOnly
+        }
+        fn file_name(&self) -> &'static str {
+            "还没量过.txt"
+        }
+        fn read(
+            &self,
+            _bytes: &[u8],
+        ) -> Result<crate::adapter::Parsed, crate::adapter::AdapterError> {
+            unreachable!("这个格式只用来钉空清单那条口径")
+        }
+        fn write(
+            &self,
+            _doc: &crate::adapter::Document,
+            _baseline: Option<&crate::adapter::Parsed>,
+        ) -> Result<Vec<u8>, crate::adapter::AdapterError> {
+            unreachable!("这个格式只用来钉空清单那条口径")
+        }
+        fn media_placement(
+            &self,
+            _rom_key: &str,
+            _kind: crate::scrape::MediaKind,
+            _hash: &str,
+            _ext: &str,
+        ) -> Option<crate::adapter::MediaPlacement> {
+            None
+        }
+    }
+
     #[test]
     fn 没声明结构性损失的格式一个字都不印() {
         // 空清单的意思是**还没查过**，不是「这个格式什么都不丢」。印一句
         // 「无结构性损失」就是替一份没人核过的调研背书。
-        let text = ImportReport::default().render_text();
+        assert!(
+            还没量过的格式.structural_losses().is_empty(),
+            "没覆写的适配器，默认交出来的就该是空清单"
+        );
+        let text = ImportReport {
+            structural_losses: 还没量过的格式.structural_losses().to_vec(),
+            ..ImportReport::default()
+        }
+        .render_text();
         assert!(!text.contains("结构性损失"), "空清单该一个字都不印：{text}");
+        assert!(!text.contains("无结构性损失"), "更不许印这句假保证：{text}");
+        // 导出那一侧是同一条口径——用户在导出**之前**读到的那份也不许印。
+        let text = ExportReport {
+            structural_losses: 还没量过的格式.structural_losses().to_vec(),
+            ..ExportReport::default()
+        }
+        .render_text();
+        assert!(!text.contains("结构性损失"), "导出那一侧一样：{text}");
     }
 }

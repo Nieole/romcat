@@ -72,7 +72,7 @@ use crate::scrape::MediaKind;
 use super::converge;
 use super::{
     Adapter, AdapterError, Body, Capability, Document, Entry, Game, Lossy, LossyNote,
-    MediaPlacement, Parsed, PlayerCount, Preserved, ReleaseDate,
+    MediaPlacement, Parsed, PlayerCount, Preserved, ReleaseDate, StructuralLoss,
 };
 
 /// ES gamelist 适配器。
@@ -90,6 +90,155 @@ pub const MEDIA_DIR: &str = "downloaded_media";
 
 /// 根元素。**大写 L，大小写敏感**。
 const ROOT: &str = "gameList";
+
+/// 这个格式的**结构性损失**（[`Adapter::structural_losses`]）。
+///
+/// 八条，逐样往返实测出来的（`库 → 文件 → 库`，**不给底本**），每条配一条往返测试钉着。
+///
+/// ⚠️ **这不是这个格式的全部天花板**，是量过的那几条。眼下明确**不在**这份清单里的有两族：
+///
+/// - **`rating` 存进去四舍五入到 0.1，与只知道年份的发行日期补出来的那个 1 月 1 日。**
+///   按**结构性损失**自己的定义这两样都算，但它们眼下走的是 [`LossyNote`] 那条按行数
+///   得出来的路（`fold_game` 里 `rating` 与 `releasedate` 两个分支），与 Pegasus 那一侧
+///   是同一族、同一条分界，**这张票不动那条分界**（挂单 `Q334`）。这里还比 Pegasus 多
+///   一层：写的那一侧 [`format_rating`] 自己就先四舍五入了，`库 → 文件` 那一趟连有损点
+///   都发不出来。
+/// - **行尾。** XML 规范要解析器把 `\r\n` 与单个 `\r` 都规范成 `\n`，ES-DE 用的
+///   pugixml 照做；而这里的词法**不规范化**（逐字节往返要它），往返回来 `\r` 原样还在。
+///   这一条我们自己量不到、也钉不住——照直觉写进清单就是一句没人核过的话（挂单 `Q335`）。
+/// - **真的 1970 年 1 月 1 日。** `19700101T000000` 是 ES-DE 的默认值（意思是「没有发行
+///   日期」），于是那一天表达不出来——与清单第 3 条（字面上就叫 `unknown` 的开发商）
+///   是同一个形状。它也已经走 [`LossyNote`]（读回来推一条 `Dropped`），同上不动分界
+///   （挂单 `Q339`）。
+///
+/// ## 与 Pegasus 那份清单差在哪
+///
+/// Pegasus 丢的多半是**值的文本形状**（换行、每一行两头的空白、那一行 `.`）；这个格式
+/// 丢的多半是**一条装不装得下**：`<developer>` 只有一份、`<game>` 只有一个 `<path>`、
+/// 字段表上没有的元素根本写不出去。两家都有的只有「值两端的空白」那一条，而掐的位置也
+/// 不一样——Pegasus 掐的是**每一行**的两头、一个值都不放过；这里掐的是整个值的两端，
+/// 而且 `desc`、`x-` 扩展键与未知元素这三样根本不掐。
+///
+/// ## 这几条与「往返一个字节都不差」并不打架
+///
+/// 带**底本**的那一趟里，原文那几行原样躺在快照里、原样写回去，逐字节相同照旧成立
+/// ——[`Capability::LosslessRoundTrip`] 说的正是 `文件 → 库 → 文件`。变形只发生在
+/// **新生成**的内容上：库里的值写出去、再读回来，拿到的就不是原来那个值了。
+///
+/// ## 为什么它们避不开
+///
+/// **一、值两端的空白被掐掉，三样例外。** 原版 ES 的字段声明里 `desc` 是
+/// `MD_MULTILINE_STRING`、别的元素是 `MD_STRING`（调研 §B.1 那张 18 个字段的表）。
+/// 而一份手改过的 gamelist 里，元素的文本两端带的常常是**文件自己的缩进**
+/// （`<name>\n    甲\n  </name>`），折进中立模型的那一族于是一律 `trim` 掉两头。
+/// **不掐的有三样**：`desc`（得装得下带排版的长文），以及 `x-` 扩展键与未知元素
+/// ——那两样是**原样留着**的，折那一步根本没经手它们。掐完不剩东西的
+/// （`"   "`，或本来就是空串的），那个元素**整条不写**：这个格式的规矩是
+/// 「值等于默认值时不写出」，而单行那一族的默认值就是空串。`desc` 在这一格上不例外。
+///
+/// **二、开发商 / 发行商 / 类型写了几条这件事存不下。** 这三个元素一个 `<game>` 里
+/// 各只有一份，而中立库里它们是**集合**。写的那一侧按 `, ` 合成一条（`joined`），
+/// 读的那一侧**不拆**——`Sunsoft, Inc.` 这种带逗号的单值在真的 gamelist 里到处都是，
+/// 按 `, ` 拆等于**改内容**。于是「两家」与「一家名字里有逗号」写出去长得一模一样，
+/// 读回来再也分不开。留头一条把其余的丢掉才是真的坏——那是**静默换掉一家公司**。
+///
+/// **三、字面上就叫 `unknown` 的那一条。** 原版 ES 给 `developer` / `publisher` /
+/// `genre` 的默认值就是 `unknown`（调研 §B.1 那张 18 个字段的表），而这个格式的规矩是
+/// 「值等于默认值时不写出」——一家真的叫 `unknown` 的公司写进去，与「这一栏没填」在
+/// 文件里是同一件事。**只在它单独一条的时候**：与别的值合成一条之后整条就不等于默认值了。
+///
+/// **四、「这几个文件是同一部作品」这件事。** 一个 `<game>` 只装得下一个 `<path>`
+/// （见 `paths_of`），而中立库里一个条目可以挂着好几个变体。摊成几段、每段带同一份
+/// 元数据，是这个格式里说得出口的唯一说法——代价是读回来它们成了几个各自独立的条目。
+///
+/// **五、中立库里这个格式没有元素的那几样。** `ORDER` 就是它装得下的全部字段。
+/// 一段式简介、标签、启动命令、工作目录落在中立文档的**并集**里（ADR-0003），在这张表上
+/// 却没有对应的元素——写出去一个字都没有。`desc` 装的是长描述，不拿它顶简介：
+/// 那是替用户把两个字段合成一个。
+///
+/// **六、合集段。** 这个格式里没有合集这个概念（见 `prefix_of`），一份 gamelist 就是
+/// 一个平台目录的事。合集段于是整段写不出去。**只有它的平台目录是用掉了的**：
+/// `<path>` 相对那个目录解析，写的时候把它剥掉了——那一段不是丢了，是起了作用。
+///
+/// **七、资源槽。** `MEDIA_ELEMENTS` 那张表就是这个格式认得的全部槽，而规范资源槽
+/// 一共二十个（Pegasus 那一侧的 `ASSET_TYPES`）。落在表外的十一个写出去一个元素都没有；
+/// 认得的那九个也各只有一份，一个槽里的第二条路径写不出去。这不是疏漏：ES-DE 自己
+/// **靠文件名找媒体**，gamelist 里一个媒体路径都不写，这几个元素是原版 ES / Batocera /
+/// Recalbox 留下来的。
+///
+/// **八、`x-` 扩展键与未知元素。** 一个元素就是一份值，没有续行一说，所以一个键只
+/// 写得下第一条。更要命的是**键名**：写标签名那一步不转义，而词法扫名字时撞上
+/// **空白、`/` 或 `>`** 就收尾（`lex_start`），于是键名里有这三样的写不出一个认得回来
+/// 的标签。两种坏法还不一样——空白与 `/` 是**键与值一起不见**，`>` 是**键被截断、值被
+/// 前一段键名污染**（`x-我的>备注` 读回来是键 `我的`、值 `备注>值`），后者更坏：用户
+/// 拿回来的是一个看着正常的错值。别的字符（`&`、`<`、引号、数字开头）反而都回得来
+/// ——判据是「是不是词法的分隔符」，不是「合不合 XML 规范」。Pegasus 的 `x-` 键是自由
+/// 文本（`x-我的 备注` 完全合法），跨格式搬过来正撞上这一条。
+pub const STRUCTURAL_LOSSES: &[StructuralLoss] = &[
+    StructuralLoss {
+        what: "值两端的空白，含全角空格 U+3000（`desc`、`x-` 扩展键与未知元素**之外**\
+               的每一个元素：标题、排序名、路径、开发商 / 发行商 / 类型、人数、评分、\
+               日期与媒体路径）",
+        becomes: "被掐掉；掐完不剩东西的，那个元素整条不写、读回来是空的。\
+                  `desc`、`x-` 扩展键与未知元素不掐——两端的空白与值里的换行原样回得来，\
+                  只有 `desc` 在「整条只剩空白就消失」这一格上仍旧跟着走",
+        why: "手改过的 gamelist 里元素文本两端带的常常是文件自己的缩进，折进中立模型的\
+              那一族（源码里的 `MD_STRING`）分不出它与值本身的空白，只好一律掐掉；\
+              `desc` 是 `MD_MULTILINE_STRING`、得装得下带排版的长文，而 `x-` 扩展键与\
+              未知元素是原样留着的，那一步根本没经手它们",
+    },
+    StructuralLoss {
+        what: "开发商 / 发行商 / 类型写了几条这件事",
+        becomes: "几条按 `, ` 合成一条，读回来是一条；而本来就带 `, ` 的单值\
+                  （`Sunsoft, Inc.`）原样回来——两个输入落到同一个结果上，再也分不开",
+        why: "这三个元素一个 `<game>` 里各只有一份，装不下几条；而读的那一侧不敢按 `, `\
+              拆——真的 gamelist 里名字带逗号的公司到处都是，拆开是改内容",
+    },
+    StructuralLoss {
+        what: "字面上就叫 `unknown` 的开发商 / 发行商 / 类型（**单独一条**的时候）",
+        becomes: "整条消失，读回来这一栏是空的；与别的值合成一条之后反倒留得住",
+        why: "`unknown` 是原版 ES 给这三个元素的**默认值**，而这个格式的规矩是\
+              「值等于默认值时不写出」——写出来与不写出来是同一个效果",
+    },
+    StructuralLoss {
+        what: "「这几个文件是同一部作品」这件事（**收敛**过的多文件条目）",
+        becomes: "摊成几个条目，一个文件一个；读回来是几个条目，不是一个挂着几个文件的。\
+                  元数据每一份都在，丢的是「它们是同一部作品」这一层",
+        why: "这个格式一个 `<game>` 只装得下一个 `<path>`，而 ES 那边磁盘上每个 ROM \
+              文件本来就各自是一个条目——少写的那几条不会消失，只会变成一个光秃秃的文件名",
+    },
+    StructuralLoss {
+        what: "中立库里的一段式简介、标签、启动命令、工作目录",
+        becomes: "一个字都不写，读回来这四样是空的",
+        why: "这个格式的字段表（原版 ES 的 18 个）里没有对应的元素；\
+              `desc` 装的是长描述，把简介挪进去等于替用户把两个字段合成一个",
+    },
+    StructuralLoss {
+        what: "**合集段**（它的简介、短名与 `x-` 扩展键）",
+        becomes: "整段不写，读回来一个合集段都没有。它的**平台目录**不是丢了、是用掉了\
+                  ——`<path>` 相对它解析，写的时候剥掉了那一段；而剥掉的那一段要\
+                  **再导入一趟**、靠盘上的目录重新锚定才回得来，光读文件回不来",
+        why: "ES gamelist 里没有合集这个概念：平台是由文件摆在哪个目录下说的，\
+              一份 gamelist 就是一个平台目录的事",
+    },
+    StructuralLoss {
+        what: "二十个规范**资源槽**里这个格式没有元素的那十一个，以及一个槽里的第二条路径",
+        becomes: "十一个槽（`boxSpine` `poster` `bezel` `panel` `cabinetLeft` \
+                  `cabinetRight` `tile` `banner` `steam` `music` `screenshot`）写出去\
+                  一个元素都没有；认得的那九个也只写得下**第一条**路径",
+        why: "ES-DE 自己靠文件名找媒体、gamelist 里一个媒体路径都不写，这几个元素是\
+              原版 ES / Batocera / Recalbox 留下的，各只有一份、也只有这几种",
+    },
+    StructuralLoss {
+        what: "`x-` 扩展键与未知元素：一个键的第二个值，以及**键名里的空白、`/` 或 `>`**",
+        becomes: "一个键只写得下第一条值；键名里带空白或 `/` 的，**键与值一起不见**；\
+                  带 `>` 的更坏——键被截断、值被前一段键名污染（`x-我的>备注` 读回来是\
+                  键 `我的`、值 `备注>值`），拿回来的是个看着正常的错值",
+        why: "这个格式里一个元素就是一份值，没有续行一说；而写标签名那一步不转义，\
+              词法扫名字时撞上空白、`/` 或 `>` 就收尾——Pegasus 的 `x-` 键是自由文本，\
+              跨格式搬过来正撞上这一条",
+    },
+];
 
 // ════════════════════════════════════════════════════════════════════════
 // 快照：拆到零件的节点
@@ -282,6 +431,10 @@ impl Adapter for Gamelist {
 
     fn file_name(&self) -> &'static str {
         FILE_NAME
+    }
+
+    fn structural_losses(&self) -> &'static [StructuralLoss] {
+        STRUCTURAL_LOSSES
     }
 
     fn read(&self, bytes: &[u8]) -> Result<Parsed, AdapterError> {
@@ -2064,6 +2217,516 @@ mod tests {
                 .expect("读得动")
                 .identical,
             "{text}"
+        );
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // 结构性损失：先量，再声明
+    //
+    // 量的一律是「**库 → 文件 → 库**」这一趟，而且**不给底本**。给了底本那一趟证的
+    // 是「原文写回去一个字节都不差」（档位那件事），这里要量的是另一件：**把库里的值
+    // 交给这个格式存一趟，它变成什么样**。
+    // ════════════════════════════════════════════════════════════════════
+
+    /// 一个游戏段从头写出去、再读回来，得到的**几段**。
+    ///
+    /// 交出来的是 `Vec`：这个格式一个 `<game>` 只装得下一个 `<path>`，多文件的条目
+    /// 写出去就是好几段——那本身是要量的东西之一。
+    fn 往返(game: Game) -> Vec<Game> {
+        let doc = Document {
+            entries: vec![Entry::new(Body::Game(game))],
+        };
+        let written = Gamelist.write(&doc, None).expect("写得出");
+        let back = Gamelist.read(&written).expect("读得回来");
+        back.doc
+            .entries
+            .iter()
+            .map(|entry| entry.game().expect("是游戏段").clone())
+            .collect()
+    }
+
+    /// 只有一个文件的条目往返一趟，取那唯一的一段。
+    fn 一段往返(game: Game) -> Game {
+        let mut back = 往返(game);
+        assert_eq!(back.len(), 1, "一个文件就该只写出一段");
+        back.remove(0)
+    }
+
+    /// 量结构性损失用的那个游戏段：一个标题、一个文件，别的都空着。
+    fn 一个条目() -> Game {
+        Game {
+            title: "甲".to_string(),
+            files: vec!["FC/甲.zip".to_string()],
+            ..Game::default()
+        }
+    }
+
+    #[test]
+    fn 值两端的空白被掐掉_而_desc_与扩展键不掐() {
+        // 单行那一族（源码里是 `MD_STRING`）读回来两端都被 `trim` 掉了。
+        let 回来 = 一段往返(Game {
+            title: "  甲  ".to_string(),
+            sort_title: Some("\u{3000}JIA\t".to_string()),
+            genres: vec!["  动作  ".to_string()],
+            ..一个条目()
+        });
+        assert_eq!(回来.title, "甲", "标题两端的空白没了");
+        assert_eq!(
+            回来.sort_title.as_deref(),
+            Some("JIA"),
+            "全角空格与制表符一样掐"
+        );
+        assert_eq!(回来.genres, vec!["动作".to_string()]);
+
+        // **不掐的有三样。** `desc` 在源码里是 `MD_MULTILINE_STRING`（别的是 `MD_STRING`），
+        // 得装得下带排版的长文；`x-` 扩展键与未知元素则是**原样留着、一个字都不解释**，
+        // 折进中立模型的那一步根本没经手它们。声明里这三样不能省——省了就成了
+        // 「简介的排版也会没」，而那是假的。
+        let 回来 = 一段往返(Game {
+            description: Some("\u{3000}\u{3000}第一段  \n  第二段\n".to_string()),
+            extra: BTreeMap::from([("通关".to_string(), vec!["  是  ".to_string()])]),
+            unknown: BTreeMap::from([("kidgame".to_string(), vec!["\u{3000}false ".to_string()])]),
+            ..一个条目()
+        });
+        assert_eq!(
+            回来.description.as_deref(),
+            Some("\u{3000}\u{3000}第一段  \n  第二段\n"),
+            "简介一个字符都不掐"
+        );
+        assert_eq!(
+            回来.extra.get("通关"),
+            Some(&vec!["  是  ".to_string()]),
+            "`x-` 扩展键两端的空白也原样回得来"
+        );
+        assert_eq!(
+            回来.unknown.get("kidgame"),
+            Some(&vec!["\u{3000}false ".to_string()]),
+            "未知元素一样"
+        );
+
+        // 掐完不剩东西的，**那个元素整条不写**，读回来是空的——`desc` 在这一格上不例外
+        // （它两端的空白留得住，但整条只剩空白的一样消失），而 `x-` 扩展键与未知元素
+        // 连这一格都不例外地留着。
+        let 回来 = 一段往返(Game {
+            title: "   ".to_string(),
+            sort_title: Some("  ".to_string()),
+            description: Some("  \n  ".to_string()),
+            genres: vec!["  ".to_string()],
+            developers: vec!["\u{3000}".to_string()],
+            extra: BTreeMap::from([("通关".to_string(), vec!["  ".to_string()])]),
+            ..一个条目()
+        });
+        assert_eq!(回来.title, "", "标题整条没了");
+        assert_eq!(回来.sort_title, None);
+        assert_eq!(回来.description, None, "只有空白的简介一样整条没了");
+        assert!(回来.genres.is_empty());
+        assert!(回来.developers.is_empty());
+        assert_eq!(
+            回来.extra.get("通关"),
+            Some(&vec!["  ".to_string()]),
+            "只有空白的扩展键照样在——它根本没被掐"
+        );
+
+        let 空白 = STRUCTURAL_LOSSES
+            .iter()
+            .find(|loss| loss.what.contains("两端的空白"))
+            .expect("值两端的空白那一条在");
+        assert!(空白.what.contains("U+3000"), "全角空格得点名：{空白:?}");
+        assert!(空白.becomes.contains("掐掉"), "{空白:?}");
+        assert!(
+            空白.becomes.contains("整条"),
+            "掐空了元素就没了，这句不能省：{空白:?}"
+        );
+        assert!(
+            空白.becomes.contains("desc") && 空白.becomes.contains("扩展键"),
+            "不掐的那三样都得说出口——省了就成了「简介与扩展键的排版也会没」：{空白:?}"
+        );
+    }
+
+    #[test]
+    fn 多值字段合成一条_读回来分不出原先是几条() {
+        // `<developer>` / `<publisher>` / `<genre>` 一个 `<game>` 里各只有一份，
+        // 而中立库里它们是**集合**。写的那一侧按 `, ` 合成一条，读的那一侧**不拆**。
+        let 回来 = 一段往返(Game {
+            developers: vec!["科乐美".to_string(), "KCE东京".to_string()],
+            publishers: vec!["甲".to_string(), "乙".to_string()],
+            genres: vec!["动作".to_string(), "冒险".to_string()],
+            ..一个条目()
+        });
+        assert_eq!(
+            回来.developers,
+            vec!["科乐美, KCE东京".to_string()],
+            "两家压成一条"
+        );
+        assert_eq!(回来.publishers, vec!["甲, 乙".to_string()]);
+        assert_eq!(回来.genres, vec!["动作, 冒险".to_string()]);
+
+        // **两个不同的输入落到同一个结果上。** 本来就带 `, ` 的单值原样回来，
+        // 于是「两家」与「一家名字里有逗号」读回来再也分不开——`Sunsoft, Inc.` 这种
+        // 在真的 gamelist 里到处都是，按 `, ` 拆开是改内容，比合成一条坏得多。
+        let 回来 = 一段往返(Game {
+            developers: vec!["Sunsoft, Inc.".to_string()],
+            ..一个条目()
+        });
+        assert_eq!(
+            回来.developers,
+            vec!["Sunsoft, Inc.".to_string()],
+            "一整条，不拆"
+        );
+
+        let 多值 = STRUCTURAL_LOSSES
+            .iter()
+            // **按 `写了几条这件事` 找**：光是「几条」这个词太泛，别的 `what` 迟早撞上。
+            .find(|loss| loss.what.contains("写了几条这件事"))
+            .expect("多值字段那一条在");
+        assert!(多值.becomes.contains("一条"), "压成一条得说出口：{多值:?}");
+        assert!(
+            多值.becomes.contains("分不开"),
+            "两个输入撞成一个，这句不能省：{多值:?}"
+        );
+    }
+
+    #[test]
+    fn 字面上就叫_unknown_的开发商整条消失() {
+        // 原版 ES 的 `developer` / `publisher` / `genre` **默认值就是 `unknown`**
+        // （调研 §B.1 那张 18 个字段的表），而这个格式的规矩是「值等于默认值时不写出」。
+        // 于是一家真的叫 `unknown` 的公司写进去，与「这一栏没填」在文件里是同一件事。
+        let 回来 = 一段往返(Game {
+            developers: vec!["unknown".to_string()],
+            publishers: vec!["unknown".to_string()],
+            genres: vec!["unknown".to_string()],
+            ..一个条目()
+        });
+        assert!(
+            回来.developers.is_empty(),
+            "整条没了：{:?}",
+            回来.developers
+        );
+        assert!(回来.publishers.is_empty());
+        assert!(回来.genres.is_empty());
+
+        // **只有它自己一条的时候才没。** 与别的值合成一条之后整条就不等于默认值了，
+        // `unknown` 那一半反而留得住——声明里得说准到「单独一条」。
+        let 回来 = 一段往返(Game {
+            genres: vec!["unknown".to_string(), "动作".to_string()],
+            ..一个条目()
+        });
+        assert_eq!(
+            回来.genres,
+            vec!["unknown, 动作".to_string()],
+            "合成一条就留住了"
+        );
+
+        let 那条 = STRUCTURAL_LOSSES
+            .iter()
+            .find(|loss| loss.what.contains("unknown"))
+            .expect("`unknown` 那一条在");
+        assert!(那条.becomes.contains("整条"), "{那条:?}");
+        assert!(
+            那条.becomes.contains("单独") || 那条.what.contains("单独"),
+            "说准到「单独一条」，不然合成一条那一格就成了假话：{那条:?}"
+        );
+    }
+
+    #[test]
+    fn 一个条目挂着几个文件_写出去就是几个条目() {
+        // 这个格式一个 `<game>` 只装得下一个 `<path>`。**收敛**（一个条目、多个文件）
+        // 于是在这里表达不出来：摊成几段、每段带同一份元数据，读回来就是**几个条目**。
+        let 回来 = 往返(Game {
+            files: vec!["FC/甲.zip".to_string(), "FC/甲2.zip".to_string()],
+            genres: vec!["动作".to_string()],
+            ..一个条目()
+        });
+        assert_eq!(回来.len(), 2, "摊成了两段");
+        assert_eq!(回来[0].files, vec!["FC/甲.zip".to_string()]);
+        assert_eq!(回来[1].files, vec!["FC/甲2.zip".to_string()]);
+        // 元数据每一份都在——摊开不是把别的文件丢掉。
+        for game in &回来 {
+            assert_eq!(game.title, "甲");
+            assert_eq!(game.genres, vec!["动作".to_string()]);
+        }
+
+        let 那条 = STRUCTURAL_LOSSES
+            .iter()
+            .find(|loss| loss.what.contains("同一部作品"))
+            .expect("多文件条目那一条在");
+        assert!(那条.becomes.contains("几个条目"), "{那条:?}");
+        assert!(
+            那条.becomes.contains("元数据"),
+            "元数据每一份都还在，这句不能省——省了读着像丢了东西：{那条:?}"
+        );
+    }
+
+    #[test]
+    fn 中立库有而这个格式没有元素的那几样整条不见() {
+        // [`ORDER`] 就是这个格式装得下的全部字段。中立文档按**并集**设计
+        // （ADR-0003），落在并集里、却在这张表上没有对应元素的那几样，写出去一个字都没有。
+        let 回来 = 一段往返(Game {
+            summary: Some("一句话简介".to_string()),
+            tags: vec!["中文".to_string(), "已通关".to_string()],
+            launch: Some("retroarch -L fceumm {file.path}".to_string()),
+            workdir: Some("/opt/retroarch".to_string()),
+            ..一个条目()
+        });
+        assert_eq!(回来.summary, None, "一段式简介没有对应元素");
+        assert!(回来.tags.is_empty(), "标签没有对应元素");
+        assert_eq!(回来.launch, None, "启动命令没有对应元素");
+        assert_eq!(回来.workdir, None, "工作目录没有对应元素");
+        // **`desc` 装的是长描述，不是简介**：这一条不因为「反正 `desc` 空着」就把简介
+        // 挪进去——那是替用户把两个字段合成一个。
+        assert_eq!(回来.description, None);
+
+        let 那条 = STRUCTURAL_LOSSES
+            .iter()
+            .find(|loss| loss.what.contains("一段式简介"))
+            .expect("没有对应元素那一条在");
+        assert!(那条.becomes.contains("一个字都不写"), "{那条:?}");
+        for 词 in ["标签", "启动命令", "工作目录"] {
+            assert!(那条.what.contains(词), "{词}也得点名：{那条:?}");
+        }
+    }
+
+    #[test]
+    fn 合集段整段不见() {
+        // ES gamelist 里**没有合集这个概念**：平台是由文件摆在哪个目录下说的
+        // （见 [`prefix_of`]）。于是一份带合集段的中立文档写出去，那一段连同它的
+        // 简介与 `x-` 扩展键一个字都没有。
+        let doc = Document {
+            entries: vec![
+                Entry::new(Body::Collection(Collection {
+                    name: "FC".to_string(),
+                    shortname: Some("nes".to_string()),
+                    directory: Some("FC".to_string()),
+                    summary: Some("红白机".to_string()),
+                    extra: BTreeMap::from([("我的备注".to_string(), vec!["值".to_string()])]),
+                    ..Collection::default()
+                })),
+                Entry::new(Body::Game(一个条目())),
+            ],
+        };
+        let written = Gamelist.write(&doc, None).expect("写得出");
+        let text = String::from_utf8(written.clone()).expect("UTF-8");
+        assert!(!text.contains("红白机"), "合集的简介一个字都没写：{text}");
+        assert!(!text.contains("我的备注"), "合集的扩展键也没写：{text}");
+        let back = Gamelist.read(&written).expect("读得回来");
+        assert!(
+            back.doc
+                .entries
+                .iter()
+                .all(|entry| entry.collection().is_none()),
+            "读回来一个合集段都没有"
+        );
+        // **合集段的 `directory` 不是白丢的**：它在写的那一步用掉了——`<path>` 是相对
+        // 那个平台目录解析的，那一段被剥掉了。
+        assert!(
+            text.contains("<path>./甲.zip</path>"),
+            "平台目录剥掉了：{text}"
+        );
+        // **而这一趟读回来的键真的短了一截。** 「不是丢了、是起了作用」只在**真的导入**
+        // 里成立——那时靠 `Adapter::rom_bases` 从盘上的平台目录重新锚定。这里既没有根
+        // 也没有底本，剥掉的那一段就回不来了。声明里这个前提不能省。
+        let 回来 = back.doc.entries[0].game().expect("是游戏段");
+        assert_eq!(
+            回来.files,
+            vec!["甲.zip".to_string()],
+            "库里的键 `FC/甲.zip` 读回来短了一截"
+        );
+
+        let 那条 = STRUCTURAL_LOSSES
+            .iter()
+            .find(|loss| loss.what.contains("合集段"))
+            .expect("合集段那一条在");
+        assert!(那条.becomes.contains("整段"), "{那条:?}");
+        assert!(
+            那条.becomes.contains("平台目录") && 那条.becomes.contains("重新锚定"),
+            "`directory` 是用掉了不是丢了，而「靠什么才回得来」这个前提一样不能省：{那条:?}"
+        );
+    }
+
+    #[test]
+    fn 资源槽这个格式只认九个_一个槽也只写得下一条() {
+        // [`MEDIA_ELEMENTS`] 那张表就是这个格式认得的全部槽。规范资源槽一共二十个
+        // （Pegasus 那一侧的 `ASSET_TYPES`），落在表外的十一个写出去一个元素都没有。
+        let 全部槽 = [
+            "boxFront",
+            "boxBack",
+            "boxSpine",
+            "boxFull",
+            "cartridge",
+            "logo",
+            "poster",
+            "marquee",
+            "bezel",
+            "panel",
+            "cabinetLeft",
+            "cabinetRight",
+            "tile",
+            "banner",
+            "steam",
+            "background",
+            "music",
+            "screenshot",
+            "titlescreen",
+            "video",
+        ];
+        let 回来 = 一段往返(Game {
+            assets: 全部槽
+                .iter()
+                .map(|slot| ((*slot).to_string(), vec![format!("{slot}.png")]))
+                .collect(),
+            ..一个条目()
+        });
+        let 丢了: Vec<&str> = 全部槽
+            .iter()
+            .filter(|slot| !回来.assets.contains_key(**slot))
+            .copied()
+            .collect();
+        assert_eq!(
+            丢了,
+            [
+                "boxSpine",
+                "poster",
+                "bezel",
+                "panel",
+                "cabinetLeft",
+                "cabinetRight",
+                "tile",
+                "banner",
+                "steam",
+                "music",
+                "screenshot"
+            ],
+            "这十一个槽这个格式没有对应元素"
+        );
+
+        // 一个槽里几条路径，**只写第一条**——这个格式一个 `<game>` 里每个媒体元素也只有一份。
+        let 回来 = 一段往返(Game {
+            assets: BTreeMap::from([(
+                "boxFront".to_string(),
+                vec!["头一张.png".to_string(), "第二张.png".to_string()],
+            )]),
+            ..一个条目()
+        });
+        assert_eq!(
+            回来.assets.get("boxFront"),
+            Some(&vec!["头一张.png".to_string()]),
+            "第二张没了"
+        );
+
+        let 那条 = STRUCTURAL_LOSSES
+            .iter()
+            .find(|loss| loss.what.contains("资源槽"))
+            .expect("资源槽那一条在");
+        assert!(
+            那条.becomes.contains("十一"),
+            "丢了几个槽得数得出来：{那条:?}"
+        );
+        assert!(
+            那条.becomes.contains("第一条"),
+            "一个槽只写得下一条，这句不能省：{那条:?}"
+        );
+    }
+
+    #[test]
+    fn 扩展键与未知元素一个键只写第一条_键名带空白的整条不见() {
+        // 一个键几个值：**只写第一条**。这个格式里一个元素就是一份值，没有续行一说。
+        let 回来 = 一段往返(Game {
+            extra: BTreeMap::from([(
+                "通关".to_string(),
+                vec!["是".to_string(), "两周目".to_string()],
+            )]),
+            unknown: BTreeMap::from([(
+                "kidgame".to_string(),
+                vec!["false".to_string(), "true".to_string()],
+            )]),
+            ..一个条目()
+        });
+        assert_eq!(回来.extra.get("通关"), Some(&vec!["是".to_string()]));
+        assert_eq!(
+            回来.unknown.get("kidgame"),
+            Some(&vec!["false".to_string()])
+        );
+
+        // **键名里有空白或 `/` 的，键与值一起不见。** 写标签名那一步不转义，而词法扫
+        // 名字时撞上这两样就收尾，`<x-我的 备注>` 于是不是一个认得回来的标签，读那一侧
+        // 当整行文本跳过。Pegasus 的 `x-` 键是自由文本（`x-我的 备注` 完全合法），
+        // 跨格式搬过来正撞上。
+        for 键 in ["我的 备注", "我的/备注"] {
+            let 回来 = 一段往返(Game {
+                extra: BTreeMap::from([((*键).to_string(), vec!["值".to_string()])]),
+                ..一个条目()
+            });
+            assert!(回来.extra.is_empty(), "{键}：键与值一起没了");
+            assert!(回来.unknown.is_empty(), "{键}：也没落到未知元素里");
+        }
+        // **`>` 那一格的坏法不一样，也更坏**：键被截断、值被前一段键名污染，拿回来的是
+        // 一个**看着正常的错值**，不是一个空缺。声明里这一格不能与上面那两样混着说。
+        let 回来 = 一段往返(Game {
+            extra: BTreeMap::from([("我的>备注".to_string(), vec!["值".to_string()])]),
+            ..一个条目()
+        });
+        assert_eq!(
+            回来.extra.get("我的"),
+            Some(&vec!["备注>值".to_string()]),
+            "键截成了 `我的`，值成了 `备注>值`"
+        );
+        // 别的字符回得来——判据是**是不是词法的分隔符**，不是「合不合 XML 规范」：
+        // `<x-我的&备注>` 与 `<x-3周目>` 一样不是合法 XML 标签，却原样回得来。
+        for 键 in ["我的&备注", "我的<备注", "我的\"备注", "3周目"] {
+            let 回来 = 一段往返(Game {
+                extra: BTreeMap::from([((*键).to_string(), vec!["值".to_string()])]),
+                ..一个条目()
+            });
+            assert_eq!(
+                回来.extra.get(键),
+                Some(&vec!["值".to_string()]),
+                "{键} 回得来"
+            );
+        }
+
+        let 那条 = STRUCTURAL_LOSSES
+            .iter()
+            // **按 `第二个值` 找。** 「扩展键」「未知元素」这两个词在第 1 条与第 6 条的
+            // `what` 里也有，按它们找就成了「谁排在前面找到谁」——清单一重排这条测试
+            // 就指错条目（这一格已经踩过两回）。
+            .find(|loss| loss.what.contains("第二个值"))
+            .expect("扩展键与未知元素那一条在");
+        assert!(那条.becomes.contains("第一条"), "{那条:?}");
+        assert!(
+            那条.what.contains("空白"),
+            "键名里的空白是丢东西的那一半，不能省：{那条:?}"
+        );
+        assert!(
+            那条.becomes.contains("污染"),
+            "`>` 那一格拿回来的是个看着正常的错值，这句不能省：{那条:?}"
+        );
+    }
+
+    #[test]
+    fn 结构性损失不看库里当下有什么() {
+        // 一份**一样都没撞上**的文档，清单照样说得出这八条——它说的是这个格式结构上
+        // 做不到什么，不是「这一趟丢了几条」。写成后者就成了报告的活。
+        let 回来 = 一段往返(Game {
+            title: "一个字都不会变形的标题".to_string(),
+            description: Some("横版射击".to_string()),
+            developers: vec!["科乐美".to_string()],
+            ..一个条目()
+        });
+        assert_eq!(回来.title, "一个字都不会变形的标题", "这一趟一个字都没丢");
+        assert_eq!(回来.description.as_deref(), Some("横版射击"));
+        assert_eq!(回来.developers, vec!["科乐美".to_string()]);
+        assert_eq!(回来.files, vec!["FC/甲.zip".to_string()]);
+
+        assert!(
+            !Gamelist.structural_losses().is_empty(),
+            "这一趟没撞上，声明照样在；空清单读作**还没查过**，量过了就不许再是空的"
+        );
+        // **钉住条数。** 上面那句只挡得住「清空」，挡不住「悄悄少一条」，而模块文档、
+        // 票据与迁回去的挂单都写着八条——删掉一条那几处当场变成假话，却没有任何东西会红。
+        assert_eq!(
+            Gamelist.structural_losses().len(),
+            8,
+            "量出来的是八条；改了条数，文档与票据里那个数也得跟着改"
         );
     }
 }

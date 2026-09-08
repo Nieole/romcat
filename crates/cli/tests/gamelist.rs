@@ -52,6 +52,36 @@ fn 能力档位对用户可见() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("ES-Gamelist"), "{text}");
     assert!(text.contains("gamelist.xml"), "{text}");
+    // 档位那四个词说不出「把值交给这个格式存一趟会变成什么样」。ADR-0003 要的
+    // 「**导出前**就知道会丢掉什么」得在这里说出口，而不是等用户导完自己发现
+    // 两家开发商压成了一条。
+    //
+    // ⚠️ **断言一律在这一节之内。** 这条命令是每个适配器各印一节，而 Pegasus 那一节
+    // 自己就含 `U+3000`、自己就含「分不开」——在整份输出上 `contains`，把 gamelist 的
+    // 声明整条删掉这条测试照样绿。
+    let 那节 = 那一节(&text);
+    assert!(那节.contains("U+3000"), "值两端的空白：{那节}");
+    assert!(
+        那节.contains("分不开"),
+        "两家开发商压成一条之后分不开：{那节}"
+    );
+    assert!(那节.contains("同一部作品"), "多文件条目摊成几条：{那节}");
+    assert!(那节.contains("合集段"), "合集段整段不见：{那节}");
+    assert!(那节.contains("screenshot"), "认不得的那几个资源槽：{那节}");
+    assert!(那节.contains("第二个值"), "扩展键与未知元素：{那节}");
+    // **绝不印一句「无结构性损失」的假保证**：空清单读作「还没查过」。
+    assert!(!text.contains("无结构性损失"), "{text}");
+}
+
+/// 把 `romcat adapters` 印的 **ES-Gamelist 那一节**抠出来。
+///
+/// 一节由「`<名字>` 的结构性损失」起头，到下一个空行为止——节里没有空行，节与节之间有。
+fn 那一节(text: &str) -> &str {
+    let start = text
+        .find("ES-Gamelist 的结构性损失")
+        .unwrap_or_else(|| panic!("这个格式量过了，清单得列出来：{text}"));
+    let rest = &text[start..];
+    rest.find("\n\n").map_or(rest, |end| &rest[..end])
 }
 
 #[test]
