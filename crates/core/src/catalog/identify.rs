@@ -518,10 +518,13 @@ pub enum Provenance {
     Identified,
     /// 人工**裁决**定下来的。
     ///
-    /// **票 08 起它也随重跑识别整批清掉再重建**——裁决的家搬去了
+    /// **票 08 起它随重跑识别一起重放**——裁决的家搬去了
     /// [`verdict::Store`](crate::verdict::Store)，中立库里这几行只是它的投影
     /// （见 [`Catalog::clear_identifications`](super::Catalog::clear_identifications)）。
-    /// 这一列留着是为了**报告分得清两者各建出来多少**，不再是「别删我」的记号。
+    /// 这一列有两个用处：报告分得清两者各建出来多少；同名的作品有好几行时，
+    /// 复用挑的是这一档那一行（[`Catalog::work_named`](super::Catalog::work_named)），
+    /// 而收尾那一遍只收另一档
+    /// （[`drop_unheld_identified_works`](super::Catalog::drop_unheld_identified_works)）。
     Verdict,
 }
 
@@ -909,15 +912,24 @@ impl Catalog {
     /// 按名字找一个**作品**；没有就是 `None`。
     ///
     /// **裁决**拿它把说的是同一部作品的几条裁决归到同一行上——建出两行作品会让导出时的
-    /// **收敛**把它们拆成两个前端条目。
+    /// **收敛**把它们拆成两个前端条目。**重跑识别也拿它复用现成的那一行**
+    /// （[`Catalog::clear_identifications`](Self::clear_identifications)），于是
+    /// `work.id` 不再每跑一趟就换一批。
+    ///
+    /// ## 同名的有好几行时挑哪一个：**裁决造的优先**
+    ///
+    /// `work.name` 上**没有 `UNIQUE`**（那是有意的，见表注释），所以同名的好几行是允许
+    /// 存在的。挑的时候人定下来的先于机器撞出来的——裁决过的结果不该被下一趟识别认领到
+    /// 别的行上去。同为一档时按 id，**次序定死**：同一份中立库问两次得到的是同一行。
     ///
     /// # Errors
     /// 读库失败时返回错误。
     pub fn work_named(&self, name: &str) -> Result<Option<i64>, CatalogError> {
         self.conn
             .query_row(
-                "SELECT id FROM work WHERE name = ?1 ORDER BY id LIMIT 1",
-                params![name],
+                "SELECT id FROM work WHERE name = ?1
+                 ORDER BY (origin = ?2) DESC, id LIMIT 1",
+                params![name, Provenance::Verdict.label()],
                 |row| row.get(0),
             )
             .optional()
@@ -1608,8 +1620,18 @@ impl Catalog {
     ///
     /// 调用方在开跑前先调一次
     /// [`clear_identifications`](Self::clear_identifications)——那一步把识别自己上一轮
-    /// 造的东西整批清掉。分批写而不是攒到最后一次性写，是为了让被中断的识别留下
-    /// 已经算完的那部分（与扫描的批次写同源）。
+    /// 造的**候选、结论与发行版**整批清掉（**作品那张表不清**，见那一头的文档）。
+    /// 分批写而不是攒到最后一次性写，是为了让被中断的识别留下已经算完的那部分
+    /// （与扫描的批次写同源）。
+    ///
+    /// **变体身上那两条链接由这一步逐条覆盖**，认不出来时写的是空。于是「这一趟认不
+    /// 出来了」与「这一趟还没轮到它」是两种不同的库状态，被叫停时分得开。
+    ///
+    /// 顺带把**裁决**那一侧对齐了：一条「确认它没有发行版、而且认不出是哪部作品」的裁决
+    /// （`verdict::Decision::NoRelease { work: None }`）落下来时，这个变体身上那条旧的
+    /// 作品链接从此也被写成空——与下一趟识别照沉淀库重放一遍得到的结果一模一样，
+    /// 而那正是 [`Projector`](crate::identify::Projector) 两处共用要保证的东西。
+    /// 「都不对而且认不出」那一档不走这儿（它压根不产生结论），候选照旧原样留着。
     ///
     /// # Errors
     /// 写库失败时返回错误。
@@ -1689,14 +1711,18 @@ impl Catalog {
                         ])
                         .map_err(to_err)?;
                 }
-                if record.work_id.is_some() || record.release_id.is_some() {
-                    link.execute(params![
-                        record.variant_key,
-                        record.work_id,
-                        record.release_id
-                    ])
-                    .map_err(to_err)?;
-                }
+                // **每个处理过的变体都写一次，写的是空也写**（票 parking-3/10）。
+                // 从前只写认出来的那些，靠 `clear_identifications` 起手把整列摘空来兜
+                // 「这一趟认不出来了」——而那一摘正是被叫停时咬人的地方：没轮到的变体
+                // 从此挂着空，下一次重新成型按「还有没有人指着」把它们的作品连 id 一起
+                // 收掉。改成逐条覆盖之后，没轮到的那些原样留着上一趟的链接，
+                // 而这一趟认不出来的那些在这儿被写成空——两件事分开了。
+                link.execute(params![
+                    record.variant_key,
+                    record.work_id,
+                    record.release_id
+                ])
+                .map_err(to_err)?;
             }
         }
         tx.commit().map_err(to_err)
@@ -1793,8 +1819,12 @@ impl Catalog {
     /// **不删快照**：撤销本身要撤得回来，撤回去之后还能再撤一次，靠的就是它还在。
     ///
     /// 顺手把这一批建出来、如今没人再指着的**作品**与**发行版**收掉。那不是额外的清理，
-    /// 是对齐权威那条路：重跑一趟识别会把这两张表整个清掉再重建，那时这几行本来就不在。
-    /// 收的范围**只限这几个变体刚才指着的那几行**——别人的孤行不归这一次撤销管。
+    /// 是对齐权威那条路：重跑一趟识别会把发行版整批重建，而这几行作品
+    /// （`origin = 裁决`）到下一次**重新成型**那一遍（`drop_unheld_works`，判据是
+    /// 「还有没有人指着」、不看来路）本来就不在——识别那一趟收不掉它们
+    /// （[`Catalog::drop_unheld_identified_works`](Self::drop_unheld_identified_works)
+    /// 只收 `origin = 识别`）。收的范围**只限这几个变体刚才指着的那几行**——
+    /// 别人的孤行不归这一次撤销管。
     ///
     /// # Errors
     /// 写库失败时返回错误。
@@ -1911,16 +1941,37 @@ impl Catalog {
         Ok(u64::try_from(restored).unwrap_or(0))
     }
 
-    /// 把上一轮的识别结论整批清掉：候选、结论，以及**作品**与**发行版**里由它们造出来的行。
+    /// 把上一轮的识别结论整批清掉：候选、结论、**发行版**，以及变体身上那两条链接。
     ///
     /// 顺序是有讲究的：先摘链接再删行，否则变体上会留下指向已删除记录的悬空 id。
     ///
-    /// ## 为什么 `origin = 裁决` 的行也一起清
+    /// ## **作品那张表不清**（票 parking-3/10）
     ///
-    /// 票 08 之前那些行没有产者，留着它们是怕清掉之后没处补。**票 08 起裁决有了自己的
-    /// 家**——[`verdict::Store`](crate::verdict::Store)，一份不跟中立库走、也不随它删的
-    /// 文件。于是中立库里这几行成了那份库的**投影**：清掉再照沉淀库重建一遍，结果一模一样，
-    /// 而不清的话每跑一次识别就多攒一份重复的作品与发行版。
+    /// 清了再照名字建一遍，结果**在名字上**一模一样，**在 id 上不是**：SQLite 按插入
+    /// 次序重新发号，库里多一部或少一部作品，它后面的作品全体换号。而 `work.id` 是
+    /// 浏览屏那一行的身份（[`WorkAnchor::Work`](super::browse::WorkAnchor::Work)），
+    /// 挂在它上面的收藏、媒体与打开的那一行会集体失联（挂单 `Q193`）；同名的作品还可能
+    /// 因此攒出两行，而作品名正是刮削的**锚点**（挂账 `D162`）。
+    ///
+    /// 于是这一趟改成**按名字复用现成的那一行**（[`Catalog::work_named`](Self::work_named)），
+    /// 找不到才新建。这一趟没人再认领的那些，等这一趟跑完（而不是起手）由
+    /// [`drop_unheld_identified_works`](Self::drop_unheld_identified_works) 收——
+    /// **收的只有「识别自己造的」那些**：`origin = 裁决` 的行是**沉淀库**的投影，
+    /// 由沉淀库说了算，不归识别处置。
+    ///
+    /// **变体身上那条 `work_id` 也不摘空**，理由是同一条的另一半：摘了，被叫停的那一趟里
+    /// 还没轮到的变体就从此挂着空，而下一次**重新成型**收作品走的是
+    /// `drop_unheld_works`——判据是「还有没有人指着」、**不看来路**，于是它会把这一步
+    /// 刻意留下的那些连同 `origin = 裁决` 的那些一起扫掉。改成由
+    /// [`write_identifications`](Self::write_identifications) 逐条覆盖之后，
+    /// 「这一趟认不出来了」（写成空）与「这一趟还没轮到它」（原样留着）分得开。
+    ///
+    /// ## 为什么**发行版**照旧整批清
+    ///
+    /// 它没有作品那两条理由：没有任何东西拿 `release.id` 当锚（候选与变体身上那两条
+    /// 链接都在这一趟里重算），而它认「是不是同一条」的键是「哪个源的哪份 DAT 的
+    /// 哪一条」，只活在一趟之内（`identify::Projector`）。留着它，每跑一次识别就多攒
+    /// 一份重复的发行版。
     ///
     /// `origin` 这一列照旧有用——它说得出一行是**识别**撞出来的还是**裁决**定下来的，
     /// 报告里的「识别建出来的作品数」靠它把两者分开数。
@@ -1955,14 +2006,55 @@ impl Catalog {
             tx.execute(sql, []).map_err(to_err)?;
         }
         for sql in [
+            // 发行版整批重建，所以指着它的那一列先摘空——外键是开着的。
+            // **`work_id` 那一列不摘**：摘了，被叫停的那一趟里没轮到的变体就从此挂着空，
+            // 下一次重新成型按「还有没有人指着」把它们的作品连 id 一起收掉
+            // （`drop_unheld_works`，那一步不看来路）。认不出来的那些由
+            // [`write_identifications`](Self::write_identifications) 逐条写成空。
             "UPDATE variant SET release_id = NULL",
-            "UPDATE variant SET work_id = NULL",
             "DELETE FROM release",
-            "DELETE FROM work",
         ] {
             tx.execute(sql, []).map_err(to_err)?;
         }
         tx.commit().map_err(to_err)
+    }
+
+    /// 收掉**识别自己造的**、这一趟跑完之后没人再指着的那些**作品**行；返回收了几行。
+    ///
+    /// 它是 [`clear_identifications`](Self::clear_identifications) 不再整批删作品之后
+    /// 补上的另一半：那一步起手不删，这一步收尾才删——中间那一段里，
+    /// [`Catalog::work_named`](Self::work_named) 才有现成的行可复用。
+    ///
+    /// ## 判据是「没人指着」加「识别自己造的」
+    ///
+    /// 前一半与 `drop_unheld_works` 同一条：留着没人指的那些，报告里
+    /// 「识别建出来的作品数」会一直虚高。后一半是这一步独有的——`origin = 裁决` 的行
+    /// 是**沉淀库**的投影，一趟识别没认领到它，说的是「这一趟的判据没落在它身上」，
+    /// 不是「人不要它了」。删它等于让识别替沉淀库做主——而来路这一列**只升不降**
+    /// （`identify::Projector::work`），所以一条裁决从沉淀库里删掉之后，它投影出来的
+    /// 那一行会一直挂着「裁决」，识别这边一趟都收不掉它。
+    ///
+    /// 收得掉它的是**重新成型**那一遍（`drop_variant_orphans` → `drop_unheld_works`）：
+    /// 那一步的判据是「还有没有人指着」，**不看来路**。两步的判据不同，不是同一张网。
+    ///
+    /// ## 为什么只在**跑完整一趟**之后调
+    ///
+    /// 被叫停的那一趟只认领了一部分变体，剩下的还挂着 `NULL`。那时候收，等于把没轮到
+    /// 的那些作品连同它们的 id 一起扔掉——而下一趟又要重新发号，正是这一票要治的病。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn drop_unheld_identified_works(&mut self) -> Result<u64, CatalogError> {
+        self.conn
+            .execute(
+                "DELETE FROM work
+                 WHERE origin = ?1
+                   AND NOT EXISTS(SELECT 1 FROM variant v WHERE v.work_id = work.id)
+                   AND NOT EXISTS(SELECT 1 FROM release r WHERE r.work_id = work.id)",
+                params![Provenance::Identified.label()],
+            )
+            .map(|count| u64::try_from(count).unwrap_or(0))
+            .map_err(|source| self.err(source))
     }
 
     /// 一个变体的全部**候选**，按 id 排序。

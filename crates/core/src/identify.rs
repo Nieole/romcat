@@ -362,9 +362,9 @@ pub fn run(
     cancel: &CancelToken,
     progress: &mut dyn FnMut(&Progress),
 ) -> Result<Outcome, IdentifyError> {
-    // 先把上一轮的结论清干净：候选、结论，以及作品与发行版里由它们造出来的行。
-    // **裁决那些行也一起清**——它们是沉淀库的投影，下面照沉淀库重建一遍就回来了
-    // （`Catalog::clear_identifications` 的文档说的就是这件事）。
+    // 先把上一轮的结论清干净：候选、结论、发行版，以及变体身上那两条链接。
+    // **作品那张表不清**——下面按名字复用现成的那一行，`work.id` 跨重跑不换
+    // （票 parking-3/10；`Catalog::clear_identifications` 的文档说的就是这件事）。
     catalog.clear_identifications()?;
 
     let variants = catalog.variants()?;
@@ -434,6 +434,13 @@ pub fn run(
     } else {
         crate::collection::project(catalog, ammo.verdicts.memberships())?
     };
+
+    // 起手不清作品，收尾才收：这一趟没人再认领的、**识别自己造的**那些行到这儿才
+    // 说得清（`Catalog::drop_unheld_identified_works`）。**被叫停时不收**——那时候
+    // 还有一多半变体没轮到，收了等于把它们的作品连同 id 一起扔掉，而那正是这一票要治的病。
+    if !interrupted {
+        catalog.drop_unheld_identified_works()?;
+    }
 
     let mut report = IdentifyReport::build(catalog, ammo.repo)?;
     // 花费要留得下痕迹：`--json` 存的是这份报告，只在标准错误上说一句的话，跑完就没了。
@@ -3137,28 +3144,51 @@ impl Projector {
     /// 共用是必须的：一部作品两行的话，导出时的**收敛**会把它拆成两个前端条目，而作品名
     /// 正是刮削的锚点（`catalog::scrape`）。于是来路这样定——**只要有一条裁决点过它的名，
     /// 这一行就算裁决的**，先来后到不影响最终的样子。
+    ///
+    /// ## 现成的那一行**复用，不重建**（票 parking-3/10）
+    ///
+    /// 上一趟识别留下的行照旧在库里（`Catalog::clear_identifications` 不再清它），
+    /// 于是同一个名字问过来时拿回的是**同一个 `work.id`**——浏览屏那一行的身份、
+    /// 以及挂在它上面的收藏与媒体，跨识别重跑仍然指得中（挂单 `Q193`）。
+    ///
+    /// ## 来路**只升不降**
+    ///
+    /// 复用现成的那一行时，只有**裁决**认领得动这一列：`origin = 裁决` 说的是「沉淀库
+    /// 那边有一条钉着它」，而识别这一趟认领到它，说的只是「这一趟的判据也落在它身上」，
+    /// 不是「人不要它了」。反着降会当场咬人——识别与裁决在同一趟里各认领一次，而
+    /// **中断正好可以落在两次之间**（两处都在 `run()` 的主循环里、共用一个
+    /// `Projector`）：先被识别写成「识别」、还没轮到裁决那一次就停了，这一行从此永久
+    /// 停在「识别」，而下一趟跑完
+    /// [`Catalog::drop_unheld_identified_works`](Catalog::drop_unheld_identified_works)
+    /// 就把它连同 id 一起收掉——正是这一票要治的病。
+    ///
+    /// 代价说清楚：一条裁决从沉淀库里删掉之后，它投影出来的那一行会一直挂着「裁决」
+    /// 这个来路（报告里「识别建出来的作品数」因此少数一个），直到重新成型那一遍
+    /// 按「还有没有人指着」把它收掉。记在挂单 `Q286`。
     fn work(
         &mut self,
         catalog: &mut Catalog,
         name: &str,
         origin: Provenance,
     ) -> Result<i64, CatalogError> {
-        let id = match self.works.get(name).copied() {
-            Some(id) => id,
-            None => match catalog.work_named(name)? {
+        let Some(id) = self.works.get(name).copied() else {
+            // 这一趟头一次认领它。
+            let id = match catalog.work_named(name)? {
                 Some(id) => {
-                    self.works.insert(name.to_string(), id);
+                    // 复用现成的那一行。**只升不降**：识别认领到它时这一列一个字不动，
+                    // 顺带也省掉真库上 9,226 次「写的还是原值」的 UPDATE。
+                    if origin == Provenance::Verdict {
+                        catalog.set_work_origin(id, origin)?;
+                    }
                     id
                 }
-                None => {
-                    let id = catalog.add_work(name, origin)?;
-                    self.works.insert(name.to_string(), id);
-                    if origin == Provenance::Verdict {
-                        self.verdict_works.insert(name.to_string());
-                    }
-                    return Ok(id);
-                }
-            },
+                None => catalog.add_work(name, origin)?,
+            };
+            self.works.insert(name.to_string(), id);
+            if origin == Provenance::Verdict {
+                self.verdict_works.insert(name.to_string());
+            }
+            return Ok(id);
         };
         if origin == Provenance::Verdict && self.verdict_works.insert(name.to_string()) {
             catalog.set_work_origin(id, origin)?;

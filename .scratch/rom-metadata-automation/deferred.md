@@ -1853,7 +1853,8 @@ grep -rhoE '\bD[0-9]+\b' .scratch/rom-metadata-automation/ | sort -uV | tail -1
 - **选项：** A 就这样，按名字归组的地方各自小心（眼下如此）｜B 给 `work.name` 补 UNIQUE，
   并定下同名时的处置
 - **不处理会怎样：** 刮削估算与真跑之间可能因为代表变体挑得不同而漂开。
-- **状态：** open —— 由 `.scratch/PARKING-LOT.md` 的 Q103 升上来（那份挂单收尾时清空）。
+- **状态：** **settled** —— 走 A（不补 `UNIQUE`），由票 `parking-3/10` 落地并有测试钉着。
+  决定与证据已迁回票 `rom-metadata-automation/25` 末尾「挂账裁决（第三轮收口迁回）」一节。
 
 ## D163 · 票 25 · 显示标题不再是中文时，报告口径与详情面板各说一套
 

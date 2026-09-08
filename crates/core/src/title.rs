@@ -907,7 +907,7 @@ pub fn work_titles(catalog: &Catalog) -> Result<Vec<TitleSet>, CatalogError> {
         });
     }
     catalog.for_each_title(&mut |row| {
-        // 作品在库里没了（重跑识别换掉了），而裁决留下的叫法还在——照样列出来，
+        // 作品在库里没了（那一行被收掉了），而裁决留下的叫法还在——照样列出来，
         // 它是人说过的话。
         sets.entry(row.work.clone())
             .or_insert_with(|| TitleSet {
