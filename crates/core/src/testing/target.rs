@@ -39,8 +39,18 @@
 //!   相片说「在」而真盘上没有时，`remove_file` 会报一条本不存在的失败。往**带删除步骤**
 //!   的计划里塞视图之前，先确认相片与真卡对得上。
 //!
+//! # 视图必须是 `target_root` 那棵树的相片
+//!
+//! 接缝**只读**这句话对**真跑**成立（一律 `RealFs`），可对**注入**要多说一句：那道闸
+//! 算出来的落点是拿视图的答案定的，随后的 `rename` / `metadata` 打在**真盘**上。
+//! 于是视图与真卡一旦对不上，后果不止「读错」——字节会落到另一条路径上去。
+//! 不分大小写那一档天然造得出这种不一致：真卡上 `GB/` 与 `gb/` 能并存，相片里只剩活
+//! 下来那个，写入就被重定向到它。所以视图一律拿 [`snapshot`] 从**同一个** `target_root`
+//! 照，别自己拼一棵。
+//!
 //! [`MemFs::unlistable_dir`]: crate::fs::MemFs::unlistable_dir
 
+use std::io;
 use std::path::Path;
 
 use crate::fs::{EntryKind, LibraryFs, MemFs, RealFs};
@@ -49,6 +59,12 @@ use crate::fs::{EntryKind, LibraryFs, MemFs, RealFs};
 ///
 /// 与 [`fs::case_insensitive`](crate::fs::case_insensitive) 答的是同一个问题，
 /// 只是这里由测试**指定**而不是去问盘：要的正是那台机器上问不出来的那一档。
+///
+/// **它顺带把「分解」那一轴也定死了，而那一轴没人查过。** [`MemFs`] 不分大小写那一档
+/// 折的是 [`path::fold`](crate::path::fold)（小写 **+ NFC**），分大小写那一档按字节
+/// 精确。于是 [`Self::Insensitive`] 同时是「分解不敏感」、[`Self::Sensitive`] 同时是
+/// 「分解敏感」——SD 卡的 exFAT / FAT32 到底哪样，挂账 D82 记着还没查。拿这个枚举去
+/// **验分解形式**的人得知道：它替你选了一边，不是量出来的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Folding {
     /// **分大小写**：ext4、大小写敏感的 APFS。`GB/` 与 `gb/` 是两个目录。
@@ -86,13 +102,30 @@ pub fn snapshot(root: &Path, folding: Folding) -> MemFs {
 }
 
 /// 照一层，然后往下走。
+///
+/// # Panics
+/// 这一条路径**不存在**时 panic——照相的对象没了，测试写错了该立刻知道。
+/// 「不存在」与「列不开」是 ADR-0021 分开的两态，把前者记成后者的话，相片的**根**
+/// 会变成一个列不开的目录：那道闸三问全答「没有」，测试照样绿，一点信号都没有。
 fn copy_into(fs: &mut MemFs, dir: &Path) {
-    let Ok(mut entries) = RealFs.read_dir(dir) else {
+    let entries = match RealFs.read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            panic!("照不到相：{} 不在（要照的是真卡那棵树）", dir.display())
+        }
         // 列不开：如实记成列不开，别记成一个空目录——那两件事在 ADR-0021 里是两态。
-        fs.unlistable_dir(dir);
-        return;
+        Err(_) => {
+            fs.unlistable_dir(dir);
+            return;
+        }
     };
+    let mut entries = entries;
     // 排一遍：不分大小写那一档要并层，并进谁得是定的，不能随 `read_dir` 的次序变。
+    //
+    // **「留前面那个」只对名字成立**：`MemFs::file` 是 insert，后一个折起来同名的文件
+    // 会盖掉先前那份的内容与长度（路径留第一个）；真盘上 `GB/`（目录）与 `gb`（文件）
+    // 并存时，后者还会把目录节点整个换成文件、底下已照进去的条目全成孤儿。落点闸只看
+    // 名字，够不着；造这种 fixture 之前得先想清楚。
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     for entry in entries {
         match entry.kind {
@@ -104,12 +137,16 @@ fn copy_into(fs: &mut MemFs, dir: &Path) {
                 fs.unreadable_meta(&entry.path);
             }
             EntryKind::File => {
+                // 长度照实、内容零填充。**照的是本地 fixture 那张小卡**——拿它去照
+                // 一张真卡就是把几百 GB 搬进内存。
                 let len = entry.meta.byte_len().unwrap_or(0);
                 fs.file(&entry.path, vec![0_u8; usize::try_from(len).unwrap_or(0)]);
             }
             EntryKind::Symlink => {
                 fs.symlink(&entry.path);
             }
+            // 设备、管道之类整条丢掉：卡上不会有，而 `MemFs` 也没有这一类节点。
+            // 代价是相片上那个落点是空的、真盘上不是。
             EntryKind::Other => {}
         }
     }
