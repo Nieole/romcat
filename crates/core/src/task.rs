@@ -98,16 +98,15 @@ impl Cutoff {
     }
 }
 
-impl std::fmt::Display for Cutoff {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Halted => Halted.fmt(f),
-            Self::Failed(why) => f.write_str(why),
-        }
-    }
-}
-
-impl std::error::Error for Cutoff {}
+// **这个类型特意不实现 `Display`，也不是一个 `std::error::Error`。**
+//
+// 它是一道**两选一的开关**，不是一句给人看的话。给了它 `Display`，
+// 判据链上任何一处 `to_string()` 就又把「停了」折回一句可比的字符串了——
+// 而且这一次是这个类型自己递上去的。想要那句话的人得先 `match` 一下，
+// 于是「我这儿收到的到底是哪一档」在源码上永远看得见。
+//
+// [`Halted`] 自己照旧有 `Display`（它是个 `Error`，领域错误枚举拿它当 `source`），
+// 只是那句话再也到不了任务台手上：`Cutoff::Halted` 不带它。
 
 impl From<Halted> for Cutoff {
     fn from(_: Halted) -> Self {

@@ -4421,8 +4421,13 @@ fn prepare(
         // 就是干净的（整条只读）。把手在这儿只是白记几行进度——**界面那一侧才用得上它**。
         &romcat_core::task::Handle::new(),
     )
-    // 没人按停下，所以这儿只可能是「真出错了」那一支；印出来的照旧是它自己那句话。
-    .map_err(|why| why.to_string())
+    // 没人按停下，所以这儿只可能是「真出错了」那一支。**得摊开写**：`Cutoff` 没有
+    // `Display`，想拿那句话就得先说清自己收到的是哪一档——把「停了」折成一句错话
+    // 这件事，在源码上永远看得见（`task::Cutoff` 那一段注释）。
+    .map_err(|why| match why {
+        romcat_core::task::Cutoff::Failed(said) => said,
+        romcat_core::task::Cutoff::Halted => romcat_core::task::Halted.to_string(),
+    })
 }
 
 /// 排一次同步计划，也就是**差量预览**。

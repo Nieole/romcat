@@ -35,6 +35,16 @@
   （下载那一处原先手写的 `match` 跟着收掉了）。`dat` 与 `titledb` 那两个同形状的
   `SyncError` 眼下产不出那一支（它们走 `download`，`keep_going` 恒真），
   按票面的范围原样没动，记在 `Q242`。
+  **还有第三环，收尾时补掉的**：头一版给 `Cutoff` 实现了 `Display`（`Halted` 那一支
+  转发给 `Halted` 自己那句中文）——判据链上任何一处 `to_string()` 都能把「停了」
+  重新折成一句可比的字符串，**而且这一次是刚建的那个类型自己递上去的**。
+  已改成 `Cutoff` **不实现 `Display`、也不是 `std::error::Error`**：想要那句话得先
+  `match` 一下（命令行那一处摊开写了），于是「收到的是哪一档」在源码上永远看得见。
+  `Halted` 自己照旧有 `Display`（它是个 `Error`，领域错误枚举拿它当 `source`），
+  只是那句话再也到不了任务台手上。
+  三环串起来的那句话记在 `Q243`：**`Display` 与 `#[from]` 都是「转换」，
+  而「停了」这个信息必须在每一次转换上都过不去**——只把 `String` 换成 `enum`
+  只挡住了第一次转换。
 - [x] 界面刮削那几处不再手写「按停了」，改由类型转换得来。 ——
   `crates/gui/src/scrape.rs` 那四处 `task.step("…").map_err(|_| "按停了".to_string())?`
   全删了，现在就是 `task.step("…")?`（`Halted` 经 `From` 折成 `Cutoff::Halted`）。
@@ -103,6 +113,42 @@
   **settled** 与去处。**`Q151` 没走挂单里写的那个改法**（「那四处改成
   `.map_err(String::from)`」）——那条只把这一处对上，判据还是字符串比对；
   走的是换类型那条，理由写在迁回去的裁决里。
+
+## 门禁
+
+`cargo xtask gate --keep-going -j 6`，**四条全绿**：
+
+| 条 | 结果 | 用时 | 命令 |
+|---|---|---|---|
+| fmt | 绿 | 1s | `cargo fmt --all --check` |
+| clippy | 绿 | 10s | `cargo clippy --workspace --all-targets --all-features -j 6` |
+| test | 绿 | 455s | `cargo test --workspace --all-features -j 6` |
+| doc | 绿 | 8s | `cargo doc --workspace --no-deps -j 6` |
+
+**66 个目标、1,702 条测试**（票 `13` 那趟是 1,681 / 66，中间 `09` 合了进来；
+数是 `cargo test … -- --list` 数的，没有再跑一趟）。`cargo doc` 那 65 条既有告警
+**回到基线**：core 56 / gui 8 / cli 1——cli 那一条（`sync::prepare` 既是函数又是模块，
+`crates/cli/src/main.rs:4401`）在 `05e6ace` 上本来就有，核过。清它是票 `02` 的活。
+挂钟彩票 `任务六秒都没跑完`（`Q349`）这一趟没撞上。
+
+## 票面写错了什么
+
+原话：
+
+> 眼下任务台分「停了」与「失败」的判据是那句话正好是某一句，界面刮削那几处交出去的
+> 话与核心库定的**差着字**，于是按停被**记成失败**。
+
+**两半都不成立。** 实测：`crates/gui/src/scrape.rs` 那四处交出去的是
+`"按停了".to_string()`，而 `Halted.to_string()` 是「按停下了：停在两步之间，
+没留下半截状态。」——**它们确实差着字**，所以「差着字」这半句对；不对的是后半句的
+适用范围。那四处只在**走不到 `scrape::run`** 的那一小段上生效（`run` 里那四步之间），
+真正常见的按停走的是另一个出口：`scrape::run` 里 `if context.cancel.is_cancelled()
+{ interrupted = true; break; }` 然后 `return Ok(报告)`——**任务台连比对的机会都没有**，
+记成的是「**完成**」，不是「失败」（那正是挂单 `Q217` 记的那个出口）。
+
+**病象说错了，病因说小了，而做法碰巧还是对的**：判据确实该由类型说话，而且不这么改的话
+第二个出口也收不干净（`Ending::Halfway` 那一档要长入口自己报，靠字符串比对够不着）。
+两个出口这一票都收了。
 
 ## 范围
 
