@@ -503,25 +503,47 @@ impl Catalog {
             .and_then(|text| text.parse().ok()))
     }
 
-    /// 一条变体记录。
+    /// 一条变体记录。**它是 [`Catalog::variants_of`] 一个键那一档的特例。**
     ///
-    /// **走 `prepare_cached`**：这一条会被逐个变体地问上几万遍（`collection::add` 把
-    /// 全选那一批展开之后一个一个问，`scrape::zh::Rulings::resolve` 也是），
-    /// 每次重新解析一遍 SQL 就是白花几万次。
+    /// 手上不止一个键的时候走那一条：这一句会被逐个变体地问上几万遍
+    /// （`scrape::zh::Rulings::resolve` 就是），而一条 `IN` 一趟取回一整段。
     ///
     /// # Errors
     /// 读库失败时返回错误。
     pub fn variant(&self, key: &str) -> Result<Option<VariantRow>, CatalogError> {
-        self.conn
-            .prepare_cached(&format!(
-                "SELECT {VARIANT_COLUMNS} FROM variant WHERE key = ?1"
-            ))
-            .and_then(|mut statement| {
-                statement
-                    .query_row(params![key], read_variant_row)
-                    .optional()
-            })
-            .map_err(|source| self.err(source))
+        Ok(self.variants_of(&[key])?.pop())
+    }
+
+    /// **一批变体记录**，一条 `IN` 取回一整段（段有多长见 `catalog::KEYS_PER_QUERY`）。
+    ///
+    /// 库里没有的那几个键不出现在结果里，所以**回来的条数可以少于问的个数**——
+    /// 「屏上那份名单已经过期」正是靠这个差值数出来的（`collection::plan` 的 `missing`）。
+    /// 次序不保证与问的次序一致。
+    ///
+    /// [`Catalog::variant`] 是它**一个键**那一档的特例，两处共用同一句 SQL：
+    /// 「哪几列算一行变体」写两遍，迟早有一处漏掉新加的那一列。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn variants_of(&self, keys: &[&str]) -> Result<Vec<VariantRow>, CatalogError> {
+        let mut out = Vec::with_capacity(keys.len());
+        for chunk in keys.chunks(super::KEYS_PER_QUERY) {
+            let sql = format!(
+                "SELECT {VARIANT_COLUMNS} FROM variant WHERE key IN ({})",
+                super::placeholders(chunk.len())
+            );
+            let mut statement = self
+                .conn
+                .prepare_cached(&sql)
+                .map_err(|source| self.err(source))?;
+            let rows = statement
+                .query_map(rusqlite::params_from_iter(chunk), read_variant_row)
+                .map_err(|source| self.err(source))?;
+            for row in rows {
+                out.push(row.map_err(|source| self.err(source))?);
+            }
+        }
+        Ok(out)
     }
 
     /// 一个变体有哪些成员，按键排序。
@@ -529,22 +551,46 @@ impl Catalog {
     /// # Errors
     /// 读库失败时返回错误。
     pub fn variant_members(&self, key: &str) -> Result<Vec<(String, Role)>, CatalogError> {
-        let mut statement = self
-            .conn
-            .prepare_cached(
-                "SELECT key, role FROM variant_member WHERE variant_key = ?1 ORDER BY key",
-            )
-            .map_err(|source| self.err(source))?;
-        let mut rows = statement
-            .query(params![key])
-            .map_err(|source| self.err(source))?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().map_err(|source| self.err(source))? {
-            let code: String = row.get(1).map_err(|source| self.err(source))?;
-            out.push((
-                row.get(0).map_err(|source| self.err(source))?,
-                Role::from_code(&code).unwrap_or(Role::Internal),
-            ));
+        Ok(self
+            .variant_members_of(&[key])?
+            .remove(key)
+            .unwrap_or_default())
+    }
+
+    /// **一批变体各自的成员**：变体的键 → 它的成员，各自按键排序。
+    ///
+    /// 一个成员都没有的变体不出现在结果里。[`Catalog::variant_members`] 是它
+    /// **一个键**那一档的特例（见 [`Catalog::variants_of`]）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn variant_members_of(
+        &self,
+        keys: &[&str],
+    ) -> Result<BTreeMap<String, Vec<(String, Role)>>, CatalogError> {
+        let mut out: BTreeMap<String, Vec<(String, Role)>> = BTreeMap::new();
+        for chunk in keys.chunks(super::KEYS_PER_QUERY) {
+            let sql = format!(
+                "SELECT variant_key, key, role FROM variant_member
+                 WHERE variant_key IN ({}) ORDER BY variant_key, key",
+                super::placeholders(chunk.len())
+            );
+            let mut statement = self
+                .conn
+                .prepare_cached(&sql)
+                .map_err(|source| self.err(source))?;
+            let mut rows = statement
+                .query(rusqlite::params_from_iter(chunk))
+                .map_err(|source| self.err(source))?;
+            while let Some(row) = rows.next().map_err(|source| self.err(source))? {
+                let code: String = row.get(2).map_err(|source| self.err(source))?;
+                out.entry(row.get(0).map_err(|source| self.err(source))?)
+                    .or_default()
+                    .push((
+                        row.get(1).map_err(|source| self.err(source))?,
+                        Role::from_code(&code).unwrap_or(Role::Internal),
+                    ));
+            }
         }
         Ok(out)
     }

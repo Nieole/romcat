@@ -403,10 +403,15 @@ fn fail(message: &str) -> ExitCode {
 /// 收出来 **7,712 行**（二十个作品加上那 1/13 压根没识别过的散行），而且**筛完
 /// 只剩 473 行、比一扇窗还少**，于是那一趟「滚动」一次库都没读过。量出来的帧率
 /// 不是维护者真会遇到的那个（挂单 `Q156`，实测三趟并排在 `docs/library-facts.md`）。
+/// **「落一次整批收藏」那一步只在合成数据上量**：它真的往**沉淀库**里钉收藏，
+/// 而那份东西不可再生（`bench::FavoriteCost`）。开了现成的库时那一步整个跳过，
+/// 印出来的那一行如实说没量——与 `--bench-queue` 干脆拒绝在真库上跑同一条理由，
+/// 只是这一条还有五样别的数值得在真库上量，不必整条拒绝。
 #[cfg(feature = "demo")]
 fn bench_browse(args: &Args, frames: u32) -> ExitCode {
     let rows = args.browse_rows();
     let works = args.works(rows);
+    let synthetic = !args.locate().given();
     let site = match args.open_for_bench(|| {
         demo::browse_shaped(rows, works).map_err(|error| format!("造不出合成数据：{error}"))
     }) {
@@ -414,7 +419,7 @@ fn bench_browse(args: &Args, frames: u32) -> ExitCode {
         Err(message) => return fail(&message),
     };
     let mut app = App::new(site, args.workspace_dir());
-    let cost = bench::browse(&mut app, frames);
+    let cost = bench::browse(&mut app, frames, synthetic);
     print!("{}", cost.render());
     ExitCode::SUCCESS
 }

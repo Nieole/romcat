@@ -1908,8 +1908,8 @@ fn 多选之后按一下星_那一批当场收藏而且收藏是筛得出来的(
     assert!(作用范围.len() > 1, "这一条要测的正是「一下子收藏一批」");
 
     {
-        let (browse, site) = app.browse_and_site();
-        browse.favorite(site);
+        let (browse, site, board) = app.browse_site_and_tasks();
+        browse.favorite(site, board);
     }
     跑(&ctx, &mut app, 2);
     let mut 星标 = 按规则数(&mut app, "收藏=是");
@@ -1941,8 +1941,8 @@ fn 多选之后按一下星_那一批当场收藏而且收藏是筛得出来的(
 
     // 取消：同一批一起拿出来，`收藏=是` 当场空掉。
     {
-        let (browse, site) = app.browse_and_site();
-        browse.unfavorite(site);
+        let (browse, site, board) = app.browse_site_and_tasks();
+        browse.unfavorite(site, board);
     }
     跑(&ctx, &mut app, 2);
     assert!(按规则数(&mut app, "收藏=是").is_empty(), "取消收藏没生效");
@@ -1972,9 +1972,9 @@ fn 自建合集建得出来而且按合集筛得出来() {
     };
 
     {
-        let (browse, site) = app.browse_and_site();
+        let (browse, site, board) = app.browse_site_and_tasks();
         "送朋友的".clone_into(browse.collection_draft_mut());
-        browse.join_collection(site);
+        browse.join_collection(site, board);
     }
     跑(&ctx, &mut app, 2);
     let mut 选出来 = 按规则数(&mut app, "合集=送朋友的");
@@ -1985,8 +1985,8 @@ fn 自建合集建得出来而且按合集筛得出来() {
 
     // 移出之后**这个合集从筛选栏那一维里消失**：一件东西都选不出来的合集不该摆在那儿。
     {
-        let (browse, site) = app.browse_and_site();
-        browse.leave_collection(site);
+        let (browse, site, board) = app.browse_site_and_tasks();
+        browse.leave_collection(site, board);
     }
     跑(&ctx, &mut app, 2);
     assert!(按规则数(&mut app, "合集=送朋友的").is_empty());
@@ -2010,8 +2010,8 @@ fn 拿不到内容锚的那些在详情面板上被标出来() {
     app.browse_and_site().0.picked_mut().select_all();
     跑(&ctx, &mut app, 1);
     {
-        let (browse, site) = app.browse_and_site();
-        browse.favorite(site);
+        let (browse, site, board) = app.browse_site_and_tasks();
+        browse.favorite(site, board);
     }
     跑(&ctx, &mut app, 2);
 
@@ -2080,8 +2080,8 @@ fn 一行都没勾就按星_说清而不是静静什么都不做() {
     let mut app = 界面(500);
     跑(&ctx, &mut app, 2);
     {
-        let (browse, site) = app.browse_and_site();
-        browse.favorite(site);
+        let (browse, site, board) = app.browse_site_and_tasks();
+        browse.favorite(site, board);
     }
     跑(&ctx, &mut app, 1);
     let 话 = app.browse().error().expect("该说一句").to_string();
@@ -2258,4 +2258,116 @@ fn 删掉一条刮削来的叫法之后屏上分得出压掉了与没采到() {
                 .is_empty(),
         );
     }
+}
+
+/// 一份**落在磁盘上**的小库，连它的界面。
+///
+/// 整批收藏非要它不可：台上那条线读的是同一个库文件的**第二份只读连接**
+/// （`Catalog::read_only`），而只活在内存里的那种库（合成数据走的就是那条）
+/// 分不出第二份来。
+fn 磁盘上的小库(变体数: usize) -> (App, romcat_core::testing::TempDir) {
+    use romcat_core::catalog::Catalog;
+    use romcat_core::platform::Manifest;
+    use romcat_core::shape::{SINGLE_FILE_RULE, Variant};
+    use romcat_core::site::Site;
+    use romcat_core::workspace::{self, Slug};
+
+    let dir = romcat_core::testing::temp_dir("浏览-磁盘上的库");
+    let 库文件 = workspace::catalog_path(dir.path(), Slug::Named("小库"));
+    {
+        let mut catalog = Catalog::open(&库文件).expect("开得出中立库");
+        // **建不出根就当场炸**：吞掉它的话，变体会挂在一个不存在的根上，
+        // 而失败会以「屏上少了一行」的样子冒出来。
+        romcat_core::catalog::roots::add_root(
+            &catalog,
+            None,
+            "主库",
+            std::path::Path::new("/主库"),
+        )
+        .expect("建得出根");
+        let variants: Vec<Variant> = (0..变体数)
+            .map(|at| {
+                let key = format!("主库/SFC/第{at:03}个.zip");
+                Variant {
+                    main_key: key.clone(),
+                    platform: Some("SFC".to_string()),
+                    rule: SINGLE_FILE_RULE.to_string(),
+                    manual: false,
+                    files: 1,
+                    bytes: 4096,
+                    unreadable_files: 0,
+                    members: vec![(key.clone(), Role::Main)],
+                    key,
+                }
+            })
+            .collect();
+        catalog
+            .replace_variants(&variants, 1, &Manifest::default())
+            .expect("写得进变体");
+    }
+    let site = Site::open_file(dir.path(), &库文件, None).expect("开得出现场");
+    let mut app = App::new(site, dir.path().to_path_buf());
+    app.show_view(View::Browse);
+    (app, dir)
+}
+
+#[test]
+fn 整批收藏排上任务台_跑着的时候屏上有进度也按得停() {
+    // 票 `parking-3/09`：全选之后按那颗星，窗口不许冻住——它像别的长活一样排上任务台，
+    // 看得见进度、按得停。实测这一下从前在画帧那条线程上跑 6.7 秒（挂单 `Q119`）。
+    let ctx = headless::context();
+    let (mut app, _dir) = 磁盘上的小库(200);
+    跑(&ctx, &mut app, 2);
+    app.browse_and_site().0.picked_mut().select_all();
+    跑(&ctx, &mut app, 1);
+    {
+        let (browse, site, board) = app.browse_site_and_tasks();
+        browse.favorite(site, board);
+    }
+
+    // **它排上了台，不是在这条线程上跑完了**——读那一半跑在别处，写那一半在认领那一步，
+    // 所以这会儿两份库一个字都还没动。
+    assert!(app.tasks().running().is_some(), "这一下没排上任务台");
+    assert!(
+        按规则数(&mut app, "收藏=是").is_empty(),
+        "按下去的那一刻就写了库，那就等于还在画帧这条线程上干活",
+    );
+
+    // 等它报出第一步。**进度只会往前走**（报过就一直在那儿），所以这个等法是确定的。
+    for _ in 0..2_000 {
+        if app
+            .tasks()
+            .running()
+            .is_some_and(|live| live.progress.at > 0)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+
+    // 屏上看得见：这一趟叫什么、走到哪一步、以及那颗「停下」。
+    // **这一帧不走 `App::ui`**：它头一件事就是问一遍任务台，而那一问会把跑完的那一趟
+    // 收走——这里要看的正是它**跑着的时候**屏上长什么样。
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        romcat_gui::task::Screen::new().ui(ui, app.tasks_mut());
+    }));
+    assert!(屏上.contains("放进「收藏」"), "任务屏上没有这一趟：{屏上}");
+    assert!(屏上.contains("停下"), "按不着「停下」：{屏上}");
+    assert!(屏上.contains("折锚"), "屏上说不出它走到哪一步：{屏上}");
+
+    // 跑完之后**按号认领**：投影当场生效，回执照旧两种锚各说一句。
+    for _ in 0..600 {
+        跑(&ctx, &mut app, 1);
+        if !app.tasks().busy() && !app.tasks().settled() {
+            break;
+        }
+    }
+    let 星标 = 按规则数(&mut app, "收藏=是");
+    assert_eq!(星标.len(), 200, "认领完那一批该整批进收藏");
+    let 回执 = app
+        .browse()
+        .notice()
+        .expect("认领完该有一句回执")
+        .to_string();
+    assert!(回执.contains("收藏"), "{回执}");
 }

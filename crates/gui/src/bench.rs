@@ -324,6 +324,9 @@ pub struct BrowseCost {
     pub variants: u64,
     /// **全选之后展开作用范围**要多久：把选中的那几行折成一串变体的键。
     pub scope_ms: f64,
+    /// **落一次整批收藏**那一步量出来的几个数。**只在合成数据上量**，见
+    /// [`FavoriteCost`]；开了现成的库时是 `None`。
+    pub favorite: Option<FavoriteCost>,
     /// **列一次筛选面板**要多久（连表里那一列作品名靠的那张小表一起）。
     pub facets_ms: f64,
     /// 平台、合集、语言、中文各有几个可选值。
@@ -348,6 +351,34 @@ pub struct BrowseCost {
     pub retained: usize,
 }
 
+/// **落一次整批收藏**量出来的几个数（挂单 `Q119` 那张表）。
+///
+/// ## 它只在合成数据上量
+///
+/// 这一步是这份实测里**唯一真的写库**的一步，而它写的是**沉淀库**——词表里那份
+/// 「不可再生、删掉就没了、全局一份」的东西。在真库上量一次，就等于给全库四万多个变体
+/// 各钉一条收藏进维护者自己那份沉淀库，而且没有哪一步把它们拿回来。所以给了
+/// `--catalog` / `--library` / 主库根的那一趟**整步跳过**，与 `--bench-queue`
+/// 拒绝在真库上跑同一条理由。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FavoriteCost {
+    /// 那一下作用在几个变体上。**不带筛选的全选**，也就是这份库里的全部变体。
+    pub variants: u64,
+    /// **不筛的全选**展开成那一串键要多久。它与 [`BrowseCost::scope_ms`] 量的是同一件事，
+    /// 差别只在范围——那一个是筛完之后的，这一个是整个库。挂单 `Q119` 那张表的头一行
+    /// 量的正是它，所以它留着：换一台机器时，它是判断「那张表还比得比不得」的尺子。
+    pub scope_ms: f64,
+    /// 按下那颗星，到台上那一趟跑完并**认领**（两份库都写完）为止。挂单 `Q119`
+    /// 量的就是它——票 `parking-3/09` 之前那是 **6.7 秒**，而且全花在画帧那条线程上。
+    pub ms: f64,
+    /// 其中**排锚**那一半花了多久（`collection::plan`，那趟活自己掐的表）。
+    ///
+    /// **真库上这一段跑在画帧那条线程之外**；合成数据这份库只活在内存里、分不出第二份
+    /// 只读连接，所以量的时候它是**就地跑完**的。剩下的是展开作用范围与**落两份库**
+    /// ——后者在认领那一步，两条路上都仍在画帧那条线程上。
+    pub plan_ms: f64,
+}
+
 impl BrowseCost {
     /// 排成给人看的几行。
     #[must_use]
@@ -359,7 +390,8 @@ impl BrowseCost {
              点开一行        {:.2} ms（作品、它的变体、每个变体的候选与依据一次折齐）\n\
              全选展开范围    {:.1} ms（筛完那 {} 行 → {} 个变体）\n\
              每帧            中位 {:.2} ms，最慢 {:.2} ms，共 {} 帧\n\
-             滚一趟读库      {} 次；内存里始终 {} 行\n",
+             滚一趟读库      {} 次；内存里始终 {} 行\n\
+             {}",
             thousands(self.rows),
             self.facets_ms,
             self.facet_counts.0,
@@ -378,17 +410,42 @@ impl BrowseCost {
             self.frames,
             self.reads,
             self.retained,
+            self.favorite.map_or_else(
+                || {
+                    "落一次整批收藏  没量（开的是现成的库）\n\
+                     \u{20}               —— 这一步真的往**沉淀库**里钉收藏，而沉淀库不可再生。\n"
+                        .to_string()
+                },
+                |favorite| {
+                    format!(
+                        "不筛的全选展开  {:.1} ms（{} 个变体）\n\
+                         落一次整批收藏  {:.1} ms（含上面那一步：展开 + 排锚 + 落两份库）\n\
+                         其中排锚那一半  {:.1} ms（真库上它在画帧那条线程之外；合成数据就地跑完）\n",
+                        favorite.scope_ms,
+                        thousands(favorite.variants),
+                        favorite.ms,
+                        favorite.plan_ms,
+                    )
+                },
+            ),
         )
     }
 }
 
-/// 量一遍**浏览屏**：列筛选面板、换一次筛选、点开一行、全选展开、滚一趟。
+/// 量一遍**浏览屏**：列筛选面板、换一次筛选、点开一行、全选展开、滚一趟、落一次整批收藏。
 ///
 /// 走的是界面上那条一模一样的路——[`App::ui`] 本人、
-/// [`crate::browse::Screen::open_work`] 本人。**一个字节都不写库。**
+/// [`crate::browse::Screen::open_work`] 本人、[`crate::browse::Screen::favorite`] 本人。
+///
+/// **只有最后那一步写库**（挂单 `Q119` 量的就是它），所以它排在末尾：前面那几个数
+/// 量的是一份没被动过的库，落完收藏再去量它们的话，合集那一维上凭空多一档。
+///
+/// `favorite` 说的是**准不准量那一步**。**开了现成的库就不许量**：它写的是**沉淀库**，
+/// 而那份东西不可再生（见 [`FavoriteCost`]）。合成数据那份两份库都在内存里，
+/// 主库一个字节都不碰。
 #[must_use]
 #[allow(clippy::too_many_lines)]
-pub fn browse(app: &mut App, frames: u32) -> BrowseCost {
+pub fn browse(app: &mut App, frames: u32, favorite: bool) -> BrowseCost {
     let ctx = headless::context();
     app.show_view(crate::app::View::Browse);
 
@@ -488,10 +545,17 @@ pub fn browse(app: &mut App, frames: u32) -> BrowseCost {
     app.browse_and_site().0.scroll_to = None;
     costs.sort_by(f64::total_cmp);
 
+    // 六、**落一次整批收藏**：把筛选清掉、全选、按那颗星，等台上那一趟跑完并**认领**。
+    //    量的是人按下去真正会等的那一段——展开作用范围、排锚（在任务台上）、
+    //    写两份库（在认领那一步，`browse::Screen::settle_collection`）。
+    //    **它写库，所以排在最后，而且只在合成数据上跑**（见 `FavoriteCost`）。
+    let favorite = favorite.then(|| measure_favorite(&ctx, app));
+
     BrowseCost {
         rows,
         variants,
         scope_ms,
+        favorite,
         facets_ms,
         facet_counts: counts,
         filter_ms,
@@ -739,6 +803,72 @@ fn probe(catalog: &Catalog, label: &str, query: &WorkQuery) -> PagingProbe {
         last_ms: median_ms(|| {
             let _ = catalog.work_page(query, last, PAGING_WINDOW);
         }),
+    }
+}
+
+/// 落一次整批收藏，量它。**只该在合成数据上调**，理由见 [`FavoriteCost`]。
+///
+/// **筛选先清掉**：挂单 `Q119` 量的正是「**全选 46,483 行** → ★ 收藏」，
+/// 而上一步把表筛成了最大的那个平台。不清的话这个数只是那一个平台的。
+///
+/// **它不许静静地印出一个数**（这个仓库那条「不静默结束」）：一行都没勾、库读不动、
+/// 那一趟活失败了——三种情况都会让循环立刻退出，而 `ms` 会是个接近零、看着正常的数。
+/// 所以每一种都当场炸，实测宁可跑不完也不能报一个假的。
+fn measure_favorite(ctx: &egui::Context, app: &mut App) -> FavoriteCost {
+    app.browse_and_site().0.query_mut().platform = None;
+    // 换筛选是**下一帧**才兑现的（界面每帧把查询写进窗口）。
+    headless::frame(ctx, headless::input(), |ui| app.ui(ui));
+    {
+        let (browse, _) = app.browse_and_site();
+        browse.picked_mut().select_all();
+    }
+    let started = Instant::now();
+    let variants = {
+        let (browse, site) = app.browse_and_site();
+        browse
+            .batch_variants(&site.catalog)
+            .expect("展开不了作用范围")
+            .len() as u64
+    };
+    let scope_ms = started.elapsed().as_secs_f64() * 1000.0;
+    // **历史先清掉**：下面那个数从历史头一条上取，而台上跑过别的活时头一条就是别人的。
+    app.tasks_mut().clear_history();
+    let started = Instant::now();
+    {
+        let (browse, site, board) = app.browse_site_and_tasks();
+        browse.favorite(site, board);
+    }
+    assert!(
+        app.tasks().busy() || app.tasks().settled(),
+        "按下那颗星一趟活都没排上：{}",
+        app.browse().error().unwrap_or("（连话都没说一句）"),
+    );
+    // 合成数据那份库只活在内存里，分不出第二份只读连接，于是那一趟**就地跑完**
+    // ——结果已经在台上等着认领了。真库上它跑在另一条线程上，这个循环就是在等它。
+    for _ in 0..1_000_000 {
+        app.poll_tasks();
+        if !app.tasks().busy() && !app.tasks().settled() {
+            break;
+        }
+    }
+    let ms = started.elapsed().as_secs_f64() * 1000.0;
+    assert!(
+        app.browse().error().is_none(),
+        "落收藏那一趟没干成：{}",
+        app.browse().error().unwrap_or_default(),
+    );
+    // 排锚那一半的耗时取**干活那条线程自己量的那个数**（任务台历史里记着），
+    // 剩下的就是展开作用范围与落两份库。
+    let plan_ms = app
+        .tasks()
+        .history()
+        .first()
+        .map_or(0.0, |record| record.elapsed.as_secs_f64() * 1000.0);
+    FavoriteCost {
+        variants,
+        scope_ms,
+        ms,
+        plan_ms,
     }
 }
 

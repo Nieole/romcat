@@ -20,6 +20,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use romcat_core::collection;
 use romcat_core::report::human_duration;
 use romcat_core::scan::ScanOutcome;
 use romcat_core::scrape::Outcome as ScrapeOutcome;
@@ -59,6 +60,13 @@ pub enum Product {
     Synced(Box<SyncOutcome>),
     /// 算了一遍**每台设备的容量**：一台一份[选择集报告](SelectionReport)，按子库名。
     Evaluated(Box<BTreeMap<String, SelectionReport>>),
+    /// 排好了一趟**整批收藏**（或者自建合集的加减）：这一批各该钉在哪种锚上。
+    ///
+    /// **它要写两份库**（沉淀库那些成员关系、中立库那份投影），所以与
+    /// [`Synced`](Self::Synced) 同一条：产物交回来，由认领它的那一屏落库
+    /// （`browse::Screen::settle_collection`）。装箱是因为它带着整批的锚——
+    /// 真库上「全选 46,483 行 → ★ 收藏」那一下就是四万多条。
+    Planned(Box<collection::Plan>),
 }
 
 /// 这个界面上那张**任务台**。
