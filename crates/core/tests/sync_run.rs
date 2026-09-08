@@ -15,13 +15,14 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use romcat_core::adapter;
 use romcat_core::capability::Profile;
 use romcat_core::catalog::Catalog;
 use romcat_core::catalog::Roots;
 use romcat_core::catalog::scrape::{Harvested, HarvestedMedia};
-use romcat_core::fs::{LibraryFs, MemFs, RealFs};
+use romcat_core::fs::{DirEntry, LibraryFs, MemFs, ReadSeek, RealFs};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::priority::Priorities;
@@ -831,6 +832,104 @@ fn 不注入时闸在真盘上照样挡得住() {
     );
 }
 
+/// `#[cfg(unix)]`：**列不开却写得进**的目录只有 Unix 的权限位造得出来——`0300` 是
+/// 「进得去、写得进、就是列不开」。Windows 上那种目录摆不出来，那边这道闸的这一格
+/// 由手捏的假视图钉着（`列不开的目录底下_假视图上闸照样挡得住`）。
+#[cfg(unix)]
+#[test]
+fn 列不开的目录底下_落点被占照样挡得住() {
+    // ADR-0021：**读不动是第三态**，既不是「有」也不是「没有」。这道闸折起来那一问
+    // 从前把「列不开」折成了「这一层没有挡路的」，于是在大小写敏感的盘上，维护者那份
+    // `GB/Tetris.zip` 旁边会多出一份工具写的 `GB/tetris.zip`——两份只差大小写。
+    //
+    // 这条走**真盘、不注入**：`0300` 的目录 `read_dir` 失败、按名字 `open` 照样成功，
+    // 而相片照不下这一格（`testing::target` 模块文档），假视图替不了它。
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let 现场 = 现场::摆在(建个只差大小写的库());
+    let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
+    // 排完计划之后，维护者才把自己那份拷进卡里，随后那个目录变成列不开的。
+    let 维护者那份 = 现场.卡.path().join("GB/Tetris.zip");
+    写(&维护者那份, "这是我自己拷进去的".as_bytes());
+    let 平台目录 = 现场.卡.path().join("GB");
+    fs::set_permissions(&平台目录, fs::Permissions::from_mode(0o300)).expect("改得动权限");
+    let 真的列不开 = fs::read_dir(&平台目录).is_err();
+
+    let outcome = 现场.执行(&这趟, &Manifest::empty(), &CancelToken::new());
+
+    // **权限先收回来**：底下那几条断言、以及临时目录自己的清理，都要列得开它。
+    fs::set_permissions(&平台目录, fs::Permissions::from_mode(0o700)).expect("改得回权限");
+    assert!(
+        真的列不开,
+        "这台机器上 0300 的目录照样列得开（跑测试的是 root？），这一格钉不住",
+    );
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .any(|failure| failure.path == "GB/tetris.zip" && failure.act == Act::Add),
+        "列不开就是答不出来，答不出来就不许写：{:?}",
+        outcome.failures
+    );
+    assert!(
+        !现场.卡.path().join("GB/tetris.zip").exists(),
+        "挡下来就一个字节都不写",
+    );
+    assert_eq!(
+        fs::read(&维护者那份).expect("还在"),
+        "这是我自己拷进去的".as_bytes(),
+        "维护者自己那份连一个字节都不许动",
+    );
+    assert!(
+        !outcome
+            .manifest
+            .files
+            .iter()
+            .any(|file| file.path.eq_ignore_ascii_case("GB/tetris.zip")),
+        "没写成的不许进清单",
+    );
+}
+
+#[test]
+fn 列不开的目录底下_假视图上闸照样挡得住() {
+    // 同一格的另一头：上面那条要一个 `0300` 的真目录，只有 Unix 摆得出来。这一条走
+    // 那道接缝，**哪台机器上都跑得了**。
+    //
+    // 相片照不下「列不开的目录**底下**还有东西」这一格（`testing::target` 模块文档），
+    // 于是手捏一个 `MemFs`：先 `unlistable_dir` 再往底下 `file`——那正是真盘的语义
+    // （`read_dir` 失败、按名字 `open` 照样成功）。
+    let 现场 = 现场::摆在(建个只差大小写的库());
+    let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
+    let mut 假卡 = MemFs::new();
+    假卡.unlistable_dir(现场.卡.path().join("GB"));
+    假卡.file(
+        现场.卡.path().join("GB/Tetris.zip"),
+        "这是我自己拷进去的".as_bytes().to_vec(),
+    );
+
+    let outcome = 现场.执行_折_视图(&这趟, &Manifest::empty(), &假卡, &CancelToken::new());
+    let 挡下来的 = outcome
+        .failures
+        .iter()
+        .find(|failure| failure.path == "GB/tetris.zip" && failure.act == Act::Add)
+        .unwrap_or_else(|| {
+            panic!(
+                "列不开就是答不出来，答不出来就不许写：{:?}",
+                outcome.failures
+            )
+        });
+    assert!(
+        挡下来的.why.contains("列不开"),
+        "报告要说得出是被哪一格挡下来的：{}",
+        挡下来的.why
+    );
+    assert!(
+        !现场.卡.path().join("GB/tetris.zip").exists(),
+        "挡下来就一个字节都不写",
+    );
+    assert!(!outcome.gave_up && !outcome.interrupted, "不该整趟停住");
+}
+
 #[test]
 fn 只差大小写的是上一级目录_执行这一层照样挡得住() {
     // 折的是**整条键**，不是最后那一段：计划那一侧拿 `path::fold` 折 `gb/Tetris.zip`
@@ -973,6 +1072,216 @@ fn 落点被占再多也不算系统性故障_不触发连着失败就停下来(
             "{说}：排在最后那一份照样落得下",
         );
     }
+}
+
+#[test]
+fn 该建目录的位置上躺着个文件_闸挡下来而且放弃机制真的触发() {
+    // 卡上有个**文件**叫 `GB`（前端写的一份索引、维护者手滑拷进去的东西都可能），
+    // 而这一趟要往 `GB/` 底下写十几份。两层判定从前都答不出这一格：逐字那一问只问
+    // 落点自己在不在，折起来那一问走到「不是目录」就当这一枝空的，于是一路走到
+    // `create_dir_all` 才炸——而它报的是 `AlreadyExists`，正好撞上「落点被占不计数」
+    // 那条豁免（那条认的是**错误种类**）。结果：整个平台目录下每一条新增都以同一句话
+    // 失败，连着失败的计数一次都不涨，放弃机制永不触发。
+    for 折叠 in 两种折叠语义 {
+        let 说 = 折叠.label();
+        let 现场 = 现场::摆在(建个够多的库());
+        let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
+        assert!(
+            这趟
+                .plan
+                .steps
+                .iter()
+                .filter(|step| step.act == Act::Add)
+                .count()
+                > 10,
+            "{说}：这一趟得有超过阈值那么多条新增才验得了放弃机制"
+        );
+        // 排完计划之后才出现的：那个位置上躺着的是个文件。
+        let 挡路的 = 现场.卡.path().join("GB");
+        写(&挡路的, "我是个文件，不是目录".as_bytes());
+
+        let outcome = 现场.执行_折(&这趟, &Manifest::empty(), 折叠, &CancelToken::new());
+        assert!(
+            outcome.gave_up,
+            "{说}：同一句话印上几百遍正是放弃机制要防的那一幕：{:?}",
+            outcome.failures
+        );
+        assert_eq!(
+            outcome.failures.len(),
+            10,
+            "{说}：到阈值就该收手，不是把整份计划跑完：{:?}",
+            outcome.failures
+        );
+        assert!(
+            outcome
+                .failures
+                .iter()
+                .all(|failure| failure.act == Act::Add),
+            "{说}：{:?}",
+            outcome.failures
+        );
+        assert!(
+            outcome
+                .failures
+                .iter()
+                .all(|failure| failure.why.contains("不是目录")),
+            "{说}：报告要说得出是被这一格挡下来的：{:?}",
+            outcome.failures
+        );
+        assert_eq!(
+            fs::read(&挡路的).expect("还在"),
+            "我是个文件，不是目录".as_bytes(),
+            "{说}：清单之外的东西一个字节都不许动（ADR-0015）",
+        );
+    }
+}
+
+/// 一份主库，`GB` 底下只有一份——够验「大小写敏感的盘上 `gb` 这个文件挡不住 `GB/`」。
+#[test]
+fn 只差大小写的那个文件不是目录_分大小写的盘上照样建得出目录() {
+    // 卡上躺着一个叫 `gb` 的**文件**，我们要写 `GB/tetris.zip`。分大小写的盘上
+    // `GB/` 与 `gb` 本来就并存得了，`create_dir_all` 一次就成——闸不许在这儿误报。
+    // 判据不猜：拿我们自己那个写法去问一句文件系统（与 `real_dir` 那一手同一条口径）。
+    let 现场 = 现场::摆在(建个只差大小写的库());
+    let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
+    写(&现场.卡.path().join("gb"), "我是个文件".as_bytes());
+
+    let outcome = 现场.执行_折(
+        &这趟,
+        &Manifest::empty(),
+        Folding::Sensitive,
+        &CancelToken::new(),
+    );
+    assert!(
+        outcome.failures.is_empty(),
+        "分大小写的盘上这两个并存得了，不许误报：{:?}",
+        outcome.failures
+    );
+    assert!(
+        现场.卡.path().join("GB/tetris.zip").is_file(),
+        "字节该照常落下去",
+    );
+}
+
+/// `#[cfg(unix)]`：Windows 上这种目录软链要另一套权限，造不出来。
+#[cfg(unix)]
+#[test]
+fn 平台目录是个符号链接_底下那份照样挡得住() {
+    // `LibraryFs::read_dir` **不跟随符号链接**（`fs::real`），于是卡上一个指向别处的
+    // 平台目录交出来的 `kind` 是 `Symlink` 而不是 `Dir`。折起来那一问要是按 `kind`
+    // 挑「是不是目录」再往下走，这一整枝就漏了——而维护者那份正躺在它底下。
+    // 挡不挡得住由**下一层列不列得开**说了算，不由这一层的 `kind` 说了算。
+    let 现场 = 现场::摆在(建个只差大小写的库());
+    let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
+    let 真身 = 现场.卡.path().join("别处");
+    写(&真身.join("Tetris.zip"), "这是我自己拷进去的".as_bytes());
+    std::os::unix::fs::symlink(&真身, 现场.卡.path().join("GB")).expect("建得出符号链接");
+
+    let outcome = 现场.执行(&这趟, &Manifest::empty(), &CancelToken::new());
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .any(|failure| failure.path == "GB/tetris.zip" && failure.act == Act::Add),
+        "软链底下那份也得挡得住：{:?}",
+        outcome.failures
+    );
+    assert!(!真身.join("tetris.zip").exists(), "挡下来就一个字节都不写",);
+    assert_eq!(
+        fs::read(真身.join("Tetris.zip")).expect("还在"),
+        "这是我自己拷进去的".as_bytes(),
+        "维护者自己那份连一个字节都不许动",
+    );
+}
+
+/// 一层**记数**的目标视图：每个目录被 `read_dir` 了几遍。
+///
+/// 「同一个目录被列了两遍」这件事只有在这道接缝上看得见——数在实现里数就成了对着内部
+/// 结构断言，而接缝上数的正是这道闸真的问了盘几句话。
+struct 数着列 {
+    底下: MemFs,
+    次数: Mutex<BTreeMap<PathBuf, usize>>,
+}
+
+impl 数着列 {
+    fn 摆上(底下: MemFs) -> Self {
+        Self {
+            底下,
+            次数: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn 列了几遍(&self, dir: &Path) -> usize {
+        self.次数
+            .lock()
+            .expect("锁得住")
+            .get(dir)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+impl LibraryFs for 数着列 {
+    fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf> {
+        self.底下.canonicalize(path)
+    }
+
+    fn read_dir(&self, dir: &Path) -> std::io::Result<Vec<DirEntry>> {
+        *self
+            .次数
+            .lock()
+            .expect("锁得住")
+            .entry(dir.to_path_buf())
+            .or_default() += 1;
+        self.底下.read_dir(dir)
+    }
+
+    fn read_head(&self, file: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
+        self.底下.read_head(file, limit)
+    }
+
+    fn read_tail(&self, file: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
+        self.底下.read_tail(file, limit)
+    }
+
+    fn open(&self, file: &Path) -> std::io::Result<Box<dyn ReadSeek + '_>> {
+        self.底下.open(file)
+    }
+}
+
+#[test]
+fn 一次落点判定之内_同一个目录只列一遍() {
+    // 落点判定问目标两遍：逐字那一问的退路（`real_path` 逐段列目录）与折起来那一问，
+    // 走的是**同一批目录**。各列各的等于把同一个目录整层列两遍——一个平台目录下
+    // 几千份文件，那就是几千次多余的整层 listing。
+    //
+    // 记性建在**这一次判定的栈上**，不是整趟：整趟的那份跑到一半就过期，会把
+    // 「计划算完到真的改名之间」那道缝重新打开（挂单 `Q134`）。
+    let 现场 = 现场::摆在(建个只差大小写的库());
+    // 卡上先摆一个逐字同名的平台目录：两问都得走进它，才数得出「列了两遍」。
+    写(
+        &现场.卡.path().join("GB/别的.txt"),
+        "维护者自己的东西".as_bytes(),
+    );
+    let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
+    assert!(
+        这趟
+            .plan
+            .steps
+            .iter()
+            .any(|step| step.act == Act::Add && step.path == "GB/tetris.zip"),
+        "这一趟得有那一条新增：{:?}",
+        这趟.plan.steps
+    );
+
+    let 视图 = 数着列::摆上(target::snapshot(现场.卡.path(), Folding::Sensitive));
+    let outcome = 现场.执行_折_视图(&这趟, &Manifest::empty(), &视图, &CancelToken::new());
+    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    assert_eq!(
+        视图.列了几遍(&现场.卡.path().join("GB")),
+        1,
+        "一次落点判定之内，那个平台目录只该被列一遍",
+    );
 }
 
 #[test]
