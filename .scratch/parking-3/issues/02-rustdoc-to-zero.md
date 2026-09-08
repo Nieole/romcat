@@ -141,3 +141,21 @@
 `crate name 丢弃 passed to --extern is not a valid ASCII identifier`：
 一旦包里的 bin 要链自己的 lib，cargo 递的 `--extern` 就走 ASCII 校验。
 包名已改成 `throwaway`，理由写在那份 `Cargo.toml` 的注释里。
+
+## 门禁实测（收尾，一趟五条）
+
+`cargo xtask gate --keep-going -j 6`，退出码 **0**，**5 条全绿**，合计 468 秒：
+
+```
+绿  fmt        1s  cargo fmt --all --check
+绿  check      7s  cargo check --workspace -j 6
+绿  clippy    15s  cargo clippy --workspace --all-targets --all-features -j 6
+绿  test     434s  cargo test --workspace --all-features -j 6
+绿  doc       11s  RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --lib --bins -j 6
+```
+
+`test` 那一条：66 个 `test result:` 行、**1,722 条通过、0 失败**（本票添的是 `xtask` 那 3 条，
+4 → 7）。**这个数随票涨，以 `cargo xtask gate` 自己的输出为准。**
+`doc` 那一条另印两行 cargo 的 `output filename collision`（`romcat_gui` 与 `xtask`），
+是 `--lib --bins` 的既定代价，不是 rustdoc 告警——退出码是 0，见 `Q209`。
+`Q349` 那条挂钟彩票（`任务六秒都没跑完`）这一趟没撞上。
