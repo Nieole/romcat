@@ -17,6 +17,12 @@ fn 工作目录() -> std::path::PathBuf {
     std::env::temp_dir().join("romcat-测试-关窗")
 }
 
+/// 这一屏用多少条合成数据。**故意不推到真库量级**（票 `parking-3/17`，挂单 `Q356`）。
+///
+/// 这几条验的是**命令发出去的次序**（`IMEAllowed(false)` 必须先于 `Close`），
+/// 一次库都不读。库有多大与这件事无关，造四万个变体只是给每条测试各加十几秒。
+const ROWS: u64 = 200;
+
 /// 一帧的输入：`closing` 为真时带上「窗口被要求关闭」这个事件。
 fn 输入(closing: bool) -> RawInput {
     let mut input = headless::input();
@@ -41,7 +47,7 @@ fn 跑一帧(ctx: &egui::Context, app: &mut App, closing: bool) -> Vec<ViewportC
 fn 关窗分两拍先关输入法再关窗() {
     let ctx = headless::context();
     let mut app = App::new(
-        demo::site(demo::synthetic(200).expect("造得出合成数据")).expect("开得出现场"),
+        demo::site(demo::synthetic(ROWS).expect("造得出合成数据")).expect("开得出现场"),
         工作目录(),
     );
 

@@ -133,8 +133,12 @@ pub fn synthetic(rows: u64) -> Result<Catalog, CatalogError> {
 /// 16,656 ＝ 未命中 11,823 ＋ 无判据 4,537 ＋ 命中但一条候选都没自动通过 296。
 pub const QUEUE_ROWS: u64 = 16_656;
 
-/// 真机上「无判据」那一档有多少条。
-const NO_EVIDENCE: u64 = 4_537;
+/// 真机上「无判据」那一档有多少条。见 [`QUEUE_ROWS`]。
+///
+/// **公开出去，是因为它是队列里唯一折不出内容锚的那一档**：无判据拿不到内容判据，
+/// 那正是它落进这一档的原因。界面测试要断「退到路径锚的正好是这一档」，抄一遍这个数
+/// 就等于把同一个数写两处——重量一次改一处，另一处悄悄分了岔。
+pub const NO_EVIDENCE: u64 = 4_537;
 
 /// 真机上「命中但一条都没自动通过」有多少条。**它们才是有候选可挑的那些。**
 const MATCHED: u64 = 296;
@@ -374,9 +378,9 @@ pub fn queue_with_zh(rows: u64) -> Result<(Catalog, Option<ZhMatch>), CatalogErr
                 key: key.clone(),
             });
             // **无判据那一档拿不到内容判据**——那正是它落进这一档的原因，
-            // 于是它的裁决只钉得住本机路径。别的都有 CRC-32 加大小。
-            // （**折得出内容锚的只有底下那两个**：`identify::content_print` 还要问一句
-            //  `entry_fact`，而这份数据只给那两个写了 `entry` 行——挂单 Q168。）
+            // 于是它的裁决只钉得住本机路径。别的都有 CRC-32 加大小，而且**折得出
+            // 内容锚**：`identify::content_print` 还要问一句 `entry_fact`，
+            // 底下那一批 `entry` 行给的就是它（挂单 `Q168`）。
             if state != State::NoEvidence {
                 hashes.push(ContentHash {
                     key: key.clone(),
@@ -441,23 +445,23 @@ pub fn queue_with_zh(rows: u64) -> Result<(Catalog, Option<ZhMatch>), CatalogErr
             work: QUEUE_WORKS[(at / 3) % QUEUE_WORKS.len()].to_string(),
             entry: ZH_ENTRY,
         });
-    // **这两个变体要有 `entry` 行**：内容判据走的是 `identify::content_print`，而那条路
+    // **每个变体都要有 `entry` 行**：内容判据走的是 `identify::content_print`，而那条路
     // 先问「这个成员在库里是个什么」（`entry_fact`）——没有那一行就答「压根没有」，
-    // 于是那条裁决只钉得住本机路径。**写在前头**：那一趟会把这几个键上算过的东西
-    // 当成重扫来的一起清掉（`Catalog::write`），摆在内容判据后面的话刚写的就没了。
-    let entries: Vec<EntryRecord> = zh
+    // 于是那条裁决只钉得住本机路径。从前只给中文离线源那两个写（挂单 `Q168`），
+    // 结果 `--demo` 打开的队列里**每一条**详情都写着「裁决钉在：路径——只在本机成立」，
+    // 而真库上那是一万两千多条「可导出分享」的裁决。
+    //
+    // **写在前头**：那一趟会把这些键上算过的东西当成重扫来的一起清掉
+    // （`Catalog::write`），摆在内容判据后面的话刚写的就没了。
+    let entries: Vec<EntryRecord> = variants
         .iter()
-        .flat_map(|zh| [zh.variant.clone(), zh.sibling.clone()])
-        .map(|key| EntryRecord {
+        .map(|variant| EntryRecord {
+            key: variant.key.clone(),
+            kind: EntryKind::File,
             meta: EntryMeta::Known {
-                len: variants
-                    .iter()
-                    .find(|variant| variant.key == key)
-                    .map_or(0, |variant| variant.bytes),
+                len: variant.bytes,
                 modified: None,
             },
-            key,
-            kind: EntryKind::File,
             non_utf8: false,
             verdict: Verdict::Added,
             sample: None,
@@ -825,17 +829,71 @@ const REGIONS: &[(&str, &str)] = &[
     ("Asia", "Ja,Zh-Hant,En"),
 ];
 
+/// 第 `i` 个变体落在哪个平台上。**平台跟着作品走，不跟着下标走。**
+///
+/// 真库里同一部作品在**同一个平台**上有好几个变体是常态——汉化版一个、日版一个，
+/// 而「首选变体」这件事整个是为它们存在的（ADR-0012）。从前这儿是
+/// `PLATFORMS[i % 17]`，而作品是 `WORKS[i / 3]`：一部作品名下那三个变体因此**必定**
+/// 落在三个不同的平台上，同作品同平台的兄弟一个都没有。二十个作品那会儿它靠一个巧合
+/// 蒙混过关（下标每隔 1,020 撞回同一对作品与平台），换到真库那个作品数就当场露馅
+/// ——`详情面板` 那条首选变体的测试挑不出一条有兄弟的变体来。
+///
+/// 现在：一部作品名下三个变体里**前两个同平台**、第三个落到下一个平台。
+/// 两种形状都造得出——同平台有兄弟的，与在这个平台上孤零零一个的。
+fn platform_of(i: u64) -> &'static str {
+    let at = i / 3 + (i % 3) / 2;
+    PLATFORMS[(at as usize) % PLATFORMS.len()]
+}
+
 /// 合成数据里第 `at` 个作品叫什么。
 ///
 /// 头 [`WORKS`] 条是那批手写的名字——繁简、假名、罗马数字、符号各占几条，字体那条
-/// 验收靠它们。再往后**按真库的形状补出来**：真库上 46,428 个变体收敛成 10,978 行，
-/// 二十个作品收不出那个形状，而主列表那条查询贵在**分出来多少组**，组数不对量出来的
-/// 就不是真库的代价（票 `gui-redesign/13`）。
+/// 验收靠它们。再往后**按真库的形状补出来**：真库上 [`BROWSE_VARIANTS`] 个变体收敛成
+/// [`BROWSE_LINES`] 行，二十个作品收不出那个形状，而主列表那条查询贵在**分出来多少组**，
+/// 组数不对量出来的就不是真库的代价（票 `gui-redesign/13`）。
 fn 作品名(at: usize) -> String {
     match WORKS.get(at) {
         Some(name) => (*name).to_string(),
         None => format!("{} 第{at}作", WORKS[at % WORKS.len()]),
     }
+}
+
+/// 真库有多少个**变体**（`docs/library-facts.md`，票 `gui-redesign/13` 那一趟量的基线）。
+///
+/// **它与 [`BROWSE_WORKS`]、[`BROWSE_LINES`] 是一组**：这么多变体、这么多作品，加上
+/// 1/13 那批「还没识别」的（一个变体一行），正好收出真库主列表的行数。三个数动一个
+/// 就得动另外两个，所以摆在一处——`--bench-browse`、`--bench-paging` 与那几份界面测试
+/// 引的都是这一组，不再各写各的（挂单 `Q156`）。
+pub const BROWSE_VARIANTS: u64 = 46_428;
+
+/// 那些变体收敛成多少个**作品**。见 [`BROWSE_VARIANTS`]。
+pub const BROWSE_WORKS: usize = 7_407;
+
+/// 主列表因此出多少**行**：`BROWSE_WORKS` 个作品，加上那批「还没识别」的一个变体一行。
+///
+/// **真库是 10,978 行**，而同样这些变体配二十个写死的作品只收出 **3,591 行**
+/// （`--bench-browse` 从前的默认是十万个变体配二十个作品，7,712 行）——主列表那条
+/// 查询的代价跟着分出来多少组走，组数不对量出来的就不是真库的代价。
+pub const BROWSE_LINES: u64 = 10_978;
+
+/// 这么多变体，按**真库的比例**该收敛成几个作品。
+///
+/// 界面测试并不是每条都跑得起四万多行（筛选、收藏、详情那几条几百行就够了），可它们
+/// 一样不该跑在「二十个作品」那个形状上：作品数一少，一个作品名下挂着几百个变体，
+/// 主列表、筛选面板与详情面板画出来的全是另一副样子。**给多少条就按比例造多少个作品**，
+/// 于是同一条路子上量出来的每一个数都是同一个形状的。
+///
+/// `rows` 恰好是 [`BROWSE_VARIANTS`] 时**正好**是 [`BROWSE_WORKS`]。至少一个。
+#[must_use]
+pub fn works_for(rows: u64) -> usize {
+    // **四舍五入那半格也走饱和加**：`saturating_mul` 之后直接 `+` 的话，`rows` 大到
+    // 让乘法饱和时（`--rows` 给一个天文数字）这一步在 debug 下当场 `overflow` 炸、
+    // release 下回绕成一个极小的作品数——正是饱和乘法本来要挡的那件事。
+    let works = rows
+        .saturating_mul(BROWSE_WORKS as u64)
+        .saturating_add(BROWSE_VARIANTS / 2)
+        / BROWSE_VARIANTS;
+    usize::try_from(works).unwrap_or(usize::MAX).max(1)
 }
 
 /// 一份**浏览**与**子库**用的中立库：`rows` 个变体，连作品、发行版、合集、
@@ -852,13 +910,15 @@ fn 作品名(at: usize) -> String {
 /// # Errors
 /// 建库或写库失败时返回错误。
 pub fn browse(rows: u64) -> Result<Catalog, CatalogError> {
-    browse_shaped(rows, WORKS.len())
+    browse_shaped(rows, works_for(rows))
 }
 
 /// 同 [`browse`]，但**作品有几个由调用方定**——也就是那 `rows` 个变体收敛成多少行。
 ///
-/// 主列表那条查询的代价跟着**组数**走，而 [`browse`] 那二十个作品收出来的是
-/// 3,596 行：真库是 10,978 行。量翻页要的是后者（票 `gui-redesign/13`）。
+/// 主列表那条查询的代价跟着**组数**走（票 `gui-redesign/13`）。[`browse`] 从前写死
+/// `WORKS` 那二十个，[`BROWSE_VARIANTS`] 个变体只收出 3,591 行；现在它按 [`works_for`] 折，
+/// 给多少条都是真库那个形状。这条留着，是因为**翻页那一趟要单独拧组数**：
+/// 「同样多的变体收敛成多少行，查询就慢多少」正是它量的东西。
 ///
 /// # Errors
 /// 建库或写库失败时返回错误。
@@ -873,7 +933,7 @@ pub fn browse_shaped(rows: u64, works_count: usize) -> Result<Catalog, CatalogEr
 
     let works_count = works_count.max(1);
     let key_of = |i: u64| {
-        let platform = PLATFORMS[(i as usize) % PLATFORMS.len()];
+        let platform = platform_of(i);
         let work = 作品名((i as usize / 3) % works_count);
         let mark = MARKS[(i as usize / 7) % MARKS.len()];
         format!("{DEMO_ROOT}/{platform}/{work}（{mark}）#{i:06}.zip")
@@ -930,7 +990,7 @@ pub fn browse_shaped(rows: u64, works_count: usize) -> Result<Catalog, CatalogEr
         }
         variants.push(Variant {
             main_key: key.clone(),
-            platform: (i % 17 != 3).then(|| PLATFORMS[(i as usize) % PLATFORMS.len()].to_string()),
+            platform: (i % 17 != 3).then(|| platform_of(i).to_string()),
             rule: if i % 11 == 0 {
                 SPLIT_VOLUME_RULE.to_string()
             } else {
@@ -1006,7 +1066,7 @@ pub fn browse_shaped(rows: u64, works_count: usize) -> Result<Catalog, CatalogEr
                         accepted: true,
                         source: "合成数据".to_string(),
                         dat: "合成.dat".to_string(),
-                        platform: PLATFORMS[(i as usize) % PLATFORMS.len()].to_string(),
+                        platform: platform_of(i).to_string(),
                         game: format!(
                             "{} ({})",
                             作品名((i as usize / 3) % works_count),

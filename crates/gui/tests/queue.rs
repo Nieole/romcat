@@ -309,6 +309,16 @@ fn 裁决即时写进沉淀库并从队列移除() {
     let applied = *screen.applied().expect("落下了就该有账");
     assert_eq!(applied.verdicts, 这一批 as u64);
     assert_eq!(applied.matched, 这一批 as u64, "中立库该当场兑现成命中");
+    // **这一批全钉在内容上**：[ACG汉化组] 那 129 条落在「命中但一条都没自动通过」
+    // 那一档，各自都有 CRC-32 加大小。补 `entry` 行之前这个数是 **2**（挂单 `Q168`
+    // ——全库只有中文离线源撞上的那两个变体有 `entry` 行），另外 127 条
+    // 「可导出分享」的裁决被记成只在本机成立。
+    assert_eq!(
+        applied.content_anchored, 这一批 as u64,
+        "这一批该整批钉在内容上，实际只有 {} 条",
+        applied.content_anchored,
+    );
+    assert_eq!(applied.path_anchored, 0, "这一批里不该有退到路径锚的");
 
     // 沉淀库里真的有这些条，而且**从队列里消失了**。
     let counts = app.site().store.counts().expect("读得出沉淀库");
@@ -852,6 +862,82 @@ fn 逐条时屏上真的摆着文件名路径与候选的完整依据() {
     assert!(
         屏上.contains(item.candidates[0].confidence.label()),
         "屏上没标出这条候选的置信度",
+    );
+}
+
+/// 拿得到判据的那些，详情里说的是**内容锚**——不再每一条都退到路径（挂单 `Q168`）。
+///
+/// 内容判据走 `identify::content_print`，而那条路先问一句 `entry_fact`：合成数据从前
+/// 只给中文离线源那两个变体写了 `entry` 行，别的一万六千多条一律答「压根没有」，
+/// 于是 `--demo` 打开的队列里**每一条**详情都写着「裁决钉在：路径——只在本机成立」。
+///
+/// **两种锚都要有得看**：无判据那一档拿不到内容判据（那正是它落进那一档的原因），
+/// 它只钉得住本机路径——一屏全是内容锚与一屏全是路径锚一样，都说明这份数据是假的。
+#[test]
+fn 拿得到判据的那些钉在内容上而不是每一条都退到路径() {
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    // 先切到**逐条看整个队列**：底下要停的那两条未必落在展开着的那一批里。
+    {
+        let (screen, _) = app.queue_and_site();
+        if let Some(scope) = screen.scope() {
+            screen.open_batch(&scope.shape);
+        }
+        screen.show_one_by_one();
+    }
+    跑(&ctx, &mut app, 1);
+    let 选中 = app.queue().queue().selected().to_vec();
+    let 挑一条 = |要的: bool| {
+        选中
+            .iter()
+            .find(|item| (item.state == State::NoEvidence) == 要的)
+            .map(|item| item.variant.key.clone())
+    };
+    let 有判据的 = 挑一条(false).expect("队列里该有拿得到判据的");
+    let 无判据的 = 挑一条(true).expect("队列里该有无判据的");
+
+    停在(&ctx, &mut app, &有判据的);
+    let 屏上 = 详情滚一趟(&ctx, &mut app);
+    assert!(
+        屏上.contains(verdict::ANCHOR_CONTENT),
+        "拿得到判据的这一条，详情里没写它钉在内容上：{有判据的}",
+    );
+
+    停在(&ctx, &mut app, &无判据的);
+    let 屏上 = 详情滚一趟(&ctx, &mut app);
+    assert!(
+        屏上.contains(verdict::ANCHOR_PATH),
+        "无判据的这一条该如实说只钉得住本机路径：{无判据的}",
+    );
+}
+
+/// 整条队列里**钉得住内容锚的有多少条**——补 `entry` 行之前全库只有 **2** 条
+/// （中文离线源撞上的那两个变体，挂单 `Q168`）。
+///
+/// 屏上那句「要落下 N 条：钉在内容上的 X 条（可导出分享），只钉得住本机路径的 Y 条」
+/// 印的就是这两个数。**它们该分在无判据那道线上**：无判据那一档拿不到内容判据，
+/// 那正是它落进这一档的原因；别的都有 CRC-32 加大小，也都该折得出内容锚。
+#[test]
+fn 整条队列里只有无判据那一档退到路径锚() {
+    let app = 界面(demo::QUEUE_ROWS);
+    let catalog = &app.site().catalog;
+    let (mut 内容, mut 路径) = (0_u64, 0_u64);
+    for row in catalog.queue_rows().expect("读得动队列") {
+        if romcat_core::identify::content_print(catalog, &row.variant)
+            .expect("算得动内容判据")
+            .is_some()
+        {
+            内容 += 1;
+        } else {
+            路径 += 1;
+        }
+    }
+    assert_eq!(内容 + 路径, demo::QUEUE_ROWS, "队列该是这么长");
+    assert_eq!(路径, demo::NO_EVIDENCE, "退到路径锚的该正好是无判据那一档",);
+    assert_eq!(
+        内容,
+        demo::QUEUE_ROWS - demo::NO_EVIDENCE,
+        "钉得住内容锚的条数不对——`entry` 行是不是又只写了一部分",
     );
 }
 
