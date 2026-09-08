@@ -94,6 +94,36 @@
 //! 占位能把「查完到改名之间」那道缝也焊死，代价是崩在中间会在落点上留一个 0 字节、
 //! 名字还正正经经的文件——那比 `.romcat-part` 难认得多，而且从此挡住这个落点。
 //! 眼下这个 bug 不是竞态（是「维护者早就拷进去了」），不值得换一种新的失败方式。
+//!
+//! ## 八、问目标的那几句话走一道**可注入的**接缝
+//!
+//! 上面那道闸问目标三句：**这条键在盘上是哪一条**（`on_target`，删除那一步找盘上真名
+//! 走的也是它）、**折起来有没有东西占着**（`occupied_by`）、**目录段真名是什么**
+//! （`settled`）。三句都从 [`Sources::target`] 那道 [`LibraryFs`] 上问——与[看一遍
+//! 目标](fn@super::observe)同一个 trait、同一条纪律：那个 trait 根本没有写的办法
+//! （ADR-0004 的做法）。
+//!
+//! **为什么非有它不可**：这道闸的正确性在**两种折叠语义**上不是同一件事，而一台机器上
+//! 只有一种。不分大小写的目标（ADR-0015 定的 exFAT / FAT32、ADR-0018 那台默认 APFS 的
+//! 主力机、Windows）上，卡里那份 `GB/Tetris.zip` 与我们要写的 `GB/tetris.zip`
+//! **就是同一个文件**——挡不住就是把维护者的东西顶掉；分大小写的 ext4 上它们是两个
+//! 文件，挡不住只是在旁边多写一份。开发机造不出前一种挂载点，于是「敏感那边挡得住，
+//! 不敏感那边只会更容易挡住」这句话挂了两轮都只是**推理**（挂单 `Q135`）。这是整条
+//! 链路上唯一会弄丢维护者数据的地方，推理不够。造视图见
+//! [`testing::target`](crate::testing::target)。
+//!
+//! **它不是什么**：
+//!
+//! - **不是一层通用的文件系统抽象。** 接缝只加在 [`run`] 对外那**一个**入口上，没有
+//!   下沉到每一次文件操作：写那一侧——建目录、落 `.romcat-part`、`sync_all`、
+//!   `rename`、写完读回戳——照旧是 `std::fs`，一个字节都不经过它。真下沉下去，测试
+//!   就会在一份假的盘上验「原子改名」与「`sync_all` 不能省」，而那两条防的正是**真盘
+//!   上**的断电与拔卡（本模块第二节），在内存里验等于没验。
+//! - **不许拿它去替换别处的真实文件访问。** 主库那一侧有它自己的接缝
+//!   （[`Sources::library`]，ADR-0004）；**媒体池**、转换缓存、硬链接探测都是工具自己
+//!   的地盘，一律走真盘。
+//! - **不注入就是真盘**：调用方给 [`RealFs`](crate::fs::RealFs) 就是原来那条路，
+//!   命令行与界面都这么给。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Write};
@@ -235,6 +265,15 @@ pub struct Sources<'a> {
     /// 用 `Option` 而不是一份空表当哨兵：**盘不在位与「这趟不需要盘」是两件事**，
     /// 混成一个值之后，前者会变成一堆「主库里找不到 X」而不是一句「插上外置盘」。
     pub library_roots: Option<&'a Roots>,
+    /// **目标设备的只读视图**：那道落点闸问盘的三句话走它（模块文档八）。
+    ///
+    /// 真跑一律给 [`RealFs`](crate::fs::RealFs)。测试拿一份指定**折叠语义**的
+    /// [`MemFs`](crate::fs::MemFs) 塞进来，就能在一台造不出那种挂载点的机器上验
+    /// 「不分大小写的卡上照样挡得住」——见 [`testing::target`](crate::testing::target)。
+    ///
+    /// **只读、而且只管读**：写那一侧照旧是 `std::fs`。它与 [`Self::library`] 是两道
+    /// 接缝、两个东西——一道对着 10 TB 的主库，一道对着手里那张卡。
+    pub target: &'a dyn LibraryFs,
     /// 子库根，**系统给的原始形式**（ADR-0020、挂账 D82）。
     pub target_root: &'a Path,
     /// **媒体池**里的落点：相对子库根的路径 → 池里那个文件。
@@ -702,7 +741,7 @@ fn copy_stream(reader: &mut dyn Read, temp: &Path, cancel: &CancelToken) -> io::
 /// 分解敏感的文件系统上可能是分解形式（ADR-0020）。拼出来打不开会被当成
 /// 「它已经不在了」——而在删除这一侧，那意味着**该删的没删**。
 fn on_target(sources: &Sources<'_>, key: &str) -> Option<PathBuf> {
-    real_path(&crate::fs::RealFs, sources.target_root, key)
+    real_path(sources.target, sources.target_root, key)
 }
 
 /// 这一份该**落在**目标上的哪条路径，以及**那儿现在是不是已经有东西了**。
@@ -770,7 +809,7 @@ fn occupied_by(sources: &Sources<'_>, key: &str) -> Option<PathBuf> {
         }
         let mut next: Vec<PathBuf> = at
             .iter()
-            .flat_map(|dir| folded_children(dir, segment))
+            .flat_map(|dir| folded_children(sources.target, dir, segment))
             .collect();
         if next.is_empty() {
             return None;
@@ -795,10 +834,9 @@ fn occupied_by(sources: &Sources<'_>, key: &str) -> Option<PathBuf> {
 /// ——上挡得住；剩下的只有「大小写敏感的盘 + 列不开的目录 + 只差大小写的占用」那一种，
 /// 后果是在维护者那份**旁边**多写一份（那盘上两份本来就能并存），不是顶掉它。
 /// 要补上只能把「列不开」与「列开了没找到」分成两态一路带上来，那是另一张票的形状。
-fn folded_children(dir: &Path, segment: &str) -> Vec<PathBuf> {
+fn folded_children(fs: &dyn LibraryFs, dir: &Path, segment: &str) -> Vec<PathBuf> {
     let wanted = crate::path::fold(segment);
-    crate::fs::RealFs
-        .read_dir(dir)
+    fs.read_dir(dir)
         .unwrap_or_default()
         .into_iter()
         .map(|entry| entry.path)
@@ -839,7 +877,7 @@ fn settled(
     if let Some(at) = dirs.get(dir) {
         return at.join(name);
     }
-    let Some(at) = real_dir(&crate::fs::RealFs, sources.target_root, dir) else {
+    let Some(at) = real_dir(sources.target, sources.target_root, dir) else {
         return fallback;
     };
     dirs.insert(dir.to_string(), at.clone());
