@@ -12,7 +12,8 @@
 
 use std::time::Duration;
 
-use romcat_core::task::Ending;
+use romcat_core::collection::CollectionError;
+use romcat_core::task::{Cutoff, Ending, Halted};
 use romcat_gui::app::{App, View};
 use romcat_gui::task::Product;
 use romcat_gui::{demo, headless};
@@ -78,7 +79,7 @@ fn 排一趟占位的(app: &mut App) -> u64 {
             task.step(&format!("走到第 {at} 块"))?;
             std::thread::sleep(Duration::from_millis(5));
         }
-        Err("这一趟本来就只是占着位子".to_string())
+        Err(Cutoff::failed("这一趟本来就只是占着位子"))
     })
 }
 
@@ -191,7 +192,7 @@ fn 失败的那一趟在历史里说得出哪一步为什么() {
         task.steps(12);
         task.step("读子库")?;
         task.step("看一眼目标")?;
-        Err("卡不在位：/Volumes/掌机".to_string())
+        Err(Cutoff::failed("卡不在位：/Volumes/掌机"))
     });
     画到台上空了(&ctx, &mut app);
 
@@ -205,6 +206,63 @@ fn 失败的那一趟在历史里说得出哪一步为什么() {
         record.ending.render().contains("看一眼目标"),
         "画出来的那句话没说是哪一步：{}",
         record.ending.render(),
+    );
+}
+
+#[test]
+fn 按下停下之后任务屏历史写的是停了那一类_不是失败() {
+    // 维护者在界面上按一下「停下」，那一趟就得显示成**停了**——不然他会以为自己按坏了
+    // 什么，去找哪儿出了错。
+    //
+    // 从前这一档靠**那句话正好是核心库 `Halted` 交出来的那一句**分。于是界面上任何一处
+    // 措辞与它差着字，按停就悄悄变成了失败——刮削那几处手写的「按停了」三个字正是
+    // 这么掉进去的（挂单 `Q151`）。**这一条要能在判据改回字符串比对时当场红**，
+    // 所以它交上来的那句话故意与核心库那一句不一样：整批收藏那条路交的正是这一句。
+    let ctx = headless::context();
+    let mut app = 开一个();
+    app.show_view(View::Tasks);
+
+    let 差着字的那一句 = CollectionError::from(Halted).to_string();
+    assert_ne!(
+        差着字的那一句,
+        Halted.to_string(),
+        "两句话一样的话，这一条就什么都没验",
+    );
+
+    let id = app.tasks_mut().queue("放进「收藏」· 200 个变体", |task| {
+        task.steps(1);
+        task.step("为 200 个变体折锚")?;
+        for _ in 0..占位步数 {
+            // 整批收藏那条路原样：核心库把「被按停」折进自己那个错误枚举再交上来
+            // （`collection::plan` 里那一段一样是 `check`）。
+            task.check().map_err(CollectionError::from)?;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(一份产物())
+    });
+    跑一帧(&ctx, &mut app);
+    // 界面上那颗「停下」按下去走的就是它。
+    app.tasks_mut().stop(id);
+    画到台上空了(&ctx, &mut app);
+
+    let record = &app.tasks().history()[0];
+    assert_eq!(record.id, id, "历史头一条不是刚按停的那一趟");
+    assert_eq!(
+        record.ending,
+        Ending::Stopped,
+        "按了停下，历史那一行却写成了「{}」——判据又回到那句话上了",
+        record.ending.render(),
+    );
+
+    // 屏上那一行也得是「停了」那一类。
+    let 屏上 = 一帧的字(&ctx, &mut app);
+    assert!(
+        屏上.lines().any(|line| line.trim() == "按停了"),
+        "任务屏历史那一行不是「停了」那一类：\n{屏上}",
+    );
+    assert!(
+        !屏上.lines().any(|line| line.contains("失败")),
+        "按停的那一趟在屏上说成了失败：\n{屏上}",
     );
 }
 
@@ -246,7 +304,7 @@ fn 四种收场在任务屏历史里各画各的话() {
     app.tasks_mut().queue("扫描 · 主库", |task| {
         task.steps(3);
         task.step("认根")?;
-        Err("卡不在位".to_string())
+        Err(Cutoff::failed("卡不在位"))
     });
     画到台上空了(&ctx, &mut app);
 

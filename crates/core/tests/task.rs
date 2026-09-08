@@ -22,11 +22,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 
 use romcat_core::catalog::{Catalog, CatalogError};
+use romcat_core::collection::CollectionError;
 use romcat_core::fs::{DirEntry, LibraryFs, ReadSeek, RealFs};
 use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::sublibrary::{Rule, Sublibrary};
 use romcat_core::sync;
-use romcat_core::task::{Board, Ending, Handle};
+use romcat_core::task::{Board, Cutoff, Ending, Halted, Handle};
 use romcat_core::testing::sample::zip;
 use romcat_core::testing::{TempDir, temp_dir};
 
@@ -86,7 +87,7 @@ impl 现场 {
         }
     }
 
-    fn 排一次(&self, task: &Handle) -> Result<sync::Prepared, String> {
+    fn 排一次(&self, task: &Handle) -> Result<sync::Prepared, Cutoff> {
         sync::prepare(
             &self.catalog,
             self.工作区.path(),
@@ -200,10 +201,13 @@ fn 按停下之后一个字节都没动而且再排一次照样排得出() {
 
     let task = Handle::new();
     task.stop();
-    let message = 场.排一次(&task).expect_err("已经按了停下，不该排出一份来");
-    assert!(
-        message.contains("停"),
-        "停下来的理由该说清是被按停了：{message}",
+    let 为什么 = 场.排一次(&task).expect_err("已经按了停下，不该排出一份来");
+    // **停下来的理由由类型说**，不由那句话说：`Cutoff::Halted` 一个字都不带，
+    // 于是这一句怎么改都不可能让任务台把它记成「失败」。
+    assert_eq!(
+        为什么,
+        Cutoff::Halted,
+        "停下来的理由该说清是被按停了，实际是 {为什么:?}",
     );
 
     assert_eq!(
@@ -362,11 +366,12 @@ fn 算一遍容量按停之后一个字节都没动() {
 
     let task = Handle::new();
     task.stop();
-    let message = romcat_core::sublibrary::survey(&场.catalog, &list, &task)
+    let 为什么 = romcat_core::sublibrary::survey(&场.catalog, &list, &task)
         .expect_err("已经按了停下，不该算出一份来");
-    assert!(
-        message.contains("停"),
-        "停下来的理由该说清是被按停了：{message}",
+    assert_eq!(
+        为什么,
+        Cutoff::Halted,
+        "停下来的理由该说清是被按停了，实际是 {为什么:?}",
     );
     assert_eq!(
         场.快照(),
@@ -410,7 +415,7 @@ fn 已经按了停下就不在目标设备上建目标根() {
 /// 走 `run_here` 而不是 `queue`：就地跑就是当场跑完，不必等，也不必把库交给别的线程。
 fn 上台跑一趟<T: Send + 'static>(
     name: &str,
-    job: impl FnOnce(&Handle) -> Result<T, String>,
+    job: impl FnOnce(&Handle) -> Result<T, Cutoff>,
 ) -> Ending<T> {
     let mut board: Board<T> = Board::new();
     board.run_here(name, job);
@@ -474,7 +479,7 @@ fn 同步按停时已经落下东西的那一趟在台上记成停在半路而�
             开过几个: AtomicUsize::new(0),
         };
         场.同步一次看着(&prepared, task, &视图)
-            .map_err(|error| error.to_string())
+            .map_err(|error| Cutoff::failed(error.to_string()))
     });
 
     let Ending::Halfway {
@@ -514,7 +519,7 @@ fn 同步按停时一件都没落的那一趟也记成停在半路留下的只�
     let ended = 上台跑一趟("同步 · 掌机", |task| {
         task.stop();
         场.同步一次(&prepared, task)
-            .map_err(|error| error.to_string())
+            .map_err(|error| Cutoff::failed(error.to_string()))
     });
 
     let Ending::Halfway {
@@ -548,7 +553,8 @@ fn 扫描被叫停时在台上记成停在半路而且说得出断点写下了()
 
     let ended = 上台跑一趟("扫描 · 库", |task| {
         task.stop();
-        scan::scan(&RealFs::new(), &mut catalog, &options, task).map_err(|error| error.to_string())
+        scan::scan(&RealFs::new(), &mut catalog, &options, task)
+            .map_err(|error| Cutoff::failed(error.to_string()))
     });
 
     let Ending::Halfway {
@@ -578,7 +584,8 @@ fn 没设断点的那一趟被叫停时不许说断点写下了() {
 
     let ended = 上台跑一趟("扫描 · 库", |task| {
         task.stop();
-        scan::scan(&RealFs::new(), &mut catalog, &options, task).map_err(|error| error.to_string())
+        scan::scan(&RealFs::new(), &mut catalog, &options, task)
+            .map_err(|error| Cutoff::failed(error.to_string()))
     });
 
     let Ending::Halfway { left_behind, .. } = ended else {
@@ -587,5 +594,37 @@ fn 没设断点的那一趟被叫停时不许说断点写下了() {
     assert!(
         left_behind.contains("没设断点"),
         "没设断点却说得像有断点：{left_behind}",
+    );
+}
+
+#[test]
+fn 措辞与核心库那一句差着字的按停照旧记成停了() {
+    // 「停了」与「失败」从前靠**那句话正好是 `Halted` 交出来的那一句**分开。于是它对
+    // 措辞敏感到了荒唐的地步：界面刮削那几处把被按停折成自己手写的「按停了」三个字，
+    // 那一趟就整趟记成了「失败」——人按了一下停下，屏上却说出了错（挂单 `Q151`）。
+    //
+    // 眼下分档的是**类型**：`Cutoff::Halted` 那一支一个字都不带，任务台手里没有可比的
+    // 东西。这一条把那件事钉住——**它交上来的那句话与 `Halted` 那一句差着字**，
+    // 判据要是回到字符串比对，这一趟当场记成「失败」。
+    let 差着字的那一句 = CollectionError::from(Halted).to_string();
+    assert_ne!(
+        差着字的那一句,
+        Halted.to_string(),
+        "这条测试的全部意思就是两句话不一样；一样了它就什么都没验",
+    );
+
+    let ended: Ending<()> = 上台跑一趟("放进「收藏」· 200 个变体", |task| {
+        task.stop();
+        // 整批收藏那条路原样：核心库把 `Halted` 折进自己那个错误枚举再交上来
+        // （`browse::Screen::settle_collection` 认的就是这一支）。
+        task.step("为 200 个变体折锚")
+            .map_err(CollectionError::from)?;
+        Ok(())
+    });
+    assert_eq!(
+        ended,
+        Ending::Stopped,
+        "把按停记成了「{}」——判据又回到那句话上了",
+        ended.render(),
     );
 }

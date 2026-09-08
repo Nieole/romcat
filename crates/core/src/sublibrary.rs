@@ -49,7 +49,7 @@ use serde::Serialize;
 
 use crate::catalog::{Catalog, CatalogError};
 use crate::scrape::{AnchorKind, Field};
-use crate::task::Handle;
+use crate::task::{Cutoff, Handle};
 
 pub use rule::{Bound, Clause, Dimension, Group, Join, Node, Op, Rule, RuleError};
 
@@ -798,13 +798,14 @@ pub fn facts(catalog: &Catalog) -> Result<Vec<VariantFacts>, CatalogError> {
 /// 所以被叫停时停在哪儿都是干净的——一个字节都没写，再算一次就是。
 ///
 /// # Errors
-/// 中立库读不动时返回一句给人看的话；被叫停时返回
-/// [`Halted`](crate::task::Halted) 那句话。
+/// 中立库读不动时返回 [`Cutoff::Failed`]；被叫停时返回
+/// [`Cutoff::Halted`]——**那是两个不同的支，不是两句
+/// 不同的话**，任务台按它分「停了」与「失败」。
 pub fn survey(
     catalog: &Catalog,
     sublibraries: &[Sublibrary],
     task: &Handle,
-) -> Result<BTreeMap<String, report::SelectionReport>, String> {
+) -> Result<BTreeMap<String, report::SelectionReport>, Cutoff> {
     // 折事实那一步 + 一台设备一步。
     task.steps(u32::try_from(sublibraries.len() + 1).unwrap_or(u32::MAX));
     task.step("折事实")?;

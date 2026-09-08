@@ -19,6 +19,7 @@ use romcat_core::catalog::scrape::{Harvested, HarvestedMedia};
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::preview;
 use romcat_core::scrape::{AnchorKind, MediaKind};
+use romcat_core::task::Cutoff;
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_gui::app::{App, View};
 use romcat_gui::media::Look;
@@ -482,7 +483,7 @@ fn 任务在跑时首帧先攒着不去跟别人抢写锁() {
             while !它.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(5));
             }
-            Err("测试用的占位活".to_string())
+            Err(Cutoff::failed("测试用的占位活"))
         });
     }
 

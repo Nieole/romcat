@@ -29,7 +29,7 @@ use crate::path;
 use crate::scrape::Priorities;
 use crate::scrape::pool::MediaPool;
 use crate::sublibrary::{self, Selected, Sublibrary};
-use crate::task::Handle;
+use crate::task::{Cutoff, Handle};
 use crate::workspace;
 
 use super::{Desired, Manifest, Options, Plan, TargetState};
@@ -183,15 +183,17 @@ const STEPS: u32 = 12;
 /// 没人按停下，它就只是白记几行进度。
 ///
 /// # Errors
-/// 子库不在、前端格式没有适配器、中立库读不动、目标看不了时返回一句给人看的话；
-/// 被叫停时返回 [`Halted`](crate::task::Halted) 那句话。
+/// 子库不在、前端格式没有适配器、中立库读不动、目标看不了时返回
+/// [`Cutoff::Failed`]；被叫停时返回
+/// [`Cutoff::Halted`]——**那是两个不同的支，不是两句
+/// 不同的话**，任务台按它分「停了」与「失败」。
 pub fn prepare(
     catalog: &Catalog,
     workspace: &Path,
     name: &str,
     request: &Request<'_>,
     task: &Handle,
-) -> Result<Prepared, String> {
+) -> Result<Prepared, Cutoff> {
     task.steps(STEPS);
     task.step("读子库")?;
     let mut sublibrary = catalog

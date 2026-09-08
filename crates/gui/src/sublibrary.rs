@@ -84,7 +84,7 @@ use romcat_core::sublibrary::{
     BrokenRule, ExceptionRow, Gauge, LoadedSelection, Rule, StoredRule, Sublibrary, Trim, rule,
 };
 use romcat_core::sync::{self, Act, Outcome, Prepared};
-use romcat_core::task::{Ending, Finished, Handle};
+use romcat_core::task::{Cutoff, Ending, Finished, Handle};
 
 use crate::table::ROW_HEIGHT;
 use crate::task::{Product, Tasks};
@@ -1886,7 +1886,7 @@ fn run_sync(
     prepared: &Prepared,
     library_roots: Option<&romcat_core::catalog::Roots>,
     task: &Handle,
-) -> Result<Outcome, String> {
+) -> Result<Outcome, Cutoff> {
     let sources = sync::Sources {
         library: &romcat_core::fs::RealFs,
         library_roots,
@@ -1910,7 +1910,9 @@ fn run_sync(
         &sources,
         task,
     )
-    .map_err(|error| format!("目标写不了：{error}"))
+    // **同步被按停时不走这条**：它照旧返回 `Ok`，另报一句「停在半路」，
+    // 好让那份**清单**留得下来（ADR-0015）。走到这儿的都是真出错了。
+    .map_err(|error| Cutoff::failed(format!("目标写不了：{error}")))
 }
 
 /// **容量超限**那一段：超了多少、按体积排序的裁剪建议。

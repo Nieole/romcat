@@ -59,9 +59,70 @@ impl std::fmt::Display for Halted {
 
 impl std::error::Error for Halted {}
 
-impl From<Halted> for String {
-    fn from(halted: Halted) -> Self {
-        halted.to_string()
+/// 一趟活**交不出产物**时交上来的东西：要么是**被按停了**，要么是**真出错了**。
+///
+/// ## 它存在只为一件事：让「停了」与「失败」由类型分开
+///
+/// 从前这两样共用一条 `String`，[`Board`] 只好按**那句话正好是 [`Halted`] 交出来的
+/// 那一句**分档。于是它对措辞敏感到了荒唐的地步：界面刮削那几处把被按停折成自己手写的
+/// 「按停了」三个字，那一趟就整趟记成了「失败」——人按了一下停下，屏上却说出了错，
+/// 于是去找哪儿坏了。
+///
+/// 换成这个枚举之后，[`Halted`](Self::Halted) 那一支**一个字都不带**：任务台手里
+/// 根本没有可比的话，界面上任何一处措辞怎么改都动不了分档。会写话的只剩
+/// [`Failed`](Self::Failed) 那一支，而它本来就该被原样印出来。
+///
+/// ## 长入口该交哪一支
+///
+/// - 走不到头、也没留下东西：`?` 一下 [`Handle::step`] 就是了——[`Halted`] 自己折过来。
+/// - 走不到头、可**留下了东西**：**别走这条**。照旧返回 `Ok`，另报一句
+///   [`Handle::halfway`]，那一趟才记成 [`Ending::Halfway`]（ADR-0015）。
+/// - 真出错了：[`Cutoff::failed`]，或者把一句 `String` `?` 上来。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cutoff {
+    /// **被按停了。** 停在两步之间，什么都没留下——记成 [`Ending::Stopped`]。
+    ///
+    /// **这一支不带话**：带了话就又有东西可比了。给人看的那一句由 [`Ending::render`] 出。
+    Halted,
+    /// **真出错了**：一句给人看的话，记成 [`Ending::Failed`]。
+    ///
+    /// 停在哪一步不必自己说——任务台从把手上的进度里取。
+    Failed(String),
+}
+
+impl Cutoff {
+    /// 折一句「真出错了」。
+    #[must_use]
+    pub fn failed(why: impl Into<String>) -> Self {
+        Self::Failed(why.into())
+    }
+}
+
+// **这个类型特意不实现 `Display`，也不是一个 `std::error::Error`。**
+//
+// 它是一道**两选一的开关**，不是一句给人看的话。给了它 `Display`，
+// 判据链上任何一处 `to_string()` 就又把「停了」折回一句可比的字符串了——
+// 而且这一次是这个类型自己递上去的。想要那句话的人得先 `match` 一下，
+// 于是「我这儿收到的到底是哪一档」在源码上永远看得见。
+//
+// [`Halted`] 自己照旧有 `Display`（它是个 `Error`，领域错误枚举拿它当 `source`），
+// 只是那句话再也到不了任务台手上：`Cutoff::Halted` 不带它。
+
+impl From<Halted> for Cutoff {
+    fn from(_: Halted) -> Self {
+        Self::Halted
+    }
+}
+
+impl From<String> for Cutoff {
+    fn from(why: String) -> Self {
+        Self::Failed(why)
+    }
+}
+
+impl From<&str> for Cutoff {
+    fn from(why: &str) -> Self {
+        Self::Failed(why.to_string())
     }
 }
 
@@ -378,8 +439,9 @@ pub struct Finished<T> {
     pub ended: Ending<T>,
 }
 
-/// 一趟活本身：收一个把手，交出一份产物或者一句给人看的错话。
-type Job<T> = Box<dyn FnOnce(&Handle) -> Result<T, String> + Send>;
+/// 一趟活本身：收一个把手，交出一份产物，或者一个说清「是被按停了还是真出错了」的
+/// [`Cutoff`]。
+type Job<T> = Box<dyn FnOnce(&Handle) -> Result<T, Cutoff> + Send>;
 
 /// 一趟排上队、还没开跑的活。
 struct Queued<T> {
@@ -397,7 +459,7 @@ struct Running<T> {
     /// 记进历史的那个数由干活那条线程自己掐表（见 [`Board::start_next`]）。
     started: Instant,
     /// 干完之后带回来的：产物，以及**那条线程自己量的耗时**。
-    thread: JoinHandle<(Result<T, String>, Duration)>,
+    thread: JoinHandle<(Result<T, Cutoff>, Duration)>,
 }
 
 /// **任务台**：排队、进度、可停、历史。**它不发起操作，只承接。**
@@ -494,7 +556,7 @@ impl<T: Send + 'static> Board<T> {
     pub fn queue(
         &mut self,
         name: impl Into<String>,
-        job: impl FnOnce(&Handle) -> Result<T, String> + Send + 'static,
+        job: impl FnOnce(&Handle) -> Result<T, Cutoff> + Send + 'static,
     ) -> u64 {
         let id = self.take_id();
         self.queued.push_back(Queued {
@@ -517,7 +579,7 @@ impl<T: Send + 'static> Board<T> {
     pub fn run_here(
         &mut self,
         name: impl Into<String>,
-        job: impl FnOnce(&Handle) -> Result<T, String>,
+        job: impl FnOnce(&Handle) -> Result<T, Cutoff>,
     ) -> u64 {
         let id = self.take_id();
         let name = name.into();
@@ -583,7 +645,10 @@ impl<T: Send + 'static> Board<T> {
             Ok(pair) => pair,
             // 线程炸了。**不静默结束**：这也是一种失败，得说出口。
             // 它没能带回自己量的耗时，只好退回主线程这边的表。
-            Err(_) => (Err("那条线程炸了。".to_string()), running.started.elapsed()),
+            Err(_) => (
+                Err(Cutoff::failed("那条线程炸了。")),
+                running.started.elapsed(),
+            ),
         };
         self.settle(running.id, running.name, elapsed, &running.handle, result);
         self.start_next();
@@ -597,20 +662,23 @@ impl<T: Send + 'static> Board<T> {
         name: String,
         elapsed: Duration,
         handle: &Handle,
-        result: Result<T, String>,
+        result: Result<T, Cutoff>,
     ) {
         // **被按停的那一趟按「停了」记，不按「失败」记。** 两者在界面上长得一样的话，
         // 用户会以为自己按坏了什么。
         //
-        // 判据是**那句话正是 [`Halted`] 交出来的那一句**，不是「按过停下就算停了」：
-        // 按下停下之后、走到下一个分界处之前，活本身也可能真的出错（卡拔了、盘满了）。
-        // 只看 `handle.stopped()` 的话那条错误文本会被整条丢掉，界面上却说
-        // 「一个字节都没动，再排一次就是」——那是骗人。
+        // **判据是它交上来的是哪一支，不是它说了什么。** 从前这儿比的是「那句话正是
+        // `Halted` 交出来的那一句」，于是界面上任何一处措辞改动都能把「停了」悄悄变成
+        // 「失败」——刮削那几处手写的「按停了」三个字就这么把按停记成了出错。
+        // [`Cutoff::Halted`] 一个字都不带，这儿也就没有可比的东西了。
+        //
+        // 它也不看「按过停下没有」：按下停下之后、走到下一个分界处之前，活本身也可能
+        // 真的出错（卡拔了、盘满了）。那一趟交上来的是 [`Cutoff::Failed`]，
+        // 于是照旧记成失败，那条错误文本一个字都不丢。
         //
         // **交出了产物的那一趟还要再分一次**：报过「停在半路」（[`Handle::halfway`]）
         // 的走 [`Ending::Halfway`]，没报过的才是「跑完了」。写过东西的活被叫停时
         // 走的正是前者——它照旧交出产物（清单、断点），可这一趟只走了一半。
-        let halted = Halted.to_string();
         let ended = match result {
             Ok(product) => match handle.left_behind() {
                 Some(left_behind) => Ending::Halfway {
@@ -619,8 +687,8 @@ impl<T: Send + 'static> Board<T> {
                 },
                 None => Ending::Done(product),
             },
-            Err(why) if handle.stopped() && why == halted => Ending::Stopped,
-            Err(why) => Ending::Failed {
+            Err(Cutoff::Halted) => Ending::Stopped,
+            Err(Cutoff::Failed(why)) => Ending::Failed {
                 step: handle.progress().step,
                 why,
             },
@@ -752,7 +820,7 @@ mod tests {
         let mut board: Board<()> = Board::new();
         board.queue("会出错的一趟", |task| {
             task.stop();
-            Err("目标看不了：卡拔了".to_string())
+            Err(Cutoff::failed("目标看不了：卡拔了"))
         });
         let done = 等到跑完(&mut board);
         let Ending::Failed { why, .. } = &done.ended else {
@@ -834,7 +902,7 @@ mod tests {
             task.steps(3);
             task.step("读选择集")?;
             task.step("看一眼目标")?;
-            Err("卡不在位".to_string())
+            Err(Cutoff::failed("卡不在位"))
         });
         let done = 等到跑完(&mut board);
         let Ending::Failed { step, why } = done.ended else {

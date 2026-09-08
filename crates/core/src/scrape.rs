@@ -752,7 +752,10 @@ pub struct Progress {
 }
 
 /// 一趟刮削的产物。
-#[derive(Debug, Clone)]
+///
+/// `Default` 是**一趟什么都没干的刮削**：报告是空的、一个字节都没收、没被中断。
+/// 界面那一侧拿它当测试里的起点——只把要验的那一格摆上去，别的照旧是零。
+#[derive(Debug, Clone, Default)]
 pub struct Outcome {
     /// 报告。
     pub report: ScrapeReport,
