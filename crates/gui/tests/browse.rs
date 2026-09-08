@@ -2016,88 +2016,20 @@ fn 一行都没勾就按星_说清而不是静静什么都不做() {
 ///
 /// 用手搭的而不是合成数据：这一条要看的是**同一张表上三个词并排**，而合成数据里
 /// 哪一行落哪一档随规模变。
+///
+/// 搭子在 `shared::小库`——待确认屏那边搭的是同一份形状（`有一个连识别都没跑过的库`），
+/// 两处只差各自要的那几档与工作目录。
 fn 三档并排的库() -> App {
-    use romcat_core::catalog::identify::{Candidate, Identification};
-    use romcat_core::catalog::{Catalog, Confidence};
-    use romcat_core::dat::Convention;
-    use romcat_core::platform::Manifest;
-    use romcat_core::shape::{SINGLE_FILE_RULE, Variant};
-    use romcat_core::site::Site;
-    use romcat_core::verdict::Store;
+    use shared::档;
 
-    let mut catalog = Catalog::open_in_memory().expect("开得出中立库");
-    // **建不出根就当场炸**：吞掉它的话，变体会挂在一个不存在的根上，
-    // 而失败会以「屏上少了一行」的样子冒出来——一个夹具搭错报成一个界面缺陷。
-    romcat_core::catalog::roots::add_root(&catalog, None, "主库", std::path::Path::new("/主库"))
-        .expect("建得出根");
-    let 变体 = |name: &str| {
-        let key = format!("主库/SFC/{name}");
-        Variant {
-            main_key: key.clone(),
-            platform: Some("SFC".to_string()),
-            rule: SINGLE_FILE_RULE.to_string(),
-            manual: false,
-            files: 1,
-            bytes: 4096,
-            unreadable_files: 0,
-            members: vec![(key.clone(), Role::Main)],
-            key,
-        }
-    };
-    let variants = vec![
-        变体("命中.zip"),
-        变体("一条候选都没有.zip"),
-        变体("还没轮到它.zip"),
-    ];
-    catalog
-        .replace_variants(&variants, 1, &Manifest::default())
-        .expect("写得进变体");
-    catalog
-        .write_identifications(&[
-            Identification {
-                variant_key: variants[0].key.clone(),
-                state: State::Matched,
-                reason: None,
-                units: 1,
-                nkit: 0,
-                read_bytes: 0,
-                work_id: None,
-                release_id: None,
-                candidates: vec![Candidate {
-                    member_key: variants[0].key.clone(),
-                    inner: String::new(),
-                    confidence: Confidence::High,
-                    accepted: true,
-                    source: "合成".to_string(),
-                    dat: "合成.dat".to_string(),
-                    platform: "SFC".to_string(),
-                    game: "幻想传说 (Japan)".to_string(),
-                    rom: "rom.bin".to_string(),
-                    hashed_as: Convention::AsIs,
-                    dat_convention: Convention::AsIs,
-                    evidence: "精确哈希命中".to_string(),
-                    chinese: None,
-                    serial: None,
-                    release_id: None,
-                }],
-            },
-            // **跑过了，却一条候选都没有**——那是「没有候选」。
-            Identification {
-                variant_key: variants[1].key.clone(),
-                state: State::Unmatched,
-                reason: None,
-                units: 1,
-                nkit: 0,
-                read_bytes: 0,
-                work_id: None,
-                release_id: None,
-                candidates: Vec::new(),
-            },
-            // 第三个变体**一行都不写**——那是「还没识别」。
-        ])
-        .expect("写得进结论");
-    let store = Store::in_memory().expect("开得出沉淀库");
-    let mut app = App::new(Site::in_memory(catalog, store, "主库"), 工作目录());
+    let mut app = shared::小库(
+        &[
+            ("SFC", "命中.zip", 档::命中),
+            ("SFC", "一条候选都没有.zip", 档::没有候选),
+            ("SFC", "还没轮到它.zip", 档::还没识别),
+        ],
+        工作目录(),
+    );
     app.show_view(View::Browse);
     app
 }
