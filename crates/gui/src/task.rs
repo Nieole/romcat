@@ -196,11 +196,15 @@ fn history_row(ui: &mut egui::Ui, record: &Record) {
     ui.label(&record.name);
     ui.label(elapsed(record.elapsed));
     match &record.ending {
-        Ending::Done => {
+        Ending::Done(_) => {
             ui.weak(record.ending.render());
         }
         // **失败与被按停不许长得跟完成一样**：那句「跑了 X 秒」就成了骗人的话。
-        Ending::Stopped => {
+        //
+        // **「停在半路」自己也是一档**：它与「停了，什么都没留下」画的不是同一句话
+        // ——前者留下了东西（清单、断点），维护者下一步要决定的是接着做还是重来，
+        // 而后者可以当没跑过。那一句由 [`Ending::render`] 折，说得出留下了什么。
+        Ending::Stopped | Ending::Halfway { .. } => {
             ui.colored_label(ui.visuals().warn_fg_color, record.ending.render());
         }
         Ending::Failed { .. } => {

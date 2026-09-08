@@ -34,7 +34,7 @@ use romcat_core::report::{human_bytes, human_duration, human_time, thousands};
 use romcat_core::scan::{self, CheckpointOptions, Jobs, ScanOptions};
 use romcat_core::site::Site;
 use romcat_core::sources::{self, Source, SourceState, SourceStatus};
-use romcat_core::task::Halted;
+use romcat_core::task::Ending;
 
 use crate::task::{Product, Tasks};
 
@@ -218,13 +218,12 @@ impl Screen {
     /// - **写断点**（[`CheckpointOptions`]）：按停之后那句「下次接着跑」得有依据，
     ///   而依据只能是断点文件。路径由 [`Site::checkpoint_path`] 折，与
     ///   `romcat scan --resume` 找的是同一个文件。
-    /// - **被按停的那一趟折成 [`Halted`]**：`scan` 中断时交出来的仍是
+    /// - **被按停的那一趟是「停在半路」**（[`Ending::Halfway`]）：`scan` 中断时交出来的仍是
     ///   `Ok(ScanOutcome { interrupted: true, .. })`——那份「到目前为止」的体检报告
-    ///   命令行还要拿去印，它退 130 也靠这一位，所以核心那边不动。任务台认「停了」
-    ///   的判据是**那句话正是 [`Halted`] 交出来的那一句**
-    ///   （`romcat_core::task::Board::settle`），于是折这一下的活落在这里：
-    ///   不折的话，按停的那一趟会在任务屏历史里记成「完成」、库屏说「跑完了」，
-    ///   而根那一行写着「那一趟被中断」——同一趟活三处各说各的。
+    ///   命令行还要拿去印，它退 130 也靠这一位。核心那边被叫停时自己报一句
+    ///   [`Handle::halfway`](romcat_core::task::Handle::halfway)，任务台照它把这一趟
+    ///   记成「停在半路」，于是这一层**一个字都不用凑**：库屏说「被按停了」、任务屏
+    ///   历史说「停在半路」、根那一行写着「那一趟被中断」——三处说的是同一件事。
     pub fn scan(&mut self, site: &Site, tasks: &mut Tasks, name: &str) {
         if self.job_of(name).is_some() {
             return;
@@ -274,8 +273,8 @@ impl Screen {
                 resume: true,
             });
             match scan::scan(&RealFs::new(), &mut catalog, &options, task) {
-                // 中断的那一趟折成 [`Halted`] 那句话——任务台认的正是它。
-                Ok(outcome) if outcome.interrupted => Err(Halted.to_string()),
+                // **被按停的那一趟照旧交出产物**：那份「到目前为止」的体检报告是真的，
+                // 而 `scan` 自己已经报过「停在半路」了，任务台不会把它记成「完成」。
                 Ok(outcome) => Ok(Product::Scanned(Box::new(outcome))),
                 Err(error) => Err(error.to_string()),
             }
@@ -311,26 +310,36 @@ impl Screen {
         };
         let (_, job) = self.running.remove(at);
         match (&done.ended, &job) {
-            // **「跑完了」只说给真的跑完的那一趟听。** 被按停的那一趟在
-            // [`Screen::scan`] 里就折成了 [`Halted`]，落到这儿是 `Stopped` 那一支
-            // ——不折的话它会长着 `Product` 的样子走这一支，屏上说「跑完了」，
-            // 而根那一行同时写着「那一趟被中断」。
-            (romcat_core::task::Done::Product(_), _) => {
+            // **「跑完了」只说给真的跑完的那一趟听。** 被按停的那一趟交出来的产物
+            // 长得一模一样，分开的是 `scan` 自己报的那句「停在半路」——不分的话
+            // 屏上说「跑完了」，而根那一行同时写着「那一趟被中断」。
+            (Ending::Done(_), _) => {
                 self.notice = Some(format!("{} 跑完了。", done.name));
             }
-            // 扫描停下来的地方是干净的，依据是那个**断点**文件（[`Screen::scan`] 设的）：
-            // 再按一次「重扫」从停下的地方接着走，命令行 `romcat scan --resume` 也认它。
-            (romcat_core::task::Done::Stopped, Job::Scan(_)) => {
+            // **停在半路**那一趟真跑起来过：停下来的地方是干净的，依据是那个**断点**
+            // 文件（[`Screen::scan`] 设的），再按一次「重扫」从那儿接着走，命令行
+            // `romcat scan --resume` 认的也是它。
+            (Ending::Halfway { .. }, Job::Scan(_)) => {
                 self.notice = Some(format!(
                     "{} 被按停了。停下来的地方是干净的：断点已经写下，\
                      再按「重扫」从那儿接着跑。",
                     done.name
                 ));
             }
-            (romcat_core::task::Done::Stopped, Job::Fetch(_)) => {
+            // **还排着队就被撤掉的那一趟压根没开跑**，所以这儿不许说「断点已经写下」
+            // ——它一个字节都没写，哪来的断点。两档并成一句的话，那句话对这一种就是
+            // 骗人的（改之前两档长得一样，这句话只能这么写；轴分开之后就不必了）。
+            (Ending::Stopped, Job::Scan(_)) => {
+                self.notice = Some(format!(
+                    "{} 还没轮到就被撤掉了。中立库与那块盘一个字节都没动，\
+                     再按一次「重扫」就是。",
+                    done.name
+                ));
+            }
+            (Ending::Halfway { .. } | Ending::Stopped, Job::Fetch(_)) => {
                 self.notice = Some(format!("{} 被按停了。", done.name));
             }
-            (romcat_core::task::Done::Failed { step, why }, _) => {
+            (Ending::Failed { step, why }, _) => {
                 self.error = Some(format!("{} 在「{step}」这一步失败了：{why}", done.name));
             }
         }
