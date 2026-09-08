@@ -1,9 +1,9 @@
 //! `cargo xtask` 的入口。眼下只有一条子命令：`gate`。
 //!
 //! ```text
-//! cargo xtask gate                 # 门禁四条，按机器给的资源跑
+//! cargo xtask gate                 # 门禁五条，按机器给的资源跑
 //! cargo xtask gate --throttle      # 退回限流那一档（-j 1、--test-threads=2）
-//! cargo xtask gate --list          # 只打印它会跑哪四条，一条都不跑
+//! cargo xtask gate --list          # 只打印它会跑哪五条，一条都不跑
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use xtask::gate::{self, Limits};
 
 /// 仓库里的杂活。
 #[derive(Debug, Parser)]
-#[command(name = "xtask", about = "仓库杂活：门禁四条的唯一定义", version)]
+#[command(name = "xtask", about = "仓库杂活：门禁五条的唯一定义", version)]
 struct Cli {
     /// 干哪件杂活。
     #[command(subcommand)]
@@ -24,7 +24,7 @@ struct Cli {
 /// 眼下只有门禁一件。
 #[derive(Debug, Subcommand)]
 enum Job {
-    /// 跑门禁：排版、clippy、全量测试、文档。
+    /// 跑门禁：排版、默认特性编得过、clippy、全量测试、文档。
     Gate(GateArgs),
 }
 
@@ -53,7 +53,7 @@ struct GateArgs {
     #[arg(long)]
     keep_going: bool,
 
-    /// 只打印它会跑哪四条，一条都不跑。
+    /// 只打印它会跑哪五条，一条都不跑。
     #[arg(long)]
     list: bool,
 }
@@ -64,7 +64,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// 跑（或者只打印）门禁四条。
+/// 跑（或者只打印）门禁五条。
 fn gate_job(args: &GateArgs) -> ExitCode {
     let limits = limits(args);
     if args.list {

@@ -246,10 +246,10 @@ impl Screen {
     /// 而且**从头看起**。
     ///
     /// 下钻那一层到这里才折进选择器：逐条要的正是「把队列收窄到这一组」，
-    /// 而在分批那一屏上收窄整个队列是错的（见 [`Screen::drill`] 那个字段）。
+    /// 而在分批那一屏上收窄整个队列是错的（见 `Screen::drill` 那个字段）。
     ///
     /// 光标一并放掉：不放的话它还钉在批优先那一屏上停过的某一条上，
-    /// [`Screen::resolve_cursor`] 会把它捞回来，于是「逐条看」是从中间开始的。
+    /// `Screen::resolve_cursor` 会把它捞回来，于是「逐条看」是从中间开始的。
     pub fn show_one_by_one(&mut self) {
         self.mode = Mode::OneByOne;
         self.picks.shape = self.open.clone();

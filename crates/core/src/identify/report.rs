@@ -59,7 +59,7 @@ pub struct PlatformRow {
     /// 跳过。
     pub skipped: u64,
     /// **还没识别**：这个平台有多少个变体连识别都还没跑过
-    /// （[`NOT_RUN_LABEL`](crate::catalog::identify::NOT_RUN_LABEL)）。
+    /// （[`NOT_RUN_LABEL`]）。
     ///
     /// 它**进 `variants`**（那是「这个库里有多少东西」），但**不进
     /// [`hit_rate`](Self::hit_rate) 的分母**——它一次都没撞过 DAT，混进未命中是撒谎。

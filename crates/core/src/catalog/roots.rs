@@ -401,7 +401,7 @@ impl Catalog {
 /// `workspace` 是工作目录；`None` 表示这一趟没有工作目录可守（只活在内存里的库）。
 ///
 /// **`root` 要先化成可比较的绝对形态**（[`path::normalize_existing`]，或者交给
-/// [`LibraryFs::canonicalize`](crate::fs::LibraryFs::canonicalize) 化）。这里不代劳：
+/// [`LibraryFs::canonicalize`] 化）。这里不代劳：
 /// 扫描那一侧的根是**主库的只读视图**化出来的，而这里化只会用本机文件系统再化一遍
 /// ——两者在符号链接上给出的答案不一定一样，一份中立库里于是会出现同一个根的两种写法。
 ///

@@ -1,9 +1,9 @@
 # **门禁。** 推一次代码就跑，跑的是仓库里那一条子命令 `cargo xtask gate`。
 #
-# ⭐ **这份文件里一条门禁命令都不写。** 四条（fmt / clippy / test / doc）的唯一定义在
+# ⭐ **这份文件里一条门禁命令都不写。** 五条（fmt / check / clippy / test / doc）的唯一定义在
 # `xtask/src/gate.rs`，本地与 CI 调的是同一句话——把命令抄一份到这里，就等于给自己造了
 # 一处会慢慢漂的第二定义，而「我这儿绿的、CI 红的」这种分歧只能靠猜。
-# 想知道它跑哪四条：`cargo xtask gate --list`。
+# 想知道它跑哪五条：`cargo xtask gate --list`。
 name: 门禁
 
 # ⚠️ **`push` 限在 `main` 上，不是漏写。** 两个事件都不加分支过滤时，同仓库的分支推一次
@@ -29,7 +29,7 @@ permissions: {}
 
 jobs:
   gate:
-    name: 门禁四条
+    name: 门禁五条
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -77,7 +77,7 @@ jobs:
             ${{ runner.os }}-gate-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}-
 
       # `--keep-going`：红了也把剩下几条跑完。本地默认在第一处红上就停（省时间），
-      # CI 上反过来——一趟就把四条的结论都给出来，省的是**人**来回推一次的时间。
+      # CI 上反过来——一趟就把五条的结论都给出来，省的是**人**来回推一次的时间。
       #
       # ⚠️ **不给 `--throttle`。** 那一档（`-j 1` / `--test-threads=2`）是为一台 15 GB 的
       # 开发机留的，runner 没有这个约束，限流只会让它白白慢上几倍。

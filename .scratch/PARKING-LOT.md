@@ -133,7 +133,7 @@
 | `Q177` | 队列卡片缺一句「命令行上是什么」的悬停 | 工作 | 票 `parking-3/16` |
 | `Q187` | 「门禁」没有任何机器执行的地方 | 工作 | 票 `parking-3/01` —— **settled**，裁决迁回票 `queue-followups/11` 末尾 |
 | `Q188` | 没有任何东西钉住是哪一版 `rustfmt` | 工作 | 票 `parking-3/01` —— 落 `rust-toolchain.toml`，钉具体版本。**settled**，裁决迁回票 `queue-followups/11` 末尾 |
-| `Q189` | `cargo doc` 68 条 rustdoc 告警 | 工作 | 票 `parking-3/02` |
+| `Q189` | `cargo doc` 68 条 rustdoc 告警 | 工作 | 票 `parking-3/02` —— 实测是 **67** 条（`Q206`），已清到 0 并敲成硬红。**settled**，裁决迁回票 `queue-followups/11` 末尾 |
 | `Q190` | 「跑过没跑过」分辨落在哪儿 | 记录 | 已裁：给行加标记、`Tier` 四档不动（票 `gui-redesign/17`） |
 | `Q191` | `main` 上两处不 fmt-clean，其一是重复的 `#[test]` | 记录 | **已做掉**：提交 `bd4273d` 删了那条重复的 `#[test]`。实测 `crates/core/tests/sync_run.rs` 16 个 `#[test]`，没有相邻重复 |
 | `Q192` | 两份界面测试各搭了一份几乎逐字相同的夹具 | 工作 | 票 `parking-3/16` |
@@ -278,6 +278,170 @@ _空。_（第三轮收口当天的状态；`Q194` 起见下。）
   它防的是一个要人主动打 `+stable` 才成立的场景，而真跑歪了，门禁第一条
   `cargo fmt --all --check` 的 diff 会立刻把不一致喊出来。
 - **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q204 — 给 `doc` 补 `--all-features` 让出的那一格，我另加了一条 `cargo check --workspace`：门禁从四条变五条
+
+- **来自：** 票 `parking-3/02`
+- **类别：** 两份东西矛盾（票 `parking-3/01` 在接缝上留的告示，本票必须当场裁）
+- **在哪：** `xtask/src/gate.rs` 的 `steps()` / `check()` / `DOC_ENV`；
+  `xtask/tests/gate.rs` 的 `交付出去的那份配置还有一条在看着`；
+  `README.md`「⚠️ 门禁必须带 `--all-features`」一节
+- **为什么没停线：** 票 `01` 已经把两条路都写在 `DOC_ENV` 的注释里了（另加一条默认特性的
+  `cargo check --workspace`，或把 `doc` 留在默认特性、另开一条 `--all-features` 的），
+  两条都站得住，代价也都在本票之内——翻案只要动 `steps()` 一行。
+
+**这是一次接力，不是一次顺手改：票 `01` 预告，票 `02` 兑现。**
+
+票 `01` 落门禁时它自己的 `/code-review` 报的第 1 条就是这个，而修它不是那张票的活，
+于是票 `01` **把告示留在了接缝上**（`DOC_ENV` 的文档里整整一节，点名给票 `02`）。
+告示说的是：`clippy` 与 `test` 都带 `--all-features`，于是当时**只有 `doc` 这一条跑在
+默认特性上**——也就是 `demo` 关掉、`cargo build --release` 真正交付出去的那份配置。
+换句话说，**那份配置编不编得过，当时是靠 rustdoc 顺带保住的**。票 `02` 一给 `doc` 补上
+`--all-features`（票要求的，也是对的），四条就没有任何一条再编译它。
+
+- **这张票实际做了什么：** 走了**第一条**：`doc` 补上 `--all-features`，另加
+  `cargo check --workspace`（默认特性，不带 `--all-targets`），排在 `fmt` 之后、
+  `clippy` 之前（仍是从便宜到贵）。
+
+  **为什么是这一条**：它盯的东西**说得出名字**——「`cargo build --release` 交付出去的
+  那份配置还编不编得过」。
+  **另一条路（让 `doc` 保持默认特性、另开一条 `--all-features` 的 `doc`）也站得住**，
+  它同样能把那一格填上，而且不必新起一个名字。**没走它的理由**：那样一来「谁在守这一格」
+  就是「默认特性下**文档**编不编得出来」——那件事本身没人在乎，它只是碰巧顺带保住了编译，
+  正是这一格当初变空的原因（换一个人把 `doc` 的参数一改，格子又空了，而且没人看得出来）。
+  ⚠️ 而且**那条路会漏掉 `demo` 后面那一整块的文档**：`doc` 留在默认特性时，
+  `crates/gui/src/demo.rs` 里那 19 条 intra-doc 链接没有一条被读过，
+  而票 `02` 的题目正是「文档链接断了要当场红」。要两头都不漏就得**两条 `doc`**，
+  那是门禁六条而不是五条。
+
+  **代价，说清楚：**
+  1. **门禁多一格时间。** 默认特性是一份**独立的**编译产物，与 `clippy` / `test` /
+     `doc` 那份 `--all-features` 的不共用 fingerprint。本机热跑 1.9 秒，**冷跑没量**
+     ——冷机上它是一整趟 `cargo check --workspace` 的钱。
+  2. **「四条」这族字面量全改了口。** `README.md` / `.github/workflows/gate.yml` /
+     `xtask/src/main.rs` / `xtask/Cargo.toml`，外加 `xtask/src/gate.rs` 里
+     `Step::name` 的文档（这一处是收尾审查抓出来的，我自己漏扫了）。往后每加一条门禁
+     都得再扫一遍——与 `Q198` 记的测试条数是同一类东西。
+  3. **`check` 只是 `check` 不是 `build`。** 链接期的问题它不管（本仓库眼下没有
+     C 链接以外的东西）。
+  4. **它不带 `--all-targets`**，漏的那一格另记在 `Q208`。
+- **谁来裁：** 拿主意的人（要不要把「四条 / 五条」这族字面量也交给 `--list` 去答）
+- **状态：** open
+
+### Q205 — `Op::ALL` 的注释指着一个从来不存在的 `Self::for_number`，而 `Op::ALL` 全仓库零使用者
+
+- **来自：** 票 `parking-3/02`
+- **类别：** 两份东西矛盾（文档说的和代码做的不一致）
+- **在哪：** `crates/core/src/sublibrary/rule.rs:368` 一带（`Op::ALL` 那个常量）；
+  真正判「哪个符号配得上哪个维度」的是同文件 `Op::fits`
+- **为什么没停线：** 这是本票四类 rustdoc 告警里的「解析不了的 intra-doc 链接」那一条，
+  清掉它只要改注释；而**票明写**「真发现文档说的和代码做的不一致，那是一条挂单，
+  不是就地改代码」。
+- **这张票实际做了什么：** 只改注释，一行代码没动。原句是
+  「界面照这个次序摆运算符；文字维度取前五个，数值维度取 `[`Self::for_number`]`」——
+  `for_number` 在全仓库**一次都没出现过**（只在这句注释里），而 `Op::ALL` 本身也
+  **一个使用者都没有**（`grep -rn '\bALL\b' crates/` 出来的全是别的类型的 `ALL`）。
+  改成照 `fits` 的实情写：文字维度正好是前五个，数值维度是除掉那三个字串符号
+  （`~` `^` `$`）之外的**六个**——顺带把原句那半句「数值维度取 `for_number`」暗示的
+  「数值那一档也是一段连续前缀」纠正掉，它不是。
+  **没做的**：没有去掉 `Op::ALL`，也没有补一个 `for_number`。界面眼下摆运算符走的是
+  别的路（`fits`），`Op::ALL` 是不是该删、还是该有个使用者，得看子库规则编辑器那一族。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q206 — 票正文那个「68 条、`romcat-core` 独占 56」是旧数；而且「补 `--all-features` 之后条数会变」这个前提不成立
+
+- **来自：** 票 `parking-3/02`
+- **类别：** 票写错了
+- **在哪：** `.scratch/parking-3/issues/02-rustdoc-to-zero.md` 第 4 行与第 11–13 行；
+  `.scratch/parking-3/spec.md` Problem Statement 第 1 条；`xtask/src/gate.rs` 原 `DOC_ENV` 注释
+- **为什么没停线：** 票第 13 条验收写的正是「补 `--all-features` 之后**重新数一遍**」，
+  照做即可。
+- **这张票实际做了什么：** 开工当天在本票分支（从 `main` 的 `cd1e9b8` 切出）实测：
+  **67 条**（`romcat-core` 58 / `romcat-gui` 8 / `romcat-cli` 1），不是 68 / 56。
+  更要紧的是——**默认特性与 `--all-features` 数出来一条不差**：两趟的告警清单
+  逐行 diff 只差一行「`romcat-core` (lib doc) generated 58 warnings」出现的**位置**
+  （并发编译的次序），内容完全相同。也就是说票（与 `DOC_ENV` 原注释）预设的
+  「盖的范围变了，条数多半不是 68」这个前提**不成立**：`demo` 后面那一整块文档本来就
+  一条告警都没有。补 `--all-features` 仍然是对的（那一块从此有人读了），
+  但它今天**一条也没多出来**。
+  ⚠️ **收尾审查把这个「一条不差」的成因挖出来了，它不只是巧合**（见 `Q209`）：
+  `cargo doc` 默认跳过与 lib 同名的 bin，于是 `crates/gui/src/main.rs` 两趟都没被读过
+  ——而那份文件的第 13 行 `见 [\`demo\`]` 在**默认特性**下必然解析不了。
+  给 `doc` 补上 `--lib --bins` 之后重量：**默认特性 68 条、`--all-features` 67 条**，
+  差的正是那一条。也就是说「补 `--all-features` 之后条数会变」这个前提**是成立的**，
+  只是方向与票猜的相反——`--all-features` 让告警**少**一条，而不是多。
+  ⚠️ 编排者递给我的那张对照表（默认 67 / `--all-features` 70）也是同一个误会：
+  70 是 `grep -c '^warning'` 数出来的，里头含着三行「generated N warnings」的**汇总行**。
+  真数是两边都 67。
+- **谁来裁：** 收尾
+- **状态：** open
+
+### Q207 — 53 处「公开文档链到私有条目」一律改成不带链接的代码体，那 53 个引用从此点不过去
+
+- **来自：** 票 `parking-3/02`
+- **类别：** 路过发现，不在范围内
+- **在哪：** 本票 diff 里 `crates/` 底下那 34 个文件（`git log -p` 找
+  「`[`X`]` → `` `X` ``」那一族改动）；判据写在 `xtask/src/gate.rs` 的 `DOC_ENV` 注释里
+- **为什么没停线：** 票的硬约束把另外两条路都堵死了——「**不许**靠把私有条目改成公开来
+  消警，那是改 API 面」；剩下的就是改措辞或去链接。
+- **这张票实际做了什么：** 67 条里有 **53 条**是这一类，一律
+  `[`X`]` → `` `X` ``（措辞一个字不动，只把链接语法拆掉）。
+  **代价，说清楚**：这 53 处从此在生成的文档里**点不过去**了——它们指的本来就是
+  `cargo doc` 不生成页面的私有条目，所以链接**原先**也是坏的（rustdoc 报的正是这个），
+  但读源码的人不再能靠编辑器的「跳转」直接过去。
+  **另一条路**是给门禁那一条加 `--document-private-items`，那样 53 条全部当场变合法、
+  一个字都不用改。**没走**：那会把整个私有实现面都摊进公开文档站，
+  「公开文档」与「内部注释」的界线就没了——而这条界线正是这一类告警在守的东西。
+  真要恢复导航，正路是**另开一条只给维护者看的私有文档**
+  （`cargo doc --document-private-items` 单独出一份），与门禁那一条互不相干。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q208 — `check` 那一条不带 `--all-targets`：默认特性下的测试与实测目标没人编
+
+- **来自：** 票 `parking-3/02`
+- **类别：** 路过发现，不在范围内
+- **在哪：** `xtask/src/gate.rs` 的 `check()`
+- **为什么没停线：** 它要盯的东西（`cargo build --release` 交付的那份配置）**盖住了**，
+  多盖的那一块由 `clippy --all-targets --all-features` 接着。
+- **这张票实际做了什么：** 只写 `cargo check --workspace`，**不加** `--all-targets`。
+  理由：这一条存在的唯一意义是「交付出去的那份还编不编得过」，那份就是库与二进制；
+  加上 `--all-targets` 会把默认特性下的测试目标也编一遍，而那批目标在
+  `--all-features` 下已经被 `clippy` 编过一遍了——多花的时间买不到新东西。
+  **漏的那一格**：一个**不带** `#[cfg(feature = "demo")]`、却引用了 `demo` 后面东西的
+  测试文件，五条全绿而 `cargo test --workspace`（不带 `--all-features`）编不过。
+  眼下不存在这种文件（`demo` 那七个测试目标走的是 `required-features`）。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q209 — 给 `doc` 补 `--lib --bins` 是为了让同名 bin 也被读，代价是每趟印两行 cargo 的 `output filename collision`
+
+- **来自：** 票 `parking-3/02`（收尾 `/code-review` 抓的第 1 条）
+- **类别：** 工具缺陷（[cargo#6313](https://github.com/rust-lang/cargo/issues/6313)）
+- **在哪：** `xtask/src/gate.rs` 的 `doc()`；`crates/gui/Cargo.toml` 与 `xtask/Cargo.toml`
+  的 `[[bin]]`（两个包都是 lib 加一个**同名** bin）
+- **为什么没停线：** 两条路都在本票之内，翻案只要改 `doc()` 的参数串。
+- **这张票实际做了什么：** 给 `doc` 补上 `--lib --bins`。
+  **不补会怎样**：`cargo doc` 默认跳过与 lib 同名的 bin（两者都往
+  `target/doc/<crate>/index.html` 里写），于是 `crates/gui/src/main.rs`（四百多行、
+  里头七处 intra-doc 链接）与 `xtask/src/main.rs` **一个字都没被 rustdoc 读过**
+  ——本票敲的那句「从此断一条文档链接，门禁当场红」在补之前**只对 lib 成立**。
+  实测佐证：`target/doc/src/romcat_gui/` 有 `demo.rs.html` 却**没有** `main.rs.html`，
+  而没有 lib 的 `romcat-cli` 反倒有 `main.rs.html`。
+  **代价，说清楚**：cargo 为那两个包各印一行 `warning: output filename collision`，
+  每趟门禁都印。那是 **cargo** 的告警不是 rustdoc 的，`-D warnings` 不把它当错
+  （实测退出码仍是 0）；而 `target/doc/<crate>/index.html` 从此是 lib 与 bin 里
+  **后跑完的那一个**——门禁不消费 `target/doc/`，人自己跑 `cargo doc --open` 不带
+  `--bins`，拿到的仍是正常的 lib 文档。
+  **另一条路**是另开一条 `cargo doc -p romcat-gui --bins`（外加一条给 `xtask` 的），
+  门禁就变七条、还是撞同一个文件名。**没走**：多两条命令买不到别的东西。
+  真要根治得给两个 bin 改名，那是改交付物的名字，不该由一张文档票定。
+  **钉子**：`xtask/tests/gate.rs` 的 `与_lib_同名的那个_bin_里断一条链接照样红`
+  ——丢弃 crate 的 `lib.rs` 干净、断链只在同名 `main.rs` 里；把 `--lib --bins`
+  拿掉它当场红（实测过），而原先那条只验 lib 的红绿测试照旧绿。
+- **谁来裁：** 拿主意的人（两个 bin 要不要改名）
 - **状态：** open
 
 ### Q214 — 票 `parking-3/03` 说「扫描被叫停时任务屏历史记成完成」，扫描那一半不成立

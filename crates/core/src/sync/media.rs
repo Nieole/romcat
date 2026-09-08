@@ -2,7 +2,7 @@
 //!
 //! ## 铺在哪由**适配器**说了算
 //!
-//! 布局是格式的一部分（[`Adapter::media_placement`](crate::adapter::Adapter::media_placement)），
+//! 布局是格式的一部分（[`Adapter::media_placement`]），
 //! 两家差得很远：
 //!
 //! - **Pegasus**：`media/<内容哈希前两位>/<内容哈希>.<扩展名>`——与 [`MediaPool`]
