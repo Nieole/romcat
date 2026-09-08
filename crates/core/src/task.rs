@@ -159,6 +159,45 @@ impl Progress {
         Some(((at + inner) / f64::from(self.steps)).clamp(0.0, 1.0) as f32)
     }
 
+    /// 照眼下这个速度**还要多久**——**说不出来时是 `None`**。
+    ///
+    /// 口径就一句：**已用时间 ÷ 已完成比例 − 已用时间**。它落在核心库而不在界面上，
+    /// 因为这是一句领域判断（ADR-0005）：界面只画和转发，命令行将来要报同一个数时
+    /// 也得是同一个算法，两处各折一遍迟早分家。
+    ///
+    /// ## 算不出来的时候一个字都不画
+    ///
+    /// 两条路走到「没有」，而它们在界面上是同一句话——**一格都不画**：
+    ///
+    /// - [`fraction`](Self::fraction) 本身说不出来（总步数还没报）；
+    /// - 走了几成说得出，可它是**零成**——已用时间除以零折出来的是无穷大。
+    ///   这不是个边角：`sources::refetch` 取 DAT 与取 Switch 那两趟一共就一步、
+    ///   那一步里头几件也报不出来，于是整趟下载都停在这一档上。
+    ///
+    /// 这两处都**不给兜底值**。一个会跳的数比没有数更坏：维护者会照它安排接下来
+    /// 一小时干什么，而一个从「约剩 3 秒」跳到「约剩 40 分钟」的数会把那个安排毁掉。
+    /// 与「说不出走了几成时画一条来回跑的条、而不是一条停在 0% 的条」是同一套口径。
+    ///
+    /// ## 不平滑、不开滑动窗口
+    ///
+    /// 线性外推是这一层能站得住的全部。真要更准的估法，那要的是各步自己知道的东西
+    /// （还剩几个文件、还剩几个请求），不是任务台在这儿猜得出来的。
+    #[must_use]
+    pub fn remaining(&self, elapsed: Duration) -> Option<Duration> {
+        let fraction = f64::from(self.fraction()?);
+        if fraction <= 0.0 {
+            return None;
+        }
+        let elapsed = elapsed.as_secs_f64();
+        let left = elapsed / fraction - elapsed;
+        // **走 `try_` 那条，不走会 panic 的那条。** 这一句是在**画帧那条线程**上调的，
+        // 炸了就是整个窗口没了；而 `Duration::from_secs_f64` 在负数、`NaN`、无穷大
+        // **以及有限但超过 `u64::MAX` 秒**这四种上都 panic——最后那一种 `is_finite()`
+        // 拦不住，而 `Progress` 的字段全是公开的，挡在前面的只有调用方的自觉。
+        // 折不出一个数就是「没有」，与上面那两条「说不出来」同一个出口。
+        Duration::try_from_secs_f64(left).ok()
+    }
+
     /// 排成给人看的一句话，如 `3/10 读清单`。
     #[must_use]
     pub fn render(&self) -> String {
@@ -424,6 +463,19 @@ pub struct Live {
     pub progress: Progress,
     /// 有没有已经按过停下（按下去到真的停之间还有一步的距离）。
     pub stopping: bool,
+}
+
+impl Live {
+    /// 照眼下这个速度**还要多久**——**说不出来时是 `None`**，那时界面一格都不画。
+    ///
+    /// 折算本身在 [`Progress::remaining`]，这儿只做一件事：**把这一趟的表配上这一趟
+    /// 的进度**。界面那一侧于是只问一句「还剩多久」，不必自己去想该拿哪块表配哪份进度
+    /// ——`elapsed` 与 `progress` 两个字段照旧是公开的，所以这不是一道闸，是一条
+    /// **不必绕开的近路**。
+    #[must_use]
+    pub fn remaining(&self) -> Option<Duration> {
+        self.progress.remaining(self.elapsed)
+    }
 }
 
 /// 跑完了的一趟，连它的产物。
@@ -860,6 +912,95 @@ mod tests {
         assert!(handle.progress().fraction().is_none());
         handle.step("走着").expect("没人叫停");
         assert!(handle.progress().fraction().is_none(), "总步数还没说呢");
+    }
+
+    #[test]
+    fn 走了几成说得出时约剩多久是照眼下这个速度直推出来的() {
+        // 口径写死：**已用时间 ÷ 已完成比例 − 已用时间**。不平滑、不开滑动窗口——
+        // 那种「更聪明的估法」要的是各步自己知道的东西（还剩几个文件、几个请求），
+        // 不是任务台猜得出来的。
+        let progress = Progress {
+            step: "认根".to_string(),
+            at: 1,
+            steps: 4,
+            done: 1,
+            total: 1,
+        };
+        // 四步走完了一步 = 两成五。跑了 30 秒，照这个速度还要 90 秒。
+        assert_eq!(progress.fraction(), Some(0.25));
+        let left = progress
+            .remaining(Duration::from_secs(30))
+            .expect("走了几成说得出来，这个数就说得出来");
+        assert!((left.as_secs_f64() - 90.0).abs() < 1e-6, "{left:?}");
+
+        // 走到头就是零，不是负数。
+        let 到头了 = Progress {
+            at: 4,
+            done: 1,
+            total: 1,
+            ..progress
+        };
+        assert_eq!(到头了.fraction(), Some(1.0));
+        assert_eq!(
+            到头了.remaining(Duration::from_secs(30)),
+            Some(Duration::ZERO),
+        );
+    }
+
+    #[test]
+    fn 说不出走了几成时约剩多久是没有而不是零() {
+        // **一个会跳的数比没有数更坏**：维护者会照它安排接下来一小时干什么。
+        // 所以这一格要么是个站得住的数，要么就是「没有」——不摆兜底值。
+        //
+        // 一、总步数还没说：开工到 `steps` 那一句之间的每一帧都是这样。
+        let mut progress = Progress {
+            step: "取 DAT".to_string(),
+            at: 1,
+            ..Progress::default()
+        };
+        assert!(progress.fraction().is_none());
+        assert!(progress.remaining(Duration::from_secs(90)).is_none());
+
+        // 二、走了几成说得出，可它是**零成**：`refetch` 取 DAT 与取 Switch 那两趟
+        //     一共就一步、那一步里头几件也报不出来（那两条路一次 `tick` 都不叫），
+        //     于是整趟下载都停在这一档上。已用时间除以零成不是一个数，是「没有」。
+        progress.steps = 1;
+        assert_eq!(progress.fraction(), Some(0.0));
+        assert!(
+            progress.remaining(Duration::from_secs(90)).is_none(),
+            "零成上折出来的是个无穷大，那不是给人看的数",
+        );
+    }
+
+    #[test]
+    fn 正在跑的那一趟自己把已用与约剩配成一对() {
+        // 界面那一侧只该问一句「还剩多久」——**拿哪块表配哪份进度是这一层的事**。
+        // 让界面自己去配的话，它迟早会拿另一趟的已用时间除这一趟的几成。
+        let live = Live {
+            id: 1,
+            name: "扫描 · 主库".to_string(),
+            elapsed: Duration::from_secs(60),
+            progress: Progress {
+                step: "挨个文件过一遍".to_string(),
+                at: 1,
+                steps: 2,
+                done: 0,
+                total: 0,
+            },
+            stopping: false,
+        };
+        // 两步走完了半步都没有：第一步刚开头，走了零成——说不出来。
+        assert!(live.remaining().is_none());
+
+        let 走了一半 = Live {
+            progress: Progress {
+                at: 2,
+                ..live.progress.clone()
+            },
+            ..live
+        };
+        assert_eq!(走了一半.progress.fraction(), Some(0.5));
+        assert_eq!(走了一半.remaining(), Some(Duration::from_secs(60)));
     }
 
     #[test]

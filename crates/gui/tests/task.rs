@@ -13,7 +13,7 @@
 use std::time::Duration;
 
 use romcat_core::collection::CollectionError;
-use romcat_core::task::{Cutoff, Ending, Halted};
+use romcat_core::task::{Cutoff, Ending, Halted, Handle, Live};
 use romcat_gui::app::{App, View};
 use romcat_gui::task::Product;
 use romcat_gui::{demo, headless};
@@ -93,6 +93,51 @@ fn 画到台上空了(ctx: &egui::Context, app: &mut App) {
         std::thread::sleep(Duration::from_millis(10));
     }
     panic!("六秒了台上还有活");
+}
+
+/// 一档要验的进度：一个说得出口的名字，加一句往把手上报进度的话。
+///
+/// 摆成一个别名而不是就地写全，是因为「算不出还剩多久」有**两条不同的路**通向同一句
+/// 「没有」，两档得并排验（见那条测试）——而并排就得把它们装进同一个 `Vec`。
+type 一档进度 = (&'static str, Box<dyn FnOnce(&Handle) + Send>);
+
+/// 排一趟活上去，让它**报完这点进度就停在那儿等着被叫停**。
+///
+/// 「屏上这一帧写着什么」那一类断言要的正是它：进度报到哪儿由 `报进度` 说了算，
+/// 报完就不动了——于是测试看到的每一帧都是同一个数，不靠「睡够多久它大概走到第几步」。
+/// 与 [`排一趟占位的`] 的分工：那一趟是**占着位子**用的（进度一直在往前走），
+/// 这一趟是**摆一个确定的进度**用的。
+fn 排一趟停在原地的(
+    app: &mut App, 报进度: impl FnOnce(&Handle) + Send + 'static
+) -> u64 {
+    app.tasks_mut().queue("装作在扫一趟库", move |task| {
+        报进度(task);
+        loop {
+            // 收到「停下」就带着 `Halted` 退出去——于是它记成「按停了」，不是「失败」。
+            task.check()?;
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    })
+}
+
+/// 一直画帧，直到台上那一趟报出了要等的那个进度，交出那一刻的样子。
+///
+/// **不靠「睡三十毫秒它总该走到了」**：机器一忙那条线程可能一步都还没排上，
+/// 那样这条测试就成了挂钟彩票（挂单 `Q196` / `Q349` 说的正是那种）。
+/// 六百轮 × 10 毫秒 ＝ **最多等六秒**，与 [`画到台上空了`] 同一个数。
+fn 等到那一趟报出(
+    ctx: &egui::Context, app: &mut App, 报出: impl Fn(&Live) -> bool
+) -> Live {
+    for _ in 0..600 {
+        跑一帧(ctx, app);
+        if let Some(live) = app.tasks().running()
+            && 报出(&live)
+        {
+            return live;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("六秒了台上那一趟还没报出要等的那个进度");
 }
 
 #[test]
@@ -326,4 +371,102 @@ fn 四种收场在任务屏历史里各画各的话() {
         1,
         "四趟活里只有一趟是真跑完的：\n{屏上}",
     );
+}
+
+#[test]
+fn 算不出还剩多久的那一帧屏上一个剩余时间的字都没有() {
+    // 这张票的全部价值在这一条：**工具算不出来的时候一个字都不画**。
+    // 一个会跳的「约剩」比没有「约剩」更坏——维护者会照它安排接下来一小时干什么。
+    //
+    // **两档都得验，因为它们是两条不同的路。** 只验一档的话，另一档哪天开始画出个
+    // 兜底值来，这一屏一条都不响：
+    //
+    // 1. **总步数还没报**——`fraction` 本身是「没有」；
+    // 2. **报了总步数，可走了零成**——`fraction` 说得出，答的是 `Some(0.0)`，而已用时间
+    //    除以零成折不出一个数。这一档才是真机上最常撞的那一个：`sources::refetch`
+    //    取 DAT 与取 Switch 那两趟一共就一步、一次 `tick` 都不叫，**整趟下载**都在这儿。
+    let 两档: Vec<一档进度> = vec![
+        (
+            "总步数还没报",
+            Box::new(|task: &Handle| {
+                task.step("取 DAT").expect("没人叫停");
+            }),
+        ),
+        (
+            "报了总步数，可走了零成",
+            Box::new(|task: &Handle| {
+                task.steps(1);
+                task.step("取 DAT").expect("没人叫停");
+            }),
+        ),
+    ];
+
+    for (哪一档, 报进度) in 两档 {
+        let ctx = headless::context();
+        let mut app = 开一个();
+        app.show_view(View::Tasks);
+        let id = 排一趟停在原地的(&mut app, 报进度);
+        let live = 等到那一趟报出(&ctx, &mut app, |live| live.progress.at == 1);
+        // **这一句在这儿是防恒绿的那道守卫**：夹具哪天不再造出「算不出还剩多久」
+        // 那一档，先炸的是它，而不是让底下那条负面断言静静地变成恒真。
+        assert!(
+            live.remaining().is_none(),
+            "「{哪一档}」这个夹具算得出还剩多久，底下那条断言就是恒真的",
+        );
+
+        let 屏上 = 一帧的字(&ctx, &mut app);
+        // 「已用」照旧在——**少画的只有算不出来的那一个数**，不是整行都不画了。
+        // 少了这一句的话，整行没画出来也能让底下那条负面断言过。
+        assert!(
+            屏上.lines().any(|line| line.trim().starts_with("已用")),
+            "「{哪一档}」：算不出还剩多久，连「已用」都不画了：\n{屏上}",
+        );
+        assert!(
+            !屏上.contains("剩"),
+            "「{哪一档}」：算不出来却还是画了个剩余时间出来：\n{屏上}",
+        );
+
+        app.tasks_mut().stop(id);
+        画到台上空了(&ctx, &mut app);
+    }
+}
+
+#[test]
+fn 走了一半时屏上那一句写着约剩多少() {
+    // 「已用 X」与「约剩 X」两个数并排。口径：已用时间 ÷ 已完成比例 − 已用时间。
+    let ctx = headless::context();
+    let mut app = 开一个();
+    app.show_view(View::Tasks);
+    let id = 排一趟停在原地的(&mut app, |task| {
+        task.steps(2);
+        task.step("认根").expect("没人叫停");
+        task.step("挨个文件过一遍").expect("没人叫停");
+    });
+    let live = 等到那一趟报出(&ctx, &mut app, |live| live.progress.at == 2);
+    // 两步走完了一步：**这一档真的说得出走了几成**，与上一条那一档不是同一件事。
+    assert_eq!(live.progress.fraction(), Some(0.5));
+    assert!(live.remaining().is_some());
+
+    let 屏上 = 一帧的字(&ctx, &mut app);
+    let 那一段 = |前缀: &'static str| -> String {
+        屏上
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(前缀))
+            .unwrap_or_else(|| panic!("屏上没有「{前缀}」那一段：\n{屏上}"))
+            .to_string()
+    };
+    // **两个数并排**：「已用」没被挤掉，「约剩」也写出来了。
+    let 已用 = 那一段("已用 ");
+    let 约剩 = 那一段("约剩 ");
+    // **数也得对得上，不能只是「有这么一句」。** 走了一半时口径自己说了算：
+    // 已用 ÷ 0.5 − 已用 = 已用——于是屏上这两个数必然印成同一串字。这一条不看挂钟
+    // （两句话取的是同一帧那一份 `Live`），却钉住了界面画的确实是核心折出来的那个数：
+    // 换成一个常数、或者除错了倍数，它当场红。
+    assert_eq!(
+        约剩, 已用,
+        "走了一半时「约剩」该与「已用」是同一个数（已用 ÷ 0.5 − 已用 = 已用）：\n{屏上}",
+    );
+
+    app.tasks_mut().stop(id);
+    画到台上空了(&ctx, &mut app);
 }

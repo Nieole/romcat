@@ -179,6 +179,13 @@ fn running_ui(ui: &mut egui::Ui, live: &Live) -> bool {
     ui.horizontal(|ui| {
         ui.strong(&live.name);
         ui.weak(format!("已用 {}", elapsed(live.elapsed)));
+        // **算不出来就一格都不画**：核心那一侧交出「没有」的时候（总步数还没报、
+        // 或者走了零成），这儿连个占位都不摆。一个会跳的「约剩」比没有「约剩」更坏
+        // ——维护者会照它安排接下来一小时干什么。折算本身在
+        // [`Live::remaining`](romcat_core::task::Live::remaining)：这一层只画。
+        if let Some(left) = live.remaining() {
+            ui.weak(format!("约剩 {}", elapsed(left)));
+        }
         if live.stopping {
             // 按下停下到真的停之间隔着一步——**如实说出来**，不然人会以为按钮没反应。
             ui.colored_label(ui.visuals().warn_fg_color, "正在停……走到下一步就停");
