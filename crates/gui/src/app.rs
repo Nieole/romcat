@@ -317,6 +317,11 @@ impl App {
                 self.browse.refresh(&self.site);
                 continue;
             }
+            // **整批收藏那一趟也要写两份库**（沉淀库那些成员关系、中立库那份投影），
+            // 同上：写在认领这一步。
+            let Some(done) = self.browse.settle_collection(&mut self.site, done) else {
+                continue;
+            };
             // **同步那一趟要把清单写回中立库**，所以子库屏认领时拿的是可写的那份现场
             // ——台上那条线拿的是只读连接，写不动（`task::Product` 的文档）。
             self.sublibrary.settle(&mut self.site, done);
@@ -485,9 +490,10 @@ impl App {
                 }
                 View::Browse => {
                     // **抬头上那颗「★ 收藏」真的写库**（票 `gui-redesign/06`），
-                    // 所以这一屏的抬头拿的是可变的那一份。
-                    let (browse, site) = (&mut self.browse, &mut self.site);
-                    browse.status(ui, site);
+                    // 所以这一屏的抬头拿的是可变的那一份。它同时**往任务台上排活**
+                    // ——那一下在真库量级上是几秒的读（票 `parking-3/09`）。
+                    let (browse, site, board) = (&mut self.browse, &mut self.site, &mut self.board);
+                    browse.status(ui, site, board);
                 }
                 View::Sublibraries => {
                     // **顶栏上那个「停下」按得动**，所以任务台拿的是可变的那一份。

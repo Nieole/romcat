@@ -42,12 +42,27 @@
 //! 这与裁决是同一个限制，处置也同一条（ADR-0021）：**说得出「这一条挪了位置还认不认得
 //! 出」，比让用户以为每条都认得出强**。所以 [`Applied`] 把两种锚各数一个数交出去，
 //! 界面照它写出来。
+//!
+//! ## 读一半、写一半：因为它是一趟长活
+//!
+//! 「全选 46,483 行 → ★ 收藏」那一下，**读**那一半要为每个变体折出它该钉哪种锚，
+//! 而折一个变体的判据要问几次中立库（`identify::content_prints`）——实测在画帧那条
+//! 线程上跑 6.7 秒（挂单 `Q119`）。所以这个模块拆成两半：
+//!
+//! - [`plan`] 只读，收一个[把手](crate::task::Handle)、报进度、按得停，排上**任务台**；
+//! - [`commit`] 只写，两份库各一个事务，在**认领**那一步落（台上那条线拿的是中立库的
+//!   只读连接，写不动）。
+//!
+//! [`add`] 与 [`remove`] 是这两半**接起来**的那个特例：命令行、测试与合成数据走它。
+//! 两条路共用同一份说法，不许各算各的。
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::catalog::{Catalog, CatalogError};
+use crate::catalog::{Catalog, CatalogError, KEYS_PER_QUERY, VariantRow};
 use crate::identify;
+use crate::report::thousands;
 use crate::site::Site;
+use crate::task::{Halted, Handle};
 use crate::verdict::{Anchor, Membership, VerdictError};
 
 /// **收藏**这一组合集叫什么。
@@ -69,6 +84,12 @@ pub enum CollectionError {
     /// 合集没名字。
     #[error("合集得有个名字：一组东西没有名字，日后既指不着它也筛不出它。")]
     Nameless,
+    /// 被按停了。**读那一半整条只读**，所以这一档停在哪儿都是干净的。
+    ///
+    /// 这一句原样是 [`Halted`] 交出来的那一句，**一个字都不许改**：任务台就是按
+    /// 「那句话正是 `Halted` 那一句」把「停了」与「失败」分开的（`task::Board`）。
+    #[error("{0}")]
+    Halted(#[from] Halted),
 }
 
 /// 一批变体加进（或移出）一个合集之后的账。
@@ -119,14 +140,15 @@ pub struct Projected {
 /// （`triage::Item::anchor`），而且必须是同一条：两处各挑各的，同一个变体上的收藏与
 /// 裁决会钉在不同的东西上，改个名字丢一个留一个。
 ///
-/// # Errors
-/// 读中立库失败时返回错误。
+/// **判据由调用方递进来**，这一层不自己去问：整批那条路一趟就把全批的判据取回来了
+/// （[`identify::content_prints`]），在这儿再问一次等于把省下的那笔钱又花回去。
+#[must_use]
 pub fn anchor_of(
-    catalog: &Catalog,
     library: &str,
-    variant: &crate::catalog::VariantRow,
-) -> Result<Anchor, CatalogError> {
-    Ok(match identify::content_print(catalog, variant)? {
+    variant: &VariantRow,
+    print: Option<&identify::ContentPrint>,
+) -> Anchor {
+    match print {
         Some(print) => Anchor::Content {
             crc32: print.crc32,
             size: print.size,
@@ -136,13 +158,152 @@ pub fn anchor_of(
             library: library.to_string(),
             variant_key: variant.key.clone(),
         },
+    }
+}
+
+/// 一批变体进出一个合集这件事**读完了、还没落库**的那一半。
+///
+/// 拆成两半是因为它们跑在两条线程上：读那一半排上**任务台**（一个变体要问几次中立库，
+/// 全选 46,483 行就是十几万次往返，票 `parking-3/09`），写那一半在**认领**那一步——
+/// 台上那条线拿的是中立库的只读连接，写不动（`gui::task::Product` 的文档）。
+#[derive(Debug, Clone)]
+pub struct Plan {
+    /// 往哪个合集里加、或者从哪个合集里拿。**已经去过首尾空白**。
+    pub name: String,
+    /// 是加进去（`true`）还是拿出来。
+    pub joining: bool,
+    /// 读那一半数出来的账：两种锚各几个、有几个键中立库里已经没有。
+    /// **[`Applied::changed`] 要落库之后才知道**，这里是 0。
+    tally: Applied,
+    /// 要往沉淀库里写（或者删）的那些锚。
+    anchors: Vec<Anchor>,
+    /// 中立库那份投影要动的那几个变体键。
+    touched: Vec<String>,
+}
+
+/// 排一趟：这一批变体各该钉在哪种锚上、投影要动哪几个键。**一个字都不写库。**
+///
+/// 长入口的形状（收一个[把手](Handle)、报进度、按得停）与别的长活一模一样。
+/// 整条只读，所以**停在哪儿都是干净的**——那是[收场](crate::task::Ending)四档里的
+/// 「停了，什么都没留下」，不是**停在半路**：再排一次就是从头排一次。
+///
+/// 判据整批取（[`identify::content_prints`]），不是一个变体问四次库。
+///
+/// # Errors
+/// 名字是空的、中立库读不动、或者被按停时返回错误。
+pub fn plan(
+    catalog: &Catalog,
+    library: &str,
+    name: &str,
+    keys: &[String],
+    joining: bool,
+    task: &Handle,
+) -> Result<Plan, CollectionError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(CollectionError::Nameless);
+    }
+    let mut tally = Applied::default();
+    let mut anchors: Vec<Anchor> = Vec::with_capacity(keys.len());
+    // **投影要动的键不等于人点的那几个**：一条内容锚在本机可能落在好几个变体上
+    // （两块盘各存一份）。走 [`landed`]——与整份重建那一处同一个展开，
+    // 否则屏上这一下与下一趟识别会给出两种样子。
+    let mut touched: BTreeSet<String> = BTreeSet::new();
+    let total = u64::try_from(keys.len()).unwrap_or(u64::MAX);
+    task.steps(1);
+    task.step(&format!("为 {} 个变体折锚", thousands(total)))?;
+    let mut done = 0_u64;
+    // **一段一条 `IN`，一段一次停下的机会**：段与判据那几条查询取的是同一个长度
+    // （[`KEYS_PER_QUERY`]），于是「按下停下」到「真的停了」之间最坏就是这一段。
+    for chunk in keys.chunks(KEYS_PER_QUERY) {
+        task.check()?;
+        let want: Vec<&str> = chunk.iter().map(String::as_str).collect();
+        let rows = catalog.variants_of(&want)?;
+        let by_key: BTreeMap<&str, &VariantRow> =
+            rows.iter().map(|row| (row.key.as_str(), row)).collect();
+        let prints = identify::content_prints(catalog, &rows)?;
+        for key in chunk {
+            // **不静静吞掉**：中立库里没有的那些说明屏上那份名单已经过期。
+            let Some(variant) = by_key.get(key.as_str()).copied() else {
+                tally.missing += 1;
+                continue;
+            };
+            let anchor = anchor_of(library, variant, prints.get(&variant.key));
+            match anchor {
+                Anchor::Content { .. } => tally.content += 1,
+                Anchor::Path { .. } => tally.path += 1,
+            }
+            if !joining && matches!(anchor, Anchor::Content { .. }) {
+                // **两种锚都拿一遍。** 上面那条是「眼下该钉哪种」，而库里存着的可能是
+                // 另一种——识别跑过之后同一个变体从路径锚升成了内容锚，正是这种情况。
+                // 只拿一种的话星星点不灭。
+                let by_path = Anchor::Path {
+                    library: library.to_string(),
+                    variant_key: variant.key.clone(),
+                };
+                touched.extend(landed(catalog, &by_path, Some(&variant.key))?);
+                anchors.push(by_path);
+            }
+            touched.extend(landed(catalog, &anchor, Some(&variant.key))?);
+            anchors.push(anchor);
+        }
+        done += u64::try_from(chunk.len()).unwrap_or(0);
+        task.tick(done, total);
+    }
+    Ok(Plan {
+        name: name.to_string(),
+        joining,
+        tally,
+        anchors,
+        touched: touched.into_iter().collect(),
     })
+}
+
+/// 把排好的那一趟落下去：沉淀库一个事务，中立库那份投影一个事务。
+///
+/// **它不收把手，也停不下来**，那是有意的：两份库各一个事务，中途停下留下的正是
+/// 「屏上亮着而沉淀库里没有」那种半截状态。停要停在[排那一步](plan)。
+///
+/// # Errors
+/// 两份库有一份写不动时返回错误。
+pub fn commit(site: &mut Site, plan: &Plan) -> Result<Applied, CollectionError> {
+    let mut applied = plan.tally;
+    // 沉淀库那一半：整批一个事务。
+    applied.changed = if plan.joining {
+        let memberships: Vec<Membership> = plan
+            .anchors
+            .iter()
+            .map(|anchor| Membership::now(&plan.name, anchor.clone()))
+            .collect();
+        site.store.join(&memberships)?
+    } else {
+        site.store.leave(&plan.name, &plan.anchors)?
+    };
+    // 中立库那一半（投影）跟着改，也是一个事务。**只动碰到的那几个键**：
+    // 整份重建（[`project`]）要把全库的成员关系摊一遍，而这一下人是按着按钮等结果的。
+    if plan.joining {
+        // **一个成员都落不了地就别建那个合集**：那会在筛选栏那一维上留下一个
+        // 一件东西都选不出来的合集，而这一票的正题就是把「合集 0 个」收掉。
+        if !plan.touched.is_empty() {
+            let id = site.catalog.add_collection(&plan.name)?;
+            site.catalog.add_all_to_collection(id, &plan.touched)?;
+        }
+    } else {
+        site.catalog
+            .remove_all_from_collection(&plan.name, &plan.touched)?;
+        // 一条成员都不剩的合集从投影里消失，同上。
+        site.catalog.drop_empty_collections()?;
+    }
+    Ok(applied)
 }
 
 /// 把这一批变体放进一个合集。**收藏就是 `name` 取 [`FAVORITE`]。**
 ///
 /// 落沉淀库，同时把中立库那份投影跟着改——**屏上当场生效**要的就是后半句。
 /// 整份重建（[`project`]）太贵也没必要：动了哪几个键这里一清二楚。
+///
+/// **它是[排一趟](plan)加[落下去](commit)的特例**：那一批不大、就地跑完就是。
+/// 命令行与测试走这条；界面上「全选 46,483 行」那一下走任务台，两条路共用同一份说法。
 ///
 /// # Errors
 /// 名字是空的、或者两份库有一份读写失败时返回错误。
@@ -167,70 +328,9 @@ fn apply(
     keys: &[String],
     joining: bool,
 ) -> Result<Applied, CollectionError> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err(CollectionError::Nameless);
-    }
     let library = site.library.clone();
-    let mut applied = Applied::default();
-    // **先把整批的锚算出来，再一趟写下去。** 界面上「全选 → 收藏」一下就是四万多个变体
-    // （真库 46,444 个），一条一个事务等于四万多次提交——那是画帧那条线程僵住十几秒，
-    // 正是挂账 D156 刚收掉的那一类毛病。
-    let mut anchors: Vec<Anchor> = Vec::with_capacity(keys.len());
-    // **投影要动的键不等于人点的那几个**：一条内容锚在本机可能落在好几个变体上
-    // （两块盘各存一份）。走 [`landed`]——与整份重建那一处同一个展开，
-    // 否则屏上这一下与下一趟识别会给出两种样子。
-    let mut touched: BTreeSet<String> = BTreeSet::new();
-    for key in keys {
-        let Some(variant) = site.catalog.variant(key)? else {
-            applied.missing += 1;
-            continue;
-        };
-        let anchor = anchor_of(&site.catalog, &library, &variant)?;
-        match anchor {
-            Anchor::Content { .. } => applied.content += 1,
-            Anchor::Path { .. } => applied.path += 1,
-        }
-        if !joining && matches!(anchor, Anchor::Content { .. }) {
-            // **两种锚都拿一遍。** 上面那条是「眼下该钉哪种」，而库里存着的可能是
-            // 另一种——识别跑过之后同一个变体从路径锚升成了内容锚，正是这种情况。
-            // 只拿一种的话星星点不灭。
-            let by_path = Anchor::Path {
-                library: library.clone(),
-                variant_key: variant.key.clone(),
-            };
-            touched.extend(landed(&site.catalog, &by_path, None)?);
-            anchors.push(by_path);
-        }
-        touched.extend(landed(&site.catalog, &anchor, Some(&variant.key))?);
-        anchors.push(anchor);
-    }
-    let touched: Vec<String> = touched.into_iter().collect();
-    // 沉淀库那一半：整批一个事务。
-    applied.changed = if joining {
-        let memberships: Vec<Membership> = anchors
-            .into_iter()
-            .map(|anchor| Membership::now(name, anchor))
-            .collect();
-        site.store.join(&memberships)?
-    } else {
-        site.store.leave(name, &anchors)?
-    };
-    // 中立库那一半（投影）跟着改，也是一个事务。**只动碰到的那几个键**：
-    // 整份重建（[`project`]）要把全库的成员关系摊一遍，而这一下人是按着按钮等结果的。
-    if joining {
-        // **一个成员都落不了地就别建那个合集**：那会在筛选栏那一维上留下一个
-        // 一件东西都选不出来的合集，而这一票的正题就是把「合集 0 个」收掉。
-        if !touched.is_empty() {
-            let id = site.catalog.add_collection(name)?;
-            site.catalog.add_all_to_collection(id, &touched)?;
-        }
-    } else {
-        site.catalog.remove_all_from_collection(name, &touched)?;
-        // 一条成员都不剩的合集从投影里消失，同上。
-        site.catalog.drop_empty_collections()?;
-    }
-    Ok(applied)
+    let planned = plan(&site.catalog, &library, name, keys, joining, &Handle::new())?;
+    commit(site, &planned)
 }
 
 /// 这个变体在哪几个合集里，各**钉在哪种锚上**。按合集名排。
@@ -324,7 +424,8 @@ pub fn project(
 /// （与 `scrape::zh::Rulings::resolve` 同一条路，两处不许各写一遍）。
 ///
 /// `known` 是「这条锚**就是从这个变体身上算出来的**」，那一个不必再复核一遍。
-/// 增量那条路（[`apply`]）刚刚才为它算过一次判据，而那一次不便宜（一个变体四次查库）。
+/// 排一趟那条路（[`plan`]）刚刚才为它算过一次判据，而那一次不便宜——折一个变体的判据
+/// 要问中立库好几次（[`identify::content_prints`]）。
 fn landed(
     catalog: &Catalog,
     anchor: &Anchor,
@@ -349,6 +450,11 @@ fn landed(
                 }
             }
             Ok(out)
+        }
+        // **路径锚就是那一个变体**，不必再问一次库：`known` 说的正是「这条锚是从它身上
+        // 算出来的」，而那说明它就在库里——排一趟（[`plan`]）刚为它取过那一行。
+        Anchor::Path { variant_key, .. } if known == Some(variant_key.as_str()) => {
+            Ok(vec![variant_key.clone()])
         }
         Anchor::Path { variant_key, .. } => Ok(catalog
             .variant(variant_key)?

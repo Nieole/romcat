@@ -125,6 +125,51 @@ pub use title::TitleRow;
 /// 照旧不写迁移代码。
 pub const SCHEMA_VERSION: u32 = 7;
 
+/// `prepare_cached` 那张表留几条。
+///
+/// **默认那 16 条不够用了**（票 `parking-3/09`）：按一批键取行的那几条 SQL 是照段长
+/// 现拼的（`… IN (?1,?2,…)`），段长不同就是不同的语句，而摊开**一个变体**时段长就是
+/// 它有几个成员——真库上从 1 到几十都有。缓存一挤爆就次次重新解析，
+/// 那正是 `Catalog::variant` 当年改走 `prepare_cached` 要省下的那笔钱（挂单 `Q119`）。
+///
+/// 一条准备好的语句是几 KiB 量级，128 条的代价可以忽略。
+const STATEMENT_CACHE: usize = 128;
+
+/// 一条 `IN (…)` 查询一次问多少个键。
+///
+/// 把要问的键切成这么长的段，一段一条 `IN`。逐个键往返一次的话，真库上
+/// 「全选 46,483 行 → ★ 收藏」要为每个变体各问好几次库（变体行、成员、容器构成、
+/// 容器状态、条目、算过的哈希），那是二十几万次往返（票 `parking-3/09`）。
+///
+/// **它不是全仓库唯一的一份**：`catalog::scrape` 里另有一个同名的模块私有常量
+/// （900），连占位符也自己拼了一套。两处该合成一处，记在挂单 `Q283`——那一处属于
+/// 刮削那一族的下推查询，本票没伸手。
+///
+/// **一个键那一档是它的特例**，不是另一条路：`chunks` 交出一段长度为 1 的段，
+/// 折出来的 SQL 是 `… IN (?1)`，与从前那句 `… = ?1` 走同一个索引、同样进
+/// `prepare_cached`。于是「一条」与「一批」共用同一句 SQL——**哪几列算一行**
+/// 这种事写两遍，迟早有一处漏掉新加的那一列。
+///
+/// 取 500 是给 SQLite 的绑定参数上限留余量：这个仓库用的 `bundled` 是新版（上限
+/// 32,766），但那条上限历史上是 999，而 500 段与 32,000 段的往返次数在这几张表上
+/// 已经差不到一个量级。
+pub(crate) const KEYS_PER_QUERY: usize = 500;
+
+/// `?1, ?2, …, ?n`：一条 `IN (…)` 里那一串占位符。
+pub(crate) fn placeholders(count: usize) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::with_capacity(count * 5);
+    for at in 1..=count {
+        if at > 1 {
+            out.push(',');
+        }
+        // 写进 `String` 不会失败。
+        let _ = write!(out, "?{at}");
+    }
+    out
+}
+
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS meta(
     key   TEXT PRIMARY KEY,
@@ -425,6 +470,8 @@ impl Catalog {
             file: Some(file),
             path: self.path.clone(),
         };
+        twin.conn
+            .set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         // **这一份也要等。** WAL 让读与写并行，但写者提交那一刻仍会短暂独占；
         // 默认超时是 0，于是长活那一侧会在扫描提交的那一瞬间拿到一句
         // 「database is locked」而不是等一会儿（同 `Catalog::open` 那条注释）。
@@ -468,6 +515,9 @@ impl Catalog {
         path: String,
     ) -> Result<Self, CatalogError> {
         let catalog = Self { conn, file, path };
+        catalog
+            .conn
+            .set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         // WAL：中断的扫描已经写进去的部分不会因为没提交而整份丢掉。
         // **`busy_timeout` 不是调优，是界面那一屏的前提**：扫描跑在画帧线程之外，
         // 后台那条线程按文件路径自己开一份写得动的库（`gui::roots::Screen::scan`），

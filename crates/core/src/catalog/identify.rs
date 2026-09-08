@@ -38,6 +38,12 @@ use super::{Catalog, CatalogError};
 use crate::dat::Convention;
 use crate::dat::chinese::ChineseMark;
 
+/// **一个透明容器里的一份内部文件**：内部路径、未压缩大小、可得的 CRC-32。
+///
+/// 零解压就读得出来的正是这三样（`CONTEXT.md` 的「穿透」条），所以取一个容器与取一批
+/// 容器交出来的是同一个形状。
+pub type ContainerFile = (String, u64, Option<u32>);
+
 /// 识别相关的表。
 pub(super) const IDENTIFY_SCHEMA: &str = "\
 -- 一条**候选**：识别为一个变体给出的一个可能的发行版，带**置信度**与**依据**。
@@ -976,33 +982,53 @@ impl Catalog {
     ///
     /// # Errors
     /// 读库失败时返回错误。
-    pub fn container_files(
+    pub fn container_files(&self, key: &str) -> Result<Vec<ContainerFile>, CatalogError> {
+        Ok(self
+            .container_files_of(&[key])?
+            .remove(key)
+            .unwrap_or_default())
+    }
+
+    /// **一批容器各自穿透出来的内部文件**：容器的键 → 那几条，各自按 `ordinal` 排。
+    ///
+    /// 一条都没有的容器（穿不透、空的、没读过）不出现在结果里——那三种情况分别说什么话
+    /// 由 [`Catalog::container_status`] 答。[`Catalog::container_files`] 是它**一个键**
+    /// 那一档的特例（见 [`Catalog::variants_of`]）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn container_files_of(
         &self,
-        key: &str,
-    ) -> Result<Vec<(String, u64, Option<u32>)>, CatalogError> {
-        let mut statement = self
-            .conn
-            .prepare_cached(
-                "SELECT inner, size, crc32 FROM container_entry
-                 WHERE key = ?1 AND is_dir = 0 ORDER BY ordinal",
-            )
-            .map_err(|source| self.err(source))?;
-        let rows = statement
-            .query_map(params![key], |row| {
-                let size = u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0);
-                let crc: Option<i64> = row.get(2)?;
-                Ok((
-                    row.get::<_, String>(0)?,
-                    size,
-                    crc.and_then(|crc| u32::try_from(crc).ok()),
-                ))
-            })
-            .map_err(|source| self.err(source))?;
-        let mut out = Vec::new();
-        for row in rows {
-            let row = row.map_err(|source| self.err(source))?;
-            if row.1 > 0 {
-                out.push(row);
+        keys: &[&str],
+    ) -> Result<BTreeMap<String, Vec<ContainerFile>>, CatalogError> {
+        let mut out: BTreeMap<String, Vec<ContainerFile>> = BTreeMap::new();
+        for chunk in keys.chunks(super::KEYS_PER_QUERY) {
+            let sql = format!(
+                "SELECT key, inner, size, crc32 FROM container_entry
+                 WHERE key IN ({}) AND is_dir = 0 ORDER BY key, ordinal",
+                super::placeholders(chunk.len())
+            );
+            let mut statement = self
+                .conn
+                .prepare_cached(&sql)
+                .map_err(|source| self.err(source))?;
+            let rows = statement
+                .query_map(rusqlite::params_from_iter(chunk), |row| {
+                    let size = u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0);
+                    let crc: Option<i64> = row.get(3)?;
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        size,
+                        crc.and_then(|crc| u32::try_from(crc).ok()),
+                    ))
+                })
+                .map_err(|source| self.err(source))?;
+            for row in rows {
+                let (key, inner, size, crc32) = row.map_err(|source| self.err(source))?;
+                if size > 0 {
+                    out.entry(key).or_default().push((inner, size, crc32));
+                }
             }
         }
         Ok(out)
@@ -1017,27 +1043,58 @@ impl Catalog {
     /// # Errors
     /// 读库失败时返回错误。
     pub fn entry_fact(&self, key: &str) -> Result<EntryFact, CatalogError> {
-        let row: Option<(i64, i64, Option<i64>)> = self
-            .conn
-            .prepare_cached("SELECT kind, readable, len FROM entry WHERE key = ?1")
-            .and_then(|mut statement| {
-                statement
-                    .query_row(params![key], |row| {
-                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                    })
-                    .optional()
-            })
-            .map_err(|source| self.err(source))?;
-        Ok(match row {
-            None => EntryFact::Missing,
-            Some((kind, _, _)) if kind == super::KIND_DIR => EntryFact::Dir,
-            Some((kind, _, _)) if kind != super::KIND_FILE => EntryFact::Other,
-            Some((_, 0, _)) => EntryFact::Unreadable,
-            Some((_, _, len)) => match len.and_then(|len| u64::try_from(len).ok()) {
-                Some(len) => EntryFact::File(len),
-                None => EntryFact::Unreadable,
-            },
-        })
+        Ok(self
+            .entry_facts_of(&[key])?
+            .remove(key)
+            .unwrap_or(EntryFact::Missing))
+    }
+
+    /// **一批条目各自是什么**。库里没有那一行的键不出现在结果里——那正是
+    /// [`EntryFact::Missing`]，所以取不着的按它算。
+    ///
+    /// [`Catalog::entry_fact`] 是它**一个键**那一档的特例（见 [`Catalog::variants_of`]）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn entry_facts_of(
+        &self,
+        keys: &[&str],
+    ) -> Result<BTreeMap<String, EntryFact>, CatalogError> {
+        let mut out = BTreeMap::new();
+        for chunk in keys.chunks(super::KEYS_PER_QUERY) {
+            let sql = format!(
+                "SELECT key, kind, readable, len FROM entry WHERE key IN ({})",
+                super::placeholders(chunk.len())
+            );
+            let mut statement = self
+                .conn
+                .prepare_cached(&sql)
+                .map_err(|source| self.err(source))?;
+            let rows = statement
+                .query_map(rusqlite::params_from_iter(chunk), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                })
+                .map_err(|source| self.err(source))?;
+            for row in rows {
+                let (key, kind, readable, len) = row.map_err(|source| self.err(source))?;
+                let fact = match (kind, readable) {
+                    (kind, _) if kind == super::KIND_DIR => EntryFact::Dir,
+                    (kind, _) if kind != super::KIND_FILE => EntryFact::Other,
+                    (_, 0) => EntryFact::Unreadable,
+                    _ => match len.and_then(|len| u64::try_from(len).ok()) {
+                        Some(len) => EntryFact::File(len),
+                        None => EntryFact::Unreadable,
+                    },
+                };
+                out.insert(key, fact);
+            }
+        }
+        Ok(out)
     }
 
     /// 一个**透明容器**上次穿透的结论：`None` 表示库里没有这条（不是容器，或者
@@ -1049,18 +1106,44 @@ impl Catalog {
     /// # Errors
     /// 读库失败时返回错误。
     pub fn container_status(&self, key: &str) -> Result<Option<Option<String>>, CatalogError> {
-        self.conn
-            .prepare_cached("SELECT reason, detail FROM container WHERE key = ?1")
-            .and_then(|mut statement| {
-                statement
-                    .query_row(params![key], |row| {
-                        let reason: Option<String> = row.get(0)?;
-                        let detail: Option<String> = row.get(1)?;
-                        Ok(reason.map(|reason| detail.unwrap_or(reason)))
-                    })
-                    .optional()
-            })
-            .map_err(|source| self.err(source))
+        Ok(self.container_status_of(&[key])?.remove(key))
+    }
+
+    /// **一批容器各自上次穿透的结论**。库里没有那一行的键不出现在结果里，那就是
+    /// [`Catalog::container_status`] 里外层那个 `None`（不是容器，或者那次扫描关掉了穿透）。
+    ///
+    /// [`Catalog::container_status`] 是它**一个键**那一档的特例（见 [`Catalog::variants_of`]）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn container_status_of(
+        &self,
+        keys: &[&str],
+    ) -> Result<BTreeMap<String, Option<String>>, CatalogError> {
+        let mut out = BTreeMap::new();
+        for chunk in keys.chunks(super::KEYS_PER_QUERY) {
+            let sql = format!(
+                "SELECT key, reason, detail FROM container WHERE key IN ({})",
+                super::placeholders(chunk.len())
+            );
+            let mut statement = self
+                .conn
+                .prepare_cached(&sql)
+                .map_err(|source| self.err(source))?;
+            let rows = statement
+                .query_map(rusqlite::params_from_iter(chunk), |row| {
+                    let key: String = row.get(0)?;
+                    let reason: Option<String> = row.get(1)?;
+                    let detail: Option<String> = row.get(2)?;
+                    Ok((key, reason.map(|reason| detail.unwrap_or(reason))))
+                })
+                .map_err(|source| self.err(source))?;
+            for row in rows {
+                let (key, status) = row.map_err(|source| self.err(source))?;
+                out.insert(key, status);
+            }
+        }
+        Ok(out)
     }
 
     /// 一个**已确认**的变体撞上 DAT 时用的那套判据：`(CRC-32, 字节数, 记录名)`。
@@ -1221,40 +1304,63 @@ impl Catalog {
     /// # Errors
     /// 读库失败时返回错误。
     pub fn content_hashes(&self, key: &str) -> Result<BTreeMap<String, ContentHash>, CatalogError> {
-        let mut statement = self
-            .conn
-            .prepare_cached(
-                "SELECT inner, size, crc32, looked, header, bare_size, bare_crc32, nkit,
+        Ok(self
+            .content_hashes_of(&[key])?
+            .remove(key)
+            .unwrap_or_default())
+    }
+
+    /// **一批成员上算过的哈希**：成员的键 → 内部路径 → 那一份。
+    ///
+    /// 一条都没算过的成员不出现在结果里。[`Catalog::content_hashes`] 是它**一个键**
+    /// 那一档的特例（见 [`Catalog::variants_of`]）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn content_hashes_of(
+        &self,
+        keys: &[&str],
+    ) -> Result<BTreeMap<String, BTreeMap<String, ContentHash>>, CatalogError> {
+        let mut out: BTreeMap<String, BTreeMap<String, ContentHash>> = BTreeMap::new();
+        for chunk in keys.chunks(super::KEYS_PER_QUERY) {
+            let sql = format!(
+                "SELECT key, inner, size, crc32, looked, header, bare_size, bare_crc32, nkit,
                         sha1, bare_sha1
-                 FROM content_hash WHERE key = ?1",
-            )
-            .map_err(|source| self.err(source))?;
-        let rows = statement
-            .query_map(params![key], |row| {
-                let nkit: Option<i64> = row.get(7)?;
-                Ok(ContentHash {
-                    key: key.to_string(),
-                    inner: row.get(0)?,
-                    size: u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
-                    crc32: u32::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
-                    looked: row.get::<_, i64>(3)? != 0,
-                    header: row.get(4)?,
-                    bare_size: row
-                        .get::<_, Option<i64>>(5)?
-                        .and_then(|size| u64::try_from(size).ok()),
-                    bare_crc32: row
-                        .get::<_, Option<i64>>(6)?
-                        .and_then(|crc| u32::try_from(crc).ok()),
-                    nkit: nkit.map(|nkit| nkit != 0),
-                    sha1: row.get(8)?,
-                    bare_sha1: row.get(9)?,
+                 FROM content_hash WHERE key IN ({})",
+                super::placeholders(chunk.len())
+            );
+            let mut statement = self
+                .conn
+                .prepare_cached(&sql)
+                .map_err(|source| self.err(source))?;
+            let rows = statement
+                .query_map(rusqlite::params_from_iter(chunk), |row| {
+                    let nkit: Option<i64> = row.get(8)?;
+                    Ok(ContentHash {
+                        key: row.get(0)?,
+                        inner: row.get(1)?,
+                        size: u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+                        crc32: u32::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
+                        looked: row.get::<_, i64>(4)? != 0,
+                        header: row.get(5)?,
+                        bare_size: row
+                            .get::<_, Option<i64>>(6)?
+                            .and_then(|size| u64::try_from(size).ok()),
+                        bare_crc32: row
+                            .get::<_, Option<i64>>(7)?
+                            .and_then(|crc| u32::try_from(crc).ok()),
+                        nkit: nkit.map(|nkit| nkit != 0),
+                        sha1: row.get(9)?,
+                        bare_sha1: row.get(10)?,
+                    })
                 })
-            })
-            .map_err(|source| self.err(source))?;
-        let mut out = BTreeMap::new();
-        for row in rows {
-            let row = row.map_err(|source| self.err(source))?;
-            out.insert(row.inner.clone(), row);
+                .map_err(|source| self.err(source))?;
+            for row in rows {
+                let row = row.map_err(|source| self.err(source))?;
+                out.entry(row.key.clone())
+                    .or_default()
+                    .insert(row.inner.clone(), row);
+            }
         }
         Ok(out)
     }

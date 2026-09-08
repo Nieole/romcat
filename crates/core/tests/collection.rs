@@ -28,7 +28,7 @@ use romcat_core::identify::{self, Options, fuzzy};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::site::Site;
 use romcat_core::sublibrary::{self, Rule, Selection};
-use romcat_core::task::Handle;
+use romcat_core::task::{Halted, Handle};
 use romcat_core::testing::container::{ZipEntrySpec, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::verdict::{self, ANCHOR_CONTENT, ANCHOR_PATH, Anchor, Store};
@@ -489,4 +489,103 @@ fn 合集没名字当场拒绝() {
     跑识别(&mut 现场);
     let error = collection::add(&mut 现场.site, "  ", &键(&[马里奥])).expect_err("该拒绝");
     assert!(format!("{error}").contains("名字"), "{error}");
+}
+
+#[test]
+fn 批量取判据与一条一条问_答的是同一份() {
+    // 票 `parking-3/09` 那条硬要求：**单条那份是批量那份的特例**。
+    // 「谁代表这个变体」是唯一的一句说法（`identify::representative`）——写两遍迟早漂开，
+    // 而漂开的后果正是这份 fixture 摆着的东西：同一个变体上的收藏与裁决钉在不同的锚上。
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    let 变体 = 现场.site.catalog.variants().expect("列得出变体");
+    assert_eq!(变体.len(), 3, "三个变体各占一档");
+
+    let 整批 = identify::content_prints(&现场.site.catalog, &变体).expect("整批取得出判据");
+    for row in &变体 {
+        let 一条 = identify::content_print(&现场.site.catalog, row).expect("一条一条也取得出");
+        assert_eq!(
+            整批.get(&row.key),
+            一条.as_ref(),
+            "{} 两条路答出来的代表成员不是同一份",
+            row.key,
+        );
+    }
+    // **拿不到判据的那一个整批里没有它**：`None` 不许被折成一条空判据——
+    // 那会让「无判据」那一档凭空得到一个内容锚。
+    assert!(!整批.contains_key(裸卡带));
+    assert_eq!(整批.len(), 2, "两个 zip 拿得到判据，裸卡带这一趟拿不到");
+}
+
+#[test]
+fn 整批收藏的读那一半停得下来_而且停下时一个字都没写() {
+    // 票 `parking-3/09`：这一下搬上**任务台**之后要按得停。读那一半整条只读，
+    // 所以停在哪儿都是干净的——那是[收场](romcat_core::task::Ending)四档里的
+    // 「停了，什么都没留下」，不是**停在半路**。
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    let 把手 = Handle::new();
+    把手.stop();
+    let 错 = collection::plan(
+        &现场.site.catalog,
+        库名,
+        FAVORITE,
+        &键(&[马里奥, 勇者, 裸卡带]),
+        true,
+        &把手,
+    )
+    .expect_err("按过停下就该停");
+    // **那句话必须正是 `Halted` 交出来的那一句**：任务台就是按它把「停了」与「失败」
+    // 分开的（`task::Board::settle`）。差一个字，屏上就会说这一趟出了错。
+    assert_eq!(错.to_string(), Halted.to_string());
+    // 两份库一个字都没动。
+    assert!(现场.site.store.memberships().expect("读得到").is_empty());
+    assert!(筛(&现场.site.catalog, "收藏=是").is_empty());
+}
+
+#[test]
+fn 排一趟再落下去_与当场收藏那一下一个字不差() {
+    // **`add` 是「排一趟再落下去」的特例**：两条路各算各的话，任务台上那一趟与
+    // 命令行那一下会给出两批不一样的锚。所以这一条**真的把两条路并排跑一遍**
+    // ——各自对着一串写死的数字断言的话，两串数字一起写错也看不出来。
+    let 那一批 = 键(&[马里奥, 勇者, 裸卡带]);
+
+    let mut 当场 = 建现场();
+    跑识别(&mut 当场);
+    let 当场的账 = collection::add(&mut 当场.site, FAVORITE, &那一批).expect("加得进");
+
+    let mut 排一趟 = 建现场();
+    跑识别(&mut 排一趟);
+    let 把手 = Handle::new();
+    let 计划 = collection::plan(&排一趟.site.catalog, 库名, FAVORITE, &那一批, true, &把手)
+        .expect("排得出");
+    // **排完还没写库**：写那一半在认领那一步（台上那条线拿的是只读连接）。
+    assert!(排一趟.site.store.memberships().expect("读得到").is_empty());
+    // 进度报得出来：这一趟在屏上不是一块白板。
+    let 进度 = 把手.progress();
+    assert!(进度.at > 0 && !进度.step.is_empty(), "{进度:?}");
+    assert_eq!((进度.done, 进度.total), (3, 3));
+
+    let 排出来的账 = collection::commit(&mut 排一趟.site, &计划).expect("落得下去");
+    assert_eq!(排出来的账, 当场的账, "两条路数出来的账不是同一本");
+    assert_eq!(
+        筛(&排一趟.site.catalog, "收藏=是"),
+        筛(&当场.site.catalog, "收藏=是"),
+        "两条路收藏进去的不是同一批",
+    );
+    // **沉淀库里那些成员关系也要一模一样**：锚就是它们的身份，两条路钉在不同的东西上
+    // 正是这张票要防的那件事。
+    let 锚 = |现场: &现场| -> Vec<Anchor> {
+        let mut out: Vec<Anchor> = 现场
+            .site
+            .store
+            .memberships()
+            .expect("读得到")
+            .into_iter()
+            .map(|one| one.anchor)
+            .collect();
+        out.sort();
+        out
+    };
+    assert_eq!(锚(&排一趟), 锚(&当场), "两条路钉的锚不是同一批");
 }

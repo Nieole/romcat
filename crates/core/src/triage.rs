@@ -157,7 +157,7 @@ pub struct Item {
     pub candidates: Vec<Candidate>,
     /// 拿得到的**内容判据**；`None` 表示这一条只钉得住本机的路径。
     ///
-    /// 要 [`fill_prints`] 跑过才有值——那一步要为每个变体查两次中立库，
+    /// 要 [`fill_prints`] 跑过才有值——那一步要问几次中立库，
     /// 一万多条的队列不该在只是列一眼的时候整份算出来。
     pub print: Option<ContentPrint>,
 }
@@ -618,11 +618,19 @@ fn decided(verdicts: &verdict::Index, row: &QueueRow) -> bool {
 
 /// 把每条的**内容判据**算出来。**一个字节都不读主库。**
 ///
+/// **整批一趟取回来**（[`identify::content_prints`]）：一条一条地问是一个变体四次库，
+/// 而真库的队列上这是 18,241 条各算一次（票 `parking-3/09`）。挑「谁代表这个变体」
+/// 的那句说法两条路共用同一份——队列钉裁决的锚与收藏钉的锚必须是同一个。
+///
 /// # Errors
 /// 读中立库失败时返回错误。
 pub fn fill_prints(catalog: &Catalog, items: &mut [Item]) -> Result<(), TriageError> {
+    let prints = identify::content_prints(catalog, items.iter().map(|item| &item.variant))?;
     for item in items.iter_mut() {
-        item.print = identify::content_print(catalog, &item.variant)?;
+        // **`get` 而不是 `remove`**：同一个变体在这一批里出现两次时，`remove` 只答得了
+        // 第一条，第二条会静静地退成路径锚——那正是这条入口存在的理由所要防的事
+        // （同一个变体上两处钉不同的锚）。
+        item.print = prints.get(&item.variant.key).cloned();
     }
     Ok(())
 }
@@ -1509,6 +1517,9 @@ pub fn plan_forget(
     // 去重按**锚本身**，不按它印出来的那句话：同一份内容在库里存在多份拷贝时
     // （真机上重复拷贝是常态），它们钉的是同一条裁决，只该忘一次。
     let mut seen: BTreeSet<Anchor> = BTreeSet::new();
+    // **先筛完再整批算判据**：算判据要问几次中立库，而选择器筛掉的那些一次都不该付
+    // （[`fill_prints`] 那条批量入口，票 `parking-3/09`）。
+    let mut items = Vec::new();
     for row in catalog.queue_rows()? {
         // 候选只在选择器真的按它筛时才读——真库里那是 150,959 行。
         let candidates = if row.candidates > 0 && !filter.candidate_work.is_empty() {
@@ -1516,11 +1527,13 @@ pub fn plan_forget(
         } else {
             Vec::new()
         };
-        let mut item = Item::of(row, candidates);
-        if !filter.keeps(&item) {
-            continue;
+        let item = Item::of(row, candidates);
+        if filter.keeps(&item) {
+            items.push(item);
         }
-        item.print = identify::content_print(catalog, &item.variant)?;
+    }
+    fill_prints(catalog, &mut items)?;
+    for item in items {
         let anchor = item.anchor(library);
         if store.find(&anchor)?.is_some() && seen.insert(anchor.clone()) {
             out.rows.push((item.variant.key.clone(), anchor));

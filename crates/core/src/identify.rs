@@ -101,10 +101,10 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::catalog::identify::{
-    Candidate, CartFactRow, Confidence, ContentHash, DiscFactRow, EntryFact, Identification,
-    ModelAnswerRow, SwitchFactRow,
+    Candidate, CartFactRow, Confidence, ContainerFile, ContentHash, DiscFactRow, EntryFact,
+    Identification, ModelAnswerRow, SwitchFactRow,
 };
-use crate::catalog::{Catalog, CatalogError, Provenance, Roots, State, VariantRow};
+use crate::catalog::{Catalog, CatalogError, KEYS_PER_QUERY, Provenance, Roots, State, VariantRow};
 use crate::classify::{self, Category};
 use crate::container::{self, ContainerKind, Demand, ReadPlan, volume};
 use crate::dat::chinese::ChineseMark;
@@ -821,12 +821,13 @@ fn identify_variant(
     state: &mut Run,
 ) -> Result<Identification, IdentifyError> {
     let (repo, verdicts) = (ammo.repo, ammo.verdicts);
-    let members = catalog.variant_members(&variant.key)?;
-    let (mut units, visible) = collect(catalog, &members)?;
+    let bulk = Bulk::load(catalog, std::slice::from_ref(&variant.key.as_str()))?;
+    let members = bulk.members(&variant.key).to_vec();
+    let (mut units, visible) = collect(&bulk, &members)?;
     // 算过的哈希先取回来。**这一步不读盘**，只是把中立库里存着的那套判据装回 units
     // （挂账 D14）。它排在撞库之前，是为了让沉淀库拿判据查得着——裁决过的东西
     // 一个字节都不必再读。
-    let cached = restore_cached(catalog, &mut units, state)?;
+    restore_cached(&bulk, &mut units, state);
 
     // 零、**沉淀库先说话**：裁决过的内容直接精确命中，不再进队列（ADR-0008）。
     //
@@ -871,7 +872,7 @@ fn identify_variant(
         Want::crc_only()
     };
     let read_bytes = if has_ammo(variant, state) {
-        fill_in(library, options, &mut units, &cached, want, state)?
+        fill_in(library, options, &mut units, &bulk, want, state)?
     } else {
         let platform = variant.platform.as_deref().unwrap_or("这个");
         for unit in &mut units {
@@ -947,7 +948,7 @@ fn identify_variant(
                 library,
                 options,
                 &mut units,
-                &cached,
+                &bulk,
                 Want::pay_for_sha1(),
                 state,
             )?;
@@ -1056,8 +1057,11 @@ fn identify_variant(
 }
 
 /// 把一个变体拆成几份要撞 DAT 的内容，顺带收集它里面能看见的名字（给 [`scope`] 用）。
+///
+/// **原料一律从 [`Bulk`] 上拿**，不自己往库里问：一个变体问四次库那笔钱，
+/// 整批只该付一次（票 `parking-3/09`）。
 fn collect(
-    catalog: &Catalog,
+    bulk: &Bulk,
     members: &[(String, Role)],
 ) -> Result<(Vec<ContentUnit>, scope::Visible), CatalogError> {
     let mut units = Vec::new();
@@ -1095,10 +1099,10 @@ fn collect(
             continue;
         }
         if let Some(kind) = ContainerKind::for_path(Path::new(key)) {
-            let files = catalog.container_files(key)?;
+            let files = bulk.container_files(key);
             // **只收容器里装着什么，不收容器自己**：补丁的判据是「里面没有可运行的
             // 内容」，把容器自己算进去的话每个 zip 都自称可运行，那条判据就废了。
-            for (inner, _, _) in &files {
+            for (inner, _, _) in files {
                 contents.push(inner.clone());
             }
             if files.is_empty() {
@@ -1108,7 +1112,7 @@ fn collect(
                 //
                 // 对 [`scope::Visible::saw_inside`] 而言这三者**也不是一回事**：只有「读出来了、
                 // 里面没东西」才算看进去过；另外两种交出来的空名单是「没看见」。
-                let reason = match catalog.container_status(key)? {
+                let reason = match bulk.container_status(key) {
                     Some(Some(detail)) => {
                         visible.saw_inside = false;
                         format!("容器穿不透：{detail}")
@@ -1130,16 +1134,16 @@ fn collect(
                 continue;
             }
             for (inner, size, crc32) in files {
-                if !worth_matching(&inner) {
+                if !worth_matching(inner) {
                     continue;
                 }
                 match crc32 {
                     Some(crc32) => units.push(ContentUnit {
                         member: key.clone(),
                         name: inner.clone(),
-                        inner,
-                        size,
-                        print: Some(Fingerprint::as_is(size, crc32)),
+                        inner: inner.clone(),
+                        size: *size,
+                        print: Some(Fingerprint::as_is(*size, *crc32)),
                         blocked: None,
                         hits: Vec::new(),
                         in_container: true,
@@ -1150,7 +1154,7 @@ fn collect(
                     // 7z 的 `kCRC` 是可选块。没有 CRC 的条目进不了第一命中层。
                     None => units.push(blocked_unit(
                         key,
-                        &inner,
+                        inner,
                         "容器没记这一条的 CRC-32".to_string(),
                         true,
                     )),
@@ -1168,7 +1172,7 @@ fn collect(
                 "压缩镜像：CRC-32 算在压缩后的字节上，撞不了 DAT，内部标识也没读出来".to_string(),
                 false,
             )),
-            Category::BareFile | Category::Unclassified => match catalog.entry_fact(key)? {
+            Category::BareFile | Category::Unclassified => match bulk.entry_fact(key) {
                 EntryFact::File(size) => units.push(ContentUnit {
                     member: key.clone(),
                     inner: String::new(),
@@ -1255,27 +1259,13 @@ fn worth_matching(inner: &str) -> bool {
 /// `content_hash` 是空的，裸文件的判据要回盘算出来才有，
 /// [`identify_variant`] 因此在回盘之后**再问一次**沉淀库。这一步省下的是**读盘那笔钱**，
 /// 不是那次查询。
-fn restore_cached(
-    catalog: &Catalog,
-    units: &mut [ContentUnit],
-    state: &mut Run,
-) -> Result<BTreeMap<String, BTreeMap<String, ContentHash>>, CatalogError> {
-    let mut cached: BTreeMap<String, BTreeMap<String, ContentHash>> = BTreeMap::new();
-    for unit in units.iter() {
-        if !cached.contains_key(&unit.member) {
-            cached.insert(unit.member.clone(), catalog.content_hashes(&unit.member)?);
-        }
-    }
+fn restore_cached(bulk: &Bulk, units: &mut [ContentUnit], state: &mut Run) {
     for unit in units.iter_mut() {
-        if let Some(row) = cached
-            .get(&unit.member)
-            .and_then(|rows| rows.get(&unit.inner))
-        {
+        if let Some(row) = bulk.stored(&unit.member, &unit.inner) {
             unit.print = Some(restore(row));
             state.reused += 1;
         }
     }
-    Ok(cached)
 }
 
 /// 该回盘的回盘。返回这个变体这一趟读了多少字节。
@@ -1283,7 +1273,7 @@ fn fill_in(
     library: &dyn LibraryFs,
     options: &Options,
     units: &mut [ContentUnit],
-    cached: &BTreeMap<String, BTreeMap<String, ContentHash>>,
+    bulk: &Bulk,
     want: Want,
     state: &mut Run,
 ) -> Result<u64, IdentifyError> {
@@ -1344,9 +1334,8 @@ fn fill_in(
     // 算出来的存下来。
     for unit in units.iter() {
         if let Some(print) = unit.print
-            && !cached
-                .get(&unit.member)
-                .and_then(|rows| rows.get(&unit.inner))
+            && !bulk
+                .stored(&unit.member, &unit.inner)
                 .is_some_and(|row| restore(row) == print)
         {
             state.hashes.push(store(unit, print));
@@ -1692,18 +1681,166 @@ pub fn content_print(
     catalog: &Catalog,
     variant: &VariantRow,
 ) -> Result<Option<ContentPrint>, CatalogError> {
-    let members = catalog.variant_members(&variant.key)?;
-    let (mut units, _visible) = collect(catalog, &members)?;
+    Ok(content_prints(catalog, std::slice::from_ref(variant))?.remove(&variant.key))
+}
+
+/// **整批变体各自的内容判据**：一趟几条查询取回整批，不是一条问四次库。
+///
+/// 拿得到判据的才在结果里——**拿不到就是没有那一条**，与 [`content_print`] 的 `None`
+/// 是同一件事。
+///
+/// ## 为什么非有这一条不可
+///
+/// 折一个变体的判据要问四次库：成员、容器构成、容器状态、算过的哈希。界面上
+/// 「全选 46,483 行 → ★ 收藏」按下去，那是十八万次往返，实测在画帧那条线程上
+/// 跑 6.7 秒（挂单 `Q119`）；真库的**待确认队列**上是 18,241 条各算一次
+/// （[`crate::triage::fill_prints`]）。这一条把那四次问成整批的几条
+/// （[`Catalog::variants_of`] 那一族）。
+///
+/// ## 单条那份是它的特例，这是硬的
+///
+/// [`content_print`] 就是「这一批只有一个」，`representative` 那句
+/// 「谁代表这个变体」一个字都没有第二份。另写一遍迟早会与它漂开，而漂开的后果是
+/// **同一个变体上的收藏与裁决钉在不同的东西上**：改个名字丢一个留一个。
+///
+/// ## 内存里驻留多少与这一批多大无关
+///
+/// 摊开的原料按 [`KEYS_PER_QUERY`] 一段一段取（[`Bulk`] 一段开一份、一段丢一份），
+/// 所以交进来一万八千条与交进来五百条，峰值驻留是一样的。**这条与分段查询不是同一件事**
+/// ：那一条省的是往返，这一条守的是「绝不把全库载入内存」（ADR-0005）——真库上一段
+/// 五百个变体牵动的容器构成，比整份队列牵动的少三个数量级。
+///
+/// **一个字节都不读主库**，与 [`content_print`] 同理。
+///
+/// # Errors
+/// 读中立库失败时返回错误。
+pub fn content_prints<'a>(
+    catalog: &Catalog,
+    variants: impl IntoIterator<Item = &'a VariantRow>,
+) -> Result<BTreeMap<String, ContentPrint>, CatalogError> {
+    let variants: Vec<&VariantRow> = variants.into_iter().collect();
+    let mut out = BTreeMap::new();
     let mut state = Run::default();
-    restore_cached(catalog, &mut units, &mut state)?;
-    Ok(representative(variant, &units).and_then(|unit| {
-        unit.print.map(|print| ContentPrint {
-            member: unit.member.clone(),
-            inner: unit.inner.clone(),
-            size: print.size,
-            crc32: print.crc32,
+    for chunk in variants.chunks(KEYS_PER_QUERY) {
+        let keys: Vec<&str> = chunk.iter().map(|row| row.key.as_str()).collect();
+        let bulk = Bulk::load(catalog, &keys)?;
+        for variant in chunk {
+            let members = bulk.members(&variant.key);
+            let (mut units, _visible) = collect(&bulk, members)?;
+            restore_cached(&bulk, &mut units, &mut state);
+            if let Some(print) = representative(variant, &units).and_then(|unit| {
+                unit.print.map(|print| ContentPrint {
+                    member: unit.member.clone(),
+                    inner: unit.inner.clone(),
+                    size: print.size,
+                    crc32: print.crc32,
+                })
+            }) {
+                out.insert(variant.key.clone(), print);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// 折一批变体的判据要读的**那几张表，一趟取回来**。
+///
+/// 摊开一个变体要问四次库（成员、容器构成、容器状态、算过的哈希）。这个类型是那四次的
+/// **批量形态**：整批的键一次交进来，一张表一条 `IN` 取回整批
+/// （[`Catalog::variants_of`] 那一族）。
+///
+/// **一个变体那一档是它的特例**（[`content_print`] 与 [`identify_variant`] 走的就是它）：
+/// 那时每张表的 `IN` 里只有一个键，往返次数与从前一样，一次都没多。
+///
+/// 取哪几个键**与 [`collect`] 判断走哪一支用的是同一个谓词**
+/// （[`ContainerKind::for_path`]），所以这儿备下的货正好是那边要拿的：
+/// 备漏了会静静地答出一个「没有这一行」，而那与「库里真没有」在这一层长得一模一样。
+struct Bulk {
+    /// 变体的键 → 它的成员。
+    members: BTreeMap<String, Vec<(String, Role)>>,
+    /// 容器的键 → 穿透出来的内部文件。
+    files: BTreeMap<String, Vec<ContainerFile>>,
+    /// 容器的键 → 上次穿透的结论。**只备一条内部构成都没有的那些**：
+    /// [`collect`] 也只在那时候问。
+    status: BTreeMap<String, Option<String>>,
+    /// 裸成员的键 → 它在库里是什么。
+    entries: BTreeMap<String, EntryFact>,
+    /// 成员的键 → 内部路径 → 算过的哈希。
+    hashes: BTreeMap<String, BTreeMap<String, ContentHash>>,
+}
+
+impl Bulk {
+    /// 把这一批变体要用的那几张表取回来。
+    fn load(catalog: &Catalog, variant_keys: &[&str]) -> Result<Self, CatalogError> {
+        let members = catalog.variant_members_of(variant_keys)?;
+        // **只备 [`collect`] 会去拿的那些**：内部资源与附属内容那两档它压根不摊开
+        // （`CONTEXT.md` 的「内部资源」条）。
+        let mut containers: Vec<&str> = Vec::new();
+        let mut bare: Vec<&str> = Vec::new();
+        for list in members.values() {
+            for (key, role) in list {
+                if !matches!(role, Role::Main | Role::Companion) {
+                    continue;
+                }
+                if ContainerKind::for_path(Path::new(key)).is_some() {
+                    containers.push(key.as_str());
+                } else {
+                    bare.push(key.as_str());
+                }
+            }
+        }
+        let files = catalog.container_files_of(&containers)?;
+        // **穿透结论只问内部构成为空的那几个**，与 [`collect`] 那条 `if files.is_empty()`
+        // 一一对应：真库上容器是大头，为每一个都问一次等于凭空多一趟全表的往返。
+        let empty: Vec<&str> = containers
+            .iter()
+            .copied()
+            .filter(|key| !files.contains_key(*key))
+            .collect();
+        let status = catalog.container_status_of(&empty)?;
+        let entries = catalog.entry_facts_of(&bare)?;
+        let mut all = containers;
+        all.extend(bare);
+        let hashes = catalog.content_hashes_of(&all)?;
+        Ok(Self {
+            members,
+            files,
+            status,
+            entries,
+            hashes,
         })
-    }))
+    }
+
+    /// 这个变体有哪些成员。一个都没有时是空的。
+    fn members(&self, variant_key: &str) -> &[(String, Role)] {
+        self.members
+            .get(variant_key)
+            .map_or(&[][..], |list| list.as_slice())
+    }
+
+    /// 这个容器穿透出来的内部文件。
+    fn container_files(&self, key: &str) -> &[ContainerFile] {
+        self.files.get(key).map_or(&[][..], |list| list.as_slice())
+    }
+
+    /// 这个容器上次穿透的结论。三档的意思见 [`Catalog::container_status`]。
+    fn container_status(&self, key: &str) -> Option<Option<&str>> {
+        self.status.get(key).map(|detail| detail.as_deref())
+    }
+
+    /// 这个条目在库里是什么。备着的没有它就是**压根不在库里**。
+    fn entry_fact(&self, key: &str) -> EntryFact {
+        self.entries.get(key).copied().unwrap_or(EntryFact::Missing)
+    }
+
+    /// 这一份内容上一趟算过的哈希，没算过就是 `None`。
+    ///
+    /// **借出去，不拷一份**：这一批的哈希已经攥在 [`Bulk`] 手里，为每个成员再深拷一遍
+    /// （`header` / `sha1` / `bare_sha1` 三个 `String`）等于同一批数据在内存里存两份，
+    /// 而这条路正是这张票要省钱的地方。
+    fn stored(&self, member: &str, inner: &str) -> Option<&ContentHash> {
+        self.hashes.get(member).and_then(|rows| rows.get(inner))
+    }
 }
 
 /// 一个变体拿哪一份内容代表自己。

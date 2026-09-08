@@ -72,6 +72,7 @@
 use std::collections::BTreeMap;
 
 use egui::{Align, Layout};
+use romcat_core::catalog::CatalogError;
 use romcat_core::catalog::browse::{
     Facets, PlatformFilter, Scope, WorkAnchor, WorkDetail, WorkQuery, WorkVariant,
 };
@@ -86,6 +87,7 @@ use romcat_core::site::Site;
 use romcat_core::sublibrary::{
     BrokenRule, Dimension, Discarded, Exception, ExceptionRow, LoadedSelection, Rule, Sublibrary,
 };
+use romcat_core::task::{Ending, Finished};
 use romcat_core::title::{Language, TitleKind};
 
 use crate::filter::Filter;
@@ -95,7 +97,7 @@ use crate::look;
 use crate::media::Gallery;
 use crate::scrape;
 use crate::table::{Picked, SPAN, Table, Window};
-use crate::task::Tasks;
+use crate::task::{Product, Tasks};
 
 /// 界面上人工写下的叫法，**依据**里写这一句。
 ///
@@ -318,6 +320,10 @@ pub struct Screen {
     standing: Vec<(String, &'static str)>,
     /// [`Self::standing`] 是照哪个变体算的。与眼下选中的那个不一样就重算。
     standing_for: Option<String>,
+    /// 台上那趟**整批收藏**（或者自建合集的加减）是第几号。`None` 是眼下没排着。
+    ///
+    /// **按号认领**，与别的屏一个写法：台上跑的可能是别人排的活。
+    collecting: Option<u64>,
     /// 加一条叫法的草稿。
     title_draft: TitleDraft,
     /// 写下一个刮削字段值的草稿。
@@ -364,6 +370,7 @@ impl Screen {
             collection: String::new(),
             standing: Vec::new(),
             standing_for: None,
+            collecting: None,
             title_draft: TitleDraft::default(),
             value_draft: ValueDraft::default(),
             notice: None,
@@ -1030,7 +1037,7 @@ impl Screen {
     ///
     /// 先同步一次窗口再画：顶栏与正文各画各的，而顶栏**先画**——不先同步，
     /// 状态栏上那个行数就永远比表格慢一帧（与队列那一屏 `status` 同一条道理）。
-    pub fn status(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+    pub fn status(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         self.sync_window(&site.catalog);
         ui.toggle_value(&mut self.sample, "字体样张");
         // **「刮削选中…」摆在抬头**，与原型同一个位置。它只摊开面板——真按下去那一下
@@ -1059,7 +1066,7 @@ impl Screen {
             )
             .clicked()
         {
-            self.favorite(site);
+            self.favorite(site, tasks);
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if let Some(error) = self.window.error() {
@@ -1178,53 +1185,169 @@ impl Screen {
         &self.standing
     }
 
-    /// 按「**★ 收藏**」那一下：把勾中的那一批全放进[收藏](FAVORITE)。
+    /// 按「**★ 收藏**」那一下：把勾中的那一批排上[任务台](crate::task)，放进[收藏](FAVORITE)。
     ///
-    /// 界面上那颗按钮走的就是它，测试拿它当那一下。
-    pub fn favorite(&mut self, site: &mut Site) {
-        self.join(site, FAVORITE);
+    /// **它返回的时候两份库一个字都还没写**（票 `parking-3/09`）：这一下只是**排一趟活**，
+    /// 落库在[认领](Self::settle_collection)那一步。测试与实测要断库里有没有，
+    /// 得先把台上那一趟跑完并认领（`App::poll_tasks`）。
+    ///
+    /// 界面上那颗按钮走的就是它。
+    pub fn favorite(&mut self, site: &Site, tasks: &mut Tasks) {
+        self.join(site, tasks, FAVORITE);
     }
 
-    /// 按「**☆ 取消收藏**」那一下。
-    pub fn unfavorite(&mut self, site: &mut Site) {
-        self.part(site, FAVORITE);
+    /// 按「**☆ 取消收藏**」那一下。**同样是排一趟活**，见 [`Self::favorite`]。
+    pub fn unfavorite(&mut self, site: &Site, tasks: &mut Tasks) {
+        self.part(site, tasks, FAVORITE);
     }
 
-    /// 按「**加入合集**」那一下：格子里那个名字。
-    pub fn join_collection(&mut self, site: &mut Site) {
+    /// 按「**加入合集**」那一下：格子里那个名字。**同样是排一趟活**，见 [`Self::favorite`]。
+    pub fn join_collection(&mut self, site: &Site, tasks: &mut Tasks) {
         let name = self.collection.trim().to_string();
-        self.join(site, &name);
+        self.join(site, tasks, &name);
     }
 
-    /// 按「**移出合集**」那一下。
-    pub fn leave_collection(&mut self, site: &mut Site) {
+    /// 按「**移出合集**」那一下。**同样是排一趟活**，见 [`Self::favorite`]。
+    pub fn leave_collection(&mut self, site: &Site, tasks: &mut Tasks) {
         let name = self.collection.trim().to_string();
-        self.part(site, &name);
+        self.part(site, tasks, &name);
     }
 
     /// 把勾中的那一批放进一个合集。
     ///
     /// **一个都没勾就别动库**：与「刮削选中…」同一条规矩——摆出一份「作用于 0 个变体」
     /// 的回执，人只会对着它猜哪儿出了问题。
-    fn join(&mut self, site: &mut Site, name: &str) {
-        let Some(keys) = self.scoped_keys(&site.catalog, "加收藏") else {
-            return;
-        };
-        match collection::add(site, name, &keys) {
-            Ok(applied) => self.settle(site, name, applied, true),
-            Err(error) => self.error = Some(format!("{error}")),
-        }
+    fn join(&mut self, site: &Site, tasks: &mut Tasks, name: &str) {
+        self.queue_collection(site, tasks, name, true, "加收藏");
     }
 
     /// 把勾中的那一批从一个合集里拿出来。
-    fn part(&mut self, site: &mut Site, name: &str) {
-        let Some(keys) = self.scoped_keys(&site.catalog, "取消收藏") else {
+    fn part(&mut self, site: &Site, tasks: &mut Tasks, name: &str) {
+        self.queue_collection(site, tasks, name, false, "取消收藏");
+    }
+
+    /// **把这一下排上[任务台](crate::task)**：读那一半跑在画帧那条线程之外。
+    ///
+    /// ## 为什么非搬走不可
+    ///
+    /// 「全选 46,483 行 → ★ 收藏」那一下，读那一半要为每个变体折出它的锚
+    /// （`collection::plan`），实测在画帧那条线程上跑 **6.7 秒**（挂单 `Q119`）——
+    /// 期间窗口是一块白板，切不了屏、滚不动列表、连「停下」都点不着。
+    ///
+    /// **只有读那一半上台**：写那一半（沉淀库那些成员关系、中立库那份投影）在
+    /// [认领](Self::settle_collection)那一步落，台上那条线拿的是只读连接、写不动
+    /// （`crate::task::Product` 的文档）。
+    ///
+    /// ## 后台那条线程读的是哪一份库
+    ///
+    /// 与子库屏排差量预览同一条路（`sublibrary::Screen::preview`）：**同一个文件的
+    /// 第二份只读连接**。只活在内存里的那种库（合成数据）分不出第二份，那一趟就
+    /// **就地跑完**——那份库上它是几毫秒的事。**别的原因分不出来就直说**，
+    /// 不偷偷退回画帧那条线程：那既会僵住窗口，又把真正的问题盖住了。
+    fn queue_collection(
+        &mut self,
+        site: &Site,
+        tasks: &mut Tasks,
+        name: &str,
+        joining: bool,
+        doing: &str,
+    ) {
+        // **一趟没跑完就别排第二趟**：两趟一起落，后一趟算的是前一趟落库之前那份库。
+        //
+        // 这句话里**不带动词**：`doing` 说的是**这一次**按的那一下，而还在跑的是**上一趟**
+        // ——先按 ★ 再按 ☆，写成「上一趟取消收藏还在跑」就是句假话。
+        if self.collecting.is_some() {
+            self.error = Some(
+                "上一趟还在跑（收藏与合集一次只排一趟）。\
+                 任务屏上看得见它走到哪儿了，也按得停。"
+                    .to_string(),
+            );
+            return;
+        }
+        let Some(keys) = self.scoped_keys(&site.catalog, doing) else {
             return;
         };
-        match collection::remove(site, name, &keys) {
-            Ok(applied) => self.settle(site, name, applied, false),
-            Err(error) => self.error = Some(format!("{error}")),
+        let title = format!(
+            "{}「{name}」· {} 个变体",
+            if joining { "放进" } else { "拿出" },
+            thousands(keys.len() as u64),
+        );
+        let library = site.library.clone();
+        let name = name.to_string();
+        self.collecting = Some(match site.catalog.read_only() {
+            Ok(reader) => tasks.queue(title, move |task| {
+                collection::plan(&reader, &library, &name, &keys, joining, task)
+                    .map(|planned| Product::Planned(Box::new(planned)))
+                    .map_err(|error| format!("{error}"))
+            }),
+            // **只活在内存里的库分不出第二份连接**（合成数据走这条），那是意料之中的。
+            Err(CatalogError::NotOnDisk { .. }) => tasks.run_here(title, |task| {
+                collection::plan(&site.catalog, &library, &name, &keys, joining, task)
+                    .map(|planned| Product::Planned(Box::new(planned)))
+                    .map_err(|error| format!("{error}"))
+            }),
+            Err(why) => {
+                self.error = Some(format!(
+                    "分不出第二份只读连接：{why}\n\
+                     {doing}要在画帧那条线程之外跑，而它读的是同一份中立库文件。\
+                     先确认那个文件还在、版本还对得上。"
+                ));
+                return;
+            }
+        });
+        self.error = None;
+    }
+
+    /// 任务台交回来一趟跑完的活。**不是自己那一趟就放过去**（返回 `false`）。
+    ///
+    /// **写那一半在这儿落**：台上那条线拿的是只读连接，写不动。所以这一层收的是可写的
+    /// 那份现场（`crate::task::Product::Planned` 的文档）。
+    pub fn settle_collection(
+        &mut self,
+        site: &mut Site,
+        done: Finished<Product>,
+    ) -> Option<Finished<Product>> {
+        if self.collecting != Some(done.id) {
+            return Some(done);
         }
+        self.collecting = None;
+        match done.ended {
+            // **排出来的那份计划就落下去。**（**停在半路**那一档它到不了：排那一趟整条
+            // 只读，停下来什么都不留下。并进这一支只为把那条轴配全。）
+            Ending::Done(Product::Planned(planned))
+            | Ending::Halfway {
+                product: Product::Planned(planned),
+                ..
+            } => {
+                let name = planned.name.clone();
+                let joining = planned.joining;
+                match collection::commit(site, &planned) {
+                    Ok(applied) => self.settle(site, &name, applied, joining),
+                    Err(error) => self.error = Some(format!("{error}")),
+                }
+            }
+            // 别的屏排上去的活轮不到这儿——上面那道判断已经挡掉了，这一支只为把
+            // `Product` 那个枚举配全。
+            Ending::Done(_) | Ending::Halfway { .. } => {}
+            // **停下来的地方是干净的，就得这么说。** 说成「失败」会让人去找哪儿坏了。
+            Ending::Stopped => {
+                self.notice = Some(
+                    "按停了。排锚那一趟整条只读——沉淀库、中立库一个字节都没动，\
+                     再按一次就是。"
+                        .to_string(),
+                );
+                self.error = None;
+            }
+            // **不静默结束**：哪一步、为什么，两样都说出来。
+            Ending::Failed { step, why } => {
+                self.error = Some(if step.is_empty() {
+                    why
+                } else {
+                    format!("这一趟在「{step}」这一步停下了：{why}")
+                });
+            }
+        }
+        None
     }
 
     /// 勾中的那一批展开成的变体键；一个都没勾（或者读不动库）时给一句话并返回 `None`。
@@ -1316,7 +1439,7 @@ impl Screen {
             });
         }
         layout::EDIT.show(ui, |ui| self.edit_panel(ui, site));
-        layout::FILTER.show(ui, |ui| self.filter_panel(ui, site));
+        layout::FILTER.show(ui, |ui| self.filter_panel(ui, site, tasks));
         layout::DETAIL.show(ui, |ui| self.detail_panel(ui, site));
         egui::CentralPanel::default().show(ui, |ui| {
             if self.sample {
@@ -1339,7 +1462,7 @@ impl Screen {
     }
 
     /// 左边那栏：上半五个一按就有的档，下半那棵**条件组**。
-    fn filter_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+    fn filter_panel(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         // **扔掉一条坏规则那一下不能在画的中途走**：`self.editing` 那会儿还借着。
         // 记下序号，这一栏画完再动手。
         let mut 扔掉 = None;
@@ -1462,7 +1585,7 @@ impl Screen {
                 );
                 ui.separator();
 
-                self.collection_panel(ui, site);
+                self.collection_panel(ui, site, tasks);
                 ui.separator();
 
                 self.save_panel(ui, site);
@@ -1540,7 +1663,7 @@ impl Screen {
     /// 点的，规则表达不了）。
     ///
     /// **加收藏那一下不在这儿，在抬头**（原型钉的位置）：它按得最勤，不该藏在左栏底下。
-    fn collection_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+    fn collection_panel(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         ui.strong("收藏与合集").on_hover_text(
             "**加收藏那一下在抬头**（「★ 收藏」），因为它按得最勤：\
                  勾一批、按一下、接着筛下一批。这儿是它的另一半——取消，\
@@ -1556,7 +1679,7 @@ impl Screen {
             .on_hover_text("把勾中的那一批从收藏里拿出来。**两种锚都拿**，星星不会点不灭。")
             .clicked()
         {
-            self.unfavorite(site);
+            self.unfavorite(site, tasks);
         }
         ui.horizontal(|ui| {
             ui.label("合集");
@@ -1584,14 +1707,14 @@ impl Screen {
                 .on_hover_text("没有这个合集就顺手建出来——**一个合集就是它那些成员**。")
                 .clicked()
             {
-                self.join_collection(site);
+                self.join_collection(site, tasks);
             }
             if ui
                 .add_enabled(!name.is_empty(), egui::Button::new("移出合集"))
                 .on_hover_text("一条成员都不剩的合集，从筛选栏那一维里消失。")
                 .clicked()
             {
-                self.leave_collection(site);
+                self.leave_collection(site, tasks);
             }
         });
     }
