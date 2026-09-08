@@ -73,7 +73,8 @@
 //!
 //! - 计划靠的是 [`observe`](super::observe) 交出来的那份键的集合，而那份集合**可能是
 //!   不全的**：列不开的目录（[`TargetState::unlistable_dirs`](super::TargetState)）
-//!   底下一个键都拿不到，那一枝上的落点计划根本无从判断。
+//!   底下一个键都拿不到，那一枝上的落点计划根本无从判断。**执行这一层对那一枝的答案
+//!   是「答不出来」**，不是「空的」——见下面那一节。
 //! - 计划算完到真的 `rename` 之间隔着整趟同步的时间，卡还插在机器上。
 //!
 //! 而只做这一层也不行：ADR-0016 定死**差量预览是硬要求**，一份写着「新增」、执行时
@@ -82,12 +83,27 @@
 //! 判据问两遍，因为一遍答不全。[`landing`] 那一格走 [`real_path`]，而 `real_path`
 //! 只折 NFC，大小写归目标文件系统自己认：**不敏感**的目标（卡上的 exFAT / FAT32、
 //! Windows、macOS 默认的 APFS）上它顺带把别人那份 `GB/Tetris.zip` 也认了出来，
-//! 敏感的 ext4 上它答「空的」。于是 [`occupied_by`] 折起来再问一次——折法与计划那一层
+//! 敏感的 ext4 上它答「空的」。于是 [`occupancy`] 折起来再问一次——折法与计划那一层
 //! 同一个函数（[`path::fold`](crate::path::fold)：小写 + NFC）。**同一张卡换台机器插，
 //! 行为得是同一个**：挡不住的那一边会在维护者那份旁边另写一份并报「成功」。
 //!
+//! **折起来那一问不是两态**（`Occupancy`）：「有东西占着」「什么都没有」之外，还有
+//! **列不开**——ADR-0021 的第三态。Unix 上一个 `0300` 的目录 `read_dir` 失败、按名字
+//! `open` 照样成功；从前它被折进了「什么都没有」，于是上面那条头号理由在实现里是空的，
+//! 大小写敏感的盘上会在维护者那份旁边多写一份只差大小写的。**答不出来就不写。**
+//!
+//! 问完这两遍还有**第三问**（`dir_blocked`）：**我们真要建的那条目录路径上，躺着个不是
+//! 目录的东西吗。** 卡上有个文件叫 `GB`、这一趟要往 `GB/` 底下写十几份——目录根本建不
+//! 出来，那一枝底下每一条新增都会以同一句话失败。它问的是**我们自己那条落点**，
+//! 不是折起来撞上的别的枝：大小写敏感的盘上 `GB/sub` 是个文件，不代表 `gb/sub`
+//! 建不出来，照那边的答案挡下来是误报——而这一格是**计数**的，误报十条就把整趟停住。
+//!
 //! 挡下来记成一条 [`Failure`] 而不是让整趟停住——与「单个文件写不进去不中断整趟」
-//! 同一条纪律。
+//! 同一条纪律。**但挡下来的那几种之间要分开**（`Refusal`）：落点被占与读不动是
+//! **这一个落点**的确定性条件，接着往下试有意义，不进「连着失败就停下来」那个计数；
+//! 目录段上躺着个文件是**这一枝**的条件，底下每一条都会以同一句话失败，要进。
+//! 从前那条豁免认的是 [`io::ErrorKind::AlreadyExists`]，而 `create_dir_all` 撞上同名
+//! 文件报的正是那一种——于是后一格连计数都不涨，放弃机制永不触发。
 //!
 //! **没有改掉 `rename` 的覆盖语义**：更新那一条要的正是「原子地换掉我们自己那一份」，
 //! 而 `rename` 在 Unix 与 Windows 上都替换，那是这条链路想要的性质。`create_new`
@@ -98,7 +114,7 @@
 //! ## 八、问目标的那几句话走一道**可注入的**接缝
 //!
 //! 上面那道闸问目标三句：**这条键在盘上是哪一条**（`on_target`，删除那一步找盘上真名
-//! 走的也是它）、**折起来有没有东西占着**（`occupied_by`）、**目录段真名是什么**
+//! 走的也是它）、**折起来有没有东西占着**（`occupancy`）、**目录段真名是什么**
 //! （`settled`）。三句都从 [`Sources::target`] 那道 [`LibraryFs`] 上问——与[看一遍
 //! 目标](fn@super::observe)同一个 trait、同一条纪律：那个 trait 根本没有写的办法
 //! （ADR-0004 的做法）。
@@ -122,23 +138,25 @@
 //! - **不许拿它去替换别处的真实文件访问。** 主库那一侧有它自己的接缝
 //!   （[`Sources::library`]，ADR-0004）；**媒体池**、转换缓存、硬链接探测都是工具自己
 //!   的地盘，一律走真盘。
-//! - **不是挂缓存的地方。** 想让一次落点判定之内共享一份 listing（同一个目录眼下被列
-//!   两遍），缓存得建在**那一次判定的栈上**；包一层带记性的实现塞进这个字段，作用域
-//!   就成了整趟——而这道闸防的正是「计划算完到真的改名之间，卡还插在机器上」，
-//!   一份跑到一半就过期的 listing 会把那道缝重新打开（挂单 `Q134`）。
+//! - **不是挂缓存的地方。** 一次落点判定之内共享的那份 listing（前两句走的是同一批
+//!   目录）建在**那一次判定的栈上**——`Cached` 套在这个字段外面，活到 `place`
+//!   返回为止。塞进这个字段的话作用域就成了整趟，而这道闸防的正是「计划算完到真的
+//!   改名之间，卡还插在机器上」，一份跑到一半就过期的 listing 会把那道缝重新打开
+//!   （挂单 `Q134`）。
 //! - **不注入就是真盘**：调用方给 [`RealFs`](crate::fs::RealFs) 就是原来那条路，
 //!   命令行与界面都这么给。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use ring::digest::{Context, SHA256};
 
 use crate::capability::Conversion;
 use crate::catalog::{Roots, mtime_ns};
 use crate::convert::{self, ConvertError};
-use crate::fs::{LibraryFs, real_dir, real_path};
+use crate::fs::{DirEntry, LibraryFs, ReadSeek, real_dir, real_path};
 use crate::scan::CancelToken;
 use crate::scrape::pool::hex;
 use crate::task::Handle;
@@ -160,10 +178,15 @@ const SEPARATOR: &str = std::path::MAIN_SEPARATOR_STR;
 /// 只会把同一句错误印上几百遍。单个文件失败照常跳过并记账（与扫描那一侧
 /// 「读不到某个目录不中断整趟」同一条纪律），**连着**失败才是系统性故障的信号。
 ///
-/// **落点被占不算进来**（[`io::ErrorKind::AlreadyExists`]）：那是**这一个落点**的确定性
-/// 条件，不是「接着试也没用」的那一类。计划里新增是连在一起的（`steps` 按
-/// [`Act`] 排过），维护者往卡里拷了十几个只差大小写的文件，一算进来第十条就
-/// `gave_up`，其余几百步一步都不做——而那正是「撞上不许整趟停住」要防的事。
+/// **算不算进来由 [`Refusal`] 说了算，不由错误种类说了算。** 落点被占、落点这一枝
+/// 读不动——那是**这一个落点**的确定性条件，接着往下试有意义，不算：计划里新增是连在
+/// 一起的（`steps` 按 [`Act`] 排过），维护者往卡里拷了十几个只差大小写的文件，
+/// 一算进来第十条就 `gave_up`，其余几百步一步都不做，而那正是「撞上不许整趟停住」
+/// 要防的事。**「该建目录的位置上躺着个文件」要算**：那一格底下每一条新增都会以同一句
+/// 话失败，接着试没有任何意义，正是这个计数要认出来的那一类。
+///
+/// 从前这条豁免认的是 [`io::ErrorKind::AlreadyExists`]，而 `create_dir_all` 撞上一个
+/// 同名文件报的正是那一种——于是上面那一格连计数都不涨，放弃机制永不触发。
 pub(super) const GIVE_UP_AFTER: u64 = 10;
 
 /// 一份文件放到目标上的办法。
@@ -393,7 +416,7 @@ pub fn run(
             break;
         }
         let outcome = match step.act {
-            Act::Delete => erase(sources, step).map(|()| None),
+            Act::Delete => erase(sources, step).map(|()| None).map_err(Refusal::Failed),
             Act::Add | Act::Update => {
                 place(sources, &mut dirs, step, placement, cancel, &mut out).map(Some)
             }
@@ -426,22 +449,23 @@ pub fn run(
                 account.bytes += stamp.bytes;
                 done.insert(path.clone(), recorded(step, path, stamp));
             }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+            Err(Refusal::Failed(error)) if error.kind() == io::ErrorKind::Interrupted => {
                 // 写到一半收到中断：临时文件已经清掉了，落点上还是原来那一份。
                 out.interrupted = true;
                 break;
             }
-            Err(error) => {
-                // 落点被占**不进这个计数**（见 [`GIVE_UP_AFTER`]）：它是这一个落点的
-                // 确定性条件，接着往下试是有意义的。也不清零——清零会让真正的系统性
-                // 故障被夹在中间的占用冲淡，而「连着」这个词说的正是不被冲淡。
-                if error.kind() != io::ErrorKind::AlreadyExists {
+            Err(refusal) => {
+                // **认的是「这一步是被那道闸挡下来的哪一种」，不是错误种类**
+                // （见 [`GIVE_UP_AFTER`]、[`Refusal::counted`]）。不算进来的那几种
+                // 也**不清零**——清零会让真正的系统性故障被夹在中间的占用冲淡，
+                // 而「连着」这个词说的正是不被冲淡。
+                if refusal.counted() {
                     consecutive += 1;
                 }
                 out.failures.push(Failure {
                     path: step.path.clone(),
                     act: step.act,
-                    why: format!("{error}"),
+                    why: refusal.why(&step.path),
                 });
                 if consecutive >= GIVE_UP_AFTER {
                     out.gave_up = true;
@@ -483,7 +507,7 @@ fn left_behind(touched: u64) -> String {
 
 /// 删掉目标上的一份文件。
 fn erase(sources: &Sources<'_>, step: &Step) -> io::Result<()> {
-    let Some(at) = on_target(sources, &step.path) else {
+    let Some(at) = on_target(sources.target, sources.target_root, &step.path) else {
         // 计划算出来的时候它还在。这一瞬间没了也不是灾难：要的结果本来就是「它不在」。
         return Ok(());
     };
@@ -499,31 +523,37 @@ fn place(
     placement: Option<Placement>,
     cancel: &CancelToken,
     out: &mut Outcome,
-) -> io::Result<(String, Stamp, Placement)> {
-    let (target, taken) = landing(sources, dirs, &step.path);
+) -> Result<(String, Stamp, Placement), Refusal> {
+    // **这一次判定的那份目录记性**：底下问两遍，走的是同一批目录（见 [`Cached`]）。
+    let cached = Cached::over(sources.target);
+    let (target, taken) = landing(sources, &cached, dirs, &step.path);
     // **最后一道防线**（模块文档七）：新增这一步的落点上不该有任何东西。
     //
     // 问两遍，因为一遍答不全：`landing` 那一问在**大小写不敏感**的目标上连别人那份
     // 也认得出（`real_path` 拿 `GB/tetris.zip` 就开得了 `GB/Tetris.zip`），可在
     // **大小写敏感**的盘上它一无所知——同一张卡插在 Windows 上挡得住、插在 Linux 上
-    // 就在维护者那份旁边另写一份并报「成功」。于是折起来再问一次（`occupied_by`）。
+    // 就在维护者那份旁边另写一份并报「成功」。于是折起来再问一次（`occupancy`）。
     //
     // **先问折起来那一问，哪怕逐字那一问已经说「占着了」**：`landing` 交回来的路径是
     // `根 + 键` 拼出来的（`real_path` 的快路径就是直接拼），大小写还是我们自己那份，
     // 于是在**卡上**——正是这条缺陷的主场景——报出来会是「`GB/tetris.zip` 的落点上
     // 已经有东西了（…/GB/tetris.zip）」，两条一模一样，等于没说出是谁占着。
-    // `occupied_by` 的答案来自 listing，那才是盘上真实那个名字。
+    // `occupancy` 的答案来自 listing，那才是盘上真实那个名字。
     if step.act == Act::Add {
-        let blocking = occupied_by(sources, &step.path).or_else(|| taken.then(|| target.clone()));
-        if let Some(at) = blocking {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!(
-                    "{} 的落点上已经有东西了（{}）：清单之外的文件一律不碰（ADR-0015）",
-                    step.path,
-                    crate::path::display(&at),
-                ),
-            ));
+        // **答不出来也不放行**（ADR-0021）：折起来那一问不是两态，「列不开」既不是
+        // 「有」也不是「没有」。逐字那一问答「占着了」时用它的话说——那条路径是
+        // [`on_target`] 从盘上认回来的，比一句「答不出来」说得清楚。
+        let blocking = match occupancy(&cached, sources.target_root, &step.path) {
+            Occupancy::Occupied(at) => Some(Refusal::Occupied(at)),
+            Occupancy::Unreadable(dir) if !taken => Some(Refusal::Unreadable(dir)),
+            Occupancy::Clear | Occupancy::Unreadable(_) => {
+                taken.then(|| Refusal::Occupied(target.clone()))
+            }
+        }
+        // 没人占着，也得问一句这条落点的目录建不建得出来（[`dir_blocked`]）。
+        .or_else(|| dir_blocked(&cached, sources.target_root, &target).map(Refusal::NotADir));
+        if let Some(refusal) = blocking {
+            return Err(refusal);
         }
     }
     let parent = target.parent().unwrap_or(sources.target_root).to_path_buf();
@@ -601,7 +631,7 @@ fn place(
 
     if let Err(error) = std::fs::rename(&temp, &target) {
         let _ = std::fs::remove_file(&temp);
-        return Err(error);
+        return Err(Refusal::Failed(error));
     }
     let meta = std::fs::metadata(&target)?;
     Ok((
@@ -744,8 +774,8 @@ fn copy_stream(reader: &mut dyn Read, temp: &Path, cancel: &CancelToken) -> io::
 /// 走 [`real_path`] 而不是直接拼：清单里存的是 NFC 的键，而目标上那个名字在
 /// 分解敏感的文件系统上可能是分解形式（ADR-0020）。拼出来打不开会被当成
 /// 「它已经不在了」——而在删除这一侧，那意味着**该删的没删**。
-fn on_target(sources: &Sources<'_>, key: &str) -> Option<PathBuf> {
-    real_path(sources.target, sources.target_root, key)
+fn on_target(fs: &dyn LibraryFs, root: &Path, key: &str) -> Option<PathBuf> {
+    real_path(fs, root, key)
 }
 
 /// 这一份该**落在**目标上的哪条路径，以及**那儿现在是不是已经有东西了**。
@@ -762,8 +792,13 @@ fn on_target(sources: &Sources<'_>, key: &str) -> Option<PathBuf> {
 /// 第一格就是那道最后防线的依据：[`real_path`] 在**大小写不敏感**的目标上，
 /// 拿 `GB/tetris.zip` 也开得了别人那份 `GB/Tetris.zip`，于是它答的正是
 /// 「这条键会落到一个已经存在的文件上吗」——[`place`] 拿它挡住新增（模块文档七）。
-fn landing(sources: &Sources<'_>, dirs: &BTreeMap<String, PathBuf>, key: &str) -> (PathBuf, bool) {
-    if let Some(at) = on_target(sources, key) {
+fn landing(
+    sources: &Sources<'_>,
+    fs: &dyn LibraryFs,
+    dirs: &BTreeMap<String, PathBuf>,
+    key: &str,
+) -> (PathBuf, bool) {
+    if let Some(at) = on_target(fs, sources.target_root, key) {
         return (at, true);
     }
     let Some((dir, name)) = key.rsplit_once('/') else {
@@ -774,6 +809,76 @@ fn landing(sources: &Sources<'_>, dirs: &BTreeMap<String, PathBuf>, key: &str) -
         .cloned()
         .unwrap_or_else(|| sources.target_root.join(dir.replace('/', SEPARATOR)));
     (parent.join(name), false)
+}
+
+/// 一步为什么没做成。
+///
+/// **「被那道闸挡下来」与别处冒出来的错误在类型上分开。** 「连着失败就停下来」那个
+/// 计数（[`GIVE_UP_AFTER`]）认的是这个枚举，不是 [`io::ErrorKind`]——`place` 从前只
+/// 交回一个 [`io::Error`]，于是「被闸挡下来」与 `create_dir_all` 撞上同名文件报的那条
+/// 在类型上分不开，两者都是 [`io::ErrorKind::AlreadyExists`]（挂单 `Q252`）。
+enum Refusal {
+    /// **落点被占**：折起来或逐字，那儿已经有东西了。这是它在盘上真实的那条路径。
+    Occupied(PathBuf),
+    /// **落点这一枝读不动**：有一层列不开，那儿有没有东西答不出来（ADR-0021）。
+    Unreadable(PathBuf),
+    /// **该建目录的位置上躺着个不是目录的东西**：这条键的目录根本建不出来。
+    NotADir(PathBuf),
+    /// 别的：真的写不进去、读不出来，或者被中断。
+    Failed(io::Error),
+}
+
+impl From<io::Error> for Refusal {
+    fn from(error: io::Error) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl Refusal {
+    /// 这一条进不进「连着失败就停下来」那个计数（[`GIVE_UP_AFTER`]）。
+    ///
+    /// **被占与读不动不进**：那是这一个落点的确定性条件，接着往下试有意义。
+    /// **目录段上躺着个文件要进**：那一格底下每一条新增都以同一句话失败，
+    /// 接着试没有任何意义。
+    fn counted(&self) -> bool {
+        match self {
+            Self::Occupied(_) | Self::Unreadable(_) => false,
+            Self::NotADir(_) | Self::Failed(_) => true,
+        }
+    }
+
+    /// 报告里那句话。**说得出是谁挡的**：只说一句「已经有东西了」而不指出是哪一条，
+    /// 维护者没法判断该动哪一份。
+    fn why(&self, key: &str) -> String {
+        match self {
+            Self::Occupied(at) => format!(
+                "{key} 的落点上已经有东西了（{}）：清单之外的文件一律不碰（ADR-0015）",
+                crate::path::display(at),
+            ),
+            Self::Unreadable(dir) => format!(
+                "{key} 的落点在一个列不开的目录底下（{}）：那儿有没有东西答不出来，\
+                 答不出来就不写（ADR-0021）",
+                crate::path::display(dir),
+            ),
+            Self::NotADir(at) => format!(
+                "{key} 要落进的目录位置上躺着一个不是目录的东西（{}）：这条路径底下\
+                 一份都写不进去",
+                crate::path::display(at),
+            ),
+            Self::Failed(error) => format!("{error}"),
+        }
+    }
+}
+
+/// 折起来那一问的答案。**「读不动」是第三态**（ADR-0021）——它从前被折成了「没有」。
+enum Occupancy {
+    /// 折起来有东西占着这条落点，这是它在盘上真实的那条路径。
+    Occupied(PathBuf),
+    /// 这一枝上有一层**列不开**：底下有没有挡路的**答不出来**。既不是「有」也不是
+    /// 「没有」，而这道闸要的是「证得出落点上是空的」——证不出来就不写。
+    Unreadable(PathBuf),
+    /// 列开了，没有挡路的。
+    Clear,
 }
 
 /// 目标上有没有一个东西**折起来**占着这条落点；有的话，它在盘上真实的那条路径。
@@ -805,43 +910,91 @@ fn landing(sources: &Sources<'_>, dirs: &BTreeMap<String, PathBuf>, key: &str) -
 /// 另一枝底下挡路的那份就看不见了。挡路的答案取全部候选里排下来最先那个：报出来的是
 /// 挡路的证据，谁挡的都一样，而这个选择要是确定的（与 [`plan`](super::plan) 那一侧
 /// 「留最先那个」同一条口径）。
-fn occupied_by(sources: &Sources<'_>, key: &str) -> Option<PathBuf> {
-    let mut at = vec![sources.target_root.to_path_buf()];
+///
+/// **列不开的那一层交出的是第三态，不是「这一层没有挡路的」**（ADR-0021）。Unix 上一个
+/// `0300` 的目录 `read_dir` 失败、按名字 `open` 照样成功：折成「没有」的话，大小写敏感
+/// 的盘上就会在维护者那份 `GB/Tetris.zip` 旁边多写一份 `GB/tetris.zip`。一枝列不开只在
+/// **别的枝都没找出挡路的**时候才成为答案——找得出来的话，说得出是谁挡的那一条更有用。
+///
+/// **每一层都不看 `kind`、折起来一样的全都跟下去**：`LibraryFs::read_dir` 不跟随符号链接
+/// （`fs::real`），于是目标上一个指向别处的平台目录交出来的 `kind` 是
+/// [`Symlink`](crate::fs::EntryKind::Symlink)——按 `kind` 挑「是不是目录」会把这一整枝漏掉，
+/// 而它底下照样躺得住维护者那份。挡不挡得住由**下一层列不列得开**说了算
+/// （[`list`]），不由这一层的 `kind` 说了算。
+///
+/// **「该建目录的位置上躺着个非目录」不在这一问里**：那问的是我们自己那条落点建不建得出
+/// 目录，与「折起来撞上了谁」是两件事（大小写敏感的盘上 `GB/sub` 是个文件，不代表
+/// `gb/sub` 建不出来）。它归 [`dir_blocked`]。
+fn occupancy(fs: &dyn LibraryFs, root: &Path, key: &str) -> Occupancy {
+    let mut at = vec![root.to_path_buf()];
+    let mut unreadable: Option<PathBuf> = None;
     for segment in key.split('/') {
         if segment.is_empty() {
             continue;
         }
-        let mut next: Vec<PathBuf> = at
-            .iter()
-            .flat_map(|dir| folded_children(sources.target, dir, segment))
-            .collect();
+        let mut next: Vec<PathBuf> = Vec::new();
+        for dir in &at {
+            match list(fs, dir) {
+                Listing::Entries(entries) => next.extend(folded_children(entries, segment)),
+                // 不在、或者根本不是目录：这一枝底下没有东西挡路。
+                Listing::Missing | Listing::NotADir => {}
+                // 记下来接着看别的枝：找得着挡路的那一条比一句「答不出来」说得清楚。
+                Listing::Unreadable => {
+                    unreadable.get_or_insert_with(|| dir.clone());
+                }
+            }
+        }
         if next.is_empty() {
-            return None;
+            return unreadable.map_or(Occupancy::Clear, Occupancy::Unreadable);
         }
         next.sort();
         next.dedup();
         at = next;
     }
-    at.into_iter().next()
+    at.into_iter()
+        .next()
+        .map_or(Occupancy::Clear, Occupancy::Occupied)
 }
 
-/// `dir` 这一层里，折起来与 `segment` 一样的那些名字，在盘上真实的那几条路径。
+/// 我们真要建的那条目录路径上，躺着一个**不是目录**的东西吗；有的话，是哪一段。
 ///
-/// 一律整层列出来：要认的正是「盘上那个名字与我们要写的只差大小写」，而只有 listing
-/// 交得出盘上真实那个名字。名字读不出 UTF-8 的条目跳过——折不了的东西也就无从比对。
+/// 卡上有个文件叫 `GB`、这一趟要往 `GB/` 底下写十几份：`create_dir_all` 到这一段必然
+/// 失败，那一枝底下每一条新增都写不进去。从前两层判定都答不出这一格（逐字那一问只问落点
+/// 自己在不在，折起来那一问走到「不是目录」就当这一枝空的），一路走到建目录才炸——而它
+/// 报的是 [`io::ErrorKind::AlreadyExists`]，正好撞上「落点被占不计数」那条豁免。
 ///
-/// **列不开就当这一层没有挡路的，而这是一个已知的洞**：Unix 上一个 `0300` 的目录列不开
-/// 却写得进（`read_dir` 失败，按名字 `open` 照样成功），而模块文档七点名
-/// [`TargetState::unlistable_dirs`](super::TargetState) 正是执行这一层非有不可的头号
-/// 理由。漏的那一格窄得很，也**不丢数据**：逐字那半边不受影响（`real_path` 直接拼那一下
-/// 在列不开的目录里照样开得了文件），于是大小写不敏感的目标——卡、Windows、APFS
-/// ——上挡得住；剩下的只有「大小写敏感的盘 + 列不开的目录 + 只差大小写的占用」那一种，
-/// 后果是在维护者那份**旁边**多写一份（那盘上两份本来就能并存），不是顶掉它。
-/// 要补上只能把「列不开」与「列开了没找到」分成两态一路带上来，那是另一张票的形状。
-fn folded_children(fs: &dyn LibraryFs, dir: &Path, segment: &str) -> Vec<PathBuf> {
+/// **问的是[我们自己那条落点](landing)，不是折起来撞上的别的枝。** 大小写敏感的盘上
+/// `GB/` 与 `gb/` 能同时在，`GB/sub` 是个文件**不代表** `gb/sub` 建不出来——照那边的答案
+/// 挡下来是误报，而这一格[计数](Refusal::counted)，十条就把整趟停住。
+///
+/// 判据也不猜，逐段问文件系统：
+///
+/// - **列得开**：这一段是目录，接着往下问。
+/// - **不是目录**：`create_dir_all` 到这一段必然失败——就是它。
+/// - **不在**：从这一段起都是要新建的，建得出来（分大小写的盘上 `gb` 这个文件旁边照样
+///   建得出 `GB/`，正是这一档）。
+/// - **列不开**：那个目录**在**，而建目录不需要列目录，接着往下问。
+fn dir_blocked(fs: &dyn LibraryFs, root: &Path, target: &Path) -> Option<PathBuf> {
+    let mut at = root.to_path_buf();
+    for segment in target.parent()?.strip_prefix(root).ok()?.components() {
+        at.push(segment);
+        match list(fs, &at) {
+            Listing::Entries(_) | Listing::Unreadable => {}
+            Listing::NotADir => return Some(at),
+            Listing::Missing => return None,
+        }
+    }
+    None
+}
+
+/// 这一层里折起来与 `segment` 一样的那几条。
+///
+/// **一律整层列出来再比**：要认的正是「盘上那个名字与我们要写的只差大小写」，而只有
+/// listing 交得出盘上真实那个名字。名字读不出 UTF-8 的条目跳过——折不了的东西也就
+/// 无从比对。
+fn folded_children(entries: Vec<DirEntry>, segment: &str) -> Vec<PathBuf> {
     let wanted = crate::path::fold(segment);
-    fs.read_dir(dir)
-        .unwrap_or_default()
+    entries
         .into_iter()
         .map(|entry| entry.path)
         .filter(|path| {
@@ -850,6 +1003,107 @@ fn folded_children(fs: &dyn LibraryFs, dir: &Path, segment: &str) -> Vec<PathBuf
                 .is_some_and(|name| crate::path::fold(name) == wanted)
         })
         .collect()
+}
+
+/// 一次落点判定之内的那份**目录记性**：同一个目录只列一遍。
+///
+/// 这道闸问目标两遍——逐字那一问的退路（[`real_path`] 逐段列目录）与折起来那一问
+/// （[`occupancy`] 逐段折着往下走）——两遍走的是**同一批目录**。各列各的等于把每个目录
+/// 整层列两遍，而一个平台目录下几千份文件，那就是几千次多余的整层 listing。
+///
+/// **作用域是这一次 [`place`] 的栈，不是这一趟。** 包一层带记性的实现塞进
+/// [`Sources::target`] 才是顺手的写法，可那样作用域就成了整趟——而这道闸防的正是
+/// 「计划算完到真的改名之间，卡还插在机器上」，一份跑到一半就过期的 listing 会把那道缝
+/// 重新打开（挂单 `Q134`、模块文档八）。建在栈上就不会：判定问的每一句都在这一步写字节
+/// **之前**，这一步一写完它就没了。
+///
+/// **只记 `read_dir`**，别的几句原样转给底下那一层——记住的东西越少，能骗人的地方越少。
+/// [`settled`] 那一问故意**不吃**这份记性：它排在 `create_dir_all` 之后，要看的正是刚
+/// 建出来的那个目录。
+struct Cached<'a> {
+    /// 底下那一层：真跑是真盘，测试里是塞进来的视图。
+    fs: &'a dyn LibraryFs,
+    /// 列过的那些目录。失败只留下[种类](io::ErrorKind)——[`io::Error`] 复制不了，
+    /// 而问它的那几处（[`list`]、[`real_path`]）看的也只是种类。
+    seen: Mutex<BTreeMap<PathBuf, Result<Vec<DirEntry>, io::ErrorKind>>>,
+}
+
+impl<'a> Cached<'a> {
+    /// 给这一层套上记性。
+    fn over(fs: &'a dyn LibraryFs) -> Self {
+        Self {
+            fs,
+            seen: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl LibraryFs for Cached<'_> {
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        self.fs.canonicalize(path)
+    }
+
+    fn read_dir(&self, dir: &Path) -> io::Result<Vec<DirEntry>> {
+        let mut seen = self
+            .seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !seen.contains_key(dir) {
+            let listing = self.fs.read_dir(dir).map_err(|error| error.kind());
+            seen.insert(dir.to_path_buf(), listing);
+        }
+        match seen.get(dir) {
+            Some(Ok(entries)) => Ok(entries.clone()),
+            Some(Err(kind)) => Err(io::Error::from(*kind)),
+            // 上面刚放进去过，这一支到不了。
+            None => self.fs.read_dir(dir),
+        }
+    }
+
+    fn read_head(&self, file: &Path, limit: usize) -> io::Result<Vec<u8>> {
+        self.fs.read_head(file, limit)
+    }
+
+    fn read_tail(&self, file: &Path, limit: usize) -> io::Result<Vec<u8>> {
+        self.fs.read_tail(file, limit)
+    }
+
+    fn open(&self, file: &Path) -> io::Result<Box<dyn ReadSeek + '_>> {
+        self.fs.open(file)
+    }
+}
+
+/// 列一层，**把 `read_dir` 那一个失败拆成三种结论**。
+///
+/// **「列不开」与「列开了没找到」是两态**（ADR-0021），折成一个的话，Unix 上一个 `0300`
+/// 的目录——`read_dir` 失败、按名字 `open` 照样成功——底下这道闸整个失效：大小写敏感的盘
+/// 上会在维护者那份 `GB/Tetris.zip` 旁边多写一份 `GB/tetris.zip`。而模块文档七点名
+/// [`TargetState::unlistable_dirs`](super::TargetState) 正是执行这一层非有不可的头号理由，
+/// 折掉它等于把那个理由自己作废。
+///
+/// **「不是目录」也单拎出来**：那一格挡的不是落点而是**建目录**，两件事的后果不一样
+/// ——一条挡下来接着往下试有意义，另一条底下每一条都写不进去（[`Refusal::counted`]）。
+fn list(fs: &dyn LibraryFs, dir: &Path) -> Listing {
+    match fs.read_dir(dir) {
+        Ok(entries) => Listing::Entries(entries),
+        Err(error) => match error.kind() {
+            io::ErrorKind::NotFound => Listing::Missing,
+            io::ErrorKind::NotADirectory => Listing::NotADir,
+            _ => Listing::Unreadable,
+        },
+    }
+}
+
+/// 列一层的结果。
+enum Listing {
+    /// 列开了。
+    Entries(Vec<DirEntry>),
+    /// 这条路径不在。
+    Missing,
+    /// 在，可它**不是目录**。
+    NotADir,
+    /// 在，可**列不开**：底下有什么答不出来（ADR-0021 的第三态）。
+    Unreadable,
 }
 
 /// 目录建好之后，把落点的**目录段**换成盘上**字节级真实**的那个名字。
