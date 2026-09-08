@@ -480,9 +480,15 @@ fn bench_sublibrary(args: &Args) -> ExitCode {
 
 /// 装完字体跑一帧，问 egui 哪些字画不出来。
 ///
-/// 开了现成的库就把**全部变体的键**过一遍。子集只覆盖 GBK + Big5 + 假名 + 那一段符号区，
-/// 之外的字（CJK 扩展 B 的生僻字、谚文……）照样是豆腐块——这一趟就是用来知道自己的库
-/// 撞不撞得上的，而不是等它在屏幕上出现（`docs/research/egui-viability.md` 的第 2 步）。
+/// 开了现成的库就把**全部变体的键连同它们的作品名**过一遍。子集只覆盖
+/// GBK + Big5 + 假名 + 那一段符号区，之外的字（CJK 扩展 B 的生僻字、谚文……）照样是
+/// 豆腐块——这一趟就是用来知道自己的库撞不撞得上的，而不是等它在屏幕上出现
+/// （`docs/research/egui-viability.md` 的第 2 步）。
+///
+/// **作品名也要过**（票 `parking-3/11`）：主列表第一列画的正是它，而它来自 DAT 与
+/// **中文离线源**，跟变体的键根本不是同一批字。从前这一趟只过键，于是屏上最显眼的
+/// 那一列反而没人替它查过豆腐块。作品名由页查询顺路带回来（`variant_browse_page`），
+/// 不为它整份读一遍那张作品表。
 fn font_check(args: &Args) -> ExitCode {
     let ctx = headless::context();
     headless::frame(&ctx, egui::RawInput::default(), |_| {});
@@ -511,17 +517,20 @@ fn font_check(args: &Args) -> ExitCode {
         let page = romcat_core::catalog::MAX_PAGE;
         let mut offset = 0;
         while offset < total {
-            match site.catalog.variant_page(&query, offset, page) {
+            match site.catalog.variant_browse_page(&query, offset, page) {
                 Ok(rows) => {
                     for row in &rows {
-                        missing.extend(font::missing(&ctx, &row.key));
+                        missing.extend(font::missing(&ctx, &row.variant.key));
+                        if let Some(work) = &row.work {
+                            missing.extend(font::missing(&ctx, work));
+                        }
                     }
                 }
                 Err(error) => return fail(&format!("读不动中立库：{error}")),
             }
             offset += page;
         }
-        println!("过了中立库里 {total} 个变体的键");
+        println!("过了中立库里 {total} 个变体的键，连它们的作品名一起");
     }
 
     if missing.is_empty() {

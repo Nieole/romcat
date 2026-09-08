@@ -2695,12 +2695,14 @@ fn run_export(args: &ExportArgs) -> ExitCode {
             Ok(None) => return fail(format!("库里没有叫「{key}」的变体。")),
             Err(error) => return fail(format!("中立库读不动：{error}")),
         };
-        let work = match variant.work_id {
-            Some(id) => match catalog.work_names() {
-                Ok(names) => names.get(&id).cloned().unwrap_or_else(|| key.clone()),
-                Err(error) => return fail(format!("中立库读不动：{error}")),
-            },
-            None => key.clone(),
+        // **只问这一个变体属于哪个作品**（`Catalog::work_of_variant`）：`work_names()`
+        // 是把那张表整份读进内存（真库 9,226 行），为取其中一行付那笔钱是白付的
+        // ——那个函数自己的文档说的就是这件事（票 `parking-3/11`）。
+        let work = match catalog.work_of_variant(key) {
+            Ok(Some(name)) => name,
+            // 还没认出作品时，裁决就钉在这个变体自己的键上。
+            Ok(None) => key.clone(),
+            Err(error) => return fail(format!("中立库读不动：{error}")),
         };
         let platform = variant
             .platform

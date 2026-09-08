@@ -23,6 +23,27 @@
 //! **升降序对两段一起翻**（`bytes DESC, key DESC`），不是只翻第一段。这样
 //! `(bytes, key)` 那条索引倒着扫就能直接出结果，不必落到临时表排序。
 //!
+//! ## 变体表那一列**作品名**也下推（挂账 D161，票 `parking-3/11`）
+//!
+//! 翻库时人认的是**作品**，不是那些各路来源攒出来的文件名——所以变体表上有作品名
+//! 这一列。它一度是「取回来之后拿 [`Catalog::work_names`] 在内存里对」的：那张表真库
+//! 9,226 行，整份读进来只为在页上补几十格，而且补出来的东西**进不了 `ORDER BY` /
+//! `WHERE`**，于是想按作品找就只能退回「键里含」那个框。
+//!
+//! 现在它是 [`Catalog::variant_browse_page`] 那一趟 `LEFT JOIN work` 带回来的：
+//! 排序落在 [`VariantOrder::Work`] 上、筛选落在 `作品^…` 那条子句上
+//! （`Dimension::Work` → `catalog::filter`），两样都在库里。
+//!
+//! **浏览要的那一行另立了一个类型**（[`BrowseVariant`]），没往 [`VariantRow`] 上加列：
+//! 那是「`variant` 表的一行」，识别、成型、待确认队列、导出收敛十几处都按这个意思
+//! 读它，而作品名不在那张表上。
+//!
+//! ⚠️ **屏上眼下没有变体级的表**：票 `gui-redesign/03` 把它换成了作品级主列表
+//! （那一屏的作品名走 [`WorkOrder::Name`]，早就下推着排、下推着筛）。所以上面那句
+//! 「变体表上有作品名这一列」说的是**这个查询面**，不是当下某一屏。这一层现在服务的是
+//! 字体那趟自检（作品名也要过一遍豆腐块）与测试；留着它是因为「按作品名翻变体」这件事
+//! 本身还在，只是没人在屏上问它（挂单 `Q297`）。
+//!
 //! ## 四个筛选维度也一律下推
 //!
 //! 票 25 的库浏览要按**平台**、**合集**、**语言**、**识别状态**筛。四条都写成 `WHERE`
@@ -49,8 +70,9 @@
 //! 变体在详情面板里挑。它与变体表**共用同一份筛选**（[`VariantQuery::where_clause`]），
 //! 因为规格里那条贯穿全局的约定是「主列表的筛选就是子库的规则」，而子库选的是变体。
 //!
-//! **它比变体表贵，而且贵得有理由**：变体表的每一条 `ORDER BY` 都有一条索引正好接住
-//! （`variant_bytes_key` 那几条），一次翻页是索引倒着扫；作品级那一条要先 `GROUP BY`
+//! **它比变体表贵，而且贵得有理由**：变体表按**自己那张表上的列**排时都有一条索引正好
+//! 接住（`variant_bytes_key` 那几条），一次翻页是索引倒着扫（按**作品名**排是例外，
+//! 见 [`VariantOrder::Work`]）；作品级那一条要先 `GROUP BY`
 //! 把全表折成行，再按聚合出来的列排序。这不是可以绕开的实现细节：「这个作品有几个变体」
 //! 这件事本身就要看过它的每一个变体。内存那一半照旧只有视口那几十行（[`MAX_PAGE`] 还在），
 //! 涨的是每次翻页的时间。
@@ -119,12 +141,32 @@ pub enum VariantOrder {
     Files,
     /// 容量（字节合计，是个下界）。
     Bytes,
+    /// **作品**名（票 `parking-3/11`，挂账 D161）。
+    ///
+    /// 翻库时人认的是作品，不是各路来源攒出来的文件名——所以这一列得排得了序。
+    /// 它排的是 `work_name` 那个别名，也就是 `work.name`：**下推到中立库**
+    /// （ADR-0005），不是把那张作品表整份读进内存再在页上补。
+    ///
+    /// **还没认出作品的那些排在末尾，正反两个方向都是**——`ORDER BY` 那一段
+    /// 多一把 `work_name IS NULL` 的键，理由见那个函数。
+    ///
+    /// **这一档背后没有索引**，与同一个枚举里另外几档不一样：`work_name` 是 join 出来
+    /// 的列，`variant` 上那几条 `(列, key)` 索引接不住它，`work(name)` 那条也接不住
+    /// （排的是变体，不是作品）。于是它落到一口临时 b 树上——量级与作品级主列表那一条
+    /// 同一档，而不是别的变体列那种索引倒着扫。**这不是可以绕开的实现细节**：
+    /// 按另一张表上的列排，就是要把两张表连起来之后整个排一遍。记在挂单 `Q300`。
+    Work,
 }
 
 impl VariantOrder {
-    /// 全部可排的列，界面照这个次序摆表头。
-    pub const ALL: [Self; 5] = [
+    /// 全部可排的列的**规范次序**。
+    ///
+    /// **不是「界面照这个次序摆表头」**：屏上那张表是作品级的，摆的是 [`WorkOrder::ALL`]
+    /// （`crates/gui/src/table.rs`），这个枚举在 `crates/gui/src/` 里零出现。它是给
+    /// 「把每一档都过一遍」的调用方用的——眼下就是测试。
+    pub const ALL: [Self; 6] = [
         Self::Key,
+        Self::Work,
         Self::Platform,
         Self::Rule,
         Self::Files,
@@ -136,6 +178,7 @@ impl VariantOrder {
     pub fn label(self) -> &'static str {
         match self {
             Self::Key => "变体",
+            Self::Work => "作品",
             Self::Platform => "平台",
             Self::Rule => "成型规则",
             Self::Files => "文件数",
@@ -147,6 +190,7 @@ impl VariantOrder {
     fn column(self) -> &'static str {
         match self {
             Self::Key => "key",
+            Self::Work => WORK_NAME,
             Self::Platform => "platform",
             Self::Rule => "rule",
             Self::Files => "files",
@@ -300,6 +344,32 @@ pub struct VariantQuery {
 /// `limit = u64::MAX` 这种把全库拉进内存的写法**——那正是这一层要防的事。
 pub const MAX_PAGE: u64 = 4_096;
 
+/// 变体表那一趟多取的那一列——**作品名**——在 SQL 里叫什么。
+///
+/// **只有这一处起这个名字**：[`VariantOrder::column`] 拼进 `ORDER BY` 的就是它，
+/// [`Catalog::variant_browse_page`] 那条 `SELECT` 里起的别名也是它，那一行读回来
+/// 按名字取的还是它。三处各写一遍的话，改一处就静默地按一列不存在的东西排。
+const WORK_NAME: &str = "work_name";
+
+/// 变体表翻页时的 `FROM`：变体连**它的作品**。
+///
+/// `work.id` 是主键，这条 `LEFT JOIN` 每行一次索引查——它换来的是**作品名下推**
+/// （ADR-0005）。不这么做只剩两条路，两条都是这一层从头到尾在躲的事：
+/// 把那张作品表整份读进内存在页上补（真库 9,226 行），或者逐行去问一次。
+///
+/// **`LEFT` 那半个字不能省**：还没认出作品的变体（`adapter::converge` 的
+/// `Anchor::Loose`）会被内连接**整批**筛掉，一个都不剩——那不是排序，那是换了一批行。
+/// 真库上这一批有一千七百多个（`docs/library-facts.md`：作品 9,226 个，
+/// 而主列表 10,978 行，差出来的那些一行一个变体）。
+///
+/// **它同时是「行数一个不多一个不少」的依据**，而那正是
+/// [`Catalog::variant_total`]（不连这张表，只 `COUNT(*) FROM variant`）与这一趟敢共用
+/// 同一份 `WHERE` 的前提：`work.id` 是 `INTEGER PRIMARY KEY`，一个变体最多连上一行，
+/// join 放大不了行数。**日后要往这条 `FROM` 上再连一张表，先回答这一句还成不成立**
+/// ——连的若是一对多（比如发行版的语言），总数与页内容当场分家，而屏上的样子是
+/// 滚动条指向不存在的行。
+const VARIANT_BROWSE_FROM: &str = " FROM variant LEFT JOIN work ON work.id = variant.work_id";
+
 /// 把 `LIKE` 的三个元字符转义掉。
 ///
 /// 不转义的话，用户在筛选框里打一个 `%` 就等于「什么都匹配」，打 `_` 会悄悄多匹配一个
@@ -394,16 +464,50 @@ impl VariantQuery {
     }
 
     /// 折出 `ORDER BY` 那一段。列名来自 [`VariantOrder::column`]，不含任何用户输入。
+    ///
+    /// **作品那一列多一把键**：`work_name IS NULL` 排在最前面。SQLite 给 `NULL` 的默认
+    /// 次序是「正序最前、倒序最后」——那意味着人点一下表头翻个方向，**还没认出作品**的
+    /// 那一批就从表尾跳到表头。**理由不在这一批有多大**（真库上一千七百多个），
+    /// 在于它们在这一列上根本没有值可比：没有值的东西，位置不该由方向决定。
+    /// 空格子待在表尾，两个方向都是（票 `parking-3/11` 验收第 5 条）。
+    ///
+    /// 这一句只对作品那一列写。别的可空列（`platform`）照旧走 SQLite 那套默认次序——
+    /// 那是既有行为，改它是另一件事。
     fn order_clause(&self) -> String {
         let direction = if self.descending { "DESC" } else { "ASC" };
         let column = self.order.column();
         if column == "key" {
             format!(" ORDER BY key {direction}")
+        } else if column == WORK_NAME {
+            // 并列行的次序由主键兜住，否则翻页会漏行与重行。
+            format!(" ORDER BY {WORK_NAME} IS NULL, {WORK_NAME} {direction}, key {direction}")
         } else {
             // 并列行的次序由主键兜住，否则翻页会漏行与重行。
             format!(" ORDER BY {column} {direction}, key {direction}")
         }
     }
+}
+
+/// **变体表画出来的一行**：变体自己那一行，加上它的**作品名**。
+///
+/// ## 为什么另立一个类型，而不是给 [`VariantRow`] 加一列
+///
+/// [`VariantRow`] 是「`variant` 表的一行」——识别、成型、待确认队列、导出收敛十几处
+/// 都在构造它、都在按这个意思读它。作品名不是那张表上的东西（它在 `work` 上），
+/// 给它加一列等于让那十几处各自回答「这一栏我该填什么」，而其中大多数压根不关心作品。
+/// 所以浏览要的那一行单立一个（挂账 D161 的 B 路，票 `parking-3/11`）。
+///
+/// 形状照 [`WorkVariant`] 那一条来：**装着**那一行，而不是把它的字段抄一遍。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowseVariant {
+    /// 变体自己那一行。
+    pub variant: VariantRow,
+    /// 它属于哪个**作品**；**识别还没认出来时是 `None`**——屏上那一格是空的。
+    ///
+    /// `None` 不是「作品叫空字符串」：这一档是 `adapter::converge` 的 `Anchor::Loose`，
+    /// 真库上一千七百多个变体落在里面。两件事混成一件，排序时它们就会插进真有作品的
+    /// 那一段里——空字符串排得进去，`NULL` 不该。
+    pub work: Option<String>,
 }
 
 impl Catalog {
@@ -428,6 +532,10 @@ impl Catalog {
     ///
     /// `limit` 会被夹到 [`MAX_PAGE`]——这个入口不接受「把全库读出来」这种要求。
     ///
+    /// **只要变体自己那一行**。要连着作品名一起画的走
+    /// [`variant_browse_page`](Self::variant_browse_page)——两条走的是同一条 SQL，
+    /// 于是筛的、排的绝不会漂开。
+    ///
     /// # Errors
     /// 读库失败时返回错误。
     pub fn variant_page(
@@ -436,19 +544,56 @@ impl Catalog {
         offset: u64,
         limit: u64,
     ) -> Result<Vec<VariantRow>, CatalogError> {
+        Ok(self
+            .variant_browse_page(query, offset, limit)?
+            .into_iter()
+            .map(|row| row.variant)
+            .collect())
+    }
+
+    /// 取一页**变体表画出来的行**：变体自己那一行，连它的**作品名**。
+    ///
+    /// **作品名是这一趟查询自己带回来的**（`LEFT JOIN work`），不是取回来之后拿
+    /// [`work_names`](Self::work_names) 在内存里对——那张表真库上 9,226 行，而这一层
+    /// 从头到尾在躲的就是「先把全库读进来」（ADR-0005、挂账 D161）。于是
+    /// [`VariantOrder::Work`] 那一档排得成，筛也筛得动（`作品^…` 走
+    /// `catalog::filter`），两样都落在 `ORDER BY` / `WHERE` 里。
+    ///
+    /// `limit` 会被夹到 [`MAX_PAGE`]，同 [`variant_page`](Self::variant_page)。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn variant_browse_page(
+        &self,
+        query: &VariantQuery,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<BrowseVariant>, CatalogError> {
         let limit = limit.min(MAX_PAGE);
         if limit == 0 {
             return Ok(Vec::new());
         }
         let (where_sql, mut args) = query.where_clause();
         let order_sql = query.order_clause();
-        let sql =
-            format!("SELECT {VARIANT_COLUMNS} FROM variant{where_sql}{order_sql} LIMIT ? OFFSET ?");
+        // 列名一律不加限定，只有作品名那一列例外——`variant` 与 `work` 两张表上没有
+        // 同名的列（`work` 只有 `id` / `name` / `origin`），[`VARIANT_COLUMNS`]
+        // 原样搬得过来。
+        let sql = format!(
+            "SELECT {VARIANT_COLUMNS}, work.name AS {WORK_NAME}\
+             {VARIANT_BROWSE_FROM}{where_sql}{order_sql} LIMIT ? OFFSET ?"
+        );
         args.push(Box::new(i64::try_from(limit).unwrap_or(i64::MAX)));
         args.push(Box::new(i64::try_from(offset).unwrap_or(i64::MAX)));
         let mut statement = self.conn.prepare(&sql).map_err(|source| self.err(source))?;
         let rows = statement
-            .query_map(params_from_iter(args.iter()), read_variant_row)
+            .query_map(params_from_iter(args.iter()), |row| {
+                Ok(BrowseVariant {
+                    variant: read_variant_row(row)?,
+                    // **按名字取那一列**，不按下标：`VARIANT_COLUMNS` 里加一列就会
+                    // 把下标推走，而那一下不会有任何编译错误说话。
+                    work: row.get(WORK_NAME)?,
+                })
+            })
             .map_err(|source| self.err(source))?;
         rows.collect::<Result<_, _>>()
             .map_err(|source| self.err(source))

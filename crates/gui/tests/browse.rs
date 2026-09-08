@@ -168,6 +168,193 @@ fn 主列表按作品出行而且行数与库里的作品数对得上() {
     );
 }
 
+/// 这一帧**屏上画出来的主列表那几行**，按画出来的次序；连同这个筛选下**下推出来的那一页**。
+///
+/// 表是虚拟化的，屏上只有视口那几十行——所以屏上那一串是「这一帧写着的字里，
+/// 哪几段是这一页的行名」，而不是把库再问一遍。两串一比，就问得出
+/// 「屏上画的次序是不是下推出来的那个次序」。
+///
+/// **它靠一条前提**：一个行名这一帧**只画一次**。眼下成立（没点开任何一行，右边那块
+/// 详情面板摆的是「点开一行…」那句话）；哪天别处也把某个作品名单画成一段，
+/// 这一串就会多出一项，底下那条前缀断言当场红——**红在这儿比悄悄放过好**。
+fn 屏上与下推的次序(ctx: &egui::Context, app: &mut App) -> (Vec<String>, Vec<String>) {
+    let 这一页: Vec<String> = {
+        let (browse, site) = app.browse_and_site();
+        site.catalog
+            .work_page(browse.query(), 0, SPAN)
+            .expect("取得出一页")
+            .into_iter()
+            .map(|row| row.name)
+            .collect()
+    };
+    let 认得的: std::collections::HashSet<&str> = 这一页.iter().map(String::as_str).collect();
+    let 屏上 = 画出来的字(&headless::frame(ctx, headless::input(), |ui| app.ui(ui)));
+    let 画出来的: Vec<String> = 屏上
+        .lines()
+        .filter(|line| 认得的.contains(line))
+        .map(str::to_string)
+        .collect();
+    (画出来的, 这一页)
+}
+
+/// **按作品名排完，屏上画出来的次序就是作品名的次序**（票 `parking-3/11` 验收第 4 条）。
+///
+/// 底下那条 `五列都排得了序而且换排序真的换了次序` 断的是「五种排法的头一行不全一样」：
+/// 它在一份「压根没排」的实现上会红，可在一份**排了、但排错了**的实现上照样绿；
+/// 而且它一次都没看屏上画出来的字，看的是又问了一遍库拿回来的那批行。
+///
+/// 这一条换了三样：
+///
+/// 1. **看的是这一帧真的画出来的字**（`shared::画出来的字`）。
+/// 2. **期望从数据自己算出来**——把拿回来的那串名字自己排一遍，比的是同一串。
+///    换一份同样合法的数据它照样成立；写死一批名字就只证得了「这批数据碰巧排成这样」。
+///    中文作品名尤其要这么写：`ORDER BY` 那一侧是 UTF-8 逐字节比，Rust 这一侧的
+///    `str` 也是——两边同一个口径，比得才有意义。
+/// 3. **两个方向都断**，而且断「翻了方向屏上真的变了」。
+///
+/// **还没认出作品的那些行照样在同一串里**：主列表上它们画的是自己的键
+/// （`COALESCE(work.name, variant.key)`，与 `adapter::converge` 的 `Anchor::Loose`
+/// 同一条口径），所以这一屏上那一格从来不是空的——空着的那一格在**变体表**那一层，
+/// 由 `crates/core/tests/browse.rs` 那条断它排在末尾。
+#[test]
+fn 按作品名排完屏上画出来的次序就是作品名的次序() {
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    // **先落在别的列上，再点回作品名那一列**：作品名是默认档，直接开跑的话这条测试
+    // 连「换过来」这一下都没走过，验的只是「默认排序恰好是对的」。
+    {
+        let (browse, _) = app.browse_and_site();
+        browse.query_mut().order = WorkOrder::Bytes;
+    }
+    跑(&ctx, &mut app, 2);
+    {
+        let (browse, _) = app.browse_and_site();
+        let query = browse.query_mut();
+        query.order = WorkOrder::Name;
+        query.descending = false;
+    }
+    跑(&ctx, &mut app, 2);
+
+    let (屏上, 这一页) = 屏上与下推的次序(&ctx, &mut app);
+    assert!(
+        屏上.len() >= 5,
+        "屏上只认出 {} 行，比不出次序来",
+        屏上.len()
+    );
+    assert_eq!(
+        屏上,
+        这一页[..屏上.len()],
+        "屏上画出来的次序与下推出来的那一页对不上",
+    );
+    let mut 期望 = 这一页.clone();
+    期望.sort();
+    assert_eq!(这一页, 期望, "按作品名正序排出来的不是作品名的次序");
+
+    // **两种行摆在同一串里**：认出作品的画作品名，还没认出的画自己的键。
+    {
+        let (browse, site) = app.browse_and_site();
+        let anchors: Vec<WorkAnchor> = site
+            .catalog
+            .work_page(browse.query(), 0, SPAN)
+            .expect("取得出一页")
+            .into_iter()
+            .map(|row| row.anchor)
+            .collect();
+        assert!(
+            anchors
+                .iter()
+                .any(|anchor| matches!(anchor, WorkAnchor::Work(_)))
+                && anchors
+                    .iter()
+                    .any(|anchor| matches!(anchor, WorkAnchor::Loose(_))),
+            "这一页上只有一种行，「两种行排在同一串里」这句话没验到",
+        );
+    }
+
+    {
+        let (browse, _) = app.browse_and_site();
+        browse.query_mut().descending = true;
+    }
+    跑(&ctx, &mut app, 2);
+    let (倒着画的, 倒着那一页) = 屏上与下推的次序(&ctx, &mut app);
+    assert!(倒着画的.len() >= 5, "翻了方向屏上认不出几行来");
+    assert_eq!(
+        倒着画的,
+        倒着那一页[..倒着画的.len()],
+        "翻了方向之后屏上画的与下推出来的对不上",
+    );
+    let mut 期望 = 倒着那一页.clone();
+    期望.sort();
+    期望.reverse();
+    assert_eq!(倒着那一页, 期望, "翻了方向排出来的不是倒过来的作品名次序");
+    assert_ne!(屏上, 倒着画的, "翻了方向，屏上一个字都没变");
+}
+
+/// **筛选器里作品名也用得上**，而且是**下推着筛**的（票 `parking-3/11` 验收第 3 条后半）。
+///
+/// 走的是筛选面板那条路（`browse::Screen::set_filter_rule`），不是直接改查询——
+/// 屏上人按的就是它。断四样：真的筛掉了行、筛出来的那一页每一行都对得上、
+/// 那一页正好装满（不多不少）、**屏上画的就是那一页的头几行**。
+///
+/// 最后那一样断的是**次序加前缀**（`屏上 == 这一页[..屏上.len()]`），不是
+/// 「屏上每一行都对得上」——后者是句废话：`屏上与下推的次序` 本来就是拿这一页的名字
+/// 当白名单滤出来的，屏上真画了别的行只会被静默滤掉，而不是被发现。
+///
+/// 「内存里还是那一扇窗」那一句**由构造保证**（`Window::retained()` 就是窗里那几行），
+/// 摆在这儿是拦住「日后有人把窗换成整份读回来」，不是拦这一次筛选。
+///
+/// **筛的那个名字从库里现取**：写死一个名字就只证得了「这批合成数据里恰好有它」。
+#[test]
+fn 筛选器里按作品名筛得动而且下推着筛() {
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    跑(&ctx, &mut app, 2);
+    let 全部 = app.window().total();
+
+    // 挑一行**认出了作品**的，拿它名字开头那一段当条件。
+    let 那一段 = {
+        let (browse, site) = app.browse_and_site();
+        let name = site
+            .catalog
+            .work_page(browse.query(), 0, SPAN)
+            .expect("取得出一页")
+            .into_iter()
+            .find(|row| matches!(row.anchor, WorkAnchor::Work(_)))
+            .map(|row| row.name)
+            .expect("这一页该有认出了作品的行");
+        // 条件里不带空格：规则那门语言按空格分「且 / 或」。
+        name.split(' ').next().expect("非空").to_string()
+    };
+
+    let 剩下 = 按规则筛(&ctx, &mut app, &format!("作品^{那一段}"));
+    assert!(
+        剩下 > 0 && 剩下 < 全部,
+        "按「作品^{那一段}」筛出 {剩下} 行（一共 {全部} 行），这条筛选没起作用",
+    );
+    assert!(
+        app.window().retained() as u64 <= SPAN,
+        "筛完内存里留了 {} 行——筛选没下推",
+        app.window().retained(),
+    );
+
+    let (屏上, 这一页) = 屏上与下推的次序(&ctx, &mut app);
+    assert!(
+        这一页.iter().all(|name| name.starts_with(&那一段)),
+        "筛出来的行里有名字对不上「{那一段}」的",
+    );
+    assert_eq!(
+        这一页.len() as u64,
+        剩下.min(SPAN),
+        "筛出来那一页装的行数与总数对不上",
+    );
+    assert!(!屏上.is_empty(), "屏上一行都没认出来，比不出什么");
+    assert_eq!(
+        屏上,
+        这一页[..屏上.len()],
+        "屏上画着的那几行不是筛出来那一页的头几行",
+    );
+}
+
 #[test]
 fn 五列都排得了序而且换排序真的换了次序() {
     let ctx = headless::context();
