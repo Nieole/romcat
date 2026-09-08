@@ -152,3 +152,21 @@
   办了浏览屏那一半——主列表那一栏与详情面板的变体行都先问一句「跑过没跑过」再挑词，
   而挑词这件事落在核心库里（ADR-0005）。`StateFilter::from_label` 那个裸字面量也换成了
   `NOT_RUN_LABEL`，往返有测试钉着。
+
+## 挂单裁决（第三轮）
+
+从 `.scratch/PARKING-LOT.md` 第三轮收口迁来。
+
+### Q191 — `main` 上本来就有两处不 fmt-clean，其中一处是重复的 `#[test]`
+
+- **来自：** 本票（路过发现，不在范围内）
+- **在哪：** `crates/core/tests/sync_run.rs:694` —— `#[test]` 连着写了两遍，
+  `cargo clippy` 为它报一条 `duplicated attribute`（warn 级，退出码仍是 0）；
+  `crates/core/src/scrape/zh.rs:2363` —— 一句 `assert!` 没折行。两处都在合并提交
+  `79b6bbe` 之后的 `main` 上，本票一个字都没主动改过。
+- **本票当时走的路：** 跑了门禁要求的 `cargo fmt --all`，那两个文件的排版改动一起提交了
+  ——不提交的话，绿的只有工作区、不是提交出来的树。**重复的 `#[test]` 没修**：
+  那不是排版问题（`cargo fmt` 只删了中间那个空行，两个属性都还在），是个真缺陷。
+- **收尾裁决（第三轮）：settled** —— 那条重复的 `#[test]` 已由提交 `bd4273d`
+  「删掉合并时留下的重复 `#[test]`」做掉。独立探针：`crates/core/tests/sync_run.rs`
+  现有 16 个 `#[test]`，扫一遍没有相邻重复。排版那两处随 `cargo fmt --all` 一并落定。
