@@ -13,7 +13,7 @@
 //! 的那一份搬出来单独存——和 **DAT 库**、**媒体池**是同一个形状，理由也同源：
 //!
 //! - **一条裁决说的是「世上这份内容是什么」，与它躺在哪块盘上无关。** 键是内容哈希
-//!   不是路径，所以它**不跟主库走**（[`workspace::verdict_store_path`] 不带
+//!   不是路径，所以它**不跟主库走**（[`workspace::verdict_store_path`](crate::workspace::verdict_store_path) 不带
 //!   [`Slug`](crate::workspace::Slug)）。两块盘接同一台机器，裁决一次两边都受益。
 //! - **删库重扫不该赔上攒了几个月的裁决。**
 //!
@@ -24,7 +24,7 @@
 //! ## 这份库自己怎么迁移
 //!
 //! 装着不可再生的东西，就**不许**再走「版本对不上让用户删掉」那条路。这里走顺序迁移：
-//! [`MIGRATIONS`] 是一串只增不改的建表 / 改表语句，`PRAGMA user_version` 记着跑到第几条，
+//! `MIGRATIONS` 是一串只增不改的建表 / 改表语句，`PRAGMA user_version` 记着跑到第几条，
 //! 打开时把没跑过的接着跑完。**往前迁得动，往后（库比程序新）如实拒绝并说清**——
 //! 那时该换新程序，而不是删库。
 //!
@@ -152,7 +152,7 @@ use crate::dat::chinese::ChineseMark;
 
 /// 沉淀库跑到第几条迁移，也就是它的结构版本。
 ///
-/// 等于 [`MIGRATIONS`] 的条数——加一条迁移这个数自然加一，不必两处各记一遍。
+/// 等于 `MIGRATIONS` 的条数——加一条迁移这个数自然加一，不必两处各记一遍。
 #[must_use]
 pub fn schema_version() -> u32 {
     u32::try_from(MIGRATIONS.len()).unwrap_or(u32::MAX)

@@ -115,7 +115,7 @@ romcat-gui --catalog ~/.romcat/catalog/主库-xxxx.sqlite3
 crates/core/   romcat-core   领域逻辑全在这儿：扫描、成型、识别、刮削、适配器、子库
 crates/cli/    romcat        命令行
 crates/gui/    romcat-gui    窗口壳。只画和转发，一条领域逻辑都不许长在这里
-xtask/         门禁跑手      `cargo xtask gate` 那四条的唯一定义。不交付、不被上面三个依赖
+xtask/         门禁跑手      `cargo xtask gate` 那五条的唯一定义。不交付、不被上面三个依赖
 docs/adr/      22 份架构决策记录
 docs/          library-facts.md（真库实测台账）、platforms.md、research/
 CONTEXT.md     词表。动手前先读它，输出用它的词
@@ -144,19 +144,19 @@ CONTEXT.md     词表。动手前先读它，输出用它的词
 ## 开发
 
 ```bash
-cargo xtask gate          # 门禁四条：排版、clippy、全量测试、文档
+cargo xtask gate          # 门禁五条：排版、默认特性编得过、clippy、全量测试、文档
 ```
 
-**门禁只有这一句。** 四条命令的定义在 `xtask/src/gate.rs` 里写一遍，本地与 GitHub Actions
+**门禁只有这一句。** 五条命令的定义在 `xtask/src/gate.rs` 里写一遍，本地与 GitHub Actions
 （`.github/workflows/gate.yml`）调的是同一句话——不会出现「我这儿绿的、CI 红的」这种
-只能靠猜的分歧。想知道它到底跑哪四条，**问它自己**，别去翻文档：
+只能靠猜的分歧。想知道它到底跑哪五条，**问它自己**，别去翻文档：
 
 ```bash
 cargo xtask gate --list
 ```
 
 默认在**第一处红上就停**：`fmt` 排在最前，两秒出结果，「忘了跑 `cargo fmt --all`」这种
-最常见的红不该罚你一整趟冷编译。要一趟看全四条给 `--keep-going`（CI 上就是这么调的）。
+最常见的红不该罚你一整趟冷编译。要一趟看全五条给 `--keep-going`（CI 上就是这么调的）。
 
 **内存吃紧就退回限流那一档。** 一台 15 GB 的开发机上按满并发跑全量测试会被 OOM 杀掉：
 
@@ -205,6 +205,16 @@ cargo xtask gate -j 4 --test-threads 4   # 两个开关各自也调得动
 `romcat-gui` 有一个默认关掉的 **`demo` feature**：合成数据、`--demo`、以及 `--bench*` 那几条实测开关全在它后面。**关掉之后它们一个字节都不进交付出去的二进制**——假数据与真库在界面上长得一模一样，看见一屏假名字的第一反应会是「我的库怎么了」，那比起不来更坏。
 
 代价是：**不带 `--all-features` 跑测试，会少跑 115 条**（1,575 而不是 1,690，两边同一口径实测：`cargo test --workspace [--all-features] -- --list`；同上，量的是票 `parking-3/08` 的分支，基线 `b816a48`）——其中 7 个测试文件（`browse` / `close` / `layout` / `media` / `queue` / `table` / `task`）整份都不编译，剩下的散在别的文件里被 `cfg` 掐掉。**少跑不报错**，退出码照样是 0——所以这条开关不该靠人记牢，它写在 `cargo xtask gate` 里。
+
+**反过来那一格由 `cargo check --workspace` 那一条看着。** `clippy` / `test` / `doc` 三条都带 `--all-features`，编的都是 `demo` **开着**的那份代码；而 `cargo build --release` 交付出去的是 `demo` **关掉**的那份。少了 `check` 那一条，「交付的那份还编不编得过」在门禁里一个把门的都没有——谁在 `crates/gui/src/` 里写下一处只有开着 `demo` 才编得过的引用，门禁全绿而发版当场编不过。`check` 是五条里**唯一**跑在默认特性上的，`xtask/tests/gate.rs` 的 `交付出去的那份配置还有一条在看着` 钉着这件事。
+
+### 文档链接断了，门禁当场红
+
+`doc` 那一条递 `RUSTDOCFLAGS="-D warnings"`：**rustdoc 的告警一律当错**。四类最常撞上的是——多余的显式链接目标、解析不了的 intra-doc 链接、「既是函数又是模块」的歧义（用 `mod@` 或 `()` 消歧）、以及**公开文档链到私有条目**。最后那一类不许靠把私有条目改成公开来消警（那是改 API 面），把 ``[`X`]`` 改成不带链接的代码体 `` `X` `` 即可。
+
+这条硬红是票 `parking-3/02` 敲进去的：在那之前仓库里躺着 **67** 条 rustdoc 告警（`romcat-core` 58 / `romcat-gui` 8 / `romcat-cli` 1），而 `cargo doc` 的退出码**永远**是 0，「跑绿」只在字面上成立。
+
+⚠️ **`--lib --bins` 也不能省。** `cargo doc` 默认**跳过与 lib 同名的 bin**（两者都往 `target/doc/<crate>/index.html` 里写，撞文件名）。`romcat-gui` 与 `xtask` 都是 lib 加一个同名 bin——少了这两个开关，`crates/gui/src/main.rs` 与 `xtask/src/main.rs` 一个字都没被 rustdoc 读过。代价是 cargo 会为那两个包各印一行 `warning: output filename collision`：那是 **cargo** 的告警不是 rustdoc 的，`-D warnings` 不把它当错。人自己跑 `cargo doc --open` 时不带 `--bins`，拿到的仍是正常的 lib 文档。`xtask/tests/gate.rs` 的 `与_lib_同名的那个_bin_里断一条链接照样红` 钉着这件事。
 
 ```bash
 # 跑实测（那几条都不开窗，没显示器也跑得起来）

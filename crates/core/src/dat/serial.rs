@@ -66,7 +66,7 @@ const GAME_CODE_LEN: usize = 4;
 
 /// 折平一个序列号：只留字母与数字，折成大写。
 ///
-/// 太短的（见 [`MIN_LEN`]）与一个字母都没有的返回 `None`——纯数字串撞上的多半是
+/// 太短的（见 `MIN_LEN`）与一个字母都没有的返回 `None`——纯数字串撞上的多半是
 /// 别的东西，而序列号在每一个源里都带前缀字母。
 #[must_use]
 pub fn normalize(text: &str) -> Option<String> {

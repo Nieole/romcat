@@ -35,7 +35,7 @@
 //!
 //! 票 20 给这两张表各加了一列（`sublibrary.target_raw`、`sublibrary_manifest.absent`），
 //! 判据仍是同一条：两列在老行上取得到的值与加它们之前的唯一可能完全一致，
-//! 于是旧数据读不错。补列的活在 [`add_columns`] 里，那个函数的注释写着为什么。
+//! 于是旧数据读不错。补列的活在 `add_columns` 里，那个函数的注释写着为什么。
 
 use rusqlite::{OptionalExtension, params};
 

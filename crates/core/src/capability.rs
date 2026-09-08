@@ -592,7 +592,7 @@ fn sibling(key: &str, name: &str) -> String {
 /// 而不是让每个调用方各抄一遍公历换算：抄两遍的两份公式迟早会在闰年上分家，
 /// 而它们算的本来就是同一件事。
 ///
-/// 公式是 [`day_number`] 的逆（Howard Hinnant 的 `civil_from_days`）。
+/// 公式是 `day_number` 的逆（Howard Hinnant 的 `civil_from_days`）。
 #[must_use]
 pub fn today() -> String {
     let secs = std::time::SystemTime::now()
@@ -621,7 +621,7 @@ pub(crate) fn from_day_number(days: i64) -> String {
 ///
 /// `uncompressed_bytes` 是**未压缩的数据量**（[`Conversion::bytes`]），不是源文件多大
 /// ——解压器与压缩器要处理的是前者。按源文件估的话，一个压缩率高的卡带包会估出
-/// 「1 秒」然后真跑三分钟（见 [`Recipe::throughput_mib`]）。
+/// 「1 秒」然后真跑三分钟（见 `Recipe::throughput_mib`）。
 ///
 /// 拿实测吞吐乘一乘而已，**不是一个算准了的数**：源盘是外置 NTFS、目标是 SD 卡、
 /// 中间还夹着解压与重压，三样都能把它带偏一倍。报告因此必须把「粗估」两个字印出来

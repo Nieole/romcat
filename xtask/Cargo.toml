@@ -1,4 +1,4 @@
-# **门禁跑手。** README「开发」一节那四条命令的**唯一**定义住在这个 crate 里，
+# **门禁跑手。** README「开发」一节那几条命令的**唯一**定义住在这个 crate 里，
 # 本地与 CI 都只调 `cargo xtask gate`，不各抄一份。
 #
 # 它**不是交付出去的东西**：`crates/` 下那三个才是（`romcat-core` / `romcat` / `romcat-gui`），
@@ -6,11 +6,11 @@
 # 摆在仓库根而不是 `crates/` 下，正是为了让这条界线看得见（这也是 cargo 社区的
 # `xtask` 惯例：一个 workspace 成员 + 一条 `cargo` 别名）。
 #
-# 它自己**在 workspace 里**，于是门禁四条（fmt / clippy / test / doc）照样盖着它——
+# 它自己**在 workspace 里**，于是门禁五条（fmt / check / clippy / test / doc）照样盖着它——
 # 门禁跑手自己不守门禁是最难查的一类漏。
 [package]
 name = "xtask"
-description = "门禁跑手：README「开发」一节那四条命令的唯一定义"
+description = "门禁跑手：README「开发」一节那几条命令的唯一定义"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

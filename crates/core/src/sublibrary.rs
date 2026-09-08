@@ -208,7 +208,7 @@ pub struct VariantFacts {
     /// 只有[读得成年份的值](rule::parse_year)进得来。读不成的（`199X`、`一九九六`、
     /// `+1996`）不在这儿，于是那个变体在这一维上就是取不到值。
     pub years: Vec<f64>,
-    /// 刮削来的评分，0–1。眼下没有源（见 [`RATING_FIELD`]）。
+    /// 刮削来的评分，0–1。眼下没有源（见 `RATING_FIELD`）。
     pub ratings: Vec<f64>,
     /// 刮削来的开发商。
     pub developers: Vec<String>,

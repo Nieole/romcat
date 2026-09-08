@@ -241,7 +241,7 @@ pub trait Fetcher: Sync {
     /// **这一条不跟重定向。** `head` / `get` 一跳一跳自己走，是因为 DAT 的落点真的会
     /// 302 到对象存储上去；而一个 POST 被重定向意味着落点不对，把正文原样再发一遍到
     /// 另一个主机上，是把请求（连同 `headers` 里的凭据）送到没打算送的地方。走到头
-    /// 不是 2xx 就照 [`require_ok`] 折成 [`FetchError::Status`]，**状态码原样带着**。
+    /// 不是 2xx 就照 `require_ok` 折成 [`FetchError::Status`]，**状态码原样带着**。
     ///
     /// `headers` 里装的是凭据。**实现不许把它记进任何日志或测试录音**——
     /// [`CannedFetcher`] 只记 URL 与正文。
@@ -542,7 +542,7 @@ impl Fetcher for HttpFetcher {
 /// ## 它必须和真的一样处置状态码
 ///
 /// [`with_status`](Self::with_status) 备得下 429 / 430 / 431 这些码，而且**返回的形状
-/// 与 [`HttpFetcher`] 一模一样**（走同一个 [`require_ok`]）。差一点都不行：在线刮削档
+/// 与 [`HttpFetcher`] 一模一样**（走同一个 `require_ok`）。差一点都不行：在线刮削档
 /// 的硬停止全靠认出这几个码，而真实凭据这一趟拿不到——**假服务器是这件事唯一能跑起来的
 /// 验证场**，它若比真的宽容，验的就是另一个东西。
 #[derive(Debug, Default)]

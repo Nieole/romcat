@@ -209,7 +209,7 @@ pub struct Progress {
 /// **卡带那一层**这一趟干了什么。
 ///
 /// 六个数永远同进同出（一层探测的全部账目），所以是一个类型而不是六个字段：
-/// [`Run`] 与 [`Outcome`] 上各摆一份，`run()` 收尾时整个搬过去——散成六个字段的话，
+/// `Run` 与 [`Outcome`] 上各摆一份，`run()` 收尾时整个搬过去——散成六个字段的话，
 /// 加一个计数器要改三处，而漏掉一处不会有任何人告诉你。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CartCount {

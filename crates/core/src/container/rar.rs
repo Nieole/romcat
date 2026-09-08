@@ -9,14 +9,14 @@
 //! 而这一层要的只是**读头**——内部文件的名字、未压缩大小与 CRC-32——根本不需要解压。
 //! 头部结构是公开的（RAR5 有官方 technote，RAR4 只能照 unrar 源码里的读取顺序），
 //! 自己写就彻底绕开了那份许可。**代价是解压这条路走不了**：
-//! [`read_entries`] 只交得出「原样存放」的条目，压缩过的一律如实报「解不了」。
+//! `read_entries` 只交得出「原样存放」的条目，压缩过的一律如实报「解不了」。
 //!
 //! ## 两种格式，两套布局
 //!
 //! - **RAR4**（签名 `Rar!\x1a\x07\x00`）：定长字段，`SIZEOF_FILEHEAD3 = 32`
 //!   从块首算起。**CRC-32 无条件存在**（unrar `arcread.cpp` 里直接
 //!   `hd->FileHash.Type=HASH_CRC32` 再 `Get4()`，没有任何旗标判断）。
-//!   文件名可能带 unrar 私有的 Unicode 编码段（`LHD_UNICODE`），见 [`decode_unicode_name`]。
+//!   文件名可能带 unrar 私有的 Unicode 编码段（`LHD_UNICODE`），见 `decode_unicode_name`。
 //! - **RAR5**（签名 `Rar!\x1a\x07\x01\x00`）：全部字段是变长整数，**没有固定偏移，
 //!   只有固定顺序**。CRC-32 是**可选**的（file flag `0x0004`），名字是 UTF-8。
 //!
