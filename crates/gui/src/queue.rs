@@ -635,7 +635,15 @@ impl Screen {
                     .selectable_label(open, title)
                     .on_hover_text("点开看二级下钻与随机样本")
                     .clicked();
-                hit |= ui.selectable_label(open, batch.why()).clicked();
+                // **这一批在命令行上是什么，就挂在这句共同依据上。** 三个轴的输入框
+                // 各自挂着「命令行上是 `--under`」，卡片从前一个字都没有——而卡片才是
+                // 人挑批的地方（挂单 `Q177`）。印的是折算那一对折出来的那一串
+                // （`Shape::selector`），报告里那一行印的也是它：屏上点这一张与命令行
+                // 敲那一条选中的是同一批（ADR-0005），所以这儿不许另编一句像模像样的话。
+                hit |= ui
+                    .selectable_label(open, batch.why())
+                    .on_hover_text(format!("命令行上是 `--shape '{}'`", batch.shape.selector()))
+                    .clicked();
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     look::tier_label(ui, batch.tier());
                 });

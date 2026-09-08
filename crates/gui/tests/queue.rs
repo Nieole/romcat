@@ -1488,96 +1488,54 @@ fn 队列缩到很小时那一堆的作品名照旧对得上文件名() {
     }
 }
 
+#[test]
+fn 卡片悬停说得出这一批在命令行上是什么() {
+    // ADR-0005：屏上点一张卡片、命令行敲一条 `--shape`，选中的必须是同一批。三个轴的
+    // 输入框各自挂着「命令行上是 `--under`」，**卡片上一个字都没有**——而卡片才是人真正
+    // 挑批的地方。少了这一句，从界面上挑好的那一批得回命令行 `romcat triage list`
+    // 再列一遍才拿得到那串字（挂单 `Q177`）。
+    //
+    // 断的是**那串字逐字对得上**：折算那一对（`Shape::selector` / `Shape::parse`）是
+    // 「屏上这一批与命令行那一条是同一批」在字面上的落点，悬停里印的必须是它折出来的
+    // 那一串，不是另编一句像模像样的话。报告里那一行也是这么印的（`triage::report`）。
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    跑(&ctx, &mut app, 2);
+
+    let 头一批 = app
+        .queue()
+        .queue()
+        .batches()
+        .first()
+        .expect("这个规模上该分得出批")
+        .clone();
+    let 那句 = format!("命令行上是 `--shape '{}'`", 头一批.shape.selector());
+
+    let 屏上 = shared::悬停在(&ctx, &头一批.why(), |ui| app.ui(ui));
+    assert!(屏上.contains(&那句), "卡片上悬不出「{那句}」：\n{屏上}",);
+}
+
 /// 一份**手搭的**中立库，形状照排查报告里那份现场来：3 个变体，2 个跑过识别
 /// （1 个命中、自动通过，1 个未命中、带一条低置信候选进队列），**1 个连识别都还没跑过**。
 ///
 /// 合成数据造不出第三种——`demo::queue` 给每个变体都写了一行结论。而这一屏最该说清的
 /// 正是它：同一份库，命令行 `triage list` 印「另有 1 个变体连识别都还没跑过」。
+///
+/// 搭子在 `shared::小库`——浏览屏那边搭的是同一份形状（`三档并排的库`），
+/// 两处只差各落哪一档、摆在哪几个平台上、工作目录是哪个。
 fn 有一个连识别都没跑过的库() -> App {
-    use romcat_core::catalog::identify::Identification;
-    use romcat_core::catalog::{Candidate, Catalog, Confidence, State};
-    use romcat_core::dat::Convention;
-    use romcat_core::platform::Manifest;
-    use romcat_core::shape::{Role, SINGLE_FILE_RULE, Variant};
-    use romcat_core::site::Site;
-    use romcat_core::verdict::Store;
+    use shared::档;
 
-    let catalog = Catalog::open_in_memory().expect("开得出中立库");
-    let _ = romcat_core::catalog::roots::add_root(
-        &catalog,
-        None,
-        "主库",
-        std::path::Path::new("/主库"),
-    );
-    let 变体 = |name: &str, platform: &str| {
-        let key = format!("主库/{platform}/{name}");
-        Variant {
-            main_key: key.clone(),
-            platform: Some(platform.to_string()),
-            rule: SINGLE_FILE_RULE.to_string(),
-            manual: false,
-            files: 1,
-            bytes: 4096,
-            unreadable_files: 0,
-            members: vec![(key.clone(), Role::Main)],
-            key,
-        }
-    };
-    let mut catalog = catalog;
-    let variants = vec![
-        变体("命中.zip", "SFC"),
-        变体("未命中.zip", "FC"),
-        变体("还没轮到它.zip", "GB"),
-    ];
-    catalog
-        .replace_variants(&variants, 1, &Manifest::default())
-        .expect("写得进变体");
-    let 候选 = |accepted: bool, confidence| Candidate {
-        member_key: String::new(),
-        inner: String::new(),
-        confidence,
-        accepted,
-        source: "合成".to_string(),
-        dat: "合成.dat".to_string(),
-        platform: "SFC".to_string(),
-        game: "幻想传说 (Japan)".to_string(),
-        rom: "rom.bin".to_string(),
-        hashed_as: Convention::AsIs,
-        dat_convention: Convention::AsIs,
-        evidence: "精确哈希命中".to_string(),
-        chinese: None,
-        serial: None,
-        release_id: None,
-    };
-    catalog
-        .write_identifications(&[
-            Identification {
-                variant_key: variants[0].key.clone(),
-                state: State::Matched,
-                reason: None,
-                units: 1,
-                nkit: 0,
-                read_bytes: 0,
-                work_id: None,
-                release_id: None,
-                candidates: vec![候选(true, Confidence::High)],
-            },
-            Identification {
-                variant_key: variants[1].key.clone(),
-                state: State::Unmatched,
-                reason: None,
-                units: 1,
-                nkit: 0,
-                read_bytes: 0,
-                work_id: None,
-                release_id: None,
-                candidates: vec![候选(false, Confidence::Low)],
-            },
-            // 第三个变体**一行都不写**——那就是「还没识别」。
-        ])
-        .expect("写得进结论");
-    let store = Store::in_memory().expect("开得出沉淀库");
-    App::new(Site::in_memory(catalog, store, "主库"), demo::workspace())
+    shared::小库(
+        &[
+            ("SFC", "命中.zip", 档::命中),
+            ("FC", "未命中.zip", 档::待裁决),
+            ("GB", "还没轮到它.zip", 档::还没识别),
+        ],
+        // 这一份从前递的是 `demo::workspace()`——本文件头上那条规矩明写着不许，
+        // 而它是整套界面测试里唯一破例的一处（挂单 `Q350`）。
+        工作目录(),
+    )
 }
 
 #[test]
