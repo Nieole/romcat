@@ -28,9 +28,10 @@
 //! 打开时把没跑过的接着跑完。**往前迁得动，往后（库比程序新）如实拒绝并说清**——
 //! 那时该换新程序，而不是删库。
 //!
-//! 眼下四条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
+//! 眼下五条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
 //! 第 3 条建 `verdict_batch` 与 `verdict_batch_row` 两张表（**批**，见下一节），
-//! 第 4 条建 `collection_member` 表（**合集**与**收藏**，见再下一节）。
+//! 第 4 条建 `collection_member` 表（**合集**与**收藏**，见再下一节），
+//! 第 5 条建 `title_suppression` 表（**压掉的叫法**，见最后一节）。
 //! 加这几条时库还是空的，但那不改变纪律——**永远不要求删库**，中立库那条「版本一变就
 //! 重建」的便宜路子在这份库上不许走。
 //!
@@ -112,6 +113,33 @@
 //!
 //! 它与 [`Verdict`] 共用同一套两种锚，理由也是同一条：**内容锚换台机器、改过名字之后
 //! 仍然认得出**，两块盘接同一台机器裁决一次两边都受益。
+//!
+//! ## **压掉的叫法**：删掉一条明显错的译名，它就别再回来
+//!
+//! 详情面板上每条**叫法**旁边都有「删」，**刮削来的也能删**——删一条明显错的中文名是
+//! 当下就想做的事。可**标题集合是折出来的一份投影**：[`title::refold`](crate::title::refold)
+//! 会把非**裁决**来源的整批重建，于是删掉的那条下一趟刮削又回来了，而界面没解释为什么
+//! （挂账 D157）。
+//!
+//! 所以「删」这个动作要留下一条记号，而记号必须住在这儿：**它是人的动作，不可再生**。
+//! 记在中立库里等于说「下一次改结构时你删过的那些全部复活」。
+//! [`TitleSuppression`] 就是那条记号，[`title::refold`](crate::title::refold) 折完之后
+//! 照它把压掉的那几条筛掉——**压制发生在写库那一层**，于是显示标题、详情面板、报告与
+//! 导出四处看见的是同一件事，不必各自记得再筛一遍。
+//!
+//! **锚是作品名加那条叫法的去重键**（语言、类型、源、值），不是内容锚——标题挂在
+//! **作品**这一层（`catalog::title` 那张表的主键就是这五样，`CONTEXT.md` 的**锚点**词条
+//! 也写着「刮削结论挂在作品名或变体的键上」）。作品名从 DAT 条目名折出来，因此这条记号
+//! 与**内容锚**一样**换台机器仍然认得出**，不像**路径锚**那样只在本机成立。
+//!
+//! **压得住的只有折出来的那些。** `source = 裁决` 的叫法根本不经过折
+//! （[`Catalog::clear_titles`](crate::catalog::Catalog::clear_titles) 一行都不碰它，
+//! [`fold`](crate::title::fold) 也从不产出它），删掉就是删掉了，没有什么会把它折回来
+//! ——为它记一条压制只会让面板同时说「它在集合里」和「它被压掉了」。
+//!
+//! **撤得掉**：`lifted_at` 一填，这条压制就不再算数，而**行留着**——与
+//! `verdict_batch.undone_at` 同一条纪律：撤销本身也是人的动作，删掉行就说不出
+//! 「他压过又放回来了」。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -281,6 +309,37 @@ CREATE UNIQUE INDEX IF NOT EXISTS collection_member_content
 CREATE UNIQUE INDEX IF NOT EXISTS collection_member_path
     ON collection_member(name, library, variant_key) WHERE anchor = '路径';
 CREATE INDEX IF NOT EXISTS collection_member_name ON collection_member(name);
+",
+    // 5：**压掉的叫法**（票 `parking-3/13`，挂账 D157）。人在详情面板上删掉一条
+    // 刮削来的叫法，这里记下来，重折时不再把它折回来。
+    "\
+-- 一条**压制记录**：这个作品的这一条**叫法**被人删过，重折标题集合时不许把它折回来。
+--
+-- **五列合起来就是那条叫法的去重键**（`catalog::title` 那张表的主键）。少给一样就会
+-- 连坐压掉别的源给的同名叫法，而那些是重跑刮削才造得出来的东西——面板上那个「删」
+-- 删的也正好是这五样定死的那一行（`Catalog::remove_title`）。
+--
+-- 锚是**作品名**而不是内容锚：标题挂在作品这一层。作品名从 DAT 条目名折出来，
+-- 所以这条记号与内容锚一样**换台机器仍然认得出**。
+CREATE TABLE IF NOT EXISTS title_suppression(
+    id            INTEGER PRIMARY KEY,
+    work          TEXT    NOT NULL,
+    -- 语言码 zh / ja / en / und，与中立库那张表同一套码（`title::Language::code`）。
+    language      TEXT    NOT NULL,
+    -- 官方名 / 译名 / 别名 / 汉化组自取的名。
+    kind          TEXT    NOT NULL,
+    source        TEXT    NOT NULL,
+    value         TEXT    NOT NULL,
+    note          TEXT,
+    suppressed_at INTEGER NOT NULL,
+    -- 撤掉的时刻。非空就是已经放回去了——**撤掉不删行**：撤销本身也是人的动作
+    -- （同 `verdict_batch.undone_at`）。
+    lifted_at     INTEGER
+) STRICT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS title_suppression_key
+    ON title_suppression(work, language, kind, source, value);
+CREATE INDEX IF NOT EXISTS title_suppression_work ON title_suppression(work);
 ",
 ];
 
@@ -649,6 +708,89 @@ impl Membership {
         }
     }
 }
+
+/// 一条**压制记录**：这个作品的这一条**叫法**被人删过，重折时不许把它折回来
+/// （票 `parking-3/13`、挂账 D157）。
+///
+/// 五样合起来就是那条叫法在**标题集合**里的去重键
+/// （`catalog::title` 那张表的主键），一样都不能少——少给一样就会连坐压掉别的源给的
+/// 同名叫法。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TitleSuppression {
+    /// 哪个**作品**。锚是作品名，与标题集合那张表同一条（`CONTEXT.md` 的**锚点**词条）。
+    pub work: String,
+    /// 那条叫法的语言。
+    pub language: crate::title::Language,
+    /// 那条叫法是**哪一种**叫法。
+    pub kind: crate::title::TitleKind,
+    /// 哪个源给的。
+    pub source: String,
+    /// 那一串字。
+    pub value: String,
+    /// 人留的一句话；没留就是 `None`。
+    ///
+    /// **眼下没有写入方**——面板上那个「删」按下去不问理由。列先建好，是因为迁移只许
+    /// 往后追加：将来要它时不必再加一条，而这一列与 `verdict` / `collection_member`
+    /// 上那一列是同一个形状。
+    pub note: Option<String>,
+    /// 什么时候压掉的（Unix 秒）。
+    pub suppressed_at: i64,
+    /// 什么时候放回去的（Unix 秒）；还压着就是 `None`。
+    pub lifted_at: Option<i64>,
+}
+
+impl TitleSuppression {
+    /// 现在把这条叫法压掉。
+    #[must_use]
+    pub fn now(
+        work: &str,
+        language: crate::title::Language,
+        kind: crate::title::TitleKind,
+        source: &str,
+        value: &str,
+    ) -> Self {
+        Self {
+            work: work.to_string(),
+            language,
+            kind,
+            source: source.to_string(),
+            value: value.to_string(),
+            note: None,
+            suppressed_at: now_secs(),
+            lifted_at: None,
+        }
+    }
+
+    /// 这条压制**眼下还算数吗**。撤掉过就不算了，但那一行照旧留着。
+    #[must_use]
+    pub fn in_force(&self) -> bool {
+        self.lifted_at.is_none()
+    }
+
+    /// 折出它在**标题集合**里对应的那条去重键。重折时拿它对。
+    #[must_use]
+    pub fn key(&self) -> TitleKey {
+        (
+            self.work.clone(),
+            self.language,
+            self.kind,
+            self.source.clone(),
+            self.value.clone(),
+        )
+    }
+}
+
+/// 一条**叫法**在标题集合里的去重键：作品、语言、类型、源、值。
+///
+/// 起个名字而不是把五元组摊开：压制记录与 `catalog::title` 那张表的主键必须是同一个
+/// 形状，两处各写一遍迟早会漂开。
+pub type TitleKey = (
+    String,
+    crate::title::Language,
+    crate::title::TitleKind,
+    String,
+    String,
+);
 
 /// 沉淀库里有多少条、都是什么样。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -1544,6 +1686,149 @@ impl Store {
         rows.collect::<Result<_, _>>()
             .map_err(|source| self.err(source))
     }
+
+    // ── 压掉的叫法：删掉的那条别再折回来（票 `parking-3/13`） ───────────────────
+
+    /// 把一条**叫法**压掉。返回**这一下是不是真的压上了**——本来就压着的话是 `false`。
+    ///
+    /// 压过又撤掉、如今再压一次：算真的压上了（`lifted_at` 清空，`suppressed_at` 换成
+    /// 这一刻），因为人确实又做了一次这个动作。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn suppress_title(&mut self, one: &TitleSuppression) -> Result<bool, VerdictError> {
+        self.conn
+            .execute(
+                "INSERT INTO title_suppression(work, language, kind, source, value,
+                     note, suppressed_at, lifted_at)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,NULL)
+                 ON CONFLICT(work, language, kind, source, value) DO UPDATE SET
+                    note = excluded.note,
+                    suppressed_at = excluded.suppressed_at,
+                    lifted_at = NULL
+                 WHERE title_suppression.lifted_at IS NOT NULL",
+                params![
+                    one.work,
+                    one.language.code(),
+                    one.kind.label(),
+                    one.source,
+                    one.value,
+                    one.note,
+                    one.suppressed_at,
+                ],
+            )
+            .map(|changed| changed > 0)
+            .map_err(|source| self.err(source))
+    }
+
+    /// 把一条压制**撤掉**，那条叫法下一趟重折就回来了。返回撤掉了没有。
+    ///
+    /// **不删行**：撤销本身也是人的动作，删掉就说不出「他压过又放回来了」
+    /// （同 `verdict_batch.undone_at`）。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn lift_title_suppression(&mut self, key: &TitleKey) -> Result<bool, VerdictError> {
+        let (work, language, kind, source, value) = key;
+        self.conn
+            .execute(
+                "UPDATE title_suppression SET lifted_at = ?6
+                 WHERE work = ?1 AND language = ?2 AND kind = ?3
+                   AND source = ?4 AND value = ?5 AND lifted_at IS NULL",
+                params![
+                    work,
+                    language.code(),
+                    kind.label(),
+                    source,
+                    value,
+                    now_secs()
+                ],
+            )
+            .map(|changed| changed > 0)
+            .map_err(|source| self.err(source))
+    }
+
+    /// **眼下还算数的**那些压制记录，全部。重折拿它筛
+    /// （[`title::refold`](crate::title::refold)）。
+    ///
+    /// 撤掉过的那些不在里面——它们的行还在库里，只是不再算数。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn title_suppressions(&self) -> Result<Vec<TitleSuppression>, VerdictError> {
+        self.read_suppressions(
+            &format!(
+                "{SUPPRESSION_SELECT} WHERE lifted_at IS NULL ORDER BY work, {SUPPRESSION_ORDER}"
+            ),
+            params![],
+        )
+    }
+
+    /// 一个**作品**上眼下还算数的那些压制记录。详情面板拿它把「压掉了」摆出来。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn title_suppressions_of(&self, work: &str) -> Result<Vec<TitleSuppression>, VerdictError> {
+        self.read_suppressions(
+            &format!(
+                "{SUPPRESSION_SELECT} WHERE work = ?1 AND lifted_at IS NULL
+                 ORDER BY {SUPPRESSION_ORDER}"
+            ),
+            params![work],
+        )
+    }
+
+    fn read_suppressions<P: rusqlite::Params>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> Result<Vec<TitleSuppression>, VerdictError> {
+        let mut statement = self.conn.prepare(sql).map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params, read_suppression_row)
+            .map_err(|source| self.err(source))?;
+        let rows: Vec<Option<TitleSuppression>> = rows
+            .collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))?;
+        Ok(rows.into_iter().flatten().collect())
+    }
+}
+
+const SUPPRESSION_SELECT: &str = "SELECT work, language, kind, source, value, note,
+     suppressed_at, lifted_at FROM title_suppression";
+
+/// 同一份库读两次，顺序必须一样——面板上那几行不许每帧换位置。
+const SUPPRESSION_ORDER: &str = "suppressed_at, id";
+
+/// 读一行压制记录。**语言码或类型认不出就把这一行丢掉**，返回 `None`。
+///
+/// 这里**不能**像 `catalog::title::read_title` 那样回退成 `und` / `别名`：那一处回退出来
+/// 的值只影响屏上印的标签，这一处回退出来的值会进 [`TitleSuppression::key`]，
+/// 再拿去与折出来的每一条叫法比对——于是一条认不出的记录会**精确命中另一条**语言真是
+/// `und`、类型真是`别名`的叫法，把**别人**压掉。
+///
+/// 丢掉的方向也是挑过的：那条被压的叫法下一趟重折会回来（人再删一次就是了），
+/// 比悄悄压掉一条他没碰过的强。这条路眼下走不到——这两列是本程序自己写进去的，
+/// 认不出只可能是日后加了新档而这份库是旧版程序在读。
+fn read_suppression_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<TitleSuppression>> {
+    let language: String = row.get(1)?;
+    let kind: String = row.get(2)?;
+    let (Some(language), Some(kind)) = (
+        crate::title::Language::from_code(&language),
+        crate::title::TitleKind::from_label(&kind),
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(TitleSuppression {
+        work: row.get(0)?,
+        language,
+        kind,
+        source: row.get(3)?,
+        value: row.get(4)?,
+        note: row.get(5)?,
+        suppressed_at: row.get(6)?,
+        lifted_at: row.get(7)?,
+    }))
 }
 
 /// 大小落进 SQLite 那一列时的样子。装不下就钉在上限——**这条路走不到**：
@@ -2334,6 +2619,167 @@ mod tests {
         );
         // 新那张表真的建出来了，而且是空的——升级不会凭空长出成员关系。
         assert!(store.memberships().expect("读得到").is_empty());
+    }
+
+    #[test]
+    fn 第四版的老库带着裁决合集升上来_压制那张表是空的() {
+        // 与上两条同一个形状、同一条理由，钉的是**第 5 条迁移**（压掉的叫法，
+        // 票 `parking-3/13`）。**每加一条迁移就照这个形状补一条**。
+        let conn = Connection::open_in_memory().expect("开得出来");
+        for sql in &MIGRATIONS[..4] {
+            conn.execute_batch(sql).expect("建得出第四版");
+        }
+        conn.execute_batch("PRAGMA user_version = 4")
+            .expect("盖得上第四版的版本号");
+        let mut store = Store {
+            conn,
+            path: "（内存）".to_string(),
+        };
+        let verdict = 汉化裁决();
+        store.put(&verdict).expect("第四版里就存得进");
+        let 收藏 = [Membership::now(
+            "收藏",
+            Anchor::Content {
+                crc32: 0x1234_5678,
+                size: 40_976,
+                sha1: None,
+            },
+        )];
+        assert_eq!(store.join(&收藏).expect("放得进"), 1);
+
+        store.migrate().expect("升得上来");
+
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("读得到");
+        assert_eq!(
+            u32::try_from(version).expect("装得下"),
+            schema_version(),
+            "升到最新一版"
+        );
+        assert_eq!(
+            store
+                .find(&verdict.anchor)
+                .expect("读得到")
+                .expect("老裁决还在")
+                .decision,
+            verdict.decision,
+            "裁决一个字都没变",
+        );
+        assert_eq!(store.memberships().expect("读得到").len(), 1, "合集也还在");
+        // 新那张表真的建出来了，而且是空的——升级不会凭空压掉谁的叫法。
+        assert!(store.title_suppressions().expect("读得到").is_empty());
+    }
+
+    #[test]
+    fn 压掉一条叫法之后它一直压着_撤掉才放回来而行留着() {
+        use crate::title::{Language, TitleKind};
+
+        let mut store = Store::in_memory().expect("开得出来");
+        let 一条 = TitleSuppression::now(
+            "Contra",
+            Language::Chinese,
+            TitleKind::Alias,
+            "文件名",
+            "魂斗罗 完美版",
+        );
+        assert!(store.suppress_title(&一条).expect("压得下"), "第一次是新的");
+        assert!(
+            !store.suppress_title(&一条).expect("压得下"),
+            "本来就压着，第二次不是新的一条"
+        );
+        let 压着的 = store.title_suppressions().expect("读得到");
+        assert_eq!(压着的.len(), 1, "压两次不该攒出两行");
+        assert_eq!(压着的[0].key(), 一条.key());
+        assert!(压着的[0].in_force());
+        assert_eq!(
+            store.title_suppressions_of("Contra").expect("读得到").len(),
+            1,
+            "按作品也查得到",
+        );
+        assert!(
+            store
+                .title_suppressions_of("Zelda")
+                .expect("读得到")
+                .is_empty(),
+            "锚是作品名，别的作品一条都不该沾上",
+        );
+
+        // 撤掉：那条叫法下一趟重折就回来了，而**行留着**——撤销本身也是人的动作。
+        assert!(
+            store.lift_title_suppression(&一条.key()).expect("撤得掉"),
+            "撤得掉",
+        );
+        assert!(
+            !store.lift_title_suppression(&一条.key()).expect("撤得掉"),
+            "已经撤过了，第二次没有东西可撤",
+        );
+        assert!(
+            store.title_suppressions().expect("读得到").is_empty(),
+            "撤掉之后它不再算数",
+        );
+        let 行数: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM title_suppression", [], |row| {
+                row.get(0)
+            })
+            .expect("数得出");
+        assert_eq!(行数, 1, "撤掉不删行：删了就说不出「他压过又放回来了」");
+
+        // 再压一次：算真的又压上了。
+        assert!(
+            store.suppress_title(&一条).expect("压得下"),
+            "撤掉之后再压，是人又做了一次这个动作",
+        );
+        assert_eq!(store.title_suppressions().expect("读得到").len(), 1);
+    }
+
+    #[test]
+    fn 压制的键是那条叫法的五样_少一样都不连坐() {
+        use crate::title::{Language, TitleKind};
+
+        // 面板上那个「删」删的是**五样定死的那一行**（`Catalog::remove_title`），
+        // 压制记的就得是同一个形状：同一串字、同一个作品，换个源就是另一条叫法。
+        let mut store = Store::in_memory().expect("开得出来");
+        let 文件名那条 = TitleSuppression::now(
+            "Contra",
+            Language::Chinese,
+            TitleKind::Alias,
+            "文件名",
+            "魂斗罗",
+        );
+        assert!(store.suppress_title(&文件名那条).expect("压得下"));
+
+        for 另一条 in [
+            TitleSuppression::now(
+                "Contra",
+                Language::Chinese,
+                TitleKind::Alias,
+                "中文离线源",
+                "魂斗罗",
+            ),
+            TitleSuppression::now(
+                "Contra",
+                Language::Chinese,
+                TitleKind::Translated,
+                "文件名",
+                "魂斗罗",
+            ),
+            TitleSuppression::now(
+                "Contra",
+                Language::Japanese,
+                TitleKind::Alias,
+                "文件名",
+                "魂斗罗",
+            ),
+        ] {
+            assert!(
+                store.suppress_title(&另一条).expect("压得下"),
+                "换一样就是另一条叫法，不该被当成同一条",
+            );
+        }
+        assert_eq!(store.title_suppressions().expect("读得到").len(), 4);
     }
 
     #[test]

@@ -1857,7 +1857,7 @@ fn 否定裁决把那条叫法从标题集合里也退出去() {
     let index = 中文索引();
     刮削带中文索引(&mut 现场, &index);
     // 真跑一趟的次序：`romcat scrape` 之后 `romcat titles`。
-    title::run(&mut 现场.catalog, &Priorities::builtin()).expect("折得动");
+    title::run(&mut 现场.catalog, &沉淀库(), &Priorities::builtin()).expect("折得动");
 
     let 裁决前 = 叫法(&现场);
     assert!(

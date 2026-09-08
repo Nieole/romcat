@@ -761,7 +761,7 @@ fn 加一条叫法当场进标题集合而且来源是裁决() {
     // 删得掉。
     {
         let (browse, site) = app.browse_and_site();
-        browse.remove_title(site, &work, 新的.language, 新的.kind, VERDICT, &新的.value);
+        browse.suppress_title(site, &新的);
     }
     assert_eq!(
         app.browse().detail().expect("还在").titles.len(),
@@ -2164,4 +2164,98 @@ fn 浏览屏把还没识别与没有候选印成两个词() {
     // egui 一个字都不画。那一句的两个分岔由核心库那条测试钉着
     // （`WorkVariant::no_candidate_hint`，`crates/core/tests/works.rs`）——
     // 判据收在核心库里的好处正是这个：它验得了，而这一层只是印。
+}
+
+#[test]
+fn 删掉一条刮削来的叫法之后屏上分得出压掉了与没采到() {
+    // 挂账 D157：刮削来的叫法也删得掉，可**标题集合是折出来的一份投影**——不留记号的话
+    // 下一趟重折它又回来了，而界面没解释为什么。这一条钉的是记号落在**沉淀库**里，
+    // 而且屏上说得出「压掉了」与「没采到」不是一回事。
+    let ctx = egui::Context::default();
+    let mut app = 界面(2_000);
+    let key = 一条认出作品的(&mut app);
+    {
+        let (browse, site) = app.browse_and_site();
+        browse.pick(&site.catalog, &key);
+    }
+    let detail = app.browse().detail().expect("点开得了").clone();
+    let work = detail.work.clone().expect("认出了作品");
+    let 刮削来的 = detail
+        .titles
+        .iter()
+        .find(|row| !row.is_verdict())
+        .expect("合成数据里有刮削来的叫法")
+        .clone();
+
+    {
+        let (browse, site) = app.browse_and_site();
+        browse.suppress_title(site, &刮削来的);
+    }
+
+    // ── 一、中立库里那一行当场就没了。
+    assert!(
+        !app.browse()
+            .detail()
+            .expect("还在")
+            .titles
+            .iter()
+            .any(|row| row.value == 刮削来的.value),
+        "删掉的那条还在集合里",
+    );
+
+    // ── 二、**记号落在沉淀库里**：中立库整份可再生，记在那儿等于说
+    //       「下一次改结构时你删过的全部复活」。
+    assert_eq!(app.browse().suppressed().len(), 1, "面板手上那份压制清单");
+    assert_eq!(
+        app.browse().suppressed()[0].key(),
+        romcat_core::title::suppression_key(&刮削来的),
+        "压的是那条叫法的五样，不是别的",
+    );
+    {
+        let (_, site) = app.browse_and_site();
+        assert_eq!(
+            site.store
+                .title_suppressions_of(&work)
+                .expect("读得到")
+                .len(),
+            1,
+            "沉淀库里真有这一条",
+        );
+    }
+    assert!(
+        app.browse()
+            .notice()
+            .expect("有回执")
+            .contains("重折不会把它折回来"),
+        "回执要说清「删」从此算数：{:?}",
+        app.browse().notice(),
+    );
+
+    // ── 三、屏上分得出「压掉了」与「没采到」——两者对维护者是不同的意思。
+    let 屏上 = 元数据栏滚一趟(&ctx, &mut app);
+    assert!(
+        屏上.contains("压掉的叫法"),
+        "屏上没摆出压掉的那几条：{屏上}"
+    );
+    assert!(
+        屏上.contains(&刮削来的.value),
+        "压掉的那条要指名道姓，不然人不知道自己压了什么：{屏上}"
+    );
+
+    // ── 四、**撤得掉**：这一下不是不可逆的。
+    let 那条压制 = app.browse().suppressed()[0].clone();
+    {
+        let (browse, site) = app.browse_and_site();
+        browse.lift_title(site, &那条压制);
+    }
+    assert!(app.browse().suppressed().is_empty(), "撤掉之后它不再算数",);
+    {
+        let (_, site) = app.browse_and_site();
+        assert!(
+            site.store
+                .title_suppressions_of(&work)
+                .expect("读得到")
+                .is_empty(),
+        );
+    }
 }

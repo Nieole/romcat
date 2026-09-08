@@ -64,6 +64,7 @@ use crate::dat::chinese::ChineseMark;
 use crate::identify::naming;
 use crate::scrape::priority::Priorities;
 use crate::scrape::{AnchorKind, Field};
+use crate::verdict::{Store, TitleKey, TitleSuppression, VerdictError};
 
 pub use report::TitleReport;
 
@@ -859,13 +860,29 @@ impl Tally {
 
 /// 折一遍标题集合、写进中立库、再折出一份报告。
 ///
-/// **不碰主库、不联网**：要的东西全在中立库里躺着（ADR-0001）。
+/// **不碰主库、不联网**：要的东西全在中立库里躺着（ADR-0001）。`store` 只读一次——
+/// 拿的是**压掉的叫法**，见 [`refold`]。
 ///
 /// # Errors
-/// 读写中立库失败时返回错误。
-pub fn run(catalog: &mut Catalog, priorities: &Priorities) -> Result<TitleReport, CatalogError> {
-    refold(catalog)?;
-    TitleReport::build(catalog, priorities)
+/// 读写中立库、或者读沉淀库失败时返回错误。
+pub fn run(
+    catalog: &mut Catalog,
+    store: &Store,
+    priorities: &Priorities,
+) -> Result<TitleReport, RefoldError> {
+    refold(catalog, store)?;
+    Ok(TitleReport::build(catalog, priorities)?)
+}
+
+/// 折不动标题集合的原因。
+#[derive(Debug, thiserror::Error)]
+pub enum RefoldError {
+    /// 中立库读写失败。
+    #[error(transparent)]
+    Catalog(#[from] CatalogError),
+    /// 沉淀库读不动——**压掉的叫法**取不出来。
+    #[error(transparent)]
+    Verdict(#[from] VerdictError),
 }
 
 /// **把标题集合重折一遍**，不出报告。
@@ -883,12 +900,130 @@ pub fn run(catalog: &mut Catalog, priorities: &Priorities) -> Result<TitleReport
 ///
 /// 命令行与界面因此是同一个口径：不论谁调 `judge`，标题集合都跟着折。
 ///
+/// ## **压掉的叫法**在这一层筛掉
+///
+/// 人在详情面板上删掉一条叫法，删的是**折出来的一份投影**里的一行——不拦一下，
+/// 这里就会原样把它折回来（挂账 D157）。所以折完之后照**沉淀库**里那些
+/// [`TitleSuppression`] 筛一遍，被点名的那几条一条都不写进去。
+///
+/// **筛在写库这一层，不在挑显示标题那一层**：写完之后详情面板、导出、报告与搜索读到的
+/// 是同一张表，各自不必再记得筛一遍——漏掉一处，那条被删的叫法就会在那一处冒出来。
+///
+/// 压制记号住在沉淀库而不是 `title` 表上的一列，理由是它**不可再生**：中立库整份
+/// 可再生（结构一变就让人删掉重扫），记在那儿等于说「下一次改结构时你删过的全部复活」。
+///
 /// # Errors
-/// 读写中立库失败时返回错误。
-pub fn refold(catalog: &mut Catalog) -> Result<(), CatalogError> {
-    let rows = fold(catalog)?;
+/// 读写中立库、或者读沉淀库失败时返回错误。
+pub fn refold(catalog: &mut Catalog, store: &Store) -> Result<(), RefoldError> {
+    let mut rows = fold(catalog)?;
+    let records = store.title_suppressions()?;
+    if !records.is_empty() {
+        // **借着比，不克隆。** 真库上折出来的行是万级，为查一次集合而克隆三串字
+        // 是白烧一遍；这几条记录在这一段里活着，借得住。
+        let suppressed: BTreeSet<(&str, Language, TitleKind, &str, &str)> = records
+            .iter()
+            .map(|one| {
+                (
+                    one.work.as_str(),
+                    one.language,
+                    one.kind,
+                    one.source.as_str(),
+                    one.value.as_str(),
+                )
+            })
+            .collect();
+        rows.retain(|row| {
+            !suppressed.contains(&(
+                row.work.as_str(),
+                row.language,
+                row.kind,
+                row.source.as_str(),
+                row.value.as_str(),
+            ))
+        });
+    }
     catalog.clear_titles()?;
-    catalog.put_titles(&rows)
+    Ok(catalog.put_titles(&rows)?)
+}
+
+/// 一条叫法在**标题集合**里的去重键：作品、语言、类型、源、值。
+///
+/// 压制记号与 `catalog::title` 那张表的主键必须是同一个形状，所以两处都从这里取
+/// ——各写一遍迟早会漂开，而漂开的样子是「压掉的那条又回来了」。
+#[must_use]
+pub fn suppression_key(row: &TitleRow) -> TitleKey {
+    (
+        row.work.clone(),
+        row.language,
+        row.kind,
+        row.source.clone(),
+        row.value.clone(),
+    )
+}
+
+/// 「压掉一条叫法」做完之后的账。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Suppressed {
+    /// 中立库里那一行**删掉了没有**。本来就不在时是假的（另一个窗口先删过一遍）。
+    pub removed: bool,
+    /// 沉淀库里**记下了这一下没有**。
+    ///
+    /// 两种情形下是假的：这条叫法来自**裁决**（根本不经过折，见下），
+    /// 或者它本来就压着。
+    pub recorded: bool,
+}
+
+/// **压掉一条叫法**：中立库里那一行删掉，并把「这条被人删过」记进**沉淀库**
+/// （票 `parking-3/13`、挂账 D157）。
+///
+/// 界面上每条叫法旁边那个「删」走的就是它，**刮削来的也能删**——删一条明显错的中文名
+/// 是当下就想做的事，把按钮灰掉反而要向人解释一整套来源规则。
+///
+/// ## 为什么两件事捏在一处
+///
+/// 只删中立库那一行，下一趟 [`refold`] 就把它折回来了；只记压制不删行，人得等到下一趟
+/// 重折才看得见效果。两件事分开摆，第二个调用方迟早只做其中一样。
+///
+/// ## `source = 裁决` 的那些不记压制
+///
+/// 它们根本不经过折——[`Catalog::clear_titles`](crate::catalog::Catalog::clear_titles)
+/// 一行都不碰它们，[`fold`] 也从不产出它们。删掉就是删掉了，没有什么会把它折回来。
+/// 为它记一条压制，只会让面板同时说「它在集合里」（人转头又手写了一条同样的）
+/// 和「它被压掉了」。
+///
+/// ## **先记号，后删行**
+///
+/// 两份库写不了同一个事务，所以中间那一刻必然撕得开一次，能挑的只有**往哪边撕**：
+///
+/// - 先删行、后记号：记号写不动时，那一行**已经没了而没有人记得**——下一趟重折它原样
+///   折回来，正是这张票要消灭的那个状态。
+/// - **先记号、后删行**（这里走的）：记号写不动时一个字都没动，「压不掉」是实话；
+///   行删不动时记号在、行还在，**下一趟重折自己会把它收干净**。
+///
+/// 沉淀库写不动不是纸面情形：命令行与界面常常同时开着，撞上写锁要等满
+/// [`BUSY_TIMEOUT_MS`](crate::verdict) 那十秒。
+///
+/// # Errors
+/// 沉淀库写不动、或者中立库写不动时返回错误。
+pub fn suppress(
+    catalog: &mut Catalog,
+    store: &mut Store,
+    row: &TitleRow,
+) -> Result<Suppressed, RefoldError> {
+    let recorded = if row.is_verdict() {
+        false
+    } else {
+        store.suppress_title(&TitleSuppression::now(
+            &row.work,
+            row.language,
+            row.kind,
+            &row.source,
+            &row.value,
+        ))?
+    };
+    let removed =
+        catalog.remove_title(&row.work, row.language, row.kind, &row.source, &row.value)?;
+    Ok(Suppressed { removed, recorded })
 }
 
 /// 一个作品在标题集合之外还有一条兜底的叫法：**作品名**。

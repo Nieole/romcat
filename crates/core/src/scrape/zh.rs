@@ -1021,6 +1021,16 @@ pub enum JudgeError {
     NoVariant(String),
 }
 
+/// 折标题那一步失败的两种，与这里本来就有的两种是**同一对**——不另立第三种。
+impl From<crate::title::RefoldError> for JudgeError {
+    fn from(error: crate::title::RefoldError) -> Self {
+        match error {
+            crate::title::RefoldError::Catalog(source) => Self::Catalog(source),
+            crate::title::RefoldError::Verdict(source) => Self::Verdict(source),
+        }
+    }
+}
+
 /// 一条**匹配裁决**落下之后的账。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Judged {
@@ -1147,7 +1157,7 @@ pub fn judge(
         // 界面那一侧迟早也要接上 `judge`（挂单 Q39）。
         if cleared > 0 {
             let before = catalog.title_count()?;
-            crate::title::refold(catalog)?;
+            crate::title::refold(catalog, store)?;
             untitled = before.saturating_sub(catalog.title_count()?);
         }
     }

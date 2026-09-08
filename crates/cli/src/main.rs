@@ -2498,8 +2498,16 @@ fn run_titles(args: &TitlesArgs) -> ExitCode {
         Err(message) => return fail(message),
     };
 
+    // **压掉的叫法住在沉淀库里**（票 `parking-3/13`）：折出来之后照它筛一遍，
+    // 人删过的那条不再折回来。打不开就停下，不降级成「没人压过」——那会让维护者
+    // 上一次删掉的错译名悄悄回到库里。
+    let store = match open_store(&workspace) {
+        Ok(store) => store,
+        Err(message) => return fail(message),
+    };
+
     let started = Instant::now();
-    let report = match title::run(&mut catalog, &priorities) {
+    let report = match title::run(&mut catalog, &store, &priorities) {
         Ok(report) => report,
         Err(error) => return fail(format!("标题折不出来：{error}")),
     };

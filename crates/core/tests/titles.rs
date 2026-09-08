@@ -68,6 +68,8 @@ struct 现场 {
     dir: TempDir,
     pool_dir: TempDir,
     catalog: Catalog,
+    /// **沉淀库**：压掉的叫法记在这儿，中立库重建也不丢（票 `parking-3/13`）。
+    store: verdict::Store,
     repo: DatRepo,
 }
 
@@ -127,6 +129,7 @@ fn 建现场() -> 现场 {
         dir,
         pool_dir: temp_dir("titles-pool"),
         catalog,
+        store: verdict::Store::in_memory().expect("能开沉淀库"),
         repo: 建_dat(),
     }
 }
@@ -237,7 +240,7 @@ fn 跑一遍(现场: &mut 现场) -> title::TitleReport {
         },
     )
     .expect("刮削不该失败");
-    title::run(&mut 现场.catalog, &Priorities::builtin()).expect("折得出标题")
+    title::run(&mut 现场.catalog, &现场.store, &Priorities::builtin()).expect("折得出标题")
 }
 
 /// 一部作品挑出来的显示标题与排序标题。
@@ -544,7 +547,8 @@ fn 显示标题被裁成英文之后中文覆盖照旧算它() {
             seen: 1,
         }])
         .expect("写得进");
-    let 裁后 = title::run(&mut 现场.catalog, &Priorities::builtin()).expect("折得出标题");
+    let 裁后 =
+        title::run(&mut 现场.catalog, &现场.store, &Priorities::builtin()).expect("折得出标题");
 
     let chosen = 挑(&现场, "Contra");
     assert_eq!(chosen.display, "Contra");
@@ -608,5 +612,156 @@ fn 一条中文叫法都没采到的作品不算进中文覆盖() {
     assert!(
         detail.chinese_title().is_none(),
         "集合里没有中文叫法，面板就该说没有"
+    );
+}
+
+/// 集合里眼下有没有这一串字。
+fn 集合里有(现场: &现场, work: &str, value: &str) -> bool {
+    现场
+        .catalog
+        .titles_of(work)
+        .expect("读得出")
+        .iter()
+        .any(|row| row.value == value)
+}
+
+/// 台版官中那条中文叫法：这几条测试要压掉的就是它。
+fn 那条中文叫法(现场: &现场) -> romcat_core::catalog::TitleRow {
+    现场
+        .catalog
+        .titles_of("Contra")
+        .expect("读得出")
+        .into_iter()
+        .find(|row| row.value == "魂斗罗")
+        .expect("台版官中那个中文名在集合里")
+}
+
+#[test]
+fn 压掉一条叫法之后重折不把它折回来而同批没压的照旧回来() {
+    // 挂账 D157：详情面板上每条叫法旁边都有「删」，**刮削来的也能删**——可标题集合是
+    // 折出来的一份投影，`refold` 会把非裁决来源的整批重建，于是删掉的那条下次刮削又
+    // 回来了。这一条钉的就是「删」从此算数。
+    let mut 现场 = 建现场();
+    跑一遍(&mut 现场);
+    assert!(集合里有(&现场, "Contra", "魂斗罗"), "折出来本来就有它");
+    assert!(
+        集合里有(&现场, "Contra", "魂斗罗 中文版"),
+        "同一批里还有别的叫法，它们不该被连坐",
+    );
+
+    let 那条 = 那条中文叫法(&现场);
+    let 压掉 = title::suppress(&mut 现场.catalog, &mut 现场.store, &那条).expect("压得掉");
+    assert!(压掉.removed, "中立库里那一行当场就没了");
+    assert!(压掉.recorded, "沉淀库里记下了这一下");
+    assert!(!集合里有(&现场, "Contra", "魂斗罗"), "删完当场就不在了");
+
+    // **重折一趟**——刮削那一侧的值一个字都没动，所以旧行为下它必然回来。
+    跑一遍(&mut 现场);
+    assert!(
+        !集合里有(&现场, "Contra", "魂斗罗"),
+        "压掉的那条不许自己回来（挂账 D157）",
+    );
+    assert!(
+        集合里有(&现场, "Contra", "魂斗罗 中文版"),
+        "同一批里没压的那些照旧折回来——压制只管被点名的那一条",
+    );
+    // 显示标题跟着让位：面板与导出读的是这张表，压掉的那条不该再被挑中。
+    assert_ne!(挑(&现场, "Contra").display, "魂斗罗");
+}
+
+#[test]
+fn 压制记在沉淀库里_中立库整份重建之后它照旧压着() {
+    // 验收里最硬的那一条：中立库**整份可再生**（结构一变就让人删掉重扫），
+    // 而「人删过这一条」不可再生。记在中立库里等于说「下一次改结构时你删过的全部复活」。
+    let mut 现场 = 建现场();
+    跑一遍(&mut 现场);
+    let 那条 = 那条中文叫法(&现场);
+    title::suppress(&mut 现场.catalog, &mut 现场.store, &那条).expect("压得掉");
+
+    // **中立库整份重建**：升 `SCHEMA_VERSION` 之后用户删库重扫，落到测试里就是换一份
+    // 空的中立库、从头扫一遍。沉淀库**不跟着走**。
+    现场.catalog = Catalog::open_in_memory().expect("能开中立库");
+    let mut options = ScanOptions::named(现场.dir.path(), "库");
+    options.jobs = Jobs::Fixed(2);
+    scan::scan(&RealFs::new(), &mut 现场.catalog, &options, &Handle::new()).expect("扫得动");
+    跑一遍(&mut 现场);
+
+    assert!(
+        集合里有(&现场, "Contra", "魂斗罗 中文版"),
+        "重建之后别的叫法都折回来了，这一趟确实重折过",
+    );
+    assert!(
+        !集合里有(&现场, "Contra", "魂斗罗"),
+        "压制记在沉淀库里，中立库删掉重扫也不丢",
+    );
+    assert_eq!(
+        现场.store.title_suppressions().expect("读得到").len(),
+        1,
+        "那条记号还在沉淀库里躺着",
+    );
+}
+
+#[test]
+fn 撤掉压制之后那条叫法下一趟重折就回来() {
+    // 「删」从此算数，但**不是不可逆的**：撤掉压制，下一趟重折它就回来了。
+    // 界面上那个「恢复」走的就是这条。
+    let mut 现场 = 建现场();
+    跑一遍(&mut 现场);
+    let 那条 = 那条中文叫法(&现场);
+    title::suppress(&mut 现场.catalog, &mut 现场.store, &那条).expect("压得掉");
+    跑一遍(&mut 现场);
+    assert!(!集合里有(&现场, "Contra", "魂斗罗"));
+
+    assert!(
+        现场
+            .store
+            .lift_title_suppression(&title::suppression_key(&那条))
+            .expect("撤得掉"),
+        "撤得掉",
+    );
+    跑一遍(&mut 现场);
+    assert!(
+        集合里有(&现场, "Contra", "魂斗罗"),
+        "撤掉压制之后，那条叫法照旧折得回来",
+    );
+}
+
+#[test]
+fn 裁决来源的叫法删掉就是删掉_不为它记压制() {
+    // `source = 裁决` 的叫法根本不经过折（`clear_titles` 一行都不碰它，`fold` 也从不
+    // 产出它），删掉就是删掉了。为它记一条压制只会让面板同时说「它在集合里」和
+    // 「它被压掉了」——那时人再手写一条同样的进去，两句话就打起来了。
+    let mut 现场 = 建现场();
+    跑一遍(&mut 现场);
+    let 人说的 = romcat_core::catalog::TitleRow {
+        work: "Contra".to_string(),
+        value: "魂斗羅".to_string(),
+        language: Language::Chinese,
+        kind: TitleKind::Translated,
+        source: romcat_core::scrape::priority::VERDICT.to_string(),
+        region: None,
+        variant_key: None,
+        confidence: romcat_core::catalog::Confidence::High,
+        seam: None,
+        evidence: "人说的".to_string(),
+        seen: 1,
+    };
+    现场
+        .catalog
+        .put_titles(std::slice::from_ref(&人说的))
+        .expect("写得进");
+
+    let 压掉 = title::suppress(&mut 现场.catalog, &mut 现场.store, &人说的).expect("删得掉");
+    assert!(压掉.removed, "中立库里那一行没了");
+    assert!(!压掉.recorded, "裁决来源的不记压制——没有什么会把它折回来");
+    assert!(
+        现场.store.title_suppressions().expect("读得到").is_empty(),
+        "沉淀库里一条压制都不该攒下",
+    );
+
+    跑一遍(&mut 现场);
+    assert!(
+        !集合里有(&现场, "Contra", "魂斗羅"),
+        "重折本来就不会把裁决来源的那条折回来",
     );
 }

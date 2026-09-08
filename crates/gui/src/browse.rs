@@ -86,7 +86,8 @@ use romcat_core::site::Site;
 use romcat_core::sublibrary::{
     BrokenRule, Dimension, Discarded, Exception, ExceptionRow, LoadedSelection, Rule, Sublibrary,
 };
-use romcat_core::title::{Language, TitleKind};
+use romcat_core::title::{self, Language, TitleKind};
+use romcat_core::verdict::TitleSuppression;
 
 use crate::filter::Filter;
 use crate::font;
@@ -318,6 +319,13 @@ pub struct Screen {
     standing: Vec<(String, &'static str)>,
     /// [`Self::standing`] 是照哪个变体算的。与眼下选中的那个不一样就重算。
     standing_for: Option<String>,
+    /// 选中那个变体所属的**作品**上，眼下**压掉的叫法**有哪几条（票 `parking-3/13`）。
+    ///
+    /// 读的是**沉淀库**：那是人的动作住的地方，中立库删掉重扫也不丢。面板要靠它把
+    /// 「**压掉了**」与「**没采到**」分开说——两者对维护者是不同的意思。
+    suppressed: Vec<TitleSuppression>,
+    /// [`Self::suppressed`] 是照哪个作品读的。与眼下这个不一样就重读。
+    suppressed_for: Option<String>,
     /// 加一条叫法的草稿。
     title_draft: TitleDraft,
     /// 写下一个刮削字段值的草稿。
@@ -364,6 +372,8 @@ impl Screen {
             collection: String::new(),
             standing: Vec::new(),
             standing_for: None,
+            suppressed: Vec::new(),
+            suppressed_for: None,
             title_draft: TitleDraft::default(),
             value_draft: ValueDraft::default(),
             notice: None,
@@ -916,26 +926,67 @@ impl Screen {
         }
     }
 
-    /// 从**标题集合**里删掉一条叫法。界面上那个「删」走的就是它。
-    pub fn remove_title(
-        &mut self,
-        site: &mut Site,
-        work: &str,
-        language: Language,
-        kind: TitleKind,
-        source: &str,
-        value: &str,
-    ) {
-        match site
-            .catalog
-            .remove_title(work, language, kind, source, value)
-        {
-            Ok(true) => {
-                self.notice = Some(format!("删掉了叫法「{value}」。"));
-                self.load_detail(&site.catalog);
+    /// 从**标题集合**里删掉一条叫法，并把「这条被压掉了」记进**沉淀库**。
+    ///
+    /// 界面上那个「删」走的就是它，**刮削来的也能删**——删一条明显错的中文名是当下就想
+    /// 做的事，把按钮灰掉反而要向人解释一整套来源规则（挂账 D157）。
+    ///
+    /// 两件事捏在核心库那一个动作里（[`title::suppress`]）：只删中立库那一行，
+    /// 下一趟重折就把它折回来了；只记压制不删行，人得等到下一趟重折才看得见效果。
+    pub fn suppress_title(&mut self, site: &mut Site, row: &romcat_core::catalog::TitleRow) {
+        let value = row.value.clone();
+        let done = title::suppress(&mut site.catalog, &mut site.store, row);
+        // **不论成没成都重读一遍。** 那个动作是两步（先记号、后删行），中间撕得开一次
+        // ——出了错也可能已经动过库了，面板上摆着旧的那一份会让人以为什么都没发生。
+        self.suppressed_for = None;
+        self.sync_suppressed(site);
+        self.load_detail(&site.catalog);
+        match done {
+            Ok(done) => {
+                self.notice = Some(match (done.recorded, done.removed, row.is_verdict()) {
+                    (true, _, _) => {
+                        format!("删掉了叫法「{value}」，并记下这一下——**重折不会把它折回来**。")
+                    }
+                    (false, true, true) => format!(
+                        "删掉了你自己写下的叫法「{value}」。它本来就不经过重折，\
+                         没有什么会把它折回来。"
+                    ),
+                    (false, true, false) => {
+                        format!("删掉了叫法「{value}」。它本来就压着。")
+                    }
+                    (false, false, true) => {
+                        format!("你自己写下的那条叫法「{value}」已经不在了。")
+                    }
+                    (false, false, false) => {
+                        format!("叫法「{value}」已经不在了，压制照旧记着。")
+                    }
+                });
+                self.error = None;
             }
-            Ok(false) => self.notice = Some("那一条已经不在了。".to_string()),
-            Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+            // **先记号、后删行**（`title::suppress`），所以出错时最坏也只是「记号在、
+            // 那一行还在」——下一趟重折会自己把它收干净，不会留下「行没了而没人记得」。
+            Err(error) => self.error = Some(format!("这条叫法压不掉：{error}")),
+        }
+    }
+
+    /// **撤掉一条压制**：那条叫法下一趟重折就回来了。界面上那个「恢复」走的就是它。
+    ///
+    /// **不当场把它折回来**：折一趟要走遍全库的发行版、变体与刮削值，那是画帧线程上
+    /// 几秒钟的事（真库 46,483 个变体、38,963 条自动通过的候选）。所以这里只撤记号，
+    /// 回执里说清它什么时候回来。
+    pub fn lift_title(&mut self, site: &mut Site, one: &TitleSuppression) {
+        match site.store.lift_title_suppression(&one.key()) {
+            Ok(true) => {
+                self.notice = Some(format!(
+                    "撤掉了对「{}」的压制。它**下一趟重折**（`romcat titles`）之后\
+                     回到标题集合里——这一屏不折，那要走遍全库。",
+                    one.value,
+                ));
+                self.suppressed_for = None;
+                self.sync_suppressed(site);
+            }
+            Ok(false) => self.notice = Some("那条压制已经撤过了。".to_string()),
+            Err(error) => self.error = Some(format!("沉淀库写不动：{error}")),
         }
     }
 
@@ -1178,6 +1229,15 @@ impl Screen {
         &self.standing
     }
 
+    /// 选中那个变体所属的作品上，眼下**压掉的叫法**有哪几条。
+    ///
+    /// 它与[标题集合](VariantDetail::titles)是两份东西：那一份是**眼下有的**，
+    /// 这一份是**人删掉、不许再折回来的**。摆在一起，屏上才分得出「压掉了」与「没采到」。
+    #[must_use]
+    pub fn suppressed(&self) -> &[TitleSuppression] {
+        &self.suppressed
+    }
+
     /// 按「**★ 收藏**」那一下：把勾中的那一批全放进[收藏](FAVORITE)。
     ///
     /// 界面上那颗按钮走的就是它，测试拿它当那一下。
@@ -1299,10 +1359,48 @@ impl Screen {
         };
     }
 
+    /// 缓着的那份压制清单，**只在它确实是这个作品的时候才算数**。
+    ///
+    /// [`Self::sync_suppressed`] 每帧开头才跑一趟，而点开一行是在同一帧的画表格过程中
+    /// 改 [`Self::detail`] 的——换作品的那一帧，缓着的还是**上一个作品**的那几条。
+    /// 只读展示错一帧无伤，可这一栏每行挂着一颗**「恢复」**：按下去撤的会是另一个作品
+    /// 的记录。所以这里比一次，对不上就当这个作品一条压制都没有，下一帧自然就对了。
+    fn suppressed_of(&self, work: &str) -> &[TitleSuppression] {
+        if self.suppressed_for.as_deref() == Some(work) {
+            &self.suppressed
+        } else {
+            &[]
+        }
+    }
+
+    /// 点开的那个变体换了作品就重读一次它**压掉的叫法**。没换过是空操作。
+    ///
+    /// **不每帧查一次库**：这是画帧线程，而沉淀库那份连接撞上写锁要等十秒
+    /// （同 [`Self::sync_standing`] 的道理）。压过一条之后由那个动作把
+    /// [`Self::suppressed_for`] 清掉，下一帧自然重读。
+    fn sync_suppressed(&mut self, site: &Site) {
+        let work = self.detail.as_ref().and_then(|detail| detail.work.clone());
+        if self.suppressed_for == work {
+            return;
+        }
+        self.suppressed_for = work.clone();
+        self.suppressed = match &work {
+            None => Vec::new(),
+            Some(work) => match site.store.title_suppressions_of(work) {
+                Ok(rows) => rows,
+                Err(error) => {
+                    self.error = Some(format!("沉淀库读不动：{error}"));
+                    Vec::new()
+                }
+            },
+        };
+    }
+
     /// 画一帧。
     pub fn ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         self.sync_window(&site.catalog);
         self.sync_standing(site);
+        self.sync_suppressed(site);
         // **任务台上有活在跑就先不写库**：那时后台正拿着另一份写得动的连接（扫描），
         // 这条线程上的写会在 `busy_timeout` 上等最长十秒——那是画帧线程的十秒。
         self.sync_media(ui.ctx(), site, !tasks.busy());
@@ -2326,20 +2424,19 @@ impl Screen {
             ));
         }
         let mut dirty = false;
-        let mut remove: Option<(Language, TitleKind, String, String)> = None;
+        let mut remove: Option<romcat_core::catalog::TitleRow> = None;
         for row in detail.titles.iter().take(TOP_TITLES) {
             ui.horizontal(|ui| {
                 if ui
                     .small_button("删")
-                    .on_hover_text("从标题集合里去掉这一条叫法")
+                    .on_hover_text(
+                        "从标题集合里去掉这一条叫法。**刮削来的也删得掉**——\
+                         删掉之后记一条压制，重折不会把它折回来（底下「压掉的叫法」\
+                         那一栏列着，也撤得掉）。",
+                    )
                     .clicked()
                 {
-                    remove = Some((
-                        row.language,
-                        row.kind,
-                        row.source.clone(),
-                        row.value.clone(),
-                    ));
+                    remove = Some(row.clone());
                 }
                 let line = format!(
                     "{}｜{} {}｜{}｜{} 个变体这么叫",
@@ -2363,10 +2460,22 @@ impl Screen {
             ));
         }
         if detail.titles.is_empty() {
-            ui.weak("一条叫法都没有——显示标题会退回作品名。");
+            // **「压掉了」与「没采到」是两件事**：前者是人自己做过的动作，后者是刮削
+            // 一条都没采到。合成一句「一条叫法都没有」，人会去重跑刮削，而问题其实
+            // 出在他上个月按过的那个「删」上。
+            if self.suppressed_of(&work).is_empty() {
+                ui.weak("一条叫法都没有——**一条都没采到**，显示标题会退回作品名。");
+            } else {
+                ui.weak(format!(
+                    "集合里一条叫法都没有：底下那 {} 条是**你压掉的**，不是没采到。\
+                     显示标题会退回作品名。",
+                    self.suppressed_of(&work).len(),
+                ));
+            }
         }
-        if let Some((language, kind, source, value)) = remove {
-            self.remove_title(site, &work, language, kind, &source, &value);
+        dirty |= self.suppressed_ui(ui, site, &work);
+        if let Some(row) = remove {
+            self.suppress_title(site, &row);
             dirty = true;
         }
 
@@ -2404,6 +2513,54 @@ impl Screen {
             }
         });
         dirty
+    }
+
+    /// **压掉的叫法**：人删过、重折不许折回来的那几条，连一个「恢复」。
+    ///
+    /// 摆在标题集合底下而不是另开一屏：人是在这儿按的「删」，也该在这儿看得见自己按过
+    /// 什么。**它与「没采到」是两件事**——上面那句空集合的话按这一栏在不在分两种写法。
+    fn suppressed_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, work: &str) -> bool {
+        if self.suppressed_of(work).is_empty() {
+            return false;
+        }
+        ui.weak(format!(
+            "压掉的叫法 · {} 条——是你删的，**重折不会把它折回来**。\
+             记在**沉淀库**里：中立库删掉重扫也不丢。",
+            self.suppressed_of(work).len(),
+        ));
+        let mut lift: Option<TitleSuppression> = None;
+        for one in self.suppressed_of(work).iter().take(TOP_TITLES) {
+            ui.horizontal(|ui| {
+                if ui
+                    .small_button("恢复")
+                    .on_hover_text(
+                        "撤掉这条压制。它**下一趟重折**之后回到标题集合里\
+                         ——这一屏不当场折，那要走遍全库。",
+                    )
+                    .clicked()
+                {
+                    lift = Some(one.clone());
+                }
+                ui.label(format!(
+                    "{}｜{} {}｜{}",
+                    one.value,
+                    one.language.label(),
+                    one.kind.label(),
+                    one.source,
+                ));
+            });
+        }
+        if self.suppressed_of(work).len() > TOP_TITLES {
+            ui.weak(format!(
+                "……另有 {} 条压掉的没列",
+                self.suppressed_of(work).len() - TOP_TITLES
+            ));
+        }
+        if let Some(one) = lift {
+            self.lift_title(site, &one);
+            return true;
+        }
+        false
     }
 
     /// 把草稿里那条叫法写进标题集合，**来源记作裁决**。写成了就返回 `true`。
