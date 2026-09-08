@@ -249,7 +249,12 @@ fn 跑一遍(现场: &mut 现场) {
         },
     )
     .expect("刮削不该失败");
-    title::run(&mut 现场.catalog, &Priorities::builtin()).expect("折得出标题");
+    title::run(
+        &mut 现场.catalog,
+        &romcat_core::verdict::Store::in_memory().expect("能开沉淀库"),
+        &Priorities::builtin(),
+    )
+    .expect("折得出标题");
 }
 
 fn 导出(现场: &mut 现场, force: bool) -> romcat_core::adapter::report::ExportReport {
