@@ -21,14 +21,14 @@ use std::path::Path;
 
 use romcat_core::catalog::browse::{MAX_PAGE, VariantQuery};
 use romcat_core::catalog::{Catalog, Roots};
-use romcat_core::collection::{self, FAVORITE};
+use romcat_core::collection::{self, CollectionError, FAVORITE};
 use romcat_core::dat::repo::DatRepo;
 use romcat_core::fs::RealFs;
 use romcat_core::identify::{self, Options, fuzzy};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::site::Site;
 use romcat_core::sublibrary::{self, Rule, Selection};
-use romcat_core::task::{Halted, Handle};
+use romcat_core::task::{Cutoff, Halted, Handle};
 use romcat_core::testing::container::{ZipEntrySpec, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::verdict::{self, ANCHOR_CONTENT, ANCHOR_PATH, Anchor, Store};
@@ -535,9 +535,16 @@ fn 整批收藏的读那一半停得下来_而且停下时一个字都没写() {
         &把手,
     )
     .expect_err("按过停下就该停");
-    // **那句话必须正是 `Halted` 交出来的那一句**：任务台就是按它把「停了」与「失败」
-    // 分开的（`task::Board::settle`）。差一个字，屏上就会说这一趟出了错。
-    assert_eq!(错.to_string(), Halted.to_string());
+    // **它得落在「被按停」那一支上**：任务台按支分「停了」与「失败」
+    // （`task::Board::settle`），不看这句话说了什么。折过去照旧是 `Cutoff::Halted`
+    // ——那一支一个字都不带，于是这儿的措辞怎么改都不会让屏上说这一趟出了错。
+    assert!(matches!(错, CollectionError::Halted(_)), "{错:?}");
+    assert_ne!(
+        错.to_string(),
+        Halted.to_string(),
+        "这一句与核心库那一句一样的话，「靠措辞分档」那条老路就还留着一半",
+    );
+    assert_eq!(Cutoff::from(错), Cutoff::Halted);
     // 两份库一个字都没动。
     assert!(现场.site.store.memberships().expect("读得到").is_empty());
     assert!(筛(&现场.site.catalog, "收藏=是").is_empty());

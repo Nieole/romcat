@@ -62,7 +62,7 @@ use crate::catalog::{Catalog, CatalogError, KEYS_PER_QUERY, VariantRow};
 use crate::identify;
 use crate::report::thousands;
 use crate::site::Site;
-use crate::task::{Halted, Handle};
+use crate::task::{Cutoff, Halted, Handle};
 use crate::verdict::{Anchor, Membership, VerdictError};
 
 /// **收藏**这一组合集叫什么。
@@ -86,10 +86,26 @@ pub enum CollectionError {
     Nameless,
     /// 被按停了。**读那一半整条只读**，所以这一档停在哪儿都是干净的。
     ///
-    /// 这一句原样是 [`Halted`] 交出来的那一句，**一个字都不许改**：任务台就是按
-    /// 「那句话正是 `Halted` 那一句」把「停了」与「失败」分开的（`task::Board`）。
-    #[error("{0}")]
+    /// **这一句想怎么写就怎么写。** 任务台分「停了」与「失败」看的是
+    /// [`Cutoff`] 落在哪一支（底下那个 `From` 折的），不是这句话说了什么——
+    /// 从前它比的是「那句话正是 `Halted` 那一句」，于是这儿差一个字，屏上就说这一趟
+    /// 出了错。
+    #[error("整批排锚按停了：读那一半整条只读，沉淀库与中立库一个字都没动。")]
     Halted(#[from] Halted),
+}
+
+impl From<CollectionError> for Cutoff {
+    /// **被按停不折成一句「失败」。**
+    ///
+    /// 折的是**支**不是话：`Halted` 那一支进 [`Cutoff::Halted`]（它一个字都不带），
+    /// 别的照旧带着自己那句话进 [`Cutoff::Failed`]。界面上那一趟于是记成「停了」，
+    /// 而不是让人去找哪儿坏了。
+    fn from(error: CollectionError) -> Self {
+        match error {
+            CollectionError::Halted(_) => Self::Halted,
+            error => Self::Failed(error.to_string()),
+        }
+    }
 }
 
 /// 一批变体加进（或移出）一个合集之后的账。

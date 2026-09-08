@@ -44,7 +44,7 @@ use romcat_core::scrape::estimate::{self, Estimate};
 use romcat_core::scrape::online::{self, Credentials, Limits, Net};
 use romcat_core::scrape::{self, Field, Gather, Options, Profile};
 use romcat_core::site::Site;
-use romcat_core::task::{Ending, Finished, Handle};
+use romcat_core::task::{Cutoff, Ending, Finished, Handle};
 use romcat_core::{verdict, workspace, zh};
 
 use crate::task::{Product, Tasks};
@@ -437,12 +437,18 @@ impl Panel {
             }
             // 别的屏排上去的活轮不到这儿——`running` 那道判断已经挡掉了。
             Ending::Done(_) | Ending::Halfway { .. } => {}
-            // **停下来的地方是干净的，就得这么说。** 采完的那部分留在中立库里，
-            // 再排一次从那儿接着采。
+            // **停下来的地方是干净的，就得这么说。**
+            //
+            // 刮削这条路上「被按停」有两个出口，而**落到这一档的只剩前一个**：
+            // 走不到 `scrape::run` 就被 `?` 出来的那一趟（`run` 里那四处 `task.step`），
+            // 它一个锚点都还没采。留下了东西的那个出口报了「停在半路」，走上面
+            // `Ending::Halfway` 那一支。所以这儿**不许说「已经采到的那些留在中立库里」**
+            // ——那一趟什么都没采，那句话是骗人的（词表「收场」：这一档是干净的、
+            // 可以当没跑过）。
             Ending::Stopped => {
                 self.notice = Some(
-                    "刮削按停了。已经采到的那些留在中立库里，再排一次接着采——\
-                     不重做已经采完的部分。"
+                    "刮削按停了。这一趟还没开始采——中立库与媒体池一个字节都没动，\
+                     再排一次就是。"
                         .to_string(),
                 );
             }
@@ -671,10 +677,44 @@ pub fn summary(account: &Estimate) -> String {
     )
 }
 
+/// 这一趟没走完的话，**留下了什么**——[`Handle::halfway`] 要的就是这一句。
+///
+/// 走完了就交 `None`：那一趟记成「完成」。**收手的理由不改变这一档是什么**（词表
+/// 「停在半路」）：人按的「停下」（`interrupted`）是一种，联网源自己收的手
+/// （配额、凭据、网断了）是另一种，两种留下的都是「下一趟接着来」的东西。
+fn left_behind(outcome: &scrape::Outcome) -> Option<String> {
+    if !outcome.interrupted && outcome.halted.is_none() {
+        return None;
+    }
+    let 那一下 = if outcome.interrupted {
+        "按停时"
+    } else {
+        "收手时"
+    };
+    Some(format!(
+        "{那一下}已经采到的那些落进了中立库（这一趟收进媒体 {} 份），\
+         再排一次从那儿接着采——不重做已经采完的部分。",
+        thousands(outcome.new_blobs + outcome.deduped),
+    ))
+}
+
 /// 跑完那一趟排成一句回执。
+///
+/// **没走完的那一趟不许说「跑完了」**：它交出来的产物长得跟跑完的那一份一模一样，
+/// 可它只走了一段（同 [`left_behind`]）。
 fn finished(outcome: &scrape::Outcome) -> String {
+    // **这一句得与那一档对得上。** 走到这儿又没走完的，任务台记的都是「停在半路」
+    // （`left_behind` 报了那一句）——起头写「按停了」的话，屏上这一句与任务屏历史
+    // 那一行说的是两档收场，而 `Ending::Stopped.render()` 正好就是「按停了」。
+    // **为什么收的手**放到后半句去说：词表「停在半路」那一条说得清楚，
+    // 收手的理由不改变这一档是什么。
+    let 起头 = if outcome.interrupted || outcome.halted.is_some() {
+        "刮削停在半路"
+    } else {
+        "刮削跑完了"
+    };
     let mut out = format!(
-        "刮削跑完了：{} 个「锚点 × 源」因为输入没变整条跳过，收进媒体 {} 份。",
+        "{起头}：{} 个「锚点 × 源」因为输入没变整条跳过，收进媒体 {} 份。",
         thousands(outcome.reused_probes),
         thousands(outcome.new_blobs + outcome.deduped),
     );
@@ -686,7 +726,13 @@ fn finished(outcome: &scrape::Outcome) -> String {
         ));
     }
     if let Some(halt) = &outcome.halted {
-        out.push_str(&format!(" 这一趟停在半路：{}", halt.describe()));
+        out.push_str(&format!(" 这一趟是它自己收的手：{}", halt.describe()));
+    }
+    if outcome.interrupted {
+        out.push_str(
+            " 这一趟是被你按停的：已经采到的那些留在中立库里，\
+             再排一次接着采——不重做已经采完的部分。",
+        );
     }
     out
 }
@@ -700,13 +746,15 @@ fn run(
     options: &Options,
     credentials: Option<Credentials>,
     task: &Handle,
-) -> Result<Product, String> {
+) -> Result<Product, Cutoff> {
     task.steps(4);
-    task.step("读优先级表").map_err(|_| "按停了".to_string())?;
+    // **「被按停了」一个字都不用凑**：`?` 一下把手，`Halted` 自己折成
+    // [`Cutoff::Halted`]，任务台按支记成「停了」。这几处从前各自手写一句「按停了」，
+    // 而判据是「那句话正是核心库那一句」——差着字，于是按停整趟记成了失败（挂单 `Q151`）。
+    task.step("读优先级表")?;
     let priorities = romcat_core::sync::prepare::priorities(None, workspace)?;
 
-    task.step("开中文离线源")
-        .map_err(|_| "按停了".to_string())?;
+    task.step("开中文离线源")?;
     // **剥离规则读工作目录里那份**（`sources::rules`，与命令行同一条查法）：正题正是
     // 拿去撞中文离线源的那一串字，两条路各用一份规则的话，同一个变体在命令行与界面上
     // 会撞到不同的条目——而那是写进库里的结论，不是显示上的差别。
@@ -714,7 +762,7 @@ fn run(
     let store = open_zh(workspace, &rules, task)?;
     let index = match store.as_ref().map(zh::store::Store::load).transpose() {
         Ok(index) => index.filter(|index: &zh::Index| !index.is_empty()),
-        Err(error) => return Err(format!("中文索引读不出来：{error}")),
+        Err(error) => return Err(Cutoff::failed(format!("中文索引读不出来：{error}"))),
     };
     let naming = fuzzy::Naming {
         rules: &rules,
@@ -728,8 +776,7 @@ fn run(
 
     // **匹配裁决读不到就停下，不降级成「没人裁过」。** 当成没裁过跑下去，会把人否定掉
     // 的中文名整片撞回来——那正是沉淀库那条「宁可如实拒绝、绝不将就」要拦的事。
-    task.step("摊平匹配裁决")
-        .map_err(|_| "按停了".to_string())?;
+    task.step("摊平匹配裁决")?;
     let rulings = verdict::MatchIndex::load(&site.store, &site.library)
         .map_err(|error| format!("沉淀库读不动：{error}"))
         .and_then(|index| {
@@ -737,7 +784,7 @@ fn run(
                 .map_err(|error| format!("匹配裁决摊不平：{error}"))
         })?;
 
-    task.step("采集").map_err(|_| "按停了".to_string())?;
+    task.step("采集")?;
     let fetcher = credentials
         .as_ref()
         .map(|_| HttpFetcher::with_throttle(limits().interval));
@@ -762,8 +809,18 @@ fn run(
             rulings: &rulings,
         },
     )
-    .map(|outcome| Product::Scraped(Box::new(outcome)))
-    .map_err(|error| format!("刮削失败：{error}"))
+    .map(|outcome| {
+        // **被按停（或者联网源自己收的手）那一趟没走完，可它写过东西**：采到的那些
+        // 已经落进中立库了。不报这一句的话它长着「跑完了」的样子进任务台——任务屏历史
+        // 写「完成」，而这一屏同时说「按停了」，同一趟活在两处说两套话（挂单 `Q217`）。
+        // **被按停在这条路上有两个出口**：走不到 `scrape::run` 的那个由 `?` 一下把手
+        // 交出 `Cutoff::Halted`（记成「停了」，一个字节都没写），走到了的就是这一个。
+        if let Some(said) = left_behind(&outcome) {
+            task.halfway(said);
+        }
+        Product::Scraped(Box::new(outcome))
+    })
+    .map_err(|error| Cutoff::failed(format!("刮削失败：{error}")))
 }
 
 /// 本机那份中文离线索引。**没取过数不是错误**——少一层而已，报告会说清楚。
@@ -804,4 +861,49 @@ fn open_zh(
         );
     }
     Ok(Some(store))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 一趟**被按停**的刮削交回来的账：报告是真的，只是这一趟只走了一段。
+    fn 按停的那一趟() -> scrape::Outcome {
+        scrape::Outcome {
+            interrupted: true,
+            new_blobs: 7,
+            deduped: 5,
+            ..scrape::Outcome::default()
+        }
+    }
+
+    #[test]
+    fn 被按停的那一趟说得出留下了什么_而且不说跑完了() {
+        // 挂单 `Q217`：刮削这条路上「被按停」有**两个出口**。走不到 `scrape::run` 的
+        // 那个由把手交出「被按停了」，另一个走到了——它照旧返回 `Ok`，产物长得跟跑完的
+        // 那一份一模一样。不报「停在半路」的话，任务屏历史写「完成」，而这一屏同时说
+        // 「按停了」，同一趟活在两处说两套话。
+        let 留下了 = left_behind(&按停的那一趟()).expect("被按停就该说得出留下了什么");
+        assert!(留下了.contains("落进了中立库"), "{留下了}");
+        assert!(留下了.contains("接着采"), "说不出下一趟怎么接：{留下了}");
+
+        // 回执与任务屏历史那一行得说的是**同一档**：那一趟记的是「停在半路」，
+        // 而 `Ending::Stopped.render()` 正好是「按停了」——起头写它就是两档撞脸。
+        let 回执 = finished(&按停的那一趟());
+        assert!(!回执.contains("跑完了"), "按停的那一趟说成了跑完了：{回执}");
+        assert!(回执.starts_with("刮削停在半路"), "{回执}");
+        assert!(回执.contains("被你按停的"), "说不出是谁收的手：{回执}");
+    }
+
+    #[test]
+    fn 真跑完的那一趟不报停在半路() {
+        // 报了的话它就成了「停在半路」那一档——那一行会说「留下了什么」，
+        // 而这一趟其实什么都没剩下要接着做的。
+        let 跑完了 = scrape::Outcome {
+            new_blobs: 12,
+            ..scrape::Outcome::default()
+        };
+        assert!(left_behind(&跑完了).is_none());
+        assert!(finished(&跑完了).contains("跑完了"));
+    }
 }

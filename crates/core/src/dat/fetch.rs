@@ -22,6 +22,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::guard::{self, Refusal};
+use crate::task::Halted;
 
 /// 默认每个主机之间隔多久再发下一个请求。
 pub const DEFAULT_THROTTLE: Duration = Duration::from_secs(1);
@@ -31,6 +32,16 @@ const MAX_BODY: u64 = 1 << 30;
 
 /// 最多跟几跳重定向。
 const MAX_HOPS: usize = 5;
+
+/// 大件下载**一次搬多少字节**。
+///
+/// 这个数就是「按下停下」到「真的收手」之间的粒度：[`copy_while`] 每搬一块之前问一次
+/// 要不要收手，所以最坏是**读完当前这一块**的时间。中文离线源那份 dump 是 435 MB，
+/// 一口气搬完要几分钟——那几分钟里按停下没有反应，等于按了个假按钮。
+///
+/// 一块 1 MiB 是在两头之间选的：再小就是每几毫秒问一次，白花系统调用；
+/// 再大，一条慢线路上读完一块就要好几秒，那个按钮又开始迟钝。
+const DOWNLOAD_CHUNK: usize = 1 << 20;
 
 /// 一次响应的状态与响应头。**正文不在里面**——问「变了没有」只需要这些。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -124,6 +135,61 @@ pub enum FetchError {
         /// 问的是哪个 URL。
         url: String,
     },
+    /// **被叫停了。** 停在两块之间，那半截临时文件已经删掉。
+    ///
+    /// 它与别的几样分开一格，是因为**这不是失败**：一个字节都没坏，接着按一次
+    /// 就从头再下。折成一句「取数失败」的话，界面上按一下停下会说成出了错。
+    #[error(transparent)]
+    Halted(#[from] Halted),
+}
+
+/// 一块一块地搬，**每搬一块之前问一次要不要收手**。
+///
+/// 交出搬进去多少字节。`keep_going` 说「别搬了」时当场返回
+/// [`FetchError::Halted`]——**已经搬进去的那半截归调用方处置**
+/// （[`HttpFetcher::download_while`] 把那个临时文件删掉）。
+///
+/// 收手有多快只取决于一块有多大（[`DOWNLOAD_CHUNK`]），与整份有多大无关：
+/// 那 435 MB 里按下停下，收手的代价是读完手上这一块，不是把剩下那 400 多 MB 读完。
+///
+/// `path` 只用来在出错时说清是哪个文件。
+fn copy_while(
+    from: &mut dyn io::Read,
+    into: &mut dyn io::Write,
+    path: &str,
+    keep_going: &dyn Fn() -> bool,
+) -> Result<u64, FetchError> {
+    let mut buf = vec![0_u8; DOWNLOAD_CHUNK];
+    let mut moved = 0_u64;
+    loop {
+        // **问在读之前**：这一趟要么整块搬完、要么这一块根本没开始，
+        // 于是那个临时文件里不会留下半块。
+        if !keep_going() {
+            return Err(Halted.into());
+        }
+        let read = match from.read(&mut buf) {
+            Ok(read) => read,
+            // **EINTR 不是「读不动」，是「再读一次」。** 它换掉的 `io::copy` 本来就吞
+            // 并重试这一档；不吞的话，一个信号就会让「按停」显示成
+            // 「读写 … 失败：Interrupted」——那正是这条路要消灭的那种误报。
+            Err(source) if source.kind() == io::ErrorKind::Interrupted => continue,
+            Err(source) => {
+                return Err(FetchError::Io {
+                    path: path.to_string(),
+                    source,
+                });
+            }
+        };
+        if read == 0 {
+            return Ok(moved);
+        }
+        into.write_all(&buf[..read])
+            .map_err(|source| FetchError::Io {
+                path: path.to_string(),
+                source,
+            })?;
+        moved += read as u64;
+    }
 }
 
 /// 取数的接缝。
@@ -145,6 +211,30 @@ pub trait Fetcher: Sync {
     /// # Errors
     /// 同 [`Self::head`]，外加写不进目标文件。
     fn download(&self, url: &str, to: &Path) -> Result<Head, FetchError>;
+
+    /// 同 [`Self::download`]，**只是边下边问要不要收手**。
+    ///
+    /// 中文离线源那份 dump 是 435 MB，一口气下完要几分钟；界面上那个「停下」与命令行
+    /// 的 Ctrl-C 得在那几分钟里**当场**有反应，不能等它下完。走这条的调用方把自己那个
+    /// 中断信号折成 `keep_going` 递进来。
+    ///
+    /// **默认实现只在开工之前问一次**，之后一口气下完。小件（几百 KB 的清单、
+    /// 几十 MB 的 DAT）走这条没问题——它们本来就一瞬就完。**大件必须自己覆盖它**，
+    /// 不然按下停下要等到整份下完才收手。
+    ///
+    /// # Errors
+    /// 同 [`Self::download`]；被叫停时返回 [`FetchError::Halted`]。
+    fn download_while(
+        &self,
+        url: &str,
+        to: &Path,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Result<Head, FetchError> {
+        if !keep_going() {
+            return Err(Halted.into());
+        }
+        self.download(url, to)
+    }
 
     /// 发一个带正文的请求（票 12 的模型推断要它——问题装在正文里，不装在查询串上）。
     ///
@@ -358,6 +448,16 @@ impl Fetcher for HttpFetcher {
     }
 
     fn download(&self, url: &str, to: &Path) -> Result<Head, FetchError> {
+        // 没人会来叫停的那些走这条：一路放行。
+        self.download_while(url, to, &|| true)
+    }
+
+    fn download_while(
+        &self,
+        url: &str,
+        to: &Path,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Result<Head, FetchError> {
         let (head, mut body) = self.follow(Method::Get, url)?;
         require_ok(url, &head)?;
         if let Some(parent) = to.parent() {
@@ -369,16 +469,22 @@ impl Fetcher for HttpFetcher {
         // 先写临时文件再改名：下到一半断网留下的半截文件会被当成「下好了」，
         // 而它的指纹已经记进库里，于是那份 DAT 永远不会被重下（挂账里那类静默坏账）。
         let temp = to.with_extension("partial");
+        let label = temp.display().to_string();
         let mut file = std::fs::File::create(&temp).map_err(|source| FetchError::Io {
-            path: temp.display().to_string(),
+            path: label.clone(),
             source,
         })?;
         let mut reader = body.with_config().limit(MAX_BODY).reader();
-        io::copy(&mut reader, &mut file).map_err(|source| FetchError::Io {
-            path: temp.display().to_string(),
-            source,
-        })?;
+        // **一块一块地搬，每块之前问一次**：那 435 MB 里按下停下，收手的代价是读完
+        // 手上这一块，不是把剩下那 400 多 MB 读完。
+        let 搬完了 = copy_while(&mut reader, &mut file, &label, keep_going);
         drop(file);
+        if let Err(error) = 搬完了 {
+            // **半截的不留。** 收手也好、断网也好，那个 `.partial` 留在缓存里
+            // 只会让下一趟以为原件在手边（`zh::sync` 就是按文件在不在决定要不要下的）。
+            let _ = std::fs::remove_file(&temp);
+            return Err(error);
+        }
         std::fs::rename(&temp, to).map_err(|source| FetchError::Io {
             path: to.display().to_string(),
             source,
@@ -623,7 +729,129 @@ impl Fetcher for CannedFetcher {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
+
+    /// 中文离线源那份 dump 有多大——`aux/latest.json` 上写的那个数，一个字节不差。
+    const 那份原件多大: u64 = 435_891_841;
+
+    /// 一份**读得出那么多字节**的正文：不进内存、不上网，只是一直给字节。
+    ///
+    /// **它每次都填满整个 buf。** 真的 `Read`（socket）短读是合法的，那时
+    /// `copy_while` 照旧对——只是「搬进去正好几块」那个精确的等号变成了「不超过几块」。
+    /// 底下那条测试两样都断，`<=` 那一条才是判据。
+    struct 一份大正文 {
+        剩下: u64,
+    }
+
+    impl io::Read for 一份大正文 {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = buf
+                .len()
+                .min(usize::try_from(self.剩下).unwrap_or(usize::MAX));
+            buf[..n].fill(0);
+            self.剩下 -= n as u64;
+            Ok(n)
+        }
+    }
+
+    /// 一个**只数不留**的落点：搬进去多少字节数得出来，一个字节都不占内存。
+    #[derive(Default)]
+    struct 数着丢掉 {
+        搬进去了: u64,
+    }
+
+    impl io::Write for 数着丢掉 {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.搬进去了 += buf.len() as u64;
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn 那份_435_兆的原件按停之后在当前这一块读完就收手_不等整份下完() {
+        // 挂单 `Q150`：这份 dump 一口气下完要几分钟，而那几分钟里「停下」按下去没有
+        // 反应，等于摆了个假按钮。
+        //
+        // **判据是搬进去了多少字节，不是花了多久**：时间随机器与线路飘，而
+        // 「收手时搬进去的只有放行过的那几块」是这条循环的定义，换一份多大的正文、
+        // 换一条多快的线路都成立。
+
+        // 先量一遍「不按停」那一趟：整份 435 MB 一个字节不少地搬完。
+        let mut 落点 = 数着丢掉::default();
+        let 开始 = Instant::now();
+        let 搬完 = copy_while(
+            &mut 一份大正文 {
+                剩下: 那份原件多大
+            },
+            &mut 落点,
+            "缓存里那份原件",
+            &|| true,
+        )
+        .expect("没人叫停就该整份搬完");
+        let 下完用了 = 开始.elapsed();
+        assert_eq!(搬完, 那份原件多大);
+        assert_eq!(落点.搬进去了, 那份原件多大);
+
+        // 再量一遍「按了停下」那一趟：放行三块，第四次问就收手。
+        let 放行 = AtomicU64::new(3);
+        let mut 落点 = 数着丢掉::default();
+        let 开始 = Instant::now();
+        let 结果 = copy_while(
+            &mut 一份大正文 {
+                剩下: 那份原件多大
+            },
+            &mut 落点,
+            "缓存里那份原件",
+            &|| 放行.fetch_sub(1, Ordering::Relaxed) > 0,
+        );
+        let 收手用了 = 开始.elapsed();
+        assert!(
+            matches!(结果, Err(FetchError::Halted(_))),
+            "按了停下却不是「被叫停」那一档：{结果:?}",
+        );
+
+        // **收手的代价是当前这一块，不是剩下那 400 多 MB。**
+        let 一块 = DOWNLOAD_CHUNK as u64;
+        // 这一条是**判据**：放行几次，搬进去的就不超过几块——换一份多大的正文、
+        // 换一条会短读的线路都成立。
+        assert!(
+            (0 < 落点.搬进去了) && (落点.搬进去了 <= 3 * 一块),
+            "放行了三块，搬进去的却是 {} 字节——收手没落在块与块之间",
+            落点.搬进去了,
+        );
+        // 这一条精确到等号，靠的是 `一份大正文` 每次填满整个 buf（见它的文档）。
+        assert_eq!(落点.搬进去了, 3 * 一块);
+        assert!(
+            落点.搬进去了 * 100 < 那份原件多大,
+            "按停之后还是把大半份搬完了：{} / {那份原件多大}",
+            落点.搬进去了,
+        );
+        eprintln!(
+            "435 MB 整份搬完 {下完用了:?}；按停之后搬了 3 块（{} 字节）就收手，\
+             用了 {收手用了:?}（合成正文，内存速度）。收手的上界是**读完当前这一块**\
+             ——{} 字节，换算到一条 20 MB/s 的线路上约 50 ms，\
+             而从前要等的是剩下那 430 MB，约 21 秒。",
+            3 * 一块,
+            一块,
+        );
+    }
+
+    #[test]
+    fn 一块搬不完的正文也搬得完() {
+        // 一块是 1 MiB，而正文不会正好是它的整数倍——最后那不足一块的一段照旧要搬进去。
+        let 零头 = DOWNLOAD_CHUNK as u64 * 2 + 7;
+        let mut 落点 = Vec::new();
+        let 搬完 = copy_while(&mut 一份大正文 { 剩下: 零头 }, &mut 落点, "零头", &|| true)
+            .expect("搬得完");
+        assert_eq!(搬完, 零头);
+        assert_eq!(落点.len() as u64, 零头);
+    }
 
     /// **真的那一个也过闸门。**
     ///

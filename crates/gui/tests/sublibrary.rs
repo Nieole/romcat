@@ -28,8 +28,7 @@ use romcat_core::fs::RealFs;
 use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::site::Site;
 use romcat_core::sublibrary::{Exception, Group, Join, Rule};
-use romcat_core::task::Ending;
-use romcat_core::task::Handle;
+use romcat_core::task::{Cutoff, Ending, Handle};
 use romcat_core::testing::sample::zip;
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_gui::app::{App, View};
@@ -246,7 +245,7 @@ impl 现场 {
                 task.check()?;
                 std::thread::sleep(Duration::from_millis(5));
             }
-            Err("这一趟本来就只是占着位子".to_string())
+            Err(Cutoff::failed("这一趟本来就只是占着位子"))
         })
     }
 

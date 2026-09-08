@@ -87,7 +87,7 @@ use romcat_core::site::Site;
 use romcat_core::sublibrary::{
     BrokenRule, Dimension, Discarded, Exception, ExceptionRow, LoadedSelection, Rule, Sublibrary,
 };
-use romcat_core::task::{Ending, Finished};
+use romcat_core::task::{Cutoff, Ending, Finished};
 use romcat_core::title::{self, Language, TitleKind};
 use romcat_core::verdict::TitleSuppression;
 
@@ -1338,13 +1338,16 @@ impl Screen {
             Ok(reader) => tasks.queue(title, move |task| {
                 collection::plan(&reader, &library, &name, &keys, joining, task)
                     .map(|planned| Product::Planned(Box::new(planned)))
-                    .map_err(|error| format!("{error}"))
+                    // **被按停不折成一句「失败」**：`CollectionError` 自己认得
+                    // 那一支，折过来就是 `Cutoff::Halted`（`collection` 那一处的
+                    // `From`）。这一层一个字都不用凑。
+                    .map_err(Cutoff::from)
             }),
             // **只活在内存里的库分不出第二份连接**（合成数据走这条），那是意料之中的。
             Err(CatalogError::NotOnDisk { .. }) => tasks.run_here(title, |task| {
                 collection::plan(&site.catalog, &library, &name, &keys, joining, task)
                     .map(|planned| Product::Planned(Box::new(planned)))
-                    .map_err(|error| format!("{error}"))
+                    .map_err(Cutoff::from)
             }),
             Err(why) => {
                 self.error = Some(format!(

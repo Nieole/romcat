@@ -42,6 +42,11 @@
 //! 一条看一眼。这正是[任务](crate::task)那一层说的「一步内部还想更细的，把
 //! `Handle::cancel` 那个信号往下传」——**不是另造一套**。
 //!
+//! **那 435 MB 的下载也按同一条接住**：同一个中断信号折成「还要不要接着搬」递给
+//! [`Fetcher::download_while`]，
+//! 于是按下停下的代价是**读完手上那一块**，不是把剩下那 400 多 MB 读完。
+//! 半截的那个 `.partial` 当场删掉——留着的话下一趟会以为原件已经在手边了。
+//!
 //! **停下的地方是干净的**：收手在两条记录之间，那时一个字都还没写进库
 //! （换结构与写新数据在 [`Store::replace`] 那一个事务里），手上那份索引原样可用。
 
@@ -70,8 +75,13 @@ pub const SUBJECTS: &str = "subject.jsonlines";
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
     /// 取数失败（含闸门拦下）。
+    ///
+    /// **这一支特意不带 `#[from]`**：`FetchError` 上有一支
+    /// [`Halted`](FetchError::Halted)，而 `#[from]` 生成的那个转换会把它一并折进这一格
+    /// ——于是随手 `?` 一下就把「被按停了」悄悄变成了「取数失败」。折支的活由底下
+    /// 那条手写的 `From` 干，`?` 就再也漏不掉。
     #[error(transparent)]
-    Fetch(#[from] FetchError),
+    Fetch(FetchError),
     /// 索引读写失败。
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -92,6 +102,20 @@ pub enum SyncError {
     /// 命令行与界面都会劝用户去重下那 435 MB，而它一个字节都没坏。
     #[error(transparent)]
     Halted(#[from] Halted),
+}
+
+impl From<FetchError> for SyncError {
+    /// **被叫停不折成一句「取数失败」。**
+    ///
+    /// 折的是**支**不是话：[`FetchError::Halted`] 进 [`SyncError::Halted`]，
+    /// 别的照旧带着自己那句话进 [`SyncError::Fetch`]。手写这一条而不是用 `#[from]`，
+    /// 是因为 `#[from]` 会把两样并成一格——那正是这一层要拆掉的形状。
+    fn from(error: FetchError) -> Self {
+        match error {
+            FetchError::Halted(halted) => Self::Halted(halted),
+            error => Self::Fetch(error),
+        }
+    }
 }
 
 /// 取数的选项。
@@ -258,7 +282,16 @@ pub fn sync(
     // **原件已经在手边就不再下一遍**，`--full` 也不例外：文件名里带着这一版的日期，
     // 同名就是同一版。改一条平台别名重建索引时省的正是这 415 MB。
     if !file.exists() {
-        fetcher.download(&release.url, &file)?;
+        // **那 435 MB 里按下停下要当场有反应。** 中断信号折成「还要不要接着搬」递进去，
+        // 于是收手的代价是读完手上那一块，不是把剩下那 400 多 MB 读完（挂单 `Q150`）。
+        let cancel = ctx.cancel;
+        // 收手折成 `SyncError::Halted` 而不是「取数失败」，是 `From<FetchError>` 那条
+        // 干的（就在这个文件上头）——那份原件一个字节都没坏，缓存里也没有半截留下
+        // （`HttpFetcher::download_while` 把 `.partial` 删了），报成失败的话，
+        // 命令行与界面都会劝人去重下那 435 MB。
+        fetcher.download_while(&release.url, &file, &|| {
+            cancel.is_none_or(|token| !token.is_cancelled())
+        })?;
         out.downloaded = true;
     }
     let (entries, records, fold) = read_dump(library, &file, manifest, rules, ctx)?;
@@ -984,10 +1017,11 @@ mod tests {
             &mut Context::cancelled_by(&cancel),
         )
         .expect_err("按停了");
+        // **它得落在「被按停」那一支上。** 任务台按支分「停了」与「失败」
+        // （`task::Board::settle`，`sources::refetch` 把这一支折成 `Cutoff::Halted`），
+        // 不看这句话说了什么——从前这儿还断过一句 `error.to_string() == Halted.to_string()`，
+        // 那时判据是字符串比对，差一个字就记成失败；现在那一句断的只是个巧合。
         assert!(matches!(error, SyncError::Halted(_)), "{error:?}");
-        // **那句话正是任务台认得的那一句**：任务台按它把「按停了」与「失败」分开记
-        // （`task::Board::settle`），差一个字就会被记成失败。
-        assert_eq!(error.to_string(), Halted.to_string());
 
         let index = store.load().expect("读得回来");
         assert_eq!(index.entries()[0].id, 4, "手上那份索引原样可用");
@@ -1036,6 +1070,147 @@ mod tests {
                 was: 1,
                 dump: "dump-2026-09-01.210329Z.zip".to_string(),
             }
+        );
+    }
+
+    /// 一个**边下边问**的下载替身：那份原件一块一块地给，每块之前问一次要不要收手。
+    ///
+    /// `CannedFetcher::download` 是一次 `fs::write`——那一下根本没有「下到一半」可言，
+    /// 拿它测不出「按下停下之后等不等它下完」。真的那一个（`HttpFetcher`）走的是
+    /// `dat::fetch::copy_while`，一块 1 MiB；这一个只是把同一副问法摆出来，
+    /// 好验**这一层有没有把中断信号递下去**。
+    struct 边下边问 {
+        canned: crate::dat::CannedFetcher,
+        /// 那份原件，整份下完时落到盘上的就是它。
+        正文: Vec<u8>,
+        /// 那 435 MB 折成几块。
+        共几块: u64,
+        /// 收手（或者下完）时搬了几块。
+        搬了几块: std::sync::atomic::AtomicU64,
+    }
+
+    impl Fetcher for 边下边问 {
+        fn head(&self, url: &str) -> Result<crate::dat::fetch::Head, FetchError> {
+            self.canned.head(url)
+        }
+
+        fn get(&self, url: &str) -> Result<crate::dat::fetch::Fetched, FetchError> {
+            self.canned.get(url)
+        }
+
+        fn download(&self, url: &str, to: &Path) -> Result<crate::dat::fetch::Head, FetchError> {
+            self.download_while(url, to, &|| true)
+        }
+
+        fn download_while(
+            &self,
+            _url: &str,
+            to: &Path,
+            keep_going: &dyn Fn() -> bool,
+        ) -> Result<crate::dat::fetch::Head, FetchError> {
+            use std::sync::atomic::Ordering;
+            for 第几块 in 0..self.共几块 {
+                if !keep_going() {
+                    self.搬了几块.store(第几块, Ordering::Relaxed);
+                    // **半截的不留**：真的那一个把 `.partial` 删掉，这儿一个字节都没落。
+                    return Err(Halted.into());
+                }
+            }
+            self.搬了几块.store(self.共几块, Ordering::Relaxed);
+            std::fs::write(to, &self.正文).map_err(|source| FetchError::Io {
+                path: crate::path::display(to),
+                source,
+            })?;
+            Ok(crate::dat::fetch::Head::default())
+        }
+
+        fn post(
+            &self,
+            url: &str,
+            headers: &[(&str, &str)],
+            body: &[u8],
+        ) -> Result<crate::dat::fetch::Fetched, FetchError> {
+            self.canned.post(url, headers, body)
+        }
+    }
+
+    /// 那 435 MB 按一块 1 MiB 折成几块。
+    const 那份原件几块: u64 = 435_891_841_u64.div_ceil(1 << 20);
+
+    fn 摆一个边下边问的() -> 边下边问 {
+        边下边问 {
+            canned: crate::dat::CannedFetcher::new().with(LATEST_URL, 一份_latest_json()),
+            正文: 一份原件(),
+            共几块: 那份原件几块,
+            搬了几块: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    #[test]
+    fn 那_435_兆的下载按停之后当场收手_不等它下完() {
+        // 挂单 `Q150`：从前这一层只把中断信号接到「读那份原件」那几分钟上，下载那一段
+        // 根本没人问——按下停下之后要等 435 MB 全下完才轮得到它。
+        //
+        // **这一条验的是这一层有没有把信号递下去**（那条一块一块搬的循环由
+        // `dat::fetch` 自己的测试钉）。**两头都跑**：按了停下的那一趟当场收手，
+        // 没按的那一趟整份下完——只跑前一半的话，把信号接到一个恒假的东西上也会绿。
+        let dir = crate::testing::temp_dir("zh-sync-按停");
+        let cache = dir.path().join("cache");
+
+        // 一、按了停下：第一块都不搬就收手，缓存里一个字节都不留。
+        let fetcher = 摆一个边下边问的();
+        let mut store = Store::open(&dir.path().join("zh-停.sqlite3")).expect("开得起来");
+        let token = crate::scan::CancelToken::new();
+        token.cancel();
+        let error = sync(
+            &fetcher,
+            &crate::fs::RealFs,
+            &mut store,
+            &Manifest::builtin(),
+            &Rules::builtin(),
+            &Options {
+                cache: cache.clone(),
+                full: false,
+                dry_run: false,
+            },
+            &mut Context::cancelled_by(&token),
+        )
+        .expect_err("按过停下就该收手");
+        // **它是「被按停了」那一档，不是「取数失败」。** 折成失败的话，命令行与界面
+        // 都会劝人去重下那 435 MB，而它一个字节都没坏。
+        assert!(matches!(error, SyncError::Halted(_)), "{error:?}");
+        assert_eq!(
+            fetcher.搬了几块.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "按了停下却还是搬了几块",
+        );
+        assert!(
+            !cache.join(原件名).exists(),
+            "收手了却在缓存里留下一份原件——下一趟会以为它已经在手边",
+        );
+
+        // 二、没按停下：同一副替身整份下完，那 416 块一块不少。
+        let fetcher = 摆一个边下边问的();
+        let mut store = Store::open(&dir.path().join("zh-不停.sqlite3")).expect("开得起来");
+        let outcome = sync(
+            &fetcher,
+            &crate::fs::RealFs,
+            &mut store,
+            &Manifest::builtin(),
+            &Rules::builtin(),
+            &Options {
+                cache,
+                full: false,
+                dry_run: false,
+            },
+            &mut Context::unattended(),
+        )
+        .expect("没人叫停就该下得完");
+        assert!(outcome.downloaded, "这一趟该是真下了一份");
+        assert_eq!(
+            fetcher.搬了几块.load(std::sync::atomic::Ordering::Relaxed),
+            那份原件几块,
+            "没人叫停却没搬完",
         );
     }
 

@@ -34,7 +34,7 @@ use romcat_core::report::{human_bytes, human_duration, human_time, thousands};
 use romcat_core::scan::{self, CheckpointOptions, Jobs, ScanOptions};
 use romcat_core::site::Site;
 use romcat_core::sources::{self, Source, SourceState, SourceStatus};
-use romcat_core::task::Ending;
+use romcat_core::task::{Cutoff, Ending};
 
 use crate::task::{Product, Tasks};
 
@@ -276,7 +276,9 @@ impl Screen {
                 // **被按停的那一趟照旧交出产物**：那份「到目前为止」的体检报告是真的，
                 // 而 `scan` 自己已经报过「停在半路」了，任务台不会把它记成「完成」。
                 Ok(outcome) => Ok(Product::Scanned(Box::new(outcome))),
-                Err(error) => Err(error.to_string()),
+                // **扫描被按停时不走这条**：它照旧返回 `Ok`，另报一句「停在半路」，
+                // 好让**断点**留得下来（ADR-0015）。走到这儿的都是真出错了。
+                Err(error) => Err(Cutoff::failed(error.to_string())),
             }
         });
         self.error = None;
@@ -556,7 +558,9 @@ impl Screen {
                         .add_enabled(!忙, egui::Button::new(标签))
                         .on_hover_text(
                             "联网取一趟，排到任务台上跑。\
-                             开跑之后停不下来——底下那三个入口不收中断信号（挂单 Q62）。",
+                             中文离线源那一条按得停——按下之后在当前这一块读完就收手，\
+                             不等那 435 MB 下完。另外两条开跑之后还停不下来\
+                             （底下那两个入口不收中断信号，挂单 Q62）。",
                         )
                         .clicked()
                     {
