@@ -1845,6 +1845,9 @@ fn run_sync(
     let sources = sync::Sources {
         library: &romcat_core::fs::RealFs,
         library_roots,
+        // 真跑一律给真盘：那道可注入的接缝只为测试造得出的那两格而存在
+        // （`sync::execute` 模块文档八）。
+        target: &romcat_core::fs::RealFs,
         target_root: &prepared.root,
         from_pool: &prepared.from_pool,
         generated: &prepared.generated,

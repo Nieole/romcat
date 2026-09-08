@@ -21,7 +21,7 @@ use romcat_core::capability::Profile;
 use romcat_core::catalog::Catalog;
 use romcat_core::catalog::Roots;
 use romcat_core::catalog::scrape::{Harvested, HarvestedMedia};
-use romcat_core::fs::RealFs;
+use romcat_core::fs::{LibraryFs, MemFs, RealFs};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::priority::Priorities;
@@ -30,6 +30,7 @@ use romcat_core::sublibrary::{self, Rule, Selection, Sublibrary};
 use romcat_core::sync::{self, Act, FileKind, Manifest, Placement, Sources};
 use romcat_core::task::Handle;
 use romcat_core::testing::sample::zip;
+use romcat_core::testing::target::{self, Folding};
 use romcat_core::testing::{TempDir, temp_dir};
 
 fn 写(path: &Path, bytes: &[u8]) {
@@ -197,9 +198,47 @@ impl 现场 {
         缓存: Option<&Path>,
         cancel: &CancelToken,
     ) -> sync::Outcome {
+        self.执行_全(这趟, 清单, 缓存, &RealFs, cancel)
+    }
+
+    /// 把**目标那一侧**换成一份指定[折叠语义](Folding)的只读视图再跑一趟。
+    ///
+    /// 卡上真实那棵树照一张相放进去（`testing::target`），字节照旧落在真实的临时
+    /// 目录里——那道接缝只管读（`sync::execute` 模块文档八）。
+    fn 执行_折(
+        &self,
+        这趟: &一趟,
+        清单: &Manifest,
+        折叠: Folding,
+        cancel: &CancelToken,
+    ) -> sync::Outcome {
+        let 视图 = target::snapshot(self.卡.path(), 折叠);
+        self.执行_折_视图(这趟, 清单, &视图, cancel)
+    }
+
+    /// 同上，但视图由调用方自己捏——用来验「塞得进去」这件事本身。
+    fn 执行_折_视图(
+        &self,
+        这趟: &一趟,
+        清单: &Manifest,
+        目标: &dyn LibraryFs,
+        cancel: &CancelToken,
+    ) -> sync::Outcome {
+        self.执行_全(这趟, 清单, None, 目标, cancel)
+    }
+
+    fn 执行_全(
+        &self,
+        这趟: &一趟,
+        清单: &Manifest,
+        缓存: Option<&Path>,
+        目标: &dyn LibraryFs,
+        cancel: &CancelToken,
+    ) -> sync::Outcome {
         let sources = Sources {
             library: &RealFs,
             library_roots: Some(&Roots::single("库", &self.库根)),
+            target: 目标,
             target_root: self.卡.path(),
             from_pool: &这趟.from_pool,
             generated: &这趟.generated,
@@ -394,6 +433,7 @@ fn 探不动硬链接就复制_降级路径在任何文件系统上都成立() {
     let sources = Sources {
         library: &RealFs,
         library_roots: Some(&Roots::single("库", &现场.库根)),
+        target: &RealFs,
         target_root: 现场.卡.path(),
         from_pool: &这趟.from_pool,
         generated: &这趟.generated,
@@ -647,47 +687,147 @@ fn 大小写不敏感的目标上_清单之外只差大小写的文件不被顶�
 }
 
 #[test]
+fn 塞得进一个假目标_不塞就是真盘() {
+    // 这道闸问目标的那几句话走 `Sources::target`（`sync::execute` 模块文档八）。
+    // **它在不在**，判据是「同一份主库、同一趟计划、两张一样的空卡，塞与不塞答案相反」：
+    //
+    // - 塞一份说「那儿躺着维护者一份只差大小写的文件」的视图进去 → 挡得住；
+    // - 不塞 → 那一问落在**真盘**上，盘上真的没有，于是字节照常落下去。
+    //
+    // 两边都不是「假装成功」：第一趟落点上一个字节都没写，第二趟写的是真文件。
+    // **第二趟另起一张卡**而不是复用第一张：第一趟虽然被挡下的那一步没写东西，
+    // 同一趟里的元数据那一步照样落到真卡上了，复用的话它自己会把第二趟挡下来。
+    let 现场 = 现场::摆在(建个只差大小写的库());
+    let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
+    let 落点 = 现场.卡.path().join("GB/tetris.zip");
+    assert!(!落点.exists(), "真卡上这会儿什么都没有");
+
+    let mut 假卡 = MemFs::insensitive();
+    假卡.file(
+        现场.卡.path().join("GB/Tetris.zip"),
+        "这是我自己拷进去的".as_bytes().to_vec(),
+    );
+    let 假的 = 现场.执行_折_视图(&这趟, &Manifest::empty(), &假卡, &CancelToken::new());
+    assert!(
+        假的
+            .failures
+            .iter()
+            .any(|failure| failure.path == "GB/tetris.zip" && failure.act == Act::Add),
+        "视图说那儿有东西，闸就得挡下来：{:?}",
+        假的.failures
+    );
+    assert!(!落点.exists(), "挡下来就一个字节都不写");
+
+    // 换一张干净的真卡、同一份主库、同一趟计划，这回**不塞**：那一问落在盘上，
+    // 盘上真的没有，于是字节照常落下去。
+    let 另一处 = 现场::摆在(建个只差大小写的库());
+    let 另一趟 = 另一处.排一趟("平台=GB", &Manifest::empty());
+    let 真的 = 另一处.执行(&另一趟, &Manifest::empty(), &CancelToken::new());
+    assert!(
+        真的.failures.is_empty(),
+        "不塞视图时那一问落在真盘上，盘上没有就该照常落下去：{:?}",
+        真的.failures
+    );
+    assert_eq!(
+        fs::read(另一处.卡.path().join("GB/tetris.zip")).expect("真的落在真盘上"),
+        fs::read(另一处.库根.join("GB/tetris.zip")).expect("读得出"),
+        "写那一侧照旧是真实文件系统，一个字节都没经过那道接缝",
+    );
+}
+
+/// 落点闸那几条**在两种折叠语义下各跑一遍**。
+///
+/// 卡是 exFAT / FAT32、主力机是默认 APFS——**都不分大小写**；开发机是 ext4，**分**。
+/// 这道闸的正确性在两边不是同一件事：不分大小写的目标上，卡里那份 `GB/Tetris.zip`
+/// 与我们要写的 `GB/tetris.zip` **就是同一个文件**，挡不住就是把维护者的东西顶掉；
+/// 分大小写的盘上它们是两个文件，挡不住只是在旁边多写一份。一台机器上造不出另一种
+/// 挂载点，于是不敏感那半边挂了两轮都只是一句推理（挂单 `Q135`）——眼下它由
+/// `Sources::target` 那道接缝喂进来（`sync::execute` 模块文档八）。
+const 两种折叠语义: [Folding; 2] = [Folding::Sensitive, Folding::Insensitive];
+
+#[test]
 fn 计划算完之后才出现的落点占用_执行这一层也挡得住() {
     // 计划靠的是 `observe` 交出来的那份键的集合，而那份集合**可能是不全的**：
     // 列不开的目录底下一个键都拿不到，那一枝上的落点计划根本无从判断；计划算完到
     // 真的改名之间也隔着整趟同步的时间，卡还插在机器上。于是执行这一层还要兜一道。
+    for 折叠 in 两种折叠语义 {
+        let 说 = 折叠.label();
+        let 现场 = 现场::摆在(建个只差大小写的库());
+        let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
+        assert!(
+            这趟
+                .plan
+                .steps
+                .iter()
+                .any(|step| step.act == Act::Add && step.path == "GB/tetris.zip"),
+            "{说}：计划这一侧看不见它，本来就该排一条新增"
+        );
+
+        // 排完计划之后，维护者才把自己那份拷进卡里——只差大小写。
+        let 维护者那份 = 现场.卡.path().join("GB/Tetris.zip");
+        写(&维护者那份, "这是我自己拷进去的".as_bytes());
+        let 原样 = fs::read(&维护者那份).expect("读得出");
+
+        let outcome = 现场.执行_折(&这趟, &Manifest::empty(), 折叠, &CancelToken::new());
+        assert_eq!(
+            fs::read(&维护者那份).expect("还在"),
+            原样,
+            "{说}：维护者自己那份连一个字节都不许动",
+        );
+        assert!(
+            outcome
+                .failures
+                .iter()
+                .any(|failure| failure.path == "GB/tetris.zip" && failure.act == Act::Add),
+            "{说}：挡下来要记成一条没做成，而不是整趟停住：{:?}",
+            outcome.failures
+        );
+        assert!(
+            !outcome
+                .manifest
+                .files
+                .iter()
+                .any(|file| file.path.eq_ignore_ascii_case("GB/tetris.zip")),
+            "{说}：没写成的不许进清单"
+        );
+        // 上面那条「维护者那份一个字节没动」在**不分大小写**那一档上咬不动：闸真漏了，
+        // 字节会落到真卡（ext4）上另一个 inode 的 `GB/tetris.zip` 里，维护者那份照样
+        // 完好。所以还得断这一条——挡下来就是一个字节都没写。
+        assert!(
+            !现场.卡.path().join("GB/tetris.zip").exists(),
+            "{说}：挡下来就一个字节都不写"
+        );
+    }
+}
+
+#[test]
+fn 不注入时闸在真盘上照样挡得住() {
+    // 上面那四条两档跑的都是**假视图**。真盘那一档不能只剩「盘上没有就放行」
+    // （`塞得进一个假目标_不塞就是真盘` 的后半段）——**挡住**那条路也得有人在真实
+    // 文件系统上钉着，不然接缝一接错，四条假视图测试照样全绿。
     let 现场 = 现场::摆在(建个只差大小写的库());
     let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
-    assert!(
-        这趟
-            .plan
-            .steps
-            .iter()
-            .any(|step| step.act == Act::Add && step.path == "GB/tetris.zip"),
-        "计划这一侧看不见它，本来就该排一条新增"
-    );
-
-    // 排完计划之后，维护者才把自己那份拷进卡里——只差大小写。
     let 维护者那份 = 现场.卡.path().join("GB/Tetris.zip");
     写(&维护者那份, "这是我自己拷进去的".as_bytes());
     let 原样 = fs::read(&维护者那份).expect("读得出");
 
     let outcome = 现场.执行(&这趟, &Manifest::empty(), &CancelToken::new());
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .any(|failure| failure.path == "GB/tetris.zip" && failure.act == Act::Add),
+        "真盘上也得挡下来：{:?}",
+        outcome.failures
+    );
     assert_eq!(
         fs::read(&维护者那份).expect("还在"),
         原样,
         "维护者自己那份连一个字节都不许动",
     );
     assert!(
-        outcome
-            .failures
-            .iter()
-            .any(|failure| failure.path == "GB/tetris.zip" && failure.act == Act::Add),
-        "挡下来要记成一条没做成，而不是整趟停住：{:?}",
-        outcome.failures
-    );
-    assert!(
-        !outcome
-            .manifest
-            .files
-            .iter()
-            .any(|file| file.path.eq_ignore_ascii_case("GB/tetris.zip")),
-        "没写成的不许进清单"
+        !现场.卡.path().join("GB/tetris.zip").exists(),
+        "挡下来就一个字节都不写"
     );
 }
 
@@ -696,43 +836,48 @@ fn 只差大小写的是上一级目录_执行这一层照样挡得住() {
     // 折的是**整条键**，不是最后那一段：计划那一侧拿 `path::fold` 折 `gb/Tetris.zip`
     // 一整条，执行这一侧只折文件名的话，上一级目录换个大小写就从缝里漏过去了——
     // 而卡上那个 `gb` 与我们要建的 `GB` 在不敏感的卡上本来就是同一个目录。
-    let 现场 = 现场::摆在(建个只差大小写的库());
-    let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
+    for 折叠 in 两种折叠语义 {
+        let 说 = 折叠.label();
+        let 现场 = 现场::摆在(建个只差大小写的库());
+        let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
 
-    // 同样是排完计划之后才出现的：目录这一级也只差大小写。
-    //
-    // 卡上顺手再摆一个 `GB/`：大小写敏感的盘上它与 `gb/` 能并存，而 `GB` 排在 `gb`
-    // 前面。一层只跟排在前面那个候选的话，`gb/` 底下挡路的那份就从缝里漏过去了。
-    写(
-        &现场.卡.path().join("GB/别的.txt"),
-        "维护者自己的东西".as_bytes(),
-    );
-    let 维护者那份 = 现场.卡.path().join("gb/Tetris.zip");
-    写(&维护者那份, "这是我自己拷进去的".as_bytes());
-    let 原样 = fs::read(&维护者那份).expect("读得出");
+        // 同样是排完计划之后才出现的：目录这一级也只差大小写。
+        //
+        // 卡上顺手再摆一个 `GB/`：大小写敏感的盘上它与 `gb/` 能并存，而 `GB` 排在 `gb`
+        // 前面。一层只跟排在前面那个候选的话，`gb/` 底下挡路的那份就从缝里漏过去了。
+        // **不分大小写那一档上这两层并成一层**——真卡上本来就装不下两个，于是挡下来
+        // 的理由换了一个（同一个目录里那份逐字就撞上了），可结论得是同一个。
+        写(
+            &现场.卡.path().join("GB/别的.txt"),
+            "维护者自己的东西".as_bytes(),
+        );
+        let 维护者那份 = 现场.卡.path().join("gb/Tetris.zip");
+        写(&维护者那份, "这是我自己拷进去的".as_bytes());
+        let 原样 = fs::read(&维护者那份).expect("读得出");
 
-    let outcome = 现场.执行(&这趟, &Manifest::empty(), &CancelToken::new());
-    assert_eq!(
-        fs::read(&维护者那份).expect("还在"),
-        原样,
-        "维护者自己那份连一个字节都不许动",
-    );
-    assert!(
-        outcome
-            .failures
-            .iter()
-            .any(|failure| failure.path == "GB/tetris.zip" && failure.act == Act::Add),
-        "上一级目录只差大小写也要挡下来：{:?}",
-        outcome.failures
-    );
-    assert!(
-        outcome
-            .failures
-            .iter()
-            .any(|failure| failure.why.contains("Tetris.zip")),
-        "报告要说得出是哪个落点被占着：{:?}",
-        outcome.failures
-    );
+        let outcome = 现场.执行_折(&这趟, &Manifest::empty(), 折叠, &CancelToken::new());
+        assert_eq!(
+            fs::read(&维护者那份).expect("还在"),
+            原样,
+            "{说}：维护者自己那份连一个字节都不许动",
+        );
+        assert!(
+            outcome
+                .failures
+                .iter()
+                .any(|failure| failure.path == "GB/tetris.zip" && failure.act == Act::Add),
+            "{说}：上一级目录只差大小写也要挡下来：{:?}",
+            outcome.failures
+        );
+        assert!(
+            outcome
+                .failures
+                .iter()
+                .any(|failure| failure.why.contains("Tetris.zip")),
+            "{说}：报告要说得出是哪个落点被占着：{:?}",
+            outcome.failures
+        );
+    }
 }
 
 /// 一份主库，`GB` 底下除了那个只差大小写的，还有别的东西。
@@ -746,30 +891,40 @@ fn 建个只差大小写又不止一件的库() -> TempDir {
 #[test]
 fn 落点被占只挡那一条_其余几步照常做完() {
     // 一条挡下来不许拖累整趟：与「单个文件写不进去不中断整趟」同一条纪律。
-    let 现场 = 现场::摆在(建个只差大小写又不止一件的库());
-    let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
-    let 一共 = 这趟.plan.steps.len();
-    assert!(一共 >= 2, "这一趟得有别的步可做：{:?}", 这趟.plan.steps);
+    for 折叠 in 两种折叠语义 {
+        let 说 = 折叠.label();
+        let 现场 = 现场::摆在(建个只差大小写又不止一件的库());
+        let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
+        let 一共 = 这趟.plan.steps.len();
+        assert!(
+            一共 >= 2,
+            "{说}：这一趟得有别的步可做：{:?}",
+            这趟.plan.steps
+        );
 
-    写(
-        &现场.卡.path().join("GB/Tetris.zip"),
-        "这是我自己拷进去的".as_bytes(),
-    );
+        写(
+            &现场.卡.path().join("GB/Tetris.zip"),
+            "这是我自己拷进去的".as_bytes(),
+        );
 
-    let outcome = 现场.执行(&这趟, &Manifest::empty(), &CancelToken::new());
-    assert!(!outcome.interrupted && !outcome.gave_up, "不该整趟停住");
-    assert_eq!(outcome.failures.len(), 1, "{:?}", outcome.failures);
-    assert_eq!(
-        outcome.manifest.files.len(),
-        一共 - 1,
-        "其余几步都该写成、都该进清单：{:?}",
-        outcome.manifest.files
-    );
-    assert_eq!(
-        fs::read(现场.卡.path().join("GB/口袋妖怪.zip")).expect("读得出"),
-        fs::read(现场.库根.join("GB/口袋妖怪.zip")).expect("读得出"),
-        "同一趟里别的那份照常落到卡上",
-    );
+        let outcome = 现场.执行_折(&这趟, &Manifest::empty(), 折叠, &CancelToken::new());
+        assert!(
+            !outcome.interrupted && !outcome.gave_up,
+            "{说}：不该整趟停住"
+        );
+        assert_eq!(outcome.failures.len(), 1, "{说}：{:?}", outcome.failures);
+        assert_eq!(
+            outcome.manifest.files.len(),
+            一共 - 1,
+            "{说}：其余几步都该写成、都该进清单：{:?}",
+            outcome.manifest.files
+        );
+        assert_eq!(
+            fs::read(现场.卡.path().join("GB/口袋妖怪.zip")).expect("读得出"),
+            fs::read(现场.库根.join("GB/口袋妖怪.zip")).expect("读得出"),
+            "{说}：同一趟里别的那份照常落到卡上",
+        );
+    }
 }
 
 /// 一份主库，`GB` 底下摆着 12 份，够把「连着失败就停下来」那个计数顶过去。
@@ -787,32 +942,77 @@ fn 落点被占再多也不算系统性故障_不触发连着失败就停下来(
     // 接着往下试没有意义的那种。落点被占不是那一类：它是**这一个落点**的确定性条件。
     // 而计划里新增是**连在一起**的（`steps` 按 `Act` 排过），一算进那个计数，
     // 维护者往卡里拷十来个只差大小写的文件就能让其余几百步一步都不做。
-    let 现场 = 现场::摆在(建个够多的库());
-    let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
+    for 折叠 in 两种折叠语义 {
+        let 说 = 折叠.label();
+        let 现场 = 现场::摆在(建个够多的库());
+        let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
 
-    // 排完计划之后，前 11 份的落点全被占上——比那个计数多一个。
-    for i in 1..=11 {
-        写(
-            &现场.卡.path().join(format!("GB/G{i:02}.zip")),
-            "这是我自己拷进去的".as_bytes(),
+        // 排完计划之后，前 11 份的落点全被占上——比那个计数多一个。
+        for i in 1..=11 {
+            写(
+                &现场.卡.path().join(format!("GB/G{i:02}.zip")),
+                "这是我自己拷进去的".as_bytes(),
+            );
+        }
+
+        let outcome = 现场.执行_折(&这趟, &Manifest::empty(), 折叠, &CancelToken::new());
+        assert!(!outcome.gave_up, "{说}：落点被占不该被当成系统性故障");
+        assert!(!outcome.interrupted, "{说}：不该整趟停住");
+        assert_eq!(outcome.failures.len(), 11, "{说}：{:?}", outcome.failures);
+        assert!(
+            outcome
+                .failures
+                .iter()
+                .all(|failure| failure.act == Act::Add),
+            "{说}：{:?}",
+            outcome.failures
+        );
+        assert_eq!(
+            fs::read(现场.卡.path().join("GB/g12.zip")).expect("排在最后那一份照样落得下"),
+            fs::read(现场.库根.join("GB/g12.zip")).expect("读得出"),
+            "{说}：排在最后那一份照样落得下",
         );
     }
+}
 
-    let outcome = 现场.执行(&这趟, &Manifest::empty(), &CancelToken::new());
-    assert!(!outcome.gave_up, "落点被占不该被当成系统性故障");
-    assert!(!outcome.interrupted);
-    assert_eq!(outcome.failures.len(), 11, "{:?}", outcome.failures);
+#[test]
+fn 不分大小写的卡上_清单记的是盘上那个目录真名() {
+    // 模块文档八那三句里的**第三句**（`settled`：目录段真名）。上面四条落点占用测试
+    // 的目录段在两档上都是逐字命中，`real_dir` 那条「只差大小写就再问一次文件系统」
+    // 的支一次都没走到——而模块文档**六**点名的那种损失正是它防的：清单记成我们要的
+    // 那个写法，下一趟 `observe` 交出来的却是 `read_dir` 给的真名，工具从第二趟起就
+    // 认不出自己放的那一份，报成「没了」、同时被数进「清单之外」。
+    //
+    // 卡上先有一个 `gb/`（前端或维护者建的，里面躺着存档），主库那边的键写作 `GB/`。
+    // 不分大小写的目标上两者**就是同一个目录**：字节其实落在 `gb/` 里，清单就得记 `gb/`。
+    let 现场 = 现场::摆好();
+    写(&现场.卡.path().join("gb/存档.sav"), &[9u8; 64]);
+    let 这趟 = 现场.排一趟("平台=GB", &Manifest::empty());
+
+    let outcome = 现场.执行_折(
+        &这趟,
+        &Manifest::empty(),
+        Folding::Insensitive,
+        &CancelToken::new(),
+    );
+    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
     assert!(
         outcome
-            .failures
+            .manifest
+            .files
             .iter()
-            .all(|failure| failure.act == Act::Add),
-        "{:?}",
-        outcome.failures
+            .any(|file| file.path == "gb/口袋妖怪.zip"),
+        "清单记的得是盘上那个目录真名（`gb/`），不是我们要的那个写法：{:?}",
+        outcome
+            .manifest
+            .files
+            .iter()
+            .map(|file| &file.path)
+            .collect::<Vec<_>>()
     );
-    assert_eq!(
-        fs::read(现场.卡.path().join("GB/g12.zip")).expect("排在最后那一份照样落得下"),
-        fs::read(现场.库根.join("GB/g12.zip")).expect("读得出"),
+    assert!(
+        现场.卡.path().join("gb/口袋妖怪.zip").is_file(),
+        "字节真的落在 gb/ 里",
     );
 }
 

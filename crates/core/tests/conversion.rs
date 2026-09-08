@@ -161,6 +161,9 @@ impl 现场 {
         let sources = Sources {
             library: &RealFs,
             library_roots: Some(&Roots::single("库", &self.库根)),
+            // 目标那一侧照旧是真盘：这几条验的是转格式，不是落点闸。
+            // 目标那一侧照旧是真盘：这几条验的是转格式，不是落点闸。
+            target: &RealFs,
             target_root: self.卡.path(),
             from_pool: &from_pool,
             generated: &generated,
@@ -540,6 +543,7 @@ fn 默认不缓存_给了目录才落第三份而且第二趟直接命中() {
     let sources = Sources {
         library: &RealFs,
         library_roots: Some(&Roots::single("库", &现场.库根)),
+        target: &RealFs,
         target_root: 卡二.path(),
         from_pool: &from_pool,
         generated: &generated,

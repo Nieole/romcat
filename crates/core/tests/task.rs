@@ -117,6 +117,8 @@ impl 现场 {
         let roots = romcat_core::catalog::Roots::single("库", self.库.path());
         let sources = sync::Sources {
             library,
+            // **目标那一侧照旧是真盘**：这几条测试验的是「按停」，不是落点闸。
+            target: &RealFs,
             library_roots: Some(&roots),
             target_root: &prepared.root,
             from_pool: &prepared.from_pool,

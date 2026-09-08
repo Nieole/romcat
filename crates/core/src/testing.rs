@@ -1,4 +1,4 @@
-//! 测试支持：临时目录。
+//! 测试支持：临时目录、样本字节、目标设备的假视图。
 //!
 //! 只为测试存在，但它是普通模块而不是 `#[cfg(test)]`——集成测试与后续票的测试都要用。
 
@@ -7,6 +7,7 @@ pub mod container;
 pub mod disc;
 pub mod sample;
 pub mod switch;
+pub mod target;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

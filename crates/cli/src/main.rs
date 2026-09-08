@@ -4565,6 +4565,9 @@ fn run_sublibrary_sync(args: &SubSyncArgs, cancel: &CancelToken) -> ExitCode {
     let sources = sync::Sources {
         library: &RealFs,
         library_roots: library_roots.as_ref(),
+        // 真跑一律给真盘：那道可注入的接缝只为测试造得出的那两格而存在
+        // （`sync::execute` 模块文档八）。
+        target: &RealFs,
         target_root: &ready.root,
         from_pool: &ready.from_pool,
         generated: &ready.generated,
