@@ -10,7 +10,6 @@
 //!
 //! 验的是**状态转换**，不是像素（那是 ADR-0005 给这一层定的验收面）。
 
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use romcat_core::task::Ending;
@@ -204,7 +203,7 @@ fn 失败的那一趟在历史里说得出哪一步为什么() {
 ///
 /// 这几条钉的是**收场怎么画**，不是产物里装了什么——拿最不占地方的那一支来占位。
 fn 一份产物() -> Product {
-    Product::Evaluated(Box::new(BTreeMap::new()))
+    Product::Evaluated(Box::default())
 }
 
 /// 跑一帧，交出这一帧真画在屏上的字。

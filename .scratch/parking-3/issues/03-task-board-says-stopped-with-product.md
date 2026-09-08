@@ -116,6 +116,22 @@ pub enum Ending<T> {          // crates/core/src/task.rs
 `crates/gui/src/roots.rs::Screen::settle` 里那两支**拆开**了，撤掉那一趟改说
 「还没轮到就被撤掉了。中立库与那块盘一个字节都没动」。
 
+### 门禁四条（2026-09-08，`-j 6`）
+
+| 门禁 | 结果 |
+|---|---|
+| `cargo fmt --all --check` | **绿** |
+| `cargo clippy --workspace --all-targets --all-features` | **绿**，零告警（先红过一次：新写的测试里 `Box::new(BTreeMap::new())` 撞上 `clippy::box_default`，改成 `Box::default()`） |
+| `cargo test --workspace --all-features` | **绿**，62 个测试目标、**1,639 条**全过 |
+| `cargo doc --workspace --no-deps` | 退出码 0，**68 条**告警——与改动前**一条不多不少**，且没有一条指到本票改过的文件（那 68 条是票 `02` 的活，本票不碰） |
+
+**一处保留**：全量测试头一趟在 `crates/gui/tests/media.rs:248::切换选中那一帧不解码`
+上红过一次（`头一帧花了 1.02007901s`）。那是**负载假红**，不是这张票的事——同一棵树
+安静单跑 `-- --test-threads=1` 当场绿（1.29 秒），第二趟全量跑（62 个目标、1,639 条）
+一条都没红。那条挂钟断言归票 `parking-3/01`，正在飞行中，本票没碰它。
+
 ### 挂单
 
-`Q214`–`Q221` 八条，见 `.scratch/PARKING-LOT.md` 的「## 条目」一节。
+`Q214`–`Q222` 九条，见 `.scratch/PARKING-LOT.md` 的「## 条目」一节。
+末一条 `Q222` 记的是收尾流程本身：`/code-review` 在 worktree 里认错工作区，
+审成了主工作区的上一个提交；我另派两个只读 agent 对着本票的 diff 重跑，两份意见逐条落地。
