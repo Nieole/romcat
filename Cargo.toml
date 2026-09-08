@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/cli", "crates/gui"]
+# `xtask` 不是交付出去的东西，是**门禁跑手**（`cargo xtask gate`）。
+# 放进 workspace 是为了让门禁四条照样盖着它——门禁跑手自己不守门禁是最难查的一类漏。
+members = ["crates/core", "crates/cli", "crates/gui", "xtask"]
+# 不点包名时（`cargo build --release`）只建交付的那三个：`xtask` 是门禁跑手，
+# 不该在 `target/release/` 里落一个不是交付物的二进制——照 `target/release/*` 打包的人会捡走它。
+# 门禁那四条都显式带 `--workspace`，**照样盖着 `xtask`**，这一行不放过它。
+default-members = ["crates/core", "crates/cli", "crates/gui"]
 
 [workspace.package]
 version = "0.1.0"

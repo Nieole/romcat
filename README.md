@@ -94,7 +94,7 @@ romcat-gui --catalog ~/.romcat/catalog/主库-xxxx.sqlite3
 
 ## 现在到哪一步了
 
-**59/63 张票落地**（四条队列合计）。余下四张：三张是 Windows 真机验证（`ready-for-human`，需要人在 Windows 上跑），一张还没接（`ready-for-agent`）。**1,581 条测试全绿。**
+**59/63 张票落地**（四条队列合计）。余下四张：三张是 Windows 真机验证（`ready-for-human`，需要人在 Windows 上跑），一张还没接（`ready-for-agent`）。**1,635 条测试全绿**（`cargo xtask gate` 实测；**这个数会随票涨，以门禁自己的输出为准**，别拿这里当基线）。
 
 真库实测（`docs/library-facts.md` 记着全部数字与日期）：
 
@@ -115,6 +115,7 @@ romcat-gui --catalog ~/.romcat/catalog/主库-xxxx.sqlite3
 crates/core/   romcat-core   领域逻辑全在这儿：扫描、成型、识别、刮削、适配器、子库
 crates/cli/    romcat        命令行
 crates/gui/    romcat-gui    窗口壳。只画和转发，一条领域逻辑都不许长在这里
+xtask/         门禁跑手      `cargo xtask gate` 那四条的唯一定义。不交付、不被上面三个依赖
 docs/adr/      22 份架构决策记录
 docs/          library-facts.md（真库实测台账）、platforms.md、research/
 CONTEXT.md     词表。动手前先读它，输出用它的词
@@ -143,11 +144,45 @@ CONTEXT.md     词表。动手前先读它，输出用它的词
 ## 开发
 
 ```bash
-cargo fmt --all --check                                   # 排版归机器管
-cargo clippy --workspace --all-targets --all-features     # 零警告
-cargo test --workspace --all-features                     # 1,581 条
-cargo doc --workspace --no-deps
+cargo xtask gate          # 门禁四条：排版、clippy、全量测试、文档
 ```
+
+**门禁只有这一句。** 四条命令的定义在 `xtask/src/gate.rs` 里写一遍，本地与 GitHub Actions
+（`.github/workflows/gate.yml`）调的是同一句话——不会出现「我这儿绿的、CI 红的」这种
+只能靠猜的分歧。想知道它到底跑哪四条，**问它自己**，别去翻文档：
+
+```bash
+cargo xtask gate --list
+```
+
+默认在**第一处红上就停**：`fmt` 排在最前，两秒出结果，「忘了跑 `cargo fmt --all`」这种
+最常见的红不该罚你一整趟冷编译。要一趟看全四条给 `--keep-going`（CI 上就是这么调的）。
+
+**内存吃紧就退回限流那一档。** 一台 15 GB 的开发机上按满并发跑全量测试会被 OOM 杀掉：
+
+```bash
+cargo xtask gate --throttle              # = -j 1、--test-threads=2
+cargo xtask gate -j 4 --test-threads 4   # 两个开关各自也调得动
+```
+
+两个开关**各管一段**，少一个都不成立：`-j` 管编译期同时活着的 `rustc`（峰值内存的大头），
+`--test-threads` 管跑起来之后同时活着的测试线程。不给这些开关就按机器给的资源跑；
+**CI 上一个都不给**——runner 没有这个约束，限流只会让它白白慢上几倍。
+
+### 工具链钉住了
+
+`rust-toolchain.toml` 钉的是 **`1.98.1`**（`rustfmt 1.9.0-stable`）。`rustfmt.toml` 钉的是
+**风格**，钉不住**实现**——同一份配置换一版 rustfmt 产出就可能变，于是换一台机器提交，
+`cargo fmt --all` 会顺手重排一大片与你这件事无关的代码，而门禁第一条在那台机器上照样是绿的。
+
+**副作用先说清楚：** rustup 从此在这个目录下只认这一版，机器上没有它时，第一次进目录
+跑任何 cargo 命令都会**触发一次下载**（要联网）。这是拿「每台机器多下一次」换
+「谁提交都不会多出一片重排」。
+
+**它与 `Cargo.toml` 的 `rust-version = "1.95"` 并存、互不替代**，两个数不同不是矛盾：
+前者是给 cargo 解析器的 **MSRV 声明**（下界，管「多老的 rustc 也编得动」，钉不住任何一版），
+后者是给 rustup 的**指定**（定值，管「产出逐字节一致」）。**门禁跑 1.98.1，而这套代码
+声明自己 1.95 就编得动。** 逐条理由写在 `rust-toolchain.toml` 里。
 
 ### 排版归机器管
 
@@ -169,7 +204,7 @@ cargo doc --workspace --no-deps
 
 `romcat-gui` 有一个默认关掉的 **`demo` feature**：合成数据、`--demo`、以及 `--bench*` 那几条实测开关全在它后面。**关掉之后它们一个字节都不进交付出去的二进制**——假数据与真库在界面上长得一模一样，看见一屏假名字的第一反应会是「我的库怎么了」，那比起不来更坏。
 
-代价是：**不带 `--all-features` 跑测试，会少跑 101 条**（1,480 而不是 1,581）——其中 7 个测试文件（`browse` / `close` / `layout` / `media` / `queue` / `table` / `task`）整份都不编译，剩下的散在别的文件里被 `cfg` 掐掉。**少跑不报错**，退出码照样是 0，所以命令得记牢。
+代价是：**不带 `--all-features` 跑测试，会少跑 105 条**（1,530 而不是 1,635，两边同一口径实测：`cargo test --workspace [--all-features] -- --list`）——其中 7 个测试文件（`browse` / `close` / `layout` / `media` / `queue` / `table` / `task`）整份都不编译，剩下的散在别的文件里被 `cfg` 掐掉。**少跑不报错**，退出码照样是 0——所以这条开关不该靠人记牢，它写在 `cargo xtask gate` 里。
 
 ```bash
 # 跑实测（那几条都不开窗，没显示器也跑得起来）

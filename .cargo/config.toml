@@ -1,0 +1,7 @@
+# **`cargo xtask` 这条别名。** 门禁四条的唯一定义在 `xtask/src/gate.rs` 里，
+# 这里只是让它有一个跟 `cargo` 一样顺手的叫法：`cargo xtask gate`。
+#
+# `--quiet` 是为了让 xtask 自己那几行「Compiling / Finished」不要盖住门禁的输出——
+# 门禁跑手编译到没编译到不是要看的东西，四条绿没绿才是。
+[alias]
+xtask = "run --quiet --package xtask --"
