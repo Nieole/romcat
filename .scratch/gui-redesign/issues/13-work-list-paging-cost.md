@@ -240,3 +240,29 @@
 - **谁来裁：** 收尾
 - **状态：** open
 - **收尾裁决（第二轮）：** **noted** —— 核对过、不用改，留作记录。
+
+---
+
+## 挂单裁决（第三轮）
+
+从 `.scratch/PARKING-LOT.md` 第三轮收口迁来。**本票的验收正文一个字没动。**
+
+### Q156 — `--bench-browse` 与那七个界面测试还在二十个作品上
+
+- **条目正文在** `.scratch/PARKING-LOT.md` 第三轮收口的已收索引表（去处：票 `parking-3/17`）。
+- **收尾裁决（第三轮）：settled** —— 由票 `parking-3/17` 落地。
+  本票当初为 `--bench-paging` 立的那条「按形状造」的路子（`demo::browse_shaped`，
+  作品数由调用方给）推广到了 `--bench-browse` 与七份界面测试：
+  - **真库那个形状收成一组常量**：`demo::BROWSE_VARIANTS`（46,428）、
+    `demo::BROWSE_WORKS`（7,407）、`demo::BROWSE_LINES`（10,978）。本票留在
+    `crates/gui/src/main.rs` 的 `PAGING_ROWS` / `PAGING_WORKS` 搬了过去，
+    `browse.rs` / `layout.rs` 里各写一遍的 46,483 也改成引这一组。
+  - **`demo::browse` 不再写死二十个作品**：它按 `demo::works_for` 折——给多少条就按
+    真库的比例造多少个作品，于是几百行的那些测试跑的也是真库那个形状。
+    46,428 个变体现在收出 **10,978 行**（从前是 3,596 行）。
+  - **`--bench-works` 从写死的默认值改成 `Option`**：不给就按比例折。本票文档里
+    「两个数是一对，动一个就得动另一个」那条手工规矩，现在是代码自己接住的；
+    `--bench-paging` 不带参数时量的还是同一份数据（46,428 → 7,407 → 10,978）。
+- **本票那张翻页对照表照旧可比**：默认那两个数一个字没变。
+- **钉着它的测试：** `crates/gui/tests/browse.rs::真库量级上主列表收出真库那么多行`
+  ——`demo::BROWSE_VARIANTS` 个变体收敛成 `demo::BROWSE_LINES` 行，一行不差。

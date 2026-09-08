@@ -22,6 +22,16 @@ fn 工作目录() -> std::path::PathBuf {
     std::env::temp_dir().join("romcat-测试-表格")
 }
 
+/// **变体表那条线的量级**（票 22）：一行一个变体，与收敛成多少行无关。
+///
+/// 浏览屏那几条量的是**作品级主列表**，它们照真库的形状造（`demo::BROWSE_VARIANTS`
+/// 收敛成 `demo::BROWSE_LINES` 行）；这一份不是——`demo::synthetic` 一个作品都不造，
+/// 十万个变体在主列表上就是十万行，那正是这三条要撑住的最坏情况。
+const 十万行: u64 = 100_000;
+
+/// 拿来做对照的小库：**同一趟滚动，库大一百倍，内存里的行数该一个不差**。
+const 小库: u64 = 1_000;
+
 fn 界面(rows: u64) -> App {
     let site = demo::site(demo::synthetic(rows).expect("造得出合成数据")).expect("开得出现场");
     let mut app = App::new(site, 工作目录());
@@ -32,9 +42,9 @@ fn 界面(rows: u64) -> App {
 
 #[test]
 fn 滚完十万行内存里也只有一扇窗() {
-    let mut app = 界面(100_000);
+    let mut app = 界面(十万行);
     let cost = bench::scroll(&mut app, 240, Sweep::Whole);
-    assert_eq!(app.window().total(), 100_000);
+    assert_eq!(app.window().total(), 十万行);
     assert!(
         app.window().retained() as u64 <= SPAN,
         "内存里 {} 行，超过一扇窗（{SPAN} 行）",
@@ -46,13 +56,13 @@ fn 滚完十万行内存里也只有一扇窗() {
 
 #[test]
 fn 内存里的行数与总行数无关() {
-    let mut 小 = 界面(1_000);
-    let mut 大 = 界面(100_000);
+    let mut 小 = 界面(小库);
+    let mut 大 = 界面(十万行);
     for app in [&mut 小, &mut 大] {
         let _ = bench::scroll(app, 60, Sweep::Rows(3.0));
     }
-    assert_eq!(小.window().total(), 1_000);
-    assert_eq!(大.window().total(), 100_000);
+    assert_eq!(小.window().total(), 小库);
+    assert_eq!(大.window().total(), 十万行);
     assert_eq!(
         小.window().retained(),
         大.window().retained(),
@@ -62,7 +72,7 @@ fn 内存里的行数与总行数无关() {
 
 #[test]
 fn 常态滚动不是每帧都读库() {
-    let mut app = 界面(100_000);
+    let mut app = 界面(十万行);
     let cost = bench::scroll(&mut app, 240, Sweep::Rows(3.0));
     // 240 帧每帧 3 行 = 720 行，一扇窗 512 行，最多跨两次。
     assert!(
@@ -74,8 +84,8 @@ fn 常态滚动不是每帧都读库() {
 
 #[test]
 fn 每帧代价与总行数无关() {
-    let mut 小 = 界面(1_000);
-    let mut 大 = 界面(100_000);
+    let mut 小 = 界面(小库);
+    let mut 大 = 界面(十万行);
     let 小的 = bench::scroll(&mut 小, 120, Sweep::Rows(3.0));
     let 大的 = bench::scroll(&mut 大, 120, Sweep::Rows(3.0));
     assert!(小的.median_ms > 0.0 && 大的.median_ms > 0.0, "没量到时间");

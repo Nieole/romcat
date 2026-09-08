@@ -20,11 +20,17 @@ use romcat_gui::{demo, headless, look};
 mod shared;
 use shared::画出来的字;
 
-/// 合成数据的规模。真库是 46,483 个变体（`docs/library-facts.md`），照它来。
-const ROWS: u64 = 46_483;
+/// 浏览那一屏的规模。**照真库的形状来**：`demo::BROWSE_VARIANTS` 个变体收敛成
+/// `demo::BROWSE_LINES` 行主列表（`docs/library-facts.md`）。
+///
+/// 版式那几条量的是面板宽窄与屏上摆得下几行，而**屏上摆的是主列表那一行**——
+/// 从前这儿的变体数对了、作品数却是写死的二十个，收出来只有 3,596 行（挂单 `Q156`）。
+const ROWS: u64 = demo::BROWSE_VARIANTS;
 
 /// 待确认那一屏的规模。真机上一万八千多条（票 08 实测 16,656）。
-const QUEUE_ROWS: u64 = 16_656;
+///
+/// **引合成数据自己那一份，不再另写一遍**：同一个数写两处，改一处就悄悄分了岔。
+const QUEUE_ROWS: u64 = demo::QUEUE_ROWS;
 
 /// 这一趟测试自己的**工作目录**。
 ///
