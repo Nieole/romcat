@@ -376,11 +376,18 @@ fn 界面上按停一趟扫描_任务台与库屏都说它被按停了_不说跑
 
     let history = 现场.app.tasks().history();
     assert_eq!(history.len(), 1, "任务台上该正好留下这一趟");
-    assert_eq!(
-        history[0].ending,
-        Ending::Stopped,
-        "任务屏历史把按停记成了「{}」——那句「跑了 X 秒」于是成了骗人的话",
-        history[0].ending.render(),
+    // **它走的是「停在半路」那一档**：断点与那半份体检报告都留下了，不是「什么都没留下」。
+    let Ending::Halfway { left_behind, .. } = &history[0].ending else {
+        panic!(
+            "任务屏历史把按停记成了「{}」——那句「跑了 X 秒」于是成了骗人的话",
+            history[0].ending.render(),
+        );
+    };
+    // **断到那半句上**：只断「断点」两个字的话，「这一趟没设断点」那一支照样绿，
+    // 而界面这条路是**设了**断点的（`Screen::scan` 里那份 `CheckpointOptions`）。
+    assert!(
+        left_behind.contains("断点写下了"),
+        "说不出留下了断点：{left_behind}",
     );
 
     let 话 = 现场.app.roots().notice().expect("库屏该说一句");

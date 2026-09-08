@@ -14,7 +14,11 @@ use std::time::Duration;
 
 use romcat_core::task::Ending;
 use romcat_gui::app::{App, View};
+use romcat_gui::task::Product;
 use romcat_gui::{demo, headless};
+
+mod shared;
+use shared::画出来的字;
 
 /// 这几条测试自己的**工作目录**。
 ///
@@ -192,5 +196,67 @@ fn 失败的那一趟在历史里说得出哪一步为什么() {
         record.ending.render().contains("看一眼目标"),
         "画出来的那句话没说是哪一步：{}",
         record.ending.render(),
+    );
+}
+
+/// 一份**空**的容量账，当那种「有产物」的活的产物用。
+///
+/// 这几条钉的是**收场怎么画**，不是产物里装了什么——拿最不占地方的那一支来占位。
+fn 一份产物() -> Product {
+    Product::Evaluated(Box::default())
+}
+
+/// 跑一帧，交出这一帧真画在屏上的字。
+fn 一帧的字(ctx: &egui::Context, app: &mut App) -> String {
+    画出来的字(&headless::frame(ctx, headless::input(), |ui| app.ui(ui)))
+}
+
+#[test]
+fn 四种收场在任务屏历史里各画各的话() {
+    // 一条轴四档：**完成 / 按停了 / 停在半路 / 失败**。谁都不许长得跟谁一样——
+    // 撞脸的那两档里，那句「跑了 X 秒」就成了骗人的话。
+    let ctx = headless::context();
+    let mut app = 开一个();
+    app.show_view(View::Tasks);
+
+    app.tasks_mut().queue("算一遍容量", |_| Ok(一份产物()));
+    // 整条只读的活被按停：什么都没留下，可以当没跑过。
+    app.tasks_mut().queue("排差量预览 · 掌机", |task| {
+        task.stop();
+        task.step("读选择集")?;
+        Ok(一份产物())
+    });
+    // 写过东西的活被按停：产物照旧交出来，且明说它是半截的。
+    app.tasks_mut().queue("同步 · 掌机", |task| {
+        task.steps(3);
+        task.step("新增 SFC/幻想传说 汉化版.zip")?;
+        task.stop();
+        task.halfway("按停时落了 1 件，清单记着到这儿为止目标上真实有什么");
+        Ok(一份产物())
+    });
+    app.tasks_mut().queue("扫描 · 主库", |task| {
+        task.steps(3);
+        task.step("认根")?;
+        Err("卡不在位".to_string())
+    });
+    画到台上空了(&ctx, &mut app);
+
+    let 屏上 = 一帧的字(&ctx, &mut app);
+    for 那一句 in [
+        "完成",
+        "按停了",
+        "停在半路：按停时落了 1 件，清单记着到这儿为止目标上真实有什么",
+        "在「认根」这一步失败：卡不在位",
+    ] {
+        assert!(
+            屏上.lines().any(|line| line.trim() == 那一句),
+            "屏上没有这一行「{那一句}」：\n{屏上}",
+        );
+    }
+    // **「停在半路」不是「完成」的一种写法**：那一行说得出留下了什么。
+    assert_eq!(
+        屏上.lines().filter(|line| line.trim() == "完成").count(),
+        1,
+        "四趟活里只有一趟是真跑完的：\n{屏上}",
     );
 }

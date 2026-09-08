@@ -44,7 +44,7 @@ use romcat_core::scrape::estimate::{self, Estimate};
 use romcat_core::scrape::online::{self, Credentials, Limits, Net};
 use romcat_core::scrape::{self, Field, Gather, Options, Profile};
 use romcat_core::site::Site;
-use romcat_core::task::{Done, Finished, Handle};
+use romcat_core::task::{Ending, Finished, Handle};
 use romcat_core::{verdict, workspace, zh};
 
 use crate::task::{Product, Tasks};
@@ -427,15 +427,19 @@ impl Panel {
         // 跑完一趟，采集记录变了，那本账跟着作废——重算一遍，屏上那个数才对得上。
         self.counted = None;
         match &done.ended {
-            Done::Product(Product::Scraped(outcome)) => {
+            Ending::Done(Product::Scraped(outcome))
+            | Ending::Halfway {
+                product: Product::Scraped(outcome),
+                ..
+            } => {
                 self.notice = Some(finished(outcome));
                 self.error = None;
             }
             // 别的屏排上去的活轮不到这儿——`running` 那道判断已经挡掉了。
-            Done::Product(_) => {}
+            Ending::Done(_) | Ending::Halfway { .. } => {}
             // **停下来的地方是干净的，就得这么说。** 采完的那部分留在中立库里，
             // 再排一次从那儿接着采。
-            Done::Stopped => {
+            Ending::Stopped => {
                 self.notice = Some(
                     "刮削按停了。已经采到的那些留在中立库里，再排一次接着采——\
                      不重做已经采完的部分。"
@@ -443,7 +447,7 @@ impl Panel {
                 );
             }
             // **不静默结束**：哪一步、为什么，两样都说出来。
-            Done::Failed { step, why } => {
+            Ending::Failed { step, why } => {
                 self.error = Some(if step.is_empty() {
                     why.clone()
                 } else {

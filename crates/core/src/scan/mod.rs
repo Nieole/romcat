@@ -330,6 +330,12 @@ pub struct ResumeDeclined {
 /// （断点已经写下，续跑接着来）。命令行把 Ctrl-C 接在它的
 /// [`CancelToken`](crate::task::Handle::cancel) 上，界面把「停下」按钮接在它上面。
 ///
+/// **被叫停时不抛错**：那份「到目前为止」的体检报告与那个断点都得留下来
+/// （ADR-0015），所以照旧返回 `Ok`，只把 [`ScanOutcome::interrupted`] 记上。
+/// 它长得跟跑完的那一趟一模一样，于是这一层还会往把手上报一句**停在半路**
+/// （[`Handle::halfway`](crate::task::Handle::halfway)）：任务台照它把这一趟记成
+/// [`Ending::Halfway`](crate::task::Ending::Halfway)，历史里那一行才不会写成「完成」。
+///
 /// # Errors
 /// 扫描根打不开、这个根加不进来、断点落在主库内、断点读写失败或中立库读写失败时
 /// 返回错误。
@@ -532,6 +538,19 @@ pub fn scan(
     }
     let checkpoint_path =
         finish_checkpoint(options, &root, &queue, start.scan, &traversal, interrupted)?;
+    if interrupted {
+        // **停在半路**：这一趟照旧返回，可它只走了一半——说出口，任务台才记得对
+        // （[`Handle::halfway`]）。扫描留下的续跑依据是**断点**（同步那一侧是清单）。
+        task.halfway(format!(
+            "按停时走过 {} 个条目{}",
+            crate::report::thousands(progress.delta.total()),
+            if checkpoint_path.is_some() {
+                "，断点写下了"
+            } else {
+                "，这一趟没设断点"
+            },
+        ));
+    }
 
     let aggregate = catalog.aggregate(&options.limits, &options.manifest)?;
     let meta = ReportMeta {

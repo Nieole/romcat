@@ -986,7 +986,7 @@ fn 排差量预览进任务队列跑完之后留一条带耗时的历史() {
         "历史那条说不清是给哪个子库排的：{}",
         history[0].name,
     );
-    assert_eq!(history[0].ending, Ending::Done);
+    assert_eq!(history[0].ending, Ending::Done(()));
 }
 
 #[test]
@@ -1186,7 +1186,7 @@ fn 同步进任务台跑完之后留一条带耗时的历史而且清单写在�
         "历史那条说不清是给哪个子库同步的：{}",
         history[0].name,
     );
-    assert_eq!(history[0].ending, Ending::Done);
+    assert_eq!(history[0].ending, Ending::Done(()));
     assert!(history[0].elapsed > Duration::ZERO, "历史那条没带耗时");
 
     // **清单落回了中立库**，而且是在认领那一步落的——下一趟增量才接得上。
@@ -1386,7 +1386,7 @@ fn 算一遍容量进任务台跑完之后留一条带耗时的历史() {
         "历史那条说不清跑的是什么：{}",
         history[0].name,
     );
-    assert_eq!(history[0].ending, Ending::Done);
+    assert_eq!(history[0].ending, Ending::Done(()));
     assert!(history[0].elapsed > Duration::ZERO, "历史那条没带耗时");
 }
 
@@ -1511,5 +1511,76 @@ fn 删掉一个子库之后台上那趟还没认领的容量不认了() {
     assert!(
         场.app.sublibrary().evaluated("掌机").is_none(),
         "删掉的那一台，它的账又长回来了",
+    );
+}
+
+#[test]
+fn 按停一趟同步之后子库屏与任务屏说的是同一件事() {
+    // **挂单 Q153**：写过东西的活被按停时照旧交出**清单**（ADR-0015），于是它以前
+    // 长着「跑完了」的样子进任务台——子库屏如实说「⚠️ 这一趟被你按停了」，任务屏历史
+    // 那一行却写着「完成」。同一趟活在两屏上说两套话，维护者只能两屏比对才敢下结论。
+    //
+    // 界面上那一下就是这样：按「同步」把活排上台（`Board::queue` 当场开跑），
+    // 人紧接着在任务屏上按「停下」。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+    {
+        let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
+        screen.sync(site, tasks);
+    }
+    let 号 = 场.app.sublibrary().syncing().expect("这一趟排上任务台了");
+    // **按下停下与那一趟真的开跑之间隔着好几个数量级**：这两行是已经热了的几百纳秒，
+    // 而对面那条线程要先被 `thread::spawn` 生出来、排上 CPU，然后才走得到第一步
+    // ——它整趟传完是十几毫秒的事。所以这一下**不靠抢**：它落在第一步之前。
+    //
+    // **这儿用不了 `占住位子` 那一招**（撤单那条测试用的是它）：占住位子之后这一趟
+    // 就排在队里，而撤掉一趟**还没开跑**的活是「停了，什么都没留下」那一档
+    // ——正好不是这条测试要验的那一档。
+    场.app.tasks_mut().stop(号);
+    场.等任务跑完();
+
+    // 核心那一侧：这一趟走的是**第三支**，不是「跑完了」。
+    let ending = &场.app.tasks().history()[0].ending;
+    assert!(
+        matches!(ending, Ending::Halfway { .. }),
+        "被按停却交出了清单的那一趟记成了「{}」\n\
+         （记成「完成」的话：这一趟抢在按下停下之前就整趟传完了——\
+         那是机器满载时的偶发，不是实现坏了）",
+        ending.render(),
+    );
+
+    // 子库屏那句回执。
+    场.app.show_view(View::Sublibraries);
+    let 子库屏 = 画两帧(&ctx, &mut 场);
+    assert!(
+        子库屏.contains("按停"),
+        "子库屏那句回执没说这一趟是被按停的：\n{子库屏}",
+    );
+
+    // 任务屏历史那一行——**同一件事，同一个词**。
+    场.app.show_view(View::Tasks);
+    let 任务屏 = 画两帧(&ctx, &mut 场);
+    assert!(
+        任务屏.contains("按停"),
+        "任务屏历史那一行没说这一趟是被按停的：\n{任务屏}",
+    );
+    // 历史那一行是「名字、耗时、怎么收场」三格，所以这一趟的收场就在它名字下面两行。
+    // **盯住这一趟自己那一行**：台上还有排差量预览那一趟，它是真跑完的，
+    // 屏上本来就该有一个「完成」。
+    let 这一趟的收场 = 任务屏
+        .lines()
+        .skip_while(|line| line.trim() != "同步「掌机」")
+        .nth(2)
+        .expect("任务屏历史里没有这一趟");
+    assert!(
+        这一趟的收场.contains("停在半路"),
+        "任务屏历史那一行没说它留下了东西：{这一趟的收场}",
+    );
+    assert!(
+        !这一趟的收场.contains("完成"),
+        "任务屏历史把被按停的那一趟记成了「完成」：{这一趟的收场}",
     );
 }

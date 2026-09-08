@@ -76,7 +76,7 @@ use romcat_core::sublibrary::{
     BrokenRule, ExceptionRow, Gauge, LoadedSelection, Rule, StoredRule, Sublibrary, Trim, rule,
 };
 use romcat_core::sync::{self, Act, Outcome, Prepared};
-use romcat_core::task::{Done, Finished, Handle};
+use romcat_core::task::{Ending, Finished, Handle};
 
 use crate::table::ROW_HEIGHT;
 use crate::task::{Product, Tasks};
@@ -619,18 +619,24 @@ impl Screen {
     /// 排差量预览那一趟回来了。
     fn settle_preview(&mut self, done: Finished<Product>) {
         match done.ended {
-            Done::Product(Product::Preview(prepared)) => {
-                // **只有真排出来那一趟才记耗时。** 被停下、出错的那趟什么都没排出来，
+            Ending::Done(Product::Preview(prepared))
+            | Ending::Halfway {
+                product: Product::Preview(prepared),
+                ..
+            } => {
+                // **只有真排出来那一趟才记耗时。** 被撤掉、出错的那趟什么都没排出来，
                 // 摆一个「排它用了 120 ms」在旁边等于给一份不存在的差量记账。
+                // （**停在半路**那一档它到不了：排差量整条只读，停下来什么都不留下。
+                // 并进这一支只为把那条轴配全。）
                 self.prepare_ms = done.elapsed.as_secs_f64() * 1000.0;
                 self.prepared = Some(*prepared);
                 self.error = None;
             }
             // 别的屏排上去的活轮不到这儿——`previewing` 那道判断已经挡掉了，
             // 这一支只为把 `Product` 那个枚举配全。
-            Done::Product(_) => {}
+            Ending::Done(_) | Ending::Halfway { .. } => {}
             // **停下来的地方是干净的，就得这么说。** 说成「失败」会让人去找哪儿坏了。
-            Done::Stopped => {
+            Ending::Stopped => {
                 self.notice = Some(
                     "排差量预览按停了。这一趟整条只读——中立库、媒体池、目标设备\
                      一个字节都没动，再排一次就是。"
@@ -639,7 +645,7 @@ impl Screen {
                 self.failed = false;
             }
             // **不静默结束**：哪一步、为什么，两样都说出来。
-            Done::Failed { step, why } => {
+            Ending::Failed { step, why } => {
                 self.error = Some(if step.is_empty() {
                     why
                 } else {
@@ -652,14 +658,18 @@ impl Screen {
     /// 算一遍容量那一趟回来了。
     fn settle_evaluate(&mut self, done: Finished<Product>) {
         match done.ended {
-            Done::Product(Product::Evaluated(reports)) => {
+            Ending::Done(Product::Evaluated(reports))
+            | Ending::Halfway {
+                product: Product::Evaluated(reports),
+                ..
+            } => {
                 self.evaluated = *reports;
                 self.error = None;
             }
-            Done::Product(_) => {}
+            Ending::Done(_) | Ending::Halfway { .. } => {}
             // **停下来的地方是干净的，就得这么说。** 上一趟算出来的那几个数照旧摆着
             // ——它们没有因为这一趟被停而变得不对。
-            Done::Stopped => {
+            Ending::Stopped => {
                 self.notice = Some(
                     "算容量按停了。这一趟整条只读——中立库、主库、目标设备一个字节都没动，\
                      再算一次就是。"
@@ -667,7 +677,7 @@ impl Screen {
                 );
                 self.failed = false;
             }
-            Done::Failed { step, why } => {
+            Ending::Failed { step, why } => {
                 self.error = Some(if step.is_empty() {
                     why
                 } else {
@@ -685,7 +695,15 @@ impl Screen {
     fn settle_sync(&mut self, site: &mut Site, done: Finished<Product>) {
         let elapsed = done.elapsed.as_secs_f64();
         match done.ended {
-            Done::Product(Product::Synced(outcome)) => {
+            // **跑完的那一趟与「停在半路」那一趟走同一条**：后者交出来的清单同样是真的
+            // ——它记着「到中断为止目标上真实有什么」，不落库下一趟就接不上（ADR-0015）。
+            // 回执里那句「⚠️ 这一趟被你按停了」由 `sync_notice` 照 `interrupted` 印，
+            // 与任务屏历史那一行说的是同一件事。
+            Ending::Done(Product::Synced(outcome))
+            | Ending::Halfway {
+                product: Product::Synced(outcome),
+                ..
+            } => {
                 if let Err(error) = site
                     .catalog
                     .put_manifest(&outcome.sublibrary, &outcome.manifest)
@@ -714,11 +732,12 @@ impl Screen {
                 }
                 self.outcome = Some(*outcome);
             }
-            Done::Product(_) => {}
+            Ending::Done(_) | Ending::Halfway { .. } => {}
             // **走到这儿的只有「还排着队就被撤掉」那一种**：真跑起来的那一趟被按停时
-            // 照旧交出产物（[`Product::Synced`] 的文档），因为那份清单非落库不可。
-            // 于是这一句敢说「一个字节都没动」——它说的正是那一种。
-            Done::Stopped => {
+            // 照旧交出产物（[`Product::Synced`] 的文档），走的是上面那一支
+            // ——那是「停了，留下了产物」，这一支是「停了，什么都没留下」。
+            // 于是这一句敢说「一个字节都没动」。
+            Ending::Stopped => {
                 self.notice = Some(
                     "同步还没轮到就被撤掉了。目标设备上一个字节都没动，那份差量还摆着，\
                      再按一次同步就是。"
@@ -726,7 +745,7 @@ impl Screen {
                 );
                 self.failed = false;
             }
-            Done::Failed { step, why } => {
+            Ending::Failed { step, why } => {
                 self.error = Some(if step.is_empty() {
                     why
                 } else {

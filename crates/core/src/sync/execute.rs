@@ -268,6 +268,10 @@ pub struct Sources<'a> {
 /// 而是记一笔 [`Outcome::interrupted`] 照常返回——**与扫描同一条**（`scan::scan` 那几处
 /// `let _ = task.step(…)` 也是这个道理：写过东西的活得留下续跑的依据才停得干净）。
 ///
+/// 交出去的产物长得跟「跑完了」那一份一模一样，所以这一层被叫停时还会往把手上报一句
+/// **停在半路**（[`Handle::halfway`]）：任务台照它把这一趟记成
+/// [`Ending::Halfway`](crate::task::Ending::Halfway)，历史里那一行才不会写成「完成」。
+///
 /// 不想要把手的调用方给一个 [`Handle::new`](crate::task::Handle::new) 就行。
 ///
 /// # Errors
@@ -408,7 +412,30 @@ pub fn run(
     out.manifest = manifest;
     out.dropped = dropped;
     out.withheld = withheld;
+    if out.interrupted {
+        // **停在半路**：这一趟照旧交出产物，可它只走了一半——说出口，任务台才
+        // 记得对（`Handle::halfway`）。不说的话那份清单会被当成「跑完了」的那一份，
+        // 历史里写「完成」，而子库屏同时说「⚠️ 这一趟被你按停了」。
+        task.halfway(left_behind(out.touched()));
+    }
     Ok(out)
+}
+
+/// 一趟**停在半路**的同步留下了什么，一句话。任务屏历史那一行画的就是它。
+///
+/// **「为什么收的手」也在这句话里**：`Ending::Halfway` 那一层不替长入口写死它
+/// （[`Handle::halfway`]），而这条路上收手的理由只有一个——人按了停下。
+///
+/// 清单永远在——它非落库不可（ADR-0015），所以哪怕一件都没落也得说清这一点：
+/// 「什么都没留下」是另一档，那一档可以当没跑过。
+fn left_behind(touched: u64) -> String {
+    if touched == 0 {
+        return "按停时一件都没落，只重折了那份清单".to_string();
+    }
+    format!(
+        "按停时落了 {} 件，清单记着到这儿为止目标上真实有什么",
+        crate::report::thousands(touched)
+    )
 }
 
 /// 删掉目标上的一份文件。

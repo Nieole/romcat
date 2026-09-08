@@ -16,15 +16,17 @@
 //! 目标设备**一律拿本地临时目录模拟**：绝不去动任何真实设备或 SD 卡。
 
 use std::fs;
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 
 use romcat_core::catalog::{Catalog, CatalogError};
-use romcat_core::fs::RealFs;
+use romcat_core::fs::{DirEntry, LibraryFs, ReadSeek, RealFs};
 use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::sublibrary::{Rule, Sublibrary};
 use romcat_core::sync;
-use romcat_core::task::Handle;
+use romcat_core::task::{Board, Ending, Handle};
 use romcat_core::testing::sample::zip;
 use romcat_core::testing::{TempDir, temp_dir};
 
@@ -102,9 +104,19 @@ impl 现场 {
         prepared: &sync::Prepared,
         task: &Handle,
     ) -> std::io::Result<sync::Outcome> {
+        self.同步一次看着(prepared, task, &RealFs)
+    }
+
+    /// 同上，只是主库那一侧的**只读视图**由调用方给——`读到第几个就按停` 走这条。
+    fn 同步一次看着(
+        &self,
+        prepared: &sync::Prepared,
+        task: &Handle,
+        library: &dyn LibraryFs,
+    ) -> std::io::Result<sync::Outcome> {
         let roots = romcat_core::catalog::Roots::single("库", self.库.path());
         let sources = sync::Sources {
-            library: &RealFs,
+            library,
             library_roots: Some(&roots),
             target_root: &prepared.root,
             from_pool: &prepared.from_pool,
@@ -386,5 +398,192 @@ fn 已经按了停下就不在目标设备上建目标根() {
     assert_eq!(
         outcome.placement, None,
         "一步都不做，就不该为了探测去碰那张卡"
+    );
+}
+
+/// 把一趟活丢上**任务台**跑完，交出它的收场。
+///
+/// **断的是任务台真正记下的那一支**（[`Ending`]），不是长入口往把手上报的那个侧信道
+/// ——后者是实现细节，这几条测试要证的是「这一趟在台上被记成了哪一档」。
+/// 走 `run_here` 而不是 `queue`：就地跑就是当场跑完，不必等，也不必把库交给别的线程。
+fn 上台跑一趟<T: Send + 'static>(
+    name: &str,
+    job: impl FnOnce(&Handle) -> Result<T, String>,
+) -> Ending<T> {
+    let mut board: Board<T> = Board::new();
+    board.run_here(name, job);
+    board.poll().expect("就地跑就是当场跑完").ended
+}
+
+/// 一份**照着主库读**的只读视图：读到第 `stop_at` 个文件时替人按下「停下」。
+///
+/// 「停在半路那一趟说得出落了几件」得**真的落下几件**才验得到，而靠时间去抢那一下
+/// 抢不准——这份 fixture 小到几毫秒就传完了，抢早了一件没落、抢晚了整趟跑完，
+/// 两种都验不到要验的东西。这一层把那一下钉死在「读到第几个文件」上。
+///
+/// **`stop_at: 2` 落在「第一份传完了、第二份一个字节都没写」这个位置上**：
+/// `copy_stream` 在第一次读之前先看一眼中断信号，所以第二份整份回滚，落成的只有
+/// 第一份。哪天那一眼挪到读之后，落成的件数会跟着变——断言用的是 `outcome.touched()`
+/// 而不是写死的数，所以那时这几条测试仍然在验「落下了东西的那一趟记成停在半路」。
+///
+/// 它只是**转发给 [`RealFs`]**：一个字节都不多读，一个字节都不写（ADR-0004）。
+struct 读到第几个就按停 {
+    task: Handle,
+    stop_at: usize,
+    开过几个: AtomicUsize,
+}
+
+impl LibraryFs for 读到第几个就按停 {
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        RealFs.canonicalize(path)
+    }
+
+    fn read_dir(&self, dir: &Path) -> io::Result<Vec<DirEntry>> {
+        RealFs.read_dir(dir)
+    }
+
+    fn read_head(&self, file: &Path, limit: usize) -> io::Result<Vec<u8>> {
+        RealFs.read_head(file, limit)
+    }
+
+    fn read_tail(&self, file: &Path, limit: usize) -> io::Result<Vec<u8>> {
+        RealFs.read_tail(file, limit)
+    }
+
+    fn open(&self, file: &Path) -> io::Result<Box<dyn ReadSeek + '_>> {
+        if self.开过几个.fetch_add(1, Ordering::SeqCst) + 1 >= self.stop_at {
+            self.task.stop();
+        }
+        RealFs.open(file)
+    }
+}
+
+#[test]
+fn 同步按停时已经落下东西的那一趟在台上记成停在半路而且说得出落了几件() {
+    // **这是这条轴上的第三档**：停了，可留下了产物。第一件已经躺在卡上了，
+    // 记成「完成」的话任务屏会说「跑了 X 秒」，而子库屏同时说「⚠️ 这一趟被你按停了」。
+    let 场 = 现场::摆好();
+    let prepared = 场.排一次(&Handle::new()).expect("排得出来");
+
+    let ended = 上台跑一趟("同步 · 掌机", |task| {
+        let 视图 = 读到第几个就按停 {
+            task: task.clone(),
+            stop_at: 2,
+            开过几个: AtomicUsize::new(0),
+        };
+        场.同步一次看着(&prepared, task, &视图)
+            .map_err(|error| error.to_string())
+    });
+
+    let Ending::Halfway {
+        product: outcome,
+        left_behind,
+    } = ended
+    else {
+        panic!("被按停却把清单交出来了的那一趟，台上没记成停在半路");
+    };
+    assert!(outcome.interrupted, "被按停了却没记上");
+    assert!(
+        outcome.touched() > 0,
+        "一件都没落下，这条测试就没在验「留下了产物」那一档",
+    );
+    // **留下了什么由长入口自己说**（`Handle::halfway`）：只有它知道落了几件。
+    // 件数不写死——`thousands` 那道逗号得跟着它，不然上千件时两边对不上。
+    assert!(
+        left_behind.contains(&format!(
+            "{} 件",
+            romcat_core::report::thousands(outcome.touched())
+        )),
+        "说不出落了几件：{left_behind}",
+    );
+    assert!(
+        left_behind.contains("清单"),
+        "说不出那份清单还在：{left_behind}",
+    );
+}
+
+#[test]
+fn 同步按停时一件都没落的那一趟也记成停在半路留下的只有清单() {
+    // 一步都没做，可**清单照旧交出去**——那份清单非落库不可（ADR-0015），
+    // 所以这一趟仍然是「停了，留下了产物」，只是留下的只有它。
+    let 场 = 现场::摆好();
+    let prepared = 场.排一次(&Handle::new()).expect("排得出来");
+
+    let ended = 上台跑一趟("同步 · 掌机", |task| {
+        task.stop();
+        场.同步一次(&prepared, task)
+            .map_err(|error| error.to_string())
+    });
+
+    let Ending::Halfway {
+        product: outcome,
+        left_behind,
+    } = ended
+    else {
+        panic!("按停了却把这一趟记成了别的档");
+    };
+    assert!(outcome.interrupted, "被按停了却没记上");
+    assert_eq!(outcome.touched(), 0, "已经按了停下，一步都不该做");
+    assert!(
+        left_behind.contains("清单"),
+        "说不出那份清单还在：{left_behind}",
+    );
+}
+
+#[test]
+fn 扫描被叫停时在台上记成停在半路而且说得出断点写下了() {
+    // 扫描那一侧的续跑依据是**断点**（同步那一侧是清单）。它被叫停时照旧返回，
+    // 于是任务台得把这一趟记成「停在半路」，否则历史里那一行会写「完成」。
+    let 场 = 现场::摆好();
+    let mut catalog = Catalog::open(&场.库文件).expect("能开中立库");
+    let mut options = ScanOptions::named(场.库.path(), "库");
+    options.jobs = Jobs::Fixed(2);
+    options.checkpoint = Some(romcat_core::scan::CheckpointOptions {
+        path: 场.工作区.path().join("断点.json"),
+        interval: std::time::Duration::from_millis(1),
+        resume: false,
+    });
+
+    let ended = 上台跑一趟("扫描 · 库", |task| {
+        task.stop();
+        scan::scan(&RealFs::new(), &mut catalog, &options, task).map_err(|error| error.to_string())
+    });
+
+    let Ending::Halfway {
+        product: outcome,
+        left_behind,
+    } = ended
+    else {
+        panic!("按停了却把这一趟记成了别的档");
+    };
+    assert!(outcome.interrupted, "被按停了却没记上");
+    // **断到那半句上**：只断「断点」两个字的话，「这一趟没设断点」那一支照样绿。
+    assert!(
+        left_behind.contains("断点写下了"),
+        "说不出断点写下了：{left_behind}",
+    );
+}
+
+#[test]
+fn 没设断点的那一趟被叫停时不许说断点写下了() {
+    // 界面与命令行默认都设断点，但**把手收得下不设断点的调用方**（`ScanOptions`
+    // 那一格是 `Option`）。那时候「再扫一趟从那儿接着走」是句空话，别说。
+    let 场 = 现场::摆好();
+    let mut catalog = Catalog::open(&场.库文件).expect("能开中立库");
+    let mut options = ScanOptions::named(场.库.path(), "库");
+    options.jobs = Jobs::Fixed(2);
+    assert!(options.checkpoint.is_none(), "前提：这一趟不设断点");
+
+    let ended = 上台跑一趟("扫描 · 库", |task| {
+        task.stop();
+        scan::scan(&RealFs::new(), &mut catalog, &options, task).map_err(|error| error.to_string())
+    });
+
+    let Ending::Halfway { left_behind, .. } = ended else {
+        panic!("按停了却把这一趟记成了别的档");
+    };
+    assert!(
+        left_behind.contains("没设断点"),
+        "没设断点却说得像有断点：{left_behind}",
     );
 }

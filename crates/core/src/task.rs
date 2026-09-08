@@ -18,6 +18,17 @@
 //!   它一个字节都不写，停下等于什么都没发生。会写东西的活（扫描、同步）各有自己的
 //!   续跑依据——扫描的**断点**、同步的**清单**——把手只保证它们在两步之间被叫停。
 //!
+//! ## 一趟活有四种收场，不是三种
+//!
+//! [`Ending`] 是**一条轴**：跑完了 / 停了什么都没留下 / **停在半路** / 出错了。
+//! 第三档不是多余的——写过东西的活被叫停时照旧要把这一趟收完（扫描的**断点**、
+//! 同步的**清单**是下一趟接着跑的依据，抛错会把它们丢掉，ADR-0015），于是它交出来的
+//! 产物长得跟「跑完了」那一份一模一样。少了这一档，那一趟只能记成「完成」，
+//! 而子库屏同时说「⚠️ 这一趟被你按停了」——同一趟活在两屏上说两套话。
+//!
+//! 走哪一档由**那个长入口自己说**（[`Handle::halfway`]），不由任务台猜：
+//! 只有它知道自己写没写过东西。
+//!
 //! ## 停下有多快，取决于最长的那一步
 //!
 //! 把手在两步之间生效，所以「按下停下」到「真的停了」之间最坏是**当前这一步的长度**。
@@ -109,6 +120,8 @@ impl Progress {
 struct Shared {
     cancel: CancelToken,
     progress: Mutex<Progress>,
+    /// 报过「**停在半路**」没有，报了的话留下了什么。见 [`Handle::halfway`]。
+    left_behind: Mutex<Option<String>>,
 }
 
 /// 一趟长活的**把手**：干活那一侧报进度、看有没有被叫停；界面那一侧读进度、按停下。
@@ -134,6 +147,7 @@ impl Handle {
         Self(Arc::new(Shared {
             cancel,
             progress: Mutex::new(Progress::default()),
+            left_behind: Mutex::new(None),
         }))
     }
 
@@ -182,6 +196,37 @@ impl Handle {
         Ok(())
     }
 
+    /// 报一句：这一趟**停在半路**了——没走完就收了场，可它交得出产物。
+    ///
+    /// `left_behind` 说的是**留下了什么**，一句话：走了几步、落了几件、断点写下了。
+    /// 任务台拿它把这一趟记成 [`Ending::Halfway`] 而不是 [`Ending::Done`]。
+    /// **整句话都由这一层给**——任务台一个字都不替它做主（它也不知道这一趟写没写过东西）。
+    ///
+    /// **写过东西的长入口没走完就收场时都得说这一句。** 不说的话它交出来的产物会被
+    /// 当成「跑完了」那一份，于是任务屏历史写着「完成」，而这一趟其实只走了一半——
+    /// 那正是 `sync::execute::run` 与 `scan::scan` 两条路上的账（ADR-0015：它们
+    /// 被叫停时不抛错，而是记一笔照常返回，好让**清单**与**断点**留得下来）。
+    ///
+    /// **报了这一句就得返回 `Ok`。** 任务台只在 `Ok` 那一支问它（[`Board`] 的
+    /// `settle`），所以报完再把错抛出去的话，这句话被整条丢掉，历史反过来说
+    /// 「停了，什么都没留下、可以当没跑过」——而它其实写过东西，那正是 ADR-0015
+    /// 最怕的那件事换了个出口。
+    ///
+    /// 只读的活不该说这一句：它们停下来什么都没留下，那是 [`Ending::Stopped`]。
+    pub fn halfway(&self, left_behind: impl Into<String>) {
+        if let Ok(mut slot) = self.0.left_behind.lock() {
+            *slot = Some(left_behind.into());
+        }
+    }
+
+    /// 报过「停在半路」没有，报了的话留下了什么。任务台收场时问的就是它。
+    ///
+    /// **不对外**：这一格是长入口报给任务台的**侧信道**，外面该看的是任务台交出去的
+    /// [`Ending::Halfway`]。
+    fn left_behind(&self) -> Option<String> {
+        self.0.left_behind.lock().ok().and_then(|slot| slot.clone())
+    }
+
     /// 请求停下。界面上那个「停下」按钮按的就是它。
     pub fn stop(&self) {
         self.0.cancel.cancel();
@@ -212,13 +257,43 @@ impl Handle {
     }
 }
 
-/// 一趟活是怎么收场的。
+/// 一趟活是怎么收场的——**一条轴，四档**。
+///
+/// 轴上分的是**留下了什么**，不是「顺不顺利」：
+///
+/// | 收场 | 留下了什么 |
+/// |---|---|
+/// | [`Done`](Self::Done) | 跑完了，产物在这儿 |
+/// | [`Stopped`](Self::Stopped) | 停了，什么都没留下——干净，可以当没跑过 |
+/// | [`Halfway`](Self::Halfway) | **停在半路**：停了，可交出了产物，且明说它是半截的 |
+/// | [`Failed`](Self::Failed) | 出错了：停在哪一步、为什么 |
+///
+/// ## 第三档不是多余的
+///
+/// 写过东西的活被叫停时照旧要把这一趟收完——扫描的**断点**、同步的**清单**是下一趟
+/// 接着跑的依据，抛错会把它们丢掉（ADR-0015）。少了这一档，那一趟只能折成「跑完了」：
+/// 任务屏历史写着「完成」，而子库屏同时写着「⚠️ 这一趟被你按停了」——同一趟活在两屏上
+/// 说两套话。哪一趟走这一档由**长入口自己说**（[`Handle::halfway`]），不由任务台猜：
+/// 只有它知道自己写没写过东西。
+///
+/// ## 记进历史的是摘掉产物的那一份
+///
+/// 产物归**认领它的那一屏**，历史只留账，所以 [`Record`] 上那一格是 `Ending<()>`
+/// （[`forget`](Self::forget) 折出来的）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Ending {
-    /// 跑完了。
-    Done,
-    /// 被按停了。**停在两步之间，状态是干净的。**
+pub enum Ending<T> {
+    /// 跑完了，这是它的产物。
+    Done(T),
+    /// 停了，**什么都没留下**：停在两步之间，状态是干净的，可以当没跑过。
     Stopped,
+    /// **停在半路**：没走完就收了场，可交出了产物——那份产物是真的，认领的人照旧要收。
+    Halfway {
+        /// 收场之前落下来的那份产物。**丢了下一趟就接不上**（ADR-0015）。
+        product: T,
+        /// 留下了什么，一句话：走了几步、落了几件、断点写下了。**整句由长入口自己说**
+        /// （[`Handle::halfway`]）——只有它知道自己写过什么，也只有它知道为什么收的手。
+        left_behind: String,
+    },
     /// 出错了：停在哪一步、为什么。**不静默结束**，两样都要说得出来。
     Failed {
         /// 出错时正在做的那一步。说不出来时是空的。
@@ -228,15 +303,36 @@ pub enum Ending {
     },
 }
 
-impl Ending {
-    /// 排成给人看的一句话。
+impl<T> Ending<T> {
+    /// 排成给人看的一句话。**四档四句，谁都不许长得跟谁一样。**
     #[must_use]
     pub fn render(&self) -> String {
         match self {
-            Self::Done => "完成".to_string(),
+            Self::Done(_) => "完成".to_string(),
             Self::Stopped => "按停了".to_string(),
+            // **「为什么收的手」不由这一层写死**：眼下报这一句的两条都是被按停的，
+            // 而下一批候选（连着失败太多次主动停了、刮削撞上配额）不是——那半句话
+            // 归长入口，这儿只管把它摆进「停在半路」这一档里。
+            Self::Halfway { left_behind, .. } => format!("停在半路：{left_behind}"),
             Self::Failed { step, why } if step.is_empty() => format!("失败：{why}"),
             Self::Failed { step, why } => format!("在「{step}」这一步失败：{why}"),
+        }
+    }
+
+    /// 把产物摘掉，只留下账：[`Record`] 上那一格用的就是它。
+    #[must_use]
+    pub fn forget(&self) -> Ending<()> {
+        match self {
+            Self::Done(_) => Ending::Done(()),
+            Self::Stopped => Ending::Stopped,
+            Self::Halfway { left_behind, .. } => Ending::Halfway {
+                product: (),
+                left_behind: left_behind.clone(),
+            },
+            Self::Failed { step, why } => Ending::Failed {
+                step: step.clone(),
+                why: why.clone(),
+            },
         }
     }
 }
@@ -250,8 +346,8 @@ pub struct Record {
     pub name: String,
     /// 花了多久。
     pub elapsed: Duration,
-    /// 怎么收场的。
-    pub ending: Ending,
+    /// 怎么收场的。**产物已经归认领它的那一屏**，这儿只留账。
+    pub ending: Ending<()>,
 }
 
 /// 正在跑的那一趟：名字、已经跑了多久、走到哪一步了。
@@ -278,39 +374,8 @@ pub struct Finished<T> {
     pub name: String,
     /// 花了多久。
     pub elapsed: Duration,
-    /// 收场：跑完的话产物在这儿。
-    pub ended: Done<T>,
-}
-
-/// 一趟活的收场，连它的产物。
-#[derive(Debug)]
-pub enum Done<T> {
-    /// 跑完了，这是它的产物。
-    Product(T),
-    /// 被按停了。
-    Stopped,
-    /// 出错了。
-    Failed {
-        /// 出错时正在做的那一步。
-        step: String,
-        /// 为什么。
-        why: String,
-    },
-}
-
-impl<T> Done<T> {
-    /// 折成一条历史用得上的收场（把产物丢掉）。
-    #[must_use]
-    pub fn ending(&self) -> Ending {
-        match self {
-            Self::Product(_) => Ending::Done,
-            Self::Stopped => Ending::Stopped,
-            Self::Failed { step, why } => Ending::Failed {
-                step: step.clone(),
-                why: why.clone(),
-            },
-        }
-    }
+    /// 收场：跑完了与**停在半路**都带着产物。
+    pub ended: Ending<T>,
 }
 
 /// 一趟活本身：收一个把手，交出一份产物或者一句给人看的错话。
@@ -491,7 +556,7 @@ impl<T: Send + 'static> Board<T> {
                 id: job.id,
                 name: job.name,
                 elapsed: Duration::ZERO,
-                ended: Done::Stopped,
+                ended: Ending::Stopped,
             });
         }
     }
@@ -541,11 +606,21 @@ impl<T: Send + 'static> Board<T> {
         // 按下停下之后、走到下一个分界处之前，活本身也可能真的出错（卡拔了、盘满了）。
         // 只看 `handle.stopped()` 的话那条错误文本会被整条丢掉，界面上却说
         // 「一个字节都没动，再排一次就是」——那是骗人。
+        //
+        // **交出了产物的那一趟还要再分一次**：报过「停在半路」（[`Handle::halfway`]）
+        // 的走 [`Ending::Halfway`]，没报过的才是「跑完了」。写过东西的活被叫停时
+        // 走的正是前者——它照旧交出产物（清单、断点），可这一趟只走了一半。
         let halted = Halted.to_string();
         let ended = match result {
-            Ok(product) => Done::Product(product),
-            Err(why) if handle.stopped() && why == halted => Done::Stopped,
-            Err(why) => Done::Failed {
+            Ok(product) => match handle.left_behind() {
+                Some(left_behind) => Ending::Halfway {
+                    product,
+                    left_behind,
+                },
+                None => Ending::Done(product),
+            },
+            Err(why) if handle.stopped() && why == halted => Ending::Stopped,
+            Err(why) => Ending::Failed {
                 step: handle.progress().step,
                 why,
             },
@@ -556,7 +631,7 @@ impl<T: Send + 'static> Board<T> {
                 id,
                 name: name.clone(),
                 elapsed,
-                ending: ended.ending(),
+                ending: ended.forget(),
             },
         );
         self.finished.push_back(Finished {
@@ -610,6 +685,66 @@ mod tests {
     }
 
     #[test]
+    fn 被按停却交出了产物的那一趟记成停在半路而不是完成() {
+        // 写过东西的活（扫描、同步）被叫停时照旧要把这一趟收完——**断点**与**清单**
+        // 是下一趟接着跑的依据，抛错会把它们丢掉（ADR-0015）。少了「停在半路」这一档，
+        // 那一趟就只能折成「跑完了」：任务屏历史写着「完成」，而子库屏同时写着
+        // 「⚠️ 这一趟被你按停了」——同一趟活在两屏上说两套话。
+        let mut board: Board<u32> = Board::new();
+        board.queue("同步 · 掌机", |task| {
+            task.steps(3);
+            task.step("新增 SFC/幻想传说 汉化版.zip")?;
+            task.stop();
+            task.halfway("按停时落了 1 件，清单记着到这儿为止的样子");
+            Ok(7)
+        });
+        let done = 等到跑完(&mut board);
+        let Ending::Halfway {
+            product,
+            left_behind,
+        } = done.ended
+        else {
+            panic!("该是停在半路");
+        };
+        // **产物照旧交出来**：那份清单非落库不可，丢了下一趟就接不上。
+        assert_eq!(product, 7);
+        assert!(left_behind.contains("落了 1 件"), "{left_behind}");
+
+        // 历史那一行如实说，而且**不说「完成」**。
+        let 记的 = &board.history()[0].ending;
+        assert!(matches!(记的, Ending::Halfway { .. }), "{记的:?}");
+        let 画出来的 = 记的.render();
+        assert!(画出来的.contains("停在半路"), "{画出来的}");
+        assert!(
+            画出来的.contains("落了 1 件"),
+            "说不出留下了什么：{画出来的}"
+        );
+        assert_ne!(画出来的, Ending::<()>::Done(()).render());
+    }
+
+    #[test]
+    fn 四种收场各画各的话() {
+        // 一条轴四档，谁都不许长得跟谁一样：两档在界面上撞脸，那句「跑了 X 秒」
+        // 就成了骗人的话。
+        let 四句 = [
+            Ending::Done(()).render(),
+            Ending::<()>::Stopped.render(),
+            Ending::<()>::Halfway {
+                product: (),
+                left_behind: "按停时落了 12 件".to_string(),
+            }
+            .render(),
+            Ending::<()>::Failed {
+                step: "看一眼目标".to_string(),
+                why: "卡不在位".to_string(),
+            }
+            .render(),
+        ];
+        let 去重: std::collections::BTreeSet<&String> = 四句.iter().collect();
+        assert_eq!(去重.len(), 4, "四种收场里有两种画出来是同一句：{四句:?}");
+    }
+
+    #[test]
     fn 按下停下之后才真出错的那一趟按失败记而不是按停了记() {
         // 按下停下到走到下一个分界处之间，活本身也可能真的出错（卡拔了、盘满了）。
         // 只看「按过停下没有」的话，那条错误文本会被整条丢掉，界面上却说
@@ -620,7 +755,7 @@ mod tests {
             Err("目标看不了：卡拔了".to_string())
         });
         let done = 等到跑完(&mut board);
-        let Done::Failed { why, .. } = &done.ended else {
+        let Ending::Failed { why, .. } = &done.ended else {
             panic!("该是失败，实际是 {:?}", done.ended);
         };
         assert_eq!(why, "目标看不了：卡拔了");
@@ -632,7 +767,7 @@ mod tests {
             Ok(())
         });
         let done = 等到跑完(&mut board);
-        assert!(matches!(done.ended, Done::Stopped), "{:?}", done.ended);
+        assert!(matches!(done.ended, Ending::Stopped), "{:?}", done.ended);
     }
 
     #[test]
@@ -684,7 +819,7 @@ mod tests {
         }
         board.stop(id);
         let done = 等到跑完(&mut board);
-        assert!(matches!(done.ended, Done::Stopped), "{:?}", done.ended);
+        assert!(matches!(done.ended, Ending::Stopped), "{:?}", done.ended);
         let 走完的 = 做了几步.load(Ordering::SeqCst);
         assert!(走完的 > 0 && 走完的 < 10, "该停在半路上：{走完的}");
         // 历史里它是「按停了」，不是「失败」。
@@ -702,7 +837,7 @@ mod tests {
             Err("卡不在位".to_string())
         });
         let done = 等到跑完(&mut board);
-        let Done::Failed { step, why } = done.ended else {
+        let Ending::Failed { step, why } = done.ended else {
             panic!("该是失败");
         };
         assert_eq!(step, "看一眼目标");
@@ -746,9 +881,9 @@ mod tests {
         // **撤掉的那一趟也交回给排它的人**，不然排它的那一屏会一直等着它。
         let 撤掉的 = board.poll().expect("撤掉的那趟该交回来");
         assert_eq!(撤掉的.id, 第二趟);
-        assert!(matches!(撤掉的.ended, Done::Stopped));
+        assert!(matches!(撤掉的.ended, Ending::Stopped));
         let done = 等到跑完(&mut board);
-        assert!(matches!(done.ended, Done::Product(1)));
+        assert!(matches!(done.ended, Ending::Done(1)));
         assert!(!board.busy(), "撤掉的那趟不该被顶上来跑");
     }
 
@@ -762,8 +897,8 @@ mod tests {
         });
         let done = board.poll().expect("当场就跑完了");
         assert_eq!(done.id, id);
-        assert!(matches!(done.ended, Done::Product(7)));
-        assert_eq!(board.history()[0].ending, Ending::Done);
+        assert!(matches!(done.ended, Ending::Done(7)));
+        assert_eq!(board.history()[0].ending, Ending::Done(()));
     }
 
     #[test]
