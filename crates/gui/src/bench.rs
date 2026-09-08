@@ -324,7 +324,12 @@ pub struct BrowseCost {
     pub variants: u64,
     /// **全选之后展开作用范围**要多久：把选中的那几行折成一串变体的键。
     pub scope_ms: f64,
-    /// **列一次筛选面板**要多久（连表里那一列作品名靠的那张小表一起）。
+    /// **列一次筛选面板**要多久（四条 `GROUP BY`）。
+    ///
+    /// **那张作品表不在这一趟里**：主列表那一列作品名从头到尾是页查询自己带回来的
+    /// （`WORK_ANCHOR_COLUMNS` 里的 `COALESCE(work.name, variant.key)`），
+    /// 这一屏一次都没整份读过它（真库 9,226 行）。这半句原先写着「连那张小表一起」
+    /// ——那是票 25 那一版变体表的说法，早不作数了（票 `parking-3/11`）。
     pub facets_ms: f64,
     /// 平台、合集、语言、中文各有几个可选值。
     pub facet_counts: (usize, usize, usize, usize),

@@ -12,9 +12,10 @@
 
 use romcat_core::catalog::browse::{MAX_PAGE, StateFilter, VariantOrder, VariantQuery};
 use romcat_core::catalog::identify::{NOT_RUN_LABEL, Tier};
-use romcat_core::catalog::{Catalog, VariantRow};
+use romcat_core::catalog::{Catalog, Provenance, VariantRow};
 use romcat_core::platform::Manifest;
 use romcat_core::shape::Variant;
+use romcat_core::sublibrary::Rule;
 
 /// 造一份变体。`bytes` 故意大量并列，逼出「翻页会不会漏行」这个问题。
 fn 变体(key: &str, platform: Option<&str>, files: u64, bytes: u64) -> Variant {
@@ -39,14 +40,32 @@ fn 建库(variants: &[Variant]) -> Catalog {
     catalog
 }
 
-/// 一份形状照真库来的合成库：平台若干、容量大量并列、还有**平台未知**的一档。
+/// 合成库里那几个**作品**的名字。
+///
+/// **故意与键的次序对不上**：按作品名排出来的次序若与按键排出来的一样，
+/// 「真按作品名排了」与「压根没排」这两件事就分不开——那时断言只是在说
+/// 「这批数据碰巧排成这样」。汉字、假名、拉丁各占几条，中文那一段的次序正是
+/// 最容易写成「碰巧」的地方。
+const 作品们: [&str; 5] = [
+    "幻想传说",
+    "ゼルダの伝説",
+    "Ninja Gaiden",
+    "口袋妖怪 绿宝石",
+    "沙罗曼蛇",
+];
+
+/// 一份形状照真库来的合成库：平台若干、容量大量并列、有**平台未知**的一档，
+/// 也有**还没认出作品**的那一批（每三个留一个）。
 fn 合成库(rows: u64) -> Catalog {
     let 平台 = ["SFC", "PS1", "PSP", "NDS"];
+    // 键带**根名**（`path::library_key`）：合成库照真库的形状摆。
+    let keys: Vec<String> = (0..rows)
+        .map(|i| format!("库/{}/幻想传说 {i:05} 汉化版.zip", 平台[(i % 4) as usize]))
+        .collect();
     let variants: Vec<Variant> = (0..rows)
         .map(|i| {
             变体(
-                // 键带**根名**（`path::library_key`）：合成库照真库的形状摆。
-                &format!("库/{}/幻想传说 {i:05} 汉化版.zip", 平台[(i % 4) as usize]),
+                &keys[i as usize],
                 // 每七个留一个平台未知：那是真库里存在的一档（认不出平台的内容照常入库），
                 // 排序遇到 `NULL` 时不该翻车。
                 (i % 7 != 2).then(|| 平台[(i % 4) as usize]),
@@ -56,7 +75,27 @@ fn 合成库(rows: u64) -> Catalog {
             )
         })
         .collect();
-    建库(&variants)
+    let mut catalog = 建库(&variants);
+    let works: Vec<i64> = 作品们
+        .iter()
+        .map(|name| {
+            catalog
+                .add_work(name, Provenance::Identified)
+                .expect("建得出作品")
+        })
+        .collect();
+    for (i, key) in keys.iter().enumerate() {
+        // **每三个留一个还没认出作品的**：真库上那是一千七百多个（`adapter::converge`
+        // 的 `Anchor::Loose`）。这里的比例比真库高得多是有意的——这条测试要断的是
+        // 「空的那一批连成一段」，稀疏的话一次抽样就说明不了什么。
+        if i % 3 == 0 {
+            continue;
+        }
+        catalog
+            .link_variant(key, Some(works[i % works.len()]), None)
+            .expect("挂得上作品");
+    }
+    catalog
 }
 
 /// 一页一页翻完，把键收成一串。
@@ -173,6 +212,142 @@ fn 平台未知的那些行照样排得进去() {
         .filter(|row| row.platform.is_none())
         .count();
     assert!(未知的 > 0, "平台未知的行没排在最前，`NULL` 的次序漂了");
+}
+
+/// **按作品名排序是下推出来的**，而且**作品那一格空着的一律排在末尾**（票 `parking-3/11`）。
+///
+/// 三件事一条测试里断，它们互为前提：
+///
+/// 1. **真的按作品名排**——期望值是从这一趟取回来的那批名字自己排出来的，不是写死一串。
+///    换一份同样合法的数据这条照样成立，而写死那串就只证得了「这批数据碰巧排成这样」。
+/// 2. **它与按键排不是同一个次序**。少了这一句，一个「作品名那一档什么都没干、
+///    照旧按键排」的实现会一路绿着过去。
+/// 3. **作品那一格是空的那些排在末尾，正反两个方向都是**。`NULL` 在 `ORDER BY` 里
+///    自己有一套默认次序，跟着方向翻——那意味着人点一下表头，「还没认出作品」的那一批
+///    就从表尾跳到表头。位置得是定死的，不是随方向漂的。
+#[test]
+fn 按作品名排序是下推出来的而且作品那一格空着的一律排在末尾() {
+    let catalog = 合成库(300);
+    let 按键排 = 翻完(
+        &catalog,
+        &VariantQuery {
+            order: VariantOrder::Key,
+            ..Default::default()
+        },
+        300,
+    );
+    for descending in [false, true] {
+        let query = VariantQuery {
+            order: VariantOrder::Work,
+            descending,
+            ..Default::default()
+        };
+        let rows = catalog
+            .variant_browse_page(&query, 0, MAX_PAGE)
+            .expect("取得出一页");
+        assert_eq!(rows.len(), 300, "按作品名排完少了行");
+
+        // 空的那一批一律在末尾：找到第一个空的，从它往后必须全空。
+        let 空的从哪起 = rows
+            .iter()
+            .position(|row| row.work.is_none())
+            .expect("这份库里该有还没认出作品的变体");
+        assert!(
+            rows[..空的从哪起].iter().all(|row| row.work.is_some()),
+            "作品那一格空着的行插进了有作品的那一段",
+        );
+        assert!(
+            rows[空的从哪起..].iter().all(|row| row.work.is_none()),
+            "作品那一格空着的那一批没有连成一段，位置漂了",
+        );
+
+        // 有作品的那一段真的按作品名排——期望从数据自己算出来。
+        let 名字: Vec<&str> = rows[..空的从哪起]
+            .iter()
+            .map(|row| row.work.as_deref().expect("这一段全有作品"))
+            .collect();
+        let mut 期望 = 名字.clone();
+        期望.sort_unstable();
+        if descending {
+            期望.reverse();
+        }
+        assert_eq!(
+            名字,
+            期望,
+            "按作品名{}排出来的不是作品名的次序",
+            if descending { "倒" } else { "正" },
+        );
+
+        // 与按键排不是同一个次序，否则这条测试证不出「作品名那一档真的生效了」。
+        let 键: Vec<String> = rows
+            .iter()
+            .map(|row| row.variant.key.clone())
+            .collect::<Vec<_>>();
+        assert_ne!(
+            键, 按键排,
+            "按作品名排出来的与按键排出来的一模一样，这批数据分不出真假",
+        );
+    }
+}
+
+/// **作品名是页查询交回来的**，不是回来之后在内存里补的。
+///
+/// 判据是「翻页也对」：只取中间一页时，界面手上没有别的行、也没有那张作品表——
+/// 那一页上每一格作品名都对得上，只可能是查询自己带回来的（D161 的 B 路）。
+#[test]
+fn 页查询自己带回作品名而不必整份读那张小表() {
+    let catalog = 合成库(120);
+    let names = catalog.work_names().expect("读得出作品");
+    let query = VariantQuery {
+        order: VariantOrder::Work,
+        ..Default::default()
+    };
+    // 中间一页：前面那些行压根没取回来过。
+    let rows = catalog
+        .variant_browse_page(&query, 40, 20)
+        .expect("取得出一页");
+    assert_eq!(rows.len(), 20);
+    for row in &rows {
+        assert_eq!(
+            row.work,
+            row.variant.work_id.and_then(|id| names.get(&id).cloned()),
+            "「{}」那一格作品名与作品表说的对不上",
+            row.variant.key,
+        );
+    }
+    assert!(
+        rows.iter().any(|row| row.work.is_some()),
+        "这一页一条有作品的都没有，比不出什么",
+    );
+}
+
+/// **筛选器里作品名也用得上，而且是下推的**（`Dimension::Work` → `catalog::filter`）。
+///
+/// 断的是「总数与页内容筛的是同一批」：两处若各筛各的，滚动条会指向不存在的行。
+#[test]
+fn 按作品名筛也下推到库里() {
+    let catalog = 合成库(300);
+    let 全部 = catalog
+        .variant_total(&VariantQuery::default())
+        .expect("数得出");
+    let query = VariantQuery {
+        rule: Some(Rule::parse("作品^幻想").expect("规则读得懂")),
+        ..Default::default()
+    };
+    let total = catalog.variant_total(&query).expect("数得出");
+    assert!(
+        total > 0 && total < 全部,
+        "按作品名筛出 {total} 行（一共 {全部} 行），这条筛选没起作用",
+    );
+    let rows = catalog
+        .variant_browse_page(&query, 0, MAX_PAGE)
+        .expect("取得出一页");
+    assert_eq!(rows.len() as u64, total, "总数与页内容筛的不是同一批");
+    assert!(
+        rows.iter()
+            .all(|row| row.work.as_deref().is_some_and(|w| w.starts_with("幻想"))),
+        "筛出来的行里有作品名对不上的",
+    );
 }
 
 #[test]
