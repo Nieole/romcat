@@ -1,5 +1,5 @@
 //! 端到端验收 `romcat titles` 这一层：它**一个字节都不读主库**，报告说得出多少个作品
-//! 拿到了中文显示标题，而且**盘不在位时照样出得来**——标题集合是从中立库折出来的
+//! 的标题集合里有中文叫法，而且**盘不在位时照样出得来**——标题集合是从中立库折出来的
 //! （ADR-0001、ADR-0009）。
 //!
 //! 挑标题的规则本身由 `romcat-core` 那一侧验（`crates/core/tests/titles.rs` 与
@@ -91,7 +91,7 @@ fn 报告里那个中文覆盖数导得出_json() {
     let value: serde_json::Value = serde_json::from_str(&text).expect("是合法 JSON");
     assert!(
         value.get("chinese_works").is_some(),
-        "「多少个作品拿到了中文显示标题」是这张票对用户的意义，报告里必须有：{text}"
+        "「多少个作品的标题集合里有中文叫法」是中文覆盖这个数，报告里必须有：{text}"
     );
 }
 

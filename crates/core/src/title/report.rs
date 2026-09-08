@@ -5,8 +5,11 @@
 //!
 //! ## 三件必须说出口的事
 //!
-//! 1. **多少个作品最终拿到了中文显示标题。** 这张票对用户的实际意义就是这个数——
-//!    前端里能有多少条是中文的。说不出这个数，「中文优先」就只是一句口号。
+//! 1. **多少个作品的标题集合里有中文叫法。** 这个数回答的是**刮削到底采到了多少
+//!    中文**，所以它数的是**标题集合**，不是**显示标题**——显示标题是后一步的选择
+//!    （裁决可以把它定成英文名），采到的中文不该被那一步抹掉（挂账 `D163`）。
+//!    它与详情面板上「中文标题取的是这一条」摆的是同一件事：
+//!    [`title::best_chinese`](super::best_chinese) 那一条在不在。
 //! 2. **那些中文名各是哪一档来的。** 官中的官方译名、库里的中文文件名、汉化组自取的
 //!    名字，三者的可信程度差得很远（ADR-0012），混成一个数就看不出哪些该复核。
 //! 3. **哪些作品排不动。** 一个拉丁标题都没有的作品，排序标题只能退回中文显示标题，
@@ -21,19 +24,21 @@ use crate::catalog::{Catalog, CatalogError, Confidence};
 use crate::report::{heading, pad, thousands};
 use crate::scrape::priority::Priorities;
 
-use super::{Chosen, Language, SortFrom, TitleKind, TitleSet, choose, work_titles};
+use super::{
+    Chosen, Language, SortFrom, TitleKind, TitleRow, TitleSet, best_chinese, choose, work_titles,
+};
 
 /// 报告里最多列几个例子。
 const EXAMPLES: usize = 10;
 
-/// 一个中文显示标题的例子。
+/// 一个中文叫法的例子。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct TitleExample {
     /// 哪个作品。
     pub work: String,
-    /// 挑出来的显示标题。
+    /// 摆出来的那一条叫法。中文那几节里它是**中文那一档的第一名**，不一定是显示标题。
     pub display: String,
-    /// 排序标题。
+    /// 这个作品的排序标题。
     pub sort: String,
     /// 这个名字来自哪个变体；发行版级的叫法没有变体，是 `None`。
     ///
@@ -79,11 +84,25 @@ pub struct TitleReport {
     pub display_by_language: Vec<(String, u64)>,
     /// 标题集合是空的、显示标题退回作品名的作品有几个。
     pub display_from_work_name: u64,
-    /// **拿到中文显示标题的作品数。这张票对用户的实际意义就是这个数。**
+    /// **标题集合里有中文叫法的作品数——「中文覆盖」就是这个数。**
+    ///
+    /// 数的是**标题集合**，不是**显示标题**：刮削采到了中文，它就算，哪怕人裁决把
+    /// 显示标题定成了英文名（挂账 `D163`）。判据与详情面板摆的那一条是同一个
+    /// （[`title::best_chinese`](super::best_chinese)）。
     pub chinese_works: u64,
-    /// 那些中文显示标题按类型：`(类型, 作品数)`。
+    /// 其中**显示标题不是中文**的有几个。
+    ///
+    /// 报告里同时有「中文覆盖」与[显示标题按语言](Self::display_by_language)两个数，
+    /// 两者本来就不相等，这一个是差出来的一半。不说出来，看报告的人会以为其中一处是 bug。
+    ///
+    /// **两个数之间不是一条减法。** 另一半来自反方向：标题集合是空的时候显示标题退回
+    /// **作品名**（[`choose`]），作品名带汉字就按中文计——那种作品进得了
+    /// 「显示标题按语言」的中文那一栏，却一条中文**叫法**都没采到，进不了这里。
+    /// 那一族的上界是 [`display_from_work_name`](Self::display_from_work_name)。
+    pub chinese_not_displayed: u64,
+    /// 那些中文叫法按类型：`(类型, 作品数)`。
     pub chinese_by_kind: Vec<(String, u64)>,
-    /// 那些中文显示标题按置信度：`(置信度, 作品数)`。
+    /// 那些中文叫法按置信度：`(置信度, 作品数)`。
     pub chinese_by_confidence: Vec<(String, u64)>,
     /// 官方译名走的是**世代裂缝**的哪一侧：`(那一侧, 作品数)`（ADR-0019）。
     pub chinese_by_seam: Vec<(String, u64)>,
@@ -99,7 +118,7 @@ pub struct TitleReport {
     pub unsortable_works: u64,
     /// 那种作品的例子。
     pub unsortable_examples: Vec<String>,
-    /// **低置信的中文显示标题**有几个——它们是待确认队列的输入（ADR-0002）。
+    /// **低置信的中文叫法**有几个——它们是待确认队列的输入（ADR-0002）。
     pub queue_works: u64,
     /// 队列里的例子。
     pub queue_examples: Vec<TitleExample>,
@@ -150,25 +169,30 @@ impl TitleReport {
                     report.unsortable_examples.push(chosen.display.clone());
                 }
             }
-            if chosen.language == Language::Chinese {
+            // **中文覆盖数的是标题集合，不是显示标题**（挂账 `D163`）。判据用
+            // `best_chinese` 而不是 `chosen.language`：显示标题被裁成英文名之后，
+            // 刮削采到的那条中文叫法照旧在集合里、详情面板也照旧摆着它，报告再把它
+            // 抹掉，两处就各说一套。下面这几栏跟着一起改口径——它们要与总数对得上。
+            if let Some(best) = best_chinese(set, priorities) {
                 report.chinese_works += 1;
-                if let Some(kind) = chosen.kind {
-                    *chinese_kind.entry(kind.label()).or_default() += 1;
+                if chosen.language != Language::Chinese {
+                    report.chinese_not_displayed += 1;
                 }
-                if let Some(confidence) = chosen.confidence {
-                    *chinese_confidence.entry(confidence.label()).or_default() += 1;
-                    if confidence == Confidence::Low {
-                        report.queue_works += 1;
-                        push_example(&mut report.queue_examples, set, &chosen);
-                    }
+                *chinese_kind.entry(best.kind.label()).or_default() += 1;
+                *chinese_confidence
+                    .entry(best.confidence.label())
+                    .or_default() += 1;
+                if best.confidence == Confidence::Low {
+                    report.queue_works += 1;
+                    push_example(&mut report.queue_examples, set, &chosen, best);
                 }
-                if let Some(seam) = chosen.seam {
+                if let Some(seam) = best.seam {
                     *chinese_seam.entry(seam.label()).or_default() += 1;
-                    push_example(&mut report.official_examples, set, &chosen);
+                    push_example(&mut report.official_examples, set, &chosen, best);
                 }
                 if chosen.chinese_names > 1 {
                     report.rival_works += 1;
-                    push_rival(&mut report.rival_examples, set, &chosen);
+                    push_rival(&mut report.rival_examples, set, best);
                 }
             }
         }
@@ -206,13 +230,26 @@ impl TitleReport {
             thousands(self.entries),
         );
 
-        heading(&mut out, "中文显示标题");
+        heading(&mut out, "中文覆盖");
         let _ = writeln!(
             out,
-            "**{} 个作品拿到了中文显示标题**（一共 {} 个作品）。",
+            "**{} 个作品的标题集合里有中文叫法**（一共 {} 个作品）。\n\
+             数的是**标题集合**里有没有中文，不是**显示标题**是不是中文——\
+             显示标题是后一步的选择（裁决可以把它定成英文名），\n\
+             而这个数要回答的是**刮削到底采到了多少中文**，不该被后一步抹掉。",
             thousands(self.chinese_works),
             thousands(self.works),
         );
+        if self.chinese_not_displayed > 0 {
+            let _ = writeln!(
+                out,
+                "其中 **{} 个作品的显示标题不是中文**——那条中文叫法照旧在集合里，\
+                 详情面板摆的也照旧是它。\n所以下面「显示标题的回退链」那一栏的中文数\
+                 **与这里对不上，而那是对的**：那一栏问的是「最后挑了哪一条」，\
+                 这里问的是「采到了没有」。",
+                thousands(self.chinese_not_displayed),
+            );
+        }
         rows(&mut out, "按类型", &self.chinese_by_kind);
         rows(&mut out, "按置信度", &self.chinese_by_confidence);
         if self.chinese_by_seam.is_empty() {
@@ -298,7 +335,7 @@ impl TitleReport {
         heading(&mut out, "低置信的中文名——待确认队列的输入");
         let _ = writeln!(
             out,
-            "{} 个作品的中文显示标题是**低置信**的：没有任何官中发行版为它背书，\
+            "{} 个作品的中文叫法是**低置信**的：没有任何官中发行版为它背书，\
              它只是盘上那个文件叫这个。\n\
              合集包、精简版、带广告后缀的文件名全落在这一档，**照用但标记**\
              （ADR-0002 的低置信那一档）。\n\
@@ -333,40 +370,41 @@ fn pick(counts: &BTreeMap<&str, u64>, order: &[&str]) -> Vec<(String, u64)> {
         .collect()
 }
 
-fn push_example(into: &mut Vec<TitleExample>, set: &TitleSet, chosen: &Chosen) {
+/// 摆一条叫法当例子：`row` 是要摆的那一条，`chosen` 只用来取这个作品的排序标题。
+///
+/// 依据与「来自哪个变体」都从 `row` 上直接取，**不再拿字面去集合里回找**——
+/// 中文那一档的第一名与显示标题分开之后，那条回找会摸到另一条叫法上去。
+fn push_example(into: &mut Vec<TitleExample>, set: &TitleSet, chosen: &Chosen, row: &TitleRow) {
     if into.len() >= EXAMPLES {
         return;
     }
     into.push(TitleExample {
         work: set.work.clone(),
-        display: chosen.display.clone(),
+        display: row.value.clone(),
         sort: chosen.sort.clone(),
-        variant: set
-            .entries
-            .iter()
-            .find(|row| row.value == chosen.display)
-            .and_then(|row| row.variant_key.clone()),
-        evidence: chosen.evidence.clone(),
+        variant: row.variant_key.clone(),
+        evidence: row.evidence.clone(),
     });
 }
 
-fn push_rival(into: &mut Vec<RivalExample>, set: &TitleSet, chosen: &Chosen) {
+/// 同一部作品的几个中文叫法里，`best` 是胜出的那一条，其余的列成落选。
+fn push_rival(into: &mut Vec<RivalExample>, set: &TitleSet, best: &TitleRow) {
     if into.len() >= EXAMPLES {
         return;
     }
     let mut others: Vec<String> = set
         .entries
         .iter()
-        .filter(|entry| entry.language == Language::Chinese && entry.value != chosen.display)
+        .filter(|entry| entry.language == Language::Chinese && entry.value != best.value)
         .map(|entry| format!("{}（{}）", entry.value, entry.kind.label()))
         .collect();
     others.sort();
     others.dedup();
     into.push(RivalExample {
         work: set.work.clone(),
-        chosen: chosen.display.clone(),
+        chosen: best.value.clone(),
         others,
-        evidence: chosen.evidence.clone(),
+        evidence: best.evidence.clone(),
     });
 }
 

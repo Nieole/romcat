@@ -82,6 +82,8 @@ const 台版变体: &str = "库/FC/魂斗罗台版/魂斗罗.zip";
 const 汉化变体: &str = "库/FC/魂斗罗汉化/魂斗罗 中文版[dwt_so 汉化].zip";
 const 数字美服变体: &str = "库/FC/Gaia/Gaia.zip";
 const 数字港服变体: &str = "库/FC/盖亚/盖亚.zip";
+/// Zelda 那一份——它在这个 fixture 里是**一条中文叫法都没采到**的那部作品。
+const 只有英文变体: &str = "库/FC/Zelda/Zelda (USA).zip";
 
 fn 建现场() -> 现场 {
     let dir = temp_dir("titles");
@@ -512,5 +514,99 @@ fn 重折不冲掉裁决而且重跑识别之后标题还认得回来() {
             .iter()
             .any(|row| row.value == "魂斗罗"),
         "折出来的那些照样重新折了一遍"
+    );
+}
+
+#[test]
+fn 显示标题被裁成英文之后中文覆盖照旧算它() {
+    let mut 现场 = 建现场();
+    let 裁前 = 跑一遍(&mut 现场);
+    assert_eq!(
+        裁前.chinese_works, 2,
+        "魂斗罗与盖亚各有中文叫法，Zelda 没有"
+    );
+
+    // 人裁一个**英文**显示标题。裁决排在选定规则的第一层，显示标题当场就不是中文了
+    // ——而刮削采到的那条中文叫法照旧躺在标题集合里。
+    现场
+        .catalog
+        .put_titles(&[romcat_core::catalog::TitleRow {
+            work: "Contra".to_string(),
+            value: "Contra".to_string(),
+            language: Language::English,
+            kind: TitleKind::Official,
+            source: romcat_core::scrape::priority::VERDICT.to_string(),
+            region: None,
+            variant_key: None,
+            confidence: romcat_core::catalog::Confidence::High,
+            seam: None,
+            evidence: "人说的".to_string(),
+            seen: 1,
+        }])
+        .expect("写得进");
+    let 裁后 = title::run(&mut 现场.catalog, &Priorities::builtin()).expect("折得出标题");
+
+    let chosen = 挑(&现场, "Contra");
+    assert_eq!(chosen.display, "Contra");
+    assert_eq!(chosen.language, Language::English, "显示标题已经不是中文了");
+
+    assert_eq!(
+        裁后.chinese_works, 裁前.chinese_works,
+        "报告数的是**标题集合**里有没有中文，不是**显示标题**挑了哪一条（挂账 D163）"
+    );
+    assert_eq!(
+        裁后.chinese_not_displayed, 1,
+        "报告要自己说清这一个：中文叫法在集合里，只是没当上显示标题"
+    );
+
+    // 报告要在那个数旁边说清它数的是什么，别让人自己去猜。
+    let text = 裁后.render_text();
+    assert!(
+        text.contains("个作品的标题集合里有中文叫法"),
+        "报告要用词表的词说清数的是标题集合：{text}"
+    );
+    assert!(
+        text.contains("显示标题不是中文"),
+        "两个数不相等要在报告里就说明白，不然看的人会以为其中一处是 bug：{text}"
+    );
+
+    // 详情面板那一侧摆的还是那条中文叫法——**两处说的是同一件事**。
+    let detail = 现场
+        .catalog
+        .variant_detail(台版变体, &Priorities::builtin(), None)
+        .expect("读得出")
+        .expect("在");
+    assert_eq!(
+        detail.chinese_title().map(|row| row.value.as_str()),
+        Some("魂斗罗"),
+        "详情面板不动：它摆的那条中文叫法，正是报告数进去的那一条"
+    );
+}
+
+#[test]
+fn 一条中文叫法都没采到的作品不算进中文覆盖() {
+    let mut 现场 = 建现场();
+    let report = 跑一遍(&mut 现场);
+
+    let zelda = 现场.catalog.titles_of("Zelda").expect("读得出");
+    assert!(
+        !zelda.iter().any(|row| row.language == Language::Chinese),
+        "这部作品一条中文叫法都没采到：{zelda:#?}"
+    );
+    assert_eq!(report.works, 3, "这个 fixture 一共三部作品");
+    assert_eq!(
+        report.chinese_works, 2,
+        "三部里只有魂斗罗与盖亚算得进去——覆盖率数的是采到了中文没有，采不到就是采不到"
+    );
+
+    // 详情面板那一侧也说「没有」——**两处说的是同一件事**。
+    let detail = 现场
+        .catalog
+        .variant_detail(只有英文变体, &Priorities::builtin(), None)
+        .expect("读得出")
+        .expect("在");
+    assert!(
+        detail.chinese_title().is_none(),
+        "集合里没有中文叫法，面板就该说没有"
     );
 }
