@@ -10,6 +10,14 @@
 //! 将来若 Windows 真机的输入法验证（票 23）没过，换掉的只是这个 crate——
 //! **那正是把领域判断按在核心里的理由**。
 //!
+//! ## 顶上那两态
+//!
+//! `eframe` 收的是 [`program::Program`] 而不是 [`app::App`]：**启动那条路**——定位要开
+//! 哪份库、开出**现场**、进主窗口——住在它上面，程序入口只剩解析参数与开窗。它持两态
+//! ——**开场中**（票 `gui-self-sufficient/03` 往里填开场那一屏）与**已开库**（`App` 在
+//! 画那五屏）。抬上来是为了**那条路够得着测试**：`main.rs` 里的东西一条测试都碰不到，
+//! 而它正是维护者第一次打开这个工具时走的路。
+//!
 //! ## 五屏
 //!
 //! - [`queue`]：**待确认队列**，默认那一屏。真机上一万八千多条，**打开看见的是工具已经
@@ -88,6 +96,7 @@ pub mod headless;
 pub mod layout;
 pub mod look;
 pub mod media;
+pub mod program;
 pub mod queue;
 pub mod roots;
 pub mod scrape;
