@@ -210,3 +210,62 @@ fn 既不给路径也不给名字时说清楚该怎么办() {
         "{报告:?}"
     );
 }
+
+/// 跑一次报告。`定位` 是「怎么找到那份库」那几个参数：`--library <名字>`，或者主库根。
+fn 出报告(workspace: &Path, 定位: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_romcat"))
+        .arg("report")
+        .args(定位)
+        .arg("--workspace")
+        .arg(workspace)
+        .arg("--quiet")
+        .output()
+        .expect("能启动 romcat")
+}
+
+#[test]
+fn 报告印得出主库名而不是那串带哈希的文件名() {
+    // 名字此前只活在人敲过的那行命令里：中立库的文件名是「可读的一段 + 哈希」，
+    // 而哈希那半段不可逆。这一条钉住「起的那个名字有个落点，报告里读得回来」。
+    let workspace = temp_dir("library-print-workspace");
+    let 主库 = temp_dir("library-print-lib");
+    建_主库(主库.path());
+    assert!(
+        扫(workspace.path(), 主库.path(), Some("我的主库"))
+            .status
+            .success()
+    );
+
+    let 报告 = 出报告(workspace.path(), &["--library", "我的主库"]);
+    assert!(报告.status.success(), "{报告:?}");
+    let 说明 = String::from_utf8_lossy(&报告.stderr);
+    assert!(
+        说明.lines().any(|line| line == "主库：我的主库"),
+        "报告里该印出起的那个名字：{说明}"
+    );
+}
+
+#[test]
+fn 没起名字时报告印的是主库根的末级目录名() {
+    // 不给 `--library` 时文件名的可读一半只留 ASCII 字母数字，人认不出是哪块盘。
+    // 印出来的该是那个目录真正叫什么。
+    let workspace = temp_dir("library-print-path-workspace");
+    let 主库 = temp_dir("库名-末级目录");
+    建_主库(主库.path());
+    assert!(扫(workspace.path(), 主库.path(), None).status.success());
+
+    let 末级 = 主库
+        .path()
+        .file_name()
+        .expect("有末级目录名")
+        .to_string_lossy()
+        .into_owned();
+    let 根 = 主库.path().to_str().expect("临时目录的路径是 UTF-8");
+    let 报告 = 出报告(workspace.path(), &[根]);
+    assert!(报告.status.success(), "{报告:?}");
+    let 说明 = String::from_utf8_lossy(&报告.stderr);
+    assert!(
+        说明.lines().any(|line| line == format!("主库：{末级}")),
+        "报告里该印出那个目录真正叫什么：{说明}"
+    );
+}

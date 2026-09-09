@@ -44,6 +44,7 @@ use crate::scan::aggregate::{
     Aggregate, ContainerFacts, FileObservation, InnerEntryContext, Limits, SampleResult,
 };
 use crate::shape;
+use crate::workspace;
 
 pub use baseline::{Baseline, Recorded, ScanDelta, Verdict};
 pub use browse::{
@@ -71,7 +72,7 @@ pub use title::TitleRow;
 /// 票 07 留下的判断是「删库重扫这条路到票 08 就走不通了——那时沉淀库里攒着裁决，
 /// 重扫补不回来」。**这条判断成立，但它的结论不是「给中立库写迁移」，而是
 /// 「别把裁决放进中立库」。** 票 08 因此把**沉淀库**做成一份单独的文件
-/// （[`workspace::verdict_store_path`](crate::workspace::verdict_store_path)），
+/// （[`workspace::verdict_store_path`]），
 /// 与 DAT 库、媒体池同构，理由也同源：一条**裁决**说的是「世上这份内容是什么」，
 /// 与它躺在哪块盘上无关。
 ///
@@ -170,6 +171,13 @@ pub(crate) fn placeholders(count: usize) -> String {
     }
     out
 }
+
+/// 元数据表里记**这份主库叫什么**的那个键。
+///
+/// 加这一个键是**纯加**：已有的表一列没动、一条语义没改，于是
+/// [`SCHEMA_VERSION`] 一动不动（判据见它的文档）。旧库拿新程序打开照样能用，
+/// 只是读不到这一行——那时走 [`Catalog::library_name`] 的退路。
+const META_LIBRARY_NAME: &str = "library_name";
 
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS meta(
@@ -418,9 +426,35 @@ pub struct Catalog {
 impl Catalog {
     /// 打开（必要时新建）一个落在磁盘上的中立库。
     ///
+    /// **建出来的库不知道自己叫什么**，读它的名字只能从文件名截
+    /// （[`Self::library_name`]）。手上有 [`workspace::Slug`] 的调用方走
+    /// [`Self::open_named`]，那一条会在**建库那一趟**把原名记下。
+    ///
     /// # Errors
     /// 建目录、打开文件、建表或版本对不上时返回错误。
     pub fn open(path: &Path) -> Result<Self, CatalogError> {
+        Self::open_with(path, None)
+    }
+
+    /// 同上，外加**建库时**记下这份主库叫什么。
+    ///
+    /// `name` 是**原名**——人起的那个名字，或者没起名字时主库根的末级目录名
+    /// （[`workspace::Slug::display_name`]）。它一个字符都不折：
+    /// 名字里带 `/`、带控制字符、长过 24 个字符时，落进元数据表的是原名，
+    /// **文件名照旧按 [`workspace::Slug::text`] 那套折**——两条路
+    /// 互不干扰。
+    ///
+    /// **只在建库那一趟写。** 库已经在那儿了就一个字不改：那一行是「这份库是谁建的、
+    /// 当时叫什么」，不是「这次是拿哪个名字打开的」。于是票 01 之前建的那些库
+    /// 一辈子读不到这一行，走 [`Self::library_name`] 的退路——那正是它存在的理由。
+    ///
+    /// # Errors
+    /// 同 [`Self::open`]。
+    pub fn open_named(path: &Path, name: &str) -> Result<Self, CatalogError> {
+        Self::open_with(path, Some(name))
+    }
+
+    fn open_with(path: &Path, name: Option<&str>) -> Result<Self, CatalogError> {
         let display = path::display(path);
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
@@ -434,7 +468,7 @@ impl Catalog {
             path: display.clone(),
             source,
         })?;
-        Self::prepare(conn, Some(path.to_path_buf()), display)
+        Self::prepare(conn, Some(path.to_path_buf()), display, name)
     }
 
     /// 为**另一条线程**再开一份同一份中立库，**只读**。
@@ -507,13 +541,14 @@ impl Catalog {
             path: "（内存）".to_string(),
             source,
         })?;
-        Self::prepare(conn, None, "（内存）".to_string())
+        Self::prepare(conn, None, "（内存）".to_string(), None)
     }
 
     fn prepare(
         conn: Connection,
         file: Option<PathBuf>,
         path: String,
+        name: Option<&str>,
     ) -> Result<Self, CatalogError> {
         let catalog = Self { conn, file, path };
         catalog
@@ -560,6 +595,13 @@ impl Catalog {
                         params![SCHEMA_VERSION.to_string()],
                     )
                     .map_err(|source| catalog.err(source))?;
+                // **「结构版本这一行还不在」就是「这份库是这一趟建出来的」。**
+                // 名字只在这一趟落，理由见 `Catalog::open_named`。
+                // **空白不是名字**：`--library ""` 命令行不拦（那是它自己的行为），
+                // 落一行空串下去，开场那一屏就多一行没有名字的库。宁可不写，走退路。
+                if let Some(name) = name.filter(|name| !name.trim().is_empty()) {
+                    catalog.meta_set(META_LIBRARY_NAME, name)?;
+                }
             }
             Some(Ok(version)) if version == SCHEMA_VERSION => {}
             Some(found) => {
@@ -598,6 +640,38 @@ impl Catalog {
     #[must_use]
     pub fn file(&self) -> Option<&Path> {
         self.file.as_deref()
+    }
+
+    /// 这份主库叫什么——说得出口的那个名字。
+    ///
+    /// 先读元数据表里那一行（建库时落的原名，见 [`Self::open_named`]）；**读不到就退回
+    /// 从中立库的文件名截**，把哈希后缀剥掉只留人认得出的那一半
+    /// （[`workspace::readable_half`]）。
+    ///
+    /// **它不报错、不中断，一定交得出一句话。** 退路要顶的有三种库：票 01 之前建的
+    /// （那一行压根没写过）、拿 [`Self::open`] 建的（不知道自己叫什么）、以及库本身
+    /// 读不动的。而开场那一屏的判据是**照列不误**——从列表里静静消失才是最难查的那种错
+    /// （ADR-0023），一份库说不出名字不该让整屏失败。
+    ///
+    /// 只活在内存里的那份没有文件名可截，交出的是它那个占位路径。空白也算读不到。
+    ///
+    /// ## 它**不是** [`Site::library`](crate::site::Site::library)
+    ///
+    /// 那一个是 [`workspace::Slug::text`] 折出来的那串「可读的一半 + 哈希」，是中立库的
+    /// 主文件名，也是**路径锚**里记的那个键——换一个字，命令行裁的界面就看不见了。
+    /// 这一个是**给人看的**，进不了任何键，也没人拿它去找文件。两样都叫「主库名」，
+    /// 但只有那一个是标识符。
+    #[must_use]
+    pub fn library_name(&self) -> String {
+        if let Ok(Some(name)) = self.meta_get(META_LIBRARY_NAME)
+            && !name.trim().is_empty()
+        {
+            return name;
+        }
+        self.file.as_deref().and_then(Path::file_stem).map_or_else(
+            || self.path.clone(),
+            |stem| workspace::readable_half(&stem.to_string_lossy()).to_string(),
+        )
     }
 
     fn meta_get(&self, key: &str) -> Result<Option<String>, CatalogError> {

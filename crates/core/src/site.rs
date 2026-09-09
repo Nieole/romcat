@@ -46,6 +46,11 @@ pub struct Site {
     /// **沉淀库**：裁决落在这里，**不跟中立库走**，删掉中立库重扫也不丢。
     pub store: Store,
     /// 这份主库在**路径锚**里叫什么名字。
+    ///
+    /// **它是标识符，不是给人看的那个名字。** 这一串是
+    /// [`Slug::text`](crate::workspace::Slug::text) 折出来的「可读的一半 + 哈希」，
+    /// 也就是中立库的主文件名；人起的那个原名走
+    /// [`Catalog::library_name`](crate::catalog::Catalog::library_name)。
     pub library: String,
 }
 
