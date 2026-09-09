@@ -493,17 +493,41 @@ impl Catalog {
         let file = self.file.clone().ok_or_else(|| CatalogError::NotOnDisk {
             path: self.path.clone(),
         })?;
+        Self::read_only_at(file, self.path.clone())
+    }
+
+    /// 只读地打开磁盘上**已经在那儿**的一份中立库。
+    ///
+    /// 与 [`Self::open`] 差在两处，而这两处正是**列举**要的
+    /// （[`workspace::catalogs`]）：
+    ///
+    /// - **不建库。** 文件不在就报错，不会凭空建一份空的。
+    /// - **不建表、不补列、不写版本。** [`Self::open`] 那条路会给每一份老库补上新表、
+    ///   补上新列——**只是想看看这个工作目录里有哪些库**，不该改动其中任何一份。
+    ///   版本对不上时它照旧开不出来（[`CatalogError::Version`] 带着两个版本号），
+    ///   而那份库的内容一个字节都没被动过。
+    ///
+    /// 开出来的那一份写不动（`SQLITE_OPEN_READ_ONLY`），理由与 [`Self::read_only`]
+    /// 同源。
+    ///
+    /// # Errors
+    /// 文件不在、打不开、或者结构版本对不上时返回错误。
+    pub fn open_read_only(file: &Path) -> Result<Self, CatalogError> {
+        Self::read_only_at(file.to_path_buf(), path::display(file))
+    }
+
+    fn read_only_at(file: PathBuf, path: String) -> Result<Self, CatalogError> {
         let flags =
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let conn =
             Connection::open_with_flags(&file, flags).map_err(|source| CatalogError::Sqlite {
-                path: self.path.clone(),
+                path: path.clone(),
                 source,
             })?;
         let twin = Self {
             conn,
             file: Some(file),
-            path: self.path.clone(),
+            path,
         };
         twin.conn
             .set_prepared_statement_cache_capacity(STATEMENT_CACHE);

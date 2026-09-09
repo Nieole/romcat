@@ -111,8 +111,9 @@ pub struct App {
     board: task::Tasks,
     /// 七条**面板边界**各自拖到哪儿了。存**工作目录**，不存中立库。
     layout: layout::Layout,
-    /// 标题里那个库名。默认就是这份现场的名字；合成数据那一路另给一个
-    /// （[`Self::set_library_label`]），免得一屏假名字看着像真库。
+    /// 标题里那个库名。默认是这份现场**给人看的**那个名字
+    /// （[`Site::display_name`]，也就是开场那一屏上画着的同一个）；合成数据那一路另给
+    /// 一个（[`Self::set_library_label`]），免得一屏假名字看着像真库。
     library_label: String,
     /// **观感基线与上次的版式装过了没有。** 只在开窗第一帧装一次。
     prepared: bool,
@@ -151,7 +152,11 @@ impl App {
         let layout = layout::Layout::load(&workspace);
         let mut sublibrary = sublibrary::Screen::new(workspace);
         sublibrary.reload(&site);
-        let library_label = site.library.clone();
+        // **给人看的那个名字，不是标识符。** `Site::library` 是中立库的主文件名
+        // （「可读的一半 + 十六位哈希」），人在开场那一屏上看见的却是「我的主库」——
+        // 同一份库在相邻两屏上两个样子，而票 01 把原名落进元数据表存在的全部理由
+        // 就是这个（ADR-0023、规格 User Story 5）。
+        let library_label = site.display_name();
         Self {
             site,
             view: View::default(),
@@ -184,6 +189,9 @@ impl App {
     ///
     /// 两样都写进去，是因为它们各自回答一个只有标题答得了的问题：任务栏上并排两个
     /// romcat 时「哪个是哪份库」，以及截图发出来时「这是哪一屏」。
+    ///
+    /// 库名那一段是**给人看的**那个（[`Site::display_name`]）——与开场那一屏上画着的
+    /// 是同一个字，不是那串带哈希的主文件名。
     #[must_use]
     pub fn window_title(&self) -> String {
         format!("romcat — {} — {}", self.library_label, self.view.label())
