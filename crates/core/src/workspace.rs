@@ -148,6 +148,60 @@ impl<'a> Slug<'a> {
             }
         }
     }
+
+    /// 这份主库**原本**叫什么：人起的那个名字，或者没起名字时主库根**化开之后**的
+    /// 末级目录名。落进中立库元数据表的就是它（`Catalog::open_named`）。
+    ///
+    /// **与 [`Self::text`] 同源而不同用，两条路互不干扰。** 那一条要折出一个合法文件名：
+    /// 滤掉 `/ \ : * ? " < > |` 与控制字符、截到 24 个字符、全滤光时退成 `library`、
+    /// 再缀上哈希。折完就回不来了——哈希不可逆，截掉的那半截也没处找。这一条**一个
+    /// 字符都不动**，只把名字规范化成 NFC（ADR-0020，理由同 [`Self::text`]：同一个名字
+    /// 在两台机器上可能一台交出 NFD、一台交出 NFC，不折一下元数据表里就是两个名字）。
+    ///
+    /// [`Self::AtPath`] 那一支取**末级目录名**而不是整条路径：人认库靠的是「那个目录
+    /// 叫什么」，而整条绝对路径正是换个挂载点就变的那样东西（那也是 [`Self::Named`]
+    /// 存在的理由）。末级名字取不出来时（根就是 `/`）退回整条路径——那时它就是全部
+    /// 认得出的信息了。
+    ///
+    /// **它与 [`Self::text`] 一样会碰磁盘**（[`path::normalize_existing`]）：`.`、尾斜杠、
+    /// 夹着 `..` 的写法自己没有末级名字，化开之后才拿得到那个目录真正叫什么。
+    #[must_use]
+    pub fn display_name(self) -> String {
+        match self {
+            Self::Named(name) => path::nfc(name).into_owned(),
+            Self::AtPath(root) => {
+                let root = path::normalize_existing(root);
+                root.file_name().map_or_else(
+                    || path::nfc(&path::display(&root)).into_owned(),
+                    |last| path::nfc(&last.to_string_lossy()).into_owned(),
+                )
+            }
+        }
+    }
+}
+
+/// 从 [`Slug::text`] 折出来的那一串里剥掉哈希后缀，只剩人认得出的那一半。
+///
+/// **这是「这份主库叫什么」的退路**：中立库元数据表里没有那一行时（票 01 之前建的库，
+/// 或者一份结构版本对不上、连开都开不了的库）拿它顶上。交出来的绝不是那串哈希——
+/// 十六个十六进制数字对人来说与空白没有区别，而**照列不误**正是开场那一屏的判据
+/// （ADR-0023）。
+///
+/// 剥的判据是「最后一段恰好是 16 位十六进制」，因为可读那一半自己也允许带 `-`
+/// （折文件名那一步放行 `-` 与 `_`）。不合这个形状的原样交出去：文件被人改过名字时
+/// 那一串就是全部信息，截成空的只会更难认。
+#[must_use]
+pub fn readable_half(slug_text: &str) -> &str {
+    match slug_text.rsplit_once('-') {
+        Some((head, hash))
+            if !head.is_empty()
+                && hash.len() == 16
+                && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            head
+        }
+        _ => slug_text,
+    }
 }
 
 /// 认得出是哪份库的那一半。
@@ -573,5 +627,46 @@ mod tests {
     fn 汉字名字留得住() {
         let name = Slug::Named("主库").text();
         assert!(name.starts_with("主库-"), "{name}");
+    }
+
+    #[test]
+    fn 原名不跟着文件名一起折() {
+        // 文件名那一半要滤字符、截到 24 个、全滤光退成 `library`，折完就回不来了。
+        // **原名走另一条路**：一个字符都不动，好让它原样落进中立库的元数据表。
+        let 长名字 = "这个主库的名字长得超过二十四个字符所以文件名一定截得到它";
+        assert!(长名字.chars().count() > 24);
+        assert_eq!(Slug::Named(长名字).display_name(), 长名字);
+        assert_eq!(
+            Slug::Named("带/斜杠\\和:冒号").display_name(),
+            "带/斜杠\\和:冒号"
+        );
+        assert_eq!(Slug::Named("。、？").display_name(), "。、？");
+        assert!(
+            Slug::Named("。、？").text().starts_with("library-"),
+            "字符全被滤光时文件名退成那个固定词，而原名仍是原名"
+        );
+    }
+
+    #[test]
+    fn 没起名字时原名取主库根的末级目录名() {
+        // 路径那条的可读一半只留 ASCII 字母数字，于是 `漫画` 折出来是 `library-…`。
+        // 原名不受那道过滤管，人在开场上看见的是「漫画」而不是一串哈希。
+        let root = Path::new("/Volumes/新加卷/漫画");
+        assert_eq!(Slug::AtPath(root).display_name(), "漫画");
+        #[cfg(unix)]
+        assert_eq!(Slug::AtPath(root).text(), "library-39a9fc87af2531b6");
+    }
+
+    #[test]
+    fn 从中立库的文件名截得回人认得出的那一半() {
+        // 元数据表里读不到原名时（旧库、或者直接开一份文件）走这条退路。
+        // 交出来的不许是那串哈希——人在开场上认不出十六个十六进制数字。
+        assert_eq!(readable_half(&Slug::Named("主库").text()), "主库");
+        assert_eq!(readable_half("library-39a9fc87af2531b6"), "library");
+        // 可读那一半自己就带 `-`：只剥最后那一段十六位十六进制。
+        assert_eq!(readable_half(&Slug::Named("甲-乙").text()), "甲-乙");
+        // 文件被人改过名字、后缀根本不是哈希：原样交出去，不截成空的。
+        assert_eq!(readable_half("我自己改的名字"), "我自己改的名字");
+        assert_eq!(readable_half("主库-不是十六进制"), "主库-不是十六进制");
     }
 }

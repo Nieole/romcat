@@ -1144,6 +1144,11 @@ fn emit_from_catalog(catalog: &Catalog, manifest: &Manifest, output: &OutputArgs
         return ExitCode::FAILURE;
     }
     eprintln!("以上出自中立库 {}，没有读过主库。", catalog.location());
+    // **在终端里也认得出自己在操作哪一份。** 中立库的文件名是「可读的一段 + 哈希」，
+    // 那串哈希谁也认不出来；名字从元数据表读，读不到就从文件名截
+    // （`Catalog::library_name`）。**排在那句「以上」后面**：那句罩的是报告正文，
+    // 不该把这一行也罩进去。
+    eprintln!("主库：{}", catalog.library_name());
     ExitCode::SUCCESS
 }
 
@@ -1293,13 +1298,19 @@ fn workspace_dir(given: Option<&Path>) -> PathBuf {
         .unwrap_or_else(workspace::default_dir)
 }
 
+/// 开（必要时新建）这一份中立库。
+///
+/// **建库那一趟顺手把主库的原名记下**（`Catalog::open_named`）：名字此前只活在人敲过的
+/// 那行命令里，中立库的文件名折过一道——滤字符、截到 24 个、缀上不可逆的哈希——
+/// 谁也从那串字里认不回原名。库已经在那儿了就一个字不改。
 fn open_catalog(workspace: &Path, slug: Slug<'_>, root: Option<&Path>) -> Result<Catalog, String> {
     let path = workspace::catalog_path(workspace, slug);
     // 主库只读（ADR-0004）：中立库落进主库就该在开扫之前被拦下。
     if let Some(root) = root {
         refuse_writing_into_library(root, &path)?;
     }
-    Catalog::open(&path).map_err(|error| format!("中立库打不开：{error}"))
+    Catalog::open_named(&path, &slug.display_name())
+        .map_err(|error| format!("中立库打不开：{error}"))
 }
 
 /// 这一趟扫描的断点文件按哪个**根**名去找。
