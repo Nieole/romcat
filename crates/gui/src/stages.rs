@@ -22,10 +22,19 @@
 //!
 //! ## 后台那条线程写的是哪一份库
 //!
-//! 识别要**写**中立库（起手先把上一轮的结论清干净），而 `rusqlite::Connection` 不是
-//! `Sync`。于是后台那条线程按文件路径自己再开一份现场（`Site::open_file`），
-//! 与扫描、刮削两条路一模一样；跑完这一段 `reload` 一次。**只活在内存里的库
-//! （合成数据）没有文件**，那时就地跑完——那份库小到几毫秒就走完。
+//! 识别与折标题都要**写**中立库（两者起手都先把上一轮折出来的清干净），而
+//! `rusqlite::Connection` 不是 `Sync`。于是后台那条线程按文件路径自己再开一份现场
+//! （`Site::open_file`），与扫描、刮削两条路一模一样；跑完这一段 `reload` 一次。
+//! **只活在内存里的库（合成数据）没有文件**，那时就地跑完——那份库小到几毫秒就走完。
+//!
+//! ## 按停停在哪儿
+//!
+//! **识别与折标题在这件事上不一样，而差别是真的**：识别一路往中立库写批，按停时
+//! 已经算完的那些结论真的落了库，所以它报**停在半路**；折标题的写是「清掉再写回」，
+//! 中间停下等于把整份**标题集合**丢掉——所以它的最后一个停下点摆在写回**之前**
+//! （`romcat_core::title::run_task`），那一趟要么写完、要么一个字节都没写，
+//! 按停记的是「停了」。两者都由长入口自己说
+//! （`romcat_core::task::Handle::halfway` 的文档写着这条分界）。
 
 use std::path::{Path, PathBuf};
 
@@ -36,7 +45,7 @@ use romcat_core::report::thousands;
 use romcat_core::site::Site;
 use romcat_core::stage::{Behind, Stage, StageRow, Stages};
 use romcat_core::task::{Cutoff, Ending, Finished, Handle};
-use romcat_core::{verdict, workspace};
+use romcat_core::{title, verdict, workspace};
 
 use crate::task::{Product, Tasks};
 
@@ -174,6 +183,16 @@ impl Section {
                     thousands(outcome.report.total.matched),
                 ));
             }
+            Ending::Done(Product::Titled(report)) => {
+                self.error = None;
+                self.notice = Some(format!(
+                    "{} 跑完了：{} 个作品折出 {} 条叫法，其中 {} 个作品有中文叫法。",
+                    stage.label(),
+                    thousands(report.works),
+                    thousands(report.entries),
+                    thousands(report.chinese_works),
+                ));
+            }
             // **停在半路**：识别起手就把上一轮的结论清干净，所以它一定动过库
             // ——记成「可以当没跑过」是骗人的。那句话由核心库折
             // （`identify::run_task` 里 `Handle::halfway` 报的那一句），这一层原样转出来：
@@ -183,10 +202,13 @@ impl Section {
                 self.notice = Some(format!("{} 被按停了。{left_behind}", stage.label()));
             }
             // 还排着队就被撤掉的那一趟压根没开跑：一个字节都没写。
+            // **停了，什么都没留下。** 两条路走到这一档：还排着队就被撤掉（压根没开跑），
+            // 以及开跑了但停在写库之前（折标题走的正是这条，见 `title::run_task`）。
+            // 两条留下的是同一件事——中立库一个字节都没动——所以这儿说的是同一句话。
             Ending::Stopped => {
                 self.error = None;
                 self.notice = Some(format!(
-                    "{} 还没轮到就被撤掉了。中立库一个字节都没动，再按一次就是。",
+                    "{} 停下了。中立库一个字节都没动，再按一次就是。",
                     stage.label(),
                 ));
             }
@@ -251,7 +273,7 @@ impl Section {
                         .add_enabled(!忙, egui::Button::new(if 忙 { "跑着呢" } else { "开跑" }))
                         .on_hover_text(
                             "排到任务台上跑，期间照常用别的屏；\
-                             按得停，停下来的地方在两个变体之间。",
+                             按得停——停下来留下了什么，那一趟自己会在任务台上说。",
                         )
                         .clicked()
                     {
@@ -275,6 +297,7 @@ impl Section {
 fn run(stage: Stage, site: &mut Site, workspace: &Path, task: &Handle) -> Result<Product, Cutoff> {
     match stage {
         Stage::Identify => identify_run(site, workspace, task),
+        Stage::FoldTitles => fold_titles_run(site, workspace, task),
     }
 }
 
@@ -325,4 +348,36 @@ fn identify_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Prod
     )
     .map(|outcome| Product::Identified(Box::new(outcome)))
     .map_err(|error| Cutoff::failed(format!("识别失败：{error}")))
+}
+
+/// 跑一趟**折标题**：把识别与刮削的结论折成每个作品的**标题集合**。
+///
+/// **一个字节都不读主库、一个请求都不发**（ADR-0001）：要的东西全在中立库里躺着。
+/// 装配只有两样——**优先级表**与**沉淀库**，与命令行 `romcat titles` 摆的是同一副。
+///
+/// ## 停下的地方只有开折之前那一处
+///
+/// 重折是「把折出来的那批清掉再写回去」（[`title::refold`]），**中间停下等于把整份
+/// 标题集合丢掉**。所以这一段在开折之前 `?` 一下把手，之后一步都不看停下的信号：
+/// 那一折在真库上是秒级的事（`romcat titles` 整趟不到 3 秒，`docs/library-facts.md`）,
+/// 等它走完比留下一份空集合便宜得多。于是这一趟**要么写完、要么一个字节都没写**
+/// ——被按停的那一趟走的是「停了」，不是**停在半路**。
+///
+/// ## 优先级表读不出来就停下，不退回内置那份
+///
+/// 挑**显示标题**用的是同一份表，而工作目录里那份 `priorities.toml` 正是人改过的
+/// 说法。悄悄退回内置那份的话，人会看见一份自己没定过的显示标题，还查不出为什么。
+fn fold_titles_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Product, Cutoff> {
+    // 装配那一步加上核心库自己那几步。**核心库那个数由它自己报**
+    // （`title::TASK_STEPS`）——在这儿手写一个 3，那边加一步这儿的进度条就走过头了。
+    task.steps(1 + title::TASK_STEPS);
+    // **「被按停了」一个字都不用凑**：`?` 一下把手，`Halted` 自己折成 `Cutoff::Halted`，
+    // 任务台按支记成「停了」（`Cutoff` 的文档）。底下 `run_task` 交上来的那一支同理，
+    // 折它的是 `From<FoldTitlesError> for Cutoff`。
+    task.step("读优先级表")?;
+    let priorities = romcat_core::sync::prepare::priorities(None, workspace)?;
+    // **能停到哪儿、压掉的叫法怎么筛，全在核心库那一段**（`title::run_task`）：
+    // 这一层只把料摆齐、把把手递进去（ADR-0005）。
+    let report = title::run_task(&mut site.catalog, &site.store, &priorities, task)?;
+    Ok(Product::Titled(Box::new(report)))
 }

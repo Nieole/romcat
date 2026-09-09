@@ -64,6 +64,7 @@ use crate::dat::chinese::ChineseMark;
 use crate::identify::naming;
 use crate::scrape::priority::Priorities;
 use crate::scrape::{AnchorKind, Field};
+use crate::task::{Cutoff, Halted, Handle};
 use crate::verdict::{Store, TitleKey, TitleSuppression, VerdictError};
 
 pub use report::TitleReport;
@@ -858,20 +859,105 @@ impl Tally {
     }
 }
 
-/// 折一遍标题集合、写进中立库、再折出一份报告。
+/// 折一遍标题集合、写进中立库、再折出一份报告。**没人按停下的那条路。**
 ///
 /// **不碰主库、不联网**：要的东西全在中立库里躺着（ADR-0001）。`store` 只读一次——
 /// 拿的是**压掉的叫法**，见 [`refold`]。
 ///
+/// 它就是 [`run_task`] 配一个**没人拿着的把手**：`Handle::new()` 建出来的取消位
+/// 永远关着，也没有第二处够得着它，于是那一趟停不下来。**两条路只有一份实现**
+/// ——分成两份的话，「跑完之后记下这一趟的时刻」这种事迟早只落在其中一条上。
+///
 /// # Errors
-/// 读写中立库、或者读沉淀库失败时返回错误。
+/// 读写中立库、或者读沉淀库失败时返回错误。**这条路交不出
+/// [`Halted`](FoldTitlesError::Halted) 那一支。**
 pub fn run(
     catalog: &mut Catalog,
     store: &Store,
     priorities: &Priorities,
-) -> Result<TitleReport, RefoldError> {
-    refold(catalog, store)?;
-    Ok(TitleReport::build(catalog, priorities)?)
+) -> Result<TitleReport, FoldTitlesError> {
+    run_task(catalog, store, priorities, &Handle::new())
+}
+
+/// 这一趟一共几步。**改了 [`run_task`] 里那几句 `task.step` 就得改这个数**，
+/// 不然进度条会走过头。调用方自己还有装配步骤时，把它加进自己声明的总数里
+/// （`romcat_gui::stages` 那一处「读优先级表」就是这么算的）。
+pub const TASK_STEPS: u32 = 3;
+
+/// 折一遍标题集合、写进中立库、再折出一份报告——**接在任务台上**的那一趟。
+///
+/// ## 能停的地方到写回之前为止
+///
+/// 三步之间各看一眼有没有被叫停（[`Handle::step`]），**最后一个能停的地方是写回
+/// 之前那一处**。过了它就一步都不停：写回是[「清掉再写回」](refold)，
+/// **停在那中间等于把整份标题集合丢掉**——那是一份可再生但当下没人有的东西，
+/// 而库屏、详情面板、导出与搜索读的都是它。
+///
+/// 于是这一趟**要么写完、要么一个字节都没写**：被按停的那一趟走
+/// [`Cutoff::Halted`]（任务台记「停了，什么都没留下」），**不是「停在半路」**
+/// ——[`Handle::halfway`] 的文档写着那一档是留给「没走完却留下了东西」的活的。
+///
+/// 折那一步本身不细停：真库上它是秒级的事（`romcat titles` 整趟不到 3 秒，
+/// `docs/library-facts.md`），按下停下最多多等它走完这一折。
+///
+/// # Errors
+/// 读写中立库、或者读沉淀库失败时返回 [`FoldTitlesError::Refold`]；
+/// 被叫停时返回 [`FoldTitlesError::Halted`]，那时中立库一个字节都没动。
+pub fn run_task(
+    catalog: &mut Catalog,
+    store: &Store,
+    priorities: &Priorities,
+    task: &Handle,
+) -> Result<TitleReport, FoldTitlesError> {
+    task.step("折一遍标题集合")?;
+    let rows = fold(catalog).map_err(RefoldError::from)?;
+    task.step("筛掉压掉的叫法")?;
+    let rows = keep_unsuppressed(rows, store).map_err(RefoldError::from)?;
+    // **最后一个能停的地方。** 底下那两句是「清掉再写回」，中间停下会把整份集合丢掉。
+    task.step("写回中立库")?;
+    write_back(catalog, &rows).map_err(RefoldError::from)?;
+    // **记下这一趟折的时刻**：库屏工序段上折标题那一行说的正是它——那一支的
+    // 「还差多少」算不出来（`stage::Stage::FoldTitles` 写着为什么与实测代价），
+    // 退回显示上次跑的时刻。
+    //
+    // **记在这儿而不在 [`refold`] 里**：那一条是**别人顺手把集合折回来**
+    // （`scrape::zh::judge` 否掉一条中文名之后就地重折的那一下），
+    // 不是有人跑了这道工序。记进去的话，人在详情面板上删掉一个名字之后，
+    // 库屏会说「上次跑是刚刚」，而他并没有点过那颗按钮。
+    catalog.mark_titles_folded().map_err(RefoldError::from)?;
+    Ok(TitleReport::build(catalog, priorities).map_err(RefoldError::from)?)
+}
+
+/// 折标题**接在任务台上**那一趟交不出报告的原因。
+///
+/// **单独一个枚举，不往 [`RefoldError`] 上加一支**：那一条是[重折](refold)自己的
+/// 错误，而重折没有把手、停不下来——给它加一个交不出来的支，等于让每个 `match` 它的
+/// 地方都去处理一种不会发生的事（`scrape::zh` 那处就是逐支 `match` 的）。
+#[derive(Debug, thiserror::Error)]
+pub enum FoldTitlesError {
+    /// 折不出来：读写中立库、或者读**沉淀库**失败。
+    #[error(transparent)]
+    Refold(#[from] RefoldError),
+    /// **被按停了。** 停在开折之前、筛之前或者写回之前——中立库一个字节都没动。
+    ///
+    /// **这一句想怎么写就怎么写。** 任务台分「停了」与「失败」看的是 [`Cutoff`]
+    /// 落在哪一支（底下那个 `From` 折的），不是这句话说了什么。
+    #[error("折标题按停了：清掉再写回还没开始，中立库一个字节都没动。")]
+    Halted(#[from] Halted),
+}
+
+impl From<FoldTitlesError> for Cutoff {
+    /// **被按停不折成一句「失败」。**
+    ///
+    /// 折的是**支**不是话：`Halted` 那一支进 [`Cutoff::Halted`]（它一个字都不带），
+    /// 别的照旧带着自己那句话进 [`Cutoff::Failed`]。界面上那一趟于是记成「停了」，
+    /// 而不是让人去找哪儿坏了。
+    fn from(error: FoldTitlesError) -> Self {
+        match error {
+            FoldTitlesError::Halted(_) => Self::Halted,
+            error => Self::Failed(error.to_string()),
+        }
+    }
 }
 
 /// 折不动标题集合的原因。
@@ -915,7 +1001,19 @@ pub enum RefoldError {
 /// # Errors
 /// 读写中立库、或者读沉淀库失败时返回错误。
 pub fn refold(catalog: &mut Catalog, store: &Store) -> Result<(), RefoldError> {
-    let mut rows = fold(catalog)?;
+    let rows = keep_unsuppressed(fold(catalog)?, store)?;
+    Ok(write_back(catalog, &rows)?)
+}
+
+/// 折出来的那批照**沉淀库**里那些 [`TitleSuppression`] 筛一遍：被点名的一条都不留。
+///
+/// 摊出来是给 [`run_task`] 用的——它要在折与写之间留一个能停的地方，
+/// 而[`refold`]是一口气走完的。**两条路筛的是同一份记录、同一个键**，
+/// 各写一遍的话，被删掉的那条会在其中一条上悄悄回来。
+fn keep_unsuppressed(
+    mut rows: Vec<TitleRow>,
+    store: &Store,
+) -> Result<Vec<TitleRow>, VerdictError> {
     let records = store.title_suppressions()?;
     if !records.is_empty() {
         // **借着比，不克隆。** 真库上折出来的行是万级，为查一次集合而克隆三串字
@@ -942,8 +1040,17 @@ pub fn refold(catalog: &mut Catalog, store: &Store) -> Result<(), RefoldError> {
             ))
         });
     }
+    Ok(rows)
+}
+
+/// **清掉再写回，中间一步都不停。**
+///
+/// 这两句之间没有任何看停下信号的地方，也不许有：停在那中间，`title` 那张表就是空的
+/// ——库屏、详情面板、导出与搜索读的都是它。[`run_task`] 的最后一个停下点因此摆在
+/// 调用它**之前**。
+fn write_back(catalog: &mut Catalog, rows: &[TitleRow]) -> Result<(), CatalogError> {
     catalog.clear_titles()?;
-    Ok(catalog.put_titles(&rows)?)
+    catalog.put_titles(rows)
 }
 
 /// 一条叫法在**标题集合**里的去重键：作品、语言、类型、源、值。
