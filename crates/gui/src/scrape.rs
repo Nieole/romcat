@@ -755,23 +755,12 @@ fn run(
     let priorities = romcat_core::sync::prepare::priorities(None, workspace)?;
 
     task.step("开中文离线源")?;
-    // **剥离规则读工作目录里那份**（`sources::rules`，与命令行同一条查法）：正题正是
-    // 拿去撞中文离线源的那一串字，两条路各用一份规则的话，同一个变体在命令行与界面上
-    // 会撞到不同的条目——而那是写进库里的结论，不是显示上的差别。
-    let rules = romcat_core::sources::rules(workspace)?;
-    let store = open_zh(workspace, &rules, task)?;
-    let index = match store.as_ref().map(zh::store::Store::load).transpose() {
-        Ok(index) => index.filter(|index: &zh::Index| !index.is_empty()),
-        Err(error) => return Err(Cutoff::failed(format!("中文索引读不出来：{error}"))),
-    };
-    let naming = fuzzy::Naming {
-        rules: &rules,
-        index: index.as_ref(),
-        tuning: zh::Tuning::default(),
-    };
-    let summaries: Option<&dyn scrape::zh::Summaries> = index
+    let parts = NamingParts::open(workspace, task)?;
+    let naming = parts.naming();
+    let summaries: Option<&dyn scrape::zh::Summaries> = parts
+        .index
         .as_ref()
-        .and(store.as_ref())
+        .and(parts.store.as_ref())
         .map(|store| store as &dyn scrape::zh::Summaries);
 
     // **匹配裁决读不到就停下，不降级成「没人裁过」。** 当成没裁过跑下去，会把人否定掉
@@ -823,7 +812,59 @@ fn run(
     .map_err(|error| Cutoff::failed(format!("刮削失败：{error}")))
 }
 
+/// **名字那一层**要的那副原料：剥离规则、本机那份中文离线索引，以及索引背后那份库。
+///
+/// **刮削与识别摆的是同一副**（`romcat_core::identify::fuzzy` 与
+/// `romcat_core::scrape` 认的是同一份规则、同一份索引），所以它只有这一处：两条路各开
+/// 一遍的话，同一个变体在两条路上会撞到不同的条目——而那是**写进库里的结论**，
+/// 不是显示上的差别。识别那一侧走 [`crate::stages`]。
+///
+/// 它交出来的是这三样本身而不是折好的 [`fuzzy::Naming`]：后者**只借不拥有**，
+/// 得活在调用方的栈上。
+pub(crate) struct NamingParts {
+    /// **剥离规则**：拿去撞中文离线源的那一串字是它剥出来的。
+    pub rules: romcat_core::filename::Rules,
+    /// 索引背后那份库。**刮削那一侧还要拿它取简介**（`scrape::zh::Summaries`），
+    /// 识别那一侧只要索引。
+    pub store: Option<zh::store::Store>,
+    /// 索引本身。**没取过数、或者取过但空的，都是 `None`**——那不是错误，只是少一层。
+    pub index: Option<zh::Index>,
+}
+
+impl NamingParts {
+    /// 开一副出来。
+    ///
+    /// # Errors
+    /// 规则读不动、那份索引库打不开、或者索引读不出来时返回一句给人看的话；
+    /// 重建那一趟被按停时交出 [`Cutoff::Halted`](romcat_core::task::Cutoff::Halted)。
+    pub(crate) fn open(workspace: &Path, task: &Handle) -> Result<Self, Cutoff> {
+        // **剥离规则读工作目录里那份**（`sources::rules`，与命令行同一条查法）。
+        let rules = romcat_core::sources::rules(workspace)?;
+        let store = open_zh(workspace, &rules, task)?;
+        let index = match store.as_ref().map(zh::store::Store::load).transpose() {
+            Ok(index) => index.filter(|index: &zh::Index| !index.is_empty()),
+            Err(error) => return Err(Cutoff::failed(format!("中文索引读不出来：{error}"))),
+        };
+        Ok(Self {
+            rules,
+            store,
+            index,
+        })
+    }
+
+    /// 折出**名字那一层**认得的东西。借的是这副原料自己，所以它活不过这个 `self`。
+    pub(crate) fn naming(&self) -> fuzzy::Naming<'_> {
+        fuzzy::Naming {
+            rules: &self.rules,
+            index: self.index.as_ref(),
+            tuning: zh::Tuning::default(),
+        }
+    }
+}
+
 /// 本机那份中文离线索引。**没取过数不是错误**——少一层而已，报告会说清楚。
+///
+/// **两条路都经 [`NamingParts::open`] 走这儿**：刮削与识别摆的是同一副原料。
 ///
 /// 结构版本对不上时从本机那份原件就地重建（`zh::sync::rebuild`），一个网络请求都不发；
 /// **重建不成也只是少一层**，与命令行同一条口径（那一侧的 `heal_zh_store`）。
@@ -834,7 +875,7 @@ fn run(
 /// [`Handle::tick`]，「停下」接到它底下那个中断信号——界面上那个按钮于是也停得动它，
 /// 而停下的地方在两条记录之间，那份索引原样等着下一趟（ADR-0005：判断在核心里，
 /// 这一层只把把手转发进去）。
-fn open_zh(
+pub(crate) fn open_zh(
     workspace: &Path,
     rules: &romcat_core::filename::Rules,
     task: &Handle,

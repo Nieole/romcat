@@ -102,7 +102,7 @@ use std::path::{Path, PathBuf};
 
 use crate::catalog::identify::{
     Candidate, CartFactRow, Confidence, ContainerFile, ContentHash, DiscFactRow, EntryFact,
-    Identification, ModelAnswerRow, SwitchFactRow,
+    Identification, ModelAnswerRow, NOT_RUN_LABEL, SwitchFactRow,
 };
 use crate::catalog::{Catalog, CatalogError, KEYS_PER_QUERY, Provenance, Roots, State, VariantRow};
 use crate::classify::{self, Category};
@@ -114,6 +114,7 @@ use crate::path::file_name_of_key;
 use crate::report::thousands;
 use crate::scan::CancelToken;
 use crate::shape::Role;
+use crate::task::Handle;
 use crate::titledb;
 use crate::verdict::{self, Decision, Verdict};
 
@@ -470,6 +471,68 @@ pub fn run(
         model: state.model,
         collections,
     })
+}
+
+/// 跑一趟识别，**把手接在任务台上**。
+///
+/// 它就是 [`run`] 外面包的那一层，接法与 [`scan::scan`](crate::scan::scan) 一模一样：
+/// 「停下」接在把手底下那个中断信号上，进度往
+/// [`Handle::tick`](crate::task::Handle::tick) 上报。**识别一趟 65 秒**（真机上四万六千
+/// 个变体），跑在画帧那条线程上的话窗口就是一块白板。
+///
+/// ## 为什么另开一个函数而不是给 [`run`] 换参数
+///
+/// 命令行要的是**每五秒印一行**（`romcat identify` 那几行「已算 N / M」），而它手里
+/// 没有任务台。两个调用方要的东西不一样，[`run`] 那一对 `cancel + progress` 参数于是
+/// 留着——这一层只负责把它们接到把手上。
+///
+/// ## 被叫停时不抛错，而是报一句**停在半路**
+///
+/// 与 [`scan::scan`](crate::scan::scan) 同一条：那份「到目前为止」的账是真的，已经算出
+/// 来的结论也真的落进了中立库，所以照旧返回 `Ok`，只往把手上报一句
+/// [`Handle::halfway`](crate::task::Handle::halfway)——任务台照它把这一趟记成
+/// [`Ending::Halfway`](crate::task::Ending::Halfway)，历史里那一行才不会写成「完成」。
+///
+/// **那句话不许说「下一趟接着算」**：[`run`] 起手就
+/// [`clear_identifications`](Catalog::clear_identifications)，下一趟是**从头再算一遍**
+/// ——识别没有**断点**。说反了的话，人会以为按停是省时间的。
+///
+/// # Errors
+/// 中立库或 DAT 库读写失败时返回错误。**被按停不是错误。**
+pub fn run_task(
+    library: &dyn LibraryFs,
+    catalog: &mut Catalog,
+    ammo: &Ammo<'_>,
+    options: &Options,
+    task: &Handle,
+) -> Result<Outcome, IdentifyError> {
+    task.steps(1);
+    // **这一步报出去就不回头看**：识别只有「挨个变体过一遍」这一段，粗粒度的步数没有
+    // 信息量，走到哪儿由底下那句 `tick` 说。已经被叫停的话 `run` 自己会在第一个变体
+    // 之前发现（它收的就是这个把手底下的信号），照旧交出那份账。
+    let _ = task.step("挨个变体过一遍");
+    let outcome = run(
+        library,
+        catalog,
+        ammo,
+        options,
+        task.cancel(),
+        &mut |progress: &Progress| task.tick(progress.done, progress.total),
+    )?;
+    if outcome.interrupted {
+        let 算完了 = outcome
+            .report
+            .total
+            .variants
+            .saturating_sub(outcome.report.total.not_run);
+        task.halfway(format!(
+            "按停时算完 {} 个变体，结论落进了中立库；还剩 {} 个{NOT_RUN_LABEL}\
+             ——识别没有断点，下一趟从头再算一遍。",
+            thousands(算完了),
+            thousands(outcome.report.total.not_run),
+        ));
+    }
+    Ok(outcome)
 }
 
 /// **模型推断那一层**：把残渣打包问出去，答案落库，候选追加到已有的结论上。

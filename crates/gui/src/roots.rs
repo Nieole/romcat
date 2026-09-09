@@ -1,4 +1,12 @@
-//! **库**那一屏：这个库由什么构成——**一组根**，加上让识别能干活的**数据源**。
+//! **库**那一屏：这个库由什么构成——**一组根**，加上让识别能干活的**数据源**，
+//! 再加上这个库还差哪几道[**工序**](crate::stages)。
+//!
+//! ## 工序那一段为什么也在这一屏
+//!
+//! 「扫完了怎么没认出来」这个问题的答案有两种：**数据源是空的**（底下那一段画着），
+//! 与**识别根本没跑过**。后者从前在这一屏上看不见，于是这一屏只答得出一半。
+//! 工序那一段答的是另一半，而它与前两段是同一件事的三面——这个库由什么构成、
+//! 还差什么。那一段自己住在 [`crate::stages`]，这一屏只把它摆进来。
 //!
 //! ## 两半东西为什么同屏
 //!
@@ -60,6 +68,8 @@ pub struct Screen {
     workspace: PathBuf,
     roots: Vec<RootRow>,
     sources: Vec<SourceStatus>,
+    /// 第三段：**工序**——这个库还差哪几道步骤。
+    stages: crate::stages::Section,
     /// 「添加目录」那两个输入框。
     new_path: String,
     new_name: String,
@@ -91,6 +101,7 @@ impl Screen {
     #[must_use]
     pub fn new(workspace: PathBuf) -> Self {
         Self {
+            stages: crate::stages::Section::new(workspace.clone()),
             workspace,
             roots: Vec::new(),
             sources: Vec::new(),
@@ -121,6 +132,7 @@ impl Screen {
             Err(error) => self.error = Some(format!("这份中立库读不动：{error}")),
         }
         self.sources = sources::survey(&self.workspace);
+        self.stages.reload(site);
     }
 
     /// 这个库由哪几个根构成。测试拿它核对。
@@ -133,6 +145,21 @@ impl Screen {
     #[must_use]
     pub fn sources(&self) -> &[SourceStatus] {
         &self.sources
+    }
+
+    /// **工序**那一段：这个库还差哪几道步骤。测试拿它核对。
+    #[must_use]
+    pub fn stages(&self) -> &crate::stages::Section {
+        &self.stages
+    }
+
+    /// **工序**那一段，改得动的那一份：排一趟工序上台、取走「刚跑完的是哪一道」
+    /// 都走它（[`crate::stages::Section`]）。
+    ///
+    /// 露出这一份而不是各包一层转发：包一层的话，同一趟活要穿三层壳
+    /// （窗口 → 库屏 → 工序段），而中间那层一个字都不加。
+    pub fn stages_mut(&mut self) -> &mut crate::stages::Section {
+        &mut self.stages
     }
 
     /// 这一屏眼下报出来的那句错；没有就是 `None`。
@@ -307,6 +334,10 @@ impl Screen {
     ///
     /// 返回「认领了没有」，好让上一层知道要不要接着问别的屏。
     pub fn settle(&mut self, site: &Site, done: &romcat_core::task::Finished<Product>) -> bool {
+        // **工序那一段自己认领自己排的那几趟**：它按任务号认，不是它的就往下走。
+        if self.stages.settle(site, done) {
+            return true;
+        }
         let Some(at) = self.running.iter().position(|(id, _)| *id == done.id) else {
             return false;
         };
@@ -393,7 +424,7 @@ impl Screen {
 
     fn body(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         ui.heading("库");
-        ui.weak("这个库由什么构成：根 + 数据源");
+        ui.weak("这个库由什么构成：根 + 数据源 + 还差哪几道工序");
         if let Some(error) = &self.error {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
@@ -405,6 +436,8 @@ impl Screen {
         self.roots_ui(ui, site, tasks);
         ui.add_space(18.0);
         self.sources_ui(ui, tasks);
+        ui.add_space(18.0);
+        self.stages.ui(ui, site, tasks);
     }
 
     fn roots_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {

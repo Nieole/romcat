@@ -29,6 +29,7 @@ pub mod scrape;
 pub mod shape;
 pub mod site;
 pub mod sources;
+pub mod stage;
 pub mod sublibrary;
 pub mod sync;
 pub mod task;
