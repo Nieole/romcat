@@ -24,7 +24,7 @@
 //! 主库**一律拿本地 fixture 目录模拟**：绝不去动任何真实设备或 SD 卡。
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use romcat_core::catalog::{Catalog, Roots};
@@ -222,6 +222,30 @@ impl 现场 {
             .clone()
     }
 
+    /// 工序段上导出那一行。
+    fn 导出那一行(&self) -> StageRow {
+        self.app
+            .roots()
+            .stages()
+            .of(Stage::Export)
+            .expect("工序段有导出那一行")
+            .clone()
+    }
+
+    /// 选一次**前端格式**与**导出目录**。界面上工序段底下那一行填完按「记下」走的就是它。
+    fn 选一次导出去哪儿(&mut self, 格式: &str, 目录: &Path) {
+        let (screen, site, _) = self.app.roots_site_and_tasks();
+        screen
+            .stages_mut()
+            .set_export_setup(site, 格式, &目录.to_string_lossy());
+    }
+
+    /// 把**导出**那一道工序排上任务台，等它收场。界面上点那一行的按钮走的就是这条。
+    fn 导出(&mut self) {
+        self.app.start_stage(Stage::Export);
+        self.等任务跑完();
+    }
+
     /// 队列屏眼下说库里还有多少个变体连识别都没跑过。
     fn 队列屏说的(&self) -> u64 {
         self.app.queue().queue().not_run()
@@ -266,6 +290,28 @@ impl 现场 {
         }
         panic!("这一趟活迟迟不结束");
     }
+}
+
+/// 主库那棵目录树眼下长什么样：每份文件的**相对路径与内容**。
+///
+/// **导出只写元数据文件，一个 ROM 都不搬**（ADR-0004、验收第 6 条）。这一份在导出前后
+/// 各取一次，逐字节比——比「文件数没变」严，那样连「原地改写了一个 ROM」都验得到。
+fn 主库快照(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut 待走 = vec![root.to_path_buf()];
+    while let Some(dir) = 待走.pop() {
+        for entry in fs::read_dir(&dir).expect("读得出目录") {
+            let path = entry.expect("读得出一条").path();
+            if path.is_dir() {
+                待走.push(path);
+            } else {
+                let 相对 = path.strip_prefix(root).expect("在这棵树里").to_path_buf();
+                out.push((相对, fs::read(&path).expect("读得出文件")));
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 fn 跑一帧(ctx: &egui::Context, app: &mut App) {
@@ -1019,7 +1065,7 @@ fn 工序段上折标题一行_画的是上次跑的时刻() {
         "工序段上没有折标题那一行：\n{屏上}",
     );
     assert!(
-        屏上.lines().any(|line| line.trim() == "工序 · 2 道"),
+        屏上.lines().any(|line| line.trim() == "工序 · 3 道"),
         "工序段说的道数不对：\n{屏上}",
     );
 
@@ -1065,4 +1111,243 @@ fn 折标题读不动优先级表时如实拒绝_并说清停在哪一步() {
         "{}",
         现场.折标题那一行().render(),
     );
+}
+
+#[test]
+fn 工序段上导出一行_画的是上次跑的时刻() {
+    // 验收第 1 条：那一行在屏上，说的是**上次导出的时刻**（这一支的度量走了退路，
+    // 见 `romcat_core::stage::Stage::Export` 与挂单 `Q436`），**而另外两支不受牵连**。
+    let 库 = 建库("gui-stages-导出一行");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        屏上.lines().any(|line| line.trim() == "导出"),
+        "工序段上没有导出那一行：\n{屏上}",
+    );
+
+    // 一趟都没导过：说的是「还没跑过」，**不是零**。
+    let 那一句 = 现场.导出那一行().render();
+    assert!(那一句.contains("还没跑过"), "{那一句}");
+    assert!(那一句.contains("算不出还差多少"), "{那一句}");
+    // **另外两支照旧**：识别报数，折标题说它自己那一句（验收第 1 条「不牵连另外两支」）。
+    assert_eq!(现场.识别那一行().behind, Behind::Left(2));
+    assert!(现场.折标题那一行().render().contains("还没跑过"));
+}
+
+#[test]
+fn 选一次前端格式与目录之后_点一下就重导_而主库里的东西一个字节都没动() {
+    // 验收第 2、3、4、6 条一条线走完：选一次记进中立库 → 点一下排上任务台 →
+    // 元数据落在导出目录里 → **主库那几个 ROM 一个字节都没动**（ADR-0004）。
+    let 库 = 建库("gui-stages-导出跑一趟");
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    let 导出去 = 现场.工作区.path().join("导出去");
+    let 主库原样 = 主库快照(库.path());
+
+    现场.选一次导出去哪儿("Pegasus", &导出去);
+    assert!(现场.app.roots().stages().error().is_none());
+    // **记进了中立库**：这一份就是下一趟不必再选的依据。
+    let 记下的 = 现场
+        .app
+        .site()
+        .catalog
+        .export_setup()
+        .expect("读得出")
+        .expect("记下了");
+    assert_eq!(记下的.format, "Pegasus");
+    assert_eq!(记下的.out, 导出去);
+
+    现场.导出();
+
+    // 元数据真的写出去了。
+    let 写出来的: Vec<PathBuf> = fs::read_dir(&导出去)
+        .expect("导出目录建出来了")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_file())
+        .collect();
+    assert!(!写出来的.is_empty(), "一份元数据都没写出来");
+
+    // **主库一个 ROM 都没搬、一个字节都没改**（验收第 6 条逐字要求）。
+    assert_eq!(主库快照(库.path()), 主库原样, "导出动了主库里的东西");
+
+    // 任务台历史上留下一条**跑完了**，名字就是那道工序的名字。
+    let record = &现场.app.tasks().history()[0];
+    assert_eq!(record.name, "导出");
+    assert!(
+        matches!(record.ending, Ending::Done(_)),
+        "跑完的那一趟记成了「{}」",
+        record.ending.render(),
+    );
+
+    // 那一行改口说「上次跑是 ⋯」，而**识别那一行照旧报数**（验收第 1 条）。
+    let 那一句 = 现场.导出那一行().render();
+    assert!(那一句.contains("上次跑是"), "{那一句}");
+    assert_eq!(
+        现场.识别那一行().behind,
+        Behind::Left(2),
+        "导出退回时刻，把识别那一支也一起降级了",
+    );
+
+    // **下一趟不必再选**：直接再点一下就重导（验收第 3 条）。
+    现场.导出();
+    assert!(现场.app.roots().stages().error().is_none());
+    assert_eq!(
+        现场
+            .app
+            .tasks()
+            .history()
+            .iter()
+            .filter(|record| record.name == "导出")
+            .count(),
+        2,
+        "第二趟没排上台——「下一趟不必再选」没兑现",
+    );
+}
+
+#[test]
+fn 外面有人动过那些元数据文件时停下来_不静默覆盖() {
+    // 验收第 5 条。判据是**底本**：上次我们写出去的那份是这个哈希，盘上那份不是，
+    // 那就是有人在外面动过（`catalog::frontend` 的模块文档）。
+    let 库 = 建库("gui-stages-导出撞手改");
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    let 导出去 = 现场.工作区.path().join("导出去");
+    现场.选一次导出去哪儿("Pegasus", &导出去);
+    现场.导出();
+
+    // 有人在工具外面改了它。
+    let 落点 = fs::read_dir(&导出去)
+        .expect("导出目录在")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| path.is_file())
+        .expect("写出来了一份");
+    let mut 手改的 = fs::read_to_string(&落点).expect("读得出");
+    手改的.push_str("\n# 我后来手加的一行\n");
+    fs::write(&落点, &手改的).expect("写得进");
+
+    现场.导出();
+
+    assert_eq!(
+        fs::read_to_string(&落点).expect("读得出"),
+        手改的,
+        "**没有静默覆盖**：手改的那一行还在",
+    );
+    let 说的 = 现场
+        .app
+        .roots()
+        .stages()
+        .error()
+        .expect("撞上手改要说出来，不能默默跳过");
+    assert!(说的.contains("动过"), "没说清为什么没写：{说的}");
+    // **「跑完了」那一句数的是真写出去的那几份**：这个库横跨两个平台、收敛成两份，
+    // 手改的是其中一份，于是这一趟只写成了另一份。报「2 份」就是虚报——被挡下的那一份
+    // 一个字节都没写。
+    let 那一句 = 现场.app.roots().stages().notice().expect("跑完了也要说话");
+    assert!(
+        那一句.contains("写进 1 份"),
+        "写出去的份数报错了（被挡下的那份也算进去了？）：{那一句}",
+    );
+}
+
+#[test]
+fn 还没选过格式与目录时点导出_当场说清而不是默默不动() {
+    // **排一趟活的入口只有一个**（`App::start_stage`），票 `09` 的捷径走的也是它。
+    // 那时人可能一次都没选过——默默不动的话，他会以为按钮坏了。
+    let 库 = 建库("gui-stages-导出没选过");
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+
+    现场.导出();
+    let 说的 = 现场.app.roots().stages().error().expect("该说清");
+    assert!(说的.contains("格式"), "没说清缺的是什么：{说的}");
+    assert!(说的.contains("目录"), "没说清缺的是什么：{说的}");
+    // 一个字节都没写出去。
+    assert_eq!(现场.app.site().catalog.exported_at().expect("读得出"), None);
+}
+
+#[test]
+fn 导出不出现在子库屏上_也没占用子库那套选择集与清单() {
+    // 验收第 7 条。词表里**子库**是「从主库挑选**一部分**导出到某个**目标设备**形成的
+    // **派生库**」，而导出三个限定词一个都不满足：不挑选（整库级、作品级收敛）、
+    // 没有目标设备、不是派生库。做成一个特殊子库的话，「子库」就从「给掌机的一份派生」
+    // 稀释成「任何一次往外写」，而**清单**——工具在目标设备上的行为边界——在主库根上
+    // 根本没有边界可划。
+    let 库 = 建库("gui-stages-导出不是子库");
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    现场.选一次导出去哪儿("Pegasus", &现场.工作区.path().join("导出去"));
+    现场.导出();
+
+    let (sublibrary, site) = 现场.app.sublibrary_and_site();
+    sublibrary.reload(site);
+    assert!(
+        现场.app.sublibrary().list().is_empty(),
+        "导出在子库屏上多出了一行：{:?}",
+        现场.app.sublibrary().list(),
+    );
+}
+
+#[test]
+fn 导出排着队被撤掉时一份元数据都没写出去() {
+    // **规格 Testing Decisions 要求三支各走一遍这两条**：排一趟等它收场（上面那条），
+    // 与排一趟当场按停。这一条是后者——按停在**一份都还没写**那个位置上，记的是
+    // 「停了，什么都没留下」而不是**停在半路**（写过之后再停才是那一档，那条钉在
+    // `romcat-core` 的 `tests/stage.rs` 上，靠一个「写出第一份就按停」的适配器把那一下
+    // 钉死，不靠挂钟）。
+    //
+    // **台上先摆一趟别的活**：任务台一次只跑一趟，于是排上去的导出稳稳地停在队列里
+    // ——不靠「恰好还没跑完」那种挂钟彩票（挂单 `Q196` / `Q349`）。
+    let 库 = 建库("gui-stages-导出按停");
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    let 导出去 = 现场.工作区.path().join("导出去");
+    现场.选一次导出去哪儿("Pegasus", &导出去);
+
+    let 占位 = 现场.app.tasks_mut().queue("装作在扫一趟库", |task| {
+        for _ in 0..3_000 {
+            task.check()?;
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Err(Cutoff::failed("这一趟本来就只是占着位子"))
+    });
+    现场.app.start_stage(Stage::Export);
+    let id = 现场
+        .app
+        .roots()
+        .stages()
+        .task_of(Stage::Export)
+        .expect("这一趟排上任务台了");
+    现场.app.tasks_mut().stop(id);
+    现场.app.poll_tasks();
+
+    let record = 现场
+        .app
+        .tasks()
+        .history()
+        .iter()
+        .find(|one| one.id == id)
+        .expect("撤掉的那一趟也进历史");
+    assert!(
+        matches!(record.ending, Ending::Stopped),
+        "撤掉的那一趟记成了「{}」——它一份都没写，不是停在半路",
+        record.ending.render(),
+    );
+    assert!(!导出去.exists(), "一份都没写的那一趟却建出了导出目录");
+    assert_eq!(现场.app.site().catalog.exported_at().expect("读得出"), None);
+    // 那一行的按钮又按得下去了。
+    assert!(现场.app.roots().stages().task_of(Stage::Export).is_none());
+
+    现场.app.tasks_mut().stop(占位);
+    现场.等任务跑完();
 }

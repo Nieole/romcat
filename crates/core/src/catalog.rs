@@ -20,6 +20,7 @@ pub mod baseline;
 pub mod browse;
 pub mod content;
 pub mod detail;
+pub mod export;
 mod filter;
 pub mod frontend;
 pub mod identify;
@@ -54,6 +55,7 @@ pub use browse::{
 };
 pub use content::{MemberFile, ReleaseRow, VariantRow};
 pub use detail::{MediaHave, MediaItem, Sibling, ValueItem, VariantDetail};
+pub use export::{ExportSetup, ExportSetupError};
 pub use frontend::{SnapshotOrigin, SnapshotRow};
 pub use identify::{
     AcceptedCandidate, Candidate, CandidateCounts, Confidence, ContentHash, EntryFact,

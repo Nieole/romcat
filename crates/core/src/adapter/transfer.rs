@@ -41,8 +41,10 @@ use std::path::{Component, Path, PathBuf};
 use crate::catalog::scrape::{Harvested, HarvestedValue};
 use crate::catalog::{Catalog, CatalogError, Roots, SnapshotOrigin};
 use crate::path;
+use crate::report::thousands;
 use crate::scrape::priority::Priorities;
 use crate::scrape::{AnchorKind, Field};
+use crate::task::{Cutoff, Halted, Handle};
 
 use super::converge::{self, Converged, NotAnEntry, Preference, VARIANT_KEY};
 use super::report::{Conflict, EXAMPLES, ExportReport, ExportedFile, ImportReport, ImportedFile};
@@ -213,6 +215,54 @@ pub fn import(
 
     report.tier = worst.label().to_string();
     Ok(report)
+}
+
+/// 导出**接在任务台上**那一趟交不出报告的原因。
+///
+/// **单独一个枚举，不往 [`TransferError`] 上加一支**：那一条是**导入与导出共用**的，
+/// 而导入根本没有把手、停不下来——给它加一个交不出来的支，等于让每个 `match` 它的
+/// 地方都去处理一种不会发生的事（与 [`FoldTitlesError`](crate::title::FoldTitlesError)
+/// 同一条理由）。
+#[derive(Debug, thiserror::Error)]
+pub enum ExportError {
+    /// 导不出来：读写中立库、写文件或适配器写不出来。
+    #[error(transparent)]
+    Transfer(#[from] TransferError),
+    /// **被按停了，而且一份文件都还没写。** 盘上与中立库都一个字节没动。
+    ///
+    /// **写过之后停下的那一趟不走这一支**：它交出的是一份报告加一句
+    /// [`Handle::halfway`]，因为它**留下了东西**（见 [`export_task`]）。
+    ///
+    /// **这一句想怎么写就怎么写。** 任务台分「停了」与「失败」看的是 [`Cutoff`]
+    /// 落在哪一支（底下那个 `From` 折的），不是这句话说了什么。
+    #[error("导出按停了：还没开始往盘上写，一份元数据文件都没动。")]
+    Halted(#[from] Halted),
+}
+
+impl From<CatalogError> for ExportError {
+    fn from(error: CatalogError) -> Self {
+        Self::Transfer(error.into())
+    }
+}
+
+impl From<AdapterError> for ExportError {
+    fn from(error: AdapterError) -> Self {
+        Self::Transfer(error.into())
+    }
+}
+
+impl From<ExportError> for Cutoff {
+    /// **被按停不折成一句「失败」。**
+    ///
+    /// 折的是**支**不是话：`Halted` 那一支进 [`Cutoff::Halted`]（它一个字都不带），
+    /// 别的照旧带着自己那句话进 [`Cutoff::Failed`]。界面上那一趟于是记成「停了」，
+    /// 而不是让人去找哪儿坏了。
+    fn from(error: ExportError) -> Self {
+        match error {
+            ExportError::Halted(_) => Self::Halted,
+            error => Self::Failed(error.to_string()),
+        }
+    }
 }
 
 /// 一个条目的 `file:` 指到库里的哪个变体，以及它属于哪个作品。
@@ -386,17 +436,73 @@ pub struct ExportOptions {
     pub force: bool,
 }
 
-/// 把中立库导出成前端元数据。
+/// 把中立库导出成前端元数据。**没人按停下的那条路。**
+///
+/// 它就是 [`export_task`] 配一个**没人拿着的把手**：[`Handle::new`] 建出来的取消位
+/// 永远关着，也没有第二处够得着它，于是那一趟停不下来。**两条路只有一份实现**
+/// ——分成两份的话，「跑完之后记下这一趟的时刻」这种事迟早只落在其中一条上。
 ///
 /// # Errors
-/// 读写中立库、写文件或适配器写不出来时返回错误。
-#[allow(clippy::too_many_lines)]
+/// 读写中立库、写文件或适配器写不出来时返回错误。**这条路交不出
+/// [`Halted`](ExportError::Halted) 那一支。**
 pub fn export(
     catalog: &mut Catalog,
     adapter: &dyn Adapter,
     priorities: &Priorities,
     options: &ExportOptions,
-) -> Result<ExportReport, TransferError> {
+) -> Result<ExportReport, ExportError> {
+    export_task(catalog, adapter, priorities, options, &Handle::new())
+}
+
+/// 这一趟一共几步。**改了 [`export_task`] 里那几句 `task.step` 就得改这个数**，
+/// 不然进度条会走过头。调用方自己还有装配步骤时，把它加进自己声明的总数里
+/// （`romcat_gui::stages` 那一处「读优先级表」就是这么算的）。
+pub const TASK_STEPS: u32 = 3;
+
+/// 把中立库导出成前端元数据——**接在任务台上**的那一趟。
+///
+/// ## 导出**有**「停在半路」这一档
+///
+/// 这一条与[折标题](crate::title::run_task)正相反，而差别是真的：重折的写是
+/// 「清掉再写回」，停在中间等于把整份集合丢掉，所以那一趟要么写完、要么一个字节
+/// 都没写；**导出是一份文件一份文件地写**，而每一份写完就当场把
+/// [**底本**](Catalog::put_snapshot)也存进中立库。停在第三份上，前两份**真的躺在盘上
+/// 了**，而且下一趟拿它们当基线接着比——那正是[停在半路](Handle::halfway)那一档
+/// 说的「没走完却留下了东西」。
+///
+/// 于是这一趟有两种停法，**按留下了什么分**：
+///
+/// - **一份都还没写就停下** → [`ExportError::Halted`]，任务台记「停了，什么都没留下」。
+///   收敛整个库那一步是这一趟最长的一段（见 [`Stage::Export`](crate::stage::Stage::Export)
+///   上的实测），按停多半落在这儿。
+/// - **写过至少一份之后停下** → 报一句 [`Handle::halfway`] 并**照旧返回 `Ok`**
+///   （`Handle::halfway` 的文档逐字写着这一条：报了这句就得返回 `Ok`，
+///   不然那句话被整条丢掉，历史反过来说「什么都没留下」）。报告里逐份列着写了哪几份。
+///
+/// **只排计划那一趟（`dry_run`）没有半路可停**：它一个字节都不写盘，停在哪儿都是
+/// 「什么都没留下」。
+///
+/// ## 时刻戳打在最后，而且只打给走完了的那一趟
+///
+/// [`Catalog::mark_exported`] 在这一趟的**末尾**、跳过了 `dry_run` 与被按停的那两种
+/// 之后才落。库屏工序段上导出那一行说的正是它——那一支的「还差多少」算不出来
+/// （`stage::Stage::Export` 写着为什么与实测代价），退回显示上次跑的时刻。
+/// 只排了计划、或者只写了一半就说「上次跑是刚刚」，那一行就在骗人
+/// （规格第 31 条「至少不骗我」）。
+///
+/// # Errors
+/// 读写中立库、写文件或适配器写不出来时返回 [`ExportError::Transfer`]；
+/// 一份文件都没写就被叫停时返回 [`ExportError::Halted`]，那时盘上与中立库都一个字节
+/// 没动。
+#[allow(clippy::too_many_lines)]
+pub fn export_task(
+    catalog: &mut Catalog,
+    adapter: &dyn Adapter,
+    priorities: &Priorities,
+    options: &ExportOptions,
+    task: &Handle,
+) -> Result<ExportReport, ExportError> {
+    task.step("把整个库收敛成条目")?;
     let converged = converge::run(catalog, priorities, adapter)?;
     let out_dir = normalize(&options.out);
 
@@ -414,6 +520,7 @@ pub fn export(
     // 拿键去 `fs::write` 会在旁边新建一个 NFC 名字的文件，维护者的原件还躺在原处
     // 一个字没改——从此两份各走各的，而且外部改动检测再也认不出那份原件。
     // ADR-0020 的「读盘用系统给的原始路径，入库与比较用 NFC 形式」在这里是硬约束。
+    task.step("读上次写出去的底本")?;
     let stored_snapshots = catalog.snapshots(adapter.name())?;
     let mut baselines: BTreeMap<String, (PathBuf, Parsed)> = BTreeMap::new();
     let mut by_path: BTreeMap<String, (PathBuf, Parsed)> = BTreeMap::new();
@@ -452,7 +559,23 @@ pub fn export(
     fill_counts(&mut report, &converged);
     let mut worst = adapter.ceiling();
 
-    for file in &converged.files {
+    // **最后一个能停的地方在每一份文件之前。** 过了它这一份就写到底：一份文件写一半
+    // 留在盘上，前端读到的是一份残缺的元数据，而外部改动检测下一趟会把它认成
+    // 「有人在外面动过」。
+    task.step("逐份写出去")?;
+    let 共几份 = converged.files.len() as u64;
+    let mut 写了几份 = 0_u64;
+    for (走到第几份, file) in converged.files.iter().enumerate() {
+        task.tick(走到第几份 as u64, 共几份);
+        // 一份都还没写就停下的那一趟什么都没留下，交回 `Halted`（任务台记「停了」）；
+        // 写过之后停下的那一趟**留下了东西**，走底下那句 `halfway` 并照旧返回 `Ok`。
+        if task.check().is_err() {
+            if 写了几份 == 0 {
+                return Err(Halted.into());
+            }
+            report.interrupted = true;
+            break;
+        }
         let default = out_dir.join(&file.file_name);
         let (target, baseline) = match baselines.get(&file.collection) {
             Some((real, parsed)) => (real.clone(), Some(parsed)),
@@ -507,6 +630,7 @@ pub fn export(
                 source,
             })?;
             catalog.put_snapshot(adapter.name(), &stored, &bytes, SnapshotOrigin::Exported)?;
+            写了几份 += 1;
         }
 
         report.files.push(ExportedFile {
@@ -527,6 +651,26 @@ pub fn export(
     }
 
     report.tier = worst.label().to_string();
+    if report.interrupted {
+        // **留下了什么由这一层说**：任务台不知道这一趟写没写过东西（`Handle::halfway`
+        // 的文档）。这句话要说清「下一趟接着来」是什么意思——导出**有**接得上的东西：
+        // 写过的那几份连底本一起进了中立库，下一趟以它们为基线，只有变过的才重写。
+        task.halfway(format!(
+            "按停时写出去 {} 份元数据文件（共 {} 份），底本一起进了中立库；\
+             再按一次会接着把剩下的写完，已经写过的那几份原样对得上就不重写。",
+            thousands(写了几份),
+            thousands(共几份),
+        ));
+    } else if 写了几份 > 0 {
+        // **记下这一趟导出的时刻**：库屏工序段上导出那一行说的正是它。
+        //
+        // **判据是「真往盘上写过东西」**，四档收场里三档因此都不打戳，而且是同一条理由
+        // ——它们一个字节都没写：只排计划那一趟（`dry_run`）、被按停那一趟（上面那一支），
+        // 以及**每一份都撞上外面有人动过、一份都没写成**的那一趟。最后这一档最容易漏：
+        // 它走的是正常出口、报告也没有 `interrupted`，可盘上什么都没多。那时说
+        // 「上次跑是刚刚」，工序段那一行就在骗人（规格第 31 条「至少不骗我」）。
+        catalog.mark_exported()?;
+    }
     Ok(report)
 }
 
