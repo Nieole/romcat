@@ -111,6 +111,29 @@ impl Site {
         workspace::checkpoint_path_of(workspace, &self.library, root_name)
     }
 
+    /// 这份主库**给人看的**那个名字——窗口标题、报告抬头写的就是它。
+    ///
+    /// 先问中立库自己记着的原名（[`Catalog::library_name`]，票 01 落进元数据表的那一行；
+    /// 读不到那一行时它自己会从文件名截，剥掉哈希后缀）。**只活在内存里的那一份没有
+    /// 文件名可截**，那时退回 [`Self::library`]——`library_name` 在那种库上交出来的是
+    /// 「（内存）」这个占位路径，对人没有任何意义，而合成数据走的正是这条。
+    ///
+    /// ## 它**不是** [`Self::library`]
+    ///
+    /// 那一个是标识符：[`Slug::text`] 折出来的「可读的一半 + 十六位哈希」，也就是中立库
+    /// 的主文件名，**路径锚**与**断点**文件名认的都是它——换一个字，命令行裁的界面就
+    /// 看不见了。这一个进不了任何键，也没人拿它去找文件，它只回答「人管这份库叫什么」。
+    ///
+    /// 摆在这儿而不摆在界面层：「一份现场该报哪个名字」是一条领域判断，两处各挑一次
+    /// 迟早挑出两个答案（ADR-0005）。
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        if self.catalog.file().is_none() {
+            return self.library.clone();
+        }
+        self.catalog.library_name()
+    }
+
     /// 一份**全在内存里**的现场。演示与实测走这条，连磁盘都不碰。
     #[must_use]
     pub fn in_memory(catalog: Catalog, store: Store, library: &str) -> Self {

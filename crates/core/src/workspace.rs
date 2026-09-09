@@ -26,6 +26,8 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
+use crate::catalog::Catalog;
+use crate::catalog::browse::VariantQuery;
 use crate::path;
 
 /// 默认工作目录。
@@ -233,12 +235,150 @@ fn slug_from(key: &str, readable: &str) -> String {
     format!("{readable}-{hash:016x}")
 }
 
+/// 中立库都住在这个目录底下。
+///
+/// 单独一处，好让[折一个文件名出来](catalog_path)与[把它们列一遍](catalogs)对着同一个
+/// 目录：两处各写一遍 `join("catalog")`，改一处就是「建在这儿、列的是那儿」。
+#[must_use]
+fn catalog_dir(workspace: &Path) -> PathBuf {
+    workspace.join("catalog")
+}
+
 /// 某个主库的**中立库**文件。
 #[must_use]
 pub fn catalog_path(workspace: &Path, slug: Slug<'_>) -> PathBuf {
-    workspace
-        .join("catalog")
-        .join(format!("{}.sqlite3", slug.text()))
+    catalog_dir(workspace).join(format!("{}.sqlite3", slug.text()))
+}
+
+/// 中立库文件的扩展名。
+const CATALOG_EXT: &str = "sqlite3";
+
+/// 工作目录里的一份**中立库**，列举时交出来的那一行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogEntry {
+    /// 那份中立库文件在哪。**开它就用这一条**（`site::Site::open_file`）。
+    pub path: PathBuf,
+    /// **这份主库叫什么**——给人看的那个名字，不是标识符。
+    ///
+    /// 读得开就是库里记着的那个原名（[`Catalog::library_name`]，它自己还带一层退路）；
+    /// **读不开的那一份也有名字**——从文件名截，把哈希后缀剥掉（[`readable_half`]）。
+    /// 一份说不出名字的库不该在列表上留一行空白，更不该只剩一串十六进制。
+    pub name: String,
+    /// **这份库开得进去吗**——`site::Site::open_file` 那一步走不走得通。
+    ///
+    /// **与[那几个数](Self::facts)分开，不是一件事。** 结构版本对不上是**开不进去**；
+    /// 而开进去了、只是某一次查询没读回数来，那只是这一行的数缺了，库照样开得进去。
+    /// 两件事并成一件的话，一份开得动的库会被画成按不下去的——而验收要的是「那一份
+    /// 单独标出来，其余照列」，不是「读不出数就当它坏了」。
+    ///
+    /// 它为**假**时 [`Self::facts`] 必定是 `Err`，那句话说的就是开不进去的原因。
+    pub openable: bool,
+    /// 读得出来时**它交得出的那几个数**；读不出来时是那句给人看的话。
+    ///
+    /// **读不开也照列不误**：那句话里写着为什么——结构版本对不上时它就是
+    /// [`CatalogError::Version`](crate::catalog::CatalogError::Version)
+    /// 那一句「版本 X，本程序认得的是 Y，删掉它重扫一遍即可」。措辞由核心库一处出，
+    /// 界面只画（ADR-0005）。
+    pub facts: Result<CatalogFacts, String>,
+}
+
+/// 一份中立库交得出的那几个数。
+///
+/// **盘没挂上照样有**：它们住在中立库里而不在主库上（ADR-0009），所以外置盘不在位时
+/// 开场那一屏一样画得出来。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CatalogFacts {
+    /// 这份库里有多少个**变体**。
+    pub variants: u64,
+    /// **上次扫描**的时刻（UNIX 纪元起的秒）：这份库里那几个根里最晚的那一趟。
+    ///
+    /// 一个根都还没扫过时是 `None`——那与「扫过但一个条目都没有」不是一件事
+    /// （`library_root` 表那句注释）。
+    pub scanned_at: Option<i64>,
+}
+
+/// 列出这个**工作目录**里有哪些**中立库**。
+///
+/// 别处开库的路都是「给我名字或路径，我去折一个出来看在不在」
+/// （[`catalog_path`] + `site::Site::open`）。**开场**那一屏要的正相反：人还说不出名字，
+/// 得先看见这儿有些什么（ADR-0023）。
+///
+/// **一份打不开不连累其余。** 每一份各开各的，开不出来的那一份带着那句话单独站着
+/// ([`CatalogEntry`])，别的照列——从列表里静静消失才是最难查的那种错。
+///
+/// **列一遍不改动其中任何一份。** 每一份都只读地开（[`Catalog::open_read_only`]）：
+/// 不建表、不补列、不写版本，也不会凭空建出一份空库来——只是想看看这儿有哪些库，
+/// 不该顺手把每一份老库都改一遍。（SQLite 自己那两个附件 `-wal` / `-shm` 不算：
+/// 那是一次连接的账，不是库的内容。）
+///
+/// 按**主库名**排，同名的再按路径排：目录列出来的次序是文件系统给的，两次打开不保证
+/// 一样，而开场那一屏的行不该自己跳来跳去。
+///
+/// 目录不在（这个工作目录还一份库都没建过）或者读不动时交出**空的一批**——
+/// 那与「一份库都没有」在屏上是同一句话。
+///
+/// ## 它为什么住在这个模块里
+///
+/// **ADR-0023 点的名**：「核心库要新增『列出一个工作目录里有哪些中立库』
+/// （`crates/core/src/workspace.rs` 现在一个列举函数都没有）」。这个模块管的正是
+/// 「工作目录里有什么、各自叫什么文件名」，而列举是 [`catalog_path`] 的另一半——
+/// 那一条从名字折出文件，这一条从文件回到名字。代价是这个模块头一回反过来用到
+/// [`catalog`](crate::catalog)（那边一直在用这边的 [`readable_half`]）：不开一下那份库，
+/// 「这份主库叫什么、有多少变体、上次什么时候扫的」一样都说不出来。
+#[must_use]
+pub fn catalogs(workspace: &Path) -> Vec<CatalogEntry> {
+    let Ok(dir) = std::fs::read_dir(catalog_dir(workspace)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<CatalogEntry> = dir
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == CATALOG_EXT))
+        .map(entry_of)
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
+    out
+}
+
+/// 看一份中立库：开得开就问它自己那几个数，开不开就从文件名截个名字、把那句话带上。
+fn entry_of(path: PathBuf) -> CatalogEntry {
+    let (openable, name, facts) = match Catalog::open_read_only(&path) {
+        // **开进去了就是开得进去**，哪怕底下那几个数一个都没读回来。
+        Ok(catalog) => (true, catalog.library_name(), facts_of(&catalog)),
+        // **名字与那几个数分开退**：库读不开时名字还截得出来，而截出来的名字正是这一行
+        // 唯一认得出的东西。
+        Err(error) => (false, name_from_file(&path), Err(format!("{error}"))),
+    };
+    CatalogEntry {
+        path,
+        name,
+        openable,
+        facts,
+    }
+}
+
+/// 问这份库要那几个数。哪一步读不出来，整行就退成那句话——半份数字比没有数字更难认。
+fn facts_of(catalog: &Catalog) -> Result<CatalogFacts, String> {
+    let 数 = || -> Result<CatalogFacts, crate::catalog::CatalogError> {
+        Ok(CatalogFacts {
+            variants: catalog.variant_total(&VariantQuery::default())?,
+            // **上次扫描**按根记（`library_root` 表），一份库里的那一刻取最晚的那个根。
+            scanned_at: catalog
+                .roots()?
+                .into_iter()
+                .filter_map(|root| root.scan.map(|scan| scan.at))
+                .max(),
+        })
+    };
+    数().map_err(|error| format!("{error}"))
+}
+
+/// 从中立库的文件名截出人认得出的那一半。
+fn name_from_file(path: &Path) -> String {
+    path.file_stem().map_or_else(
+        || path::display(path),
+        |stem| readable_half(&stem.to_string_lossy()).to_string(),
+    )
 }
 
 /// **DAT 仓库**在哪。

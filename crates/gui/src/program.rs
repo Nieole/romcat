@@ -7,11 +7,14 @@
 //!
 //! ## 两态
 //!
-//! - **开场中**：还没有现场。**这一版是个空位**——[`Program::start`] 眼下走不到它，
-//!   一个参数都不给时照旧报「说清要开哪份库」并退出。填它是票
-//!   `gui-self-sufficient/03` 的事：列出这个**工作目录**里已有的中立库、认领一个新主库、
-//!   或者换一个工作目录。
+//! - **开场中**：还没有现场，[**开场**](crate::opening)那一屏摆在窗口里——列出这个
+//!   **工作目录**里已有的中立库，挑一份开进去，或者换一个工作目录。一个参数都不给
+//!   （双击图标）走的就是这条路：**界面自足，从第一步起不必开终端**（ADR-0023）。
 //! - **已开库**：现场开好了，[`App`] 在画那五屏。
+//!
+//! 两态之间只有一条路：开场交出一份现场（[`opening::Chosen`]），这儿把它换成主窗口。
+//! **换回去也走同一个构造子**（[`Program::opening`]）——票 `gui-self-sufficient/04`
+//! 的「回开场换一份库」接的就是它。
 //!
 //! ## 为什么两态在这儿，而不在 [`App`] 里
 //!
@@ -19,39 +22,22 @@
 //! 兜住「还没有库」，就得把现场变成可空的，而那个可空会渗进五屏每一处判空——为的只是
 //! 一个冷启动时出现一次的状态。挡在现场之前，五屏一行都不用改（ADR-0023）。
 
-use crate::app::App;
-use crate::site::Locate;
+use std::path::PathBuf;
 
-/// 一个参数都不给时说的那句话。**不擅自造一份假的**。
-///
-/// 合成数据与真库在界面上长得一模一样，于是不带参数打开看见的会是一屏假名字，
-/// 第一反应是「我的库怎么了」而不是「我打开的不是我的库」——**不报错的错比报错的错
-/// 难查得多**。
-///
-/// 票 `gui-self-sufficient/03` 会把这句话换成**开场**那一屏：那时这条路不再是死路，
-/// 而是**开场中**那一态。**这一张不改它**。
-pub const NO_LIBRARY: &str = "说清要开哪份库：\n\
-     \x20 romcat-gui <主库根>\n\
-     \x20 romcat-gui --library <名字> [--workspace <目录>]\n\
-     \x20 romcat-gui --catalog <中立库文件>\n\
-     \n\
-     只想看看界面长什么样：`cargo run -p romcat-gui --features demo -- --demo`。";
+use crate::app::App;
+use crate::opening;
+use crate::site::Locate;
 
 /// 走到哪一态了。
 ///
 /// 摆成一个**私有**的枚举：外面认得 [`Program`]，但拿不到它此刻是哪一态——于是测试
 /// 只能验人看得见的东西（标题写着什么、屏上画出了什么），戳不进来。
 enum Stage {
-    /// **开场中**：还没有现场，开场那一屏摆在窗口里。
+    /// **开场中**：还没有现场，[开场](crate::opening)那一屏摆在窗口里。
     ///
-    /// 这一版**只留位、不构造**：一个参数都不给时照旧报 [`NO_LIBRARY`] 并退出
-    /// （票 `gui-self-sufficient/03` 才把那条路引到这儿来）。填它的人把开场那一屏挂在
-    /// 这一支上，并把底下 `#[expect]` 那一行撤掉——撤晚了编译器会提醒。
-    #[expect(
-        dead_code,
-        reason = "开场那一屏是票 `gui-self-sufficient/03` 的活：这一趟只留位子，不构造它"
-    )]
-    Opening,
+    /// **不装箱**：它就是一个工作目录、一小批列出来的库行和一个输入框，与旁边那一态
+    /// （整扇窗）差着两三个数量级，装不装箱这个枚举的尺寸都由 `Opened` 那一支说了算。
+    Opening(opening::Screen),
     /// **已开库**：现场开好了，主窗口在画。
     ///
     /// **装箱**：开场那一态几乎不占地方，主窗口那一态是整扇窗（五屏各自的缓存都在
@@ -74,19 +60,33 @@ impl Program {
     /// 工作目录不另外要一个——它从这三种给法里折出来（[`Locate::workspace_dir`]），
     /// 两处各算一遍迟早对不上。
     ///
+    /// 三种给法一样都没给时——双击图标那一下——走的是**开场**：这个工作目录里有哪些
+    /// 库，挑一份开进去（ADR-0023）。**不擅自造一份假的**：合成数据与真库在界面上长得
+    /// 一模一样，看见一屏假名字的第一反应是「我的库怎么了」而不是「我打开的不是我的
+    /// 库」，而**不报错的错比报错的错难查得多**。
+    ///
     /// # Errors
-    /// 三种给法一样都没给时返回 [`NO_LIBRARY`]；给了但库不在、或者打不开时，返回核心库
-    /// 那句给人看的话。
+    /// 给了要开哪一份、但库不在或者打不开时，返回核心库那句给人看的话。**一样都没给
+    /// 不是错**——那是开场。
     pub fn start(locate: &Locate<'_>) -> Result<Self, String> {
-        // 三样都不给就如实报错。**票 `gui-self-sufficient/03` 改的是这一句**：那时它
-        // 交出的是 `Stage::Opening` 而不是一条错。
         if !locate.given() {
-            return Err(NO_LIBRARY.to_string());
+            return Ok(Self::opening(locate.workspace_dir()));
         }
         Ok(Self::opened(App::new(
             locate.open()?,
             locate.workspace_dir(),
         )))
+    }
+
+    /// 进**开场**：列出这个工作目录里有哪些中立库，挑一份开进去。
+    ///
+    /// 它是**公开**的，而且开场随时进得来第二次：票 `gui-self-sufficient/04` 的
+    /// 「在主窗口里主动回到开场换一份库」接的就是这个构造子。
+    #[must_use]
+    pub fn opening(workspace: PathBuf) -> Self {
+        Self {
+            stage: Stage::Opening(opening::Screen::new(workspace)),
+        }
     }
 
     /// 现场已经在手上时直接进主窗口。
@@ -103,21 +103,29 @@ impl Program {
     /// 窗口标题。
     ///
     /// **开窗到第一帧之间**那一小会儿靠它：第一帧一画，[`App`] 就把带屏名的那个标题发
-    /// 下来了。开场那一态还没有库也还没有屏，于是只剩程序自己的名字。
+    /// 下来了。开场那一态还没有库，标题里于是只剩它自己那一屏的名字。
     #[must_use]
     pub fn window_title(&self) -> String {
         match &self.stage {
-            Stage::Opening => "romcat".to_string(),
+            Stage::Opening(_) => "romcat — 开场".to_string(),
             Stage::Opened(app) => app.window_title(),
         }
     }
 
     /// 画一帧。`eframe` 与不开窗跑帧的那条路走的是同一个函数。
+    ///
+    /// **两态之间那一下换在这儿**：开场挑中一份并开出现场，这一帧末尾就换成主窗口，
+    /// 开场自己退场。
     pub fn ui(&mut self, ui: &mut egui::Ui) {
-        match &mut self.stage {
-            // 开场那一屏还没有人画（票 `gui-self-sufficient/03`）。
-            Stage::Opening => {}
-            Stage::Opened(app) => app.ui(ui),
+        let 开出来的 = match &mut self.stage {
+            Stage::Opening(opening) => opening.ui(ui),
+            Stage::Opened(app) => {
+                app.ui(ui);
+                None
+            }
+        };
+        if let Some(chosen) = 开出来的 {
+            self.stage = Stage::Opened(Box::new(App::new(chosen.site, chosen.workspace)));
         }
     }
 }
