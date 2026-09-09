@@ -32,7 +32,7 @@
 //! 两份连接同时写同一个文件由 SQLite 的 WAL 与 `busy_timeout` 兜着。
 //! **只活在内存里的库（合成数据）没有文件**，那时候直说扫不了——不偷偷开一份空库。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use romcat_core::catalog::Catalog;
@@ -45,6 +45,15 @@ use romcat_core::sources::{self, Source, SourceState, SourceStatus};
 use romcat_core::task::{Cutoff, Ending};
 
 use crate::task::{Product, Tasks};
+
+/// 「添加目录」那两个框里的提示字。
+///
+/// **摆成常量是因为它们有第二个用处**：[开场那条向导](crate::claim)第二步问的是同样
+/// 两样东西，用的必须是同一句话——同一件事在相邻两处换个说法，人就会以为它们是两件事。
+pub const ROOT_HINT: &str = "那块盘上的目录";
+/// 同上，根名那个框。**不填就按目录自己的名字取**，那一下在
+/// [`add_root_from_fields`] 里。
+pub const ROOT_NAME_HINT: &str = "根名（不填就按目录名取）";
 
 /// 两次存**断点**的最小间隔。**与命令行同一个数**（`romcat scan` 默认 15 秒）：
 /// 界面停下的那一趟与命令行 `--resume` 接的是同一个文件，两边攒的活也该一样多。
@@ -121,7 +130,7 @@ impl Screen {
             Ok(found) => {
                 for root in found {
                     let stats = site.catalog.root_stats(&root.name).unwrap_or_default();
-                    let mounted = std::path::Path::new(&root.path).is_dir();
+                    let mounted = Path::new(&root.path).is_dir();
                     self.roots.push(RootRow {
                         root,
                         stats,
@@ -174,34 +183,19 @@ impl Screen {
         self.notice.as_deref()
     }
 
-    /// 加一个根。**校验在核心里**（[`roots::add_root`]），这里只把话转出来。
+    /// 加一个根。**判断在核心里**，这一层只把话转出来（[`add_root_from_fields`]）。
     ///
     /// 加进来之后**还没扫过**：那一行照实写「还没扫过」，按「扫描」才真去读盘。
-    pub fn add_root(&mut self, site: &Site, path: &str, name: &str) {
-        let path = std::path::Path::new(path.trim());
-        if path.as_os_str().is_empty() {
-            self.error = Some("先填一个目录。".to_string());
-            return;
-        }
-        if !path.is_dir() {
-            self.error = Some(format!(
-                "{} 不是一个目录。加根只认目录——主库是一组目录（`CONTEXT.md` 的**根**）。",
-                romcat_core::path::display(path)
-            ));
-            return;
-        }
-        // 化成可比较的绝对形态之后再交给核心：套没套在一起是拿路径比出来的，
-        // 而 `/var` 与 `/private/var` 这类链接不化开就比不出来。
-        let normalized = romcat_core::path::normalize_existing(path);
-        let name = if name.trim().is_empty() {
-            normalized
-                .file_name()
-                .map(|it| it.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "主库".to_string())
-        } else {
-            name.trim().to_string()
-        };
-        match roots::add_root(&site.catalog, Some(&self.workspace), &name, &normalized) {
+    ///
+    /// 交出**加上去的那个根名**；被拦下就是 `None`，那句话摆在 [`Self::error`] 上。
+    /// 名字没填时它是从目录名取的那一个，而排一趟扫描要的正是这个名字
+    /// （[`Self::scan`]）——不交出来的话，调用方就得自己再折一遍「名字空着时按目录名
+    /// 取」，那是第二套算法（[开场那条向导](crate::claim)就在这条路上）。
+    ///
+    /// 库屏自己那颗「+ 添加目录」不看这个返回值：它接着画的那一帧本来就照着重读过的
+    /// 那张表画。
+    pub fn add_root(&mut self, site: &Site, path: &str, name: &str) -> Option<String> {
+        match add_root_from_fields(&site.catalog, &self.workspace, path, name) {
             Ok(root) => {
                 self.error = None;
                 self.notice = Some(format!(
@@ -211,8 +205,12 @@ impl Screen {
                 self.new_path.clear();
                 self.new_name.clear();
                 self.reload(site);
+                Some(root.name)
             }
-            Err(why) => self.error = Some(why.to_string()),
+            Err(why) => {
+                self.error = Some(why);
+                None
+            }
         }
     }
 
@@ -529,12 +527,12 @@ impl Screen {
             ui.label("添加目录");
             ui.add(
                 egui::TextEdit::singleline(&mut self.new_path)
-                    .hint_text("那块盘上的目录")
+                    .hint_text(ROOT_HINT)
                     .desired_width(320.0),
             );
             ui.add(
                 egui::TextEdit::singleline(&mut self.new_name)
-                    .hint_text("根名（不填就按目录名取）")
+                    .hint_text(ROOT_NAME_HINT)
                     .desired_width(180.0),
             );
             if ui.button("+ 添加目录").clicked() {
@@ -608,6 +606,50 @@ impl Screen {
         ui.add_space(6.0);
         ui.weak("扫完没认出来？先看这一屏——多半是某个源还没取回。");
     }
+}
+
+/// 把「一个目录 + 一个可以不填的根名」折成核心库那一次加根调用，拦下时交出那句话。
+///
+/// **判断一条都不在这儿**：这儿只做两个框到那次调用之间的折算——目录空着、目录不是
+/// 目录、名字不填时按目录自己的名字取；拦不拦得住全由
+/// [`roots::add_root`] 说了算，而它那句话原样交出去（ADR-0005）。
+///
+/// **库屏与[开场那条向导](crate::claim)走的是同一条。** 加一个根要拦的三种情况
+/// （根名重复、与已有的根套在一起、圈进**工作目录**）于是在两处是同一个答案、同一句
+/// 措辞——两套判断只会分叉出两套行为。
+///
+/// # Errors
+/// 目录空着、那不是一个目录、或者核心库把这个根拦下时，返回那句给人看的话。
+pub fn add_root_from_fields(
+    catalog: &Catalog,
+    workspace: &Path,
+    path: &str,
+    name: &str,
+) -> Result<LibraryRoot, String> {
+    let path = Path::new(path.trim());
+    if path.as_os_str().is_empty() {
+        return Err("先填一个目录。".to_string());
+    }
+    if !path.is_dir() {
+        return Err(format!(
+            "{} 不是一个目录。加根只认目录——主库是一组目录（`CONTEXT.md` 的**根**）。",
+            romcat_core::path::display(path)
+        ));
+    }
+    // 化成可比较的绝对形态之后再交给核心：套没套在一起是拿路径比出来的，
+    // 而 `/var` 与 `/private/var` 这类链接不化开就比不出来。
+    let normalized = romcat_core::path::normalize_existing(path);
+    // **不填就按目录自己的名字取**：常见情况下少填一个框。取的是**化开之后**那个目录名
+    // ——`.` 与尾斜杠自己没有名字。连末级名字都取不出来（根就是 `/`）时退成一个词。
+    let name = if name.trim().is_empty() {
+        normalized
+            .file_name()
+            .map(|it| it.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "主库".to_string())
+    } else {
+        name.trim().to_string()
+    };
+    roots::add_root(catalog, Some(workspace), &name, &normalized).map_err(|why| why.to_string())
 }
 
 /// 一个根上次扫描那一句。**没扫过与扫过是两件事**，说清楚。

@@ -270,6 +270,37 @@ impl App {
         (&mut self.roots, &mut self.site, &mut self.board)
     }
 
+    /// **刚认领出来的那一份的第一个根**：加上它，再把第一趟扫描排到任务台上。
+    ///
+    /// [开场那条向导](crate::claim)走完之后欠着的就是这一下
+    /// （[`Chosen::first_root`](crate::opening::Chosen::first_root)）。它走的是**库屏那
+    /// 两条现成的路**——加根是 [`roots::Screen::add_root`]（判断全在
+    /// [`romcat_core::catalog::roots::add_root`] 里），排扫描是 [`roots::Screen::scan`]
+    /// （**断点**、并发档、被按停时怎么记账，全在那一条上）。向导重画 UI，这两下与库屏上
+    /// 按出来的是同一件事（ADR-0005）。
+    ///
+    /// **它不是第二条加根的路**：第二个根照旧从库屏加。这一条只在向导走完的那一下走
+    /// 一趟，比库屏多做的只有两件——把那一趟扫描接着排上去，以及换到任务屏，好让人
+    /// 当场看见它在跑。
+    ///
+    /// 摆在窗口上而不在任何一屏里，与 [`Self::start_stage`] 同理：**只有这儿同时够得着
+    /// 库屏与任务台**。
+    pub fn claim_first_root(&mut self, first: &crate::claim::FirstRoot) {
+        let Some(根名) = self.roots.add_root(&self.site, &first.path, &first.name) else {
+            // **走到这儿说明向导拦过一遍之后又被拦了一次**：那个目录刚被挪走，或者中立库
+            // 写不动。那句话已经写在库屏上了，换过去让人看见——**不吞掉，也不退回开场**：
+            // 库这时候已经建出来了，而库屏正是接着把这个根加上的地方。
+            self.view = View::Library;
+            return;
+        };
+        let (roots, site, board) = (&mut self.roots, &mut self.site, &mut self.board);
+        roots.scan(site, board, &根名);
+        // **落在任务屏上**：这一下之后唯一在动的就是那一趟扫描，而人要的正是「立刻看得见
+        // 进度、按得下停下」。默认那一屏（**待确认队列**）这会儿必然是空的——一份刚建出来
+        // 的库里一个变体都还没有，而那句空话答不了「我刚才那一下成了没有」。
+        self.view = View::Tasks;
+    }
+
     /// 把一道**工序**排到任务台上。
     ///
     /// **这是排一趟工序的唯一入口**：库屏工序段那一行的按钮走的是它，各屏空态上的捷径

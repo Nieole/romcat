@@ -221,7 +221,16 @@ impl Program {
             }
         }
         if let Some(chosen) = 开出来的 {
-            *self = Self::opened_with(chosen.site, chosen.workspace, self.recent.clone());
+            let 欠着的 = chosen.first_root;
+            let mut 换成 = Self::opened_with(chosen.site, chosen.workspace, self.recent.clone());
+            // **刚认领出来的那一份还欠着第一个根**（[`opening::Chosen::first_root`]）：
+            // 加上它，再把第一趟扫描排上**任务台**。**这两下都在换成主窗口之后**——
+            // 它们的现成入口都长在库屏上（[`App::claim_first_root`]），而库屏是主窗口的
+            // 一部分，开场手上没有。
+            if let (Some(first), Stage::Opened(app)) = (欠着的, &mut 换成.stage) {
+                app.claim_first_root(&first);
+            }
+            *self = 换成;
         } else if 要回开场 {
             // **回的是这一趟正开着的那个工作目录**：人要换的多半是隔壁那一份，
             // 而不是默认那条链折出来的那个。**那份记忆原样带走**——不然在主窗口里换的库

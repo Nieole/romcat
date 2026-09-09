@@ -23,10 +23,12 @@ use romcat_core::report::{human_time, thousands};
 use romcat_core::site::Site;
 use romcat_core::workspace::{self, CatalogEntry};
 
+use crate::claim;
+
 /// 这个工作目录里一份中立库都没有时说的那句话。
 ///
-/// **它指向下一步**，不是一句「空」：认领一个主库才是这时候唯一做得下去的事
-/// （那个入口是票 `gui-self-sufficient/05` 的活）。
+/// **它指向下一步**，不是一句「空」：认领一个主库才是这时候唯一做得下去的事，
+/// 而它指的就是抬头那一行上那颗「认领新主库」——[那条向导](crate::claim)在那儿起步。
 pub const NO_CATALOG: &str = "还没有库，认领一个主库开始";
 
 /// 换工作目录那个框里的提示字。
@@ -41,6 +43,14 @@ pub struct Chosen {
     pub site: Site,
     /// 它住在哪个工作目录里。
     pub workspace: PathBuf,
+    /// **刚认领出来的那一份还欠着的那一下**：把第一个根加上，再把第一趟扫描排上
+    /// **任务台**。挑中一份现成的库时它是 `None`——那一份的根早就在库里了。
+    ///
+    /// **为什么欠到进主窗口之后才还**：加根与排扫描这两下的现成入口都长在库屏上
+    /// （[`crate::roots::Screen`]），而库屏是主窗口的一部分，向导手上没有。所以向导
+    /// 只把这两串字捎过去，由 [`Program`](crate::program::Program) 在换成主窗口之后
+    /// 交给库屏——**不另造一条加根的路，也不另造一条排扫描的路**（ADR-0005）。
+    pub first_root: Option<claim::FirstRoot>,
 }
 
 /// 开场那一屏。
@@ -66,6 +76,16 @@ pub struct Screen {
     /// 这一条在这一屏画出来之前就已经知道了，画在表**上头**人第一眼就看得见；那一条
     /// 要等人按下去才知道，画在上头的话人得多等一帧才看见它。
     fallback_reason: Option<String>,
+    /// 正在走[认领新主库那条向导](crate::claim)时，那条向导。
+    ///
+    /// **它在的时候那张表让位给它**：向导是一条龙，中途还摆着一排现成的库，只会让人
+    /// 在「认领一个新的」与「开那一份」之间来回犹豫。
+    ///
+    /// **装箱**：开场这一屏本身几乎不占地方，而
+    /// [`Program`](crate::program::Program) 那两态正是照着这一条摆的（那个枚举里
+    /// 「开场中」不装箱、「已开库」装箱）。把攒着三串字的向导直接嵌进来，这一屏就翻了
+    /// 一倍——而它只在人真按下「认领新主库」之后才存在。
+    claiming: Option<Box<claim::Wizard>>,
 }
 
 impl Screen {
@@ -79,6 +99,7 @@ impl Screen {
             draft: String::new(),
             error: None,
             fallback_reason: None,
+            claiming: None,
         }
     }
 
@@ -101,6 +122,10 @@ impl Screen {
         self.error = None;
         // **换了目录那句话就作废**：它说的是上次开的那份在**原来那个**目录里出了什么事。
         self.fallback_reason = None;
+        // **攒到一半那条向导也作废**：它认领的是**原来那个**目录，连第一步查的重名都是
+        // 在那儿查的。（屏上换目录那一行在走向导时是收起来的，所以这条走不到；留着是因为
+        // 这个方法是公开的，谁都能在向导开着的时候换一个目录进来。）
+        self.claiming = None;
         self.catalogs = workspace::catalogs(&self.workspace);
     }
 
@@ -118,6 +143,10 @@ impl Screen {
         self.workspace_ui(ui);
         ui.add_space(12.0);
 
+        // **走向导的时候那张表让位给它**，见 [`Self::claiming`]。
+        if self.claiming.is_some() {
+            return self.claiming_ui(ui);
+        }
         let 要开的 = self.catalogs_ui(ui);
         let 开出来的 = 要开的.and_then(|catalog| self.open(&catalog));
         // **那句话画在表底下**，不是画在表上头：它是**按下「打开」之后**才知道的，
@@ -131,13 +160,24 @@ impl Screen {
 
     /// 抬头那一行：现在看的是哪个工作目录，以及换一个。
     ///
-    /// **票 `gui-self-sufficient/05` 的「认领新主库」挂在这一行**：开场不是一个只能
-    /// 选中已有库的列表，它同时是「这个工作目录里从零开始」的入口。
+    /// **「认领新主库」挂在这一行**：开场不是一个只能选中已有库的列表，它同时是
+    /// 「这个工作目录里从零开始」的入口（ADR-0023）。它紧挨着工作目录那一句，
+    /// 因为**认领进哪儿**正是这一下最要紧的事——认错了目录，建出来的库在别处。
     fn workspace_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.strong("工作目录");
             ui.label(path::display(&self.workspace));
+            // 向导开着的时候不再摆一颗——那一下没有意义（已经在里头了），而按下去
+            // 会把人攒到一半的那三串字抹掉。
+            if self.claiming.is_none() && ui.button("认领新主库").clicked() {
+                self.claiming = Some(Box::new(claim::Wizard::new(self.workspace.clone())));
+            }
         });
+        // **走向导的时候换目录那一行收起来**：向导第一步查的重名是在**这个**目录里查的，
+        // 走到一半换个目录，攒着的那份就悄悄说的是另一个目录的事了。
+        if self.claiming.is_some() {
+            return;
+        }
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.draft)
@@ -155,6 +195,29 @@ impl Screen {
                 self.look_at(换到);
             }
         });
+    }
+
+    /// [认领新主库那条向导](crate::claim)那一段。走完了就跟挑中一份一样：交出现场，
+    /// 开场到此退场。
+    fn claiming_ui(&mut self, ui: &mut egui::Ui) -> Option<Chosen> {
+        let wizard = self.claiming.as_mut()?;
+        match wizard.ui(ui) {
+            claim::Outcome::Going => None,
+            // **回那张表**：攒着的那三串字连同那条向导一起丢掉，磁盘上本来就什么都没有。
+            claim::Outcome::Dropped => {
+                self.claiming = None;
+                None
+            }
+            claim::Outcome::Done(认领的) => {
+                self.claiming = None;
+                let claim::Claimed { site, root } = *认领的;
+                Some(Chosen {
+                    site,
+                    workspace: self.workspace.clone(),
+                    first_root: Some(root),
+                })
+            }
+        }
     }
 
     /// 那张表：一份库一行。挑中了哪一份就交出它的文件路径。
@@ -213,6 +276,7 @@ impl Screen {
                 Some(Chosen {
                     site,
                     workspace: self.workspace.clone(),
+                    first_root: None,
                 })
             }
             Err(error) => {
