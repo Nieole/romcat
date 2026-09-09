@@ -84,6 +84,7 @@ use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::priority::VERDICT;
 use romcat_core::scrape::{AnchorKind, Field, Priorities};
 use romcat_core::site::Site;
+use romcat_core::stage::Stage;
 use romcat_core::sublibrary::{
     BrokenRule, Dimension, Discarded, Exception, ExceptionRow, LoadedSelection, Rule, Sublibrary,
 };
@@ -338,6 +339,22 @@ pub struct Screen {
     value_draft: ValueDraft,
     /// 上一次动作的回执。
     notice: Option<String>,
+    /// **刚撤掉一条压制**那一句，连它旁边那颗就地的「折标题」。
+    ///
+    /// **与 [`Self::notice`] 分开一格**，因为它带着一颗按钮：撤掉一条压制这一下唯一的
+    /// 下文就是折一趟标题（那条叫法要等下一趟重折才回得来），而别处那些回执没有下文
+    /// ——合成一格的话，那颗「折标题」会挂在「首选变体裁给了 X」这类回执旁边。
+    /// 换一个作品就收掉（[`Self::sync_suppressed`]）：那时人已经不在刚才那条叫法上了。
+    lift_notice: Option<String>,
+    /// 人在这一屏按下的那道**工序**的捷径，等窗口取走。
+    ///
+    /// **这一屏排不了活**：排一趟工序要同时够得着库屏那一段与**任务台**，而屏与屏
+    /// 之间不该互相拿着对方（ADR-0005）。所以按下去只留一个记号，由
+    /// [`App::route`](crate::app::App::route) 取走、交给
+    /// [`App::start_stage`](crate::app::App::start_stage)——与 [`Self::returned`]、
+    /// [`Self::touched`] 同一个办法。这么一来捷径排的就是**与库屏工序段那一行完全
+    /// 同一趟活**（票 `gui-self-sufficient/09`）。
+    asked: Option<Stage>,
     /// 上一次出的错。
     error: Option<String>,
     /// 字体样张开着没有。
@@ -384,6 +401,8 @@ impl Screen {
             title_draft: TitleDraft::default(),
             value_draft: ValueDraft::default(),
             notice: None,
+            lift_notice: None,
+            asked: None,
             error: None,
             sample: false,
             scroll_to: None,
@@ -648,6 +667,29 @@ impl Screen {
     /// 把「刚动过哪个子库的选择集」取走。**取过就没了**：窗口一帧问一次。
     pub fn take_touched(&mut self) -> Option<String> {
         self.touched.take()
+    }
+
+    /// 按下撤掉压制那句回执旁边那颗**折标题**的捷径。界面上点那一下走的就是它，
+    /// 实测与测试拿它当那一下。
+    ///
+    /// **它不在这儿排活**，只留一个记号（`asked` 那一格）——排的是与库屏工序段
+    /// 那一行完全同一趟。
+    pub fn ask_fold_titles(&mut self) {
+        self.asked = Some(Stage::FoldTitles);
+        self.lift_notice = None;
+        // **这一句在两种情形下都得是真的**：`Section::start` 撞上同一道工序已经在跑
+        // 就什么都不做，那时「排上去了」是假话。所以后半句把那一档一并说出来。
+        self.notice = Some(
+            "折标题交给**任务台**了——跑完那条叫法就回到标题集合里。\
+             台上已经在跑同一趟的话，不会再排一遍。"
+                .to_string(),
+        );
+    }
+
+    /// 把上面那一下取走。**取过就没了**：窗口一帧问一次
+    /// （[`App::route`](crate::app::App::route)）。
+    pub fn take_asked(&mut self) -> Option<Stage> {
+        self.asked.take()
     }
 
     /// 给正在改的那个子库记一条**例外**：把这个变体含进来，或者排除掉。
@@ -984,16 +1026,27 @@ impl Screen {
     pub fn lift_title(&mut self, site: &mut Site, one: &TitleSuppression) {
         match site.store.lift_title_suppression(&one.key()) {
             Ok(true) => {
-                self.notice = Some(format!(
-                    "撤掉了对「{}」的压制。它**下一趟重折**（`romcat titles`）之后\
-                     回到标题集合里——这一屏不折，那要走遍全库。",
+                self.suppressed_for = None;
+                // **先重读再说话**：这一句会把上一条 `lift_notice` 收掉（换作品那一条路
+                // 走的也是它），所以这一趟要说的话得排在它后头。
+                self.sync_suppressed(site);
+                self.notice = None;
+                self.lift_notice = Some(format!(
+                    "撤掉了对「{}」的压制。**这一屏不折**，那要走遍全库\
+                     ——点旁边那颗「折标题」排一趟，跑完它就回到标题集合里。",
                     one.value,
                 ));
-                self.suppressed_for = None;
-                self.sync_suppressed(site);
             }
-            Ok(false) => self.notice = Some("那条压制已经撤过了。".to_string()),
-            Err(error) => self.error = Some(format!("沉淀库写不动：{error}")),
+            // **这两条也得把上一句连它那颗按钮收掉**：不收的话「那条压制已经撤过了」
+            // 会与上一条「撤掉了对「X」的压制」同屏叠着画，而那两句说的是反话。
+            Ok(false) => {
+                self.lift_notice = None;
+                self.notice = Some("那条压制已经撤过了。".to_string());
+            }
+            Err(error) => {
+                self.lift_notice = None;
+                self.error = Some(format!("沉淀库写不动：{error}"));
+            }
         }
     }
 
@@ -1509,6 +1562,9 @@ impl Screen {
         if self.suppressed_for == work {
             return;
         }
+        // **换一个作品就把「撤掉了压制」那一句连它那颗按钮收掉**：人已经不在刚才那条
+        // 叫法上了，那颗「折标题」摆在这儿只会让人以为它说的是眼下这一个。
+        self.lift_notice = None;
         self.suppressed_for = work.clone();
         self.suppressed = match &work {
             None => Vec::new(),
@@ -2337,6 +2393,24 @@ impl Screen {
         if let Some(notice) = &self.notice {
             ui.colored_label(ui.visuals().warn_fg_color, notice);
         }
+        // **撤掉一条压制之后那一句，连它旁边就地的下一步**（票 `gui-self-sufficient/09`）。
+        // 画的时候不改自己：按下去的那一下先记下来，画完再动。
+        let mut 要折 = false;
+        if let Some(说的) = &self.lift_notice {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(ui.visuals().warn_fg_color, 说的);
+                要折 = ui
+                    .button("折标题")
+                    .on_hover_text(
+                        "排到任务台上跑，期间照常用别的屏；按得停。\
+                         **与库屏工序段那一行同一趟活**——跑完这一屏的显示标题跟着更新。",
+                    )
+                    .clicked();
+            });
+        }
+        if 要折 {
+            self.ask_fold_titles();
+        }
         // 筛选框在这块面板里而不在左栏，与队列那一屏同一条规矩：会碰到输入法的控件
         // 全收在**不虚拟化**的面板里（ADR-0005）。筛选本身照旧下推到中立库。
         ui.horizontal(|ui| {
@@ -2783,7 +2857,9 @@ impl Screen {
             });
         }
         if detail.values.is_empty() {
-            ui.weak("一条刮削结论都没有。跑一次 `romcat scrape`，或者在这儿手写。");
+            // **不指向终端**（票 `gui-self-sufficient/09` 验收第 5 条）：刮削在界面上
+            // 早有自己的入口，那颗「刮削选中…」就在这一屏的抬头上。
+            ui.weak("一条刮削结论都没有。点抬头那颗「刮削选中…」采一趟，或者在这儿手写。");
         }
         // 作品未知时只挂得到变体那一层——**作品锚点是作品名**，没有名字就没有锚点。
         let anchors: Vec<AnchorKind> = if detail.work.is_some() {

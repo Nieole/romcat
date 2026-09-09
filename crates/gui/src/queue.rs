@@ -61,6 +61,7 @@ use romcat_core::dat::chinese::ChineseMark;
 use romcat_core::report::{capacity, thousands};
 use romcat_core::scrape::AnchorKind;
 use romcat_core::scrape::zh::{Judged, MatchGroup, judge, matched_groups};
+use romcat_core::stage::Stage;
 use romcat_core::triage::batch::Coverage;
 use romcat_core::triage::{
     Applied, Axis, Batch, Draft, Drill, Filter, ItemOrder, Overrides, Plan, Queue, Sample, Scope,
@@ -175,9 +176,51 @@ pub struct Screen {
     /// ——同一批里各人的候选不是同一部游戏。勾上它，选择器就多一条「点名这个变体」
     /// （[`Filter::keys`]），队列、分组表、计划书全都跟着只剩这一条。
     only_picked: bool,
+    /// 人在这一屏按下的那道**工序**的捷径，等窗口取走。
+    ///
+    /// **这一屏排不了活**：排一趟工序要同时够得着库屏那一段与**任务台**，而屏与屏
+    /// 之间不该互相拿着对方（ADR-0005）。所以按下去只留一个记号，由
+    /// [`App::route`](crate::app::App::route) 取走、交给
+    /// [`App::start_stage`](crate::app::App::start_stage)——与子库屏那几个跳转记号
+    /// 同一个办法。这么一来捷径排的就是**与库屏工序段那一行完全同一趟活**：
+    /// 同一个函数、同一趟任务、同一份产物（票 `gui-self-sufficient/09`）。
+    asked: Option<Stage>,
     /// 把表格的滚动位置强按到这个像素偏移。**只有量帧率时才设**（[`crate::bench`]），
     /// 真界面上永远是 `None`。
     pub scroll_to: Option<f32>,
+}
+
+/// 那颗**就地跑识别**的捷径。按下去返回 `true`。
+///
+/// 队列屏上一共画四处：顶栏那句「还没跑过识别」旁边、一级分批那张空态、逐条那张
+/// 空态，以及「另有 N 个变体连识别都还没跑过」那句警告旁边。四处从前写的都是
+/// 「先跑一次 `romcat identify`」——人是在这一屏发现「没识别」的，让他跑回库屏是
+/// 多余的一步（规格 46）。**四处画的是同一颗**：从前四处也是同一句话，换成四份
+/// 写法迟早各说各的。
+///
+/// **它自己不排活**：按下去只让调用方留一个记号（[`Screen::asked`]），
+/// 排的是与库屏工序段那一行完全同一趟。
+fn identify_shortcut(ui: &mut egui::Ui) -> bool {
+    ui.button("跑识别")
+        .on_hover_text(
+            "排到任务台上跑，期间照常用别的屏；按得停。\
+             **与库屏工序段那一行同一趟活**——跑完这一屏自己重新列过。",
+        )
+        .clicked()
+}
+
+/// 「还没跑过识别」那张**空态**：一句话加一颗捷径。按下去返回 `true`。
+///
+/// 一级分批与逐条那张表**各有一张，画的是同一张**——这一屏没有队列可看的理由只有
+/// 一个，两处各写一份的话，改一处就漏一处。
+fn identify_empty_state(ui: &mut egui::Ui) -> bool {
+    let mut 要跑 = false;
+    ui.vertical_centered(|ui| {
+        ui.add_space(24.0);
+        ui.label("还没跑过识别，队列无从谈起。");
+        要跑 = identify_shortcut(ui);
+    });
+    要跑
 }
 
 impl Screen {
@@ -206,6 +249,7 @@ impl Screen {
             error: None,
             changed: false,
             only_picked: false,
+            asked: None,
             scroll_to: None,
         }
     }
@@ -214,6 +258,26 @@ impl Screen {
     /// （`crate::app::App::route`）。
     pub fn take_changed(&mut self) -> bool {
         std::mem::take(&mut self.changed)
+    }
+
+    /// 按下这一屏上那颗**跑识别**的捷径。界面上点那一下走的就是它，实测与测试拿它当
+    /// 那一下。
+    ///
+    /// **它不在这儿排活**，只留一个记号（`asked` 那一格）——排的是与库屏工序段
+    /// 那一行完全同一趟。
+    ///
+    /// **按下去的回音不由这一屏出**，与浏览屏那颗（`browse::Screen::ask_fold_titles`
+    /// 当场换掉自己那句回执）不一样：顶栏那颗「任务台 ●」哪一屏上都看得见
+    /// （`App::top_bar`），而这一屏的空态本来就会在识别跑完那一刻自己变成队列
+    /// ——为它另存一句回执，等于让同一件事在屏上有两个说法。
+    pub fn ask_identify(&mut self) {
+        self.asked = Some(Stage::Identify);
+    }
+
+    /// 把上面那一下取走。**取过就没了**：窗口一帧问一次
+    /// （[`App::route`](crate::app::App::route)）。
+    pub fn take_asked(&mut self) -> Option<Stage> {
+        self.asked.take()
     }
 
     /// 队列本身，供测试查「列出多少条、分成几批」。
@@ -511,7 +575,10 @@ impl Screen {
         }
         ui.separator();
         if !self.queue.identified() {
-            ui.label("还没跑过识别，队列无从谈起。先跑一次 `romcat identify`。");
+            ui.label("还没跑过识别，队列无从谈起。");
+            if identify_shortcut(ui) {
+                self.ask_identify();
+            }
             return;
         }
         let mut line = format!("队列 {} 条待裁决", thousands(self.queue.pending()));
@@ -541,8 +608,11 @@ impl Screen {
             )
             .on_hover_text(
                 "它们一条候选都没有，队列里根本没有它们，选择器也筛不到。\
-                 先跑一趟 `romcat identify` 把它们补上。",
+                 点旁边那颗「跑识别」把它们补上。",
             );
+            if identify_shortcut(ui) {
+                self.ask_identify();
+            }
         }
         ui.separator();
         // **四档一眼看得出哪批稳、哪批悬**（规格 37）。颜色与标签同出一处
@@ -560,10 +630,10 @@ impl Screen {
     /// **正文：一级分批那一列卡片。**
     fn batches_ui(&mut self, ui: &mut egui::Ui, site: &mut Site) {
         if !self.queue.identified() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(24.0);
-                ui.label("还没跑过识别，队列无从谈起。先跑一次 `romcat identify`。");
-            });
+            // 画的时候不改自己：按下去的那一下先记下来，画完再动。
+            if identify_empty_state(ui) {
+                self.ask_identify();
+            }
             return;
         }
         self.applied_row(ui, site);
@@ -846,10 +916,10 @@ impl Screen {
     /// `ORDER BY`）是两条路，**分界在数据躺在哪**，不在哪张表更讲究。
     fn table(&mut self, ui: &mut egui::Ui) {
         if !self.queue.identified() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(24.0);
-                ui.label("还没跑过识别，队列无从谈起。先跑一次 `romcat identify`。");
-            });
+            // 画的时候不改自己：按下去的那一下先记下来，画完再动。
+            if identify_empty_state(ui) {
+                self.ask_identify();
+            }
             return;
         }
         if self.queue.selected().is_empty() {
@@ -1942,7 +2012,7 @@ fn judged_text(judged: &MatchJudged) -> String {
     if judged.accepted {
         text.push_str(
             "。这一次匹配带来的字段一并定下，一个字都不清。\
-             屏上那一堆仍写着「还等着裁」——那句话在依据里，下一趟 `romcat scrape` 才改写",
+             屏上那一堆仍写着「还等着裁」——那句话在依据里，下一趟刮削才改写",
         );
     } else {
         let _ = write!(
@@ -1977,7 +2047,7 @@ fn judged_text(judged: &MatchJudged) -> String {
     } else {
         text.push_str(
             "；清掉的那些值要回来，得先改判成「就是这条」，\
-             再跑一趟 `romcat scrape`。",
+             再采一趟刮削——浏览屏抬头那颗「刮削选中…」。",
         );
     }
     text
