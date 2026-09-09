@@ -1351,3 +1351,170 @@ fn 导出排着队被撤掉时一份元数据都没写出去() {
     现场.app.tasks_mut().stop(占位);
     现场.等任务跑完();
 }
+
+/// 跑一帧队列屏，返回**屏上那些字**。
+///
+/// 队列屏那四处从前写的都是「先跑一次 `romcat identify`」，而它们分住在三种状态里
+/// （顶栏、一级分批那张空态、逐条那张空态、以及「还没识别」那句警告），
+/// 底下几条各自把屏切到那一种再看一遍。
+fn 队列屏上(ctx: &egui::Context, 现场: &mut 现场) -> String {
+    现场.app.show_view(View::Queue);
+    画出来的字(&headless::frame(ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }))
+}
+
+#[test]
+fn 队列屏那几处空态不再指向命令行_就地摆着一颗跑识别() {
+    // **留一处旧文案，人就照着去开终端了**（规格 Further Notes）。所以这一条把三种
+    // 状态各画一遍：顶栏、一级分批那张空态、逐条那张空态——三处从前是同一句
+    // 「先跑一次 `romcat identify`」。
+    let 库 = 建库("gui-捷径-空态");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    assert!(
+        !现场.app.queue().queue().identified(),
+        "前提：这份库还没跑过识别",
+    );
+
+    // ── 一、一级分批那一档（打开就是它）连顶栏。
+    let 屏上 = 队列屏上(&ctx, &mut 现场);
+    assert!(
+        !屏上.contains("romcat identify"),
+        "队列屏还在叫人去开终端：\n{屏上}",
+    );
+    assert!(
+        屏上.lines().any(|line| line.trim() == "跑识别"),
+        "队列屏空态上没有就地跑识别那颗捷径：\n{屏上}",
+    );
+
+    // ── 二、逐条那一档：那张表自己也有一张空态。
+    现场.app.queue_and_site().0.show_one_by_one();
+    let 屏上 = 队列屏上(&ctx, &mut 现场);
+    assert!(
+        !屏上.contains("romcat identify"),
+        "逐条那一档还在叫人去开终端：\n{屏上}",
+    );
+    assert!(
+        屏上.lines().any(|line| line.trim() == "跑识别"),
+        "逐条那一档的空态上没有那颗捷径：\n{屏上}",
+    );
+}
+
+#[test]
+fn 队列屏那颗捷径排的是与库屏工序段完全同一趟识别() {
+    // **同一个函数、同一趟任务、同一份产物**（验收第 3、4 条）。断言落在
+    // 「库屏工序段认领了这一趟」上：只有 `Section::start` 排出去的任务号才进得了
+    // `Section::running`，也只有它认领得下来（`Section::settle`）。捷径要是第二份
+    // 实现，这两句一句都过不去。
+    let 甲 = 建库("gui-捷径-甲");
+    let 乙 = 建库("gui-捷径-乙");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.装上弹药();
+    现场.加根(甲.path(), "主库");
+    现场.扫("主库");
+    现场.重列队列();
+
+    // 按下队列屏空态上那颗捷径。**这一屏排不了活**，它只留一个记号。
+    现场.app.queue_and_site().0.ask_identify();
+    assert!(
+        现场.app.roots().stages().task_of(Stage::Identify).is_none(),
+        "按下去那一下不该由队列屏自己排活",
+    );
+
+    // 窗口跑一帧：`App::route` 取走那个记号，交给 `App::start_stage`。
+    let _ = headless::frame(&ctx, headless::input(), |ui| 现场.app.ui(ui));
+    现场.等任务跑完();
+
+    // **同一趟任务**：库屏工序段认领了它。只有 `Section::start` 排出去的任务号才进得了
+    // `Section::running`，也只有它认领得下来（`Section::settle`）——这一句要是捷径自己
+    // 另排了一趟，工序段一个字都不会说。
+    assert!(
+        现场
+            .app
+            .roots()
+            .stages()
+            .notice()
+            .is_some_and(|说的| 说的.starts_with("识别 跑完了")),
+        "库屏工序段没认领这一趟：{:?} / {:?}",
+        现场.app.roots().stages().notice(),
+        现场.app.roots().stages().error(),
+    );
+    // **在任务台上与从库屏排的看不出区别**：那一行的名字就是这道工序的名字。
+    let record = &现场.app.tasks().history()[0];
+    assert_eq!(record.name, "识别");
+    assert!(matches!(record.ending, Ending::Done(_)));
+    // **同一份产物**：那一行的数当场刷新，队列自己重新列过——一次「重新列队列」都没点。
+    assert_eq!(现场.识别那一行().behind, Behind::Left(0));
+    assert!(现场.app.queue().queue().identified());
+
+    // ── 「还没识别」那句警告旁边也是就地的按钮，不是一句 `romcat identify`。
+    现场.加根(乙.path(), "元数据库");
+    现场.扫("元数据库");
+    现场.重列队列();
+    assert_eq!(现场.队列屏说的(), 2, "乙那两个变体连识别都还没跑过");
+    let 屏上 = 队列屏上(&ctx, &mut 现场);
+    assert!(
+        屏上.contains("个变体连识别都还没跑过"),
+        "那句警告没了：\n{屏上}",
+    );
+    assert!(
+        !屏上.contains("romcat identify"),
+        "那句警告旁边还在叫人去开终端：\n{屏上}",
+    );
+    assert!(
+        屏上.lines().any(|line| line.trim() == "跑识别"),
+        "那句警告旁边没有就地的按钮：\n{屏上}",
+    );
+}
+
+#[test]
+fn 台上已经有一趟识别时再按队列屏那颗捷径_不会排第二趟() {
+    // **捷径按不禁**：工序段那一行跑着时会写「跑着呢」并禁掉按钮（规格 34），可队列屏
+    // 够不着工序段，那颗捷径不知道台上有没有活。兜底在 `Section::start` 那句「同一道
+    // 工序已经在跑就什么都不做」——这一条走的是**真的那条路**：留记号、`App::route`
+    // 取走、交给 `App::start_stage`。两趟识别在同一份中立库上互相清对方的结论。
+    let 库 = 建库("gui-捷径-按两下");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.装上弹药();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+
+    // 占住台上那个位子，好让下面那一趟停在队里、不会自己跑完。
+    let 占位 = 现场.app.tasks_mut().queue("装作在扫一趟库", |task| {
+        for _ in 0..3_000 {
+            task.check()?;
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Err(Cutoff::failed("这一趟本来就只是占着位子"))
+    });
+    现场.app.start_stage(Stage::Identify);
+    let id = 现场
+        .app
+        .roots()
+        .stages()
+        .task_of(Stage::Identify)
+        .expect("这一趟排上任务台了");
+
+    现场.app.queue_and_site().0.ask_identify();
+    let _ = headless::frame(&ctx, headless::input(), |ui| 现场.app.ui(ui));
+    assert_eq!(
+        现场.app.roots().stages().task_of(Stage::Identify),
+        Some(id),
+        "捷径按下去换掉了台上那一趟",
+    );
+    assert_eq!(
+        现场.app.tasks().queued().len(),
+        1,
+        "同一趟识别被排了两遍：{:?}",
+        现场.app.tasks().queued(),
+    );
+
+    现场.app.tasks_mut().stop(id);
+    现场.app.tasks_mut().stop(占位);
+    现场.等任务跑完();
+}

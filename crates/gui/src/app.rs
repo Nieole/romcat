@@ -303,10 +303,10 @@ impl App {
 
     /// 把一道**工序**排到任务台上。
     ///
-    /// **这是排一趟工序的唯一入口**：库屏工序段那一行的按钮走的是它，各屏空态上的捷径
-    /// 走的也该是它（票 `gui-self-sufficient/09` 要把队列屏那三处「先跑一次
-    /// `romcat identify`」换成就地按钮）。摆在窗口上而不是某一屏里，正因为**别的屏
-    /// 够不着库屏**（ADR-0005：屏与屏之间不该互相拿着对方）。
+    /// **这是排一趟工序的唯一入口**：库屏工序段那一行的按钮走的是它，各屏空态上那几颗
+    /// 捷径走的也是它——那几屏够不着库屏，所以它们只留一个记号，由 [`Self::route`]
+    /// 取走再交到这儿（票 `gui-self-sufficient/09`）。摆在窗口上而不是某一屏里，
+    /// 正因为**别的屏够不着库屏**（ADR-0005：屏与屏之间不该互相拿着对方）。
     pub fn start_stage(&mut self, stage: romcat_core::stage::Stage) {
         let (roots, site, board) = (&mut self.roots, &mut self.site, &mut self.board);
         roots.stages_mut().start(stage, site, board);
@@ -443,6 +443,10 @@ impl App {
     /// 走的是同一个入口（[`browse::Screen::invalidate`]），只是那一趟由任务台交回来，
     /// 这一趟就发生在本进程的这一帧里。
     ///
+    /// **还有一条不是跳转的**：待确认队列屏与浏览屏空态上那几颗**捷径**（「跑识别」、
+    /// 「折标题」）按下去只留一个记号，由这一趟取走、交给 [`Self::start_stage`]——
+    /// 排一趟工序要同时够得着库屏工序段与任务台，而那两屏够不着库屏。
+    ///
     /// 每帧一次。测试与实测拿它当那一下——**走的是界面上那条一模一样的路**。
     pub fn route(&mut self) {
         if self.queue.take_changed() {
@@ -461,6 +465,17 @@ impl App {
             self.sublibrary.reload(&self.site);
             self.sublibrary.open(&self.site, &name);
             self.view = View::Sublibraries;
+        }
+        // **各屏空态上那几颗捷径**（票 `gui-self-sufficient/09`）：按下去的那一屏排不了
+        // 活——排一趟**工序**要同时够得着库屏那一段与**任务台**，而只有这儿够得着两边
+        // （ADR-0005，与上面那几个跳转记号同理）。所以那几屏只留一个记号，这一趟取走、
+        // 交给 [`Self::start_stage`]：**同一个函数、同一趟任务、同一份产物**，
+        // 在任务台上与从库屏排的看不出区别。
+        if let Some(stage) = self.queue.take_asked() {
+            self.start_stage(stage);
+        }
+        if let Some(stage) = self.browse.take_asked() {
+            self.start_stage(stage);
         }
     }
 

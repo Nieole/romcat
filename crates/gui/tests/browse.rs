@@ -19,6 +19,7 @@ use romcat_core::dat::chinese::ChineseMark;
 use romcat_core::scrape::priority::VERDICT;
 use romcat_core::scrape::{AnchorKind, Field, Gather, MediaKind};
 use romcat_core::shape::Role;
+use romcat_core::stage::Stage;
 use romcat_core::title::{Language, TitleKind};
 use romcat_gui::app::{App, View};
 use romcat_gui::bench::{self, Sweep};
@@ -2557,4 +2558,67 @@ fn 整批收藏排上任务台_跑着的时候屏上有进度也按得停() {
         .expect("认领完该有一句回执")
         .to_string();
     assert!(回执.contains("收藏"), "{回执}");
+}
+
+#[test]
+fn 撤掉一条标题压制之后就地摆着折标题的入口_排的是与库屏工序段同一趟() {
+    // 从前那句回执写的是「它**下一趟重折**（`romcat titles`）之后回到标题集合里」
+    // ——人读完就去开终端了。**这一屏不折**那句照旧成立（折一趟要走遍全库），
+    // 变的是下一步就在旁边：点一下，与库屏工序段那一行完全同一趟活排上任务台
+    // （规格 48、验收第 2、3 条）。
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    let key = 一条认出作品的(&mut app);
+    {
+        let (browse, site) = app.browse_and_site();
+        browse.pick(&site.catalog, &key);
+    }
+    let detail = app.browse().detail().expect("点开得了").clone();
+    let 刮削来的 = detail
+        .titles
+        .iter()
+        .find(|row| !row.is_verdict())
+        .expect("合成数据里有刮削来的叫法")
+        .clone();
+    {
+        let (browse, site) = app.browse_and_site();
+        browse.suppress_title(site, &刮削来的);
+    }
+    let 那条压制 = app.browse().suppressed()[0].clone();
+    {
+        let (browse, site) = app.browse_and_site();
+        browse.lift_title(site, &那条压制);
+    }
+
+    // ── 一、那句回执不再指向命令行，旁边摆着就地的入口。
+    let 屏上 = 元数据栏滚一趟(&ctx, &mut app);
+    assert!(
+        !屏上.contains("romcat titles"),
+        "撤掉压制之后还在叫人去开终端：\n{屏上}",
+    );
+    assert!(屏上.contains("撤掉了对"), "那句回执没了：\n{屏上}",);
+    assert!(
+        屏上.lines().any(|line| line.trim() == "折标题"),
+        "撤掉压制之后就地没有折标题那个入口：\n{屏上}",
+    );
+
+    // ── 二、点它排的是**与库屏工序段那一行完全同一趟**：只有 `Section::start` 排出去
+    //       的任务号才进得了 `Section::running`，也只有它认领得下来。
+    app.browse_and_site().0.ask_fold_titles();
+    assert!(
+        app.roots().stages().task_of(Stage::FoldTitles).is_none(),
+        "按下去那一下不该由浏览屏自己排活",
+    );
+    跑(&ctx, &mut app, 2);
+    assert!(
+        app.roots()
+            .stages()
+            .notice()
+            .is_some_and(|说的| 说的.starts_with("折标题 跑完了")),
+        "库屏工序段没认领这一趟：{:?} / {:?}",
+        app.roots().stages().notice(),
+        app.roots().stages().error(),
+    );
+    // **在任务台上看不出区别**：那一行的名字就是这道工序的名字。
+    assert_eq!(app.tasks().history()[0].name, "折标题");
 }
