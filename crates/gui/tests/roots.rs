@@ -16,6 +16,10 @@
 //!   两个数。
 //! - **识别跑完之后队列自己重新列过**：不然人得再点一次「重新列队列」，而那正是
 //!   这一票要消掉的那种「还得记住下一步」。
+//! - **折标题跑完之后浏览屏上的显示标题跟着更新**：那是这道工序起没起作用**唯一看得见
+//!   的地方**。
+//! - **折标题被按停时中立库一个字节都没动**：重折是「清掉再写回」，停在那中间等于把
+//!   整份**标题集合**丢掉——所以它压根不停在那儿。
 //!
 //! 主库**一律拿本地 fixture 目录模拟**：绝不去动任何真实设备或 SD 卡。
 
@@ -23,11 +27,19 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use romcat_core::catalog::Catalog;
+use romcat_core::catalog::{Catalog, Roots};
+use romcat_core::dat::Convention;
+use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
+use romcat_core::dat::repo::{DatMeta, Unit};
+use romcat_core::fs::RealFs;
+use romcat_core::identify::fuzzy;
+use romcat_core::scan::CancelToken;
+use romcat_core::scrape::{self, Priorities};
 use romcat_core::site::Site;
 use romcat_core::sources::SourceState;
 use romcat_core::stage::{Behind, Stage, StageRow};
 use romcat_core::task::{Cutoff, Ending};
+use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::sample::zip;
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_gui::app::{App, View};
@@ -64,6 +76,23 @@ fn 建大库(tag: &str) -> TempDir {
     dir
 }
 
+/// 盘上那个文件叫**中文名**、DAT 里那条是**英文名**的一份 fixture 主库。
+///
+/// **折标题起没起作用要看得见，就得有这道落差**：折之前浏览屏上的显示标题退回
+/// **作品名**（识别从 DAT 条目名折出来的那个英文名），折之后取的是盘上那个中文名
+/// ——那正是这个库里中文名的**唯一来源**，因为 DAT 里根本没有中文（ADR-0019）。
+///
+/// 返回那份内容的字节：DAT 那一条要按它的 CRC-32 与大小来撞。
+fn 建中文库(tag: &str) -> (TempDir, Vec<u8>) {
+    let dir = temp_dir(tag);
+    let bytes = vec![0xA1_u8; 4_096];
+    写(
+        &dir.path().join("FC/魂斗罗.zip"),
+        &zip_container(&[ZipEntrySpec::stored("Contra.nes", bytes.clone())]),
+    );
+    (dir, bytes)
+}
+
 struct 现场 {
     工作区: TempDir,
     app: App,
@@ -89,6 +118,92 @@ impl 现场 {
     fn 装上弹药(&self) {
         let path = romcat_core::workspace::dat_repo_path(self.工作区.path());
         drop(romcat_core::dat::DatRepo::open(&path).expect("开得出 DAT 库"));
+    }
+
+    /// 装一份**认得出东西的** DAT 库：一条条目，按内容的 CRC-32 与大小撞。
+    ///
+    /// 折标题这几条要的是「库里真有一个作品」——标题挂在作品上，一个作品都没有的话
+    /// 折出来是空的，那时验不到「显示标题跟着变」。
+    fn 装上认得出的弹药(&self, 条目名: &str, bytes: &[u8]) {
+        let path = romcat_core::workspace::dat_repo_path(self.工作区.path());
+        let mut repo = romcat_core::dat::DatRepo::open(&path).expect("开得出 DAT 库");
+        let mut writer = repo
+            .begin(&Unit {
+                source: "No-Intro".to_string(),
+                name: "Nintendo - Nintendo Entertainment System".to_string(),
+                url: "https://example.invalid/x".to_string(),
+                fingerprint: "sha".to_string(),
+            })
+            .expect("开得了事务");
+        writer
+            .write_dat(
+                &DatMeta {
+                    name: "Nintendo - Nintendo Entertainment System".to_string(),
+                    platform: "FC".to_string(),
+                    convention: Convention::AsIs,
+                    header: DatHeader::default(),
+                },
+                &[GameRecord {
+                    name: 条目名.to_string(),
+                    roms: vec![RomRecord {
+                        name: format!("{条目名}.nes"),
+                        size: Some(bytes.len() as u64),
+                        crc32: Some(crc32(bytes)),
+                        ..RomRecord::default()
+                    }],
+                    ..GameRecord::default()
+                }],
+            )
+            .expect("写得进");
+        writer.commit().expect("提交");
+    }
+
+    /// 采一趟**刮削**：把盘上那个文件的名字采成标题那个字段的值。
+    ///
+    /// **摆料而已，不是这几条要验的东西**——刮削自己那条路由 `romcat-core` 的
+    /// `tests/titles.rs` 与界面上的刮削面板各自钉着。这里走核心库那个入口，
+    /// 一个请求都不发（`media = false`、`Net` 是 `None`）。
+    fn 刮一遍(&mut self, 根名: &str, 目录: &Path) {
+        let pool = self.工作区.path().join("pool");
+        let (_, site, _) = self.app.roots_site_and_tasks();
+        let mut options = scrape::Options::new(Roots::single(根名, 目录), &pool);
+        options.media = false;
+        scrape::run(
+            &RealFs::new(),
+            &mut site.catalog,
+            &Priorities::builtin(),
+            &options,
+            None,
+            &mut scrape::RunContext {
+                cancel: &CancelToken::new(),
+                progress: &mut |_| {},
+                naming: &fuzzy::Naming::off(),
+                summaries: None,
+                rulings: &scrape::zh::Rulings::none(),
+            },
+        )
+        .expect("刮得动");
+    }
+
+    /// 把**折标题**那一道工序排上任务台，等它收场。界面上点那一行的按钮走的就是这条。
+    fn 折标题(&mut self) {
+        self.app.start_stage(Stage::FoldTitles);
+        self.等任务跑完();
+    }
+
+    /// 工序段上折标题那一行。
+    fn 折标题那一行(&self) -> StageRow {
+        self.app
+            .roots()
+            .stages()
+            .of(Stage::FoldTitles)
+            .expect("工序段有折标题那一行")
+            .clone()
+    }
+
+    /// 中立库里眼下有多少条叫法。
+    fn 叫法条数(&self) -> u64 {
+        self.app.site().catalog.title_count().expect("数得出")
     }
 
     /// 把**识别**那一道工序排上任务台，等它收场。界面上点那一行的按钮走的就是这条。
@@ -746,4 +861,208 @@ fn 还没取回那份弹药时识别如实拒绝并说清为什么() {
     assert!(why.contains("数据源"), "没指向取回它的地方：{why}");
     // 库里一条结论都没多出来。
     assert_eq!(现场.识别那一行().behind, Behind::Left(2));
+}
+
+#[test]
+fn 折标题跑完之后浏览屏上的显示标题跟着更新() {
+    // **这道工序起没起作用，唯一看得见的地方就是浏览屏上那个显示标题。**
+    // 不重读那一格的话，人点完折标题看见的还是折之前那个名字，只好去关掉窗口重开
+    // ——而那正是这一票要消掉的那种「还得记住下一步」。
+    let (库, 字节) = 建中文库("gui-stages-折标题");
+    let mut 现场 = 现场::摆好();
+    现场.装上认得出的弹药("Contra (Japan)", &字节);
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    现场.跑识别();
+    现场.刮一遍("主库", 库.path());
+
+    // 点开那一行、再选中它底下那个变体——**界面上那两下**。
+    {
+        let (browse, site) = 现场.app.browse_and_site();
+        let 一行 = site
+            .catalog
+            .work_page(browse.query(), 0, 8)
+            .expect("取得出一页")
+            .into_iter()
+            .next()
+            .expect("识别认出了一个作品");
+        browse.open_work(&site.catalog, &一行.anchor);
+        browse.pick(&site.catalog, "主库/FC/魂斗罗.zip");
+    }
+    // **折之前**标题集合是空的，显示标题退回作品名（那个英文名）。
+    let 折前 = 现场.app.browse().detail().expect("点得开").clone();
+    assert!(
+        折前.titles.is_empty(),
+        "还没折就有标题集合了：{:?}",
+        折前.titles,
+    );
+    let 折前显示 = 折前.display.expect("显示标题总挑得出一个").display;
+    assert_eq!(折前显示, "Contra", "折之前该退回作品名");
+
+    // 点一下**折标题**。
+    现场.折标题();
+
+    let 折后 = 现场.app.browse().detail().expect("那一条还在");
+    assert!(!折后.titles.is_empty(), "折完标题集合还是空的");
+    let 折后显示 = &折后.display.as_ref().expect("显示标题").display;
+    assert_ne!(
+        *折后显示, 折前显示,
+        "折完了，浏览屏上的显示标题一个字都没变"
+    );
+    assert_eq!(
+        折后显示, "魂斗罗",
+        "中文名没顶上来——DAT 里没有中文，这个名字只可能从盘上那个文件名来",
+    );
+
+    // 任务台历史上留下一条**跑完了**，名字就是那道工序的名字。
+    let record = &现场.app.tasks().history()[0];
+    assert_eq!(record.name, "折标题");
+    assert!(
+        matches!(record.ending, Ending::Done(_)),
+        "跑完的那一趟记成了「{}」",
+        record.ending.render(),
+    );
+
+    // 工序段那一行改口说「上次跑是 ⋯」，而**识别那一行照旧报数**（验收第 2 条）。
+    let 那一句 = 现场.折标题那一行().render();
+    assert!(那一句.contains("上次跑是"), "{那一句}");
+    assert_eq!(
+        现场.识别那一行().behind,
+        Behind::Left(0),
+        "折标题退回时刻，把识别那一支也一起降级了",
+    );
+}
+
+#[test]
+fn 折标题排着队被撤掉时标题集合一条都没少() {
+    // **重折是「清掉再写回」**：停在那中间等于把整份标题集合丢掉，所以这一支压根不停
+    // 在那儿——按停只停在开折之前，那一趟一个字节都没写，记的是「停了」而不是
+    // **停在半路**。这一条钉的正是「停下来什么都没留下」这句话是真的。
+    //
+    // **台上先摆一趟别的活**：任务台一次只跑一趟，于是排上去的折标题稳稳地停在队列里
+    // ——不靠「恰好还没跑完」那种挂钟彩票（挂单 `Q196` / `Q349`）。
+    let (库, 字节) = 建中文库("gui-stages-折标题按停");
+    let mut 现场 = 现场::摆好();
+    现场.装上认得出的弹药("Contra (Japan)", &字节);
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    现场.跑识别();
+    现场.刮一遍("主库", 库.path());
+    现场.折标题();
+    let 折过之后 = 现场.叫法条数();
+    assert!(折过之后 > 0, "前提：折过一趟，库里有叫法");
+
+    let 占位 = 现场.app.tasks_mut().queue("装作在扫一趟库", |task| {
+        for _ in 0..3_000 {
+            task.check()?;
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Err(Cutoff::failed("这一趟本来就只是占着位子"))
+    });
+    现场.app.start_stage(Stage::FoldTitles);
+    let id = 现场
+        .app
+        .roots()
+        .stages()
+        .task_of(Stage::FoldTitles)
+        .expect("这一趟排上任务台了");
+    现场.app.tasks_mut().stop(id);
+    现场.app.poll_tasks();
+
+    let record = 现场
+        .app
+        .tasks()
+        .history()
+        .iter()
+        .find(|one| one.id == id)
+        .expect("撤掉的那一趟也进历史");
+    assert!(
+        matches!(record.ending, Ending::Stopped),
+        "撤掉的那一趟记成了「{}」——它一个字节都没写，不是停在半路",
+        record.ending.render(),
+    );
+    assert_eq!(
+        现场.叫法条数(),
+        折过之后,
+        "这一趟停在开折之前，标题集合却少了几条",
+    );
+    // 那一行的按钮又按得下去了。
+    assert!(
+        现场
+            .app
+            .roots()
+            .stages()
+            .task_of(Stage::FoldTitles)
+            .is_none()
+    );
+
+    现场.app.tasks_mut().stop(占位);
+    现场.等任务跑完();
+}
+
+#[test]
+fn 工序段上折标题一行_画的是上次跑的时刻() {
+    // 验收第 1 条与第 2 条：那一行在屏上，说的是**上次跑的时刻**（这一支的度量走了
+    // 退路，见 `romcat_core::stage::Stage::FoldTitles` 与挂单 `Q426`），
+    // **而识别那一行不受影响**。
+    let 库 = 建库("gui-stages-两行");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        屏上.lines().any(|line| line.trim() == "折标题"),
+        "工序段上没有折标题那一行：\n{屏上}",
+    );
+    assert!(
+        屏上.lines().any(|line| line.trim() == "工序 · 2 道"),
+        "工序段说的道数不对：\n{屏上}",
+    );
+
+    // 一趟都没折过：说的是「还没跑过」，**不是零**。
+    let 那一句 = 现场.折标题那一行().render();
+    assert!(那一句.contains("还没跑过"), "{那一句}");
+    assert!(那一句.contains("算不出还差多少"), "{那一句}");
+    // 识别那一支照旧报数。
+    assert_eq!(现场.识别那一行().behind, Behind::Left(2));
+}
+
+#[test]
+fn 折标题读不动优先级表时如实拒绝_并说清停在哪一步() {
+    // **两件事一条测试**：
+    //
+    // 1. **不静默退回内置那份优先级表。** 挑**显示标题**用的就是这份表，而工作目录里
+    //    那份 `priorities.toml` 正是人改过的说法——悄悄退回内置的，人会看见一份自己
+    //    没定过的显示标题，还查不出为什么。
+    // 2. **这一趟报得出走到第几步。** 任务台记下来的那句「停在哪一步」取自把手上的
+    //    进度（`Board::settle`），它对得上就说明 `task.step` 那几句真的报出去了
+    //    ——**验收第 3 条「报得出进度」的落点**。
+    let 库 = 建库("gui-stages-折标题坏表");
+    let mut 现场 = 现场::摆好();
+    写(
+        &现场.工作区.path().join("priorities.toml"),
+        "这不是一份 TOML".as_bytes(),
+    );
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    现场.折标题();
+
+    let record = &现场.app.tasks().history()[0];
+    let Ending::Failed { step, why } = &record.ending else {
+        panic!("表都读不动却把这一趟记成了「{}」", record.ending.render());
+    };
+    assert_eq!(step, "读优先级表", "说不清停在哪一步");
+    assert!(!why.is_empty(), "说不清为什么跑不了");
+    // 库里一条叫法都没多出来。
+    assert_eq!(现场.叫法条数(), 0);
+    // 那一行照旧说「还没跑过」——**失败不算跑过**。
+    assert!(
+        现场.折标题那一行().render().contains("还没跑过"),
+        "{}",
+        现场.折标题那一行().render(),
+    );
 }

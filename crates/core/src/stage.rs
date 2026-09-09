@@ -17,6 +17,10 @@
 //! （[`Behind`] 那两支），**退路只对单支生效**：一支退了不许把现成的识别那一支也降级
 //! ——它明明数得出来。
 //!
+//! **折标题那一支就是走退路的那一支**，理由与实测代价写在 [`Stage::FoldTitles`] 上。
+//! 它同时把「上次跑是几点」那条数据通路带了进来
+//! （[`Catalog::titles_folded_at`]）——退回时刻的那一行没有它就画不出时刻。
+//!
 //! 这也是 [`Stages::survey`] **不返回 `Result`** 的理由：某一支读不动库时，它降级的是
 //! 那一行，不是整段。整段失败的话，一个算不出来的度量会让库屏上连识别那一行都消失。
 //!
@@ -31,8 +35,8 @@ use crate::report::{human_time, thousands};
 
 /// 一道**工序**。
 ///
-/// **眼下只有识别一支**：折标题与**导出**各在自己那张票里加进来
-/// （票 `gui-self-sufficient/07` 与 `08`）。**加一支要写五处，两处不在这个 crate 里**：
+/// **眼下是识别与折标题两支**：**导出**在它自己那张票里加进来
+/// （票 `gui-self-sufficient/08`）。**加一支要写五处，两处不在这个 crate 里**：
 ///
 /// 1. 这个枚举一个变体，加 [`Stage::label`] 那个 `match` 一支；
 /// 2. [`Stage::ALL`] 一项——[`Stages::survey`] 照它走，漏了就整支不出现；
@@ -46,17 +50,46 @@ use crate::report::{human_time, thousands};
 pub enum Stage {
     /// **识别**：撞 DAT、撞**沉淀库**、撞名字，给每个**变体**一条结论。
     Identify,
+    /// **折标题**：把识别与刮削的结论折成每个作品的**标题集合**
+    /// （[`title::run`](crate::title::run)）。
+    ///
+    /// ## 这一支为什么退回显示时刻
+    ///
+    /// 它要说的数是「**标题集合变过、但还没重折的作品数**」，而这个数**只有把整份集合
+    /// 重折一遍再逐个作品比对才算得出来**——也就是说，**算这个数就是跑这道工序**。
+    /// 中立库里没有第二条便宜的路：`title` 那张表上没有时刻列（加一列要升结构版本、
+    /// 让人删掉重扫），`candidate` 那张表连时刻都没有，于是拿 `scrape_value.at` 去
+    /// 兜的话，重跑一趟识别之后那个数会一直报零——**报零比报不出来坏得多**，
+    /// 人会以为这道工序已经跑完了。
+    ///
+    /// 还有一层拦在前面：[`Stages::survey`] 手里只有中立库，够不着**沉淀库**，
+    /// 而**压掉的叫法**正筛在写库那一层（[`title::refold`](crate::title::refold)）。
+    /// 拿现折的结果直接比，人删过叫法的那几个作品会永远算成「变过还没重折」——
+    /// 一个折完也归不了零的数。
+    ///
+    /// **实测**（`crates/core` 的 debug 构建，2,000 个作品 / 2,000 个变体 /
+    /// 4,000 条叫法的合成库）：[`title::fold`](crate::title::fold) 一趟 **73–81 毫秒**，
+    /// 一趟走过约 1.2 万行；照真库 46,483 个变体线性折算是 **1.7 秒上下**，而
+    /// [`Stages::survey`] 跑在**画帧那条线程**上、每次重读库屏都要跑一遍——
+    /// 一帧的预算是 16 毫秒。真机上 `romcat titles` 整趟不到 3 秒
+    /// （`docs/library-facts.md`），那三秒的大头正是这一折。
+    ///
+    /// 所以这一支交出 [`Behind::Unmeasured`]，带上[上次重折的时刻](Catalog::titles_folded_at)。
+    /// **要不要为它加一张变更计数表由拿主意的人裁**（挂单 `Q426`）——票面写着
+    /// 「不为了整齐去加一张计数表」。
+    FoldTitles,
 }
 
 impl Stage {
     /// 全部工序。**库屏上从上到下就是这个次序**，也是主干六步里的先后。
-    pub const ALL: [Self; 1] = [Self::Identify];
+    pub const ALL: [Self; 2] = [Self::Identify, Self::FoldTitles];
 
     /// 打给用户的那个词。**与词表逐字一样**（`CONTEXT.md` 的**工序**条）。
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Identify => "识别",
+            Self::FoldTitles => "折标题",
         }
     }
 }
@@ -102,6 +135,14 @@ impl StageRow {
             Behind::Left(left) => match self.stage {
                 Stage::Identify if *left == 0 => "每个变体都跑过识别了".to_string(),
                 Stage::Identify => format!("{} 个变体连识别都还没跑过", thousands(*left)),
+                // **折标题眼下折不出这一支**——它走的是退路（见 [`Stage::FoldTitles`]）。
+                // 这两句话是那张变更计数表真被认下来之后这一行该说的话，钉在
+                // `crates/core/tests/stage.rs` 上：换度量的人不必再想一遍措辞，
+                // 也不会顺手写成「N 个作品还没折标题」——那是另一件事。
+                Stage::FoldTitles if *left == 0 => "标题集合都是重折过的".to_string(),
+                Stage::FoldTitles => {
+                    format!("{} 个作品的标题集合变过、还没重折", thousands(*left))
+                }
             },
             // **退回时刻的那一行不许画零**：「还差 0」与「算不出还差多少」是两件事。
             // 这一支**与是哪道工序无关**，所以它不跟着工序分支——07 与 08 加自己那一支时
@@ -156,6 +197,7 @@ impl Stages {
 fn row_of(stage: Stage, catalog: &Catalog) -> StageRow {
     match stage {
         Stage::Identify => identify_row(catalog),
+        Stage::FoldTitles => fold_titles_row(catalog),
     }
 }
 
@@ -178,5 +220,29 @@ fn identify_row(catalog: &Catalog) -> StageRow {
     StageRow {
         stage: Stage::Identify,
         behind,
+    }
+}
+
+/// **折标题**那一行：**退回上次重折的时刻**。
+///
+/// 为什么不报数、代价实测了多少，全写在 [`Stage::FoldTitles`] 上。这一层只做两件事：
+/// 把[上次重折的时刻](Catalog::titles_folded_at)取出来，把「为什么算不出来」这句话
+/// 说给人听——那句话决定人接下来信不信这一行。
+///
+/// **时刻读不出来也不失败**：那时 `at` 是 `None`，[`StageRow::render`] 画的是
+/// 「还没跑过」。一份库读不动不该让工序段上连识别那一行都消失。
+fn fold_titles_row(catalog: &Catalog) -> StageRow {
+    // **「这份库读不动」与「还没折过」是两句话**，别都画成「还没跑过」——前者是一件
+    // 该去查的事，后者是一件该去做的事。与识别那一行同一个口径：**只降这一行**。
+    let (at, why) = match catalog.titles_folded_at() {
+        Ok(at) => (
+            at,
+            "要把整份标题集合重折一遍才比得出来，而那一趟正是这道工序自己".to_string(),
+        ),
+        Err(error) => (None, format!("中立库读不动：{error}")),
+    };
+    StageRow {
+        stage: Stage::FoldTitles,
+        behind: Behind::Unmeasured { at, why },
     }
 }

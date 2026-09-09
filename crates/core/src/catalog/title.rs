@@ -33,9 +33,17 @@
 use rusqlite::params;
 
 use super::identify::Confidence;
-use super::{Catalog, CatalogError};
+use super::{Catalog, CatalogError, now_secs};
 use crate::scrape::priority::VERDICT;
 use crate::title::{Language, Seam, TitleKind};
+
+/// **上次重折标题集合是什么时候**，落在元数据表上的那个键。
+///
+/// **不是 `title` 表上的一列**：那张表一行一条叫法，而这是整趟活的账，落在行上等于
+/// 同一个时刻抄一万遍；更要紧的是**加一列要升结构版本**，而升版意味着让人删掉重扫
+/// 一份 8.60 TiB 的库。元数据表是键值表，**加一个键是纯加**——旧库拿新程序打开照样
+/// 能用，读不到这一行就是「还没折过」。
+const META_TITLES_FOLDED_AT: &str = "titles_folded_at";
 
 /// 标题集合那张表。
 pub(super) const TITLE_SCHEMA: &str = "\
@@ -108,6 +116,32 @@ impl TitleRow {
 pub type TitleVisitor<'a> = dyn FnMut(&TitleRow) + 'a;
 
 impl Catalog {
+    /// **上次重折标题集合是什么时候**（UNIX 纪元起的秒）；一趟都没折过就是 `None`。
+    ///
+    /// 库屏**工序段**上折标题那一行靠它说话：那一支的「还差多少」算不出来，退回显示
+    /// 上次跑的时刻（`stage::Stage::FoldTitles`）。**没折过就是 `None`**——那时画一个
+    /// 时刻出来是凭空捏造。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn titles_folded_at(&self) -> Result<Option<i64>, CatalogError> {
+        Ok(self
+            .meta_get(META_TITLES_FOLDED_AT)?
+            .and_then(|value| value.trim().parse::<i64>().ok()))
+    }
+
+    /// 记下**这一趟重折**的时刻。
+    ///
+    /// [`crate::title::refold`] 写完集合就调它，于是命令行 `romcat titles`、界面上
+    /// 工序段那一行、以及一条否定裁决就地重折（`scrape::zh::judge`）记下的是同一件事
+    /// ——**标题集合上一次被折出来是什么时候**，不是「谁跑的」。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn mark_titles_folded(&self) -> Result<(), CatalogError> {
+        self.meta_set(META_TITLES_FOLDED_AT, &now_secs().to_string())
+    }
+
     /// 把一批叫法写进去。**同一条写两次是同一个结果**。
     ///
     /// # Errors

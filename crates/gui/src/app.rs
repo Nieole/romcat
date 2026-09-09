@@ -336,6 +336,13 @@ impl App {
                 if let Some(stage) = self.roots.stages_mut().take_ran() {
                     match stage {
                         romcat_core::stage::Stage::Identify => self.queue.reload(&self.site),
+                        // **折标题跑完了，浏览屏上的显示标题跟着更新**：那是这道工序
+                        // 起没起作用唯一看得见的地方。走 `refresh` 而不是上面那句
+                        // `invalidate`——显示标题画在**详情面板**上，而只有 `refresh`
+                        // 连那一格一起重读（`browse::Screen::refresh`）。
+                        romcat_core::stage::Stage::FoldTitles => {
+                            self.browse.refresh(&self.site);
+                        }
                     }
                 }
                 continue;
