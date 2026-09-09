@@ -12,6 +12,10 @@
 //! 界面上长得一模一样，看见一屏假名字的第一反应会是「我的库怎么了」。要看合成数据
 //! （形状照真机来，见 [`demo`]）得显式给 `--demo`。
 //! **一个字节都不读主库**（ADR-0001、ADR-0004）。
+//!
+//! **定位、开出现场、进主窗口那一段不在这个文件里**，在 [`Program`] 上——这儿的东西
+//! 一条测试都够不着（它是个二进制的 `main`），而那一段正是维护者第一次打开工具时走的
+//! 那条路。入口只剩**解析参数**与**开窗**。
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -23,11 +27,11 @@ use romcat_core::catalog::Catalog;
 use romcat_core::catalog::VariantQuery;
 #[cfg(feature = "demo")]
 use romcat_core::site::Site;
-use romcat_gui::app::App;
 #[cfg(feature = "demo")]
-use romcat_gui::app::View;
+use romcat_gui::app::{App, View};
 #[cfg(feature = "demo")]
 use romcat_gui::bench::Sweep;
+use romcat_gui::program::Program;
 use romcat_gui::site::Locate;
 #[cfg(feature = "demo")]
 use romcat_gui::{bench, demo};
@@ -41,14 +45,6 @@ use romcat_gui::{font, headless};
 /// [`demo::BROWSE_LINES`] 行。
 #[cfg(feature = "demo")]
 const BENCH_ROWS: u64 = 100_000;
-
-/// 没说开哪份库时说的那句话。**不擅自造一份假的**。
-const NO_LIBRARY: &str = "说清要开哪份库：\n\
-     \x20 romcat-gui <主库根>\n\
-     \x20 romcat-gui --library <名字> [--workspace <目录>]\n\
-     \x20 romcat-gui --catalog <中立库文件>\n\
-     \n\
-     只想看看界面长什么样：`cargo run -p romcat-gui --features demo -- --demo`。";
 
 /// romcat 的界面。
 #[derive(Debug, Parser)]
@@ -195,12 +191,6 @@ impl Args {
         self.demo || self.benching()
     }
 
-    /// 没编进 `demo` feature：合成数据这条路根本不存在。
-    #[cfg(not(feature = "demo"))]
-    const fn wants_demo(&self) -> bool {
-        false
-    }
-
     /// 在跑哪一条**实测**。这几条量的就是合成数据，不给库也照造。
     #[cfg(feature = "demo")]
     fn benching(&self) -> bool {
@@ -211,20 +201,34 @@ impl Args {
             || self.bench_sublibrary
     }
 
-    /// 开一份现成的库。**没说开哪份、也没要合成数据，就如实报错。**
+    /// 走完启动那条路，交出**程序本体**。
     ///
-    /// 以前这里是「都不给就悄悄造一份合成的」。合成数据与真库在界面上长得一模一样，
-    /// 于是不带参数打开看见的是一屏假名字，第一反应是「我的库怎么了」而不是
-    /// 「我打开的不是我的库」——**不报错的错比报错的错难查得多**。
+    /// 开现成的库那条整条在 [`Program::start`] 上——**没说开哪份、也没要合成数据，
+    /// 就如实报错**（以前这里是「都不给就悄悄造一份合成的」；合成数据与真库在界面上
+    /// 长得一模一样，于是不带参数打开看见的是一屏假名字，第一反应是「我的库怎么了」
+    /// 而不是「我打开的不是我的库」——**不报错的错比报错的错难查得多**）。
+    ///
+    /// 这儿只多一支：**合成数据那一路**。它的现场是造出来的，压根不走定位那一段，
+    /// 而且进窗口之前要把标题里那个库名换掉。
     #[cfg(feature = "demo")]
-    fn open(&self, synthetic: impl FnOnce() -> Result<Catalog, String>) -> Result<Site, String> {
-        if self.locate().given() {
-            return self.locate().open();
+    fn start(&self) -> Result<Program, String> {
+        // 没说开哪份现成的库、又点名要看合成数据——只有这一种情况走演示那条路。
+        if !self.locate().given() && self.wants_demo() {
+            let synthetic =
+                demo::queue(self.queue_rows).map_err(|error| format!("造不出合成数据：{error}"))?;
+            let mut app = App::new(demo::site(synthetic)?, self.workspace_dir());
+            // 标题里说清开的是哪一份。合成数据与真库在界面上长得一模一样，标题是唯一
+            // 一直看得见的区分处。
+            app.set_library_label("合成数据（演示）");
+            return Ok(Program::opened(app));
         }
-        if !self.wants_demo() {
-            return Err(NO_LIBRARY.to_string());
-        }
-        demo::site(synthetic()?)
+        Program::start(&self.locate())
+    }
+
+    /// 走完启动那条路。没编进 `demo` feature 时**只有开现成的库这一条**。
+    #[cfg(not(feature = "demo"))]
+    fn start(&self) -> Result<Program, String> {
+        Program::start(&self.locate())
     }
 
     /// 实测那几条专用：它们量的就是合成数据，不给库也照造。
@@ -243,18 +247,16 @@ impl Args {
     ///
     /// 说了 `--workspace` 就用它；开的是现成的库就按 [`Locate`] 那条算；跑**合成数据**
     /// 时用一个**临时目录**——演示不该去翻维护者真正的那一份。
+    ///
+    /// **只有合成数据与实测那几条要它**：开现成的库那条路上，工作目录由
+    /// [`Program::start`] 自己从三种给法里折（`Locate::workspace_dir`），两处各算一遍
+    /// 迟早对不上。
+    #[cfg(feature = "demo")]
     fn workspace_dir(&self) -> PathBuf {
         if self.workspace.is_some() || self.locate().given() {
             return self.locate().workspace_dir();
         }
-        #[cfg(feature = "demo")]
-        {
-            demo::workspace()
-        }
-        #[cfg(not(feature = "demo"))]
-        {
-            romcat_core::workspace::default_dir()
-        }
+        demo::workspace()
     }
 }
 
@@ -270,33 +272,16 @@ fn main() -> ExitCode {
         return code;
     }
 
-    if !args.locate().given() && !args.wants_demo() {
-        return fail(NO_LIBRARY);
-    }
-
-    #[cfg(feature = "demo")]
-    let site = match args
-        .open(|| demo::queue(args.queue_rows).map_err(|error| format!("造不出合成数据：{error}")))
-    {
-        Ok(site) => site,
-        Err(message) => return fail(&message),
-    };
-    #[cfg(not(feature = "demo"))]
-    let site = match args.locate().open() {
-        Ok(site) => site,
+    let program = match args.start() {
+        Ok(program) => program,
         Err(message) => return fail(&message),
     };
 
-    // 标题里说清开的是哪一份。合成数据与真库在界面上长得一模一样，标题是唯一
-    // 一直看得见的区分处。**开的是哪一屏也写进去**（票 `gui-redesign/12` 验收第 6 条）
-    // ——那一半跟着屏变，所以由 [`App::window_title`] 每次换屏时重发一条。
-    let mut app = App::new(site, args.workspace_dir());
-    if !args.locate().given() {
-        app.set_library_label("合成数据（演示）");
-    }
+    // 标题里说清开的是哪一份。**开的是哪一屏也写进去**（票 `gui-redesign/12` 验收
+    // 第 6 条）——那一半跟着屏变，所以由 [`App::window_title`] 每次换屏时重发一条。
     // 这一句只管**开窗到第一帧之间**那一小会儿：第一帧一画，`App` 就把带屏名的那个
     // 标题发下来了。
-    let title = app.window_title();
+    let title = program.window_title();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0])
@@ -309,7 +294,7 @@ fn main() -> ExitCode {
         options,
         Box::new(|cc| {
             font::install(&cc.egui_ctx);
-            Ok(Box::new(app))
+            Ok(Box::new(program))
         }),
     ) {
         Ok(()) => ExitCode::SUCCESS,

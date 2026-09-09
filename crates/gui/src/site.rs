@@ -14,7 +14,11 @@ use std::path::{Path, PathBuf};
 use romcat_core::site::Site;
 use romcat_core::workspace::{self, Slug};
 
-/// 界面从哪儿找中立库。三种给法任给一样，都不给就是合成数据。
+/// 界面从哪儿找中立库。三种给法任给一样。
+///
+/// **一样都不给的那条路不归它管**：由 [`crate::program::Program::start`] 挡在前面，
+/// 报「说清要开哪份库」并退出（ADR-0023：不擅自造一份假的）。这行字从前写的是
+/// 「都不给就是合成数据」，那是 `--demo` 还会兜底的年代留下的。
 #[derive(Debug, Clone, Default)]
 pub struct Locate<'a> {
     /// 主库根目录。**只用来找到对应的中立库，一个字节都不读它。**
@@ -65,9 +69,13 @@ impl Locate<'_> {
                 let (slug, located_by) = match (self.library, self.root) {
                     (Some(name), _) => (Slug::Named(name), format!("--library {name}")),
                     (None, Some(root)) => (Slug::AtPath(root), romcat_core::path::display(root)),
+                    // **走不到这儿**：一样都不给的那条路由
+                    // [`crate::program::Program::start`] 挡在前面（它先问 [`Self::given`]）。
+                    // 留着这一支是因为这个函数是公开的，谁都能空手调它一次；但它这句话
+                    // 从前写的是「不给就是合成数据」，与 ADR-0023 正相反。
                     (None, None) => {
                         return Err("说清要开哪份库：给主库根、`--library <名字>`，\
-                                    或者 `--catalog <文件>`。不给就是合成数据。"
+                                    或者 `--catalog <文件>`。"
                             .to_string());
                     }
                 };
