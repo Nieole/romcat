@@ -14,6 +14,8 @@
 use std::fs;
 use std::path::Path;
 
+use romcat_core::adapter::pegasus::Pegasus;
+use romcat_core::adapter::transfer;
 use romcat_core::catalog::{Catalog, Confidence, Roots, TitleRow};
 use romcat_core::dat::repo::DatRepo;
 use romcat_core::fs::RealFs;
@@ -49,8 +51,19 @@ fn 建库(tag: &str, 份数: usize) -> TempDir {
     dir
 }
 
+/// 一份**横跨两个平台**的 fixture 主库：导出会收敛成两份元数据文件。
+///
+/// 「写过一份之后按停」得有第二份可写才验得到——一份的库停在哪儿都是「写完了」。
+fn 建库两个平台(tag: &str) -> TempDir {
+    let dir = temp_dir(tag);
+    for (平台, i) in [("FC", 0), ("SFC", 1)] {
+        写(&dir.path().join(format!("{平台}/游戏.zip")), &zip(1024 + i));
+    }
+    dir
+}
+
 struct 现场 {
-    _工作区: TempDir,
+    工作区: TempDir,
     catalog: Catalog,
     repo: DatRepo,
     store: Store,
@@ -64,7 +77,7 @@ impl 现场 {
         let repo = DatRepo::open(&工作区.path().join("dat.sqlite3")).expect("开得出 DAT 库");
         let store = Store::in_memory().expect("开得出沉淀库");
         Self {
-            _工作区: 工作区,
+            工作区,
             catalog,
             repo,
             store,
@@ -123,6 +136,34 @@ impl 现场 {
     /// 跑一趟**折标题**。界面上点那一行的按钮、命令行 `romcat titles` 走的都是它。
     fn 折标题(&mut self) {
         title::run(&mut self.catalog, &self.store, &Priorities::builtin()).expect("折得出标题");
+    }
+
+    /// 导出那一行。
+    fn 导出那一行(&self) -> romcat_core::stage::StageRow {
+        Stages::survey(&self.catalog)
+            .of(Stage::Export)
+            .expect("工序段有导出那一行")
+            .clone()
+    }
+
+    /// 跑一趟**导出**：把中立库写成 Pegasus 能读的元数据，铺在一个临时目录里。
+    /// 界面上点那一行的按钮、命令行 `romcat export` 走的都是它。
+    ///
+    /// **一个 ROM 都不搬**（ADR-0004）：落点是另开的一个临时目录，主库那份 fixture
+    /// 一个字节都不动。
+    fn 导出(&mut self) -> romcat_core::adapter::report::ExportReport {
+        let out = self.工作区.path().join("导出去");
+        transfer::export(
+            &mut self.catalog,
+            &Pegasus,
+            &Priorities::builtin(),
+            &transfer::ExportOptions {
+                out,
+                dry_run: false,
+                force: false,
+            },
+        )
+        .expect("导得出来")
     }
 
     /// 往标题集合里塞一条叫法，**当作上一趟折出来的那批**。
@@ -435,4 +476,368 @@ fn 顺手把集合折回来不算跑过这道工序() {
         "跑过了却说不出上次是什么时候：{:?}",
         现场.折标题那一行().behind,
     );
+}
+
+#[test]
+fn 导出那一支退回上次跑的时刻_而识别那一行照旧报数() {
+    // **这一支的度量也走了退路**（规格「退路已经认可」，挂单 `Q436`）：算「上次导出
+    // 之后库里改了多少条」要把整库收敛一遍、再逐份与上次写出去的**底本**比对，
+    // 而那一趟正是这道工序自己——实测见 `Stage::Export` 上那段说明。
+    //
+    // 退路那一行说的是**上次跑的时刻**，而且**只降它自己这一支**：识别那一行照旧报数
+    // （验收第 1 条逐字写着「且不牵连另外两支」）。
+    let 甲 = 建库("stage-导出", 4);
+    let mut 现场 = 现场::摆好();
+    现场.扫("甲", 甲.path());
+
+    // 还没导过：画的是「还没跑过」，**不是零**——「还差 0」与「算不出还差多少」
+    // 是两件事。
+    let 行 = 现场.导出那一行();
+    let Behind::Unmeasured { at, why } = &行.behind else {
+        panic!("导出这一支眼下走的是退路：{:?}", 行.behind);
+    };
+    assert_eq!(*at, None, "一趟都没导过，却报得出一个时刻");
+    assert!(why.contains("收敛"), "没说清它为什么算不出还差多少：{why}");
+    assert!(行.render().contains("还没跑过"), "{}", 行.render());
+    assert!(
+        !行.render().contains(" 0 "),
+        "算不出还差多少却画了个零出来：{}",
+        行.render(),
+    );
+
+    // **另外两支不受影响**：识别明明数得出来，折标题照旧说它自己那一句。
+    assert_eq!(现场.识别那一行().behind, Behind::Left(4));
+    assert!(现场.折标题那一行().render().contains("还没跑过"));
+
+    // 导一趟：那一行改口说「上次跑是 ⋯」。
+    现场.导出();
+    let 行 = 现场.导出那一行();
+    let Behind::Unmeasured { at: Some(at), .. } = 行.behind else {
+        panic!("导过一趟了，那一行还说不出上次是什么时候：{:?}", 行.behind);
+    };
+    assert!(at > 0, "记下来的时刻不像个时刻：{at}");
+    assert!(
+        行.render().contains("上次跑是"),
+        "导过一趟了，那一行还在说「还没跑过」：{}",
+        行.render(),
+    );
+
+    // 导完之后识别那一行**一个字都没变**。
+    assert_eq!(现场.识别那一行().behind, Behind::Left(4));
+}
+
+#[test]
+fn 导出的度量真做出来时那一行说的是几个条目在上次导出之后变过() {
+    // **退路不是这一支永远的说法**：拿主意的人日后要是认了那张变更计数表
+    // （挂单 `Q436`），`row_of` 折出来的就是 `Left`，而那一行该说的话在这儿钉着。
+    let 差着 = romcat_core::stage::StageRow {
+        stage: Stage::Export,
+        behind: Behind::Left(2_345),
+    };
+    let 那一句 = 差着.render();
+    assert!(那一句.contains(&thousands(2_345)), "{那一句}");
+    assert!(那一句.contains("上次导出之后变过"), "{那一句}");
+
+    // **不差什么了也得说话**：一行空白读起来像出了什么事。
+    let 不差 = romcat_core::stage::StageRow {
+        stage: Stage::Export,
+        behind: Behind::Left(0),
+    };
+    assert!(!不差.render().is_empty());
+    assert!(!不差.render().contains("变过"), "{}", 不差.render());
+}
+
+#[test]
+fn 导出一份都没写就被按停_盘上与中立库都一个字节没动() {
+    // **四档收场里的第二档**：停了，什么都没留下。收敛整个库是这一趟最长的一段
+    // （见 `Stage::Export` 上的实测），按停多半就落在那儿——那时一份文件都还没写，
+    // 说「停在半路」是骗人的（`Handle::halfway` 的文档：只读的活不该说这一句）。
+    //
+    // 拿一个**一开始就停着的把手**验，不靠「恰好停在某一步」那种挂钟彩票。
+    let 甲 = 建库("stage-导出按停", 3);
+    let mut 现场 = 现场::摆好();
+    现场.扫("甲", 甲.path());
+    let out = 现场.工作区.path().join("导出去");
+
+    let 把手 = Handle::new();
+    把手.stop();
+    let 结果 = transfer::export_task(
+        &mut 现场.catalog,
+        &Pegasus,
+        &Priorities::builtin(),
+        &transfer::ExportOptions {
+            out: out.clone(),
+            dry_run: false,
+            force: false,
+        },
+        &把手,
+    );
+    assert!(
+        matches!(结果, Err(transfer::ExportError::Halted(_))),
+        "按停了却没交出「被按停了」那一支：{结果:?}",
+    );
+    assert!(!out.exists(), "一份都没写的那一趟却建出了导出目录");
+    // 也没打时刻戳：**没跑完就不算跑过**。
+    assert_eq!(现场.catalog.exported_at().expect("读得出"), None);
+    assert!(现场.导出那一行().render().contains("还没跑过"));
+}
+
+#[test]
+fn 只排计划那一趟不打时刻戳() {
+    // `dry_run` 一个字节都不写盘。说「上次跑是刚刚」，那一行就在骗人
+    // （规格第 31 条「至少不骗我」）。
+    let 甲 = 建库("stage-导出预演", 3);
+    let mut 现场 = 现场::摆好();
+    现场.扫("甲", 甲.path());
+    let out = 现场.工作区.path().join("预演");
+
+    transfer::export(
+        &mut 现场.catalog,
+        &Pegasus,
+        &Priorities::builtin(),
+        &transfer::ExportOptions {
+            out,
+            dry_run: true,
+            force: false,
+        },
+    )
+    .expect("排得出计划");
+    assert_eq!(现场.catalog.exported_at().expect("读得出"), None);
+    assert!(现场.导出那一行().render().contains("还没跑过"));
+}
+
+/// 一份**照着 Pegasus 写、但写出第一份就替人按下「停下」**的适配器。
+///
+/// 「停在半路那一趟说得出留下了什么」得**真的留下几份文件**才验得到，而靠时间去抢
+/// 那一下抢不准——这份 fixture 小到几毫秒就导完了（挂单 `Q196` / `Q349` 说的正是那种
+/// 挂钟彩票）。这一层把那一下钉死在「写出第几份」上。
+///
+/// **停下的信号落在第一份写出去之后**：`export_task` 在每一份之前看一眼把手，
+/// 所以第一份整份落成、第二份一个字节都没写。它自己**一个判断都不做**，只转发给
+/// [`Pegasus`]。
+struct 写出第一份就按停<'a> {
+    task: &'a Handle,
+    写过几份: std::cell::Cell<usize>,
+}
+
+impl romcat_core::adapter::Adapter for 写出第一份就按停<'_> {
+    fn name(&self) -> &'static str {
+        Pegasus.name()
+    }
+    fn ceiling(&self) -> romcat_core::adapter::Capability {
+        Pegasus.ceiling()
+    }
+    fn file_name(&self) -> &'static str {
+        Pegasus.file_name()
+    }
+    fn read(
+        &self,
+        bytes: &[u8],
+    ) -> Result<romcat_core::adapter::Parsed, romcat_core::adapter::AdapterError> {
+        Pegasus.read(bytes)
+    }
+    fn write(
+        &self,
+        doc: &romcat_core::adapter::Document,
+        baseline: Option<&romcat_core::adapter::Parsed>,
+    ) -> Result<Vec<u8>, romcat_core::adapter::AdapterError> {
+        self.写过几份.set(self.写过几份.get() + 1);
+        self.task.stop();
+        Pegasus.write(doc, baseline)
+    }
+    fn media_placement(
+        &self,
+        rom_key: &str,
+        kind: romcat_core::scrape::MediaKind,
+        hash: &str,
+        ext: &str,
+    ) -> Option<romcat_core::adapter::MediaPlacement> {
+        Pegasus.media_placement(rom_key, kind, hash, ext)
+    }
+}
+
+#[test]
+fn 导出写过一份之后被按停_记的是停在半路而且写过的那几份留在盘上() {
+    // **导出有「停在半路」这一档，而折标题没有**——差别是真的：重折是「清掉再写回」，
+    // 停在中间等于把整份集合丢掉；导出是**一份文件一份文件地写**，写完一份就把
+    // **底本**一起存进中立库。停在第三份上，前两份真的躺在盘上了，下一趟还拿它们
+    // 当基线接着比——那正是「没走完却留下了东西」（`Handle::halfway`）。
+    let 甲 = 建库两个平台("stage-导出半路");
+    let mut 现场 = 现场::摆好();
+    现场.扫("甲", 甲.path());
+    let out = 现场.工作区.path().join("导出去");
+
+    let ended = {
+        let mut board: romcat_core::task::Board<romcat_core::adapter::report::ExportReport> =
+            romcat_core::task::Board::new();
+        board.run_here("导出", |task| {
+            transfer::export_task(
+                &mut 现场.catalog,
+                &写出第一份就按停 {
+                    task,
+                    写过几份: std::cell::Cell::new(0),
+                },
+                &Priorities::builtin(),
+                &transfer::ExportOptions {
+                    out: out.clone(),
+                    dry_run: false,
+                    force: false,
+                },
+                task,
+            )
+            .map_err(romcat_core::task::Cutoff::from)
+        });
+        board.poll().expect("就地跑就是当场跑完").ended
+    };
+
+    let romcat_core::task::Ending::Halfway {
+        product: report,
+        left_behind,
+    } = ended
+    else {
+        panic!("写过一份之后按停，台上却没记成停在半路");
+    };
+    assert!(report.interrupted, "被按停了却没记上");
+    let 写出去的: Vec<&romcat_core::adapter::report::ExportedFile> =
+        report.files.iter().filter(|file| file.written).collect();
+    assert_eq!(写出去的.len(), 1, "该只写出去一份：{:#?}", report.files);
+    // **第二份一个字节都没写**：这个库横跨两个平台，收敛出两份元数据文件。
+    // 落点上只躺着一份，这条测试才真的验在「没走完」上。
+    let 盘上几份 = fs::read_dir(&out)
+        .expect("导出目录建出来了")
+        .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+        .count();
+    assert_eq!(盘上几份, 1, "落点上不止一份，那这一趟其实跑完了");
+    // **留下了什么由长入口自己说**（`Handle::halfway`）：只有它知道写出去了几份、
+    // 一共几份。
+    assert!(
+        left_behind.contains(&format!("共 {} 份", thousands(2))),
+        "那一句没说清一共几份：{left_behind}",
+    );
+    assert!(
+        left_behind.contains("接着把剩下的写完"),
+        "那一句没说清下一趟接得上：{left_behind}",
+    );
+    // 写过的那一份**真的躺在盘上**。
+    let 落点 = std::path::PathBuf::from(&写出去的[0].path);
+    assert!(
+        落点.exists(),
+        "报告说写了，盘上却没有：{}",
+        写出去的[0].path
+    );
+    // **没打时刻戳**：只写了一半说不上「导过了」。
+    assert_eq!(现场.catalog.exported_at().expect("读得出"), None);
+    assert!(现场.导出那一行().render().contains("还没跑过"));
+}
+
+#[test]
+fn 导出这一趟报得出走到第几步() {
+    // 验收第 4 条「报得出进度」的落点：任务屏画的那句「几/几 哪一步」取的就是把手上
+    // 这几个数（`task::Progress::render`）。总步数由调用方声明——界面那一侧还多一步
+    // 「读优先级表」，所以它报的是 `1 + TASK_STEPS`。
+    let 甲 = 建库("stage-导出步数", 3);
+    let mut 现场 = 现场::摆好();
+    现场.扫("甲", 甲.path());
+    let out = 现场.工作区.path().join("导出去");
+
+    let 把手 = Handle::new();
+    把手.steps(transfer::TASK_STEPS);
+    transfer::export_task(
+        &mut 现场.catalog,
+        &Pegasus,
+        &Priorities::builtin(),
+        &transfer::ExportOptions {
+            out,
+            dry_run: false,
+            force: false,
+        },
+        &把手,
+    )
+    .expect("导得出来");
+
+    let 进度 = 把手.progress();
+    assert_eq!(进度.steps, transfer::TASK_STEPS, "总步数报错了");
+    assert_eq!(进度.at, transfer::TASK_STEPS, "走过的步数与声明的对不上");
+    assert_eq!(进度.step, "逐份写出去", "最后停在的那一步说错了");
+    assert!(进度.fraction().is_some(), "说不出走了几成");
+}
+
+#[test]
+fn 选过一次前端格式与目录_下一趟从库里读得回来() {
+    // 验收第 2、3 条：第一次跑之前选一次，记进中立库的元数据表；下一趟不必再选。
+    // **纯加键、不升结构版本**——`SCHEMA_VERSION` 一动不动。
+    let 现场 = 现场::摆好();
+    assert_eq!(
+        现场.catalog.export_setup().expect("读得出"),
+        None,
+        "一次都没选过，却读回来一套配置",
+    );
+
+    let 选好的 = romcat_core::catalog::ExportSetup::check("pegasus", "/一个/目录")
+        .expect("这是带得出来的格式");
+    // **存的是适配器自己报的那个名字**：快照那张表按格式名分栏，大小写各存一份的话
+    // 上一趟的**底本**再也认不出来。
+    assert_eq!(选好的.format, "Pegasus");
+    现场.catalog.set_export_setup(&选好的).expect("记得下");
+
+    assert_eq!(
+        现场.catalog.export_setup().expect("读得出"),
+        Some(选好的),
+        "记下了却读不回来——下一趟还得再选一遍",
+    );
+    // 记一套配置**不算导过一趟**。
+    assert_eq!(现场.catalog.exported_at().expect("读得出"), None);
+}
+
+#[test]
+fn 格式打错时当场说清眼下带的是哪几个() {
+    // **判据在核心里**（ADR-0005）：界面那一层只把这句话转出来，不自己判「这个格式
+    // 有没有」——散一份判断出去，命令行与界面迟早会对同一个字给出两种答复。
+    let 错 = romcat_core::catalog::ExportSetup::check("Pegasüs", "/一个/目录")
+        .expect_err("没有这个格式");
+    let 那一句 = 错.to_string();
+    assert!(那一句.contains("Pegasüs"), "没说清打错的是哪个：{那一句}");
+    for 带得出来的 in romcat_core::adapter::names() {
+        assert!(
+            那一句.contains(带得出来的),
+            "没列出眼下带的那几个：{那一句}",
+        );
+    }
+
+    let 错 = romcat_core::catalog::ExportSetup::check("Pegasus", "   ").expect_err("没给目录");
+    assert!(错.to_string().contains("目录"), "{错}");
+}
+
+#[test]
+fn 每一份都撞上外面有人动过_那一趟不打时刻戳() {
+    // **四档收场之外的第五种「什么都没写」**：这一趟走的是正常出口、报告也没有
+    // `interrupted`，可每一份都被挡下，盘上一个字节都没多。那时说「上次跑是刚刚」，
+    // 工序段那一行就在骗人（规格第 31 条「至少不骗我」）——判据统一成
+    // **真往盘上写过东西**，与只排计划、按停那两档同一条。
+    let 甲 = 建库("stage-导出全挡下", 3);
+    let mut 现场 = 现场::摆好();
+    现场.扫("甲", 甲.path());
+    let out = 现场.工作区.path().join("导出去");
+
+    // 落点上先躺着一份**我们从没见过**的文件——那可能就是维护者的原件，
+    // 覆盖等于把它抹掉（`transfer` 的模块文档）。
+    let 落点 = out.join("FC.metadata.pegasus.txt");
+    写(&落点, b"# \xe6\x89\x8b\xe5\x86\x99\xe7\x9a\x84\n");
+    let 手写的 = fs::read_to_string(&落点).expect("读得出");
+
+    let report = 现场.导出();
+    assert!(!report.conflicts.is_empty(), "该被挡下：{report:#?}");
+    assert!(
+        report.files.iter().all(|file| !file.written),
+        "一份都不该写出去：{:#?}",
+        report.files,
+    );
+    assert_eq!(
+        fs::read_to_string(&落点).expect("读得出"),
+        手写的,
+        "**没有静默覆盖**：手写的那份还在",
+    );
+    // **一个字节都没写，就不算导过一趟。**
+    assert_eq!(现场.catalog.exported_at().expect("读得出"), None);
+    assert!(现场.导出那一行().render().contains("还没跑过"));
 }

@@ -29,16 +29,19 @@
 //!
 //! ## 按停停在哪儿
 //!
-//! **识别与折标题在这件事上不一样，而差别是真的**：识别一路往中立库写批，按停时
-//! 已经算完的那些结论真的落了库，所以它报**停在半路**；折标题的写是「清掉再写回」，
-//! 中间停下等于把整份**标题集合**丢掉——所以它的最后一个停下点摆在写回**之前**
+//! **三支在这件事上各不一样，而差别是真的**：识别一路往中立库写批，按停时已经算完的
+//! 那些结论真的落了库，所以它报**停在半路**；折标题的写是「清掉再写回」，中间停下
+//! 等于把整份**标题集合**丢掉——所以它的最后一个停下点摆在写回**之前**
 //! （`romcat_core::title::run_task`），那一趟要么写完、要么一个字节都没写，
-//! 按停记的是「停了」。两者都由长入口自己说
+//! 按停记的是「停了」；导出**一份文件一份文件地写**，写完一份就把**底本**一起存进
+//! 中立库，于是它两档都有——一份都没写就停下记「停了」，写过之后停下记**停在半路**
+//! （`romcat_core::adapter::transfer::export_task`）。三支都由长入口自己说
 //! （`romcat_core::task::Handle::halfway` 的文档写着这条分界）。
 
 use std::path::{Path, PathBuf};
 
-use romcat_core::catalog::Roots;
+use romcat_core::adapter::transfer::{self, ExportOptions};
+use romcat_core::catalog::{ExportSetup, Roots};
 use romcat_core::fs::RealFs;
 use romcat_core::identify;
 use romcat_core::report::thousands;
@@ -57,6 +60,31 @@ pub struct Section {
     stages: Stages,
     /// 正在跑的那几趟活的任务号，用来禁掉重复按下。
     running: Vec<(u64, Stage)>,
+    /// 记住的那套**导出**配置：往哪个前端格式、哪个目录写。
+    /// **从中立库现读**（[`Catalog::export_setup`](romcat_core::catalog::Catalog::export_setup)），
+    /// 与工序那几行同一趟 [`Section::reload`]——命令行 `romcat export` 改过之后
+    /// 这一屏跟着变。
+    setup: Option<ExportSetup>,
+    /// 那两个键**读不出来**时的那句话；读得出来（哪怕是「还没选过」）就是 `None`。
+    ///
+    /// **「这份库读不动」与「还没选过」是两句话**，与工序那几行同一个口径
+    /// （`romcat_core::stage::export_row` 逐字写着这一条）：前者是一件该去查的事，
+    /// 后者是一件该去做的事。少了这一格，读不动的那份库会被画成「第一次导出之前先选
+    /// 一次」——把该去查的事说成了该去做的事。
+    ///
+    /// **它不占 [`Self::error`] 那一格**：`settle` 收场时才写那一格，而这一趟重读发生在
+    /// 它之后，占过去会把「有几份没写」那句话冲掉。
+    setup_unreadable: Option<String>,
+    /// 底下那两格里人正打着的字。
+    ///
+    /// **与 [`Self::setup`] 分开**：那一份是库里记着的，这一份是人手上还没按「记下」的。
+    /// 合成一格的话，人改了一半切走再回来，屏上会显示一套并没有记进库的配置。
+    ///
+    /// **两格就是两个 `String`**，与库屏加根那两格一个写法
+    /// （`roots::Screen` 的 `new_path` / `new_name`）——它们是输入框里的字，不是一套
+    /// 立得住的配置；立得住的那一份叫 [`ExportSetup`]，由 [`ExportSetup::check`] 折出来。
+    format_draft: String,
+    out_draft: String,
     /// 刚跑完的那一道工序，等窗口取走。
     ///
     /// **跑完识别之后待确认队列得自己重新列过**，而这一段够不着那一屏（ADR-0005：
@@ -76,6 +104,10 @@ impl Section {
             workspace,
             stages: Stages::default(),
             running: Vec::new(),
+            setup: None,
+            setup_unreadable: None,
+            format_draft: String::new(),
+            out_draft: String::new(),
             ran: None,
             error: None,
             notice: None,
@@ -86,6 +118,64 @@ impl Section {
     /// 外置盘不在位时这几行照样看得见。
     pub fn reload(&mut self, site: &Site) {
         self.stages = Stages::survey(&site.catalog);
+        // **读不动与还没选过分两支说**（同 `stage::export_row`）：整段一起失败不成——
+        // 一个读不出来的键会让工序段上连识别那一行都消失（与 `Stages::survey` 同一条）。
+        match site.catalog.export_setup() {
+            Ok(setup) => {
+                self.setup = setup;
+                self.setup_unreadable = None;
+            }
+            Err(error) => {
+                self.setup = None;
+                self.setup_unreadable = Some(format!("中立库读不动：{error}"));
+            }
+        }
+        // **人正打着的字不覆盖**：只在两格都还空着的时候把库里记着的那套填进去。
+        if self.format_draft.is_empty()
+            && self.out_draft.is_empty()
+            && let Some(setup) = &self.setup
+        {
+            self.format_draft = setup.format.clone();
+            self.out_draft = setup.out.to_string_lossy().into_owned();
+        }
+    }
+
+    /// 记住的那套**导出**配置；一次都没选过就是 `None`。测试拿它核对。
+    #[must_use]
+    pub fn export_setup(&self) -> Option<&ExportSetup> {
+        self.setup.as_ref()
+    }
+
+    /// 选一次**前端格式**与**导出目录**，记进中立库。**下一趟不必再选。**
+    ///
+    /// **判据在核心里**（[`ExportSetup::check`]，ADR-0005）：这一层只把话转出来
+    /// ——「有没有这个格式」散一份判断到界面上，命令行与界面迟早会对同一个字给出
+    /// 两种答复。
+    pub fn set_export_setup(&mut self, site: &Site, format: &str, out: &str) {
+        match ExportSetup::check(format, out) {
+            Ok(setup) => match site.catalog.set_export_setup(&setup) {
+                Ok(()) => {
+                    self.error = None;
+                    self.notice = Some(format!(
+                        "记下了：按 {} 的格式写进 {}。下一趟点「开跑」就重导。",
+                        setup.format,
+                        setup.out.display(),
+                    ));
+                    self.format_draft = setup.format.clone();
+                    self.out_draft = setup.out.to_string_lossy().into_owned();
+                    self.setup = Some(setup);
+                    self.setup_unreadable = None;
+                }
+                Err(error) => {
+                    self.notice = None;
+                    self.error = Some(format!("这份中立库写不进去：{error}"));
+                }
+            },
+            Err(error) => {
+                self.notice = None;
+                self.error = Some(error.to_string());
+            }
+        }
     }
 
     /// 一道工序一行。测试拿它核对。
@@ -193,6 +283,37 @@ impl Section {
                     thousands(report.chinese_works),
                 ));
             }
+            Ending::Done(Product::Exported(report)) => {
+                // **数的是真写出去的那几份**，不是整库收敛出来的总数：撞上外面有人动过
+                // 的那几份一个字节都没写，把它们算进「写进了几份」等于虚报
+                // （`ExportedFile::written` 就是这条界线）。
+                let 写出去的: Vec<_> = report.files.iter().filter(|file| file.written).collect();
+                let 条目 = 写出去的.iter().map(|file| file.entries).sum::<u64>();
+                self.notice = Some(if 写出去的.is_empty() {
+                    // 每一份都被挡下、或者库里压根没东西可导。**这一档也得说话**
+                    // ——它与「写了几份」长得完全不一样，而底下那句红字说的是为什么。
+                    format!("{} 跑完了，可一份元数据都没写出去。", stage.label())
+                } else {
+                    format!(
+                        "{} 跑完了：{} 个条目写进 {} 份元数据文件，实测档位 {}。\
+                         一个 ROM 都没搬。",
+                        stage.label(),
+                        thousands(条目),
+                        thousands(写出去的.len() as u64),
+                        report.tier,
+                    )
+                });
+                // **撞上手改要说出口**（验收第 5 条）：跳过的那几份是「你要的事没做，
+                // 去处理一下」，与上面那句「跑完了」意思相反，所以它走的是报错那一格
+                // ——两句合成一句的话，那几份被吞掉的活会被读成一次顺利的导出。
+                self.error = (!report.conflicts.is_empty()).then(|| {
+                    format!(
+                        "有 {} 份没写——外面有人动过那些文件，**没有静默覆盖**。\
+                         先看一眼那几份，确认不要了再重导。",
+                        thousands(report.conflicts.len() as u64),
+                    )
+                });
+            }
             // **停在半路**：识别起手就把上一轮的结论清干净，所以它一定动过库
             // ——记成「可以当没跑过」是骗人的。那句话由核心库折
             // （`identify::run_task` 里 `Handle::halfway` 报的那一句），这一层原样转出来：
@@ -282,8 +403,59 @@ impl Section {
                     ui.end_row();
                 }
             });
+        self.export_setup_ui(ui, site);
         if let Some(stage) = 要跑 {
             self.start(stage, site, tasks);
+        }
+    }
+
+    /// 底下那一行：**导出**往哪个前端格式、哪个目录写。
+    ///
+    /// **第一次导出之前选一次，之后一键重导**（验收第 2、3 条）。选完记进中立库的
+    /// 元数据表，与主库名同一处——**纯加键、不升结构版本**，旧库拿新程序打开照样能用
+    /// （`romcat_core::catalog::export` 的模块文档）。
+    fn export_setup_ui(&mut self, ui: &mut egui::Ui, site: &Site) {
+        ui.add_space(6.0);
+        let mut 要记下 = false;
+        ui.horizontal(|ui| {
+            ui.label("导出去哪儿");
+            // **格式是从适配器名单里挑的，不是手打的**：打错一个字母的代价是一趟活白跑，
+            // 而这份名单本来就是核心库交出来的（`adapter::names`）。
+            egui::ComboBox::from_id_salt("前端格式")
+                .selected_text(if self.format_draft.is_empty() {
+                    "选一个前端格式"
+                } else {
+                    &self.format_draft
+                })
+                .show_ui(ui, |ui| {
+                    for name in romcat_core::adapter::names() {
+                        ui.selectable_value(&mut self.format_draft, name.to_string(), name);
+                    }
+                });
+            ui.add(
+                egui::TextEdit::singleline(&mut self.out_draft)
+                    .hint_text("导出到哪个目录")
+                    .desired_width(320.0),
+            );
+            if ui.button("记下").clicked() {
+                要记下 = true;
+            }
+        });
+        if let Some(why) = &self.setup_unreadable {
+            // **不许画成「还没选过」**：那是一件该去做的事，而这是一件该去查的事。
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!("导出那套配置读不出来：{why}。这**不是**「还没选过」。"),
+            );
+        } else if self.setup.is_none() {
+            ui.weak(
+                "第一次导出之前先选一次；选完记进这份库，下一趟点「开跑」就重导。\
+                 那个目录是**主库根的替身**——放进主库根，前端直接就读得到。",
+            );
+        }
+        if 要记下 {
+            let (format, out) = (self.format_draft.clone(), self.out_draft.clone());
+            self.set_export_setup(site, &format, &out);
         }
     }
 }
@@ -298,6 +470,7 @@ fn run(stage: Stage, site: &mut Site, workspace: &Path, task: &Handle) -> Result
     match stage {
         Stage::Identify => identify_run(site, workspace, task),
         Stage::FoldTitles => fold_titles_run(site, workspace, task),
+        Stage::Export => export_run(site, workspace, task),
     }
 }
 
@@ -380,4 +553,61 @@ fn fold_titles_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<P
     // 这一层只把料摆齐、把把手递进去（ADR-0005）。
     let report = title::run_task(&mut site.catalog, &site.store, &priorities, task)?;
     Ok(Product::Titled(Box::new(report)))
+}
+
+/// 跑一趟**导出**：把中立库写成前端能读的元数据，铺在导出目录里。
+///
+/// **一个字节都不读主库、一个 ROM 都不搬**（ADR-0004、验收第 6 条）：要的东西全在
+/// 中立库里躺着，写出去的只有元数据文件。装配只有两样——记住的那套**配置**与
+/// **优先级表**，与命令行 `romcat export` 摆的是同一副。
+///
+/// ## 两个旋钮界面上一个都不给
+///
+/// 命令行那边有 `--dry-run` 与 `--force`，这儿两个都钉死在「关」上：
+///
+/// - **只排计划**在这一屏上没有落点——工序段那一行问的是「还差多少」，一次不写盘的
+///   预演答不了它，反倒会让那一行说「上次跑是刚刚」而盘上什么都没有。
+/// - **照写**（`--force`）是**丢掉一次手改**，那是不可逆的事。撞上外面有人动过时
+///   这一趟停下来、逐份点名（验收第 5 条），要不要丢由人自己去看那几份文件再定。
+fn export_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Product, Cutoff> {
+    // 装配那两步加上核心库自己那几步。**核心库那个数由它自己报**
+    // （`transfer::TASK_STEPS`）——在这儿手写一个 3，那边加一步这儿的进度条就走过头了。
+    task.steps(2 + transfer::TASK_STEPS);
+    task.step("读导出的配置")?;
+    let setup = site
+        .catalog
+        .export_setup()
+        .map_err(|error| Cutoff::failed(format!("这份中立库读不动：{error}")))?
+        // **没选过就如实拒绝**，不替人挑一个格式与目录：挑错一个目录就是往别人的盘上
+        // 写一堆文件。这一句与上面那一行的空态说的是同一件事（挂单 `Q437`）。
+        .ok_or_else(|| {
+            Cutoff::failed(
+                "还没选过导出的前端格式与目录。先在工序段底下那一行选一次\
+                 ——选完记进这份库，下一趟点一下就重导。"
+                    .to_string(),
+            )
+        })?;
+    // **找不到那个格式该说哪句话在核心里**（`ExportSetup::adapter`，ADR-0005）。
+    let adapter = setup
+        .adapter()
+        .map_err(|error| Cutoff::failed(error.to_string()))?;
+    // **优先级表读不出来就停下，不退回内置那份**：挑**显示标题**用的是同一份表，
+    // 而工作目录里那份 `priorities.toml` 正是人改过的说法。悄悄退回内置那份的话，
+    // 导出去的名字会与他定过的对不上，还查不出为什么（与折标题那一支同一条）。
+    task.step("读优先级表")?;
+    let priorities = romcat_core::sync::prepare::priorities(None, workspace)?;
+    // **能停到哪儿、撞上手改怎么办，全在核心库那一段**（`transfer::export_task`）：
+    // 这一层只把料摆齐、把把手递进去（ADR-0005）。
+    let report = transfer::export_task(
+        &mut site.catalog,
+        adapter.as_ref(),
+        &priorities,
+        &ExportOptions {
+            out: setup.out.clone(),
+            dry_run: false,
+            force: false,
+        },
+        task,
+    )?;
+    Ok(Product::Exported(Box::new(report)))
 }

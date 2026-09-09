@@ -361,6 +361,12 @@ impl App {
                         romcat_core::stage::Stage::FoldTitles => {
                             self.browse.refresh(&self.site);
                         }
+                        // **导出跑完了，哪一屏都不必重读**：它写出去的是主库根上那些
+                        // 元数据文件，五屏一个都不画它们；库里被它动过的只有**底本**
+                        // 与那个时刻戳，而工序段那一行已经由 `Section::settle` 自己
+                        // 重问过了。这一支空着是**故意的**，不是漏了——照抄上面两支
+                        // 随手 `reload` 一屏，等于每导一趟就白读一遍几万行。
+                        romcat_core::stage::Stage::Export => {}
                     }
                 }
                 continue;

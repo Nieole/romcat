@@ -299,6 +299,18 @@ pub struct ExportReport {
     pub out: String,
     /// 只排计划、不写盘吗。
     pub dry_run: bool,
+    /// **这一趟没走完就收了场吗**——按停时已经写出去的那几份**真的躺在盘上**
+    /// （`transfer::export_task`）。
+    ///
+    /// 它与 `dry_run` 分成两格：一个是「你要的事只做了一半」，一个是「你要的事
+    /// 一件都没做，这是预演」。合成一格的话，按停那一趟的报告会被读成一次预演，
+    /// 而盘上真多了几份文件。
+    ///
+    /// **产物自己说得出「没走完」是这个仓库的既有记法**：
+    /// [`identify::Outcome::interrupted`](crate::identify::Outcome) 与
+    /// [`sync::Outcome::interrupted`](crate::sync::execute::Outcome) 各有一格同名的。
+    /// 拿任务台那一档（`Ending::Halfway`）代替它不成——命令行手里没有任务台。
+    pub interrupted: bool,
     /// 逐份文件。
     pub files: Vec<ExportedFile>,
     /// 库里一共几个变体。
