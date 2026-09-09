@@ -32,11 +32,45 @@ pub struct Locate<'a> {
     pub catalog: Option<&'a Path>,
 }
 
-impl Locate<'_> {
+impl<'a> Locate<'a> {
+    /// 只说「开这一份中立库文件」的那条路。
+    ///
+    /// 它单独立成一个构造子，是因为**这条路自带一段推断**——工作目录从那条文件路径反推
+    /// （[`Self::workspace_dir`]）。[**上次开的那份**](crate::recent)记下来的正是这样一条
+    /// 路径，于是「拿记着的那份开库」与「判它属不属于这个工作目录」两处走的是同一条路，
+    /// 没有第二个地方再拼一次这个形状。
+    #[must_use]
+    pub fn at_catalog(catalog: &'a Path) -> Self {
+        Self {
+            catalog: Some(catalog),
+            ..Self::default()
+        }
+    }
+
     /// 说了要开现成的库吗。
     #[must_use]
     pub fn given(&self) -> bool {
         self.catalog.is_some() || self.library.is_some() || self.root.is_some()
+    }
+
+    /// 这一趟说的工作目录**管得着这份中立库吗**。
+    ///
+    /// 没说 `--workspace` 时一律算数——那时工作目录本来就是跟着中立库走的
+    /// （[`Self::workspace_dir`] 的第二支）。说了的话，那份库得**住在他说的那个工作目录
+    /// 里**：换一个工作目录等于换一整套工具状态（`CONTEXT.md` 的**工作目录**），
+    /// 把别处那一份开进来就等于把人当场说的话当没听见。
+    ///
+    /// **比的是反推出来的那个工作目录**，不另拆一遍路径：形状不对（那条路径压根不长成
+    /// `工作目录/catalog/某某.sqlite3`）时它退回默认那个，于是与人给的目录对不上——
+    /// 那是对的，说不出自己属于哪个工作目录的一份库，本来就不该算作「这个工作目录里的
+    /// 那一份」。
+    ///
+    /// 眼下只有一个调用方：[`Program::start_with`](crate::program::Program::start_with)
+    /// 拿它判「记着的那份这一趟还算不算数」。
+    #[must_use]
+    pub fn covers(&self, catalog: &Path) -> bool {
+        self.workspace
+            .is_none_or(|说的| Locate::at_catalog(catalog).workspace_dir() == 说的)
     }
 
     /// 这一趟的**工作目录**：中立库、沉淀库、**媒体池**、能力档案名册都在这儿。

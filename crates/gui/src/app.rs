@@ -119,6 +119,13 @@ pub struct App {
     prepared: bool,
     /// 上一次写进窗口标题的是哪一屏。**换屏才发一条命令**，不是每帧发一条。
     titled: Option<View>,
+    /// **人按了顶栏上那颗「换一份库」。**
+    ///
+    /// 这一层自己换不了库：五屏全建立在「库一定在」这个前提上，换库那一下要把整份
+    /// **现场**换掉，而那件事在 [`Program`](crate::program::Program) 上（ADR-0023）。
+    /// 这儿只放下一个记号，由它下一步读走——**放下就不撤**：读到它的那一下这份 `App`
+    /// 整个被丢掉，没有「换回来」这回事。
+    switching: bool,
     closing: Closing,
 }
 
@@ -170,6 +177,7 @@ impl App {
             library_label,
             prepared: false,
             titled: None,
+            switching: false,
             closing: Closing::No,
         }
     }
@@ -201,6 +209,16 @@ impl App {
     #[must_use]
     pub fn layout(&self) -> &layout::Layout {
         &self.layout
+    }
+
+    /// **人要换一份库了吗**——顶栏上那颗按钮按下去之后就是真。
+    ///
+    /// [`Program`](crate::program::Program) 每帧画完问一次，问到就换回**开场**。
+    /// 摆成一个记号而不是让这一层自己动手，是因为换库要换掉整份**现场**，而这一层
+    /// 拿的是一份**已经开好的**现场——那件事只有它上头那一层做得了。
+    #[must_use]
+    pub fn switching(&self) -> bool {
+        self.switching
     }
 
     /// 关窗走到哪一拍了。测试拿它核对两拍的次序。
@@ -504,6 +522,15 @@ impl App {
             }
             // 屏名那一排刚画完，`self.view` 已经是这一帧要看的那一屏——标题跟着它改。
             self.retitle(ui.ctx());
+            ui.separator();
+            // **回开场换一份库的那条路**（票 `gui-self-sufficient/04` 验收第 5 条）。
+            //
+            // **它不是第六屏**，所以不长成屏名那一排里的一颗：开场是五屏之外的那一屏，
+            // 它交出现场之后自己退场（词表**开场**那一条）。摆一颗按钮在屏名右边——
+            // 一按，这份 `App` 连同它手上那份现场整个退场，不必关窗重开。
+            if ui.button("换一份库").clicked() {
+                self.switching = true;
+            }
             ui.separator();
             // **版式存不下来就说一句**：吞掉的话人只看见「拖了半天，下次全忘」，
             // 而真正的病在工作目录上（写不动的工作目录还会连累中立库与沉淀库）。

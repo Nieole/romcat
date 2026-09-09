@@ -60,6 +60,12 @@ pub struct Screen {
     /// 与「这一份读不开」不是一回事：那一条跟着行走（[`CatalogEntry::facts`]），
     /// 这一条是**按下「打开」之后**才知道的（文件在列出来之后被挪走了、被别人占着）。
     error: Option<String>,
+    /// **退回这一屏的原因**：上次开的那份打不开了，这是那句原话。
+    ///
+    /// 与[按下「打开」之后那一句](Self::error)分开摆，因为它们**知道的时机**不同：
+    /// 这一条在这一屏画出来之前就已经知道了，画在表**上头**人第一眼就看得见；那一条
+    /// 要等人按下去才知道，画在上头的话人得多等一帧才看见它。
+    fallback_reason: Option<String>,
 }
 
 impl Screen {
@@ -72,7 +78,17 @@ impl Screen {
             catalogs,
             draft: String::new(),
             error: None,
+            fallback_reason: None,
         }
+    }
+
+    /// 摆一句「**为什么你会看见这一屏**」在抬头底下。
+    ///
+    /// [`Program`](crate::program::Program) 拿它交进来那句核心库的原话：上次开的那份
+    /// 打不开时，人期待的是直接进主窗口，突然看见开场就得当场说得出是哪一条原因——
+    /// 挪走了、删了、还是结构版本对不上（票 `gui-self-sufficient/04` 验收第 4 条）。
+    pub fn explain(&mut self, 说的: String) {
+        self.fallback_reason = Some(说的);
     }
 
     /// 换一个工作目录，**立刻**列出那个目录里的库。
@@ -83,6 +99,8 @@ impl Screen {
     pub fn look_at(&mut self, workspace: PathBuf) {
         self.workspace = workspace;
         self.error = None;
+        // **换了目录那句话就作废**：它说的是上次开的那份在**原来那个**目录里出了什么事。
+        self.fallback_reason = None;
         self.catalogs = workspace::catalogs(&self.workspace);
     }
 
@@ -90,6 +108,11 @@ impl Screen {
     pub fn ui(&mut self, ui: &mut egui::Ui) -> Option<Chosen> {
         ui.heading("开场");
         ui.weak("挑一份库开进去。底下这几个数住在中立库里，外置盘不在位照样看得见");
+        // **它画在表上头**：这一句回答的是「我明明开过库了，怎么又看见这一屏」，
+        // 那个问题在人找那份库之前就问出口了。
+        if let Some(说的) = &self.fallback_reason {
+            ui.colored_label(ui.visuals().warn_fg_color, 说的);
+        }
         ui.separator();
 
         self.workspace_ui(ui);
