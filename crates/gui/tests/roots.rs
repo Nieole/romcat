@@ -1,4 +1,4 @@
-//! **库**那一屏：一组根加得进、扫得完、移得掉，数据源的账看得见。
+//! **库**那一屏：一组根加得进、扫得完、移得掉，数据源的账看得见，**工序**那一段说得出还差什么。
 //!
 //! 这几条都是「不这么做会出事」而不是「这样比较好看」：
 //!
@@ -10,6 +10,12 @@
 //! - **盘没挂上时上次结果仍然看得见**：它住在中立库里，不跟着盘走（ADR-0009）。
 //! - **还没取回的数据源要被明确标出来**：新用户卡在「扫完了怎么没认出来」时，
 //!   答案就在这一行上。
+//! - **工序那一段说的是「还差多少」而不是「上次几点跑的」**：加了一块盘重扫之后那个
+//!   数自己就涨上去，人不必再自己推理「是不是该重跑识别了」——时间戳答不了这个问题。
+//! - **那个数与待确认队列屏上的是同一个**：造第二份的话，同一份库在两屏上会报出
+//!   两个数。
+//! - **识别跑完之后队列自己重新列过**：不然人得再点一次「重新列队列」，而那正是
+//!   这一票要消掉的那种「还得记住下一步」。
 //!
 //! 主库**一律拿本地 fixture 目录模拟**：绝不去动任何真实设备或 SD 卡。
 
@@ -20,11 +26,15 @@ use std::time::Duration;
 use romcat_core::catalog::Catalog;
 use romcat_core::site::Site;
 use romcat_core::sources::SourceState;
-use romcat_core::task::Ending;
+use romcat_core::stage::{Behind, Stage, StageRow};
+use romcat_core::task::{Cutoff, Ending};
 use romcat_core::testing::sample::zip;
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_gui::app::{App, View};
 use romcat_gui::headless;
+
+mod shared;
+use shared::画出来的字;
 
 fn 写(path: &Path, bytes: &[u8]) {
     fs::create_dir_all(path.parent().expect("有上级目录")).expect("能建目录");
@@ -55,7 +65,7 @@ fn 建大库(tag: &str) -> TempDir {
 }
 
 struct 现场 {
-    _工作区: TempDir,
+    工作区: TempDir,
     app: App,
 }
 
@@ -69,10 +79,43 @@ impl 现场 {
         let site = Site::open_file(工作区.path(), &库文件, None).expect("开得出现场");
         let mut app = App::new(site, 工作区.path().to_path_buf());
         app.show_view(View::Library);
-        Self {
-            _工作区: 工作区,
-            app,
-        }
+        Self { 工作区, app }
+    }
+
+    /// 装一份**空的 DAT 库**：没有弹药识别根本不跑（那时它如实拒绝，见底下那条）。
+    ///
+    /// **空着是故意的**：工序段这几条钉的是「识别接上了任务台、那个数会刷新」，
+    /// 不是识别认得出什么——那由 `romcat-core` 的 `tests/identify.rs` 钉。
+    fn 装上弹药(&self) {
+        let path = romcat_core::workspace::dat_repo_path(self.工作区.path());
+        drop(romcat_core::dat::DatRepo::open(&path).expect("开得出 DAT 库"));
+    }
+
+    /// 把**识别**那一道工序排上任务台，等它收场。界面上点那一行的按钮走的就是这条。
+    fn 跑识别(&mut self) {
+        self.app.start_stage(Stage::Identify);
+        self.等任务跑完();
+    }
+
+    /// 工序段上识别那一行。
+    fn 识别那一行(&self) -> StageRow {
+        self.app
+            .roots()
+            .stages()
+            .of(Stage::Identify)
+            .expect("工序段有识别那一行")
+            .clone()
+    }
+
+    /// 队列屏眼下说库里还有多少个变体连识别都没跑过。
+    fn 队列屏说的(&self) -> u64 {
+        self.app.queue().queue().not_run()
+    }
+
+    /// 队列屏重列一次——界面上那颗「重新列队列」按的就是它。
+    fn 重列队列(&mut self) {
+        let (queue, site) = self.app.queue_and_site();
+        queue.reload(site);
     }
 
     fn 加根(&mut self, 目录: &Path, 名字: &str) {
@@ -171,7 +214,7 @@ fn 新根落在已有根内部时被拒绝并说清为什么() {
 fn 新根落在工作目录里时被拒绝() {
     // **中立库不许被圈进主库**（ADR-0004）：它、断点与媒体池都写在工作目录里。
     let mut 现场 = 现场::摆好();
-    let 工作区 = 现场._工作区.path().to_path_buf();
+    let 工作区 = 现场.工作区.path().to_path_buf();
     let 手滑 = 工作区.join("roms");
     fs::create_dir_all(&手滑).expect("建得出");
 
@@ -413,7 +456,7 @@ fn 界面发起的扫描停下之后断点真的写在盘上() {
 
     // **路径与命令行 `--resume` 找的是同一个**（`Site::checkpoint_path`）——
     // 两条路折出两个文件名的话，界面停下的那一趟命令行就接不上。
-    let 断点 = 现场.app.site().checkpoint_path(现场._工作区.path(), "主库");
+    let 断点 = 现场.app.site().checkpoint_path(现场.工作区.path(), "主库");
     assert!(
         断点.is_file(),
         "停下来了却没有断点，「下次接着跑」没有依据：{}",
@@ -454,4 +497,253 @@ fn 扫完一个根之后浏览屏当场看得见新扫进来的那几行() {
         !现场.app.browse().facets().platforms.is_empty(),
         "扫进来两个平台，筛选面板上一个都没有",
     );
+}
+
+#[test]
+fn 库屏在根与数据源之后长出工序那一段_识别那一行说的是还差多少() {
+    // **这一段答的是「下一步该干什么」**。时间戳答不了这个问题：屏上写「上次 10:31 跑过
+    // 识别」，人还是不知道加完那块盘之后要不要重跑。
+    let 库 = 建库("gui-stages-一段");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+
+    assert_eq!(
+        现场.识别那一行().behind,
+        Behind::Left(2),
+        "扫进来两个变体，一个都还没跑过识别",
+    );
+
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        屏上.lines().any(|line| line.trim().starts_with("工序 · ")),
+        "库屏上没有工序那一段：\n{屏上}",
+    );
+    assert!(
+        屏上.lines().any(|line| line.trim() == "识别"),
+        "工序段上没有识别那一行：\n{屏上}",
+    );
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line.trim() == "2 个变体连识别都还没跑过"),
+        "识别那一行说的不是「还差多少」：\n{屏上}",
+    );
+}
+
+#[test]
+fn 工序段那个数与待确认队列屏上的是同一个() {
+    // **不另造一份**：两处各算一份的话，同一份库在库屏与队列屏上会报出两个数，
+    // 而人没有办法知道该信哪一个。
+    let 甲 = 建库("gui-stages-甲");
+    let 乙 = 建库("gui-stages-乙");
+    let mut 现场 = 现场::摆好();
+    现场.装上弹药();
+    现场.加根(甲.path(), "主库");
+    现场.扫("主库");
+    现场.跑识别();
+    assert_eq!(
+        现场.识别那一行().behind,
+        Behind::Left(0),
+        "跑完了就不差什么了"
+    );
+
+    // **加了一块盘重扫**：那个数自己就涨上去（规格 28）。
+    现场.加根(乙.path(), "元数据库");
+    现场.扫("元数据库");
+    let Behind::Left(还差) = 现场.识别那一行().behind else {
+        panic!("识别这一支说得出还差多少");
+    };
+    assert_eq!(还差, 2, "乙那两个变体连识别都还没跑过");
+
+    现场.重列队列();
+    assert_eq!(
+        现场.队列屏说的(),
+        还差,
+        "库屏工序段与待确认队列屏说的不是同一个数",
+    );
+}
+
+#[test]
+fn 点一下把识别排上任务台_跑完那一行的数字当场刷新_队列自己重新列过() {
+    // 三件事一趟兑现：**排上任务台**（跑在画帧那条线程之外）、**那一行当场刷新**
+    // （看得出这一趟起了作用）、**队列自己重新列过**（不必再点一次「重新列队列」）。
+    let 库 = 建库("gui-stages-跑一趟");
+    let mut 现场 = 现场::摆好();
+    现场.装上弹药();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    现场.重列队列();
+    assert!(!现场.app.queue().queue().identified(), "前提：还没跑过识别");
+    assert_eq!(现场.队列屏说的(), 2);
+
+    现场.跑识别();
+
+    // **那一行当场刷新**：不必再点一次什么。
+    assert_eq!(现场.识别那一行().behind, Behind::Left(0));
+    // **队列自己重新列过**：这几句一次「重新列队列」都没点。
+    assert!(
+        现场.app.queue().queue().identified(),
+        "识别跑完了，队列屏却还说「还没跑过识别」——它没有自己重列",
+    );
+    assert_eq!(现场.队列屏说的(), 0, "队列屏那个数没跟着刷新");
+
+    // 任务台上留下一条**跑完了**的历史。
+    let record = &现场.app.tasks().history()[0];
+    assert_eq!(record.name, "识别");
+    assert!(
+        matches!(record.ending, Ending::Done(_)),
+        "跑完的那一趟记成了「{}」",
+        record.ending.render(),
+    );
+}
+
+#[test]
+fn 识别跑到一半按停在任务台历史上记成停在半路() {
+    // **写过东西的活被叫停要记成第三档**：识别起手就把上一轮的结论清干净，所以它一定
+    // 动过库——记成「停了，什么都没留下、可以当没跑过」的话，那句话是骗人的。
+    //
+    // 大 fixture：两个文件的库在按下停之前就跑完了，那时验的是「跑完了」而不是「停下了」。
+    let 库 = 建大库("gui-stages-按停");
+    let mut 现场 = 现场::摆好();
+    现场.装上弹药();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+
+    现场.app.start_stage(Stage::Identify);
+    let id = 现场
+        .app
+        .roots()
+        .stages()
+        .task_of(Stage::Identify)
+        .expect("这一趟排上任务台了");
+    现场.app.tasks_mut().stop(id);
+    现场.等任务跑完();
+
+    let record = &现场.app.tasks().history()[0];
+    let Ending::Halfway { left_behind, .. } = &record.ending else {
+        panic!("按停了却把这一趟记成了「{}」", record.ending.render());
+    };
+    // **识别没有断点**：下一趟从头再算一遍。说反了的话人会以为按停是省时间的。
+    assert!(
+        left_behind.contains("从头再算一遍"),
+        "那一句说得像接得上：{left_behind}",
+    );
+}
+
+#[test]
+fn 这一趟正在跑的时候那一行的按钮按不下去() {
+    // 不禁掉的话同一趟活会被排两遍——而两趟识别在同一份中立库上互相清对方的结论。
+    //
+    // **台上先摆一趟别的活**：任务台一次只跑一趟，于是排上去的识别稳稳地停在队列里。
+    // 这一条要验的是「那一行的按钮按不下去」，不该靠「识别恰好还没跑完」这种挂钟彩票
+    // （挂单 `Q196` / `Q349` 说的正是那种测试）——那样机器一忙它就绿得莫名其妙。
+    let 库 = 建库("gui-stages-按不下去");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.装上弹药();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+
+    let 占位 = 现场.app.tasks_mut().queue("装作在扫一趟库", |task| {
+        for _ in 0..3_000 {
+            task.check()?;
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Err(Cutoff::failed("这一趟本来就只是占着位子"))
+    });
+
+    现场.app.start_stage(Stage::Identify);
+    let id = 现场
+        .app
+        .roots()
+        .stages()
+        .task_of(Stage::Identify)
+        .expect("这一趟排上任务台了");
+
+    // 屏上那一行写着「跑着呢」，那颗按钮是禁着的。
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        屏上.lines().any(|line| line.trim() == "跑着呢"),
+        "这一趟还在台上，那一行的按钮却还写着「开跑」：\n{屏上}",
+    );
+
+    // 再按一次（别处的捷径走的也是这个入口）：**什么都不该发生**。
+    现场.app.start_stage(Stage::Identify);
+    assert_eq!(
+        现场.app.tasks().queued().len(),
+        1,
+        "同一趟识别被排了两遍：{:?}",
+        现场.app.tasks().queued(),
+    );
+    assert_eq!(
+        现场.app.roots().stages().task_of(Stage::Identify),
+        Some(id),
+        "第二次按下换掉了台上那一趟",
+    );
+
+    现场.app.tasks_mut().stop(id);
+    现场.app.tasks_mut().stop(占位);
+    现场.等任务跑完();
+}
+
+#[test]
+fn 外置盘不在位的时候工序那几行照样看得见() {
+    // 工序段的数从中立库里折出来，**一个字节都不读主库**（ADR-0001）。盘不在位时它照样
+    // 答得出话——那正是「外置盘没挂上也能知道库的状况」。
+    let 库 = 建库("gui-stages-不在位");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    assert_eq!(现场.识别那一行().behind, Behind::Left(2));
+
+    // 把那块「盘」拔掉。
+    drop(库);
+    let (screen, site, _) = 现场.app.roots_site_and_tasks();
+    screen.reload(site);
+    assert!(
+        现场.app.roots().roots().iter().all(|row| !row.mounted),
+        "前提：那个根现在不在位",
+    );
+
+    assert_eq!(
+        现场.识别那一行().behind,
+        Behind::Left(2),
+        "盘拔了，工序段就答不出话了",
+    );
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line.trim() == "2 个变体连识别都还没跑过"),
+        "盘不在位，工序那一行就不见了：\n{屏上}",
+    );
+}
+
+#[test]
+fn 还没取回那份弹药时识别如实拒绝并说清为什么() {
+    // **偷偷开一份空的 DAT 库跑下去是一句假话**：整库都会落成「未命中」，
+    // 而人会去找哪儿坏了。没有弹药就没有命中率——直说，并指向上面那一段。
+    let 库 = 建库("gui-stages-没弹药");
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    现场.跑识别();
+
+    let record = &现场.app.tasks().history()[0];
+    let Ending::Failed { why, .. } = &record.ending else {
+        panic!("没有 DAT 库却把这一趟记成了「{}」", record.ending.render());
+    };
+    assert!(why.contains("DAT 库"), "说不清为什么跑不了：{why}");
+    assert!(why.contains("数据源"), "没指向取回它的地方：{why}");
+    // 库里一条结论都没多出来。
+    assert_eq!(现场.识别那一行().behind, Behind::Left(2));
 }

@@ -244,6 +244,17 @@ impl App {
         (&mut self.roots, &mut self.site, &mut self.board)
     }
 
+    /// 把一道**工序**排到任务台上。
+    ///
+    /// **这是排一趟工序的唯一入口**：库屏工序段那一行的按钮走的是它，各屏空态上的捷径
+    /// 走的也该是它（票 `gui-self-sufficient/09` 要把队列屏那三处「先跑一次
+    /// `romcat identify`」换成就地按钮）。摆在窗口上而不是某一屏里，正因为**别的屏
+    /// 够不着库屏**（ADR-0005：屏与屏之间不该互相拿着对方）。
+    pub fn start_stage(&mut self, stage: romcat_core::stage::Stage) {
+        let (roots, site, board) = (&mut self.roots, &mut self.site, &mut self.board);
+        roots.stages_mut().start(stage, site, board);
+    }
+
     /// 浏览那一屏，供测试查「筛出多少行、点开的那一行是什么」。
     #[must_use]
     pub fn browse(&self) -> &browse::Screen {
@@ -310,6 +321,15 @@ impl App {
             // 时，各自在这儿多认一次。
             if self.roots.settle(&self.site, &done) {
                 self.browse.invalidate(&self.site);
+                // **识别跑完了，待确认队列自己重新列过**：那一屏的每一批都是识别结论
+                // 折出来的，不重列的话人得再点一次「重新列队列」——而那正是这一票要
+                // 消掉的那种「还得记住下一步」。这一句住在窗口里而不在库屏里，
+                // 因为**只有这儿同时够得着两屏**（ADR-0005，与 [`Self::route`] 同理）。
+                if let Some(stage) = self.roots.stages_mut().take_ran() {
+                    match stage {
+                        romcat_core::stage::Stage::Identify => self.queue.reload(&self.site),
+                    }
+                }
                 continue;
             }
             // **刮削跑完了要重读一遍**：这一屏画的元数据那几栏正是它刚写进去的。

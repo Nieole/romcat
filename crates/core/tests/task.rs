@@ -628,3 +628,125 @@ fn 措辞与核心库那一句差着字的按停照旧记成停了() {
         ended.render(),
     );
 }
+
+/// 一趟识别要的**弹药**：空的 DAT 库加一份空的沉淀库。
+///
+/// 这两条钉的是**识别接上了把手**，不是识别本身认得出什么——弹药空着，每个变体都落成
+/// 「无判据」，而那与「报得出进度」「按停记成停在半路」一件都不相干。识别本身那几层
+/// 由 `tests/identify.rs` 钉。
+struct 弹药 {
+    _工作区: TempDir,
+    repo: romcat_core::dat::repo::DatRepo,
+    store: romcat_core::verdict::Store,
+}
+
+impl 弹药 {
+    fn 摆好() -> Self {
+        let 工作区 = temp_dir("task-identify");
+        let repo = romcat_core::dat::repo::DatRepo::open(&工作区.path().join("dat.sqlite3"))
+            .expect("开得出 DAT 库");
+        let store = romcat_core::verdict::Store::in_memory().expect("开得出沉淀库");
+        Self {
+            _工作区: 工作区,
+            repo,
+            store,
+        }
+    }
+
+    /// 跑一趟识别，把手交给调用方先动手脚（`按停` 那一条要在开跑之前按下去）。
+    fn 跑一趟(
+        &self,
+        catalog: &mut Catalog,
+        库: &Path,
+        task: &Handle,
+    ) -> Result<romcat_core::identify::Outcome, Cutoff> {
+        let index = romcat_core::verdict::Index::load(&self.store, "库").expect("读得出沉淀库");
+        romcat_core::identify::run_task(
+            &RealFs::new(),
+            catalog,
+            &romcat_core::identify::Ammo {
+                repo: &self.repo,
+                verdicts: &index,
+                naming: &romcat_core::identify::fuzzy::Naming::off(),
+                guessing: &romcat_core::identify::model::Guessing::off(),
+                titledb: None,
+            },
+            &romcat_core::identify::Options::new(romcat_core::catalog::Roots::single("库", 库)),
+            task,
+        )
+        .map_err(|error| Cutoff::failed(error.to_string()))
+    }
+}
+
+#[test]
+fn 识别一路报得出算完了几个变体而且跑完记成完成() {
+    // 真机上识别一趟 65.5 秒、四万六千个变体。只说一句「正在识别」等于什么都没说——
+    // 走到第几个由 `Handle::tick` 报出来，进度条照它画。
+    let 场 = 现场::摆好();
+    let mut catalog = Catalog::open(&场.库文件).expect("能开中立库");
+    let 弹 = 弹药::摆好();
+    let 变体数 = catalog.variants().expect("读得出变体").len() as u64;
+    assert!(变体数 > 0, "前提：这份 fixture 扫出了变体");
+
+    let task = Handle::new();
+    let outcome = 弹
+        .跑一趟(&mut catalog, 场.库.path(), &task)
+        .expect("识别不该失败");
+    assert!(!outcome.interrupted, "没人按停，却记成被中断了");
+    // **走完了**：报到最后一个变体上。
+    assert_eq!(task.progress().done, 变体数, "进度没报到最后一个变体");
+    assert_eq!(task.progress().total, 变体数);
+
+    // 跑完之后库里一个「还没识别」都不剩——工序段那一行的数就是这个。
+    assert_eq!(catalog.not_run_count().expect("数得出"), 0);
+
+    // 上台跑一趟，验的是**任务台真正记下的那一支**。
+    let mut catalog = Catalog::open(&场.库文件).expect("能开中立库");
+    let ended = 上台跑一趟("识别", |task| {
+        弹.跑一趟(&mut catalog, 场.库.path(), task)
+            .map(|outcome| outcome.interrupted)
+    });
+    assert_eq!(ended, Ending::Done(false), "跑完的那一趟没记成完成");
+}
+
+#[test]
+fn 识别按停之后在台上记成停在半路而且不说下一趟接着算() {
+    // **写过东西的活被叫停，得记成第三档**：识别起手就把上一轮的结论清干净
+    // （`Catalog::clear_identifications`），所以它一定动过库——记成
+    // 「停了，什么都没留下」的话，那句「可以当没跑过」是骗人的。
+    //
+    // **但它也没有断点**：下一趟从头再算一遍。那句话说反了，人会以为按停是省时间的。
+    let 场 = 现场::摆好();
+    let mut catalog = Catalog::open(&场.库文件).expect("能开中立库");
+    let 弹 = 弹药::摆好();
+
+    let ended = 上台跑一趟("识别", |task| {
+        task.stop();
+        弹.跑一趟(&mut catalog, 场.库.path(), task)
+            .map(|outcome| outcome.interrupted)
+    });
+
+    let Ending::Halfway {
+        product: interrupted,
+        left_behind,
+    } = ended
+    else {
+        panic!("按停了却把这一趟记成了别的档：{}", ended.render());
+    };
+    assert!(interrupted, "被按停了却没记上");
+    assert!(
+        left_behind.contains("落进了中立库"),
+        "说不出留下了什么：{left_behind}",
+    );
+    assert!(
+        left_behind.contains("从头再算一遍"),
+        "识别没有断点，那一句却说得像接得上：{left_behind}",
+    );
+
+    // **按停之后那些变体退回「还没识别」**：工序段那一行的数跟着涨回去，
+    // 人一眼看得出这一趟没跑完（规格 28 的另一半）。
+    assert!(
+        catalog.not_run_count().expect("数得出") > 0,
+        "整趟被按停，库里却一个「还没识别」都不剩",
+    );
+}
