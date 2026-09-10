@@ -64,8 +64,7 @@
   独立探针：`deferred.md` 归档前后都是 **134 条**，最大号仍是 `D163`，**一条都没加**。
 
   **但有三条要单独说出来，它们在仓库里只做得了一半**（写进结论，不是往 `deferred.md` 送）：
-  `Q195`（`gate.yml` 从没被任何 CI 跑过——根是「这个仓库要不要有 remote 与 runner」，
-  维护者的决定，不是一张票）、`Q304`（真库不在开发机上，`Q277` 同形状）、
+  `Q304`（真库不在开发机上，`Q277` 同形状）、
   `Q222` / `Q288` / `Q348`（`/code-review` `/to-spec` `/to-tickets` `/wayfinder` **全都住在
   仓库之外**——实测在 `~/.claude/plugins/cache/claude-plugins-official/mattpocock-skills/1.2.3/docs/engineering/`，
   这个仓库改不掉它们）。三条**都有仓库这一侧做得了的那一半**，所以都不算无处可去；

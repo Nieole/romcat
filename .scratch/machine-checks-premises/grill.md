@@ -51,7 +51,7 @@
 
 | # | 裁定 |
 |---|---|
-| **不接 CI** | `.github/workflows/gate.yml` 早写好了（调的就是同一个 xtask），但它**从没被任何 CI 跑过**——这个仓库没有 remote。**接受「只咬跑 `cargo xtask gate` 的 agent」**：这个仓库 90 张票几乎全是 agent 做的。否掉 pre-commit hook——它把每次提交拖到 8–11 分钟，而「跑得慢的检查被 `--no-verify` 绕过」是有名的失败模式。接 remote ＋ runner 是维护者的决定，不是一张票 |
+| **CI 已经在跑，不用做任何事** | `.github/workflows/gate.yml` 从 **2026-09-08 04:47** 起就在 GitHub Actions 上真跑（实测 32 次运行、28 次绿、3 次被并发组取消，都在第一天——三次推送撞在几分钟内）。于是这一批加的两道机器**咬得住每一次 push**，不只是跑 `cargo xtask gate` 的 agent。⚠️ **但 CI 上有一处要当心**：`actions/checkout@v4` 没给 `fetch-depth`，默认**浅克隆 1 层**，**「相对 merge base 的 diff」在 CI 上算不出来**——要么给 checkout 加 `fetch-depth: 0`，要么那一步拿不到历史时如实跳过并说明。否掉 pre-commit hook：它把每次提交拖到门禁那个量级（8–11 分钟），而「跑得慢的检查被 `--no-verify` 绕过」是有名的失败模式 |
 | **件一 · 范围** | **只扫新增/改动的行 ＋ 只用 `_Gate_` 那份缩小词表。** 范围＝**相对 `main` 的 merge base 以来的全部改动，含未提交的**——接票的 agent 跑门禁时改动一半已提交一半没有，两者都要看。⚠️ 在 `main` 上直接干活时 merge base 就是 `HEAD`，于是退化成「只看未提交的」，**这一点要在规程里写明**，否则有人会以为门禁在 `main` 上失效了 |
 | **件一 · 扫什么** | 标识符 ＋ **字符串字面量**（屏上真说出去的话）。**不扫注释与文档注释**（那里是在**谈论**禁词），**不扫 `.scratch/`** |
 | **件一 · 形状** | 递归 `cargo xtask words`，检查本体是 xtask 里带单元测试的函数——保住「门禁每一步都是 cargo」那条形状 |
@@ -110,9 +110,14 @@ xtask 里一个带单元测试的函数。这样保住「五步全是 cargo」�
 - 那张五行汇总表在 `xtask/src/main.rs:77`–`95`（不在 `gate.rs`），它**再算一遍 `steps()`**
   取总条数。
 
-⚠️ **这道机器咬得住谁**：`.github/workflows/gate.yml:85` 是唯一的门禁调用，但挂单 `Q195`
-查过它**从没被任何 CI 跑过**（要不要有 remote 与 runner 是另一个决定）。所以眼下的执行者
-只有跑 `cargo xtask gate` 的 agent——**咬得住 agent，咬不住别人**。
+⚠️ **这道机器咬得住谁**：`.github/workflows/gate.yml:85` 是唯一的门禁调用，而它
+**从 2026-09-08 起就在 GitHub Actions 上真跑**（实测 32 次、28 绿）。所以执行者是
+**每一次 push**，不只是跑 `cargo xtask gate` 的 agent。
+
+⚠️ **CI 上的浅克隆会让这一步算不出 diff**：`actions/checkout@v4` 没给 `fetch-depth`，
+默认只取 1 层历史，于是**「相对 `main` 的 merge base」在 CI 上求不出来**。两条路：给 checkout
+加 `fetch-depth: 0`，或者这一步在**拿不到历史时如实跳过并说明**（别假装扫过了）。
+本地跑 `cargo xtask gate` 不受影响——那儿历史是全的。
 
 ## 件二：机器可核的数字
 

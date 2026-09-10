@@ -1,6 +1,6 @@
 # 工单跟踪器：本地 Markdown
 
-这个仓库的工单与规格（规格也叫 PRD）以 Markdown 文件的形式住在 `.scratch/` 下。没有 git remote，也不需要。
+这个仓库的工单与规格（规格也叫 PRD）以 Markdown 文件的形式住在 `.scratch/` 下，**跟代码一起进 git**——票据的历史与代码的历史是同一条。
 
 ## 约定
 
