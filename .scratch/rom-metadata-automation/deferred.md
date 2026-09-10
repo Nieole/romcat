@@ -1112,7 +1112,18 @@ grep -rhoE '\bD[0-9]+\b' .scratch/rom-metadata-automation/ | sort -uV | tail -1
   反查主库根（`Catalog::library_root` 记着），于是不必多加参数
 - **不处理会怎样：** `romcat triage export --out /Volumes/新加卷/Game/裁决.json` 会往
   只读的主库里写一个 JSON。主库在 macOS 上是只读挂载，写会失败；换到 Windows 上会成功。
-- **状态：** 冻结（2026-09-08 归档；归档前是 `open`，从此不是待办——要动走 `/to-spec` 开票）
+- **状态：** **做掉了（2026-09-09）——走的是本条自己列的选项 C。**
+  新增 `refuse_writing_into_any_library(workspace, target)`（`crates/cli/src/main.rs`，
+  紧跟单根那道守卫）：问工作目录要它认得的每一份中立库，逐个 `Roots::load` 把根拿出来比一遍；
+  开不动的那几份跳过（根读不出来，而这道守卫宁可少挡一次也不能挡错一次）。
+  `run_triage_export` 在 `write_file` 之前接上它。
+  `crates/cli/tests/triage.rs::导出不许把那份_json_写进主库` 钉两头：写进主库当场拒且
+  文件不落地、写到工作目录照旧成功。
+  **本条原先推荐的是 A（就这样，与 `platforms --dump-builtin` 同一档）——那条推荐被否了**：
+  ADR-0004 护着的是 10 TB 不可再生的东西，而这道守卫十三处落实里只漏了这一处；
+  B（加一个只为守卫存在的 `--root`）照本条自己的话否掉——一道要人记得带旗子才生效的守卫不是守卫。
+  这一条由 2026-09-09 的 `/grill-with-docs` 从 68 条「仍然成立」里挑出来（`Q364` → 效应
+  `.scratch/one-criterion-per-thing/`），是那一批里最便宜也最该先做的一条。
 
 ## D105 · 票 08 · 只补**汉化组**、不说作品的那种批量裁决表达不了
 

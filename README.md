@@ -94,7 +94,7 @@ romcat-gui --catalog ~/.romcat/catalog/主库-xxxx.sqlite3
 
 ## 现在到哪一步了
 
-**59/63 张票落地**（四条队列合计）。余下四张：三张是 Windows 真机验证（`ready-for-human`，需要人在 Windows 上跑），一张还没接（`ready-for-agent`）。**1,722 条测试全绿**（`cargo xtask gate` 实测，66 个测试目标；**这个数会随票涨，以门禁自己的输出为准**，别拿这里当基线——这一次量在 `main` 上，第三轮十八张票全部合并之后）。
+**87/90 张票落地**（六条队列合计）。余下三张全是 `ready-for-human`：两张 Windows 真机验证（需要人在 Windows 上跑），一张要在真库上跑一趟把数字补进事实台账。**1,815 条测试**（`cargo test --workspace --all-features -- --list` 数出来的，70 个测试目标；**这个数会随票涨，以门禁自己的输出为准**，别拿这里当基线——这一次量在 `main` `a142612` 上，第四轮九张票全部合并之后）。
 
 真库实测（`docs/library-facts.md` 记着全部数字与日期）：
 
@@ -116,7 +116,7 @@ crates/core/   romcat-core   领域逻辑全在这儿：扫描、成型、识别
 crates/cli/    romcat        命令行
 crates/gui/    romcat-gui    窗口壳。只画和转发，一条领域逻辑都不许长在这里
 xtask/         门禁跑手      `cargo xtask gate` 那五条的唯一定义。不交付、不被上面三个依赖
-docs/adr/      22 份架构决策记录
+docs/adr/      23 份架构决策记录
 docs/          library-facts.md（真库实测台账）、platforms.md、research/
 CONTEXT.md     词表。动手前先读它，输出用它的词
 .scratch/      规格与工单
@@ -204,7 +204,7 @@ cargo xtask gate -j 4 --test-threads 4   # 两个开关各自也调得动
 
 `romcat-gui` 有一个默认关掉的 **`demo` feature**：合成数据、`--demo`、以及 `--bench*` 那几条实测开关全在它后面。**关掉之后它们一个字节都不进交付出去的二进制**——假数据与真库在界面上长得一模一样，看见一屏假名字的第一反应会是「我的库怎么了」，那比起不来更坏。
 
-代价是：**不带 `--all-features` 跑测试，会少跑 122 条**（1,600 而不是 1,722，两边同一口径实测：`cargo test --workspace [--all-features] -- --list`；同上，量在 `main` 上）——其中 7 个测试文件（`browse` / `close` / `layout` / `media` / `queue` / `table` / `task`）整份都不编译，剩下的散在别的文件里被 `cfg` 掐掉。**少跑不报错**，退出码照样是 0——所以这条开关不该靠人记牢，它写在 `cargo xtask gate` 里。
+代价是：**不带 `--all-features` 跑测试，会少跑 123 条**（1,692 而不是 1,815，两边同一口径实测：`cargo test --workspace [--all-features] -- --list`；同上，量在 `main` `a142612` 上）——其中 7 个测试文件（`browse` / `close` / `layout` / `media` / `queue` / `table` / `task`）整份都不编译，剩下的散在别的文件里被 `cfg` 掐掉。**少跑不报错**，退出码照样是 0——所以这条开关不该靠人记牢，它写在 `cargo xtask gate` 里。
 
 **反过来那一格由 `cargo check --workspace` 那一条看着。** `clippy` / `test` / `doc` 三条都带 `--all-features`，编的都是 `demo` **开着**的那份代码；而 `cargo build --release` 交付出去的是 `demo` **关掉**的那份。少了 `check` 那一条，「交付的那份还编不编得过」在门禁里一个把门的都没有——谁在 `crates/gui/src/` 里写下一处只有开着 `demo` 才编得过的引用，门禁全绿而发版当场编不过。`check` 是五条里**唯一**跑在默认特性上的，`xtask/tests/gate.rs` 的 `交付出去的那份配置还有一条在看着` 钉着这件事。
 
