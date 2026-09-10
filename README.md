@@ -116,7 +116,7 @@ crates/core/   romcat-core   领域逻辑全在这儿：扫描、成型、识别
 crates/cli/    romcat        命令行
 crates/gui/    romcat-gui    窗口壳。只画和转发，一条领域逻辑都不许长在这里
 xtask/         门禁跑手      `cargo xtask gate` 那五条的唯一定义。不交付、不被上面三个依赖
-docs/adr/      23 份架构决策记录
+docs/adr/      24 份架构决策记录
 docs/          library-facts.md（真库实测台账）、platforms.md、research/
 CONTEXT.md     词表。动手前先读它，输出用它的词
 .scratch/      规格与工单
