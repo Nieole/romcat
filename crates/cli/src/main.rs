@@ -1454,6 +1454,10 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
 
     let wrote_everything = args.output.emit(&outcome.report, &outcome.aggregate);
     eprintln!("中立库：{}", catalog.location());
+    // **建库那一趟正是名字被钉死的那一刻**，而人恰恰这时候最该看见「我建的这份库叫什么」
+    // ——那串哈希谁也认不出来（挂单 `Q369`）。与 `emit_from_catalog` 里那一行同源同序：
+    // 先说中立库在哪，再说它是哪个主库的。
+    eprintln!("主库：{}", catalog.library_name());
 
     if !wrote_everything {
         return ExitCode::FAILURE;
@@ -3945,6 +3949,9 @@ fn run_triage_export(args: &TriageExportArgs) -> ExitCode {
         Ok(text) => text,
         Err(error) => return fail(format!("序列化失败：{error}")),
     };
+    if let Err(message) = refuse_writing_into_any_library(&workspace, &args.out) {
+        return fail(message);
+    }
     if let Err(error) = write_file(&args.out, format!("{text}\n").as_bytes()) {
         return fail(format!("写不出 {}：{error}", path::display(&args.out)));
     }
@@ -5872,6 +5879,36 @@ fn refuse_writing_into_library(root: &Path, target: &Path) -> Result<(), String>
             "输出文件 {} 落在主库内。主库只读，请写到别处。",
             romcat_core::path::display(&target)
         ));
+    }
+    Ok(())
+}
+
+/// 同上，用在**不知道主库根在哪**的那几条命令上。
+///
+/// [`refuse_writing_into_library`] 要调用方手上先有一个根。`triage export --out` 是
+/// **工作目录级**的命令，票面上没有 `--root`，于是它成了 ADR-0004 那条红线十三处落实里
+/// **唯一漏掉的一处**（挂账 `D104`）——守卫早就写好了，只有这一处没接上。
+///
+/// 这里反过来问工作目录：把它认得的每一份中立库里记着的每一个根都拿出来比一遍。
+/// 加一个 `--root` 是站不住的另一条路——一道要人记得带旗子才生效的守卫不是守卫，
+/// 而这条红线护着的是 10 TB 不可再生的东西。
+///
+/// **开不动的那几份跳过**：它们的根读不出来，而这道守卫宁可少挡一次，也不能挡错一次
+/// （把人往别处写的合法输出拦下来）。用户机器上是三份库（ADR-0023），这一趟三次只读打开。
+fn refuse_writing_into_any_library(workspace: &Path, target: &Path) -> Result<(), String> {
+    for entry in romcat_core::workspace::catalogs(workspace) {
+        if !entry.openable {
+            continue;
+        }
+        let Ok(catalog) = Catalog::open(&entry.path) else {
+            continue;
+        };
+        let Ok(roots) = Roots::load(&catalog) else {
+            continue;
+        };
+        for (_, root) in roots.iter() {
+            refuse_writing_into_library(root, target)?;
+        }
     }
     Ok(())
 }

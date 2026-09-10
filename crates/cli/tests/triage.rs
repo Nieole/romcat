@@ -836,3 +836,47 @@ fn 依据形状写岔了当场说清该怎么写() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+#[test]
+fn 导出不许把那份_json_写进主库() {
+    // ADR-0004 那条红线：工具写出去的任何文件都不许落进主库（10 TB 不可再生）。
+    // 那道守卫十三处里十二处都接了，`triage export --out` 是唯一漏掉的一处（挂账 `D104`）
+    // ——它是工作目录级的命令、票面上没有 `--root`，于是没人给它一个根去比。
+    let (library, workspace) = 现场();
+    扫并识别(library.path(), workspace.path());
+
+    let 落在库里 = library.path().join("分享.json");
+    let out = 跑(&[
+        "triage",
+        "export",
+        "--workspace",
+        &workspace.path().to_string_lossy(),
+        "--out",
+        &落在库里.to_string_lossy(),
+    ]);
+    assert!(
+        !out.status.success(),
+        "该拒绝：{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let 说明 = String::from_utf8_lossy(&out.stderr);
+    assert!(说明.contains("主库只读"), "拒绝的话要说清为什么：{说明}");
+    assert!(!落在库里.exists(), "拒绝之后主库里不该多出这个文件");
+
+    // 写到别处照旧走得通——这道守卫不能把合法输出也拦下来。
+    let 写别处 = workspace.path().join("分享.json");
+    let 好的 = 跑(&[
+        "triage",
+        "export",
+        "--workspace",
+        &workspace.path().to_string_lossy(),
+        "--out",
+        &写别处.to_string_lossy(),
+    ]);
+    assert!(
+        好的.status.success(),
+        "{}",
+        String::from_utf8_lossy(&好的.stderr)
+    );
+    assert!(写别处.exists(), "写到工作目录里该成功");
+}

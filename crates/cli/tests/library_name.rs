@@ -269,3 +269,21 @@ fn 没起名字时报告印的是主库根的末级目录名() {
         "报告里该印出那个目录真正叫什么：{说明}"
     );
 }
+
+#[test]
+fn 扫描那一趟也印得出主库名() {
+    // 报告印它、`shape` 印它，而**建库那一趟**原先只印中立库的路径——偏偏名字就是在这一刻
+    // 被钉死的，此后这条命令再不改它。人在这时候看不见自己建的这份库叫什么，就得回头去
+    // 跑一趟 `report` 才确认得了（挂单 `Q369`）。
+    let workspace = temp_dir("library-scan-print-workspace");
+    let 主库 = temp_dir("library-scan-print-lib");
+    建_主库(主库.path());
+
+    let 扫过 = 扫(workspace.path(), 主库.path(), Some("扫这一趟的主库"));
+    assert!(扫过.status.success(), "{扫过:?}");
+    let 说明 = String::from_utf8_lossy(&扫过.stderr);
+    assert!(
+        说明.lines().any(|line| line == "主库：扫这一趟的主库"),
+        "扫描收尾该印出起的那个名字：{说明}"
+    );
+}
