@@ -100,6 +100,29 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 # （`crates/core/Cargo.toml` 的 `cfg(unix)`）。Windows 上这一问答不出来，交给建库那一下自己报错
 # （挂单 `Q611`）。
 rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
+# **系统目录选择器**（票 `gui-answers-all-six/01`，挂单 `Q387`）：开场换工作目录、添加主库向导选第一个根，
+# 按一下弹系统的选目录对话框，不必把一条 10 TB 盘上的绝对路径手打进单行框。**只有界面用它**
+# （`crates/gui/Cargo.toml`，只在 `src/pick.rs` 里调），核心库与命令行一个依赖都不多。
+#
+# 选 `rfd` 而不是自己分平台调：三个平台的系统对话框（macOS 的打开面板、Windows 的文件对话框、
+# Linux 的 XDG 桌面门户）各是一套 FFI 或 D-Bus 协议，而这个工作区禁 `unsafe`。egui 仓库自己的
+# 选文件示例用的也是它。
+#
+# **关掉默认特性，只开 `xdg-portal`**（只在 Linux 上生效，macOS 与 Windows 走系统自己的对话框）：
+# - `xdg-portal`：问 XDG 桌面门户要对话框。说 D-Bus 用的是系统的 `libdbus-1`，但那是**运行时
+#   `dlopen`**（`rfd` 0.17.2 的 `portal/ffi.rs`；它的 `build.rs` 在 Linux 上一条链接指令都不发），
+#   **编译期不要系统库**——门禁的 CI 在 `ubuntu-latest` 上一个系统包都不装（`.github/workflows/gate.yml`）。
+#   **predicted**：本机是 macOS，没在 Linux 上编过，依据是读源码。运行时问不到门户（缺 `libdbus-1`、
+#   缺门户服务）时它先退到 `zenity` 命令再试（`xdg_desktop_portal.rs` 的 `pick_folder`），那也没有才
+#   交回 `None`——那时两处的输入框就是退路。
+# - 默认特性里的 `wayland` 不开：它只为把对话框挂到一扇 Wayland 窗口底下（要递父窗口句柄），
+#   这里不递父窗口。
+# - `gtk3` 不开：它要链 GTK 的系统库。
+#
+# **多拉进来的**（锁文件实测）：只有它自己与 `pollster` 0.4——后者只在 Linux 上用，锁文件里另有一份
+# 1.0，两版并存。macOS 上复用已有的 `objc2` 0.6 / `objc2-app-kit` 0.3 / `block2` 0.6，Windows 上复用
+# `windows-sys` 0.61。
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 
 # 主库只读是这个项目唯一不可退让的约束（ADR-0004），
 # 因此禁 unsafe，一切磁盘接触走 `romcat_core::fs::LibraryFs` 这个只读接缝。

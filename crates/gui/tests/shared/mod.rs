@@ -288,3 +288,69 @@ pub fn 悬停在(
     }
     画出来的字(&out)
 }
+
+// ——— 跑一帧、点一下、打字 ———
+//
+// 收的都是「怎么画一帧」那个闭包，与 [`悬停在`] 同一个形状：开场那一屏、添加主库向导、
+// 主窗口，谁都递得进来。几份老测试各有一份绑死在自己那种屏上的（`program.rs`、`queue.rs`、
+// `roots.rs`），新测试用这几样，不再各搭一份。
+
+/// 跑一帧，交出这一帧画出来的字。
+pub fn 跑一帧(ctx: &egui::Context, 画一帧: impl FnMut(&mut egui::Ui)) -> String {
+    use romcat_gui::headless;
+
+    画出来的字(&headless::frame(ctx, headless::input(), 画一帧))
+}
+
+/// 按一下屏上写着 `那一段` 的地方（移过去、按下、松开），返回**松开之后再画一帧**画出来的字。
+///
+/// 多跑一帧才收，是因为按下去的后果（换屏、重列、弹出下一步）落在松开那一帧的帧末，
+/// 下一帧才画得出来。
+///
+/// # Panics
+/// 屏上找不着 `那一段` 时当场炸，并把这一帧画出来的字一并印出来——没处点的话，底下那条
+/// 断言测的就是「什么都没按」。
+pub fn 点一下(
+    ctx: &egui::Context,
+    那一段: &str,
+    mut 画一帧: impl FnMut(&mut egui::Ui),
+) -> String {
+    use romcat_gui::headless;
+
+    let 头一帧 = headless::frame(ctx, headless::input(), &mut 画一帧);
+    let Some(位置) = 那一段画在哪儿(&头一帧, 那一段) else {
+        panic!("屏上没有「{那一段}」，没处点：\n{}", 画出来的字(&头一帧));
+    };
+    let 按 = |pressed: bool| egui::Event::PointerButton {
+        pos: 位置,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let mut input = headless::input();
+    input.events.push(egui::Event::PointerMoved(位置));
+    input.events.push(按(true));
+    headless::frame(ctx, input, &mut 画一帧);
+    let mut input = headless::input();
+    input.events.push(按(false));
+    headless::frame(ctx, input, &mut 画一帧);
+    跑一帧(ctx, 画一帧)
+}
+
+/// 往屏上那个写着 `框上写着` 的输入框里打一段字。
+///
+/// 先[点一下](点一下)把焦点放进去，再发一条文本事件——egui 把文本事件交给**拿着焦点**的那个
+/// 控件，没有第二条路把字送进去。
+pub fn 打字(
+    ctx: &egui::Context,
+    框上写着: &str,
+    字: &str,
+    mut 画一帧: impl FnMut(&mut egui::Ui),
+) {
+    use romcat_gui::headless;
+
+    点一下(ctx, 框上写着, &mut 画一帧);
+    let mut input = headless::input();
+    input.events.push(egui::Event::Text(字.to_string()));
+    headless::frame(ctx, input, &mut 画一帧);
+}

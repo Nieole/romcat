@@ -195,6 +195,14 @@ impl Screen {
                 self.draft.clear();
                 self.look_at(换到);
             }
+            // 系统目录选择器（[`crate::pick`]）：选中之后走的是上面「换过去」那一条路。
+            if ui
+                .button("选择…")
+                .on_hover_text(crate::pick::FALLBACK_HINT)
+                .clicked()
+            {
+                self.picked(crate::pick::directory("换一个工作目录", &self.workspace));
+            }
         });
     }
 
@@ -299,5 +307,24 @@ impl Screen {
                 None
             }
         }
+    }
+}
+
+impl Screen {
+    /// **目录选择器交回来的那一下**（[`crate::pick`]）：选中了一个目录就走「换过去」那条路，
+    /// 取消了（`None`）什么都不动——框里打着的字、眼下看的工作目录，一个字都不变。
+    ///
+    /// **不另开第二条换目录的路**：选中之后做的正是按下「换过去」做的那两下——框里的字清掉、
+    /// [`Self::look_at`]。清框是因为人改用选择器之后，框里那半截字说的已经是换过去之前的打算，
+    /// 留着它，下一下「换过去」会把人带回一个他已经放弃的目录。
+    ///
+    /// 这一半与弹对话框那一层分开摆，是为了**它测得到**：对话框是系统的模态窗口，
+    /// 测试驱动不了；拿到路径之后发生什么，测试递一个进来就验得着。
+    pub fn picked(&mut self, 选中的: Option<PathBuf>) {
+        let Some(换到) = 选中的 else {
+            return;
+        };
+        self.draft.clear();
+        self.look_at(换到);
     }
 }
