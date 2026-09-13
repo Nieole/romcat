@@ -2118,6 +2118,7 @@ fn 有两份重复拷贝的现场() -> romcat_core::site::Site {
         .map(|variant| Identification {
             variant_key: variant.key.clone(),
             platform: None,
+            standalone: None,
             state: State::Unmatched,
             reason: None,
             units: 1,

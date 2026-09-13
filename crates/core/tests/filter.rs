@@ -56,6 +56,7 @@ fn 认出来(
         .write_identifications(&[Identification {
             variant_key: key.to_string(),
             platform: None,
+            standalone: None,
             state: State::Matched,
             reason: None,
             units: 1,

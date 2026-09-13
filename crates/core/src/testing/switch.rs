@@ -14,6 +14,13 @@ const PFS0_ENTRY: usize = 0x18;
 /// HFS0 一条条目多大（多了被哈希区域的大小与一段 SHA-256）。
 const HFS0_ENTRY: usize = 0x40;
 
+/// 一张票据在文件名表里叫什么：`<RightsId>.tik`，RightsId = TitleID ‖ 7 字节零 ‖
+/// KeyGeneration。**前 16 位 hex 就是 TitleID**（`identify::switch::rights_id`）。
+#[must_use]
+pub fn ticket(title_id: &str) -> String {
+    format!("{}0000000000000010.tik", title_id.to_lowercase())
+}
+
 /// 造一张 PFS0：一个裸 `.nsp` / `.nsz` 就是它本身。
 ///
 /// 每一条给 16 字节的零当「内容」——识别一个字节都不看它们。
@@ -120,4 +127,46 @@ fn padded_string_table(names: &[&str]) -> usize {
         len += 1;
     }
     len
+}
+
+/// [`base_update_add_on`] 里**本体**那一份的路径（相对主库根）。
+pub const BASE_NSP: &str = "switch/伊蘇X[v0].nsp";
+
+/// [`base_update_add_on`] 里**补丁**（更新包）那一份：名字里只写着版本号。
+pub const UPDATE_NSP: &str = "switch/伊蘇X[v1.0.2].nsp";
+
+/// [`base_update_add_on`] 里**附属内容**（追加内容）那一份：名字里只有一个中文名。
+pub const ADD_ON_NSP: &str = "switch/伊蘇X 追加曲包.nsp";
+
+/// 一部作品在 `switch/` 目录下的三份：**本体**、**补丁**、**附属内容**。
+///
+/// 三份的名字里一个「补丁」字都没有——说出是哪一种的只有容器里那张票据的 TitleID
+/// （尾 `000` / `800` / 别的，挂账 `D142`）。交出 `(相对主库根的路径, 字节)`，由调用方写盘。
+#[must_use]
+pub fn base_update_add_on() -> [(&'static str, Vec<u8>); 3] {
+    [
+        (
+            BASE_NSP,
+            pfs0(&[
+                &ticket("0100A0C01BED8000"),
+                "8eed26260dbdb1ea545119cc0368fa06.cnmt.nca",
+                "dfdb0f5bc5c5056a2f35d0379ee23020.nca",
+            ]),
+        ),
+        (
+            UPDATE_NSP,
+            pfs0(&[
+                "ba39a7f62eeb23476c08600ed405a1cf.cnmt.nca",
+                "150cf9022bfb2e72527669f2701ee31b.nca",
+                &ticket("0100A0C01BED8800"),
+            ]),
+        ),
+        (
+            ADD_ON_NSP,
+            pfs0(&[
+                &ticket("0100A0C01BED9001"),
+                "00c3cb5d146efa3cc9f2cb83682cf483.cnmt.nca",
+            ]),
+        ),
+    ]
 }

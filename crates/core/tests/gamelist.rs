@@ -15,21 +15,27 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use romcat_core::adapter::converge::NotAnEntry;
 use romcat_core::adapter::gamelist::Gamelist;
 use romcat_core::adapter::transfer::{self, ExportOptions};
 use romcat_core::adapter::{Adapter, Capability, assert_capability};
-use romcat_core::catalog::Catalog;
 use romcat_core::catalog::scrape::{Harvested, HarvestedMedia, HarvestedValue};
+use romcat_core::catalog::{Catalog, Roots};
+use romcat_core::dat::repo::DatRepo;
 use romcat_core::fs::RealFs;
-use romcat_core::scan::{self, Jobs, ScanOptions};
+use romcat_core::identify::{self, fuzzy};
+use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::priority::Priorities;
 use romcat_core::scrape::{AnchorKind, Field, MediaKind};
 use romcat_core::sublibrary::{self, Rule, Selection};
 use romcat_core::sync;
 use romcat_core::task::Handle;
+use romcat_core::testing::container::{ZipEntrySpec, zip_container};
 use romcat_core::testing::sample::zip;
+use romcat_core::testing::switch::{ADD_ON_NSP, BASE_NSP, UPDATE_NSP, base_update_add_on};
 use romcat_core::testing::{TempDir, temp_dir};
+use romcat_core::verdict;
 
 /// 盘上那几条**相对主库根**的路径。
 const 台版路径: &str = "FC/魂斗罗台版/魂斗罗.zip";
@@ -862,4 +868,78 @@ fn 开着铺媒体时报的步数与声明的对得上() {
     let 进度 = 把手.progress();
     assert_eq!(进度.at, 开着.task_steps(), "走过的步数与声明的对不上");
     assert_eq!(进度.step, "把媒体铺出去", "最后停在的那一步说错了");
+}
+
+#[test]
+fn 补丁与附属内容不导出为前端条目_名字说的与_titleid_说的都算() {
+    // 挂账 `D142`。与 `tests/pegasus.rs` 的 `switch_的补丁与附属内容…` 钉的是同一个答案：
+    // Switch 那三份的名字里一个「补丁」字都没有，说出是补丁还是附属内容的是容器里那张票据的
+    // TitleID。另一头：一份按名字判出来的汉化补丁照旧拦得住。
+    let dir = temp_dir("gamelist-switch");
+    for (path, bytes) in base_update_add_on() {
+        写(&dir.path().join(path), &bytes);
+    }
+    写(
+        &dir.path().join("FC/《流星洛克人3》汉化补丁.zip"),
+        &zip_container(&[ZipEntrySpec::stored("rockman3.ips", vec![0xF6; 256])]),
+    );
+    let 工作区 = temp_dir("gamelist-switch-ws");
+    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+    let mut options = ScanOptions::named(dir.path(), "库");
+    options.jobs = Jobs::Fixed(2);
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
+    identify::run(
+        &RealFs::new(),
+        &mut catalog,
+        &identify::Ammo {
+            repo: &DatRepo::in_memory().expect("开得出来"),
+            verdicts: &verdict::Index::empty(),
+            naming: &fuzzy::Naming::off(),
+            guessing: &identify::model::Guessing::off(),
+            titledb: None,
+        },
+        &identify::Options::new(Roots::single("库", dir.path())),
+        &CancelToken::new(),
+        &mut |_| {},
+    )
+    .expect("识别不该失败");
+    let pool = MediaPool::open(&工作区.path().join("media")).expect("池建得出");
+    let mut 现场 = 现场 {
+        dir,
+        _工作区: 工作区,
+        catalog,
+        pool,
+    };
+
+    let report = 导出(&mut 现场);
+    let 数 = |why: NotAnEntry| {
+        report
+            .excluded
+            .iter()
+            .find(|(label, _)| label == why.label())
+            .map_or(0, |(_, count)| *count)
+    };
+    assert_eq!(
+        数(NotAnEntry::Patch),
+        2,
+        "更新包与汉化补丁那两个：{report:#?}"
+    );
+    assert_eq!(
+        数(NotAnEntry::ExtraContent),
+        1,
+        "追加内容那一个：{report:#?}"
+    );
+    let text: String = report
+        .files
+        .iter()
+        .map(|file| fs::read_to_string(现场.out().join(&file.path)).expect("读得出"))
+        .collect();
+    let 名字 = |path: &'static str| path.rsplit('/').next().unwrap_or(path);
+    assert!(text.contains(名字(BASE_NSP)), "本体照样是前端条目：{text}");
+    assert!(!text.contains(名字(UPDATE_NSP)), "补丁不导出：{text}");
+    assert!(!text.contains(名字(ADD_ON_NSP)), "附属内容不导出：{text}");
+    assert!(
+        !text.contains("汉化补丁.zip"),
+        "按名字判出来的补丁不导出：{text}"
+    );
 }
