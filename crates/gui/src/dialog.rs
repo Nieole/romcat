@@ -1,0 +1,579 @@
+//! **弹层**：窗口里每一处对话框都照这一种写法画——添加主库向导、刮削、批量裁决计划，往后的
+//! 子库目标设置、手动例外、合集、优先级、导出照写、移除根、成型纠正、平台纠正、库体检明细、导入、
+//! 快捷键表、删除确认、移出此作品（票 `gui-looks-like-the-design/04`）。
+//!
+//! **不许各写各的。** 自己拿 `egui::Modal` / `egui::Window` 摆一块，遮罩、宽度、Esc、焦点、
+//! 底下那一屏的快捷键就又各是各的——这一层收之前，待确认屏那份计划书正是这样：现编一个 560 的
+//! 宽度、Esc 不管、「开着不接键盘」那道门记在那一屏自己身上。
+//!
+//! ## 怎么用
+//!
+//! 弹层开没开着是**画它的那一屏**自己记着的（一个 `Option`、一个 `bool`），这一层不替谁记。
+//! 开着的每一帧画一次，看交回来的动作：
+//!
+//! ```no_run
+//! use romcat_gui::dialog::{Button, Dialog, Footer, Width};
+//!
+//! /// 页脚上按下去的是哪一颗。
+//! enum 按的 {
+//!     取消,
+//!     保存,
+//! }
+//!
+//! /// 画弹层的那一屏：弹层开没开着由它自己记。
+//! struct 子库屏 {
+//!     /// 「目标设置」开着时，框里正打着的目标路径。
+//!     目标设置: Option<String>,
+//! }
+//!
+//! impl 子库屏 {
+//!     fn ui(&mut self, ctx: &egui::Context) {
+//!         let Some(路径) = &mut self.目标设置 else {
+//!             return;
+//!         };
+//!         let 填了 = !路径.trim().is_empty();
+//!         // 退出那一颗靠左，Esc 等于按它；其余几颗照读的次序靠右，往前走的那一颗是主按钮。
+//!         let footer = Footer::new(Button::new("取消", 按的::取消))
+//!             .button(Button::new("保存", 按的::保存).enabled(填了).primary());
+//!         let shown = Dialog::new("目标设置", "目标设置 · 掌机", footer)
+//!             .note("改了目标路径，已经排好的差量预览会作废")
+//!             .width(Width::Wide)
+//!             .show(ctx, |ui| ui.text_edit_singleline(路径));
+//!         match shown.pressed {
+//!             Some(按的::取消) => self.目标设置 = None,
+//!             Some(按的::保存) => {
+//!                 // 存下来……
+//!                 self.目标设置 = None;
+//!             }
+//!             None => {}
+//!         }
+//!     }
+//! }
+//! ```
+//!
+//! **页脚先搭好再画内容区**：页脚是一份数据（字、动作、按不按得动、悬停那句），内容区是一个
+//! 闭包——两样都要读写同一份状态的话，只有这样借用才排得开。按不按得动因此看的是这一帧画之前的
+//! 状态；按下任何一颗弹层都会要一次重画，下一帧就对上了。
+//!
+//! ## 这一层替每一处做掉的几件事
+//!
+//! - **遮罩**：令牌 `scrim`（[`look::scrim`]），盖住整个窗口，底下那一屏点不动。
+//!   **点遮罩不关**：弹层里常有打到一半的字，手一滑就没了。
+//! - **标题 + 说明**：标题是令牌 `size-title` 那一档，说明是弱字。
+//! - **内容区滚得动，页脚不被顶出去**：这一层最多多高由窗口定（离上下边各留间距最宽那一档），
+//!   内容比这还长时是内容区自己滚。
+//! - **页脚**：退出那一颗靠左，其余几颗照读的次序靠右——看着靠右，Tab 照读的次序走。往前走的
+//!   那一颗（「下一步」「开始扫描」「开始刮削」「落下」）标上 [`Button::primary`]，画成强调色底。
+//! - **宽度只取令牌里那四档**（[`Width`]），不许现编一个数；窗口比那一档还窄时收进窗口里。
+//! - **Esc 关最上面那一层**，等于按退出那一颗（[`Shown::pressed`] 交回的就是它的动作）。
+//!   两层叠着时一下只退一层。
+//! - **焦点**：打开时落进这一层里头头一个接得住焦点的控件（向导是起名那一框；内容区里没有
+//!   控件时是页脚头一颗）。这一层不再画了——不管是 Esc、页脚、还是画它的那一屏把它扔了——焦点
+//!   还给打开它时拿着焦点的那个控件。**鼠标点开的弹层关上之后焦点不落到任何地方**：egui 点一下
+//!   按钮不给它焦点，没有「原来那颗」可还（挂单 `Q668`）。
+//! - **底下那一屏的快捷键不接**：各屏读快捷键之前先问 [`screen_has_keys`]。
+//!
+//! ## 两条要知道的
+//!
+//! - **中文输入放在不会被回收的区域里**（ADR-0005）：内容区每帧把整份内容都摆一遍，输入框滚到
+//!   外头去也还在（`tests/dialog.rs` 钉着）。**别在内容区里再套一层只摆看得见那几行的东西**
+//!   （`ScrollArea::show_rows` 之类）**再往里放输入框**——那正是 ADR-0005 拦的那种回收。
+//! - **那道快捷键的门看的是上一帧**：[`screen_has_keys`] 问的是上一帧有没有弹层画出来
+//!   （挂单 `Q662`）。真窗口里打开弹层的那一下与它第一次画在同一帧，没有缝；弹层在两帧之间被
+//!   打开（测试里直接调 `open` 那种）时，它画出来之前那一帧的按键拦不住。关上那一下弹层自己
+//!   要一次重画，补上那一帧。
+
+use std::fmt::Debug;
+use std::hash::Hash;
+
+use crate::font;
+use crate::look;
+use crate::tokens::Tokens;
+
+/// 弹层有多宽：**只有令牌里那四档**（`tokens.toml` 的 `dialog-width`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Width {
+    /// 最窄那一档：一两句话的确认。
+    Narrow,
+    /// 默认那一档：向导、快捷键表。
+    #[default]
+    Standard,
+    /// 宽一档：表单、带几列旋钮的面板。
+    Wide,
+    /// 最宽那一档：带表格的明细。
+    Widest,
+}
+
+impl Width {
+    /// 四档，从窄到宽。
+    pub const ALL: [Self; 4] = [Self::Narrow, Self::Standard, Self::Wide, Self::Widest];
+
+    /// 这一档多宽，点：令牌里那一格。
+    #[must_use]
+    pub fn points(self) -> f32 {
+        let at = match self {
+            Self::Narrow => 0,
+            Self::Standard => 1,
+            Self::Wide => 2,
+            Self::Widest => 3,
+        };
+        Tokens::builtin().layout.dialog_width[at]
+    }
+}
+
+/// 页脚上的一颗按钮：写在上面的字，与按下去交回的那个动作。
+pub struct Button<A> {
+    /// 按钮上的字。
+    label: String,
+    /// 按下去交回的动作。
+    action: A,
+    /// 按得动没有。
+    enabled: bool,
+    /// 是不是往前走的那一颗。
+    primary: bool,
+    /// 指针停在上面时说的那句话。
+    hover: Option<String>,
+}
+
+impl<A> Button<A> {
+    /// 一颗写着 `label`、按下去交回 `action` 的按钮。
+    #[must_use]
+    pub fn new(label: impl Into<String>, action: A) -> Self {
+        Self {
+            label: label.into(),
+            action,
+            enabled: true,
+            primary: false,
+            hover: None,
+        }
+    }
+
+    /// 按得动没有。
+    #[must_use]
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// **往前走的那一颗**：画成强调色底（[`look::primary_button`]）。
+    ///
+    /// 一排里最多标一颗——两颗都标，人就分不出哪一颗是这一层等着他按的。退出那一颗不标。
+    #[must_use]
+    pub fn primary(mut self) -> Self {
+        self.primary = true;
+        self
+    }
+
+    /// 指针停在上面时说的那句话。
+    #[must_use]
+    pub fn hover(mut self, text: impl Into<String>) -> Self {
+        self.hover = Some(text.into());
+        self
+    }
+}
+
+/// 页脚那一排按钮。
+pub struct Footer<A> {
+    /// **退出那一颗**：Esc 等于按它。
+    dismiss: Button<A>,
+    /// 其余几颗，照读的次序。
+    rest: Vec<Button<A>>,
+}
+
+impl<A> Footer<A> {
+    /// 一排页脚，退出那一颗是 `dismiss`。
+    #[must_use]
+    pub fn new(dismiss: Button<A>) -> Self {
+        Self {
+            dismiss,
+            rest: Vec::new(),
+        }
+    }
+
+    /// 再摆一颗。
+    #[must_use]
+    pub fn button(mut self, button: Button<A>) -> Self {
+        self.rest.push(button);
+        self
+    }
+
+    /// 这一颗交回的动作。
+    fn take(mut self, slot: Slot) -> A {
+        match slot {
+            Slot::Dismiss => self.dismiss.action,
+            Slot::Rest(at) => self.rest.swap_remove(at).action,
+        }
+    }
+}
+
+/// 页脚上的**哪一颗**：退出那一颗，或者其余几颗里的第几颗。
+///
+/// 与各处自己的动作枚举不是一回事——那一个说按下去要干什么，这一个只说按的是第几颗，
+/// 画完这一帧由 [`Footer::take`] 换成那个动作。
+#[derive(Debug, Clone, Copy)]
+enum Slot {
+    /// 退出那一颗。
+    Dismiss,
+    /// 其余几颗里的第几颗。
+    Rest(usize),
+}
+
+/// 一层弹层。
+pub struct Dialog<A> {
+    /// 这一层的 id。
+    id: egui::Id,
+    /// 标题。
+    title: String,
+    /// 标题底下那句说明。
+    note: Option<String>,
+    /// 多宽。
+    width: Width,
+    /// 页脚。
+    footer: Footer<A>,
+}
+
+/// 画完一帧交回来的东西。
+pub struct Shown<A, R> {
+    /// 这一帧按下去的那颗交回的动作；按了 Esc 就是退出那一颗的。
+    pub pressed: Option<A>,
+    /// 内容区交回来的东西。
+    pub inner: R,
+    /// 这一层连边框画在哪儿。
+    pub rect: egui::Rect,
+}
+
+impl<A> Dialog<A> {
+    /// 一层弹层：`id_salt` 在全窗口里认得出它，`title` 是标题。
+    #[must_use]
+    pub fn new(id_salt: impl Hash + Debug, title: impl Into<String>, footer: Footer<A>) -> Self {
+        Self {
+            id: egui::Id::new(("弹层", id_salt)),
+            title: title.into(),
+            note: None,
+            width: Width::default(),
+            footer,
+        }
+    }
+
+    /// 标题底下那句说明。
+    #[must_use]
+    pub fn note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
+        self
+    }
+
+    /// 多宽：令牌里那四档之一。
+    #[must_use]
+    pub fn width(mut self, width: Width) -> Self {
+        self.width = width;
+        self
+    }
+
+    /// 画这一帧。
+    pub fn show<R>(
+        self,
+        ctx: &egui::Context,
+        body: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> Shown<A, R> {
+        let Self {
+            id,
+            title,
+            note,
+            width,
+            footer,
+        } = self;
+
+        // **焦点**：头一回画这一层时记下是谁拿着焦点（多半是打开它的那颗按钮），并把焦点交给
+        // 这一层里头头一个接得住的控件；这一层不再画了，由 [`return_focus`] 还回去。
+        hook_return_focus(ctx);
+        let pass = ctx.cumulative_pass_nr();
+        let opener = ctx.memory(egui::Memory::focused);
+        let focus_landed = ctx.data_mut(|data| {
+            let layer = data
+                .get_temp_mut_or_default::<egui::IdMap<OpenLayer>>(open_layers_id())
+                .entry(id)
+                .or_insert(OpenLayer {
+                    opener,
+                    focus_landed: false,
+                    shown_pass: pass,
+                });
+            layer.shown_pass = pass;
+            layer.focus_landed
+        });
+        if !focus_landed {
+            // 头一帧 egui 在量这一层多大，里头的控件接不住焦点——所以没接住就下一帧再来一遍。
+            ctx.memory_mut(|memory| {
+                if let Some(focused) = memory.focused() {
+                    memory.surrender_focus(focused);
+                }
+                memory.move_focus(egui::FocusDirection::Next);
+            });
+        }
+
+        let tokens = Tokens::builtin();
+        let style = ctx.style_of(ctx.theme());
+        let visuals = &style.visuals;
+        let screen = ctx.content_rect();
+        // 间距只从令牌那几档里取（`space.steps`，从窄到宽）：离窗口边取最宽那一档；抬头上下取
+        // 第四档、页脚上下取第三档——设计稿 `.mhead` 是上 18 下 14、`.mfoot` 是 12，各取最近那一档。
+        let step = |at: usize| tokens.space.steps.get(at).copied().unwrap_or_default();
+        let margin = tokens.space.steps.last().copied().unwrap_or_default();
+        let [header_pad_y, footer_pad_y] = [step(3), step(2)];
+        let stroke = visuals.window_stroke.width;
+        // 窗口比那一档还窄时收进窗口里：窗口最小 720 点宽，而最宽那一档是 840。
+        let outer_width = width.points().min(screen.width() - 2.0 * margin);
+        let outer_height = screen.height() - 2.0 * margin;
+
+        // 页脚多高是上一帧量出来的：内容区先画、页脚后画，而内容区能占多高得扣掉页脚。
+        let footer_height_id = id.with("页脚多高");
+        let footer_height = ctx
+            .data(|data| data.get_temp::<f32>(footer_height_id))
+            .unwrap_or(style.spacing.interact_size.y + 2.0 * footer_pad_y);
+
+        let frame = egui::Frame::new()
+            .fill(visuals.window_fill)
+            .stroke(visuals.window_stroke)
+            .corner_radius(visuals.window_corner_radius)
+            .shadow(visuals.window_shadow);
+        let [pad_y, pad_x] = tokens.space.dialog_padding;
+        let footer_radius = egui::CornerRadius {
+            nw: 0,
+            ne: 0,
+            ..visuals.window_corner_radius
+        };
+        let footer_fill = visuals.faint_bg_color;
+        let modal = egui::Modal::new(id)
+            .backdrop_color(look::scrim(visuals))
+            .frame(frame)
+            .show(ctx, |ui| {
+                ui.set_width(outer_width - 2.0 * stroke);
+                let spacing = ui.spacing().item_spacing;
+                // 三段之间不留缝：分隔线就是缝。段里头照旧用原来的间距。
+                ui.spacing_mut().item_spacing.y = 0.0;
+
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::from(egui::vec2(pad_x, header_pad_y)))
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = spacing;
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            font::strong(title)
+                                .text_style(egui::TextStyle::Name(look::TITLE.into())),
+                        );
+                        if let Some(note) = note {
+                            ui.label(egui::RichText::new(note).small().weak());
+                        }
+                    });
+                divider(ui);
+                let above_body = ui.min_rect().height();
+
+                let body_height =
+                    (outer_height - 2.0 * stroke - above_body - 1.0 - footer_height).max(0.0);
+                // **内容区摆在一块明说了多大的地方里。** 不明说的话，它能占多高由这一层眼下摆在
+                // 哪儿决定（离窗口底边还剩多少）——而这一层是照上一帧的尺寸居中的，于是一帧长
+                // 一截、要好多帧才长到头，人看见的是弹层一点点往下撑。
+                let body_rect = egui::Rect::from_min_size(
+                    ui.cursor().min,
+                    egui::vec2(outer_width - 2.0 * stroke, body_height),
+                );
+                let inner = ui
+                    .scope_builder(egui::UiBuilder::new().max_rect(body_rect), |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("内容区")
+                            .auto_shrink([false, true])
+                            .max_height(body_height)
+                            .show(ui, |ui| {
+                                egui::Frame::new()
+                                    .inner_margin(egui::Margin::from(egui::vec2(pad_x, pad_y)))
+                                    .show(ui, |ui| {
+                                        ui.spacing_mut().item_spacing = spacing;
+                                        ui.set_width(ui.available_width());
+                                        body(ui)
+                                    })
+                                    .inner
+                            })
+                            .inner
+                    })
+                    .inner;
+                divider(ui);
+
+                let above_footer = ui.min_rect().height();
+                let clicked = egui::Frame::new()
+                    .fill(footer_fill)
+                    .corner_radius(footer_radius)
+                    .inner_margin(egui::Margin::from(egui::vec2(pad_x, footer_pad_y)))
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = spacing;
+                        ui.set_width(ui.available_width());
+                        footer_ui(ui, &footer)
+                    })
+                    .inner;
+                let measured = ui.min_rect().height() - above_footer;
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(footer_height_id, measured));
+                (inner, clicked)
+            });
+        if !focus_landed {
+            let landed = ctx.memory(egui::Memory::focused).is_some();
+            // 没接住的话别让这一回「交给下一个」漏到这一层之后才画的控件上去。
+            ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+            if landed {
+                ctx.data_mut(|data| {
+                    if let Some(layer) = data
+                        .get_temp_mut_or_default::<egui::IdMap<OpenLayer>>(open_layers_id())
+                        .get_mut(&id)
+                    {
+                        layer.focus_landed = true;
+                    }
+                });
+            }
+        }
+        let (inner, clicked) = modal.inner;
+        let escaped = modal.is_top_modal
+            && !modal.any_popup_open
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        let pressed = match clicked {
+            Some(slot) => Some(footer.take(slot)),
+            None if escaped => Some(footer.take(Slot::Dismiss)),
+            None => None,
+        };
+        if pressed.is_some() {
+            ctx.request_repaint();
+        }
+        Shown {
+            pressed,
+            inner,
+            rect: modal.response.rect,
+        }
+    }
+}
+
+/// 一层开着的弹层替**焦点**记下的东西：谁打开的它、焦点落进去没有、最近一回哪一趟画过它。
+#[derive(Debug, Clone, Copy)]
+struct OpenLayer {
+    /// 头一回画它时拿着焦点的那个控件：关上之后焦点还给它。
+    opener: Option<egui::Id>,
+    /// 焦点落进这一层里头了没有。
+    focus_landed: bool,
+    /// 最近一回画它是第几趟。
+    shown_pass: u64,
+}
+
+/// 开着的那几层记在 egui 临时数据里的哪一格。
+fn open_layers_id() -> egui::Id {
+    egui::Id::new("开着的弹层")
+}
+
+/// 每一趟画完问一遍 [`return_focus`]。**一个窗口只挂一次。**
+fn hook_return_focus(ctx: &egui::Context) {
+    let hooked = egui::Id::new("弹层关上时还焦点");
+    if ctx
+        .data(|data| data.get_temp::<bool>(hooked))
+        .unwrap_or(false)
+    {
+        return;
+    }
+    ctx.data_mut(|data| data.insert_temp(hooked, true));
+    ctx.on_end_pass(
+        "弹层关上时还焦点",
+        std::sync::Arc::new(|ui: &mut egui::Ui| return_focus(ui.ctx())),
+    );
+}
+
+/// 这一趟没再画的那几层**就是关上了**：焦点还给当初打开它的那个控件。
+///
+/// 放在每一趟的末尾而不交给各处自己还：弹层是怎么关的有好几条路（Esc、页脚那几颗、
+/// 画它的那一屏把它扔了），各处自己还就得每一条路都记得还。
+fn return_focus(ctx: &egui::Context) {
+    let pass = ctx.cumulative_pass_nr();
+    let openers: Vec<egui::Id> = ctx.data_mut(|data| {
+        let mut openers = Vec::new();
+        data.get_temp_mut_or_default::<egui::IdMap<OpenLayer>>(open_layers_id())
+            .retain(|_, layer| {
+                let still_open = layer.shown_pass == pass;
+                if !still_open {
+                    openers.extend(layer.opener);
+                }
+                still_open
+            });
+        openers
+    });
+    for opener in openers {
+        ctx.memory_mut(|memory| memory.request_focus(opener));
+    }
+}
+
+/// 两段之间那条一点宽的分隔线。
+fn divider(ui: &mut egui::Ui) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        ui.visuals().widgets.noninteractive.bg_stroke,
+    );
+}
+
+/// 页脚那一排：退出那一颗靠左，其余几颗照读的次序靠右。返回这一帧按下的是哪一颗。
+///
+/// **靠右不走 `right_to_left`**：那样摆出来的次序是反的，Tab 从右往左走。先量出右边那几颗
+/// 一共多宽、空出左边那一截，再从左往右摆——看着靠右，Tab 照读的次序走。
+fn footer_ui<A>(ui: &mut egui::Ui, footer: &Footer<A>) -> Option<Slot> {
+    let mut clicked = None;
+    ui.horizontal(|ui| {
+        if add_button(ui, &footer.dismiss).clicked() {
+            clicked = Some(Slot::Dismiss);
+        }
+        let gap = ui.spacing().item_spacing.x;
+        let wide: f32 = footer
+            .rest
+            .iter()
+            .map(|button| button_width(ui, &button.label))
+            .sum::<f32>()
+            + gap * footer.rest.len().saturating_sub(1) as f32;
+        ui.add_space((ui.available_width() - wide).max(0.0));
+        for (at, button) in footer.rest.iter().enumerate() {
+            if add_button(ui, button).clicked() {
+                clicked = Some(Slot::Rest(at));
+            }
+        }
+    });
+    clicked
+}
+
+/// 一颗写着 `label` 的按钮画出来多宽：字宽加两边的内边距，与 `egui::Button` 自己量的一样。
+fn button_width(ui: &egui::Ui, label: &str) -> f32 {
+    let galley = egui::WidgetText::from(label).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Button,
+    );
+    galley.size().x + 2.0 * ui.spacing().button_padding.x
+}
+
+/// 摆一颗页脚按钮。主按钮在一个 `scope` 里换上那一档颜色，别的控件不受影响。
+fn add_button<A>(ui: &mut egui::Ui, button: &Button<A>) -> egui::Response {
+    let add = |ui: &mut egui::Ui| {
+        ui.add_enabled(button.enabled, egui::Button::new(button.label.as_str()))
+    };
+    let response = if button.primary {
+        ui.scope(|ui| {
+            look::primary_button(ui.visuals_mut());
+            add(ui)
+        })
+        .inner
+    } else {
+        add(ui)
+    };
+    match &button.hover {
+        Some(text) => response.on_hover_text(text.as_str()),
+        None => response,
+    }
+}
+
+/// 底下那一屏这一帧接不接键盘快捷键：**有一层弹层开着就不接。**
+#[must_use]
+pub fn screen_has_keys(ctx: &egui::Context) -> bool {
+    ctx.memory(|memory| memory.top_modal_layer().is_none())
+}

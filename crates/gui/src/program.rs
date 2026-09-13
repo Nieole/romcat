@@ -36,6 +36,7 @@ use std::path::PathBuf;
 use romcat_core::site::Site;
 
 use crate::app::App;
+use crate::look;
 use crate::opening;
 use crate::recent::Recent;
 use crate::site::Locate;
@@ -211,6 +212,9 @@ impl Program {
     /// 主窗口，开场自己退场；主窗口上按下「换一份库」，这一帧末尾就换回开场——**换回去
     /// 那一下不重开一个程序**，那份记忆原样带着走，不然在主窗口里换的库记不下来。
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        // **观感基线开场那一态也要**：主窗口那一态由 [`App`] 的第一帧装，而开场上那条向导是
+        // 一层弹层，标题要令牌那几档字号。两态走同一句，装过就不再装。
+        look::install_once(ui.ctx());
         let mut 开出来的 = None;
         let mut 要回开场 = false;
         match &mut self.stage {

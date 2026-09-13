@@ -195,6 +195,30 @@ pub fn 小库(
     romcat_gui::app::App::new(Site::in_memory(catalog, store, 根), workspace)
 }
 
+// ——— 输入 ———
+
+/// 按下一次 `key` 的键盘事件，不带修饰键。
+///
+/// 塞进 [`输入`] 跑一帧，走的就是真键盘那条路（`egui::Event::Key` 进 `RawInput`）。
+#[must_use]
+pub fn 按键事件(key: egui::Key) -> egui::Event {
+    egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    }
+}
+
+/// 一帧的输入：视口照 [`romcat_gui::headless::input`]，带着这几件事。
+#[must_use]
+pub fn 输入(events: Vec<egui::Event>) -> egui::RawInput {
+    let mut input = romcat_gui::headless::input();
+    input.events = events;
+    input
+}
+
 // ——— 悬停 ———
 
 /// 屏上写着这一段字的地方——**画出来的那一段**的中心点；找不着时是 `None`。

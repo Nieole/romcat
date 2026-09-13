@@ -4,7 +4,7 @@
 //! 松手，然后问 egui 那块面板现在多宽、问文件系统那个数落在哪儿、问这一帧到底画出了
 //! 哪几个字。
 //!
-//! - **拖得动**：三屏七条边界，每一条按住往外拖 60 点就宽 60 点。
+//! - **拖得动**：三屏六条边界，每一条按住往外拖 60 点就宽 60 点。
 //! - **记得住**：拖完关掉再开，还是那个样子；那个数落在**工作目录**里，
 //!   中立库那份文件一个字节都不多。
 //! - **挤不没**：往里拖到底停在下限，往外拖到底也留得住正中那块。
@@ -163,21 +163,15 @@ fn 描边(output: &egui::FullOutput) -> Vec<egui::Color32> {
     out
 }
 
-/// 把这一屏摆成「七条边界都在屏上」的样子。
+/// 把这一屏摆成「这一屏的边界都在屏上」的样子。
+///
+/// **浏览屏不必摆**：从前要先摊开刮削面板才有第四条边界，如今刮削是一层弹层，不占屏上的
+/// 地方——而且它开着的时候底下那几条边界反倒拖不动（弹层盖在整屏上头）。
 fn 摆开(app: &mut App, screen: View) {
     app.show_view(screen);
-    match screen {
-        // 刮削面板摊开才有那条边界，而**一行都没勾就不摊开**（那时它会摆出一块
-        // 「作用于 0 个变体」的面板，人按下去只会对着一份什么都没干的报告发愣）。
-        View::Browse => {
-            app.browse_and_site().0.picked_mut().select_all();
-            let (browse, site) = app.browse_and_site();
-            browse.open_scrape(&site.catalog);
-            assert!(browse.scrape().is_open(), "{:?}", browse.error());
-        }
-        // 逐条那一路才有左栏与裁决面板；分批那一路整屏就是一列卡片。
-        View::Queue => app.queue_and_site().0.show_one_by_one(),
-        _ => {}
+    // 逐条那一路才有左栏与裁决面板；分批那一路整屏就是一列卡片。
+    if screen == View::Queue {
+        app.queue_and_site().0.show_one_by_one();
     }
 }
 
@@ -309,30 +303,6 @@ fn 拖到极限时不塌陷也不把正中那块挤没() {
         正中高 >= layout::FLOOR,
         "底栏拖到底之后，正中那张表只剩 {正中高} 点高",
     );
-}
-
-#[test]
-fn 刮削面板摊开时两块底栏一起拖到底也挤不没正中那块() {
-    // 验收第 3 条最坏的那一路：**同一维上两块都在**。光按「整个窗口的几成」算，
-    // 两块各吃四成、再扣掉顶栏，正中那张表在最小窗口上只剩七十来点（表头 24 加两行）。
-    // 兜底的是 [`layout::Boundary::cap`] 里第二道——「眼下还剩多少减去 `FLOOR`」。
-    let mut app = 浏览(&工作目录("两块底栏"));
-    摆开(&mut app, View::Browse);
-    let ctx = headless::context();
-    跑(&ctx, &mut app, 3);
-    for boundary in [layout::SCRAPE, layout::EDIT] {
-        拖到(&ctx, &mut app, boundary, 5000.0);
-    }
-    let 正中高 = egui::Vec2::from(headless::VIEWPORT).y
-        - 多宽(&ctx, layout::SCRAPE)
-        - 多宽(&ctx, layout::EDIT);
-    assert!(
-        正中高 >= layout::FLOOR,
-        "两块底栏都拖到底之后，正中那张表只剩 {正中高} 点高",
-    );
-    // 表还在：塌没了的话表头一个字都画不出来。
-    let 屏上 = 画出来的字(&跑一帧(&ctx, &mut app, Vec::new()));
-    assert!(屏上.contains("作品"), "正中那张表的表头没了：\n{屏上}");
 }
 
 #[test]

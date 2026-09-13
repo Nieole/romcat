@@ -1,6 +1,6 @@
 //! **面板边界**：拖得动、记得住、挤不塌。
 //!
-//! 三屏上一共七条边界（[`Boundary::ALL`]），每一条都是一句声明：靠哪一边、默认多宽、
+//! 三屏上一共六条边界（[`Boundary::ALL`]），每一条都是一句声明：靠哪一边、默认多宽、
 //! 最少多宽、最多占整个窗口那一维的几成。**画那一屏的代码不自己写这四个数**
 //! ——写了就会有人只改一处，于是同一条边界在两个地方是两个下限。
 //!
@@ -123,16 +123,6 @@ pub const EDIT: Boundary = Boundary {
     share: 0.40,
 };
 
-/// 浏览屏底下那块**刮削面板**。摊开才有，收起来这条边界就不在屏上。
-pub const SCRAPE: Boundary = Boundary {
-    id: "刮削面板",
-    screen: View::Browse,
-    side: Side::Bottom,
-    default: 300.0,
-    min: 160.0,
-    share: 0.40,
-};
-
 /// 待确认屏逐条那一路左边那栏：选择器与整批操作。
 pub const BATCHES: Boundary = Boundary {
     id: "批量",
@@ -164,7 +154,10 @@ pub const TARGET: Boundary = Boundary {
 };
 
 impl Boundary {
-    /// 全部七条，**照各屏真正摆它们的次序**。不在这儿的边界不落盘。
+    /// 全部六条，**照各屏真正摆它们的次序**。不在这儿的边界不落盘。
+    ///
+    /// **刮削面板不在这儿**：它从前是浏览屏底下第四块，如今是一层弹层（[`crate::dialog`]），
+    /// 不占屏上的地方。工作目录里旧版式文件记着的那一行「刮削面板 = …」读的时候跳过。
     ///
     /// 次序不是随手排的：面板是**一块接一块**吃地方的（先摆的把地方吃掉一截，后摆的
     /// 看见的是剩下的），而 [`Self::cap`] 第二道正是按「眼下还剩多少」算的。
@@ -173,9 +166,8 @@ impl Boundary {
     // 三屏各自照 `Screen::ui` 里 `show` 的先后排；`rustfmt` 会把它挤成一行，
     // 而这张表的次序**是有意义的**，所以不让它挤。
     #[rustfmt::skip]
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 6] = [
         // 浏览屏（`browse::Screen::ui`）
-        SCRAPE,
         EDIT,
         FILTER,
         DETAIL,
@@ -273,7 +265,7 @@ const HEADER: &str = "\
 # 它**不在中立库里**——中立库整份可再生，界面偏好放进去会被某一次重扫抹掉。
 ";
 
-/// 七条边界各自拖到哪儿了，以及它落在哪个文件上。
+/// 六条边界各自拖到哪儿了，以及它落在哪个文件上。
 #[derive(Debug)]
 pub struct Layout {
     /// 那份文件在哪。**在工作目录里**（[`romcat_core::workspace::gui_layout_path`]）。
@@ -454,7 +446,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 七条边界的名字互不相同() {
+    fn 边界的名字互不相同() {
         // 名字同时是 `egui` 的面板 id：撞了的话两块面板会共用一个尺寸，
         // 拖左栏右栏跟着动。
         for at in 0..Boundary::ALL.len() {

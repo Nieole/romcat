@@ -22,7 +22,7 @@
 //! ## 五屏共用的那两样也在这儿接上
 //!
 //! 开窗第一帧装两样：[观感基线](crate::look)——置信度四档的颜色与
-//! 键盘焦点长什么样；以及[上次拖到哪儿的版式](crate::layout)——七条面板边界的宽度，
+//! 键盘焦点长什么样；以及[上次拖到哪儿的版式](crate::layout)——六条面板边界的宽度，
 //! 从**工作目录**里读出来塞回 egui。画完一帧再问一遍面板现在多宽，手松开了才落盘。
 //! 窗口标题跟着屏走：`romcat — {哪一份库} — {哪一屏}`，**换屏才发一条命令**。
 
@@ -109,7 +109,7 @@ pub struct App {
     tasks: task::Screen,
     /// **任务台**：长活排在这儿跑，跑在画帧那条线程之外。
     board: task::Tasks,
-    /// 七条**面板边界**各自拖到哪儿了。存**工作目录**，不存中立库。
+    /// 六条**面板边界**各自拖到哪儿了。存**工作目录**，不存中立库。
     layout: layout::Layout,
     /// 标题里那一段名字。默认是这份现场的**主库原名**
     /// （[`Site::display_name`]，也就是开场那一屏上画着的同一个）；合成数据那一路另给
@@ -205,7 +205,7 @@ impl App {
         format!("romcat — {} — {}", self.library_label, self.view.label())
     }
 
-    /// 七条面板边界各自拖到哪儿了。测试拿它核对「存在工作目录里」。
+    /// 六条面板边界各自拖到哪儿了。测试拿它核对「存在工作目录里」。
     #[must_use]
     pub fn layout(&self) -> &layout::Layout {
         &self.layout
@@ -559,7 +559,8 @@ impl App {
             return;
         }
         self.prepared = true;
-        look::install(ctx);
+        // 与开场那一态（`Program::ui`）走同一句：两态各装一遍的话，换进主窗口那一帧会再装一次。
+        look::install_once(ctx);
         self.layout.seed(ctx);
     }
 

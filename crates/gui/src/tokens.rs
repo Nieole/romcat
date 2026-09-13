@@ -58,6 +58,8 @@ pub struct Tokens {
     pub space: Space,
     /// 版式尺寸。
     pub layout: Layout,
+    /// 阴影：弹层与弹出菜单。
+    pub shadow: Shadows,
 }
 
 impl Tokens {
@@ -252,6 +254,8 @@ palette! {
     none_soft = "none-soft",
     /// 对话框遮罩（半透明）。
     scrim = "scrim",
+    /// 弹层、弹出菜单的阴影（半透明）。
+    pop_color = "pop-color",
 }
 
 /// 令牌里的一个颜色：`#RRGGBB`，半透明的写 `#RRGGBBAA`——**未预乘**，与 CSS 的 `rgba()` 同义。
@@ -415,6 +419,32 @@ pub struct Layout {
     pub dialog_width: [f32; 4],
 }
 
+/// 阴影：一种一格，**形状两套主题共用**，颜色是各主题里同名的那一格（`pop` → `pop-color`）。
+///
+/// 眼下只有 `pop` 一种。设计稿还有一种 `--shadow`（卡片、窗口外框），画它的那一屏照稿重排时
+/// 在这里添一格。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Shadows {
+    /// 弹层与弹出菜单。
+    pub pop: ShadowShape,
+}
+
+/// 一种阴影的形状，点。
+///
+/// 设计稿 `--pop` 的负扩散 egui 画不出（`egui::Shadow::spread` 只收非负数）：令牌里写的是照
+/// egui 画得出的样子挑过的那一份，理由在 `tokens.toml` 那一节的注释里。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShadowShape {
+    /// 往哪儿挪：`[横, 竖]`。
+    pub offset: [i8; 2],
+    /// 半影多宽。
+    pub blur: u8,
+    /// 往四周扩多少。
+    pub spread: u8,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,6 +497,14 @@ mod tests {
         assert_eq!(tokens.radius.medium, 6);
         assert_eq!(tokens.font.size_body, 13.0);
         assert_eq!(tokens.layout.dialog_width, [520.0, 620.0, 720.0, 840.0]);
+        // 设计稿 `--pop` 里那一色 rgba(16,20,30,.45)，暗色没有另写，照亮色那一份。
+        for palette in [&tokens.color.light, &tokens.color.dark] {
+            assert_eq!(
+                palette.pop_color,
+                Color32::from_rgba_unmultiplied(16, 20, 30, 0x73)
+            );
+        }
+        assert_eq!(tokens.shadow.pop.offset, [0, 10], "设计稿 --pop 的偏移");
     }
 
     #[test]

@@ -1275,6 +1275,63 @@ fn 向导走到第二步就放弃时工作目录里一个文件都不多() {
     );
 }
 
+/// 按一下这个键：一帧。
+fn 按键(ctx: &egui::Context, program: &mut Program, key: egui::Key) {
+    let input = shared::输入(vec![shared::按键事件(key)]);
+    headless::frame(ctx, input, |ui| program.ui(ui));
+}
+
+#[test]
+fn 向导开着时按退出键等于按了算了_工作目录里一个文件都不多() {
+    // 向导是一层弹层（票 `gui-looks-like-the-design/04`）：Esc 关最上面那一层，等于按页脚上
+    // 退出那一颗——在这条向导上就是「算了」，**磁盘上什么都没留下**。
+    let 工作目录 = temp_dir("gui-program-向导按退出键");
+    let (_记忆, 记的) = 记在临时处("gui-program-向导按退出键-记忆");
+    let mut program = 开场(工作目录.path(), 记的);
+    let ctx = headless::context();
+
+    点一下(&ctx, &mut program, "添加主库");
+    打字(&ctx, &mut program, "主库原名，例如", "我的主库");
+    let 第二步 = 点一下(&ctx, &mut program, "下一步");
+    assert!(
+        第二步.contains("选第一个根"),
+        "前提：走到了第二步：\n{第二步}"
+    );
+
+    按键(&ctx, &mut program, egui::Key::Escape);
+    let 屏上 = 跑一帧(&ctx, &mut program);
+    assert!(
+        屏上.contains("还没有库，添加一个主库开始") && !屏上.contains("选第一个根"),
+        "按了 Esc 没回到那张表：\n{屏上}",
+    );
+    assert!(
+        底下有什么(工作目录.path()).is_empty(),
+        "按了 Esc，工作目录里却多出了 {:?}",
+        底下有什么(工作目录.path()),
+    );
+}
+
+#[test]
+fn 按下添加主库焦点就落在起名那一框里_不用先拿鼠标点进去() {
+    let 工作目录 = temp_dir("gui-program-向导焦点");
+    let (_记忆, 记的) = 记在临时处("gui-program-向导焦点-记忆");
+    let mut program = 开场(工作目录.path(), 记的);
+    let ctx = headless::context();
+
+    点一下(&ctx, &mut program, "添加主库");
+    跑一帧(&ctx, &mut program);
+    // **不点那一框，直接打字**：字该落进起名那一框。
+    let mut input = headless::input();
+    input.events.push(egui::Event::Text("我的主库".to_string()));
+    headless::frame(&ctx, input, |ui| program.ui(ui));
+    let 屏上 = 点一下(&ctx, &mut program, "下一步");
+
+    assert!(
+        屏上.contains("给「我的主库」选第一个根"),
+        "打的字没落进起名那一框：\n{屏上}",
+    );
+}
+
 #[test]
 fn 向导建出来的库与命令行扫出来的库一样命令行接得上() {
     // 验收第 7 条：**同一份现场、同一套路径锚**。向导走的是核心库那两条现成的路

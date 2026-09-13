@@ -78,6 +78,7 @@ use romcat_core::verdict;
 // **一行画得下的那一截**收在浏览屏那一处：一条简介在中立库里最多 4,000 字
 // （`scrape::zh::DESCRIPTION_LIMIT`），两屏碰到的是同一个问题，各写一份迟早两种收法。
 use crate::browse::one_line;
+use crate::dialog;
 use crate::font;
 use crate::layout;
 use crate::look;
@@ -545,7 +546,7 @@ impl Screen {
 
     /// **裁决记录**那一块：落过的每一批裁决，新的在前。
     ///
-    /// 摆成一块浮在正文上的窗，不是一条面板边界：面板边界是 [`crate::layout`] 声明的那七条，
+    /// 摆成一块浮在正文上的窗，不是一条面板边界：面板边界是 [`crate::layout`] 声明的那六条，
     /// 加一条就是给这一屏另立一份记得住的版式偏好——而这一屏照稿重排是票
     /// `gui-looks-like-the-design/18` 的事，它换版式、不换这里的逻辑（挂单 `Q625`）。
     ///
@@ -1608,13 +1609,14 @@ impl Screen {
     ///
     /// 光标在文本框里时一个键都不接——那一栏里正打着中文，`Y` 是用户要的字母不是命令。
     ///
-    /// **计划书开着时也一个键都不接。** egui 的 [`egui::Modal`] 只拦得住指针、拦不住
-    /// 键盘（0.36），于是计划书开着按 `N` 会当场落下光标那一条——而屏上那份计划书还
-    /// 写着排它时的那一批，人再点「落下」时它已经过期了。模态框是这一层自己的东西，
-    /// 所以这一道门也在这一层（[`Screen::drop_stale_plan`] 说了它与核心库那道门各管
+    /// **有一层弹层开着时也一个键都不接**——计划书就是一层。egui 的 [`egui::Modal`] 只拦得住
+    /// 指针、拦不住键盘（0.36），于是计划书开着按 `N` 会当场落下光标那一条——而屏上那份
+    /// 计划书还写着排它时的那一批，人再点「落下」时它已经过期了。那道门在弹层那一处
+    /// （[`dialog::screen_has_keys`]），不在这一屏自己记着「计划书开着没有」：别处开出来的
+    /// 弹层盖在这一屏上头时，照样得拦（[`Screen::drop_stale_plan`] 说了它与核心库那道门各管
     /// 各的什么）。
     fn keyboard(&mut self, ctx: &egui::Context, site: &mut Site) {
-        if self.pending.is_some() || ctx.egui_wants_keyboard_input() {
+        if !dialog::screen_has_keys(ctx) || ctx.egui_wants_keyboard_input() {
             return;
         }
         let (mut pass, mut reject, mut skip, mut undo, mut back, mut forth) =
@@ -1821,75 +1823,71 @@ impl Screen {
         let Some(pending) = self.pending.take() else {
             return;
         };
+        /// 计划书页脚上按下去的是哪一颗。
+        enum Pressed {
+            /// 「取消」：退出那一颗，Esc 等于按它。
+            Cancel,
+            /// 「落下」。
+            Apply,
+        }
         let plan = pending.plan;
-        let mut keep = true;
-        let mut go = false;
-        egui::Modal::new(egui::Id::new("裁决计划")).show(ctx, |ui| {
-            ui.set_width(560.0);
-            ui.heading("批量裁决计划");
-            ui.label(format!(
-                "要落下 {} 条：钉在内容上的 {} 条（可导出分享），只钉得住本机路径的 {} 条；\
-                 其中盖掉已有裁决的 {} 条。",
-                thousands(plan.decided.len() as u64),
-                thousands(plan.content_anchored() as u64),
-                thousands(plan.path_anchored() as u64),
-                thousands(plan.replacing() as u64),
-            ));
-            if !plan.blocked.is_empty() {
-                ui.colored_label(
-                    ui.visuals().warn_fg_color,
-                    format!("{} 条落不下去：", thousands(plan.blocked.len() as u64)),
-                );
-            }
-            egui::ScrollArea::vertical()
-                .id_salt("计划明细")
-                .max_height(260.0)
-                .show(ui, |ui| {
-                    for row in plan.blocked.iter().take(20) {
-                        ui.colored_label(
-                            ui.visuals().warn_fg_color,
-                            format!("{}：{}", row.key, row.why),
-                        );
-                    }
-                    for row in plan.decided.iter().take(200) {
-                        ui.label(format!(
-                            "{}{}",
-                            row.key,
-                            if row.replaces {
-                                "（盖掉已有的）"
-                            } else {
-                                ""
-                            }
-                        ));
-                    }
-                    if plan.decided.len() > 200 {
-                        ui.weak(format!(
-                            "……还有 {} 条没列",
-                            thousands_len(plan.decided.len() - 200)
-                        ));
-                    }
+        // **一层弹层**（[`dialog`]）：说明是那句总账，内容区是明细，页脚「取消 ｜ 落下」。
+        // 明细不再自己套一层滚动区——弹层的内容区本来就滚得动，页脚一直在屏上。
+        let note = format!(
+            "要落下 {} 条：钉在内容上的 {} 条（可导出分享），只钉得住本机路径的 {} 条；\
+             其中盖掉已有裁决的 {} 条。",
+            thousands(plan.decided.len() as u64),
+            thousands(plan.content_anchored() as u64),
+            thousands(plan.path_anchored() as u64),
+            thousands(plan.replacing() as u64),
+        );
+        let footer = dialog::Footer::new(dialog::Button::new("取消", Pressed::Cancel)).button(
+            dialog::Button::new("落下", Pressed::Apply)
+                .primary()
+                .enabled(!plan.decided.is_empty()),
+        );
+        let shown = dialog::Dialog::new("裁决计划", "批量裁决计划", footer)
+            .note(note)
+            .show(ctx, |ui| {
+                if !plan.blocked.is_empty() {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!("{} 条落不下去：", thousands(plan.blocked.len() as u64)),
+                    );
+                }
+                for row in plan.blocked.iter().take(20) {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!("{}：{}", row.key, row.why),
+                    );
+                }
+                for row in plan.decided.iter().take(200) {
+                    ui.label(format!(
+                        "{}{}",
+                        row.key,
+                        if row.replaces {
+                            "（盖掉已有的）"
+                        } else {
+                            ""
+                        }
+                    ));
+                }
+                if plan.decided.len() > 200 {
+                    ui.weak(format!(
+                        "……还有 {} 条没列",
+                        thousands_len(plan.decided.len() - 200)
+                    ));
+                }
+            });
+        match shown.pressed {
+            Some(Pressed::Apply) => self.apply_plan(site, &plan),
+            Some(Pressed::Cancel) => {}
+            None => {
+                self.pending = Some(Pending {
+                    plan,
+                    revision: pending.revision,
                 });
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(!plan.decided.is_empty(), egui::Button::new("落下"))
-                    .clicked()
-                {
-                    go = true;
-                    keep = false;
-                }
-                if ui.button("取消").clicked() {
-                    keep = false;
-                }
-            });
-        });
-        if go {
-            self.apply_plan(site, &plan);
-        } else if keep {
-            self.pending = Some(Pending {
-                plan,
-                revision: pending.revision,
-            });
+            }
         }
     }
 
