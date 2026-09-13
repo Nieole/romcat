@@ -33,6 +33,7 @@ use std::collections::BTreeMap;
 use rusqlite::{OptionalExtension, params};
 
 use super::identify::Provenance;
+use super::meta::MetaKey;
 use super::{Catalog, CatalogError};
 use crate::platform::Manifest;
 use crate::scan::aggregate::ShapingAcc;
@@ -200,12 +201,6 @@ pub(super) fn read_variant_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Vari
         release_id: row.get(9)?,
     })
 }
-
-/// `meta` 里记「成型跑到哪一次遍历为止」的那把键。
-const META_SHAPED_SCAN: &str = "shaped_scan";
-
-/// `meta` 里记「成型用的是哪一份平台清单」的那把键。
-const META_SHAPED_MANIFEST: &str = "shaped_manifest";
 
 /// 一条**发行版**记录读回来的样子。
 ///
@@ -479,8 +474,8 @@ impl Catalog {
         // 而那正是这一趟要治的病。
         super::identify::drop_variant_orphans(&tx).map_err(to_err)?;
         tx.commit().map_err(to_err)?;
-        self.meta_set(META_SHAPED_SCAN, &scan.to_string())?;
-        self.meta_set(META_SHAPED_MANIFEST, &manifest.fingerprint().to_string())
+        self.meta_set(MetaKey::ShapedScan, &scan.to_string())?;
+        self.meta_set(MetaKey::ShapedManifest, &manifest.fingerprint().to_string())
     }
 
     /// 成型跑到哪一次遍历为止；从没成型过时是 `None`。
@@ -489,7 +484,7 @@ impl Catalog {
     /// 读库失败时返回错误。
     pub fn shaped_scan(&self) -> Result<Option<i64>, CatalogError> {
         Ok(self
-            .meta_get(META_SHAPED_SCAN)?
+            .meta_get(MetaKey::ShapedScan)?
             .and_then(|text| text.parse().ok()))
     }
 
@@ -499,7 +494,7 @@ impl Catalog {
     /// 读库失败时返回错误。
     pub fn shaped_manifest(&self) -> Result<Option<u64>, CatalogError> {
         Ok(self
-            .meta_get(META_SHAPED_MANIFEST)?
+            .meta_get(MetaKey::ShapedManifest)?
             .and_then(|text| text.parse().ok()))
     }
 

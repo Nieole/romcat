@@ -17,23 +17,9 @@
 
 use std::path::PathBuf;
 
+use super::meta::MetaKey;
 use super::{Catalog, CatalogError, now_secs};
 use crate::adapter;
-
-/// **前端格式**记在元数据表上的那个键。
-const META_EXPORT_FORMAT: &str = "export_format";
-
-/// **导出目录**记在元数据表上的那个键。
-///
-/// 键名里是 `out`：中立库的键相对主库根，而元数据里的 `file:` 相对元数据文件自己
-/// 所在的目录，所以这个目录在语义上是**主库根的替身**（`CONTEXT.md` 的**导出**条）。
-const META_EXPORT_OUT_DIR: &str = "export_out_dir";
-
-/// **上次导出是什么时候**记在元数据表上的那个键。
-///
-/// 与 [`META_TITLES_FOLDED_AT`](super::title) 同一条理由：这是整趟活的账，
-/// 落在某张表的一列上等于同一个时刻抄几万遍，而**加一列要升结构版本**。
-const META_EXPORTED_AT: &str = "exported_at";
 
 /// 记住的那套**导出**配置：往哪个前端格式写、写到哪个目录。
 ///
@@ -130,8 +116,8 @@ impl Catalog {
     /// 读库失败时返回错误。
     pub fn export_setup(&self) -> Result<Option<ExportSetup>, CatalogError> {
         let (Some(format), Some(out)) = (
-            self.meta_get(META_EXPORT_FORMAT)?,
-            self.meta_get(META_EXPORT_OUT_DIR)?,
+            self.meta_get(MetaKey::ExportFormat)?,
+            self.meta_get(MetaKey::ExportDir)?,
         ) else {
             return Ok(None);
         };
@@ -149,8 +135,8 @@ impl Catalog {
     /// # Errors
     /// 写库失败时返回错误。
     pub fn set_export_setup(&self, setup: &ExportSetup) -> Result<(), CatalogError> {
-        self.meta_set(META_EXPORT_FORMAT, &setup.format)?;
-        self.meta_set(META_EXPORT_OUT_DIR, &setup.out.to_string_lossy())
+        self.meta_set(MetaKey::ExportFormat, &setup.format)?;
+        self.meta_set(MetaKey::ExportDir, &setup.out.to_string_lossy())
     }
 
     /// **上次导出是什么时候**（UNIX 纪元起的秒）；一趟都没导过就是 `None`。
@@ -163,7 +149,7 @@ impl Catalog {
     /// 读库失败时返回错误。
     pub fn exported_at(&self) -> Result<Option<i64>, CatalogError> {
         Ok(self
-            .meta_get(META_EXPORTED_AT)?
+            .meta_get(MetaKey::ExportedAt)?
             .and_then(|value| value.trim().parse::<i64>().ok()))
     }
 
@@ -175,6 +161,6 @@ impl Catalog {
     /// # Errors
     /// 写库失败时返回错误。
     pub fn mark_exported(&self) -> Result<(), CatalogError> {
-        self.meta_set(META_EXPORTED_AT, &now_secs().to_string())
+        self.meta_set(MetaKey::ExportedAt, &now_secs().to_string())
     }
 }
