@@ -53,7 +53,8 @@
       **不含** `registry/src`（那是解包出来的源码，存它等于同一份东西存两遍）；key 里带上
       `Cargo.lock` 与 `rust-toolchain.toml`。工具链走 `rustup toolchain install`（不给参数
       就读 `rust-toolchain.toml`），**不用 runner 预装的 stable**。
-      **带保留**：这个仓库没有 remote，这份 YAML **从未被任何 CI 实跑过**（挂单 `Q195`）。
+      这份 YAML **从合并这张票那一刻起就在 GitHub Actions 上真跑**（首跑 2026-09-08 04:47，
+      触发它的正是「合并票 `parking-3/01`」那个提交）。
       其中唯一真有风险的那一格已经量掉：`ldd target/debug/romcat-gui` 只链
       `libc` / `libm` / `libgcc_s` / `ld-linux`，界面测试又全是 headless，所以
       **一个 apt 步骤都不写**，理由与实测写在文件里。
@@ -177,12 +178,13 @@
   （winit 与 wgpu 那一层是运行时 `dlopen`），而门禁跑的界面测试全是 headless、不开窗，
   于是 workflow 里**一个 apt 步骤都不写**，并把这条实测写在文件里。缓存那段照 cargo 官方
   CI 配方（`registry/index` + `registry/cache` + `git/db` + `target/`，**不含**
-  `registry/src`）。剩下没验到的是：YAML 语法、action 版本、缓存命中率——这个仓库
-  **没有 remote、没有 runner，这份文件从未被任何 CI 实跑过**。
-- **谁来裁：** 拿主意的人（第一次真的推上去时）
-- **状态：** settled —— 第三轮收口 2026-09-08，走 **C（仍然成立，归第四轮）**
-- **收尾裁决（第三轮收口，2026-09-08）：** **C** —— `.github/workflows/gate.yml` 至今**没有被任何 CI 跑过**——这个仓库没有 remote、没有 runner。真有风险的那一格（GUI 要不要装 X11/wayland 那串 dev 包）已经用 `ldd` 量掉了，剩下 YAML 语法、action 版本、缓存命中率三样只有推上去才验得了。**触发条件写死在条目里：第一次真的推上去时。** 这一条的根不在代码里，是「这个仓库要不要有 remote」，由维护者定。
-  **去处：** 第四轮规格材料，「门禁与工具链」那一组。
+  `registry/src`）。当时没验到的是：YAML 语法、action 版本、缓存命中率——**推上去之后
+  三样都验过了**：这份文件从 2026-09-08 起在 GitHub Actions 上真跑，32 次运行 28 次绿
+  （3 次被并发组取消，都在第一天，三次推送撞在几分钟内）。
+- **谁来裁：** 已裁 —— 推上去那一刻自己验完了
+- **状态：** settled
+- **收尾裁决：** **A（做完了）** —— 真有风险的那一格（GUI 要不要装 X11/wayland 那串 dev 包）用 `ldd` 量掉了；剩下 YAML 语法、action 版本、缓存命中率三样**只有推上去才验得了，而推上去之后就验完了**：`.github/workflows/gate.yml` 从 **2026-09-08 04:47** 起在 GitHub Actions 上真跑，**32 次运行、28 次绿**，3 次被并发组取消（都在第一天，三次推送撞在几分钟内）。第一次运行的提交正是「合并票 `parking-3/01`」——**这张票自己**。
+  ⚠️ **留给后来人的一处**：`actions/checkout@v4` 没给 `fetch-depth`，默认浅克隆 1 层。眼下五条都不看 git 历史，所以无碍；哪一条要看历史（比如按 diff 扫的检查），就得给它 `fetch-depth: 0`。
 
 ### Q196 — 界面媒体那条「头一帧 < 1 秒」的挂钟断言，落到门禁上就是一张彩票
 
