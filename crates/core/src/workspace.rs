@@ -333,7 +333,8 @@ pub struct CatalogFacts {
 /// 开场屏上说的是「还没有库」——而正确的下一步完全不同：去修那个目录的权限，别去建第二份库。
 #[derive(Debug)]
 pub enum Listing {
-    /// **有库**：一份一行，**至少一份**，按**主库原名**排。开不进去的那几份也在里头，
+    /// **有库**：一份一行，**至少一份**，**排好了的**——从没扫过的在前，其余按上次扫描时刻
+    /// 倒排，说不上来的垫底（[`catalogs`]）。开不进去的那几份也在里头，
     /// 各自带着说得出原因的状态（[`CatalogEntry`]）。
     Catalogs(Vec<CatalogEntry>),
     /// **空的**：这个工作目录里一份中立库都没有。中立库住的那个目录还没建过也是这一态——
@@ -454,7 +455,16 @@ fn writable(_dir: &Path) -> std::io::Result<()> {
 /// 不该顺手把每一份老库都改一遍。（SQLite 自己那两个附件 `-wal` / `-shm` 不算：
 /// 那是一次连接的账，不是库的内容。）
 ///
-/// 按**主库原名**排，同名的再按路径排：目录列出来的次序是文件系统给的，两次打开不保证
+/// **交出来就是排好的**，界面照这个次序画、不另排一遍（挂单 `Q389`）。按**上次扫描**分三档
+/// （`LastScan`）：
+///
+/// 1. **从没扫过**的在最前：建出来了却没开工的那一份，未完成的东西该看得见；
+/// 2. **扫过的**按上次扫描时刻倒排：人刚在弄的那一份在最上面；
+/// 3. **说不上来**的垫底：开不进去、或者那几个数没读回来（挂单 `Q731`）——读不出来所以不知道，
+///    不是从没扫过。
+///
+/// 同一档里（扫描时刻撞在同一秒、或者都没扫过、或者都说不上来）按**主库原名**排（比码位，
+/// 这个仓库不做拼音排序），同名的再按路径：目录列出来的次序是文件系统给的，两次打开不保证
 /// 一样，而开场那一屏的行不该自己跳来跳去。
 ///
 /// ## 它为什么住在这个模块里
@@ -475,8 +485,48 @@ pub fn catalogs(workspace: &Path) -> Listing {
         return Listing::Empty;
     }
     let mut out: Vec<CatalogEntry> = files.into_iter().map(entry_of).collect();
-    out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
+    out.sort_by(|a, b| {
+        LastScan::of(a)
+            .cmp(&LastScan::of(b))
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.path.cmp(&b.path))
+    });
     Listing::Catalogs(out)
+}
+
+/// 开场那几行分先后的那一格：**这份库上次什么时候扫的**，分三档。
+///
+/// 档的先后就是这几支的声明次序（`derive(Ord)`）；扫过的那一档里按时刻倒排。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum LastScan {
+    /// **从没扫过**：建出来了却没开工的那一份。排最前（`Q389` 那一件在规格第五节里的裁定）
+    /// ——未完成的东西该看得见，排最后会让它沉到底下，而那正是人最该点进去的一行。
+    Never,
+    /// **扫过**，最近的那一份在前。
+    At(std::cmp::Reverse<i64>),
+    /// **说不上来**：开不进去，或者开进去了、那几个数没读回来（挂单 `Q731`）。
+    ///
+    /// **读不出来所以不知道，不是从没扫过**（同 ADR-0021 那条修订「读不动不是空的」）。
+    /// 并进 [`Never`](Self::Never) 的话，打不开的那几份会压在人刚在弄的那份上面。
+    Unknown,
+}
+
+impl LastScan {
+    /// 这一行落在哪一档。
+    const fn of(entry: &CatalogEntry) -> Self {
+        match &entry.state {
+            CatalogState::Openable(Ok(CatalogFacts {
+                scanned_at: None, ..
+            })) => Self::Never,
+            CatalogState::Openable(Ok(CatalogFacts {
+                scanned_at: Some(at),
+                ..
+            })) => Self::At(std::cmp::Reverse(*at)),
+            CatalogState::Openable(Err(_))
+            | CatalogState::SchemaMismatch { .. }
+            | CatalogState::Broken { .. } => Self::Unknown,
+        }
+    }
 }
 
 /// 这个**工作目录**里，开场那一行上印的名字恰是 `name` 的那一份中立库。
