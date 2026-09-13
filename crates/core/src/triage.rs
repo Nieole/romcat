@@ -1275,7 +1275,8 @@ pub fn apply(
             account.path_anchored += 1;
         }
         // 「认不出」不产生结论——它只是在理由那一列上盖一句，别的一个字不动。
-        // 结论本身没变（照旧是未命中或无判据），变的只是「为什么还停在这儿」。
+        // 结论本身没变（未命中、无判据，或者只有不自动通过的候选的命中），
+        // 变的只是「为什么还停在这儿」。
         if matches!(verdict.decision, Decision::Unknown) {
             catalog.set_identification_reason(
                 &item.variant.key,

@@ -62,7 +62,17 @@ const 残渣二: &str = "库/gba/ACGHH-0113-TP.zip";
 const 残渣三: &str = "库/gba/my_theme0.zip";
 const 补丁: &str = "库/gba/流星洛克人 3 汉化补丁.zip";
 
+/// **无判据的残渣**：一份读不进去的 zip。它一份可以撞 DAT 的内容都没有，
+/// 结论那一列上写着一句真事实（「容器穿不透：…」）——那正是票
+/// `one-criterion-per-thing/06` 要留住的东西。
+const 穿不透的: &str = "库/gba/某合集.zip";
+
 fn 建现场() -> 现场 {
+    摆现场(&[])
+}
+
+/// 同一份现场，另外再摆几份文件（键、字节）。扫描在摆完之后才跑。
+fn 摆现场(另外: &[(&str, Vec<u8>)]) -> 现场 {
     let dir = temp_dir("model");
     let root = dir.path();
 
@@ -95,6 +105,9 @@ fn 建现场() -> 现场 {
         &root.join(相对(补丁)),
         &zip_container(&[ZipEntrySpec::stored("rockman.ips", 卡带(0xC6))]),
     );
+    for (key, bytes) in 另外 {
+        写(&root.join(相对(key)), bytes);
+    }
 
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
     let mut options = ScanOptions::named(root, "库");
@@ -368,28 +381,132 @@ fn 这一层的候选永不自动通过而且进了待确认队列() {
     assert!(!queue.items.iter().any(|row| row.variant.key == 精确命中的));
 }
 
-#[test]
-fn 结论的状态与那句_为什么没定下来_一个字都没被猜测覆盖() {
-    // 与文件名那一层**故意不同**：「无判据」那一列的理由是真事实
-    // （rar 穿不透、元数据读不到），让一句猜测覆盖掉是净损失。
-    let mut 现场 = 建现场();
-    // 先跑一趟不问的，把「这一层没插手时结论长什么样」记下来。
-    跑一趟(&mut 现场, None, 宽松上限());
-    let 之前 = 现场
+/// 一个变体的**识别结论**：状态与「为什么没定下来」那两列。
+fn 结论(现场: &现场, key: &str) -> (State, Option<String>) {
+    现场
         .catalog
-        .identification_of(残渣一)
+        .identification_of(key)
         .expect("读得到")
-        .expect("有结论");
+        .expect("有结论")
+}
+
+#[test]
+fn 没有模型候选的变体_状态与理由一个字没变() {
+    // 反向钉住：这一改只挪只有模型候选的那几份。精确命中的、名字撞得上的、补丁三份
+    // 手里没有这一层的候选，问没问模型，它们那两列都得与改前一模一样。
+    let mut 现场 = 带无判据的现场();
+    let 两列 = |现场: &现场| [精确命中的, 名字撞得上的, 补丁].map(|key| 结论(现场, key));
+    跑一趟(&mut 现场, None, 宽松上限());
+    let 之前 = 两列(&现场);
+    assert_eq!(
+        之前.clone().map(|(state, _)| state),
+        [State::Matched, State::Matched, State::Skipped]
+    );
+
     let fetcher = CannedFetcher::new().with_prefix(model::ENDPOINT, 200, 一份答复(20));
     跑一趟(&mut 现场, Some(&fetcher), 宽松上限());
-    let 之后 = 现场
-        .catalog
-        .identification_of(残渣一)
-        .expect("读得到")
-        .expect("有结论");
-    assert_eq!(之后.0, State::Unmatched, "状态不许被猜测抬成命中");
-    assert_eq!(之前, 之后, "状态与「为什么没定下来」那两列一个字都不许变");
-    assert!(!候选(&现场, 残渣一).is_empty(), "但候选照样落下来了");
+    for key in [精确命中的, 名字撞得上的, 补丁] {
+        assert!(
+            候选(&现场, key)
+                .iter()
+                .all(|candidate| candidate.source != model::SOURCE),
+            "{key} 手里不该有模型推断的候选"
+        );
+    }
+    assert_eq!(两列(&现场), 之前);
+}
+
+#[test]
+fn 状态在模型候选进来之后才定_那句理由一个字不丢() {
+    // 一次判断、一个候选集合（票 `one-criterion-per-thing/06`）：模型那一层说了话，
+    // 状态就不能再说「一条候选都没有」。但「无判据」那一列的**理由**是真事实
+    // （容器穿不透、元数据读不到），候选与它并存，不许被一句猜测盖掉。
+    let mut 现场 = 带无判据的现场();
+    跑一趟(&mut 现场, None, 宽松上限());
+    let 之前 = 结论(&现场, 穿不透的);
+    assert_eq!(之前.0, State::NoEvidence);
+    assert!(
+        之前
+            .1
+            .as_deref()
+            .is_some_and(|why| why.starts_with("容器穿不透")),
+        "{之前:?}"
+    );
+    let fetcher = CannedFetcher::new().with_prefix(model::ENDPOINT, 200, 一份答复(20));
+    跑一趟(&mut 现场, Some(&fetcher), 宽松上限());
+
+    let 之后 = 结论(&现场, 穿不透的);
+    assert_eq!(之后.0, State::Matched, "它有候选、一条都没自动通过");
+    assert_eq!(之后.1, 之前.1, "那句「为什么没定下来」一个字都不许丢");
+    assert!(!候选(&现场, 穿不透的).is_empty());
+    assert_eq!(结论(&现场, 残渣一), (State::Matched, None));
+}
+
+/// 报告里按结论分的那四档：命中、未命中、无判据、跳过。
+fn 四档(outcome: &identify::Outcome) -> [u64; 4] {
+    let total = &outcome.report.total;
+    [
+        total.matched,
+        total.unmatched,
+        total.no_evidence,
+        total.skipped,
+    ]
+}
+
+/// 摆了[`穿不透的`]那一份的现场。
+fn 带无判据的现场() -> 现场 {
+    // 扩展名是 zip、头四个字节是 zip 的本地文件头，后面接不上——扫描照 zip 去读，读不出里面装着什么。
+    摆现场(&[(穿不透的, b"PK\x03\x04 truncated, not really a zip".to_vec())])
+}
+
+#[test]
+fn 只有模型候选的变体_状态计数跳一次() {
+    // **改前**：`49dece6` 上同一份现场、同一份答复实测的四档（命中、未命中、无判据、跳过）。
+    // 那时状态在模型候选进来之前就定死了：三份残渣记成未命中、穿不透的那份记成无判据，
+    // 而它们手里各有两条模型候选。**这一改会让历史库的计数跳一次**，重跑一趟识别才对得上。
+    const 改前: [u64; 4] = [2, 3, 1, 1];
+    // **改后**：四份残渣各有候选、一条都没自动通过，全落进命中；精确命中的、名字撞得上的、
+    // 补丁三份一个字没变。
+    const 改后: [u64; 4] = [6, 0, 0, 1];
+
+    let mut 现场 = 带无判据的现场();
+    // 一、模型那一层**还没说话**（没有网络、缓存里也没有答案）：就是改前那几个数。
+    let 没问 = 跑一趟(&mut 现场, None, 宽松上限());
+    assert_eq!(没问.model.residue, 4, "{:?}", 没问.model);
+    assert_eq!(四档(&没问), 改前, "模型候选还没进来时，计数与改前一样");
+    // 「只靠名字」那一列：名字撞得上的那一份，它有一份内容撞过。
+    let 只靠名字 = |outcome: &identify::Outcome| {
+        let total = &outcome.report.total;
+        (total.name_only, total.name_only_no_evidence)
+    };
+    assert_eq!(只靠名字(&没问), (1, 0));
+
+    // 二、真问一趟（候选在主循环之后才追加进库的那条路）。
+    let fetcher = CannedFetcher::new().with_prefix(model::ENDPOINT, 200, 一份答复(20));
+    let 问过 = 跑一趟(&mut 现场, Some(&fetcher), 宽松上限());
+    assert_eq!(问过.model.with_candidates, 4, "{:?}", 问过.model);
+    assert_ne!(
+        四档(&问过),
+        改前,
+        "这一改没让数变——状态还是在模型候选进来之前定的"
+    );
+    assert_eq!(四档(&问过), 改后);
+    // 挪进命中的四份全记在「只靠名字」那一列里，穿不透的那份记作本来是无判据的——
+    // 于是**不算那几层的命中率一个点都没动**：命中率没有替模型邀功。
+    assert_eq!(只靠名字(&问过), (5, 1));
+    assert_eq!(
+        format!("{:.1}", 问过.report.total.hit_rate_without_names()),
+        format!("{:.1}", 没问.report.total.hit_rate_without_names()),
+    );
+
+    // 三、只用缓存重跑一趟（候选在定状态之前就进了同一个集合的那条路）。两条路必须是同一个数。
+    let 缓存 = 跑一趟(&mut 现场, None, 宽松上限());
+    assert_eq!(缓存.model.from_cache, 4, "{:?}", 缓存.model);
+    assert_eq!(
+        四档(&缓存),
+        改后,
+        "缓存那条路与真问那条路定出来的状态不一样"
+    );
 }
 
 #[test]
