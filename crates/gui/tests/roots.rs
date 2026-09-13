@@ -350,6 +350,91 @@ fn 跑一帧(ctx: &egui::Context, app: &mut App) {
     headless::frame(ctx, headless::input(), |ui| app.ui(ui));
 }
 
+/// 导出目录里眼下躺着的那几份元数据文件，按路径排好。
+fn 导出去的文件(导出去: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = fs::read_dir(导出去)
+        .expect("导出目录在")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_file())
+        .collect();
+    out.sort();
+    out
+}
+
+/// 屏上**整段就是** `按钮上的字` 的那一段画在哪儿（中心点）；找不着时是 `None`。
+///
+/// 与 `shared::那一段画在哪儿` 的差别是**整段相等**而不是「含着这几个字」：按钮上的字
+/// 常常也出现在旁边那句说明里（「……再按「我看过了，照写」」），按「含着」找会点到
+/// 那句说明上，按钮一下都没挨着。
+fn 按钮画在哪儿(output: &egui::FullOutput, 按钮上的字: &str) -> Option<egui::Pos2> {
+    fn 找(shape: &egui::epaint::Shape, 按钮上的字: &str) -> Option<egui::Pos2> {
+        match shape {
+            egui::epaint::Shape::Text(text) => (text.galley.text() == 按钮上的字)
+                .then(|| egui::Rect::from_min_size(text.pos, text.galley.size()).center()),
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(|one| 找(one, 按钮上的字)),
+            _ => None,
+        }
+    }
+    output
+        .shapes
+        .iter()
+        .find_map(|clipped| 找(&clipped.shape, 按钮上的字))
+}
+
+/// 在窗口上**真点一下**写着 `按钮上的字` 的那颗按钮：指针挪过去、按下、松开，各一帧。
+///
+/// 位置从画出来的那一段字上量（[`按钮画在哪儿`]），不把控件的 `Rect` 从界面层漏出来。
+/// 先空跑一帧把界面跑稳——首帧还在估滚动区尺寸，量出来的位置会偏。
+///
+/// # Panics
+/// 屏上找不着那颗按钮时当场炸，并把这一帧画出来的字一并印出来。
+fn 点一下(ctx: &egui::Context, app: &mut App, 按钮上的字: &str) {
+    跑一帧(ctx, app);
+    let 稳了 = headless::frame(ctx, headless::input(), |ui| app.ui(ui));
+    let Some(pos) = 按钮画在哪儿(&稳了, 按钮上的字) else {
+        panic!(
+            "屏上没有「{按钮上的字}」这颗按钮，没处点：\n{}",
+            画出来的字(&稳了)
+        );
+    };
+    let 按 = |pressed: bool| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::default(),
+    };
+    for events in [
+        vec![egui::Event::PointerMoved(pos)],
+        vec![按(true)],
+        vec![按(false)],
+    ] {
+        let mut input = headless::input();
+        input.events = events;
+        headless::frame(ctx, input, |ui| app.ui(ui));
+    }
+}
+
+/// 摆一份**已经导过一趟**的现场：横跨两个平台的 fixture 主库扫进来、选好 Pegasus 与
+/// 导出目录、导一趟。返回主库（得活到测试结束）、现场与导出目录。
+fn 导过一趟(tag: &str) -> (TempDir, 现场, PathBuf) {
+    let 库 = 建库(tag);
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    let 导出去 = 现场.工作区.path().join("导出去");
+    现场.选一次导出去哪儿("Pegasus", &导出去);
+    现场.导出();
+    (库, 现场, 导出去)
+}
+
+/// 有人在工具外面给这份文件手加了一行。返回手改之后的全文。
+fn 手改一行(落点: &Path) -> String {
+    let mut 手改的 = fs::read_to_string(落点).expect("读得出");
+    手改的.push_str("\n# 我后来手加的一行\n");
+    fs::write(落点, &手改的).expect("写得进");
+    手改的
+}
+
 #[test]
 fn 两个根扫进同一份中立库而且互不覆盖() {
     let 甲 = 建库("gui-roots-甲");
@@ -1489,6 +1574,226 @@ fn 外面有人动过那些元数据文件时停下来_不静默覆盖() {
         那一句.contains("写进 1 份"),
         "写出去的份数报错了（被挡下的那份也算进去了？）：{那一句}",
     );
+}
+
+#[test]
+fn 外面有人动过时这一趟停下来_屏上逐份点名是哪几份() {
+    // 票 `gui-answers-all-six/05` 验收第 1 条：导一趟 → 改掉盘上那一份 → 再导。
+    // **名单是导出本来就交得出的那一份**（`ExportReport::conflicts`），界面不另比一遍。
+    // 这个库收敛成两份，只改其中一份：屏上点名的得是**那一份**，没动过的那份不许混进来。
+    let (_库, mut 现场, 导出去) = 导过一趟("gui-stages-导出点名");
+    let ctx = headless::context();
+    let 写出来的 = 导出去的文件(&导出去);
+    assert_eq!(写出来的.len(), 2, "这个库横跨两个平台：{写出来的:?}");
+    let (动过的, 没动的) = (&写出来的[0], &写出来的[1]);
+    let 手改的 = 手改一行(动过的);
+
+    现场.导出();
+
+    assert_eq!(
+        fs::read_to_string(动过的).expect("读得出"),
+        手改的,
+        "没有静默覆盖：手改的那一行还在",
+    );
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        屏上.contains(&动过的.display().to_string()),
+        "屏上没点名被动过的那一份：\n{屏上}",
+    );
+    assert!(
+        !屏上.contains(&没动的.display().to_string()),
+        "没人动过的那一份也被点了名：\n{屏上}",
+    );
+    // **为什么没写也画在那一份底下**：「有人在外面改过」与「工具从没见过、可能就是原件」
+    // 要人去看的东西不一样。
+    assert!(
+        屏上.contains("有人在工具外面改过它"),
+        "点了名却没说为什么没写：\n{屏上}",
+    );
+}
+
+#[test]
+fn 看过之后按一下我看过了照写_那几份真的被写过去了() {
+    // 验收第 2 条：屏上有一颗「我看过了，照写」，**真点一下**（指针事件，不是直接调函数），
+    // 那一份就被写过去了。**丢掉手改也得说出口**：照写掉了哪几份，回执里逐份点名
+    // （`ExportReport::forced`——「不静默」说的是不许悄悄发生，不是不许发生）。
+    let (_库, mut 现场, 导出去) = 导过一趟("gui-stages-导出照写");
+    let ctx = headless::context();
+    let 动过的 = 导出去的文件(&导出去)[0].clone();
+    手改一行(&动过的);
+    现场.导出();
+
+    点一下(&ctx, &mut 现场.app, "我看过了，照写");
+    现场.等任务跑完();
+
+    let 现在的 = fs::read_to_string(&动过的).expect("读得出");
+    assert!(
+        !现在的.contains("我后来手加的一行"),
+        "按了照写，手改的那一行却还在：\n{现在的}",
+    );
+    let 回执 = 现场
+        .app
+        .roots()
+        .stages()
+        .notice()
+        .expect("照写那一趟也要说话");
+    assert!(
+        回执.contains(&动过的.display().to_string()),
+        "照写掉了哪一份没说出口：{回执}",
+    );
+    assert!(
+        现场.app.roots().stages().error().is_none(),
+        "照写过去之后还挂着「有几份没写」",
+    );
+    // 任务台历史上看得出**这一趟是照写的**：丢掉手改的那一趟不许与平常那几趟长得一样。
+    // 历史**最近的在前面**（`Board::history`）。
+    let 最后一趟 = 现场.app.tasks().history().first().expect("进了历史");
+    assert!(
+        最后一趟.name.contains("照写"),
+        "历史上看不出这一趟是照写的：{}",
+        最后一趟.name,
+    );
+}
+
+#[test]
+fn 照写那颗按钮不记状态_下一趟撞上同样的事还得再点一次() {
+    // 验收第 3 条。照写丢掉的是人的一次手改，**每次都得当场点**：按过一次之后，
+    // 下一趟平常的导出撞上外面有人动过，照样停下来、照样点名、照样一个字节不写。
+    let (_库, mut 现场, 导出去) = 导过一趟("gui-stages-导出照写不记");
+    let ctx = headless::context();
+    let 动过的 = 导出去的文件(&导出去)[0].clone();
+    手改一行(&动过的);
+    现场.导出();
+    点一下(&ctx, &mut 现场.app, "我看过了，照写");
+    现场.等任务跑完();
+
+    // 又有人在外面动了它，然后人照平常那样点一下导出。
+    let 又改的 = 手改一行(&动过的);
+    现场.导出();
+
+    assert_eq!(
+        fs::read_to_string(&动过的).expect("读得出"),
+        又改的,
+        "上一趟按过照写，这一趟就静默覆盖了——照写被记住了",
+    );
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        屏上.contains(&动过的.display().to_string()),
+        "这一趟没再点名被动过的那一份：\n{屏上}",
+    );
+    assert!(
+        屏上.lines().any(|line| line.trim() == "我看过了，照写"),
+        "照写那颗按钮没再摆出来，人没处当场点：\n{屏上}",
+    );
+    // 「每次都得当场点」这句话**画在屏上**，不只藏在悬停里。
+    assert!(
+        屏上.contains("只管这一趟"),
+        "屏上没说清照写只管这一趟：\n{屏上}",
+    );
+    let 最后一趟 = 现场.app.tasks().history().first().expect("进了历史");
+    assert_eq!(最后一趟.name, "导出", "平常那一趟被记成了照写");
+}
+
+#[test]
+fn 没人动过任何文件时_导出一路走完不多问一句() {
+    // 验收第 4 条：**默认一个字不变**。没人动过的时候不摆照写那颗按钮、不挂红字，
+    // 点一下导出就是一趟——不多一次点击。
+    let (_库, mut 现场, _导出去) = 导过一趟("gui-stages-导出不多问");
+    let ctx = headless::context();
+    现场.导出();
+
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        !屏上.lines().any(|line| line.trim() == "我看过了，照写"),
+        "没人动过却摆出了照写那颗按钮：\n{屏上}",
+    );
+    assert!(
+        现场.app.roots().stages().error().is_none(),
+        "没人动过却挂着一句红字",
+    );
+    let 那一句 = 现场.app.roots().stages().notice().expect("跑完了要说话");
+    assert!(那一句.contains("写进 2 份"), "两份都该写出去：{那一句}");
+    // **点两下就是两趟**，每一趟都一路走完：没有哪一趟停下来等人再点一次。
+    let 历史 = 现场.app.tasks().history();
+    assert_eq!(历史.len(), 3, "扫描一趟、导出两趟：{历史:?}");
+    for record in 历史.iter().filter(|record| record.name.starts_with("导出")) {
+        assert_eq!(record.name, "导出", "没人动过却排了一趟照写");
+        assert!(
+            matches!(record.ending, Ending::Done(_)),
+            "没人动过的那一趟记成了「{}」",
+            record.ending.render(),
+        );
+    }
+}
+
+#[test]
+fn 停下那一趟不打上次导出的时刻_照写那一趟走完之后那一行的时刻跟着更新() {
+    // 验收第 5、6 条。**不靠挂钟**：时刻戳是秒级的，「导一趟 → 改 → 再导」那条路上
+    // 第二趟有没有重打，同一秒里分不出来。于是让撞上的那一趟就是头一趟：导出目录里
+    // 先躺着一份工具从没见过的文件（那可能就是维护者的原件），这一趟写成了另一份、
+    // 挡下了这一份——**只写了一半，说不上导过了**。
+    let 库 = 建库("gui-stages-导出时刻戳");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    let 导出去 = 现场.工作区.path().join("导出去");
+    现场.选一次导出去哪儿("Pegasus", &导出去);
+    let 原件 = 导出去.join("FC.metadata.pegasus.txt");
+    写(&原件, "# 维护者自己手写的\n".as_bytes());
+
+    现场.导出();
+
+    assert_eq!(
+        导出去的文件(&导出去).len(),
+        2,
+        "没人动过的那一份该照常写出去",
+    );
+    assert_eq!(
+        fs::read_to_string(&原件).expect("读得出"),
+        "# 维护者自己手写的\n",
+        "没有静默覆盖：原件还在",
+    );
+    assert_eq!(
+        现场.app.site().catalog.exported_at().expect("读得出"),
+        None,
+        "停下那一趟打了「上次导出」的时刻戳——只写了一半说不上导过了",
+    );
+    assert!(
+        现场.导出那一行().render().contains("还没跑过"),
+        "{}",
+        现场.导出那一行().render(),
+    );
+
+    点一下(&ctx, &mut 现场.app, "我看过了，照写");
+    现场.等任务跑完();
+
+    assert!(
+        现场
+            .app
+            .site()
+            .catalog
+            .exported_at()
+            .expect("读得出")
+            .is_some(),
+        "照写那一趟走完了却没打时刻戳",
+    );
+    let 那一句 = 现场.导出那一行().render();
+    assert!(
+        那一句.contains("上次跑是"),
+        "工序段导出那一行没跟着更新：{那一句}"
+    );
+    // **画在屏上的那一行也跟着变**，不只是数据结构里那一格。
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(屏上.contains(&那一句), "屏上导出那一行还是旧的：\n{屏上}");
 }
 
 #[test]
