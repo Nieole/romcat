@@ -418,7 +418,7 @@ impl Screen {
 
     /// 列一次队列。**一个字节都不读主库**——原料全在中立库与沉淀库里（ADR-0001）。
     pub fn reload(&mut self, site: &Site) {
-        match verdict::Index::load(&site.store, &site.library)
+        match verdict::Index::load(&site.store, &site.library_identity)
             .map_err(|error| format!("沉淀库读不动：{error}"))
             .and_then(|index| {
                 Queue::load(&site.catalog, &index).map_err(|error| format!("中立库读不动：{error}"))
@@ -1311,7 +1311,7 @@ impl Screen {
         match judge(
             &mut site.catalog,
             &mut site.store,
-            &site.library,
+            &site.library_identity,
             key,
             entry,
             accepted,
@@ -1512,7 +1512,7 @@ impl Screen {
             return;
         };
         let scope_keys = vec![item.variant.key.clone()];
-        let decide = match draft.build(&site.library) {
+        let decide = match draft.build(&site.library_identity) {
             Ok(decide) => decide,
             Err(message) => {
                 self.error = Some(message);
@@ -1576,7 +1576,7 @@ impl Screen {
     /// 给一个范围排一次计划。**整批操作按下去走的就是它。**
     fn preview_scope(&mut self, site: &mut Site, scope: &Scope, draft: &Draft) {
         self.applied = None;
-        match draft.build(&site.library).and_then(|decide| {
+        match draft.build(&site.library_identity).and_then(|decide| {
             self.queue
                 .plan_scope(&site.catalog, &site.store, &decide, scope)
                 .map_err(|error| format!("排不出计划：{error}"))
@@ -1592,7 +1592,7 @@ impl Screen {
     /// 排一次计划。**界面上「预览这一批」按下去走的就是它。**
     pub fn preview(&mut self, site: &mut Site, draft: &Draft) {
         self.applied = None;
-        match draft.build(&site.library).and_then(|decide| {
+        match draft.build(&site.library_identity).and_then(|decide| {
             self.queue
                 .plan(&site.catalog, &site.store, &decide)
                 .map_err(|error| format!("排不出计划：{error}"))
@@ -1760,10 +1760,12 @@ impl Screen {
             );
             return;
         };
-        match self
-            .queue
-            .undo(&mut site.catalog, &mut site.store, &site.library, batch)
-        {
+        match self.queue.undo(
+            &mut site.catalog,
+            &mut site.store,
+            &site.library_identity,
+            batch,
+        ) {
             Ok(account) => {
                 self.error = None;
                 self.applied = None;
@@ -1781,10 +1783,12 @@ impl Screen {
         let Some(batch) = self.undone.map(|undone| undone.batch) else {
             return;
         };
-        match self
-            .queue
-            .redo(&mut site.catalog, &mut site.store, &site.library, batch)
-        {
+        match self.queue.redo(
+            &mut site.catalog,
+            &mut site.store,
+            &site.library_identity,
+            batch,
+        ) {
             Ok(account) => {
                 self.error = None;
                 self.undone = None;

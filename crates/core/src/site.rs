@@ -6,9 +6,9 @@
 //!
 //! ## 为什么这三样必须一起开
 //!
-//! 一条**路径锚**记的是「主库『某某』里的某某变体」，而那个「某某」就是中立库的文件名
-//! （[`Slug::text`]）。谁自己另起一个名字，谁裁出来的那批锚就与别处对不上——命令行裁的
-//! 界面看不见，反过来也一样。把「开哪份中立库」「开哪份沉淀库」「这份主库叫什么」捏成
+//! 一条**路径锚**记的是「主库『某某』里的某某变体」，而那个「某某」就是**主库标识**——中立库的文件名
+//! （[`Slug::text`]）。谁自己另起一个标识，谁裁出来的那批锚就与别处对不上——命令行裁的
+//! 界面看不见，反过来也一样。把「开哪份中立库」「开哪份沉淀库」「这份主库的主库标识」捏成
 //! 一个类型，就是不让第二份算法长出来。
 
 use std::path::{Path, PathBuf};
@@ -38,20 +38,20 @@ pub enum SiteError {
     Verdict(#[from] VerdictError),
 }
 
-/// 一份开好的中立库加沉淀库，连这份主库在**裁决**里叫什么名字。
+/// 一份开好的中立库加沉淀库，连这份主库的**主库标识**。
 #[derive(Debug)]
 pub struct Site {
     /// **中立库**：变体、候选、依据、这一轮的识别结论。
     pub catalog: Catalog,
     /// **沉淀库**：裁决落在这里，**不跟中立库走**，删掉中立库重扫也不丢。
     pub store: Store,
-    /// 这份主库在**路径锚**里叫什么名字。
+    /// 这份主库的**主库标识**：**路径锚**与**断点**文件名认的都是它。
     ///
-    /// **它是标识符，不是给人看的那个名字。** 这一串是
+    /// **它不是给人看的名字。** 这一串是
     /// [`Slug::text`](crate::workspace::Slug::text) 折出来的「可读的一半 + 哈希」，
-    /// 也就是中立库的主文件名；人起的那个原名走
+    /// 也就是中立库的主文件名；人起的那个**主库原名**走
     /// [`Catalog::library_name`](crate::catalog::Catalog::library_name)。
-    pub library: String,
+    pub library_identity: String,
 }
 
 impl Site {
@@ -77,9 +77,9 @@ impl Site {
 
     /// 直接开这一份中立库文件。
     ///
-    /// **主库的名字就是它的主文件名**：中立库落在 `工作目录/catalog/{名字}.sqlite3`
+    /// **主库标识就是它的主文件名**：中立库落在 `工作目录/catalog/{主库标识}.sqlite3`
     /// （[`workspace::catalog_path`]），所以这不是猜，是同一条算法反过来走。文件被人改过
-    /// 名字的话名字就跟着变——那时路径锚会记在另一个名字下，`--library` 才是稳的那条路。
+    /// 名字的话标识就跟着变——那时路径锚会记在另一个标识下，`--library` 才是稳的那条路。
     ///
     /// # Errors
     /// 同 [`Site::open`]。
@@ -91,36 +91,36 @@ impl Site {
         if !catalog.exists() {
             return Err(SiteError::NoCatalog(path::display(catalog)));
         }
-        let library = catalog
+        let library_identity = catalog
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
             .ok_or_else(|| SiteError::NotACatalog(path::display(catalog)))?;
-        Self::at(workspace, catalog, library, root)
+        Self::at(workspace, catalog, library_identity, root)
     }
 
     /// 这份现场里**某一个根**的**断点**文件在哪。
     ///
     /// 与 [`workspace::checkpoint_path`] 折出来的**是同一条路径**，只是不再要一个
-    /// [`Slug`]：开完现场的人手上只剩 [`Site::library`]，而它**就是** `Slug::text()`
+    /// [`Slug`]：开完现场的人手上只剩 [`Site::library_identity`]，而它**就是** `Slug::text()`
     /// 交出来的那一串（[`Site::open`] 与 [`Site::open_file`] 两条路都保证，底下那条
     /// 单元测试钉着）。再拿它包一次 `Slug::Named` 会哈希两遍，折出第二个文件名——
     /// 于是界面停下来的那一趟，命令行 `romcat scan --resume` 就接不上了，
     /// 而「命令行裁的界面看得见，反过来也一样」是这个仓库的判据。
     #[must_use]
     pub fn checkpoint_path(&self, workspace: &Path, root_name: &str) -> PathBuf {
-        workspace::checkpoint_path_of(workspace, &self.library, root_name)
+        workspace::checkpoint_path_of(workspace, &self.library_identity, root_name)
     }
 
-    /// 这份主库**给人看的**那个名字——窗口标题、报告抬头写的就是它。
+    /// 这份主库的**主库原名**——窗口标题、报告抬头写的就是它。
     ///
     /// 先问中立库自己记着的原名（[`Catalog::library_name`]，票 01 落进元数据表的那一行；
     /// 读不到那一行时它自己会从文件名截，剥掉哈希后缀）。**只活在内存里的那一份没有
-    /// 文件名可截**，那时退回 [`Self::library`]——`library_name` 在那种库上交出来的是
+    /// 文件名可截**，那时退回 [`Self::library_identity`]——`library_name` 在那种库上交出来的是
     /// 「（内存）」这个占位路径，对人没有任何意义，而合成数据走的正是这条。
     ///
-    /// ## 它**不是** [`Self::library`]
+    /// ## 它**不是** [`Self::library_identity`]
     ///
-    /// 那一个是标识符：[`Slug::text`] 折出来的「可读的一半 + 十六位哈希」，也就是中立库
+    /// 那一个是**主库标识**：[`Slug::text`] 折出来的「可读的一半 + 十六位哈希」，也就是中立库
     /// 的主文件名，**路径锚**与**断点**文件名认的都是它——换一个字，命令行裁的界面就
     /// 看不见了。这一个进不了任何键，也没人拿它去找文件，它只回答「人管这份库叫什么」。
     ///
@@ -129,25 +129,25 @@ impl Site {
     #[must_use]
     pub fn display_name(&self) -> String {
         if self.catalog.file().is_none() {
-            return self.library.clone();
+            return self.library_identity.clone();
         }
         self.catalog.library_name()
     }
 
     /// 一份**全在内存里**的现场。演示与实测走这条，连磁盘都不碰。
     #[must_use]
-    pub fn in_memory(catalog: Catalog, store: Store, library: &str) -> Self {
+    pub fn in_memory(catalog: Catalog, store: Store, library_identity: &str) -> Self {
         Self {
             catalog,
             store,
-            library: library.to_string(),
+            library_identity: library_identity.to_string(),
         }
     }
 
     fn at(
         workspace: &Path,
         catalog: &Path,
-        library: String,
+        library_identity: String,
         root: Option<&Path>,
     ) -> Result<Self, SiteError> {
         if let Some(root) = root {
@@ -160,7 +160,7 @@ impl Site {
         Ok(Self {
             catalog: Catalog::open(catalog)?,
             store: Store::open(&workspace::verdict_store_path(workspace))?,
-            library,
+            library_identity,
         })
     }
 }
@@ -172,10 +172,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 中立库的主文件名就是这份主库的名字() {
-        // `Site::open_file` 靠这条把 `--catalog <文件>` 逆推回主库的名字。它不是猜——
+    fn 中立库的主文件名就是这份主库的主库标识() {
+        // `Site::open_file` 靠这条把 `--catalog <文件>` 逆推回主库标识。它不是猜——
         // `catalog_path` 就是这么拼的。这条一旦漂开，直接开文件裁出来的**路径锚**
-        // 会记在另一个名字下，`--library` 那条路就看不见它们了。
+        // 会记在另一个标识下，`--library` 那条路就看不见它们了。
         let workspace = PathBuf::from("/work");
         for slug in [
             Slug::Named("主库"),
@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn 界面折出来的断点路径与命令行找的是同一个文件() {
-        // 界面手上只有 `Site::library`，命令行手上是 `Slug`。两条路折出两个文件名的话，
+        // 界面手上只有 `Site::library_identity`，命令行手上是 `Slug`。两条路折出两个文件名的话，
         // 界面停下来的那一趟，`romcat scan --resume` 就接不上——而「命令行裁的界面
         // 看得见，反过来也一样」是这个仓库的判据。
         let workspace = PathBuf::from("/work");
@@ -202,7 +202,7 @@ mod tests {
             let site = Site {
                 catalog: Catalog::open_in_memory().expect("开得出"),
                 store: crate::verdict::Store::in_memory().expect("开得出"),
-                library: slug.text(),
+                library_identity: slug.text(),
             };
             for root_name in ["主库", "元数据库", "带 / 斜杠的根名"] {
                 assert_eq!(

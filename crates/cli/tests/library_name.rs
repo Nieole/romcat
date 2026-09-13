@@ -224,7 +224,7 @@ fn 出报告(workspace: &Path, 定位: &[&str]) -> std::process::Output {
 }
 
 #[test]
-fn 报告印得出主库名而不是那串带哈希的文件名() {
+fn 报告印得出主库原名而不是那串带哈希的文件名() {
     // 名字此前只活在人敲过的那行命令里：中立库的文件名是「可读的一段 + 哈希」，
     // 而哈希那半段不可逆。这一条钉住「起的那个名字有个落点，报告里读得回来」。
     let workspace = temp_dir("library-print-workspace");
@@ -250,7 +250,7 @@ fn 没起名字时报告印的是主库根的末级目录名() {
     // 不给 `--library` 时文件名的可读一半只留 ASCII 字母数字，人认不出是哪块盘。
     // 印出来的该是那个目录真正叫什么。
     let workspace = temp_dir("library-print-path-workspace");
-    let 主库 = temp_dir("库名-末级目录");
+    let 主库 = temp_dir("原名-末级目录");
     建_主库(主库.path());
     assert!(扫(workspace.path(), 主库.path(), None).status.success());
 
@@ -271,7 +271,7 @@ fn 没起名字时报告印的是主库根的末级目录名() {
 }
 
 #[test]
-fn 扫描那一趟也印得出主库名() {
+fn 扫描那一趟也印得出主库原名() {
     // 报告印它、`shape` 印它，而**建库那一趟**原先只印中立库的路径——偏偏名字就是在这一刻
     // 被钉死的，此后这条命令再不改它。人在这时候看不见自己建的这份库叫什么，就得回头去
     // 跑一趟 `report` 才确认得了（挂单 `Q369`）。

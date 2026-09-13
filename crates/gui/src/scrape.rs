@@ -766,7 +766,7 @@ fn run(
     // **匹配裁决读不到就停下，不降级成「没人裁过」。** 当成没裁过跑下去，会把人否定掉
     // 的中文名整片撞回来——那正是沉淀库那条「宁可如实拒绝、绝不将就」要拦的事。
     task.step("摊平匹配裁决")?;
-    let rulings = verdict::MatchIndex::load(&site.store, &site.library)
+    let rulings = verdict::MatchIndex::load(&site.store, &site.library_identity)
         .map_err(|error| format!("沉淀库读不动：{error}"))
         .and_then(|index| {
             scrape::zh::Rulings::resolve(&site.catalog, &index, fuzzy::SOURCE)

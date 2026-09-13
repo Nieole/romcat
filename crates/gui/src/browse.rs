@@ -1385,11 +1385,11 @@ impl Screen {
             if joining { "放进" } else { "拿出" },
             thousands(keys.len() as u64),
         );
-        let library = site.library.clone();
+        let library_identity = site.library_identity.clone();
         let name = name.to_string();
         self.collecting = Some(match site.catalog.read_only() {
             Ok(reader) => tasks.queue(title, move |task| {
-                collection::plan(&reader, &library, &name, &keys, joining, task)
+                collection::plan(&reader, &library_identity, &name, &keys, joining, task)
                     .map(|planned| Product::Planned(Box::new(planned)))
                     // **被按停不折成一句「失败」**：`CollectionError` 自己认得
                     // 那一支，折过来就是 `Cutoff::Halted`（`collection` 那一处的
@@ -1398,9 +1398,16 @@ impl Screen {
             }),
             // **只活在内存里的库分不出第二份连接**（合成数据走这条），那是意料之中的。
             Err(CatalogError::NotOnDisk { .. }) => tasks.run_here(title, |task| {
-                collection::plan(&site.catalog, &library, &name, &keys, joining, task)
-                    .map(|planned| Product::Planned(Box::new(planned)))
-                    .map_err(Cutoff::from)
+                collection::plan(
+                    &site.catalog,
+                    &library_identity,
+                    &name,
+                    &keys,
+                    joining,
+                    task,
+                )
+                .map(|planned| Product::Planned(Box::new(planned)))
+                .map_err(Cutoff::from)
             }),
             Err(why) => {
                 self.error = Some(format!(

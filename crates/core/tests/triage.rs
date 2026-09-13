@@ -29,7 +29,7 @@ use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::triage::{self, Decide, DecisionSpec, Fanout, Filter, Overrides, Shape, batch};
 use romcat_core::verdict::{self, Anchor, Decision, Facts, Store, Verdict};
 
-const 库名: &str = "小库";
+const 主库标识: &str = "小库";
 
 fn 卡带(fill: u8, payload: usize) -> Vec<u8> {
     let mut data = vec![0u8; 16];
@@ -168,7 +168,7 @@ fn 建_dat() -> DatRepo {
 }
 
 fn 跑识别(现场: &mut 现场) -> identify::Outcome {
-    let index = verdict::Index::load(&现场.store, 库名).expect("读得出沉淀库");
+    let index = verdict::Index::load(&现场.store, 主库标识).expect("读得出沉淀库");
     identify::run(
         &RealFs::new(),
         &mut 现场.catalog,
@@ -187,7 +187,7 @@ fn 跑识别(现场: &mut 现场) -> identify::Outcome {
 }
 
 fn 队列(现场: &现场, filter: &Filter) -> Vec<triage::Item> {
-    let index = verdict::Index::load(&现场.store, 库名).expect("读得出沉淀库");
+    let index = verdict::Index::load(&现场.store, 主库标识).expect("读得出沉淀库");
     let mut items = triage::survey(&现场.catalog, &index, filter)
         .expect("折得出队列")
         .items;
@@ -209,7 +209,7 @@ fn 手工(work: &str) -> Decide {
             ..Overrides::default()
         },
         note: None,
-        library: 库名.to_string(),
+        library: 主库标识.to_string(),
     }
 }
 
@@ -913,7 +913,7 @@ fn 拿不到内容判据时退到路径锚并如实说出来() {
     let 那条 = items.first().expect("队列里该有一条");
     assert_eq!(那条.state, State::NoEvidence);
     assert!(那条.print.is_none(), "压缩镜像这一层拿不到判据");
-    assert!(matches!(那条.anchor(库名), Anchor::Path { .. }));
+    assert!(matches!(那条.anchor(主库标识), Anchor::Path { .. }));
 
     let applied = 裁(&mut 现场, &Filter::default(), &手工("某游戏"));
     assert_eq!((applied.content_anchored, applied.path_anchored), (0, 1));
@@ -941,7 +941,7 @@ fn 忘掉裁决之后重跑识别就回到队列里() {
     跑识别(&mut 现场);
     assert!(队列(&现场, &filter).is_empty());
 
-    let plan = triage::plan_forget(&现场.catalog, &现场.store, &filter, 库名).expect("排得出");
+    let plan = triage::plan_forget(&现场.catalog, &现场.store, &filter, 主库标识).expect("排得出");
     assert_eq!(plan.rows.len(), 2);
     assert_eq!(triage::forget(&mut 现场.store, &plan).expect("忘得掉"), 2);
     跑识别(&mut 现场);
@@ -1115,7 +1115,7 @@ fn 一批盖掉了先前的裁决时撤销把旧的那条放回去() {
         ..Filter::default()
     };
     let 那一条 = 队列(&现场, &filter).remove(0);
-    let 锚 = 那一条.anchor(库名);
+    let 锚 = 那一条.anchor(主库标识);
     let 旧的 = verdict::Verdict::now(
         锚.clone(),
         Decision::Release(verdict::Facts {
@@ -1188,7 +1188,7 @@ fn 几份同内容的拷贝盖掉过旧裁决时撤销照样把它们全都放�
         ..Filter::default()
     };
     // 那条锚上先有一条裁决（换台机器导进来的、或者别处那份拷贝早先裁过的）。
-    let 锚 = 队列(&现场, &filter)[0].anchor(库名);
+    let 锚 = 队列(&现场, &filter)[0].anchor(主库标识);
     let 旧的 = verdict::Verdict::now(
         锚,
         Decision::Release(verdict::Facts {
@@ -1632,7 +1632,7 @@ fn 队列列一次之后换选择器不再读库() {
     // 1.3 秒的卡顿——那样的队列没人用得下去（`triage::queue` 的模块文档）。
     let mut 现场 = 建现场();
     跑识别(&mut 现场);
-    let index = verdict::Index::load(&现场.store, 库名).expect("读得出沉淀库");
+    let index = verdict::Index::load(&现场.store, 主库标识).expect("读得出沉淀库");
     let mut queue = triage::Queue::load(&现场.catalog, &index).expect("列得出队列");
     let 整个队列 = queue.selected().len();
     assert!(整个队列 > 0);
@@ -1659,7 +1659,7 @@ fn 裁完的当场从队列里消失() {
     // ADR-0002 说队列是主界面，而一个裁完了还留在原地的条目会被人再问一遍。
     let mut 现场 = 建现场();
     跑识别(&mut 现场);
-    let index = verdict::Index::load(&现场.store, 库名).expect("读得出沉淀库");
+    let index = verdict::Index::load(&现场.store, 主库标识).expect("读得出沉淀库");
     let mut queue = triage::Queue::load(&现场.catalog, &index).expect("列得出队列");
     let 原有 = queue.pending();
 
@@ -1680,7 +1680,7 @@ fn 裁完的当场从队列里消失() {
         },
         ..triage::Draft::default()
     }
-    .build(库名)
+    .build(主库标识)
     .expect("说得成立");
     let plan = queue
         .plan(&现场.catalog, &现场.store, &decide)
@@ -1738,7 +1738,7 @@ fn 中文离线索引() -> romcat_core::zh::Index {
 /// 跑一趟识别，**中文离线源那一层开着**。
 fn 跑识别带中文源(现场: &mut 现场, index: &romcat_core::zh::Index) {
     let rules = romcat_core::filename::Rules::builtin();
-    let verdicts = verdict::Index::load(&现场.store, 库名).expect("读得出沉淀库");
+    let verdicts = verdict::Index::load(&现场.store, 主库标识).expect("读得出沉淀库");
     identify::run(
         &RealFs::new(),
         &mut 现场.catalog,
@@ -1761,7 +1761,7 @@ fn 跑识别带中文源(现场: &mut 现场, index: &romcat_core::zh::Index) {
 }
 
 fn 列队列(现场: &现场) -> triage::Queue {
-    let index = verdict::Index::load(&现场.store, 库名).expect("读得出沉淀库");
+    let index = verdict::Index::load(&现场.store, 主库标识).expect("读得出沉淀库");
     triage::Queue::load(&现场.catalog, &index).expect("列得出队列")
 }
 
@@ -1977,7 +1977,7 @@ fn 整批通过之后按批整个撤回() {
         pick: Some(1),
         ..triage::Draft::default()
     }
-    .build(库名)
+    .build(主库标识)
     .expect("说得成立");
     let plan = queue
         .plan_scope(&现场.catalog, &现场.store, &decide, &scope)
@@ -1991,7 +1991,7 @@ fn 整批通过之后按批整个撤回() {
 
     // **按批整个撤回**：两边一起回去，当场列队列就看得见它们回来了。
     let undone = queue
-        .undo(&mut 现场.catalog, &mut 现场.store, 库名, applied.batch)
+        .undo(&mut 现场.catalog, &mut 现场.store, 主库标识, applied.batch)
         .expect("撤得掉");
     assert_eq!(
         (undone.batch, undone.removed, undone.kept),
@@ -2029,7 +2029,7 @@ fn 整批拒绝走的是认不出那一档() {
         unknown: true,
         ..triage::Draft::default()
     }
-    .build(库名)
+    .build(主库标识)
     .expect("说得成立");
     let plan = queue
         .plan_scope(&现场.catalog, &现场.store, &decide, &scope)
@@ -2135,7 +2135,7 @@ fn 排完计划之后先裁掉其中一条再落下整份被拒那一条照旧�
         spec: DecisionSpec::Unknown,
         overrides: Overrides::default(),
         note: None,
-        library: 库名.to_string(),
+        library: 主库标识.to_string(),
     };
     let 单条 = queue
         .plan(&现场.catalog, &现场.store, &认不出)
@@ -2278,7 +2278,7 @@ fn 换排序排在内存里而且撤回一批之后那一下还留着() {
         .apply(&mut 现场.catalog, &mut 现场.store, &plan)
         .expect("落得下");
     queue
-        .undo(&mut 现场.catalog, &mut 现场.store, 库名, applied.batch)
+        .undo(&mut 现场.catalog, &mut 现场.store, 主库标识, applied.batch)
         .expect("撤得回");
 
     assert_eq!(

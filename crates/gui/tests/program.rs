@@ -32,11 +32,11 @@ fn 建一份库(workspace: &Path, slug: Slug<'_>) -> std::path::PathBuf {
     path
 }
 
-/// 那份中立库的主文件名——**主库在路径锚里叫什么名字**（`Site::library`）。
+/// 那份中立库的主文件名——这份主库的**主库标识**，路径锚里记的就是它（`Site::library_identity`）。
 ///
-/// 它是**标识符**，带着十六位哈希后缀。屏上与标题上都不该出现它，几条测试拿它做反向
+/// 它带着十六位哈希后缀。屏上与标题上都不该出现它，几条测试拿它做反向
 /// 断言（`Site::display_name` 交出来的是另一个）。
-fn 主库名(catalog: &Path) -> String {
+fn 主库标识(catalog: &Path) -> String {
     catalog
         .file_stem()
         .expect("有主文件名")
@@ -49,7 +49,7 @@ fn 主库名(catalog: &Path) -> String {
 /// 这几份夹具库是拿 `Catalog::open` 建的（没记过名字），于是它就是主文件名剥掉哈希
 /// 后缀剩下的那一半（`workspace::readable_half`，票 01 那条退路）。
 fn 给人看的名字(catalog: &Path) -> String {
-    workspace::readable_half(&主库名(catalog)).to_string()
+    workspace::readable_half(&主库标识(catalog)).to_string()
 }
 
 /// 一个工作目录，连它里头那份现成的库。
@@ -61,7 +61,7 @@ fn 摆好一份库(tag: &str) -> (TempDir, std::path::PathBuf) {
 
 // ——— 开场那一屏 ———
 
-/// 开场那一行要画的三样全在这份库里：**主库名**（元数据表那一行）、**变体数**、
+/// 开场那一行要画的三样全在这份库里：**主库原名**（元数据表那一行）、**变体数**、
 /// **上次扫描时刻**。
 ///
 /// 根指着一块**没挂上的盘**：这三个数住在中立库里，画它们一个字节都不许碰主库
@@ -188,7 +188,7 @@ fn 一个参数都不给看见的是开场列着这个工作目录里的库() {
     let ctx = headless::context();
     let 屏上 = 跑一帧(&ctx, &mut program);
 
-    assert!(屏上.contains("我的主库"), "屏上没有主库名：\n{屏上}");
+    assert!(屏上.contains("我的主库"), "屏上没有主库原名：\n{屏上}");
     // 断的是整段而不是那个数字：`human_time` 画出来的时刻自己就含数字，
     // 光断一个 `'3'` 那条断言几乎不可能红。
     assert!(屏上.contains("3 个变体"), "屏上没有变体数：\n{屏上}");
@@ -199,7 +199,7 @@ fn 一个参数都不给看见的是开场列着这个工作目录里的库() {
     // **画的是给人看的那个名字，不是中立库的主文件名**：那一串带着十六位哈希，
     // 人认不出自己的哪份库（承票 01 的退路，ADR-0023）。
     assert!(
-        !屏上.contains(&主库名(&库文件)),
+        !屏上.contains(&主库标识(&库文件)),
         "屏上画的是带哈希的那一串：\n{屏上}",
     );
 }
@@ -227,7 +227,7 @@ fn 给一份现成的库就走完启动进主窗口() {
         program.window_title(),
     );
     assert!(
-        !program.window_title().contains(&主库名(&库文件)),
+        !program.window_title().contains(&主库标识(&库文件)),
         "标题里写的是带哈希的那一串：{}",
         program.window_title(),
     );
@@ -249,8 +249,8 @@ fn 三种给法开出来的是同一份库() {
     let 工作目录 = temp_dir("gui-program-三种给法");
     let 主库根 = temp_dir("gui-program-主库根");
 
-    // 按名字那份与直接给文件那份**是同一个文件**：两条路开出来的主库名必须一模一样，
-    // 不然同一份库裁出来的**路径锚**会记在两个名字下。
+    // 按名字那份与直接给文件那份**是同一个文件**：两条路开出来的主库标识必须一模一样，
+    // 不然同一份库裁出来的**路径锚**会记在两个标识下。
     let 按名字 = 建一份库(工作目录.path(), Slug::Named("测试库"));
     let 按根 = 建一份库(工作目录.path(), Slug::AtPath(主库根.path()));
 
@@ -289,17 +289,17 @@ fn 三种给法开出来的是同一份库() {
         "给主库根开出来的不是它那一份：{根那条}",
     );
 
-    // 标题里写的是**给人看的**那个名字，于是**标识符另比一次**——两条路指着同一个文件，
-    // `Site::library` 那一串必须一模一样，不然同一份库裁出来的**路径锚**会记在两个名字下
+    // 标题里写的是**给人看的**那个名字，于是**主库标识另比一次**——两条路指着同一个文件，
+    // `Site::library_identity` 那一串必须一模一样，不然同一份库裁出来的**路径锚**会记在两个标识下
     // （这一条本来靠标题捎带验着，标题改画人名之后它得自己站出来）。
-    let 开出的标识符 = |locate: &Locate<'_>| locate.open().expect("开得出现场").library;
+    let 开出的主库标识 = |locate: &Locate<'_>| locate.open().expect("开得出现场").library_identity;
     assert_eq!(
-        开出的标识符(&Locate {
+        开出的主库标识(&Locate {
             library: Some("测试库"),
             workspace: Some(工作目录.path()),
             ..Locate::default()
         }),
-        开出的标识符(&Locate {
+        开出的主库标识(&Locate {
             catalog: Some(&按名字),
             ..Locate::default()
         }),
@@ -375,7 +375,7 @@ fn 在开场上选中一行就进主窗口标题写着那一份库() {
         program.window_title(),
     );
     assert!(
-        !program.window_title().contains(&主库名(&库文件)),
+        !program.window_title().contains(&主库标识(&库文件)),
         "标题里写的是带哈希的那一串：{}",
         program.window_title(),
     );
@@ -521,7 +521,7 @@ fn 开过一份库之后再启动直接进主窗口不经过开场() {
         屏上.contains(&romcat_core::path::display(工作目录.path())),
         "反推出来的不是那份库住的工作目录：\n{屏上}",
     );
-    // 记下的是**完整路径**，不是工作目录、也不是库名。
+    // 记下的是**完整路径**，不是工作目录、也不是主库标识或主库原名。
     assert!(
         std::fs::read_to_string(&记在哪儿)
             .expect("记得下来")
@@ -824,7 +824,7 @@ fn 开场上按下认领新主库看见的是起名那一步() {
 }
 
 #[test]
-fn 起名那一步就拦下这个工作目录里已被占用的主库名() {
+fn 起名那一步就拦下这个工作目录里已被占用的主库标识() {
     // 验收第 3 条：**当场说，而不是等你选完目录、按下开始才发现**。判据是「工作目录里
     // 那个文件在不在」——折文件名那条算法与真落盘时走的是同一条，两处各折一遍的话，
     // 拦得住的与建出来的就不是一回事了。
@@ -873,12 +873,12 @@ fn 摆一块盘(tag: &str) -> TempDir {
 fn 走一趟向导(
     ctx: &egui::Context,
     program: &mut Program,
-    主库名: &str,
+    主库原名: &str,
     根: &Path,
     根名: &str,
 ) -> String {
     点一下(ctx, program, "认领新主库");
-    打字(ctx, program, "主库名，例如", 主库名);
+    打字(ctx, program, "主库名，例如", 主库原名);
     点一下(ctx, program, "下一步");
     打字(
         ctx,
@@ -1166,12 +1166,12 @@ fn 向导建出来的库与命令行扫出来的库一样命令行接得上() {
     .open()
     .expect("命令行按名字开得出向导建的那份库");
 
-    // **同一套路径锚**：`Site::library` 就是中立库的主文件名，裁决记在它名下。
+    // **同一套路径锚**：`Site::library_identity` 就是中立库的主文件名，裁决记在它名下。
     let 库文件 = workspace::catalog_path(工作目录.path(), Slug::Named("我的主库"));
     assert_eq!(
-        site.library,
-        主库名(&库文件),
-        "两条路记出来的路径锚名字不一样"
+        site.library_identity,
+        主库标识(&库文件),
+        "两条路记出来的主库标识不一样"
     );
     // **原名真的落进了元数据表**：不落的话它只活在人刚才敲过的那一下里——文件名折过
     // 一道滤字符、截断、缀哈希，谁也从那串字里认不回来（票 01）。
