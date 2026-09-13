@@ -255,4 +255,5 @@
 - **谁来裁：** 拿主意的人
 - **状态：** settled（第四轮收口，2026-09-09）
 - **落地（2026-09-13）：** ① 由票 `machine-checks-premises/05` 落在 `docs/agents/long-jobs.md`「派审查」一节（`CLAUDE.md` 的 Agent skills 指过去）；② 归票 `machine-checks-premises/02`。
+- **落地（2026-09-14）：** ② 由票 `machine-checks-premises/02` 落成门禁里 `glossary` 那一条（`xtask/src/glossary.rs`），**但落的是代码那一侧，不是上面写的 `.scratch/**/*.md`**：`/grill-with-docs` 把范围收窄成「`crates/` 下新写的标识符与字符串字面量、只用 `_Gate_` 那份缩小词表」，因为票与规格里大量**合法地谈论**禁词（`.scratch/machine-checks-premises/grill.md`「件一」）。于是「没有任何东西在票与规格上跑一遍词表」这一半**仍然没有机器**，留给派活时那句「动手前把你要用的词在词表里过一遍」。
 

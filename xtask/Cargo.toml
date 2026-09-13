@@ -6,8 +6,8 @@
 # 摆在仓库根而不是 `crates/` 下，正是为了让这条界线看得见（这也是 cargo 社区的
 # `xtask` 惯例：一个 workspace 成员 + 一条 `cargo` 别名）。
 #
-# 它自己**在 workspace 里**，于是门禁那几条（fmt / check / clippy / test / doc）照样盖着它——
-# 门禁跑手自己不守门禁是最难查的一类漏。
+# 它自己**在 workspace 里**，于是门禁里排版与编译的那几条（fmt / check / clippy / test / doc）照样盖着它——
+# 门禁跑手自己不守门禁是最难查的一类漏。`glossary` 那条只扫 `crates/` 下的代码，不看它。
 [package]
 name = "xtask"
 description = "门禁跑手：README「开发」一节那几条命令的唯一定义"

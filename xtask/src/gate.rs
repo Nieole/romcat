@@ -17,7 +17,7 @@
 //! 一百多条**而退出码照样是 0**。可 `cargo build --release` 交出去的是 `demo`
 //! **关掉**的那份：三条全带 `--all-features` 就意味着没有任何一条再编译交付的那份配置，
 //! 谁在 `crates/gui/src/` 里写下一处只有开着 `demo` 才编得过的引用，门禁全绿而发版
-//! 当场编不过。`check` 那一条补的正是这一格——它是门禁里**唯一**一条跑在默认特性上的。
+//! 当场编不过。`check` 那一条补的正是这一格——它是门禁里**唯一**一条在默认特性上编整个工作区的。
 //! （票 `parking-3/01` 收尾审查报的第 1 条，票 `parking-3/02` 落的。）
 //!
 //! ## 两档资源
@@ -83,7 +83,7 @@ impl Limits {
 /// 门禁里的一条命令。程序一律是 `cargo`（见 [`cargo`]）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step {
-    /// 这一条叫什么——`fmt` / `check` / `clippy` / `test` / `doc`。
+    /// 这一条叫什么——`fmt` / `glossary` / `check` / `clippy` / `test` / `doc`。
     pub name: &'static str,
     /// 递给 `cargo` 的参数，按顺序。
     pub args: Vec<String>,
@@ -140,11 +140,32 @@ pub fn cargo() -> OsString {
 pub fn steps(limits: Limits) -> Vec<Step> {
     vec![
         fmt(),
+        glossary(),
         check(limits),
         clippy(limits),
         test(limits),
         doc(limits),
     ]
+}
+
+/// 新写的代码不撞词表 `_Gate_`。检查本体在 [`crate::glossary`]，这一条只是递归起一趟
+/// `cargo xtask glossary`。
+///
+/// ⚠️ **形状仍然是一条 cargo 子进程**：走 `.cargo/config.toml` 那条 `xtask` 别名，
+/// 与别的几条一样从 [`Step::command_in`] 起，门禁里没有第二种起法。别名只在仓库里认得，
+/// 门禁起它时工作目录正是仓库根。
+///
+/// 不吃 `-j`：它什么都不编（跑到这一条时 xtask 早已编好），限流那一档在这条上没有开关可递。
+/// 排在 `fmt` 后面、编译那几条前面：它跑几条 git、读几份改过的文件，是秒级的。
+///
+/// 它扫什么、不扫什么、在 `main` 上与 CI 上各看得见什么、**拦不住什么**，都写在
+/// [`crate::glossary`] 的模块文档里。
+fn glossary() -> Step {
+    Step {
+        name: "glossary",
+        args: ["xtask", "glossary"].map(String::from).to_vec(),
+        env: Vec::new(),
+    }
 }
 
 /// 排版归机器管。`cargo fmt` 不吃 `-j`，限流那一档在这条上没有开关可递。

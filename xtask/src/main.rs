@@ -1,9 +1,10 @@
-//! `cargo xtask` 的入口。眼下只有一条子命令：`gate`。
+//! `cargo xtask` 的入口：`gate`，以及门禁里扫词表那一条单独的入口 `glossary`。
 //!
 //! ```text
 //! cargo xtask gate                 # 跑门禁，按机器给的资源跑
 //! cargo xtask gate --throttle      # 退回限流那一档（-j 1、--test-threads=2）
 //! cargo xtask gate --list          # 只打印它会跑哪几条，一条都不跑
+//! cargo xtask glossary             # 只跑门禁里扫词表的那一条
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -11,6 +12,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use xtask::gate::{self, Limits};
+use xtask::glossary::{self, Place, Scope};
 
 /// 仓库里的杂活。
 #[derive(Debug, Parser)]
@@ -21,11 +23,15 @@ struct Cli {
     command: Job,
 }
 
-/// 眼下只有门禁一件。
+/// 门禁，以及门禁里扫词表那一条单独的入口。
 #[derive(Debug, Subcommand)]
 enum Job {
-    /// 跑门禁：排版、默认特性编得过、clippy、全量测试、文档。
+    /// 跑门禁：排版、词表、默认特性编得过、clippy、全量测试、文档。
     Gate(GateArgs),
+    /// 扫新写的代码撞没撞词表 `_Gate_` 的词。门禁里 `glossary` 那一条跑的就是它。
+    ///
+    /// 范围是相对 `main` 的 merge base 以来的改动，含未提交的；站在 `main` 上时只看未提交的。
+    Glossary,
 }
 
 /// `cargo xtask gate` 的开关。
@@ -61,7 +67,76 @@ struct GateArgs {
 fn main() -> ExitCode {
     match Cli::parse().command {
         Job::Gate(args) => gate_job(&args),
+        Job::Glossary => glossary_job(),
     }
+}
+
+/// 扫一趟新写的代码，把范围与每一处命中印出来。
+///
+/// 站在哪个目录跑，扫的就是那个目录所在的仓库——门禁起它时把工作目录设成了仓库根。
+fn glossary_job() -> ExitCode {
+    let dir = std::env::current_dir().unwrap_or_else(|_| repo_root());
+    let report = match glossary::scan(&dir) {
+        Ok(report) => report,
+        Err(err) => {
+            eprintln!("词表那一条跑不下去：{err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!(
+        "词表：`CONTEXT.md` 里读出 {} 个 `_Gate_` 词，每一个都在它那条 `_Avoid_` 里。",
+        report.gate_words
+    );
+    match &report.scope {
+        // ⭐ **跳过要说成跳过。** 退 0 是因为拿不到历史不是谁写错了什么，
+        // 但这句话得明说一行都没扫——否则一个绿就会被读成「扫过了、干净」。
+        Scope::Skipped { reason } => {
+            println!("跳过：{reason}。");
+            println!("这一趟一行代码都没扫——不是扫过了没撞上。");
+            return ExitCode::SUCCESS;
+        }
+        Scope::SinceMergeBase {
+            base,
+            merge_base,
+            on_base: true,
+        } => println!(
+            "范围：merge base 就是 `HEAD`（{merge_base}）——站在 `{base}` 上，\
+             或者这条分支还没有自己的提交——于是只看未提交的改动。"
+        ),
+        Scope::SinceMergeBase {
+            base, merge_base, ..
+        } => println!("范围：相对 `{base}` 的 merge base（{merge_base}）以来的改动，含未提交的。"),
+    }
+    println!(
+        "扫了 `crates/` 下 {} 份 `.rs` 里新写的 {} 行：标识符与字符串字面量，不含注释。",
+        report.files, report.lines
+    );
+    if report.lines == 0 {
+        // 一行都没扫时印「没撞上」，会被读成扫过了、干净。
+        println!("没有新写的代码可扫。");
+        return ExitCode::SUCCESS;
+    }
+    if report.findings.is_empty() {
+        println!("没撞上。");
+        return ExitCode::SUCCESS;
+    }
+    for finding in &report.findings {
+        let hit = &finding.hit;
+        let place = match hit.place {
+            Place::Identifier => "标识符",
+            Place::Literal => "字符串字面量",
+        };
+        println!(
+            "{}:{}  {place}里撞上「{}」→ 该用「{}」（CONTEXT.md:{}）",
+            finding.path, hit.line, hit.gate.word, hit.gate.term, hit.gate.line
+        );
+        println!("    {}", finding.excerpt);
+    }
+    println!(
+        "红：{} 处新写的代码撞上词表 `_Gate_`。改的是名字或屏上的话；注释里谈论这个词不算撞。",
+        report.findings.len()
+    );
+    ExitCode::FAILURE
 }
 
 /// 跑（或者只打印）门禁那几条。
