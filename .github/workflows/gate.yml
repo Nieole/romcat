@@ -1,6 +1,6 @@
 # **门禁。** 推一次代码就跑，跑的是仓库里那一条子命令 `cargo xtask gate`。
 #
-# ⭐ **这份文件里一条门禁命令都不写。** 那几条（fmt / check / clippy / test / doc）的唯一定义在
+# ⭐ **这份文件里一条门禁命令都不写。** 那几条（fmt / glossary / check / clippy / test / doc）的唯一定义在
 # `xtask/src/gate.rs`，本地与 CI 调的是同一句话——把命令抄一份到这里，就等于给自己造了
 # 一处会慢慢漂的第二定义，而「我这儿绿的、CI 红的」这种分歧只能靠猜。
 # 想知道它跑哪几条：`cargo xtask gate --list`。
@@ -32,7 +32,12 @@ jobs:
     name: cargo xtask gate
     runs-on: ubuntu-latest
     steps:
+      # ⚠️ **`fetch-depth: 0` 是给门禁里 `glossary` 那一条的**：它比的是相对 `main` 的 merge base，
+      # 默认的浅克隆只取 1 层历史、不取 `origin/main`，那时它只能跳过。它在 CI 上各看得见什么
+      # （推到 `main` 的那一趟一行都不扫），见 `xtask/src/glossary.rs` 的模块文档。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # ⚠️ **这里不装任何系统库，是量过的，不是漏了。** `romcat-gui` 用 egui/eframe，
       # 直觉上会以为 Linux 上要一串 X11 / wayland / xkbcommon 的 dev 包。实测本机

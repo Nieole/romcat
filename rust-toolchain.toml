@@ -35,7 +35,8 @@
 [toolchain]
 channel = "1.98.1"
 # 门禁那几条里 `fmt` 要 rustfmt、`clippy` 要 clippy，两个都不是 `minimal` 自带的，
-# 在这儿点名。`doc` 那条只要 rustdoc（随 rustc 走），`test` 只要 cargo。
+# 在这儿点名。`doc` 那条只要 rustdoc（随 rustc 走），`test` 只要 cargo，
+# `glossary` 那条要的是 git——不是工具链组件，不归这份文件管。
 components = ["rustfmt", "clippy"]
 # `minimal` 而不是默认的 `default`：差的那一份是 `rust-docs`（离线的标准库文档，
 # 几十 MB），门禁哪一条都用不到它。少下这一份，是上面那笔「每台机器多下一次」
