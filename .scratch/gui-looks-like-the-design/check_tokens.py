@@ -1,14 +1,18 @@
-"""核对设计稿 prototype.html 顶部的 CSS 变量与 tokens.toml 是否一致。
+"""核对设计稿 prototype.html 顶部的 CSS 变量与令牌是否一致。
 
-用法：python3 check_tokens.py    （在本目录下运行；不一致时列出差异并以 1 退出）
+令牌全仓库只有一份：crates/gui/src/tokens.toml——界面编进二进制的就是它。设计稿目录里
+不留第二份：两份各改各的，正是这份脚本要防的事。
+
+用法：python3 check_tokens.py    （在哪个目录下运行都行；不一致时列出差异并以 1 退出）
 """
 import re
 import sys
 import tomllib
 from pathlib import Path
 
-here = Path(__file__).parent
-tokens = tomllib.loads((here / "tokens.toml").read_text(encoding="utf-8"))
+here = Path(__file__).resolve().parent
+repo = here.parents[1]
+tokens = tomllib.loads((repo / "crates" / "gui" / "src" / "tokens.toml").read_text(encoding="utf-8"))
 html = (here / "prototype.html").read_text(encoding="utf-8")
 
 

@@ -1,11 +1,18 @@
 # romcat 界面的颜色与尺寸参数（令牌）
 #
-# 这份文件是设计稿与 egui 实现共用的唯一来源：
-# - 设计稿 prototype.html 顶部的 CSS 变量必须与这里一致（check_tokens.py 逐项比对）；
-# - egui 那边的两套 Visuals、字号、间距、圆角照这里取值，门禁里用一条测试逐项比对。
-# 改颜色只改这里，再同步两边；两边各改各的，门禁会报红。
+# **数据不是代码**：与核心库的 platforms.toml / profiles.toml / priorities.toml 同一条纪律，
+# `include_str!` 编进二进制（crates/gui/src/tokens.rs），运行时不读盘。
 #
-# 颜色一律写 #RRGGBB（半透明的写 #RRGGBBAA）。键名与 CSS 变量同名（去掉前缀 --）。
+# 这份文件是设计稿与界面共用的**唯一**来源，全仓库只有这一份：
+# - 界面：crates/gui/src/look.rs 从这里装亮暗两套 Visuals 与字号、圆角，那儿的测试逐项比对，
+#   偏一项门禁就红；
+# - 设计稿：.scratch/gui-looks-like-the-design/check_tokens.py 读这一份，核对 prototype.html
+#   顶部的 CSS 变量。
+# 改颜色只改这里；再跑一遍 check_tokens.py，把设计稿那边对齐。
+#
+# 读得严：少一项、多一项、颜色写法不对，程序当场报错并说出是哪一项。
+# 颜色一律写 #RRGGBB（半透明的写 #RRGGBBAA，未预乘）。键名与 CSS 变量同名（去掉前缀 --）。
+# 键名是稳定接口：后面每一屏都按这些名字取值，改名等于改接口。
 
 version = 1
 
@@ -80,6 +87,13 @@ MD  = "#2B2F3A"
 PS2 = "#2F4DA0"
 NGC = "#6B4FB8"
 other = "#555555"         # 表里没有的平台
+
+# ── 视频格上的播放标：两套主题共用 ──
+# 它压在一帧视频画面上，不压在界面底色上，画面多亮多暗与主题无关。
+# 设计稿里没有这两格的 CSS 变量，check_tokens.py 不核它们。
+[color.video]
+shade = "#00000050"       # 压在首帧上的那层半透明底
+mark  = "#FFFFFF"         # 底上的 ▶
 
 # ── 尺寸（逻辑像素，egui 的 points） ──────────────────────
 [radius]

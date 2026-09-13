@@ -63,6 +63,11 @@ eframe.workspace = true
 egui.workspace = true
 egui_extras.workspace = true
 romcat-core.workspace = true
+# **令牌**（`src/tokens.toml`：两套主题的颜色、平台色、字号、圆角、间距、版式尺寸）是数据
+# 不是代码，与核心库的 `platforms.toml` / `profiles.toml` 同一条纪律：编进二进制、读得严。
+# 两个都已经在编译图里（核心库读那几份清单用的就是它们），这里不多编一行。
+serde.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 # **只有测试用它**：媒体那几条要造真的 png 才验得了「画得出来、纵横比不歪」。

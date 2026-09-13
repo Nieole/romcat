@@ -320,7 +320,8 @@ impl Gallery {
         // （票 `gui-redesign/12` 验收第 7 条）。
         let focused = response.has_focus();
         let painter = ui.painter();
-        let radius = 4.0;
+        let tokens = crate::tokens::Tokens::builtin();
+        let radius = f32::from(tokens.radius.small);
         painter.rect_filled(rect, radius, visuals.extreme_bg_color);
 
         let look = self.look(item);
@@ -362,16 +363,17 @@ impl Gallery {
         }
 
         if preview::is_video(&item.ext) {
-            // **播放标**：原型 `.thumb.vid::after` 那一层半透明黑底加一个 ▶。
+            // **播放标**：一层半透明底加一个 ▶，两个颜色都取令牌的 `[color.video]`。
             // 它压在首帧上，于是「这是段视频」不必读文字就看得出来。
             let painter = ui.painter();
-            painter.rect_filled(rect, radius, egui::Color32::from_black_alpha(80));
+            let mark = &tokens.color.video;
+            painter.rect_filled(rect, radius, mark.shade);
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 "▶",
                 egui::FontId::proportional(18.0),
-                egui::Color32::WHITE,
+                mark.mark,
             );
         }
 

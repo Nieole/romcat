@@ -3000,6 +3000,8 @@ dependencies = [
  "egui_extras",
  "image",
  "romcat-core",
+ "serde",
+ "toml",
 ]
 
 [[package]]

@@ -1,4 +1,42 @@
-//! 五屏共用的**观感基线**：置信度四档标成什么样、键盘焦点长什么样。
+//! 五屏共用的**观感基线**：两套主题的颜色与字号、置信度四档标成什么样、键盘焦点长什么样。
+//!
+//! ## 颜色与字号只从令牌来
+//!
+//! 亮暗两套 `Visuals` 与字号表由 [`install`] 从**令牌**（[`crate::tokens`]，同目录的
+//! `tokens.toml`）装上去，**每一个颜色都取自令牌**：底色、描边、字色、选中、焦点、警告与错误。
+//! `Visuals` 里没有槽位的颜色：置信度四档由 [`tier_color`] 按主题挑；平台色、视频播放标这类
+//! 两套主题共用、没有映射可言的，直接问令牌（[`Tokens::builtin`] 的 `color.platform`、
+//! `color.video`）。**界面里别处不写一个颜色**，要颜色就问 `ui.visuals()`、[`tier_color`]
+//! 或令牌。
+//!
+//! 槽位怎么对上令牌：
+//!
+//! | 令牌 | egui 槽位 |
+//! |---|---|
+//! | `win` | `panel_fill`（窗口底色） |
+//! | `panel` | `window_fill`；不可交互、未激活两档的控件底；展开那一档的底 |
+//! | `panel-2` | `faint_bg_color`（表头、条纹行） |
+//! | `sunken` | `extreme_bg_color`、文本框底、代码底；悬停、按下两档的控件底；展开那一档的弱底 |
+//! | `ink` | 按钮字；悬停、按下、展开三档的字——也就是**强调字**（`strong_text_color`） |
+//! | `ink-2` | 正文（不可交互那一档的字） |
+//! | `ink-3` | 弱字（`weak_text_color`）、悬停那一档的描边 |
+//! | `ink-4` | 输入法组字里没在转换的那几段下划线 |
+//! | `line` | 分隔线（不可交互那一档的描边） |
+//! | `line-2` | 未激活、展开两档的描边，弹窗描边 |
+//! | `accent` | 选中的字与描边、**键盘焦点**、文本光标、组字下划线 |
+//! | `accent-soft` | 选中的底色 |
+//! | `accent-ink` | 链接 |
+//! | `mid` / `lo` | `warn_fg_color` / `error_fg_color` |
+//!
+//! **正文是 `ink-2`、强调字是 `ink`**：中文没有粗体（票 `gui-looks-like-the-design/02`），
+//! 一句纯中文的小标题与正文之间只剩颜色这一层差别——两个都给 `ink`，那一层也没了。
+//!
+//! **只换颜色，线宽一个点都不动**（理由见下面「键盘焦点」一节）；屏的版式由各屏自己的票重排。
+//! 圆角照令牌：控件 `medium`，窗口、弹窗与菜单 `large`。阴影不在令牌里，照 egui 原样。
+//!
+//! 字号六档：egui 自带五档照它的名字对上（`Small` 说明文字、`Body` 与 `Button` 正文、
+//! `Heading` 页面标题、`Monospace` 与正文同大），另三档挂成具名档 [`CAPTION`] / [`TITLE`] /
+//! [`HERO`]，取法是 `egui::TextStyle::Name(look::TITLE.into())`。
 //!
 //! 这一层里一条领域判断都没有（ADR-0005）。「哪一档」是核心库说的
 //! （[`Tier`]），「叫什么」也是核心库说的（[`Tier::label`]）；这儿只回答一个纯画法的
@@ -36,49 +74,160 @@
 //! （`Style::button_style`），加宽会让控件在得到焦点的那一帧缩一下——焦点在控件之间跳的
 //! 时候，整排按钮跟着抖。
 
+use egui::Color32;
 use romcat_core::catalog::identify::Tier;
 
-/// 色条多宽，点。行左边缘那一条，照原型 `prototype.html` 里 `.conf` 那条竖线。
-const BAR: f32 = 3.0;
+use crate::tokens::{Palette, Tokens};
 
 /// 把这个窗口的**观感基线**装上去。开窗那一路与不开窗跑帧那一路走的是同一句
 /// （[`crate::app::App::ui`] 每次开头问一遍，只装一次）。
 ///
-/// **亮暗两套主题都装**：`all_styles_mut` 一次改两份，不然人换一次系统主题，
-/// 焦点就悄悄退回默认那个几乎看不见的样子。
+/// **亮暗两套主题都装**，各取令牌里的那一套：只装一套的话，人换一次系统主题，
+/// 界面就悄悄退回 egui 默认的那一套颜色。
 pub fn install(ctx: &egui::Context) {
-    ctx.all_styles_mut(|style| {
-        // **焦点用主题自己的强调色**，与 `TextEdit` 拿到焦点时的那一圈同出一处。
-        let accent = style.visuals.selection.stroke.color;
-        style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, accent);
-    });
+    install_tokens(ctx, Tokens::builtin());
+}
+
+/// 拿**这一份**令牌装。拆出来是为了让测试拿**改过的**令牌走一遍整条装配：哪一格写死了
+/// 颜色——哪怕与令牌同值——改令牌时它不跟着变，测试就抓得到。
+fn install_tokens(ctx: &egui::Context, tokens: &Tokens) {
+    for theme in [egui::Theme::Dark, egui::Theme::Light] {
+        ctx.style_mut_of(theme, |style| {
+            style.visuals = visuals(tokens, theme);
+            style.text_styles = text_styles(tokens);
+        });
+    }
+}
+
+/// 具名字号「角标、分组标题」（令牌 `size-caption`）在 egui 里的名字。
+///
+/// 令牌六档里 egui 没有现成名字的三档挂成具名档，名字与令牌里的键同名（去掉 `size-`）。
+/// 取法是 `egui::TextStyle::Name(look::CAPTION.into())`——**用这三个常量，别手写字符串**：
+/// 拼错的名字 egui 要到解析那一档字号时才 panic。
+pub const CAPTION: &str = "caption";
+/// 具名字号「卡片标题、对话框标题」（令牌 `size-title`），取法同 [`CAPTION`]。
+pub const TITLE: &str = "title";
+/// 具名字号「作品详情页的大标题」（令牌 `size-hero`），取法同 [`CAPTION`]。
+pub const HERO: &str = "hero";
+
+/// 字号：**整张换掉**，不在 egui 那张表上增补——留着 egui 自带的哪一档，屏上就有一个字号
+/// 不从令牌来。
+///
+/// egui 自带五档照它的名字对上令牌：`Small` 是说明文字、`Body` 与 `Button` 是正文、
+/// `Heading` 是页面标题、`Monospace` 跟正文一样大（等宽只换字族，[`crate::font::mono`]
+/// 也是这么做的）。
+fn text_styles(tokens: &Tokens) -> std::collections::BTreeMap<egui::TextStyle, egui::FontId> {
+    use egui::FontFamily::{Monospace, Proportional};
+    use egui::{FontId, TextStyle};
+    let font = &tokens.font;
+    [
+        (TextStyle::Small, FontId::new(font.size_small, Proportional)),
+        (TextStyle::Body, FontId::new(font.size_body, Proportional)),
+        (TextStyle::Button, FontId::new(font.size_body, Proportional)),
+        (
+            TextStyle::Heading,
+            FontId::new(font.size_page, Proportional),
+        ),
+        (TextStyle::Monospace, FontId::new(font.size_body, Monospace)),
+        (
+            TextStyle::Name(CAPTION.into()),
+            FontId::new(font.size_caption, Proportional),
+        ),
+        (
+            TextStyle::Name(TITLE.into()),
+            FontId::new(font.size_title, Proportional),
+        ),
+        (
+            TextStyle::Name(HERO.into()),
+            FontId::new(font.size_hero, Proportional),
+        ),
+    ]
+    .into()
+}
+
+/// 那一套主题的 `Visuals`：**每一个颜色都取自令牌**；不是颜色的（线宽、手柄形状……）
+/// 照 egui 原样。
+///
+/// **线宽一个点都不动。** egui 把描边宽度从按钮的内边距里扣，而「不画框的那一档」只留
+/// 内边距不画描边——给哪一档加宽，可选标签就会在悬停前后差一个点。
+fn visuals(tokens: &Tokens, theme: egui::Theme) -> egui::Visuals {
+    let p = tokens.color.theme(theme);
+    let mut v = theme.default_visuals();
+    let medium = egui::CornerRadius::same(tokens.radius.medium);
+    let large = egui::CornerRadius::same(tokens.radius.large);
+
+    // 每一档：底色、弱底色（按钮底）、描边、前景（字）。
+    let paint = |widget: &mut egui::style::WidgetVisuals,
+                 [bg, weak_bg, stroke, fg]: [Color32; 4]| {
+        widget.bg_fill = bg;
+        widget.weak_bg_fill = weak_bg;
+        widget.bg_stroke.color = stroke;
+        widget.fg_stroke.color = fg;
+        widget.corner_radius = medium;
+    };
+    paint(
+        &mut v.widgets.noninteractive,
+        [p.panel, p.panel, p.line, p.ink_2],
+    );
+    paint(&mut v.widgets.inactive, [p.panel, p.panel, p.line_2, p.ink]);
+    paint(&mut v.widgets.hovered, [p.sunken, p.sunken, p.ink_3, p.ink]);
+    paint(&mut v.widgets.active, [p.sunken, p.sunken, p.accent, p.ink]);
+    paint(&mut v.widgets.open, [p.panel, p.sunken, p.line_2, p.ink]);
+
+    v.override_text_color = None;
+    v.weak_text_color = Some(p.ink_3);
+    v.selection.bg_fill = p.accent_soft;
+    v.selection.stroke.color = p.accent;
+    v.ime_composition.active_underline_stroke.color = p.accent;
+    v.ime_composition.inactive_underline_stroke.color = p.ink_4;
+    v.hyperlink_color = p.accent_ink;
+    v.faint_bg_color = p.panel_2;
+    v.extreme_bg_color = p.sunken;
+    v.text_edit_bg_color = Some(p.sunken);
+    v.code_bg_color = p.sunken;
+    v.warn_fg_color = p.mid;
+    v.error_fg_color = p.lo;
+    v.window_corner_radius = large;
+    v.window_fill = p.panel;
+    v.window_stroke.color = p.line_2;
+    v.menu_corner_radius = large;
+    v.panel_fill = p.win;
+    v.text_cursor.stroke.color = p.accent;
+    v
 }
 
 /// **置信度四档**画成什么颜色。**全窗口只有这一处回答这个问题。**
 ///
-/// 颜色从 `Visuals` 里取而不是写死：亮色与暗色主题下同一串 RGB 不是同一个可读性。
+/// 颜色取自令牌的 `hi` / `mid` / `lo` / `none`，按 `visuals` 是哪一套主题挑那一套：
+/// 亮色与暗色主题下同一串 RGB 不是同一个可读性，令牌两套各配一份。
 ///
-/// **高置信取的是 `selection.stroke` 而不是 `selection.bg_fill`**：后者是给背景用的，
-/// 当前景色用在暗色主题上对比度只有 **2.33**、亮色主题上 **1.55**（WCAG AA 要 4.5），
-/// 「高置信」三个字几乎读不出来；换成前者是 **12.41 / 7.81**。
-/// 这一条正是「颜色不是唯一线索」的另一半——字得先读得出来才算线索。
+/// **不再借 egui 的 `selection` / `warn` / `error` / `weak`**：那几个是别的意思的颜色——
+/// 从前高置信借的是选中色，于是改一处选中色，高置信就悄悄跟着变。
 #[must_use]
-pub fn tier_color(tier: Tier, visuals: &egui::Visuals) -> egui::Color32 {
+pub fn tier_color(tier: Tier, visuals: &egui::Visuals) -> Color32 {
+    let theme = egui::Theme::from_dark_mode(visuals.dark_mode);
+    tier_color_in(Tokens::builtin().color.theme(theme), tier)
+}
+
+/// 那一档在这一套颜色里取哪一个。拆出来是为了让测试拿**改过的**令牌来问：
+/// 这里写死一个颜色（哪怕与令牌同值），改令牌时它不跟着变，测试就抓得到。
+fn tier_color_in(palette: &Palette, tier: Tier) -> Color32 {
     match tier {
-        Tier::High => visuals.selection.stroke.color,
-        Tier::Medium => visuals.warn_fg_color,
-        Tier::Low => visuals.error_fg_color,
-        Tier::Unidentified => visuals.weak_text_color(),
+        Tier::High => palette.hi,
+        Tier::Medium => palette.mid,
+        Tier::Low => palette.lo,
+        Tier::Unidentified => palette.none,
     }
 }
 
-/// 行左边缘那条**置信度色条**：宽 3 点（`BAR`）、与一行正文一样高。
+/// 行左边缘那条**置信度色条**：宽取令牌 `tier-bar`、与一行正文一样高。
 ///
 /// 它**从不单独出现**——摆它的地方旁边一定跟着 [`tier_label`] 或那个词本身
 /// （[`tier_tag`] 把两样一起给出来）。
 pub fn tier_bar(ui: &mut egui::Ui, tier: Tier) {
     let height = ui.text_style_height(&egui::TextStyle::Body);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(BAR, height), egui::Sense::hover());
+    let width = Tokens::builtin().layout.tier_bar;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
     ui.painter()
         .rect_filled(rect, 1.0, tier_color(tier, ui.visuals()));
 }
@@ -136,6 +285,391 @@ pub fn focus_ring(ctx: &egui::Context, visible: egui::Rect, response: &egui::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::headless;
+    use egui::{CornerRadius, Theme};
+
+    /// 一处与令牌对不上的地方：`(令牌键, 哪儿对不上)`。
+    type 偏离 = (String, String);
+
+    /// 令牌里**界面还没有一处用上**的颜色：页面背景（设计稿自己用）、主按钮、四档的浅底、
+    /// 对话框遮罩——egui 的 `Visuals` 里没有它们的槽位，而画它们的那几屏还没照稿重排。
+    /// 哪一屏第一个用上它，就从这张单子里划掉（下面那条变异测试会提醒）。
+    const NOT_YET_USED: &[&str] = &[
+        "ground",
+        "accent-hover",
+        "on-accent",
+        "hi-soft",
+        "mid-soft",
+        "lo-soft",
+        "none-soft",
+        "scrim",
+    ];
+
+    /// 这套主题下**有映射的每一个颜色**与令牌逐项比，对不上的那几项：`visuals` 的每个颜色槽位，
+    /// 加上 `四档`（置信度四档各取哪个颜色）。平台色与播放标直接读令牌、没有映射可接错，
+    /// 不在这里比。
+    ///
+    /// **`Visuals` 整个拆开**（不写 `..`）：egui 升版多长一个字段，这里当场编不过，
+    /// 新长出来的颜色槽位没法悄悄留在 egui 的默认值上。不比的字段逐个写明为什么不比。
+    ///
+    /// **槽位 → 令牌键**这张表是这条测试自己写的，不从 [`install`] 那边抄——
+    /// 抄过来就是拿实现去验实现。
+    fn 颜色_偏离(
+        tokens: &Tokens,
+        theme: Theme,
+        visuals: &egui::Visuals,
+        四档: impl Fn(Tier) -> Color32,
+    ) -> Vec<偏离> {
+        let p = tokens.color.theme(theme);
+        // `clip_rect_margin` 在 egui 0.36 里弃用了，可整个拆开就得点到它的名字。
+        #[allow(deprecated)]
+        let egui::Visuals {
+            dark_mode,
+            // 字形的伽马曲线，不是颜色。
+            text_options: _,
+            override_text_color,
+            // 设了 `weak_text_color` 之后用不上。
+            weak_text_alpha: _,
+            weak_text_color,
+            widgets,
+            selection,
+            ime_composition,
+            hyperlink_color,
+            faint_bg_color,
+            extreme_bg_color,
+            text_edit_bg_color,
+            code_bg_color,
+            warn_fg_color,
+            error_fg_color,
+            window_corner_radius,
+            // 阴影不在令牌里：设计稿的 `--pop` 是 CSS 的 box-shadow，形状 egui 画不出一样的。
+            window_shadow: _,
+            window_fill,
+            window_stroke,
+            window_highlight_topmost: _,
+            menu_corner_radius,
+            panel_fill,
+            popup_shadow: _,
+            // 以下都不是颜色也不是圆角。
+            resize_corner_size: _,
+            text_cursor,
+            clip_rect_margin: _,
+            button_frame: _,
+            collapsing_header_frame: _,
+            indent_has_left_vline: _,
+            striped: _,
+            slider_trailing_fill: _,
+            handle_shape: _,
+            interact_cursor: _,
+            image_loading_spinners: _,
+            numeric_color_space: _,
+            disabled_alpha: _,
+        } = visuals;
+        let egui::style::Selection {
+            bg_fill: selection_fill,
+            stroke: selection_stroke,
+        } = selection;
+        let egui::style::ImeComposition {
+            active_underline_stroke,
+            inactive_underline_stroke,
+            legacy_visuals: _,
+        } = ime_composition;
+        let egui::style::TextCursorStyle {
+            stroke: cursor_stroke,
+            preview: _,
+            blink: _,
+            on_duration: _,
+            off_duration: _,
+        } = text_cursor;
+
+        let mut 颜色 = vec![
+            (
+                "weak_text_color".to_owned(),
+                weak_text_color.unwrap_or(Color32::TRANSPARENT),
+                "ink-3",
+            ),
+            (
+                "selection.bg_fill".to_owned(),
+                *selection_fill,
+                "accent-soft",
+            ),
+            (
+                "selection.stroke".to_owned(),
+                selection_stroke.color,
+                "accent",
+            ),
+            (
+                "ime_composition.active_underline_stroke".to_owned(),
+                active_underline_stroke.color,
+                "accent",
+            ),
+            (
+                "ime_composition.inactive_underline_stroke".to_owned(),
+                inactive_underline_stroke.color,
+                "ink-4",
+            ),
+            ("hyperlink_color".to_owned(), *hyperlink_color, "accent-ink"),
+            ("faint_bg_color".to_owned(), *faint_bg_color, "panel-2"),
+            ("extreme_bg_color".to_owned(), *extreme_bg_color, "sunken"),
+            (
+                "text_edit_bg_color".to_owned(),
+                text_edit_bg_color.unwrap_or(Color32::TRANSPARENT),
+                "sunken",
+            ),
+            ("code_bg_color".to_owned(), *code_bg_color, "sunken"),
+            ("warn_fg_color".to_owned(), *warn_fg_color, "mid"),
+            ("error_fg_color".to_owned(), *error_fg_color, "lo"),
+            ("window_fill".to_owned(), *window_fill, "panel"),
+            ("window_stroke".to_owned(), window_stroke.color, "line-2"),
+            ("panel_fill".to_owned(), *panel_fill, "win"),
+            (
+                "text_cursor.stroke".to_owned(),
+                cursor_stroke.color,
+                "accent",
+            ),
+        ];
+        let mut 圆角 = vec![
+            (
+                "window_corner_radius".to_owned(),
+                *window_corner_radius,
+                tokens.radius.large,
+            ),
+            (
+                "menu_corner_radius".to_owned(),
+                *menu_corner_radius,
+                tokens.radius.large,
+            ),
+        ];
+
+        let egui::style::Widgets {
+            noninteractive,
+            inactive,
+            hovered,
+            active,
+            open,
+        } = widgets;
+        // 每一档：底色、弱底色（按钮）、描边、前景（字）。
+        for (name, widget, [bg, weak_bg, stroke, fg]) in [
+            (
+                "noninteractive",
+                noninteractive,
+                ["panel", "panel", "line", "ink-2"],
+            ),
+            ("inactive", inactive, ["panel", "panel", "line-2", "ink"]),
+            ("hovered", hovered, ["sunken", "sunken", "ink-3", "ink"]),
+            ("active", active, ["sunken", "sunken", "accent", "ink"]),
+            ("open", open, ["panel", "sunken", "line-2", "ink"]),
+        ] {
+            let egui::style::WidgetVisuals {
+                bg_fill,
+                weak_bg_fill,
+                bg_stroke,
+                corner_radius,
+                fg_stroke,
+                // 不是颜色；而且动它会让控件在状态之间抖（模块文档「键盘焦点」一节）。
+                expansion: _,
+            } = widget;
+            颜色.push((format!("widgets.{name}.bg_fill"), *bg_fill, bg));
+            颜色.push((
+                format!("widgets.{name}.weak_bg_fill"),
+                *weak_bg_fill,
+                weak_bg,
+            ));
+            颜色.push((format!("widgets.{name}.bg_stroke"), bg_stroke.color, stroke));
+            颜色.push((format!("widgets.{name}.fg_stroke"), fg_stroke.color, fg));
+            圆角.push((
+                format!("widgets.{name}.corner_radius"),
+                *corner_radius,
+                tokens.radius.medium,
+            ));
+        }
+
+        for (tier, key) in [
+            (Tier::High, "hi"),
+            (Tier::Medium, "mid"),
+            (Tier::Low, "lo"),
+            (Tier::Unidentified, "none"),
+        ] {
+            颜色.push((format!("四档（{}）", tier.label()), 四档(tier), key));
+        }
+
+        let mut out = Vec::new();
+        if *dark_mode != (theme == Theme::Dark) {
+            out.push(("(主题)".to_owned(), format!("dark_mode 是 {dark_mode}")));
+        }
+        if let Some(color) = override_text_color {
+            out.push((
+                "ink-2".to_owned(),
+                format!("override_text_color 是 {color:?}：字色该由 widgets 各档说"),
+            ));
+        }
+        for (槽位, got, key) in 颜色 {
+            let want = p.get(key).unwrap_or_else(|| panic!("令牌里没有 {key}"));
+            if got != want {
+                out.push((
+                    key.to_owned(),
+                    format!("{槽位} 是 {got:?}，令牌 {key} 是 {want:?}"),
+                ));
+            }
+        }
+        for (槽位, got, want) in 圆角 {
+            if got != CornerRadius::same(want) {
+                out.push((
+                    "(圆角)".to_owned(),
+                    format!("{槽位} 是 {got:?}，令牌是 {want}"),
+                ));
+            }
+        }
+        out
+    }
+
+    /// 偏离清单排成人读的几行。
+    fn 列(偏离: &[偏离]) -> String {
+        偏离
+            .iter()
+            .map(|(_, what)| what.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// 一个与 `color` 一定不同的颜色——变异用。
+    fn 另一个颜色(color: Color32) -> Color32 {
+        let 哨兵 = Color32::from_rgb(1, 2, 3);
+        if color == 哨兵 {
+            Color32::from_rgb(3, 2, 1)
+        } else {
+            哨兵
+        }
+    }
+
+    /// 走 [`install`] 装好之后，这套主题的 `Visuals` 与内置令牌对不上的那几项。
+    fn 装好之后的偏离(theme: Theme) -> Vec<偏离> {
+        let ctx = headless::context();
+        install(&ctx);
+        let style = ctx.style_of(theme);
+        颜色_偏离(Tokens::builtin(), theme, &style.visuals, |tier| {
+            tier_color(tier, &style.visuals)
+        })
+    }
+
+    /// **变异实测写成测试**：这套主题的令牌里每一个颜色各改一次，**拿改过的令牌走一遍整条装配**
+    /// （`install_tokens`，四档走 `tier_color_in`），返回 `(接线断了的键, 没人读的键)`。
+    ///
+    /// - **接线断了**：装出来的与**改过的**令牌对不上。某一格写死了颜色——哪怕与令牌同值——
+    ///   改令牌时它不跟着变，就落在这里。
+    /// - **没人读**：装出来的与**没改的**令牌比，一格都没因为这个键报出来。
+    fn 变异(theme: Theme) -> (Vec<&'static str>, Vec<&'static str>) {
+        let mut 断了 = Vec::new();
+        let mut 没人读 = Vec::new();
+        for key in Palette::KEYS {
+            let mut 改过 = Tokens::builtin().clone();
+            let palette = match theme {
+                Theme::Dark => &mut 改过.color.dark,
+                Theme::Light => &mut 改过.color.light,
+            };
+            let color = palette.get_mut(key).expect("KEYS 里的键都取得到");
+            *color = 另一个颜色(*color);
+
+            let ctx = headless::context();
+            install_tokens(&ctx, &改过);
+            let 装出来 = ctx.style_of(theme);
+            let 四档 = |tier| tier_color_in(改过.color.theme(theme), tier);
+            if !颜色_偏离(&改过, theme, &装出来.visuals, 四档).is_empty() {
+                断了.push(*key);
+            }
+            if !颜色_偏离(Tokens::builtin(), theme, &装出来.visuals, 四档)
+                .iter()
+                .any(|(报的, _)| 报的 == key)
+            {
+                没人读.push(*key);
+            }
+        }
+        (断了, 没人读)
+    }
+
+    /// 这套主题装上去的字号，与令牌对不上的那几项。
+    ///
+    /// egui 自带五档，令牌有六档：对得上号的照 egui 的名字装，对不上号的三档（角标、
+    /// 卡片标题、大标题）按令牌里的名字挂成具名档。**多出一档也算对不上**。
+    fn 字号_偏离(tokens: &Tokens, style: &egui::Style) -> Vec<String> {
+        use egui::FontFamily::{Monospace, Proportional};
+        use egui::{FontId, TextStyle};
+        let font = &tokens.font;
+        let want = [
+            (TextStyle::Small, FontId::new(font.size_small, Proportional)),
+            (TextStyle::Body, FontId::new(font.size_body, Proportional)),
+            (TextStyle::Button, FontId::new(font.size_body, Proportional)),
+            (
+                TextStyle::Heading,
+                FontId::new(font.size_page, Proportional),
+            ),
+            (TextStyle::Monospace, FontId::new(font.size_body, Monospace)),
+            (
+                TextStyle::Name("caption".into()),
+                FontId::new(font.size_caption, Proportional),
+            ),
+            (
+                TextStyle::Name("title".into()),
+                FontId::new(font.size_title, Proportional),
+            ),
+            (
+                TextStyle::Name("hero".into()),
+                FontId::new(font.size_hero, Proportional),
+            ),
+        ];
+        let mut out = Vec::new();
+        for (text_style, font_id) in &want {
+            match style.text_styles.get(text_style) {
+                Some(got) if got == font_id => {}
+                got => out.push(format!("{text_style:?} 是 {got:?}，令牌是 {font_id:?}")),
+            }
+        }
+        for text_style in style.text_styles.keys() {
+            if !want.iter().any(|(wanted, _)| wanted == text_style) {
+                out.push(format!("多出来一档 {text_style:?}"));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn 两套主题的字号取自令牌() {
+        let ctx = headless::context();
+        install(&ctx);
+        for theme in [Theme::Dark, Theme::Light] {
+            let 偏离 = 字号_偏离(Tokens::builtin(), &ctx.style_of(theme));
+            assert!(偏离.is_empty(), "{theme:?}：\n{}", 偏离.join("\n"));
+        }
+    }
+
+    #[test]
+    fn 暗色主题的颜色逐项取自令牌() {
+        let 偏离 = 装好之后的偏离(Theme::Dark);
+        assert!(偏离.is_empty(), "暗色主题与令牌对不上：\n{}", 列(&偏离));
+    }
+
+    #[test]
+    fn 亮色主题的颜色逐项取自令牌() {
+        let 偏离 = 装好之后的偏离(Theme::Light);
+        assert!(偏离.is_empty(), "亮色主题与令牌对不上：\n{}", 列(&偏离));
+    }
+
+    #[test]
+    fn 改暗色令牌里任意一个颜色界面跟着变() {
+        // 验收第 3 条「改令牌里任意一个颜色，这条当场红」落成的样子（挂单 `Q480`）：
+        // 拿改过的令牌去装，装出来的得跟着变——哪一格写死了颜色，这里报「接线断了」；
+        // 没人读的恰好是 `NOT_YET_USED` 那张单子——新加一个颜色忘了接、接上了忘了划掉，这条都红。
+        let (断了, 没人读) = 变异(Theme::Dark);
+        assert!(断了.is_empty(), "改了这几个键，装出来的没跟着变：{断了:?}");
+        assert_eq!(没人读, NOT_YET_USED);
+    }
+
+    #[test]
+    fn 改亮色令牌里任意一个颜色界面跟着变() {
+        let (断了, 没人读) = 变异(Theme::Light);
+        assert!(断了.is_empty(), "改了这几个键，装出来的没跟着变：{断了:?}");
+        assert_eq!(没人读, NOT_YET_USED);
+    }
 
     #[test]
     fn 四档各画各的颜色不串() {
@@ -162,12 +696,17 @@ mod tests {
     #[test]
     fn 高置信那一档在两套主题下都读得出来() {
         // 「颜色不是唯一线索」的另一半：**字得先读得出来才算线索**。
-        // 这一档从前取的是 `selection.bg_fill`——那是给背景用的一串，当前景色用时
-        // 暗色主题下对比度只有 2.33、亮色主题下 1.55，远在 WCAG AA 的 4.5 之下。
-        // 另外三档取的是 egui 自己的 `warn` / `error` / `weak`，这一票不动它们。
-        for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
-            let 对比度 = contrast(tier_color(Tier::High, &visuals), visuals.panel_fill);
-            assert!(对比度 >= 4.5, "高置信在这套主题下对比度只有 {对比度:.2}",);
+        // 这一档曾经借过 `selection.bg_fill`——那是给背景用的一串，当前景色用时对比度远在
+        // WCAG AA 的 4.5 之下。现在取令牌的 `hi`，比的是**装好之后**的窗口底色。
+        let ctx = headless::context();
+        install(&ctx);
+        for theme in [Theme::Dark, Theme::Light] {
+            let visuals = &ctx.style_of(theme).visuals;
+            let 对比度 = contrast(tier_color(Tier::High, visuals), visuals.panel_fill);
+            assert!(
+                对比度 >= 4.5,
+                "高置信在 {theme:?} 主题下对比度只有 {对比度:.2}"
+            );
         }
     }
 

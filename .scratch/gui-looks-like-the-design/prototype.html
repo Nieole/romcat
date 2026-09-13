@@ -1382,7 +1382,7 @@ textarea.input{height:auto;min-height:110px;padding:8px 10px;line-height:1.65;re
   </section>
 
   <section>
-    <h2>颜色令牌<span class="help" style="font-weight:400"> · 完整一份在同目录的 <span class="mono">tokens.toml</span>，<span class="mono">check_tokens.py</span> 逐项比对</span></h2>
+    <h2>颜色令牌<span class="help" style="font-weight:400"> · 完整一份在 <span class="mono">crates/gui/src/tokens.toml</span>，<span class="mono">check_tokens.py</span> 逐项比对</span></h2>
     <div class="scrollx"><table class="tbl maptbl">
       <thead><tr><th>名称</th><th>浅色</th><th>深色</th></tr></thead>
       <tbody>
@@ -1403,7 +1403,7 @@ textarea.input{height:auto;min-height:110px;padding:8px 10px;line-height:1.65;re
   <section>
     <h2>验收方式</h2>
     <ul>
-      <li><b>颜色令牌：自动检查。</b>令牌文件已经在同目录的 <span class="mono">tokens.toml</span> 里（两套主题、平台色、字号、间距、圆角、版式尺寸）。<span class="mono">check_tokens.py</span> 现在就能核对本稿的 CSS 变量与它是否一致（当前 65 项一致）；egui 那边照它填 Visuals，门禁里用同样的一条测试比对。</li>
+      <li><b>颜色令牌：自动检查。</b>令牌文件在 <span class="mono">crates/gui/src/tokens.toml</span> 里（两套主题、平台色、字号、间距、圆角、版式尺寸；全仓库只有这一份，界面编进二进制的就是它）。<span class="mono">check_tokens.py</span> 现在就能核对本稿的 CSS 变量与它是否一致（当前 65 项一致）；egui 那边照它填 Visuals，门禁里用同样的一条测试比对。</li>
       <li><b>结构与文案：自动检查。</b>利用现有测试工具读取界面文字和元素位置，例如导航在左侧、刮削对话框默认不显示、界面上不出现 <span class="mono">**</span> 或 <span class="mono">ADR-</span>。</li>
       <li><b>画面：首次人工确认，之后自动守护。</b>用 egui_kittest 以示例数据渲染每个页面作为基准图，第一次由你对照本稿确认，之后任何像素变化都会让门禁失败。</li>
       <li><b>开发过程中对照检查。</b>实现时用 egui MCP 启动程序截图，与本稿对应页面并排比较，并在工单收尾时附上对照图。</li>
