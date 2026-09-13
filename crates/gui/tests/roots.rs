@@ -2831,3 +2831,380 @@ fn 改了导出的前端格式之后_那句代价重算一遍() {
         .count();
     assert_eq!(算了几趟, 2, "换了前端格式，那句代价没重算");
 }
+
+/// **识别用得上库里已经问过的答案**（票 `gui-answers-all-six/02`，挂单 `Q418`）。
+///
+/// `model_answer` 那张表是中立库里唯一花过钱的一张：人在命令行上带 `--model` 问过一趟，
+/// 答案连同那笔账落在库里，重扫、重跑识别都不清它。界面上跑一趟识别得照旧把它们折成
+/// **候选**、与命令行那一趟一样多，而且**一个请求都不发**。
+mod 问过的答案 {
+    use super::*;
+
+    use romcat_core::dat::{CannedFetcher, DatRepo};
+    use romcat_core::filename::Rules;
+    use romcat_core::identify;
+    use romcat_core::identify::model::{self, Credentials, Guessing, Inference, Limits, Pricing};
+    use romcat_core::identify::report::IdentifyReport;
+    use romcat_core::verdict;
+    use romcat_core::zh;
+
+    /// `建库` 摆的那两份：穿不透的 zip，DAT 库又是空的，前面各层一条候选都给不出。
+    const 问过的两个: [&str; 2] = ["主库/FC/魂斗罗.zip", "主库/SFC/幻想传说 汉化版.zip"];
+
+    /// 问过那一趟之后才扫进来的那一份：**没被问过**。它照样落到模型推断那一层——
+    /// 手里有网络句柄的话，它就会被问出去。
+    const 没问过的: &str = "主库/MD/新来的.zip";
+
+    /// 假服务器答的那一份：这一批 `n` 条，每条两个候选。
+    ///
+    /// **答案那一段照核心库自己的写法折**（`model::Answer::to_json`），这里只补编号与外面
+    /// 那层信封——手写那几个键的话，核心库改一个键名，这份摆料就悄悄成了一份认不出的答复。
+    fn 一份答复(n: usize) -> Vec<u8> {
+        let rows: Vec<serde_json::Value> = (1..=n)
+            .map(|id| {
+                let answer = model::Answer {
+                    guesses: vec![
+                        model::Guess {
+                            title: format!("模型说的第{id}个"),
+                            platform: None,
+                            basis: "名字像".to_string(),
+                        },
+                        model::Guess {
+                            title: format!("模型说的第{id}个备选"),
+                            platform: None,
+                            basis: "同系列".to_string(),
+                        },
+                    ],
+                };
+                let mut row: serde_json::Value =
+                    serde_json::from_str(&answer.to_json()).expect("核心库折出来的是 JSON");
+                row["编号"] = serde_json::json!(id);
+                row
+            })
+            .collect();
+        let text = serde_json::json!({ "答案": rows }).to_string();
+        serde_json::to_vec(&serde_json::json!({
+            "model": model::DEFAULT_MODEL,
+            "content": [{ "type": "text", "text": text }],
+            "usage": { "input_tokens": 3_000, "output_tokens": 600 }
+        }))
+        .expect("造得出")
+    }
+
+    /// 命令行 `romcat identify` **一个旋钮都不拨**时的上限：`ModelArgs::limits` 照那几个
+    /// 开关的默认值折出来的那一副（`crates/cli/src/main.rs`），一格一格照抄——那边是字面量
+    /// 的（花费上限、请求间隔）这边也写字面量。
+    ///
+    /// **提问指纹认的就是它**：界面那一路取的是 `Limits::default()`。两边对不上的话，命令行
+    /// 问过的答案界面上一条都命中不了，候选数悄悄少掉——这几条测试拿它问答案、拿它当命令行
+    /// 那一趟，于是那件事一发生就当场红。
+    fn 命令行不拨旋钮时的上限() -> Limits {
+        Limits {
+            batch: model::DEFAULT_BATCH,
+            guesses: model::DEFAULT_GUESSES,
+            budget: model::DEFAULT_BUDGET,
+            // `--model-max-spend` 的默认值是 "5.00" 美元。
+            spend_cap_micros: 5_000_000,
+            max_output_tokens: model::DEFAULT_MAX_OUTPUT,
+            effort: model::DEFAULT_EFFORT.to_string(),
+            // `--model-interval-ms` 的默认值。
+            interval: Duration::from_millis(1_000),
+            backoff: model::BACKOFF,
+        }
+    }
+
+    fn 开_dat(现场: &现场) -> DatRepo {
+        DatRepo::open(&romcat_core::workspace::dat_repo_path(现场.工作区.path()))
+            .expect("开得出 DAT 库")
+    }
+
+    /// **在界面之外**跑一趟识别，模型推断那一层由调用方给。
+    ///
+    /// 别的原料是界面与命令行在一份什么都没摆的工作目录里摆出来的那一副：空 DAT 库、
+    /// 内置剥离规则、没取过中文离线源、沉淀库里什么都没有、没取过 TitleID 索引。
+    fn 在界面之外跑一趟识别(
+        现场: &mut 现场,
+        guessing: &Guessing<'_>,
+    ) -> identify::Outcome {
+        let repo = 开_dat(现场);
+        let rules = Rules::builtin();
+        let naming = fuzzy::Naming {
+            rules: &rules,
+            index: None,
+            tuning: zh::Tuning::default(),
+        };
+        let (_, site, _) = 现场.app.roots_site_and_tasks();
+        let verdicts =
+            verdict::Index::load(&site.store, &site.library_identity).expect("沉淀库读得动");
+        let roots = Roots::load(&site.catalog).expect("读得出根");
+        identify::run(
+            &RealFs::new(),
+            &mut site.catalog,
+            &identify::Ammo {
+                repo: &repo,
+                verdicts: &verdicts,
+                naming: &naming,
+                guessing,
+                titledb: None,
+            },
+            &identify::Options::new(roots),
+            &CancelToken::new(),
+            &mut |_| {},
+        )
+        .expect("识别不该失败")
+    }
+
+    /// **在界面之外问过一趟**：命令行带 `--model`、别的旋钮不拨跑过的那一趟——答案连同那笔账
+    /// 落进中立库。
+    ///
+    /// 答话的是假服务器（`CannedFetcher`），一个网络请求都不发，同 `romcat-core` 的
+    /// `tests/model_inference.rs`。**凭据只在这一趟摆料里出现**：界面上那一趟要证的正是它
+    /// 手里一套都没有。
+    fn 在界面之外问过一趟(现场: &mut 现场) {
+        let fetcher = CannedFetcher::new().with_prefix(model::ENDPOINT, 200, 一份答复(20));
+        let cancel = CancelToken::new();
+        let price = model::Price {
+            input_per_mtok: 500,
+            output_per_mtok: 2_500,
+        };
+        // 间隔与退避不进提问指纹，摆料这一趟不必真等。
+        let limits = Limits {
+            interval: Duration::ZERO,
+            backoff: Duration::ZERO,
+            ..命令行不拨旋钮时的上限()
+        };
+        let net = Inference::new(
+            &fetcher,
+            limits.clone(),
+            price,
+            Credentials::api_key("摆料用的假凭据"),
+            &cancel,
+        );
+        let 还没问过 = model::Answers::default();
+        let outcome = 在界面之外跑一趟识别(
+            现场,
+            &Guessing {
+                answers: &还没问过,
+                net: Some(&net),
+                announce: None,
+                planning: false,
+                model: model::DEFAULT_MODEL.to_string(),
+                price,
+                checked: String::new(),
+                limits,
+            },
+        );
+        assert_eq!(
+            outcome.model.asked, 2,
+            "前提：那两个变体真的被问过：{:?}",
+            outcome.model,
+        );
+    }
+
+    /// 照命令行 `romcat identify`（**不带** `--model`）那一副装配，在同一份中立库上跑一趟识别。
+    ///
+    /// **命令行没有库函数可调**（`romcat-cli` 只有一个 `main.rs`），界面测试也够不着那个
+    /// 二进制，于是照 `crates/cli/src/main.rs` 里 `model::Guessing` 那段字面量抄一份：答案整份
+    /// 读回来、价钱**从内置价目表里查**、念计划的回调装着、没有网络句柄、不排计划、上限是
+    /// 旋钮全不拨的那一副。与界面那一副差的正是价目表与念计划那两样。
+    fn 照命令行那一副跑一趟(现场: &mut 现场) {
+        let answers = model::Answers::build(
+            现场
+                .app
+                .site()
+                .catalog
+                .model_answers()
+                .expect("读得出问过的答案"),
+        );
+        let pricing = Pricing::builtin();
+        let price = pricing
+            .price(model::DEFAULT_MODEL)
+            .expect("库里存着答案时命令行查不到价就不启动：内置价目表里得有默认模型");
+        let announce = |_: &model::Plan| {};
+        let _ = 在界面之外跑一趟识别(
+            现场,
+            &Guessing {
+                answers: &answers,
+                net: None,
+                announce: Some(&announce),
+                planning: false,
+                model: model::DEFAULT_MODEL.to_string(),
+                price,
+                checked: pricing.checked().to_string(),
+                limits: 命令行不拨旋钮时的上限(),
+            },
+        );
+    }
+
+    /// 中立库里这个变体身上有几条**模型推断**那一层的候选。
+    fn 模型的候选(现场: &现场, key: &str) -> usize {
+        现场
+            .app
+            .site()
+            .catalog
+            .candidates_of(key)
+            .expect("读得出候选")
+            .iter()
+            .filter(|candidate| candidate.source == model::SOURCE)
+            .count()
+    }
+
+    /// 一份库眼下的**候选**账。
+    #[derive(Debug, PartialEq, Eq)]
+    struct 候选账 {
+        /// 问过的两个与没问过的那个，各几条。
+        每个变体: Vec<(&'static str, usize)>,
+        /// 报告里一共几条。
+        一共: u64,
+        /// 其中模型推断那一层几条。
+        模型推断: u64,
+    }
+
+    fn 记一笔候选账(现场: &现场) -> 候选账 {
+        let catalog = &现场.app.site().catalog;
+        let 每个变体 = [问过的两个[0], 问过的两个[1], 没问过的]
+            .into_iter()
+            .map(|key| (key, catalog.candidates_of(key).expect("读得出候选").len()))
+            .collect();
+        let report = IdentifyReport::build(catalog, &开_dat(现场)).expect("报告折得出");
+        let 模型推断 = report
+            .sources
+            .iter()
+            .find(|row| row.source == model::SOURCE)
+            .map_or(0, |row| row.candidates);
+        候选账 {
+            每个变体,
+            一共: report.candidates,
+            模型推断,
+        }
+    }
+
+    /// 摆好一份问过一趟的库：两个变体、两份答案、一笔账。
+    fn 问过一趟的库(tag: &str) -> (TempDir, 现场) {
+        let 库 = 建库(tag);
+        let mut 现场 = 现场::摆好();
+        现场.装上弹药();
+        现场.加根(库.path(), "主库");
+        现场.扫("主库");
+        在界面之外问过一趟(&mut 现场);
+        (库, 现场)
+    }
+
+    /// 问过那一趟之后，往这份 fixture 主库里再放一份、重扫一遍。
+    fn 再扫进一个没问过的(库: &TempDir, 现场: &mut 现场) {
+        写(&库.path().join("MD/新来的.zip"), &zip(1_024));
+        现场.扫("主库");
+    }
+
+    fn 屏上的字(现场: &mut 现场) -> String {
+        let ctx = headless::context();
+        画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+            现场.app.ui(ui)
+        }))
+    }
+
+    #[test]
+    fn 库里已经问过的答案_界面上跑一趟识别照旧折成候选() {
+        let (_库, mut 现场) = 问过一趟的库("gui-stages-问过的答案");
+
+        现场.跑识别();
+
+        let record = &现场.app.tasks().history()[0];
+        assert!(
+            matches!(record.ending, Ending::Done(_)),
+            "识别那一趟记成了「{}」",
+            record.ending.render(),
+        );
+        for key in 问过的两个 {
+            assert_eq!(
+                模型的候选(&现场, key),
+                2,
+                "{key} 问过的那两条没折成候选——界面上那一趟没用库里已经问过的答案",
+            );
+        }
+    }
+
+    #[test]
+    fn 界面上那一趟一个请求都不发_没问过的那个照旧没有答案_零价不上屏() {
+        // **一个请求都不发**看的是库里那本账：发出去的每一个请求都记一笔
+        // （`Catalog::put_model_call`），答回来的每一条都落一行答案。
+        let (库, mut 现场) = 问过一趟的库("gui-stages-一个请求都不发");
+        再扫进一个没问过的(&库, &mut 现场);
+        let 账 = 现场.app.site().catalog.model_spend().expect("读得出总账");
+        let 答案 = 现场
+            .app
+            .site()
+            .catalog
+            .model_answers()
+            .expect("读得出答案")
+            .len();
+        let (请求数, _) = 账;
+        assert_eq!(请求数, 1, "前提：问过的那一趟发过一个请求");
+
+        现场.跑识别();
+
+        assert_eq!(
+            现场.app.site().catalog.model_spend().expect("读得出总账"),
+            账,
+            "界面上那一趟发了请求",
+        );
+        assert_eq!(
+            现场
+                .app
+                .site()
+                .catalog
+                .model_answers()
+                .expect("读得出答案")
+                .len(),
+            答案,
+            "界面上那一趟替没问过的那个问了",
+        );
+        assert_eq!(
+            模型的候选(&现场, 没问过的),
+            0,
+            "没问过的那个凭空多出了模型推断的候选",
+        );
+        for key in 问过的两个 {
+            assert_eq!(模型的候选(&现场, key), 2, "{key} 问过的那两条没折成候选");
+        }
+        // **零价不上屏是一道护栏**：没问过的那个让核心库照零价算了一份计划（界面这一路价钱
+        // 传零），那份计划留在这一趟的产物里。界面眼下一处都不画计划与花费，所以这一句
+        // 改动之前也是绿的——它防的是日后有人把那份计划、或者报告里模型推断那一段画上屏。
+        let 屏上 = 屏上的字(&mut 现场);
+        assert!(!屏上.contains("美元"), "零价的花费上了屏：\n{屏上}");
+    }
+
+    #[test]
+    fn 跑完那句回执说得出几条候选来自已经问过的答案() {
+        let (_库, mut 现场) = 问过一趟的库("gui-stages-回执数得出");
+
+        现场.跑识别();
+
+        let 屏上 = 屏上的字(&mut 现场);
+        assert!(
+            屏上.lines().any(|line| line.trim()
+                == "4 条候选来自已经问过的答案（2 个变体），这一趟一个请求都没发。"),
+            "屏上说不出几条候选来自已经问过的答案：\n{屏上}",
+        );
+    }
+
+    #[test]
+    fn 同一份库上界面那一趟与命令行那一趟折出的候选一样多() {
+        let (库, mut 现场) = 问过一趟的库("gui-stages-与命令行一样多");
+        再扫进一个没问过的(&库, &mut 现场);
+
+        现场.跑识别();
+        let 界面那一趟 = 记一笔候选账(&现场);
+        照命令行那一副跑一趟(&mut 现场);
+        let 命令行那一趟 = 记一笔候选账(&现场);
+
+        assert_eq!(
+            界面那一趟, 命令行那一趟,
+            "同一份库上界面与命令行折出的候选不一样多",
+        );
+        assert_eq!(
+            界面那一趟.模型推断, 4,
+            "前提：两条路都把问过的那四条折成了候选",
+        );
+    }
+}
