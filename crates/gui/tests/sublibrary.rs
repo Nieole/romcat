@@ -98,7 +98,7 @@ impl 现场 {
         // 真库本来就是这个样子，fixture 照着摆才验得到那条路。
         let 库文件 = 工作区.path().join("catalog").join("fixture.sqlite3");
         {
-            let mut catalog = Catalog::open(&库文件).expect("能开中立库");
+            let mut catalog = Catalog::create(&库文件, "fixture").expect("能开中立库");
             let mut roots: Vec<(&str, &Path)> = vec![("库", 库.path())];
             if let Some(第二个) = 第二个根 {
                 roots.push(("另一块盘", 第二个.path()));

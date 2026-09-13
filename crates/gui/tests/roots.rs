@@ -104,7 +104,7 @@ impl 现场 {
     fn 摆好() -> Self {
         let 工作区 = temp_dir("gui-roots-ws");
         let 库文件 = 工作区.path().join("catalog").join("fixture.sqlite3");
-        drop(Catalog::open(&库文件).expect("能开中立库"));
+        drop(Catalog::create(&库文件, "fixture").expect("能开中立库"));
         let site = Site::open_file(工作区.path(), &库文件, None).expect("开得出现场");
         let mut app = App::new(site, 工作区.path().to_path_buf());
         app.show_view(View::Library);

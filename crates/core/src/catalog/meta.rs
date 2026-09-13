@@ -39,7 +39,7 @@ pub(super) enum MetaKey {
     SchemaVersion,
     /// **主库原名**：人给这份主库起的那个名字，原样落、一个字符都不折。
     ///
-    /// 建库那一趟落（[`Catalog::open_named`]），改名时换（[`Catalog::set_library_name`]），
+    /// 建库那一趟落（[`Catalog::create`]），改名时换（[`Catalog::set_library_name`]），
     /// 读不到时退回从文件名截（[`Catalog::library_name`]）。**它不是主库标识**：
     /// 中立库的文件名与路径锚认的都不是这一行。
     LibraryName,

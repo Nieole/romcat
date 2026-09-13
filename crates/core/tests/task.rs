@@ -61,7 +61,7 @@ impl 现场 {
         let 工作区 = temp_dir("task-ws");
         let 卡 = temp_dir("task-card");
         let 库文件 = 工作区.path().join("catalog").join("fixture.sqlite3");
-        let mut catalog = Catalog::open(&库文件).expect("能开中立库");
+        let mut catalog = Catalog::create(&库文件, "fixture").expect("能开中立库");
         let mut options = ScanOptions::named(库.path(), "库");
         options.jobs = Jobs::Fixed(2);
         scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");

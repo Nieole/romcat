@@ -2108,10 +2108,11 @@ mod tests {
 
     #[test]
     fn 中立库落在本机而不是主库里() {
-        let mut catalog = Catalog::open(
+        let mut catalog = Catalog::create(
             &crate::testing::temp_dir("catalog")
                 .path()
                 .join("库.sqlite3"),
+            "库",
         )
         .expect("能开中立库");
         let 之前 = 扫入(&mut catalog, &建库(), &ScanOptions::named("/lib", "库")).report;
@@ -2121,7 +2122,7 @@ mod tests {
         let path = crate::testing::temp_dir("catalog2")
             .path()
             .join("库.sqlite3");
-        let mut catalog = Catalog::open(&path).expect("能开中立库");
+        let mut catalog = Catalog::create(&path, "库").expect("能开中立库");
         扫入(&mut catalog, &建库(), &ScanOptions::named("/lib", "库"));
         drop(catalog);
         let catalog = Catalog::open(&path).expect("能再打开");

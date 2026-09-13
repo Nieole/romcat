@@ -294,8 +294,8 @@ fn kind_code(kind: EntryKind) -> i64 {
 /// 中立库读写过程中的错误。
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogError {
-    /// 中立库所在的目录建不出来。
-    #[error("中立库的目录建不出来：{path}（{source}）")]
+    /// 中立库文件、或者它所在的目录建不出来。
+    #[error("中立库或它所在的目录建不出来：{path}（{source}）")]
     Io {
         /// 出问题的路径。
         path: String,
@@ -339,21 +339,72 @@ pub enum CatalogError {
         /// 底层错误。
         source: serde_json::Error,
     },
-    /// 改名时给的**主库原名**是空白。**空白不是名字**（挂单 `Q469`）。
-    #[error("中立库 {path} 的主库原名不能改成空白——开场屏与报告上认这份库靠的就是这个名字")]
+    /// 建库或改名时给的**主库原名**是空白。**空白不是名字**（挂单 `Q469`）。
+    #[error("中立库 {path} 的主库原名不能是空白——开场屏与报告上认这份库靠的就是这个名字")]
     BlankLibraryName {
         /// 中立库文件。
         path: String,
+    },
+    /// 要打开的那份中立库不在。**打开不建库**（挂单 `Q371`）：建库走 [`Catalog::create`]。
+    #[error("中立库 {path} 不在——打开不会顺手建一份")]
+    Missing {
+        /// 中立库文件。
+        path: String,
+    },
+    /// 要建的那份中立库已经在了。**建库不开现成的那一份**：给的名字既不会被悄悄丢掉，
+    /// 也不会顶掉人家原来的名字。
+    #[error("中立库 {path} 已经在了——建库不会去开现成的那一份")]
+    AlreadyExists {
+        /// 中立库文件。
+        path: String,
+    },
+    /// 这个**主库原名**在同一个工作目录里已经有一份库在用了（挂单 `Q472`）。
+    #[error(
+        "这个工作目录里已经有一份主库叫「{name}」了（{other}）——\
+         同一个工作目录里主库原名不许重，不然开场屏上两行同名，人分不出哪份是哪份"
+    )]
+    LibraryNameTaken {
+        /// 要落这个名字的那份中立库。
+        path: String,
+        /// 撞上的那个名字。
+        name: String,
+        /// 已经在用这个名字的那份中立库。
+        other: String,
     },
 }
 
 /// **空白不是名字**：一个主库原名是不是空的、或者全是空白字符。
 ///
-/// 三处都问这一处：改名时拒收（[`Catalog::set_library_name`]）、建库时不写
-/// （`Catalog::prepare`）、读的时候当它不在（[`Catalog::library_name`]）。
-/// 各判一次，迟早判出几个答案（ADR-0024）。
+/// 两处都问这一处：落一个名字之前拒收（`refuse_library_name`，建库与改名都走它）、
+/// 读的时候当它不在（[`Catalog::library_name`]）。各判一次，迟早判出几个答案（ADR-0024）。
 fn is_blank_name(name: &str) -> bool {
     name.trim().is_empty()
+}
+
+/// **这个主库原名收不收**：建库（[`Catalog::create`]）与改名（[`Catalog::set_library_name`]）
+/// 落名字之前都问这一处，拒收时交出那句话。两样不收：
+///
+/// - **空白**（挂单 `Q469`）：空白不是名字。
+/// - **同一个工作目录里另一份库已经叫这个名字**（挂单 `Q472`）：改名只换主库原名、找库
+///   仍认主库标识，只查标识撞没撞的话，改过名的那份与拿新名字另建的那份会在开场屏上
+///   印成两行同名。「撞没撞」怎么比只在 `workspace` 那一处（[`workspace::namesake`]）。
+///
+/// `file` 是要落这个名字的那份中立库文件（还没建出来也行），它自己不算撞；只活在内存里的
+/// 那份没有工作目录，只查空白。`shown` 是报错时说的那份库（[`Catalog::location`] 那一串）。
+fn refuse_library_name(name: &str, file: Option<&Path>, shown: &str) -> Result<(), CatalogError> {
+    if is_blank_name(name) {
+        return Err(CatalogError::BlankLibraryName {
+            path: shown.to_string(),
+        });
+    }
+    if let Some(other) = file.and_then(|file| workspace::namesake_beside(file, name)) {
+        return Err(CatalogError::LibraryNameTaken {
+            path: shown.to_string(),
+            name: name.to_string(),
+            other: path::display(&other),
+        });
+    }
+    Ok(())
 }
 
 /// 现在是 UNIX 纪元起的第几秒。
@@ -431,6 +482,17 @@ pub struct EntryRecord {
     pub container: Option<Penetration>,
 }
 
+/// 一份中立库这一趟是怎么开出来的——**结构版本那一行还不在**时该怎么办，看的就是它。
+#[derive(Clone, Copy)]
+enum Birth<'a> {
+    /// 开一份盘上已经在那儿的库（[`Catalog::open`]）。
+    Opened,
+    /// 这一趟建出来的，带着建库时记下的主库原名（[`Catalog::create`]）。
+    Created(&'a str),
+    /// 只活在内存里（[`Catalog::open_in_memory`]）：不在哪个工作目录里，也就没有主库原名。
+    InMemory,
+}
+
 /// 中立库。
 #[derive(Debug)]
 pub struct Catalog {
@@ -440,52 +502,97 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// 打开（必要时新建）一个落在磁盘上的中立库。
+    /// 打开一份落在磁盘上、**已经在那儿**的中立库；老库缺的表与列在这一步补上。
     ///
-    /// **建出来的库不知道自己叫什么**，读它的名字只能从文件名截
-    /// （[`Self::library_name`]）。手上有 [`workspace::Slug`] 的调用方走
-    /// [`Self::open_named`]，那一条会在**建库那一趟**把原名记下。
+    /// **打开不建库**（挂单 `Q371`）：文件不在就报 [`CatalogError::Missing`]，盘上一个文件
+    /// 都不多——连中立库住的那个目录都不建。建库是一个明说的动作，走 [`Self::create`]，
+    /// 它必然收一个名字。于是调用方问漏了「在不在」，也建不出一份没记过名字的库。
     ///
     /// # Errors
-    /// 建目录、打开文件、建表或版本对不上时返回错误。
+    /// 文件不在（[`CatalogError::Missing`]）、打不开、建表失败或结构版本对不上时返回错误。
+    /// 盘上那个文件不是一份建好的库（没有元数据表、或者连结构版本那一行都没有）时也报错，
+    /// 而且**一个字节都不写**——没有那一行按版本 0 报，与 [`Self::open_read_only`] 同一个说法。
     pub fn open(path: &Path) -> Result<Self, CatalogError> {
-        Self::open_with(path, None)
+        let display = path::display(path);
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(path, flags).map_err(|source| {
+            if matches!(path.try_exists(), Ok(false)) {
+                CatalogError::Missing {
+                    path: display.clone(),
+                }
+            } else {
+                CatalogError::Sqlite {
+                    path: display.clone(),
+                    source,
+                }
+            }
+        })?;
+        Self::prepare(conn, Some(path.to_path_buf()), display, Birth::Opened)
     }
 
-    /// 同上，外加**建库时**记下这份主库叫什么。
+    /// **建一份新的中立库**，建库那一趟把这份主库的**主库原名**记下。
+    ///
+    /// **名字是必填的**（挂单 `Q371`）：建出来却没记住名字的库，在类型上就写不出来
+    /// （ADR-0024 那条推论）。命令行 `romcat scan` 与界面添加主库那条向导建库都走这一个入口。
     ///
     /// `name` 是**原名**——人起的那个名字，或者没起名字时主库根的末级目录名
-    /// （[`workspace::Slug::display_name`]）。它一个字符都不折：
-    /// 名字里带 `/`、带控制字符、长过 24 个字符时，落进元数据表的是原名，
-    /// **文件名照旧按 [`workspace::Slug::text`] 那套折**——两条路
-    /// 互不干扰。
+    /// （[`workspace::Slug::display_name`]）。它原样落进元数据表，一个字符都不折——名字里
+    /// 带 `/`、带控制字符、长过 24 个字符时，落进去的是原名，**文件名照旧按
+    /// [`workspace::Slug::text`] 那套折**，两条路互不干扰。
     ///
-    /// **只在建库那一趟写。** 库已经在那儿了就一个字不改：那一行是「人管这份库叫什么」，
-    /// 不是「这次是拿哪个名字打开的」——**打开不是改名**，改名走
-    /// [`Self::set_library_name`]。于是票 01 之前建的那些库，没人给它改过名就一辈子
-    /// 读不到这一行，走 [`Self::library_name`] 的退路——那正是它存在的理由。
+    /// **名字收不收先判，判完才碰盘**：空白（挂单 `Q469`）、同一个工作目录里另一份库已经
+    /// 叫这个名字（挂单 `Q472`）都当场报错，工作目录里一个文件都不多。这一处判断与改名
+    /// （[`Self::set_library_name`]）问的是同一个函数。
+    ///
+    /// **只建新的**：那个文件已经在了就报错，一个字节都不碰它——建库不是打开，
+    /// 开现成的那一份走 [`Self::open`]。
     ///
     /// # Errors
-    /// 同 [`Self::open`]。
-    pub fn open_named(path: &Path, name: &str) -> Result<Self, CatalogError> {
-        Self::open_with(path, Some(name))
-    }
-
-    fn open_with(path: &Path, name: Option<&str>) -> Result<Self, CatalogError> {
+    /// 名字是空白（[`CatalogError::BlankLibraryName`]）或撞了名
+    /// （[`CatalogError::LibraryNameTaken`]）、那份库已经在了
+    /// （[`CatalogError::AlreadyExists`]）、建目录或文件失败、建表失败时返回错误。
+    pub fn create(path: &Path, name: &str) -> Result<Self, CatalogError> {
         let display = path::display(path);
+        // **先判名字，再碰盘**：拒收的那一次，工作目录里连中立库住的目录都不该多出来。
+        refuse_library_name(name, Some(path), &display)?;
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
             std::fs::create_dir_all(parent).map_err(|source| CatalogError::Io {
-                path: crate::path::display(parent),
+                path: path::display(parent),
                 source,
             })?;
         }
+        // **查在不在与建是同一个动作**（`create_new`）：先问一句 `exists()` 再建的话，
+        // 中间那一瞬别人建出来的那一份就被当成自己刚建的了。
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|source| {
+                if source.kind() == std::io::ErrorKind::AlreadyExists {
+                    CatalogError::AlreadyExists {
+                        path: display.clone(),
+                    }
+                } else {
+                    CatalogError::Io {
+                        path: display.clone(),
+                        source,
+                    }
+                }
+            })?;
         let conn = Connection::open(path).map_err(|source| CatalogError::Sqlite {
             path: display.clone(),
             source,
         })?;
-        Self::prepare(conn, Some(path.to_path_buf()), display, name)
+        Self::prepare(
+            conn,
+            Some(path.to_path_buf()),
+            display,
+            Birth::Created(name),
+        )
     }
 
     /// 为**另一条线程**再开一份同一份中立库，**只读**。
@@ -497,7 +604,8 @@ impl Catalog {
     ///
     /// 1. **它写不动。** 连接带 `SQLITE_OPEN_READ_ONLY` 开出来，往它上面写一个字节都会
     ///    被 SQLite 当场拒绝。**全程只有一个写者**，那还是原来那份连接。
-    /// 2. **它不建表、不改版本。** 建表与版本那一套只在 [`Catalog::open`] 里做一次；
+    /// 2. **它不建表、不改版本。** 建表与版本那一套只在开库与建库那一步
+    ///    （[`Catalog::open`]、[`Catalog::create`]）里做；
     ///    这一份只核对版本对不对，对不上就不开。
     /// 3. **它活得比一趟活还短。** 一趟长活开一份、跑完就丢，不是一份放在那儿慢慢变旧的
     ///    缓存。WAL 让它在这段时间里读到一份一致的快照——另一条线程同时在写也不打架。
@@ -515,10 +623,9 @@ impl Catalog {
 
     /// 只读地打开磁盘上**已经在那儿**的一份中立库。
     ///
-    /// 与 [`Self::open`] 差在两处，而这两处正是**列举**要的
-    /// （[`workspace::catalogs`]）：
+    /// 与 [`Self::open`] 一样**不建库**（文件不在就报错），差在一处，而这一处正是
+    /// **列举**要的（[`workspace::catalogs`]）：
     ///
-    /// - **不建库。** 文件不在就报错，不会凭空建一份空的。
     /// - **不建表、不补列、不写版本。** [`Self::open`] 那条路会给每一份老库补上新表、
     ///   补上新列——**只是想看看这个工作目录里有哪些库**，不该改动其中任何一份。
     ///   版本对不上时它照旧开不出来（[`CatalogError::Version`] 带着两个版本号），
@@ -574,19 +681,29 @@ impl Catalog {
             path: "（内存）".to_string(),
             source,
         })?;
-        Self::prepare(conn, None, "（内存）".to_string(), None)
+        Self::prepare(conn, None, "（内存）".to_string(), Birth::InMemory)
     }
 
     fn prepare(
         conn: Connection,
         file: Option<PathBuf>,
         path: String,
-        name: Option<&str>,
+        birth: Birth<'_>,
     ) -> Result<Self, CatalogError> {
         let catalog = Self { conn, file, path };
         catalog
             .conn
             .set_prepared_statement_cache_capacity(STATEMENT_CACHE);
+        // **打开不建库，也不改写一份没建好的库**（挂单 `Q371`）：盘上一个文件却连结构版本那一行
+        // 都没有——一个空文件、建到一半断了的那一份——就不是一份建好的中立库。**先核这一行，
+        // 再动任何东西**：底下那几句要切 WAL、建表，一旦跑了那个文件就被改写了。只核在不在，
+        // 版本对不上的老库照旧走底下那条路。
+        if matches!(birth, Birth::Opened) {
+            catalog.batch("PRAGMA busy_timeout = 10000;")?;
+            if catalog.meta_get(MetaKey::SchemaVersion)?.is_none() {
+                return Err(catalog.unbuilt());
+            }
+        }
         // WAL：中断的扫描已经写进去的部分不会因为没提交而整份丢掉。
         // **`busy_timeout` 不是调优，是界面那一屏的前提**：扫描跑在画帧线程之外，
         // 后台那条线程按文件路径自己开一份写得动的库（`gui::roots::Screen::scan`），
@@ -611,19 +728,20 @@ impl Catalog {
         sublibrary::add_columns(&catalog.conn).map_err(|source| catalog.err(source))?;
         identify::add_columns(&catalog.conn).map_err(|source| catalog.err(source))?;
         let found = catalog.meta_get(MetaKey::SchemaVersion)?;
-        match found.as_deref().map(str::parse::<u32>) {
-            None => {
+        match (found.as_deref().map(str::parse::<u32>), birth) {
+            // 开头已经核过这一行在不在；这一支只防核完之后另一个连接把它删了——照样不许顺手
+            // 写上版本、把它变成一份没记过名字的库。
+            (None, Birth::Opened) => return Err(catalog.unbuilt()),
+            (None, Birth::Created(name)) => {
                 catalog.meta_set(MetaKey::SchemaVersion, &SCHEMA_VERSION.to_string())?;
-                // **「结构版本这一行还不在」就是「这份库是这一趟建出来的」。**
-                // 打开时给的名字只在这一趟落，理由见 `Catalog::open_named`。
-                // **空白名字在这一路照旧不写**、读时退回从文件名截：`--library ""` 命令行不拦，
-                // 改成当场报错归票 03（挂单 `Q469`）。所以先滤掉空白，不走会报错的那一句。
-                if let Some(name) = name.filter(|name| !is_blank_name(name)) {
-                    catalog.set_library_name(name)?;
-                }
+                // 名字在 `create` 碰盘之前已经判过（`refuse_library_name`），这里只落。
+                catalog.meta_set(MetaKey::LibraryName, name)?;
             }
-            Some(Ok(version)) if version == SCHEMA_VERSION => {}
-            Some(found) => {
+            (None, Birth::InMemory) => {
+                catalog.meta_set(MetaKey::SchemaVersion, &SCHEMA_VERSION.to_string())?;
+            }
+            (Some(Ok(version)), _) if version == SCHEMA_VERSION => {}
+            (Some(found), _) => {
                 return Err(CatalogError::Version {
                     path: catalog.path.clone(),
                     found: found.unwrap_or(0),
@@ -632,6 +750,16 @@ impl Catalog {
             }
         }
         Ok(catalog)
+    }
+
+    /// 「这不是一份建好的中立库」那一句：连结构版本那一行都没有，按版本 0 报——与只读地开
+    /// （[`Self::open_read_only`]）、开场那一屏的列举同一个说法。
+    fn unbuilt(&self) -> CatalogError {
+        CatalogError::Version {
+            path: self.path.clone(),
+            found: 0,
+            expected: SCHEMA_VERSION,
+        }
     }
 
     fn err(&self, source: rusqlite::Error) -> CatalogError {
@@ -663,12 +791,12 @@ impl Catalog {
 
     /// **主库原名**：这份主库叫什么——说得出口的那个名字。
     ///
-    /// 先读元数据表里那一行（建库时落下、改名时换掉的那个原名，见 [`Self::open_named`]
+    /// 先读元数据表里那一行（建库时落下、改名时换掉的那个原名，见 [`Self::create`]
     /// 与 [`Self::set_library_name`]）；**读不到就退回从中立库的文件名截**，把哈希后缀
     /// 剥掉只留人认得出的那一半（[`workspace::readable_half`]）。
     ///
-    /// **它不报错、不中断，一定交得出一句话。** 退路要顶的有四种库：票 01 之前建的
-    /// （那一行压根没写过）、拿 [`Self::open`] 建的（不知道自己叫什么）、建库时给了空白
+    /// **它不报错、不中断，一定交得出一句话。** 退路要顶的有三种库：票 01 之前建的
+    /// （那一行压根没写过）、票 `no-mute-spots-opening-a-catalog/03` 之前建库时给了空白
     /// 名字的（`--library ""`，那一行不写）、以及库本身读不动的。而开场那一屏的判据是**照列不误**
     /// ——从列表里静静消失才是最难查的那种错（ADR-0023），一份库说不出名字不该让整屏失败。
     ///
@@ -694,30 +822,31 @@ impl Catalog {
 
     /// 改这份主库的**主库原名**——人起错了名字，不必删库重来。
     ///
-    /// 名字原样落进元数据表，一个字符都不折（同 [`Self::open_named`]）；开场那一屏、
-    /// 报告抬头、窗口标题读的都是它（[`Self::library_name`]）。建库那一趟记名字走的也是
-    /// 这一个函数。
+    /// 名字原样落进元数据表，一个字符都不折（同 [`Self::create`]）；开场那一屏、
+    /// 报告抬头、窗口标题读的都是它（[`Self::library_name`]）。
     ///
     /// **空白不是名字**（挂单 `Q469`）：交一个空白进来当场报错，元数据表那一行一个字不动
     /// ——改名框里清空了名字按确定，人该听到一句「不能是空白」，而不是名字悄悄变回
-    /// 从文件名截出来的那一半。「算不算空白」只在 `is_blank_name` 一处判。
+    /// 从文件名截出来的那一半。
+    ///
+    /// **同一个工作目录里另一份库已经叫这个名字，也当场报错**（挂单 `Q472`）：开场屏上两行
+    /// 同名，人分不出哪份是哪份。改成自己眼下这个名字不算撞。收不收只在
+    /// `refuse_library_name` 一处判，建库那一步问的也是它。
     ///
     /// ## 它不动**主库标识**
     ///
     /// 中立库的文件名、**路径锚**里记的那个键、**断点**的文件名，认的都是主库标识
     /// （[`Site::library_identity`](crate::site::Site::library_identity)），改原名一个都
     /// 不动——沉淀库里的裁决照旧对得上。代价是**找库仍按起先那个名字**：命令行
-    /// `--library` 折出来的是主库标识，拿新名字去找是找不到这一份的（挂单 `Q472`）。
+    /// `--library` 折出来的是主库标识，拿新名字去找是找不到这一份的——那一下报错说清，
+    /// 不会另建一份（挂单 `Q472`）。
     ///
     /// # Errors
-    /// 名字是空白时返回 [`CatalogError::BlankLibraryName`]；写库失败时返回错误——
+    /// 名字是空白时返回 [`CatalogError::BlankLibraryName`]，同一个工作目录里另一份库已经叫
+    /// 这个名字时返回 [`CatalogError::LibraryNameTaken`]；写库失败时返回错误——
     /// 只读地开的那一份（[`Self::open_read_only`]）写不进去。
     pub fn set_library_name(&self, name: &str) -> Result<(), CatalogError> {
-        if is_blank_name(name) {
-            return Err(CatalogError::BlankLibraryName {
-                path: self.path.clone(),
-            });
-        }
+        refuse_library_name(name, self.file.as_deref(), &self.path)?;
         self.meta_set(MetaKey::LibraryName, name)
     }
 

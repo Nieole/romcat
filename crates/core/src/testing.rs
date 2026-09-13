@@ -53,7 +53,8 @@ impl Drop for TempDir {
 pub fn catalog_at_version(file: &Path, version: u32) {
     use rusqlite::{Connection, params};
 
-    drop(crate::catalog::Catalog::open(file).expect("能建中立库"));
+    // 名字随便起一个：版本对不上的那一份开不出来，开场屏上印的是从文件名截出来的那一半。
+    drop(crate::catalog::Catalog::create(file, "结构版本待改的库").expect("能建中立库"));
     let conn = Connection::open(file).expect("能再打开那个文件");
     let 改了 = conn
         .execute(
@@ -62,6 +63,26 @@ pub fn catalog_at_version(file: &Path, version: u32) {
         )
         .expect("改得动版本那一行");
     assert_eq!(改了, 1, "版本那一行没改到");
+}
+
+/// 现建一份**票 01 之前建的**中立库：结构版本对得上，元数据表里却没有**主库原名**那一行。
+///
+/// 那些库不会被改——旧库拿新程序打开照样能用，名字退回从文件名截
+/// （[`Catalog::library_name`](crate::catalog::Catalog::library_name)）。如今建库名字是
+/// 必填的（[`Catalog::create`](crate::catalog::Catalog::create)），造这样一份只能
+/// **先建出来、再把那一行删掉**。
+///
+/// # Panics
+/// 建不出、或者删不掉那一行时当场 panic，理由同 [`catalog_at_version`]。
+pub fn catalog_without_name(file: &Path) {
+    use rusqlite::Connection;
+
+    drop(crate::catalog::Catalog::create(file, "待删的名字").expect("能建中立库"));
+    let conn = Connection::open(file).expect("能再打开那个文件");
+    let 删了 = conn
+        .execute("DELETE FROM meta WHERE key = 'library_name'", [])
+        .expect("删得动那一行");
+    assert_eq!(删了, 1, "主库原名那一行没删到");
 }
 
 /// 建一个临时目录，名字里带上 `tag` 便于出问题时辨认。

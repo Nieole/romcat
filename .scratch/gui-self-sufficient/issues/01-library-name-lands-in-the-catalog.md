@@ -187,6 +187,7 @@
   入口出来，是替想象中的需求造抽象。
 - **谁来裁：** 票 `05`
 - **状态：** settled（第四轮收口，2026-09-09）
+- **票 `no-mute-spots-opening-a-catalog/03` 已落地：** `Catalog::open` 只开不建（文件不在报 `CatalogError::Missing`，盘上一个文件都不多）；建库只剩 `Catalog::create(path, name: &str)`，名字必填，`open_named` 删掉。命令行 `scan`（`open_or_create_catalog`）与界面添加主库那条向导建库都调它，名字收不收在 `refuse_library_name` 一处判。
 
 
 ### Q372 — 公开面上并存两个「主库名」，只有一个是标识符

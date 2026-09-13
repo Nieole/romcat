@@ -291,6 +291,83 @@ fn 扫描那一趟也印得出主库原名() {
 }
 
 #[test]
+fn 改过名之后拿新名字扫描或出报告都说清是哪一份而不另建一份() {
+    // **改名只换主库原名，找库仍认主库标识**（挂单 `Q472`）。从前 `scan --library <新名字>`
+    // 折出另一个文件、顺手另建一份，开场屏上两行同名，人分不出哪份是哪份。现在建库那一步
+    // 查同一个工作目录里的主库原名：撞上就报错，说清撞的是哪一份，一份库都不多。
+    let workspace = temp_dir("library-rename-scan-workspace");
+    let 主库 = temp_dir("library-rename-scan-lib");
+    建_主库(主库.path());
+    assert!(
+        扫(workspace.path(), 主库.path(), Some("起错了的名字"))
+            .status
+            .success()
+    );
+    let 原先那份 = workspace::catalog_path(workspace.path(), Slug::Named("起错了的名字"));
+    Catalog::open(&原先那份)
+        .expect("开得了扫出来的那份库")
+        .set_library_name("改过的名字")
+        .expect("改得了名");
+
+    let 出错 = 扫(workspace.path(), 主库.path(), Some("改过的名字"));
+
+    assert!(!出错.status.success(), "撞上了改过名的那份库却扫成了");
+    let 说明 = String::from_utf8_lossy(&出错.stderr);
+    assert!(
+        说明.contains("已经有一份主库叫「改过的名字」"),
+        "没说清撞上的是哪个名字：{说明}"
+    );
+    assert!(
+        说明.contains(&romcat_core::path::display(&原先那份)),
+        "没说清撞上的是哪一份库：{说明}"
+    );
+    assert!(
+        !workspace::catalog_path(workspace.path(), Slug::Named("改过的名字")).exists(),
+        "报了错却按新名字另建了一份"
+    );
+    assert_eq!(
+        workspace::catalogs(workspace.path()).len(),
+        1,
+        "报了错，开场屏上却多出一行"
+    );
+
+    // **只开不建的命令也得说清**：拿新名字出报告，不许只说一句「先跑一次 `romcat scan`」——
+    // 人照做，撞上的就是上面那一句，绕一步才知道那份库改过名。
+    let 报告 = 出报告(workspace.path(), &["--library", "改过的名字"]);
+    assert!(!报告.status.success(), "按新名字出报告却成了");
+    let 说明 = String::from_utf8_lossy(&报告.stderr);
+    assert!(
+        说明.contains("主库原名叫「改过的名字」"),
+        "没说清这个名字是哪一份库的主库原名：{说明}"
+    );
+    assert!(
+        说明.contains(&romcat_core::path::display(&原先那份)),
+        "没说清是哪一份库：{说明}"
+    );
+}
+
+#[test]
+fn 扫描时给空白名字当场报错一份库都不建() {
+    // **空白不是名字**（挂单 `Q469` 的裁决）：从前 `--library ""` 建得出一份库、名字退回从
+    // 文件名截。现在命令行建库走的是核心库那唯一一个入口，空白在那儿当场报错。
+    let workspace = temp_dir("library-blank-scan-workspace");
+    let 主库 = temp_dir("library-blank-scan-lib");
+    建_主库(主库.path());
+
+    for 空的 in ["", "   "] {
+        let 出错 = 扫(workspace.path(), 主库.path(), Some(空的));
+
+        assert!(!出错.status.success(), "空白名字 {空的:?} 却扫成了");
+        let 说明 = String::from_utf8_lossy(&出错.stderr);
+        assert!(说明.contains("空白"), "没说清是名字空白：{说明}");
+        assert!(
+            workspace::catalogs(workspace.path()).is_empty(),
+            "空白名字报了错，工作目录里却建出了库"
+        );
+    }
+}
+
+#[test]
 fn 改过名的库报告印的是新名字() {
     // 起错了名字不必删库重来（挂单 `Q370`）。改名的入口在核心库
     // （`Catalog::set_library_name`；界面上那一处归票 `gui-looks-like-the-design/31`），

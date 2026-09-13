@@ -16,7 +16,7 @@ use romcat_core::workspace::{Slug, catalog_path};
 fn 建库(tag: &str, keys: &[&str]) -> (TempDir, std::path::PathBuf) {
     let dir = temp_dir(tag);
     let path = catalog_path(dir.path(), Slug::Named("小库"));
-    let mut catalog = Catalog::open(&path).expect("开得出中立库");
+    let mut catalog = Catalog::create(&path, "小库").expect("开得出中立库");
     let variants: Vec<Variant> = keys
         .iter()
         .map(|key| Variant {

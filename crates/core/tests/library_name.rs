@@ -21,7 +21,7 @@ use std::path::Path;
 use romcat_core::catalog::{Catalog, CatalogError, EntryRecord, SCHEMA_VERSION, Verdict};
 use romcat_core::fs::{EntryKind, EntryMeta};
 use romcat_core::site::Site;
-use romcat_core::testing::temp_dir;
+use romcat_core::testing::{self, temp_dir};
 use romcat_core::verdict::{Anchor, Membership, Store};
 use romcat_core::workspace::{self, Slug};
 
@@ -31,11 +31,41 @@ fn 建库时原名落进元数据表再开一次读得回来() {
     let slug = Slug::Named("主库");
     let 库文件 = workspace::catalog_path(工作目录.path(), slug);
 
-    // 建库这个动作本身就是开库：这一趟把名字一并写下。
-    drop(Catalog::open_named(&库文件, &slug.display_name()).expect("能建中立库"));
+    // **建库是一个明说的动作，名字是必填的**（挂单 `Q371`）：不给名字就编不过，于是不会有
+    // 一份建出来却没记住名字的库。这一趟把名字一并写下。
+    drop(Catalog::create(&库文件, &slug.display_name()).expect("能建中立库"));
 
     let catalog = Catalog::open(&库文件).expect("能再打开");
     assert_eq!(catalog.library_name(), "主库");
+}
+
+#[test]
+fn 建库时那份库已经在了就报错原先那一份一个字不改() {
+    // **建库不是打开**：那个文件已经在了，说明这份主库早就建过——顺手开它的话，给的这个
+    // 名字要么被悄悄丢掉，要么把人家的名字改掉，两样都不是「建库」。
+    let 工作目录 = temp_dir("建库-已经在了");
+    let slug = Slug::Named("主库");
+    let 库文件 = workspace::catalog_path(工作目录.path(), slug);
+    {
+        let mut catalog = Catalog::create(&库文件, "主库").expect("能建中立库");
+        写一条(&mut catalog);
+    }
+
+    let 结果 = Catalog::create(&库文件, "另起的名字");
+
+    let Err(错) = 结果 else {
+        panic!("那份库已经在了，建库却成了");
+    };
+    assert!(
+        matches!(错, CatalogError::AlreadyExists { .. }),
+        "报的不是「这份库已经在了」那一句：{错:?}"
+    );
+    let catalog = Catalog::open(&库文件).expect("原先那一份照样打得开");
+    assert_eq!(catalog.library_name(), "主库", "报了错却动了原先那份的名字");
+    assert!(
+        catalog.contains("库/FC/魂斗罗.zip").expect("读得出来"),
+        "报了错却动了原先那份库里的东西"
+    );
 }
 
 #[test]
@@ -47,15 +77,13 @@ fn 票01之前建的库读不到那一行时退回从文件名截() {
     let slug = Slug::Named("我的库");
     let 库文件 = workspace::catalog_path(工作目录.path(), slug);
 
-    {
-        // 票 01 之前那条路：建库时没人告诉它这份主库叫什么。
-        let mut catalog = Catalog::open(&库文件).expect("能建中立库");
-        写一条(&mut catalog);
-    }
+    // 票 01 之前那条路：建库时没人告诉它这份主库叫什么，元数据表里压根没有那一行。
+    testing::catalog_without_name(&库文件);
+    写一条(&mut Catalog::open(&库文件).expect("能再打开"));
 
-    // 新程序打开同一份：版本对得上（对不上 `open_named` 当场就拒），库里的东西一条不少，
-    // 名字退回从文件名截。**新程序也不会顺手把名字补进去**——那一行只在建库那一趟落。
-    let catalog = Catalog::open_named(&库文件, &slug.display_name()).expect("旧库照样打得开");
+    // 新程序打开同一份：版本对得上（对不上 `open` 当场就拒），库里的东西一条不少，
+    // 名字退回从文件名截。**打开不会顺手把名字补进去**——那一行只在建库那一趟落。
+    let catalog = Catalog::open(&库文件).expect("旧库照样打得开");
     assert!(
         catalog.contains("库/FC/魂斗罗.zip").expect("读得出来"),
         "旧库里的东西一条不少"
@@ -79,7 +107,7 @@ fn 名字折不进文件名时元数据表里仍是原名() {
     ] {
         let slug = Slug::Named(原名);
         let 库文件 = workspace::catalog_path(工作目录.path(), slug);
-        drop(Catalog::open_named(&库文件, &slug.display_name()).expect("能建中立库"));
+        drop(Catalog::create(&库文件, &slug.display_name()).expect("能建中立库"));
 
         let 主文件名 = 库文件
             .file_stem()
@@ -99,7 +127,7 @@ fn 名字被滤光时文件名退成那个固定词而元数据表里仍是原�
     let 工作目录 = temp_dir("原名-滤光");
     let slug = Slug::Named("。、？");
     let 库文件 = workspace::catalog_path(工作目录.path(), slug);
-    drop(Catalog::open_named(&库文件, &slug.display_name()).expect("能建中立库"));
+    drop(Catalog::create(&库文件, &slug.display_name()).expect("能建中立库"));
 
     let 主文件名 = 库文件
         .file_stem()
@@ -120,8 +148,8 @@ fn 界面与命令行开同一份库读到的是同一个名字() {
     // **验的是读这一侧**：开库这件事在核心里，命令行按 `--library` 的名字找，
     // 界面直接开开场上列出来的那一份文件（`site::Site` 的两个入口，界面走的就是它们，
     // 见 `crates/gui/src/site.rs`）。两条路读出两个名字的话，人在终端里与在界面上就认不出
-    // 自己操作的是同一份库了。建库那一侧不在这一条里——那两个入口都先 `exists()` 才开，
-    // 建不出新库，眼下唯一建得出库的是命令行的 `open_catalog`（挂单 `Q371`）。
+    // 自己操作的是同一份库了。建库那一侧不在这一条里——建库只有 `Catalog::create` 一个
+    // 入口，命令行 `romcat scan` 与界面添加主库那条向导调的都是它（挂单 `Q371`）。
     //
     // 名字挑一个**折进文件名会变形**的：`。、？` 全被滤光，文件名退成 `library-…`。
     // 于是「两边一样」不是因为两边都在读文件名。
@@ -129,7 +157,7 @@ fn 界面与命令行开同一份库读到的是同一个名字() {
     for 原名 in ["主库", "。、？"] {
         let slug = Slug::Named(原名);
         let 库文件 = workspace::catalog_path(工作目录.path(), slug);
-        drop(Catalog::open_named(&库文件, &slug.display_name()).expect("能建中立库"));
+        drop(Catalog::create(&库文件, &slug.display_name()).expect("能建中立库"));
 
         let 按名字 = Site::open(工作目录.path(), slug, None, "--library").expect("开得出现场");
         let 按文件 = Site::open_file(工作目录.path(), &库文件, None).expect("开得出现场");
@@ -151,7 +179,7 @@ fn 路径锚里存的主库标识一个字节没动() {
     let 工作目录 = temp_dir("标识-路径锚");
     let slug = Slug::Named("主库");
     let 库文件 = workspace::catalog_path(工作目录.path(), slug);
-    drop(Catalog::open_named(&库文件, &slug.display_name()).expect("能建中立库"));
+    drop(Catalog::create(&库文件, &slug.display_name()).expect("能建中立库"));
 
     let 变体 = "主盘/FC/魂斗罗.zip";
     {
@@ -195,8 +223,7 @@ fn 已经建好的库改得了名开场屏与报告上印的是新名字() {
     let 起的名字 = Slug::Named("起错了的名字");
     let 库文件 = workspace::catalog_path(工作目录.path(), 起的名字);
     {
-        let mut catalog =
-            Catalog::open_named(&库文件, &起的名字.display_name()).expect("能建中立库");
+        let mut catalog = Catalog::create(&库文件, &起的名字.display_name()).expect("能建中立库");
         写一条(&mut catalog);
     }
 
@@ -235,7 +262,7 @@ fn 改名之后路径锚一个字节没动沉淀库里的裁决照旧对得上()
     let 工作目录 = temp_dir("改名-路径锚");
     let 起的名字 = Slug::Named("主库");
     let 库文件 = workspace::catalog_path(工作目录.path(), 起的名字);
-    drop(Catalog::open_named(&库文件, &起的名字.display_name()).expect("能建中立库"));
+    drop(Catalog::create(&库文件, &起的名字.display_name()).expect("能建中立库"));
 
     let 变体 = "主盘/FC/魂斗罗.zip";
     落一条路径锚(工作目录.path(), 锚里存的, 变体);
@@ -264,7 +291,7 @@ fn 改名成空白时当场报错那一行与路径锚都没动() {
     let 工作目录 = temp_dir("改名-空白");
     let 起的名字 = Slug::Named("主库");
     let 库文件 = workspace::catalog_path(工作目录.path(), 起的名字);
-    drop(Catalog::open_named(&库文件, &起的名字.display_name()).expect("能建中立库"));
+    drop(Catalog::create(&库文件, &起的名字.display_name()).expect("能建中立库"));
     let 变体 = "主盘/FC/魂斗罗.zip";
     落一条路径锚(工作目录.path(), 锚里存的, 变体);
     Catalog::open(&库文件)
@@ -308,23 +335,208 @@ fn 改名成空白时当场报错那一行与路径锚都没动() {
 }
 
 #[test]
-fn 名字是空白时退回从文件名截而不是留一行空的() {
-    // `--library ""` 命令行不拦（改它的行为不在这张票里）。**空白不是名字**：那一行不落，
-    // 读的时候也退回从文件名截，于是报告里不会印出一句光秃秃的「主库：」，
-    // 开场那一屏也不会多一行没有名字的库。
+fn 同一个工作目录里主库原名重了建库当场报错不另建一份() {
+    // **改名只换主库原名，找库仍认主库标识**（挂单 `Q472`）。于是改名之后拿新名字去建库，
+    // 折出来的是另一个文件——从前那一下会顺手**另建一份**，开场屏上两行同名，人分不出
+    // 哪份是哪份。现在建库那一步查同一个工作目录里的主库原名，撞上就报错，说清撞的是哪一份。
+    let 工作目录 = temp_dir("原名-建库撞名");
+    let 起的名字 = Slug::Named("主库");
+    let 原先那份 = workspace::catalog_path(工作目录.path(), 起的名字);
+    drop(Catalog::create(&原先那份, &起的名字.display_name()).expect("能建中立库"));
+    Catalog::open(&原先那份)
+        .expect("能再打开")
+        .set_library_name("改过的名字")
+        .expect("改得了名");
+
+    let 新名字 = Slug::Named("改过的名字");
+    let 另一个文件 = workspace::catalog_path(工作目录.path(), 新名字);
+    assert_ne!(另一个文件, 原先那份, "前提：新名字折出来的是另一个文件");
+    let 结果 = Catalog::create(&另一个文件, &新名字.display_name());
+
+    let Err(错) = 结果 else {
+        panic!("主库原名撞上了同一个工作目录里的另一份库，建库却成了");
+    };
+    assert!(
+        matches!(错, CatalogError::LibraryNameTaken { .. }),
+        "报的不是「这个名字已经有库在用」那一句：{错:?}"
+    );
+    let 说的 = format!("{错}");
+    assert!(说的.contains("改过的名字"), "没说清撞的是哪个名字：{说的}");
+    assert!(
+        说的.contains(&romcat_core::path::display(&原先那份)),
+        "没说清撞上的是哪一份库：{说的}"
+    );
+    assert!(!另一个文件.exists(), "报了错却把另一份库建出来了");
+    assert_eq!(
+        workspace::catalogs(工作目录.path()).len(),
+        1,
+        "报了错，开场屏上却多出一行"
+    );
+
+    // **管的是同一个工作目录**：换一个工作目录等于换一整套工具状态，那边同名不算撞。
+    let 另一个工作目录 = temp_dir("原名-建库撞名-另一个工作目录");
+    drop(
+        Catalog::create(
+            &workspace::catalog_path(另一个工作目录.path(), 新名字),
+            &新名字.display_name(),
+        )
+        .expect("另一个工作目录里同名照样建得出"),
+    );
+}
+
+#[test]
+fn 改名成同一个工作目录里另一份库的主库原名时当场报错() {
+    // 建库与改名问的是**同一处判断**（ADR-0024）：只在建库那一步查，改名就能把两份库改成
+    // 同一个名字，开场屏上照样两行同名。改成自己眼下这个名字不算撞。
+    let 工作目录 = temp_dir("原名-改名撞名");
+    let 甲 = workspace::catalog_path(工作目录.path(), Slug::Named("甲库"));
+    let 乙 = workspace::catalog_path(工作目录.path(), Slug::Named("乙库"));
+    drop(Catalog::create(&甲, "甲库").expect("能建甲库"));
+    drop(Catalog::create(&乙, "乙库").expect("能建乙库"));
+
+    let 结果 = Catalog::open(&乙)
+        .expect("能再打开")
+        .set_library_name("甲库");
+
+    let Err(错) = 结果 else {
+        panic!("改成了另一份库的名字，却改成了");
+    };
+    assert!(
+        matches!(错, CatalogError::LibraryNameTaken { .. }),
+        "报的不是「这个名字已经有库在用」那一句：{错:?}"
+    );
+    assert_eq!(
+        Catalog::open(&乙).expect("能再打开").library_name(),
+        "乙库",
+        "报了错却动了元数据表那一行"
+    );
+    Catalog::open(&乙)
+        .expect("能再打开")
+        .set_library_name("乙库")
+        .expect("改成自己眼下这个名字不算撞");
+}
+
+#[test]
+fn 改过名之后按新名字找库说清那个名字是哪一份库的主库原名() {
+    // **找库认的是主库标识，改名不动它**（挂单 `Q472`）。按新名字折出来的是另一个文件，找不到
+    // 是对的；可只说一句「还没有这份中立库，先跑一次 `romcat scan`」，人照做就撞上建库那一步
+    // 的撞名报错，绕一步才知道原因。命令行 `--library` 与界面按名字启动都走这一句。
+    let 工作目录 = temp_dir("原名-改名后找库");
+    let 起的名字 = Slug::Named("起错了的名字");
+    let 原先那份 = workspace::catalog_path(工作目录.path(), 起的名字);
+    drop(Catalog::create(&原先那份, &起的名字.display_name()).expect("能建中立库"));
+    Catalog::open(&原先那份)
+        .expect("能再打开")
+        .set_library_name("改过的名字")
+        .expect("改得了名");
+
+    let 结果 = Site::open(
+        工作目录.path(),
+        Slug::Named("改过的名字"),
+        None,
+        "--library 改过的名字",
+    );
+
+    let Err(错) = 结果 else {
+        panic!("按新名字折出来的是另一个文件，却开出了现场");
+    };
+    let 说的 = format!("{错}");
+    assert!(
+        说的.contains("主库原名叫「改过的名字」"),
+        "没说清这个名字是哪一份库的主库原名：{说的}"
+    );
+    assert!(
+        说的.contains(&romcat_core::path::display(&原先那份)),
+        "没说清是哪一份库：{说的}"
+    );
+    assert!(
+        !workspace::catalog_path(工作目录.path(), Slug::Named("改过的名字")).exists(),
+        "找库顺手建出了一份"
+    );
+}
+
+#[test]
+fn 建库时名字是空白就当场报错盘上一个文件都不多() {
+    // **空白不是名字**（挂单 `Q469` 的裁决）：从前 `--library ""` 建得出一份库、名字退回从
+    // 文件名截，于是「不会有一份建出来却没记住名字的库」只是一句愿望。现在建库与改名是
+    // 同一处判断，空白（含全是空白字符）当场报错——**报了错就什么都没建**，连中立库住的
+    // 那个目录都不多。
     let 工作目录 = temp_dir("原名-空名字");
-    for 空的 in ["", "   "] {
+    for 空的 in ["", "   ", "\t\n"] {
         let slug = Slug::Named(空的);
         let 库文件 = workspace::catalog_path(工作目录.path(), slug);
-        drop(Catalog::open_named(&库文件, &slug.display_name()).expect("能建中立库"));
 
-        let catalog = Catalog::open(&库文件).expect("能再打开");
-        assert_eq!(
-            catalog.library_name(),
-            "library",
-            "退回从文件名截，而文件名的可读一半本来就退成了那个固定词"
+        let 结果 = Catalog::create(&库文件, &slug.display_name());
+
+        let Err(错) = 结果 else {
+            panic!("空白名字 {空的:?} 该当场报错，却建出了库");
+        };
+        assert!(
+            matches!(错, CatalogError::BlankLibraryName { .. }),
+            "报的不是「名字是空白」那一句：{错:?}"
+        );
+        assert!(format!("{错}").contains("空白"), "那句话没说清是空白：{错}");
+        assert!(
+            std::fs::read_dir(工作目录.path())
+                .expect("读得了工作目录")
+                .next()
+                .is_none(),
+            "空白名字报了错，工作目录里却多出了东西"
         );
     }
+}
+
+#[test]
+fn 打开一份不存在的中立库当场报错盘上一个文件都不多() {
+    // **打开不是建库**（挂单 `Q371`）。「打开即创建」的代价是每个调用方都得自己先问一句
+    // 「在不在」——漏问一处，一条打错的名字就在工作目录里留下一份没记过名字的空库，
+    // 从此占着开场屏的一行。连中立库住的那个目录都不许顺手建出来。
+    let 工作目录 = temp_dir("打开-不在");
+    let 库文件 = workspace::catalog_path(工作目录.path(), Slug::Named("压根没建过"));
+
+    let 结果 = Catalog::open(&库文件);
+
+    let Err(错) = 结果 else {
+        panic!("打开一份不存在的中立库该报错，却开出来了");
+    };
+    assert!(
+        matches!(错, CatalogError::Missing { .. }),
+        "报的不是「这份库不在」那一句：{错:?}"
+    );
+    assert!(
+        std::fs::read_dir(工作目录.path())
+            .expect("读得了工作目录")
+            .next()
+            .is_none(),
+        "打开失败了，工作目录里却多出了东西"
+    );
+}
+
+#[test]
+fn 打开一份不是建好的中立库的文件报错一个字节都不写() {
+    // **打开不建库**，对一个已经在盘上、却不是建好的中立库的文件也一样：一个空文件、或者建到
+    // 一半断了的那一份，从前 `open` 会给它建表、写上结构版本，把它变成一份没记过名字的库。
+    // 现在当场报错，那个文件一个字节不动，SQLite 的附件（`-wal` / `-shm`）也不多。
+    let 工作目录 = temp_dir("打开-空文件");
+    let 库文件 = workspace::catalog_path(工作目录.path(), Slug::Named("空文件"));
+    let 目录 = 库文件.parent().expect("有上级目录").to_path_buf();
+    std::fs::create_dir_all(&目录).expect("建得出目录");
+    std::fs::write(&库文件, b"").expect("写得出空文件");
+
+    let 结果 = Catalog::open(&库文件);
+
+    assert!(结果.is_err(), "一个空文件却开成了中立库");
+    drop(结果);
+    assert_eq!(
+        std::fs::metadata(&库文件).expect("文件还在").len(),
+        0,
+        "打开失败了，却往那个文件里写了东西"
+    );
+    assert_eq!(
+        std::fs::read_dir(&目录).expect("读得了目录").count(),
+        1,
+        "打开失败了，目录里却多出了 SQLite 的附件"
+    );
 }
 
 #[test]
@@ -340,7 +552,7 @@ fn 元数据表那一族的键名一个字节没动旧库记下的账照样读�
 
     let 工作目录 = temp_dir("元数据表-键名");
     let 库文件 = workspace::catalog_path(工作目录.path(), Slug::Named("键名"));
-    drop(Catalog::open(&库文件).expect("能建中立库"));
+    testing::catalog_without_name(&库文件);
     {
         let conn = rusqlite::Connection::open(&库文件).expect("能再打开那个文件");
         for (键, 值) in [
