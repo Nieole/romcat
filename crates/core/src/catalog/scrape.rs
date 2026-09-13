@@ -926,6 +926,33 @@ impl Catalog {
             .map_err(|source| self.err(source))
     }
 
+    /// 整个库里**一条刮削结论都没有**的变体有多少个。库屏工序段刮削那一行报的就是它
+    /// （[`Stage::Scrape`](crate::stage::Stage::Scrape) 写着这个口径，以及为什么不按旋钮算）。
+    ///
+    /// 「有结论」的判据与 [`scraped_subjects`](Self::scraped_subjects) 是同一条：变体锚点上
+    /// 有一行 `scrape_value` 就算，**哪个源给的都算**——裁决那一源也算。
+    ///
+    /// **连着 `variant` 表数，不拿变体总数去减 `scraped_subjects` 那个数**：`scrape_value`
+    /// 按锚点存、不跟着变体走，重扫把变体整份换掉时（`replace_variants`）它一行都不删，
+    /// 于是那张表里留着已经不在库里的变体。拿它去减的话，删过文件又添了文件的那份库会少报。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn unscraped_variant_count(&self) -> Result<u64, CatalogError> {
+        let value: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM variant v
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM scrape_value s WHERE s.anchor = ?1 AND s.subject = v.key
+                 )",
+                params![AnchorKind::Variant.label()],
+                |row| row.get(0),
+            )
+            .map_err(|source| self.err(source))?;
+        Ok(u64::try_from(value).unwrap_or(0))
+    }
+
     /// 人在界面上直接写下的一个字段值，**来源记作裁决**。
     ///
     /// 与 [`put_scraped`](Self::put_scraped) 分开的理由是它**只动这一行**：那条路的语义

@@ -29,13 +29,16 @@
 //!
 //! ## 按停停在哪儿
 //!
-//! **三支在这件事上各不一样，而差别是真的**：识别一路往中立库写批，按停时已经算完的
-//! 那些结论真的落了库，所以它报**停在半路**；折标题的写是「清掉再写回」，中间停下
+//! **四支在这件事上各不一样，而差别是真的**：识别一路往中立库写批，按停时已经算完的
+//! 那些结论真的落了库，所以它报**停在半路**；刮削两档都有——还没开采（读优先级表、
+//! 开中文离线源那几下）就停下记**已取消**，采过之后停下记**部分完成**，已经采到的那些
+//! 落进了中立库（`crate::scrape::run`，与浏览屏刮削面板那一趟同一个函数）；
+//! 折标题的写是「清掉再写回」，中间停下
 //! 等于把整份**标题集合**丢掉——所以它的最后一个停下点摆在写回**之前**
 //! （`romcat_core::title::run_task`），那一趟要么写完、要么一个字节都没写，
 //! 按停记的是「停了」；导出**一份文件一份文件地写**，写完一份就把**底本**一起存进
 //! 中立库，于是它两档都有——一份都没写就停下记「停了」，写过之后停下记**停在半路**
-//! （`romcat_core::adapter::transfer::export_task`）。三支都由长入口自己说
+//! （`romcat_core::adapter::transfer::export_task`）。四支都由长入口自己说
 //! （`romcat_core::task::Handle::halfway` 的文档写着这条分界）。
 
 use std::path::{Path, PathBuf};
@@ -274,6 +277,12 @@ impl Section {
                     thousands(outcome.report.total.matched),
                 ));
             }
+            // **回执与刮削面板那一趟是同一句**（`crate::scrape::finished`）：同一个函数
+            // 交出来的产物，两处各折一句的话迟早差着字。
+            Ending::Done(Product::Scraped(outcome)) => {
+                self.error = None;
+                self.notice = Some(crate::scrape::finished(outcome));
+            }
             Ending::Done(Product::Titled(report)) => {
                 self.error = None;
                 self.notice = Some(format!(
@@ -382,24 +391,32 @@ impl Section {
                 ui.end_row();
                 for row in &rows {
                     ui.label(row.stage.label());
-                    match &row.behind {
+                    let 那个数 = match &row.behind {
                         // **还差东西的那一行标出来**：这一段存在的全部理由就是这个数。
                         Behind::Left(left) if *left > 0 => {
-                            ui.colored_label(ui.visuals().warn_fg_color, row.render());
+                            ui.colored_label(ui.visuals().warn_fg_color, row.render())
                         }
                         // 不差什么了、以及**这一支交不出度量退回时刻**的那一行，
                         // 都不该抢眼——后者说的是「我算不出来」，不是「你该动手了」。
-                        Behind::Left(_) | Behind::Unmeasured { .. } => {
-                            ui.weak(row.render());
-                        }
+                        Behind::Left(_) | Behind::Unmeasured { .. } => ui.weak(row.render()),
+                    };
+                    // **口径也挂在那个数上**：指针停在数上就读得到它数的是什么。
+                    if let Some(basis) = row.stage.basis() {
+                        那个数.on_hover_text(basis);
                     }
                     let 忙 = self.task_of(row.stage).is_some();
+                    let mut 悬停 = "排到任务台上跑，期间照常用别的屏；\
+                                  按得停——停下来留下了什么，那一趟自己会在任务台上说。"
+                        .to_string();
+                    // **刮削那颗按钮说清排的是哪一趟**：旋钮是固定的整库那一套，不是
+                    // 浏览屏刮削面板眼下拨到哪儿的那一套（`crate::scrape::whole_library`）。
+                    if row.stage == Stage::Scrape {
+                        悬停.push('\n');
+                        悬停.push_str(crate::scrape::WHOLE_LIBRARY);
+                    }
                     if ui
                         .add_enabled(!忙, egui::Button::new(if 忙 { "跑着呢" } else { "开跑" }))
-                        .on_hover_text(
-                            "排到任务台上跑，期间照常用别的屏；\
-                             按得停——停下来留下了什么，那一趟自己会在任务台上说。",
-                        )
+                        .on_hover_text(悬停)
                         .clicked()
                     {
                         要跑 = Some(row.stage);
@@ -407,6 +424,14 @@ impl Section {
                     ui.end_row();
                 }
             });
+        // **口径画在屏上，不只藏在悬停里**（票 `gui-answers-all-six/04` 验收第 3 条）：
+        // 人不会去悬停一个数。画在表格底下而不塞进那一格——那句话长，塞进去会把表格撑宽、
+        // 把按钮那一列挤出窗口。那句话本身在核心里（`romcat_core::stage::SCRAPE_BASIS`）。
+        for row in &rows {
+            if let Some(basis) = row.stage.basis() {
+                ui.weak(format!("{}那一行的口径：{basis}", row.stage.label()));
+            }
+        }
         self.export_setup_ui(ui, site);
         if let Some(stage) = 要跑 {
             self.start(stage, site, tasks);
@@ -473,6 +498,7 @@ impl Section {
 fn run(stage: Stage, site: &mut Site, workspace: &Path, task: &Handle) -> Result<Product, Cutoff> {
     match stage {
         Stage::Identify => identify_run(site, workspace, task),
+        Stage::Scrape => scrape_run(site, workspace, task),
         Stage::FoldTitles => fold_titles_run(site, workspace, task),
         Stage::Export => export_run(site, workspace, task),
     }
@@ -525,6 +551,17 @@ fn identify_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Prod
     )
     .map(|outcome| Product::Identified(Box::new(outcome)))
     .map_err(|error| Cutoff::failed(format!("识别失败：{error}")))
+}
+
+/// 跑一趟**刮削**：整库、全部字段、只用本地源、不收媒体、补缺——**一个请求都不发**。
+///
+/// **装配只有一处**（`crate::scrape::run`）：浏览屏刮削面板排的那一趟走的是同一个函数，
+/// 这一支只把选项换成整库那一套（`crate::scrape::whole_library`，旋钮为什么是那一套
+/// 写在那儿）。
+fn scrape_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Product, Cutoff> {
+    let options = crate::scrape::whole_library(&site.catalog, workspace)
+        .map_err(|error| Cutoff::failed(format!("这份中立库读不动：{error}")))?;
+    crate::scrape::run(site, workspace, &options, None, task)
 }
 
 /// 跑一趟**折标题**：把识别与刮削的结论折成每个作品的**标题集合**。

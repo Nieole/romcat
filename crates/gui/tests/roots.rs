@@ -20,6 +20,8 @@
 //!   的地方**。
 //! - **折标题被按停时中立库一个字节都没动**：重折是「清掉再写回」，停在那中间等于把
 //!   整份**标题集合**丢掉——所以它压根不停在那儿。
+//! - **刮削那一行的口径画在屏上**：那个数数的是一条刮削结论都没有的变体，一眼看去却像
+//!   「按我眼下那套旋钮还差多少」——不写出来，人会拿它当刮削面板那本估算账读。
 //!
 //! 主库**一律拿本地 fixture 目录模拟**：绝不去动任何真实设备或 SD 卡。
 
@@ -219,6 +221,36 @@ impl 现场 {
             .stages()
             .of(Stage::Identify)
             .expect("工序段有识别那一行")
+            .clone()
+    }
+
+    /// 台上摆一趟**等到被按停才收场**的活，返回它的任务号。
+    ///
+    /// 任务台一次只跑一趟，于是之后排上去的那一趟稳稳停在队里。**钉在「按停」这个信号上，
+    /// 不钉在挂钟上**：规格不许再添「几千步、每步睡几毫秒」那种写法（挂单 `Q427`）
+    /// ——机器一忙它就自己先结束。忘了按停的话，`等任务跑完` 会当场炸出来。
+    fn 占住任务台(&mut self) -> u64 {
+        self.app.tasks_mut().queue("装作在扫一趟库", |task| {
+            loop {
+                task.check()?;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        })
+    }
+
+    /// 把**刮削**那一道工序排上任务台，等它收场。界面上点那一行的按钮走的就是这条。
+    fn 跑刮削(&mut self) {
+        self.app.start_stage(Stage::Scrape);
+        self.等任务跑完();
+    }
+
+    /// 工序段上刮削那一行。
+    fn 刮削那一行(&self) -> StageRow {
+        self.app
+            .roots()
+            .stages()
+            .of(Stage::Scrape)
+            .expect("工序段有刮削那一行")
             .clone()
     }
 
@@ -1065,7 +1097,7 @@ fn 工序段上折标题一行_画的是上次跑的时刻() {
         "工序段上没有折标题那一行：\n{屏上}",
     );
     assert!(
-        屏上.lines().any(|line| line.trim() == "工序 · 3 道"),
+        屏上.lines().any(|line| line.trim() == "工序 · 4 道"),
         "工序段说的道数不对：\n{屏上}",
     );
 
@@ -1138,6 +1170,208 @@ fn 工序段上导出一行_画的是上次跑的时刻() {
     // **另外两支照旧**：识别报数，折标题说它自己那一句（验收第 1 条「不牵连另外两支」）。
     assert_eq!(现场.识别那一行().behind, Behind::Left(2));
     assert!(现场.折标题那一行().render().contains("还没跑过"));
+}
+
+#[test]
+fn 工序段上刮削一行_数与口径都画在屏上() {
+    // 验收第 1–3 条：工序段有四行、刮削那一行报得出「一条刮削结论都没有的变体」有几个、
+    // 那个数的口径**画在屏上**——不只在悬停里，人不会去悬停一个数。
+    let 库 = 建库("gui-stages-刮削一行");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+
+    assert_eq!(
+        现场.刮削那一行().behind,
+        Behind::Left(2),
+        "扫进来两个变体，一条刮削结论都还没有",
+    );
+
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        屏上.lines().any(|line| line.trim() == "工序 · 4 道"),
+        "工序段说的道数不对：\n{屏上}",
+    );
+    assert!(
+        屏上.lines().any(|line| line.trim() == "刮削"),
+        "工序段上没有刮削那一行：\n{屏上}",
+    );
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line.trim() == "2 个变体一条刮削结论都还没有"),
+        "刮削那一行说的不是「还差多少」：\n{屏上}",
+    );
+    assert!(
+        屏上.contains(romcat_core::stage::SCRAPE_BASIS),
+        "刮削那一行的口径没画在屏上：\n{屏上}",
+    );
+    // **另外几行照旧**：识别那一行报它自己的数。
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line.trim() == "2 个变体连识别都还没跑过"),
+        "加了刮削那一行，识别那一行不见了：\n{屏上}",
+    );
+}
+
+#[test]
+fn 点一下把刮削排上任务台_跑完那一行的数跟着变_主库一个字节都没动() {
+    // 验收第 4 条：按那一行的按钮排一趟刮削上任务台，跑完那一行的数跟着变。
+    // **一个请求都不发**：这一趟没给凭据，工序段排出去的那一趟也只用本地源。
+    let 库 = 建库("gui-stages-刮削跑一趟");
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    let 刮之前 = 主库快照(库.path());
+    assert_eq!(现场.刮削那一行().behind, Behind::Left(2), "前提：还没刮过");
+
+    现场.跑刮削();
+
+    // 任务台上留下一条**跑完了**的历史，名字就是这道工序的名字。
+    let record = &现场.app.tasks().history()[0];
+    assert_eq!(record.name, "刮削");
+    assert!(
+        matches!(record.ending, Ending::Done(_)),
+        "跑完的那一趟记成了「{}」",
+        record.ending.render(),
+    );
+    // **那一行当场刷新**：不必再点一次什么。
+    assert_eq!(现场.刮削那一行().behind, Behind::Left(0));
+    let 说的 = 现场.app.roots().stages().notice().expect("跑完了也要说话");
+    assert!(说的.starts_with("刮削跑完了"), "{说的}");
+    assert!(!说的.contains("联网"), "工序段排的那一趟发了请求：{说的}");
+    // **主库一个字节都没动**（ADR-0004）。
+    assert_eq!(主库快照(库.path()), 刮之前, "刮一趟动了主库");
+}
+
+#[test]
+fn 刮削这一趟正在跑的时候那一行的按钮按不下去() {
+    // 验收第 6 条，照识别那一行的先例：不禁掉的话同一趟刮削会被排两遍。
+    let 库 = 建库("gui-stages-刮削按不下去");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    let 占位 = 现场.占住任务台();
+
+    现场.app.start_stage(Stage::Scrape);
+    let id = 现场
+        .app
+        .roots()
+        .stages()
+        .task_of(Stage::Scrape)
+        .expect("这一趟排上任务台了");
+
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        屏上.lines().any(|line| line.trim() == "跑着呢"),
+        "刮削还在台上，那一行的按钮却还写着「开跑」：\n{屏上}",
+    );
+    // **只禁它自己那一行**：另外三行照旧按得下去。
+    assert_eq!(
+        屏上.lines().filter(|line| line.trim() == "开跑").count(),
+        3,
+        "禁掉的不只是刮削那一行：\n{屏上}",
+    );
+
+    // 再按一次：**什么都不该发生**。
+    现场.app.start_stage(Stage::Scrape);
+    assert_eq!(
+        现场.app.tasks().queued().len(),
+        1,
+        "同一趟刮削被排了两遍：{:?}",
+        现场.app.tasks().queued(),
+    );
+    assert_eq!(
+        现场.app.roots().stages().task_of(Stage::Scrape),
+        Some(id),
+        "第二次按下换掉了台上那一趟",
+    );
+
+    现场.app.tasks_mut().stop(id);
+    现场.app.tasks_mut().stop(占位);
+    现场.等任务跑完();
+}
+
+#[test]
+fn 刮削排着队被撤掉时记成已取消_一条刮削结论都没多() {
+    // 验收第 5 条「四档收场照旧分得开」里的第二档：还没开采就停下，什么都没留下。
+    // 与导出那一支同一个验法——排在一趟占位的活后面，撤掉它。
+    let 库 = 建库("gui-stages-刮削撤掉");
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    let 占位 = 现场.占住任务台();
+
+    现场.app.start_stage(Stage::Scrape);
+    let id = 现场
+        .app
+        .roots()
+        .stages()
+        .task_of(Stage::Scrape)
+        .expect("这一趟排上任务台了");
+    现场.app.tasks_mut().stop(id);
+    现场.app.poll_tasks();
+
+    let record = 现场
+        .app
+        .tasks()
+        .history()
+        .iter()
+        .find(|one| one.id == id)
+        .expect("撤掉的那一趟也进历史");
+    assert!(
+        matches!(record.ending, Ending::Stopped),
+        "撤掉的那一趟记成了「{}」——它一个锚点都没采",
+        record.ending.render(),
+    );
+    assert_eq!(
+        现场.刮削那一行().behind,
+        Behind::Left(2),
+        "撤掉的那一趟写了库"
+    );
+    let 说的 = 现场.app.roots().stages().notice().expect("停下了也要说话");
+    assert!(说的.starts_with("刮削"), "{说的}");
+    assert!(!说的.contains("跑完了"), "停下的那一趟说成了跑完了：{说的}");
+    // 那一行的按钮又按得下去了。
+    assert!(现场.app.roots().stages().task_of(Stage::Scrape).is_none());
+
+    现场.app.tasks_mut().stop(占位);
+    现场.等任务跑完();
+}
+
+#[test]
+fn 刮削读不动优先级表时记成失败_并说清停在哪一步() {
+    // 验收第 5 条的第四档，**也是「报得出跑到哪儿」的落点**：任务台记下来的那句「停在哪一步」
+    // 取自把手上的进度，对得上就说明这一趟的 `task.step` 真的报出去了——与折标题那一条
+    // 同一个验法。**不静默退回内置那份表**：挑哪个源的值说了算的正是它。
+    let 库 = 建库("gui-stages-刮削坏表");
+    let mut 现场 = 现场::摆好();
+    写(
+        &现场.工作区.path().join("priorities.toml"),
+        "这不是一份 TOML".as_bytes(),
+    );
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    现场.跑刮削();
+
+    let record = &现场.app.tasks().history()[0];
+    assert_eq!(record.name, "刮削");
+    let Ending::Failed { step, why } = &record.ending else {
+        panic!("表都读不动却把这一趟记成了「{}」", record.ending.render());
+    };
+    assert_eq!(step, "读优先级表", "说不清停在哪一步");
+    assert!(!why.is_empty(), "说不清为什么跑不了");
+    let 说的 = 现场.app.roots().stages().error().expect("失败要说出来");
+    assert!(说的.contains("读优先级表"), "{说的}");
+    // **失败不算刮过**：那一行照旧是两个。
+    assert_eq!(现场.刮削那一行().behind, Behind::Left(2));
 }
 
 #[test]

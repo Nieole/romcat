@@ -385,6 +385,9 @@ impl App {
                 if let Some(stage) = self.roots.stages_mut().take_ran() {
                     match stage {
                         romcat_core::stage::Stage::Identify => self.queue.reload(&self.site),
+                        // **刮削跑完了，浏览屏重读一遍**：那一屏画的元数据那几栏正是它刚
+                        // 写进去的——与刮削面板排的那一趟认领之后同一句（见下面）。
+                        romcat_core::stage::Stage::Scrape => self.browse.refresh(&self.site),
                         // **折标题跑完了，浏览屏上的显示标题跟着更新**：那是这道工序
                         // 起没起作用唯一看得见的地方。走 `refresh` 而不是上面那句
                         // `invalidate`——显示标题画在**详情面板**上，而只有 `refresh`
