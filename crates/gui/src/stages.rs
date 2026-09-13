@@ -62,6 +62,7 @@ use romcat_core::adapter::transfer::{self, ExportOptions};
 use romcat_core::catalog::{Catalog, CatalogError, ExportSetup, Roots};
 use romcat_core::fs::RealFs;
 use romcat_core::identify;
+use romcat_core::identify::model::{Answers, DEFAULT_MODEL, Guessing, Limits, Price};
 use romcat_core::report::{human_bytes, thousands};
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::site::Site;
@@ -560,12 +561,18 @@ impl Section {
         match &done.ended {
             Ending::Done(Product::Identified(outcome)) => {
                 self.error = None;
-                self.notice = Some(format!(
+                let mut 回执 = format!(
                     "{} 跑完了：{} 个变体过了一遍，命中 {}。",
                     stage.label(),
                     thousands(outcome.report.total.variants),
                     thousands(outcome.report.total.matched),
-                ));
+                );
+                // **用上了库里已经问过的答案就说出口**（挂单 `Q418`）。
+                if let Some(line) = paid_answers_line(outcome) {
+                    回执.push('\n');
+                    回执.push_str(&line);
+                }
+                self.notice = Some(回执);
             }
             // **回执与刮削面板那一趟是同一句**（`crate::scrape::finished`）：同一个函数
             // 交出来的产物，两处各折一句的话迟早差着字。
@@ -637,10 +644,20 @@ impl Section {
             // **停在半路**：识别起手就把上一轮的结论清干净，所以它一定动过库
             // ——记成「可以当没跑过」是骗人的。那句话由核心库折
             // （`identify::run_task` 里 `Handle::halfway` 报的那一句），这一层原样转出来：
-            // **识别没有断点**，下一趟从头再算一遍。
-            Ending::Halfway { .. } => {
+            // 下一趟接着算剩下的（票 `gui-answers-all-six/03`）。
+            //
+            // 识别那一趟停下时库里已经折进去的模型推断候选照样是真的，那一行与跑完那一支
+            // 说的是同一句（`paid_answers_line`）。
+            Ending::Halfway { product, .. } => {
                 self.error = None;
-                self.notice = Some(format!("{} {}", stage.label(), done.ended.render()));
+                let mut 回执 = format!("{} {}", stage.label(), done.ended.render());
+                if let Product::Identified(outcome) = product
+                    && let Some(line) = paid_answers_line(outcome)
+                {
+                    回执.push('\n');
+                    回执.push_str(&line);
+                }
+                self.notice = Some(回执);
             }
             // 还排着队就被撤掉的那一趟压根没开跑：一个字节都没写。
             // **停了，什么都没留下。** 两条路走到这一档：还排着队就被撤掉（压根没开跑），
@@ -881,9 +898,9 @@ impl Section {
 /// 后台那条线程真跑的那一趟。
 ///
 /// **装配全在这儿**：DAT 库、沉淀库、剥离规则、中文离线源、TitleID 索引。领域判断一条
-/// 都不在这一层——它只是把核心库要的原料摆齐（与命令行 `romcat identify` 摆的是同一副，
-/// 只差**模型推断兜底**那一层：界面上没有价目表与花费上限那几个旋钮，所以那一层整个
-/// 关着，挂单 `Q418`）。
+/// 都不在这一层——它只是把核心库要的原料摆齐（与命令行 `romcat identify` 不带 `--model`
+/// 摆的原料是同一副；**模型推断**那一层只用库里已经问过的答案、一个请求都不发，比命令行
+/// 少装价目表与念计划的回调两样，见 [`model_layer`]）。
 fn run(
     stage: Stage,
     knobs: ExportKnobs,
@@ -948,6 +965,13 @@ fn identify_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Prod
     // 「无判据」，与命令行一个口径（读不到不是结论，ADR-0021）。
     let roots = Roots::load(&site.catalog)
         .map_err(|error| Cutoff::failed(format!("这份中立库读不动：{error}")))?;
+    // **库里已经问过的答案照旧折成候选**（挂单 `Q418`）：那是中立库里唯一花过钱的一张表。
+    // 整份读回来的写法与命令行一样（`Catalog::model_answers` → `Answers::build`）。
+    let answers = Answers::build(
+        site.catalog
+            .model_answers()
+            .map_err(|error| Cutoff::failed(format!("问过的答案读不动：{error}")))?,
+    );
     identify::run_task(
         &RealFs::new(),
         &mut site.catalog,
@@ -955,7 +979,7 @@ fn identify_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Prod
             repo: &repo,
             verdicts: &verdicts,
             naming: &naming,
-            guessing: &identify::model::Guessing::off(),
+            guessing: &model_layer(&answers),
             titledb: titledb.as_ref(),
         },
         &identify::Options::new(roots),
@@ -963,6 +987,67 @@ fn identify_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Prod
     )
     .map(|outcome| Product::Identified(Box::new(outcome)))
     .map_err(|error| Cutoff::failed(format!("识别失败：{error}")))
+}
+
+/// 识别的**模型推断**那一层：**只用中立库里已经问过的答案**，一个请求都不发（挂单 `Q418`）。
+///
+/// 不用那些答案的话，人得回终端跑一趟 `romcat identify` 才捡得回自己付过的钱。**照命令行
+/// 那样用字面量建**：核心库那个装配结构体的字段全部公开，不为界面另长一个构造器。与命令行
+/// 不带 `--model` 那一副比，这里少装价目表与念计划的回调两样（见下）。
+///
+/// ## 四样一起钉死
+///
+/// - **不给凭据**（`net: None`）：一个请求都不发。缓存命中在核心库的主循环里、与网络无关；
+///   发请求那一层一见没有网络句柄就返回。
+/// - **不排计划**（`planning: false`）。
+/// - **不装念计划的回调**（`announce: None`）：界面这一路从不印一份计划。
+/// - **价目表不装，价钱一律传零**。命令行「价目表里查不到就不启动」那道拦，拦的是**印一份
+///   零价的计划**；这一路既不排、也不念，零价到不了任何人眼前（回执只数候选）。日后真要在
+///   界面上开推断，那时再装价目表——那时它才有意义。
+///
+/// ## 提问指纹为什么对得上命令行问过的那些
+///
+/// 答案按**提问指纹**存，指纹里有模型名与上限里会改变答复的那几档（每条要几个候选、力度、
+/// 输出上限，`Limits::ask_fingerprint`）。这里取默认那个模型与 `Limits::default()`——命令行
+/// `--model-id`、`--model-guesses`、`--model-effort`、`--model-max-tokens` 的默认值指的正是
+/// 同一组核心库常量（花费上限与请求间隔在命令行上是字面量，但它们不进指纹），于是命令行
+/// 不拨旋钮时问过的答案，这一趟一条不落地命中。**拨过那几档问出来的答案对不上**，界面上
+/// 用不到（挂单 `Q751`）。
+fn model_layer(answers: &Answers) -> Guessing<'_> {
+    Guessing {
+        answers,
+        net: None,
+        planning: false,
+        announce: None,
+        model: DEFAULT_MODEL.to_string(),
+        price: Price {
+            input_per_mtok: 0,
+            output_per_mtok: 0,
+        },
+        checked: String::new(),
+        limits: Limits::default(),
+    }
+}
+
+/// 识别回执里「几条候选来自已经问过的答案」那一行；这份库上没有模型推断的候选时不说。
+///
+/// **数的是整份库**（识别报告里按数据源分的那一行），不是这一趟现折的那几条：接着上一趟算
+/// 的那一趟不重算已经有候选的变体（`identify::run_task`），只数这一趟会少报。界面这一路
+/// 一个请求都不发（[`model_layer`]），所以库里模型推断那一层的候选全部来自已经问过的答案。
+/// **只数候选，不提计划与花费**——这一路价钱传的是零，印出来就是一句假话。
+fn paid_answers_line(outcome: &identify::Outcome) -> Option<String> {
+    let row = outcome
+        .report
+        .sources
+        .iter()
+        .find(|row| row.source == identify::model::SOURCE)?;
+    (row.candidates > 0).then(|| {
+        format!(
+            "{} 条候选来自已经问过的答案（{} 个变体），这一趟一个请求都没发。",
+            thousands(row.candidates),
+            thousands(row.variants),
+        )
+    })
 }
 
 /// 跑一趟**刮削**：整库、全部字段、只用本地源、不收媒体、补缺——**一个请求都不发**。
@@ -1130,6 +1215,34 @@ mod tests {
             ExportSetup::check("Pegasus", &导出去.to_string_lossy()).expect("有 Pegasus 这个格式");
         site.catalog.set_export_setup(&setup).expect("记得下");
         (工作区, site)
+    }
+
+    #[test]
+    fn 识别那一层只用已经问过的答案_不给凭据_不排计划_不装念计划的回调_价钱传零() {
+        // 挂单 `Q418` 那几样**一起**钉死，少一样这一路就不对：手里有网络句柄就会发请求；
+        // 排了计划、装了念计划的回调，就会有一份零价的计划被念给人听。
+        // **价目表一处都没读**：价钱是零、核实日期是空的——那两样只有价目表给得出。
+        let answers = Answers::default();
+        let layer = model_layer(&answers);
+        assert!(
+            layer.net.is_none() && !layer.asking(),
+            "界面这一路手里有网络句柄"
+        );
+        assert!(!layer.planning, "界面这一路排了计划");
+        assert!(layer.announce.is_none(), "界面这一路装了念计划的回调");
+        assert_eq!(
+            layer.price,
+            Price {
+                input_per_mtok: 0,
+                output_per_mtok: 0,
+            },
+            "界面这一路的价钱不是零",
+        );
+        assert!(
+            layer.checked.is_empty(),
+            "界面这一路带着一个价目表核实日期：{}",
+            layer.checked,
+        );
     }
 
     #[test]
