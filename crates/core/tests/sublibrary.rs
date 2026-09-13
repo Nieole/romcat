@@ -35,6 +35,7 @@ fn 标上中文(catalog: &mut Catalog, key: &str, mark: ChineseMark) {
         .write_identifications(&[Identification {
             variant_key: key.to_string(),
             platform: None,
+            standalone: None,
             state: State::Matched,
             reason: None,
             units: 1,

@@ -977,8 +977,21 @@ fn identify_variant(
     // 答不出来的那些，第一之二步读完盘还要再问一次。
     let mut unknown = false;
     let mut silent = false;
-    match ask_verdicts(catalog, verdicts, variant, &units, state)? {
-        Said::Conclusion(record) => return Ok(record),
+    match ask_verdicts(catalog, verdicts, variant, &visible, &units, state)? {
+        Said::Conclusion(mut record) => {
+            settle_after_verdict(
+                library,
+                catalog,
+                ammo,
+                options,
+                variant,
+                &visible,
+                &mut units,
+                &mut record,
+                state,
+            )?;
+            return Ok(record);
+        }
         // 「都不对而且认不出」不短路：它照常走完下面的流程，只在结论上盖一句
         // [`VERDICT_UNKNOWN_REASON`]，队列据此不再问它。
         Said::Unknown => unknown = true,
@@ -991,6 +1004,7 @@ fn identify_variant(
             state: State::Skipped,
             reason: Some(skip.recorded()),
             platform: platform_of(variant, &units).map(ToString::to_string),
+            standalone: skip.standalone(),
             units: 0,
             nkit: 0,
             read_bytes: 0,
@@ -1043,10 +1057,21 @@ fn identify_variant(
     // 排在这一步而不是 SHA-1 那一趟之后，是因为**锚不看 SHA-1**：CRC-32 加大小到这儿
     // 已经齐了，往后再等只是白撞一遍 DAT。
     if silent {
-        match ask_verdicts(catalog, verdicts, variant, &units, state)? {
+        match ask_verdicts(catalog, verdicts, variant, &visible, &units, state)? {
             Said::Conclusion(mut record) => {
                 // 这一趟盘是真读了，报告里的花费不该少记一笔。
                 record.read_bytes = read_bytes;
+                settle_after_verdict(
+                    library,
+                    catalog,
+                    ammo,
+                    options,
+                    variant,
+                    &visible,
+                    &mut units,
+                    &mut record,
+                    state,
+                )?;
                 return Ok(record);
             }
             Said::Unknown => unknown = true,
@@ -1195,7 +1220,75 @@ fn identify_variant(
     if unknown {
         record.reason = Some(VERDICT_UNKNOWN_REASON.to_string());
     }
+    // **能不能独立运行，依据到这儿才齐**：TitleID 那一条要等 Switch 那一层读过容器头
+    // （票 `one-criterion-per-thing/05`）。判断只有 `scope::standalone` 那一处，结论跟着
+    // 这条结论落库，导出那道闸读它。
+    record.standalone = standalone_of(catalog, variant, &visible, &units)?;
     Ok(record)
+}
+
+/// 识别给一个变体定「能不能独立运行」：**依据拿齐了**才问 [`scope::standalone`]，没拿齐就不说。
+///
+/// TitleID 那条依据是这个变体里每份 Switch 容器的事实。这一趟探过的在 `unit.switch` 上；
+/// 这一趟没探的——被裁决短路、Switch 那一层没跑——从中立库里取算过的那份
+/// （`content_switch`，**不读盘**，与 [`probe_switch`] 取缓存是同一张表）。有一份两处都
+/// 拿不到（盘不在位、从没探过），结论就不说：拿名字那条顶上去的话，一份没读到票据的更新包
+/// 会被说成「能跑」（挂单 `Q704`）。
+///
+/// 从容器事实上**现问** [`scope::title_kind`]，不读落库的 `kind` 那一串：缓存里那一串可能是
+/// 改读法之前算的（挂单 `Q706`）。
+fn standalone_of(
+    catalog: &Catalog,
+    variant: &VariantRow,
+    visible: &scope::Visible,
+    units: &[ContentUnit],
+) -> Result<Option<crate::catalog::identify::Standalone>, CatalogError> {
+    let mut containers: Vec<switch::Facts> = Vec::new();
+    for unit in units.iter().filter(|unit| switch::by_name(&unit.name)) {
+        if let Some(facts) = &unit.switch {
+            containers.push(facts.clone());
+            continue;
+        }
+        let Some(facts) = catalog
+            .switch_facts(&unit.member)?
+            .get(&unit.inner)
+            .and_then(|text| serde_json::from_str::<switch::Facts>(text).ok())
+        else {
+            return Ok(None);
+        };
+        containers.push(facts);
+    }
+    let containers: Vec<&switch::Facts> = containers.iter().collect();
+    Ok(Some(scope::standalone(variant, visible, &containers).0))
+}
+
+/// 裁决短路出来的结论，**能不能独立运行**还没说时补齐依据再判。
+///
+/// [`ask_verdicts`] 先从中立库里取算过的 Switch 容器事实。取不到的是这一种：删库重扫之后、
+/// 裁决钉在路径上——识别每一趟都在 Switch 那一层读过它之前就短路，缓存永远空着。那就在这儿
+/// 把容器头读出来（[`probe_switch`]，几 KB，读完落库，下一趟不再读）。
+///
+/// 这是「裁决过的东西一个字节都不必再读」唯一的例外：不读的话那份更新包一趟都判不出来，
+/// 永远是前端条目（挂单 `Q704`）。那一层顺手产出的候选不要——人已经裁过了。
+#[allow(clippy::too_many_arguments)]
+fn settle_after_verdict(
+    library: &dyn LibraryFs,
+    catalog: &mut Catalog,
+    ammo: &Ammo<'_>,
+    options: &Options,
+    variant: &VariantRow,
+    visible: &scope::Visible,
+    units: &mut [ContentUnit],
+    record: &mut Identification,
+    state: &mut Run,
+) -> Result<(), IdentifyError> {
+    if record.standalone.is_some() || !units.iter().any(|unit| switch::by_name(&unit.name)) {
+        return Ok(());
+    }
+    let switched = probe_switch(library, catalog, options, variant, units, ammo, state)?;
+    record.read_bytes += switched.read_bytes;
+    record.standalone = standalone_of(catalog, variant, visible, units)?;
+    Ok(())
 }
 
 /// 把一个变体拆成几份要撞 DAT 的内容，顺带收集它里面能看见的名字（给 [`scope`] 用）。
@@ -2099,6 +2192,7 @@ fn ask_verdicts(
     catalog: &mut Catalog,
     verdicts: &verdict::Index,
     variant: &VariantRow,
+    visible: &scope::Visible,
     units: &[ContentUnit],
     state: &mut Run,
 ) -> Result<Said, CatalogError> {
@@ -2115,6 +2209,10 @@ fn ask_verdicts(
         // 判出来的是目录声明的那个（挂单 `Q602`）。
         Some(mut record) => {
             record.platform = platform_of(variant, units).map(ToString::to_string);
+            // **能不能独立运行同样由识别替它判**：人裁的是它是哪个发行版，不是它能不能独立
+            // 运行。Switch 那一层这一趟不跑，TitleID 从中立库里算过的那份取，不读盘
+            // （票 `one-criterion-per-thing/05`）。
+            record.standalone = standalone_of(catalog, variant, visible, units)?;
             Said::Conclusion(record)
         }
         None => Said::Unknown,
@@ -3214,6 +3312,8 @@ fn assemble(
         // 判出来的平台**落下来**：刮削读它，不再拿目录那一列判一次（票
         // `one-criterion-per-thing/03`）。
         platform: platform_of(variant, units).map(ToString::to_string),
+        // 能不能独立运行由 `identify_variant` 拿齐依据再填：TitleID 那一条这里还够不着。
+        standalone: None,
         units: usable,
         nkit,
         read_bytes,
@@ -3634,6 +3734,8 @@ impl Projector {
             // **裁决不判平台**：它没看过内容。识别那一趟替它补上（`ask_verdicts`），
             // 命令行与界面直接落的这一条不盖掉识别判过的那个（`write_identifications`）。
             platform: None,
+            // 能不能独立运行同理：裁决没看过内容，写库时不盖掉识别判过的那个。
+            standalone: None,
             units: 1,
             nkit: 0,
             read_bytes: 0,

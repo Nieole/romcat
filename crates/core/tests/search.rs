@@ -129,6 +129,7 @@ fn 建库() -> Catalog {
         records.extend((0..变体数(at)).map(|n| Identification {
             variant_key: 键(at, n),
             platform: None,
+            standalone: None,
             state: State::Matched,
             reason: None,
             units: 1,

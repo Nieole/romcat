@@ -37,15 +37,17 @@
 //! - **非游戏资产**（模拟器 BIOS、街机的 device set）：判断在
 //!   [`classify::non_game_asset`]，这里传变体的键去问它。真库上是 11 个
 //!   （`街机/FBA-ROMS/BIOS/neogeo.zip`、`ps2/…/Bios/SCPH-10000.BIN`）。
-//! - **补丁**：不可运行，识别那一趟已经判过并落了库（`identification.reason`），
-//!   这里读回来即可——导出这一趟看不到容器里装着什么，重判不了。
+//! - **补丁**，以及 Switch 容器的 TitleID 说出来的**附属内容**：判断在
+//!   `identify::scope::standalone`（名字与 TitleID 两条依据，TitleID 优先），识别那一趟
+//!   判一次、落进 `identification.standalone`，这里读那一列（ADR-0024 推论 3）。
+//!   **不 parse 那句理由**——TitleID 判出来的补丁根本不走「跳过」，理由里一个字都没有。
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::catalog::identify::Standalone;
 use crate::catalog::{Catalog, CatalogError, ReleaseRow, VariantRow};
 use crate::classify;
 use crate::dat::chinese::ChineseMark;
-use crate::identify::scope;
 use crate::path::file_name_of_key;
 use crate::scrape::priority::Priorities;
 use crate::scrape::{AnchorKind, Field};
@@ -291,15 +293,8 @@ pub fn run_within(
     let overrides = catalog.preferred_variants()?;
     let abnormal = catalog.abnormal_main_members()?;
 
-    // 识别那一趟判过的「跳过」，读回来即可——这一趟看不到容器里装着什么。
-    let mut skipped: BTreeMap<String, &'static str> = BTreeMap::new();
-    catalog.for_each_identification(&mut |_, _, reason, key, _| {
-        if let Some(reason) = reason
-            && let Some(kind) = scope::Skip::kind_in(reason)
-        {
-            skipped.insert(key.to_string(), kind);
-        }
-    })?;
+    // 识别那一趟判过的「自己不能独立运行」，读落了库的结论即可（ADR-0024 推论 3）。
+    let not_standalone = catalog.not_standalone()?;
 
     // 变体上的中文记号：**汉化压过官中**（`dat::chinese::mark_of` 同一条纪律）。
     let mut marks: BTreeMap<String, BTreeSet<ChineseMark>> = BTreeMap::new();
@@ -345,7 +340,7 @@ pub fn run_within(
     // 平台 → 作品名（或变体的键）→ 那几个变体。
     let mut grouped: BTreeMap<String, BTreeMap<Anchor, Vec<VariantRow>>> = BTreeMap::new();
     for variant in variants {
-        if let Some(why) = excluded(&variant, &abnormal, &skipped) {
+        if let Some(why) = excluded(&variant, &abnormal, &not_standalone) {
             out.count_excluded(why, &variant.key);
             continue;
         }
@@ -462,7 +457,7 @@ impl Anchor {
 fn excluded(
     variant: &VariantRow,
     abnormal: &BTreeMap<String, String>,
-    skipped: &BTreeMap<String, &'static str>,
+    not_standalone: &BTreeMap<String, Standalone>,
 ) -> Option<NotAnEntry> {
     if abnormal.get(&variant.key).map(String::as_str) == Some(Role::ExtraContent.code()) {
         return Some(NotAnEntry::ExtraContent);
@@ -471,12 +466,14 @@ fn excluded(
     if classify::non_game_asset(&variant.key) {
         return Some(NotAnEntry::NonGameAsset);
     }
-    // **只挡补丁那一类。** 「没有发行版链接」是同人移植与 homebrew——它们照样能跑，
-    // 挡掉等于把用户的自制游戏从前端里抹掉。
-    if skipped.get(&variant.key).copied() == Some(scope::PATCH) {
-        return Some(NotAnEntry::Patch);
+    // 补丁与附属内容：识别那一趟判过（`identify::scope::standalone`），读的是落了库的结论。
+    // 「没有发行版链接」不在里面——同人移植与 homebrew 照样能跑，挡掉等于把用户的自制
+    // 游戏从前端里抹掉。
+    match not_standalone.get(&variant.key)? {
+        Standalone::Runs => None,
+        Standalone::Patch => Some(NotAnEntry::Patch),
+        Standalone::ExtraContent => Some(NotAnEntry::ExtraContent),
     }
-    None
 }
 
 /// 这个变体凭什么当首选：汉化 > 官中 > 日版 > 其他，裁决压过全部。

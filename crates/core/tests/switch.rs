@@ -576,3 +576,119 @@ fn 容器里另有一批查不到的_content_id_就不自动通过() {
         整合[0].evidence
     );
 }
+
+/// 这个变体眼下落着「自己不能独立运行」的哪一种；能独立运行、或者没判过是 `None`。
+fn 落下的(
+    现场: &现场, 名字里带: &str
+) -> Option<romcat_core::catalog::identify::Standalone> {
+    现场
+        .catalog
+        .not_standalone()
+        .expect("读得出")
+        .into_iter()
+        .find(|(key, _)| key.contains(名字里带))
+        .map(|(_, what)| what)
+}
+
+#[test]
+fn 更新包落下的结论是补丁_追加内容是附属内容_本体与卡带都不是() {
+    // 挂账 `D142` 识别那一侧：「是不是补丁」判一次、落进结论，导出那道闸读的就是它
+    // （`tests/pegasus.rs` 与 `tests/gamelist.rs` 里 `switch_的补丁与附属内容…` 那两条）。
+    use romcat_core::catalog::identify::Standalone;
+    let mut 现场 = 建现场();
+    let titledb = 建_titledb();
+    跑(&mut 现场, Some(&titledb));
+
+    assert_eq!(落下的(&现场, "伊蘇X 更新"), Some(Standalone::Patch));
+    assert_eq!(
+        落下的(&现场, "伊蘇X 追加曲包"),
+        Some(Standalone::ExtraContent)
+    );
+    assert_eq!(落下的(&现场, "伊蘇X 北境歷險"), None);
+    assert_eq!(落下的(&现场, "伊蘇X 卡带"), None, "卡带里只有本体那张票据");
+}
+
+#[test]
+fn 人裁过的更新包重跑一趟识别照旧是补丁() {
+    // 被裁决短路的变体不走 Switch 那一层——可「是不是补丁」与人裁它是哪个发行版无关。
+    // 上一趟跑完之后下一趟起手清掉全部结论，于是这一条每次重跑识别都会走到。
+    use romcat_core::catalog::identify::Standalone;
+    let mut 现场 = 建现场();
+    let titledb = 建_titledb();
+    跑(&mut 现场, Some(&titledb));
+    assert_eq!(
+        落下的(&现场, "伊蘇X 更新"),
+        Some(Standalone::Patch),
+        "先得判出来"
+    );
+
+    let outcome = 带着一条裁决跑(&mut 现场, &titledb, "伊蘇X 更新");
+    assert_eq!(outcome.from_verdicts, 1, "这一趟真是裁决短路的");
+    assert_eq!(
+        落下的(&现场, "伊蘇X 更新"),
+        Some(Standalone::Patch),
+        "人裁的是发行版，不是它能不能独立运行"
+    );
+}
+
+/// 往沉淀库里钉一条**路径锚**的裁决——把名字里带着 `名字里带` 的那个变体定成伊蘇X 的一次
+/// 发行——再带着它跑一趟识别。
+fn 带着一条裁决跑(
+    现场: &mut 现场, titledb: &TitleDb, 名字里带: &str
+) -> identify::Outcome {
+    let 键 = 现场
+        .catalog
+        .variants()
+        .expect("读得出变体")
+        .into_iter()
+        .find(|it| it.key.contains(名字里带))
+        .unwrap_or_else(|| panic!("找得到 {名字里带}"))
+        .key;
+    let 主库 = 现场.catalog.library_name();
+    let mut store = verdict::Store::in_memory().expect("开得出沉淀库");
+    store
+        .put(&verdict::Verdict::now(
+            verdict::Anchor::Path {
+                library: 主库.clone(),
+                variant_key: 键,
+            },
+            verdict::Decision::Release(verdict::Facts {
+                work: "伊蘇X －北境歷險－".to_string(),
+                ..verdict::Facts::default()
+            }),
+        ))
+        .expect("写得进");
+    let index = verdict::Index::load(&store, &主库).expect("读得出沉淀库");
+    identify::run(
+        &RealFs::new(),
+        &mut 现场.catalog,
+        &identify::Ammo {
+            repo: &现场.repo,
+            verdicts: &index,
+            naming: &fuzzy::Naming::off(),
+            guessing: &identify::model::Guessing::off(),
+            titledb: Some(titledb),
+        },
+        &Options::new(Roots::single("库", 现场.dir.path())),
+        &CancelToken::new(),
+        &mut |_| {},
+    )
+    .expect("跑得动")
+}
+
+#[test]
+fn 裁决先于第一趟识别就钉在路径上_更新包照样判得出是补丁() {
+    // 删库重扫之后就是这个样子：中立库是新的，裁决钉在路径上。识别每一趟都在 Switch 那一层
+    // 读过它之前就被裁决短路，缓存里永远没有它的容器事实——不补读那几 KB，这份更新包
+    // 一趟都判不出来，永远是前端条目。
+    use romcat_core::catalog::identify::Standalone;
+    let mut 现场 = 建现场();
+    let titledb = 建_titledb();
+    let outcome = 带着一条裁决跑(&mut 现场, &titledb, "伊蘇X 更新");
+    assert_eq!(outcome.from_verdicts, 1, "这一趟真是裁决短路的");
+    assert_eq!(
+        落下的(&现场, "伊蘇X 更新"),
+        Some(Standalone::Patch),
+        "缓存里没有，就把容器头读出来再判"
+    );
+}

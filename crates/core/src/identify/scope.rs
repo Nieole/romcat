@@ -26,8 +26,11 @@
 use std::path::Path;
 
 use crate::catalog::VariantRow;
+use crate::catalog::identify::Standalone;
 use crate::classify::{self, Category};
 use crate::path::{extension_lower, file_name_of_key};
+
+use super::switch::{Facts, Kind};
 
 /// 一个变体里**能看见的内容名字**，连一句「这份名单靠不靠得住」。
 ///
@@ -83,22 +86,25 @@ impl Skip {
         }
     }
 
-    /// 落进中立库 `identification.reason` 那一列的那句话。
+    /// 这一类跳过顺带说了它**能不能独立运行**吗：补丁说了（不能）。没有发行版链接的没说
+    /// ——同人移植与 homebrew 照样能跑，可这一问问在 Switch 那一层之前，TitleID 那条依据
+    /// 还没读出来，结论不替它说。
+    #[must_use]
+    pub fn standalone(&self) -> Option<Standalone> {
+        match self {
+            Self::Patch(_) => Some(Standalone::Patch),
+            Self::NoRelease(_) => None,
+        }
+    }
+
+    /// 落进中立库 `identification.reason` 那一列的那句话。**给人看的**：报告按冒号前那个词
+    /// 分组，队列与详情照原样印。
     ///
-    /// **写与读必须共用它。** 导出要挡下补丁（补丁不可运行，做不成前端条目），
-    /// 判据只能从这一列读回来——识别那一趟才有容器内容可看，导出这一趟没有。
-    /// 两处各写一遍格式串，改一次就会有一处对不上。
+    /// 机器不从这句话里认东西：导出要挡的补丁读的是 `identification.standalone`
+    /// （[`standalone`](Self::standalone) 那一类的结论），不 parse 它。
     #[must_use]
     pub fn recorded(&self) -> String {
         format!("{}：{}", self.kind(), self.detail())
-    }
-
-    /// 从库里那句话认回它是哪一类；认不出是 `None`。
-    #[must_use]
-    pub fn kind_in(recorded: &str) -> Option<&'static str> {
-        [PATCH, NO_RELEASE]
-            .into_iter()
-            .find(|kind| recorded.starts_with(&format!("{kind}：")))
     }
 }
 
@@ -155,21 +161,99 @@ const HOMEBREW_APPS: &[&str] = &[
 ///
 /// 补丁的判据要看 [`Visible`]——一个名字叫「汉化补丁」的 zip，里面若装着一份完整的
 /// ROM，那它就不是补丁；而里面**看不进去**时，这句话根本说不出口。
+///
+/// 「是不是补丁」从 [`standalone`] 取，这里不另判。
 #[must_use]
 pub fn decide(variant: &VariantRow, visible: &Visible) -> Option<Skip> {
-    let name = file_name_of_key(&variant.key);
-    if let Some(skip) = patch_of(name, &variant.main_key, visible) {
-        return Some(skip);
+    if let (Standalone::Patch, Some(by)) = standalone(variant, visible, NOT_READ_YET) {
+        return Some(Skip::Patch(by));
     }
-    homebrew_of(name, variant.platform.as_deref())
+    homebrew_of(file_name_of_key(&variant.key), variant.platform.as_deref())
 }
 
-/// 这是不是一个**补丁**。
-fn patch_of(name: &str, main_key: &str, visible: &Visible) -> Option<Skip> {
+/// [`decide`] 交给 [`standalone`] 的 Switch 容器事实：**一份都还没读**。这一问问在撞 DAT
+/// 之前，Switch 那一层排在后面，TitleID 那条依据这时候还读不出来（挂单 `Q702`）。
+const NOT_READ_YET: &[&Facts] = &[];
+
+/// ⭐ **这份内容能不能独立运行：能跑、是补丁、还是附属内容**——全仓只在这里判
+/// （ADR-0024；判据是 ADR-0013 的「能否独立运行」）。「是不是补丁」就是它的一个答案。
+///
+/// 两条**依据**，有先后：
+///
+/// 1. **TitleID**（`containers`：这个变体里每份 Switch 容器的事实，逐份问 [`title_kind`]）。
+///    它是内容自己写着的，**比名字准，有它就用它**：一份 `伊蘇X[v1.0.2].nsp` 名字里一个
+///    「补丁」字都没有，TitleID 尾 `800` 照样说得出它是更新包（挂账 `D142`）。几份容器说法
+///    不一、或者其中一份说不清时，答「能跑」——错挡一个的代价是一部游戏从前端里消失，漏挡
+///    一个只是多一个条目。
+/// 2. **名字**：主文件的扩展名、看得见的内容、名字里自称的词（[`Visible`]）。没有一份容器
+///    说得出 TitleID 时才轮到它。
+///
+/// 第二样是名字那条依据判出补丁时凭的那一句——跳过的理由要印它。TitleID 判出来的不交：
+/// 那种变体不走跳过，没有地方印。
+///
+/// 识别那一趟判一次、跟着结论落库，导出那道闸读落了库的那一列（ADR-0024 推论 3）。
+#[must_use]
+pub fn standalone(
+    variant: &VariantRow,
+    visible: &Visible,
+    containers: &[&Facts],
+) -> (Standalone, Option<String>) {
+    let titles: Vec<Option<Kind>> = containers.iter().map(|facts| title_kind(facts)).collect();
+    if titles.iter().any(Option::is_some) {
+        let all = |one: Kind| titles.iter().all(|kind| *kind == Some(one));
+        let answer = if all(Kind::Patch) {
+            Standalone::Patch
+        } else if all(Kind::AddOn) {
+            Standalone::ExtraContent
+        } else {
+            Standalone::Runs
+        };
+        return (answer, None);
+    }
+    match patch_by_name(file_name_of_key(&variant.key), &variant.main_key, visible) {
+        Some(by) => (Standalone::Patch, Some(by)),
+        None => (Standalone::Runs, None),
+    }
+}
+
+/// **TitleID 那条依据**：这一份 Switch 容器整份是本体、补丁，还是附属内容；说不清是 `None`。
+///
+/// ⚠ **票据不一定替整份容器说话**。卡带上的本体没有票据（卡带那一套加密不走 titlekey），
+/// 同一张卡里打进去的更新包却带着——真库上五张「本体加更新」的卡里唯一那张票据都是更新包的
+/// （`switch` 模块里 `cross_check` 那段注释）。照它判，整张卡就成了补丁。所以：
+///
+/// - 有一张票据说是本体，这一份就能独立运行；
+/// - 否则只有**容器里恰好一档内容**（恰好一份 Meta NCA）、票据又众口一词时才照票据说；
+/// - 装着不止一档、票据说法不一、或者一张票据都没有：说不清。
+///
+/// 库体检的「Switch 的内容分布」（落库的 `switch::Facts::kind`）与 [`standalone`] 都从这儿取，
+/// 两处不各读一遍票据。
+#[must_use]
+pub fn title_kind(facts: &Facts) -> Option<Kind> {
+    let kinds: Vec<Kind> = facts
+        .ids
+        .iter()
+        .filter_map(|id| Kind::of(&id.key))
+        .collect();
+    if kinds.contains(&Kind::Base) {
+        return Some(Kind::Base);
+    }
+    let metas = facts
+        .entries
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .filter(|name| name.ends_with(".cnmt.nca") || name.ends_with(".cnmt.ncz"))
+        .count();
+    let first = *kinds.first()?;
+    (metas == 1 && kinds.iter().all(|kind| *kind == first)).then_some(first)
+}
+
+/// 名字那条依据说它是不是一个**补丁**；是的话交出凭什么。
+fn patch_by_name(name: &str, main_key: &str, visible: &Visible) -> Option<String> {
     let contents = &visible.names;
     // 主文件本身就是补丁格式：`.ips` / `.bps` / `.ppf` 之流。
     if let Some(ext) = patch_extension(main_key) {
-        return Some(Skip::Patch(format!("主文件是 .{ext} 补丁")));
+        return Some(format!("主文件是 .{ext} 补丁"));
     }
     // 容器里装的全是补丁：有补丁文件，且没有任何可运行的内容。
     // 两个条件缺一不可——装着补丁**也**装着 ROM 的包是个变体，不是补丁。
@@ -180,10 +264,10 @@ fn patch_of(name: &str, main_key: &str, visible: &Visible) -> Option<Skip> {
     if let Some(inner) = contents.iter().find_map(|inner| {
         patch_extension(inner).map(|ext| (file_name_of_key(inner).to_string(), ext))
     }) {
-        return Some(Skip::Patch(format!(
+        return Some(format!(
             "里面装的是 .{} 补丁（{}），没有可运行的内容",
             inner.1, inner.0
-        )));
+        ));
     }
     // 名字自称是补丁，而里面**确实**没有可运行的东西。
     //
@@ -194,9 +278,7 @@ fn patch_of(name: &str, main_key: &str, visible: &Visible) -> Option<Skip> {
     if visible.saw_inside
         && let Some(word) = patch_word(name)
     {
-        return Some(Skip::Patch(format!(
-            "名字里写着「{word}」，里面也没有可运行的内容"
-        )));
+        return Some(format!("名字里写着「{word}」，里面也没有可运行的内容"));
     }
     None
 }

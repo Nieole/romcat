@@ -93,7 +93,12 @@ CREATE TABLE IF NOT EXISTS identification(
     --
     -- 它**不是** `variant.platform` 的改写：那一列的语义就是「目录说的」，平台冲突那张
     -- 报表拿它当对照物，一个字都不动。NULL 是识别没判过：加这一列之前识别的那些行。
-    platform    TEXT
+    platform    TEXT,
+    -- **能不能独立运行**（票 `one-criterion-per-thing/05`，ADR-0013 的判据）：能跑 / 补丁 /
+    -- 附属内容，存的是 `Standalone::code`。判断只有 `identify::scope::standalone` 那一处，
+    -- 导出那道闸读这一列、不自己再判（ADR-0024 推论 3）。NULL 是这条结论不说：裁决落成的
+    -- 结论没看过内容、识别这一趟没拿齐依据，或者是加这一列之前识别的那些行。
+    standalone  TEXT
 ) STRICT;
 
 -- 算过的哈希。**同一份内容的两套口径都在这里**：`crc32`/`size` 是含头（原样），
@@ -300,30 +305,53 @@ CREATE TABLE IF NOT EXISTS verdict_batch_shadow_candidate(
 /// 票 `one-criterion-per-thing/03` 加的是 `identification.platform`（**识别判定的平台**）。
 /// 老行上它是 NULL，读的那一侧当「识别没判过」处理——那正是加这一列之前的唯一可能，
 /// 于是旧数据一行都不会被读错；旧程序写结论时列名单里没有它，照样写得进。
+///
+/// 票 `one-criterion-per-thing/05` 加的是 `identification.standalone`（**能不能独立运行**）。
+/// 它与 `platform` 不同，**补上那一刻要把旧结论搬进来**：导出那道闸
+/// 只认这一列，老行若空着，识别早就按名字判过的补丁会被当成前端条目放出去，而「接着上一趟
+/// 算」的识别不重算已有结论的变体。旧结论只有一处可搬——那一版把它写在理由的开头。
+/// Switch 的补丁与附属内容旧版从没判过，没有可搬的，重跑一趟识别才落下来。
 pub(super) fn add_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     add_column(conn, "content_hash", "sha1", "TEXT")?;
     add_column(conn, "content_hash", "bare_sha1", "TEXT")?;
-    add_column(conn, "identification", "platform", "TEXT")
+    add_column(conn, "identification", "platform", "TEXT")?;
+    if add_column(conn, "identification", "standalone", "TEXT")? {
+        conn.execute(
+            "UPDATE identification SET standalone = ?1 WHERE state = ?2 AND instr(reason, ?3) = 1",
+            params![
+                Standalone::Patch.code(),
+                State::Skipped.label(),
+                OLD_PATCH_REASON
+            ],
+        )?;
+    }
+    Ok(())
 }
 
-/// 一张表上缺了这一列就补上；已经有了就什么都不做。
+/// 加 `identification.standalone` 之前那一版识别把「按名字判出来的补丁」写成的理由开头
+/// （`identify::scope::Skip::recorded`）。**这是一段历史**：搬的是旧程序写下的行，
+/// 日后那句话怎么改，旧行上写着的都是这个样子。
+const OLD_PATCH_REASON: &str = "补丁：";
+
+/// 一张表上缺了这一列就补上；已经有了就什么都不做。返回这一次是不是真补了。
 fn add_column(
     conn: &rusqlite::Connection,
     table: &str,
     column: &str,
     decl: &str,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<bool> {
     let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let mut rows = statement.query([])?;
     while let Some(row) = rows.next()? {
         if row.get::<_, String>(1)? == column {
-            return Ok(());
+            return Ok(false);
         }
     }
     drop(rows);
     drop(statement);
     // 表名与列名都是这个文件里写死的字面量，不来自外面。
-    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))
+    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+    Ok(true)
 }
 
 /// 一条候选的**置信度**（ADR-0002）。
@@ -473,6 +501,40 @@ impl Tier {
 /// 与详情面板的变体行都从这儿取——各处各抄一遍那四个字的话，改一处、断一处，
 /// 而断了没有一条编译错误会说话（票 `gui-redesign/17`）。
 pub const NOT_RUN_LABEL: &str = "还没识别";
+
+/// 一份内容**能不能独立运行**（ADR-0013 的判据）：能跑，还是补丁、附属内容。
+///
+/// 识别那一趟判一次、跟着结论落进 `identification.standalone`；导出那道闸读那一列，
+/// 不自己再判（ADR-0024 推论 3）。判断只有 `identify::scope::standalone` 那一处。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Standalone {
+    /// **能跑**：判过了，名字与 TitleID 都没说它不能独立运行。
+    Runs,
+    /// **补丁**：把一个变体变换成另一个变体的指令文件。
+    Patch,
+    /// **附属内容**：真正的追加内容，归属某个作品、有自己的名字，但不能独立运行。
+    ExtraContent,
+}
+
+impl Standalone {
+    /// 存进中立库用的短码。
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Runs => "runs",
+            Self::Patch => "patch",
+            Self::ExtraContent => "extra-content",
+        }
+    }
+
+    /// 从短码读回来。
+    #[must_use]
+    pub fn from_code(code: &str) -> Option<Self> {
+        [Self::Runs, Self::Patch, Self::ExtraContent]
+            .into_iter()
+            .find(|it| it.code() == code)
+    }
+}
 
 /// 一个变体这一轮识别的结论。
 ///
@@ -747,6 +809,13 @@ pub struct Identification {
     /// 那一层要重问的那几个（`identify::run` 起手那一步）：它们的旧值是上一趟判的，两趟
     /// 之间弹药没换过时与这一趟判的一样（换过的情形见挂单 `Q631`）。
     pub platform: Option<String>,
+    /// **能不能独立运行**：`identify::scope::standalone` 那一处判断的结论（票
+    /// `one-criterion-per-thing/05`）。导出那道闸读它，不自己再判。
+    ///
+    /// **`None` 是这条结论不说**：裁决从命令行与界面直接落成的结论没看过内容；识别这一趟
+    /// 没拿齐依据（有一份 Switch 容器没读到）也不说。「能跑」是判过的一个答案，明写成
+    /// [`Standalone::Runs`]。写库时 `None` 不盖掉库里已有的那个，`Runs` 盖得掉。
+    pub standalone: Option<Standalone>,
     /// 拿了几份内容去撞。
     pub units: u64,
     /// 这个变体里有几份是 NKit 处理过的镜像。
@@ -1835,17 +1904,20 @@ impl Catalog {
                 .map_err(to_err)?;
             // **不说平台的结论不盖掉判过的那个**：裁决落成的结论没看过内容
             // （`Projector::project`），人裁完一条，识别按内容判定的平台照旧留着。
+            // 「能不能独立运行」那一列同理：人裁完一份更新包是哪个发行版，它照旧是补丁。
+            // 识别判出的「能跑」是明写的一个值，不是空，所以盖得掉判过的旧值。
             let mut insert_identification = tx
                 .prepare(
                     "INSERT INTO identification(variant_key, state, reason, units, candidates,
-                         accepted, nkit, read_bytes, platform)
-                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                         accepted, nkit, read_bytes, platform, standalone)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
                      ON CONFLICT(variant_key) DO UPDATE SET
                         state = excluded.state, reason = excluded.reason,
                         units = excluded.units, candidates = excluded.candidates,
                         accepted = excluded.accepted, nkit = excluded.nkit,
                         read_bytes = excluded.read_bytes,
-                        platform = COALESCE(excluded.platform, platform)",
+                        platform = COALESCE(excluded.platform, platform),
+                        standalone = COALESCE(excluded.standalone, standalone)",
                 )
                 .map_err(to_err)?;
             let mut link = tx
@@ -1870,6 +1942,7 @@ impl Catalog {
                         i64::try_from(record.nkit).unwrap_or(i64::MAX),
                         i64::try_from(record.read_bytes).unwrap_or(i64::MAX),
                         record.platform,
+                        record.standalone.map(Standalone::code),
                     ])
                     .map_err(to_err)?;
                 for candidate in &record.candidates {
@@ -2785,6 +2858,37 @@ impl Catalog {
             .map_err(|source| self.err(source))?;
         rows.collect::<Result<_, _>>()
             .map_err(|source| self.err(source))
+    }
+
+    /// 每个**不能独立运行**的变体：变体的键 → 补丁还是附属内容。能跑的、结论没说的都不在里面。
+    ///
+    /// 读的是识别那一趟判过、落了库的结论（`identification.standalone`），**不是第二次判断**
+    /// （ADR-0024 推论 3）：导出那道闸拿它挡补丁，自己不看名字、也不读 TitleID。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn not_standalone(&self) -> Result<BTreeMap<String, Standalone>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT variant_key, standalone FROM identification WHERE standalone IS NOT NULL",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (key, code) = row.map_err(|source| self.err(source))?;
+            if let Some(what) = Standalone::from_code(&code)
+                && what != Standalone::Runs
+            {
+                out.insert(key, what);
+            }
+        }
+        Ok(out)
     }
 
     /// **模型推断问过的答案**，整份读回来（票 12）。

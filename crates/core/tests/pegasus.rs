@@ -33,6 +33,9 @@ use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::scrape::{self, Priorities};
 use romcat_core::task::Handle;
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
+use romcat_core::testing::switch::{
+    ADD_ON_NSP, BASE_NSP, UPDATE_NSP, base_update_add_on, ticket, xci,
+};
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::title;
 use romcat_core::verdict;
@@ -285,6 +288,15 @@ fn 导出(现场: &mut 现场, force: bool) -> romcat_core::adapter::report::Exp
 
 fn 读出(现场: &现场, name: &str) -> String {
     fs::read_to_string(现场.out().join(name)).expect("读得出导出来的文件")
+}
+
+/// 这一趟导出写出去的全部元数据文件拼成一份——断言「谁是前端条目、谁不是」用。
+fn 导出的全文(现场: &现场, report: &romcat_core::adapter::report::ExportReport) -> String {
+    report
+        .files
+        .iter()
+        .map(|file| fs::read_to_string(现场.out().join(&file.path)).expect("读得出"))
+        .collect()
 }
 
 impl 现场 {
@@ -1094,6 +1106,131 @@ fn 真叫_bios_的根底下的游戏照旧导出成条目() {
     assert!(
         text.contains("Contra (Japan).zip"),
         "它底下的游戏照样是前端条目：{text}"
+    );
+}
+
+#[test]
+fn switch_的补丁与附属内容名字里一个字都没说也不导出为前端条目() {
+    // 挂账 `D142`：Switch 的更新包是**补丁**、追加内容是**附属内容**（词表、ADR-0013），可它们
+    // 的文件名多半只写着版本号或者一个中文名。说出是哪一种的是容器里那张票据的 TitleID
+    // （尾 `800` 是更新包，既不是 `000` 也不是 `800` 是追加内容）——那条依据比名字准。
+    // 按名字判出来的那一头照旧拦得住，见 `非游戏资产与补丁不导出为前端条目`。
+    let dir = temp_dir("pegasus-switch");
+    for (path, bytes) in base_update_add_on() {
+        写(&dir.path().join(path), &bytes);
+    }
+    let mut 现场 = 扫成现场(dir, "库");
+
+    let report = 导出(&mut 现场, false);
+    let 数 = |why: NotAnEntry| {
+        report
+            .excluded
+            .iter()
+            .find(|(label, _)| label == why.label())
+            .map_or(0, |(_, count)| *count)
+    };
+    assert_eq!(数(NotAnEntry::Patch), 1, "更新包那一个：{report:#?}");
+    assert_eq!(
+        数(NotAnEntry::ExtraContent),
+        1,
+        "追加内容那一个：{report:#?}"
+    );
+    let text = 导出的全文(&现场, &report);
+    let 名字 = |path: &'static str| path.rsplit('/').next().unwrap_or(path);
+    assert!(text.contains(名字(BASE_NSP)), "本体照样是前端条目：{text}");
+    assert!(!text.contains(名字(UPDATE_NSP)), "补丁不导出：{text}");
+    assert!(!text.contains(名字(ADD_ON_NSP)), "附属内容不导出：{text}");
+}
+
+#[test]
+fn 本体加更新的卡带只带着更新的票据_照样是前端条目() {
+    // 另一头：**票据不一定替整个容器说话**。卡带上的本体没有票据（卡带那一套加密不走
+    // titlekey），同一张卡里打进去的更新包却带着——真库上五张「本体加更新」的卡里唯一
+    // 那张票据都是更新包的（`identify::switch::cross_check` 那段注释）。照那张票据把整张卡
+    // 判成补丁，一部游戏就从前端里没了。
+    const 更新: &str = "0100A0C01BED8800";
+    let dir = temp_dir("pegasus-switch-card");
+    写(
+        &dir.path().join("switch/伊蘇X 卡带[v1.0.2].xci"),
+        &xci(
+            0,
+            &["update", "logo", "normal", "secure"],
+            &[
+                &ticket(更新),
+                "8eed26260dbdb1ea545119cc0368fa06.cnmt.nca",
+                "dfdb0f5bc5c5056a2f35d0379ee23020.nca",
+                "ba39a7f62eeb23476c08600ed405a1cf.cnmt.nca",
+                "150cf9022bfb2e72527669f2701ee31b.nca",
+            ],
+        ),
+    );
+    let mut 现场 = 扫成现场(dir, "库");
+
+    let report = 导出(&mut 现场, false);
+    assert!(
+        report.excluded.iter().all(|(_, count)| *count == 0),
+        "{report:#?}"
+    );
+    let text = 导出的全文(&现场, &report);
+    assert!(
+        text.contains("伊蘇X 卡带[v1.0.2].xci"),
+        "整张卡是游戏：{text}"
+    );
+}
+
+#[test]
+fn 没有那一列的旧库_按名字判出来的补丁照旧不导出为前端条目() {
+    // **结构版本没升**：`identification.standalone` 是纯加的一列，旧库打开时补上。补上之后
+    // 老行若是空的，导出那道闸（它不再 parse 理由）就会把识别早就判过的汉化补丁当成前端
+    // 条目放出去——而「接着上一趟算」的识别不会重算这些已经有结论的变体。
+    let dir = temp_dir("pegasus-old-catalog");
+    写(
+        &dir.path().join(相对(补丁)),
+        &zip_container(&[ZipEntrySpec::stored("rockman3.ips", 补丁字节())]),
+    );
+    写(
+        &dir.path().join(相对(塞尔达)),
+        &zip_container(&[ZipEntrySpec::stored("Zelda.nes", 只有英文())]),
+    );
+    let 工作目录 = temp_dir("pegasus-old-catalog-ws");
+    let 库文件 = 工作目录.path().join("中立库.sqlite");
+    let mut catalog = Catalog::create(&库文件, "旧库").expect("能建中立库");
+    let mut options = ScanOptions::named(dir.path(), "库");
+    options.jobs = Jobs::Fixed(2);
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
+    let mut 现场 = 现场 {
+        dir,
+        _pool: temp_dir("pegasus-old-catalog-pool"),
+        catalog,
+    };
+    跑一遍(&mut 现场);
+
+    // 退回加这一列之前的样子：识别过，库里却没有那一列。
+    drop(std::mem::replace(
+        &mut 现场.catalog,
+        Catalog::open_in_memory().expect("能开中立库"),
+    ));
+    let conn = rusqlite::Connection::open(&库文件).expect("能再打开那个文件");
+    conn.execute_batch("ALTER TABLE identification DROP COLUMN standalone")
+        .expect("删得掉那一列");
+    drop(conn);
+    现场.catalog = Catalog::open(&库文件).expect("旧库照样打得开");
+
+    let report = 导出(&mut 现场, false);
+    let 补丁数 = report
+        .excluded
+        .iter()
+        .find(|(label, _)| label == NotAnEntry::Patch.label())
+        .map_or(0, |(_, count)| *count);
+    assert_eq!(
+        补丁数, 1,
+        "旧库里按名字判出来的那一个照旧拦得住：{report:#?}"
+    );
+    let text = 导出的全文(&现场, &report);
+    assert!(text.contains("Zelda (USA).zip"), "游戏照样导出：{text}");
+    assert!(
+        !text.contains("《流星洛克人3》汉化补丁.zip"),
+        "补丁不导出：{text}"
     );
 }
 

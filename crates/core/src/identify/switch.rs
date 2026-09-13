@@ -621,11 +621,7 @@ fn from_rows(wrapper: Wrapper, partitions: Vec<String>, rows: &[Row]) -> Facts {
     let compressed = entries
         .iter()
         .any(|name| name.to_ascii_lowercase().ends_with(".ncz"));
-    let kind = ids
-        .first()
-        .and_then(|id| Kind::of(&id.key))
-        .map(|kind| kind.code().to_string());
-    Facts {
+    let mut facts = Facts {
         wrapper: Some(wrapper.code().to_string()),
         structure: Some(
             structure_of(wrapper, &partitions, &entries)
@@ -637,9 +633,13 @@ fn from_rows(wrapper: Wrapper, partitions: Vec<String>, rows: &[Row]) -> Facts {
         content_ids,
         ids,
         compressed,
-        kind,
+        kind: None,
         note: None,
-    }
+    };
+    // 本体 / 补丁 / 附属内容怎么从票据读出来，只在 `scope::title_kind` 那一处
+    // （「能不能独立运行」问的也是它，票 `one-criterion-per-thing/05`）。
+    facts.kind = super::scope::title_kind(&facts).map(|kind| kind.code().to_string());
+    facts
 }
 
 /// 这个文件名是不是一份 NCA，是的话交出它的 **ContentId**。
