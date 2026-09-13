@@ -29,11 +29,23 @@ use romcat_core::catalog::Catalog;
 use romcat_core::site::Site;
 use romcat_core::workspace::{self, Slug};
 
-use crate::font;
+use crate::dialog::{Button, Dialog, Footer};
 use crate::roots::{ROOT_HINT, ROOT_NAME_HINT};
 
 /// 起名那一步框里的提示字。
 const NAME_HINT: &str = "主库原名，例如「主库」";
+
+/// 向导页脚上按下去的是哪一颗。
+enum Pressed {
+    /// 「算了」：退出那一颗，Esc 等于按它。
+    Drop,
+    /// 「下一步」：起名那一问上。
+    Next,
+    /// 「上一步」：选根那一问上。
+    Back,
+    /// 「开始扫描」：选根那一问上。
+    Claim,
+}
 
 /// 向导这会儿问的是哪一样。
 ///
@@ -115,97 +127,97 @@ impl Wizard {
         }
     }
 
-    /// 画一帧。
-    pub fn ui(&mut self, ui: &mut egui::Ui) -> Outcome {
-        ui.label(font::strong("添加主库"));
-        let out = match self.asking {
-            Asking::Name => {
-                self.name_ui(ui);
+    /// 画一帧：**一层弹层**（[`crate::dialog`]）。标题底下那句说明是这一问，内容区是那几个框，
+    /// 页脚是「算了 ｜ 上一步 · 下一步 / 开始扫描」。Esc 等于「算了」。
+    ///
+    /// **一帧里只会按下一颗**（弹层一帧只交回一个动作），于是「一帧里既走完又算了」在结构上
+    /// 撞不到——那时候库已经建出来了，而「算了」那一支说的是「磁盘上什么都没留下」。
+    pub fn show(&mut self, ctx: &egui::Context) -> Outcome {
+        let (note, footer) = match self.asking {
+            Asking::Name => (
+                "第一步：给这个主库起个名字。\
+                 换了挂载点、盘符变了，靠这个名字还能找回同一份中立库"
+                    .to_string(),
+                Footer::new(Button::new("算了", Pressed::Drop))
+                    .button(Button::new("下一步", Pressed::Next).primary()),
+            ),
+            // **「开始扫描」那颗就在这一问上**——第三步没有自己的一屏。
+            Asking::Root => (
+                format!(
+                    "第二步：给「{}」选第一个根。主库是一组根——往后再加第二块盘从库屏加",
+                    self.name.trim(),
+                ),
+                Footer::new(Button::new("算了", Pressed::Drop))
+                    .button(Button::new("上一步", Pressed::Back))
+                    .button(
+                        Button::new("开始扫描", Pressed::Claim)
+                            .primary()
+                            .hover("这一下才真的开出中立库：在这之前工作目录里一个文件都不多"),
+                    ),
+            ),
+        };
+        let shown = Dialog::new("添加主库", "添加主库", footer)
+            .note(note)
+            .show(ctx, |ui| self.fields_ui(ui));
+        match shown.pressed {
+            None => Outcome::Going,
+            Some(Pressed::Drop) => Outcome::Dropped,
+            Some(Pressed::Next) => {
+                self.named();
                 Outcome::Going
             }
-            Asking::Root => self.root_ui(ui),
-        };
-        // **走完了就到此为止**：这一帧是向导画的最后一帧，底下那句话与那颗「算了」都没有
-        // 下一帧可看了。摆这一句还有第二个理由——**一帧里不许既走完又算了**：那时候库已经
-        // 建出来了，而「算了」那一支说的是「磁盘上什么都没留下」。
-        if !matches!(out, Outcome::Going) {
-            return out;
+            Some(Pressed::Back) => {
+                self.asking = Asking::Name;
+                self.error = None;
+                Outcome::Going
+            }
+            Some(Pressed::Claim) => self.claim(),
         }
-        // **那句话画在两个框底下**：它是**按下去之后**才知道的，而这一帧的按下就发生在
-        // 上面那几行画完的那一刻——画在上头的话，人得多等一帧才看见它。
+    }
+
+    /// 内容区：这一问的那几个框，底下是上一下被拦下时说的那句话。
+    ///
+    /// **那句话是按下去之后才知道的**，而页脚那一下要等内容区画完才交回来——于是它落在下一帧
+    /// 上。弹层按下任何一颗都会要一次重画，人看见的仍旧是「按下去就说」。
+    fn fields_ui(&mut self, ui: &mut egui::Ui) {
+        match self.asking {
+            Asking::Name => {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.name)
+                        .hint_text(NAME_HINT)
+                        .desired_width(320.0),
+                );
+            }
+            Asking::Root => {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.first.path)
+                            .hint_text(ROOT_HINT)
+                            .desired_width(320.0),
+                    );
+                    // 系统目录选择器（[`crate::pick`]）：选中的目录落进左边这个框，与贴路径同一处。
+                    if ui
+                        .button("选择…")
+                        .on_hover_text(crate::pick::FALLBACK_HINT)
+                        .clicked()
+                    {
+                        self.picked_root(crate::pick::directory(
+                            "选第一个根",
+                            &self.root_pick_start(),
+                        ));
+                    }
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.first.name)
+                            .hint_text(ROOT_NAME_HINT)
+                            .desired_width(180.0),
+                    );
+                });
+            }
+        }
         if let Some(说的) = &self.error {
             ui.add_space(6.0);
             ui.colored_label(ui.visuals().error_fg_color, 说的);
         }
-        ui.add_space(6.0);
-        if ui.button("算了").clicked() {
-            return Outcome::Dropped;
-        }
-        Outcome::Going
-    }
-
-    /// 第一步：起名。
-    fn name_ui(&mut self, ui: &mut egui::Ui) {
-        ui.weak(
-            "第一步：给这个主库起个名字。\
-             换了挂载点、盘符变了，靠这个名字还能找回同一份中立库",
-        );
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.name)
-                    .hint_text(NAME_HINT)
-                    .desired_width(320.0),
-            );
-            if ui.button("下一步").clicked() {
-                self.named();
-            }
-        });
-    }
-
-    /// 第二步：选第一个根。**「开始扫描」那颗就在这一步上**——第三步没有自己的一屏。
-    fn root_ui(&mut self, ui: &mut egui::Ui) -> Outcome {
-        let mut out = Outcome::Going;
-        ui.weak(format!(
-            "第二步：给「{}」选第一个根。主库是一组根——往后再加第二块盘从库屏加",
-            self.name.trim(),
-        ));
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.first.path)
-                    .hint_text(ROOT_HINT)
-                    .desired_width(320.0),
-            );
-            // 系统目录选择器（[`crate::pick`]）：选中的目录落进左边这个框，与贴路径同一处。
-            if ui
-                .button("选择…")
-                .on_hover_text(crate::pick::FALLBACK_HINT)
-                .clicked()
-            {
-                self.picked_root(crate::pick::directory(
-                    "选第一个根",
-                    &self.root_pick_start(),
-                ));
-            }
-            ui.add(
-                egui::TextEdit::singleline(&mut self.first.name)
-                    .hint_text(ROOT_NAME_HINT)
-                    .desired_width(180.0),
-            );
-        });
-        ui.horizontal(|ui| {
-            if ui
-                .button("开始扫描")
-                .on_hover_text("这一下才真的开出中立库：在这之前工作目录里一个文件都不多")
-                .clicked()
-            {
-                out = self.claim();
-            }
-            if ui.button("上一步").clicked() {
-                self.asking = Asking::Name;
-                self.error = None;
-            }
-        });
-        out
     }
 
     /// 按下「开始扫描」那一下。**两段，次序是要紧的。**

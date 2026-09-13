@@ -103,14 +103,19 @@ fn 向导里选中一个目录填进选根那一步开始扫描照旧往下走()
     let 工作目录 = temp_dir("gui-pick-向导-工作目录");
     let 盘 = temp_dir("gui-pick-向导-盘");
     let ctx = headless::context();
+    // 弹层标题用的是观感基线里的 `title` 字号（票 `gui-looks-like-the-design/04`），不装就当场 panic。
+    romcat_gui::look::install(&ctx);
     let mut 向导 = Wizard::new(工作目录.path().to_path_buf());
+    // 头一帧 egui 在量弹层多大（不画、也不接），第二帧才摆稳——先空跑两帧再去点、去打字。
+    shared::跑一帧(&ctx, |ui| drop(向导.show(ui.ctx())));
+    shared::跑一帧(&ctx, |ui| drop(向导.show(ui.ctx())));
 
     shared::打字(&ctx, "主库原名，例如", "我的主库", |ui| {
-        drop(向导.ui(ui))
+        drop(向导.show(ui.ctx()))
     });
-    shared::点一下(&ctx, "下一步", |ui| drop(向导.ui(ui)));
+    shared::点一下(&ctx, "下一步", |ui| drop(向导.show(ui.ctx())));
     向导.picked_root(Some(盘.path().to_path_buf()));
-    let 屏上 = shared::跑一帧(&ctx, |ui| drop(向导.ui(ui)));
+    let 屏上 = shared::跑一帧(&ctx, |ui| drop(向导.show(ui.ctx())));
     assert!(
         屏上.contains(&romcat_core::path::display(盘.path())),
         "选中的目录没落进选根那个框：\n{屏上}",
@@ -118,7 +123,7 @@ fn 向导里选中一个目录填进选根那一步开始扫描照旧往下走()
 
     let mut 走完 = None;
     let 屏上 = shared::点一下(&ctx, "开始扫描", |ui| {
-        if let Outcome::Done(交出来的) = 向导.ui(ui) {
+        if let Outcome::Done(交出来的) = 向导.show(ui.ctx()) {
             走完 = Some(交出来的);
         }
     });
@@ -142,24 +147,31 @@ fn 向导里选中一个目录填进选根那一步开始扫描照旧往下走()
 fn 向导里取消选择器不进下一步也不动已经打的字() {
     let 工作目录 = temp_dir("gui-pick-向导取消-工作目录");
     let ctx = headless::context();
+    // 弹层标题用的是观感基线里的 `title` 字号（票 `gui-looks-like-the-design/04`），不装就当场 panic。
+    romcat_gui::look::install(&ctx);
     let mut 向导 = Wizard::new(工作目录.path().to_path_buf());
+    // 头一帧 egui 在量弹层多大（不画、也不接），第二帧才摆稳——先空跑两帧再去点、去打字。
+    shared::跑一帧(&ctx, |ui| drop(向导.show(ui.ctx())));
+    shared::跑一帧(&ctx, |ui| drop(向导.show(ui.ctx())));
 
     shared::打字(&ctx, "主库原名，例如", "我的主库", |ui| {
-        drop(向导.ui(ui))
+        drop(向导.show(ui.ctx()))
     });
-    shared::点一下(&ctx, "下一步", |ui| drop(向导.ui(ui)));
+    shared::点一下(&ctx, "下一步", |ui| drop(向导.show(ui.ctx())));
     shared::打字(
         &ctx,
         "那块盘上的目录",
         "/半截没打完的盘",
         |ui| {
-            drop(向导.ui(ui));
+            drop(向导.show(ui.ctx()));
         },
     );
-    shared::打字(&ctx, "根名（不填", "乙盘", |ui| drop(向导.ui(ui)));
-    let 取消之前 = shared::跑一帧(&ctx, |ui| drop(向导.ui(ui)));
+    shared::打字(&ctx, "根名（不填", "乙盘", |ui| {
+        drop(向导.show(ui.ctx()))
+    });
+    let 取消之前 = shared::跑一帧(&ctx, |ui| drop(向导.show(ui.ctx())));
     向导.picked_root(None);
-    let 取消之后 = shared::跑一帧(&ctx, |ui| drop(向导.ui(ui)));
+    let 取消之后 = shared::跑一帧(&ctx, |ui| drop(向导.show(ui.ctx())));
 
     assert!(
         取消之后.contains("第二步") && 取消之后.contains("开始扫描"),

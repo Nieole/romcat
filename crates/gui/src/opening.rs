@@ -210,7 +210,7 @@ impl Screen {
     /// 开场到此退场。
     fn claiming_ui(&mut self, ui: &mut egui::Ui) -> Option<Chosen> {
         let wizard = self.claiming.as_mut()?;
-        match wizard.ui(ui) {
+        match wizard.show(ui.ctx()) {
             claim::Outcome::Going => None,
             // **回那张表**：攒着的那三串字连同那条向导一起丢掉，磁盘上本来就什么都没有。
             claim::Outcome::Dropped => {

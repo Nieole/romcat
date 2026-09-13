@@ -1199,6 +1199,60 @@ fn 计划书开着时键盘一个字都不接落下的还是屏上那一份() {
 }
 
 #[test]
+fn 计划书开着时按退出键撤掉计划书_一个字都不写_关上之后逐条键盘照常() {
+    // 计划书是一层弹层（票 `gui-looks-like-the-design/04`）：底下那一屏的单键快捷键一个都不接，
+    // Esc 关最上面那一层，等于按页脚上的「取消」。**关上之后那道门得放开**——一直拦着的话，
+    // 逐条流从此一个键都按不动，比拦不住更难查。
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    let 多候选 = app
+        .queue()
+        .queue()
+        .batches()
+        .iter()
+        .find(|batch| batch.shape.fanout() == romcat_core::triage::Fanout::Several)
+        .cloned()
+        .expect("合成数据里该有 4–10 个候选那一档");
+    展开(&mut app, &多候选.shape);
+    app.queue_and_site().0.show_one_by_one();
+    跑(&ctx, &mut app, 1);
+    {
+        let (screen, site) = app.queue_and_site();
+        screen.preview(
+            site,
+            &Draft {
+                work: Some("某作".to_string()),
+                ..Draft::default()
+            },
+        );
+    }
+    跑(&ctx, &mut app, 2);
+    assert!(app.queue().pending().is_some(), "前提：计划书弹出来了");
+
+    按(&ctx, &mut app, egui::Key::N);
+    assert!(
+        app.queue().applied().is_none(),
+        "计划书开着时按 N 当场落下了一条",
+    );
+
+    按(&ctx, &mut app, egui::Key::Escape);
+    assert!(app.queue().pending().is_none(), "按了 Esc，计划书还挂着");
+    assert_eq!(
+        app.site().store.counts().expect("读得出沉淀库").total,
+        0,
+        "按了 Esc 却写了沉淀库",
+    );
+
+    // 关上那一下补的那一帧（弹层要了一次重画）。
+    跑(&ctx, &mut app, 1);
+    按(&ctx, &mut app, egui::Key::N);
+    assert!(
+        app.queue().applied().is_some(),
+        "计划书关上之后按 N 不生效——逐条流的键盘被一直拦着",
+    );
+}
+
+#[test]
 fn 换过选择器之后那份计划书作废而不是照旧落下() {
     // 队列一变样，计划书上那几行说的就不再是屏上这一批。**作废而不是照着新的重排**：
     // 重排出来的是另一份承诺，而人点「落下」点的是他看过的那一份（ADR-0016）。

@@ -4,7 +4,8 @@
 //!
 //! 亮暗两套 `Visuals` 与字号表由 [`install`] 从**令牌**（[`crate::tokens`]，同目录的
 //! `tokens.toml`）装上去，**每一个颜色都取自令牌**：底色、描边、字色、选中、焦点、警告与错误。
-//! `Visuals` 里没有槽位的颜色：置信度四档由 [`tier_color`] 按主题挑；平台色、视频播放标这类
+//! `Visuals` 里没有槽位的颜色：置信度四档由 [`tier_color`]、弹层遮罩由 [`scrim`] 按主题挑，
+//! 主按钮那一档由 [`primary_button`] 换上；平台色、视频播放标这类
 //! 两套主题共用、没有映射可言的，直接问令牌（[`Tokens::builtin`] 的 `color.platform`、
 //! `color.video`）。**界面里别处不写一个颜色**，要颜色就问 `ui.visuals()`、[`tier_color`]
 //! 或令牌。
@@ -23,16 +24,20 @@
 //! | `ink-4` | 输入法组字里没在转换的那几段下划线 |
 //! | `line` | 分隔线（不可交互那一档的描边） |
 //! | `line-2` | 未激活、展开两档的描边，弹窗描边 |
-//! | `accent` | 选中的字与描边、**键盘焦点**、文本光标、组字下划线 |
+//! | `accent` | 选中的字与描边、**键盘焦点**、文本光标、组字下划线；主按钮未激活那一档的底与描边 |
+//! | `accent-hover` | 主按钮悬停、按下两档的底 |
+//! | `on-accent` | 主按钮上的字，主按钮拿到焦点那一档的描边 |
 //! | `accent-soft` | 选中的底色 |
 //! | `accent-ink` | 链接 |
+//! | `pop-color` | 窗口与弹出菜单的阴影（`window_shadow`、`popup_shadow`；形状照令牌 `[shadow.pop]`） |
 //! | `mid` / `lo` | `warn_fg_color` / `error_fg_color` |
 //!
 //! **正文是 `ink-2`、强调字是 `ink`**：中文没有粗体（票 `gui-looks-like-the-design/02`），
 //! 一句纯中文的小标题与正文之间只剩颜色这一层差别——两个都给 `ink`，那一层也没了。
 //!
 //! **只换颜色，线宽一个点都不动**（理由见下面「键盘焦点」一节）；屏的版式由各屏自己的票重排。
-//! 圆角照令牌：控件 `medium`，窗口、弹窗与菜单 `large`。阴影不在令牌里，照 egui 原样。
+//! 圆角照令牌：控件 `medium`，窗口、弹窗与菜单 `large`。阴影照令牌 `[shadow.pop]` 那一节，颜色
+//! `pop-color`（设计稿 `--pop`）。
 //!
 //! 字号六档：egui 自带五档照它的名字对上（`Small` 说明文字、`Body` 与 `Button` 正文、
 //! `Heading` 页面标题、`Monospace` 与正文同大），另三档挂成具名档 [`CAPTION`] / [`TITLE`] /
@@ -86,6 +91,23 @@ use crate::tokens::{Palette, Tokens};
 /// 界面就悄悄退回 egui 默认的那一套颜色。
 pub fn install(ctx: &egui::Context) {
     install_tokens(ctx, Tokens::builtin());
+}
+
+/// 同 [`install`]，只是**这个窗口装过一次就不再装**。
+///
+/// [`crate::program::Program`] 每帧开头问它一遍：**开场**那一态手上还没有
+/// [`crate::app::App`]（装基线的另一处在它的第一帧里），而开场上的弹层——添加主库那条向导
+/// ——标题要的是令牌那几档字号（[`TITLE`]），没装的话 egui 当场 panic。
+pub fn install_once(ctx: &egui::Context) {
+    let 装过 = egui::Id::new("观感基线装过了");
+    if ctx
+        .data(|data| data.get_temp::<bool>(装过))
+        .unwrap_or(false)
+    {
+        return;
+    }
+    ctx.data_mut(|data| data.insert_temp(装过, true));
+    install(ctx);
 }
 
 /// 拿**这一份**令牌装。拆出来是为了让测试拿**改过的**令牌走一遍整条装配：哪一格写死了
@@ -191,9 +213,50 @@ fn visuals(tokens: &Tokens, theme: egui::Theme) -> egui::Visuals {
     v.window_fill = p.panel;
     v.window_stroke.color = p.line_2;
     v.menu_corner_radius = large;
+    // 弹层与弹出菜单的阴影：形状照令牌 `[shadow.pop]` 那一节，颜色是这一套主题的 `pop-color`。
+    let shape = tokens.shadow.pop;
+    let pop = egui::Shadow {
+        offset: shape.offset,
+        blur: shape.blur,
+        spread: shape.spread,
+        color: p.pop_color,
+    };
+    v.window_shadow = pop;
+    v.popup_shadow = pop;
     v.panel_fill = p.win;
     v.text_cursor.stroke.color = p.accent;
     v
+}
+
+/// **主按钮**那一档：把这块 `Visuals` 里按钮画得到的三档（未激活、悬停、按下与拿到焦点）换成
+/// 强调色底、`on-accent` 字。**全窗口只有这一处回答「主按钮什么颜色」**；画它的是
+/// [`crate::dialog`] 页脚上标了 `primary` 的那一颗。
+///
+/// 在一个 `ui.scope` 里改 `ui.visuals_mut()`，别处的控件不受影响。**拿到焦点那一档的描边换成
+/// `on-accent`**：强调色底上再描一圈强调色是看不见的，而焦点得看得见（模块文档「键盘焦点」一节）。
+pub fn primary_button(visuals: &mut egui::Visuals) {
+    let theme = egui::Theme::from_dark_mode(visuals.dark_mode);
+    primary_button_in(Tokens::builtin().color.theme(theme), visuals);
+}
+
+/// 主按钮在这一套颜色里取哪几个。拆出来的理由同 [`tier_color_in`]。
+fn primary_button_in(palette: &Palette, visuals: &mut egui::Visuals) {
+    let widgets = &mut visuals.widgets;
+    // 每一档：底色、描边。字一律 `on-accent`。
+    for (widget, fill, stroke) in [
+        (&mut widgets.inactive, palette.accent, palette.accent),
+        (
+            &mut widgets.hovered,
+            palette.accent_hover,
+            palette.accent_hover,
+        ),
+        (&mut widgets.active, palette.accent_hover, palette.on_accent),
+    ] {
+        widget.bg_fill = fill;
+        widget.weak_bg_fill = fill;
+        widget.bg_stroke.color = stroke;
+        widget.fg_stroke.color = palette.on_accent;
+    }
 }
 
 /// **置信度四档**画成什么颜色。**全窗口只有这一处回答这个问题。**
@@ -218,6 +281,21 @@ fn tier_color_in(palette: &Palette, tier: Tier) -> Color32 {
         Tier::Low => palette.lo,
         Tier::Unidentified => palette.none,
     }
+}
+
+/// 弹层底下那层**遮罩**画成什么颜色（令牌 `scrim`，半透明）。**全窗口只有这一处回答。**
+///
+/// `Visuals` 里没有这个槽位，于是与置信度四档同一个办法：按 `visuals` 是哪一套主题挑那一套。
+/// 画它的只有 [`crate::dialog`]。
+#[must_use]
+pub fn scrim(visuals: &egui::Visuals) -> Color32 {
+    let theme = egui::Theme::from_dark_mode(visuals.dark_mode);
+    scrim_in(Tokens::builtin().color.theme(theme))
+}
+
+/// 遮罩在这一套颜色里取哪一个。拆出来的理由同 [`tier_color_in`]。
+fn scrim_in(palette: &Palette) -> Color32 {
+    palette.scrim
 }
 
 /// 行左边缘那条**置信度色条**：宽取令牌 `tier-bar`、与一行正文一样高。
@@ -291,19 +369,10 @@ mod tests {
     /// 一处与令牌对不上的地方：`(令牌键, 哪儿对不上)`。
     type 偏离 = (String, String);
 
-    /// 令牌里**界面还没有一处用上**的颜色：页面背景（设计稿自己用）、主按钮、四档的浅底、
-    /// 对话框遮罩——egui 的 `Visuals` 里没有它们的槽位，而画它们的那几屏还没照稿重排。
+    /// 令牌里**界面还没有一处用上**的颜色：页面背景（设计稿自己用）、四档的浅底
+    /// ——egui 的 `Visuals` 里没有它们的槽位，而画它们的那几屏还没照稿重排。
     /// 哪一屏第一个用上它，就从这张单子里划掉（下面那条变异测试会提醒）。
-    const NOT_YET_USED: &[&str] = &[
-        "ground",
-        "accent-hover",
-        "on-accent",
-        "hi-soft",
-        "mid-soft",
-        "lo-soft",
-        "none-soft",
-        "scrim",
-    ];
+    const NOT_YET_USED: &[&str] = &["ground", "hi-soft", "mid-soft", "lo-soft", "none-soft"];
 
     /// 这套主题下**有映射的每一个颜色**与令牌逐项比，对不上的那几项：`visuals` 的每个颜色槽位，
     /// 加上 `四档`（置信度四档各取哪个颜色）。平台色与播放标直接读令牌、没有映射可接错，
@@ -319,6 +388,8 @@ mod tests {
         theme: Theme,
         visuals: &egui::Visuals,
         四档: impl Fn(Tier) -> Color32,
+        遮罩: Color32,
+        主按钮: &egui::style::Widgets,
     ) -> Vec<偏离> {
         let p = tokens.color.theme(theme);
         // `clip_rect_margin` 在 egui 0.36 里弃用了，可整个拆开就得点到它的名字。
@@ -342,14 +413,13 @@ mod tests {
             warn_fg_color,
             error_fg_color,
             window_corner_radius,
-            // 阴影不在令牌里：设计稿的 `--pop` 是 CSS 的 box-shadow，形状 egui 画不出一样的。
-            window_shadow: _,
+            window_shadow,
             window_fill,
             window_stroke,
             window_highlight_topmost: _,
             menu_corner_radius,
             panel_fill,
-            popup_shadow: _,
+            popup_shadow,
             // 以下都不是颜色也不是圆角。
             resize_corner_size: _,
             text_cursor,
@@ -423,6 +493,16 @@ mod tests {
             ("window_stroke".to_owned(), window_stroke.color, "line-2"),
             ("panel_fill".to_owned(), *panel_fill, "win"),
             (
+                "window_shadow.color".to_owned(),
+                window_shadow.color,
+                "pop-color",
+            ),
+            (
+                "popup_shadow.color".to_owned(),
+                popup_shadow.color,
+                "pop-color",
+            ),
+            (
                 "text_cursor.stroke".to_owned(),
                 cursor_stroke.color,
                 "accent",
@@ -492,6 +572,31 @@ mod tests {
         ] {
             颜色.push((format!("四档（{}）", tier.label()), 四档(tier), key));
         }
+        颜色.push(("弹层遮罩".to_owned(), 遮罩, "scrim"));
+        // 主按钮三档（[`primary_button`]）：底色、描边；字一律 `on-accent`。拿到焦点那一档的描边是
+        // `on-accent`——强调色底上描一圈强调色看不见。
+        for (name, widget, [fill, stroke]) in [
+            ("inactive", &主按钮.inactive, ["accent", "accent"]),
+            ("hovered", &主按钮.hovered, ["accent-hover", "accent-hover"]),
+            ("active", &主按钮.active, ["accent-hover", "on-accent"]),
+        ] {
+            颜色.push((format!("主按钮.{name}.bg_fill"), widget.bg_fill, fill));
+            颜色.push((
+                format!("主按钮.{name}.weak_bg_fill"),
+                widget.weak_bg_fill,
+                fill,
+            ));
+            颜色.push((
+                format!("主按钮.{name}.bg_stroke"),
+                widget.bg_stroke.color,
+                stroke,
+            ));
+            颜色.push((
+                format!("主按钮.{name}.fg_stroke"),
+                widget.fg_stroke.color,
+                "on-accent",
+            ));
+        }
 
         let mut out = Vec::new();
         if *dark_mode != (theme == Theme::Dark) {
@@ -517,6 +622,19 @@ mod tests {
                 out.push((
                     "(圆角)".to_owned(),
                     format!("{槽位} 是 {got:?}，令牌是 {want}"),
+                ));
+            }
+        }
+        let 令牌 = &tokens.shadow.pop;
+        for (槽位, shadow) in [
+            ("window_shadow", window_shadow),
+            ("popup_shadow", popup_shadow),
+        ] {
+            if (shadow.offset, shadow.blur, shadow.spread) != (令牌.offset, 令牌.blur, 令牌.spread)
+            {
+                out.push((
+                    "(阴影)".to_owned(),
+                    format!("{槽位} 的形状是 {shadow:?}，令牌是 {令牌:?}"),
                 ));
             }
         }
@@ -547,9 +665,16 @@ mod tests {
         let ctx = headless::context();
         install(&ctx);
         let style = ctx.style_of(theme);
-        颜色_偏离(Tokens::builtin(), theme, &style.visuals, |tier| {
-            tier_color(tier, &style.visuals)
-        })
+        let mut 主按钮 = style.visuals.clone();
+        primary_button(&mut 主按钮);
+        颜色_偏离(
+            Tokens::builtin(),
+            theme,
+            &style.visuals,
+            |tier| tier_color(tier, &style.visuals),
+            scrim(&style.visuals),
+            &主按钮.widgets,
+        )
     }
 
     /// **变异实测写成测试**：这套主题的令牌里每一个颜色各改一次，**拿改过的令牌走一遍整条装配**
@@ -574,12 +699,24 @@ mod tests {
             install_tokens(&ctx, &改过);
             let 装出来 = ctx.style_of(theme);
             let 四档 = |tier| tier_color_in(改过.color.theme(theme), tier);
-            if !颜色_偏离(&改过, theme, &装出来.visuals, 四档).is_empty() {
+            let 遮罩 = scrim_in(改过.color.theme(theme));
+            let mut 主按钮 = 装出来.visuals.clone();
+            primary_button_in(改过.color.theme(theme), &mut 主按钮);
+            let 主按钮 = &主按钮.widgets;
+            if !颜色_偏离(&改过, theme, &装出来.visuals, 四档, 遮罩, 主按钮).is_empty()
+            {
                 断了.push(*key);
             }
-            if !颜色_偏离(Tokens::builtin(), theme, &装出来.visuals, 四档)
-                .iter()
-                .any(|(报的, _)| 报的 == key)
+            if !颜色_偏离(
+                Tokens::builtin(),
+                theme,
+                &装出来.visuals,
+                四档,
+                遮罩,
+                主按钮,
+            )
+            .iter()
+            .any(|(报的, _)| 报的 == key)
             {
                 没人读.push(*key);
             }

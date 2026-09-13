@@ -1877,6 +1877,30 @@ fn 刮削面板每一种样子都画得出来() {
 }
 
 #[test]
+fn 刮削面板开着时按退出键就收起_旋钮留在原位() {
+    // 刮削是一层弹层（票 `gui-looks-like-the-design/04`）：Esc 关最上面那一层，等于按页脚上
+    // 退出那一颗——与「取消」一样，**旋钮留在原位**（人多半是回去改筛选，改完还想按同一套）。
+    let ctx = headless::context();
+    let mut app = 界面(小库);
+    摊开刮削面板(&ctx, &mut app);
+    app.browse_site_and_tasks()
+        .0
+        .scrape_mut()
+        .toggle_field(Field::Description);
+    跑(&ctx, &mut app, 3);
+    assert!(app.browse().scrape().is_open(), "前提：面板摊开着");
+
+    let esc = shared::输入(vec![shared::按键事件(egui::Key::Escape)]);
+    headless::frame(&ctx, esc, |ui| app.ui(ui));
+
+    assert!(!app.browse().scrape().is_open(), "按了 Esc，刮削面板还摊着");
+    assert!(
+        !app.browse().scrape().fields().contains(&Field::Description),
+        "收起来之后旋钮没留在原位",
+    );
+}
+
+#[test]
 fn 一行都没勾时不摊开刮削面板而是直说() {
     let ctx = headless::context();
     let mut app = 界面(小库);

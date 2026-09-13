@@ -1,6 +1,7 @@
 //! **刮削面板**：四个旋钮，外加按下去之前那本账。
 //!
-//! 它挂在[浏览屏](crate::browse)上：筛出一批，按「刮削选中…」，面板摊开。
+//! 它挂在[浏览屏](crate::browse)上：筛出一批，按「刮削选中…」，面板摊开——**画成一层弹层**
+//! （[`crate::dialog`]），与添加主库那条向导同一种写法。
 //!
 //! ## 四个旋钮，两条轴分得清清楚楚
 //!
@@ -47,6 +48,7 @@ use romcat_core::site::Site;
 use romcat_core::task::{Cutoff, Ending, Finished, Handle};
 use romcat_core::{verdict, workspace, zh};
 
+use crate::dialog::{Button, Dialog, Footer, Width};
 use crate::font;
 use crate::task::{Product, Tasks};
 
@@ -369,7 +371,7 @@ impl Panel {
     /// 分不出第二份，那时**就地跑完**——合成数据上这是几毫秒的事，与子库屏排差量预览
     /// 走的是同一条退路。
     ///
-    /// 界面上按「加入任务队列」走的就是它，测试与实测拿它当那一下。
+    /// 界面上按「开始刮削」走的就是它，测试与实测拿它当那一下。
     pub fn start(&mut self, site: &mut Site, tasks: &mut Tasks) {
         if self.running.is_some() {
             return;
@@ -470,30 +472,74 @@ impl Panel {
         true
     }
 
-    /// 画一帧。摊开着才画。
-    pub fn ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
+    /// 画一帧：**一层弹层**（[`crate::dialog`]），摊开着才画。
+    ///
+    /// 标题写着范围，内容区是三列旋钮加底下那本账，页脚是「取消 ｜ 开始刮削」。配额提醒摆着的
+    /// 时候内容区只剩那句提醒，页脚换成「算了 ｜ 我知道，勾上」。Esc 等于按页脚上退出那一颗：
+    /// 提醒摆着时是「算了」，否则是「取消」——一下退一层。
+    pub fn show(&mut self, ctx: &egui::Context, site: &mut Site, tasks: &mut Tasks) {
+        /// 页脚上按下去的是哪一颗。
+        enum Pressed {
+            /// 「取消」：收起，旋钮留在原位。
+            Close,
+            /// 「开始刮削」。
+            Start,
+            /// 配额提醒上的「我知道，勾上」。
+            Confirm,
+            /// 配额提醒上的「算了」。
+            Decline,
+        }
         if !self.open {
             return;
         }
         self.recount(&site.catalog);
-        ui.horizontal(|ui| {
-            ui.label(font::strong(format!(
-                "刮削 · 作用于筛出来的 {} 个变体",
-                thousands(self.scope_total()),
-            )))
-            .on_hover_text(
+        let footer = if self.quota {
+            Footer::new(Button::new("算了", Pressed::Decline))
+                .button(Button::new("我知道，勾上", Pressed::Confirm))
+        } else {
+            // **账算不出来就不许按。** 屏上写着「这本账算不出来」而按钮照旧按得下去的话，
+            // 勾了联网源就是在零估算下拿账号与 IP 发几千个请求——那正是这块面板要防的
+            // 那一件事（ADR-0007）。
+            let ready = self.running.is_none() && !self.scope.is_empty() && self.estimate.is_some();
+            Footer::new(Button::new("取消", Pressed::Close)).button(
+                Button::new("开始刮削", Pressed::Start)
+                    .primary()
+                    .enabled(ready)
+                    .hover(
+                        "排到任务台上跑：按下之后按「取消」或 Esc 收起这一层，\
+                         浏览、筛选、看详情照常，那一趟接着跑。\
+                         底下那本账算不出来时按不动——不知道要发多少请求就不该发。",
+                    ),
+            )
+        };
+        let title = format!(
+            "刮削 · 作用于筛出来的 {} 个变体",
+            thousands(self.scope_total()),
+        );
+        let shown = Dialog::new("刮削", title, footer)
+            .note(
                 "范围就是筛出来的那一批，这儿改不了——要改回左边的筛选器改。\
                  屏上写几个、这儿列几个、按下去动几个，三处同一个数。",
-            );
-            if ui.button("收起").clicked() {
-                self.close();
-            }
-        });
-        if self.quota {
-            self.quota_ui(ui);
-            return;
+            )
+            .width(Width::Wide)
+            .show(ctx, |ui| {
+                if self.quota {
+                    self.quota_ui(ui);
+                } else {
+                    self.knobs_ui(ui);
+                }
+            });
+        match shown.pressed {
+            None => {}
+            Some(Pressed::Close) => self.close(),
+            Some(Pressed::Start) => self.start(site, tasks),
+            Some(Pressed::Confirm) => self.confirm_online(),
+            Some(Pressed::Decline) => self.decline_online(),
         }
-        ui.separator();
+    }
+
+    /// 内容区：三列旋钮、底下那本账、按下去之后的回话。
+    fn knobs_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| self.fields_ui(ui));
             ui.separator();
@@ -503,8 +549,17 @@ impl Panel {
         });
         ui.separator();
         self.account_ui(ui);
-        ui.separator();
-        self.go_ui(ui, site, tasks);
+        if self.running.is_some() {
+            ui.weak("这一趟在任务屏里跑着。");
+        }
+        if let Some(notice) = &self.notice {
+            ui.weak(notice);
+        }
+        if let Some(error) = &self.error
+            && self.estimate.is_some()
+        {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
     }
 
     /// **字段 · 我要什么。**
@@ -620,54 +675,10 @@ impl Panel {
         );
     }
 
-    /// **配额提醒。** 勾联网源那一下先摆它。
-    fn quota_ui(&mut self, ui: &mut egui::Ui) {
-        ui.separator();
+    /// **配额提醒。** 勾联网源那一下先摆它：内容区只剩这一句，页脚换成「算了 ｜ 我知道，勾上」。
+    fn quota_ui(&self, ui: &mut egui::Ui) {
         ui.colored_label(ui.visuals().warn_fg_color, "勾上联网源之前，先看清这一条：");
         ui.label(QUOTA_WARNING);
-        ui.horizontal(|ui| {
-            if ui.button("我知道，勾上").clicked() {
-                self.confirm_online();
-            }
-            if ui.button("算了").clicked() {
-                self.decline_online();
-            }
-        });
-    }
-
-    /// **按下去那一行。**
-    fn go_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
-        let mut go = false;
-        ui.horizontal(|ui| {
-            // **账算不出来就不许按。** 屏上写着「这本账算不出来」而按钮照旧按得下去的话，
-            // 勾了联网源就是在零估算下拿账号与 IP 发几千个请求——那正是这块面板要防的
-            // 那一件事（ADR-0007）。
-            let ready = self.running.is_none() && !self.scope.is_empty() && self.estimate.is_some();
-            go = ui
-                .add_enabled(ready, egui::Button::new("加入任务队列"))
-                .on_hover_text(
-                    "排到任务台上跑：期间浏览、筛选、看详情照常。\
-                     底下那本账算不出来时按不动——不知道要发多少请求就不该发。",
-                )
-                .clicked();
-            if ui.button("取消").clicked() {
-                self.close();
-            }
-            if self.running.is_some() {
-                ui.weak("这一趟在任务屏里跑着。");
-            }
-        });
-        if go {
-            self.start(site, tasks);
-        }
-        if let Some(notice) = &self.notice {
-            ui.weak(notice);
-        }
-        if let Some(error) = &self.error
-            && self.estimate.is_some()
-        {
-            ui.colored_label(ui.visuals().error_fg_color, error);
-        }
     }
 }
 

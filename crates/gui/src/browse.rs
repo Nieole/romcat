@@ -1243,7 +1243,7 @@ impl Screen {
         &self.scrape
     }
 
-    /// 刮削面板，供测试与实测拨旋钮、按「加入任务队列」。
+    /// 刮削面板，供测试与实测拨旋钮、按「开始刮削」。
     pub fn scrape_mut(&mut self) -> &mut scrape::Panel {
         &mut self.scrape
     }
@@ -1593,15 +1593,10 @@ impl Screen {
         // **任务台上有活在跑就先不写库**：那时后台正拿着另一份写得动的连接（扫描），
         // 这条线程上的写会在 `busy_timeout` 上等最长十秒——那是画帧线程的十秒。
         self.sync_media(ui.ctx(), site, !tasks.busy());
-        // **四条边界都拖得动，四条都记得住**：怎么拖、拖到哪儿为止、拖到哪儿记在哪儿，
+        // **刮削是一层弹层**（[`crate::dialog`]），不占这一屏的地方：摊开着才画，盖在整屏上头。
+        self.scrape.show(ui.ctx(), site, tasks);
+        // **三条边界都拖得动，三条都记得住**：怎么拖、拖到哪儿为止、拖到哪儿记在哪儿，
         // 全在 [`crate::layout`] 那一份声明里（票 `gui-redesign/12`）。
-        if self.scrape.is_open() {
-            layout::SCRAPE.show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("刮削面板")
-                    .show(ui, |ui| self.scrape.ui(ui, site, tasks));
-            });
-        }
         layout::EDIT.show(ui, |ui| self.edit_panel(ui, site));
         layout::FILTER.show(ui, |ui| self.filter_panel(ui, site, tasks));
         layout::DETAIL.show(ui, |ui| self.detail_panel(ui, site));
