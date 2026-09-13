@@ -280,12 +280,22 @@ impl Screen {
         let title = format!("扫描 · {owned}");
         // **断点路径在这条线程上折**：后台那条线程手里没有现场（`Site` 交不过去）。
         let checkpoint = site.checkpoint_path(&self.workspace, name);
+        // **人工纠正也在这条线程上取**：它住沉淀库（票 `one-criterion-per-thing/07`），
+        // 后台那条线程手里没有沉淀库。旧库里记着的那几条，开现场时已经搬过去了。
+        let shaping_overrides = match site.shaping_overrides() {
+            Ok(overrides) => overrides,
+            Err(error) => {
+                self.error = Some(format!("沉淀库读不出来：{error}"));
+                return;
+            }
+        };
         let id = tasks.queue(title, move |task| {
             // 后台这条线程自己开一份写得动的中立库：`rusqlite::Connection` 不是 `Sync`，
             // 界面那条线程手里那一份交不过来。
             let mut catalog = Catalog::open(&file).map_err(|error| error.to_string())?;
             let mut options = ScanOptions::named(&path, &owned);
             options.workspace = Some(workspace);
+            options.shaping_overrides = shaping_overrides;
             // 界面上不给并发档：开扫前探一探介质自己定，与命令行默认那条路一样
             // （挂账 D9）。
             options.jobs = Jobs::Adaptive;

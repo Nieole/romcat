@@ -8,8 +8,9 @@
 //! NoNpDrm 的 `app/<TitleID>`、MaiDump 的 `<TitleID>`、TitleID 写在目录名里的、
 //! 以及 `.vpk` 与被归档裹着的。
 
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use romcat_core::catalog::Catalog;
 use romcat_core::fs::RealFs;
@@ -18,9 +19,12 @@ use romcat_core::report::HealthReport;
 use romcat_core::scan::aggregate::{ConflictEvidence, Limits};
 use romcat_core::scan::{self, Jobs, ScanOptions, ScanOutcome};
 use romcat_core::shape::Role;
+use romcat_core::site::Site;
 use romcat_core::task::Handle;
 use romcat_core::testing::sample::{chd, gba, iso, nds, zip};
 use romcat_core::testing::{TempDir, temp_dir};
+use romcat_core::verdict::{Anchor, Decision, Store, Verdict};
+use romcat_core::workspace::{self, CatalogState, Slug};
 
 fn 写(path: &Path, bytes: &[u8]) {
     fs::create_dir_all(path.parent().expect("有上级目录")).expect("能建目录");
@@ -337,32 +341,267 @@ fn 目录说的与文件说的对不上时被报出来() {
 #[test]
 fn 人工纠正把两个散文件并成一个变体且熬得过重扫() {
     let dir = 建库();
-    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-    扫(dir.path(), &mut catalog);
+    let mut site = Site::in_memory(
+        Catalog::open_in_memory().expect("能开中立库"),
+        Store::in_memory().expect("能开沉淀库"),
+        "主库",
+    );
+    照纠正扫(dir.path(), &mut site);
     assert!(
-        catalog
+        site.catalog
             .variant("库/FC/超级马里奥.zip")
             .expect("读得出")
             .is_some()
     );
 
     // 维护者说：这个 png 其实是那个变体的一部分。
-    catalog
-        .set_shaping_override("库/FC/封面.png", "库/FC/超级马里奥.zip")
+    site.store
+        .set_shaping_override("主库", "库/FC/封面.png", "库/FC/超级马里奥.zip")
         .expect("记得下");
-    catalog
-        .set_shaping_override("库/FC/超级马里奥.zip", "库/FC/超级马里奥.zip")
+    site.store
+        .set_shaping_override("主库", "库/FC/超级马里奥.zip", "库/FC/超级马里奥.zip")
         .expect("记得下");
 
     // 重扫一遍：纠正要熬得过去。
-    let report = 扫(dir.path(), &mut catalog).report;
-    let 并起来的 = catalog
+    let report = 照纠正扫(dir.path(), &mut site).report;
+    let 并起来的 = site
+        .catalog
         .variant("库/FC/超级马里奥.zip")
         .expect("读得出")
         .expect("还在");
     assert_eq!(并起来的.files, 2);
     assert!(并起来的.manual);
     assert_eq!(report.shaping.manual, 1);
+}
+
+/// 扫一遍，**照沉淀库里这份主库的人工纠正成型**——命令行 `romcat scan` 与界面上的
+/// 「扫描」都是这么接的：纠正从沉淀库里按**主库标识**取出来，交给这一趟。
+fn 照纠正扫(root: &Path, site: &mut Site) -> ScanOutcome {
+    let mut options = ScanOptions::named(root, "库");
+    options.jobs = Jobs::Fixed(4);
+    options.samples_per_class = 64;
+    options.shaping_overrides = site.shaping_overrides().expect("读得出沉淀库");
+    scan::scan(&RealFs::new(), &mut site.catalog, &options, &Handle::new()).expect("扫描不该失败")
+}
+
+/// 在工作目录里建一份落在磁盘上的中立库，连沉淀库一起开成现场。
+fn 建现场(工作目录: &Path) -> (PathBuf, Site) {
+    let 库文件 = workspace::catalog_path(工作目录, Slug::Named("主库"));
+    drop(Catalog::create(&库文件, "主库").expect("建得出中立库"));
+    let site = Site::open_file(工作目录, &库文件, None).expect("开得出现场");
+    (库文件, site)
+}
+
+/// **删掉中立库**：连 SQLite 的附件（`-wal` / `-shm`）一起，一个字节都不留给下一份。
+fn 删库(库文件: &Path) {
+    for 后缀 in ["", "-wal", "-shm"] {
+        let mut 名 = 库文件.as_os_str().to_owned();
+        名.push(后缀);
+        match fs::remove_file(PathBuf::from(名)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("删不掉中立库：{error}"),
+        }
+    }
+}
+
+#[test]
+fn 人工纠正熬得过删库重扫() {
+    // 「熬得过重扫」的另一半：**删掉中立库文件**、从零扫一遍，人一条条纠正出来的成型
+    // 还在。结构版本一变，维护者按提示做的正是这件事（ADR-0001 的修订，挂账 D97）。
+    let dir = 建库();
+    let 工作目录 = temp_dir("shaping-ws");
+    let (库文件, mut site) = 建现场(工作目录.path());
+    照纠正扫(dir.path(), &mut site);
+
+    // 维护者说：这个 png 其实是那个变体的一部分。
+    let 标识 = site.library_identity.clone();
+    site.store
+        .set_shaping_override(&标识, "库/FC/封面.png", "库/FC/超级马里奥.zip")
+        .expect("记得下");
+    site.store
+        .set_shaping_override(&标识, "库/FC/超级马里奥.zip", "库/FC/超级马里奥.zip")
+        .expect("记得下");
+    照纠正扫(dir.path(), &mut site);
+    assert!(
+        site.catalog
+            .variant("库/FC/超级马里奥.zip")
+            .expect("读得出")
+            .expect("在")
+            .manual,
+        "纠正当场就生效了",
+    );
+
+    drop(site);
+    删库(&库文件);
+    let (_, mut site) = 建现场(工作目录.path());
+    assert!(
+        site.catalog
+            .variant("库/FC/超级马里奥.zip")
+            .expect("读得出")
+            .is_none(),
+        "新库里本来什么都没有",
+    );
+
+    let report = 照纠正扫(dir.path(), &mut site).report;
+    let 并起来的 = site
+        .catalog
+        .variant("库/FC/超级马里奥.zip")
+        .expect("读得出")
+        .expect("还在");
+    assert_eq!(并起来的.files, 2, "封面还并在那个变体里");
+    assert!(并起来的.manual, "它仍是人工纠正出来的");
+    assert_eq!(report.shaping.manual, 1);
+}
+
+#[test]
+fn 旧中立库里记着的人工纠正_开现场时搬进沉淀库_撤掉的不再回来() {
+    // 人工纠正原先住在中立库里。新程序不再读那张表——**不搬一次，旧库里一条条纠正出来的
+    // 成型就悄悄没了**，而那正是这张票要防的事。
+    let dir = 建库();
+    let 工作目录 = temp_dir("shaping-carry-ws");
+    let (库文件, site) = 建现场(工作目录.path());
+    drop(site);
+    // 旧版程序在这份中立库里记过两条（那时的表就长这样）。
+    {
+        let conn = rusqlite::Connection::open(&库文件).expect("开得出旧库");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS shaping_override(
+                 key         TEXT PRIMARY KEY,
+                 variant_key TEXT NOT NULL
+             ) STRICT;
+             INSERT INTO shaping_override(key, variant_key) VALUES
+                 ('库/FC/封面.png', '库/FC/超级马里奥.zip'),
+                 ('库/FC/超级马里奥.zip', '库/FC/超级马里奥.zip');",
+        )
+        .expect("写得进旧表");
+    }
+
+    let mut site = Site::open_file(工作目录.path(), &库文件, None).expect("开得出现场");
+    let 标识 = site.library_identity.clone();
+    assert_eq!(
+        site.store.shaping_overrides(&标识).expect("读得出"),
+        BTreeMap::from([
+            (
+                "库/FC/封面.png".to_string(),
+                "库/FC/超级马里奥.zip".to_string()
+            ),
+            (
+                "库/FC/超级马里奥.zip".to_string(),
+                "库/FC/超级马里奥.zip".to_string()
+            ),
+        ]),
+        "开现场那一下就搬进沉淀库了",
+    );
+    照纠正扫(dir.path(), &mut site);
+    let 并起来的 = site
+        .catalog
+        .variant("库/FC/超级马里奥.zip")
+        .expect("读得出")
+        .expect("在");
+    assert_eq!(并起来的.files, 2, "搬过来的纠正照样生效");
+
+    // 人撤掉一条：下次开现场，旧表里那一条**不许**又被搬回来。
+    site.store
+        .clear_shaping_override(&标识, "库/FC/封面.png")
+        .expect("撤得掉");
+    drop(site);
+    let site = Site::open_file(工作目录.path(), &库文件, None).expect("再开得出现场");
+    assert_eq!(
+        site.store.shaping_overrides(&标识).expect("读得出").len(),
+        1,
+        "撤掉的那条没被旧表带回来",
+    );
+    drop(site);
+
+    // **搬走不是删掉**：旧表原样留在旧库里，一行没动。
+    let conn = rusqlite::Connection::open(&库文件).expect("开得出");
+    let 旧表里还有: i64 = conn
+        .query_row("SELECT count(*) FROM shaping_override", [], |row| {
+            row.get(0)
+        })
+        .expect("旧表还在");
+    assert_eq!(旧表里还有, 2);
+}
+
+#[test]
+fn 结构版本对不上的旧库_列出来那一下就把人工纠正救进沉淀库_照提示删库重扫之后还在() {
+    // 删库那句提示说「人工纠正一条不丢」，而人读到它的时候，那份库**开不进去**——
+    // 开现场时搬一次那条路走不到。列出来那一下就得先救出来，照提示删掉才真的不丢。
+    let dir = 建库();
+    let 工作目录 = temp_dir("shaping-stranded-ws");
+    let (库文件, site) = 建现场(工作目录.path());
+    drop(site);
+    // 一份旧版程序留下的库：旧表里记着两条，结构版本也是旧的。
+    {
+        let conn = rusqlite::Connection::open(&库文件).expect("开得出旧库");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS shaping_override(
+                 key         TEXT PRIMARY KEY,
+                 variant_key TEXT NOT NULL
+             ) STRICT;
+             INSERT INTO shaping_override(key, variant_key) VALUES
+                 ('库/FC/封面.png', '库/FC/超级马里奥.zip'),
+                 ('库/FC/超级马里奥.zip', '库/FC/超级马里奥.zip');
+             UPDATE meta SET value = '6' WHERE key = 'schema_version';",
+        )
+        .expect("改得成一份旧版本的库");
+    }
+
+    // 开场那一屏：它列出来了，说的是「删掉它重扫」。
+    let 列出来的 = workspace::catalogs(工作目录.path());
+    let 那一份 = 列出来的
+        .entries()
+        .expect("列得开")
+        .iter()
+        .find(|一份| 一份.path == 库文件)
+        .expect("版本对不上的那一份照样列出来了");
+    let CatalogState::SchemaMismatch { said: 说的, .. } = &那一份.state else {
+        panic!("该是结构版本对不上：{那一份:?}");
+    };
+    assert!(说的.contains("删掉它重扫一遍"), "{说的}");
+
+    // 照提示删库重扫。
+    删库(&库文件);
+    let (_, mut site) = 建现场(工作目录.path());
+    照纠正扫(dir.path(), &mut site);
+    let 并起来的 = site
+        .catalog
+        .variant("库/FC/超级马里奥.zip")
+        .expect("读得出")
+        .expect("在");
+    assert_eq!(并起来的.files, 2, "照提示删库重扫之后，人工纠正还在");
+    assert!(并起来的.manual);
+}
+
+#[test]
+fn 人工纠正默认不出现在沉淀库的导出里() {
+    // 「熬得过删库重扫」的另一头：进了沉淀库，**不跟着导出去分享**。它与路径锚同一个
+    // 处境——键是中立库里的键，只在本机这一份主库里成立（ADR-0001 的修订）。
+    let mut store = Store::in_memory().expect("能开沉淀库");
+    store
+        .set_shaping_override("主库", "库/FC/封面.png", "库/FC/超级马里奥.zip")
+        .expect("记得下");
+    // 对照：一条钉在内容上、能分享的裁决——导出不是空的，它照样出去了。
+    store
+        .put(&Verdict::now(
+            Anchor::Content {
+                crc32: 0x1234_5678,
+                size: 40_976,
+                sha1: None,
+            },
+            Decision::Unknown,
+        ))
+        .expect("写得进");
+    let 导出 = store.export(false).expect("导得出");
+    assert_eq!(导出.verdicts.len(), 1, "对照那条裁决该在导出里");
+    let 导出 = serde_json::to_string(&导出).expect("序列化");
+    assert!(!导出.contains("封面.png"), "人工纠正跟着导出去了：{导出}");
+
+    // 别人收下这一份，他那边一条人工纠正都没有。
+    let mut 别人的 = Store::in_memory().expect("能开沉淀库");
+    别人的.import(&导出).expect("收得下");
+    assert!(别人的.shaping_overrides("主库").expect("读得出").is_empty());
 }
 
 #[test]

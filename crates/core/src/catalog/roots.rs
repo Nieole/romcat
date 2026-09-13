@@ -329,12 +329,12 @@ impl Catalog {
         // 挂在**这个根的变体**身上的那几张表按前缀整批删。挂在别处的（作品级的刮削值、
         // 合集本身、别的根的东西）一条都不动——留着幽灵行比留着孤儿更坏：
         // 浏览屏与待确认队列上会长出指不着任何文件的行。
+        //
+        // **人工纠正不在这份清单上**：它住沉淀库（票 `one-criterion-per-thing/07`），
+        // 移除根不动沉淀库一个字——与路径锚同一条，这个根加回来，那几条照旧生效。
         for sql in [
             "DELETE FROM variant_member WHERE substr(variant_key, 1, length(?1)) = ?1",
             "DELETE FROM variant WHERE substr(key, 1, length(?1)) = ?1",
-            "DELETE FROM shaping_override
-             WHERE substr(key, 1, length(?1)) = ?1
-                OR substr(variant_key, 1, length(?1)) = ?1",
             "DELETE FROM candidate WHERE substr(variant_key, 1, length(?1)) = ?1",
             "DELETE FROM identification WHERE substr(variant_key, 1, length(?1)) = ?1",
             "DELETE FROM model_answer WHERE substr(variant_key, 1, length(?1)) = ?1",

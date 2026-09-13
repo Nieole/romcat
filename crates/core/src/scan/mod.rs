@@ -238,6 +238,15 @@ pub struct ScanOptions {
     pub decompress_zst: bool,
     /// **平台清单与成型规则**。平台由目录给出，而哪些目录算平台写在这里（ADR-0011）。
     pub manifest: Manifest,
+    /// 这份主库的**人工纠正**：条目的键 → 它该归到哪个变体。收尾成型时照它，
+    /// **优先于一切成型规则**。
+    ///
+    /// 它住**沉淀库**不住中立库（票 `one-criterion-per-thing/07`，ADR-0001 的修订）：
+    /// 删掉中立库重扫，它还在。所以这一趟照哪几条，由开着沉淀库的调用方按**主库标识**
+    /// 取出来交进来（[`Store::shaping_overrides`](crate::verdict::Store::shaping_overrides)）。
+    /// 留空就是这一趟一条都不照：人工纠正出来的那几个变体会换回规则的结论，
+    /// 沉淀库里那几条一条不少，下一趟带上就回来。
+    pub shaping_overrides: std::collections::BTreeMap<String, String>,
 }
 
 impl ScanOptions {
@@ -256,6 +265,7 @@ impl ScanOptions {
             penetrate_containers: true,
             decompress_zst: false,
             manifest: Manifest::builtin(),
+            shaping_overrides: std::collections::BTreeMap::new(),
         }
     }
 
@@ -534,7 +544,12 @@ pub fn scan(
             .last_traversal()?
             .map_or(start.scan, |latest| latest.scan)
             .max(start.scan);
-        shape::reshape(catalog, &options.manifest, shaped_scan)?;
+        shape::reshape(
+            catalog,
+            &options.manifest,
+            &options.shaping_overrides,
+            shaped_scan,
+        )?;
     }
     let checkpoint_path =
         finish_checkpoint(options, &root, &queue, start.scan, &traversal, interrupted)?;

@@ -209,10 +209,14 @@ fn last_component(key: &str) -> &str {
     key.rsplit('/').next().unwrap_or(key)
 }
 
-/// 对着一份中立库重新成型一遍：读条目、算变体、整批换掉。
+/// 对着一份中立库重新成型一遍：读条目、照人工纠正算变体、整批换掉。
 ///
 /// **不碰磁盘。** 改一条成型规则不必重扫 8.6 TiB，跑一次这个就够了。
 /// 已有的作品与发行版链接会被保住（[`Catalog::replace_variants`]）。
+///
+/// `overrides` 是这份主库的**人工纠正**。它**住沉淀库**，不在中立库里
+/// （[`Store::shaping_overrides`](crate::verdict::Store::shaping_overrides)，
+/// 票 `one-criterion-per-thing/07`）——删掉中立库重扫，它丢不了。
 ///
 /// `scan` 是这次成型对着的遍历代号，报告据此说得出「成型是不是比中立库旧」。
 ///
@@ -221,11 +225,11 @@ fn last_component(key: &str) -> &str {
 pub fn reshape(
     catalog: &mut Catalog,
     manifest: &Manifest,
+    overrides: &BTreeMap<String, String>,
     scan: i64,
 ) -> Result<Plan, CatalogError> {
     let entries = catalog.shape_entries()?;
-    let overrides = catalog.shaping_overrides()?;
-    let plan = plan(&entries, manifest, &overrides);
+    let plan = plan(&entries, manifest, overrides);
     catalog.replace_variants(&plan.variants, scan, manifest)?;
     Ok(plan)
 }
