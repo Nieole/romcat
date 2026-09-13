@@ -128,10 +128,10 @@ pub enum TriageError {
     /// 「**这一下做不成**」——两份库一个字都没动，人换个顺序再来一次就行。
     #[error(
         "第 {batch} 批放不回去：其中 {rows} 条的锚上眼下不是这一批撤掉时留下的那个样子\
-         （{names}）。要么是它盖掉过的那一批眼下也撤着——**放回去按落下的顺序来**，\
+         （{names}）。要么是它盖掉过的那一批眼下也撤着——放回去按落下的顺序来，\
          先放回更早的那一批；要么是那几条锚上后来另有人裁过（别人分享来、\
          `triage import` 收下的那些不属于任何一批），那就先把那几条忘掉。\
-         放回是整份的事，**放不回去就一条都不放**，两份库一个字都没动"
+         放回是整份的事，放不回去就一条都不放，两份库一个字都没动"
     )]
     CannotRedo {
         /// 点名的那一批。
@@ -1112,7 +1112,7 @@ fn resolve(item: &Item, decide: &Decide) -> Result<Decision, String> {
         }
     };
     if facts.work.trim().is_empty() {
-        return Err("裁决要说得出是哪部**作品**，不然它什么也没定下来".to_string());
+        return Err("裁决要说得出是哪部作品，不然它什么也没定下来".to_string());
     }
     decide.overrides.apply_to(&mut facts);
     if facts.platform.is_none() {

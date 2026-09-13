@@ -159,7 +159,7 @@ pub enum AddRootError {
     /// 与工作目录纠缠在一起。
     #[error(
         "{path} 与工作目录 {workspace} 套在一起。\
-         **主库只读**（ADR-0004）：中立库、断点、媒体池都写在工作目录里，\
+         主库只读：中立库、断点、媒体池都写在工作目录里，\
          而它们一个字节都不许落进主库"
     )]
     Workspace {
@@ -839,7 +839,7 @@ mod tests {
         )
         .expect_err("该被拒");
         assert!(matches!(error, AddRootError::Workspace { .. }));
-        assert!(error.to_string().contains("ADR-0004"));
+        assert!(error.to_string().contains("主库只读"));
     }
 
     #[test]

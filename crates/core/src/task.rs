@@ -20,7 +20,7 @@
 //!
 //! ## 一趟活有四种收场，不是三种
 //!
-//! [`Ending`] 是**一条轴**：跑完了 / 停了什么都没留下 / **停在半路** / 出错了。
+//! [`Ending`] 是**一条轴**：完成 / 已取消（什么都没留下） / **部分完成** / 失败。
 //! 第三档不是多余的——写过东西的活被叫停时照旧要把这一趟收完（扫描的**断点**、
 //! 同步的**清单**是下一趟接着跑的依据，抛错会把它们丢掉，ADR-0015），于是它交出来的
 //! 产物长得跟「跑完了」那一份一模一样。少了这一档，那一趟只能记成「完成」，
@@ -53,7 +53,7 @@ pub struct Halted;
 
 impl std::fmt::Display for Halted {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("按停下了：停在两步之间，没留下半截状态。")
+        f.write_str("已取消：停在两步之间，没留下半截状态。")
     }
 }
 
@@ -386,7 +386,7 @@ pub enum Ending<T> {
     Done(T),
     /// 停了，**什么都没留下**：停在两步之间，状态是干净的，可以当没跑过。
     Stopped,
-    /// **停在半路**：没走完就收了场，可交出了产物——那份产物是真的，认领的人照旧要收。
+    /// **部分完成**：没走完就收了场，可交出了产物——那份产物是真的，认领的人照旧要收。
     Halfway {
         /// 收场之前落下来的那份产物。**丢了下一趟就接不上**（ADR-0015）。
         product: T,
@@ -405,17 +405,22 @@ pub enum Ending<T> {
 
 impl<T> Ending<T> {
     /// 排成给人看的一句话。**四档四句，谁都不许长得跟谁一样。**
+    ///
+    /// 每一句都以词表**收场**那一档的词起头：完成 / 已取消 / 部分完成 / 失败。
+    /// **这四个词只在这儿落一次**——任务台历史、命令行收场那一句、各屏拿着收场结果的
+    /// 通知读的都是它。手上没有 [`Ending`]、只有一份产物或一个标志的几处（被按停时的
+    /// 错误文案、刮削与同步的回执、根那一行上次扫描那一句）自己写词（挂单 `Q573`）。
     #[must_use]
     pub fn render(&self) -> String {
         match self {
             Self::Done(_) => "完成".to_string(),
-            Self::Stopped => "按停了".to_string(),
+            Self::Stopped => "已取消".to_string(),
             // **「为什么收的手」不由这一层写死**：眼下报这一句的两条都是被按停的，
             // 而下一批候选（连着失败太多次主动停了、刮削撞上配额）不是——那半句话
-            // 归长入口，这儿只管把它摆进「停在半路」这一档里。
-            Self::Halfway { left_behind, .. } => format!("停在半路：{left_behind}"),
+            // 归长入口，这儿只管把它摆进「部分完成」这一档里。
+            Self::Halfway { left_behind, .. } => format!("部分完成：{left_behind}"),
             Self::Failed { step, why } if step.is_empty() => format!("失败：{why}"),
-            Self::Failed { step, why } => format!("在「{step}」这一步失败：{why}"),
+            Self::Failed { step, why } => format!("失败：在「{step}」这一步，{why}"),
         }
     }
 
@@ -834,7 +839,7 @@ mod tests {
         let 记的 = &board.history()[0].ending;
         assert!(matches!(记的, Ending::Halfway { .. }), "{记的:?}");
         let 画出来的 = 记的.render();
-        assert!(画出来的.contains("停在半路"), "{画出来的}");
+        assert!(画出来的.starts_with("部分完成："), "{画出来的}");
         assert!(
             画出来的.contains("落了 1 件"),
             "说不出留下了什么：{画出来的}"
@@ -862,6 +867,23 @@ mod tests {
         ];
         let 去重: std::collections::BTreeSet<&String> = 四句.iter().collect();
         assert_eq!(去重.len(), 4, "四种收场里有两种画出来是同一句：{四句:?}");
+        // **四档的词与词表「收场」那一条逐字一样**：任务台历史与命令行读的都是这一句，
+        // 词只在 `render` 里落一次。
+        assert_eq!(四句[0], "完成");
+        assert_eq!(四句[1], "已取消");
+        assert_eq!(四句[2], "部分完成：按停时落了 12 件");
+        assert_eq!(四句[3], "失败：在「看一眼目标」这一步，卡不在位");
+        let 说不出哪一步 = Ending::<()>::Failed {
+            step: String::new(),
+            why: "卡不在位".to_string(),
+        };
+        assert_eq!(说不出哪一步.render(), "失败：卡不在位");
+        // 被按停交上来的那句错话也从这一档的词起头，不另写一个。
+        assert!(
+            Halted
+                .to_string()
+                .starts_with(&Ending::<()>::Stopped.render())
+        );
     }
 
     #[test]
@@ -1053,7 +1075,7 @@ mod tests {
         assert_eq!(why, "卡不在位");
         assert_eq!(
             board.history()[0].ending.render(),
-            "在「看一眼目标」这一步失败：卡不在位",
+            "失败：在「看一眼目标」这一步，卡不在位",
         );
     }
 

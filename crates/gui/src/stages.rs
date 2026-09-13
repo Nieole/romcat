@@ -318,7 +318,7 @@ impl Section {
                 // ——两句合成一句的话，那几份被吞掉的活会被读成一次顺利的导出。
                 self.error = (!report.conflicts.is_empty()).then(|| {
                     format!(
-                        "有 {} 份没写——外面有人动过那些文件，**没有静默覆盖**。\
+                        "有 {} 份没写——外面有人动过那些文件，没有静默覆盖。\
                          先看一眼那几份，确认不要了再重导。",
                         thousands(report.conflicts.len() as u64),
                     )
@@ -328,9 +328,9 @@ impl Section {
             // ——记成「可以当没跑过」是骗人的。那句话由核心库折
             // （`identify::run_task` 里 `Handle::halfway` 报的那一句），这一层原样转出来：
             // **识别没有断点**，下一趟从头再算一遍。
-            Ending::Halfway { left_behind, .. } => {
+            Ending::Halfway { .. } => {
                 self.error = None;
-                self.notice = Some(format!("{} 被按停了。{left_behind}", stage.label()));
+                self.notice = Some(format!("{} {}", stage.label(), done.ended.render()));
             }
             // 还排着队就被撤掉的那一趟压根没开跑：一个字节都没写。
             // **停了，什么都没留下。** 两条路走到这一档：还排着队就被撤掉（压根没开跑），
@@ -339,17 +339,14 @@ impl Section {
             Ending::Stopped => {
                 self.error = None;
                 self.notice = Some(format!(
-                    "{} 停下了。中立库一个字节都没动，再按一次就是。",
+                    "{} {}。中立库一个字节都没动，再按一次就是。",
                     stage.label(),
+                    done.ended.render(),
                 ));
             }
             // **不静默结束**：哪一步、为什么，两样都说出来。
-            Ending::Failed { step, why } => {
-                self.error = Some(if step.is_empty() {
-                    why.clone()
-                } else {
-                    format!("{} 在「{step}」这一步停下了：{why}", stage.label())
-                });
+            Ending::Failed { .. } => {
+                self.error = Some(format!("{} {}", stage.label(), done.ended.render()));
             }
             // 别的屏排上去的活轮不到这儿——上面那道任务号已经挡掉了。
             Ending::Done(_) => {}
@@ -474,12 +471,12 @@ impl Section {
             // **不许画成「还没选过」**：那是一件该去做的事，而这是一件该去查的事。
             ui.colored_label(
                 ui.visuals().error_fg_color,
-                format!("导出那套配置读不出来：{why}。这**不是**「还没选过」。"),
+                format!("导出那套配置读不出来：{why}。这不是「还没选过」。"),
             );
         } else if self.setup.is_none() {
             ui.weak(
                 "第一次导出之前先选一次；选完记进这份库，下一趟点「开跑」就重导。\
-                 那个目录是**主库根的替身**——放进主库根，前端直接就读得到。",
+                 那个目录是主库根的替身——放进主库根，前端直接就读得到。",
             );
         }
         if 要记下 {

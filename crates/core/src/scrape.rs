@@ -100,7 +100,7 @@ pub enum ScrapeError {
         "在线档要一个网络句柄与一套凭据才起得来。\
          凭据从环境变量读：{}。\
          ScreenScraper 的 devid 要在它的论坛人工申请（无 devid 直接 403），\
-         **不要拿别人的 devid 用**——那会连累对方被拉黑。",
+         不要拿别人的 devid 用——那会连累对方被拉黑。",
         online::ENV_KEYS.join(" / ")
     )]
     NoNetwork,

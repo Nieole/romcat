@@ -363,7 +363,7 @@ fn 这一层的候选永不自动通过而且进了待确认队列() {
         assert_eq!(one.source, model::SOURCE);
         // **依据明确说它是模型推断的**（工单原话：依据要标注这一层的出处）。
         assert!(
-            one.evidence.starts_with("**这一条是模型推断的**"),
+            one.evidence.starts_with("这一条是模型推断的"),
             "{}",
             one.evidence
         );

@@ -221,7 +221,7 @@ impl Halt {
     pub fn describe(&self) -> String {
         match self {
             Self::Quota { source, why } => format!(
-                "{source} 的{why}。**这一趟到此为止，不重试也不换账号**——\
+                "{source} 的{why}。这一趟到此为止，不重试也不换账号——\
                  配额同时按账号与 IP 计，轮换账号的处置是永久封禁。明天再来。"
             ),
             Self::Fatal { source, why } => {

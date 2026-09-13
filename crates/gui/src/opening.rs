@@ -28,9 +28,9 @@ use crate::font;
 
 /// 这个工作目录里一份中立库都没有时说的那句话。
 ///
-/// **它指向下一步**，不是一句「空」：认领一个主库才是这时候唯一做得下去的事，
-/// 而它指的就是抬头那一行上那颗「认领新主库」——[那条向导](crate::claim)在那儿起步。
-pub const NO_CATALOG: &str = "还没有库，认领一个主库开始";
+/// **它指向下一步**，不是一句「空」：添加一个主库才是这时候唯一做得下去的事，
+/// 而它指的就是抬头那一行上那颗「添加主库」——[那条向导](crate::claim)在那儿起步。
+pub const NO_CATALOG: &str = "还没有库，添加一个主库开始";
 
 /// 换工作目录那个框里的提示字。
 const WORKSPACE_HINT: &str = "换一个工作目录：把路径贴在这儿";
@@ -170,7 +170,7 @@ impl Screen {
             ui.label(path::display(&self.workspace));
             // 向导开着的时候不再摆一颗——那一下没有意义（已经在里头了），而按下去
             // 会把人攒到一半的那三串字抹掉。
-            if self.claiming.is_none() && ui.button("认领新主库").clicked() {
+            if self.claiming.is_none() && ui.button("添加主库").clicked() {
                 self.claiming = Some(Box::new(claim::Wizard::new(self.workspace.clone())));
             }
         });

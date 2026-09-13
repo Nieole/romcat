@@ -180,23 +180,22 @@ fn candidate_of(evidence: &Evidence, hit: &SerialHit, exact: bool) -> Candidate 
     }
     if release_level_only {
         text.push_str(
-            "；**这只说得到发行版这一层**——汉化补丁通常不改卡带内部头，同一个游戏码底下\
-             既有原版转储也有一堆汉化版，认得出是哪个游戏，认不出是谁汉化的第几版\
-             （ADR-0008），不自动通过",
+            "；这只说得到发行版这一层——汉化补丁通常不改卡带内部头，同一个游戏码底下\
+             既有原版转储也有一堆汉化版，认得出是哪个游戏，认不出是谁汉化的第几版，不自动通过",
         );
     }
     if !exact {
         text.push_str(
-            "；**对上的只是里面那一段**——同一个 TitleID 下面还有更新与 DLC，\
+            "；对上的只是里面那一段——同一个 TitleID 下面还有更新与 DLC，\
              光凭它说不出是哪一条，不自动通过",
         );
     }
     if !evidence.from_content {
-        text.push_str("；**这一条只看了名字没看内容**，目录只是强先验（ADR-0011），不自动通过");
+        text.push_str("；这一条只看了名字没看内容，目录只是强先验，不自动通过");
     }
     if exact && evidence.from_content && !evidence.nkit_clean {
         text.push_str(
-            "；这份镜像**没验过 NKit 或者验出来就是 NKit**——NKit 处理过的镜像 CRC32 \
+            "；这份镜像没验过 NKit 或者验出来就是 NKit——NKit 处理过的镜像 CRC32 \
              可能与好转储相同（Dolphin），序列号对得上也不代表它是一份好转储，不自动通过",
         );
     }

@@ -793,7 +793,7 @@ pub fn candidates_of(
         .enumerate()
         .map(|(at, guess)| {
             let mut evidence = format!(
-                "**这一条是模型推断的**（{model}）：在同一批问题里，它把这个变体的第 {} 个猜测\
+                "这一条是模型推断的（{model}）：在同一批问题里，它把这个变体的第 {} 个候选\
                  （一共 {total} 个）给了「{}」，依据「{}」。",
                 at + 1,
                 guess.title,
@@ -804,13 +804,12 @@ pub fn candidates_of(
                 }
             );
             evidence.push_str(&format!(
-                "提问只给了它{}——**一个字节的内容都没有看过**，也没有撞任何数据库。",
+                "提问只给了它{}——一个字节的内容都没有看过，也没有撞任何数据库。",
                 asked_with(question)
             ));
             evidence.push_str(
                 "前面每一层（精确哈希、光盘序列号、卡带内部头、文件名规则加中文离线条目表）\
-                 对这个变体全部落空，才轮到这一层。**它永不自动通过**，一律进待确认队列\
-                 （ADR-0002）。",
+                 对这个变体全部落空，才轮到这一层。它永不自动通过，一律进待确认队列。",
             );
             Candidate {
                 member_key: variant.main_key.clone(),
@@ -1326,7 +1325,7 @@ mod tests {
             assert_eq!(candidate.source, SOURCE);
             // **依据的第一句就写着它是模型推断的。**
             assert!(
-                candidate.evidence.starts_with("**这一条是模型推断的**"),
+                candidate.evidence.starts_with("这一条是模型推断的"),
                 "{}",
                 candidate.evidence
             );
@@ -1335,8 +1334,8 @@ mod tests {
             assert!(candidate.evidence.contains("永不自动通过"));
         }
         // 排序保住了：模型排第几，候选就写第几。
-        assert!(built[0].evidence.contains("第 1 个猜测"));
-        assert!(built[1].evidence.contains("第 2 个猜测"));
+        assert!(built[0].evidence.contains("第 1 个候选"));
+        assert!(built[1].evidence.contains("第 2 个候选"));
         assert_eq!(built[0].game, "合金弹头7");
     }
 

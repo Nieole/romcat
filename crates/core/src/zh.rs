@@ -413,8 +413,8 @@ impl Match {
             query_label,
             query_text,
             &format!(
-                "。{CONFIRMED_MARK}（锚是{anchor}）：这一次匹配带来的**全部字段**\
-                 ——中文名、别名、类型、简介、开发商、发行商——由这**一条**裁决一并定下，\
+                "。{CONFIRMED_MARK}（锚是{anchor}）：这一次匹配带来的全部字段\
+                 ——中文名、别名、类型、简介、开发商、发行商——由这一条裁决一并定下，\
                  不再进待确认队列"
             ),
         )
@@ -469,14 +469,14 @@ pub const ENTRY_MARK: &str = "的条目 ";
 /// 一条依据里说「人已经裁决过这一次匹配」时写的那个记号。
 ///
 /// 队列靠它把**已经定下的**与**还等着裁的**分开——两者的下一步完全不同。
-pub const CONFIRMED_MARK: &str = "这一次匹配**由人工裁决确认过**";
+pub const CONFIRMED_MARK: &str = "这一次匹配由人工裁决确认过";
 
 /// 依据的最后一句：这一档在**置信度**上算什么。
 ///
 /// 它与 [`Match::evidence_confirmed`] 那一句是同一个位置上的两个态，摆在一起是为了
 /// 让「裁决过了还写着一律进队列」这种自相矛盾没地方长出来。
-const FUZZY_TAIL: &str = "。**这是模糊匹配不是命中**：它只看名字，没看这个文件里的一个字节，\
-     所以永不自动通过，一律进待确认队列（ADR-0002）";
+const FUZZY_TAIL: &str = "。这是模糊匹配不是命中：它只看名字，没看这个文件里的一个字节，\
+     所以永不自动通过，一律进待确认队列";
 
 /// 从一条**依据**里认回**条目号**；不是这个源写的那句话就是 `None`。
 ///
@@ -495,7 +495,9 @@ pub fn entry_in(evidence: &str) -> Option<u32> {
 /// 这条依据说的是「人已经裁决过这一次匹配」吗。
 #[must_use]
 pub fn is_confirmed(evidence: &str) -> bool {
-    evidence.contains(CONFIRMED_MARK)
+    // **依据是落库的**：记号去掉 `**` 之前裁决过的那几条，库里存的仍是
+    // `这一次匹配**由人工裁决确认过**`。认不回来的话，重跑识别之前它们会被当成还等着裁。
+    evidence.contains(CONFIRMED_MARK) || evidence.replace("**", "").contains(CONFIRMED_MARK)
 }
 
 /// 索引里的一条叫法。
@@ -1174,6 +1176,9 @@ mod tests {
         assert!(text.contains("平台交叉校验对得上"), "{text}");
         assert!(text.contains("年份交叉校验对得上"), "{text}");
         assert!(text.contains("永不自动通过"), "{text}");
+        // 依据原样画在待确认屏上，egui 不认 markdown。
+        assert!(!text.contains("**"), "{text}");
+        assert!(!text.contains("ADR-"), "{text}");
         // **写出去的号认得回来**：队列按条目号把「同一次匹配带来的字段」归堆（票 05），
         // 而依据这句话是会改的——两头摆在同一个文件里，这条钉着它们不许各走各的。
         assert_eq!(entry_in(&text), Some(4));
@@ -1192,10 +1197,21 @@ mod tests {
             "CRC-32 1234ABCD + 4096 字节",
         );
         assert!(is_confirmed(&text), "{text}");
+        assert!(!text.contains("**"), "{text}");
         assert!(!text.contains("一律进待确认队列"), "{text}");
         assert!(text.contains("CRC-32 1234ABCD"), "锚要写进依据：{text}");
         // 条目号那一半一个字都没变——归堆的判据两档共用。
         assert_eq!(entry_in(&text), Some(4));
+    }
+
+    #[test]
+    fn 旧库里带星号的确认记号照样认得出() {
+        // 依据是落库的：这句话去掉 `**` 之前裁决过的那几条，库里存的仍是旧写法。
+        // 认不出来的话，重跑识别之前那几条会被当成还等着裁的。
+        let 旧的 = "中文离线数据源（Bangumi 离线 dump d）的条目 4 「x」的中文名「x」。\
+                    这一次匹配**由人工裁决确认过**（锚是 y）：这一次匹配带来的**全部字段**";
+        assert!(is_confirmed(旧的), "{旧的}");
+        assert_eq!(entry_in(旧的), Some(4));
     }
 
     #[test]

@@ -658,20 +658,19 @@ impl Screen {
             Ending::Done(_) | Ending::Halfway { .. } => {}
             // **停下来的地方是干净的，就得这么说。** 说成「失败」会让人去找哪儿坏了。
             Ending::Stopped => {
-                self.notice = Some(
-                    "排差量预览按停了。这一趟整条只读——中立库、媒体池、目标设备\
-                     一个字节都没动，再排一次就是。"
-                        .to_string(),
-                );
+                self.notice = Some(format!(
+                    "排差量预览{}。这一趟整条只读——中立库、媒体池、目标设备\
+                     一个字节都没动，再排一次就是。",
+                    Ending::<()>::Stopped.render(),
+                ));
                 self.failed = false;
             }
             // **不静默结束**：哪一步、为什么，两样都说出来。
             Ending::Failed { step, why } => {
-                self.error = Some(if step.is_empty() {
-                    why
-                } else {
-                    format!("排差量预览在「{step}」这一步停下了：{why}")
-                });
+                self.error = Some(format!(
+                    "排差量预览{}",
+                    Ending::<()>::Failed { step, why }.render()
+                ));
             }
         }
     }
@@ -691,19 +690,18 @@ impl Screen {
             // **停下来的地方是干净的，就得这么说。** 上一趟算出来的那几个数照旧摆着
             // ——它们没有因为这一趟被停而变得不对。
             Ending::Stopped => {
-                self.notice = Some(
-                    "算容量按停了。这一趟整条只读——中立库、主库、目标设备一个字节都没动，\
-                     再算一次就是。"
-                        .to_string(),
-                );
+                self.notice = Some(format!(
+                    "算容量{}。这一趟整条只读——中立库、主库、目标设备一个字节都没动，\
+                     再算一次就是。",
+                    Ending::<()>::Stopped.render(),
+                ));
                 self.failed = false;
             }
             Ending::Failed { step, why } => {
-                self.error = Some(if step.is_empty() {
-                    why
-                } else {
-                    format!("算一遍容量在「{step}」这一步停下了：{why}")
-                });
+                self.error = Some(format!(
+                    "算一遍容量{}",
+                    Ending::<()>::Failed { step, why }.render()
+                ));
             }
         }
     }
@@ -767,11 +765,10 @@ impl Screen {
                 self.failed = false;
             }
             Ending::Failed { step, why } => {
-                self.error = Some(if step.is_empty() {
-                    why
-                } else {
-                    format!("同步在「{step}」这一步停下了：{why}")
-                });
+                self.error = Some(format!(
+                    "同步{}",
+                    Ending::<()>::Failed { step, why }.render()
+                ));
             }
         }
     }
@@ -821,12 +818,12 @@ impl Screen {
         }
         let Some(prepared) = self.prepared.clone() else {
             // 这句话不是提示，是这一屏的规矩：没预览就没有可传的东西。
-            self.error = Some("还没排过差量预览。先看一遍它要做什么（ADR-0016）。".to_string());
+            self.error = Some("还没排过差量预览。先看一遍它要做什么。".to_string());
             return;
         };
         if prepared.plan.deletes.files > 0 && !self.acknowledged {
             self.error = Some(format!(
-                "这份计划里有 {} 个**删除**（{}）。看过上面的预览之后，勾上「我看过删除清单」再来。",
+                "这份计划里有 {} 个删除（{}）。看过上面的预览之后，勾上「我看过删除清单」再来。",
                 thousands(prepared.plan.deletes.files),
                 human_bytes(prepared.plan.deletes.bytes),
             ));
@@ -962,11 +959,13 @@ impl Screen {
         }
         ui.horizontal(|ui| {
             ui.label(font::strong("子库"));
-            ui.weak("一台目标设备一张卡。**这一屏不选内容**——改选择跳回浏览屏。");
+            ui.weak("一台目标设备一张卡。这一屏不选内容——改选择跳回浏览屏。");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
                     .button("+ 新建")
-                    .on_hover_text("底下那块面板填名字与目标路径。**选择集去浏览屏筛**：筛到满意按「存成子库」。")
+                    .on_hover_text(
+                        "底下那块面板填名字与目标路径。选择集去浏览屏筛：筛到满意按「存成子库」。",
+                    )
                     .clicked()
                 {
                     self.picked = None;
@@ -975,14 +974,11 @@ impl Screen {
                     self.invalidate();
                 }
                 if ui
-                    .add_enabled(
-                        self.evaluating.is_none(),
-                        egui::Button::new("算一遍容量"),
-                    )
+                    .add_enabled(self.evaluating.is_none(), egui::Button::new("算一遍容量"))
                     .on_hover_text(
                         "只问中立库：每台设备的选择集各选出多少、多大、装不装得下。\
-                         **卡不在手边也算得出来**。折一次事实，全部设备共用。\
-                         它进**任务队列**跑，期间这一屏照常用。",
+                         卡不在手边也算得出来，全部设备一次算完。\
+                         它排到任务台上跑，期间这一屏照常用。",
                     )
                     .clicked()
                 {
@@ -1050,7 +1046,7 @@ impl Screen {
                         && ui
                             .button("改选择…")
                             .on_hover_text(
-                                "跳去浏览屏，**这个子库的规则预填进筛选器**。\
+                                "跳去浏览屏，这个子库的规则预填进筛选器。\
                                  在那儿改得见它真的筛出了什么；调完按「更新到子库」原样带回。",
                             )
                             .clicked()
@@ -1102,7 +1098,7 @@ impl Screen {
         ui.horizontal(|ui| {
             ui.label(font::strong("选择集"));
             ui.weak("只读——改它按上面「改选择」").on_hover_text(
-                "规则与例外都在**浏览屏**上改：在那儿改得见它真的筛出了什么，\
+                "规则与例外都在浏览屏上改：在那儿改得见它真的筛出了什么，\
                      在这儿改只看得见一行字。这一屏管的是「送到哪」。",
             );
         });
@@ -1160,7 +1156,7 @@ impl Screen {
                 self.broken.len(),
             ))
             .on_hover_text(
-                "**这一屏不选内容**（票 `gui-redesign/11`）：规则增删都在浏览屏上。\
+                "这一屏不选内容：规则增删都在浏览屏上。\
                  命令行那条路也还在：`romcat sublibrary rule <子库> --remove <序号>`，\
                  序号就是上面印着的那个。",
             );
@@ -1183,7 +1179,7 @@ impl Screen {
                 thousands(排除),
             ))
             .on_hover_text(
-                "**优先于规则、永久记住**：规则表达不了的个人口味（ADR-0016）。\
+                "优先于规则、永久记住：规则表达不了的个人口味。\
                  加减在浏览屏的详情面板里做。",
             );
         }
@@ -1204,7 +1200,7 @@ impl Screen {
                 ui.visuals().warn_fg_color,
                 format!(
                     "规则引到了这几维，而这份库里一条数据都没有：{}。选不出东西是\
-                     **缺数据**，不是规则写错了。",
+                     缺数据，不是规则写错了。",
                     report.thin_dimensions.join("、"),
                 ),
             );
@@ -1244,7 +1240,7 @@ impl Screen {
             ui.colored_label(选中色, "■");
             ui.label(format!("选中 {}", human_bytes(gauge.picked)))
                 .on_hover_text(
-                    "这个子库在卡上占的地方。**排过差量预览之后**算的是同步完的样子\
+                    "这个子库在卡上占的地方。排过差量预览之后算的是同步完的样子\
                      ——元数据与媒体也要占地方，转换又省下来一些，而卡上还留着那些\
                      「对不上、本次不动」的文件。没排过时就是选择集选出来那批变体一共多大。",
                 );
@@ -1258,7 +1254,9 @@ impl Screen {
                 }
                 Some(bytes) => {
                     ui.label(format!("清单之外 {}", human_bytes(bytes)))
-                        .on_hover_text("工具没放过的文件：维护者自己拷进去的存档、金手指、截图。**连看都不看**（ADR-0015）。");
+                        .on_hover_text(
+                            "工具没放过的文件：维护者自己拷进去的存档、金手指、截图。连看都不看。",
+                        );
                 }
             }
             ui.separator();
@@ -1310,7 +1308,7 @@ impl Screen {
                 .on_hover_text(
                     "只读：中立库读一遍、目标设备看一遍，一个文件都不写。\
                      插上读卡器再点——目标不在位时它会直说。\
-                     它进**任务队列**跑，期间这一屏照常用。",
+                     它排到任务台上跑，期间这一屏照常用。",
                 )
                 .clicked()
             {
@@ -1336,8 +1334,8 @@ impl Screen {
                     .add(button)
                     .on_hover_text(format!(
                         "只删中立库里的这条定义与它的规则、例外、清单；目标设备上的文件\
-                         一个都不碰。**要按两下**：{} 条规则与 {} 条例外跟着一起没——\
-                         例外是手挑的、**永久记住**的决定（ADR-0016），\
+                         一个都不碰。要按两下：{} 条规则与 {} 条例外跟着一起没——\
+                         例外是手挑的、永久记住的决定，\
                          规则也不在这一屏上重打得回来。",
                         self.rules.len() + self.broken.len(),
                         self.exceptions.len(),
@@ -1360,8 +1358,8 @@ impl Screen {
             // ——不然人一按下同步，屏上就什么都没有了。
             Self::live_ui(ui, tasks, self.syncing, "同步");
             ui.weak(
-                "还没有差量预览。**同步前必须先看一遍它要做什么**——那是硬要求，\
-                 不是可以跳过的一步（ADR-0016）。",
+                "还没有差量预览。同步前必须先看一遍它要做什么——那是硬要求，\
+                 不是可以跳过的一步。",
             );
             return;
         };
@@ -1457,8 +1455,8 @@ impl Screen {
                 .add_enabled(ready, egui::Button::new("同步"))
                 .on_hover_text(
                     "把上面这份差量真的落到目标设备上。只碰清单里记录过的文件。\
-                     它进**任务队列**跑：进度、已用时间、停下都在任务屏上，\
-                     **跑的是这一刻摆着的这一份计划**——排上去之后改规则也改不了它。",
+                     它排到任务台上跑：进度、已用时间、停下都在任务屏上，\
+                     跑的是这一刻摆着的这一份计划——排上去之后改规则也改不了它。",
                 )
                 .clicked()
             {
@@ -1530,7 +1528,7 @@ fn concerns_ui(ui: &mut egui::Ui, prepared: &Prepared) {
         ui.colored_label(
             ui.visuals().error_fg_color,
             format!(
-                "{} 份**放不进目标**，这一趟既不新增也不删除——它们进不了卡，\
+                "{} 份放不进目标，这一趟既不新增也不删除——它们进不了卡，\
                  而「放不进去」这个判断本身也可能是错的，删掉别人的东西不可逆：",
                 thousands(plan.rejected.len() as u64),
             ),
@@ -1555,7 +1553,7 @@ fn concerns_ui(ui: &mut egui::Ui, prepared: &Prepared) {
         ui.colored_label(
             ui.visuals().warn_fg_color,
             format!(
-                "{} 份目标**吃不下、而这一版转不了**：照样传过去，但它在这台设备上多半打不开。",
+                "{} 份目标吃不下、而这一版转不了：照样传过去，但它在这台设备上多半打不开。",
                 thousands(plan.unsupported.len() as u64),
             ),
         );
@@ -1581,7 +1579,7 @@ fn concerns_ui(ui: &mut egui::Ui, prepared: &Prepared) {
     ui.colored_label(
         ui.visuals().warn_fg_color,
         format!(
-            "{} 件对不上的事，**本次一律不动它们**：",
+            "{} 件对不上的事，本次一律不动它们：",
             thousands(plan.surprises.len() as u64)
         ),
     );
@@ -1616,7 +1614,7 @@ impl Screen {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(font::strong("配目标"));
-                    ui.weak("这台设备是什么样的。**要什么内容**去浏览屏筛。");
+                    ui.weak("这台设备是什么样的。要什么内容去浏览屏筛。");
                 });
                 egui::Grid::new("配目标格")
                     .num_columns(2)
@@ -1642,9 +1640,7 @@ impl Screen {
                     !self.form.name.trim().is_empty() && !self.form.target.trim().is_empty();
                 if ui
                     .add_enabled(ready, egui::Button::new("存下来"))
-                    .on_hover_text(
-                        "新建或改写这台设备。**目标设备不在位也存得下**——子库是持久实体。",
-                    )
+                    .on_hover_text("新建或改写这台设备。目标设备不在位也存得下——子库是持久实体。")
                     .clicked()
                 {
                     self.save(site);
@@ -1828,9 +1824,8 @@ pub fn steps_table(
 /// 「怎么卡了一下」底下。排差量预览与算一遍容量两处说的是同一件事，所以话也只写一处。
 fn no_second_connection(什么活: &str, why: &CatalogError) -> String {
     format!(
-        "分不出第二份只读连接：{why}\n\
-         {什么活}要在画帧那条线程之外跑，而它读的是同一份中立库文件。\
-         先确认那个文件还在、版本还对得上。"
+        "{什么活}没开跑：读中立库要另开一份只读连接，这一下没开出来（{why}）。\n\
+         先确认中立库那个文件还在、结构版本对得上，再按一次。"
     )
 }
 
@@ -1855,16 +1850,16 @@ fn sync_notice(outcome: &Outcome, elapsed: f64) -> String {
     );
     if outcome.interrupted {
         line.push_str(
-            "\n⚠️ **这一趟被你按停了**：目标上没有半份文件，清单记的是\
-             到中断为止真实有什么，再跑一趟就接上。",
+            "\n⚠️ 这一趟部分完成：按停时目标上没留下写了一半的文件，清单记的是\
+             停下那一刻目标上真实有什么，再跑一趟就接上。",
         );
     }
     if outcome.gave_up {
-        line.push_str("\n⚠️ **连着失败太多次，主动停了**：多半是卡拔了或者写满了。");
+        line.push_str("\n⚠️ 连着失败太多次，主动停了：多半是卡拔了或者写满了。");
     }
     if !outcome.failures.is_empty() {
         line.push_str(&format!(
-            "\n⚠️ **有 {} 步没做成**：",
+            "\n⚠️ 有 {} 步没做成：",
             thousands(outcome.failures.len() as u64),
         ));
         for failure in outcome.failures.iter().take(TOP_NOTES) {
@@ -1930,7 +1925,7 @@ fn trim_ui(ui: &mut egui::Ui, over: u64, capacity: Option<u64>, trims: &[Trim]) 
     ui.colored_label(
         ui.visuals().error_fg_color,
         format!(
-            "超出容量上限 {}（上限 {}）。**不会自动截断**——砍谁由你定：\
+            "超出容量上限 {}（上限 {}）。不会自动截断——砍谁由你定：\
              按上面「改选择」跳去浏览屏，在详情面板里把它排除掉。",
             human_bytes(over),
             capacity.map_or_else(|| "—".to_string(), human_bytes),

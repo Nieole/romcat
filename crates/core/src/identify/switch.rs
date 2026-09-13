@@ -1003,12 +1003,12 @@ impl Verdict {
         match self {
             Self::Trust => None,
             Self::Several => Some(
-                "；**这个容器里装着不止一个 TitleID**（合集卡带那一类），\
+                "；这个容器里装着不止一个 TitleID（合集卡带那一类），\
                  哪一个代表这个变体说不清，所以不自动通过"
                     .to_string(),
             ),
             Self::Extra(extra) => Some(format!(
-                "；⚠ 容器里另有 {extra} 个 ContentId 在 titledb 里**查不到**\
+                "；⚠ 容器里另有 {extra} 个 ContentId 在 titledb 里查不到\
                  （Meta NCA 不在自己的清单里，所以漏一个是常态，漏这么多不是）——\
                  这一份多半装着不止一档内容（本体加更新加 DLC 的整合包），\
                  或者被重打包过，所以不自动通过"
@@ -1032,7 +1032,7 @@ fn resolved_candidate(
     let mut evidence = format!(
         "{wrapper} 的{FROM_NAMES}里 {looked} 个 ContentId，其中 {count} 个在 titledb 的 \
          cnmts.json 里查得到，全部指向 TitleID {} 版本 {}（调研实测 173,502 个 ContentId \
-         100.00% 唯一映射到单个 (TitleID, 版本)，零冲突）。**免密钥**：一个字节的 NCA \
+         100.00% 唯一映射到单个 (TitleID, 版本)，零冲突）。免密钥：一个字节的 NCA \
          都没解开",
         content.title_id, content.version
     );
@@ -1076,21 +1076,21 @@ fn ticket_candidate(
     conflicts: &mut u64,
 ) -> Result<Candidate, StoreError> {
     let facts = probe.facts;
-    let mut evidence = format!("{}。**免密钥**：容器层不加密，读它一个密钥都不要", id.from);
+    let mut evidence = format!("{}。免密钥：容器层不加密，读它一个密钥都不要", id.from);
     describe_shape(&mut evidence, facts, &id.key);
     cross_check(&mut evidence, &id.key, &ctx.named, conflicts);
     // **「没查过」与「查了没有」是两件事**，混成一句下一个人只会重下一遍数据源
     // （同 `CONTEXT.md` 里「穿不透」与「还没读过」那一条）。
     evidence.push_str(if ctx.store.is_none() {
-        "；**本机还没取过 titledb**，所以说不出这是哪个版本——\
+        "；本机还没取过 titledb，所以说不出这是哪个版本——\
          `romcat switch sync` 取一次就能把这一条抬到高置信"
     } else if facts.content_ids.is_empty() {
         "；容器里一个 ContentId 都没有，反查无从谈起"
     } else {
-        "；容器里那几个 ContentId 在 titledb 里**一个都查不到**。\
+        "；容器里那几个 ContentId 在 titledb 里一个都查不到。\
          XCI 本来就该是这样（titledb 抓的是 eShop 的 CDN，卡带上的 NCA \
          DistributionType 不同、ContentId 也就不同，实测 isGameCard 只有 121 条）；\
-         而一份 NSP 落到这一档，高度提示它是**重打包的魔改整合版**——\
+         而一份 NSP 落到这一档，高度提示它是重打包的魔改整合版——\
          Program NCA 被重建、ContentId 全变，而票据原样留着"
     });
     let (title, chinese) = named(ctx.store, &id.key, None)?;
@@ -1123,13 +1123,11 @@ fn name_candidate(
     probe: &Probe<'_>,
     title_id: &str,
 ) -> Result<Candidate, StoreError> {
-    let mut evidence =
-        format!("文件名里直接写着的 TitleID `[{title_id}]`。**容器一个字都没说出来**");
+    let mut evidence = format!("文件名里直接写着的 TitleID `[{title_id}]`。容器一个字都没说出来");
     if let Some(note) = &probe.facts.note {
         evidence.push_str(&format!("（{note}）"));
     }
-    evidence
-        .push_str("，所以这一条**连内容都没看**——文件名可以被任意改写，永不自动通过（ADR-0011）");
+    evidence.push_str("，所以这一条连内容都没看——文件名可以被任意改写，永不自动通过");
     let (title, chinese) = named(ctx.store, title_id, None)?;
     Ok(Candidate {
         member_key: probe.member.to_string(),
@@ -1162,7 +1160,7 @@ fn describe_shape(evidence: &mut String, facts: &Facts, title_id: &str) {
     // 真机上撞见过：一份合集卡带里装着两个游戏、两张票据，两条候选的「本体是」
     // 会同时印成第一张票据的那一串——两条候选里必有一条在撒谎。
     if let Some(kind) = Kind::of(title_id) {
-        evidence.push_str(&format!("，这一份是**{}**", kind.label()));
+        evidence.push_str(&format!("，这一份是{}", kind.label()));
         if kind != Kind::Base
             && let Some(base) = Kind::base_of(title_id)
         {
@@ -1171,9 +1169,8 @@ fn describe_shape(evidence: &mut String, facts: &Facts, title_id: &str) {
     }
     if facts.compressed {
         evidence.push_str(
-            "；里面是 `.ncz`，**这一份是压缩过的**——识别不受影响（零解压），\
-             但 ES-DE 的扩展名表里没有 `.nsz` / `.xcz`，它在那个前端里默认看不见\
-             （ADR-0017）",
+            "；里面是 `.ncz`，这一份是压缩过的——识别不受影响（零解压），\
+             但 ES-DE 的扩展名表里没有 `.nsz` / `.xcz`，它在那个前端里默认看不见",
         );
     }
 }
@@ -1184,7 +1181,7 @@ fn cross_check(evidence: &mut String, found: &str, named: &[String], conflicts: 
         return;
     }
     if named.iter().any(|it| it.eq_ignore_ascii_case(found)) {
-        evidence.push_str("；文件名里写的 TitleID 与容器里读出来的**一致**");
+        evidence.push_str("；文件名里写的 TitleID 与容器里读出来的一致");
         return;
     }
     // **文件名里可能写着好几个**：真机上那份合集卡带的名字里就有两个 TitleID，
@@ -1201,14 +1198,14 @@ fn cross_check(evidence: &mut String, found: &str, named: &[String], conflicts: 
         let kind = Kind::of(found).map_or("另一档", Kind::label);
         evidence.push_str(&format!(
             "；文件名里写的是 `[{named}]`，容器里读出来的是同一部作品的{kind} {found}\
-             ——**同一个本体号段，对得上**"
+             ——同一个本体号段，对得上"
         ));
         return;
     }
     *conflicts += 1;
     evidence.push_str(&format!(
         "；⚠ 文件名里写的是 `[{named}]`，容器里读出来的却是 {found}，\
-         **连本体那一串都对不上**——这是极强的「文件被改过 / 命名错误」信号"
+         连本体那一串都对不上——这是极强的「文件被改过 / 命名错误」信号"
     ));
 }
 

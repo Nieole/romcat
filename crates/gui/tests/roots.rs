@@ -413,7 +413,7 @@ fn 新根落在工作目录里时被拒绝() {
 
     现场.加根(&手滑, "手滑");
     let 错 = 现场.app.roots().error().expect("该被拒");
-    assert!(错.contains("ADR-0004"), "得点名那条纪律：{错}");
+    assert!(错.contains("主库只读"), "得点名那条纪律：{错}");
     assert!(现场.app.roots().roots().is_empty());
 }
 
@@ -994,7 +994,7 @@ fn 折标题跑完之后浏览屏上的显示标题跟着更新() {
 
     // 任务台历史上留下一条**跑完了**，名字就是那道工序的名字。
     let record = &现场.app.tasks().history()[0];
-    assert_eq!(record.name, "折标题");
+    assert_eq!(record.name, "整理标题");
     assert!(
         matches!(record.ending, Ending::Done(_)),
         "跑完的那一趟记成了「{}」",
@@ -1093,8 +1093,8 @@ fn 工序段上折标题一行_画的是上次跑的时刻() {
         现场.app.ui(ui)
     }));
     assert!(
-        屏上.lines().any(|line| line.trim() == "折标题"),
-        "工序段上没有折标题那一行：\n{屏上}",
+        屏上.lines().any(|line| line.trim() == "整理标题"),
+        "工序段上没有整理标题那一行：\n{屏上}",
     );
     assert!(
         屏上.lines().any(|line| line.trim() == "工序 · 4 道"),

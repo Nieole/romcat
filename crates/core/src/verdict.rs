@@ -554,7 +554,7 @@ impl Verdict {
     #[must_use]
     pub fn evidence(&self) -> String {
         let mut text = format!(
-            "沉淀库：人工**裁决**定下来的（锚是{}——{}）",
+            "沉淀库：人工裁决定下来的（锚是{}——{}）",
             self.anchor.label(),
             self.anchor.describe(),
         );

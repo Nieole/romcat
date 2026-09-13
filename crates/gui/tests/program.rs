@@ -325,7 +325,7 @@ fn 工作目录里一份库都没有时开场说还没有库认领一个主库�
     // **字面量，不引 `opening::NO_CATALOG`**：引常量的话两边同一个出处，谁把那句话改成
     // 别的，两边一起变而这条测试照样绿。这一条钉的正是「人看见的是这句话」。
     assert!(
-        屏上.contains("还没有库，认领一个主库开始"),
+        屏上.contains("还没有库，添加一个主库开始"),
         "空工作目录上没说下一步该干什么：\n{屏上}",
     );
 }
@@ -818,7 +818,7 @@ fn 开场上按下认领新主库看见的是起名那一步() {
     let mut program = 开场(工作目录.path(), 记的);
     let ctx = headless::context();
 
-    let 屏上 = 点一下(&ctx, &mut program, "认领新主库");
+    let 屏上 = 点一下(&ctx, &mut program, "添加主库");
 
     assert!(
         屏上.contains("给这个主库起个名字"),
@@ -837,8 +837,8 @@ fn 起名那一步就拦下这个工作目录里已被占用的主库标识() {
     let mut program = 开场(工作目录.path(), 记的);
     let ctx = headless::context();
 
-    点一下(&ctx, &mut program, "认领新主库");
-    打字(&ctx, &mut program, "主库名，例如", "我的主库");
+    点一下(&ctx, &mut program, "添加主库");
+    打字(&ctx, &mut program, "主库原名，例如", "我的主库");
     let 屏上 = 点一下(&ctx, &mut program, "下一步");
 
     assert!(
@@ -880,8 +880,8 @@ fn 走一趟向导(
     根: &Path,
     根名: &str,
 ) -> String {
-    点一下(ctx, program, "认领新主库");
-    打字(ctx, program, "主库名，例如", 主库原名);
+    点一下(ctx, program, "添加主库");
+    打字(ctx, program, "主库原名，例如", 主库原名);
     点一下(ctx, program, "下一步");
     打字(
         ctx,
@@ -1061,7 +1061,8 @@ fn 向导里选的根圈进工作目录时被拦下说的是加根那一处的�
 
     // **核心库那句原话**，界面一个字都不改写（ADR-0005）：人在库屏上加根撞上同一条时
     // 看见的是同一句话。
-    assert!(屏上.contains("ADR-0004"), "没点名那条纪律：\n{屏上}");
+    assert!(屏上.contains("主库只读"), "没点名那条纪律：\n{屏上}");
+    assert!(!屏上.contains("ADR-"), "屏上印着写给开发者的出处：\n{屏上}");
     assert!(
         屏上.contains("与工作目录"),
         "没说清是与什么套在一起：\n{屏上}",
@@ -1087,14 +1088,14 @@ fn 向导起的名字撞上一份改过名的库时开始扫描那一下拦下�
     // （挂单 `Q472`）。改名只换主库原名、不动主库标识，于是第一步「这个标识占没占」拦不住
     // 它——那份库的文件名还是按起先那个名字折的。拦它的是建库入口那一处：同一个工作目录里
     // 主库原名不许重。**拦下时说的是核心库那句原话，一份库都没多**。
-    let 工作目录 = temp_dir("gui-program-添加主库撞原名");
-    let 盘 = 摆一块盘("gui-program-添加主库撞原名-盘");
+    let 工作目录 = temp_dir("gui-program-向导撞原名");
+    let 盘 = 摆一块盘("gui-program-向导撞原名-盘");
     let 改过名的 = 建一份像样的库(工作目录.path(), "起错了的名字", 1, 1_700_000_000);
     Catalog::open(&改过名的)
         .expect("开得出那份库")
         .set_library_name("我的主库")
         .expect("改得了名");
-    let (_记忆, 记的) = 记在临时处("gui-program-添加主库撞原名-记忆");
+    let (_记忆, 记的) = 记在临时处("gui-program-向导撞原名-记忆");
     let mut program = 开场(工作目录.path(), 记的);
     let ctx = headless::context();
 
@@ -1134,8 +1135,8 @@ fn 向导走到第二步就放弃时工作目录里一个文件都不多() {
     {
         let (_记忆, 记的) = 记在临时处("gui-program-认领半路放弃-记忆甲");
         let mut program = 开场(工作目录.path(), 记的);
-        点一下(&ctx, &mut program, "认领新主库");
-        打字(&ctx, &mut program, "主库名，例如", "我的主库");
+        点一下(&ctx, &mut program, "添加主库");
+        打字(&ctx, &mut program, "主库原名，例如", "我的主库");
         点一下(&ctx, &mut program, "下一步");
         打字(
             &ctx,
@@ -1155,12 +1156,12 @@ fn 向导走到第二步就放弃时工作目录里一个文件都不多() {
     // 二、**按「算了」**：同一条路，只是人明说不认领了。
     let (_记忆, 记的) = 记在临时处("gui-program-认领半路放弃-记忆乙");
     let mut program = 开场(工作目录.path(), 记的);
-    点一下(&ctx, &mut program, "认领新主库");
-    打字(&ctx, &mut program, "主库名，例如", "我的主库");
+    点一下(&ctx, &mut program, "添加主库");
+    打字(&ctx, &mut program, "主库原名，例如", "我的主库");
     点一下(&ctx, &mut program, "下一步");
     let 屏上 = 点一下(&ctx, &mut program, "算了");
     assert!(
-        屏上.contains("还没有库，认领一个主库开始"),
+        屏上.contains("还没有库，添加一个主库开始"),
         "按了「算了」没回到那张表：\n{屏上}",
     );
     assert!(
@@ -1171,8 +1172,8 @@ fn 向导走到第二步就放弃时工作目录里一个文件都不多() {
 
     // **那个名字还空着**：留下一份空库的话，人重走一遍向导会在第一步撞上自己刚才
     // 那一趟——被自己拦在门外，还看不出为什么。
-    点一下(&ctx, &mut program, "认领新主库");
-    打字(&ctx, &mut program, "主库名，例如", "我的主库");
+    点一下(&ctx, &mut program, "添加主库");
+    打字(&ctx, &mut program, "主库原名，例如", "我的主库");
     let 屏上 = 点一下(&ctx, &mut program, "下一步");
     assert!(
         屏上.contains("选第一个根"),
@@ -1249,8 +1250,8 @@ fn 向导只管第一个根第二个根仍然从库屏加() {
     // 「加第二块盘」也走它。
     let 屏上 = 点一下(&ctx, &mut program, "库");
     assert!(
-        !屏上.contains("认领新主库"),
-        "主窗口里也摆着认领那颗按钮：\n{屏上}",
+        !屏上.contains("添加主库"),
+        "主窗口里也摆着添加主库那颗按钮：\n{屏上}",
     );
 
     // 第二个根从库屏那两个框加进去。
@@ -1328,4 +1329,27 @@ fn 向导里根名不能用时说的也是加根那一处的原话() {
         原样,
         "被拦下了，工作目录里却多出了东西",
     );
+}
+
+#[test]
+fn 开场与添加主库向导上画出来的字里没有星号也没有文档编号() {
+    // 屏上的每一句都得是维护者用得上的话（票 `gui-looks-like-the-design/03`）：
+    // egui 不认 markdown，`**` 原样印出来；ADR 编号是写给开发者的出处。
+    let 工作目录 = temp_dir("gui-program-文案");
+    let (_记忆, 记的) = 记在临时处("gui-program-文案-记忆");
+    let mut program = 开场(工作目录.path(), 记的);
+    let ctx = headless::context();
+
+    let mut 屏上 = 跑一帧(&ctx, &mut program);
+    屏上.push_str(&点一下(&ctx, &mut program, "添加主库"));
+    打字(&ctx, &mut program, "主库原名，例如", "我的主库");
+    let 第二步 = 点一下(&ctx, &mut program, "下一步");
+    assert!(第二步.contains("选第一个根"), "没走到第二步：\n{第二步}");
+    屏上.push_str(&第二步);
+    for 不该有 in ["**", "ADR-"] {
+        assert!(
+            !屏上.contains(不该有),
+            "开场或向导上画出了「{不该有}」：\n{屏上}",
+        );
+    }
 }

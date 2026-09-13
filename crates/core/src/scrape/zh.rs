@@ -472,7 +472,7 @@ impl WorkHit {
     /// 加第四个字段时最容易漏掉的正是后半句。
     fn evidence(&self, dump: &str, field: Field) -> String {
         format!(
-            "{}；**这条结论挂在作品这一层**：撞是名下的变体「{}」撞的，\
+            "{}；这条结论挂在作品这一层：撞是名下的变体「{}」撞的，\
              而{}跨平台跨地区都成立（名下 {} 个变体撞上了中文条目，\
              其中 {} 个撞的是这一条）",
             self.hit.evidence(dump),
@@ -967,7 +967,7 @@ impl<'a> ChineseSource<'a> {
             // 都是内容的一部分（规格 18）。
             None => won.evidence(dump, Field::Description),
             Some(total) => format!(
-                "{}；⚠️ **这条简介被截断了**：原文 {total} 字，超过 {DESCRIPTION_LIMIT} \
+                "{}；⚠️ 这条简介被截断了：原文 {total} 字，超过 {DESCRIPTION_LIMIT} \
                  字这道闸，落库的是前 {DESCRIPTION_LIMIT} 字",
                 won.evidence(dump, Field::Description),
             ),

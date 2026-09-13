@@ -344,7 +344,7 @@ impl Screen {
         match (&done.ended, &job) {
             // **「跑完了」只说给真的跑完的那一趟听。** 被按停的那一趟交出来的产物
             // 长得一模一样，分开的是 `scan` 自己报的那句「停在半路」——不分的话
-            // 屏上说「跑完了」，而根那一行同时写着「那一趟被中断」。
+            // 屏上说「跑完了」，而根那一行同时写着「那一趟部分完成」。
             (Ending::Done(_), _) => {
                 self.notice = Some(format!("{} 跑完了。", done.name));
             }
@@ -353,9 +353,9 @@ impl Screen {
             // `romcat scan --resume` 认的也是它。
             (Ending::Halfway { .. }, Job::Scan(_)) => {
                 self.notice = Some(format!(
-                    "{} 被按停了。停下来的地方是干净的：断点已经写下，\
-                     再按「重扫」从那儿接着跑。",
-                    done.name
+                    "{} {}。再按「重扫」从那儿接着跑。",
+                    done.name,
+                    done.ended.render(),
                 ));
             }
             // **还排着队就被撤掉的那一趟压根没开跑**，所以这儿不许说「断点已经写下」
@@ -369,10 +369,10 @@ impl Screen {
                 ));
             }
             (Ending::Halfway { .. } | Ending::Stopped, Job::Fetch(_)) => {
-                self.notice = Some(format!("{} 被按停了。", done.name));
+                self.notice = Some(format!("{} {}。", done.name, done.ended.render()));
             }
-            (Ending::Failed { step, why }, _) => {
-                self.error = Some(format!("{} 在「{step}」这一步失败了：{why}", done.name));
+            (Ending::Failed { .. }, _) => {
+                self.error = Some(format!("{} {}", done.name, done.ended.render()));
             }
         }
         // 扫完与取完都会改库或改数据源，两样都重读一遍。**认领哪一种都一样**：
@@ -592,8 +592,7 @@ impl Screen {
                         .on_hover_text(
                             "联网取一趟，排到任务台上跑。\
                              中文离线源那一条按得停——按下之后在当前这一块读完就收手，\
-                             不等那 435 MB 下完。另外两条开跑之后还停不下来\
-                             （底下那两个入口不收中断信号，挂单 Q62）。",
+                             不等那 435 MB 下完。另外两条开跑之后还停不下来。",
                         )
                         .clicked()
                     {
@@ -634,7 +633,7 @@ pub fn add_root_from_fields(
     }
     if !path.is_dir() {
         return Err(format!(
-            "{} 不是一个目录。加根只认目录——主库是一组目录（`CONTEXT.md` 的**根**）。",
+            "{} 不是一个目录。加根只认目录——主库是一组目录。",
             romcat_core::path::display(path)
         ));
     }
@@ -665,7 +664,7 @@ fn last_scan(row: &RootRow) -> String {
         human_duration(scan.elapsed_ms)
     );
     if scan.interrupted {
-        line.push_str("（那一趟被中断，数字是下界）");
+        line.push_str("（那一趟部分完成，数字是下界）");
     }
     line
 }
