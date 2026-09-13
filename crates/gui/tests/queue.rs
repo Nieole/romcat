@@ -1060,7 +1060,8 @@ fn 界面点开的那一批与命令行按同一串字选出来的一条不差()
         "合成数据里该有一条候选都没有的批",
     );
 
-    let index = verdict::Index::load(&app.site().store, &app.site().library).expect("读得出沉淀库");
+    let index = verdict::Index::load(&app.site().store, &app.site().library_identity)
+        .expect("读得出沉淀库");
     for batch in &batches {
         // 界面这一侧：屏上点开这张卡片，作用范围盖住的那些条。
         展开(&mut app, &batch.shape);
@@ -1432,7 +1433,7 @@ fn 界面与命令行裁同一条匹配落下的东西一模一样() {
     let 命令行账 = judge(
         &mut site.catalog,
         &mut site.store,
-        &site.library,
+        &site.library_identity,
         &zh.variant,
         zh.entry,
         false,
@@ -1514,11 +1515,11 @@ fn 匹配裁决不另起一条撤销路() {
         screen.judge_match(site, &zh.variant, zh.entry, false);
     }
     assert!(app.queue().error().is_none(), "{:?}", app.queue().error());
-    let library = app.site().library.clone();
+    let library_identity = app.site().library_identity.clone();
     assert!(
         app.site()
             .store
-            .batches(&library, 10)
+            .batches(&library_identity, 10)
             .expect("读得出")
             .is_empty(),
         "匹配裁决建出了一批——那会让「撤回第 N 批」去撤一件它管不了的事",

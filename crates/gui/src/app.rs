@@ -57,7 +57,7 @@ pub enum View {
     ///
     /// 名字与模块名从 `Variants` / `library` 改成了 `Browse` / [`crate::browse`]
     /// （票 `12`，挂单 Q61）：规格里这一屏叫「浏览」，而 `library` 那个名字在这个仓库里
-    /// 已经归了**库**——`site.library` 是「这份主库叫什么」，`View::Library` 是**库屏**。
+    /// 已经归了**库**——`site.library`（后来正名为 `site.library_identity`）是**主库标识**，`View::Library` 是**库屏**。
     /// 同一个词指着三样东西，谁读代码都得先猜一遍。
     Browse,
     /// **子库**：管住这几台设备——一台一张卡，配目标、排差量、同步。
@@ -111,7 +111,7 @@ pub struct App {
     board: task::Tasks,
     /// 七条**面板边界**各自拖到哪儿了。存**工作目录**，不存中立库。
     layout: layout::Layout,
-    /// 标题里那个库名。默认是这份现场**给人看的**那个名字
+    /// 标题里那一段名字。默认是这份现场的**主库原名**
     /// （[`Site::display_name`]，也就是开场那一屏上画着的同一个）；合成数据那一路另给
     /// 一个（[`Self::set_library_label`]），免得一屏假名字看着像真库。
     library_label: String,
@@ -159,7 +159,7 @@ impl App {
         let layout = layout::Layout::load(&workspace);
         let mut sublibrary = sublibrary::Screen::new(workspace);
         sublibrary.reload(&site);
-        // **给人看的那个名字，不是标识符。** `Site::library` 是中立库的主文件名
+        // **给人看的主库原名，不是主库标识。** `Site::library_identity` 是中立库的主文件名
         // （「可读的一半 + 十六位哈希」），人在开场那一屏上看见的却是「我的主库」——
         // 同一份库在相邻两屏上两个样子，而票 01 把原名落进元数据表存在的全部理由
         // 就是这个（ADR-0023、规格 User Story 5）。
@@ -182,7 +182,7 @@ impl App {
         }
     }
 
-    /// 换掉标题里那个库名。
+    /// 换掉标题里那一段名字。
     ///
     /// **合成数据那一路要它**：假数据与真库在界面上长得一模一样，标题是唯一一直看得见的
     /// 区分处（`main.rs` 拿它写「合成数据（演示）」）。真库那一路不必调——默认就是
@@ -198,7 +198,7 @@ impl App {
     /// 两样都写进去，是因为它们各自回答一个只有标题答得了的问题：任务栏上并排两个
     /// romcat 时「哪个是哪份库」，以及截图发出来时「这是哪一屏」。
     ///
-    /// 库名那一段是**给人看的**那个（[`Site::display_name`]）——与开场那一屏上画着的
+    /// 名字那一段默认是**主库原名**（[`Site::display_name`]）——与开场那一屏上画着的
     /// 是同一个字，不是那串带哈希的主文件名。
     #[must_use]
     pub fn window_title(&self) -> String {

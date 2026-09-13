@@ -762,7 +762,7 @@ fn candidates_of(work: &str, bucket: &Bucket, mark: &str, at: u64) -> Vec<Candid
     out
 }
 
-/// 这份合成数据在**路径锚**里叫什么名字。真库永远不会叫这个。
+/// 这份合成数据的**主库标识**——**路径锚**里记的就是它。真库永远不会叫这个。
 pub const LIBRARY: &str = "合成数据";
 
 /// 合成数据这一趟的**工作目录**。

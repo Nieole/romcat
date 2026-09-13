@@ -32,7 +32,7 @@ use romcat_core::triage::Queue;
 use romcat_core::triage::report::QueueReport;
 use romcat_core::verdict::{self, Store};
 
-const 库名: &str = "小库";
+const 主库标识: &str = "小库";
 
 fn 写(path: &Path, bytes: &[u8]) {
     fs::create_dir_all(path.parent().expect("有上级目录")).expect("能建目录");
@@ -91,7 +91,7 @@ impl 现场 {
     }
 
     fn 跑识别(&mut self, 根名: &str, 目录: &Path) {
-        let index = verdict::Index::load(&self.store, 库名).expect("读得出沉淀库");
+        let index = verdict::Index::load(&self.store, 主库标识).expect("读得出沉淀库");
         identify::run(
             &RealFs::new(),
             &mut self.catalog,
@@ -111,7 +111,7 @@ impl 现场 {
 
     /// **待确认队列**眼下说库里还有多少个变体连识别都没跑过。
     fn 队列说的(&self) -> u64 {
-        let index = verdict::Index::load(&self.store, 库名).expect("读得出沉淀库");
+        let index = verdict::Index::load(&self.store, 主库标识).expect("读得出沉淀库");
         Queue::load(&self.catalog, &index)
             .expect("列得出队列")
             .not_run()

@@ -412,7 +412,7 @@ impl Section {
     /// 底下那一行：**导出**往哪个前端格式、哪个目录写。
     ///
     /// **第一次导出之前选一次，之后一键重导**（验收第 2、3 条）。选完记进中立库的
-    /// 元数据表，与主库名同一处——**纯加键、不升结构版本**，旧库拿新程序打开照样能用
+    /// 元数据表，与**主库原名**同一处——**纯加键、不升结构版本**，旧库拿新程序打开照样能用
     /// （`romcat_core::catalog::export` 的模块文档）。
     fn export_setup_ui(&mut self, ui: &mut egui::Ui, site: &Site) {
         ui.add_space(6.0);
@@ -489,7 +489,7 @@ fn identify_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Prod
     let repo = romcat_core::dat::DatRepo::open(&dat)
         .map_err(|error| Cutoff::failed(format!("DAT 库打不开：{error}")))?;
     // **沉淀库先说话**：裁决过的内容直接精确命中，不再进队列（ADR-0008）。
-    let verdicts = verdict::Index::load(&site.store, &site.library)
+    let verdicts = verdict::Index::load(&site.store, &site.library_identity)
         .map_err(|error| Cutoff::failed(format!("沉淀库读不动：{error}")))?;
     // **名字那一层的原料只有一处**（[`crate::scrape::NamingParts`]）：刮削与识别摆的是
     // 同一副，两条路各开一遍的话，同一个变体在两条路上会撞到不同的条目——而那是写进

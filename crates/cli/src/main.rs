@@ -2832,7 +2832,7 @@ impl TriageCommonArgs {
         String::new()
     }
 
-    /// 开一份**现场**：中立库、沉淀库，连这份主库在**路径锚**里叫什么名字。
+    /// 开一份**现场**：中立库、沉淀库，连这份主库的**主库标识**。
     ///
     /// 三样一起开在 `core::site` 里——界面走的是同一条（ADR-0005：核心是独立的库）。
     /// 命令行这一层只负责把三种给法折成一个 [`Slug`]。
@@ -3430,7 +3430,7 @@ fn collect_queue(
         .store
         .counts()
         .map_err(|error| format!("沉淀库读不动：{error}"))?;
-    let index = verdict::Index::load(&site.store, &site.library)
+    let index = verdict::Index::load(&site.store, &site.library_identity)
         .map_err(|error| format!("沉淀库读不动：{error}"))?;
     let survey = triage::survey(&site.catalog, &index, filter)
         .map_err(|error| format!("中立库读不动：{error}"))?;
@@ -3515,7 +3515,7 @@ fn run_triage_decide(args: &TriageDecideArgs) -> ExitCode {
     if let Err(error) = triage::fill_prints(&site.catalog, &mut survey.items) {
         return fail(format!("中立库读不动：{error}"));
     }
-    let decide = match draft.build(&site.library) {
+    let decide = match draft.build(&site.library_identity) {
         Ok(decide) => decide,
         Err(message) => return fail(message),
     };
@@ -3665,12 +3665,12 @@ fn run_triage_batches(args: &TriageBatchesArgs) -> ExitCode {
         Ok(site) => site,
         Err(message) => return fail(message),
     };
-    let batches = match site.store.batches(&site.library, args.limit) {
+    let batches = match site.store.batches(&site.library_identity, args.limit) {
         Ok(batches) => batches,
         Err(error) => return fail(format!("沉淀库读不动：{error}")),
     };
     if batches.is_empty() {
-        println!("主库「{}」上还没有落过一批裁决。", site.library);
+        println!("主库「{}」上还没有落过一批裁决。", site.library_identity);
         return ExitCode::SUCCESS;
     }
     println!("落过的那些批（新的在前）");
@@ -3791,7 +3791,7 @@ fn pick_batch(site: &Site, batch: Option<i64>, last: bool, undone: bool) -> Resu
     }
     let batches = site
         .store
-        .batches(&site.library, 0)
+        .batches(&site.library_identity, 0)
         .map_err(|error| format!("沉淀库读不动：{error}"))?;
     batches
         .iter()
@@ -3801,7 +3801,7 @@ fn pick_batch(site: &Site, batch: Option<i64>, last: bool, undone: bool) -> Resu
             if undone {
                 "一批撤掉的都没有，没什么可放回去的。".to_string()
             } else {
-                format!("主库「{}」上还没有落过一批裁决。", site.library)
+                format!("主库「{}」上还没有落过一批裁决。", site.library_identity)
             }
         })
 }
@@ -3899,10 +3899,11 @@ fn run_triage_undo(args: &TriageUndoArgs) -> ExitCode {
             （中立库与沉淀库两边一起回去）。",
         );
     }
-    let plan = match triage::plan_forget(&site.catalog, &site.store, &filter, &site.library) {
-        Ok(plan) => plan,
-        Err(error) => return fail(format!("中立库或沉淀库读不动：{error}")),
-    };
+    let plan =
+        match triage::plan_forget(&site.catalog, &site.store, &filter, &site.library_identity) {
+            Ok(plan) => plan,
+            Err(error) => return fail(format!("中立库或沉淀库读不动：{error}")),
+        };
     if plan.rows.is_empty() {
         return fail("这些变体上一条裁决都没有。");
     }
@@ -5322,7 +5323,7 @@ fn run_zh_judge(args: &ZhJudgeArgs) -> ExitCode {
     let judged = match scrape::zh::judge(
         &mut site.catalog,
         &mut site.store,
-        &site.library,
+        &site.library_identity,
         &key,
         args.entry,
         args.yes,

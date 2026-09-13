@@ -344,8 +344,15 @@ fn apply(
     keys: &[String],
     joining: bool,
 ) -> Result<Applied, CollectionError> {
-    let library = site.library.clone();
-    let planned = plan(&site.catalog, &library, name, keys, joining, &Handle::new())?;
+    let library_identity = site.library_identity.clone();
+    let planned = plan(
+        &site.catalog,
+        &library_identity,
+        name,
+        keys,
+        joining,
+        &Handle::new(),
+    )?;
     commit(site, &planned)
 }
 
@@ -364,7 +371,7 @@ pub fn standing(site: &Site, key: &str) -> Result<Vec<(String, &'static str)>, C
     // 路径锚那一份先问，内容锚后问——同一个合集两种锚都有时，**报内容锚那一种**：
     // 认得出改名的那条成立，整条成员关系就认得出改名。
     let by_path = Anchor::Path {
-        library: site.library.clone(),
+        library: site.library_identity.clone(),
         variant_key: variant.key.clone(),
     };
     for name in site.store.joined(&by_path)? {

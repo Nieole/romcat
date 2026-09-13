@@ -33,8 +33,8 @@ use romcat_core::testing::container::{ZipEntrySpec, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::verdict::{self, ANCHOR_CONTENT, ANCHOR_PATH, Anchor, Store};
 
-/// 这份主库在**路径锚**里叫什么。
-const 库名: &str = "小库";
+/// 这份主库的**主库标识**：**路径锚**里记的就是它。
+const 主库标识: &str = "小库";
 /// 主库那一组根里，头一个叫什么。
 const 主根: &str = "主盘";
 /// 第二个根：「挪到另一个根之后还认得出」要它。
@@ -87,7 +87,7 @@ fn 建现场() -> 现场 {
     现场 {
         dir,
         副,
-        site: Site::in_memory(catalog, Store::in_memory().expect("开得出沉淀库"), 库名),
+        site: Site::in_memory(catalog, Store::in_memory().expect("开得出沉淀库"), 主库标识),
         repo: DatRepo::in_memory().expect("开得出 DAT 库"),
     }
 }
@@ -109,7 +109,7 @@ fn 跑识别(现场: &mut 现场) -> identify::Outcome {
 
 /// 同上，但主库摆在这一组根上。「挪到另一个根」那条要它。
 fn 跑识别在(现场: &mut 现场, roots: Roots) -> identify::Outcome {
-    let index = verdict::Index::load(&现场.site.store, 库名).expect("读得出沉淀库");
+    let index = verdict::Index::load(&现场.site.store, 主库标识).expect("读得出沉淀库");
     let mut options = Options::new(roots);
     options.read_library = false;
     identify::run(
@@ -242,7 +242,7 @@ fn 收藏落沉淀库_锚是内容锚_无判据的那个如实退成路径锚() 
     assert!(
         成员.iter().any(|one| matches!(
             &one.anchor,
-            Anchor::Path { library, variant_key } if library == 库名 && variant_key == 裸卡带
+            Anchor::Path { library, variant_key } if library == 主库标识 && variant_key == 裸卡带
         )),
         "无判据的那一个如实退成路径锚，而且记着这是哪份主库的哪个变体",
     );
@@ -462,7 +462,7 @@ fn 取消时两种锚都拿_识别之前放进去的那一条也拿得掉() {
         .join(&[verdict::Membership::now(
             FAVORITE,
             Anchor::Path {
-                library: 库名.to_string(),
+                library: 主库标识.to_string(),
                 variant_key: 马里奥.to_string(),
             },
         )])
@@ -528,7 +528,7 @@ fn 整批收藏的读那一半停得下来_而且停下时一个字都没写() {
     把手.stop();
     let 错 = collection::plan(
         &现场.site.catalog,
-        库名,
+        主库标识,
         FAVORITE,
         &键(&[马里奥, 勇者, 裸卡带]),
         true,
@@ -564,8 +564,15 @@ fn 排一趟再落下去_与当场收藏那一下一个字不差() {
     let mut 排一趟 = 建现场();
     跑识别(&mut 排一趟);
     let 把手 = Handle::new();
-    let 计划 = collection::plan(&排一趟.site.catalog, 库名, FAVORITE, &那一批, true, &把手)
-        .expect("排得出");
+    let 计划 = collection::plan(
+        &排一趟.site.catalog,
+        主库标识,
+        FAVORITE,
+        &那一批,
+        true,
+        &把手,
+    )
+    .expect("排得出");
     // **排完还没写库**：写那一半在认领那一步（台上那条线拿的是只读连接）。
     assert!(排一趟.site.store.memberships().expect("读得到").is_empty());
     // 进度报得出来：这一趟在屏上不是一块白板。

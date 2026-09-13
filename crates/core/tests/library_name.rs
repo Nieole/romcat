@@ -8,16 +8,20 @@
 //! 这里钉的是三件事：建库时那一行真的落了盘、读得回来的是**原名**而不是折过的文件名、
 //! 以及**读不到时退回从文件名截**——票 01 之前建的那些库一个字都不会改，
 //! 中立库的结构版本也不许为这一行加 1（它是元数据表上的**纯加**）。
+//!
+//! 另钉一件与原名相对的事：**主库标识**正过一次名（`Site::library` → `Site::library_identity`），
+//! **路径锚**里存的那串字节一个没动。
 
 use romcat_core::catalog::{Catalog, EntryRecord, SCHEMA_VERSION, Verdict};
 use romcat_core::fs::{EntryKind, EntryMeta};
 use romcat_core::site::Site;
 use romcat_core::testing::temp_dir;
+use romcat_core::verdict::{Anchor, Membership, Store};
 use romcat_core::workspace::{self, Slug};
 
 #[test]
 fn 建库时原名落进元数据表再开一次读得回来() {
-    let 工作目录 = temp_dir("库名-建库");
+    let 工作目录 = temp_dir("原名-建库");
     let slug = Slug::Named("主库");
     let 库文件 = workspace::catalog_path(工作目录.path(), slug);
 
@@ -33,7 +37,7 @@ fn 票01之前建的库读不到那一行时退回从文件名截() {
     // 那些库的元数据表里压根没有这一行，而它们**不会被改**——旧库拿新程序打开照样能用
     // （中立库的结构版本没有为这一行加 1）。于是「这份主库叫什么」只能从文件名截，
     // 截出来的是人认得出的那一半，不是那串哈希。
-    let 工作目录 = temp_dir("库名-旧库");
+    let 工作目录 = temp_dir("原名-旧库");
     let slug = Slug::Named("我的库");
     let 库文件 = workspace::catalog_path(工作目录.path(), slug);
 
@@ -61,7 +65,7 @@ fn 票01之前建的库读不到那一行时退回从文件名截() {
 fn 名字折不进文件名时元数据表里仍是原名() {
     // 名字里带路径分隔符、控制字符、或长过 24 个字符：文件名照旧按既有规则折
     // （滤字符、截断、缀哈希），而落进元数据表的是**原名**。两条路各自正确、互不干扰。
-    let 工作目录 = temp_dir("库名-怪名字");
+    let 工作目录 = temp_dir("原名-怪名字");
     for 原名 in [
         "甲/乙\\丙:丁",
         "这个主库的名字长得超过二十四个字符所以文件名一定截得到它",
@@ -86,7 +90,7 @@ fn 名字折不进文件名时元数据表里仍是原名() {
 
 #[test]
 fn 名字被滤光时文件名退成那个固定词而元数据表里仍是原名() {
-    let 工作目录 = temp_dir("库名-滤光");
+    let 工作目录 = temp_dir("原名-滤光");
     let slug = Slug::Named("。、？");
     let 库文件 = workspace::catalog_path(工作目录.path(), slug);
     drop(Catalog::open_named(&库文件, &slug.display_name()).expect("能建中立库"));
@@ -115,7 +119,7 @@ fn 界面与命令行开同一份库读到的是同一个名字() {
     //
     // 名字挑一个**折进文件名会变形**的：`。、？` 全被滤光，文件名退成 `library-…`。
     // 于是「两边一样」不是因为两边都在读文件名。
-    let 工作目录 = temp_dir("库名-两条路");
+    let 工作目录 = temp_dir("原名-两条路");
     for 原名 in ["主库", "。、？"] {
         let slug = Slug::Named(原名);
         let 库文件 = workspace::catalog_path(工作目录.path(), slug);
@@ -130,11 +134,58 @@ fn 界面与命令行开同一份库读到的是同一个名字() {
 }
 
 #[test]
+fn 路径锚里存的主库标识一个字节没动() {
+    // **主库标识**在代码里正过一次名（票 `no-mute-spots-opening-a-catalog/01`），**只改叫法，
+    // 不动锚**。沉淀库不可再生，里头那些**路径锚**记的就是这一串原样的字节——它要是变了
+    // 一个字，那些锚一条都不删，却从此一条都撞不上。
+    //
+    // 这串字面量是正名之前从代码里读出来的，**不许照着现在的算法重算一遍**：重算出来的
+    // 那一串永远与代码一致，钉不住任何东西。
+    const 锚里存的: &str = "主库-f5c61109e92b6036";
+    let 工作目录 = temp_dir("标识-路径锚");
+    let slug = Slug::Named("主库");
+    let 库文件 = workspace::catalog_path(工作目录.path(), slug);
+    drop(Catalog::open_named(&库文件, &slug.display_name()).expect("能建中立库"));
+
+    let 变体 = "主盘/FC/魂斗罗.zip";
+    {
+        // 正名之前落下的那条路径锚：沉淀库里原样躺着的就是这串字节。
+        let mut store =
+            Store::open(&workspace::verdict_store_path(工作目录.path())).expect("开得出沉淀库");
+        store
+            .join(&[Membership::now(
+                "收藏",
+                Anchor::Path {
+                    library: 锚里存的.to_string(),
+                    variant_key: 变体.to_string(),
+                },
+            )])
+            .expect("写得进沉淀库");
+    }
+
+    // 两个入口都得认得它：命令行按 `--library` 的名字找，界面直接开列出来的那份文件。
+    let 按名字 = Site::open(工作目录.path(), slug, None, "--library").expect("开得出现场");
+    let 按文件 = Site::open_file(工作目录.path(), &库文件, None).expect("开得出现场");
+    for (路, site) in [("按名字", &按名字), ("按文件", &按文件)] {
+        assert_eq!(site.library_identity, 锚里存的, "{路}开出来的主库标识变了");
+        let 锚 = Anchor::Path {
+            library: site.library_identity.clone(),
+            variant_key: 变体.to_string(),
+        };
+        assert_eq!(
+            site.store.joined(&锚).expect("读得出沉淀库"),
+            ["收藏"],
+            "{路}开出来的现场认不出原先那条路径锚"
+        );
+    }
+}
+
+#[test]
 fn 名字是空白时退回从文件名截而不是留一行空的() {
     // `--library ""` 命令行不拦（改它的行为不在这张票里）。**空白不是名字**：那一行不落，
     // 读的时候也退回从文件名截，于是报告里不会印出一句光秃秃的「主库：」，
     // 开场那一屏也不会多一行没有名字的库。
-    let 工作目录 = temp_dir("库名-空名字");
+    let 工作目录 = temp_dir("原名-空名字");
     for 空的 in ["", "   "] {
         let slug = Slug::Named(空的);
         let 库文件 = workspace::catalog_path(工作目录.path(), slug);
