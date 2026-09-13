@@ -49,7 +49,8 @@ use serde::Serialize;
 
 use crate::catalog::{Catalog, CatalogError};
 use crate::scrape::{AnchorKind, Field};
-use crate::task::{Cutoff, Handle};
+use crate::sync::Plan;
+use crate::task::{Cutoff, Halted, Handle};
 
 pub use rule::{Bound, Clause, Dimension, Group, Join, Node, Op, Rule, RuleError};
 
@@ -432,6 +433,116 @@ pub struct Trim {
     pub cumulative: u64,
 }
 
+/// **装得下吗**：这一台设备同步完之后卡上占多少、超没超上限。
+///
+/// ## 只有一处算，这里一个数都不算
+///
+/// 算它的是**同步计划器**（[`sync::plan`](crate::sync::plan)）：比的是**目标现占 ＋ 净变化**
+/// （[`Plan::after_bytes`]），不是选择集选出来那批一共多大。卡上的地方是共用的——维护者
+/// 自己拷进去的存档、落点被占传不上去的、被改过因而不删的，全都还占着位置；只比选中容量
+/// 会给出一个「装得下」，然后传到一半没空间（挂账 D76）。
+///
+/// 子库报告、界面上「算一遍容量」、`romcat sublibrary show` 摆的都是这个值，而它只从一份
+/// [`Plan`] 里抄出来（[`Room::of`]）——「报告说装得下、差量预览说装不下」在构造上长不出来。
+///
+/// ## 算不出就说算不出
+///
+/// 计划器要看一眼目标才排得出来。**卡不在手边时现占算不出**，这时是 [`Fit::Unknown`]：
+/// 不退回选中容量，也不退回上一趟记下的数——前者正是那个不成立的「装得下」，后者说的是
+/// 一张此刻没人看过的卡（ADR-0015：目标上的状态要**验证**，不盲信清单）。
+///
+/// [`Plan::after_bytes`]: crate::sync::Plan::after_bytes
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum Fit {
+    /// 排得出计划：数全部抄自同步计划器那一份。
+    Known(Room),
+    /// 现占算不出——目标不在位、看不成，或者计划排不出来。**不给数。**
+    Unknown {
+        /// 为什么算不出，一句给人看的话。
+        why: String,
+    },
+}
+
+impl Fit {
+    /// 排得出计划时那笔账；算不出时是 `None`。
+    ///
+    /// **`None` 不是「装得下」**——问超没超之前，先问它算没算出来。
+    #[must_use]
+    pub fn known(&self) -> Option<&Room> {
+        match self {
+            Self::Known(room) => Some(room),
+            Self::Unknown { .. } => None,
+        }
+    }
+}
+
+/// 卡上那笔账：现占多少、其中清单之外多少、净变化、同步之后、超出多少、砍谁。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Room {
+    /// 目标上**眼下**实际占多少（下界：元数据读不到的按 0 计）。
+    pub actual_bytes: u64,
+    /// 其中**清单之外**的占多少。
+    pub stranger_bytes: u64,
+    /// 这一趟的净变化：`新增 + 更新后 - 更新前 - 删除`。
+    pub net_bytes: i64,
+    /// 这一趟同步完之后目标上占多少：`目标现占 + 净变化`。**超没超比的是这个数。**
+    pub after_bytes: u64,
+    /// 超出容量上限多少字节；没超或没设上限时是 `None`。
+    pub over_capacity: Option<u64>,
+    /// 超了的话，按体积排序的裁剪建议。**绝不自动截断**（ADR-0016）。
+    pub trim_suggestions: Vec<Trim>,
+}
+
+impl Room {
+    /// 从一份计划里抄出来。**一个数都不另算。**
+    #[must_use]
+    pub fn of(plan: &Plan) -> Self {
+        Self {
+            actual_bytes: plan.actual_bytes,
+            stranger_bytes: plan.stranger_bytes,
+            net_bytes: plan.net_bytes,
+            after_bytes: plan.after_bytes,
+            over_capacity: plan.over_capacity,
+            trim_suggestions: plan.trim_suggestions.clone(),
+        }
+    }
+}
+
+/// **装得下吗**——对着目标把这一批排一遍计划，抄出那笔账（[`Fit`]）。
+///
+/// 走的是 [`sync::prepare_selected`](crate::sync::prepare_selected)，与差量预览同一条线，
+/// 按同步默认的那一趟排（不补回你删过的、用工作目录里那份优先级表）。只读：目标走只读
+/// 接缝看一眼，中立库只读，媒体池连目录都不建。
+///
+/// 收 [`Selected`] 而不是子库名：一趟折一次事实、好几台设备共用（[`survey`]），
+/// 或者问「加上这一批之后装不装得下」，都是同一个问题。
+///
+/// `step` 每走一步报一次，一共 [`sync::PLAN_STEPS`](crate::sync::PLAN_STEPS) 步。
+///
+/// # Errors
+/// 只有被叫停时返回 [`Halted`]。别的原因排不出计划都落在 [`Fit::Unknown`] 里——
+/// **那是答案的一种，不是错误**：卡不在手边时，「算不出」就是这台设备眼下的真实状况。
+pub fn fit(
+    catalog: &Catalog,
+    workspace: &Path,
+    sublibrary: &Sublibrary,
+    selected: &Selected,
+    step: &dyn Fn(&str) -> Result<(), Halted>,
+) -> Result<Fit, Halted> {
+    match crate::sync::prepare_selected(
+        catalog,
+        workspace,
+        sublibrary.clone(),
+        selected,
+        &crate::sync::Request::default(),
+        step,
+    ) {
+        Ok(prepared) => Ok(Fit::Known(Room::of(&prepared.plan))),
+        Err(Cutoff::Halted) => Err(Halted),
+        Err(Cutoff::Failed(why)) => Ok(Fit::Unknown { why }),
+    }
+}
+
 /// 超出容量上限多少字节；没超或没设上限时是 `None`。
 #[must_use]
 pub fn over_capacity(capacity: Option<u64>, bytes: u64) -> Option<u64> {
@@ -446,10 +557,10 @@ pub fn over_capacity(capacity: Option<u64>, bytes: u64) -> Option<u64> {
 /// 三个数各有各的出处，而且**出处不同这件事本身要说得出口**：
 ///
 /// - **选中**——这个子库在卡上占的地方。**卡不在手边时**是选择集选出来的那批变体一共
-///   多大（只问中立库）；**排过差量预览之后**换成计划里那个数，因为那时算得准了
-///   （元数据与媒体也要占地方、转换又省下来一些）。
+///   多大（只问中立库）；**看过目标之后**（算过一遍容量、或者排过差量预览）换成计划里
+///   那个数，因为那时算得准了（元数据与媒体也要占地方、转换又省下来一些）。
 /// - **清单之外**——目标上工具没放过的那些文件一共多大（[`Plan::stranger_bytes`]）。
-///   它要**目标设备在位**才知道，所以没排过差量预览时是 `None`——那是「还不知道」，
+///   它要**目标设备在位**才知道，所以没看过目标时是 `None`——那是「还不知道」，
 ///   不是「一个字节都没有」。两者在卡上画成同一个 0 的话，人会以为卡上是空的。
 /// - **上限**——子库自己记着的容量上限。`None` 是不设限。
 ///
@@ -459,20 +570,18 @@ pub fn over_capacity(capacity: Option<u64>, bytes: u64) -> Option<u64> {
 ///
 /// **不算，也就必须对得上**，而对得上是一条能写下来的规矩：填这三个数的人要保证
 /// `over_capacity(capacity, taken())` 等于旁边那行字用的那个超出量。
-/// 排过差量的那一台照 [`Plan::over_capacity`] 那条口径填
-/// （`选中 = after_bytes − stranger_bytes`，于是 [`Self::taken`] 正好是 `after_bytes`）；
-/// 没排过的照 [`SelectionReport::over_capacity`] 那条填（`选中 = report.bytes`、
-/// 清单之外是 `None`，于是 `taken()` 正好是 `report.bytes`）。两条都是恒等式，
-/// 不是「差不多」。
+/// 看过目标的那一台照 [`Room`] 那条口径填（`选中 = after_bytes − stranger_bytes`、
+/// 清单之外是 `stranger_bytes`，于是 [`Self::taken`] 正好是 `after_bytes`——计划与报告
+/// 摆的是同一笔账）。没看过目标的那一台旁边那行字**不给超出量**（[`Fit::Unknown`]），
+/// 条子照 `选中 = report.bytes`、清单之外 `None` 画，**只画、不替它说超没超**。
+/// 这是恒等式，不是「差不多」。
 ///
 /// [`Plan::stranger_bytes`]: crate::sync::Plan::stranger_bytes
-/// [`Plan::over_capacity`]: crate::sync::Plan::over_capacity
-/// [`SelectionReport::over_capacity`]: report::SelectionReport::over_capacity
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Gauge {
     /// 选择集选中的那批变体一共多大。
     pub picked: u64,
-    /// 目标上**清单之外**的文件一共多大；`None` 是还没排过差量预览，不知道。
+    /// 目标上**清单之外**的文件一共多大；`None` 是还没看过目标，不知道。
     pub strangers: Option<u64>,
     /// 容量上限；`None` 是不设限。
     pub capacity: Option<u64>,
@@ -782,41 +891,55 @@ pub fn facts(catalog: &Catalog) -> Result<Vec<VariantFacts>, CatalogError> {
     Ok(out)
 }
 
-/// **算一遍容量**：每台设备各求一次选择集，折出各自的[选择集报告](report::SelectionReport)。
+/// **算一遍容量**：每台设备各求一次选择集、各对着自己的目标问一遍装不装得下，
+/// 折出各自的[选择集报告](report::SelectionReport)。
 ///
 /// ## 折一趟事实，全部设备共用
 ///
 /// 大头是 [`facts`] 走一遍全库（真机量级上 343 毫秒，挂账 D156），而按选择集求值是
 /// 内存里的事。一台一折的话，五张卡就是五趟全库。
 ///
-/// ## 不碰目标设备
+/// ## 装得下吗：看一眼目标
 ///
-/// 「这套规则选出多少、装不装得下」只要中立库——卡不在手边也算得出来（ADR-0009）。
-/// 要目标设备在位的是**差量预览**（[`sync::prepare`](fn@crate::sync::prepare)），那是另一趟活。
+/// 「这套规则选出多少、多大」只要中立库，卡不在手边也算得出来。**「装得下吗」要看目标**
+/// ——比的是目标现占 ＋ 净变化（[`Fit`]、挂账 D76），于是每台设备各走一遍排计划那半条线
+/// （[`fit`]），与**差量预览**（[`sync::prepare`](fn@crate::sync::prepare)）是同一条线。
+/// **卡不在手边的那一台如实说算不出**，不拿选中容量去冒充。
 ///
-/// `task` 是这一趟的**把手**：折事实一步，此后一台设备一步。**整条只读**，
-/// 所以被叫停时停在哪儿都是干净的——一个字节都没写，再算一次就是。
+/// `task` 是这一趟的**把手**：折事实一步，此后一台设备
+/// [`sync::PLAN_STEPS`](crate::sync::PLAN_STEPS) 步，步名前面带着是哪一台。**整条只读**
+/// （目标也只走只读接缝看一眼），所以被叫停时停在哪儿都是干净的——一个字节都没写，
+/// 再算一次就是。
 ///
 /// # Errors
-/// 中立库读不动时返回 [`Cutoff::Failed`]；被叫停时返回
+/// 折事实、读选择集时中立库读不动返回 [`Cutoff::Failed`]——**某一台排不出计划不在此列**：
+/// 那台的报告里是 [`Fit::Unknown`]，别的设备照算。被叫停时返回
 /// [`Cutoff::Halted`]——**那是两个不同的支，不是两句
 /// 不同的话**，任务台按它分「停了」与「失败」。
 pub fn survey(
     catalog: &Catalog,
+    workspace: &Path,
     sublibraries: &[Sublibrary],
     task: &Handle,
 ) -> Result<BTreeMap<String, report::SelectionReport>, Cutoff> {
-    // 折事实那一步 + 一台设备一步。
-    task.steps(u32::try_from(sublibraries.len() + 1).unwrap_or(u32::MAX));
+    // 折事实那一步 + 一台设备各走一遍排计划那半条线。
+    let devices = u32::try_from(sublibraries.len()).unwrap_or(u32::MAX);
+    task.steps(
+        devices
+            .saturating_mul(crate::sync::PLAN_STEPS)
+            .saturating_add(1),
+    );
     task.step("折事实")?;
     let facts = facts(catalog).map_err(|error| format!("中立库读不动：{error}"))?;
     let mut out = BTreeMap::new();
     for sublibrary in sublibraries {
-        task.step(&format!("算「{}」", sublibrary.name))?;
         let loaded = catalog
             .selection(&sublibrary.name)
             .map_err(|error| format!("中立库读不动：{error}"))?;
         let selected = select(&loaded.selection, &facts);
+        let fit = fit(catalog, workspace, sublibrary, &selected, &|step| {
+            task.step(&format!("算「{}」：{step}", sublibrary.name))
+        })?;
         out.insert(
             sublibrary.name.clone(),
             report::SelectionReport::build(
@@ -825,6 +948,7 @@ pub fn survey(
                 &loaded,
                 &facts,
                 &selected,
+                fit,
             ),
         );
     }

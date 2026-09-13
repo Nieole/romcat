@@ -38,10 +38,11 @@
 //! ## 容量条三段：选中的、清单之外的、上限
 //!
 //! 三个数各有各的出处，而且**出处不同这件事要说得出口**（[`Gauge`]）：**选中**只问
-//! 中立库，卡不在手边也算得出来；**清单之外**要目标设备在位，没排过差量预览时它是
+//! 中立库，卡不在手边也算得出来；**清单之外**要目标设备在位，没看过目标时它是
 //! 「还不知道」而不是零。画成同一个零的话，人会以为卡上是空的。
 //!
-//! 超没超由核心一处算（`sublibrary::over_capacity`），条子自己不算第二遍。
+//! 超没超由核心一处算——同步计划器，底是目标现占 ＋ 净变化；「算一遍容量」那份报告里的
+//! 是从计划抄来的（`sublibrary::Fit`，挂账 D76）。条子自己不算第二遍。
 //! **容量超限只给建议，绝不自动截断**（ADR-0016）——而砍谁的落点是一条**排除例外**，
 //! 那是浏览屏上的动作：这一屏把建议摆出来，按不动。
 //!
@@ -192,10 +193,10 @@ pub struct Screen {
     /// 整趟活在核心里（`sublibrary::survey`），于是屏上摆着的与 `romcat sublibrary show`
     /// 印出来的是同一个值。
     ///
-    /// **与差量预览分开**，因为它们要的东西不一样：差量预览要目标设备在位（三方对比的
-    /// 第三方就是目标上实际有什么），而「这套规则选出多少、装不装得下」只要中立库。
-    /// 子库是持久实体，不是「插上卡才存在的东西」（ADR-0009）——卡不在手边时照样该
-    /// 看得见容量账。
+    /// **与差量预览分开**：「这套规则选出多少、多大」只要中立库，子库是持久实体，不是
+    /// 「插上卡才存在的东西」——卡不在手边时照样该看得见。**装不装得下**两边走的是同一条
+    /// 排计划的线（目标现占 ＋ 净变化，挂账 D76），只是这里一趟问全部设备、不留可同步的
+    /// 计划；卡不在手边的那台如实说算不出。
     evaluated: BTreeMap<String, SelectionReport>,
     /// 正在算的那一趟容量是任务台上的第几号。**它同时是认领凭据**
     /// （与 [`Self::previewing`] 一个写法）。
@@ -364,43 +365,54 @@ impl Screen {
 
     /// 某一台设备卡上那根**容量条**：选中的、清单之外的、上限。
     ///
-    /// 三个数从哪儿来，[`Gauge`] 的文档写着。**清单之外只有排过差量预览才知道**，
-    /// 而那份预览是对着某一台设备排的——所以只有那一台的条子有第二段。
+    /// 三个数从哪儿来，[`Gauge`] 的文档写着。**清单之外要看过目标才知道**：排过差量预览的
+    /// 那一台、或者算过容量时卡在手边的那几台，条子才有第二段。
     ///
     /// ## 条子与旁边那行「超出容量上限」必须是同一笔账
     ///
     /// 超没超由核心一处算（ADR-0016），这一屏两处摆它：排过差量的照
-    /// [`Plan::over_capacity`]，没排过的照 [`SelectionReport::over_capacity`]。
+    /// [`Plan::over_capacity`]，没排过的照报告里从计划抄来的那一份（[`Fit`]）——同一个底。
     /// 于是条子的总量得**照同一条口径**填，不然会出现「条子画到九成、旁边说超了
     /// 200 MiB」——那正是 [`Gauge`] 的文档说不该发生的事。
     ///
-    /// - 排过差量：`选中 = after_bytes − stranger_bytes`，于是 `taken()` 正好是
-    ///   `after_bytes`——计划算超出量用的就是它。**它不等于「期望总量」**：卡上还
-    ///   留着那些「对不上、因此本次不动」的文件，它们照样占地方（挂账 D76）。
-    /// - 没排过：`选中 = report.bytes`、清单之外是 `None`，于是 `taken()` 正好是
-    ///   `report.bytes`——报告算超出量用的就是它。
+    /// - 排过差量、或者算过容量时卡在手边：`选中 = after_bytes − stranger_bytes`，于是
+    ///   `taken()` 正好是 `after_bytes`——计划算超出量用的就是它，报告里那份是从计划抄的。
+    ///   **它不等于「期望总量」**：卡上还留着那些「对不上、因此本次不动」的文件，
+    ///   它们照样占地方（挂账 D76）。
+    /// - 没看过目标：`选中 = report.bytes`、清单之外是 `None`，而旁边**不给超出量**
+    ///   （算不出）——条子只画选中那一段与上限。
     ///
     /// [`Plan::over_capacity`]: romcat_core::sync::Plan::over_capacity
-    /// [`SelectionReport::over_capacity`]: romcat_core::sublibrary::report::SelectionReport::over_capacity
+    /// [`Fit`]: romcat_core::sublibrary::Fit
     #[must_use]
     pub fn gauge(&self, name: &str) -> Gauge {
-        let plan = self
-            .prepared
-            .as_ref()
-            .filter(|prepared| prepared.sublibrary.name == name)
-            .map(|prepared| &prepared.plan);
+        let room = self.room_of(name);
         Gauge {
-            picked: plan.map_or_else(
+            picked: room.as_ref().map_or_else(
                 || self.evaluated.get(name).map_or(0, |report| report.bytes),
-                |plan| plan.after_bytes.saturating_sub(plan.stranger_bytes),
+                |room| room.after_bytes.saturating_sub(room.stranger_bytes),
             ),
-            strangers: plan.map(|plan| plan.stranger_bytes),
+            strangers: room.as_ref().map(|room| room.stranger_bytes),
             capacity: self
                 .list
                 .iter()
                 .find(|row| row.name == name)
                 .and_then(|row| row.capacity),
         }
+    }
+
+    /// 这一台卡上那笔**装得下吗**的账：排过差量的照那份计划，没排过的照「算一遍容量」
+    /// 报告里从计划抄来的那份——两份同底（目标现占 ＋ 净变化，挂账 D76）。
+    /// 卡不在手边、也没排过差量时是 `None`：**不是「装得下」，是算不出**。
+    fn room_of(&self, name: &str) -> Option<romcat_core::sublibrary::Room> {
+        self.plan_of(name)
+            .map(romcat_core::sublibrary::Room::of)
+            .or_else(|| {
+                self.evaluated
+                    .get(name)
+                    .and_then(|report| report.fit.known())
+                    .cloned()
+            })
     }
 
     /// 上一趟同步的账。
@@ -524,7 +536,8 @@ impl Screen {
     /// **每台设备各求一次选择集**：这套规则加例外选出什么、多大、装不装得下。
     /// 往[任务台](crate::task)上排一趟，跑在画帧那条线程之外。
     ///
-    /// **不碰目标设备**——卡不在手边时照样看得见容量账（ADR-0009）。折事实那一趟走一遍
+    /// 选中多少只问中立库；**装不装得下对着目标排一遍计划**（与差量预览同一条线，挂账 D76），
+    /// 卡不在手边的那台如实说算不出、不给数。折事实那一趟走一遍
     /// 全库，**全部子库共用它**：一台一折的话，五张卡就是五趟全库。整趟活整份交给核心
     /// （[`survey`](romcat_core::sublibrary::survey)），于是界面上摆着的与
     /// `romcat sublibrary show` 印出来的是同一个值。容量超限时**只给建议，一个都不砍**
@@ -545,14 +558,15 @@ impl Screen {
         self.error = None;
         // **算的是排它这一刻库里摆着的那几台设备**，这一份名单跟着那趟活走。
         let list = self.list.clone();
+        let workspace = self.workspace.clone();
         let title = "算一遍容量".to_string();
         self.evaluating = Some(match site.catalog.read_only() {
             Ok(reader) => tasks.queue(title, move |task| {
-                romcat_core::sublibrary::survey(&reader, &list, task)
+                romcat_core::sublibrary::survey(&reader, &workspace, &list, task)
                     .map(|reports| Product::Evaluated(Box::new(reports)))
             }),
             Err(CatalogError::NotOnDisk { .. }) => tasks.run_here(title, |task| {
-                romcat_core::sublibrary::survey(&site.catalog, &list, task)
+                romcat_core::sublibrary::survey(&site.catalog, &workspace, &list, task)
                     .map(|reports| Product::Evaluated(Box::new(reports)))
             }),
             Err(why) => {
@@ -980,8 +994,8 @@ impl Screen {
                         egui::Button::new("算一遍容量"),
                     )
                     .on_hover_text(
-                        "只问中立库：每台设备的选择集各选出多少、多大、装不装得下。\
-                         **卡不在手边也算得出来**。折一次事实，全部设备共用。\
+                        "每台设备的选择集各选出多少、多大，装不装得下要看一眼那张卡——\
+                         **卡不在手边的那台如实说算不出**。折一次事实，全部设备共用。\
                          它进**任务队列**跑，期间这一屏照常用。",
                     )
                     .clicked()
@@ -1244,9 +1258,9 @@ impl Screen {
             ui.colored_label(选中色, "■");
             ui.label(format!("选中 {}", human_bytes(gauge.picked)))
                 .on_hover_text(
-                    "这个子库在卡上占的地方。**排过差量预览之后**算的是同步完的样子\
+                    "这个子库在卡上占的地方。**看过目标之后**（算过容量或排过差量）算的是同步完的样子\
                      ——元数据与媒体也要占地方，转换又省下来一些，而卡上还留着那些\
-                     「对不上、本次不动」的文件。没排过时就是选择集选出来那批变体一共多大。",
+                     「对不上、本次不动」的文件。卡不在手边时就是选择集选出来那批变体一共多大。",
                 );
             ui.separator();
             ui.colored_label(之外色, "■");
@@ -1254,7 +1268,7 @@ impl Screen {
                 // **「还不知道」不画成零**：卡不在手边时目标上有什么本来就没看过，
                 // 摆一个 0 出去等于说「卡上是空的」。
                 None => {
-                    ui.weak("清单之外 —（排一次差量预览才知道）");
+                    ui.weak("清单之外 —（插上卡算一遍容量、或者排一次差量预览才知道）");
                 }
                 Some(bytes) => {
                     ui.label(format!("清单之外 {}", human_bytes(bytes)))
@@ -1270,27 +1284,19 @@ impl Screen {
         if gauge.picked == 0 && !self.evaluated.contains_key(name) && self.prepared.is_none() {
             ui.weak("还没算过：按右上角「算一遍容量」，或者排一次差量预览。");
         }
-        // 超没超由核心一处算，这儿只把它摆出来。排过差量的那一台照计划里那份
-        // （它把清单之外的占用也算进去了），没排过的照选择集那份。
-        let over = self.plan_of(name).map_or_else(
-            || {
-                self.evaluated
-                    .get(name)
-                    .and_then(|report| report.over_capacity)
-            },
-            |plan| plan.over_capacity,
-        );
-        if let Some(over) = over {
-            let trims = self.plan_of(name).map_or_else(
-                || {
-                    self.evaluated
-                        .get(name)
-                        .map(|report| report.trim_suggestions.clone())
-                        .unwrap_or_default()
-                },
-                |plan| plan.trim_suggestions.clone(),
-            );
-            trim_ui(ui, over, gauge.capacity, &trims);
+        // 超没超由核心一处算（同步计划器），这儿只把它摆出来（`room_of`）。
+        let room = self.room_of(name);
+        if let Some(room) = &room
+            && let Some(over) = room.over_capacity
+        {
+            trim_ui(ui, over, gauge.capacity, &room.trim_suggestions);
+        }
+        // 算过容量、卡却不在手边：**不给数**，不拿选中容量去冒充「装得下」。
+        if room.is_none()
+            && let Some(romcat_core::sublibrary::Fit::Unknown { why }) =
+                self.evaluated.get(name).map(|report| &report.fit)
+        {
+            ui.weak(format!("装不装得下算不出：{why}"));
         }
     }
 

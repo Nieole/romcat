@@ -3,7 +3,8 @@
 //!
 //! 求值本身由 `romcat-core` 那一侧验（`crates/core/tests/sublibrary.rs` 与
 //! `sublibrary` 的单元测试）。这个文件验命令行这一层：写错的规则当场被拦下、
-//! 子库不在时说得清怎么建、**目标设备与主库都不在位照样干得了**（ADR-0009）。
+//! 子库不在时说得清怎么建、**主库不在位照样干得了**（ADR-0009），**目标不在位时
+//! 装不装得下如实说算不出**（挂账 D76）。
 //!
 //! 工作目录一律显式指到临时目录：绝不能让测试往开发者真实的
 //! `~/.local/share/romcat` 里写东西。
@@ -282,7 +283,7 @@ fn 多个子库互不干扰() {
 }
 
 #[test]
-fn 主库不在位照样看得了选择集() {
+fn 主库不在位照样看得了选择集_卡不在手边时装不装得下说算不出() {
     // 子库是持久实体，不是「插上卡才存在的东西」；选择集从中立库折出来（ADR-0009）。
     let (library, workspace) = 现场();
     let ws = workspace.path();
@@ -298,7 +299,16 @@ fn 主库不在位照样看得了选择集() {
     assert!(out.status.success(), "{}", 出来的话(&out));
     let text = 出来的话(&out);
     assert!(text.contains("选中 3 个变体"), "{text}");
-    // 8 KiB 的卡装不下这三个归档：报出超出量与裁剪建议，**不自动截断**（ADR-0016）。
+    // 卡还没插：装不装得下比的是目标现占 ＋ 净变化，看不见目标就**不给数**——
+    // 不拿选中容量去比上限（挂账 D76）。
+    assert!(text.contains("算不出"), "{text}");
+    assert!(text.contains("目标不在位"), "{text}");
+    assert!(!text.contains("装得下："), "{text}");
+    assert!(!text.contains("装不下"), "{text}");
+
+    // 插上卡：8 KiB 的卡装不下这三个归档，报出超出量与裁剪建议，**不自动截断**（ADR-0016）。
+    fs::create_dir_all(ws.join("卡-掌机")).expect("建得出卡");
+    let text = 出来的话(&子库(ws, &["show", "掌机"]));
     assert!(text.contains("装不下"), "{text}");
     assert!(text.contains("不会自动截断"), "{text}");
 }

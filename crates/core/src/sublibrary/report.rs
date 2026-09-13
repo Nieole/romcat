@@ -1,7 +1,7 @@
 //! **选择集报告**：这个子库眼下选中了多少条、共多少容量、装不装得下。
 //!
 //! 与体检、命中率、刮削、标题、导出那几份同一个形状——从中立库折出来（ADR-0001），
-//! 不碰主库一个字节，也不需要目标设备在位。
+//! 不碰主库一个字节。**只有「装得下吗」那一节要看目标**，而它是抄来的，不是这里算的（第 4 条）。
 //!
 //! ## 它必须说出口的四件事
 //!
@@ -10,7 +10,8 @@
 //! 3. **例外起没起作用**。排除掉的里有几个是规则本来会选中的——那几条才是真正在
 //!    干活的例外；收入的里有几个规则本来也会选中——那几条是多余的，删掉不影响结果。
 //! 4. **超没超容量上限，超了多少**。ADR-0016 定死了**不自动截断**：报出超出量与
-//!    按体积排序的裁剪建议，砍谁由用户决定。
+//!    按体积排序的裁剪建议，砍谁由用户决定。**底是同步计划器那一个**——目标现占 ＋ 净变化，
+//!    不是选中容量（[`Fit`]、挂账 D76）；卡不在手边时如实说算不出。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -19,9 +20,7 @@ use serde::Serialize;
 
 use crate::report::{heading, human_bytes, pad, thousands};
 
-use super::{
-    LoadedSelection, Selected, Sublibrary, Trim, VariantFacts, over_capacity, trim_suggestions,
-};
+use super::{Fit, LoadedSelection, Selected, Sublibrary, VariantFacts};
 
 /// 报告里例外那一栏最多列几个键。
 const EXAMPLES: usize = 10;
@@ -63,7 +62,7 @@ pub struct PlatformLine {
 }
 
 /// 一份选择集报告。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SelectionReport {
     /// 中立库在哪。
     pub catalog: String,
@@ -104,10 +103,12 @@ pub struct SelectionReport {
     pub missing_exceptions: Vec<String>,
     /// 规则引到、但这份库里一条数据都没有的维度。
     pub thin_dimensions: Vec<String>,
-    /// 超出容量上限多少字节；没超或没设上限时是 `None`。
-    pub over_capacity: Option<u64>,
-    /// 超了的话，按体积排序的裁剪建议。**不自动截断**（ADR-0016）。
-    pub trim_suggestions: Vec<Trim>,
+    /// **装得下吗**——抄自同步计划器那一份（目标现占 ＋ 净变化）；目标看不成时是
+    /// [`Fit::Unknown`]，**不给数**。
+    ///
+    /// 超出量与裁剪建议都在它里头，不在报告顶层另摆一份：顶层一个 `null` 的超出量读起来
+    /// 就是「装得下」，而「算不出」时它也会是 `null`。
+    pub fit: Fit,
 }
 
 impl SelectionReport {
@@ -116,6 +117,9 @@ impl SelectionReport {
     /// 收整份 [`LoadedSelection`] 而不是拆开的「规则 + 序号」：那两半本来就是一起
     /// 从库里读出来的，拆开传就得再补一个「对不齐怎么办」的分支，而那个分支
     /// 构造上根本走不到。
+    ///
+    /// `fit` 由调用方交进来（[`super::fit`]）：这里**一个容量的数都不算**，
+    /// 装不装得下只有同步计划器那一处说了算。
     #[must_use]
     pub fn build(
         catalog: &str,
@@ -123,6 +127,7 @@ impl SelectionReport {
         loaded: &LoadedSelection,
         facts: &[VariantFacts],
         selected: &Selected,
+        fit: Fit,
     ) -> Self {
         let mut platforms: BTreeMap<String, PlatformLine> = BTreeMap::new();
         for picked in &selected.picked {
@@ -159,21 +164,6 @@ impl SelectionReport {
                 .unwrap_or_else(|| picked.key.clone());
             anchors.insert((platform, anchor));
         }
-
-        // 超没超与砍谁，与同步计划器共用一套算法（`sublibrary::over_capacity` /
-        // `trim_suggestions`）：两处各写一遍的话，「这份报告说装得下、那份说砍这几个」
-        // 这种对不上的账迟早会出现。
-        let over = over_capacity(sublibrary.capacity, selected.bytes);
-        let trims = if over.is_some() {
-            trim_suggestions(
-                selected
-                    .picked
-                    .iter()
-                    .map(|picked| (picked.key.clone(), picked.bytes)),
-            )
-        } else {
-            Vec::new()
-        };
 
         Self {
             catalog: catalog.to_string(),
@@ -217,8 +207,7 @@ impl SelectionReport {
                 .iter()
                 .map(|name| (*name).to_string())
                 .collect(),
-            over_capacity: over,
-            trim_suggestions: trims,
+            fit,
         }
     }
 
@@ -339,61 +328,101 @@ impl SelectionReport {
         }
 
         heading(&mut out, "装得下吗");
-        match (self.capacity, self.over_capacity) {
+        // 比的是**目标现占加净变化**，与差量预览同一笔账：卡上的地方是共用的，
+        // 手动拷进去的存档、落点被占传不上去的、被改过因而不删的，全都还占着位置。
+        if let Fit::Known(room) = &self.fit {
+            let _ = writeln!(
+                out,
+                "{}{}（其中清单之外 {}）",
+                pad("目标现占", 12),
+                pad(&human_bytes(room.actual_bytes), 12),
+                human_bytes(room.stranger_bytes),
+            );
+            let _ = writeln!(
+                out,
+                "{}{}",
+                pad("同步之后", 12),
+                human_bytes(room.after_bytes)
+            );
+            let _ = writeln!(
+                out,
+                "按同步默认的那一趟算：你在目标设备上删过的不补回。\
+                 `--restore` 那一趟另算——`romcat sublibrary plan {} --restore` 看。",
+                self.name
+            );
+        }
+        match (self.capacity, &self.fit) {
             (None, _) => {
                 let _ = writeln!(
                     out,
                     "没设容量上限。`--capacity 512GB` 设一个就能在这里看到余量。"
                 );
             }
-            (Some(limit), None) => {
+            (Some(limit), Fit::Unknown { why }) => {
+                let _ = writeln!(out, "**算不出**（上限 {}）：{why}", human_bytes(limit));
                 let _ = writeln!(
                     out,
-                    "装得下：{} / {}，还剩 {}。",
-                    human_bytes(self.bytes),
-                    human_bytes(limit),
-                    human_bytes(limit.saturating_sub(self.bytes)),
+                    "装不装得下比的是**目标现占 ＋ 这一趟的净变化**，要看一眼目标才知道。\n\
+                     上面那个选中容量只是这个子库自己那一半，拿它去比上限答不出这个问题。",
                 );
             }
-            (Some(limit), Some(over)) => {
-                let _ = writeln!(
-                    out,
-                    "**装不下**：{} / {}，超出 {}。",
-                    human_bytes(self.bytes),
-                    human_bytes(limit),
-                    human_bytes(over),
-                );
-                let _ = writeln!(
-                    out,
-                    "**不会自动截断**（ADR-0016）——同一套规则在两张不同容量的卡上会选出\n\
-                     完全不同的东西，而你无从得知它砍掉了什么。砍谁由你定，最大的几个是：",
-                );
-                let _ = writeln!(out, "  {}{}变体", pad("腾出", 12), pad("累计", 12));
-                for trim in &self.trim_suggestions {
+            (Some(limit), Fit::Known(room)) => match room.over_capacity {
+                None => {
                     let _ = writeln!(
                         out,
-                        "  {}{}{}",
-                        pad(&human_bytes(trim.bytes), 12),
-                        pad(&human_bytes(trim.cumulative), 12),
-                        trim.variant,
+                        "装得下：{} / {}，还剩 {}。",
+                        human_bytes(room.after_bytes),
+                        human_bytes(limit),
+                        human_bytes(limit.saturating_sub(room.after_bytes)),
                     );
                 }
-                if let Some(last) = self.trim_suggestions.last()
-                    && last.cumulative < over
-                {
+                Some(over) => {
                     let _ = writeln!(
                         out,
-                        "这十个**全砍掉也只腾出 {}，还差 {}**。`--json` 出完整的一份。",
-                        human_bytes(last.cumulative),
-                        human_bytes(over - last.cumulative),
+                        "**装不下**：{} / {}，超出 {}。",
+                        human_bytes(room.after_bytes),
+                        human_bytes(limit),
+                        human_bytes(over),
                     );
+                    let _ = writeln!(
+                        out,
+                        "**不会自动截断**（ADR-0016）——同一套规则在两张不同容量的卡上会选出\n\
+                         完全不同的东西，而你无从得知它砍掉了什么。砍谁由你定，最大的几个是：",
+                    );
+                    let _ = writeln!(out, "  {}{}变体", pad("腾出", 12), pad("累计", 12));
+                    for trim in &room.trim_suggestions {
+                        let _ = writeln!(
+                            out,
+                            "  {}{}{}",
+                            pad(&human_bytes(trim.bytes), 12),
+                            pad(&human_bytes(trim.cumulative), 12),
+                            trim.variant,
+                        );
+                    }
+                    if let Some(last) = room.trim_suggestions.last()
+                        && last.cumulative < over
+                    {
+                        let _ = writeln!(
+                            out,
+                            "这几个**全砍掉也只腾出 {}，还差 {}**。`--json` 出完整的一份。",
+                            human_bytes(last.cumulative),
+                            human_bytes(over - last.cumulative),
+                        );
+                    }
+                    let _ = writeln!(
+                        out,
+                        "排除一个：`romcat sublibrary except {} --exclude <变体的键>`",
+                        self.name
+                    );
+                    if room.stranger_bytes > 0 {
+                        let _ = writeln!(
+                            out,
+                            "另一条路是自己清掉清单之外那 {}——**工具不会替你动它们**。",
+                            human_bytes(room.stranger_bytes),
+                        );
+                    }
                 }
-                let _ = writeln!(
-                    out,
-                    "排除一个：`romcat sublibrary except {} --exclude <变体的键>`",
-                    self.name
-                );
-            }
+            },
         }
         out
     }
