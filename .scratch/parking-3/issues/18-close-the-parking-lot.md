@@ -254,4 +254,5 @@
   挡不住写票的人。
 - **谁来裁：** 拿主意的人
 - **状态：** settled（第四轮收口，2026-09-09）
+- **落地（2026-09-13）：** ① 由票 `machine-checks-premises/05` 落在 `docs/agents/long-jobs.md`「派审查」一节（`CLAUDE.md` 的 Agent skills 指过去）；② 归票 `machine-checks-premises/02`。
 
