@@ -1445,3 +1445,300 @@ fn 同名异作插得进两行而重跑识别不抹掉裁决造的那一行() {
         "识别自己造的、如今没人指着的那一行跟着这一趟收掉"
     );
 }
+
+// ───── 按停之后接着算（票 gui-answers-all-six/03） ─────────────────────────────────
+//
+// 从前识别起手把结论整份清掉，按停之后下一趟从头再算一遍（挂单 `Q420`）。这几条钉的是
+// 新的口径：**下一趟只算还没算过的那些**，算完之后与一趟不停跑到底一模一样。
+//
+// **按停钉在一个信号上，不钉在挂钟上**：一个变体一批，每算完一个报一次进度，报到第几个
+// 就在那一下按停——主循环在轮到下一个变体之前就看得见它。
+
+/// 跑一趟识别，**算完第 `按停在` 个变体就按停**（`None` 是不按）；另把这一趟报的最后
+/// 一次进度交回来——「这一趟过了几个变体」看的就是它。
+fn 跑一趟记下进度(
+    现场: &mut 现场,
+    按停在: Option<u64>,
+) -> (identify::Outcome, identify::Progress) {
+    带着模型那一层跑一趟(现场, 按停在, &identify::model::Guessing::off())
+}
+
+/// 同 [`跑一趟记下进度`]，模型推断那一层的弹药由调用方给。
+fn 带着模型那一层跑一趟(
+    现场: &mut 现场,
+    按停在: Option<u64>,
+    guessing: &identify::model::Guessing<'_>,
+) -> (identify::Outcome, identify::Progress) {
+    let cancel = CancelToken::new();
+    let mut options = Options::new(Roots::single("库", 现场.dir.path()));
+    options.write_batch = 1;
+    let verdicts = verdict::Index::load(&现场.store, "库").expect("读得出沉淀库");
+    let mut 最后一次 = identify::Progress::default();
+    let outcome = identify::run(
+        &RealFs::new(),
+        &mut 现场.catalog,
+        &identify::Ammo {
+            repo: &现场.repo,
+            verdicts: &verdicts,
+            naming: &fuzzy::Naming::off(),
+            guessing,
+            titledb: None,
+        },
+        &options,
+        &cancel,
+        &mut |progress| {
+            最后一次 = *progress;
+            if 按停在.is_some_and(|at| progress.done >= at) {
+                cancel.cancel();
+            }
+        },
+    )
+    .expect("按停不是错误");
+    (outcome, 最后一次)
+}
+
+/// 这个变体在 `variants()` 的次序里排第几（从 1 数）。按停就停在它后面。
+fn 排第几(现场: &现场, key: &str) -> u64 {
+    let at = 现场
+        .catalog
+        .variants()
+        .expect("读得出变体")
+        .iter()
+        .position(|variant| variant.key == key)
+        .unwrap_or_else(|| panic!("{key} 这个变体不在"));
+    u64::try_from(at + 1).expect("数得过来")
+}
+
+#[test]
+fn 按停之后再跑一趟_已经算完的那些不再重算() {
+    let mut 现场 = 建现场();
+    let 变体数 =
+        u64::try_from(现场.catalog.variants().expect("读得出变体").len()).expect("数得过来");
+    // 停在那份带拷贝机头的**裸文件**后面：它的哈希是回盘读出来、落进中立库的。下一趟要是
+    // 把它再过一遍，「从中立库直接取回来的哈希」那个数就不是 0（见本条最后一段对照）。
+    let 按停在 = 排第几(&现场, "库/SFC/带拷贝机头的.smc");
+    assert!(按停在 < 变体数, "前提：按停之后还剩没轮到的变体");
+
+    let (第一趟, _) = 跑一趟记下进度(&mut 现场, Some(按停在));
+    assert!(第一趟.interrupted, "前提：这一趟是被按停的");
+    assert_eq!(
+        变体数 - 现场.catalog.not_run_count().expect("数得出"),
+        按停在,
+        "前提：按停时正好算完这几个"
+    );
+
+    let (第二趟, 进度) = 跑一趟记下进度(&mut 现场, None);
+    assert!(!第二趟.interrupted, "没人按停，这一趟却没走完");
+    assert_eq!(
+        (进度.done, 进度.total),
+        (变体数 - 按停在, 变体数 - 按停在),
+        "这一趟该过的只有上一趟没轮到的那几个"
+    );
+    assert_eq!(
+        第二趟.reused_hashes, 0,
+        "上一趟算过哈希的变体这一趟又被过了一遍"
+    );
+    assert_eq!(
+        现场.catalog.not_run_count().expect("数得出"),
+        0,
+        "接着算完之后一个「还没识别」都不剩"
+    );
+
+    // 对照：上一趟跑完了，这一趟**照旧从头算**（DAT 库换过之后重跑一遍靠的就是它），
+    // 而同一份裸文件的哈希这时是从中立库取回来的——上面那个 0 不是因为这份 fixture
+    // 根本取不回哈希。
+    let (第三趟, 进度) = 跑一趟记下进度(&mut 现场, None);
+    assert_eq!(进度.total, 变体数, "上一趟跑完了，这一趟该从头算");
+    assert!(
+        第三趟.reused_hashes > 0,
+        "从头算的那一趟一份哈希都没从中立库取回来，上面那个 0 验不出东西"
+    );
+}
+
+/// 再摆两份字节相同的：
+///
+/// - 一份「超级马里奥」：两个变体撞上**同一条 DAT 条目**，该共用一条发行版。
+/// - 一份「谁也不认得」，放进 `wii/`：调用方裁过那份字节的话，两个变体钉着**同一条裁决**，
+///   该共用裁决落成的那条发行版。
+fn 建现场加两份同款() -> 现场 {
+    let mut 现场 = 建现场();
+    写(
+        &现场.dir.path().join("FC/超级马里奥 备份.zip"),
+        &zip_container(&[ZipEntrySpec::stored("Super Mario (Japan).nes", 原版())]),
+    );
+    写(
+        &现场.dir.path().join("wii/谁也不认得的又一份.zip"),
+        &zip_container(&[ZipEntrySpec::stored("陌生.nes", 陌生())]),
+    );
+    重扫(&mut 现场);
+    现场
+}
+
+/// 两份库里识别落下来的结论一行一行比，红了说得出是哪一行不一样。
+fn 两份结论一样(一口气: &现场, 停过: &现场) {
+    let (甲, 乙) = (结论全貌(一口气), 结论全貌(停过));
+    for (一口气的, 停过的) in 甲.iter().zip(&乙) {
+        assert_eq!(停过的, 一口气的, "按停过再接着算完的那份库，这一行不一样");
+    }
+    assert_eq!(乙.len(), 甲.len(), "两份库的结论条数不一样");
+}
+
+/// 每个变体的结论上记着的**这一趟为它读了多少字节**。
+///
+/// 它是账，不是结论：同一份库从头再跑一趟，算过的哈希取回来不读盘，这一列就成了 0。
+/// 所以它不在 [`结论全貌`] 里，要比的那一条自己比。
+fn 读盘的账(现场: &现场) -> Vec<(String, u64)> {
+    let mut 账 = Vec::new();
+    现场
+        .catalog
+        .for_each_identification(&mut |_, _, _, key, read_bytes| {
+            账.push((key.to_string(), read_bytes));
+        })
+        .expect("走得动");
+    账
+}
+
+/// 一份中立库里**识别落下来的全部结论**，一行一行拼成字。
+///
+/// **不带行号**：行号是插入次序的产物，比它等于在比「两份库按同一个次序建行」，而这里
+/// 要比的是结论本身。作品与发行版因此按它们说的东西比，外加各有几行。
+fn 结论全貌(现场: &现场) -> Vec<String> {
+    let catalog = &现场.catalog;
+    let 作品们 = catalog.work_names().expect("读得出作品");
+    let 发行版们 = catalog.releases().expect("读得出发行版");
+    let 作品 = |id: Option<i64>| {
+        id.map(|id| {
+            作品们
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| format!("悬空的作品 {id}"))
+        })
+    };
+    let 发行版 = |id: Option<i64>| {
+        id.map(|id| match 发行版们.get(&id) {
+            Some(row) => format!(
+                "{:?}|{:?}|{:?}|{:?}|{:?}",
+                作品们.get(&row.work_id),
+                row.platform,
+                row.region,
+                row.serial,
+                row.languages
+            ),
+            None => format!("悬空的发行版 {id}"),
+        })
+    };
+    let 平台们 = catalog.identified_platforms().expect("读得出平台");
+    let mut 行 = vec![format!(
+        "作品 {} 行，发行版 {} 行",
+        作品们.len(),
+        发行版们.len()
+    )];
+    catalog
+        .for_each_identification(&mut |_, state, reason, key, _| {
+            行.push(format!(
+                "{key}：{state:?}，理由 {reason:?}，平台 {:?}",
+                平台们.get(key)
+            ));
+        })
+        .expect("走得动");
+    for variant in catalog.variants().expect("读得出变体") {
+        行.push(format!(
+            "{}：作品 {:?}，发行版 {:?}",
+            variant.key,
+            作品(variant.work_id),
+            发行版(variant.release_id)
+        ));
+        for mut candidate in catalog.candidates_of(&variant.key).expect("读得出候选") {
+            let 指着 = 发行版(candidate.release_id.take());
+            行.push(format!(
+                "{}：候选 {candidate:?}，指着 {指着:?}",
+                variant.key
+            ));
+        }
+    }
+    行.push(
+        IdentifyReport::build(catalog, &现场.repo)
+            .expect("折得出报告")
+            .render_text(),
+    );
+    行
+}
+
+#[test]
+fn 按停之后接着跑完_结论与一趟不停跑到底一模一样() {
+    // 验收那句「完全一样」：状态（`State::of` 那一处定的）、理由、识别判定的平台、候选、
+    // 作品与发行版，连报告一起比。
+    //
+    // ⭐ 按停落在**两对该共用一条发行版的变体中间**：上一趟那一个建出了发行版，下一趟
+    // 那一个得认领它，而不是再建一条——多出来的那一行会让导出时的**收敛**把一个条目拆成
+    // 两个。一对撞的是同一条 DAT 条目，一对钉的是同一条裁决，两条认领的路各走一遍。
+    let 同款们 = [
+        ("库/FC/超级马里奥 备份.zip", "库/FC/超级马里奥.zip"),
+        ("库/FC/谁也不认得.zip", "库/wii/谁也不认得的又一份.zip"),
+    ];
+    let mut 一口气 = 建现场加两份同款();
+    裁(&mut 一口气, &陌生(), "一部新作品");
+    跑一趟记下进度(&mut 一口气, None);
+    for (这个, 那个) in 同款们 {
+        assert_eq!(
+            挂着的发行版(&一口气, 这个),
+            挂着的发行版(&一口气, 那个),
+            "前提：{这个} 与 {那个} 共用一条发行版"
+        );
+    }
+
+    let mut 停过 = 建现场加两份同款();
+    裁(&mut 停过, &陌生(), "一部新作品");
+    let 按停在 = 排第几(&停过, "库/FC/超级马里奥 备份.zip");
+    for (这个, 那个) in 同款们 {
+        assert!(
+            排第几(&停过, 这个) <= 按停在 && 排第几(&停过, 那个) > 按停在,
+            "前提：{这个} 与 {那个} 分在按停的两边"
+        );
+    }
+    let (第一趟, _) = 跑一趟记下进度(&mut 停过, Some(按停在));
+    assert!(第一趟.interrupted, "前提：这一趟是被按停的");
+    let (第二趟, _) = 跑一趟记下进度(&mut 停过, None);
+    assert!(!第二趟.interrupted, "没人按停，这一趟却没走完");
+
+    两份结论一样(&一口气, &停过);
+    // 读盘的账这一回也对得上：上一趟没轮到的那几个这一趟才头一回读盘，
+    // 与一趟不停跑到底读的一样多。
+    assert_eq!(读盘的账(&停过), 读盘的账(&一口气), "读盘的账不一样");
+}
+
+#[test]
+fn 按停之后接着算_模型推断那一层要问的一个不少() {
+    // 模型推断那一层跑在主循环**之后**，被按停的那一趟整个不跑；它要问谁，得等全部变体
+    // 都有了结论才定。接着算的那一趟要是只把这一趟算的那几个交给它，上一趟算完、一条
+    // 候选都没有的那些就从此漏问——计划少算钱，真问的那一趟少问，结论就与一趟不停跑到底
+    // 的不一样了。
+    //
+    // **只算计划，一个请求都不发**：要问几个变体，计划上那个数就说得出来。
+    let mut 只算计划 = identify::model::Guessing::off();
+    只算计划.planning = true;
+
+    let mut 一口气 = 建现场();
+    let (全算, _) = 带着模型那一层跑一趟(&mut 一口气, None, &只算计划);
+    let 要问 = 全算.model.plan.as_ref().map(|plan| plan.variants);
+    assert!(
+        要问.is_some_and(|count| count > 0),
+        "前提：这份 fixture 里有要交给模型推断的变体：{要问:?}"
+    );
+
+    let mut 停过 = 建现场();
+    // 停在那个谁也不认得的后面：它一条候选都没有，正是要交给模型推断的那一种。
+    let 按停在 = 排第几(&停过, "库/FC/谁也不认得.zip");
+    let (第一趟, _) = 带着模型那一层跑一趟(&mut 停过, Some(按停在), &只算计划);
+    assert!(第一趟.interrupted, "前提：这一趟是被按停的");
+    let (接着算, _) = 带着模型那一层跑一趟(&mut 停过, None, &只算计划);
+
+    assert_eq!(
+        接着算.model.plan.as_ref().map(|plan| plan.variants),
+        要问,
+        "接着算完的那一趟，计划上要问的变体数与一趟不停跑到底的不一样"
+    );
+    // 重问的那几个又过了一遍，结论照样与一趟不停跑到底的一样。**读盘的账不比**：它们的
+    // 哈希这一趟是从中立库取回来的，记成 0——那一列本来就是这一趟的账。
+    两份结论一样(&一口气, &停过);
+}
