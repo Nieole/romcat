@@ -3078,9 +3078,15 @@ fn assemble(
             .then_with(|| a.0.dat.cmp(&b.0.dat))
     });
 
+    // **作品不跟着非游戏资产定**（挂账 `D66`）：整理包里捎带的一份 BIOS 同样精确命中、
+    // 自动通过，源还常排得更靠前——跟着它定，整包游戏就挂到了 BIOS 名下。那条候选照旧
+    // 留在候选里（它撞上了是事实），只是不拿它挑作品。
     let mut work_id = None;
     let mut release_id = None;
-    if let Some(best) = scored.iter().position(|(c, _)| c.accepted) {
+    if let Some(best) = scored
+        .iter()
+        .position(|(c, _)| c.accepted && !hit_non_game_asset(c))
+    {
         let (candidate, cloneof) = &scored[best];
         let parsed = naming::parse(&candidate.game, cloneof.as_deref());
         let work = state
@@ -3264,6 +3270,19 @@ fn names_of(variant: &VariantRow, units: &[ContentUnit], state: &Run) -> Vec<fuz
     let mut seen: BTreeSet<String> = BTreeSet::new();
     names.retain(|named| seen.insert(named.text.clone()));
     names
+}
+
+/// 这条候选撞上的那份内容是**非游戏资产**吗。
+///
+/// 判断只有一处（[`classify::non_game_asset`]，ADR-0024），这里只补齐它要的输入：
+/// **这份内容在库里的键**。**透明容器**只是包装，容器里的一份内容住在「容器的键接上
+/// 容器内部路径」那儿——`bios/` 这一段在容器外面还是里面，说的是同一件事。
+fn hit_non_game_asset(candidate: &Candidate) -> bool {
+    if candidate.inner.is_empty() {
+        classify::non_game_asset(&candidate.member_key)
+    } else {
+        classify::non_game_asset(&format!("{}/{}", candidate.member_key, candidate.inner))
+    }
 }
 
 /// 候选之间怎么排。数字小的排前面。

@@ -136,8 +136,13 @@ fn 建现场() -> 现场 {
         );
     }
 
+    扫成现场(dir, "库")
+}
+
+/// 把 `dir` 当成一份根叫 `根名` 的主库扫一遍，再照 [`按根名跑一遍`] 把识别、刮削、标题跑完。
+fn 扫成现场(dir: TempDir, 根名: &str) -> 现场 {
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-    let mut options = ScanOptions::named(root, "库");
+    let mut options = ScanOptions::named(dir.path(), 根名);
     options.jobs = Jobs::Fixed(2);
     scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
 
@@ -146,7 +151,7 @@ fn 建现场() -> 现场 {
         _pool: temp_dir("pegasus-pool"),
         catalog,
     };
-    跑一遍(&mut 场);
+    按根名跑一遍(&mut 场, 根名);
     场
 }
 
@@ -216,6 +221,11 @@ fn 建_dat() -> DatRepo {
 }
 
 fn 跑一遍(现场: &mut 现场) {
+    按根名跑一遍(现场, "库");
+}
+
+/// 与 [`跑一遍`] 同一趟，只是这份主库的**根**叫 `根名`。
+fn 按根名跑一遍(现场: &mut 现场, 根名: &str) {
     let repo = 建_dat();
     identify::run(
         &RealFs::new(),
@@ -227,12 +237,12 @@ fn 跑一遍(现场: &mut 现场) {
             guessing: &identify::model::Guessing::off(),
             titledb: None,
         },
-        &identify::Options::new(Roots::single("库", 现场.dir.path())),
+        &identify::Options::new(Roots::single(根名, 现场.dir.path())),
         &CancelToken::new(),
         &mut |_| {},
     )
     .expect("识别不该失败");
-    let mut options = scrape::Options::new(Roots::single("库", 现场.dir.path()), 现场._pool.path());
+    let mut options = scrape::Options::new(Roots::single(根名, 现场.dir.path()), 现场._pool.path());
     options.media = false;
     scrape::run(
         &RealFs::new(),
@@ -1059,6 +1069,32 @@ fn 非游戏资产与补丁不导出为前端条目() {
             assert!(!text.contains(补丁), "补丁不导出：{text}");
         }
     }
+}
+
+#[test]
+fn 真叫_bios_的根底下的游戏照旧导出成条目() {
+    // **根名不参与「是不是非游戏资产」的判断**：根的名字是维护者起的，一个真叫 `BIOS`
+    // 的根底下的游戏照样是游戏。识别那一侧是同一个答案（`tests/identify.rs` 的
+    // `真叫_bios_的根底下的游戏照旧认得出作品`）。
+    let dir = temp_dir("pegasus-bios-root");
+    写(
+        &dir.path().join("FC/魂斗罗日版/Contra (Japan).zip"),
+        &zip_container(&[ZipEntrySpec::stored("Contra.nes", 日版())]),
+    );
+    let mut 现场 = 扫成现场(dir, "BIOS");
+
+    let report = 导出(&mut 现场, false);
+    let 非游戏资产 = report
+        .excluded
+        .iter()
+        .find(|(label, _)| label == NotAnEntry::NonGameAsset.label())
+        .map_or(0, |(_, count)| *count);
+    assert_eq!(非游戏资产, 0, "根叫 BIOS 不算：{report:#?}");
+    let text = 读出(&现场, "FC.metadata.pegasus.txt");
+    assert!(
+        text.contains("Contra (Japan).zip"),
+        "它底下的游戏照样是前端条目：{text}"
+    );
 }
 
 #[test]
