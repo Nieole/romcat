@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use romcat_core::capability::Profile;
 use romcat_core::capability::{Filesystem, RejectReason};
-use romcat_core::catalog::{Catalog, roots};
+use romcat_core::catalog::{Catalog, Roots, roots};
 use romcat_core::fs::RealFs;
 use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::sublibrary::{self, Rule, Selection, Sublibrary};
@@ -689,4 +689,122 @@ fn 两个根里同一条相对路径落在卡上同一个文件上_排计划时�
     // 只有一块盘有的那个照旧放行——撞车判的是落点，不是「这个名字出现过两次」。
     assert_eq!(desired.files.len(), 1);
     assert_eq!(desired.files[0].path, "FC/只有乙有.zip");
+}
+
+// ───────────────────────── 四、装得下吗：计划器那个数就是子库报告那个数（挂账 D76）
+
+/// 一棵目录树底下全部文件一共多少字节——**从盘上量**，不经过计划器。
+fn 盘上一共多大(dir: &Path) -> u64 {
+    let mut total = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        for entry in fs::read_dir(&at).expect("列得开").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                total += entry.metadata().expect("读得到元数据").len();
+            }
+        }
+    }
+    total
+}
+
+fn 排计划(catalog: &Catalog, 工作区: &Path) -> sync::Prepared {
+    sync::prepare(
+        catalog,
+        工作区,
+        "掌机",
+        &sync::Request::default(),
+        &Handle::new(),
+    )
+    .expect("排得出计划")
+}
+
+/// 子库报告那一份：界面上「算一遍容量」与 `romcat sublibrary show` 走的那一趟。
+fn 算容量(catalog: &Catalog, 工作区: &Path) -> sublibrary::report::SelectionReport {
+    let list = catalog.sublibraries().expect("读得出子库");
+    sublibrary::survey(catalog, 工作区, &list, &Handle::new())
+        .expect("算得出来")
+        .remove("掌机")
+        .expect("一台设备一份报告")
+}
+
+#[test]
+fn 装得下吗_计划器与子库报告是同一个数_说装得下就真装得下_装不下报得出差多少() {
+    let dir = 建库();
+    let 工作区 = temp_dir("sync-fit-ws");
+    let 目标 = temp_dir("sync-fit-card");
+    // 维护者自己拷进卡里的存档：清单之外，工具不碰——但它占着卡上的地方。
+    写(&目标.path().join("saves/魂斗罗.sav"), &[9u8; 512]);
+    let mut catalog = 扫成库(dir.path());
+    catalog
+        .put_sublibrary(&子库(目标.path(), None))
+        .expect("子库写得进");
+    catalog
+        .add_rule("掌机", &Rule::parse("平台=FC").expect("规则读得懂"))
+        .expect("规则写得进");
+    let 同步之后 = 排计划(&catalog, 工作区.path()).plan.after_bytes;
+    assert!(
+        同步之后 > 512,
+        "存档之外还该有两个归档与前端元数据：{同步之后}"
+    );
+
+    // ── 上限比同步之后少 1000 字节：两边都说装不下，差的正是那 1000。
+    catalog
+        .put_sublibrary(&子库(目标.path(), Some(同步之后 - 1000)))
+        .expect("改得了上限");
+    let plan = 排计划(&catalog, 工作区.path()).plan;
+    assert_eq!(plan.over_capacity, Some(1000), "计划器报的超出量");
+    let report = 算容量(&catalog, 工作区.path());
+    let room = report.fit.known().expect("卡在手边，报告该算得出");
+    assert_eq!(
+        (room.after_bytes, room.over_capacity),
+        (plan.after_bytes, Some(1000)),
+        "子库报告与计划器不是同一个数",
+    );
+    let text = report.render_text();
+    assert!(
+        text.contains(&format!("超出 {}", romcat_core::report::human_bytes(1000))),
+        "{text}"
+    );
+
+    // ── 上限正好等于同步之后：两边都说装得下。
+    catalog
+        .put_sublibrary(&子库(目标.path(), Some(同步之后)))
+        .expect("改得了上限");
+    let prepared = 排计划(&catalog, 工作区.path());
+    assert_eq!(prepared.plan.over_capacity, None, "计划器说装得下");
+    let report = 算容量(&catalog, 工作区.path());
+    let room = report.fit.known().expect("卡在手边，报告该算得出");
+    assert_eq!((room.after_bytes, room.over_capacity), (同步之后, None));
+    assert!(report.render_text().contains("装得下："));
+
+    // ── 真同步一趟：卡上量出来的总量就是说好的那个数，一个字节都没超出上限。
+    let roots = Roots::single("库", dir.path());
+    let sources = sync::Sources {
+        library: &RealFs,
+        target: &RealFs,
+        library_roots: Some(&roots),
+        target_root: &prepared.root,
+        from_pool: &prepared.from_pool,
+        generated: &prepared.generated,
+        link_probe_dir: Some(&prepared.scratch),
+        convert_cache: None,
+    };
+    let outcome = sync::execute::run(
+        &prepared.plan,
+        &prepared.desired,
+        &prepared.actual,
+        &prepared.manifest,
+        &sources,
+        &Handle::new(),
+    )
+    .expect("传得动");
+    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    assert_eq!(
+        盘上一共多大(目标.path()),
+        同步之后,
+        "说好的「同步之后」与卡上真实占用对不上——它说装得下，卡却可能装不下",
+    );
 }

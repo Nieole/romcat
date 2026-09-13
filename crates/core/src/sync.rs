@@ -78,7 +78,7 @@ use crate::sublibrary::{Selected, Sublibrary, Trim, over_capacity, trim_suggesti
 
 pub use execute::{Outcome, Placement, Sources};
 pub use observe::{ObserveError, observe};
-pub use prepare::{Prepared, Request, prepare};
+pub use prepare::{PLAN_STEPS, Prepared, Request, prepare, prepare_selected};
 
 /// 子库里一个文件是干什么的。
 ///

@@ -4421,23 +4421,25 @@ fn run_sublibrary_show(args: &SubShowArgs) -> ExitCode {
     {
         return fail(message);
     }
-    let loaded = match catalog.selection(&args.name) {
-        Ok(loaded) => loaded,
-        Err(error) => return fail(format!("中立库读不动：{error}")),
-    };
     let started = Instant::now();
-    let facts = match sublibrary::facts(&catalog) {
-        Ok(facts) => facts,
-        Err(error) => return fail(format!("中立库读不动：{error}")),
+    // 与界面上「算一遍容量」同一趟活（`sublibrary::survey`）：选中多少只问中立库，
+    // 装不装得下对着目标排一遍计划——与 `sublibrary plan` 同一个底（挂账 D76）。
+    let workspace = workspace_dir(args.common.workspace.as_deref());
+    let mut reports = match sublibrary::survey(
+        &catalog,
+        &workspace,
+        std::slice::from_ref(&sublibrary),
+        &Handle::new(),
+    ) {
+        Ok(reports) => reports,
+        Err(romcat_core::task::Cutoff::Failed(said)) => return fail(said),
+        Err(romcat_core::task::Cutoff::Halted) => {
+            return fail(romcat_core::task::Halted.to_string());
+        }
     };
-    let selected = sublibrary::select(&loaded.selection, &facts);
-    let report = sublibrary::report::SelectionReport::build(
-        catalog.location(),
-        &sublibrary,
-        &loaded,
-        &facts,
-        &selected,
-    );
+    let Some(report) = reports.remove(&args.name) else {
+        return fail(format!("子库「{}」没算出报告。", args.name));
+    };
     if !args.quiet {
         let text = report.render_text();
         let mut stdout = io::stdout().lock();
@@ -4445,7 +4447,7 @@ fn run_sublibrary_show(args: &SubShowArgs) -> ExitCode {
         let _ = stdout.flush();
     }
     eprintln!(
-        "求值用了 {:.1} 秒，一个字节都没读主库、也没碰目标设备。选中 {} 个变体、{}。",
+        "算了 {:.1} 秒，一个字节都没读主库；目标设备只读地看了一眼。选中 {} 个变体、{}。",
         started.elapsed().as_secs_f64(),
         thousands(report.picked),
         human_bytes(report.bytes),

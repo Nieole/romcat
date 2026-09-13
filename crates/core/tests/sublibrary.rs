@@ -13,7 +13,7 @@ use romcat_core::platform::Manifest;
 use romcat_core::scrape::Field;
 use romcat_core::shape::{Role, SINGLE_FILE_RULE, Variant};
 use romcat_core::sublibrary::{
-    self, Discarded, Exception, Gauge, LoadedSelection, Rule, StoredRule, Sublibrary,
+    self, Discarded, Exception, Fit, Gauge, LoadedSelection, Rule, StoredRule, Sublibrary,
 };
 
 fn 变体(key: &str, platform: &str, bytes: u64) -> Variant {
@@ -283,6 +283,9 @@ fn 读不懂的规则进得了报告_不只写在标准错误上() {
         &loaded,
         &facts,
         &selected,
+        Fit::Unknown {
+            why: "这份现场没有卡".to_string(),
+        },
     );
     assert_eq!(report.broken_rules.len(), 1);
     assert_eq!(report.broken_rules[0].ordinal, 7);
@@ -356,10 +359,9 @@ fn 事实从三层内容层级与刮削结论折出来() {
 }
 
 #[test]
-fn 报告数得出选中多少条与多少容量_并报出超限() {
+fn 报告数得出选中多少条与多少容量() {
     let mut catalog = 现场();
-    // 上限故意压到一个 GB 都不到：PSV 那个 3 GiB 的一定超。
-    建子库(&mut catalog, "掌机", Some(1024 * 1024 * 1024));
+    建子库(&mut catalog, "掌机", None);
     加规则(&mut catalog, "掌机", "平台=GB,PSV");
 
     let sublibrary = catalog.sublibrary("掌机").expect("读得动").expect("在");
@@ -372,26 +374,17 @@ fn 报告数得出选中多少条与多少容量_并报出超限() {
         &loaded,
         &facts,
         &selected,
+        // 这份现场的变体键是摆出来的，没有真文件、也没有卡：装不装得下由
+        // `装得下吗与同步计划器同底_…` 那几条对着真卡验，这里只验选中那几个数。
+        Fit::Unknown {
+            why: "这份现场没有卡".to_string(),
+        },
     );
 
     assert_eq!(report.picked, 3);
     assert_eq!(report.variants, 3);
     assert_eq!(report.bytes, 3 * 1024 * 1024 * 1024 + 6 * 1024 * 1024);
     assert_eq!(report.platforms.len(), 2);
-    // **不自动截断**：报出超出量与按体积排序的裁剪建议（ADR-0016）。
-    assert_eq!(
-        report.over_capacity,
-        Some(2 * 1024 * 1024 * 1024 + 6 * 1024 * 1024)
-    );
-    assert_eq!(report.trim_suggestions[0].variant, "库/PSV/大作.vpk");
-    assert_eq!(
-        report.trim_suggestions[0].cumulative, report.trim_suggestions[0].bytes,
-        "累计从最大的那个起算——「砍到第几个才够」直接读得出来"
-    );
-    let text = report.render_text();
-    assert!(text.contains("装不下"), "{text}");
-    assert!(text.contains("不会自动截断"), "{text}");
-    assert!(text.contains("库/PSV/大作.vpk"), "{text}");
 }
 
 #[test]
@@ -561,4 +554,169 @@ fn 容量条三段各自说得清而且清单之外分得出没有与不知道()
     assert_eq!(不设限.scale(), 400);
     assert_eq!(Gauge::default().scale(), 0);
     assert_eq!(Gauge::default().picked_share(), 0.0);
+}
+
+// ───────────────────────── 装得下吗：与同步计划器同底（挂账 D76）
+
+/// 一份**落在磁盘上**的小主库、扫进来的中立库、一个工作目录、一张当目标用的卡。
+///
+/// 「装得下吗」要看目标上实际有什么，于是这几条测试不能再拿假的变体键摆现场：
+/// 期望状态要从真实的成员折出来，卡上要真的躺着东西。
+struct 一张卡 {
+    _库目录: romcat_core::testing::TempDir,
+    工作区: romcat_core::testing::TempDir,
+    卡: romcat_core::testing::TempDir,
+    catalog: Catalog,
+}
+
+fn 写(path: &std::path::Path, bytes: &[u8]) {
+    std::fs::create_dir_all(path.parent().expect("有上级目录")).expect("能建目录");
+    std::fs::write(path, bytes).expect("能写文件");
+}
+
+impl 一张卡 {
+    /// 主库里两个 FC、一个 GB；卡上预先躺着维护者自己拷进去的 `存档` 那么多字节。
+    fn 摆好(存档: usize) -> Self {
+        use romcat_core::fs::RealFs;
+        use romcat_core::scan::{self, Jobs, ScanOptions};
+        use romcat_core::task::Handle;
+        use romcat_core::testing::sample::zip;
+        use romcat_core::testing::temp_dir;
+
+        let 库目录 = temp_dir("sublib-fit-lib");
+        写(&库目录.path().join("FC/魂斗罗.zip"), &zip(2048));
+        写(&库目录.path().join("FC/超级玛丽.zip"), &zip(4096));
+        写(&库目录.path().join("GB/口袋妖怪.zip"), &zip(8192));
+        let 工作区 = temp_dir("sublib-fit-ws");
+        let 卡 = temp_dir("sublib-fit-card");
+        if 存档 > 0 {
+            写(&卡.path().join("saves/魂斗罗.sav"), &vec![9u8; 存档]);
+        }
+        let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+        let mut options = ScanOptions::named(库目录.path(), "库");
+        options.jobs = Jobs::Fixed(2);
+        scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
+        Self {
+            _库目录: 库目录,
+            工作区,
+            卡,
+            catalog,
+        }
+    }
+
+    /// 这条规则只比**选中容量**的话选出多少字节——旧口径那个数。
+    fn 选中容量(&self, 规则: &str) -> u64 {
+        let selection = sublibrary::Selection {
+            rules: vec![Rule::parse(规则).expect("规则读得懂")],
+            exceptions: Vec::new(),
+        };
+        let facts = sublibrary::facts(&self.catalog).expect("事实折得出来");
+        sublibrary::select(&selection, &facts).bytes
+    }
+
+    /// 建「掌机」这个子库，目标指着这张卡。
+    fn 建子库(&mut self, 规则: &str, capacity: Option<u64>) {
+        self.catalog
+            .put_sublibrary(&Sublibrary::at("掌机", self.卡.path(), "Pegasus", capacity))
+            .expect("子库写得进");
+        加规则(&mut self.catalog, "掌机", 规则);
+    }
+
+    /// 同步计划器那一份。
+    fn 排计划(&self) -> romcat_core::sync::Prepared {
+        romcat_core::sync::prepare(
+            &self.catalog,
+            self.工作区.path(),
+            "掌机",
+            &romcat_core::sync::Request::default(),
+            &romcat_core::task::Handle::new(),
+        )
+        .expect("排得出计划")
+    }
+
+    /// 子库报告那一份：界面上「算一遍容量」与 `romcat sublibrary show` 走的那一趟。
+    fn 算容量(&self) -> sublibrary::report::SelectionReport {
+        let list = self.catalog.sublibraries().expect("读得出子库");
+        let mut reports = sublibrary::survey(
+            &self.catalog,
+            self.工作区.path(),
+            &list,
+            &romcat_core::task::Handle::new(),
+        )
+        .expect("算得出来");
+        reports.remove("掌机").expect("一台设备一份报告")
+    }
+}
+
+#[test]
+fn 装得下吗与同步计划器同底_卡上清单之外的东西也算进去() {
+    let mut 场 = 一张卡::摆好(512);
+    // 上限**正好等于选中容量**：只比选中容量的话，这里该说「装得下」。
+    let 选中 = 场.选中容量("平台=FC");
+    场.建子库("平台=FC", Some(选中));
+
+    let prepared = 场.排计划();
+    let plan = &prepared.plan;
+    // 独立的账：卡上眼下只躺着维护者那份 512 字节的存档，它在清单之外。
+    assert_eq!(plan.actual_bytes, 512, "目标现占");
+    assert_eq!(plan.stranger_bytes, 512, "清单之外");
+    let over = plan
+        .over_capacity
+        .expect("卡上那份存档还占着地方，计划器该说装不下");
+    // 清单之外那一份**正好**被算进去：同一批文件、同一个上限，卡上没有那份存档时，
+    // 超出量整整少 512 字节（剩下那一截是前端元数据占的）。
+    let mut 空卡 = 一张卡::摆好(0);
+    let 空卡选中 = 空卡.选中容量("平台=FC");
+    空卡.建子库("平台=FC", Some(空卡选中));
+    let 空卡超出 = 空卡
+        .算容量()
+        .fit
+        .known()
+        .and_then(|room| room.over_capacity)
+        .expect("前端元数据也占地方，空卡照样超出一截");
+    assert_eq!(over - 空卡超出, 512, "卡上那份存档没被算进装得下吗");
+
+    let report = 场.算容量();
+    let room = report.fit.known().expect("卡在手边，报告该算得出");
+    assert_eq!(
+        (room.after_bytes, room.over_capacity),
+        (plan.after_bytes, plan.over_capacity),
+        "同一批文件、同一个目标，子库报告与同步计划器说的不是同一个数",
+    );
+    assert_eq!(
+        room.actual_bytes, 512,
+        "报告那一侧的目标现占也得把存档算进去"
+    );
+    assert_eq!(room.stranger_bytes, 512);
+    let text = report.render_text();
+    assert!(text.contains("装不下"), "{text}");
+    assert!(!text.contains("装得下："), "{text}");
+}
+
+#[test]
+fn 目标不在位时装不装得下如实说算不出_不给一个数() {
+    let mut 场 = 一张卡::摆好(0);
+    let 选中 = 场.选中容量("平台=FC");
+    // 上限远大于选中容量：只比选中容量的话，这里会信心十足地说「装得下」。
+    场.建子库("平台=FC", Some(选中 * 1000));
+    // 卡没插：把当目标用的那个目录整个挪走。
+    std::fs::remove_dir_all(场.卡.path()).expect("删得掉");
+
+    let report = 场.算容量();
+    assert_eq!(
+        report.bytes, 选中,
+        "选中多少只问中立库，卡不在手边照样算得出"
+    );
+    match &report.fit {
+        Fit::Unknown { why } => assert!(why.contains("目标不在位"), "{why}"),
+        Fit::Known(room) => panic!("卡不在手边却给了一个数：{room:?}"),
+    }
+    let text = report.render_text();
+    assert!(text.contains("算不出"), "{text}");
+    assert!(!text.contains("装得下："), "{text}");
+    assert!(!text.contains("装不下"), "{text}");
+    // 照 JSON 核对的人也读不出一个「装得下」：没有一个空着的超出量摆在顶层。
+    let json = serde_json::to_value(&report).expect("序列化得了");
+    assert!(json.get("over_capacity").is_none(), "{json}");
+    assert!(json["fit"]["Unknown"]["why"].is_string(), "{json}");
 }

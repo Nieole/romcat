@@ -336,13 +336,18 @@ fn 算一遍容量一路报得出算到哪一台() {
     let 场 = 现场::摆好();
     let task = Handle::new();
     let list = 场.catalog.sublibraries().expect("读得出子库");
-    let reports = romcat_core::sublibrary::survey(&场.catalog, &list, &task).expect("算得出来");
+    let reports = romcat_core::sublibrary::survey(&场.catalog, 场.工作区.path(), &list, &task)
+        .expect("算得出来");
 
     assert_eq!(reports.len(), 1, "一台设备一份报告");
     assert_eq!(reports["掌机"].picked, 2, "选出来的与规则说的对不上");
 
     let progress = task.progress();
-    assert_eq!(progress.steps, 2, "折事实一步，一台设备各一步");
+    assert_eq!(
+        progress.steps,
+        1 + sync::PLAN_STEPS,
+        "折事实一步，一台设备各走一遍排计划那几步（装得下吗要看目标）",
+    );
     assert_eq!(
         progress.at,
         progress.steps,
@@ -358,7 +363,7 @@ fn 算一遍容量一路报得出算到哪一台() {
 
 #[test]
 fn 算一遍容量按停之后一个字节都没动() {
-    // 它**整条只读**：只问中立库，连目标设备都不看（ADR-0009——卡不在手边也算得出来）。
+    // 它**整条只读**：中立库只读，目标设备也只走只读接缝看一眼（装得下吗要看目标，挂账 D76）。
     // 于是它的干净可以照字面核对。
     let 场 = 现场::摆好();
     let 停之前 = 场.快照();
@@ -366,7 +371,7 @@ fn 算一遍容量按停之后一个字节都没动() {
 
     let task = Handle::new();
     task.stop();
-    let 为什么 = romcat_core::sublibrary::survey(&场.catalog, &list, &task)
+    let 为什么 = romcat_core::sublibrary::survey(&场.catalog, 场.工作区.path(), &list, &task)
         .expect_err("已经按了停下，不该算出一份来");
     assert_eq!(
         为什么,

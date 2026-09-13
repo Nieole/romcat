@@ -299,21 +299,34 @@ fn 容量条三段各自标得出数() {
     场.建子库("掌机", "1GB");
     场.加规则("掌机", "平台=SFC");
 
-    // **卡不在手边也算得出选中那一段**（ADR-0009）：只问中立库。
+    // **清单之外要目标设备在位才知道**——卡就在手边，算一遍容量时就看过了。
+    // （卡不在手边时它是「还不知道」：见 `卡不在手边算得出选中多少_…`。）
     场.求值();
     let gauge = 场.app.sublibrary().gauge("掌机");
     assert_eq!(gauge.capacity, Some(1_000_000_000), "上限那一段没数");
     assert!(gauge.picked > 0, "选中那一段没数");
+    let room = 场
+        .app
+        .sublibrary()
+        .evaluated("掌机")
+        .and_then(|report| report.fit.known())
+        .expect("卡在手边，装不装得下该算得出")
+        .clone();
     assert_eq!(
-        gauge.strangers, None,
-        "还没排过差量就说得出「清单之外」多大——那是编的",
+        gauge.strangers,
+        Some(room.stranger_bytes),
+        "清单之外那一段与报告里那个数不是同一个",
+    );
+    assert_eq!(
+        gauge.taken(),
+        room.after_bytes,
+        "条子的总量与报告算超出量用的不是同一个数",
     );
     // 一成都不到：条子上选中那一段与上限的比例算得出来。
     assert!(gauge.picked_share() > 0.0 && gauge.picked_share() < 0.01);
-    assert_eq!(gauge.stranger_share(), 0.0);
     assert_eq!(gauge.scale(), 1_000_000_000, "没超限时条子照上限画满");
 
-    // **清单之外要目标设备在位才知道。** 排完差量它就有数了。
+    // 排完差量：还是同一个数。
     场.排预览();
     let plan_strangers = 场
         .app
@@ -329,6 +342,10 @@ fn 容量条三段各自标得出数() {
         "清单之外那一段与计划里那个数不是同一个",
     );
     assert!(plan_strangers > 0, "维护者那份存档该被数进清单之外");
+    assert_eq!(
+        plan_strangers, room.stranger_bytes,
+        "算容量与排差量看见的不是同一张卡"
+    );
     assert_eq!(
         gauge.taken(),
         gauge.picked + plan_strangers,
@@ -848,10 +865,10 @@ fn 容量超限时给裁剪建议但一个都不自动砍掉() {
 }
 
 #[test]
-fn 卡不在手边也算得出选中多少与超限多少() {
-    // 子库是**持久实体**，不是「插上卡才存在的东西」（ADR-0015）；而排差量预览要
-    // 目标在位（三方对比的第三方就是目标上实际有什么）。于是只求选择集这一步单开一条路：
-    // 卡不在手边照样看得见容量账。
+fn 卡不在手边算得出选中多少_装不装得下如实说算不出() {
+    // 子库是**持久实体**，不是「插上卡才存在的东西」（ADR-0015）：卡不在手边照样
+    // 看得见选中多少。而**装不装得下**比的是目标现占 ＋ 净变化，要看一眼目标——
+    // 看不见就不给数，不拿选中容量去冒充（挂账 D76）。
     let mut 场 = 现场::摆好();
     场.建子库("小卡", "4KB");
     场.加规则("小卡", "平台=SFC");
@@ -868,15 +885,21 @@ fn 卡不在手边也算得出选中多少与超限多少() {
     assert_eq!(report.picked, 2);
     assert_eq!(report.rules.len(), 1);
     assert_eq!(report.rules[0].hits, 2);
-    assert!(report.over_capacity.is_some(), "4KB 装不下 12KiB");
-    assert!(!report.trim_suggestions.is_empty(), "超限了却没给裁剪建议");
-    // 没排过差量那一侧同样对得上：`选中 = report.bytes`、清单之外是「还不知道」。
-    let over = report.over_capacity;
+    // 4KB 比 12KiB 小——可那只是选中容量；卡不在手边，现占算不出。
+    match &report.fit {
+        romcat_core::sublibrary::Fit::Unknown { why } => {
+            assert!(why.contains("目标不在位"), "{why}");
+        }
+        romcat_core::sublibrary::Fit::Known(room) => {
+            panic!("卡不在手边却给了一个数：{room:?}");
+        }
+    }
+    // 条子照 `选中 = report.bytes` 画，清单之外是「还不知道」，不是零。
     let gauge = screen.gauge("小卡");
     assert_eq!(gauge.taken(), report.bytes);
     assert_eq!(
-        romcat_core::sublibrary::over_capacity(gauge.capacity, gauge.taken()),
-        over,
+        gauge.strangers, None,
+        "卡不在手边就说得出清单之外多大——那是编的"
     );
 
     // 而**差量预览**这时该直说目标不在位，不是编一份出来。
@@ -1491,7 +1514,9 @@ fn 存过子库之后台上那趟还没认领的容量不认了() {
             .sublibrary()
             .evaluated("掌机")
             .expect("算得出来")
-            .over_capacity
+            .fit
+            .known()
+            .and_then(|room| room.over_capacity)
             .is_some(),
         "改完上限重算一遍，该报超限",
     );

@@ -2,8 +2,9 @@
 //!
 //! ## 为什么这一步在核心里
 //!
-//! 它是十来个步骤串起来的一条线：读选择集 → 折事实 → 求值 → 折期望状态 → 铺媒体 →
-//! 折前端元数据 → 按目标存储筛一遍 → 读清单 → 看一眼目标 → 排计划。每一步都是领域
+//! 它是十来个步骤串起来的一条线：读子库 → 读选择集 → 折事实 → 求值 → 看一眼目标 →
+//! 读能力档案 → 折期望状态 → 铺媒体 → 折前端元数据 → 按目标存储筛一遍 → 读清单 →
+//! 排计划。每一步都是领域
 //! 判断，而**命令行与界面必须得到同一份计划**——`romcat sublibrary plan` 印出来的那份
 //! 差量，与界面上按钮旁边显示的那份，不能是两条各自演化的代码。
 //!
@@ -29,7 +30,7 @@ use crate::path;
 use crate::scrape::Priorities;
 use crate::scrape::pool::MediaPool;
 use crate::sublibrary::{self, Selected, Sublibrary};
-use crate::task::{Cutoff, Handle};
+use crate::task::{Cutoff, Halted, Handle};
 use crate::workspace;
 
 use super::{Desired, Manifest, Options, Plan, TargetState};
@@ -168,7 +169,13 @@ pub fn priorities(given: Option<&Path>, workspace: &Path) -> Result<Priorities, 
 
 /// 这一条线一共几步。**改了下面的 `task.step` 就得改这个数**，不然进度条会走过头。
 /// `tests/task.rs::排差量预览一路报得出走到第几步` 盯着这两个数对不对得上。
-const STEPS: u32 = 12;
+const STEPS: u32 = 4 + PLAN_STEPS;
+
+/// [`prepare_selected`] 那半条线一共几步。**改了它里头的 `step` 就得改这个数。**
+///
+/// 调它的人各自报总步数（[`prepare`] 是读选择集那四步加这几步，
+/// [`sublibrary::survey`] 是折事实一步加每台设备各这几步），所以它得是个说得出口的数。
+pub const PLAN_STEPS: u32 = 8;
 
 /// 把中立库、媒体池与目标设备折成一份计划。**除了目标目录，什么都不写。**
 ///
@@ -181,6 +188,13 @@ const STEPS: u32 = 12;
 ///
 /// 不想要把手的调用方给一个 [`Handle::new`](crate::task::Handle::new) 就行——
 /// 没人按停下，它就只是白记几行进度。
+///
+/// ## 两半
+///
+/// 前半截读子库、求值选择集；后半截对着那份求过值的选择集排计划
+/// （[`prepare_selected`]）。拆开是因为**「装得下吗」也要走后半截**：子库报告
+/// （[`sublibrary::survey`]）一趟折一次事实、全部设备共用，再各自走一遍后半截——
+/// 于是报告里那个数与这里排出来的计划是**同一条线**算的，不是两条各自演化的代码（挂账 D76）。
 ///
 /// # Errors
 /// 子库不在、前端格式没有适配器、中立库读不动、目标看不了时返回
@@ -196,7 +210,7 @@ pub fn prepare(
 ) -> Result<Prepared, Cutoff> {
     task.steps(STEPS);
     task.step("读子库")?;
-    let mut sublibrary = catalog
+    let sublibrary = catalog
         .sublibrary(name)
         .map_err(|error| format!("中立库读不动：{error}"))?
         .ok_or_else(|| {
@@ -205,6 +219,53 @@ pub fn prepare(
                  建一个：`romcat sublibrary set {name} --target <目标设备上的目录>`"
             )
         })?;
+    task.step("读选择集")?;
+    let loaded = catalog
+        .selection(name)
+        .map_err(|error| format!("中立库读不动：{error}"))?;
+    // **这一步是最长的那一步**（真机量级上占大头：它走一遍全库）。把手在两步之间生效，
+    // 所以「按下停下」到「真的停了」之间最坏就是这一步的长度。
+    task.step("折事实")?;
+    let facts = sublibrary::facts(catalog).map_err(|error| format!("中立库读不动：{error}"))?;
+    task.step("求值选择集")?;
+    let selected = sublibrary::select(&loaded.selection, &facts);
+    let mut prepared = prepare_selected(
+        catalog,
+        workspace,
+        sublibrary,
+        &selected,
+        request,
+        &|step| task.step(step),
+    )?;
+    // 读不懂的规则是选择集那半截的账，后半截看不见它。
+    prepared.broken = loaded.broken.len();
+    Ok(prepared)
+}
+
+/// **对着一份已经求过值的选择集排计划**：看一眼目标 → 读能力档案 → 折期望状态 →
+/// 铺媒体 → 折前端元数据 → 按目标存储筛一遍 → 读清单 → 排计划。
+///
+/// [`prepare`] 的后半截，也是「装得下吗」唯一的那条线（[`sublibrary::fit`]）。
+/// 收 [`Selected`] 而不是去库里读选择集，是因为问「装得下吗」的不止存着的那一套：
+/// 一趟折一次事实、好几台设备共用，或者「加上这条规则之后装不装得下」。
+///
+/// **先看一眼目标**：卡不在位时后面几步全是白折（期望状态、媒体、前端元数据都要读中立库），
+/// 而一次问好几台设备时，不在手边的往往不止一台。
+///
+/// `step` 是每走一步报一次的那个口子，[`PLAN_STEPS`] 步。给的是闭包而不是把手，
+/// 是因为调用方要在步名前面加上是哪一台设备——把手自己不知道。
+///
+/// # Errors
+/// 目标看不了、前端格式没有适配器、中立库读不动时返回 [`Cutoff::Failed`]；
+/// `step` 说停下时返回 [`Cutoff::Halted`]。
+pub fn prepare_selected(
+    catalog: &Catalog,
+    workspace: &Path,
+    mut sublibrary: Sublibrary,
+    selected: &Selected,
+    request: &Request<'_>,
+    step: &dyn Fn(&str) -> Result<(), Halted>,
+) -> Result<Prepared, Cutoff> {
     // **读盘用的路径与入库比较用的键分开**（ADR-0020）：`--target` 给的是系统给的
     // 原始形式，就拿它原样去读；子库自己那条走 `read_path`，它取的正是存进库的
     // 那一份原始形式。混用会让带假名或带音标的目标目录 `canonicalize` 失败，
@@ -216,15 +277,17 @@ pub fn prepare(
     if request.target.is_some() {
         sublibrary.target = path::nfc(&path::display(&root)).into_owned();
     }
+    step("看一眼目标")?;
+    let actual = super::observe(&RealFs, &root).map_err(|error| format!("{error}"))?;
     let adapter = adapter::find(&sublibrary.format).ok_or_else(|| {
         format!(
-            "子库「{name}」的前端格式是「{}」，可这一版没带这个适配器。",
-            sublibrary.format
+            "子库「{}」的前端格式是「{}」，可这一版没带这个适配器。",
+            sublibrary.name, sublibrary.format
         )
     })?;
     // **能力档案**：目标吃得下什么、这张卡放得下什么（票 21、ADR-0017）。
     // 子库记的是名字，档案本身是一份可以整份换掉的数据。
-    task.step("读能力档案")?;
+    step("读能力档案")?;
     let roster = Roster::in_workspace(workspace).map_err(|error| format!("{error}"))?;
     let missing_capability = sublibrary
         .capability
@@ -240,29 +303,18 @@ pub fn prepare(
     // **不建目录**：排计划那条命令说的是「一个文件都没写」。
     let pool = MediaPool::at(&workspace::media_pool_dir(workspace));
 
-    task.step("读选择集")?;
-    let loaded = catalog
-        .selection(name)
+    step("折期望状态")?;
+    let mut desired = super::desired(catalog, selected, &profile)
         .map_err(|error| format!("中立库读不动：{error}"))?;
-    // **这一步是最长的那一步**（真机量级上占大头：它走一遍全库）。把手在两步之间生效，
-    // 所以「按下停下」到「真的停了」之间最坏就是这一步的长度。
-    task.step("折事实")?;
-    let facts = sublibrary::facts(catalog).map_err(|error| format!("中立库读不动：{error}"))?;
-    task.step("求值选择集")?;
-    let selected = sublibrary::select(&loaded.selection, &facts);
-
-    task.step("折期望状态")?;
-    let mut desired = super::desired(catalog, &selected, &profile)
+    step("铺媒体")?;
+    let mut media = super::media::lay(catalog, adapter.as_ref(), &pool, selected)
         .map_err(|error| format!("中立库读不动：{error}"))?;
-    task.step("铺媒体")?;
-    let mut media = super::media::lay(catalog, adapter.as_ref(), &pool, &selected)
-        .map_err(|error| format!("中立库读不动：{error}"))?;
-    task.step("折前端元数据")?;
+    step("折前端元数据")?;
     let mut frontend = super::frontend::lay(
         catalog,
         adapter.as_ref(),
         &priorities,
-        &selected,
+        selected,
         &media.assets,
     )
     .map_err(|error| format!("元数据折不出来：{error}"))?;
@@ -274,18 +326,16 @@ pub fn prepare(
     // 步骤的路径都没有——「传到一半失败」这件事在构造上不会发生。
     //
     // 路径上限比的是**完整路径**，因此把子库根那串的长度也交进去。
-    task.step("按目标存储筛一遍")?;
+    step("按目标存储筛一遍")?;
     desired.screen(
         &profile.filesystem,
         path::display(&root).encode_utf16().count(),
     );
 
-    task.step("读清单")?;
+    step("读清单")?;
     let manifest = catalog
-        .manifest(name)
+        .manifest(&sublibrary.name)
         .map_err(|error| format!("中立库读不动：{error}"))?;
-    task.step("看一眼目标")?;
-    let actual = super::observe(&RealFs, &root).map_err(|error| format!("{error}"))?;
     // **落点的目录段先与目标折齐**（`sync::align`）。卡上那个 `gb/` 与我们键里的
     // `GB/`，在不分大小写的目标上是同一个目录：不折的话文件落进 `gb/`、清单记成
     // `GB/`，第二趟起工具就认不出自己放的那一份。改名表要原样落到媒体与生成物那两张
@@ -293,7 +343,7 @@ pub fn prepare(
     let realign = super::align(&mut desired, &actual);
     realign.apply(&mut media.from_pool);
     realign.apply(&mut frontend.bytes);
-    task.step("排计划")?;
+    step("排计划")?;
     let plan = super::plan(
         &sublibrary,
         &desired,
@@ -306,7 +356,7 @@ pub fn prepare(
     Ok(Prepared {
         sublibrary,
         root,
-        selected,
+        selected: selected.clone(),
         desired,
         manifest,
         actual,
@@ -314,7 +364,8 @@ pub fn prepare(
         from_pool: media.from_pool,
         generated: frontend.bytes,
         scratch: pool.scratch(),
-        broken: loaded.broken.len(),
+        // 读不懂的规则几条是求值那半截的账：这里收的已经是求过值的选择集，由 [`prepare`] 填。
+        broken: 0,
         media_not_in_pool: media.not_in_pool,
         media_unknown_kind: media.unknown_kind,
         media_crowded_out: media.crowded_out,
