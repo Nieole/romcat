@@ -68,3 +68,5 @@
     所以豆腐块只少不多。
   - 定向跑过（`TMPDIR` 指向分大小写的盘）：`romcat-gui` 全部测试文件（`browse` 那条修过后重跑）、
     clippy `--all-targets --all-features`、`RUSTDOCFLAGS="-D warnings"` 的 doc。
+  - 全量门禁：日志 `/Users/nicoer/dev/game-wt/logs/slot-2-gate.log`，fmt、check、clippy、test、doc
+    五步全绿，`EXIT=0`，70 个测试目标 1826 条通过、0 失败。
