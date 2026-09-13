@@ -40,7 +40,7 @@ use romcat_core::scrape::{self, Priorities};
 use romcat_core::site::Site;
 use romcat_core::sources::SourceState;
 use romcat_core::stage::{Behind, Stage, StageRow};
-use romcat_core::task::{Cutoff, Ending};
+use romcat_core::task::Ending;
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::sample::zip;
 use romcat_core::testing::{TempDir, temp_dir};
@@ -48,7 +48,7 @@ use romcat_gui::app::{App, View};
 use romcat_gui::headless;
 
 mod shared;
-use shared::画出来的字;
+use shared::{占位活, 画出来的字};
 
 fn 写(path: &Path, bytes: &[u8]) {
     fs::create_dir_all(path.parent().expect("有上级目录")).expect("能建目录");
@@ -927,13 +927,7 @@ fn 这一趟正在跑的时候那一行的按钮按不下去() {
     现场.加根(库.path(), "主库");
     现场.扫("主库");
 
-    let 占位 = 现场.app.tasks_mut().queue("装作在扫一趟库", |task| {
-        for _ in 0..3_000 {
-            task.check()?;
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        Err(Cutoff::failed("这一趟本来就只是占着位子"))
-    });
+    let 占位 = 占位活::排上(现场.app.tasks_mut(), "装作在扫一趟库");
 
     现场.app.start_stage(Stage::Identify);
     let id = 现场
@@ -967,7 +961,7 @@ fn 这一趟正在跑的时候那一行的按钮按不下去() {
     );
 
     现场.app.tasks_mut().stop(id);
-    现场.app.tasks_mut().stop(占位);
+    占位.按停(现场.app.tasks_mut());
     现场.等任务跑完();
 }
 
@@ -1116,13 +1110,7 @@ fn 折标题排着队被撤掉时标题集合一条都没少() {
     let 折过之后 = 现场.叫法条数();
     assert!(折过之后 > 0, "前提：折过一趟，库里有叫法");
 
-    let 占位 = 现场.app.tasks_mut().queue("装作在扫一趟库", |task| {
-        for _ in 0..3_000 {
-            task.check()?;
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        Err(Cutoff::failed("这一趟本来就只是占着位子"))
-    });
+    let 占位 = 占位活::排上(现场.app.tasks_mut(), "装作在扫一趟库");
     现场.app.start_stage(Stage::FoldTitles);
     let id = 现场
         .app
@@ -1160,7 +1148,7 @@ fn 折标题排着队被撤掉时标题集合一条都没少() {
             .is_none()
     );
 
-    现场.app.tasks_mut().stop(占位);
+    占位.按停(现场.app.tasks_mut());
     现场.等任务跑完();
 }
 
@@ -1854,13 +1842,7 @@ fn 导出排着队被撤掉时一份元数据都没写出去() {
     let 导出去 = 现场.工作区.path().join("导出去");
     现场.选一次导出去哪儿("Pegasus", &导出去);
 
-    let 占位 = 现场.app.tasks_mut().queue("装作在扫一趟库", |task| {
-        for _ in 0..3_000 {
-            task.check()?;
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        Err(Cutoff::failed("这一趟本来就只是占着位子"))
-    });
+    let 占位 = 占位活::排上(现场.app.tasks_mut(), "装作在扫一趟库");
     现场.app.start_stage(Stage::Export);
     let id = 现场
         .app
@@ -1888,7 +1870,7 @@ fn 导出排着队被撤掉时一份元数据都没写出去() {
     // 那一行的按钮又按得下去了。
     assert!(现场.app.roots().stages().task_of(Stage::Export).is_none());
 
-    现场.app.tasks_mut().stop(占位);
+    占位.按停(现场.app.tasks_mut());
     现场.等任务跑完();
 }
 
@@ -2025,13 +2007,7 @@ fn 台上已经有一趟识别时再按队列屏那颗捷径_不会排第二趟(
     现场.扫("主库");
 
     // 占住台上那个位子，好让下面那一趟停在队里、不会自己跑完。
-    let 占位 = 现场.app.tasks_mut().queue("装作在扫一趟库", |task| {
-        for _ in 0..3_000 {
-            task.check()?;
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        Err(Cutoff::failed("这一趟本来就只是占着位子"))
-    });
+    let 占位 = 占位活::排上(现场.app.tasks_mut(), "装作在扫一趟库");
     现场.app.start_stage(Stage::Identify);
     let id = 现场
         .app
@@ -2055,7 +2031,7 @@ fn 台上已经有一趟识别时再按队列屏那颗捷径_不会排第二趟(
     );
 
     现场.app.tasks_mut().stop(id);
-    现场.app.tasks_mut().stop(占位);
+    占位.按停(现场.app.tasks_mut());
     现场.等任务跑完();
 }
 

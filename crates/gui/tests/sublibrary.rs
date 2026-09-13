@@ -28,14 +28,14 @@ use romcat_core::fs::RealFs;
 use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::site::Site;
 use romcat_core::sublibrary::{Exception, Group, Join, Rule};
-use romcat_core::task::{Cutoff, Ending, Handle};
+use romcat_core::task::{Ending, Handle};
 use romcat_core::testing::sample::zip;
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_gui::app::{App, View};
 use romcat_gui::headless;
 
 mod shared;
-use shared::画出来的字;
+use shared::{占位活, 画出来的字};
 
 /// 这一趟拿来当目标的那个 fixture 目录里，维护者自己拷进去的东西叫什么。
 const 存档: &str = "我自己拷进来的存档.sav";
@@ -231,22 +231,6 @@ impl 现场 {
     fn 摊开(&mut self, name: &str) {
         let (screen, site) = self.app.sublibrary_and_site();
         screen.open(site, name);
-    }
-
-    /// 排一趟**占着位子**的活上去。台上一次只跑一趟，于是这之后排上去的那些都在队里
-    /// 等着——「排上去之后再改规则」这类事情因此不带竞态。
-    ///
-    /// **步数给得足够多**，多到它绝不可能在测试看完之前自己跑完：早先写死的
-    /// 400 步 × 5 ms 正好两秒，机器一忙（全量测试并排跑）就自己先结束了、测试假失败
-    /// （`tests/task.rs` 里那个占位任务栽过同一跤）。用它的每一条都自己按停下。
-    fn 占住位子(&mut self) -> u64 {
-        self.app.tasks_mut().queue("占着位子", |task| {
-            for _ in 0..40_000 {
-                task.check()?;
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            Err(Cutoff::failed("这一趟本来就只是占着位子"))
-        })
     }
 
     fn 求值(&mut self) {
@@ -1039,7 +1023,7 @@ fn 排差量预览按停之后一个字节都没写而且再排一次照样排�
     场.加规则("掌机", "平台=SFC");
     let 卡上原样 = 卡上有什么(场.卡.path());
 
-    let 占位 = 场.占住位子();
+    let 占位 = 占位活::排上(场.app.tasks_mut(), "占着位子");
     {
         let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
         screen.preview(site, tasks);
@@ -1070,7 +1054,7 @@ fn 排差量预览按停之后一个字节都没写而且再排一次照样排�
     assert_eq!(卡上有什么(场.卡.path()), 卡上原样, "按停了却动了卡上的文件");
 
     // **再排一次照样排得出完整的一份**：它没有半截状态要收拾。
-    场.app.tasks_mut().stop(占位);
+    占位.按停(场.app.tasks_mut());
     场.等任务跑完();
     场.排预览();
     let screen = 场.app.sublibrary();
@@ -1281,7 +1265,7 @@ fn 台上排着的那一趟同步认的是排它时那份计划() {
 
     // 先把台上那个位子占住，于是同步是**排着队**的那一趟——「排上去之后再改规则」
     // 这件事就不带竞态。
-    let 占位 = 场.占住位子();
+    let 占位 = 占位活::排上(场.app.tasks_mut(), "占着位子");
     {
         let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
         screen.sync(site, tasks);
@@ -1300,8 +1284,8 @@ fn 台上排着的那一趟同步认的是排它时那份计划() {
         "改过规则那份预览就该当场作废（ADR-0016）",
     );
 
-    // 放行，让排着的那一趟跑完。
-    场.app.tasks_mut().stop(占位);
+    // 按停占位活，让排着的那一趟轮上、跑完。
+    占位.按停(场.app.tasks_mut());
     场.等任务跑完();
 
     let screen = 场.app.sublibrary();
@@ -1335,7 +1319,7 @@ fn 排着队的那一趟同步撤得掉而且撤完目标与工作目录一处�
     场.加规则("掌机", "平台=SFC");
     场.排预览();
 
-    let 占位 = 场.占住位子();
+    let 占位 = 占位活::排上(场.app.tasks_mut(), "占着位子");
     {
         let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
         screen.sync(site, tasks);
@@ -1378,7 +1362,7 @@ fn 排着队的那一趟同步撤得掉而且撤完目标与工作目录一处�
         场.app.sublibrary().prepared().is_some(),
         "撤掉同步不该连差量一起丢"
     );
-    场.app.tasks_mut().stop(占位);
+    占位.按停(场.app.tasks_mut());
     场.等任务跑完();
     场.同步到底();
     let screen = 场.app.sublibrary();
@@ -1436,7 +1420,7 @@ fn 算一遍容量按停之后那几个数没长出来而且一个字节都没�
     场.加规则("掌机", "平台=SFC");
     let 卡上原样 = 卡上有什么(场.卡.path());
 
-    let 占位 = 场.占住位子();
+    let 占位 = 占位活::排上(场.app.tasks_mut(), "占着位子");
     {
         let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
         screen.evaluate(site, tasks);
@@ -1459,7 +1443,7 @@ fn 算一遍容量按停之后那几个数没长出来而且一个字节都没�
     assert_eq!(卡上有什么(场.卡.path()), 卡上原样, "按停了却动了卡上的文件");
 
     // 再算一次照样算得出来：它没有半截状态要收拾。
-    场.app.tasks_mut().stop(占位);
+    占位.按停(场.app.tasks_mut());
     场.等任务跑完();
     场.求值();
     assert_eq!(
@@ -1481,7 +1465,7 @@ fn 存过子库之后台上那趟还没认领的容量不认了() {
     场.建子库("掌机", "1TB");
     场.加规则("掌机", "平台=SFC");
 
-    let 占位 = 场.占住位子();
+    let 占位 = 占位活::排上(场.app.tasks_mut(), "占着位子");
     {
         let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
         screen.evaluate(site, tasks);
@@ -1500,7 +1484,7 @@ fn 存过子库之后台上那趟还没认领的容量不认了() {
         "把那一趟丢了却不吭声：{notice}",
     );
 
-    场.app.tasks_mut().stop(占位);
+    占位.按停(场.app.tasks_mut());
     场.等任务跑完();
     assert!(
         场.app.sublibrary().evaluated("掌机").is_none(),
@@ -1531,7 +1515,7 @@ fn 删掉一个子库之后台上那趟还没认领的容量不认了() {
     场.加规则("掌机", "平台=SFC");
     场.摊开("掌机");
 
-    let 占位 = 场.占住位子();
+    let 占位 = 占位活::排上(场.app.tasks_mut(), "占着位子");
     {
         let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
         screen.evaluate(site, tasks);
@@ -1545,7 +1529,7 @@ fn 删掉一个子库之后台上那趟还没认领的容量不认了() {
         "删掉之后那趟还认着"
     );
 
-    场.app.tasks_mut().stop(占位);
+    占位.按停(场.app.tasks_mut());
     场.等任务跑完();
     assert_eq!(场.app.sublibrary().list().len(), 1, "该只剩一台");
     assert!(
@@ -1576,7 +1560,7 @@ fn 按停一趟同步之后子库屏与任务屏说的是同一件事() {
     // 而对面那条线程要先被 `thread::spawn` 生出来、排上 CPU，然后才走得到第一步
     // ——它整趟传完是十几毫秒的事。所以这一下**不靠抢**：它落在第一步之前。
     //
-    // **这儿用不了 `占住位子` 那一招**（撤单那条测试用的是它）：占住位子之后这一趟
+    // **这儿用不了 `占位活` 那一招**（撤单那条测试用的是它）：台上摆着占位活时这一趟
     // 就排在队里，而撤掉一趟**还没开跑**的活是「停了，什么都没留下」那一档
     // ——正好不是这条测试要验的那一档。
     场.app.tasks_mut().stop(号);

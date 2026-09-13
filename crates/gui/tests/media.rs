@@ -19,11 +19,13 @@ use romcat_core::catalog::scrape::{Harvested, HarvestedMedia};
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::preview;
 use romcat_core::scrape::{AnchorKind, MediaKind};
-use romcat_core::task::Cutoff;
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_gui::app::{App, View};
 use romcat_gui::media::Look;
 use romcat_gui::{demo, headless};
+
+mod shared;
+use shared::占位活;
 
 /// 合成数据的规模。**形状照真库，个头不照**。
 ///
@@ -475,17 +477,7 @@ fn 任务在跑时首帧先攒着不去跟别人抢写锁() {
 
     // 占住任务台。**由测试放行，不靠睡够多久**——睡一个固定的时长，机器慢一点
     // 这条测试就时灵时不灵。收场是失败还是完成不要紧，要的只是这段时间里 `busy()` 为真。
-    let 放行 = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    {
-        let 它 = std::sync::Arc::clone(&放行);
-        let (_, _, tasks) = 场.app.browse_site_and_tasks();
-        tasks.queue("占着台子", move |_| {
-            while !它.load(std::sync::atomic::Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            Err(Cutoff::failed("测试用的占位活"))
-        });
-    }
+    let 占位 = 占位活::排上(场.app.browse_site_and_tasks().2, "占着台子");
 
     // 跑到首帧抽完（后台那条解码线程不受任务台影响）。
     等图(&ctx, &mut 场.app, Duration::from_secs(20));
@@ -503,7 +495,7 @@ fn 任务在跑时首帧先攒着不去跟别人抢写锁() {
     }
 
     // 放它走，再跑几帧——这时候才记进去。
-    放行.store(true, std::sync::atomic::Ordering::Relaxed);
+    占位.放行();
     let 截止 = Instant::now() + Duration::from_secs(20);
     while 场.app.browse().gallery().pending() > 0 && Instant::now() < 截止 {
         跑(&ctx, &mut 场.app, 1);
