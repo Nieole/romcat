@@ -3,7 +3,7 @@
 **Status:** ready-for-agent
 **Opened:** 2026-09-13
 **判据：** 设计稿 `.scratch/gui-looks-like-the-design/prototype.html`（第四稿）与令牌
-`.scratch/gui-looks-like-the-design/tokens.toml`；ADR-0023（**自足**的判据）、ADR-0005
+`crates/gui/src/tokens.toml`（票 `01` 从设计稿目录搬过去，全仓库只留这一份）；ADR-0023（**自足**的判据）、ADR-0005
 （界面只是窗口壳）、ADR-0024（一个判断只有一处实现）、ADR-0016（容量超限只给建议）、
 ADR-0017（能力档案与文件系统上限）、ADR-0007（ScreenScraper 配额）
 **材料：** 设计稿（六屏 + 开场 + 全部对话框，离线可用）、`before/` 现状截图、
