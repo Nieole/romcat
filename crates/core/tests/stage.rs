@@ -72,7 +72,7 @@ struct 现场 {
 impl 现场 {
     fn 摆好() -> Self {
         let 工作区 = temp_dir("stage-ws");
-        let catalog = Catalog::open(&工作区.path().join("catalog").join("小库.sqlite3"))
+        let catalog = Catalog::create(&工作区.path().join("catalog").join("小库.sqlite3"), "小库")
             .expect("开得出中立库");
         let repo = DatRepo::open(&工作区.path().join("dat.sqlite3")).expect("开得出 DAT 库");
         let store = Store::in_memory().expect("开得出沉淀库");

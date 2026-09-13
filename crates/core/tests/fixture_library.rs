@@ -305,8 +305,8 @@ fn 遍历不改主库一个字节() {
         interval: std::time::Duration::ZERO,
         resume: false,
     });
-    let mut catalog =
-        Catalog::open(&workspace.path().join("catalog").join("库.sqlite3")).expect("能开中立库");
+    let mut catalog = Catalog::create(&workspace.path().join("catalog").join("库.sqlite3"), "库")
+        .expect("能开中立库");
     let outcome = 扫入(&mut catalog, &options);
     assert!(outcome.report.totals.files > 0);
 
@@ -334,8 +334,8 @@ fn 中立库绝不落在主库里() {
     // 主库只读（ADR-0004），而且外置盘不常挂载——中立库跟着盘走的话，
     // 盘不在时连浏览元数据都做不到（ADR-0009）。
     let library = 建_fixture_主库();
-    let mut catalog =
-        Catalog::open(&library.path().join(".romcat").join("库.sqlite3")).expect("能开中立库");
+    let mut catalog = Catalog::create(&library.path().join(".romcat").join("库.sqlite3"), "库")
+        .expect("能开中立库");
     let options = ScanOptions::named(library.path(), "库");
     let err =
         scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect_err("必须拒绝");
@@ -476,7 +476,7 @@ fn 中立库落在本机重启后仍读得出来() {
     let catalog_path = workspace.path().join("catalog").join("库.sqlite3");
 
     let 扫出来的 = {
-        let mut catalog = Catalog::open(&catalog_path).expect("能开中立库");
+        let mut catalog = Catalog::create(&catalog_path, "库").expect("能开中立库");
         let mut options = ScanOptions::named(library.path(), "库");
         options.jobs = Jobs::Fixed(4);
         扫入(&mut catalog, &options).report

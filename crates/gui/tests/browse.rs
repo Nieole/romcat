@@ -2463,7 +2463,7 @@ fn 磁盘上的小库(变体数: usize) -> (App, romcat_core::testing::TempDir) 
     let dir = romcat_core::testing::temp_dir("浏览-磁盘上的库");
     let 库文件 = workspace::catalog_path(dir.path(), Slug::Named("小库"));
     {
-        let mut catalog = Catalog::open(&库文件).expect("开得出中立库");
+        let mut catalog = Catalog::create(&库文件, "小库").expect("开得出中立库");
         // **建不出根就当场炸**：吞掉它的话，变体会挂在一个不存在的根上，
         // 而失败会以「屏上少了一行」的样子冒出来。
         romcat_core::catalog::roots::add_root(

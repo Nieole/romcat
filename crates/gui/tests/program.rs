@@ -26,9 +26,12 @@ mod shared;
 ///
 /// **建的是磁盘上那一份**，不是内存里那一份：启动那条路认的正是「这个文件在不在」
 /// （`Site::open` 在 `catalog.exists()` 那一步挡下），只活在内存里的库它一眼都看不见。
+///
+/// 记下的主库原名取**主文件名剥掉哈希后缀剩下的那一半**，好让 `给人看的名字` 照着文件名
+/// 就说得出它来。
 fn 建一份库(workspace: &Path, slug: Slug<'_>) -> std::path::PathBuf {
     let path = workspace::catalog_path(workspace, slug);
-    drop(Catalog::open(&path).expect("开得出中立库"));
+    drop(Catalog::create(&path, workspace::readable_half(&slug.text())).expect("开得出中立库"));
     path
 }
 
@@ -46,8 +49,8 @@ fn 主库标识(catalog: &Path) -> String {
 
 /// 那份库**给人看的**名字——窗口标题与开场那一行上写着的那个。
 ///
-/// 这几份夹具库是拿 `Catalog::open` 建的（没记过名字），于是它就是主文件名剥掉哈希
-/// 后缀剩下的那一半（`workspace::readable_half`，票 01 那条退路）。
+/// 这几份夹具库建库时记下的就是主文件名剥掉哈希后缀剩下的那一半（`建一份库`），
+/// 与票 01 那条退路（`workspace::readable_half`）交出来的是同一串。
 fn 给人看的名字(catalog: &Path) -> String {
     workspace::readable_half(&主库标识(catalog)).to_string()
 }
@@ -74,7 +77,7 @@ fn 建一份像样的库(
 ) -> std::path::PathBuf {
     let slug = Slug::Named(名字);
     let 库文件 = workspace::catalog_path(工作目录, slug);
-    let mut catalog = Catalog::open_named(&库文件, &slug.display_name()).expect("开得出中立库");
+    let mut catalog = Catalog::create(&库文件, &slug.display_name()).expect("开得出中立库");
     roots::add_root(
         &catalog,
         Some(工作目录),
@@ -909,7 +912,7 @@ fn 在开场上认领一个新主库走完向导就进主窗口() {
         assert!(屏上.contains(屏), "顶栏上没有「{屏}」这一屏：\n{屏上}");
     }
     // **标题写的是人刚起的那个名字**：它这一趟真的落进了中立库的元数据表
-    // （`Catalog::open_named`），而不是从带哈希的文件名截出来的。
+    // （`Catalog::create`），而不是从带哈希的文件名截出来的。
     assert!(
         program.window_title().contains("我的主库"),
         "标题里没写认领出来的是哪一份库：{}",
@@ -1079,6 +1082,41 @@ fn 向导里选的根圈进工作目录时被拦下说的是加根那一处的�
 }
 
 #[test]
+fn 向导起的名字撞上一份改过名的库时开始扫描那一下拦下而不另建一份() {
+    // **界面与命令行建库走同一个入口**（`Catalog::create`），名字收不收只在那儿判一次
+    // （挂单 `Q472`）。改名只换主库原名、不动主库标识，于是第一步「这个标识占没占」拦不住
+    // 它——那份库的文件名还是按起先那个名字折的。拦它的是建库入口那一处：同一个工作目录里
+    // 主库原名不许重。**拦下时说的是核心库那句原话，一份库都没多**。
+    let 工作目录 = temp_dir("gui-program-添加主库撞原名");
+    let 盘 = 摆一块盘("gui-program-添加主库撞原名-盘");
+    let 改过名的 = 建一份像样的库(工作目录.path(), "起错了的名字", 1, 1_700_000_000);
+    Catalog::open(&改过名的)
+        .expect("开得出那份库")
+        .set_library_name("我的主库")
+        .expect("改得了名");
+    let (_记忆, 记的) = 记在临时处("gui-program-添加主库撞原名-记忆");
+    let mut program = 开场(工作目录.path(), 记的);
+    let ctx = headless::context();
+
+    let 屏上 = 走一趟向导(&ctx, &mut program, "我的主库", 盘.path(), "主库");
+
+    assert!(
+        屏上.contains("已经有一份主库叫「我的主库」"),
+        "撞上了那份改过名的库却没说：\n{屏上}",
+    );
+    assert_eq!(program.window_title(), "romcat — 开场", "被拦下了却换了屏");
+    assert_eq!(
+        workspace::catalogs(工作目录.path()).len(),
+        1,
+        "被拦下了，工作目录里却多出一份库",
+    );
+    assert!(
+        !workspace::catalog_path(工作目录.path(), Slug::Named("我的主库")).exists(),
+        "被拦下了，按新名字折出来的那份库却建出来了",
+    );
+}
+
+#[test]
 fn 向导走到第二步就放弃时工作目录里一个文件都不多() {
     // 验收第 6 条，**晚落盘**那一条：起名与选根两步只在内存里攒，按下「开始扫描」才
     // 真的开中立库（开一份库这个动作本身就是建库）。零根的库仍然是合法状态——晚落盘
@@ -1145,7 +1183,7 @@ fn 向导走到第二步就放弃时工作目录里一个文件都不多() {
 #[test]
 fn 向导建出来的库与命令行扫出来的库一样命令行接得上() {
     // 验收第 7 条：**同一份现场、同一套路径锚**。向导走的是核心库那两条现成的路
-    // （`Catalog::open_named` 把原名记进元数据表、`workspace::catalog_path` 折文件名），
+    // （`Catalog::create` 把原名记进元数据表、`workspace::catalog_path` 折文件名），
     // 与 `romcat scan` 建库那一段同源。折出第二个文件名的话，界面建的库命令行按名字
     // 找不着，界面裁出来的**路径锚**命令行也认不出。
     let 工作目录 = temp_dir("gui-program-认领后命令行接得上");

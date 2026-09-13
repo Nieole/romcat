@@ -152,7 +152,7 @@ impl<'a> Slug<'a> {
     }
 
     /// 这份主库**原本**叫什么：人起的那个名字，或者没起名字时主库根**化开之后**的
-    /// 末级目录名。落进中立库元数据表的就是它（`Catalog::open_named`）。
+    /// 末级目录名。落进中立库元数据表的就是它（`Catalog::create`）。
     ///
     /// **与 [`Self::text`] 同源而不同用，两条路互不干扰。** 那一条要折出一个合法文件名：
     /// 滤掉 `/ \ : * ? " < > |` 与控制字符、截到 24 个字符、全滤光时退成 `library`、
@@ -327,27 +327,69 @@ pub struct CatalogFacts {
 /// 「这份主库叫什么、有多少变体、上次什么时候扫的」一样都说不出来。
 #[must_use]
 pub fn catalogs(workspace: &Path) -> Vec<CatalogEntry> {
-    let Ok(dir) = std::fs::read_dir(catalog_dir(workspace)) else {
-        return Vec::new();
-    };
-    let mut out: Vec<CatalogEntry> = dir
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == CATALOG_EXT))
+    let mut out: Vec<CatalogEntry> = catalog_files(&catalog_dir(workspace))
+        .into_iter()
         .map(entry_of)
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
     out
 }
 
+/// 这个**工作目录**里，开场那一行上印的名字恰是 `name` 的那一份中立库。
+///
+/// **主库原名撞没撞，只在这儿比**（ADR-0024）：建库与改名拒收一个撞了名的名字
+/// （`Catalog::create`、`Catalog::set_library_name`），找库按名字折不出文件时说清「这个名字
+/// 是哪一份库的主库原名」（`site::SiteError::not_found`），问的都是这一处。
+///
+/// 比的是开场那一行上印的名字（与 [`catalogs`] 交出来的那一格同一处取），**NFC 之后逐字比**
+/// ——同一个名字在两台机器上可能一台交出 NFD、一台交出 NFC（ADR-0020）。只是不问那几个数：
+/// 「这个名字撞没撞」用不着数变体。
+#[must_use]
+pub fn namesake(workspace: &Path, name: &str) -> Option<PathBuf> {
+    namesake_in(&catalog_dir(workspace), name, None)
+}
+
+/// 同 [`namesake`]，只是看的是 `file` 住的那个目录，**`file` 自己不算**。
+///
+/// 「同一个目录」就是「同一个工作目录」：中立库一律住在 `工作目录/catalog/` 底下
+/// （[`catalog_path`]）。`file` 自己**不开也不比**——改名的时候它正开着一份写得动的连接；
+/// 它还没建出来时本来也列不到它。
+pub(crate) fn namesake_beside(file: &Path, name: &str) -> Option<PathBuf> {
+    let dir = file
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    namesake_in(dir, name, file.file_name())
+}
+
+/// 在 `dir` 里找开场那一行印着 `name` 的中立库，文件名是 `except` 的那一份跳过、也不开。
+fn namesake_in(dir: &Path, name: &str, except: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let wanted = path::nfc(name);
+    catalog_files(dir)
+        .into_iter()
+        .filter(|file| except.is_none_or(|own| file.file_name() != Some(own)))
+        .find(|file| path::nfc(&listed_name(&Catalog::open_read_only(file), file)) == wanted)
+}
+
+/// 这个目录里有哪几个中立库文件。目录不在或者读不动时是空的一批。
+fn catalog_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    read.flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == CATALOG_EXT))
+        .collect()
+}
+
 /// 看一份中立库：开得开就问它自己那几个数，开不开就从文件名截个名字、把那句话带上。
 fn entry_of(path: PathBuf) -> CatalogEntry {
-    let (openable, name, facts) = match Catalog::open_read_only(&path) {
+    let opened = Catalog::open_read_only(&path);
+    let name = listed_name(&opened, &path);
+    let (openable, facts) = match &opened {
         // **开进去了就是开得进去**，哪怕底下那几个数一个都没读回来。
-        Ok(catalog) => (true, catalog.library_name(), facts_of(&catalog)),
-        // **名字与那几个数分开退**：库读不开时名字还截得出来，而截出来的名字正是这一行
-        // 唯一认得出的东西。
-        Err(error) => (false, name_from_file(&path), Err(format!("{error}"))),
+        Ok(catalog) => (true, facts_of(catalog)),
+        Err(error) => (false, Err(format!("{error}"))),
     };
     CatalogEntry {
         path,
@@ -355,6 +397,17 @@ fn entry_of(path: PathBuf) -> CatalogEntry {
         openable,
         facts,
     }
+}
+
+/// **开场那一行上印的那个名字**：开得开就是库里记着的主库原名，开不开就从文件名截。
+///
+/// **名字与那几个数分开退**：库读不开时名字还截得出来，而截出来的名字正是这一行唯一
+/// 认得出的东西。列举（[`catalogs`]）与查重名（`namesake_in`）问的都是这一处——
+/// 两处各取一次的话，屏上印的与查重时比的就不是同一个名字了（ADR-0024）。
+fn listed_name(opened: &Result<Catalog, crate::catalog::CatalogError>, path: &Path) -> String {
+    opened
+        .as_ref()
+        .map_or_else(|_| name_from_file(path), Catalog::library_name)
 }
 
 /// 问这份库要那几个数。哪一步读不出来，整行就退成那句话——半份数字比没有数字更难认。

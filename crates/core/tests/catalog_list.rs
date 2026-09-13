@@ -15,7 +15,7 @@ use romcat_core::workspace::{self, Slug};
 fn 建一份(工作目录: &std::path::Path, 名字: &str) -> std::path::PathBuf {
     let slug = Slug::Named(名字);
     let 库文件 = workspace::catalog_path(工作目录, slug);
-    drop(Catalog::open_named(&库文件, &slug.display_name()).expect("能建中立库"));
+    drop(Catalog::create(&库文件, &slug.display_name()).expect("能建中立库"));
     库文件
 }
 
@@ -147,13 +147,13 @@ fn 结构版本对不上的库照列并说清是哪个版本对哪个版本() {
 
 #[test]
 fn 主库原名读不到时退回从文件名截既不空着也不是那串哈希() {
-    // 票 01 之前建的库、以及拿 `Catalog::open` 建的库都不知道自己叫什么。退路在
+    // 票 01 之前建的库不知道自己叫什么。退路在
     // `Catalog::library_name` 里，这一条钉的是**列举这一层真的走了那条退路**——
     // 开场那一屏上一行空白或者一串十六进制，人都认不出那是自己的哪份库。
     let 工作目录 = temp_dir("列举-没名字");
     let slug = Slug::Named("没记过名字的库");
     let 库文件 = workspace::catalog_path(工作目录.path(), slug);
-    drop(Catalog::open(&库文件).expect("能建中立库"));
+    testing::catalog_without_name(&库文件);
 
     let 列出来的 = workspace::catalogs(工作目录.path());
     let [一份] = 列出来的.as_slice() else {

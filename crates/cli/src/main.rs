@@ -16,7 +16,7 @@ use std::{fs, io};
 use clap::{Args, Parser, Subcommand};
 use romcat_core::adapter::{self, Adapter, transfer};
 use romcat_core::capability::{Roster, today};
-use romcat_core::catalog::{Catalog, Roots};
+use romcat_core::catalog::{Catalog, CatalogError, Roots};
 use romcat_core::dat::HttpFetcher;
 use romcat_core::dat::registry::Registry;
 use romcat_core::dat::repo::DatRepo;
@@ -33,7 +33,7 @@ use romcat_core::scan::aggregate::{Aggregate, Limits};
 use romcat_core::scan::{self, CancelToken, CheckpointOptions, Jobs, ScanOptions};
 use romcat_core::scrape::{self, Priorities};
 use romcat_core::shape;
-use romcat_core::site::Site;
+use romcat_core::site::{Site, SiteError};
 use romcat_core::sublibrary::{self, Sublibrary};
 use romcat_core::sync;
 use romcat_core::task::Handle;
@@ -1298,19 +1298,69 @@ fn workspace_dir(given: Option<&Path>) -> PathBuf {
         .unwrap_or_else(workspace::default_dir)
 }
 
-/// 开（必要时新建）这一份中立库。
-///
-/// **建库那一趟顺手把主库的原名记下**（`Catalog::open_named`）：名字此前只活在人敲过的
-/// 那行命令里，中立库的文件名折过一道——滤字符、截到 24 个、缀上不可逆的哈希——
-/// 谁也从那串字里认不回原名。库已经在那儿了就一个字不改。
-fn open_catalog(workspace: &Path, slug: Slug<'_>, root: Option<&Path>) -> Result<Catalog, String> {
+/// 这一份中立库落在哪。给了主库根就顺手挡一次：中立库落进主库就该在开扫之前被拦下
+/// （ADR-0004）。开库与建库两条路都先走这一步。
+fn guarded_catalog_path(
+    workspace: &Path,
+    slug: Slug<'_>,
+    root: Option<&Path>,
+) -> Result<PathBuf, String> {
     let path = workspace::catalog_path(workspace, slug);
-    // 主库只读（ADR-0004）：中立库落进主库就该在开扫之前被拦下。
     if let Some(root) = root {
         refuse_writing_into_library(root, &path)?;
     }
-    Catalog::open_named(&path, &slug.display_name())
-        .map_err(|error| format!("中立库打不开：{error}"))
+    Ok(path)
+}
+
+/// 开这一份**已经在那儿**的中立库。
+///
+/// **打开不建库**（[`Catalog::open`]）：不在就说清是靠什么没找到、该先跑哪一条
+/// （[`SiteError::not_found`]，与界面按名字开现场同一句）——命令行上
+/// 建库只有 `romcat scan` 一条路（[`open_or_create_catalog`]）。于是出报告、识别、导出
+/// 这些命令问漏了「在不在」，也建不出一份空库来。
+fn open_catalog(
+    workspace: &Path,
+    slug: Slug<'_>,
+    root: Option<&Path>,
+    located_by: &str,
+) -> Result<Catalog, String> {
+    let path = guarded_catalog_path(workspace, slug, root)?;
+    Catalog::open(&path).map_err(|error| match error {
+        CatalogError::Missing { .. } => {
+            SiteError::not_found(workspace, slug, located_by).to_string()
+        }
+        error => format!("中立库打不开：{error}"),
+    })
+}
+
+/// 开这一份中立库，**还没有就建一份**——命令行上建库只有 `romcat scan` 这一条路。
+///
+/// 建库走核心库那唯一一个入口（[`Catalog::create`]），界面上添加主库那条向导调的也是它。
+/// **建库那一趟把主库的原名记下**：名字此前只活在人敲过的那行命令里，中立库的文件名折过
+/// 一道——滤字符、截到 24 个、缀上不可逆的哈希——谁也从那串字里认不回原名。名字收不收
+/// （空白、撞没撞同一个工作目录里另一份库的主库原名）也只在那儿判一次。
+/// 库已经在那儿了就只开，一个字不改。
+fn open_or_create_catalog(
+    workspace: &Path,
+    slug: Slug<'_>,
+    root: &Path,
+) -> Result<Catalog, String> {
+    let path = guarded_catalog_path(workspace, slug, Some(root))?;
+    match Catalog::open(&path) {
+        Err(CatalogError::Missing { .. }) => {
+            Catalog::create(&path, &slug.display_name()).map_err(|error| match error {
+                // **改名只换主库原名，找库仍认主库标识**（挂单 `Q472`）：拿改过的名字来扫，
+                // 折出来的是另一个文件。核心库那句话说清了撞上哪一份，这里补一句该怎么办。
+                CatalogError::LibraryNameTaken { .. } => format!(
+                    "中立库建不出来：{error}\n\
+                     要扫的就是那一份的话，`--library` 给它建库时的那个名字（改名不动它）；\
+                     要另建一份，用 `--library` 起个别的名字。"
+                ),
+                error => format!("中立库建不出来：{error}"),
+            })
+        }
+        opened => opened.map_err(|error| format!("中立库打不开：{error}")),
+    }
 }
 
 /// 这一趟扫描的断点文件按哪个**根**名去找。
@@ -1333,8 +1383,8 @@ fn checkpoint_root_name(explicit: Option<&str>, root: &Path) -> String {
 
 /// 开库之前先看一眼这个**根**在不在。
 ///
-/// **建库这件事本身就是开工。** [`Catalog::open`] 会当场把中立库文件建出来、把表建好，
-/// 而它的调用方是这一层（`open_catalog`）——核心的 `scan::scan` 接手时库早就开着了，
+/// **建库这件事本身就是开工。** [`Catalog::create`] 会当场把中立库文件建出来、把表建好，
+/// 而它的调用方是这一层（`open_or_create_catalog`）——核心的 `scan::scan` 接手时库早就开着了，
 /// 所以那道「盘不在位」的闸（`scan::resolve_root`）再往前挪也挡不住这一件。判据只好
 /// 留在这儿：一条打错的路径不该在工作目录里留下一份空中立库，让往后的 `report` /
 /// `triage list` 都把它当成一份真库——中立库是**每个主库一份**（`CONTEXT.md`）。
@@ -1364,7 +1414,7 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
 
     let workspace = workspace_dir(args.workspace.as_deref());
     let slug = Slug::pick(args.library.as_deref(), &args.root);
-    let mut catalog = match open_catalog(&workspace, slug, Some(&args.root)) {
+    let mut catalog = match open_or_create_catalog(&workspace, slug, &args.root) {
         Ok(catalog) => catalog,
         Err(message) => return fail(message),
     };
@@ -1491,14 +1541,8 @@ fn run_report(args: &ReportArgs) -> ExitCode {
         return fail(message);
     }
     let workspace = workspace_dir(args.workspace.as_deref());
-    let path = workspace::catalog_path(&workspace, slug);
-    // 只出报告不该顺手建一个空库出来。
-    if !path.exists() {
-        return fail(format!(
-            "还没有 {located_by} 这份中立库。先跑一次 `romcat scan`。"
-        ));
-    }
-    let catalog = match open_catalog(&workspace, slug, args.root.as_deref()) {
+    // 只出报告不该顺手建一个空库出来：`open_catalog` 只开不建，不在就说清。
+    let catalog = match open_catalog(&workspace, slug, args.root.as_deref(), &located_by) {
         Ok(catalog) => catalog,
         Err(message) => return fail(message),
     };
@@ -1556,15 +1600,13 @@ fn run_shape(args: &ShapeArgs) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let path = workspace::catalog_path(&workspace, slug);
     if !path.exists() {
-        return fail(format!(
-            "还没有 {located_by} 这份中立库。先跑一次 `romcat scan`。"
-        ));
+        return fail(SiteError::not_found(&workspace, slug, &located_by).to_string());
     }
     let manifest = match args.manifest.load(&workspace) {
         Ok(manifest) => manifest,
         Err(message) => return fail(message),
     };
-    let mut catalog = match open_catalog(&workspace, slug, args.root.as_deref()) {
+    let mut catalog = match open_catalog(&workspace, slug, args.root.as_deref(), &located_by) {
         Ok(catalog) => catalog,
         Err(message) => return fail(message),
     };
@@ -1666,9 +1708,7 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let catalog_path = workspace::catalog_path(&workspace, slug);
     if !catalog_path.exists() {
-        return fail(format!(
-            "还没有 {located_by} 这份中立库。先跑一次 `romcat scan`。"
-        ));
+        return fail(SiteError::not_found(&workspace, slug, &located_by).to_string());
     }
     let dat_path = workspace::dat_repo_path(&workspace);
     if !dat_path.exists() {
@@ -1677,7 +1717,7 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
             dat_path.display()
         ));
     }
-    let mut catalog = match open_catalog(&workspace, slug, args.root.as_deref()) {
+    let mut catalog = match open_catalog(&workspace, slug, args.root.as_deref(), &located_by) {
         Ok(catalog) => catalog,
         Err(message) => return fail(message),
     };
@@ -2202,15 +2242,13 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let catalog_path = workspace::catalog_path(&workspace, slug);
     if !catalog_path.exists() {
-        return fail(format!(
-            "还没有 {located_by} 这份中立库。先跑一次 `romcat scan`。"
-        ));
+        return fail(SiteError::not_found(&workspace, slug, &located_by).to_string());
     }
     let priorities = match args.load_priorities(&workspace) {
         Ok(priorities) => priorities,
         Err(message) => return fail(message),
     };
-    let mut catalog = match open_catalog(&workspace, slug, args.root.as_deref()) {
+    let mut catalog = match open_catalog(&workspace, slug, args.root.as_deref(), &located_by) {
         Ok(catalog) => catalog,
         Err(message) => return fail(message),
     };
@@ -2493,9 +2531,7 @@ fn run_titles(args: &TitlesArgs) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let catalog_path = workspace::catalog_path(&workspace, slug);
     if !catalog_path.exists() {
-        return fail(format!(
-            "还没有 {located_by} 这份中立库。先跑一次 `romcat scan`。"
-        ));
+        return fail(SiteError::not_found(&workspace, slug, &located_by).to_string());
     }
     let priorities = match load_priorities(args.priorities.as_deref(), &workspace) {
         Ok(priorities) => priorities,
@@ -2508,7 +2544,7 @@ fn run_titles(args: &TitlesArgs) -> ExitCode {
     {
         return fail(message);
     }
-    let mut catalog = match open_catalog(&workspace, slug, args.root.as_deref()) {
+    let mut catalog = match open_catalog(&workspace, slug, args.root.as_deref(), &located_by) {
         Ok(catalog) => catalog,
         Err(message) => return fail(message),
     };
@@ -2601,9 +2637,7 @@ fn run_import(args: &ImportArgs) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let catalog_path = workspace::catalog_path(&workspace, slug);
     if !catalog_path.exists() {
-        return fail(format!(
-            "还没有 {located_by} 这份中立库。先跑一次 `romcat scan`。"
-        ));
+        return fail(SiteError::not_found(&workspace, slug, &located_by).to_string());
     }
     if let Some(root) = args.root.as_deref()
         && let Some(target) = args.json.as_deref()
@@ -2611,7 +2645,7 @@ fn run_import(args: &ImportArgs) -> ExitCode {
     {
         return fail(message);
     }
-    let mut catalog = match open_catalog(&workspace, slug, args.root.as_deref()) {
+    let mut catalog = match open_catalog(&workspace, slug, args.root.as_deref(), &located_by) {
         Ok(catalog) => catalog,
         Err(message) => return fail(message),
     };
@@ -2684,9 +2718,7 @@ fn run_export(args: &ExportArgs) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let catalog_path = workspace::catalog_path(&workspace, slug);
     if !catalog_path.exists() {
-        return fail(format!(
-            "还没有 {located_by} 这份中立库。先跑一次 `romcat scan`。"
-        ));
+        return fail(SiteError::not_found(&workspace, slug, &located_by).to_string());
     }
     let priorities = match load_priorities(args.priorities.as_deref(), &workspace) {
         Ok(priorities) => priorities,
@@ -2698,7 +2730,7 @@ fn run_export(args: &ExportArgs) -> ExitCode {
     {
         return fail(message);
     }
-    let mut catalog = match open_catalog(&workspace, slug, None) {
+    let mut catalog = match open_catalog(&workspace, slug, None, &located_by) {
         Ok(catalog) => catalog,
         Err(message) => return fail(message),
     };
@@ -3316,12 +3348,7 @@ impl SubCommonArgs {
     fn open(&self) -> Result<Catalog, String> {
         let (slug, located_by) = locate(self.library.as_deref(), self.root.as_deref())?;
         let workspace = workspace_dir(self.workspace.as_deref());
-        if !workspace::catalog_path(&workspace, slug).exists() {
-            return Err(format!(
-                "还没有 {located_by} 这份中立库。先跑一次 `romcat scan`。"
-            ));
-        }
-        open_catalog(&workspace, slug, self.root.as_deref())
+        open_catalog(&workspace, slug, self.root.as_deref(), &located_by)
     }
 }
 
@@ -5511,7 +5538,7 @@ fn run_names_recheck(args: &NamesArgs, cancel: &CancelToken) -> ExitCode {
         Err(message) => return fail(message),
     };
     let workspace = workspace_dir(args.workspace.as_deref());
-    let mut catalog = match open_catalog(&workspace, slug, args.root.as_deref()) {
+    let mut catalog = match open_catalog(&workspace, slug, args.root.as_deref(), &located_by) {
         Ok(catalog) => catalog,
         Err(message) => return fail(message),
     };

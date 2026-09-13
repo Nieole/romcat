@@ -24,6 +24,20 @@ pub enum SiteError {
     /// 中立库还不在。
     #[error("还没有 {0} 这份中立库。先跑一次 `romcat scan`。")]
     NoCatalog(String),
+    /// 按这个名字折出来的中立库不在，而这个工作目录里另一份库的**主库原名**正是它——那份
+    /// 多半改过名：改名只换主库原名，找库认的仍是建库时那个名字折出来的主库标识（挂单 `Q472`）。
+    #[error(
+        "还没有 {located_by} 这份中立库——这个工作目录里主库原名叫「{name}」的是 {other}。\
+         找库认的是建库时的那个名字，改名不动它：要开的是那一份，就按它建库时的名字找"
+    )]
+    Renamed {
+        /// 靠什么没找到（`--library <名字>` 那一串）。
+        located_by: String,
+        /// 人给的那个名字。
+        name: String,
+        /// 主库原名正是这个名字的那份中立库。
+        other: String,
+    },
     /// 中立库要落进主库里去了。**主库只读**（ADR-0004）。
     #[error("中立库 {0} 落在主库内。主库只读，请把工作目录放到别处。")]
     InsideLibrary(String),
@@ -36,6 +50,27 @@ pub enum SiteError {
     /// 沉淀库打不开。
     #[error("沉淀库打不开：{0}")]
     Verdict(#[from] VerdictError),
+}
+
+impl SiteError {
+    /// 按 `slug` 折出来的中立库不在时该说哪一句——命令行各命令与 [`Site::open`] 说的是同一句。
+    ///
+    /// 给的是名字、而这个工作目录里另一份库的主库原名正是它时，说清是哪一份
+    /// （[`SiteError::Renamed`]，判「是不是它」只在 [`workspace::namesake`]）；否则就是
+    /// 「还没有，先跑一次 `romcat scan`」（[`SiteError::NoCatalog`]）。
+    #[must_use]
+    pub fn not_found(workspace: &Path, slug: Slug<'_>, located_by: &str) -> Self {
+        if let Slug::Named(name) = slug
+            && let Some(other) = workspace::namesake(workspace, name)
+        {
+            return Self::Renamed {
+                located_by: located_by.to_string(),
+                name: name.to_string(),
+                other: path::display(&other),
+            };
+        }
+        Self::NoCatalog(located_by.to_string())
+    }
 }
 
 /// 一份开好的中立库加沉淀库，连这份主库的**主库标识**。
@@ -70,7 +105,7 @@ impl Site {
     ) -> Result<Self, SiteError> {
         let catalog = workspace::catalog_path(workspace, slug);
         if !catalog.exists() {
-            return Err(SiteError::NoCatalog(located_by.to_string()));
+            return Err(SiteError::not_found(workspace, slug, located_by));
         }
         Self::at(workspace, &catalog, slug.text(), root)
     }
