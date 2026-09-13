@@ -20,6 +20,9 @@
 //! [`App::start_stage`](crate::app::App::start_stage) 递过来。**同一趟活不许有第二份
 //! 实现**：两份实现迟早会在「排的时候顺手做了什么」上分叉。
 //!
+//! 导出撞上外面有人动过之后那颗「我看过了，照写」（`Section::force_export`）也不另起
+//! 一份：它与 `start` 走的是同一个 `queue`，只多压一格**只管这一趟**的旋钮。
+//!
 //! ## 后台那条线程写的是哪一份库
 //!
 //! 识别与折标题都要**写**中立库（两者起手都先把上一轮折出来的清干净），而
@@ -43,6 +46,7 @@
 
 use std::path::{Path, PathBuf};
 
+use romcat_core::adapter::report::Conflict;
 use romcat_core::adapter::transfer::{self, ExportOptions};
 use romcat_core::catalog::{ExportSetup, Roots};
 use romcat_core::fs::RealFs;
@@ -98,6 +102,11 @@ pub struct Section {
     ran: Option<Stage>,
     error: Option<String>,
     notice: Option<String>,
+    /// 上一趟**导出**撞上「外面有人动过」而没写的那几份，逐份点名画在屏上。
+    ///
+    /// **名单是导出本来就交得出的那一份**（`ExportReport::conflicts`）：导出一份文件一份
+    /// 文件地写、每写完把**底本**存进中立库，哪几份对不上是现成的，这一层不另比一遍。
+    conflicts: Vec<Conflict>,
 }
 
 impl Section {
@@ -115,6 +124,7 @@ impl Section {
             ran: None,
             error: None,
             notice: None,
+            conflicts: Vec::new(),
         }
     }
 
@@ -233,31 +243,70 @@ impl Section {
     ///
     /// **这是这一段唯一的排活入口**：库屏工序段那颗按钮与别处的捷径（队列屏空态上那
     /// 几颗「跑识别」、浏览屏撤掉压制之后那颗「折标题」）调的都是它，排的是同一趟活。
+    /// 这一段自己那颗「我看过了，照写」也不另起一份：它走的是同一个 `queue`
+    /// （`Self::force_export`），而且不对外。
     ///
     /// 同一道工序已经在跑就**什么都不做**——那一行的按钮本来就是禁着的，这一句是给
     /// 别处的捷径兜底的。
     pub fn start(&mut self, stage: Stage, site: &mut Site, tasks: &mut Tasks) {
+        let knobs = self.export_knobs();
+        self.queue(stage, knobs, site, tasks);
+    }
+
+    /// 带着**照写**重排一趟**导出**：屏上那颗「我看过了，照写」按的就是它。
+    ///
+    /// **不对外**：它只长在这一段自己画的那份名单底下——没画出那份名单的地方，没有资格
+    /// 替人点这一下。**只管这一趟**：照写不记进这一段、不记进库，下一趟撞上外面有人动过
+    /// 照样停下来逐份点名——它丢掉的是人的一次手改，所以每次都得人当场点
+    /// （票 `gui-answers-all-six/05`）。排的是与 [`Self::start`] 同一份实现，
+    /// 带的是同一套旋钮，只多压一格照写。
+    fn force_export(&mut self, site: &mut Site, tasks: &mut Tasks) {
+        let mut knobs = self.export_knobs();
+        knobs.force = true;
+        self.queue(Stage::Export, knobs, site, tasks);
+    }
+
+    /// 这一段眼下拨着的**导出**旋钮：平常那一趟与照写那一趟带的是**同一套**。
+    /// **照写不在这里头**——它从不记在这一段上（[`Self::force_export`]）。
+    ///
+    /// 眼下这一段上一个导出开关都没有，交出默认那一套。票 `one-criterion-per-thing/09`
+    /// 的铺媒体开关在这儿从这一段读出来，[`Self::start`] 与 [`Self::force_export`]
+    /// 一行不用改。
+    fn export_knobs(&self) -> ExportKnobs {
+        ExportKnobs::default()
+    }
+
+    /// 排一趟活**只有这一份实现**：[`Self::start`] 与 [`Self::force_export`] 都走它，
+    /// 差的只是导出那一支这一趟带哪几个旋钮（[`ExportKnobs`]）。
+    fn queue(&mut self, stage: Stage, knobs: ExportKnobs, site: &mut Site, tasks: &mut Tasks) {
         if self.task_of(stage).is_some() {
             return;
         }
         let workspace = self.workspace.clone();
-        let title = stage.label().to_string();
+        // **照写那一趟在任务台历史上也看得出来**：丢掉手改的那一趟不许与平常那几趟长得一样。
+        let title = if knobs.force {
+            format!("{}（照写）", stage.label())
+        } else {
+            stage.label().to_string()
+        };
         let id = match site.catalog.file().map(Path::to_path_buf) {
             Some(file) => tasks.queue(title, move |task| {
                 // 后台这条线程自己开一份写得动的现场：`rusqlite::Connection` 不是
                 // `Sync`，界面那条线程手里那一份交不过来。
                 let mut site = Site::open_file(&workspace, &file, None)
                     .map_err(|error| format!("这份库在后台开不出来：{error}"))?;
-                run(stage, &mut site, &workspace, task)
+                run(stage, knobs, &mut site, &workspace, task)
             }),
             // 只活在内存里的库（合成数据走这条）分不出第二份连接：**就地跑完**。
             // 那时窗口确实会僵一下，但那份库小到几毫秒就走完——真库一律走上面那条。
-            None => tasks.run_here(title, |task| run(stage, site, &workspace, task)),
+            None => tasks.run_here(title, |task| run(stage, knobs, site, &workspace, task)),
         };
         // **上一趟的回执一起收掉**：不收的话「识别 跑完了：…」会挂在新一趟正跑着的
-        // 那一行旁边，读起来像这一趟已经跑完了。
+        // 那一行旁边，读起来像这一趟已经跑完了。点名的那几份同理——那份名单说的是
+        // 上一趟撞上的，留着它，人会对着一份过期的名单按「照写」。
         self.error = None;
         self.notice = None;
+        self.conflicts.clear();
         self.running.push((id, stage));
     }
 
@@ -299,7 +348,7 @@ impl Section {
                 // （`ExportedFile::written` 就是这条界线）。
                 let 写出去的: Vec<_> = report.files.iter().filter(|file| file.written).collect();
                 let 条目 = 写出去的.iter().map(|file| file.entries).sum::<u64>();
-                self.notice = Some(if 写出去的.is_empty() {
+                let mut 回执 = if 写出去的.is_empty() {
                     // 每一份都被挡下、或者库里压根没东西可导。**这一档也得说话**
                     // ——它与「写了几份」长得完全不一样，而底下那句红字说的是为什么。
                     format!("{} 跑完了，可一份元数据都没写出去。", stage.label())
@@ -312,17 +361,32 @@ impl Section {
                         thousands(写出去的.len() as u64),
                         report.tier,
                     )
-                });
+                };
+                // **照写掉了哪几份得说出口**（`ExportReport::forced`）：「不静默覆盖」说的是
+                // 不许悄悄发生，不是不许发生。逐份点名，与撞上时那份名单一个粒度。
+                if !report.forced.is_empty() {
+                    回执.push_str(&format!(
+                        "\n照写了 {} 份外面有人动过的文件，那几次手改已经没了：",
+                        thousands(report.forced.len() as u64),
+                    ));
+                    for conflict in &report.forced {
+                        回执.push_str("\n  ");
+                        回执.push_str(&conflict.path);
+                    }
+                }
+                self.notice = Some(回执);
                 // **撞上手改要说出口**（验收第 5 条）：跳过的那几份是「你要的事没做，
                 // 去处理一下」，与上面那句「跑完了」意思相反，所以它走的是报错那一格
                 // ——两句合成一句的话，那几份被吞掉的活会被读成一次顺利的导出。
                 self.error = (!report.conflicts.is_empty()).then(|| {
                     format!(
                         "有 {} 份没写——外面有人动过那些文件，没有静默覆盖。\
-                         先看一眼那几份，确认不要了再重导。",
+                         先去看一眼底下点名的那几份；确认那几次手改可以丢掉，\
+                         再按「我看过了，照写」。",
                         thousands(report.conflicts.len() as u64),
                     )
                 });
+                self.conflicts.clone_from(&report.conflicts);
             }
             // **停在半路**：识别起手就把上一轮的结论清干净，所以它一定动过库
             // ——记成「可以当没跑过」是骗人的。那句话由核心库折
@@ -369,6 +433,29 @@ impl Section {
         });
         if let Some(error) = &self.error {
             ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        // **逐份点名**：人要去看的是哪几个文件，一个数答不了。
+        let mut 要照写 = false;
+        if !self.conflicts.is_empty() {
+            ui.indent("外面有人动过的那几份", |ui| {
+                for conflict in &self.conflicts {
+                    ui.label(&conflict.path);
+                    ui.weak(&conflict.why);
+                }
+                // **不做差量预览**：人拿到的是一份文件名单，看文件本身由他自己去。
+                if ui
+                    .button("我看过了，照写")
+                    .on_hover_text(
+                        "带着照写重排一趟导出：上面点名的那几份会被写过去，那几次手改就没了。",
+                    )
+                    .clicked()
+                {
+                    要照写 = true;
+                }
+                // **画在屏上，不只藏在悬停里**：「每次都得当场点」是这颗按钮最要紧的一句，
+                // 而人不会先悬停一颗按钮再按它。
+                ui.weak("只管这一趟：下一趟撞上外面有人动过，照样停下来再问。");
+            });
         }
         if let Some(notice) = &self.notice {
             ui.weak(notice);
@@ -433,6 +520,9 @@ impl Section {
         if let Some(stage) = 要跑 {
             self.start(stage, site, tasks);
         }
+        if 要照写 {
+            self.force_export(site, tasks);
+        }
     }
 
     /// 底下那一行：**导出**往哪个前端格式、哪个目录写。
@@ -492,13 +582,33 @@ impl Section {
 /// 都不在这一层——它只是把核心库要的原料摆齐（与命令行 `romcat identify` 摆的是同一副，
 /// 只差**模型推断兜底**那一层：界面上没有价目表与花费上限那几个旋钮，所以那一层整个
 /// 关着，挂单 `Q418`）。
-fn run(stage: Stage, site: &mut Site, workspace: &Path, task: &Handle) -> Result<Product, Cutoff> {
+fn run(
+    stage: Stage,
+    knobs: ExportKnobs,
+    site: &mut Site,
+    workspace: &Path,
+    task: &Handle,
+) -> Result<Product, Cutoff> {
     match stage {
         Stage::Identify => identify_run(site, workspace, task),
         Stage::Scrape => scrape_run(site, workspace, task),
         Stage::FoldTitles => fold_titles_run(site, workspace, task),
-        Stage::Export => export_run(site, workspace, task),
+        Stage::Export => export_run(site, workspace, knobs, task),
     }
+}
+
+/// **导出**那一支这一趟带哪几个旋钮。别的几支不看它。
+///
+/// **每排一趟现折一份**（`Section::export_knobs`），照写那一趟只在上面再压一格；
+/// **照写那一格从不记在 [`Section`] 上**（`Section::force_export`）。
+///
+/// 给导出那一支再加开关（票 `one-criterion-per-thing/09` 的铺媒体）：往这儿加一格，
+/// 在 `Section::export_knobs` 里从这一段读出来——`start` 与 `force_export` 一行不用改，
+/// 照写那一趟也带着同一个开关。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ExportKnobs {
+    /// 外面有人动过也照写（[`ExportOptions::force`]）。**默认关**。
+    force: bool,
 }
 
 /// 跑一趟**识别**。
@@ -599,15 +709,19 @@ fn fold_titles_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<P
 /// 中立库里躺着，写出去的只有元数据文件。装配只有两样——记住的那套**配置**与
 /// **优先级表**，与命令行 `romcat export` 摆的是同一副。
 ///
-/// ## 两个旋钮界面上一个都不给
+/// ## 命令行那两个旋钮，界面上给一个、不给一个
 ///
-/// 命令行那边有 `--dry-run` 与 `--force`，这儿两个都钉死在「关」上：
-///
-/// - **只排计划**在这一屏上没有落点——工序段那一行问的是「还差多少」，一次不写盘的
-///   预演答不了它，反倒会让那一行说「上次跑是刚刚」而盘上什么都没有。
-/// - **照写**（`--force`）是**丢掉一次手改**，那是不可逆的事。撞上外面有人动过时
-///   这一趟停下来、逐份点名（验收第 5 条），要不要丢由人自己去看那几份文件再定。
-fn export_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Product, Cutoff> {
+/// - **只排计划**（`--dry-run`）**不给**，钉死在「关」上：工序段那一行问的是「还差多少」，
+///   一次不写盘的排计划答不了它，反倒会让那一行说「上次跑是刚刚」而盘上什么都没有。
+/// - **照写**（`--force`）**默认关**，只从 `knobs` 那一格来：撞上外面有人动过时这一趟
+///   停下来、逐份点名，人自己去看过那几份文件，再在屏上按「我看过了，照写」重排一趟
+///   （`Section::force_export`）。它丢掉的是一次手改，所以**每次都得当场点**，不记住。
+fn export_run(
+    site: &mut Site,
+    workspace: &Path,
+    knobs: ExportKnobs,
+    task: &Handle,
+) -> Result<Product, Cutoff> {
     // 装配那两步加上核心库自己那几步。**核心库那个数由它自己报**
     // （`transfer::TASK_STEPS`）——在这儿手写一个 3，那边加一步这儿的进度条就走过头了。
     task.steps(2 + transfer::TASK_STEPS);
@@ -643,7 +757,7 @@ fn export_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Produc
         &ExportOptions {
             out: setup.out.clone(),
             dry_run: false,
-            force: false,
+            force: knobs.force,
             media: None,
         },
         task,
