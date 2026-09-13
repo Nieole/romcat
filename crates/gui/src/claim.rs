@@ -175,6 +175,17 @@ impl Wizard {
                     .hint_text(ROOT_HINT)
                     .desired_width(320.0),
             );
+            // 系统目录选择器（[`crate::pick`]）：选中的目录落进左边这个框，与贴路径同一处。
+            if ui
+                .button("选择…")
+                .on_hover_text(crate::pick::FALLBACK_HINT)
+                .clicked()
+            {
+                self.picked_root(crate::pick::directory(
+                    "选第一个根",
+                    &self.root_pick_start(),
+                ));
+            }
             ui.add(
                 egui::TextEdit::singleline(&mut self.first.name)
                     .hint_text(ROOT_NAME_HINT)
@@ -309,5 +320,41 @@ fn 收掉刚建的(path: &Path) {
         let mut 附件 = path.as_os_str().to_os_string();
         附件.push(尾);
         let _ = std::fs::remove_file(PathBuf::from(附件));
+    }
+}
+
+impl Wizard {
+    /// **目录选择器交回来的那一下**（[`crate::pick`]）：选中了一个目录，就把它落进选根那个框
+    /// ——贴路径那条路填的正是这一处（[`FirstRoot::path`]）；取消了（`None`）什么都不动。
+    ///
+    /// **只填框，不替人按「开始扫描」**：选中之后那一步照旧往下走，人还要看一眼、起个根名再按。
+    /// 化路径、按目录名兜底根名、拦下那几种情况，照旧全是按下「开始扫描」那一下的事
+    /// （[`crate::roots::add_root_from_fields`]）——在这儿先折一遍就成了第二套算法。
+    ///
+    /// **按原样落成一串字**，不走 [`romcat_core::path::display`]：那一个是展示用的，
+    /// 而这串字等会儿要被当成路径再去碰盘。
+    ///
+    /// 这一半与弹对话框那一层分开摆，是为了**它测得到**：对话框是系统的模态窗口，
+    /// 测试驱动不了；拿到路径之后发生什么，测试递一个进来就验得着。
+    pub fn picked_root(&mut self, 选中的: Option<PathBuf>) {
+        let Some(目录) = 选中的 else {
+            return;
+        };
+        self.first.path = 目录.to_string_lossy().into_owned();
+    }
+
+    /// 选根那个对话框从哪儿打开：**上次选过的位置，没有就用工作目录**。
+    ///
+    /// **「上次选过的位置」就是选根那个框里眼下那一串**：选中的那一下落进的正是它
+    /// （[`Self::picked_root`]），不另记一份，也不落盘（挂单 `Q692`）。框里是人自己贴进去的一个
+    /// 目录时同样从那儿打开——那也是人上一次说的「在这附近」。框里不是一个目录（空的、半截、
+    /// 打错的）时退回工作目录。
+    fn root_pick_start(&self) -> PathBuf {
+        let 框里的 = Path::new(self.first.path.trim());
+        if 框里的.is_dir() {
+            框里的.to_path_buf()
+        } else {
+            self.workspace.clone()
+        }
     }
 }
