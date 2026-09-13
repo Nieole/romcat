@@ -20,9 +20,10 @@ use std::fmt::Write as _;
 
 use serde::Serialize;
 
-use crate::catalog::{Catalog, CatalogError, Confidence};
+use crate::catalog::{Catalog, CatalogError};
 use crate::report::{heading, pad, thousands};
 use crate::scrape::priority::Priorities;
+use crate::scrape::zh::affirmed_title;
 
 use super::{
     Chosen, Language, SortFrom, TitleKind, TitleRow, TitleSet, best_chinese, choose, work_titles,
@@ -118,7 +119,17 @@ pub struct TitleReport {
     pub unsortable_works: u64,
     /// 那种作品的例子。
     pub unsortable_examples: Vec<String>,
-    /// **低置信的中文叫法**有几个——它们是待确认队列的输入（ADR-0002）。
+    /// **没人裁过的中文叫法**有几个——它们是待确认队列的输入。
+    ///
+    /// 判据与识别那一侧同一条：**没人裁过就进，不看置信度**（挂账 `D128`）。
+    /// 从前这里只收低置信，模糊匹配来的**中置信**中文名于是一进库就退出了视线。
+    /// 数的仍是每个作品中文那一档的第一名（[`title::best_chinese`](super::best_chinese)，
+    /// 挂账 `D163` 的口径）。
+    ///
+    /// ⚠️ **判据不是 ADR-0002 那三档置信度。** ADR-0002 说「中置信通过但标记；低置信
+    /// 进待确认队列」，词表的**待确认队列**说「置信度不足以自动通过的候选的集合」——两句
+    /// 说的都是识别**候选**。标题集合里的叫法不是候选，也没有自动通过这一步；这里照
+    /// `D128` 的裁定跟识别那一侧眼下的判据走。那两句原话要不要补，见挂单 `Q714`。
     pub queue_works: u64,
     /// 队列里的例子。
     pub queue_examples: Vec<TitleExample>,
@@ -182,7 +193,11 @@ impl TitleReport {
                 *chinese_confidence
                     .entry(best.confidence.label())
                     .or_default() += 1;
-                if best.confidence == Confidence::Low {
+                // **待确认队列：没人裁过就进，不看置信度**（挂账 `D128`）——与识别那一侧
+                // 同一条判据（`triage::survey`）。置信度是描述性的量，拿它当「进不进队列」
+                // 的开关，模糊匹配来的中置信中文名就一进库退出了视线。「裁过」认哪几样
+                // 见 [`judged`]。
+                if !judged(catalog, best)? {
                     report.queue_works += 1;
                     push_example(&mut report.queue_examples, set, &chosen, best);
                 }
@@ -332,22 +347,40 @@ impl TitleReport {
         rows(&mut out, "按类型", &self.by_kind);
         rows(&mut out, "按来源", &self.by_source);
 
-        heading(&mut out, "低置信的中文名——待确认队列的输入");
+        heading(&mut out, "没人裁过的中文名——待确认队列的输入");
         let _ = writeln!(
             out,
-            "{} 个作品的中文叫法是**低置信**的：没有任何官中发行版为它背书，\
-             它只是盘上那个文件叫这个。\n\
-             合集包、精简版、带广告后缀的文件名全落在这一档，**照用但标记**\
-             （ADR-0002 的低置信那一档）。\n\
-             上面「按置信度」那一栏里的**中置信**是另一回事：那些名字的**来源**确凿\
-             （官中发行版背书、或者确是某个汉化版），\n只是**字面**还没人看过一眼——\
-             官方译名不在 DAT 里，中文名只存在于盘上那个文件的名字上。\n\
-             **高置信这一档留给裁决**：人看过才叫确凿。",
+            "{} 个作品的中文叫法**还没人裁过**。判据与识别那一侧同一条：\
+             **没人裁过就进，不看置信度**（挂账 D128）。\n\
+             置信度说的是这个名字**有多可信**，不是**该不该让人看一眼**：\
+             低置信的（合集包、精简版、带广告后缀的文件名，\n\
+             没有任何官中发行版为它背书）要看；中置信的也要看——官中发行版背书的译名、\
+             模糊匹配来的中文名，\n来源有出处，**字面**却还没人看过一眼，\
+             一进库就可能当上显示标题。\n\
+             **裁过的不在这里**：人亲手写下的叫法（来源是裁决），\
+             以及人肯定过的那一次中文离线源匹配带来的名字。",
             thousands(self.queue_works),
         );
         examples(&mut out, "队列里的例子", &self.queue_examples);
         out
     }
+}
+
+/// 这条中文叫法**有人裁过**吗——标题这一侧待确认队列的判据：没人裁过就进，不看置信度
+/// （挂账 `D128`，与识别那一侧 `triage::survey` 同一条）。
+///
+/// 「裁过」认两样，**都从现成的那一处取，这里不另判**（ADR-0024）：
+///
+/// 1. **人亲手写下的叫法**：来源是裁决（[`TitleRow::is_verdict`]）。
+/// 2. **人肯定过的那一次中文离线源匹配带来的名字**（[`affirmed_title`]）。
+///
+/// **不算裁过的**：
+///
+/// - **压掉的叫法**——它已经不在集合里，轮不到这里问；压掉一条也不等于为剩下的背书。
+/// - **人裁的是别的语言的显示标题**——那条中文叫法本身没人看过（挂单 `Q711`）。
+/// - **识别那一侧的裁决**——它定的是「这个变体是哪条发行版」，不是「这串中文字对不对」。
+fn judged(catalog: &Catalog, row: &TitleRow) -> Result<bool, CatalogError> {
+    Ok(row.is_verdict() || affirmed_title(catalog, row)?)
 }
 
 /// 一本按名字排的账摊成报告要的 `(名字, 个数)`。名字自己就定了顺序。

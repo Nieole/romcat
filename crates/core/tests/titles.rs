@@ -10,7 +10,8 @@
 //! 3. **世代裂缝两侧都走得通**（ADR-0019）：台版卡带是独立一条发行版，港服数字版是
 //!    同一条发行版的语言属性；
 //! 4. **排序标题独立生成**，中文条目排出来的顺序与按码位排不一样；
-//! 5. **低置信的中文名照样给结论，但标记出来**，进得了待确认队列。
+//! 5. **没人裁过的中文名照样给结论，但进得了待确认队列**——低置信的与模糊匹配来的
+//!    中置信的都进，裁过的不进（挂账 `D128`）。
 //!
 //! fixture 的形状照真机来（`docs/library-facts.md`）：内容在**透明容器**里，官中版与
 //! 汉化版各占一个目录，文件名是中文的——那正是这个库里中文名的唯一来源。
@@ -207,6 +208,35 @@ fn 建_dat() -> DatRepo {
 
 /// 跑一遍完整的管线：识别 → 刮削 → 折标题。
 fn 跑一遍(现场: &mut 现场) -> title::TitleReport {
+    跑一遍带(现场, &fuzzy::Naming::off(), &scrape::zh::Rulings::none())
+}
+
+/// 同上，但刮削那一步带着一份**中文离线索引**与那批**匹配裁决**。
+///
+/// 识别那一步照旧不带索引：塞尔达那个变体本来就精确命中了 No-Intro，这里要的只是刮削
+/// 那一侧的中文离线源给它产出一个中文名。
+fn 跑一遍带中文索引(
+    现场: &mut 现场,
+    index: &romcat_core::zh::Index,
+    rulings: &scrape::zh::Rulings,
+) -> title::TitleReport {
+    let rules = romcat_core::filename::Rules::builtin();
+    跑一遍带(
+        现场,
+        &fuzzy::Naming {
+            rules: &rules,
+            index: Some(index),
+            tuning: romcat_core::zh::Tuning::default(),
+        },
+        rulings,
+    )
+}
+
+fn 跑一遍带(
+    现场: &mut 现场,
+    naming: &fuzzy::Naming<'_>,
+    rulings: &scrape::zh::Rulings,
+) -> title::TitleReport {
     identify::run(
         &RealFs::new(),
         &mut 现场.catalog,
@@ -234,13 +264,72 @@ fn 跑一遍(现场: &mut 现场) -> title::TitleReport {
         &mut scrape::RunContext {
             cancel: &CancelToken::new(),
             progress: &mut |_| {},
-            naming: &fuzzy::Naming::off(),
+            naming,
             summaries: None,
-            rulings: &scrape::zh::Rulings::none(),
+            rulings,
         },
     )
     .expect("刮削不该失败");
     title::run(&mut 现场.catalog, &现场.store, &Priorities::builtin()).expect("折得出标题")
+}
+
+/// 盘上叫「塞尔达传说」的那一份：字节就是 Zelda (USA)，文件名是中文。
+const 塞尔达变体: &str = "库/FC/塞尔达/塞尔达传说.zip";
+
+/// 中文离线索引里塞尔达那一条的条目号。
+const 塞尔达条目: u32 = 4_242;
+
+/// 往主库里再放一份**文件名是中文**的塞尔达，重扫一遍。
+fn 放一份中文名的塞尔达(现场: &mut 现场) {
+    写(
+        &现场.dir.path().join(相对(塞尔达变体)),
+        &zip_container(&[ZipEntrySpec::stored("Zelda.nes", 只有英文())]),
+    );
+    let mut options = ScanOptions::named(现场.dir.path(), "库");
+    options.jobs = Jobs::Fixed(2);
+    scan::scan(&RealFs::new(), &mut 现场.catalog, &options, &Handle::new()).expect("扫得动");
+}
+
+/// 一份最小的**中文离线索引**：塞尔达那一条。
+///
+/// 那个文件的正题与这条条目的中文名一字不差、平台也对得上，于是刮削那一侧的中文离线源
+/// 给它产出一个中文名——**模糊匹配来的**，一个字节都没看。
+fn 中文索引() -> romcat_core::zh::Index {
+    romcat_core::zh::Index::build(
+        vec![romcat_core::zh::Entry {
+            id: 塞尔达条目,
+            name: "Zelda no Densetsu".to_string(),
+            name_cn: "塞尔达传说".to_string(),
+            aliases: Vec::new(),
+            year: Some(1986),
+            platforms: vec!["FC".to_string()],
+            platform_text: "FC".to_string(),
+            summary: String::new(),
+            genres: Vec::new(),
+            developers: Vec::new(),
+            publishers: Vec::new(),
+        }],
+        "dump-2026-09-01".to_string(),
+    )
+}
+
+/// 中文离线源撞出来的那条中文名，在标题集合里的那一行。
+fn 模糊匹配那条(现场: &现场) -> romcat_core::catalog::TitleRow {
+    现场
+        .catalog
+        .titles_of("Zelda")
+        .expect("读得出")
+        .into_iter()
+        .find(|row| row.source == fuzzy::SOURCE && row.value == "塞尔达传说")
+        .expect("中文离线源撞出来的那个中文名进了标题集合")
+}
+
+/// 这份报告的队列里有没有这个作品的这一条。
+fn 队列里有(report: &title::TitleReport, work: &str, value: &str) -> bool {
+    report
+        .queue_examples
+        .iter()
+        .any(|example| example.work == work && example.display == value)
 }
 
 /// 一部作品挑出来的显示标题与排序标题。
@@ -459,7 +548,7 @@ fn 中文名带置信度低的那些进得了队列() {
     assert_eq!(挑(&现场, "Contra").display, "魂斗罗");
 
     // 而本来只有英文名的那部作品，现在拿到了一个中文名——**照用**（前端里多一条
-    // 中文），**但标记**：它是低置信的，队列里躺着等人裁决。合集包的名字本来就不该
+    // 中文），**但标记**：它是低置信的、没人裁过，队列里躺着等人裁决。合集包的名字本来就不该
     // 当成一部作品的中文名，而这一点只有人看得出来。
     let zelda = 挑(&现场, "Zelda");
     assert_eq!(zelda.display, "塞尔达全集");
@@ -475,6 +564,146 @@ fn 中文名带置信度低的那些进得了队列() {
             .any(|example| example.display == "塞尔达全集"),
         "队列里要说得出是哪一条、凭什么"
     );
+}
+
+#[test]
+fn 模糊匹配来的中置信中文名没人裁过就进得了队列() {
+    // 挂账 `D128`：同一个模糊匹配器的产出，识别那一侧一律进待确认队列，标题这一侧从前
+    // 却按置信度筛——只收低置信，于是这条**中置信**的中文名一进库就退出了视线，
+    // 还当上了显示标题，而维护者一眼都没看过。
+    let mut 现场 = 建现场();
+    放一份中文名的塞尔达(&mut 现场);
+    let report = 跑一遍带中文索引(&mut 现场, &中文索引(), &scrape::zh::Rulings::none());
+
+    // **置信度这个值一个字没改**：模糊匹配来的仍是中置信。进不进队列不靠调档。
+    assert_eq!(
+        模糊匹配那条(&现场).confidence,
+        romcat_core::catalog::Confidence::Medium
+    );
+    assert_eq!(
+        挑(&现场, "Zelda").display,
+        "塞尔达传说",
+        "它当上了显示标题——这正是它必须让人看一眼的理由"
+    );
+
+    assert!(
+        队列里有(&report, "Zelda", "塞尔达传说"),
+        "模糊匹配来的中置信中文名没人裁过，要进队列：{:#?}",
+        report.queue_examples
+    );
+    // 判据与识别那一侧同一条：**没人裁过就进，不看置信度**。这份库里一条都没人裁过，
+    // 于是魂斗罗（官中译名，中置信）、盖亚（语言属性，中置信）、塞尔达（模糊匹配，
+    // 中置信）三部全在队列里——从前按「只收低置信」一部都进不来。
+    assert_eq!(report.chinese_works, 3);
+    assert_eq!(report.queue_works, 3, "{:#?}", report.queue_examples);
+
+    let text = report.render_text();
+    assert!(
+        text.contains("没人裁过就进"),
+        "报告那一节的口径要跟着判据一起改：{text}"
+    );
+}
+
+#[test]
+fn 人亲手写下的中文叫法裁过了不再进队列() {
+    let mut 现场 = 建现场();
+    let 裁前 = 跑一遍(&mut 现场);
+    assert!(
+        队列里有(&裁前, "Gaia", "盖亚"),
+        "{:#?}",
+        裁前.queue_examples
+    );
+
+    // 人给盖亚写下一个中文叫法（详情面板上手写的那一栏落的就是这一行）：来源是**裁决**。
+    现场
+        .catalog
+        .put_titles(&[romcat_core::catalog::TitleRow {
+            work: "Gaia".to_string(),
+            value: "盖亚传奇".to_string(),
+            language: Language::Chinese,
+            kind: TitleKind::Translated,
+            source: romcat_core::scrape::priority::VERDICT.to_string(),
+            region: None,
+            variant_key: None,
+            confidence: romcat_core::catalog::Confidence::High,
+            seam: None,
+            evidence: "人说的".to_string(),
+            seen: 1,
+        }])
+        .expect("写得进");
+    let 裁后 =
+        title::run(&mut 现场.catalog, &现场.store, &Priorities::builtin()).expect("折得出标题");
+
+    assert_eq!(
+        挑(&现场, "Gaia").display,
+        "盖亚传奇",
+        "裁决排在选定规则的第一层"
+    );
+    assert!(
+        !裁后
+            .queue_examples
+            .iter()
+            .any(|example| example.work == "Gaia"),
+        "人裁过的不再进队列：{:#?}",
+        裁后.queue_examples
+    );
+    assert_eq!(裁后.queue_works, 裁前.queue_works - 1, "只少了盖亚这一部");
+    assert_eq!(
+        裁后.chinese_works, 裁前.chinese_works,
+        "出了队列不等于出了中文覆盖：它照旧是一部有中文叫法的作品"
+    );
+}
+
+#[test]
+fn 人肯定过的那一次模糊匹配带来的中文名裁过了不再进队列() {
+    let mut 现场 = 建现场();
+    放一份中文名的塞尔达(&mut 现场);
+    let index = 中文索引();
+    let 裁前 = 跑一遍带中文索引(&mut 现场, &index, &scrape::zh::Rulings::none());
+    assert!(
+        队列里有(&裁前, "Zelda", "塞尔达传说"),
+        "{:#?}",
+        裁前.queue_examples
+    );
+
+    // 人在中文离线源那一次匹配上说「就是这条」——`romcat zh judge --yes` 走的就是它。
+    // 肯定这一档一个字都不清；下一趟刮削时那条值的依据换成「由人工裁决确认过」。
+    scrape::zh::judge(
+        &mut 现场.catalog,
+        &mut 现场.store,
+        "库",
+        塞尔达变体,
+        塞尔达条目,
+        true,
+        None,
+    )
+    .expect("裁得下去");
+    let rulings = scrape::zh::Rulings::resolve(
+        &现场.catalog,
+        &verdict::MatchIndex::load(&现场.store, "库").expect("沉淀库读得出"),
+        fuzzy::SOURCE,
+    )
+    .expect("中立库读得出");
+    let 裁后 = 跑一遍带中文索引(&mut 现场, &index, &rulings);
+    assert!(
+        scrape::zh::matched_groups(&现场.catalog, 塞尔达变体)
+            .expect("读得出")
+            .iter()
+            .any(|group| group.confirmed),
+        "前提：重刮之后那一次匹配盖上了「人工裁决确认过」的章"
+    );
+
+    // **置信度一个字没改**：出队列靠的是「裁过」，不是给它调档。
+    assert_eq!(
+        模糊匹配那条(&现场).confidence,
+        romcat_core::catalog::Confidence::Medium
+    );
+    assert!(
+        !队列里有(&裁后, "Zelda", "塞尔达传说"),
+        "人肯定过的那一次匹配带来的中文名不再进队列：{:#?}",
+        裁后.queue_examples
+    );
+    assert_eq!(裁后.queue_works, 裁前.queue_works - 1, "只少了塞尔达这一部");
 }
 
 #[test]
@@ -561,6 +790,14 @@ fn 显示标题被裁成英文之后中文覆盖照旧算它() {
     assert_eq!(
         裁后.chinese_not_displayed, 1,
         "报告要自己说清这一个：中文叫法在集合里，只是没当上显示标题"
+    );
+    // 人裁的是**英文**显示标题，那条中文叫法**本身**照旧没人裁过——它仍在集合里、
+    // 详情面板上仍摆着它，所以照旧在待确认队列里（挂单 `Q711`）。
+    assert_eq!(裁后.queue_works, 裁前.queue_works);
+    assert!(
+        队列里有(&裁后, "Contra", "魂斗罗"),
+        "{:#?}",
+        裁后.queue_examples
     );
 
     // 报告要在那个数旁边说清它数的是什么，别让人自己去猜。
