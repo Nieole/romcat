@@ -130,7 +130,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::catalog::{Catalog, CatalogError};
+use crate::catalog::{Catalog, CatalogError, TitleRow};
 use crate::identify::fuzzy;
 use crate::identify::naming;
 use crate::verdict::{self, Anchor, MatchVerdict, VerdictError};
@@ -1140,7 +1140,7 @@ pub fn judge(
     let mut cleared_work = 0;
     let mut untitled = 0;
     if !accepted {
-        for source in [fuzzy::SOURCE, fuzzy::ALIAS_SOURCE] {
+        for source in MATCH_SOURCES {
             cleared += clear_source(catalog, AnchorKind::Variant, variant_key, source, entry)?;
         }
         if from_variant && let Some(work) = &work {
@@ -1271,7 +1271,7 @@ pub fn matched_groups(
     }
     for (kind, subject) in places {
         for value in catalog.scraped_values(kind.label(), &subject)? {
-            if value.source != fuzzy::SOURCE && value.source != fuzzy::ALIAS_SOURCE {
+            if !MATCH_SOURCES.contains(&value.source.as_str()) {
                 continue;
             }
             let (Some(entry), Some(field)) = (
@@ -1299,6 +1299,40 @@ pub fn matched_groups(
         }
     }
     Ok(by_entry.into_values().collect())
+}
+
+/// **中文离线源一次匹配产出叫法的那两路**：中文名与别名。一次裁决管的正是这两路
+/// （[`judge`] 否定时清的、[`matched_groups`] 归堆时认的都是它们）。
+const MATCH_SOURCES: [&str; 2] = [fuzzy::SOURCE, fuzzy::ALIAS_SOURCE];
+
+/// 标题集合里这一条叫法，是**人肯定过的那一次匹配**带来的吗（挂账 `D128`）。
+///
+/// 标题这一侧的待确认队列靠它把裁过的挡在外面（`title::report`）。认法与这个变体自己
+/// 那几次匹配的队列同一个——[`matched_groups`] 的 `confirmed`——不另认一遍：
+/// 这条值的依据此时写着「不再进待确认队列」，两处认法不同就各说一套。
+///
+/// 不是这两路产出的叫法、以及不挂在变体上的叫法一律是假，**一次库都不查**——
+/// 真库上中文叫法是万级。只问这一行记着的那个变体：同一串字被几个变体叫着时，
+/// 集合里只有一行（挂单 `Q712`）。
+///
+/// # Errors
+/// 读中立库失败时返回错误。
+pub fn affirmed_title(catalog: &Catalog, row: &TitleRow) -> Result<bool, CatalogError> {
+    if !MATCH_SOURCES.contains(&row.source.as_str()) {
+        return Ok(false);
+    }
+    let Some(variant) = row.variant_key.as_deref() else {
+        return Ok(false);
+    };
+    Ok(matched_groups(catalog, variant)?.iter().any(|group| {
+        group.confirmed
+            && group.values.iter().any(|value| {
+                value.kind == AnchorKind::Variant
+                    && value.field == Field::Title
+                    && value.source == row.source
+                    && value.value == row.value
+            })
+    }))
 }
 
 /// **中文离线源的别名那一路**：撞上的那条条目**还叫什么**。
