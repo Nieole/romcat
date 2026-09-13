@@ -644,6 +644,7 @@ fn export_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Produc
             out: setup.out.clone(),
             dry_run: false,
             force: false,
+            media: None,
         },
         task,
     )?;

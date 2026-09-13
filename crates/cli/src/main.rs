@@ -36,7 +36,7 @@ use romcat_core::shape;
 use romcat_core::site::{Site, SiteError};
 use romcat_core::sublibrary::{self, Sublibrary};
 use romcat_core::sync;
-use romcat_core::task::Handle;
+use romcat_core::task::{Ending, Handle};
 use romcat_core::title;
 use romcat_core::titledb;
 use romcat_core::triage::{self, Filter, Shape};
@@ -918,6 +918,14 @@ struct ExportArgs {
     #[arg(long)]
     force: bool,
 
+    /// 铺媒体：把媒体池里的封面、截图、视频照这个格式的布局铺进导出目录
+    ///
+    /// **默认不铺**：媒体池在工作目录里、主库多半在外置盘上，硬链接跨不过文件系统就只能
+    /// 整份复制，一趟几秒的导出会变成几十 GiB。同一块盘上走硬链接，不额外占空间；落点上
+    /// 已经有东西的一律不覆盖。先加 `--dry-run` 看要铺几份、多大；铺的时候 Ctrl-C 停在两份之间
+    #[arg(long)]
+    media: bool,
+
     /// 把报告另存为 JSON
     #[arg(long, value_name = "文件")]
     json: Option<PathBuf>,
@@ -1069,7 +1077,7 @@ fn main() -> ExitCode {
         Command::Scrape(args) => run_scrape(&args, &cancel),
         Command::Titles(args) => run_titles(&args),
         Command::Import(args) => run_import(&args),
-        Command::Export(args) => run_export(&args),
+        Command::Export(args) => run_export(&args, &cancel),
         Command::Adapters => run_adapters(),
         Command::Platforms(args) => run_platforms(&args),
         Command::Capability(args) => run_capability(&args),
@@ -2724,7 +2732,7 @@ fn run_import(args: &ImportArgs) -> ExitCode {
 }
 
 /// 把中立库导出成前端元数据。
-fn run_export(args: &ExportArgs) -> ExitCode {
+fn run_export(args: &ExportArgs, cancel: &CancelToken) -> ExitCode {
     let adapter = match args.format.load() {
         Ok(adapter) => adapter,
         Err(message) => return fail(message),
@@ -2784,11 +2792,30 @@ fn run_export(args: &ExportArgs) -> ExitCode {
         out: args.out.clone(),
         dry_run: args.dry_run,
         force: args.force,
+        // **铺媒体默认关着**（票 `one-criterion-per-thing/08`）。池只读、不建目录：
+        // `--dry-run` 那一趟说的是「一个文件都没写」。
+        media: args.media.then(|| {
+            romcat_core::scrape::pool::MediaPool::at(&workspace::media_pool_dir(&workspace))
+        }),
     };
-    let report = match transfer::export(&mut catalog, adapter.as_ref(), &priorities, &options) {
-        Ok(report) => report,
-        Err(error) => return fail(format!("导出没跑完：{error}")),
+    // **开着铺媒体才接 Ctrl-C**（接法与 `scan` 同一条：把手与 Ctrl-C 共用同一个中断信号）。
+    // 铺媒体可能是几十 GiB 的复制，按下 Ctrl-C 得停在两份之间，而不是等它铺完。不开时照旧
+    // 不接，那一趟的行为一字不变（挂单 `Q587`）。
+    let task = if args.media {
+        Handle::with_cancel(cancel.clone())
+    } else {
+        Handle::new()
     };
+    let report =
+        match transfer::export_task(&mut catalog, adapter.as_ref(), &priorities, &options, &task) {
+            Ok(report) => report,
+            // 一份都还没写就停下：什么都没留下。**收场那句话从 `Ending` 出**，不在这儿另写。
+            Err(transfer::ExportError::Halted(_)) => {
+                eprintln!("{}", Ending::<()>::Stopped.render());
+                return ExitCode::from(130);
+            }
+            Err(error) => return fail(format!("导出没跑完：{error}")),
+        };
     if !args.quiet {
         let text = report.render_text();
         let mut stdout = io::stdout().lock();
@@ -2802,10 +2829,52 @@ fn run_export(args: &ExportArgs) -> ExitCode {
         thousands(report.files.len() as u64),
         report.tier,
     );
+    if let Some(media) = report.media.as_ref().filter(|_| !args.dry_run) {
+        eprintln!(
+            "媒体铺出去 {} 份（硬链接 {}、复制 {}），落点上本来就有的 {} 份没重铺。",
+            thousands(media.placed()),
+            thousands(media.linked),
+            thousands(media.copied),
+            thousands(media.already),
+        );
+        if !media.occupied.is_empty() {
+            eprintln!(
+                "有 {} 份媒体的落点上已经有别的东西——**没有覆盖**，详见报告。",
+                thousands(media.occupied.len() as u64)
+            );
+        }
+    }
+    // **没走完却留下了东西**（人按了停下，或者铺媒体连着失败主动停了）：留下了什么由核心库
+    // 那一趟自己说（`Handle::halfway`），这儿只从收场那一档把它念出来。
+    let ending = Ending::of(Ok(()), &task);
+    if matches!(ending, Ending::Halfway { .. }) {
+        eprintln!("{}", ending.render());
+    }
+    if report.interrupted {
+        if !write_json(args.json.as_deref(), &report) {
+            return ExitCode::FAILURE;
+        }
+        // 130 是被 SIGINT 打断的惯例退出码（与 `scan` 同一个）。
+        return ExitCode::from(130);
+    }
     if !report.conflicts.is_empty() {
         eprintln!(
             "有 {} 份没写——外面有人动过。**没有静默覆盖**，详见报告。",
             thousands(report.conflicts.len() as u64)
+        );
+        if !write_json(args.json.as_deref(), &report) {
+            return ExitCode::FAILURE;
+        }
+        return ExitCode::FAILURE;
+    }
+    if let Some(media) = report
+        .media
+        .as_ref()
+        .filter(|media| media.gave_up || !media.failures.is_empty())
+    {
+        eprintln!(
+            "有 {} 份媒体没铺成，详见报告。",
+            thousands(media.failures.len() as u64)
         );
         if !write_json(args.json.as_deref(), &report) {
             return ExitCode::FAILURE;

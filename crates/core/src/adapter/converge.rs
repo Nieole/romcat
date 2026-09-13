@@ -214,6 +214,37 @@ pub fn safe_segment(collection: &str) -> String {
         .collect()
 }
 
+/// 把铺出来的**资源槽**填进条目：**取首选变体那一个的**。
+///
+/// 一个条目底下可能挂着好几个变体，而条目在前端里只有一张封面——取首选变体的，
+/// 与「默认启动首选变体」是同一个选择（ADR-0012）。首选变体是哪一个，读的是
+/// [`VARIANT_KEY`] 那一格（收敛时写进去的）。
+///
+/// **子库与导出走的是这同一处**（`sync::frontend::lay`、`transfer::export_task`）：
+/// 两边各填一遍的话，「封面取哪个变体的」迟早长出两个答案（ADR-0024、挂账 `D64`）。
+///
+/// `assets` 是 [`Laid::assets`](crate::sync::media::Laid) 那一份：变体的键 → 资源槽 →
+/// 相对路径。**靠文件名找媒体的格式这一份是空的**（ES-DE），于是一个字都不填。
+pub fn attach_assets(
+    doc: &mut Document,
+    assets: &BTreeMap<String, BTreeMap<&'static str, Vec<String>>>,
+) {
+    for entry in &mut doc.entries {
+        let Body::Game(game) = &mut entry.body else {
+            continue;
+        };
+        let Some(head) = game.extra.get(VARIANT_KEY).and_then(|keys| keys.first()) else {
+            continue;
+        };
+        let Some(slots) = assets.get(head) else {
+            continue;
+        };
+        for (slot, paths) in slots {
+            game.assets.insert((*slot).to_string(), paths.clone());
+        }
+    }
+}
+
 /// 把中立库收敛成一份份中立文档。
 ///
 /// **不碰主库、不联网**：要的东西全在中立库里躺着（ADR-0001）。

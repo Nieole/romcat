@@ -150,9 +150,258 @@ fn 导出(现场: &mut 现场) -> romcat_core::adapter::report::ExportReport {
             out,
             dry_run: false,
             force: false,
+            media: None,
         },
     )
     .expect("导得出来")
+}
+
+/// 往**媒体池**里塞一份媒体，挂到某个变体上。返回它的内容哈希。
+fn 收一份媒体(现场: &mut 现场, 变体: &str, kind: MediaKind, bytes: &[u8]) -> String {
+    let hash = romcat_core::catalog::frontend::hash_of(bytes);
+    写(&现场.pool.path_of(&hash, "png"), bytes);
+    现场
+        .catalog
+        .put_media(&hash, "png", bytes.len() as u64)
+        .expect("池里记得下");
+    现场
+        .catalog
+        .put_scraped(&[Harvested {
+            anchor: AnchorKind::Variant.label().to_string(),
+            subject: 变体.to_string(),
+            // 一个源在一个锚点上写两次是同一个结果，于是每份媒体各记一个源。
+            source: format!("本地媒体-{hash}"),
+            input: format!("{变体}/{hash}"),
+            values: Vec::new(),
+            media: vec![HarvestedMedia {
+                kind: kind.label().to_string(),
+                hash: hash.clone(),
+                evidence: "测试".to_string(),
+            }],
+        }])
+        .expect("引用写得进");
+    hash
+}
+
+/// 一棵目录树底下有哪些文件：相对树根的路径，`/` 分隔。
+fn 盘上的文件(dir: &Path) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&at) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let relative = path.strip_prefix(dir).expect("在树里");
+            out.insert(
+                relative
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/"),
+            );
+        }
+    }
+    out
+}
+
+#[test]
+fn 不开铺媒体时_导出目录里一个媒体文件都不多() {
+    // **默认关着**：媒体池在工作目录、主库多半在外置盘上，硬链接跨不过去，无条件铺的话
+    // 一趟几秒的导出会变成几十 GiB 的复制（票 `one-criterion-per-thing/08`）。
+    // 池里真有一份挂在台版上的封面，这一条才验得出「有也不铺」。
+    let mut 现场 = 建现场();
+    收一份媒体(
+        &mut 现场,
+        台版,
+        MediaKind::Cover,
+        b"\x89PNG-- fake cover --",
+    );
+    let 之前 = 盘上的文件(现场.out());
+
+    let report = 导出(&mut 现场);
+
+    let 多出来的: Vec<String> = 盘上的文件(现场.out()).difference(&之前).cloned().collect();
+    assert_eq!(
+        多出来的,
+        ["gamelists/FC/gamelist.xml", "gamelists/GB/gamelist.xml"],
+        "不开时多出来的只该是元数据文件"
+    );
+    assert!(report.media.is_none(), "{:?}", report.media);
+    let json = serde_json::to_string(&report).expect("序列化得了");
+    assert!(
+        !json.contains("\"media\""),
+        "不开时 `--json` 那一份一个键都不多：{json}"
+    );
+}
+
+/// 开着**铺媒体**导出一趟。
+fn 导出_铺媒体(现场: &mut 现场) -> romcat_core::adapter::report::ExportReport {
+    let out = 现场.out().to_path_buf();
+    let pool = 现场.pool.clone();
+    transfer::export(
+        &mut 现场.catalog,
+        &Gamelist,
+        &Priorities::builtin(),
+        &ExportOptions {
+            out,
+            dry_run: false,
+            force: false,
+            media: Some(pool),
+        },
+    )
+    .expect("导得出来")
+}
+
+#[test]
+fn 开了铺媒体_照前端自己的布局铺进_downloaded_media_条目里一个路径都不写() {
+    // ES-DE 靠**文件名**找媒体：路径镜像 ROM 相对平台目录的那一截，文件名是去掉扩展名的
+    // ROM 名（官方示例）。池按哈希存，于是非得照这个布局铺一份出去，前端才找得着。
+    let mut 现场 = 建现场();
+    let 封面 = b"\x89PNG-- fake cover --".to_vec();
+    收一份媒体(&mut 现场, 台版, MediaKind::Cover, &封面);
+    let 之前 = 盘上的文件(现场.out());
+
+    let report = 导出_铺媒体(&mut 现场);
+
+    let 多出来的: Vec<String> = 盘上的文件(现场.out()).difference(&之前).cloned().collect();
+    assert_eq!(
+        多出来的,
+        [
+            "downloaded_media/FC/covers/魂斗罗台版/魂斗罗.png",
+            "gamelists/FC/gamelist.xml",
+            "gamelists/GB/gamelist.xml",
+        ],
+    );
+    assert_eq!(
+        fs::read(
+            现场
+                .out()
+                .join("downloaded_media/FC/covers/魂斗罗台版/魂斗罗.png")
+        )
+        .expect("铺出去了"),
+        封面,
+        "铺出去的就是池里那一份",
+    );
+    let media = report.media.expect("开了铺媒体，报告里就有这一半的账");
+    assert_eq!(media.files, 1, "{media:?}");
+    assert_eq!(media.linked + media.copied, 1, "{media:?}");
+    // **条目里一个媒体路径都不写**：写进去既没用，又会在 ES-DE 重写这份文件时被清掉。
+    let text = fs::read_to_string(现场.包的落点()).expect("读得出");
+    assert!(!text.contains("<image>"), "{text}");
+    assert!(!text.contains("downloaded_media"), "{text}");
+}
+
+#[test]
+fn 铺媒体时同一块盘上走硬链接_不额外占空间() {
+    // ADR-0009：同卷且支持硬链接就链接（零额外占用），否则降级复制。主库与工作目录
+    // 都开在系统临时目录底下，是同一块盘，于是探出来必然是链接。
+    let mut 现场 = 建现场();
+    let 封面 = b"\x89PNG-- linked cover --".to_vec();
+    let hash = 收一份媒体(&mut 现场, 台版, MediaKind::Cover, &封面);
+
+    let report = 导出_铺媒体(&mut 现场);
+
+    let media = report.media.expect("开了铺媒体，报告里就有这一半的账");
+    assert_eq!(media.placement.as_deref(), Some("硬链接"), "{media:?}");
+    assert_eq!((media.linked, media.copied), (1, 0), "{media:?}");
+    let 铺出去的 = 现场
+        .out()
+        .join("downloaded_media/FC/covers/魂斗罗台版/魂斗罗.png");
+    assert_eq!(fs::read(&铺出去的).expect("铺出去了"), 封面);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            fs::metadata(&铺出去的).expect("读得到").ino(),
+            fs::metadata(现场.pool.path_of(&hash, "png"))
+                .expect("读得到")
+                .ino(),
+            "同一个 inode 才叫不额外占空间",
+        );
+    }
+}
+
+/// 两个目录在不在**两块盘**上：比它们所在文件系统的设备号。
+///
+/// 只有 Unix 上读得到设备号；别的平台一律答「不在」，那条测试如实跳过。
+fn 在两块盘上(甲: &Path, 乙: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (fs::metadata(甲), fs::metadata(乙)) {
+            (Ok(甲), Ok(乙)) => 甲.dev() != 乙.dev(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (甲, 乙);
+        false
+    }
+}
+
+#[test]
+fn 铺媒体时媒体池与导出目录不在一块盘上_降级复制() {
+    // 真实场景：媒体池在本机的工作目录里、主库在外置盘上，硬链接跨不过文件系统（ADR-0009）。
+    // 这里拿**构建目录**那块盘放媒体池、系统临时目录放主库。两者恰好在同一块盘上时
+    // （CI 的 Linux 就是单一文件系统）**造不出跨盘，如实跳过**——不拿替身假装跨了盘。
+    //
+    // 本机要带 `TMPDIR=<另一块卷>` 跑才造得出跨盘（门禁在本机就是这么跑的）。两支都印一行，
+    // 带 `--nocapture` 看得见这一趟到底验没验：通过的测试 libtest 不印它的输出。
+    let mut 现场 = 建现场();
+    let 池根 = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("gamelist-cross-disk-pool-{}", std::process::id()));
+    fs::create_dir_all(&池根).expect("建得出");
+    if !在两块盘上(&池根, 现场.out()) {
+        let _ = fs::remove_dir_all(&池根);
+        eprintln!(
+            "跳过：{} 与 {} 在同一块盘上，这台机器造不出跨盘，这一条什么都没验。",
+            池根.display(),
+            现场.out().display()
+        );
+        return;
+    }
+    eprintln!(
+        "跨了盘：媒体池 {} → 导出目录 {}，这一条验的是降级复制。",
+        池根.display(),
+        现场.out().display()
+    );
+    现场.pool = MediaPool::open(&池根).expect("池建得出");
+    let 封面 = b"\x89PNG-- copied cover --".to_vec();
+    let hash = 收一份媒体(&mut 现场, 台版, MediaKind::Cover, &封面);
+
+    let report = 导出_铺媒体(&mut 现场);
+
+    let 铺出去的 = 现场
+        .out()
+        .join("downloaded_media/FC/covers/魂斗罗台版/魂斗罗.png");
+    let 读回来 = fs::read(&铺出去的);
+    #[cfg(unix)]
+    let 同一个_inode = {
+        use std::os::unix::fs::MetadataExt;
+        match (
+            fs::metadata(&铺出去的),
+            fs::metadata(现场.pool.path_of(&hash, "png")),
+        ) {
+            (Ok(甲), Ok(乙)) => 甲.ino() == 乙.ino() && 甲.dev() == 乙.dev(),
+            _ => false,
+        }
+    };
+    // 先收拾构建目录那一份，再断言：断言炸了也不留垃圾。
+    let _ = fs::remove_dir_all(&池根);
+
+    let media = report.media.expect("开了铺媒体，报告里就有这一半的账");
+    assert_eq!(media.placement.as_deref(), Some("复制"), "{media:?}");
+    assert_eq!((media.linked, media.copied), (0, 1), "{media:?}");
+    assert_eq!(读回来.expect("铺出去了"), 封面);
+    #[cfg(unix)]
+    assert!(!同一个_inode, "跨了盘就不可能是同一个文件");
 }
 
 #[test]
@@ -581,4 +830,36 @@ fn 带逗号的公司名是一整条_读的那一侧不拆() {
             .identical,
         "写回去逐字节相同"
     );
+}
+
+#[test]
+fn 开着铺媒体时报的步数与声明的对得上() {
+    // 调用方照 `ExportOptions::task_steps` 声明总步数（界面上导出那一支要接它）：
+    // 开着铺媒体多走两步，照不开时的数声明，进度条就会走过头。
+    let mut 现场 = 建现场();
+    收一份媒体(&mut 现场, 台版, MediaKind::Cover, b"\x89PNG-- steps --");
+    let 不开 = ExportOptions {
+        out: 现场.out().to_path_buf(),
+        dry_run: false,
+        force: false,
+        media: None,
+    };
+    assert_eq!(不开.task_steps(), transfer::TASK_STEPS, "不开时一步都不多");
+    let 开着 = ExportOptions {
+        media: Some(现场.pool.clone()),
+        ..不开
+    };
+    let 把手 = Handle::new();
+    把手.steps(开着.task_steps());
+    transfer::export_task(
+        &mut 现场.catalog,
+        &Gamelist,
+        &Priorities::builtin(),
+        &开着,
+        &把手,
+    )
+    .expect("导得出来");
+    let 进度 = 把手.progress();
+    assert_eq!(进度.at, 开着.task_steps(), "走过的步数与声明的对不上");
+    assert_eq!(进度.step, "把媒体铺出去", "最后停在的那一步说错了");
 }

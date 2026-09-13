@@ -182,3 +182,104 @@ fn 干跑不写盘() {
     );
     let _ = dir;
 }
+
+/// 往工作目录里那份**媒体池**塞一份封面，并在中立库里把它挂到那个变体上。返回内容哈希。
+fn 塞一份封面(workspace: &Path, 变体: &str, 字节: &[u8]) -> String {
+    use romcat_core::catalog::Catalog;
+    use romcat_core::workspace::{self, Slug};
+
+    let hash = romcat_core::catalog::frontend::hash_of(字节);
+    let pool = romcat_core::scrape::pool::MediaPool::at(&workspace::media_pool_dir(workspace));
+    写(&pool.path_of(&hash, "png"), 字节);
+    let mut catalog = Catalog::open(&workspace::catalog_path(workspace, Slug::Named("测试库")))
+        .expect("开得了中立库");
+    挂上(&mut catalog, 变体, &hash, 字节.len() as u64);
+    hash
+}
+
+fn 挂上(catalog: &mut romcat_core::catalog::Catalog, 变体: &str, hash: &str, bytes: u64) {
+    use romcat_core::catalog::scrape::{Harvested, HarvestedMedia};
+    use romcat_core::scrape::{AnchorKind, MediaKind};
+
+    catalog.put_media(hash, "png", bytes).expect("池里记得下");
+    catalog
+        .put_scraped(&[Harvested {
+            anchor: AnchorKind::Variant.label().to_string(),
+            subject: 变体.to_string(),
+            source: "本地媒体".to_string(),
+            input: format!("{变体}/{hash}"),
+            values: Vec::new(),
+            media: vec![HarvestedMedia {
+                kind: MediaKind::Cover.label().to_string(),
+                hash: hash.to_string(),
+                evidence: "测试".to_string(),
+            }],
+        }])
+        .expect("引用写得进");
+}
+
+#[test]
+fn 导出加上铺媒体才铺_干跑先说要铺几份多大() {
+    // 票 `one-criterion-per-thing/08`：`--media` 默认关着。媒体池里塞一份挂在魂斗罗上的
+    // 封面，三趟各验一件：干跑说得出要付多少、不加开关一份都不铺、加上开关照 Pegasus 的
+    // 布局铺进 `media/`。
+    let (dir, workspace) = 现场();
+    let 封面 = b"\x89PNG-- cli cover --";
+    let hash = 塞一份封面(workspace.path(), "库/FC/魂斗罗.zip", 封面);
+    let out_dir = dir.path().to_string_lossy().into_owned();
+    let ws = workspace.path().to_string_lossy().into_owned();
+    let 导出 = |extra: &[&str]| {
+        let mut args = vec![
+            "export",
+            "--out",
+            out_dir.as_str(),
+            "--library",
+            "测试库",
+            "--workspace",
+            ws.as_str(),
+        ];
+        args.extend_from_slice(extra);
+        romcat(&args)
+    };
+
+    // 干跑：说得出要铺几份、多大，一份都不铺。
+    let out = 导出(&["--media", "--dry-run"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("1 份，共"),
+        "按下之前得说得出要铺几份、多大：{text}"
+    );
+    assert!(!dir.path().join("media").exists(), "`--dry-run` 一份都不铺");
+
+    // 不加开关：一份都不铺，报告里连这一节都没有。
+    let out = 导出(&[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!dir.path().join("media").exists(), "默认关着");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.contains("媒体池 → 媒体目录"), "{text}");
+
+    // 加上开关：照 Pegasus 的布局铺进 `media/`，条目里写着那条路径。
+    let out = 导出(&["--media"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let 落点 = format!("media/{}/{hash}.png", &hash[..2]);
+    assert_eq!(fs::read(dir.path().join(&落点)).expect("铺出去了"), 封面);
+    let 元数据 =
+        fs::read_to_string(dir.path().join("FC.metadata.pegasus.txt")).expect("元数据写出来了");
+    assert!(
+        元数据.contains(&format!("assets.boxFront: {落点}")),
+        "{元数据}"
+    );
+}

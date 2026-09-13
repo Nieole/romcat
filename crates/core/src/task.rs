@@ -442,6 +442,36 @@ impl<T> Ending<T> {
     }
 }
 
+impl<T> Ending<T> {
+    /// 一趟活交上来的结果折成**四档里的哪一档**。
+    ///
+    /// **任务台与命令行走的是同一处**：任务台收场时折一次（`Board` 的 `settle`）；命令行手里
+    /// 没有任务台，拿同一个把手、同一个结果来问，折出来的是同一档。「留下了什么」那句话只从
+    /// [`Handle::halfway`] 这一个侧信道来，外面够不着它，于是不会长出第二种折法（ADR-0024）。
+    ///
+    /// 判据是交上来的是**哪一支**，不是它说了什么（`settle` 里的注释说清了为什么）：
+    /// `Ok` 且报过没走完 → [`Ending::Halfway`]；`Ok` 没报过 → [`Ending::Done`]；
+    /// [`Cutoff::Halted`] → [`Ending::Stopped`]；[`Cutoff::Failed`] → [`Ending::Failed`]，
+    /// 停在哪一步从把手的进度上取。
+    #[must_use]
+    pub fn of(result: Result<T, Cutoff>, handle: &Handle) -> Self {
+        match result {
+            Ok(product) => match handle.left_behind() {
+                Some(left_behind) => Self::Halfway {
+                    product,
+                    left_behind,
+                },
+                None => Self::Done(product),
+            },
+            Err(Cutoff::Halted) => Self::Stopped,
+            Err(Cutoff::Failed(why)) => Self::Failed {
+                step: handle.progress().step,
+                why,
+            },
+        }
+    }
+}
+
 /// 任务台上的一条历史。
 #[derive(Debug, Clone)]
 pub struct Record {
@@ -736,20 +766,7 @@ impl<T: Send + 'static> Board<T> {
         // **交出了产物的那一趟还要再分一次**：报过「停在半路」（[`Handle::halfway`]）
         // 的走 [`Ending::Halfway`]，没报过的才是「跑完了」。写过东西的活被叫停时
         // 走的正是前者——它照旧交出产物（清单、断点），可这一趟只走了一半。
-        let ended = match result {
-            Ok(product) => match handle.left_behind() {
-                Some(left_behind) => Ending::Halfway {
-                    product,
-                    left_behind,
-                },
-                None => Ending::Done(product),
-            },
-            Err(Cutoff::Halted) => Ending::Stopped,
-            Err(Cutoff::Failed(why)) => Ending::Failed {
-                step: handle.progress().step,
-                why,
-            },
-        };
+        let ended = Ending::of(result, handle);
         self.history.insert(
             0,
             Record {

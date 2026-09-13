@@ -130,8 +130,8 @@
 //!
 //! **它不是什么**：
 //!
-//! - **不是一层通用的文件系统抽象。** 接缝只加在 [`run`] 对外那**一个**入口上，没有
-//!   下沉到每一次文件操作：写那一侧——建目录、落 `.romcat-part`、`sync_all`、
+//! - **不是一层通用的文件系统抽象。** 接缝只加在对外那两个入口上（[`run`] 与九里的
+//!   [`place_media`]），没有下沉到每一次文件操作：写那一侧——建目录、落 `.romcat-part`、`sync_all`、
 //!   `rename`、写完读回戳——照旧是 `std::fs`，一个字节都不经过它。真下沉下去，测试
 //!   就会在一份假的盘上验「原子改名」与「`sync_all` 不能省」，而那两条防的正是**真盘
 //!   上**的断电与拔卡（本模块第二节），在内存里验等于没验。
@@ -145,6 +145,15 @@
 //!   （挂单 `Q134`）。
 //! - **不注入就是真盘**：调用方给 [`RealFs`](crate::fs::RealFs) 就是原来那条路，
 //!   命令行与界面都这么给。
+//!
+//! ## 九、导出铺媒体走第二个入口，落地还是同一个
+//!
+//! [`place_media`] 是**导出**开着铺媒体时用的（票 `one-criterion-per-thing/08`）：没有计划、
+//! 没有清单，要放的就是 [`Sources::from_pool`] 里那几条落点——它们由适配器的布局折出来
+//! （`sync::media::lay_for`），于是第一节那句「不自己发明任何一次写入」在这儿照样成立：
+//! 路径不是执行这一层想出来的。每一份落地走的仍是 `place`，二、四、七、八那几条一条不少；
+//! 「连着失败就停」与 [`run`] 共用一个计数（`Streak`）。**没有清单证明「那是工具放的」，
+//! 于是落点上有东西一律不覆盖**——那是第一节「只碰清单里记录过的」在没有清单时的对应物。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Write};
@@ -188,6 +197,29 @@ const SEPARATOR: &str = std::path::MAIN_SEPARATOR_STR;
 /// 从前这条豁免认的是 [`io::ErrorKind::AlreadyExists`]，而 `create_dir_all` 撞上一个
 /// 同名文件报的正是那一种——于是上面那一格连计数都不涨，放弃机制永不触发。
 pub(super) const GIVE_UP_AFTER: u64 = 10;
+
+/// 「连着失败」那个计数（[`GIVE_UP_AFTER`]）。**同步与导出铺媒体共用这一份**：哪几种挡下来
+/// 算进来由 [`Refusal::counted`] 说，连着几次就停由这里说，两个入口不各数各的。
+#[derive(Debug, Default)]
+struct Streak(u64);
+
+impl Streak {
+    /// 这一步做成了：清零。
+    fn reset(&mut self) {
+        self.0 = 0;
+    }
+
+    /// 这一步被挡下或没做成：该算的算进来。返回「连着失败到头了，该停下」。
+    ///
+    /// 不算进来的那几种**也不清零**——清零会让真正的系统性故障被夹在中间的占用冲淡，
+    /// 而「连着」这个词说的正是不被冲淡。
+    fn refused(&mut self, refusal: &Refusal) -> bool {
+        if refusal.counted() {
+            self.0 += 1;
+        }
+        self.0 >= GIVE_UP_AFTER
+    }
+}
 
 /// 一份文件放到目标上的办法。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -380,28 +412,10 @@ pub fn run(
         }
     };
 
-    let mut out = Outcome {
-        sublibrary: plan.sublibrary.clone(),
-        target: plan.target.clone(),
-        added: Done::default(),
-        updated: Done::default(),
-        deleted: Done::default(),
-        placement,
-        linked: 0,
-        copied: 0,
-        failures: Vec::new(),
-        interrupted: false,
-        gave_up: false,
-        manifest: Manifest::empty(),
-        dropped: 0,
-        withheld: 0,
-        converted: Done::default(),
-        convert_cached: 0,
-        convert_ms: 0,
-    };
+    let mut out = Outcome::empty(plan.sublibrary.clone(), plan.target.clone(), placement);
     let mut done: BTreeMap<String, ManifestFile> = BTreeMap::new();
     let mut removed: BTreeSet<String> = BTreeSet::new();
-    let mut consecutive = 0_u64;
+    let mut streak = Streak::default();
     // 认出来的目录真名（[`settled`]）：一个平台目录只列一次。
     let mut dirs: BTreeMap<String, PathBuf> = BTreeMap::new();
 
@@ -423,13 +437,13 @@ pub fn run(
         };
         match outcome {
             Ok(None) => {
-                consecutive = 0;
+                streak.reset();
                 removed.insert(step.path.clone());
                 out.deleted.files += 1;
                 out.deleted.bytes += step.was;
             }
             Ok(Some((path, stamp, how))) => {
-                consecutive = 0;
+                streak.reset();
                 if step.convert.is_some() {
                     out.converted.files += 1;
                     out.converted.bytes += stamp.bytes;
@@ -459,15 +473,13 @@ pub fn run(
                 // （见 [`GIVE_UP_AFTER`]、[`Refusal::counted`]）。不算进来的那几种
                 // 也**不清零**——清零会让真正的系统性故障被夹在中间的占用冲淡，
                 // 而「连着」这个词说的正是不被冲淡。
-                if refusal.counted() {
-                    consecutive += 1;
-                }
+                let 到头了 = streak.refused(&refusal);
                 out.failures.push(Failure {
                     path: step.path.clone(),
                     act: step.act,
                     why: refusal.why(&step.path),
                 });
-                if consecutive >= GIVE_UP_AFTER {
+                if 到头了 {
                     out.gave_up = true;
                     break;
                 }
@@ -583,22 +595,8 @@ fn place(
                 .from_pool
                 .get(&step.path)
                 .ok_or_else(|| io::Error::other(format!("{} 在媒体池里找不到落点", step.path)))?;
-            match placement.unwrap_or(Placement::Copy) {
-                // 链接成不了就当场降级复制：探测说得中不等于每一份都成
-                // （目标上那一枝可能挂在别的卷上）。
-                Placement::Link => match std::fs::hard_link(from, &temp) {
-                    Ok(()) => Placement::Link,
-                    Err(_) => {
-                        let _ = std::fs::remove_file(&temp);
-                        copy_local(from, &temp, cancel)?;
-                        Placement::Copy
-                    }
-                },
-                Placement::Copy => {
-                    copy_local(from, &temp, cancel)?;
-                    Placement::Copy
-                }
-            }
+            // 链接成不了就当场降级复制（`link_or_copy`）。
+            link_or_copy(from, &temp, placement.unwrap_or(Placement::Copy), cancel)?
         }
         FileKind::Rom => {
             // **主库只读**：走那道没有写操作的接缝，而且**只复制不链接**（模块文档三）。
@@ -686,13 +684,7 @@ fn convert_into(
         out.convert_cached += 1;
     }
     // 缓存与目标同卷就链接（零额外占用），不同卷（卡就是不同卷）落回复制。
-    match std::fs::hard_link(&cached, temp) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            let _ = std::fs::remove_file(temp);
-            copy_local(&cached, temp, cancel)
-        }
-    }
+    link_or_copy(&cached, temp, Placement::Link, cancel).map(|_| ())
 }
 
 /// 一份转换产物在缓存里叫什么。
@@ -1246,4 +1238,220 @@ pub fn probe(from: &Path, to: &Path) -> Placement {
     let _ = std::fs::remove_file(&link);
     let _ = std::fs::remove_file(&source);
     placement
+}
+
+/// 把本机的一份现成文件放到临时文件上：**链接成不了就当场降级复制**（模块文档四）。
+///
+/// 探测说得中不等于每一份都成——目标上那一枝可能挂在别的卷上。媒体池那一段与
+/// 转换缓存那一段走的都是它。
+fn link_or_copy(
+    from: &Path,
+    temp: &Path,
+    placement: Placement,
+    cancel: &CancelToken,
+) -> io::Result<Placement> {
+    if placement == Placement::Link {
+        if std::fs::hard_link(from, temp).is_ok() {
+            return Ok(Placement::Link);
+        }
+        let _ = std::fs::remove_file(temp);
+    }
+    copy_local(from, temp, cancel)?;
+    Ok(Placement::Copy)
+}
+
+impl Outcome {
+    /// 一份空账：一步都还没做。
+    fn empty(sublibrary: String, target: String, placement: Option<Placement>) -> Self {
+        Self {
+            sublibrary,
+            target,
+            added: Done::default(),
+            updated: Done::default(),
+            deleted: Done::default(),
+            placement,
+            linked: 0,
+            copied: 0,
+            failures: Vec::new(),
+            interrupted: false,
+            gave_up: false,
+            manifest: Manifest::empty(),
+            dropped: 0,
+            withheld: 0,
+            converted: Done::default(),
+            convert_cached: 0,
+            convert_ms: 0,
+        }
+    }
+}
+
+/// 一批媒体放完之后的账（[`place_media`]）。
+#[derive(Debug, Clone, Default)]
+pub struct Placed {
+    /// 探测出来的办法；一份都没去放（没有要放的，或者一开始就被叫停）时是 `None`。
+    pub placement: Option<Placement>,
+    /// 用硬链接放上去的有几份。
+    pub linked: u64,
+    /// 复制过去的有几份。
+    pub copied: u64,
+    /// 落点上已经有一份**大小与池里那份对得上**的：没重放。
+    pub already: u64,
+    /// 落点上有东西、**大小对不上**：没覆盖。`(落点的键, 盘上那条路径)`。
+    pub occupied: Vec<(String, PathBuf)>,
+    /// 没放成的。
+    pub failures: Vec<Failure>,
+    /// 被叫停了。
+    pub interrupted: bool,
+    /// 连着失败太多次，主动停了。
+    pub gave_up: bool,
+}
+
+impl Placed {
+    /// 真放上去了几份：链接的加复制的。
+    #[must_use]
+    pub fn placed(&self) -> u64 {
+        self.linked + self.copied
+    }
+}
+
+/// 往目标上**新增**一批**媒体池**里的文件——不排计划、不记清单。**导出**开着铺媒体时
+/// 走的就是它（票 `one-criterion-per-thing/08`、挂账 `D64`）。
+///
+/// ## 每一份落地的规矩与 [`run`] 是同一份
+///
+/// 一份一份放，走的是 [`run`] 里那同一个落地函数：那道落点闸（模块文档七、八）、
+/// 先落 `.romcat-part` 再改名（二）、同卷硬链接失败就降级复制（四）、复制时逐块看
+/// 中断信号；连着失败太多次就停，算不算、几次停与 [`run`] 共用一个计数（`Streak`）。
+/// **这几条规矩只有一份实现**
+/// （ADR-0024）——导出从前交空表，挡着它的正是「落文件那条路是同步执行器自己写的」，
+/// 解法是接上这一条，不是另写一条。
+///
+/// ## 与 [`run`] 不同的只有「没有清单」
+///
+/// - **落点上已经有东西就不放，也不算失败**：大小与池里那份对得上的记进
+///   [`Placed::already`]（上一趟铺过的），对不上的记进 [`Placed::occupied`]。没有清单
+///   证明得了「那是工具放的」，于是**一律不覆盖**——代价是池里换了一张新图而落点名字
+///   不变时（ES-DE 按 ROM 名铺），那一格要人自己挪开。
+/// - **进度只报 [`Handle::tick`]，不换步、不报「没走完」**：这一趟有几步、收场那句话
+///   怎么说，归调用方（导出那一趟的步数与收场在 `transfer::export_task`）。
+///
+/// **探硬链接探的是媒体目录本身**（落点的第一段），不是目标根：导出目录就是主库根，
+/// 工具在那儿只许写元数据文件与媒体目录（ADR-0004），探测文件也不例外——落点的键里没有
+/// 目录段、说不出媒体目录在哪时就不探，一律复制。
+///
+/// # Errors
+/// 目标根建不出来时返回错误。单个文件放不上去**不是错误**：记进 [`Placed::failures`]。
+pub fn place_media(sources: &Sources<'_>, task: &Handle) -> io::Result<Placed> {
+    let mut out = Placed::default();
+    let Some(first) = sources.from_pool.keys().next() else {
+        return Ok(out);
+    };
+    // **一个字节都没写之前先看一眼有没有被叫停**（与 [`run`] 同一条）：建目标根、
+    // 探硬链接都在盘上留痕。
+    if task.check().is_err() {
+        out.interrupted = true;
+        return Ok(out);
+    }
+    std::fs::create_dir_all(sources.target_root)?;
+    // 落点的键里没有目录段时不探：探测文件会落在目标根上，而导出目录就是主库根。
+    let placement = match (
+        sources.link_probe_dir,
+        media_dir_of(sources.target_root, first),
+    ) {
+        (Some(from), Some(dir)) => match std::fs::create_dir_all(&dir) {
+            Ok(()) => probe(from, &dir),
+            // 建不出来就不探了：每一份照旧过那道闸，闸会说清是谁挡着。
+            Err(_) => Placement::Copy,
+        },
+        _ => Placement::Copy,
+    };
+    out.placement = Some(placement);
+
+    let cancel = task.cancel();
+    let total = sources.from_pool.len() as u64;
+    let mut dirs: BTreeMap<String, PathBuf> = BTreeMap::new();
+    // `place` 只在转格式的 ROM 那一步往这份账上记（转了几份、花了多久）；媒体不转，
+    // 这一份一格都不会被写，只是凑它的签名。
+    let mut 转格式的账 = Outcome::empty(String::new(), String::new(), Some(placement));
+    let mut streak = Streak::default();
+    for (done, (key, from)) in sources.from_pool.iter().enumerate() {
+        task.tick(done as u64, total);
+        // **停下来的地方永远在两份之间**：这一份一件事都还没做。
+        if task.check().is_err() {
+            out.interrupted = true;
+            break;
+        }
+        // `place` 认的是一条步骤：落点就是适配器折出来的那条键，别的格子媒体用不上。
+        let step = Step {
+            act: Act::Add,
+            path: key.clone(),
+            kind: FileKind::Media,
+            bytes: 0,
+            was: 0,
+            source: String::new(),
+            source_stamp: Stamp {
+                bytes: 0,
+                mtime_ns: None,
+            },
+            variant: String::new(),
+            restore: false,
+            convert: None,
+        };
+        match place(
+            sources,
+            &mut dirs,
+            &step,
+            Some(placement),
+            cancel,
+            &mut 转格式的账,
+        ) {
+            Ok((_, _, how)) => {
+                streak.reset();
+                match how {
+                    Placement::Link => out.linked += 1,
+                    Placement::Copy => out.copied += 1,
+                }
+            }
+            // **落点被占不算失败、不进计数**（与 [`run`] 同一条）。大小对得上的是上一趟
+            // 铺过的那一份，对不上的是别人放的——两种都不覆盖，只是账分开记。
+            Err(Refusal::Occupied(at)) => {
+                let same = match (std::fs::metadata(&at), std::fs::metadata(from)) {
+                    (Ok(there), Ok(pooled)) => there.len() == pooled.len(),
+                    _ => false,
+                };
+                if same {
+                    out.already += 1;
+                } else {
+                    out.occupied.push((key.clone(), at));
+                }
+            }
+            Err(Refusal::Failed(error)) if error.kind() == io::ErrorKind::Interrupted => {
+                // 复制到一半收到中断：临时文件已经清掉了，落点上什么都没多。
+                out.interrupted = true;
+                break;
+            }
+            Err(refusal) => {
+                let 到头了 = streak.refused(&refusal);
+                out.failures.push(Failure {
+                    path: key.clone(),
+                    act: Act::Add,
+                    why: refusal.why(key),
+                });
+                if 到头了 {
+                    out.gave_up = true;
+                    break;
+                }
+            }
+        }
+    }
+    if !out.interrupted && !out.gave_up {
+        task.tick(total, total);
+    }
+    Ok(out)
+}
+
+/// 一份落点的**媒体目录**：键的第一段（Pegasus 的 `media`、ES-DE 的 `downloaded_media`）。
+/// 键里没有目录段时是 `None`——说不出媒体目录在哪，也就不在目标根上探。
+fn media_dir_of(root: &Path, key: &str) -> Option<PathBuf> {
+    key.split_once('/').map(|(top, _)| root.join(top))
 }

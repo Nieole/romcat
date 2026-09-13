@@ -27,8 +27,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::adapter::converge::{self, VARIANT_KEY};
-use crate::adapter::{Adapter, AdapterError, Body};
+use crate::adapter::converge;
+use crate::adapter::{Adapter, AdapterError};
 use crate::catalog::{Catalog, CatalogError, frontend::hash_of};
 use crate::scrape::priority::Priorities;
 use crate::sublibrary::Selected;
@@ -95,21 +95,8 @@ pub fn lay(
     };
     for file in &converged.files {
         let mut doc = file.doc.clone();
-        for entry in &mut doc.entries {
-            let Body::Game(game) = &mut entry.body else {
-                continue;
-            };
-            // 首选变体写在 `x-romcat-variant` 里（`converge::build_game`）。
-            let Some(head) = game.extra.get(VARIANT_KEY).and_then(|keys| keys.first()) else {
-                continue;
-            };
-            let Some(slots) = assets.get(head) else {
-                continue;
-            };
-            for (slot, paths) in slots {
-                game.assets.insert((*slot).to_string(), paths.clone());
-            }
-        }
+        // 资源槽取首选变体那一个的——导出那一侧走的是同一处（`converge::attach_assets`）。
+        converge::attach_assets(&mut doc, assets);
         // **不给基线**：子库里那份元数据是工具自己生成的，没有维护者手写的原文要保。
         // 目标上已经有一份而且不是我们放的那一份时，计划器那一侧会把它报成
         // 「落点被占」或者「被改过」，一个字节都不会覆盖过去（ADR-0015）。

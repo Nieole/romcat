@@ -267,6 +267,7 @@ fn 导出(现场: &mut 现场, force: bool) -> romcat_core::adapter::report::Exp
             out,
             dry_run: false,
             force,
+            media: None,
         },
     )
     .expect("导得出来")
@@ -274,6 +275,426 @@ fn 导出(现场: &mut 现场, force: bool) -> romcat_core::adapter::report::Exp
 
 fn 读出(现场: &现场, name: &str) -> String {
     fs::read_to_string(现场.out().join(name)).expect("读得出导出来的文件")
+}
+
+impl 现场 {
+    /// **媒体池**。刮削那一趟收媒体用的也是这个目录。
+    fn 池(&self) -> romcat_core::scrape::pool::MediaPool {
+        romcat_core::scrape::pool::MediaPool::open(self._pool.path()).expect("池建得出")
+    }
+}
+
+/// 往**媒体池**里塞一份媒体，挂到某个变体上。返回它的内容哈希。
+fn 收一份媒体(
+    现场: &mut 现场,
+    变体: &str,
+    kind: romcat_core::scrape::MediaKind,
+    bytes: &[u8],
+) -> String {
+    use romcat_core::catalog::scrape::{Harvested, HarvestedMedia};
+    let hash = romcat_core::catalog::frontend::hash_of(bytes);
+    写(&现场.池().path_of(&hash, "png"), bytes);
+    现场
+        .catalog
+        .put_media(&hash, "png", bytes.len() as u64)
+        .expect("池里记得下");
+    现场
+        .catalog
+        .put_scraped(&[Harvested {
+            anchor: romcat_core::scrape::AnchorKind::Variant.label().to_string(),
+            subject: 变体.to_string(),
+            // 一个源在一个锚点上写两次是同一个结果，于是每份媒体各记一个源。
+            source: format!("本地媒体-{hash}"),
+            input: format!("{变体}/{hash}"),
+            values: Vec::new(),
+            media: vec![HarvestedMedia {
+                kind: kind.label().to_string(),
+                hash: hash.clone(),
+                evidence: "测试".to_string(),
+            }],
+        }])
+        .expect("引用写得进");
+    hash
+}
+
+/// 一棵目录树底下有哪些文件：相对树根的路径，`/` 分隔。
+fn 盘上的文件(dir: &Path) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&at) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let relative = path.strip_prefix(dir).expect("在树里");
+            out.insert(
+                relative
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/"),
+            );
+        }
+    }
+    out
+}
+
+#[test]
+fn 不开铺媒体时_主库里一个媒体文件都不多() {
+    // **默认关着**（票 `one-criterion-per-thing/08`）。导出目录就是主库根，
+    // 池里真有一份挂在塞尔达上的封面，这一条才验得出「有也不铺」。
+    let mut 现场 = 建现场();
+    收一份媒体(
+        &mut 现场,
+        塞尔达,
+        romcat_core::scrape::MediaKind::Cover,
+        b"\x89PNG-- zelda cover --",
+    );
+    let 之前 = 盘上的文件(现场.out());
+
+    let report = 导出(&mut 现场, false);
+
+    let 多出来的: Vec<String> = 盘上的文件(现场.out()).difference(&之前).cloned().collect();
+    assert_eq!(
+        多出来的,
+        ["FC.metadata.pegasus.txt"],
+        "不开时多出来的只该是元数据文件"
+    );
+    assert!(report.media.is_none(), "{:?}", report.media);
+    let 元数据 = 读出(&现场, "FC.metadata.pegasus.txt");
+    assert!(
+        !元数据.contains("assets."),
+        "不铺就一个资源槽都不写：{元数据}"
+    );
+}
+
+/// 开着**铺媒体**导出一趟。
+fn 导出_铺媒体(现场: &mut 现场) -> romcat_core::adapter::report::ExportReport {
+    let out = 现场.out().to_path_buf();
+    let pool = 现场.池();
+    transfer::export(
+        &mut 现场.catalog,
+        &Pegasus,
+        &Priorities::builtin(),
+        &ExportOptions {
+            out,
+            dry_run: false,
+            force: false,
+            media: Some(pool),
+        },
+    )
+    .expect("导得出来")
+}
+
+#[test]
+fn 开了铺媒体_按内容寻址铺进_media_而且条目里写着那条路径() {
+    // Pegasus 是**内容寻址**：`media/<哈希前两位>/<哈希>.<扩展名>`，前端靠条目里写死的
+    // `assets.*` 找图。维护者直接拿 Pegasus 读主库时看得见封面，靠的就是这两样都在。
+    let mut 现场 = 建现场();
+    let 封面 = b"\x89PNG-- zelda cover --".to_vec();
+    let hash = 收一份媒体(
+        &mut 现场,
+        塞尔达,
+        romcat_core::scrape::MediaKind::Cover,
+        &封面,
+    );
+    let 之前 = 盘上的文件(现场.out());
+
+    let report = 导出_铺媒体(&mut 现场);
+
+    let 落点 = format!("media/{}/{hash}.png", &hash[..2]);
+    let 多出来的: Vec<String> = 盘上的文件(现场.out()).difference(&之前).cloned().collect();
+    assert_eq!(
+        多出来的,
+        ["FC.metadata.pegasus.txt".to_string(), 落点.clone()]
+    );
+    assert_eq!(
+        fs::read(现场.out().join(&落点)).expect("铺出去了"),
+        封面,
+        "铺出去的就是池里那一份",
+    );
+    let media = report.media.expect("开了铺媒体，报告里就有这一半的账");
+    assert_eq!(media.files, 1, "{media:?}");
+    assert_eq!(media.linked + media.copied, 1, "{media:?}");
+    let 元数据 = 读出(&现场, "FC.metadata.pegasus.txt");
+    assert!(
+        元数据.contains(&format!("assets.boxFront: {落点}")),
+        "塞尔达那一条得写着封面在哪：{元数据}"
+    );
+}
+
+/// 一份照 Pegasus 写、**写出元数据就替人按下「停下」**的适配器。
+///
+/// 这份 fixture 只收敛出一份元数据文件（FC；街机那个 BIOS 成不了条目），于是停下的信号
+/// 正好落在「元数据写完、媒体一份都还没铺」那道缝上——不靠挂钟去抢那一下（挂单 `Q196`）。
+/// 它自己一个判断都不做，只转发给 [`Pegasus`]。
+struct 写出元数据就按停<'a> {
+    task: &'a Handle,
+}
+
+impl Adapter for 写出元数据就按停<'_> {
+    fn name(&self) -> &'static str {
+        Pegasus.name()
+    }
+    fn ceiling(&self) -> Capability {
+        Pegasus.ceiling()
+    }
+    fn file_name(&self) -> &'static str {
+        Pegasus.file_name()
+    }
+    fn read(
+        &self,
+        bytes: &[u8],
+    ) -> Result<romcat_core::adapter::Parsed, romcat_core::adapter::AdapterError> {
+        Pegasus.read(bytes)
+    }
+    fn write(
+        &self,
+        doc: &romcat_core::adapter::Document,
+        baseline: Option<&romcat_core::adapter::Parsed>,
+    ) -> Result<Vec<u8>, romcat_core::adapter::AdapterError> {
+        self.task.stop();
+        Pegasus.write(doc, baseline)
+    }
+    fn media_placement(
+        &self,
+        rom_key: &str,
+        kind: romcat_core::scrape::MediaKind,
+        hash: &str,
+        ext: &str,
+    ) -> Option<romcat_core::adapter::MediaPlacement> {
+        Pegasus.media_placement(rom_key, kind, hash, ext)
+    }
+}
+
+#[test]
+fn 元数据写完媒体还没铺就按停_记的是没走完而且说得出媒体一份都还没铺() {
+    // 媒体排在元数据后面铺：元数据几秒就写完，媒体可能是几十 GiB 的复制。停在这道缝上，
+    // 元数据那一份**真的躺在盘上**，于是这一趟是「没走完却留下了东西」，而那句话得说清
+    // 媒体一份都还没铺、一共几份——人才知道再跑一次要付多少。
+    let mut 现场 = 建现场();
+    收一份媒体(
+        &mut 现场,
+        塞尔达,
+        romcat_core::scrape::MediaKind::Cover,
+        b"\x89PNG-- zelda cover --",
+    );
+    let pool = 现场.池();
+    let out = 现场.out().to_path_buf();
+
+    let ended = {
+        let mut board: romcat_core::task::Board<romcat_core::adapter::report::ExportReport> =
+            romcat_core::task::Board::new();
+        board.run_here("导出", |task| {
+            transfer::export_task(
+                &mut 现场.catalog,
+                &写出元数据就按停 { task },
+                &Priorities::builtin(),
+                &ExportOptions {
+                    out: out.clone(),
+                    dry_run: false,
+                    force: false,
+                    media: Some(pool.clone()),
+                },
+                task,
+            )
+            .map_err(romcat_core::task::Cutoff::from)
+        });
+        board.poll().expect("就地跑就是当场跑完").ended
+    };
+
+    let romcat_core::task::Ending::Halfway {
+        product: report,
+        left_behind,
+    } = ended
+    else {
+        panic!("元数据写完之后按停，台上却没记成没走完：{ended:?}");
+    };
+    assert!(report.interrupted, "被按停了却没记上");
+    assert!(
+        out.join("FC.metadata.pegasus.txt").is_file(),
+        "写完的元数据留在盘上"
+    );
+    assert!(!out.join("media").exists(), "媒体一份都还没铺");
+    let media = report.media.expect("开了铺媒体，报告里就有这一半的账");
+    assert_eq!(
+        (media.files, media.linked + media.copied),
+        (1, 0),
+        "{media:?}"
+    );
+    assert!(
+        left_behind.contains("元数据文件写出去 1 份（共 1 份）"),
+        "那一句没说清元数据写了几份：{left_behind}"
+    );
+    assert!(
+        left_behind.contains("媒体一份都还没铺（共 1 份）"),
+        "那一句没说清媒体铺到哪儿了：{left_behind}"
+    );
+    // **没打时刻戳**：没走完说不上「导过了」。
+    assert_eq!(现场.catalog.exported_at().expect("读得出"), None);
+}
+
+#[test]
+fn 铺媒体连着没铺成主动停了_记的是没走完而且说得出铺到第几份() {
+    // 活自己收的手与人按的停下是同一档收场：没走完、却留下了东西（词表**部分完成**）。
+    // 这一条走 `export_task` 整条路：铺出去的那一份留在盘上，收场那句话说得出铺到第几份、
+    // 一共几份。
+    //
+    // 让它**确定地**连着失败，不靠挂钟：Pegasus 按内容寻址铺（`media/<哈希前两位>/…`），
+    // 把排在后面那几份的 `media/<前两位>` 先占成一个**文件**——那一枝的目录建不出来，
+    // 每一份都以同一句话失败，正是「连着失败太多次」要认出来的那一类。
+    let mut 现场 = 建现场();
+    let mut 按前缀: std::collections::BTreeMap<String, Vec<u8>> = std::collections::BTreeMap::new();
+    let mut n = 0;
+    while 按前缀.len() < 12 {
+        let 字节 = format!("screenshot-{n}").into_bytes();
+        n += 1;
+        let hash = romcat_core::catalog::frontend::hash_of(&字节);
+        按前缀.entry(hash[..2].to_string()).or_insert(字节);
+    }
+    for 字节 in 按前缀.values() {
+        收一份媒体(
+            &mut 现场,
+            塞尔达,
+            romcat_core::scrape::MediaKind::Screenshot,
+            字节,
+        );
+    }
+    let mut 前缀们 = 按前缀.keys();
+    let 第一份 = 前缀们.next().expect("有第一份").clone();
+    for 前缀 in 前缀们 {
+        写(&现场.out().join("media").join(前缀), b"not a directory");
+    }
+    let pool = 现场.池();
+    let out = 现场.out().to_path_buf();
+
+    let ended = {
+        let mut board: romcat_core::task::Board<romcat_core::adapter::report::ExportReport> =
+            romcat_core::task::Board::new();
+        board.run_here("导出", |task| {
+            transfer::export_task(
+                &mut 现场.catalog,
+                &Pegasus,
+                &Priorities::builtin(),
+                &ExportOptions {
+                    out: out.clone(),
+                    dry_run: false,
+                    force: false,
+                    media: Some(pool.clone()),
+                },
+                task,
+            )
+            .map_err(romcat_core::task::Cutoff::from)
+        });
+        board.poll().expect("就地跑就是当场跑完").ended
+    };
+
+    let romcat_core::task::Ending::Halfway {
+        product: report,
+        left_behind,
+    } = ended
+    else {
+        panic!("铺媒体连着失败主动停了，台上却没记成没走完：{ended:?}");
+    };
+    assert!(!report.interrupted, "没人按停下");
+    let media = report.media.expect("开了铺媒体，报告里就有这一半的账");
+    assert!(media.gave_up, "{media:?}");
+    assert_eq!(media.linked + media.copied, 1, "{media:?}");
+    assert!(
+        out.join("media").join(&第一份).is_dir(),
+        "铺出去的那一份留在盘上"
+    );
+    assert!(
+        left_behind.contains("媒体铺到第 11 份（共 12 份）"),
+        "那一句没说清铺到第几份：{left_behind}"
+    );
+    assert!(
+        left_behind.contains("主动停了"),
+        "那一句没说清为什么收的手：{left_behind}"
+    );
+    // **没打时刻戳**：没走完说不上「导过了」。
+    assert_eq!(现场.catalog.exported_at().expect("读得出"), None);
+}
+
+/// 一棵目录树底下每个文件的字节、修改时间与链接数。
+fn 每个文件(
+    dir: &Path,
+) -> std::collections::BTreeMap<String, (Vec<u8>, std::time::SystemTime, u64)> {
+    盘上的文件(dir)
+        .into_iter()
+        .map(|path| {
+            let at = dir.join(&path);
+            let meta = fs::metadata(&at).expect("读得到");
+            #[cfg(unix)]
+            let links = {
+                use std::os::unix::fs::MetadataExt;
+                meta.nlink()
+            };
+            #[cfg(not(unix))]
+            let links = 1;
+            let bytes = fs::read(&at).expect("读得出");
+            (path, (bytes, meta.modified().expect("有修改时间"), links))
+        })
+        .collect()
+}
+
+#[test]
+fn 铺媒体只写进媒体目录_主库里的_rom_一个字节都没动() {
+    // ADR-0004：工具只写元数据文件、媒体目录与子库。导出目录就是主库根，于是逐个文件对：
+    // 原来就在的那些，字节、修改时间、链接数一样不差（链接数防的是拿主库里的文件当
+    // 硬链接的源）；多出来的只许是元数据文件与 `media/` 底下的。
+    let mut 现场 = 建现场();
+    收一份媒体(
+        &mut 现场,
+        塞尔达,
+        romcat_core::scrape::MediaKind::Cover,
+        b"\x89PNG-- zelda cover --",
+    );
+    收一份媒体(
+        &mut 现场,
+        台版变体,
+        romcat_core::scrape::MediaKind::Screenshot,
+        b"\x89PNG-- contra screenshot --",
+    );
+    let 之前 = 每个文件(现场.out());
+    assert!(
+        之前.keys().filter(|path| path.ends_with(".zip")).count() >= 6,
+        "主库里得真有 ROM：{:?}",
+        之前.keys()
+    );
+
+    let report = 导出_铺媒体(&mut 现场);
+
+    let 之后 = 每个文件(现场.out());
+    for (path, 原样) in &之前 {
+        assert!(之后.get(path) == Some(原样), "{path} 被动过了");
+    }
+    let 多出来的: Vec<&String> = 之后
+        .keys()
+        .filter(|path| !之前.contains_key(*path))
+        .collect();
+    for path in &多出来的 {
+        assert!(
+            path.starts_with("media/")
+                || (!path.contains('/') && path.ends_with(".metadata.pegasus.txt")),
+            "{path} 落在媒体目录与元数据文件之外"
+        );
+    }
+    assert_eq!(
+        多出来的
+            .iter()
+            .filter(|path| path.starts_with("media/"))
+            .count(),
+        2,
+        "{多出来的:?}"
+    );
+    let media = report.media.expect("开了铺媒体，报告里就有这一半的账");
+    assert_eq!(media.linked + media.copied, 2, "{media:?}");
 }
 
 /// 一份**照维护者手工维护的样子**写的元数据：注释、未知键、`x-` 扩展键、
