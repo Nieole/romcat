@@ -39,3 +39,5 @@
 - [x] 价目表在界面这条路上一处都没读；零价不会被印到任何人眼前
   - 证据：`grep -rn Pricing crates/gui/src` 零处；单元测试断言价钱是零、核实日期是空的。在 `界面上那一趟一个请求都不发_…_零价不上屏` 里，没问过的那个变体让核心库照零价算了一份计划，屏上一处「美元」都没有。回执只数候选，不提计划与花费。
   - 保留：「屏上没有美元」那一句改动之前也是绿的，界面源码里本来就一处都不画计划与花费。它是护栏，防的是日后有人把那份零价计划画上屏，不是这张票改出来的。
+
+**门禁（`a7c3da1`，2026-09-14）：** `TMPDIR=/Users/nicoer/dev/game-wt/cs/tmp cargo xtask gate -j 3 --test-threads 3 --keep-going` 六条全绿：fmt 1s、glossary 0s、check 12s、clippy 16s、test 368s（73 个测试结果行合计 1,983 passed、0 failed、2 ignored）、doc 5s。日志 `/Users/nicoer/dev/game-wt/logs/slot-4-ga02-gate.log`，`EXIT=0`。
