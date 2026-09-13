@@ -207,21 +207,37 @@ pub fn 小库(
 /// 按画出来的次序找**头一处**：同一句话在屏上出现不止一次时，取的是先画的那一处。
 #[must_use]
 pub fn 那一段画在哪儿(output: &egui::FullOutput, 那一段: &str) -> Option<egui::Pos2> {
-    fn 找(shape: &egui::epaint::Shape, 那一段: &str) -> Option<egui::Pos2> {
+    头一处画在哪儿(output, &|text| text.contains(那一段))
+}
+
+/// 屏上**正好**写着这一段字的地方：整段一字不差，不是「含有」。
+///
+/// 按钮上的字常常是别的句子里的一截——裁决记录里那颗「撤销」，也在那一块开头那句
+/// 「撤销一批，那些变体……」里；按 [`那一段画在哪儿`] 找，点到的是先画出来的那句话。
+#[must_use]
+pub fn 正好那一段画在哪儿(
+    output: &egui::FullOutput, 那一段: &str
+) -> Option<egui::Pos2> {
+    头一处画在哪儿(output, &|text| text == 那一段)
+}
+
+/// 按画出来的次序，头一段认得下的字画在哪儿（中心点）。
+fn 头一处画在哪儿(
+    output: &egui::FullOutput,
+    认: &dyn Fn(&str) -> bool,
+) -> Option<egui::Pos2> {
+    fn 找(shape: &egui::epaint::Shape, 认: &dyn Fn(&str) -> bool) -> Option<egui::Pos2> {
         match shape {
-            egui::epaint::Shape::Text(text) => text
-                .galley
-                .text()
-                .contains(那一段)
+            egui::epaint::Shape::Text(text) => 认(text.galley.text())
                 .then(|| egui::Rect::from_min_size(text.pos, text.galley.size()).center()),
-            egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(|one| 找(one, 那一段)),
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(|one| 找(one, 认)),
             _ => None,
         }
     }
     output
         .shapes
         .iter()
-        .find_map(|clipped| 找(&clipped.shape, 那一段))
+        .find_map(|clipped| 找(&clipped.shape, 认))
 }
 
 /// 指针不动地再跑这么多帧，够 egui 那道悬停延迟跨过去。

@@ -8,6 +8,7 @@
 
 use egui::widgets::text_edit::TextEditState;
 use romcat_core::catalog::State;
+use romcat_core::report::{human_time, thousands};
 use romcat_core::scrape::AnchorKind;
 use romcat_core::scrape::zh::{judge, matched_groups};
 use romcat_core::triage::{self, Axis, Draft, Filter, ItemOrder, Overrides, Scope, Shape};
@@ -1674,9 +1675,15 @@ fn 逐条流按_u_无可撤时说清楚而不是一声不吭() {
     按(&ctx, &mut app, egui::Key::U);
     let 错 = app.queue().error().expect("`U` 无可撤时得说一句");
     assert!(错.contains("没什么可撤"), "得说清什么都没发生：{错}");
+    // 更早那几批裁决如今在界面上撤得掉（裁决记录，挂单 `Q448`），那条路就该指到那儿，
+    // 不该再叫人回终端。
     assert!(
-        错.contains("romcat triage undo"),
-        "更早那些批得指条路出去：{错}",
+        错.contains("裁决记录"),
+        "更早那几批裁决得指到界面上撤得掉它们的地方：{错}",
+    );
+    assert!(
+        !错.contains("romcat"),
+        "界面上撤得掉更早那几批了，还在叫人回终端：{错}",
     );
     assert!(app.queue().undone().is_none(), "什么都没撤，账上不许多一笔");
 }
@@ -1721,6 +1728,25 @@ fn 点一下(ctx: &egui::Context, app: &mut App, 那一段: &str) -> String {
     let Some(位置) = shared::那一段画在哪儿(&头一帧, 那一段) else {
         panic!("屏上没有「{那一段}」，没处点：\n{}", 画出来的字(&头一帧));
     };
+    按在(ctx, app, 位置)
+}
+
+/// 按一下屏上**正好**写着 `那一段` 的那一颗（整段一字不差），返回松开之后那一帧画出来的字。
+///
+/// 按钮上的字是别的句子里的一截时用它：裁决记录里那颗「撤销」也在那一块开头那句说明里。
+fn 点正好那一颗(ctx: &egui::Context, app: &mut App, 那一段: &str) -> String {
+    let 头一帧 = headless::frame(ctx, headless::input(), |ui| app.ui(ui));
+    let Some(位置) = shared::正好那一段画在哪儿(&头一帧, 那一段) else {
+        panic!(
+            "屏上没有正好写着「{那一段}」的那一段，没处点：\n{}",
+            画出来的字(&头一帧)
+        );
+    };
+    按在(ctx, app, 位置)
+}
+
+/// 在这个位置上按下、松开，返回**松开之后下一帧**画出来的字。
+fn 按在(ctx: &egui::Context, app: &mut App, 位置: egui::Pos2) -> String {
     let 按 = |pressed: bool| egui::Event::PointerButton {
         pos: 位置,
         button: egui::PointerButton::Primary,
@@ -1950,4 +1976,403 @@ fn 停在中文离线源那一条上依据里没有星号也没有文档编号()
     for 不该有 in ["**", "ADR-"] {
         assert!(!屏上.contains(不该有), "屏上画出了「{不该有}」：\n{屏上}");
     }
+}
+
+// ——— 裁决记录：列得出、撤得掉任意一批裁决（票 `gui-answers-all-six/06`）———
+
+/// 两份**重复拷贝**（同一份内容，钉的是同一条**内容锚**）的名字，外加一份别的内容。
+///
+/// 重复拷贝是真机上的常态，也是**两批裁决在同一条锚上叠起来**唯一的来路：裁过的变体
+/// 当场退出队列，同一个变体裁不了第二遍；而另一份拷贝还在队列里，裁它落下的那一批
+/// 就盖住了前一批（核心库 `tests/triage.rs` 那条同形状的测试）。
+const 甲名: &str = "甲 某汉化.gba";
+const 乙名: &str = "乙 某汉化.gba";
+const 丙名: &str = "丙 另一部.gba";
+
+/// 变体的键（`shared::变体` 折出来的那个样子）。
+fn 键(名字: &str) -> String {
+    format!("{}/GBA/{名字}", shared::根)
+}
+
+/// 搭一份**手搭的**小现场：三个识别过、一条候选都没有的变体，甲与乙是同一份内容。
+///
+/// 合成数据（`demo::queue`）里每个变体的内容各不相同，搭不出「两批叠在同一条锚上」；
+/// `shared::小库` 不写内容判据，裁决全退到路径锚上，也搭不出。所以这里自己摆
+/// 条目、变体、哈希与结论——四样缺一样，内容锚就折不出来（`identify::content_prints`）。
+fn 有两份重复拷贝的现场() -> romcat_core::site::Site {
+    use romcat_core::catalog::identify::{ContentHash, Identification};
+    use romcat_core::catalog::{Catalog, EntryRecord, Verdict as 这次的判断};
+    use romcat_core::fs::{EntryKind, EntryMeta};
+    use romcat_core::platform::Manifest;
+    use romcat_core::site::Site;
+
+    let mut catalog = Catalog::open_in_memory().expect("开得出中立库");
+    romcat_core::catalog::roots::add_root(
+        &catalog,
+        None,
+        shared::根,
+        std::path::Path::new(&format!("/{}", shared::根)),
+    )
+    .expect("建得出根");
+    let variants: Vec<_> = [甲名, 乙名, 丙名]
+        .iter()
+        .map(|名字| shared::变体("GBA", 名字))
+        .collect();
+    let entries: Vec<EntryRecord> = variants
+        .iter()
+        .map(|variant| EntryRecord {
+            key: variant.key.clone(),
+            kind: EntryKind::File,
+            meta: EntryMeta::Known {
+                len: variant.bytes,
+                modified: None,
+            },
+            non_utf8: false,
+            verdict: 这次的判断::Added,
+            sample: None,
+            container: None,
+        })
+        .collect();
+    // **条目写在前头**：那一趟会把这些键上算过的东西当成重扫来的一起清掉（`demo::queue` 同一句）。
+    catalog.write(1, &entries).expect("写得进条目");
+    catalog
+        .replace_variants(&variants, 1, &Manifest::default())
+        .expect("写得进变体");
+    let hashes: Vec<ContentHash> = variants
+        .iter()
+        .map(|variant| ContentHash {
+            key: variant.key.clone(),
+            inner: String::new(),
+            size: variant.bytes,
+            crc32: if variant.key == 键(丙名) {
+                0x0BAD_F00D
+            } else {
+                0x5EED_CAFE
+            },
+            looked: true,
+            header: None,
+            bare_size: None,
+            bare_crc32: None,
+            nkit: None,
+            sha1: None,
+            bare_sha1: None,
+        })
+        .collect();
+    catalog.put_content_hashes(&hashes).expect("写得进哈希");
+    let 结论: Vec<Identification> = variants
+        .iter()
+        .map(|variant| Identification {
+            variant_key: variant.key.clone(),
+            platform: None,
+            state: State::Unmatched,
+            reason: None,
+            units: 1,
+            nkit: 0,
+            read_bytes: 0,
+            work_id: None,
+            release_id: None,
+            candidates: Vec::new(),
+        })
+        .collect();
+    catalog.write_identifications(&结论).expect("写得进结论");
+    Site::in_memory(
+        catalog,
+        verdict::Store::in_memory().expect("开得出沉淀库"),
+        shared::根,
+    )
+}
+
+/// **在这个窗口之外**裁一条：上一趟会话、或者命令行，走的是核心库那条同一条路。
+/// 返回落下的那一批裁决的号。
+fn 在别处裁(site: &mut romcat_core::site::Site, key: &str) -> i64 {
+    let index = verdict::Index::load(&site.store, &site.library_identity).expect("读得出沉淀库");
+    let mut queue = triage::Queue::load(&site.catalog, &index).expect("列得出队列");
+    queue.set_filter(Filter {
+        keys: vec![key.to_string()],
+        ..Filter::default()
+    });
+    let decide = Draft {
+        unknown: true,
+        ..Draft::default()
+    }
+    .build(&site.library_identity)
+    .expect("说得成立");
+    let plan = queue
+        .plan(&site.catalog, &site.store, &decide)
+        .expect("排得出计划");
+    queue
+        .apply(&mut site.catalog, &mut site.store, &plan)
+        .expect("落得下去")
+        .batch
+}
+
+/// 光标停到这一条上，按 `N`（记成「我看过了，认不出」）：**逐条流里一下就是一批裁决**。
+/// 返回落下的那一批的号。
+fn 逐条拒(ctx: &egui::Context, app: &mut App, key: &str) -> i64 {
+    停在(ctx, app, key);
+    按(ctx, app, egui::Key::N);
+    assert!(app.queue().error().is_none(), "{:?}", app.queue().error());
+    app.queue().applied().expect("落下了就该有账").batch
+}
+
+/// 点一下顶栏上那颗「裁决记录」，再跑两帧让那一块摆稳。
+fn 打开裁决记录(ctx: &egui::Context, app: &mut App) {
+    let _ = 点一下(ctx, app, "裁决记录");
+    跑(ctx, app, 2);
+}
+
+/// 这一帧画出来的字。
+fn 画一帧(ctx: &egui::Context, app: &mut App) -> String {
+    画出来的字(&headless::frame(ctx, headless::input(), |ui| app.ui(ui)))
+}
+
+/// 裁决记录里这一批**在册**时那一行该写成什么：第几批、什么时候落的、多少条、撤过没有。
+fn 在册那一行(batch: &verdict::Batch) -> String {
+    format!(
+        "第 {} 批裁决 · {} · {} 条 · 在册",
+        batch.id,
+        human_time(batch.decided_at),
+        thousands(batch.rows),
+    )
+}
+
+/// 沉淀库里点名的这一批。
+fn 册子上的(app: &App, id: i64) -> verdict::Batch {
+    app.site()
+        .store
+        .batch(id)
+        .expect("读得出沉淀库")
+        .expect("沉淀库里有这一批")
+}
+
+#[test]
+fn 裁决记录从沉淀库列出落过的每一批裁决_连这个窗口开之前落下的() {
+    // 从前这一屏只记得「本次进程里刚落下的那一批」——一个可空的位置。窗口一关、
+    // 或者那一批是命令行落的，屏上就一个字都没有，而沉淀库里每一批都还躺着。
+    let mut site = 有两份重复拷贝的现场();
+    let 早先那一批 = 在别处裁(&mut site, &键(丙名));
+    let ctx = headless::context();
+    let mut app = App::new(site, 工作目录());
+    let 刚落下的 = 逐条拒(&ctx, &mut app, &键(甲名));
+
+    打开裁决记录(&ctx, &mut app);
+    let 屏上 = 画一帧(&ctx, &mut app);
+    let 行 = |id: i64| {
+        let 那一行 = 在册那一行(&册子上的(&app, id));
+        屏上
+            .lines()
+            .position(|line| line == 那一行)
+            .unwrap_or_else(|| panic!("裁决记录里没有「{那一行}」：\n{屏上}"))
+    };
+    assert!(
+        行(刚落下的) < 行(早先那一批),
+        "裁决记录该新的在前：\n{屏上}",
+    );
+}
+
+#[test]
+fn 撤得掉任意一批裁决不只是最后一批_撤完那些变体当场回到队列里() {
+    // 从前界面上只撤得掉「刚落下的那一批」，更早的那些得回终端
+    // `romcat triage undo --batch <号>`（挂单 `Q448`）。
+    let ctx = headless::context();
+    let mut app = App::new(有两份重复拷贝的现场(), 工作目录());
+    let _甲那一批 = 逐条拒(&ctx, &mut app, &键(甲名));
+    let 丙那一批 = 逐条拒(&ctx, &mut app, &键(丙名));
+    let 乙那一批 = 逐条拒(&ctx, &mut app, &键(乙名));
+    assert_eq!(
+        app.queue().queue().pending(),
+        0,
+        "三条都裁完了，队列该是空的"
+    );
+    assert_eq!(
+        app.queue().applied().map(|applied| applied.batch),
+        Some(乙那一批),
+        "前提：最后落下的是乙那一批，要撤的丙那一批不是它",
+    );
+
+    let (screen, site) = app.queue_and_site();
+    screen.undo(site, 丙那一批);
+    assert!(screen.error().is_none(), "{:?}", screen.error());
+
+    // **当场回到队列里**：不重新列、不重跑识别，逐条那张表下一帧就画得出它。
+    let 屏上 = 画一帧(&ctx, &mut app);
+    assert!(
+        屏上.lines().any(|line| line == 键(丙名)),
+        "撤完丙那一批，丙没回到队列里：\n{屏上}",
+    );
+    assert_eq!(app.queue().queue().pending(), 1, "只该回来丙那一条");
+    // 别的批一条不受牵连：甲、乙那两批照旧在册，它们的变体照旧不在队列里。
+    for 名字 in [甲名, 乙名] {
+        assert!(
+            !屏上.lines().any(|line| line == 键(名字)),
+            "撤的是丙那一批，{名字} 却也回到了队列里：\n{屏上}",
+        );
+    }
+    assert!(
+        !册子上的(&app, 乙那一批).undone(),
+        "撤的是丙那一批，乙那一批却被标成了已撤",
+    );
+}
+
+#[test]
+fn 撤一批被后来还在册的一批盖住时当场拒并说清是哪一批盖的_撤过的仍在记录上标着已撤() {
+    // **批与批在同一条锚上是叠着的**：甲、乙是同一份内容，乙那一批记着的「它盖掉了什么」
+    // 正是甲那一批落下的那条。先撤甲那一批的话它回不到「落下之前」——核心库整份拒下，
+    // 界面要把那句话原样画出来，说清是哪一批盖的，让人先撤那一批。
+    let ctx = headless::context();
+    let mut app = App::new(有两份重复拷贝的现场(), 工作目录());
+    let 甲那一批 = 逐条拒(&ctx, &mut app, &键(甲名));
+    let 乙那一批 = 逐条拒(&ctx, &mut app, &键(乙名));
+    打开裁决记录(&ctx, &mut app);
+    // 丙没裁过，还在队列里。
+    let 裁完剩下的 = app.queue().queue().pending();
+
+    let (screen, site) = app.queue_and_site();
+    screen.undo(site, 甲那一批);
+    let 那句话 = screen
+        .error()
+        .expect("被后来还在册的一批盖住了，得当场说一句")
+        .to_string();
+    assert!(
+        那句话.contains(&format!("第 {乙那一批} 批")),
+        "那句话没说清是哪一批盖的：{那句话}",
+    );
+    let 屏上 = 画一帧(&ctx, &mut app);
+    assert!(
+        屏上.lines().any(|line| line.contains(&那句话)),
+        "拒下的那句话没画在屏上：\n{屏上}",
+    );
+    // **拒下了就一个字都不动**：甲那一批照旧在册，甲照旧不在队列里。
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line == 在册那一行(&册子上的(&app, 甲那一批))),
+        "撤不动的那一批在裁决记录上不该变样：\n{屏上}",
+    );
+    assert_eq!(
+        app.queue().queue().pending(),
+        裁完剩下的,
+        "拒下了却有变体回到了队列里",
+    );
+    assert!(
+        !屏上.lines().any(|line| line == 键(甲名)),
+        "拒下了，甲却回到了队列里：\n{屏上}",
+    );
+
+    // 照那句话说的，先撤盖住它的那一批，再撤它。
+    for batch in [乙那一批, 甲那一批] {
+        let (screen, site) = app.queue_and_site();
+        screen.undo(site, batch);
+        assert!(
+            screen.error().is_none(),
+            "第 {batch} 批：{:?}",
+            screen.error()
+        );
+    }
+    跑(&ctx, &mut app, 1);
+    let 屏上 = 画一帧(&ctx, &mut app);
+    // **撤过的那两批仍在裁决记录上**，标着已撤，旁边是「放回」而不是「撤销」。
+    for batch in [甲那一批, 乙那一批] {
+        let 册子 = 册子上的(&app, batch);
+        let 那一行 = format!(
+            "第 {batch} 批裁决 · {} · 1 条 · 已撤（{}）",
+            human_time(册子.decided_at),
+            human_time(册子.undone_at.expect("撤过了就该有已撤的时刻")),
+        );
+        assert!(
+            屏上.lines().any(|line| line == 那一行),
+            "撤过的那一批从裁决记录上消失了，或者没标已撤：「{那一行}」\n{屏上}",
+        );
+    }
+    assert_eq!(
+        屏上.lines().filter(|line| *line == "放回").count(),
+        2,
+        "撤过的两批旁边该各有一颗「放回」：\n{屏上}",
+    );
+    assert!(
+        !屏上.lines().any(|line| line == "撤销"),
+        "两批都撤过了，还摆着「撤销」：\n{屏上}",
+    );
+    assert_eq!(
+        app.queue().queue().pending(),
+        裁完剩下的 + 2,
+        "两份拷贝都该回到队列里",
+    );
+}
+
+#[test]
+fn 屏上一批变体与一批裁决两处措辞分得开() {
+    // 词表**批**那一条：一级分批那一列卡片是**一批变体**（还没落任何库），裁决记录里的是
+    // **一批裁决**（撤销的粒度）。两处从前都只说「批」——「分成 12 批」旁边摆着「撤回第 3 批」，
+    // 读的人分不出第 3 批是哪一张卡片。
+    let ctx = headless::context();
+    let mut app = App::new(有两份重复拷贝的现场(), 工作目录());
+    let 落下的 = 逐条拒(&ctx, &mut app, &键(甲名));
+    app.queue_and_site().0.show_batches();
+    打开裁决记录(&ctx, &mut app);
+    let 屏上 = 画一帧(&ctx, &mut app);
+
+    let 分批那一句 = 屏上
+        .lines()
+        .find(|line| line.starts_with("一级 · "))
+        .unwrap_or_else(|| panic!("屏上没有一级分批那一句：\n{屏上}"));
+    assert!(
+        分批那一句.contains("批变体") && !分批那一句.contains("裁决"),
+        "一级分批说的是一批变体：{分批那一句}",
+    );
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line == 在册那一行(&册子上的(&app, 落下的))),
+        "裁决记录里没有刚落下的那一批：\n{屏上}",
+    );
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line == format!("撤回第 {落下的} 批裁决")),
+        "落下之后那颗按钮没说清撤的是一批裁决：\n{屏上}",
+    );
+    for line in 屏上.lines() {
+        if line.contains(&format!("第 {落下的} 批")) {
+            assert!(
+                line.contains("批裁决"),
+                "这一句提到第 {落下的} 批，却没说是哪一种批：{line}",
+            );
+        }
+    }
+}
+
+#[test]
+fn 裁决记录里那颗撤销与放回按下去就是撤销与放回() {
+    // 前几条直接调 `Screen::undo` / `Screen::redo`；这一条点的是裁决记录里那两颗按钮本身
+    // ——票 `gui-looks-like-the-design/18` 重排的正是它们。接线接反了（「撤销」那颗去放回），
+    // 这一条当场红。
+    let ctx = headless::context();
+    let mut app = App::new(有两份重复拷贝的现场(), 工作目录());
+    let 那一批 = 逐条拒(&ctx, &mut app, &键(丙名));
+    打开裁决记录(&ctx, &mut app);
+
+    let 屏上 = 点正好那一颗(&ctx, &mut app, "撤销");
+    assert!(app.queue().error().is_none(), "{:?}", app.queue().error());
+    assert!(
+        册子上的(&app, 那一批).undone(),
+        "按了「撤销」，那一批却没撤：\n{屏上}",
+    );
+    assert!(
+        屏上.lines().any(|line| line == 键(丙名)),
+        "撤完了，丙没回到队列里：\n{屏上}",
+    );
+
+    let 屏上 = 点正好那一颗(&ctx, &mut app, "放回");
+    assert!(app.queue().error().is_none(), "{:?}", app.queue().error());
+    let 册子 = 册子上的(&app, 那一批);
+    assert!(!册子.undone(), "按了「放回」，那一批却还撤着：\n{屏上}");
+    assert!(
+        屏上.lines().any(|line| line == 在册那一行(&册子)),
+        "放回之后那一行该回到在册：\n{屏上}",
+    );
+    assert!(
+        !屏上.lines().any(|line| line == 键(丙名)),
+        "放回之后丙该再退出队列：\n{屏上}",
+    );
 }
