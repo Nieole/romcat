@@ -238,6 +238,13 @@ mod tests {
     fn 分大小写那一档上_两个只差大小写的目录照旧是两个() {
         let 卡 = temp_dir("snap-two");
         写(&卡.path().join("GB/别的.txt"), b"x");
+        // 这一条要的是**真盘上**并存的 `GB/` 与 `gb/`，不分大小写的盘（默认 APFS、
+        // Windows）根本摆不出来：第二个 `写` 落进同一个目录，数出来是 1，红的是盘不是相片。
+        // 摆不出来就如实跳过——分大小写的盘（CI 的 ext4）上照跑。
+        if crate::fs::case_insensitive(&RealFs, 卡.path()) == Some(true) {
+            eprintln!("跳过：临时目录所在的盘不分大小写，摆不出只差大小写的两个目录");
+            return;
+        }
         写(&卡.path().join("gb/Tetris.zip"), b"y");
         let 相 = snapshot(卡.path(), Folding::Sensitive);
         assert_eq!(相.read_dir(卡.path()).expect("列得开").len(), 2);
