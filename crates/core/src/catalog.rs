@@ -24,6 +24,7 @@ pub mod export;
 mod filter;
 pub mod frontend;
 pub mod identify;
+mod meta;
 pub mod roots;
 pub mod scrape;
 pub mod sublibrary;
@@ -46,6 +47,7 @@ use crate::scan::aggregate::{
 };
 use crate::shape;
 use crate::workspace;
+use meta::MetaKey;
 
 pub use baseline::{Baseline, Recorded, ScanDelta, Verdict};
 pub use browse::{
@@ -177,13 +179,6 @@ pub(crate) fn placeholders(count: usize) -> String {
     }
     out
 }
-
-/// 元数据表里记**这份主库叫什么**的那个键。
-///
-/// 加这一个键是**纯加**：已有的表一列没动、一条语义没改，于是
-/// [`SCHEMA_VERSION`] 一动不动（判据见它的文档）。旧库拿新程序打开照样能用，
-/// 只是读不到这一行——那时走 [`Catalog::library_name`] 的退路。
-const META_LIBRARY_NAME: &str = "library_name";
 
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS meta(
@@ -350,6 +345,14 @@ pub enum CatalogError {
 ///
 /// 一处定死：快照、刮削、子库三处都往库里记时刻，各写一遍的话「取不到时钟怎么办」
 /// 这个岔路口就有三个不一样的答案。
+/// **空白不是名字**：一个主库原名是不是空的、或者全是空白字符。
+///
+/// 写的一侧（[`Catalog::set_library_name`]，建库那一趟也走它）与读的一侧
+/// （[`Catalog::library_name`]）都问这一处——两处各判一次，迟早判出两个答案（ADR-0024）。
+fn is_blank_name(name: &str) -> bool {
+    name.trim().is_empty()
+}
+
 pub(crate) fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -450,9 +453,10 @@ impl Catalog {
     /// **文件名照旧按 [`workspace::Slug::text`] 那套折**——两条路
     /// 互不干扰。
     ///
-    /// **只在建库那一趟写。** 库已经在那儿了就一个字不改：那一行是「这份库是谁建的、
-    /// 当时叫什么」，不是「这次是拿哪个名字打开的」。于是票 01 之前建的那些库
-    /// 一辈子读不到这一行，走 [`Self::library_name`] 的退路——那正是它存在的理由。
+    /// **只在建库那一趟写。** 库已经在那儿了就一个字不改：那一行是「人管这份库叫什么」，
+    /// 不是「这次是拿哪个名字打开的」——**打开不是改名**，改名走
+    /// [`Self::set_library_name`]。于是票 01 之前建的那些库，没人给它改过名就一辈子
+    /// 读不到这一行，走 [`Self::library_name`] 的退路——那正是它存在的理由。
     ///
     /// # Errors
     /// 同 [`Self::open`]。
@@ -543,15 +547,7 @@ impl Catalog {
         twin.batch("PRAGMA busy_timeout = 10000;")?;
         // **只核对，不建、不改。** 版本对不上时开出来的是一份读得出行、却对不上号的库，
         // 那比打不开更坏。
-        let found: Option<String> = twin
-            .conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|source| twin.err(source))?;
+        let found = twin.meta_get(MetaKey::SchemaVersion)?;
         match found.as_deref().map(str::parse::<u32>) {
             Some(Ok(version)) if version == SCHEMA_VERSION => Ok(twin),
             found => Err(CatalogError::Version {
@@ -607,30 +603,15 @@ impl Catalog {
         // `CREATE TABLE IF NOT EXISTS` 对它们一个字都不改（见 `add_columns`）。
         sublibrary::add_columns(&catalog.conn).map_err(|source| catalog.err(source))?;
         identify::add_columns(&catalog.conn).map_err(|source| catalog.err(source))?;
-        let found: Option<String> = catalog
-            .conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|source| catalog.err(source))?;
+        let found = catalog.meta_get(MetaKey::SchemaVersion)?;
         match found.as_deref().map(str::parse::<u32>) {
             None => {
-                catalog
-                    .conn
-                    .execute(
-                        "INSERT INTO meta(key, value) VALUES('schema_version', ?1)",
-                        params![SCHEMA_VERSION.to_string()],
-                    )
-                    .map_err(|source| catalog.err(source))?;
+                catalog.meta_set(MetaKey::SchemaVersion, &SCHEMA_VERSION.to_string())?;
                 // **「结构版本这一行还不在」就是「这份库是这一趟建出来的」。**
-                // 名字只在这一趟落，理由见 `Catalog::open_named`。
-                // **空白不是名字**：`--library ""` 命令行不拦（那是它自己的行为），
-                // 落一行空串下去，开场那一屏就多一行没有名字的库。宁可不写，走退路。
-                if let Some(name) = name.filter(|name| !name.trim().is_empty()) {
-                    catalog.meta_set(META_LIBRARY_NAME, name)?;
+                // 打开时给的名字只在这一趟落，理由见 `Catalog::open_named`；空白怎么办
+                // 由 `Catalog::set_library_name` 说了算（`--library ""` 命令行不拦）。
+                if let Some(name) = name {
+                    catalog.set_library_name(name)?;
                 }
             }
             Some(Ok(version)) if version == SCHEMA_VERSION => {}
@@ -674,14 +655,14 @@ impl Catalog {
 
     /// **主库原名**：这份主库叫什么——说得出口的那个名字。
     ///
-    /// 先读元数据表里那一行（建库时落的原名，见 [`Self::open_named`]）；**读不到就退回
-    /// 从中立库的文件名截**，把哈希后缀剥掉只留人认得出的那一半
-    /// （[`workspace::readable_half`]）。
+    /// 先读元数据表里那一行（建库时落下、改名时换掉的那个原名，见 [`Self::open_named`]
+    /// 与 [`Self::set_library_name`]）；**读不到就退回从中立库的文件名截**，把哈希后缀
+    /// 剥掉只留人认得出的那一半（[`workspace::readable_half`]）。
     ///
-    /// **它不报错、不中断，一定交得出一句话。** 退路要顶的有三种库：票 01 之前建的
-    /// （那一行压根没写过）、拿 [`Self::open`] 建的（不知道自己叫什么）、以及库本身
-    /// 读不动的。而开场那一屏的判据是**照列不误**——从列表里静静消失才是最难查的那种错
-    /// （ADR-0023），一份库说不出名字不该让整屏失败。
+    /// **它不报错、不中断，一定交得出一句话。** 退路要顶的有四种库：票 01 之前建的
+    /// （那一行压根没写过）、拿 [`Self::open`] 建的（不知道自己叫什么）、名字被清空的
+    /// （改名时给了空白）、以及库本身读不动的。而开场那一屏的判据是**照列不误**
+    /// ——从列表里静静消失才是最难查的那种错（ADR-0023），一份库说不出名字不该让整屏失败。
     ///
     /// 只活在内存里的那份没有文件名可截，交出的是它那个占位路径。空白也算读不到。
     ///
@@ -692,8 +673,8 @@ impl Catalog {
     /// 这一个是**主库原名**，**给人看的**，进不了任何键，也没人拿它去找文件。
     #[must_use]
     pub fn library_name(&self) -> String {
-        if let Ok(Some(name)) = self.meta_get(META_LIBRARY_NAME)
-            && !name.trim().is_empty()
+        if let Ok(Some(name)) = self.meta_get(MetaKey::LibraryName)
+            && !is_blank_name(&name)
         {
             return name;
         }
@@ -703,26 +684,30 @@ impl Catalog {
         )
     }
 
-    fn meta_get(&self, key: &str) -> Result<Option<String>, CatalogError> {
-        self.conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = ?1",
-                params![key],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|source| self.err(source))
-    }
-
-    fn meta_set(&self, key: &str, value: &str) -> Result<(), CatalogError> {
-        self.conn
-            .execute(
-                "INSERT INTO meta(key, value) VALUES(?1, ?2)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![key, value],
-            )
-            .map_err(|source| self.err(source))?;
-        Ok(())
+    /// 改这份主库的**主库原名**——人起错了名字，不必删库重来。
+    ///
+    /// 名字原样落进元数据表，一个字符都不折（同 [`Self::open_named`]）；开场那一屏、
+    /// 报告抬头、窗口标题读的都是它（[`Self::library_name`]）。建库那一趟记名字走的也是
+    /// 这一个函数。
+    ///
+    /// **空白不是名字。** 交一个空白进来就把那一行抹掉，读的时候退回从文件名截
+    /// ——落一行空串下去，开场那一屏就多一行没有名字的库。「算不算空白」读写两侧问的是
+    /// 同一个判断（`is_blank_name`）。
+    ///
+    /// ## 它不动**主库标识**
+    ///
+    /// 中立库的文件名、**路径锚**里记的那个键、**断点**的文件名，认的都是主库标识
+    /// （[`Site::library_identity`](crate::site::Site::library_identity)），改原名一个都
+    /// 不动——沉淀库里的裁决照旧对得上。代价是**找库仍按起先那个名字**：命令行
+    /// `--library` 折出来的是主库标识，拿新名字去找是找不到这一份的（挂单 `Q472`）。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误——只读地开的那一份（[`Self::open_read_only`]）写不进去。
+    pub fn set_library_name(&self, name: &str) -> Result<(), CatalogError> {
+        if is_blank_name(name) {
+            return self.meta_clear(MetaKey::LibraryName);
+        }
+        self.meta_set(MetaKey::LibraryName, name)
     }
 
     /// 一批**透明容器**的内部构成，零解压层当初落库的那一份。

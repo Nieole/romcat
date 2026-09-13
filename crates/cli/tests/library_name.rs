@@ -13,8 +13,10 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use romcat_core::catalog::Catalog;
 use romcat_core::testing::sample::{gba, zip};
 use romcat_core::testing::{TempDir, temp_dir};
+use romcat_core::workspace::{self, Slug};
 
 /// 一个小 fixture 主库：按平台分目录，够顶层条目比对认得出它。
 fn 建_主库(dir: &Path) {
@@ -285,5 +287,35 @@ fn 扫描那一趟也印得出主库原名() {
     assert!(
         说明.lines().any(|line| line == "主库：扫这一趟的主库"),
         "扫描收尾该印出起的那个名字：{说明}"
+    );
+}
+
+#[test]
+fn 改过名的库报告印的是新名字() {
+    // 起错了名字不必删库重来（挂单 `Q370`）。改名的入口在核心库
+    // （`Catalog::set_library_name`；界面上那一处归票 `gui-looks-like-the-design/31`），
+    // 这一条钉的是**报告这一侧读到的是改过之后的那个**。
+    let workspace = temp_dir("library-rename-workspace");
+    let 主库 = temp_dir("library-rename-lib");
+    建_主库(主库.path());
+    assert!(
+        扫(workspace.path(), 主库.path(), Some("起错了的名字"))
+            .status
+            .success()
+    );
+
+    let 库文件 = workspace::catalog_path(workspace.path(), Slug::Named("起错了的名字"));
+    Catalog::open(&库文件)
+        .expect("开得了扫出来的那份库")
+        .set_library_name("改过的名字")
+        .expect("改得了名");
+
+    // 找库仍按**原先那个名字**：`--library` 折出来的是主库标识，改名不动它。
+    let 报告 = 出报告(workspace.path(), &["--library", "起错了的名字"]);
+    assert!(报告.status.success(), "{报告:?}");
+    let 说明 = String::from_utf8_lossy(&报告.stderr);
+    assert!(
+        说明.lines().any(|line| line == "主库：改过的名字"),
+        "报告里该印改过之后的名字：{说明}"
     );
 }

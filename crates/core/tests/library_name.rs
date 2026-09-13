@@ -11,6 +11,10 @@
 //!
 //! 另钉一件与原名相对的事：**主库标识**正过一次名（`Site::library` → `Site::library_identity`），
 //! **路径锚**里存的那串字节一个没动。
+//!
+//! **已经建好的库改得了名**（`Catalog::set_library_name`，挂单 `Q370`）：改完开场屏与现场上印的
+//! 是新名字，**路径锚与中立库的文件名一个字节不动**——锚认的是主库标识，改的是主库原名。
+//! 元数据表那一族的键名收进一处之后，旧库里按原先那几串键名记下的账也得照样读得回来。
 
 use romcat_core::catalog::{Catalog, EntryRecord, SCHEMA_VERSION, Verdict};
 use romcat_core::fs::{EntryKind, EntryMeta};
@@ -181,6 +185,131 @@ fn 路径锚里存的主库标识一个字节没动() {
 }
 
 #[test]
+fn 已经建好的库改得了名开场屏与报告上印的是新名字() {
+    // 维护者起错了名字，不必删库重来（挂单 `Q370`）。改的是**主库原名**那一行：
+    // 开场那一屏列的（`workspace::catalogs`）、窗口标题与报告抬头印的（`Site::display_name`、
+    // `Catalog::library_name`）都是它。库里的东西一条不少，文件也不挪。
+    let 工作目录 = temp_dir("原名-改名");
+    let 起的名字 = Slug::Named("起错了的名字");
+    let 库文件 = workspace::catalog_path(工作目录.path(), 起的名字);
+    {
+        let mut catalog =
+            Catalog::open_named(&库文件, &起的名字.display_name()).expect("能建中立库");
+        写一条(&mut catalog);
+    }
+
+    Catalog::open(&库文件)
+        .expect("能再打开")
+        .set_library_name("改过的名字")
+        .expect("改得了名");
+
+    let 列出来的 = workspace::catalogs(工作目录.path());
+    let [一份] = 列出来的.as_slice() else {
+        panic!("改名不该多出或少掉一份库：{列出来的:?}");
+    };
+    assert_eq!(一份.name, "改过的名字", "开场屏上印的还是旧名字");
+    assert_eq!(一份.path, 库文件, "改名把中立库文件挪走了");
+
+    let 现场 = Site::open_file(工作目录.path(), &库文件, None).expect("开得出现场");
+    assert_eq!(
+        现场.display_name(),
+        "改过的名字",
+        "窗口标题上印的还是旧名字"
+    );
+    assert!(
+        现场.catalog.contains("库/FC/魂斗罗.zip").expect("读得出来"),
+        "改名之后库里的东西少了"
+    );
+}
+
+#[test]
+fn 改名之后路径锚一个字节没动沉淀库里的裁决照旧对得上() {
+    // **锚认的是主库标识，改的是主库原名。** 沉淀库不可再生，里头的**路径锚**记的是
+    // 主库标识那一串原样的字节；改名要是顺手把它（连同中立库的文件名）跟着新名字折一遍，
+    // 那些裁决一条都不删，却从此一条都撞不上。
+    //
+    // 字面量同 `路径锚里存的主库标识一个字节没动`：取自正名之前的代码，不照算法重算。
+    const 锚里存的: &str = "主库-f5c61109e92b6036";
+    let 工作目录 = temp_dir("改名-路径锚");
+    let 起的名字 = Slug::Named("主库");
+    let 库文件 = workspace::catalog_path(工作目录.path(), 起的名字);
+    drop(Catalog::open_named(&库文件, &起的名字.display_name()).expect("能建中立库"));
+
+    let 变体 = "主盘/FC/魂斗罗.zip";
+    {
+        let mut store =
+            Store::open(&workspace::verdict_store_path(工作目录.path())).expect("开得出沉淀库");
+        store
+            .join(&[Membership::now(
+                "收藏",
+                Anchor::Path {
+                    library: 锚里存的.to_string(),
+                    variant_key: 变体.to_string(),
+                },
+            )])
+            .expect("写得进沉淀库");
+    }
+
+    Catalog::open(&库文件)
+        .expect("能再打开")
+        .set_library_name("改过的名字")
+        .expect("改得了名");
+
+    // 找库仍按**原先那个名字**：`--library` 折出来的是主库标识，改名不动它。
+    let 按名字 = Site::open(工作目录.path(), 起的名字, None, "--library").expect("开得出现场");
+    let 按文件 = Site::open_file(工作目录.path(), &库文件, None).expect("开得出现场");
+    for (路, site) in [("按名字", &按名字), ("按文件", &按文件)] {
+        assert_eq!(site.display_name(), "改过的名字", "{路}开出来的不是新名字");
+        assert_eq!(
+            site.library_identity, 锚里存的,
+            "{路}开出来的主库标识跟着改名变了"
+        );
+        let 锚 = Anchor::Path {
+            library: site.library_identity.clone(),
+            variant_key: 变体.to_string(),
+        };
+        assert_eq!(
+            site.store.joined(&锚).expect("读得出沉淀库"),
+            ["收藏"],
+            "{路}开出来的现场认不出改名之前那条路径锚"
+        );
+    }
+}
+
+#[test]
+fn 改名成空白时退回从文件名截而不是留一行空的() {
+    // **空白不是名字**，改名也一样（建库那一趟的规矩见下一条）。清空了名字的库退回
+    // 从文件名截——截出来的是建库时那个名字折进文件名的可读一半——而不是在开场那一屏
+    // 留一行空白，也不是还印着清空之前那个名字。
+    let 工作目录 = temp_dir("改名-空白");
+    let 起的名字 = Slug::Named("原先的名字");
+    let 库文件 = workspace::catalog_path(工作目录.path(), 起的名字);
+    drop(Catalog::open_named(&库文件, &起的名字.display_name()).expect("能建中立库"));
+
+    for 空的 in ["", "   "] {
+        {
+            let catalog = Catalog::open(&库文件).expect("能再打开");
+            catalog.set_library_name("改过的名字").expect("改得了名");
+            catalog.set_library_name(空的).expect("清得掉名字");
+        }
+        assert_eq!(
+            Catalog::open(&库文件).expect("能再打开").library_name(),
+            "原先的名字",
+            "清空名字之后该退回从文件名截"
+        );
+        let 列出来的 = workspace::catalogs(工作目录.path());
+        assert_eq!(
+            列出来的
+                .iter()
+                .map(|一份| 一份.name.as_str())
+                .collect::<Vec<_>>(),
+            ["原先的名字"],
+            "开场屏上该印从文件名截出来的那一半"
+        );
+    }
+}
+
+#[test]
 fn 名字是空白时退回从文件名截而不是留一行空的() {
     // `--library ""` 命令行不拦（改它的行为不在这张票里）。**空白不是名字**：那一行不落，
     // 读的时候也退回从文件名截，于是报告里不会印出一句光秃秃的「主库：」，
@@ -198,6 +327,57 @@ fn 名字是空白时退回从文件名截而不是留一行空的() {
             "退回从文件名截，而文件名的可读一半本来就退成了那个固定词"
         );
     }
+}
+
+#[test]
+fn 元数据表那一族的键名一个字节没动旧库记下的账照样读得回来() {
+    // 元数据表上那几笔账（主库原名、上次折标题、上次导出、记住的导出配置、成型记到哪一趟）
+    // **键名是落在盘上的**。键名收进一处的时候改岔一个字，旧库里那一行不删，却从此读不回来
+    // ——改过的名字变回从文件名截、记住的导出配置要人重选，谁都不报错。
+    //
+    // 造法是**按旧程序落盘的样子直接往那张表里写**（同 `testing::catalog_at_version`）。
+    // 这几串键名取自键名收进一处之前的代码，**不许照着现在的代码抄一遍**。
+    use romcat_core::catalog::ExportSetup;
+    use std::path::PathBuf;
+
+    let 工作目录 = temp_dir("元数据表-键名");
+    let 库文件 = workspace::catalog_path(工作目录.path(), Slug::Named("键名"));
+    drop(Catalog::open(&库文件).expect("能建中立库"));
+    {
+        let conn = rusqlite::Connection::open(&库文件).expect("能再打开那个文件");
+        for (键, 值) in [
+            ("library_name", "旧程序记下的名字"),
+            ("titles_folded_at", "1700000001"),
+            ("exported_at", "1700000002"),
+            ("export_format", "Pegasus"),
+            ("export_out_dir", "/导出/目录"),
+            ("shaped_scan", "3"),
+            ("shaped_manifest", "42"),
+        ] {
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES(?1, ?2)",
+                rusqlite::params![键, 值],
+            )
+            .expect("写得进那一行");
+        }
+    }
+
+    let catalog = Catalog::open(&库文件).expect("旧库照样打得开");
+    assert_eq!(catalog.library_name(), "旧程序记下的名字");
+    assert_eq!(
+        catalog.titles_folded_at().expect("读得出"),
+        Some(1_700_000_001)
+    );
+    assert_eq!(catalog.exported_at().expect("读得出"), Some(1_700_000_002));
+    assert_eq!(
+        catalog.export_setup().expect("读得出"),
+        Some(ExportSetup {
+            format: "Pegasus".to_string(),
+            out: PathBuf::from("/导出/目录"),
+        })
+    );
+    assert_eq!(catalog.shaped_scan().expect("读得出"), Some(3));
+    assert_eq!(catalog.shaped_manifest().expect("读得出"), Some(42));
 }
 
 /// 往库里放一条记录，好证明「旧库照样能用」不是空话。
