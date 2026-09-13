@@ -1,14 +1,14 @@
-//! 门禁五条的**唯一**定义。
+//! 门禁那几条的**唯一**定义。
 //!
 //! 在这份文件之前，「门禁」是 `README.md`「开发」一节里的四行命令：没有任何机器执行它的
-//! 地方，漏跑了没有人拦，本地与 CI 也无从对齐（挂单 `Q187`）。现在五条只在下面 [`steps`]
+//! 地方，漏跑了没有人拦，本地与 CI 也无从对齐（挂单 `Q187`）。现在门禁的每一条只在下面 [`steps`]
 //! 里写一遍，README 指向 `cargo xtask gate`、GitHub Actions 也只调这一句——**要漂就一起漂**。
 //!
 //! ## 顺序：从便宜到贵
 //!
 //! `fmt` 两秒出结果，`test` 要几分钟。默认在第一处红上就停（[`run`] 的 `keep_going`
 //! 传 `false`），于是「忘了跑 `cargo fmt --all`」这种最常见的红，代价是两秒而不是
-//! 一整趟冷编译。CI 上想一次看全五条时给 `--keep-going`。
+//! 一整趟冷编译。CI 上想一次看全每一条时给 `--keep-going`。
 //!
 //! ## 两份特性配置，各有一条盯着
 //!
@@ -17,7 +17,7 @@
 //! 一百多条**而退出码照样是 0**。可 `cargo build --release` 交出去的是 `demo`
 //! **关掉**的那份：三条全带 `--all-features` 就意味着没有任何一条再编译交付的那份配置，
 //! 谁在 `crates/gui/src/` 里写下一处只有开着 `demo` 才编得过的引用，门禁全绿而发版
-//! 当场编不过。`check` 那一条补的正是这一格——它是五条里**唯一**跑在默认特性上的。
+//! 当场编不过。`check` 那一条补的正是这一格——它是门禁里**唯一**一条跑在默认特性上的。
 //! （票 `parking-3/01` 收尾审查报的第 1 条，票 `parking-3/02` 落的。）
 //!
 //! ## 两档资源
@@ -34,7 +34,7 @@ use std::time::Instant;
 ///
 /// 在票 `parking-3/02` 之前这里是空的，也就是「软红」：`cargo doc --workspace --no-deps`
 /// 退出码是 0，可仓库里躺着 **67** 条 rustdoc 告警（`romcat-core` 独占 58 条，
-/// 挂单 `Q189`）——四条里只有这一条从来没写过标准，`clippy` 那条明写「零警告」，它没有。
+/// 挂单 `Q189`）——那时门禁里只有这一条从来没写过标准，`clippy` 那条明写「零警告」，它没有。
 /// 那 67 条清到零之后，这一格换成了 `-D warnings`：**从此断一条文档链接，门禁当场红。**
 ///
 /// 这不是一句声明，`xtask/tests/gate.rs` 里那条
@@ -135,7 +135,7 @@ pub fn cargo() -> OsString {
     std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"))
 }
 
-/// 门禁五条，按从便宜到贵排。**这是它们唯一的定义。**
+/// 门禁那几条，按从便宜到贵排。**这是它们唯一的定义。**
 #[must_use]
 pub fn steps(limits: Limits) -> Vec<Step> {
     vec![
@@ -156,7 +156,7 @@ fn fmt() -> Step {
     }
 }
 
-/// 交付出去的那份配置还编得过。**五条里唯一不带 `--all-features` 的一条。**
+/// 交付出去的那份配置还编得过。**编整个工作区的那几条里，唯一不带 `--all-features` 的一条。**
 ///
 /// ⚠️ **这一条的价值全在它没带的那个开关上。** `clippy` / `test` / `doc` 都带
 /// `--all-features`，编的是 `demo` 开着的那份代码；而 `cargo build --release`
@@ -166,9 +166,9 @@ fn fmt() -> Step {
 ///
 /// 不带 `--all-targets`：要盯的是 `cargo build --release` 那份配置，也就是库与二进制。
 ///
-/// ⚠️ **于是「默认特性下的测试目标」五条里一条都没编。** `clippy` 编的那批测试目标是
+/// ⚠️ **于是「默认特性下的测试目标」门禁里哪一条都没编。** `clippy` 编的那批测试目标是
 /// `demo` **开着**的那一份，盖不住这一格。漏的是这么一个文件：**不带**
-/// `#[cfg(feature = "demo")]`、却引用了 `demo` 后面的东西——五条全绿，而
+/// `#[cfg(feature = "demo")]`、却引用了 `demo` 后面的东西——门禁全绿，而
 /// `cargo test --workspace`（不带 `--all-features`）编不过。眼下不存在这种文件
 /// （`demo` 那七个测试目标走的是 `required-features`）。要盖住就给这一条补
 /// `--all-targets`，代价是多编一遍默认特性下的测试目标。挂单 `Q208`。
@@ -227,7 +227,7 @@ fn test(limits: Limits) -> Step {
 /// `romcat-gui` 与 `xtask` 都是 lib 加一个同名 bin，于是不带这两个开关时
 /// `crates/gui/src/main.rs`（四百多行，里头七处 intra-doc 链接）与
 /// `xtask/src/main.rs` **一个字都没被 rustdoc 读过**——谁往它们里头写一条断链，
-/// 门禁五条全绿。加上之后 cargo 会为那两个包各印一行
+/// 门禁照样全绿。加上之后 cargo 会为那两个包各印一行
 /// `warning: output filename collision`：那是 **cargo** 的告警不是 rustdoc 的，
 /// `-D warnings` 不把它当错，而门禁不消费 `target/doc/`（人自己跑
 /// `cargo doc --open` 时不带 `--bins`，拿到的仍是正常的 lib 文档）。

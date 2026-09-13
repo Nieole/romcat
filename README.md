@@ -115,7 +115,7 @@ romcat-gui --catalog ~/.romcat/catalog/主库-xxxx.sqlite3
 crates/core/   romcat-core   领域逻辑全在这儿：扫描、成型、识别、刮削、适配器、子库
 crates/cli/    romcat        命令行
 crates/gui/    romcat-gui    窗口壳。只画和转发，一条领域逻辑都不许长在这里
-xtask/         门禁跑手      `cargo xtask gate` 那五条的唯一定义。不交付、不被上面三个依赖
+xtask/         门禁跑手      `cargo xtask gate` 那几条的唯一定义。不交付、不被上面三个依赖
 docs/adr/      24 份架构决策记录
 docs/          library-facts.md（真库实测台账）、platforms.md、research/
 CONTEXT.md     词表。动手前先读它，输出用它的词
@@ -144,19 +144,19 @@ CONTEXT.md     词表。动手前先读它，输出用它的词
 ## 开发
 
 ```bash
-cargo xtask gate          # 门禁五条：排版、默认特性编得过、clippy、全量测试、文档
+cargo xtask gate          # 门禁那几条：排版、默认特性编得过、clippy、全量测试、文档
 ```
 
-**门禁只有这一句。** 五条命令的定义在 `xtask/src/gate.rs` 里写一遍，本地与 GitHub Actions
+**门禁只有这一句。** 那几条命令的定义在 `xtask/src/gate.rs` 里写一遍，本地与 GitHub Actions
 （`.github/workflows/gate.yml`）调的是同一句话——不会出现「我这儿绿的、CI 红的」这种
-只能靠猜的分歧。想知道它到底跑哪五条，**问它自己**，别去翻文档：
+只能靠猜的分歧。想知道它到底跑哪几条，**问它自己**，别去翻文档：
 
 ```bash
 cargo xtask gate --list
 ```
 
 默认在**第一处红上就停**：`fmt` 排在最前，两秒出结果，「忘了跑 `cargo fmt --all`」这种
-最常见的红不该罚你一整趟冷编译。要一趟看全五条给 `--keep-going`（CI 上就是这么调的）。
+最常见的红不该罚你一整趟冷编译。要一趟跑完每一条给 `--keep-going`（CI 上就是这么调的）。
 
 **内存吃紧就退回限流那一档。** 一台 15 GB 的开发机上按满并发跑全量测试会被 OOM 杀掉：
 
@@ -206,7 +206,7 @@ cargo xtask gate -j 4 --test-threads 4   # 两个开关各自也调得动
 
 代价是：**不带 `--all-features` 跑测试，会少跑 123 条**（1,692 而不是 1,815，两边同一口径实测：`cargo test --workspace [--all-features] -- --list`；同上，量在 `main` `a142612` 上）——其中 7 个测试文件（`browse` / `close` / `layout` / `media` / `queue` / `table` / `task`）整份都不编译，剩下的散在别的文件里被 `cfg` 掐掉。**少跑不报错**，退出码照样是 0——所以这条开关不该靠人记牢，它写在 `cargo xtask gate` 里。
 
-**反过来那一格由 `cargo check --workspace` 那一条看着。** `clippy` / `test` / `doc` 三条都带 `--all-features`，编的都是 `demo` **开着**的那份代码；而 `cargo build --release` 交付出去的是 `demo` **关掉**的那份。少了 `check` 那一条，「交付的那份还编不编得过」在门禁里一个把门的都没有——谁在 `crates/gui/src/` 里写下一处只有开着 `demo` 才编得过的引用，门禁全绿而发版当场编不过。`check` 是五条里**唯一**跑在默认特性上的，`xtask/tests/gate.rs` 的 `交付出去的那份配置还有一条在看着` 钉着这件事。
+**反过来那一格由 `cargo check --workspace` 那一条看着。** `clippy` / `test` / `doc` 三条都带 `--all-features`，编的都是 `demo` **开着**的那份代码；而 `cargo build --release` 交付出去的是 `demo` **关掉**的那份。少了 `check` 那一条，「交付的那份还编不编得过」在门禁里一个把门的都没有——谁在 `crates/gui/src/` 里写下一处只有开着 `demo` 才编得过的引用，门禁全绿而发版当场编不过。`check` 是门禁里**唯一**一条跑在默认特性上的，`xtask/tests/gate.rs` 的 `交付出去的那份配置还有一条在看着` 钉着这件事。
 
 ### 文档链接断了，门禁当场红
 

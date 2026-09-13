@@ -1,9 +1,9 @@
 //! `cargo xtask` 的入口。眼下只有一条子命令：`gate`。
 //!
 //! ```text
-//! cargo xtask gate                 # 门禁五条，按机器给的资源跑
+//! cargo xtask gate                 # 跑门禁，按机器给的资源跑
 //! cargo xtask gate --throttle      # 退回限流那一档（-j 1、--test-threads=2）
-//! cargo xtask gate --list          # 只打印它会跑哪五条，一条都不跑
+//! cargo xtask gate --list          # 只打印它会跑哪几条，一条都不跑
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use xtask::gate::{self, Limits};
 
 /// 仓库里的杂活。
 #[derive(Debug, Parser)]
-#[command(name = "xtask", about = "仓库杂活：门禁五条的唯一定义", version)]
+#[command(name = "xtask", about = "仓库杂活：门禁的唯一定义", version)]
 struct Cli {
     /// 干哪件杂活。
     #[command(subcommand)]
@@ -53,7 +53,7 @@ struct GateArgs {
     #[arg(long)]
     keep_going: bool,
 
-    /// 只打印它会跑哪五条，一条都不跑。
+    /// 只打印它会跑哪几条，一条都不跑。
     #[arg(long)]
     list: bool,
 }
@@ -64,7 +64,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// 跑（或者只打印）门禁五条。
+/// 跑（或者只打印）门禁那几条。
 fn gate_job(args: &GateArgs) -> ExitCode {
     let limits = limits(args);
     if args.list {
@@ -85,7 +85,7 @@ fn gate_job(args: &GateArgs) -> ExitCode {
         println!("{总条数} 条全绿。");
         return ExitCode::SUCCESS;
     }
-    // ⭐ **没跑完的那几条要点名。** 只列跑过的两条，会被读成「另外两条是绿的」——
+    // ⭐ **没跑完的那几条要点名。** 只列跑过的，会被读成「没列出来的都是绿的」——
     // 门禁最不该做的事就是让人以为它盖过了它其实没碰的地方。
     let 没跑 = 总条数 - ran.len();
     if 没跑 > 0 {
