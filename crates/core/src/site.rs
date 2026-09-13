@@ -11,6 +11,7 @@
 //! 界面看不见，反过来也一样。把「开哪份中立库」「开哪份沉淀库」「这份主库的主库标识」捏成
 //! 一个类型，就是不让第二份算法长出来。
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::catalog::{Catalog, CatalogError};
@@ -50,6 +51,18 @@ pub enum SiteError {
     /// 沉淀库打不开。
     #[error("沉淀库打不开：{0}")]
     Verdict(#[from] VerdictError),
+    /// 中立库结构版本对不上，而它里面还没搬进沉淀库的**人工纠正**这一回没救出来
+    /// （[`rescue_shaping_overrides`]）。那句「删掉它重扫」**这时不能照做**。
+    #[error(
+        "{said}——但这份库里还记着没搬进沉淀库的人工纠正，这一回没搬成（{why}）。\
+         删掉它之前先把沉淀库弄好，不然它们就没了"
+    )]
+    Stranded {
+        /// 那句叫人删库重扫的原话（[`CatalogError::Version`]）。
+        said: String,
+        /// 没搬成的原因。
+        why: String,
+    },
 }
 
 impl SiteError {
@@ -129,9 +142,7 @@ impl Site {
         if !catalog.exists() {
             return Err(SiteError::NoCatalog(path::display(catalog)));
         }
-        let library_identity = catalog
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
+        let library_identity = workspace::library_identity_of(catalog)
             .ok_or_else(|| SiteError::NotACatalog(path::display(catalog)))?;
         Self::at(workspace, catalog, library_identity, root)
     }
@@ -172,6 +183,15 @@ impl Site {
         self.catalog.library_name()
     }
 
+    /// 这份主库的**人工纠正**：沉淀库里按 [`Self::library_identity`] 取出来的那一份——
+    /// 成型要照着的就是它（[`ScanOptions::shaping_overrides`](crate::scan::ScanOptions::shaping_overrides)）。
+    ///
+    /// # Errors
+    /// 读沉淀库失败时返回错误。
+    pub fn shaping_overrides(&self) -> Result<BTreeMap<String, String>, VerdictError> {
+        self.store.shaping_overrides(&self.library_identity)
+    }
+
     /// 一份**全在内存里**的现场。演示与实测走这条，连磁盘都不碰。
     #[must_use]
     pub fn in_memory(catalog: Catalog, store: Store, library_identity: &str) -> Self {
@@ -195,12 +215,95 @@ impl Site {
                 return Err(SiteError::InsideLibrary(path::display(&target)));
             }
         }
+        let catalog = match Catalog::open(catalog) {
+            Ok(opened) => opened,
+            // **结构版本对不上**：那句话会叫人删掉它重扫。删之前，它里面没搬走的人工纠正
+            // 得先救进沉淀库——那句「人工纠正一条不丢」才是真的。
+            Err(error @ CatalogError::Version { .. }) => {
+                rescue_shaping_overrides(workspace, catalog, &error)?;
+                return Err(error.into());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut store = Store::open(&workspace::verdict_store_path(workspace))?;
+        carry_over_shaping_overrides(&catalog, &mut store, &library_identity)?;
         Ok(Self {
-            catalog: Catalog::open(catalog)?,
-            store: Store::open(&workspace::verdict_store_path(workspace))?,
+            catalog,
+            store,
             library_identity,
         })
     }
+}
+
+/// 把票 `one-criterion-per-thing/07` 之前记在这份中立库里的**人工纠正**搬进沉淀库，
+/// **只搬一次**。返回新收下几条。
+///
+/// 人工纠正从那张票起住沉淀库（ADR-0001 的修订，挂账 D97）。旧程序建的中立库里那张表
+/// 可能攒着人一条条纠正出来的东西；新程序不再读它，**不搬一次那些就悄悄没了**。
+/// 开一份现场（[`Site::open`] / [`Site::open_file`]）先做这件事；命令行上不经现场、
+/// 自己开两份库再成型的那两条路（`romcat scan`、`romcat shape`）也调它。
+///
+/// 顺序是**先写沉淀库、再在中立库里记「搬过了」**：中途断掉，最坏是下次再搬一遍
+/// （沉淀库里已有的不盖），不会丢。记下之后旧表不再交出东西——人在沉淀库里撤掉的，
+/// 不许被旧表带回来。**旧表一行不删**：搬走不是删掉。
+///
+/// `library` 是这份中立库的**主库标识**：沉淀库几份主库共用，纠正按它分开。
+/// 结构版本对不上、开不进去的那一份走 [`rescue_shaping_overrides`]。
+///
+/// # Errors
+/// 读中立库、写沉淀库或记下「搬过了」失败时返回错误。
+pub fn carry_over_shaping_overrides(
+    catalog: &Catalog,
+    store: &mut Store,
+    library: &str,
+) -> Result<usize, SiteError> {
+    // 只活在内存里的库是这一版建的，没有旧表。
+    let Some(file) = catalog.file() else {
+        return Ok(0);
+    };
+    let Some(stranded) = Catalog::stranded_shaping_overrides(file)? else {
+        return Ok(0);
+    };
+    let added = store.add_missing_shaping_overrides(library, &stranded)?;
+    catalog.mark_shaping_overrides_carried()?;
+    Ok(added)
+}
+
+/// **结构版本对不上、开不进去**的那一份中立库：把它里面还没搬走的人工纠正救进沉淀库。
+/// 返回新收下几条。
+///
+/// 那份库打不开，它交出来的那句话（`unopened`，[`CatalogError::Version`]）叫人删掉它
+/// 重扫、并说「人工纠正一条不丢」——**这句话要成立，删之前就得先救**，而现场开不起来，
+/// [`carry_over_shaping_overrides`] 那条路走不到。所以撞上这句话的每一处都先调它：
+/// 开现场（`Site::at`）、开场列举（`workspace::catalogs`）、命令行自己开中立库的那两处。
+///
+/// **那份旧库一个字不改**（不记「搬过了」）：它开不进去，也就没人能在沉淀库里撤掉它的
+/// 纠正，再救一遍只是把已经有的再核一遍（[`Store::add_missing_shaping_overrides`]）。
+/// 主库标识从文件名认（[`workspace::library_identity_of`]），与开现场同一处。
+///
+/// # Errors
+/// 没救成时交回 [`SiteError::Stranded`]：原话连同没救成的原因，说清删之前先弄好沉淀库。
+pub fn rescue_shaping_overrides(
+    workspace: &Path,
+    catalog_file: &Path,
+    unopened: &CatalogError,
+) -> Result<usize, SiteError> {
+    let rescue = || -> Result<usize, SiteError> {
+        let Some(stranded) = Catalog::stranded_shaping_overrides(catalog_file)? else {
+            return Ok(0);
+        };
+        if stranded.is_empty() {
+            return Ok(0);
+        }
+        let library = workspace::library_identity_of(catalog_file)
+            .ok_or_else(|| SiteError::NotACatalog(path::display(catalog_file)))?;
+        let mut store = Store::open(&workspace::verdict_store_path(workspace))?;
+        Ok(store.add_missing_shaping_overrides(&library, &stranded)?)
+    };
+    rescue().map_err(|why| SiteError::Stranded {
+        said: unopened.to_string(),
+        why: why.to_string(),
+    })
 }
 
 #[cfg(test)]

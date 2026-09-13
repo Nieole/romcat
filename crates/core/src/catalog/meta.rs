@@ -81,6 +81,14 @@ pub(super) enum MetaKey {
     /// 只在 `identify::run` 里：起手从头算、清完结论时记成 `1`，跑完一整趟记成 `0`。记着 `0`
     /// 或者那一行不在，就是上一趟跑完了或者从没跑过——下一趟从头算。
     IdentifyUnfinished,
+    /// **旧表里的人工纠正已经搬进沉淀库了**（记下的时刻，UNIX 纪元起的秒）。
+    ///
+    /// 票 `one-criterion-per-thing/07` 之前人工纠正住在这份库的 `shaping_override` 表里。
+    /// 读 [`Catalog::stranded_shaping_overrides`]（记着就不再交出旧表；结构版本对不上的旧库
+    /// 也读这一行），写 [`Catalog::mark_shaping_overrides_carried`]（只在
+    /// `site::carry_over_shaping_overrides` 里，结构版本对得上的库才写——对不上的那一份
+    /// 一个字不改）。那一行不在就是还没搬过，或者这份库压根没有旧表。
+    ShapingOverridesCarriedAt,
 }
 
 impl MetaKey {
@@ -96,6 +104,7 @@ impl MetaKey {
             Self::ShapedScan => "shaped_scan",
             Self::ShapedManifest => "shaped_manifest",
             Self::IdentifyUnfinished => "identify_unfinished",
+            Self::ShapingOverridesCarriedAt => "shaping_overrides_carried_at",
         }
     }
 }

@@ -287,13 +287,14 @@ pub enum CatalogState {
     /// 两件事并成一件的话，一份开得动的库会被画成按不下去的——而验收要的是「那一份
     /// 单独标出来，其余照列」，不是「读不出数就当它坏了」。
     Openable(Result<CatalogFacts, String>),
-    /// **结构版本对不上**：开不进去，删掉它重扫一遍就好。
+    /// **结构版本对不上**：开不进去，删掉它重扫一遍就好——会丢什么，那句话逐项说。
     SchemaMismatch {
         /// 文件里的结构版本；连结构版本那一行都没有时是 0。
         found: u32,
         /// 本程序认得的结构版本。
         expected: u32,
-        /// 核心库那句原话：「结构版本是 X，本程序认得的是 Y，删掉它重扫一遍即可」。
+        /// 核心库那句原话：「结构版本是 X，本程序认得的是 Y，删掉它重扫一遍即可」，连同删库
+        /// 会跟着丢的那几样（逐项列在 [`CatalogError::Version`] 那一句里，这里不抄）。
         said: String,
     },
     /// **文件坏了**：开不进去，而且不是结构版本的事——不是一份 SQLite 库、读到一半坏了、
@@ -484,7 +485,10 @@ pub fn catalogs(workspace: &Path) -> Listing {
     if files.is_empty() {
         return Listing::Empty;
     }
-    let mut out: Vec<CatalogEntry> = files.into_iter().map(entry_of).collect();
+    let mut out: Vec<CatalogEntry> = files
+        .into_iter()
+        .map(|file| entry_of(workspace, file))
+        .collect();
     out.sort_by(|a, b| {
         LastScan::of(a)
             .cmp(&LastScan::of(b))
@@ -595,7 +599,12 @@ fn catalog_files(dir: &Path) -> Result<Vec<PathBuf>, DirUnreadable> {
 }
 
 /// 看一份中立库：开得开就问它自己那几个数，开不开就从文件名截个名字、把那句话带上。
-fn entry_of(path: PathBuf) -> CatalogEntry {
+///
+/// **结构版本对不上的那一份，列出来这一下就把它里面没搬走的人工纠正救进沉淀库**
+/// （[`site::rescue_shaping_overrides`](crate::site::rescue_shaping_overrides)）：开场那一屏
+/// 正是人读到「删掉它重扫」的地方，而那份库开不进去、现场开不起来——等不到别处去救。
+/// 这是列举唯一会写的东西，写的是沉淀库；那份旧库一个字不动。
+fn entry_of(workspace: &Path, path: PathBuf) -> CatalogEntry {
     let opened = Catalog::open_read_only(&path);
     let name = listed_name(&opened, &path);
     let state = match &opened {
@@ -609,7 +618,10 @@ fn entry_of(path: PathBuf) -> CatalogEntry {
         ) => CatalogState::SchemaMismatch {
             found: *found,
             expected: *expected,
-            said: format!("{error}"),
+            said: match crate::site::rescue_shaping_overrides(workspace, &path, error) {
+                Ok(_) => format!("{error}"),
+                Err(stranded) => format!("{stranded}"),
+            },
         },
         Err(error) => CatalogState::Broken {
             said: format!("{error}"),
@@ -708,6 +720,18 @@ pub fn titledb_store_path(workspace: &Path) -> PathBuf {
 #[must_use]
 pub fn titledb_cache_dir(workspace: &Path) -> PathBuf {
     workspace.join("titledb").join("cache")
+}
+
+/// 一份中立库文件的**主库标识**：就是它的主文件名。
+///
+/// 不是猜——[`catalog_path`] 就是拿 [`Slug::text`] 拼出 `catalog/{主库标识}.sqlite3` 的，
+/// 这里是同一条算法反过来走。**只此一处**：开现场（`site::Site::open_file`）与救旧库里的
+/// 人工纠正（`site::rescue_shaping_overrides`）问的都是它（ADR-0024）。
+#[must_use]
+pub fn library_identity_of(catalog_file: &Path) -> Option<String> {
+    catalog_file
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
 }
 
 /// **沉淀库**在哪。
