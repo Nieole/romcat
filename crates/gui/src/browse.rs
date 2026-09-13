@@ -1637,7 +1637,7 @@ impl Screen {
                     ui.separator();
                 }
                 ui.horizontal(|ui| {
-                    ui.strong("筛选");
+                    ui.label(font::strong("筛选"));
                     if ui
                         .button("全清")
                         .on_hover_text(
@@ -1665,7 +1665,7 @@ impl Screen {
                 // （`Catalog::facets` 一次 `GROUP BY` 问出来的），那是用来**摸清库里有
                 // 什么**的；条件组里的值要打出来，那是用来**说清楚要哪一批**的。
                 // 没有条数的下拉框，人只能一个个点开试。
-                ui.strong("一按就有的档").on_hover_text(
+                ui.label(font::strong("一按就有的档")).on_hover_text(
                     "**探索用的那一半**：五个维度各带着条数，点一下就收窄一层，\
                      不必先知道值长什么样。「识别状态」这一维只在这儿有，\
                      条件组里写不出来。",
@@ -1699,7 +1699,7 @@ impl Screen {
                 );
                 ui.separator();
 
-                ui.strong("识别状态");
+                ui.label(font::strong("识别状态"));
                 let mut state = self.query.state;
                 if ui.selectable_label(state.is_none(), "不筛").clicked() {
                     state = None;
@@ -1716,7 +1716,7 @@ impl Screen {
                 self.query.state = state;
                 ui.separator();
 
-                ui.strong("条件组").on_hover_text(
+                ui.label(font::strong("条件组")).on_hover_text(
                     "**表达用的那一半**：可嵌套的条件组，每组选「全部满足 / 任一满足 /\
                          都不满足」，组里还能再套组，九个运算符。**这就是子库的规则**——\
                          上头那五个档存成子库时也会折进同一条规则里\
@@ -1821,7 +1821,7 @@ impl Screen {
     ///
     /// **加收藏那一下不在这儿，在抬头**（原型钉的位置）：它按得最勤，不该藏在左栏底下。
     fn collection_panel(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
-        ui.strong("收藏与合集").on_hover_text(
+        ui.label(font::strong("收藏与合集")).on_hover_text(
             "**加收藏那一下在抬头**（「★ 收藏」），因为它按得最勤：\
                  勾一批、按一下、接着筛下一批。这儿是它的另一半——取消，\
                  以及自己起名的合集（挂单 Q117）。",
@@ -1888,7 +1888,7 @@ impl Screen {
             self.update_panel(ui, site);
             return;
         }
-        ui.strong("存成子库");
+        ui.label(font::strong("存成子库"));
         let folded = self.query.to_rule();
         match &folded {
             Ok(None) => {
@@ -1935,7 +1935,7 @@ impl Screen {
             return;
         };
         let (name, broken) = (editing.sublibrary.clone(), editing.broken.len());
-        ui.strong(format!("正在改子库「{name}」的选择集"));
+        ui.label(font::strong(format!("正在改子库「{name}」的选择集")));
         ui.weak("这个子库的规则已经预填在上面的筛选器里。调完按「更新到子库」原样带回。");
         if broken > 0 {
             // **处置它们的地方在这一栏顶上**（票 `gui-redesign/14`）：这儿说的是
@@ -2107,7 +2107,7 @@ impl Screen {
         egui::ScrollArea::vertical()
             .id_salt("作品详情")
             .show(ui, |ui| {
-                ui.strong(&work.name);
+                ui.label(font::strong(&work.name));
                 ui.label(format!(
                     "{}｜{}｜{} 个变体",
                     if work.platforms.is_empty() {
@@ -2125,7 +2125,7 @@ impl Screen {
                 }
 
                 ui.separator();
-                ui.strong(format!("变体 {} 个", work.variants.len()));
+                ui.label(font::strong(format!("变体 {} 个", work.variants.len())));
                 ui.weak("点一个：底下的文件、媒体与元数据编辑就只作用于它。");
                 for variant in &work.variants {
                     if this.variant_row(ui, variant) {
@@ -2245,7 +2245,10 @@ impl Screen {
             ui.weak("选一个变体，看它在哪几个合集里。");
             return;
         }
-        ui.strong(format!("收藏与合集 · {} 个", self.standing.len()));
+        ui.label(font::strong(format!(
+            "收藏与合集 · {} 个",
+            self.standing.len()
+        )));
         if self.standing.is_empty() {
             ui.weak("一个都没进。勾几行按抬头那颗「★ 收藏」，或者在左栏底下加进自建合集。");
             return;
@@ -2275,7 +2278,7 @@ impl Screen {
             ui.weak("选一个变体，看它有哪些文件。");
             return;
         };
-        ui.strong(format!("文件 · {} 个", detail.members.len()));
+        ui.label(font::strong(format!("文件 · {} 个", detail.members.len())));
         for (key, role) in detail.members.iter().take(TOP_MEMBERS) {
             ui.label(format!("{}  {key}", role.code()));
         }
@@ -2298,7 +2301,10 @@ impl Screen {
     /// 一屏 6 件媒体，先看图后看账。
     fn media_ui(&self, ui: &mut egui::Ui) -> Option<crate::media::Clicked> {
         let detail = self.detail.as_ref()?;
-        ui.strong(format!("媒体 · {} 件", detail.media_items.len()));
+        ui.label(font::strong(format!(
+            "媒体 · {} 件",
+            detail.media_items.len()
+        )));
         // **几格图**：一行摆得下几格摆几格，照原型 `prototype.html` 那张 `.thumbs` 网格。
         // 格子的大小跟着这块面板的宽度走（[`crate::media::cell_size`]，挂单 `Q126`）——
         // 拖宽了就每格大一点，而不是右边空出一条。
@@ -2470,7 +2476,7 @@ impl Screen {
         egui::ScrollArea::vertical()
             .id_salt("变体详情")
             .show(ui, |ui| {
-                ui.strong(&detail.row.key);
+                ui.label(font::strong(&detail.row.key));
                 ui.label(format!(
                     "平台 {}｜成型规则 {}｜{} 个文件｜{}",
                     detail.row.platform.as_deref().unwrap_or("未知"),
@@ -2557,7 +2563,7 @@ impl Screen {
         let name = editing.sublibrary.clone();
         let key = detail.row.key.clone();
         let current = editing.exceptions.get(&key).cloned();
-        ui.strong(format!("例外 · 子库「{name}」"));
+        ui.label(font::strong(format!("例外 · 子库「{name}」")));
         match &current {
             None => {
                 ui.weak("这个变体上还没有例外：进不进选择集，眼下由规则说了算。");
@@ -2609,7 +2615,7 @@ impl Screen {
 
     /// **标题集合**：全部叫法，加一条、删一条。
     fn titles_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, detail: &VariantDetail) -> bool {
-        ui.strong("标题集合");
+        ui.label(font::strong("标题集合"));
         let Some(work) = detail.work.clone() else {
             ui.weak("这个变体还没认出属于哪个作品，标题集合无从谈起。");
             return false;
@@ -2647,7 +2653,7 @@ impl Screen {
                     row.seen,
                 );
                 if row.is_verdict() {
-                    ui.strong(line).on_hover_text(&row.evidence);
+                    ui.label(font::strong(line)).on_hover_text(&row.evidence);
                 } else {
                     ui.label(line).on_hover_text(&row.evidence);
                 }
@@ -2805,7 +2811,7 @@ impl Screen {
     /// ——年份、发行商、开发商、类型、简介、汉化组这几样也会写进导出条目
     /// （`adapter::converge`），主库的元数据文件既然不再是编辑入口，它们就得在这儿改。
     fn values_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, detail: &VariantDetail) -> bool {
-        ui.strong("刮削来的元数据");
+        ui.label(font::strong("刮削来的元数据"));
         ui.weak("同一个字段可以有好几条，三元组并存不互相覆盖；**裁决**排在最前，导出用它。");
         let mut dirty = false;
         let mut clear: Option<(AnchorKind, Field)> = None;
@@ -2835,7 +2841,7 @@ impl Screen {
                     short.as_deref().unwrap_or(&item.value.value),
                 );
                 let response = if item.is_verdict() {
-                    ui.strong(line)
+                    ui.label(font::strong(line))
                 } else {
                     ui.label(line)
                 };
@@ -2920,7 +2926,7 @@ impl Screen {
 
     /// **首选变体**：这个作品在这个平台上默认启动哪一个。
     fn preferred_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, detail: &VariantDetail) -> bool {
-        ui.strong("首选变体");
+        ui.label(font::strong("首选变体"));
         let (Some(work), Some(platform)) = (detail.work.clone(), detail.row.platform.clone())
         else {
             ui.weak("作品或平台还没定下来，首选变体无从谈起。");
@@ -2990,21 +2996,40 @@ impl Screen {
     /// 字体样张：把 egui 内置字体缺的那几类字**摆出来给人看**。
     fn font_sample(&self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.strong("字体样张");
-            ui.label(format!("子集 {}", human_bytes(font::subset_bytes() as u64)));
+            ui.label(font::strong("字体样张"));
+            ui.label(format!(
+                "子集 {}，另有拉丁粗体与等宽 {}",
+                human_bytes(font::subset_bytes() as u64),
+                human_bytes(font::latin_bytes() as u64),
+            ));
         });
-        for (what, text) in font::SAMPLE.iter().copied() {
+        // 末尾两行摆粗体与等宽：粗体只落在拉丁与数字上、中文照旧常规字重，等宽的数字同宽。
+        let sample = font::SAMPLE
+            .iter()
+            .map(|(what, text)| (*what, egui::RichText::new(*text)));
+        let faces = [
+            ("粗体", font::strong("Final Fantasy VII 1997 最终幻想")),
+            ("等宽", font::mono("SLPS-02170  1,234,567  888.8 MB")),
+        ];
+        for (what, text) in sample.chain(faces) {
             ui.horizontal(|ui| {
                 ui.add_sized([90.0, 18.0], egui::Label::new(what));
                 ui.label(text);
             });
         }
-        // OFL 要求分发字体时随附许可，而这份字体是嵌在可执行文件里的——许可得跟着走。
-        ui.collapsing("字体许可（SIL Open Font License 1.1）", |ui| {
-            egui::ScrollArea::vertical()
-                .max_height(160.0)
-                .show(ui, |ui| ui.monospace(font::LICENSE));
-        });
+        // OFL 要求分发字体时随附许可，而这几份字体是嵌在可执行文件里的——许可得跟着走，
+        // 两家版权行不同，一家一份。全文用常规字体：等宽只给路径、哈希、序列号、数量与容量。
+        for (family, text) in font::LICENSES.iter().copied() {
+            ui.collapsing(
+                format!("字体许可 · {family}（SIL Open Font License 1.1）"),
+                |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt(family)
+                        .max_height(160.0)
+                        .show(ui, |ui| ui.label(text));
+                },
+            );
+        }
     }
 }
 
@@ -3024,7 +3049,7 @@ fn facet_picker(
     facets: &[romcat_core::catalog::Facet],
     picked: &mut Option<String>,
 ) {
-    ui.strong(what).on_hover_text(hint);
+    ui.label(font::strong(what)).on_hover_text(hint);
     if facets.is_empty() {
         ui.weak(format!("库里还没有{what}这一维的数据。"));
         return;
@@ -3050,7 +3075,7 @@ fn platform_picker(
     facets: &[romcat_core::catalog::Facet],
     picked: &mut Option<PlatformFilter>,
 ) {
-    ui.strong("平台")
+    ui.label(font::strong("平台"))
         .on_hover_text("变体所属的硬件系统。认不出平台的内容照常入库（ADR-0011）。");
     if facets.is_empty() {
         ui.weak("库里还没有平台这一维的数据。");

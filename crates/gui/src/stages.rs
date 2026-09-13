@@ -50,6 +50,7 @@ use romcat_core::stage::{Behind, Stage, StageRow, Stages};
 use romcat_core::task::{Cutoff, Ending, Finished, Handle};
 use romcat_core::{title, verdict, workspace};
 
+use crate::font;
 use crate::task::{Product, Tasks};
 
 /// 库屏上的**工序**那一段。
@@ -354,7 +355,10 @@ impl Section {
     /// 画这一段。
     pub fn ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         ui.horizontal(|ui| {
-            ui.strong(format!("工序 · {} 道", self.stages.rows().len()));
+            ui.label(font::strong(format!(
+                "工序 · {} 道",
+                self.stages.rows().len()
+            )));
             ui.weak("这个库还差哪几道步骤。点一下排一趟任务上台");
         });
         if let Some(error) = &self.error {
@@ -373,7 +377,7 @@ impl Section {
             .striped(true)
             .show(ui, |ui| {
                 for header in ["工序", "还差多少", ""] {
-                    ui.strong(header);
+                    ui.label(font::strong(header));
                 }
                 ui.end_row();
                 for row in &rows {

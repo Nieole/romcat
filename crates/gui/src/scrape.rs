@@ -47,6 +47,7 @@ use romcat_core::site::Site;
 use romcat_core::task::{Cutoff, Ending, Finished, Handle};
 use romcat_core::{verdict, workspace, zh};
 
+use crate::font;
 use crate::task::{Product, Tasks};
 
 /// 面板上那句常驻的话。**行为上也成立**，不只是写着好看：
@@ -471,10 +472,10 @@ impl Panel {
         }
         self.recount(&site.catalog);
         ui.horizontal(|ui| {
-            ui.strong(format!(
+            ui.label(font::strong(format!(
                 "刮削 · 作用于筛出来的 {} 个变体",
                 thousands(self.scope_total()),
-            ))
+            )))
             .on_hover_text(
                 "**范围就是筛出来的那一批**，这儿改不了——要改回左边的筛选器改。\
                  屏上写几个、这儿列几个、按下去动几个，三处同一个数。",
@@ -503,7 +504,7 @@ impl Panel {
 
     /// **字段 · 我要什么。**
     fn fields_ui(&mut self, ui: &mut egui::Ui) {
-        ui.strong("字段 · 我要什么");
+        ui.label(font::strong("字段 · 我要什么"));
         for field in KNOBS {
             let mut on = self.fields.contains(&field);
             if ui.checkbox(&mut on, field.label()).changed() {
@@ -530,7 +531,7 @@ impl Panel {
 
     /// **源 · 花多少代价。**
     fn sources_ui(&mut self, ui: &mut egui::Ui) {
-        ui.strong("源 · 花多少代价");
+        ui.label(font::strong("源 · 花多少代价"));
         let mut local = true;
         ui.add_enabled(false, egui::Checkbox::new(&mut local, "本地源"))
             .on_hover_text(
@@ -552,7 +553,7 @@ impl Panel {
 
     /// **采法 · 跑多久。**
     fn sweep_ui(&mut self, ui: &mut egui::Ui) {
-        ui.strong("采法 · 跑多久");
+        ui.label(font::strong("采法 · 跑多久"));
         for sweep in Gather::all() {
             if ui
                 .radio(
@@ -608,7 +609,7 @@ impl Panel {
                 }
             }
         }
-        ui.strong(UNTOUCHED).on_hover_text(
+        ui.label(font::strong(UNTOUCHED)).on_hover_text(
             "**裁决**排在每条优先级链的第一位（ADR-0001），刮削产出的值再多也排在它后面；\
              重采清采集记录时也一条裁决都不删。",
         );

@@ -24,6 +24,7 @@ use romcat_core::site::Site;
 use romcat_core::workspace::{self, CatalogEntry};
 
 use crate::claim;
+use crate::font;
 
 /// 这个工作目录里一份中立库都没有时说的那句话。
 ///
@@ -165,7 +166,7 @@ impl Screen {
     /// 因为**认领进哪儿**正是这一下最要紧的事——认错了目录，建出来的库在别处。
     fn workspace_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.strong("工作目录");
+            ui.label(font::strong("工作目录"));
             ui.label(path::display(&self.workspace));
             // 向导开着的时候不再摆一颗——那一下没有意义（已经在里头了），而按下去
             // 会把人攒到一半的那三串字抹掉。
@@ -243,7 +244,7 @@ impl Screen {
                     要开的 = Some(一份.path.clone());
                 }
                 ui.vertical(|ui| {
-                    ui.strong(&一份.name);
+                    ui.label(font::strong(&一份.name));
                     match &一份.facts {
                         Ok(facts) => {
                             ui.weak(format!(
