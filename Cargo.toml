@@ -92,6 +92,14 @@ ring = "0.17"
 # `docs/library-facts.md`）。gif 与 webp 各要再拉一个解码器，而库里一张都没有——
 # 认不出的格式如实说「这一版不解这个格式」，不拿一个猜出来的依赖换。
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# **「这个目录写不写得进」要在一个字节都不写的前提下答**（票 `no-mute-spots-opening-a-catalog/04`：
+# 添加主库那条向导点「开始扫描」之前，工作目录里一个文件都不写）。那一问是 POSIX 的 `access(2)`，
+# 而这个工作区禁 `unsafe`，`libc::access` 用不了——`rustix` 是它的安全封装。
+#
+# **它本来就在锁文件里**（`tempfile`、`zbus` 等在用），这里只开 `std` 与 `fs`，只在 Unix 上用
+# （`crates/core/Cargo.toml` 的 `cfg(unix)`）。Windows 上这一问答不出来，交给建库那一下自己报错
+# （挂单 `Q611`）。
+rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
 
 # 主库只读是这个项目唯一不可退让的约束（ADR-0004），
 # 因此禁 unsafe，一切磁盘接触走 `romcat_core::fs::LibraryFs` 这个只读接缝。

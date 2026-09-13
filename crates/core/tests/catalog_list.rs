@@ -8,8 +8,16 @@ use romcat_core::catalog::roots::{self, RootScan};
 use romcat_core::catalog::{Catalog, SCHEMA_VERSION};
 use romcat_core::platform::Manifest;
 use romcat_core::shape::{Role, SINGLE_FILE_RULE, Variant};
-use romcat_core::testing::{self, temp_dir};
-use romcat_core::workspace::{self, Slug};
+use romcat_core::testing::{self, Revoke, temp_dir};
+use romcat_core::workspace::{self, CatalogEntry, CatalogState, Listing, Slug};
+
+/// 列这个工作目录，**得是有库那一态**，交出那几行。
+fn 有库(工作目录: &std::path::Path) -> Vec<CatalogEntry> {
+    match workspace::catalogs(工作目录) {
+        Listing::Catalogs(那几行) => 那几行,
+        别的 => panic!("该列得出库：{别的:?}"),
+    }
+}
 
 /// 在这个工作目录里现建一份中立库，返回它的文件路径。
 fn 建一份(工作目录: &std::path::Path, 名字: &str) -> std::path::PathBuf {
@@ -41,7 +49,7 @@ fn 列出这个工作目录里的中立库() {
     建一份(工作目录.path(), "甲库");
     建一份(工作目录.path(), "乙库");
 
-    let 名字: Vec<String> = workspace::catalogs(工作目录.path())
+    let 名字: Vec<String> = 有库(工作目录.path())
         .into_iter()
         .map(|一份| 一份.name)
         .collect();
@@ -88,12 +96,13 @@ fn 变体数与上次扫描时刻盘没挂上照样交得出() {
             .expect("记得下上次扫描");
     }
 
-    let 列出来的 = workspace::catalogs(工作目录.path());
+    let 列出来的 = 有库(工作目录.path());
     let [一份] = 列出来的.as_slice() else {
         panic!("该只有一份库：{列出来的:?}");
     };
-    assert!(一份.openable, "这一份该开得进去");
-    let 那几个数 = 一份.facts.as_ref().expect("这一份读得开");
+    let CatalogState::Openable(Ok(那几个数)) = &一份.state else {
+        panic!("这一份该开得进去、数也读得回来：{一份:?}");
+    };
     assert_eq!(那几个数.variants, 2);
     assert_eq!(那几个数.scanned_at, Some(1_700_000_000));
 }
@@ -108,7 +117,7 @@ fn 结构版本对不上的库照列并说清是哪个版本对哪个版本() {
     let 旧的 = workspace::catalog_path(工作目录.path(), Slug::Named("版本对不上的库"));
     testing::catalog_at_version(&旧的, 4);
 
-    let 列出来的 = workspace::catalogs(工作目录.path());
+    let 列出来的 = 有库(工作目录.path());
     assert_eq!(
         列出来的.len(),
         2,
@@ -119,8 +128,13 @@ fn 结构版本对不上的库照列并说清是哪个版本对哪个版本() {
         .iter()
         .find(|一份| 一份.path == 旧的)
         .expect("版本对不上的那一份照样列出来了");
-    assert!(!那一份.openable, "版本对不上的那一份不该是「开得进去」");
-    let 说的 = 那一份.facts.as_ref().expect_err("这一份开不出来");
+    assert!(
+        !那一份.state.openable(),
+        "版本对不上的那一份不该是「开得进去」"
+    );
+    let CatalogState::SchemaMismatch { said: 说的, .. } = &那一份.state else {
+        panic!("版本对不上的那一份没交出「结构版本对不上」：{那一份:?}");
+    };
     assert!(
         说的.contains("结构版本是 4"),
         "没说清库里是哪个版本：{说的}"
@@ -140,8 +154,48 @@ fn 结构版本对不上的库照列并说清是哪个版本对哪个版本() {
         .find(|一份| 一份.path == 好的)
         .expect("好的那一份照列");
     assert!(
-        好那一份.openable && 好那一份.facts.is_ok(),
+        matches!(好那一份.state, CatalogState::Openable(Ok(_))),
         "好的那一份被连累了：{好那一份:?}"
+    );
+}
+
+#[test]
+fn 调用方分得开结构版本对不上与文件坏了() {
+    // ADR-0021 那条修订、挂单 `Q393`：从前两种打不开交出来都是一句字符串，调用方要分只能去
+    // 解析那句话。而人对这两种的下一步各不相同——结构版本对不上删掉重扫就好，文件坏了是
+    // 另一回事。**分支靠类型，不靠字符串**：这条测试一个字都不看那句话。
+    let 工作目录 = temp_dir("列举-分得开");
+    let 好的 = 建一份(工作目录.path(), "好的库");
+    let 旧的 = workspace::catalog_path(工作目录.path(), Slug::Named("版本对不上的库"));
+    testing::catalog_at_version(&旧的, 4);
+    let 坏的 = workspace::catalog_path(工作目录.path(), Slug::Named("坏的库"));
+    std::fs::write(&坏的, "这不是一份 SQLite 数据库").expect("写得出那个文件");
+
+    let 列出来的 = 有库(工作目录.path());
+    let 那一份 = |文件: &std::path::PathBuf| {
+        列出来的
+            .iter()
+            .find(|一份| &一份.path == 文件)
+            .unwrap_or_else(|| panic!("{} 没列出来：{列出来的:?}", 文件.display()))
+    };
+
+    assert!(
+        matches!(
+            那一份(&旧的).state,
+            CatalogState::SchemaMismatch { found: 4, expected, .. } if expected == SCHEMA_VERSION
+        ),
+        "版本对不上的那一份没交出「结构版本对不上」、或者版本号不对：{:?}",
+        那一份(&旧的),
+    );
+    assert!(
+        matches!(那一份(&坏的).state, CatalogState::Broken { .. }),
+        "坏了的那一份没交出「文件坏了」：{:?}",
+        那一份(&坏的),
+    );
+    assert!(
+        matches!(那一份(&好的).state, CatalogState::Openable(Ok(_))),
+        "好的那一份没交出「开得了」：{:?}",
+        那一份(&好的),
     );
 }
 
@@ -155,7 +209,7 @@ fn 主库原名读不到时退回从文件名截既不空着也不是那串哈�
     let 库文件 = workspace::catalog_path(工作目录.path(), slug);
     testing::catalog_without_name(&库文件);
 
-    let 列出来的 = workspace::catalogs(工作目录.path());
+    let 列出来的 = 有库(工作目录.path());
     let [一份] = 列出来的.as_slice() else {
         panic!("该只有一份库：{列出来的:?}");
     };
@@ -172,33 +226,78 @@ fn 一份读不出来的库不连累其余() {
     let 坏的 = workspace::catalog_path(工作目录.path(), Slug::Named("坏的库"));
     std::fs::write(&坏的, "这不是一份 SQLite 数据库").expect("写得出那个文件");
 
-    let 列出来的 = workspace::catalogs(工作目录.path());
+    let 列出来的 = 有库(工作目录.path());
     assert_eq!(列出来的.len(), 2, "整批塌了：{列出来的:?}");
     let 那一份 = 列出来的
         .iter()
         .find(|一份| 一份.path == 坏的)
         .expect("坏的那一份照样列出来了");
-    assert!(!那一份.openable, "开不进去的那一份不该是「开得进去」");
-    assert!(那一份.facts.is_err(), "读不出来的却报了一份数：{那一份:?}");
+    assert!(
+        !那一份.state.openable(),
+        "开不进去的那一份不该是「开得进去」：{那一份:?}"
+    );
     assert_eq!(那一份.name, "坏的库", "开不了也得有个认得出的名字");
     assert!(
         列出来的
             .iter()
-            .any(|一份| 一份.openable && 一份.facts.is_ok()),
+            .any(|一份| matches!(一份.state, CatalogState::Openable(Ok(_)))),
         "好的那一份被连累了：{列出来的:?}",
     );
 }
 
 #[test]
 fn 一份中立库都没有时列出来是空的而且不留下任何东西() {
-    // 开场那一屏那句「还没有库，认领一个主库开始」由它撑着。**列一遍不许留痕**：
+    // 开场那一屏那句「还没有库，添加一个主库开始」由它撑着。**列一遍不许留痕**：
     // 只是想看看有哪些库，不该顺手把目录建出来，更不该建出一份空库。
     let 工作目录 = temp_dir("列举-空的");
-    assert!(workspace::catalogs(工作目录.path()).is_empty());
+    let 列出来的 = workspace::catalogs(工作目录.path());
+    assert!(
+        matches!(列出来的, Listing::Empty),
+        "还没建过库的工作目录该是「空的」：{列出来的:?}"
+    );
     assert!(
         !工作目录.path().join("catalog").exists(),
         "列一遍把目录建出来了",
     );
+}
+
+#[test]
+fn 工作目录读不动时交出来的是读不动而不是空的() {
+    // ADR-0021 那条修订：**读不动与空的是两态**（挂单 `Q388`）。从前列不开那个目录就当空的
+    // 交出去，开场屏上说「还没有库」——而正确的下一步完全不同：去修那个目录的权限，别去
+    // 建第二份库。
+    //
+    // 造的是**真的**读不动的目录，不注入：里头明明有一份库，权限位一收就列不开。造不出来
+    // （不是 Unix、或者跑测试的是 root）就如实跳过，`testing::revoke` 印出为什么。
+    //
+    // **两层都钉**：工作目录**本身**读不动（票面说的是「把工作目录指到一个读不动的位置」），
+    // 与它底下中立库住的那个目录读不动。
+    let 工作目录 = temp_dir("列举-收了读权限");
+    let 库文件 = 建一份(工作目录.path(), "列不开也在的库");
+    let 目录 = 库文件.parent().expect("有那个目录").to_path_buf();
+
+    for 收哪一层 in [工作目录.path(), 目录.as_path()] {
+        let Some(_还回去) = testing::revoke(收哪一层, Revoke::Read) else {
+            return;
+        };
+
+        let 列出来的 = workspace::catalogs(工作目录.path());
+
+        let Listing::Unreadable(为什么) = &列出来的 else {
+            panic!(
+                "{} 读不动时交出来的不是「读不动」：{列出来的:?}",
+                收哪一层.display()
+            );
+        };
+        // 列的是中立库住的那个目录；工作目录本身读不动时，列不开的也是它。
+        assert_eq!(为什么.dir, 目录, "没说清是哪个目录读不动");
+        let 说的 = 为什么.to_string();
+        assert!(说的.contains("读不动"), "那句话没说是读不动：{说的}");
+        assert!(
+            说的.contains(&romcat_core::path::display(&目录)),
+            "那句话没说清是哪个目录：{说的}"
+        );
+    }
 }
 
 #[test]
@@ -211,7 +310,7 @@ fn 不是中立库的那些文件不算数() {
     std::fs::write(目录.join("唯一那份库.sqlite3-wal"), "").expect("写得出");
     std::fs::create_dir(目录.join("子目录")).expect("建得出");
 
-    let 列出来的 = workspace::catalogs(工作目录.path());
+    let 列出来的 = 有库(工作目录.path());
     let [一份] = 列出来的.as_slice() else {
         panic!("旁边的东西被当成库了：{列出来的:?}");
     };

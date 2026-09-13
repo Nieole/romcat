@@ -26,8 +26,8 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use crate::catalog::Catalog;
 use crate::catalog::browse::VariantQuery;
+use crate::catalog::{Catalog, CatalogError};
 use crate::path;
 
 /// 默认工作目录。
@@ -264,22 +264,52 @@ pub struct CatalogEntry {
     /// **读不开的那一份也有名字**——从文件名截，把哈希后缀剥掉（[`readable_half`]）。
     /// 一份说不出名字的库不该在列表上留一行空白，更不该只剩一串十六进制。
     pub name: String,
-    /// **这份库开得进去吗**——`site::Site::open_file` 那一步走不走得通。
+    /// **这份库眼下是什么状态**：开得了、结构版本对不上、还是文件坏了。
     ///
-    /// **与[那几个数](Self::facts)分开，不是一件事。** 结构版本对不上是**开不进去**；
-    /// 而开进去了、只是某一次查询没读回数来，那只是这一行的数缺了，库照样开得进去。
+    /// **读不开也照列不误**：开不进去的那一份带着说得出原因的状态单独站着。
+    pub state: CatalogState,
+}
+
+/// 列出来的一份中立库**说得出原因的状态**：开得了 ／ 结构版本对不上 ／ 文件坏了。
+///
+/// **分成几支，不是一句话**（ADR-0021 那条修订，挂单 `Q393`）：两种打不开交出来都是一句
+/// 字符串的话，调用方要分只能去解析那句话——而人对这两种的下一步各不相同：结构版本对不上
+/// 删掉重扫就好（中立库整份可再生），文件坏了是另一回事。
+///
+/// 每一支里给人看的那句话（`said`）都是核心库的原话，
+/// [`CatalogError`] 自己的那一句。措辞由核心库一处出，
+/// 界面只画、一个字不改写（ADR-0005）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogState {
+    /// **开得了**：`site::Site::open_file` 那一步走得通。
+    ///
+    /// 里头是**它交得出的那几个数**；某一次查询没读回数来时是那句话，**库照样开得进去**。
     /// 两件事并成一件的话，一份开得动的库会被画成按不下去的——而验收要的是「那一份
     /// 单独标出来，其余照列」，不是「读不出数就当它坏了」。
-    ///
-    /// 它为**假**时 [`Self::facts`] 必定是 `Err`，那句话说的就是开不进去的原因。
-    pub openable: bool,
-    /// 读得出来时**它交得出的那几个数**；读不出来时是那句给人看的话。
-    ///
-    /// **读不开也照列不误**：那句话里写着为什么——结构版本对不上时它就是
-    /// [`CatalogError::Version`](crate::catalog::CatalogError::Version)
-    /// 那一句「版本 X，本程序认得的是 Y，删掉它重扫一遍即可」。措辞由核心库一处出，
-    /// 界面只画（ADR-0005）。
-    pub facts: Result<CatalogFacts, String>,
+    Openable(Result<CatalogFacts, String>),
+    /// **结构版本对不上**：开不进去，删掉它重扫一遍就好。
+    SchemaMismatch {
+        /// 文件里的结构版本；连结构版本那一行都没有时是 0。
+        found: u32,
+        /// 本程序认得的结构版本。
+        expected: u32,
+        /// 核心库那句原话：「结构版本是 X，本程序认得的是 Y，删掉它重扫一遍即可」。
+        said: String,
+    },
+    /// **文件坏了**：开不进去，而且不是结构版本的事——不是一份 SQLite 库、读到一半坏了、
+    /// 列出来之后又被挪走了。
+    Broken {
+        /// 核心库那句原话，带着底层怎么说的。
+        said: String,
+    },
+}
+
+impl CatalogState {
+    /// 这份库**开得进去**吗——开场上那颗「打开」按不按得下。
+    #[must_use]
+    pub const fn openable(&self) -> bool {
+        matches!(self, Self::Openable(_))
+    }
 }
 
 /// 一份中立库交得出的那几个数。
@@ -297,11 +327,124 @@ pub struct CatalogFacts {
     pub scanned_at: Option<i64>,
 }
 
+/// 列一个**工作目录**交出来的那一样：**有库 ／ 空的 ／ 读不动**，三态。
+///
+/// **读不动不是空的**（ADR-0021 那条修订，挂单 `Q388`）：两者交出来是同一样东西的话，
+/// 开场屏上说的是「还没有库」——而正确的下一步完全不同：去修那个目录的权限，别去建第二份库。
+#[derive(Debug)]
+pub enum Listing {
+    /// **有库**：一份一行，**至少一份**，按**主库原名**排。开不进去的那几份也在里头，
+    /// 各自带着说得出原因的状态（[`CatalogEntry`]）。
+    Catalogs(Vec<CatalogEntry>),
+    /// **空的**：这个工作目录里一份中立库都没有。中立库住的那个目录还没建过也是这一态——
+    /// 那是一个还一份库都没建过的工作目录，不是读不动。
+    Empty,
+    /// **读不动**：中立库住的那个目录在，却列不开。里头有没有库、有哪几份，说不上来。
+    Unreadable(DirUnreadable),
+}
+
+impl Listing {
+    /// 列出来的那几行：有库时是那几行，空的时是空的一批。
+    ///
+    /// **读不动时是 `Err`，不是空的一批**——拿到它的人得自己说清怎么办。
+    ///
+    /// # Errors
+    /// 那个目录读不动时交出那一条（[`DirUnreadable`]）。
+    pub fn entries(&self) -> Result<&[CatalogEntry], &DirUnreadable> {
+        match self {
+            Self::Catalogs(entries) => Ok(entries),
+            Self::Empty => Ok(&[]),
+            Self::Unreadable(why) => Err(why),
+        }
+    }
+}
+
+/// **中立库住的那个目录读不动**：它在，却列不开。
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "中立库住的那个目录读不动：{}（{source}）。里头有哪几份库说不上来——先去看它的权限，别急着再建一份",
+    path::display(.dir)
+)]
+pub struct DirUnreadable {
+    /// 列不开的那个目录。
+    pub dir: PathBuf,
+    /// 系统怎么说的。
+    pub source: std::io::Error,
+}
+
+/// **中立库要建进的那个目录写不动**。建库之前就问得出来（[`Catalog::refuse_create`]），
+/// 不必等到真去建的那一下撞上一句「建不出来」。
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "中立库要建进的那个目录写不动：{}（{source}）——换一个工作目录，或者先去改它的权限",
+    path::display(.dir)
+)]
+pub struct DirUnwritable {
+    /// 写不动的那个目录：中立库住的那个目录；它还没建出来时，是它最近那一级已经在的上级。
+    pub dir: PathBuf,
+    /// 系统怎么说的。
+    pub source: std::io::Error,
+}
+
+/// 一份中立库文件住在哪个目录：它的上级；没有上级（只是一个文件名）时是当前目录。
+///
+/// 查重名（`namesake_beside`）与建库之前那一问（[`Catalog::refuse_create`]）问的都是这一处。
+pub(crate) fn dir_of(file: &Path) -> &Path {
+    file.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+/// **这个目录写不写得进一份新的中立库**——问系统答不答应，一个字节都不写。
+///
+/// 目录还没建出来时，问的是它最近那一级**已经在**的上级：建库那一下要从那儿往下把目录建出来。
+/// 那一级在却不是目录（被一个文件占着）、或者连「在不在」都问不出来（上级进不去），也算写不动
+/// ——建库那一下照样过不去。
+pub(crate) fn refuse_unwritable(dir: &Path) -> Result<(), DirUnwritable> {
+    let mut at = dir;
+    let answer = loop {
+        match std::fs::metadata(at) {
+            Ok(meta) if meta.is_dir() => break writable(at),
+            Ok(_) => break Err(std::io::Error::from(std::io::ErrorKind::NotADirectory)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match at.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+                    Some(parent) => at = parent,
+                    // 一路往上都不在（相对路径走到了头）：说不准，交给建库那一下自己说。
+                    None => break Ok(()),
+                }
+            }
+            Err(error) => break Err(error),
+        }
+    };
+    answer.map_err(|source| DirUnwritable {
+        dir: at.to_path_buf(),
+        source,
+    })
+}
+
+/// 系统答不答应往这个目录里建东西：写与进都得许（`access(2)`）。
+#[cfg(unix)]
+fn writable(dir: &Path) -> std::io::Result<()> {
+    use rustix::fs::{Access, access};
+
+    access(dir, Access::WRITE_OK | Access::EXEC_OK).map_err(std::io::Error::from)
+}
+
+/// **Windows 上这一问答不出来**：目录上那个只读属性管不住往里建文件，真正管事的是 ACL，
+/// 而问 ACL 要走一段 `unsafe` 的系统调用（这个工作区禁 `unsafe`）。答不出来就不拦，交给
+/// 建库那一下自己报错（[`Catalog::create`]，挂单 `Q611`）。
+#[cfg(not(unix))]
+fn writable(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// 列出这个**工作目录**里有哪些**中立库**。
 ///
 /// 别处开库的路都是「给我名字或路径，我去折一个出来看在不在」
 /// （[`catalog_path`] + `site::Site::open`）。**开场**那一屏要的正相反：人还说不出名字，
 /// 得先看见这儿有些什么（ADR-0023）。
+///
+/// **交出来的是三态**（[`Listing`]）：有库、空的、读不动。
 ///
 /// **一份打不开不连累其余。** 每一份各开各的，开不出来的那一份带着那句话单独站着
 /// ([`CatalogEntry`])，别的照列——从列表里静静消失才是最难查的那种错。
@@ -314,9 +457,6 @@ pub struct CatalogFacts {
 /// 按**主库原名**排，同名的再按路径排：目录列出来的次序是文件系统给的，两次打开不保证
 /// 一样，而开场那一屏的行不该自己跳来跳去。
 ///
-/// 目录不在（这个工作目录还一份库都没建过）或者读不动时交出**空的一批**——
-/// 那与「一份库都没有」在屏上是同一句话。
-///
 /// ## 它为什么住在这个模块里
 ///
 /// **ADR-0023 点的名**：「核心库要新增『列出一个工作目录里有哪些中立库』
@@ -326,13 +466,17 @@ pub struct CatalogFacts {
 /// [`catalog`](crate::catalog)（那边一直在用这边的 [`readable_half`]）：不开一下那份库，
 /// 「这份主库叫什么、有多少变体、上次什么时候扫的」一样都说不出来。
 #[must_use]
-pub fn catalogs(workspace: &Path) -> Vec<CatalogEntry> {
-    let mut out: Vec<CatalogEntry> = catalog_files(&catalog_dir(workspace))
-        .into_iter()
-        .map(entry_of)
-        .collect();
+pub fn catalogs(workspace: &Path) -> Listing {
+    let files = match catalog_files(&catalog_dir(workspace)) {
+        Ok(files) => files,
+        Err(why) => return Listing::Unreadable(why),
+    };
+    if files.is_empty() {
+        return Listing::Empty;
+    }
+    let mut out: Vec<CatalogEntry> = files.into_iter().map(entry_of).collect();
     out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
-    out
+    Listing::Catalogs(out)
 }
 
 /// 这个**工作目录**里，开场那一行上印的名字恰是 `name` 的那一份中立库。
@@ -344,8 +488,12 @@ pub fn catalogs(workspace: &Path) -> Vec<CatalogEntry> {
 /// 比的是开场那一行上印的名字（与 [`catalogs`] 交出来的那一格同一处取），**NFC 之后逐字比**
 /// ——同一个名字在两台机器上可能一台交出 NFD、一台交出 NFC（ADR-0020）。只是不问那几个数：
 /// 「这个名字撞没撞」用不着数变体。
-#[must_use]
-pub fn namesake(workspace: &Path, name: &str) -> Option<PathBuf> {
+///
+/// **列不开时答不出来，不是「没撞上」**（ADR-0021 那条修订）：交出 `Err`，由问的人说清怎么办。
+///
+/// # Errors
+/// 中立库住的那个目录列不开时交出那一条（[`DirUnreadable`]）。
+pub fn namesake(workspace: &Path, name: &str) -> Result<Option<PathBuf>, DirUnreadable> {
     namesake_in(&catalog_dir(workspace), name, None)
 }
 
@@ -354,49 +502,70 @@ pub fn namesake(workspace: &Path, name: &str) -> Option<PathBuf> {
 /// 「同一个目录」就是「同一个工作目录」：中立库一律住在 `工作目录/catalog/` 底下
 /// （[`catalog_path`]）。`file` 自己**不开也不比**——改名的时候它正开着一份写得动的连接；
 /// 它还没建出来时本来也列不到它。
-pub(crate) fn namesake_beside(file: &Path, name: &str) -> Option<PathBuf> {
-    let dir = file
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    namesake_in(dir, name, file.file_name())
+pub(crate) fn namesake_beside(file: &Path, name: &str) -> Result<Option<PathBuf>, DirUnreadable> {
+    namesake_in(dir_of(file), name, file.file_name())
 }
 
 /// 在 `dir` 里找开场那一行印着 `name` 的中立库，文件名是 `except` 的那一份跳过、也不开。
-fn namesake_in(dir: &Path, name: &str, except: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+fn namesake_in(
+    dir: &Path,
+    name: &str,
+    except: Option<&std::ffi::OsStr>,
+) -> Result<Option<PathBuf>, DirUnreadable> {
     let wanted = path::nfc(name);
-    catalog_files(dir)
+    Ok(catalog_files(dir)?
         .into_iter()
         .filter(|file| except.is_none_or(|own| file.file_name() != Some(own)))
-        .find(|file| path::nfc(&listed_name(&Catalog::open_read_only(file), file)) == wanted)
+        .find(|file| path::nfc(&listed_name(&Catalog::open_read_only(file), file)) == wanted))
 }
 
-/// 这个目录里有哪几个中立库文件。目录不在或者读不动时是空的一批。
-fn catalog_files(dir: &Path) -> Vec<PathBuf> {
-    let Ok(read) = std::fs::read_dir(dir) else {
-        return Vec::new();
+/// 这个目录里有哪几个中立库文件。
+///
+/// **目录不在是空的一批**：那是一个还一份库都没建过的工作目录。**列不开是读不动**，
+/// 不是空的一批（ADR-0021 那条修订）——连列到一半出错也算：系统在那之后不再交出剩下的
+/// 条目，交出一半就等于让没列到的那几份库静静消失。
+fn catalog_files(dir: &Path) -> Result<Vec<PathBuf>, DirUnreadable> {
+    let unreadable = |source| DirUnreadable {
+        dir: dir.to_path_buf(),
+        source,
     };
-    read.flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == CATALOG_EXT))
-        .collect()
+    let read = match std::fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(unreadable(error)),
+    };
+    let mut files = Vec::new();
+    for entry in read {
+        let path = entry.map_err(unreadable)?.path();
+        if path.extension().is_some_and(|ext| ext == CATALOG_EXT) {
+            files.push(path);
+        }
+    }
+    Ok(files)
 }
 
 /// 看一份中立库：开得开就问它自己那几个数，开不开就从文件名截个名字、把那句话带上。
 fn entry_of(path: PathBuf) -> CatalogEntry {
     let opened = Catalog::open_read_only(&path);
     let name = listed_name(&opened, &path);
-    let (openable, facts) = match &opened {
+    let state = match &opened {
         // **开进去了就是开得进去**，哪怕底下那几个数一个都没读回来。
-        Ok(catalog) => (true, facts_of(catalog)),
-        Err(error) => (false, Err(format!("{error}"))),
+        Ok(catalog) => CatalogState::Openable(facts_of(catalog)),
+        // 分支按的是**错误的类型**，不是那句话里写了什么（挂单 `Q393`）。
+        Err(
+            error @ CatalogError::Version {
+                found, expected, ..
+            },
+        ) => CatalogState::SchemaMismatch {
+            found: *found,
+            expected: *expected,
+            said: format!("{error}"),
+        },
+        Err(error) => CatalogState::Broken {
+            said: format!("{error}"),
+        },
     };
-    CatalogEntry {
-        path,
-        name,
-        openable,
-        facts,
-    }
+    CatalogEntry { path, name, state }
 }
 
 /// **开场那一行上印的那个名字**：开得开就是库里记着的主库原名，开不开就从文件名截。

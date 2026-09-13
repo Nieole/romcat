@@ -58,10 +58,13 @@ impl SiteError {
     /// 给的是名字、而这个工作目录里另一份库的主库原名正是它时，说清是哪一份
     /// （[`SiteError::Renamed`]，判「是不是它」只在 [`workspace::namesake`]）；否则就是
     /// 「还没有，先跑一次 `romcat scan`」（[`SiteError::NoCatalog`]）。
+    ///
+    /// 中立库住的那个目录列不开时查不了这个名字是哪一份库的原名，就只说「还没有」：那一句
+    /// 只是替人多指一步路，指不出来不改变「按这个名字折出来的那份不在」（挂单 `Q614`）。
     #[must_use]
     pub fn not_found(workspace: &Path, slug: Slug<'_>, located_by: &str) -> Self {
         if let Slug::Named(name) = slug
-            && let Some(other) = workspace::namesake(workspace, name)
+            && let Ok(Some(other)) = workspace::namesake(workspace, name)
         {
             return Self::Renamed {
                 located_by: located_by.to_string(),
