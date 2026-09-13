@@ -17,3 +17,7 @@
 ### 领域文档
 
 动手前先读词表与 ADR，输出用词表的词。见 `docs/agents/domain.md`。
+
+### 长活与回执
+
+在 worktree 里派审查、跑门禁，以及怎么判断手上那份回执审的、跑的是不是你这棵树。见 `docs/agents/long-jobs.md`。
