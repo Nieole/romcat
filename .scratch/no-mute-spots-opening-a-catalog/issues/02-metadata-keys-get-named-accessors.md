@@ -8,7 +8,9 @@
 
 **Blocked by:** **01 —（prefactor）`主库标识` 与 `主库原名` 正名**
 
-**Status:** ready-for-agent
+**Status:** done
+
+全量门禁（2026-09-13，在提交 `486326e` 上跑，Q469 裁决的改动已在里面）：`TMPDIR=/Users/nicoer/dev/game-wt/cs/tmp cargo xtask gate -j 3 --test-threads 3 --keep-going`，日志 `/Users/nicoer/dev/game-wt/logs/slot-1-nm02-gate2.log`。fmt、check、clippy、test、doc 五步全绿，`EXIT=0`；test 那一步 70 个测试目标全部 ok，1823 条通过、0 条失败。
 
 ⚠️ **每个键一对具名函数，不做通用的按键读写面。** 通用面把「这一族有哪些键、各自什么语义」
 变成一个**字符串约定**，而键名会被两处各写一遍——ADR-0024 反对的正是这个。
