@@ -26,7 +26,13 @@
 //! 「整批通过 3,053 条」按错了要撤得干净，否则批量这件事本身不成立。撤销走的是
 //! 票 `gui-redesign/08` 那条路（[`Queue::undo`]）：中立库与沉淀库两边一起回到这一批
 //! 落下之前，**一个字节的 DAT 都不读**。逐条流里 `U` 撤的也是它——逐条落下的每一下
-//! 自己就是一**批**。
+//! 自己就是一**批裁决**。
+//!
+//! 撤得掉的不只是刚落下的那一批：**裁决记录**（顶栏上那颗按钮）从沉淀库列出落过的
+//! 每一批裁决——什么时候落的、多少条、撤过没有——每一批旁边一颗撤销（撤过的是放回）。
+//! 被后来还在册的一批盖住时核心库整份拒下，那句话原样画在那一块里（票
+//! `gui-answers-all-six/06`）。**一批裁决**（[`verdict::Batch`]）与正文那一列卡片上的
+//! **一批变体**（[`Batch`]）是词表**批**那一条分开的两件事，屏上两处措辞各说各的。
 //!
 //! ## 中文输入全在底下那块面板里
 //!
@@ -58,7 +64,7 @@ use egui_extras::{Column, TableBuilder};
 use romcat_core::catalog::State;
 use romcat_core::catalog::identify::{NOT_RUN_LABEL, Tier};
 use romcat_core::dat::chinese::ChineseMark;
-use romcat_core::report::{capacity, thousands};
+use romcat_core::report::{capacity, human_time, thousands};
 use romcat_core::scrape::AnchorKind;
 use romcat_core::scrape::zh::{Judged, MatchGroup, judge, matched_groups};
 use romcat_core::stage::Stage;
@@ -76,6 +82,7 @@ use crate::font;
 use crate::layout;
 use crate::look;
 use crate::table::ROW_HEIGHT;
+use crate::tokens::Tokens;
 use romcat_core::site::Site;
 
 /// 分组表一个轴最多列几行。再多就不是给人看的了（与命令行报告同一个数）。
@@ -153,6 +160,32 @@ pub struct Screen {
     applied: Option<Applied>,
     /// 上一次撤回的账。
     undone: Option<Undone>,
+    /// **裁决记录**：这份主库上落过的每一批裁决，新的在前，**从沉淀库列**。
+    ///
+    /// 从前这一屏只记得「本次进程里刚落下的那一批」（`applied` 那一格，一个可空的位置）
+    /// ——窗口一关、或者那一批是命令行落的，屏上就一个字都没有，而沉淀库里每一批都还
+    /// 躺着，撤销那个入口也本来就吃任意一批（[`Queue::undo`]）。
+    ///
+    /// **沉淀库每动一次重列一遍**（落下、撤销、放回、重新列队列），不是每帧一句查询。
+    ///
+    /// ⚠️ 装的是 [`verdict::Batch`]——**一批裁决**，不是 [`Batch`]（一级分批的**一批变体**）。
+    /// 词表**批**那一条把两件事分开了，代码里两层各有一个同名的类型，这里永远带着模块名写。
+    records: Vec<verdict::Batch>,
+    /// 裁决记录那一块开着没有。
+    records_open: bool,
+    /// 裁决记录里那两颗按钮上一次的回话：撤不掉、放不回去时核心库那句话。
+    ///
+    /// 与 `error` 分开存，是因为两处**画在不同的地方、清在不同的时刻**：那句话要画在按下去
+    /// 的那一块里，而整屏别处的错（列队列失败、`U` 无可撤）不该跑进裁决记录。
+    records_refusal: Option<String>,
+    /// 屏头那句「另有 N 个变体连识别都还没跑过」的 N。
+    ///
+    /// **数只有一处算**：[`Catalog::not_run_count`](romcat_core::catalog::Catalog::not_run_count)
+    /// ——列队列、库屏工序段识别那一行、命令行队列报告取的都是它，这里只缓着读出来的数。
+    /// 缓在这一屏而不只靠 [`Queue::not_run`]，是因为它过期的时机与队列不一样：扫完一个根
+    /// 它就过期了，而队列本身一条都没变——为一个数把整份队列重列一遍，真库上是一万八千条
+    /// （挂单 `Q419`）。所以队列列一次它跟着换，扫完一个根只重算它（[`Screen::recount_not_run`]）。
+    not_run: u64,
     /// 光标底下那个变体身上，**中文离线源那几次匹配**各带来了哪些字段。
     ///
     /// **缓着而不是每帧重问**：归堆一趟要读两个锚点（变体与作品各一次查库），
@@ -244,6 +277,10 @@ impl Screen {
             pending: None,
             applied: None,
             undone: None,
+            records: Vec::new(),
+            records_open: false,
+            records_refusal: None,
+            not_run: 0,
             matches: None,
             judged: None,
             match_note: String::new(),
@@ -285,6 +322,26 @@ impl Screen {
     #[must_use]
     pub fn queue(&self) -> &Queue {
         &self.queue
+    }
+
+    /// 屏头那句「另有 N 个变体连识别都还没跑过」眼下说的 N。
+    #[must_use]
+    pub fn not_run(&self) -> u64 {
+        self.not_run
+    }
+
+    /// **只重算屏头那个数，不重列整份队列**：扫完一个根之后窗口转告的就是它
+    /// （[`App::poll_tasks`](crate::app::App::poll_tasks)）。
+    ///
+    /// 扫描不改变队列本身——新扫进来的变体连结论都还没有，进不了队列——变的只有「还没识别的
+    /// 有几个」这一个数。取的是
+    /// [`Catalog::not_run_count`](romcat_core::catalog::Catalog::not_run_count) 那一句 SQL，
+    /// 与列队列、库屏工序段、命令行队列报告同一处，不另造一份。
+    pub fn recount_not_run(&mut self, site: &Site) {
+        match site.catalog.not_run_count() {
+            Ok(count) => self.not_run = count,
+            Err(error) => self.error = Some(format!("中立库读不动：{error}")),
+        }
     }
 
     /// 上一次出的错。
@@ -426,6 +483,7 @@ impl Screen {
             }) {
             Ok(queue) => {
                 self.queue = queue;
+                self.not_run = self.queue.not_run();
                 self.queue.set_filter(self.picks.filter());
                 self.error = None;
                 // **头一批默认是展开的**（设计稿上就是这样）：那一批盖住的最多，
@@ -442,6 +500,8 @@ impl Screen {
             }
             Err(message) => self.error = Some(message),
         }
+        self.refresh_records(site);
+        self.records_refusal = None;
         self.pending = None;
         self.cursor = None;
         // 这两样都跟着光标那一条走，而光标刚放掉了。留着的话，人再走回那一条上时
@@ -465,8 +525,108 @@ impl Screen {
                 self.keyboard(ui.ctx(), site);
             }
         }
+        if self.records_open {
+            self.records_window(ui.ctx(), site);
+        }
         if self.pending.is_some() {
             self.plan_modal(ui.ctx(), site);
+        }
+    }
+
+    /// 把**裁决记录**重列一遍：从沉淀库列（[`verdict::Store::batches`]），这一屏自己
+    /// 一批都不记。
+    fn refresh_records(&mut self, site: &Site) {
+        // 条数给 0 是**不限**：裁决记录列的是落过的每一批，行是虚拟化的（`records_window`）。
+        match site.store.batches(&site.library_identity, 0) {
+            Ok(records) => self.records = records,
+            Err(error) => self.error = Some(format!("沉淀库读不动：{error}")),
+        }
+    }
+
+    /// **裁决记录**那一块：落过的每一批裁决，新的在前。
+    ///
+    /// 摆成一块浮在正文上的窗，不是一条面板边界：面板边界是 [`crate::layout`] 声明的那七条，
+    /// 加一条就是给这一屏另立一份记得住的版式偏好——而这一屏照稿重排是票
+    /// `gui-looks-like-the-design/18` 的事，它换版式、不换这里的逻辑（挂单 `Q625`）。
+    ///
+    /// **行是虚拟化的**（`show_rows`）：逐条流里按一下 `Y` 就是一批，真库上攒出几千批
+    /// 是寻常事，每帧把几千行全排一遍版不划算。
+    fn records_window(&mut self, ctx: &egui::Context, site: &mut Site) {
+        /// 这一帧在裁决记录里按下了哪一颗。
+        enum Pressed {
+            /// 在册那一批旁边的「撤销」。
+            Undo(i64),
+            /// 撤过那一批旁边的「放回」。
+            Redo(i64),
+        }
+        let tokens = Tokens::builtin();
+        // 离窗口边多远取间距那几档里最宽的一档，多宽取对话框那几档里最窄的一档（`tokens.toml`）。
+        let margin = tokens.space.steps.last().copied().unwrap_or_default();
+        let mut open = self.records_open;
+        // 画的时候不改自己：按下去的那一下先记下来，画完再动。
+        let mut pressed: Option<Pressed> = None;
+        egui::Window::new("裁决记录")
+            .open(&mut open)
+            .default_width(tokens.layout.dialog_width[0])
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-margin, margin))
+            .show(ctx, |ui| {
+                ui.weak(
+                    "每一次裁决落下的那些记成一批裁决，新的在前。撤销一批，那些变体当场回到\
+                     待确认队列；撤过的仍留在这里，标着已撤，放得回去。",
+                );
+                // **撤不动时那句话就画在按下去的地方**：核心库说清了是哪一批盖的，而人要做的
+                // 下一步（先撤那一批）就在这一块里。只画这一块里那两颗按钮自己的回话——
+                // 整屏别处的错（列队列失败、`U` 无可撤）各自画在各自的地方。
+                if let Some(refusal) = &self.records_refusal {
+                    ui.colored_label(ui.visuals().error_fg_color, refusal);
+                }
+                if self.records.is_empty() {
+                    ui.weak("这份主库上还没有落过一批裁决。");
+                    return;
+                }
+                egui::ScrollArea::vertical()
+                    .id_salt("裁决记录")
+                    .max_height(360.0)
+                    .show_rows(ui, ROW_HEIGHT, self.records.len(), |ui, rows| {
+                        for record in &self.records[rows] {
+                            ui.horizontal(|ui| {
+                                ui.label(record_line(record))
+                                    .on_hover_text(match &record.note {
+                                        Some(note) => format!("{}\n「{note}」", record.summary),
+                                        None => record.summary.clone(),
+                                    });
+                                let (label, hint, press) = if record.undone() {
+                                    (
+                                        "放回",
+                                        "把这一批原样放回去：当初落下的每一条都记在批里，\
+                                         一个字都不必重打。",
+                                        Pressed::Redo(record.id),
+                                    )
+                                } else {
+                                    (
+                                        "撤销",
+                                        "中立库与沉淀库两边都回到这一批落下之前，\
+                                         那些变体当场回到待确认队列——不必重跑识别。",
+                                        Pressed::Undo(record.id),
+                                    )
+                                };
+                                if ui.button(label).on_hover_text(hint).clicked() {
+                                    pressed = Some(press);
+                                }
+                            });
+                        }
+                    });
+                ui.separator();
+                ui.weak(
+                    "某一批里有几条被之后还在册的那一批盖住时撤不动，要先撤之后的那一批；\
+                     放回也照落下的先后来。",
+                );
+            });
+        self.records_open = open;
+        match pressed {
+            Some(Pressed::Undo(id)) => self.undo(site, id),
+            Some(Pressed::Redo(id)) => self.redo(site, id),
+            None => {}
         }
     }
 
@@ -574,6 +734,16 @@ impl Screen {
         {
             self.reload(site);
         }
+        if ui
+            .selectable_label(
+                self.records_open,
+                format!("裁决记录 {}", thousands_len(self.records.len())),
+            )
+            .on_hover_text("落过的每一批裁决都列在这里：什么时候落的、多少条、撤过没有。")
+            .clicked()
+        {
+            self.records_open = !self.records_open;
+        }
         ui.separator();
         if !self.queue.identified() {
             ui.label("还没跑过识别，队列无从谈起。");
@@ -599,12 +769,12 @@ impl Screen {
         // 它们不在上面那个数里——`variant JOIN identification` 一行都进不去，所以既不是
         // 「拿不定主意」，也不是底下四档里的任何一档。措辞照命令行那份报告来
         // （`romcat_core::triage::report`），同一份库两处印出来的是同一句话。
-        if self.queue.not_run() > 0 {
+        if self.not_run > 0 {
             ui.colored_label(
                 ui.visuals().warn_fg_color,
                 format!(
                     "{NOT_RUN_LABEL} 另有 {} 个变体连识别都还没跑过",
-                    thousands(self.queue.not_run())
+                    thousands(self.not_run)
                 ),
             )
             .on_hover_text(
@@ -662,7 +832,7 @@ impl Screen {
         }
         ui.horizontal_wrapped(|ui| {
             ui.label(font::strong(format!(
-                "一级 · 按依据形状分成 {} 批",
+                "一级 · 按依据形状分成 {} 批变体",
                 thousands_len(没列的.batches)
             )));
             ui.weak("（源 / DAT / 置信度 / 哈希口径 / 候选数）");
@@ -688,7 +858,7 @@ impl Screen {
             }
             if 没列的.rest_batches > 0 {
                 ui.weak(format!(
-                    "……另有 {} 批没列（共 {} 条）。先把上面这几批过完——它们盖住的最多。",
+                    "……另有 {} 批变体没列（共 {} 条）。先把上面这几批过完——它们盖住的最多。",
                     thousands_len(没列的.rest_batches),
                     thousands(没列的.rest),
                 ));
@@ -863,7 +1033,7 @@ impl Screen {
                 }
             });
             if let Some(shape) = &self.picks.shape {
-                ui.weak(format!("只看这一批：{}", shape.label()));
+                ui.weak(format!("只看这一批变体：{}", shape.label()));
             }
             ui.separator();
             ui.label(font::strong("从哪一批下手"));
@@ -1048,7 +1218,7 @@ impl Screen {
             ui.horizontal_wrapped(|ui| {
                 ui.colored_label(ui.visuals().warn_fg_color, applied_text(applied));
                 undo = ui
-                    .button(format!("撤回第 {batch} 批"))
+                    .button(format!("撤回第 {batch} 批裁决"))
                     .on_hover_text(
                         "中立库与沉淀库两边都回到这一批落下之前，\
                          那些变体当场回到待裁决——不必重跑识别。",
@@ -1067,7 +1237,7 @@ impl Screen {
             ui.horizontal_wrapped(|ui| {
                 ui.colored_label(ui.visuals().warn_fg_color, undone_text(undone));
                 redo = ui
-                    .button(format!("放回第 {batch} 批"))
+                    .button(format!("放回第 {batch} 批裁决"))
                     .on_hover_text(
                         "把这一批原样放回去：当初落下的每一条都记在批里，一个字都不必重打。",
                     )
@@ -1546,6 +1716,7 @@ impl Screen {
                 self.applied = Some(applied);
                 self.undone = None;
                 self.changed = true;
+                self.refresh_records(site);
                 // 裁完这一条，**下一条自己滑到光标底下**——手不必动。
                 self.move_to(self.at);
             }
@@ -1738,6 +1909,7 @@ impl Screen {
                 self.undone = None;
                 self.changed = true;
                 self.cursor = None;
+                self.refresh_records(site);
             }
             // 计划过期那一句核心库已经说全了（连「两份库一个字都没动」都在里面），
             // 再前缀一句「写不进去」反而让人以为是库出了毛病。
@@ -1746,63 +1918,110 @@ impl Screen {
         }
     }
 
-    /// **撤回刚落下的那一批**：两边一起回到它落下之前，队列当场重列。
+    /// **撤销一批裁决**——裁决记录里的任意一批，不只是刚落下的那一批。两边一起回到它
+    /// 落下之前，队列当场重列，那一批里的变体当场回到队列里。
+    ///
+    /// **界面上点裁决记录里那颗「撤销」走的就是它**，实测与测试拿它当那一下。
     ///
     /// 领域判断一条都不在这里——[`Queue::undo`] 走的是命令行 `romcat triage undo --batch`
-    /// 那条同一条路（ADR-0005）。这一层只负责把按下去的那一下转过去，再把账画出来。
-    ///
-    /// 没有可撤的那一批时**报一句**再回来。屏上那个「撤回第 N 批」的按钮只在有批的时候
-    /// 才画得出来，所以走到这一支的一定是逐条流里按下的 `U`；一声不吭地返回，人只会
-    /// 以为键盘坏了（`Y` 那一支写着同一句话，命令行 `undo --last` 无批时也报错退 1）。
-    pub fn undo_last(&mut self, site: &mut Site) {
-        let Some(batch) = self.applied.map(|applied| applied.batch) else {
-            self.error = Some(
-                "这一趟还没落下过一批裁决，`U` 没什么可撤的——先 `Y` 采用或 `N` 拒绝一条。\
-                 更早落下的那些在命令行上撤：`romcat triage batches` 看有哪几批，\
-                 `romcat triage undo --batch <号>` 撤其中一批。"
-                    .to_string(),
-            );
-            return;
-        };
+    /// 那条同一条路（ADR-0005）：没这一批、已经撤过了、被后来还在册的一批盖住了，全由
+    /// 核心库拒下，这一层只把按下去的那一下转过去，再把账或那句话画出来。
+    pub fn undo(&mut self, site: &mut Site, id: i64) {
         match self.queue.undo(
             &mut site.catalog,
             &mut site.store,
             &site.library_identity,
-            batch,
+            id,
         ) {
             Ok(account) => {
-                self.error = None;
-                self.applied = None;
+                // 撤的正是「刚落下」那一行说的那一批，那一行就不作数了——留着的话，那颗
+                // 按钮会把同一批再撤一次。撤的是别的批时，那一行照旧是实话。
+                if self.applied.is_some_and(|applied| applied.batch == id) {
+                    self.applied = None;
+                }
                 self.undone = Some(account);
-                self.changed = true;
-                self.cursor = None;
-                self.queue.set_filter(self.picks.filter());
+                self.after_roll(site);
             }
-            Err(error) => self.error = Some(format!("撤不掉：{error}")),
+            Err(error) => self.refuse(format!("撤不掉：{error}")),
         }
     }
 
-    /// **把刚撤掉的那一批放回去**。与 [`Screen::undo_last`] 对称，走的也是核心库那条路。
-    pub fn redo_last(&mut self, site: &mut Site) {
-        let Some(batch) = self.undone.map(|undone| undone.batch) else {
+    /// 撤销或放回做成之后，这一屏跟着换的那几样。
+    ///
+    /// 两条路（[`Queue::undo`] 与 [`Queue::redo`]）都把队列整份重列过了：屏头那个数跟着
+    /// 队列换、裁决记录重列、选择器写回去、光标放掉，再给浏览屏留个记号。
+    fn after_roll(&mut self, site: &Site) {
+        self.error = None;
+        self.records_refusal = None;
+        self.changed = true;
+        self.cursor = None;
+        self.queue.set_filter(self.picks.filter());
+        self.not_run = self.queue.not_run();
+        self.refresh_records(site);
+    }
+
+    /// 撤销或放回被核心库拒下：那句话原样记下，整屏那一处与裁决记录那一块各画一份。
+    fn refuse(&mut self, message: String) {
+        self.records_refusal = Some(message.clone());
+        self.error = Some(message);
+    }
+
+    /// **撤回刚落下的那一批**：逐条流里的 `U`、落下之后那一行右边那颗按钮走的都是它，
+    /// 撤走的是 [`Screen::undo`] 那条同一条路。
+    ///
+    /// 「刚落下」说的是**本进程里最近一次落下**的那一批——在裁决记录里放回一批也算一次落下
+    /// （[`Screen::redo`]），放回之后 `U` 撤的就是它（挂单 `Q621`）。
+    ///
+    /// 没有可撤的那一批时**报一句**再回来。屏上那个「撤回第 N 批裁决」的按钮只在有批的时候
+    /// 才画得出来，所以走到这一支的一定是逐条流里按下的 `U`；一声不吭地返回，人只会
+    /// 以为键盘坏了（`Y` 那一支写着同一句话，命令行 `undo --last` 无批时也报错退 1）。
+    pub fn undo_last(&mut self, site: &mut Site) {
+        let Some(id) = self.applied.map(|applied| applied.batch) else {
+            self.error = Some(
+                "这一趟还没落下过一批裁决，`U` 没什么可撤的——先 `Y` 采用或 `N` 拒绝一条。\
+                 更早落下的那些在「裁决记录」里撤：顶栏上那颗按钮，每一批旁边都有一颗撤销。"
+                    .to_string(),
+            );
             return;
         };
+        self.undo(site, id);
+    }
+
+    /// **把撤掉的一批裁决放回去**——裁决记录里任意一批撤过的，不只是刚撤掉的那一批。
+    /// 撤销本身撤得回来：命令行 `romcat triage redo --batch` 吃的也是任意一批，界面上
+    /// 做不到的话，撤错了更早的那一批就得回终端（ADR-0023 修订段那条判据）。
+    ///
+    /// **界面上点裁决记录里那颗「放回」走的就是它。** 放不回去（被后来还在册的一批盖住、
+    /// 锚上眼下不是它撤掉时留下的样子）由核心库整份拒下（[`Queue::redo`]），这一层把
+    /// 那句话原样画出来。
+    pub fn redo(&mut self, site: &mut Site, id: i64) {
         match self.queue.redo(
             &mut site.catalog,
             &mut site.store,
             &site.library_identity,
-            batch,
+            id,
         ) {
             Ok(account) => {
-                self.error = None;
-                self.undone = None;
+                // 与 [`Screen::undo`] 对称：放回的正是「撤回」那一行说的那一批，那一行才不作数。
+                if self.undone.is_some_and(|undone| undone.batch == id) {
+                    self.undone = None;
+                }
+                // **放回也是一次落下**：本进程里最近落下的就是它，「刚落下」那一行与 `U`
+                // 从此说的是这一批——与 `undo` 把撤掉的那一批记成「刚撤回」是同一个对称。
                 self.applied = Some(account);
-                self.changed = true;
-                self.cursor = None;
-                self.queue.set_filter(self.picks.filter());
+                self.after_roll(site);
             }
-            Err(error) => self.error = Some(format!("放不回去：{error}")),
+            Err(error) => self.refuse(format!("放不回去：{error}")),
         }
+    }
+
+    /// **把刚撤掉的那一批放回去**：撤回之后那一行右边那颗按钮走的是它，放回走的是
+    /// [`Screen::redo`] 那条同一条路。
+    pub fn redo_last(&mut self, site: &mut Site) {
+        let Some(id) = self.undone.map(|undone| undone.batch) else {
+            return;
+        };
+        self.redo(site, id);
     }
 
     /// 逐条流眼下停在第几条（选中的那些里数）。
@@ -2044,7 +2263,7 @@ fn judged_text(judged: &MatchJudged) -> String {
     // **走回来那一下要说清楚**：按批撤销（[`Screen::undo_last`]）管的是**识别**那一批
     // 裁决，匹配裁决不在那条路上——改主意的路是再裁一次，同一条锚上后一条盖掉前一条。
     text.push_str(
-        "。改主意就再裁一次：这一条不在「撤回第 N 批」那条路上（那条管的是识别那一批），\
+        "。改主意就再裁一次：这一条不在裁决记录那条路上（那条撤的是识别那边的一批裁决），\
          同一条锚上后一条盖掉前一条",
     );
     // **「采得回来」有前提，说全它**。否定之后重跑刮削照旧不会撞回这条条目
@@ -2100,7 +2319,7 @@ fn headline(账: &Coverage) -> String {
         return "队列是空的。".to_string();
     }
     format!(
-        "前 {} 批盖住 {} 条（{:.0}%）。其中按批答得了的（只有一个候选）{} 条；\
+        "前 {} 批变体盖住 {} 条（{:.0}%）。其中按批答得了的（只有一个候选）{} 条；\
          剩下的多候选与一条候选都没有的走逐条。",
         账.head_batches,
         thousands(账.head),
@@ -2378,7 +2597,7 @@ fn applied_text(applied: &Applied) -> String {
 /// （快照随重跑识别清掉了），人得再跑一趟识别才看得见——两种情形说同一句话是撒谎。
 fn undone_text(undone: &Undone) -> String {
     let mut text = format!(
-        "第 {} 批已撤回 {} 条（其中 {} 条把它盖掉的那条旧裁决放了回去）",
+        "第 {} 批裁决已撤回 {} 条（其中 {} 条把它盖掉的那条旧裁决放了回去）",
         undone.batch,
         thousands(undone.removed),
         thousands(undone.restored),
@@ -2403,6 +2622,23 @@ fn undone_text(undone: &Undone) -> String {
         );
     }
     text
+}
+
+/// 裁决记录里一批裁决的那一行：第几批、什么时候落的、多少条、撤过没有。
+///
+/// 时刻走 [`human_time`]（UTC）——库屏「上次扫描」那一格与开场那一行用的是同一个，
+/// 同一份库在几屏上印出来的时刻是同一种写法。
+fn record_line(record: &verdict::Batch) -> String {
+    let 撤过没有 = match record.undone_at {
+        None => "在册".to_string(),
+        Some(at) => format!("已撤（{}）", human_time(at)),
+    };
+    format!(
+        "第 {} 批裁决 · {} · {} 条 · {撤过没有}",
+        record.id,
+        human_time(record.decided_at),
+        thousands(record.rows),
+    )
 }
 
 fn thousands_len(value: usize) -> String {
