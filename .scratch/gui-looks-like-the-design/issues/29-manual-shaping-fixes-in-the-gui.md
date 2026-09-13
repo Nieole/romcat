@@ -1,10 +1,10 @@
-# 28 — 成型纠正的界面
+# 29 — 成型纠正的界面
 
 **What to build:** 维护者纠正**成型规则**出错的地方：三张光盘被当成三个**变体**（应该合成
 一个，前端用播放列表启动换碟）、一个目录被当成一个变体（里面其实是十几个各自独立的游戏）。
 纠正**永久保留**，可撤销。
 
-**Blocked by:** 26；纠正落沉淀库由 `one-criterion-per-thing/07` 提供。
+**Blocked by:** 27；纠正落沉淀库由 `one-criterion-per-thing/07` 提供。
 
 **Status:** ready-for-agent
 

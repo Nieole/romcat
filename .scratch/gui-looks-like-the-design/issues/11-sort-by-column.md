@@ -1,9 +1,9 @@
-# 10 — 表格按列排序
+# 11 — 表格按列排序
 
 **What to build:** 维护者点表头就能按作品名、平台、变体数、容量、年份排序，年份未知的
 那些永远排在最后。
 
-**Blocked by:** 08
+**Blocked by:** 09
 
 **Status:** ready-for-agent
 
