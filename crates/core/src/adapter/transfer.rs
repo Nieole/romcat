@@ -40,14 +40,20 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::catalog::scrape::{Harvested, HarvestedValue};
 use crate::catalog::{Catalog, CatalogError, Roots, SnapshotOrigin};
+use crate::fs::RealFs;
 use crate::path;
 use crate::report::thousands;
+use crate::scrape::pool::MediaPool;
 use crate::scrape::priority::Priorities;
 use crate::scrape::{AnchorKind, Field};
+use crate::sync::{Act, execute, media};
 use crate::task::{Cutoff, Halted, Handle};
 
 use super::converge::{self, Converged, NotAnEntry, Preference, VARIANT_KEY};
-use super::report::{Conflict, EXAMPLES, ExportReport, ExportedFile, ImportReport, ImportedFile};
+use super::report::{
+    Conflict, EXAMPLES, ExportReport, ExportedFile, ImportReport, ImportedFile, MediaReport,
+    NotLaid,
+};
 use super::{Adapter, AdapterError, Body, Document, Entry, Lossy, Parsed, assert_capability};
 
 /// 导入或导出跑不下去的原因。
@@ -434,6 +440,27 @@ pub struct ExportOptions {
     pub dry_run: bool,
     /// 外面有人动过也照写。**默认关**。
     pub force: bool,
+    /// **铺媒体**：给了**媒体池**，就把池里的封面、截图、视频照这个适配器的布局铺进
+    /// 导出目录。**默认 `None`，一份都不铺**（票 `one-criterion-per-thing/08`）。
+    ///
+    /// 默认关着不是省事：媒体池住在**工作目录**里、主库多半在外置盘上，硬链接跨不过
+    /// 文件系统，一趟几秒的导出就会变成几十 GiB 的复制——而人多半只想要元数据。
+    pub media: Option<MediaPool>,
+}
+
+/// 开着**铺媒体**时这一趟多走几步：「折媒体的落点」与「把媒体铺出去」。
+const MEDIA_STEPS: u32 = 2;
+
+impl ExportOptions {
+    /// 这一趟一共几步：[`TASK_STEPS`]，开着铺媒体再多两步（「折媒体的落点」「把媒体铺出去」）。
+    ///
+    /// 调用方声明总步数照它（[`Handle::steps`]）：照 [`TASK_STEPS`] 声明的话，开着铺媒体
+    /// 那一趟进度条会走过头。界面上导出那一支接铺媒体开关时要用它
+    /// （票 `one-criterion-per-thing/09`）。
+    #[must_use]
+    pub fn task_steps(&self) -> u32 {
+        TASK_STEPS + if self.media.is_some() { MEDIA_STEPS } else { 0 }
+    }
 }
 
 /// 把中立库导出成前端元数据。**没人按停下的那条路。**
@@ -452,6 +479,34 @@ pub fn export(
     options: &ExportOptions,
 ) -> Result<ExportReport, ExportError> {
     export_task(catalog, adapter, priorities, options, &Handle::new())
+}
+
+/// 导出开着**铺媒体**时要铺的那一批：整个库、照这个适配器的布局
+/// （票 `one-criterion-per-thing/08`）。
+///
+/// **按下之前**报「要铺几份、多大」取的就是它——份数是 [`media::Laid::files`] 的长度，
+/// 大小是 [`media::Laid::bytes`]——而导出那一趟真铺的也是这一份，两处是同一个数。
+///
+/// 只读中立库与媒体池，**不碰导出目录**：那块盘不在位也算得出来。于是它是个**上界**：
+/// 落点上已经有的那几份要到真铺时才知道（[`execute::Placed::already`]）。
+///
+/// 布局与同步是同一份实现（[`media::lay_for`]）。**库里全部变体都算进来**，成不了条目的
+/// 那几个（非游戏资产、补丁、附属内容）也在里面：[`converge::run`] 挡下的它不挡，于是这个
+/// 数比真用得上的多（挂单 `Q583`）。
+///
+/// # Errors
+/// 读中立库失败时返回错误。
+pub fn media_to_lay(
+    catalog: &Catalog,
+    adapter: &dyn Adapter,
+    pool: &MediaPool,
+) -> Result<media::Laid, CatalogError> {
+    let variants = catalog.variants()?;
+    let keys: Vec<&str> = variants
+        .iter()
+        .map(|variant| variant.key.as_str())
+        .collect();
+    media::lay_for(catalog, adapter, pool, &keys)
 }
 
 /// 这一趟一共几步。**改了 [`export_task`] 里那几句 `task.step` 就得改这个数**，
@@ -503,8 +558,22 @@ pub fn export_task(
     task: &Handle,
 ) -> Result<ExportReport, ExportError> {
     task.step("把整个库收敛成条目")?;
-    let converged = converge::run(catalog, priorities, adapter)?;
+    let mut converged = converge::run(catalog, priorities, adapter)?;
     let out_dir = normalize(&options.out);
+
+    // **铺媒体开着的话，先折出每一份落在哪**，而且得排在写元数据之前：Pegasus 靠条目里
+    // 写死的 `assets.*` 找图，那条路径要先有（资源槽怎么填见 `converge::attach_assets`）。
+    let to_lay = match &options.media {
+        Some(pool) => {
+            task.step("折媒体的落点")?;
+            let laid = media_to_lay(catalog, adapter, pool)?;
+            for file in &mut converged.files {
+                converge::attach_assets(&mut file.doc, &laid.assets);
+            }
+            Some((pool, laid))
+        }
+        None => None,
+    };
 
     // 落点目录里对齐过的快照，两条路各认各的：
     //
@@ -554,6 +623,14 @@ pub fn export_task(
         structural_losses: adapter.structural_losses().to_vec(),
         out: path::display(&out_dir),
         dry_run: options.dry_run,
+        media: to_lay.as_ref().map(|(_, laid)| MediaReport {
+            files: laid.files.len() as u64,
+            bytes: laid.bytes(),
+            not_in_pool: laid.not_in_pool,
+            unknown_kind: laid.unknown_kind,
+            crowded_out: laid.crowded_out,
+            ..MediaReport::default()
+        }),
         ..ExportReport::default()
     };
     fill_counts(&mut report, &converged);
@@ -650,18 +727,82 @@ pub fn export_task(
         });
     }
 
+    // **媒体排在元数据后面铺**：元数据几秒就写完，媒体可能是几十 GiB 的复制——铺到一半
+    // 叫停时，人最想要的那一半已经在盘上了。
+    let mut 铺了几份 = 0_u64;
+    if let Some((pool, laid)) = &to_lay
+        && !report.interrupted
+    {
+        if task.step("把媒体铺出去").is_err() {
+            report.interrupted = true;
+        } else if !options.dry_run {
+            let scratch = pool.scratch();
+            let generated = BTreeMap::new();
+            let sources = execute::Sources {
+                library: &RealFs,
+                library_roots: None,
+                target: &RealFs,
+                target_root: &out_dir,
+                from_pool: &laid.from_pool,
+                generated: &generated,
+                link_probe_dir: Some(&scratch),
+                convert_cache: None,
+            };
+            let placed = match execute::place_media(&sources, task) {
+                Ok(placed) => placed,
+                // 导出目录建不出来。**元数据已经写过的话那是留下了东西**：记一条没铺成、
+                // 照旧交报告（与「写过就留下」同一个口径）；一份都没写过才是整趟没跑成。
+                Err(source) if 写了几份 > 0 => execute::Placed {
+                    failures: vec![execute::Failure {
+                        path: path::display(&out_dir),
+                        act: Act::Add,
+                        why: format!("建不出目录：{source}"),
+                    }],
+                    gave_up: true,
+                    ..execute::Placed::default()
+                },
+                Err(source) => {
+                    return Err(TransferError::Io {
+                        path: path::display(&out_dir),
+                        what: "建不出目录",
+                        source,
+                    }
+                    .into());
+                }
+            };
+            铺了几份 = placed.placed();
+            report.interrupted |= placed.interrupted;
+            if let Some(account) = &mut report.media {
+                fill_media(account, &placed);
+            }
+        }
+    }
+    // 一份元数据都没写、一份媒体都没铺就被叫停：什么都没留下（`ExportError::Halted`）。
+    if report.interrupted && 写了几份 == 0 && 铺了几份 == 0 {
+        return Err(Halted.into());
+    }
+
     report.tier = worst.label().to_string();
-    if report.interrupted {
+    // **铺媒体连着失败、自己收了手**也是没走完——只要这一趟留下了东西（词表**部分完成**：
+    // 收手的理由不改变这一档是什么）。
+    let 留下了东西 = 写了几份 > 0 || 铺了几份 > 0;
+    let 媒体自己收了手 = report.media.as_ref().is_some_and(|media| media.gave_up);
+    if report.interrupted || (媒体自己收了手 && 留下了东西) {
         // **留下了什么由这一层说**：任务台不知道这一趟写没写过东西（`Handle::halfway`
         // 的文档）。这句话要说清「下一趟接着来」是什么意思——导出**有**接得上的东西：
         // 写过的那几份连底本一起进了中立库，下一趟以它们为基线，只有变过的才重写。
-        task.halfway(format!(
-            "按停时写出去 {} 份元数据文件（共 {} 份），底本一起进了中立库；\
-             再按一次会接着把剩下的写完，已经写过的那几份原样对得上就不重写。",
-            thousands(写了几份),
-            thousands(共几份),
-        ));
-    } else if 写了几份 > 0 {
+        let left_behind = match &report.media {
+            // 开着铺媒体：两半都得说（`left_behind_with_media`）。
+            Some(media) => left_behind_with_media(写了几份, 共几份, media),
+            None => format!(
+                "按停时写出去 {} 份元数据文件（共 {} 份），底本一起进了中立库；\
+                 再按一次会接着把剩下的写完，已经写过的那几份原样对得上就不重写。",
+                thousands(写了几份),
+                thousands(共几份),
+            ),
+        };
+        task.halfway(left_behind);
+    } else if 留下了东西 {
         // **记下这一趟导出的时刻**：库屏工序段上导出那一行说的正是它。
         //
         // **判据是「真往盘上写过东西」**，四档收场里三档因此都不打戳，而且是同一条理由
@@ -672,6 +813,68 @@ pub fn export_task(
         catalog.mark_exported()?;
     }
     Ok(report)
+}
+
+/// 开着**铺媒体**的那一趟没走完时留下了什么，一句话（[`Handle::halfway`]）。
+///
+/// **两半都得说**：元数据写出去几份、媒体铺到第几份，各自一共几份。只说元数据那一半，
+/// 人会以为媒体也齐了；只说铺了几份不说一共几份，人算不出再跑一次要付多少。
+///
+/// 「铺到第几份」数的是**走过的**那几份：新铺出去的、落点上本来就有的、被占着没覆盖的、
+/// 没铺成的都算——下一趟从哪一份往后才有活，看的正是这个数。
+fn left_behind_with_media(写了几份: u64, 共几份: u64, media: &MediaReport) -> String {
+    // **为什么收的手也在这句话里**（`Handle::halfway`）：人按了停下，或者媒体连着没铺成。
+    let 为什么 = if media.gave_up {
+        "媒体连着好几份没铺成，主动停了（多半是盘满了或者盘被拔了）："
+    } else {
+        "按停时"
+    };
+    let 新铺 = media.placed();
+    let 走过 = 新铺 + media.already + media.occupied.len() as u64 + media.failures.len() as u64;
+    let 媒体 = if 走过 == 0 {
+        format!("媒体一份都还没铺（共 {} 份）", thousands(media.files))
+    } else {
+        format!(
+            "媒体铺到第 {} 份（共 {} 份），其中新铺出去 {} 份，铺过的都留在盘上",
+            thousands(走过),
+            thousands(media.files),
+            thousands(新铺),
+        )
+    };
+    format!(
+        "{为什么}元数据文件写出去 {} 份（共 {} 份），底本一起进了中立库；{媒体}。\
+         再跑一次会接着来：元数据原样对得上的不重写，落点上已经有的媒体不重铺。",
+        thousands(写了几份),
+        thousands(共几份),
+    )
+}
+
+/// 把铺媒体那一趟的账抄进报告。
+fn fill_media(account: &mut MediaReport, placed: &execute::Placed) {
+    account.placement = placed.placement.map(|how| how.label().to_string());
+    account.linked = placed.linked;
+    account.copied = placed.copied;
+    account.already = placed.already;
+    account.gave_up = placed.gave_up;
+    account.occupied = placed
+        .occupied
+        .iter()
+        .map(|(key, at)| NotLaid {
+            path: key.clone(),
+            why: format!(
+                "落点上已经有一份（{}），大小与媒体池里那份对不上：不覆盖",
+                path::display(at)
+            ),
+        })
+        .collect();
+    account.failures = placed
+        .failures
+        .iter()
+        .map(|failure| NotLaid {
+            path: failure.path.clone(),
+            why: failure.why.clone(),
+        })
+        .collect();
 }
 
 fn fill_counts(report: &mut ExportReport, converged: &Converged) {
@@ -913,6 +1116,33 @@ fn normalize(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::adapter::Capability;
+
+    #[test]
+    fn 铺媒体铺到一半收手时_那句话说得出铺到第几份与一共几份() {
+        // 走过的那几份里有新铺的、本来就在的、被占着没覆盖的：「铺到第几份」三样都算。
+        let media = MediaReport {
+            files: 120,
+            linked: 30,
+            copied: 2,
+            already: 5,
+            occupied: vec![NotLaid {
+                path: "media/ab/abc.png".to_string(),
+                why: "有人放了一份".to_string(),
+            }],
+            ..MediaReport::default()
+        };
+        let 那一句 = left_behind_with_media(22, 22, &media);
+        assert!(
+            那一句.contains("元数据文件写出去 22 份（共 22 份）"),
+            "{那一句}"
+        );
+        assert!(那一句.contains("媒体铺到第 38 份（共 120 份）"), "{那一句}");
+        assert!(那一句.contains("新铺出去 32 份"), "{那一句}");
+        assert!(
+            那一句.starts_with("按停时"),
+            "为什么收的手得在这句话里：{那一句}"
+        );
+    }
 
     #[test]
     fn 路径里的点点就地约掉() {

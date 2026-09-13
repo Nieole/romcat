@@ -607,6 +607,99 @@ fn 上一趟遗留的半份文件先清掉再写() {
     );
 }
 
+/// 一份**替人按停**的目标视图：落点闸问到某一条落点时按下停下，别的一律转给真盘。
+///
+/// 「铺到一半按停」得真的铺下去几份才验得到，而靠时间去抢那一下抢不准（挂单 `Q196`）。
+/// 闸在放每一份之前都要问目标一句「这条落点上有没有东西」（`sync::execute` 模块文档八），
+/// 这一层把按停钉死在「问到哪一份」上。它自己一个判断都不做。
+struct 问到这一份就按停<'a> {
+    task: &'a Handle,
+    落点: PathBuf,
+}
+
+impl LibraryFs for 问到这一份就按停<'_> {
+    fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf> {
+        RealFs.canonicalize(path)
+    }
+
+    fn read_dir(&self, dir: &Path) -> std::io::Result<Vec<DirEntry>> {
+        RealFs.read_dir(dir)
+    }
+
+    fn read_head(&self, file: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
+        if file == self.落点 {
+            self.task.stop();
+        }
+        RealFs.read_head(file, limit)
+    }
+
+    fn read_tail(&self, file: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
+        RealFs.read_tail(file, limit)
+    }
+
+    fn open(&self, file: &Path) -> std::io::Result<Box<dyn ReadSeek + '_>> {
+        RealFs.open(file)
+    }
+}
+
+#[test]
+fn 导出铺媒体铺到一半按停_铺过的留在盘上_说得出铺了几份() {
+    // 票 `one-criterion-per-thing/08`：导出开着铺媒体时走 `execute::place_media`，每一份
+    // 落地的规矩与同步是同一份。按停在两份之间生效：铺过的那几份原样留在盘上，账上说得出
+    // 铺了几份，落点上没有半份文件。
+    let mut 现场 = 现场::摆好();
+    for (字节, kind) in [
+        (1u8, MediaKind::Cover),
+        (2, MediaKind::Screenshot),
+        (3, MediaKind::Video),
+    ] {
+        现场.收一份媒体("库/FC/魂斗罗.zip", kind, &[字节; 1024]);
+    }
+    let selected = 选中(&现场.catalog, "平台=FC");
+    let adapter = adapter::find("Pegasus").expect("带着 Pegasus 适配器");
+    let laid = sync::media::lay(&现场.catalog, adapter.as_ref(), &现场.pool, &selected)
+        .expect("铺得出媒体");
+    assert_eq!(laid.from_pool.len(), 3, "{:?}", laid.from_pool);
+    let 第二份 = laid.from_pool.keys().nth(1).expect("有第二份").clone();
+
+    let task = Handle::new();
+    let 视图 = 问到这一份就按停 {
+        task: &task,
+        落点: 现场.卡.path().join(&第二份),
+    };
+    let scratch = 现场.pool.scratch();
+    let generated = BTreeMap::new();
+    let sources = Sources {
+        library: &RealFs,
+        library_roots: None,
+        target: &视图,
+        target_root: 现场.卡.path(),
+        from_pool: &laid.from_pool,
+        generated: &generated,
+        link_probe_dir: Some(&scratch),
+        convert_cache: None,
+    };
+
+    let placed = sync::execute::place_media(&sources, &task).expect("放得动");
+
+    assert!(placed.interrupted, "按停了却没记上：{placed:?}");
+    // 按停落在第二份的落点闸上，那一份已经在放了：链接一步到位，复制则逐块看信号当场收手。
+    let 该有几份: usize = match placed.placement {
+        Some(Placement::Link) => 2,
+        _ => 1,
+    };
+    assert_eq!(placed.placed(), 该有几份 as u64, "{placed:?}");
+    let 盘上 = 盘上有什么(现场.卡.path());
+    assert_eq!(盘上.len(), 该有几份, "盘上只该有铺过的那几份：{盘上:?}");
+    for path in laid.from_pool.keys().take(该有几份) {
+        assert!(
+            现场.卡.path().join(path).is_file(),
+            "{path} 铺过了就得留在盘上"
+        );
+    }
+    assert!(!有半份文件(现场.卡.path()), "落点上不许留半份文件");
+}
+
 /// 这棵树底下有没有半份文件。
 fn 有半份文件(dir: &Path) -> bool {
     let mut stack = vec![dir.to_path_buf()];

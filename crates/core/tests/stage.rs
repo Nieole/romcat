@@ -161,6 +161,7 @@ impl 现场 {
                 out,
                 dry_run: false,
                 force: false,
+                media: None,
             },
         )
         .expect("导得出来")
@@ -569,6 +570,7 @@ fn 导出一份都没写就被按停_盘上与中立库都一个字节没动() {
             out: out.clone(),
             dry_run: false,
             force: false,
+            media: None,
         },
         &把手,
     );
@@ -599,6 +601,7 @@ fn 只排计划那一趟不打时刻戳() {
             out,
             dry_run: true,
             force: false,
+            media: None,
         },
     )
     .expect("排得出计划");
@@ -682,6 +685,7 @@ fn 导出写过一份之后被按停_记的是停在半路而且写过的那几�
                     out: out.clone(),
                     dry_run: false,
                     force: false,
+                    media: None,
                 },
                 task,
             )
@@ -750,6 +754,7 @@ fn 导出这一趟报得出走到第几步() {
             out,
             dry_run: false,
             force: false,
+            media: None,
         },
         &把手,
     )

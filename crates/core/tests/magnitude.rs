@@ -357,6 +357,7 @@ fn 导出一趟的量级() {
                 out: 导出目录.path().join("导出去"),
                 dry_run: true,
                 force: false,
+                media: None,
             },
         )
         .expect("排得出导出计划");

@@ -341,6 +341,60 @@ pub struct ExportReport {
     /// 去处理一下」，一个是「你要的事做了，代价是这个」。合成一列，`--force` 那一趟
     /// 要么被当成失败、要么就什么也不说——而**丢掉一次手改是必须说出口的**。
     pub forced: Vec<Conflict>,
+    /// **铺媒体**那一半的账。**没开铺媒体就是 `None`，`--json` 里连这个键都没有**
+    /// ——不开时的导出一个字都不变（票 `one-criterion-per-thing/08`）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media: Option<MediaReport>,
+}
+
+/// 导出这一趟**铺媒体**的账。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct MediaReport {
+    /// 这一趟要铺几份。**是上界**：落点上已经有的那几份也在里面，要真铺的时候才知道
+    /// （[`Self::already`]）。
+    pub files: u64,
+    /// 共多少字节，同样是上界。
+    pub bytes: u64,
+    /// 探测出来的办法（`硬链接` / `复制`）；一份都没去铺时是空的。
+    pub placement: Option<String>,
+    /// 用硬链接铺出去的有几份。
+    pub linked: u64,
+    /// 复制出去的有几份。
+    pub copied: u64,
+    /// 落点上已经有一份大小对得上的：没重铺。
+    pub already: u64,
+    /// 落点上有别的东西（大小对不上）：**没覆盖**。
+    pub occupied: Vec<NotLaid>,
+    /// 没铺成的。
+    pub failures: Vec<NotLaid>,
+    /// 连着失败太多次，主动停了。
+    pub gave_up: bool,
+    /// 库里记着、池里却没有那个文件的引用有几条。
+    pub not_in_pool: u64,
+    /// 认不出是什么的图有几张——一张都不铺。
+    pub unknown_kind: u64,
+    /// 被同类挤掉的图有几张：靠文件名找媒体的格式里，一个变体的一个类型只放得下一张。
+    pub crowded_out: u64,
+}
+
+impl MediaReport {
+    /// 真铺出去了几份：硬链接的加复制的。
+    #[must_use]
+    pub fn placed(&self) -> u64 {
+        self.linked + self.copied
+    }
+}
+
+/// 一份**没铺出去**的媒体：落点被别的东西占着，或者没铺成。
+///
+/// 与 [`Conflict`] 分开：那一个说的是元数据文件上的**外部改动**，这一个说的是媒体目录里
+/// 一条落点为什么空着。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct NotLaid {
+    /// 落点：相对导出目录的路径。
+    pub path: String,
+    /// 为什么。
+    pub why: String,
 }
 
 impl ExportReport {
@@ -436,6 +490,10 @@ impl ExportReport {
             }
         }
 
+        if let Some(media) = &self.media {
+            write_media(&mut out, media, self.dry_run);
+        }
+
         if !self.forced.is_empty() {
             heading(&mut out, "⚠️ 外面有人动过，这几份照 `--force` 覆盖掉了");
             for conflict in &self.forced {
@@ -463,6 +521,77 @@ impl ExportReport {
             );
         }
         out
+    }
+}
+
+/// 导出报告里**铺媒体**那一节。没开铺媒体的那一趟不进这里，一个字都不印
+/// （[`ExportReport::media`]）。
+fn write_media(out: &mut String, media: &MediaReport, dry_run: bool) {
+    heading(out, "媒体");
+    let _ = writeln!(
+        out,
+        "{}{} 份，共 {}（媒体池 → 媒体目录，照这个格式的布局）",
+        pad("要铺", 16),
+        thousands(media.files),
+        human_bytes(media.bytes),
+    );
+    if dry_run {
+        let _ = writeln!(
+            out,
+            "只排了计划，一份都没铺。这两个数是上界：落点上已经有的，真铺时不重铺。"
+        );
+        return;
+    }
+    if let Some(placement) = &media.placement {
+        let _ = writeln!(out, "{}{}", pad("探测结果", 16), placement);
+    }
+    let _ = writeln!(
+        out,
+        "{}{} 份：硬链接 {}、复制 {}",
+        pad("新铺出去", 16),
+        thousands(media.placed()),
+        thousands(media.linked),
+        thousands(media.copied),
+    );
+    if media.already > 0 {
+        let _ = writeln!(
+            out,
+            "{}{} 份（大小对得上，没重铺）",
+            pad("落点上本来就有", 16),
+            thousands(media.already),
+        );
+    }
+    if media.not_in_pool + media.unknown_kind + media.crowded_out > 0 {
+        let _ = writeln!(
+            out,
+            "没铺的：池里没有那个文件的引用 {} 条、认不出是什么的图 {} 张、被同类挤掉 {} 张",
+            thousands(media.not_in_pool),
+            thousands(media.unknown_kind),
+            thousands(media.crowded_out),
+        );
+    }
+    if !media.occupied.is_empty() {
+        let _ = writeln!(
+            out,
+            "⚠️ {} 份的落点上有别的东西，**没覆盖**——那可能是维护者自己放的：",
+            thousands(media.occupied.len() as u64),
+        );
+        for one in media.occupied.iter().take(EXAMPLES) {
+            let _ = writeln!(out, "  {}\n    {}", one.path, one.why);
+        }
+    }
+    if !media.failures.is_empty() {
+        let _ = writeln!(
+            out,
+            "⚠️ {} 份没铺成：",
+            thousands(media.failures.len() as u64),
+        );
+        for failure in media.failures.iter().take(EXAMPLES) {
+            let _ = writeln!(out, "  {}\n    {}", failure.path, failure.why);
+        }
+    }
+    if media.gave_up {
+        let _ = writeln!(out, "连着失败太多次，主动停了——多半是盘满了或者盘被拔了。");
     }
 }
 

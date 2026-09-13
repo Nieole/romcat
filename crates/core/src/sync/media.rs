@@ -87,15 +87,36 @@ pub fn lay(
     pool: &MediaPool,
     selected: &Selected,
 ) -> Result<Laid, CatalogError> {
+    let variants: Vec<&str> = selected
+        .picked
+        .iter()
+        .map(|picked| picked.key.as_str())
+        .collect();
+    lay_for(catalog, adapter, pool, &variants)
+}
+
+/// 同 [`lay`]，只是直接给**变体的键**。
+///
+/// **导出**铺的是整个库，没有选择集可求值（`adapter::transfer::media_to_lay`，
+/// 票 `one-criterion-per-thing/08`）——布局照旧只有这一份实现，子库与导出从这儿各取一份。
+///
+/// # Errors
+/// 读中立库失败时返回错误。
+pub fn lay_for(
+    catalog: &Catalog,
+    adapter: &dyn Adapter,
+    pool: &MediaPool,
+    variants: &[&str],
+) -> Result<Laid, CatalogError> {
     let works = work_of_variant(catalog)?;
     let mut out = Laid::default();
     // 同一份媒体被多个变体引用时目标上只有一个文件，于是同一条路径只铺一次；
     // 归属哪个变体记第一个遇到的那个（报告按变体折账，重复计一次就够）。
     let mut placed: BTreeSet<String> = BTreeSet::new();
 
-    for picked in &selected.picked {
-        let mut anchors = vec![(AnchorKind::Variant.label(), picked.key.clone())];
-        if let Some(work) = works.get(&picked.key) {
+    for &key in variants {
+        let mut anchors = vec![(AnchorKind::Variant.label(), key.to_string())];
+        if let Some(work) = works.get(key) {
             anchors.push((AnchorKind::Work.label(), work.clone()));
         }
         for (anchor, subject) in anchors {
@@ -111,8 +132,7 @@ pub fn lay(
                     out.not_in_pool += 1;
                     continue;
                 };
-                let Some(placement) =
-                    adapter.media_placement(&picked.key, kind, &reference.hash, &ext)
+                let Some(placement) = adapter.media_placement(key, kind, &reference.hash, &ext)
                 else {
                     out.unknown_kind += 1;
                     continue;
@@ -125,7 +145,7 @@ pub fn lay(
                 let path = placement.path;
                 // 槽是 `None` 的格式**靠文件名找媒体**，条目里一个路径都不写。
                 if let Some(slot) = placement.slot {
-                    let slots = out.assets.entry(picked.key.clone()).or_default();
+                    let slots = out.assets.entry(key.to_string()).or_default();
                     let list = slots.entry(slot).or_default();
                     if !list.contains(&path) {
                         list.push(path.clone());
@@ -156,7 +176,7 @@ pub fn lay(
                         bytes: meta.len(),
                         mtime_ns: Some(0),
                     },
-                    variant: picked.key.clone(),
+                    variant: key.to_string(),
                     // 媒体不转格式：**能力档案说的是模拟器吃什么**，而封面截图是给
                     // 前端看的，前端吃什么由适配器那一侧决定（票 13 的媒体池已经把
                     // 扩展名规范过了）。
