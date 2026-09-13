@@ -255,6 +255,12 @@ pub struct Outcome {
     pub report: IdentifyReport,
     /// 这一趟是不是被中断了。
     pub interrupted: bool,
+    /// **接着上一趟算**时，上一趟已经算完、这一趟没再算的变体数；从头算的那一趟是 0
+    /// （票 `gui-answers-all-six/03`）。
+    ///
+    /// 进度（[`Progress`]）数的是这一趟算的那些，所以变体总数对不上进度那个分母时，
+    /// 差的就是它。
+    pub carried_over: u64,
     /// 回盘读了多少字节。**第二趟应当接近 0**——算过的哈希留在中立库里（挂账 D14）。
     pub read_bytes: u64,
     /// 回盘读了几份内容。
@@ -298,6 +304,30 @@ pub struct Outcome {
     /// 同一个身份，所以它们在同一趟里一起重建（[`crate::collection::project`]）。
     /// **这就是「删掉中立库重扫之后收藏还在」那句话的兑现处。**
     pub collections: crate::collection::Projected,
+}
+
+impl Outcome {
+    /// 这一趟**部分完成**时留下了什么，一句话；跑完了是 `None`。
+    ///
+    /// **只在这儿写一次**：任务台那一句（[`run_task`] 报给
+    /// [`Handle::halfway`](crate::task::Handle::halfway)）与命令行收场那一句都从这儿取。
+    /// 两处各写一遍的话，一处改了说法、另一处还照旧——票 `gui-answers-all-six/03` 之前
+    /// 正是这样，两处各说一句「从头再算」，只是字不一样。
+    ///
+    /// **它说「下一趟接着算剩下的」**：已经算完的结论留在中立库里，下一趟只算还没识别的
+    /// 那些（[`run`] 起手那一步）。说成从头再算的话，人会以为按停白按了。
+    #[must_use]
+    pub fn left_behind(&self) -> Option<String> {
+        self.interrupted.then(|| {
+            let total = &self.report.total;
+            format!(
+                "按停时一共算完 {} 个变体，结论落进了中立库；还剩 {} 个{NOT_RUN_LABEL}\
+                 ——下一趟接着算剩下的，不从头来。",
+                thousands(total.variants.saturating_sub(total.not_run)),
+                thousands(total.not_run),
+            )
+        })
+    }
 }
 
 /// 一份拿去撞 DAT 的内容：容器里的一个内部文件，或者一个裸文件。
@@ -363,15 +393,18 @@ pub fn run(
     cancel: &CancelToken,
     progress: &mut dyn FnMut(&Progress),
 ) -> Result<Outcome, IdentifyError> {
-    // 先把上一轮的结论清干净：候选、结论、发行版，以及变体身上那两条链接。
-    // **作品那张表不清**——下面按名字复用现成的那一行，`work.id` 跨重跑不换
-    // （票 parking-3/10；`Catalog::clear_identifications` 的文档说的就是这件事）。
-    catalog.clear_identifications()?;
+    let kept = start_or_continue(catalog, ammo.guessing)?;
 
     let variants = catalog.variants()?;
+    // **这一趟要算的只有这些**。进度的分母也是它：从上一趟的数接着往上报的话，
+    // 任务台照「走了几成」线性外推出来的剩余时间会短得离谱。
+    let todo: Vec<&VariantRow> = variants
+        .iter()
+        .filter(|variant| !kept.contains(&variant.key))
+        .collect();
     let mut state = Run {
         progress: Progress {
-            total: u64::try_from(variants.len()).unwrap_or(u64::MAX),
+            total: u64::try_from(todo.len()).unwrap_or(u64::MAX),
             ..Progress::default()
         },
         // DAT 库里有哪几个平台。**没有弹药的平台不值得为它读盘**——真机上
@@ -387,12 +420,15 @@ pub fn run(
         exclusive_dirs: exclusive_dirs(&variants),
         // 谁挨着谁——模型推断那一层的「同目录还有」（票 12）。
         neighbours: Neighbours::build(&variants),
+        // 库里已有的发行版先认领上：接着算的那一趟不清发行版（`start_or_continue`），
+        // 从头算的那一趟刚清完，认领的是一张空表。
+        projector: Projector::adopting(catalog)?,
         ..Run::default()
     };
     let mut batch: Vec<Identification> = Vec::new();
     let mut interrupted = false;
 
-    for variant in &variants {
+    for &variant in &todo {
         if cancel.is_cancelled() {
             interrupted = true;
             break;
@@ -425,7 +461,7 @@ pub fn run(
     }
 
     // **合集与收藏照沉淀库重建**（票 `gui-redesign/06`）。摆在这儿而不是别处，理由与
-    // 上面 `clear_identifications` 那一句同源：中立库里的合集是沉淀库的**投影**，
+    // 起手那一清（`start`）同源：中立库里的合集是沉淀库的**投影**，
     // 与 `origin = 裁决` 那几行一样，重跑识别就该照着重建一遍。
     //
     // **被中断时不重建**：那时判据只算了一半，照半份算出来的投影会让一批收藏凭空消失
@@ -441,6 +477,9 @@ pub fn run(
     // 还有一多半变体没轮到，收了等于把它们的作品连同 id 一起扔掉，而那正是这一票要治的病。
     if !interrupted {
         catalog.drop_unheld_identified_works()?;
+        // 走完一整趟才摘掉记号。被按停、或者出了错（上面哪一个 `?` 抛出去了）时它留着：
+        // 那时已经落进库里的结论照样是真的，下一趟接着算剩下的。
+        catalog.set_identify_unfinished(false)?;
     }
 
     let mut report = IdentifyReport::build(catalog, ammo.repo)?;
@@ -452,6 +491,7 @@ pub fn run(
     Ok(Outcome {
         report,
         interrupted,
+        carried_over: u64::try_from(kept.len()).unwrap_or(u64::MAX),
         read_bytes: state.progress.read_bytes,
         read_files: state.progress.read_files,
         reused_hashes: state.reused,
@@ -473,6 +513,55 @@ pub fn run(
     })
 }
 
+/// 一趟识别起手：**上一趟没走完就接着算，否则从头算**。返回这一趟不再算的那些变体的键。
+///
+/// ## 从头算
+///
+/// 把上一轮的结论整份清干净：候选、结论、发行版，以及变体身上那条发行版链接。
+/// **作品那张表不清**——主循环按名字复用现成的那一行，`work.id` 跨重跑不换
+/// （票 parking-3/10；[`Catalog::clear_identifications`] 的文档说的就是这件事）。
+/// 清完记上「这一趟没走完」，跑完一整趟才摘掉（[`run`] 的末尾）。
+///
+/// ## 接着算（票 `gui-answers-all-six/03`）
+///
+/// 上一趟没走完时（被按停、出了错、进程没了），库里有结论的那些变体就是它已经算完的：
+/// 起手那一清把别的都清掉了，此后的结论是那一趟一条一条写进来的。于是**只算还没识别的
+/// 那些**，不落断点文件——「算到哪儿了」本来就摆在中立库里。两趟之间在待确认屏上裁决、
+/// 撤销或重做一批也会改写几条结论，但只动得了有结论的变体，写下的与重跑一遍照沉淀库重放
+/// 得到的一样（挂单 `Q631`）。
+///
+/// 结论不清，发行版也就不整批清——上一趟建出来的那些由主循环接着认领
+/// （`Projector::adopting`）。只收**谁都不指着**的那几行（[`Catalog::drop_unheld_releases`]）：
+/// 上一趟在建出发行版与写下结论之间出了错，才会留下它们。
+///
+/// ## 一条候选都没有的那些，模型推断那一层有事可做时照旧算
+///
+/// 那一层跑在主循环之后、被按停的那一趟整个不跑，而它要问谁是主循环一个一个攒出来的。
+/// 上一趟算完的这种变体不再过一遍的话，这一趟攒不到它们：计划少算钱，真问的那一趟少问，
+/// 结论就与一趟不停跑到底的不一样。判据与主循环里「交不交给它」是同一处
+/// （[`model::Guessing::wants`]）；库里记着的条数把缓存里取回来的模型候选也算进去了——
+/// 那些变体问过了，一趟不停跑到底也不会再问它们。
+///
+/// 代价：重算的那几个在结论上记的「这一趟读了多少字节」是 0（哈希取回来不读盘），与一趟
+/// 不停跑到底记的不一样——那一列本来就是这一趟的账，从头再跑一趟也是 0（挂单 `Q632`）。
+fn start_or_continue(
+    catalog: &mut Catalog,
+    guessing: &model::Guessing<'_>,
+) -> Result<BTreeSet<String>, CatalogError> {
+    if !catalog.identify_unfinished()? {
+        catalog.clear_identifications()?;
+        catalog.set_identify_unfinished(true)?;
+        return Ok(BTreeSet::new());
+    }
+    catalog.drop_unheld_releases()?;
+    Ok(catalog
+        .identified_candidates()?
+        .into_iter()
+        .filter(|(_, candidates)| !guessing.wants(*candidates))
+        .map(|(key, _)| key)
+        .collect())
+}
+
 /// 跑一趟识别，**把手接在任务台上**。
 ///
 /// 它就是 [`run`] 外面包的那一层，接法与 [`scan::scan`](crate::scan::scan) 一模一样：
@@ -486,16 +575,14 @@ pub fn run(
 /// 没有任务台。两个调用方要的东西不一样，[`run`] 那一对 `cancel + progress` 参数于是
 /// 留着——这一层只负责把它们接到把手上。
 ///
-/// ## 被叫停时不抛错，而是报一句**停在半路**
+/// ## 被叫停时不抛错，而是报一句**部分完成**
 ///
 /// 与 [`scan::scan`](crate::scan::scan) 同一条：那份「到目前为止」的账是真的，已经算出
 /// 来的结论也真的落进了中立库，所以照旧返回 `Ok`，只往把手上报一句
 /// [`Handle::halfway`](crate::task::Handle::halfway)——任务台照它把这一趟记成
 /// [`Ending::Halfway`](crate::task::Ending::Halfway)，历史里那一行才不会写成「完成」。
 ///
-/// **那句话不许说「下一趟接着算」**：[`run`] 起手就
-/// [`clear_identifications`](Catalog::clear_identifications)，下一趟是**从头再算一遍**
-/// ——识别没有**断点**。说反了的话，人会以为按停是省时间的。
+/// 那句话是 [`Outcome::left_behind`]：下一趟接着算剩下的（票 `gui-answers-all-six/03`）。
 ///
 /// # Errors
 /// 中立库或 DAT 库读写失败时返回错误。**被按停不是错误。**
@@ -519,18 +606,8 @@ pub fn run_task(
         task.cancel(),
         &mut |progress: &Progress| task.tick(progress.done, progress.total),
     )?;
-    if outcome.interrupted {
-        let 算完了 = outcome
-            .report
-            .total
-            .variants
-            .saturating_sub(outcome.report.total.not_run);
-        task.halfway(format!(
-            "按停时算完 {} 个变体，结论落进了中立库；还剩 {} 个{NOT_RUN_LABEL}\
-             ——识别没有断点，下一趟从头再算一遍。",
-            thousands(算完了),
-            thousands(outcome.report.total.not_run),
-        ));
+    if let Some(left_behind) = outcome.left_behind() {
+        task.halfway(left_behind);
     }
     Ok(outcome)
 }
@@ -3069,7 +3146,10 @@ fn assemble(
     // 判据是「**一条候选都没有**」，比文件名那一层的「没有自动通过的候选」严一档——
     // 已经有东西可裁的变体不重复花钱。
     let mut candidates = candidates;
-    if candidates.is_empty() && ammo.guessing.ready() {
+    if ammo
+        .guessing
+        .wants(u64::try_from(candidates.len()).unwrap_or(u64::MAX))
+    {
         state.model.residue += 1;
         let question = model::Question {
             variant_key: variant.key.clone(),
@@ -3409,6 +3489,34 @@ impl Projector {
         Ok(id)
     }
 
+    /// **库里已有的发行版先认领上**（票 `gui-answers-all-six/03`）。
+    ///
+    /// 识别接着上一趟算时不清发行版，不先认领的话，下一个撞上同一条条目的变体会再建一行
+    /// ——导出时的**收敛**于是把一个条目拆成两个。键就记在候选身上
+    /// （[`Catalog::entry_releases`]）。从头算的那一趟起手刚把候选与发行版整批清掉，认领的
+    /// 是一张空表，与 [`Projector::new`] 一样。
+    ///
+    /// **裁决落成的那几条不在这儿认领**：它们的键是裁决说出口的那几样，跨调用本来就靠
+    /// 库里现找（`verdict_release`）。
+    fn adopting(catalog: &Catalog) -> Result<Self, CatalogError> {
+        let mut projector = Self::new();
+        for entry in catalog.entry_releases()? {
+            if entry.source == VERDICT_SOURCE {
+                continue;
+            }
+            projector
+                .releases
+                .entry(Self::entry_key(&entry.source, &entry.dat, &entry.game))
+                .or_insert(entry.release_id);
+        }
+        Ok(projector)
+    }
+
+    /// 一条 DAT 条目的发行版去重键：哪个源的哪份 DAT 的哪一条。
+    fn entry_key(source: &str, dat: &str, game: &str) -> String {
+        format!("{source}|{dat}|{game}")
+    }
+
     /// 识别撞出来的那条 DAT 条目对应的发行版。一条 DAT 条目就是一条发行版。
     fn dat_release(
         &mut self,
@@ -3419,7 +3527,7 @@ impl Projector {
     ) -> Result<i64, CatalogError> {
         // **数字世代不必特殊对待**（ADR-0019）：那里港服与美服共用同一个 TitleID，
         // 本来就是 DAT 里的同一条条目，于是自然只有一条发行版，中文落在 `languages` 上。
-        let key = format!("{}|{}|{}", candidate.source, candidate.dat, candidate.game);
+        let key = Self::entry_key(&candidate.source, &candidate.dat, &candidate.game);
         if let Some(id) = self.releases.get(&key) {
             return Ok(*id);
         }

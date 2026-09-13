@@ -34,6 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::{OptionalExtension, Transaction, params};
 
+use super::meta::MetaKey;
 use super::{Catalog, CatalogError};
 use crate::dat::Convention;
 use crate::dat::chinese::ChineseMark;
@@ -741,8 +742,10 @@ pub struct Identification {
     /// **`None` 是这条结论不说平台**：裁决落成的结论没看过内容，它不判平台；识别判了
     /// 却一个平台都说不出（读不出头、目录也没声明）时同样是 `None`。写库时这样一条
     /// 不盖掉库里已有的那个（[`Catalog::write_identifications`]），所以这一列**写不空**
-    /// ——识别那一趟起手整批清掉结论（[`Catalog::clear_identifications`]），判不出的
-    /// 那一行本来就没有旧值可留。
+    /// ——识别从头算的那一趟起手整批清掉结论（[`Catalog::clear_identifications`]），接着
+    /// 上一趟算的那一趟算的是还没识别的，判不出的那一行本来就没有旧值可留。例外是模型推断
+    /// 那一层要重问的那几个（`identify::run` 起手那一步）：它们的旧值是上一趟判的，两趟
+    /// 之间弹药没换过时与这一趟判的一样（换过的情形见挂单 `Q631`）。
     pub platform: Option<String>,
     /// 拿了几份内容去撞。
     pub units: u64,
@@ -795,6 +798,22 @@ pub struct AcceptedCandidate<'a> {
 
 /// 逐条走**自动通过**的候选时收到的那一条。
 pub type AcceptedCandidateVisitor<'a> = dyn FnMut(&AcceptedCandidate<'_>) + 'a;
+
+/// 一条 DAT 条目在这份库里立起来的**发行版**：候选身上记着的哪个源、哪份 DAT、哪一条，
+/// 指着哪一行（[`Catalog::entry_releases`]）。
+///
+/// 捏成一个结构而不是四元组：三个 `String` 挨在一起，元组里写反了编译器不会说话。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryRelease {
+    /// 哪个数据源。
+    pub source: String,
+    /// 哪一份 DAT。
+    pub dat: String,
+    /// 条目名。
+    pub game: String,
+    /// 它指着的那一行发行版。
+    pub release_id: i64,
+}
 
 /// 一个数据源贡献了多少条候选。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1777,11 +1796,12 @@ impl Catalog {
     /// 把一批变体的结论写进去。**一个变体写两次是同一个结果**：先删掉它上一批候选
     /// 再插新的，于是重跑与分批写都不会攒出重复的候选。
     ///
-    /// 调用方在开跑前先调一次
+    /// 从头算的那一趟开跑前先调一次
     /// [`clear_identifications`](Self::clear_identifications)——那一步把识别自己上一轮
     /// 造的**候选、结论与发行版**整批清掉（**作品那张表不清**，见那一头的文档）。
-    /// 分批写而不是攒到最后一次性写，是为了让被中断的识别留下已经算完的那部分
-    /// （与扫描的批次写同源）。
+    /// 分批写而不是攒到最后一次性写，是为了让被按停的识别留下已经算完的那部分
+    /// （与扫描的批次写同源）——**下一趟接着算剩下的，靠的就是这一部分**
+    /// （[`identify_unfinished`](Self::identify_unfinished)）。
     ///
     /// **变体身上那两条链接由这一步逐条覆盖**，认不出来时写的是空。于是「这一趟认不
     /// 出来了」与「这一趟还没轮到它」是两种不同的库状态，被叫停时分得开。
@@ -2133,8 +2153,9 @@ impl Catalog {
     ///
     /// 它没有作品那两条理由：没有任何东西拿 `release.id` 当锚（候选与变体身上那两条
     /// 链接都在这一趟里重算），而它认「是不是同一条」的键是「哪个源的哪份 DAT 的
-    /// 哪一条」，只活在一趟之内（`identify::Projector`）。留着它，每跑一次识别就多攒
-    /// 一份重复的发行版。
+    /// 哪一条」（`identify::Projector`）。留着它不认领，每从头跑一次识别就多攒一份重复的
+    /// 发行版。**接着上一趟算的那一趟不调这一步**：结论与发行版都留着，发行版由
+    /// `identify::Projector` 从候选身上认领回来（[`entry_releases`](Self::entry_releases)）。
     ///
     /// `origin` 这一列照旧有用——它说得出一行是**识别**撞出来的还是**裁决**定下来的，
     /// 报告里的「识别建出来的作品数」靠它把两者分开数。
@@ -2180,6 +2201,103 @@ impl Catalog {
             tx.execute(sql, []).map_err(to_err)?;
         }
         tx.commit().map_err(to_err)
+    }
+
+    /// 上一趟识别是不是**没走完**：被按停、出了错或者进程没了，已经算完的结论留在库里。
+    ///
+    /// `identify::run` 起手问它：是，就接着算还没识别的那些；不是，就整份清掉从头算
+    /// （[`clear_identifications`](Self::clear_identifications)）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn identify_unfinished(&self) -> Result<bool, CatalogError> {
+        Ok(self.meta_get(MetaKey::IdentifyUnfinished)?.as_deref() == Some("1"))
+    }
+
+    /// 记下「这一趟识别没走完」（`true`，落 `1`），或者「走完了」（`false`，落 `0`）。
+    ///
+    /// **只有 `identify::run` 调它**：起手从头算、清完结论之后记上，跑完一整趟之后摘掉。
+    /// 先清后记是有讲究的——两步之间进程没了，库里没有记号，下一趟照旧从头算；反过来
+    /// 先记后清的话，下一趟会把上一趟跑完的那份旧结论整份当成「已经算完」留下来。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn set_identify_unfinished(&self, unfinished: bool) -> Result<(), CatalogError> {
+        self.meta_set(
+            MetaKey::IdentifyUnfinished,
+            if unfinished { "1" } else { "0" },
+        )
+    }
+
+    /// 候选身上认领过的**发行版**：哪个源的哪份 DAT 的哪一条，指着哪一行。按行号排。
+    ///
+    /// 识别**接着上一趟算**时拿它把上一趟已经建出来的发行版先认领上
+    /// （`identify::Projector`）：发行版认「是不是同一条」的键就是这三样，而它们本来就
+    /// 记在候选身上，不必另记一份。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn entry_releases(&self) -> Result<Vec<EntryRelease>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT source, dat, game, release_id FROM candidate
+                 WHERE release_id IS NOT NULL
+                 ORDER BY release_id, source, dat, game",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(EntryRelease {
+                    source: row.get(0)?,
+                    dat: row.get(1)?,
+                    game: row.get(2)?,
+                    release_id: row.get(3)?,
+                })
+            })
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
+    /// 收掉没有任何变体、任何候选指着的**发行版**行；返回收了几行。
+    ///
+    /// 识别**接着上一趟算**时起手调它。发行版是撞上条目的那一刻当场建的，结论却攒够一批
+    /// 才写——上一趟要是在两者之间出了错，那几行就谁都不指着。从头算的那一趟起手整批清掉
+    /// 发行版，用不着它；接着算的那一趟不清，不收的话它们会一直留着，标题集合照样拿它们
+    /// 的条目名折出指不着任何文件的叫法。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn drop_unheld_releases(&mut self) -> Result<u64, CatalogError> {
+        drop_unheld_release_rows(&self.conn)
+            .map(|count| u64::try_from(count).unwrap_or(0))
+            .map_err(|source| self.err(source))
+    }
+
+    /// 有结论的变体各有几条**候选**：变体的键 → 条数。[还没识别](NOT_RUN_LABEL)的不在里面。
+    ///
+    /// 识别**接着上一趟算**时拿它定这一趟不再算哪些（`identify::run`）：有结论的就是
+    /// 上一趟算完的；一条候选都没有的那些，模型推断那一层这一趟有事可做时还得交给它
+    /// （`identify::model::Guessing::wants`）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn identified_candidates(&self) -> Result<BTreeMap<String, u64>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT variant_key, candidates FROM identification")
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+                ))
+            })
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
     }
 
     /// 收掉**识别自己造的**、这一趟跑完之后没人再指着的那些**作品**行；返回收了几行。
@@ -2377,8 +2495,8 @@ impl Catalog {
     /// 必须走完两半，只走前一半就等于把还没轮到的变体从分母里抹掉，覆盖率当场虚高。
     ///
     /// 真机上这一半什么时候不空：识别被中断（没轮到的那些）、识别跑完之后又扫进了
-    /// 新文件或加了新的**根**。识别每一趟起手都 `clear_identifications` 整批重算
-    /// （`identify::run`），所以跑完一整趟之后这一半是空的。
+    /// 新文件或加了新的**根**。识别从头算的那一趟起手整批清掉结论、接着算的那一趟只算
+    /// 这一半（`identify::run`），所以跑完一整趟之后这一半是空的。
     ///
     /// # Errors
     /// 读库失败时返回错误。
@@ -3061,12 +3179,7 @@ pub(super) fn drop_stale_conclusions(
 /// 闸是「还有没有人指着它」，而不是「它是怎么来的」——这两张表每一行都可再生，
 /// 判据写在 [`drop_variant_orphans`] 的「作品与发行版凭什么也删得」那一段。
 fn drop_unheld_works(tx: &Transaction<'_>) -> rusqlite::Result<()> {
-    tx.execute(
-        "DELETE FROM release
-         WHERE NOT EXISTS(SELECT 1 FROM variant v WHERE v.release_id = release.id)
-           AND NOT EXISTS(SELECT 1 FROM candidate c WHERE c.release_id = release.id)",
-        [],
-    )?;
+    drop_unheld_release_rows(tx)?;
     tx.execute(
         "DELETE FROM work
          WHERE NOT EXISTS(SELECT 1 FROM variant v WHERE v.work_id = work.id)
@@ -3074,4 +3187,18 @@ fn drop_unheld_works(tx: &Transaction<'_>) -> rusqlite::Result<()> {
         [],
     )?;
     Ok(())
+}
+
+/// 收掉没有任何变体、任何候选指着的**发行版**行；返回收了几行。
+///
+/// 「一行发行版还有没有人要」只在这儿判一次，两处共用：重新成型收孤行那一遍
+/// （[`drop_unheld_works`]）与识别接着上一趟算的起手那一步
+/// （[`Catalog::drop_unheld_releases`]）。
+fn drop_unheld_release_rows(conn: &rusqlite::Connection) -> rusqlite::Result<usize> {
+    conn.execute(
+        "DELETE FROM release
+         WHERE NOT EXISTS(SELECT 1 FROM variant v WHERE v.release_id = release.id)
+           AND NOT EXISTS(SELECT 1 FROM candidate c WHERE c.release_id = release.id)",
+        [],
+    )
 }

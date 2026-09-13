@@ -71,6 +71,16 @@ pub(super) enum MetaKey {
     ///
     /// 读 [`Catalog::shaped_manifest`]；写同 [`Self::ShapedScan`]。
     ShapedManifest,
+    /// **上一趟识别没走完**：已经算完的结论留在库里，下一趟接着算剩下的
+    /// （票 `gui-answers-all-six/03`）。
+    ///
+    /// 「没走完」盖三种情形：被按停（收场是部分完成）、跑到一半出了错（收场是失败）、
+    /// 进程没了。三种留下的结论都是真的，所以下一趟一样接着算。
+    ///
+    /// 读 [`Catalog::identify_unfinished`]，写 [`Catalog::set_identify_unfinished`]，两头都
+    /// 只在 `identify::run` 里：起手从头算、清完结论时记成 `1`，跑完一整趟记成 `0`。记着 `0`
+    /// 或者那一行不在，就是上一趟跑完了或者从没跑过——下一趟从头算。
+    IdentifyUnfinished,
 }
 
 impl MetaKey {
@@ -85,6 +95,7 @@ impl MetaKey {
             Self::ExportDir => "export_out_dir",
             Self::ShapedScan => "shaped_scan",
             Self::ShapedManifest => "shaped_manifest",
+            Self::IdentifyUnfinished => "identify_unfinished",
         }
     }
 }

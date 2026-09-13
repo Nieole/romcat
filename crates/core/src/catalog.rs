@@ -61,7 +61,7 @@ pub use export::{ExportSetup, ExportSetupError};
 pub use frontend::{SnapshotOrigin, SnapshotRow};
 pub use identify::{
     AcceptedCandidate, Candidate, CandidateCounts, Confidence, ContentHash, EntryFact,
-    Identification, Provenance, SourceCount, State,
+    EntryRelease, Identification, Provenance, SourceCount, State,
 };
 pub use roots::{AddRootError, LibraryRoot, RootScan, RootStats, Roots};
 pub use title::TitleRow;

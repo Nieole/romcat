@@ -7,13 +7,16 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use romcat_core::catalog::Catalog;
+use romcat_core::catalog::{Catalog, Roots};
 use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
 use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
+use romcat_core::fs::RealFs;
+use romcat_core::identify;
+use romcat_core::scan::CancelToken;
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
-use romcat_core::workspace;
+use romcat_core::{verdict, workspace};
 
 fn 跑(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_romcat"))
@@ -127,6 +130,91 @@ fn 识别跑通并把命中率打出来() {
         .expect("读得出")
         .expect("在");
     assert!(变体.work_id.is_some() && 变体.release_id.is_some());
+}
+
+/// 在命令行之外**按停一趟识别**：一个变体一批，算完第一个就按停。
+///
+/// 按停钉在进度回调这个信号上，不钉在挂钟上。它按的与命令行的 Ctrl-C、界面上那个
+/// 「停下」是同一个信号（`identify::run` 收的那个 `CancelToken`）。
+fn 算完一个就按停(workspace: &Path) {
+    let mut catalog = Catalog::open(&workspace::catalog_path(
+        workspace,
+        workspace::Slug::Named("小库"),
+    ))
+    .expect("开得出中立库");
+    let repo = DatRepo::open(&workspace::dat_repo_path(workspace)).expect("开得出 DAT 库");
+    let mut options = identify::Options::new(Roots::load(&catalog).expect("读得出根"));
+    options.write_batch = 1;
+    let cancel = CancelToken::new();
+    let outcome = identify::run(
+        &RealFs::new(),
+        &mut catalog,
+        &identify::Ammo {
+            repo: &repo,
+            verdicts: &verdict::Index::empty(),
+            naming: &identify::fuzzy::Naming::off(),
+            guessing: &identify::model::Guessing::off(),
+            titledb: None,
+        },
+        &options,
+        &cancel,
+        &mut |progress| {
+            if progress.done >= 1 {
+                cancel.cancel();
+            }
+        },
+    )
+    .expect("按停不是错误");
+    assert!(outcome.interrupted, "前提：这一趟是被按停的");
+}
+
+#[test]
+fn 按停过的识别命令行接着算剩下的() {
+    // 票 `gui-answers-all-six/03`：接着算写在 `identify::run` 里，命令行与界面共用那一份，
+    // 命令行不必另写一份就拿到——这一条钉的是它真的拿到了，而且嘴上说得出来。
+    let (library, workspace) = 现场加残渣();
+    扫(library.path(), workspace.path());
+    算完一个就按停(workspace.path());
+    let catalog_path = workspace::catalog_path(workspace.path(), workspace::Slug::Named("小库"));
+    assert_eq!(
+        Catalog::open(&catalog_path)
+            .expect("开得出中立库")
+            .not_run_count()
+            .expect("数得出"),
+        1,
+        "前提：两个变体，按停时算完一个"
+    );
+
+    let out = 跑(&[
+        "identify",
+        &library.path().to_string_lossy(),
+        "--library",
+        "小库",
+        "--workspace",
+        &workspace.path().to_string_lossy(),
+        "--quiet",
+    ]);
+    let text = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains("上一趟已经算完的 1 个变体这一趟没再算"),
+        "命令行没说它是接着上一趟算的：{text}"
+    );
+
+    let catalog = Catalog::open(&catalog_path).expect("开得出中立库");
+    assert_eq!(
+        catalog.not_run_count().expect("数得出"),
+        0,
+        "接着算完之后一个「还没识别」都不剩"
+    );
+    assert_eq!(
+        catalog
+            .candidates_of("库/FC/游戏.zip")
+            .expect("读得出")
+            .len(),
+        1,
+        "上一趟没轮到的那一个这一趟真的算了"
+    );
 }
 
 #[test]

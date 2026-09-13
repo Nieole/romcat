@@ -1967,15 +1967,18 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
     // 两句话分工：这一句说**为什么**有变体没轮到，报告里那一栏（「还没识别 N 个」）
     // 说**有多少个**没轮到。少了后者，中断之后的报告会说「变体 1 个，全部变体里
     // 100.0%」而库里躺着 5 个——那正是这一票要消掉的东西。
-    if outcome.interrupted {
+    //
+    // 「留下了什么、下一趟怎么接」那半句与任务台共用一处（`Outcome::left_behind`），
+    // 这儿只补命令行自己的那半句：底下这份报告是半份。
+    if let Some(left_behind) = outcome.left_behind() {
         eprintln!(
             "⚠ 识别{}",
             romcat_core::task::Ending::Halfway {
                 product: (),
-                left_behind: "下面这份报告只是半份——没轮到的那些变体\
-                              在报告里记作「还没识别」，它们在「全部变体里」那个分母中。\
-                              已经算完的那部分留在中立库里，重跑会从头算一遍。"
-                    .to_string(),
+                left_behind: format!(
+                    "{left_behind}下面这份报告只是半份——没轮到的那些变体\
+                     在报告里记作「还没识别」，它们在「全部变体里」那个分母中。"
+                ),
             }
             .render()
         );
@@ -1993,6 +1996,14 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
         thousands(outcome.read_files),
         thousands(outcome.reused_hashes),
     );
+    // **接着上一趟算的要说出来**：不说的话，跑的时候那几行「已算 N / M」里的 M 比变体
+    // 总数小，秒数也短得不像整份库，看着像少算了一批（票 `gui-answers-all-six/03`）。
+    if outcome.carried_over > 0 {
+        eprintln!(
+            "这一趟是接着上一趟算的：上一趟已经算完的 {} 个变体这一趟没再算。",
+            thousands(outcome.carried_over),
+        );
+    }
     if outcome.probed > 0 || outcome.missed > 0 {
         eprintln!(
             "光盘那一层探了 {} 份内容（读出标识 {} 份，另有 {} 份这一趟没读到），撞出 {} 条候选，其中 {} 个变体是**只靠序列号**才认出来的。",

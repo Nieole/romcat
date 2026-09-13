@@ -1084,6 +1084,16 @@ impl Guessing<'_> {
         self.planning || self.net.is_some() || !self.answers.is_empty()
     }
 
+    /// 前面各层给一个变体交出了 `candidates` 条候选，**要不要交给这一层**。
+    ///
+    /// 判据是「这一层这一趟有事可做，而且一条候选都没有」——已经有东西可裁的变体不重复
+    /// 花钱。**只在这儿判一次**：主循环拿它定排不排进要问的那一批，识别接着上一趟算时拿它
+    /// 定上一趟算完的那几个要不要再过一遍（`identify::run` 起手那一步）。
+    #[must_use]
+    pub fn wants(&self, candidates: u64) -> bool {
+        candidates == 0 && self.ready()
+    }
+
     /// 这一趟会真的发请求吗。
     #[must_use]
     pub fn asking(&self) -> bool {
