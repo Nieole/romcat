@@ -5,7 +5,7 @@
 
 **Blocked by:** 无 —— 可立即开工
 
-**Status:** ready-for-agent
+**Status:** done
 
 ⚠️ **数据不是代码**：这份令牌与 `platforms.toml` / `profiles.toml` / `priorities.toml`
 同一条纪律，编进二进制，不在运行时读盘。
@@ -24,8 +24,8 @@
     本票也没加画它的地方。
   - 量法 `grep -rnE 'Color32::|Rgba|from_rgb|from_gray' crates/gui/src`：基点 `a14db7a` 上 3 处命中，
     其中 **2 处是写死的颜色**（`media.rs:368` `from_black_alpha(80)`、`:374` `WHITE`），1 处是
-    `ColorImage` 解码；做完 14 处命中，非测试代码只剩 `tokens.rs:271`（文档）、`:282`
-    （`Color32::from_hex`，解析器本身）与 `media.rs:491`（同一处解码），其余 11 处都在两个测试模块里
+    `ColorImage` 解码；做完（`316f72f`）14 处命中，非测试代码只剩 `tokens.rs:259`（文档）、`:270`
+    （`Color32::from_hex`，解析器本身）与 `media.rs:492`（同一处解码），其余 11 处都在两个测试模块里
     ——**写死的颜色 0 处**。
   - 保留：没有测试守着「没有第二处」（挂单 `Q486`）；阴影照 egui 默认，不在令牌里（挂单 `Q485`）。
 - [x] 一条测试拿令牌**逐项**比对两套 Visuals；**变异实测**：改令牌里任意一个颜色，这条当场红
@@ -47,4 +47,9 @@
     `dark: --accent 设计稿是 #8190F6，令牌是 #8190F7`、退出 1。规格开头「判据」与设计稿说明区两处
     令牌路径跟着改了。
   - 保留：脚本不在门禁里，设计稿对令牌这一侧仍靠人跑（挂单 `Q481`）。
-- [ ] 门禁全绿（`--all-features`）
+- [x] 门禁全绿（`--all-features`）
+  - 证据：在实现提交 `316f72f` 上跑 `TMPDIR=/Users/nicoer/dev/game-wt/cs/tmp cargo xtask gate -j 3
+    --test-threads 3 --keep-going`，日志 `/Users/nicoer/dev/game-wt/logs/slot-2-gl01-gate.log`：
+    fmt 1s、check 26s、clippy 41s、test 403s、doc 7s，「5 条全绿。」`EXIT=0`。test 那一步 70 份
+    `test result: ok`，合计 1,839 passed、0 failed、0 ignored。日志里那几行 `unresolved link to NoSuchItem`
+    出自 `xtask/tests/gate.rs` 故意造红的丢弃 crate，不是本仓库的文档告警。
