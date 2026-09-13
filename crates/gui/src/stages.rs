@@ -23,6 +23,17 @@
 //! 导出撞上外面有人动过之后那颗「我看过了，照写」（`Section::force_export`）也不另起
 //! 一份：它与 `start` 走的是同一个 `queue`，只多压一格**只管这一趟**的旋钮。
 //!
+//! ## 导出那一支上那颗铺媒体开关
+//!
+//! **默认关着**（[`LAY_MEDIA`]），关着时导出那一趟与没有这颗开关时一样。打开时先排一趟
+//! 「算一遍要铺多少媒体」上任务台，算出来的那句代价（[`media_cost`]）画在开关底下；
+//! **那句话画出来之前按导出，当场说一句、不排**——人按下去的那一刻得已经知道要付多少，
+//! 平常那一趟与照写那一趟一个口径。
+//!
+//! 数是核心库那一处算的**上界**（`romcat_core::adapter::transfer::media_to_lay`，界面不另算
+//! 一份），缓存到库可能变了为止：这一段重读库、跑完一道工序（导出除外）、改导出配置、
+//! 离开库屏再回来（挂单 `Q651`、`Q654`）。
+//!
 //! ## 后台那条线程写的是哪一份库
 //!
 //! 识别与折标题都要**写**中立库（两者起手都先把上一轮折出来的清干净），而
@@ -48,10 +59,11 @@ use std::path::{Path, PathBuf};
 
 use romcat_core::adapter::report::Conflict;
 use romcat_core::adapter::transfer::{self, ExportOptions};
-use romcat_core::catalog::{ExportSetup, Roots};
+use romcat_core::catalog::{Catalog, CatalogError, ExportSetup, Roots};
 use romcat_core::fs::RealFs;
 use romcat_core::identify;
-use romcat_core::report::thousands;
+use romcat_core::report::{human_bytes, thousands};
+use romcat_core::scrape::pool::MediaPool;
 use romcat_core::site::Site;
 use romcat_core::stage::{Behind, Stage, StageRow, Stages};
 use romcat_core::task::{Cutoff, Ending, Finished, Handle};
@@ -59,6 +71,90 @@ use romcat_core::{title, verdict, workspace};
 
 use crate::font;
 use crate::task::{Product, Tasks};
+
+/// 导出那一支上那颗**铺媒体**开关上写的字（票 `one-criterion-per-thing/09`）。
+///
+/// **摆成常量是给重排留的**：库屏照稿重排时（票 `gui-looks-like-the-design/06`）这颗开关
+/// 一个字都不许丢，钉它的测试按这串字在屏上找。
+pub const LAY_MEDIA: &str = "一起铺媒体";
+
+/// 开着**铺媒体**时屏上先画的那句代价：这一趟**最多**要铺几份、共多大。
+///
+/// **按下导出之前就得说得出来**（票 `one-criterion-per-thing/09`）：不是按下去之后才发现
+/// 在拷贝。两个数是核心库那一处算的（[`transfer::media_to_lay`]，ADR-0024），界面不另算
+/// 一份。那是个**上界**——落点上已经有的真铺时不重铺——所以说成「最多」（挂单 `Q584`）。
+///
+/// **摆成函数是给重排留的**，理由同 [`LAY_MEDIA`]。
+#[must_use]
+pub fn media_cost(files: u64, bytes: u64) -> String {
+    format!(
+        "开着它，这一趟最多要铺 {} 份媒体，共 {}。落点上已经有的不重铺；\
+         媒体池与导出目录不在同一块盘上时是整份复制。",
+        thousands(files),
+        human_bytes(bytes),
+    )
+}
+
+/// 开着**铺媒体**、那句代价（[`media_cost`]）还没画出来时按导出，屏上挂的那一句。
+/// 一处写、两处认：闸挡下时挂它，数出来或关掉开关时按它收掉（`Section::clear_media_refusal`）。
+fn media_refusal() -> String {
+    format!("开着「{LAY_MEDIA}」，屏上却还没说清这一趟最多要铺多少——先看清那句再按。")
+}
+
+/// 算「这一趟最多要铺多少」那一趟在任务台上叫什么。测试按它在任务台上找那一趟。
+pub const COUNT_MEDIA: &str = "算一遍要铺多少媒体";
+
+/// 开着**铺媒体**的那一趟走完之后回执里那一句：铺出去几份、怎么铺的、落点上本来就有几份。
+///
+/// **没铺出去的也得说出口**：落点被别的东西占着的一律不覆盖、没铺成的留在报告里
+/// （`romcat_core::adapter::report::MediaReport`），它们不会出现在前端里——不说的话，
+/// 人对着前端里缺的那几张封面查不出为什么。
+fn media_laid(media: &romcat_core::adapter::report::MediaReport) -> String {
+    let mut line = format!(
+        "媒体：铺出去 {} 份（硬链接 {}、复制 {}），落点上本来就有 {} 份。",
+        thousands(media.placed()),
+        thousands(media.linked),
+        thousands(media.copied),
+        thousands(media.already),
+    );
+    if !media.occupied.is_empty() {
+        line.push_str(&format!(
+            "{} 份的落点上有别的东西，没覆盖。",
+            thousands(media.occupied.len() as u64),
+        ));
+    }
+    if !media.failures.is_empty() {
+        line.push_str(&format!(
+            "{} 份没铺成。",
+            thousands(media.failures.len() as u64)
+        ));
+    }
+    line
+}
+
+/// 开着**铺媒体**时那句代价（[`media_cost`]）眼下是什么样。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MediaCost {
+    /// 还没算过，或者算过的那个数作废了（[`Section::expire_media_cost`]）：开关开着时
+    /// 下一帧排一趟去算。
+    NotAsked,
+    /// 正在任务台上算。
+    Counting {
+        /// 那一趟的任务号。
+        id: u64,
+        /// 算的时候库变了：交回来的那个数读的可能是变之前那一份，不用，再算一遍。
+        expired: bool,
+    },
+    /// 算出来了。
+    Counted {
+        /// 最多几份。
+        files: u64,
+        /// 最多共多少字节。
+        bytes: u64,
+    },
+    /// 没算出来：那句话。
+    NotCounted(String),
+}
 
 /// 库屏上的**工序**那一段。
 pub struct Section {
@@ -107,6 +203,19 @@ pub struct Section {
     /// **名单是导出本来就交得出的那一份**（`ExportReport::conflicts`）：导出一份文件一份
     /// 文件地写、每写完把**底本**存进中立库，哪几份对不上是现成的，这一层不另比一遍。
     conflicts: Vec<Conflict>,
+    /// 导出那一支上那颗**铺媒体**开关（[`LAY_MEDIA`]）。**默认关着**，只记在这一段上、
+    /// 不记进库：媒体池住在工作目录里、主库多半在外置盘上，跨盘就是整份复制——
+    /// 几十 GiB 的事，每次开窗都该由人自己再点一次。
+    lay_media: bool,
+    /// 开着铺媒体时这一趟最多要铺多少（[`media_cost`]）。**打开开关时算一次、库变了再算**
+    /// （`Section::expire_media_cost`），不每帧重算：
+    /// 算它要把全库变体的媒体引用逐个问一遍、再逐份问一遍媒体池
+    /// （`romcat_core::sync::media::lay_for`），真库上要多久没量过——所以它排在任务台上跑，
+    /// 不在画帧这条线程上。
+    media_cost: MediaCost,
+    /// 上一次画这一段是第几趟画帧（egui 的 `cumulative_pass_nr`）。**隔了帧没画，就是人离开过
+    /// 库屏**：那句铺媒体的代价跟着作废（`Section::lay_media_ui`，挂单 `Q654`）。
+    drawn_at: Option<u64>,
 }
 
 impl Section {
@@ -125,12 +234,94 @@ impl Section {
             error: None,
             notice: None,
             conflicts: Vec::new(),
+            lay_media: false,
+            media_cost: MediaCost::NotAsked,
+            drawn_at: None,
         }
+    }
+
+    /// 导出那一支上那颗**铺媒体**开关眼下开着没有。**默认关着。** 测试拿它核对。
+    #[must_use]
+    pub fn lay_media(&self) -> bool {
+        self.lay_media
+    }
+
+    /// 拨那颗**铺媒体**开关（界面上点 [`LAY_MEDIA`] 走的就是它）。
+    ///
+    /// **打开时当场排一趟去算这一趟最多要铺多少**：那句代价（[`media_cost`]）要在按下
+    /// 导出**之前**画出来。上一趟没算出来（被撤掉、读不动库）时再打开就重算——屏上那句
+    /// 「关掉再打开就重算」说的就是这一下；已经算出来、或者正在算的，不重排。
+    pub fn set_lay_media(&mut self, on: bool, site: &Site, tasks: &mut Tasks) {
+        self.lay_media = on;
+        // 关掉了，「开着它却还没说清」那句话就不成立了。
+        if !on {
+            self.clear_media_refusal();
+        }
+        if on
+            && matches!(
+                self.media_cost,
+                MediaCost::NotAsked | MediaCost::NotCounted(_)
+            )
+        {
+            self.count_media(site, tasks);
+        }
+    }
+
+    /// 排一趟「这一趟最多要铺多少」上任务台（[`media_cost_run`]）。
+    ///
+    /// 与子库屏「算一遍容量」同一条路：整条只读，后台那条线程读的是同一个库文件的
+    /// **第二份只读连接**（[`Catalog::read_only`]）；只活在内存里的库分不出第二份，
+    /// 就地跑完——合成数据上那是几毫秒的事。
+    fn count_media(&mut self, site: &Site, tasks: &mut Tasks) {
+        let workspace = self.workspace.clone();
+        let id = match site.catalog.read_only() {
+            Ok(reader) => tasks.queue(COUNT_MEDIA, move |task| {
+                media_cost_run(&reader, &workspace, task)
+            }),
+            Err(CatalogError::NotOnDisk { .. }) => tasks.run_here(COUNT_MEDIA, |task| {
+                media_cost_run(&site.catalog, &workspace, task)
+            }),
+            // 别的原因是**意外**：直说，不退到画帧这条线程上偷偷算一遍（同子库屏那一处）。
+            Err(why) => {
+                self.media_cost = MediaCost::NotCounted(format!(
+                    "要铺多少没算出来：读中立库要另开一份只读连接，这一下没开出来（{why}）"
+                ));
+                return;
+            }
+        };
+        self.media_cost = MediaCost::Counting { id, expired: false };
+    }
+
+    /// 屏上挂的若是那句「开着铺媒体却还没说清」（[`media_refusal`]），收掉；别的话不碰。
+    fn clear_media_refusal(&mut self) {
+        if self.error.as_deref() == Some(media_refusal().as_str()) {
+            self.error = None;
+        }
+    }
+
+    /// 那句铺媒体的代价作废：库变了，或者可能变了。
+    ///
+    /// 开关开着时下一帧重排一趟去算（`Section::lay_media_ui`）。**正在算的那一趟不撤**，
+    /// 只记一笔：它交回来的那个数不用，再算一遍——它读的可能是变之前那一份。
+    fn expire_media_cost(&mut self) {
+        self.media_cost = match self.media_cost {
+            MediaCost::Counting { id, .. } => MediaCost::Counting { id, expired: true },
+            _ => MediaCost::NotAsked,
+        };
     }
 
     /// 从库里重新问一遍：每一道工序还差多少。**一个字节都不读主库**——
     /// 外置盘不在位时这几行照样看得见。
+    ///
+    /// **重读库就是库可能变了**（加根、移根、扫完、取完数据源都走这儿）：开着铺媒体时那句
+    /// 代价跟着作废、重算。
     pub fn reload(&mut self, site: &Site) {
+        self.resurvey(site);
+        self.expire_media_cost();
+    }
+
+    /// [`Self::reload`] 里读库的那一半：工序那几行与导出配置。
+    fn resurvey(&mut self, site: &Site) {
         self.stages = Stages::survey(&site.catalog);
         // **读不动与还没选过分两支说**（同 `stage::export_row`）：整段一起失败不成——
         // 一个读不出来的键会让工序段上连识别那一行都消失（与 `Stages::survey` 同一条）。
@@ -179,6 +370,8 @@ impl Section {
                     self.out_draft = setup.out.to_string_lossy().into_owned();
                     self.setup = Some(setup);
                     self.setup_unreadable = None;
+                    // **媒体的布局随前端格式不同**：换了格式，那句铺媒体的代价就不是这个数了。
+                    self.expire_media_cost();
                 }
                 Err(error) => {
                     self.notice = None;
@@ -269,17 +462,29 @@ impl Section {
     /// 这一段眼下拨着的**导出**旋钮：平常那一趟与照写那一趟带的是**同一套**。
     /// **照写不在这里头**——它从不记在这一段上（[`Self::force_export`]）。
     ///
-    /// 眼下这一段上一个导出开关都没有，交出默认那一套。票 `one-criterion-per-thing/09`
-    /// 的铺媒体开关在这儿从这一段读出来，[`Self::start`] 与 [`Self::force_export`]
-    /// 一行不用改。
+    /// 这一段上拨得动的导出开关只有**铺媒体**那一颗（[`Self::lay_media`]），在这儿读出来：
+    /// [`Self::start`] 与 [`Self::force_export`] 一行不用改，照写那一趟也带着它。
     fn export_knobs(&self) -> ExportKnobs {
-        ExportKnobs::default()
+        ExportKnobs {
+            force: false,
+            media: self.lay_media,
+        }
     }
 
     /// 排一趟活**只有这一份实现**：[`Self::start`] 与 [`Self::force_export`] 都走它，
     /// 差的只是导出那一支这一趟带哪几个旋钮（[`ExportKnobs`]）。
     fn queue(&mut self, stage: Stage, knobs: ExportKnobs, site: &mut Site, tasks: &mut Tasks) {
         if self.task_of(stage).is_some() {
+            return;
+        }
+        // **开着铺媒体、那句代价还没画出来，就不排**：人按下去的那一刻得已经知道要付多少，
+        // 不是按下去之后才发现在拷贝（票 `one-criterion-per-thing/09`）。平常那一趟与照写
+        // 那一趟都走这儿，所以两颗按钮一个口径。
+        if stage == Stage::Export
+            && knobs.media
+            && !matches!(self.media_cost, MediaCost::Counted { .. })
+        {
+            self.error = Some(media_refusal());
             return;
         }
         let workspace = self.workspace.clone();
@@ -308,6 +513,42 @@ impl Section {
         self.notice = None;
         self.conflicts.clear();
         self.running.push((id, stage));
+        // **排上一道别的工序，那句铺媒体的代价当场作废**：刮削、识别都改得动媒体引用或作品
+        // 归属，而导出若这时按下去就排在它后面跑——屏上的数说的却是它之前那一份库。作废之后
+        // 数重新出来之前导出按不下去（上面那道闸）。导出自己不作废：它不改那个数读的东西。
+        if stage != Stage::Export {
+            self.expire_media_cost();
+        }
+    }
+
+    /// 任务台交回来的是不是**算要铺多少媒体**那一趟（[`COUNT_MEDIA`]）；是就认领，
+    /// 返回「认领了没有」。
+    ///
+    /// **与 [`Self::settle`] 分开认**：那一趟整条只读，认领它不等于库变了。窗口那一层认领完
+    /// 库屏的活会转告浏览屏整页重读（`App::poll_tasks`），走那条路的话，每打开一次开关、每离开
+    /// 库屏再回来一次，浏览屏就白读一遍——所以窗口先问这一句，认领了就不往下走。
+    pub fn settle_media_cost(&mut self, done: &Finished<Product>) -> bool {
+        let MediaCost::Counting { id, expired } = self.media_cost else {
+            return false;
+        };
+        if id != done.id {
+            return false;
+        }
+        self.media_cost = match &done.ended {
+            // 算的时候库变了：这个数读的可能是变之前那一份，作废（下一帧重算）。
+            _ if expired => MediaCost::NotAsked,
+            Ending::Done(Product::MediaCounted { files, bytes }) => MediaCost::Counted {
+                files: *files,
+                bytes: *bytes,
+            },
+            // 已取消、失败：那一档的词从收场渲染出，这儿一个字都不另写。
+            other => MediaCost::NotCounted(format!("{COUNT_MEDIA} {}", other.render())),
+        };
+        // **数出来了，「还没说清」那句话就收掉**：留着它，屏上一句说还没说清、底下一句已经说清。
+        if matches!(self.media_cost, MediaCost::Counted { .. }) {
+            self.clear_media_refusal();
+        }
+        true
     }
 
     /// 任务台交回来一趟跑完的活。**不是自己那一趟就放过去**，返回「认领了没有」。
@@ -362,6 +603,11 @@ impl Section {
                         report.tier,
                     )
                 };
+                // **开着铺媒体就说铺了什么**（`media_laid`）；关着时报告里没有这一半，一个字都不多。
+                if let Some(media) = &report.media {
+                    回执.push('\n');
+                    回执.push_str(&media_laid(media));
+                }
                 // **照写掉了哪几份得说出口**（`ExportReport::forced`）：「不静默覆盖」说的是
                 // 不许悄悄发生，不是不许发生。逐份点名，与撞上时那份名单一个粒度。
                 if !report.forced.is_empty() {
@@ -417,7 +663,12 @@ impl Section {
         }
         // **跑完当场重问一遍**：那一行的数字就是这么刷新的（验收第 6 条）。
         // 被按停的那一趟照样要重问——它写进中立库的那半份结论是真的。
-        self.reload(site);
+        self.resurvey(site);
+        // **跑完一道工序，那句铺媒体的代价跟着作废**——导出除外：它只写底本与时刻戳，
+        // `media_to_lay` 读的变体、作品归属、媒体引用、媒体池一样都没动，重算只是白排一趟。
+        if stage != Stage::Export {
+            self.expire_media_cost();
+        }
         self.ran = Some(stage);
         true
     }
@@ -517,11 +768,62 @@ impl Section {
             }
         }
         self.export_setup_ui(ui, site);
+        self.lay_media_ui(ui, site, tasks);
         if let Some(stage) = 要跑 {
             self.start(stage, site, tasks);
         }
         if 要照写 {
             self.force_export(site, tasks);
+        }
+    }
+
+    /// 导出那一支上那颗**铺媒体**开关（**默认关着**，[`Self::lay_media`]），与打开之后
+    /// 先画出来的那句代价（[`media_cost`]）。
+    fn lay_media_ui(&mut self, ui: &mut egui::Ui, site: &Site, tasks: &mut Tasks) {
+        // **离开过这一屏再回来，那个数作废**：别的屏改库的出口（裁决、合并作品、刮削面板收媒体）
+        // 不经过这一段，而人要改它们就得先离开库屏（挂单 `Q654`）。认法是画帧的序号：上一次
+        // 画这一段之后隔了至少一趟没画，就是离开过。
+        let pass = ui.ctx().cumulative_pass_nr();
+        if self.drawn_at.is_some_and(|last| pass > last + 1) {
+            self.expire_media_cost();
+        }
+        self.drawn_at = Some(pass);
+        // **那个数作废了、开关又开着，就重排一趟去算**：不每帧重算，作废之后只排这一次。
+        if self.lay_media && self.media_cost == MediaCost::NotAsked {
+            self.count_media(site, tasks);
+        }
+        let mut on = self.lay_media;
+        let 拨了 = ui
+            .checkbox(&mut on, LAY_MEDIA)
+            .on_hover_text(
+                "把媒体池里的封面、截图、视频照这个前端格式的布局铺进导出目录。\
+                 默认关着：媒体池在工作目录里，主库多半在外置盘上，跨盘就是整份复制。",
+            )
+            .changed();
+        if self.lay_media {
+            match &self.media_cost {
+                // **代价画在屏上、画得醒目**：人不会先悬停一颗开关再按导出。
+                MediaCost::Counted { files, bytes } => {
+                    ui.colored_label(ui.visuals().warn_fg_color, media_cost(*files, *bytes));
+                }
+                MediaCost::NotAsked | MediaCost::Counting { .. } => {
+                    ui.weak(
+                        "正在算这一趟最多要铺多少媒体（任务台上看得见它）；\
+                         算出来之前导出按不下去。",
+                    );
+                }
+                MediaCost::NotCounted(why) => {
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        format!(
+                            "{why}。关掉再打开「{LAY_MEDIA}」就重算一遍；关着它，导出照常按得下去。"
+                        ),
+                    );
+                }
+            }
+        }
+        if 拨了 {
+            self.set_lay_media(on, site, tasks);
         }
     }
 
@@ -602,13 +904,16 @@ fn run(
 /// **每排一趟现折一份**（`Section::export_knobs`），照写那一趟只在上面再压一格；
 /// **照写那一格从不记在 [`Section`] 上**（`Section::force_export`）。
 ///
-/// 给导出那一支再加开关（票 `one-criterion-per-thing/09` 的铺媒体）：往这儿加一格，
-/// 在 `Section::export_knobs` 里从这一段读出来——`start` 与 `force_export` 一行不用改，
-/// 照写那一趟也带着同一个开关。
+/// 给导出那一支再加开关：往这儿加一格，在 `Section::export_knobs` 里从这一段读出来——
+/// `start` 与 `force_export` 一行不用改，照写那一趟也带着同一个开关。铺媒体那一格就是
+/// 这么加的（票 `one-criterion-per-thing/09`）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct ExportKnobs {
     /// 外面有人动过也照写（[`ExportOptions::force`]）。**默认关**。
     force: bool,
+    /// 把**媒体池**里的媒体一起铺进导出目录（[`ExportOptions::media`]）。**默认关**，
+    /// 从这一段那颗开关读（[`LAY_MEDIA`]）。
+    media: bool,
 }
 
 /// 跑一趟**识别**。
@@ -706,43 +1011,41 @@ fn fold_titles_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<P
 /// 跑一趟**导出**：把中立库写成前端能读的元数据，铺在导出目录里。
 ///
 /// **一个字节都不读主库、一个 ROM 都不搬**（ADR-0004、验收第 6 条）：要的东西全在
-/// 中立库里躺着，写出去的只有元数据文件。装配只有两样——记住的那套**配置**与
-/// **优先级表**，与命令行 `romcat export` 摆的是同一副。
+/// 中立库里躺着，写的只有元数据文件——开着**铺媒体**时再加上媒体目录里那几份。
+/// 装配只有三样——记住的那套**配置**、**优先级表**与工作目录里那个**媒体池**，与命令行
+/// `romcat export` 摆的是同一副。
 ///
-/// ## 命令行那两个旋钮，界面上给一个、不给一个
+/// ## 命令行那三个旋钮，界面上给两个、不给一个
 ///
 /// - **只排计划**（`--dry-run`）**不给**，钉死在「关」上：工序段那一行问的是「还差多少」，
 ///   一次不写盘的排计划答不了它，反倒会让那一行说「上次跑是刚刚」而盘上什么都没有。
 /// - **照写**（`--force`）**默认关**，只从 `knobs` 那一格来：撞上外面有人动过时这一趟
 ///   停下来、逐份点名，人自己去看过那几份文件，再在屏上按「我看过了，照写」重排一趟
 ///   （`Section::force_export`）。它丢掉的是一次手改，所以**每次都得当场点**，不记住。
+/// - **铺媒体**（`--media`）**默认关**，只从 `knobs` 那一格来（[`LAY_MEDIA`]）。与照写不同，
+///   它记在这一段上、跨趟不变：它不丢掉任何东西，要付的是时间与盘——那句代价按下之前
+///   就画在屏上（[`media_cost`]）。
 fn export_run(
     site: &mut Site,
     workspace: &Path,
     knobs: ExportKnobs,
     task: &Handle,
 ) -> Result<Product, Cutoff> {
-    // 装配那两步加上核心库自己那几步。**核心库那个数由它自己报**
-    // （`transfer::TASK_STEPS`）——在这儿手写一个 3，那边加一步这儿的进度条就走过头了。
-    task.steps(2 + transfer::TASK_STEPS);
+    // **这一趟的选项开工时就定下**，总步数照它报（`ExportOptions::task_steps`）：开着铺媒体
+    // 那一趟核心库多走两步，照 `transfer::TASK_STEPS` 手写的话进度条会走过头。导出目录要
+    // 读出配置才知道，读出来再填进去。
+    let mut options = ExportOptions {
+        out: PathBuf::new(),
+        dry_run: false,
+        force: knobs.force,
+        // **铺媒体只从 `knobs` 那一格来**，默认关：关着时这一趟与没有这颗开关时一样。
+        media: knobs.media.then(|| media_pool(workspace)),
+    };
+    // 装配那两步加上核心库自己那几步。
+    task.steps(2 + options.task_steps());
     task.step("读导出的配置")?;
-    let setup = site
-        .catalog
-        .export_setup()
-        .map_err(|error| Cutoff::failed(format!("这份中立库读不动：{error}")))?
-        // **没选过就如实拒绝**，不替人挑一个格式与目录：挑错一个目录就是往别人的盘上
-        // 写一堆文件。这一句与上面那一行的空态说的是同一件事（挂单 `Q437`）。
-        .ok_or_else(|| {
-            Cutoff::failed(
-                "还没选过导出的前端格式与目录。先在工序段底下那一行选一次\
-                 ——选完记进这份库，下一趟点一下就重导。"
-                    .to_string(),
-            )
-        })?;
-    // **找不到那个格式该说哪句话在核心里**（`ExportSetup::adapter`，ADR-0005）。
-    let adapter = setup
-        .adapter()
-        .map_err(|error| Cutoff::failed(error.to_string()))?;
+    let (setup, adapter) = export_setup_of(&site.catalog)?;
+    options.out = setup.out;
     // **优先级表读不出来就停下，不退回内置那份**：挑**显示标题**用的是同一份表，
     // 而工作目录里那份 `priorities.toml` 正是人改过的说法。悄悄退回内置那份的话，
     // 导出去的名字会与他定过的对不上，还查不出为什么（与折标题那一支同一条）。
@@ -754,13 +1057,115 @@ fn export_run(
         &mut site.catalog,
         adapter.as_ref(),
         &priorities,
-        &ExportOptions {
-            out: setup.out.clone(),
-            dry_run: false,
-            force: knobs.force,
-            media: None,
-        },
+        &options,
         task,
     )?;
     Ok(Product::Exported(Box::new(report)))
+}
+
+/// 读出记住的那套**导出**配置与它的**适配器**。
+///
+/// 导出那一趟（[`export_run`]）与算要铺多少那一趟（[`media_cost_run`]）摆的是同一副料，
+/// **同一句拒绝只写在这儿**。
+fn export_setup_of(
+    catalog: &Catalog,
+) -> Result<(ExportSetup, Box<dyn romcat_core::adapter::Adapter>), Cutoff> {
+    let setup = catalog
+        .export_setup()
+        .map_err(|error| Cutoff::failed(format!("这份中立库读不动：{error}")))?
+        // **没选过就如实拒绝**，不替人挑一个格式与目录：挑错一个目录就是往别人的盘上
+        // 写一堆文件。这一句与上面那一行的空态说的是同一件事（挂单 `Q437`）。
+        // 算要铺多少那一趟也停在这儿：媒体的布局随前端格式不同，没选过就算不出来。
+        .ok_or_else(|| {
+            Cutoff::failed(
+                "还没选过导出的前端格式与目录。先在工序段底下那一行选一次\
+                 ——选完记进这份库，下一趟点一下就重导。"
+                    .to_string(),
+            )
+        })?;
+    // **找不到那个格式该说哪句话在核心里**（`ExportSetup::adapter`，ADR-0005）。
+    let adapter = setup
+        .adapter()
+        .map_err(|error| Cutoff::failed(error.to_string()))?;
+    Ok((setup, adapter))
+}
+
+/// 工作目录里那个**媒体池**，**一个目录都不建**（[`MediaPool::at`]）：算要铺多少那一趟
+/// 整条只读，池不在时照实算出零份。导出那一趟铺的也从它取——两趟指的是同一个池，与命令行
+/// `romcat export --media` 指的也是同一个。
+fn media_pool(workspace: &Path) -> MediaPool {
+    MediaPool::at(&workspace::media_pool_dir(workspace))
+}
+
+/// 算一遍开着**铺媒体**时这一趟**最多**要铺多少：几份、共多少字节（[`media_cost`]）。
+///
+/// **算法一行都不在这里**：数是核心库那一处交的（[`transfer::media_to_lay`]，ADR-0024），
+/// 导出那一趟真铺的也是同一份。这一层只把料摆齐——记住的那套配置（布局随前端格式不同）
+/// 与工作目录里那个媒体池。整条只读：停在哪儿都什么都没留下。
+fn media_cost_run(catalog: &Catalog, workspace: &Path, task: &Handle) -> Result<Product, Cutoff> {
+    task.steps(2);
+    task.step("读导出的配置")?;
+    let (_, adapter) = export_setup_of(catalog)?;
+    task.step("折媒体的落点")?;
+    let laid = transfer::media_to_lay(catalog, adapter.as_ref(), &media_pool(workspace))
+        .map_err(|error| Cutoff::failed(format!("这份中立库读不动：{error}")))?;
+    Ok(Product::MediaCounted {
+        files: laid.files.len() as u64,
+        bytes: laid.bytes(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 一份**落在盘上**的空库，选好了 Pegasus 与导出目录。返回工作目录（得活到测试结束）与现场。
+    fn 选好导出的空库(tag: &str) -> (romcat_core::testing::TempDir, Site) {
+        let 工作区 = romcat_core::testing::temp_dir(tag);
+        let 库文件 = 工作区.path().join("catalog").join("fixture.sqlite3");
+        drop(Catalog::create(&库文件, "fixture").expect("能建中立库"));
+        let site = Site::open_file(工作区.path(), &库文件, None).expect("开得出现场");
+        let 导出去 = 工作区.path().join("导出去");
+        let setup =
+            ExportSetup::check("Pegasus", &导出去.to_string_lossy()).expect("有 Pegasus 这个格式");
+        site.catalog.set_export_setup(&setup).expect("记得下");
+        (工作区, site)
+    }
+
+    #[test]
+    fn 导出那一趟声明的总步数与真走过的对得上_开着铺媒体也不走过头() {
+        // 票 `one-criterion-per-thing/09` 验收第 4 条「报得出跑到哪儿」：任务屏的进度条照
+        // `Handle::steps` 声明的总数画。开着铺媒体那一趟核心库多走两步
+        // （`ExportOptions::task_steps`），照不开时的数声明的话，进度条会走过头。
+        //
+        // 空库也走得完每一步（没有要写的、也没有要铺的），于是这一条不必摆一整份 fixture。
+        for media in [false, true] {
+            let (工作区, mut site) = 选好导出的空库("gui-stages-导出步数");
+            let 把手 = Handle::new();
+            export_run(
+                &mut site,
+                工作区.path(),
+                ExportKnobs {
+                    force: false,
+                    media,
+                },
+                &把手,
+            )
+            .expect("空库也导得完");
+            let 进度 = 把手.progress();
+            assert_eq!(
+                进度.at, 进度.steps,
+                "开着铺媒体={media}：走过的步数与声明的对不上：{进度:?}",
+            );
+            let 最后一步 = if media {
+                "把媒体铺出去"
+            } else {
+                "逐份写出去"
+            };
+            assert_eq!(
+                进度.step, 最后一步,
+                "开着铺媒体={media}：最后停在的那一步说错了",
+            );
+        }
+    }
 }

@@ -374,6 +374,11 @@ impl App {
     /// 收场，只看「库屏认领了没有」。
     pub fn poll_tasks(&mut self) {
         while let Some(done) = self.board.poll() {
+            // **算要铺多少媒体那一趟先认**（`stages::Section::settle_media_cost`）：它整条只读，
+            // 认领了不等于库变了，于是不走底下「转告浏览屏整页重读」那条路。
+            if self.roots.stages_mut().settle_media_cost(&done) {
+                continue;
+            }
             // **各屏按任务号认领自己那一趟，不是它的就放过去。** 将来识别与刮削接上来
             // 时，各自在这儿多认一次。
             if self.roots.settle(&self.site, &done) {

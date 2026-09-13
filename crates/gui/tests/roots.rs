@@ -2057,3 +2057,723 @@ fn 台上已经有一趟识别时再按队列屏那颗捷径_不会排第二趟(
     现场.app.tasks_mut().stop(占位);
     现场.等任务跑完();
 }
+
+// ——— 导出那一支上的铺媒体开关（票 `one-criterion-per-thing/09`） ———
+
+/// 一张封面的字节：**19 个字节**。屏上那句「共多大」对的就是这个数。
+const 一张封面: &[u8] = b"\x89PNG-- contra cover";
+
+impl 现场 {
+    /// 库里键里带着 `名字` 的那个变体的键。
+    fn 变体键(&self, 名字: &str) -> String {
+        self.app
+            .site()
+            .catalog
+            .variants()
+            .expect("读得出变体")
+            .into_iter()
+            .map(|row| row.key)
+            .find(|key| key.contains(名字))
+            .expect("那个变体扫进来了")
+    }
+
+    /// 往**媒体池**里放一份媒体、挂到这个变体上。刮削收媒体那一趟落下来的就是这两样：
+    /// 池里那个文件、中立库里那条引用。返回它的内容哈希。
+    ///
+    /// **摆料而已**：收媒体那条路由 `romcat-core` 的 `tests/scrape.rs` 钉着。
+    fn 收一份媒体(
+        &mut self,
+        变体: &str,
+        kind: romcat_core::scrape::MediaKind,
+        bytes: &[u8],
+    ) -> String {
+        use romcat_core::catalog::scrape::{Harvested, HarvestedMedia};
+        let hash = romcat_core::catalog::frontend::hash_of(bytes);
+        let 池 = romcat_core::scrape::pool::MediaPool::at(&romcat_core::workspace::media_pool_dir(
+            self.工作区.path(),
+        ));
+        写(&池.path_of(&hash, "png"), bytes);
+        let (_, site, _) = self.app.roots_site_and_tasks();
+        site.catalog
+            .put_media(&hash, "png", bytes.len() as u64)
+            .expect("池里记得下");
+        site.catalog
+            .put_scraped(&[Harvested {
+                anchor: romcat_core::scrape::AnchorKind::Variant.label().to_string(),
+                subject: 变体.to_string(),
+                // 一个源在一个锚点上写两次是同一个结果，于是每份媒体各记一个源。
+                source: format!("本地媒体-{hash}"),
+                input: format!("{变体}/{hash}"),
+                values: Vec::new(),
+                media: vec![HarvestedMedia {
+                    kind: kind.label().to_string(),
+                    hash: hash.clone(),
+                    evidence: "测试".to_string(),
+                }],
+            }])
+            .expect("引用写得进");
+        hash
+    }
+
+    /// 打开导出那一支上那颗**铺媒体**开关，等「这一趟最多要铺多少」那一趟算完。
+    /// 界面上点那颗开关走的就是它（真点那一下由 `打开铺媒体时_…` 那一条钉着）。
+    fn 打开铺媒体(&mut self) {
+        let (screen, site, tasks) = self.app.roots_site_and_tasks();
+        screen.stages_mut().set_lay_media(true, site, tasks);
+        self.等任务跑完();
+    }
+}
+
+/// 一棵目录树底下的全部文件：相对树根、`/` 分隔、排好。树不在就是空的。
+fn 树里的文件(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut 待走 = vec![root.to_path_buf()];
+    while let Some(dir) = 待走.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                待走.push(path);
+            } else {
+                let 相对 = path.strip_prefix(root).expect("在这棵树里");
+                out.push(
+                    相对
+                        .components()
+                        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                        .join("/"),
+                );
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// 摆一份**要不要铺媒体还没定**的现场：横跨两个平台的 fixture 主库扫进来、选好 Pegasus
+/// 与导出目录，池里有一张挂在魂斗罗上的封面。返回主库（得活到测试结束）、现场、
+/// 导出目录与那张封面的哈希。
+fn 摆好一张封面(tag: &str) -> (TempDir, 现场, PathBuf, String) {
+    let 库 = 建库(tag);
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    let 魂斗罗 = 现场.变体键("魂斗罗");
+    let hash = 现场.收一份媒体(&魂斗罗, romcat_core::scrape::MediaKind::Cover, 一张封面);
+    let 导出去 = 现场.工作区.path().join("导出去");
+    现场.选一次导出去哪儿("Pegasus", &导出去);
+    (库, 现场, 导出去, hash)
+}
+
+#[test]
+fn 铺媒体开关默认关着_关着时导出与今天一模一样_一份媒体都不铺() {
+    // 票 `one-criterion-per-thing/09` 验收第 1、3 条。池里**真有**一张挂在魂斗罗上的封面，
+    // 「关着就一份都不铺」才验得出来——池是空的话，关着与开着铺出去的都是零份。
+    let (_库, mut 现场, 导出去, _) = 摆好一张封面("gui-stages-铺媒体默认关");
+    let ctx = headless::context();
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line.trim() == romcat_gui::stages::LAY_MEDIA),
+        "导出那一支上没有铺媒体那颗开关：\n{屏上}",
+    );
+    assert!(!现场.app.roots().stages().lay_media(), "开关默认开着");
+    assert!(
+        !屏上.contains("最多要铺"),
+        "开关关着，屏上却说起了要铺多少：\n{屏上}",
+    );
+
+    现场.导出();
+
+    // **导出目录里只多出元数据文件**：一个 `media/` 都没有，条目里一个资源槽都不写。
+    let 盘上 = 树里的文件(&导出去);
+    assert_eq!(盘上.len(), 2, "这个库横跨两个平台：{盘上:?}");
+    assert!(
+        盘上
+            .iter()
+            .all(|path| path.ends_with(".metadata.pegasus.txt")),
+        "关着时导出目录里多出了元数据之外的东西：{盘上:?}",
+    );
+    for 文件 in 导出去的文件(&导出去) {
+        let 元数据 = fs::read_to_string(&文件).expect("读得出");
+        assert!(
+            !元数据.contains("assets."),
+            "关着时条目里写了资源槽：{元数据}"
+        );
+    }
+    let record = &现场.app.tasks().history()[0];
+    assert_eq!(record.name, "导出", "关着时那一趟的名字变了");
+    assert!(
+        matches!(record.ending, Ending::Done(_)),
+        "关着时那一趟记成了「{}」",
+        record.ending.render(),
+    );
+    let 回执 = 现场.app.roots().stages().notice().expect("跑完了要说话");
+    assert!(!回执.contains("媒体"), "关着时回执里说起了媒体：{回执}");
+}
+
+#[test]
+fn 打开铺媒体时_按下导出之前屏上先说清这一趟最多要铺几份多大() {
+    // 验收第 2 条。**真点一下那颗开关**（指针事件，不是直接调函数），不按导出：
+    // 那句代价要在按下之前就画在屏上，不是按下去之后才发现在拷贝。
+    //
+    // 数是核心库算的**上界**（`transfer::media_to_lay`：落点上已经有的真铺时不重铺），
+    // 所以屏上说「最多」（挂单 `Q584`）。池里一张封面、19 个字节：那句话得说「1 份」「19 B」。
+    let (_库, mut 现场, 导出去, _) = 摆好一张封面("gui-stages-铺媒体说代价");
+    let ctx = headless::context();
+
+    点一下(&ctx, &mut 现场.app, romcat_gui::stages::LAY_MEDIA);
+    assert!(
+        现场.app.roots().stages().lay_media(),
+        "点了那颗开关，它却没开"
+    );
+    现场.等任务跑完();
+
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    // 那句话是**说得出名字的那个函数**折的：重排库屏时（票 `gui-looks-like-the-design/06`）
+    // 它一句都不许丢，就按它找。
+    let 那一句 = romcat_gui::stages::media_cost(1, 19);
+    assert!(屏上.contains(&那一句), "打开之后屏上没说要铺多少：\n{屏上}");
+    for 该有的 in ["最多", "1 份", "19 B"] {
+        assert!(
+            那一句.contains(该有的),
+            "那句代价里没有「{该有的}」：{那一句}"
+        );
+    }
+    // **还没按导出**：一个媒体文件都不许先铺出去。
+    assert!(
+        树里的文件(&导出去).is_empty(),
+        "只拨了开关，导出目录里就多了东西：{:?}",
+        树里的文件(&导出去),
+    );
+}
+
+#[test]
+fn 要铺多少还没算出来时按导出_当场说清_一份都不先铺() {
+    // 验收第 2 条的另一半：代价那句话要在**按下之前**说得出来。开关开着、数还没出来时
+    // 按导出，不许先排上去拷起来——人按下去的那一刻屏上还没说过要付多少。
+    //
+    // **台上先摆一趟占位的活**：任务台一次只跑一趟，算要铺多少那一趟稳稳排在它后面。
+    // 钉在「按停」这个信号上，不钉挂钟（同 `占住任务台`）。
+    let (_库, mut 现场, _导出去, _) = 摆好一张封面("gui-stages-铺媒体没算完");
+    let 占位 = 现场.占住任务台();
+    {
+        let (screen, site, tasks) = 现场.app.roots_site_and_tasks();
+        screen.stages_mut().set_lay_media(true, site, tasks);
+    }
+    let ctx = headless::context();
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        !屏上.contains(&romcat_gui::stages::media_cost(1, 19)),
+        "还没算出来就画了那句代价：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("正在算"),
+        "开着开关、数还没出来，屏上一句都没说：\n{屏上}",
+    );
+
+    现场.app.start_stage(Stage::Export);
+    assert!(
+        现场.app.roots().stages().task_of(Stage::Export).is_none(),
+        "要铺多少还没说清，导出就排上了任务台",
+    );
+    let 说的 = 现场
+        .app
+        .roots()
+        .stages()
+        .error()
+        .expect("按不下去要说清为什么");
+    assert!(
+        说的.contains(romcat_gui::stages::LAY_MEDIA),
+        "没说清是那颗开关在等：{说的}",
+    );
+
+    现场.app.tasks_mut().stop(占位);
+    现场.等任务跑完();
+    // **数出来之后再按，就排得上了。**
+    现场.导出();
+    assert!(
+        现场
+            .app
+            .tasks()
+            .history()
+            .iter()
+            .any(|record| record.name == "导出"),
+        "算出来之后导出还是排不上：{:?}",
+        现场.app.tasks().history(),
+    );
+}
+
+#[test]
+fn 打开铺媒体之后导出那一趟真的铺出去_任务台记完成_回执说得出铺了几份() {
+    // 验收第 4 条的第一档（完成）。Pegasus 按内容寻址铺：`media/<哈希前两位>/<哈希>.png`，
+    // 条目里写着 `assets.boxFront` 指着它。那条路本身由 `romcat-core` 的 `tests/pegasus.rs`
+    // 钉着；这一条钉的是**界面上那颗开关真的接到了那条路上**。
+    let (_库, mut 现场, 导出去, hash) = 摆好一张封面("gui-stages-铺媒体完成");
+    现场.打开铺媒体();
+
+    现场.导出();
+
+    let 落点 = format!("media/{}/{hash}.png", &hash[..2]);
+    assert_eq!(
+        fs::read(导出去.join(&落点)).expect("那张封面铺出去了"),
+        一张封面,
+        "铺出去的不是池里那一份",
+    );
+    assert!(
+        导出去的文件(&导出去).iter().any(|文件| {
+            fs::read_to_string(文件)
+                .expect("读得出")
+                .contains(&format!("assets.boxFront: {落点}"))
+        }),
+        "条目里没写封面铺在哪儿",
+    );
+    let record = &现场.app.tasks().history()[0];
+    assert_eq!(record.name, "导出");
+    assert!(
+        matches!(record.ending, Ending::Done(_)),
+        "铺完了的那一趟记成了「{}」",
+        record.ending.render(),
+    );
+    let 回执 = 现场.app.roots().stages().notice().expect("跑完了要说话");
+    assert!(
+        回执.contains("铺出去 1 份"),
+        "回执没说铺出去几份媒体：{回执}"
+    );
+}
+
+#[test]
+fn 开着铺媒体的导出排着队被撤掉时记成已取消_一份媒体都没铺() {
+    // 验收第 4 条的第二档。台上先摆一趟占位的活，开着铺媒体的导出稳稳排在它后面，撤掉它
+    // ——与导出、刮削那两条「排着队被撤掉」同一个验法，不靠挂钟。
+    let (_库, mut 现场, 导出去, _) = 摆好一张封面("gui-stages-铺媒体撤掉");
+    现场.打开铺媒体();
+    let 占位 = 现场.占住任务台();
+
+    现场.app.start_stage(Stage::Export);
+    let id = 现场
+        .app
+        .roots()
+        .stages()
+        .task_of(Stage::Export)
+        .expect("这一趟排上任务台了");
+    现场.app.tasks_mut().stop(id);
+    现场.app.poll_tasks();
+
+    let record = 现场
+        .app
+        .tasks()
+        .history()
+        .iter()
+        .find(|one| one.id == id)
+        .expect("撤掉的那一趟也进历史");
+    assert!(
+        matches!(record.ending, Ending::Stopped),
+        "撤掉的那一趟记成了「{}」——它一份都没铺",
+        record.ending.render(),
+    );
+    assert!(
+        树里的文件(&导出去).is_empty(),
+        "撤掉的那一趟往导出目录里放了东西：{:?}",
+        树里的文件(&导出去),
+    );
+    let 说的 = 现场.app.roots().stages().notice().expect("停下了也要说话");
+    assert!(
+        说的.contains(&Ending::<()>::Stopped.render()),
+        "停下的那一趟没说「已取消」：{说的}",
+    );
+
+    现场.app.tasks_mut().stop(占位);
+    现场.等任务跑完();
+}
+
+#[test]
+fn 铺媒体连着没铺成主动停了_任务台记部分完成_说得出铺到第几份() {
+    // 验收第 4 条的第三档：没走完、却留下了东西（词表**部分完成**）。
+    //
+    // 让它**确定地**连着失败，不靠挂钟（与 `romcat-core` 的 `tests/pegasus.rs` 那一条同一个
+    // 办法）：Pegasus 按内容寻址铺（`media/<哈希前两位>/…`），把排在后面那几份的
+    // `media/<前两位>` 先占成一个**文件**——那一枝的目录建不出来，每一份都以同一句话失败。
+    let 库 = 建库("gui-stages-铺媒体部分完成");
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    let 导出去 = 现场.工作区.path().join("导出去");
+    现场.选一次导出去哪儿("Pegasus", &导出去);
+    let 魂斗罗 = 现场.变体键("魂斗罗");
+    let mut 按前缀: std::collections::BTreeMap<String, Vec<u8>> = std::collections::BTreeMap::new();
+    let mut n = 0;
+    while 按前缀.len() < 12 {
+        let 字节 = format!("screenshot-{n}").into_bytes();
+        n += 1;
+        let hash = romcat_core::catalog::frontend::hash_of(&字节);
+        按前缀.entry(hash[..2].to_string()).or_insert(字节);
+    }
+    for 字节 in 按前缀.values() {
+        现场.收一份媒体(&魂斗罗, romcat_core::scrape::MediaKind::Screenshot, 字节);
+    }
+    let mut 前缀们 = 按前缀.keys();
+    let 第一份 = 前缀们.next().expect("有第一份").clone();
+    for 前缀 in 前缀们 {
+        写(&导出去.join("media").join(前缀), b"not a directory");
+    }
+    现场.打开铺媒体();
+
+    现场.导出();
+
+    let record = &现场.app.tasks().history()[0];
+    let Ending::Halfway { left_behind, .. } = &record.ending else {
+        panic!(
+            "铺媒体连着失败主动停了，台上却记成了「{}」",
+            record.ending.render()
+        );
+    };
+    assert!(
+        left_behind.contains("（共 12 份）"),
+        "那一句没说清一共几份：{left_behind}"
+    );
+    assert!(
+        导出去.join("media").join(&第一份).is_dir(),
+        "铺出去的那一份没留在盘上"
+    );
+    let 说的 = 现场.app.roots().stages().notice().expect("收了场要说话");
+    assert!(
+        说的.starts_with("导出") && 说的.contains(&record.ending.render()),
+        "屏上没说这一趟部分完成：{说的}",
+    );
+    assert!(
+        !说的.contains("跑完了"),
+        "没走完的那一趟说成了跑完了：{说的}"
+    );
+}
+
+#[test]
+fn 开着铺媒体读不动优先级表时记成失败_一份媒体都没铺() {
+    // 验收第 4 条的第四档：说得出停在哪一步、为什么（与折标题那一条同一个办法）。
+    let (_库, mut 现场, 导出去, _) = 摆好一张封面("gui-stages-铺媒体失败");
+    现场.打开铺媒体();
+    写(
+        &现场.工作区.path().join("priorities.toml"),
+        "这不是一份 TOML".as_bytes(),
+    );
+
+    现场.导出();
+
+    let record = &现场.app.tasks().history()[0];
+    let Ending::Failed { step, why } = &record.ending else {
+        panic!("表都读不动却把这一趟记成了「{}」", record.ending.render());
+    };
+    assert_eq!(step, "读优先级表", "说不清停在哪一步");
+    assert!(!why.is_empty(), "说不清为什么跑不了");
+    assert!(
+        树里的文件(&导出去).is_empty(),
+        "失败的那一趟往导出目录里放了东西：{:?}",
+        树里的文件(&导出去),
+    );
+    let 说的 = 现场
+        .app
+        .roots()
+        .stages()
+        .error()
+        .expect("失败要说出来，不能默默结束");
+    assert!(
+        说的.starts_with("导出") && 说的.contains(&record.ending.render()),
+        "屏上没把失败那一档说出来：{说的}",
+    );
+}
+
+#[test]
+fn 照写那一趟带着同一颗铺媒体开关() {
+    // 照写走的是与平常那一趟同一份实现、同一套旋钮（`Section::export_knobs`，票
+    // `gui-answers-all-six/05`）。先关着导一趟、外面有人动了一份、再导撞上点名；**这时才**
+    // 打开铺媒体，**真点一下**「我看过了，照写」——那一趟既照写过去，也把媒体铺出去。
+    let (_库, mut 现场, 导出去, hash) = 摆好一张封面("gui-stages-铺媒体照写");
+    let ctx = headless::context();
+    现场.导出();
+    let 动过的 = 导出去的文件(&导出去)[0].clone();
+    手改一行(&动过的);
+    现场.导出();
+    assert!(!导出去.join("media").exists(), "开关还关着，媒体就铺出去了");
+
+    现场.打开铺媒体();
+    点一下(&ctx, &mut 现场.app, "我看过了，照写");
+    现场.等任务跑完();
+
+    let 落点 = format!("media/{}/{hash}.png", &hash[..2]);
+    assert!(
+        导出去.join(&落点).is_file(),
+        "照写那一趟没带上铺媒体：{:?}",
+        树里的文件(&导出去),
+    );
+    assert!(
+        !fs::read_to_string(&动过的)
+            .expect("读得出")
+            .contains("我后来手加的一行"),
+        "按了照写，手改的那一行却还在",
+    );
+    let 最后一趟 = 现场.app.tasks().history().first().expect("进了历史");
+    assert!(
+        最后一趟.name.contains("照写"),
+        "最后一趟不是照写那一趟：{}",
+        最后一趟.name
+    );
+    assert!(
+        matches!(最后一趟.ending, Ending::Done(_)),
+        "照写那一趟记成了「{}」",
+        最后一趟.ending.render(),
+    );
+}
+
+#[test]
+fn 要铺多少那一趟被撤掉时屏上说清_关掉再打开就重算() {
+    // 算要铺多少那一趟也是台上的一趟，按得停。停了之后屏上得说清没算出来、导出照旧按不下去；
+    // 屏上那句话说「关掉再打开就重算」——**它得是真的**。
+    //
+    // 台上先摆一趟占位的活，算的那一趟稳稳排在它后面，撤掉它（不靠挂钟）。
+    let (_库, mut 现场, _导出去, _) = 摆好一张封面("gui-stages-铺媒体算被撤掉");
+    let 占位 = 现场.占住任务台();
+    {
+        let (screen, site, tasks) = 现场.app.roots_site_and_tasks();
+        screen.stages_mut().set_lay_media(true, site, tasks);
+    }
+    let 算的那一趟 = 现场
+        .app
+        .tasks()
+        .queued()
+        .into_iter()
+        .find(|(_, name)| name == romcat_gui::stages::COUNT_MEDIA)
+        .map(|(id, _)| id)
+        .expect("打开开关就排上了算要铺多少那一趟");
+    现场.app.tasks_mut().stop(算的那一趟);
+    现场.app.poll_tasks();
+
+    let ctx = headless::context();
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        屏上.contains(&Ending::<()>::Stopped.render()) && 屏上.contains("关掉再打开"),
+        "算的那一趟撤掉了，屏上没说清：\n{屏上}",
+    );
+    现场.app.start_stage(Stage::Export);
+    assert!(
+        现场.app.roots().stages().task_of(Stage::Export).is_none(),
+        "要铺多少没算出来，导出却排上了",
+    );
+
+    现场.app.tasks_mut().stop(占位);
+    现场.等任务跑完();
+    {
+        let (screen, site, tasks) = 现场.app.roots_site_and_tasks();
+        screen.stages_mut().set_lay_media(false, site, tasks);
+        screen.stages_mut().set_lay_media(true, site, tasks);
+    }
+    现场.等任务跑完();
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        屏上.contains(&romcat_gui::stages::media_cost(1, 19)),
+        "关掉再打开没重算：\n{屏上}",
+    );
+}
+
+#[test]
+fn 跑完一道工序之后那句代价跟着重算_不拿旧数骗人() {
+    // 那个数缓存着、不每帧重算——**缓存到库变了为止**。库变了还画着旧数，屏上说 1 份、
+    // 按下去铺 2 份：少报正是这句代价要防的那个方向。
+    //
+    // 算过一次（1 份、19 个字节）之后，池里又多了一张截图挂在同一个变体上（19 个字节），
+    // 再在这一段上跑完一道工序（刮削：只用本地源、不收媒体，库里那两条引用都还在）。
+    // 下一帧那句话得说 2 份、38 B。
+    let (_库, mut 现场, _导出去, _) = 摆好一张封面("gui-stages-铺媒体库变了");
+    现场.打开铺媒体();
+    let 魂斗罗 = 现场.变体键("魂斗罗");
+    现场.收一份媒体(
+        &魂斗罗,
+        romcat_core::scrape::MediaKind::Screenshot,
+        b"\x89PNG-- contra title",
+    );
+
+    现场.跑刮削();
+
+    let ctx = headless::context();
+    跑一帧(&ctx, &mut 现场.app);
+    现场.等任务跑完();
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        屏上.contains(&romcat_gui::stages::media_cost(2, 38)),
+        "库变了之后那句代价没跟着重算：\n{屏上}",
+    );
+}
+
+#[test]
+fn 离开库屏再回来_那句代价重算一遍() {
+    // 别的屏也改得动库（裁决、合并作品、刮削面板收媒体），而那几条出口不经过这一段。
+    // 人要改它们就得先离开库屏，所以**离开过这一屏再回来，那个数就重算一遍**（挂单 `Q654`）。
+    //
+    // 算过一次（1 份）之后池里又挂上一张截图——这一下不经过这一段，与在别的屏上改库一样——
+    // 切去浏览屏画一帧、再切回来：那句话得说 2 份、38 B。
+    let (_库, mut 现场, _导出去, _) = 摆好一张封面("gui-stages-铺媒体切屏回来");
+    let ctx = headless::context();
+    现场.打开铺媒体();
+    跑一帧(&ctx, &mut 现场.app);
+    let 魂斗罗 = 现场.变体键("魂斗罗");
+    现场.收一份媒体(
+        &魂斗罗,
+        romcat_core::scrape::MediaKind::Screenshot,
+        b"\x89PNG-- contra title",
+    );
+
+    // **还在库屏上**：那个数不动，也不又排一趟去算——缓存着就是不每帧重算。
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        屏上.contains(&romcat_gui::stages::media_cost(1, 19)),
+        "没离开库屏，那句代价就变了：\n{屏上}",
+    );
+    assert!(!现场.app.tasks().busy(), "没离开库屏，又排了一趟去算");
+
+    现场.app.show_view(View::Browse);
+    跑一帧(&ctx, &mut 现场.app);
+    现场.app.show_view(View::Library);
+    跑一帧(&ctx, &mut 现场.app);
+    现场.等任务跑完();
+
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        屏上.contains(&romcat_gui::stages::media_cost(2, 38)),
+        "离开库屏再回来，那句代价没重算：\n{屏上}",
+    );
+}
+
+#[test]
+fn 台上排着一道别的工序时按导出_那句代价作废_不排() {
+    // 那个数算出来之后，人在这一段上又排了一道会改库的工序（刮削、识别都会改媒体引用或作品
+    // 归属），它还没收场就按导出：导出排在它后面跑，屏上那个数说的却是它之前那一份库。
+    // **排别的工序那一下，那句代价就作废**，数重新出来之前导出按不下去。
+    //
+    // 台上先摆一趟占位的活，刮削稳稳排在它后面（不靠挂钟）。
+    let (_库, mut 现场, _导出去, _) = 摆好一张封面("gui-stages-铺媒体排着别的");
+    现场.打开铺媒体();
+    let 占位 = 现场.占住任务台();
+    现场.app.start_stage(Stage::Scrape);
+    let 刮削 = 现场
+        .app
+        .roots()
+        .stages()
+        .task_of(Stage::Scrape)
+        .expect("刮削排上任务台了");
+
+    现场.app.start_stage(Stage::Export);
+
+    assert!(
+        现场.app.roots().stages().task_of(Stage::Export).is_none(),
+        "台上排着一道会改库的工序，导出却拿着之前那个数排上了",
+    );
+    let 说的 = 现场
+        .app
+        .roots()
+        .stages()
+        .error()
+        .expect("按不下去要说清为什么");
+    assert!(
+        说的.contains(romcat_gui::stages::LAY_MEDIA),
+        "没说清是那颗开关在等：{说的}",
+    );
+
+    现场.app.tasks_mut().stop(刮削);
+    现场.app.tasks_mut().stop(占位);
+    现场.等任务跑完();
+}
+
+#[test]
+fn 算要铺多少那一趟收场时浏览屏不重读() {
+    // 那一趟整条只读：认领了它不等于库变了。照「认领了就转告浏览屏」那条路走的话，每打开
+    // 一次开关、每离开库屏再回来一次，浏览屏就把窗里那几百行连同筛选面板整份重读一遍。
+    let (_库, mut 现场, _导出去, _) = 摆好一张封面("gui-stages-铺媒体不惊动浏览屏");
+    let ctx = headless::context();
+    现场.app.show_view(View::Browse);
+    跑一帧(&ctx, &mut 现场.app);
+    跑一帧(&ctx, &mut 现场.app);
+    let 读过几次 = 现场.app.window().reads();
+    assert!(读过几次 > 0, "浏览屏一次都没读过库，这一条什么都没验");
+
+    现场.app.show_view(View::Library);
+    现场.打开铺媒体();
+    现场.app.show_view(View::Browse);
+    跑一帧(&ctx, &mut 现场.app);
+    跑一帧(&ctx, &mut 现场.app);
+
+    assert_eq!(
+        现场.app.window().reads(),
+        读过几次,
+        "算要铺多少那一趟收了场，浏览屏跟着重读了一遍",
+    );
+}
+
+#[test]
+fn 要铺多少算出来之后_那句按不下去的话收掉() {
+    // 数没出来时按导出，屏上挂一句「先看清那句再按」；数出来之后那句话还挂着，就与底下已经
+    // 画出来的代价互相顶：一句说还没说清，一句已经说清了。
+    let (_库, mut 现场, _导出去, _) = 摆好一张封面("gui-stages-铺媒体收掉拒绝");
+    let 占位 = 现场.占住任务台();
+    {
+        let (screen, site, tasks) = 现场.app.roots_site_and_tasks();
+        screen.stages_mut().set_lay_media(true, site, tasks);
+    }
+    现场.app.start_stage(Stage::Export);
+    assert!(
+        现场.app.roots().stages().error().is_some(),
+        "数没出来时按导出，一句都没说",
+    );
+
+    现场.app.tasks_mut().stop(占位);
+    现场.等任务跑完();
+
+    assert!(
+        现场.app.roots().stages().error().is_none(),
+        "数算出来了，那句按不下去的话还挂着：{:?}",
+        现场.app.roots().stages().error(),
+    );
+}
+
+#[test]
+fn 改了导出的前端格式之后_那句代价重算一遍() {
+    // 媒体的布局随前端格式不同（Pegasus 按内容寻址、ES-DE 按 ROM 名），换了格式那个数就不是
+    // 这一份了——哪怕这份小库上两种格式算出来碰巧一样，也得重算，不拿旧格式的数说新格式。
+    let (_库, mut 现场, 导出去, _) = 摆好一张封面("gui-stages-铺媒体换格式");
+    let ctx = headless::context();
+    现场.打开铺媒体();
+    let 另一个格式 = romcat_core::adapter::names()
+        .into_iter()
+        .find(|name| *name != "Pegasus")
+        .expect("除了 Pegasus 还有别的格式");
+
+    现场.选一次导出去哪儿(另一个格式, &导出去);
+    跑一帧(&ctx, &mut 现场.app);
+    现场.等任务跑完();
+
+    let 算了几趟 = 现场
+        .app
+        .tasks()
+        .history()
+        .iter()
+        .filter(|record| record.name == romcat_gui::stages::COUNT_MEDIA)
+        .count();
+    assert_eq!(算了几趟, 2, "换了前端格式，那句代价没重算");
+}

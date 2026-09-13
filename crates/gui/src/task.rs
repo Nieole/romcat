@@ -100,6 +100,18 @@ pub enum Product {
     /// （`browse::Screen::settle_collection`）。装箱是因为它带着整批的锚——
     /// 真库上「全选 46,483 行 → ★ 收藏」那一下就是四万多条。
     Planned(Box<collection::Plan>),
+    /// 算了一遍**开着铺媒体时这一趟导出最多要铺多少**：几份、共多少字节
+    /// （库屏工序段导出那一支，票 `one-criterion-per-thing/09`）。
+    ///
+    /// **是上界**（`romcat_core::adapter::transfer::media_to_lay`）：落点上已经有的真铺时
+    /// 不重铺。只留两个数、不留整份落点表：屏上要画的只有这两个，而整库的落点表真库上
+    /// 是几万条。整条只读，所以它与 [`Evaluated`](Self::Evaluated) 一样不必写在认领那一步。
+    MediaCounted {
+        /// 几份。
+        files: u64,
+        /// 共多少字节。
+        bytes: u64,
+    },
 }
 
 /// 这个界面上那张**任务台**。
