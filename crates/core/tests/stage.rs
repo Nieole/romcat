@@ -22,7 +22,7 @@ use romcat_core::fs::RealFs;
 use romcat_core::identify::{self, Options, fuzzy};
 use romcat_core::report::thousands;
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
-use romcat_core::scrape::Priorities;
+use romcat_core::scrape::{self, Priorities};
 use romcat_core::stage::{Behind, Stage, Stages};
 use romcat_core::task::Handle;
 use romcat_core::testing::sample::zip;
@@ -123,6 +123,39 @@ impl 现场 {
             .of(Stage::Identify)
             .expect("工序段有识别那一行")
             .clone()
+    }
+
+    /// 刮削那一行。
+    fn 刮削那一行(&self) -> romcat_core::stage::StageRow {
+        Stages::survey(&self.catalog)
+            .of(Stage::Scrape)
+            .expect("工序段有刮削那一行")
+            .clone()
+    }
+
+    /// 采一趟**刮削**：只用本地源、不收媒体，**一个请求都不发**（没有网络句柄）。
+    /// `只刮` 给了就只过那几个变体——界面上刮削面板那个「范围」旋钮换的正是它。
+    fn 刮(&mut self, 根名: &str, 目录: &Path, 只刮: Option<&[&str]>) {
+        let mut options =
+            scrape::Options::new(Roots::single(根名, 目录), self.工作区.path().join("媒体池"));
+        options.media = false;
+        options.only =
+            只刮.map(|keys| scrape::estimate::only(keys.iter().map(|key| (*key).to_string())));
+        scrape::run(
+            &RealFs::new(),
+            &mut self.catalog,
+            &Priorities::builtin(),
+            &options,
+            None,
+            &mut scrape::RunContext {
+                cancel: &CancelToken::new(),
+                progress: &mut |_| {},
+                naming: &fuzzy::Naming::off(),
+                summaries: None,
+                rulings: &scrape::zh::Rulings::none(),
+            },
+        )
+        .expect("刮得动");
     }
 
     /// 折标题那一行。
@@ -304,6 +337,111 @@ fn 一个变体都没有的库里识别这一支说它不差什么() {
     let 行 = 现场.识别那一行();
     assert_eq!(行.behind, Behind::Left(0));
     assert!(!行.render().contains("还没跑过"), "{}", 行.render());
+}
+
+#[test]
+fn 刮削那一行数的是一条刮削结论都没有的变体_刮过一趟那个数跟着变() {
+    // **口径已裁定**（票 `gui-answers-all-six/04`、挂单 `Q447`）：数变体，不按旋钮算。
+    // 同一个变体在窄字段那一趟算「刮过」、宽字段那一趟算「没刮过」——那个数是刮削面板
+    // 那本估算账的事，这一行不碰。
+    let 甲 = 建库("stage-刮削", 4);
+    let mut 现场 = 现场::摆好();
+    现场.扫("甲", 甲.path());
+
+    let 行 = 现场.刮削那一行();
+    assert_eq!(
+        行.behind,
+        Behind::Left(4),
+        "扫进来四个变体，一条刮削结论都还没有"
+    );
+    assert_eq!(行.render(), "4 个变体一条刮削结论都还没有");
+
+    // **只刮其中两个**：剩下那两个照旧一条结论都没有。
+    现场.刮(
+        "甲",
+        甲.path(),
+        Some(&["甲/FC/游戏00.zip", "甲/FC/游戏01.zip"]),
+    );
+    assert_eq!(现场.刮削那一行().behind, Behind::Left(2));
+
+    // **全库刮一趟**：文件名那个源给每个变体都落一条标题，于是那个数归零。
+    现场.刮("甲", 甲.path(), None);
+    let 行 = 现场.刮削那一行();
+    assert_eq!(行.behind, Behind::Left(0));
+    assert!(!行.render().is_empty(), "不差什么了也得说话");
+    assert!(!行.render().contains("还没有"), "{}", 行.render());
+
+    // **识别那一行一个字都没变**：刮削不是识别。
+    assert_eq!(现场.识别那一行().behind, Behind::Left(4));
+}
+
+#[test]
+fn 刮削那一行带着口径_说清它不是按当前那套旋钮算的() {
+    // **屏上要明写这个口径**（票 `gui-answers-all-six/04` 验收第 3 条）：不写的话，人会把
+    // 那个数读成「按我眼下那套旋钮还差多少」——那是刮削面板那本估算账。
+    // **措辞在核心里**（ADR-0005），界面那一层只画。
+    let 口径 = Stage::Scrape.basis().expect("刮削那一行得带着口径");
+    assert!(口径.contains("一条刮削结论都没有的变体"), "{口径}");
+    assert!(口径.contains("不是按当前那套旋钮"), "{口径}");
+
+    // 另外三支的数说的就是字面上那件事，不另带一句。
+    for stage in [Stage::Identify, Stage::FoldTitles, Stage::Export] {
+        assert_eq!(stage.basis(), None, "{} 那一行不该带口径", stage.label());
+    }
+}
+
+#[test]
+fn 删过文件又添了文件之后_刮削那一行只数眼下库里的变体() {
+    // **刮削结论按锚点存，不跟着变体走**：重扫把变体整份换掉时，`scrape_value` 一行都
+    // 不删，于是表里留着已经不在库里的变体。拿变体总数去减「有刮削结论的锚点几个」的话，
+    // 这份库会少报一个——人会以为新添的那两份里有一份已经刮过了。
+    let 甲 = 建库("stage-刮削重扫", 3);
+    let mut 现场 = 现场::摆好();
+    现场.扫("甲", 甲.path());
+    现场.刮("甲", 甲.path(), None);
+    assert_eq!(现场.刮削那一行().behind, Behind::Left(0));
+
+    // 删掉一份、添两份，重扫。**只动临时目录里那份 fixture。**
+    fs::remove_file(甲.path().join("FC/游戏02.zip")).expect("删得掉");
+    写(&甲.path().join("FC/新来的甲.zip"), &zip(2048));
+    写(&甲.path().join("FC/新来的乙.zip"), &zip(2049));
+    现场.扫("甲", 甲.path());
+
+    // 前提：表里真留着那个已经删掉的变体——不然这一条验不到它要验的东西。
+    let 有结论的变体 = 现场
+        .catalog
+        .scraped_subjects()
+        .expect("数得出")
+        .into_iter()
+        .find(|(anchor, _)| anchor == scrape::AnchorKind::Variant.label())
+        .map_or(0, |(_, 几个)| 几个);
+    assert_eq!(有结论的变体, 3, "前提：删掉的那一个的刮削结论还留在表里");
+
+    assert_eq!(
+        现场.刮削那一行().behind,
+        Behind::Left(2),
+        "新添的那两个一条刮削结论都还没有",
+    );
+}
+
+#[test]
+fn 刮削那一行说的是几个变体一条刮削结论都还没有() {
+    // 与折标题、导出那两支同一个形状：数在句子里，「不差什么了」那一档也得说话。
+    let 差着 = romcat_core::stage::StageRow {
+        stage: Stage::Scrape,
+        behind: Behind::Left(3_456),
+    };
+    let 那一句 = 差着.render();
+    assert!(那一句.contains(&thousands(3_456)), "{那一句}");
+    assert!(那一句.contains("一条刮削结论都还没有"), "{那一句}");
+
+    // **不差什么了也得说话**：一行空白读起来像出了什么事。
+    let 不差 = romcat_core::stage::StageRow {
+        stage: Stage::Scrape,
+        behind: Behind::Left(0),
+    };
+    assert!(!不差.render().is_empty());
+    assert!(!不差.render().contains("还没有"), "{}", 不差.render());
 }
 
 #[test]

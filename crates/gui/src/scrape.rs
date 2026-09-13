@@ -295,6 +295,16 @@ impl Panel {
     /// # Errors
     /// 中立库读不出那一组根时返回错误。
     pub fn options(&self, catalog: &Catalog) -> Result<Options, CatalogError> {
+        let mut options = self.knob_options(catalog)?;
+        options.only = Some(estimate::only(self.scope.iter().cloned()));
+        Ok(options)
+    }
+
+    /// 字段、源、媒体、采法那几个旋钮折成的选项，**范围不收窄**（整库）。
+    ///
+    /// 与 [`Self::options`] 分开，是为了让工序段那一趟从**同一个构造**里折出它那一套
+    /// （[`whole_library`]），而不是另写一份默认值。
+    fn knob_options(&self, catalog: &Catalog) -> Result<Options, CatalogError> {
         let mut options = Options::new(
             Roots::load(catalog)?,
             workspace::media_pool_dir(&self.workspace),
@@ -312,7 +322,6 @@ impl Panel {
             .copied()
             .chain([Field::Title, Field::TranslationGroup])
             .collect();
-        options.only = Some(estimate::only(self.scope.iter().cloned()));
         self.sweep.apply(&mut options);
         Ok(options)
     }
@@ -666,6 +675,30 @@ impl Panel {
     }
 }
 
+/// 库屏工序段**刮削**那一行排的那一趟用的选项：**整库，旋钮是面板刚摊开时那一套**
+/// ——全部字段、只用本地源、不收媒体、补缺（屏上那句话是 [`WHOLE_LIBRARY`]）。
+///
+/// ## 为什么是这一套，而不是面板眼下拨到哪儿的那一套
+///
+/// - **按一下就走的那颗按钮不该花配额。** 面板上勾联网源要先看过配额提醒，按下去之前
+///   底下那本账得算得出来（ADR-0007）；工序段那一行两样都没有。只用本地源的那一趟
+///   一个请求都不发，也就不需要那本账。
+/// - **面板那几个旋钮是给「这一批」拨的**：人在浏览屏上为筛出来的几十个变体勾过联网源、
+///   收过媒体，那一套悄悄套到整库上，就是几万个请求、或者把 10 TB 那块盘回读一遍。
+/// - **不另写一套默认值**：从 [`Panel::new`] 那个构造里折出来，面板刚摊开时就是它
+///   ——两处不会一处改了另一处没改。
+///
+/// # Errors
+/// 中立库读不出那一组根时返回错误。
+pub(crate) fn whole_library(catalog: &Catalog, workspace: &Path) -> Result<Options, CatalogError> {
+    Panel::new(workspace.to_path_buf()).knob_options(catalog)
+}
+
+/// 工序段刮削那一行那颗按钮按下去排的是哪一趟。**旋钮为什么是这一套**写在同一个模块的
+/// `whole_library` 上。
+pub const WHOLE_LIBRARY: &str = "刮削那一行排的是整库一趟：全部字段、只用本地源、不收媒体、补缺\
+     ——一个网络请求都不发。要挑一批、联网或收媒体，去浏览屏抬头那颗「刮削选中…」。";
+
 /// 那本账排成给人看的一句话。
 #[must_use]
 pub fn summary(account: &Estimate) -> String {
@@ -703,7 +736,10 @@ fn left_behind(outcome: &scrape::Outcome) -> Option<String> {
 ///
 /// **没走完的那一趟不许说「跑完了」**：它交出来的产物长得跟跑完的那一份一模一样，
 /// 可它只走了一段（同 [`left_behind`]）。
-fn finished(outcome: &scrape::Outcome) -> String {
+///
+/// **工序段刮削那一行认领时说的也是这一句**（`crate::stages::Section::settle`）：同一个
+/// 函数交出来的产物，两处各折一句的话迟早差着字。
+pub(crate) fn finished(outcome: &scrape::Outcome) -> String {
     // **这一句得与那一档对得上。** 走到这儿又没走完的，任务台记的都是「停在半路」
     // （`left_behind` 报了那一句）——起头写「按停了」的话，屏上这一句与任务屏历史
     // 那一行说的是两档收场，而 `Ending::Stopped.render()` 正好就是「按停了」。
@@ -741,7 +777,10 @@ fn finished(outcome: &scrape::Outcome) -> String {
 /// 后台那条线程真跑的那一趟。**装配全在这儿**：中文离线源、匹配裁决、优先级表、
 /// 网络句柄。领域判断一条都不在这一层——它只是把核心库要的原料摆齐
 /// （与命令行 `romcat scrape` 摆的是同一副）。
-fn run(
+///
+/// **工序段刮削那一行排的那一趟走的也是它**（`crate::stages`），只是选项换成
+/// [整库那一套](whole_library)——装配只有这一份。
+pub(crate) fn run(
     site: &mut Site,
     workspace: &Path,
     options: &Options,

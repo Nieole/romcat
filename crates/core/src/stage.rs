@@ -36,7 +36,7 @@ use crate::report::{human_time, thousands};
 
 /// 一道**工序**。
 ///
-/// **眼下是识别、折标题与导出三支**。**加一支要写五处，两处不在这个 crate 里**：
+/// **眼下是识别、刮削、折标题与导出四支**。**加一支要写五处，两处不在这个 crate 里**：
 ///
 /// 1. 这个枚举一个变体，加 [`Stage::label`] 那个 `match` 一支；
 /// 2. [`Stage::ALL`] 一项——[`Stages::survey`] 照它走，漏了就整支不出现；
@@ -50,6 +50,22 @@ use crate::report::{human_time, thousands};
 pub enum Stage {
     /// **识别**：撞 DAT、撞**沉淀库**、撞名字，给每个**变体**一条结论。
     Identify,
+    /// **刮削**：在识别结论的基础上去数据源取标题、简介、封面这些元数据
+    /// （[`scrape::run`](crate::scrape::run)）。
+    ///
+    /// ## 这一支数的是什么
+    ///
+    /// **一条刮削结论都没有的变体**（[`Catalog::unscraped_variant_count`]）——挂单 `Q447`
+    /// 当场裁定的口径，一句 SQL，与识别那一支一样便宜。
+    ///
+    /// 它**不是**「按刮削面板眼下那套旋钮还差多少」：真判据是逐（锚点 × 源）比
+    /// **输入指纹**，而指纹把「这一趟要哪些字段」折了进去——**同一个变体在窄字段那一趟算
+    /// 「刮过」、宽字段那一趟算「没刮过」**。按旋钮算的那个数是刮削面板那本估算账的事
+    /// （[`scrape::estimate`](crate::scrape::estimate)），**两本账不混**。
+    ///
+    /// 数**变体**而不数作品：作品锚点只有被识别确认过的变体才挂得上，数作品会把还没认出来的
+    /// 那一批整个漏掉；而文件名那个源给每个变体都落一条标题，所以全库刮过一趟，这个数就归零。
+    Scrape,
     /// **折标题**：把识别与刮削的结论折成每个作品的**标题集合**
     /// （[`title::run`](crate::title::run)）。
     ///
@@ -118,18 +134,39 @@ pub enum Stage {
 
 impl Stage {
     /// 全部工序。**库屏上从上到下就是这个次序**，也是主干六步里的先后。
-    pub const ALL: [Self; 3] = [Self::Identify, Self::FoldTitles, Self::Export];
+    pub const ALL: [Self; 4] = [Self::Identify, Self::Scrape, Self::FoldTitles, Self::Export];
 
     /// 打给用户的那个词。**与词表逐字一样**（`CONTEXT.md` 的**工序**条）。
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Identify => "识别",
+            Self::Scrape => "刮削",
             Self::FoldTitles => "折标题",
             Self::Export => "导出",
         }
     }
+
+    /// 这一行那个数的**口径**：要跟那个数一起画在屏上的那句话。数说的就是字面上那件事的
+    /// 那几支交 `None`。
+    ///
+    /// **眼下只有刮削带一句**（[`SCRAPE_BASIS`]）：识别那句「N 个变体连识别都还没跑过」
+    /// 读不岔，而刮削那个数一眼看去很像「按我眼下那套旋钮还差多少」——它不是。
+    #[must_use]
+    pub fn basis(self) -> Option<&'static str> {
+        (self == Self::Scrape).then_some(SCRAPE_BASIS)
+    }
 }
+
+/// **刮削**那一行的口径（[`Stage::basis`]）。**屏上要明写**（票 `gui-answers-all-six/04`）：
+/// 不写的话，人会把那个数读成「按我眼下那套旋钮还差多少」，而那是刮削面板那本估算账
+/// ——为什么两本账不混，写在 [`Stage::Scrape`] 上。
+///
+/// 摆成一个有名字的常量而不是散在布局代码里：库屏日后重排时（票
+/// `gui-looks-like-the-design/06`）这句话一个字都不许丢，有名字才查得到它还在不在。
+pub const SCRAPE_BASIS: &str = "这一行数的是一条刮削结论都没有的变体，不是按当前那套旋钮还差多少\
+     ——按旋钮算的话，同一个变体只要标题的那一趟算刮过、还要简介的那一趟就算没刮过，\
+     那个数归刮削面板底下那本估算账。";
 
 /// 一道工序**还差多少**。
 ///
@@ -172,6 +209,10 @@ impl StageRow {
             Behind::Left(left) => match self.stage {
                 Stage::Identify if *left == 0 => "每个变体都跑过识别了".to_string(),
                 Stage::Identify => format!("{} 个变体连识别都还没跑过", thousands(*left)),
+                // 刮削那一支数的是变体，**不是**「按眼下那套旋钮还差多少」
+                // ——口径见 [`Stage::Scrape`]。
+                Stage::Scrape if *left == 0 => "每个变体都有刮削结论了".to_string(),
+                Stage::Scrape => format!("{} 个变体一条刮削结论都还没有", thousands(*left)),
                 // **折标题眼下折不出这一支**——它走的是退路（见 [`Stage::FoldTitles`]）。
                 // 这两句话是那张变更计数表真被认下来之后这一行该说的话，钉在
                 // `crates/core/tests/stage.rs` 上：换度量的人不必再想一遍措辞，
@@ -242,6 +283,7 @@ impl Stages {
 fn row_of(stage: Stage, catalog: &Catalog) -> StageRow {
     match stage {
         Stage::Identify => identify_row(catalog),
+        Stage::Scrape => scrape_row(catalog),
         Stage::FoldTitles => fold_titles_row(catalog),
         Stage::Export => export_row(catalog),
     }
@@ -265,6 +307,25 @@ fn identify_row(catalog: &Catalog) -> StageRow {
     };
     StageRow {
         stage: Stage::Identify,
+        behind,
+    }
+}
+
+/// **刮削**那一行：库里还有多少个**变体**一条刮削结论都没有。
+///
+/// 口径、为什么不按旋钮算，写在 [`Stage::Scrape`] 上。数只有
+/// [`Catalog::unscraped_variant_count`] 一处算得出来——一句 SQL，跑在画帧那条线程上也不卡。
+fn scrape_row(catalog: &Catalog) -> StageRow {
+    let behind = match catalog.unscraped_variant_count() {
+        Ok(left) => Behind::Left(left),
+        // 读不动就退回那一支——**只降这一行**，与识别那一行同一个口径。
+        Err(error) => Behind::Unmeasured {
+            at: None,
+            why: format!("中立库读不动：{error}"),
+        },
+    };
+    StageRow {
+        stage: Stage::Scrape,
         behind,
     }
 }
