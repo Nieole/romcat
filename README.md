@@ -10,7 +10,7 @@
 
 ## 它解决什么
 
-一个 10 TB 量级的 ROM 库，46,444 个变体、215,964 个文件，绝大多数是**汉化版**——文件名五花八门，DAT 里根本没有，光看名字认不出是哪个游戏。手工维护元数据到某个规模就维护不动了。
+一个 10 TB 量级的 ROM 库（实测规模只记在 `docs/library-facts.md`），其中大量是**汉化版**——文件名五花八门，DAT 里根本没有，光看名字认不出是哪个游戏。手工维护元数据到某个规模就维护不动了。
 
 romcat 做四件事：
 
@@ -96,16 +96,7 @@ romcat-gui --catalog ~/.romcat/catalog/主库-xxxx.sqlite3
 
 **88/90 张票落地**（前六条队列合计）。余下两张都是 `ready-for-human`：一张要在 Windows 真机上核对路径形式与文件元数据，一张要在真库上跑一趟把数字补进事实台账。（Windows 真机中文输入法验证 2026-09-13 已过，界面层留在 egui。）**另有五条队列共 59 张票还没开工**：界面观感照设计稿落地 31 张、一个判断一处实现 9 张、六步都在界面上答完 6 张、开一份库不留哑口 6 张，再加机器替人核前提 7 张——**这个数以后由门禁生成并核对**（票 `machine-checks-premises/03`）。**1,815 条测试**（`cargo test --workspace --all-features -- --list` 数出来的，70 个测试目标；**这个数会随票涨，以门禁自己的输出为准**，别拿这里当基线——这一次量在 `main` `a142612` 上，第四轮九张票全部合并之后）。
 
-真库实测（`docs/library-facts.md` 记着全部数字与日期）：
-
-| | |
-|---|---|
-| 变体 | **46,444 个**，吃掉 215,964 个文件、5.33 TiB |
-| 识别命中率 | **83.7%**（不含模糊匹配；含模糊匹配的候选另计） |
-| 前端条目 | 46,444 个变体作品级收敛成 **28,529 条** |
-| 无判据 | 2,631 个（拿不到可撞的东西，**不进命中率的分母**） |
-
-第二批工作已出规格与工单：**中文离线源取全字段**（`.scratch/offline-chinese-fields/`）——本机那份中文离线数据里 94.2% 的条目带中文简介、99.7% 带类型、83.8% 带开发商，眼下**一条都没被取出来过**。
+**真库上跑出来的数——多少变体、认出多少、收敛成多少条目——只记在 `docs/library-facts.md`**，每一节带日期与出处。这里不抄：抄过来的数会漂，而且漂了没有东西报红。
 
 ---
 
@@ -155,7 +146,7 @@ cargo xtask gate          # 门禁五条：排版、默认特性编得过、clip
 cargo xtask gate --list
 ```
 
-默认在**第一处红上就停**：`fmt` 排在最前，两秒出结果，「忘了跑 `cargo fmt --all`」这种
+默认在**第一处红上就停**：`fmt` 排在最前、几秒就出结果，「忘了跑 `cargo fmt --all`」这种
 最常见的红不该罚你一整趟冷编译。要一趟看全五条给 `--keep-going`（CI 上就是这么调的）。
 
 **内存吃紧就退回限流那一档。** 一台 15 GB 的开发机上按满并发跑全量测试会被 OOM 杀掉：
@@ -171,7 +162,7 @@ cargo xtask gate -j 4 --test-threads 4   # 两个开关各自也调得动
 
 ### 工具链钉住了
 
-`rust-toolchain.toml` 钉的是 **`1.98.1`**（`rustfmt 1.9.0-stable`）。`rustfmt.toml` 钉的是
+`rust-toolchain.toml` 钉死了一版工具链（哪一版、落版那天实测的 rustfmt 是哪一版，只写在那份文件里）。`rustfmt.toml` 钉的是
 **风格**，钉不住**实现**——同一份配置换一版 rustfmt 产出就可能变，于是换一台机器提交，
 `cargo fmt --all` 会顺手重排一大片与你这件事无关的代码，而门禁第一条在那台机器上照样是绿的。
 
@@ -179,10 +170,10 @@ cargo xtask gate -j 4 --test-threads 4   # 两个开关各自也调得动
 跑任何 cargo 命令都会**触发一次下载**（要联网）。这是拿「每台机器多下一次」换
 「谁提交都不会多出一片重排」。
 
-**它与 `Cargo.toml` 的 `rust-version = "1.95"` 并存、互不替代**，两个数不同不是矛盾：
+**它与 `Cargo.toml` 的 `rust-version` 并存、互不替代**，两个数不同不是矛盾：
 前者是给 cargo 解析器的 **MSRV 声明**（下界，管「多老的 rustc 也编得动」，钉不住任何一版），
-后者是给 rustup 的**指定**（定值，管「产出逐字节一致」）。**门禁跑 1.98.1，而这套代码
-声明自己 1.95 就编得动。** 逐条理由写在 `rust-toolchain.toml` 里。
+后者是给 rustup 的**指定**（定值，管「产出逐字节一致」）。**门禁跑的那一版比这套代码
+声明的下界新，这是有意的。** 逐条理由写在 `rust-toolchain.toml` 里。
 
 ### 排版归机器管
 
@@ -212,7 +203,7 @@ cargo xtask gate -j 4 --test-threads 4   # 两个开关各自也调得动
 
 `doc` 那一条递 `RUSTDOCFLAGS="-D warnings"`：**rustdoc 的告警一律当错**。四类最常撞上的是——多余的显式链接目标、解析不了的 intra-doc 链接、「既是函数又是模块」的歧义（用 `mod@` 或 `()` 消歧）、以及**公开文档链到私有条目**。最后那一类不许靠把私有条目改成公开来消警（那是改 API 面），把 ``[`X`]`` 改成不带链接的代码体 `` `X` `` 即可。
 
-这条硬红是票 `parking-3/02` 敲进去的：在那之前仓库里躺着 **67** 条 rustdoc 告警（`romcat-core` 58 / `romcat-gui` 8 / `romcat-cli` 1），而 `cargo doc` 的退出码**永远**是 0，「跑绿」只在字面上成立。
+这条硬红是票 `parking-3/02` 敲进去的：在那之前仓库里攒着几十条 rustdoc 告警（多少条、大头落在哪个包，记在 `xtask/src/gate.rs` 里 `DOC_ENV` 的文档上），而 `cargo doc` 的退出码**永远**是 0，「跑绿」只在字面上成立。
 
 ⚠️ **`--lib --bins` 也不能省。** `cargo doc` 默认**跳过与 lib 同名的 bin**（两者都往 `target/doc/<crate>/index.html` 里写，撞文件名）。`romcat-gui` 与 `xtask` 都是 lib 加一个同名 bin——少了这两个开关，`crates/gui/src/main.rs` 与 `xtask/src/main.rs` 一个字都没被 rustdoc 读过。代价是 cargo 会为那两个包各印一行 `warning: output filename collision`：那是 **cargo** 的告警不是 rustdoc 的，`-D warnings` 不把它当错。人自己跑 `cargo doc --open` 时不带 `--bins`，拿到的仍是正常的 lib 文档。`xtask/tests/gate.rs` 的 `与_lib_同名的那个_bin_里断一条链接照样红` 钉着这件事。
 
@@ -229,7 +220,7 @@ cargo run -p romcat-gui --features demo -- --demo          # 拿合成数据开�
 - **路径键一律 NFC 归一**，从磁盘读时用原始形态（ADR-0020）。这条被违反过四次。键的第一段是**根名**，拆键走 `path::split_root`。
 - **绝不直连 `datomatic.no-intro.org`**——一次畸形请求已在调研中导致永久 IP 封禁。Redump 走 `redump.info`。
 - **在线源赌的是你的账号与 IP**（ADR-0007）。默认限流，未识别的变体一个请求都不发。
-- `#![forbid(unsafe_code)]`，Rust 1.95，edition 2024。
+- `#![forbid(unsafe_code)]`。MSRV 与 edition 看根 `Cargo.toml`。
 
 ## 许可
 
