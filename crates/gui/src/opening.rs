@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use romcat_core::path;
 use romcat_core::report::{human_time, thousands};
 use romcat_core::site::Site;
-use romcat_core::workspace::{self, CatalogEntry};
+use romcat_core::workspace::{self, CatalogState, Listing};
 
 use crate::claim;
 use crate::font;
@@ -63,12 +63,12 @@ pub struct Screen {
     /// 不每帧现列：列一遍要把目录里每一份库都开一趟（[`workspace::catalogs`]），
     /// 那是几次到几十次磁盘往返，一秒钟做六十遍是拿开场那一屏当磁盘压力测试。
     /// 换了工作目录才重列——而那正是列表内容会变的唯一时机。
-    catalogs: Vec<CatalogEntry>,
+    catalogs: Listing,
     /// 换工作目录那个框里正打着的字。
     draft: String,
     /// 上一次开库没开成时说的那句话。
     ///
-    /// 与「这一份读不开」不是一回事：那一条跟着行走（[`CatalogEntry::facts`]），
+    /// 与「这一份读不开」不是一回事：那一条跟着行走（[`workspace::CatalogEntry`]），
     /// 这一条是**按下「打开」之后**才知道的（文件在列出来之后被挪走了、被别人占着）。
     error: Option<String>,
     /// **退回这一屏的原因**：上次开的那份打不开了，这是那句原话。
@@ -222,31 +222,43 @@ impl Screen {
     }
 
     /// 那张表：一份库一行。挑中了哪一份就交出它的文件路径。
+    ///
+    /// **三态各画各的**（[`Listing`]）：有库画那张表，空的画 [`NO_CATALOG`]，读不动画核心库
+    /// 那句原话。读不动与空的在屏上说同一句话的话，人会照着「还没有库」去建第二份库——
+    /// 而该做的是去修那个目录的权限（ADR-0021 那条修订）。
     fn catalogs_ui(&mut self, ui: &mut egui::Ui) -> Option<PathBuf> {
-        if self.catalogs.is_empty() {
-            ui.label(NO_CATALOG);
-            return None;
-        }
+        let 那几份 = match &self.catalogs {
+            Listing::Catalogs(那几份) => 那几份,
+            Listing::Empty => {
+                ui.label(NO_CATALOG);
+                return None;
+            }
+            // 核心库那句话原样画出来：哪个目录、系统怎么说的、下一步该去看它的权限。
+            Listing::Unreadable(为什么) => {
+                ui.colored_label(ui.visuals().error_fg_color, 为什么.to_string());
+                return None;
+            }
+        };
 
         let mut 要开的 = None;
-        for 一份 in &self.catalogs {
+        for 一份 in 那几份 {
             ui.horizontal(|ui| {
                 // **开不进去的那一份按钮按不下去，但那一行照样在。** 从列表里静静消失
                 // 才是最难查的那种错（ADR-0023）。
                 //
-                // 按的是 `openable` 而**不是**「那几个数读出来了没有」：开进去了、
+                // 按的是「开得进去」而**不是**「那几个数读出来了没有」：开进去了、
                 // 只是数没读回来的那一份照样开得进去，把两件事并成一件就会把它画成
                 // 一份坏库。
                 if ui
-                    .add_enabled(一份.openable, egui::Button::new("打开"))
+                    .add_enabled(一份.state.openable(), egui::Button::new("打开"))
                     .clicked()
                 {
                     要开的 = Some(一份.path.clone());
                 }
                 ui.vertical(|ui| {
                     ui.label(font::strong(&一份.name));
-                    match &一份.facts {
-                        Ok(facts) => {
+                    match &一份.state {
+                        CatalogState::Openable(Ok(facts)) => {
                             ui.weak(format!(
                                 "{} 个变体 · {}",
                                 thousands(facts.variants),
@@ -258,7 +270,9 @@ impl Screen {
                         }
                         // 核心库那句话原样画出来：它自己就说清了是哪个版本对哪个版本、
                         // 该怎么办。
-                        Err(说的) => {
+                        CatalogState::Openable(Err(说的))
+                        | CatalogState::SchemaMismatch { said: 说的, .. }
+                        | CatalogState::Broken { said: 说的 } => {
                             ui.colored_label(ui.visuals().warn_fg_color, 说的);
                         }
                     }

@@ -21,9 +21,134 @@ use std::path::Path;
 use romcat_core::catalog::{Catalog, CatalogError, EntryRecord, SCHEMA_VERSION, Verdict};
 use romcat_core::fs::{EntryKind, EntryMeta};
 use romcat_core::site::Site;
-use romcat_core::testing::{self, temp_dir};
+use romcat_core::testing::{self, Revoke, temp_dir};
 use romcat_core::verdict::{Anchor, Membership, Store};
 use romcat_core::workspace::{self, Slug};
+
+#[test]
+fn 建库之前问得出会被拦下的那几样而且一个字节都不碰() {
+    // 挂单 `Q524`：添加主库那条向导第一步从前自己判空白、自己问一句那个文件在不在，撞上
+    // 主库原名要到「开始扫描」那一下才由建库入口拦下。现在它问核心库这一处
+    // （`Catalog::refuse_create`）：名字收不收与建库问的是同一个判断，而且**问一遍一个字节
+    // 都不碰**——点「开始扫描」之前工作目录里一个文件都不多（词表**添加主库**）。
+    let 工作目录 = temp_dir("原名-建库之前");
+    let 新的 = |名字: &str| workspace::catalog_path(工作目录.path(), Slug::Named(名字));
+
+    Catalog::refuse_create(&新的("我的主库"), "我的主库").expect("空的工作目录里起一个新名字该收");
+    assert!(
+        !工作目录.path().join("catalog").exists(),
+        "问了一遍就把目录建出来了"
+    );
+
+    for 空的 in ["", "   "] {
+        let 错 = Catalog::refuse_create(&新的(空的), 空的).expect_err("空白名字该拦下");
+        assert!(
+            matches!(错, CatalogError::BlankLibraryName { .. }),
+            "报的不是「名字是空白」那一句：{错:?}"
+        );
+    }
+
+    // 撞上一份**改过名**的库的主库原名：主库标识没撞，撞的是原名。
+    let 原先那份 = 新的("起错了的名字");
+    drop(Catalog::create(&原先那份, "起错了的名字").expect("能建中立库"));
+    Catalog::open(&原先那份)
+        .expect("能再打开")
+        .set_library_name("我的主库")
+        .expect("改得了名");
+    let 错 = Catalog::refuse_create(&新的("我的主库"), "我的主库")
+        .expect_err("撞了同一个工作目录里另一份库的主库原名，该拦下");
+    assert!(
+        matches!(错, CatalogError::LibraryNameTaken { .. }),
+        "报的不是「这个名字已经有库在用」那一句：{错:?}"
+    );
+
+    // 反过来：原名没撞，**主库标识**撞了——拿那份库建库时的名字再建一份，折出来的是同一个文件。
+    let 错 =
+        Catalog::refuse_create(&原先那份, "起错了的名字").expect_err("那个文件已经在了，该拦下");
+    assert!(
+        matches!(错, CatalogError::AlreadyExists { .. }),
+        "报的不是「那份库已经在了」那一句：{错:?}"
+    );
+
+    assert_eq!(
+        workspace::catalogs(工作目录.path())
+            .entries()
+            .expect("列得开")
+            .len(),
+        1,
+        "问了几遍，工作目录里却多出了库"
+    );
+}
+
+#[test]
+fn 工作目录写不动时建库之前就说清是写不动() {
+    // 票 04：添加主库那条路正要往工作目录里写，目录写不动就该当场说清，而不是等到「开始扫描」
+    // 那一下才撞上一句「建不出来」。**问的时候一个字节都不写**：问的是系统答不答应写，
+    // 不是真去写一个试试。
+    //
+    // 造的是**真的**写不动的目录；造不出来（不是 Unix、或者跑测试的是 root）就如实跳过。
+    // Windows 上这一问本来就答不出来，交给建库那一下自己报错（挂单 `Q611`）。
+    let 工作目录 = temp_dir("原名-收了写权限");
+    let Some(_还回去) = testing::revoke(工作目录.path(), Revoke::Write) else {
+        return;
+    };
+    let 新的 = workspace::catalog_path(工作目录.path(), Slug::Named("我的主库"));
+
+    let 错 =
+        Catalog::refuse_create(&新的, "我的主库").expect_err("写不动的工作目录里建库，该当场拦下");
+
+    assert!(
+        matches!(错, CatalogError::DirUnwritable(_)),
+        "报的不是「写不动」那一句：{错:?}"
+    );
+    let 说的 = format!("{错}");
+    assert!(说的.contains("写不动"), "那句话没说是写不动：{说的}");
+    // 中立库住的那个目录还没建出来，拦住它的是最近那一级已经在的上级——工作目录本身。
+    assert!(
+        说的.contains(&romcat_core::path::display(工作目录.path())),
+        "那句话没说清是哪个目录写不动：{说的}"
+    );
+    // 「问一遍一个字节都不写」在写不动的目录上验不出来（本来就写不进去），由
+    // `建库之前问得出会被拦下的那几样而且一个字节都不碰` 在写得动的工作目录上钉着。
+}
+
+#[test]
+fn 中立库住的那个目录列不开时查不了重名就不收() {
+    // ADR-0021 那条修订：**列不开不是空的**。「这个名字撞没撞」要把同一个目录里每一份库
+    // 都看一眼，列不开就答不出来——从前当成「没撞上」放过去，那正是把读不动说成空的。
+    // 建库入口、建库之前那一问与改名是同一处判断，三个都钉（挂单 `Q612`）。
+    let 工作目录 = temp_dir("原名-收了读权限");
+    let 已有的 = workspace::catalog_path(工作目录.path(), Slug::Named("我的主库"));
+    drop(Catalog::create(&已有的, "我的主库").expect("能建中立库"));
+    // 改名那一路要一份**开着的**库：收权限之前开好，收完就开不了了。它比收权限那个守卫先声明，
+    // 于是守卫先丢、权限先还回去，这份库再关。
+    let 开着的 = Catalog::open(&已有的).expect("能再打开");
+    let 目录 = 已有的.parent().expect("有那个目录").to_path_buf();
+    let Some(_还回去) = testing::revoke(&目录, Revoke::Read) else {
+        return;
+    };
+    let 新的 = workspace::catalog_path(工作目录.path(), Slug::Named("另一个名字"));
+
+    for (哪一下, 结果) in [
+        (
+            "建库之前那一问",
+            Catalog::refuse_create(&新的, "另一个名字"),
+        ),
+        ("建库", Catalog::create(&新的, "另一个名字").map(drop)),
+        ("改名", 开着的.set_library_name("另一个名字")),
+    ] {
+        let 错 = 结果.expect_err("列不开的目录里查不了重名，该拦下");
+        assert!(
+            matches!(错, CatalogError::DirUnreadable(_)),
+            "{哪一下}报的不是「读不动」那一句：{错:?}"
+        );
+        let 说的 = format!("{错}");
+        assert!(
+            说的.contains("读不动"),
+            "{哪一下}那句话没说是读不动：{说的}"
+        );
+    }
+}
 
 #[test]
 fn 建库时原名落进元数据表再开一次读得回来() {
@@ -233,7 +358,7 @@ fn 已经建好的库改得了名开场屏与报告上印的是新名字() {
         .expect("改得了名");
 
     let 列出来的 = workspace::catalogs(工作目录.path());
-    let [一份] = 列出来的.as_slice() else {
+    let Ok([一份]) = 列出来的.entries() else {
         panic!("改名不该多出或少掉一份库：{列出来的:?}");
     };
     assert_eq!(一份.name, "改过的名字", "开场屏上印的还是旧名字");
@@ -321,6 +446,8 @@ fn 改名成空白时当场报错那一行与路径锚都没动() {
     let 列出来的 = workspace::catalogs(工作目录.path());
     assert_eq!(
         列出来的
+            .entries()
+            .expect("列得开")
             .iter()
             .map(|一份| 一份.name.as_str())
             .collect::<Vec<_>>(),
@@ -368,7 +495,10 @@ fn 同一个工作目录里主库原名重了建库当场报错不另建一份()
     );
     assert!(!另一个文件.exists(), "报了错却把另一份库建出来了");
     assert_eq!(
-        workspace::catalogs(工作目录.path()).len(),
+        workspace::catalogs(工作目录.path())
+            .entries()
+            .expect("列得开")
+            .len(),
         1,
         "报了错，开场屏上却多出一行"
     );

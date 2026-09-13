@@ -26,7 +26,6 @@
 use std::path::{Path, PathBuf};
 
 use romcat_core::catalog::Catalog;
-use romcat_core::path;
 use romcat_core::site::Site;
 use romcat_core::workspace::{self, Slug};
 
@@ -208,12 +207,7 @@ impl Wizard {
     /// 开场的一行，而开场没有删库那条路。更难受的是人接着重走一遍向导——第一步就会撞上
     /// 自己刚才留下的那个名字。
     fn claim(&mut self) -> Outcome {
-        let name = self.name.trim().to_string();
-        let slug = Slug::Named(&name);
-        match self
-            .在内存里试一遍()
-            .and_then(|()| self.开出那份现场(&slug))
-        {
+        match self.在内存里试一遍().and_then(|()| self.开出那份现场()) {
             Ok(site) => {
                 self.error = None;
                 Outcome::Done(Box::new(Claimed {
@@ -258,8 +252,9 @@ impl Wizard {
     /// **开出来那一步失手的话，刚建出来的那一份跟着一起收掉。** 那一步开的是**两份**
     /// 库（中立库刚建出来，而**沉淀库**是这个工作目录里共用的那一份，它可能压根开不动），
     /// 留下来的就是一份零根空库——它对人没有用处，却会永久占着开场的一行。
-    fn 开出那份现场(&self, slug: &Slug<'_>) -> Result<Site, String> {
-        let path = workspace::catalog_path(&self.workspace, *slug);
+    fn 开出那份现场(&self) -> Result<Site, String> {
+        let slug = self.slug();
+        let path = workspace::catalog_path(&self.workspace, slug);
         // 建完就把它放下：底下那一句要按同一个文件把**现场**整个开出来，一份连接够了。
         // **建得成就说明它本来不在**：那个文件已经在时 `create` 当场报错、一个字节不碰，
         // 于是底下那一步失手时收掉的只会是这一趟建出来的那一份。
@@ -273,28 +268,31 @@ impl Wizard {
         })
     }
 
-    /// 起名那一下：**重名在这一步就拦**。
+    /// 起名那一下：**收不收在这一步就说清**。
+    ///
+    /// 问的是核心库建库入口那一处（[`Catalog::refuse_create`]，挂单 `Q524`）：名字是不是空白、
+    /// 撞没撞这个工作目录里另一份库的主库原名、按这个名字折出来的那份库在不在、这个工作目录
+    /// 写不写得进——**问一遍一个字节都不写**（ADR-0023 的晚落盘）。折文件名走的是核心库那条
+    /// 算法本人（[`workspace::catalog_path`] + [`Slug::Named`]），与按下「开始扫描」那一下建出来
+    /// 的是同一个文件。向导自己另判一份的话，这一步拦得住的与建库时拦的迟早不是一回事（ADR-0024）。
     fn named(&mut self) {
-        let name = self.name.trim();
-        if name.is_empty() {
-            self.error = Some("先给这个主库起个名字。".to_string());
-            return;
-        }
-        // **靠工作目录里那个文件在不在，而不是等落盘时才发现**（ADR-0023）。折文件名
-        // 走的是核心库那条算法本人（[`workspace::catalog_path`] + [`Slug::Named`]），
-        // 与按下「开始扫描」那一下建出来的是同一个文件——两处各折一遍的话，拦得住的
-        // 与建出来的就不是一回事了。
-        let 那份 = workspace::catalog_path(&self.workspace, Slug::Named(name));
-        if 那份.exists() {
-            self.error = Some(format!(
-                "这个工作目录里已经有一份叫「{name}」的主库了（{}）。\
-                 换个名字，或者回去把那一份开进来。",
-                path::display(&那份),
-            ));
+        let slug = self.slug();
+        let 那份 = workspace::catalog_path(&self.workspace, slug);
+        if let Err(error) = Catalog::refuse_create(&那份, &slug.display_name()) {
+            // 拦下时说的是**核心库那句原话**，一个字都不改写（ADR-0005）。
+            self.error = Some(format!("{error}"));
             return;
         }
         self.error = None;
         self.asking = Asking::Root;
+    }
+
+    /// 人起的这个名字认的是哪一份库：框里那串字去掉两头空白，按名字折（[`Slug::Named`]）。
+    ///
+    /// **起名那一下与「开始扫描」那一下问的都是这一处**：两处各折一遍的话，第一步查过的
+    /// 与真建出来的迟早不是同一个文件。
+    fn slug(&self) -> Slug<'_> {
+        Slug::Named(self.name.trim())
     }
 }
 

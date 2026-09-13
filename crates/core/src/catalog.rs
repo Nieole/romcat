@@ -371,6 +371,14 @@ pub enum CatalogError {
         /// 已经在用这个名字的那份中立库。
         other: String,
     },
+    /// 中立库住的那个目录**读不动**：列不开，于是同一个目录里有哪几份库、这个名字撞没撞
+    /// 都答不出来。**答不出来就不收**——列不开不是空的（ADR-0021 那条修订）。
+    #[error(transparent)]
+    DirUnreadable(#[from] workspace::DirUnreadable),
+    /// 中立库要建进的那个目录**写不动**（[`workspace::DirUnwritable`]）。建库之前就问得出来
+    /// （[`Catalog::refuse_create`]），不必等到真去建的那一下撞上一句「建不出来」。
+    #[error(transparent)]
+    DirUnwritable(#[from] workspace::DirUnwritable),
 }
 
 /// **空白不是名字**：一个主库原名是不是空的、或者全是空白字符。
@@ -381,13 +389,16 @@ fn is_blank_name(name: &str) -> bool {
     name.trim().is_empty()
 }
 
-/// **这个主库原名收不收**：建库（[`Catalog::create`]）与改名（[`Catalog::set_library_name`]）
-/// 落名字之前都问这一处，拒收时交出那句话。两样不收：
+/// **这个主库原名收不收**：建库（[`Catalog::create`]）、建库之前那一问
+/// （[`Catalog::refuse_create`]）与改名（[`Catalog::set_library_name`]）落名字之前都问这一处，
+/// 拒收时交出那句话。三样不收：
 ///
 /// - **空白**（挂单 `Q469`）：空白不是名字。
 /// - **同一个工作目录里另一份库已经叫这个名字**（挂单 `Q472`）：改名只换主库原名、找库
 ///   仍认主库标识，只查标识撞没撞的话，改过名的那份与拿新名字另建的那份会在开场屏上
 ///   印成两行同名。「撞没撞」怎么比只在 `workspace` 那一处（[`workspace::namesake`]）。
+/// - **那个目录列不开**：撞没撞答不出来。当成「没撞上」放过去，就是把读不动说成了空的
+///   （ADR-0021 那条修订，挂单 `Q612`）。
 ///
 /// `file` 是要落这个名字的那份中立库文件（还没建出来也行），它自己不算撞；只活在内存里的
 /// 那份没有工作目录，只查空白。`shown` 是报错时说的那份库（[`Catalog::location`] 那一串）。
@@ -397,7 +408,9 @@ fn refuse_library_name(name: &str, file: Option<&Path>, shown: &str) -> Result<(
             path: shown.to_string(),
         });
     }
-    if let Some(other) = file.and_then(|file| workspace::namesake_beside(file, name)) {
+    if let Some(file) = file
+        && let Some(other) = workspace::namesake_beside(file, name)?
+    {
         return Err(CatalogError::LibraryNameTaken {
             path: shown.to_string(),
             name: name.to_string(),
@@ -530,6 +543,29 @@ impl Catalog {
             }
         })?;
         Self::prepare(conn, Some(path.to_path_buf()), display, Birth::Opened)
+    }
+
+    /// **建这份库之前、一个字节都不碰就说得出会被拦下的那几样。**
+    ///
+    /// 添加主库那条向导第一步问的就是它（挂单 `Q524`）：点「开始扫描」之前工作目录里一个
+    /// 文件都不写，而人该在填完名字的那一刻就知道这个名字收不收、这个工作目录建不建得进。
+    ///
+    /// # Errors
+    /// 名字收不收与 [`Self::create`] 问的是同一处判断：空白（[`CatalogError::BlankLibraryName`]）、
+    /// 撞了同一个目录里另一份库的主库原名（[`CatalogError::LibraryNameTaken`]）、那个目录列不开、
+    /// 查不了重名（[`CatalogError::DirUnreadable`]）。另两样是 [`Self::create`] 碰盘时才撞得上的，
+    /// 这里先问一句：那个文件已经在了（[`CatalogError::AlreadyExists`]）、那个目录写不动
+    /// （[`CatalogError::DirUnwritable`]）。
+    pub fn refuse_create(path: &Path, name: &str) -> Result<(), CatalogError> {
+        let display = path::display(path);
+        refuse_library_name(name, Some(path), &display)?;
+        // 这一问只是**先说一声**：真去建的那一下照旧用 `create_new` 当场核，中间那一瞬别人
+        // 建出来的那一份不会被当成自己的。问不出在不在（`Err`）时不在这儿下结论：那是上级
+        // 目录进不去，底下那一问会把它答成写不动。
+        if matches!(path.try_exists(), Ok(true)) {
+            return Err(CatalogError::AlreadyExists { path: display });
+        }
+        workspace::refuse_unwritable(workspace::dir_of(path)).map_err(CatalogError::from)
     }
 
     /// **建一份新的中立库**，建库那一趟把这份主库的**主库原名**记下。
@@ -843,7 +879,8 @@ impl Catalog {
     ///
     /// # Errors
     /// 名字是空白时返回 [`CatalogError::BlankLibraryName`]，同一个工作目录里另一份库已经叫
-    /// 这个名字时返回 [`CatalogError::LibraryNameTaken`]；写库失败时返回错误——
+    /// 这个名字时返回 [`CatalogError::LibraryNameTaken`]，这份库住的那个目录列不开、查不了
+    /// 重名时返回 [`CatalogError::DirUnreadable`]；写库失败时返回错误——
     /// 只读地开的那一份（[`Self::open_read_only`]）写不进去。
     pub fn set_library_name(&self, name: &str) -> Result<(), CatalogError> {
         refuse_library_name(name, self.file.as_deref(), &self.path)?;

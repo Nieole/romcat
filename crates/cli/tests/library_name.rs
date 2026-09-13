@@ -326,7 +326,10 @@ fn 改过名之后拿新名字扫描或出报告都说清是哪一份而不另�
         "报了错却按新名字另建了一份"
     );
     assert_eq!(
-        workspace::catalogs(workspace.path()).len(),
+        workspace::catalogs(workspace.path())
+            .entries()
+            .expect("列得开")
+            .len(),
         1,
         "报了错，开场屏上却多出一行"
     );
@@ -361,7 +364,10 @@ fn 扫描时给空白名字当场报错一份库都不建() {
         let 说明 = String::from_utf8_lossy(&出错.stderr);
         assert!(说明.contains("空白"), "没说清是名字空白：{说明}");
         assert!(
-            workspace::catalogs(workspace.path()).is_empty(),
+            matches!(
+                workspace::catalogs(workspace.path()),
+                workspace::Listing::Empty
+            ),
             "空白名字报了错，工作目录里却建出了库"
         );
     }

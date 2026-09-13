@@ -6016,9 +6016,14 @@ fn refuse_writing_into_library(root: &Path, target: &Path) -> Result<(), String>
 ///
 /// **开不动的那几份跳过**：它们的根读不出来，而这道守卫宁可少挡一次，也不能挡错一次
 /// （把人往别处写的合法输出拦下来）。用户机器上是三份库（ADR-0023），这一趟三次只读打开。
+/// **中立库住的那个目录读不动时同一个口径**：一份库的根都读不出来，一个都不比。
 fn refuse_writing_into_any_library(workspace: &Path, target: &Path) -> Result<(), String> {
-    for entry in romcat_core::workspace::catalogs(workspace) {
-        if !entry.openable {
+    let listing = romcat_core::workspace::catalogs(workspace);
+    let Ok(entries) = listing.entries() else {
+        return Ok(());
+    };
+    for entry in entries {
+        if !entry.state.openable() {
             continue;
         }
         let Ok(catalog) = Catalog::open(&entry.path) else {
