@@ -1,0 +1,125 @@
+# romcat 界面的颜色与尺寸参数（令牌）
+#
+# 这份文件是设计稿与 egui 实现共用的唯一来源：
+# - 设计稿 prototype.html 顶部的 CSS 变量必须与这里一致（check_tokens.py 逐项比对）；
+# - egui 那边的两套 Visuals、字号、间距、圆角照这里取值，门禁里用一条测试逐项比对。
+# 改颜色只改这里，再同步两边；两边各改各的，门禁会报红。
+#
+# 颜色一律写 #RRGGBB（半透明的写 #RRGGBBAA）。键名与 CSS 变量同名（去掉前缀 --）。
+
+version = 1
+
+# ── 浅色主题 ──────────────────────────────────────────────
+[color.light]
+ground      = "#E8ECF1"   # 窗口外的底色（设计稿页面背景，不进 egui）
+win         = "#F6F7F9"   # 窗口底色：侧栏、页面头
+panel       = "#FFFFFF"   # 面板、卡片、对话框
+panel-2     = "#F0F2F6"   # 面板里的次级底色：表头、分组头
+sunken      = "#E5E9EF"   # 凹陷区：进度条槽、代码块
+ink         = "#161A21"   # 正文
+ink-2       = "#465063"   # 次要文字
+ink-3       = "#677185"   # 说明文字（在 panel 上对比度 ≥ 4.5）
+ink-4       = "#A3AAB7"   # 占位、禁用
+line        = "#DCE1E8"   # 1 像素描边、分隔线
+line-2      = "#C6CDD9"   # 输入框描边、强一级的分隔
+accent      = "#3E4EC6"   # 强调色：主按钮、选中、焦点
+accent-hover = "#3240AE"
+accent-soft = "#E4E7FA"   # 选中行、选中分面的底色
+accent-ink  = "#2D3AA3"   # 强调色上的文字 / 强调色的文字形态
+on-accent   = "#FFFFFF"   # 主按钮上的文字
+hi          = "#0A785C"   # 高置信 / 成功
+hi-soft     = "#DBF0E8"
+mid         = "#985F00"   # 中置信 / 提醒
+mid-soft    = "#F7EAD3"
+lo          = "#B0392F"   # 低置信 / 错误 / 危险操作
+lo-soft     = "#F9E1DE"
+none        = "#6E7788"   # 没有候选 / 中性
+none-soft   = "#E6E9EE"
+scrim       = "#0C0F158C" # 对话框遮罩（rgba(12,15,21,.55)）
+
+# ── 深色主题 ──────────────────────────────────────────────
+[color.dark]
+ground      = "#07090D"
+win         = "#101318"
+panel       = "#161A21"
+panel-2     = "#1B2028"
+sunken      = "#0C0F14"
+ink         = "#E5E9F0"
+ink-2       = "#A8B1BF"
+ink-3       = "#858F9E"
+ink-4       = "#4D5563"
+line        = "#242A34"
+line-2      = "#323A47"
+accent      = "#8190F6"
+accent-hover = "#9AA6F8"
+accent-soft = "#1F2547"
+accent-ink  = "#A7B1FA"
+on-accent   = "#0D1030"
+hi          = "#3FBF9C"
+hi-soft     = "#112E27"
+mid         = "#DBA243"
+mid-soft    = "#302415"
+lo          = "#EC7C70"
+lo-soft     = "#371E1B"
+none        = "#7B8595"
+none-soft   = "#1F242D"
+scrim       = "#00000099" # rgba(0,0,0,.6)
+
+# ── 平台色：两套主题共用；卡片平台标签、字卡底色、平台色块取这里 ──
+[color.platform]
+FC  = "#C23B30"
+SFC = "#6A5ACD"
+GB  = "#7D9A1E"
+GBC = "#D0632B"
+GBA = "#4453C4"
+NDS = "#6F7A8C"
+PSP = "#3B4252"
+PSV = "#2A6BD1"
+PS1 = "#565C6B"
+MD  = "#2B2F3A"
+PS2 = "#2F4DA0"
+NGC = "#6B4FB8"
+other = "#555555"         # 表里没有的平台
+
+# ── 尺寸（逻辑像素，egui 的 points） ──────────────────────
+[radius]
+small  = 4    # 分面、标签、小按钮
+medium = 6    # 按钮、输入框、列表项
+large  = 10   # 面板、卡片、对话框
+
+[font]
+sans = ["PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Noto Sans SC"]   # egui 打包 Noto Sans SC
+mono = ["SF Mono", "JetBrains Mono", "Cascadia Mono", "Menlo", "Consolas"]           # egui 打包一份只含拉丁字符的等宽字体
+# 字体预算（裁定 2026-09-13）：只打包一份**拉丁与数字**的粗体，中文一律常规字重。
+# 于是「粗体」只对拉丁字母和数字生效，中文的层次靠字号、颜色和间距拉开；
+# egui 侧不要开字重合成（font_synthesis 关掉），否则会画出假粗体。
+bold-coverage = "latin-digits-only"
+weight-regular = 400
+weight-strong  = 600
+size-caption = 11     # 角标、分组标题
+size-small   = 12     # 说明文字、表格副行
+size-body    = 13     # 正文、按钮
+size-title   = 15     # 卡片标题、对话框标题
+size-page    = 18     # 页面标题
+size-hero    = 24     # 作品详情页的大标题
+line-height  = 1.55
+
+[space]
+steps = [4, 8, 12, 16, 20]   # 间距只从这几档里取
+panel-padding  = [11, 14]    # 面板标题栏内边距（上下, 左右）
+dialog-padding = [20, 22]    # 对话框内容区内边距（上下, 左右）
+cell-padding   = [8, 10]     # 表格单元格内边距
+
+[layout]
+rail-width        = 196   # 左侧导航展开宽度
+rail-collapsed    = 68    # 左侧导航收起后的宽度
+strip-width       = 36    # 面板折叠后的窄条
+filter-pane-width = 232   # 浏览页筛选栏
+detail-pane-width = 296   # 浏览页侧边详情
+table-row         = 46    # 作品表格行高（等高行）
+table-row-cover   = 58    # 打开「在每行开头显示封面」后的行高
+tier-bar          = 3     # 置信度色条宽度
+thumb-list        = [32, 43] # 列表行首封面缩略图（宽, 高）
+card-cover-ratio  = 0.75  # 卡片封面宽高比 3:4
+statusbar         = 30    # 底部状态栏高度
+dialog-width      = [520, 620, 720, 840]   # 对话框只用这几档宽度
