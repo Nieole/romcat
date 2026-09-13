@@ -634,7 +634,7 @@ fn 扩展长度形式的目标落在主库里照样拦得住() {
     let 话 = sync::prepare::refuse_target_in_library(&catalog, &[], Path::new(r"D:\Game\子库"))
         .expect_err("该被拒");
     assert!(话.contains("主库"), "哪个根拦下的要说出来：{话}");
-    assert!(话.contains("ADR-0004"), "红线的出处要说出来：{话}");
+    assert!(话.contains("主库只读"), "红线要说出来：{话}");
 }
 
 #[test]

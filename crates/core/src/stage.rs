@@ -128,7 +128,7 @@ impl Stage {
     pub fn label(self) -> &'static str {
         match self {
             Self::Identify => "识别",
-            Self::FoldTitles => "折标题",
+            Self::FoldTitles => "整理标题",
             Self::Export => "导出",
         }
     }
@@ -179,9 +179,9 @@ impl StageRow {
                 // 这两句话是那张变更计数表真被认下来之后这一行该说的话，钉在
                 // `crates/core/tests/stage.rs` 上：换度量的人不必再想一遍措辞，
                 // 也不会顺手写成「N 个作品还没折标题」——那是另一件事。
-                Stage::FoldTitles if *left == 0 => "标题集合都是重折过的".to_string(),
+                Stage::FoldTitles if *left == 0 => "标题集合都整理过了".to_string(),
                 Stage::FoldTitles => {
-                    format!("{} 个作品的标题集合变过、还没重折", thousands(*left))
+                    format!("{} 个作品的标题集合变过、还没重新整理", thousands(*left))
                 }
                 // **导出眼下也折不出这一支**——同上，它走的是退路（见 [`Stage::Export`]）。
                 // 这两句话钉在 `crates/core/tests/stage.rs` 上，理由与折标题那两句一样：
@@ -286,7 +286,7 @@ fn fold_titles_row(catalog: &Catalog) -> StageRow {
     let (at, why) = match catalog.titles_folded_at() {
         Ok(at) => (
             at,
-            "要把整份标题集合重折一遍才比得出来，而那一趟正是这道工序自己".to_string(),
+            "要把整份标题集合重新整理一遍才比得出来，而那一趟正是这道工序自己".to_string(),
         ),
         Err(error) => (None, format!("中立库读不动：{error}")),
     };

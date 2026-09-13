@@ -2123,7 +2123,7 @@ fn 多选之后按一下星_那一批当场收藏而且收藏是筛得出来的(
     let 回执 = app.browse().notice().expect("按完该有一句回执").to_string();
     assert!(回执.contains("收藏"), "{回执}");
     assert!(
-        回执.contains("本机的路径") || 回执.contains("全部钉在**内容**上"),
+        回执.contains("本机的路径") || 回执.contains("全部钉在内容上"),
         "回执里没说清锚钉在哪：{回执}",
     );
 
@@ -2414,7 +2414,7 @@ fn 删掉一条刮削来的叫法之后屏上分得出压掉了与没采到() {
         app.browse()
             .notice()
             .expect("有回执")
-            .contains("重折不会把它折回来"),
+            .contains("重新整理标题也不会把它加回来"),
         "回执要说清「删」从此算数：{:?}",
         app.browse().notice(),
     );
@@ -2598,8 +2598,8 @@ fn 撤掉一条标题压制之后就地摆着折标题的入口_排的是与库�
     );
     assert!(屏上.contains("撤掉了对"), "那句回执没了：\n{屏上}",);
     assert!(
-        屏上.lines().any(|line| line.trim() == "折标题"),
-        "撤掉压制之后就地没有折标题那个入口：\n{屏上}",
+        屏上.lines().any(|line| line.trim() == "整理标题"),
+        "撤掉压制之后就地没有整理标题那个入口：\n{屏上}",
     );
 
     // ── 二、点它排的是**与库屏工序段那一行完全同一趟**：只有 `Section::start` 排出去
@@ -2614,11 +2614,11 @@ fn 撤掉一条标题压制之后就地摆着折标题的入口_排的是与库�
         app.roots()
             .stages()
             .notice()
-            .is_some_and(|说的| 说的.starts_with("折标题 跑完了")),
+            .is_some_and(|说的| 说的.starts_with("整理标题 跑完了")),
         "库屏工序段没认领这一趟：{:?} / {:?}",
         app.roots().stages().notice(),
         app.roots().stages().error(),
     );
     // **在任务台上看不出区别**：那一行的名字就是这道工序的名字。
-    assert_eq!(app.tasks().history()[0].name, "折标题");
+    assert_eq!(app.tasks().history()[0].name, "整理标题");
 }

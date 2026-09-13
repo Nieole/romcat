@@ -69,21 +69,21 @@ pub enum Refusal {
     /// 指向 No-Intro 的 DAT 生成站点。
     #[error(
         "拒绝连 datomatic.no-intro.org：一次参数畸形的请求就会触发永久 IP 封禁，\
-         解封要发邮件求人（ADR-0007）。No-Intro 的 DAT 走 GitHub 每日镜像。"
+         解封要发邮件求人。No-Intro 的 DAT 走 GitHub 每日镜像。"
     )]
     Datomatic,
     /// 指向 Redump 的冻结旧镜像。
     #[error(
         "拒绝连 Redump 的冻结镜像：redump.org 自 2026-06-20 起不再更新，\
          只有 60 个系统（现站 106 个），且会以「系统存在但 No discs found」误导。\
-         走 redump.info（ADR-0007 修订段）。"
+         走 redump.info。"
     )]
     FrozenRedump,
     /// 从那个每日镜像里取 Redump 的数据。
     #[error(
         "拒绝从 {repo} 取 {asset}：那个生成器的 redump.py 硬编码了已冻结的 redump.org，\
          产出的 redump.xml / redump.zip 是 60 个系统的旧数据（现站 106 个）。\
-         Redump 走 redump.info（ADR-0007 修订段）。"
+         Redump 走 redump.info。"
     )]
     MirrorRedumpAsset {
         /// 哪个仓库。

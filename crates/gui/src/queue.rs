@@ -205,7 +205,7 @@ fn identify_shortcut(ui: &mut egui::Ui) -> bool {
     ui.button("跑识别")
         .on_hover_text(
             "排到任务台上跑，期间照常用别的屏；按得停。\
-             **与库屏工序段那一行同一趟活**——跑完这一屏自己重新列过。",
+             与库屏上「识别」那一行是同一趟——跑完这一屏自己重新列过。",
         )
         .clicked()
 }
@@ -968,7 +968,7 @@ impl Screen {
                             .selectable_label(active, format!("{}{mark}", order.label()))
                             .on_hover_text(
                                 "点它换成按这一列排；再点一下翻方向。队列本来就整份在内存里，\
-                                 这一下**一次库都不读**。",
+                                 这一下一次库都不读。",
                             )
                             .clicked()
                         {

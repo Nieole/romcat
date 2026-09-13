@@ -1514,14 +1514,19 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
     }
 
     if outcome.interrupted {
-        if let Some(path) = &outcome.checkpoint_path {
-            eprintln!(
-                "扫描被中断，进度已存在 {}。加 --resume 接着扫。",
-                path.display()
-            );
-        } else {
-            eprintln!("扫描被中断，且没有写断点，下次要从头扫。");
-        }
+        // 收场那个词由 `Ending::render` 落：这一句与任务台历史那一行说的是同一个词。
+        let left_behind = match &outcome.checkpoint_path {
+            Some(path) => format!("进度已存在 {}。加 --resume 接着扫。", path.display()),
+            None => "没有写断点，下次要从头扫。".to_string(),
+        };
+        eprintln!(
+            "扫描{}",
+            romcat_core::task::Ending::Halfway {
+                product: (),
+                left_behind,
+            }
+            .render()
+        );
         // 130 是被 SIGINT 打断的惯例退出码。
         return ExitCode::from(130);
     }
@@ -1956,9 +1961,15 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
     // 100.0%」而库里躺着 5 个——那正是这一票要消掉的东西。
     if outcome.interrupted {
         eprintln!(
-            "⚠ 这一趟识别被中断了，下面这份报告只是**半份**：没轮到的那些变体\
-             在报告里记作「还没识别」，它们在「全部变体里」那个分母中。\
-             已经算完的那部分留在中立库里，重跑会从头算一遍。"
+            "⚠ 识别{}",
+            romcat_core::task::Ending::Halfway {
+                product: (),
+                left_behind: "下面这份报告只是半份——没轮到的那些变体\
+                              在报告里记作「还没识别」，它们在「全部变体里」那个分母中。\
+                              已经算完的那部分留在中立库里，重跑会从头算一遍。"
+                    .to_string(),
+            }
+            .render()
         );
     }
     if !args.quiet {
@@ -2513,7 +2524,14 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
         });
     }
     if outcome.interrupted {
-        eprintln!("这一趟被中断了，已经采完的那部分留在中立库里，重跑会接着采。");
+        eprintln!(
+            "刮削{}",
+            romcat_core::task::Ending::Halfway {
+                product: (),
+                left_behind: "已经采完的那部分留在中立库里，重跑会接着采。".to_string(),
+            }
+            .render()
+        );
         return ExitCode::from(130);
     }
     ExitCode::SUCCESS
@@ -2569,7 +2587,7 @@ fn run_titles(args: &TitlesArgs) -> ExitCode {
         let _ = stdout.flush();
     }
     eprintln!(
-        "折标题用了 {:.1} 秒，一个字节都没读主库。{} 个作品的标题集合里有中文叫法。",
+        "整理标题用了 {:.1} 秒，一个字节都没读主库。{} 个作品的标题集合里有中文叫法。",
         started.elapsed().as_secs_f64(),
         thousands(report.chinese_works),
     );
@@ -4998,9 +5016,10 @@ fn run_zh_sync(args: &ZhSyncArgs, cancel: &CancelToken) -> ExitCode {
         // 从前只有后一个出口停得下来，所以这句话从前只说了后者。
         Err(zh::sync::SyncError::Halted(_)) => {
             eprintln!(
-                "这一趟被中断了。停下的地方是干净的：库里一个字都没写，缓存里也没留下\
-                 半截原件——手上那份索引原样可用。重跑会从头来一遍；**下完了的那份原件\
-                 还在缓存里的话不会再下一次**（文件名里带着版本，同名就是同一版）。"
+                "取中文数据源{}。停下的地方是干净的：库里一个字都没写，缓存里也没留下\
+                 半截原件——手上那份索引原样可用。重跑会从头来一遍；下完了的那份原件\
+                 还在缓存里的话不会再下一次（文件名里带着版本，同名就是同一版）。",
+                romcat_core::task::Ending::<()>::Stopped.render(),
             );
             return ExitCode::from(130);
         }
@@ -5422,7 +5441,7 @@ fn run_zh_judge(args: &ZhJudgeArgs) -> ExitCode {
         if judged.cleared > 0 {
             // **标题集合是跟着折过的**，不必再叫人去跑一次 `romcat titles`。
             println!(
-                "  标题集合跟着重折了一遍，退出去 {} 条叫法——详情面板与导出的**显示标题**\
+                "  标题集合跟着重新整理了一遍，退出去 {} 条叫法——详情面板与导出的**显示标题**\
                  这一刻就不会再挑到这条条目了。",
                 thousands(judged.untitled),
             );
@@ -5457,7 +5476,10 @@ fn run_zh_find(args: &ZhFindArgs, cancel: &CancelToken) -> ExitCode {
     // 就成了「中文索引是空的，先跑一次 zh sync」——而数取过，只是这一趟被按停了。
     // 退出码走中断那一档（130），与 `zh sync` 同一条口径。
     if cancel.is_cancelled() {
-        eprintln!("这一趟被中断了。库里那份索引原样等着重建，什么都没丢。");
+        eprintln!(
+            "重建中文索引{}。库里那份索引原样等着重建，什么都没丢。",
+            romcat_core::task::Ending::<()>::Stopped.render(),
+        );
         return ExitCode::from(130);
     }
     let index = match store.load() {

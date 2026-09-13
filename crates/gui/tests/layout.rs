@@ -591,3 +591,30 @@ fn 五屏上按一下跳格键焦点都落得下去() {
         );
     }
 }
+
+#[test]
+fn 五屏上画出来的字里没有星号也没有文档编号() {
+    // 屏上的每一句都得是维护者用得上的话（票 `gui-looks-like-the-design/03`）：
+    // egui 不认 markdown，`**` 原样印出来；ADR 编号是写给开发者的出处。
+    for screen in View::ALL {
+        let mut app = if screen == View::Queue {
+            待确认(&工作目录(&format!("文案-{screen:?}")))
+        } else {
+            浏览(&工作目录(&format!("文案-{screen:?}")))
+        };
+        app.show_view(screen);
+        let ctx = headless::context();
+        跑(&ctx, &mut app, 2);
+        let 屏上 = 画出来的字(&跑一帧(&ctx, &mut app, Vec::new()));
+        assert!(
+            !屏上.trim().is_empty(),
+            "{screen:?} 上一个字都没画，这条什么都没验",
+        );
+        for 不该有 in ["**", "ADR-"] {
+            assert!(
+                !屏上.contains(不该有),
+                "{screen:?} 上画出了「{不该有}」：\n{屏上}",
+            );
+        }
+    }
+}

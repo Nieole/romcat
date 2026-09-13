@@ -34,7 +34,7 @@ use crate::font;
 use crate::roots::{ROOT_HINT, ROOT_NAME_HINT};
 
 /// 起名那一步框里的提示字。
-const NAME_HINT: &str = "主库名，例如「主库」";
+const NAME_HINT: &str = "主库原名，例如「主库」";
 
 /// 向导这会儿问的是哪一样。
 ///
@@ -118,7 +118,7 @@ impl Wizard {
 
     /// 画一帧。
     pub fn ui(&mut self, ui: &mut egui::Ui) -> Outcome {
-        ui.label(font::strong("认领一个新主库"));
+        ui.label(font::strong("添加主库"));
         let out = match self.asking {
             Asking::Name => {
                 self.name_ui(ui);

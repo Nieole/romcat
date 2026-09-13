@@ -426,7 +426,7 @@ fn read_nes(facts: &mut Facts, head: &[u8]) -> bool {
     let trainer = bytes[6] & 0x04 != 0;
     facts.note = Some(format!(
         "{kind}：PRG {} KiB、CHR {} KiB、mapper {mapper}{}。\
-         **iNES 格式本身没有任何编号与校验和**（NESdev 全页检索不出 CRC / checksum / serial），\
+         iNES 格式本身没有任何编号与校验和（NESdev 全页检索不出 CRC / checksum / serial），\
          这一层给不出可以撞 DAT 的编号——FC 只能靠哈希",
         u32::from(bytes[4]) * 16,
         u32::from(bytes[5]) * 8,
@@ -726,7 +726,7 @@ fn read_snes(facts: &mut Facts, head: &[u8]) -> bool {
     }
     if facts.ids.is_empty() {
         facts.note = Some(
-            "SFC 内部头读出来了，但**没有扩展头**（0x7FDA / 0xFFDA 不是 33h）——\
+            "SFC 内部头读出来了，但没有扩展头（0x7FDA / 0xFFDA 不是 33h）——\
              老卡没有 Game Code 这样东西，这一层给不出可以撞库的编号"
                 .to_string(),
         );

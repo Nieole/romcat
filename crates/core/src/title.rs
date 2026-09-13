@@ -675,7 +675,7 @@ fn chinese_release(
     {
         "语言标记组里有中文"
     } else if marks.is_some_and(|marks| marks.contains(&ChineseMark::Official)) {
-        "撞上的那条候选带**官中**记号"
+        "撞上的那条候选带官中记号"
     } else {
         return None;
     };
@@ -790,7 +790,7 @@ fn classify(
             .unwrap_or("地区没记出来");
         let evidence = match chinese.seam {
             Seam::OwnRelease => format!(
-                "它基于的那条发行版就是**官中那一条**（地区 {region}、序列号 {}，\
+                "它基于的那条发行版就是官中那一条（地区 {region}、序列号 {}，\
                  {}）——官中在这一侧是独立一条发行版，中文名归到那一条上",
                 release
                     .and_then(|r| r.serial.as_deref())
@@ -799,7 +799,7 @@ fn classify(
             ),
             Seam::LanguageField => format!(
                 "它基于的那条发行版地区是 {region}、而{}（{}）——\
-                 中文在这一侧是**同一条发行版的语言属性**，不另成发行版",
+                 中文在这一侧是同一条发行版的语言属性，不另成发行版",
                 chinese.declared_by,
                 release
                     .and_then(|r| r.languages.as_deref())
@@ -942,7 +942,7 @@ pub enum FoldTitlesError {
     ///
     /// **这一句想怎么写就怎么写。** 任务台分「停了」与「失败」看的是 [`Cutoff`]
     /// 落在哪一支（底下那个 `From` 折的），不是这句话说了什么。
-    #[error("折标题按停了：清掉再写回还没开始，中立库一个字节都没动。")]
+    #[error("整理标题已取消：清掉再写回还没开始，中立库一个字节都没动。")]
     Halted(#[from] Halted),
 }
 

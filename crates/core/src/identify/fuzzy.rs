@@ -334,7 +334,7 @@ fn candidate_of(
     evidence.push_str(&one.evidence(dump, picked.label, &picked.text));
     if !strong {
         evidence.push_str(
-            "；**两道交叉校验没有都对上**，所以只到低置信——平台与年份任何一边说不出，\
+            "；两道交叉校验没有都对上，所以只到低置信——平台与年份任何一边说不出，\
              同名的续作与同系列的移植就分不开",
         );
     }

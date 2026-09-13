@@ -406,13 +406,13 @@ pub fn decide(
         // 上是自相矛盾的理由——那一份其实是当初**穿不透**（要密码、结构读不下去），
         // 而穿不透与「不是那个格式」在这个项目里从来是分开的两件事（`CONTEXT.md`）。
         let why = if crate::container::ContainerKind::for_path(Path::new(key)).is_some() {
-            "这是**透明容器**，可中立库里没有它的内部构成：当初**穿不透**（要密码、\
+            "这是透明容器，可中立库里没有它的内部构成：当初穿不透（要密码、\
              结构读不下去），或者那一趟压根没读它（zst 要 `romcat scan --zst`）。\
              内部构成读不出来，于是转不了——`romcat report` 说得出它卡在哪一类"
                 .to_string()
         } else {
             format!(
-                "`.{extension}` 不是这一版认得的**透明容器**（只认 zip、7z、rar 与 zst），\
+                "`.{extension}` 不是这一版认得的透明容器（只认 zip、7z、rar 与 zst），\
                  转换要外部工具，工具做不到"
             )
         };
@@ -428,7 +428,7 @@ pub fn decide(
         return Decision::Unsupported {
             want,
             why: "rar 的内部构成读得出来，字节取不出来：解压要 UnRAR 的算法，\
-                  而这个项目刻意没有引进它（许可传染，ADR-0014）。\
+                  而这个项目刻意没有引进它（许可传染）。\
                   要转的话先用外部工具解一次"
                 .to_string(),
         };
@@ -825,7 +825,7 @@ impl Roster {
                 if anything && !accepts_set.is_empty() {
                     return Err(invalid(format!(
                         "平台矩阵「{}」有一条同时写了 `*` 与具体扩展名。\
-                         `*` 是**不作声称**，与「吃这几样」是两件事，混在一起说不清",
+                         `*` 是不作声称，与「吃这几样」是两件事，混在一起说不清",
                         raw_matrix.name
                     )));
                 }

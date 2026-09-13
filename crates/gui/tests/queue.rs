@@ -1934,3 +1934,20 @@ fn 换排序之后换选择器不必重排而且光标还停在同一条上() {
         );
     }
 }
+
+#[test]
+fn 停在中文离线源那一条上依据里没有星号也没有文档编号() {
+    // 屏上的每一句都得是维护者用得上的话（票 `gui-looks-like-the-design/03`）。
+    // 依据这句话是核心库写的、落进中立库、原样画在这一屏上——egui 不认 markdown。
+    let ctx = headless::context();
+    let (mut app, zh) = 带中文匹配的界面(中文匹配用的条数);
+    停在(&ctx, &mut app, &zh.variant);
+    let 屏上 = 详情滚一趟(&ctx, &mut app);
+    assert!(
+        屏上.contains(&format!("条目 {}", zh.entry)),
+        "依据没摆上屏，这条什么都没验：\n{屏上}",
+    );
+    for 不该有 in ["**", "ADR-"] {
+        assert!(!屏上.contains(不该有), "屏上画出了「{不该有}」：\n{屏上}");
+    }
+}

@@ -852,12 +852,12 @@ impl Refusal {
     fn why(&self, key: &str) -> String {
         match self {
             Self::Occupied(at) => format!(
-                "{key} 的落点上已经有东西了（{}）：清单之外的文件一律不碰（ADR-0015）",
+                "{key} 的落点上已经有东西了（{}）：清单之外的文件一律不碰",
                 crate::path::display(at),
             ),
             Self::Unreadable(dir) => format!(
                 "{key} 的落点在一个列不开的目录底下（{}）：那儿有没有东西答不出来，\
-                 答不出来就不写（ADR-0021）",
+                 答不出来就不写",
                 crate::path::display(dir),
             ),
             Self::NotADir(at) => format!(

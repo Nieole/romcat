@@ -56,13 +56,13 @@ pub const UNTOUCHED: &str = "裁决与你手工维护的元数据不会被动。
 
 /// 「有值了但我想换一个」该怎么办。
 pub const NOT_BY_RESCRAPE: &str =
-    "「有值了但我想换一个」不该靠重采——那是**优先级**的事：改一次排序，零成本、不重跑。";
+    "「有值了但我想换一个」不该靠重采——那是优先级的事：改一次排序，零成本、不重跑。";
 
 /// 勾联网源时弹的那句提醒。**照 ADR-0007 的口径说**。
 pub const QUOTA_WARNING: &str = "\
-    联网源赌的是你的**账号与 IP**：ScreenScraper 的配额同时按账号与 IP 计，\
+    联网源赌的是你的账号与 IP：ScreenScraper 的配额同时按账号与 IP 计，\
     撞穿了是永久封禁，而汉化版在它眼里正是「未识别 ROM」。\
-    这一档默认限流、只对**已确认**的条目发请求、配额超限当场停下——不重试、不换账号。";
+    这一档默认限流、只对已确认的条目发请求、配额超限当场停下——不重试、不换账号。";
 
 /// **字段那个旋钮上摆得出来的那几个。**
 ///
@@ -386,7 +386,7 @@ impl Panel {
                 self.error = Some(format!(
                     "联网源要一套 ScreenScraper 凭据，从环境变量读：{}。\n\
                      devid 要在它的论坛人工申请（无 devid 直接 403），\
-                     **不要拿别人的 devid 用**——那会连累对方被拉黑。",
+                     不要拿别人的 devid 用——那会连累对方被拉黑。",
                     online::ENV_KEYS.join(" / "),
                 ));
                 return;
@@ -447,19 +447,15 @@ impl Panel {
             // ——那一趟什么都没采，那句话是骗人的（词表「收场」：这一档是干净的、
             // 可以当没跑过）。
             Ending::Stopped => {
-                self.notice = Some(
-                    "刮削按停了。这一趟还没开始采——中立库与媒体池一个字节都没动，\
-                     再排一次就是。"
-                        .to_string(),
-                );
+                self.notice = Some(format!(
+                    "刮削{}。这一趟还没开始采——中立库与媒体池一个字节都没动，\
+                     再排一次就是。",
+                    done.ended.render(),
+                ));
             }
             // **不静默结束**：哪一步、为什么，两样都说出来。
-            Ending::Failed { step, why } => {
-                self.error = Some(if step.is_empty() {
-                    why.clone()
-                } else {
-                    format!("刮削在「{step}」这一步停下了：{why}")
-                });
+            Ending::Failed { .. } => {
+                self.error = Some(format!("刮削{}", done.ended.render()));
             }
         }
         true
@@ -477,7 +473,7 @@ impl Panel {
                 thousands(self.scope_total()),
             )))
             .on_hover_text(
-                "**范围就是筛出来的那一批**，这儿改不了——要改回左边的筛选器改。\
+                "范围就是筛出来的那一批，这儿改不了——要改回左边的筛选器改。\
                  屏上写几个、这儿列几个、按下去动几个，三处同一个数。",
             );
             if ui.button("收起").clicked() {
@@ -516,15 +512,15 @@ impl Panel {
             .checkbox(&mut media, "媒体（封面、截图、视频）")
             .on_hover_text(
                 "本地那一半要回主库把图读一遍（真库上 539 份、71 秒，第二趟哈希从中立库\
-                 取回）；**联网那一半每份图各花一个请求**。",
+                 取回）；联网那一半每份图各花一个请求。",
             )
             .changed()
         {
             self.media = media;
         }
-        ui.weak("标题与汉化组不在这张单子上——它们**永远采**，而且一分代价都不多花。")
+        ui.weak("标题与汉化组不在这张单子上——它们永远采，而且一分代价都不多花。")
             .on_hover_text(
-                "中立库里标题永远是集合（**标题集合**），中文名与别名就落在那里。\
+                "中立库里标题永远是集合（标题集合），中文名与别名就落在那里。\
                  那几个源本来就是一次撞完一起带回来的。",
             );
     }
@@ -535,7 +531,7 @@ impl Panel {
         let mut local = true;
         ui.add_enabled(false, egui::Checkbox::new(&mut local, "本地源"))
             .on_hover_text(
-                "DAT、文件名、中文离线源、本地媒体。**免费**——一个网络请求都不发，\
+                "DAT、文件名、中文离线源、本地媒体。免费——一个网络请求都不发，\
                  也关不掉：它们不花任何配额，关掉只会让联网那一侧多背几个字段。",
             );
         let mut online = self.online;
@@ -566,7 +562,7 @@ impl Panel {
             }
         }
         ui.weak(NOT_BY_RESCRAPE).on_hover_text(
-            "刮削结果按「锚点 × 字段 × 源」三元组**并存**，没有覆盖这回事。\
+            "每个源采到的值各记一条、并存，没有覆盖这回事。\
              真正需要重采的只有两种：数据源更新了，或者解析逻辑改了。",
         );
     }
@@ -595,8 +591,8 @@ impl Panel {
                 }
                 if account.media_downloads {
                     ui.weak(format!(
-                        "上面那个数是**查询**那一半：查回来之后，每采到一份图还要各下一次，\
-                         而图有几份要查过才知道。**图与查询共用这一趟自设的 {} 个请求的上限**\
+                        "上面那个数是查询那一半：查回来之后，每采到一份图还要各下一次，\
+                         而图有几份要查过才知道。图与查询共用这一趟自设的 {} 个请求的上限\
                          ——撞上就当场停下，剩下的下一趟再来。",
                         thousands(account.budget),
                     ));
@@ -610,7 +606,7 @@ impl Panel {
             }
         }
         ui.label(font::strong(UNTOUCHED)).on_hover_text(
-            "**裁决**排在每条优先级链的第一位（ADR-0001），刮削产出的值再多也排在它后面；\
+            "裁决排在每条优先级链的第一位，刮削产出的值再多也排在它后面；\
              重采清采集记录时也一条裁决都不删。",
         );
     }
@@ -641,8 +637,8 @@ impl Panel {
             go = ui
                 .add_enabled(ready, egui::Button::new("加入任务队列"))
                 .on_hover_text(
-                    "跑在画帧那条线程之外：期间浏览、筛选、看详情照常。\
-                     **底下那本账算不出来时按不动**——不知道要发多少请求就不该发。",
+                    "排到任务台上跑：期间浏览、筛选、看详情照常。\
+                     底下那本账算不出来时按不动——不知道要发多少请求就不该发。",
                 )
                 .clicked();
             if ui.button("取消").clicked() {
@@ -704,18 +700,18 @@ fn left_behind(outcome: &scrape::Outcome) -> Option<String> {
 /// **没走完的那一趟不许说「跑完了」**：它交出来的产物长得跟跑完的那一份一模一样，
 /// 可它只走了一段（同 [`left_behind`]）。
 fn finished(outcome: &scrape::Outcome) -> String {
-    // **这一句得与那一档对得上。** 走到这儿又没走完的，任务台记的都是「停在半路」
-    // （`left_behind` 报了那一句）——起头写「按停了」的话，屏上这一句与任务屏历史
-    // 那一行说的是两档收场，而 `Ending::Stopped.render()` 正好就是「按停了」。
-    // **为什么收的手**放到后半句去说：词表「停在半路」那一条说得清楚，
+    // **这一句得与那一档对得上。** 走到这儿又没走完的，任务台记的都是「部分完成」
+    // （`left_behind` 报了那一句）——起头写「已取消」的话，屏上这一句与任务屏历史
+    // 那一行说的是两档收场，而 `Ending::Stopped.render()` 正好就是「已取消」。
+    // **为什么收的手**放到后半句去说：词表「部分完成」那一条说得清楚，
     // 收手的理由不改变这一档是什么。
     let 起头 = if outcome.interrupted || outcome.halted.is_some() {
-        "刮削停在半路"
+        "刮削部分完成"
     } else {
         "刮削跑完了"
     };
     let mut out = format!(
-        "{起头}：{} 个「锚点 × 源」因为输入没变整条跳过，收进媒体 {} 份。",
+        "{起头}：{} 项输入没变、整项跳过，收进媒体 {} 份。",
         thousands(outcome.reused_probes),
         thousands(outcome.new_blobs + outcome.deduped),
     );
@@ -929,11 +925,11 @@ mod tests {
         assert!(留下了.contains("落进了中立库"), "{留下了}");
         assert!(留下了.contains("接着采"), "说不出下一趟怎么接：{留下了}");
 
-        // 回执与任务屏历史那一行得说的是**同一档**：那一趟记的是「停在半路」，
-        // 而 `Ending::Stopped.render()` 正好是「按停了」——起头写它就是两档撞脸。
+        // 回执与任务屏历史那一行得说的是**同一档**：那一趟记的是「部分完成」，
+        // 而 `Ending::Stopped.render()` 正好是「已取消」——起头写它就是两档撞脸。
         let 回执 = finished(&按停的那一趟());
         assert!(!回执.contains("跑完了"), "按停的那一趟说成了跑完了：{回执}");
-        assert!(回执.starts_with("刮削停在半路"), "{回执}");
+        assert!(回执.starts_with("刮削部分完成"), "{回执}");
         assert!(回执.contains("被你按停的"), "说不出是谁收的手：{回执}");
     }
 

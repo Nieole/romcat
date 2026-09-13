@@ -1257,12 +1257,9 @@ fn collect(
                     "目录树转储：没有可以算哈希的整份内容，也没读到 param.sfo".to_string(),
                     false,
                 )),
-                EntryFact::Unreadable => units.push(blocked_unit(
-                    key,
-                    "",
-                    "元数据读不到（ADR-0021 的第三态）".to_string(),
-                    false,
-                )),
+                EntryFact::Unreadable => {
+                    units.push(blocked_unit(key, "", "元数据读不到".to_string(), false))
+                }
                 EntryFact::Missing | EntryFact::Other => {}
             },
             // 归类说它是**透明容器**、穿透层却认不出来的，只剩这一版还没做的格式。
@@ -2669,8 +2666,8 @@ fn enrich(from: &str, found: &cart::Facts) -> String {
     }
     match found.checksum {
         Some(true) => text.push_str(
-            "；**头部校验和自洽**——而整文件哈希撞不上任何 DAT，\
-             那多半是一份改过内容、又把头修回去的变体（调研 D.3.3）",
+            "；头部校验和自洽——而整文件哈希撞不上任何 DAT，\
+             那多半是一份改过内容、又把头修回去的变体",
         ),
         Some(false) => text.push_str("；头部校验和对不上，这份头被改过且没修回去"),
         None => {}
@@ -3272,18 +3269,18 @@ fn candidate_of(unit: &ContentUnit, hit: &Hit, hashed_as: Convention) -> Candida
     }
     if per_chip {
         evidence.push_str(
-            "；这是**逐芯片**的记录（一条 `rom` 是一颗芯片，不是一个文件），\
+            "；这是逐芯片的记录（一条 `rom` 是一颗芯片，不是一个文件），\
              对上一颗芯片不等于对上整次发行，不自动通过",
         );
     }
     if nkit {
         evidence.push_str(
-            "；**这份镜像是 NKit 处理过的**，Dolphin 明说它的 CRC32 可能与好转储相同而内容不同，\
-             不许自动通过（票 09 转回 ISO 再识别）",
+            "；这份镜像是 NKit 处理过的，Dolphin 明说它的 CRC32 可能与好转储相同而内容不同，\
+             不许自动通过（转回 ISO 再识别）",
         );
     } else if unverified {
         evidence.push_str(
-            "；这条记录说它是 GC / Wii 的光盘，而这份内容**没验过 NKit**——\
+            "；这条记录说它是 GC / Wii 的光盘，而这份内容没验过 NKit——\
              NKit 处理过的镜像 CRC32 可能与好转储相同（Dolphin），验不了就不敢自动通过",
         );
     }

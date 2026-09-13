@@ -325,7 +325,10 @@ fn 折标题那一支退回上次跑的时刻_而识别那一行照旧报数() {
         panic!("折标题这一支眼下走的是退路：{:?}", 行.behind);
     };
     assert_eq!(*at, None, "一趟都没折过，却报得出一个时刻");
-    assert!(why.contains("重折"), "没说清它为什么算不出还差多少：{why}",);
+    assert!(
+        why.contains("重新整理"),
+        "没说清它为什么算不出还差多少：{why}",
+    );
     assert!(行.render().contains("还没跑过"), "{}", 行.render(),);
     assert!(
         !行.render().contains(" 0 "),
@@ -378,7 +381,7 @@ fn 折标题的度量真做出来时那一行说的是几个作品还没重折()
     };
     let 那一句 = 差着.render();
     assert!(那一句.contains(&thousands(1_234)), "{那一句}");
-    assert!(那一句.contains("还没重折"), "{那一句}");
+    assert!(那一句.contains("还没重新整理"), "{那一句}");
 
     // **不差什么了也得说话**：一行空白读起来像出了什么事。
     let 不差 = romcat_core::stage::StageRow {
@@ -386,7 +389,7 @@ fn 折标题的度量真做出来时那一行说的是几个作品还没重折()
         behind: Behind::Left(0),
     };
     assert!(!不差.render().is_empty());
-    assert!(!不差.render().contains("还没重折"), "{}", 不差.render());
+    assert!(!不差.render().contains("还没重新整理"), "{}", 不差.render());
 }
 
 #[test]

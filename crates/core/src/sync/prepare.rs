@@ -106,35 +106,35 @@ impl Prepared {
         }
         if self.media_not_in_pool > 0 {
             out.push(format!(
-                "⚠️ 有 {} 条媒体引用在**媒体池**里找不到那个文件，这一趟一张都不铺。\n\
+                "⚠️ 有 {} 条媒体引用在媒体池里找不到那个文件，这一趟一张都不铺。\n\
                  重新跑一次 `romcat scrape` 把它们收回池里。",
                 crate::report::thousands(self.media_not_in_pool),
             ));
         }
         if self.media_unknown_kind > 0 {
             out.push(format!(
-                "认不出是什么的图有 {} 张，**一张都没铺**——猜错了就是把说明书当封面。",
+                "认不出是什么的图有 {} 张，一张都没铺——猜错了就是把说明书当封面。",
                 crate::report::thousands(self.media_unknown_kind),
             ));
         }
         if self.media_crowded_out > 0 {
             out.push(format!(
-                "有 {} 张图被同类挤掉、没铺出去：这个格式靠**文件名**找媒体，\n\
+                "有 {} 张图被同类挤掉、没铺出去：这个格式靠文件名找媒体，\n\
                  一个游戏的一个类型只放得下一张。挤掉的是同一个游戏的第二张起。",
                 crate::report::thousands(self.media_crowded_out),
             ));
         }
         if let Some(missing) = &self.missing_capability {
             out.push(format!(
-                "⚠️ 子库记着的能力档案「{missing}」在眼下这份名册里**找不到**，这一趟退回了\n\
-                 「不作声称」：**不转换、也不检查**。别以为它替你查过了。\n\
+                "⚠️ 子库记着的能力档案「{missing}」在眼下这份名册里找不到，这一趟退回了\n\
+                 「不作声称」：不转换、也不检查。别以为它替你查过了。\n\
                  `romcat capability` 看还有哪些，`romcat sublibrary set {name} --capability <名字>` 重挑一份。",
             ));
         }
         if self.stale_claims > 0 {
             out.push(format!(
-                "⚠️ 这份能力档案里有 {} 条声明**超过半年没核实**。模拟器一年发好几版，\n\
-                 而矩阵错了比不转换更糟（ADR-0017）——`romcat capability <档案名>` 看是哪几条。",
+                "⚠️ 这份能力档案里有 {} 条声明超过半年没核实。模拟器一年发好几版，\n\
+                 而矩阵错了比不转换更糟——`romcat capability <档案名>` 看是哪几条。",
                 crate::report::thousands(self.stale_claims as u64),
             ));
         }
@@ -429,9 +429,9 @@ pub fn refuse_target_in_library(
     for (name, root) in roots.iter() {
         if path::is_inside_place(root, &target) {
             return Err(format!(
-                "目标 {} 落在主库的根「{name}」（{}）里。**主库只读**（ADR-0004）：\n\
+                "目标 {} 落在主库的根「{name}」（{}）里。主库只读：\n\
                  同步会往目标上写文件、删文件，绝不能指着那块盘。\n\
-                 子库要导到别处去——一律走读卡器（ADR-0015）。",
+                 子库要导到别处去——一律走读卡器。",
                 path::display(&target),
                 path::display(root),
             ));

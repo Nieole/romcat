@@ -680,7 +680,7 @@ impl Screen {
         // **这一句在两种情形下都得是真的**：`Section::start` 撞上同一道工序已经在跑
         // 就什么都不做，那时「排上去了」是假话。所以后半句把那一档一并说出来。
         self.notice = Some(
-            "折标题交给**任务台**了——跑完那条叫法就回到标题集合里。\
+            "整理标题交给任务台了——跑完那条叫法就回到标题集合里。\
              台上已经在跑同一趟的话，不会再排一遍。"
                 .to_string(),
         );
@@ -994,11 +994,13 @@ impl Screen {
             Ok(done) => {
                 self.notice = Some(match (done.recorded, done.removed, row.is_verdict()) {
                     (true, _, _) => {
-                        format!("删掉了叫法「{value}」，并记下这一下——**重折不会把它折回来**。")
+                        format!(
+                            "删掉了叫法「{value}」，并记下这一下——重新整理标题也不会把它加回来。"
+                        )
                     }
                     (false, true, true) => format!(
-                        "删掉了你自己写下的叫法「{value}」。它本来就不经过重折，\
-                         没有什么会把它折回来。"
+                        "删掉了你自己写下的叫法「{value}」。它本来就不经过整理标题，\
+                         没有什么会把它加回来。"
                     ),
                     (false, true, false) => {
                         format!("删掉了叫法「{value}」。它本来就压着。")
@@ -1032,8 +1034,8 @@ impl Screen {
                 self.sync_suppressed(site);
                 self.notice = None;
                 self.lift_notice = Some(format!(
-                    "撤掉了对「{}」的压制。**这一屏不折**，那要走遍全库\
-                     ——点旁边那颗「折标题」排一趟，跑完它就回到标题集合里。",
+                    "撤掉了对「{}」的压制。这一屏不当场整理，那要走遍全库\
+                     ——点旁边那颗「整理标题」排一趟，跑完它就回到标题集合里。",
                     one.value,
                 ));
             }
@@ -1150,7 +1152,7 @@ impl Screen {
             .button("刮削选中…")
             .on_hover_text(
                 "对筛出来的这一批取元数据与媒体。四个旋钮定清楚要干什么，\
-                 **按下去之前就看得见会发多少网络请求、大概多久**。",
+                 按下去之前就看得见会发多少网络请求、大概多久。",
             )
             .clicked()
         {
@@ -1162,11 +1164,11 @@ impl Screen {
         if ui
             .button("★ 收藏")
             .on_hover_text(
-                "把勾中的那一批全放进**收藏**。落**沉淀库**、锚在**内容**上——\
-                 删掉中立库重扫、改名、挪目录都还在。**无判据**的那些只钉得住本机路径，\
+                "把勾中的那一批全放进收藏。落沉淀库、锚在内容上——\
+                 删掉中立库重扫、改名、挪目录都还在。无判据的那些只钉得住本机路径，\
                  按完的回执里会点名说有几个。\n\n\
-                 **取消收藏**与自建合集在左栏底下那块「收藏与合集」里：\
-                 加收藏按得最勤，所以只有它在抬头（挂单 Q117）。",
+                 取消收藏与自建合集在左栏底下那块「收藏与合集」里：\
+                 加收藏按得最勤，所以只有它在抬头。",
             )
             .clicked()
         {
@@ -1411,9 +1413,8 @@ impl Screen {
             }),
             Err(why) => {
                 self.error = Some(format!(
-                    "分不出第二份只读连接：{why}\n\
-                     {doing}要在画帧那条线程之外跑，而它读的是同一份中立库文件。\
-                     先确认那个文件还在、版本还对得上。"
+                    "{doing}没开跑：读中立库要另开一份只读连接，这一下没开出来（{why}）。\n\
+                     先确认中立库那个文件还在、结构版本对得上，再按一次。"
                 ));
                 return;
             }
@@ -1454,20 +1455,19 @@ impl Screen {
             Ending::Done(_) | Ending::Halfway { .. } => {}
             // **停下来的地方是干净的，就得这么说。** 说成「失败」会让人去找哪儿坏了。
             Ending::Stopped => {
-                self.notice = Some(
-                    "按停了。排锚那一趟整条只读——沉淀库、中立库一个字节都没动，\
-                     再按一次就是。"
-                        .to_string(),
-                );
+                self.notice = Some(format!(
+                    "{}。这一趟整条只读——沉淀库、中立库一个字节都没动，\
+                     再按一次就是。",
+                    Ending::<()>::Stopped.render(),
+                ));
                 self.error = None;
             }
             // **不静默结束**：哪一步、为什么，两样都说出来。
             Ending::Failed { step, why } => {
-                self.error = Some(if step.is_empty() {
-                    why
-                } else {
-                    format!("这一趟在「{step}」这一步停下了：{why}")
-                });
+                self.error = Some(format!(
+                    "这一趟{}",
+                    Ending::<()>::Failed { step, why }.render()
+                ));
             }
         }
         None
@@ -1508,14 +1508,14 @@ impl Screen {
         );
         if joining && applied.path > 0 {
             line.push_str(&format!(
-                "其中 {} 个只钉得住**本机的路径**——那些变体拿不到内容判据（**无判据**那一档），\
-                 改名或挪到别的目录就认不出来了；另外 {} 个钉在**内容**上，\
+                "其中 {} 个只钉得住本机的路径——那些变体拿不到内容判据（无判据那一档），\
+                 改名或挪到别的目录就认不出来了；另外 {} 个钉在内容上，\
                  重扫、改名、挪目录都还认得出。",
                 thousands(applied.path as u64),
                 thousands(applied.content as u64),
             ));
         } else if joining {
-            line.push_str("全部钉在**内容**上——重扫、改名、挪目录都还认得出。");
+            line.push_str("全部钉在内容上——重扫、改名、挪目录都还认得出。");
         }
         if applied.missing > 0 {
             line.push_str(&format!(
@@ -1648,7 +1648,7 @@ impl Screen {
                     if ui
                         .button("全清")
                         .on_hover_text(
-                            "把这一栏的条件全部清掉。**排序与搜索框不动**——\
+                            "把这一栏的条件全部清掉。排序与搜索框不动——\
                              搜索管排序、筛选器管集合，这颗按钮只管后者。",
                         )
                         .clicked()
@@ -1659,11 +1659,10 @@ impl Screen {
                         self.clear_filter();
                     }
                 });
-                ui.weak("上下两半之间是「且」：一层层收窄。全部下推到中立库。")
-                    .on_hover_text(
-                        "**这就是子库的规则**：筛到满意按「存成子库」，条件原样变成那个\
+                ui.weak("上下两半之间是「且」：一层层收窄。").on_hover_text(
+                    "这就是子库的规则：筛到满意按「存成子库」，条件原样变成那个\
                          子库的规则；反过来子库屏点「改选择」跳回这里，规则预填进筛选器。",
-                    );
+                );
                 ui.separator();
 
                 // **两半各管一段，屏上说清**（挂单 `Q73`）：上半那五个档，条件组里
@@ -1673,7 +1672,7 @@ impl Screen {
                 // 什么**的；条件组里的值要打出来，那是用来**说清楚要哪一批**的。
                 // 没有条数的下拉框，人只能一个个点开试。
                 ui.label(font::strong("一按就有的档")).on_hover_text(
-                    "**探索用的那一半**：五个维度各带着条数，点一下就收窄一层，\
+                    "探索用的那一半：五个维度各带着条数，点一下就收窄一层，\
                      不必先知道值长什么样。「识别状态」这一维只在这儿有，\
                      条件组里写不出来。",
                 );
@@ -1684,7 +1683,7 @@ impl Screen {
                 facet_picker(
                     ui,
                     "合集",
-                    "用户自定义的一组游戏，与平台正交（ADR-0011）。",
+                    "用户自定义的一组游戏，与平台是两回事。",
                     &self.facets.collections,
                     &mut self.query.collection,
                 );
@@ -1692,7 +1691,7 @@ impl Screen {
                 facet_picker(
                     ui,
                     "语言",
-                    "**发行版**标着的语言码。汉化版不在这一维里——它是变体，底版多半是日版。",
+                    "发行版标着的语言码。汉化版不在这一维里——它是变体，底版多半是日版。",
                     &self.facets.languages,
                     &mut self.query.language,
                 );
@@ -1700,7 +1699,7 @@ impl Screen {
                 facet_picker(
                     ui,
                     "中文",
-                    "**变体**的中文身份：汉化 / 官中（ADR-0012）。这个库最要紧的那批全在这儿。",
+                    "变体的中文身份：汉化 / 官中。这个库最要紧的那批全在这儿。",
                     &self.facets.chinese,
                     &mut self.query.chinese,
                 );
@@ -1724,10 +1723,10 @@ impl Screen {
                 ui.separator();
 
                 ui.label(font::strong("条件组")).on_hover_text(
-                    "**表达用的那一半**：可嵌套的条件组，每组选「全部满足 / 任一满足 /\
-                         都不满足」，组里还能再套组，九个运算符。**这就是子库的规则**——\
+                    "表达用的那一半：可嵌套的条件组，每组选「全部满足 / 任一满足 /\
+                         都不满足」，组里还能再套组，九个运算符。这就是子库的规则——\
                          上头那五个档存成子库时也会折进同一条规则里\
-                         （「识别状态」那一维折不进去，挂单 Q70）。",
+                         （「识别状态」那一维折不进去）。",
                 );
                 ui.weak("值要自己打——说得清楚，也存得成子库的规则。");
                 if self.filter.ui(ui) {
@@ -1784,7 +1783,7 @@ impl Screen {
         ui.colored_label(
             ui.visuals().warn_fg_color,
             format!(
-                "这个子库另有 {} 条规则**读不懂**：没参与求值，「更新到子库」也不碰它们。",
+                "这个子库另有 {} 条规则读不懂：没参与求值，「更新到子库」也不碰它们。",
                 thousands(broken.len() as u64),
             ),
         );
@@ -1795,7 +1794,7 @@ impl Screen {
             .default_open(true)
             .show(ui, |ui| {
                 ui.weak(
-                    "它们进不了下面的筛选器——那是一棵**读得懂**的树。这儿只给一个动作：\
+                    "它们进不了下面的筛选器——那是一棵读得懂的树。这儿只给一个动作：\
                      扔掉。要的东西改对了再筛一遍，按「更新到子库」带回去。",
                 );
                 for row in broken {
@@ -1806,9 +1805,9 @@ impl Screen {
                     if ui
                         .button("扔掉这条")
                         .on_hover_text(
-                            "**只删这一条**：读得懂的那几条与全部例外一个都不碰\
-                             （`Catalog::discard_broken_rule` 先读一遍再决定删不删，\
-                             读得懂的它拒绝）。扔掉不改变这个子库选出什么\
+                            "只删这一条：读得懂的那几条与全部例外一个都不碰\
+                             （先读一遍再决定删不删，\
+                             读得懂的那几条不会被删）。扔掉不改变这个子库选出什么\
                              ——它本来就没参与求值。",
                         )
                         .clicked()
@@ -1829,18 +1828,18 @@ impl Screen {
     /// **加收藏那一下不在这儿，在抬头**（原型钉的位置）：它按得最勤，不该藏在左栏底下。
     fn collection_panel(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         ui.label(font::strong("收藏与合集")).on_hover_text(
-            "**加收藏那一下在抬头**（「★ 收藏」），因为它按得最勤：\
+            "加收藏那一下在抬头（「★ 收藏」），因为它按得最勤：\
                  勾一批、按一下、接着筛下一批。这儿是它的另一半——取消，\
-                 以及自己起名的合集（挂单 Q117）。",
+                 以及自己起名的合集。",
         );
-        ui.weak("作用范围是**勾中的那一批**（不是筛出来的全部）。落沉淀库，删掉中立库重扫也不丢。")
+        ui.weak("作用范围是勾中的那一批（不是筛出来的全部）。落沉淀库，删掉中立库重扫也不丢。")
             .on_hover_text(
                 "收藏走的就是合集那套成员关系——收藏是名字定死的那一组，\
                  自建合集是自己起名的那些。筛的时候写 `收藏=是` 或 `合集=某某`。",
             );
         if ui
             .button("☆ 取消收藏")
-            .on_hover_text("把勾中的那一批从收藏里拿出来。**两种锚都拿**，星星不会点不灭。")
+            .on_hover_text("把勾中的那一批从收藏里拿出来。两种锚都拿，星星不会点不灭。")
             .clicked()
         {
             self.unfavorite(site, tasks);
@@ -1868,7 +1867,7 @@ impl Screen {
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(!name.is_empty(), egui::Button::new("加入合集"))
-                .on_hover_text("没有这个合集就顺手建出来——**一个合集就是它那些成员**。")
+                .on_hover_text("没有这个合集就顺手建出来——一个合集就是它那些成员。")
                 .clicked()
             {
                 self.join_collection(site, tasks);
@@ -1950,7 +1949,7 @@ impl Screen {
             ui.colored_label(
                 ui.visuals().warn_fg_color,
                 format!(
-                    "这个子库另有 {} 条规则读不懂：它们没参与求值，也**不会**被这一趟改掉。\
+                    "这个子库另有 {} 条规则读不懂：它们没参与求值，也不会被这一趟改掉。\
                      扔掉它们在这一栏顶上。",
                     thousands(broken as u64),
                 ),
@@ -1979,7 +1978,7 @@ impl Screen {
                 )
                 .on_hover_text(
                     "把屏上这份筛选原样换成那个子库的规则，然后回子库屏。\
-                     **换掉而不是加上去**：加的话子库选出来的会比屏上多。",
+                     换掉而不是加上去：加的话子库选出来的会比屏上多。",
                 )
                 .clicked()
             {
@@ -1988,7 +1987,7 @@ impl Screen {
             if ui
                 .button("不改了")
                 .on_hover_text(
-                    "放下这一趟，筛选留在屏上不动。**已经记下的例外不撤**——那是各自独立的决定。",
+                    "放下这一趟，筛选留在屏上不动。已经记下的例外不撤——那是各自独立的决定。",
                 )
                 .clicked()
             {
@@ -2271,9 +2270,9 @@ impl Screen {
                     format!("{星}{name}｜只钉得住本机路径，挪了位置会飘"),
                 )
                 .on_hover_text(
-                    "这个变体拿不到**内容判据**（**无判据**那一档：容器穿不透、压缩镜像、\
+                    "这个变体拿不到内容判据（无判据那一档：容器穿不透、压缩镜像、\
                      目录树转储），所以只钉得住它眼下这个位置。改名或挪到别的目录之后，\
-                     这一条就认不出来了。与**裁决**是同一个限制。",
+                     这一条就认不出来了。与裁决是同一个限制。",
                 );
             }
         }
@@ -2348,7 +2347,7 @@ impl Screen {
                 for item in &detail.media_items {
                     let where_at = match (&item.at, item.in_pool) {
                         (Some(at), Some(true)) => romcat_core::path::display(at),
-                        (Some(_), _) => "**池里没有这个文件**".to_string(),
+                        (Some(_), _) => "池里没有这个文件".to_string(),
                         _ => "（媒体池没查）".to_string(),
                     };
                     let line = format!(
@@ -2389,7 +2388,7 @@ impl Screen {
             ui.colored_label(
                 ui.visuals().warn_fg_color,
                 format!(
-                    "有 {} 条引用在**媒体池**里找不到那个文件，导出时一张都铺不出去。",
+                    "有 {} 条引用在媒体池里找不到那个文件，导出时一张都铺不出去。",
                     thousands(detail.dangling_media()),
                 ),
             );
@@ -2413,10 +2412,10 @@ impl Screen {
             ui.horizontal_wrapped(|ui| {
                 ui.colored_label(ui.visuals().warn_fg_color, 说的);
                 要折 = ui
-                    .button("折标题")
+                    .button("整理标题")
                     .on_hover_text(
                         "排到任务台上跑，期间照常用别的屏；按得停。\
-                         **与库屏工序段那一行同一趟活**——跑完这一屏的显示标题跟着更新。",
+                         与库屏上「整理标题」那一行是同一趟——跑完这一屏的显示标题跟着更新。",
                     )
                     .clicked();
             });
@@ -2434,10 +2433,10 @@ impl Screen {
                     .hint_text("打几个字，匹配得好的排前面"),
             )
             .on_hover_text(
-                "**搜索管排序，筛选器管集合。** 三条路都找：屏上这个名字、\
-                 **标题集合**里别的叫法（中文名就在这儿）、**简介**。\
+                "搜索管排序，筛选器管集合。三条路都找：屏上这个名字、\
+                 标题集合里别的叫法（中文名就在这儿）、简介。\
                  命中在哪一条决定这一行排哪一档，权重内置、不用配。\n\
-                 它**进不了子库的规则**——子库要的是集合不是顺序，\
+                 它进不了子库的规则——子库要的是集合不是顺序，\
                  「存成子库」之前得先把它清空。",
             );
             ui.separator();
@@ -2447,8 +2446,8 @@ impl Screen {
                 scope_label(self.scope),
             ))
             .on_hover_text(
-                "**选中主列表的行 ＝ 选中这些作品，批量操作作用于它们的变体。**\
-                 刮削（票 10）、存成子库（票 11）、加收藏（票 06）按下去动的就是这一批。",
+                "选中主列表的行 ＝ 选中这些作品，批量操作作用于它们的变体。\
+                 刮削、存成子库、加收藏按下去动的就是这一批。",
             );
             if ui.button("全不选").clicked() {
                 self.picked.clear();
@@ -2456,7 +2455,7 @@ impl Screen {
         });
         ui.separator();
         if self.detail.is_none() {
-            ui.weak("在右边选一个变体，改它的元数据。**改动只作用于那一个变体。**");
+            ui.weak("在右边选一个变体，改它的元数据。改动只作用于那一个变体。");
             return;
         }
         let available = ui.available_width();
@@ -2643,8 +2642,8 @@ impl Screen {
                 if ui
                     .small_button("删")
                     .on_hover_text(
-                        "从标题集合里去掉这一条叫法。**刮削来的也删得掉**——\
-                         删掉之后记一条压制，重折不会把它折回来（底下「压掉的叫法」\
+                        "从标题集合里去掉这一条叫法。刮削来的也删得掉——\
+                         删掉之后记一条压制，重新整理标题也不会把它加回来（底下「压掉的叫法」\
                          那一栏列着，也撤得掉）。",
                     )
                     .clicked()
@@ -2677,10 +2676,10 @@ impl Screen {
             // 一条都没采到。合成一句「一条叫法都没有」，人会去重跑刮削，而问题其实
             // 出在他上个月按过的那个「删」上。
             if self.suppressed_of(&work).is_empty() {
-                ui.weak("一条叫法都没有——**一条都没采到**，显示标题会退回作品名。");
+                ui.weak("一条叫法都没有——一条都没采到，显示标题会退回作品名。");
             } else {
                 ui.weak(format!(
-                    "集合里一条叫法都没有：底下那 {} 条是**你压掉的**，不是没采到。\
+                    "集合里一条叫法都没有：底下那 {} 条是你压掉的，不是没采到。\
                      显示标题会退回作品名。",
                     self.suppressed_of(&work).len(),
                 ));
@@ -2737,8 +2736,8 @@ impl Screen {
             return false;
         }
         ui.weak(format!(
-            "压掉的叫法 · {} 条——是你删的，**重折不会把它折回来**。\
-             记在**沉淀库**里：中立库删掉重扫也不丢。",
+            "压掉的叫法 · {} 条——是你删的，重新整理标题也不会把它加回来。\
+             记在沉淀库里：中立库删掉重扫也不丢。",
             self.suppressed_of(work).len(),
         ));
         let mut lift: Option<TitleSuppression> = None;
@@ -2747,8 +2746,8 @@ impl Screen {
                 if ui
                     .small_button("恢复")
                     .on_hover_text(
-                        "撤掉这条压制。它**下一趟重折**之后回到标题集合里\
-                         ——这一屏不当场折，那要走遍全库。",
+                        "撤掉这条压制。下一趟整理标题之后它回到标题集合里\
+                         ——这一屏不当场整理，那要走遍全库。",
                     )
                     .clicked()
                 {
@@ -2819,7 +2818,7 @@ impl Screen {
     /// （`adapter::converge`），主库的元数据文件既然不再是编辑入口，它们就得在这儿改。
     fn values_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, detail: &VariantDetail) -> bool {
         ui.label(font::strong("刮削来的元数据"));
-        ui.weak("同一个字段可以有好几条，三元组并存不互相覆盖；**裁决**排在最前，导出用它。");
+        ui.weak("同一个字段可以有好几条，各个源的值并存、不互相覆盖；裁决排在最前，导出用它。");
         let mut dirty = false;
         let mut clear: Option<(AnchorKind, Field)> = None;
         for item in &detail.values {
@@ -2942,7 +2941,7 @@ impl Screen {
         // ADR-0012 那条**必须写在人眼前**：改首选不会改中文标题的来源。
         match detail.chinese_title() {
             Some(row) => ui.label(format!(
-                "中文标题取的是「{}」（{}｜{}），**与首选变体无关**——\
+                "中文标题取的是「{}」（{}｜{}），与首选变体无关——\
                  首选启动汉化版，中文名照旧取官中版的官方译名。",
                 row.value,
                 row.kind.label(),
@@ -2950,7 +2949,7 @@ impl Screen {
             )),
             None => ui.label(
                 "这个作品还没有中文叫法。首选变体改成汉化版也不会凭空生出一个中文名——\
-                 那两件事是分开的（ADR-0012）。",
+                 那两件事是分开的。",
             ),
         };
         let mut dirty = false;
@@ -2979,7 +2978,7 @@ impl Screen {
         }
         ui.horizontal(|ui| {
             match &detail.preferred {
-                Some(key) => ui.label(format!("眼下是**裁决**指定的：{key}")),
+                Some(key) => ui.label(format!("眼下是裁决指定的：{key}")),
                 None => ui.label("眼下没人裁过，按规则算：汉化 > 官中 > 日版 > 其他"),
             };
             if ui
@@ -3083,7 +3082,7 @@ fn platform_picker(
     picked: &mut Option<PlatformFilter>,
 ) {
     ui.label(font::strong("平台"))
-        .on_hover_text("变体所属的硬件系统。认不出平台的内容照常入库（ADR-0011）。");
+        .on_hover_text("变体所属的硬件系统。认不出平台的内容照常入库。");
     if facets.is_empty() {
         ui.weak("库里还没有平台这一维的数据。");
         return;

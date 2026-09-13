@@ -1034,7 +1034,7 @@ fn 排差量预览按停之后一个字节都没写而且再排一次照样排�
         screen.error()
     );
     let notice = screen.notice().expect("该说一句它被停了");
-    assert!(notice.contains("停"), "回执没说清是被停了：{notice}");
+    assert!(notice.contains("已取消"), "回执没说清是被停了：{notice}");
     // **什么都没排出来，就别记「排它用了多久」**：那是给一份不存在的差量记账。
     assert_eq!(screen.prepare_ms(), 0.0, "按停的那一趟也记了耗时");
     assert_eq!(
@@ -1431,7 +1431,7 @@ fn 算一遍容量按停之后那几个数没长出来而且一个字节都没�
         screen.error()
     );
     let notice = screen.notice().expect("该说一句它被停了");
-    assert!(notice.contains("停"), "回执没说清是被停了：{notice}");
+    assert!(notice.contains("已取消"), "回执没说清是被停了：{notice}");
     assert_eq!(场.app.tasks().history()[0].ending, Ending::Stopped);
     assert_eq!(卡上有什么(场.卡.path()), 卡上原样, "按停了却动了卡上的文件");
 
@@ -1591,11 +1591,11 @@ fn 按停一趟同步之后子库屏与任务屏说的是同一件事() {
         .nth(2)
         .expect("任务屏历史里没有这一趟");
     assert!(
-        这一趟的收场.contains("停在半路"),
+        这一趟的收场.trim().starts_with("部分完成"),
         "任务屏历史那一行没说它留下了东西：{这一趟的收场}",
     );
     assert!(
-        !这一趟的收场.contains("完成"),
+        这一趟的收场.trim() != "完成",
         "任务屏历史把被按停的那一趟记成了「完成」：{这一趟的收场}",
     );
 }
