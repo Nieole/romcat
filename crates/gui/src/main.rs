@@ -490,8 +490,9 @@ fn font_check(args: &Args) -> ExitCode {
     headless::frame(&ctx, egui::RawInput::default(), |_| {});
 
     println!(
-        "字体子集 {} 字节；必备字符 {} 个",
+        "字体子集 {} 字节，另有拉丁粗体与等宽 {} 字节；必备字符 {} 个；常规、粗体、等宽三个字族都查",
         font::subset_bytes(),
+        font::latin_bytes(),
         font::REQUIRED.chars().count()
     );
     let mut missing: BTreeSet<char> = font::missing(&ctx, font::REQUIRED).into_iter().collect();

@@ -233,4 +233,6 @@ cargo run -p romcat-gui --features demo -- --demo          # 拿合成数据开�
 
 ## 许可
 
-界面内嵌的中文字体是 Noto Sans SC 子集，OFL 许可，随附 `crates/gui/assets/OFL.txt`。
+界面内嵌三份字体子集，都是 OFL 许可，许可全文随二进制一起分发：常规体与拉丁粗体出自
+Noto Sans SC，随附 `crates/gui/assets/OFL.txt`；拉丁等宽出自 JetBrains Mono，随附
+`crates/gui/assets/OFL-JetBrainsMono.txt`。三份都由 `tools/font-subset.py` 裁出。

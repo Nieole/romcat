@@ -72,6 +72,7 @@ use romcat_core::verdict;
 // **一行画得下的那一截**收在浏览屏那一处：一条简介在中立库里最多 4,000 字
 // （`scrape::zh::DESCRIPTION_LIMIT`），两屏碰到的是同一个问题，各写一份迟早两种收法。
 use crate::browse::one_line;
+use crate::font;
 use crate::layout;
 use crate::look;
 use crate::table::ROW_HEIGHT;
@@ -660,10 +661,10 @@ impl Screen {
             return;
         }
         ui.horizontal_wrapped(|ui| {
-            ui.strong(format!(
+            ui.label(font::strong(format!(
                 "一级 · 按依据形状分成 {} 批",
                 thousands_len(没列的.batches)
-            ));
+            )));
             ui.weak("（源 / DAT / 置信度 / 哈希口径 / 候选数）");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
@@ -707,7 +708,7 @@ impl Screen {
                 // **置信度色条**：带置信度的行与卡，左边缘一条色带（规格 69）。
                 // 那个词摆在这一行的右头（底下 `tier_label` 那一句）——**色条从不单独出现**。
                 look::tier_bar(ui, batch.tier());
-                let title = egui::RichText::new(thousands(batch.count)).strong();
+                let title = font::strong(thousands(batch.count));
                 hit |= ui
                     .selectable_label(open, title)
                     .on_hover_text("点开看二级下钻与随机样本")
@@ -741,7 +742,7 @@ impl Screen {
         ui.separator();
         // ——— 二级下钻 ———
         ui.horizontal_wrapped(|ui| {
-            ui.strong("二级");
+            ui.label(font::strong("二级"));
             let mut axis = self.axis;
             for one in Axis::ALL {
                 ui.radio_value(&mut axis, one, one.label());
@@ -796,7 +797,10 @@ impl Screen {
         // ——— 随机样本 ———
         let count = opened.count;
         ui.separator();
-        ui.strong(format!("随机样本 {} 条", opened.samples.len()));
+        ui.label(font::strong(format!(
+            "随机样本 {} 条",
+            opened.samples.len()
+        )));
         for one in &opened.samples {
             ui.horizontal_wrapped(|ui| {
                 ui.label(&one.name);
@@ -862,18 +866,18 @@ impl Screen {
                 ui.weak(format!("只看这一批：{}", shape.label()));
             }
             ui.separator();
-            ui.strong("从哪一批下手");
+            ui.label(font::strong("从哪一批下手"));
             ui.label("点一行就是一条覆盖几百条的选择器。");
             ui.separator();
 
-            ui.strong("按识别结论");
+            ui.label(font::strong("按识别结论"));
             for (at, state) in State::ALL.iter().enumerate() {
                 ui.checkbox(&mut self.picks.states[at], state.label());
             }
 
             for axis in Axis::ALL {
                 ui.separator();
-                ui.strong(axis.label());
+                ui.label(font::strong(axis.label()));
                 let rows = self.queue.groups(axis);
                 if rows.is_empty() {
                     ui.weak(empty_axis(axis));
@@ -1170,7 +1174,7 @@ impl Screen {
         });
         egui::ScrollArea::vertical().id_salt("详情").show(ui, |ui| {
             // **文件名与路径分两行**：人裁决时先认名字，路径是用来判「这一批是不是同一堆」的。
-            ui.strong(&name);
+            ui.label(font::strong(&name));
             ui.weak(format!("路径 {directory}"));
             ui.label(format!(
                 "{state}｜平台 {}｜容量 {bytes}",
@@ -1190,7 +1194,7 @@ impl Screen {
             for (index, (tier, line)) in candidates.iter().enumerate() {
                 let color = look::tier_color(*tier, ui.visuals());
                 if index == nth {
-                    ui.colored_label(color, egui::RichText::new(line).strong());
+                    ui.colored_label(color, font::strong(line));
                 } else {
                     ui.colored_label(color, line);
                 }
@@ -1225,7 +1229,7 @@ impl Screen {
             return;
         }
         ui.separator();
-        ui.strong("中文离线源那几次匹配");
+        ui.label(font::strong("中文离线源那几次匹配"));
         ui.weak(
             "一条裁决管住同一次匹配带来的全部字段——中文名、别名、类型、简介、\
              开发商、发行商同生共死，不必对同一次误撞裁五遍。",
@@ -1362,7 +1366,7 @@ impl Screen {
             ui.separator();
 
             ui.horizontal_wrapped(|ui| {
-                ui.strong("裁成");
+                ui.label(font::strong("裁成"));
                 for how in How::ALL {
                     ui.radio_value(&mut self.form.how, how, how.label());
                 }
@@ -1918,7 +1922,7 @@ fn match_groups_ui(ui: &mut egui::Ui, groups: &[MatchGroup]) -> Option<(u32, boo
         ui.horizontal_wrapped(|ui| {
             // **条目号写在堆上**：它就是「同一次匹配」的判据，人要去数据源核对时，
             // 那也是唯一查得回去的东西。
-            ui.strong(format!("条目 {}", group.entry));
+            ui.label(font::strong(format!("条目 {}", group.entry)));
             if group.confirmed {
                 ui.label("已由人裁决确认");
             } else {

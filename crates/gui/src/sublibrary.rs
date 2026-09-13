@@ -86,6 +86,7 @@ use romcat_core::sublibrary::{
 use romcat_core::sync::{self, Act, Outcome, Prepared};
 use romcat_core::task::{Cutoff, Ending, Finished, Handle};
 
+use crate::font;
 use crate::table::ROW_HEIGHT;
 use crate::task::{Product, Tasks};
 
@@ -960,7 +961,7 @@ impl Screen {
             ui.colored_label(color, notice);
         }
         ui.horizontal(|ui| {
-            ui.strong("子库");
+            ui.label(font::strong("子库"));
             ui.weak("一台目标设备一张卡。**这一屏不选内容**——改选择跳回浏览屏。");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
@@ -1016,7 +1017,7 @@ impl Screen {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 if ui
-                    .selectable_label(open, egui::RichText::new(&sublibrary.name).strong())
+                    .selectable_label(open, font::strong(&sublibrary.name))
                     .clicked()
                 {
                     if open {
@@ -1099,7 +1100,7 @@ impl Screen {
     /// 印的是同一个值），按过「算一遍容量」才有。
     fn selection_ui(&mut self, ui: &mut egui::Ui, name: &str) {
         ui.horizontal(|ui| {
-            ui.strong("选择集");
+            ui.label(font::strong("选择集"));
             ui.weak("只读——改它按上面「改选择」").on_hover_text(
                 "规则与例外都在**浏览屏**上改：在那儿改得见它真的筛出了什么，\
                      在这儿改只看得见一行字。这一屏管的是「送到哪」。",
@@ -1213,7 +1214,7 @@ impl Screen {
     /// **容量条**：选中的、清单之外的、上限，三段各自标得出数。
     fn gauge_ui(&mut self, ui: &mut egui::Ui, name: &str) {
         let gauge = self.gauge(name);
-        ui.strong("容量");
+        ui.label(font::strong("容量"));
         let (rect, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), GAUGE_HEIGHT),
             egui::Sense::hover(),
@@ -1381,10 +1382,10 @@ impl Screen {
     fn steps_ui(&mut self, ui: &mut egui::Ui, plan: &romcat_core::sync::Plan) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.strong(format!(
+            ui.label(font::strong(format!(
                 "这一趟要动的 {} 步（先删后传）",
                 thousands(plan.touched())
-            ));
+            )));
             if plan.steps.len() > STEP_SAMPLE {
                 let label = if self.expanded {
                     "收起来"
@@ -1477,10 +1478,10 @@ fn tally_ui(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan, prepare_ms: f64) 
         .num_columns(4)
         .spacing([16.0, 4.0])
         .show(ui, |ui| {
-            ui.strong("");
-            ui.strong("文件");
-            ui.strong("变体");
-            ui.strong("容量");
+            ui.label(font::strong(""));
+            ui.label(font::strong("文件"));
+            ui.label(font::strong("变体"));
+            ui.label(font::strong("容量"));
             ui.end_row();
             for (what, tally) in [
                 ("新增", plan.adds),
@@ -1489,9 +1490,10 @@ fn tally_ui(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan, prepare_ms: f64) 
                 ("原样留着", plan.keeps),
             ] {
                 ui.label(what);
-                ui.label(thousands(tally.files));
-                ui.label(thousands(tally.variants));
-                ui.label(human_bytes(tally.bytes));
+                // 数量与容量用等宽：四行账竖着比大小。
+                ui.label(font::mono(thousands(tally.files)));
+                ui.label(font::mono(thousands(tally.variants)));
+                ui.label(font::mono(human_bytes(tally.bytes)));
                 ui.end_row();
             }
         });
@@ -1613,7 +1615,7 @@ impl Screen {
             .id_salt("配目标")
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.strong("配目标");
+                    ui.label(font::strong("配目标"));
                     ui.weak("这台设备是什么样的。**要什么内容**去浏览屏筛。");
                 });
                 egui::Grid::new("配目标格")
@@ -1784,7 +1786,7 @@ pub fn steps_table(
         .header(22.0, |mut header| {
             for title in ["干什么", "类别", "容量", "目标上的路径"] {
                 header.col(|ui| {
-                    ui.strong(title);
+                    ui.label(font::strong(title));
                 });
             }
         })

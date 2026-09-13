@@ -29,6 +29,8 @@ use romcat_core::sublibrary::report::SelectionReport;
 use romcat_core::sync::{Outcome as SyncOutcome, Prepared};
 use romcat_core::task::{Board, Ending, Live, Record};
 
+use crate::font;
+
 /// 一趟任务跑完之后交出来的东西。
 ///
 /// **导出接上来时往这里再加一支**（票 `gui-self-sufficient/08`）——这个枚举就是
@@ -145,7 +147,7 @@ impl Screen {
         ui.weak("任务跑着的时候，别的屏照常用——浏览、筛选、看详情都不受影响。");
         ui.separator();
 
-        ui.strong("进行中");
+        ui.label(font::strong("进行中"));
         let mut stop = None;
         match tasks.running() {
             None => {
@@ -160,7 +162,7 @@ impl Screen {
         let queued = tasks.queued();
         if !queued.is_empty() {
             ui.add_space(6.0);
-            ui.strong("排着队");
+            ui.label(font::strong("排着队"));
             for (id, name) in queued {
                 ui.horizontal(|ui| {
                     ui.label(format!("{name}（第 {id} 号）"));
@@ -175,7 +177,7 @@ impl Screen {
         }
 
         ui.add_space(12.0);
-        ui.strong("历史");
+        ui.label(font::strong("历史"));
         if tasks.history().is_empty() {
             ui.weak("还没有跑完过任何任务。");
             return;
@@ -208,7 +210,7 @@ fn summary(tasks: &Tasks) -> String {
 fn running_ui(ui: &mut egui::Ui, live: &Live) -> bool {
     let mut stopped = false;
     ui.horizontal(|ui| {
-        ui.strong(&live.name);
+        ui.label(font::strong(&live.name));
         ui.weak(format!("已用 {}", elapsed(live.elapsed)));
         // **算不出来就一格都不画**：核心那一侧交出「没有」的时候（总步数还没报、
         // 或者走了零成），这儿连个占位都不摆。一个会跳的「约剩」比没有「约剩」更坏

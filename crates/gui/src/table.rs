@@ -35,6 +35,7 @@ use romcat_core::catalog::Catalog;
 use romcat_core::catalog::browse::{Scope, SearchHit, WorkAnchor, WorkOrder, WorkQuery, WorkRow};
 use romcat_core::report::{capacity, thousands};
 
+use crate::font;
 use crate::look;
 
 /// 一行多高，点。
@@ -450,11 +451,12 @@ impl Table<'_> {
                         // **平台是个集合**：一部作品可以横跨好几个平台。
                         ui.label(work.platforms.join(" / "));
                     });
+                    // 变体数与容量用等宽：一列扫下来位数对得齐。
                     row.col(|ui| {
-                        ui.label(thousands(work.variants));
+                        ui.label(font::mono(thousands(work.variants)));
                     });
                     row.col(|ui| {
-                        ui.label(capacity(work.bytes, work.unreadable_files));
+                        ui.label(font::mono(capacity(work.bytes, work.unreadable_files)));
                     });
                     row.col(|ui| {
                         ui.label(work.year.as_deref().unwrap_or("—"));

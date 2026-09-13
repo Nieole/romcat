@@ -31,6 +31,7 @@ use romcat_core::path;
 use romcat_core::site::Site;
 use romcat_core::workspace::{self, Slug};
 
+use crate::font;
 use crate::roots::{ROOT_HINT, ROOT_NAME_HINT};
 
 /// 起名那一步框里的提示字。
@@ -118,7 +119,7 @@ impl Wizard {
 
     /// 画一帧。
     pub fn ui(&mut self, ui: &mut egui::Ui) -> Outcome {
-        ui.strong("认领一个新主库");
+        ui.label(font::strong("认领一个新主库"));
         let out = match self.asking {
             Asking::Name => {
                 self.name_ui(ui);

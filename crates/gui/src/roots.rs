@@ -44,6 +44,7 @@ use romcat_core::site::Site;
 use romcat_core::sources::{self, Source, SourceState, SourceStatus};
 use romcat_core::task::{Cutoff, Ending};
 
+use crate::font;
 use crate::task::{Product, Tasks};
 
 /// 「添加目录」那两个框里的提示字。
@@ -440,7 +441,7 @@ impl Screen {
 
     fn roots_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         ui.horizontal(|ui| {
-            ui.strong(format!("根 · {} 个", self.roots.len()));
+            ui.label(font::strong(format!("根 · {} 个", self.roots.len())));
             ui.weak("主库是一组根：几块盘都能加进同一个库，扫完收进同一份中立库");
         });
 
@@ -457,22 +458,23 @@ impl Screen {
             .striped(true)
             .show(ui, |ui| {
                 for header in ["根名", "路径", "变体", "容量", "上次扫描", ""] {
-                    ui.strong(header);
+                    ui.label(font::strong(header));
                 }
                 ui.end_row();
                 for row in &roots {
                     ui.label(&row.root.name);
+                    // 路径、变体数与容量用等宽：一列扫下来位数对得齐。
                     if row.mounted {
-                        ui.weak(&row.root.path);
+                        ui.label(font::mono(&row.root.path).weak());
                     } else {
                         // **盘没挂上照样看得见上次结果**——那是这一行存在的一半理由。
                         ui.colored_label(
                             ui.visuals().warn_fg_color,
-                            format!("{}（不在位）", row.root.path),
+                            font::mono(format!("{}（不在位）", row.root.path)),
                         );
                     }
-                    ui.label(thousands(row.stats.variants));
-                    ui.label(human_bytes(row.stats.bytes));
+                    ui.label(font::mono(thousands(row.stats.variants)));
+                    ui.label(font::mono(human_bytes(row.stats.bytes)));
                     ui.label(last_scan(row));
                     ui.horizontal(|ui| {
                         let 忙 = 忙的.contains(&row.root.name);
@@ -544,7 +546,7 @@ impl Screen {
 
     fn sources_ui(&mut self, ui: &mut egui::Ui, tasks: &mut Tasks) {
         ui.horizontal(|ui| {
-            ui.strong("数据源 · 让识别能干活的原料");
+            ui.label(font::strong("数据源 · 让识别能干活的原料"));
         });
         let mut 要取 = None;
         egui::Grid::new("数据源")
@@ -552,7 +554,7 @@ impl Screen {
             .striped(true)
             .show(ui, |ui| {
                 for header in ["源", "记录", "上次取回", "覆盖", ""] {
-                    ui.strong(header);
+                    ui.label(font::strong(header));
                 }
                 ui.end_row();
                 for (source, status) in Source::all().into_iter().zip(&self.sources) {
