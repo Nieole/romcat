@@ -12,7 +12,7 @@
 use std::fs;
 use std::path::Path;
 
-use romcat_core::catalog::identify::State;
+use romcat_core::catalog::identify::{Identification, State};
 use romcat_core::catalog::{Catalog, Confidence, Roots};
 use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
@@ -379,6 +379,75 @@ fn 内部头与目录声明的平台冲突记下来() {
         .expect("那一份该在里面");
     assert_eq!(found.declared, "GBA");
     assert_eq!(found.found, "NDS");
+}
+
+#[test]
+fn 识别把内容说的平台落下来而目录声明的那一列一个字不动() {
+    // 票 `one-criterion-per-thing/03`：判出来的平台落进中立库，刮削读它，不再判一次
+    // （ADR-0024 推论 3）。但**不回写目录声明的那一列**——那一列的语义就是「目录说的」，
+    // 改了它，上面那条平台冲突的报表就没了对照物。
+    let mut 现场 = 建现场();
+    for 趟 in ["第一趟", "第二趟（卡带头从中立库取回，不读盘）"] {
+        跑一趟(&mut 现场);
+        let key = 变体键(&现场.catalog, "下错了的");
+        let 判定的 = 现场.catalog.identified_platforms().expect("读得出");
+        assert_eq!(
+            判定的.get(&key).map(String::as_str),
+            Some("NDS"),
+            "{趟}：识别判定的是内部头说的那个"
+        );
+        let variant = 现场.catalog.variant(&key).expect("读得出").expect("在库里");
+        assert_eq!(
+            variant.platform.as_deref(),
+            Some("GBA"),
+            "{趟}：目录声明的那一列原样"
+        );
+        let conflicts = 现场.catalog.platform_conflicts(10).expect("查得出");
+        let found = conflicts
+            .iter()
+            .find(|it| it.variant_key == key)
+            .unwrap_or_else(|| panic!("{趟}：平台冲突那张报表照旧报得出它"));
+        assert_eq!(
+            (found.declared.as_str(), found.found.as_str()),
+            ("GBA", "NDS")
+        );
+        // 目录也说对了的那一份，判定的与声明的是同一个。
+        let 洛克人 = 变体键(&现场.catalog, "洛克人EXE6");
+        assert_eq!(判定的.get(&洛克人).map(String::as_str), Some("GBA"), "{趟}");
+    }
+}
+
+#[test]
+fn 不说平台的结论写回去不盖掉识别判定的那个() {
+    // 裁决没看过内容，它落成的结论不判平台（`identify::Projector::project`）。人在队列里
+    // 裁完一条、命令行或界面把那条结论写回中立库，识别按内容判定的平台照旧留着。
+    let mut 现场 = 建现场();
+    跑一趟(&mut 现场);
+    let key = 变体键(&现场.catalog, "下错了的");
+    现场
+        .catalog
+        .write_identifications(&[Identification {
+            variant_key: key.clone(),
+            platform: None,
+            state: State::Skipped,
+            reason: None,
+            units: 1,
+            nkit: 0,
+            read_bytes: 0,
+            work_id: None,
+            release_id: None,
+            candidates: Vec::new(),
+        }])
+        .expect("写得进");
+    assert_eq!(
+        现场
+            .catalog
+            .identified_platforms()
+            .expect("读得出")
+            .get(&key)
+            .map(String::as_str),
+        Some("NDS")
+    );
 }
 
 #[test]

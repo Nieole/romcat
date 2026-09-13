@@ -31,6 +31,7 @@ use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::priority::VERDICT;
 use romcat_core::scrape::{self, AnchorKind, Field, Priorities};
 use romcat_core::task::Handle;
+use romcat_core::testing::cart as real;
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::title;
@@ -126,9 +127,7 @@ fn 建现场() -> 现场 {
     写(&root.join("FC/一堆/无关.jpg"), &截图());
 
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-    let mut options = ScanOptions::named(root, "库");
-    options.jobs = Jobs::Fixed(2);
-    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
+    扫进(&mut catalog, root);
 
     现场 {
         dir,
@@ -634,6 +633,171 @@ fn 名下一个变体都没撞上的作品不产出任何字段() {
         .filter(|value| value.source.starts_with("中文离线源"))
         .count();
     assert_eq!(中文的, 0, "名下一个变体都没撞上，作品锚点上不该有任何一条");
+}
+
+/// 目录说一个平台、卡带内部头说另一个的那一份：**`nds/` 目录底下躺着一张 GBA 卡**。
+const 放错目录的变体: &str = "库/nds/洛克人EXE6.gba";
+
+/// 同一个目录底下另一份 `.gba`：**字节里一种卡带头都读不出来**。
+const 读不出头的变体: &str = "库/nds/逆转检事.gba";
+
+/// 摆两张卡：放错目录的那一张，与读不出头的那一份。
+///
+/// 头部字节来自真主库（`testing::cart`），与识别那一侧的卡带测试是同一份：
+/// 手工编造的头只证得了「文档说该长什么样」。
+fn 摆两张卡(root: &Path) {
+    写(
+        &root.join(相对(放错目录的变体)),
+        &real::padded(&real::GBA_ROCKMAN_EXE6, 1 << 20),
+    );
+    写(&root.join(相对(读不出头的变体)), &[0xC3; 1 << 16]);
+}
+
+fn 扫进(catalog: &mut Catalog, root: &Path) {
+    let mut options = ScanOptions::named(root, "库");
+    options.jobs = Jobs::Fixed(2);
+    scan::scan(&RealFs::new(), catalog, &options, &Handle::new()).expect("扫得动");
+}
+
+fn 建放错目录的现场() -> 现场 {
+    let dir = temp_dir("scrape-platform");
+    摆两张卡(dir.path());
+    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+    扫进(&mut catalog, dir.path());
+    现场 {
+        dir,
+        pool_dir: temp_dir("scrape-platform-pool"),
+        catalog,
+        repo: 建_dat(),
+    }
+}
+
+/// 一份中文离线索引：每条是 `(条目号, 中文名, 平台)`。
+fn 一份中文索引(entries: &[(u32, &str, &str)]) -> romcat_core::zh::Index {
+    romcat_core::zh::Index::build(
+        entries
+            .iter()
+            .map(|(id, name, platform)| romcat_core::zh::Entry {
+                id: *id,
+                name: (*name).to_string(),
+                name_cn: (*name).to_string(),
+                platforms: vec![(*platform).to_string()],
+                platform_text: (*platform).to_string(),
+                ..romcat_core::zh::Entry::default()
+            })
+            .collect(),
+        "dump-2026-09-01".to_string(),
+    )
+}
+
+/// 目录声明的平台：变体那一行上的那一列。
+fn 目录声明的平台(现场: &现场, key: &str) -> Option<String> {
+    现场
+        .catalog
+        .variant(key)
+        .expect("读得出变体")
+        .unwrap_or_else(|| panic!("库里该有 {key}"))
+        .platform
+}
+
+#[test]
+fn 目录写着一个平台而内容是另一个时刮削撞的是内容那个() {
+    // 挂账 `D123`：识别按**内容**定平台（ADR-0011：目录只是强先验），刮削那一趟却听
+    // **目录声明**的——于是放错目录的那一份，中文名被平台交叉校验整条挡掉。
+    // 刮削不重新判一次平台，读识别判过的那个（ADR-0024 推论 3）。
+    let mut 现场 = 建放错目录的现场();
+    识别(&mut 现场);
+    assert_eq!(
+        目录声明的平台(&现场, 放错目录的变体).as_deref(),
+        Some("NDS"),
+        "前提：目录说的是 NDS"
+    );
+
+    刮削带中文索引(&mut 现场, &一份中文索引(&[(23_456, "洛克人EXE6", "GBA")]));
+
+    assert_eq!(
+        值(&现场, "变体", 放错目录的变体, "标题", "中文离线源").as_deref(),
+        Some("洛克人EXE6"),
+        "内部头说这是 GBA，GBA 的那一条就该撞得上"
+    );
+}
+
+#[test]
+fn 一个都读不出内部头时照旧退回目录声明的那个() {
+    // 行为不变：字节里读不出任何一种卡带头，识别手上只有目录那一个平台——
+    // 扩展名说 `.gba` 也不算数（ADR-0011 对文件名同样成立）。
+    let mut 现场 = 建放错目录的现场();
+    识别(&mut 现场);
+    assert_eq!(
+        现场
+            .catalog
+            .identified_platforms()
+            .expect("读得出")
+            .get(读不出头的变体)
+            .map(String::as_str),
+        Some("NDS"),
+        "识别判定的是目录声明的那个"
+    );
+
+    刮削带中文索引(&mut 现场, &一份中文索引(&[(34_567, "逆转检事", "NDS")]));
+
+    assert_eq!(
+        值(&现场, "变体", 读不出头的变体, "标题", "中文离线源").as_deref(),
+        Some("逆转检事"),
+        "按目录声明的 NDS 去撞，NDS 的那一条撞得上"
+    );
+}
+
+#[test]
+fn 没有判定平台那一列的旧库照样打得开而且重跑识别之后刮削就用上了() {
+    // **结构版本没升**（`catalog::SCHEMA_VERSION` 的判据：改了已有表的列或含义才加一，
+    // 纯加一列不算）。旧库里的 `identification` 表上没有识别判定的平台那一列：打开时补上，
+    // 老行上它是空的，读的那一侧当「识别没判过」——于是刮削与加这一列之前一模一样。
+    let dir = temp_dir("scrape-platform-old");
+    摆两张卡(dir.path());
+    let 工作目录 = temp_dir("scrape-platform-old-catalog");
+    let 库文件 = 工作目录.path().join("中立库.sqlite");
+    let mut catalog = Catalog::create(&库文件, "旧库").expect("能建中立库");
+    扫进(&mut catalog, dir.path());
+    let mut 现场 = 现场 {
+        dir,
+        pool_dir: temp_dir("scrape-platform-old-pool"),
+        catalog,
+        repo: 建_dat(),
+    };
+    识别(&mut 现场);
+
+    // 退回加这一列之前的样子：识别过，库里却没有那一列。
+    drop(std::mem::replace(
+        &mut 现场.catalog,
+        Catalog::open_in_memory().expect("能开中立库"),
+    ));
+    let conn = rusqlite::Connection::open(&库文件).expect("能再打开那个文件");
+    conn.execute_batch("ALTER TABLE identification DROP COLUMN platform")
+        .expect("删得掉那一列");
+    drop(conn);
+
+    现场.catalog = Catalog::open(&库文件).expect("旧库照样打得开");
+    let 索引 = 一份中文索引(&[(23_456, "洛克人EXE6", "GBA")]);
+    刮削带中文索引(&mut 现场, &索引);
+    assert_eq!(
+        值(&现场, "变体", 放错目录的变体, "标题", "中文离线源"),
+        None,
+        "老行识别没判过平台，照旧按目录声明的 NDS 算——与加这一列之前一模一样"
+    );
+
+    识别(&mut 现场);
+    刮削带中文索引(&mut 现场, &索引);
+    assert_eq!(
+        值(&现场, "变体", 放错目录的变体, "标题", "中文离线源").as_deref(),
+        Some("洛克人EXE6"),
+        "重跑一趟识别，判定的平台落下来，刮削就撞得上内容那个"
+    );
+    assert_eq!(
+        目录声明的平台(&现场, 放错目录的变体).as_deref(),
+        Some("NDS"),
+        "目录声明的那一列一个字没动"
+    );
 }
 
 /// 数据源里那条 infobox 的原样：**开发**写成顿号分隔的一行，**发行**写成多值块。

@@ -123,6 +123,7 @@ fn 建库() -> Catalog {
         for n in 0..PER_WORK {
             records.push(Identification {
                 variant_key: 键(at, n),
+                platform: None,
                 state: State::Matched,
                 reason: None,
                 units: 1,
@@ -291,6 +292,7 @@ fn 连识别都没跑过的与跑过了没候选的在同一张表上印两个�
     catalog
         .write_identifications(&[Identification {
             variant_key: 跑过了.clone(),
+            platform: None,
             state: State::Unmatched,
             reason: None,
             units: 1,
@@ -399,6 +401,7 @@ fn 一行底下只要还剩一个变体没跑过识别这一行就说还没识�
         .expect("建得出作品");
     let 一条不带候选的 = |key: String, work: i64| Identification {
         variant_key: key,
+        platform: None,
         state: State::Unmatched,
         reason: None,
         units: 1,

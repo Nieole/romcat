@@ -1240,6 +1240,10 @@ impl Plan {
     fn build(catalog: &Catalog, options: &Options) -> Result<Self, CatalogError> {
         let variants = catalog.variants()?;
         let works = catalog.work_names()?;
+        // **平台读识别判定的那个**，不读变体那一行上目录声明的（挂账 `D123`）：放错目录的
+        // 那一份，拿目录说的平台去做交叉校验，中文名会被整条挡掉。刮削不重新判一次平台
+        // （ADR-0024 推论 3）。
+        let platforms = catalog.identified_platforms()?;
 
         // 候选按变体归堆。同一个源在同一个变体上可能撞出好几条（多碟、多芯片），
         // 归堆时去重——刮削要的是「这个源说这是什么」，不是「撞了几次」。
@@ -1284,6 +1288,7 @@ impl Plan {
                 .as_ref()
                 .is_none_or(|only| only.contains(&variant.key));
             let entries = by_variant.remove(&variant.key).unwrap_or_default();
+            let platform = platforms.get(&variant.key).cloned();
             // **「已确认」的判据是有一条自动通过的候选**，不是「有发行版链接」：
             // 汉化版认得出是哪部作品、认不出基于哪一条发行版，发行版那一列本来就空着
             // （ADR-0012），拿它当判据会把整批汉化版划成未识别。判据在变体这一行上
@@ -1299,13 +1304,13 @@ impl Plan {
                 let slot = work_entries
                     .entry(name.clone())
                     .or_insert_with(|| WorkSlot {
-                        platform: variant.platform.clone(),
+                        platform: platform.clone(),
                         entries: Vec::new(),
                         variants: Vec::new(),
                         representative: None,
                     });
                 if slot.platform.is_none() {
-                    slot.platform.clone_from(&variant.platform);
+                    slot.platform.clone_from(&platform);
                 }
                 slot.entries.extend(entries.iter().cloned());
                 // **作品层不自己撞名字，读的是名下变体撞出来的条目**（票 02）。
@@ -1313,7 +1318,7 @@ impl Plan {
                 slot.variants.push(WorkVariant {
                     key: variant.key.clone(),
                     main_key: variant.main_key.clone(),
-                    platform: variant.platform.clone(),
+                    platform: platform.clone(),
                     entries: entries.clone(),
                 });
                 // **一部作品发一次查询就够**，所以只留一个代表变体。变体按键排序遍历，
@@ -1332,7 +1337,7 @@ impl Plan {
             subjects.push(PlannedSubject {
                 kind: AnchorKind::Variant,
                 id: variant.key.clone(),
-                platform: variant.platform.clone(),
+                platform,
                 entries,
                 main_key: Some(variant.main_key.clone()),
                 media,

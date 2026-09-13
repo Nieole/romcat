@@ -913,6 +913,7 @@ fn identify_variant(
             variant_key: variant.key.clone(),
             state: State::Skipped,
             reason: Some(skip.recorded()),
+            platform: platform_of(variant, &units).map(ToString::to_string),
             units: 0,
             nkit: 0,
             read_bytes: 0,
@@ -2033,7 +2034,12 @@ fn ask_verdicts(
             .projector
             .project(catalog, variant, found.verdict, &found.member, &found.inner)?;
     Ok(match projected {
-        Some(record) => Said::Conclusion(record),
+        // **裁决不判平台，识别替它判**。这一问排在探卡带头之前，units 上还没有卡带头，
+        // 判出来的是目录声明的那个（挂单 `Q602`）。
+        Some(mut record) => {
+            record.platform = platform_of(variant, units).map(ToString::to_string);
+            Said::Conclusion(record)
+        }
         None => Said::Unknown,
     })
 }
@@ -3119,6 +3125,9 @@ fn assemble(
         variant_key: variant.key.clone(),
         state: state_of,
         reason,
+        // 判出来的平台**落下来**：刮削读它，不再拿目录那一列判一次（票
+        // `one-criterion-per-thing/03`）。
+        platform: platform_of(variant, units).map(ToString::to_string),
         units: usable,
         nkit,
         read_bytes,
@@ -3135,6 +3144,9 @@ fn assemble(
 /// FC / GB / SFC ROM——按目录判，它们的中文名会被整批判成「平台对不上」而一条不产出。
 ///
 /// 头读不出来（没探过、不是卡带、光盘世代）才退回目录那一个。
+///
+/// **判断只有这一处，结论落进中立库**（`identification.platform`，票
+/// `one-criterion-per-thing/03`）：刮削读那一列，不自己拿目录声明再判一次（ADR-0024 推论 3）。
 fn platform_of<'a>(variant: &'a VariantRow, units: &'a [ContentUnit]) -> Option<&'a str> {
     units
         .iter()
@@ -3492,6 +3504,9 @@ impl Projector {
             variant_key: variant.key.clone(),
             state: state_of,
             reason,
+            // **裁决不判平台**：它没看过内容。识别那一趟替它补上（`ask_verdicts`），
+            // 命令行与界面直接落的这一条不盖掉识别判过的那个（`write_identifications`）。
+            platform: None,
             units: 1,
             nkit: 0,
             read_bytes: 0,

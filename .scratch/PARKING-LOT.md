@@ -1624,6 +1624,78 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 - **谁来裁：** 拿主意的人
 - **状态：** open
 
+### Q601 — 旧库补识别判定的平台那一列走 `ALTER TABLE … ADD COLUMN`，没另开一张表
+
+- **来自：** 票 `one-criterion-per-thing/03`
+- **类别：** 规格没说
+- **在哪：** `crates/core/src/catalog/identify.rs` 的 `IDENTIFY_SCHEMA`（`identification.platform`）与 `add_columns`
+- **为什么没停线：** 「纯加一列、不升结构版本、旧库打开照旧能用」三条同时做得到：同一个文件的 `add_columns` 早就这么给 `content_hash` 补过两列 SHA-1，判据是「旧数据会不会被读错」。
+- **这张票实际做了什么：** 新库建表时带上 `platform TEXT`；旧库在 `Catalog::open` 里由 `add_columns` 补一句 `ALTER TABLE identification ADD COLUMN platform TEXT`，老行上是 NULL，读的那一侧（`Catalog::identified_platforms`）当「识别没判过」退回目录声明。`SCHEMA_VERSION` 一个字没动。测试 `scrape.rs` 的 `没有判定平台那一列的旧库照样打得开而且重跑识别之后刮削就用上了` 删掉那一列再开。
+- **没走的那条：** 另开一张 `identification_platform(variant_key, platform)` 表，`CREATE TABLE IF NOT EXISTS` 白拿——`content_disc` / `content_cart` 那几张表的注释写的就是「加表不加列」。
+- **建议留：** 这条。规格原话是「落在识别结论那张表上」；另开一张表要跟着 `clear_identifications`、`drop_variant_orphans`、`drop_stale_conclusions`、按根删那几处各补一句 `DELETE`，漏一处就留下一行过期的平台。`content_disc` 那句「加列要删库重扫」早被票 10 的 `add_columns` 推翻了。
+- **谁来裁：** 收尾
+- **状态：** open
+
+### Q602 — 裁决短路那一步没探卡带头，落下的是目录声明的平台：被裁决过的放错目录的变体，刮削照旧撞不上
+
+- **来自：** 票 `one-criterion-per-thing/03`
+- **类别：** 规格没说
+- **在哪：** `crates/core/src/identify.rs` 的 `ask_verdicts`——`identify_variant` 里两处调它，答出结论就返回，都排在 `probe_carts` 之前
+- **为什么没停线：** 四条验收的测试都绿，但**验收 1（「刮削撞的是内容那个」）在被裁决过的变体上不成立**，也没有测试钉这条路。改它要在下面两条都站得住的路之间挑：短路那一步不读盘是 `identify_variant` 那段注释许的（「裁决过的东西一个字节都不必再读」），不是 ADR 原文，要不要为卡带头破例是拿主意的人的事。
+- **这张票实际做了什么：** `ask_verdicts` 答出结论时照样调 `platform_of`，但那时 units 上还没有卡带头，判出来的是目录声明的那个。**`D123` 在被裁决过的变体上没收干净**：`psp/` 目录下那批 FC / GB / SFC 整理包（`D123` 与 `platform_of` 文档里举的正是它）一旦在待确认队列里被裁过，从下一趟识别起判定的平台又回到 PSP，刮削的中文名照旧被平台交叉校验挡掉。
+- **没走的那条：** (a) 短路之前从 `content_cart` 取回算过的卡带头（不读盘）再判——删库重扫之后那张表是空的，而短路让它永远填不上，只治一半；(b) 短路那一步也探卡带头（每份 0x400 字节到 64 KiB，ExHiROM 4 MiB），与「一个字节都不必再读」那句相悖。
+- **建议留：** 不留现状，开一张票走 (a)+(b)：先取缓存，取不到才读卡带头。量级与光盘那一层「只读几百字节」同档，但要不要为它松那句话，是拿主意的人的事。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q603 — 不说平台的结论写回去时用 `COALESCE` 留住判过的那个，没让快照表带上这一列
+
+- **来自：** 票 `one-criterion-per-thing/03`
+- **类别：** 规格没说
+- **在哪：** `crates/core/src/catalog/identify.rs` `write_identifications` 的 upsert（`platform = COALESCE(excluded.platform, platform)`）；`crates/core/src/identify.rs` `Projector::project` 里的 `platform: None`
+- **为什么没停线：** 裁决落成的结论（`triage.rs` 两处 `write_identifications`）没看过内容，手上没有平台可写；只是「写 NULL 还是留旧值」之间挑一个。
+- **这张票实际做了什么：** 结论不说平台时不盖掉库里那一行已有的；撤销走 `restore_conclusions`，那条 upsert 本来就不碰这一列，于是裁决与撤销前后判定的平台都不变。测试 `cart_header.rs` 的 `不说平台的结论写回去不盖掉识别判定的那个`。
+- **没走的那条：** 照写（写成 NULL，读的那一侧退回目录声明），`verdict_batch_shadow` 补一列 `platform`，快照与放回两处跟着带上——那样与 `Q602` 眼下的短路行为（重跑识别之后是目录声明的）处处一致。
+- **建议留：** 这条。`Q602` 修好之后重跑识别判出的也是内容那个，`COALESCE` 与它自然一致，不必回头改；照写那条要多补一张快照表的列，而且在 `Q602` 修好之前人一裁完就撞不上。代价如实记下：`Q602` 修好之前，裁完到下一趟识别之间用的是内容那个，重跑之后回到目录声明的——「眼下」与「重算一遍」差这一处。
+- **谁来裁：** 收尾
+- **状态：** open
+
+### Q604 — 「识别没判过就退回目录声明」放在中立库的读法里，没让刮削自己退
+
+- **来自：** 票 `one-criterion-per-thing/03`
+- **类别：** 规格没说
+- **在哪：** `crates/core/src/catalog/identify.rs` `Catalog::identified_platforms`；`crates/core/src/scrape.rs` `Plan::build`
+- **为什么没停线：** 几条路交出来的平台一模一样，差在「识别没判过」那一步写在哪。
+- **这张票实际做了什么：** 存进 `identification.platform` 的是 `platform_of` 的完整结论（连它自己退回目录的那一步）；读法是 `COALESCE(i.platform, v.platform)`（`variant LEFT JOIN identification`），只管还没识别、或者加这一列之前识别的那些。刮削只 `platforms.get(&variant.key)`，自己一句平台逻辑都不写。
+- **没走的那条：** 读法只交判过的那些，刮削自己 `.or(variant.platform)`；或者列里只存内容读出来的那个，读的时候再退。
+- **建议留：** 这条。刮削那一侧多一句 `.or(variant.platform)` 正是 ADR-0024 要挡的形状，下一个调用方（票 `gui-looks-like-the-design/28`）会照抄一句；只存内容那条让「退回目录」写在两处（`platform_of` 与读法）。代价：这个读法分不出「判过、判的就是目录那个」与「没判过」，要分就看 `identification_of` 有没有结论。
+- **谁来裁：** 收尾
+- **状态：** open
+
+### Q605 — 识别与两份报告里还有四处拿目录声明的平台，没跟着改
+
+- **来自：** 票 `one-criterion-per-thing/03`（`for_each_identification` 那一处是 `/code-review` 的 Spec 轴补的）
+- **类别：** 路过发现，不在范围内
+- **在哪：** `crates/core/src/identify.rs` 的 `rank`（`platform_matches` 比的是 `variant.platform`）；`has_ammo` / `has_sha1_ammo`（按目录声明决定读不读盘）；`crates/core/src/catalog/scrape.rs` 的 `source_by_platform`（刮削报告按 `v.platform` 分平台）；`crates/core/src/catalog/identify.rs` 的 `for_each_identification`（识别报告 `identify/report.rs` 按 `v.platform` 分平台）
+- **为什么没停线：** 票与 `D123` 只点了刮削取平台那一处（`scrape.rs:1335`）。
+- **这张票实际做了什么：** 没动。
+- **没走的那条：** `rank` 改用 `platform_of`（排序那一步 units 已经探完），刮削报告按 `Catalog::identified_platforms` 分组。
+- **建议留：** `rank` 跟着改：与 `D123` 同一个形状——放错目录的变体上「平台对得上」那一档仍然听目录的，DAT 候选的次序会偏。两份报告按哪个平台分组是**口径**：按目录声明分，读者对得上盘上的目录；按判定的分，数得出「这个平台真有几个」——至少要在报告里说清是哪一个。`has_ammo` 两处留着：它们在读盘之前判，那时内容还没读，目录声明是判断的前提而不是第二个判据。开一张票。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q606 — 「识别判定的平台」词表里没有，没往 `CONTEXT.md` 加
+
+- **来自：** 票 `one-criterion-per-thing/03`（`/code-review` 的 Standards 轴指出）
+- **类别：** 规格没说
+- **在哪：** `CONTEXT.md` 的 **平台** 条只说「平台由目录给出……文件内容可以推翻它」；代码里如今有两个说法并存：`variant.platform`（目录声明的）与 `identification.platform` / `Catalog::identified_platforms`（识别判定的），文档与注释里用的是「目录声明的平台」「识别判定的平台」
+- **为什么没停线：** 两个说法都是 **平台** 条那句话的直译，没发明新概念；`docs/agents/domain.md` 说真缺口「记下来交给 `/domain-modeling`」。
+- **这张票实际做了什么：** 没动 `CONTEXT.md`，只在代码文档里把两个说法各自讲清。
+- **没走的那条：** 当场在 **平台** 条下补一句，把「目录声明的平台」与「识别判定的平台」立成两个说法。
+- **建议留：** 这条，等票 `gui-looks-like-the-design/28`（平台纠正）一起立：那张票会带来第三个——人纠正过的平台——三个说法与「刮削、报告各按哪一个算」该一次定下来，现在只立两个，下一张票还得回头改这一条。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
 ---
 
 ## 结算索引（第四轮收口，`Q364`–`Q448`）
