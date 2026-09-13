@@ -339,20 +339,27 @@ pub enum CatalogError {
         /// 底层错误。
         source: serde_json::Error,
     },
+    /// 改名时给的**主库原名**是空白。**空白不是名字**（挂单 `Q469`）。
+    #[error("中立库 {path} 的主库原名不能改成空白——开场屏与报告上认这份库靠的就是这个名字")]
+    BlankLibraryName {
+        /// 中立库文件。
+        path: String,
+    },
+}
+
+/// **空白不是名字**：一个主库原名是不是空的、或者全是空白字符。
+///
+/// 三处都问这一处：改名时拒收（[`Catalog::set_library_name`]）、建库时不写
+/// （`Catalog::prepare`）、读的时候当它不在（[`Catalog::library_name`]）。
+/// 各判一次，迟早判出几个答案（ADR-0024）。
+fn is_blank_name(name: &str) -> bool {
+    name.trim().is_empty()
 }
 
 /// 现在是 UNIX 纪元起的第几秒。
 ///
 /// 一处定死：快照、刮削、子库三处都往库里记时刻，各写一遍的话「取不到时钟怎么办」
 /// 这个岔路口就有三个不一样的答案。
-/// **空白不是名字**：一个主库原名是不是空的、或者全是空白字符。
-///
-/// 写的一侧（[`Catalog::set_library_name`]，建库那一趟也走它）与读的一侧
-/// （[`Catalog::library_name`]）都问这一处——两处各判一次，迟早判出两个答案（ADR-0024）。
-fn is_blank_name(name: &str) -> bool {
-    name.trim().is_empty()
-}
-
 pub(crate) fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -608,9 +615,10 @@ impl Catalog {
             None => {
                 catalog.meta_set(MetaKey::SchemaVersion, &SCHEMA_VERSION.to_string())?;
                 // **「结构版本这一行还不在」就是「这份库是这一趟建出来的」。**
-                // 打开时给的名字只在这一趟落，理由见 `Catalog::open_named`；空白怎么办
-                // 由 `Catalog::set_library_name` 说了算（`--library ""` 命令行不拦）。
-                if let Some(name) = name {
+                // 打开时给的名字只在这一趟落，理由见 `Catalog::open_named`。
+                // **空白名字在这一路照旧不写**、读时退回从文件名截：`--library ""` 命令行不拦，
+                // 改成当场报错归票 03（挂单 `Q469`）。所以先滤掉空白，不走会报错的那一句。
+                if let Some(name) = name.filter(|name| !is_blank_name(name)) {
                     catalog.set_library_name(name)?;
                 }
             }
@@ -660,8 +668,8 @@ impl Catalog {
     /// 剥掉只留人认得出的那一半（[`workspace::readable_half`]）。
     ///
     /// **它不报错、不中断，一定交得出一句话。** 退路要顶的有四种库：票 01 之前建的
-    /// （那一行压根没写过）、拿 [`Self::open`] 建的（不知道自己叫什么）、名字被清空的
-    /// （改名时给了空白）、以及库本身读不动的。而开场那一屏的判据是**照列不误**
+    /// （那一行压根没写过）、拿 [`Self::open`] 建的（不知道自己叫什么）、建库时给了空白
+    /// 名字的（`--library ""`，那一行不写）、以及库本身读不动的。而开场那一屏的判据是**照列不误**
     /// ——从列表里静静消失才是最难查的那种错（ADR-0023），一份库说不出名字不该让整屏失败。
     ///
     /// 只活在内存里的那份没有文件名可截，交出的是它那个占位路径。空白也算读不到。
@@ -690,9 +698,9 @@ impl Catalog {
     /// 报告抬头、窗口标题读的都是它（[`Self::library_name`]）。建库那一趟记名字走的也是
     /// 这一个函数。
     ///
-    /// **空白不是名字。** 交一个空白进来就把那一行抹掉，读的时候退回从文件名截
-    /// ——落一行空串下去，开场那一屏就多一行没有名字的库。「算不算空白」读写两侧问的是
-    /// 同一个判断（`is_blank_name`）。
+    /// **空白不是名字**（挂单 `Q469`）：交一个空白进来当场报错，元数据表那一行一个字不动
+    /// ——改名框里清空了名字按确定，人该听到一句「不能是空白」，而不是名字悄悄变回
+    /// 从文件名截出来的那一半。「算不算空白」只在 `is_blank_name` 一处判。
     ///
     /// ## 它不动**主库标识**
     ///
@@ -702,10 +710,13 @@ impl Catalog {
     /// `--library` 折出来的是主库标识，拿新名字去找是找不到这一份的（挂单 `Q472`）。
     ///
     /// # Errors
-    /// 写库失败时返回错误——只读地开的那一份（[`Self::open_read_only`]）写不进去。
+    /// 名字是空白时返回 [`CatalogError::BlankLibraryName`]；写库失败时返回错误——
+    /// 只读地开的那一份（[`Self::open_read_only`]）写不进去。
     pub fn set_library_name(&self, name: &str) -> Result<(), CatalogError> {
         if is_blank_name(name) {
-            return self.meta_clear(MetaKey::LibraryName);
+            return Err(CatalogError::BlankLibraryName {
+                path: self.path.clone(),
+            });
         }
         self.meta_set(MetaKey::LibraryName, name)
     }

@@ -12,7 +12,7 @@
 //! ## 为什么不做通用的按键读写面
 //!
 //! 通用面把「这一族有哪些键、各自什么语义」变成一个**字符串约定**：键名在调用方与这里
-//! 各写一遍，写岔一个字，读的那一方交回「没记过」，谁都不报错。所以按键读写的那三个
+//! 各写一遍，写岔一个字，读的那一方交回「没记过」，谁都不报错。所以按键读写的那两个
 //! 函数只在 [`catalog`](super) 这一层里可见，收的也不是字符串而是 [`MetaKey`]。
 //!
 //! ## 为什么是键值表上的键，不是哪张表上的一列
@@ -110,14 +110,6 @@ impl Catalog {
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 params![key.as_str(), value],
             )
-            .map_err(|source| self.err(source))?;
-        Ok(())
-    }
-
-    /// 抹掉一个键：那一行不在也不算错。
-    pub(super) fn meta_clear(&self, key: MetaKey) -> Result<(), CatalogError> {
-        self.conn
-            .execute("DELETE FROM meta WHERE key = ?1", params![key.as_str()])
             .map_err(|source| self.err(source))?;
         Ok(())
     }

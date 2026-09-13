@@ -16,7 +16,9 @@
 //! 是新名字，**路径锚与中立库的文件名一个字节不动**——锚认的是主库标识，改的是主库原名。
 //! 元数据表那一族的键名收进一处之后，旧库里按原先那几串键名记下的账也得照样读得回来。
 
-use romcat_core::catalog::{Catalog, EntryRecord, SCHEMA_VERSION, Verdict};
+use std::path::Path;
+
+use romcat_core::catalog::{Catalog, CatalogError, EntryRecord, SCHEMA_VERSION, Verdict};
 use romcat_core::fs::{EntryKind, EntryMeta};
 use romcat_core::site::Site;
 use romcat_core::testing::temp_dir;
@@ -236,19 +238,7 @@ fn 改名之后路径锚一个字节没动沉淀库里的裁决照旧对得上()
     drop(Catalog::open_named(&库文件, &起的名字.display_name()).expect("能建中立库"));
 
     let 变体 = "主盘/FC/魂斗罗.zip";
-    {
-        let mut store =
-            Store::open(&workspace::verdict_store_path(工作目录.path())).expect("开得出沉淀库");
-        store
-            .join(&[Membership::now(
-                "收藏",
-                Anchor::Path {
-                    library: 锚里存的.to_string(),
-                    variant_key: 变体.to_string(),
-                },
-            )])
-            .expect("写得进沉淀库");
-    }
+    落一条路径锚(工作目录.path(), 锚里存的, 变体);
 
     Catalog::open(&库文件)
         .expect("能再打开")
@@ -256,56 +246,64 @@ fn 改名之后路径锚一个字节没动沉淀库里的裁决照旧对得上()
         .expect("改得了名");
 
     // 找库仍按**原先那个名字**：`--library` 折出来的是主库标识，改名不动它。
-    let 按名字 = Site::open(工作目录.path(), 起的名字, None, "--library").expect("开得出现场");
-    let 按文件 = Site::open_file(工作目录.path(), &库文件, None).expect("开得出现场");
-    for (路, site) in [("按名字", &按名字), ("按文件", &按文件)] {
+    for (路, site) in
+        两个入口都认得那条路径锚(工作目录.path(), 起的名字, &库文件, 锚里存的, 变体)
+    {
         assert_eq!(site.display_name(), "改过的名字", "{路}开出来的不是新名字");
-        assert_eq!(
-            site.library_identity, 锚里存的,
-            "{路}开出来的主库标识跟着改名变了"
-        );
-        let 锚 = Anchor::Path {
-            library: site.library_identity.clone(),
-            variant_key: 变体.to_string(),
-        };
-        assert_eq!(
-            site.store.joined(&锚).expect("读得出沉淀库"),
-            ["收藏"],
-            "{路}开出来的现场认不出改名之前那条路径锚"
-        );
     }
 }
 
 #[test]
-fn 改名成空白时退回从文件名截而不是留一行空的() {
-    // **空白不是名字**，改名也一样（建库那一趟的规矩见下一条）。清空了名字的库退回
-    // 从文件名截——截出来的是建库时那个名字折进文件名的可读一半——而不是在开场那一屏
-    // 留一行空白，也不是还印着清空之前那个名字。
+fn 改名成空白时当场报错那一行与路径锚都没动() {
+    // **空白不是名字**（挂单 `Q469` 的裁决）：改名框里清空了名字按确定，该听到一句说得清的
+    // 「不能是空白」，而不是悄悄把名字抹掉、退回从文件名截。**报了错就什么都没改**：
+    // 元数据表里还是报错之前那个名字，路径锚一个字节没动。
+    //
+    // 建库那一趟给空白名字眼下照旧不报错、退回从文件名截（下一条钉着），改它归票 `03`。
+    const 锚里存的: &str = "主库-f5c61109e92b6036";
     let 工作目录 = temp_dir("改名-空白");
-    let 起的名字 = Slug::Named("原先的名字");
+    let 起的名字 = Slug::Named("主库");
     let 库文件 = workspace::catalog_path(工作目录.path(), 起的名字);
     drop(Catalog::open_named(&库文件, &起的名字.display_name()).expect("能建中立库"));
+    let 变体 = "主盘/FC/魂斗罗.zip";
+    落一条路径锚(工作目录.path(), 锚里存的, 变体);
+    Catalog::open(&库文件)
+        .expect("能再打开")
+        .set_library_name("改过的名字")
+        .expect("改得了名");
 
-    for 空的 in ["", "   "] {
-        {
-            let catalog = Catalog::open(&库文件).expect("能再打开");
-            catalog.set_library_name("改过的名字").expect("改得了名");
-            catalog.set_library_name(空的).expect("清得掉名字");
-        }
+    for 空的 in ["", "   ", "\t\n"] {
+        let 结果 = Catalog::open(&库文件)
+            .expect("能再打开")
+            .set_library_name(空的);
+        let Err(错) = 结果 else {
+            panic!("空白名字 {空的:?} 该当场报错，却改成了");
+        };
+        assert!(
+            matches!(错, CatalogError::BlankLibraryName { .. }),
+            "报的不是「名字是空白」那一句：{错:?}"
+        );
+        assert!(format!("{错}").contains("空白"), "那句话没说清是空白：{错}");
         assert_eq!(
             Catalog::open(&库文件).expect("能再打开").library_name(),
-            "原先的名字",
-            "清空名字之后该退回从文件名截"
+            "改过的名字",
+            "报了错却动了元数据表那一行"
         );
-        let 列出来的 = workspace::catalogs(工作目录.path());
-        assert_eq!(
-            列出来的
-                .iter()
-                .map(|一份| 一份.name.as_str())
-                .collect::<Vec<_>>(),
-            ["原先的名字"],
-            "开场屏上该印从文件名截出来的那一半"
-        );
+    }
+
+    let 列出来的 = workspace::catalogs(工作目录.path());
+    assert_eq!(
+        列出来的
+            .iter()
+            .map(|一份| 一份.name.as_str())
+            .collect::<Vec<_>>(),
+        ["改过的名字"],
+        "开场屏上该还是报错之前那个名字"
+    );
+    for (路, site) in
+        两个入口都认得那条路径锚(工作目录.path(), 起的名字, &库文件, 锚里存的, 变体)
+    {
+        assert_eq!(site.display_name(), "改过的名字", "{路}开出来的名字被动过");
     }
 }
 
@@ -378,6 +376,54 @@ fn 元数据表那一族的键名一个字节没动旧库记下的账照样读�
     );
     assert_eq!(catalog.shaped_scan().expect("读得出"), Some(3));
     assert_eq!(catalog.shaped_manifest().expect("读得出"), Some(42));
+}
+
+/// 往沉淀库里落一条收藏，锚在「主库标识 `标识` 这份主库里的 `变体`」这条**路径锚**上。
+fn 落一条路径锚(工作目录: &Path, 标识: &str, 变体: &str) {
+    let mut store = Store::open(&workspace::verdict_store_path(工作目录)).expect("开得出沉淀库");
+    store
+        .join(&[Membership::now(
+            "收藏",
+            Anchor::Path {
+                library: 标识.to_string(),
+                variant_key: 变体.to_string(),
+            },
+        )])
+        .expect("写得进沉淀库");
+}
+
+/// 按名字（命令行 `--library`）与按文件（界面开场屏）两个入口各开一份现场：断言两份的
+/// **主库标识**逐字节是 `标识`、都认得出 `落一条路径锚` 落下的那一条，再把两份现场交回去。
+fn 两个入口都认得那条路径锚(
+    工作目录: &Path,
+    起的名字: Slug<'_>,
+    库文件: &Path,
+    标识: &str,
+    变体: &str,
+) -> Vec<(&'static str, Site)> {
+    let 现场 = vec![
+        (
+            "按名字",
+            Site::open(工作目录, 起的名字, None, "--library").expect("开得出现场"),
+        ),
+        (
+            "按文件",
+            Site::open_file(工作目录, 库文件, None).expect("开得出现场"),
+        ),
+    ];
+    for (路, site) in &现场 {
+        assert_eq!(site.library_identity, 标识, "{路}开出来的主库标识变了");
+        let 锚 = Anchor::Path {
+            library: site.library_identity.clone(),
+            variant_key: 变体.to_string(),
+        };
+        assert_eq!(
+            site.store.joined(&锚).expect("读得出沉淀库"),
+            ["收藏"],
+            "{路}开出来的现场认不出那条路径锚"
+        );
+    }
+    现场
 }
 
 /// 往库里放一条记录，好证明「旧库照样能用」不是空话。
