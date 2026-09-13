@@ -131,15 +131,20 @@ fn 建现场() -> 现场 {
         &zip_container(&[ZipEntrySpec::stored("game.vpk", vec![2u8; 64])]),
     );
 
+    扫成现场(dir, "库", 建_dat())
+}
+
+/// 把 `dir` 当成一份根叫 `根名` 的主库扫一遍，配上 `repo` 与一个空的沉淀库。
+fn 扫成现场(dir: TempDir, 根名: &str, repo: DatRepo) -> 现场 {
     let mut catalog = Catalog::open_in_memory().expect("能开中立库");
-    let mut options = ScanOptions::named(root, "库");
+    let mut options = ScanOptions::named(dir.path(), 根名);
     options.jobs = Jobs::Fixed(2);
     scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
 
     现场 {
         dir,
         catalog,
-        repo: 建_dat(),
+        repo,
         store: Store::in_memory().expect("开得出沉淀库"),
     }
 }
@@ -261,8 +266,13 @@ fn 建_dat() -> DatRepo {
 }
 
 fn 跑(现场: &mut 现场) -> identify::Outcome {
-    let options = Options::new(Roots::single("库", 现场.dir.path()));
-    let verdicts = verdict::Index::load(&现场.store, "库").expect("读得出沉淀库");
+    按根名跑(现场, "库")
+}
+
+/// 与 [`跑`] 同一趟，只是这份主库的**根**叫 `根名`。
+fn 按根名跑(现场: &mut 现场, 根名: &str) -> identify::Outcome {
+    let options = Options::new(Roots::single(根名, 现场.dir.path()));
+    let verdicts = verdict::Index::load(&现场.store, 根名).expect("读得出沉淀库");
     identify::run(
         &RealFs::new(),
         &mut 现场.catalog,
@@ -1741,4 +1751,139 @@ fn 按停之后接着算_模型推断那一层要问的一个不少() {
     // 重问的那几个又过了一遍，结论照样与一趟不停跑到底的一样。**读盘的账不比**：它们的
     // 哈希这一趟是从中立库取回来的，记成 0——那一列本来就是这一趟的账。
     两份结论一样(&一口气, &停过);
+}
+
+/// 一份 FC 游戏。没有 iNES 头，含头与去头两套哈希落在同一串字节上。
+fn 魂斗罗() -> Vec<u8> {
+    vec![0xC3; 4_096]
+}
+
+/// 磁碟机的 BIOS（`disksys.rom`）：模拟器要它，它本身不是游戏。
+fn 磁碟机_bios() -> Vec<u8> {
+    vec![0x5A; 8_192]
+}
+
+/// 认得出上面两份的 DAT。**BIOS 那条在 No-Intro 里、游戏那条在 TOSEC 里**：源的先后
+/// 让 BIOS 那条排在前面（`identify::rank`），真库里 BIOS 本来就收在 No-Intro 的主集里。
+fn 认得出游戏与_bios_的_dat() -> DatRepo {
+    let mut repo = DatRepo::in_memory().expect("开得出来");
+    let bios = 磁碟机_bios();
+    let 游戏 = 魂斗罗();
+    装(
+        &mut repo,
+        "No-Intro",
+        "Nintendo - Family Computer Disk System",
+        "FC",
+        Convention::AsIs,
+        &[条目(
+            "[BIOS] Family Computer Disk System (Japan)",
+            "disksys.rom",
+            bios.len() as u64,
+            crc32(&bios),
+        )],
+    );
+    装(
+        &mut repo,
+        "TOSEC",
+        "Nintendo Famicom - Games",
+        "FC",
+        Convention::AsIs,
+        &[条目(
+            "Contra (1988-02-09)(Konami)(JP)",
+            "Contra (1988-02-09)(Konami)(JP).nes",
+            游戏.len() as u64,
+            crc32(&游戏),
+        )],
+    );
+    repo
+}
+
+/// 一份根叫 `根名` 的主库：`摆` 里每一条是「相对根的路径、盘上的字节」。
+fn 按根名建现场(根名: &str, 摆: &[(&str, Vec<u8>)]) -> 现场 {
+    let dir = temp_dir("identify-non-game-asset");
+    for (relative, bytes) in 摆 {
+        写(&dir.path().join(relative), bytes);
+    }
+    扫成现场(dir, 根名, 认得出游戏与_bios_的_dat())
+}
+
+/// 这个变体挂着的那部作品叫什么。
+fn 作品名(现场: &现场, key: &str) -> Option<String> {
+    挂着的作品(现场, key).map(|work| {
+        现场
+            .catalog
+            .work_name(work)
+            .expect("读得出")
+            .unwrap_or_else(|| panic!("{key} 挂着的作品 {work} 不在作品表里"))
+    })
+}
+
+#[test]
+fn 容器里捎带一份_bios_时作品不被它定() {
+    // 挂账 `D66`：整理包常把模拟器要的 BIOS 一起塞进游戏的透明容器。那份 BIOS 在 DAT 里
+    // 同样是一条精确命中、自动通过，而且源排得更靠前——作品要是跟着「排第一的那条自动
+    // 通过的候选」定，整包游戏就挂到了 BIOS 名下，屏上那一行写的不是维护者拥有的那个游戏。
+    let key = "库/FC/魂斗罗 带 BIOS.zip";
+    let 单放的_bios = "库/FC/bios/disksys.rom";
+    let mut 现场 = 按根名建现场(
+        "库",
+        &[
+            (
+                "FC/魂斗罗 带 BIOS.zip",
+                zip_container(&[
+                    ZipEntrySpec::stored("Contra (Japan).nes", 魂斗罗()),
+                    ZipEntrySpec::stored("bios/disksys.rom", 磁碟机_bios()),
+                ]),
+            ),
+            ("FC/bios/disksys.rom", 磁碟机_bios()),
+        ],
+    );
+    跑(&mut 现场);
+
+    let 候选 = 现场.catalog.candidates_of(key).expect("读得出");
+    assert_eq!(候选.len(), 2, "前提：游戏与 BIOS 各撞上一条：{候选:#?}");
+    assert!(
+        候选.iter().all(|c| c.accepted),
+        "前提：两条都是精确命中、自动通过：{候选:#?}"
+    );
+    assert_eq!(
+        候选[0].inner, "bios/disksys.rom",
+        "前提：BIOS 那条排在第一：{候选:#?}"
+    );
+
+    assert_eq!(
+        作品名(&现场, key).as_deref(),
+        Some("Contra"),
+        "作品是包里那个游戏，不是捎带的 BIOS"
+    );
+    // 另一头：一整个变体就是那份 BIOS 时，它**不归属任何作品**（ADR-0013）——导出那道闸
+    // 把同一个变体挡成非游戏资产，两侧是同一个答案。
+    assert_eq!(
+        结论(&现场, 单放的_bios).0,
+        State::Matched,
+        "前提：它照样撞上了 DAT"
+    );
+    assert_eq!(作品名(&现场, 单放的_bios), None, "非游戏资产不挂到作品上");
+}
+
+#[test]
+fn 真叫_bios_的根底下的游戏照旧认得出作品() {
+    // **根名不参与判断。** 根的名字是维护者起的，不是这份内容是什么的依据：一个真叫
+    // `BIOS` 的根底下的游戏照样是游戏，作品照样跟着它定。导出那一侧是同一个答案
+    // （`tests/pegasus.rs` 的 `真叫_bios_的根底下的游戏照旧导出成条目`）。
+    let key = "BIOS/FC/魂斗罗.zip";
+    let mut 现场 = 按根名建现场(
+        "BIOS",
+        &[(
+            "FC/魂斗罗.zip",
+            zip_container(&[ZipEntrySpec::stored("Contra (Japan).nes", 魂斗罗())]),
+        )],
+    );
+    按根名跑(&mut 现场, "BIOS");
+
+    assert_eq!(
+        作品名(&现场, key).as_deref(),
+        Some("Contra"),
+        "根叫 BIOS 不让它底下的游戏变成非游戏资产"
+    );
 }

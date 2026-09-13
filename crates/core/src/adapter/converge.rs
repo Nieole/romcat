@@ -34,14 +34,16 @@
 //! - **附属内容**（PSV 的 `addcont/`）：它是变体的**成员身份**，不是变体。导出只拿
 //!   每个变体的主文件当 `file:`，所以它天然不会成为条目；真正要证的是「主文件本身
 //!   是附属内容」的那种变体也挡得住。
-//! - **非游戏资产**（模拟器 BIOS、街机的 device set）：判据是路径里有一段是 `bios`。
-//!   真库上是 11 个（`街机/FBA-ROMS/BIOS/neogeo.zip`、`ps2/…/Bios/SCPH-10000.BIN`）。
+//! - **非游戏资产**（模拟器 BIOS、街机的 device set）：判断在
+//!   [`classify::non_game_asset`]，这里传变体的键去问它。真库上是 11 个
+//!   （`街机/FBA-ROMS/BIOS/neogeo.zip`、`ps2/…/Bios/SCPH-10000.BIN`）。
 //! - **补丁**：不可运行，识别那一趟已经判过并落了库（`identification.reason`），
 //!   这里读回来即可——导出这一趟看不到容器里装着什么，重判不了。
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::catalog::{Catalog, CatalogError, ReleaseRow, VariantRow};
+use crate::classify;
 use crate::dat::chinese::ChineseMark;
 use crate::identify::scope;
 use crate::path::file_name_of_key;
@@ -465,7 +467,8 @@ fn excluded(
     if abnormal.get(&variant.key).map(String::as_str) == Some(Role::ExtraContent.code()) {
         return Some(NotAnEntry::ExtraContent);
     }
-    if non_game_asset(&variant.key) {
+    // 判断只有一处（ADR-0024），识别挑作品时问的也是它。这一侧是变体级，传变体的键。
+    if classify::non_game_asset(&variant.key) {
         return Some(NotAnEntry::NonGameAsset);
     }
     // **只挡补丁那一类。** 「没有发行版链接」是同人移植与 homebrew——它们照样能跑，
@@ -474,22 +477,6 @@ fn excluded(
         return Some(NotAnEntry::Patch);
     }
     None
-}
-
-/// 这是**非游戏资产**吗（ADR-0010）。
-///
-/// 判据只有一条：路径里有一段是 `bios`。**宁可窄不宜宽**（同 `identify::scope`）——
-/// 漏挡一个，代价是前端里多一个点不动的条目；错挡一个，代价是一个真游戏永远出不来。
-///
-/// 真库上这条判据挑出 11 个，全部名副其实：`街机/FBA-ROMS/BIOS/neogeo.zip`、
-/// `ps/龙骑士传说/bios/Scph1001.7z`、`ps2/…/Bios/SCPH-10000.BIN`。
-fn non_game_asset(key: &str) -> bool {
-    let mut segments: Vec<&str> = key.split('/').collect();
-    // 最后一段是文件自己的名字，不算目录。
-    segments.pop();
-    segments
-        .iter()
-        .any(|segment| segment.eq_ignore_ascii_case("bios"))
 }
 
 /// 这个变体凭什么当首选：汉化 > 官中 > 日版 > 其他，裁决压过全部。
@@ -687,19 +674,6 @@ fn build_game(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn bios_目录里的东西是非游戏资产() {
-        // 真库上这四条都在（`docs/library-facts.md` 之后实地查的）。
-        assert!(non_game_asset("街机/FBA-ROMS/BIOS/neogeo.zip"));
-        assert!(non_game_asset("ps/龙骑士传说/bios/Scph1001.7z"));
-        assert!(non_game_asset(
-            "ps2/ROM/勇者斗恶龙8/x/PCSX2/Bios/SCPH-10000.BIN"
-        ));
-        // 一个叫 `bios.zip` 的游戏不该被挡下——判的是目录段，不是文件名。
-        assert!(!non_game_asset("FC/bios.zip"));
-        assert!(!non_game_asset("FC/魂斗罗.zip"));
-    }
 
     #[test]
     fn 语言标记组里的中文认得出() {

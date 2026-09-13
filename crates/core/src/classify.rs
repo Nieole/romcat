@@ -6,6 +6,9 @@
 //!
 //! 这里的表是**数据不是代码**的雏形：全部规则是几张常量表，票 05 把平台清单与成型
 //! 规则外置成声明式配置时，它们会一起搬过去。
+//!
+//! 另有一条不看扩展名、看**键里的目录段**的归类：[`non_game_asset`]，这份内容是不是
+//! **非游戏资产**。它住在这一层，是因为识别、导出、界面都够得着这一层（ADR-0024）。
 
 use std::path::Path;
 
@@ -283,6 +286,31 @@ pub fn classify(path: &Path) -> Classification {
     result
 }
 
+/// 这份内容是**非游戏资产**吗（ADR-0010）：模拟器要它，它本身不是游戏。
+///
+/// **判断只有这一处**（ADR-0024）：导出那道闸挡前端条目、识别挑作品时跳过它，问的都是
+/// 它；别处要判也从这里取，不另写一份。**收这份内容在中立库里的键**——变体级的调用方传
+/// 变体的键，内容级的传成员的键；**透明容器**里的一份内容，是容器的键接上容器内部路径。
+///
+/// 判据只有一条：**相对根的**路径里有一段**目录**是 `bios`。**宁可窄不宜宽**（同
+/// `identify::scope`）——漏挡一个，代价是前端里多一个点不动的条目；错挡一个，代价是一个
+/// 真游戏永远出不来。
+///
+/// **根名不参与判断**：那是维护者给**根**起的名字，不是这份内容是什么的依据。一个真叫
+/// `BIOS` 的根，不让它底下的游戏全变成非游戏资产。
+///
+/// 真库上这条判据挑出 11 个，全部名副其实：`街机/FBA-ROMS/BIOS/neogeo.zip`、
+/// `ps/龙骑士传说/bios/Scph1001.7z`、`ps2/…/Bios/SCPH-10000.BIN`。
+#[must_use]
+pub fn non_game_asset(key: &str) -> bool {
+    let mut segments: Vec<&str> = crate::path::relative_of_key(key).split('/').collect();
+    // 最后一段是文件自己的名字，不算目录。
+    segments.pop();
+    segments
+        .iter()
+        .any(|segment| segment.eq_ignore_ascii_case("bios"))
+}
+
 /// 文件名里是否含中日韩汉字。
 ///
 /// 这是「库里中文资源占多少」的**文件名层面的粗略代理**，不是识别结论：
@@ -329,6 +357,26 @@ mod tests {
 
     fn 归类(name: &str) -> Classification {
         classify(Path::new(name))
+    }
+
+    #[test]
+    fn bios_目录里的东西是非游戏资产() {
+        // 真库上这四条都在（`docs/library-facts.md` 之后实地查的）。键是中立库的键，
+        // 第一段是根名。
+        assert!(non_game_asset("库/街机/FBA-ROMS/BIOS/neogeo.zip"));
+        assert!(non_game_asset("库/ps/龙骑士传说/bios/Scph1001.7z"));
+        assert!(non_game_asset(
+            "库/ps2/ROM/勇者斗恶龙8/x/PCSX2/Bios/SCPH-10000.BIN"
+        ));
+        // 透明容器里的一份内容：容器的键接上容器内部路径。
+        assert!(non_game_asset("库/FC/魂斗罗 带 BIOS.zip/bios/disksys.rom"));
+        // 一个叫 `bios.zip` 的游戏不该被挡下——判的是目录段，不是文件名。
+        assert!(!non_game_asset("库/FC/bios.zip"));
+        assert!(!non_game_asset("库/FC/魂斗罗.zip"));
+        // 根名不参与判断：一个真叫 `BIOS` 的根底下的游戏照旧是游戏。
+        assert!(!non_game_asset("BIOS/FC/魂斗罗.zip"));
+        assert!(!non_game_asset("bios/FC/魂斗罗.zip/Contra (Japan).nes"));
+        assert!(non_game_asset("BIOS/街机/BIOS/neogeo.zip"));
     }
 
     #[test]
