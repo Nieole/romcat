@@ -399,6 +399,7 @@ pub fn queue_with_zh(rows: u64) -> Result<(Catalog, Option<ZhMatch>), CatalogErr
             }
             records.push(Identification {
                 variant_key: key.clone(),
+                platform: None,
                 state,
                 reason: (state == State::NoEvidence)
                     .then(|| REASONS[(n as usize) % REASONS.len()].to_string()),
@@ -1048,6 +1049,7 @@ pub fn browse_shaped(rows: u64, works_count: usize) -> Result<Catalog, CatalogEr
         };
         records.push(Identification {
             variant_key: key_of(i),
+            platform: None,
             state,
             reason: (state == State::NoEvidence)
                 .then(|| REASONS[(i as usize) % REASONS.len()].to_string()),

@@ -85,7 +85,14 @@ CREATE TABLE IF NOT EXISTS identification(
     candidates  INTEGER NOT NULL,
     accepted    INTEGER NOT NULL,
     nkit        INTEGER NOT NULL,
-    read_bytes  INTEGER NOT NULL
+    read_bytes  INTEGER NOT NULL,
+    -- **识别判定的平台**（票 `one-criterion-per-thing/03`）：卡带内部头读得出就是它说的
+    -- 那个，一个都读不出才是目录声明的那个——判断只有 `identify::platform_of` 那一处，
+    -- 这里是它的结论。刮削拿平台去做交叉校验时读这一列，不重新判一次（ADR-0024 推论 3）。
+    --
+    -- 它**不是** `variant.platform` 的改写：那一列的语义就是「目录说的」，平台冲突那张
+    -- 报表拿它当对照物，一个字都不动。NULL 是识别没判过：加这一列之前识别的那些行。
+    platform    TEXT
 ) STRICT;
 
 -- 算过的哈希。**同一份内容的两套口径都在这里**：`crc32`/`size` 是含头（原样），
@@ -111,9 +118,9 @@ CREATE INDEX IF NOT EXISTS content_hash_print ON content_hash(crc32, size);
 -- 从一份内容前几百字节里读出来的**光盘标识**与 **NKit** 结论（票 09）。
 --
 -- 它与 `content_hash` 同源同命：都是「读过的盘不白读」，都按文件的三元组作废。
--- 分开一张表而不是往 `content_hash` 上加列，是为了**不动已有的表结构**——加列要用户
--- 删掉 8.60 TiB 的中立库重扫一遍，而加表在 `CREATE TABLE IF NOT EXISTS` 这条路上是
--- 白拿的。代价写在下面那两列上。
+-- 分开一张表而不是往 `content_hash` 上加列，是为了**不动已有的表结构**。票 09 那时以为
+-- 加列要用户删掉 8.60 TiB 的中立库重扫一遍；票 10 起 `add_columns` 那条路证明纯加一列
+-- 同样不必（见那一头的文档），加表与加列如今都是白拿的。代价写在下面那两列上。
 --
 -- `len` 与 `mtime_ns` 是**这一行自带的有效期**：算这一条时那个成员文件多大、什么时候
 -- 改的。读回来先对一遍，对不上就当没算过。有了这两列，这张表就不依赖任何人记得
@@ -288,9 +295,14 @@ CREATE TABLE IF NOT EXISTS verdict_batch_shadow_candidate(
 ///
 /// **`content_cart` 不在这里**：那张表是票 10 新建的，`CREATE TABLE IF NOT EXISTS`
 /// 一次就把它连同 `family` 那一列建齐了。这里只放「已经存在于旧库里的表上后来加的列」。
+///
+/// 票 `one-criterion-per-thing/03` 加的是 `identification.platform`（**识别判定的平台**）。
+/// 老行上它是 NULL，读的那一侧当「识别没判过」处理——那正是加这一列之前的唯一可能，
+/// 于是旧数据一行都不会被读错；旧程序写结论时列名单里没有它，照样写得进。
 pub(super) fn add_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     add_column(conn, "content_hash", "sha1", "TEXT")?;
-    add_column(conn, "content_hash", "bare_sha1", "TEXT")
+    add_column(conn, "content_hash", "bare_sha1", "TEXT")?;
+    add_column(conn, "identification", "platform", "TEXT")
 }
 
 /// 一张表上缺了这一列就补上；已经有了就什么都不做。
@@ -723,6 +735,15 @@ pub struct Identification {
     /// **前面各层落进无判据、模型推断那一层又给了候选的**，状态是命中而这一句照留——
     /// 候选与理由并存（票 `one-criterion-per-thing/06`）。
     pub reason: Option<String>,
+    /// **识别判定的平台**：卡带内部头读得出就是它说的那个，一个都读不出才是目录声明的
+    /// 那个（`identify::platform_of` 那一处判断的结论，票 `one-criterion-per-thing/03`）。
+    ///
+    /// **`None` 是这条结论不说平台**：裁决落成的结论没看过内容，它不判平台；识别判了
+    /// 却一个平台都说不出（读不出头、目录也没声明）时同样是 `None`。写库时这样一条
+    /// 不盖掉库里已有的那个（[`Catalog::write_identifications`]），所以这一列**写不空**
+    /// ——识别那一趟起手整批清掉结论（[`Catalog::clear_identifications`]），判不出的
+    /// 那一行本来就没有旧值可留。
+    pub platform: Option<String>,
     /// 拿了几份内容去撞。
     pub units: u64,
     /// 这个变体里有几份是 NKit 处理过的镜像。
@@ -1792,16 +1813,19 @@ impl Catalog {
                      VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
                 )
                 .map_err(to_err)?;
+            // **不说平台的结论不盖掉判过的那个**：裁决落成的结论没看过内容
+            // （`Projector::project`），人裁完一条，识别按内容判定的平台照旧留着。
             let mut insert_identification = tx
                 .prepare(
                     "INSERT INTO identification(variant_key, state, reason, units, candidates,
-                         accepted, nkit, read_bytes)
-                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+                         accepted, nkit, read_bytes, platform)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
                      ON CONFLICT(variant_key) DO UPDATE SET
                         state = excluded.state, reason = excluded.reason,
                         units = excluded.units, candidates = excluded.candidates,
                         accepted = excluded.accepted, nkit = excluded.nkit,
-                        read_bytes = excluded.read_bytes",
+                        read_bytes = excluded.read_bytes,
+                        platform = COALESCE(excluded.platform, platform)",
                 )
                 .map_err(to_err)?;
             let mut link = tx
@@ -1825,6 +1849,7 @@ impl Catalog {
                         i64::try_from(accepted).unwrap_or(i64::MAX),
                         i64::try_from(record.nkit).unwrap_or(i64::MAX),
                         i64::try_from(record.read_bytes).unwrap_or(i64::MAX),
+                        record.platform,
                     ])
                     .map_err(to_err)?;
                 for candidate in &record.candidates {
@@ -2612,6 +2637,38 @@ impl Catalog {
             .optional()
             .map_err(|source| self.err(source))
     }
+
+    /// 每个变体**按哪个平台算**：变体的键 → 平台。一个平台都说不出的变体不在里面。
+    ///
+    /// 识别判过的，就是它**判定的那个**（`identification.platform`：卡带内部头读得出就是
+    /// 它说的，一个都读不出才是目录声明的）。**识别没判过的**——还没识别，或者是加那一列
+    /// 之前识别的——手上只有目录声明的那个。
+    ///
+    /// 这是读一份物化的结论，**不是第二次判断**（ADR-0024 推论 3）：谁要拿变体的平台去撞
+    /// 别的东西（刮削的平台交叉校验），就从这儿取，不自己拿目录那一列再判一次。
+    /// 目录声明的那个原样在 [`VariantRow::platform`](super::VariantRow::platform) 上，
+    /// 平台冲突那张报表拿它当对照物（[`Catalog::platform_conflicts`]）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn identified_platforms(&self) -> Result<BTreeMap<String, String>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT v.key, COALESCE(i.platform, v.platform)
+                 FROM variant v LEFT JOIN identification i ON i.variant_key = v.key
+                 WHERE COALESCE(i.platform, v.platform) IS NOT NULL",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
     /// **模型推断问过的答案**，整份读回来（票 12）。
     ///
     /// 整份读而不是逐个变体查：残渣最多也就一万多条，一次读进内存是几 MB，而逐个查

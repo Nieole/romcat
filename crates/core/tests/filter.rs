@@ -55,6 +55,7 @@ fn 认出来(
     catalog
         .write_identifications(&[Identification {
             variant_key: key.to_string(),
+            platform: None,
             state: State::Matched,
             reason: None,
             units: 1,

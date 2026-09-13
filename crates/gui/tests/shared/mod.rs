@@ -177,6 +177,7 @@ pub fn 小库(
             };
             Some(Identification {
                 variant_key: variant.key.clone(),
+                platform: None,
                 state,
                 reason: None,
                 units: 1,

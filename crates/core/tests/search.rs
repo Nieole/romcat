@@ -128,6 +128,7 @@ fn 建库() -> Catalog {
             .expect("建得出作品");
         records.extend((0..变体数(at)).map(|n| Identification {
             variant_key: 键(at, n),
+            platform: None,
             state: State::Matched,
             reason: None,
             units: 1,
