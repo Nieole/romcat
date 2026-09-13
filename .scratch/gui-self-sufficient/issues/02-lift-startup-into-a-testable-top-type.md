@@ -249,4 +249,5 @@ if !locate.given() {
   而去掉一个 trait 实现正是动公开接口。
 - **谁来裁：** 票 `gui-self-sufficient/03`（它动这一带时顺手删；或收尾时单独裁）
 - **状态：** settled（第四轮收口，2026-09-09）
+- **票 `no-mute-spots-opening-a-catalog/06` 已落地：** `crates/gui/src/app.rs` 末尾那份 `impl eframe::App for App` 删掉了（连同 `Q390`）；`eframe::run_native` 收的仍是 `Program`，`program.rs` 末尾那一份照旧，经 `Program::ui` 调到 `App::ui`。
 
