@@ -351,9 +351,9 @@ ADR-0017（能力档案与文件系统上限）、ADR-0007（ScreenScraper 配�
 
 ## Further Notes
 
-- **排期**：`rom-metadata-automation/23`（Windows 输入法真机验证）决定界面层是否留在
-  egui，**建议它排在大规模观感实现之前**；令牌文件、字体预算与设计稿本身与渲染器无关，
-  两种结局都用得上。
+- **排期：不再有前置的闸门。** `rom-metadata-automation/23`（Windows 输入法真机验证）
+  **已于 2026-09-13 验过、通过**，界面层留在 egui（ADR-0005 的实机验证结果一节）。
+  这批票可以直接铺开，不必担心万一换壳白写。升 egui 或 winit 大版本时那五项要重跑。
 - **这份规格推翻 `gui-redesign/spec.md` 里「原型不是实现的依据」那一句**，与 ADR-0023
   的修订段一致：观感以设计稿为准，分三层把门。
 - 设计稿是**单文件、离线可用**的 `.scratch/gui-looks-like-the-design/prototype.html`
