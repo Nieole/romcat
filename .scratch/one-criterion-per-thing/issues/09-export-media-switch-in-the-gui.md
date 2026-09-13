@@ -53,3 +53,8 @@
 **收尾（2026-09-14）：** 收了挂账 `D64` 的下半（界面那颗开关）；上半（核心库那条路与命令行 `--media`）由票 08 收。收挂单 `Q584`（留上界、屏上说「最多」，已标 `settled`）。本票挂单 `Q651`–`Q655`。
 审查（`/code-review`，两轴）之后改的：算要铺多少那一趟收场不再惊动浏览屏整页重读（`App::poll_tasks` 先认它）；排上别的工序时那句代价作废；数出来或关掉开关时收掉那句按不下去的话；挂单格式两处。没改的判断项：只读连接那三支 `match` 已是仓里第四份、铺媒体回执与命令行各写一份（`Q655`）。
 窄跑（2026-09-14，带 `TMPDIR=/Users/nicoer/dev/game-wt/cs/tmp`）：`cargo test -p romcat-gui --all-features --no-fail-fast` 全绿（lib 44、`roots.rs` 56，其余测试目标照旧），`EXIT=0`，日志 `/Users/nicoer/dev/game-wt/logs/slot-3-oc09-gui-tests-after-review.log`；`clippy -p romcat-gui --all-targets --all-features -D warnings`、`cargo xtask glossary`（4 份 `.rs` 新写 1180 行，没撞上）、`cargo doc -p romcat-gui`（`-D warnings`）全绿，日志 `slot-3-oc09-review-green.log`。全量门禁另起一个提交补在后面。
+
+**全量门禁（2026-09-14，跑在票提交 `a9efe5c` 上，带 `TMPDIR=/Users/nicoer/dev/game-wt/cs/tmp`）：** `cargo xtask gate -j 3 --test-threads 3 --keep-going`，日志开头两行是 `/Users/nicoer/dev/game-wt/slot-3` 与 `q5/oc-09-export-media-switch-gui`。fmt 1s、glossary 0s、check 12s、clippy 17s、test 350s、doc 4s，6 条全绿，`EXIT=0`。
+- glossary 扫的是相对 `main` 的 merge base（`d411fdf`）以来的改动：4 份 `.rs` 里新写 1180 行，没撞上。
+- test：71 个测试目标、1931 条通过、0 条失败、2 条 `#[ignore]`；门禁在第一个红的目标上就停，这一趟没红，全部都跑到了。
+- 日志：`/Users/nicoer/dev/game-wt/logs/slot-3-oc09-gate.log`。
