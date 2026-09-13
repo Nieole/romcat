@@ -543,7 +543,8 @@ pub fn run_task(
 ///    上界——而 `--model-plan` 到这里就停了，一个请求都不发。
 /// 2. **一批一批问**。每收到一个响应就**当场落库**：这一层每一条都付过钱，攒到最后
 ///    一次性写的话，跑到一半被 Ctrl-C 就等于把已经花掉的钱扔了。
-/// 3. **候选只追加，不重写结论**（[`Catalog::append_candidates`]）。
+/// 3. **候选只追加，结论不整条重写**（[`Catalog::append_candidates`]）：理由、撞过几份
+///    内容那几列一个字不动，只有状态照[同一处判断](State::of)跟着全部候选重定一次。
 fn ask_model(
     catalog: &mut Catalog,
     ammo: &Ammo<'_>,
@@ -3044,31 +3045,28 @@ fn assemble(
     for found in evidence.iter().filter(|found| found.from_content) {
         with_evidence.insert((found.member.as_str(), found.inner.as_str()));
     }
-    let usable = with_evidence.len();
-    let state_of = if !candidates.is_empty() {
-        State::Matched
-    } else if usable > 0 {
-        State::Unmatched
-    } else {
-        State::NoEvidence
-    };
-    let reason = match state_of {
-        State::NoEvidence => Some(if blocked.is_empty() {
-            "这个变体里没有可以撞 DAT 的内容".to_string()
-        } else {
-            blocked[0].to_string()
-        }),
-        _ => None,
-    };
+    let usable = u64::try_from(with_evidence.len()).unwrap_or(u64::MAX);
+    // **那句「为什么没定下来」在模型那一层之前挑**：它说的是前面各层——撞 DAT、读标识、
+    // 查中文条目表——为什么一个字都说不出，「容器穿不透」「元数据读不到」那类是真事实。
+    // 模型那一层的候选与它**并存**，不盖掉它（票 `one-criterion-per-thing/06`）。
+    //
+    // 这里问一次 [`State::of`] 只为挑理由，**不是这个变体的状态**——状态要等模型那一层的
+    // 候选也进来之后才定（下面）。
+    let state_without_model =
+        State::of(u64::try_from(candidates.len()).unwrap_or(u64::MAX), usable);
+    let reason = (state_without_model == State::NoEvidence).then(|| {
+        blocked.first().map_or_else(
+            || "这个变体里没有可以撞 DAT 的内容".to_string(),
+            |why| (*why).to_string(),
+        )
+    });
 
     // ⭐ **最后一档：模型推断兜底**（票 12）。
     //
     // 判据是「**一条候选都没有**」，比文件名那一层的「没有自动通过的候选」严一档——
-    // 已经有东西可裁的变体不重复花钱。**结论与理由在上面已经算完了，这一层不动它们**：
-    // 「rar 容器这一层还穿不透」那类理由是真事实，让一句猜测覆盖掉是净损失
-    // （`model` 的模块文档说得更细）。
+    // 已经有东西可裁的变体不重复花钱。
     let mut candidates = candidates;
-    if candidates.is_empty() && state_of != State::Skipped && ammo.guessing.ready() {
+    if candidates.is_empty() && ammo.guessing.ready() {
         state.model.residue += 1;
         let question = model::Question {
             variant_key: variant.key.clone(),
@@ -3109,16 +3107,22 @@ fn assemble(
                     answered_by,
                 ));
             }
-            // 没问过：排进队里，等主循环跑完一起打包问。
+            // 没问过：排进队里，等主循环跑完一起打包问。答案到了，
+            // [`Catalog::append_candidates`] 照同一处判断把状态重定一次。
             None => state.model_pending.push(model::Asking { question, ask }),
         }
     }
+
+    // ⭐ **状态在全部候选都进来之后才定**（票 `one-criterion-per-thing/06`）：一次判断，
+    // 一个候选集合。先定状态、再把模型那一层的候选并进来的话，同一个集合一半算数一半
+    // 不算——一个只有模型候选的变体，库里会记着「它一条候选都没有」。
+    let state_of = State::of(u64::try_from(candidates.len()).unwrap_or(u64::MAX), usable);
 
     Ok(Identification {
         variant_key: variant.key.clone(),
         state: state_of,
         reason,
-        units: u64::try_from(usable).unwrap_or(u64::MAX),
+        units: usable,
         nkit,
         read_bytes,
         work_id,

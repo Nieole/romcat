@@ -467,7 +467,8 @@ pub const NOT_RUN_LABEL: &str = "还没识别";
 /// 那是[还没识别](NOT_RUN_LABEL)，不是这里的第五档。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum State {
-    /// 撞上了 DAT。
+    /// **有候选**：撞上了 DAT，或者前面哪一层给出了带依据的候选——自动通过没有另说
+    /// （文件名与模型推断那两层一条都不自动通过，照样落这一档，见 [`State::of`]）。
     Matched,
     /// 拿判据撞过了，DAT 里没有。
     Unmatched,
@@ -510,6 +511,33 @@ impl State {
             "无判据" => Some(Self::NoEvidence),
             "跳过" => Some(Self::Skipped),
             _ => None,
+        }
+    }
+
+    /// **识别给一个变体定状态的那一处**：全部候选都进来之后问一次（票
+    /// `one-criterion-per-thing/06`，ADR-0024）。
+    ///
+    /// - 有候选就是**命中**，不看自动通过没有、也不看出自哪一层：文件名那一层与模型推断
+    ///   那一层的候选一条都不自动通过，照样落这一档——有候选、但没被自动通过。报告里
+    ///   「只靠名字」那一列把它们单数出来，命中率才不替它们邀功（`identify::report`）。
+    /// - 一条候选都没有、拿判据撞过了：**未命中**。
+    /// - 连一份可以撞的内容都没有：**无判据**。
+    ///
+    /// `units` 是拿去撞的内容有几份（[`Identification::units`]，库里那一列）。
+    /// **跳过**不从这儿出：补丁与没有发行版链接的变体在撞 DAT 之前就判了。
+    ///
+    /// 两个调用方，一处判断：识别的主循环（缓存里有模型的答案时，那几条候选在这之前就
+    /// 并进了同一个集合），与 [`Catalog::append_candidates`](super::Catalog::append_candidates)
+    /// （真问的那一趟，答案在主循环跑完之后才到）。两处各写一遍的话，同一个变体走缓存与
+    /// 走网络会定出两个状态。
+    #[must_use]
+    pub fn of(candidates: u64, units: u64) -> Self {
+        if candidates > 0 {
+            Self::Matched
+        } else if units > 0 {
+            Self::Unmatched
+        } else {
+            Self::NoEvidence
         }
     }
 }
@@ -598,17 +626,18 @@ pub struct CartFactRow {
 
 /// **命中里只靠某一个源的候选**的变体数，按平台。
 ///
-/// 它为一件事而存在：[文件名那一层](crate::identify::fuzzy)产出的候选一条都不自动通过，
-/// 却照样把变体的结论从「未命中」变成「命中」——那是对的（**它确实拿到了带依据的候选**），
-/// 但如果报告只给一个总的命中率，读者就分不出「认出来了」与「有人猜了一下」。
+/// 它为一件事而存在：[文件名那一层](crate::identify::fuzzy)与[模型推断那一层](crate::identify::model)
+/// 产出的候选一条都不自动通过，却照样把变体的结论从「未命中」「无判据」变成「命中」——
+/// 那是对的（**它确实拿到了带依据的候选**，[`State::of`]），但如果报告只给一个总的命中率，
+/// 读者就分不出「认出来了」与「有人按名字猜了一下」。
 ///
-/// 于是这一列单列。判据是「这个变体的候选**全部**来自那个源」——只要还有一条别的源的
+/// 于是这一列单列。判据是「这个变体的候选**全部**来自那几个源」——只要还有一条别的源的
 /// 候选，它就不算只靠名字。
 ///
 /// **第三列是「这些变体本来是无判据的」**（`units = 0`：一份可以撞的内容都没有）。
-/// 少了它，「不算那一层的命中率」会算错：那一层把一批本来在**无判据**里的变体拉进了
+/// 少了它，「不算那几层的命中率」会算错：那几层把一批本来在**无判据**里的变体拉进了
 /// 命中，而无判据本来就不在命中率的分母里（跳过与无判据不混进未命中，见模块文档）。
-/// 只从分子里减掉它们、分母却留着，那个数会比那一层跑之前还低——凭空冤枉前几层。
+/// 只从分子里减掉它们、分母却留着，那个数会比那几层跑之前还低——凭空冤枉前几层。
 pub(super) const NAME_ONLY_SQL: &str = "\
 SELECT COALESCE(v.platform, ?2), COUNT(*), SUM(CASE WHEN i.units = 0 THEN 1 ELSE 0 END)
                  FROM identification i
@@ -690,6 +719,9 @@ pub struct Identification {
     /// 结论。
     pub state: State,
     /// 跳过或无判据的具体理由。
+    ///
+    /// **前面各层落进无判据、模型推断那一层又给了候选的**，状态是命中而这一句照留——
+    /// 候选与理由并存（票 `one-criterion-per-thing/06`）。
     pub reason: Option<String>,
     /// 拿了几份内容去撞。
     pub units: u64,
@@ -2493,11 +2525,11 @@ impl Catalog {
 
     /// **命中里只有「一个字节都不读」那几个源的候选**的变体数，按平台。
     ///
-    /// `sources` 是那几个源的名字，写成 `,中文离线源,Switch 文件名,` 这样两头带逗号的
-    /// 一串——与 `content_cart.family` 同一个写法，为的是 SQL 里能用 `instr` 做整词
-    /// 匹配。**它不止一个源**：票 11 的中文离线源与票 27 的 Switch 文件名层是同一件事
-    /// ——都只看名字、都永不自动通过，而这一列存在的理由正是**不让「命中」两个字被
-    /// 只看名字的层撑起来**。少数一个，那一列就会撒谎。
+    /// `sources` 是那几个源的名字，写成 `,中文离线源,Switch 文件名,模型推断,` 这样两头带
+    /// 逗号的一串——与 `content_cart.family` 同一个写法，为的是 SQL 里能用 `instr` 做整词
+    /// 匹配。**它不止一个源**：票 11 的中文离线源、票 27 的 Switch 文件名层与票 12 的模型
+    /// 推断是同一件事——都只看名字、都永不自动通过，而这一列存在的理由正是**不让「命中」
+    /// 两个字被只看名字的层撑起来**。少数一个，那一列就会撒谎。
     ///
     /// 判据见 `NAME_ONLY_SQL`。
     ///
@@ -2537,8 +2569,8 @@ impl Catalog {
 
     /// 只改一条结论的**理由**那一列，别的一个字不动。
     ///
-    /// **裁决**里「都不对，而且认不出」那一档走这条：结论本身没有变（照旧是未命中或
-    /// 无判据），变的只是「为什么还停在这儿」。整条重写的话，那个变体的候选会被
+    /// **裁决**里「都不对，而且认不出」那一档走这条：结论本身没有变（未命中、无判据，
+    /// 或者只有不自动通过的候选的命中），变的只是「为什么还停在这儿」。整条重写的话，那个变体的候选会被
     /// 连带清掉——而它们是识别撞出来的事实，与人认不认得出无关。
     ///
     /// # Errors
@@ -2704,7 +2736,8 @@ impl Catalog {
         ))
     }
 
-    /// 往一条已有的结论上**追加候选**，别的一个字不动（票 12）。
+    /// 往一条已有的结论上**追加候选**，并照全部候选把状态重定一次（票 12；状态那半句是
+    /// 票 `one-criterion-per-thing/06`）。
     ///
     /// 与 [`write_identifications`](Self::write_identifications) 恰恰相反：那一条整条
     /// 重写（先 `DELETE FROM candidate`），这一条只加。模型推断那一层在识别的主循环
@@ -2712,10 +2745,13 @@ impl Catalog {
     /// `units`、`nkit`、`read_bytes` 全部再算一遍并原样写回，而其中任何一个写岔了都是
     /// 静默的坏账。
     ///
-    /// **`state` 与 `reason` 一个字都不改**，这是有意的（见 `identify::model` 的模块
-    /// 文档）：那两列上写着「rar 容器这一层还穿不透」这类真事实，让一句模型的猜测把它
-    /// 覆盖掉是净损失。候选照样进**待确认队列**——队列的判据是「没有自动通过的候选、
-    /// 而且不是跳过」，与状态无关。
+    /// **`state` 跟着重定，走的是识别定状态的同一处**（[`State::of`]，收的正是库里那两列：
+    /// 候选几条、撞过几份内容）。不重定的话，同一个候选集合一半算数一半不算：一个只有
+    /// 模型候选的变体，库里记着「它一条候选都没有」——而同一份答案走缓存的那一趟会记成命中。
+    ///
+    /// **`reason` 一个字都不改**：那一列上写着「容器穿不透」「元数据读不到」这类真事实，
+    /// 与候选并存，不让一句模型的猜测盖掉（见 `identify::model` 的模块文档）。
+    /// 候选照样进**待确认队列**——队列的判据是「没有自动通过的候选、而且不是跳过」。
     ///
     /// # Errors
     /// 写库失败时返回错误。
@@ -2774,12 +2810,42 @@ impl Catalog {
                     ])
                     .map_err(to_err)?;
             }
-            // 队列按这一列决定要不要去把候选读出来，不加就等于白写。
-            tx.execute(
-                "UPDATE identification SET candidates = candidates + ?2 WHERE variant_key = ?1",
-                params![variant_key, i64::try_from(candidates.len()).unwrap_or(0)],
-            )
-            .map_err(to_err)?;
+            // 队列按 `candidates` 这一列决定要不要去把候选读出来，不加就等于白写。
+            // 状态跟着全部候选重定一次，理由一个字不动。
+            let row = tx
+                .query_row(
+                    "SELECT state, units, candidates FROM identification WHERE variant_key = ?1",
+                    params![variant_key],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(to_err)?;
+            if let Some((before, units, had)) = row {
+                // 只数**真写进库的**那几条：自动通过的在上面被挡掉了，而这个数现在决定状态——
+                // 把挡掉的也算进去，库里会出现一条「命中」底下一条候选都没有。
+                let written = candidates.iter().filter(|c| !c.accepted).count();
+                let total = had.saturating_add(i64::try_from(written).unwrap_or(0));
+                // 跳过在撞 DAT 之前就判了，不归候选定——模型那一层本来也不问它。
+                let state = if State::from_label(&before) == Some(State::Skipped) {
+                    State::Skipped
+                } else {
+                    State::of(
+                        u64::try_from(total).unwrap_or(0),
+                        u64::try_from(units).unwrap_or(0),
+                    )
+                };
+                tx.execute(
+                    "UPDATE identification SET candidates = ?2, state = ?3 WHERE variant_key = ?1",
+                    params![variant_key, total, state.label()],
+                )
+                .map_err(to_err)?;
+            }
         }
         tx.commit().map_err(to_err)
     }
