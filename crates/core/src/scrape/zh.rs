@@ -607,7 +607,9 @@ impl<'a> ChineseSource<'a> {
         if name.contains('\u{FFFD}') {
             return None;
         }
-        let parsed = self.naming.rules.parse(name);
+        // **剥哪个名字只在 `Rules::parse_main_key` 说一次**：浏览屏那一行画的正题也从那儿取。
+        // 上面乱码那一道看的是同一截主文件名——它只挡「不撞」，不决定剥什么。
+        let parsed = self.naming.rules.parse_main_key(main_key);
         // 年份这一侧：文件名里明写的，或者**已经撞上的那条 DAT 条目名**里读出来的。
         // 后者是这一侧比识别那一层多出来的弹药——已确认的变体身上往往有 TOSEC 的条目名，
         // 而 TOSEC 的第一个括号就是发行日期。
@@ -774,11 +776,11 @@ impl<'a> ChineseSource<'a> {
         let platform = subject.platform.unwrap_or("");
         let tuning = self.naming.tuning.fingerprint();
         // **剥离规则**（`filename::Rules::fingerprint`）：这一层撞的是从文件名里剥出来的
-        // **正题**（上面 `hit` 里那句 `rules.parse(name)`），而剥离规则是配置不是代码，
+        // **正题**（上面 `hit` 里那句 `rules.parse_main_key`），而剥离规则是配置不是代码，
         // 用户补一条自己遇到的模式，正题就变了、撞出来的条目也可能跟着变。它算的是规则的
         // **语义**——给规则文件加一行注释不该让全库重采一遍。
         // **剥离规则是数据不是代码**：拿去撞的那串正题正是它剥出来的
-        // （[`hit`](Self::hit) 里那行 `rules.parse`）。补一条正题噪音词重跑，同一个
+        // （[`hit`](Self::hit) 里那行 `rules.parse_main_key`）。补一条正题噪音词重跑，同一个
         // 文件名剥出来的正题就变了，撞出来的东西也跟着变——那正是 `zh` 模块文档许诺
         // 的那条出口（「补进配置，重跑一遍就撞上了」）。`Source::probe` 那个「源自己的
         // 解析逻辑不进指纹」的例外管不到它：规则住在用户编得动的 `name-rules.toml` 里。

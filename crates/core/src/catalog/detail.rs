@@ -508,46 +508,104 @@ impl Catalog {
     ) -> Result<Vec<MediaItem>, CatalogError> {
         let mut out = Vec::new();
         for (anchor, subject) in anchors_of(key, work) {
-            let mut statement = self
-                .conn
-                .prepare_cached(
-                    "SELECT r.kind, r.source, r.hash, m.ext, r.evidence
-                     FROM media_ref r JOIN media m ON m.hash = r.hash
-                     WHERE r.anchor = ?1 AND r.subject = ?2
-                     ORDER BY r.kind, r.source, r.hash",
-                )
-                .map_err(|source| self.err(source))?;
-            let rows = statement
-                .query_map(params![anchor.label(), subject], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                    ))
-                })
-                .map_err(|source| self.err(source))?;
-            for row in rows {
-                let (label, source, hash, ext, evidence) = row.map_err(|e| self.err(e))?;
-                // **认不出的类别不静默归进「其他」**：那会把「这是张说明书」与
-                // 「这一版不认得这个类别」说成同一件事。认不出就整条不算。
-                let Some(kind) = MediaKind::from_label(&label) else {
-                    continue;
-                };
-                out.push(MediaItem {
-                    anchor,
-                    kind,
-                    source,
-                    at: pool.map(|pool| pool.path_of(&hash, &ext)),
-                    in_pool: pool.map(|pool| pool.contains(&hash, &ext)),
-                    hash,
-                    ext,
-                    evidence,
-                });
-            }
+            out.extend(self.media_at(anchor, subject, pool)?);
         }
         Ok(out)
+    }
+
+    /// **一个锚点上**挂着的全部媒体引用，按类别、源、哈希排好。
+    ///
+    /// 逐条清单（[`Self::media_items`]）与「这一行的封面是哪张」（[`Self::cover_of`]）都从这儿读：
+    /// 两处排的是同一个次序，于是表上贴的那张就是清单里头一张封面。
+    fn media_at(
+        &self,
+        anchor: AnchorKind,
+        subject: &str,
+        pool: Option<&MediaPool>,
+    ) -> Result<Vec<MediaItem>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare_cached(
+                "SELECT r.kind, r.source, r.hash, m.ext, r.evidence
+                 FROM media_ref r JOIN media m ON m.hash = r.hash
+                 WHERE r.anchor = ?1 AND r.subject = ?2
+                 ORDER BY r.kind, r.source, r.hash",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![anchor.label(), subject], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (label, source, hash, ext, evidence) = row.map_err(|e| self.err(e))?;
+            // **认不出的类别不静默归进「其他」**：那会把「这是张说明书」与
+            // 「这一版不认得这个类别」说成同一件事。认不出就整条不算。
+            let Some(kind) = MediaKind::from_label(&label) else {
+                continue;
+            };
+            out.push(MediaItem {
+                anchor,
+                kind,
+                source,
+                at: pool.map(|pool| pool.path_of(&hash, &ext)),
+                in_pool: pool.map(|pool| pool.contains(&hash, &ext)),
+                hash,
+                ext,
+                evidence,
+            });
+        }
+        Ok(out)
+    }
+
+    /// 主列表那几行**各自的封面**：行首那一小格贴哪张（票 `gui-looks-like-the-design/09`）。
+    ///
+    /// 每一行看它**自己那个锚点**：认出作品的看作品锚点（封面默认挂在作品这一层，ADR-0009），
+    /// 没认出来的看那个变体自己（[`WorkAnchor::scrape_anchor`](super::browse::WorkAnchor::scrape_anchor)，
+    /// 与主列表补元数据那一趟同一处取）。一个锚点上有好几张封面时取逐条清单
+    /// （[`VariantDetail::media_items`]）里头一张。
+    ///
+    /// 交回的次序与 `rows` 一一对应；这一行一张封面都没有是 `None`。**一行一次按锚点的查询**：
+    /// 界面只拿视口里新滚进来的那十几行来问，不是整页。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn row_covers(
+        &self,
+        rows: &[super::browse::WorkRow],
+        pool: Option<&MediaPool>,
+    ) -> Result<Vec<Option<MediaItem>>, CatalogError> {
+        rows.iter()
+            .map(|row| self.cover_of(&row.anchor, &row.name, pool))
+            .collect()
+    }
+
+    /// 主列表**一行**的封面，挑法见 [`Self::row_covers`]。
+    ///
+    /// **侧边详情头上那一格问的也是它**：同一行在表上与详情里贴的是同一张，「这一行的封面是哪张」
+    /// 只在这儿挑一次（ADR-0024）。`name` 是那一行的名字——认出作品的是作品名
+    /// （`WorkRow::name`、`WorkDetail::name`）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn cover_of(
+        &self,
+        anchor: &super::browse::WorkAnchor,
+        name: &str,
+        pool: Option<&MediaPool>,
+    ) -> Result<Option<MediaItem>, CatalogError> {
+        let (anchor, subject) = anchor.scrape_anchor(name);
+        Ok(self
+            .media_at(anchor, subject, pool)?
+            .into_iter()
+            .find(|item| item.kind == MediaKind::Cover))
     }
 }
 

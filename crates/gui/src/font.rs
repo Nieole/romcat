@@ -98,6 +98,9 @@ pub fn strong_family() -> FontFamily {
 ///
 /// 只换字族，字号跟着所在处的正文走——等宽的数字与同一行旁边的字一样大。等宽只给上面
 /// 这几样用；混在里面的中文照旧回退常规体。
+///
+/// **例外：浏览屏主列表的容量那一列用常规体**，照稿（设计稿 `.wtbl td.num` 不是等宽字）——
+/// 等宽的「256.00 MiB」在 86 点宽的那一列里放不下，两位小数照旧（拿主意的人 2026-09-14 定）。
 #[must_use]
 pub fn mono(text: impl Into<String>) -> egui::RichText {
     egui::RichText::new(text).family(FontFamily::Monospace)

@@ -18,10 +18,11 @@
 //! 那要 ffmpeg 的 Rust 绑定，是规格的 Out of Scope。**ffmpeg 不在的机器上照常可用**：
 //! 那一格显示占位，面板上说一句为什么，视频照样点得开。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
 use romcat_core::catalog::Catalog;
+use romcat_core::catalog::browse::{WorkAnchor, WorkRow};
 use romcat_core::catalog::detail::MediaItem;
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::preview::{self, EDGE, Frame, Key, Loader, Missing, Preview, Thumbnail};
@@ -410,6 +411,295 @@ impl Gallery {
         }
         out
     }
+}
+
+// ── 封面那几种小格子：列表行首、侧边详情头上（票 `gui-looks-like-the-design/09`） ──────
+
+/// 主列表**行首那一小格封面**：哪一行贴哪张、后台解码。
+///
+/// - **贴哪张由核心库答**（`Catalog::row_covers`），这里只缓着问过的那几行——一行问一次，
+///   滚回来不再问；刮削跑完、库底下变了由 [`Self::forget`] 作废。
+/// - **解码在后台**（[`Gallery`]），与详情面板那几格**分开一份**：那一份只留选中那个变体的图，
+///   两份合用的话翻几屏列表就把详情里的图挤掉了。
+/// - **没有封面的那一行画平台色块**（`platform_block`），不画灰色占位：大多数作品没有封面。
+#[derive(Debug, Default)]
+pub struct Shelf {
+    /// 问过核心库的那几行：它的封面，或者 `None`（问过了，一张都没有）。
+    covers: BTreeMap<WorkAnchor, Option<MediaItem>>,
+    /// 这一帧画到的那几行。画完表交给 [`Self::sync`]。
+    seen: Vec<WorkRow>,
+    /// 行首那些图的后台解码。
+    gallery: Gallery,
+    /// 问封面那一趟读库出的错。
+    error: Option<String>,
+}
+
+impl Shelf {
+    /// 指一份**媒体池**；不在位时是 `None`，那时每一行都画平台色块。
+    pub fn set_pool(&mut self, pool: Option<MediaPool>) {
+        self.gallery.set_pool(pool);
+        self.covers.clear();
+    }
+
+    /// 库底下变了（刮削跑完、扫完、裁完）：问过的封面全部作废，下一帧照新的库重问。
+    pub fn forget(&mut self) {
+        self.covers.clear();
+        self.error = None;
+    }
+
+    /// 问封面那一趟读库出的错。
+    #[must_use]
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// **画完表之后每帧一次**：这一帧新画到、还没问过的那几行去问核心库要封面，
+    /// 画到的那几行要的图交给后台解。
+    ///
+    /// `writable` 同 [`Gallery::sync`]：任务台上有活在跑时给 `false`。
+    pub fn sync(
+        &mut self,
+        ctx: &egui::Context,
+        catalog: &mut Catalog,
+        pool: Option<&MediaPool>,
+        writable: bool,
+    ) {
+        let seen = std::mem::take(&mut self.seen);
+        let fresh: Vec<WorkRow> = seen
+            .iter()
+            .filter(|row| !self.covers.contains_key(&row.anchor))
+            .cloned()
+            .collect();
+        if !fresh.is_empty() {
+            match catalog.row_covers(&fresh, pool) {
+                Ok(found) => {
+                    for (row, cover) in fresh.into_iter().zip(found) {
+                        self.covers.insert(row.anchor, cover);
+                    }
+                }
+                Err(error) => {
+                    // **记成「问过了」**：读不动时每帧再问一遍，只是把同一句错刷满。
+                    for row in fresh {
+                        self.covers.insert(row.anchor, None);
+                    }
+                    self.error = Some(format!("行首封面读不动：{error}"));
+                }
+            }
+        }
+        let items: Vec<MediaItem> = seen
+            .iter()
+            .filter_map(|row| self.covers.get(&row.anchor).cloned().flatten())
+            .collect();
+        self.gallery.sync(ctx, catalog, &items, writable);
+    }
+
+    /// 行首那一格：这一行的封面解出来了就贴封面，否则画平台色块。大小照令牌 `thumb-list`。
+    pub(crate) fn thumb(&mut self, ui: &mut egui::Ui, row: &WorkRow) {
+        self.seen.push(row.clone());
+        let tokens = crate::tokens::Tokens::builtin();
+        let [width, height] = tokens.layout.thumb_list;
+        let size = egui::vec2(width, height);
+        let item = self.covers.get(&row.anchor).and_then(Option::as_ref);
+        match item.and_then(|item| self.gallery.texture(item)) {
+            Some(texture) => paint_cover(ui, size, tokens.radius.small, texture),
+            None => platform_block(ui, size, row.platforms.first().map_or("", String::as_str)),
+        }
+    }
+}
+
+impl Gallery {
+    /// 这一份**已经解出来**的那张图；没解完、没有、池子不在位都是 `None`。
+    #[must_use]
+    pub fn texture(&self, item: &MediaItem) -> Option<&egui::TextureHandle> {
+        match self.look(item) {
+            Look::Ready(texture) => Some(texture),
+            _ => None,
+        }
+    }
+}
+
+/// 一张解出来的封面照稿贴进这么大一格（设计稿 `.dcover img` / `.lthumb img` 的 `object-fit:cover`）：
+/// **等比放大到盖满这一格、多出来的那一边两头各裁一半**，四角照 `radius` 圆着裁，外头描一圈一点宽的
+/// 分隔线（`outline`）。
+pub(crate) fn paint_cover(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    radius: u8,
+    texture: &egui::TextureHandle,
+) {
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    egui::Image::new(texture)
+        .uv(cover_uv(texture.size_vec2(), size))
+        .corner_radius(radius)
+        .paint_at(ui, rect);
+    outline(ui, rect, radius);
+}
+
+/// `object-fit: cover` 取纹理上的哪一块（0 到 1 的坐标）：放大到盖满这一格，多出来的那一边两头各裁一半。
+fn cover_uv(texture: egui::Vec2, frame: egui::Vec2) -> egui::Rect {
+    let whole = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+    if texture.x <= 0.0 || texture.y <= 0.0 || frame.x <= 0.0 || frame.y <= 0.0 {
+        return whole;
+    }
+    let scale = (frame.x / texture.x).max(frame.y / texture.y);
+    let take = egui::vec2(frame.x / scale / texture.x, frame.y / scale / texture.y);
+    let from = (egui::vec2(1.0, 1.0) - take) / 2.0;
+    egui::Rect::from_min_size(from.to_pos2(), take)
+}
+
+/// 封面那一格外头那一圈：一点宽的分隔线（令牌 `line`），**描在格子外沿**——设计稿写的是
+/// `box-shadow:0 0 0 1px var(--line)`，不占格子里的地方。
+fn outline(ui: &egui::Ui, rect: egui::Rect, radius: u8) {
+    let tokens = crate::tokens::Tokens::builtin();
+    ui.painter().rect_stroke(
+        rect,
+        radius,
+        egui::Stroke::new(
+            tokens.layout.control_stroke,
+            ui.visuals().widgets.noninteractive.bg_stroke.color,
+        ),
+        egui::StrokeKind::Outside,
+    );
+}
+
+/// 格子**顶上那一道平台色**（设计稿 `box-shadow:inset 0 Npx 0 var(--pc)`）：把整个圆角格子用平台色
+/// 再铺一遍，只留顶上 `height` 那么高一截——上面两个角于是贴着格子的圆角走，底边是一条直线。
+///
+/// 从前画的是一个方角矩形盖在圆角格子上，两个上角外头各露出一小块——那正是「占位封面形状不规则」。
+fn top_band(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    radius: u8,
+    height: f32,
+    color: egui::Color32,
+) {
+    let band = egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, rect.min.y + height));
+    painter
+        .with_clip_rect(band)
+        .rect_filled(rect, radius, color);
+}
+
+/// 把格子**下面两个圆角外头**那一小块刷回这一栏的底色 `ground`。
+///
+/// 水印照稿伸出格子、被格子方方正正地裁掉之后，圆角外头还留着一点字——egui 裁不出圆角，
+/// 刷回底色这一格才是规整的圆角矩形。一个角是一把以那个角尖为轴心的扇子，贴着圆弧收边。
+fn clear_bottom_corners(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    radius: f32,
+    ground: egui::Color32,
+) {
+    use std::f32::consts::FRAC_PI_2;
+    const SEGMENTS: u16 = 8;
+    let r = radius.min(rect.width() / 2.0).min(rect.height() / 2.0);
+    if r <= 0.0 {
+        return;
+    }
+    let mut mesh = egui::Mesh::default();
+    for (corner, center, from) in [
+        (
+            rect.left_bottom(),
+            egui::pos2(rect.left() + r, rect.bottom() - r),
+            FRAC_PI_2,
+        ),
+        (
+            rect.right_bottom(),
+            egui::pos2(rect.right() - r, rect.bottom() - r),
+            0.0,
+        ),
+    ] {
+        let base = u32::try_from(mesh.vertices.len()).unwrap_or(u32::MAX);
+        mesh.colored_vertex(corner, ground);
+        for i in 0..=SEGMENTS {
+            let a = from + FRAC_PI_2 * f32::from(i) / f32::from(SEGMENTS);
+            mesh.colored_vertex(center + r * egui::vec2(a.cos(), a.sin()), ground);
+        }
+        for i in 0..u32::from(SEGMENTS) {
+            mesh.add_triangle(base, base + 1 + i, base + 2 + i);
+        }
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// 没有封面时侧边详情头上摆的**字卡**，照稿 `.dcover .tcard`：规整的圆角矩形（令牌 `radius.medium`），
+/// 平台色调进次级底色的底、顶上一道平台色、左上角至多三行的标题、右下角伸出格子被裁掉的平台代号水印，
+/// 外头一圈分隔线。`ground` 是这一栏的底色：水印伸出去的那一截在圆角外头要刷回它。
+///
+/// **大多数作品没有封面**（真库本地匹配得到的图只有几百张），所以它是常态不是例外——不画成灰色占位块。
+pub(crate) fn title_card(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    title: &str,
+    platform: &str,
+    ground: egui::Color32,
+) {
+    let tokens = crate::tokens::Tokens::builtin();
+    let radius = tokens.radius.medium;
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let color = tokens.color.platform.of(platform);
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(
+        rect,
+        radius,
+        ui.visuals()
+            .faint_bg_color
+            .lerp_to_gamma(color, tokens.mix.title_card_tint),
+    );
+    top_band(&painter, rect, radius, tokens.layout.title_card_band, color);
+    // 标题：拉丁与数字是粗体，中文照旧常规体（字体预算）；至多三行，放不下的尾巴补「…」。
+    let [padding_y, padding_x] = tokens.space.title_card_padding;
+    let ink = ui.visuals().strong_text_color();
+    let mut job = egui::text::LayoutJob::simple(
+        title.to_owned(),
+        egui::FontId::new(tokens.font.size_cover_title, crate::font::strong_family()),
+        ink,
+        rect.width() - 2.0 * padding_x,
+    );
+    job.wrap.max_rows = 3;
+    job.wrap.break_anywhere = true;
+    painter.galley(
+        rect.min + egui::vec2(padding_x, padding_y),
+        painter.layout_job(job),
+        ink,
+    );
+    // 水印照稿伸出格子右下角，伸出去的那一截被格子裁掉。字号直接问令牌：具名字号档要等观感基线
+    // 装上的下一帧才有，而点开一行可能就发生在头一帧。
+    let [out_x, out_y] = tokens.layout.title_card_mark_offset;
+    painter.text(
+        egui::pos2(rect.right() + out_x, rect.bottom() + out_y),
+        egui::Align2::RIGHT_BOTTOM,
+        platform,
+        egui::FontId::new(tokens.font.size_cover_mark, crate::font::strong_family()),
+        color.gamma_multiply(tokens.mix.watermark_opacity),
+    );
+    clear_bottom_corners(&painter, rect, f32::from(radius), ground);
+    outline(ui, rect, radius);
+}
+
+/// 没有封面时列表行首那一格：**平台色块**，照稿 `.lthumb`——规整的小圆角矩形（令牌 `radius.small`），
+/// 平台色调进次级底色的底、顶上一道平台色、正中写平台代号，外头一圈分隔线。
+pub(crate) fn platform_block(ui: &mut egui::Ui, size: egui::Vec2, platform: &str) {
+    let tokens = crate::tokens::Tokens::builtin();
+    let radius = tokens.radius.small;
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let color = tokens.color.platform.of(platform);
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(
+        rect,
+        radius,
+        ui.visuals()
+            .faint_bg_color
+            .lerp_to_gamma(color, tokens.mix.thumb_list_tint),
+    );
+    top_band(&painter, rect, radius, tokens.layout.thumb_list_band, color);
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        platform,
+        egui::FontId::new(tokens.font.size_thumb_code, crate::font::strong_family()),
+        ui.visuals().text_color(),
+    );
+    outline(ui, rect, radius);
 }
 
 /// 点一格算什么。

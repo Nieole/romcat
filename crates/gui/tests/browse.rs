@@ -23,7 +23,7 @@ use romcat_core::stage::Stage;
 use romcat_core::title::{Language, TitleKind};
 use romcat_gui::app::{App, View};
 use romcat_gui::bench::{self, Sweep};
-use romcat_gui::table::{ROW_HEIGHT, SPAN};
+use romcat_gui::table::{SPAN, row_height};
 use romcat_gui::{browse, demo, headless};
 
 mod shared;
@@ -1014,7 +1014,7 @@ fn 表格里画多少行文本输入框都是那几个() {
         跑(&ctx, &mut app, 3);
         const STEPS: u32 = 24;
         #[allow(clippy::cast_precision_loss)]
-        let travel = app.window().total() as f32 * ROW_HEIGHT;
+        let travel = app.window().total() as f32 * row_height();
         for step in 0..=STEPS {
             app.browse_and_site().0.scroll_to = Some(travel * step as f32 / STEPS as f32);
             headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
@@ -1798,7 +1798,7 @@ fn 筛选栏那颗全清不碰搜索框() {
 /// 面板测试用的规模：几百行够摆出「筛一批、勾几行」，而刮削真跑一趟只要几毫秒。
 const 小库: u64 = 400;
 
-/// 全选一批，再按「刮削选中…」。**走的是界面上那条一模一样的路**：
+/// 全选一批，再按「刮削…」。**走的是界面上那条一模一样的路**：
 /// 先画两帧让屏上那句「作用于多少个变体」数出来，再按那一下。
 fn 摊开刮削面板(ctx: &egui::Context, app: &mut App) {
     跑(ctx, app, 2);
@@ -1815,7 +1815,7 @@ fn 刮削面板四个旋钮的默认位置() {
     摊开刮削面板(&ctx, &mut app);
     let panel = app.browse().scrape();
 
-    assert!(panel.is_open(), "按「刮削选中…」该把面板摊开");
+    assert!(panel.is_open(), "按「刮削…」该把面板摊开");
     // **默认只勾本地源**（ADR-0007）：联网那一档要人明确点头才开。
     assert!(!panel.online(), "联网源默认不该勾上");
     // 字段那一栏答的是「我要什么」，几样本来就是一次撞完一起带回来的，默认全勾。
@@ -2286,7 +2286,7 @@ fn 拿不到内容锚的那些在详情面板上被标出来() {
 
 #[test]
 fn 一行都没勾就按星_说清而不是静静什么都不做() {
-    // 与「刮削选中…」同一条规矩：摆出一份「作用于 0 个变体」的回执，
+    // 与「刮削…」同一条规矩：摆出一份「作用于 0 个变体」的回执，
     // 人只会对着它猜哪儿出了问题。
     let ctx = headless::context();
     let mut app = 界面(500);
@@ -2345,31 +2345,44 @@ fn 浏览屏把还没识别与没有候选印成两个词() {
             .collect()
     };
     assert_eq!(anchors.len(), 3, "三个变体各自成一行");
-    let mut 屏上 = String::new();
+    let mut 各栏 = Vec::new();
     for anchor in &anchors {
         {
             let (browse, site) = app.browse_and_site();
             browse.open_work(&site.catalog, anchor);
         }
         跑(&ctx, &mut app, 1);
-        屏上.push_str(&画出来的字(&headless::frame(
+        各栏.push(一栏::看(
             &ctx,
-            headless::input(),
-            |ui| app.ui(ui),
-        )));
-        屏上.push('\n');
+            &headless::frame(&ctx, headless::input(), |ui| app.ui(ui)),
+        ));
     }
 
-    // 断的是**那一行整句**而不是光那几个字：光看那几个字的话，左边筛选面板里
-    // 「还没识别」那一档的名字就足以让断言通过，而它说的是另一件事。
-    for 那一行 in [
-        "高置信｜主库/SFC/命中.zip",
-        "没有候选｜主库/SFC/一条候选都没有.zip",
-        "还没识别｜主库/SFC/还没轮到它.zip",
+    // 断的是**侧边详情里那张变体卡片**：置信度那枚标签上一字不差是那个词，卡片底下那一行一字不差
+    // 是那个变体的键，两样在同一回点开的那一栏里。只看那一栏、只认一字不差：光看那几个字的话，
+    // 左栏「识别结论」那一簇里「还没识别」那一枚、判定依据里「识别结论：还没识别」那一句就足以让
+    // 断言通过，而它们说的是另一件事。
+    // 卡片底下那一行照稿写「根名 · 相对路径」（挂单 `Q809`）。
+    for (那个词, 相对路径) in [
+        ("高置信", "SFC/命中.zip"),
+        ("没有候选", "SFC/一条候选都没有.zip"),
+        ("还没识别", "SFC/还没轮到它.zip"),
     ] {
+        let 那个键 = format!(
+            "{}{}{相对路径}",
+            shared::根,
+            romcat_gui::table::ROOT_SEPARATOR
+        );
         assert!(
-            屏上.contains(那一行),
-            "详情面板里没有「{那一行}」这一行：\n{屏上}",
+            各栏
+                .iter()
+                .any(|栏| 栏.有这一段(那个词) && 栏.有这一段(&那个键)),
+            "侧边详情里没有一张卡片同时写着「{那个词}」与「{那个键}」：\n{}",
+            各栏
+                .iter()
+                .map(一栏::全文)
+                .collect::<Vec<_>>()
+                .join("\n——\n"),
         );
     }
     // 悬停里跟着说的那一句**这儿验不了**：它在 `on_hover_ui` 里，而这几帧没有指针，
@@ -2698,12 +2711,15 @@ fn 非游戏资产默认不列出_屏上说收起了几个_开关打开后列出
     let mut app = 夹着非游戏资产的小库();
     跑(&ctx, &mut app, 2);
 
-    // 一、默认收起：表上只有两行，屏上说清收起了几个，行上一个标记都没有。
+    // 开关底下那句小字（拿主意的人照稿定的字）：共几个、不会被导出。数是核心库数的，开没开都是这一句。
+    const 非游戏资产那句: &str = "BIOS 等文件共 2 个，不会被导出";
+
+    // 一、默认收起：表上只有两行，屏上说清有几个，行上一个标记都没有。
     let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
     assert_eq!(app.window().total(), 2, "默认收起：四行里只列两行");
     assert!(
-        屏上.contains("收起了 2 个非游戏资产"),
-        "屏上没说收起了几个：\n{屏上}"
+        屏上.contains(非游戏资产那句),
+        "屏上没说有几个非游戏资产：\n{屏上}"
     );
     assert!(
         !屏上.contains("SCPH-1001"),
@@ -2722,15 +2738,28 @@ fn 非游戏资产默认不列出_屏上说收起了几个_开关打开后列出
     assert_eq!(平台条数(&app, "街机"), None);
 
     // 二、点那颗开关：列出来，行上标着——**标着哪几行由核心库说**，屏上照着标。
-    let 屏上 = shared::点一下(&ctx, "列出非游戏资产", |ui| app.ui(ui));
+    let 屏上 = shared::点一下(&ctx, "显示非游戏资产", |ui| app.ui(ui));
     assert_eq!(app.browse().query().non_game_assets, NonGameAssets::Listed);
     assert_eq!(app.window().total(), 4, "列出来之后四行都在");
     let 标着的 = 核心库标着的(&mut app);
     assert_eq!(标着的.len(), 2, "{标着的:?}");
+    // 认不出作品的那一行副行照稿写「根名 · 相对路径」（挂单 `Q809`），屏上认的是那个样子。
+    // 作品那一列窄得摆不下时副行**从尾部截断**（同一条挂单）：根名留着、相对路径左边删字补「…」；
+    // 写上根名就把文件名挤没时省掉根名、只写「…尾巴」（Q809 的例外）——这几种都算画着。
+    // 左边多了导航、标签挪到副行开头之后，1280 宽的窗口里这一格就只有那么宽。
     for name in &标着的 {
+        let 副行 = name.replacen('/', romcat_gui::table::ROOT_SEPARATOR, 1);
+        let (根名, 相对路径) = name.split_once('/').expect("键里带着根名");
+        let 截过的开头 = format!("{根名}{}…", romcat_gui::table::ROOT_SEPARATOR);
+        let 是尾巴 = |tail: &str| !tail.is_empty() && 相对路径.ends_with(tail);
+        let 画着 = 屏上.lines().any(|line| {
+            line == 副行
+                || line.strip_prefix(截过的开头.as_str()).is_some_and(是尾巴)
+                || line.strip_prefix('…').is_some_and(是尾巴)
+        });
         assert!(
-            屏上.contains(name.as_str()),
-            "列出来的「{name}」没画在屏上：\n{屏上}"
+            画着,
+            "列出来的「{副行}」没画在屏上（整段、从尾部截断、省掉根名的「…尾巴」都算）：\n{屏上}"
         );
     }
     assert_eq!(
@@ -2741,7 +2770,7 @@ fn 非游戏资产默认不列出_屏上说收起了几个_开关打开后列出
         标着的.len(),
         "行上标着的与核心库说的对不上：\n{屏上}",
     );
-    assert!(屏上.contains("列出了 2 个非游戏资产"), "{屏上}");
+    assert!(屏上.contains(非游戏资产那句), "{屏上}");
     assert_eq!(
         平台条数(&app, "PS"),
         Some(2),
@@ -2750,7 +2779,852 @@ fn 非游戏资产默认不列出_屏上说收起了几个_开关打开后列出
     assert_eq!(平台条数(&app, "街机"), Some(1));
 
     // 三、再点一下收回去：数与表回到原样。
-    let 屏上 = shared::点一下(&ctx, "列出非游戏资产", |ui| app.ui(ui));
+    let 屏上 = shared::点一下(&ctx, "显示非游戏资产", |ui| app.ui(ui));
     assert_eq!(app.window().total(), 2);
-    assert!(屏上.contains("收起了 2 个非游戏资产"), "{屏上}");
+    assert!(屏上.contains(非游戏资产那句), "{屏上}");
+}
+
+// ——— 票 `gui-looks-like-the-design/09`：浏览屏照稿重排 ———
+
+/// 这一段文字**画在哪儿、被夹在哪一格里**：`(那一段自己的外框, 它的裁剪矩形)`，按画出来的
+/// 次序取头一处；一字不差地比，不是「含有」。
+///
+/// 「从尾部截断」那一条要的是**画得下**，不是「画出去了、被格子裁掉了」——两者在
+/// [`画出来的字`] 里是同一串字，只有外框比得出来。
+fn 正好这一段的外框(
+    output: &egui::FullOutput,
+    那一段: &str,
+) -> Option<(egui::Rect, egui::Rect)> {
+    fn 找(
+        shape: &egui::epaint::Shape,
+        clip: egui::Rect,
+        那一段: &str,
+    ) -> Option<(egui::Rect, egui::Rect)> {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == 那一段 => Some((
+                egui::Rect::from_min_size(text.pos, text.galley.size()),
+                clip,
+            )),
+            egui::epaint::Shape::Vec(shapes) => {
+                shapes.iter().find_map(|one| 找(one, clip, 那一段))
+            }
+            _ => None,
+        }
+    }
+    output
+        .shapes
+        .iter()
+        .find_map(|clipped| 找(&clipped.shape, clipped.clip_rect, 那一段))
+}
+
+/// 两个**认不出作品**的变体各自成一行：一个路径长到一格画不下，一个短得一眼画得完。
+///
+/// 长的那个文件名就是剥离规则模块开头那一行（`romcat_core::filename` 的文档与它自己那条
+/// 测试钉着：剥完是 `超级机器人大战R`），又在前面垫了两层真库里常见的整理目录。
+/// `shared::小库` 不给变体挂作品，于是两行都是**未关联作品**的那一种。
+fn 两行认不出作品的小库() -> App {
+    use shared::档;
+
+    let mut app = shared::小库(
+        &[
+            (
+                "GBA",
+                "【全部汉化】/GBA 汉化合集 第一辑（按首字排好）/超级机器人大战R[星组](v1.2+)(简)(JP)(68.92Mb).zip",
+                档::没有候选,
+            ),
+            ("SFC", "短.zip", 档::命中),
+        ],
+        std::env::temp_dir().join("romcat-测试-浏览-未关联作品"),
+    );
+    app.show_view(View::Browse);
+    app
+}
+
+#[test]
+fn 认不出作品的那一行画正题与未关联作品标签_路径从尾部截断画得下() {
+    const 长键: &str = "主库/GBA/【全部汉化】/GBA 汉化合集 第一辑（按首字排好）/超级机器人大战R[星组](v1.2+)(简)(JP)(68.92Mb).zip";
+    const 短键: &str = "主库/SFC/短.zip";
+
+    let ctx = headless::context();
+    let mut app = 两行认不出作品的小库();
+    跑(&ctx, &mut app, 3);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&这一帧);
+    let 行: Vec<&str> = 屏上.lines().collect();
+
+    // 一、主栏是**正题**，不是那一长串键。
+    assert!(行.contains(&"超级机器人大战R"), "主栏没画正题：\n{屏上}");
+    assert!(行.contains(&"短"), "短的那一行也该画正题：\n{屏上}");
+    // 二、两行都挂着「未关联作品」。
+    assert_eq!(
+        行.iter().filter(|line| **line == "未关联作品").count(),
+        2,
+        "两行认不出作品的都该挂那个标签：\n{屏上}",
+    );
+    // 三、**不再印一长串原始路径**：整条长键在屏上一处都不整段出现。
+    assert!(
+        !行.contains(&长键),
+        "认不出作品的那一行还在整段印原始路径：\n{屏上}"
+    );
+    // 四、副行在标签后头（挂单 `Q878`），照 `Q809` 写「根名 · 相对路径」、画不下从左边删字补「…」；写上根名就会
+    //     把文件名挤没时省掉根名、只写「…尾巴」（Q809 的例外，拿主意的人 2026-09-14 定）。
+    //     副行是正题底下、标签后头那一段；留下来的那一截得是相对路径的**尾巴**（截掉的是左边）。
+    let 副行 = |行: &[&str], 正题: &str| -> String {
+        let 在 = 行
+            .iter()
+            .position(|line| *line == 正题)
+            .unwrap_or_else(|| panic!("没画正题「{正题}」"));
+        assert_eq!(
+            行.get(在 + 1).copied(),
+            Some("未关联作品"),
+            "「{正题}」底下头一样该是标签"
+        );
+        行.get(在 + 2)
+            .copied()
+            .unwrap_or_else(|| panic!("「{正题}」那一行没有副行"))
+            .to_owned()
+    };
+    let 带根名 = format!("{}{}", shared::根, romcat_gui::table::ROOT_SEPARATOR);
+    let 留下的尾巴 = |副行: &str, 键: &str| -> String {
+        let 相对路径 = 键.split_once('/').expect("键里带着根名").1;
+        let 去掉根名 = 副行.strip_prefix(带根名.as_str()).unwrap_or(副行);
+        let 尾巴 = 去掉根名.strip_prefix('…').unwrap_or(去掉根名);
+        assert!(
+            !尾巴.is_empty() && 相对路径.ends_with(尾巴),
+            "副行「{副行}」留下的不是相对路径的尾巴"
+        );
+        尾巴.to_owned()
+    };
+    //     1280 宽的窗口里扣掉标签，这一格只剩六十来点：两行都至少留得下文件名末尾几个字、以 `.zip` 结尾。
+    let 长副行 = 副行(&行, "超级机器人大战R");
+    let 短副行 = 副行(&行, "短");
+    for (那一行, 键) in [(&长副行, 长键), (&短副行, 短键)] {
+        let 尾巴 = 留下的尾巴(那一行, 键);
+        assert!(
+            尾巴.chars().count() >= 4 && 尾巴.ends_with(".zip"),
+            "1280 宽下标签后头的副行该留得下文件名末尾几个字、以 .zip 结尾：「{那一行}」"
+        );
+    }
+    assert!(
+        长副行.contains('…'),
+        "长路径在 1280 宽下该截过：「{长副行}」"
+    );
+    // 五、**画得下**：截过的那一段整个落在它那一格的裁剪矩形里，不是画出去再被格子裁掉。
+    let (外框, 裁剪) = 正好这一段的外框(&这一帧, &长副行).expect("刚找到的那一段");
+    assert!(
+        外框.min.x >= 裁剪.min.x - 0.5 && 外框.max.x <= 裁剪.max.x + 0.5,
+        "截过的路径 {外框:?} 伸出了它那一格 {裁剪:?}——那是被裁掉的，不是截到画得下",
+    );
+    // 六、**宽窗口里宽度够**：两行都照 `Q809` 带着根名；画得下的短路径一个字都不删，只是根名与相对路径之间
+    //     换成「 · 」。窗口只是这一条里拉宽，别的几条照旧是 1280。
+    let 宽窗口 = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(2560.0, headless::VIEWPORT[1]),
+        )),
+        ..Default::default()
+    };
+    for _ in 0..3 {
+        headless::frame(&ctx, 宽窗口.clone(), |ui| app.ui(ui));
+    }
+    let 宽的一帧 = headless::frame(&ctx, 宽窗口, |ui| app.ui(ui));
+    let 宽屏上 = 画出来的字(&宽的一帧);
+    let 宽行: Vec<&str> = 宽屏上.lines().collect();
+    let 宽长副行 = 副行(&宽行, "超级机器人大战R");
+    assert!(
+        宽长副行.starts_with(带根名.as_str()),
+        "宽窗口里宽度够，副行该照 Q809 带根名：「{宽长副行}」\n{宽屏上}"
+    );
+    留下的尾巴(&宽长副行, 长键);
+    assert_eq!(
+        副行(&宽行, "短"),
+        短键.replacen('/', romcat_gui::table::ROOT_SEPARATOR, 1),
+        "宽窗口里画得下的短路径不该被截：\n{宽屏上}"
+    );
+    // 七、**开了行首封面、宽度更紧**（协调人 2026-09-15 审行首封面那两张打回「未关联作品 …s」）：标签后头连
+    //     文件名末尾几个字都放不下时只画标签、不画路径碎片；画了路径就至少露出 `PATH_MIN_CHARS` 个字。
+    //     标签后头紧跟着的那一段以根名或「…」开头才是路径，否则是平台那一格——那就是没画路径。
+    for _ in 0..2 {
+        headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    }
+    shared::点一下(&ctx, "在每行开头显示封面", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    let 封面一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 封面屏上 = 画出来的字(&封面一帧);
+    let 封面行: Vec<&str> = 封面屏上.lines().collect();
+    for (正题, 键) in [("超级机器人大战R", 长键), ("短", 短键)] {
+        let 标签后头 = 副行(&封面行, 正题);
+        if 标签后头.starts_with(带根名.as_str()) || 标签后头.starts_with('…') {
+            let 尾巴 = 留下的尾巴(&标签后头, 键);
+            assert!(
+                尾巴.chars().count() >= romcat_gui::table::PATH_MIN_CHARS,
+                "开了行首封面，「{正题}」那一行的路径只露出「{标签后头}」：\n{封面屏上}"
+            );
+        }
+    }
+}
+
+#[test]
+fn 字体样张开关只在带演示启动的窗口里摆出来() {
+    // 拿主意的人 2026-09-14：「字体样张」只在演示/开发构建里出现（挂单 `Q874`）。看的是**运行时**那个标记
+    // （`App::mark_demo`，只有程序带 `--demo` 启动时 `main.rs` 才设），不看编译开关——这份测试本身就开着
+    // `demo` 特性编，没设标记时屏头上照样不该有它。
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        std::env::temp_dir().join("romcat-测试-浏览-演示标记"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 2);
+    // 认的是**正好画着「字体样张」那一段**：状态栏里印着工作目录，目录名带着这几个字就会被「含有」误认。
+    let 摆着开关 = |屏上: &str| 屏上.lines().any(|line| line == "字体样张");
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        !摆着开关(&屏上),
+        "没带演示启动，屏头上摆出了「字体样张」：\n{屏上}"
+    );
+    app.mark_demo();
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        摆着开关(&屏上),
+        "带演示启动的窗口，屏头上没有「字体样张」：\n{屏上}"
+    );
+}
+
+/// 按一下屏上**正好**写着 `文字`、而且画在**左半屏还是右半屏**的那一处，返回松开之后再画一帧的字。
+///
+/// 两颗箭头长得一样：左栏的「收起」是「«」，右栏收起之后的「展开」也是「«」——只按字找，
+/// 点到的是先画出来的那一颗。`shared::点一下` 按「含有」找头一处，这里多一道「哪半边」。
+fn 点这半边的(
+    ctx: &egui::Context,
+    文字: &str,
+    左半边: bool,
+    mut 画一帧: impl FnMut(&mut egui::Ui),
+) -> String {
+    fn 收(shape: &egui::epaint::Shape, 文字: &str, out: &mut Vec<egui::Pos2>) {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == 文字 => {
+                out.push(egui::Rect::from_min_size(text.pos, text.galley.size()).center());
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    收(one, 文字, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let 头一帧 = headless::frame(ctx, headless::input(), &mut 画一帧);
+    let mut 处处 = Vec::new();
+    for clipped in &头一帧.shapes {
+        收(&clipped.shape, 文字, &mut 处处);
+    }
+    let 中线 = headless::VIEWPORT[0] / 2.0;
+    let Some(位置) = 处处.into_iter().find(|at| (at.x < 中线) == 左半边) else {
+        panic!(
+            "{}半屏上没有正好写着「{文字}」的地方：\n{}",
+            if 左半边 { "左" } else { "右" },
+            画出来的字(&头一帧)
+        );
+    };
+    let 按 = |pressed: bool| egui::Event::PointerButton {
+        pos: 位置,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    headless::frame(
+        ctx,
+        shared::输入(vec![egui::Event::PointerMoved(位置), 按(true)]),
+        &mut 画一帧,
+    );
+    headless::frame(ctx, shared::输入(vec![按(false)]), &mut 画一帧);
+    shared::跑一帧(ctx, 画一帧)
+}
+
+/// 这条边界眼下多宽：egui 自己存着的那一份。**收起来之后它照旧存着**——展开回来靠的就是它。
+fn 面板多宽(ctx: &egui::Context, boundary: romcat_gui::layout::Boundary) -> f32 {
+    let state = egui::PanelState::load(ctx, egui::Id::new(boundary.id))
+        .unwrap_or_else(|| panic!("「{}」那块面板一次都没画过", boundary.id));
+    boundary.side.of(state.size())
+}
+
+#[test]
+fn 左右两栏收得起来_关掉再打开还收着_展开回到原来那么宽() {
+    use romcat_gui::layout;
+
+    // 两栏里各挑一句**只在那一栏里**的话：它在不在屏上，就是那一栏摊没摊开。
+    const 筛选栏里的: &str = "显示非游戏资产";
+    const 详情栏里的: &str = "点主列表里的一行，看它包含哪几个变体。";
+
+    // **版式偏好往工作目录里写**：先清干净，上一趟收起来的不该带进这一趟。
+    let 目录 = std::env::temp_dir().join("romcat-测试-浏览-收起");
+    let _ = std::fs::remove_dir_all(&目录);
+    let 开 = || {
+        let mut app = shared::小库(&[("SFC", "短.zip", shared::档::命中)], 目录.clone());
+        app.show_view(View::Browse);
+        app
+    };
+
+    let ctx = headless::context();
+    let mut app = 开();
+    跑(&ctx, &mut app, 3);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(屏上.contains(筛选栏里的), "筛选栏默认摊开着：\n{屏上}");
+    assert!(屏上.contains(详情栏里的), "详情栏默认摊开着：\n{屏上}");
+    let 原来多宽 = 面板多宽(&ctx, layout::FILTER);
+
+    // 一、收起左栏：那一栏的东西不画了，正中那张表照旧在。
+    let 屏上 = 点这半边的(&ctx, "«", true, |ui| app.ui(ui));
+    assert!(!屏上.contains(筛选栏里的), "左栏没收起来：\n{屏上}");
+    assert!(屏上.contains(详情栏里的), "收左栏不该碰右栏：\n{屏上}");
+    assert!(
+        屏上.lines().any(|line| line == "短"),
+        "表格该照旧在：\n{屏上}"
+    );
+
+    // 二、收起右栏。
+    let 屏上 = 点这半边的(&ctx, "»", false, |ui| app.ui(ui));
+    assert!(!屏上.contains(详情栏里的), "右栏没收起来：\n{屏上}");
+
+    // 三、**关掉再打开**：新的 `App`、新的上下文——egui 自己那份内存跟着旧窗口一起没了，
+    //     两栏还收着只能是工作目录里记下了。
+    drop(app);
+    let ctx = headless::context();
+    let mut 再开 = 开();
+    跑(&ctx, &mut 再开, 3);
+    let 屏上 = shared::跑一帧(&ctx, |ui| 再开.ui(ui));
+    assert!(
+        !屏上.contains(筛选栏里的) && !屏上.contains(详情栏里的),
+        "再打开两栏该还收着：\n{屏上}"
+    );
+
+    // 四、展开左栏：回来的是收起之前那么宽，不是被窄条那 36 点带歪。
+    let 屏上 = 点这半边的(&ctx, "»", true, |ui| 再开.ui(ui));
+    assert!(屏上.contains(筛选栏里的), "左栏没展开：\n{屏上}");
+    assert!(
+        (面板多宽(&ctx, layout::FILTER) - 原来多宽).abs() <= 1.0,
+        "展开回来是 {}，收起之前是 {原来多宽}",
+        面板多宽(&ctx, layout::FILTER),
+    );
+}
+
+/// 右边那一栏（侧边详情）这一帧画了什么：几段字连它们的外框、贴了图的那几块、纯色块。
+///
+/// **只收那一栏里的**：同一个平台名、同一句「1 个变体」在左栏与表格里也画着，混进来的话
+/// 断言测的就不是侧边详情了。那一栏在哪儿问 egui 自己存的面板尺寸（`layout::DETAIL`）。
+struct 一栏 {
+    字: Vec<(String, egui::Rect)>,
+    图: Vec<egui::Rect>,
+    色块: Vec<(egui::Color32, egui::Rect)>,
+}
+
+impl 一栏 {
+    /// 侧边详情那一栏。
+    fn 看(ctx: &egui::Context, output: &egui::FullOutput) -> Self {
+        let 栏 = egui::PanelState::load(ctx, egui::Id::new(romcat_gui::layout::DETAIL.id))
+            .expect("侧边详情那一栏画过")
+            .outer_rect;
+        Self::看这一块(output, 栏)
+    }
+
+    /// **正中那一栏**：左栏右沿到右栏左沿之间，表格就在这儿。
+    fn 正中(ctx: &egui::Context, output: &egui::FullOutput) -> Self {
+        let 边 = |boundary: romcat_gui::layout::Boundary| {
+            egui::PanelState::load(ctx, egui::Id::new(boundary.id))
+                .unwrap_or_else(|| panic!("「{}」那一栏画过", boundary.id))
+                .outer_rect
+        };
+        let 左 = 边(romcat_gui::layout::FILTER);
+        let 右 = 边(romcat_gui::layout::DETAIL);
+        let 栏 = egui::Rect::from_min_max(
+            egui::pos2(左.max.x, 左.min.y),
+            egui::pos2(右.min.x, 右.max.y),
+        );
+        Self::看这一块(output, 栏)
+    }
+
+    /// 正好写着这一段的那一处在哪儿（一字不差）。
+    fn 正好那一段在哪儿(&self, 那一段: &str) -> egui::Rect {
+        self.字
+            .iter()
+            .find(|(text, _)| text == 那一段)
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| {
+                panic!(
+                    "这一栏里没有正好写着「{那一段}」的那一段：\n{}",
+                    self.全文()
+                )
+            })
+    }
+
+    fn 看这一块(output: &egui::FullOutput, 栏: egui::Rect) -> Self {
+        fn 收(shape: &egui::epaint::Shape, 栏: egui::Rect, out: &mut 一栏) {
+            match shape {
+                egui::epaint::Shape::Text(text) => {
+                    let rect = egui::Rect::from_min_size(text.pos, text.galley.size());
+                    if 栏.contains(rect.center()) {
+                        out.字.push((text.galley.text().to_string(), rect));
+                    }
+                }
+                egui::epaint::Shape::Mesh(mesh)
+                    if mesh.texture_id != egui::TextureId::default() =>
+                {
+                    let rect = mesh.calc_bounds();
+                    if 栏.contains(rect.center()) {
+                        out.图.push(rect);
+                    }
+                }
+                egui::epaint::Shape::Rect(rect) if 栏.contains(rect.rect.center()) => {
+                    if rect.fill_texture_id() == egui::TextureId::default() {
+                        out.色块.push((rect.fill, rect.rect));
+                    } else {
+                        out.图.push(rect.rect);
+                    }
+                }
+                egui::epaint::Shape::Vec(shapes) => {
+                    for one in shapes {
+                        收(one, 栏, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = 一栏 {
+            字: Vec::new(),
+            图: Vec::new(),
+            色块: Vec::new(),
+        };
+        for clipped in &output.shapes {
+            收(&clipped.shape, 栏, &mut out);
+        }
+        out
+    }
+
+    fn 有这一段(&self, 那一段: &str) -> bool {
+        self.字.iter().any(|(text, _)| text == 那一段)
+    }
+
+    /// 以这几个字开头的那一段在哪儿。
+    fn 那一段在哪儿(&self, 开头: &str) -> egui::Rect {
+        self.字
+            .iter()
+            .find(|(text, _)| text.starts_with(开头))
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| panic!("侧边详情里没有以「{开头}」开头的那一段：\n{}", self.全文()))
+    }
+
+    fn 全文(&self) -> String {
+        self.字
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// 一张纯色 PNG 的字节，3:4——封面那一格的比例。
+fn 一张封面() -> Vec<u8> {
+    let buf = image::RgbImage::from_pixel(60, 80, image::Rgb([30, 90, 160]));
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(buf)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .expect("编得出 PNG");
+    out.into_inner()
+}
+
+/// 有封面的那一个变体在根底下的路径：**长到侧边详情一行画不下**——前面垫两层真库里常见的整理目录。
+///
+/// 变体那一行与文件那一行都印这串键，从前它们不折不截，把那一栏撑出界、盖到表格底下去
+/// （第二段对着截图看出来的）。
+const 长路径: &str = "【全部汉化】/GBA 汉化合集 第一辑（按首字排好）/超级机器人大战R[星组](v1.2+)(简)(JP)(68.92Mb).zip";
+
+/// 侧边详情那一栏里**伸出界**的字：裁剪矩形落在那一栏里，外框却越过了那一栏的左右两沿。
+///
+/// 看的是这一帧真画出去的每一段字的外框，不是「字在不在」——伸出界的字照样在
+/// [`画出来的字`] 里，只是被表格盖着看不见。
+fn 伸出右栏的字(ctx: &egui::Context, output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+    fn 收(
+        shape: &egui::epaint::Shape,
+        clip: egui::Rect,
+        栏: egui::Rect,
+        out: &mut Vec<(String, egui::Rect)>,
+    ) {
+        match shape {
+            egui::epaint::Shape::Text(text) if 栏.contains(clip.center()) => {
+                let rect = egui::Rect::from_min_size(text.pos, text.galley.size());
+                if rect.min.x < 栏.min.x - 0.5 || rect.max.x > 栏.max.x + 0.5 {
+                    out.push((text.galley.text().to_string(), rect));
+                }
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    收(one, clip, 栏, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let 栏 = egui::PanelState::load(ctx, egui::Id::new(romcat_gui::layout::DETAIL.id))
+        .expect("侧边详情那一栏画过")
+        .outer_rect;
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        收(&clipped.shape, clipped.clip_rect, 栏, &mut out);
+    }
+    out
+}
+
+/// 两个认不出作品的变体：一个在**媒体池**里有一张封面（挂在它自己这个变体上），一个什么图都没有。
+///
+/// 工作目录要活到测试结束——媒体池就在它里头，所以连它一起交出去。
+fn 一个有封面一个没有的小库() -> (App, romcat_core::testing::TempDir) {
+    use shared::档;
+
+    let dir = romcat_core::testing::temp_dir("gui-浏览-侧边详情");
+    // **池子得先在**：界面开起来那一刻看工作目录里有没有媒体池，没有就不指（「没查」与「没有」分开）。
+    let pool = romcat_core::scrape::pool::MediaPool::open(&romcat_core::workspace::media_pool_dir(
+        dir.path(),
+    ))
+    .expect("开得出媒体池");
+    let mut app = shared::小库(
+        &[("GBA", 长路径, 档::命中), ("SFC", "短.zip", 档::没有候选)],
+        dir.path().to_path_buf(),
+    );
+    app.show_view(View::Browse);
+    let bytes = 一张封面();
+    let (hash, _) = pool.take_bytes(&bytes, "png").expect("落得进池");
+    {
+        let (_, site) = app.browse_and_site();
+        site.catalog
+            .put_media(&hash, "png", bytes.len() as u64)
+            .expect("记得进库");
+        site.catalog
+            .put_scraped(&[romcat_core::catalog::scrape::Harvested {
+                anchor: AnchorKind::Variant.label().to_string(),
+                subject: format!("主库/GBA/{长路径}"),
+                source: "测试".to_string(),
+                input: "测试指纹".to_string(),
+                values: Vec::new(),
+                media: vec![romcat_core::catalog::scrape::HarvestedMedia {
+                    kind: MediaKind::Cover.label().to_string(),
+                    hash,
+                    evidence: "测试摆进去的".to_string(),
+                }],
+            }])
+            .expect("写得进");
+    }
+    (app, dir)
+}
+
+/// 一帧一帧跑到后台把那几份图解完。**不看挂钟**：解码在后台线程上，每跑一帧它就往前走一截；
+/// 跑满上限还没解完就当场炸，并说清卡在哪儿。
+fn 跑到图解完(ctx: &egui::Context, app: &mut App) {
+    for _ in 0..20_000 {
+        跑(ctx, app, 1);
+        let gallery = app.browse().gallery();
+        if gallery.ready() >= 1 && gallery.busy() == 0 {
+            return;
+        }
+    }
+    panic!("跑了两万帧图还没解完：{:?}", app.browse().gallery());
+}
+
+#[test]
+fn 侧边详情摆封面或字卡_平台年份变体数_判定依据_变体列表与媒体() {
+    let 有封面的 = format!("主库/GBA/{长路径}");
+    const 没封面的: &str = "主库/SFC/短.zip";
+
+    let ctx = headless::context();
+    let (mut app, _dir) = 一个有封面一个没有的小库();
+    跑(&ctx, &mut app, 2);
+
+    // 一、有封面的那一个。
+    {
+        let (browse, site) = app.browse_and_site();
+        browse.open_work(&site.catalog, &WorkAnchor::Loose(有封面的.clone()));
+    }
+    跑到图解完(&ctx, &mut app);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 栏 = 一栏::看(&ctx, &这一帧);
+    // **一个字都不伸出那一栏**：变体那一行、文件那一行印的都是这串长键，得截到画得下，
+    // 那一栏也不许被它撑宽（没拖过，就还是默认那么宽）。
+    let 伸出去的 = 伸出右栏的字(&ctx, &这一帧);
+    assert!(
+        伸出去的.is_empty(),
+        "侧边详情里有字伸出了那一栏：{伸出去的:#?}",
+    );
+    let 栏宽 = egui::PanelState::load(&ctx, egui::Id::new(romcat_gui::layout::DETAIL.id))
+        .expect("画过")
+        .outer_rect
+        .width();
+    assert!(
+        (栏宽 - romcat_gui::layout::DETAIL.default).abs() <= 1.0,
+        "侧边详情被撑成了 {栏宽} 宽，默认是 {}",
+        romcat_gui::layout::DETAIL.default,
+    );
+    // 变体卡片底下那一行是整条键，在那一栏里折着摆下（上面那条「一个字都不伸出那一栏」管着它折没折）。
+    // 文件那一行在这一栏更底下，滚下去再看（这一条测试的末尾）。
+    assert!(
+        栏.有这一段(&有封面的.replacen('/', romcat_gui::table::ROOT_SEPARATOR, 1)),
+        "变体卡片底下那一行该是「根名 · 相对路径」整条：\n{}",
+        栏.全文()
+    );
+    for 该有的 in [
+        "未关联作品的变体",
+        "超级机器人大战R",
+        "GBA · 年份未知",
+        "1 个变体",
+        "判定依据",
+        "变体 1 个",
+    ] {
+        assert!(
+            栏.有这一段(该有的),
+            "侧边详情里没有「{该有的}」：\n{}",
+            栏.全文()
+        );
+    }
+    // **判定依据摊在栏里**，不只挂在悬停里：这几帧没有指针，悬停里的字一个都不画。
+    assert!(
+        栏.字.iter().any(|(text, _)| text.contains("精确哈希命中")),
+        "判定依据没摊在栏里：\n{}",
+        栏.全文()
+    );
+    栏.那一段在哪儿("媒体 1 个");
+    // **封面贴在头上那一块**：比「变体 1 个」那一行高。底下媒体那几格也贴着同一张图，那几格不算。
+    let 变体那一行 = 栏.那一段在哪儿("变体 1 个");
+    assert!(
+        栏.图.iter().any(|rect| rect.max.y <= 变体那一行.min.y),
+        "封面该画在头上那一块，贴了图的地方：{:?}；「变体 1 个」在 {变体那一行:?}",
+        栏.图,
+    );
+    // **文件那一行在这一栏底下**，照稿那几段摆开之后一屏装不下：像人一样把指针放在这一栏上往下滚，
+    // 滚一下跑一帧，等它画出来为止（不看挂钟）；再看它是不是从左边截、留着文件名。一路上照旧
+    // 一个字都不许伸出那一栏。看完滚回顶上，底下那一段还要看头上那一块。
+    let 栏框 = egui::PanelState::load(&ctx, egui::Id::new(romcat_gui::layout::DETAIL.id))
+        .expect("画过")
+        .outer_rect;
+    let 滚一下 = |ctx: &egui::Context, app: &mut App, 往下: bool| {
+        let mut input = headless::input();
+        input.events.push(egui::Event::PointerMoved(栏框.center()));
+        input.events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, if 往下 { -150.0 } else { 150.0 }),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let 这一帧 = headless::frame(ctx, input, |ui| app.ui(ui));
+        let 伸出去的 = 伸出右栏的字(ctx, &这一帧);
+        assert!(
+            伸出去的.is_empty(),
+            "滚动的时候侧边详情里有字伸出了那一栏：{伸出去的:#?}",
+        );
+        一栏::看(ctx, &这一帧)
+    };
+    let mut 文件那一行 = None;
+    for _ in 0..40 {
+        文件那一行 = 滚一下(&ctx, &mut app, true)
+            .字
+            .into_iter()
+            .map(|(text, _)| text)
+            .find(|text| text.contains('…') && text.contains("(68.92Mb).zip"));
+        if 文件那一行.is_some() {
+            break;
+        }
+    }
+    assert!(
+        文件那一行.is_some(),
+        "往下滚到底，文件那一行也该从左边截、留着文件名那一截",
+    );
+    let mut 回到顶上 = false;
+    for _ in 0..60 {
+        if 滚一下(&ctx, &mut app, false).有这一段("未关联作品的变体") {
+            回到顶上 = true;
+            break;
+        }
+    }
+    assert!(回到顶上, "滚回顶上之后头上那一块该露出来");
+    // 头上那一块露出来时滚动条未必到了顶：再往上多滚几下，底下那一段从最顶上开始看。
+    for _ in 0..10 {
+        滚一下(&ctx, &mut app, false);
+    }
+
+    // 二、没有封面的那一个：头上那一块是**字卡**，底色取的是这个平台的颜色。
+    {
+        let (browse, site) = app.browse_and_site();
+        browse.open_work(&site.catalog, &WorkAnchor::Loose(没封面的.to_string()));
+    }
+    跑(&ctx, &mut app, 2);
+    let 栏 = 一栏::看(
+        &ctx,
+        &headless::frame(&ctx, headless::input(), |ui| app.ui(ui)),
+    );
+    for 该有的 in [
+        "未关联作品的变体",
+        "短",
+        "SFC · 年份未知",
+        "1 个变体",
+        "判定依据",
+    ] {
+        assert!(
+            栏.有这一段(该有的),
+            "侧边详情里没有「{该有的}」：\n{}",
+            栏.全文()
+        );
+    }
+    // 一条候选都没有时，判定依据那一块说的是核心库挑的那一句（`WorkVariant::no_candidate_hint`）。
+    assert!(
+        栏.字
+            .iter()
+            .any(|(text, _)| text.contains("识别跑过了，一条候选都没有")),
+        "没有候选时判定依据该说清：\n{}",
+        栏.全文()
+    );
+    let 变体那一行 = 栏.那一段在哪儿("变体 1 个");
+    let 平台色 = romcat_gui::tokens::Tokens::builtin()
+        .color
+        .platform
+        .of("SFC");
+    assert!(
+        栏.色块
+            .iter()
+            .any(|(color, rect)| *color == 平台色 && rect.max.y <= 变体那一行.min.y),
+        "没有封面时头上那一块该是带平台色（{平台色:?}）的字卡：{:?}",
+        栏.色块,
+    );
+    assert!(
+        栏.图.iter().all(|rect| rect.min.y >= 变体那一行.min.y),
+        "没有封面就不该在头上贴图：{:?}",
+        栏.图,
+    );
+}
+
+#[test]
+fn 列表每行开头显示封面的开关_有封面贴封面_没封面画平台色块() {
+    let tokens = romcat_gui::tokens::Tokens::builtin();
+    let 平台色 = tokens.color.platform.of("SFC");
+    // 同一行：竖直方向上离那一行的正题不超过半行（开着封面时一行照令牌 `table-row-cover`）。
+    let 半行 = tokens.layout.table_row_cover / 2.0;
+
+    let ctx = headless::context();
+    let (mut app, _dir) = 一个有封面一个没有的小库();
+    跑(&ctx, &mut app, 3);
+
+    // 一、默认关着：表里一张图都不贴，也没有平台色块。
+    let 中 = 一栏::正中(
+        &ctx,
+        &headless::frame(&ctx, headless::input(), |ui| app.ui(ui)),
+    );
+    assert!(中.图.is_empty(), "开关关着时表里不该贴图：{:?}", 中.图);
+    assert!(
+        !中.色块.iter().any(|(color, _)| *color == 平台色),
+        "开关关着时不该画平台色块：{:?}",
+        中.色块,
+    );
+
+    // 二、打开开关，跑到表里那张封面解出来为止（解码在后台，不看挂钟）。
+    shared::点一下(&ctx, "在每行开头显示封面", |ui| app.ui(ui));
+    let mut 中 = 一栏::正中(
+        &ctx,
+        &headless::frame(&ctx, headless::input(), |ui| app.ui(ui)),
+    );
+    for _ in 0..20_000 {
+        if !中.图.is_empty() {
+            break;
+        }
+        中 = 一栏::正中(
+            &ctx,
+            &headless::frame(&ctx, headless::input(), |ui| app.ui(ui)),
+        );
+    }
+
+    // 三、有封面的那一行：正题左边贴着那张图。
+    let 长 = 中.正好那一段在哪儿("超级机器人大战R");
+    assert!(
+        中.图
+            .iter()
+            .any(|rect| rect.max.x <= 长.min.x && (rect.center().y - 长.center().y).abs() <= 半行),
+        "有封面的那一行，正题 {长:?} 左边该贴着封面：{:?}",
+        中.图,
+    );
+    // 四、没有封面的那一行：正题左边一块平台色，块里写着平台代号。
+    let 短 = 中.正好那一段在哪儿("短");
+    assert!(
+        中.色块.iter().any(|(color, rect)| {
+            *color == 平台色
+                && rect.max.x <= 短.min.x
+                && (rect.center().y - 短.center().y).abs() <= 半行
+        }),
+        "没有封面的那一行，正题 {短:?} 左边该有一块 SFC 的平台色（{平台色:?}）：{:?}",
+        中.色块,
+    );
+    assert!(
+        中.字.iter().any(|(text, rect)| {
+            text == "SFC"
+                && rect.max.x <= 短.min.x
+                && (rect.center().y - 短.center().y).abs() <= 半行
+        }),
+        "平台色块里该写着平台代号：\n{}",
+        中.全文(),
+    );
+}
+
+#[test]
+fn 筛不出东西时说清楚并给一颗清除筛选_按下去表就回来() {
+    const 空态: &str = "没有符合当前筛选条件的作品。";
+
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        std::env::temp_dir().join("romcat-测试-浏览-空态"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        !屏上.contains(空态),
+        "有一行的时候不该说筛不出东西：\n{屏上}"
+    );
+
+    // 一、打开「显示非游戏资产」、再筛一个库里压根没有的平台：一行都不剩，屏上说清为什么空着。
+    {
+        let query = app.browse_and_site().0.query_mut();
+        query.non_game_assets = romcat_core::catalog::browse::NonGameAssets::Listed;
+        query.platform = Some(PlatformFilter::from_label("FC"));
+    }
+    跑(&ctx, &mut app, 2);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert_eq!(app.window().total(), 0, "这个筛选下该一行都不剩");
+    assert!(
+        屏上.contains(空态),
+        "筛不出东西时屏上没说为什么空着：\n{屏上}"
+    );
+    assert!(
+        屏上.lines().any(|line| line == "清除筛选"),
+        "空态旁边该有一颗「清除筛选」：\n{屏上}"
+    );
+    // **表头照旧在**：空态是表里的一行，不是把整张表换掉——排序那几个表头还点得着。
+    assert!(
+        屏上.lines().any(|line| line.starts_with("作品")),
+        "空态把表头也换掉了：\n{屏上}"
+    );
+
+    // 二、按「清除筛选」：条件清掉，那一行回来，空态那句收掉。
+    let 屏上 = shared::点一下(&ctx, "清除筛选", |ui| app.ui(ui));
+    assert!(
+        app.browse().query().platform.is_none(),
+        "按完「清除筛选」平台那一档该清掉"
+    );
+    // 「显示非游戏资产」是视图开关，不是条件：清筛选不把它拨回去。
+    assert_eq!(
+        app.browse().query().non_game_assets,
+        romcat_core::catalog::browse::NonGameAssets::Listed,
+        "清除筛选不该把「显示非游戏资产」拨回收起"
+    );
+    assert_eq!(app.window().total(), 1, "清掉之后那一行该回来");
+    assert!(
+        屏上.lines().any(|line| line == "短"),
+        "那一行没画回来：\n{屏上}"
+    );
+    assert!(!屏上.contains(空态), "表回来了空态那句还挂着：\n{屏上}");
 }

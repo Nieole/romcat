@@ -212,6 +212,38 @@ impl Catalog {
             .map_err(|source| self.err(source))
     }
 
+    /// 好几个作品的全部叫法，按作品分好；一条叫法都没有的作品不在表里。
+    ///
+    /// 浏览屏主列表一页那几十个作品一趟读回来（[`Catalog::work_page_with_titles`]），不逐个作品
+    /// 问一次。作品多时按 `KEYS_PER_QUERY` 分几趟。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn titles_of_works(
+        &self,
+        works: &[&str],
+    ) -> Result<std::collections::BTreeMap<String, Vec<TitleRow>>, CatalogError> {
+        let mut out: std::collections::BTreeMap<String, Vec<TitleRow>> =
+            std::collections::BTreeMap::new();
+        for chunk in works.chunks(crate::catalog::KEYS_PER_QUERY) {
+            let mut statement = self
+                .conn
+                .prepare(&format!(
+                    "{SELECT_TITLE} WHERE work IN ({}) {ORDER_TITLE}",
+                    crate::catalog::placeholders(chunk.len())
+                ))
+                .map_err(|source| self.err(source))?;
+            let rows = statement
+                .query_map(rusqlite::params_from_iter(chunk.iter()), read_title)
+                .map_err(|source| self.err(source))?;
+            for row in rows {
+                let row = row.map_err(|source| self.err(source))?;
+                out.entry(row.work.clone()).or_default().push(row);
+            }
+        }
+        Ok(out)
+    }
+
     /// 一条条走过全部叫法，**按作品聚在一起**。
     ///
     /// 走回调而不是返回一整份 `Vec`：真库里作品有 9,226 个，而选**显示标题**是逐个作品

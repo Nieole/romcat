@@ -103,6 +103,74 @@ else:
     if int(m[1]) != tokens["layout"]["chip-dot"]:
         problems.append(f"chip-dot: 设计稿是 {m[1]}px，令牌是 {tokens['layout']['chip-dot']}")
 
+# 浏览屏（票 gui-looks-like-the-design/09）：设计稿写在规则上、表头上的字面量，照字面值一个个核。
+# （函数叫 literal_pairs：下面库屏那一段另有一个 literal，签名与用法不同，两个分开叫。）
+L, S, F, M = tokens["layout"], tokens["space"], tokens["font"], tokens["mix"]
+
+
+def literal_pairs(label, pattern, pairs):
+    """在设计稿里按 pattern 找一处，逐组与令牌比。pairs 是 [(组号, 令牌值, 叫什么)]；带 % 的按成数比。"""
+    global literals
+    m = re.search(pattern, html)
+    if not m:
+        problems.append(f"找不到 {label}")
+        return
+    for group, want, key in pairs:
+        literals += 1
+        got = m[group]
+        value = float(got[:-1]) / 100 if got.endswith("%") else float(got)
+        if abs(value - float(want)) > 1e-9:
+            problems.append(f"{key}: 设计稿是 {got}，令牌是 {want}")
+
+
+literal_pairs(".fpane", r"\.fpane\{[^}]*?padding:(\d+)px;[^}]*?gap:(\d+)px", [(1, S["filter-pane-padding"], "filter-pane-padding"), (2, S["pane-gap"], "pane-gap")])
+literal_pairs(".dpane", r"\.dpane\{[^}]*?padding:(\d+)px;[^}]*?gap:(\d+)px", [(1, S["detail-pane-padding"], "detail-pane-padding"), (2, S["pane-gap"], "pane-gap")])
+literal_pairs(".dpane h3", r"\.dpane h3\{font-size:([\d.]+)px", [(1, F["size-detail-title"], "size-detail-title")])
+literal_pairs("平台那一段的 .col", r'class="col" style="gap:(\d+)px">\s*<span class="sec">平台', [(1, S["section-gap"], "section-gap")])
+literal_pairs(".facet", r"\.facet\{[^}]*?gap:(\d+)px", [(1, S["facet-gap"], "facet-gap")])
+literal_pairs(".fchip", r"\.fchip\{[^}]*?gap:(\d+)px;height:(\d+)px;padding:0 (\d+)px;[^}]*?font-size:(\d+)px", [(1, S["facet-chip-gap"], "facet-chip-gap"), (2, L["facet-chip-height"], "facet-chip-height"), (3, L["facet-chip-padding"], "facet-chip-padding"), (4, F["size-small"], "size-small")])
+literal_pairs(".fchip small", r"\.fchip small\{[^}]*?font-size:([\d.]+)px", [(1, F["size-mini"], "size-mini")])
+literal_pairs(".tag", r"\.tag\{[^}]*?height:(\d+)px;padding:0 (\d+)px;[^}]*?font-size:([\d.]+)px", [(1, L["tag-height"], "tag-height"), (2, L["tag-padding"], "tag-padding"), (3, F["size-caption-plus"], "size-caption-plus")])
+literal_pairs(".note", r"\.note\{padding:(\d+)px (\d+)px;[^}]*?font-size:([\d.]+)px", [(1, S["note-padding"][0], "note-padding 上下"), (2, S["note-padding"][1], "note-padding 左右"), (3, F["size-small-plus"], "size-small-plus")])
+literal_pairs(".opt", r"\.opt\{[^}]*?font-size:([\d.]+)px", [(1, F["size-small-plus"], "size-small-plus")])
+literal_pairs(".opt small", r"\.opt small\{[^}]*?font-size:([\d.]+)px", [(1, F["size-caption-plus"], "size-caption-plus")])
+literal_pairs(".var", r"\.var\{[^}]*?padding:(\d+)px (\d+)px;[^}]*?gap:(\d+)px (\d+)px", [(1, S["variant-card-padding"][0], "variant-card-padding 上下"), (2, S["variant-card-padding"][1], "variant-card-padding 左右"), (3, S["variant-card-gap"][0], "variant-card-gap 竖"), (4, S["variant-card-gap"][1], "variant-card-gap 横")])
+literal_pairs(".var .p", r"\.var \.p\{[^}]*?font-size:(\d+)px", [(1, F["size-path"], "size-path")])
+literal_pairs(".w2", r"\.w2\{[^}]*?font-size:(\d+)px", [(1, F["size-path"], "size-path")])
+literal_pairs(".wcell", r"\.wcell\{[^}]*?gap:(\d+)px", [(1, S["cell-gap"], "cell-gap")])
+literal_pairs(".tbl th", r"\.tbl th\{[^}]*?font-size:([\d.]+)px;[^}]*?padding:(\d+)px (\d+)px", [(1, F["size-caption-plus"], "size-caption-plus"), (2, S["table-head-padding"][0], "table-head-padding 上下"), (3, S["table-head-padding"][1], "table-head-padding 左右")])
+literal_pairs(".wtbl td", r"\.wtbl td\{padding:0 (\d+)px;height:(\d+)px", [(1, S["table-cell-padding"], "table-cell-padding"), (2, L["table-row"], "table-row")])
+literal_pairs(".wtbl.lc td", r"\.wtbl\.lc td\{height:(\d+)px", [(1, L["table-row-cover"], "table-row-cover")])
+literal_pairs(".wtbl .ck", r"\.wtbl \.ck\{width:(\d+)px;padding:0 0 0 (\d+)px", [(1, L["check-column"], "check-column"), (2, L["check-padding"], "check-padding")])
+literal_pairs(".wtbl th .sa", r"\.wtbl th \.sa\{font-size:(\d+)px;margin-left:(\d+)px", [(1, F["size-arrow"], "size-arrow"), (2, S["sort-arrow-gap"], "sort-arrow-gap")])
+literal_pairs("表头五列的宽", r'data-sort="t">作品</th><th style="width:(\d+)px"[^>]*>平台</th><th class="r" style="width:(\d+)px"[^>]*>变体</th><th class="r" style="width:(\d+)px"[^>]*>容量</th><th style="width:(\d+)px"[^>]*>年份</th><th style="width:(\d+)px">元数据', [(i + 1, L["table-columns"][i], f"table-columns[{i}]") for i in range(5)])
+literal_pairs(".cbar", r"\.cbar\{[^}]*?gap:(\d+)px;padding:(\d+)px (\d+)px", [(1, S["list-bar-gap"], "list-bar-gap"), (2, S["list-bar-padding"][0], "list-bar-padding 上下"), (3, S["list-bar-padding"][1], "list-bar-padding 左右")])
+literal_pairs(".empty", r"\.empty\{padding:(\d+)px", [(1, S["empty-padding"], "empty-padding")])
+literal_pairs(".lthumb", r"\.lthumb\{width:(\d+)px;height:(\d+)px;border-radius:(\d+)px;[^}]*?(\d+%)", [(1, L["thumb-list"][0], "thumb-list 宽"), (2, L["thumb-list"][1], "thumb-list 高"), (3, tokens["radius"]["small"], "radius small"), (4, M["thumb-list-tint"], "thumb-list-tint")])
+literal_pairs(".lthumb i", r"\.lthumb i\{[^}]*?font-size:(\d+)px;[^}]*?inset 0 (\d+)px", [(1, F["size-thumb-code"], "size-thumb-code"), (2, L["thumb-list-band"], "thumb-list-band")])
+literal_pairs(".dhead", r"\.dhead\{[^}]*?grid-template-columns:(\d+)px[^;]*;gap:(\d+)px", [(1, L["detail-cover-width"], "detail-cover-width"), (2, S["detail-head-gap"], "detail-head-gap")])
+literal_pairs(".dcover", r"\.dcover\{[^}]*?border-radius:(\d+)px", [(1, tokens["radius"]["medium"], "radius medium")])
+literal_pairs(".dcover .tcard", r"\.dcover \.tcard\{padding:(\d+)px (\d+)px", [(1, S["title-card-padding"][0], "title-card-padding 上下"), (2, S["title-card-padding"][1], "title-card-padding 左右")])
+literal_pairs(".dcover .tc-t", r"\.dcover \.tc-t\{font-size:(\d+)px", [(1, F["size-cover-title"], "size-cover-title")])
+literal_pairs(".dcover .tc-wm", r"\.dcover \.tc-wm\{font-size:(\d+)px;bottom:-(\d+)px", [(1, F["size-cover-mark"], "size-cover-mark"), (2, L["title-card-mark-offset"][1], "title-card-mark-offset 下")])
+literal_pairs(".tcard", r"\.tcard\{[^}]*?(\d+%)[^}]*?inset 0 (\d+)px", [(1, M["title-card-tint"], "title-card-tint"), (2, L["title-card-band"], "title-card-band")])
+literal_pairs(".tc-wm", r"\.tc-wm\{[^}]*?right:-(\d+)px;[^}]*?opacity:([\d.]+)", [(1, L["title-card-mark-offset"][0], "title-card-mark-offset 右"), (2, M["watermark-opacity"], "watermark-opacity")])
+literal_pairs(".thumbs", r"\.thumbs\{[^}]*?repeat\((\d+),1fr\);gap:(\d+)px", [(1, L["thumbs-per-row"], "thumbs-per-row"), (2, S["thumb-gap"], "thumb-gap")])
+literal_pairs(".gtree", r"\.gtree\{border:[^}]*?padding:(\d+)px", [(1, S["rule-box-padding"], "rule-box-padding")])
+literal_pairs(".ruletext", r"\.ruletext\{[^}]*?font-size:(\d+)px;[^}]*?padding:(\d+)px (\d+)px", [(1, F["size-path"], "size-path"), (2, S["rule-text-padding"][0], "rule-text-padding 上下"), (3, S["rule-text-padding"][1], "rule-text-padding 左右")])
+literal_pairs(".iconbtn", r"\.iconbtn\{width:(\d+)px;height:(\d+)px", [(1, L["icon-button"], "icon-button 宽"), (2, L["icon-button"], "icon-button 高")])
+literal_pairs(".strip", r"\.strip\{[^}]*?gap:(\d+)px;padding:(\d+)px 0", [(1, S["strip-gap"], "strip-gap"), (2, S["strip-padding"], "strip-padding")])
+
+# 平台那一簇先摆几个：「更多（N）」前头没带 data-more 的那几枚。
+plats = re.search(r'<span class="sec">平台</span>\s*<div class="facet">(.*?)id="more-plat"', html, re.S)
+if not plats:
+    problems.append("找不到平台那一簇")
+else:
+    literals += 1
+    shown = len(re.findall(r'data-plat="[^"]+" aria-pressed', plats[1]))
+    if shown != L["platforms-visible"]:
+        problems.append(f"platforms-visible: 设计稿先摆 {shown} 个，令牌是 {L['platforms-visible']}")
+
 # 库屏（设计稿 .libgrid / .phead / .stage / .nextline / .tbl）：两栏间距、面板标题栏、工序那一行的列宽、列缝、
 # 内边距、圆点、字号、状态竖条与图标按钮。都是字面值，照字面值核。
 def literal(pattern: str, what: str):
@@ -216,28 +284,17 @@ for pattern, key in [
     if int(m[1]) != tokens["layout"][key]:
         problems.append(f"{key}: 设计稿是 {m[1]}px，令牌是 {tokens['layout'][key]}")
 
-# 规则行尾那颗图标按钮（设计稿 .iconbtn）：边长与字号。
+# 规则行尾那颗图标按钮（设计稿 .iconbtn）：字号。边长 icon-button 在上面浏览屏那一段与高一起核过，这儿不再核。
 m = re.search(r"\.iconbtn\{width:(\d+)px;[^}]*?font-size:(\d+)px", html)
 if not m:
     problems.append("找不到 .iconbtn 的 width 与 font-size")
 else:
-    for got, section, key in [(m[1], "layout", "icon-button"), (m[2], "font", "size-body")]:
+    for got, section, key in [(m[2], "font", "size-body")]:
         literals += 1
         if int(got) != tokens[section][key]:
             problems.append(f"{key}: 设计稿是 {got}px，令牌是 {tokens[section][key]}")
 
-# 两档半号字号（拿主意的人定：照稿加，各分支同一个键名）：设计稿 .tbl th 的 11.5px、.note 的 12.5px。
-for pattern, key in [
-    (r"\.tbl th\{[^}]*?font-size:([\d.]+)px", "size-caption-plus"),
-    (r"\.note\{[^}]*?font-size:([\d.]+)px", "size-small-plus"),
-]:
-    m = re.search(pattern, html)
-    if not m:
-        problems.append(f"找不到 {key} 在设计稿里的那个字面值")
-        continue
-    literals += 1
-    if float(m[1]) != float(tokens["font"][key]):
-        problems.append(f"{key}: 设计稿是 {m[1]}px，令牌是 {tokens['font'][key]}")
+# 两档半号字号在设计稿 .tbl th（11.5px）、.note（12.5px）上的那两处，上面浏览屏那一段已经核过（同一个键），这儿不再核。
 
 # 子库屏空态那张卡的标题字号：设计稿 renderDevs 里写在 h3 上的字面值。
 m = re.search(r'<h3 style="font-size:(\d+)px">还没有子库</h3>', html)
@@ -266,7 +323,8 @@ else:
     if int(m[1]) != tokens["layout"]["runcard-bar"]:
         problems.append(f"runcard-bar: 设计稿是 {m[1]}px，令牌是 {tokens['layout']['runcard-bar']}")
 
-# 任务屏（票 gui-looks-like-the-design/25）：块与块、卡片、表格、空态的留白（屏头、屏体的内边距归下面外壳那一段核）。
+# 任务屏（票 gui-looks-like-the-design/25）：块与块、卡片、表格、空态的留白（屏头、屏体的内边距归下面外壳那一段核；
+# 空态 .empty 与表头 .tbl th 的留白与浏览屏同一个令牌，在上面浏览屏那一段核过，这儿不再核一遍）。
 space, layout = tokens["space"], tokens["layout"]
 for pattern, wants in [
     (r'id="s-task".*?class="scrbody col" style="gap:(\d+)px"', [("screen-section-gap", space["screen-section-gap"])]),
@@ -275,8 +333,6 @@ for pattern, wants in [
     (r"\.runcard \.bar\{[^}]*?height:(\d+)px", [("runcard-progress", layout["runcard-progress"])]),
     (r"\.runcard \.meta\{[^}]*?gap:(\d+)px", [("meta-gap", space["meta-gap"])]),
     (r"\$\('#tqueue'\).*?class=\"card row\" style=\"padding:(\d+)px (\d+)px\"", [("queue-row-padding 上下", space["queue-row-padding"][0]), ("queue-row-padding 左右", space["queue-row-padding"][1])]),
-    (r"\.empty\{padding:(\d+)px", [("empty-padding", space["empty-padding"])]),
-    (r"\.tbl th\{[^}]*?padding:(\d+)px (\d+)px", [("table-head-padding 上下", space["table-head-padding"][0]), ("table-head-padding 左右", space["table-head-padding"][1])]),
     (r"\.tbl td\{[^}]*?padding:(\d+)px (\d+)px", [("cell-padding 上下", space["cell-padding"][0]), ("cell-padding 左右", space["cell-padding"][1])]),
 ]:
     m = re.search(pattern, html, re.S)
@@ -288,8 +344,9 @@ for pattern, wants in [
         if int(got) != want:
             problems.append(f"{key}: 设计稿是 {got}px，令牌是 {want}")
 
-# 两档半号字号（拿主意的人裁，挂单 Q840 / Q862）：设计稿 .scrhead .sub、.hist td 的 12.5px，.railfoot .st、.tbl th 的 11.5px。
-for selector, key in [(r"\.scrhead \.sub\{", "size-small-plus"), (r"\.hist td\{", "size-small-plus"), (r"\.railfoot \.st\{", "size-caption-plus"), (r"\.tbl th\{", "size-caption-plus")]:
+# 两档半号字号（拿主意的人裁，挂单 Q840 / Q862）：设计稿 .scrhead .sub、.hist td 的 12.5px，.railfoot .st 的 11.5px
+# （.tbl th 的 11.5px 在上面浏览屏那一段与表头内边距一起核）。
+for selector, key in [(r"\.scrhead \.sub\{", "size-small-plus"), (r"\.hist td\{", "size-small-plus"), (r"\.railfoot \.st\{", "size-caption-plus")]:
     m = re.search(selector + r"[^}]*?font-size:([\d.]+)px", html)
     if not m:
         problems.append(f"找不到 {selector} 的 font-size")

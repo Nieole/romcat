@@ -958,12 +958,30 @@ pub enum WorkAnchor {
     Loose(String),
 }
 
+impl WorkAnchor {
+    /// 这一行的**刮削锚点**：认出作品的挂**作品名**（`name`），没认出来的挂**变体的键**。
+    ///
+    /// 与 `converge`、SQL 那一侧的 `row_anchor!` 同一条口径；Rust 这一侧问「这一行的年份、
+    /// 元数据、封面挂在哪儿」的几处（`Catalog::fill_scraped`、年份、`Catalog::cover_of`）
+    /// 都从这儿取，不各写一个 `match`。
+    #[must_use]
+    pub fn scrape_anchor<'a>(&'a self, name: &'a str) -> (AnchorKind, &'a str) {
+        match self {
+            Self::Work(_) => (AnchorKind::Work, name),
+            Self::Loose(key) => (AnchorKind::Variant, key),
+        }
+    }
+}
+
 /// 主列表按哪一列排。
 ///
 /// 与 [`VariantOrder`] 一样是个闭集合：拼进 `ORDER BY` 的只能来自这里。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WorkOrder {
-    /// 作品名。没认出作品的那些行用它自己的键——**排的与画的是同一串字**。
+    /// 作品名。没认出作品的那些行用它自己的键。
+    ///
+    /// 那些行屏上主栏画的是**正题**（[`WorkRow::title`]），键画在副行——所以按这一列排时
+    /// 它们照的是副行那条相对路径，屏上看得出凭什么排在这儿（挂单 `Q802`，交给按列排序那张票定）。
     #[default]
     Name,
     /// 平台。一行可以跨好几个平台（同一部作品在 GB 与 GBC 上各有变体），
@@ -1049,8 +1067,27 @@ pub const WORK_FIELDS: [Field; 5] = [
 pub struct WorkRow {
     /// 这一行是谁。批量操作的作用范围靠它展开（[`Catalog::scoped_variants`]）。
     pub anchor: WorkAnchor,
-    /// 画出来的那个名字：作品名，或者那个变体的键。
+    /// 这一行的名字：作品名，或者那个变体的键。**排的、搜的是它**（[`WorkOrder::Name`]）。
+    ///
+    /// 认不出作品的那一行屏上主栏画的不是它，是 [`title`](Self::title) 那个正题；它自己
+    /// （变体的键，也就是那份内容在主库里的相对路径）画在副行。
     pub name: String,
+    /// 认出作品的那一行：这个作品的**显示标题**——[`title::choose`](crate::title::choose) 挑的那一个，
+    /// 与详情面板（[`Catalog::variant_detail`]）、导出写进去的是同一个。
+    ///
+    /// **取不到时是 `None`**：标题集合是空的（`choose` 只能退回作品名），或者挑出来的就是作品名
+    /// 本身——那时屏上主栏印作品名、第二行不写。认不出作品的那一行一律是 `None`，它屏上的名字是
+    /// [`title`](Self::title) 那个正题。
+    ///
+    /// **只有 [`Catalog::work_page_with_titles`] 补它**：挑显示标题要一份优先级表，
+    /// [`Catalog::work_page`] 手上没有，那一趟出来的行上这一格一律是 `None`。
+    pub display: Option<String>,
+    /// 认不出作品的那一行：那个变体**主文件**的键，[`title`](Self::title) 从它剥正题；
+    /// 认出作品的那一行是 `None`。
+    ///
+    /// **不对外**：要的是正题就从 `title` 取。把它交出去，就会有调用方自己拿它去剥
+    /// ——剥哪个名字、剥完空了怎么办，那是第二个判据（ADR-0024）。
+    main_key: Option<String>,
     /// **平台集合**。一部作品可以横跨好几个平台，真库上 9,226 个作品里有 2,314 个如此。
     pub platforms: Vec<String>,
     /// 底下挂着几个变体。**按当前筛选算**——屏上写着几个，批量操作就作用于那几个。
@@ -1107,6 +1144,23 @@ impl WorkRow {
         self.missing.is_empty()
     }
 
+    /// **认不出作品的那一行叫什么**：那个变体的**正题**；认出作品的那一行是 `None`。
+    ///
+    /// 两件事都在这儿答，界面照着画（ADR-0005）：「认不认得出作品」看 [`anchor`](Self::anchor)
+    /// 是不是 [`WorkAnchor::Loose`]；「正题是什么」从那个变体的**主文件名**剥
+    /// （[`Rules::parse_main_key`](crate::filename::Rules::parse_main_key)，撞中文离线源的
+    /// 那一处剥的也是它）。
+    ///
+    /// **规则由调用方交进来**，因为剥离规则是配置：工作目录里那份 `name-rules.toml`
+    /// （[`sources::rules`](crate::sources::rules)）拿去刮削，屏上这一行就得拿同一份剥，
+    /// 不然两处是两个正题。
+    ///
+    /// 整个文件名剥完一个字都不剩时退回**主文件名**：空着一行，比印一串记号更认不出它是谁。
+    #[must_use]
+    pub fn title(&self, rules: &crate::filename::Rules) -> Option<String> {
+        Some(loose_title(rules, self.main_key.as_deref()?))
+    }
+
     /// 「元数据」那一栏画成什么。齐了就一个字，缺了就点名缺哪几样。
     #[must_use]
     pub fn missing_label(&self) -> String {
@@ -1124,6 +1178,43 @@ impl WorkRow {
                 .collect::<Vec<_>>()
                 .join("、")
         )
+    }
+
+    /// 「元数据」那一栏那枚**短标签**上的字（设计稿主列表的 `.chip`；词是拿主意的人 2026-09-14
+    /// 照稿定的）。
+    ///
+    /// 先看这一行**跑没跑过识别、认没认出作品**，再看**元数据齐不齐**：
+    ///
+    /// 1. 底下还有变体没跑过识别：**还没识别**——与 [`confidence_label`](Self::confidence_label)
+    ///    那个词是同一条判据，这里直接问它，不另判一次（ADR-0024）；
+    /// 2. 认不出作品、手上有候选却一条都没定下来（最高那档不到高置信）：**待确认**；
+    /// 3. 认不出作品、一条候选都没有、一样元数据都没采到：**仅文件名**；
+    /// 4. 其余照 [`missing`](Self::missing) 说：一样不缺是**完整**，缺一样点名是哪一样（「缺简介」），
+    ///    缺几样是「缺 N 项」，全缺是**缺全部**。
+    ///
+    /// 颜色不在这儿：界面照这一行那一档置信度上色（[`tier`](Self::tier)）。
+    #[must_use]
+    pub fn meta_label(&self) -> String {
+        if self.confidence_label() == NOT_RUN_LABEL {
+            return NOT_RUN_LABEL.to_string();
+        }
+        if matches!(self.anchor, WorkAnchor::Loose(_)) {
+            match self.confidence {
+                Some(confidence) if confidence != Confidence::High => {
+                    return "待确认".to_string();
+                }
+                None if self.missing.len() == WORK_FIELDS.len() => {
+                    return "仅文件名".to_string();
+                }
+                _ => {}
+            }
+        }
+        match self.missing.as_slice() {
+            [] => "完整".to_string(),
+            [one] => format!("缺{}", one.label()),
+            all if all.len() == WORK_FIELDS.len() => "缺全部".to_string(),
+            some => format!("缺 {} 项", some.len()),
+        }
     }
 
     /// 置信度那一栏画成什么。**「还没识别」是独立的一档**（ADR-0002）。
@@ -1164,6 +1255,9 @@ impl WorkRow {
 /// **只有这一处写它**：[`WORK_ANCHOR_COLUMNS`] 里那一列、[`WORK_FROM`] 里年份那张
 /// join、搜索框那条名字命中路（[`Search::name`]），全都从这儿展开——排的、画的、搜的
 /// 不是同一串字的话，屏上会出现一行「凭什么排在这儿」看不出答案的结果。
+///
+/// 没认出作品的那一行**主栏**画的是从这串键里剥出来的正题（[`WorkRow::title`]），
+/// 这串键本身画在副行，于是排的、搜的那一串照旧在屏上（挂单 `Q802`）。
 ///
 /// **是个宏而不是常量**，因为那几处里有两处是 `const &str`：`const` 里拼不了
 /// `format!`，而 `concat!` 只吃字面量与展开成字面量的宏。写成常量的话那两处只能各自
@@ -1823,6 +1917,8 @@ struct GroupTotals {
     platforms: Vec<String>,
     identified: bool,
     non_game_asset: bool,
+    /// 这一组里**主文件**键里最小的那个。只有认不出作品的那一组用得上——那一组就是一个变体。
+    main_key: Option<String>,
 }
 
 impl GroupTotals {
@@ -1839,6 +1935,7 @@ impl GroupTotals {
             platforms: Vec::new(),
             identified: true,
             non_game_asset: false,
+            main_key: None,
         }
     }
 }
@@ -1965,6 +2062,113 @@ impl Catalog {
         let mut out = self.work_page_totals(query, picked)?;
         self.fill_scraped(&mut out)?;
         self.fill_confidence(query, &mut out)?;
+        Ok(out)
+    }
+
+    /// 同 [`Self::work_page`]，再给认出作品的那几行补上**显示标题**（[`WorkRow::display`]）。
+    ///
+    /// **每页多读一次标题集合**：这一页那几十个作品的叫法一趟读回来（[`Self::titles_of_works`]），
+    /// 逐个作品交给 [`title::choose`](crate::title::choose) 挑——与详情面板
+    /// （[`Self::variant_detail`]）、导出挑的是同一处（ADR-0024）。`priorities` 要与那两处交的是
+    /// 同一份（工作目录里那份优先级表），不然屏上这一行与详情头上是两个名字。
+    ///
+    /// 别的格子一个字都不动：补的只有这一格，结构版本不升。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn work_page_with_titles(
+        &self,
+        query: &WorkQuery,
+        offset: u64,
+        limit: u64,
+        priorities: &crate::scrape::Priorities,
+    ) -> Result<Vec<WorkRow>, CatalogError> {
+        let mut rows = self.work_page(query, offset, limit)?;
+        let works: Vec<&str> = rows
+            .iter()
+            .filter(|row| matches!(row.anchor, WorkAnchor::Work(_)))
+            .map(|row| row.name.as_str())
+            .collect();
+        let mut titles = self.titles_of_works(&works)?;
+        for row in &mut rows {
+            if !matches!(row.anchor, WorkAnchor::Work(_)) {
+                continue;
+            }
+            // 一条叫法都没有：`choose` 只能退回作品名，屏上主栏本来就印它。
+            let Some(entries) = titles.remove(&row.name) else {
+                continue;
+            };
+            let chosen = crate::title::choose(
+                &crate::title::TitleSet {
+                    work: row.name.clone(),
+                    entries,
+                },
+                priorities,
+            );
+            if chosen.display != row.name {
+                row.display = Some(chosen.display);
+            }
+        }
+        Ok(rows)
+    }
+
+    /// 一份详情里每个变体的**变体简称**（[`variant_short_name`]），次序与 `detail.variants` 一样。
+    ///
+    /// 两样输入各从它们唯一的出处取（ADR-0024）：
+    ///
+    /// - **是哪一种**：[`preference_for`](crate::adapter::converge::preference_for)，与首选变体那条规则
+    ///   同一处；喂的是这个变体**定下来的候选**身上的中文记号与它的发行版——导出那一步喂的也是这两样。
+    ///   不指名裁决，只问是哪一种。一条定下来的候选都没有、也没有发行版链接时，说不出是哪一种。
+    /// - **汉化组**：导出时这个字段写进去的那一个（`converge::shown`，从这个变体自己身上的刮削值与裁决里
+    ///   照优先级表挑），只在是汉化版时才问。**不从文件名剥。**
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn variant_short_names(
+        &self,
+        detail: &WorkDetail,
+        priorities: &crate::scrape::Priorities,
+    ) -> Result<Vec<String>, CatalogError> {
+        use crate::adapter::converge::{Preference, preference_for, shown};
+
+        let mut out = Vec::with_capacity(detail.variants.len());
+        for variant in &detail.variants {
+            let key = variant.row.key.as_str();
+            let settled = variant
+                .candidates
+                .iter()
+                .any(|candidate| candidate.accepted);
+            let release = match variant.row.release_id {
+                Some(id) => self.release(id)?,
+                None => None,
+            };
+            if !settled && release.is_none() {
+                out.push(variant_short_name(None, None, key));
+                continue;
+            }
+            let marks: std::collections::BTreeSet<crate::dat::chinese::ChineseMark> = variant
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.accepted)
+                .filter_map(|candidate| candidate.chinese)
+                .collect();
+            let kind = preference_for(key, &marks, release.as_ref(), None);
+            let team = if kind == Preference::FanTranslated {
+                let values = self.scraped_values(AnchorKind::Variant.label(), key)?;
+                shown(
+                    Field::TranslationGroup,
+                    variant.row.platform.as_deref().unwrap_or_default(),
+                    &[],
+                    &values,
+                    None,
+                    priorities,
+                )
+                .and_then(|said| said.values.into_iter().next())
+            } else {
+                None
+            };
+            out.push(variant_short_name(Some(kind), team.as_deref(), key));
+        }
         Ok(out)
     }
 
@@ -2100,8 +2304,12 @@ impl Catalog {
             // **行上那个「非游戏资产」标记也在这一趟折**：只给这一页那几百行问，
             // `MIN` 折成「这一组是不是全都是」，与 [`Catalog::non_game_asset_rows`]
             // 那句 `HAVING` 是同一个口径。
+            //
+            // **主文件键也在这一趟带回来**：认不出作品的那一行要从它剥正题（`WorkRow::title`），
+            // 那一组就是一个变体，`MIN` 只是个取值器。
             "SELECT {WORK_TOTAL_COLUMNS},
-                    MIN({NON_GAME_ASSET_FN}(variant.key)) AS non_game_asset\
+                    MIN({NON_GAME_ASSET_FN}(variant.key)) AS non_game_asset,
+                    MIN(variant.main_key) AS main_key\
              {WORK_FROM_BASE}{where_sql}{glue} ({branch})\
              {WORK_GROUP_BY}",
             glue = if where_sql.is_empty() {
@@ -2139,6 +2347,7 @@ impl Catalog {
                         identified: row.get::<_, i64>(7)? != 0,
                         // 按名字取：这一列是拼在常量后头的，下标跟着常量变。
                         non_game_asset: row.get::<_, i64>("non_game_asset")? != 0,
+                        main_key: row.get("main_key")?,
                     },
                 ))
             })
@@ -2164,9 +2373,17 @@ impl Catalog {
                 // 「先跑一趟 `romcat identify`」，是这一票专门要消灭的那种指错下一步。
                 // 兜底的那一份见 [`GroupTotals::vanished`]。
                 let sums = totals.remove(&anchor).unwrap_or_else(GroupTotals::vanished);
+                // 认出作品的那一组里挂着一堆变体，它们的主文件键谁也代表不了这一行。
+                let main_key = match anchor {
+                    WorkAnchor::Loose(_) => sums.main_key,
+                    WorkAnchor::Work(_) => None,
+                };
                 WorkRow {
                     anchor,
                     name,
+                    // 挑显示标题要优先级表，这一趟手上没有（`work_page_with_titles` 补）。
+                    display: None,
+                    main_key,
                     platforms: sums.platforms,
                     variants: sums.variants,
                     bytes: sums.bytes,
@@ -2202,10 +2419,9 @@ impl Catalog {
         for anchor in [AnchorKind::Work, AnchorKind::Variant] {
             let subjects: Vec<&str> = rows
                 .iter()
-                .filter(|row| {
-                    matches!(row.anchor, WorkAnchor::Work(_)) == (anchor == AnchorKind::Work)
-                })
-                .map(|row| row.name.as_str())
+                .map(|row| row.anchor.scrape_anchor(&row.name))
+                .filter(|(kind, _)| *kind == anchor)
+                .map(|(_, subject)| subject)
                 .collect();
             if subjects.is_empty() {
                 continue;
@@ -2252,9 +2468,10 @@ impl Catalog {
                 }
                 have.insert((subject, field));
             }
-            for row in rows.iter_mut().filter(|row| {
-                matches!(row.anchor, WorkAnchor::Work(_)) == (anchor == AnchorKind::Work)
-            }) {
+            for row in rows
+                .iter_mut()
+                .filter(|row| row.anchor.scrape_anchor(&row.name).0 == anchor)
+            {
                 row.missing = WORK_FIELDS
                     .into_iter()
                     .filter(|field| !have.contains(&(row.name.clone(), field.label().to_string())))
@@ -2562,6 +2779,36 @@ impl WorkVariant {
     }
 }
 
+/// **变体简称**（`CONTEXT.md` 同名词条，2026-09-14 拿主意的人定）：屏上一个变体给人认的那几个字。
+///
+/// - `kind` 是这个变体**是哪一种**，由 [`preference_for`](crate::adapter::converge::preference_for)
+///   判（与首选变体那条规则同一处，见 [`Catalog::variant_short_names`]）；**说不出是哪一种时是
+///   `None`**——那时退回文件名。
+/// - `team` 是导出时写进去的那个**汉化组**（刮削来的值或裁决），不是从文件名剥的。
+///
+/// 汉化版说得出汉化组是「汉化版 · 汉化组」，说不出（或者只是一串空白）只写「汉化版」；官中版是
+/// 「官中版」，不跟汉化组；其余一律「原版」。
+#[must_use]
+pub fn variant_short_name(
+    kind: Option<crate::adapter::converge::Preference>,
+    team: Option<&str>,
+    key: &str,
+) -> String {
+    use crate::adapter::converge::Preference;
+
+    match kind {
+        None => crate::path::file_name_of_key(key).to_string(),
+        Some(Preference::FanTranslated) => {
+            match team.map(str::trim).filter(|team| !team.is_empty()) {
+                Some(team) => format!("汉化版 · {team}"),
+                None => "汉化版".to_string(),
+            }
+        }
+        Some(Preference::OfficialChinese) => "官中版".to_string(),
+        Some(Preference::Verdict | Preference::Japanese | Preference::Other) => "原版".to_string(),
+    }
+}
+
 /// 主列表点开一行之后，详情面板上摆的那一份。
 ///
 /// 三层里的头两层（**作品** → **变体**）在这儿；第三层**文件**跟着选中的那个变体走
@@ -2580,6 +2827,34 @@ pub struct WorkDetail {
     pub platforms: Vec<String>,
     /// 底下挂着的全部变体（按当前筛选），按键排。
     pub variants: Vec<WorkVariant>,
+}
+
+impl WorkDetail {
+    /// 点开的是**认不出作品的那一行**时，它的**正题**；点开的是一个作品时是 `None`。
+    ///
+    /// 与主列表那一行（[`WorkRow::title`]）同一处剥：侧边详情头上写的，就是表上那一行主栏
+    /// 写的。认不出作品的那一行底下只有它自己那一个变体，正题从那个变体的主文件名剥。
+    #[must_use]
+    pub fn title(&self, rules: &crate::filename::Rules) -> Option<String> {
+        if !matches!(self.anchor, WorkAnchor::Loose(_)) {
+            return None;
+        }
+        let variant = self.variants.first()?;
+        Some(loose_title(rules, &variant.row.main_key))
+    }
+}
+
+/// 认不出作品的那一行的**正题**：从它主文件名剥（[`Rules::parse_main_key`](crate::filename::Rules::parse_main_key)），
+/// 剥完一个字都不剩时退回主文件名。
+///
+/// [`WorkRow::title`] 与 [`WorkDetail::title`] 都走这一处——「剥完空了怎么办」只说一次。
+fn loose_title(rules: &crate::filename::Rules, main_key: &str) -> String {
+    let parsed = rules.parse_main_key(main_key);
+    if parsed.title.trim().is_empty() {
+        crate::path::file_name_of_key(main_key).to_string()
+    } else {
+        parsed.title
+    }
 }
 
 impl Catalog {
@@ -2637,10 +2912,7 @@ impl Catalog {
     /// 一行的年份。取法与主列表那一列**一模一样**（裁决优先，其次最早的那一个），
     /// 否则面板上写的与列表上写的会是两个数。
     fn work_year(&self, anchor: &WorkAnchor, name: &str) -> Result<Option<String>, CatalogError> {
-        let kind = match anchor {
-            WorkAnchor::Work(_) => AnchorKind::Work,
-            WorkAnchor::Loose(_) => AnchorKind::Variant,
-        };
+        let (kind, name) = anchor.scrape_anchor(name);
         self.conn
             .prepare_cached(
                 "SELECT COALESCE(MIN(CASE WHEN source = ?3 THEN value END), MIN(value))
@@ -2658,5 +2930,138 @@ impl Catalog {
                 )
             })
             .map_err(|source| self.err(source))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 一行主列表：只填短标签要看的那几格，其余给个不碍事的值。
+    fn 一行(
+        anchor: WorkAnchor,
+        missing: &[Field],
+        confidence: Option<Confidence>,
+        identified: bool,
+    ) -> WorkRow {
+        WorkRow {
+            anchor,
+            name: "某作品".to_string(),
+            display: None,
+            main_key: None,
+            platforms: Vec::new(),
+            variants: 1,
+            bytes: 0,
+            unreadable_files: 0,
+            year: None,
+            missing: missing.to_vec(),
+            confidence,
+            identified,
+            hit: None,
+            non_game_asset: false,
+        }
+    }
+
+    fn 作品() -> WorkAnchor {
+        WorkAnchor::Work(1)
+    }
+
+    fn 散的() -> WorkAnchor {
+        WorkAnchor::Loose("主库/GBC/精灵宝可梦 银.7z".to_string())
+    }
+
+    #[test]
+    fn 元数据那一栏的短标签照稿七个词() {
+        let 高 = Some(Confidence::High);
+        assert_eq!(一行(作品(), &[], 高, true).meta_label(), "完整");
+        assert_eq!(
+            一行(作品(), &[Field::Description], 高, true).meta_label(),
+            format!("缺{}", Field::Description.label()),
+        );
+        assert_eq!(
+            一行(
+                作品(),
+                &[Field::Year, Field::Genre, Field::Description],
+                高,
+                true
+            )
+            .meta_label(),
+            "缺 3 项",
+        );
+        assert_eq!(一行(作品(), &WORK_FIELDS, 高, true).meta_label(), "缺全部");
+        assert_eq!(
+            一行(散的(), &WORK_FIELDS, None, true).meta_label(),
+            "仅文件名"
+        );
+        assert_eq!(
+            一行(散的(), &WORK_FIELDS, Some(Confidence::Low), true).meta_label(),
+            "待确认",
+        );
+        assert_eq!(
+            一行(散的(), &WORK_FIELDS, None, false).meta_label(),
+            NOT_RUN_LABEL
+        );
+    }
+
+    #[test]
+    fn 变体简称照词表拼() {
+        use crate::adapter::converge::Preference;
+
+        let key =
+            "主库/GBC/汉化/精灵宝可梦 银[简正确精灵名](完美LOGO+背包等汉化-sss888+RickyL1213).7z";
+        assert_eq!(
+            variant_short_name(Some(Preference::FanTranslated), Some("口袋汉化组"), key),
+            "汉化版 · 口袋汉化组",
+        );
+        assert_eq!(
+            variant_short_name(Some(Preference::FanTranslated), None, key),
+            "汉化版"
+        );
+        assert_eq!(
+            variant_short_name(Some(Preference::FanTranslated), Some("  "), key),
+            "汉化版",
+            "一串空白的汉化组等于说不出",
+        );
+        assert_eq!(
+            variant_short_name(Some(Preference::OfficialChinese), Some("口袋汉化组"), key),
+            "官中版",
+            "官中版不跟汉化组",
+        );
+        assert_eq!(
+            variant_short_name(Some(Preference::Japanese), None, key),
+            "原版"
+        );
+        assert_eq!(
+            variant_short_name(Some(Preference::Other), None, key),
+            "原版"
+        );
+        assert_eq!(
+            variant_short_name(None, Some("口袋汉化组"), key),
+            "精灵宝可梦 银[简正确精灵名](完美LOGO+背包等汉化-sss888+RickyL1213).7z",
+            "说不出是哪一种：退回文件名",
+        );
+    }
+
+    #[test]
+    fn 短标签先看跑没跑过与认没认出作品_再看元数据() {
+        // 元数据齐了也还没识别：先说还没识别——与置信度那个词是同一条判据。
+        let 没跑过 = 一行(作品(), &[], None, false);
+        assert_eq!(没跑过.meta_label(), NOT_RUN_LABEL);
+        assert_eq!(没跑过.meta_label(), 没跑过.confidence_label());
+        // 认不出作品、一条候选都没有，却采到了元数据：不是「仅文件名」，照缺几样说。
+        assert_eq!(
+            一行(散的(), &[Field::Genre], None, true).meta_label(),
+            format!("缺{}", Field::Genre.label()),
+        );
+        // 认不出作品、最高一条是中置信的候选：还等人裁，待确认。
+        assert_eq!(
+            一行(散的(), &[], Some(Confidence::Medium), true).meta_label(),
+            "待确认",
+        );
+        // 认出了作品的那一行，候选置信度不高也照缺几样说：它已经挂上作品了。
+        assert_eq!(
+            一行(作品(), &[], Some(Confidence::Low), true).meta_label(),
+            "完整"
+        );
     }
 }

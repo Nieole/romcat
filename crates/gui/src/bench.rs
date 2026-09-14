@@ -27,7 +27,7 @@ use romcat_core::triage::{Axis, Draft, ItemOrder, Overrides};
 
 use crate::app::App;
 use crate::headless::{self, VIEWPORT};
-use crate::table::{ROW_HEIGHT, SPAN};
+use crate::table::{SPAN, row_height};
 
 /// 一次实测的结果，毫秒。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -63,9 +63,9 @@ pub enum Sweep {
     Rows(f32),
 }
 
-/// 一行占多高，含行距。
+/// 浏览屏主列表一行占多高，含行距。
 fn row_pitch() -> f32 {
-    ROW_HEIGHT + egui::Style::default().spacing.item_spacing.y
+    row_height() + egui::Style::default().spacing.item_spacing.y
 }
 
 /// 滚一趟，量每帧的 CPU 代价。

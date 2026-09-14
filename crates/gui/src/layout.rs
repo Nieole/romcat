@@ -28,6 +28,14 @@
 //! [`Layout::flush`] 只在**手松开之后**落盘（`pointer.any_down()` 为假的那一帧），
 //! 而且只在数真变了的时候写。拖一次是一次写，不是六十次。
 //!
+//! ## 左右两栏还**收得起来**
+//!
+//! 票 `gui-looks-like-the-design/09`：一栏收起来只剩一条窄条（令牌 `strip-width`），
+//! 点窄条上的箭头展开（[`Boundary::show_collapsible`]）。收没收起来与面板宽度**住在同一个
+//! 地方**——egui 那张跨帧的表里，开窗第一帧由 [`Layout::seed`] 塞进去、每帧画完由
+//! [`Layout::harvest`] 收回来、手松开之后 [`Layout::flush`] 落进同一份文件。收起来**不丢宽度**：
+//! 窄条是另一块面板，这条边界自己那格尺寸原样留着。
+//!
 //! ## 左栏收不收起
 //!
 //! 主窗口左边那条导航（[`crate::app`]）也记在这份文件里：**人按了「收起」就记一行**，展开回去就把那一行去掉
@@ -46,6 +54,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::app::View;
+use crate::look;
 
 /// 一条边界靠在哪一边。
 ///
@@ -102,21 +111,24 @@ pub struct Boundary {
 }
 
 /// 浏览屏左边那栏：五个一按就有的档 ＋ 条件组 ＋ 搜索 ＋ 收藏合集 ＋ 存成子库。
+///
+/// 默认宽照稿（`prototype.html` 的 `.browse`：`232px minmax(0,1fr) 296px`，票 `gui-looks-like-the-design/09`）：
+/// 外壳左边多了一条导航之后，1280 宽的窗口里照旧的 230 与 360 只给表格剩 494，作品那一列连它的最窄都摆不下。
 pub const FILTER: Boundary = Boundary {
     id: "筛选",
     screen: View::Browse,
     side: Side::Left,
-    default: 230.0,
+    default: 232.0,
     min: 150.0,
     share: 0.35,
 };
 
-/// 浏览屏右边那块：作品 → 变体 → 文件 → 媒体。
+/// 浏览屏右边那块：作品 → 变体 → 文件 → 媒体。默认宽照稿，见 [`FILTER`]。
 pub const DETAIL: Boundary = Boundary {
     id: "浏览详情",
     screen: View::Browse,
     side: Side::Right,
-    default: 360.0,
+    default: 296.0,
     min: 200.0,
     share: 0.45,
 };
@@ -167,7 +179,8 @@ impl Boundary {
     // 而这张表的次序**是有意义的**，所以不让它挤。
     #[rustfmt::skip]
     pub const ALL: [Self; 5] = [
-        // 浏览屏（`browse::Screen::ui`）
+        // 浏览屏（`browse::Screen::ui`；底栏如今只占正中那一栏、摆在左右两栏之后——
+        // 它与左右两栏不同轴，吃的不是同一维的地方，这一行的先后不影响账）
         EDIT,
         FILTER,
         DETAIL,
@@ -232,6 +245,119 @@ impl Boundary {
             .max_size(max)
     }
 
+    /// 这一栏眼下**收起来了吗**。
+    ///
+    /// 读的是 egui 那张跨帧的表：开窗第一帧由 [`Layout::seed`] 从工作目录塞进去，屏上那颗箭头
+    /// 改的也是这一格（[`Self::set_collapsed`]）——**不另起一份状态**，两份迟早对不上。
+    #[must_use]
+    pub fn collapsed(self, ctx: &egui::Context) -> bool {
+        ctx.data_mut(|data| data.get_persisted::<bool>(collapse_id(self)))
+            .unwrap_or(false)
+    }
+
+    /// 收起或展开这一栏。画完这一帧由 [`Layout::harvest`] 收走，手松开之后落盘。
+    pub fn set_collapsed(self, ctx: &egui::Context, collapsed: bool) {
+        ctx.data_mut(|data| data.insert_persisted(collapse_id(self), collapsed));
+    }
+
+    /// 那一栏标题行里的**收起**箭头：左栏「«」、右栏「»」，都指向它收进去的那一边。
+    pub fn collapse_button(self, ui: &mut egui::Ui) {
+        let (收起, _) = self.arrows();
+        if look::icon_button(ui, 收起)
+            .on_hover_text("收起这一栏，只留一条窄条；点窄条上的箭头再展开。")
+            .clicked()
+        {
+            self.set_collapsed(ui.ctx(), true);
+        }
+    }
+
+    /// 画这块面板，**底色与内边距照 `frame`**；**收起来了就只画一条窄条**：一颗展开的箭头，底下竖着写
+    /// 这一栏叫什么（设计稿 `.strip`）。
+    ///
+    /// 收起来时交回 `None`：那一栏的内容这一帧一行都没画。**宽度不丢**——窄条是另一块面板
+    /// （id 另起），这条边界自己那格尺寸在 egui 那张表里原样留着，展开回来就是原来那么宽。
+    ///
+    /// **只收左右两栏**：底栏收起来要的是横着的另一副窄条，眼下没有哪一屏要，底栏照常画。
+    pub fn show_collapsible<R>(
+        self,
+        ui: &mut egui::Ui,
+        name: &str,
+        frame: egui::Frame,
+        add_contents: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> Option<R> {
+        if self.side == Side::Bottom || !self.collapsed(ui.ctx()) {
+            // 与 [`Self::show`] 同一个写法，只是框换成调用方给的那一个：内容头一件事是把地方占满。
+            return Some(
+                self.panel(ui)
+                    .frame(frame)
+                    .show(ui, |ui| {
+                        match self.side {
+                            Side::Left | Side::Right => ui.take_available_width(),
+                            Side::Bottom => ui.take_available_height(),
+                        }
+                        add_contents(ui)
+                    })
+                    .inner,
+            );
+        }
+        let tokens = crate::tokens::Tokens::builtin();
+        let (_, 展开) = self.arrows();
+        let id = egui::Id::new(self.id).with("窄条");
+        let strip = if self.side == Side::Left {
+            egui::Panel::left(id)
+        } else {
+            egui::Panel::right(id)
+        };
+        // 窄条的底是次级底色（设计稿 `.strip`），左右留白正好让那颗图标按钮摆在正中。
+        let 左右 = ((tokens.layout.strip_width - tokens.layout.icon_button) / 2.0).max(0.0);
+        let 窄条框 = egui::Frame::new()
+            .fill(ui.visuals().faint_bg_color)
+            .inner_margin(egui::Margin::from(egui::vec2(
+                左右,
+                tokens.space.strip_padding,
+            )));
+        strip
+            .resizable(false)
+            .exact_size(tokens.layout.strip_width)
+            .frame(窄条框)
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    if look::icon_button(ui, 展开)
+                        .on_hover_text(format!("展开{name}"))
+                        .clicked()
+                    {
+                        self.set_collapsed(ui.ctx(), false);
+                    }
+                    ui.add_space((tokens.space.strip_gap - ui.spacing().item_spacing.y).max(0.0));
+                    // **竖着写**：一个字一行，照稿那一条竖排的栏名（说明字号、次一级的字色）。
+                    ui.label(
+                        egui::RichText::new(
+                            name.chars()
+                                .map(String::from)
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        )
+                        .small()
+                        .color(ui.visuals().text_color()),
+                    );
+                });
+            });
+        None
+    }
+
+    /// `(收起, 展开)` 两颗箭头。左栏往左收，右栏往右收。
+    fn arrows(self) -> (&'static str, &'static str) {
+        match self.side {
+            Side::Left => ("«", "»"),
+            Side::Right | Side::Bottom => ("»", "«"),
+        }
+    }
+
+    /// 叫这个名字的那一条边界；不认得的名字是 `None`。
+    fn named(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|it| it.id == id)
+    }
+
     /// 一个存下来的数**收进这条边界认的范围**。
     ///
     /// 上限这儿只用一个够宽的绝对值（`SANE`）——真正的上限要等到画那一帧才知道
@@ -286,7 +412,7 @@ pub const FLOOR: f32 = 120.0;
 /// 那份文件开头写着的几句话。**它是给人看的**：一个不认得的文件躺在工作目录里，
 /// 第一个问题永远是「删了会怎样」。
 const HEADER: &str = "\
-# romcat 界面的版式偏好：几条面板边界各自拖到哪儿了，单位是点。
+# romcat 界面的版式偏好：几条面板边界各自拖到哪儿了（单位是点），以及哪几栏收起来了。
 # 这一份**随时可以删**：删了就回到默认版式，库里一个字节都不动。
 # 它**不在中立库里**——中立库整份可再生，界面偏好放进去会被某一次重扫抹掉。
 ";
@@ -300,6 +426,10 @@ pub struct Layout {
     sizes: BTreeMap<&'static str, f32>,
     /// **上一次真写进文件的是哪几个数。** 拿它与 [`Self::sizes`] 比，才知道要不要写盘。
     saved: BTreeMap<&'static str, f32>,
+    /// 哪几栏**收起来了**（[`Boundary::collapsed`]）。没记过的那几条不在这张表里，那时是摊开的。
+    collapsed: BTreeMap<&'static str, bool>,
+    /// 上一次真写进文件的收起状态，与 [`Self::saved`] 同一个用处。
+    saved_collapsed: BTreeMap<&'static str, bool>,
     /// 库屏上眼下收着的那几块（[`Fold`]）。没记过的就是摊开的。
     folded: BTreeSet<&'static str>,
     /// 上一次真写进文件的收着的那几块。与 `saved` 同一个用处：比出来变了才写盘。
@@ -322,12 +452,15 @@ impl Layout {
         let path = romcat_core::workspace::gui_layout_path(workspace);
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let sizes = parse(&text);
+        let collapsed = parse_collapsed(&text);
         let folded = parse_folds(&text);
         let rail_collapsed = parse_rail(&text);
         Self {
             path,
             saved: sizes.clone(),
             sizes,
+            saved_collapsed: collapsed.clone(),
+            collapsed,
             folded_saved: folded.clone(),
             folded,
             rail_collapsed,
@@ -399,6 +532,12 @@ impl Layout {
                 data.insert_persisted(egui::Id::new(boundary.id), egui::PanelState { outer_rect });
             });
         }
+        // 收起来的那几栏同一个道理：开窗第一帧就是收着的，不闪一下摊开的样子。
+        for (id, collapsed) in &self.collapsed {
+            if let Some(boundary) = Boundary::named(id) {
+                boundary.set_collapsed(ctx, *collapsed);
+            }
+        }
     }
 
     /// 画完一帧之后问一遍：这一帧**有没有人松开某条边界的把手**，松开在哪儿。
@@ -430,6 +569,14 @@ impl Layout {
                 self.sizes.insert(boundary.id, size);
             }
         }
+        // **收起状态只收人点过的那几栏**：表里有这一格，就是开窗时塞进去的或者人点的；
+        // 一次都没碰过的那几栏不记，文件里不抄一遍默认值。
+        for boundary in Boundary::ALL {
+            let 记着的 = ctx.data_mut(|data| data.get_persisted::<bool>(collapse_id(boundary)));
+            if let Some(collapsed) = 记着的 {
+                self.collapsed.insert(boundary.id, collapsed);
+            }
+        }
     }
 
     /// 数变了就落盘。**没变就一个字节都不写。**
@@ -438,6 +585,7 @@ impl Layout {
     /// 写一次是六十次写盘，而那六十次里有五十九次的值是过路的。
     pub fn flush(&mut self) {
         if self.sizes == self.saved
+            && self.collapsed == self.saved_collapsed
             && self.folded == self.folded_saved
             && self.rail_collapsed == self.saved_rail_collapsed
         {
@@ -446,6 +594,7 @@ impl Layout {
         // 不管写成没写成，都记成「写过了」：写不成时每帧再试一次只是把同一个错刷六十遍。
         // 下一次拖动会再试一次——那时人正等着它记住，重试才有意义。
         self.saved = self.sizes.clone();
+        self.saved_collapsed = self.collapsed.clone();
         self.folded_saved = self.folded.clone();
         self.saved_rail_collapsed = self.rail_collapsed;
         self.error = write(&self.path, &self.render()).err();
@@ -462,6 +611,15 @@ impl Layout {
                 out.push_str(&format!("{} = {:.0}\n", boundary.id, size));
             }
         }
+        for boundary in Boundary::ALL {
+            if let Some(collapsed) = self.collapsed.get(boundary.id) {
+                out.push_str(&format!(
+                    "{}{COLLAPSED_SUFFIX} = {}\n",
+                    boundary.id,
+                    if *collapsed { "是" } else { "否" },
+                ));
+            }
+        }
         // **收着的那几块跟在后面**，照 `Fold::ALL` 的次序；摊开的不写——那是默认。
         for fold in Fold::ALL {
             if self.folded(fold) {
@@ -474,6 +632,38 @@ impl Layout {
         }
         out
     }
+}
+
+/// 收起状态那一行的名字：边界的名字后面缀上它，`筛选 收起 = 是`。
+///
+/// 读宽度那一遍（[`parse`]）不认得这个名字，照旧跳过——旧版本读到新文件也不会把它当成宽度。
+const COLLAPSED_SUFFIX: &str = " 收起";
+
+/// egui 那张跨帧的表里，一条边界**收没收起来**记在哪一格。
+fn collapse_id(boundary: Boundary) -> egui::Id {
+    egui::Id::new(boundary.id).with("收起")
+}
+
+/// 读收起状态那几行：`<边界名> 收起 = 是 / 否`。读不懂的、不认得的，一律跳过（同 [`parse`]）。
+fn parse_collapsed(text: &str) -> BTreeMap<&'static str, bool> {
+    let mut collapsed = BTreeMap::new();
+    for line in text.lines() {
+        let Some((name, value)) = line.trim().split_once('=') else {
+            continue;
+        };
+        let Some(name) = name.trim().strip_suffix(COLLAPSED_SUFFIX) else {
+            continue;
+        };
+        let Some(boundary) = Boundary::named(name) else {
+            continue;
+        };
+        match value.trim() {
+            "是" => collapsed.insert(boundary.id, true),
+            "否" => collapsed.insert(boundary.id, false),
+            _ => continue,
+        };
+    }
+    collapsed
 }
 
 /// 左栏那一行的名字，与它收起时写的那个值。
@@ -728,6 +918,8 @@ mod tests {
             path: PathBuf::from("/dev/null"),
             sizes: BTreeMap::new(),
             saved: BTreeMap::new(),
+            collapsed: BTreeMap::new(),
+            saved_collapsed: BTreeMap::new(),
             folded: BTreeSet::new(),
             folded_saved: BTreeSet::new(),
             rail_collapsed: false,
@@ -813,6 +1005,8 @@ mod tests {
             path: PathBuf::from("/dev/null"),
             sizes: BTreeMap::new(),
             saved: BTreeMap::new(),
+            collapsed: BTreeMap::new(),
+            saved_collapsed: BTreeMap::new(),
             folded: BTreeSet::new(),
             folded_saved: BTreeSet::new(),
             rail_collapsed: false,

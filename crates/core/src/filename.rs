@@ -404,6 +404,17 @@ impl Rules {
         format!("{hash:016x}")
     }
 
+    /// 剥一个**变体**：从它**主文件**的文件名剥（不带目录那几段）。
+    ///
+    /// 「一个变体的正题从哪个名字剥」只在这儿说一次（ADR-0024）：变体的键可以是一整棵
+    /// 目录树的根（`shape::Variant::key`），拿它剥的话目录转储剥出来的是目录名，而撞中文
+    /// 离线源那一处（`scrape::zh`）剥的是主文件名——同一个变体在浏览屏上与刮削依据里
+    /// 就成了两个正题。
+    #[must_use]
+    pub fn parse_main_key(&self, main_key: &str) -> Parsed {
+        self.parse(crate::path::file_name_of_key(main_key))
+    }
+
     /// 剥一个文件名。
     #[must_use]
     pub fn parse(&self, file_name: &str) -> Parsed {
