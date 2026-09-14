@@ -2646,3 +2646,111 @@ fn 撤掉一条标题压制之后就地摆着折标题的入口_排的是与库�
     // **在任务台上看不出区别**：那一行的名字就是这道工序的名字。
     assert_eq!(app.tasks().history()[0].name, "整理标题");
 }
+
+/// 夹着两个**非游戏资产**的一份小库，四个变体各自成一行。
+///
+/// **哪几个算非游戏资产不在这里判**：判断只有核心库那一处，这份库只是照「根名之后有一段
+/// 目录叫 `bios`」摆的数据；下面的断言读的是核心库交回来的标记（`WorkRow::non_game_asset`）。
+/// 一个**文件名**叫 `bios` 的游戏也摆进来——判的是目录段，它照旧是游戏。
+fn 夹着非游戏资产的小库() -> App {
+    use shared::档;
+
+    let mut app = shared::小库(
+        &[
+            ("PS", "幻想传说.bin", 档::命中),
+            ("PS", "bios/SCPH-1001.BIN", 档::还没识别),
+            ("街机", "BIOS/neogeo.zip", 档::还没识别),
+            ("SFC", "bios.sfc", 档::没有候选),
+        ],
+        std::env::temp_dir().join("romcat-测试-浏览-非游戏资产"),
+    );
+    app.show_view(View::Browse);
+    app
+}
+
+/// 核心库说**标着**的那几行叫什么（按当前筛选）。
+fn 核心库标着的(app: &mut App) -> Vec<String> {
+    let (browse, site) = app.browse_and_site();
+    site.catalog
+        .work_page(browse.query(), 0, 64)
+        .expect("读得动")
+        .into_iter()
+        .filter(|row| row.non_game_asset)
+        .map(|row| row.name)
+        .collect()
+}
+
+#[test]
+fn 非游戏资产默认不列出_屏上说收起了几个_开关打开后列出来并标着() {
+    use romcat_core::catalog::browse::{NON_GAME_ASSET_LABEL, NonGameAssets};
+
+    // 左栏「平台」那一档某个平台写着几个；那一档压根不在时是 `None`。
+    let 平台条数 = |app: &App, 平台: &str| {
+        app.browse()
+            .facets()
+            .platforms
+            .iter()
+            .find(|facet| facet.value == 平台)
+            .map(|facet| facet.count)
+    };
+
+    let ctx = headless::context();
+    let mut app = 夹着非游戏资产的小库();
+    跑(&ctx, &mut app, 2);
+
+    // 一、默认收起：表上只有两行，屏上说清收起了几个，行上一个标记都没有。
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert_eq!(app.window().total(), 2, "默认收起：四行里只列两行");
+    assert!(
+        屏上.contains("收起了 2 个非游戏资产"),
+        "屏上没说收起了几个：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("SCPH-1001"),
+        "收起的那一行画出来了：\n{屏上}"
+    );
+    assert!(核心库标着的(&mut app).is_empty());
+    assert_eq!(
+        屏上
+            .lines()
+            .filter(|line| *line == NON_GAME_ASSET_LABEL)
+            .count(),
+        0
+    );
+    // 左栏的条数跟着收起：PS 只数那一个游戏，街机那一档压根不在——点进去列几个，这儿就写几个。
+    assert_eq!(平台条数(&app, "PS"), Some(1));
+    assert_eq!(平台条数(&app, "街机"), None);
+
+    // 二、点那颗开关：列出来，行上标着——**标着哪几行由核心库说**，屏上照着标。
+    let 屏上 = shared::点一下(&ctx, "列出非游戏资产", |ui| app.ui(ui));
+    assert_eq!(app.browse().query().non_game_assets, NonGameAssets::Listed);
+    assert_eq!(app.window().total(), 4, "列出来之后四行都在");
+    let 标着的 = 核心库标着的(&mut app);
+    assert_eq!(标着的.len(), 2, "{标着的:?}");
+    for name in &标着的 {
+        assert!(
+            屏上.contains(name.as_str()),
+            "列出来的「{name}」没画在屏上：\n{屏上}"
+        );
+    }
+    assert_eq!(
+        屏上
+            .lines()
+            .filter(|line| *line == NON_GAME_ASSET_LABEL)
+            .count(),
+        标着的.len(),
+        "行上标着的与核心库说的对不上：\n{屏上}",
+    );
+    assert!(屏上.contains("列出了 2 个非游戏资产"), "{屏上}");
+    assert_eq!(
+        平台条数(&app, "PS"),
+        Some(2),
+        "列出来之后左栏的条数跟着回来"
+    );
+    assert_eq!(平台条数(&app, "街机"), Some(1));
+
+    // 三、再点一下收回去：数与表回到原样。
+    let 屏上 = shared::点一下(&ctx, "列出非游戏资产", |ui| app.ui(ui));
+    assert_eq!(app.window().total(), 2);
+    assert!(屏上.contains("收起了 2 个非游戏资产"), "{屏上}");
+}

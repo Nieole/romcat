@@ -32,7 +32,9 @@
 use egui::{Align, Layout};
 use egui_extras::{Column, TableBuilder};
 use romcat_core::catalog::Catalog;
-use romcat_core::catalog::browse::{Scope, SearchHit, WorkAnchor, WorkOrder, WorkQuery, WorkRow};
+use romcat_core::catalog::browse::{
+    NON_GAME_ASSET_LABEL, Scope, SearchHit, WorkAnchor, WorkOrder, WorkQuery, WorkRow,
+};
 use romcat_core::report::{capacity, thousands};
 
 use crate::font;
@@ -428,22 +430,29 @@ impl Table<'_> {
                         // **搜索命中在别处时说清楚**：一行名字里一个搜索词都没有的
                         // 作品冒在前面，不印这一句就是「凭什么排在这儿」看不出答案。
                         // 标题自己命中的不印——那一眼就看得见，多一个记号只是噪音。
-                        match work.hit.filter(|hit| *hit > SearchHit::Title) {
-                            None => {
-                                ui.label(&work.name);
-                            }
-                            Some(hit) => {
-                                // **先把那句话摆到这一格的右头，剩下的宽度才给名字。**
-                                // 这一列是定宽加 `clip`，而真库里 DAT 条目名普遍长——
-                                // 顺着写的话被截掉的正是那句唯一的答案。反过来摆，
-                                // 截掉的是名字，而名字还挂在悬停里。
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        //
+                        // **非游戏资产也标在右头**（票 `gui-looks-like-the-design/08`）：
+                        // 是不是由核心库答（`WorkRow::non_game_asset`），这里照着标，
+                        // 不自己判（ADR-0024）。
+                        let hit = work.hit.filter(|hit| *hit > SearchHit::Title);
+                        if hit.is_none() && !work.non_game_asset {
+                            ui.label(&work.name);
+                        } else {
+                            // **先把那句话摆到这一格的右头，剩下的宽度才给名字。**
+                            // 这一列是定宽加 `clip`，而真库里 DAT 条目名普遍长——
+                            // 顺着写的话被截掉的正是那句唯一的答案。反过来摆，
+                            // 截掉的是名字，而名字还挂在悬停里。
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if let Some(hit) = hit {
                                     ui.weak(hit.label());
-                                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                                        ui.label(&work.name).on_hover_text(&work.name);
-                                    });
+                                }
+                                if work.non_game_asset {
+                                    ui.weak(NON_GAME_ASSET_LABEL);
+                                }
+                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                    ui.label(&work.name).on_hover_text(&work.name);
                                 });
-                            }
+                            });
                         }
                     });
                     row.col(|ui| {

@@ -12,7 +12,10 @@
 
 use std::collections::BTreeSet;
 
-use romcat_core::catalog::browse::{Scope, WORK_FIELDS, WorkAnchor, WorkOrder, WorkQuery, WorkRow};
+use romcat_core::catalog::browse::{
+    NonGameAssets, PlatformFilter, Scope, VariantQuery, WORK_FIELDS, WorkAnchor, WorkOrder,
+    WorkQuery, WorkRow,
+};
 use romcat_core::catalog::identify::{Candidate, Identification, NOT_RUN_LABEL, Provenance};
 use romcat_core::catalog::{Catalog, Confidence, State};
 use romcat_core::dat::Convention;
@@ -798,4 +801,325 @@ fn 一页取不出全库() {
             .expect("取得出一页")
             .is_empty(),
     );
+}
+
+// ——— 非游戏资产默认收起（票 `gui-looks-like-the-design/08`） ———
+
+/// 夹着的那几个**自成一行**的非游戏资产的键。
+///
+/// 键按次序排时它们**插在游戏中间**（`bios` 那一段比「游戏」排得靠前），翻页才测得出
+/// 漏行重行。**哪几个算非游戏资产不在这里判**：判断只有 `classify::non_game_asset`
+/// 那一处，这份库只是照「根名之后有一段目录叫 `bios`」摆的数据。
+const 散落的非游戏资产: [&str; 4] = [
+    "主库/FC/bios/disksys.rom",
+    "主库/GB/BIOS/gb_bios.bin",
+    "主库/PS/bios/SCPH-1001.BIN",
+    "主库/街机/FBA-ROMS/BIOS/neogeo.zip",
+];
+
+/// 五个平台各六个游戏，外加：
+///
+/// - [`散落的非游戏资产`] 那四个，各自成一行（识别挑作品时跳过它们，于是它们认不出作品）；
+/// - 一个**文件名**叫 `bios` 的游戏——判的是目录段，它照旧是游戏；
+/// - 一部作品底下一个游戏、一个被人**手工挂进来**的 BIOS：这一行两档都列着。
+///
+/// 返回库与那部作品的 id。
+fn 夹着非游戏资产的库() -> (Catalog, i64) {
+    let mut catalog = Catalog::open_in_memory().expect("开得出中立库");
+    let mut variants = Vec::new();
+    for platform in ["FC", "GB", "PS", "SFC", "街机"] {
+        for n in 0..6 {
+            variants.push(变体(
+                &format!("主库/{platform}/游戏{n}.zip"),
+                Some(platform),
+                1_000,
+            ));
+        }
+    }
+    for key in 散落的非游戏资产 {
+        let platform = key.split('/').nth(1);
+        variants.push(变体(key, platform, 512));
+    }
+    variants.push(变体("主库/SFC/bios.zip", Some("SFC"), 2_000));
+    variants.push(变体("主库/FC/魂斗罗.nes", Some("FC"), 4_000));
+    variants.push(变体("主库/FC/魂斗罗/bios/disksys.rom", Some("FC"), 512));
+    catalog
+        .replace_variants(&variants, 1, &Manifest::default())
+        .expect("写得进去");
+    let work = catalog
+        .add_work("魂斗罗", Provenance::Identified)
+        .expect("建得出作品");
+    for key in ["主库/FC/魂斗罗.nes", "主库/FC/魂斗罗/bios/disksys.rom"] {
+        catalog
+            .link_variant(key, Some(work), None)
+            .expect("挂得上作品");
+    }
+    (catalog, work)
+}
+
+/// 这份查询在库里一共几行、翻出来是哪几行。
+fn 数与表(catalog: &Catalog, query: &WorkQuery) -> (u64, BTreeSet<WorkAnchor>) {
+    let total = catalog.work_total(query).expect("数得出总数");
+    let rows = 翻完(catalog, query, 7);
+    let set: BTreeSet<WorkAnchor> = rows.iter().cloned().collect();
+    assert_eq!(set.len(), rows.len(), "翻页翻出了重行");
+    assert_eq!(rows.len() as u64, total, "翻出来的行数与总数对不上");
+    (total, set)
+}
+
+#[test]
+fn 非游戏资产默认不列出_收起了几行与翻出来的表对得上() {
+    let (catalog, work) = 夹着非游戏资产的库();
+    let 默认 = WorkQuery::default();
+    let 列出 = WorkQuery {
+        non_game_assets: NonGameAssets::Listed,
+        ..WorkQuery::default()
+    };
+    assert_eq!(默认.non_game_assets, NonGameAssets::Hidden, "浏览默认收起");
+    assert!(
+        !默认.same_filter(&列出),
+        "拨一下开关换的是一批行，全选说的那一批跟着变",
+    );
+
+    let 收起了 = catalog
+        .non_game_asset_rows(&默认)
+        .expect("数得出收起了几行");
+    assert_eq!(收起了, 散落的非游戏资产.len() as u64);
+    // 开关拨在哪一档，这个数都是同一个：它说的是「这批筛选下整行都是非游戏资产的有几行」。
+    assert_eq!(catalog.non_game_asset_rows(&列出).expect("数得出"), 收起了);
+
+    let (收着的数, 收着的表) = 数与表(&catalog, &默认);
+    let (列着的数, 列着的表) = 数与表(&catalog, &列出);
+    assert_eq!(
+        收着的数 + 收起了,
+        列着的数,
+        "屏上说收起了几行，表上就得正好少那几行"
+    );
+    assert!(收着的表.is_subset(&列着的表), "收起不该让别的行冒出来");
+    let 多出来的: BTreeSet<WorkAnchor> = 列着的表.difference(&收着的表).cloned().collect();
+    let 期望: BTreeSet<WorkAnchor> = 散落的非游戏资产
+        .iter()
+        .map(|key| WorkAnchor::Loose((*key).to_string()))
+        .collect();
+    assert_eq!(多出来的, 期望);
+
+    // 一部作品底下夹着一个 BIOS：**这一行两档都列着**，收起的只是底下那一个变体，
+    // 行上的变体数跟着说真话。
+    let 魂斗罗 = WorkAnchor::Work(work);
+    assert!(收着的表.contains(&魂斗罗) && 列着的表.contains(&魂斗罗));
+    let 变体数 = |query: &WorkQuery| {
+        catalog
+            .work_page(query, 0, 64)
+            .expect("取得出一页")
+            .into_iter()
+            .find(|row| row.anchor == 魂斗罗)
+            .map(|row| row.variants)
+    };
+    assert_eq!(变体数(&默认), Some(1));
+    assert_eq!(变体数(&列出), Some(2));
+
+    // 筛着的时候也对得上：只数这一批里收起的。
+    for (platform, 该收起) in [("FC", 1), ("PS", 1), ("SFC", 0)] {
+        let 筛 = WorkQuery {
+            platform: Some(PlatformFilter::Named(platform.to_string())),
+            ..WorkQuery::default()
+        };
+        let 筛着列出 = WorkQuery {
+            non_game_assets: NonGameAssets::Listed,
+            ..筛.clone()
+        };
+        let 收起 = catalog.non_game_asset_rows(&筛).expect("数得出");
+        assert_eq!(收起, 该收起, "{platform}");
+        assert_eq!(
+            数与表(&catalog, &筛).0 + 收起,
+            数与表(&catalog, &筛着列出).0,
+            "{platform} 那一批数与表对不上",
+        );
+    }
+
+    // 变体那一层与主列表共用同一份筛选：亲手收起时五个非游戏资产都不在。
+    // **它默认全列**——拿它默认值的调用方问的都是库里一共有什么（挂单 `Q776`）。
+    assert_eq!(
+        catalog
+            .variant_total(&VariantQuery {
+                non_game_assets: NonGameAssets::Hidden,
+                ..VariantQuery::default()
+            })
+            .expect("数得出"),
+        32
+    );
+    assert_eq!(
+        catalog
+            .variant_total(&VariantQuery::default())
+            .expect("数得出"),
+        37
+    );
+
+    // 左栏那几档的条数跟着开关走（挂单 `Q775`）：FC 底下六个游戏、魂斗罗一个、两个 BIOS。
+    let 平台条数 = |switch: NonGameAssets, platform: &str| {
+        catalog
+            .facets(switch)
+            .expect("问得出")
+            .platforms
+            .into_iter()
+            .find(|facet| facet.value == platform)
+            .map(|facet| facet.count)
+    };
+    assert_eq!(平台条数(NonGameAssets::Hidden, "FC"), Some(7));
+    assert_eq!(平台条数(NonGameAssets::Listed, "FC"), Some(9));
+    // 「还没识别」那一档拿总数去减：这份库一条结论都没写，两档各是它自己那个总数。
+    let 还没识别 = |switch: NonGameAssets| {
+        catalog
+            .facets(switch)
+            .expect("问得出")
+            .states
+            .into_iter()
+            .find(|(filter, _)| *filter == romcat_core::catalog::browse::StateFilter::Unidentified)
+            .map(|(_, count)| count)
+    };
+    assert_eq!(还没识别(NonGameAssets::Hidden), Some(32));
+    assert_eq!(还没识别(NonGameAssets::Listed), Some(37));
+}
+
+#[test]
+fn 几种开法开出来的库都问得动那一处判断() {
+    // 判断挂成 SQL 函数，而函数不落在库文件里——**每条连接各挂一次**。日后添一个开连接的
+    // 入口却忘了挂，浏览那几条查询就报「没有这个函数」，这条当场红。
+    let dir = romcat_core::testing::temp_dir("浏览-非游戏资产");
+    let 库文件 = dir.path().join("catalog").join("库.sqlite3");
+    let 两个变体 = [
+        变体("库/PS/游戏.zip", Some("PS"), 1_000),
+        变体("库/PS/bios/SCPH-1001.BIN", Some("PS"), 512),
+    ];
+    let 问一遍 = |开法: &str, catalog: &Catalog| {
+        let 默认 = WorkQuery::default();
+        let 列出 = WorkQuery {
+            non_game_assets: NonGameAssets::Listed,
+            ..WorkQuery::default()
+        };
+        let 数 = |结果: Result<u64, romcat_core::catalog::CatalogError>| {
+            结果.unwrap_or_else(|error| panic!("{开法} 开出来的库问不动：{error}"))
+        };
+        assert_eq!(数(catalog.work_total(&默认)), 1, "{开法}");
+        assert_eq!(数(catalog.work_total(&列出)), 2, "{开法}");
+        assert_eq!(数(catalog.non_game_asset_rows(&默认)), 1, "{开法}");
+        assert_eq!(
+            数(catalog.variant_total(&VariantQuery {
+                non_game_assets: NonGameAssets::Hidden,
+                ..VariantQuery::default()
+            })),
+            1,
+            "{开法}"
+        );
+        // 左栏那几档也问它。
+        assert_eq!(
+            数(catalog.facets(NonGameAssets::Hidden).map(|facets| facets
+                .platforms
+                .iter()
+                .map(|facet| facet.count)
+                .sum())),
+            1,
+            "{开法}"
+        );
+    };
+
+    {
+        let mut 建的 = Catalog::create(&库文件, "库").expect("建得出中立库");
+        建的
+            .replace_variants(&两个变体, 1, &Manifest::default())
+            .expect("写得进去");
+        问一遍("Catalog::create", &建的);
+    }
+    let 读写 = Catalog::open(&库文件).expect("打得开");
+    问一遍("Catalog::open", &读写);
+    问一遍(
+        "Catalog::read_only",
+        &读写.read_only().expect("分得出只读的一份"),
+    );
+    问一遍(
+        "Catalog::open_read_only",
+        &Catalog::open_read_only(&库文件).expect("只读打得开"),
+    );
+    let mut 内存 = Catalog::open_in_memory().expect("开得出内存库");
+    内存
+        .replace_variants(&两个变体, 1, &Manifest::default())
+        .expect("写得进去");
+    问一遍("Catalog::open_in_memory", &内存);
+}
+
+#[test]
+fn 列出来的每一行说得出它是非游戏资产_收起时一行都不标() {
+    let (catalog, work) = 夹着非游戏资产的库();
+    let 默认 = WorkQuery::default();
+    let 列出 = WorkQuery {
+        non_game_assets: NonGameAssets::Listed,
+        ..WorkQuery::default()
+    };
+    let 期望: BTreeSet<WorkAnchor> = 散落的非游戏资产
+        .iter()
+        .map(|key| WorkAnchor::Loose((*key).to_string()))
+        .collect();
+
+    // 一页一页翻完：标着的是哪几行、一共几行。**标记是核心库交回来的**，这里不判。
+    let 翻着数标记 = |query: &WorkQuery| {
+        let total = catalog.work_total(query).expect("数得出总数");
+        let mut 标着的 = BTreeSet::new();
+        let mut offset = 0;
+        while offset < total {
+            for row in catalog.work_page(query, offset, 7).expect("取得出一页") {
+                if row.non_game_asset {
+                    assert!(标着的.insert(row.anchor), "翻页翻出了重行");
+                }
+            }
+            offset += 7;
+        }
+        标着的
+    };
+    let 标着的 = 翻着数标记(&列出);
+    assert_eq!(标着的, 期望, "列出来之后，标着的得正好是那几个");
+    assert_eq!(
+        标着的.len() as u64,
+        catalog.non_game_asset_rows(&列出).expect("数得出"),
+        "屏上说列出了几个，行上就标着几个",
+    );
+    assert!(翻着数标记(&默认).is_empty(), "收起时列着的行一行都不该标");
+
+    // 夹着一个 BIOS 的作品：**行上不标**（它底下还有游戏），详情里那一个变体标着。
+    let 魂斗罗 = WorkAnchor::Work(work);
+    let 列着的详情 = catalog
+        .work_detail(&列出, &魂斗罗)
+        .expect("读得动")
+        .expect("这一行列着");
+    assert_eq!(列着的详情.variants.len(), 2);
+    let 标着的变体: Vec<&str> = 列着的详情
+        .variants
+        .iter()
+        .filter(|variant| variant.non_game_asset())
+        .map(|variant| variant.row.key.as_str())
+        .collect();
+    assert_eq!(标着的变体, vec!["主库/FC/魂斗罗/bios/disksys.rom"]);
+    let 收着的详情 = catalog
+        .work_detail(&默认, &魂斗罗)
+        .expect("读得动")
+        .expect("这一行照样列着");
+    assert_eq!(
+        收着的详情
+            .variants
+            .iter()
+            .map(|variant| variant.row.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["主库/FC/魂斗罗.nes"],
+        "收起时详情里也不列那个 BIOS",
+    );
+
+    // **开关进不了子库的规则**：子库选的变体照旧由规则说了算（挂单 `Q773`）。
+    let 筛 = WorkQuery {
+        platform: Some(PlatformFilter::Named("FC".to_string())),
+        ..WorkQuery::default()
+    };
+    let 筛着列出 = WorkQuery {
+        non_game_assets: NonGameAssets::Listed,
+        ..筛.clone()
+    };
+    assert_eq!(筛.to_rule(), 筛着列出.to_rule());
 }
