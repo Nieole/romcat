@@ -35,16 +35,36 @@ use romcat_core::catalog::Catalog;
 use romcat_core::catalog::browse::{
     NON_GAME_ASSET_LABEL, Scope, SearchHit, WorkAnchor, WorkOrder, WorkQuery, WorkRow,
 };
+use romcat_core::filename::Rules;
 use romcat_core::report::{capacity, thousands};
 
 use crate::font;
 use crate::look;
+use crate::media::Shelf;
+use crate::tokens::Tokens;
 
-/// 一行多高，点。
+/// 一行多高，点。**待确认屏、子库屏那几张一行字的表**用它。
 ///
 /// 十万行乘以它约 2.1×10⁶ 点，而 `f32` 在那个量级上的最小间隔是 0.25 点——距离滚动抖动
 /// 的阈值还有一个数量级以上的余量（egui#1391）。
+///
+/// 浏览屏的主列表不用它：那一张照稿是两行字一行（[`row_height`]）。
 pub const ROW_HEIGHT: f32 = 21.0;
+
+/// 浏览屏**主列表**一行多高，点：照令牌 `table-row`，摆得下名字一行、副行一行。
+///
+/// 十万行乘以它约 4.6×10⁶ 点，`f32` 在那个量级上的最小间隔是 0.5 点，离滚动抖动的阈值
+/// 照旧差得远（见 [`ROW_HEIGHT`] 那一条）。
+#[must_use]
+pub fn row_height() -> f32 {
+    Tokens::builtin().layout.table_row
+}
+
+/// 认不出作品的那一行挂的**标签**。
+///
+/// 那一行是不是认不出作品，由核心库答（[`WorkAnchor::Loose`]）；这几个字是屏上怎么称呼
+/// 那种行——卡片视图与作品详情页挂的是同一个标签，所以摆在这儿一处。
+pub const UNLINKED_LABEL: &str = "未关联作品";
 
 /// 窗口默认一次取多少行。
 ///
@@ -316,6 +336,14 @@ pub struct Table<'a> {
     pub picked: &'a mut Picked,
     /// 把滚动位置强按到这个像素偏移。**只有量帧率时才用**，界面上是 `None`。
     pub scroll_to: Option<f32>,
+    /// **剥离规则**：认不出作品的那一行拿它剥正题（[`WorkRow::title`]）。
+    ///
+    /// 与刮削撞中文离线源用的是同一份（工作目录里那份，`sources::rules`）——
+    /// 屏上这一行写的正题，就是刮削依据里写的那一个。
+    pub rules: &'a Rules,
+    /// **行首那一小格封面**：「在每行开头显示封面」开着时是 `Some`，关着是 `None`
+    /// ——那时行首什么都不摆，行也照令牌矮回 `table-row`。
+    pub shelf: Option<&'a mut Shelf>,
 }
 
 impl Table<'_> {
@@ -331,7 +359,15 @@ impl Table<'_> {
             focused,
             picked,
             scroll_to,
+            rules,
+            mut shelf,
         } = self;
+        // 行首摆封面时一行照令牌 `table-row-cover` 高：两行字旁边还得竖得下那一小格封面。
+        let height = if shelf.is_some() {
+            Tokens::builtin().layout.table_row_cover
+        } else {
+            row_height()
+        };
         let mut opened = None;
         // 行画完之后手上没有那一行的 `Ui` 了（列都加完才拿得到 `response`），
         // 而焦点那一圈要画在那时——先把上下文留一份。
@@ -406,7 +442,7 @@ impl Table<'_> {
                 });
             })
             .body(|body| {
-                body.rows(ROW_HEIGHT, total, |mut row| {
+                body.rows(height, total, |mut row| {
                     let index = row.index() as u64;
                     row.set_selected(*focused == Some(index));
                     let Some(work) = window.row(catalog, index) else {
@@ -426,35 +462,7 @@ impl Table<'_> {
                             picked.toggle(&work.anchor);
                         }
                     });
-                    row.col(|ui| {
-                        // **搜索命中在别处时说清楚**：一行名字里一个搜索词都没有的
-                        // 作品冒在前面，不印这一句就是「凭什么排在这儿」看不出答案。
-                        // 标题自己命中的不印——那一眼就看得见，多一个记号只是噪音。
-                        //
-                        // **非游戏资产也标在右头**（票 `gui-looks-like-the-design/08`）：
-                        // 是不是由核心库答（`WorkRow::non_game_asset`），这里照着标，
-                        // 不自己判（ADR-0024）。
-                        let hit = work.hit.filter(|hit| *hit > SearchHit::Title);
-                        if hit.is_none() && !work.non_game_asset {
-                            ui.label(&work.name);
-                        } else {
-                            // **先把那句话摆到这一格的右头，剩下的宽度才给名字。**
-                            // 这一列是定宽加 `clip`，而真库里 DAT 条目名普遍长——
-                            // 顺着写的话被截掉的正是那句唯一的答案。反过来摆，
-                            // 截掉的是名字，而名字还挂在悬停里。
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if let Some(hit) = hit {
-                                    ui.weak(hit.label());
-                                }
-                                if work.non_game_asset {
-                                    ui.weak(NON_GAME_ASSET_LABEL);
-                                }
-                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                                    ui.label(&work.name).on_hover_text(&work.name);
-                                });
-                            });
-                        }
-                    });
+                    row.col(|ui| name_cell(ui, work, rules, shelf.as_deref_mut()));
                     row.col(|ui| {
                         // **平台是个集合**：一部作品可以横跨好几个平台。
                         ui.label(work.platforms.join(" / "));
@@ -496,4 +504,159 @@ impl Table<'_> {
             });
         opened
     }
+}
+
+/// 「作品」那一格。
+///
+/// **认不出作品的那一行两行字**（票 `gui-looks-like-the-design/09`）：主栏是**正题**挂一个
+/// 「未关联作品」标签，副行是那份内容在主库里的**相对路径，从尾部截断**。从前那一格直接印
+/// 变体的键——真库里一万六千多行都是一长串路径，而路径的信息在尾巴上，被列宽截掉的正是
+/// 文件名那一截。认不认得出、正题是什么，都是核心库答的（[`WorkRow::title`]）。
+///
+/// 认出作品的那一行照旧一行字。
+///
+/// 「在每行开头显示封面」开着时（`shelf` 是 `Some`），这一格最左边先摆一小格封面或平台色块。
+fn name_cell(ui: &mut egui::Ui, work: &WorkRow, rules: &Rules, shelf: Option<&mut Shelf>) {
+    if let Some(shelf) = shelf {
+        shelf.thumb(ui, work);
+    }
+    // **搜索命中在别处时说清楚**：一行名字里一个搜索词都没有的
+    // 作品冒在前面，不印这一句就是「凭什么排在这儿」看不出答案。
+    // 标题自己命中的不印——那一眼就看得见，多一个记号只是噪音。
+    //
+    // **非游戏资产也标在右头**（票 `gui-looks-like-the-design/08`）：
+    // 是不是由核心库答（`WorkRow::non_game_asset`），这里照着标，
+    // 不自己判（ADR-0024）。
+    let hit = work.hit.filter(|hit| *hit > SearchHit::Title);
+    let Some(title) = work.title(rules) else {
+        if hit.is_none() && !work.non_game_asset {
+            ui.label(&work.name);
+        } else {
+            // **先把那句话摆到这一格的右头，剩下的宽度才给名字。**
+            // 这一列是定宽加 `clip`，而真库里 DAT 条目名普遍长——
+            // 顺着写的话被截掉的正是那句唯一的答案。反过来摆，
+            // 截掉的是名字，而名字还挂在悬停里。
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                right_marks(ui, work, hit);
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.label(&work.name).on_hover_text(&work.name);
+                });
+            });
+        }
+        return;
+    };
+    let width = ui.available_width();
+    let line = ui.text_style_height(&egui::TextStyle::Body);
+    let small = egui::TextStyle::Small.resolve(ui.style());
+    let path_font = egui::FontId::new(small.size, egui::FontFamily::Monospace);
+    ui.vertical(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, line),
+            Layout::right_to_left(Align::Center),
+            |ui| {
+                right_marks(ui, work, hit);
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    // **标签的宽度先让出来，剩下的才给正题**：正题长了截的是正题，
+                    // 「未关联作品」那几个字总在。
+                    let tag = tag_galley(ui, UNLINKED_LABEL);
+                    let room =
+                        ui.available_width() - tag_size(&tag).x - ui.spacing().item_spacing.x;
+                    ui.scope(|ui| {
+                        ui.set_max_width(room.max(0.0));
+                        ui.add(egui::Label::new(&title).truncate());
+                    });
+                    paint_tag(ui, tag);
+                });
+            },
+        );
+        // **副行：从尾部截断的相对路径。** 截到画得下为止，整条挂在悬停里。
+        let shown = tail_fit(ui, &work.name, &path_font, width);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(shown)
+                    .font(path_font)
+                    .color(ui.visuals().weak_text_color()),
+            )
+            .extend(),
+        )
+        .on_hover_text(&work.name);
+    });
+}
+
+/// 这一格右头那两个记号：命中在哪儿、是不是非游戏资产。**右往左摆**，先摆的在最右。
+fn right_marks(ui: &mut egui::Ui, work: &WorkRow, hit: Option<SearchHit>) {
+    if let Some(hit) = hit {
+        ui.weak(hit.label());
+    }
+    if work.non_game_asset {
+        ui.weak(NON_GAME_ASSET_LABEL);
+    }
+}
+
+/// 一段字**从左边删字**、补一个「…」，删到量出来的宽度摆得进 `max_width` 为止；
+/// 本来就摆得下就原样交回。
+///
+/// 给路径用：路径的信息在尾巴上（文件名），从右边截掉的正是人要认的那一截。
+/// **宽度是拿这个字体真量出来的**，不是数字数——一个汉字比一个拉丁字母宽一倍，
+/// 按字数截要么截多了、要么画出格。
+///
+/// 删几个字是二分找的：删得越多越窄，找「删最少、摆得下」的那一处，一格量十几次。
+#[must_use]
+fn tail_fit(ui: &egui::Ui, text: &str, font: &egui::FontId, max_width: f32) -> String {
+    let width = |candidate: String| {
+        ui.ctx().fonts_mut(|fonts| {
+            fonts
+                .layout_no_wrap(candidate, font.clone(), egui::Color32::PLACEHOLDER)
+                .size()
+                .x
+        })
+    };
+    if width(text.to_string()) <= max_width {
+        return text.to_string();
+    }
+    // 删掉头 `n + 1` 个字之后，剩下那一截从哪个字节起；最后一格是「全删了」。
+    let starts: Vec<usize> = text
+        .char_indices()
+        .map(|(at, _)| at)
+        .skip(1)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    let fits = |n: usize| width(format!("…{}", &text[starts[n]..])) <= max_width;
+    let (mut low, mut high) = (0, starts.len() - 1);
+    while low < high {
+        let middle = (low + high) / 2;
+        if fits(middle) {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    format!("…{}", &text[starts[low]..])
+}
+
+/// 行上那种**标签**排好的字：小字号、正文次一级的字色（令牌 `ink-2`）。
+fn tag_galley(ui: &egui::Ui, text: &str) -> std::sync::Arc<egui::Galley> {
+    let font = egui::TextStyle::Small.resolve(ui.style());
+    let color = ui.visuals().text_color();
+    ui.ctx()
+        .fonts_mut(|fonts| fonts.layout_no_wrap(text.to_string(), font, color))
+}
+
+/// 标签连底多大：字的四周各让出令牌里最小那一档间距的一半到一整档。
+fn tag_size(galley: &egui::Galley) -> egui::Vec2 {
+    let step = Tokens::builtin().space.steps[0];
+    galley.size() + egui::vec2(step * 2.0, step)
+}
+
+/// 画一个**标签**：凹陷底（令牌 `sunken`）、小圆角，照稿 `.tag`。
+fn paint_tag(ui: &mut egui::Ui, galley: std::sync::Arc<egui::Galley>) {
+    let (rect, _) = ui.allocate_exact_size(tag_size(&galley), egui::Sense::hover());
+    let radius = Tokens::builtin().radius.small;
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, ui.visuals().extreme_bg_color);
+    painter.galley(
+        rect.center() - galley.size() / 2.0,
+        galley,
+        ui.visuals().text_color(),
+    );
 }

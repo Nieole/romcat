@@ -958,12 +958,30 @@ pub enum WorkAnchor {
     Loose(String),
 }
 
+impl WorkAnchor {
+    /// 这一行的**刮削锚点**：认出作品的挂**作品名**（`name`），没认出来的挂**变体的键**。
+    ///
+    /// 与 `converge`、SQL 那一侧的 `row_anchor!` 同一条口径；Rust 这一侧问「这一行的年份、
+    /// 元数据、封面挂在哪儿」的几处（`Catalog::fill_scraped`、年份、`Catalog::cover_of`）
+    /// 都从这儿取，不各写一个 `match`。
+    #[must_use]
+    pub fn scrape_anchor<'a>(&'a self, name: &'a str) -> (AnchorKind, &'a str) {
+        match self {
+            Self::Work(_) => (AnchorKind::Work, name),
+            Self::Loose(key) => (AnchorKind::Variant, key),
+        }
+    }
+}
+
 /// 主列表按哪一列排。
 ///
 /// 与 [`VariantOrder`] 一样是个闭集合：拼进 `ORDER BY` 的只能来自这里。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WorkOrder {
-    /// 作品名。没认出作品的那些行用它自己的键——**排的与画的是同一串字**。
+    /// 作品名。没认出作品的那些行用它自己的键。
+    ///
+    /// 那些行屏上主栏画的是**正题**（[`WorkRow::title`]），键画在副行——所以按这一列排时
+    /// 它们照的是副行那条相对路径，屏上看得出凭什么排在这儿（挂单 `Q802`，交给按列排序那张票定）。
     #[default]
     Name,
     /// 平台。一行可以跨好几个平台（同一部作品在 GB 与 GBC 上各有变体），
@@ -1049,8 +1067,17 @@ pub const WORK_FIELDS: [Field; 5] = [
 pub struct WorkRow {
     /// 这一行是谁。批量操作的作用范围靠它展开（[`Catalog::scoped_variants`]）。
     pub anchor: WorkAnchor,
-    /// 画出来的那个名字：作品名，或者那个变体的键。
+    /// 这一行的名字：作品名，或者那个变体的键。**排的、搜的是它**（[`WorkOrder::Name`]）。
+    ///
+    /// 认不出作品的那一行屏上主栏画的不是它，是 [`title`](Self::title) 那个正题；它自己
+    /// （变体的键，也就是那份内容在主库里的相对路径）画在副行。
     pub name: String,
+    /// 认不出作品的那一行：那个变体**主文件**的键，[`title`](Self::title) 从它剥正题；
+    /// 认出作品的那一行是 `None`。
+    ///
+    /// **不对外**：要的是正题就从 `title` 取。把它交出去，就会有调用方自己拿它去剥
+    /// ——剥哪个名字、剥完空了怎么办，那是第二个判据（ADR-0024）。
+    main_key: Option<String>,
     /// **平台集合**。一部作品可以横跨好几个平台，真库上 9,226 个作品里有 2,314 个如此。
     pub platforms: Vec<String>,
     /// 底下挂着几个变体。**按当前筛选算**——屏上写着几个，批量操作就作用于那几个。
@@ -1105,6 +1132,23 @@ impl WorkRow {
     #[must_use]
     pub fn complete(&self) -> bool {
         self.missing.is_empty()
+    }
+
+    /// **认不出作品的那一行叫什么**：那个变体的**正题**；认出作品的那一行是 `None`。
+    ///
+    /// 两件事都在这儿答，界面照着画（ADR-0005）：「认不认得出作品」看 [`anchor`](Self::anchor)
+    /// 是不是 [`WorkAnchor::Loose`]；「正题是什么」从那个变体的**主文件名**剥
+    /// （[`Rules::parse_main_key`](crate::filename::Rules::parse_main_key)，撞中文离线源的
+    /// 那一处剥的也是它）。
+    ///
+    /// **规则由调用方交进来**，因为剥离规则是配置：工作目录里那份 `name-rules.toml`
+    /// （[`sources::rules`](crate::sources::rules)）拿去刮削，屏上这一行就得拿同一份剥，
+    /// 不然两处是两个正题。
+    ///
+    /// 整个文件名剥完一个字都不剩时退回**主文件名**：空着一行，比印一串记号更认不出它是谁。
+    #[must_use]
+    pub fn title(&self, rules: &crate::filename::Rules) -> Option<String> {
+        Some(loose_title(rules, self.main_key.as_deref()?))
     }
 
     /// 「元数据」那一栏画成什么。齐了就一个字，缺了就点名缺哪几样。
@@ -1164,6 +1208,9 @@ impl WorkRow {
 /// **只有这一处写它**：[`WORK_ANCHOR_COLUMNS`] 里那一列、[`WORK_FROM`] 里年份那张
 /// join、搜索框那条名字命中路（[`Search::name`]），全都从这儿展开——排的、画的、搜的
 /// 不是同一串字的话，屏上会出现一行「凭什么排在这儿」看不出答案的结果。
+///
+/// 没认出作品的那一行**主栏**画的是从这串键里剥出来的正题（[`WorkRow::title`]），
+/// 这串键本身画在副行，于是排的、搜的那一串照旧在屏上（挂单 `Q802`）。
 ///
 /// **是个宏而不是常量**，因为那几处里有两处是 `const &str`：`const` 里拼不了
 /// `format!`，而 `concat!` 只吃字面量与展开成字面量的宏。写成常量的话那两处只能各自
@@ -1823,6 +1870,8 @@ struct GroupTotals {
     platforms: Vec<String>,
     identified: bool,
     non_game_asset: bool,
+    /// 这一组里**主文件**键里最小的那个。只有认不出作品的那一组用得上——那一组就是一个变体。
+    main_key: Option<String>,
 }
 
 impl GroupTotals {
@@ -1839,6 +1888,7 @@ impl GroupTotals {
             platforms: Vec::new(),
             identified: true,
             non_game_asset: false,
+            main_key: None,
         }
     }
 }
@@ -2100,8 +2150,12 @@ impl Catalog {
             // **行上那个「非游戏资产」标记也在这一趟折**：只给这一页那几百行问，
             // `MIN` 折成「这一组是不是全都是」，与 [`Catalog::non_game_asset_rows`]
             // 那句 `HAVING` 是同一个口径。
+            //
+            // **主文件键也在这一趟带回来**：认不出作品的那一行要从它剥正题（`WorkRow::title`），
+            // 那一组就是一个变体，`MIN` 只是个取值器。
             "SELECT {WORK_TOTAL_COLUMNS},
-                    MIN({NON_GAME_ASSET_FN}(variant.key)) AS non_game_asset\
+                    MIN({NON_GAME_ASSET_FN}(variant.key)) AS non_game_asset,
+                    MIN(variant.main_key) AS main_key\
              {WORK_FROM_BASE}{where_sql}{glue} ({branch})\
              {WORK_GROUP_BY}",
             glue = if where_sql.is_empty() {
@@ -2139,6 +2193,7 @@ impl Catalog {
                         identified: row.get::<_, i64>(7)? != 0,
                         // 按名字取：这一列是拼在常量后头的，下标跟着常量变。
                         non_game_asset: row.get::<_, i64>("non_game_asset")? != 0,
+                        main_key: row.get("main_key")?,
                     },
                 ))
             })
@@ -2164,9 +2219,15 @@ impl Catalog {
                 // 「先跑一趟 `romcat identify`」，是这一票专门要消灭的那种指错下一步。
                 // 兜底的那一份见 [`GroupTotals::vanished`]。
                 let sums = totals.remove(&anchor).unwrap_or_else(GroupTotals::vanished);
+                // 认出作品的那一组里挂着一堆变体，它们的主文件键谁也代表不了这一行。
+                let main_key = match anchor {
+                    WorkAnchor::Loose(_) => sums.main_key,
+                    WorkAnchor::Work(_) => None,
+                };
                 WorkRow {
                     anchor,
                     name,
+                    main_key,
                     platforms: sums.platforms,
                     variants: sums.variants,
                     bytes: sums.bytes,
@@ -2202,10 +2263,9 @@ impl Catalog {
         for anchor in [AnchorKind::Work, AnchorKind::Variant] {
             let subjects: Vec<&str> = rows
                 .iter()
-                .filter(|row| {
-                    matches!(row.anchor, WorkAnchor::Work(_)) == (anchor == AnchorKind::Work)
-                })
-                .map(|row| row.name.as_str())
+                .map(|row| row.anchor.scrape_anchor(&row.name))
+                .filter(|(kind, _)| *kind == anchor)
+                .map(|(_, subject)| subject)
                 .collect();
             if subjects.is_empty() {
                 continue;
@@ -2252,9 +2312,10 @@ impl Catalog {
                 }
                 have.insert((subject, field));
             }
-            for row in rows.iter_mut().filter(|row| {
-                matches!(row.anchor, WorkAnchor::Work(_)) == (anchor == AnchorKind::Work)
-            }) {
+            for row in rows
+                .iter_mut()
+                .filter(|row| row.anchor.scrape_anchor(&row.name).0 == anchor)
+            {
                 row.missing = WORK_FIELDS
                     .into_iter()
                     .filter(|field| !have.contains(&(row.name.clone(), field.label().to_string())))
@@ -2582,6 +2643,34 @@ pub struct WorkDetail {
     pub variants: Vec<WorkVariant>,
 }
 
+impl WorkDetail {
+    /// 点开的是**认不出作品的那一行**时，它的**正题**；点开的是一个作品时是 `None`。
+    ///
+    /// 与主列表那一行（[`WorkRow::title`]）同一处剥：侧边详情头上写的，就是表上那一行主栏
+    /// 写的。认不出作品的那一行底下只有它自己那一个变体，正题从那个变体的主文件名剥。
+    #[must_use]
+    pub fn title(&self, rules: &crate::filename::Rules) -> Option<String> {
+        if !matches!(self.anchor, WorkAnchor::Loose(_)) {
+            return None;
+        }
+        let variant = self.variants.first()?;
+        Some(loose_title(rules, &variant.row.main_key))
+    }
+}
+
+/// 认不出作品的那一行的**正题**：从它主文件名剥（[`Rules::parse_main_key`](crate::filename::Rules::parse_main_key)），
+/// 剥完一个字都不剩时退回主文件名。
+///
+/// [`WorkRow::title`] 与 [`WorkDetail::title`] 都走这一处——「剥完空了怎么办」只说一次。
+fn loose_title(rules: &crate::filename::Rules, main_key: &str) -> String {
+    let parsed = rules.parse_main_key(main_key);
+    if parsed.title.trim().is_empty() {
+        crate::path::file_name_of_key(main_key).to_string()
+    } else {
+        parsed.title
+    }
+}
+
 impl Catalog {
     /// 主列表某一行的详情；这一行在当前筛选下一个变体都不剩时是 `None`。
     ///
@@ -2637,10 +2726,7 @@ impl Catalog {
     /// 一行的年份。取法与主列表那一列**一模一样**（裁决优先，其次最早的那一个），
     /// 否则面板上写的与列表上写的会是两个数。
     fn work_year(&self, anchor: &WorkAnchor, name: &str) -> Result<Option<String>, CatalogError> {
-        let kind = match anchor {
-            WorkAnchor::Work(_) => AnchorKind::Work,
-            WorkAnchor::Loose(_) => AnchorKind::Variant,
-        };
+        let (kind, name) = anchor.scrape_anchor(name);
         self.conn
             .prepare_cached(
                 "SELECT COALESCE(MIN(CASE WHEN source = ?3 THEN value END), MIN(value))

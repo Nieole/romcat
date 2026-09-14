@@ -18,10 +18,11 @@
 //! 那要 ffmpeg 的 Rust 绑定，是规格的 Out of Scope。**ffmpeg 不在的机器上照常可用**：
 //! 那一格显示占位，面板上说一句为什么，视频照样点得开。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
 use romcat_core::catalog::Catalog;
+use romcat_core::catalog::browse::{WorkAnchor, WorkRow};
 use romcat_core::catalog::detail::MediaItem;
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::preview::{self, EDGE, Frame, Key, Loader, Missing, Preview, Thumbnail};
@@ -410,6 +411,209 @@ impl Gallery {
         }
         out
     }
+}
+
+// ── 封面那几种小格子：列表行首、侧边详情头上（票 `gui-looks-like-the-design/09`） ──────
+
+/// 主列表**行首那一小格封面**：哪一行贴哪张、后台解码。
+///
+/// - **贴哪张由核心库答**（`Catalog::row_covers`），这里只缓着问过的那几行——一行问一次，
+///   滚回来不再问；刮削跑完、库底下变了由 [`Self::forget`] 作废。
+/// - **解码在后台**（[`Gallery`]），与详情面板那几格**分开一份**：那一份只留选中那个变体的图，
+///   两份合用的话翻几屏列表就把详情里的图挤掉了。
+/// - **没有封面的那一行画平台色块**（`platform_block`），不画灰色占位：大多数作品没有封面。
+#[derive(Debug, Default)]
+pub struct Shelf {
+    /// 问过核心库的那几行：它的封面，或者 `None`（问过了，一张都没有）。
+    covers: BTreeMap<WorkAnchor, Option<MediaItem>>,
+    /// 这一帧画到的那几行。画完表交给 [`Self::sync`]。
+    seen: Vec<WorkRow>,
+    /// 行首那些图的后台解码。
+    gallery: Gallery,
+    /// 问封面那一趟读库出的错。
+    error: Option<String>,
+}
+
+impl Shelf {
+    /// 指一份**媒体池**；不在位时是 `None`，那时每一行都画平台色块。
+    pub fn set_pool(&mut self, pool: Option<MediaPool>) {
+        self.gallery.set_pool(pool);
+        self.covers.clear();
+    }
+
+    /// 库底下变了（刮削跑完、扫完、裁完）：问过的封面全部作废，下一帧照新的库重问。
+    pub fn forget(&mut self) {
+        self.covers.clear();
+        self.error = None;
+    }
+
+    /// 问封面那一趟读库出的错。
+    #[must_use]
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// **画完表之后每帧一次**：这一帧新画到、还没问过的那几行去问核心库要封面，
+    /// 画到的那几行要的图交给后台解。
+    ///
+    /// `writable` 同 [`Gallery::sync`]：任务台上有活在跑时给 `false`。
+    pub fn sync(
+        &mut self,
+        ctx: &egui::Context,
+        catalog: &mut Catalog,
+        pool: Option<&MediaPool>,
+        writable: bool,
+    ) {
+        let seen = std::mem::take(&mut self.seen);
+        let fresh: Vec<WorkRow> = seen
+            .iter()
+            .filter(|row| !self.covers.contains_key(&row.anchor))
+            .cloned()
+            .collect();
+        if !fresh.is_empty() {
+            match catalog.row_covers(&fresh, pool) {
+                Ok(found) => {
+                    for (row, cover) in fresh.into_iter().zip(found) {
+                        self.covers.insert(row.anchor, cover);
+                    }
+                }
+                Err(error) => {
+                    // **记成「问过了」**：读不动时每帧再问一遍，只是把同一句错刷满。
+                    for row in fresh {
+                        self.covers.insert(row.anchor, None);
+                    }
+                    self.error = Some(format!("行首封面读不动：{error}"));
+                }
+            }
+        }
+        let items: Vec<MediaItem> = seen
+            .iter()
+            .filter_map(|row| self.covers.get(&row.anchor).cloned().flatten())
+            .collect();
+        self.gallery.sync(ctx, catalog, &items, writable);
+    }
+
+    /// 行首那一格：这一行的封面解出来了就贴封面，否则画平台色块。大小照令牌 `thumb-list`。
+    pub(crate) fn thumb(&mut self, ui: &mut egui::Ui, row: &WorkRow) {
+        self.seen.push(row.clone());
+        let tokens = crate::tokens::Tokens::builtin();
+        let [width, height] = tokens.layout.thumb_list;
+        let size = egui::vec2(width, height);
+        let item = self.covers.get(&row.anchor).and_then(Option::as_ref);
+        match item.and_then(|item| self.gallery.texture(item)) {
+            Some(texture) => paint_cover(ui, size, tokens.radius.small, texture),
+            None => platform_block(ui, size, row.platforms.first().map_or("", String::as_str)),
+        }
+    }
+}
+
+impl Gallery {
+    /// 这一份**已经解出来**的那张图；没解完、没有、池子不在位都是 `None`。
+    #[must_use]
+    pub fn texture(&self, item: &MediaItem) -> Option<&egui::TextureHandle> {
+        match self.look(item) {
+            Look::Ready(texture) => Some(texture),
+            _ => None,
+        }
+    }
+}
+
+/// 字卡底色里调进几成平台色：原型 `.tcard` 那句 `color-mix(… var(--pc) 22%, var(--panel-2))`。
+///
+/// 这三个比例（连 `BLOCK_TINT`、`WATERMARK_ALPHA`）在设计稿里是写在规则上的字面量，不是 CSS 变量，
+/// 所以令牌里没有它们（挂单 `Q808`）；颜色本身照旧全从令牌来。
+const CARD_TINT: f32 = 0.22;
+
+/// 平台色块底色里调进几成平台色：原型 `.lthumb` 那句 `color-mix(… var(--pc) 24%, var(--panel-2))`。
+const BLOCK_TINT: f32 = 0.24;
+
+/// 字卡水印有多淡：原型 `.tc-wm` 那句 `opacity: .3`。
+const WATERMARK_ALPHA: f32 = 0.3;
+
+/// 一张解出来的封面**等比缩进**这么大一格贴上：先铺凹陷底，不拉伸。
+pub(crate) fn paint_cover(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    radius: u8,
+    texture: &egui::TextureHandle,
+) {
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    ui.painter()
+        .rect_filled(rect, radius, ui.visuals().extreme_bg_color);
+    let fit = fit_into(texture.size_vec2(), rect.size());
+    egui::Image::new(texture).paint_at(ui, egui::Rect::from_center_size(rect.center(), fit));
+}
+
+/// 平台色的那块底：面板次级底色里调进 `tint` 成平台色，顶上一道纯平台色（高是令牌里最小那一档间距）。
+/// 交回这个平台的颜色，给上面的字用。
+fn platform_swatch(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    platform: &str,
+    tint: f32,
+    radius: u8,
+) -> egui::Color32 {
+    let tokens = crate::tokens::Tokens::builtin();
+    let color = tokens.color.platform.of(platform);
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(
+        rect,
+        radius,
+        ui.visuals().faint_bg_color.lerp_to_gamma(color, tint),
+    );
+    // 顶上那一道只圆上面两个角：底下两个角贴着底色，圆了就露出一道缝。
+    painter.rect_filled(
+        egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), tokens.space.steps[0])),
+        egui::CornerRadius {
+            nw: radius,
+            ne: radius,
+            sw: 0,
+            se: 0,
+        },
+        color,
+    );
+    color
+}
+
+/// 没有封面时摆的**字卡**：照稿 `.tcard`——平台色底、左上角标题、右下角平台代号的水印。
+///
+/// **大多数作品没有封面**（真库本地匹配得到的图只有几百张），所以它是常态不是例外——不画成灰色占位块。
+pub(crate) fn title_card(ui: &mut egui::Ui, size: egui::Vec2, title: &str, platform: &str) {
+    let tokens = crate::tokens::Tokens::builtin();
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let color = platform_swatch(ui, rect, platform, CARD_TINT, tokens.radius.medium);
+    let step = tokens.space.steps[0];
+    let painter = ui.painter_at(rect);
+    let 标题 = painter.layout(
+        title.to_string(),
+        egui::TextStyle::Small.resolve(ui.style()),
+        ui.visuals().strong_text_color(),
+        rect.width() - step * 4.0,
+    );
+    painter.galley(rect.min + egui::vec2(step * 2.0, step * 3.0), 标题, color);
+    // 水印压在右下角、伸出格子的那一截被裁掉。字号直接问令牌：具名字号档要等观感基线装上的
+    // 下一帧才有，而点开一行可能就发生在头一帧。
+    painter.text(
+        rect.right_bottom() + egui::vec2(0.0, step * 2.0),
+        egui::Align2::RIGHT_BOTTOM,
+        platform,
+        egui::FontId::proportional(tokens.font.size_hero),
+        color.gamma_multiply(WATERMARK_ALPHA),
+    );
+}
+
+/// 没有封面时列表行首那一格：**平台色块**，照稿 `.lthumb`——平台色底、当中写平台代号。
+pub(crate) fn platform_block(ui: &mut egui::Ui, size: egui::Vec2, platform: &str) {
+    let tokens = crate::tokens::Tokens::builtin();
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    platform_swatch(ui, rect, platform, BLOCK_TINT, tokens.radius.small);
+    ui.painter_at(rect).text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        platform,
+        egui::FontId::proportional(tokens.font.size_caption),
+        ui.visuals().text_color(),
+    );
 }
 
 /// 点一格算什么。

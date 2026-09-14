@@ -80,6 +80,7 @@ use romcat_core::catalog::browse::{
 use romcat_core::catalog::identify::{NOT_RUN_LABEL, Tier};
 use romcat_core::catalog::{Catalog, VariantDetail};
 use romcat_core::collection::{self, Applied, FAVORITE};
+use romcat_core::filename::Rules;
 use romcat_core::report::{capacity, human_bytes, thousands};
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::priority::VERDICT;
@@ -97,10 +98,11 @@ use crate::filter::Filter;
 use crate::font;
 use crate::layout;
 use crate::look;
-use crate::media::Gallery;
+use crate::media::{Gallery, Shelf};
 use crate::scrape;
-use crate::table::{Picked, SPAN, Table, Window};
+use crate::table::{Picked, SPAN, Table, UNLINKED_LABEL, Window};
 use crate::task::{Product, Tasks};
+use crate::tokens::Tokens;
 
 /// 界面上人工写下的叫法，**依据**里写这一句。
 ///
@@ -314,12 +316,24 @@ pub struct Screen {
     scoped: Option<Picked>,
     /// 挑**显示标题**用的优先级表。与导出走同一份，于是面板上写着的就是导出会写的。
     priorities: Priorities,
+    /// **剥离规则**：认不出作品的那一行拿它剥正题（`WorkRow::title`）。
+    ///
+    /// 读**工作目录里那份**（`sources::rules`，刮削与命令行同一条查法）：屏上那一行写的
+    /// 正题，就是刮削撞中文离线源时剥出来的那一个。
+    rules: Rules,
     /// **媒体池**：查「这张图在不在」用它。池子整个不在位时是 `None`——
     /// 那时面板如实说「没查池子」，而不是报一句「一张都没有」。
     pool: Option<MediaPool>,
     /// 详情面板那几格**缩略图**（票 `gui-redesign/07`）。解码与抽首帧全在核心库，
     /// 这里只握着一条后台线程的把手与传上显卡的那几张纹理（[`crate::media`]）。
     gallery: Gallery,
+    /// 「**在每行开头显示封面**」那颗开关（票 `gui-looks-like-the-design/09`）。默认关着。
+    list_covers: bool,
+    /// 主列表行首那几格封面：问过的、解着的（[`Shelf`]）。与 [`Self::gallery`] 分开一份。
+    shelf: Shelf,
+    /// 点开那一行的**封面**，侧边详情头上那一格贴它：核心库挑的（`Catalog::cover_of`，与表上
+    /// 那一行行首问的是同一处），点开一行时问一次。`None` 是这一行一张封面都没有——那时画字卡。
+    cover: Option<romcat_core::catalog::detail::MediaItem>,
     /// **合集**那个格子：往哪个合集里加、从哪个合集里拿。收藏不用它——那一组的名字
     /// 是定死的（[`FAVORITE`]）。
     collection: String,
@@ -378,6 +392,17 @@ impl Screen {
     /// 沉淀库（`scrape::Panel`）。
     #[must_use]
     pub fn new(workspace: std::path::PathBuf) -> Self {
+        // **规则文件写坏了也开得了屏**：那几行先照内置那份剥，并把原因摆在屏上——
+        // 屏上的正题与刮削剥出来的不是同一个，这件事得让人知道。
+        let (rules, error) = match romcat_core::sources::rules(&workspace) {
+            Ok(rules) => (rules, None),
+            Err(why) => (
+                Rules::builtin(),
+                Some(format!(
+                    "剥离规则读不进来，认不出作品的那几行先照内置规则剥正题：{why}"
+                )),
+            ),
+        };
         Self {
             window: Window::new(SPAN),
             query: WorkQuery::default(),
@@ -400,8 +425,12 @@ impl Screen {
             scope: None,
             scoped: None,
             priorities: Priorities::builtin(),
+            rules,
             pool: None,
             gallery: Gallery::new(),
+            list_covers: false,
+            shelf: Shelf::default(),
+            cover: None,
             collection: String::new(),
             standing: Vec::new(),
             standing_for: None,
@@ -413,7 +442,7 @@ impl Screen {
             notice: None,
             lift_notice: None,
             asked: None,
-            error: None,
+            error,
             sample: false,
             scroll_to: None,
         }
@@ -430,6 +459,8 @@ impl Screen {
         // **两处一起换。** 那一栏问「在不在池子里」用 `pool`，画那几格图用 `gallery`
         // 手里那条后台线程——只换一处的话，屏上会一边说「池里有」一边一格图都画不出。
         self.gallery.set_pool(pool.clone());
+        // 行首那几格封面同一个池子——只换一处的话，列表里说有封面、详情里一张都画不出。
+        self.shelf.set_pool(pool.clone());
         self.pool = pool;
     }
 
@@ -451,6 +482,8 @@ impl Screen {
     /// 不作废的话人要滚出视口再滚回来才看得见。
     pub fn refresh(&mut self, site: &Site) {
         self.window.invalidate();
+        // 刮削写进去的可能正是封面：行首那几格问过的全部作废。
+        self.shelf.forget();
         self.reload(site);
         self.load_work(&site.catalog);
         self.load_detail(&site.catalog);
@@ -496,6 +529,7 @@ impl Screen {
     pub fn invalidate(&mut self, site: &Site) {
         self.reload(site);
         self.window.invalidate();
+        self.shelf.forget();
         self.filtered = None;
         self.non_game_assets = None;
         self.scoped = None;
@@ -543,6 +577,10 @@ impl Screen {
             search: std::mem::take(&mut self.query.search),
             order: self.query.order,
             descending: self.query.descending,
+            // **「列出非游戏资产」那颗开关也不动**（票 `gui-looks-like-the-design/09`）：它是个
+            // 视图开关，不是人加上去的条件——空态上那颗「清除筛选」按下去把它拨回收起，
+            // 人会以为自己刚打开的东西坏了。设计稿的「清除」同样不碰它。
+            non_game_assets: self.query.non_game_assets,
             ..WorkQuery::default()
         };
         self.filter.clear();
@@ -1107,6 +1145,7 @@ impl Screen {
     fn load_work(&mut self, catalog: &Catalog) {
         let Some(anchor) = self.opened.clone() else {
             self.work = None;
+            self.cover = None;
             self.variant = None;
             self.detail = None;
             return;
@@ -1118,6 +1157,18 @@ impl Screen {
             }
             Err(error) => {
                 self.work = None;
+                self.error = Some(format!("中立库读不动：{error}"));
+            }
+        }
+        // **头上那一格贴哪张，点开时问核心库一次**：与表上那一行行首是同一处挑的。
+        let cover = match &self.work {
+            Some(work) => catalog.cover_of(&work.anchor, &work.name, self.pool.as_ref()),
+            None => Ok(None),
+        };
+        match cover {
+            Ok(cover) => self.cover = cover,
+            Err(error) => {
+                self.cover = None;
                 self.error = Some(format!("中立库读不动：{error}"));
             }
         }
@@ -1630,30 +1681,110 @@ impl Screen {
         self.sync_suppressed(site);
         // **任务台上有活在跑就先不写库**：那时后台正拿着另一份写得动的连接（扫描），
         // 这条线程上的写会在 `busy_timeout` 上等最长十秒——那是画帧线程的十秒。
-        self.sync_media(ui.ctx(), site, !tasks.busy());
+        let writable = !tasks.busy();
+        self.sync_media(ui.ctx(), site, writable);
         // **刮削是一层弹层**（[`crate::dialog`]），不占这一屏的地方：摊开着才画，盖在整屏上头。
         self.scrape.show(ui.ctx(), site, tasks);
-        // **三条边界都拖得动，三条都记得住**：怎么拖、拖到哪儿为止、拖到哪儿记在哪儿，
-        // 全在 [`crate::layout`] 那一份声明里（票 `gui-redesign/12`）。
-        layout::EDIT.show(ui, |ui| self.edit_panel(ui, site));
-        layout::FILTER.show(ui, |ui| self.filter_panel(ui, site, tasks));
-        layout::DETAIL.show(ui, |ui| self.detail_panel(ui, site));
-        egui::CentralPanel::default().show(ui, |ui| {
-            if self.sample {
-                self.font_sample(ui);
-                ui.separator();
-            }
-            let opened = Table {
-                catalog: &site.catalog,
-                window: &mut self.window,
-                query: &mut self.query,
-                focused: &mut self.focused,
-                picked: &mut self.picked,
-                scroll_to: self.scroll_to,
-            }
-            .show(ui);
-            if let Some(row) = opened {
-                self.open_work(&site.catalog, &row.anchor);
+        // **三栏：左筛选 / 中表格 / 右详情**（票 `gui-looks-like-the-design/09`）。左右两栏
+        // 从顶到底，拖得动、收得起来、下次打开还记得；怎么拖、收起来长什么样、记在哪儿，全在
+        // [`crate::layout`] 那一份声明里（票 `gui-redesign/12`）。
+        layout::FILTER.show_collapsible(ui, "筛选", |ui| self.filter_panel(ui, site, tasks));
+        layout::DETAIL.show_collapsible(ui, "详情", |ui| self.detail_panel(ui, site));
+        // **底下那块编辑面板只占正中那一栏**：摆在左右两栏之前的话它横跨整屏，
+        // 两侧那两栏被它削掉一截，表格也被挤成中间一条缝。
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
+                layout::EDIT.show(ui, |ui| self.edit_panel(ui, site));
+                egui::CentralPanel::default().show(ui, |ui| {
+                    if self.sample {
+                        self.font_sample(ui);
+                        ui.separator();
+                    }
+                    // **列表那一条**：行首摆不摆封面。照稿 `#lbar`。
+                    ui.horizontal(|ui| {
+                        ui.weak("列表");
+                        ui.checkbox(&mut self.list_covers, "在每行开头显示封面");
+                        ui.weak("没有封面的那一行显示平台色块");
+                        if let Some(说的) = self.shelf.error() {
+                            ui.colored_label(ui.visuals().error_fg_color, 说的);
+                        }
+                    });
+                    let opened = Table {
+                        catalog: &site.catalog,
+                        window: &mut self.window,
+                        query: &mut self.query,
+                        focused: &mut self.focused,
+                        picked: &mut self.picked,
+                        scroll_to: self.scroll_to,
+                        rules: &self.rules,
+                        shelf: if self.list_covers {
+                            Some(&mut self.shelf)
+                        } else {
+                            None
+                        },
+                    }
+                    .show(ui);
+                    // **画完表才问封面**：这一帧画到了哪几行，表画完才知道。
+                    if self.list_covers {
+                        self.shelf
+                            .sync(ui.ctx(), &mut site.catalog, self.pool.as_ref(), writable);
+                    }
+                    // **一行都没有时说清为什么空着**：表头照旧在（排序、全选都还点得着），
+                    // 空态那一句摆在表头底下（照稿 `.empty` 是表里的一行）。
+                    if self.window.total() == 0 && self.window.error().is_none() {
+                        self.empty_state(ui);
+                    }
+                    if let Some(row) = opened {
+                        self.open_work(&site.catalog, &row.anchor);
+                    }
+                });
+            });
+    }
+
+    /// **主列表一行都没有时**正中那一栏摆什么（票 `gui-looks-like-the-design/09`）。
+    ///
+    /// 三种空各说各的，因为下一步不一样：
+    ///
+    /// - **筛选把行筛没了**：说清楚，旁边给一颗「清除筛选」——走的是左栏「全清」同一个入口
+    ///   （[`Self::clear_filter`]），搜索框照旧不动。
+    /// - **只有搜索框里有字**：说没搜到什么、搜的是哪几条路。
+    /// - **什么都没筛**：库里本来就没有能列的；全是收起着的非游戏资产时点名说。
+    ///
+    /// 哪些字段算筛选由核心库答（[`WorkQuery::same_filter`]），收起了几个也是核心库数的——
+    /// 这一层只挑一句话。
+    fn empty_state(&mut self, ui: &mut egui::Ui) {
+        let steps = &Tokens::builtin().space.steps;
+        let search = self.query.search.trim().to_string();
+        let 只搜了 = WorkQuery {
+            search: self.query.search.clone(),
+            ..WorkQuery::default()
+        };
+        let 筛过 = !self.query.same_filter(&只搜了);
+        let 收起的 = self.non_game_assets.unwrap_or(0);
+        ui.add_space(steps[4]);
+        ui.vertical_centered(|ui| {
+            if 筛过 {
+                ui.weak("没有符合当前筛选条件的作品。");
+                ui.add_space(steps[1]);
+                if ui
+                    .button("清除筛选")
+                    .on_hover_text("把左栏的条件全部清掉，与左栏那颗「全清」是同一下。搜索框不动。")
+                    .clicked()
+                {
+                    self.clear_filter();
+                }
+            } else if !search.is_empty() {
+                ui.weak(format!(
+                    "没有找到「{search}」。搜的是屏上的名字、别的叫法与简介。"
+                ));
+            } else if 收起的 > 0 {
+                ui.weak(format!(
+                    "库里能列的只有 {} 个非游戏资产，默认收起着——在左栏打开「列出非游戏资产」看。",
+                    thousands(收起的),
+                ));
+            } else {
+                ui.weak("库里还没有能列出来的东西。");
             }
         });
     }
@@ -1663,6 +1794,27 @@ impl Screen {
         // **扔掉一条坏规则那一下不能在画的中途走**：`self.editing` 那会儿还借着。
         // 记下序号，这一栏画完再动手。
         let mut 扔掉 = None;
+        // **标题行钉在滚动区外头**：这一栏比一屏长，滚动条浮在右沿，而那颗「收起」正摆在右沿
+        // ——摆进滚动区里，按下去那一下落在滚动条上。
+        ui.horizontal(|ui| {
+            ui.label(font::strong("筛选"));
+            if ui
+                .button("全清")
+                .on_hover_text(
+                    "把这一栏的条件全部清掉。排序与搜索框不动——\
+                     搜索管排序、筛选器管集合，这颗按钮只管后者。",
+                )
+                .clicked()
+            {
+                // **按钮体只有这一句。** 把那几行抄在这儿的话，钉着
+                // [`Self::clear_filter`] 的那条测试就钉不到界面上这一下——
+                // 改了这儿它照样绿，而那正是这条修复要防的漂移。
+                self.clear_filter();
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                layout::FILTER.collapse_button(ui);
+            });
+        });
         egui::ScrollArea::vertical()
             .id_salt("筛选栏")
             .show(ui, |ui| {
@@ -1676,22 +1828,6 @@ impl Screen {
                     扔掉 = Self::broken_rules_ui(ui, &editing.broken);
                     ui.separator();
                 }
-                ui.horizontal(|ui| {
-                    ui.label(font::strong("筛选"));
-                    if ui
-                        .button("全清")
-                        .on_hover_text(
-                            "把这一栏的条件全部清掉。排序与搜索框不动——\
-                             搜索管排序、筛选器管集合，这颗按钮只管后者。",
-                        )
-                        .clicked()
-                    {
-                        // **按钮体只有这一句。** 把那几行抄在这儿的话，钉着
-                        // [`Self::clear_filter`] 的那条测试就钉不到界面上这一下——
-                        // 改了这儿它照样绿，而那正是这条修复要防的漂移。
-                        self.clear_filter();
-                    }
-                });
                 ui.weak("上下两半之间是「且」：一层层收窄。").on_hover_text(
                     "这就是子库的规则：筛到满意按「存成子库」，条件原样变成那个\
                          子库的规则；反过来子库屏点「改选择」跳回这里，规则预填进筛选器。",
@@ -2156,6 +2292,13 @@ impl Screen {
     }
 
     fn detail_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+        // 标题行：这一栏叫什么，右头那颗「收起」。点没点开一行都在。
+        ui.horizontal(|ui| {
+            ui.label(font::strong("详情"));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                layout::DETAIL.collapse_button(ui);
+            });
+        });
         if self.work.is_none() {
             ui.add_space(4.0);
             ui.weak("点主列表里的一行，看它包含哪几个变体。");
@@ -2168,29 +2311,17 @@ impl Screen {
         let Some(work) = this.work.as_ref() else {
             return;
         };
+        // **照稿的次序**（票 `gui-looks-like-the-design/09`）：头上那一块（封面或字卡、它是什么、
+        // 叫什么、哪个平台哪一年、几个变体）→ 变体 → 判定依据 → 媒体；合集与文件垫在后头，
+        // 作品详情页那一票接走之前它们照旧在这儿看得到。
         egui::ScrollArea::vertical()
             .id_salt("作品详情")
             .show(ui, |ui| {
-                ui.label(font::strong(&work.name));
-                ui.label(format!(
-                    "{}｜{}｜{} 个变体",
-                    if work.platforms.is_empty() {
-                        "—".to_string()
-                    } else {
-                        work.platforms.join(" / ")
-                    },
-                    work.year.as_deref().unwrap_or("年份不详"),
-                    work.variants.len(),
-                ));
-                if matches!(work.anchor, WorkAnchor::Loose(_)) {
-                    // 没有作品链接**本身就是一条信息**：识别还没认出它属于哪个作品，
-                    // 于是它自成一行（与导出那一侧同一条口径）。
-                    ui.weak("识别还没认出它属于哪个作品，所以这一行就是它自己。");
-                }
+                this.detail_head(ui, work);
 
                 ui.separator();
                 ui.label(font::strong(format!("变体 {} 个", work.variants.len())));
-                ui.weak("点一个：底下的文件、媒体与元数据编辑就只作用于它。");
+                ui.weak("点一个：底下的判定依据、媒体、文件与元数据编辑就只作用于它。");
                 for variant in &work.variants {
                     if this.variant_row(ui, variant) {
                         pick = Some(variant.row.key.clone());
@@ -2198,11 +2329,13 @@ impl Screen {
                 }
 
                 ui.separator();
+                this.basis_ui(ui, work);
+                ui.separator();
+                open = this.media_ui(ui);
+                ui.separator();
                 this.collections_ui(ui);
                 ui.separator();
                 this.files_ui(ui);
-                ui.separator();
-                open = this.media_ui(ui);
             });
         if let Some(key) = pick {
             self.pick(&site.catalog, &key);
@@ -2227,7 +2360,83 @@ impl Screen {
         }
     }
 
-    /// 详情面板里的一个变体：置信度、**依据**、点得中。点中了返回 `true`。
+    /// 侧边详情**头上那一块**：左边封面或字卡，右边它是什么（作品 / 未关联作品的变体）、
+    /// 叫什么、哪个平台哪一年、底下几个变体。
+    ///
+    /// 认不出作品的那一行**标题是正题**（`WorkDetail::title`，与表上那一行主栏同一处剥），
+    /// 底下再说一句这个名字是怎么来的——没有作品链接**本身就是一条信息**。
+    fn detail_head(&self, ui: &mut egui::Ui, work: &WorkDetail) {
+        let loose = matches!(work.anchor, WorkAnchor::Loose(_));
+        let title = work.title(&self.rules).unwrap_or_else(|| work.name.clone());
+        let platform = work.platforms.first().map_or("", String::as_str);
+        // 封面那一格照媒体那几格的最小宽（原型 `.thumb`），高按令牌里封面的宽高比折。
+        let cell = crate::media::CELL;
+        let size = egui::vec2(cell, cell / Tokens::builtin().layout.card_cover_ratio);
+        ui.horizontal_top(|ui| {
+            // **解码借详情面板那几格的**：这一张挂在这一行自己的锚点上，选中变体的逐条清单里本来就有它；
+            // 还在后台解的那一帧先画字卡，解完了下一帧自然换上。
+            match self
+                .cover
+                .as_ref()
+                .and_then(|item| self.gallery.texture(item))
+            {
+                Some(texture) => {
+                    crate::media::paint_cover(ui, size, Tokens::builtin().radius.medium, texture);
+                }
+                None => crate::media::title_card(ui, size, &title, platform),
+            }
+            ui.vertical(|ui| {
+                ui.weak(if loose {
+                    format!("{UNLINKED_LABEL}的变体")
+                } else {
+                    "作品".to_string()
+                });
+                // 字号**直接问令牌**，不走具名字号档：那几档要等观感基线装上之后的下一帧才有，
+                // 而点开一行正好可能发生在头一帧（跳过来的「改选择」、测试里先点开再跑帧）。
+                ui.label(
+                    egui::RichText::new(&title)
+                        .size(Tokens::builtin().font.size_title)
+                        .color(ui.visuals().strong_text_color()),
+                );
+                ui.weak(format!(
+                    "{} · {}",
+                    if work.platforms.is_empty() {
+                        "—".to_string()
+                    } else {
+                        work.platforms.join(" / ")
+                    },
+                    work.year.as_deref().unwrap_or("年份未知"),
+                ));
+                ui.weak(format!("{} 个变体", work.variants.len()));
+            });
+        });
+        if loose {
+            ui.weak(
+                "这个名字是从文件名剥出来的正题（剥掉了汉化组、版本号这类记号）：\
+                 识别还没认出它属于哪个作品，所以这一行就是它自己。",
+            );
+        }
+    }
+
+    /// **判定依据**：选中那个变体凭什么落在这一档——识别结论、没定下来的理由、每条候选与它的依据。
+    ///
+    /// 从前它只挂在变体那一行的悬停里；照稿摊在栏里。没有依据的结论事后无法复核（ADR-0002），
+    /// 而悬停得先知道去哪儿停。
+    fn basis_ui(&self, ui: &mut egui::Ui, work: &WorkDetail) {
+        ui.label(font::strong("判定依据"));
+        let Some(variant) = work
+            .variants
+            .iter()
+            .find(|variant| self.variant.as_deref() == Some(variant.row.key.as_str()))
+        else {
+            ui.weak("点一个变体，看它凭什么落在这一档。");
+            return;
+        };
+        basis_lines(ui, variant);
+    }
+
+    /// 详情面板里的一个变体：置信度、点得中。点中了返回 `true`。**依据**摊在底下
+    /// 「判定依据」那一块（[`Self::basis_ui`]）。
     ///
     /// **置信度那一档走五屏共用的那一份**（[`crate::look`]，票 `gui-redesign/12`）：
     /// 从前这儿手写「高 / 中 / 低」，而中间那张表与待确认屏写的是「高置信 / 中置信 /
@@ -2236,7 +2445,7 @@ impl Screen {
     ///
     /// **那个词由核心库挑**（[`WorkVariant::confidence_label`]，票 `gui-redesign/17`）：
     /// 一条候选都没有时它是**没有候选**还是**还没识别**，取决于这个变体跑没跑过识别，
-    /// 而那是一条领域判断，不是画法（ADR-0005）。悬停里跟着说的那一句同理，
+    /// 而那是一条领域判断，不是画法（ADR-0005）。判定依据里跟着说的那一句同理，
     /// 走 [`WorkVariant::no_candidate_hint`]。色条照旧只认四档——两者的区别由词说，
     /// 不由颜色说。
     fn variant_row(&self, ui: &mut egui::Ui, variant: &WorkVariant) -> bool {
@@ -2262,47 +2471,6 @@ impl Screen {
                 ui.selectable_label(on, line)
             })
             .inner;
-        // **依据挂在悬停里**：没有依据的候选事后无法复核（ADR-0002），
-        // 而一条依据能有一整句话，摆在行上会把这一栏撑开。
-        let response = response.on_hover_ui(|ui| {
-            ui.set_max_width(420.0);
-            ui.label(format!(
-                "识别结论：{}",
-                variant.state.map_or(NOT_RUN_LABEL, |state| state.label()),
-            ));
-            if let Some(reason) = &variant.reason {
-                ui.label(format!("为什么没定下来：{reason}"));
-            }
-            // **一条候选都没有分两种**（`CONTEXT.md` 的**还没识别**与**没有候选**）：
-            // 连识别都还没跑过，该做的事是跑一趟识别；跑过了却一个字都没说得出来，
-            // 该做的事是人自己来。两种印同一句话的话，屏上就指错了下一步。
-            // **哪一句由核心库挑**（`WorkVariant::no_candidate_hint`）——与那一行印哪个词
-            // 同一条判据，这儿一个 `if` 都不写（ADR-0005）。
-            if let Some(说一句) = variant.no_candidate_hint() {
-                ui.label(说一句);
-            }
-            for candidate in variant.candidates.iter().take(TOP_CANDIDATES) {
-                ui.separator();
-                ui.label(format!(
-                    "{} · {}｜{}｜{}",
-                    candidate.confidence.label(),
-                    if candidate.accepted {
-                        "自动通过"
-                    } else {
-                        "等人裁决"
-                    },
-                    candidate.source,
-                    candidate.game,
-                ));
-                ui.weak(&candidate.evidence);
-            }
-            if variant.candidates.len() > TOP_CANDIDATES {
-                ui.weak(format!(
-                    "……另有 {} 条候选没列",
-                    variant.candidates.len() - TOP_CANDIDATES,
-                ));
-            }
-        });
         response.clicked()
     }
 
@@ -3101,6 +3269,47 @@ impl Screen {
                 },
             );
         }
+    }
+}
+
+/// 一个变体的**判定依据**那几行：识别结论、没定下来的理由、每条候选凭什么。
+///
+/// 一条依据能有一整句话，所以一条一行、在栏里折行，不挤进变体那一行。
+fn basis_lines(ui: &mut egui::Ui, variant: &WorkVariant) {
+    ui.label(format!(
+        "识别结论：{}",
+        variant.state.map_or(NOT_RUN_LABEL, |state| state.label()),
+    ));
+    if let Some(reason) = &variant.reason {
+        ui.label(format!("为什么没定下来：{reason}"));
+    }
+    // **一条候选都没有分两种**（`CONTEXT.md` 的**还没识别**与**没有候选**）：
+    // 连识别都还没跑过，该做的事是跑一趟识别；跑过了却一个字都没说得出来，
+    // 该做的事是人自己来。两种印同一句话的话，屏上就指错了下一步。
+    // **哪一句由核心库挑**（`WorkVariant::no_candidate_hint`）——与那一行印哪个词
+    // 同一条判据，这儿一个 `if` 都不写（ADR-0005）。
+    if let Some(说一句) = variant.no_candidate_hint() {
+        ui.label(说一句);
+    }
+    for candidate in variant.candidates.iter().take(TOP_CANDIDATES) {
+        ui.label(format!(
+            "{} · {}｜{}｜{}",
+            candidate.confidence.label(),
+            if candidate.accepted {
+                "自动通过"
+            } else {
+                "等人裁决"
+            },
+            candidate.source,
+            candidate.game,
+        ));
+        ui.weak(&candidate.evidence);
+    }
+    if variant.candidates.len() > TOP_CANDIDATES {
+        ui.weak(format!(
+            "……另有 {} 条候选没列",
+            variant.candidates.len() - TOP_CANDIDATES,
+        ));
     }
 }
 
