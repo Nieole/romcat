@@ -415,6 +415,8 @@ pub struct Layout {
     pub card_cover_ratio: f32,
     /// 底部状态栏高度。
     pub statusbar: f32,
+    /// 底部状态栏里任务那条小进度条的宽度。
+    pub statusbar_bar: f32,
     /// 对话框只用这几档宽度。
     pub dialog_width: [f32; 4],
 }
@@ -497,6 +499,8 @@ mod tests {
         assert_eq!(tokens.radius.medium, 6);
         assert_eq!(tokens.font.size_body, 13.0);
         assert_eq!(tokens.layout.dialog_width, [520.0, 620.0, 720.0, 840.0]);
+        // 设计稿 `.statusbar .mini .bar{width:120px}`。
+        assert_eq!(tokens.layout.statusbar_bar, 120.0);
         // 设计稿 `--pop` 里那一色 rgba(16,20,30,.45)，暗色没有另写，照亮色那一份。
         for palette in [&tokens.color.light, &tokens.color.dark] {
             assert_eq!(

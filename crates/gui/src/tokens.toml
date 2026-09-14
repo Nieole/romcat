@@ -138,6 +138,7 @@ tier-bar          = 3     # 置信度色条宽度
 thumb-list        = [32, 43] # 列表行首封面缩略图（宽, 高）
 card-cover-ratio  = 0.75  # 卡片封面宽高比 3:4
 statusbar         = 30    # 底部状态栏高度
+statusbar-bar     = 120   # 底部状态栏里任务那条小进度条的宽度
 dialog-width      = [520, 620, 720, 840]   # 对话框只用这几档宽度
 
 # ── 阴影的形状：两套主题共用，颜色是各主题里同名的那一格（pop → pop-color） ──

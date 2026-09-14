@@ -81,6 +81,7 @@
 
 use egui::Color32;
 use romcat_core::catalog::identify::Tier;
+use romcat_core::task::Ending;
 
 use crate::tokens::{Palette, Tokens};
 
@@ -298,6 +299,28 @@ fn scrim_in(palette: &Palette) -> Color32 {
     palette.scrim
 }
 
+/// **收场四档**画成什么颜色：`(字与圆点, 浅底)`。**全窗口只有这一处回答这个问题。**
+///
+/// 画它的是任务屏历史「收场」那一格（设计稿 `.chip`）。配色照设计稿：完成 `hi`、已取消
+/// `none`、部分完成 `mid`、失败 `lo`，底色取各自的 `-soft`。与置信度四档同一个办法：
+/// `Visuals` 里没有槽位，按 `visuals` 是哪一套主题挑那一套令牌。**颜色不是唯一线索**——
+/// 格子里照样写着那一档的词（[`Ending::word`]）。
+#[must_use]
+pub fn ending_colors(ending: &Ending<()>, visuals: &egui::Visuals) -> (Color32, Color32) {
+    let theme = egui::Theme::from_dark_mode(visuals.dark_mode);
+    ending_colors_in(Tokens::builtin().color.theme(theme), ending)
+}
+
+/// 那一档在这一套颜色里取哪两个。拆出来的理由同 [`tier_color_in`]。
+fn ending_colors_in(palette: &Palette, ending: &Ending<()>) -> (Color32, Color32) {
+    match ending {
+        Ending::Done(()) => (palette.hi, palette.hi_soft),
+        Ending::Stopped => (palette.none, palette.none_soft),
+        Ending::Halfway { .. } => (palette.mid, palette.mid_soft),
+        Ending::Failed { .. } => (palette.lo, palette.lo_soft),
+    }
+}
+
 /// 行左边缘那条**置信度色条**：宽取令牌 `tier-bar`、与一行正文一样高。
 ///
 /// 它**从不单独出现**——摆它的地方旁边一定跟着 [`tier_label`] 或那个词本身
@@ -372,7 +395,7 @@ mod tests {
     /// 令牌里**界面还没有一处用上**的颜色：页面背景（设计稿自己用）、四档的浅底
     /// ——egui 的 `Visuals` 里没有它们的槽位，而画它们的那几屏还没照稿重排。
     /// 哪一屏第一个用上它，就从这张单子里划掉（下面那条变异测试会提醒）。
-    const NOT_YET_USED: &[&str] = &["ground", "hi-soft", "mid-soft", "lo-soft", "none-soft"];
+    const NOT_YET_USED: &[&str] = &["ground"];
 
     /// 这套主题下**有映射的每一个颜色**与令牌逐项比，对不上的那几项：`visuals` 的每个颜色槽位，
     /// 加上 `四档`（置信度四档各取哪个颜色）。平台色与播放标直接读令牌、没有映射可接错，
@@ -389,6 +412,7 @@ mod tests {
         visuals: &egui::Visuals,
         四档: impl Fn(Tier) -> Color32,
         遮罩: Color32,
+        收场: impl Fn(&Ending<()>) -> (Color32, Color32),
         主按钮: &egui::style::Widgets,
     ) -> Vec<偏离> {
         let p = tokens.color.theme(theme);
@@ -573,6 +597,29 @@ mod tests {
             颜色.push((format!("四档（{}）", tier.label()), 四档(tier), key));
         }
         颜色.push(("弹层遮罩".to_owned(), 遮罩, "scrim"));
+        // 任务屏历史「收场」那一格（[`ending_colors`]）：字与圆点、浅底，照设计稿 `.chip`。
+        for (ending, [ink, soft]) in [
+            (Ending::Done(()), ["hi", "hi-soft"]),
+            (Ending::Stopped, ["none", "none-soft"]),
+            (
+                Ending::Halfway {
+                    product: (),
+                    left_behind: String::new(),
+                },
+                ["mid", "mid-soft"],
+            ),
+            (
+                Ending::Failed {
+                    step: String::new(),
+                    why: String::new(),
+                },
+                ["lo", "lo-soft"],
+            ),
+        ] {
+            let (got_ink, got_soft) = 收场(&ending);
+            颜色.push((format!("收场（{}）字", ending.word()), got_ink, ink));
+            颜色.push((format!("收场（{}）底", ending.word()), got_soft, soft));
+        }
         // 主按钮三档（[`primary_button`]）：底色、描边；字一律 `on-accent`。拿到焦点那一档的描边是
         // `on-accent`——强调色底上描一圈强调色看不见。
         for (name, widget, [fill, stroke]) in [
@@ -673,6 +720,7 @@ mod tests {
             &style.visuals,
             |tier| tier_color(tier, &style.visuals),
             scrim(&style.visuals),
+            |ending: &Ending<()>| ending_colors(ending, &style.visuals),
             &主按钮.widgets,
         )
     }
@@ -700,10 +748,11 @@ mod tests {
             let 装出来 = ctx.style_of(theme);
             let 四档 = |tier| tier_color_in(改过.color.theme(theme), tier);
             let 遮罩 = scrim_in(改过.color.theme(theme));
+            let 收场 = |ending: &Ending<()>| ending_colors_in(改过.color.theme(theme), ending);
             let mut 主按钮 = 装出来.visuals.clone();
             primary_button_in(改过.color.theme(theme), &mut 主按钮);
             let 主按钮 = &主按钮.widgets;
-            if !颜色_偏离(&改过, theme, &装出来.visuals, 四档, 遮罩, 主按钮).is_empty()
+            if !颜色_偏离(&改过, theme, &装出来.visuals, 四档, 遮罩, 收场, 主按钮).is_empty()
             {
                 断了.push(*key);
             }
@@ -713,6 +762,7 @@ mod tests {
                 &装出来.visuals,
                 四档,
                 遮罩,
+                收场,
                 主按钮,
             )
             .iter()

@@ -115,6 +115,10 @@ pub struct App {
     /// （[`Site::display_name`]，也就是开场那一屏上画着的同一个）；合成数据那一路另给
     /// 一个（[`Self::set_library_label`]），免得一屏假名字看着像真库。
     library_label: String,
+    /// 底部状态栏右边那一段：**工作目录**，`HOME` 那一截缩成 `~`（设计稿写的是
+    /// `~/.local/share/romcat`）。截图那一路另给一个定死的（[`Self::set_workspace_label`]）：
+    /// 测试的工作目录是临时目录，每台机器、每一趟都不一样。
+    workspace_label: String,
     /// **观感基线与上次的版式装过了没有。** 只在开窗第一帧装一次。
     prepared: bool,
     /// 上一次写进窗口标题的是哪一屏。**换屏才发一条命令**，不是每帧发一条。
@@ -157,6 +161,7 @@ impl App {
         // **版式先读出来**：面板尺寸要赶在开窗第一帧画面板之前塞进 egui 那张表里
         // （[`layout::Layout::seed`]），晚一帧人就会看见面板从默认宽度跳一下。
         let layout = layout::Layout::load(&workspace);
+        let workspace_label = Self::shorten_home(&workspace);
         let mut sublibrary = sublibrary::Screen::new(workspace);
         sublibrary.reload(&site);
         // **给人看的主库原名，不是主库标识。** `Site::library_identity` 是中立库的主文件名
@@ -175,6 +180,7 @@ impl App {
             board: task::Tasks::new(),
             layout,
             library_label,
+            workspace_label,
             prepared: false,
             titled: None,
             switching: false,
@@ -191,6 +197,28 @@ impl App {
         self.library_label = label.into();
         // 名字变了，标题得重发一次。
         self.titled = None;
+    }
+
+    /// 换掉底部状态栏右边那一段工作目录。
+    ///
+    /// **截图那一路要它**：测试的工作目录是临时目录，每台机器、每一趟都不一样，
+    /// 照实画的话同一屏的截图一趟一个样。真窗口那一路不必调——默认就是工作目录本身。
+    pub fn set_workspace_label(&mut self, label: impl Into<String>) {
+        self.workspace_label = label.into();
+    }
+
+    /// 工作目录排成给人看的样子：落在 `HOME` 底下的缩成 `~/…`，别处照原样。
+    fn shorten_home(workspace: &std::path::Path) -> String {
+        std::env::var_os("HOME")
+            .and_then(|home| {
+                workspace
+                    .strip_prefix(&home)
+                    .ok()
+                    .map(|rest| std::path::Path::new("~").join(rest))
+            })
+            .unwrap_or_else(|| workspace.to_path_buf())
+            .display()
+            .to_string()
     }
 
     /// 窗口标题：**开的是哪一份库、看的是哪一屏**（验收第 6 条）。
@@ -512,6 +540,21 @@ impl App {
         // 「下一帧开头结算」在眼里就是「按下去就换」。
         self.route();
         egui::Panel::top("顶栏").show(ui, |ui| self.top_bar(ui));
+        // **底部状态栏**（设计稿 `.statusbar`，票 `gui-looks-like-the-design/25`）：每一屏都有。
+        // 左边任务台那一小截与任务屏那张卡读同一份快照，点一下去任务屏；右边「ROM 只读」与
+        // 工作目录。**摆在正文那几屏之前**：底边那一条得在中间那块之前占好地方。
+        let status_height = crate::tokens::Tokens::builtin().layout.statusbar;
+        let go_to_tasks = egui::Panel::bottom("状态栏")
+            .resizable(false)
+            .exact_size(status_height)
+            .show(ui, |ui| {
+                self.tasks
+                    .status_bar(ui, &self.board, &self.workspace_label)
+            })
+            .inner;
+        if go_to_tasks {
+            self.show_view(View::Tasks);
+        }
         match self.view {
             View::Queue => {
                 let (queue, site) = (&mut self.queue, &mut self.site);
