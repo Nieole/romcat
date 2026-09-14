@@ -1,8 +1,9 @@
-//! **子库屏**：一台设备一张卡、**选择集只读**、排差量预览、同步从这里触发。
+//! **子库屏**：一台设备一张卡、**选择集只读**（只有超限时删减建议上的「排除」记得下一条例外）、
+//! 排差量预览、同步从这里触发。
 //!
 //! 这几条是这张票最要紧的纪律，而它们都是「不这么做会出事」而不是「这样比较好看」：
 //!
-//! - **这一屏不选内容**（票 `gui-redesign/11`）：规则与例外都在浏览屏上改，
+//! - **这一屏不增删规则**（票 `gui-redesign/11`）：规则与例外的增减在浏览屏上做，
 //!   点「改选择」跳过去、规则预填进筛选器，按「更新到子库」原样带回。
 //! - **同步前必须预览差量**（ADR-0016）：没排过预览，那个按钮就不该动得了。
 //! - **删除前必须干跑预览**（ADR-0015）：计划里有删除时还要人再点一次头。
@@ -25,6 +26,7 @@ use romcat_core::capability::RejectReason;
 use romcat_core::catalog::Catalog;
 use romcat_core::catalog::browse::Scope;
 use romcat_core::fs::RealFs;
+use romcat_core::report::human_bytes;
 use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::site::Site;
 use romcat_core::sublibrary::{Exception, Group, Join, Rule};
@@ -35,7 +37,7 @@ use romcat_gui::app::{App, View};
 use romcat_gui::headless;
 
 mod shared;
-use shared::{占位活, 画出来的字};
+use shared::{占位活, 正好那一段画在哪儿, 点一下, 画出来的字};
 
 /// 这一趟拿来当目标的那个 fixture 目录里，维护者自己拷进去的东西叫什么。
 const 存档: &str = "我自己拷进来的存档.sav";
@@ -293,6 +295,373 @@ fn 一台设备一张卡目标格式容量与待同步步数一眼看得见() {
 }
 
 #[test]
+fn 还没有子库时是空态加一颗新建子库_不是示例设备() {
+    // 票 `gui-looks-like-the-design/20`：设计稿的脚本里摆着两台示例设备，那是给稿子看的数据，
+    // 不是空库上该画的东西。一台都没有时屏上说「还没有子库」、说清子库是什么，给一颗「新建子库」。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    assert!(
+        场.app.sublibrary().list().is_empty(),
+        "前提：一个子库都没有"
+    );
+
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(屏上.contains("还没有子库"), "空态没画出来：\n{屏上}");
+    assert!(
+        屏上.lines().any(|line| line == "新建子库"),
+        "空态上没有「新建子库」那一颗：\n{屏上}"
+    );
+    // **不是示例设备**：一张卡都没画——卡上才有的那几段一段都不在。
+    // （「容量上限」「能力档案」不在单子上：底下「配目标」那一栏的格子也叫这两个名字；
+    // 「选择集」也不在：屏头那句说的是它在哪儿编辑。）
+    for 卡上才有的 in ["条规则", "清单之外", "排差量预览"] {
+        assert!(
+            !屏上.contains(卡上才有的),
+            "没有子库却画出了卡上的「{卡上才有的}」：\n{屏上}"
+        );
+    }
+
+    // 按下去就是开始新建：「配目标」那一栏的草稿清空，没有哪一张卡算摊开着。
+    场.app.sublibrary_and_site().0.form_mut().name = "上回没存的草稿".to_string();
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    assert!(
+        场.app.sublibrary_and_site().0.form_mut().name.is_empty(),
+        "按了「新建子库」，草稿还是上回那份"
+    );
+    assert_eq!(场.app.sublibrary().picked(), None);
+}
+
+#[test]
+fn 一台设备一张卡_卡头写清路径前端格式文件系统与能力档案() {
+    // 票 `gui-looks-like-the-design/20`：卡头那一行是「这台设备是什么样的」。**文件系统跟着能力档案走**
+    // （能力档案 = 平台矩阵 × 文件系统，ADR-0017）——所以两台挑两份不同的档案，那一格也得跟着不同。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "1GB");
+    let 目标 = romcat_core::path::display(场.卡.path());
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        let form = screen.form_mut();
+        form.name = "备份卡".to_string();
+        form.target.clone_from(&目标);
+        form.capability = "retroarch-fat32".to_string();
+        screen.save(site);
+        assert!(screen.error().is_none(), "{:?}", screen.error());
+    }
+
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    for 名字 in ["掌机", "备份卡"] {
+        assert!(
+            屏上.lines().any(|line| line == 名字),
+            "「{名字}」那张卡没画出来：\n{屏上}"
+        );
+    }
+    let 卡头: Vec<&str> = 屏上
+        .lines()
+        .filter(|line| line.contains("能力档案："))
+        .collect();
+    assert_eq!(卡头.len(), 2, "两台设备该是两行卡头：\n{屏上}");
+    // 没挑过档案的那台走「不作声称」，它的文件系统是「无限制」（内置名册 `profiles.toml`）。
+    for (档案, 文件系统) in [("不作声称", "无限制"), ("retroarch-fat32", "FAT32")] {
+        assert!(
+            卡头.iter().any(|line| line.contains(&目标)
+                && line.contains("Pegasus")
+                && line.contains(文件系统)
+                && line.contains(档案)),
+            "没有哪一行卡头同时写着路径、前端格式、{文件系统}、{档案}：\n{}",
+            卡头.join("\n"),
+        );
+    }
+}
+
+#[test]
+fn 规则列表逐条写名称条件命中数与大小_合计写明去掉了几个规则之间重叠的() {
+    // 票 `gui-looks-like-the-design/20`：每张卡上摆着这台设备的选择集——每条规则的名称、条件、
+    // 命中多少、多大；合计是去重之后的，并写明去掉了几个重复。**命中数与大小每条各自算**
+    // （不扣例外、不扣与别条的重叠），加起来多于合计，多出来的正是那几个重叠的。屏上的话照设计稿，
+    // 不说「重复」——那是词表**重复拷贝**的词。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.建子库("备份卡", "");
+    场.加规则("备份卡", "平台=GBA");
+    场.加规则("掌机", "平台=SFC");
+    场.加规则("掌机", "平台=SFC,GBA");
+    场.求值();
+
+    // 各变体多大从盘上量：fixture 上每个成员都读得到，选中容量这个下界（ADR-0021）正好就是它。
+    let 多大 = |相对: &str| fs::metadata(场.库.path().join(相对)).expect("在").len();
+    let 幻想 = 多大("SFC/幻想传说 汉化版.zip");
+    let 圣剑 = 多大("SFC/圣剑传说 3 汉化版.zip");
+    let 口袋 = 多大("GBA/口袋妖怪 绿宝石.zip");
+
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    for 那一行 in [
+        "选择集 · 2 条规则".to_string(),
+        "规则 1".to_string(),
+        "平台=SFC".to_string(),
+        format!("2 个 · {}", human_bytes(幻想 + 圣剑)),
+        "规则 2".to_string(),
+        "平台=SFC,GBA".to_string(),
+        format!("3 个 · {}", human_bytes(幻想 + 圣剑 + 口袋)),
+        format!("合计 3 个变体 · {}", human_bytes(幻想 + 圣剑 + 口袋)),
+        "已去除 2 个被多条规则同时选中的变体".to_string(),
+        // 没摊开的那一张也摆得出它自己的选择集。
+        "选择集 · 1 条规则".to_string(),
+        "平台=GBA".to_string(),
+        format!("1 个 · {}", human_bytes(口袋)),
+        format!("合计 1 个变体 · {}", human_bytes(口袋)),
+        "规则之间没有重叠".to_string(),
+    ] {
+        assert!(
+            屏上.lines().any(|line| line == 那一行),
+            "屏上没有「{那一行}」这一行：\n{屏上}"
+        );
+    }
+}
+
+#[test]
+fn 容量条三段照词表画_没看过目标时清单之外画成未知而不是零() {
+    // 词表**容量条**：选中（只问中立库，卡不在手边也算得出）、清单之外（要目标在位才知道）、上限。
+    // 没看过目标时清单之外是「还不知道」——画成 0 的话，人会以为卡上是空的。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "1GB");
+    场.加规则("掌机", "平台=SFC");
+    let 选中: u64 = ["SFC/幻想传说 汉化版.zip", "SFC/圣剑传说 3 汉化版.zip"]
+        .iter()
+        .map(|相对| fs::metadata(场.库.path().join(相对)).expect("在").len())
+        .sum();
+    let 上限 = format!("上限 {}", human_bytes(1_000_000_000));
+
+    // 一、卡不在手边：算一遍容量，选中照样算得出，清单之外画成未知。
+    let 卡路径 = 场.卡.path().to_path_buf();
+    let 拔下来放在 = 卡路径.with_extension("拔了");
+    fs::rename(&卡路径, &拔下来放在).expect("拔得下来");
+    场.求值();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    for 那一行 in [
+        format!("选中 {}", human_bytes(选中)),
+        "清单之外 未知".to_string(),
+        上限.clone(),
+    ] {
+        assert!(
+            屏上.lines().any(|line| line == 那一行),
+            "容量条图例里没有「{那一行}」：\n{屏上}"
+        );
+    }
+    assert!(
+        屏上.contains("未知不代表为零"),
+        "没说清未知不是零：\n{屏上}"
+    );
+    assert!(
+        !屏上.lines().any(|line| line.starts_with("清单之外 0")),
+        "没看过目标，清单之外却画成了零：\n{屏上}"
+    );
+
+    // 二、插回来再算一遍：清单之外就是维护者那份存档多大。
+    fs::rename(&拔下来放在, &卡路径).expect("插得回去");
+    场.求值();
+    let 存档多大 = fs::metadata(卡路径.join(存档)).expect("在").len();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    let 看过之后 = format!("清单之外 {}", human_bytes(存档多大));
+    assert!(
+        屏上.lines().any(|line| line == 看过之后),
+        "看过目标之后清单之外没写那个数「{看过之后}」：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("清单之外 未知"),
+        "看过目标了还说未知：\n{屏上}"
+    );
+    assert!(
+        屏上.lines().any(|line| line == 上限),
+        "上限那一段没了：\n{屏上}"
+    );
+}
+
+/// 按一下屏上**正好**写着 `那一段` 的地方（整段一字不差），返回松开之后再画一帧画出来的字。
+///
+/// 「排除」这颗按钮上的两个字，也是屏上别的句子里的一截；`shared::点一下` 认「含有」，
+/// 会点到先画出来的那句话上。走法与它一样：移过去、按下、松开、再画一帧。
+fn 点正好那一段(
+    ctx: &egui::Context,
+    那一段: &str,
+    mut 画一帧: impl FnMut(&mut egui::Ui),
+) -> String {
+    let 头一帧 = headless::frame(ctx, headless::input(), &mut 画一帧);
+    let Some(位置) = 正好那一段画在哪儿(&头一帧, 那一段) else {
+        panic!(
+            "屏上没有正好写着「{那一段}」的地方，没处点：\n{}",
+            画出来的字(&头一帧)
+        );
+    };
+    let 按 = |pressed: bool| egui::Event::PointerButton {
+        pos: 位置,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let mut input = headless::input();
+    input.events.push(egui::Event::PointerMoved(位置));
+    input.events.push(按(true));
+    headless::frame(ctx, input, &mut 画一帧);
+    let mut input = headless::input();
+    input.events.push(按(false));
+    headless::frame(ctx, input, &mut 画一帧);
+    画出来的字(&headless::frame(ctx, headless::input(), &mut 画一帧))
+}
+
+/// 这一台眼下「算一遍容量」算出来的那笔账；卡不在手边、或者还没算过时当场炸。
+fn 那笔账(场: &现场, name: &str) -> romcat_core::sublibrary::Room {
+    场.app
+        .sublibrary()
+        .evaluated(name)
+        .and_then(|report| report.fit.known())
+        .unwrap_or_else(|| panic!("「{name}」的装不装得下没算出来"))
+        .clone()
+}
+
+#[test]
+fn 超限时删减建议表四个数齐_排除记为这个子库的手动例外_一个文件都不删() {
+    // 票 `gui-looks-like-the-design/20`、ADR-0016：**超限只给建议，绝不自动删减。**建议表说清每项释放多少、
+    // 累计多少、排除到哪一项就放得下、全排除也还差多少；按「排除」记成这个子库的一条手动例外，
+    // 主库与卡上一个字节都不动。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("小卡", "");
+    场.加规则("小卡", "平台=SFC,GBA");
+    let 多大 = |相对: &str| fs::metadata(场.库.path().join(相对)).expect("在").len();
+    let 圣剑 = 多大("SFC/圣剑传说 3 汉化版.zip");
+    let 幻想 = 多大("SFC/幻想传说 汉化版.zip");
+    let 口袋 = 多大("GBA/口袋妖怪 绿宝石.zip");
+    let 最大的 = "库/SFC/圣剑传说 3 汉化版.zip";
+    let 第二大的 = "库/SFC/幻想传说 汉化版.zip";
+    // 同步完之后卡上占多少由核心算（目标现占 ＋ 净变化）。先不设限算一遍，拿它来定上限。
+    场.求值();
+    let 同步之后 = 那笔账(&场, "小卡").after_bytes;
+    let 行号 = |屏上: &str, 那一行: &str| 屏上.lines().position(|line| line == 那一行);
+
+    // 一、上限正好比同步之后少「最大那一个」那么多：排除到头一项就放得下。
+    场.建子库("小卡", &format!("{}B", 同步之后 - 圣剑));
+    场.求值();
+    assert_eq!(
+        那笔账(&场, "小卡").over_capacity,
+        Some(圣剑),
+        "前提：超出量正好是最大那一个"
+    );
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    for 那一行 in [
+        format!("超出容量上限 {}", human_bytes(圣剑)),
+        "释放".to_string(),
+        "累计".to_string(),
+        最大的.to_string(),
+        第二大的.to_string(),
+        human_bytes(圣剑 + 幻想),
+        human_bytes(圣剑 + 幻想 + 口袋),
+    ] {
+        assert!(
+            屏上.lines().any(|line| line == 那一行),
+            "删减建议表里没有「{那一行}」：\n{屏上}"
+        );
+    }
+    let 放得下 = 行号(&屏上, "排除到这一项就能放下").expect("没说排除到哪一项就放得下");
+    assert!(
+        行号(&屏上, 最大的).expect("在") < 放得下 && 放得下 < 行号(&屏上, 第二大的).expect("在"),
+        "「排除到这一项就能放下」该紧跟在头一项后面：\n{屏上}"
+    );
+    assert!(!屏上.contains("全部排除也还差"), "放得下却说还差：\n{屏上}");
+
+    // 二、上限只有 1 字节：建议里那几个全排除也放不下，说清还差多少。卡上那份存档与元数据
+    // 不在建议里（它们不是变体），差的正是它们。
+    场.建子库("小卡", "1B");
+    场.求值();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    let 还差 = format!(
+        "全部排除也还差 {}",
+        human_bytes(同步之后 - 1 - 圣剑 - 幻想 - 口袋)
+    );
+    assert!(
+        屏上.contains(&还差),
+        "没说全排除也还差多少「{还差}」：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("排除到这一项就能放下"),
+        "全排除都放不下，却说排除到某一项就放得下：\n{屏上}"
+    );
+
+    // 三、回到情形一，按头一行的「排除」。
+    场.建子库("小卡", &format!("{}B", 同步之后 - 圣剑));
+    场.求值();
+    画两帧(&ctx, &mut 场);
+    let 主库之前 = 目录树(场.库.path(), &[]);
+    let 卡上之前 = 卡上有什么(场.卡.path());
+    点正好那一段(&ctx, "排除", |ui| 场.app.ui(ui));
+    场.等任务跑完();
+
+    let 例外 = 场
+        .app
+        .site()
+        .catalog
+        .selection("小卡")
+        .expect("读得回来")
+        .selection
+        .exceptions;
+    assert!(
+        例外
+            .iter()
+            .any(|row| row.variant_key == 最大的 && row.kind == Exception::Exclude),
+        "按了排除，却没记成这个子库的排除例外：{例外:?}"
+    );
+    assert_eq!(目录树(场.库.path(), &[]), 主库之前, "主库动了——ADR-0004");
+    assert_eq!(
+        卡上有什么(场.卡.path()),
+        卡上之前,
+        "卡上动了——超限只建议，不删"
+    );
+    // 排除之后那笔账由核心重算：少了最大那一个，放得下了，建议表跟着收掉。
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("排除 1 条"),
+        "卡上的手动例外那一行没跟着变：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("超出容量上限"),
+        "排除之后没重算，建议表还挂着：\n{屏上}"
+    );
+    assert_eq!(那笔账(&场, "小卡").over_capacity, None);
+}
+
+#[test]
+fn 没摊开的那一张也画得出自己的容量条() {
+    // 设计稿一台设备一张卡，每张卡上都有容量条：不是先点开哪一张才看得见它装不装得下。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("备份卡", "2GB");
+    场.建子库("掌机", "1GB");
+    场.加规则("备份卡", "平台=GBA");
+    场.加规则("掌机", "平台=SFC");
+    场.求值();
+    assert_eq!(
+        场.app.sublibrary().picked(),
+        Some("掌机"),
+        "前提：摊开的是掌机"
+    );
+
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    for 上限 in [1_000_000_000_u64, 2_000_000_000] {
+        let 那一行 = format!("上限 {}", human_bytes(上限));
+        assert!(
+            屏上.lines().any(|line| line == 那一行),
+            "有一张卡没画出容量条（没有「{那一行}」）：\n{屏上}"
+        );
+    }
+    assert!(
+        !屏上.contains("摊开"),
+        "卡上还要人先摊开才看得见容量：\n{屏上}"
+    );
+}
+
+#[test]
 fn 容量条三段各自标得出数() {
     let mut 场 = 现场::摆好();
     场.建子库("掌机", "1GB");
@@ -428,7 +797,7 @@ fn 在浏览屏调完更新到子库规则原样带回而且选出来的与屏�
 #[test]
 fn 例外在浏览屏上加减子库屏如实显示有几条() {
     // ADR-0016：**例外优先于规则、永久记住**。加减落在浏览屏——「哪一份」只有在
-    // 详情面板里才指得准；子库屏只数一数。
+    // 详情面板里才指得准；子库屏上只摆出来（删减建议上的「排除」另有一条测试钉着）。
     let mut 场 = 现场::摆好();
     场.建子库("掌机", "");
     场.加规则("掌机", "平台=SFC");
@@ -542,7 +911,7 @@ fn 选择集在这一屏上只读摆得出规则与例外() {
 fn 读不懂的规则在改选择那条横幅里扔得掉而且别的一条都没动() {
     // 票 `gui-redesign/14`（挂单 `Q86`）：一条读不回来的规则原先在界面上**改不动也
     // 删不掉**，只能去命令行。这一票给它一条出路——**开在浏览屏筛选栏顶上那条横幅里**，
-    // 不在子库卡上：子库屏一个写的动作都没有（票 `gui-redesign/11` 的「这一屏不选内容」，
+    // 不在子库卡上：子库屏上没有增删规则的动作（票 `gui-redesign/11` 把规则增删整个搬去了浏览屏，
     // 它把八个概念降到三个靠的就是这条）。
     //
     // 这几条断言看的是**这一帧真画出来的字**：查数据结构里那一条是在测别的东西。
@@ -573,7 +942,7 @@ fn 读不懂的规则在改选择那条横幅里扔得掉而且别的一条都�
     );
     assert!(
         !卡上.contains("扔掉这条"),
-        "子库屏上长出了一颗删规则的按钮——票 11 立的「这一屏不选内容」破了：{卡上}",
+        "子库屏上长出了一颗删规则的按钮——票 11 把规则增删搬去浏览屏那一条破了：{卡上}",
     );
 
     // **出路在浏览屏筛选栏顶上那条横幅里**：原文原样摆着，跟着一颗「扔掉这条」。
@@ -685,6 +1054,51 @@ fn 卡不在位时按排差量预览_屏上说清插上读卡器或改目标路�
 }
 
 #[test]
+fn 没摊开的卡上按排差量预览_卡不在位时照旧只在屏上说_任务历史不多一条() {
+    // 票 `gui-looks-like-the-design/07` 的拒绝重排之后不许丢：每张卡上都摆着一颗「排差量预览」，
+    // 没摊开的那一张按下去先换成那一台，排之前照旧查一眼目标在不在位——不排、只在屏上说。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    let 没插上 = romcat_core::path::display(&场.卡.path().with_extension("没插上"));
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        let form = screen.form_mut();
+        form.name = "备份卡".to_string();
+        form.target = 没插上;
+        form.capacity = String::new();
+        screen.save(site);
+        assert!(screen.error().is_none(), "{:?}", screen.error());
+    }
+    // 摊开的是掌机，而且排过一份差量：它那颗按钮叫「重排差量」，屏上正好写着「排差量预览」的
+    // 只剩备份卡那一颗。
+    场.摊开("掌机");
+    场.排预览();
+    assert!(
+        场.app.sublibrary().prepared().is_some(),
+        "前提：掌机的差量排出来了：{:?}",
+        场.app.sublibrary().error(),
+    );
+    画两帧(&ctx, &mut 场);
+    let 历史几条 = 场.app.tasks().history().len();
+
+    let 屏上 = 点正好那一段(&ctx, "排差量预览", |ui| 场.app.ui(ui));
+    let screen = 场.app.sublibrary();
+    assert_eq!(screen.picked(), Some("备份卡"), "按的是备份卡那一颗");
+    let 说的 = screen.error().expect("卡不在位该说出口");
+    assert!(说的.contains("目标不在位"), "没说清为什么不行：{说的}");
+    assert!(说的.contains("插上读卡器"), "没说去哪儿办：{说的}");
+    assert!(
+        屏上.contains(说的),
+        "那句话没画在屏上：{说的}\n屏上：\n{屏上}"
+    );
+    assert!(screen.prepared().is_none(), "卡不在位却摆着一份差量");
+    assert!(!场.app.tasks().busy(), "卡不在位却往任务台上排了活");
+    历史没多一条(&场, 历史几条);
+}
+
+#[test]
 fn 目标路径上是一份文件时排差量预览照旧排上去_任务历史记失败() {
     // 票 `gui-looks-like-the-design/07` 的另一半：**跑了没成照旧进历史，收场是「失败」。**
     // 那条路径上**有东西**，按下去之前查一眼看不出缺什么；它不是目录，是「看一眼目标」那一下
@@ -785,7 +1199,8 @@ fn 差量预览摆得出新增与净变化而且步骤全部展开得了() {
     场.排预览();
     assert!(!场.app.sublibrary().expanded(), "重排一次没收回去");
 
-    // **摊开之后那张表真的画了几行**，而且一步都没截：这一份计划只有两步，两步全画。
+    // **摊开之后那张表真的画了几行**，而且一步都没截：这一份计划几步就画几行。
+    // 靠的不是「一屏碰巧摆得下」：摊开那一下把表滚到视口顶上，上面那几段多高都不影响。
     let ctx = headless::context();
     场.app.sublibrary_and_site().0.expand(true);
     画两帧(&ctx, &mut 场);

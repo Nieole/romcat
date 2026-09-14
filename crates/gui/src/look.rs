@@ -298,6 +298,16 @@ fn scrim_in(palette: &Palette) -> Color32 {
     palette.scrim
 }
 
+/// **成功、放得下**画成什么颜色（令牌 `hi`）。**全窗口只有这一处回答。**
+///
+/// 令牌里 `hi` 那一格同时是「高置信」与「成功」（`tokens.toml` 那一行的注释），所以它就是置信度
+/// 高那一档的颜色——两件事共用一格是令牌定的，不是这儿借的。哪天令牌把两件事拆成两格，只改这一处。
+/// 画它的是子库屏删减建议表上「排除到这一项就能放下」那一行。
+#[must_use]
+pub fn success_color(visuals: &egui::Visuals) -> Color32 {
+    tier_color(Tier::High, visuals)
+}
+
 /// 行左边缘那条**置信度色条**：宽取令牌 `tier-bar`、与一行正文一样高。
 ///
 /// 它**从不单独出现**——摆它的地方旁边一定跟着 [`tier_label`] 或那个词本身

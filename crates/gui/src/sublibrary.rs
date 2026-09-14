@@ -1,4 +1,5 @@
-//! **子库屏**：管住这几台设备。**不选内容**——改选择跳回浏览屏。
+//! **子库屏**：管住这几台设备。**不增删规则**——改选择跳回浏览屏；只有超限时的删减建议上
+//! 按得出一条排除例外。
 //!
 //! ## 一屏三件事，不是八件
 //!
@@ -12,7 +13,8 @@
 //! 2. **配目标**——底下那块面板：名字、目标路径、前端格式、容量上限、能力档案。
 //! 3. **排差量后同步**——卡片下半截。
 //!
-//! **选择集在这一屏上只读。** 规则怎么改、例外记哪几条，全在浏览屏上做：卡上点
+//! **选择集在这一屏上只读**——只留一处例外：超限时删减建议表上的「排除」（见下面「容量条三段」）。
+//! 规则怎么改、例外怎么增减，全在浏览屏上做：卡上点
 //! 「改选择」跳过去、这个子库的规则预填进筛选器，调完按「更新到子库」原样带回来。
 //! 这不是为了少写几个控件——**在浏览屏上改规则，人看得见它真的筛出了什么**；
 //! 在这一屏上改，改完只看得见一行字。
@@ -43,8 +45,9 @@
 //!
 //! 超没超由核心一处算——同步计划器，底是目标现占 ＋ 净变化；「算一遍容量」那份报告里的
 //! 是从计划抄来的（`sublibrary::Fit`，挂账 D76）。条子自己不算第二遍。
-//! **容量超限只给建议，绝不自动截断**（ADR-0016）——而砍谁的落点是一条**排除例外**，
-//! 那是浏览屏上的动作：这一屏把建议摆出来，按不动。
+//! **容量超限只给建议，绝不自动截断**（ADR-0016）——删减建议表上按「排除」，落的就是这个子库的
+//! 一条**排除例外**（与浏览屏详情面板里记的是同一种，票 `gui-looks-like-the-design/20`），
+//! 盘上的文件一个都不动。
 //!
 //! ## 领域判断一条都不在这里
 //!
@@ -77,19 +80,22 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use egui::{Align, Layout};
+use romcat_core::capability::Roster;
 use romcat_core::catalog::CatalogError;
 use romcat_core::report::{human_bytes, thousands};
 use romcat_core::site::Site;
 use romcat_core::sublibrary::report::SelectionReport;
 use romcat_core::sublibrary::{
-    BrokenRule, ExceptionRow, Gauge, LoadedSelection, Rule, StoredRule, Sublibrary, Trim, rule,
+    BrokenRule, Exception, ExceptionRow, Gauge, LoadedSelection, Room, Rule, StoredRule,
+    Sublibrary, rule,
 };
 use romcat_core::sync::{self, Act, Outcome, Prepared};
 use romcat_core::task::{Cutoff, Ending, Finished, Handle};
 
-use crate::font;
 use crate::table::ROW_HEIGHT;
 use crate::task::{Product, Tasks};
+use crate::tokens::Tokens;
+use crate::{font, look};
 
 /// 没摊开时卡上先摆几条步骤。**摆得出样子就够**：这几条回答的是「它大概要干什么」，
 /// 「一共几步」那个数写在旁边，「到底哪几步」按「全部展开」。
@@ -98,8 +104,11 @@ const STEP_SAMPLE: usize = 6;
 /// 意外与放不下的那几类，最多各列几条。
 const TOP_NOTES: usize = 20;
 
-/// 容量条画多高，像素。
-const GAUGE_HEIGHT: f32 = 8.0;
+/// 容量条上「清单之外：还不知道」那一段画多长，占整条的几成。
+///
+/// 取的是设计稿 `devCard` 里那个数（没看过目标时那一段 `min(12%, 余下的)`）：它不是一个量出来的
+/// 容量——还不知道就没有数可画——只是让「这儿有一段不知道的」看得见，而不是缩成零。
+const UNKNOWN_SHARE: f32 = 0.12;
 
 /// 新建或改一个子库时界面上那份草稿。
 ///
@@ -152,22 +161,51 @@ pub struct Jump {
     pub broken: Vec<BrokenRule>,
 }
 
+/// 一台设备卡头上的**能力档案**与**文件系统**：名册里解出来的那一份的名字。
+#[derive(Debug, Clone)]
+struct Profiled {
+    /// 真会用上的那份档案叫什么。
+    profile: String,
+    /// 那份档案声明的文件系统叫什么。
+    filesystem: String,
+    /// 子库记着一份档案的名字、名册里却查不到（[`Roster::find`]）时，记着的那个名字。
+    missing: Option<String>,
+}
+
+/// 一台设备**存在中立库里的那份选择集**：规则原文（连序号）、读不懂的那几条、例外。
+/// 卡上的规则列表照它摆。
+#[derive(Debug, Clone, Default)]
+struct StoredSelection {
+    /// 读得懂的规则原文，连库里的序号。
+    rules: Vec<StoredRule>,
+    /// 读不懂的那几条。
+    broken: Vec<BrokenRule>,
+    /// 例外。
+    exceptions: Vec<ExceptionRow>,
+}
+
 /// 子库这个屏幕。
 pub struct Screen {
     /// 工作目录：中立库、**媒体池**、能力档案名册都在这儿。
     workspace: PathBuf,
     /// 库里现有的子库。**一台设备一张卡，就是这一串。**
     list: Vec<Sublibrary>,
+    /// 每台设备卡头上那两格：**能力档案**与它的**文件系统**，照核心的名册解出来
+    /// （[`Roster::find_or_unclaimed`]，与排差量那一趟用的是同一处）。随 [`Self::reload`] 重读，
+    /// 不在画帧里读盘。
+    profiled: BTreeMap<String, Profiled>,
+    /// 能力档案名册读不动时那句话。**那时卡头不编一份档案出来。**
+    roster_error: Option<String>,
     /// 眼下摊开的是哪一张卡。
     picked: Option<String>,
     /// 编辑草稿：底下那块「配目标」面板。
     form: Form,
-    /// 摊开那个子库的规则原文，连库里的序号。**这一屏上只读。**
-    rules: Vec<StoredRule>,
-    /// 读不懂的那几条。**一条坏的不该让另外五条一起用不了。**
-    broken: Vec<BrokenRule>,
-    /// 摊开那个子库的例外。**这一屏上只数一数**：加减在浏览屏上做。
-    exceptions: Vec<ExceptionRow>,
+    /// **每台设备**的选择集原文：规则（连库里的序号）、读不懂的那几条、例外。
+    ///
+    /// 每张卡都摆它自己的规则列表（票 `gui-looks-like-the-design/20`），所以一台不落全读回来
+    /// （[`Self::reload`]），不只读摊开那一张。**一条坏的不该让另外五条一起用不了**：
+    /// 读不懂的另放一栏。
+    selections: BTreeMap<String, StoredSelection>,
     /// 排出来的那份计划，**它就是差量预览**。
     prepared: Option<Prepared>,
     /// 正在排的那一趟差量预览是任务台上的第几号。
@@ -180,6 +218,12 @@ pub struct Screen {
     prepare_ms: f64,
     /// 差量步骤摊开了没有。**默认不摊**：几百上千步铺满一屏，把它下面的按钮挤没了。
     expanded: bool,
+    /// 刚摊开、还没把那张表滚进视口。
+    ///
+    /// 卡上差量表上面摆着卡头、规则、容量条与差量账，**摊开时那张表多半在视口底下**——
+    /// 虚拟化的表只画视口里的行，于是按了「全部展开」却一行都看不见。摊开那一下把它滚到
+    /// 视口顶上：看得见几行由视口多高决定，与上面那几段（按钮多高、规则几条）无关。
+    reveal_steps: bool,
     /// 上一帧那张步骤表**真的画了几行**。
     ///
     /// 它是「翻行的代价与总步数无关」那句话的**量具**，与 [`crate::table::Window::reads`]
@@ -234,15 +278,16 @@ impl Screen {
         Self {
             workspace,
             list: Vec::new(),
+            profiled: BTreeMap::new(),
+            roster_error: None,
             picked: None,
             form: Form::default(),
-            rules: Vec::new(),
-            broken: Vec::new(),
-            exceptions: Vec::new(),
+            selections: BTreeMap::new(),
             prepared: None,
             previewing: None,
             prepare_ms: 0.0,
             expanded: false,
+            reveal_steps: false,
             steps_drawn: 0,
             evaluated: BTreeMap::new(),
             evaluating: None,
@@ -266,11 +311,52 @@ impl Screen {
             }
             Err(error) => self.error = Some(format!("中立库读不动：{error}")),
         }
-        if let Some(name) = self.picked.clone() {
-            if self.list.iter().any(|row| row.name == name) {
-                self.open(site, &name);
-            } else {
-                self.picked = None;
+        // **档案名解到哪一份由核心说**：记着的名字在名册里没有时退回「不作声称」
+        // ——卡头写的是真会用上的那一份，不是记着的那个名字。
+        match Roster::in_workspace(&self.workspace) {
+            Ok(roster) => {
+                self.profiled = self
+                    .list
+                    .iter()
+                    .map(|sublibrary| {
+                        let recorded = sublibrary.capability.as_deref();
+                        let profile = roster.find_or_unclaimed(recorded);
+                        (
+                            sublibrary.name.clone(),
+                            Profiled {
+                                profile: profile.name,
+                                filesystem: profile.filesystem.name,
+                                missing: recorded
+                                    .filter(|name| roster.find(name).is_none())
+                                    .map(ToString::to_string),
+                            },
+                        )
+                    })
+                    .collect();
+                self.roster_error = None;
+            }
+            Err(error) => {
+                self.profiled.clear();
+                self.roster_error = Some(format!("能力档案名册读不动：{error}"));
+            }
+        }
+        self.selections.clear();
+        // **摊开的那一张先由 `open` 读**（它会重设这一屏那句错），别的卡随后读：
+        // 次序反过来的话，别的卡读不动的那句话会被 `open` 抹掉。
+        match self.picked.clone() {
+            Some(name) if self.list.iter().any(|row| row.name == name) => self.open(site, &name),
+            Some(_) => self.picked = None,
+            None => {}
+        }
+        let others: Vec<String> = self
+            .list
+            .iter()
+            .map(|row| row.name.clone())
+            .filter(|name| self.picked.as_deref() != Some(name.as_str()))
+            .collect();
+        for name in &others {
+            if let Err(why) = self.read_selection(site, name) {
+                self.error = Some(why);
             }
         }
     }
@@ -290,19 +376,57 @@ impl Screen {
     /// 摊开那个子库的规则原文。**只读**：改它去浏览屏。
     #[must_use]
     pub fn rules(&self) -> &[StoredRule] {
-        &self.rules
+        self.picked_selection().map_or(&[], |chosen| &chosen.rules)
     }
 
-    /// 读不懂的那几条规则。
+    /// 摊开那个子库读不懂的那几条规则。
     #[must_use]
     pub fn broken(&self) -> &[BrokenRule] {
-        &self.broken
+        self.picked_selection().map_or(&[], |chosen| &chosen.broken)
     }
 
-    /// 摊开那个子库的例外。**这一屏只数一数**：加减在浏览屏上做。
+    /// 摊开那个子库的例外。
     #[must_use]
     pub fn exceptions(&self) -> &[ExceptionRow] {
-        &self.exceptions
+        self.picked_selection()
+            .map_or(&[], |chosen| &chosen.exceptions)
+    }
+
+    /// 摊开那一台的选择集原文。
+    fn picked_selection(&self) -> Option<&StoredSelection> {
+        self.picked
+            .as_ref()
+            .and_then(|name| self.selections.get(name))
+    }
+
+    /// 把一台设备的选择集原文从中立库读回来，替掉缓着的那一份。读不动时返回那句话，
+    /// 缓着的那一份照旧丢掉——**不留一份说不清是哪一刻的旧规则**摆在卡上。
+    fn read_selection(&mut self, site: &Site, name: &str) -> Result<(), String> {
+        self.selections.remove(name);
+        let loaded = site
+            .catalog
+            .selection(name)
+            .map_err(|error| format!("中立库读不动：{error}"))?;
+        let stored = site
+            .catalog
+            .sublibrary_rules(name)
+            .map_err(|error| format!("中立库读不动：{error}"))?;
+        // **读得懂的与读不懂的分两栏摆**：合在一起的话，读不懂那几条会被印两遍
+        // ——一遍在规则里当正常的，一遍在下面当坏的。
+        let broken: std::collections::BTreeSet<i64> =
+            loaded.broken.iter().map(|row| row.ordinal).collect();
+        self.selections.insert(
+            name.to_string(),
+            StoredSelection {
+                rules: stored
+                    .into_iter()
+                    .filter(|row| !broken.contains(&row.ordinal))
+                    .collect(),
+                broken: loaded.broken,
+                exceptions: loaded.selection.exceptions,
+            },
+        );
+        Ok(())
     }
 
     /// 排出来的那份差量预览。
@@ -330,6 +454,7 @@ impl Screen {
     /// **一步都不截**（[`steps_table`]）。
     pub fn expand(&mut self, on: bool) {
         self.expanded = on;
+        self.reveal_steps = on;
     }
 
     /// 上一帧那张步骤表真的画了几行。见这个字段的文档：它是那句「翻行的代价与总步数
@@ -447,27 +572,7 @@ impl Screen {
         if let Some(sublibrary) = self.list.iter().find(|row| row.name == name) {
             self.form = Form::of(sublibrary);
         }
-        match site.catalog.selection(name) {
-            Ok(loaded) => {
-                self.exceptions = loaded.selection.exceptions;
-                self.broken = loaded.broken;
-                self.error = None;
-            }
-            Err(error) => self.error = Some(format!("中立库读不动：{error}")),
-        }
-        match site.catalog.sublibrary_rules(name) {
-            // **读得懂的与读不懂的分两栏摆**：合在一起的话，读不懂那几条会被印两遍
-            // ——一遍在规则里当正常的，一遍在下面当坏的。
-            Ok(stored) => {
-                let broken: std::collections::BTreeSet<i64> =
-                    self.broken.iter().map(|row| row.ordinal).collect();
-                self.rules = stored
-                    .into_iter()
-                    .filter(|row| !broken.contains(&row.ordinal))
-                    .collect();
-            }
-            Err(error) => self.error = Some(format!("中立库读不动：{error}")),
-        }
+        self.error = self.read_selection(site, name).err();
     }
 
     /// 某一台设备的选择集或它自己被**别处**改过了：把这一屏为它缓着的东西全丢掉。
@@ -488,8 +593,11 @@ impl Screen {
         }
         // 摊开的正是它的话，规则与例外也要重读一遍——卡上那几行印的就是它们。
         // `open` 自己会把差量预览作废（那份差量只可能是摊开这一台的）。
+        // 没摊开的那一张也摆着自己的规则列表，同样要重读。
         if self.picked.as_deref() == Some(name) {
             self.open(site, name);
+        } else if let Err(why) = self.read_selection(site, name) {
+            self.error = Some(why);
         }
     }
 
@@ -507,6 +615,7 @@ impl Screen {
         // 「排它用了 120 ms」——那说的是一份已经不在了的差量。
         self.prepare_ms = 0.0;
         self.expanded = false;
+        self.reveal_steps = false;
         self.acknowledged = false;
         self.outcome = None;
     }
@@ -804,9 +913,38 @@ impl Screen {
         }
     }
 
+    /// **删减建议表上按「排除」**：把这个变体记成这台设备的一条**排除例外**，然后重算一遍容量。
+    ///
+    /// ADR-0016：超限只给建议，砍谁由人定。落的就是浏览屏详情面板里那种例外
+    /// （`Catalog::set_exception`），不是第二套机制；**盘上的文件一个都不动**——主库只读
+    /// （ADR-0004），卡上的文件等下一趟差量预览与同步照清单去对。
+    ///
+    /// 记完之后这一台缓着的差量与容量账全部作废（[`Self::forget`]），并且**当场重排一趟
+    /// 「算一遍容量」**：人对着建议表一项项往下排除，下一项还要不要排由核心重新说，屏上不留
+    /// 一份排除之前的账。
+    ///
+    /// 界面上按那颗按钮走的就是它，实测与测试拿它当那一下。
+    pub fn exclude(&mut self, site: &mut Site, tasks: &mut Tasks, name: &str, key: &str) {
+        match site
+            .catalog
+            .set_exception(name, key, Exception::Exclude, None)
+        {
+            Ok(()) => {
+                // 台上那趟还没认领的「算一遍容量」算的是排除之前那一套，`forget` 把它弃认；
+                // 紧接着就重排一趟，所以它留下的那句「再按一次」换成下面这句。
+                self.forget(site, name);
+                self.notice = Some(format!(
+                    "给「{name}」记下了一条排除例外：{key}。盘上的文件一个都没动；容量正在重算。"
+                ));
+                self.evaluate(site, tasks);
+            }
+            Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+        }
+    }
+
     /// 「**改选择**」：把这个子库的规则并成一条，交给窗口送去浏览屏。
     ///
-    /// 这一屏不改选择集，所以这一下**什么都没写**——它只是把要改的东西装好。
+    /// 这一下**什么都没写**——它只是把要改的东西装好（规则与例外的增减在浏览屏上做）。
     /// 真正的跳转由 [`crate::app::App::route`] 走：那儿才同时够得着两屏。
     ///
     /// 界面上按那个按钮走的就是它，实测与测试拿它当那一下。
@@ -816,11 +954,12 @@ impl Screen {
             return;
         };
         // 读得懂的并成一条，读不懂的只数一数：它们本来就没参与求值，这一趟也不碰。
-        let loaded = LoadedSelection::from_stored(&self.rules);
+        let chosen = self.selections.get(&name).cloned().unwrap_or_default();
+        let loaded = LoadedSelection::from_stored(&chosen.rules);
         self.jump = Some(Jump {
             sublibrary: name,
             rule: Rule::any_of(loaded.selection.rules),
-            broken: self.broken.clone(),
+            broken: chosen.broken,
         });
     }
 
@@ -984,6 +1123,14 @@ impl Screen {
         }
     }
 
+    /// 「**新建子库**」：底下「配目标」那一栏换成一份空草稿，没有哪一张卡算摊开着。
+    fn begin_new(&mut self) {
+        self.picked = None;
+        self.confirm_remove = None;
+        self.form = Form::default();
+        self.invalidate();
+    }
+
     /// 中间那一列：**一台设备一张卡**。
     fn cards_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         if let Some(error) = &self.error {
@@ -998,20 +1145,16 @@ impl Screen {
             ui.colored_label(color, notice);
         }
         ui.horizontal(|ui| {
-            ui.label(font::strong("子库"));
-            ui.weak("一台目标设备一张卡。这一屏不选内容——改选择跳回浏览屏。");
+            ui.heading("子库");
+            ui.weak("选择集在「浏览」中编辑，这里负责同步到各台设备");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui
-                    .button("+ 新建")
+                if primary_button(ui, "新建子库")
                     .on_hover_text(
                         "底下那块面板填名字与目标路径。选择集去浏览屏筛：筛到满意按「存成子库」。",
                     )
                     .clicked()
                 {
-                    self.picked = None;
-                    self.confirm_remove = None;
-                    self.form = Form::default();
-                    self.invalidate();
+                    self.begin_new();
                 }
                 if ui
                     .add_enabled(self.evaluating.is_none(), egui::Button::new("算一遍容量"))
@@ -1029,17 +1172,31 @@ impl Screen {
         });
         ui.separator();
         if self.list.is_empty() {
-            ui.weak("一台设备都还没有。底下那块面板填个名字与目标路径，或者去浏览屏筛一批按「存成子库」。");
+            // **空态，不是示例设备**（票 `gui-looks-like-the-design/20`）：设计稿脚本里那两台是给稿子
+            // 看的数据。一台都没有时说清子库是什么，给一颗「新建子库」。
+            if empty_ui(ui) {
+                self.begin_new();
+            }
             return;
         }
         let names: Vec<String> = self.list.iter().map(|row| row.name.clone()).collect();
+        // **两列**（设计稿 `.devs`）；窄到并排放不下两张卡时一列。一张卡至少多宽取令牌里弹层的
+        // 头一档——卡上那几行（规则、容量条图例、差量账）在那个宽度上摆得开。
+        let columns = if ui.available_width() >= 2.0 * Tokens::builtin().layout.dialog_width[0] {
+            2
+        } else {
+            1
+        };
         egui::ScrollArea::vertical()
             .id_salt("设备卡片")
             .show(ui, |ui| {
-                for name in names {
-                    self.card_ui(ui, site, tasks, &name);
-                    ui.add_space(8.0);
-                }
+                ui.columns(columns, |cols| {
+                    for (at, name) in names.iter().enumerate() {
+                        let col = &mut cols[at % columns];
+                        self.card_ui(col, site, tasks, name);
+                        col.add_space(step(3));
+                    }
+                });
             });
     }
 
@@ -1049,20 +1206,10 @@ impl Screen {
             return;
         };
         let open = self.picked.as_deref() == Some(name);
-        egui::Frame::group(ui.style()).show(ui, |ui| {
+        card_frame(ui).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                if ui
-                    .selectable_label(open, font::strong(&sublibrary.name))
-                    .clicked()
-                {
-                    if open {
-                        self.picked = None;
-                        self.invalidate();
-                    } else {
-                        self.open(site, name);
-                    }
-                }
+                ui.label(font::strong(&sublibrary.name).size(Tokens::builtin().font.size_title));
                 // **待同步步数**：排过差量的那一台才有。没排过就说没排过，不摆一个 0
                 // ——「一步都不用做」与「还不知道要做什么」是两件事。
                 match self.plan_of(name) {
@@ -1080,44 +1227,92 @@ impl Screen {
                     }
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    // **只有摊开那一张摆得出这个按钮**：它带走的是「这一台的规则」，
-                    // 而规则要等 `open` 读回来才在手上。摆一个灰的在每张卡上只是噪音。
-                    if open
-                        && ui
-                            .button("改选择…")
-                            .on_hover_text(
-                                "跳去浏览屏，这个子库的规则预填进筛选器。\
-                                 在那儿改得见它真的筛出了什么；调完按「更新到子库」原样带回。",
-                            )
-                            .clicked()
+                    if ui
+                        .button("目标设置…")
+                        .on_hover_text("在底下「配目标」那一栏改这台设备的名字、目标路径、前端格式、容量上限与能力档案。")
+                        .clicked()
+                        && !open
                     {
+                        self.open(site, name);
+                    }
+                    // 它带走的是「这一台的规则」，规则要等 `open` 读回来才在手上——没摊开的先摊开。
+                    if ui
+                        .button("改选择…")
+                        .on_hover_text(
+                            "跳去浏览屏，这个子库的规则预填进筛选器。\
+                             在那儿改得见它真的筛出了什么；调完按「更新到子库」原样带回。",
+                        )
+                        .clicked()
+                    {
+                        if !open {
+                            self.open(site, name);
+                        }
                         self.edit_selection();
                     }
                 });
             });
-            ui.label(
-                egui::RichText::new(format!(
-                    "{}｜{}｜能力档案 {}｜上限 {}",
-                    sublibrary.target,
-                    sublibrary.format,
-                    sublibrary.capability.as_deref().unwrap_or("不作声称"),
-                    sublibrary
-                        .capacity
-                        .map_or_else(|| "不设限".to_string(), human_bytes),
-                ))
-                .weak(),
-            );
-            if !open {
-                ui.weak("点名字摊开：选择集、容量、差量都在里头。");
+            self.head_ui(ui, &sublibrary);
+            ui.add_space(step(2));
+            self.selection_ui(ui, name);
+            ui.add_space(step(2));
+            // 删减建议表上按了「排除」：写库与重算在这一层做，画容量条的那一层不动库。
+            if let Some(key) = self.gauge_ui(ui, name) {
+                self.exclude(site, tasks, name, &key);
+            }
+            ui.add_space(step(2));
+            if open {
+                self.delta_ui(ui, site, tasks);
                 return;
             }
-            ui.add_space(6.0);
-            self.selection_ui(ui, name);
-            ui.add_space(6.0);
-            self.gauge_ui(ui, name);
-            ui.add_space(6.0);
-            self.delta_ui(ui, site, tasks);
+            // **差量预览一次只摆一台的**（它是同步认的那一份计划，见 `prepared`）。别的卡上只留
+            // 排它的那一颗：按下去就换成这一台、当场排——前提不在时照旧只在屏上说为什么不行
+            // （票 `gui-looks-like-the-design/07`，拦在 `preview` 里）。
+            if ui
+                .add_enabled(
+                    self.syncing.is_none() && self.previewing.is_none(),
+                    egui::Button::new("排差量预览"),
+                )
+                .on_hover_text(
+                    "只读：中立库读一遍、目标设备看一遍，一个文件都不写。\
+                     别的卡上摆着的那份差量会换成这一台的。",
+                )
+                .clicked()
+            {
+                self.open(site, name);
+                self.preview(site, tasks);
+            }
         });
+    }
+
+    /// 卡头名字底下那一行：**路径 · 前端格式 · 文件系统 · 能力档案**（设计稿 `devCard`）。
+    ///
+    /// 档案与文件系统是名册解出来的那一份（[`Self::reload`]）。记着的名字在名册里没有时，
+    /// 真会用上的是「不作声称」——照实写出来，并点名记着的是哪个：不说的话人会以为那份
+    /// 档案生效了（ADR-0017：矩阵错了比不转换更糟）。
+    fn head_ui(&self, ui: &mut egui::Ui, sublibrary: &Sublibrary) {
+        let Some(profiled) = self.profiled.get(&sublibrary.name) else {
+            ui.label(font::mono(format!("{} · {}", sublibrary.target, sublibrary.format)).weak());
+            if let Some(why) = &self.roster_error {
+                ui.colored_label(ui.visuals().warn_fg_color, why);
+            }
+            return;
+        };
+        ui.label(
+            font::mono(format!(
+                "{} · {} · {} · 能力档案：{}",
+                sublibrary.target, sublibrary.format, profiled.filesystem, profiled.profile,
+            ))
+            .weak(),
+        );
+        if let Some(recorded) = &profiled.missing {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!(
+                    "名册里没有「{recorded}」这份能力档案，眼下按「{}」走。",
+                    profiled.profile
+                ),
+            );
+        }
     }
 
     /// 排出来那份计划，若它正好是这台设备的。
@@ -1128,99 +1323,190 @@ impl Screen {
             .map(|prepared| &prepared.plan)
     }
 
-    /// **选择集：只读展示。** 规则几条、各命中多少、例外几条、有没有引到空的维度。
+    /// **选择集**那一块（设计稿 `.rules`）：每条规则的名称、条件、命中多少、多大，例外那一行，
+    /// 去重之后的合计。**每张卡都摆**，不只摊开那一张。
     ///
-    /// 改它按上面「改选择」——**这一屏一个写的动作都没有**。但**看**得尽量全：
-    /// 「这条规则写对了吗」「为什么一个都没选中」这两个问题只有在摆着规则的地方才答得了，
-    /// 而答案整份来自核心折的 [`SelectionReport`]（与 `romcat sublibrary show`
-    /// 印的是同一个值），按过「算一遍容量」才有。
-    fn selection_ui(&mut self, ui: &mut egui::Ui, name: &str) {
-        ui.horizontal(|ui| {
-            ui.label(font::strong("选择集"));
-            ui.weak("只读——改它按上面「改选择」").on_hover_text(
-                "规则与例外都在浏览屏上改：在那儿改得见它真的筛出了什么，\
-                     在这儿改只看得见一行字。这一屏管的是「送到哪」。",
-            );
-        });
+    /// 数整份来自核心折的 [`SelectionReport`]（与 `romcat sublibrary show` 印的是同一个值），
+    /// 按过「算一遍容量」才有；没算过的那几格写「—」，不写 0——「还没算」与「一个都没选中」
+    /// 是两件事。**名称眼下就是「规则 N」**：中立库里一条规则只存原文与序号，还没有名字那一列
+    /// （挂单 `Q811`）。
+    ///
+    /// 改规则按卡头「改选择…」去浏览屏：在那儿改得见它真的筛出了什么（票 `gui-redesign/11`）。
+    fn selection_ui(&self, ui: &mut egui::Ui, name: &str) {
+        let chosen = self.selections.get(name);
+        let rules = chosen.map_or(&[][..], |chosen| &chosen.rules[..]);
+        let broken = chosen.map_or(&[][..], |chosen| &chosen.broken[..]);
+        let exceptions = chosen.map_or(&[][..], |chosen| &chosen.exceptions[..]);
         let report = self.evaluated.get(name);
-        if let Some(report) = report {
-            ui.label(format!(
-                "选出 {} / {} 个变体，分属 {} 个「作品 × 平台」",
-                thousands(report.picked),
-                thousands(report.variants),
-                thousands(report.anchors),
-            ));
-        }
-        if self.rules.is_empty() && self.broken.is_empty() {
-            ui.weak("一条规则都没有——选择集是空的，同步过去也是空的。");
-        }
-        for stored in &self.rules {
-            // **逐条各自算，不扣例外也不扣重叠**：这个数回答的是「我这条规则写对了吗」。
-            let hits = report.and_then(|report| {
-                report
-                    .rules
-                    .iter()
-                    .find(|line| line.ordinal == stored.ordinal)
-                    .map(|line| line.hits)
+        let caption = Tokens::builtin().font.size_caption;
+        let visuals = ui.visuals().clone();
+        egui::Frame::new()
+            .stroke(visuals.widgets.noninteractive.bg_stroke)
+            .corner_radius(visuals.window_corner_radius)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                // 行与行之间不留缝：分隔线就是缝。
+                ui.spacing_mut().item_spacing.y = 0.0;
+                egui::Frame::new()
+                    .fill(visuals.faint_bg_color)
+                    .corner_radius(egui::CornerRadius {
+                        sw: 0,
+                        se: 0,
+                        ..visuals.window_corner_radius
+                    })
+                    .inner_margin(block_margin())
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            let mut head = format!(
+                                "选择集 · {} 条规则",
+                                thousands((rules.len() + broken.len()) as u64)
+                            );
+                            if !exceptions.is_empty() {
+                                head.push_str(&format!(
+                                    " · {} 条例外",
+                                    thousands(exceptions.len() as u64)
+                                ));
+                            }
+                            ui.label(egui::RichText::new(head).size(caption).weak());
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(egui::RichText::new("规则之间取并集").small().weak());
+                            });
+                        });
+                    });
+                if rules.is_empty() && broken.is_empty() {
+                    block_row(
+                        ui,
+                        "·",
+                        |ui| {
+                            ui.weak("还没有规则。按「改选择…」去浏览屏，按平台筛选后加入。");
+                        },
+                        |_| {},
+                    );
+                }
+                for stored in rules {
+                    // **逐条各自算，不扣例外也不扣重叠**：这个数回答的是「我这条规则写对了吗」。
+                    let line = report.and_then(|report| {
+                        report
+                            .rules
+                            .iter()
+                            .find(|line| line.ordinal == stored.ordinal)
+                    });
+                    block_row(
+                        ui,
+                        &stored.ordinal.to_string(),
+                        |ui| {
+                            ui.label(font::strong(format!("规则 {}", stored.ordinal)));
+                            ui.label(font::mono(&stored.text).size(caption).weak());
+                        },
+                        |ui| match line {
+                            Some(line) => {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} 个 · {}",
+                                        thousands(line.hits),
+                                        human_bytes(line.bytes)
+                                    ))
+                                    .small(),
+                                )
+                                .on_hover_text(
+                                    "这一条自己命中多少个变体、一共多大——不扣例外，也不扣与别条重叠的。",
+                                );
+                            }
+                            None => {
+                                ui.weak("—").on_hover_text("按「算一遍容量」之后才有。");
+                            }
+                        },
+                    );
+                }
+                for row in broken {
+                    block_row(
+                        ui,
+                        &row.ordinal.to_string(),
+                        |ui| {
+                            ui.label(font::strong(format!("规则 {}", row.ordinal)));
+                            ui.colored_label(
+                                visuals.error_fg_color,
+                                format!(
+                                    "{}. {}（读不懂：{}）——少选出来的东西全在它里面；\
+                                     它没参与求值，「改选择」也不会碰它",
+                                    row.ordinal, row.text, row.error,
+                                ),
+                            );
+                        },
+                        |_| {},
+                    );
+                }
+                let (收入, 排除) = exception_tally(exceptions);
+                block_row(
+                    ui,
+                    "+",
+                    |ui| {
+                        if exceptions.is_empty() {
+                            ui.weak("没有手动例外");
+                            return;
+                        }
+                        let 顶用的 = report.map_or_else(String::new, |report| {
+                            format!(
+                                "（其中 {} 条收入是多余的、{} 条排除真起了作用）",
+                                thousands(report.forced_in_redundant),
+                                thousands(report.forced_out_effective),
+                            )
+                        });
+                        ui.label(format!(
+                            "手动例外：收入 {} 条、排除 {} 条{顶用的}",
+                            thousands(收入),
+                            thousands(排除),
+                        ))
+                        .on_hover_text(
+                            "优先于规则、永久记住：规则表达不了的个人口味。\
+                             加减在浏览屏的详情面板里做。",
+                        );
+                    },
+                    |_| {},
+                );
+                ui.add(egui::Separator::default().spacing(0.0));
+                egui::Frame::new()
+                    .inner_margin(block_margin())
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal_wrapped(|ui| match report {
+                            Some(report) => {
+                                ui.label(font::strong(format!(
+                                    "合计 {} 个变体 · {}",
+                                    thousands(report.picked),
+                                    human_bytes(report.bytes),
+                                )));
+                                // 被几条规则同时选中、只算一次的有几个由核心数（`Selected::overlaps`），
+                                // 这儿只照着写。话照设计稿，不说「重复」：那是词表**重复拷贝**的词。
+                                ui.weak(if report.overlaps > 0 {
+                                    format!(
+                                        "已去除 {} 个被多条规则同时选中的变体",
+                                        thousands(report.overlaps),
+                                    )
+                                } else {
+                                    "规则之间没有重叠".to_string()
+                                });
+                            }
+                            None => {
+                                ui.label(font::strong("合计 —"));
+                                ui.weak("按「算一遍容量」之后才有");
+                            }
+                        });
+                    });
             });
-            match hits {
-                Some(hits) => ui
-                    .label(format!(
-                        "{} 个 ← {}. {}",
-                        thousands(hits),
-                        stored.ordinal,
-                        stored.text,
-                    ))
-                    .on_hover_text("这一条自己命中多少个变体——不扣例外，也不扣与别条重叠的。"),
-                None => ui.label(format!("{}. {}", stored.ordinal, stored.text)),
-            };
-        }
-        for row in &self.broken {
-            ui.colored_label(
-                ui.visuals().error_fg_color,
-                format!(
-                    "{}. {}（读不懂：{}）——少选出来的东西全在它里面；\
-                     它没参与求值，「改选择」也不会碰它",
-                    row.ordinal, row.text, row.error,
-                ),
-            );
-        }
-        if !self.broken.is_empty() {
-            // **处置它的那条路在浏览屏上**（票 `gui-redesign/14`，挂单 `Q86`）。
-            // 这一屏照旧一个写的动作都没有：筛选器摆的是一棵读得懂的树，一条读不回来的
-            // 原文在那儿没有位置，所以它跟着「改选择」那一趟整条带过去，摆在**筛选栏顶上**
-            // 那条横幅里逐条扔——浏览屏本来就是这个子库的规则唯一改得动的地方。
+        if !broken.is_empty() {
+            // **处置它的那条路在浏览屏上**（票 `gui-redesign/14`，挂单 `Q86`）：筛选器摆的是一棵
+            // 读得懂的树，一条读不回来的原文在那儿没有位置，所以它跟着「改选择」那一趟整条带过去，
+            // 摆在**筛选栏顶上**那条横幅里逐条扔。
             ui.weak(format!(
                 "读不懂的这 {} 条要扔掉：按上面「改选择」跳去浏览屏，\
                  筛选栏顶上那条横幅里逐条扔得掉。改对了再来一条，走那儿的筛选器。",
-                self.broken.len(),
+                broken.len(),
             ))
             .on_hover_text(
-                "这一屏不选内容：规则增删都在浏览屏上。\
-                 命令行那条路也还在：`romcat sublibrary rule <子库> --remove <序号>`，\
+                "命令行那条路也还在：`romcat sublibrary rule <子库> --remove <序号>`，\
                  序号就是上面印着的那个。",
-            );
-        }
-        let (收入, 排除) = exception_tally(&self.exceptions);
-        if self.exceptions.is_empty() {
-            ui.weak("一条例外都没有。");
-        } else {
-            let 顶用的 = report.map_or_else(String::new, |report| {
-                format!(
-                    "（其中 {} 条收入是多余的、{} 条排除真起了作用）",
-                    thousands(report.forced_in_redundant),
-                    thousands(report.forced_out_effective),
-                )
-            });
-            ui.label(format!(
-                "{} 条例外：收入 {}、排除 {}{顶用的}",
-                thousands(self.exceptions.len() as u64),
-                thousands(收入),
-                thousands(排除),
-            ))
-            .on_hover_text(
-                "优先于规则、永久记住：规则表达不了的个人口味。\
-                 加减在浏览屏的详情面板里做。",
             );
         }
         let Some(report) = report else {
@@ -1247,74 +1533,118 @@ impl Screen {
         }
     }
 
-    /// **容量条**：选中的、清单之外的、上限，三段各自标得出数。
-    fn gauge_ui(&mut self, ui: &mut egui::Ui, name: &str) {
+    /// **容量条**：选中的、清单之外的、上限，三段各自标得出数；超限时底下是删减建议表。
+    ///
+    /// 返回删减建议表上这一帧按了「排除」的那个变体的键——**这一层只画**，写库与重算由卡片那一层
+    /// 调 [`Self::exclude`]。
+    fn gauge_ui(&self, ui: &mut egui::Ui, name: &str) -> Option<String> {
         let gauge = self.gauge(name);
-        ui.label(font::strong("容量"));
+        // 超没超由核心一处算（同步计划器），条子只拿它换选中那一段的颜色（`room_of`）。
+        let room = self.room_of(name);
+        let over = room.as_ref().and_then(|room| room.over_capacity).is_some();
+        // 选中那一段**算过才有数**（算过容量或排过差量）：没算过写「还没算」，不写 0。
+        let counted = room.is_some() || self.evaluated.contains_key(name);
+        let visuals = ui.visuals().clone();
+        let 选中色 = if over {
+            visuals.error_fg_color
+        } else {
+            visuals.selection.stroke.color
+        };
+        let 之外色 = visuals.warn_fg_color;
+        let 未知描边 = visuals.widgets.inactive.bg_stroke;
+        ui.label(
+            egui::RichText::new("容量")
+                .size(Tokens::builtin().font.size_caption)
+                .weak(),
+        );
+        let height = step(1);
         let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), GAUGE_HEIGHT),
+            egui::vec2(ui.available_width(), height),
             egui::Sense::hover(),
         );
+        let rounding = height / 2.0;
         let painter = ui.painter();
-        let rounding = GAUGE_HEIGHT / 2.0;
-        painter.rect_filled(rect, rounding, ui.visuals().extreme_bg_color);
-        let 选中色 = ui.visuals().selection.bg_fill;
-        let 之外色 = ui.visuals().warn_fg_color;
-        let mut x = rect.left();
-        for (share, color) in [
-            (gauge.picked_share(), 选中色),
-            (gauge.stranger_share(), 之外色),
-        ] {
-            let width = rect.width() * share;
-            if width <= 0.0 {
-                continue;
-            }
-            let part = egui::Rect::from_min_size(
-                egui::pos2(x, rect.top()),
-                egui::vec2(width, rect.height()),
+        painter.rect_filled(rect, rounding, visuals.extreme_bg_color);
+        let picked = rect.width() * gauge.picked_share();
+        if picked > 0.0 {
+            painter.rect_filled(
+                egui::Rect::from_min_size(rect.min, egui::vec2(picked, height)),
+                rounding,
+                选中色,
             );
-            painter.rect_filled(part, rounding, color);
-            x += width;
+        }
+        let rest_left = rect.left() + picked;
+        match gauge.strangers {
+            Some(_) => {
+                let width = rect.width() * gauge.stranger_share();
+                if width > 0.0 {
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(
+                            egui::pos2(rest_left, rect.top()),
+                            egui::vec2(width, height),
+                        ),
+                        rounding,
+                        之外色,
+                    );
+                }
+            }
+            // **「还不知道」画成一段斜纹，不画成零**（设计稿 `.gauge .unk`）：卡不在手边时目标上
+            // 有什么本来就没看过，一段也不画等于说「卡上是空的」。
+            None => {
+                let width = (rect.right() - rest_left).min(rect.width() * UNKNOWN_SHARE);
+                hatch(
+                    painter,
+                    egui::Rect::from_min_size(
+                        egui::pos2(rest_left, rect.top()),
+                        egui::vec2(width, height),
+                    ),
+                    未知描边,
+                );
+            }
         }
         ui.horizontal_wrapped(|ui| {
-            ui.colored_label(选中色, "■");
-            ui.label(format!("选中 {}", human_bytes(gauge.picked)))
-                .on_hover_text(
-                    "这个子库在卡上占的地方。看过目标之后（算过容量或排过差量预览）算的是同步完的样子\
-                     ——元数据与媒体也要占地方，转换又省下来一些，而卡上还留着那些\
-                     「对不上、本次不动」的文件。卡不在手边时就是选择集选出来那批变体一共多大。",
-                );
-            ui.separator();
-            ui.colored_label(之外色, "■");
+            legend_swatch(ui, 选中色);
+            let 选中 = if counted {
+                format!("选中 {}", human_bytes(gauge.picked))
+            } else {
+                "选中 还没算".to_string()
+            };
+            ui.label(选中).on_hover_text(
+                "这个子库在卡上占的地方。看过目标之后（算过容量或排过差量预览）算的是同步完的样子\
+                 ——元数据与媒体也要占地方，转换又省下来一些，而卡上还留着那些\
+                 「对不上、本次不动」的文件。卡不在手边时就是选择集选出来那批变体一共多大。",
+            );
+            ui.add_space(step(3));
             match gauge.strangers {
-                // **「还不知道」不画成零**：卡不在手边时目标上有什么本来就没看过，
-                // 摆一个 0 出去等于说「卡上是空的」。
                 None => {
-                    ui.weak("清单之外 —（插上卡算一遍容量、或者排一次差量预览才知道）");
+                    legend_swatch(ui, 未知描边.color);
+                    ui.label("清单之外 未知");
                 }
                 Some(bytes) => {
+                    legend_swatch(ui, 之外色);
                     ui.label(format!("清单之外 {}", human_bytes(bytes)))
                         .on_hover_text(
                             "工具没放过的文件：维护者自己拷进去的存档、金手指、截图。连看都不看。",
                         );
                 }
             }
-            ui.separator();
+            ui.add_space(step(3));
             match gauge.capacity {
                 None => ui.weak("上限 不设限"),
                 Some(bytes) => ui.weak(format!("上限 {}", human_bytes(bytes))),
             };
         });
-        if gauge.picked == 0 && !self.evaluated.contains_key(name) && self.prepared.is_none() {
+        if gauge.strangers.is_none() {
+            ui.weak(
+                "卡不在手边时照样算得出选中多少；清单之外要插上卡、算一遍容量或者排一次差量预览\
+                 才知道——未知不代表为零。",
+            );
+        }
+        if !counted {
             ui.weak("还没算过：按右上角「算一遍容量」，或者排一次差量预览。");
         }
-        // 超没超由核心一处算（同步计划器），这儿只把它摆出来（`room_of`）。
-        let room = self.room_of(name);
-        if let Some(room) = &room
-            && let Some(over) = room.over_capacity
-        {
-            trim_ui(ui, over, gauge.capacity, &room.trim_suggestions);
-        }
+        // 超出多少、砍谁由核心一处算（同步计划器），这儿只把它摆出来。
+        let excluded = room.as_ref().and_then(|room| trim_ui(ui, name, room));
         // 算过容量、卡却不在手边：**不给数**，不拿选中容量去冒充「装得下」。
         if room.is_none()
             && let Some(romcat_core::sublibrary::Fit::Unknown { why }) =
@@ -1322,6 +1652,7 @@ impl Screen {
         {
             ui.weak(format!("装不装得下算不出：{why}"));
         }
+        excluded
     }
 
     /// 卡的下半截：**排差量、看步骤、按同步**。
@@ -1369,8 +1700,8 @@ impl Screen {
                          一个都不碰。要按两下：{} 条规则与 {} 条例外跟着一起没——\
                          例外是手挑的、永久记住的决定，\
                          规则也不在这一屏上重打得回来。",
-                        self.rules.len() + self.broken.len(),
-                        self.exceptions.len(),
+                        self.rules().len() + self.broken().len(),
+                        self.exceptions().len(),
                     ))
                     .clicked()
                 {
@@ -1411,26 +1742,40 @@ impl Screen {
     /// 步骤那一段：收起来时摆头几条，摊开是那张虚拟化的表。
     fn steps_ui(&mut self, ui: &mut egui::Ui, plan: &romcat_core::sync::Plan) {
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.label(font::strong(format!(
-                "这一趟要动的 {} 步（先删后传）",
-                thousands(plan.touched())
-            )));
-            if plan.steps.len() > STEP_SAMPLE {
-                let label = if self.expanded {
-                    "收起来"
-                } else {
-                    "全部展开"
-                };
-                if ui.button(label).clicked() {
-                    self.expanded = !self.expanded;
+        let header = ui
+            .horizontal(|ui| {
+                ui.label(font::strong(format!(
+                    "这一趟要动的 {} 步（先删后传）",
+                    thousands(plan.touched())
+                )));
+                if plan.steps.len() > STEP_SAMPLE {
+                    let label = if self.expanded {
+                        "收起来"
+                    } else {
+                        "全部展开"
+                    };
+                    if ui.button(label).clicked() {
+                        self.expand(!self.expanded);
+                    }
                 }
-            }
-        });
+            })
+            .response;
         if self.expanded {
-            // **界面上不按滚动位置**：人自己滚。`scroll_to` 是给实测与测试的
+            // **表里不按滚动位置**：人自己滚。`scroll_to` 是给实测与测试的
             // （[`steps_table`]）。
             self.steps_drawn = steps_table(ui, plan, None);
+            // 刚摊开：把卡片那一列滚到这张表的表头（`reveal_steps` 的文档）。**要在表画完之后问**：
+            // 表自己也是一块滚动区，在它之前问的话，那一下被它先收走，滚的是表里头而不是卡片那一列。
+            // **不带动画**：一下到位。带动画的话要跑上十几帧才滚到，而这一下是替人把刚摊开的表
+            // 摆到眼前，不是一段要看的过渡。
+            if self.reveal_steps {
+                ui.scroll_to_rect_animation(
+                    header.rect,
+                    Some(Align::Min),
+                    egui::style::ScrollAnimation::none(),
+                );
+                self.reveal_steps = false;
+            }
             return;
         }
         self.steps_drawn = 0;
@@ -1763,6 +2108,145 @@ impl Screen {
     }
 }
 
+/// 间距第 `at` 档（从 0 数：4 / 8 / 12 / 16 / 20 点）。**间距只从令牌这几档里取**。
+fn step(at: usize) -> f32 {
+    Tokens::builtin().space.steps[at]
+}
+
+/// 一颗**主按钮**：强调色底。颜色只从 [`look::primary_button`] 那一处来，换在一个 `scope` 里，
+/// 别的控件不受影响。
+fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.scope(|ui| {
+        look::primary_button(ui.visuals_mut());
+        ui.button(label)
+    })
+    .inner
+}
+
+/// 卡片的框（设计稿 `.card`）：面板底、一道分隔线色的描边、大圆角，内边距 16。
+///
+/// 颜色与圆角全从 `Visuals` 的槽位取——那几格由 [`look::install`] 照令牌装好
+/// （`window_fill` 是 `panel`、`noninteractive` 的描边是 `line`、`window_corner_radius` 是
+/// `large`）。
+fn card_frame(ui: &egui::Ui) -> egui::Frame {
+    let visuals = ui.visuals();
+    egui::Frame::new()
+        .fill(visuals.window_fill)
+        .stroke(visuals.widgets.noninteractive.bg_stroke)
+        .corner_radius(visuals.window_corner_radius)
+        .inner_margin(egui::Margin::from(egui::vec2(step(3), step(3))))
+}
+
+/// **还没有子库**时那一块：一张居中的卡，说清子库是什么，给一颗「新建子库」。返回按没按。
+///
+/// 宽照设计稿那张空态卡（620 点），与弹层第二档同宽，取令牌里那一档。
+fn empty_ui(ui: &mut egui::Ui) -> bool {
+    let width = Tokens::builtin().layout.dialog_width[1].min(ui.available_width());
+    let mut clicked = false;
+    ui.add_space(step(4));
+    ui.horizontal(|ui| {
+        ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+        ui.vertical(|ui| {
+            ui.set_width(width);
+            card_frame(ui)
+                .inner_margin(egui::Margin::from(egui::vec2(step(4), step(4))))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.vertical_centered(|ui| {
+                        // **字号直接取令牌，不取具名档 `look::TITLE`**：空库上窗口的头一帧就画到
+                        // 这里，而具名档是 `App::prepare` 在那一帧里才装上的——这一帧的 `Ui`
+                        // 拿的还是装之前那份样式，按名字找会当场 panic。
+                        ui.label(
+                            font::strong("还没有子库").size(Tokens::builtin().font.size_title),
+                        );
+                        ui.add_space(step(1));
+                        ui.label(
+                            egui::RichText::new(
+                                "子库是为一台设备（通常是掌机）挑出来的一部分内容。\
+                                 新建一个子库，然后在「浏览」中按平台分几次加入。",
+                            )
+                            .weak(),
+                        );
+                        ui.add_space(step(2));
+                        clicked = primary_button(ui, "新建子库").clicked();
+                    });
+                });
+        });
+    });
+    clicked
+}
+
+/// 容量条上「还不知道」那一段的斜纹（设计稿 `.gauge .unk`）：强一级描边色的细斜线，一档间距一道。
+///
+/// 描边（颜色与线宽）取 `widgets.inactive.bg_stroke`，由 [`look::install`] 照令牌 `line-2` 装好。
+fn hatch(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    if rect.width() <= 0.0 {
+        return;
+    }
+    let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
+    let gap = step(1);
+    let mut x = rect.left() - rect.height();
+    while x < rect.right() {
+        painter.line_segment(
+            [
+                egui::pos2(x, rect.bottom()),
+                egui::pos2(x + rect.height(), rect.top()),
+            ],
+            stroke,
+        );
+        x += gap;
+    }
+}
+
+/// 容量条图例前那一小块颜色（设计稿 `.legend i`）。**颜色不是唯一线索**：后面一定跟着那一段的名字。
+fn legend_swatch(ui: &mut egui::Ui, color: egui::Color32) {
+    let side = step(1);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+    ui.painter()
+        .rect_filled(rect, f32::from(Tokens::builtin().radius.small) / 2.0, color);
+}
+
+/// 规则块里一行的内边距（设计稿 `.rule` 的 8 × 12）。
+fn block_margin() -> egui::Margin {
+    egui::Margin::from(egui::vec2(step(2), step(1)))
+}
+
+/// 规则块里的一行（设计稿 `.rule`）：上面一道分隔线，行首一个序号圆，中间一段，右边一段。
+fn block_row(
+    ui: &mut egui::Ui,
+    badge: &str,
+    middle: impl FnOnce(&mut egui::Ui),
+    right: impl FnOnce(&mut egui::Ui),
+) {
+    ui.add(egui::Separator::default().spacing(0.0));
+    egui::Frame::new()
+        .inner_margin(block_margin())
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                badge_ui(ui, badge);
+                ui.vertical(middle);
+                ui.with_layout(Layout::right_to_left(Align::Center), right);
+            });
+        });
+}
+
+/// 行首那个序号圆（设计稿 `.rule .rn`）：凹陷底、弱字色、等宽角标字。
+fn badge_ui(ui: &mut egui::Ui, text: &str) {
+    let side = step(4);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+    let visuals = ui.visuals();
+    ui.painter()
+        .circle_filled(rect.center(), side / 2.0, visuals.extreme_bg_color);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        egui::FontId::monospace(Tokens::builtin().font.size_caption),
+        visuals.weak_text_color(),
+    );
+}
+
 /// 例外分两向各有几条。
 fn exception_tally(rows: &[ExceptionRow]) -> (u64, u64) {
     let mut 收入 = 0;
@@ -1962,42 +2446,98 @@ fn run_sync(
     .map_err(|error| Cutoff::failed(format!("目标写不了：{error}")))
 }
 
-/// **容量超限**那一段：超了多少、按体积排序的裁剪建议。
+/// **删减建议表**（设计稿 `trimHTML`）：超出多少，按体积排的每一项释放多少、累计多少，排除到哪一项
+/// 就放得下，全排除也还差多少。没超限时什么都不画。返回这一帧按了「排除」的那个变体的键。
 ///
-/// 只求选择集与排完差量预览两处摆的是同一段——超出量与建议本来就由核心一处算
-/// （`sublibrary::over_capacity` / `trim_suggestions`），画法也就只该写一处：
-/// 各画一遍的话，改了一处的措辞另一处就跟着说另一套话。
+/// 只求选择集与排完差量预览两处摆的是同一段（[`Room`] 两处都抄自同步计划器），画法也就只写一处。
+/// **四个数与两句判断全是核心说的**：释放与累计是 [`romcat_core::sublibrary::Trim`]，「放得下」
+/// 「还差」是 [`Room::fits_after`] / [`Room::short_after_all`]，这儿只画（ADR-0005、ADR-0024）。
 ///
-/// **这一段按不动**（ADR-0016 的「砍谁由人定」在浏览屏上做）：砍一个的落点是一条
-/// **排除例外**，而例外的加减这一票整个搬去了浏览屏（票 `gui-redesign/11`）。
-/// 在这儿留一个「排除」按钮，等于把刚拆开的那两件事又缝回去。
-fn trim_ui(ui: &mut egui::Ui, over: u64, capacity: Option<u64>, trims: &[Trim]) {
-    ui.colored_label(
-        ui.visuals().error_fg_color,
-        format!(
-            "超出容量上限 {}（上限 {}）。不会自动截断——砍谁由你定：\
-             按上面「改选择」跳去浏览屏，在详情面板里把它排除掉。",
-            human_bytes(over),
-            capacity.map_or_else(|| "—".to_string(), human_bytes),
-        ),
-    );
-    ui.label("按体积排序的裁剪建议：");
-    for trim in trims {
-        ui.label(format!(
-            "{}  砍到这条为止腾出 {}  {}",
-            human_bytes(trim.bytes),
-            human_bytes(trim.cumulative),
-            trim.variant,
-        ));
-    }
-    // **「砍到第几个才够」要一眼看得出来**：超出量动辄几十上百 GiB，让人自己把十行
-    // 数字加一遍是白让他算。
-    if let Some(last) = trims.last()
-        && last.cumulative < over
-    {
+/// **只建议，绝不自动删减**（ADR-0016）：「排除」记成这个子库的一条手动例外，由调用方落库
+/// （[`Screen::exclude`]）。
+fn trim_ui(ui: &mut egui::Ui, name: &str, room: &Room) -> Option<String> {
+    let over = room.over_capacity?;
+    let fits = room.fits_after();
+    let visuals = ui.visuals().clone();
+    let 放得下色 = look::success_color(&visuals);
+    ui.horizontal_wrapped(|ui| {
         ui.colored_label(
-            ui.visuals().warn_fg_color,
-            format!("这几个全砍掉还差 {}。", human_bytes(over - last.cumulative)),
+            visuals.error_fg_color,
+            format!("超出容量上限 {}", human_bytes(over)),
+        );
+        ui.weak("按大小列出可以排除的变体；排除会记为这个子库的手动例外，不会自动删减。");
+    });
+    // 行高照控件那一档量：按钮加高之后这张表跟着高，不写死。表只有至多十行，不开自己的滚动区。
+    let row_height = ui.spacing().interact_size.y;
+    let mut clicked = None;
+    egui_extras::TableBuilder::new(ui)
+        .id_salt(format!("删减建议 · {name}"))
+        .vscroll(false)
+        .cell_layout(Layout::left_to_right(Align::Center))
+        .column(egui_extras::Column::remainder().clip(true))
+        .column(egui_extras::Column::auto())
+        .column(egui_extras::Column::auto())
+        .column(egui_extras::Column::auto())
+        .header(row_height, |mut header| {
+            for title in ["变体", "释放", "累计", ""] {
+                header.col(|ui| {
+                    ui.label(egui::RichText::new(title).small().weak());
+                });
+            }
+        })
+        .body(|mut body| {
+            for (at, trim) in room.trim_suggestions.iter().enumerate() {
+                // 已经放得下之后的那几项淡下去：再往下排除就多砍了。
+                let faded = fits.is_some_and(|fits| at > fits);
+                body.row(row_height, |mut row| {
+                    for text in [
+                        trim.variant.clone(),
+                        human_bytes(trim.bytes),
+                        human_bytes(trim.cumulative),
+                    ] {
+                        row.col(|ui| {
+                            if faded {
+                                ui.multiply_opacity(visuals.disabled_alpha);
+                            }
+                            ui.label(font::mono(text));
+                        });
+                    }
+                    row.col(|ui| {
+                        if ui
+                            .button("排除")
+                            .on_hover_text(
+                                "记成这个子库的一条排除例外：规则选中了也不带。优先于规则、永久记住；\
+                                 盘上的文件一个都不动。",
+                            )
+                            .clicked()
+                        {
+                            clicked = Some(trim.variant.clone());
+                        }
+                    });
+                });
+                if fits == Some(at) {
+                    body.row(row_height, |mut row| {
+                        row.col(|ui| {
+                            ui.colored_label(放得下色, "排除到这一项就能放下").on_hover_text(
+                                "照计划器记的账估的：作品共用的媒体记在头一个变体名下，同一作品还有\
+                                 别的变体留着时，排除它未必省下那几份。按下「排除」之后会当场重算。",
+                            );
+                        });
+                        for _ in 0..3 {
+                            row.col(|_| {});
+                        }
+                    });
+                }
+            }
+        });
+    if let Some(short) = room.short_after_all() {
+        ui.colored_label(
+            visuals.warn_fg_color,
+            format!(
+                "全部排除也还差 {}，需要移除规则或换一张更大的卡。",
+                human_bytes(short)
+            ),
         );
     }
+    clicked
 }

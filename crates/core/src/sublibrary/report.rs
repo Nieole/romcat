@@ -34,6 +34,8 @@ pub struct RuleLine {
     pub text: String,
     /// 这条规则自己命中多少个变体（不扣例外、不扣与别条的重叠）。
     pub hits: u64,
+    /// 这条规则自己命中的那批变体一共多大（下界）。口径同 [`Self::hits`]。
+    pub bytes: u64,
 }
 
 /// 一条**读不懂**的规则在报告里的样子。
@@ -87,6 +89,8 @@ pub struct SelectionReport {
     pub anchors: u64,
     /// 逐条规则。
     pub rules: Vec<RuleLine>,
+    /// 规则之间的重叠：逐条命中数加起来比规则选中的变体数多出来几个（[`Selected::overlaps`]）。
+    pub overlaps: u64,
     /// 读不懂、这一趟没参与求值的那几条。
     pub broken_rules: Vec<BrokenRuleLine>,
     /// 按平台拆开。
@@ -185,8 +189,10 @@ impl SelectionReport {
                     ordinal: *ordinal,
                     text: rule.text.clone(),
                     hits: selected.rule_hits.get(index).copied().unwrap_or(0),
+                    bytes: selected.rule_bytes.get(index).copied().unwrap_or(0),
                 })
                 .collect(),
+            overlaps: selected.overlaps,
             broken_rules: loaded
                 .broken
                 .iter()
