@@ -395,7 +395,9 @@ impl Table<'_> {
         let spacing = ui.spacing().item_spacing;
         let cell_x = tokens.space.table_cell_padding;
         let check = [tokens.layout.check_padding, 0.0];
-        let head_font = egui::FontId::proportional(tokens.font.size_caption_plus);
+        // 半号字号走 `look::font_size` 取整（票 `gui-looks-like-the-design/32` 定的统一入口）。
+        let head_font =
+            egui::FontId::proportional(look::font_size(&ctx, tokens.font.size_caption_plus));
         let header_height = ctx.fonts_mut(|fonts| fonts.row_height(&head_font))
             + 2.0 * tokens.space.table_head_padding[0];
         let line = ui.visuals().widgets.noninteractive.bg_stroke;
@@ -664,7 +666,10 @@ fn sort_header(
 /// 表头上的字：表头字号（令牌 `size-caption-plus`）、弱字色，拉丁与数字加粗（设计稿 `.tbl th`）。
 fn head_text(ui: &egui::Ui, text: &str) -> egui::RichText {
     egui::RichText::new(text)
-        .size(Tokens::builtin().font.size_caption_plus)
+        .size(look::font_size(
+            ui.ctx(),
+            Tokens::builtin().font.size_caption_plus,
+        ))
         .family(font::strong_family())
         .color(ui.visuals().weak_text_color())
 }
@@ -883,7 +888,7 @@ pub(crate) fn tag_width(ui: &egui::Ui, text: &str) -> f32 {
     text_width(
         ui,
         text,
-        &egui::FontId::proportional(tokens.font.size_caption_plus),
+        &egui::FontId::proportional(look::font_size(ui.ctx(), tokens.font.size_caption_plus)),
     ) + 2.0 * tokens.layout.tag_padding
 }
 
@@ -896,7 +901,7 @@ pub(crate) fn tag(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let color = ui.visuals().text_color();
     let galley = ui.painter().layout_no_wrap(
         text.to_owned(),
-        egui::FontId::proportional(tokens.font.size_caption_plus),
+        egui::FontId::proportional(look::font_size(ui.ctx(), tokens.font.size_caption_plus)),
         color,
     );
     let size = egui::vec2(

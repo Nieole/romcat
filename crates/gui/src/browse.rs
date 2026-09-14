@@ -282,7 +282,7 @@ pub struct Screen {
     non_game_assets: Option<u64>,
     /// 「存成子库」那两个格子：名字与目标路径。
     save: SaveDraft,
-    /// **刮削面板**：抬头那个「刮削选中…」摊开的就是它（票 `gui-redesign/10`）。
+    /// **刮削面板**：屏头那颗「刮削…」摊开的就是它（票 `gui-redesign/10`）。
     ///
     /// 它住在这一屏里而不是自成一屏，是因为它的**范围**就是这一屏筛出来的那一批——
     /// 挪到别处去，那批东西就得再传一遍，而传着传着两边的数就对不上了。
@@ -1242,69 +1242,95 @@ impl Screen {
         }
     }
 
-    /// 顶栏上属于这一屏的那一段。
+    /// **屏头右侧**属于这一屏的那一段（[`crate::look::screen_header`]，票 `gui-looks-like-the-design/32`
+    /// 把它从顶栏原样挪进来，这一票照稿摆）：「刮削…」「★ 收藏」两颗小号按钮（[`look::small_buttons`]，
+    /// 照稿 `.btn.sm`，拿主意的人 2026-09-14 定，挂单 `Q877`），最后是开发用的「字体样张」开关。
+    /// 「N 个作品（共 M）」那一句在表格上方「列表」那一条的右端（[`Self::list_bar`]，挂单 `Q876`）。
     ///
-    /// 先同步一次窗口再画：顶栏与正文各画各的，而顶栏**先画**——不先同步，
-    /// 状态栏上那个行数就永远比表格慢一帧（与队列那一屏 `status` 同一条道理）。
+    /// 先同步一次窗口再画：屏头与正文各画各的，而屏头**先画**——不先同步，
+    /// 这一屏头一帧的行数就比表格慢一帧（与队列那一屏 `status` 同一条道理）。
     pub fn status(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         self.sync_window(&site.catalog);
-        ui.toggle_value(&mut self.sample, "字体样张");
-        // **「刮削选中…」摆在抬头**，与原型同一个位置。它只摊开面板——真按下去那一下
-        // 在面板底下，因为按之前该先看清那本账。
-        if ui
-            .button("刮削选中…")
-            .on_hover_text(
-                "对筛出来的这一批取元数据与媒体。四个旋钮定清楚要干什么，\
-                 按下去之前就看得见会发多少网络请求、大概多久。",
-            )
-            .clicked()
-        {
+        let (刮削, 收藏) = look::small_buttons(ui, |ui| {
+            // **「刮削…」摆在屏头**。它只摊开弹层——真按下去那一下在弹层底下，
+            // 因为按之前该先看清那本账；作用于哪一批，弹层标题上写着。
+            let 刮削 = ui
+                .button("刮削…")
+                .on_hover_text(
+                    "对勾中的那几个作品取元数据与媒体。四个旋钮定清楚要干什么，\
+                     按下去之前就看得见会发多少网络请求、大概多久。",
+                )
+                .clicked();
+            // **「★ 收藏」也摆在屏头**：它是这一屏按得最勤的一下（勾一批、按一下、接着筛下一批）。
+            // 取消收藏与自建合集是低频的，摆在左栏最底下。
+            let 收藏 = ui
+                .button("★ 收藏")
+                .on_hover_text(
+                    "把勾中的那一批全放进收藏。落沉淀库、锚在内容上——\
+                     删掉中立库重扫、改名、挪目录都还在。无判据的那些只钉得住本机路径，\
+                     按完的回执里会点名说有几个。\n\n\
+                     取消收藏与自建合集在左栏最底下：加收藏按得最勤，所以只有它在屏头。",
+                )
+                .clicked();
+            (刮削, 收藏)
+        });
+        if 刮削 {
             self.open_scrape(&site.catalog);
         }
-        // **「★ 收藏」也摆在抬头**，与原型同一个位置：它是这一屏按得最勤的一下
-        // （勾一批、按一下、接着筛下一批）。取消收藏与自建合集是低频的，
-        // 摆在左栏底下那块「把这批选中变成持久的东西」里，与「存成子库」做邻居。
-        if ui
-            .button("★ 收藏")
-            .on_hover_text(
-                "把勾中的那一批全放进收藏。落沉淀库、锚在内容上——\
-                 删掉中立库重扫、改名、挪目录都还在。无判据的那些只钉得住本机路径，\
-                 按完的回执里会点名说有几个。\n\n\
-                 取消收藏与自建合集在左栏底下那块「收藏与合集」里：\
-                 加收藏按得最勤，所以只有它在抬头。",
-            )
-            .clicked()
-        {
+        if 收藏 {
             self.favorite(site, tasks);
         }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if let Some(error) = self.window.error() {
-                ui.colored_label(ui.visuals().error_fg_color, error);
+        // **开发用的开关只在演示/开发构建里有**（拿主意的人 2026-09-14 定，挂单 `Q874`）：挂在现成的
+        // `demo` 特性上——正式构建里合成数据与实测开关一个字节都不进二进制，这颗开关跟它们同一个待遇。
+        #[cfg(feature = "demo")]
+        ui.toggle_value(&mut self.sample, "字体样张");
+    }
+
+    /// 「列表」那一条右端那一句（设计稿 `.tbar .cnt`）：没勾的时候是「**N** 个作品（共 M）」，勾了是
+    /// 「**已选 N 个作品** · N 个变体」；读库出错时是那一句错。
+    ///
+    /// **写法照稿**：从前这一句在顶栏上，还跟着「内存里几行、读库几次」，那是写给开发者的。
+    fn count_line(&self, ui: &egui::Ui) -> std::sync::Arc<egui::Galley> {
+        let tokens = Tokens::builtin();
+        let (次, 弱, 错) = {
+            let visuals = ui.visuals();
+            (
+                visuals.text_color(),
+                visuals.weak_text_color(),
+                visuals.error_fg_color,
+            )
+        };
+        // 照稿 `.tbar .cnt`：半号 `size-small-plus`、次一级的字色，数字加粗、括号里那半句弱字色（`.dim`）。
+        // 半号字号走 [`look::font_size`] 取整（票 `gui-looks-like-the-design/32` 定的统一入口）。
+        let 字号 = look::font_size(ui.ctx(), tokens.font.size_small_plus);
+        let 常规 = egui::FontId::proportional(字号);
+        let 加粗 = egui::FontId::new(字号, font::strong_family());
+        let mut job = egui::text::LayoutJob::default();
+        let mut 接 = |字: &str, 字体: &egui::FontId, 色: egui::Color32| {
+            job.append(字, 0.0, egui::TextFormat::simple(字体.clone(), 色));
+        };
+        if let Some(error) = self.window.error() {
+            接(error, &常规, 错);
+        } else {
+            let total = self.window.total();
+            let picked = self.picked.count(total);
+            if picked == 0 {
+                接(&thousands(total), &加粗, 次);
+                接(" 个作品", &常规, 次);
+                接(
+                    &format!("（共 {}）", scope_label(self.all_works)),
+                    &常规,
+                    弱,
+                );
             } else {
-                // **写法照稿**（`prototype.html` 表格上方那一句）：没勾的时候说筛出几个作品、库里共几个；
-                // 勾了就说勾了几个、底下几个变体。从前这儿还跟着「内存里几行、读库几次」，那是写给开发者的。
-                let total = self.window.total();
-                let picked = self.picked.count(total);
-                ui.label(if picked == 0 {
-                    format!(
-                        "{} 个作品（共 {}）",
-                        thousands(total),
-                        scope_label(self.all_works)
-                    )
-                } else {
-                    format!(
-                        "已选 {} 个作品{} · {} 个变体",
-                        thousands(picked),
-                        if self.picked.is_all() {
-                            "（全部筛选结果）"
-                        } else {
-                            ""
-                        },
-                        scope_label(self.scope),
-                    )
-                });
+                接(&format!("已选 {} 个作品", thousands(picked)), &加粗, 次);
+                if self.picked.is_all() {
+                    接("（全部筛选结果）", &常规, 次);
+                }
+                接(&format!(" · {} 个变体", scope_label(self.scope)), &常规, 次);
             }
-        });
+        }
+        ui.painter().layout_job(job)
     }
 
     /// 换过筛选或排序就把窗口作废重取。没换过是空操作。
@@ -1391,7 +1417,7 @@ impl Screen {
         &mut self.scrape
     }
 
-    /// **按「刮削选中…」那一下**：把这一批展开成变体的键，摊开刮削面板。
+    /// **按「刮削…」那一下**：把这一批展开成变体的键，摊开刮削面板。
     ///
     /// 范围就是[批量操作作用的那一批](Self::batch_variants)——屏上写几个、面板列几个、
     /// 按下去动几个，三处同一个数（票 `gui-redesign/03` 的口径，这一票不另算一份）。
@@ -1473,7 +1499,7 @@ impl Screen {
 
     /// 把勾中的那一批放进一个合集。
     ///
-    /// **一个都没勾就别动库**：与「刮削选中…」同一条规矩——摆出一份「作用于 0 个变体」
+    /// **一个都没勾就别动库**：与「刮削…」同一条规矩——摆出一份「作用于 0 个变体」
     /// 的回执，人只会对着它猜哪儿出了问题。
     fn join(&mut self, site: &Site, tasks: &mut Tasks, name: &str) {
         self.queue_collection(site, tasks, name, true, "加收藏");
@@ -1869,11 +1895,15 @@ impl Screen {
     }
 
     /// 表格上方「**列表**」那一条（设计稿 `#lbar` 的 `.cbar`）：次级底色、底下一条分隔线，
-    /// 摆一颗「在每行开头显示封面」和一句帮助。
+    /// 摆一颗「在每行开头显示封面」和一句帮助；右端是「N 个作品（共 M）」那一句（[`Self::count_line`]）。
+    ///
+    /// 稿上那一句在再上面一条 `.tbar` 里，与视图切换、几颗批量按钮做邻居：批量按钮挪进了屏头右侧，
+    /// 视图切换归票 `10`，那一条只剩这一句，于是摆进这一条的右端，不另起一条。
     fn list_bar(&mut self, ui: &mut egui::Ui) {
         let tokens = Tokens::builtin();
         let [上下, 左右] = tokens.space.list_bar_padding;
         let 线 = ui.visuals().widgets.noninteractive.bg_stroke;
+        let 这一句 = self.count_line(ui);
         let 这一条 = egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
             .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
@@ -1885,13 +1915,21 @@ impl Screen {
                     look::section(ui, "列表");
                     ui.checkbox(
                         &mut self.list_covers,
-                        egui::RichText::new("在每行开头显示封面").size(tokens.font.size_small_plus),
+                        egui::RichText::new("在每行开头显示封面")
+                            .size(look::font_size(ui.ctx(), tokens.font.size_small_plus)),
                     );
                     // 稿上这句后半截是「双击一行打开作品详情」：作品详情页还没有，先不说。
                     look::help(ui, "没有封面的作品显示平台色块");
                     if let Some(说的) = self.shelf.error() {
                         ui.colored_label(ui.visuals().error_fg_color, 说的);
                     }
+                    // 右端那一句：先量出它多宽、空出这一行剩下那一截再摆；摆不下就折到下一行的行首。
+                    let 宽 = 这一句.size().x;
+                    let 剩 = ui.available_size_before_wrap().x;
+                    if 宽 < 剩 {
+                        ui.add_space((剩 - 宽).floor());
+                    }
+                    ui.label(这一句);
                 });
             })
             .response
@@ -1998,7 +2036,7 @@ impl Screen {
 
                 pane_gap(ui);
                 section_title(ui, "收藏与合集", None).on_hover_text(
-                    "加收藏那一下在抬头（「★ 收藏」），因为它按得最勤：\
+                    "加收藏那一下在屏头（「★ 收藏」），因为它按得最勤：\
                      勾一批、按一下、接着筛下一批。取消收藏与自建合集的加减在这一栏最底下。",
                 );
                 section_gap(ui);
@@ -2085,9 +2123,11 @@ impl Screen {
                             照旧入库、永不导出——这颗开关只管列不列出来。";
         let tokens = Tokens::builtin();
         let mut listed = self.query.non_game_assets == NonGameAssets::Listed;
-        let 字 = egui::RichText::new("显示非游戏资产").size(tokens.font.size_small_plus);
+        // 两档半号字号走 `look::font_size` 取整（票 `gui-looks-like-the-design/32` 定的统一入口）。
+        let 字 = egui::RichText::new("显示非游戏资产")
+            .size(look::font_size(ui.ctx(), tokens.font.size_small_plus));
         let 小字 = egui::RichText::new(non_game_asset_label(self.non_game_assets))
-            .size(tokens.font.size_caption_plus)
+            .size(look::font_size(ui.ctx(), tokens.font.size_caption_plus))
             .color(ui.visuals().weak_text_color());
         // 照稿 `.opt`：勾选框在左，右边一栏两行——开关上的字、底下那句小字，**两行左沿对齐**。
         // 勾选框自己不带字，字摆在右边那一栏里，点字与点勾选框是同一下。
@@ -2184,7 +2224,7 @@ impl Screen {
     /// 作用范围是勾中的那一批，不是筛出来的全部；成员关系落沉淀库。这几句不写在屏上（票 `03`：
     /// 屏上不出现写给开发者的解释），留在这里和各颗按钮的悬停里。
     ///
-    /// **加收藏那一下不在这儿，在抬头**（原型钉的位置）：它按得最勤，不该藏在左栏底下。
+    /// **加收藏那一下不在这儿，在屏头**（原型钉的位置）：它按得最勤，不该藏在左栏底下。
     fn collection_actions(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         let 取消 = look::small_buttons(ui, |ui| {
             ui.button("☆ 取消收藏")
@@ -2785,7 +2825,7 @@ impl Screen {
         );
         section_gap(ui);
         if self.standing.is_empty() {
-            ui.weak("一个都没进。勾几行按抬头那颗「★ 收藏」，或者在左栏底下加进自建合集。");
+            ui.weak("一个都没进。勾几行按屏头那颗「★ 收藏」，或者在左栏底下加进自建合集。");
             return;
         }
         for (name, anchor) in &self.standing {
@@ -3169,7 +3209,9 @@ impl Screen {
         let mut dirty = false;
         let mut remove: Option<romcat_core::catalog::TitleRow> = None;
         for row in detail.titles.iter().take(TOP_TITLES) {
-            ui.horizontal(|ui| {
+            // **一条叫法长了就在这一栏里折**：横排里的字默认不折，伸出去会把这一栏撑宽，后面几行跟着按
+            // 撑宽了的宽度折、摆——底下那颗「中文」下拉就伸到侧边详情底下去了（合进外壳之后第八趟截图）。
+            ui.horizontal_top(|ui| {
                 if ui
                     .small_button("删")
                     .on_hover_text(
@@ -3190,9 +3232,11 @@ impl Screen {
                     row.seen,
                 );
                 if row.is_verdict() {
-                    ui.label(font::strong(line)).on_hover_text(&row.evidence);
+                    ui.add(egui::Label::new(font::strong(line)).wrap())
+                        .on_hover_text(&row.evidence);
                 } else {
-                    ui.label(line).on_hover_text(&row.evidence);
+                    ui.add(egui::Label::new(line).wrap())
+                        .on_hover_text(&row.evidence);
                 }
             });
         }
@@ -3279,7 +3323,8 @@ impl Screen {
         ));
         let mut lift: Option<TitleSuppression> = None;
         for one in self.suppressed_of(work).iter().take(TOP_TITLES) {
-            ui.horizontal(|ui| {
+            // 与标题集合那几行同一条道理：长了就在这一栏里折，不把这一栏撑宽。
+            ui.horizontal_top(|ui| {
                 if ui
                     .small_button("恢复")
                     .on_hover_text(
@@ -3290,13 +3335,16 @@ impl Screen {
                 {
                     lift = Some(one.clone());
                 }
-                ui.label(format!(
-                    "{}｜{} {}｜{}",
-                    one.value,
-                    one.language.label(),
-                    one.kind.label(),
-                    one.source,
-                ));
+                ui.add(
+                    egui::Label::new(format!(
+                        "{}｜{} {}｜{}",
+                        one.value,
+                        one.language.label(),
+                        one.kind.label(),
+                        one.source,
+                    ))
+                    .wrap(),
+                );
             });
         }
         if self.suppressed_of(work).len() > TOP_TITLES {
@@ -3359,7 +3407,7 @@ impl Screen {
         let mut dirty = false;
         let mut clear: Option<(AnchorKind, Field)> = None;
         for item in &detail.values {
-            ui.horizontal(|ui| {
+            ui.horizontal_top(|ui| {
                 if item.is_verdict() {
                     if ui
                         .small_button("撤")
@@ -3374,7 +3422,8 @@ impl Screen {
                 } else {
                     ui.add_space(24.0);
                 }
-                // **一行画得下的那一截**：简介能有 4,000 字，横排里不折行（见 `one_line`）。
+                // **一行画得下的那一截**：简介能有 4,000 字，先收成一行（见 `one_line`）；收过的那一行
+                // 仍长过这一栏就在栏里折，不把这一栏撑宽（与标题集合那几行同一条道理）。
                 let short = one_line(&item.value.value);
                 let line = format!(
                     "{} · {}｜{}｜{}",
@@ -3384,9 +3433,9 @@ impl Screen {
                     short.as_deref().unwrap_or(&item.value.value),
                 );
                 let response = if item.is_verdict() {
-                    ui.label(font::strong(line))
+                    ui.add(egui::Label::new(font::strong(line)).wrap())
                 } else {
-                    ui.label(line)
+                    ui.add(egui::Label::new(line).wrap())
                 };
                 if short.is_some() {
                     // 收窄过的那些，整段挂在悬停里——**面板上画不下不等于看不到**。
@@ -3407,8 +3456,8 @@ impl Screen {
         }
         if detail.values.is_empty() {
             // **不指向终端**（票 `gui-self-sufficient/09` 验收第 5 条）：刮削在界面上
-            // 早有自己的入口，那颗「刮削选中…」就在这一屏的抬头上。
-            ui.weak("一条刮削结论都没有。点抬头那颗「刮削选中…」采一趟，或者在这儿手写。");
+            // 早有自己的入口，那颗「刮削…」就在这一屏的屏头上。
+            ui.weak("一条刮削结论都没有。点屏头那颗「刮削…」采一趟，或者在这儿手写。");
         }
         // 作品未知时只挂得到变体那一层——**作品锚点是作品名**，没有名字就没有锚点。
         let anchors: Vec<AnchorKind> = if detail.work.is_some() {

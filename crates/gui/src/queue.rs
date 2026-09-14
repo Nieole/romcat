@@ -2272,7 +2272,7 @@ fn judged_text(judged: &MatchJudged) -> String {
     } else {
         text.push_str(
             "；清掉的那些值要回来，得先改判成「就是这条」，\
-             再采一趟刮削——浏览屏抬头那颗「刮削选中…」。",
+             再采一趟刮削——浏览屏屏头那颗「刮削…」。",
         );
     }
     text

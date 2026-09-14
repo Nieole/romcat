@@ -658,8 +658,8 @@ pub fn note_box<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R
         .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.style_mut().override_font_id =
-                Some(egui::FontId::proportional(tokens.font.size_small_plus));
+            let 字号 = font_size(ui.ctx(), tokens.font.size_small_plus);
+            ui.style_mut().override_font_id = Some(egui::FontId::proportional(字号));
             add(ui)
         })
         .inner
@@ -755,7 +755,7 @@ pub fn facet_chip(ui: &mut egui::Ui, selected: bool, value: &str, count: &str) -
     );
     let 数 = ui.painter().layout_no_wrap(
         count.to_owned(),
-        egui::FontId::monospace(tokens.font.size_mini),
+        egui::FontId::monospace(font_size(ui.ctx(), tokens.font.size_mini)),
         数色,
     );
     let 边 = tokens.layout.facet_chip_padding;

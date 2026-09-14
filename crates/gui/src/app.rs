@@ -368,7 +368,7 @@ impl App {
         (&mut self.browse, &mut self.site)
     }
 
-    /// 浏览那一屏、它的库、**再加任务台**。按「刮削选中…」之后那一下三样都要：
+    /// 浏览那一屏、它的库、**再加任务台**。按「刮削…」之后那一下三样都要：
     /// 展开这一批的键、算那本账、把活排到台上去（票 `gui-redesign/10`）。
     pub fn browse_site_and_tasks(&mut self) -> (&mut browse::Screen, &mut Site, &mut task::Tasks) {
         (&mut self.browse, &mut self.site, &mut self.board)
@@ -747,8 +747,8 @@ impl App {
                 roots.status(ui, site);
             }
             View::Browse => {
-                // **抬头上那颗「★ 收藏」真的写库**（票 `gui-redesign/06`），
-                // 所以这一屏的抬头拿的是可变的那一份。它同时**往任务台上排活**
+                // **屏头上那颗「★ 收藏」真的写库**（票 `gui-redesign/06`），
+                // 所以这一屏的屏头拿的是可变的那一份。它同时**往任务台上排活**
                 // ——那一下在真库量级上是几秒的读（票 `parking-3/09`）。
                 let (browse, site, board) = (&mut self.browse, &mut self.site, &mut self.board);
                 browse.status(ui, site, board);

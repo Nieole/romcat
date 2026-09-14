@@ -682,7 +682,7 @@ fn 点左栏入口就换到那一屏_屏头写着那一屏_右侧是它原来在
     for (view, 入口, 右侧那一段) in [
         (View::Library, "库", 根数.as_str()),
         (View::Queue, "待确认", "重新列队列"),
-        (View::Browse, "浏览", "刮削选中…"),
+        (View::Browse, "浏览", "刮削…"),
         (View::Sublibraries, "子库", "重新列一遍"),
         (View::Tasks, "任务", "个进行中"),
     ] {
@@ -784,7 +784,7 @@ fn 左栏的计数取各屏与核心库现成的那个数() {
     let 屏上 = 画出来的字(&out);
     let 作品 = 左栏计数(&out, "浏览").unwrap_or_else(|| panic!("浏览那一项没画数：\n{屏上}"));
     assert!(
-        屏上.contains(&format!("{作品} 个作品；")),
+        屏上.contains(&format!("{作品} 个作品（共 {作品}）")),
         "左栏说 {作品} 个作品，浏览屏自己说的不是这个数：\n{屏上}",
     );
 

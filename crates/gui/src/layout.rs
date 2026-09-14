@@ -111,21 +111,24 @@ pub struct Boundary {
 }
 
 /// 浏览屏左边那栏：五个一按就有的档 ＋ 条件组 ＋ 搜索 ＋ 收藏合集 ＋ 存成子库。
+///
+/// 默认宽照稿（`prototype.html` 的 `.browse`：`232px minmax(0,1fr) 296px`，票 `gui-looks-like-the-design/09`）：
+/// 外壳左边多了一条导航之后，1280 宽的窗口里照旧的 230 与 360 只给表格剩 494，作品那一列连它的最窄都摆不下。
 pub const FILTER: Boundary = Boundary {
     id: "筛选",
     screen: View::Browse,
     side: Side::Left,
-    default: 230.0,
+    default: 232.0,
     min: 150.0,
     share: 0.35,
 };
 
-/// 浏览屏右边那块：作品 → 变体 → 文件 → 媒体。
+/// 浏览屏右边那块：作品 → 变体 → 文件 → 媒体。默认宽照稿，见 [`FILTER`]。
 pub const DETAIL: Boundary = Boundary {
     id: "浏览详情",
     screen: View::Browse,
     side: Side::Right,
-    default: 360.0,
+    default: 296.0,
     min: 200.0,
     share: 0.45,
 };
