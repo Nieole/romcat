@@ -1516,12 +1516,18 @@ impl Screen {
                 look::help(ui, "请先连接设备").on_hover_text(悬停);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if look::small_buttons(ui, |ui| look::warn_button(ui, "删除子库"))
-                    .on_hover_text(
-                        "删掉这个子库的定义与它的规则、例外、清单；设备上的文件一个字节都不动。\
+                if look::small_buttons(ui, |ui| {
+                    ui.scope(|ui| {
+                        look::warn_button(ui.visuals_mut());
+                        ui.button("删除子库")
+                    })
+                    .inner
+                })
+                .on_hover_text(
+                    "删掉这个子库的定义与它的规则、例外、清单；设备上的文件一个字节都不动。\
                          按下去先问一层。",
-                    )
-                    .clicked()
+                )
+                .clicked()
                 {
                     pressed = Some(Pressed::Remove);
                 }
@@ -3138,7 +3144,7 @@ fn run_sync(
 ///
 /// ## 画法照稿（`.trim`）
 ///
-/// 一圈描边的框：头上一条 `lo-soft` 底（[`look::Tone::Danger`]）写超出多少；表每一行之间一道分隔线，
+/// 一圈描边的框：头上一条 `lo-soft` 底（[`look::Tone::Bad`]）写超出多少；表每一行之间一道分隔线，
 /// 格子内边距取令牌 `cell-padding`（稿子写的是 6，令牌里没有这一档，挂单 `Q854`），「排除」是小号按钮；
 /// 放得下之后的那几行**整行**淡下去（按钮一起）；「排除到这一项就能放下」那一行垫 `hi-soft`
 /// （[`look::Tone::Good`]）；全排除也不够时底下再一条 `lo-soft` 底说还差多少。
@@ -3146,7 +3152,7 @@ fn trim_ui(ui: &mut egui::Ui, room: &Room) -> Option<String> {
     let over = room.over_capacity?;
     let fits = room.fits_after();
     let visuals = ui.visuals().clone();
-    let (超字, 超底) = look::tone_colors(look::Tone::Danger, &visuals);
+    let (超字, 超底) = look::tone_colors(look::Tone::Bad, &visuals);
     let (放下字, 放下底) = look::tone_colors(look::Tone::Good, &visuals);
     let tokens = Tokens::builtin();
     let [格上下, 格左右] = tokens.space.cell_padding;

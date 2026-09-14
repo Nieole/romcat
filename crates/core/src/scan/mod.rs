@@ -556,13 +556,18 @@ pub fn scan(
     if interrupted {
         // **停在半路**：这一趟照旧返回，可它只走了一半——说出口，任务台才记得对
         // （[`Handle::halfway`]）。扫描留下的续跑依据是**断点**（同步那一侧是清单）。
+        //
+        // **下次从哪儿继续也说在这一句里**：任务屏历史那一行只画它，界面不另编
+        // （票 `gui-looks-like-the-design/25`）。断点的 `pending` 含着停下时正在扫的目录，
+        // 于是续跑只重扫那几个，扫完的不再走（本模块开头「可中断可续跑」那一条）。
+        // 界面上的「重扫」就是续跑，命令行是 `--resume`。
         task.halfway(format!(
             "按停时走过 {} 个条目{}",
             crate::report::thousands(progress.delta.total()),
             if checkpoint_path.is_some() {
-                "，断点写下了"
+                "，断点写下了；续跑从断点接着走，扫完的目录不再重扫"
             } else {
-                "，这一趟没设断点"
+                "，这一趟没设断点；下一趟得从头扫"
             },
         ));
     }

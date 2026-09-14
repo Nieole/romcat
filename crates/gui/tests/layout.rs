@@ -684,7 +684,8 @@ fn 点左栏入口就换到那一屏_屏头写着那一屏_右侧是它原来在
         (View::Queue, "待确认", "重新列队列"),
         (View::Browse, "浏览", "刮削选中…"),
         (View::Sublibraries, "子库", "重新列一遍"),
-        (View::Tasks, "任务", "个进行中"),
+        // 任务屏照稿重排之后（票 `gui-looks-like-the-design/25`）右侧只放「清空历史」，顶栏那句摘要照稿不要了。
+        (View::Tasks, "任务", "清空历史"),
     ] {
         let out = 点左栏(&ctx, &mut app, 入口);
         assert_eq!(app.view(), view, "点了左栏的「{入口}」");

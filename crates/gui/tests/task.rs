@@ -15,7 +15,7 @@ use std::time::Duration;
 use romcat_core::collection::CollectionError;
 use romcat_core::task::{Cutoff, Ending, Halted, Handle, Live};
 use romcat_gui::app::{App, View};
-use romcat_gui::task::Product;
+use romcat_gui::task::{Clock, Product};
 use romcat_gui::{demo, headless};
 
 mod shared;
@@ -349,29 +349,72 @@ fn 四种收场在任务屏历史里各画各的话() {
     画到台上空了(&ctx, &mut app);
 
     let 屏上 = 一帧的字(&ctx, &mut app);
-    for 那一句 in [
-        "完成",
-        "已取消",
-        "部分完成：按停时落了 1 件，清单记着到这儿为止目标上真实有什么",
-        "失败：在「认根」这一步，卡不在位",
-    ] {
-        assert!(
-            屏上.lines().any(|line| line.trim() == 那一句),
-            "屏上没有这一行「{那一句}」：\n{屏上}",
+    let 行: Vec<&str> = 屏上.lines().map(str::trim).collect();
+    // **历史四列**，照设计稿的次序：任务、收场、耗时、时间。第二列设计稿写的是「结果」，
+    // 那是词表**收场**那一条的避用词（挂单 `Q832`）。
+    assert!(
+        行.windows(4)
+            .any(|four| four == ["任务", "结果", "耗时", "时间"]),
+        "历史那张表的表头不是「任务 / 结果 / 耗时 / 时间」：\n{屏上}",
+    );
+    // **「收场」那一列只摆那一档的词，逐字与词表一致**，四趟四个词各一次——
+    // 「部分完成」不是「完成」的一种写法。
+    for 词 in ["完成", "已取消", "部分完成", "失败"] {
+        assert_eq!(
+            行.iter().filter(|line| **line == 词).count(),
+            1,
+            "「结果」那一列里「{词}」不是正好一行：\n{屏上}",
         );
     }
-    // **「部分完成」不是「完成」的一种写法**：那一行说得出留下了什么。
+    // 说明摆在任务名底下：留下了什么、停在哪一步为什么——整句由核心库说。
+    for 那一句 in [
+        "按停时落了 1 件，清单记着到这儿为止目标上真实有什么",
+        "在「认根」这一步，卡不在位",
+    ] {
+        assert!(
+            行.contains(&那一句),
+            "任务名底下没有这一句「{那一句}」：\n{屏上}",
+        );
+    }
+    // 「耗时」与「时间」两列画的是任务台记下的那两个数，时间照稿画**本地时间的短格式**：
+    // 钉一只钟（东八区、此刻与收场同一天），期望值是手算的——2026-09-13 14:05（UTC）在东八区是 22:05。
+    let 收场于 = 1_789_308_300;
+    app.pin_task_clock(Clock {
+        elapsed: Duration::from_secs(192),
+        ended_at: 收场于,
+        utc_offset: 8 * 3_600,
+        now: 收场于,
+    });
+    let 屏上 = 一帧的字(&ctx, &mut app);
+    for 那一格 in ["3 分 12 秒", "09-13 22:05"] {
+        assert_eq!(
+            屏上.lines().filter(|line| line.trim() == 那一格).count(),
+            4,
+            "四趟历史不是每一行都画了「{那一格}」：\n{屏上}",
+        );
+    }
+    // **不是今年的才带年份**：此刻挪到一年以后，同一个收场时刻就得写全「2026-09-13 22:05」。
+    app.pin_task_clock(Clock {
+        elapsed: Duration::from_secs(192),
+        ended_at: 收场于,
+        utc_offset: 8 * 3_600,
+        now: 收场于 + 365 * 86_400,
+    });
+    let 屏上 = 一帧的字(&ctx, &mut app);
     assert_eq!(
-        屏上.lines().filter(|line| line.trim() == "完成").count(),
-        1,
-        "四趟活里只有一趟是真跑完的：\n{屏上}",
+        屏上
+            .lines()
+            .filter(|line| line.trim() == "2026-09-13 22:05")
+            .count(),
+        4,
+        "收场不在今年，时间那一格却没带年份：\n{屏上}",
     );
 }
 
 #[test]
 fn 算不出还剩多久的那一帧屏上一个剩余时间的字都没有() {
     // 这张票的全部价值在这一条：**工具算不出来的时候一个字都不画**。
-    // 一个会跳的「约剩」比没有「约剩」更坏——维护者会照它安排接下来一小时干什么。
+    // 一个会跳的「剩余约」比没有「剩余约」更坏——维护者会照它安排接下来一小时干什么。
     //
     // **两档都得验，因为它们是两条不同的路。** 只验一档的话，另一档哪天开始画出个
     // 兜底值来，这一屏一条都不响：
@@ -428,7 +471,7 @@ fn 算不出还剩多久的那一帧屏上一个剩余时间的字都没有() {
 
 #[test]
 fn 走了一半时屏上那一句写着约剩多少() {
-    // 「已用 X」与「约剩 X」两个数并排。口径：已用时间 ÷ 已完成比例 − 已用时间。
+    // 「已用 X」与「剩余约 X」两个数并排。口径：已用时间 ÷ 已完成比例 − 已用时间。
     let ctx = headless::context();
     let mut app = 开一个();
     app.show_view(View::Tasks);
@@ -450,16 +493,16 @@ fn 走了一半时屏上那一句写着约剩多少() {
             .unwrap_or_else(|| panic!("屏上没有「{前缀}」那一段：\n{屏上}"))
             .to_string()
     };
-    // **两个数并排**：「已用」没被挤掉，「约剩」也写出来了。
+    // **两个数并排**：「已用」没被挤掉，「剩余约」也写出来了。
     let 已用 = 那一段("已用 ");
-    let 约剩 = 那一段("约剩 ");
+    let 剩余约 = 那一段("剩余约 ");
     // **数也得对得上，不能只是「有这么一句」。** 走了一半时口径自己说了算：
     // 已用 ÷ 0.5 − 已用 = 已用——于是屏上这两个数必然印成同一串字。这一条不看挂钟
     // （两句话取的是同一帧那一份 `Live`），却钉住了界面画的确实是核心折出来的那个数：
     // 换成一个常数、或者除错了倍数，它当场红。
     assert_eq!(
-        约剩, 已用,
-        "走了一半时「约剩」该与「已用」是同一个数（已用 ÷ 0.5 − 已用 = 已用）：\n{屏上}",
+        剩余约, 已用,
+        "走了一半时「剩余约」该与「已用」是同一个数（已用 ÷ 0.5 − 已用 = 已用）：\n{屏上}",
     );
 
     app.tasks_mut().stop(id);
@@ -531,4 +574,243 @@ fn 占位活放行了就收场_丢掉它也一样() {
     drop(丢掉的);
     画到台上空了(&ctx, &mut app);
     assert_eq!(app.tasks().history()[0].id, 丢掉的号);
+}
+
+// ——— 照稿重排（票 `gui-looks-like-the-design/25`）———
+
+#[test]
+fn 台上什么都没有时三块各说一句空态() {
+    // 空台是这一屏最常见的样子：开窗、还没点过任何工序。正在运行、等待中、历史三块
+    // **各说一句**，人才分得清「本来就空着」与「没画出来」。
+    let ctx = headless::context();
+    let mut app = 开一个();
+    app.show_view(View::Tasks);
+    跑一帧(&ctx, &mut app);
+
+    let 屏上 = 一帧的字(&ctx, &mut app);
+    for 那一句 in [
+        // 设计稿 `.card.empty`：一句居中（票 `gui-looks-like-the-design/25`，挂单 `Q839`）。
+        "当前没有运行中的任务。在「库」页面运行任意工序后，任务会显示在这里。",
+        "没有等待中的任务。",
+        // 不说「已完成」：历史里装着四档收场，「完成」只是其中一档。
+        "还没有已完成的任务。",
+    ] {
+        assert!(
+            屏上.lines().any(|line| line.trim() == 那一句),
+            "空台上没有这一句「{那一句}」：\n{屏上}",
+        );
+    }
+    // 空台上**不摆按不了的东西**：没有在跑的就没有「停下」，没有排着的就没有「移除」。
+    assert!(!屏上.contains("停止"), "空台上摆了「停止」：\n{屏上}");
+    assert!(!屏上.contains("移除"), "空台上摆了「移除」：\n{屏上}");
+}
+
+#[test]
+fn 正在跑的那一张卡写着进度已用约剩在做什么还有停下() {
+    // 设计稿那张卡：名字、停下、进度条，底下一排「进度 / 已用 / 剩余约 / 在做什么」。
+    // 数全从任务台那一份快照来（`Live`），这一层只画。
+    let ctx = headless::context();
+    let mut app = 开一个();
+    app.show_view(View::Tasks);
+    // 那一趟**报完进度就发信号**，测试等这一声再看屏——不睡、不数挂钟。
+    let (报完了, 等它报完) = 一对信号();
+    let 占位 = 占位活::照这样排上(app.tasks_mut(), "扫描 · 主库", move |task, 等收场| {
+        task.steps(4);
+        task.step("认根")?;
+        task.step("挨个文件过一遍")?;
+        task.tick(3, 6);
+        报完了.发();
+        等收场.等();
+        task.check()?;
+        Err(Cutoff::failed("这一趟本来就只是占着位子"))
+    });
+    等它报完.等();
+
+    let 屏上 = 一帧的字(&ctx, &mut app);
+    let 行: Vec<&str> = 屏上.lines().map(str::trim).collect();
+    // 四步走完一步、第二步走了一半：(1 + 3/6) ÷ 4 = 37.5%，四舍五入印成 38%。
+    for 那一句 in [
+        "扫描 · 主库",
+        "进度 38%",
+        "2/4 挨个文件过一遍（3/6）",
+        "停止",
+    ] {
+        assert!(
+            行.contains(&那一句),
+            "正在跑的那一张卡上没有「{那一句}」：\n{屏上}",
+        );
+    }
+    for 前缀 in ["已用 ", "剩余约 "] {
+        assert!(
+            行.iter().any(|line| line.starts_with(前缀)),
+            "正在跑的那一张卡上没有「{前缀}」那一段：\n{屏上}",
+        );
+    }
+    // **一次只跑一趟**（词表**任务台**）：屏上把这条说出口，人才不会以为排着的那几趟卡住了。
+    assert!(
+        行.iter().any(|line| line.contains("一次只运行一个")),
+        "屏上没说一次只运行一个：\n{屏上}",
+    );
+
+    占位.按停(app.tasks_mut());
+    画到台上空了(&ctx, &mut app);
+}
+
+#[test]
+fn 等待中的每一趟各有一颗移除_按下只撤掉那一趟() {
+    // 设计稿「等待中」那一块：一趟一行，右边一颗「移除」。按下去撤掉的**只有那一趟**：
+    // 走任务台现成的入口（`Board::stop` 对还排着的那一趟就是撤掉），排在后面的照旧排着，
+    // 正在跑的那一趟一点不受影响。
+    let ctx = headless::context();
+    let mut app = 开一个();
+    app.show_view(View::Tasks);
+    // 台上先占住，后面两趟才稳稳停在队里——不带竞态。
+    let 占位 = 占位活::排上(app.tasks_mut(), "装作在扫一趟库");
+    let 头一趟 = app.tasks_mut().queue("识别 · 全部变体", |_| Ok(一份产物()));
+    let 第二趟 = app.tasks_mut().queue("整理标题", |_| Ok(一份产物()));
+
+    let 屏上 = 一帧的字(&ctx, &mut app);
+    let 行: Vec<&str> = 屏上.lines().map(str::trim).collect();
+    for 名字 in ["识别 · 全部变体", "整理标题"] {
+        assert!(行.contains(&名字), "等待中那一块没有「{名字}」：\n{屏上}");
+    }
+    assert_eq!(
+        行.iter().filter(|line| **line == "移除").count(),
+        2,
+        "排着的两趟不是各有一颗「移除」：\n{屏上}",
+    );
+
+    // 头一颗「移除」是排在最前面那一趟的。
+    let 屏上 = shared::点一下(&ctx, "移除", |ui| app.ui(ui));
+    let 排着的: Vec<u64> = app.tasks().queued().iter().map(|(id, _)| *id).collect();
+    assert_eq!(排着的, vec![第二趟], "按下头一颗「移除」撤掉的不是头一趟");
+    assert_eq!(
+        屏上.lines().filter(|line| line.trim() == "移除").count(),
+        1,
+        "撤掉一趟之后「移除」没少一颗：\n{屏上}",
+    );
+    assert_eq!(
+        app.tasks().running().map(|live| live.id),
+        Some(占位.id()),
+        "撤掉排着的那一趟碰到了正在跑的那一趟",
+    );
+    // 撤掉的那一趟**照任务台原有的账记成已取消**（交回排它的那一屏，不然那一屏一直等它）。
+    let 撤掉的 = app
+        .tasks()
+        .history()
+        .iter()
+        .find(|record| record.id == 头一趟)
+        .expect("撤掉的那一趟在历史里有一条");
+    assert_eq!(撤掉的.ending, Ending::Stopped);
+
+    占位.按停(app.tasks_mut());
+    画到台上空了(&ctx, &mut app);
+}
+
+/// 状态栏上任务那一句：以这一趟的名字加「 · 」起头的那一行。没有就是 `None`。
+fn 状态栏那一句(屏上: &str, 名字: &str) -> Option<String> {
+    let 起头 = format!("{名字} · ");
+    屏上
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with(&起头))
+        .map(str::to_string)
+}
+
+#[test]
+fn 任务跑着的时候别的屏照常用_底下状态栏说的与任务屏是同一件事() {
+    // 设计稿每一屏底下都有一条**状态栏**：左边是任务台那一小截（哪一趟、走了几成、剩余约多少，
+    // 点一下去任务屏），右边是「ROM 只读」与工作目录。它与任务屏那张卡读的是**同一份**
+    // 任务台快照（`Live`），于是人在浏览屏上看见的「38%」与切到任务屏看见的「进度 38%」
+    // 是同一个数——不是两处各算各的。
+    let ctx = headless::context();
+    let mut app = 开一个();
+    app.show_view(View::Browse);
+
+    let 空台时 = 一帧的字(&ctx, &mut app);
+    for 那一句 in ["任务台空闲", "ROM 只读"] {
+        assert!(
+            空台时.lines().any(|line| line.trim() == 那一句),
+            "空台时状态栏上没有「{那一句}」：\n{空台时}",
+        );
+    }
+    assert!(
+        空台时
+            .lines()
+            .any(|line| line.trim().ends_with("romcat-测试-任务")),
+        "状态栏上没有工作目录：\n{空台时}",
+    );
+    // **截图那一路把工作目录定死**：测试的工作目录是临时目录，每台机器、每一趟都不一样。
+    app.set_workspace_label("~/.local/share/romcat");
+    let 定死之后 = 一帧的字(&ctx, &mut app);
+    assert!(
+        定死之后
+            .lines()
+            .any(|line| line.trim() == "~/.local/share/romcat"),
+        "定死的工作目录没画到状态栏上：\n{定死之后}",
+    );
+
+    let (报完了, 等它报完) = 一对信号();
+    let 占位 = 占位活::照这样排上(app.tasks_mut(), "扫描 · 主库", move |task, 等收场| {
+        task.steps(4);
+        task.step("认根")?;
+        task.step("挨个文件过一遍")?;
+        task.tick(3, 6);
+        报完了.发();
+        等收场.等();
+        task.check()?;
+        Err(Cutoff::failed("这一趟本来就只是占着位子"))
+    });
+    等它报完.等();
+
+    // **别的屏照常用**：浏览屏这一帧照样画得出行，底下那条写着这一趟走到哪儿了。
+    let 浏览屏上 = 一帧的字(&ctx, &mut app);
+    assert!(app.window().retained() > 0, "任务跑着的时候浏览屏空了");
+    let 那一句 = 状态栏那一句(&浏览屏上, "扫描 · 主库")
+        .unwrap_or_else(|| panic!("浏览屏底下没说台上在跑哪一趟：\n{浏览屏上}"));
+    // 四步走完一步、第二步走了一半：37.5%，印成 38%——与任务屏那张卡上同一个数。
+    assert!(
+        那一句.starts_with("扫描 · 主库 · 38% · 剩余约 "),
+        "状态栏那一句不是「名字 · 百分比 · 剩余约」：{那一句}",
+    );
+    assert!(
+        !浏览屏上.lines().any(|line| line.trim() == "任务台空闲"),
+        "台上有活，状态栏还说空闲：\n{浏览屏上}",
+    );
+
+    // 点一下那一句，去任务屏：那张卡上写的是同一个数，底下那条照旧在。
+    let 任务屏上 = shared::点一下(&ctx, "扫描 · 主库 · ", |ui| app.ui(ui));
+    assert_eq!(app.view(), View::Tasks, "点状态栏上任务那一句没去任务屏");
+    let 行: Vec<&str> = 任务屏上.lines().map(str::trim).collect();
+    assert!(
+        行.contains(&"进度 38%"),
+        "任务屏那张卡上不是 38%：\n{任务屏上}"
+    );
+    assert!(
+        状态栏那一句(&任务屏上, "扫描 · 主库")
+            .is_some_and(|line| line.starts_with("扫描 · 主库 · 38% · 剩余约 ")),
+        "任务屏底下那条与卡上说的不是同一个数：\n{任务屏上}",
+    );
+    // **同一帧里读的是同一份快照**：剩余约多少跟着挂钟走，两处各问一次任务台的话，同一帧里
+    // 状态栏与卡上就会印出两个不一样的数。
+    let 卡上剩余约 = 行
+        .iter()
+        .find_map(|line| line.strip_prefix("剩余约 "))
+        .unwrap_or_else(|| panic!("任务屏那张卡上没有剩余约：\n{任务屏上}"))
+        .to_string();
+    let 栏上剩余约 = 状态栏那一句(&任务屏上, "扫描 · 主库")
+        .and_then(|line| line.split(" · 剩余约 ").nth(1).map(str::to_string))
+        .unwrap_or_else(|| panic!("状态栏上没有剩余约：\n{任务屏上}"));
+    assert_eq!(
+        栏上剩余约, 卡上剩余约,
+        "同一帧里状态栏与卡上的剩余约不是同一个数：\n{任务屏上}",
+    );
+
+    占位.按停(app.tasks_mut());
+    画到台上空了(&ctx, &mut app);
+    let 收场后 = 一帧的字(&ctx, &mut app);
+    assert!(
+        收场后.lines().any(|line| line.trim() == "任务台空闲"),
+        "收场之后状态栏没回到空闲：\n{收场后}",
+    );
 }
