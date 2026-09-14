@@ -47,3 +47,8 @@
   - 保留：刮削那一行不画稿上那两句，画口径 `SCRAPE_BASIS`（照稿换成「统计的是没有任何刮削结果的变体」，核心 `刮削那一行带着口径_说清数的是没有任何刮削结果的变体`）；识别那一行没做完时说 DAT 库在不在那三句在界面（`stages::IDENTIFY_NEEDS_DAT` 等，稿上原话）。
 - [x] 这一屏的基线图入库（票 05 之后）
   - 证据：`crates/gui/tests/snapshots/library/` 六张：空库、扫过两个根、三块收起 × 浅色 / 暗色，整扇主窗口（左栏、屏头「添加根…」、底部状态栏）1280×800。提交 `7162138`。拿主意的人 2026-09-14 点头：库屏接外壳与状态栏。点头之前改过几轮：工序行照稿（序号圆点、做完 / 在等两种样式、按钮动词，挂单 `Q825`–`Q830`、`Q881`）；接手外壳（挂单 `Q866` / `Q868` 库屏那一半）；根表路径列被挤碎——两颗按钮窄时竖着叠，路径字号照稿 `.mono`；空库数据源那句段末不留孤字（`look::weak_paragraph`）。截图测试里同时钉着：右栏里每颗按钮都落在栏里、「选择…」贴右内边距、「下载」「移除」右沿对齐（`右栏的按钮都落在右栏里`），上次扫描时刻与「未下载」画成一行，两条路径最多折两行（`折行不超过`），数据源那句末行不只剩一个字（`段末不留孤字`）。snap-16（HEAD `b1d5c29`，已合 main `1655c1c`）：带更新重出 `库屏_` 6 passed，不带更新整份截图 23 passed，`roots` 77、`program` 43 passed（`/Users/nicoer/dev/game-wt/logs/slot-4-gl06-snap-16.log`）。
+
+**门禁**（2026-09-14，分支 `q5/gl-06-library-screen-six-stages`，最新 HEAD `90d7ef5`——基线入库、勾票、修门禁两处红、合 main `0b2c276`（票 20 子库屏）之后，`cargo xtask gate -j 3 --test-threads 3 --keep-going`）：
+fmt / glossary / check / clippy / test / doc 六步绿；test 76 个目标、2134 条通过、0 条失败、2 条忽略。日志 `/Users/nicoer/dev/game-wt/logs/slot-4-gl06-gate-final-3.log`。
+合 main 之后先不带更新跑整份截图：33 条对着入库的基线通过，库屏 6 张一像素不变（`slot-4-gl06-snap-17.log`）。
+前两趟：头一趟（HEAD `b6a15cf`，`slot-4-gl06-gate-final.log`）红两步——`tests/layout.rs` 左栏切屏那条还认库屏屏头的「N 个根」（照稿删了，改认「添加根…」）、三处公开文档链到私有项（改成不带链接的反引号），修复提交 `0f505fb`；第二趟（HEAD `0f505fb`，`slot-4-gl06-gate-final-2.log`）六步绿，2101 条通过。
