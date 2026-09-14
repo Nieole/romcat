@@ -602,6 +602,23 @@ impl Screen {
         if self.previewing.is_some() {
             return;
         }
+        // **卡不在位是按下去之前就判得出的**（票 `gui-looks-like-the-design/07`）：不排，只在屏上
+        // 说为什么不行、去哪儿办。排上去的话那一趟在「看一眼目标」那一下撞上、记一条失败——任务
+        // 历史里就多一条压根没开跑的「失败」。查的是子库自己那条读盘路径（`Sublibrary::read_path`，
+        // ADR-0020），与那一趟看的是同一个目录。
+        //
+        // **记着的前端格式这一版没有适配器，不在这里拦**：找不到时该说哪句话是核心库的事，而核心库
+        // 对子库没有对外的那一问（`ExportSetup::adapter` 的文档：界面那一层不自己去
+        // `adapter::find`）。它照旧排上去，在那一趟里记失败（挂单 `Q797`）。
+        if let Some(why) = self
+            .list
+            .iter()
+            .find(|sublibrary| sublibrary.name == name)
+            .and_then(|sublibrary| target_absent(&sublibrary.read_path()))
+        {
+            self.error = Some(why);
+            return;
+        }
         self.invalidate();
         self.error = None;
         let workspace = self.workspace.clone();
@@ -814,8 +831,9 @@ impl Screen {
 
     /// **同步**：把差量真正落到目标设备上，往[任务台](crate::task)上排一趟。
     ///
-    /// 三道闸一道都不能少：**得先有预览**（ADR-0016）、**有删除就得先点头**（ADR-0015）、
-    /// **目标不许落在主库里**（ADR-0004，判据在核心里）。三道都过在**排它之前**——
+    /// 四道闸一道都不能少：**得先有预览**（ADR-0016）、**目标得在位**（票
+    /// `gui-looks-like-the-design/07`）、**有删除就得先点头**（ADR-0015）、
+    /// **目标不许落在主库里**（ADR-0004，判据在核心里）。四道都过在**排它之前**——
     /// 排上去之后没人再看第二眼。
     ///
     /// ## 台上那一趟认的是排它时那份计划
@@ -835,6 +853,14 @@ impl Screen {
             self.error = Some("还没排过差量预览。先看一遍它要做什么。".to_string());
             return;
         };
+        // **排完差量之后卡被拔了，就不排**：同步那一趟起手就把目标根建出来，卡拔了之后那个路径
+        // 指着的是本机的盘——一份子库会被悄悄写进本机一个新建的空目录里。这是按下去之前就判得出
+        // 的，只在屏上说（票 `gui-looks-like-the-design/07`）。**写到一半写不进**（卡满了、中途
+        // 被拔）是跑起来才撞上的，照旧记失败（[`run_sync`]）。
+        if let Some(why) = target_absent(&prepared.root) {
+            self.error = Some(why);
+            return;
+        }
         if prepared.plan.deletes.files > 0 && !self.acknowledged {
             self.error = Some(format!(
                 "这份计划里有 {} 个删除（{}）。看过上面的预览之后，勾上「我看过删除清单」再来。",
@@ -1879,6 +1905,24 @@ fn sync_notice(outcome: &Outcome, elapsed: f64) -> String {
         }
     }
     line
+}
+
+/// 目标设备那个目录不在时那句话：为什么不行、去哪儿办；在就是 `None`。
+///
+/// **不是判断，是查一眼有没有**（ADR-0005 修订段「原料还没备齐」：盘上缺一样东西）。「在不在」
+/// 照核心那一趟看目标时的口径（`sync::observe` 化不开这条路径就报目标不在位），话却是这一层
+/// 自己说的：它要指向屏上的哪一处——「配目标」那一栏——而那是核心库不该知道的。
+/// 排差量预览与同步两颗按钮说的是同一句。
+///
+/// **在、却不是目录**（那条路径上是一份文件）不归这里：那不是缺一样东西，是一件该去查的事
+/// ——那一趟在「看一眼目标」真去列它时撞上（`sync::observe` 报「列不开」），照实记失败。
+fn target_absent(root: &std::path::Path) -> Option<String> {
+    (!root.exists()).then(|| {
+        format!(
+            "目标不在位：{}。插上读卡器再按；目标路径不对的话，在「配目标」那一栏改。",
+            romcat_core::path::display(root)
+        )
+    })
 }
 
 /// 任务台上那趟同步干的活：把计划落到目标上。

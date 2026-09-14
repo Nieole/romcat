@@ -155,6 +155,12 @@ enum MediaCost {
     },
     /// 没算出来：那句话。
     NotCounted(String),
+    /// **没去算**：按下去之前就判得出算不出来（还没选过导出配置，或者记着的格式这一版没有
+    /// 适配器，[`export_refusal`]）。那句话。
+    ///
+    /// 与 [`Self::NotCounted`] 分开，是因为两档收尾说的不一样：那一档说「关掉再打开就重算」，
+    /// 这一档要人先去选——选好之后自己重算（`Section::set_export_setup` 让它作废），不必关掉再打开。
+    Refused(String),
 }
 
 /// 库屏上的**工序**那一段。
@@ -217,6 +223,8 @@ pub struct Section {
     /// 上一次画这一段是第几趟画帧（egui 的 `cumulative_pass_nr`）。**隔了帧没画，就是人离开过
     /// 库屏**：那句铺媒体的代价跟着作废（`Section::lay_media_ui`，挂单 `Q654`）。
     drawn_at: Option<u64>,
+    /// 库屏排上的那一趟**取回 DAT** 眼下在不在台上（`Section::set_dat_on_board`）。
+    dat_on_board: bool,
 }
 
 impl Section {
@@ -238,6 +246,7 @@ impl Section {
             lay_media: false,
             media_cost: MediaCost::NotAsked,
             drawn_at: None,
+            dat_on_board: false,
         }
     }
 
@@ -261,7 +270,7 @@ impl Section {
         if on
             && matches!(
                 self.media_cost,
-                MediaCost::NotAsked | MediaCost::NotCounted(_)
+                MediaCost::NotAsked | MediaCost::NotCounted(_) | MediaCost::Refused(_)
             )
         {
             self.count_media(site, tasks);
@@ -274,6 +283,14 @@ impl Section {
     /// **第二份只读连接**（[`Catalog::read_only`]）；只活在内存里的库分不出第二份，
     /// 就地跑完——合成数据上那是几毫秒的事。
     fn count_media(&mut self, site: &Site, tasks: &mut Tasks) {
+        // **没选过导出配置（或者记着的格式没有适配器），就不排**：媒体的布局随前端格式不同，
+        // 那一趟一定算不出来——这是按下去之前就判得出的，排上去只会在任务历史里多一条压根没开跑
+        // 的「失败」（票 `gui-looks-like-the-design/07`）。选好之后那个数作废
+        // （`Self::set_export_setup`），开关开着时下一帧自己重算。
+        if let Some(why) = export_refusal(&site.catalog) {
+            self.media_cost = MediaCost::Refused(why);
+            return;
+        }
         let workspace = self.workspace.clone();
         let id = match site.catalog.read_only() {
             Ok(reader) => tasks.queue(COUNT_MEDIA, move |task| {
@@ -472,10 +489,44 @@ impl Section {
         }
     }
 
+    /// 库屏排上一趟**取回 DAT** 时拨上、认领它时拨回（`roots::Screen::fetch` / `settle`）。
+    ///
+    /// **它在台上，「还没有 DAT 库」就不是按下去之前判得出的了**：轮到识别时它多半已经取回来了
+    /// ——改之前识别就这样排在它后面跑成。这时识别照常排上；真取不回来，识别那一趟开跑时自己
+    /// 撞上、照实记失败（`identify_run` 里那一问兜底）。
+    pub(crate) fn set_dat_on_board(&mut self, on: bool) {
+        self.dat_on_board = on;
+    }
+
+    /// 这道工序**按下去之前就判得出**的那句拒绝：为什么不行、去哪儿办；前提都在就是 `None`。
+    ///
+    /// **只收「原料还没备齐」那一类**（ADR-0005 修订段）：盘上/库里缺一样东西，查一眼就知道。
+    /// 要读、要算、要跑一段才撞得上的（库读不动、DAT 库打不开）不在这里——那一趟排上去，
+    /// 撞上了照实记失败（票 `gui-looks-like-the-design/07`：分开的是压根没开跑与跑了没成）。
+    fn refusal(&self, stage: Stage, site: &Site) -> Option<String> {
+        match stage {
+            // 取回 DAT 那一趟已经排在台上：判不出来，放识别排在它后面（`Self::set_dat_on_board`）。
+            Stage::Identify if self.dat_on_board => None,
+            Stage::Identify => missing_dat(&self.workspace),
+            Stage::Export => export_refusal(&site.catalog),
+            Stage::Scrape | Stage::FoldTitles => None,
+        }
+    }
+
     /// 排一趟活**只有这一份实现**：[`Self::start`] 与 [`Self::force_export`] 都走它，
     /// 差的只是导出那一支这一趟带哪几个旋钮（[`ExportKnobs`]）。
     fn queue(&mut self, stage: Stage, knobs: ExportKnobs, site: &mut Site, tasks: &mut Tasks) {
         if self.task_of(stage).is_some() {
+            return;
+        }
+        // **按下去之前就判得出的前提不在，就不排**（票 `gui-looks-like-the-design/07`）：只在屏上
+        // 说一句为什么不行、去哪儿办。排上去再在那一趟里报失败的话，任务历史里就多一条压根没开跑
+        // 的「失败」——那一栏只记真跑过的。**跑起来才撞上的**（库读不动、DAT 库打不开）照旧排上去，
+        // 那一趟照实记失败。平常那一趟与照写那一趟都走这儿。
+        if let Some(why) = self.refusal(stage, site) {
+            self.error = Some(why);
+            // 上一趟的回执一起收掉：「识别 跑完了：…」挨着「还没有 DAT 库」，两句读着互相打架。
+            self.notice = None;
             return;
         }
         // **开着铺媒体、那句代价还没画出来，就不排**：人按下去的那一刻得已经知道要付多少，
@@ -837,6 +888,16 @@ impl Section {
                         ),
                     );
                 }
+                // **没去算**：缺的那样东西补上之后自己重算，不叫人关掉再打开。
+                MediaCost::Refused(why) => {
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        format!(
+                            "这一趟最多要铺多少还算不出来：媒体的布局随前端格式不同。\
+                             {why}选好之后这里自己重算。"
+                        ),
+                    );
+                }
             }
         }
         if 拨了 {
@@ -933,18 +994,33 @@ struct ExportKnobs {
     media: bool,
 }
 
+/// 还没有 DAT 库时那句话：为什么不行、去哪儿取；有就是 `None`。
+///
+/// **不是判断，是查一眼有没有**（ADR-0005 修订段「原料还没备齐」），而那句话要指向屏上
+/// 的哪一处——那正是核心库不该知道的东西，所以它留在这一层。
+///
+/// **两处认它、说同一句**：按下去那一刻（`Section::refusal`，那时不排、只在屏上说），
+/// 与那一趟开跑时（[`identify_run`] 兜底）。
+fn missing_dat(workspace: &Path) -> Option<String> {
+    (!workspace::dat_repo_path(workspace).exists()).then(|| {
+        "还没有 DAT 库。先在上面「数据源」那一段把它取回来——没有弹药就没有命中率。".to_string()
+    })
+}
+
 /// 跑一趟**识别**。
 fn identify_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Product, Cutoff> {
     // **没有弹药就没有命中率**：DAT 库不在时直说。偷偷让 `DatRepo::open` 当场建出一份
     // 空库跑下去的话，整库都会落成「未命中」并写进中立库——那是一条**假结论**，
     // 不是一次失败。命令行开头拦的是同一件事，但两处各说各的话（那一句指的是
     // `romcat dat sync`，这一句指的是上面「数据源」那一段）——挂单 `Q423`。
-    let dat = workspace::dat_repo_path(workspace);
-    if !dat.exists() {
-        return Err(Cutoff::failed(
-            "还没有 DAT 库。先在上面「数据源」那一段把它取回来——没有弹药就没有命中率。".to_string(),
-        ));
+    //
+    // **按下去那一刻已经问过一遍**（`Section::refusal`：不排，只在屏上说）。这里再问一遍是
+    // 兜底——排上去之后、轮到它之前那份库被挪走了。那是真跑起来才撞上的，照实记失败；
+    // 少了这一问，`DatRepo::open` 会当场建出一份空库。
+    if let Some(why) = missing_dat(workspace) {
+        return Err(Cutoff::failed(why));
     }
+    let dat = workspace::dat_repo_path(workspace);
     let repo = romcat_core::dat::DatRepo::open(&dat)
         .map_err(|error| Cutoff::failed(format!("DAT 库打不开：{error}")))?;
     // **沉淀库先说话**：裁决过的内容直接精确命中，不再进队列（ADR-0008）。
@@ -1148,30 +1224,54 @@ fn export_run(
     Ok(Product::Exported(Box::new(report)))
 }
 
+/// 还没选过导出的前端格式与目录时那句话：缺什么、去哪儿选。
+///
+/// **没选过就如实拒绝**，不替人挑一个格式与目录：挑错一个目录就是往别人的盘上写一堆文件。
+/// 这一句与工序段底下那一行的空态说的是同一件事（挂单 `Q437`）。
+const EXPORT_NOT_CHOSEN: &str =
+    "还没选过导出的前端格式与目录。先在工序段底下那一行选一次，选完记进这份库。";
+
+/// 记着的那个前端格式这一版没有适配器时那句话：**为什么在核心里**（`ExportSetup::adapter`
+/// 的 `Display`，ADR-0005），这一层只在后面补上去哪儿重选。
+fn no_adapter(error: &romcat_core::catalog::ExportSetupError) -> String {
+    format!("{error}先在工序段底下那一行重选一次。")
+}
+
+/// **导出**那一支按下去之前就判得出的那句拒绝；前提都在就是 `None`。
+///
+/// 两样：**没选过**（库里那两个键在不在，查一眼就知道），与**记着的格式这一版没有适配器**
+/// （判据在核心里，[`ExportSetup::adapter`]）。导出那一趟与算要铺多少那一趟问的都是它
+/// （`Section::refusal`、`Section::count_media`）——媒体的布局随前端格式不同，没选过就算不出来。
+///
+/// **库读不动不在这里，交 `None`**：那不是缺一样东西，是一件该去查的事。排上去，那一趟在
+/// [`export_setup_of`] 撞上它、照实记失败（票 `gui-looks-like-the-design/07`：分开的是
+/// 压根没开跑与跑了没成）。
+fn export_refusal(catalog: &Catalog) -> Option<String> {
+    match catalog.export_setup() {
+        Ok(None) => Some(EXPORT_NOT_CHOSEN.to_string()),
+        Ok(Some(setup)) => setup.adapter().err().map(|error| no_adapter(&error)),
+        Err(_) => None,
+    }
+}
+
 /// 读出记住的那套**导出**配置与它的**适配器**。
 ///
 /// 导出那一趟（[`export_run`]）与算要铺多少那一趟（[`media_cost_run`]）摆的是同一副料，
-/// **同一句拒绝只写在这儿**。
+/// **同一句拒绝只写在这儿与 [`export_refusal`]**，两处说的是同一句（[`EXPORT_NOT_CHOSEN`]、
+/// [`no_adapter`]）。
 fn export_setup_of(
     catalog: &Catalog,
 ) -> Result<(ExportSetup, Box<dyn romcat_core::adapter::Adapter>), Cutoff> {
     let setup = catalog
         .export_setup()
         .map_err(|error| Cutoff::failed(format!("这份中立库读不动：{error}")))?
-        // **没选过就如实拒绝**，不替人挑一个格式与目录：挑错一个目录就是往别人的盘上
-        // 写一堆文件。这一句与上面那一行的空态说的是同一件事（挂单 `Q437`）。
-        // 算要铺多少那一趟也停在这儿：媒体的布局随前端格式不同，没选过就算不出来。
-        .ok_or_else(|| {
-            Cutoff::failed(
-                "还没选过导出的前端格式与目录。先在工序段底下那一行选一次\
-                 ——选完记进这份库，下一趟点一下就重导。"
-                    .to_string(),
-            )
-        })?;
-    // **找不到那个格式该说哪句话在核心里**（`ExportSetup::adapter`，ADR-0005）。
+        // **按下去那一刻已经问过一遍**（[`export_refusal`]：不排，只在屏上说）。走到这儿还是
+        // 没选过，是排上去之后、轮到它之前那两个键被抹掉了——真跑起来才撞上的，照实记失败。
+        .ok_or_else(|| Cutoff::failed(EXPORT_NOT_CHOSEN))?;
+    // **找不到那个格式该说哪句话在核心里**（`ExportSetup::adapter`，ADR-0005）。兜底同上。
     let adapter = setup
         .adapter()
-        .map_err(|error| Cutoff::failed(error.to_string()))?;
+        .map_err(|error| Cutoff::failed(no_adapter(&error)))?;
     Ok((setup, adapter))
 }
 

@@ -337,6 +337,11 @@ impl Screen {
         });
         self.error = None;
         self.running.push((id, Job::Fetch(source)));
+        // **取回 DAT 排在台上，识别就不当场拒「还没有 DAT 库」**：轮到识别时它多半已经取回来了
+        // （`stages::Section::set_dat_on_board`）。认领它时拨回。
+        if source == Source::Dat {
+            self.stages.set_dat_on_board(true);
+        }
     }
 
     /// 任务台交回来一趟跑完的活。**不是自己那一趟就放过去。**
@@ -351,6 +356,9 @@ impl Screen {
             return false;
         };
         let (_, job) = self.running.remove(at);
+        if job == Job::Fetch(Source::Dat) {
+            self.stages.set_dat_on_board(false);
+        }
         match (&done.ended, &job) {
             // **「跑完了」只说给真的跑完的那一趟听。** 被按停的那一趟交出来的产物
             // 长得一模一样，分开的是 `scan` 自己报的那句「停在半路」——不分的话
