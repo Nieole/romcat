@@ -1005,6 +1005,8 @@ mod tests {
             path: PathBuf::from("/dev/null"),
             sizes: BTreeMap::new(),
             saved: BTreeMap::new(),
+            collapsed: BTreeMap::new(),
+            saved_collapsed: BTreeMap::new(),
             folded: BTreeSet::new(),
             folded_saved: BTreeSet::new(),
             rail_collapsed: false,

@@ -60,7 +60,7 @@ use romcat_core::fs::RealFs;
 use romcat_core::platform::Manifest;
 use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::scrape::{AnchorKind, Field, MediaKind};
-use romcat_core::shape::{Role, SINGLE_FILE_RULE, Variant};
+use romcat_core::shape::{SINGLE_FILE_RULE, Variant};
 use romcat_core::site::Site;
 use romcat_core::sublibrary::{Rule, Sublibrary};
 #[cfg(feature = "demo")]
@@ -617,7 +617,8 @@ fn 浏览现场(收起两栏: bool) -> 浏览现场 {
                 files: 1,
                 bytes: one.字节,
                 unreadable_files: 0,
-                members: vec![(key.clone(), Role::Main)],
+                // 变体成员的角色（核心库的 `shape::Role`）；这个文件里单写的 `Role` 是无障碍树的角色（库屏那一段用）。
+                members: vec![(key.clone(), romcat_core::shape::Role::Main)],
                 key,
             }
         })
