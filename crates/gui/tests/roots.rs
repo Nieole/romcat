@@ -428,6 +428,39 @@ fn 点一下(ctx: &egui::Context, app: &mut App, 按钮上的字: &str) {
     }
 }
 
+/// **滚到库屏底下**：真发滚轮事件往下滚，滚到这一帧画出来的字不再变为止（等的是滚动停下，不是等一段时间），
+/// 再把指针挪走。只滚、不读——读字仍由调用方接着那一帧做。
+///
+/// 工序段底下「一起铺媒体」那几句在库屏正文的最底下：主窗口长出左栏、屏头比从前的顶栏高
+/// （票 `gui-looks-like-the-design/32`）之后，它们落到了视口外，而 egui 不画视口外的字。再加上
+/// 右侧主区底下那条状态栏（票 `gui-looks-like-the-design/25`），连「一起铺媒体」那颗开关本身也落到了
+/// 视口外——找那颗开关之前也得先滚。
+fn 滚到库屏底下(ctx: &egui::Context, app: &mut App) {
+    let 指在 = egui::pos2(headless::VIEWPORT[0] * 0.6, headless::VIEWPORT[1] * 0.75);
+    let mut 上一帧 = None;
+    let mut 停了 = false;
+    for _ in 0..200 {
+        let mut input = headless::input();
+        input.events.push(egui::Event::PointerMoved(指在));
+        input.events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -headless::VIEWPORT[1]),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let 这一帧 = 画出来的字(&headless::frame(ctx, input, |ui| app.ui(ui)));
+        if 上一帧.as_ref() == Some(&这一帧) {
+            停了 = true;
+            break;
+        }
+        上一帧 = Some(这一帧);
+    }
+    assert!(停了, "滚了两百帧，库屏正文还在动");
+    let mut input = headless::input();
+    input.events.push(egui::Event::PointerGone);
+    headless::frame(ctx, input, |ui| app.ui(ui));
+}
+
 /// 摆一份**已经导过一趟**的现场：横跨两个平台的 fixture 主库扫进来、选好 Pegasus 与
 /// 导出目录、导一趟。返回主库（得活到测试结束）、现场与导出目录。
 fn 导过一趟(tag: &str) -> (TempDir, 现场, PathBuf) {
@@ -2027,6 +2060,7 @@ fn 还没选过导出配置就打开铺媒体_不排那一趟去算_屏上说清
 
     现场.打开铺媒体();
     跑一帧(&ctx, &mut 现场.app);
+    滚到库屏底下(&ctx, &mut 现场.app);
     let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
         现场.app.ui(ui)
     }));
@@ -2039,6 +2073,7 @@ fn 还没选过导出配置就打开铺媒体_不排那一趟去算_屏上说清
     现场.选一次导出去哪儿("Pegasus", &现场.工作区.path().join("导出去"));
     跑一帧(&ctx, &mut 现场.app);
     现场.等任务跑完();
+    滚到库屏底下(&ctx, &mut 现场.app);
     let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
         现场.app.ui(ui)
     }));
@@ -2456,6 +2491,7 @@ fn 铺媒体开关默认关着_关着时导出与今天一模一样_一份媒体
     // 「关着就一份都不铺」才验得出来——池是空的话，关着与开着铺出去的都是零份。
     let (_库, mut 现场, 导出去, _) = 摆好一张封面("gui-stages-铺媒体默认关");
     let ctx = headless::context();
+    滚到库屏底下(&ctx, &mut 现场.app);
     let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
         现场.app.ui(ui)
     }));
@@ -2510,6 +2546,7 @@ fn 打开铺媒体时_按下导出之前屏上先说清这一趟最多要铺几�
     let (_库, mut 现场, 导出去, _) = 摆好一张封面("gui-stages-铺媒体说代价");
     let ctx = headless::context();
 
+    滚到库屏底下(&ctx, &mut 现场.app);
     点一下(&ctx, &mut 现场.app, romcat_gui::stages::LAY_MEDIA);
     assert!(
         现场.app.roots().stages().lay_media(),
@@ -2517,10 +2554,7 @@ fn 打开铺媒体时_按下导出之前屏上先说清这一趟最多要铺几�
     );
     现场.等任务跑完();
 
-    // **先空跑一帧**（同 `点一下` 的「先把界面跑稳」）：开关底下那一句一换，界面把它滚进视口
-    // （`stages::scroll_in_when_new`）；可这一帧里 egui 摆两趟，那一句在第二趟才被挤到视口底下，
-    // 滚动落在下一帧。
-    跑一帧(&ctx, &mut 现场.app);
+    滚到库屏底下(&ctx, &mut 现场.app);
     let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
         现场.app.ui(ui)
     }));
@@ -2556,10 +2590,7 @@ fn 要铺多少还没算出来时按导出_当场说清_一份都不先铺() {
         screen.stages_mut().set_lay_media(true, site, tasks);
     }
     let ctx = headless::context();
-    // **先空跑一帧**（同 `点一下` 的「先把界面跑稳」）：开关底下那一句一换，界面把它滚进视口
-    // （`stages::scroll_in_when_new`）；可这一帧里 egui 摆两趟，那一句在第二趟才被挤到视口底下，
-    // 滚动落在下一帧。
-    跑一帧(&ctx, &mut 现场.app);
+    滚到库屏底下(&ctx, &mut 现场.app);
     let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
         现场.app.ui(ui)
     }));
@@ -2848,10 +2879,7 @@ fn 要铺多少那一趟被撤掉时屏上说清_关掉再打开就重算() {
     现场.app.poll_tasks();
 
     let ctx = headless::context();
-    // **先空跑一帧**（同 `点一下` 的「先把界面跑稳」）：开关底下那一句一换，界面把它滚进视口
-    // （`stages::scroll_in_when_new`）；可这一帧里 egui 摆两趟，那一句在第二趟才被挤到视口底下，
-    // 滚动落在下一帧。
-    跑一帧(&ctx, &mut 现场.app);
+    滚到库屏底下(&ctx, &mut 现场.app);
     let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
         现场.app.ui(ui)
     }));
@@ -2873,6 +2901,7 @@ fn 要铺多少那一趟被撤掉时屏上说清_关掉再打开就重算() {
         screen.stages_mut().set_lay_media(true, site, tasks);
     }
     现场.等任务跑完();
+    滚到库屏底下(&ctx, &mut 现场.app);
     let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
         现场.app.ui(ui)
     }));
@@ -2904,6 +2933,7 @@ fn 跑完一道工序之后那句代价跟着重算_不拿旧数骗人() {
     let ctx = headless::context();
     跑一帧(&ctx, &mut 现场.app);
     现场.等任务跑完();
+    滚到库屏底下(&ctx, &mut 现场.app);
     let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
         现场.app.ui(ui)
     }));
@@ -2932,6 +2962,7 @@ fn 离开库屏再回来_那句代价重算一遍() {
     );
 
     // **还在库屏上**：那个数不动，也不又排一趟去算——缓存着就是不每帧重算。
+    滚到库屏底下(&ctx, &mut 现场.app);
     let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
         现场.app.ui(ui)
     }));
@@ -2947,6 +2978,7 @@ fn 离开库屏再回来_那句代价重算一遍() {
     跑一帧(&ctx, &mut 现场.app);
     现场.等任务跑完();
 
+    滚到库屏底下(&ctx, &mut 现场.app);
     let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
         现场.app.ui(ui)
     }));

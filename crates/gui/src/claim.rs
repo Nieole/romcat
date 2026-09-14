@@ -335,7 +335,7 @@ impl Wizard {
             None => {}
         }
         ui.add_space(look::step(2));
-        look::chip(ui, Tone::Good, "只读访问，不会写入这个根");
+        look::read_only(ui, "只读访问，不会写入这个根");
     }
 
     /// 第三问：扫描读哪儿、写哪儿。**写哪儿**全是核心库折出来的那几条路径，与按下「开始扫描」
@@ -356,7 +356,7 @@ impl Wizard {
         });
         key_value(ui, "读取", |ui| {
             ui.label("这个目录底下每个文件的大小、修改时间与文件头，以及 zip、7z 这类透明容器里的文件列表。");
-            look::chip(ui, Tone::Good, "只读");
+            look::read_only(ui, "只读");
         });
         key_value(ui, "写入", |ui| {
             ui.label(font::mono(path::display(&中立库)));

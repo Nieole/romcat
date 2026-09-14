@@ -208,9 +208,21 @@ impl Screen {
             .collect()
     }
 
-    /// 顶栏上属于这一屏的那一段。
-    pub fn status(&mut self, ui: &mut egui::Ui, tasks: &Tasks) {
-        ui.label(summary(tasks));
+    /// 屏头右侧属于这一屏的那一段（[`look::screen_header`] 的右侧）：**照稿只放一颗小号幽灵「清空历史」**
+    /// （设计稿 `.scrhead` 里那颗 `.btn.ghost.sm`）。原来顶栏上那句「N 个进行中 · M 条历史」照稿不要了
+    /// ——跑着的、排着的、历史里有几条，这一屏正文里一眼就看得见。历史空着时这颗按钮灰掉。
+    pub fn status(&mut self, ui: &mut egui::Ui, tasks: &mut Tasks) {
+        let 有历史 = !tasks.history().is_empty();
+        let 清空 = look::small_buttons(ui, |ui| {
+            ui.scope(|ui| {
+                look::ghost_button(ui.visuals_mut());
+                ui.add_enabled(有历史, egui::Button::new("清空历史"))
+            })
+            .inner
+        });
+        if 清空.clicked() {
+            tasks.clear_history();
+        }
     }
 
     /// **底部状态栏**（设计稿 `.statusbar`）：每一屏底下都有这一条。左边是任务台那一小截，
@@ -247,74 +259,19 @@ impl Screen {
         go
     }
 
-    /// 画一帧：屏头（设计稿 `.scrhead`）钉在上面，屏体（`.scrbody`）在底下滚。
+    /// 画一帧：屏体（设计稿 `.scrbody`，[`look::screen_body`]）在屏头底下滚。屏头归主窗口画
+    /// （[`look::screen_header`]；右侧那颗「清空历史」见 [`Self::status`]）。
     ///
-    /// **留白全照设计稿、全从令牌取**：屏头 `screen-head-padding`，屏体 `screen-body-padding`，
-    /// 块与块之间 `screen-section-gap`，小标题与底下那块 `section-title-gap`。中间那块面板自己
-    /// 不留边（egui 缺省给 8 点）、这一屏里控件之间也不垫缺省的竖向间距——留多少只由令牌说。
+    /// **留白全照设计稿、全从令牌取**：屏体内边距由 `look::screen_body` 给，块与块之间
+    /// `screen-section-gap`，小标题与底下那块 `section-title-gap`。这一屏里控件之间不垫缺省的
+    /// 竖向间距——留多少只由令牌说。
     pub fn ui(&mut self, ui: &mut egui::Ui, tasks: &mut Tasks) {
-        let frame = egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin::ZERO);
-        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+        look::screen_body(ui, "任务屏", |ui| {
             // 卡片里头照旧用缺省的间距，这里先记下来（与弹层框架 `dialog.rs` 同一个办法）。
             let spacing = ui.spacing().item_spacing;
             ui.spacing_mut().item_spacing.y = 0.0;
-            self.head(ui, tasks, spacing);
-            egui::ScrollArea::vertical()
-                .id_salt("任务屏")
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    let [top, side, bottom] = Tokens::builtin().space.screen_body_padding;
-                    ui.add_space(top);
-                    ui.horizontal(|ui| {
-                        ui.add_space(side);
-                        ui.vertical(|ui| {
-                            ui.set_width(ui.available_width() - side);
-                            ui.spacing_mut().item_spacing.y = 0.0;
-                            self.body(ui, tasks, spacing);
-                        });
-                    });
-                    ui.add_space(bottom);
-                });
+            self.body(ui, tasks, spacing);
         });
-    }
-
-    /// 屏头：设计稿 `.scrhead`——「任务」、一句说明、右头「清空历史」（小号幽灵按钮），底下一道
-    /// 分隔线。底色是窗口底（`win`），内边距取令牌 `screen-head-padding`，几样之间隔一档 12 点。
-    ///
-    /// **先画在这一屏里**：窗口外壳（左栏导航、屏头、去掉顶栏）归票 `gui-looks-like-the-design/32`。
-    fn head(&mut self, ui: &mut egui::Ui, tasks: &mut Tasks, spacing: egui::Vec2) {
-        let [pad_y, pad_x] = Tokens::builtin().space.screen_head_padding;
-        egui::Frame::new()
-            .fill(ui.visuals().panel_fill)
-            .inner_margin(egui::Margin::from(egui::vec2(pad_x, pad_y)))
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing = spacing;
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = step(2);
-                    ui.heading("任务");
-                    ui.label(
-                        // 逐字照稿（拿主意的人裁，挂单 `Q832`）；设计稿 `.scrhead .sub` 是 12.5 号（`size-small-plus`，挂单 `Q840`）。
-                        egui::RichText::new("查看正在运行、等待中和已完成的任务")
-                            .size(Tokens::builtin().font.size_small_plus)
-                            .weak(),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let 有历史 = !tasks.history().is_empty();
-                        let 清空 = look::small_buttons(ui, |ui| {
-                            ui.scope(|ui| {
-                                look::ghost_button(ui.visuals_mut());
-                                ui.add_enabled(有历史, egui::Button::new("清空历史"))
-                            })
-                            .inner
-                        });
-                        if 清空.clicked() {
-                            tasks.clear_history();
-                        }
-                    });
-                });
-            });
-        look::divider(ui);
     }
 
     fn body(&mut self, ui: &mut egui::Ui, tasks: &mut Tasks, spacing: egui::Vec2) {
@@ -768,18 +725,6 @@ fn status_line(live: &Live) -> String {
     line
 }
 
-/// 「1 个进行中 · 3 条历史」那一句。
-fn summary(tasks: &Tasks) -> String {
-    let running = usize::from(tasks.running().is_some());
-    let queued = tasks.queued().len();
-    let mut line = format!("{running} 个进行中");
-    if queued > 0 {
-        line.push_str(&format!(" · {queued} 个排着队"));
-    }
-    line.push_str(&format!(" · {} 条历史", tasks.history().len()));
-    line
-}
-
 /// 正在跑的那一趟：设计稿 `.runcard`——名字与「停止」一排，一条进度条，底下一排
 /// 进度、已用、约剩、在做什么。返回「按了停下没有」。
 fn running_ui(ui: &mut egui::Ui, live: &Live) -> bool {
@@ -796,15 +741,17 @@ fn running_ui(ui: &mut egui::Ui, live: &Live) -> bool {
             if live.stopping {
                 // 按下停下到真的停之间隔着一步——**如实说出来**，不然人会以为按钮没反应。
                 ui.colored_label(ui.visuals().warn_fg_color, "正在停……走到下一步就停");
-            } else if ui
-                .scope(|ui| {
+            } else if look::buttons(ui, |ui| {
+                ui.scope(|ui| {
                     // 设计稿 `.btn.warn`：白底、红字、红描边，与库屏「移除」同一档（拿主意的人裁，挂单 `Q834`）。
+                    // 默认那一档按钮的字号（12.5）只在 `look::buttons` 里才装得上（挂单 `Q862`）。
                     look::warn_button(ui.visuals_mut());
                     ui.button("停止")
                         .on_hover_text("停在两步之间：不留半截状态。")
                 })
                 .inner
-                .clicked()
+            })
+            .clicked()
             {
                 stopped = true;
             }

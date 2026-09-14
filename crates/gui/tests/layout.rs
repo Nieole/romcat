@@ -588,3 +588,490 @@ fn 五屏上画出来的字里没有星号也没有文档编号() {
         }
     }
 }
+
+// ——— 左栏与屏头（票 `gui-looks-like-the-design/32`） ———
+
+/// 屏上认得下的每一段字画在哪儿，按画出来的次序。
+fn 画在哪几处(output: &egui::FullOutput, 认: &dyn Fn(&str) -> bool) -> Vec<egui::Rect> {
+    每一段(output)
+        .into_iter()
+        .filter(|(画的, _)| 认(画的))
+        .map(|(_, 在)| 在)
+        .collect()
+}
+
+/// 屏上**正好**写着 `字` 的每一处，按画出来的次序。
+fn 正好画在哪几处(output: &egui::FullOutput, 字: &str) -> Vec<egui::Rect> {
+    画在哪几处(output, &|画的| 画的 == 字)
+}
+
+/// 左栏展开时多宽（令牌 `rail-width`）。
+fn 左栏宽() -> f32 {
+    romcat_gui::tokens::Tokens::builtin().layout.rail_width
+}
+
+/// 屏头的下沿：上下内边距、按钮那么高的一行、底下那道一点宽的线（`look::screen_header`）。
+fn 屏头底() -> f32 {
+    let tokens = romcat_gui::tokens::Tokens::builtin();
+    2.0 * tokens.space.screen_header_padding[0] + tokens.layout.button_height + 1.0
+}
+
+/// 右侧那一段在标题后面摆不下、折到第二行时屏头的下沿：再多一行按钮高，加一档行距。
+fn 折成两行的屏头底() -> f32 {
+    let tokens = romcat_gui::tokens::Tokens::builtin();
+    屏头底() + tokens.space.screen_header_gap + tokens.layout.button_height
+}
+
+/// 左栏里（整段落在左栏宽以内）正好写着 `字` 的那一处。
+fn 左栏里的(output: &egui::FullOutput, 字: &str) -> Option<egui::Rect> {
+    正好画在哪几处(output, 字)
+        .into_iter()
+        .find(|rect| rect.right() <= 左栏宽())
+}
+
+/// 按一下左栏里正好写着 `字` 的那一处（移过去、按下、松开），再画一帧，交回那一帧。
+fn 点左栏(ctx: &egui::Context, app: &mut App, 字: &str) -> egui::FullOutput {
+    点左栏_窗口宽(ctx, app, headless::VIEWPORT[0], 字)
+}
+
+#[test]
+fn 导航在左栏_三组五个入口照稿排好_顶栏上的换一份库不在了() {
+    // 规格「测试决定」：导航在左栏且入口齐。设置屏还没有（票 31），新手引导主程序眼下没有：两样都不摆。
+    let mut app = 待确认(&工作目录("左栏入口"));
+    let ctx = headless::context();
+    跑(&ctx, &mut app, 2);
+    let out = 跑一帧(&ctx, &mut app, Vec::new());
+    let 屏上 = 画出来的字(&out);
+
+    let 库名 = app.site().display_name();
+    let mut 上一项 = f32::NEG_INFINITY;
+    for 字 in [
+        库名.as_str(),
+        "切换主库",
+        "整理",
+        "库",
+        "待确认",
+        "浏览",
+        "输出",
+        "子库",
+        "后台",
+        "任务",
+    ] {
+        let 在 = 左栏里的(&out, 字).unwrap_or_else(|| panic!("左栏里没有「{字}」：\n{屏上}"));
+        assert!(在.center().y > 上一项, "「{字}」没排在上一项底下：{在:?}");
+        上一项 = 在.center().y;
+    }
+    assert!(
+        !屏上.contains("换一份库"),
+        "顶栏那颗「换一份库」还在：\n{屏上}"
+    );
+    for 不摆 in ["设置", "新手引导"] {
+        assert!(
+            正好画在哪几处(&out, 不摆).is_empty(),
+            "「{不摆}」不该摆出来：\n{屏上}"
+        );
+    }
+}
+
+#[test]
+fn 点左栏入口就换到那一屏_屏头写着那一屏_右侧是它原来在顶栏上的那一段() {
+    let mut app = 浏览(&工作目录("左栏切屏"));
+    let ctx = headless::context();
+    跑(&ctx, &mut app, 2);
+    let 根数 = format!("{} 个根", app.roots().roots().len());
+    for (view, 入口, 右侧那一段) in [
+        (View::Library, "库", 根数.as_str()),
+        (View::Queue, "待确认", "重新列队列"),
+        (View::Browse, "浏览", "刮削选中…"),
+        (View::Sublibraries, "子库", "重新列一遍"),
+        // 任务屏照稿重排之后（票 `gui-looks-like-the-design/25`）右侧只放「清空历史」，顶栏那句摘要照稿不要了。
+        (View::Tasks, "任务", "清空历史"),
+    ] {
+        let out = 点左栏(&ctx, &mut app, 入口);
+        assert_eq!(app.view(), view, "点了左栏的「{入口}」");
+        let 在屏头里 = |rect: &egui::Rect| rect.left() > 左栏宽() && rect.bottom() <= 屏头底();
+        assert!(
+            正好画在哪几处(&out, 入口).iter().any(在屏头里),
+            "{view:?} 的屏头上没写「{入口}」：\n{}",
+            画出来的字(&out),
+        );
+        // 右侧那一段摆不下时会折到屏头第二行（设计稿 `.scrhead` 的 `flex-wrap`）。
+        let 右侧 = 画在哪几处(&out, &|画的| 画的.contains(右侧那一段));
+        assert!(
+            右侧
+                .iter()
+                .any(|rect| rect.left() > 左栏宽() && rect.bottom() <= 折成两行的屏头底()),
+            "{view:?} 的屏头里没有它原来在顶栏上的「{右侧那一段}」（画在 {右侧:?}）：\n{}",
+            画出来的字(&out),
+        );
+    }
+}
+
+/// 这一帧画出来的每一段字与它画在哪儿，按画出来的次序。
+fn 每一段(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+    fn 收(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+        match shape {
+            egui::Shape::Text(text) => out.push((
+                text.galley.text().to_owned(),
+                egui::Rect::from_min_size(text.pos, text.galley.size()),
+            )),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|one| 收(one, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        收(&clipped.shape, &mut out);
+    }
+    out
+}
+
+/// 左栏里 `入口` 那一行右边画着的计数：与入口的字在同一行、在它右边、整段落在左栏以内。没画就是 `None`。
+fn 左栏计数(output: &egui::FullOutput, 入口: &str) -> Option<String> {
+    let 字 = 左栏里的(output, 入口)?;
+    每一段(output)
+        .into_iter()
+        .find(|(_, 在)| {
+            在.right() <= 左栏宽() && 在.left() > 字.right() && 字.y_range().contains(在.center().y)
+        })
+        .map(|(画的, _)| 画的)
+}
+
+/// 跑一帧，窗口宽 `宽`（高照旧 [`headless::VIEWPORT`]），带上这些事件。
+fn 跑一帧_窗口宽(
+    ctx: &egui::Context,
+    app: &mut App,
+    宽: f32,
+    events: Vec<egui::Event>,
+) -> egui::FullOutput {
+    let mut input = headless::input();
+    input.screen_rect = Some(egui::Rect::from_min_size(
+        egui::Pos2::ZERO,
+        egui::vec2(宽, headless::VIEWPORT[1]),
+    ));
+    input.events = events;
+    headless::frame(ctx, input, |ui| app.ui(ui))
+}
+
+#[test]
+fn 左栏的计数取各屏与核心库现成的那个数() {
+    // 不另算一份（票 `gui-looks-like-the-design/32`）：待确认是队列里待裁决的条数——屏头右侧那一段
+    // 「队列 N 条待裁决」说的是同一个数；库是根数；子库是子库屏列出来的个数；台上没活时任务不画数。
+    let mut app = 待确认(&工作目录("左栏计数-待确认"));
+    let ctx = headless::context();
+    跑(&ctx, &mut app, 2);
+    let out = 跑一帧(&ctx, &mut app, Vec::new());
+    let 屏上 = 画出来的字(&out);
+    let 待裁 = 左栏计数(&out, "待确认").unwrap_or_else(|| panic!("待确认那一项没画数：\n{屏上}"));
+    assert!(
+        屏上.contains(&format!("队列 {待裁} 条待裁决")),
+        "左栏说 {待裁}，屏头右侧那一段说的不是这个数：\n{屏上}",
+    );
+    assert_eq!(
+        左栏计数(&out, "库"),
+        Some(format!("{} 个根", app.roots().roots().len()))
+    );
+    assert_eq!(
+        左栏计数(&out, "子库"),
+        Some(app.sublibrary().list().len().to_string())
+    );
+    assert_eq!(左栏计数(&out, "任务"), None, "台上没活时任务那一项不画数");
+
+    // 浏览是作品数：与浏览屏没筛过时自己说的「N 个作品」是同一个数。
+    let mut app = 浏览(&工作目录("左栏计数-浏览"));
+    let ctx = headless::context();
+    跑(&ctx, &mut app, 3);
+    let out = 跑一帧(&ctx, &mut app, Vec::new());
+    let 屏上 = 画出来的字(&out);
+    let 作品 = 左栏计数(&out, "浏览").unwrap_or_else(|| panic!("浏览那一项没画数：\n{屏上}"));
+    assert!(
+        屏上.contains(&format!("{作品} 个作品；")),
+        "左栏说 {作品} 个作品，浏览屏自己说的不是这个数：\n{屏上}",
+    );
+
+    // 一个根都还没扫过、库里一个作品都没有：浏览那一项画「—」（设计稿 `!S.scanDone?'—'`）——此刻的 0 说的是
+    // 「还不知道」，不是「这份库有 0 个作品」。
+    let mut app = shared::小库(&[], 工作目录("左栏计数-没扫过"));
+    let ctx = headless::context();
+    跑(&ctx, &mut app, 2);
+    let out = 跑一帧(&ctx, &mut app, Vec::new());
+    assert_eq!(
+        左栏计数(&out, "浏览"),
+        Some("—".to_owned()),
+        "还没扫过的库，浏览那一项该画「—」：\n{}",
+        画出来的字(&out),
+    );
+}
+
+#[test]
+fn 落下一批之后左栏的已保存裁决数与待确认数当场跟着变() {
+    use romcat_core::triage::{Axis, Draft, Overrides};
+
+    let mut app = 待确认(&工作目录("左栏裁决数"));
+    let ctx = headless::context();
+    跑(&ctx, &mut app, 2);
+    let out = 跑一帧(&ctx, &mut app, Vec::new());
+    assert!(
+        左栏里的(&out, "已保存 0 条裁决").is_some(),
+        "左栏底下没说已保存几条裁决：\n{}",
+        画出来的字(&out),
+    );
+    let 原有 = app.queue().queue().pending();
+
+    // 走 `tests/queue.rs` 那条「裁决即时写进沉淀库并从队列移除」的路：点一个汉化组记号，手工指定作品，落下。
+    let (screen, _) = app.queue_and_site();
+    screen.pick(Axis::NameMark, "ACG汉化组");
+    跑(&ctx, &mut app, 1);
+    let draft = Draft {
+        work: Some("勇者斗恶龙".to_string()),
+        overrides: Overrides {
+            team: Some("ACG汉化组".to_string()),
+            ..Overrides::default()
+        },
+        ..Draft::default()
+    };
+    let (screen, site) = app.queue_and_site();
+    screen.preview(site, &draft);
+    screen.commit(site);
+    assert!(screen.error().is_none(), "{:?}", screen.error());
+    跑(&ctx, &mut app, 1);
+    let out = 跑一帧(&ctx, &mut app, Vec::new());
+    assert!(
+        左栏里的(&out, "已保存 129 条裁决").is_some(),
+        "真机上 [ACG汉化组] 带 129 条，落下之后左栏该说已保存 129 条：\n{}",
+        画出来的字(&out),
+    );
+    assert_eq!(
+        左栏计数(&out, "待确认"),
+        Some(romcat_core::report::thousands(原有 - 129)),
+        "落下之后待确认那一项该少 129 条",
+    );
+}
+
+#[test]
+fn 台上有活时任务那一项带着强调色圆点与跑着加排着的数() {
+    use shared::占位活;
+
+    let mut app = 待确认(&工作目录("左栏任务"));
+    let ctx = headless::context();
+    跑(&ctx, &mut app, 1);
+    let 跑着的 = 占位活::排上(app.tasks_mut(), "装作在扫一趟库");
+    跑(&ctx, &mut app, 1);
+    let out = 跑一帧(&ctx, &mut app, Vec::new());
+    assert_eq!(左栏计数(&out, "任务"), Some("1".to_owned()));
+    let 任务那一行 = 左栏里的(&out, "任务").expect("左栏里有任务");
+    let 点 = romcat_gui::tokens::Tokens::builtin().layout.rail_dot;
+    let 有圆点 = out.shapes.iter().any(|clipped| match &clipped.shape {
+        egui::Shape::Circle(circle) => {
+            circle.center.x < 左栏宽()
+                && 任务那一行.y_range().contains(circle.center.y)
+                && (circle.radius - 点 / 2.0).abs() < 0.01
+        }
+        _ => false,
+    });
+    assert!(有圆点, "任务那一项的数前面没有那枚圆点");
+
+    let 排着的 = 占位活::排上(app.tasks_mut(), "装作在排着队");
+    跑(&ctx, &mut app, 1);
+    let out = 跑一帧(&ctx, &mut app, Vec::new());
+    assert_eq!(
+        左栏计数(&out, "任务"),
+        Some("2".to_owned()),
+        "数的是跑着的加排着的"
+    );
+    排着的.按停(app.tasks_mut());
+    跑着的.按停(app.tasks_mut());
+}
+
+#[test]
+fn 收起左栏变成窄条_关掉再打开还是收着的_展开回去那一行就去掉() {
+    let 目录 = 工作目录("左栏收起");
+    let 窄条宽 = romcat_gui::tokens::Tokens::builtin().layout.rail_collapsed;
+    let mut app = 待确认(&目录);
+    let ctx = headless::context();
+    跑(&ctx, &mut app, 2);
+    let out = 点左栏(&ctx, &mut app, "« 收起");
+    let 屏上 = 画出来的字(&out);
+    assert!(
+        左栏里的(&out, "»").is_some_and(|在| 在.right() <= 窄条宽),
+        "收起之后窄条底下该是「»」：\n{屏上}"
+    );
+    for 入口 in ["库", "待确认", "浏览", "子库", "任务"] {
+        assert!(
+            正好画在哪几处(&out, 入口)
+                .iter()
+                .any(|在| 在.right() <= 窄条宽),
+            "窄条里没有「{入口}」：\n{屏上}",
+        );
+    }
+    for 不在窄条里 in ["切换主库", "已保存"] {
+        assert!(
+            !屏上.contains(不在窄条里),
+            "窄条里不该有「{不在窄条里}」：\n{屏上}"
+        );
+    }
+    let 文件 = std::fs::read_to_string(app.layout().path()).expect("收起之后该落盘");
+    assert!(文件.contains("左栏 = 收起"), "{文件}");
+
+    drop(app);
+    let mut 再开 = 待确认(&目录);
+    let ctx = headless::context();
+    跑(&ctx, &mut 再开, 2);
+    let out = 跑一帧(&ctx, &mut 再开, Vec::new());
+    assert!(
+        左栏里的(&out, "»").is_some(),
+        "关掉再打开左栏没收着：\n{}",
+        画出来的字(&out)
+    );
+    let out = 点左栏(&ctx, &mut 再开, "»");
+    assert!(
+        左栏里的(&out, "切换主库").is_some(),
+        "展开回去没有切换主库那张卡：\n{}",
+        画出来的字(&out)
+    );
+    let 文件 = std::fs::read_to_string(再开.layout().path()).expect("那份文件还在");
+    assert!(!文件.contains("左栏"), "展开回去那一行该去掉：{文件}");
+}
+
+#[test]
+fn 窗口窄于门槛左栏自动收起_宽回来照人选的_自动收起不写进文件() {
+    // 拿主意的人 2026-09-14 定：窗口宽不到 `rail-collapse-below` 时自动收成窄条，宽回来恢复人自己选的；
+    // 人手动收起、展开记在版式文件里，自动收起只看当下窗口宽，不写进文件。
+    let 门槛 = romcat_gui::tokens::Tokens::builtin()
+        .layout
+        .rail_collapse_below;
+    let (窄, 宽) = (门槛 - 40.0, headless::VIEWPORT[0]);
+    let 目录 = 工作目录("左栏自动收起");
+    let mut app = 待确认(&目录);
+    let ctx = headless::context();
+    跑一帧_窗口宽(&ctx, &mut app, 窄, Vec::new());
+    let out = 跑一帧_窗口宽(&ctx, &mut app, 窄, Vec::new());
+    assert!(
+        左栏里的(&out, "»").is_some() && !画出来的字(&out).contains("切换主库"),
+        "{窄} 宽的窗口里左栏该自动收着：\n{}",
+        画出来的字(&out),
+    );
+
+    跑一帧_窗口宽(&ctx, &mut app, 宽, Vec::new());
+    let out = 跑一帧_窗口宽(&ctx, &mut app, 宽, Vec::new());
+    assert!(
+        左栏里的(&out, "切换主库").is_some(),
+        "人没收起过，宽回来该照旧展开：\n{}",
+        画出来的字(&out),
+    );
+    let 记着的 = std::fs::read_to_string(app.layout().path()).unwrap_or_default();
+    assert!(!记着的.contains("左栏"), "自动收起不该写进文件：{记着的}");
+
+    // 人收起了：窗口窄了再宽回来，还是收着——自动收起没把人选的那一份覆盖掉。
+    点左栏(&ctx, &mut app, "« 收起");
+    跑一帧_窗口宽(&ctx, &mut app, 窄, Vec::new());
+    跑一帧_窗口宽(&ctx, &mut app, 宽, Vec::new());
+    let out = 跑一帧_窗口宽(&ctx, &mut app, 宽, Vec::new());
+    assert!(
+        左栏里的(&out, "»").is_some() && !画出来的字(&out).contains("切换主库"),
+        "人收起的，窗口窄了再宽回来还该收着：\n{}",
+        画出来的字(&out),
+    );
+    let 记着的 = std::fs::read_to_string(app.layout().path()).expect("人收起之后该落盘");
+    assert!(记着的.contains("左栏 = 收起"), "{记着的}");
+}
+
+/// 同 [`点左栏`]，只是窗口宽 `宽`。
+fn 点左栏_窗口宽(
+    ctx: &egui::Context, app: &mut App, 宽: f32, 字: &str
+) -> egui::FullOutput {
+    let 头一帧 = 跑一帧_窗口宽(ctx, app, 宽, Vec::new());
+    let Some(在) = 左栏里的(&头一帧, 字) else {
+        panic!("左栏里没有「{字}」，没处点：\n{}", 画出来的字(&头一帧));
+    };
+    let 按 = |pressed: bool| egui::Event::PointerButton {
+        pos: 在.center(),
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    跑一帧_窗口宽(
+        ctx,
+        app,
+        宽,
+        vec![egui::Event::PointerMoved(在.center()), 按(true)],
+    );
+    跑一帧_窗口宽(ctx, app, 宽, vec![按(false)]);
+    跑一帧_窗口宽(ctx, app, 宽, Vec::new())
+}
+
+#[test]
+fn 窗口窄时点左栏底下那颗临时展开_不写文件_窗口宽度一变又收回去() {
+    // 拿主意的人 2026-09-14 定（挂单 `Q867`）：窗口窄于门槛、左栏自动收着时，点「»」临时展开，不写进版式文件；
+    // 临时展开时再点「« 收起」收回去；窗口宽度一变，就回到自动收起的规则。
+    let 门槛 = romcat_gui::tokens::Tokens::builtin()
+        .layout
+        .rail_collapse_below;
+    let 窄 = 门槛 - 40.0;
+    let mut app = 待确认(&工作目录("左栏临时展开"));
+    let ctx = headless::context();
+    let 记着的 = |app: &App| std::fs::read_to_string(app.layout().path()).unwrap_or_default();
+    跑一帧_窗口宽(&ctx, &mut app, 窄, Vec::new());
+
+    let out = 点左栏_窗口宽(&ctx, &mut app, 窄, "»");
+    assert!(
+        左栏里的(&out, "切换主库").is_some(),
+        "窄窗口里点「»」该临时展开：\n{}",
+        画出来的字(&out),
+    );
+    assert!(
+        !记着的(&app).contains("左栏"),
+        "临时展开不该写进文件：{}",
+        记着的(&app)
+    );
+
+    let out = 点左栏_窗口宽(&ctx, &mut app, 窄, "« 收起");
+    assert!(
+        左栏里的(&out, "»").is_some() && !画出来的字(&out).contains("切换主库"),
+        "临时展开时点「« 收起」该收回去：\n{}",
+        画出来的字(&out),
+    );
+    assert!(
+        !记着的(&app).contains("左栏"),
+        "收回去也不该写进文件：{}",
+        记着的(&app)
+    );
+
+    点左栏_窗口宽(&ctx, &mut app, 窄, "»");
+    跑一帧_窗口宽(&ctx, &mut app, 窄 + 10.0, Vec::new());
+    let out = 跑一帧_窗口宽(&ctx, &mut app, 窄 + 10.0, Vec::new());
+    assert!(
+        左栏里的(&out, "»").is_some() && !画出来的字(&out).contains("切换主库"),
+        "临时展开之后窗口宽度一变，该回到自动收起：\n{}",
+        画出来的字(&out),
+    );
+    assert!(
+        !记着的(&app).contains("左栏"),
+        "文件一直没被动过：{}",
+        记着的(&app)
+    );
+}
+
+#[test]
+fn 收起窄条里的入口照稿按行高撑高() {
+    // 设计稿 `.main.rcol .nav{padding:7px 0;gap:1px;font-size:12px}` 与 `.main.rcol .nav .badge{font-size:10px}`，
+    // 行高继承 `body` 的 1.55（令牌 `line-height`）：一项高 = 上下留白 + 字号 × 行高 + 间距 + 计数字号 × 行高。
+    // 量相邻两项（库、待确认，都带计数）的字相差多少：该是一项高再加栏里一格间距。
+    let t = romcat_gui::tokens::Tokens::builtin();
+    let mut app = 待确认(&工作目录("窄条行高"));
+    let ctx = headless::context();
+    跑(&ctx, &mut app, 2);
+    let out = 点左栏(&ctx, &mut app, "« 收起");
+    let 库 = 左栏里的(&out, "库").expect("窄条里有库");
+    let 待确认那一项 = 左栏里的(&out, "待确认").expect("窄条里有待确认");
+    let 一项 = 2.0 * t.space.nav_padding_collapsed
+        + t.font.size_small * t.font.line_height
+        + t.space.nav_gap_collapsed
+        + t.font.size_badge_narrow * t.font.line_height;
+    let 差 = 待确认那一项.top() - 库.top();
+    assert!(
+        (差 - (一项 + t.space.rail_gap)).abs() < 0.5,
+        "窄条里相邻两项隔 {差}，照稿该是 {}：库 {库:?}，待确认 {待确认那一项:?}",
+        一项 + t.space.rail_gap,
+    );
+}

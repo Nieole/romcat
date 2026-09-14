@@ -352,11 +352,12 @@ pub struct Font {
     pub weight_strong: u16,
     /// 角标、分组标题。
     pub size_caption: f32,
-    /// 表头、图例（稿 11.5）。
+    /// 表头、图例：设计稿上的半号（11.5）。不挂进 egui 的字号表，用到的那一处直接取。
     pub size_caption_plus: f32,
     /// 说明文字、表格副行。
     pub size_small: f32,
-    /// 屏头说明、表格行（稿 12.5）。
+    /// 屏头说明、表格行：设计稿上的半号（12.5）。不挂进 egui 的字号表，用到的那一处直接取
+    /// （屏头的副标题见 [`crate::look::screen_header`]）。
     pub size_small_plus: f32,
     /// 正文、按钮。
     pub size_body: f32,
@@ -368,6 +369,12 @@ pub struct Font {
     pub size_hero: f32,
     /// 行高，字号的倍数。
     pub line_height: f32,
+    /// 左栏收成窄条后入口底下那个计数的字号。
+    pub size_badge_narrow: f32,
+    /// 左栏分组标题的字距，字号的倍数。
+    pub group_tracking: f32,
+    /// 大号按钮上的字。
+    pub size_button_large: f32,
 }
 
 /// 粗体覆盖哪些字。
@@ -379,7 +386,11 @@ pub enum BoldCoverage {
     LatinDigitsOnly,
 }
 
-/// 间距，点。**档位是约定**：版式里只从 `steps` 里取，由代码走查守，不写测试。
+/// 间距，点。
+///
+/// `steps` 是**通用间距的档位**：版式里随手要一个间距时从这几档里取，由代码走查守，不写测试。
+/// 设计稿上写死的字面值（面板、对话框、开场、屏头、屏体、左栏……）不硬凑进档位，各立一个具名令牌，
+/// 由 `check_tokens.py` 逐项对着设计稿核。
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Space {
@@ -399,10 +410,44 @@ pub struct Space {
     pub catalog_row_padding: [f32; 2],
     /// 开场主库列表那一行里，名字与底下那句之间的竖向间距。
     pub catalog_row_gap: f32,
-    /// 屏头内边距：`[上下, 左右]`。
-    pub screen_head_padding: [f32; 2],
-    /// 屏体内边距：`[上, 左右, 下]`。
+    /// 屏头的内边距：`[上下, 左右]`。
+    pub screen_header_padding: [f32; 2],
+    /// 屏头里标题、副标题、右侧那一段彼此隔多远。
+    pub screen_header_gap: f32,
+    /// 屏体的内边距：`[上, 左右, 下]`。
     pub screen_body_padding: [f32; 3],
+    /// 左栏的内边距：`[上下, 左右]`。
+    pub rail_padding: [f32; 2],
+    /// 左栏收成窄条后的内边距：`[上下, 左右]`。
+    pub rail_padding_collapsed: [f32; 2],
+    /// 左栏里一项与下一项隔多远。
+    pub rail_gap: f32,
+    /// 左栏顶上切换主库那张卡的内边距：`[上下, 左右]`。
+    pub rail_switch_padding: [f32; 2],
+    /// 那张卡里标志与字之间。
+    pub rail_switch_gap: f32,
+    /// 那张卡底下再空多少。
+    pub rail_switch_margin: f32,
+    /// 左栏分组标题的内边距：`[上, 左右, 下]`。
+    pub rail_group_padding: [f32; 3],
+    /// 收成窄条后分组标题变成一道线，线四周空多少：`[上下, 左右]`。
+    pub rail_group_margin_collapsed: [f32; 2],
+    /// 左栏入口左右留白。
+    pub nav_padding: f32,
+    /// 收成窄条后入口上下留白。
+    pub nav_padding_collapsed: f32,
+    /// 收成窄条后入口的字与计数之间。
+    pub nav_gap_collapsed: f32,
+    /// 任务跑着时入口计数前那枚圆点与数之间。
+    pub live_badge_gap: f32,
+    /// 左栏栏底几样之间。
+    pub rail_foot_gap: f32,
+    /// 栏底那道线底下空多少。
+    pub rail_foot_padding: f32,
+    /// 栏底「已保存 N 条裁决」那一行左右留白。
+    pub rail_note_padding: f32,
+    /// 那一行圆点与字之间。
+    pub rail_note_gap: f32,
     /// 屏体里一块与一块之间的竖向间距。
     pub screen_section_gap: f32,
     /// 小标题与它底下那一块之间的竖向间距。
@@ -429,6 +474,14 @@ pub struct Layout {
     pub rail_width: f32,
     /// 左侧导航收起后的宽度。
     pub rail_collapsed: f32,
+    /// 窗口宽不到这么多时左栏自动收成窄条。怎么算出来的写在令牌文件那一行的注释里。
+    pub rail_collapse_below: f32,
+    /// 左栏顶上切换主库那张卡上标志的边长。
+    pub rail_mark: f32,
+    /// 左栏入口的高。
+    pub nav_height: f32,
+    /// 左栏里那两枚圆点的直径：任务跑着时、栏底裁决数前。
+    pub rail_dot: f32,
     /// 面板折叠后的窄条。
     pub strip_width: f32,
     /// 浏览页筛选栏宽度。
@@ -467,6 +520,18 @@ pub struct Layout {
     pub page_dot: f32,
     /// 标签左边那枚圆点的直径（设计稿 `.chip::before`）。
     pub chip_dot: f32,
+    /// 标签的高。
+    pub chip_height: f32,
+    /// 标签左右留白。
+    pub chip_padding: f32,
+    /// 标签里圆点与字之间。
+    pub chip_gap: f32,
+    /// 只读标签的高（设计稿 `.ro`）。
+    pub ro_height: f32,
+    /// 只读标签左右留白。
+    pub ro_padding: f32,
+    /// 只读标签里圆点与字之间。
+    pub ro_gap: f32,
     /// 「名 → 值」两列排时名那一列的宽。
     pub kv_key_width: f32,
     /// 按钮的高。
@@ -612,9 +677,9 @@ mod tests {
             "设计稿 .catrow"
         );
         assert_eq!(tokens.space.catalog_row_gap, 2.0, "设计稿 .catrow");
-        // 任务屏（票 `gui-looks-like-the-design/25`）：屏头、屏体、块与块、卡片、表格、空态的留白。
+        // 屏头、屏体（票 `gui-looks-like-the-design/32`），与任务屏（票 `gui-looks-like-the-design/25`）的块与块、卡片、表格、空态的留白。
         assert_eq!(
-            tokens.space.screen_head_padding,
+            tokens.space.screen_header_padding,
             [14.0, 20.0],
             "设计稿 .scrhead"
         );
