@@ -709,9 +709,10 @@ pub(crate) fn root_and_path(
 
 /// 「作品」那一格。
 ///
-/// **认不出作品的那一行两行字**（票 `gui-looks-like-the-design/09`）：主栏是**正题**挂一个
-/// 「未关联作品」标签，副行是那份内容在主库里的「**根名 · 相对路径**」，**从尾部截断**
-/// （[`root_and_path`]）。从前那一格直接印变体的键——真库里一万六千多行都是一长串路径，
+/// **认不出作品的那一行两行字**（票 `gui-looks-like-the-design/09`）：主栏是**正题**，单独占一行；
+/// 副行开头是「未关联作品」标签，跟着那份内容在主库里的「**根名 · 相对路径**」，**从尾部截断**
+/// （[`root_and_path`]）。标签挪到第二行是拿主意的人 2026-09-14 定的（挂单 `Q878`）：左边多了导航之后，
+/// 1280 宽的窗口里作品那一列只剩一百六十来点，标签跟在正题后头时正题被挤得只剩一个「…」。从前那一格直接印变体的键——真库里一万六千多行都是一长串路径，
 /// 而路径的信息在尾巴上，被列宽截掉的正是文件名那一截。认不认得出、正题是什么，都是核心库答的
 /// （[`WorkRow::title`]）。
 ///
@@ -770,7 +771,8 @@ enum Second {
 }
 
 /// 两行字的那一格（设计稿 `.wtxt`）：主栏拉丁与数字加粗，右头照旧挂着搜索命中与非游戏资产那两个
-/// 记号，`label` 给了就跟一枚行内标签；底下一行小字，等宽、弱字色（设计稿 `.w2`），整条挂在悬停里。
+/// 记号；底下一行小字，等宽、弱字色（设计稿 `.w2`），整条挂在悬停里。`label` 给了就摆在**第二行开头**，
+/// 主栏整行都给正题（挂单 `Q878`）。
 fn two_lines(
     ui: &mut egui::Ui,
     work: &WorkRow,
@@ -791,36 +793,50 @@ fn two_lines(
             |ui| {
                 right_marks(ui, work, hit);
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    // **标签的宽度先让出来，剩下的才给主栏**：主栏长了截的是主栏，
-                    // 「未关联作品」那几个字总在。
-                    let room = ui.available_width()
-                        - label.map_or(0.0, |text| {
-                            tag_width(ui, text) + ui.spacing().item_spacing.x
-                        });
-                    ui.scope(|ui| {
-                        ui.set_max_width(room.max(0.0));
-                        ui.add(egui::Label::new(font::strong(main)).truncate());
-                    });
-                    if let Some(text) = label {
-                        tag(ui, text);
-                    }
+                    ui.add(egui::Label::new(font::strong(main)).truncate());
                 });
             },
         );
         let weak = ui.visuals().weak_text_color();
-        let second_line = match second {
-            // **路径从尾部截断**：截到画得下为止，文件名那一截留着。
-            Second::Path => egui::Label::new(
-                egui::RichText::new(root_and_path(ui, &work.name, &small, width))
-                    .font(small)
-                    .color(weak),
-            )
-            .extend(),
-            Second::WorkName => {
-                egui::Label::new(egui::RichText::new(&work.name).font(small).color(weak)).truncate()
+        match second {
+            Second::Path => {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(width, tokens.layout.tag_height),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        // **标签的宽度先让出来，剩下的才给路径**：路径长了截的是路径的左边，
+                        // 「未关联作品」那几个字总在。
+                        let mut room = width;
+                        if let Some(text) = label {
+                            tag(ui, text);
+                            room -= tag_width(ui, text) + ui.spacing().item_spacing.x;
+                        }
+                        // **路径从尾部截断**：截到画得下为止，文件名那一截留着。
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(root_and_path(
+                                    ui,
+                                    &work.name,
+                                    &small,
+                                    room.max(0.0),
+                                ))
+                                .font(small)
+                                .color(weak),
+                            )
+                            .extend(),
+                        )
+                        .on_hover_text(&work.name);
+                    },
+                );
             }
-        };
-        ui.add(second_line).on_hover_text(&work.name);
+            Second::WorkName => {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&work.name).font(small).color(weak))
+                        .truncate(),
+                )
+                .on_hover_text(&work.name);
+            }
+        }
     });
 }
 

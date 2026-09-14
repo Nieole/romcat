@@ -741,9 +741,84 @@ fn 拍浏览(名字: &str, 主题: Theme, 态: 浏览态) {
         浏览态::筛空 => {}
     }
     控件都落在所在那一栏里(&harness, 名字);
+    if 态 != 浏览态::筛空 {
+        带标签的行正题露得出字(&harness, 名字);
+    }
     拍下(harness, 名字);
     // 拍完才收工作目录：版式偏好一直在里头读写。
     drop(目录);
+}
+
+/// 带「未关联作品」标签的那一行，正题至少露出这么多个字（不算截断补上的「…」）。
+const 正题至少露出: usize = 3;
+
+/// **带「未关联作品」标签的那几行，第一行的正题没被截成只剩「…」**（拿主意的人 2026-09-14：标签挪到
+/// 第二行、跟路径放在一起，正题单独占第一行，挂单 `Q878`）。
+///
+/// 表上每画一枚「未关联作品」标签，就找它正上方、同一格里画的那一段字——那就是这一行的正题。
+/// 数的是**真画出来的字形**，不是那一段的原文：egui 截断时原文照旧整段留在排版结果里，只是后头的字
+/// 没排、最后一个换成「…」。
+#[track_caller]
+fn 带标签的行正题露得出字(harness: &Harness<'_>, 名字: &str) {
+    use romcat_gui::table::UNLINKED_LABEL;
+
+    let mut 各段: Vec<(egui::Rect, std::sync::Arc<egui::Galley>)> = Vec::new();
+    fn 收(shape: &egui::epaint::Shape, out: &mut Vec<(egui::Rect, std::sync::Arc<egui::Galley>)>) {
+        match shape {
+            egui::epaint::Shape::Text(text) => out.push((
+                egui::Rect::from_min_size(text.pos, text.galley.size()),
+                text.galley.clone(),
+            )),
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|one| 收(one, out)),
+            _ => {}
+        }
+    }
+    for clipped in &harness.output().shapes {
+        收(&clipped.shape, &mut 各段);
+    }
+    let tag_padding = romcat_gui::tokens::Tokens::builtin().layout.tag_padding;
+    let tag_height = romcat_gui::tokens::Tokens::builtin().layout.tag_height;
+
+    let mut 查过 = 0;
+    let mut 截没了 = Vec::new();
+    for (标签, _) in 各段
+        .iter()
+        .filter(|(_, galley)| galley.text() == UNLINKED_LABEL)
+    {
+        // 标签那一枚的字画在底色正中，底色左沿比字再往左一份 `tag-padding`；正题与底色左沿对齐。
+        let 左沿 = 标签.min.x - tag_padding;
+        let Some((正题框, 正题)) = 各段
+            .iter()
+            .filter(|(框, _)| {
+                (框.min.x - 左沿).abs() <= 1.0
+                    && 框.max.y <= 标签.min.y + 0.5
+                    && 标签.min.y - 框.max.y <= tag_height
+            })
+            .max_by(|(甲, _), (乙, _)| 甲.max.y.total_cmp(&乙.max.y))
+        else {
+            截没了.push(format!("标签 {标签:?} 正上方没画正题"));
+            continue;
+        };
+        查过 += 1;
+        let 露出来的: String = 正题
+            .rows
+            .iter()
+            .flat_map(|row| row.glyphs.iter().map(|glyph| glyph.chr))
+            .filter(|chr| *chr != '…')
+            .collect();
+        if 露出来的.chars().count() < 正题至少露出 {
+            截没了.push(format!(
+                "「{}」只露出「{露出来的}」（画在 {正题框:?}）",
+                正题.text()
+            ));
+        }
+    }
+    assert!(查过 > 0, "{名字}：表上一枚「{UNLINKED_LABEL}」标签都没画");
+    assert!(
+        截没了.is_empty(),
+        "{名字}：带标签的行正题被截得不到 {正题至少露出} 个字：\n{}",
+        截没了.join("\n"),
+    );
 }
 
 /// **每一个可交互的控件都整个落在它所在那一栏的可见区里**（拿主意的人看浏览屏：「按钮都没显示全」）。
