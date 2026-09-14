@@ -661,11 +661,10 @@ pub fn survey(
         identified: !rows.is_empty(),
         ..Survey::default()
     };
-    let whole = Filter::default();
     for row in rows {
         // 整个队列有多少条，与选择器无关——报告要拿这两个数并排放，
         // 不然用户看不出自己的选择器是选窄了还是库里本来就只有这些。
-        if in_queue(&row, &whole) && !decided(verdicts, &row) {
+        if awaits_verdict(&row, verdicts) {
             out.queue += 1;
         }
         if !in_queue(&row, filter) || decided(verdicts, &row) {
@@ -683,6 +682,54 @@ pub fn survey(
         }
     }
     Ok(out)
+}
+
+/// 整个**待确认队列**有多少条待裁决。**与 [`survey`] 交出来的 [`Survey::queue`]、
+/// [`Queue::pending`] 是同一个数**：判据只有 `awaits_verdict` 那一句。
+///
+/// **只数，不取候选、不折条目**：库屏工序段上裁决那一行（`stage::Stages::survey`）每次重读库屏
+/// 都要问它，而 [`survey`] 要为列出来的每一条读候选——真库上那是 15 万行。
+///
+/// **要沉淀库**（`verdicts`）：钉在路径上的裁决只记在那儿（`decided`），只问中立库的话，
+/// 人已经裁过的那几个会被再数一遍。
+///
+/// # Errors
+/// 读中立库失败时返回错误。
+pub fn pending_count(catalog: &Catalog, verdicts: &verdict::Index) -> Result<u64, TriageError> {
+    let rows = catalog.queue_rows()?;
+    Ok(rows
+        .iter()
+        .filter(|row| awaits_verdict(row, verdicts))
+        .count() as u64)
+}
+
+/// 「前几批盖住多少」按**前几批**算：库屏工序段裁决那一行底下那句（设计稿「前 5 批可一次处理 12,223 个」）与待确认队列屏
+/// 屏底那句说的是同一个数。
+pub const HEADLINE_BATCHES: usize = 5;
+
+/// **前 `head` 批盖住多少**（[`batch::Coverage`]）：整个待确认队列（默认那几档，裁过的不算）照依据形状一级分批，数前几批的账。
+///
+/// **与待确认队列屏说的是同一个数**：条目照 [`survey`] 列（默认选择器），分批照 [`batch::batches`]，账照 [`batch::coverage`]
+/// ——与 [`Queue::load`] 之后 [`Queue::coverage`] 走的是同一副。**它贵**：要为队列里每一条读候选（真库 15 万行），所以库屏
+/// 工序段算一次存着、只在队列可能变了时重算（`romcat_gui::stages::Section`），不跟着每次重读库屏算。
+///
+/// # Errors
+/// 读中立库失败时返回错误。
+pub fn head_coverage(
+    catalog: &Catalog,
+    verdicts: &verdict::Index,
+    head: usize,
+) -> Result<batch::Coverage, TriageError> {
+    let listed = survey(catalog, verdicts, &Filter::default())?;
+    Ok(batch::coverage(&batch::batches(&listed.items), head))
+}
+
+/// 这个变体算不算**待裁决**：在队列里（不过任何选择器、不含**跳过**），而且沉淀库还没对它说过话。
+///
+/// [`survey`] 数整个队列与 [`pending_count`] 都问这一句——两处各写一遍的话，库屏工序段与
+/// 待确认队列屏迟早报出两个数。
+fn awaits_verdict(row: &QueueRow, verdicts: &verdict::Index) -> bool {
+    in_queue(row, &Filter::default()) && !decided(verdicts, row)
 }
 
 /// 这个变体在队列里吗（还没过过滤器）。

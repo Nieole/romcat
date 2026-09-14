@@ -812,7 +812,13 @@ pub fn export_task(
         // **只写了一半说不上导过了**（票 `gui-answers-all-six/05` 验收第 5 条）。
         // 那时说「上次跑是刚刚」，工序段那一行就在骗人（规格第 31 条「至少不骗我」）。
         // 照写（`force`）那一趟没有挡下的，走完照常打戳。
-        catalog.mark_exported()?;
+        // **这一趟铺没铺出媒体由这一层说**（库屏导出那一行照实写「仅写入元数据」还是「写入元数据与媒体」，挂单 `Q889`）：
+        // 开着铺媒体、而且真有媒体落在导出去的那一侧——新铺的，或者本来就在那儿、对得上的——才算。
+        let 铺了媒体 = report
+            .media
+            .as_ref()
+            .is_some_and(|media| media.linked + media.copied + media.already > 0);
+        catalog.mark_exported(report.entries, 铺了媒体)?;
     }
     Ok(report)
 }

@@ -31,23 +31,49 @@
 //! 识别那一句与**待确认队列**屏、与命令行 `triage list` 印的**是同一个数**
 //! ——三处都取 [`Catalog::not_run_count`]，没有第二份算法。
 
-use crate::catalog::Catalog;
-use crate::report::{human_time, thousands};
+use crate::catalog::identify::IdentifyTally;
+use crate::catalog::roots::LibraryTotals;
+use crate::catalog::title::TitleTally;
+use crate::catalog::{Catalog, ExportSetup};
+use crate::path;
+use crate::report::{human_bytes, human_time, thousands};
+use crate::triage;
+use crate::triage::batch::Coverage;
+use crate::verdict::{self, Store};
 
 /// 一道**工序**。
 ///
-/// **眼下是识别、刮削、折标题与导出四支**。**加一支要写五处，两处不在这个 crate 里**：
+/// **眼下是扫描、识别、刮削、整理标题、裁决与导出六支**，次序照设计稿
+/// （`.scratch/gui-looks-like-the-design/prototype.html` 的 `stageRows()`）。
+/// **加一支要写五处，最后一处不在这个 crate 里**：
 ///
-/// 1. 这个枚举一个变体，加 [`Stage::label`] 那个 `match` 一支；
+/// 1. 这个枚举一个变体，加 [`Stage::label`] 与 [`Stage::prerequisite`] 那两个 `match` 各一支；
 /// 2. [`Stage::ALL`] 一项——[`Stages::survey`] 照它走，漏了就整支不出现；
 /// 3. 一个折得出 [`StageRow`] 的函数，挂进 `row_of` 那个 `match`；
 /// 4. [`StageRow::render`] 那个 `match` 一支（说不出还差多少时走
 ///    [`Behind::Unmeasured`]，那一支与工序无关，不必动）；
-/// 5. **界面那一侧两处**：`romcat_gui::stages` 里排活那个 `match`（这一支排一趟什么活
-///    上任务台），以及 `romcat_gui::app::App::poll_tasks` 里那个 `match`
-///    （跑完之后还有哪一屏要重读）。
+/// 5. **界面那一侧**：`romcat_gui::stages` 里认工序的那几个 `match`——`Section::start`（这一支排一趟
+///    什么活上任务台，或者像扫描、裁决那样交给够得着的那一处：扫描交库屏自己那条扫描的路，裁决换到
+///    待确认队列屏）、`Section::refusal`（按下去之前就判得出的那句拒绝）、`run`（后台那条线程跑哪一个
+///    长入口）与 `go_label`（顶上「下一步」那颗按钮上的字）；以及 `romcat_gui::app::App::poll_tasks`
+///    里那个 `match`（跑完之后还有哪一屏要重读）。它们都是穷尽匹配，漏一处编译器当场点名。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Stage {
+    /// **扫描**：遍历主库的一组**根**，把盘上有什么收进中立库
+    /// （[`scan::scan`](crate::scan::scan)）。
+    ///
+    /// ## 这一支数的是什么
+    ///
+    /// **还没完整扫过一趟的根**：从没扫过的，加上上次那一趟**部分完成**的（每个根记着的上次扫描，
+    /// [`Catalog::roots`]）。一句查询，不碰盘——外置盘不在位时照样数得出来。
+    ///
+    /// 它**不数**「盘上变了多少」：那要把整棵树再走一遍才知道，**算这个数就是跑这道工序**
+    /// （真库一趟 37.1 分钟）。所以扫完一趟之后这一行归零，往根里再拷东西它不会自己涨；
+    /// 加一个根会（挂单 `Q821`）。
+    ///
+    /// **一个根都没有时交不出数**：那时说「每个根都扫过了」是一句空话，下一步明明是添加根
+    /// ——这一支走 [`Behind::Unmeasured`]，没有上次。
+    Scan,
     /// **识别**：撞 DAT、撞**沉淀库**、撞名字，给每个**变体**一条结论。
     Identify,
     /// **刮削**：在识别结论的基础上去数据源取标题、简介、封面这些元数据
@@ -96,6 +122,17 @@ pub enum Stage {
     /// **要不要为它加一张变更计数表由拿主意的人裁**（挂单 `Q426`）——票面写着
     /// 「不为了整齐去加一张计数表」。
     FoldTitles,
+    /// **裁决**：人在候选之间做出选择，或者判定「都不对」——在**待确认队列**屏上做。
+    ///
+    /// ## 这一支数的是什么
+    ///
+    /// **待确认队列里等着裁决的变体**，与待确认队列屏报的是**同一个数**
+    /// （[`triage::pending_count`]；判据与 [`Queue::pending`](crate::triage::Queue::pending)
+    /// 只有一处，挂单 `Q822`）。它要读**沉淀库**：钉在路径上的裁决只记在那儿，只问中立库会把
+    /// 人已经裁过的那几个再数一遍。
+    ///
+    /// **这一道不排任务**：裁决是人自己一批批做的，库屏上那一行的按钮把人带去待确认队列屏。
+    Triage,
     /// **导出**：把中立库写成前端能读的元数据，铺在主库上
     /// （[`transfer::export`](crate::adapter::transfer::export)）。
     /// **只写元数据文件，一个 ROM 都不搬**（ADR-0004）。
@@ -137,15 +174,24 @@ pub enum Stage {
 
 impl Stage {
     /// 全部工序。**库屏上从上到下就是这个次序**，也是主干六步里的先后。
-    pub const ALL: [Self; 4] = [Self::Identify, Self::Scrape, Self::FoldTitles, Self::Export];
+    pub const ALL: [Self; 6] = [
+        Self::Scan,
+        Self::Identify,
+        Self::Scrape,
+        Self::FoldTitles,
+        Self::Triage,
+        Self::Export,
+    ];
 
     /// 打给用户的那个词。**与词表逐字一样**（`CONTEXT.md` 的**工序**条）。
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
+            Self::Scan => "扫描",
             Self::Identify => "识别",
             Self::Scrape => "刮削",
             Self::FoldTitles => "整理标题",
+            Self::Triage => "裁决",
             Self::Export => "导出",
         }
     }
@@ -159,17 +205,33 @@ impl Stage {
     pub fn basis(self) -> Option<&'static str> {
         (self == Self::Scrape).then_some(SCRAPE_BASIS)
     }
+
+    /// 这一道的**前置**：它要等哪一道做完（[`Stages::waiting_on`]）。扫描是头一道，不等谁。
+    ///
+    /// **照设计稿逐行定**（`stageRows()` 里每一行 `wait` 那一支等的是哪一道；拿主意的人 2026-09-14 照设计稿定，挂单
+    /// `Q830`）：识别等扫描、刮削等识别、整理标题等刮削、**裁决等识别**、**导出等整理标题**。前置**不是**「排在它上面的
+    /// 那一道」——裁决不等刮削与整理标题。词表**工序**条写着这张对应表。
+    #[must_use]
+    pub fn prerequisite(self) -> Option<Self> {
+        match self {
+            Self::Scan => None,
+            Self::Identify => Some(Self::Scan),
+            Self::Scrape => Some(Self::Identify),
+            Self::FoldTitles => Some(Self::Scrape),
+            Self::Triage => Some(Self::Identify),
+            Self::Export => Some(Self::FoldTitles),
+        }
+    }
 }
 
 /// **刮削**那一行的口径（[`Stage::basis`]）。**屏上要明写**（票 `gui-answers-all-six/04`）：
 /// 不写的话，人会把那个数读成「按我眼下那套旋钮还差多少」，而那是刮削面板那本估算账
 /// ——为什么两本账不混，写在 [`Stage::Scrape`] 上。
 ///
-/// 摆成一个有名字的常量而不是散在布局代码里：库屏日后重排时（票
-/// `gui-looks-like-the-design/06`）这句话一个字都不许丢，有名字才查得到它还在不在。
-pub const SCRAPE_BASIS: &str = "这一行数的是一条刮削结论都没有的变体，不是按当前那套旋钮还差多少\
-     ——按旋钮算的话，同一个变体只要标题的那一趟算刮过、还要简介的那一趟就算没刮过，\
-     那个数归刮削面板底下那本估算账。";
+/// **措辞照设计稿逐字**（`stageRows()` 刮削那一行的 `small`；票 `gui-looks-like-the-design/06` 第二段，拿主意的人
+/// 2026-09-14 看候选图后要求）：从前那一长句是写给开发者看的，屏上只留稿上这一句，「不按旋钮算」的来龙去脉留在
+/// [`Stage::Scrape`] 的文档里。摆成一个有名字的常量：界面、测试查得到它还在不在。
+pub const SCRAPE_BASIS: &str = "统计的是没有任何刮削结果的变体";
 
 /// 一道工序**还差多少**。
 ///
@@ -199,6 +261,20 @@ pub struct StageRow {
 }
 
 impl StageRow {
+    /// 这一道算不算**做完了**。库屏顶上那一行「下一步」照它挑（[`Stages::next_up`]）。
+    ///
+    /// - **报得出数的**：还差 0 才算做完。
+    /// - **算不出数、退回时刻的**：**跑过就算**。库变过之后该不该重跑，这一支说不出来——硬指着它，
+    ///   「下一步」会永远停在整理标题上；该不该重跑，人看那一行上次跑的时刻（挂单 `Q823`）。
+    ///   **从没跑过的不算**。读不动库而退回的那几支也落在这一档：那是一件该去查的事，指着它不亏。
+    #[must_use]
+    pub fn settled(&self) -> bool {
+        match &self.behind {
+            Behind::Left(left) => *left == 0,
+            Behind::Unmeasured { at, .. } => at.is_some(),
+        }
+    }
+
     /// 这一行画出来的那句话。
     ///
     /// **措辞在核心里**（ADR-0005）：识别那一句与待确认队列屏、与命令行的队列报告
@@ -210,6 +286,9 @@ impl StageRow {
             // **不差什么了也得说话**——一行空白读起来像出了什么事，所以「零」那一档
             // 也在这儿各说各的话，不另开一个 `match`。
             Behind::Left(left) => match self.stage {
+                // 数的是**根**，不是变体：盘上变了多少不在这个数里（见 [`Stage::Scan`]）。
+                Stage::Scan if *left == 0 => "每个根都完整扫过一趟了".to_string(),
+                Stage::Scan => format!("{} 个根还没完整扫过一趟", thousands(*left)),
                 Stage::Identify if *left == 0 => "每个变体都跑过识别了".to_string(),
                 Stage::Identify => format!("{} 个变体连识别都还没跑过", thousands(*left)),
                 // 刮削那一支数的是变体，**不是**「按眼下那套旋钮还差多少」
@@ -224,6 +303,11 @@ impl StageRow {
                 Stage::FoldTitles => {
                     format!("{} 个作品的标题集合变过、还没重新整理", thousands(*left))
                 }
+                // 与待确认队列屏同一个数（[`Stage::Triage`]）；还没跑过识别时队列本来就是空的。
+                Stage::Triage if *left == 0 => "待确认队列里没有等着裁决的变体".to_string(),
+                Stage::Triage => {
+                    format!("{} 个变体在待确认队列里等着裁决", thousands(*left))
+                }
                 // **导出眼下也折不出这一支**——同上，它走的是退路（见 [`Stage::Export`]）。
                 // 这两句话钉在 `crates/core/tests/stage.rs` 上，理由与折标题那两句一样：
                 // 换度量的人不必再想一遍措辞，也不会顺手写成「N 个条目还没导出」
@@ -236,6 +320,10 @@ impl StageRow {
             // **退回时刻的那一行不许画零**：「还差 0」与「算不出还差多少」是两件事。
             // 这一支**与是哪道工序无关**，所以它不跟着工序分支——眼下走退路的折标题与
             // 导出两支画的都是它，下一支加进来照样白拿。
+            // **扫描那一支交不出数时直说为什么**（一个根都没有、或者读不动库）：它没有「上次跑是几点」这一说——
+            // 每个根记着各自的上次扫描，那几格画在库屏根那张表里。空库那一句照拿主意的人 2026-09-14 的答复写
+            // （[`scan_row`]），不套「还没跑过（这一趟算不出……）」那层给开发者看的壳。
+            Behind::Unmeasured { at: None, why } if self.stage == Stage::Scan => why.clone(),
             Behind::Unmeasured { at, why } => {
                 let 上次 = at.map_or_else(
                     || "还没跑过".to_string(),
@@ -251,6 +339,22 @@ impl StageRow {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Stages {
     rows: Vec<StageRow>,
+    /// 那几行底下那句小字要用的数（[`Stages::detail`]），与那几行同一趟问出来。
+    facts: Facts,
+}
+
+/// 工序那几行底下那句小字要用的数。**每个数都有自己的查询函数**，这里只一趟问齐；读不动的那一个是 `None`，那一句
+/// 就不画——与 [`Stages::survey`] 不返回 `Result` 同一条理由。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Facts {
+    totals: Option<LibraryTotals>,
+    identified: Option<IdentifyTally>,
+    titled: Option<TitleTally>,
+    export_setup: Option<ExportSetup>,
+    exported_entries: Option<u64>,
+    exported_media: Option<bool>,
+    /// 前几批盖住多少：**不在 [`Stages::survey`] 里问**，由调用方算一次交进来（[`Stages::set_queue_head`]）。
+    queue_head: Option<Coverage>,
 }
 
 impl Stages {
@@ -259,13 +363,25 @@ impl Stages {
     ///
     /// **它不返回 `Result`**：某一支读不动库时降级成
     /// [`Behind::Unmeasured`] 那一支，别的支照旧报数。见模块文档。
+    ///
+    /// `store` 与 `library` 是**沉淀库**与这份主库的**主库标识**：裁决那一行要问沉淀库
+    /// 对哪些变体说过话（[`Stage::Triage`]）。
     #[must_use]
-    pub fn survey(catalog: &Catalog) -> Self {
+    pub fn survey(catalog: &Catalog, store: &Store, library: &str) -> Self {
         Self {
             rows: Stage::ALL
                 .iter()
-                .map(|stage| row_of(*stage, catalog))
+                .map(|stage| row_of(*stage, catalog, store, library))
                 .collect(),
+            facts: Facts {
+                totals: catalog.library_totals().ok(),
+                identified: catalog.identify_tally().ok(),
+                titled: catalog.title_tally().ok(),
+                export_setup: catalog.export_setup().ok().flatten(),
+                exported_entries: catalog.exported_entries().ok().flatten(),
+                exported_media: catalog.exported_with_media().ok().flatten(),
+                queue_head: None,
+            },
         }
     }
 
@@ -280,15 +396,217 @@ impl Stages {
     pub fn of(&self, stage: Stage) -> Option<&StageRow> {
         self.rows.iter().find(|row| row.stage == stage)
     }
+
+    /// 库屏顶上那一行「**下一步**」指着的那一道：从上往下头一道还没做完的
+    /// （[`StageRow::settled`]）；六道都做完了就是 `None`。
+    ///
+    /// **判断在核心里**（ADR-0005）：「哪一道算做完了」是领域判断，界面只画它指着的那一行。
+    #[must_use]
+    pub fn next_up(&self) -> Option<&StageRow> {
+        self.rows.iter().find(|row| !row.settled())
+    }
+
+    /// 这一行**在等哪一道**：它的前置（[`Stage::prerequisite`]）还没做完时交那一道；前置做完了、或者它没有前置，
+    /// 交 `None`。
+    ///
+    /// **等的是自己那一道前置，不是头一道没做完的**（挂单 `Q830` 已裁：照稿）：识别一跑完，裁决就不再在等，哪怕刮削
+    /// 还没跑。**「前置做完了」要连着往上问**：前置那一行自己数出来不差什么、却还在等它的前置时，照样算没做完——一个根
+    /// 都没扫过的库里识别那一行数出来是零（库里一个变体都没有），刮削那一行照样说「等待识别完成」，不说空话（挂单
+    /// `Q827`）。**判断在核心里**（ADR-0005）：界面照这个答案决定那一行画不画按钮、用不用弱色。
+    #[must_use]
+    pub fn waiting_on(&self, row: &StageRow) -> Option<Stage> {
+        let before = row.stage.prerequisite()?;
+        let done = self
+            .of(before)
+            .is_some_and(|it| it.settled() && self.waiting_on(it).is_none());
+        (!done).then_some(before)
+    }
+
+    /// 这一行底下那句**小字**（设计稿 `stageRows()` 每行的 `small`）；这一行写不出第二句时交 `None`。**在等的那几行
+    /// 不画**（设计稿 `wait` 那一支没有小字）。
+    ///
+    /// - **扫描**做完了：几个根一共装着几份文件、多少字节（[`Catalog::library_totals`]）。
+    /// - **识别**做完了：命中、未命中、无判据、跳过各几个，几条候选来自已问过的模型答案（[`Catalog::identify_tally`]）。
+    /// - **整理标题**跑过了：几个作品、其中几个有中文标题（[`Catalog::title_tally`]）。
+    /// - **裁决**：前几批可一次处理多少（[`triage::head_coverage`]）。它贵，不在 [`Self::survey`] 里问：调用方算一次交进来
+    ///   （[`Self::set_queue_head`]），没交就不画。
+    /// - **导出**选过格式与目录时：跑过的说格式、上次那一趟收敛出几个条目（[`Catalog::exported_entries`]），以及那一趟
+    ///   **照实**是仅写入元数据还是连媒体也写了（[`Catalog::exported_with_media`]，挂单 `Q889` 已裁）；记这两样之前导出的库
+    ///   说不出，那几段不画。没跑过的说格式与目录。
+    /// - **刮削**那一句是口径（[`Stage::basis`]），界面照前几张票挨着那个数画，不走这里。
+    ///
+    /// **数与措辞都在核心里**（ADR-0005）：每个数各有一个查询函数，[`Self::survey`] 那一趟一起问齐；读不动的那一个
+    /// 不画，别的照旧。
+    #[must_use]
+    pub fn detail(&self, row: &StageRow) -> Option<String> {
+        if self.waiting_on(row).is_some() {
+            return None;
+        }
+        let facts = &self.facts;
+        match row.stage {
+            Stage::Scan => facts
+                .totals
+                .filter(|totals| row.settled() && totals.roots > 0)
+                .map(|totals| {
+                    format!(
+                        "{} 个文件 · {} · {} 个根",
+                        thousands(totals.files),
+                        human_bytes(totals.bytes),
+                        thousands(totals.roots),
+                    )
+                }),
+            Stage::Identify => facts.identified.filter(|_| row.settled()).map(|tally| {
+                format!(
+                    "命中 {} · 未命中 {} · 无判据 {} · 跳过 {} · {} 条候选来自已问过的模型答案",
+                    thousands(tally.matched),
+                    thousands(tally.unmatched),
+                    thousands(tally.no_evidence),
+                    thousands(tally.skipped),
+                    thousands(tally.model_candidates),
+                )
+            }),
+            Stage::FoldTitles => facts.titled.filter(|_| row.settled()).map(|tally| {
+                format!(
+                    "{} 个作品 · {} 个有中文标题",
+                    thousands(tally.works),
+                    thousands(tally.chinese),
+                )
+            }),
+            Stage::Triage => {
+                facts
+                    .queue_head
+                    .filter(|coverage| coverage.head > 0)
+                    .map(|coverage| {
+                        format!(
+                            "前 {} 批可一次处理 {} 个",
+                            coverage.head_batches,
+                            thousands(coverage.head)
+                        )
+                    })
+            }
+            Stage::Export => facts.export_setup.as_ref().map(|setup| {
+                if !row.settled() {
+                    return format!("{} · {}", setup.format, path::display(&setup.out));
+                }
+                match (facts.exported_entries, facts.exported_media) {
+                    (Some(entries), Some(media)) => format!(
+                        "{} · {} 个条目 · {}",
+                        setup.format,
+                        thousands(entries),
+                        if media {
+                            "写入元数据与媒体"
+                        } else {
+                            "仅写入元数据"
+                        },
+                    ),
+                    (Some(entries), None) => {
+                        format!("{} · {} 个条目", setup.format, thousands(entries))
+                    }
+                    (None, _) => setup.format.clone(),
+                }
+            }),
+            Stage::Scrape => None,
+        }
+    }
+
+    /// 交进来裁决那一行底下那句小字要的**前几批盖住多少**（[`triage::head_coverage`]）。
+    ///
+    /// **它不在 [`Self::survey`] 里问**：那要把整个队列连候选读一遍，跟着每次重读库屏跑付不起——界面算一次存着、只在队列可能
+    /// 变了时重算，每次问完工序那几行再把存着的那一份交进来。交 `None`（没算过、算不出来）就不画那一句。
+    pub fn set_queue_head(&mut self, head: Option<Coverage>) {
+        self.facts.queue_head = head;
+    }
+
+    /// 这一行**放在整段里**画出来的那句话：在等它的前置（[`Self::waiting_on`]）就说「等待某某完成」，
+    /// 别的时候就是它自己那句 [`StageRow::render`]。
+    #[must_use]
+    pub fn line(&self, row: &StageRow) -> String {
+        match self.waiting_on(row) {
+            Some(earlier) => format!("等待{}完成", earlier.label()),
+            None => row.render(),
+        }
+    }
+
+    /// 六道都做完时（[`Self::next_up`] 交 `None`）补的那一句：哪几道**只看跑没跑过**——它们算不出还差多少，
+    /// 库变过之后要不要重跑得看那几行上次跑的时刻。一道都没有退回时刻时交 `None`。
+    ///
+    /// **照眼下那几行现折**，不写死是哪两道：度量真做出来、那一行换回报数时，这句话自己就少一道。
+    #[must_use]
+    pub fn settled_by_running(&self) -> Option<String> {
+        let 只看跑没跑过: Vec<&str> = self
+            .rows
+            .iter()
+            .filter(|row| matches!(row.behind, Behind::Unmeasured { .. }))
+            .map(|row| row.stage.label())
+            .collect();
+        (!只看跑没跑过.is_empty()).then(|| {
+            format!(
+                "{}算不出还差多少，只看跑没跑过——库变过之后要不要重跑，看那几行上次跑的时刻。",
+                只看跑没跑过.join("与")
+            )
+        })
+    }
 }
 
 /// 某一道工序那一行。**加一支就在这儿多挂一个函数。**
-fn row_of(stage: Stage, catalog: &Catalog) -> StageRow {
+fn row_of(stage: Stage, catalog: &Catalog, store: &Store, library: &str) -> StageRow {
     match stage {
+        Stage::Scan => scan_row(catalog),
         Stage::Identify => identify_row(catalog),
         Stage::Scrape => scrape_row(catalog),
         Stage::FoldTitles => fold_titles_row(catalog),
+        Stage::Triage => triage_row(catalog, store, library),
         Stage::Export => export_row(catalog),
+    }
+}
+
+/// **扫描**那一行：还有几个**根**没完整扫过一趟——从没扫过的，加上上次那一趟部分完成的。
+///
+/// 口径、为什么不数「盘上变了多少」，写在 [`Stage::Scan`] 上。**一个字节都不读主库**：
+/// 每个根上次扫描的结果住在中立库里。
+fn scan_row(catalog: &Catalog) -> StageRow {
+    let behind = match catalog.roots() {
+        // **一个根都没有就交不出数**：「每个根都扫过了」在这时是一句空话。那一句照拿主意的人 2026-09-14 的答复写
+        // （库屏顶上「下一步：扫描」底下与扫描那一行都画它，[`StageRow::render`] 不给扫描这一支套「还没跑过」那层壳）。
+        Ok(roots) if roots.is_empty() => Behind::Unmeasured {
+            at: None,
+            why: "还没有根，先点右上角「添加根…」选一个目录".to_string(),
+        },
+        Ok(roots) => Behind::Left(roots.iter().filter(|root| !root.fully_scanned()).count() as u64),
+        // 读不动就退回那一支——**只降这一行**，与识别那一行同一个口径。
+        Err(error) => Behind::Unmeasured {
+            at: None,
+            why: format!("中立库读不动：{error}"),
+        },
+    };
+    StageRow {
+        stage: Stage::Scan,
+        behind,
+    }
+}
+
+/// **裁决**那一行：待确认队列里还有几个变体等着裁决。
+///
+/// **不另造一份数**：它就是 [`triage::pending_count`]，与待确认队列屏
+/// （[`Queue::pending`](crate::triage::Queue::pending)）同一句判据。
+fn triage_row(catalog: &Catalog, store: &Store, library: &str) -> StageRow {
+    // **两份库各说各的读不动**：沉淀库读不出来与中立库读不出来是两件该去查的事。**只降这一行。**
+    let behind = match verdict::Index::load(store, library) {
+        Ok(verdicts) => match triage::pending_count(catalog, &verdicts) {
+            Ok(left) => Behind::Left(left),
+            Err(error) => Behind::Unmeasured {
+                at: None,
+                why: format!("中立库读不动：{error}"),
+            },
+        },
+        Err(error) => Behind::Unmeasured {
+            at: None,
+            why: format!("沉淀库读不动：{error}"),
+        },
+    };
+    StageRow {
+        stage: Stage::Triage,
+        behind,
     }
 }
 

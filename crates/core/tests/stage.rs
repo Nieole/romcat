@@ -16,21 +16,27 @@ use std::path::Path;
 
 use romcat_core::adapter::pegasus::Pegasus;
 use romcat_core::adapter::transfer;
-use romcat_core::catalog::{Catalog, Confidence, Roots, TitleRow};
-use romcat_core::dat::repo::DatRepo;
+use romcat_core::catalog::roots::{self, LibraryTotals, RootScan};
+use romcat_core::catalog::{Catalog, Confidence, ExportSetup, Roots, TitleRow};
+use romcat_core::dat::Convention;
+use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
+use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
 use romcat_core::fs::RealFs;
+use romcat_core::identify::report::IdentifyReport;
 use romcat_core::identify::{self, Options, fuzzy};
+use romcat_core::report::human_bytes;
 use romcat_core::report::thousands;
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::scrape::{self, Priorities};
 use romcat_core::stage::{Behind, Stage, Stages};
 use romcat_core::task::Handle;
+use romcat_core::testing::container::crc32;
 use romcat_core::testing::sample::zip;
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::title;
 use romcat_core::triage::Queue;
 use romcat_core::triage::report::QueueReport;
-use romcat_core::verdict::{self, Store};
+use romcat_core::verdict::{self, Anchor, Decision, Store, Verdict};
 
 const 主库标识: &str = "小库";
 
@@ -109,6 +115,40 @@ impl 现场 {
         .expect("识别不该失败");
     }
 
+    /// 往 DAT 库里装**一条认得出的**条目（`FC` 平台）：按内容的 CRC-32 与大小撞。作品要识别撞上它才建得出来。
+    fn 装一条认得出的(&mut self, 条目名: &str, bytes: &[u8]) {
+        let mut writer = self
+            .repo
+            .begin(&Unit {
+                source: "No-Intro".to_string(),
+                name: "Nintendo - Nintendo Entertainment System".to_string(),
+                url: "https://example.invalid/x".to_string(),
+                fingerprint: "sha".to_string(),
+            })
+            .expect("开得了事务");
+        writer
+            .write_dat(
+                &DatMeta {
+                    name: "Nintendo - Nintendo Entertainment System".to_string(),
+                    platform: "FC".to_string(),
+                    convention: Convention::AsIs,
+                    header: DatHeader::default(),
+                },
+                &[GameRecord {
+                    name: 条目名.to_string(),
+                    roms: vec![RomRecord {
+                        name: format!("{条目名}.nes"),
+                        size: Some(bytes.len() as u64),
+                        crc32: Some(crc32(bytes)),
+                        ..RomRecord::default()
+                    }],
+                    ..GameRecord::default()
+                }],
+            )
+            .expect("写得进");
+        writer.commit().expect("提交");
+    }
+
     /// **待确认队列**眼下说库里还有多少个变体连识别都没跑过。
     fn 队列说的(&self) -> u64 {
         let index = verdict::Index::load(&self.store, 主库标识).expect("读得出沉淀库");
@@ -117,9 +157,32 @@ impl 现场 {
             .not_run()
     }
 
+    /// **待确认队列**眼下有多少条待裁决——待确认队列屏屏头那个数（`Queue::pending`）。
+    fn 队列待裁决的(&self) -> u64 {
+        let index = verdict::Index::load(&self.store, 主库标识).expect("读得出沉淀库");
+        Queue::load(&self.catalog, &index)
+            .expect("列得出队列")
+            .pending()
+    }
+
+    /// 库屏顶上那一行「下一步」指着哪一道工序；六道都做完了就是 `None`。
+    fn 下一步(&self) -> Option<Stage> {
+        Stages::survey(&self.catalog, &self.store, 主库标识)
+            .next_up()
+            .map(|row| row.stage)
+    }
+
+    /// 某一道工序那一行。
+    fn 那一行(&self, stage: Stage) -> romcat_core::stage::StageRow {
+        Stages::survey(&self.catalog, &self.store, 主库标识)
+            .of(stage)
+            .expect("工序段有这一行")
+            .clone()
+    }
+
     /// 识别那一行。
     fn 识别那一行(&self) -> romcat_core::stage::StageRow {
-        Stages::survey(&self.catalog)
+        Stages::survey(&self.catalog, &self.store, 主库标识)
             .of(Stage::Identify)
             .expect("工序段有识别那一行")
             .clone()
@@ -127,7 +190,7 @@ impl 现场 {
 
     /// 刮削那一行。
     fn 刮削那一行(&self) -> romcat_core::stage::StageRow {
-        Stages::survey(&self.catalog)
+        Stages::survey(&self.catalog, &self.store, 主库标识)
             .of(Stage::Scrape)
             .expect("工序段有刮削那一行")
             .clone()
@@ -160,7 +223,7 @@ impl 现场 {
 
     /// 折标题那一行。
     fn 折标题那一行(&self) -> romcat_core::stage::StageRow {
-        Stages::survey(&self.catalog)
+        Stages::survey(&self.catalog, &self.store, 主库标识)
             .of(Stage::FoldTitles)
             .expect("工序段有折标题那一行")
             .clone()
@@ -173,7 +236,7 @@ impl 现场 {
 
     /// 导出那一行。
     fn 导出那一行(&self) -> romcat_core::stage::StageRow {
-        Stages::survey(&self.catalog)
+        Stages::survey(&self.catalog, &self.store, 主库标识)
             .of(Stage::Export)
             .expect("工序段有导出那一行")
             .clone()
@@ -377,13 +440,13 @@ fn 刮削那一行数的是一条刮削结论都没有的变体_刮过一趟那�
 }
 
 #[test]
-fn 刮削那一行带着口径_说清它不是按当前那套旋钮算的() {
+fn 刮削那一行带着口径_说清数的是没有任何刮削结果的变体() {
     // **屏上要明写这个口径**（票 `gui-answers-all-six/04` 验收第 3 条）：不写的话，人会把
     // 那个数读成「按我眼下那套旋钮还差多少」——那是刮削面板那本估算账。
-    // **措辞在核心里**（ADR-0005），界面那一层只画。
+    // **措辞在核心里**（ADR-0005），界面那一层只画。票 `gui-looks-like-the-design/06` 第二段起照设计稿逐字
+    // （拿主意的人 2026-09-14 看候选图后要求）：从前那一长句里「不是按当前那套旋钮」是写给开发者看的。
     let 口径 = Stage::Scrape.basis().expect("刮削那一行得带着口径");
-    assert!(口径.contains("一条刮削结论都没有的变体"), "{口径}");
-    assert!(口径.contains("不是按当前那套旋钮"), "{口径}");
+    assert_eq!(口径, "统计的是没有任何刮削结果的变体");
 
     // 另外三支的数说的就是字面上那件事，不另带一句。
     for stage in [Stage::Identify, Stage::FoldTitles, Stage::Export] {
@@ -501,12 +564,518 @@ fn 工序段一道工序一行_次序就是那张全部工序的名单() {
     // `Stage::ALL` 是库屏上从上到下的次序，也是主干六步里的先后。漏一项的话
     // 那一支整个不出现在库屏上，而**不出现**是最难查的那种错。
     let 现场 = 现场::摆好();
-    let stages = Stages::survey(&现场.catalog);
+    let stages = Stages::survey(&现场.catalog, &现场.store, 主库标识);
     let 次序: Vec<Stage> = stages.rows().iter().map(|row| row.stage).collect();
     assert_eq!(次序, Stage::ALL.to_vec(), "工序段少了一行，或者次序对不上");
     assert!(
         stages.of(Stage::FoldTitles).is_some(),
         "折标题那一行没排进来",
+    );
+}
+
+#[test]
+fn 工序六道_次序与叫法照设计稿() {
+    // 票 `gui-looks-like-the-design/06` 验收第 1 条：**主干六道一道不少**，从上到下就是
+    // 设计稿（`.scratch/gui-looks-like-the-design/prototype.html` 的 `stageRows()`）那个次序，
+    // 叫法与词表**工序**那一条逐字一样。扫描与裁决两道从前不在这张名单里，于是库屏上看不见
+    // 整条路有多长、走到了哪儿。
+    let 叫法: Vec<&str> = Stage::ALL.iter().map(|stage| stage.label()).collect();
+    assert_eq!(
+        叫法,
+        ["扫描", "识别", "刮削", "整理标题", "裁决", "导出"],
+        "工序名单少了几道，或者次序、叫法与设计稿对不上",
+    );
+}
+
+#[test]
+fn 扫描那一行数的是还没完整扫过一趟的根_加一个根那个数跟着涨() {
+    // 挂单 `Q821`：扫描那一行说的是**还差几个根**——从没扫过的，加上上次那一趟部分完成的。
+    // 盘上变了多少要把整棵树再走一遍才知道，那不在这个数里。
+    let 甲 = 建库("stage-扫描-甲", 2);
+    let 乙 = 建库("stage-扫描-乙", 1);
+    let mut 现场 = 现场::摆好();
+
+    // **一个根都没有**：交不出数，更不许说「每个根都扫过了」——下一步明明是添加根。
+    let 空 = 现场.那一行(Stage::Scan);
+    assert!(
+        matches!(空.behind, Behind::Unmeasured { at: None, .. }),
+        "一个根都没有时报了一个数：{空:?}",
+    );
+    // 那一句照拿主意的人 2026-09-14 的答复写：库屏顶上「下一步：扫描」底下与扫描那一行都画它，命令行跟着变。
+    assert_eq!(
+        空.render(),
+        "还没有根，先点右上角「添加根…」选一个目录",
+        "一个根都没有时没说下一步是添加根",
+    );
+
+    for (名字, 目录) in [("甲", 甲.path()), ("乙", 乙.path())] {
+        roots::add_root(&现场.catalog, None, 名字, 目录).expect("加得上");
+    }
+    assert_eq!(
+        现场.那一行(Stage::Scan).behind,
+        Behind::Left(2),
+        "加了两个根，一个都还没扫过",
+    );
+    assert_eq!(现场.那一行(Stage::Scan).render(), "2 个根还没完整扫过一趟");
+
+    现场.扫("甲", 甲.path());
+    assert_eq!(
+        现场.那一行(Stage::Scan).behind,
+        Behind::Left(1),
+        "甲扫完了，还差乙"
+    );
+
+    // **上次那一趟部分完成的也算还差**：它记下的数字只是个下界。
+    现场
+        .catalog
+        .record_root_scan(
+            "乙",
+            &RootScan {
+                at: 1_700_000_000,
+                elapsed_ms: 10,
+                entries: 0,
+                interrupted: true,
+            },
+        )
+        .expect("记得下");
+    assert_eq!(
+        现场.那一行(Stage::Scan).behind,
+        Behind::Left(1),
+        "乙那一趟部分完成，却算成了扫过",
+    );
+
+    现场.扫("乙", 乙.path());
+    let 行 = 现场.那一行(Stage::Scan);
+    assert_eq!(行.behind, Behind::Left(0), "两个根都完整扫过了");
+    assert_eq!(行.render(), "每个根都完整扫过一趟了");
+}
+
+#[test]
+fn 裁决那一行的数与待确认队列说的是同一个_裁过的不再算() {
+    // 挂单 `Q822`：裁决那一行说的是待确认队列里还有几个变体等着裁决，与待确认队列屏
+    // （`Queue::pending`）是**同一个数**。钉在路径上的裁决只记在沉淀库里——只问中立库的话，
+    // 人已经裁过的那一个会被再数一遍。
+    let 甲 = 建库("stage-裁决", 3);
+    let mut 现场 = 现场::摆好();
+    现场.扫("甲", 甲.path());
+
+    // 还没跑过识别：队列本来就是空的。
+    let 行 = 现场.那一行(Stage::Triage);
+    assert_eq!(行.behind, Behind::Left(0));
+    assert_eq!(行.render(), "待确认队列里没有等着裁决的变体");
+
+    // DAT 库是空的：三个变体一个都没认出来，全进待确认队列。
+    现场.跑识别("甲", 甲.path());
+    assert_eq!(现场.队列待裁决的(), 3, "前提：待确认队列里是这三个");
+    let 行 = 现场.那一行(Stage::Triage);
+    assert_eq!(行.behind, Behind::Left(3));
+    assert_eq!(行.render(), "3 个变体在待确认队列里等着裁决");
+
+    // **人裁掉一个，钉在路径上**：这一条只记在沉淀库里。
+    现场
+        .store
+        .put(&Verdict::now(
+            Anchor::Path {
+                library: 主库标识.to_string(),
+                variant_key: "甲/FC/游戏00.zip".to_string(),
+            },
+            Decision::Unknown,
+        ))
+        .expect("写得进沉淀库");
+    assert_eq!(现场.队列待裁决的(), 2, "前提：待确认队列不再列裁过的那一个");
+    assert_eq!(
+        现场.那一行(Stage::Triage).behind,
+        Behind::Left(2),
+        "裁决那一行与待确认队列说的不是同一个数",
+    );
+}
+
+#[test]
+fn 下一步指向头一道还没做完的工序_做完一道就往下挪() {
+    // 票 `gui-looks-like-the-design/06` 验收第 2 条、挂单 `Q823`：「下一步」是一条领域判断
+    // ——哪一道算做完了——所以在核心里，界面只画它。报得出数的那几道：还差 0 才算做完；
+    // 算不出数的那两道（整理标题、导出）：**跑过就不再指它**——库变过之后该不该重跑它说不出来，
+    // 只能看那一行上次跑的时刻。
+    let 甲 = 建库("stage-下一步", 2);
+    let mut 现场 = 现场::摆好();
+    assert_eq!(
+        现场.下一步(),
+        Some(Stage::Scan),
+        "一个根都没有：下一步是扫描（先添加根）",
+    );
+
+    roots::add_root(&现场.catalog, None, "甲", 甲.path()).expect("加得上");
+    assert_eq!(现场.下一步(), Some(Stage::Scan), "加了根还没扫");
+
+    现场.扫("甲", 甲.path());
+    assert_eq!(现场.下一步(), Some(Stage::Identify), "扫完了还没识别");
+
+    现场.跑识别("甲", 甲.path());
+    assert_eq!(现场.下一步(), Some(Stage::Scrape), "识别完了还没刮削");
+
+    现场.刮("甲", 甲.path(), None);
+    assert_eq!(
+        现场.下一步(),
+        Some(Stage::FoldTitles),
+        "刮完了，整理标题从没跑过",
+    );
+
+    现场.折标题();
+    assert_eq!(
+        现场.下一步(),
+        Some(Stage::Triage),
+        "DAT 库是空的，两个变体都等着裁决",
+    );
+
+    for i in 0..2 {
+        现场
+            .store
+            .put(&Verdict::now(
+                Anchor::Path {
+                    library: 主库标识.to_string(),
+                    variant_key: format!("甲/FC/游戏{i:02}.zip"),
+                },
+                Decision::Unknown,
+            ))
+            .expect("写得进沉淀库");
+    }
+    assert_eq!(现场.下一步(), Some(Stage::Export), "裁完了，导出从没跑过");
+
+    现场.导出();
+    assert_eq!(现场.下一步(), None, "六道都做完了，不该再指着哪一道");
+}
+
+#[test]
+fn 每道工序等自己的前置_裁决不等刮削_导出等整理标题_前置做完就不再在等() {
+    // 票 `gui-looks-like-the-design/06`、挂单 `Q830`（拿主意的人 2026-09-14 照设计稿定）：每道工序等的是**自己那一道
+    // 前置**（`Stage::prerequisite`），不是头一道没做完的。前置没做完时那一行说「等待某某完成」、不给按钮；前置做完了，
+    // 这一行就不再在等。判断在核心里，界面只画。
+    //
+    // **对应表照设计稿 `stageRows()` 逐行读**：识别在 `!scanDone` 时等，刮削在 `!idDone` 时等，整理标题在 `!scraped`
+    // 时等，裁决在 `!idDone` 时等，导出在 `!folded` 时等；扫描那一支没有 `wait`。
+    for (stage, 前置) in [
+        (Stage::Scan, None),
+        (Stage::Identify, Some(Stage::Scan)),
+        (Stage::Scrape, Some(Stage::Identify)),
+        (Stage::FoldTitles, Some(Stage::Scrape)),
+        (Stage::Triage, Some(Stage::Identify)),
+        (Stage::Export, Some(Stage::FoldTitles)),
+    ] {
+        assert_eq!(stage.prerequisite(), 前置, "{}的前置", stage.label());
+    }
+
+    let 甲 = 建库("stage-前置", 2);
+    let mut 现场 = 现场::摆好();
+
+    // **一个根都没有**：扫描不等谁；后面几行各等各的前置。前置自己还在等时照样算没做完——识别那一行数出来是零
+    // （库里一个变体都没有）也不作数，刮削那一行照样说在等识别（挂单 `Q827`）。
+    let stages = Stages::survey(&现场.catalog, &现场.store, 主库标识);
+    let 那一行 = |stage| stages.of(stage).expect("工序段有这一行");
+    assert_eq!(stages.waiting_on(那一行(Stage::Scan)), None);
+    assert_eq!(
+        stages.line(那一行(Stage::Scan)),
+        那一行(Stage::Scan).render()
+    );
+    for stage in [
+        Stage::Identify,
+        Stage::Scrape,
+        Stage::FoldTitles,
+        Stage::Triage,
+        Stage::Export,
+    ] {
+        let 前置 = stage.prerequisite().expect("除了扫描都有前置");
+        assert_eq!(
+            stages.waiting_on(那一行(stage)),
+            Some(前置),
+            "{}那一行该在等{}",
+            stage.label(),
+            前置.label(),
+        );
+        assert_eq!(
+            stages.line(那一行(stage)),
+            format!("等待{}完成", 前置.label())
+        );
+    }
+
+    // **扫完了、识别还没跑**：刮削与裁决等识别，整理标题等刮削，导出等整理标题。
+    roots::add_root(&现场.catalog, None, "甲", 甲.path()).expect("加得上");
+    现场.扫("甲", 甲.path());
+    let stages = Stages::survey(&现场.catalog, &现场.store, 主库标识);
+    let 那一行 = |stage| stages.of(stage).expect("工序段有这一行");
+    assert_eq!(stages.line(那一行(Stage::Scan)), "每个根都完整扫过一趟了");
+    assert_eq!(
+        stages.line(那一行(Stage::Identify)),
+        "2 个变体连识别都还没跑过"
+    );
+    assert_eq!(stages.line(那一行(Stage::Scrape)), "等待识别完成");
+    assert_eq!(stages.line(那一行(Stage::Triage)), "等待识别完成");
+    assert_eq!(stages.line(那一行(Stage::FoldTitles)), "等待刮削完成");
+    assert_eq!(stages.line(那一行(Stage::Export)), "等待整理标题完成");
+    // **在等的那一行自己的数照旧交得出**（`StageRow::render`）：换的只是屏上那一句。
+    assert_eq!(
+        那一行(Stage::Scrape).render(),
+        "2 个变体一条刮削结论都还没有"
+    );
+
+    // **识别跑完、刮削还没跑**：裁决不等刮削——它的前置识别做完了，这一行说它自己的数。
+    现场.跑识别("甲", 甲.path());
+    let stages = Stages::survey(&现场.catalog, &现场.store, 主库标识);
+    let 那一行 = |stage| stages.of(stage).expect("工序段有这一行");
+    assert_eq!(
+        stages.waiting_on(那一行(Stage::Triage)),
+        None,
+        "裁决不等刮削"
+    );
+    assert_eq!(
+        stages.line(那一行(Stage::Triage)),
+        那一行(Stage::Triage).render()
+    );
+    assert!(
+        !那一行(Stage::Scrape).settled(),
+        "前提：刮削还没跑，排在裁决上面的工序没做完"
+    );
+    assert_eq!(
+        stages.waiting_on(那一行(Stage::Export)),
+        Some(Stage::FoldTitles)
+    );
+
+    // **刮完、导出跑过一趟、整理标题还没跑**：导出照样等整理标题——自己跑过也一样。
+    现场.刮("甲", 甲.path(), None);
+    现场.导出();
+    let stages = Stages::survey(&现场.catalog, &现场.store, 主库标识);
+    let 导出 = stages.of(Stage::Export).expect("工序段有导出那一行");
+    assert!(导出.settled(), "前提：导出跑过了");
+    assert_eq!(
+        stages.waiting_on(导出),
+        Some(Stage::FoldTitles),
+        "导出等整理标题"
+    );
+    assert_eq!(stages.line(导出), "等待整理标题完成");
+
+    // **整理标题跑完**：导出的前置做完了，这一行不再在等，说它自己那一句。
+    现场.折标题();
+    let stages = Stages::survey(&现场.catalog, &现场.store, 主库标识);
+    let 导出 = stages.of(Stage::Export).expect("工序段有导出那一行");
+    assert_eq!(
+        stages.waiting_on(导出),
+        None,
+        "前置做完了，这一行就不再是在等"
+    );
+    assert_eq!(stages.line(导出), 导出.render());
+}
+
+#[test]
+fn 工序那几行底下那句小字_数各由一个查询函数交出来_与别处印的是同一组数() {
+    // 票 `gui-looks-like-the-design/06`、挂单 `Q882`（拿主意的人 2026-09-14 要求）：设计稿每一行底下那句小字的数，
+    // 各由核心库一个查询函数交出来，措辞在 `Stages::detail`，界面只画。**在等的那几行一句都不画**（稿上 `wait` 没有小字）。
+    let 甲 = 建库("stage-小字", 2);
+    let mut 现场 = 现场::摆好();
+
+    let stages = Stages::survey(&现场.catalog, &现场.store, 主库标识);
+    for row in stages.rows() {
+        assert_eq!(stages.detail(row), None, "{}那一行", row.stage.label());
+    }
+    assert_eq!(
+        现场.catalog.library_totals().expect("读得出"),
+        LibraryTotals::default()
+    );
+
+    // **扫完**：整个库装着多少，就是每个根的 `root_stats` 加起来——与库屏根那张表逐行画的是同一组数。
+    roots::add_root(&现场.catalog, None, "甲", 甲.path()).expect("加得上");
+    现场.扫("甲", 甲.path());
+    let 甲装着 = 现场.catalog.root_stats("甲").expect("读得出");
+    let totals = 现场.catalog.library_totals().expect("读得出");
+    assert_eq!(
+        totals,
+        LibraryTotals {
+            roots: 1,
+            files: 甲装着.files,
+            bytes: 甲装着.bytes,
+        }
+    );
+    assert_eq!(totals.files, 2, "前提：两份文件");
+    let stages = Stages::survey(&现场.catalog, &现场.store, 主库标识);
+    assert_eq!(
+        stages.detail(stages.of(Stage::Scan).expect("有扫描那一行")),
+        Some(format!("2 个文件 · {} · 1 个根", human_bytes(甲装着.bytes)))
+    );
+    assert_eq!(
+        stages.detail(stages.of(Stage::Identify).expect("有识别那一行")),
+        None,
+        "识别还没做完，核心库不替它说分布"
+    );
+
+    // **识别跑完**：分布与命令行识别报告那一行是同一组数；模型候选数与报告按数据源分的那一行是同一个数。
+    现场.跑识别("甲", 甲.path());
+    let tally = 现场.catalog.identify_tally().expect("读得出");
+    let report = IdentifyReport::build(&现场.catalog, &现场.repo).expect("出得了识别报告");
+    assert_eq!(
+        (
+            tally.matched,
+            tally.unmatched,
+            tally.no_evidence,
+            tally.skipped
+        ),
+        (
+            report.total.matched,
+            report.total.unmatched,
+            report.total.no_evidence,
+            report.total.skipped
+        ),
+        "与命令行识别报告那一行对不上"
+    );
+    assert_eq!(
+        tally.matched + tally.unmatched + tally.no_evidence + tally.skipped,
+        2,
+        "两个变体都有结论"
+    );
+    let 模型候选: u64 = report
+        .sources
+        .iter()
+        .filter(|row| row.source == identify::model::SOURCE)
+        .map(|row| row.candidates)
+        .sum();
+    assert_eq!(tally.model_candidates, 模型候选);
+    let stages = Stages::survey(&现场.catalog, &现场.store, 主库标识);
+    assert_eq!(
+        stages.detail(stages.of(Stage::Identify).expect("有识别那一行")),
+        Some(format!(
+            "命中 {} · 未命中 {} · 无判据 {} · 跳过 {} · {} 条候选来自已问过的模型答案",
+            thousands(tally.matched),
+            thousands(tally.unmatched),
+            thousands(tally.no_evidence),
+            thousands(tally.skipped),
+            thousands(tally.model_candidates),
+        ))
+    );
+
+    // **裁决**：前几批盖住多少由 `triage::head_coverage` 算，与待确认队列屏 `Queue::coverage` 是同一个数。它贵，不在
+    // `Stages::survey` 里问：没交进来就不画，交进来（`Stages::set_queue_head`）才画。
+    let index = verdict::Index::load(&现场.store, 主库标识).expect("读得出沉淀库");
+    let 前几批 = romcat_core::triage::head_coverage(
+        &现场.catalog,
+        &index,
+        romcat_core::triage::HEADLINE_BATCHES,
+    )
+    .expect("算得出前几批");
+    assert_eq!(
+        前几批,
+        Queue::load(&现场.catalog, &index)
+            .expect("列得出队列")
+            .coverage(romcat_core::triage::HEADLINE_BATCHES),
+        "与待确认队列屏说的不是同一个数"
+    );
+    assert_eq!(前几批.head, 2, "前提：两个变体都等着裁决");
+    let mut stages = Stages::survey(&现场.catalog, &现场.store, 主库标识);
+    assert_eq!(
+        stages.detail(stages.of(Stage::Triage).expect("有裁决那一行")),
+        None,
+        "没交进来就不画"
+    );
+    stages.set_queue_head(Some(前几批));
+    assert_eq!(
+        stages.detail(stages.of(Stage::Triage).expect("有裁决那一行")),
+        Some(format!(
+            "前 {} 批可一次处理 {} 个",
+            前几批.head_batches,
+            thousands(前几批.head)
+        ))
+    );
+
+    // **导出**：选过格式与目录、还没跑过时说格式与目录；跑完（前置整理标题也做完了）说格式、那一趟收敛出几个条目，
+    // 与那一趟照实是仅写入元数据还是连媒体也写了（挂单 `Q889`）。
+    let 导出去 = 现场.工作区.path().join("导出去");
+    现场
+        .catalog
+        .set_export_setup(&ExportSetup {
+            format: "Pegasus".to_string(),
+            out: 导出去.clone(),
+        })
+        .expect("记得下");
+    assert_eq!(
+        现场.catalog.exported_entries().expect("读得出"),
+        None,
+        "一趟都没导过"
+    );
+    现场.刮("甲", 甲.path(), None);
+    现场.折标题();
+    let stages = Stages::survey(&现场.catalog, &现场.store, 主库标识);
+    assert_eq!(
+        stages.detail(stages.of(Stage::Export).expect("有导出那一行")),
+        Some(format!("Pegasus · {}", romcat_core::path::display(&导出去)))
+    );
+    let 报告 = 现场.导出();
+    assert_eq!(
+        现场.catalog.exported_entries().expect("读得出"),
+        Some(报告.entries),
+        "记下的条目数就是那一趟报告里的条目数"
+    );
+    assert_eq!(
+        现场.catalog.exported_with_media().expect("读得出"),
+        Some(false),
+        "没开铺媒体的那一趟记成了铺过媒体"
+    );
+    let stages = Stages::survey(&现场.catalog, &现场.store, 主库标识);
+    assert_eq!(
+        stages.detail(stages.of(Stage::Export).expect("有导出那一行")),
+        Some(format!(
+            "Pegasus · {} 个条目 · 仅写入元数据",
+            thousands(报告.entries)
+        ))
+    );
+    // 铺出了媒体的那一趟（`transfer::export` 末尾照那一趟的媒体账记 `true`），那一句照实换成连媒体也写了。
+    现场
+        .catalog
+        .mark_exported(报告.entries, true)
+        .expect("记得下");
+    let stages = Stages::survey(&现场.catalog, &现场.store, 主库标识);
+    assert_eq!(
+        stages.detail(stages.of(Stage::Export).expect("有导出那一行")),
+        Some(format!(
+            "Pegasus · {} 个条目 · 写入元数据与媒体",
+            thousands(报告.entries)
+        ))
+    );
+}
+
+#[test]
+fn 整理标题那一行的作品账_几个作品几个有中文标题_与标题集合对得上() {
+    // 挂单 `Q882`：整理标题那一行底下那句「N 个作品 · N 个有中文标题」的数由 `Catalog::title_tally` 一句聚合交出来。
+    // 盘上那个文件叫中文名、DAT 里那一条是英文名：撞上之后建出一个作品，折标题从文件名采到一条中文叫法。
+    let dir = temp_dir("stage-作品账");
+    let 魂斗罗 = vec![0xA1_u8; 4_096];
+    写(&dir.path().join("FC/魂斗罗.nes"), &魂斗罗);
+    let mut 现场 = 现场::摆好();
+    现场.装一条认得出的("Contra (Japan)", &魂斗罗);
+    roots::add_root(&现场.catalog, None, "甲", dir.path()).expect("加得上");
+    现场.扫("甲", dir.path());
+    现场.跑识别("甲", dir.path());
+    现场.刮("甲", dir.path(), None);
+    现场.折标题();
+
+    let tally = 现场.catalog.title_tally().expect("读得出");
+    assert_eq!(
+        tally.works,
+        现场.catalog.candidate_counts().expect("读得出").works,
+        "这份库的作品都是识别建出来的"
+    );
+    assert_eq!(tally.works, 1, "前提：撞上 DAT 建出一个作品");
+    let mut 有中文叫法的 = std::collections::BTreeSet::new();
+    现场
+        .catalog
+        .for_each_title(&mut |row| {
+            if row.language == title::Language::Chinese {
+                有中文叫法的.insert(row.work.clone());
+            }
+        })
+        .expect("走得完标题集合");
+    assert_eq!(tally.chinese, 有中文叫法的.len() as u64);
+    assert_eq!(tally.chinese, 1, "文件名是中文的，那个作品有一条中文叫法");
+
+    let stages = Stages::survey(&现场.catalog, &现场.store, 主库标识);
+    assert_eq!(
+        stages.detail(stages.of(Stage::FoldTitles).expect("有整理标题那一行")),
+        Some("1 个作品 · 1 个有中文标题".to_string())
     );
 }
 

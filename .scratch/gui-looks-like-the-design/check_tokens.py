@@ -103,6 +103,61 @@ else:
     if int(m[1]) != tokens["layout"]["chip-dot"]:
         problems.append(f"chip-dot: 设计稿是 {m[1]}px，令牌是 {tokens['layout']['chip-dot']}")
 
+# 库屏（设计稿 .libgrid / .phead / .stage / .nextline / .tbl）：两栏间距、面板标题栏、工序那一行的列宽、列缝、
+# 内边距、圆点、字号、状态竖条与图标按钮。都是字面值，照字面值核。
+def literal(pattern: str, what: str):
+    found = re.search(pattern, html)
+    if not found:
+        problems.append(f"找不到 {what}")
+    return found
+
+
+def same(got: str, want, key: str):
+    global literals
+    literals += 1
+    if float(got) != float(want):
+        problems.append(f"{key}: 设计稿是 {got}px，令牌是 {want}")
+
+
+def in_steps(got: str, what: str):
+    global literals
+    literals += 1
+    if float(got) not in [float(s) for s in tokens["space"]["steps"]]:
+        problems.append(f"{what} {got}px 不在间距档位 {tokens['space']['steps']} 里")
+
+
+panel_padding = tokens["space"]["panel-padding"]
+if m := literal(r"\.libgrid\{[^}]*?gap:(\d+)px", ".libgrid 的 gap"):
+    same(m[1], tokens["space"]["library-gap"], "library-gap")
+if m := literal(r"\.phead\{[^}]*?gap:(\d+)px;padding:(\d+)px (\d+)px", ".phead 的 gap 与 padding"):
+    same(m[1], tokens["space"]["panel-head-gap"], "panel-head-gap")
+    same(m[2], panel_padding[0], "panel-padding 上下（.phead）")
+    same(m[3], panel_padding[1], "panel-padding 左右（.phead）")
+if m := literal(r"\.phead h3\{font-size:([\d.]+)px", ".phead h3 的 font-size"):
+    same(m[1], tokens["font"]["size-panel-title"], "size-panel-title")
+if m := literal(r"\.stage\{[^}]*?grid-template-columns:(\d+)px (\d+)px 1fr auto;gap:(\d+)px;[^}]*?padding:(\d+)px (\d+)px", ".stage 的列宽、gap 与 padding"):
+    same(m[1], tokens["layout"]["stage-columns"][0], "stage-columns 圆点那一列")
+    same(m[2], tokens["layout"]["stage-columns"][1], "stage-columns 工序名那一列")
+    in_steps(m[3], ".stage 的 gap")
+    same(m[4], panel_padding[0], "panel-padding 上下（.stage）")
+    same(m[5], panel_padding[1], "panel-padding 左右（.stage）")
+if m := literal(r"\.stage \.dot\{width:(\d+)px;[^}]*?border:([\d.]+)px", ".stage .dot 的 width 与 border"):
+    same(m[1], tokens["layout"]["stage-dot"], "stage-dot")
+    same(m[2], tokens["layout"]["stage-dot-stroke"], "stage-dot-stroke")
+if m := literal(r"\.stage \.left\{font-size:([\d.]+)px", ".stage .left 的 font-size"):
+    same(m[1], tokens["font"]["size-small-plus"], "size-small-plus（.stage .left）")
+if m := literal(r"\.stage \.left small\{[^}]*?font-size:([\d.]+)px", ".stage .left small 的 font-size"):
+    same(m[1], tokens["font"]["size-caption-plus"], "size-caption-plus（.stage .left small）")
+if m := literal(r"\.stage\.next\{[^}]*?inset (\d+)px", ".stage.next 的竖条"):
+    same(m[1], tokens["layout"]["row-stripe"], "row-stripe（.stage.next）")
+if m := literal(r"\.tbl td\.st\{box-shadow:inset (\d+)px", ".tbl td.st 的竖条"):
+    same(m[1], tokens["layout"]["row-stripe"], "row-stripe（.tbl td.st）")
+if m := literal(r"\.nextline\{[^}]*?gap:(\d+)px;[^}]*?padding:(\d+)px;", ".nextline 的 gap 与 padding"):
+    in_steps(m[1], ".nextline 的 gap")
+    same(m[2], panel_padding[1], "下一步那一块的内边距（panel-padding 左右）")
+if m := literal(r'style="width:(\d+)px" aria-label="前端格式"', "导出设置那一块前端格式下拉的 width"):
+    same(m[1], tokens["layout"]["format-select-width"], "format-select-width")
+
 # 子库屏（票 gui-looks-like-the-design/20）：容量条的高与「未知」那一段斜纹一个来回、图例色块的边长与圆角、
 # 规则行首序号圆的直径、空态卡的内边距——设计稿里都是字面值，照字面值核。
 for pattern, key in [
