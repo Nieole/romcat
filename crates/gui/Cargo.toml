@@ -80,5 +80,9 @@ image.workspace = true
 # 答案那一段照核心库自己的写法折（`model::Answer::to_json`），这里只补编号与信封。
 serde_json.workspace = true
 
+# **截图门**（`tests/snapshot.rs`）：把一屏渲染成 PNG 与基线比。为什么是它、为什么钉死版本、只开哪两个特性，
+# 写在根 `Cargo.toml` 那一条上。
+egui_kittest.workspace = true
+
 [lints]
 workspace = true
