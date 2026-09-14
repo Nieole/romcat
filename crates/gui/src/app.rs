@@ -768,8 +768,10 @@ impl App {
                 ui.label(format!("沉淀库 {}", self.site.store.location()));
             }
             View::Library => {
+                // 库屏照稿重排过（票 `gui-looks-like-the-design/06` 接手挂单 `Q866` / `Q868`）：右侧是稿上那颗「添加根…」，
+                // 原来顶栏上那一句不要了。
                 let (roots, site) = (&mut self.roots, &self.site);
-                roots.status(ui, site);
+                roots.header_actions(ui, site);
             }
             View::Browse => {
                 // **抬头上那颗「★ 收藏」真的写库**（票 `gui-redesign/06`），

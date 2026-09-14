@@ -68,9 +68,10 @@ const UNMOUNTED: &str = "未连接";
 /// 盘不在位的根，上次扫描那一格小标签旁边那句（设计稿原话）：这一行的数是上次扫出来的。
 const LAST_SCAN_SHOWN: &str = "显示上次扫描结果";
 
-/// 根那一块一个根都没有时画的那一句。**空着的那一块说清下一步去哪儿办**，不画一张只有表头的表
-/// （票 `gui-looks-like-the-design/06`）。
-const ROOTS_EMPTY: &str = "还没有根。按右上角「添加根…」选一个目录——几块盘都能加进同一个库。";
+/// 根那一块一个根都没有时画的那一句，不画一张只有表头的表（票 `gui-looks-like-the-design/06`）。**只留后半句**
+/// （拿主意的人 2026-09-14 答）：去哪儿加由工序段扫描那一行说（「还没有根，先点右上角「添加根…」选一个目录」），
+/// 这一块不再重复一遍。
+pub const ROOTS_EMPTY: &str = "还没有根——几块盘都能加进同一个库。";
 
 /// 屏头「添加根…」那个选目录窗口什么都没交回来时屏上那一句（[`Screen::picked_root`]）。取消了与弹不出来分不开
 /// （`crate::pick` 的模块文档），所以说到弹不出来时去哪儿办——加根是 `romcat scan` 的活。
@@ -78,8 +79,12 @@ pub const PICK_ROOT_NONE: &str = "没有选目录。选择窗口弹不出来时�
      扫这个目录，把它加成这个库的一个根。";
 
 /// 数据源那一块在**还没扫描**、又有源没取回时画的那一句：扫描与取回互不挡道，下一步可以两件一起办。
-const SOURCES_BEFORE_SCAN: &str =
+pub const SOURCES_BEFORE_SCAN: &str =
     "还没扫描。扫描的时候就可以先把这几个源下载下来——识别和刮削要用它们。";
+
+/// 根那张表里一条路径**最多折几行**：两颗按钮并排时剩下的宽不够，按钮就竖着叠（`Screen::roots_ui`）。
+/// 第十四版候选图审稿定的：稿上同样的宽度，路径折成两行。
+const ROOT_PATH_ROWS: usize = 2;
 
 /// 屏头那颗按钮上写的字：弹系统的选目录窗口，选中的加成一个根（`Screen::picked_root`）。
 pub const ADD_ROOT: &str = "添加根…";
@@ -559,46 +564,48 @@ impl Screen {
         self.stages.set_scan_on_board(id);
     }
 
-    /// 顶栏上属于这一屏的那一段。
-    pub fn status(&mut self, ui: &mut egui::Ui, _site: &Site) {
-        let 没取回 = self.sources.iter().filter(|it| !it.ready()).count();
-        let mut line = format!("{} 个根", self.roots.len());
-        if 没取回 > 0 {
-            line.push_str(&format!(" · {没取回} 个数据源还没取回"));
+    /// **屏头右侧**那一段（屏头归窗口本体，`look::screen_header`；票 `gui-looks-like-the-design/32` 立好、挂单 `Q866` /
+    /// `Q868` 交给本票接手）：照稿一颗小号的「添加根…」（设计稿 `.scrhead` 里那颗 `btn sm`）。按下去弹系统的选目录窗口，
+    /// 选中了就加（[`Self::picked_root`]，挂单 `Q890`）。
+    ///
+    /// **原来顶栏上那句「N 个根 · N 个数据源还没下载」照稿不要了**：几个根写在左栏导航上，哪个数据源没下载在数据源那一块里
+    /// 说。屏头右侧这一段一帧调两遍（先在看不见、按不动的地方量一遍宽），只有真摆的那一遍按得动，选目录窗口不会弹两次。
+    pub fn header_actions(&mut self, ui: &mut egui::Ui, site: &Site) {
+        let 按了 = look::small_buttons(ui, |ui| {
+            ui.button(ADD_ROOT)
+                .on_hover_text("选一个目录，加成这个库的一个根")
+                .clicked()
+        });
+        if 按了 {
+            let 起点 = self
+                .roots
+                .last()
+                .and_then(|row| Path::new(&row.root.path).parent().map(Path::to_path_buf))
+                .unwrap_or_default();
+            let 选中 = crate::pick::directory("选一个目录作为根", &起点);
+            self.picked_root(site, 选中);
         }
-        ui.label(line);
     }
 
-    /// 画一帧。
+    /// 画一帧的**屏体**（`look::screen_body`：屏头底下剩下的整块，竖着滚，内边距取令牌 `screen-body-padding`）。
+    /// 屏名、副标题与「添加根…」在窗口本体画的屏头里（[`Self::header_actions`]），这一屏正文里不再画一遍（挂单 `Q866`）。
     pub fn ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
-        egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("库屏")
-                .show(ui, |ui| self.body(ui, site, tasks));
-        });
+        look::screen_body(ui, "库屏", |ui| self.body(ui, site, tasks));
     }
 
     fn body(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         let 间距 = panel_gap();
-        // 屏头（设计稿 `.scrhead`）：屏名、一句说明，右边一颗「添加根…」。
-        let mut 要选根 = false;
-        ui.horizontal(|ui| {
-            ui.heading("库");
-            ui.weak("根、数据源和处理进度");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                要选根 = ui
-                    .button(ADD_ROOT)
-                    .on_hover_text("选一个目录，加成这个库的一个根")
-                    .clicked();
-            });
-        });
+        // 这一屏自己的错与回执（加根被拦下、扫完一个根……）：有才画，画在两栏上头。
+        let 有话说 = self.error.is_some() || self.notice.is_some();
         if let Some(error) = &self.error {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
         if let Some(notice) = &self.notice {
             ui.weak(notice);
         }
-        ui.add_space(间距);
+        if 有话说 {
+            ui.add_space(间距);
+        }
 
         // 两栏（设计稿 `.libgrid`）：左边工序段，右边根、数据源、导出设置三块。
         ui.horizontal_top(|ui| {
@@ -619,16 +626,6 @@ impl Screen {
         });
         // 工序段扫描那一行按下去只留记号：这一屏自己那条扫描的路接着排（`Self::take_scan`）。
         self.take_scan(site, tasks);
-        if 要选根 {
-            // 照稿（挂单 `Q890`）：直接弹系统的选目录窗口（`crate::pick`），选中了就加。
-            let 起点 = self
-                .roots
-                .last()
-                .and_then(|row| Path::new(&row.root.path).parent().map(Path::to_path_buf))
-                .unwrap_or_default();
-            let 选中 = crate::pick::directory("选一个目录作为根", &起点);
-            self.picked_root(site, 选中);
-        }
     }
 
     /// 右边那一栏：根、数据源、导出设置三块，**各自收得起来**（[`Fold`]），次序照设计稿。
@@ -730,7 +727,8 @@ impl Screen {
             // **照稿五列**（设计稿根那张表：根名称、路径、变体、上次扫描、按钮；挂单 `Q828` 已裁）。这一块在右边
             // 那一栏里、窄：不折行的那几列（根名称、变体、上次扫描那一刻、按钮）照它们最宽那一格画，**路径拿剩下的
             // 宽度、在格子里折行**（[`remaining_width`]），用时落上次扫描那一格第二行——整张表宽不过这一栏，
-            // 「重新扫描」「移除」一定落在栏里（`tests/snapshot.rs` 那条断言钉着）。列与列、行与行之间的缝取令牌
+            // 「重新扫描」「移除」一定落在栏里（`tests/snapshot.rs` 那条断言钉着）。剩下的宽不够路径折在
+            // [`ROOT_PATH_ROWS`] 行以内，两颗按钮就竖着叠、让出宽来（见下面的 `叠起`）。列与列、行与行之间的缝取令牌
             // `cell-padding`；表头说明字号、弱色；每行左边一条状态竖条，行与行之间一条分隔线（设计稿 `.tbl`）。
             let tokens = Tokens::builtin();
             let [行缝, 列缝] = tokens.space.cell_padding;
@@ -770,10 +768,8 @@ impl Screen {
                         egui::WidgetText::from(egui::RichText::new(LAST_SCAN_SHOWN).weak())
                     })),
             );
-            let 按钮宽 = look::small_button_width(ui, RESCAN)
-                .max(look::small_button_width(ui, "扫描"))
-                + ui.spacing().item_spacing.x
-                + look::small_button_width(ui, "移除");
+            // 路径用等宽，字号照稿（设计稿 `.mono` 是正文的 0.92 倍，令牌 `size-small`）：一列扫下来位数对得齐。
+            let 路径字 = |path: &str| font::mono(path).size(tokens.font.size_small).weak();
             // **表格通栏**（设计稿 `.tbl` 直接放在 `.panel` 里）：分隔线从面板左沿画到右沿，状态竖条贴着面板左沿；格子的
             // 内边距取令牌 `cell-padding`——表的四周垫一份，列与列、行与行之间垫两份（两边的格子各一份），分隔线画在正中。
             let 表 = ui.available_rect_before_wrap();
@@ -786,6 +782,33 @@ impl Screen {
                     ui.spacing_mut().item_spacing = 缝;
                     // 根名那一列不超过令牌 `root-name-max`（挂单 `Q911` 已裁：截断加悬停）：目录名再长，路径那一列也留得出地方。
                     let 名宽 = 名宽.min(tokens.layout.root_name_max);
+                    // **两颗按钮并排还是竖着叠**：稿上每行只有一颗按钮，按钮那一列窄，路径拿得到的宽也多；这里每个根
+                    // 两颗都给（挂单 `Q884` 已裁），并排时右栏一窄，路径那一列只剩一个词宽——第十四版候选图上
+                    // 「/Volumes/新加卷/Game」折成四行、「/」一个人占一行。于是先照并排量：有哪条路径在剩下的宽里折过
+                    // [`ROOT_PATH_ROWS`] 行，两颗按钮就竖着叠、贴右（照稿 `td.r`），让出一颗按钮的宽给路径。
+                    let 并排宽 = look::small_button_width(ui, RESCAN)
+                        .max(look::small_button_width(ui, "扫描"))
+                        + ui.spacing().item_spacing.x
+                        + look::small_button_width(ui, "移除");
+                    let 叠起宽 = [RESCAN, "扫描", "移除"]
+                        .into_iter()
+                        .map(|字| look::small_button_width(ui, 字))
+                        .fold(0.0, f32::max);
+                    let 并排时路径宽 =
+                        remaining_width(ui, &[名宽, 变体宽, 扫描宽, 并排宽], 2.0 * 列缝);
+                    let 叠起 = roots.iter().any(|row| {
+                        egui::WidgetText::from(路径字(&row.root.path))
+                            .into_galley(
+                                ui,
+                                Some(egui::TextWrapMode::Wrap),
+                                并排时路径宽,
+                                egui::FontSelection::Default,
+                            )
+                            .rows
+                            .len()
+                            > ROOT_PATH_ROWS
+                    });
+                    let 按钮宽 = if 叠起 { 叠起宽 } else { 并排宽 };
                     let 路径宽 = remaining_width(ui, &[名宽, 变体宽, 扫描宽, 按钮宽], 2.0 * 列缝);
                     // **列宽下限收成零**：egui 的表格默认每列至少一个可点区域那么宽（40 点），「变体」那一列于是被撑到 40，
                     // 比算好的宽出十几点、整栏跟着宽出去（第六版候选图扫过两个根那两张）。列宽只照量出来的那一格。
@@ -811,17 +834,14 @@ impl Screen {
                                     })
                                     .response
                                     .rect;
-                                // 路径用等宽：一列扫下来位数对得齐；长了在格子里折行。
+                                // 路径长了在格子里折行（字见上面的 `路径字`）。
                                 let 路径格 = ui
                                     .vertical(|ui| {
                                         // 这一格**占满**算给它的宽：整张表于是铺满这一栏，按钮那一列贴着表的右内边距（照稿，
                                         // 与数据源那张表的按钮右沿对齐）。
                                         ui.set_min_width(路径宽);
                                         ui.set_max_width(路径宽);
-                                        ui.add(
-                                            egui::Label::new(font::mono(&row.root.path).weak())
-                                                .wrap(),
-                                        );
+                                        ui.add(egui::Label::new(路径字(&row.root.path)).wrap());
                                     })
                                     .response
                                     .rect;
@@ -865,59 +885,74 @@ impl Screen {
                                     })
                                     .response
                                     .rect;
-                                // **按钮那一格也折行**：确认移除那一态多一句话、两颗按钮，并排放不下就换行，不挤出这一栏。
-                                // 按钮是小号（设计稿 `.btn.sm`）；「移除」照稿用警示样式（`.btn.warn`：`lo` 的字、透明底）。
-                                let 按钮格 = ui
-                                    .horizontal_wrapped(|ui| {
-                                        ui.set_max_width(按钮宽);
-                                        look::small_buttons(ui, |ui| {
-                                            let 忙 = 忙的.contains(&row.root.name);
-                                            let 标签 = if row.root.scan.is_some() {
-                                                RESCAN
-                                            } else {
-                                                "扫描"
-                                            };
-                                            if ui
-                                                .add_enabled(!忙, egui::Button::new(标签))
-                                                .on_hover_text("排到任务台上跑，期间照常用别的屏")
-                                                .clicked()
-                                            {
-                                                要扫 = Some(row.root.name.clone());
+                                // **按钮那一格**：并排时折行——确认移除那一态多一句话、两颗按钮，放不下就换行，不挤出这一栏；
+                                // 路径那一列不够宽时竖着叠、贴右（见上面的 `叠起`）。按钮是小号（设计稿 `.btn.sm`）；「移除」照稿用
+                                // 警示样式（`.btn.warn`：`lo` 的字、透明底）。
+                                let mut 摆按钮 = |ui: &mut egui::Ui| {
+                                    look::small_buttons(ui, |ui| {
+                                        let 忙 = 忙的.contains(&row.root.name);
+                                        let 标签 = if row.root.scan.is_some() {
+                                            RESCAN
+                                        } else {
+                                            "扫描"
+                                        };
+                                        if ui
+                                            .add_enabled(!忙, egui::Button::new(标签))
+                                            .on_hover_text("排到任务台上跑，期间照常用别的屏")
+                                            .clicked()
+                                        {
+                                            要扫 = Some(row.root.name.clone());
+                                        }
+                                        if self.removing.as_deref() == Some(row.root.name.as_str())
+                                        {
+                                            ui.colored_label(
+                                                ui.visuals().warn_fg_color,
+                                                format!(
+                                                    "会去掉 {} 个变体",
+                                                    thousands(row.stats.variants)
+                                                ),
+                                            );
+                                            if ui.button("确认移除").clicked() {
+                                                要移除 = Some(row.root.name.clone());
                                             }
-                                            if self.removing.as_deref()
-                                                == Some(row.root.name.as_str())
-                                            {
-                                                ui.colored_label(
-                                                    ui.visuals().warn_fg_color,
-                                                    format!(
-                                                        "会去掉 {} 个变体",
-                                                        thousands(row.stats.variants)
-                                                    ),
-                                                );
-                                                if ui.button("确认移除").clicked() {
-                                                    要移除 = Some(row.root.name.clone());
-                                                }
-                                                // **「算了」得真的算了。** 一个只能前进不能后退的破坏性确认，
-                                                // 比不加确认更坏。
-                                                if ui.button("算了").clicked() {
-                                                    要收回 = true;
-                                                }
-                                            } else if ui
-                                                .add_enabled(
-                                                    !忙,
-                                                    egui::Button::new(
-                                                        egui::RichText::new("移除").color(警示色),
-                                                    )
-                                                    .fill(egui::Color32::TRANSPARENT),
+                                            // **「算了」得真的算了。** 一个只能前进不能后退的破坏性确认，
+                                            // 比不加确认更坏。
+                                            if ui.button("算了").clicked() {
+                                                要收回 = true;
+                                            }
+                                        } else if ui
+                                            .add_enabled(
+                                                !忙,
+                                                egui::Button::new(
+                                                    egui::RichText::new("移除").color(警示色),
                                                 )
-                                                .clicked()
-                                            {
-                                                要点头 = Some(row.root.name.clone());
-                                            }
-                                        });
+                                                .fill(egui::Color32::TRANSPARENT),
+                                            )
+                                            .clicked()
+                                        {
+                                            要点头 = Some(row.root.name.clone());
+                                        }
+                                    });
+                                };
+                                let 按钮格 = if 叠起 {
+                                    ui.vertical(|ui| {
+                                        ui.set_min_width(按钮宽);
+                                        ui.set_max_width(按钮宽);
+                                        ui.with_layout(
+                                            egui::Layout::top_down(egui::Align::Max),
+                                            摆按钮,
+                                        );
                                     })
                                     .response
-                                    .rect;
+                                    .rect
+                                } else {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.set_max_width(按钮宽);
+                                        摆按钮(ui);
+                                    })
+                                    .response
+                                    .rect
+                                };
                                 // 这一行左边那条状态竖条（设计稿 `.tbl td.st`）：完整扫过、盘又在位是 `hi`，别的是 `none`。
                                 let 语气 = if row.mounted && row.root.fully_scanned() {
                                     Tone::Good
@@ -956,7 +991,7 @@ impl Screen {
         // 一个根都没有时这一块说清去哪儿加（照稿这一块里不摆贴路径的表单，加根在屏头「添加根…」，`Self::picked_root`）。
         // 表格通栏，这一句照面板内边距垫（[`padded`]）。
         if roots.is_empty() {
-            padded(ui, |ui| ui.weak(ROOTS_EMPTY));
+            padded(ui, |ui| look::weak_paragraph(ui, ROOTS_EMPTY));
         }
     }
 
@@ -966,7 +1001,8 @@ impl Screen {
         // 判据与工序段扫描那一行同一句（`LibraryRoot::fully_scanned`，ADR-0024）：一个根都没完整扫过。
         let 还没扫描 = !self.roots.iter().any(|row| row.root.fully_scanned());
         if 还没扫描 && self.sources.iter().any(|status| !status.ready()) {
-            padded(ui, |ui| ui.weak(SOURCES_BEFORE_SCAN));
+            // 段末不留孤字（第十四版候选图上这一句最后折出一个孤零零的「们。」）。
+            padded(ui, |ui| look::weak_paragraph(ui, SOURCES_BEFORE_SCAN));
         }
         // **照稿四列**（设计稿数据源那张表：数据源、记录数、更新时间 / 说明、按钮）：不折行的那几列（名字、记录数、
         // 按钮）照它们最宽那一格画，**说明拿剩下的宽度、在格子里折行**（[`remaining_width`]）——整张表宽不过这一栏，
@@ -1167,7 +1203,7 @@ impl Screen {
         }
         if !还没扫描 {
             padded(ui, |ui| {
-                ui.weak("扫完没认出来？先看这一屏——多半是某个源还没下载。")
+                look::weak_paragraph(ui, "扫完没认出来？先看这一屏——多半是某个源还没下载。")
             });
         }
     }

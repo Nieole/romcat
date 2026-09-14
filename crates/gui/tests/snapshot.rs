@@ -340,7 +340,7 @@ fn 开场_添加主库向导盖在上面_浅色() {
 
 // ——— 库 ———
 
-/// 库屏那几张基线用的现场：一份落在临时工作目录里的中立库，交出**整个窗口**（顶栏加库屏）。
+/// 库屏那几张基线用的现场：一份落在临时工作目录里的中立库，交出**整个窗口**（左栏、屏头加库屏的屏体）。
 /// 临时目录跟着它活到拍完。
 ///
 /// **屏上画着的都得是定值。** 变体数、容量、工序那几行说的话、数据源那几行照真库读——那几样只随摆进去的
@@ -489,7 +489,8 @@ fn 摆一块盘(tag: &str, 文件: &[(&str, usize)]) -> TempDir {
 /// 导出设置那一行的「记下」被截掉——读字的那几条测试一条都没抓到：按钮的字照样在那一帧的树里。这里读的是
 /// 无障碍树里每颗按钮的**外框**（`egui_kittest` 的 `Node::rect`，逻辑坐标）。
 ///
-/// 这一栏的两条边从屏上现量，不写像素：**右边**是屏头「添加根…」那颗按钮的右沿（它与右栏同靠一条内容边）；
+/// 这一栏的两条边从屏上现量，不写像素：**右边**是屏体可见区的右沿减去令牌 `screen-body-padding` 左右那一份（右栏靠着这条
+/// 内容边）；
 /// **左边**是右栏头一块的标题往左让出面板内边距（令牌 `space.panel-padding`），再让一点给面板的描边。
 /// 只量横向：右栏竖着长过窗口时整屏往下滚得到，那不算落在栏外。
 #[track_caller]
@@ -500,16 +501,21 @@ fn 右栏的按钮都落在右栏里(
 ) {
     /// 面板描边的余量，点。描边宽度是 egui 的缺省线宽，令牌里没有这一格。
     const 描边余量: f32 = 1.5;
-    let 栏右 = harness
-        .get_by_role_and_label(Role::Button, "添加根…")
-        .rect()
-        .max
-        .x;
-    let [_, 左右内边距] = romcat_gui::tokens::Tokens::builtin().space.panel_padding;
-    let 栏左 = harness.get_by_label(右栏头一块的标题).rect().min.x - 左右内边距 - 描边余量;
+    // **右沿从屏体的可见区算**：屏体右沿（窗口的右沿）减去令牌 `screen-body-padding` 左右那一份——右栏与屏体靠同一条
+    // 内容边（`look::screen_body`）。不再借屏头上那颗「添加根…」量：它挪进了屏头（票 `gui-looks-like-the-design/32`），
+    // 屏头右侧那一段一帧摆两遍（先在看不见的地方量一遍宽），无障碍树里有两颗。
+    let tokens = romcat_gui::tokens::Tokens::builtin();
+    let [_, 屏体左右, _] = tokens.space.screen_body_padding;
+    let 栏右 = harness.ctx.content_rect().max.x - 屏体左右;
+    let [面板上下, 左右内边距] = tokens.space.panel_padding;
+    let 标题 = harness.get_by_label(右栏头一块的标题).rect();
+    let 栏左 = 标题.min.x - 左右内边距 - 描边余量;
+    // 只量右栏里的按钮：右栏头一块的顶以下，屏头右侧那一段不算。
+    let 栏顶 = 标题.min.y - 面板上下 - 描边余量;
     let 越界的: Vec<egui::Rect> = harness
         .query_all_by_role(Role::Button)
         .map(|node| node.rect())
+        .filter(|外框| 外框.min.y >= 栏顶)
         .filter(|外框| 外框.center().x > 栏左)
         .filter(|外框| 外框.min.x < 栏左 || 外框.max.x > 栏右 + 描边余量)
         .collect();
@@ -557,30 +563,74 @@ fn 右栏的按钮都落在右栏里(
 /// 那一段字排成了几行（`Galley` 的行数），与「字的外框高不过一行」是同一件事，不必另猜行高。
 #[track_caller]
 fn 画成一行(harness: &Harness<'_>, 那几个字: &str) {
-    fn 收(shape: &egui::epaint::Shape, 那几个字: &str, 行数: &mut Vec<usize>) {
+    折行不超过(harness, 那几个字, 1);
+}
+
+/// 屏上**正好**写着 `那几个字` 的每一处都**最多折成 `最多几行` 行**，而且至少画了一处。读法同 [`画成一行`]。
+///
+/// 第十四版候选图上，根那张表「/Volumes/新加卷/Game」折成了四行、「/」一个人占一行：两颗按钮并排、根名与上次扫描
+/// 那几列一挤，路径那一列只剩一个词宽。
+#[track_caller]
+fn 折行不超过(harness: &Harness<'_>, 那几个字: &str, 最多几行: usize) {
+    let 行数: Vec<usize> = 画着的段(harness, 那几个字)
+        .iter()
+        .map(|galley| galley.rows.len())
+        .collect();
+    assert!(!行数.is_empty(), "屏上没画出「{那几个字}」");
+    assert!(
+        行数.iter().all(|几行| *几行 <= 最多几行),
+        "「{那几个字}」该最多折成 {最多几行} 行，各处分别折成了 {行数:?} 行",
+    );
+}
+
+/// 屏上**正好**写着 `那一句` 的每一处，折行时**末行至少两个字**（标点不算），而且至少画了一处。
+///
+/// 第十四版候选图上，空库时数据源那一句最后折出一个孤零零的「们。」——中文排版说的「孤字」。
+#[track_caller]
+fn 段末不留孤字(harness: &Harness<'_>, 那一句: &str) {
+    let 各处 = 画着的段(harness, 那一句);
+    assert!(!各处.is_empty(), "屏上没画出「{那一句}」");
+    for galley in 各处 {
+        let 末行: String = galley
+            .rows
+            .last()
+            .map(|row| row.glyphs.iter().map(|glyph| glyph.chr).collect())
+            .unwrap_or_default();
+        let 字数 = 末行.chars().filter(|c| c.is_alphanumeric()).count();
+        assert!(
+            galley.rows.len() < 2 || 字数 >= 2,
+            "「{那一句}」折成 {} 行，末行只剩「{末行}」",
+            galley.rows.len(),
+        );
+    }
+}
+
+/// 这一帧里**正好**写着 `那几个字` 的每一段排好的字（`Galley`）。
+fn 画着的段(harness: &Harness<'_>, 那几个字: &str) -> Vec<std::sync::Arc<egui::Galley>> {
+    fn 收(
+        shape: &egui::epaint::Shape,
+        那几个字: &str,
+        各段: &mut Vec<std::sync::Arc<egui::Galley>>,
+    ) {
         match shape {
             egui::epaint::Shape::Text(text) => {
                 if text.galley.text() == 那几个字 {
-                    行数.push(text.galley.rows.len());
+                    各段.push(text.galley.clone());
                 }
             }
             egui::epaint::Shape::Vec(shapes) => {
                 for one in shapes {
-                    收(one, 那几个字, 行数);
+                    收(one, 那几个字, 各段);
                 }
             }
             _ => {}
         }
     }
-    let mut 行数 = Vec::new();
+    let mut 各段 = Vec::new();
     for clipped in &harness.output().shapes {
-        收(&clipped.shape, 那几个字, &mut 行数);
+        收(&clipped.shape, 那几个字, &mut 各段);
     }
-    assert!(!行数.is_empty(), "屏上没画出「{那几个字}」");
-    assert!(
-        行数.iter().all(|几行| *几行 == 1),
-        "「{那几个字}」没画成一行，各处分别折成了 {行数:?} 行",
-    );
+    各段
 }
 
 /// 一个根都没有时右栏里该看得见的那几颗：数据源标题栏的「全部下载」、三个源各一颗「下载」、导出设置的「选择…」。
@@ -607,6 +657,8 @@ fn 库屏_空的_浅色() {
     右栏的按钮都落在右栏里(&harness, "根", 空库右栏的按钮);
     // 数据源那张表记录数那一列不该折行。
     画成一行(&harness, "未下载");
+    // 数据源那一块还没扫描时那一句，末行不只剩一个字。
+    段末不留孤字(&harness, romcat_gui::roots::SOURCES_BEFORE_SCAN);
     拍下(harness, 名字);
 }
 
@@ -621,6 +673,8 @@ fn 库屏_空的_暗色() {
     右栏的按钮都落在右栏里(&harness, "根", 空库右栏的按钮);
     // 数据源那张表记录数那一列不该折行。
     画成一行(&harness, "未下载");
+    // 数据源那一块还没扫描时那一句，末行不只剩一个字。
+    段末不留孤字(&harness, romcat_gui::roots::SOURCES_BEFORE_SCAN);
     拍下(harness, 名字);
 }
 
@@ -636,6 +690,9 @@ fn 库屏_扫过两个根_浅色() {
     // 不该折行的字画成一行：上次扫描那一刻、数据源那张表记录数那一列。
     画成一行(&harness, "09-03 14:58");
     画成一行(&harness, "未下载");
+    // 根那张表的路径最多折两行（稿上同样的宽度折成两行）。
+    折行不超过(&harness, "/Volumes/新加卷/Game", 2);
+    折行不超过(&harness, "/Volumes/备份/Pegasus", 2);
     拍下(harness, 名字);
 }
 
@@ -651,6 +708,9 @@ fn 库屏_扫过两个根_暗色() {
     // 不该折行的字画成一行：上次扫描那一刻、数据源那张表记录数那一列。
     画成一行(&harness, "09-03 14:58");
     画成一行(&harness, "未下载");
+    // 根那张表的路径最多折两行（稿上同样的宽度折成两行）。
+    折行不超过(&harness, "/Volumes/新加卷/Game", 2);
+    折行不超过(&harness, "/Volumes/备份/Pegasus", 2);
     拍下(harness, 名字);
 }
 

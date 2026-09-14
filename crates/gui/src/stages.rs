@@ -939,13 +939,14 @@ impl Section {
                     ui.weak(&conflict.why);
                 }
                 // **不做差量预览**：人拿到的是一份文件名单，看文件本身由他自己去。
-                if ui
-                    .button("我看过了，照写")
-                    .on_hover_text(
-                        "带着照写重排一趟导出：上面点名的那几份会被写过去，那几次手改就没了。",
-                    )
-                    .clicked()
-                {
+                // 默认那一档按钮（设计稿 `.btn`，`look::buttons`）。
+                if look::buttons(ui, |ui| {
+                    ui.button("我看过了，照写")
+                        .on_hover_text(
+                            "带着照写重排一趟导出：上面点名的那几份会被写过去，那几次手改就没了。",
+                        )
+                        .clicked()
+                }) {
                     要照写 = true;
                 }
                 // **画在屏上，不只藏在悬停里**：「每次都得当场点」是这颗按钮最要紧的一句，
@@ -1215,13 +1216,12 @@ impl Section {
         let mut 按了 = false;
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // **主按钮**：这一屏上最该按的就是它。颜色只从令牌来（`look::primary_button`）。
-                按了 = ui
-                    .scope(|ui| {
-                        look::primary_button(ui.visuals_mut());
-                        ui.add_enabled(!忙, egui::Button::new(字)).clicked()
-                    })
-                    .inner;
+                // **主按钮**：这一屏上最该按的就是它。颜色只从令牌来（`look::primary_button`），高、留白、字号是默认那一档
+                // （设计稿 `.btn.pri`，`look::buttons`）。
+                按了 = look::buttons(ui, |ui| {
+                    look::primary_button(ui.visuals_mut());
+                    ui.add_enabled(!忙, egui::Button::new(字)).clicked()
+                });
                 ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                     ui.label(标题(ui, format!("下一步：{}", row.stage.label())));
                     ui.add(egui::Label::new(egui::RichText::new(row.render()).weak()).wrap());
@@ -1334,8 +1334,9 @@ impl Section {
                     .setup
                     .as_ref()
                     .is_none_or(|setup| setup.out.to_string_lossy() != self.out_draft);
-            // 系统目录选择器（`crate::pick`）：选中的目录落进左边这个框，与贴路径同一处。
-            if ui.button("选择…").clicked() {
+            // 系统目录选择器（`crate::pick`）：选中的目录落进左边这个框，与贴路径同一处。默认那一档按钮（设计稿 `.btn`，
+            // `look::buttons`）。
+            if look::buttons(ui, |ui| ui.button("选择…").clicked()) {
                 选中 = crate::pick::directory("选导出目录", Path::new(&self.out_draft));
             }
         });
