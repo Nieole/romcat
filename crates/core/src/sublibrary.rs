@@ -391,6 +391,19 @@ pub struct Selected {
     /// 扣掉重叠之后它就变成了「这条规则的边际贡献」——那是另一个问题，而且答案取决于
     /// 规则的排列顺序，用户核对不了。
     pub rule_hits: Vec<u64>,
+    /// 每条规则各命中的那批变体一共多大（下界，ADR-0021）。
+    ///
+    /// 与 [`Self::rule_hits`] **同一条口径**：逐条各自算，不扣例外、不扣与别条的重叠——
+    /// 回答的仍是「我这条规则写对了吗」，只是换成容量问。
+    pub rule_bytes: Vec<u64>,
+    /// **规则之间的重叠**：逐条命中数加起来，比「被至少一条规则选中的变体数」多出来几个。
+    ///
+    /// 规则之间取并集，一个变体被三条规则同时选中只算一次——它在逐条命中数里却数了三次，
+    /// 这里记 2。子库屏合计那一行写的「已去除几个被多条规则同时选中的变体」就是它；逐条那几个数
+    /// 加起来减去它，正好是规则（不看例外）选中的变体数。**与例外无关**：命中数本来就不扣例外。
+    ///
+    /// 不叫「重复」：词表里**重复拷贝**说的是同一份内容存了多份，与这里是两件事。
+    pub overlaps: u64,
     /// 例外收入了几个（变体在库里的那些）。
     pub forced_in: u64,
     /// 其中规则本来也会选中的——**这几条例外是多余的**，删掉不影响结果。
@@ -495,6 +508,39 @@ pub struct Room {
 }
 
 impl Room {
+    /// **排除到哪一项就放得下**：裁剪建议从最大的排起，排除到第几项（从 0 数）为止腾出来的够抵掉
+    /// 超出量；没超限、或者建议全排除也不够时是 `None`。
+    ///
+    /// 判据是「累计腾出 ≥ 超出量」。**累计腾出是计划器按变体记的账**（[`Trim::cumulative`]）：一个
+    /// 变体名下记的是它自己的文件，外加**头一个引用到**的那几份作品级媒体——同一份媒体只铺一次、
+    /// 记在头一个遇到它的变体名下（`sync::media`）。于是排除一个变体、而同作品的别的变体还留着时，
+    /// 那几份媒体照旧要铺，实际腾出的比这里算的少：**这是计划器口径下的估计**，排除之后重排一遍
+    /// 计划才是准数（子库屏按下「排除」会当场重算；挂单 `Q819`）。
+    ///
+    /// **这是一处判断**，子库屏的删减建议表只照它画那一行（ADR-0024）。
+    #[must_use]
+    pub fn fits_after(&self) -> Option<usize> {
+        let over = self.over_capacity?;
+        self.trim_suggestions
+            .iter()
+            .position(|trim| trim.cumulative >= over)
+    }
+
+    /// **全排除也还差多少**：建议里那几项全排除之后仍然超出的字节数；没超限、或者排除到某一项
+    /// 就放得下时是 `None`。
+    ///
+    /// 建议只列体积最大的那 [`TRIM_SUGGESTIONS`] 个，而卡上占地方的还有清单之外的文件与元数据
+    /// ——它们不是变体，排除不掉。
+    #[must_use]
+    pub fn short_after_all(&self) -> Option<u64> {
+        let over = self.over_capacity?;
+        let freed = self
+            .trim_suggestions
+            .last()
+            .map_or(0, |trim| trim.cumulative);
+        over.checked_sub(freed).filter(|short| *short > 0)
+    }
+
     /// 从一份计划里抄出来。**一个数都不另算。**
     #[must_use]
     pub fn of(plan: &Plan) -> Self {
@@ -670,8 +716,11 @@ pub fn select(selection: &Selection, facts: &[VariantFacts]) -> Selected {
 
     let mut out = Selected {
         rule_hits: vec![0; selection.rules.len()],
+        rule_bytes: vec![0; selection.rules.len()],
         ..Selected::default()
     };
+    // 被至少一条规则选中的变体有几个——重叠数是逐条命中数的和减去它。
+    let mut hit_by_any_rule: u64 = 0;
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for variant in facts {
         seen.insert(variant.key.as_str());
@@ -684,8 +733,12 @@ pub fn select(selection: &Selection, facts: &[VariantFacts]) -> Selected {
         for (index, rule) in selection.rules.iter().enumerate() {
             if matches(rule, variant) {
                 out.rule_hits[index] += 1;
+                out.rule_bytes[index] += variant.bytes;
                 by_rule.get_or_insert(index);
             }
+        }
+        if by_rule.is_some() {
+            hit_by_any_rule += 1;
         }
         // **例外先看，而且看完就定。** 规则算出什么都不改变这一步的结论——
         // 「优先于规则」在代码里就该长成这样。
@@ -717,6 +770,11 @@ pub fn select(selection: &Selection, facts: &[VariantFacts]) -> Selected {
             why,
         });
     }
+    out.overlaps = out
+        .rule_hits
+        .iter()
+        .sum::<u64>()
+        .saturating_sub(hit_by_any_rule);
     out.missing_exceptions = selection
         .exceptions
         .iter()

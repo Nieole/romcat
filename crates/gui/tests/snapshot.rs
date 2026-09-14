@@ -25,7 +25,9 @@
 //!
 //! 屏上画着的每一样都得是定值：工作目录的路径、主库原名、变体数、上次扫描时刻。从真盘上列的话，
 //! 临时目录每一趟都是另一串，像素跟着变。所以开场那几态走 [`Screen::listed`]，把核心库那个类型
-//! （[`Listing`]）直接交进去。视口是 [`headless::VIEWPORT`]，一点一个像素。**浅色与暗色各拍一张**：
+//! （[`Listing`]）直接交进去。视口是 [`headless::VIEWPORT`]，一点一个像素。**例外只有一对**：子库屏超限那两张
+//! （`sublibrary/over-capacity-*`）是 1280×960——整张卡连删减表底下的灰框与按钮都要拍全，800 高装不下（拿主意的人
+//! 2026-09-14 定，挂单 `Q895`；[`开一扇`]）。**浅色与暗色各拍一张**：
 //! 两套主题各取令牌里的一套，只拍一套的话，另一套颜色接错了没人看得见。
 //!
 //! ## 往后每一屏加一张
@@ -51,12 +53,17 @@ use romcat_core::catalog::identify::{Candidate, Identification, Provenance};
 use romcat_core::catalog::scrape::{Harvested, HarvestedMedia, HarvestedValue};
 use romcat_core::catalog::{Catalog, CatalogError, Confidence, SCHEMA_VERSION, State};
 use romcat_core::dat::Convention;
+use romcat_core::fs::RealFs;
 use romcat_core::platform::Manifest;
+use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::scrape::{AnchorKind, Field, MediaKind};
 use romcat_core::shape::{Role, SINGLE_FILE_RULE, Variant};
 use romcat_core::site::Site;
+use romcat_core::sublibrary::{Rule, Sublibrary};
 #[cfg(feature = "demo")]
 use romcat_core::task::Cutoff;
+use romcat_core::task::Handle;
+use romcat_core::testing::sample::zip;
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::verdict::Store;
 use romcat_core::workspace::{CatalogEntry, CatalogFacts, CatalogState, DirUnreadable, Listing};
@@ -125,9 +132,18 @@ fn 装好(ctx: &egui::Context) -> bool {
 ///
 /// 台上有活在跑的那几张用它自己数帧（[`拍正在跑`]）：台上有活时主窗口每一帧都请求下一帧，
 /// 永远跑不到「不要重画」。别的一律走 [`开一个`]。
-fn 搭一个<'a>(主题: Theme, mut 画一帧: impl FnMut(&mut egui::Ui) + 'a) -> Harness<'a> {
+fn 搭一个<'a>(主题: Theme, 画一帧: impl FnMut(&mut egui::Ui) + 'a) -> Harness<'a> {
+    搭一扇(主题, headless::VIEWPORT, 画一帧)
+}
+
+/// 同 [`搭一个`]，画面多大由调用方给（点）。**只给模块文档「视口定死」那一节写着的例外用。**
+fn 搭一扇<'a>(
+    主题: Theme,
+    画面: [f32; 2],
+    mut 画一帧: impl FnMut(&mut egui::Ui) + 'a,
+) -> Harness<'a> {
     let mut harness = Harness::builder()
-        .with_size(headless::VIEWPORT)
+        .with_size(画面)
         .with_pixels_per_point(1.0)
         .with_theme(主题)
         .wgpu()
@@ -157,6 +173,17 @@ fn 开一个<'a>(主题: Theme, 画一帧: impl FnMut(&mut egui::Ui) + 'a) -> Ha
     harness
 }
 
+/// 同 [`开一个`]，画面多大由调用方给（点，[`搭一扇`]）。**只给模块文档「视口定死」那一节写着的例外用。**
+fn 开一扇<'a>(
+    主题: Theme,
+    画面: [f32; 2],
+    画一帧: impl FnMut(&mut egui::Ui) + 'a,
+) -> Harness<'a> {
+    let mut harness = 搭一扇(主题, 画面, 画一帧);
+    harness.run();
+    harness
+}
+
 /// 按一下屏上**正好**写着 `那几个字`、最后画出来的那一处，再把指针挪走、跑到不要重画为止。
 ///
 /// **指针要挪走**：`Harness` 出图时会在指针所在处画一枚指针三角，悬停也会换按钮的底色——
@@ -182,26 +209,35 @@ fn 按(harness: &mut Harness<'_>, 那几个字: &str) {
 
 /// 屏上**正好**写着 `那几个字`、按画出来的次序**最后**那一处的中心点。
 fn 最后一处正好画着(output: &egui::FullOutput, 那几个字: &str) -> Option<egui::Pos2> {
-    fn 找(shape: &egui::epaint::Shape, 那几个字: &str, 最后: &mut Option<egui::Pos2>) {
+    正好画着的每一处(output, 那几个字)
+        .last()
+        .map(|rect| rect.center())
+}
+
+/// 屏上**正好**写着 `那几个字` 的每一处画在哪儿，按画出来的次序。
+///
+/// egui 不画整个落在裁剪区外的控件，所以一处都没画出来的就不在里头。
+fn 正好画着的每一处(output: &egui::FullOutput, 那几个字: &str) -> Vec<egui::Rect> {
+    fn 找(shape: &egui::epaint::Shape, 那几个字: &str, 每一处: &mut Vec<egui::Rect>) {
         match shape {
             egui::epaint::Shape::Text(text) => {
                 if text.galley.text() == 那几个字 {
-                    *最后 = Some(egui::Rect::from_min_size(text.pos, text.galley.size()).center());
+                    每一处.push(egui::Rect::from_min_size(text.pos, text.galley.size()));
                 }
             }
             egui::epaint::Shape::Vec(shapes) => {
                 for one in shapes {
-                    找(one, 那几个字, 最后);
+                    找(one, 那几个字, 每一处);
                 }
             }
             _ => {}
         }
     }
-    let mut 最后 = None;
+    let mut 每一处 = Vec::new();
     for clipped in &output.shapes {
-        找(&clipped.shape, 那几个字, &mut 最后);
+        找(&clipped.shape, 那几个字, &mut 每一处);
     }
-    最后
+    每一处
 }
 
 /// 把这扇窗此刻的样子与 `tests/snapshots/<名字>.png` 比。对不上时当场红。
@@ -1005,6 +1041,333 @@ fn 浏览_两栏收起_浅色() {
 #[test]
 fn 浏览_两栏收起_暗色() {
     拍浏览("browse/collapsed-dark", Theme::Dark, 浏览态::两栏收起);
+}
+
+// ——— 子库 ———
+//
+// 子库屏那几张拍的是**整个窗口**（`App`：左栏、屏头连子库屏）。屏上画着的每一样都得是定值（票
+// `gui-looks-like-the-design/20`）：
+//
+// - **主库**扫进一份**内存里的**中立库，变体的键是「库/<平台>/<名字>」，与临时目录落在哪儿无关；
+// - **卡头上的目标路径**是一串定值（`/Volumes/…`）。要看得见卡上现占多少的那一台，读盘那一份
+//   （`target_raw`）指向一个临时目录——屏上只画 `target`、读盘只走 `target_raw`（ADR-0020 那两份形式），
+//   于是像素里没有临时路径；
+// - **工作目录**是临时目录，这一屏不画它；
+// - 容量是「算一遍容量」**真算出来**的：内存里的库分不出第二份连接，那一趟就地跑完。
+
+/// 子库那几张的现场：几个临时目录（跟着窗口一起活到拍完）与窗口本身。
+struct 子库现场 {
+    主库: TempDir,
+    _工作区: TempDir,
+    卡: TempDir,
+    app: App,
+}
+
+impl 子库现场 {
+    /// 扫好一份小主库、开出窗口、换到子库屏。一个子库都还没有。
+    fn 摆好() -> Self {
+        let 主库 = temp_dir("snap-sub-lib");
+        for (相对, 多大) in [
+            ("SFC/幻想传说 汉化版.zip", 4096),
+            ("SFC/圣剑传说 3 汉化版.zip", 8192),
+            ("GBA/口袋妖怪 绿宝石.zip", 2048),
+            ("GBA/黄金太阳 开启的封印.zip", 3072),
+        ] {
+            let 在 = 主库.path().join(相对);
+            std::fs::create_dir_all(在.parent().expect("有上级目录")).expect("能建目录");
+            std::fs::write(&在, zip(多大)).expect("能写文件");
+        }
+        let mut catalog = Catalog::open_in_memory().expect("开得出中立库");
+        let mut options = ScanOptions::named(主库.path(), "库");
+        options.jobs = Jobs::Fixed(2);
+        scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
+        let site = Site::in_memory(catalog, Store::in_memory().expect("开得出沉淀库"), "库");
+        let 工作区 = temp_dir("snap-sub-ws");
+        let 卡 = temp_dir("snap-sub-card");
+        // 维护者自己拷进卡里的一份存档：清单之外那一段有一个定值。
+        std::fs::write(卡.path().join("存档.sav"), [0_u8; 1536]).expect("能写存档");
+        let mut app = App::new(site, 工作区.path().to_path_buf());
+        // 底部状态栏右边那一段工作目录定死成基线里那一串（同任务屏、主窗口那几张）：临时目录每一趟都不一样。
+        app.set_workspace_label(工作目录().display().to_string());
+        app.show_view(View::Sublibraries);
+        Self {
+            主库,
+            _工作区: 工作区,
+            卡,
+            app,
+        }
+    }
+
+    /// 记一台设备。`在手边` 为真时读盘那一份指向临时卡目录；卡头上画的一律是 `目标` 那串定值。
+    fn 记一台(
+        &mut self,
+        名字: &str,
+        目标: &str,
+        在手边: bool,
+        上限: Option<u64>,
+        档案: Option<&str>,
+        规则: &[&str],
+    ) {
+        let target_raw = 在手边.then(|| {
+            self.卡
+                .path()
+                .to_str()
+                .expect("临时目录是 UTF-8")
+                .to_string()
+        });
+        let (screen, site) = self.app.sublibrary_and_site();
+        site.catalog
+            .put_sublibrary(&Sublibrary {
+                name: 名字.to_owned(),
+                target: 目标.to_owned(),
+                target_raw,
+                format: "Pegasus".to_owned(),
+                capacity: 上限,
+                capability: 档案.map(ToString::to_string),
+            })
+            .expect("写得进子库");
+        for 那条 in 规则 {
+            site.catalog
+                .add_rule(名字, &Rule::parse(那条).expect("读得懂"))
+                .expect("写得进规则");
+        }
+        screen.reload(site);
+    }
+
+    /// 换一台设备的容量上限，别的一格不动。
+    fn 换上限(&mut self, 名字: &str, 上限: Option<u64>) {
+        let (screen, site) = self.app.sublibrary_and_site();
+        let mut 那一台 = site.catalog.sublibrary(名字).expect("读得动").expect("在");
+        那一台.capacity = 上限;
+        site.catalog.put_sublibrary(&那一台).expect("写得进子库");
+        screen.reload(site);
+    }
+
+    /// 按一下「算一遍容量」，等它收回来。内存里的库就地跑完，认领在 `App::poll_tasks` 里。
+    fn 算一遍容量(&mut self) {
+        {
+            let (screen, site, tasks) = self.app.sublibrary_site_and_tasks();
+            screen.evaluate(site, tasks);
+        }
+        for _ in 0..8 {
+            self.app.poll_tasks();
+            if self.app.sublibrary().evaluating().is_none() && !self.app.tasks().busy() {
+                break;
+            }
+        }
+        assert!(
+            self.app.sublibrary().evaluating().is_none(),
+            "算一遍容量没收回来：{:?}",
+            self.app.sublibrary().error(),
+        );
+    }
+}
+
+/// 「卡不在手边」那一台卡头上画的目标路径——**这一台真去读盘**：它没有 `target_raw`，`read_path` 就是这一串，
+/// 卡头那枚「未连接」与容量底下那一行都照「这个目录在不在」说话（`Screen::look_at_targets`）。
+///
+/// 所以它得保证**哪台机器上都不在**。原先用的 `/Volumes/SDCARD` 是掌机存储卡最常见的卷名，维护者正好
+/// 插着一张叫 SDCARD 的卡时，那枚标签就换成「尚未生成差量预览」、那一行也没了——基线莫名其妙变红，
+/// 而界面一点毛病都没有。取一个真卡不会起的卷名。卡在手边的那几台读的是 `target_raw` 指的临时目录，
+/// 卡头上画的那串路径不去读，照旧用常见的写法。
+const 不在位的目标: &str = "/Volumes/ROMCAT-NO-SUCH-CARD";
+
+/// **两台设备**，两台都算过一遍容量：一台卡不在手边（清单之外画成未知），一台卡在手边
+/// （清单之外有数、挑了一份能力档案）。头一台两条规则互相重叠，合计那一行写得出去掉了几个。
+fn 两台设备() -> 子库现场 {
+    let mut 现场 = 子库现场::摆好();
+    现场.记一台(
+        "RG35XX Plus",
+        不在位的目标,
+        false,
+        Some(64_000_000_000),
+        None,
+        &["平台=SFC", "平台=SFC,GBA"],
+    );
+    现场.记一台(
+        "Retroid Pocket 5",
+        "/Volumes/RP5",
+        true,
+        Some(128_000_000_000),
+        Some("retroarch-fat32"),
+        &["平台=GBA"],
+    );
+    现场.算一遍容量();
+    现场
+}
+
+/// **超限的一台**：上限正好比同步之后少「最大那一个」那么多——删减建议表排除到头一项就放得下。
+/// 同步之后多大先不设限算一遍，由核心说（目标现占 ＋ 净变化）。
+fn 超限的一台() -> 子库现场 {
+    const 名字: &str = "RG35XX Plus";
+    let mut 现场 = 子库现场::摆好();
+    现场.记一台(名字, "/Volumes/SDCARD", true, None, None, &["平台=SFC,GBA"]);
+    现场.算一遍容量();
+    let 同步之后 = 现场
+        .app
+        .sublibrary()
+        .evaluated(名字)
+        .and_then(|report| report.fit.known())
+        .expect("卡在手边，装不装得下算得出")
+        .after_bytes;
+    let 最大的 = std::fs::metadata(现场.主库.path().join("SFC/圣剑传说 3 汉化版.zip"))
+        .expect("在")
+        .len();
+    现场.换上限(名字, Some(同步之后 - 最大的));
+    现场.算一遍容量();
+    现场
+}
+
+#[test]
+fn 子库_空的_浅色() {
+    let mut 现场 = 子库现场::摆好();
+    拍("sublibrary/empty-light", Theme::Light, move |ui| {
+        现场.app.ui(ui);
+    });
+}
+
+#[test]
+fn 子库_空的_暗色() {
+    let mut 现场 = 子库现场::摆好();
+    拍("sublibrary/empty-dark", Theme::Dark, move |ui| {
+        现场.app.ui(ui);
+    });
+}
+
+#[test]
+fn 子库_两台设备_浅色() {
+    let mut 现场 = 两台设备();
+    拍("sublibrary/cards-light", Theme::Light, move |ui| {
+        现场.app.ui(ui);
+    });
+}
+
+#[test]
+fn 子库_两台设备_暗色() {
+    let mut 现场 = 两台设备();
+    拍("sublibrary/cards-dark", Theme::Dark, move |ui| {
+        现场.app.ui(ui);
+    });
+}
+
+/// 超限那一对的画面（点）：宽照旧，高 960——整张卡连灰框与按钮都要拍全（拿主意的人 2026-09-14 定，挂单 `Q895`）。
+const 超限那一对的画面: [f32; 2] = [1280.0, 960.0];
+
+/// **超限的一台**那一对：画面 1280×960（[`超限那一对的画面`]），卡片顶边贴着可视区顶部（不滚），整张卡连删减表、灰框与按钮都在画面里。
+///
+/// 早先是把卡片那一列滚到底再拍：滚动位置夹在最大那一格上，图顶上「选择集 · 1 条规则」那一行只露出下半截，
+/// 字被切掉一半、看着像画坏了（协调人对稿打回，票 `gui-looks-like-the-design/20` 第二段）。改成不滚之后 800 高里灰框与按钮
+/// 落在画面外，拿主意的人定这一对用高一点的画面（挂单 `Q895`）。
+///
+/// **「看得全」写成断言**：删减表有几项，屏上就得画出几颗「排除」，而且每一颗都整个在视口里（egui 不画整个
+/// 落在裁剪区外的控件，被挤出去的那几行一颗都不会画）；卡片的名字画在屏头底下。哪天卡片长高、表被挤出视口，
+/// 这里当场红，不会悄悄拍一张截掉半张表的基线。不滚，也就没有要等它停下的滚动。
+fn 拍超限(名字: &str, 主题: Theme) {
+    const 那一台: &str = "RG35XX Plus";
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 超限的一台();
+    let 几项 = 现场
+        .app
+        .sublibrary()
+        .evaluated(那一台)
+        .and_then(|report| report.fit.known())
+        .expect("卡在手边，装不装得下算得出")
+        .trim_suggestions
+        .len();
+    let harness = 开一扇(主题, 超限那一对的画面, move |ui| {
+        现场.app.ui(ui);
+    });
+    let 视口 = egui::Rect::from_min_size(egui::Pos2::ZERO, 超限那一对的画面.into());
+    let 排除 = 正好画着的每一处(harness.output(), "排除");
+    assert_eq!(
+        排除.len(),
+        几项,
+        "删减表 {几项} 项，屏上只画出 {} 颗「排除」——有几行被挤出了视口",
+        排除.len()
+    );
+    assert!(
+        排除.iter().all(|rect| 视口.contains_rect(*rect)),
+        "删减表有一行被视口截了一半：{排除:?}"
+    );
+    let 屏头 = 正好画着的每一处(harness.output(), "新建子库");
+    let 卡名 = 正好画着的每一处(harness.output(), 那一台);
+    assert!(
+        matches!((屏头.first(), 卡名.first()), (Some(头), Some(名)) if 名.min.y >= 头.max.y),
+        "卡片顶上那一截没整个露出来：屏头 {屏头:?}，卡名 {卡名:?}"
+    );
+    // 灰框底下那一排按钮也整个在画面里：卡片一张拍全了。
+    for 按钮 in ["生成差量预览", "删除子库"] {
+        let 在 = 正好画着的每一处(harness.output(), 按钮);
+        assert!(
+            在.len() == 1 && 视口.contains_rect(在[0]),
+            "卡底那一排「{按钮}」没整个在画面里：{在:?}"
+        );
+    }
+    拍下(harness, 名字);
+}
+
+#[test]
+fn 子库_超限给删减建议_浅色() {
+    拍超限("sublibrary/over-capacity-light", Theme::Light);
+}
+
+#[test]
+fn 子库_超限给删减建议_暗色() {
+    拍超限("sublibrary/over-capacity-dark", Theme::Dark);
+}
+
+/// **目标设置弹层**：两台设备那一屏上，按右边那张卡（「Retroid Pocket 5」）的「目标设置…」。
+/// 照开场「添加主库向导盖在上面」那张的写法：[`开一个`] + [`按`]，再 [`拍下`]。
+fn 拍目标设置弹层(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 两台设备();
+    let mut harness = 开一个(主题, move |ui| {
+        现场.app.ui(ui);
+    });
+    按(&mut harness, "目标设置…");
+    拍下(harness, 名字);
+}
+
+#[test]
+fn 子库_目标设置弹层_浅色() {
+    拍目标设置弹层("sublibrary/target-settings-light", Theme::Light);
+}
+
+#[test]
+fn 子库_目标设置弹层_暗色() {
+    拍目标设置弹层("sublibrary/target-settings-dark", Theme::Dark);
+}
+
+/// **删掉一台之后的提示条**：两台设备那一屏上删掉右边那张卡（「Retroid Pocket 5」），底边提示条上一颗「撤销」
+/// （拿主意的人 2026-09-14 定）。提示条按 egui 那一帧的时刻计时，拍的那几帧远不到停够的时候。
+fn 拍删除后提示条(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 两台设备();
+    {
+        let (screen, site) = 现场.app.sublibrary_and_site();
+        screen.open(site, "Retroid Pocket 5");
+        screen.remove(site);
+    }
+    let harness = 开一个(主题, move |ui| {
+        现场.app.ui(ui);
+    });
+    拍下(harness, 名字);
+}
+
+#[test]
+fn 子库_删除后提示条_浅色() {
+    拍删除后提示条("sublibrary/deleted-toast-light", Theme::Light);
+}
+
+#[test]
+fn 子库_删除后提示条_暗色() {
+    拍删除后提示条("sublibrary/deleted-toast-dark", Theme::Dark);
 }
 
 // ——— 任务屏（票 `gui-looks-like-the-design/25`）———

@@ -127,6 +127,7 @@ size-thumb-code   = 9   # 行首封面格里的平台代号（设计稿 .lthumb 
 size-cover-title  = 12  # 侧边详情字卡上的标题（设计稿 .dcover .tc-t）
 size-cover-mark   = 40  # 侧边详情字卡上的平台代号水印（设计稿 .dcover .tc-wm）
 size-arrow        = 10  # 表头上排序那枚小箭头（设计稿 .wtbl th .sa）
+size-empty-title = 16 # 子库屏空态那张卡的标题（设计稿空态卡 h3 的 font-size:16px）
 line-height  = 1.55
 size-badge-narrow = 10    # 左栏收成窄条后入口底下那个计数（设计稿 .main.rcol .nav .badge 的 10px）
 group-tracking    = 0.08  # 左栏分组标题的字距，字号的倍数（设计稿 .grp 的 letter-spacing:.08em）
@@ -236,7 +237,7 @@ control-stroke    = 1     # 控件（按钮、输入框、勾选框）描边的�
 input-height      = 28    # 单行输入框的高：与同一行默认那一档按钮等高（拿主意的人 2026-09-14 第三次裁；设计稿 .input 是 30，不照它）
 input-small-height = 24   # 小号单行输入框的高：与小号按钮等高（开场贴路径那一框，旁边是小号的「换过去」）
 input-padding     = 10    # 单行输入框左右留白（设计稿 .input 的 padding:0 10px）
-icon-button       = 24    # 图标按钮（收起、展开那两颗箭头）的边长（设计稿 .iconbtn）
+icon-button       = 24    # 图标按钮的边长（设计稿 .iconbtn 的 24px）：浏览屏收起、展开那两颗箭头，子库屏规则行尾那颗「×」「✎」
 facet-chip-height = 24    # 分面标签的高（设计稿 .fchip）
 facet-chip-padding = 8    # 分面标签左右留白（设计稿 .fchip 的 padding:0 8px）
 tag-height        = 20    # 行内标签（「未关联作品」「首选变体」）的高（设计稿 .tag）
@@ -250,6 +251,19 @@ title-card-mark-offset = [4, 8]  # 字卡水印伸出格子多少（右, 下）�
 thumbs-per-row    = 3     # 侧边详情媒体一行几格（设计稿 .thumbs 的 repeat(3,1fr)）
 check-padding     = 12    # 表格勾选那一列左边留白（设计稿 .wtbl .ck 的 padding:0 0 0 12px）
 platforms-visible = 7     # 平台那一簇先摆几个，其余收进「更多（N）」（设计稿 #more-plat 前头没带 data-more 的那几个）
+gauge-height      = 10    # 子库卡上容量条的高（设计稿 .gauge 的 height:10px）
+gauge-hatch       = 10    # 容量条「清单之外：未知」那一段斜纹一个来回（设计稿 .gauge .unk：5px 有色、5px 空）
+legend-swatch     = 9     # 容量条图例前那一小块颜色的边长（设计稿 .legend i 的 9px）
+legend-swatch-radius = 2  # 那一小块颜色的圆角（设计稿 .legend i 的 border-radius:2px）
+rule-badge        = 20    # 规则行首序号圆的直径（设计稿 .rule .rn 的 20px）
+empty-card-padding = 40   # 子库屏空态那张卡的内边距（设计稿空态卡的 padding:40px）
+toast-bottom      = 44    # 提示条离窗口底边多远（设计稿 .toast 的 bottom:44px）
+toast-padding     = [9, 10, 9, 14]   # 提示条四边留白（上, 右, 下, 左）（设计稿 .toast 的 padding:9px 10px 9px 14px）
+toast-button-line = 0.25  # 提示条上那颗按钮的描边是字色的几成（设计稿 .toast .btn 的 rgba(255,255,255,.25)）
+toast-seconds     = 3.6   # 只有一句话的提示条停多久，秒（设计稿 toast() 的 3600 毫秒）
+toast-action-seconds = 6.5  # 带一颗按钮的提示条停多久，秒（设计稿 toast() 的 6500 毫秒）
+impact-dot        = 8     # 弹层里「会怎样」那几条行首圆点的直径（设计稿 .impact li::before 的 8px）
+impact-column     = 18    # 行首圆点那一列多宽（设计稿 .impact li 的 grid-template-columns:18px 1fr）
 
 # ── 调色比例：两套主题共用。设计稿里写在规则上的字面量（color-mix 的百分比、opacity），不是 CSS 变量 ──
 [mix]

@@ -383,6 +383,8 @@ pub struct Font {
     pub size_cover_mark: f32,
     /// 表头上排序那枚小箭头。
     pub size_arrow: f32,
+    /// 子库屏空态那张卡的标题（设计稿空态卡 `h3` 的 16px）。只这一处用，不挂成具名档。
+    pub size_empty_title: f32,
     /// 行高，字号的倍数。
     pub line_height: f32,
     /// 左栏收成窄条后入口底下那个计数的字号。
@@ -612,7 +614,7 @@ pub struct Layout {
     pub input_small_height: f32,
     /// 单行输入框左右留白。
     pub input_padding: f32,
-    /// 图标按钮（收起、展开那两颗箭头）的边长。
+    /// 图标按钮的边长（设计稿 `.iconbtn`）：浏览屏收起、展开那两颗箭头，子库屏规则行尾那颗「×」「✎」。
     pub icon_button: f32,
     /// 分面标签的高。
     pub facet_chip_height: f32,
@@ -640,6 +642,32 @@ pub struct Layout {
     pub check_padding: f32,
     /// 平台那一簇先摆几个，其余收进「更多（N）」。
     pub platforms_visible: usize,
+    /// 子库卡上容量条的高（设计稿 `.gauge`）。
+    pub gauge_height: f32,
+    /// 容量条上「清单之外：还不知道」那一段斜纹一个来回多宽（设计稿 `.gauge .unk`：一半有色、一半空）。
+    pub gauge_hatch: f32,
+    /// 容量条图例前那一小块颜色的边长（设计稿 `.legend i`）。
+    pub legend_swatch: f32,
+    /// 那一小块颜色的圆角（设计稿 `.legend i`）。
+    pub legend_swatch_radius: f32,
+    /// 规则行首那枚序号圆的直径（设计稿 `.rule .rn`）。
+    pub rule_badge: f32,
+    /// 子库屏空态那张卡的内边距（设计稿空态卡的 `padding`）。
+    pub empty_card_padding: f32,
+    /// 提示条离窗口底边多远（设计稿 `.toast` 的 `bottom`）。
+    pub toast_bottom: f32,
+    /// 提示条四边留白：`[上, 右, 下, 左]`（设计稿 `.toast` 的 `padding`）。
+    pub toast_padding: [i8; 4],
+    /// 提示条上那颗按钮的描边是字色的几成（设计稿 `.toast .btn` 的描边）。
+    pub toast_button_line: f32,
+    /// 只有一句话的提示条停多久，秒（设计稿 `toast()`）。
+    pub toast_seconds: f32,
+    /// 带一颗按钮的提示条停多久，秒（设计稿 `toast()`）。
+    pub toast_action_seconds: f32,
+    /// 弹层里「会怎样」那几条行首圆点的直径（设计稿 `.impact li::before`）。
+    pub impact_dot: f32,
+    /// 行首圆点那一列多宽（设计稿 `.impact li`）。
+    pub impact_column: f32,
 }
 
 /// 调色比例：两套主题共用。设计稿里写在规则上的字面量（`color-mix` 的百分比、`opacity`）。

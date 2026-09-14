@@ -578,6 +578,79 @@ impl Rule {
         self.root.clauses()
     }
 
+    /// 这条规则**一眼认得出的短名**（设计稿 `autoName`）：`平台 · 其余`，如「FC · 汉化」「PSP · 汉化和官中」。
+    ///
+    /// 只看顶层「全部满足」那一层：`平台=` 的值用「、」连成头一段（没有就是「全部平台」）；其余几段依次是
+    /// `中文=` 的值用「和」连、`收藏=是` 写「收藏」与 `合集=` 的值用「、」连、剩下的子句只有一条时照原文写，
+    /// 多于一条写「另 N 个条件」（照稿，挂单 `Q858`）。**其余一段都没有时只写头一段**：只有平台一个子句的
+    /// 规则就叫「SFC」「SFC、GBA」，不补「全部」——补了读起来像多了一条条件。套在里面的组照原文算一条；
+    /// 顶层不是「全部满足」的规则整条原文算一条。
+    ///
+    /// 中立库里一条规则**只存原文与序号**，没有名字那一列（挂单 `Q811`），这个名字每回从原文拼出来——
+    /// 子库屏卡上的规则行、将来命令行印规则列表，拿的是同一个。
+    #[must_use]
+    pub fn label(&self) -> String {
+        let mut platforms: Vec<&str> = Vec::new();
+        let mut chinese: Vec<&str> = Vec::new();
+        let mut collections: Vec<String> = Vec::new();
+        let mut others: Vec<String> = Vec::new();
+        if self.root.join == Join::All {
+            for node in &self.root.nodes {
+                let Node::Clause(clause) = node else {
+                    if let Node::Group(group) = node {
+                        others.push(render_group(group, true));
+                    }
+                    continue;
+                };
+                let values = match &clause.bound {
+                    Bound::Text(values) if clause.op.label() == "=" => Some(values),
+                    _ => None,
+                };
+                match (clause.dimension, values) {
+                    (Dimension::Platform, Some(values)) => {
+                        platforms.extend(values.iter().map(String::as_str));
+                    }
+                    (Dimension::Chinese, Some(values)) => {
+                        chinese.extend(values.iter().map(String::as_str));
+                    }
+                    (Dimension::Favorite, Some(values))
+                        if values.iter().all(|value| value == "是") =>
+                    {
+                        collections.push("收藏".to_string());
+                    }
+                    (Dimension::Collection, Some(values)) => {
+                        collections.extend(values.iter().cloned());
+                    }
+                    _ => others.push(clause.to_string()),
+                }
+            }
+        } else if !self.root.nodes.is_empty() {
+            others.push(render_group(&self.root, false));
+        }
+        let head = if platforms.is_empty() {
+            "全部平台".to_string()
+        } else {
+            platforms.join("、")
+        };
+        let mut rest: Vec<String> = Vec::new();
+        if !chinese.is_empty() {
+            rest.push(chinese.join("和"));
+        }
+        if !collections.is_empty() {
+            rest.push(collections.join("、"));
+        }
+        match others.len() {
+            0 => {}
+            1 => rest.append(&mut others),
+            n => rest.push(format!("另 {n} 个条件")),
+        }
+        if rest.is_empty() {
+            head
+        } else {
+            format!("{head} · {}", rest.join(" · "))
+        }
+    }
+
     /// 把几条规则并成一条。
     ///
     /// 一个选择集里**多条规则之间是并集**，而并集就是一个「任一满足」组。子库屏点
@@ -1185,6 +1258,29 @@ mod tests {
 
     fn 子句(rule: &Rule, at: usize) -> Clause {
         rule.clauses()[at].clone()
+    }
+
+    #[test]
+    fn 规则的短名照设计稿拼_平台在前其余用点隔开() {
+        // 设计稿 `autoName`：子库屏卡上每一条规则的标题（票 `gui-looks-like-the-design/20` 第二段）。
+        let 名 = |text: &str| Rule::parse(text).expect("读得懂").label();
+        assert_eq!(名("平台=FC 且 中文=汉化"), "FC · 汉化");
+        assert_eq!(名("平台=PSP 且 中文=汉化,官中"), "PSP · 汉化和官中");
+        // 只有平台一个子句：只写平台，不补「全部」（补了读起来像多了一条条件）。
+        assert_eq!(名("平台=SFC"), "SFC");
+        assert_eq!(名("平台=SFC,GBA"), "SFC、GBA");
+        assert_eq!(名("平台=GBA 且 年份>=2003"), "GBA · 年份>=2003");
+        assert_eq!(
+            名("平台=GB,GBA 且 收藏=是 且 合集=通关过的"),
+            "GB、GBA · 收藏、通关过的"
+        );
+        // 剩下的子句多于一条时只数个数，照稿写「另 N 个条件」（挂单 `Q858`，拿主意的人照稿定）。
+        assert_eq!(
+            名("中文=汉化 且 年份>=2003 且 体积<64MiB"),
+            "全部平台 · 汉化 · 另 2 个条件"
+        );
+        // 顶层不是「全部满足」：整条原文算一条。
+        assert_eq!(名("平台=FC 或 平台=SFC"), "全部平台 · 平台=FC 或 平台=SFC");
     }
 
     #[test]

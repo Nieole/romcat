@@ -241,6 +241,9 @@ pub struct Editing {
     ///
     /// 它在详情面板里，那儿不虚拟化——**唯一会碰到输入法的位置**（ADR-0005 的修订段）。
     pub note: String,
+    /// 子库屏规则行上「✎」跳过来的：只改这个子库的**第几条**规则，「更新到子库」只换回这一条
+    /// （`Catalog::replace_rule`，票 `gui-looks-like-the-design/20`）。`None` 是「改选择」那种整批改。
+    pub ordinal: Option<i64>,
 }
 
 /// 「**存成子库**」那两个格子。
@@ -659,8 +662,18 @@ impl Screen {
             broken,
             exceptions: BTreeMap::new(),
             note: String::new(),
+            ordinal: None,
         });
         self.reload_exceptions(site);
+    }
+
+    /// 这一趟**只改第 `ordinal` 条**（子库屏规则行上「✎」，票 `gui-looks-like-the-design/20`）：「更新到子库」时只换回
+    /// 这一条（[`Catalog::replace_rule`](romcat_core::catalog::Catalog::replace_rule)）。紧跟在 [`Self::begin_editing`]
+    /// 后面调；没在改的时候什么都不做。窗口按下「✎」时走的就是它（[`crate::app::App::route`]）。
+    pub fn edit_only(&mut self, ordinal: i64) {
+        if let Some(editing) = &mut self.editing {
+            editing.ordinal = Some(ordinal);
+        }
     }
 
     /// 重读正在改的那个子库的例外。记一条、撤一条之后都走一趟。
@@ -722,7 +735,21 @@ impl Screen {
                 return;
             }
         };
-        match site.catalog.replace_rules(&name, &rule) {
+        // 「✎」跳过来的只换那一条（`Editing::ordinal`），「改选择」跳过来的整批换。
+        let written = match self.editing.as_ref().and_then(|editing| editing.ordinal) {
+            Some(ordinal) => match site.catalog.replace_rule(&name, ordinal, &rule) {
+                Ok(true) => Ok(0),
+                Ok(false) => {
+                    self.error = Some(format!(
+                        "子库「{name}」的第 {ordinal} 条规则已经不在了，没换。"
+                    ));
+                    return;
+                }
+                Err(error) => Err(error),
+            },
+            None => site.catalog.replace_rules(&name, &rule),
+        };
+        match written {
             Ok(_) => {
                 self.notice = Some(format!(
                     "子库「{name}」的规则换成了：{rule}。屏上这 {} 行 · {} 个变体原样带过去。",
