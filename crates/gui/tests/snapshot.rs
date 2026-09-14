@@ -36,10 +36,22 @@
 use std::path::{Path, PathBuf};
 
 use egui::Theme;
+use egui::accesskit::Role;
+use egui_kittest::kittest::Queryable;
 use egui_kittest::{Harness, SnapshotOptions};
-use romcat_core::catalog::{CatalogError, SCHEMA_VERSION};
+use romcat_core::catalog::roots::{self, LibraryRoot, RootScan};
+use romcat_core::catalog::{Catalog, CatalogError, SCHEMA_VERSION};
+use romcat_core::fs::RealFs;
+use romcat_core::scan::{self, Jobs, ScanOptions};
+use romcat_core::site::Site;
+use romcat_core::task::Handle;
+use romcat_core::testing::sample::zip;
+use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::workspace::{CatalogEntry, CatalogFacts, CatalogState, DirUnreadable, Listing};
+use romcat_gui::app::{App, View};
+use romcat_gui::layout::{FOLD_EXPORT, FOLD_ROOTS, FOLD_SOURCES};
 use romcat_gui::opening::Screen;
+use romcat_gui::roots::RootRow;
 use romcat_gui::{font, headless, look};
 
 /// 比对阈值：一个像素的色差过了多少算坏（每像素 YIQ 色距 0.6）、坏几个像素算红（0 个）。
@@ -313,4 +325,336 @@ fn 开场_添加主库向导盖在上面_浅色() {
     });
     按(&mut harness, "添加主库");
     拍下(harness, 名字);
+}
+
+// ——— 库 ———
+
+/// 库屏那几张基线用的现场：一份落在临时工作目录里的中立库，交出**整个窗口**（顶栏加库屏）。
+/// 临时目录跟着它活到拍完。
+///
+/// **屏上画着的都得是定值。** 变体数、容量、工序那几行说的话、数据源那几行照真库读——那几样只随摆进去的
+/// 文件变，每一趟都一样。**根那几行**的路径、盘在不在位与上次扫描时刻由这里交进去
+/// （`roots::Screen::list_roots`，与开场的 [`Screen::listed`] 同一个办法）：临时目录每一趟都是另一串，
+/// 时刻是扫的那一刻。**等的是一趟扫描真跑完**（核心库那个入口是同步的），不是挂钟。
+struct 库屏 {
+    app: App,
+    _工作区: TempDir,
+    _盘: Vec<TempDir>,
+}
+
+impl 库屏 {
+    /// 一份刚建出来、一个根都没有的库：库屏上每一块都是空态（票 `gui-looks-like-the-design/06` 验收第 4 条）。
+    fn 空的() -> Self {
+        let 工作区 = temp_dir("snapshot-库屏-空的");
+        let site = 开库(工作区.path());
+        let mut app = App::new(site, 工作区.path().to_path_buf());
+        app.show_view(View::Library);
+        app.roots_site_and_tasks().0.set_clock(库屏的钟());
+        Self {
+            app,
+            _工作区: 工作区,
+            _盘: Vec::new(),
+        }
+    }
+
+    /// 两个根都完整扫过一趟、识别还没跑：顶上指着识别，六行工序各报各的数，数据源都还没取回。
+    ///
+    /// 两个根照设计稿库屏那张表：主库在位，元数据库那块盘没接上。
+    fn 扫过两个根() -> Self {
+        let 工作区 = temp_dir("snapshot-库屏-扫过");
+        let mut site = 开库(工作区.path());
+        let 甲 = 摆一块盘(
+            "snapshot-库屏-甲",
+            &[
+                ("SFC/幻想传说 汉化版.zip", 4_096),
+                ("FC/魂斗罗.zip", 2_048),
+                ("GBA/黄金太阳.zip", 8_192),
+            ],
+        );
+        let 乙 = 摆一块盘("snapshot-库屏-乙", &[("MD/梦幻模拟战.zip", 3_072)]);
+        for (根名, 盘, 扫于, 用时) in [
+            // 东八区 2026-09-03 14:58（设计稿那一格），用时 37 分钟。
+            ("主库", &甲, 1_788_418_680, 2_220_000),
+            // 东八区 2026-08-29 21:10，用时 1 分 35 秒。
+            ("元数据库", &乙, 1_788_009_000, 95_000),
+        ] {
+            let 目录 = romcat_core::path::normalize_existing(盘.path());
+            roots::add_root(&site.catalog, Some(工作区.path()), 根名, &目录).expect("加得上根");
+            let mut options = ScanOptions::named(&目录, 根名);
+            options.workspace = Some(工作区.path().to_path_buf());
+            options.jobs = Jobs::Fixed(1);
+            scan::scan(&RealFs::new(), &mut site.catalog, &options, &Handle::new())
+                .expect("扫得完");
+            // **上次扫描那一格要是定值**：扫描自己记下的是扫完那一刻。别的几样（记了几个条目）照它记下的留着。
+            let 记下的 = site
+                .catalog
+                .root(根名)
+                .expect("读得出根")
+                .and_then(|root| root.scan)
+                .expect("扫完记下了上次扫描");
+            site.catalog
+                .record_root_scan(
+                    根名,
+                    &RootScan {
+                        at: 扫于,
+                        elapsed_ms: 用时,
+                        ..记下的
+                    },
+                )
+                .expect("记得下");
+        }
+        let mut app = App::new(site, 工作区.path().to_path_buf());
+        app.show_view(View::Library);
+        let (屏, _, _) = app.roots_site_and_tasks();
+        let 画的: Vec<RootRow> = 屏
+            .roots()
+            .iter()
+            .map(|row| {
+                let (位置, 在位) = match row.root.name.as_str() {
+                    "主库" => ("/Volumes/新加卷/Game", true),
+                    _ => ("/Volumes/备份/Pegasus", false),
+                };
+                RootRow {
+                    root: LibraryRoot {
+                        path: 位置.to_owned(),
+                        ..row.root.clone()
+                    },
+                    stats: row.stats,
+                    mounted: 在位,
+                }
+            })
+            .collect();
+        屏.list_roots(画的);
+        屏.set_clock(库屏的钟());
+        Self {
+            app,
+            _工作区: 工作区,
+            _盘: vec![甲, 乙],
+        }
+    }
+
+    /// 同一份扫过两个根的库，右边那三块都收着（验收第 3 条「可折叠」那一半的样子）。
+    fn 三块收起() -> Self {
+        let mut 现场 = Self::扫过两个根();
+        let (屏, _, _) = 现场.app.roots_site_and_tasks();
+        for 那一块 in [FOLD_ROOTS, FOLD_SOURCES, FOLD_EXPORT] {
+            屏.set_folded(那一块, true);
+        }
+        现场
+    }
+}
+
+/// 库屏那几张画时刻用的钟：此刻钉在 2026-09-14 08:00（UTC），本地钉在东八区。**截图里不许有当前时间**，
+/// 「今年的不带年份」也不跟着跑测试的那一天变。
+fn 库屏的钟() -> romcat_gui::clock::Clock {
+    /// 2026-09-14 08:00（UTC）。
+    const 此刻: i64 = 1_789_372_800;
+    /// 东八区比 UTC 快八小时。
+    const 东八区: i32 = 28_800;
+    romcat_gui::clock::Clock::fixed(此刻, 东八区)
+}
+
+/// 在工作目录里建一份叫「主库」的中立库，开成现场。
+fn 开库(工作区: &Path) -> Site {
+    let 库文件 = 工作区.join("catalog").join("主库.sqlite3");
+    drop(Catalog::create(&库文件, "主库").expect("建得出中立库"));
+    Site::open_file(工作区, &库文件, None).expect("开得出现场")
+}
+
+/// 一块只往临时目录里写的「盘」：每份文件是一个定长的小 zip。**一个字节都不碰真盘。**
+fn 摆一块盘(tag: &str, 文件: &[(&str, usize)]) -> TempDir {
+    let 盘 = temp_dir(tag);
+    for (相对, 大小) in 文件 {
+        let 落点 = 盘.path().join(相对);
+        std::fs::create_dir_all(落点.parent().expect("有上级目录")).expect("建得出目录");
+        std::fs::write(&落点, zip(*大小)).expect("写得进");
+    }
+    盘
+}
+
+/// **库屏右边那一栏里每一颗按钮的外框都落在这一栏里**，而且点名的那几颗一颗不少。
+///
+/// 第二段头一版候选图上，根那张表与数据源那张表比这一栏宽，「重扫」「移除」「取回」被挤到栏外、屏上看不见，
+/// 导出设置那一行的「记下」被截掉——读字的那几条测试一条都没抓到：按钮的字照样在那一帧的树里。这里读的是
+/// 无障碍树里每颗按钮的**外框**（`egui_kittest` 的 `Node::rect`，逻辑坐标）。
+///
+/// 这一栏的两条边从屏上现量，不写像素：**右边**是屏头「添加根…」那颗按钮的右沿（它与右栏同靠一条内容边）；
+/// **左边**是右栏头一块的标题往左让出面板内边距（令牌 `space.panel-padding`），再让一点给面板的描边。
+/// 只量横向：右栏竖着长过窗口时整屏往下滚得到，那不算落在栏外。
+#[track_caller]
+fn 右栏的按钮都落在右栏里(
+    harness: &Harness<'_>,
+    右栏头一块的标题: &str,
+    点名: &[(&str, usize)],
+) {
+    /// 面板描边的余量，点。描边宽度是 egui 的缺省线宽，令牌里没有这一格。
+    const 描边余量: f32 = 1.5;
+    let 栏右 = harness
+        .get_by_role_and_label(Role::Button, "添加根…")
+        .rect()
+        .max
+        .x;
+    let [_, 左右内边距] = romcat_gui::tokens::Tokens::builtin().space.panel_padding;
+    let 栏左 = harness.get_by_label(右栏头一块的标题).rect().min.x - 左右内边距 - 描边余量;
+    let 越界的: Vec<egui::Rect> = harness
+        .query_all_by_role(Role::Button)
+        .map(|node| node.rect())
+        .filter(|外框| 外框.center().x > 栏左)
+        .filter(|外框| 外框.min.x < 栏左 || 外框.max.x > 栏右 + 描边余量)
+        .collect();
+    assert!(
+        越界的.is_empty(),
+        "右栏（{栏左:.1}..{栏右:.1}）里有按钮的外框落在栏外：{越界的:?}",
+    );
+    // **右栏没被撑宽**：导出设置那一块的「选择…」贴着那一块的右内边距。表格里哪一列比算好的宽，整栏就跟着宽出去、这颗按钮
+    // 往右挪——第六版候选图扫过两个根那两张就是这样（表格每列默认至少 40 点，「变体」那一列被撑宽，整栏宽出 8 点），
+    // 按钮外框却都还落在上面那个余量里，那一条没抓到。
+    let 选择 = harness.get_by_role_and_label(Role::Button, "选择…").rect();
+    let 该在 = 栏右 - 左右内边距;
+    assert!(
+        (选择.max.x - 该在).abs() <= 描边余量,
+        "右栏被撑宽了：导出设置那一块「选择…」的右沿在 {:.1}，该在 {该在:.1}",
+        选择.max.x,
+    );
+    // **表里的按钮那一列贴着表的右内边距**（令牌 `cell-padding` 左右那一份）：数据源那张表的「下载」与根那张表的「移除」
+    // 右沿对齐，照稿。第八版候选图上「下载」那一列没贴右边，按钮右边空出一大截——上面两条都没抓到。
+    let [_, 格子左右] = romcat_gui::tokens::Tokens::builtin().space.cell_padding;
+    let 表右 = 栏右 - 格子左右;
+    for 字 in ["下载", "移除"] {
+        for node in harness.query_all_by_role_and_label(Role::Button, 字) {
+            let 右沿 = node.rect().max.x;
+            assert!(
+                (右沿 - 表右).abs() <= 描边余量,
+                "「{字}」的右沿在 {右沿:.1}，该贴着表的右内边距 {表右:.1}",
+            );
+        }
+    }
+    for (字, 几颗) in 点名 {
+        // 只数右栏里的：工序段扫描那一行做完时也有一颗「重新扫描」，在左边那张卡里。
+        let 数到 = harness
+            .query_all_by_role_and_label(Role::Button, 字)
+            .filter(|node| node.rect().center().x > 栏左)
+            .count();
+        assert_eq!(数到, *几颗, "右栏里写着「{字}」的按钮该有 {几颗} 颗");
+    }
+}
+
+/// 屏上**正好**写着 `那几个字` 的每一处都**画成一行**，而且至少画了一处。
+///
+/// 第二段第三版候选图上，根那张表「变体」那一格的容量「14.00 KiB」被折成了三行：那一列沿用上一帧量出来的窄宽度，
+/// 格子里的字默认又会折行。数、容量、「还没取回」这类字折开来就读不成一个数、一个词了。读的是那一帧画出来的
+/// 那一段字排成了几行（`Galley` 的行数），与「字的外框高不过一行」是同一件事，不必另猜行高。
+#[track_caller]
+fn 画成一行(harness: &Harness<'_>, 那几个字: &str) {
+    fn 收(shape: &egui::epaint::Shape, 那几个字: &str, 行数: &mut Vec<usize>) {
+        match shape {
+            egui::epaint::Shape::Text(text) => {
+                if text.galley.text() == 那几个字 {
+                    行数.push(text.galley.rows.len());
+                }
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    收(one, 那几个字, 行数);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut 行数 = Vec::new();
+    for clipped in &harness.output().shapes {
+        收(&clipped.shape, 那几个字, &mut 行数);
+    }
+    assert!(!行数.is_empty(), "屏上没画出「{那几个字}」");
+    assert!(
+        行数.iter().all(|几行| *几行 == 1),
+        "「{那几个字}」没画成一行，各处分别折成了 {行数:?} 行",
+    );
+}
+
+/// 一个根都没有时右栏里该看得见的那几颗：数据源标题栏的「全部下载」、三个源各一颗「下载」、导出设置的「选择…」。
+/// 贴路径的表单照稿不在右栏里，加根在屏头「添加根…」。
+const 空库右栏的按钮: &[(&str, usize)] = &[("全部下载", 1), ("下载", 3), ("选择…", 1)];
+
+/// 扫过两个根时右栏里该看得见的那几颗：每个根一颗「重新扫描」一颗「移除」，外加空库时那几颗。
+const 扫过的库右栏的按钮: &[(&str, usize)] = &[
+    ("重新扫描", 2),
+    ("移除", 2),
+    ("全部下载", 1),
+    ("下载", 3),
+    ("选择…", 1),
+];
+
+#[test]
+fn 库屏_空的_浅色() {
+    const 名字: &str = "library/empty-light";
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 库屏::空的();
+    let harness = 开一个(Theme::Light, move |ui| 现场.app.ui(ui));
+    右栏的按钮都落在右栏里(&harness, "根", 空库右栏的按钮);
+    // 数据源那张表记录数那一列不该折行。
+    画成一行(&harness, "未下载");
+    拍下(harness, 名字);
+}
+
+#[test]
+fn 库屏_空的_暗色() {
+    const 名字: &str = "library/empty-dark";
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 库屏::空的();
+    let harness = 开一个(Theme::Dark, move |ui| 现场.app.ui(ui));
+    右栏的按钮都落在右栏里(&harness, "根", 空库右栏的按钮);
+    // 数据源那张表记录数那一列不该折行。
+    画成一行(&harness, "未下载");
+    拍下(harness, 名字);
+}
+
+#[test]
+fn 库屏_扫过两个根_浅色() {
+    const 名字: &str = "library/scanned-light";
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 库屏::扫过两个根();
+    let harness = 开一个(Theme::Light, move |ui| 现场.app.ui(ui));
+    右栏的按钮都落在右栏里(&harness, "根", 扫过的库右栏的按钮);
+    // 不该折行的字画成一行：上次扫描那一刻、数据源那张表记录数那一列。
+    画成一行(&harness, "09-03 14:58");
+    画成一行(&harness, "未下载");
+    拍下(harness, 名字);
+}
+
+#[test]
+fn 库屏_扫过两个根_暗色() {
+    const 名字: &str = "library/scanned-dark";
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 库屏::扫过两个根();
+    let harness = 开一个(Theme::Dark, move |ui| 现场.app.ui(ui));
+    右栏的按钮都落在右栏里(&harness, "根", 扫过的库右栏的按钮);
+    // 不该折行的字画成一行：上次扫描那一刻、数据源那张表记录数那一列。
+    画成一行(&harness, "09-03 14:58");
+    画成一行(&harness, "未下载");
+    拍下(harness, 名字);
+}
+
+#[test]
+fn 库屏_三块收起_浅色() {
+    let mut 现场 = 库屏::三块收起();
+    拍("library/folded-light", Theme::Light, move |ui| {
+        现场.app.ui(ui)
+    });
+}
+
+#[test]
+fn 库屏_三块收起_暗色() {
+    let mut 现场 = 库屏::三块收起();
+    拍("library/folded-dark", Theme::Dark, move |ui| {
+        现场.app.ui(ui)
+    });
 }

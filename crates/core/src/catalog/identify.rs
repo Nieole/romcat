@@ -897,6 +897,22 @@ pub struct SourceCount {
     pub variants: u64,
 }
 
+/// 识别结论的**分布**：命中、未命中、无判据、跳过各几个变体，外加几条候选出自**模型推断**那一层（库屏工序段识别那一行
+/// 底下那句小字，`stage::Stages::detail`）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IdentifyTally {
+    /// 命中的变体数。
+    pub matched: u64,
+    /// 未命中的变体数。
+    pub unmatched: u64,
+    /// 无判据的变体数。
+    pub no_evidence: u64,
+    /// 跳过的变体数。
+    pub skipped: u64,
+    /// 出自模型推断那一层的候选条数（[`crate::identify::model::SOURCE`]）。库里的这些候选都是问过之后落下的答案。
+    pub model_candidates: u64,
+}
+
 /// 报告要的那几个计数。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CandidateCounts {
@@ -2610,6 +2626,51 @@ impl Catalog {
             )
             .map_err(|source| self.err(source))?;
         Ok(u64::try_from(value).unwrap_or(0))
+    }
+
+    /// 识别结论的分布（[`IdentifyTally`]）：结论那张表一句 `GROUP BY`，模型推断那一层的候选再一句计数。
+    ///
+    /// **与命令行识别报告那一行「命中、未命中、无判据、跳过」是同一组数**（`identify::report` 逐个变体加出来的合计），
+    /// 模型候选数与报告按数据源分的那一行是同一个数——`tests/stage.rs` 钉着。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn identify_tally(&self) -> Result<IdentifyTally, CatalogError> {
+        let mut tally = IdentifyTally::default();
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT i.state, COUNT(*) FROM identification i
+                 JOIN variant v ON v.key = i.variant_key
+                 GROUP BY i.state",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|source| self.err(source))?;
+        for row in rows {
+            let (state, count) = row.map_err(|source| self.err(source))?;
+            let count = u64::try_from(count).unwrap_or(0);
+            match State::from_label(&state) {
+                Some(State::Matched) => tally.matched += count,
+                Some(State::Unmatched) => tally.unmatched += count,
+                Some(State::NoEvidence) => tally.no_evidence += count,
+                Some(State::Skipped) => tally.skipped += count,
+                None => {}
+            }
+        }
+        let model: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM candidate WHERE source = ?1",
+                params![crate::identify::model::SOURCE],
+                |row| row.get(0),
+            )
+            .map_err(|source| self.err(source))?;
+        tally.model_candidates = u64::try_from(model).unwrap_or(0);
+        Ok(tally)
     }
 
     /// 报告要的那几个计数：候选、自动通过、中文、NKit、建出来的作品与发行版。

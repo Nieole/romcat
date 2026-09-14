@@ -427,13 +427,16 @@ fn scrim_in(palette: &Palette) -> Color32 {
     palette.scrim
 }
 
-/// 一枚**标签**说的是好事还是要留神（设计稿 `.ro`「只读」、`.chip.t-mid`「版本不兼容」）。
+/// 一枚**标签**说的是好事、要留神，还是只说明眼下的状况（设计稿 `.ro`「只读」、`.chip.t-mid`「版本不兼容」、
+/// `.chip.t-none`「未连接」）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
     /// 放心：令牌 `hi` 那一对（`hi` 的字、`hi-soft` 的底）。
     Good,
     /// 留神：令牌 `mid` 那一对。
     Caution,
+    /// 中性：令牌 `none` 那一对。不好不坏、只说明眼下状况的（库屏上盘不在位的那个根）。
+    Neutral,
 }
 
 /// 那种语气的标签画成什么颜色：`(字, 底)`。**全窗口只有这一处回答。**
@@ -451,6 +454,7 @@ fn tone_colors_in(palette: &Palette, tone: Tone) -> (Color32, Color32) {
     match tone {
         Tone::Good => (palette.hi, palette.hi_soft),
         Tone::Caution => (palette.mid, palette.mid_soft),
+        Tone::Neutral => (palette.none, palette.none_soft),
     }
 }
 
@@ -469,6 +473,16 @@ pub fn step(at: usize) -> f32 {
 
 /// 一枚**标签**：浅底小圆角，同色的圆点与字（设计稿 `.chip`）。圆点直径取令牌 `chip-dot`。
 pub fn chip(ui: &mut egui::Ui, tone: Tone, text: &str) -> egui::Response {
+    chip_drawn(ui, tone, text, true)
+}
+
+/// 一枚**不带圆点**的标签（设计稿 `.chip.plain`，库屏根那张表上盘没接上的那一枚）。别的同 [`chip`]。
+pub fn plain_chip(ui: &mut egui::Ui, tone: Tone, text: &str) -> egui::Response {
+    chip_drawn(ui, tone, text, false)
+}
+
+/// 标签画在这儿；`dot` 是字左边画不画那枚圆点。
+fn chip_drawn(ui: &mut egui::Ui, tone: Tone, text: &str, dot: bool) -> egui::Response {
     let (字色, 底色) = tone_colors(tone, ui.visuals());
     let galley = egui::WidgetText::from(egui::RichText::new(text).small().color(字色)).into_galley(
         ui,
@@ -477,17 +491,20 @@ pub fn chip(ui: &mut egui::Ui, tone: Tone, text: &str) -> egui::Response {
         egui::TextStyle::Small,
     );
     let (边, 点, 缝) = (step(1), Tokens::builtin().layout.chip_dot, step(0));
+    let 点占 = if dot { 点 + 缝 } else { 0.0 };
     let 字 = galley.size();
-    let size = egui::vec2(边 + 点 + 缝 + 字.x + 边, 字.y + step(0));
+    let size = egui::vec2(边 + 点占 + 字.x + 边, 字.y + step(0));
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, Tokens::builtin().radius.small, 底色);
-    painter.circle_filled(
-        egui::pos2(rect.left() + 边 + 点 / 2.0, rect.center().y),
-        点 / 2.0,
-        字色,
-    );
-    let 摆在 = egui::pos2(rect.left() + 边 + 点 + 缝, rect.center().y - 字.y / 2.0);
+    if dot {
+        painter.circle_filled(
+            egui::pos2(rect.left() + 边 + 点 / 2.0, rect.center().y),
+            点 / 2.0,
+            字色,
+        );
+    }
+    let 摆在 = egui::pos2(rect.left() + 边 + 点占, rect.center().y - 字.y / 2.0);
     painter.galley(摆在, galley, 字色);
     response
 }

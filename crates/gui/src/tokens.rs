@@ -352,8 +352,12 @@ pub struct Font {
     pub weight_strong: u16,
     /// 角标、分组标题。
     pub size_caption: f32,
+    /// 表头、图例（稿 11.5）。
+    pub size_caption_plus: f32,
     /// 说明文字、表格副行。
     pub size_small: f32,
+    /// 屏头说明、表格行（稿 12.5）。
+    pub size_small_plus: f32,
     /// 正文、按钮。
     pub size_body: f32,
     /// 卡片标题、对话框标题。
@@ -362,6 +366,8 @@ pub struct Font {
     pub size_page: f32,
     /// 作品详情页的大标题。
     pub size_hero: f32,
+    /// 面板标题（设计稿 `.phead h3`）。
+    pub size_panel_title: f32,
     /// 行高，字号的倍数。
     pub line_height: f32,
 }
@@ -395,6 +401,10 @@ pub struct Space {
     pub catalog_row_padding: [f32; 2],
     /// 开场主库列表那一行里，名字与底下那句之间的竖向间距。
     pub catalog_row_gap: f32,
+    /// 面板标题栏里标题、说明、按钮之间的横向间距（设计稿 `.phead` 的 `gap`）。
+    pub panel_head_gap: f32,
+    /// 库屏两栏之间、右栏几块之间的间距（设计稿 `.libgrid` 的 `gap`）。
+    pub library_gap: f32,
 }
 
 /// 版式尺寸，点。
@@ -459,6 +469,23 @@ pub struct Layout {
     pub input_small_height: f32,
     /// 单行输入框左右留白。
     pub input_padding: f32,
+    /// 工序那一行头两列的宽：`[圆点, 工序名]`（设计稿 `.stage` 的 `grid-template-columns`）。
+    pub stage_columns: [f32; 2],
+    /// 工序圆点的直径（设计稿 `.stage .dot`）。
+    pub stage_dot: f32,
+    /// 工序圆点描边的宽（设计稿 `.stage .dot` 的 `border`）。
+    pub stage_dot_stroke: f32,
+    /// 行左边那条状态竖条的宽（设计稿 `.stage.next`、`.tbl td.st` 的 `inset 3px`）。
+    pub row_stripe: f32,
+    /// 图标按钮的边长（设计稿 `.iconbtn`）：面板标题栏里那枚折叠标。
+    pub icon_button: f32,
+    /// 面板标题栏那枚折叠标三角的宽（设计稿 `.iconbtn` 里 13px 字号的 `▾`，照稿图量约 7 点）。
+    pub fold_mark: f32,
+    /// 导出设置那一块前端格式下拉的宽（设计稿 `select.input` 的 `width:150px`）。
+    pub format_select_width: f32,
+    /// 库屏根那张表根名称那一列的宽度上限：超过就截断加「…」、悬停看全名，路径那一列始终留得出地方
+    /// （拿主意的人 2026-09-14 定，稿上没有这一格）。
+    pub root_name_max: f32,
 }
 
 /// 阴影：一种一格，**形状两套主题共用**，颜色是各主题里同名的那一格（`pop` → `pop-color`）。

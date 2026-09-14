@@ -153,7 +153,8 @@ impl Catalog {
             .and_then(|value| value.trim().parse::<i64>().ok()))
     }
 
-    /// 记下**这一趟导出**的时刻。
+    /// 记下**这一趟导出**的时刻、这一趟收敛出几个**条目**（`entries`），与这一趟有没有铺出**媒体**（`media`）——库屏工序段导出
+    /// 那一行底下那句小字说的正是后两样（`stage::Stages::detail`）。
     ///
     /// **只有真把一趟导出走完了才调它**（`adapter::transfer::export_task` 的末尾）：
     /// 只排计划那一趟一个字节都没写，按停那一趟只写了一部分，撞上外面有人动过的那一趟
@@ -161,7 +162,38 @@ impl Catalog {
     ///
     /// # Errors
     /// 写库失败时返回错误。
-    pub fn mark_exported(&self) -> Result<(), CatalogError> {
-        self.meta_set(MetaKey::ExportedAt, &now_secs().to_string())
+    pub fn mark_exported(&self, entries: u64, media: bool) -> Result<(), CatalogError> {
+        self.meta_set(MetaKey::ExportedAt, &now_secs().to_string())?;
+        self.meta_set(MetaKey::ExportedEntries, &entries.to_string())?;
+        self.meta_set(MetaKey::ExportedWithMedia, if media { "1" } else { "0" })
+    }
+
+    /// **上次导出有没有铺出媒体**；一趟都没导过、或者这份库是记这一样之前导出的，就是 `None`。
+    ///
+    /// 与 [`Self::exported_at`] 同一下落（[`Self::mark_exported`]），说的是同一趟。铺没铺由导出那一趟自己说
+    /// （`adapter::transfer::export_task` 的末尾），这里只读回来。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn exported_with_media(&self) -> Result<Option<bool>, CatalogError> {
+        Ok(self
+            .meta_get(MetaKey::ExportedWithMedia)?
+            .and_then(|value| match value.trim() {
+                "1" => Some(true),
+                "0" => Some(false),
+                _ => None,
+            }))
+    }
+
+    /// **上次导出收敛出几个条目**；一趟都没导过、或者这份库是记这个数之前导出的，就是 `None`。
+    ///
+    /// 与 [`Self::exported_at`] 同一下落（[`Self::mark_exported`]）：打了时刻戳的那一趟才记这个数，所以两者说的是同一趟。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn exported_entries(&self) -> Result<Option<u64>, CatalogError> {
+        Ok(self
+            .meta_get(MetaKey::ExportedEntries)?
+            .and_then(|value| value.trim().parse::<u64>().ok()))
     }
 }

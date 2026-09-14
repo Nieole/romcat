@@ -39,38 +39,59 @@ use std::time::Duration;
 use romcat_core::catalog::Catalog;
 use romcat_core::catalog::roots::{self, LibraryRoot, RootStats};
 use romcat_core::fs::RealFs;
-use romcat_core::report::{human_bytes, human_duration, human_time, thousands};
+use romcat_core::report::{human_duration, thousands};
 use romcat_core::scan::{self, CheckpointOptions, Jobs, ScanOptions};
 use romcat_core::site::Site;
 use romcat_core::sources::{self, Source, SourceState, SourceStatus};
 use romcat_core::stage::Stage;
 use romcat_core::task::{Cutoff, Ending};
 
+use crate::clock::Clock;
 use crate::font;
 use crate::layout::{FOLD_EXPORT, FOLD_ROOTS, FOLD_SOURCES, Fold};
+use crate::look::{self, Tone};
 use crate::task::{Product, Tasks};
 use crate::tokens::Tokens;
 
+/// 数据源那一块标题栏右边那颗按钮上写的字（设计稿 `data-fetch-all`，挂单 `Q826`、`Q881` 已裁：照稿）。
+pub const FETCH_ALL: &str = "全部下载";
+
+/// 同一颗按钮在**每个源都下载过了**时写的字：按下去把每个源重新下载一遍（拿主意的人 2026-09-14 答）。
+pub const REFETCH_ALL: &str = "全部更新";
+
+/// 根那张表里扫过的根那颗按钮（设计稿「重新扫描」，与工序段扫描那一行做完时那颗同一个说法）。
+const RESCAN: &str = "重新扫描";
+
+/// 盘不在位的根，上次扫描那一格挂的那枚小标签（设计稿原话，挂单 `Q829` 已裁：照稿；词表里原来那个「连接」改名「组合方式」）。
+const UNMOUNTED: &str = "未连接";
+
+/// 盘不在位的根，上次扫描那一格小标签旁边那句（设计稿原话）：这一行的数是上次扫出来的。
+const LAST_SCAN_SHOWN: &str = "显示上次扫描结果";
+
 /// 根那一块一个根都没有时画的那一句。**空着的那一块说清下一步去哪儿办**，不画一张只有表头的表
 /// （票 `gui-looks-like-the-design/06`）。
-const ROOTS_EMPTY: &str = "还没有根。按右上角「添加根…」选一个目录，或者把目录贴进底下那个框\
-     ——几块盘都能加进同一个库。";
+const ROOTS_EMPTY: &str = "还没有根。按右上角「添加根…」选一个目录——几块盘都能加进同一个库。";
+
+/// 屏头「添加根…」那个选目录窗口什么都没交回来时屏上那一句（[`Screen::picked_root`]）。取消了与弹不出来分不开
+/// （`crate::pick` 的模块文档），所以说到弹不出来时去哪儿办——加根是 `romcat scan` 的活。
+pub const PICK_ROOT_NONE: &str = "没有选目录。选择窗口弹不出来时（例如远程会话），可以在命令行用 `romcat scan` \
+     扫这个目录，把它加成这个库的一个根。";
 
 /// 数据源那一块在**还没扫描**、又有源没取回时画的那一句：扫描与取回互不挡道，下一步可以两件一起办。
 const SOURCES_BEFORE_SCAN: &str =
-    "还没扫描。扫描的时候就可以先把这几个源取回来——识别和刮削要用它们。";
+    "还没扫描。扫描的时候就可以先把这几个源下载下来——识别和刮削要用它们。";
 
-/// 屏头那颗按钮上写的字：弹系统的选目录对话框，选中的加成一个根（`Screen::pick_root`）。
+/// 屏头那颗按钮上写的字：弹系统的选目录窗口，选中的加成一个根（`Screen::picked_root`）。
 pub const ADD_ROOT: &str = "添加根…";
 
 /// 库屏两栏里左边（工序）占多少：设计稿 `.libgrid` 是 `1.25fr : 1fr`。**设计稿不给断点**，
 /// 窗口窄了两栏一起收窄，不叠成一栏。
 const LEFT_SHARE: f32 = 1.25 / 2.25;
 
-/// 「添加目录」那两个框里的提示字。
+/// 贴一个根的目录那个框里的提示字（[开场那条向导](crate::claim)第二步那一框）。
 ///
-/// **摆成常量是因为它们有第二个用处**：[开场那条向导](crate::claim)第二步问的是同样
-/// 两样东西，用的必须是同一句话——同一件事在相邻两处换个说法，人就会以为它们是两件事。
+/// **摆在这一屏**：加根那条路（[`add_root_from_fields`]）在这儿，向导与库屏走的是同一条——同一件事在相邻两处换个说法，
+/// 人就会以为它们是两件事。
 pub const ROOT_HINT: &str = "那块盘上的目录";
 /// 同上，根名那个框。**不填就按目录自己的名字取**，那一下在
 /// [`add_root_from_fields`] 里。
@@ -100,9 +121,6 @@ pub struct Screen {
     sources: Vec<SourceStatus>,
     /// 第三段：**工序**——这个库还差哪几道步骤。
     stages: crate::stages::Section,
-    /// 「添加目录」那两个输入框。
-    new_path: String,
-    new_name: String,
     /// 正在跑的那几趟活的任务号，用来禁掉重复按下。
     running: Vec<(u64, Job)>,
     /// 点了「移除」还没点头的那个根。
@@ -112,6 +130,8 @@ pub struct Screen {
     /// 右边那一栏里眼下收着的那几块（[`Fold`]）。开窗时从版式偏好里交进来、每帧画完抄回去
     /// （`App::new` / `App::ui`）——这一屏自己不读写文件。
     folded: BTreeSet<&'static str>,
+    /// 画时刻用的钟（[`Clock`]）：本地时间短格式；截图测试钉死此刻与偏移（[`Screen::set_clock`]）。
+    clock: Clock,
 }
 
 /// 这一屏排上去的活是哪一种。
@@ -138,13 +158,12 @@ impl Screen {
             workspace,
             roots: Vec::new(),
             sources: Vec::new(),
-            new_path: String::new(),
-            new_name: String::new(),
             running: Vec::new(),
             removing: None,
             error: None,
             notice: None,
             folded: BTreeSet::new(),
+            clock: Clock::default(),
         }
     }
 
@@ -190,6 +209,16 @@ impl Screen {
         &self.roots
     }
 
+    /// 根那几行**换成调用方交进来的**，这一下不碰盘、不读中立库。
+    ///
+    /// **截图门要它**（`tests/snapshot.rs`），与开场那一屏的 [`crate::opening::Screen::listed`] 同一个办法：
+    /// 根那一行画着那个目录的路径、盘在不在位与上次扫描的时刻，从真库上读的话，临时目录在每台机器、
+    /// 每一趟上都是另一串，时刻是扫的那一刻，像素跟着变。交进来的仍是 [`RootRow`]，画法与
+    /// [`Self::reload`] 读出来的走同一条路；下一次重读（加根、扫完一趟……）照旧回到真库。
+    pub fn list_roots(&mut self, roots: Vec<RootRow>) {
+        self.roots = roots;
+    }
+
     /// 三个数据源现在什么状况。
     #[must_use]
     pub fn sources(&self) -> &[SourceStatus] {
@@ -232,8 +261,7 @@ impl Screen {
     /// （[`Self::scan`]）——不交出来的话，调用方就得自己再折一遍「名字空着时按目录名
     /// 取」，那是第二套算法（[开场那条向导](crate::claim)就在这条路上）。
     ///
-    /// 库屏自己那颗「+ 添加目录」不看这个返回值：它接着画的那一帧本来就照着重读过的
-    /// 那张表画。
+    /// 库屏屏头「添加根…」不看这个返回值（[`Self::picked_root`]）：接着画的那一帧本来就照着重读过的那张表画。
     pub fn add_root(&mut self, site: &Site, path: &str, name: &str) -> Option<String> {
         match add_root_from_fields(&site.catalog, &self.workspace, path, name) {
             Ok(root) => {
@@ -242,8 +270,6 @@ impl Screen {
                     "加上了根「{}」。按「扫描」把它收进这份中立库。",
                     root.name
                 ));
-                self.new_path.clear();
-                self.new_name.clear();
                 self.reload(site);
                 Some(root.name)
             }
@@ -359,6 +385,44 @@ impl Screen {
         self.error = None;
         self.running.push((id, Job::Scan(name.to_string())));
         self.sync_scan_board();
+    }
+
+    /// 换一个画时刻用的钟（[`Clock`]）：截图测试钉死此刻与偏移，截图里才没有当前时间。
+    pub fn set_clock(&mut self, clock: Clock) {
+        self.clock = clock;
+    }
+
+    /// 每个源是不是**都下载过了**。一个源都没列出来时不算。
+    fn all_fetched(&self) -> bool {
+        !self.sources.is_empty() && self.sources.iter().all(SourceStatus::ready)
+    }
+
+    /// 标题栏那颗按下去要排的那几个源：都下载过了（[`Self::all_fetched`]）就是每个源，否则是还没下载的那几个；
+    /// 已经在台上的不重排。
+    fn to_fetch_all(&self) -> impl Iterator<Item = Source> + '_ {
+        let 每个 = self.all_fetched();
+        Source::all()
+            .into_iter()
+            .zip(&self.sources)
+            .filter(move |(source, status)| {
+                (每个 || !status.ready())
+                    && !self
+                        .running
+                        .iter()
+                        .any(|(_, job)| *job == Job::Fetch(*source))
+            })
+            .map(|(source, _)| source)
+    }
+
+    /// **全部下载 / 全部更新**（数据源那一块标题栏右边那颗，[`FETCH_ALL`] / [`REFETCH_ALL`]）：有源没下载时把那几个
+    /// 逐个排上任务台；每个源都下载过了，就把每个源重新下载一遍（[`Self::to_fetch_all`]）。
+    ///
+    /// **走的就是 [`Self::fetch`]**，不另写一条：任务台一次只跑一趟，排上去的依次跑；已经在台上的不重排。
+    pub fn fetch_all(&mut self, tasks: &mut Tasks) {
+        let 要取: Vec<Source> = self.to_fetch_all().collect();
+        for source in 要取 {
+            self.fetch(tasks, source);
+        }
     }
 
     /// 取回一个数据源，**排到任务台上**。
@@ -524,10 +588,7 @@ impl Screen {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 要选根 = ui
                     .button(ADD_ROOT)
-                    .on_hover_text(format!(
-                        "选一个目录，加成这个库的一个根。{}",
-                        crate::pick::FALLBACK_HINT
-                    ))
+                    .on_hover_text("选一个目录，加成这个库的一个根")
                     .clicked();
             });
         });
@@ -544,12 +605,11 @@ impl Screen {
             let 左宽 = (ui.available_width() - 间距) * LEFT_SHARE;
             ui.vertical(|ui| {
                 ui.set_width(左宽);
-                panel_frame(ui)
-                    .inner_margin(panel_padding())
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        self.stages.ui(ui, site, tasks);
-                    });
+                // 左边那一整张卡（设计稿 `#stages-panel`）：卡里头的几块各自铺满卡宽、自己垫内边距（`stages::Section::ui`）。
+                panel_frame(ui).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    self.stages.ui(ui, site, tasks);
+                });
             });
             ui.add_space((间距 - ui.spacing().item_spacing.x).max(0.0));
             ui.vertical(|ui| {
@@ -560,7 +620,14 @@ impl Screen {
         // 工序段扫描那一行按下去只留记号：这一屏自己那条扫描的路接着排（`Self::take_scan`）。
         self.take_scan(site, tasks);
         if 要选根 {
-            self.pick_root(site);
+            // 照稿（挂单 `Q890`）：直接弹系统的选目录窗口（`crate::pick`），选中了就加。
+            let 起点 = self
+                .roots
+                .last()
+                .and_then(|row| Path::new(&row.root.path).parent().map(Path::to_path_buf))
+                .unwrap_or_default();
+            let 选中 = crate::pick::directory("选一个目录作为根", &起点);
+            self.picked_root(site, 选中);
         }
     }
 
@@ -568,27 +635,54 @@ impl Screen {
     fn side_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         let 间距 = panel_gap();
         let mut 收着 = self.folded(FOLD_ROOTS);
-        // 标题带着几个根，与工序段上「工序 · N 道」同一个写法：收着的时候也看得出这个库有几个根。
-        let 标题 = format!("根 · {} 个", self.roots.len());
+        // 标题照稿只写「根」（挂单 `Q888` 已裁）：几个根写在左栏导航上（票 `gui-looks-like-the-design/32`）。
         foldable_panel(
             ui,
-            &标题,
+            "根",
             "同一个主库可以包含多块盘或多个目录",
             &mut 收着,
+            None,
             |ui| self.roots_ui(ui, site, tasks),
         );
         self.set_folded(FOLD_ROOTS, 收着);
         ui.add_space(间距);
 
         let mut 收着 = self.folded(FOLD_SOURCES);
+        // 标题栏右边那颗（挂单 `Q826` 已裁：照稿）：有源没下载时写「全部下载」，都下载过了写「全部更新」、按下去把每个源
+        // 重新下载一遍（拿主意的人 2026-09-14 答）。按下去只记一笔，画完再排——排活要的是这一屏自己（[`Self::fetch_all`]），
+        // 而那颗按钮画在标题栏里。
+        let mut 要全取 = false;
+        let (字, 悬停) = if self.all_fetched() {
+            (
+                REFETCH_ALL,
+                "每个源逐个重新下载一遍，排到任务台上，一次只跑一趟；联网下载",
+            )
+        } else {
+            (
+                FETCH_ALL,
+                "未下载的那几个源逐个排到任务台上，一次只跑一趟；联网下载",
+            )
+        };
+        let 能全取 = self.to_fetch_all().next().is_some();
+        let mut 标题栏的按钮 = |ui: &mut egui::Ui| {
+            要全取 = look::small_buttons(ui, |ui| {
+                ui.add_enabled(能全取, egui::Button::new(字))
+                    .on_hover_text(悬停)
+                    .clicked()
+            });
+        };
         foldable_panel(
             ui,
             "数据源",
             "识别和刮削要用的本地数据",
             &mut 收着,
+            Some(&mut 标题栏的按钮),
             |ui| self.sources_ui(ui, tasks),
         );
         self.set_folded(FOLD_SOURCES, 收着);
+        if 要全取 {
+            self.fetch_all(tasks);
+        }
         ui.add_space(间距);
 
         let mut 收着 = self.folded(FOLD_EXPORT);
@@ -597,22 +691,29 @@ impl Screen {
             "导出设置",
             "设置一次，之后在工序段上直接运行导出",
             &mut 收着,
-            |ui| self.stages.export_setup_ui(ui, site),
+            None,
+            |ui| padded(ui, |ui| self.stages.export_setup_ui(ui, site)),
         );
         self.set_folded(FOLD_EXPORT, 收着);
     }
 
-    /// 屏头那颗「添加根…」：弹系统的选目录对话框，选中的交给 [`Self::add_root`]——**加根只有那一条路**
-    /// （挂单 `Q694`，与开场那条向导选第一个根同一个办法）。名字不填，按目录自己的名字取；取消了什么都
-    /// 不发生。对话框弹不出来时，根那一块底下那两个框照旧贴得进路径（`crate::pick` 的模块文档）。
-    fn pick_root(&mut self, site: &Site) {
-        let 起点 = self
-            .roots
-            .last()
-            .and_then(|row| Path::new(&row.root.path).parent().map(Path::to_path_buf))
-            .unwrap_or_default();
-        if let Some(path) = crate::pick::directory("选一个目录作为根", &起点) {
-            self.add_root(site, &path.to_string_lossy(), "");
+    /// 屏头「添加根…」弹的系统选目录窗口交回来的那一个（`crate::pick::directory`；挂单 `Q890` 已裁：照稿，不另开弹层）。
+    ///
+    /// - **选中了一个目录**：加成一个根，根名取目录自己的名字（[`Self::add_root`]）。被核心库拦下时（套在已有的根里、已经
+    ///   加过……）那句原话摆在屏上，任务历史不多一条——加根不是任务（照票 `gui-looks-like-the-design/07` 被拒的写法）。
+    /// - **交回 `None`**：取消了，或者窗口压根弹不出来（远程会话；`crate::pick` 的模块文档——两样分不开），屏上说一句去哪儿办
+    ///   （[`PICK_ROOT_NONE`]）。
+    ///
+    /// **测试从这儿递路径进去**：系统窗口测试点不了，选中之后那一半照 `tests/pick.rs` 的做法验。
+    pub fn picked_root(&mut self, site: &Site, picked: Option<PathBuf>) {
+        match picked {
+            Some(path) => {
+                self.add_root(site, &path.to_string_lossy(), "");
+            }
+            None => {
+                self.error = None;
+                self.notice = Some(PICK_ROOT_NONE.to_string());
+            }
         }
     }
 
@@ -625,75 +726,215 @@ impl Screen {
         // （借用检查器要的，也让「按一下发生什么」读起来是一条直线）。
         let roots = self.roots.clone();
         let 忙的 = self.busy_roots();
-        if roots.is_empty() {
-            ui.weak(ROOTS_EMPTY);
-        } else {
-            // 表比这一栏宽时（路径长）横着滚，不把整屏撑宽（设计稿 `.scrollx`）。
-            egui::ScrollArea::horizontal()
-                .id_salt("根那一块")
+        if !roots.is_empty() {
+            // **照稿五列**（设计稿根那张表：根名称、路径、变体、上次扫描、按钮；挂单 `Q828` 已裁）。这一块在右边
+            // 那一栏里、窄：不折行的那几列（根名称、变体、上次扫描那一刻、按钮）照它们最宽那一格画，**路径拿剩下的
+            // 宽度、在格子里折行**（[`remaining_width`]），用时落上次扫描那一格第二行——整张表宽不过这一栏，
+            // 「重新扫描」「移除」一定落在栏里（`tests/snapshot.rs` 那条断言钉着）。列与列、行与行之间的缝取令牌
+            // `cell-padding`；表头说明字号、弱色；每行左边一条状态竖条，行与行之间一条分隔线（设计稿 `.tbl`）。
+            let tokens = Tokens::builtin();
+            let [行缝, 列缝] = tokens.space.cell_padding;
+            let 弱色 = ui.visuals().weak_text_color();
+            let 警示色 = ui.visuals().error_fg_color;
+            let 表头 = |字: &str| {
+                font::strong(字)
+                    .size(tokens.font.size_caption_plus)
+                    .color(弱色)
+            };
+            let 名宽 = widest(
+                ui,
+                std::iter::once(egui::WidgetText::from(表头("根名称"))).chain(
+                    roots
+                        .iter()
+                        .map(|row| egui::WidgetText::from(row.root.name.as_str())),
+                ),
+            );
+            let 变体宽 =
+                widest(
+                    ui,
+                    std::iter::once(egui::WidgetText::from(表头("变体"))).chain(roots.iter().map(
+                        |row| egui::WidgetText::from(font::mono(thousands(row.stats.variants))),
+                    )),
+                );
+            let clock = self.clock;
+            let 扫描宽 = widest(
+                ui,
+                std::iter::once(egui::WidgetText::from(表头("上次扫描")))
+                    .chain(
+                        roots
+                            .iter()
+                            .filter(|row| row.mounted)
+                            .map(|row| egui::WidgetText::from(last_scan(row, clock).0)),
+                    )
+                    .chain(roots.iter().any(|row| !row.mounted).then(|| {
+                        egui::WidgetText::from(egui::RichText::new(LAST_SCAN_SHOWN).weak())
+                    })),
+            );
+            let 按钮宽 = look::small_button_width(ui, RESCAN)
+                .max(look::small_button_width(ui, "扫描"))
+                + ui.spacing().item_spacing.x
+                + look::small_button_width(ui, "移除");
+            // **表格通栏**（设计稿 `.tbl` 直接放在 `.panel` 里）：分隔线从面板左沿画到右沿，状态竖条贴着面板左沿；格子的
+            // 内边距取令牌 `cell-padding`——表的四周垫一份，列与列、行与行之间垫两份（两边的格子各一份），分隔线画在正中。
+            let 表 = ui.available_rect_before_wrap();
+            let 线 = ui.visuals().widgets.noninteractive.bg_stroke;
+            egui::Frame::new()
+                .inner_margin(egui::Margin::from(egui::vec2(列缝, 行缝)))
                 .show(ui, |ui| {
+                    // 格子里一段挨一段照回主题的缝（面板正文那一层把竖向的缝收成了零，`foldable_panel`）。
+                    let 缝 = ui.ctx().style_of(ui.ctx().theme()).spacing.item_spacing;
+                    ui.spacing_mut().item_spacing = 缝;
+                    // 根名那一列不超过令牌 `root-name-max`（挂单 `Q911` 已裁：截断加悬停）：目录名再长，路径那一列也留得出地方。
+                    let 名宽 = 名宽.min(tokens.layout.root_name_max);
+                    let 路径宽 = remaining_width(ui, &[名宽, 变体宽, 扫描宽, 按钮宽], 2.0 * 列缝);
+                    // **列宽下限收成零**：egui 的表格默认每列至少一个可点区域那么宽（40 点），「变体」那一列于是被撑到 40，
+                    // 比算好的宽出十几点、整栏跟着宽出去（第六版候选图扫过两个根那两张）。列宽只照量出来的那一格。
                     egui::Grid::new("根")
-                        .num_columns(6)
-                        .striped(true)
+                        .num_columns(5)
+                        .min_col_width(0.0)
+                        .spacing(egui::vec2(2.0 * 列缝, 2.0 * 行缝))
                         .show(ui, |ui| {
-                            for header in ["根名", "路径", "变体", "容量", "上次扫描", ""]
-                            {
-                                ui.label(font::strong(header));
-                            }
+                            let 表头底 = ["根名称", "路径", "变体", "上次扫描", ""]
+                                .into_iter()
+                                .map(|header| ui.label(表头(header)).rect.bottom())
+                                .fold(f32::NEG_INFINITY, f32::max);
                             ui.end_row();
-                            for row in &roots {
-                                ui.label(&row.root.name);
-                                // 路径、变体数与容量用等宽：一列扫下来位数对得齐。
-                                if row.mounted {
-                                    ui.label(font::mono(&row.root.path).weak());
-                                } else {
-                                    // **盘没挂上照样看得见上次结果**——那是这一行存在的一半理由。
-                                    ui.colored_label(
-                                        ui.visuals().warn_fg_color,
-                                        font::mono(format!("{}（不在位）", row.root.path)),
-                                    );
-                                }
-                                ui.label(font::mono(thousands(row.stats.variants)));
-                                ui.label(font::mono(human_bytes(row.stats.bytes)));
-                                ui.label(last_scan(row));
-                                ui.horizontal(|ui| {
-                                    let 忙 = 忙的.contains(&row.root.name);
-                                    let 标签 = if row.root.scan.is_some() {
-                                        "重扫"
-                                    } else {
-                                        "扫描"
-                                    };
-                                    if ui
-                                        .add_enabled(!忙, egui::Button::new(标签))
-                                        .on_hover_text("排到任务台上跑，期间照常用别的屏")
-                                        .clicked()
-                                    {
-                                        要扫 = Some(row.root.name.clone());
-                                    }
-                                    if self.removing.as_deref() == Some(row.root.name.as_str()) {
-                                        ui.colored_label(
-                                            ui.visuals().warn_fg_color,
-                                            format!(
-                                                "会去掉 {} 个变体",
-                                                thousands(row.stats.variants)
-                                            ),
+                            ui.painter().hline(表.x_range(), 表头底 + 行缝, 线);
+                            for (at, row) in roots.iter().enumerate() {
+                                // 根名**不折行，超过那一列的宽就截断**，末尾「…」，悬停看全名（egui 截断的标签自己挂上全名的悬停；
+                                // 挂单 `Q911` 已裁）。
+                                let 名格 = ui
+                                    .vertical(|ui| {
+                                        ui.set_min_width(名宽);
+                                        ui.set_max_width(名宽);
+                                        ui.add(egui::Label::new(row.root.name.as_str()).truncate());
+                                    })
+                                    .response
+                                    .rect;
+                                // 路径用等宽：一列扫下来位数对得齐；长了在格子里折行。
+                                let 路径格 = ui
+                                    .vertical(|ui| {
+                                        // 这一格**占满**算给它的宽：整张表于是铺满这一栏，按钮那一列贴着表的右内边距（照稿，
+                                        // 与数据源那张表的按钮右沿对齐）。
+                                        ui.set_min_width(路径宽);
+                                        ui.set_max_width(路径宽);
+                                        ui.add(
+                                            egui::Label::new(font::mono(&row.root.path).weak())
+                                                .wrap(),
                                         );
-                                        if ui.button("确认移除").clicked() {
-                                            要移除 = Some(row.root.name.clone());
+                                    })
+                                    .response
+                                    .rect;
+                                // 变体数**不折行**。容量不在这一格（挂单 `Q828` 已裁：几个根一共多大在工序段扫描那一行的小字里）。
+                                let 变体格 = single_line_cell(
+                                    ui,
+                                    变体宽,
+                                    [egui::WidgetText::from(font::mono(thousands(
+                                        row.stats.variants,
+                                    )))],
+                                );
+                                let 扫描格 = ui
+                                    .vertical(|ui| {
+                                        // 这一格照最宽那一段量（那一刻、「显示上次扫描结果」都不折行）。
+                                        ui.set_min_width(扫描宽);
+                                        ui.set_max_width(扫描宽);
+                                        if row.mounted {
+                                            let (那一刻, 其余) = last_scan(row, clock);
+                                            ui.add(egui::Label::new(那一刻).extend());
+                                            // 第二行小字（用了多久、部分完成）在格子里折。
+                                            if let Some(其余) = 其余 {
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(其余).small().weak(),
+                                                    )
+                                                    .wrap(),
+                                                );
+                                            }
+                                        } else {
+                                            // **盘没挂上照样看得见上次结果**——那是这一行存在的一半理由。照稿（设计稿根那张表
+                                            // 不在位那一行 `.chip.t-none.plain`）：一枚不带圆点的中性小标签，底下一句弱色的
+                                            // 「显示上次扫描结果」，**那一句本身不折行**；不画用时（稿上那一行没有）。
+                                            look::plain_chip(ui, Tone::Neutral, UNMOUNTED);
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(LAST_SCAN_SHOWN).weak(),
+                                                )
+                                                .extend(),
+                                            );
                                         }
-                                        // **「算了」得真的算了。** 一个只能前进不能后退的破坏性确认，
-                                        // 比不加确认更坏。
-                                        if ui.button("算了").clicked() {
-                                            要收回 = true;
-                                        }
-                                    } else if ui
-                                        .add_enabled(!忙, egui::Button::new("移除"))
-                                        .clicked()
-                                    {
-                                        要点头 = Some(row.root.name.clone());
-                                    }
-                                });
+                                    })
+                                    .response
+                                    .rect;
+                                // **按钮那一格也折行**：确认移除那一态多一句话、两颗按钮，并排放不下就换行，不挤出这一栏。
+                                // 按钮是小号（设计稿 `.btn.sm`）；「移除」照稿用警示样式（`.btn.warn`：`lo` 的字、透明底）。
+                                let 按钮格 = ui
+                                    .horizontal_wrapped(|ui| {
+                                        ui.set_max_width(按钮宽);
+                                        look::small_buttons(ui, |ui| {
+                                            let 忙 = 忙的.contains(&row.root.name);
+                                            let 标签 = if row.root.scan.is_some() {
+                                                RESCAN
+                                            } else {
+                                                "扫描"
+                                            };
+                                            if ui
+                                                .add_enabled(!忙, egui::Button::new(标签))
+                                                .on_hover_text("排到任务台上跑，期间照常用别的屏")
+                                                .clicked()
+                                            {
+                                                要扫 = Some(row.root.name.clone());
+                                            }
+                                            if self.removing.as_deref()
+                                                == Some(row.root.name.as_str())
+                                            {
+                                                ui.colored_label(
+                                                    ui.visuals().warn_fg_color,
+                                                    format!(
+                                                        "会去掉 {} 个变体",
+                                                        thousands(row.stats.variants)
+                                                    ),
+                                                );
+                                                if ui.button("确认移除").clicked() {
+                                                    要移除 = Some(row.root.name.clone());
+                                                }
+                                                // **「算了」得真的算了。** 一个只能前进不能后退的破坏性确认，
+                                                // 比不加确认更坏。
+                                                if ui.button("算了").clicked() {
+                                                    要收回 = true;
+                                                }
+                                            } else if ui
+                                                .add_enabled(
+                                                    !忙,
+                                                    egui::Button::new(
+                                                        egui::RichText::new("移除").color(警示色),
+                                                    )
+                                                    .fill(egui::Color32::TRANSPARENT),
+                                                )
+                                                .clicked()
+                                            {
+                                                要点头 = Some(row.root.name.clone());
+                                            }
+                                        });
+                                    })
+                                    .response
+                                    .rect;
+                                // 这一行左边那条状态竖条（设计稿 `.tbl td.st`）：完整扫过、盘又在位是 `hi`，别的是 `none`。
+                                let 语气 = if row.mounted && row.root.fully_scanned() {
+                                    Tone::Good
+                                } else {
+                                    Tone::Neutral
+                                };
+                                let 下 = paint_row_stripe(
+                                    ui,
+                                    表.left(),
+                                    &[名格, 路径格, 变体格, 扫描格, 按钮格],
+                                    (行缝, 行缝),
+                                    look::tone_colors(语气, ui.visuals()).0,
+                                );
                                 ui.end_row();
+                                if at + 1 < roots.len() {
+                                    ui.painter().hline(表.x_range(), 下 + 行缝, 线);
+                                }
                             }
                         });
                 });
@@ -712,30 +953,10 @@ impl Screen {
             self.remove_root(site, &name);
         }
 
-        ui.add_space(step(1));
-        // **对话框弹不出来时的退路**（`crate::pick` 的模块文档）：把目录贴进来。这一块在右边那一栏里，
-        // 窄——两个框**跟着这一栏的宽度摆**，不写死宽度：写死的话按钮被挤出这一栏，画都画不出来。
-        ui.label("添加目录");
-        ui.add(
-            egui::TextEdit::singleline(&mut self.new_path)
-                .hint_text(ROOT_HINT)
-                .desired_width(f32::INFINITY),
-        );
-        let mut 要加 = false;
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                要加 = ui.button("+ 添加目录").clicked();
-                let 余下 = ui.available_width();
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.new_name)
-                        .hint_text(ROOT_NAME_HINT)
-                        .desired_width(余下),
-                );
-            });
-        });
-        if 要加 {
-            let (path, name) = (self.new_path.clone(), self.new_name.clone());
-            self.add_root(site, &path, &name);
+        // 一个根都没有时这一块说清去哪儿加（照稿这一块里不摆贴路径的表单，加根在屏头「添加根…」，`Self::picked_root`）。
+        // 表格通栏，这一句照面板内边距垫（[`padded`]）。
+        if roots.is_empty() {
+            padded(ui, |ui| ui.weak(ROOTS_EMPTY));
         }
     }
 
@@ -745,63 +966,199 @@ impl Screen {
         // 判据与工序段扫描那一行同一句（`LibraryRoot::fully_scanned`，ADR-0024）：一个根都没完整扫过。
         let 还没扫描 = !self.roots.iter().any(|row| row.root.fully_scanned());
         if 还没扫描 && self.sources.iter().any(|status| !status.ready()) {
-            ui.weak(SOURCES_BEFORE_SCAN);
+            padded(ui, |ui| ui.weak(SOURCES_BEFORE_SCAN));
         }
-        egui::ScrollArea::horizontal()
-            .id_salt("数据源那一块")
-            .show(ui, |ui| {
-                egui::Grid::new("数据源")
-                    .num_columns(5)
-                    .striped(true)
-                    .show(ui, |ui| {
-                        for header in ["源", "记录", "上次取回", "覆盖", ""] {
-                            ui.label(font::strong(header));
+        // **照稿四列**（设计稿数据源那张表：数据源、记录数、更新时间 / 说明、按钮）：不折行的那几列（名字、记录数、
+        // 按钮）照它们最宽那一格画，**说明拿剩下的宽度、在格子里折行**（[`remaining_width`]）——整张表宽不过这一栏，
+        // 「取回」「重取」一定落在栏里。缝、表头、竖条、分隔线与根那张表同一套（设计稿 `.tbl`）：竖条取回了是 `hi`，
+        // 还没取回是 `mid`，读不动是 `lo`。
+        let tokens = Tokens::builtin();
+        let clock = self.clock;
+        let [行缝, 列缝] = tokens.space.cell_padding;
+        let 弱色 = ui.visuals().weak_text_color();
+        let 警告色 = ui.visuals().warn_fg_color;
+        let 出错色 = ui.visuals().error_fg_color;
+        let 表头 = |字: &str| {
+            font::strong(字)
+                .size(tokens.font.size_caption_plus)
+                .color(弱色)
+        };
+        let 名宽 = widest(
+            ui,
+            std::iter::once(egui::WidgetText::from(表头("数据源"))).chain(
+                self.sources
+                    .iter()
+                    .map(|status| egui::WidgetText::from(status.name)),
+            ),
+        );
+        let 记录宽 =
+            widest(
+                ui,
+                [
+                    egui::WidgetText::from(表头("记录数")),
+                    "未下载".into(),
+                    "读不动".into(),
+                ]
+                .into_iter()
+                .chain(self.sources.iter().filter_map(
+                    |status| match &status.state {
+                        SourceState::Ready { records, .. } => {
+                            Some(egui::WidgetText::from(thousands(*records)))
                         }
+                        SourceState::Missing | SourceState::Broken { .. } => None,
+                    },
+                )),
+            );
+        let 按钮宽 = look::small_button_width(ui, "下载").max(look::small_button_width(ui, "更新"));
+        // 表格通栏，缝与分隔线同根那张表（`roots_ui`）。
+        let 表 = ui.available_rect_before_wrap();
+        let 线 = ui.visuals().widgets.noninteractive.bg_stroke;
+        let 行数 = self.sources.len();
+        egui::Frame::new()
+            .inner_margin(egui::Margin::from(egui::vec2(列缝, 行缝)))
+            .show(ui, |ui| {
+                // 格子里照回主题的缝；列宽下限收成零——理由同根那张表（`roots_ui`）。
+                let 缝 = ui.ctx().style_of(ui.ctx().theme()).spacing.item_spacing;
+                ui.spacing_mut().item_spacing = 缝;
+                let 说明宽 = remaining_width(ui, &[名宽, 记录宽, 按钮宽], 2.0 * 列缝);
+                egui::Grid::new("数据源")
+                    .num_columns(4)
+                    .min_col_width(0.0)
+                    .spacing(egui::vec2(2.0 * 列缝, 2.0 * 行缝))
+                    .show(ui, |ui| {
+                        let 表头底 = ["数据源", "记录数", "更新时间 / 说明", ""]
+                            .into_iter()
+                            .map(|header| ui.label(表头(header)).rect.bottom())
+                            .fold(f32::NEG_INFINITY, f32::max);
                         ui.end_row();
-                        for (source, status) in Source::all().into_iter().zip(&self.sources) {
-                            ui.label(status.name);
-                            match &status.state {
+                        ui.painter().hline(表.x_range(), 表头底 + 行缝, 线);
+                        for (at, (source, status)) in
+                            Source::all().into_iter().zip(&self.sources).enumerate()
+                        {
+                            let 名格 =
+                                single_line_cell(ui, 名宽, [egui::WidgetText::from(status.name)]);
+                            let (记录格, 说明格, 竖条色) = match &status.state {
                                 SourceState::Ready {
                                     records,
                                     fetched_at,
-                                } => {
-                                    ui.label(thousands(*records));
-                                    ui.label(
-                                        fetched_at.map_or_else(|| "——".to_string(), human_time),
-                                    );
-                                    ui.weak(&status.coverage);
-                                }
+                                } => (
+                                    single_line_cell(
+                                        ui,
+                                        记录宽,
+                                        [egui::WidgetText::from(thousands(*records))],
+                                    ),
+                                    ui.vertical(|ui| {
+                                        // 占满算给这一格的宽：按钮那一列才贴着表的右内边距（照稿，第八版候选图上空出一大截）。
+                                        ui.set_min_width(说明宽);
+                                        ui.set_max_width(说明宽);
+                                        ui.label(fetched_at.map_or_else(
+                                            || "——".to_string(),
+                                            |at| clock.short(at),
+                                        ));
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(&status.coverage)
+                                                    .small()
+                                                    .weak(),
+                                            )
+                                            .wrap(),
+                                        );
+                                    })
+                                    .response
+                                    .rect,
+                                    look::tone_colors(Tone::Good, ui.visuals()).0,
+                                ),
                                 // **还没取回的要被明确标出来**：那正是「扫完了怎么没认出来」
                                 // 的答案。
-                                SourceState::Missing => {
-                                    ui.colored_label(ui.visuals().warn_fg_color, "还没取回");
-                                    ui.weak("——");
-                                    ui.colored_label(ui.visuals().warn_fg_color, status.cost);
-                                }
+                                SourceState::Missing => (
+                                    single_line_cell(
+                                        ui,
+                                        记录宽,
+                                        [egui::WidgetText::from(
+                                            egui::RichText::new("未下载").color(警告色),
+                                        )],
+                                    ),
+                                    ui.vertical(|ui| {
+                                        // 占满算给这一格的宽：按钮那一列才贴着表的右内边距（照稿，第八版候选图上空出一大截）。
+                                        ui.set_min_width(说明宽);
+                                        ui.set_max_width(说明宽);
+                                        // 说明那一句照稿用弱色（设计稿 `td.dim`）：「未下载」那一格与竖条已经是警示色。
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(status.cost).color(弱色),
+                                            )
+                                            .wrap(),
+                                        );
+                                    })
+                                    .response
+                                    .rect,
+                                    警告色,
+                                ),
                                 // **读不动不等于空**（ADR-0021）：那要人去看一眼，不是按一下取回。
-                                SourceState::Broken { why } => {
-                                    ui.colored_label(ui.visuals().error_fg_color, "读不动");
-                                    ui.weak("——");
-                                    ui.colored_label(ui.visuals().error_fg_color, why);
-                                }
-                            }
+                                SourceState::Broken { why } => (
+                                    single_line_cell(
+                                        ui,
+                                        记录宽,
+                                        [egui::WidgetText::from(
+                                            egui::RichText::new("读不动").color(出错色),
+                                        )],
+                                    ),
+                                    ui.vertical(|ui| {
+                                        // 占满算给这一格的宽：按钮那一列才贴着表的右内边距（照稿，第八版候选图上空出一大截）。
+                                        ui.set_min_width(说明宽);
+                                        ui.set_max_width(说明宽);
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(why).color(出错色),
+                                            )
+                                            .wrap(),
+                                        );
+                                    })
+                                    .response
+                                    .rect,
+                                    出错色,
+                                ),
+                            };
                             let 忙 = self
                                 .running
                                 .iter()
                                 .any(|(_, job)| *job == Job::Fetch(source));
-                            let 标签 = if status.ready() { "重取" } else { "取回" };
-                            if ui
-                                .add_enabled(!忙, egui::Button::new(标签))
-                                .on_hover_text(
-                                    "联网取一趟，排到任务台上跑。\
+                            let 按钮 = look::small_buttons(ui, |ui| {
+                                // 按钮上的字照稿（挂单 `Q881` 已裁）：没下载的「下载」；下载过的是弱化的「更新」（设计稿 `.btn.ghost`）。
+                                let 按钮 = if status.ready() {
+                                    let 弱化字色 =
+                                        ui.visuals().widgets.noninteractive.fg_stroke.color;
+                                    egui::Button::new(egui::RichText::new("更新").color(弱化字色))
+                                        .frame_when_inactive(false)
+                                } else {
+                                    egui::Button::new("下载")
+                                };
+                                ui.add_enabled(!忙, 按钮).on_hover_text(
+                                    "联网下载一趟，排到任务台上跑。\
                              中文离线源那一条按得停——按下之后在当前这一块读完就收手，\
-                             不等那 435 MB 下完。另外两条开跑之后还停不下来。",
+                             不等那 435 MB 下完。另外两条开始之后还停不下来。",
                                 )
-                                .clicked()
-                            {
+                            });
+                            if 按钮.clicked() {
                                 要取 = Some(source);
                             }
+                            // 末行贴着面板底（底下没有「扫完没认出来」那句）时竖条不伸进底边那份内边距：面板底角是圆的，伸下去会戳出圆角。
+                            let 下伸 = if at + 1 == 行数 && 还没扫描 {
+                                0.0
+                            } else {
+                                行缝
+                            };
+                            let 下 = paint_row_stripe(
+                                ui,
+                                表.left(),
+                                &[名格, 记录格, 说明格, 按钮.rect],
+                                (行缝, 下伸),
+                                竖条色,
+                            );
                             ui.end_row();
+                            if at + 1 < 行数 {
+                                ui.painter().hline(表.x_range(), 下 + 行缝, 线);
+                            }
                         }
                     });
             });
@@ -809,8 +1166,9 @@ impl Screen {
             self.fetch(tasks, source);
         }
         if !还没扫描 {
-            ui.add_space(step(0));
-            ui.weak("扫完没认出来？先看这一屏——多半是某个源还没取回。");
+            padded(ui, |ui| {
+                ui.weak("扫完没认出来？先看这一屏——多半是某个源还没下载。")
+            });
         }
     }
 }
@@ -859,19 +1217,9 @@ pub fn add_root_from_fields(
     roots::add_root(catalog, Some(workspace), &name, &normalized).map_err(|why| why.to_string())
 }
 
-/// 令牌里间距那几档的第 `at` 档（`space.steps`，从窄到宽）。**这一屏的间距只从这几档里取。**
-fn step(at: usize) -> f32 {
-    Tokens::builtin()
-        .space
-        .steps
-        .get(at)
-        .copied()
-        .unwrap_or_default()
-}
-
-/// 面板与面板之间、两栏之间隔多宽：设计稿 `.libgrid` 与右边那一栏都是 18 点，取令牌间距里最近那一档（16）。
+/// 面板与面板之间、两栏之间隔多宽（设计稿 `.libgrid` 与右边那一栏的 `gap:18px`，令牌 `library-gap`）。
 fn panel_gap() -> f32 {
-    step(3)
+    Tokens::builtin().space.library_gap
 }
 
 /// 面板内边距（令牌 `space.panel-padding`：上下、左右）。工序段那几行也用它（`stages::Section::ui`）。
@@ -890,75 +1238,217 @@ fn panel_frame(ui: &egui::Ui) -> egui::Frame {
         .corner_radius(egui::CornerRadius::same(Tokens::builtin().radius.large))
 }
 
-/// 一块**收得起来的面板**：头上一条标题栏（设计稿 `.phead`：标题、一句说明、右边一个折叠标），
-/// **点标题栏收起、再点摊开**；收着时只画标题栏，好让它还点得开。`folded` 是这一块眼下收着没有，
-/// 点了当场翻过来——记不记得住由调用方交给版式偏好（[`Fold`]）。
+/// 一块**收得起来的面板**（设计稿 `.panel` 与 `.phead`）：头上一条标题栏——标题（令牌 `size-panel-title`）、一句说明；
+/// `actions` 给了就再摆一排按钮、把折叠标推到最右（设计稿数据源那一块），没给时折叠标紧跟说明（根、导出设置那两块）。
+/// 标题栏里的间距取令牌 `panel-head-gap`。**点标题、说明或折叠标收起、再点摊开**，标题栏里的按钮照常按；收着时只画
+/// 标题栏，好让它还点得开。`folded` 是这一块眼下收着没有，点了当场翻过来——记不记得住由调用方交给版式偏好（[`Fold`]）。
 fn foldable_panel(
     ui: &mut egui::Ui,
     title: &str,
     sub: &str,
     folded: &mut bool,
+    actions: Option<&mut dyn FnMut(&mut egui::Ui)>,
     body: impl FnOnce(&mut egui::Ui),
 ) {
+    let tokens = Tokens::builtin();
     panel_frame(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
         let spacing = ui.spacing().item_spacing;
         // 标题栏、分隔线、正文之间不留缝：分隔线就是缝。段里头照旧用原来的间距。
         ui.spacing_mut().item_spacing.y = 0.0;
-        let header = egui::Frame::new()
+        let mut 点了 = false;
+        egui::Frame::new()
             .inner_margin(panel_padding())
             .show(ui, |ui| {
-                ui.spacing_mut().item_spacing = spacing;
+                ui.spacing_mut().item_spacing = egui::vec2(tokens.space.panel_head_gap, spacing.y);
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    ui.label(font::strong(title));
-                    ui.label(egui::RichText::new(sub).small().weak());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let 边长 = ui.spacing().icon_width;
-                        let (_, 标) =
-                            ui.allocate_exact_size(egui::vec2(边长, 边长), egui::Sense::hover());
-                        let 摊开 = if *folded { 0.0 } else { 1.0 };
-                        egui::collapsing_header::paint_default_icon(ui, 摊开, &标);
-                    });
+                    let 悬停 = if *folded {
+                        "点一下摊开"
+                    } else {
+                        "点一下收起"
+                    };
+                    let 标题 = ui
+                        .add(
+                            egui::Label::new(
+                                font::strong(title).size(tokens.font.size_panel_title),
+                            )
+                            .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text(悬停);
+                    let 说明 = ui
+                        .add(
+                            egui::Label::new(egui::RichText::new(sub).small().weak())
+                                .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text(悬停);
+                    let 标 = match actions {
+                        None => fold_icon(ui, *folded),
+                        Some(actions) => {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let 标 = fold_icon(ui, *folded);
+                                actions(ui);
+                                标
+                            })
+                            .inner
+                        }
+                    };
+                    点了 = 标题.clicked() || 说明.clicked() || 标.on_hover_text(悬停).clicked();
                 });
             });
-        let 标题栏 = header
-            .response
-            .interact(egui::Sense::click())
-            .on_hover_text(if *folded {
-                "点一下摊开"
-            } else {
-                "点一下收起"
-            });
-        if 标题栏.clicked() {
+        if 点了 {
             *folded = !*folded;
         }
         if *folded {
             return;
         }
-        ui.add(egui::Separator::default().spacing(0.0));
-        egui::Frame::new()
-            .inner_margin(panel_padding())
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing = spacing;
-                ui.set_width(ui.available_width());
-                body(ui);
-            });
+        look::divider(ui);
+        // **正文不垫内边距**：表格照稿通栏（设计稿 `.tbl` 直接放在 `.panel` 里），别的内容自己垫一份（[`padded`]）。
+        // **段与段之间不另留缝**：表格四周自带格子的内边距，别的段垫着面板内边距，缝就是那两份——再加一份主题的缝，
+        // 「还没扫描……」那一句与表头之间就空出一大截（第六版候选图空库那两张）。
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(spacing.x, 0.0);
+            ui.set_width(ui.available_width());
+            body(ui);
+        });
     });
 }
 
-/// 一个根上次扫描那一句。**没扫过与扫过是两件事**，说清楚。
-fn last_scan(row: &RootRow) -> String {
-    let Some(scan) = &row.root.scan else {
-        return "还没扫过".to_string();
+/// 面板正文里**不是表格**的那几段：垫一份面板内边距（[`panel_padding`]）。表格通栏，不走它。段里头照回主题的缝。
+fn padded<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::new()
+        .inner_margin(panel_padding())
+        .show(ui, |ui| {
+            let 缝 = ui.ctx().style_of(ui.ctx().theme()).spacing.item_spacing;
+            ui.spacing_mut().item_spacing = 缝;
+            ui.set_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
+
+/// 面板标题栏里那枚**折叠标**（设计稿 `.iconbtn` 里那个 `▾`，收着时转成 `▸`）：可点的一格边长取令牌 `icon-button`，
+/// 三角宽取令牌 `fold-mark`、高取宽的一半（直角等腰，尖朝下；收着时转九十度，尖朝右）。平常弱色（`.iconbtn` 的
+/// `ink-3`），悬停时垫凹陷底、换正文色（`.iconbtn:hover`）。打包的字形子集里没有 `▾`，所以是画的。
+fn fold_icon(ui: &mut egui::Ui, folded: bool) -> egui::Response {
+    let tokens = Tokens::builtin();
+    let 边长 = tokens.layout.icon_button;
+    let (格, response) = ui.allocate_exact_size(egui::vec2(边长, 边长), egui::Sense::click());
+    let visuals = ui.visuals();
+    let 色 = if response.hovered() {
+        ui.painter()
+            .rect_filled(格, tokens.radius.small, visuals.extreme_bg_color);
+        visuals.text_color()
+    } else {
+        visuals.weak_text_color()
     };
-    let mut line = format!(
-        "{} · {}",
-        human_time(scan.at),
-        human_duration(scan.elapsed_ms)
-    );
-    if scan.interrupted {
-        line.push_str("（那一趟部分完成，数字是下界）");
+    let (中, 半) = (格.center(), tokens.layout.fold_mark / 2.0);
+    let 三点 = if folded {
+        vec![
+            中 + egui::vec2(-半 / 2.0, -半),
+            中 + egui::vec2(-半 / 2.0, 半),
+            中 + egui::vec2(半 / 2.0, 0.0),
+        ]
+    } else {
+        vec![
+            中 + egui::vec2(-半, -半 / 2.0),
+            中 + egui::vec2(半, -半 / 2.0),
+            中 + egui::vec2(0.0, 半 / 2.0),
+        ]
+    };
+    ui.painter()
+        .add(egui::Shape::convex_polygon(三点, 色, egui::Stroke::NONE));
+    response
+}
+
+/// 表里这一行左边那条**状态竖条**（设计稿 `.tbl td.st` 的 `inset 3px`，宽取令牌 `row-stripe`）：贴着 `左`（面板左沿）画，
+/// 从这一行最高那一格的顶再往上伸 `伸.0`、画到最低那一格的底再往下伸 `伸.1`——格子的内边距里也还是这一行。交回这几格的底，
+/// 好在底下画分隔线。
+fn paint_row_stripe(
+    ui: &egui::Ui,
+    左: f32,
+    这一行的格: &[egui::Rect],
+    伸: (f32, f32),
+    色: egui::Color32,
+) -> f32 {
+    let 上 = 这一行的格
+        .iter()
+        .map(|格| 格.top())
+        .fold(f32::INFINITY, f32::min);
+    let 下 = 这一行的格
+        .iter()
+        .map(|格| 格.bottom())
+        .fold(f32::NEG_INFINITY, f32::max);
+    if !这一行的格.is_empty() {
+        ui.painter().rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(左, 上 - 伸.0),
+                egui::pos2(左 + Tokens::builtin().layout.row_stripe, 下 + 伸.1),
+            ),
+            0.0,
+            色,
+        );
     }
-    line
+    下
+}
+
+/// 一个根上次扫描那两句：头一句是**那一刻**，第二句（小字，设计稿上次扫描那一格的第二行）是用了多久、
+/// 那一趟是不是部分完成。**没扫过与扫过是两件事**，说清楚——没扫过就只有头一句。
+fn last_scan(row: &RootRow, clock: Clock) -> (String, Option<String>) {
+    let Some(scan) = &row.root.scan else {
+        return ("还没扫过".to_string(), None);
+    };
+    let mut 其余 = format!("用时 {}", human_duration(scan.elapsed_ms));
+    if scan.interrupted {
+        其余.push_str("（那一趟部分完成，数字是下界）");
+    }
+    (clock.short(scan.at), Some(其余))
+}
+
+/// 一张表里**折行的那一列**能拿多宽：这一栏眼下的宽度，扣掉不折行那几列各自的宽与列之间的缝。
+///
+/// 不折行的那几列（名字、数、按钮）照它们最宽那一格画（[`widest`]、[`look::small_button_width`]），剩下的全给折行那一列：
+/// 整张表宽不过这一栏，按钮不被挤出去；折行那一列也不会像等分那样被压得比别的列还窄、把整块撑高
+/// （第二段第二版候选图上导出设置那一块就这样被挤出了窗口）。不写一个像素：栏宽跟着窗口走，缝与按钮内边距跟着
+/// 主题走，字宽现量。
+fn remaining_width(ui: &egui::Ui, 不折行那几列: &[f32], 列缝: f32) -> f32 {
+    let 缝 = 列缝 * 不折行那几列.len() as f32;
+    (ui.available_width() - 不折行那几列.iter().sum::<f32>() - 缝).max(0.0)
+}
+
+/// 表里**不折行**的那一格：至少有量出来的那个宽（[`widest`]），里头每一段字都画成一行，一段一行竖着摆。
+///
+/// 表格沿用上一帧量出来的列宽，格子里的字默认又会折行——不钉住下限的话，一列会卡在表头那两个字的宽度上，
+/// 容量「14.00 KiB」就被折成三行（第二段第三版候选图；`tests/snapshot.rs` 的 `画成一行` 钉着）。
+fn single_line_cell(
+    ui: &mut egui::Ui,
+    宽: f32,
+    那几段: impl IntoIterator<Item = egui::WidgetText>,
+) -> egui::Rect {
+    ui.vertical(|ui| {
+        ui.set_min_width(宽);
+        for 一段 in 那几段 {
+            ui.add(egui::Label::new(一段).extend());
+        }
+    })
+    .response
+    .rect
+}
+
+/// 这几段字**不折行**画出来，最宽那一段多宽（点）。字体、字号照各段自己带的样式，没带的按正文。
+fn widest(ui: &egui::Ui, 那几段: impl IntoIterator<Item = egui::WidgetText>) -> f32 {
+    那几段
+        .into_iter()
+        .map(|一段| {
+            一段
+                .into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Body,
+                )
+                .size()
+                .x
+        })
+        .fold(0.0, f32::max)
 }
