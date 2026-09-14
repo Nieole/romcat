@@ -178,7 +178,7 @@ fn 摆开(app: &mut App, screen: View) {
 #[test]
 fn 三屏的面板边界都拖得动() {
     // 验收第 1 条。`egui::Panel::bottom` **默认是拖不动的**，这一票之前那三块底栏
-    // （浏览编辑、裁决面板、配目标）正是这么钉死的；而光打开 `resizable` 还不够——
+    // （浏览编辑、裁决面板）正是这么钉死的；而光打开 `resizable` 还不够——
     // 内容不把地方占满的话，拖宽了下一帧又缩回去（[`Boundary::show`]）。
     for screen in [View::Browse, View::Queue, View::Sublibraries] {
         let workspace = 工作目录(&format!("拖得动-{screen:?}"));
@@ -705,6 +705,29 @@ fn 点左栏入口就换到那一屏_屏头写着那一屏_右侧是它原来在
             "{view:?} 的屏头里没有它原来在顶栏上的「{右侧那一段}」（画在 {右侧:?}）：\n{}",
             画出来的字(&out),
         );
+        // 子库屏的屏头右侧照稿只剩「重新列一遍」与「新建子库」（票 `gui-looks-like-the-design/20`，拿主意的人
+        // 2026-09-14 选 B，挂单 `Q896`）：原来顶栏上的「N 台设备」拿掉了——左栏角标已经写着几台。
+        if view == View::Sublibraries {
+            assert!(
+                正好画在哪几处(&out, "新建子库")
+                    .iter()
+                    .any(|rect| rect.left() > 左栏宽() && rect.bottom() <= 折成两行的屏头底()),
+                "子库屏的屏头里没有「新建子库」：\n{}",
+                画出来的字(&out),
+            );
+            // 只看屏头那一截、只认「数字 台设备」那种写法：空态卡上那句「子库是为一台设备（通常是掌机）……」与
+            // 屏头副标题「……同步到各台设备」也带着这几个字。
+            let 几台 = 画在哪几处(&out, &|画的| {
+                画的.ends_with(" 台设备") && 画的.starts_with(|c: char| c.is_ascii_digit())
+            });
+            assert!(
+                !几台
+                    .iter()
+                    .any(|rect| rect.left() > 左栏宽() && rect.bottom() <= 折成两行的屏头底()),
+                "子库屏的屏头里还写着几台设备（画在 {几台:?}）：\n{}",
+                画出来的字(&out),
+            );
+        }
     }
 }
 

@@ -74,10 +74,11 @@ pub enum View {
     /// 已经归了**库**——`site.library`（后来正名为 `site.library_identity`）是**主库标识**，`View::Library` 是**库屏**。
     /// 同一个词指着三样东西，谁读代码都得先猜一遍。
     Browse,
-    /// **子库**：管住这几台设备——一台一张卡，配目标、排差量、同步。
+    /// **子库**：管住这几台设备——一台一张卡，目标设置（一层弹层）、排差量、同步。
     ///
-    /// **这一屏不选内容**（票 `gui-redesign/11`）：选择集在这儿只读，改它点「改选择」
-    /// 跳去浏览屏，调完按「更新到子库」回来（[`App::route`]）。
+    /// **规则与例外的增减在浏览屏上做**（票 `gui-redesign/11`）：改它点「改选择」跳去浏览屏，
+    /// 调完按「更新到子库」回来（[`App::route`]）。这一屏只留一处写例外的动作：超限时删减建议表
+    /// 上的「排除」（票 `gui-looks-like-the-design/20`）。
     Sublibraries,
     /// **任务**：排队、进度、可停、历史。**不发起操作，只承接**（票 01）。
     Tasks,
@@ -566,6 +567,10 @@ impl App {
         if let Some(jump) = self.sublibrary.take_jump() {
             self.browse
                 .begin_editing(&self.site, &jump.sublibrary, jump.rule, jump.broken);
+            // 规则行上「✎」跳过来的只改那一条（票 `gui-looks-like-the-design/20`）。
+            if let Some(ordinal) = jump.ordinal {
+                self.browse.edit_only(ordinal);
+            }
             self.view = View::Browse;
         }
         // **先丢账再换屏**：回程那一下也会留下记号，丢在前面，`open` 重读到的就是新的。
@@ -616,6 +621,11 @@ impl App {
         // 人会看见子库屏又闪一下才换过去。点一下 egui 本来就会再要一帧，所以
         // 「下一帧开头结算」在眼里就是「按下去就换」。
         self.route();
+        // **换到别的屏，子库屏删掉一台之后留着的那一份撤销就丢掉**（拿主意的人 2026-09-14 定）：提示条上
+        // 那颗「撤销」只在子库屏摆着的时候按得着。
+        if self.view != View::Sublibraries {
+            self.sublibrary.leave();
+        }
         self.rail(ui);
         // **底部状态栏**（设计稿 `.statusbar`，票 `gui-looks-like-the-design/25`）：每一屏都有。
         // 左边任务台那一小截与任务屏那张卡读同一份快照，点一下去任务屏；右边「ROM 只读」与
@@ -833,9 +843,8 @@ impl App {
                 browse.status(ui, site, board);
             }
             View::Sublibraries => {
-                // **抬头上那个「停下」按得动**，所以任务台拿的是可变的那一份。
-                let (sublibrary, site, board) = (&mut self.sublibrary, &self.site, &mut self.board);
-                sublibrary.status(ui, site, board);
+                let (sublibrary, site) = (&mut self.sublibrary, &self.site);
+                sublibrary.status(ui, site);
             }
             View::Tasks => {
                 // 照稿只有一颗「清空历史」，按得动，所以任务台拿的是可变的那一份。

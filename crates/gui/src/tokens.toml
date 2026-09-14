@@ -121,6 +121,7 @@ size-title   = 15     # 卡片标题、对话框标题
 size-page    = 18     # 页面标题
 size-hero    = 24     # 作品详情页的大标题
 size-panel-title = 14 # 面板标题（设计稿 .phead h3）
+size-empty-title = 16 # 子库屏空态那张卡的标题（设计稿空态卡 h3 的 font-size:16px）
 line-height  = 1.55
 size-badge-narrow = 10    # 左栏收成窄条后入口底下那个计数（设计稿 .main.rcol .nav .badge 的 10px）
 group-tracking    = 0.08  # 左栏分组标题的字距，字号的倍数（设计稿 .grp 的 letter-spacing:.08em）
@@ -215,10 +216,23 @@ stage-columns     = [26, 64] # 工序那一行头两列的宽：圆点、工序�
 stage-dot         = 22    # 工序圆点的直径（设计稿 .stage .dot）
 stage-dot-stroke  = 1.5   # 工序圆点描边的宽（设计稿 .stage .dot 的 border:1.5px）
 row-stripe        = 3     # 行左边那条状态竖条的宽（设计稿 .stage.next 与 .tbl td.st 的 inset 3px）
-icon-button       = 24    # 图标按钮的边长（设计稿 .iconbtn）：面板标题栏里那枚折叠标
 fold-mark         = 7     # 面板标题栏那枚折叠标三角的宽（设计稿 .iconbtn 里 13px 字号的 ▾，照稿图量约 7px）
 format-select-width = 150 # 导出设置那一块前端格式下拉的宽（设计稿 select.input 的 width:150px）
 root-name-max     = 120   # 库屏根那张表根名称那一列的宽度上限：超过就截断加「…」、悬停看全名，路径那一列始终留得出地方（拿主意的人 2026-09-14 定，稿上没有这一格）
+gauge-height      = 10    # 子库卡上容量条的高（设计稿 .gauge 的 height:10px）
+gauge-hatch       = 10    # 容量条「清单之外：未知」那一段斜纹一个来回（设计稿 .gauge .unk：5px 有色、5px 空）
+legend-swatch     = 9     # 容量条图例前那一小块颜色的边长（设计稿 .legend i 的 9px）
+legend-swatch-radius = 2  # 那一小块颜色的圆角（设计稿 .legend i 的 border-radius:2px）
+rule-badge        = 20    # 规则行首序号圆的直径（设计稿 .rule .rn 的 20px）
+empty-card-padding = 40   # 子库屏空态那张卡的内边距（设计稿空态卡的 padding:40px）
+toast-bottom      = 44    # 提示条离窗口底边多远（设计稿 .toast 的 bottom:44px）
+toast-padding     = [9, 10, 9, 14]   # 提示条四边留白（上, 右, 下, 左）（设计稿 .toast 的 padding:9px 10px 9px 14px）
+toast-button-line = 0.25  # 提示条上那颗按钮的描边是字色的几成（设计稿 .toast .btn 的 rgba(255,255,255,.25)）
+toast-seconds     = 3.6   # 只有一句话的提示条停多久，秒（设计稿 toast() 的 3600 毫秒）
+toast-action-seconds = 6.5  # 带一颗按钮的提示条停多久，秒（设计稿 toast() 的 6500 毫秒）
+impact-dot        = 8     # 弹层里「会怎样」那几条行首圆点的直径（设计稿 .impact li::before 的 8px）
+impact-column     = 18    # 行首圆点那一列多宽（设计稿 .impact li 的 grid-template-columns:18px 1fr）
+icon-button       = 24    # 图标按钮的边长（设计稿 .iconbtn 的 24px）：库屏面板标题栏里那枚折叠标、子库屏规则行尾那颗「×」
 
 # ── 阴影的形状：两套主题共用，颜色是各主题里同名的那一格（pop → pop-color） ──
 # check_tokens.py 不核这一节：设计稿里是一整句 box-shadow，不是分开的几格。
