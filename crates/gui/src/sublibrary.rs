@@ -2400,7 +2400,9 @@ impl Screen {
                 self.error = None;
             }
             Some(Pressed::Save) => {
-                if self.save(site) {
+                // 存下来才关；没存下来时那句话画在弹层里（[`Self::save`]）。先存再判，不把有副作用的一下写进分支守卫。
+                let saved = self.save(site);
+                if saved {
                     self.target_dialog = None;
                 }
             }
