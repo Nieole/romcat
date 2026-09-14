@@ -26,11 +26,11 @@
 //! | `line-2` | 未激活、展开两档的描边，弹窗描边 |
 //! | `accent` | 选中的字与描边、**键盘焦点**、文本光标、组字下划线；主按钮未激活那一档的底与描边 |
 //! | `accent-hover` | 主按钮悬停、按下两档的底 |
-//! | `on-accent` | 主按钮上的字，主按钮拿到焦点那一档的描边 |
+//! | `on-accent` | 主按钮与危险按钮上的字，这两种按钮拿到焦点那一档的描边 |
 //! | `accent-soft` | 选中的底色 |
 //! | `accent-ink` | 链接 |
 //! | `pop-color` | 窗口与弹出菜单的阴影（`window_shadow`、`popup_shadow`；形状照令牌 `[shadow.pop]`） |
-//! | `mid` / `lo` | `warn_fg_color` / `error_fg_color` |
+//! | `mid` / `lo` | `warn_fg_color` / `error_fg_color`；`lo` 还是危险按钮的底、警示按钮的字与描边（[`danger_button`]、[`warn_button`]） |
 //!
 //! **正文是 `ink-2`、强调字是 `ink`**：中文没有粗体（票 `gui-looks-like-the-design/02`），
 //! 一句纯中文的小标题与正文之间只剩颜色这一层差别——两个都给 `ink`，那一层也没了。
@@ -388,6 +388,109 @@ fn primary_button_in(palette: &Palette, visuals: &mut egui::Visuals) {
     }
 }
 
+/// **幽灵按钮**那一档（设计稿 `.btn.ghost`）：没有底、没有描边、次要字色；悬停时垫凹陷底、字换成强调字。
+/// **全窗口只有这一处回答「幽灵按钮什么颜色」**。
+///
+/// 与 [`primary_button`] 一样在一个 `ui.scope` 里改 `ui.visuals_mut()`。拿到焦点那一档照旧描强调色那一圈
+/// （模块文档「键盘焦点」一节）：没底没框的按钮，焦点更得看得见。
+pub fn ghost_button(visuals: &mut egui::Visuals) {
+    let theme = egui::Theme::from_dark_mode(visuals.dark_mode);
+    ghost_button_in(Tokens::builtin().color.theme(theme), visuals);
+}
+
+/// 幽灵按钮在这一套颜色里取哪几个。拆出来的理由同 [`tier_color_in`]。
+fn ghost_button_in(palette: &Palette, visuals: &mut egui::Visuals) {
+    let widgets = &mut visuals.widgets;
+    // 每一档：底色、描边、字。没底没框那两格是「不画」，不是一个颜色。
+    for (widget, fill, stroke, fg) in [
+        (
+            &mut widgets.inactive,
+            Color32::TRANSPARENT,
+            Color32::TRANSPARENT,
+            palette.ink_2,
+        ),
+        (
+            &mut widgets.hovered,
+            palette.sunken,
+            Color32::TRANSPARENT,
+            palette.ink,
+        ),
+        (
+            &mut widgets.active,
+            palette.sunken,
+            palette.accent,
+            palette.ink,
+        ),
+    ] {
+        widget.bg_fill = fill;
+        widget.weak_bg_fill = fill;
+        widget.bg_stroke.color = stroke;
+        widget.fg_stroke.color = fg;
+    }
+}
+
+/// 一颗**危险按钮**（设计稿 `.btn.danger`）：危险色底（令牌 `lo`）、`on-accent` 字。**全窗口只有这一处回答
+/// 「危险按钮什么颜色」**；画它的是 [`crate::dialog`] 页脚上标了 `danger` 的那一颗——删掉一样东西之前问的那一下，
+/// 按下去就真删。
+///
+/// 在一个 `ui.scope` 里换颜色，别的控件不受影响。字取 `on-accent`（强色底上的字那一格），不照稿写死白字
+/// （挂单 `Q894`）。
+pub fn danger_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.scope(|ui| {
+        let theme = egui::Theme::from_dark_mode(ui.visuals().dark_mode);
+        danger_button_in(Tokens::builtin().color.theme(theme), ui.visuals_mut());
+        ui.button(text)
+    })
+    .inner
+}
+
+/// 危险按钮在这一套颜色里取哪几个。拆出来的理由同 [`tier_color_in`]。
+fn danger_button_in(palette: &Palette, visuals: &mut egui::Visuals) {
+    let widgets = &mut visuals.widgets;
+    // 三档同一个底：令牌里没有「危险色悬停」那一格。拿到焦点那一档的描边换成 `on-accent`，
+    // 理由同 [`primary_button_in`]：危险色底上再描一圈危险色是看不见的。
+    for (widget, stroke) in [
+        (&mut widgets.inactive, palette.lo),
+        (&mut widgets.hovered, palette.lo),
+        (&mut widgets.active, palette.on_accent),
+    ] {
+        widget.bg_fill = palette.lo;
+        widget.weak_bg_fill = palette.lo;
+        widget.bg_stroke.color = stroke;
+        widget.fg_stroke.color = palette.on_accent;
+    }
+}
+
+/// 一颗**警示按钮**（设计稿 `.btn.warn`）：透明底、危险色（令牌 `lo`）的字与描边。卡片底下「删除子库」那种——
+/// 按下去还要再问一次的那一颗，先把颜色摆出来。**全窗口只有这一处回答「警示按钮什么颜色」。**
+///
+/// 在一个 `ui.scope` 里换颜色，别的控件不受影响；要小号的话包在 [`small_buttons`] 里。
+pub fn warn_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.scope(|ui| {
+        let theme = egui::Theme::from_dark_mode(ui.visuals().dark_mode);
+        warn_button_in(Tokens::builtin().color.theme(theme), ui.visuals_mut());
+        ui.button(text)
+    })
+    .inner
+}
+
+/// 警示按钮在这一套颜色里取哪几个。拆出来的理由同 [`tier_color_in`]。
+fn warn_button_in(palette: &Palette, visuals: &mut egui::Visuals) {
+    let widgets = &mut visuals.widgets;
+    // 每一档：底色、描边。字一律 `lo`。悬停垫一层 `lo-soft`；拿到焦点那一档描强调色那一圈，
+    // 理由同 [`ghost_button_in`]。
+    for (widget, fill, stroke) in [
+        (&mut widgets.inactive, Color32::TRANSPARENT, palette.lo),
+        (&mut widgets.hovered, palette.lo_soft, palette.lo),
+        (&mut widgets.active, palette.lo_soft, palette.accent),
+    ] {
+        widget.bg_fill = fill;
+        widget.weak_bg_fill = fill;
+        widget.bg_stroke.color = stroke;
+        widget.fg_stroke.color = palette.lo;
+    }
+}
+
 /// **置信度四档**画成什么颜色。**全窗口只有这一处回答这个问题。**
 ///
 /// 颜色取自令牌的 `hi` / `mid` / `lo` / `none`，按 `visuals` 是哪一套主题挑那一套：
@@ -434,6 +537,12 @@ pub enum Tone {
     Good,
     /// 留神：令牌 `mid` 那一对。
     Caution,
+    /// 出了界：令牌 `lo` 那一对（设计稿 `.trim .th` 的 `lo-soft` 底、`lo` 字）——子库屏「超出容量上限」。
+    Danger,
+    /// 中性：令牌 `none` 那一对（设计稿 `.t-none`）——子库屏「未连接」。
+    Neutral,
+    /// 强调：令牌 `accent-ink` 的字、`accent-soft` 的底（设计稿 `.t-acc`）——子库屏「尚未生成差量预览」。
+    Accent,
 }
 
 /// 那种语气的标签画成什么颜色：`(字, 底)`。**全窗口只有这一处回答。**
@@ -451,6 +560,9 @@ fn tone_colors_in(palette: &Palette, tone: Tone) -> (Color32, Color32) {
     match tone {
         Tone::Good => (palette.hi, palette.hi_soft),
         Tone::Caution => (palette.mid, palette.mid_soft),
+        Tone::Danger => (palette.lo, palette.lo_soft),
+        Tone::Neutral => (palette.none, palette.none_soft),
+        Tone::Accent => (palette.accent_ink, palette.accent_soft),
     }
 }
 
@@ -469,6 +581,16 @@ pub fn step(at: usize) -> f32 {
 
 /// 一枚**标签**：浅底小圆角，同色的圆点与字（设计稿 `.chip`）。圆点直径取令牌 `chip-dot`。
 pub fn chip(ui: &mut egui::Ui, tone: Tone, text: &str) -> egui::Response {
+    chip_with(ui, tone, text, true)
+}
+
+/// 一枚**不带圆点**的标签（设计稿 `.chip.plain`）：其余同 [`chip`]。
+pub fn plain_chip(ui: &mut egui::Ui, tone: Tone, text: &str) -> egui::Response {
+    chip_with(ui, tone, text, false)
+}
+
+/// 标签画在一处：`圆点` 为假时不画点、也不留点那一格。
+fn chip_with(ui: &mut egui::Ui, tone: Tone, text: &str, 圆点: bool) -> egui::Response {
     let (字色, 底色) = tone_colors(tone, ui.visuals());
     let galley = egui::WidgetText::from(egui::RichText::new(text).small().color(字色)).into_galley(
         ui,
@@ -476,18 +598,26 @@ pub fn chip(ui: &mut egui::Ui, tone: Tone, text: &str) -> egui::Response {
         f32::INFINITY,
         egui::TextStyle::Small,
     );
-    let (边, 点, 缝) = (step(1), Tokens::builtin().layout.chip_dot, step(0));
+    let (边, 缝) = (step(1), step(0));
+    let 点 = if 圆点 {
+        Tokens::builtin().layout.chip_dot
+    } else {
+        0.0
+    };
+    let 点后 = if 圆点 { 缝 } else { 0.0 };
     let 字 = galley.size();
-    let size = egui::vec2(边 + 点 + 缝 + 字.x + 边, 字.y + step(0));
+    let size = egui::vec2(边 + 点 + 点后 + 字.x + 边, 字.y + step(0));
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, Tokens::builtin().radius.small, 底色);
-    painter.circle_filled(
-        egui::pos2(rect.left() + 边 + 点 / 2.0, rect.center().y),
-        点 / 2.0,
-        字色,
-    );
-    let 摆在 = egui::pos2(rect.left() + 边 + 点 + 缝, rect.center().y - 字.y / 2.0);
+    if 圆点 {
+        painter.circle_filled(
+            egui::pos2(rect.left() + 边 + 点 / 2.0, rect.center().y),
+            点 / 2.0,
+            字色,
+        );
+    }
+    let 摆在 = egui::pos2(rect.left() + 边 + 点 + 点后, rect.center().y - 字.y / 2.0);
     painter.galley(摆在, galley, 字色);
     response
 }
@@ -667,8 +797,10 @@ mod tests {
     /// 令牌里**界面还没有一处用上**的颜色：页面背景（设计稿自己用）、低与没有候选那两档的浅底
     /// ——egui 的 `Visuals` 里没有它们的槽位，而画它们的那几屏还没照稿重排。
     /// 哪一屏第一个用上它，就从这张单子里划掉（下面那条变异测试会提醒）。`hi-soft` 与 `mid-soft`
-    /// 由标签（[`tone_colors`]）用上了（票 `gui-looks-like-the-design/05`，开场与添加主库向导）。
-    const NOT_YET_USED: &[&str] = &["ground", "lo-soft", "none-soft"];
+    /// 由标签（[`tone_colors`]）用上了（票 `gui-looks-like-the-design/05`，开场与添加主库向导）；
+    /// `lo-soft` 由子库屏删减建议表的表头用上了（票 `gui-looks-like-the-design/20`，[`Tone::Danger`]）。
+    /// `none-soft` 由子库屏「未连接」那枚标签用上了（[`Tone::Neutral`]，票 20 第二段）。
+    const NOT_YET_USED: &[&str] = &["ground"];
 
     /// 这套主题下**有映射的每一个颜色**与令牌逐项比，对不上的那几项：`visuals` 的每个颜色槽位，
     /// 加上 `四档`（置信度四档各取哪个颜色）。平台色与播放标直接读令牌、没有映射可接错，
@@ -874,6 +1006,9 @@ mod tests {
         for (tone, [字键, 底键]) in [
             (Tone::Good, ["hi", "hi-soft"]),
             (Tone::Caution, ["mid", "mid-soft"]),
+            (Tone::Danger, ["lo", "lo-soft"]),
+            (Tone::Neutral, ["none", "none-soft"]),
+            (Tone::Accent, ["accent-ink", "accent-soft"]),
         ] {
             let (字, 底) = 标签(tone);
             颜色.push((format!("标签（{tone:?}）的字"), 字, 字键));
@@ -1115,6 +1250,55 @@ mod tests {
         let (断了, 没人读) = 变异(Theme::Light);
         assert!(断了.is_empty(), "改了这几个键，装出来的没跟着变：{断了:?}");
         assert_eq!(没人读, NOT_YET_USED);
+    }
+
+    #[test]
+    fn 危险按钮与警示按钮的颜色取自令牌() {
+        // 票 `gui-looks-like-the-design/20`：删除确认弹层上那一颗（`.btn.danger`）与卡底「删除子库」（`.btn.warn`）。
+        for theme in [Theme::Dark, Theme::Light] {
+            let p = Tokens::builtin().color.theme(theme);
+            let mut 危险 = egui::Visuals::light();
+            danger_button_in(p, &mut 危险);
+            for (档, widget) in [
+                ("inactive", &危险.widgets.inactive),
+                ("hovered", &危险.widgets.hovered),
+                ("active", &危险.widgets.active),
+            ] {
+                assert_eq!(widget.bg_fill, p.lo, "{theme:?} 危险按钮 {档} 的底");
+                assert_eq!(widget.weak_bg_fill, p.lo, "{theme:?} 危险按钮 {档} 的底");
+                assert_eq!(
+                    widget.fg_stroke.color, p.on_accent,
+                    "{theme:?} 危险按钮 {档} 的字"
+                );
+            }
+            assert_eq!(
+                危险.widgets.active.bg_stroke.color, p.on_accent,
+                "{theme:?} 焦点圈"
+            );
+
+            let mut 警示 = egui::Visuals::light();
+            warn_button_in(p, &mut 警示);
+            assert_eq!(
+                警示.widgets.inactive.bg_fill,
+                Color32::TRANSPARENT,
+                "{theme:?} 警示按钮不垫底"
+            );
+            assert_eq!(
+                警示.widgets.inactive.bg_stroke.color, p.lo,
+                "{theme:?} 警示按钮的描边"
+            );
+            assert_eq!(
+                警示.widgets.hovered.bg_fill, p.lo_soft,
+                "{theme:?} 警示按钮悬停的底"
+            );
+            for widget in [
+                &警示.widgets.inactive,
+                &警示.widgets.hovered,
+                &警示.widgets.active,
+            ] {
+                assert_eq!(widget.fg_stroke.color, p.lo, "{theme:?} 警示按钮的字");
+            }
+        }
     }
 
     #[test]

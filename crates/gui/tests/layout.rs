@@ -178,7 +178,7 @@ fn 摆开(app: &mut App, screen: View) {
 #[test]
 fn 三屏的面板边界都拖得动() {
     // 验收第 1 条。`egui::Panel::bottom` **默认是拖不动的**，这一票之前那三块底栏
-    // （浏览编辑、裁决面板、配目标）正是这么钉死的；而光打开 `resizable` 还不够——
+    // （浏览编辑、裁决面板）正是这么钉死的；而光打开 `resizable` 还不够——
     // 内容不把地方占满的话，拖宽了下一帧又缩回去（[`Boundary::show`]）。
     for screen in [View::Browse, View::Queue, View::Sublibraries] {
         let workspace = 工作目录(&format!("拖得动-{screen:?}"));

@@ -131,6 +131,8 @@ pub struct Button<A> {
     enabled: bool,
     /// 是不是往前走的那一颗。
     primary: bool,
+    /// 是不是删掉东西的那一颗。
+    danger: bool,
     /// 指针停在上面时说的那句话。
     hover: Option<String>,
 }
@@ -144,6 +146,7 @@ impl<A> Button<A> {
             action,
             enabled: true,
             primary: false,
+            danger: false,
             hover: None,
         }
     }
@@ -161,6 +164,14 @@ impl<A> Button<A> {
     #[must_use]
     pub fn primary(mut self) -> Self {
         self.primary = true;
+        self
+    }
+
+    /// **删掉东西的那一颗**：画成危险色底（[`look::danger_button`]）。删除确认弹层上按下去就真删的那一颗标它；
+    /// 与 [`Self::primary`] 不同时标。
+    #[must_use]
+    pub fn danger(mut self) -> Self {
+        self.danger = true;
         self
     }
 
@@ -643,7 +654,7 @@ fn footer_ui<A>(ui: &mut egui::Ui, footer: &Footer<A>) -> Option<Slot> {
     clicked
 }
 
-/// 摆一颗页脚按钮。主按钮在一个 `scope` 里换上那一档颜色，别的控件不受影响。
+/// 摆一颗页脚按钮。主按钮、危险按钮在一个 `scope` 里换上那一档颜色，别的控件不受影响。
 fn add_button<A>(ui: &mut egui::Ui, button: &Button<A>) -> egui::Response {
     let add = |ui: &mut egui::Ui| {
         ui.add_enabled(button.enabled, egui::Button::new(button.label.as_str()))
@@ -652,6 +663,11 @@ fn add_button<A>(ui: &mut egui::Ui, button: &Button<A>) -> egui::Response {
         ui.scope(|ui| {
             look::primary_button(ui.visuals_mut());
             add(ui)
+        })
+        .inner
+    } else if button.danger {
+        ui.add_enabled_ui(button.enabled, |ui| {
+            look::danger_button(ui, button.label.as_str())
         })
         .inner
     } else {

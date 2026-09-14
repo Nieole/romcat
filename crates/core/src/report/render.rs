@@ -42,6 +42,36 @@ pub fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// 把字节数写成**十进制单位**（`KB`、`MB`、`GB`、`TB`，按 1000 进），**最多留一位小数、末尾的 `.0` 去掉**：
+/// 「64 GB」「511.1 GB」。
+///
+/// 只给**容量上限**用（挂单 `Q856`，拿主意的人照稿定）：卡上印的标称值是十进制，一张 512GB 的卡写成
+/// 476.84 GiB，人认不出是哪张卡。算出来的量（已选多少、清单外文件多大）照旧走 [`human_bytes`]。
+///
+/// **一位小数是给人看的，写不回去**：「511.1 GB」读回来是 511,100,000,000，不是原来那个数。要原样存回去的
+/// 地方别拿它当往返的格式。
+#[must_use]
+pub fn decimal_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    if bytes < 1000 {
+        return format!("{bytes} B");
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    // 进位之后到了 1000 的也升一档：999,960 B 写「1 MB」，不写「1000 KB」。
+    while unit + 1 < UNITS.len() && (value * 10.0).round() >= 10_000.0 {
+        value /= 1000.0;
+        unit += 1;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let tenths = (value * 10.0).round() as u64;
+    match tenths % 10 {
+        0 => format!("{} {}", tenths / 10, UNITS[unit]),
+        frac => format!("{}.{frac} {}", tenths / 10, UNITS[unit]),
+    }
+}
+
 /// 一段时长排成人看得懂的样子。
 ///
 /// **只给粗估用**，因此刻意粗：一小时以上不报秒、一分钟以上不报小数。一个看着精确的
@@ -942,6 +972,21 @@ mod tests {
         assert_eq!(human_bytes(1023), "1023 B");
         assert_eq!(human_bytes(1024), "1.00 KiB");
         assert_eq!(human_bytes(10 * 1024_u64.pow(4)), "10.00 TiB");
+    }
+
+    #[test]
+    fn 容量上限写成十进制单位_最多一位小数_末尾的零去掉() {
+        // 挂单 `Q856`：拿主意的人照稿定，容量上限写十进制，与卡上印的标称值一致。
+        assert_eq!(decimal_bytes(0), "0 B");
+        assert_eq!(decimal_bytes(999), "999 B");
+        assert_eq!(decimal_bytes(1000), "1 KB");
+        assert_eq!(decimal_bytes(1500), "1.5 KB");
+        assert_eq!(decimal_bytes(64_000_000_000), "64 GB");
+        assert_eq!(decimal_bytes(128_000_000_000), "128 GB");
+        assert_eq!(decimal_bytes(511_123_456_789), "511.1 GB");
+        assert_eq!(decimal_bytes(2_000_000_000_000), "2 TB");
+        // 进位之后到了 1000 的升一档，不写「1000 KB」。
+        assert_eq!(decimal_bytes(999_960), "1 MB");
     }
 
     #[test]

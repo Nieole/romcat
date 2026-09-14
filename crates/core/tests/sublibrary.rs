@@ -15,6 +15,7 @@ use romcat_core::shape::{Role, SINGLE_FILE_RULE, Variant};
 use romcat_core::sublibrary::{
     self, Discarded, Exception, Fit, Gauge, LoadedSelection, Rule, StoredRule, Sublibrary,
 };
+use romcat_core::sync::{FileKind, Manifest as 同步清单, ManifestFile, Stamp};
 
 fn 变体(key: &str, platform: &str, bytes: u64) -> Variant {
     Variant {
@@ -229,6 +230,103 @@ fn 同一个子库之内规则序号不复用() {
     assert_eq!(加规则(&mut catalog, "掌机", "平台=PSV"), 2);
     assert!(catalog.remove_rule("掌机", 2).expect("删得动"));
     assert_eq!(加规则(&mut catalog, "掌机", "平台=SFC"), 3);
+}
+
+#[test]
+fn 删掉子库交回整份_原样放回去之后与删之前逐列一样() {
+    // 票 `gui-looks-like-the-design/20`（拿主意的人 2026-09-14 定）：界面上删掉一个子库之后，提示条上有一颗
+    // 「撤销」。放回去的得是**同一份**：规则的序号与下一个发几号、例外、清单一样不差——清单少一行，同步就把
+    // 自己放过的文件当成清单之外，碰都不敢碰；规则从 1 号重新发，照着旧报告删 2 号就删错一条。
+    let mut catalog = 现场();
+    建子库(&mut catalog, "掌机", Some(64_000_000_000));
+    建子库(&mut catalog, "备用卡", None);
+    加规则(&mut catalog, "掌机", "平台=GB");
+    加规则(&mut catalog, "掌机", "平台=PSV");
+    加规则(&mut catalog, "备用卡", "平台=PSV");
+    // 删掉 1 号：下一条发 3 号，放回去之后也得接着发 3 号。
+    assert!(catalog.remove_rule("掌机", 1).expect("删得动"));
+    catalog
+        .set_exception("掌机", "库/PSV/大作.vpk", Exception::Include, Some("想玩"))
+        .expect("例外写得进");
+    let 清单 = 同步清单 {
+        files: vec![ManifestFile {
+            path: "roms/gb/口袋妖怪 汉化.zip".to_string(),
+            kind: FileKind::Rom,
+            stamp: Stamp {
+                bytes: 4096,
+                mtime_ns: Some(1_700_000_000_000_000_000),
+            },
+            source: "库/GB/口袋妖怪 汉化.zip".to_string(),
+            source_stamp: Stamp {
+                bytes: 4096,
+                mtime_ns: None,
+            },
+            variant: "库/GB/口袋妖怪 汉化.zip".to_string(),
+            absent: true,
+        }],
+    };
+    catalog.put_manifest("掌机", &清单).expect("清单写得进");
+    let 读一遍 = |catalog: &Catalog| {
+        (
+            catalog.sublibrary("掌机").expect("读得动"),
+            catalog.sublibrary_rules("掌机").expect("读得动"),
+            catalog.sublibrary_exceptions("掌机").expect("读得动"),
+            catalog.manifest("掌机").expect("读得动"),
+        )
+    };
+    let 之前 = 读一遍(&catalog);
+    assert!(
+        之前.0.is_some() && !之前.3.files.is_empty(),
+        "前提：子库与清单都在"
+    );
+
+    let 留下的 = catalog
+        .take_sublibrary("掌机")
+        .expect("删得动")
+        .expect("本来在");
+    assert_eq!(留下的.name(), "掌机");
+    let 删了之后 = 读一遍(&catalog);
+    assert!(删了之后.0.is_none(), "交回来了却没删");
+    assert!(删了之后.1.is_empty() && 删了之后.2.is_empty() && 删了之后.3.files.is_empty());
+    assert_eq!(
+        catalog.sublibrary_rules("备用卡").expect("读得动").len(),
+        1,
+        "删掉一个不碰另一个"
+    );
+    assert!(
+        catalog.take_sublibrary("掌机").expect("读得动").is_none(),
+        "不在的交回 None"
+    );
+
+    assert!(catalog.restore_sublibrary(&留下的).expect("写得进"));
+    assert_eq!(读一遍(&catalog), 之前, "放回来的与删之前读出来的不一样");
+    // **逐列**：再整份拿一次与头一份比——这一份连 `next_rule`、每一行记下的时刻都带着。
+    let 再拿一次 = catalog
+        .take_sublibrary("掌机")
+        .expect("删得动")
+        .expect("放回来了");
+    assert_eq!(再拿一次, 留下的, "放回来的那几列与删之前不一样");
+    assert!(catalog.restore_sublibrary(&再拿一次).expect("写得进"));
+    assert_eq!(
+        加规则(&mut catalog, "掌机", "平台=GB"),
+        3,
+        "下一条规则没接着删之前的号发"
+    );
+
+    // 删完之后人又建了一个同名的：一行都不写，两份不揉在一起。
+    let 又删一次 = catalog
+        .take_sublibrary("掌机")
+        .expect("删得动")
+        .expect("在");
+    建子库(&mut catalog, "掌机", None);
+    assert!(
+        !catalog.restore_sublibrary(&又删一次).expect("读得动"),
+        "同名的已经有了还往里写"
+    );
+    let 新建的 = 读一遍(&catalog);
+    assert!(新建的.1.is_empty(), "旧的规则揉进了新建的那一个");
+    assert!(新建的.2.is_empty(), "旧的例外揉进了新建的那一个");
+    assert!(新建的.3.files.is_empty(), "旧的清单揉进了新建的那一个");
 }
 
 #[test]
