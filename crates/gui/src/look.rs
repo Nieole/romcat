@@ -648,7 +648,8 @@ pub fn mark(painter: &egui::Painter, rect: egui::Rect, corner: u8, visuals: &egu
 /// 里头要是有占满剩下那一截的东西（一段 `right_to_left`），量到的就是整截，那时照常从副标题后面接着摆。
 ///
 /// **摆不下就整段折到下一行**（设计稿 `.scrhead` 的 `flex-wrap:wrap`）：从左边内边距起摆，与上一行隔
-/// `screen-header-gap`，屏头跟着长高。不折的话它溢出屏头右沿，后半截被裁掉。**屏头刚长高的那一帧**面板还按上一帧的高
+/// `screen-header-gap`，屏头跟着长高；这一段自己比一整行还宽时，摆不下的那几样再往下折。不折的话它溢出屏头右沿，
+/// 后半截被裁掉。**屏头刚长高的那一帧**面板还按上一帧的高
 /// 裁剪，折下来那一行的字 egui 不画——只在这一帧让它重画一遍（`request_discard`）；平时不动用那一遍额度。
 ///
 /// **不用「量上一帧、宽变了就让 egui 重画这一帧」**（`request_discard`）：egui 一帧最多画两遍，这一遍让屏头用掉，
@@ -695,9 +696,13 @@ pub fn screen_header<R>(
                 // 摆不下：整段折到下一行，从左边起摆，行距也是那一档间距。
                 None => {
                     ui.add_space((间距 - ui.spacing().item_spacing.y).max(0.0));
+                    // 折下来的那一行是**会接着折的**：这一段自己比一整行还宽时，摆不下的那几样再往下折，不溢出右沿
+                    // （`flex-wrap` 折的是每一样，不是整段）。**字不许在一样里头断开**：会折行的横排里 egui 的字默认
+                    // 跟着折，一句「队列 3 条待裁决；选中 3 条」会从半中间断到下一行——换成整样挪下去。
                     let inner = ui
-                        .horizontal(|ui| {
+                        .horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing = 原来的间距;
+                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                             actions(ui)
                         })
                         .inner;
@@ -1687,6 +1692,8 @@ mod tests {
                         egui::vec2(交给它的.width() - 2.0 * 左右 - 100.0, 20.0),
                         egui::Sense::hover(),
                     );
+                    // 这一样在折下来的那一行里也摆不下：再往下折一行，不溢出右沿（`flex-wrap` 折的是每一样，不是整段）。
+                    ui.label("再折一行的字");
                 });
                 量到 = Some((交给它的, 头.response.rect));
             });
@@ -1715,6 +1722,15 @@ mod tests {
         assert!(
             右侧.bottom() <= 头.bottom(),
             "屏头该跟着长高把它包住：{右侧:?}，屏头 {头:?}"
+        );
+        let (再折, _) = 那一段(&头一帧, "再折一行的字");
+        assert!(
+            (再折.left() - (区.left() + 左右)).abs() < 0.5 && 再折.top() > 右侧.bottom(),
+            "折下来那一行里摆不下的那一样该再往下折一行、从左边起摆：{再折:?}，上一行 {右侧:?}",
+        );
+        assert!(
+            再折.bottom() <= 头.bottom(),
+            "屏头该跟着长高把它包住：{再折:?}，屏头 {头:?}"
         );
     }
 
