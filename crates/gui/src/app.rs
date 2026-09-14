@@ -524,6 +524,13 @@ impl App {
             View::Browse => {
                 let (browse, site, board) = (&mut self.browse, &mut self.site, &mut self.board);
                 browse.ui(ui, site, board);
+                // **刮削面板里的优先级那一层刚保存了一份**：浏览屏手上缓着的那一份跟着换，
+                // 整屏重读——详情面板上写着的显示值得是导出会写进去的那个。读这份表的别的
+                // 几条路（刮削、整理标题、导出、同步）每一趟开头自己读，不用转告。
+                if let Some(priorities) = browse.scrape_mut().priority_mut().take_saved() {
+                    browse.set_priorities(priorities);
+                    browse.refresh(site);
+                }
             }
             View::Sublibraries => {
                 let (sublibrary, site, board) =

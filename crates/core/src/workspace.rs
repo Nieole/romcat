@@ -761,6 +761,20 @@ pub fn media_pool_dir(workspace: &Path) -> PathBuf {
     workspace.join("media")
 }
 
+/// 工作目录里那份**优先级表**：字段级多源优先级（`scrape::priority`）人改过的那一份。
+///
+/// **读它与写它走同一个函数**（ADR-0024）：刮削、整理标题、导出、同步挑表时读它
+/// （[`sync::prepare::priorities`](crate::sync::prepare::priorities)：给了的 > 这一份 > 内置的），
+/// 界面上改完优先级写回它（[`Priorities::save`](crate::scrape::Priorities::save)）。两处各拼
+/// 一次路径的话，写进去的那份就可能是读的那一侧永远看不见的一份。
+///
+/// 与媒体池一样**不带 [`Slug`]**：哪个源说了算是这个人的口味，不随今天开的是哪一份库变。
+/// **它随时可以删**：删了就回到内置那一份，库里一个字节都不动。
+#[must_use]
+pub fn priorities_path(workspace: &Path) -> PathBuf {
+    workspace.join("priorities.toml")
+}
+
 /// **界面的版式偏好**：面板边界各自拖到哪儿了。
 ///
 /// 它落在工作目录里而**不落进中立库**，这不是随手挑的位置：中立库整份可再生

@@ -50,6 +50,7 @@ use romcat_core::{verdict, workspace, zh};
 
 use crate::dialog::{Button, Dialog, Footer, Width};
 use crate::font;
+use crate::priority::Editor;
 use crate::task::{Product, Tasks};
 
 /// 面板上那句常驻的话。**行为上也成立**，不只是写着好看：
@@ -131,6 +132,9 @@ pub struct Panel {
     notice: Option<String>,
     /// 上一次出的错。
     error: Option<String>,
+    /// **数据源优先级**那一层弹层：从「不该靠重采」那句旁边打开，叠在这一层上头
+    /// （[`crate::priority`]）。
+    priority: Editor,
 }
 
 impl Panel {
@@ -138,6 +142,7 @@ impl Panel {
     #[must_use]
     pub fn new(workspace: PathBuf) -> Self {
         Self {
+            priority: Editor::new(workspace.clone()),
             workspace,
             open: false,
             scope: Vec::new(),
@@ -180,6 +185,18 @@ impl Panel {
     pub fn close(&mut self) {
         self.open = false;
         self.quota = false;
+        self.priority.close();
+    }
+
+    /// 数据源优先级那一层。
+    #[must_use]
+    pub fn priority(&self) -> &Editor {
+        &self.priority
+    }
+
+    /// 同上，可改。测试拿它当屏上那几下。
+    pub fn priority_mut(&mut self) -> &mut Editor {
+        &mut self.priority
     }
 
     /// 这一批有多少个变体。
@@ -536,16 +553,24 @@ impl Panel {
             Some(Pressed::Confirm) => self.confirm_online(),
             Some(Pressed::Decline) => self.decline_online(),
         }
+        // **优先级那一层叠在这一层上头**：Esc 一下只退它（`crate::dialog`）。保存成了就在
+        // 这一层上留一句回话——那一层关上之后人回到的是这儿。
+        let editing = self.priority.is_open();
+        self.priority.show(ctx, &site.catalog);
+        if editing && !self.priority.is_open() && self.priority.has_saved() {
+            self.notice = Some(crate::priority::SAVED.to_string());
+        }
     }
 
     /// 内容区：三列旋钮、底下那本账、按下去之后的回话。
     fn knobs_ui(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| self.fields_ui(ui));
-            ui.separator();
-            ui.vertical(|ui| self.sources_ui(ui));
-            ui.separator();
-            ui.vertical(|ui| self.sweep_ui(ui));
+        // **三列等宽**（`Ui::columns`）。不定宽的话，头一列里那句长话照整块内容区的宽度排，
+        // 后两列只剩一条缝：「采法」那一列的字一个一行地竖着排下去，把「不该靠重采」那句与
+        // 旁边那颗「调整优先级…」一起顶出内容区（票 `gui-looks-like-the-design/30` 撞上的）。
+        ui.columns(3, |columns| {
+            self.fields_ui(&mut columns[0]);
+            self.sources_ui(&mut columns[1]);
+            self.sweep_ui(&mut columns[2]);
         });
         ui.separator();
         self.account_ui(ui);
@@ -629,6 +654,15 @@ impl Panel {
             "每个源采到的值各记一条、并存，没有覆盖这回事。\
              真正需要重采的只有两种：数据源更新了，或者解析逻辑改了。",
         );
+        // **那句话说的那件事，就在旁边这颗按钮后头**（[`crate::priority`]）：不摆的话，
+        // 人读完「那是优先级的事」还是不知道去哪儿调。
+        if ui
+            .button(crate::priority::OPEN)
+            .on_hover_text("按字段排数据源的先后：保存后立即生效，不排任何刮削任务。")
+            .clicked()
+        {
+            self.priority.open();
+        }
     }
 
     /// **底下那本账。**
