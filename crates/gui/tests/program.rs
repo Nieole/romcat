@@ -1124,7 +1124,7 @@ fn 摆一块大盘(tag: &str) -> TempDir {
 fn 等台上那一趟收场(ctx: &egui::Context, program: &mut Program) -> String {
     for _ in 0..600 {
         let 屏上 = 跑一帧(ctx, program);
-        if 屏上.contains("眼下没有任务在跑。") {
+        if 屏上.contains("当前没有运行中的任务。") {
             return 屏上;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1150,9 +1150,9 @@ fn 走完向导之后扫描已经排在任务台上报得出进度也按得下�
         "走完向导，扫描没排在任务台上：\n{屏上}",
     );
     assert!(屏上.contains("已用"), "那一趟报不出进度：\n{屏上}");
-    assert!(屏上.contains("停下"), "那一趟按不下停下：\n{屏上}");
+    assert!(屏上.contains("停止"), "那一趟按不下「停止」：\n{屏上}");
 
-    点一下(&ctx, &mut program, "停下");
+    点一下(&ctx, &mut program, "停止");
     let 屏上 = 等台上那一趟收场(&ctx, &mut program);
     // 收场之后台上留一条历史——**那一趟真的排上去过**，不是屏上画了一行好看的。
     assert!(屏上.contains("1 条历史"), "台上没留下这一趟：\n{屏上}");

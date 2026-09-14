@@ -207,6 +207,14 @@ impl App {
         self.workspace_label = label.into();
     }
 
+    /// 定死任务屏与状态栏上跟着挂钟走的那几个数（[`task::Clock`]）：已用、剩余约、耗时、收场时刻。
+    ///
+    /// **截图那一路要它**，理由同 [`Self::set_workspace_label`]：照实画的话同一屏的截图一趟一个样。
+    /// 真窗口那一路不必调。
+    pub fn pin_task_clock(&mut self, clock: task::Clock) {
+        self.tasks.pin_clock(clock);
+    }
+
     /// 工作目录排成给人看的样子：落在 `HOME` 底下的缩成 `~/…`，别处照原样。
     fn shorten_home(workspace: &std::path::Path) -> String {
         std::env::var_os("HOME")

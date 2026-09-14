@@ -388,6 +388,73 @@ fn primary_button_in(palette: &Palette, visuals: &mut egui::Visuals) {
     }
 }
 
+/// **幽灵按钮**那一档（设计稿 `.btn.ghost`）：未激活时不画底也不画描边，字取次要文字色（`ink-2`）；
+/// 悬停出一块凹陷底（`sunken`）、字换强调字色（`ink`）。按下与拿到焦点那一档描强调色——焦点得看得见。
+/// **全窗口只有这一处回答「幽灵按钮什么颜色」**。
+///
+/// 用法同 [`primary_button`]：在一个 `ui.scope` 里改 `ui.visuals_mut()`。
+pub fn ghost_button(visuals: &mut egui::Visuals) {
+    let theme = egui::Theme::from_dark_mode(visuals.dark_mode);
+    ghost_button_in(Tokens::builtin().color.theme(theme), visuals);
+}
+
+/// 幽灵按钮在这一套颜色里取哪几个。拆出来的理由同 [`tier_color_in`]。
+fn ghost_button_in(palette: &Palette, visuals: &mut egui::Visuals) {
+    let widgets = &mut visuals.widgets;
+    // 每一档：底色、描边、字。
+    for (widget, fill, stroke, ink) in [
+        (
+            &mut widgets.inactive,
+            Color32::TRANSPARENT,
+            Color32::TRANSPARENT,
+            palette.ink_2,
+        ),
+        (
+            &mut widgets.hovered,
+            palette.sunken,
+            Color32::TRANSPARENT,
+            palette.ink,
+        ),
+        (
+            &mut widgets.active,
+            palette.sunken,
+            palette.accent,
+            palette.ink,
+        ),
+    ] {
+        widget.bg_fill = fill;
+        widget.weak_bg_fill = fill;
+        widget.bg_stroke.color = stroke;
+        widget.fg_stroke.color = ink;
+    }
+}
+
+/// **警示按钮**那一档（设计稿 `.btn.warn`）：白底（`panel`）、红字、红描边（`lo`），悬停时照旧红描边——
+/// 拿主意的人定，与库屏「移除」同一档。按下与拿到焦点那一档描强调色，焦点得看得见。
+/// **全窗口只有这一处回答「警示按钮什么颜色」**。
+///
+/// 用法同 [`primary_button`]：在一个 `ui.scope` 里改 `ui.visuals_mut()`。
+pub fn warn_button(visuals: &mut egui::Visuals) {
+    let theme = egui::Theme::from_dark_mode(visuals.dark_mode);
+    warn_button_in(Tokens::builtin().color.theme(theme), visuals);
+}
+
+/// 警示按钮在这一套颜色里取哪几个。拆出来的理由同 [`tier_color_in`]。
+fn warn_button_in(palette: &Palette, visuals: &mut egui::Visuals) {
+    let widgets = &mut visuals.widgets;
+    // 每一档：底色、描边。字一律 `lo`。
+    for (widget, fill, stroke) in [
+        (&mut widgets.inactive, palette.panel, palette.lo),
+        (&mut widgets.hovered, palette.panel, palette.lo),
+        (&mut widgets.active, palette.sunken, palette.accent),
+    ] {
+        widget.bg_fill = fill;
+        widget.weak_bg_fill = fill;
+        widget.bg_stroke.color = stroke;
+        widget.fg_stroke.color = palette.lo;
+    }
+}
+
 /// **置信度四档**画成什么颜色。**全窗口只有这一处回答这个问题。**
 ///
 /// 颜色取自令牌的 `hi` / `mid` / `lo` / `none`，按 `visuals` 是哪一套主题挑那一套：
@@ -1295,6 +1362,41 @@ mod tests {
             Tokens::builtin().layout.control_stroke > 0.0,
             "次要按钮得有一圈描边（设计稿 .btn）",
         );
+    }
+
+    #[test]
+    fn 警示按钮的颜色取自令牌() {
+        // 设计稿 `.btn.warn`（拿主意的人定）：白底 `panel`、红字红描边 `lo`，悬停也是红描边。两套主题各查一遍。
+        for theme in [Theme::Dark, Theme::Light] {
+            let p = Tokens::builtin().color.theme(theme);
+            let mut 警示 = theme.default_visuals();
+            warn_button(&mut 警示);
+            let w = &警示.widgets;
+            assert_eq!(w.inactive.weak_bg_fill, p.panel, "{theme:?}");
+            assert_eq!(w.inactive.bg_stroke.color, p.lo, "{theme:?}");
+            assert_eq!(w.inactive.fg_stroke.color, p.lo, "{theme:?}");
+            assert_eq!(w.hovered.bg_stroke.color, p.lo, "{theme:?}");
+        }
+    }
+
+    #[test]
+    fn 幽灵按钮的颜色取自令牌() {
+        // 设计稿 `.btn.ghost`：底与描边透明、字 `ink-2`，悬停出 `sunken` 底、字 `ink`。两套主题各查一遍。
+        for theme in [Theme::Dark, Theme::Light] {
+            let p = Tokens::builtin().color.theme(theme);
+            let mut 幽灵 = theme.default_visuals();
+            ghost_button(&mut 幽灵);
+            let w = &幽灵.widgets;
+            assert_eq!(w.inactive.weak_bg_fill, Color32::TRANSPARENT, "{theme:?}");
+            assert_eq!(
+                w.inactive.bg_stroke.color,
+                Color32::TRANSPARENT,
+                "{theme:?}"
+            );
+            assert_eq!(w.inactive.fg_stroke.color, p.ink_2, "{theme:?}");
+            assert_eq!(w.hovered.weak_bg_fill, p.sunken, "{theme:?}");
+            assert_eq!(w.hovered.fg_stroke.color, p.ink, "{theme:?}");
+        }
     }
 
     #[test]

@@ -352,8 +352,12 @@ pub struct Font {
     pub weight_strong: u16,
     /// 角标、分组标题。
     pub size_caption: f32,
+    /// 表头、图例（稿 11.5）。
+    pub size_caption_plus: f32,
     /// 说明文字、表格副行。
     pub size_small: f32,
+    /// 屏头说明、表格行（稿 12.5）。
+    pub size_small_plus: f32,
     /// 正文、按钮。
     pub size_body: f32,
     /// 卡片标题、对话框标题。
@@ -395,6 +399,26 @@ pub struct Space {
     pub catalog_row_padding: [f32; 2],
     /// 开场主库列表那一行里，名字与底下那句之间的竖向间距。
     pub catalog_row_gap: f32,
+    /// 屏头内边距：`[上下, 左右]`。
+    pub screen_head_padding: [f32; 2],
+    /// 屏体内边距：`[上, 左右, 下]`。
+    pub screen_body_padding: [f32; 3],
+    /// 屏体里一块与一块之间的竖向间距。
+    pub screen_section_gap: f32,
+    /// 小标题与它底下那一块之间的竖向间距。
+    pub section_title_gap: f32,
+    /// 正在跑那张卡的内边距。
+    pub card_padding: f32,
+    /// 正在跑那张卡里一排与一排之间的竖向间距。
+    pub card_row_gap: f32,
+    /// 等待中那一行卡片的内边距：`[上下, 左右]`。
+    pub queue_row_padding: [f32; 2],
+    /// 空态那一格的内边距。
+    pub empty_padding: f32,
+    /// 正在跑那张卡底下那一排，格与格之间的间距。
+    pub meta_gap: f32,
+    /// 表头格子内边距：`[上下, 左右]`。
+    pub table_head_padding: [f32; 2],
 }
 
 /// 版式尺寸，点。
@@ -425,6 +449,10 @@ pub struct Layout {
     pub statusbar: f32,
     /// 底部状态栏里任务那条小进度条的宽度。
     pub statusbar_bar: f32,
+    /// 正在跑那张卡左边那条强调色竖条的宽。
+    pub runcard_bar: f32,
+    /// 正在跑那张卡上进度条的高。
+    pub runcard_progress: f32,
     /// 对话框只用这几档宽度。
     pub dialog_width: [f32; 4],
     /// 开场右栏宽度：`[最窄, 最宽]`。
@@ -540,9 +568,13 @@ mod tests {
         assert_eq!(tokens.color.video.mark, Color32::WHITE);
         assert_eq!(tokens.radius.medium, 6);
         assert_eq!(tokens.font.size_body, 13.0);
+        assert_eq!(tokens.font.size_caption_plus, 11.5);
+        assert_eq!(tokens.font.size_small_plus, 12.5);
         assert_eq!(tokens.layout.dialog_width, [520.0, 620.0, 720.0, 840.0]);
         // 设计稿 `.statusbar .mini .bar{width:120px}`。
         assert_eq!(tokens.layout.statusbar_bar, 120.0);
+        // 设计稿 `.runcard{box-shadow:inset 3px 0 0 var(--accent)}`。
+        assert_eq!(tokens.layout.runcard_bar, 3.0);
         // 按钮三档：设计稿 `.btn` / `.btn.sm` / `.btn.lg` 的 height 与左右 padding。
         assert_eq!(
             [tokens.layout.button_height, tokens.layout.button_padding],
@@ -580,6 +612,38 @@ mod tests {
             "设计稿 .catrow"
         );
         assert_eq!(tokens.space.catalog_row_gap, 2.0, "设计稿 .catrow");
+        // 任务屏（票 `gui-looks-like-the-design/25`）：屏头、屏体、块与块、卡片、表格、空态的留白。
+        assert_eq!(
+            tokens.space.screen_head_padding,
+            [14.0, 20.0],
+            "设计稿 .scrhead"
+        );
+        assert_eq!(
+            tokens.space.screen_body_padding,
+            [18.0, 20.0, 28.0],
+            "设计稿 .scrbody"
+        );
+        assert_eq!(
+            tokens.space.screen_section_gap, 18.0,
+            "设计稿任务屏 .scrbody.col"
+        );
+        assert_eq!(tokens.space.section_title_gap, 8.0, "设计稿任务屏 .col");
+        assert_eq!(tokens.space.card_padding, 16.0, "设计稿 .runcard");
+        assert_eq!(tokens.space.card_row_gap, 8.0, "设计稿 .runcard");
+        assert_eq!(
+            tokens.space.queue_row_padding,
+            [10.0, 14.0],
+            "设计稿等待中那一行"
+        );
+        assert_eq!(tokens.space.empty_padding, 28.0, "设计稿 .empty");
+        assert_eq!(tokens.space.meta_gap, 18.0, "设计稿 .runcard .meta");
+        assert_eq!(
+            tokens.space.table_head_padding,
+            [7.0, 10.0],
+            "设计稿 .tbl th"
+        );
+        assert_eq!(tokens.space.cell_padding, [8.0, 10.0], "设计稿 .tbl td");
+        assert_eq!(tokens.layout.runcard_progress, 8.0, "设计稿 .runcard .bar");
         // 设计稿 `--pop` 里那一色 rgba(16,20,30,.45)，暗色没有另写，照亮色那一份。
         for palette in [&tokens.color.light, &tokens.color.dark] {
             assert_eq!(
