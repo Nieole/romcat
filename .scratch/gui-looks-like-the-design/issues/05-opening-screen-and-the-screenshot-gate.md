@@ -7,7 +7,7 @@
 **Blocked by:** 01（令牌）、02（字体）、03（文案）、04（弹层写法）；
 目录选择器复用 `gui-answers-all-six/01`；开场那一屏另有三张票在动，见下面的排波约束。
 
-**Status:** ready-for-agent
+**Status:** done
 
 ⚠️ **弹层照票 04 那一套**，向导不自己写一份。
 
@@ -78,7 +78,8 @@ prefactor）→ `/03`（建库变成显式动作，改向导落盘那一段）�
       证据：下面「什么时候该重批基线，什么时候是回归」一节，那几张票逐一写进去了。
 - [x] 本票新增的界面测试**等信号不等挂钟**，用 `machine-checks-premises/07` 那个共享 helper；
       它若还没合并，先照它的形状写，别再添一处「睡两毫秒」
-      证据：`machine-checks-premises/07` 还没做，但本票新增的测试没有要等的东西。当场校验是画帧线程上同步问核心库：
+      证据：`machine-checks-premises/07` 已经做完，合 main 之后本分支里就有那个共享 helper（`tests/shared/mod.rs` 的
+      `一对信号` / `占位活`）。本票新增的测试没有要等的东西，所以没用上它。当场校验是画帧线程上同步问核心库：
       名字问 `Catalog::refuse_create`，根问 `roots::add_root_from_fields`。截图测试跑满帧（`Harness::run`）再拍。
       新增代码里 `sleep` / `Duration` / `Instant` 零处。
 - [x] 收尾时附一张对照图（程序截图 vs 设计稿同一屏）
@@ -98,6 +99,14 @@ prefactor）→ `/03`（建库变成显式动作，改向导落盘那一段）�
   测试 `向导选根那一问当场说这个目录收不收_弹不出选择窗口时的退路常驻在框底下`。
 - `Q696`：「换过去」改调 `self.picked(Some(换到))`，与「更改…」走同一处。
   `tests/program.rs::在开场上换一个工作目录立刻列出那个目录里的库` 与 `tests/pick.rs::开场上选中一个目录立刻列出那个目录里的库` 照旧绿。
+
+**门禁**（2026-09-14，分支 `q5/gl-05-opening-and-screenshot-gate`，合 main 之后的 `24e0016`，`cargo xtask gate -j 3 --test-threads 3 --keep-going`）：
+fmt、glossary（扫 `crates/` 下 10 份 `.rs` 里新写的 2,340 行，没撞上）、check、clippy、test、doc 六步全绿，`EXIT=0`；
+test 那一步 76 个测试目标、2,036 条通过、0 失败、2 条 ignored（`magnitude` 那两条量级测量：导出、整理标题），
+其中截图门 `--test snapshot` 7 条通过（本机跑，没跳过）。日志 `/Users/nicoer/dev/game-wt/logs/slot-1-gl05-gate.log`。
+合 main 时有库那两张基线因 `one-criterion-per-thing/07` 加长了版本对不上那句原话而重批（`2f76f63`，挂单 `Q841`）；main 新来的界面测试一条都没因按钮加高变红。
+审查两轴各一趟（`/code-review`）：Standards 这一轴收了七处——两处 `_Avoid_` 词、写死的线宽 / 圆点 / 圆角、`first_card` 改名、空白交核心库判断；小标题没照稿加粗，挂 `Q770`。
+Spec 这一轴改正了向导那张基线的证据，另挂 `Q767` / `Q768` / `Q769`。
 
 ## 截图门：定下来的几件事（拿主意的人 2026-09-14）
 
