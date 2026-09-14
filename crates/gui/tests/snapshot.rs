@@ -816,43 +816,50 @@ const 正题至少露出: usize = 3;
 /// 表上每画一枚「未关联作品」标签，就找它正上方、同一格里画的那一段字——那就是这一行的正题。
 /// 数的是**真画出来的字形**，不是那一段的原文：egui 截断时原文照旧整段留在排版结果里，只是后头的字
 /// 没排、最后一个换成「…」。
+///
+/// **只查整枚看得见的标签**：表格是滚动区，视口外头那几行的正题是 `Label`，egui 不画；标签是拿画笔
+/// 直接画的，照样交出一段字、只是被裁剪矩形裁掉——拿它去找正题只会扑空（snap-13 行首封面那两张：
+/// 第三行带标签的整行在表格视口底下）。看不见的行不是「正题被截没了」。
 #[track_caller]
 fn 带标签的行正题露得出字(harness: &Harness<'_>, 名字: &str) {
     use romcat_gui::table::UNLINKED_LABEL;
 
-    let mut 各段: Vec<(egui::Rect, std::sync::Arc<egui::Galley>)> = Vec::new();
-    fn 收(shape: &egui::epaint::Shape, out: &mut Vec<(egui::Rect, std::sync::Arc<egui::Galley>)>) {
+    // 每一段字：`(外框, 裁剪矩形, 排版结果)`。
+    type 一段 = (egui::Rect, egui::Rect, std::sync::Arc<egui::Galley>);
+    let mut 各段: Vec<一段> = Vec::new();
+    fn 收(shape: &egui::epaint::Shape, clip: egui::Rect, out: &mut Vec<一段>) {
         match shape {
             egui::epaint::Shape::Text(text) => out.push((
                 egui::Rect::from_min_size(text.pos, text.galley.size()),
+                clip,
                 text.galley.clone(),
             )),
-            egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|one| 收(one, out)),
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|one| 收(one, clip, out)),
             _ => {}
         }
     }
     for clipped in &harness.output().shapes {
-        收(&clipped.shape, &mut 各段);
+        收(&clipped.shape, clipped.clip_rect, &mut 各段);
     }
     let tag_padding = romcat_gui::tokens::Tokens::builtin().layout.tag_padding;
     let tag_height = romcat_gui::tokens::Tokens::builtin().layout.tag_height;
 
     let mut 查过 = 0;
     let mut 截没了 = Vec::new();
-    for (标签, _) in 各段
+    for (标签, _, _) in 各段
         .iter()
-        .filter(|(_, galley)| galley.text() == UNLINKED_LABEL)
+        .filter(|(框, 裁剪, galley)| galley.text() == UNLINKED_LABEL && 裁剪.contains_rect(*框))
     {
         // 标签那一枚的字画在底色正中，底色左沿比字再往左一份 `tag-padding`；正题与底色左沿对齐。
         let 左沿 = 标签.min.x - tag_padding;
-        let Some((正题框, 正题)) = 各段
+        let Some((正题框, _, 正题)) = 各段
             .iter()
-            .filter(|(框, _)| {
+            .filter(|(框, _, _)| {
                 (框.min.x - 左沿).abs() <= 1.0
                     && 框.max.y <= 标签.min.y + 0.5
                     && 标签.min.y - 框.max.y <= tag_height
             })
-            .max_by(|(甲, _), (乙, _)| 甲.max.y.total_cmp(&乙.max.y))
+            .max_by(|(甲, _, _), (乙, _, _)| 甲.max.y.total_cmp(&乙.max.y))
         else {
             截没了.push(format!("标签 {标签:?} 正上方没画正题"));
             continue;
