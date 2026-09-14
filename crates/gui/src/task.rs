@@ -29,8 +29,9 @@ use romcat_core::sublibrary::report::SelectionReport;
 use romcat_core::sync::{Outcome as SyncOutcome, Prepared};
 use romcat_core::task::{Board, Ending, Live, Record};
 
+use crate::font;
+use crate::look::{self, Tone, step};
 use crate::tokens::Tokens;
-use crate::{font, look};
 
 /// 一趟任务跑完之后交出来的东西。
 ///
@@ -285,8 +286,8 @@ fn history_table(ui: &mut egui::Ui, history: &[Record]) {
     let [task_title, ending_title, took_title, at_title] = ["任务", "收场", "耗时", "时间"];
     let small = egui::TextStyle::Small;
     let body = egui::TextStyle::Body;
-    // 收场那一格是一枚记号：圆点、一档间距、词，两侧各一档内边距（见 [`ending_chip`]）。
-    let chip_extra = ui.text_style_height(&small) / 2.0 + step(0) + 2.0 * step(1);
+    // 收场那一格是一枚标签（[`look::chip`]）：两侧各一档内边距、圆点、一档缝，再加上词。
+    let chip_extra = 2.0 * step(1) + Tokens::builtin().layout.chip_dot + step(0);
     let chip = history
         .iter()
         .map(|record| text_width(ui, record.ending.word(), &small) + chip_extra)
@@ -334,20 +335,10 @@ fn text_width(ui: &egui::Ui, text: &str, style: &egui::TextStyle) -> f32 {
         .x
 }
 
-/// 间距那几档里的第几档（`tokens.toml` 的 `space.steps`，从窄到宽）。
-fn step(at: usize) -> f32 {
-    Tokens::builtin()
-        .space
-        .steps
-        .get(at)
-        .copied()
-        .unwrap_or_default()
-}
-
-/// 一块的小标题：设计稿 `.sec`，说明文字那一档字号、弱字色。上面空出一档间距隔开上一块。
+/// 一块的小标题（[`look::section`]），上面空出一档间距隔开上一块。
 fn section(ui: &mut egui::Ui, title: &str) {
     ui.add_space(step(3));
-    ui.label(egui::RichText::new(title).small().weak());
+    look::section(ui, title);
 }
 
 /// 一张卡：设计稿 `.card`——面板底、分隔线那一档描边、大圆角。颜色、描边与圆角取 `Visuals`
@@ -467,35 +458,26 @@ fn history_row(ui: &mut egui::Ui, record: &Record, name: f32) {
             ui.label(egui::RichText::new(detail).small().weak());
         }
     });
-    ending_chip(ui, &record.ending);
+    look::chip(ui, tone(&record.ending), record.ending.word());
     ui.label(elapsed(record.elapsed));
     // 时刻走 [`human_time`]（UTC）：库屏「上次扫描」、开场那一行用的是同一个。
     ui.weak(human_time(record.ended_at));
     ui.end_row();
 }
 
-/// 「收场」那一格：设计稿 `.chip`——那一档的浅底，同色的圆点与词。
+/// 那一档收场的标签用哪种语气，照设计稿 `renderTasks()`：完成 `t-hi`、已取消 `t-none`、
+/// 部分完成 `t-mid`、失败 `t-lo`。
 ///
 /// **失败与已取消不许长得跟完成一样**：那句「跑了 X 秒」就成了骗人的话。**颜色又不是唯一
-/// 线索**：词本身就在格子里（[`Ending::word`]，逐字是词表那四档）。四档配哪一色由
-/// [`look::ending_colors`] 回答，这里只画。
-fn ending_chip(ui: &mut egui::Ui, ending: &Ending<()>) {
-    let (ink, soft) = look::ending_colors(ending, ui.visuals());
-    egui::Frame::new()
-        .fill(soft)
-        .corner_radius(egui::CornerRadius::same(Tokens::builtin().radius.small))
-        .inner_margin(egui::Margin::from(egui::vec2(step(1), 0.0)))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = step(0);
-                // 圆点直径取说明文字那一档字高的一半（设计稿 12 号字配 6 点的点）。
-                let size = ui.text_style_height(&egui::TextStyle::Small) / 2.0;
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
-                ui.painter().circle_filled(rect.center(), size / 2.0, ink);
-                ui.label(egui::RichText::new(ending.word()).small().color(ink));
-            });
-        });
+/// 线索**：标签上照样写着那一档的词（[`Ending::word`]，逐字是词表那四档）。颜色本身由
+/// [`look::tone_colors`] 回答，这里只挑语气。
+fn tone(ending: &Ending<()>) -> Tone {
+    match ending {
+        Ending::Done(()) => Tone::Good,
+        Ending::Stopped => Tone::Neutral,
+        Ending::Halfway { .. } => Tone::Caution,
+        Ending::Failed { .. } => Tone::Bad,
+    }
 }
 
 /// 一段时长排成人看得懂的样子。**与报告那一侧同一个算法**

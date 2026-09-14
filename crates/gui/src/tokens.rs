@@ -387,6 +387,14 @@ pub struct Space {
     pub dialog_padding: [f32; 2],
     /// 表格单元格内边距：`[上下, 左右]`。
     pub cell_padding: [f32; 2],
+    /// 开场左栏内边距：`[上下, 左右]`。
+    pub opening_hero_padding: [f32; 2],
+    /// 开场右栏内边距：`[上下, 左右]`。
+    pub opening_side_padding: [f32; 2],
+    /// 开场主库列表每一行的内边距：`[上下, 左右]`。
+    pub catalog_row_padding: [f32; 2],
+    /// 开场主库列表那一行里，名字与底下那句之间的竖向间距。
+    pub catalog_row_gap: f32,
 }
 
 /// 版式尺寸，点。
@@ -419,6 +427,40 @@ pub struct Layout {
     pub statusbar_bar: f32,
     /// 对话框只用这几档宽度。
     pub dialog_width: [f32; 4],
+    /// 开场右栏宽度：`[最窄, 最宽]`。
+    pub opening_side_width: [f32; 2],
+    /// 开场左栏最窄宽度。
+    pub opening_hero_min: f32,
+    /// 开场左上角那枚标志的边长。
+    pub mark: f32,
+    /// 开场三条承诺前那枚字块的边长。
+    pub promise_icon: f32,
+    /// 弹层标头「走到第几问」那一圈的直径。
+    pub page_dot: f32,
+    /// 标签左边那枚圆点的直径（设计稿 `.chip::before`）。
+    pub chip_dot: f32,
+    /// 「名 → 值」两列排时名那一列的宽。
+    pub kv_key_width: f32,
+    /// 按钮的高。
+    pub button_height: f32,
+    /// 按钮左右留白。
+    pub button_padding: f32,
+    /// 小号按钮的高。
+    pub button_small_height: f32,
+    /// 小号按钮左右留白。
+    pub button_small_padding: f32,
+    /// 大号按钮的高。
+    pub button_large_height: f32,
+    /// 大号按钮左右留白。
+    pub button_large_padding: f32,
+    /// 控件描边的宽：未激活、悬停、按下、展开四档一样宽。
+    pub control_stroke: f32,
+    /// 单行输入框的高：与默认那一档按钮等高。
+    pub input_height: f32,
+    /// 小号单行输入框的高：与小号按钮等高。
+    pub input_small_height: f32,
+    /// 单行输入框左右留白。
+    pub input_padding: f32,
 }
 
 /// 阴影：一种一格，**形状两套主题共用**，颜色是各主题里同名的那一格（`pop` → `pop-color`）。
@@ -501,6 +543,43 @@ mod tests {
         assert_eq!(tokens.layout.dialog_width, [520.0, 620.0, 720.0, 840.0]);
         // 设计稿 `.statusbar .mini .bar{width:120px}`。
         assert_eq!(tokens.layout.statusbar_bar, 120.0);
+        // 按钮三档：设计稿 `.btn` / `.btn.sm` / `.btn.lg` 的 height 与左右 padding。
+        assert_eq!(
+            [tokens.layout.button_height, tokens.layout.button_padding],
+            [28.0, 12.0],
+            "设计稿 .btn",
+        );
+        assert_eq!(
+            [
+                tokens.layout.button_small_height,
+                tokens.layout.button_small_padding
+            ],
+            [24.0, 9.0],
+            "设计稿 .btn.sm",
+        );
+        assert_eq!(
+            [
+                tokens.layout.button_large_height,
+                tokens.layout.button_large_padding
+            ],
+            [36.0, 18.0],
+            "设计稿 .btn.lg",
+        );
+        // 单行输入框：左右留白照设计稿 `.input`；高与同档按钮等高（拿主意的人 2026-09-14 第三次裁，
+        // 设计稿 `.input` 写的 30 不照）。
+        assert_eq!(tokens.layout.input_padding, 10.0, "设计稿 .input");
+        assert_eq!(
+            [tokens.layout.input_height, tokens.layout.input_small_height],
+            [28.0, 24.0],
+            "与同档按钮等高",
+        );
+        // 开场主库列表每一行：设计稿 `.catrow` 的 padding 与 gap。
+        assert_eq!(
+            tokens.space.catalog_row_padding,
+            [12.0, 14.0],
+            "设计稿 .catrow"
+        );
+        assert_eq!(tokens.space.catalog_row_gap, 2.0, "设计稿 .catrow");
         // 设计稿 `--pop` 里那一色 rgba(16,20,30,.45)，暗色没有另写，照亮色那一份。
         for palette in [&tokens.color.light, &tokens.color.dark] {
             assert_eq!(

@@ -35,7 +35,23 @@
 //! **正文是 `ink-2`、强调字是 `ink`**：中文没有粗体（票 `gui-looks-like-the-design/02`），
 //! 一句纯中文的小标题与正文之间只剩颜色这一层差别——两个都给 `ink`，那一层也没了。
 //!
-//! **只换颜色，线宽一个点都不动**（理由见下面「键盘焦点」一节）；屏的版式由各屏自己的票重排。
+//! **线宽只有一处从令牌来：控件那一圈描边**（令牌 `control-stroke`，未激活、悬停、按下、展开四档一样宽）。
+//! egui 原样里未激活那一档是 0、其余三档是 1，于是次要按钮没有边框；设计稿 `.btn` 是一圈 1px 的
+//! `line-2`——拿主意的人 2026-09-14 看过开场的候选基线之后裁：照稿补上（票 `gui-looks-like-the-design/05`）。
+//! 四档必须一样宽，理由见下面「键盘焦点」一节；别的线宽照 egui 原样。屏的版式由各屏自己的票重排。
+//!
+//! **按钮三档的高与左右留白也从令牌来**（默认 `button-height` / `button-padding`，小号
+//! `button-small-*`，大号 `button-large-*`，照设计稿 `.btn` / `.btn.sm` / `.btn.lg`）。egui 原样的按钮
+//! 只有 18 点高、左右各 4 点，比稿上矮一截——拿主意的人 2026-09-14 **第二次**看过开场的候选基线之后裁：
+//! 照稿加高、加宽，小号单列一档（票 `gui-looks-like-the-design/05`）。默认那一档由 [`install`] 装上，
+//! 小号与大号在一块里换（[`small_buttons`]、[`large_buttons`]）。egui 的横排一行最矮就是按钮那么高，
+//! 于是摆着按钮的那几行跟着一起高。
+//!
+//! **单行输入框的高与左右留白、开场主库列表每一行的间距也从令牌来**（`input-height` /
+//! `input-small-height` / `input-padding`；`catalog-row-padding` / `catalog-row-gap`）——拿主意的人
+//! 2026-09-14 **第三次**看过候选基线之后裁：输入框加高到与同一行那一档按钮等高（设计稿 `.input` 写的是
+//! 30，不照它），主库列表那几行照稿 `.catrow` 收紧，行内的「打开」用小号按钮、不把行撑高
+//! （票 `gui-looks-like-the-design/05`）。输入框的尺寸由 [`text_input`]、[`small_text_input`] 换上。
 //! 圆角照令牌：控件 `medium`，窗口、弹窗与菜单 `large`。阴影照令牌 `[shadow.pop]` 那一节，颜色
 //! `pop-color`（设计稿 `--pop`）。
 //!
@@ -75,13 +91,12 @@
 //! [`install`] 把它换成主题自己的**强调色**（`selection.stroke`），也就是 `TextEdit`
 //! 得到焦点时用的那一串：于是按钮、勾选框、可选标签与文本框**得到焦点的样子是同一个**。
 //!
-//! **宽度一个点都不动。** egui 把描边宽度反过来从按钮的内边距里扣
-//! （`Style::button_style`），加宽会让控件在得到焦点的那一帧缩一下——焦点在控件之间跳的
-//! 时候，整排按钮跟着抖。
+//! **四档一样宽，宽度取令牌 `control-stroke`。** egui 把描边宽度反过来从按钮的内边距里扣
+//! （`Style::button_style`），哪一档比别的档宽，控件就会在进出那一档的那一帧缩一下——焦点在
+//! 控件之间跳的时候，整排按钮跟着抖。
 
 use egui::Color32;
 use romcat_core::catalog::identify::Tier;
-use romcat_core::task::Ending;
 
 use crate::tokens::{Palette, Tokens};
 
@@ -118,8 +133,109 @@ fn install_tokens(ctx: &egui::Context, tokens: &Tokens) {
         ctx.style_mut_of(theme, |style| {
             style.visuals = visuals(tokens, theme);
             style.text_styles = text_styles(tokens);
+            button_spacing(&mut style.spacing, &tokens.layout);
         });
     }
+}
+
+/// 按钮的高与左右留白：**默认那一档**（设计稿 `.btn`），取令牌 `button-height` / `button-padding`。
+///
+/// egui 的按钮最矮不矮过 `interact_size.y`，左右留白是 `button_padding.x`——两样都换成令牌里那一格，
+/// 按钮就是稿上那么高。上下留白取 0：稿上是 `padding:0 12px`，高由那个最矮值撑。
+/// **副作用**：egui 的横排一行最矮也是 `interact_size.y`，于是摆着按钮的那几行跟着一起高。
+fn button_spacing(spacing: &mut egui::style::Spacing, layout: &crate::tokens::Layout) {
+    spacing.interact_size.y = layout.button_height;
+    spacing.button_padding = egui::vec2(layout.button_padding, 0.0);
+}
+
+/// 在这一块里摆的按钮是**小号**的（设计稿 `.btn.sm`）：高、左右留白取令牌 `button-small-*`，
+/// 按钮上的字换成说明字号（令牌 `size-small`）。行内的「打开」、抬头上的「添加主库」「更改…」用它。
+///
+/// 要先量小号按钮多宽再摆的，用 [`small_button_width`] 在块外量，**别在这一块里量**：这一块是一个
+/// `ui.scope`，里头什么都不摆也会在横排里占一格间距，后面摆的东西就被往右推了一格。
+pub fn small_buttons<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let tokens = Tokens::builtin();
+    let font = egui::FontId::proportional(tokens.font.size_small);
+    sized_buttons(
+        ui,
+        [
+            tokens.layout.button_small_height,
+            tokens.layout.button_small_padding,
+        ],
+        Some(font),
+        add,
+    )
+}
+
+/// 在这一块里摆的按钮是**大号**的（设计稿 `.btn.lg`）：高、左右留白取令牌 `button-large-*`。
+/// 开场空态那一颗「添加主库」用它。
+pub fn large_buttons<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let layout = &Tokens::builtin().layout;
+    sized_buttons(
+        ui,
+        [layout.button_large_height, layout.button_large_padding],
+        None,
+        add,
+    )
+}
+
+/// **摆一个单行输入框，默认那一档**：高取令牌 `input-height`（与同一行默认那一档按钮等高）、左右留白取
+/// `input-padding`，字上下居中；宽是 `width`（连留白在内的外宽，占满一栏就给 `ui.available_width()`）。
+///
+/// 收一个搭好提示字、字体的 `TextEdit`，这一处替它摆上去。**高不能交给 `TextEdit` 自己**：egui 0.36 的
+/// 单行输入框多高由字的行高加上下留白算出来，`min_size` 只管宽——令牌里的高得靠摆它的那一块给足。
+pub fn text_input(ui: &mut egui::Ui, width: f32, edit: egui::TextEdit<'_>) -> egui::Response {
+    let layout = &Tokens::builtin().layout;
+    sized_input(ui, [width, layout.input_height], layout.input_padding, edit)
+}
+
+/// **摆一个小号单行输入框**：高取令牌 `input-small-height`（与小号按钮等高），用在旁边摆着小号按钮的
+/// 那一框。其余同 [`text_input`]。
+pub fn small_text_input(ui: &mut egui::Ui, width: f32, edit: egui::TextEdit<'_>) -> egui::Response {
+    let layout = &Tokens::builtin().layout;
+    sized_input(
+        ui,
+        [width, layout.input_small_height],
+        layout.input_padding,
+        edit,
+    )
+}
+
+/// 在一块正好 `[宽, 高]` 的地方里摆这个输入框：左右留这么多、上下不另留（高由那一块撑满）、字上下居中。
+fn sized_input(
+    ui: &mut egui::Ui,
+    size: [f32; 2],
+    padding: f32,
+    edit: egui::TextEdit<'_>,
+) -> egui::Response {
+    ui.add_sized(
+        size,
+        edit.margin(egui::Margin::from(egui::vec2(padding, 0.0)))
+            .vertical_align(egui::Align::Center),
+    )
+}
+
+/// 在一个 `scope` 里把按钮换成这一档：`[高, 左右留白]`，要换字号时连字号一起换。别处不受影响。
+///
+/// **字号换的是 `override_font_id`，不是 `TextStyle::Button` 那一格**：egui 0.36 的按钮取字只认
+/// `override_font_id`，没有就用正文那一档（`Style::widget_style`），`Button` 那一格它不读。所以这一块
+/// 里只摆按钮（以及量按钮多宽）——摆一句说明进来，它也会跟着变小。
+fn sized_buttons<R>(
+    ui: &mut egui::Ui,
+    [height, padding]: [f32; 2],
+    font: Option<egui::FontId>,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.scope(|ui| {
+        let spacing = ui.spacing_mut();
+        spacing.interact_size.y = height;
+        spacing.button_padding.x = padding;
+        if let Some(font) = font {
+            ui.style_mut().override_font_id = Some(font);
+        }
+        add(ui)
+    })
+    .inner
 }
 
 /// 具名字号「角标、分组标题」（令牌 `size-caption`）在 egui 里的名字。
@@ -168,11 +284,13 @@ fn text_styles(tokens: &Tokens) -> std::collections::BTreeMap<egui::TextStyle, e
     .into()
 }
 
-/// 那一套主题的 `Visuals`：**每一个颜色都取自令牌**；不是颜色的（线宽、手柄形状……）
-/// 照 egui 原样。
+/// 那一套主题的 `Visuals`：**每一个颜色都取自令牌**；控件那一圈描边的宽也取令牌；别的不是颜色的
+/// （其余线宽、手柄形状……）照 egui 原样。
 ///
-/// **线宽一个点都不动。** egui 把描边宽度从按钮的内边距里扣，而「不画框的那一档」只留
-/// 内边距不画描边——给哪一档加宽，可选标签就会在悬停前后差一个点。
+/// **控件四档的描边一样宽**（令牌 `control-stroke`）。egui 把描边宽度从按钮的内边距里扣，而「不画框
+/// 的那一档」只留内边距不画描边——哪一档比别的档宽，可选标签就会在悬停前后差一个点。egui 原样里
+/// 未激活那一档是 0、其余三档是 1：次要按钮于是没有边框，而设计稿 `.btn` 有一圈 `line-2`
+/// （拿主意的人 2026-09-14 裁：照稿补上，票 `gui-looks-like-the-design/05`）。
 fn visuals(tokens: &Tokens, theme: egui::Theme) -> egui::Visuals {
     let p = tokens.color.theme(theme);
     let mut v = theme.default_visuals();
@@ -196,6 +314,16 @@ fn visuals(tokens: &Tokens, theme: egui::Theme) -> egui::Visuals {
     paint(&mut v.widgets.hovered, [p.sunken, p.sunken, p.ink_3, p.ink]);
     paint(&mut v.widgets.active, [p.sunken, p.sunken, p.accent, p.ink]);
     paint(&mut v.widgets.open, [p.panel, p.sunken, p.line_2, p.ink]);
+    // 控件四档的描边一样宽，宽度取令牌（设计稿 `.btn` / `.input` 那一圈 1px；颜色是上面各档自己那一格）。
+    let 线宽 = tokens.layout.control_stroke;
+    for widget in [
+        &mut v.widgets.inactive,
+        &mut v.widgets.hovered,
+        &mut v.widgets.active,
+        &mut v.widgets.open,
+    ] {
+        widget.bg_stroke.width = 线宽;
+    }
 
     v.override_text_color = None;
     v.weak_text_color = Some(p.ink_3);
@@ -299,26 +427,177 @@ fn scrim_in(palette: &Palette) -> Color32 {
     palette.scrim
 }
 
-/// **收场四档**画成什么颜色：`(字与圆点, 浅底)`。**全窗口只有这一处回答这个问题。**
-///
-/// 画它的是任务屏历史「收场」那一格（设计稿 `.chip`）。配色照设计稿：完成 `hi`、已取消
-/// `none`、部分完成 `mid`、失败 `lo`，底色取各自的 `-soft`。与置信度四档同一个办法：
-/// `Visuals` 里没有槽位，按 `visuals` 是哪一套主题挑那一套令牌。**颜色不是唯一线索**——
-/// 格子里照样写着那一档的词（[`Ending::word`]）。
-#[must_use]
-pub fn ending_colors(ending: &Ending<()>, visuals: &egui::Visuals) -> (Color32, Color32) {
-    let theme = egui::Theme::from_dark_mode(visuals.dark_mode);
-    ending_colors_in(Tokens::builtin().color.theme(theme), ending)
+/// 一枚**标签**是哪种语气（设计稿 `.ro`「只读」、`.chip.t-mid`「版本不兼容」；任务屏历史收场那一格的
+/// `t-hi` / `t-none` / `t-mid` / `t-lo`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    /// 放心：令牌 `hi` 那一对（`hi` 的字、`hi-soft` 的底）。
+    Good,
+    /// 留神：令牌 `mid` 那一对。
+    Caution,
+    /// 中性：令牌 `none` 那一对（任务屏历史里的「已取消」）。
+    Neutral,
+    /// 出错：令牌 `lo` 那一对（任务屏历史里的「失败」）。
+    Bad,
 }
 
-/// 那一档在这一套颜色里取哪两个。拆出来的理由同 [`tier_color_in`]。
-fn ending_colors_in(palette: &Palette, ending: &Ending<()>) -> (Color32, Color32) {
-    match ending {
-        Ending::Done(()) => (palette.hi, palette.hi_soft),
-        Ending::Stopped => (palette.none, palette.none_soft),
-        Ending::Halfway { .. } => (palette.mid, palette.mid_soft),
-        Ending::Failed { .. } => (palette.lo, palette.lo_soft),
+/// 那种语气的标签画成什么颜色：`(字, 底)`。**全窗口只有这一处回答。**
+///
+/// 借的是与置信度四档同一对令牌（令牌里 `hi` / `mid` 本来就写着「高置信 / 成功」「中置信 /
+/// 提醒」），但**不走 [`tier_color`]**：「只读」不是一档置信度，改置信度颜色的人不该顺手改了它。
+#[must_use]
+pub fn tone_colors(tone: Tone, visuals: &egui::Visuals) -> (Color32, Color32) {
+    let theme = egui::Theme::from_dark_mode(visuals.dark_mode);
+    tone_colors_in(Tokens::builtin().color.theme(theme), tone)
+}
+
+/// 标签在这一套颜色里取哪一对。拆出来的理由同 [`tier_color_in`]。
+fn tone_colors_in(palette: &Palette, tone: Tone) -> (Color32, Color32) {
+    match tone {
+        Tone::Good => (palette.hi, palette.hi_soft),
+        Tone::Caution => (palette.mid, palette.mid_soft),
+        Tone::Neutral => (palette.none, palette.none_soft),
+        Tone::Bad => (palette.lo, palette.lo_soft),
     }
+}
+
+/// 间距档位里的第 `at` 档（令牌 `space.steps`，从窄到宽，从 0 数）。**版式里的间距从这儿取。**
+///
+/// 档位不够时交回 0：宁可挤一点，也不在画帧时 panic。
+#[must_use]
+pub fn step(at: usize) -> f32 {
+    Tokens::builtin()
+        .space
+        .steps
+        .get(at)
+        .copied()
+        .unwrap_or_default()
+}
+
+/// 一枚**标签**：浅底小圆角，同色的圆点与字（设计稿 `.chip`）。圆点直径取令牌 `chip-dot`。
+pub fn chip(ui: &mut egui::Ui, tone: Tone, text: &str) -> egui::Response {
+    let (字色, 底色) = tone_colors(tone, ui.visuals());
+    let galley = egui::WidgetText::from(egui::RichText::new(text).small().color(字色)).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Small,
+    );
+    let (边, 点, 缝) = (step(1), Tokens::builtin().layout.chip_dot, step(0));
+    let 字 = galley.size();
+    let size = egui::vec2(边 + 点 + 缝 + 字.x + 边, 字.y + step(0));
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, Tokens::builtin().radius.small, 底色);
+    painter.circle_filled(
+        egui::pos2(rect.left() + 边 + 点 / 2.0, rect.center().y),
+        点 / 2.0,
+        字色,
+    );
+    let 摆在 = egui::pos2(rect.left() + 边 + 点 + 缝, rect.center().y - 字.y / 2.0);
+    painter.galley(摆在, galley, 字色);
+    response
+}
+
+/// 一张**卡片**：面板底、分隔线色描边、大圆角（设计稿 `.card`）。`padding` 是（左右, 上下）。
+pub fn card<R>(
+    ui: &mut egui::Ui,
+    padding: egui::Vec2,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    let (底色, 描边) = (
+        ui.visuals().window_fill,
+        ui.visuals().widgets.noninteractive.bg_stroke,
+    );
+    egui::Frame::new()
+        .fill(底色)
+        .stroke(描边)
+        .corner_radius(Tokens::builtin().radius.large)
+        .inner_margin(egui::Margin::from(padding))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui)
+        })
+}
+
+/// 一条**提示条**（设计稿 `.note`）：次级底色、分隔线色描边、中圆角，占满这一栏的宽。
+pub fn note(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) {
+    let (底色, 描边) = (
+        ui.visuals().faint_bg_color,
+        ui.visuals().widgets.noninteractive.bg_stroke,
+    );
+    egui::Frame::new()
+        .fill(底色)
+        .stroke(描边)
+        .corner_radius(Tokens::builtin().radius.medium)
+        .inner_margin(egui::Margin::from(egui::vec2(step(2), step(1))))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(text);
+        });
+}
+
+/// 一栏的**小标题**（设计稿 `.sec`）：说明字号、弱字色。稿上还加粗，眼下没照，画得与 [`help`] 一样（挂单 `Q770`）。
+pub fn section(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.label(egui::RichText::new(text).small().weak())
+}
+
+/// 一行**帮助字**（设计稿 `.help`）：说明字号、弱字色，摆在它说的那样东西底下。
+pub fn help(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.label(egui::RichText::new(text).small().weak())
+}
+
+/// 两段之间那条一点宽的**分隔线**，颜色取不可交互那一档的描边（令牌 `line`）。
+pub fn divider(ui: &mut egui::Ui) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        ui.visuals().widgets.noninteractive.bg_stroke,
+    );
+}
+
+/// 一颗写着 `label` 的按钮画出来多宽：字宽加两边的内边距，与 `egui::Button` 自己量的一样。
+///
+/// 要把按钮摆在一行的右头、先替它留出地方时用。**字照按钮取字的规矩取**：`override_font_id`，
+/// 没有就用正文那一档（egui 0.36 的 `Style::widget_style`）——小号按钮那一块里换的正是前者
+/// （[`small_buttons`]），量的与摆的才是同一个字号。描边不另算：egui 把描边宽从内边距里扣了。
+#[must_use]
+pub fn button_width(ui: &egui::Ui, label: &str) -> f32 {
+    let font = ui
+        .style()
+        .override_font_id
+        .clone()
+        .unwrap_or_else(|| egui::TextStyle::Body.resolve(ui.style()));
+    measured_button_width(ui, label, font, ui.spacing().button_padding.x)
+}
+
+/// 一颗写着 `label` 的**小号**按钮（[`small_buttons`]）画出来多宽：字取令牌 `size-small`，左右留白取
+/// `button-small-padding`。
+///
+/// **量小号按钮只用它，别在 [`small_buttons`] 那一块里用 [`button_width`] 量**：那一块是一个 `ui.scope`，
+/// 哪怕里头什么都不摆，它也在横排里占一格间距——量的那一下就把后面摆的东西往右推了一格。
+#[must_use]
+pub fn small_button_width(ui: &egui::Ui, label: &str) -> f32 {
+    let tokens = Tokens::builtin();
+    measured_button_width(
+        ui,
+        label,
+        egui::FontId::proportional(tokens.font.size_small),
+        tokens.layout.button_small_padding,
+    )
+}
+
+/// 按钮多宽：这一个字号下的字宽，加两边各一份留白。描边不另算：egui 把描边宽从内边距里扣了。
+fn measured_button_width(ui: &egui::Ui, label: &str, font: egui::FontId, padding: f32) -> f32 {
+    let galley = egui::WidgetText::from(label).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        font,
+    );
+    galley.size().x + 2.0 * padding
 }
 
 /// 行左边缘那条**置信度色条**：宽取令牌 `tier-bar`、与一行正文一样高。
@@ -392,9 +671,10 @@ mod tests {
     /// 一处与令牌对不上的地方：`(令牌键, 哪儿对不上)`。
     type 偏离 = (String, String);
 
-    /// 令牌里**界面还没有一处用上**的颜色：页面背景（设计稿自己用）、四档的浅底
-    /// ——egui 的 `Visuals` 里没有它们的槽位，而画它们的那几屏还没照稿重排。
-    /// 哪一屏第一个用上它，就从这张单子里划掉（下面那条变异测试会提醒）。
+    /// 令牌里**界面还没有一处用上**的颜色：页面背景（设计稿自己用，不进 egui）。
+    /// 哪一屏第一个用上它，就从这张单子里划掉（下面那条变异测试会提醒）。`hi-soft` 与 `mid-soft`
+    /// 由标签（[`tone_colors`]）用上了（票 `gui-looks-like-the-design/05`，开场与添加主库向导）；
+    /// `none-soft` 与 `lo-soft` 由任务屏历史收场那一格用上了（票 `gui-looks-like-the-design/25`）。
     const NOT_YET_USED: &[&str] = &["ground"];
 
     /// 这套主题下**有映射的每一个颜色**与令牌逐项比，对不上的那几项：`visuals` 的每个颜色槽位，
@@ -412,8 +692,8 @@ mod tests {
         visuals: &egui::Visuals,
         四档: impl Fn(Tier) -> Color32,
         遮罩: Color32,
-        收场: impl Fn(&Ending<()>) -> (Color32, Color32),
         主按钮: &egui::style::Widgets,
+        标签: impl Fn(Tone) -> (Color32, Color32),
     ) -> Vec<偏离> {
         let p = tokens.color.theme(theme);
         // `clip_rect_margin` 在 egui 0.36 里弃用了，可整个拆开就得点到它的名字。
@@ -597,28 +877,16 @@ mod tests {
             颜色.push((format!("四档（{}）", tier.label()), 四档(tier), key));
         }
         颜色.push(("弹层遮罩".to_owned(), 遮罩, "scrim"));
-        // 任务屏历史「收场」那一格（[`ending_colors`]）：字与圆点、浅底，照设计稿 `.chip`。
-        for (ending, [ink, soft]) in [
-            (Ending::Done(()), ["hi", "hi-soft"]),
-            (Ending::Stopped, ["none", "none-soft"]),
-            (
-                Ending::Halfway {
-                    product: (),
-                    left_behind: String::new(),
-                },
-                ["mid", "mid-soft"],
-            ),
-            (
-                Ending::Failed {
-                    step: String::new(),
-                    why: String::new(),
-                },
-                ["lo", "lo-soft"],
-            ),
+        // 标签四种语气（[`tone_colors`]）：字与底各一格。
+        for (tone, [字键, 底键]) in [
+            (Tone::Good, ["hi", "hi-soft"]),
+            (Tone::Caution, ["mid", "mid-soft"]),
+            (Tone::Neutral, ["none", "none-soft"]),
+            (Tone::Bad, ["lo", "lo-soft"]),
         ] {
-            let (got_ink, got_soft) = 收场(&ending);
-            颜色.push((format!("收场（{}）字", ending.word()), got_ink, ink));
-            颜色.push((format!("收场（{}）底", ending.word()), got_soft, soft));
+            let (字, 底) = 标签(tone);
+            颜色.push((format!("标签（{tone:?}）的字"), 字, 字键));
+            颜色.push((format!("标签（{tone:?}）的底"), 底, 底键));
         }
         // 主按钮三档（[`primary_button`]）：底色、描边；字一律 `on-accent`。拿到焦点那一档的描边是
         // `on-accent`——强调色底上描一圈强调色看不见。
@@ -720,8 +988,8 @@ mod tests {
             &style.visuals,
             |tier| tier_color(tier, &style.visuals),
             scrim(&style.visuals),
-            |ending: &Ending<()>| ending_colors(ending, &style.visuals),
             &主按钮.widgets,
+            |tone| tone_colors(tone, &style.visuals),
         )
     }
 
@@ -748,11 +1016,11 @@ mod tests {
             let 装出来 = ctx.style_of(theme);
             let 四档 = |tier| tier_color_in(改过.color.theme(theme), tier);
             let 遮罩 = scrim_in(改过.color.theme(theme));
-            let 收场 = |ending: &Ending<()>| ending_colors_in(改过.color.theme(theme), ending);
             let mut 主按钮 = 装出来.visuals.clone();
             primary_button_in(改过.color.theme(theme), &mut 主按钮);
             let 主按钮 = &主按钮.widgets;
-            if !颜色_偏离(&改过, theme, &装出来.visuals, 四档, 遮罩, 收场, 主按钮).is_empty()
+            let 标签 = |tone| tone_colors_in(改过.color.theme(theme), tone);
+            if !颜色_偏离(&改过, theme, &装出来.visuals, 四档, 遮罩, 主按钮, 标签).is_empty()
             {
                 断了.push(*key);
             }
@@ -762,8 +1030,8 @@ mod tests {
                 &装出来.visuals,
                 四档,
                 遮罩,
-                收场,
                 主按钮,
+                标签,
             )
             .iter()
             .any(|(报的, _)| 报的 == key)
@@ -856,6 +1124,177 @@ mod tests {
         let (断了, 没人读) = 变异(Theme::Light);
         assert!(断了.is_empty(), "改了这几个键，装出来的没跟着变：{断了:?}");
         assert_eq!(没人读, NOT_YET_USED);
+    }
+
+    #[test]
+    fn 按钮三档的高与左右留白取自令牌() {
+        // 拿主意的人 2026-09-14 第二次裁：按钮照稿加高、加宽，小号单列一档（票 `gui-looks-like-the-design/05`）。
+        //
+        // 一、装配：拿**改过的**令牌走一遍，默认那一档的高与左右留白跟着变——哪一格写死了这里就红。
+        let mut 改过 = Tokens::builtin().clone();
+        改过.layout.button_height = 31.0;
+        改过.layout.button_padding = 15.0;
+        let ctx = headless::context();
+        install_tokens(&ctx, &改过);
+        for theme in [Theme::Dark, Theme::Light] {
+            let spacing = &ctx.style_of(theme).spacing;
+            assert_eq!(
+                spacing.interact_size.y, 31.0,
+                "{theme:?} 的按钮高没跟着令牌变"
+            );
+            assert_eq!(
+                spacing.button_padding.x, 15.0,
+                "{theme:?} 的按钮左右留白没跟着令牌变"
+            );
+        }
+
+        // 二、真摆出来量：默认、小号、大号三颗按钮各多高、左右各留多少、摆出来多宽。
+        let layout = &Tokens::builtin().layout;
+        let ctx = headless::context();
+        install(&ctx);
+        let mut 量到 = Vec::new();
+        // 头一帧 egui 还在量尺寸，第二帧才是摆稳的样子。
+        for _ in 0..2 {
+            量到.clear();
+            headless::frame(&ctx, headless::input(), |ui| {
+                let 摆一颗 = |ui: &mut egui::Ui| {
+                    let 量的宽 = button_width(ui, "按钮");
+                    (
+                        ui.button("按钮").rect,
+                        ui.spacing().button_padding.x,
+                        量的宽,
+                    )
+                };
+                量到.push(("默认", 摆一颗(ui)));
+                量到.push(("小号", small_buttons(ui, 摆一颗)));
+                量到.push(("大号", large_buttons(ui, 摆一颗)));
+            });
+        }
+        let 期望 = [
+            (layout.button_height, layout.button_padding),
+            (layout.button_small_height, layout.button_small_padding),
+            (layout.button_large_height, layout.button_large_padding),
+        ];
+        assert_eq!(量到.len(), 期望.len());
+        for ((name, (rect, 留白, 量的宽)), (高, 令牌留白)) in 量到.iter().zip(期望) {
+            assert_eq!(
+                rect.height(),
+                高,
+                "{name}按钮高 {}，令牌是 {高}",
+                rect.height()
+            );
+            assert_eq!(
+                *留白, 令牌留白,
+                "{name}按钮左右留白 {留白}，令牌是 {令牌留白}"
+            );
+            assert!(
+                (rect.width() - 量的宽).abs() < 0.5,
+                "{name}按钮摆出来宽 {}，照令牌留白量的是 {量的宽}",
+                rect.width(),
+            );
+        }
+    }
+
+    #[test]
+    fn 单行输入框的高取自令牌_与同档按钮等高() {
+        // 拿主意的人 2026-09-14 第三次裁：输入框加高到与同一行那一档按钮等高（票 `gui-looks-like-the-design/05`）。
+        let layout = &Tokens::builtin().layout;
+        assert_eq!(
+            layout.input_height, layout.button_height,
+            "默认那一档输入框与按钮在令牌里就不等高"
+        );
+        assert_eq!(
+            layout.input_small_height, layout.button_small_height,
+            "小号输入框与小号按钮在令牌里就不等高"
+        );
+
+        // 真摆出来量：两档输入框各多高，与同一行里同档的那颗按钮是不是一样高；宽是不是连留白在内的外宽。
+        let ctx = headless::context();
+        install(&ctx);
+        let (mut 默认框, mut 小号框) = (String::new(), String::new());
+        let mut 量到 = None;
+        // 头一帧 egui 还在量尺寸，第二帧才是摆稳的样子。
+        for _ in 0..2 {
+            headless::frame(&ctx, headless::input(), |ui| {
+                let (框, 钮) = ui
+                    .horizontal(|ui| {
+                        let 框 =
+                            text_input(ui, 200.0, egui::TextEdit::singleline(&mut 默认框)).rect;
+                        (框, ui.button("按钮").rect)
+                    })
+                    .inner;
+                let (小框, 小钮) = ui
+                    .horizontal(|ui| {
+                        let 框 =
+                            small_text_input(ui, 200.0, egui::TextEdit::singleline(&mut 小号框))
+                                .rect;
+                        (框, small_buttons(ui, |ui| ui.button("按钮")).rect)
+                    })
+                    .inner;
+                量到 = Some((框, 钮, 小框, 小钮));
+            });
+        }
+        let (框, 钮, 小框, 小钮) = 量到.expect("跑过帧");
+        assert_eq!(
+            框.height(),
+            layout.input_height,
+            "默认那一档输入框高 {}，令牌是 {}",
+            框.height(),
+            layout.input_height,
+        );
+        assert_eq!(
+            框.height(),
+            钮.height(),
+            "默认那一档输入框与同一行的按钮不等高"
+        );
+        assert_eq!(
+            小框.height(),
+            layout.input_small_height,
+            "小号输入框高 {}，令牌是 {}",
+            小框.height(),
+            layout.input_small_height,
+        );
+        assert_eq!(
+            小框.height(),
+            小钮.height(),
+            "小号输入框与同一行的小号按钮不等高"
+        );
+        assert!(
+            (框.width() - 200.0).abs() < 0.5,
+            "desired_width 该是连留白在内的外宽，量到 {}",
+            框.width(),
+        );
+    }
+
+    #[test]
+    fn 控件四档的描边一样宽_宽度取令牌() {
+        // 票 `gui-looks-like-the-design/05`（拿主意的人 2026-09-14 裁）：次要按钮照稿画一圈描边。
+        // 四档一样宽、宽度跟着令牌走——拿**改过的**令牌走一遍整条装配，哪一档写死了宽度这里就红。
+        for 宽 in [Tokens::builtin().layout.control_stroke, 2.5] {
+            let mut 改过 = Tokens::builtin().clone();
+            改过.layout.control_stroke = 宽;
+            let ctx = headless::context();
+            install_tokens(&ctx, &改过);
+            for theme in [Theme::Dark, Theme::Light] {
+                let widgets = &ctx.style_of(theme).visuals.widgets;
+                for (name, widget) in [
+                    ("inactive", &widgets.inactive),
+                    ("hovered", &widgets.hovered),
+                    ("active", &widgets.active),
+                    ("open", &widgets.open),
+                ] {
+                    assert_eq!(
+                        widget.bg_stroke.width, 宽,
+                        "{theme:?} 的 {name} 那一档描边宽 {}，令牌是 {宽}",
+                        widget.bg_stroke.width,
+                    );
+                }
+            }
+        }
+        assert!(
+            Tokens::builtin().layout.control_stroke > 0.0,
+            "次要按钮得有一圈描边（设计稿 .btn）",
+        );
     }
 
     #[test]

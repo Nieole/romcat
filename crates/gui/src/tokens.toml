@@ -125,6 +125,10 @@ steps = [4, 8, 12, 16, 20]   # 间距只从这几档里取
 panel-padding  = [11, 14]    # 面板标题栏内边距（上下, 左右）
 dialog-padding = [20, 22]    # 对话框内容区内边距（上下, 左右）
 cell-padding   = [8, 10]     # 表格单元格内边距
+opening-hero-padding = [56, 48]   # 开场左栏内边距（上下, 左右）
+opening-side-padding = [40, 36]   # 开场右栏内边距（上下, 左右）
+catalog-row-padding  = [12, 14]   # 开场主库列表每一行的内边距（上下, 左右）（设计稿 .catrow 的 padding:12px 14px）
+catalog-row-gap      = 2          # 那一行里名字与底下那句之间的竖向间距（设计稿 .catrow 的 gap:2px）
 
 [layout]
 rail-width        = 196   # 左侧导航展开宽度
@@ -140,6 +144,23 @@ card-cover-ratio  = 0.75  # 卡片封面宽高比 3:4
 statusbar         = 30    # 底部状态栏高度
 statusbar-bar     = 120   # 底部状态栏里任务那条小进度条的宽度
 dialog-width      = [520, 620, 720, 840]   # 对话框只用这几档宽度
+opening-side-width = [440, 560]  # 开场右栏宽度（最窄, 最宽）
+opening-hero-min  = 360   # 开场左栏最窄宽度
+mark              = 44    # 开场左上角那枚标志的边长
+promise-icon      = 28    # 开场三条承诺前那枚字块的边长
+page-dot          = 20    # 弹层标头「走到第几问」那一圈的直径
+chip-dot          = 6     # 标签左边那枚圆点的直径（设计稿 .chip::before 与 .ro::before 的 6px）
+kv-key-width      = 84    # 「名 → 值」两列排时名那一列的宽
+button-height     = 28    # 按钮的高（设计稿 .btn）：弹层页脚、「选择…」
+button-padding    = 12    # 按钮左右留白（设计稿 .btn 的 padding:0 12px）
+button-small-height  = 24 # 小号按钮的高（设计稿 .btn.sm）：行内「打开」、抬头上的「添加主库」「更改…」
+button-small-padding = 9  # 小号按钮左右留白（设计稿 .btn.sm 的 padding:0 9px）
+button-large-height = 36  # 大号按钮的高（设计稿 .btn.lg）：开场空态那一颗「添加主库」
+button-large-padding = 18 # 大号按钮左右留白（设计稿 .btn.lg 的 padding:0 18px）
+control-stroke    = 1     # 控件（按钮、输入框、勾选框）描边的宽：四档一样宽，颜色取各档自己那一格（设计稿 .btn / .input 的 1px）
+input-height      = 28    # 单行输入框的高：与同一行默认那一档按钮等高（拿主意的人 2026-09-14 第三次裁；设计稿 .input 是 30，不照它）
+input-small-height = 24   # 小号单行输入框的高：与小号按钮等高（开场贴路径那一框，旁边是小号的「换过去」）
+input-padding     = 10    # 单行输入框左右留白（设计稿 .input 的 padding:0 10px）
 
 # ── 阴影的形状：两套主题共用，颜色是各主题里同名的那一格（pop → pop-color） ──
 # check_tokens.py 不核这一节：设计稿里是一整句 box-shadow，不是分开的几格。
