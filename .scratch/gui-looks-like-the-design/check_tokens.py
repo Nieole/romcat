@@ -138,6 +138,23 @@ def token(section, key, at):
     value = tokens[section][key]
     return value if at is None else value[at]
 
+
+def check_literals(entries):
+    """逐条核对设计稿里写死的字面值；交回核了几项。"""
+    checked = 0
+    for pattern, checks in entries:
+        m = re.search(pattern, html)
+        if not m:
+            problems.append(f"找不到 {pattern}")
+            continue
+        for group, section, key, at in checks:
+            checked += 1
+            want = token(section, key, at)
+            if float(m[group]) != float(want):
+                where = key if at is None else f"{key}[{at}]"
+                problems.append(f"{where}: 设计稿是 {m[group]}，令牌是 {want}")
+    return checked
+
 rail_literals = [
     (r"\.rail\{[^}]*?padding:(\d+)px (\d+)px;gap:(\d+)px", [(1, "space", "rail-padding", 0), (2, "space", "rail-padding", 1), (3, "space", "rail-gap", None)]),
     (r"\.main\.rcol \.rail\{padding:(\d+)px (\d+)px", [(1, "space", "rail-padding-collapsed", 0), (2, "space", "rail-padding-collapsed", 1)]),
@@ -154,17 +171,7 @@ rail_literals = [
     (r"\.railfoot \.st\{[^}]*?padding:0 (\d+)px;[^}]*?gap:(\d+)px", [(1, "space", "rail-note-padding", None), (2, "space", "rail-note-gap", None)]),
     (r"\.railfoot \.st::before\{[^}]*?width:(\d+)px", [(1, "layout", "rail-dot", None)]),
 ]
-for pattern, checks in rail_literals:
-    m = re.search(pattern, html)
-    if not m:
-        problems.append(f"找不到 {pattern}")
-        continue
-    for group, section, key, at in checks:
-        literals += 1
-        want = token(section, key, at)
-        if float(m[group]) != float(want):
-            where = key if at is None else f"{key}[{at}]"
-            problems.append(f"{where}: 设计稿是 {m[group]}，令牌是 {want}")
+literals += check_literals(rail_literals)
 
 # 标签与按钮的字号（设计稿 .chip / .btn / .btn.sm / .btn.lg），以及标签的高、左右留白、圆点与字的间距。
 shared_literals = [
@@ -173,16 +180,7 @@ shared_literals = [
     (r"\.btn\.sm\{[^}]*?font-size:(\d+)px", [(1, "font", "size-small", None)]),
     (r"\.btn\.lg\{[^}]*?font-size:(\d+)px", [(1, "font", "size-button-large", None)]),
 ]
-for pattern, checks in shared_literals:
-    m = re.search(pattern, html)
-    if not m:
-        problems.append(f"找不到 {pattern}")
-        continue
-    for group, section, key, at in checks:
-        literals += 1
-        want = token(section, key, at)
-        if float(m[group]) != float(want):
-            problems.append(f"{key}: 设计稿是 {m[group]}，令牌是 {want}")
+literals += check_literals(shared_literals)
 
 if problems:
     print("\n".join(problems))

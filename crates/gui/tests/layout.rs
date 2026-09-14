@@ -593,20 +593,11 @@ fn 五屏上画出来的字里没有星号也没有文档编号() {
 
 /// 屏上认得下的每一段字画在哪儿，按画出来的次序。
 fn 画在哪几处(output: &egui::FullOutput, 认: &dyn Fn(&str) -> bool) -> Vec<egui::Rect> {
-    fn 收(shape: &egui::Shape, 认: &dyn Fn(&str) -> bool, out: &mut Vec<egui::Rect>) {
-        match shape {
-            egui::Shape::Text(text) if 认(text.galley.text()) => {
-                out.push(egui::Rect::from_min_size(text.pos, text.galley.size()));
-            }
-            egui::Shape::Vec(shapes) => shapes.iter().for_each(|one| 收(one, 认, out)),
-            _ => {}
-        }
-    }
-    let mut out = Vec::new();
-    for clipped in &output.shapes {
-        收(&clipped.shape, 认, &mut out);
-    }
-    out
+    每一段(output)
+        .into_iter()
+        .filter(|(画的, _)| 认(画的))
+        .map(|(_, 在)| 在)
+        .collect()
 }
 
 /// 屏上**正好**写着 `字` 的每一处，按画出来的次序。
@@ -625,6 +616,12 @@ fn 屏头底() -> f32 {
     2.0 * tokens.space.screen_header_padding[0] + tokens.layout.button_height + 1.0
 }
 
+/// 右侧那一段在标题后面摆不下、折到第二行时屏头的下沿：再多一行按钮高，加一档行距。
+fn 折成两行的屏头底() -> f32 {
+    let tokens = romcat_gui::tokens::Tokens::builtin();
+    屏头底() + tokens.space.screen_header_gap + tokens.layout.button_height
+}
+
 /// 左栏里（整段落在左栏宽以内）正好写着 `字` 的那一处。
 fn 左栏里的(output: &egui::FullOutput, 字: &str) -> Option<egui::Rect> {
     正好画在哪几处(output, 字)
@@ -634,23 +631,7 @@ fn 左栏里的(output: &egui::FullOutput, 字: &str) -> Option<egui::Rect> {
 
 /// 按一下左栏里正好写着 `字` 的那一处（移过去、按下、松开），再画一帧，交回那一帧。
 fn 点左栏(ctx: &egui::Context, app: &mut App, 字: &str) -> egui::FullOutput {
-    let 头一帧 = 跑一帧(ctx, app, Vec::new());
-    let Some(在) = 左栏里的(&头一帧, 字) else {
-        panic!("左栏里没有「{字}」，没处点：\n{}", 画出来的字(&头一帧));
-    };
-    let 按 = |pressed: bool| egui::Event::PointerButton {
-        pos: 在.center(),
-        button: egui::PointerButton::Primary,
-        pressed,
-        modifiers: egui::Modifiers::NONE,
-    };
-    跑一帧(
-        ctx,
-        app,
-        vec![egui::Event::PointerMoved(在.center()), 按(true)],
-    );
-    跑一帧(ctx, app, vec![按(false)]);
-    跑一帧(ctx, app, Vec::new())
+    点左栏_窗口宽(ctx, app, headless::VIEWPORT[0], 字)
 }
 
 #[test]
@@ -713,9 +694,12 @@ fn 点左栏入口就换到那一屏_屏头写着那一屏_右侧是它原来在
             "{view:?} 的屏头上没写「{入口}」：\n{}",
             画出来的字(&out),
         );
+        // 右侧那一段摆不下时会折到屏头第二行（设计稿 `.scrhead` 的 `flex-wrap`）。
         let 右侧 = 画在哪几处(&out, &|画的| 画的.contains(右侧那一段));
         assert!(
-            右侧.iter().any(在屏头里),
+            右侧
+                .iter()
+                .any(|rect| rect.left() > 左栏宽() && rect.bottom() <= 折成两行的屏头底()),
             "{view:?} 的屏头里没有它原来在顶栏上的「{右侧那一段}」（画在 {右侧:?}）：\n{}",
             画出来的字(&out),
         );
@@ -802,6 +786,19 @@ fn 左栏的计数取各屏与核心库现成的那个数() {
     assert!(
         屏上.contains(&format!("{作品} 个作品；")),
         "左栏说 {作品} 个作品，浏览屏自己说的不是这个数：\n{屏上}",
+    );
+
+    // 一个根都还没扫过、库里一个作品都没有：浏览那一项画「—」（设计稿 `!S.scanDone?'—'`）——此刻的 0 说的是
+    // 「还不知道」，不是「这份库有 0 个作品」。
+    let mut app = shared::小库(&[], 工作目录("左栏计数-没扫过"));
+    let ctx = headless::context();
+    跑(&ctx, &mut app, 2);
+    let out = 跑一帧(&ctx, &mut app, Vec::new());
+    assert_eq!(
+        左栏计数(&out, "浏览"),
+        Some("—".to_owned()),
+        "还没扫过的库，浏览那一项该画「—」：\n{}",
+        画出来的字(&out),
     );
 }
 

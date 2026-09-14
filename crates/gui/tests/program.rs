@@ -163,6 +163,11 @@ fn 点一下(ctx: &egui::Context, program: &mut Program, 那一段: &str) -> Str
             shared::画出来的字(&头一帧)
         );
     };
+    按在(ctx, program, 位置)
+}
+
+/// 在 `位置` 上按一下（移过去、按下、松开），返回**松开之后再画一帧**画出来的字。
+fn 按在(ctx: &egui::Context, program: &mut Program, 位置: egui::Pos2) -> String {
     let 按 = |pressed: bool| egui::Event::PointerButton {
         pos: 位置,
         button: egui::PointerButton::Primary,
@@ -188,20 +193,7 @@ fn 正好点一下(ctx: &egui::Context, program: &mut Program, 那一段: &str) 
             shared::画出来的字(&头一帧)
         );
     };
-    let 按 = |pressed: bool| egui::Event::PointerButton {
-        pos: 位置,
-        button: egui::PointerButton::Primary,
-        pressed,
-        modifiers: egui::Modifiers::NONE,
-    };
-    let mut input = headless::input();
-    input.events.push(egui::Event::PointerMoved(位置));
-    input.events.push(按(true));
-    headless::frame(ctx, input, |ui| program.ui(ui));
-    let mut input = headless::input();
-    input.events.push(按(false));
-    headless::frame(ctx, input, |ui| program.ui(ui));
-    跑一帧(ctx, program)
+    按在(ctx, program, 位置)
 }
 
 #[test]

@@ -386,7 +386,11 @@ pub enum BoldCoverage {
     LatinDigitsOnly,
 }
 
-/// 间距，点。**档位是约定**：版式里只从 `steps` 里取，由代码走查守，不写测试。
+/// 间距，点。
+///
+/// `steps` 是**通用间距的档位**：版式里随手要一个间距时从这几档里取，由代码走查守，不写测试。
+/// 设计稿上写死的字面值（面板、对话框、开场、屏头、屏体、左栏……）不硬凑进档位，各立一个具名令牌，
+/// 由 `check_tokens.py` 逐项对着设计稿核。
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Space {

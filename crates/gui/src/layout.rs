@@ -440,11 +440,17 @@ const RAIL_COLLAPSED: &str = "收起";
 /// 窗口宽度一变就作废，那一下由摆左栏的那一层管（[`crate::app`]）。
 #[must_use]
 pub fn rail_folded(chosen_collapsed: bool, peeking: bool, window_width: f32) -> bool {
-    if window_width < crate::tokens::Tokens::builtin().layout.rail_collapse_below {
+    if window_narrow(window_width) {
         !peeking
     } else {
         chosen_collapsed
     }
+}
+
+/// 窗口窄到左栏该自动收起了吗：宽不到令牌 `rail-collapse-below`。
+#[must_use]
+pub fn window_narrow(window_width: f32) -> bool {
+    window_width < crate::tokens::Tokens::builtin().layout.rail_collapse_below
 }
 
 /// 左栏收着（`folded`）与展开时各多宽：令牌 `rail-collapsed` / `rail-width`。

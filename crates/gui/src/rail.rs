@@ -88,8 +88,7 @@ pub fn show(ui: &mut egui::Ui, facts: &Facts<'_>) -> Option<Pressed> {
     let tokens = Tokens::builtin();
     let 窗口宽 = ui.ctx().content_rect().width();
     let folded = crate::layout::rail_folded(facts.chosen_collapsed, facts.peeking, 窗口宽);
-    // 窗口窄不窄：人没收起、也没临时展开时收着，就是窄。
-    let 窄 = crate::layout::rail_folded(false, false, 窗口宽);
+    let 窄 = crate::layout::window_narrow(窗口宽);
     let [上下, 左右] = if folded {
         tokens.space.rail_padding_collapsed
     } else {

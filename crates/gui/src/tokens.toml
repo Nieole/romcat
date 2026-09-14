@@ -126,7 +126,7 @@ group-tracking    = 0.08  # 左栏分组标题的字距，字号的倍数（设�
 size-button-large = 14    # 大号按钮上的字（设计稿 .btn.lg 的 font-size:14px）
 
 [space]
-steps = [4, 8, 12, 16, 20]   # 间距只从这几档里取
+steps = [4, 8, 12, 16, 20]   # 通用间距的档位；设计稿上写死的字面值不凑进档位，另立下面那些具名令牌
 panel-padding  = [11, 14]    # 面板标题栏内边距（上下, 左右）
 dialog-padding = [20, 22]    # 对话框内容区内边距（上下, 左右）
 cell-padding   = [8, 10]     # 表格单元格内边距

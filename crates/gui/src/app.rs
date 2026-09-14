@@ -37,7 +37,7 @@
 //! **一个都不在这儿另算**，取的都是现成的那一份：库是库屏手上的根数，待确认是队列里待裁决的条数
 //! （还没跑过识别画「—」），子库是子库屏列出来的个数，任务是台上跑着的加排着的。另两个要问库：
 //! 浏览是核心库按默认那一套筛选数的作品数（[`Catalog::work_total`](romcat_core::catalog::Catalog::work_total)，
-//! 与浏览屏没筛过时的总行数是同一句查询），已保存的裁决是沉淀库自己数的（`Store::counts`）。这两个
+//! 与浏览屏没筛过时的总行数是同一句查询；一个根都还没扫过、数又是 0 时画「—」），已保存的裁决是沉淀库自己数的（`Store::counts`）。这两个
 //! **不每帧问**：开库时问一次，库变了再问（[`App::recount`]）——库屏认领完一趟、待确认屏落下或撤回一批。
 
 use std::path::PathBuf;
@@ -674,7 +674,14 @@ impl App {
             "—".to_owned()
         };
         let 根 = format!("{} 个根", self.roots.roots().len());
-        let 作品 = self.works.map_or_else(|| "—".to_owned(), thousands);
+        // **一个根都还没扫过、作品数又是 0，画「—」**（设计稿 `!S.scanDone?'—'`）：那个 0 说的是「还不知道」，
+        // 不是「这份库有 0 个作品」。扫没扫过取库屏手上那几个根自己记着的（`RootRow::root.scan`）。
+        let 扫过 = self.roots.roots().iter().any(|row| row.root.scan.is_some());
+        let 作品 = match self.works {
+            Some(0) if !扫过 => "—".to_owned(),
+            Some(数) => thousands(数),
+            None => "—".to_owned(),
+        };
         let 子库 = self.sublibrary.list().len().to_string();
         // **哪一屏上都看得见台上有活在跑**：跑着的时候人多半正在别的屏上。数的是跑着的加排着的。
         let 任务 = self

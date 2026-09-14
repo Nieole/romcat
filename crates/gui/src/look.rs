@@ -647,6 +647,10 @@ pub fn mark(painter: &egui::Painter, rect: egui::Rect, corner: u8, visuals: &egu
 /// 画出来的已经是靠右的样子，不会先在左边画一帧、下一帧才挪过去（测试照上一帧的位置去点，点的正是那一帧）。
 /// 里头要是有占满剩下那一截的东西（一段 `right_to_left`），量到的就是整截，那时照常从副标题后面接着摆。
 ///
+/// **摆不下就整段折到下一行**（设计稿 `.scrhead` 的 `flex-wrap:wrap`）：从左边内边距起摆，与上一行隔
+/// `screen-header-gap`，屏头跟着长高。不折的话它溢出屏头右沿，后半截被裁掉。**屏头刚长高的那一帧**面板还按上一帧的高
+/// 裁剪，折下来那一行的字 egui 不画——只在这一帧让它重画一遍（`request_discard`）；平时不动用那一遍额度。
+///
 /// **不用「量上一帧、宽变了就让 egui 重画这一帧」**（`request_discard`）：egui 一帧最多画两遍，这一遍让屏头用掉，
 /// 同一帧里头一回出现的表格（`egui::Grid` 头一帧也要重画一遍才看得见）就只能隐身一帧——
 /// 任务屏的历史就是这么在换进来的那一帧里一行都没画出来的。
@@ -657,7 +661,7 @@ pub fn screen_header<R>(
     id: impl Into<egui::Id>,
     title: &str,
     subtitle: &str,
-    actions: impl FnMut(&mut egui::Ui) -> R,
+    mut actions: impl FnMut(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<R> {
     let tokens = Tokens::builtin();
     let [上下, 左右] = tokens.space.screen_header_padding;
@@ -670,8 +674,9 @@ pub fn screen_header<R>(
         .frame(框)
         .show(ui, |ui| {
             let 原来的间距 = ui.spacing().item_spacing;
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = tokens.space.screen_header_gap;
+            let 间距 = tokens.space.screen_header_gap;
+            let 摆进这一行 = ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 间距;
                 let 强调字 = ui.visuals().strong_text_color();
                 ui.label(egui::RichText::new(title).heading().color(强调字));
                 let 弱字 = ui.visuals().weak_text_color();
@@ -683,17 +688,41 @@ pub fn screen_header<R>(
                         )))
                         .color(弱字),
                 );
-                靠右摆(ui, 原来的间距, actions)
-            })
-            .inner
+                靠右摆(ui, 原来的间距, &mut actions)
+            });
+            match 摆进这一行.inner {
+                Some(inner) => inner,
+                // 摆不下：整段折到下一行，从左边起摆，行距也是那一档间距。
+                None => {
+                    ui.add_space((间距 - ui.spacing().item_spacing.y).max(0.0));
+                    let inner = ui
+                        .horizontal(|ui| {
+                            ui.spacing_mut().item_spacing = 原来的间距;
+                            actions(ui)
+                        })
+                        .inner;
+                    // **屏头刚长高的那一帧**：面板这一帧还按上一帧的高裁剪，折下来的那一行落在裁剪框外，
+                    // egui 不画那一行的字。只在这一下让它当场把这一帧重画一遍——第二遍面板已经记住了新的高。
+                    let 要的底 = ui.min_rect().bottom() + 上下;
+                    let 上一帧的底 =
+                        egui::PanelState::load(ui.ctx(), id).map(|state| state.outer_rect.bottom());
+                    if 上一帧的底.is_none_or(|底| 底 + 0.5 < 要的底) {
+                        ui.ctx().request_discard("屏头折成两行，刚长高");
+                    }
+                    inner
+                }
+            }
         })
 }
 
 /// 在这一行剩下的地方里把 `add` 摆的那一段**靠右**：先在一块看不见、按不动的地方摆一遍量宽，
-/// 让出「剩下的宽 − 它有多宽」，再真摆。见 [`screen_header`]「右侧那一段怎么靠右」。
+/// 让出「剩下的宽 − 它有多宽」，再真摆。**剩下的地方摆不下就不摆**，交回 `None`，由调用方折到下一行。
+/// 见 [`screen_header`]「右侧那一段怎么靠右」。
 fn 靠右摆<R>(
-    ui: &mut egui::Ui, 间距: egui::Vec2, mut add: impl FnMut(&mut egui::Ui) -> R
-) -> R {
+    ui: &mut egui::Ui,
+    间距: egui::Vec2,
+    mut add: impl FnMut(&mut egui::Ui) -> R,
+) -> Option<R> {
     let 剩下 = ui.available_width();
     let mut 量 = ui.new_child(
         egui::UiBuilder::new()
@@ -706,12 +735,18 @@ fn 靠右摆<R>(
     量.spacing_mut().item_spacing = 间距;
     add(&mut 量);
     let 宽 = 量.min_rect().width();
+    // 差不到半点不算摆不下：位置取整到像素时宽会多出一点点。
+    if 宽 > 剩下 + 0.5 {
+        return None;
+    }
     ui.add_space((剩下 - 宽).max(0.0));
-    ui.scope(|ui| {
-        ui.spacing_mut().item_spacing = 间距;
-        add(ui)
-    })
-    .inner
+    Some(
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing = 间距;
+            add(ui)
+        })
+        .inner,
+    )
 }
 
 /// 一屏的**屏体**（设计稿 `.scrbody`）：屏头底下剩下的整块，窗口底色，竖着滚；内边距取令牌
@@ -1626,6 +1661,60 @@ mod tests {
         assert!(
             (钮.right() - (头.right() - 左右)).abs() < 0.5,
             "右侧那一段换了宽度的那一帧没靠右：按钮 {钮:?}，屏头 {头:?}",
+        );
+    }
+
+    #[test]
+    fn 屏头右侧那一段摆不下时照稿折到下一行_头一帧就画得出来() {
+        // 设计稿 `.scrhead{flex-wrap:wrap;gap:12px}`：右侧那一段在标题、副标题后面摆不下，整段折到下一行，
+        // 从左边内边距起摆，与上一行隔 12。不折的话它溢出屏头右沿，后半截被裁掉。
+        //
+        // **头一帧就得画出来**：面板这一帧按它上一帧的高裁剪，折下来的那一行落在裁剪框外，egui 的字干脆不画
+        // ——测试只跑一帧就读屏上的字，读不到的正是那一行。
+        let tokens = Tokens::builtin();
+        let [上下, 左右] = tokens.space.screen_header_padding;
+        let ctx = headless::context();
+        install(&ctx);
+        let mut 量到 = None;
+        let mut 头一帧 = None;
+        for _ in 0..2 {
+            let output = headless::frame(&ctx, headless::input(), |ui| {
+                let 交给它的 = ui.max_rect();
+                let 头 = screen_header(ui, "屏头", "标题", "一句副标题", |ui| {
+                    ui.label("折下来的字");
+                    // 连上前面那几个字，在标题、副标题后面摆不下，自己一行摆得下。
+                    ui.allocate_exact_size(
+                        egui::vec2(交给它的.width() - 2.0 * 左右 - 100.0, 20.0),
+                        egui::Sense::hover(),
+                    );
+                });
+                量到 = Some((交给它的, 头.response.rect));
+            });
+            头一帧.get_or_insert(output);
+        }
+        let 头一帧 = 头一帧.expect("跑过帧");
+        assert!(
+            画出来的段(&头一帧)
+                .iter()
+                .any(|(画的, ..)| 画的 == "折下来的字"),
+            "头一帧上折下来的那一行没画出来：{:?}",
+            画出来的段(&头一帧),
+        );
+        let (区, 头) = 量到.expect("画过屏头");
+        let (右侧, _) = 那一段(&头一帧, "折下来的字");
+        assert!(
+            (右侧.left() - (区.left() + 左右)).abs() < 0.5,
+            "折下来的那一段该从左边内边距起摆：{右侧:?}，交给屏头的 {区:?}",
+        );
+        let 第一行底 = 区.top() + 上下 + tokens.layout.button_height;
+        assert!(
+            右侧.top() >= 第一行底 + tokens.space.screen_header_gap - 0.5,
+            "折下来的那一段该在第一行底下、隔 {}：{右侧:?}，第一行底在 {第一行底}",
+            tokens.space.screen_header_gap,
+        );
+        assert!(
+            右侧.bottom() <= 头.bottom(),
+            "屏头该跟着长高把它包住：{右侧:?}，屏头 {头:?}"
         );
     }
 
