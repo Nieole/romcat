@@ -70,8 +70,12 @@ use romcat_core::stage::{Behind, Stage, StageRow, Stages};
 use romcat_core::task::{Cutoff, Ending, Finished, Handle};
 use romcat_core::{title, verdict, workspace};
 
-use crate::font;
 use crate::task::{Product, Tasks};
+use crate::tokens::Tokens;
+use crate::{font, look};
+
+/// 裁决那一道的按钮上写的字：**它不排任务**，把人带去待确认队列屏（`Section::start`）。
+pub const TO_QUEUE: &str = "去待确认队列";
 
 /// 导出那一支上那颗**铺媒体**开关上写的字（票 `one-criterion-per-thing/09`）。
 ///
@@ -225,6 +229,12 @@ pub struct Section {
     drawn_at: Option<u64>,
     /// 库屏排上的那一趟**取回 DAT** 眼下在不在台上（`Section::set_dat_on_board`）。
     dat_on_board: bool,
+    /// 台上头一趟**扫描**的任务号（`Section::set_scan_on_board`）。扫描不在这一段排，这一段只照它
+    /// 禁掉扫描那一行的按钮。
+    scan_on_board: Option<u64>,
+    /// 按下去了、却**不在这一段排**的那一道（扫描、裁决），等够得着的那一处取走
+    /// （`Section::take_handoff`）。
+    handoff: Option<Stage>,
 }
 
 impl Section {
@@ -247,6 +257,8 @@ impl Section {
             media_cost: MediaCost::NotAsked,
             drawn_at: None,
             dat_on_board: false,
+            scan_on_board: None,
+            handoff: None,
         }
     }
 
@@ -340,7 +352,7 @@ impl Section {
 
     /// [`Self::reload`] 里读库的那一半：工序那几行与导出配置。
     fn resurvey(&mut self, site: &Site) {
-        self.stages = Stages::survey(&site.catalog);
+        self.stages = Stages::survey(&site.catalog, &site.store, &site.library_identity);
         // **读不动与还没选过分两支说**（同 `stage::export_row`）：整段一起失败不成——
         // 一个读不出来的键会让工序段上连识别那一行都消失（与 `Stages::survey` 同一条）。
         match site.catalog.export_setup() {
@@ -415,6 +427,13 @@ impl Section {
         self.stages.of(stage)
     }
 
+    /// 这一行在工序段上真画出来的那句话（`Stages::line`：前面有一道没做完、它自己数出来是零时说在等谁）。
+    /// 测试拿它核对屏上画的是哪一句。
+    #[must_use]
+    pub fn line(&self, row: &StageRow) -> String {
+        self.stages.line(row)
+    }
+
     /// 这道工序上有没有**任务**在台上（排着队也算）；有就是那一趟的任务号。
     /// **测试拿它核对「按钮按不下去」那一条。**
     ///
@@ -422,6 +441,10 @@ impl Section {
     /// （`CONTEXT.md`）。库屏那一侧的 `Job` 是这条账在旧代码里的欠款，不往新代码里扩。
     #[must_use]
     pub fn task_of(&self, stage: Stage) -> Option<u64> {
+        // 扫描那一趟由库屏自己排、自己认领（`roots::Screen::scan`），这一段只记着它的任务号。
+        if stage == Stage::Scan {
+            return self.scan_on_board;
+        }
         self.running
             .iter()
             .find(|(_, running)| *running == stage)
@@ -459,9 +482,54 @@ impl Section {
     ///
     /// 同一道工序已经在跑就**什么都不做**——那一行的按钮本来就是禁着的，这一句是给
     /// 别处的捷径兜底的。
+    ///
+    /// **扫描与裁决两道不在这一段排**（`Self::hand_over`）：扫描交给库屏自己那条扫描的路，
+    /// 裁决换到待确认队列屏。
     pub fn start(&mut self, stage: Stage, site: &mut Site, tasks: &mut Tasks) {
-        let knobs = self.export_knobs();
-        self.queue(stage, knobs, site, tasks);
+        match stage {
+            Stage::Scan | Stage::Triage => self.hand_over(stage, site),
+            Stage::Identify | Stage::Scrape | Stage::FoldTitles | Stage::Export => {
+                let knobs = self.export_knobs();
+                self.queue(stage, knobs, site, tasks);
+            }
+        }
+    }
+
+    /// 按下去了、却**不在这一段排**的那两道：留一个记号，由够得着的那一处取走
+    /// （[`Self::take_handoff`]）。
+    ///
+    /// - **扫描**有自己那条现成的路（`roots::Screen::scan`：断点、并发档、按停怎么记账都在那儿，
+    ///   而且是按根排的），这一段不另写一份——同一趟活不许有第二份实现。库屏取走记号，把还没完整
+    ///   扫过一趟的根排上去（`roots::Screen::take_scan`）。
+    /// - **裁决**不是一趟任务：人在待确认队列屏上一批批做。窗口取走记号换到那一屏
+    ///   （`App::route`；屏与屏之间不互相拿着，ADR-0005）。
+    ///
+    /// 按下去之前就判得出的前提不在，照旧只在屏上说（[`Self::refusal`]）。
+    fn hand_over(&mut self, stage: Stage, site: &Site) {
+        if self.task_of(stage).is_some() {
+            return;
+        }
+        if let Some(why) = self.refusal(stage, site) {
+            self.error = Some(why);
+            self.notice = None;
+            return;
+        }
+        self.handoff = Some(stage);
+    }
+
+    /// 取走「按下去了、却不在这一段排」的那个记号（`Section::hand_over`）：记着的正是这一道就交
+    /// `true`，取走就没了。
+    pub fn take_handoff(&mut self, stage: Stage) -> bool {
+        let 是它 = self.handoff == Some(stage);
+        if 是它 {
+            self.handoff = None;
+        }
+        是它
+    }
+
+    /// 库屏排上、收掉扫描时拨（`roots::Screen::scan` / `settle`）：台上头一趟扫描的任务号。
+    pub(crate) fn set_scan_on_board(&mut self, id: Option<u64>) {
+        self.scan_on_board = id;
     }
 
     /// 带着**照写**重排一趟**导出**：屏上那颗「我看过了，照写」按的就是它。
@@ -509,7 +577,8 @@ impl Section {
             Stage::Identify if self.dat_on_board => None,
             Stage::Identify => missing_dat(&self.workspace),
             Stage::Export => export_refusal(&site.catalog),
-            Stage::Scrape | Stage::FoldTitles => None,
+            Stage::Scan => no_roots(&site.catalog),
+            Stage::Scrape | Stage::FoldTitles | Stage::Triage => None,
         }
     }
 
@@ -743,12 +812,28 @@ impl Section {
 
     /// 画这一段。
     pub fn ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
+        let tokens = Tokens::builtin();
+        let 内边距 = crate::roots::panel_padding();
+        // 顶上那一行「下一步」（设计稿 `.nextline`）：`panel-2` 底，与底下那几行隔开。
+        let 下一步要跑 = egui::Frame::new()
+            .fill(ui.visuals().faint_bg_color)
+            .corner_radius(egui::CornerRadius::same(tokens.radius.medium))
+            .inner_margin(内边距)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                self.next_up_ui(ui)
+            })
+            .inner;
         ui.horizontal(|ui| {
             ui.label(font::strong(format!(
                 "工序 · {} 道",
                 self.stages.rows().len()
             )));
-            ui.weak("这个库还差哪几道步骤。点一下排一趟任务上台");
+            ui.label(
+                egui::RichText::new("按顺序完成，每一道说得出还差多少")
+                    .small()
+                    .weak(),
+            );
         });
         if let Some(error) = &self.error {
             ui.colored_label(ui.visuals().error_fg_color, error);
@@ -780,69 +865,169 @@ impl Section {
             ui.weak(notice);
         }
 
-        let mut 要跑 = None;
+        let mut 要跑 = 下一步要跑;
         // 画的时候不改自己：按下去的那一下先记下来，画完再动（借用检查器要的，
         // 也让「按一下发生什么」读起来是一条直线）。
         let rows: Vec<StageRow> = self.stages.rows().to_vec();
-        egui::Grid::new("工序")
-            .num_columns(3)
-            .striped(true)
-            .show(ui, |ui| {
-                for header in ["工序", "还差多少", ""] {
-                    ui.label(font::strong(header));
-                }
-                ui.end_row();
-                for row in &rows {
-                    ui.label(row.stage.label());
-                    let 那个数 = match &row.behind {
-                        // **还差东西的那一行标出来**：这一段存在的全部理由就是这个数。
-                        Behind::Left(left) if *left > 0 => {
-                            ui.colored_label(ui.visuals().warn_fg_color, row.render())
+        let 下一道 = self.stages.next_up().map(|row| row.stage);
+        // **名字那一列对齐**：量出六个名字里最宽的那个，不写死宽度——字号跟着令牌走。
+        let 名宽 = rows
+            .iter()
+            .map(|row| {
+                egui::WidgetText::from(font::strong(row.stage.label()))
+                    .into_galley(
+                        ui,
+                        Some(egui::TextWrapMode::Extend),
+                        f32::INFINITY,
+                        egui::TextStyle::Body,
+                    )
+                    .size()
+                    .x
+            })
+            .fold(0.0_f32, f32::max);
+        let 行距 = ui.spacing().item_spacing;
+        // 行与行之间不留缝：分隔线就是缝。行里头照旧用原来的间距。
+        ui.spacing_mut().item_spacing.y = 0.0;
+        for (at, row) in rows.iter().enumerate() {
+            if at > 0 {
+                ui.add(egui::Separator::default().spacing(0.0));
+            }
+            // **一道工序一行**（设计稿 `.stage`）：名字、还差多少、按钮。「下一步」指着的那一行垫上选中的
+            // 底色（设计稿 `.stage.next`），与顶上那一行对得上。
+            let mut 这一行 = egui::Frame::new().inner_margin(内边距);
+            if 下一道 == Some(row.stage) {
+                这一行 = 这一行.fill(ui.visuals().selection.bg_fill);
+            }
+            这一行.show(ui, |ui| {
+                ui.spacing_mut().item_spacing = 行距;
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(stage) = self.row_button(ui, row) {
+                            要跑 = Some(stage);
                         }
-                        // 不差什么了、以及**这一支交不出度量退回时刻**的那一行，
-                        // 都不该抢眼——后者说的是「我算不出来」，不是「你该动手了」。
-                        Behind::Left(_) | Behind::Unmeasured { .. } => ui.weak(row.render()),
-                    };
-                    // **口径也挂在那个数上**：指针停在数上就读得到它数的是什么。
-                    if let Some(basis) = row.stage.basis() {
-                        那个数.on_hover_text(basis);
-                    }
-                    let 忙 = self.task_of(row.stage).is_some();
-                    let mut 悬停 = "排到任务台上跑，期间照常用别的屏；\
-                                  按得停——停下来留下了什么，那一趟自己会在任务台上说。"
-                        .to_string();
-                    // **刮削那颗按钮说清排的是哪一趟**：旋钮是固定的整库那一套，不是
-                    // 浏览屏刮削面板眼下拨到哪儿的那一套（`crate::scrape::whole_library`）。
-                    if row.stage == Stage::Scrape {
-                        悬停.push('\n');
-                        悬停.push_str(crate::scrape::WHOLE_LIBRARY);
-                    }
-                    if ui
-                        .add_enabled(!忙, egui::Button::new(if 忙 { "跑着呢" } else { "开跑" }))
-                        .on_hover_text(悬停)
-                        .clicked()
-                    {
-                        要跑 = Some(row.stage);
-                    }
-                    ui.end_row();
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(名宽, ui.spacing().interact_size.y),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.set_min_width(名宽);
+                                    ui.label(font::strong(row.stage.label()));
+                                },
+                            );
+                            let 字 = match &row.behind {
+                                // **还差东西的那一行标出来**：这一段存在的全部理由就是这个数。
+                                Behind::Left(left) if *left > 0 => {
+                                    egui::RichText::new(self.stages.line(row))
+                                        .color(ui.visuals().warn_fg_color)
+                                }
+                                // 不差什么了、以及**这一支交不出度量退回时刻**的那一行，
+                                // 都不该抢眼——后者说的是「我算不出来」，不是「你该动手了」。
+                                Behind::Left(_) | Behind::Unmeasured { .. } => {
+                                    egui::RichText::new(self.stages.line(row)).weak()
+                                }
+                            };
+                            let 那个数 = ui.add(egui::Label::new(字).wrap());
+                            // **口径也挂在那个数上**：指针停在数上就读得到它数的是什么。
+                            if let Some(basis) = row.stage.basis() {
+                                那个数.on_hover_text(basis);
+                            }
+                        });
+                    });
+                });
+                // 底下那几句**挨着这一行、对齐那个数**（设计稿 `.stage .left small`）。
+                let 缩进 = 名宽 + 行距.x;
+                // **口径画在屏上，不只藏在悬停里**（票 `gui-answers-all-six/04` 验收第 3 条），而且**挨着
+                // 刮削那一行**、画在那个数底下（收挂单 `Q554`）：画到整张表底下，人读到它时已经不知道它说的
+                // 是哪一行。那句话本身在核心里（`romcat_core::stage::SCRAPE_BASIS`），一个字不改。
+                if let Some(basis) = row.stage.basis() {
+                    ui.horizontal(|ui| {
+                        ui.add_space(缩进);
+                        ui.add(egui::Label::new(egui::RichText::new(basis).small().weak()).wrap());
+                    });
+                }
+                // **铺媒体那颗开关挨着导出那一行**：它是导出这一道**这一趟**的旋钮。导出往哪儿写不在这一段，
+                // 是库屏右边「导出设置」那一块（`roots::Screen`）。
+                if row.stage == Stage::Export {
+                    ui.horizontal_top(|ui| {
+                        ui.add_space(缩进);
+                        ui.vertical(|ui| self.lay_media_ui(ui, site, tasks));
+                    });
                 }
             });
-        // **口径画在屏上，不只藏在悬停里**（票 `gui-answers-all-six/04` 验收第 3 条）：
-        // 人不会去悬停一个数。画在表格底下而不塞进那一格——那句话长，塞进去会把表格撑宽、
-        // 把按钮那一列挤出窗口。那句话本身在核心里（`romcat_core::stage::SCRAPE_BASIS`）。
-        for row in &rows {
-            if let Some(basis) = row.stage.basis() {
-                ui.weak(format!("{}那一行的口径：{basis}", row.stage.label()));
-            }
         }
-        self.export_setup_ui(ui, site);
-        self.lay_media_ui(ui, site, tasks);
+        ui.spacing_mut().item_spacing = 行距;
         if let Some(stage) = 要跑 {
             self.start(stage, site, tasks);
         }
         if 要照写 {
             self.force_export(site, tasks);
         }
+    }
+
+    /// 一道工序那一行右边那颗按钮；按下去就交回那一道（走 [`Self::start`]，与顶上「下一步」同一个入口）。
+    fn row_button(&self, ui: &mut egui::Ui, row: &StageRow) -> Option<Stage> {
+        // **裁决不排任务**：那一行的按钮把人带去待确认队列屏（`Self::hand_over`）。
+        if row.stage == Stage::Triage {
+            return ui
+                .button(TO_QUEUE)
+                .on_hover_text("裁决在待确认队列屏上一批批做，不排到任务台上")
+                .clicked()
+                .then_some(row.stage);
+        }
+        let 忙 = self.task_of(row.stage).is_some();
+        let mut 悬停 = "排到任务台上跑，期间照常用别的屏；\
+                      按得停——停下来留下了什么，那一趟自己会在任务台上说。"
+            .to_string();
+        // **刮削那颗按钮说清排的是哪一趟**：旋钮是固定的整库那一套，不是
+        // 浏览屏刮削面板眼下拨到哪儿的那一套（`crate::scrape::whole_library`）。
+        if row.stage == Stage::Scrape {
+            悬停.push('\n');
+            悬停.push_str(crate::scrape::WHOLE_LIBRARY);
+        }
+        ui.add_enabled(!忙, egui::Button::new(if 忙 { "跑着呢" } else { "开跑" }))
+            .on_hover_text(悬停)
+            .clicked()
+            .then_some(row.stage)
+    }
+
+    /// 顶上那一行「**下一步**」：核心库指着的那一道（`Stages::next_up`）、那一行说的话，与一颗
+    /// 一按就办的按钮。返回按下去的那一道——它与那一行自己的按钮走同一个入口（[`Self::start`]）。
+    ///
+    /// **指哪一道不在这儿判**（ADR-0005）：「哪一道算做完了」是核心库的事，这里只画它。
+    fn next_up_ui(&self, ui: &mut egui::Ui) -> Option<Stage> {
+        // **字号直接问令牌**（`size-title`），不走具名字号 `look::TITLE`：开窗头一帧交进来的 `Ui`
+        // 还带着装基线之前那份样式，具名字号在那一帧查不到、egui 当场 panic。
+        let 标题 = |ui: &egui::Ui, text: String| {
+            egui::RichText::new(text)
+                .size(Tokens::builtin().font.size_title)
+                .color(ui.visuals().strong_text_color())
+        };
+        let Some(row) = self.stages.next_up() else {
+            ui.label(标题(ui, "所有工序都已完成".to_string()));
+            // **哪几道只看跑没跑过由核心库照眼下那几行折**（`Stages::settled_by_running`），这里不写死。
+            if let Some(只看跑没跑过) = self.stages.settled_by_running() {
+                ui.weak(只看跑没跑过);
+            }
+            ui.weak("添加新的根之后，这里会再指出下一步。");
+            return None;
+        };
+        ui.label(标题(ui, format!("下一步：{}", row.stage.label())));
+        ui.weak(row.render());
+        let 忙 = self.task_of(row.stage).is_some();
+        let 字 = if 忙 {
+            "跑着呢".to_string()
+        } else {
+            go_label(row.stage)
+        };
+        // **主按钮**：这一屏上最该按的就是它。颜色只从令牌来（`look::primary_button`）。
+        let 按了 = ui
+            .scope(|ui| {
+                look::primary_button(ui.visuals_mut());
+                ui.add_enabled(!忙, egui::Button::new(字)).clicked()
+            })
+            .inner;
+        按了.then_some(row.stage)
     }
 
     /// 导出那一支上那颗**铺媒体**开关（**默认关着**，[`Self::lay_media`]），与打开之后
@@ -905,12 +1090,12 @@ impl Section {
         }
     }
 
-    /// 底下那一行：**导出**往哪个前端格式、哪个目录写。
+    /// 库屏右边「导出设置」那一块（`roots::Screen` 摆它）：**导出**往哪个前端格式、哪个目录写。
     ///
     /// **第一次导出之前选一次，之后一键重导**（验收第 2、3 条）。选完记进中立库的
     /// 元数据表，与**主库原名**同一处——**纯加键、不升结构版本**，旧库拿新程序打开照样能用
     /// （`romcat_core::catalog::export` 的模块文档）。
-    fn export_setup_ui(&mut self, ui: &mut egui::Ui, site: &Site) {
+    pub(crate) fn export_setup_ui(&mut self, ui: &mut egui::Ui, site: &Site) {
         ui.add_space(6.0);
         let mut 要记下 = false;
         ui.horizontal(|ui| {
@@ -974,6 +1159,22 @@ fn run(
         Stage::Scrape => scrape_run(site, workspace, task),
         Stage::FoldTitles => fold_titles_run(site, workspace, task),
         Stage::Export => export_run(site, workspace, knobs, task),
+        Stage::Scan | Stage::Triage => Err(Cutoff::failed(format!(
+            "{}不排到任务台上：扫描从库屏根那一块排，裁决在待确认队列屏上做",
+            stage.label()
+        ))),
+    }
+}
+
+/// 顶上那一行「下一步」那颗按钮上写的字：排任务的写「开跑某某」，裁决那一道写 [`TO_QUEUE`]。
+///
+/// **带上那一道的名字**：它与那一行自己那颗「开跑」不在一处，只写「开跑」读不出按下去跑的是哪一道。
+fn go_label(stage: Stage) -> String {
+    match stage {
+        Stage::Triage => TO_QUEUE.to_string(),
+        Stage::Scan | Stage::Identify | Stage::Scrape | Stage::FoldTitles | Stage::Export => {
+            format!("开跑{}", stage.label())
+        }
     }
 }
 
@@ -1003,8 +1204,24 @@ struct ExportKnobs {
 /// 与那一趟开跑时（[`identify_run`] 兜底）。
 fn missing_dat(workspace: &Path) -> Option<String> {
     (!workspace::dat_repo_path(workspace).exists()).then(|| {
-        "还没有 DAT 库。先在上面「数据源」那一段把它取回来——没有弹药就没有命中率。".to_string()
+        "还没有 DAT 库。先在「数据源」那一块把它取回来——没有弹药就没有命中率。".to_string()
     })
+}
+
+/// 一个根都还没有时按扫描，屏上那一句：为什么不行、去哪儿加。
+const NO_ROOTS: &str = "这个库一个根都还没有，扫描无从下手。先按右上角「添加根…」选一个目录。";
+
+/// 一个根都还没有时按扫描那句话；有根就是 `None`。
+///
+/// **不是判断，是查一眼有没有**（ADR-0005 修订段「原料还没备齐」），与 [`missing_dat`] 同形。
+/// **读不动库交 `None`**：那不是缺一样东西，是一件该去查的事（同 [`export_refusal`]）——库屏那一侧照它
+/// 手上那几个根排，一个都没有就什么都不排，而那份库读不动的话库屏自己已经说过了。
+fn no_roots(catalog: &Catalog) -> Option<String> {
+    catalog
+        .roots()
+        .ok()
+        .filter(Vec::is_empty)
+        .map(|_| NO_ROOTS.to_string())
 }
 
 /// 跑一趟**识别**。
@@ -1012,7 +1229,7 @@ fn identify_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Prod
     // **没有弹药就没有命中率**：DAT 库不在时直说。偷偷让 `DatRepo::open` 当场建出一份
     // 空库跑下去的话，整库都会落成「未命中」并写进中立库——那是一条**假结论**，
     // 不是一次失败。命令行开头拦的是同一件事，但两处各说各的话（那一句指的是
-    // `romcat dat sync`，这一句指的是上面「数据源」那一段）——挂单 `Q423`。
+    // `romcat dat sync`，这一句指的是库屏「数据源」那一块）——挂单 `Q423`。
     //
     // **按下去那一刻已经问过一遍**（`Section::refusal`：不排，只在屏上说）。这里再问一遍是
     // 兜底——排上去之后、轮到它之前那份库被挪走了。那是真跑起来才撞上的，照实记失败；
@@ -1227,14 +1444,14 @@ fn export_run(
 /// 还没选过导出的前端格式与目录时那句话：缺什么、去哪儿选。
 ///
 /// **没选过就如实拒绝**，不替人挑一个格式与目录：挑错一个目录就是往别人的盘上写一堆文件。
-/// 这一句与工序段底下那一行的空态说的是同一件事（挂单 `Q437`）。
+/// 这一句与库屏「导出设置」那一块的空态说的是同一件事（挂单 `Q437`）。
 const EXPORT_NOT_CHOSEN: &str =
-    "还没选过导出的前端格式与目录。先在工序段底下那一行选一次，选完记进这份库。";
+    "还没选过导出的前端格式与目录。先在「导出设置」那一块选一次，选完记进这份库。";
 
 /// 记着的那个前端格式这一版没有适配器时那句话：**为什么在核心里**（`ExportSetup::adapter`
 /// 的 `Display`，ADR-0005），这一层只在后面补上去哪儿重选。
 fn no_adapter(error: &romcat_core::catalog::ExportSetupError) -> String {
-    format!("{error}先在工序段底下那一行重选一次。")
+    format!("{error}先在「导出设置」那一块重选一次。")
 }
 
 /// **导出**那一支按下去之前就判得出的那句拒绝；前提都在就是 `None`。

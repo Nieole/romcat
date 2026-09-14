@@ -32,6 +32,7 @@
 //! 两份连接同时写同一个文件由 SQLite 的 WAL 与 `busy_timeout` 兜着。
 //! **只活在内存里的库（合成数据）没有文件**，那时候直说扫不了——不偷偷开一份空库。
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -42,10 +43,29 @@ use romcat_core::report::{human_bytes, human_duration, human_time, thousands};
 use romcat_core::scan::{self, CheckpointOptions, Jobs, ScanOptions};
 use romcat_core::site::Site;
 use romcat_core::sources::{self, Source, SourceState, SourceStatus};
+use romcat_core::stage::Stage;
 use romcat_core::task::{Cutoff, Ending};
 
 use crate::font;
+use crate::layout::{FOLD_EXPORT, FOLD_ROOTS, FOLD_SOURCES, Fold};
 use crate::task::{Product, Tasks};
+use crate::tokens::Tokens;
+
+/// 根那一块一个根都没有时画的那一句。**空着的那一块说清下一步去哪儿办**，不画一张只有表头的表
+/// （票 `gui-looks-like-the-design/06`）。
+const ROOTS_EMPTY: &str = "还没有根。按右上角「添加根…」选一个目录，或者把目录贴进底下那个框\
+     ——几块盘都能加进同一个库。";
+
+/// 数据源那一块在**还没扫描**、又有源没取回时画的那一句：扫描与取回互不挡道，下一步可以两件一起办。
+const SOURCES_BEFORE_SCAN: &str =
+    "还没扫描。扫描的时候就可以先把这几个源取回来——识别和刮削要用它们。";
+
+/// 屏头那颗按钮上写的字：弹系统的选目录对话框，选中的加成一个根（`Screen::pick_root`）。
+pub const ADD_ROOT: &str = "添加根…";
+
+/// 库屏两栏里左边（工序）占多少：设计稿 `.libgrid` 是 `1.25fr : 1fr`。**设计稿不给断点**，
+/// 窗口窄了两栏一起收窄，不叠成一栏。
+const LEFT_SHARE: f32 = 1.25 / 2.25;
 
 /// 「添加目录」那两个框里的提示字。
 ///
@@ -89,6 +109,9 @@ pub struct Screen {
     removing: Option<String>,
     error: Option<String>,
     notice: Option<String>,
+    /// 右边那一栏里眼下收着的那几块（[`Fold`]）。开窗时从版式偏好里交进来、每帧画完抄回去
+    /// （`App::new` / `App::ui`）——这一屏自己不读写文件。
+    folded: BTreeSet<&'static str>,
 }
 
 /// 这一屏排上去的活是哪一种。
@@ -121,6 +144,22 @@ impl Screen {
             removing: None,
             error: None,
             notice: None,
+            folded: BTreeSet::new(),
+        }
+    }
+
+    /// 右边那一栏这一块收着没有。
+    #[must_use]
+    pub fn folded(&self, fold: Fold) -> bool {
+        self.folded.contains(fold.id)
+    }
+
+    /// 记下右边那一栏这一块收着还是摊开。点那一块的标题栏走的就是它。
+    pub fn set_folded(&mut self, fold: Fold, folded: bool) {
+        if folded {
+            self.folded.insert(fold.id);
+        } else {
+            self.folded.remove(fold.id);
         }
     }
 
@@ -319,6 +358,7 @@ impl Screen {
         });
         self.error = None;
         self.running.push((id, Job::Scan(name.to_string())));
+        self.sync_scan_board();
     }
 
     /// 取回一个数据源，**排到任务台上**。
@@ -356,6 +396,7 @@ impl Screen {
             return false;
         };
         let (_, job) = self.running.remove(at);
+        self.sync_scan_board();
         if job == Job::Fetch(Source::Dat) {
             self.stages.set_dat_on_board(false);
         }
@@ -420,6 +461,40 @@ impl Screen {
             .map(|(id, _)| *id)
     }
 
+    /// 工序段扫描那一行（或者顶上「下一步」）按下去之后留的记号：取走就把该扫的根排上任务台
+    /// （`stages::Section::take_handoff`）。**排扫描只有 [`Self::scan`] 这一份实现。**
+    ///
+    /// 排哪几个根：**还没完整扫过一趟的**（[`LibraryRoot::fully_scanned`]），也就是那一行数的那几个。
+    /// 都扫过了，这一下就是「重新扫描」：每个根都排一趟。
+    pub fn take_scan(&mut self, site: &Site, tasks: &mut Tasks) {
+        if !self.stages.take_handoff(Stage::Scan) {
+            return;
+        }
+        let 没扫完的: Vec<String> = self
+            .roots
+            .iter()
+            .filter(|row| !row.root.fully_scanned())
+            .map(|row| row.root.name.clone())
+            .collect();
+        let 要扫 = if 没扫完的.is_empty() {
+            self.roots.iter().map(|row| row.root.name.clone()).collect()
+        } else {
+            没扫完的
+        };
+        for name in 要扫 {
+            self.scan(site, tasks, &name);
+        }
+    }
+
+    /// 把台上头一趟扫描的任务号告诉工序段：扫描那一行的按钮照它禁（`stages::Section::task_of`）。
+    fn sync_scan_board(&mut self) {
+        let id = self
+            .running
+            .iter()
+            .find_map(|(id, job)| matches!(job, Job::Scan(_)).then_some(*id));
+        self.stages.set_scan_on_board(id);
+    }
+
     /// 顶栏上属于这一屏的那一段。
     pub fn status(&mut self, ui: &mut egui::Ui, _site: &Site) {
         let 没取回 = self.sources.iter().filter(|it| !it.ready()).count();
@@ -440,29 +515,108 @@ impl Screen {
     }
 
     fn body(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
-        ui.heading("库");
-        ui.weak("这个库由什么构成：根 + 数据源 + 还差哪几道工序");
+        let 间距 = panel_gap();
+        // 屏头（设计稿 `.scrhead`）：屏名、一句说明，右边一颗「添加根…」。
+        let mut 要选根 = false;
+        ui.horizontal(|ui| {
+            ui.heading("库");
+            ui.weak("根、数据源和处理进度");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                要选根 = ui
+                    .button(ADD_ROOT)
+                    .on_hover_text(format!(
+                        "选一个目录，加成这个库的一个根。{}",
+                        crate::pick::FALLBACK_HINT
+                    ))
+                    .clicked();
+            });
+        });
         if let Some(error) = &self.error {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
         if let Some(notice) = &self.notice {
             ui.weak(notice);
         }
-        ui.separator();
+        ui.add_space(间距);
 
-        self.roots_ui(ui, site, tasks);
-        ui.add_space(18.0);
-        self.sources_ui(ui, tasks);
-        ui.add_space(18.0);
-        self.stages.ui(ui, site, tasks);
+        // 两栏（设计稿 `.libgrid`）：左边工序段，右边根、数据源、导出设置三块。
+        ui.horizontal_top(|ui| {
+            let 左宽 = (ui.available_width() - 间距) * LEFT_SHARE;
+            ui.vertical(|ui| {
+                ui.set_width(左宽);
+                panel_frame(ui)
+                    .inner_margin(panel_padding())
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        self.stages.ui(ui, site, tasks);
+                    });
+            });
+            ui.add_space((间距 - ui.spacing().item_spacing.x).max(0.0));
+            ui.vertical(|ui| {
+                ui.set_width(ui.available_width());
+                self.side_ui(ui, site, tasks);
+            });
+        });
+        // 工序段扫描那一行按下去只留记号：这一屏自己那条扫描的路接着排（`Self::take_scan`）。
+        self.take_scan(site, tasks);
+        if 要选根 {
+            self.pick_root(site);
+        }
+    }
+
+    /// 右边那一栏：根、数据源、导出设置三块，**各自收得起来**（[`Fold`]），次序照设计稿。
+    fn side_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
+        let 间距 = panel_gap();
+        let mut 收着 = self.folded(FOLD_ROOTS);
+        // 标题带着几个根，与工序段上「工序 · N 道」同一个写法：收着的时候也看得出这个库有几个根。
+        let 标题 = format!("根 · {} 个", self.roots.len());
+        foldable_panel(
+            ui,
+            &标题,
+            "同一个主库可以包含多块盘或多个目录",
+            &mut 收着,
+            |ui| self.roots_ui(ui, site, tasks),
+        );
+        self.set_folded(FOLD_ROOTS, 收着);
+        ui.add_space(间距);
+
+        let mut 收着 = self.folded(FOLD_SOURCES);
+        foldable_panel(
+            ui,
+            "数据源",
+            "识别和刮削要用的本地数据",
+            &mut 收着,
+            |ui| self.sources_ui(ui, tasks),
+        );
+        self.set_folded(FOLD_SOURCES, 收着);
+        ui.add_space(间距);
+
+        let mut 收着 = self.folded(FOLD_EXPORT);
+        foldable_panel(
+            ui,
+            "导出设置",
+            "设置一次，之后在工序段上直接运行导出",
+            &mut 收着,
+            |ui| self.stages.export_setup_ui(ui, site),
+        );
+        self.set_folded(FOLD_EXPORT, 收着);
+    }
+
+    /// 屏头那颗「添加根…」：弹系统的选目录对话框，选中的交给 [`Self::add_root`]——**加根只有那一条路**
+    /// （挂单 `Q694`，与开场那条向导选第一个根同一个办法）。名字不填，按目录自己的名字取；取消了什么都
+    /// 不发生。对话框弹不出来时，根那一块底下那两个框照旧贴得进路径（`crate::pick` 的模块文档）。
+    fn pick_root(&mut self, site: &Site) {
+        let 起点 = self
+            .roots
+            .last()
+            .and_then(|row| Path::new(&row.root.path).parent().map(Path::to_path_buf))
+            .unwrap_or_default();
+        if let Some(path) = crate::pick::directory("选一个目录作为根", &起点) {
+            self.add_root(site, &path.to_string_lossy(), "");
+        }
     }
 
     fn roots_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
-        ui.horizontal(|ui| {
-            ui.label(font::strong(format!("根 · {} 个", self.roots.len())));
-            ui.weak("主库是一组根：几块盘都能加进同一个库，扫完收进同一份中立库");
-        });
-
         let mut 要扫 = None;
         let mut 要移除 = None;
         let mut 要点头 = None;
@@ -471,63 +625,79 @@ impl Screen {
         // （借用检查器要的，也让「按一下发生什么」读起来是一条直线）。
         let roots = self.roots.clone();
         let 忙的 = self.busy_roots();
-        egui::Grid::new("根")
-            .num_columns(6)
-            .striped(true)
-            .show(ui, |ui| {
-                for header in ["根名", "路径", "变体", "容量", "上次扫描", ""] {
-                    ui.label(font::strong(header));
-                }
-                ui.end_row();
-                for row in &roots {
-                    ui.label(&row.root.name);
-                    // 路径、变体数与容量用等宽：一列扫下来位数对得齐。
-                    if row.mounted {
-                        ui.label(font::mono(&row.root.path).weak());
-                    } else {
-                        // **盘没挂上照样看得见上次结果**——那是这一行存在的一半理由。
-                        ui.colored_label(
-                            ui.visuals().warn_fg_color,
-                            font::mono(format!("{}（不在位）", row.root.path)),
-                        );
-                    }
-                    ui.label(font::mono(thousands(row.stats.variants)));
-                    ui.label(font::mono(human_bytes(row.stats.bytes)));
-                    ui.label(last_scan(row));
-                    ui.horizontal(|ui| {
-                        let 忙 = 忙的.contains(&row.root.name);
-                        let 标签 = if row.root.scan.is_some() {
-                            "重扫"
-                        } else {
-                            "扫描"
-                        };
-                        if ui
-                            .add_enabled(!忙, egui::Button::new(标签))
-                            .on_hover_text("排到任务台上跑，期间照常用别的屏")
-                            .clicked()
-                        {
-                            要扫 = Some(row.root.name.clone());
-                        }
-                        if self.removing.as_deref() == Some(row.root.name.as_str()) {
-                            ui.colored_label(
-                                ui.visuals().warn_fg_color,
-                                format!("会去掉 {} 个变体", thousands(row.stats.variants)),
-                            );
-                            if ui.button("确认移除").clicked() {
-                                要移除 = Some(row.root.name.clone());
+        if roots.is_empty() {
+            ui.weak(ROOTS_EMPTY);
+        } else {
+            // 表比这一栏宽时（路径长）横着滚，不把整屏撑宽（设计稿 `.scrollx`）。
+            egui::ScrollArea::horizontal()
+                .id_salt("根那一块")
+                .show(ui, |ui| {
+                    egui::Grid::new("根")
+                        .num_columns(6)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for header in ["根名", "路径", "变体", "容量", "上次扫描", ""]
+                            {
+                                ui.label(font::strong(header));
                             }
-                            // **「算了」得真的算了。** 一个只能前进不能后退的破坏性确认，
-                            // 比不加确认更坏。
-                            if ui.button("算了").clicked() {
-                                要收回 = true;
+                            ui.end_row();
+                            for row in &roots {
+                                ui.label(&row.root.name);
+                                // 路径、变体数与容量用等宽：一列扫下来位数对得齐。
+                                if row.mounted {
+                                    ui.label(font::mono(&row.root.path).weak());
+                                } else {
+                                    // **盘没挂上照样看得见上次结果**——那是这一行存在的一半理由。
+                                    ui.colored_label(
+                                        ui.visuals().warn_fg_color,
+                                        font::mono(format!("{}（不在位）", row.root.path)),
+                                    );
+                                }
+                                ui.label(font::mono(thousands(row.stats.variants)));
+                                ui.label(font::mono(human_bytes(row.stats.bytes)));
+                                ui.label(last_scan(row));
+                                ui.horizontal(|ui| {
+                                    let 忙 = 忙的.contains(&row.root.name);
+                                    let 标签 = if row.root.scan.is_some() {
+                                        "重扫"
+                                    } else {
+                                        "扫描"
+                                    };
+                                    if ui
+                                        .add_enabled(!忙, egui::Button::new(标签))
+                                        .on_hover_text("排到任务台上跑，期间照常用别的屏")
+                                        .clicked()
+                                    {
+                                        要扫 = Some(row.root.name.clone());
+                                    }
+                                    if self.removing.as_deref() == Some(row.root.name.as_str()) {
+                                        ui.colored_label(
+                                            ui.visuals().warn_fg_color,
+                                            format!(
+                                                "会去掉 {} 个变体",
+                                                thousands(row.stats.variants)
+                                            ),
+                                        );
+                                        if ui.button("确认移除").clicked() {
+                                            要移除 = Some(row.root.name.clone());
+                                        }
+                                        // **「算了」得真的算了。** 一个只能前进不能后退的破坏性确认，
+                                        // 比不加确认更坏。
+                                        if ui.button("算了").clicked() {
+                                            要收回 = true;
+                                        }
+                                    } else if ui
+                                        .add_enabled(!忙, egui::Button::new("移除"))
+                                        .clicked()
+                                    {
+                                        要点头 = Some(row.root.name.clone());
+                                    }
+                                });
+                                ui.end_row();
                             }
-                        } else if ui.add_enabled(!忙, egui::Button::new("移除")).clicked() {
-                            要点头 = Some(row.root.name.clone());
-                        }
-                    });
-                    ui.end_row();
-                }
-            });
+                        });
+                });
+        }
 
         if 要收回 {
             self.removing = None;
@@ -542,88 +712,106 @@ impl Screen {
             self.remove_root(site, &name);
         }
 
-        ui.add_space(6.0);
+        ui.add_space(step(1));
+        // **对话框弹不出来时的退路**（`crate::pick` 的模块文档）：把目录贴进来。这一块在右边那一栏里，
+        // 窄——两个框**跟着这一栏的宽度摆**，不写死宽度：写死的话按钮被挤出这一栏，画都画不出来。
+        ui.label("添加目录");
+        ui.add(
+            egui::TextEdit::singleline(&mut self.new_path)
+                .hint_text(ROOT_HINT)
+                .desired_width(f32::INFINITY),
+        );
+        let mut 要加 = false;
         ui.horizontal(|ui| {
-            ui.label("添加目录");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.new_path)
-                    .hint_text(ROOT_HINT)
-                    .desired_width(320.0),
-            );
-            ui.add(
-                egui::TextEdit::singleline(&mut self.new_name)
-                    .hint_text(ROOT_NAME_HINT)
-                    .desired_width(180.0),
-            );
-            if ui.button("+ 添加目录").clicked() {
-                let (path, name) = (self.new_path.clone(), self.new_name.clone());
-                self.add_root(site, &path, &name);
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                要加 = ui.button("+ 添加目录").clicked();
+                let 余下 = ui.available_width();
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.new_name)
+                        .hint_text(ROOT_NAME_HINT)
+                        .desired_width(余下),
+                );
+            });
         });
+        if 要加 {
+            let (path, name) = (self.new_path.clone(), self.new_name.clone());
+            self.add_root(site, &path, &name);
+        }
     }
 
     fn sources_ui(&mut self, ui: &mut egui::Ui, tasks: &mut Tasks) {
-        ui.horizontal(|ui| {
-            ui.label(font::strong("数据源 · 让识别能干活的原料"));
-        });
         let mut 要取 = None;
-        egui::Grid::new("数据源")
-            .num_columns(5)
-            .striped(true)
+        // **还没扫描**：一个根都没扫过（或者一个根都没有）。那时有源没取回，就说下一步可以先取回它们。
+        // 判据与工序段扫描那一行同一句（`LibraryRoot::fully_scanned`，ADR-0024）：一个根都没完整扫过。
+        let 还没扫描 = !self.roots.iter().any(|row| row.root.fully_scanned());
+        if 还没扫描 && self.sources.iter().any(|status| !status.ready()) {
+            ui.weak(SOURCES_BEFORE_SCAN);
+        }
+        egui::ScrollArea::horizontal()
+            .id_salt("数据源那一块")
             .show(ui, |ui| {
-                for header in ["源", "记录", "上次取回", "覆盖", ""] {
-                    ui.label(font::strong(header));
-                }
-                ui.end_row();
-                for (source, status) in Source::all().into_iter().zip(&self.sources) {
-                    ui.label(status.name);
-                    match &status.state {
-                        SourceState::Ready {
-                            records,
-                            fetched_at,
-                        } => {
-                            ui.label(thousands(*records));
-                            ui.label(fetched_at.map_or_else(|| "——".to_string(), human_time));
-                            ui.weak(&status.coverage);
+                egui::Grid::new("数据源")
+                    .num_columns(5)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for header in ["源", "记录", "上次取回", "覆盖", ""] {
+                            ui.label(font::strong(header));
                         }
-                        // **还没取回的要被明确标出来**：那正是「扫完了怎么没认出来」
-                        // 的答案。
-                        SourceState::Missing => {
-                            ui.colored_label(ui.visuals().warn_fg_color, "还没取回");
-                            ui.weak("——");
-                            ui.colored_label(ui.visuals().warn_fg_color, status.cost);
-                        }
-                        // **读不动不等于空**（ADR-0021）：那要人去看一眼，不是按一下取回。
-                        SourceState::Broken { why } => {
-                            ui.colored_label(ui.visuals().error_fg_color, "读不动");
-                            ui.weak("——");
-                            ui.colored_label(ui.visuals().error_fg_color, why);
-                        }
-                    }
-                    let 忙 = self
-                        .running
-                        .iter()
-                        .any(|(_, job)| *job == Job::Fetch(source));
-                    let 标签 = if status.ready() { "重取" } else { "取回" };
-                    if ui
-                        .add_enabled(!忙, egui::Button::new(标签))
-                        .on_hover_text(
-                            "联网取一趟，排到任务台上跑。\
+                        ui.end_row();
+                        for (source, status) in Source::all().into_iter().zip(&self.sources) {
+                            ui.label(status.name);
+                            match &status.state {
+                                SourceState::Ready {
+                                    records,
+                                    fetched_at,
+                                } => {
+                                    ui.label(thousands(*records));
+                                    ui.label(
+                                        fetched_at.map_or_else(|| "——".to_string(), human_time),
+                                    );
+                                    ui.weak(&status.coverage);
+                                }
+                                // **还没取回的要被明确标出来**：那正是「扫完了怎么没认出来」
+                                // 的答案。
+                                SourceState::Missing => {
+                                    ui.colored_label(ui.visuals().warn_fg_color, "还没取回");
+                                    ui.weak("——");
+                                    ui.colored_label(ui.visuals().warn_fg_color, status.cost);
+                                }
+                                // **读不动不等于空**（ADR-0021）：那要人去看一眼，不是按一下取回。
+                                SourceState::Broken { why } => {
+                                    ui.colored_label(ui.visuals().error_fg_color, "读不动");
+                                    ui.weak("——");
+                                    ui.colored_label(ui.visuals().error_fg_color, why);
+                                }
+                            }
+                            let 忙 = self
+                                .running
+                                .iter()
+                                .any(|(_, job)| *job == Job::Fetch(source));
+                            let 标签 = if status.ready() { "重取" } else { "取回" };
+                            if ui
+                                .add_enabled(!忙, egui::Button::new(标签))
+                                .on_hover_text(
+                                    "联网取一趟，排到任务台上跑。\
                              中文离线源那一条按得停——按下之后在当前这一块读完就收手，\
                              不等那 435 MB 下完。另外两条开跑之后还停不下来。",
-                        )
-                        .clicked()
-                    {
-                        要取 = Some(source);
-                    }
-                    ui.end_row();
-                }
+                                )
+                                .clicked()
+                            {
+                                要取 = Some(source);
+                            }
+                            ui.end_row();
+                        }
+                    });
             });
         if let Some(source) = 要取 {
             self.fetch(tasks, source);
         }
-        ui.add_space(6.0);
-        ui.weak("扫完没认出来？先看这一屏——多半是某个源还没取回。");
+        if !还没扫描 {
+            ui.add_space(step(0));
+            ui.weak("扫完没认出来？先看这一屏——多半是某个源还没取回。");
+        }
     }
 }
 
@@ -669,6 +857,94 @@ pub fn add_root_from_fields(
         name.trim().to_string()
     };
     roots::add_root(catalog, Some(workspace), &name, &normalized).map_err(|why| why.to_string())
+}
+
+/// 令牌里间距那几档的第 `at` 档（`space.steps`，从窄到宽）。**这一屏的间距只从这几档里取。**
+fn step(at: usize) -> f32 {
+    Tokens::builtin()
+        .space
+        .steps
+        .get(at)
+        .copied()
+        .unwrap_or_default()
+}
+
+/// 面板与面板之间、两栏之间隔多宽：设计稿 `.libgrid` 与右边那一栏都是 18 点，取令牌间距里最近那一档（16）。
+fn panel_gap() -> f32 {
+    step(3)
+}
+
+/// 面板内边距（令牌 `space.panel-padding`：上下、左右）。工序段那几行也用它（`stages::Section::ui`）。
+pub(crate) fn panel_padding() -> egui::Margin {
+    let [pad_y, pad_x] = Tokens::builtin().space.panel_padding;
+    egui::Margin::from(egui::vec2(pad_x, pad_y))
+}
+
+/// 设计稿里的一块**面板**（`.panel`）：`panel` 底、`line` 描边、`large` 圆角。颜色取主题里由令牌装上去
+/// 的那几格（`look.rs` 那张槽位表），圆角取令牌。
+fn panel_frame(ui: &egui::Ui) -> egui::Frame {
+    let visuals = ui.visuals();
+    egui::Frame::new()
+        .fill(visuals.window_fill)
+        .stroke(visuals.widgets.noninteractive.bg_stroke)
+        .corner_radius(egui::CornerRadius::same(Tokens::builtin().radius.large))
+}
+
+/// 一块**收得起来的面板**：头上一条标题栏（设计稿 `.phead`：标题、一句说明、右边一个折叠标），
+/// **点标题栏收起、再点摊开**；收着时只画标题栏，好让它还点得开。`folded` 是这一块眼下收着没有，
+/// 点了当场翻过来——记不记得住由调用方交给版式偏好（[`Fold`]）。
+fn foldable_panel(
+    ui: &mut egui::Ui,
+    title: &str,
+    sub: &str,
+    folded: &mut bool,
+    body: impl FnOnce(&mut egui::Ui),
+) {
+    panel_frame(ui).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let spacing = ui.spacing().item_spacing;
+        // 标题栏、分隔线、正文之间不留缝：分隔线就是缝。段里头照旧用原来的间距。
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let header = egui::Frame::new()
+            .inner_margin(panel_padding())
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = spacing;
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(font::strong(title));
+                    ui.label(egui::RichText::new(sub).small().weak());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let 边长 = ui.spacing().icon_width;
+                        let (_, 标) =
+                            ui.allocate_exact_size(egui::vec2(边长, 边长), egui::Sense::hover());
+                        let 摊开 = if *folded { 0.0 } else { 1.0 };
+                        egui::collapsing_header::paint_default_icon(ui, 摊开, &标);
+                    });
+                });
+            });
+        let 标题栏 = header
+            .response
+            .interact(egui::Sense::click())
+            .on_hover_text(if *folded {
+                "点一下摊开"
+            } else {
+                "点一下收起"
+            });
+        if 标题栏.clicked() {
+            *folded = !*folded;
+        }
+        if *folded {
+            return;
+        }
+        ui.add(egui::Separator::default().spacing(0.0));
+        egui::Frame::new()
+            .inner_margin(panel_padding())
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = spacing;
+                ui.set_width(ui.available_width());
+                body(ui);
+            });
+    });
 }
 
 /// 一个根上次扫描那一句。**没扫过与扫过是两件事**，说清楚。

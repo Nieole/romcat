@@ -44,6 +44,7 @@ use romcat_core::task::Ending;
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::sample::zip;
 use romcat_core::testing::{TempDir, temp_dir};
+use romcat_core::triage::Scope;
 use romcat_gui::app::{App, View};
 use romcat_gui::headless;
 
@@ -264,7 +265,7 @@ impl 现场 {
             .clone()
     }
 
-    /// 选一次**前端格式**与**导出目录**。界面上工序段底下那一行填完按「记下」走的就是它。
+    /// 选一次**前端格式**与**导出目录**。界面上「导出设置」那一块填完按「记下」走的就是它。
     fn 选一次导出去哪儿(&mut self, 格式: &str, 目录: &Path) {
         let (screen, site, _) = self.app.roots_site_and_tasks();
         screen
@@ -1320,7 +1321,7 @@ fn 工序段上折标题一行_画的是上次跑的时刻() {
         "工序段上没有整理标题那一行：\n{屏上}",
     );
     assert!(
-        屏上.lines().any(|line| line.trim() == "工序 · 4 道"),
+        屏上.lines().any(|line| line.trim() == "工序 · 6 道"),
         "工序段说的道数不对：\n{屏上}",
     );
 
@@ -1397,8 +1398,9 @@ fn 工序段上导出一行_画的是上次跑的时刻() {
 
 #[test]
 fn 工序段上刮削一行_数与口径都画在屏上() {
-    // 验收第 1–3 条：工序段有四行、刮削那一行报得出「一条刮削结论都没有的变体」有几个、
-    // 那个数的口径**画在屏上**——不只在悬停里，人不会去悬停一个数。
+    // 验收第 1–3 条：工序段有这几行（票 `gui-answers-all-six/04` 时四行，票
+    // `gui-looks-like-the-design/06` 补齐扫描与裁决成六行）、刮削那一行报得出「一条刮削结论都没有的
+    // 变体」有几个、那个数的口径**画在屏上**——不只在悬停里，人不会去悬停一个数。
     let 库 = 建库("gui-stages-刮削一行");
     let ctx = headless::context();
     let mut 现场 = 现场::摆好();
@@ -1415,7 +1417,7 @@ fn 工序段上刮削一行_数与口径都画在屏上() {
         现场.app.ui(ui)
     }));
     assert!(
-        屏上.lines().any(|line| line.trim() == "工序 · 4 道"),
+        屏上.lines().any(|line| line.trim() == "工序 · 6 道"),
         "工序段说的道数不对：\n{屏上}",
     );
     assert!(
@@ -1438,6 +1440,414 @@ fn 工序段上刮削一行_数与口径都画在屏上() {
             .lines()
             .any(|line| line.trim() == "2 个变体连识别都还没跑过"),
         "加了刮削那一行，识别那一行不见了：\n{屏上}",
+    );
+}
+
+#[test]
+fn 工序六行齐_次序照设计稿_每行报得出数或退回时刻() {
+    // 票 `gui-looks-like-the-design/06` 验收第 1 条：库屏上看得见**整条路有多长、走到了哪儿**
+    // ——扫描、识别、刮削、整理标题、裁决、导出六行，次序照设计稿。每一行都得说话：说得出
+    // 还差多少的报数，算不出的那两支（整理标题、导出）退回上次跑的时刻并说清为什么。
+    let 库 = 建库("gui-stages-六行");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+
+    跑一帧(&ctx, &mut 现场.app);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+
+    // **六个名字按这个次序画出来**：屏上别处也可能有同一个词（按钮、说明），所以按子序列找。
+    let 六行 = ["扫描", "识别", "刮削", "整理标题", "裁决", "导出"];
+    let mut 往下找 = 屏上.lines().map(str::trim);
+    for 名字 in 六行 {
+        assert!(
+            往下找.any(|line| line == 名字),
+            "工序段上「{名字}」那一行没画出来，或者次序与设计稿对不上：\n{屏上}",
+        );
+    }
+
+    let 行 = 现场.app.roots().stages().rows();
+    assert_eq!(行.len(), 六行.len(), "工序段不是六行：{行:?}");
+    for row in 行 {
+        let 那一句 = 现场.app.roots().stages().line(row);
+        assert!(
+            屏上.contains(&那一句),
+            "「{}」那一行说的话没画在屏上：{那一句}\n屏上：\n{屏上}",
+            row.stage.label(),
+        );
+    }
+    // **新补的两行各说各的**：唯一那个根完整扫过一趟；还没跑过识别，裁决那一行不说「没有等着裁决的」
+    // 那句空话，说它在等识别（`Stages::line`）。
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line.trim() == "每个根都完整扫过一趟了"),
+        "扫描那一行说的不是还差几个根：\n{屏上}",
+    );
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line.trim() == "等识别做完，这一行才说得准"),
+        "识别还没跑过，裁决那一行没说它在等识别：\n{屏上}",
+    );
+    // **算不出的那两支退回时刻**，不画零。
+    for 算不出的 in [Stage::FoldTitles, Stage::Export] {
+        let 那一句 = 现场
+            .app
+            .roots()
+            .stages()
+            .of(算不出的)
+            .expect("有这一行")
+            .render();
+        assert!(
+            那一句.contains("还没跑过") && 那一句.contains("算不出还差多少"),
+            "「{}」那一行没退回时刻：{那一句}",
+            算不出的.label(),
+        );
+    }
+}
+
+/// 库屏眼下**真画出来**的字：先空跑一帧把界面跑稳，再画一帧收字。
+fn 库屏上的字(ctx: &egui::Context, app: &mut App) -> String {
+    跑一帧(ctx, app);
+    画出来的字(&headless::frame(ctx, headless::input(), |ui| app.ui(ui)))
+}
+
+#[test]
+fn 顶上那一行下一步指向该做的那一道_按钮点得动_跑完自动指向下一道() {
+    // 票 `gui-looks-like-the-design/06` 验收第 2 条：人不必自己判断先做哪个。顶上那一行说
+    // 「下一步：……」、说清那一道还差什么，旁边那颗按钮一按就办；**跑完它自己指向下一道**。
+    // 指哪一道由核心库判（`Stages::next_up`，挂单 `Q823`），这一条只看屏上与按下去之后。
+    let 库 = 建库("gui-stages-下一步");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.装上弹药();
+    现场.加根(库.path(), "主库");
+
+    // 加了根还没扫：下一步是扫描。**真点那颗按钮**（指针事件），不是直接调函数。
+    let 屏上 = 库屏上的字(&ctx, &mut 现场.app);
+    assert!(
+        屏上.lines().any(|line| line.trim() == "下一步：扫描"),
+        "加了根还没扫，顶上没指向扫描：\n{屏上}",
+    );
+    点一下(&ctx, &mut 现场.app, "开跑扫描");
+    现场.等任务跑完();
+
+    // 扫完了：**自己指向识别**，并说清那一道还差什么。
+    let 屏上 = 库屏上的字(&ctx, &mut 现场.app);
+    assert!(
+        屏上.lines().any(|line| line.trim() == "下一步：识别"),
+        "扫完了，顶上没自己指向识别：\n{屏上}",
+    );
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line.trim() == "2 个变体连识别都还没跑过"),
+        "顶上没说识别还差什么：\n{屏上}",
+    );
+    点一下(&ctx, &mut 现场.app, "开跑识别");
+    现场.等任务跑完();
+
+    let 屏上 = 库屏上的字(&ctx, &mut 现场.app);
+    assert!(
+        屏上.lines().any(|line| line.trim() == "下一步：刮削"),
+        "识别跑完了，顶上没自己指向刮削：\n{屏上}",
+    );
+    点一下(&ctx, &mut 现场.app, "开跑刮削");
+    现场.等任务跑完();
+
+    let 屏上 = 库屏上的字(&ctx, &mut 现场.app);
+    assert!(
+        屏上.lines().any(|line| line.trim() == "下一步：整理标题"),
+        "刮削跑完了，顶上没自己指向整理标题：\n{屏上}",
+    );
+    点一下(&ctx, &mut 现场.app, "开跑整理标题");
+    现场.等任务跑完();
+
+    // DAT 库是空的：两个变体都没认出来，等着裁决。**裁决不排任务**，那颗按钮把人带去待确认队列屏。
+    let 屏上 = 库屏上的字(&ctx, &mut 现场.app);
+    assert!(
+        屏上.lines().any(|line| line.trim() == "下一步：裁决"),
+        "整理标题跑完了，顶上没自己指向裁决：\n{屏上}",
+    );
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line.trim() == "2 个变体在待确认队列里等着裁决"),
+        "顶上没说裁决还差什么：\n{屏上}",
+    );
+    点一下(&ctx, &mut 现场.app, "去待确认队列");
+    跑一帧(&ctx, &mut 现场.app);
+    assert_eq!(
+        现场.app.view(),
+        View::Queue,
+        "按了去待确认队列，却没换到那一屏"
+    );
+
+    // 按过的那几下**真排上了任务台、真跑完了**：扫描、识别、刮削、整理标题各一趟。
+    let 跑过的: Vec<&str> = 现场
+        .app
+        .tasks()
+        .history()
+        .iter()
+        .rev()
+        .map(|record| record.name.as_str())
+        .collect();
+    assert_eq!(
+        跑过的,
+        ["扫描 · 主库", "识别", "刮削", "整理标题"],
+        "按下去的那几下排上去的不是这几趟",
+    );
+    for record in 现场.app.tasks().history() {
+        assert!(
+            matches!(record.ending, Ending::Done(_)),
+            "「{}」记成了「{}」",
+            record.name,
+            record.ending.render(),
+        );
+    }
+}
+
+/// **关掉再打开**：同一个工作目录、同一份中立库，新开一个窗口本体。版式偏好在构造时从工作目录读出来。
+fn 关掉再打开(现场: &mut 现场) {
+    let 库文件 = 现场.工作区.path().join("catalog").join("fixture.sqlite3");
+    let site = Site::open_file(现场.工作区.path(), &库文件, None).expect("开得出现场");
+    现场.app = App::new(site, 现场.工作区.path().to_path_buf());
+    现场.app.show_view(View::Library);
+}
+
+#[test]
+fn 根_数据源_导出设置三块收得起来_关掉再打开还是收着的() {
+    // 票 `gui-looks-like-the-design/06` 验收第 3 条：三块照设计稿排在工序段旁边，各自收得起来。
+    // **收起来的样子记在工作目录的版式偏好里**（`layout.rs`，与面板边界同一份文件，不另起一份存储），
+    // 关掉窗口再打开还是收着的。
+    let 库 = 建库("gui-库屏-三块收起");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    let 根的位置 = 现场.app.roots().roots()[0].root.path.clone();
+    let 源的名字 = 现场.app.roots().sources()[0].name.to_string();
+    // 每一块里一段只在那一块里画的字：收起来之后它就不该再画出来。
+    let 三块 = [
+        ("根 · 1 个", 根的位置.as_str()),
+        ("数据源", 源的名字.as_str()),
+        ("导出设置", "选一个前端格式"),
+    ];
+
+    let 屏上 = 库屏上的字(&ctx, &mut 现场.app);
+    for (标题, 里面的字) in 三块 {
+        assert!(
+            屏上.lines().any(|line| line.trim() == 标题),
+            "库屏上没有「{标题}」那一块：\n{屏上}",
+        );
+        assert!(
+            屏上.contains(里面的字),
+            "「{标题}」那一块默认就收着：\n{屏上}"
+        );
+    }
+
+    for (标题, _) in 三块 {
+        点一下(&ctx, &mut 现场.app, 标题);
+    }
+    let 屏上 = 库屏上的字(&ctx, &mut 现场.app);
+    for (标题, 里面的字) in 三块 {
+        assert!(
+            屏上.lines().any(|line| line.trim() == 标题),
+            "收起之后连「{标题}」那一块的标题都没了——收起来的块得还点得开：\n{屏上}",
+        );
+        assert!(
+            !屏上.contains(里面的字),
+            "点了「{标题}」，那一块却没收起来：\n{屏上}",
+        );
+    }
+    assert!(
+        屏上.lines().any(|line| line.trim() == "识别"),
+        "收起那三块，工序段也跟着没了：\n{屏上}",
+    );
+
+    // **关掉再打开**：换一个窗口本体、换一份 egui 上下文——记住它的只能是工作目录里那份文件。
+    关掉再打开(&mut 现场);
+    let ctx = headless::context();
+    let 屏上 = 库屏上的字(&ctx, &mut 现场.app);
+    for (标题, 里面的字) in 三块 {
+        assert!(
+            !屏上.contains(里面的字),
+            "关掉再打开，「{标题}」那一块又摊开了：\n{屏上}",
+        );
+    }
+    assert!(
+        现场.app.layout().path().starts_with(现场.工作区.path()),
+        "收起来的样子没记在工作目录里：{}",
+        现场.app.layout().path().display(),
+    );
+
+    // **再点一下就摊开**，下次打开也记得是摊开的。
+    点一下(&ctx, &mut 现场.app, "根 · 1 个");
+    关掉再打开(&mut 现场);
+    let 屏上 = 库屏上的字(&headless::context(), &mut 现场.app);
+    assert!(
+        屏上.contains(&根的位置),
+        "摊开之后关掉再打开，根那一块还收着：\n{屏上}",
+    );
+}
+
+#[test]
+fn 还没扫描时每一块都有空态并写明下一步_一个根都没有时按扫描只在屏上说() {
+    // 票 `gui-looks-like-the-design/06` 验收第 4 条：一份刚建出来、一个根都没有的库，库屏上**每一块**
+    // 都得说话——空着的那一块说清下一步去哪儿办，而不是一片空白或者一张只有表头的表。
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    let 历史几条 = 现场.app.tasks().history().len();
+
+    let 屏上 = 库屏上的字(&ctx, &mut 现场.app);
+    // 工序段：下一步是扫描，而扫描之前得先添加根。
+    assert!(
+        屏上.lines().any(|line| line.trim() == "下一步：扫描"),
+        "一个根都没有，顶上没指向扫描：\n{屏上}",
+    );
+    assert!(
+        屏上.contains("先添加一个根"),
+        "工序段没说扫描之前得先添加根：\n{屏上}"
+    );
+    // 工序段后面那几行**不说空话**：一个变体都还没有，识别那一行不许说「每个变体都跑过识别了」，说它在等扫描。
+    assert!(
+        !屏上.contains("每个变体都跑过识别了") && 屏上.contains("等扫描做完，这一行才说得准"),
+        "还没扫描，工序段后面那几行在说空话：\n{屏上}",
+    );
+    // 根那一块：一个根都没有，说清去哪儿加。
+    assert!(
+        屏上.contains("还没有根") && 屏上.contains("「添加根…」"),
+        "根那一块空着却没说去哪儿加：\n{屏上}",
+    );
+    // 数据源那一块：还没扫描也能先取回，说清取回来做什么用。
+    assert!(
+        屏上.contains("还没扫描") && 屏上.contains("先把这几个源取回来"),
+        "数据源那一块没说还没扫描时下一步做什么：\n{屏上}",
+    );
+    // 导出设置那一块：还没选过，说清先选一次。
+    assert!(
+        屏上.contains("第一次导出之前先选一次"),
+        "导出设置那一块空着却没说下一步：\n{屏上}",
+    );
+
+    // **顶上那颗按钮按得动**：一个根都没有是按下去之前就判得出的，只在屏上说为什么不行、去哪儿办，
+    // 任务历史不多一条压根没开跑的「失败」（票 `gui-looks-like-the-design/07`）。
+    点一下(&ctx, &mut 现场.app, "开跑扫描");
+    let 屏上 = 库屏上的字(&ctx, &mut 现场.app);
+    let 说的 = 现场
+        .app
+        .roots()
+        .stages()
+        .error()
+        .expect("按了扫描却没说为什么扫不了");
+    assert!(
+        说的.contains("一个根都还没有") && 说的.contains("「添加根…」"),
+        "没说清为什么扫不了、去哪儿加根：{说的}",
+    );
+    assert!(
+        屏上.contains(说的),
+        "那句话没画在屏上：{说的}\n屏上：\n{屏上}"
+    );
+    历史没多一条(&现场.app, 历史几条);
+}
+
+#[test]
+fn 在待确认队列屏上裁完一批再回库屏_裁决那一行跟着变() {
+    // 审查 Spec 轴报的：裁决那一行说的是待确认队列里还有几个变体等着裁决，与待确认队列屏同一个数
+    // （挂单 `Q822`）。人在那一屏上落下一批、回到库屏，那一行得跟着变——不然库屏上说的是裁之前的数，
+    // 顶上「下一步」也还指着裁决。
+    let 库 = 建库("gui-stages-裁完回来");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.装上弹药();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    现场.跑识别();
+    let 裁决那一行 = |app: &App| {
+        app.roots()
+            .stages()
+            .of(Stage::Triage)
+            .expect("工序段有裁决那一行")
+            .behind
+            .clone()
+    };
+    assert_eq!(
+        裁决那一行(&现场.app),
+        Behind::Left(2),
+        "前提：DAT 库是空的，两个变体都等着裁决",
+    );
+
+    // 到待确认队列屏上，把头一批整批判成「认不出」并落下——那一屏上「整批拒绝」与「落下」走的就是这两下。
+    现场.app.show_view(View::Queue);
+    跑一帧(&ctx, &mut 现场.app);
+    let 那一批 = Scope::whole(现场.app.queue().queue().batches()[0].shape.clone());
+    let 这一批几个 = 现场.app.queue().queue().count(&那一批);
+    assert!(这一批几个 > 0, "前提：那一批里有东西");
+    {
+        let (screen, site) = 现场.app.queue_and_site();
+        screen.reject(site, &那一批);
+        screen.commit(site);
+    }
+    assert_eq!(
+        现场.app.queue().queue().pending(),
+        2 - 这一批几个,
+        "前提：待确认队列屏落下了那一批",
+    );
+
+    // 回库屏：那一行与待确认队列屏说的是同一个数。
+    现场.app.show_view(View::Library);
+    let 屏上 = 库屏上的字(&ctx, &mut 现场.app);
+    assert_eq!(
+        裁决那一行(&现场.app),
+        Behind::Left(2 - 这一批几个),
+        "裁完一批回到库屏，裁决那一行还是裁之前的数：\n{屏上}",
+    );
+}
+
+#[test]
+fn 重排之后刮削口径挨着刮削那一行画_铺媒体开关挨着导出那一行画() {
+    // 票 `gui-looks-like-the-design/06` 验收第 5 条、收挂单 `Q554`：前几张票写上屏的话一句不丢，
+    // 而且**挨着它说的那一行画**——口径说的是刮削那一个数，画到整张表底下，人读到它时已经不知道它
+    // 说的是哪一行；铺媒体那颗开关是导出这一趟的旋钮，也跟着导出那一行。
+    let 库 = 建库("gui-stages-挨着那一行");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+
+    let 屏上 = 库屏上的字(&ctx, &mut 现场.app);
+    let 行: Vec<&str> = 屏上.lines().map(str::trim).collect();
+    let 第几行 = |说的: &str, 要找: &dyn Fn(&str) -> bool| {
+        行.iter()
+            .position(|line| 要找(line))
+            .unwrap_or_else(|| panic!("屏上没有{说的}：\n{屏上}"))
+    };
+    let 刮削 = 第几行("刮削那一行", &|line| line == "刮削");
+    let 口径 = 第几行("刮削那一行的口径", &|line| {
+        line.contains(romcat_core::stage::SCRAPE_BASIS)
+    });
+    let 整理标题 = 第几行("整理标题那一行", &|line| line == "整理标题");
+    assert!(
+        刮削 < 口径 && 口径 < 整理标题,
+        "口径没挨着刮削那一行画：刮削在第 {刮削} 段、口径第 {口径} 段、整理标题第 {整理标题} 段\n{屏上}",
+    );
+
+    let 导出 = 第几行("导出那一行", &|line| line == "导出");
+    let 开关 = 第几行("铺媒体那颗开关", &|line| {
+        line == romcat_gui::stages::LAY_MEDIA
+    });
+    assert!(
+        导出 < 开关,
+        "铺媒体那颗开关画在导出那一行前面：导出第 {导出} 段、开关第 {开关} 段\n{屏上}",
+    );
+    assert!(
+        !行[导出..开关]
+            .iter()
+            .any(|line| line.contains(romcat_core::stage::SCRAPE_BASIS)),
+        "导出那一行与铺媒体开关之间隔着别的话：\n{屏上}",
     );
 }
 
@@ -1496,10 +1906,11 @@ fn 刮削这一趟正在跑的时候那一行的按钮按不下去() {
         屏上.lines().any(|line| line.trim() == "跑着呢"),
         "刮削还在台上，那一行的按钮却还写着「开跑」：\n{屏上}",
     );
-    // **只禁它自己那一行**：另外三行照旧按得下去。
+    // **只禁它自己那一行**：另外几行照旧按得下去。票 `gui-looks-like-the-design/06` 补齐成六行之前
+    // 是另外三行；补上的两行里裁决不排任务，那颗按钮写的是「去待确认队列」，于是写着「开跑」的是四行。
     assert_eq!(
         屏上.lines().filter(|line| line.trim() == "开跑").count(),
-        3,
+        4,
         "禁掉的不只是刮削那一行：\n{屏上}",
     );
 
@@ -1956,7 +2367,7 @@ fn 还没选过格式与目录时点导出_当场说清而不是默默不动_任
     let 说的 = 现场.app.roots().stages().error().expect("该说清");
     assert!(说的.contains("格式"), "没说清缺的是什么：{说的}");
     assert!(说的.contains("目录"), "没说清缺的是什么：{说的}");
-    assert!(说的.contains("工序段底下那一行"), "没说去哪儿选：{说的}");
+    assert!(说的.contains("「导出设置」那一块"), "没说去哪儿选：{说的}");
     assert!(
         屏上.contains(说的),
         "那句话没画在屏上：{说的}\n屏上：\n{屏上}"
@@ -2003,7 +2414,10 @@ fn 记着的前端格式这一版没有时点导出_当场说清去哪儿重选_
         说的.contains("这一版没带的格式"),
         "没说清是哪个格式：{说的}"
     );
-    assert!(说的.contains("工序段底下那一行"), "没说去哪儿重选：{说的}");
+    assert!(
+        说的.contains("「导出设置」那一块"),
+        "没说去哪儿重选：{说的}"
+    );
     assert!(
         屏上.contains(说的),
         "那句话没画在屏上：{说的}\n屏上：\n{屏上}"
@@ -2031,7 +2445,7 @@ fn 还没选过导出配置就打开铺媒体_不排那一趟去算_屏上说清
         现场.app.ui(ui)
     }));
     assert!(
-        屏上.contains("还没选过导出的前端格式与目录") && 屏上.contains("工序段底下那一行"),
+        屏上.contains("还没选过导出的前端格式与目录") && 屏上.contains("「导出设置」那一块"),
         "屏上没说清缺什么、去哪儿选：\n{屏上}",
     );
     历史没多一条(&现场.app, 历史几条);

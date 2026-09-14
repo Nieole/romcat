@@ -79,6 +79,17 @@ pub struct LibraryRoot {
     pub scan: Option<RootScan>,
 }
 
+impl LibraryRoot {
+    /// 这个根**完整扫过一趟**没有：扫过，而且上次那一趟不是部分完成的。
+    ///
+    /// 库屏工序段扫描那一行数的是**还没完整扫过一趟的根**（`stage::Stage::Scan`），按下那一行的
+    /// 按钮排的也是这几个——判据只有这一句，两处各写一遍迟早数的与排的对不上。
+    #[must_use]
+    pub fn fully_scanned(&self) -> bool {
+        self.scan.is_some_and(|scan| !scan.interrupted)
+    }
+}
+
 /// 一个根**上次扫描**留下的结果。
 ///
 /// 它住在中立库里而不是跟着盘走，因此**盘没挂上时照样看得见**（ADR-0009 的道理）。
