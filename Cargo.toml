@@ -125,6 +125,27 @@ rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
 # 1.0，两版并存。macOS 上复用已有的 `objc2` 0.6 / `objc2-app-kit` 0.3 / `block2` 0.6，Windows 上复用
 # `windows-sys` 0.61。
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+# **截图门**（票 `gui-looks-like-the-design/05`，规格「三层门」的像素层）：界面测试把一屏真的渲染成 PNG，
+# 与入库的基线逐像素比。**只有测试用它**（`crates/gui` 的 dev-dependencies，只在 `tests/snapshot.rs` 里用），
+# 交付出去的二进制一个字节都不多。
+#
+# 选它而不是自己拿 `egui-wgpu` 渲一张、再自己写比对：它是 egui 自家的测试库（同一个仓库、同一个版本号发布），
+# 渲染走的正是 eframe 开窗那一路的 `egui-wgpu`；比对（`dify`：每像素 YIQ 色距加失败像素数）、对不上时落
+# `.new.png` / `.diff.png`、`UPDATE_SNAPSHOTS` 重批基线都是现成的。
+#
+# **钉死 `=0.36.1`，不写 `0.36`**：0.36.2 要 `egui ^0.36.2`（读它的清单），而锁文件里的 egui 是 0.36.1——
+# 放宽的话，加一个测试依赖会顺手把整个界面层的 egui / eframe 抬一个补丁版，而上面 `egui` 那一条钉的
+# 正是逐条核实过中文输入的 0.36.1。
+#
+# **只开 `snapshot` 与 `wgpu`**：`snapshot` 是比对与落图，`wgpu` 是真渲染（没有它只跑布局、渲不出图）。
+# `eframe` 不开——测的是一个 `egui::Ui` 画一屏，不起 `eframe::App`；`x11` 不开，不开窗。
+#
+# **多拉进来的**（锁文件实测，14 个）：它自己、`kittest`（AccessKit 那一层）、`dify`（比对，连带 `rayon` /
+# `rayon-core` / `crossbeam-deque` / `crossbeam-epoch`、`colored`、`getopts`、`anyhow`、`lazy_static`）、`open`
+# （连带 `is-docker` / `is-wsl`）。`wgpu` 30 / `egui-wgpu` 0.36.1 / `image` 0.25 / `pollster` 1.0 / `tempfile` 3 /
+# `accesskit_consumer` 本来就在锁文件里。
+# CI 的 ubuntu runner 上没有显卡，`wgpu` 要软件渲染才出得了图——CI 上跑不跑像素层，见票 05。
+egui_kittest = { version = "=0.36.1", default-features = false, features = ["snapshot", "wgpu"] }
 
 # 主库只读是这个项目唯一不可退让的约束（ADR-0004），
 # 因此禁 unsafe，一切磁盘接触走 `romcat_core::fs::LibraryFs` 这个只读接缝。

@@ -95,6 +95,7 @@ use romcat_core::task::{Cutoff, Ending, Finished, Handle};
 use crate::table::ROW_HEIGHT;
 use crate::task::{Product, Tasks};
 use crate::tokens::Tokens;
+use crate::look::step;
 use crate::{font, look};
 
 /// 没摊开时卡上先摆几条步骤。**摆得出样子就够**：这几条回答的是「它大概要干什么」，
@@ -2108,11 +2109,6 @@ impl Screen {
     }
 }
 
-/// 间距第 `at` 档（从 0 数：4 / 8 / 12 / 16 / 20 点）。**间距只从令牌这几档里取**。
-fn step(at: usize) -> f32 {
-    Tokens::builtin().space.steps[at]
-}
-
 /// 一颗**主按钮**：强调色底。颜色只从 [`look::primary_button`] 那一处来，换在一个 `scope` 里，
 /// 别的控件不受影响。
 fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
@@ -2459,7 +2455,7 @@ fn trim_ui(ui: &mut egui::Ui, name: &str, room: &Room) -> Option<String> {
     let over = room.over_capacity?;
     let fits = room.fits_after();
     let visuals = ui.visuals().clone();
-    let 放得下色 = look::success_color(&visuals);
+    let 放得下色 = look::tone_colors(look::Tone::Good, &visuals).0;
     ui.horizontal_wrapped(|ui| {
         ui.colored_label(
             visuals.error_fg_color,

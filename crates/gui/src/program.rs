@@ -215,6 +215,10 @@ impl Program {
         // **观感基线开场那一态也要**：主窗口那一态由 [`App`] 的第一帧装，而开场上那条向导是
         // 一层弹层，标题要令牌那几档字号。两态走同一句，装过就不再装。
         look::install_once(ui.ctx());
+        // **手上这个 `ui` 换成装好之后的样式**：egui 在一帧开头就把样式拷给了根 `ui`，头一帧装上的
+        // 那一套它还没拿到——而开场左栏的大标题要的正是令牌那几档具名字号，拿不到当场 panic。
+        let 装好的 = ui.ctx().style_of(ui.ctx().theme());
+        ui.set_style(装好的);
         let mut 开出来的 = None;
         let mut 要回开场 = false;
         match &mut self.stage {
