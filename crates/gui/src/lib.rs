@@ -42,6 +42,10 @@
 //!
 //! ## 五屏
 //!
+//! - [`rail`]：**左栏**，主窗口左边那条导航（票 `gui-looks-like-the-design/32`）。顶上一张切换主库的卡，
+//!   「整理 / 输出 / 后台」三组入口各带一个计数，栏底是已保存多少条裁决与收起按钮；收起成窄条记在
+//!   工作目录的版式文件里，窗口太窄时自动收起、不记。每屏顶上是[屏头](look::screen_header)：标题、
+//!   副标题，右侧是那一屏的动作。
 //! - [`queue`]：**待确认队列**，默认那一屏。真机上一万八千多条，**打开看见的是工具已经
 //!   分好的几十批**——一级按依据形状、二级按目录或命名规律，每批带条数、那句共同依据
 //!   与一组随机样本，看完一键整批通过（票 `gui-redesign/09`）。多候选那些走逐条键盘流。
@@ -134,6 +138,7 @@ pub mod pick;
 pub mod priority;
 pub mod program;
 pub mod queue;
+pub mod rail;
 pub mod recent;
 pub mod roots;
 pub mod scrape;

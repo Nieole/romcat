@@ -122,9 +122,12 @@ size-page    = 18     # 页面标题
 size-hero    = 24     # 作品详情页的大标题
 size-panel-title = 14 # 面板标题（设计稿 .phead h3）
 line-height  = 1.55
+size-badge-narrow = 10    # 左栏收成窄条后入口底下那个计数（设计稿 .main.rcol .nav .badge 的 10px）
+group-tracking    = 0.08  # 左栏分组标题的字距，字号的倍数（设计稿 .grp 的 letter-spacing:.08em）
+size-button-large = 14    # 大号按钮上的字（设计稿 .btn.lg 的 font-size:14px）
 
 [space]
-steps = [4, 8, 12, 16, 20]   # 间距只从这几档里取
+steps = [4, 8, 12, 16, 20]   # 通用间距的档位；设计稿上写死的字面值不凑进档位，另立下面那些具名令牌
 panel-padding  = [11, 14]    # 面板标题栏内边距（上下, 左右）
 dialog-padding = [20, 22]    # 对话框内容区内边距（上下, 左右）
 cell-padding   = [8, 10]     # 表格单元格内边距
@@ -134,10 +137,36 @@ catalog-row-padding  = [12, 14]   # 开场主库列表每一行的内边距（�
 catalog-row-gap      = 2          # 那一行里名字与底下那句之间的竖向间距（设计稿 .catrow 的 gap:2px）
 panel-head-gap       = 10         # 面板标题栏里标题、说明、按钮之间的横向间距（设计稿 .phead 的 gap:10px）
 library-gap          = 18         # 库屏两栏之间、右栏几块之间的间距（设计稿 .libgrid 的 gap:18px）
+screen-header-padding = [14, 20]  # 屏头的内边距（上下, 左右）（设计稿 .scrhead 的 padding:14px 20px）
+screen-header-gap     = 12        # 屏头里标题、副标题、右侧那一段彼此隔多远（设计稿 .scrhead 的 gap:12px）
+screen-body-padding   = [18, 20, 28]  # 屏体的内边距（上, 左右, 下）（设计稿 .scrbody 的 padding:18px 20px 28px）
+rail-padding           = [10, 8]      # 左栏的内边距（上下, 左右）（设计稿 .rail 的 padding:10px 8px）
+rail-padding-collapsed = [10, 6]      # 左栏收成窄条后的内边距（设计稿 .main.rcol .rail 的 padding:10px 6px）
+rail-gap               = 2            # 左栏里一项与下一项隔多远（设计稿 .rail 的 gap:2px）
+rail-switch-padding    = [8, 9]       # 左栏顶上切换主库那张卡的内边距（上下, 左右）（设计稿 .libsw 的 padding:8px 9px）
+rail-switch-gap        = 9            # 那张卡里标志与字之间（设计稿 .libsw 的 gap:9px）
+rail-switch-margin     = 6            # 那张卡底下再空多少（设计稿 .libsw 的 margin-bottom:6px）
+rail-group-padding     = [12, 10, 4]  # 左栏分组标题的内边距（上, 左右, 下）（设计稿 .grp 的 padding:12px 10px 4px）
+rail-group-margin-collapsed = [8, 6]  # 收成窄条后分组标题变成一道线，线四周空多少（上下, 左右）（设计稿 .main.rcol .grp 的 margin:8px 6px）
+nav-padding            = 10           # 左栏入口左右留白（设计稿 .nav 的 padding:0 10px）
+nav-padding-collapsed  = 7            # 收成窄条后入口上下留白（设计稿 .main.rcol .nav 的 padding:7px 0）
+nav-gap-collapsed      = 1            # 收成窄条后入口的字与计数之间（设计稿 .main.rcol .nav 的 gap:1px）
+live-badge-gap         = 5            # 任务跑着时入口计数前那枚圆点与数之间（设计稿 .nav .badge.live 的 gap:5px）
+rail-foot-gap          = 6            # 左栏栏底几样之间（设计稿 .railfoot 的 gap:6px）
+rail-foot-padding      = 10           # 栏底那道线底下空多少（设计稿 .railfoot 的 padding-top:10px）
+rail-note-padding      = 10           # 栏底「已保存 N 条裁决」那一行左右留白（设计稿 .railfoot .st 的 padding:0 10px）
+rail-note-gap          = 6            # 那一行圆点与字之间（设计稿 .railfoot .st 的 gap:6px）
 
 [layout]
 rail-width        = 196   # 左侧导航展开宽度
 rail-collapsed    = 68    # 左侧导航收起后的宽度
+rail-collapse-below = 800 # 窗口宽不到这么多时左栏自动收成窄条（拿主意的人 2026-09-14 定；设计稿里没有，check_tokens.py 不核）。
+                          # 这么算出来的：左栏展开 196 时，浏览屏筛选栏最多吃窗口宽的 35%、详情栏最少 200、正中至少留 120
+                          # （crates/gui/src/layout.rs 的 FILTER / DETAIL / FLOOR），于是要 0.65·宽 − 196 ≥ 320，即宽 ≥ 794，取整到 800。
+                          # 那三个数一改，这个数跟着重算；layout.rs 的测试钉着「门槛上摆得开、窄 10 点摆不开」。
+rail-mark         = 26    # 左栏顶上切换主库那张卡上标志的边长（设计稿 .libsw .mark 的 26px）
+nav-height        = 32    # 左栏入口的高（设计稿 .nav 的 height:32px）
+rail-dot          = 7     # 左栏里那两枚圆点的直径：任务跑着时、栏底裁决数前（设计稿 .nav .badge.live::before 与 .railfoot .st::before 的 7px）
 strip-width       = 36    # 面板折叠后的窄条
 filter-pane-width = 232   # 浏览页筛选栏
 detail-pane-width = 296   # 浏览页侧边详情
@@ -154,6 +183,12 @@ mark              = 44    # 开场左上角那枚标志的边长
 promise-icon      = 28    # 开场三条承诺前那枚字块的边长
 page-dot          = 20    # 弹层标头「走到第几问」那一圈的直径
 chip-dot          = 6     # 标签左边那枚圆点的直径（设计稿 .chip::before 与 .ro::before 的 6px）
+chip-height       = 20    # 标签的高（设计稿 .chip 的 height:20px）
+chip-padding      = 7     # 标签左右留白（设计稿 .chip 的 padding:0 7px）
+chip-gap          = 5     # 标签里圆点与字之间（设计稿 .chip 的 gap:5px）
+ro-height         = 22    # 只读标签的高（设计稿 .ro 的 height:22px；圆点直径与标签共用 chip-dot，字取 size-small）
+ro-padding        = 9     # 只读标签左右留白（设计稿 .ro 的 padding:0 9px）
+ro-gap            = 6     # 只读标签里圆点与字之间（设计稿 .ro 的 gap:6px）
 kv-key-width      = 84    # 「名 → 值」两列排时名那一列的宽
 button-height     = 28    # 按钮的高（设计稿 .btn）：弹层页脚、「选择…」
 button-padding    = 12    # 按钮左右留白（设计稿 .btn 的 padding:0 12px）

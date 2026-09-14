@@ -32,6 +32,13 @@
 //!
 //! 一张基线是一个 `#[test]`：搭好那一屏、调一次 [`拍`]，名字写成 `<屏>/<那一态>-<主题>`。要先点一下
 //! 再拍的（弹层），用 [`开一个`] + [`按`]，再 [`拍下`]。
+//!
+//! ## 主窗口外壳
+//!
+//! 左栏与屏头（票 `gui-looks-like-the-design/32`）拍的是整扇主窗口，垫在**任务屏的空台态**上（拿主意的人 2026-09-14 定：
+//! main 上各屏眼下都是旧正文，任务屏空台东西最少，最看得清左栏与屏头），喂的是
+//! 测试手搭的那份小库（`shared::小库`）：主库原名、沉淀库在哪、队列那几批的样本都是定值。**正文那一块
+//! 归各屏自己的票**，它们照稿重排时这几张跟着重批。
 
 use std::path::{Path, PathBuf};
 
@@ -52,7 +59,9 @@ use romcat_gui::app::{App, View};
 use romcat_gui::layout::{FOLD_EXPORT, FOLD_ROOTS, FOLD_SOURCES};
 use romcat_gui::opening::Screen;
 use romcat_gui::roots::RootRow;
-use romcat_gui::{font, headless, look};
+use romcat_gui::{font, headless, look, rail};
+
+mod shared;
 
 /// 比对阈值：一个像素的色差过了多少算坏（每像素 YIQ 色距 0.6）、坏几个像素算红（0 个）。
 ///
@@ -95,7 +104,9 @@ fn 装好(ctx: &egui::Context) -> bool {
     }
     ctx.data_mut(|data| data.insert_temp(装过, true));
     font::install(ctx);
-    look::install(ctx);
+    // 走 `install_once`：主窗口那一路自己的第一帧还会再问一遍（`App::ui`），问到装过就不再装——
+    // 再装一遍会把底下刚关掉的光标闪烁带回来。
+    look::install_once(ctx);
     ctx.all_styles_mut(|style| style.visuals.text_cursor.blink = false);
     ctx.request_repaint();
     false
@@ -657,4 +668,61 @@ fn 库屏_三块收起_暗色() {
     拍("library/folded-dark", Theme::Dark, move |ui| {
         现场.app.ui(ui)
     });
+}
+
+// ——— 主窗口外壳（票 `gui-looks-like-the-design/32`） ———
+
+/// 主窗口外壳那几张垫的库：一个根，五个变体各落一档，两个进得了待确认队列。
+///
+/// 屏上画着的每一样都是定值：主库原名（只活在内存里的那份，名字就是主库标识「主库」）、沉淀库在哪
+/// （「（内存）」）、队列那几批的样本（种子从 0 起）。**工作目录是临时目录，屏上不画它**；收起那一下往里写版式文件。
+fn 垫的主窗口(工作目录: &Path) -> App {
+    use shared::档;
+
+    shared::小库(
+        &[
+            ("SFC", "幻想传说 (汉化).zip", 档::待裁决),
+            ("SFC", "幻想传说 (修正版).zip", 档::待裁决),
+            ("GBA", "命中.zip", 档::命中),
+            ("GBA", "一条候选都没有.zip", 档::没有候选),
+            ("FC", "还没轮到它.zip", 档::还没识别),
+        ],
+        工作目录.to_path_buf(),
+    )
+}
+
+/// 开一扇主窗口，换到任务屏（台上空着）；`收起` 时先按一下栏底那颗「« 收起」，再拍。左栏的计数照旧来自那份小库。
+#[track_caller]
+fn 拍主窗口(名字: &str, 主题: Theme, 收起: bool) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 工作目录 = romcat_core::testing::temp_dir("截图门-主窗口");
+    let mut app = 垫的主窗口(工作目录.path());
+    app.show_view(View::Tasks);
+    let mut harness = 开一个(主题, move |ui| app.ui(ui));
+    if 收起 {
+        按(&mut harness, rail::FOLD);
+    }
+    拍下(harness, 名字);
+}
+
+#[test]
+fn 主窗口_左栏展开_浅色() {
+    拍主窗口("main-window/rail-expanded-light", Theme::Light, false);
+}
+
+#[test]
+fn 主窗口_左栏展开_暗色() {
+    拍主窗口("main-window/rail-expanded-dark", Theme::Dark, false);
+}
+
+#[test]
+fn 主窗口_左栏收起_浅色() {
+    拍主窗口("main-window/rail-collapsed-light", Theme::Light, true);
+}
+
+#[test]
+fn 主窗口_左栏收起_暗色() {
+    拍主窗口("main-window/rail-collapsed-dark", Theme::Dark, true);
 }
