@@ -83,3 +83,16 @@
 | doc | 11s | 绿 |
 
 测试 2,022 条通过、0 失败、2 条忽略。基线那一格在第二段做完（见上），`Status` 改 done；终版门禁的数字见下。
+
+**终版门禁**（2026-09-15，在勾票提交 `cc6ef93` 上）：`cargo xtask gate -j 3 --test-threads 3 --keep-going`，日志在 `/Users/nicoer/dev/game-wt/logs/slot-2-gl09-gate-final.log`。
+
+| 步骤 | 耗时 | 结果 |
+|---|---|---|
+| fmt | 1s | 绿 |
+| glossary | 1s | 绿 |
+| check | 11s | 绿 |
+| clippy | 19s | 绿 |
+| test | 535s | 绿 |
+| doc | 5s | 红：`Screen::status` 的公开文档链到私有的 `Self::list_bar` |
+
+fmt、glossary、check、clippy、test 五步全绿，测试 2,153 条通过、0 失败、2 条忽略。doc 那一步因为一处私有链接红过：改成不带链接的反引号（提交 `e9e1ad1`），修正提交之后补跑 `cargo fmt --all --check` 与门禁的文档那一步（`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --lib --bins -j 3`），fmt 和 doc 都绿，日志在 `/Users/nicoer/dev/game-wt/logs/slot-2-gl09-doc-fix.log`。
