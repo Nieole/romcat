@@ -38,9 +38,9 @@ use romcat_core::identify::fuzzy;
 use romcat_core::scan::CancelToken;
 use romcat_core::scrape::{self, Priorities};
 use romcat_core::site::Site;
-use romcat_core::sources::SourceState;
+use romcat_core::sources::{Source, SourceState};
 use romcat_core::stage::{Behind, Stage, StageRow};
-use romcat_core::task::{Cutoff, Ending};
+use romcat_core::task::Ending;
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::sample::zip;
 use romcat_core::testing::{TempDir, temp_dir};
@@ -48,7 +48,7 @@ use romcat_gui::app::{App, View};
 use romcat_gui::headless;
 
 mod shared;
-use shared::画出来的字;
+use shared::{占位活, 画出来的字};
 
 fn 写(path: &Path, bytes: &[u8]) {
     fs::create_dir_all(path.parent().expect("有上级目录")).expect("能建目录");
@@ -350,6 +350,20 @@ fn 跑一帧(ctx: &egui::Context, app: &mut App) {
     headless::frame(ctx, headless::input(), |ui| app.ui(ui));
 }
 
+/// **没开跑的那一下不许在任务历史里留一条**（票 `gui-looks-like-the-design/07`）：任务历史眼下
+/// 几条，与按下去之前数的一样。多出来的话，把多出来的那一条怎么收的场一并印出来。
+fn 历史没多一条(app: &App, 之前: usize) {
+    assert_eq!(
+        app.tasks().history().len(),
+        之前,
+        "没开跑的那一下在任务历史里多了一条：{:?}",
+        app.tasks()
+            .history()
+            .first()
+            .map(|record| record.ending.render()),
+    );
+}
+
 /// 导出目录里眼下躺着的那几份元数据文件，按路径排好。
 fn 导出去的文件(导出去: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = fs::read_dir(导出去)
@@ -578,6 +592,41 @@ fn 盘没挂上时这个根的上次结果仍然看得见() {
     }
     let 错 = 现场.app.roots().error().expect("该直说");
     assert!(错.contains("不在位"), "{错}");
+}
+
+#[test]
+fn 根不在位时按扫描_屏上说清插上那块盘_任务历史不多一条() {
+    // 票 `gui-looks-like-the-design/07`：盘不在位是按下去之前就判得出的（查一眼那个目录在不在），
+    // 那一下不往任务台上排，只在屏上说为什么不行、去哪儿办——任务历史只记真跑过的。
+    let 库 = 建库("gui-roots-拔盘再扫");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    drop(库);
+    {
+        let (screen, site, _) = 现场.app.roots_site_and_tasks();
+        screen.reload(site);
+    }
+    let 历史几条 = 现场.app.tasks().history().len();
+
+    {
+        let (screen, site, tasks) = 现场.app.roots_site_and_tasks();
+        screen.scan(site, tasks, "主库");
+    }
+    现场.等任务跑完();
+    跑一帧(&ctx, &mut 现场.app);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    let 说的 = 现场.app.roots().error().expect("该直说");
+    assert!(说的.contains("不在位"), "没说清为什么不行：{说的}");
+    assert!(说的.contains("插上那块盘"), "没说去哪儿办：{说的}");
+    assert!(
+        屏上.contains(说的),
+        "那句话没画在屏上：{说的}\n屏上：\n{屏上}"
+    );
+    历史没多一条(&现场.app, 历史几条);
 }
 
 #[test]
@@ -927,13 +976,7 @@ fn 这一趟正在跑的时候那一行的按钮按不下去() {
     现场.加根(库.path(), "主库");
     现场.扫("主库");
 
-    let 占位 = 现场.app.tasks_mut().queue("装作在扫一趟库", |task| {
-        for _ in 0..3_000 {
-            task.check()?;
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        Err(Cutoff::failed("这一趟本来就只是占着位子"))
-    });
+    let 占位 = 占位活::排上(现场.app.tasks_mut(), "装作在扫一趟库");
 
     现场.app.start_stage(Stage::Identify);
     let id = 现场
@@ -967,7 +1010,7 @@ fn 这一趟正在跑的时候那一行的按钮按不下去() {
     );
 
     现场.app.tasks_mut().stop(id);
-    现场.app.tasks_mut().stop(占位);
+    占位.按停(现场.app.tasks_mut());
     现场.等任务跑完();
 }
 
@@ -1008,22 +1051,122 @@ fn 外置盘不在位的时候工序那几行照样看得见() {
 }
 
 #[test]
-fn 还没取回那份弹药时识别如实拒绝并说清为什么() {
-    // **偷偷开一份空的 DAT 库跑下去是一句假话**：整库都会落成「未命中」，
-    // 而人会去找哪儿坏了。没有弹药就没有命中率——直说，并指向上面那一段。
+fn 还没取回那份弹药时按识别_屏上说清为什么与去哪儿取_任务历史不多一条() {
+    // 票 `gui-looks-like-the-design/07`：**压根没开跑与跑了没成是两件事。** 没有 DAT 库是
+    // 按下去之前就判得出的（ADR-0005 修订段「原料还没备齐」）——那一下不往任务台上排，
+    // 只在屏上说一句为什么不行、去哪儿办。排上去再在那一趟里报失败的话，任务历史里就多一条
+    // 从没跑过的「失败」，人会去找哪儿坏了。
+    //
+    // **偷偷开一份空的 DAT 库跑下去更不行**：整库都会落成「未命中」。
     let 库 = 建库("gui-stages-没弹药");
+    let ctx = headless::context();
     let mut 现场 = 现场::摆好();
     现场.加根(库.path(), "主库");
     现场.扫("主库");
+    let 历史几条 = 现场.app.tasks().history().len();
+
+    现场.app.start_stage(Stage::Identify);
+    现场.等任务跑完();
+    跑一帧(&ctx, &mut 现场.app);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+
+    assert!(
+        屏上.contains("还没有 DAT 库"),
+        "屏上没说清为什么不行：\n{屏上}"
+    );
+    assert!(屏上.contains("数据源"), "屏上没指向取回它的地方：\n{屏上}");
+    历史没多一条(&现场.app, 历史几条);
+    // 库里一条结论都没多出来。
+    assert_eq!(现场.识别那一行().behind, Behind::Left(2));
+}
+
+#[test]
+fn 取回_dat_那一趟已经排在台上时按识别_排在它后面而不是当场拒() {
+    // 票 `gui-looks-like-the-design/07` 只拒**按下去之前就判得出**的前提。取回 DAT 那一趟已经排在
+    // 台上，「还没有 DAT 库」就判不出来了：轮到识别时它多半已经取回来了（改之前识别就这样排在它
+    // 后面跑成）。当场拒的话，人得干等取回跑完再按一次。
+    //
+    // 取回那一趟**从头到尾排着、一次都不开跑**：台上先摆一趟占位活占着位子——一个网络请求都不发。
+    let 库 = 建库("gui-stages-弹药在路上");
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    let 占位 = 占位活::排上(现场.app.tasks_mut(), "装作在扫一趟库");
+    {
+        let (screen, _, tasks) = 现场.app.roots_site_and_tasks();
+        screen.fetch(tasks, Source::Dat);
+    }
+    let 取回 = 现场
+        .app
+        .tasks()
+        .queued()
+        .into_iter()
+        .find(|(_, name)| name.starts_with("取回"))
+        .map(|(id, _)| id)
+        .expect("取回 DAT 那一趟排上了");
+
+    现场.app.start_stage(Stage::Identify);
+    let 识别 = 现场
+        .app
+        .roots()
+        .stages()
+        .task_of(Stage::Identify)
+        .expect("取回 DAT 已经排在台上，识别该排在它后面，而不是当场拒");
+    assert!(
+        现场.app.roots().stages().error().is_none(),
+        "排上了却还挂着一句拒绝：{:?}",
+        现场.app.roots().stages().error(),
+    );
+
+    // 收拾：排着的两趟撤掉，再按停占位活——取回那一趟一次都没开跑。
+    现场.app.tasks_mut().stop(取回);
+    现场.app.tasks_mut().stop(识别);
+    占位.按停(现场.app.tasks_mut());
+    现场.等任务跑完();
+
+    // 取回那一趟撤掉了，DAT 库仍不在：这时再按识别就当场拒，任务历史不多一条。
+    let 历史几条 = 现场.app.tasks().history().len();
+    现场.app.start_stage(Stage::Identify);
+    assert!(
+        现场.app.roots().stages().task_of(Stage::Identify).is_none(),
+        "取回撤掉之后还没有 DAT 库，识别却排上了",
+    );
+    let 说的 = 现场.app.roots().stages().error().expect("该当场说清");
+    assert!(说的.contains("还没有 DAT 库"), "{说的}");
+    历史没多一条(&现场.app, 历史几条);
+}
+
+#[test]
+fn 那份弹药在却打不开时识别照旧排上去_任务历史记失败() {
+    // 票 `gui-looks-like-the-design/07` 的另一半：**跑了没成照旧进历史，收场是「失败」。**
+    // DAT 库那个文件在，按下去之前查一眼看不出毛病；打不开是真去开它的那一下才撞上的
+    // ——那一趟开跑过，照实记失败、说清为什么。与上面那条分开的正是这一下。
+    let 库 = 建库("gui-stages-弹药坏了");
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    写(
+        &romcat_core::workspace::dat_repo_path(现场.工作区.path()),
+        "这不是一份 SQLite 库".as_bytes(),
+    );
+    let 历史几条 = 现场.app.tasks().history().len();
+
     现场.跑识别();
 
+    assert_eq!(
+        现场.app.tasks().history().len(),
+        历史几条 + 1,
+        "真跑过的那一趟没进任务历史",
+    );
     let record = &现场.app.tasks().history()[0];
     let Ending::Failed { why, .. } = &record.ending else {
-        panic!("没有 DAT 库却把这一趟记成了「{}」", record.ending.render());
+        panic!("DAT 库打不开却把这一趟记成了「{}」", record.ending.render());
     };
-    assert!(why.contains("DAT 库"), "说不清为什么跑不了：{why}");
-    assert!(why.contains("数据源"), "没指向取回它的地方：{why}");
-    // 库里一条结论都没多出来。
+    assert!(why.contains("DAT 库打不开"), "说不清为什么没成：{why}");
+    let 说的 = 现场.app.roots().stages().error().expect("失败要说出来");
+    assert!(说的.contains(&record.ending.render()), "{说的}");
     assert_eq!(现场.识别那一行().behind, Behind::Left(2));
 }
 
@@ -1116,13 +1259,7 @@ fn 折标题排着队被撤掉时标题集合一条都没少() {
     let 折过之后 = 现场.叫法条数();
     assert!(折过之后 > 0, "前提：折过一趟，库里有叫法");
 
-    let 占位 = 现场.app.tasks_mut().queue("装作在扫一趟库", |task| {
-        for _ in 0..3_000 {
-            task.check()?;
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        Err(Cutoff::failed("这一趟本来就只是占着位子"))
-    });
+    let 占位 = 占位活::排上(现场.app.tasks_mut(), "装作在扫一趟库");
     现场.app.start_stage(Stage::FoldTitles);
     let id = 现场
         .app
@@ -1160,7 +1297,7 @@ fn 折标题排着队被撤掉时标题集合一条都没少() {
             .is_none()
     );
 
-    现场.app.tasks_mut().stop(占位);
+    占位.按停(现场.app.tasks_mut());
     现场.等任务跑完();
 }
 
@@ -1798,20 +1935,124 @@ fn 停下那一趟不打上次导出的时刻_照写那一趟走完之后那一�
 }
 
 #[test]
-fn 还没选过格式与目录时点导出_当场说清而不是默默不动() {
+fn 还没选过格式与目录时点导出_当场说清而不是默默不动_任务历史不多一条() {
     // **排一趟活的入口只有一个**（`App::start_stage`），票 `09` 的捷径走的也是它。
     // 那时人可能一次都没选过——默默不动的话，他会以为按钮坏了。
+    //
+    // **没选过是按下去之前就判得出的**（票 `gui-looks-like-the-design/07`）：不往任务台上排，
+    // 屏上说一句缺什么、去哪儿选；任务历史里不多一条压根没开跑的「失败」。
     let 库 = 建库("gui-stages-导出没选过");
+    let ctx = headless::context();
     let mut 现场 = 现场::摆好();
     现场.加根(库.path(), "主库");
     现场.扫("主库");
+    let 历史几条 = 现场.app.tasks().history().len();
 
     现场.导出();
+    跑一帧(&ctx, &mut 现场.app);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
     let 说的 = 现场.app.roots().stages().error().expect("该说清");
     assert!(说的.contains("格式"), "没说清缺的是什么：{说的}");
     assert!(说的.contains("目录"), "没说清缺的是什么：{说的}");
+    assert!(说的.contains("工序段底下那一行"), "没说去哪儿选：{说的}");
+    assert!(
+        屏上.contains(说的),
+        "那句话没画在屏上：{说的}\n屏上：\n{屏上}"
+    );
+    assert!(
+        !说的.starts_with("导出 失败"),
+        "没开跑的那一下说成了失败：{说的}"
+    );
+    历史没多一条(&现场.app, 历史几条);
     // 一个字节都没写出去。
     assert_eq!(现场.app.site().catalog.exported_at().expect("读得出"), None);
+}
+
+#[test]
+fn 记着的前端格式这一版没有时点导出_当场说清去哪儿重选_任务历史不多一条() {
+    // 换了一版程序、或者库里记着的是这一版没带的格式：配置读得出来，只是**那个格式这一版没有
+    // 适配器**。这一样按下去之前就判得出（判据在核心里，`ExportSetup::adapter`），不排上去
+    // 再记一条失败（票 `gui-looks-like-the-design/07`）。
+    let 库 = 建库("gui-stages-导出没这个格式");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    let 导出去 = 现场.工作区.path().join("导出去");
+    {
+        let (screen, site, _) = 现场.app.roots_site_and_tasks();
+        site.catalog
+            .set_export_setup(&romcat_core::catalog::ExportSetup {
+                format: "这一版没带的格式".to_string(),
+                out: 导出去.clone(),
+            })
+            .expect("写得进");
+        screen.reload(site);
+    }
+    let 历史几条 = 现场.app.tasks().history().len();
+
+    现场.导出();
+    跑一帧(&ctx, &mut 现场.app);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    let 说的 = 现场.app.roots().stages().error().expect("该说清");
+    assert!(
+        说的.contains("这一版没带的格式"),
+        "没说清是哪个格式：{说的}"
+    );
+    assert!(说的.contains("工序段底下那一行"), "没说去哪儿重选：{说的}");
+    assert!(
+        屏上.contains(说的),
+        "那句话没画在屏上：{说的}\n屏上：\n{屏上}"
+    );
+    历史没多一条(&现场.app, 历史几条);
+    assert!(!导出去.exists(), "没开跑却建出了导出目录");
+}
+
+#[test]
+fn 还没选过导出配置就打开铺媒体_不排那一趟去算_屏上说清去哪儿选_选好之后自己算() {
+    // 媒体的布局随前端格式不同：没选过，「这一趟最多要铺多少」一定算不出来。那是打开开关之前
+    // 就判得出的——排上去再记一条失败，任务历史里就多一条压根没开跑的「失败」
+    // （票 `gui-looks-like-the-design/07`）。屏上那句要说清缺什么、去哪儿选；**选好之后自己算**，
+    // 不逼人关掉再打开。
+    let 库 = 建库("gui-stages-铺媒体没选过");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    let 历史几条 = 现场.app.tasks().history().len();
+
+    现场.打开铺媒体();
+    跑一帧(&ctx, &mut 现场.app);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        屏上.contains("还没选过导出的前端格式与目录") && 屏上.contains("工序段底下那一行"),
+        "屏上没说清缺什么、去哪儿选：\n{屏上}",
+    );
+    历史没多一条(&现场.app, 历史几条);
+
+    现场.选一次导出去哪儿("Pegasus", &现场.工作区.path().join("导出去"));
+    跑一帧(&ctx, &mut 现场.app);
+    现场.等任务跑完();
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        屏上.contains(&romcat_gui::stages::media_cost(0, 0)),
+        "选好之后没自己算：\n{屏上}",
+    );
+    let record = &现场.app.tasks().history()[0];
+    assert_eq!(record.name, romcat_gui::stages::COUNT_MEDIA);
+    assert!(
+        matches!(record.ending, Ending::Done(())),
+        "选好之后那一趟记成了「{}」",
+        record.ending.render(),
+    );
 }
 
 #[test]
@@ -1854,13 +2095,7 @@ fn 导出排着队被撤掉时一份元数据都没写出去() {
     let 导出去 = 现场.工作区.path().join("导出去");
     现场.选一次导出去哪儿("Pegasus", &导出去);
 
-    let 占位 = 现场.app.tasks_mut().queue("装作在扫一趟库", |task| {
-        for _ in 0..3_000 {
-            task.check()?;
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        Err(Cutoff::failed("这一趟本来就只是占着位子"))
-    });
+    let 占位 = 占位活::排上(现场.app.tasks_mut(), "装作在扫一趟库");
     现场.app.start_stage(Stage::Export);
     let id = 现场
         .app
@@ -1888,7 +2123,7 @@ fn 导出排着队被撤掉时一份元数据都没写出去() {
     // 那一行的按钮又按得下去了。
     assert!(现场.app.roots().stages().task_of(Stage::Export).is_none());
 
-    现场.app.tasks_mut().stop(占位);
+    占位.按停(现场.app.tasks_mut());
     现场.等任务跑完();
 }
 
@@ -2025,13 +2260,7 @@ fn 台上已经有一趟识别时再按队列屏那颗捷径_不会排第二趟(
     现场.扫("主库");
 
     // 占住台上那个位子，好让下面那一趟停在队里、不会自己跑完。
-    let 占位 = 现场.app.tasks_mut().queue("装作在扫一趟库", |task| {
-        for _ in 0..3_000 {
-            task.check()?;
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        Err(Cutoff::failed("这一趟本来就只是占着位子"))
-    });
+    let 占位 = 占位活::排上(现场.app.tasks_mut(), "装作在扫一趟库");
     现场.app.start_stage(Stage::Identify);
     let id = 现场
         .app
@@ -2055,7 +2284,7 @@ fn 台上已经有一趟识别时再按队列屏那颗捷径_不会排第二趟(
     );
 
     现场.app.tasks_mut().stop(id);
-    现场.app.tasks_mut().stop(占位);
+    占位.按停(现场.app.tasks_mut());
     现场.等任务跑完();
 }
 
@@ -2830,4 +3059,381 @@ fn 改了导出的前端格式之后_那句代价重算一遍() {
         .filter(|record| record.name == romcat_gui::stages::COUNT_MEDIA)
         .count();
     assert_eq!(算了几趟, 2, "换了前端格式，那句代价没重算");
+}
+
+/// **识别用得上库里已经问过的答案**（票 `gui-answers-all-six/02`，挂单 `Q418`）。
+///
+/// `model_answer` 那张表是中立库里唯一花过钱的一张：人在命令行上带 `--model` 问过一趟，
+/// 答案连同那笔账落在库里，重扫、重跑识别都不清它。界面上跑一趟识别得照旧把它们折成
+/// **候选**、与命令行那一趟一样多，而且**一个请求都不发**。
+mod 问过的答案 {
+    use super::*;
+
+    use romcat_core::dat::{CannedFetcher, DatRepo};
+    use romcat_core::filename::Rules;
+    use romcat_core::identify;
+    use romcat_core::identify::model::{self, Credentials, Guessing, Inference, Limits, Pricing};
+    use romcat_core::identify::report::IdentifyReport;
+    use romcat_core::verdict;
+    use romcat_core::zh;
+
+    /// `建库` 摆的那两份：穿不透的 zip，DAT 库又是空的，前面各层一条候选都给不出。
+    const 问过的两个: [&str; 2] = ["主库/FC/魂斗罗.zip", "主库/SFC/幻想传说 汉化版.zip"];
+
+    /// 问过那一趟之后才扫进来的那一份：**没被问过**。它照样落到模型推断那一层——
+    /// 手里有网络句柄的话，它就会被问出去。
+    const 没问过的: &str = "主库/MD/新来的.zip";
+
+    /// 假服务器答的那一份：这一批 `n` 条，每条两个候选。
+    ///
+    /// **答案那一段照核心库自己的写法折**（`model::Answer::to_json`），这里只补编号与外面
+    /// 那层信封——手写那几个键的话，核心库改一个键名，这份摆料就悄悄成了一份认不出的答复。
+    fn 一份答复(n: usize) -> Vec<u8> {
+        let rows: Vec<serde_json::Value> = (1..=n)
+            .map(|id| {
+                let answer = model::Answer {
+                    guesses: vec![
+                        model::Guess {
+                            title: format!("模型说的第{id}个"),
+                            platform: None,
+                            basis: "名字像".to_string(),
+                        },
+                        model::Guess {
+                            title: format!("模型说的第{id}个备选"),
+                            platform: None,
+                            basis: "同系列".to_string(),
+                        },
+                    ],
+                };
+                let mut row: serde_json::Value =
+                    serde_json::from_str(&answer.to_json()).expect("核心库折出来的是 JSON");
+                row["编号"] = serde_json::json!(id);
+                row
+            })
+            .collect();
+        let text = serde_json::json!({ "答案": rows }).to_string();
+        serde_json::to_vec(&serde_json::json!({
+            "model": model::DEFAULT_MODEL,
+            "content": [{ "type": "text", "text": text }],
+            "usage": { "input_tokens": 3_000, "output_tokens": 600 }
+        }))
+        .expect("造得出")
+    }
+
+    /// 命令行 `romcat identify` **一个旋钮都不拨**时的上限：`ModelArgs::limits` 照那几个
+    /// 开关的默认值折出来的那一副（`crates/cli/src/main.rs`），一格一格照抄——那边是字面量
+    /// 的（花费上限、请求间隔）这边也写字面量。
+    ///
+    /// **提问指纹认的就是它**：界面那一路取的是 `Limits::default()`。两边对不上的话，命令行
+    /// 问过的答案界面上一条都命中不了，候选数悄悄少掉——这几条测试拿它问答案、拿它当命令行
+    /// 那一趟，于是那件事一发生就当场红。
+    fn 命令行不拨旋钮时的上限() -> Limits {
+        Limits {
+            batch: model::DEFAULT_BATCH,
+            guesses: model::DEFAULT_GUESSES,
+            budget: model::DEFAULT_BUDGET,
+            // `--model-max-spend` 的默认值是 "5.00" 美元。
+            spend_cap_micros: 5_000_000,
+            max_output_tokens: model::DEFAULT_MAX_OUTPUT,
+            effort: model::DEFAULT_EFFORT.to_string(),
+            // `--model-interval-ms` 的默认值。
+            interval: Duration::from_millis(1_000),
+            backoff: model::BACKOFF,
+        }
+    }
+
+    fn 开_dat(现场: &现场) -> DatRepo {
+        DatRepo::open(&romcat_core::workspace::dat_repo_path(现场.工作区.path()))
+            .expect("开得出 DAT 库")
+    }
+
+    /// **在界面之外**跑一趟识别，模型推断那一层由调用方给。
+    ///
+    /// 别的原料是界面与命令行在一份什么都没摆的工作目录里摆出来的那一副：空 DAT 库、
+    /// 内置剥离规则、没取过中文离线源、沉淀库里什么都没有、没取过 TitleID 索引。
+    fn 在界面之外跑一趟识别(
+        现场: &mut 现场,
+        guessing: &Guessing<'_>,
+    ) -> identify::Outcome {
+        let repo = 开_dat(现场);
+        let rules = Rules::builtin();
+        let naming = fuzzy::Naming {
+            rules: &rules,
+            index: None,
+            tuning: zh::Tuning::default(),
+        };
+        let (_, site, _) = 现场.app.roots_site_and_tasks();
+        let verdicts =
+            verdict::Index::load(&site.store, &site.library_identity).expect("沉淀库读得动");
+        let roots = Roots::load(&site.catalog).expect("读得出根");
+        identify::run(
+            &RealFs::new(),
+            &mut site.catalog,
+            &identify::Ammo {
+                repo: &repo,
+                verdicts: &verdicts,
+                naming: &naming,
+                guessing,
+                titledb: None,
+            },
+            &identify::Options::new(roots),
+            &CancelToken::new(),
+            &mut |_| {},
+        )
+        .expect("识别不该失败")
+    }
+
+    /// **在界面之外问过一趟**：命令行带 `--model`、别的旋钮不拨跑过的那一趟——答案连同那笔账
+    /// 落进中立库。
+    ///
+    /// 答话的是假服务器（`CannedFetcher`），一个网络请求都不发，同 `romcat-core` 的
+    /// `tests/model_inference.rs`。**凭据只在这一趟摆料里出现**：界面上那一趟要证的正是它
+    /// 手里一套都没有。
+    fn 在界面之外问过一趟(现场: &mut 现场) {
+        let fetcher = CannedFetcher::new().with_prefix(model::ENDPOINT, 200, 一份答复(20));
+        let cancel = CancelToken::new();
+        let price = model::Price {
+            input_per_mtok: 500,
+            output_per_mtok: 2_500,
+        };
+        // 间隔与退避不进提问指纹，摆料这一趟不必真等。
+        let limits = Limits {
+            interval: Duration::ZERO,
+            backoff: Duration::ZERO,
+            ..命令行不拨旋钮时的上限()
+        };
+        let net = Inference::new(
+            &fetcher,
+            limits.clone(),
+            price,
+            Credentials::api_key("摆料用的假凭据"),
+            &cancel,
+        );
+        let 还没问过 = model::Answers::default();
+        let outcome = 在界面之外跑一趟识别(
+            现场,
+            &Guessing {
+                answers: &还没问过,
+                net: Some(&net),
+                announce: None,
+                planning: false,
+                model: model::DEFAULT_MODEL.to_string(),
+                price,
+                checked: String::new(),
+                limits,
+            },
+        );
+        assert_eq!(
+            outcome.model.asked, 2,
+            "前提：那两个变体真的被问过：{:?}",
+            outcome.model,
+        );
+    }
+
+    /// 照命令行 `romcat identify`（**不带** `--model`）那一副装配，在同一份中立库上跑一趟识别。
+    ///
+    /// **命令行没有库函数可调**（`romcat-cli` 只有一个 `main.rs`），界面测试也够不着那个
+    /// 二进制，于是照 `crates/cli/src/main.rs` 里 `model::Guessing` 那段字面量抄一份：答案整份
+    /// 读回来、价钱**从内置价目表里查**、念计划的回调装着、没有网络句柄、不排计划、上限是
+    /// 旋钮全不拨的那一副。与界面那一副差的正是价目表与念计划那两样。
+    fn 照命令行那一副跑一趟(现场: &mut 现场) {
+        let answers = model::Answers::build(
+            现场
+                .app
+                .site()
+                .catalog
+                .model_answers()
+                .expect("读得出问过的答案"),
+        );
+        let pricing = Pricing::builtin();
+        let price = pricing
+            .price(model::DEFAULT_MODEL)
+            .expect("库里存着答案时命令行查不到价就不启动：内置价目表里得有默认模型");
+        let announce = |_: &model::Plan| {};
+        let _ = 在界面之外跑一趟识别(
+            现场,
+            &Guessing {
+                answers: &answers,
+                net: None,
+                announce: Some(&announce),
+                planning: false,
+                model: model::DEFAULT_MODEL.to_string(),
+                price,
+                checked: pricing.checked().to_string(),
+                limits: 命令行不拨旋钮时的上限(),
+            },
+        );
+    }
+
+    /// 中立库里这个变体身上有几条**模型推断**那一层的候选。
+    fn 模型的候选(现场: &现场, key: &str) -> usize {
+        现场
+            .app
+            .site()
+            .catalog
+            .candidates_of(key)
+            .expect("读得出候选")
+            .iter()
+            .filter(|candidate| candidate.source == model::SOURCE)
+            .count()
+    }
+
+    /// 一份库眼下的**候选**账。
+    #[derive(Debug, PartialEq, Eq)]
+    struct 候选账 {
+        /// 问过的两个与没问过的那个，各几条。
+        每个变体: Vec<(&'static str, usize)>,
+        /// 报告里一共几条。
+        一共: u64,
+        /// 其中模型推断那一层几条。
+        模型推断: u64,
+    }
+
+    fn 记一笔候选账(现场: &现场) -> 候选账 {
+        let catalog = &现场.app.site().catalog;
+        let 每个变体 = [问过的两个[0], 问过的两个[1], 没问过的]
+            .into_iter()
+            .map(|key| (key, catalog.candidates_of(key).expect("读得出候选").len()))
+            .collect();
+        let report = IdentifyReport::build(catalog, &开_dat(现场)).expect("报告折得出");
+        let 模型推断 = report
+            .sources
+            .iter()
+            .find(|row| row.source == model::SOURCE)
+            .map_or(0, |row| row.candidates);
+        候选账 {
+            每个变体,
+            一共: report.candidates,
+            模型推断,
+        }
+    }
+
+    /// 摆好一份问过一趟的库：两个变体、两份答案、一笔账。
+    fn 问过一趟的库(tag: &str) -> (TempDir, 现场) {
+        let 库 = 建库(tag);
+        let mut 现场 = 现场::摆好();
+        现场.装上弹药();
+        现场.加根(库.path(), "主库");
+        现场.扫("主库");
+        在界面之外问过一趟(&mut 现场);
+        (库, 现场)
+    }
+
+    /// 问过那一趟之后，往这份 fixture 主库里再放一份、重扫一遍。
+    fn 再扫进一个没问过的(库: &TempDir, 现场: &mut 现场) {
+        写(&库.path().join("MD/新来的.zip"), &zip(1_024));
+        现场.扫("主库");
+    }
+
+    fn 屏上的字(现场: &mut 现场) -> String {
+        let ctx = headless::context();
+        画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+            现场.app.ui(ui)
+        }))
+    }
+
+    #[test]
+    fn 库里已经问过的答案_界面上跑一趟识别照旧折成候选() {
+        let (_库, mut 现场) = 问过一趟的库("gui-stages-问过的答案");
+
+        现场.跑识别();
+
+        let record = &现场.app.tasks().history()[0];
+        assert!(
+            matches!(record.ending, Ending::Done(_)),
+            "识别那一趟记成了「{}」",
+            record.ending.render(),
+        );
+        for key in 问过的两个 {
+            assert_eq!(
+                模型的候选(&现场, key),
+                2,
+                "{key} 问过的那两条没折成候选——界面上那一趟没用库里已经问过的答案",
+            );
+        }
+    }
+
+    #[test]
+    fn 界面上那一趟一个请求都不发_没问过的那个照旧没有答案_零价不上屏() {
+        // **一个请求都不发**看的是库里那本账：发出去的每一个请求都记一笔
+        // （`Catalog::put_model_call`），答回来的每一条都落一行答案。
+        let (库, mut 现场) = 问过一趟的库("gui-stages-一个请求都不发");
+        再扫进一个没问过的(&库, &mut 现场);
+        let 账 = 现场.app.site().catalog.model_spend().expect("读得出总账");
+        let 答案 = 现场
+            .app
+            .site()
+            .catalog
+            .model_answers()
+            .expect("读得出答案")
+            .len();
+        let (请求数, _) = 账;
+        assert_eq!(请求数, 1, "前提：问过的那一趟发过一个请求");
+
+        现场.跑识别();
+
+        assert_eq!(
+            现场.app.site().catalog.model_spend().expect("读得出总账"),
+            账,
+            "界面上那一趟发了请求",
+        );
+        assert_eq!(
+            现场
+                .app
+                .site()
+                .catalog
+                .model_answers()
+                .expect("读得出答案")
+                .len(),
+            答案,
+            "界面上那一趟替没问过的那个问了",
+        );
+        assert_eq!(
+            模型的候选(&现场, 没问过的),
+            0,
+            "没问过的那个凭空多出了模型推断的候选",
+        );
+        for key in 问过的两个 {
+            assert_eq!(模型的候选(&现场, key), 2, "{key} 问过的那两条没折成候选");
+        }
+        // **零价不上屏是一道护栏**：没问过的那个让核心库照零价算了一份计划（界面这一路价钱
+        // 传零），那份计划留在这一趟的产物里。界面眼下一处都不画计划与花费，所以这一句
+        // 改动之前也是绿的——它防的是日后有人把那份计划、或者报告里模型推断那一段画上屏。
+        let 屏上 = 屏上的字(&mut 现场);
+        assert!(!屏上.contains("美元"), "零价的花费上了屏：\n{屏上}");
+    }
+
+    #[test]
+    fn 跑完那句回执说得出几条候选来自已经问过的答案() {
+        let (_库, mut 现场) = 问过一趟的库("gui-stages-回执数得出");
+
+        现场.跑识别();
+
+        let 屏上 = 屏上的字(&mut 现场);
+        assert!(
+            屏上.lines().any(|line| line.trim()
+                == "4 条候选来自已经问过的答案（2 个变体），这一趟一个请求都没发。"),
+            "屏上说不出几条候选来自已经问过的答案：\n{屏上}",
+        );
+    }
+
+    #[test]
+    fn 同一份库上界面那一趟与命令行那一趟折出的候选一样多() {
+        let (库, mut 现场) = 问过一趟的库("gui-stages-与命令行一样多");
+        再扫进一个没问过的(&库, &mut 现场);
+
+        现场.跑识别();
+        let 界面那一趟 = 记一笔候选账(&现场);
+        照命令行那一副跑一趟(&mut 现场);
+        let 命令行那一趟 = 记一笔候选账(&现场);
+
+        assert_eq!(
+            界面那一趟, 命令行那一趟,
+            "同一份库上界面与命令行折出的候选不一样多",
+        );
+        assert_eq!(
+            界面那一趟.模型推断, 4,
+            "前提：两条路都把问过的那四条折成了候选",
+        );
+    }
 }

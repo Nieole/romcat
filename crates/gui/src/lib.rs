@@ -130,6 +130,7 @@ pub mod look;
 pub mod media;
 pub mod opening;
 pub mod pick;
+pub mod priority;
 pub mod program;
 pub mod queue;
 pub mod recent;

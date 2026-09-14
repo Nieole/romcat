@@ -19,7 +19,7 @@ use romcat_gui::task::Product;
 use romcat_gui::{demo, headless};
 
 mod shared;
-use shared::画出来的字;
+use shared::{一对信号, 占位活, 画出来的字};
 
 /// 这几条测试自己的**工作目录**。
 ///
@@ -59,30 +59,6 @@ fn 重画间隔(ctx: &egui::Context, app: &mut App) -> Duration {
         .map_or(Duration::MAX, |viewport| viewport.repaint_delay)
 }
 
-/// 排一趟**会跑一会儿**的活上去：每 5 毫秒看一眼有没有被叫停，最多两秒。
-///
-/// 它跑完也不交出产物（`Err`）——这一趟存在的意义只是**占着那个位子**，
-/// 好让别的屏在它跑着的时候照样画。真的活长什么样看 `tests/sublibrary.rs`。
-/// 一趟**跑不完**的活：用它的三条测试都自己按「停下」，没有一条等它自然结束。
-///
-/// **步数要给得足够多，多到它绝不可能在测试看完之前自己跑完。** 早先是 400 步 × 5 ms
-/// ＝ 正好两秒，而 `任务跑着的时候别的屏照常画得出来` 要在三十帧之内看见它还在跑——
-/// 机器一忙（全量测试并排跑、内存吃紧）三十帧就超过两秒，那一趟活自己先结束了，
-/// 测试于是在 `running().expect(…)` 上炸，而它想钉的那件事根本没出问题。
-/// **单独跑绿、全量跑挂**的测试比没有测试更坏：它会把后面每一张票的门禁都染成红的。
-const 占位步数: u32 = 40_000;
-
-fn 排一趟占位的(app: &mut App) -> u64 {
-    app.tasks_mut().queue("装作在扫一趟库", |task| {
-        task.steps(占位步数);
-        for at in 1..=占位步数 {
-            task.step(&format!("走到第 {at} 块"))?;
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        Err(Cutoff::failed("这一趟本来就只是占着位子"))
-    })
-}
-
 /// 一直画帧，直到台上空了。
 fn 画到台上空了(ctx: &egui::Context, app: &mut App) {
     for _ in 0..600 {
@@ -105,7 +81,7 @@ type 一档进度 = (&'static str, Box<dyn FnOnce(&Handle) + Send>);
 ///
 /// 「屏上这一帧写着什么」那一类断言要的正是它：进度报到哪儿由 `报进度` 说了算，
 /// 报完就不动了——于是测试看到的每一帧都是同一个数，不靠「睡够多久它大概走到第几步」。
-/// 与 [`排一趟占位的`] 的分工：那一趟是**占着位子**用的（进度一直在往前走），
+/// 与共享夹具里的 `占位活` 的分工：那一趟是**占着位子**用的（一步都不走，等信号收场），
 /// 这一趟是**摆一个确定的进度**用的。
 fn 排一趟停在原地的(
     app: &mut App, 报进度: impl FnOnce(&Handle) + Send + 'static
@@ -145,32 +121,46 @@ fn 任务跑着的时候别的屏照常画得出来() {
     let ctx = headless::context();
     let mut app = 开一个();
     app.show_view(View::Browse);
-    let id = 排一趟占位的(&mut app);
+    // 这一趟活**走一步就停下来等信号**：往下走、收场，都由这条测试发信号说了算，不靠睡够多久。
+    let (走下一步, 等走下一步) = 一对信号();
+    let 占位 = 占位活::照这样排上(
+        app.tasks_mut(),
+        "装作在扫一趟库",
+        move |task, 等收场| {
+            task.steps(2);
+            task.step("走到第 1 块")?;
+            等走下一步.等();
+            task.step("走到第 2 块")?;
+            等收场.等();
+            task.check()?;
+            Err(Cutoff::failed("这一趟本来就只是占着位子"))
+        },
+    );
 
-    // **这一趟活要跑两秒，而它在画帧那条线程上的话，`queue` 那一下就整整两秒地跑完了
-    // ——一帧都轮不上。** 所以「三十帧画完之后它还在跑」本身就是那句「不在这条线程上」。
-    跑一帧(&ctx, &mut app);
-    let 头一帧那会儿 = app.tasks().running().expect("那一趟活不见了").progress.at;
+    // **它在画帧那条线程上的话，台上就留不住它**：占位活发现自己跑在排它的那条线程上，
+    // 当场交一句失败（等下去会把这条线程堵死）。所以「三十帧画完之后它还在台上」本身
+    // 就是那句「不在这条线程上」。
+    等到那一趟报出(&ctx, &mut app, |live| live.progress.at == 1);
     for _ in 0..30 {
         跑一帧(&ctx, &mut app);
     }
     let live = app.tasks().running().expect("三十帧之后那一趟活不见了");
-    assert_eq!(live.id, id);
-    // **画着帧的同时它也在往前走**：两件事真的在同时发生，不是排着队轮流来。
-    assert!(
-        live.progress.at > 头一帧那会儿,
-        "画了三十帧，那趟活还停在第 {头一帧那会儿} 步——它没在跑",
-    );
+    assert_eq!(live.id, 占位.id());
+    assert_eq!(live.progress.at, 1, "没发信号，那趟活自己往前走了");
+    // **画着帧的同时它也在往前走**：信号一发，它在自己那条线程上走下一步，这边一帧一帧
+    // 画着就看得见——两件事真的在同时发生，不是排着队轮流来。
+    走下一步.发();
+    等到那一趟报出(&ctx, &mut app, |live| live.progress.at == 2);
 
     // 库浏览那一屏照常答得上话：这一帧要来的行还在。
     assert!(app.window().retained() > 0, "任务跑着的时候库浏览空了");
 
     let 按下那一刻 = std::time::Instant::now();
-    app.tasks_mut().stop(id);
+    占位.按停(app.tasks_mut());
     画到台上空了(&ctx, &mut app);
     let 按下之后过了 = 按下那一刻.elapsed();
-    // **按停了就记成按停了，不是失败。** 这一条本身就说明它没跑到头——跑到头会记成
-    // `Failed`（那个占位闭包最后返回的是 `Err`）。
+    // **按停过的就记成已取消，不是失败。** 这一条本身就说明它是被按停收的场——只放行不按停
+    // 会记成 `Failed`（那个占位闭包最后返回的是 `Err`）。
     assert_eq!(app.tasks().history()[0].ending, Ending::Stopped);
     assert!(
         app.tasks().history()[0].elapsed > Duration::ZERO,
@@ -195,11 +185,11 @@ fn 任务屏三种样子都画得出来() {
     跑一帧(&ctx, &mut app);
     assert!(app.tasks().history().is_empty());
 
-    let id = 排一趟占位的(&mut app);
+    let 占位 = 占位活::排上(app.tasks_mut(), "装作在扫一趟库");
     跑一帧(&ctx, &mut app);
     assert!(app.tasks().running().is_some());
 
-    app.tasks_mut().stop(id);
+    占位.按停(app.tasks_mut());
     画到台上空了(&ctx, &mut app);
     跑一帧(&ctx, &mut app);
     assert_eq!(app.tasks().history().len(), 1);
@@ -216,14 +206,14 @@ fn 台上有活的每一帧都请求下一帧() {
     let ctx = headless::context();
     let mut app = 开一个();
     app.show_view(View::Tasks);
-    let id = 排一趟占位的(&mut app);
+    let 占位 = 占位活::排上(app.tasks_mut(), "装作在扫一趟库");
     assert_eq!(
         重画间隔(&ctx, &mut app),
         Duration::ZERO,
         "台上有活，这一帧却没请求下一帧",
     );
 
-    app.tasks_mut().stop(id);
+    占位.按停(app.tasks_mut());
     画到台上空了(&ctx, &mut app);
 }
 
@@ -274,20 +264,25 @@ fn 按下停下之后任务屏历史写的是停了那一类_不是失败() {
         "两句话一样的话，这一条就什么都没验",
     );
 
-    let id = app.tasks_mut().queue("放进「收藏」· 200 个变体", |task| {
-        task.steps(1);
-        task.step("为 200 个变体折锚")?;
-        for _ in 0..占位步数 {
+    let 占位 = 占位活::照这样排上(
+        app.tasks_mut(),
+        "放进「收藏」· 200 个变体",
+        |task, 等着| {
+            task.steps(1);
+            task.step("为 200 个变体折锚")?;
+            等着.等();
             // 整批收藏那条路原样：核心库把「被按停」折进自己那个错误枚举再交上来
             // （`collection::plan` 里那一段一样是 `check`）。
             task.check().map_err(CollectionError::from)?;
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        Ok(一份产物())
-    });
-    跑一帧(&ctx, &mut app);
-    // 界面上那颗「停下」按下去走的就是它。
-    app.tasks_mut().stop(id);
+            Ok(一份产物())
+        },
+    );
+    let id = 占位.id();
+    // **等它走过那一步再按**：按早了，它在 `step` 上就直接交出 `Halted`，
+    // 折进领域错误的那条路一次都没走到，这一条就绿得什么都没验。
+    等到那一趟报出(&ctx, &mut app, |live| live.progress.at == 1);
+    // 界面上那颗「停下」按下去走的就是它（`按停` 先走它，再叫醒那一趟）。
+    占位.按停(app.tasks_mut());
     画到台上空了(&ctx, &mut app);
 
     let record = &app.tasks().history()[0];
@@ -469,4 +464,71 @@ fn 走了一半时屏上那一句写着约剩多少() {
 
     app.tasks_mut().stop(id);
     画到台上空了(&ctx, &mut app);
+}
+
+#[test]
+fn 占位活没收到信号就一直占着台子_按停之后记成已取消() {
+    // 共享夹具里的 `占位活` 是按停那类界面测试占台子用的。它得钉住：**没收到信号就一直
+    // 占着**（排在它后面的那一趟一直排着）、**一步都不自己走**（不数步数、不睡够多久就收场），
+    // **按停之后记成「已取消」**。
+    let ctx = headless::context();
+    let mut app = 开一个();
+    app.show_view(View::Tasks);
+    let 占位 = 占位活::排上(app.tasks_mut(), "装作在扫一趟库");
+    let 排在后面的 = app.tasks_mut().queue("排在它后面", |_| Ok(一份产物()));
+
+    for _ in 0..30 {
+        跑一帧(&ctx, &mut app);
+    }
+    let live = app
+        .tasks()
+        .running()
+        .expect("没收到信号，占位活却不在台上了");
+    assert_eq!(live.id, 占位.id());
+    assert_eq!(live.progress.at, 0, "没人让它走，它自己走了——它还在数步数");
+    let 排着的: Vec<u64> = app.tasks().queued().iter().map(|(id, _)| *id).collect();
+    assert_eq!(排着的, vec![排在后面的], "占位活没占住台子");
+
+    let id = 占位.id();
+    占位.按停(app.tasks_mut());
+    画到台上空了(&ctx, &mut app);
+    let 历史 = app.tasks().history();
+    let 它 = 历史
+        .iter()
+        .find(|one| one.id == id)
+        .expect("占位活进了历史");
+    assert_eq!(它.ending, Ending::Stopped, "按停过的那一趟没记成已取消");
+    let 后面那趟 = 历史
+        .iter()
+        .find(|one| one.id == 排在后面的)
+        .expect("排在后面的那一趟轮上了");
+    assert_eq!(后面那趟.ending, Ending::Done(()));
+}
+
+#[test]
+fn 占位活放行了就收场_丢掉它也一样() {
+    // 不按停、只发信号（媒体那条测试就是这么放它走的）：它照样收场，而且**不记成已取消**
+    // ——没人按过停下。发信号的那一头**丢了也算发**：测试半路炸了、忘了收拾，
+    // 那一趟也不会把台子占到进程结束。
+    let ctx = headless::context();
+    let mut app = 开一个();
+    app.show_view(View::Tasks);
+
+    let 放行的 = 占位活::排上(app.tasks_mut(), "装作在扫一趟库");
+    let 放行的号 = 放行的.id();
+    放行的.放行();
+    画到台上空了(&ctx, &mut app);
+    let 记的 = &app.tasks().history()[0];
+    assert_eq!(记的.id, 放行的号);
+    assert!(
+        matches!(记的.ending, Ending::Failed { .. }),
+        "没人按停，却记成了「{}」",
+        记的.ending.render(),
+    );
+
+    let 丢掉的 = 占位活::排上(app.tasks_mut(), "装作在扫一趟库");
+    let 丢掉的号 = 丢掉的.id();
+    drop(丢掉的);
+    画到台上空了(&ctx, &mut app);
+    assert_eq!(app.tasks().history()[0].id, 丢掉的号);
 }

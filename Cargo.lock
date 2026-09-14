@@ -3178,6 +3178,7 @@ dependencies = [
  "rfd",
  "romcat-core",
  "serde",
+ "serde_json",
  "toml",
 ]
 

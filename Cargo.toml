@@ -36,7 +36,9 @@ clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
 # 中立库是事实来源，落在 SQLite 上（ADR-0001）。`bundled` 把 SQLite 源码一起编进来，
 # 免得依赖各台机器上碰巧装了哪个版本的系统库——主力机是 Windows（ADR-0018）。
-rusqlite = { version = "0.40", features = ["bundled"] }
+# `functions` 把核心库里**那一处**领域判断挂成 SQL 函数，筛选与计数才下推得了、不必在
+# SQL 里另写一份判据（ADR-0024；`catalog::browse` 的非游戏资产那一段）。它不带新依赖。
+rusqlite = { version = "0.40", features = ["bundled", "functions"] }
 # 路径以 NFC 规范化后才作为键（ADR-0020）。
 unicode-normalization = "0.1"
 # 平台清单与成型规则是**数据不是代码**（docs/platforms.md、票 05）。选 TOML 而不是

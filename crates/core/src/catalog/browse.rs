@@ -115,6 +115,27 @@
 //! 与外层绑死，SQLite 只能逐个变体行去探一次——真库形状上那是四万多次。写成
 //! `IN (SELECT …)` 之后子查询与外层无关，一次算完存进一张临时索引，
 //! 筛出来的**是同一批行**。数字见 `docs/library-facts.md` 与挂单 Q108。
+//!
+//! ## 非游戏资产默认收起
+//!
+//! 票 `gui-looks-like-the-design/08`：BIOS 这类**非游戏资产**（ADR-0010）浏览时默认不列出，
+//! 一个开关（[`NonGameAssets`]）列出来，屏上说得出收起了几行
+//! （[`Catalog::non_game_asset_rows`]）。**只改列不列出**：照旧入库、永不导出——
+//! 导出那道闸（`adapter::converge`）不读这个开关。
+//!
+//! **判断只有一处**（`classify::non_game_asset`，ADR-0024），而收起这件事得落在 `WHERE`
+//! 里：取回来再在 Rust 里筛，总数与页内容当场分家，滚动条指向不存在的行。于是那一处判断
+//! **挂成 SQL 函数**（`register_non_game_asset`，交得出能浏览的中立库的两个入口各挂一次），`WHERE` 里问的
+//! 是它，SQL 里一个字的判据都不写。
+//!
+//! 没走「识别或成型那一趟判一次、物化成一列」那条路（ADR-0024 推论 3 允许那样）：这条判断
+//! 只看键，现问不贵；物化要改变体那张表、给老库补行，判据一改还要等下一趟扫描才跟上
+//! （挂单 `Q771`）。
+//!
+//! **收起了几个按行数算**：屏上收起的是**行**，「收起时的行数 + 收起了几行 = 列出时的
+//! 行数」这笔账才对得上。识别挑作品时跳过非游戏资产（`identify` 的 `hit_non_game_asset`），
+//! 所以它们实际上各自成一行；只有被人手工挂进某部作品的那种，收起的是那一行底下的一个
+//! 变体（挂单 `Q772`）。
 
 use rusqlite::{ToSql, params_from_iter};
 
@@ -293,6 +314,26 @@ impl PlatformFilter {
 /// **平台未知**那一档在界面上印成什么。
 pub use crate::report::UNKNOWN_PLATFORM_LABEL;
 
+/// **非游戏资产**（ADR-0010）在浏览里列不列出来。
+///
+/// **只管列不列出**：它们照旧入库、永不导出——导出那道闸（`adapter::converge`）
+/// 不读这一档。见模块文档「非游戏资产默认收起」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NonGameAssets {
+    /// 收起：不列出来。**主列表（[`WorkQuery`]）默认这一档**——BIOS 这类东西人在找游戏时
+    /// 不想看见。变体那一层（[`VariantQuery`]）默认全列，理由写在它的 `Default` 上。
+    #[default]
+    Hidden,
+    /// 列出来，行上标着（[`WorkRow::non_game_asset`]）。
+    Listed,
+}
+
+/// 屏上标在**非游戏资产**那一行、那个变体上的词。
+///
+/// **词落在核心库里**，同 [`NOT_RUN_LABEL`]：表上那一行、详情面板那一行、测试数标记，
+/// 读的都是这一个。
+pub const NON_GAME_ASSET_LABEL: &str = "非游戏资产";
+
 /// 一次翻页要的是哪一段：筛什么、按什么排。
 ///
 /// 它是**值**而不是游标：界面把它整个换掉就等于换了一张表，窗口据此作废重取。
@@ -302,7 +343,7 @@ pub use crate::report::UNKNOWN_PLATFORM_LABEL;
 ///
 /// 要并集就写进[那棵条件组](Self::rule)里，**亲手选出「任一满足」那一档**——
 /// 行数变多之前人先看见了那四个字（挂账 D154 的裁决）。
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VariantQuery {
     /// 变体的键里含这个子串才算数；空串等于不筛。
     ///
@@ -332,6 +373,12 @@ pub struct VariantQuery {
     ///
     /// **它就是子库的规则**：同一套语言、同一个求值口径（`catalog::filter`）。
     pub rule: Option<Rule>,
+    /// **非游戏资产**列不列出来。**变体这一层默认全列**（见 `Default` 那一段），
+    /// 主列表那一层（[`WorkQuery`]）默认收起。
+    ///
+    /// 它与上面那几维一样是**且**进 `WHERE` 的一条，于是数总数、取一页、详情面板、
+    /// 批量操作的作用范围收起的是同一批。
+    pub non_game_assets: NonGameAssets,
     /// 按哪一列排。
     pub order: VariantOrder,
     /// 倒着排。
@@ -370,6 +417,45 @@ const WORK_NAME: &str = "work_name";
 /// 滚动条指向不存在的行。
 const VARIANT_BROWSE_FROM: &str = " FROM variant LEFT JOIN work ON work.id = variant.work_id";
 
+/// **非游戏资产**那一处判断在 SQL 里叫什么。
+///
+/// **只有这一处写这个名字**：挂到连接上（`register_non_game_asset`）与每一条查询问它，
+/// 都从这里取。名字带着程序名，免得哪天撞上 SQLite 自己或别的扩展的函数。
+const NON_GAME_ASSET_FN: &str = "romcat_non_game_asset";
+
+/// 把**非游戏资产**那一处判断（[`crate::classify::non_game_asset`]）挂到这条连接上，
+/// SQL 里问 `romcat_non_game_asset(键)`，答 `1` / `0`。
+///
+/// **这不是第二份判断**（ADR-0024）：挂上去的就是那个函数本身，SQL 里一个字的判据都
+/// 不写。挂成函数而不是物化成一列，理由见模块文档「非游戏资产默认收起」。
+///
+/// **每条要浏览的连接都得挂**，SQLite 的函数不落在库文件里。交得出一份能浏览的
+/// [`Catalog`] 的入口是两个——`Catalog::prepare`（建库、打开、内存库）与
+/// `Catalog::read_only_at`（分出只读的一份、只读打开）——两处各调一次；日后添一个忘了调，
+/// 浏览那几条查询当场报「没有这个函数」，`crates/core/tests/works.rs` 里几种开法各跑一遍的
+/// 那条测试钉着。
+///
+/// `Catalog::stranded_shaping_overrides` 另开了一条只读连接：它只读旧库里那张旧表、
+/// 从不浏览、造出来的那一份也不交出去，所以不挂。
+pub(super) fn register_non_game_asset(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    use rusqlite::functions::FunctionFlags;
+
+    conn.create_scalar_function(
+        NON_GAME_ASSET_FN,
+        1,
+        // **同一个键永远同一个答案**：让 SQLite 在一条语句里放心复用它。
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            // 借着读，不拷一份：这一条要在翻页时逐行问一遍。
+            let key = ctx
+                .get_raw(0)
+                .as_str()
+                .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
+            Ok(crate::classify::non_game_asset(key))
+        },
+    )
+}
+
 /// 把 `LIKE` 的三个元字符转义掉。
 ///
 /// 不转义的话，用户在筛选框里打一个 `%` 就等于「什么都匹配」，打 `_` 会悄悄多匹配一个
@@ -383,6 +469,30 @@ pub(super) fn escape_like(text: &str) -> String {
         out.push(ch);
     }
     out
+}
+
+/// **变体这一层默认全列**，与主列表（[`WorkQuery`]，默认收起）不同。
+///
+/// 拿 `VariantQuery::default()` 的调用方问的都是**库里一共有什么**：开场那一行的变体数
+/// （`workspace`）、刮削整库估算（`scrape::estimate`）、字体自检、测速、左栏「还没识别」
+/// 那一档拿总数去减。默认收起的话，这几个数会悄悄少掉非游戏资产那几个，没有一处说话
+/// （挂单 `Q776`）。要收起就亲手写 [`NonGameAssets::Hidden`]——主列表把它的开关传进
+/// 变体那一层筛选时就是这么写的。
+impl Default for VariantQuery {
+    fn default() -> Self {
+        Self {
+            contains: String::new(),
+            platform: None,
+            collection: None,
+            language: None,
+            chinese: None,
+            state: None,
+            rule: None,
+            non_game_assets: NonGameAssets::Listed,
+            order: VariantOrder::default(),
+            descending: false,
+        }
+    }
 }
 
 impl VariantQuery {
@@ -452,6 +562,11 @@ impl VariantQuery {
             }
         }
         let mut parts: Vec<String> = parts.into_iter().map(str::to_string).collect();
+        if self.non_game_assets == NonGameAssets::Hidden {
+            // 问的是挂在连接上的那一处判断（[`register_non_game_asset`]），不在这儿另写一份
+            // 「键里有没有 `bios`」。
+            parts.push(format!("NOT {NON_GAME_ASSET_FN}(variant.key)"));
+        }
         if let Some(rule) = &self.rule {
             let (sql, mut more) = crate::catalog::filter::rule_sql(rule);
             parts.push(sql);
@@ -646,14 +761,27 @@ impl Catalog {
     /// `release.languages` 是逗号分隔的一串，而 SQLite 没有拆串的内置函数——
     /// 拆的是**去重之后的组合**（真库里几十种），不是四万多个变体。
     ///
+    /// **条数跟着「列出非游戏资产」那颗开关走**（`non_game_assets`）：收起时左栏若照旧把
+    /// 它们数进去，「PS 7」点进去只列 6 个，这一屏就自己说了两个数（挂单 `Q775`）。
+    /// 收起那一档给每条查询添同一句——问的是挂在连接上的那一处判断，不另写判据。
+    ///
     /// # Errors
     /// 读库失败时返回错误。
-    pub fn facets(&self) -> Result<Facets, CatalogError> {
+    pub fn facets(&self, non_game_assets: NonGameAssets) -> Result<Facets, CatalogError> {
         let mut out = Facets::default();
+        // 收起那一档：只数不是非游戏资产的。`key` 是那条查询里变体的键那一列；
+        // 列出那一档恒真，与改之前一字不差。
+        let kept = |key: &str| match non_game_assets {
+            NonGameAssets::Hidden => format!("NOT {NON_GAME_ASSET_FN}({key})"),
+            NonGameAssets::Listed => "1".to_string(),
+        };
 
         let mut statement = self
             .conn
-            .prepare("SELECT COALESCE(platform, ?1), COUNT(*) FROM variant GROUP BY platform")
+            .prepare(&format!(
+                "SELECT COALESCE(platform, ?1), COUNT(*) FROM variant WHERE {} GROUP BY platform",
+                kept("variant.key"),
+            ))
             .map_err(|source| self.err(source))?;
         let rows = statement
             .query_map([UNKNOWN_PLATFORM_LABEL], |row| {
@@ -670,11 +798,13 @@ impl Catalog {
 
         let mut statement = self
             .conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT c.name, COUNT(*) FROM collection_variant cv
                  JOIN collection c ON c.id = cv.collection_id
+                 WHERE {}
                  GROUP BY c.name",
-            )
+                kept("cv.variant_key"),
+            ))
             .map_err(|source| self.err(source))?;
         let rows = statement
             .query_map([], |row| {
@@ -691,12 +821,13 @@ impl Catalog {
 
         let mut statement = self
             .conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT r.languages, COUNT(*) FROM variant v
                  JOIN release r ON r.id = v.release_id
-                 WHERE COALESCE(r.languages, '') <> ''
+                 WHERE COALESCE(r.languages, '') <> '' AND {}
                  GROUP BY r.languages",
-            )
+                kept("v.key"),
+            ))
             .map_err(|source| self.err(source))?;
         let rows = statement
             .query_map([], |row| {
@@ -725,11 +856,12 @@ impl Catalog {
 
         let mut statement = self
             .conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT c.chinese, COUNT(DISTINCT c.variant_key) FROM candidate c
-                 WHERE c.accepted <> 0 AND c.chinese IS NOT NULL
+                 WHERE c.accepted <> 0 AND c.chinese IS NOT NULL AND {}
                  GROUP BY c.chinese",
-            )
+                kept("c.variant_key"),
+            ))
             .map_err(|source| self.err(source))?;
         let rows = statement
             .query_map([], |row| {
@@ -746,7 +878,10 @@ impl Catalog {
 
         let mut statement = self
             .conn
-            .prepare("SELECT state, COUNT(*) FROM identification GROUP BY state")
+            .prepare(&format!(
+                "SELECT state, COUNT(*) FROM identification WHERE {} GROUP BY state",
+                kept("variant_key"),
+            ))
             .map_err(|source| self.err(source))?;
         let rows = statement
             .query_map([], |row| {
@@ -762,7 +897,11 @@ impl Catalog {
             concluded += count;
             *by_state.entry(label).or_default() += count;
         }
-        let total = self.variant_total(&VariantQuery::default())?;
+        // 拿来减的总数与上面那一句同一档：收起时两边都不数非游戏资产，减出来才是真的「还没识别」。
+        let total = self.variant_total(&VariantQuery {
+            non_game_assets,
+            ..VariantQuery::default()
+        })?;
         out.states = StateFilter::ALL
             .into_iter()
             .map(|filter| match filter {
@@ -952,6 +1091,13 @@ pub struct WorkRow {
     /// 屏上要印得出来：一行名字里一个搜索词都没有的作品冒在前面，不说清它是**别名**
     /// 还是**简介**命中的，那就是这份规格从头到尾在消灭的那种「看不懂」。
     pub hit: Option<SearchHit>,
+    /// 这一行是不是**非游戏资产**（ADR-0010）：它底下那些变体（按当前筛选）**全都是**。
+    ///
+    /// 那一处判断（`classify::non_game_asset`）在库里逐个变体答完、折成这一行的——界面照着
+    /// 标，不自己判（ADR-0024）。收起时（[`NonGameAssets::Hidden`]）列着的行一行都不会是；
+    /// 一部作品底下夹着一个被人手工挂进来的 BIOS，那一行不算，那个变体在详情面板里标着
+    /// （[`WorkVariant::non_game_asset`]）。
+    pub non_game_asset: bool,
 }
 
 impl WorkRow {
@@ -1285,6 +1431,11 @@ pub struct WorkQuery {
     pub state: Option<StateFilter>,
     /// **筛选器那棵条件树**。见 [`VariantQuery::rule`]——两处共用同一份。
     pub rule: Option<Rule>,
+    /// **非游戏资产**列不列出来；默认收起。见 [`VariantQuery::non_game_assets`]——两处共用同一份。
+    ///
+    /// **它进不了子库的规则**（[`Self::to_rule`] 连读都不读）：它管的是屏上列不列出，
+    /// 子库选的变体照旧由规则说了算。
+    pub non_game_assets: NonGameAssets,
     /// 按哪一列排。
     pub order: WorkOrder,
     /// 倒着排。
@@ -1511,6 +1662,8 @@ impl WorkQuery {
             && self.chinese == other.chinese
             && self.state == other.state
             && self.rule == other.rule
+            // **非游戏资产那个开关也算筛选**：拨一下，列出来的就换了一批行。
+            && self.non_game_assets == other.non_game_assets
     }
 
     /// **当前筛选原样变成的那条规则**——「存成子库」按下去时走的就是这里。
@@ -1597,6 +1750,7 @@ impl WorkQuery {
             chinese: self.chinese.clone(),
             state: self.state,
             rule: self.rule.clone(),
+            non_game_assets: self.non_game_assets,
             order: VariantOrder::default(),
             descending: false,
         }
@@ -1658,6 +1812,37 @@ impl WorkQuery {
     }
 }
 
+/// 主列表**第二趟**给一行算出来的那几样聚合（`Catalog::work_page_totals`）。
+///
+/// **带字段名而不是一个元组**：六样里有两个 `bool` 挨着（跑没跑过识别、是不是非游戏资产），
+/// 靠位置对的话把两格写反了编译照过，屏上就对着游戏说「非游戏资产」。
+struct GroupTotals {
+    variants: u64,
+    bytes: u64,
+    unreadable_files: u64,
+    platforms: Vec<String>,
+    identified: bool,
+    non_game_asset: bool,
+}
+
+impl GroupTotals {
+    /// 挑着了却算不出聚合时这一行画成什么——两趟之间有人把这一组写没了。
+    ///
+    /// `identified` 是**空真**（零个变体「全都跑过了」），不是 `false`：`false` 会让这一行
+    /// 印出「还没识别」，对一份刚被删掉的内容指错下一步。`non_game_asset` 走「不是」：
+    /// 屏上不该给一行写没了的东西挂标记。
+    fn vanished() -> Self {
+        Self {
+            variants: 0,
+            bytes: 0,
+            unreadable_files: 0,
+            platforms: Vec::new(),
+            identified: true,
+            non_game_asset: false,
+        }
+    }
+}
+
 /// 把 `group_concat` 那一串拆回平台集合，排好序、去掉空的。
 ///
 /// 排序在这里做而不是 SQL 里：`group_concat` 不保证次序，而同一份库问两次必须一样。
@@ -1711,6 +1896,39 @@ impl Catalog {
         let sql = format!(
             "SELECT COUNT(*) FROM \
              (SELECT variant.work_id{WORK_FROM_BASE}{where_sql}{WORK_GROUP_BY})"
+        );
+        let count: i64 = self
+            .conn
+            .query_row(&sql, params_from_iter(args.iter()), |row| row.get(0))
+            .map_err(|source| self.err(source))?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    /// 这份筛选下**整行都是非游戏资产**的有几行——屏上那句「收起了几个」。
+    ///
+    /// **开关拨在哪一档都是同一个数**：收起时它就是收起了几行，列出时它就是行上标着的
+    /// 几行（[`WorkRow::non_game_asset`]）。两档之间的账是
+    /// 「收起时的 [`work_total`](Self::work_total) + 这个数 = 列出时的那个」。
+    ///
+    /// **按行数，不按变体数**：一行算不算，看它底下（按当前筛选）的变体**是不是全都是**。
+    /// 一部作品底下夹着一个被人手工挂进来的 BIOS，那一行收起时照样列着，只是变体数少一个
+    /// ——它不在这个数里（挂单 `Q772`）。
+    ///
+    /// 与 [`work_total`](Self::work_total) 同一个 `FROM`、同一个分组，外加一句 `HAVING`：
+    /// 数的是**列出那一档**的分组里，每个变体都答「是」的那几组。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn non_game_asset_rows(&self, query: &WorkQuery) -> Result<u64, CatalogError> {
+        let listed = WorkQuery {
+            non_game_assets: NonGameAssets::Listed,
+            ..query.clone()
+        };
+        let (where_sql, args) = listed.where_clause();
+        let sql = format!(
+            "SELECT COUNT(*) FROM \
+             (SELECT variant.work_id{WORK_FROM_BASE}{where_sql}{WORK_GROUP_BY} \
+              HAVING MIN({NON_GAME_ASSET_FN}(variant.key)))"
         );
         let count: i64 = self
             .conn
@@ -1879,7 +2097,12 @@ impl Catalog {
             ));
         }
         let sql = format!(
-            "SELECT {WORK_TOTAL_COLUMNS}{WORK_FROM_BASE}{where_sql}{glue} ({branch})\
+            // **行上那个「非游戏资产」标记也在这一趟折**：只给这一页那几百行问，
+            // `MIN` 折成「这一组是不是全都是」，与 [`Catalog::non_game_asset_rows`]
+            // 那句 `HAVING` 是同一个口径。
+            "SELECT {WORK_TOTAL_COLUMNS},
+                    MIN({NON_GAME_ASSET_FN}(variant.key)) AS non_game_asset\
+             {WORK_FROM_BASE}{where_sql}{glue} ({branch})\
              {WORK_GROUP_BY}",
             glue = if where_sql.is_empty() {
                 " WHERE"
@@ -1908,17 +2131,19 @@ impl Catalog {
                 let unknowns = u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0);
                 Ok((
                     anchor,
-                    (
-                        u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
-                        u64::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
-                        u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
-                        platform_set(row.get(5)?, unknowns),
-                        row.get::<_, i64>(7)? != 0,
-                    ),
+                    GroupTotals {
+                        variants: u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+                        bytes: u64::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
+                        unreadable_files: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
+                        platforms: platform_set(row.get(5)?, unknowns),
+                        identified: row.get::<_, i64>(7)? != 0,
+                        // 按名字取：这一列是拼在常量后头的，下标跟着常量变。
+                        non_game_asset: row.get::<_, i64>("non_game_asset")? != 0,
+                    },
                 ))
             })
             .map_err(|source| self.err(source))?;
-        let mut totals: std::collections::BTreeMap<WorkAnchor, (u64, u64, u64, Vec<String>, bool)> =
+        let mut totals: std::collections::BTreeMap<WorkAnchor, GroupTotals> =
             std::collections::BTreeMap::new();
         for row in found {
             let (anchor, total) = row.map_err(|source| self.err(source))?;
@@ -1933,22 +2158,22 @@ impl Catalog {
                 // [`Self::fill_scraped`] 与 [`Self::fill_confidence`] 本来就有：
                 // 这一层从来不是一条 SQL 出一整页。
                 //
-                // **这一格的 `identified` 不走 `Default`**（那是 `false`，也就是
+                // **那几格不走 `Default`**（`identified` 的默认是 `false`，也就是
                 // 「还有变体没跑过识别」）：一组零个变体，「全都跑过了」是**空真**，
                 // 而 `false` 会让这一行印出「还没识别」——对一份刚被删掉的内容说
                 // 「先跑一趟 `romcat identify`」，是这一票专门要消灭的那种指错下一步。
-                let (variants, bytes, unreadable_files, platforms, identified) = totals
-                    .remove(&anchor)
-                    .unwrap_or((0, 0, 0, Vec::new(), true));
+                // 兜底的那一份见 [`GroupTotals::vanished`]。
+                let sums = totals.remove(&anchor).unwrap_or_else(GroupTotals::vanished);
                 WorkRow {
                     anchor,
                     name,
-                    platforms,
-                    variants,
-                    bytes,
-                    unreadable_files,
-                    identified,
+                    platforms: sums.platforms,
+                    variants: sums.variants,
+                    bytes: sums.bytes,
+                    unreadable_files: sums.unreadable_files,
+                    identified: sums.identified,
                     hit,
+                    non_game_asset: sums.non_game_asset,
                     // 这三样下面补。
                     year: None,
                     missing: WORK_FIELDS.to_vec(),
@@ -2275,6 +2500,16 @@ pub struct WorkVariant {
 }
 
 impl WorkVariant {
+    /// 这个变体是不是**非游戏资产**（ADR-0010）。
+    ///
+    /// 判断只有 [`classify::non_game_asset`](crate::classify::non_game_asset) 那一处
+    /// （ADR-0024），这里传变体的键去问它——与导出那道闸（`adapter::converge`）问的是
+    /// 同一个输入。界面照着标，不自己判。
+    #[must_use]
+    pub fn non_game_asset(&self) -> bool {
+        crate::classify::non_game_asset(&self.row.key)
+    }
+
     /// 这个变体最高的那档置信度；一条候选都没有时是 `None`——**没有候选**或者
     /// **还没识别**，哪一个由 [`state`](Self::state) 分辨。
     #[must_use]

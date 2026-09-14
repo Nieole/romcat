@@ -212,6 +212,70 @@ fn 人工纠正把两个条目并成一个变体且撤得掉() {
 }
 
 #[test]
+fn 人工纠正熬得过删掉中立库重扫() {
+    // 真入口上的「删库重扫」：`shape --merge` 记下的纠正住沉淀库，删掉中立库、
+    // 从零 `scan` 一遍，成型照旧照着它（票 `one-criterion-per-thing/07`）。
+    let workspace = temp_dir("cli-merge-rebuild-ws");
+    let library = 建库();
+    assert!(
+        扫(workspace.path(), library.path(), "主库")
+            .status
+            .success()
+    );
+    let json = workspace.path().join("并过.json");
+    let out = romcat(
+        workspace.path(),
+        &[
+            "shape",
+            "--library",
+            "主库",
+            "--merge",
+            "库/FC/甲.zip",
+            "--merge",
+            "库/FC/乙.zip",
+            "--json",
+            &json.display().to_string(),
+            "--quiet",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // 删掉中立库：连 SQLite 的附件一起，中立库住的那个目录整个清掉。
+    fs::remove_dir_all(workspace.path().join("catalog")).expect("删得掉中立库");
+    let out = 扫(workspace.path(), library.path(), "主库");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let json = workspace.path().join("重扫过.json");
+    let out = romcat(
+        workspace.path(),
+        &[
+            "report",
+            "--library",
+            "主库",
+            "--json",
+            &json.display().to_string(),
+            "--quiet",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let shaping = 成型(workspace.path(), "重扫过.json");
+    assert_eq!(shaping["manual"], 1, "删库重扫之后纠正还在：{shaping}");
+    assert_eq!(shaping["variants"], 4, "两个 zip 仍是一个变体：{shaping}");
+}
+
+#[test]
 fn 键打错了当场报错而不是记一条永远不生效的纠正() {
     let workspace = temp_dir("cli-merge-typo-ws");
     let library = 建库();

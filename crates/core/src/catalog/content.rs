@@ -168,13 +168,9 @@ CREATE TABLE IF NOT EXISTS collection_variant(
     PRIMARY KEY (collection_id, variant_key)
 ) STRICT;
 
--- **人工纠正**：这个条目其实属于那个变体。
--- 规则会出错，所以人工纠正成型的结果是一等公民功能（CONTEXT 的「成型规则」词条）。
--- 它**不随重新成型消失**，也不随重扫消失。
-CREATE TABLE IF NOT EXISTS shaping_override(
-    key         TEXT PRIMARY KEY,
-    variant_key TEXT NOT NULL
-) STRICT;
+-- **人工纠正不在这里。** 它从票 `one-criterion-per-thing/07` 起住沉淀库
+-- （`verdict` 那份的第 6 条迁移）：删掉中立库重扫，它还在。旧程序建的库里那张
+-- `shaping_override` 表留着不删，开现场时搬过去一次（`site::carry_over_shaping_overrides`）。
 ";
 
 /// 一行**变体**要读哪几列，以及它们的次序。
@@ -324,56 +320,84 @@ impl Catalog {
         Ok(out)
     }
 
-    /// 全部人工纠正：条目的键 → 它该归到哪个变体。
+    /// 一份中立库**文件**里、票 `one-criterion-per-thing/07` 之前记下而**还没搬进沉淀库**的
+    /// 人工纠正：条目的键 → 它该归到哪个变体。**不管那份库的结构版本对不对得上。**
+    ///
+    /// 人工纠正从那张票起住沉淀库（ADR-0001 的修订，挂账 D97），这份库的建表语句里已经没有
+    /// `shaping_override` 那张表了；可旧程序建的库里它还在，攒着人一条条纠正出来的东西。
+    /// 新程序不读它，**不搬一次那些就悄悄没了**。
+    ///
+    /// **不走 [`Self::open`] / [`Self::open_read_only`]**：那两条先核结构版本、对不上就不往下读，
+    /// 而结构版本对不上的旧库恰恰最要这一步——那句提示叫人删掉它重扫，删之前纠正得先救出来
+    /// （`site::rescue_shaping_overrides`）。这里只读，一个字都不写。
+    ///
+    /// 交出 `None` 的两种情形：那张表根本不在（那张票之后建的库），或者已经搬过
+    /// （[`Self::mark_shaping_overrides_carried`] 记下过）。**旧表一行不删**：搬走不是删掉，
+    /// 旧版程序再打开这份库照样读得到。
     ///
     /// # Errors
-    /// 读库失败时返回错误。
-    pub fn shaping_overrides(&self) -> Result<BTreeMap<String, String>, CatalogError> {
-        let mut statement = self
+    /// 文件打不开或读库失败时返回错误。
+    pub(crate) fn stranded_shaping_overrides(
+        file: &std::path::Path,
+    ) -> Result<Option<BTreeMap<String, String>>, CatalogError> {
+        let path = crate::path::display(file);
+        let flags =
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = rusqlite::Connection::open_with_flags(file, flags).map_err(|source| {
+            CatalogError::Sqlite {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        let raw = Self {
+            conn,
+            file: Some(file.to_path_buf()),
+            path,
+        };
+        raw.batch("PRAGMA busy_timeout = 10000;")?;
+        if !raw.has_table("shaping_override")? {
+            return Ok(None);
+        }
+        // 连元数据表都没有的库，不会记过「搬过了」。
+        if raw.has_table("meta")? && raw.meta_get(MetaKey::ShapingOverridesCarriedAt)?.is_some() {
+            return Ok(None);
+        }
+        let mut statement = raw
             .conn
             .prepare("SELECT key, variant_key FROM shaping_override")
-            .map_err(|source| self.err(source))?;
-        let mut rows = statement.query([]).map_err(|source| self.err(source))?;
+            .map_err(|source| raw.err(source))?;
+        let mut rows = statement.query([]).map_err(|source| raw.err(source))?;
         let mut out = BTreeMap::new();
-        while let Some(row) = rows.next().map_err(|source| self.err(source))? {
+        while let Some(row) = rows.next().map_err(|source| raw.err(source))? {
             out.insert(
-                row.get(0).map_err(|source| self.err(source))?,
-                row.get(1).map_err(|source| self.err(source))?,
+                row.get(0).map_err(|source| raw.err(source))?,
+                row.get(1).map_err(|source| raw.err(source))?,
             );
         }
-        Ok(out)
+        Ok(Some(out))
     }
 
-    /// 记一条人工纠正：`key` 其实属于 `variant_key` 这个变体。
-    ///
-    /// `key == variant_key` 就是「这一条自己当主文件」。
-    ///
-    /// # Errors
-    /// 写库失败时返回错误。
-    pub fn set_shaping_override(
-        &mut self,
-        key: &str,
-        variant_key: &str,
-    ) -> Result<(), CatalogError> {
+    /// 这份库里有没有叫 `name` 的表。
+    fn has_table(&self, name: &str) -> Result<bool, CatalogError> {
         self.conn
-            .execute(
-                "INSERT INTO shaping_override(key, variant_key) VALUES(?1, ?2)
-                 ON CONFLICT(key) DO UPDATE SET variant_key = excluded.variant_key",
-                params![key, variant_key],
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                params![name],
+                |row| row.get(0),
             )
-            .map(|_| ())
             .map_err(|source| self.err(source))
     }
 
-    /// 撤掉一条人工纠正，返回原来有没有这一条。
+    /// 记下「旧表里的人工纠正已经搬进沉淀库了」：往后 [`Self::stranded_shaping_overrides`]
+    /// 不再交出它们——人在沉淀库里撤掉的那几条，不许被旧表又带回来。
     ///
     /// # Errors
     /// 写库失败时返回错误。
-    pub fn clear_shaping_override(&mut self, key: &str) -> Result<bool, CatalogError> {
-        self.conn
-            .execute("DELETE FROM shaping_override WHERE key = ?1", params![key])
-            .map(|removed| removed > 0)
-            .map_err(|source| self.err(source))
+    pub(crate) fn mark_shaping_overrides_carried(&self) -> Result<(), CatalogError> {
+        self.meta_set(
+            MetaKey::ShapingOverridesCarriedAt,
+            &super::now_secs().to_string(),
+        )
     }
 
     /// 整批换掉变体，**但保住 `work_id` / `release_id`**。
@@ -1390,24 +1414,6 @@ mod tests {
             vec!["FC/甲.zip".to_string()],
             "变体回来了，它还在原来的合集里"
         );
-    }
-
-    #[test]
-    fn 人工纠正存得住也撤得掉() {
-        let mut catalog = 库();
-        catalog
-            .set_shaping_override("FC/乙.zip", "FC/甲.zip")
-            .expect("记得下");
-        assert_eq!(
-            catalog
-                .shaping_overrides()
-                .expect("读得出")
-                .get("FC/乙.zip"),
-            Some(&"FC/甲.zip".to_string())
-        );
-        assert!(catalog.clear_shaping_override("FC/乙.zip").expect("撤得掉"));
-        assert!(catalog.shaping_overrides().expect("读得出").is_empty());
-        assert!(!catalog.clear_shaping_override("FC/乙.zip").expect("撤得掉"));
     }
 
     #[test]

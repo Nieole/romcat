@@ -74,7 +74,8 @@ use std::collections::BTreeMap;
 use egui::{Align, Layout};
 use romcat_core::catalog::CatalogError;
 use romcat_core::catalog::browse::{
-    Facets, PlatformFilter, Scope, WorkAnchor, WorkDetail, WorkQuery, WorkVariant,
+    Facets, NON_GAME_ASSET_LABEL, NonGameAssets, PlatformFilter, Scope, WorkAnchor, WorkDetail,
+    WorkQuery, WorkVariant,
 };
 use romcat_core::catalog::identify::{NOT_RUN_LABEL, Tier};
 use romcat_core::catalog::{Catalog, VariantDetail};
@@ -255,6 +256,8 @@ pub struct Screen {
     query: WorkQuery,
     /// 五个维度各有哪些值可选。换库或改过元数据才重问。
     facets: Facets,
+    /// [`Self::facets`] 是照开关拨在哪一档问的。与眼下那一档不一样就重问（[`Self::sync_window`]）。
+    facets_for: Option<NonGameAssets>,
     /// **筛选器**：那棵可嵌套的条件组。它折出来的规则每帧同步进 [`Self::query`]。
     filter: Filter,
     /// **当前筛选下一共多少个变体**。`None` 是数不出来，不是零。
@@ -263,6 +266,11 @@ pub struct Screen {
     /// 展开出来的**。屏上两个都写，因为按批量操作之前要分得清「筛出来多少」与
     /// 「我勾了多少」。
     filtered: Option<u64>,
+    /// **当前筛选下整行都是非游戏资产的有几行**（[`Catalog::non_game_asset_rows`]）：
+    /// 收起时屏上说「收起了几个」，列出时说「列出了几个」。`None` 是数不出来，不是零。
+    ///
+    /// 数是核心库数的、哪几行算也是核心库判的（ADR-0024）：这一层只把开关拨到哪一档交过去。
+    non_game_assets: Option<u64>,
     /// 「存成子库」那两个格子：名字与目标路径。
     save: SaveDraft,
     /// **刮削面板**：抬头那个「刮削选中…」摊开的就是它（票 `gui-redesign/10`）。
@@ -374,8 +382,10 @@ impl Screen {
             window: Window::new(SPAN),
             query: WorkQuery::default(),
             facets: Facets::default(),
+            facets_for: None,
             filter: Filter::default(),
             filtered: None,
+            non_game_assets: None,
             save: SaveDraft::default(),
             scrape: scrape::Panel::new(workspace),
             editing: None,
@@ -448,7 +458,19 @@ impl Screen {
 
     /// 重问一次筛选面板上的可选值。开库时与改过元数据之后各一次。
     pub fn reload(&mut self, site: &Site) {
-        match site.catalog.facets() {
+        self.reload_facets(&site.catalog);
+    }
+
+    /// 照眼下那颗「列出非游戏资产」开关，重问一次左栏那几档各有哪些值、各多少个。
+    ///
+    /// **条数跟着开关走**：收起时左栏写「PS 7」、点进去却只列 6 个，是这一屏自己说了两个数
+    /// （挂单 `Q775`）。数是核心库数的（[`Catalog::facets`]），这里只把开关交过去。
+    ///
+    /// 读不动时照旧只记下那句错、不每帧重试——与改之前一个样。
+    fn reload_facets(&mut self, catalog: &Catalog) {
+        let switch = self.query.non_game_assets;
+        self.facets_for = Some(switch);
+        match catalog.facets(switch) {
             Ok(facets) => {
                 self.facets = facets;
                 self.error = None;
@@ -475,6 +497,7 @@ impl Screen {
         self.reload(site);
         self.window.invalidate();
         self.filtered = None;
+        self.non_game_assets = None;
         self.scoped = None;
         self.load_work(&site.catalog);
     }
@@ -1202,6 +1225,10 @@ impl Screen {
     ///   留着它会让批量操作作用到人根本没看见的行上，所以连选中一起清掉；点开的那一行
     ///   在新的筛选下也可能一个变体都不剩，详情跟着重读一次。
     fn sync_window(&mut self, catalog: &Catalog) {
+        // 左栏那几档的条数跟着「列出非游戏资产」那颗开关走（[`Self::reload_facets`]）。
+        if self.facets_for != Some(self.query.non_game_assets) {
+            self.reload_facets(catalog);
+        }
         let refiltered = !self.window.query().same_filter(&self.query);
         if self.window.query() != &self.query {
             self.focused = None;
@@ -1219,6 +1246,17 @@ impl Screen {
                 Ok(total) => self.filtered = Some(total),
                 Err(error) => {
                     self.filtered = None;
+                    self.error = Some(format!("中立库读不动：{error}"));
+                }
+            }
+        }
+        if refiltered || self.non_game_assets.is_none() {
+            // **收起了几个由核心库数**，与表上那几行走同一份筛选——数与表对得上靠的是这个，
+            // 不是这一层自己去数。拨一下开关就是换了筛选（`WorkQuery::same_filter`）。
+            match catalog.non_game_asset_rows(&self.query) {
+                Ok(rows) => self.non_game_assets = Some(rows),
+                Err(error) => {
+                    self.non_game_assets = None;
                     self.error = Some(format!("中立库读不动：{error}"));
                 }
             }
@@ -1658,6 +1696,31 @@ impl Screen {
                     "这就是子库的规则：筛到满意按「存成子库」，条件原样变成那个\
                          子库的规则；反过来子库屏点「改选择」跳回这里，规则预填进筛选器。",
                 );
+                ui.separator();
+
+                // **非游戏资产默认收起**（票 `gui-looks-like-the-design/08`）。哪几行算、
+                // 收起了几个，都是核心库说的（`WorkQuery::non_game_assets`、
+                // `Catalog::non_game_asset_rows`）——这一层只拨开关、照着印（ADR-0024）。
+                let mut listed = self.query.non_game_assets == NonGameAssets::Listed;
+                if ui
+                    .checkbox(&mut listed, "列出非游戏资产")
+                    .on_hover_text(
+                        "BIOS 这类：模拟器要它，它本身不是游戏。默认收起；\
+                         打开之后列出来，行上标着「非游戏资产」。\
+                         照旧入库、永不导出——这颗开关只管列不列出来。",
+                    )
+                    .changed()
+                {
+                    self.query.non_game_assets = if listed {
+                        NonGameAssets::Listed
+                    } else {
+                        NonGameAssets::Hidden
+                    };
+                }
+                ui.weak(non_game_asset_label(
+                    self.query.non_game_assets,
+                    self.non_game_assets,
+                ));
                 ui.separator();
 
                 // **两半各管一段，屏上说清**（挂单 `Q73`）：上半那五个档，条件组里
@@ -2179,8 +2242,15 @@ impl Screen {
     fn variant_row(&self, ui: &mut egui::Ui, variant: &WorkVariant) -> bool {
         let on = self.variant.as_deref() == Some(variant.row.key.as_str());
         let tier = Tier::of(variant.confidence());
+        // **非游戏资产打头标出来**：是不是由核心库答（`WorkVariant::non_game_asset`），
+        // 这里照着印。
         let line = format!(
-            "{}｜{}｜{}",
+            "{}{}｜{}｜{}",
+            if variant.non_game_asset() {
+                format!("{NON_GAME_ASSET_LABEL}｜")
+            } else {
+                String::new()
+            },
             variant.confidence_label(),
             variant.row.key,
             capacity(variant.row.bytes, variant.row.unreadable_files),
@@ -3030,6 +3100,22 @@ impl Screen {
                         .show(ui, |ui| ui.label(text));
                 },
             );
+        }
+    }
+}
+
+/// 筛选栏里开关底下那一句：收起了几个，或者列出了几个。
+///
+/// **数是核心库数的**（[`Catalog::non_game_asset_rows`]），这里只挑一句话印。数不出来时
+/// 不写一个 0——读库的错另在屏上说。
+fn non_game_asset_label(switch: NonGameAssets, rows: Option<u64>) -> String {
+    match (switch, rows) {
+        (_, None) => "非游戏资产数不出来".to_string(),
+        (NonGameAssets::Hidden, Some(rows)) => {
+            format!("收起了 {} 个非游戏资产", thousands(rows))
+        }
+        (NonGameAssets::Listed, Some(rows)) => {
+            format!("列出了 {} 个非游戏资产，行上标着", thousands(rows))
         }
     }
 }

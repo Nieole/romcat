@@ -62,6 +62,7 @@ use romcat_core::adapter::transfer::{self, ExportOptions};
 use romcat_core::catalog::{Catalog, CatalogError, ExportSetup, Roots};
 use romcat_core::fs::RealFs;
 use romcat_core::identify;
+use romcat_core::identify::model::{Answers, DEFAULT_MODEL, Guessing, Limits, Price};
 use romcat_core::report::{human_bytes, thousands};
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::site::Site;
@@ -154,6 +155,12 @@ enum MediaCost {
     },
     /// 没算出来：那句话。
     NotCounted(String),
+    /// **没去算**：按下去之前就判得出算不出来（还没选过导出配置，或者记着的格式这一版没有
+    /// 适配器，[`export_refusal`]）。那句话。
+    ///
+    /// 与 [`Self::NotCounted`] 分开，是因为两档收尾说的不一样：那一档说「关掉再打开就重算」，
+    /// 这一档要人先去选——选好之后自己重算（`Section::set_export_setup` 让它作废），不必关掉再打开。
+    Refused(String),
 }
 
 /// 库屏上的**工序**那一段。
@@ -216,6 +223,8 @@ pub struct Section {
     /// 上一次画这一段是第几趟画帧（egui 的 `cumulative_pass_nr`）。**隔了帧没画，就是人离开过
     /// 库屏**：那句铺媒体的代价跟着作废（`Section::lay_media_ui`，挂单 `Q654`）。
     drawn_at: Option<u64>,
+    /// 库屏排上的那一趟**取回 DAT** 眼下在不在台上（`Section::set_dat_on_board`）。
+    dat_on_board: bool,
 }
 
 impl Section {
@@ -237,6 +246,7 @@ impl Section {
             lay_media: false,
             media_cost: MediaCost::NotAsked,
             drawn_at: None,
+            dat_on_board: false,
         }
     }
 
@@ -260,7 +270,7 @@ impl Section {
         if on
             && matches!(
                 self.media_cost,
-                MediaCost::NotAsked | MediaCost::NotCounted(_)
+                MediaCost::NotAsked | MediaCost::NotCounted(_) | MediaCost::Refused(_)
             )
         {
             self.count_media(site, tasks);
@@ -273,6 +283,14 @@ impl Section {
     /// **第二份只读连接**（[`Catalog::read_only`]）；只活在内存里的库分不出第二份，
     /// 就地跑完——合成数据上那是几毫秒的事。
     fn count_media(&mut self, site: &Site, tasks: &mut Tasks) {
+        // **没选过导出配置（或者记着的格式没有适配器），就不排**：媒体的布局随前端格式不同，
+        // 那一趟一定算不出来——这是按下去之前就判得出的，排上去只会在任务历史里多一条压根没开跑
+        // 的「失败」（票 `gui-looks-like-the-design/07`）。选好之后那个数作废
+        // （`Self::set_export_setup`），开关开着时下一帧自己重算。
+        if let Some(why) = export_refusal(&site.catalog) {
+            self.media_cost = MediaCost::Refused(why);
+            return;
+        }
         let workspace = self.workspace.clone();
         let id = match site.catalog.read_only() {
             Ok(reader) => tasks.queue(COUNT_MEDIA, move |task| {
@@ -471,10 +489,44 @@ impl Section {
         }
     }
 
+    /// 库屏排上一趟**取回 DAT** 时拨上、认领它时拨回（`roots::Screen::fetch` / `settle`）。
+    ///
+    /// **它在台上，「还没有 DAT 库」就不是按下去之前判得出的了**：轮到识别时它多半已经取回来了
+    /// ——改之前识别就这样排在它后面跑成。这时识别照常排上；真取不回来，识别那一趟开跑时自己
+    /// 撞上、照实记失败（`identify_run` 里那一问兜底）。
+    pub(crate) fn set_dat_on_board(&mut self, on: bool) {
+        self.dat_on_board = on;
+    }
+
+    /// 这道工序**按下去之前就判得出**的那句拒绝：为什么不行、去哪儿办；前提都在就是 `None`。
+    ///
+    /// **只收「原料还没备齐」那一类**（ADR-0005 修订段）：盘上/库里缺一样东西，查一眼就知道。
+    /// 要读、要算、要跑一段才撞得上的（库读不动、DAT 库打不开）不在这里——那一趟排上去，
+    /// 撞上了照实记失败（票 `gui-looks-like-the-design/07`：分开的是压根没开跑与跑了没成）。
+    fn refusal(&self, stage: Stage, site: &Site) -> Option<String> {
+        match stage {
+            // 取回 DAT 那一趟已经排在台上：判不出来，放识别排在它后面（`Self::set_dat_on_board`）。
+            Stage::Identify if self.dat_on_board => None,
+            Stage::Identify => missing_dat(&self.workspace),
+            Stage::Export => export_refusal(&site.catalog),
+            Stage::Scrape | Stage::FoldTitles => None,
+        }
+    }
+
     /// 排一趟活**只有这一份实现**：[`Self::start`] 与 [`Self::force_export`] 都走它，
     /// 差的只是导出那一支这一趟带哪几个旋钮（[`ExportKnobs`]）。
     fn queue(&mut self, stage: Stage, knobs: ExportKnobs, site: &mut Site, tasks: &mut Tasks) {
         if self.task_of(stage).is_some() {
+            return;
+        }
+        // **按下去之前就判得出的前提不在，就不排**（票 `gui-looks-like-the-design/07`）：只在屏上
+        // 说一句为什么不行、去哪儿办。排上去再在那一趟里报失败的话，任务历史里就多一条压根没开跑
+        // 的「失败」——那一栏只记真跑过的。**跑起来才撞上的**（库读不动、DAT 库打不开）照旧排上去，
+        // 那一趟照实记失败。平常那一趟与照写那一趟都走这儿。
+        if let Some(why) = self.refusal(stage, site) {
+            self.error = Some(why);
+            // 上一趟的回执一起收掉：「识别 跑完了：…」挨着「还没有 DAT 库」，两句读着互相打架。
+            self.notice = None;
             return;
         }
         // **开着铺媒体、那句代价还没画出来，就不排**：人按下去的那一刻得已经知道要付多少，
@@ -560,12 +612,18 @@ impl Section {
         match &done.ended {
             Ending::Done(Product::Identified(outcome)) => {
                 self.error = None;
-                self.notice = Some(format!(
+                let mut 回执 = format!(
                     "{} 跑完了：{} 个变体过了一遍，命中 {}。",
                     stage.label(),
                     thousands(outcome.report.total.variants),
                     thousands(outcome.report.total.matched),
-                ));
+                );
+                // **用上了库里已经问过的答案就说出口**（挂单 `Q418`）。
+                if let Some(line) = paid_answers_line(outcome) {
+                    回执.push('\n');
+                    回执.push_str(&line);
+                }
+                self.notice = Some(回执);
             }
             // **回执与刮削面板那一趟是同一句**（`crate::scrape::finished`）：同一个函数
             // 交出来的产物，两处各折一句的话迟早差着字。
@@ -637,10 +695,20 @@ impl Section {
             // **停在半路**：识别起手就把上一轮的结论清干净，所以它一定动过库
             // ——记成「可以当没跑过」是骗人的。那句话由核心库折
             // （`identify::run_task` 里 `Handle::halfway` 报的那一句），这一层原样转出来：
-            // **识别没有断点**，下一趟从头再算一遍。
-            Ending::Halfway { .. } => {
+            // 下一趟接着算剩下的（票 `gui-answers-all-six/03`）。
+            //
+            // 识别那一趟停下时库里已经折进去的模型推断候选照样是真的，那一行与跑完那一支
+            // 说的是同一句（`paid_answers_line`）。
+            Ending::Halfway { product, .. } => {
                 self.error = None;
-                self.notice = Some(format!("{} {}", stage.label(), done.ended.render()));
+                let mut 回执 = format!("{} {}", stage.label(), done.ended.render());
+                if let Product::Identified(outcome) = product
+                    && let Some(line) = paid_answers_line(outcome)
+                {
+                    回执.push('\n');
+                    回执.push_str(&line);
+                }
+                self.notice = Some(回执);
             }
             // 还排着队就被撤掉的那一趟压根没开跑：一个字节都没写。
             // **停了，什么都没留下。** 两条路走到这一档：还排着队就被撤掉（压根没开跑），
@@ -820,6 +888,16 @@ impl Section {
                         ),
                     );
                 }
+                // **没去算**：缺的那样东西补上之后自己重算，不叫人关掉再打开。
+                MediaCost::Refused(why) => {
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        format!(
+                            "这一趟最多要铺多少还算不出来：媒体的布局随前端格式不同。\
+                             {why}选好之后这里自己重算。"
+                        ),
+                    );
+                }
             }
         }
         if 拨了 {
@@ -881,9 +959,9 @@ impl Section {
 /// 后台那条线程真跑的那一趟。
 ///
 /// **装配全在这儿**：DAT 库、沉淀库、剥离规则、中文离线源、TitleID 索引。领域判断一条
-/// 都不在这一层——它只是把核心库要的原料摆齐（与命令行 `romcat identify` 摆的是同一副，
-/// 只差**模型推断兜底**那一层：界面上没有价目表与花费上限那几个旋钮，所以那一层整个
-/// 关着，挂单 `Q418`）。
+/// 都不在这一层——它只是把核心库要的原料摆齐（与命令行 `romcat identify` 不带 `--model`
+/// 摆的原料是同一副；**模型推断**那一层只用库里已经问过的答案、一个请求都不发，比命令行
+/// 少装价目表与念计划的回调两样，见 [`model_layer`]）。
 fn run(
     stage: Stage,
     knobs: ExportKnobs,
@@ -916,18 +994,33 @@ struct ExportKnobs {
     media: bool,
 }
 
+/// 还没有 DAT 库时那句话：为什么不行、去哪儿取；有就是 `None`。
+///
+/// **不是判断，是查一眼有没有**（ADR-0005 修订段「原料还没备齐」），而那句话要指向屏上
+/// 的哪一处——那正是核心库不该知道的东西，所以它留在这一层。
+///
+/// **两处认它、说同一句**：按下去那一刻（`Section::refusal`，那时不排、只在屏上说），
+/// 与那一趟开跑时（[`identify_run`] 兜底）。
+fn missing_dat(workspace: &Path) -> Option<String> {
+    (!workspace::dat_repo_path(workspace).exists()).then(|| {
+        "还没有 DAT 库。先在上面「数据源」那一段把它取回来——没有弹药就没有命中率。".to_string()
+    })
+}
+
 /// 跑一趟**识别**。
 fn identify_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Product, Cutoff> {
     // **没有弹药就没有命中率**：DAT 库不在时直说。偷偷让 `DatRepo::open` 当场建出一份
     // 空库跑下去的话，整库都会落成「未命中」并写进中立库——那是一条**假结论**，
     // 不是一次失败。命令行开头拦的是同一件事，但两处各说各的话（那一句指的是
     // `romcat dat sync`，这一句指的是上面「数据源」那一段）——挂单 `Q423`。
-    let dat = workspace::dat_repo_path(workspace);
-    if !dat.exists() {
-        return Err(Cutoff::failed(
-            "还没有 DAT 库。先在上面「数据源」那一段把它取回来——没有弹药就没有命中率。".to_string(),
-        ));
+    //
+    // **按下去那一刻已经问过一遍**（`Section::refusal`：不排，只在屏上说）。这里再问一遍是
+    // 兜底——排上去之后、轮到它之前那份库被挪走了。那是真跑起来才撞上的，照实记失败；
+    // 少了这一问，`DatRepo::open` 会当场建出一份空库。
+    if let Some(why) = missing_dat(workspace) {
+        return Err(Cutoff::failed(why));
     }
+    let dat = workspace::dat_repo_path(workspace);
     let repo = romcat_core::dat::DatRepo::open(&dat)
         .map_err(|error| Cutoff::failed(format!("DAT 库打不开：{error}")))?;
     // **沉淀库先说话**：裁决过的内容直接精确命中，不再进队列（ADR-0008）。
@@ -948,6 +1041,13 @@ fn identify_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Prod
     // 「无判据」，与命令行一个口径（读不到不是结论，ADR-0021）。
     let roots = Roots::load(&site.catalog)
         .map_err(|error| Cutoff::failed(format!("这份中立库读不动：{error}")))?;
+    // **库里已经问过的答案照旧折成候选**（挂单 `Q418`）：那是中立库里唯一花过钱的一张表。
+    // 整份读回来的写法与命令行一样（`Catalog::model_answers` → `Answers::build`）。
+    let answers = Answers::build(
+        site.catalog
+            .model_answers()
+            .map_err(|error| Cutoff::failed(format!("问过的答案读不动：{error}")))?,
+    );
     identify::run_task(
         &RealFs::new(),
         &mut site.catalog,
@@ -955,7 +1055,7 @@ fn identify_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Prod
             repo: &repo,
             verdicts: &verdicts,
             naming: &naming,
-            guessing: &identify::model::Guessing::off(),
+            guessing: &model_layer(&answers),
             titledb: titledb.as_ref(),
         },
         &identify::Options::new(roots),
@@ -963,6 +1063,67 @@ fn identify_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Prod
     )
     .map(|outcome| Product::Identified(Box::new(outcome)))
     .map_err(|error| Cutoff::failed(format!("识别失败：{error}")))
+}
+
+/// 识别的**模型推断**那一层：**只用中立库里已经问过的答案**，一个请求都不发（挂单 `Q418`）。
+///
+/// 不用那些答案的话，人得回终端跑一趟 `romcat identify` 才捡得回自己付过的钱。**照命令行
+/// 那样用字面量建**：核心库那个装配结构体的字段全部公开，不为界面另长一个构造器。与命令行
+/// 不带 `--model` 那一副比，这里少装价目表与念计划的回调两样（见下）。
+///
+/// ## 四样一起钉死
+///
+/// - **不给凭据**（`net: None`）：一个请求都不发。缓存命中在核心库的主循环里、与网络无关；
+///   发请求那一层一见没有网络句柄就返回。
+/// - **不排计划**（`planning: false`）。
+/// - **不装念计划的回调**（`announce: None`）：界面这一路从不印一份计划。
+/// - **价目表不装，价钱一律传零**。命令行「价目表里查不到就不启动」那道拦，拦的是**印一份
+///   零价的计划**；这一路既不排、也不念，零价到不了任何人眼前（回执只数候选）。日后真要在
+///   界面上开推断，那时再装价目表——那时它才有意义。
+///
+/// ## 提问指纹为什么对得上命令行问过的那些
+///
+/// 答案按**提问指纹**存，指纹里有模型名与上限里会改变答复的那几档（每条要几个候选、力度、
+/// 输出上限，`Limits::ask_fingerprint`）。这里取默认那个模型与 `Limits::default()`——命令行
+/// `--model-id`、`--model-guesses`、`--model-effort`、`--model-max-tokens` 的默认值指的正是
+/// 同一组核心库常量（花费上限与请求间隔在命令行上是字面量，但它们不进指纹），于是命令行
+/// 不拨旋钮时问过的答案，这一趟一条不落地命中。**拨过那几档问出来的答案对不上**，界面上
+/// 用不到（挂单 `Q751`）。
+fn model_layer(answers: &Answers) -> Guessing<'_> {
+    Guessing {
+        answers,
+        net: None,
+        planning: false,
+        announce: None,
+        model: DEFAULT_MODEL.to_string(),
+        price: Price {
+            input_per_mtok: 0,
+            output_per_mtok: 0,
+        },
+        checked: String::new(),
+        limits: Limits::default(),
+    }
+}
+
+/// 识别回执里「几条候选来自已经问过的答案」那一行；这份库上没有模型推断的候选时不说。
+///
+/// **数的是整份库**（识别报告里按数据源分的那一行），不是这一趟现折的那几条：接着上一趟算
+/// 的那一趟不重算已经有候选的变体（`identify::run_task`），只数这一趟会少报。界面这一路
+/// 一个请求都不发（[`model_layer`]），所以库里模型推断那一层的候选全部来自已经问过的答案。
+/// **只数候选，不提计划与花费**——这一路价钱传的是零，印出来就是一句假话。
+fn paid_answers_line(outcome: &identify::Outcome) -> Option<String> {
+    let row = outcome
+        .report
+        .sources
+        .iter()
+        .find(|row| row.source == identify::model::SOURCE)?;
+    (row.candidates > 0).then(|| {
+        format!(
+            "{} 条候选来自已经问过的答案（{} 个变体），这一趟一个请求都没发。",
+            thousands(row.candidates),
+            thousands(row.variants),
+        )
+    })
 }
 
 /// 跑一趟**刮削**：整库、全部字段、只用本地源、不收媒体、补缺——**一个请求都不发**。
@@ -1063,30 +1224,54 @@ fn export_run(
     Ok(Product::Exported(Box::new(report)))
 }
 
+/// 还没选过导出的前端格式与目录时那句话：缺什么、去哪儿选。
+///
+/// **没选过就如实拒绝**，不替人挑一个格式与目录：挑错一个目录就是往别人的盘上写一堆文件。
+/// 这一句与工序段底下那一行的空态说的是同一件事（挂单 `Q437`）。
+const EXPORT_NOT_CHOSEN: &str =
+    "还没选过导出的前端格式与目录。先在工序段底下那一行选一次，选完记进这份库。";
+
+/// 记着的那个前端格式这一版没有适配器时那句话：**为什么在核心里**（`ExportSetup::adapter`
+/// 的 `Display`，ADR-0005），这一层只在后面补上去哪儿重选。
+fn no_adapter(error: &romcat_core::catalog::ExportSetupError) -> String {
+    format!("{error}先在工序段底下那一行重选一次。")
+}
+
+/// **导出**那一支按下去之前就判得出的那句拒绝；前提都在就是 `None`。
+///
+/// 两样：**没选过**（库里那两个键在不在，查一眼就知道），与**记着的格式这一版没有适配器**
+/// （判据在核心里，[`ExportSetup::adapter`]）。导出那一趟与算要铺多少那一趟问的都是它
+/// （`Section::refusal`、`Section::count_media`）——媒体的布局随前端格式不同，没选过就算不出来。
+///
+/// **库读不动不在这里，交 `None`**：那不是缺一样东西，是一件该去查的事。排上去，那一趟在
+/// [`export_setup_of`] 撞上它、照实记失败（票 `gui-looks-like-the-design/07`：分开的是
+/// 压根没开跑与跑了没成）。
+fn export_refusal(catalog: &Catalog) -> Option<String> {
+    match catalog.export_setup() {
+        Ok(None) => Some(EXPORT_NOT_CHOSEN.to_string()),
+        Ok(Some(setup)) => setup.adapter().err().map(|error| no_adapter(&error)),
+        Err(_) => None,
+    }
+}
+
 /// 读出记住的那套**导出**配置与它的**适配器**。
 ///
 /// 导出那一趟（[`export_run`]）与算要铺多少那一趟（[`media_cost_run`]）摆的是同一副料，
-/// **同一句拒绝只写在这儿**。
+/// **同一句拒绝只写在这儿与 [`export_refusal`]**，两处说的是同一句（[`EXPORT_NOT_CHOSEN`]、
+/// [`no_adapter`]）。
 fn export_setup_of(
     catalog: &Catalog,
 ) -> Result<(ExportSetup, Box<dyn romcat_core::adapter::Adapter>), Cutoff> {
     let setup = catalog
         .export_setup()
         .map_err(|error| Cutoff::failed(format!("这份中立库读不动：{error}")))?
-        // **没选过就如实拒绝**，不替人挑一个格式与目录：挑错一个目录就是往别人的盘上
-        // 写一堆文件。这一句与上面那一行的空态说的是同一件事（挂单 `Q437`）。
-        // 算要铺多少那一趟也停在这儿：媒体的布局随前端格式不同，没选过就算不出来。
-        .ok_or_else(|| {
-            Cutoff::failed(
-                "还没选过导出的前端格式与目录。先在工序段底下那一行选一次\
-                 ——选完记进这份库，下一趟点一下就重导。"
-                    .to_string(),
-            )
-        })?;
-    // **找不到那个格式该说哪句话在核心里**（`ExportSetup::adapter`，ADR-0005）。
+        // **按下去那一刻已经问过一遍**（[`export_refusal`]：不排，只在屏上说）。走到这儿还是
+        // 没选过，是排上去之后、轮到它之前那两个键被抹掉了——真跑起来才撞上的，照实记失败。
+        .ok_or_else(|| Cutoff::failed(EXPORT_NOT_CHOSEN))?;
+    // **找不到那个格式该说哪句话在核心里**（`ExportSetup::adapter`，ADR-0005）。兜底同上。
     let adapter = setup
         .adapter()
-        .map_err(|error| Cutoff::failed(error.to_string()))?;
+        .map_err(|error| Cutoff::failed(no_adapter(&error)))?;
     Ok((setup, adapter))
 }
 
@@ -1130,6 +1315,34 @@ mod tests {
             ExportSetup::check("Pegasus", &导出去.to_string_lossy()).expect("有 Pegasus 这个格式");
         site.catalog.set_export_setup(&setup).expect("记得下");
         (工作区, site)
+    }
+
+    #[test]
+    fn 识别那一层只用已经问过的答案_不给凭据_不排计划_不装念计划的回调_价钱传零() {
+        // 挂单 `Q418` 那几样**一起**钉死，少一样这一路就不对：手里有网络句柄就会发请求；
+        // 排了计划、装了念计划的回调，就会有一份零价的计划被念给人听。
+        // **价目表一处都没读**：价钱是零、核实日期是空的——那两样只有价目表给得出。
+        let answers = Answers::default();
+        let layer = model_layer(&answers);
+        assert!(
+            layer.net.is_none() && !layer.asking(),
+            "界面这一路手里有网络句柄"
+        );
+        assert!(!layer.planning, "界面这一路排了计划");
+        assert!(layer.announce.is_none(), "界面这一路装了念计划的回调");
+        assert_eq!(
+            layer.price,
+            Price {
+                input_per_mtok: 0,
+                output_per_mtok: 0,
+            },
+            "界面这一路的价钱不是零",
+        );
+        assert!(
+            layer.checked.is_empty(),
+            "界面这一路带着一个价目表核实日期：{}",
+            layer.checked,
+        );
     }
 
     #[test]

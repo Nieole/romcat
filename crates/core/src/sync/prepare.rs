@@ -143,13 +143,13 @@ impl Prepared {
     }
 }
 
-/// 工作目录里那份可选的优先级表叫什么。
-const PRIORITIES_IN_WORKSPACE: &str = "priorities.toml";
-
 /// 挑出这一趟用哪一份优先级表：给了的 > 工作目录里那份 > 内置的。
 ///
 /// **刮削、标题、导出与同步共用它，而且必须共用**：几条路对「哪个源说了算」的答案
 /// 不一样的话，报告里合并出来的标题与导出时挑出来的标题就会对不上。
+///
+/// 工作目录里那份在哪由 [`workspace::priorities_path`] 定——界面上改完优先级写回的
+/// 也是那一处（ADR-0024）。
 ///
 /// # Errors
 /// 那份表读不动或者写坏了时返回一句给人看的话。
@@ -157,7 +157,7 @@ pub fn priorities(given: Option<&Path>, workspace: &Path) -> Result<Priorities, 
     let path = match given {
         Some(path) => path.to_path_buf(),
         None => {
-            let candidate = workspace.join(PRIORITIES_IN_WORKSPACE);
+            let candidate = workspace::priorities_path(workspace);
             if !candidate.exists() {
                 return Ok(Priorities::builtin());
             }

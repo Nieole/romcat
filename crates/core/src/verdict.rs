@@ -28,10 +28,11 @@
 //! 打开时把没跑过的接着跑完。**往前迁得动，往后（库比程序新）如实拒绝并说清**——
 //! 那时该换新程序，而不是删库。
 //!
-//! 眼下五条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
+//! 眼下六条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
 //! 第 3 条建 `verdict_batch` 与 `verdict_batch_row` 两张表（**批**，见下一节），
 //! 第 4 条建 `collection_member` 表（**合集**与**收藏**，见再下一节），
-//! 第 5 条建 `title_suppression` 表（**压掉的叫法**，见最后一节）。
+//! 第 5 条建 `title_suppression` 表（**压掉的叫法**，见倒数第二节），
+//! 第 6 条建 `shaping_override` 表（**成型的人工纠正**，见最后一节）。
 //! 加这几条时库还是空的，但那不改变纪律——**永远不要求删库**，中立库那条「版本一变就
 //! 重建」的便宜路子在这份库上不许走。
 //!
@@ -140,6 +141,24 @@
 //! **撤得掉**：`lifted_at` 一填，这条压制就不再算数，而**行留着**——与
 //! `verdict_batch.undone_at` 同一条纪律：撤销本身也是人的动作，删掉行就说不出
 //! 「他压过又放回来了」。
+//!
+//! ## **成型的人工纠正**：删掉中立库重扫，它还在
+//!
+//! 人说「这几个条目是一个变体」（`romcat shape --merge`），那一条原先记在中立库里——
+//! 于是结构版本一变、按提示删库重扫，一条条纠正出来的成型跟着没了（挂账 D97）。
+//! 它与**裁决**同类，是人一条条看出来的判断，重扫补不回来，所以搬到这里单开一张表
+//! （ADR-0001 的修订：不另开第三份库文件）。
+//!
+//! **键是中立库里的键**（根名 + 相对那个根的路径），因此它与**路径锚**同一个处境：
+//! **只在本机这一份主库里成立**。表按**主库标识**分开；**导出不带它**——[`Store::export`]
+//! 只折裁决与匹配裁决两张表，与路径锚默认不导出同一个理由：对别人没用，还顺带把自己的
+//! 目录结构交出去了。
+//!
+//! 票 `one-criterion-per-thing/07` 之前的中立库里那张 `shaping_override` 表，开现场时搬进来
+//! 一次（[`carry_over_shaping_overrides`](crate::site::carry_over_shaping_overrides)），
+//! 旧表原样留着、不再读。**结构版本对不上、开不进去的旧库**，列出来或试着打开的那一下
+//! 就先救进来（[`rescue_shaping_overrides`](crate::site::rescue_shaping_overrides)）——那句
+//! 叫人删库重扫的话说「人工纠正一条不丢」，删之前得先救出来。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -340,6 +359,23 @@ CREATE TABLE IF NOT EXISTS title_suppression(
 CREATE UNIQUE INDEX IF NOT EXISTS title_suppression_key
     ON title_suppression(work, language, kind, source, value);
 CREATE INDEX IF NOT EXISTS title_suppression_work ON title_suppression(work);
+",
+    // 6：**成型的人工纠正**（票 `one-criterion-per-thing/07`，挂账 D97）。它原先住在
+    // 中立库里，删库重扫就跟着没了；它与裁决同类，是人一条条看出来的判断。
+    "\
+-- 一条**人工纠正**：这份主库里 `key` 那个条目其实属于 `variant_key` 那个变体
+-- （两者相同就是「它自己当主文件」）。规则会出错，所以人工纠正成型的结果是一等公民
+-- 功能（`CONTEXT.md` 的**成型规则**）。
+--
+-- **键是中立库里的键**（根名 + 相对那个根的路径），与**路径锚**同一个处境：只在本机
+-- 这一份主库里成立。所以它按**主库标识**分开，也与路径锚一样**默认不导出**。
+CREATE TABLE IF NOT EXISTS shaping_override(
+    library     TEXT    NOT NULL,
+    key         TEXT    NOT NULL,
+    variant_key TEXT    NOT NULL,
+    decided_at  INTEGER NOT NULL,
+    PRIMARY KEY (library, key)
+) STRICT;
 ",
 ];
 
@@ -1792,6 +1828,119 @@ impl Store {
             .map_err(|source| self.err(source))?;
         Ok(rows.into_iter().flatten().collect())
     }
+
+    // ── 成型的人工纠正：人说这几个条目是一个变体（票 `one-criterion-per-thing/07`） ──
+
+    /// 这份主库的全部**人工纠正**：条目的键 → 它该归到哪个变体。成型照它
+    /// （[`shape::plan`](crate::shape::plan)），**优先于一切成型规则**。
+    ///
+    /// `library` 是**主库标识**：键是中立库里的键，换一份主库，同一个键指的是另一个文件，
+    /// 所以只取这一份的（与 [`Index::load`] 只认这份主库的路径锚同一条）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn shaping_overrides(
+        &self,
+        library: &str,
+    ) -> Result<BTreeMap<String, String>, VerdictError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT key, variant_key FROM shaping_override WHERE library = ?1")
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![library], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
+    /// 记一条人工纠正：这份主库里 `key` 其实属于 `variant_key` 这个变体。
+    ///
+    /// `key == variant_key` 就是「这一条自己当主文件」。同一个键上已经有一条就**盖掉**
+    /// ——人改了主意，不攒出第二行。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn set_shaping_override(
+        &mut self,
+        library: &str,
+        key: &str,
+        variant_key: &str,
+    ) -> Result<(), VerdictError> {
+        self.conn
+            .execute(
+                "INSERT INTO shaping_override(library, key, variant_key, decided_at)
+                 VALUES(?1, ?2, ?3, ?4)
+                 ON CONFLICT(library, key) DO UPDATE SET
+                    variant_key = excluded.variant_key,
+                    decided_at = excluded.decided_at",
+                params![library, key, variant_key, now_secs()],
+            )
+            .map(|_| ())
+            .map_err(|source| self.err(source))
+    }
+
+    /// 撤掉这份主库里 `key` 上的人工纠正，返回原来有没有这一条。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn clear_shaping_override(
+        &mut self,
+        library: &str,
+        key: &str,
+    ) -> Result<bool, VerdictError> {
+        self.conn
+            .execute(
+                "DELETE FROM shaping_override WHERE library = ?1 AND key = ?2",
+                params![library, key],
+            )
+            .map(|removed| removed > 0)
+            .map_err(|source| self.err(source))
+    }
+
+    /// 把一批人工纠正里**这份库还没有的那几条**收进来，返回新收下几条。同一个键上已经有的
+    /// **不盖**。
+    ///
+    /// 用处是收**中立库旧表里还没搬走的那批**（票 `one-criterion-per-thing/07` 之前记下的，
+    /// [`carry_over_shaping_overrides`](crate::site::carry_over_shaping_overrides) 与
+    /// [`rescue_shaping_overrides`](crate::site::rescue_shaping_overrides)）：沉淀库里那一条是
+    /// 人后来定的，旧表里那一条是它之前的样子。**一个事务**：半途断掉要么全收下、要么
+    /// 一条没收，下次再搬一遍。一条都没交进来就一个字都不写。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn add_missing_shaping_overrides(
+        &mut self,
+        library: &str,
+        overrides: &BTreeMap<String, String>,
+    ) -> Result<usize, VerdictError> {
+        if overrides.is_empty() {
+            return Ok(0);
+        }
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(|source| self.err(source))?;
+        let mut added = 0;
+        {
+            let mut statement = tx
+                .prepare(
+                    "INSERT INTO shaping_override(library, key, variant_key, decided_at)
+                     VALUES(?1, ?2, ?3, ?4)
+                     ON CONFLICT(library, key) DO NOTHING",
+                )
+                .map_err(|source| self.err(source))?;
+            let now = now_secs();
+            for (key, variant_key) in overrides {
+                added += statement
+                    .execute(params![library, key, variant_key, now])
+                    .map_err(|source| self.err(source))?;
+            }
+        }
+        tx.commit().map_err(|source| self.err(source))?;
+        Ok(added)
+    }
 }
 
 const SUPPRESSION_SELECT: &str = "SELECT work, language, kind, source, value, note,
@@ -2670,6 +2819,104 @@ mod tests {
         assert_eq!(store.memberships().expect("读得到").len(), 1, "合集也还在");
         // 新那张表真的建出来了，而且是空的——升级不会凭空压掉谁的叫法。
         assert!(store.title_suppressions().expect("读得到").is_empty());
+    }
+
+    #[test]
+    fn 第五版的老库带着裁决与压制升上来_人工纠正那张表是空的() {
+        // 与上几条同一个形状、同一条理由，钉的是**第 6 条迁移**（成型的人工纠正，
+        // 票 `one-criterion-per-thing/07`）。旧的沉淀库文件打开就能用，不要求删。
+        let conn = Connection::open_in_memory().expect("开得出来");
+        for sql in &MIGRATIONS[..5] {
+            conn.execute_batch(sql).expect("建得出第五版");
+        }
+        conn.execute_batch("PRAGMA user_version = 5")
+            .expect("盖得上第五版的版本号");
+        let mut store = Store {
+            conn,
+            path: "（内存）".to_string(),
+        };
+        let verdict = 汉化裁决();
+        store.put(&verdict).expect("第五版里就存得进");
+        let 压掉的 = TitleSuppression::now(
+            "Contra",
+            crate::title::Language::Chinese,
+            crate::title::TitleKind::Alias,
+            "文件名",
+            "魂斗罗 完美版",
+        );
+        assert!(store.suppress_title(&压掉的).expect("压得下"));
+
+        store.migrate().expect("升得上来");
+
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("读得到");
+        assert_eq!(
+            u32::try_from(version).expect("装得下"),
+            schema_version(),
+            "升到最新一版"
+        );
+        assert_eq!(
+            store
+                .find(&verdict.anchor)
+                .expect("读得到")
+                .expect("老裁决还在")
+                .decision,
+            verdict.decision,
+            "裁决一个字都没变",
+        );
+        assert_eq!(
+            store.title_suppressions().expect("读得到").len(),
+            1,
+            "压制也还在"
+        );
+        // 新那张表真的建出来了，而且是空的——升级不会凭空并起谁的文件。
+        assert!(store.shaping_overrides("主库").expect("读得到").is_empty());
+    }
+
+    #[test]
+    fn 人工纠正按主库分开存得住也撤得掉() {
+        // 沉淀库一个工作目录一份、几份主库共用，而人工纠正的键是中立库里的键——
+        // 同一个键在另一份主库里指的是另一个文件，所以一条纠正要说得出属于哪份主库。
+        let mut store = Store::in_memory().expect("开得出来");
+        store
+            .set_shaping_override("主库", "FC/乙.zip", "FC/甲.zip")
+            .expect("记得下");
+        store
+            .set_shaping_override("别的库", "FC/乙.zip", "FC/丙.zip")
+            .expect("记得下");
+        assert_eq!(
+            store.shaping_overrides("主库").expect("读得出"),
+            BTreeMap::from([("FC/乙.zip".to_string(), "FC/甲.zip".to_string())]),
+        );
+
+        // 同一个键再记一次是改了主意：盖掉，不攒出第二行。
+        store
+            .set_shaping_override("主库", "FC/乙.zip", "FC/乙.zip")
+            .expect("记得下");
+        assert_eq!(
+            store.shaping_overrides("主库").expect("读得出"),
+            BTreeMap::from([("FC/乙.zip".to_string(), "FC/乙.zip".to_string())]),
+        );
+
+        assert!(
+            store
+                .clear_shaping_override("主库", "FC/乙.zip")
+                .expect("撤得掉")
+        );
+        assert!(store.shaping_overrides("主库").expect("读得出").is_empty());
+        assert!(
+            !store
+                .clear_shaping_override("主库", "FC/乙.zip")
+                .expect("撤得掉"),
+            "本来就没有这一条",
+        );
+        assert_eq!(
+            store.shaping_overrides("别的库").expect("读得出"),
+            BTreeMap::from([("FC/乙.zip".to_string(), "FC/丙.zip".to_string())]),
+            "别的主库那一条一个字不动",
+        );
     }
 
     #[test]

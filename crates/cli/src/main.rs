@@ -512,7 +512,8 @@ struct ShapeArgs {
 
     /// 人工纠正：这几个键其实是一个变体。第一个当主文件，可重复给
     ///
-    /// 纠正**优先于一切成型规则**，也不随重新成型或重扫消失——规则的缺陷不该永久污染库
+    /// 纠正**优先于一切成型规则**，记在沉淀库里：不随重新成型或重扫消失，删掉中立库重扫
+    /// 也还在——规则的缺陷不该永久污染库
     #[arg(long = "merge", value_name = "键")]
     merge: Vec<String>,
 
@@ -1337,8 +1338,22 @@ fn open_catalog(
         CatalogError::Missing { .. } => {
             SiteError::not_found(workspace, slug, located_by).to_string()
         }
-        error => format!("中立库打不开：{error}"),
+        error => unopened(workspace, &path, &error),
     })
+}
+
+/// 「中立库打不开」那一句。
+///
+/// **结构版本对不上时先把那份旧库里没搬走的人工纠正救进沉淀库**
+/// （`site::rescue_shaping_overrides`）：那句话叫人删掉它重扫，删之前得先救出来——与开现场、
+/// 开场列举是同一个函数。没救成就说没救成的那一句（核心库的原话）。
+fn unopened(workspace: &Path, path: &Path, error: &CatalogError) -> String {
+    if matches!(error, CatalogError::Version { .. })
+        && let Err(stranded) = romcat_core::site::rescue_shaping_overrides(workspace, path, error)
+    {
+        return stranded.to_string();
+    }
+    format!("中立库打不开：{error}")
 }
 
 /// 开这一份中立库，**还没有就建一份**——命令行上建库只有 `romcat scan` 这一条路。
@@ -1367,7 +1382,7 @@ fn open_or_create_catalog(
                 error => format!("中立库建不出来：{error}"),
             })
         }
-        opened => opened.map_err(|error| format!("中立库打不开：{error}")),
+        opened => opened.map_err(|error| unopened(workspace, &path, &error)),
     }
 }
 
@@ -1426,6 +1441,18 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
         Ok(catalog) => catalog,
         Err(message) => return fail(message),
     };
+    // **人工纠正住沉淀库**（票 `one-criterion-per-thing/07`）：收尾成型要照着它，
+    // 删掉中立库重扫它也还在。
+    let library_identity = slug.text();
+    let shaping_overrides = match open_store_beside(&workspace, &catalog, &library_identity)
+        .and_then(|store| {
+            store
+                .shaping_overrides(&library_identity)
+                .map_err(|error| format!("沉淀库读不出来：{error}"))
+        }) {
+        Ok(overrides) => overrides,
+        Err(message) => return fail(message),
+    };
 
     let mut options = ScanOptions::new(&args.root);
     options.root_name = args.root_name.clone();
@@ -1442,6 +1469,7 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
     options.incremental = !args.full;
     options.penetrate_containers = !args.no_containers;
     options.decompress_zst = args.zst;
+    options.shaping_overrides = shaping_overrides;
     if args.output.dump_duplicates.is_some() {
         // 默认每组只留几条路径当例子。要导出可据以动手的清单，得把组内每一份都记下来。
         options.limits.max_duplicate_paths_per_group = Limits::FULL_DUPLICATE_PATHS_PER_GROUP;
@@ -1623,14 +1651,20 @@ fn run_shape(args: &ShapeArgs) -> ExitCode {
         Ok(catalog) => catalog,
         Err(message) => return fail(message),
     };
+    // **人工纠正住沉淀库**（票 `one-criterion-per-thing/07`），按**主库标识**分开。
+    let library_identity = slug.text();
+    let mut store = match open_store_beside(&workspace, &catalog, &library_identity) {
+        Ok(store) => store,
+        Err(message) => return fail(message),
+    };
 
     // 人工纠正先落库，再成型——顺序反了的话这一趟成型还用的是旧的纠正。
     for key in &args.forget_merge {
-        match catalog.clear_shaping_override(key) {
+        match store.clear_shaping_override(&library_identity, key) {
             Ok(true) => eprintln!("撤掉了 {key} 上的人工纠正。"),
             Ok(false) => eprintln!("{key} 上本来就没有人工纠正。"),
             Err(error) => {
-                eprintln!("中立库写不进：{error}");
+                eprintln!("沉淀库写不进：{error}");
                 return ExitCode::FAILURE;
             }
         }
@@ -1654,8 +1688,8 @@ fn run_shape(args: &ShapeArgs) -> ExitCode {
     }
     if let Some((main, rest)) = args.merge.split_first() {
         for key in std::iter::once(main).chain(rest) {
-            if let Err(error) = catalog.set_shaping_override(key, main) {
-                eprintln!("中立库写不进：{error}");
+            if let Err(error) = store.set_shaping_override(&library_identity, key, main) {
+                eprintln!("沉淀库写不进：{error}");
                 return ExitCode::FAILURE;
             }
         }
@@ -1679,7 +1713,14 @@ fn run_shape(args: &ShapeArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let plan = match shape::reshape(&mut catalog, &manifest, scan) {
+    let overrides = match store.shaping_overrides(&library_identity) {
+        Ok(overrides) => overrides,
+        Err(error) => {
+            eprintln!("沉淀库读不出来：{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let plan = match shape::reshape(&mut catalog, &manifest, &overrides, scan) {
         Ok(plan) => plan,
         Err(error) => {
             eprintln!("成型失败：{error}");
@@ -2942,6 +2983,22 @@ struct TriageCommonArgs {
 /// 只开**沉淀库**：导出、导入与「忘掉裁决」不必连中立库一起开。
 fn open_store(workspace: &Path) -> Result<Store, String> {
     Store::open(&workspace::verdict_store_path(workspace)).map_err(|error| format!("{error}"))
+}
+
+/// 给一份已经开着的中立库配上**沉淀库**：票 `one-criterion-per-thing/07` 之前记在那份
+/// 中立库里的**人工纠正**先搬过去一次（`site::carry_over_shaping_overrides`）。
+///
+/// 不经现场、自己开两份库再成型的那两条路（`romcat scan`、`romcat shape`）走这里——
+/// 与开现场那一步是同一个函数，不另写一遍。
+fn open_store_beside(
+    workspace: &Path,
+    catalog: &Catalog,
+    library_identity: &str,
+) -> Result<Store, String> {
+    let mut store = open_store(workspace)?;
+    romcat_core::site::carry_over_shaping_overrides(catalog, &mut store, library_identity)
+        .map_err(|error| format!("{error}"))?;
+    Ok(store)
 }
 
 impl TriageCommonArgs {

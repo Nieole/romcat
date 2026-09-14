@@ -51,9 +51,9 @@ use meta::MetaKey;
 
 pub use baseline::{Baseline, Recorded, ScanDelta, Verdict};
 pub use browse::{
-    BrowseVariant, Facet, Facets, MAX_PAGE, PlatformFilter, Scope, SearchHit, StateFilter,
-    VariantOrder, VariantQuery, WORK_FIELDS, WorkAnchor, WorkDetail, WorkOrder, WorkQuery, WorkRow,
-    WorkVariant,
+    BrowseVariant, Facet, Facets, MAX_PAGE, NonGameAssets, PlatformFilter, Scope, SearchHit,
+    StateFilter, VariantOrder, VariantQuery, WORK_FIELDS, WorkAnchor, WorkDetail, WorkOrder,
+    WorkQuery, WorkRow, WorkVariant,
 };
 pub use content::{MemberFile, ReleaseRow, VariantRow};
 pub use detail::{MediaHave, MediaItem, Sibling, ValueItem, VariantDetail};
@@ -90,8 +90,17 @@ pub use title::TitleRow;
 /// 而不是「丢掉人一条条看出来的判断」。
 ///
 /// **不可再生的东西再往这里放，这条就重新失效**——那时该做的还是先问一句
-/// 「它是不是本来就该住在别处」。眼下还剩几样半可再生的（成型的人工纠正、子库的
-/// 定义与**清单**、导入的前端快照），记在挂账 D97 上。
+/// 「它是不是本来就该住在别处」（ADR-0001 的修订起，这是一条要主动守的规矩）。
+///
+/// 挂账 D97 数出过三样半可再生的。**成型的人工纠正**已经搬进沉淀库
+/// （票 `one-criterion-per-thing/07`）：它与裁决同类，是人一条条看出来的判断。
+/// 另两样留在这里、**接受删库会丢**，因为它们重建得回来：**子库**的定义与**清单**
+/// （人重新点一遍规则），导入时存下的**底本**（重导一次）。
+///
+/// **那张挂账数漏了两样**，也是人亲手定的、重扫补不回来：**首选变体**
+/// （[`Catalog::set_preferred_variant`]）与界面上亲手加的叫法（`title` 里 `source = 裁决`
+/// 的行）。它们该不该也搬进沉淀库，记在挂单 `Q725`。删库那句话（[`CatalogError::Version`]）
+/// 把这几样逐项说出来，不许只说「重扫一遍就好」。
 ///
 /// ## 什么算「结构变了」
 ///
@@ -101,6 +110,10 @@ pub use title::TitleRow;
 /// 为它逼用户删掉 780 MB 的库、重扫 27 分钟、重跑 14 分钟识别，换不到任何东西
 /// （挂账 D50）。**改了已有表的列或含义才加 1。** 票 15 的标题集合、票 16 的旁路快照、
 /// 票 18 的子库三张表都是同一档。
+///
+/// 反方向也是这一档：票 `one-criterion-per-thing/07` 把**人工纠正**搬进沉淀库，建表语句里
+/// 删掉了 `shaping_override`。旧库里那张表还在，只是新程序不读它（开现场时搬过去一次，
+/// `site::carry_over_shaping_overrides`）——没有一条旧数据会被读错，不加 1。
 ///
 /// **中文离线源那批票的 01 是头一个真正撞上这条判据的**：它给 `scrape_value` 的去重键
 /// 加了 `value` 那一列——改的是已有表的键，旧库拿新程序打开会把「一个源的第二个值」
@@ -311,7 +324,17 @@ pub enum CatalogError {
         source: rusqlite::Error,
     },
     /// 结构版本对不上。
-    #[error("中立库 {path} 的结构版本是 {found}，本程序认得的是 {expected}。删掉它重扫一遍即可")]
+    ///
+    /// **那句话逐项说清删库会丢什么**（ADR-0001 的修订，挂账 D97）：人按下去之前得知道代价。
+    /// 往中立库里再放一样半可再生的东西，就得在这里再添一项——更该先问的是它是不是本该
+    /// 住在沉淀库。
+    #[error(
+        "中立库 {path} 的结构版本是 {found}，本程序认得的是 {expected}。删掉它重扫一遍即可——\
+         扫描、成型、识别、刮削都重跑得回来；沉淀库里的裁决、收藏与人工纠正一条不丢。\
+         会跟着丢的有三样：一是子库的定义与清单（重新点一遍规则就回来）；\
+         二是导入时存下的底本（重新导入一次就有）；\
+         三是记在这份库里的首选变体与亲手加的叫法（得重新定一遍）"
+    )]
     Version {
         /// 中立库文件。
         path: String,
@@ -691,6 +714,8 @@ impl Catalog {
         };
         twin.conn
             .set_prepared_statement_cache_capacity(STATEMENT_CACHE);
+        // 同 `prepare` 那一句：只读的这一份照样要翻页浏览。
+        browse::register_non_game_asset(&twin.conn).map_err(|source| twin.err(source))?;
         // **这一份也要等。** WAL 让读与写并行，但写者提交那一刻仍会短暂独占；
         // 默认超时是 0，于是长活那一侧会在扫描提交的那一瞬间拿到一句
         // 「database is locked」而不是等一会儿（同 `Catalog::open` 那条注释）。
@@ -730,6 +755,10 @@ impl Catalog {
         catalog
             .conn
             .set_prepared_statement_cache_capacity(STATEMENT_CACHE);
+        // **领域判断挂成 SQL 函数**：浏览那几条查询要问它（`browse::register_non_game_asset`）。
+        // 函数不落在库文件里，每条连接各挂一次——交得出能浏览的中立库的入口只有这里与
+        // `read_only_at`（`stranded_shaping_overrides` 那条临时连接从不浏览，不挂）。
+        browse::register_non_game_asset(&catalog.conn).map_err(|source| catalog.err(source))?;
         // **打开不建库，也不改写一份没建好的库**（挂单 `Q371`）：盘上一个文件却连结构版本那一行
         // 都没有——一个空文件、建到一半断了的那一份——就不是一份建好的中立库。**先核这一行，
         // 再动任何东西**：底下那几句要切 WAL、建表，一旦跑了那个文件就被改写了。只核在不在，
