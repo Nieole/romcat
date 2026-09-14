@@ -1050,3 +1050,27 @@ fn 窗口窄时点左栏底下那颗临时展开_不写文件_窗口宽度一变
         记着的(&app)
     );
 }
+
+#[test]
+fn 收起窄条里的入口照稿按行高撑高() {
+    // 设计稿 `.main.rcol .nav{padding:7px 0;gap:1px;font-size:12px}` 与 `.main.rcol .nav .badge{font-size:10px}`，
+    // 行高继承 `body` 的 1.55（令牌 `line-height`）：一项高 = 上下留白 + 字号 × 行高 + 间距 + 计数字号 × 行高。
+    // 量相邻两项（库、待确认，都带计数）的字相差多少：该是一项高再加栏里一格间距。
+    let t = romcat_gui::tokens::Tokens::builtin();
+    let mut app = 待确认(&工作目录("窄条行高"));
+    let ctx = headless::context();
+    跑(&ctx, &mut app, 2);
+    let out = 点左栏(&ctx, &mut app, "« 收起");
+    let 库 = 左栏里的(&out, "库").expect("窄条里有库");
+    let 待确认那一项 = 左栏里的(&out, "待确认").expect("窄条里有待确认");
+    let 一项 = 2.0 * t.space.nav_padding_collapsed
+        + t.font.size_small * t.font.line_height
+        + t.space.nav_gap_collapsed
+        + t.font.size_badge_narrow * t.font.line_height;
+    let 差 = 待确认那一项.top() - 库.top();
+    assert!(
+        (差 - (一项 + t.space.rail_gap)).abs() < 0.5,
+        "窄条里相邻两项隔 {差}，照稿该是 {}：库 {库:?}，待确认 {待确认那一项:?}",
+        一项 + t.space.rail_gap,
+    );
+}

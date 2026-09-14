@@ -308,13 +308,10 @@ fn nav_item(ui: &mut egui::Ui, view: View, facts: &Facts<'_>, folded: bool) -> e
     } else {
         tokens.font.size_body
     };
-    // 字色要先知道悬没悬停，而悬停要先占了地方才问得出：先排一份量高，占完地方再按悬停换色重排。
-    let 量 = galley(
-        ui,
-        名字,
-        egui::FontId::proportional(字号),
-        Color32::PLACEHOLDER,
-    );
+    // 收成窄条时字与计数各占一行，行高照稿继承正文那一档（令牌 `line-height`，设计稿 `body` 的 1.55）——
+    // 按字形本身的高摆，一项就比稿上矮一截，越往下差得越多。
+    let 字行 = 字号 * tokens.font.line_height;
+    let 数行 = 数号 * tokens.font.line_height;
     let 点 = tokens.layout.rail_dot;
     let 点宽 = if 在跑 {
         点 + tokens.space.live_badge_gap
@@ -324,8 +321,8 @@ fn nav_item(ui: &mut egui::Ui, view: View, facts: &Facts<'_>, folded: bool) -> e
     let 高 = if folded {
         let 数高 = 数
             .as_ref()
-            .map_or(0.0, |数| tokens.space.nav_gap_collapsed + 数.size().y);
-        2.0 * tokens.space.nav_padding_collapsed + 量.size().y + 数高
+            .map_or(0.0, |_| tokens.space.nav_gap_collapsed + 数行);
+        2.0 * tokens.space.nav_padding_collapsed + 字行 + 数高
     } else {
         tokens.layout.nav_height
     };
@@ -353,15 +350,15 @@ fn nav_item(ui: &mut egui::Ui, view: View, facts: &Facts<'_>, folded: bool) -> e
             .gamma_multiply((0.625 + 0.375 * 相位) as f32)
     };
     if folded {
-        let 字顶 = rect.top() + tokens.space.nav_padding_collapsed;
-        let 字高 = 字.size().y;
+        let 字行顶 = rect.top() + tokens.space.nav_padding_collapsed;
+        let 字顶 = 字行顶 + (字行 - 字.size().y) / 2.0;
         painter.galley(
             egui::pos2(rect.center().x - 字.size().x / 2.0, 字顶),
             字,
             字色,
         );
         if let Some(数) = 数 {
-            let 顶 = 字顶 + 字高 + tokens.space.nav_gap_collapsed;
+            let 顶 = 字行顶 + 字行 + tokens.space.nav_gap_collapsed + (数行 - 数.size().y) / 2.0;
             let 左 = rect.center().x - (点宽 + 数.size().x) / 2.0;
             if 在跑 {
                 painter.circle_filled(
