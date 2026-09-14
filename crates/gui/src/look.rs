@@ -520,9 +520,42 @@ pub fn step(at: usize) -> f32 {
 /// 一枚**标签**：浅底小圆角，同色的圆点与字（设计稿 `.chip`）。高、左右留白、圆点直径、圆点与字的间距取令牌
 /// `chip-height` / `chip-padding` / `chip-dot` / `chip-gap`，字取半号 `size-caption-plus`（按倍率取整，[`font_size`]）。
 pub fn chip(ui: &mut egui::Ui, tone: Tone, text: &str) -> egui::Response {
+    let layout = &Tokens::builtin().layout;
+    tag(
+        ui,
+        tone,
+        text,
+        [layout.chip_height, layout.chip_padding, layout.chip_gap],
+        Tokens::builtin().font.size_caption_plus,
+    )
+}
+
+/// 一枚**只读标签**（设计稿 `.ro`，添加主库向导里「只读访问，不会写入这个根」「只读」那两枚）：高置信那一对颜色，
+/// 高、左右留白、圆点与字的间距取令牌 `ro-height` / `ro-padding` / `ro-gap`，圆点与 [`chip`] 同一个直径，字是说明字号
+/// `size-small`。**与 [`chip`] 是两个样式**：稿上它比标签高一截、字大半号（拿主意的人 2026-09-14 定单列一档，挂单 `Q862`）。
+pub fn read_only(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let tokens = Tokens::builtin();
+    let layout = &tokens.layout;
+    tag(
+        ui,
+        Tone::Good,
+        text,
+        [layout.ro_height, layout.ro_padding, layout.ro_gap],
+        tokens.font.size_small,
+    )
+}
+
+/// 标签与只读标签共用的画法：`[高, 左右留白, 圆点与字的间距]`，这个字号（按倍率取整），圆点直径取令牌 `chip-dot`。
+fn tag(
+    ui: &mut egui::Ui,
+    tone: Tone,
+    text: &str,
+    [高, 边, 缝]: [f32; 3],
+    字号: f32,
+) -> egui::Response {
     let tokens = Tokens::builtin();
     let (字色, 底色) = tone_colors(tone, ui.visuals());
-    let 字号 = font_size(ui.ctx(), tokens.font.size_caption_plus);
+    let 字号 = font_size(ui.ctx(), 字号);
     let galley = egui::WidgetText::from(
         egui::RichText::new(text)
             .font(egui::FontId::proportional(字号))
@@ -534,13 +567,12 @@ pub fn chip(ui: &mut egui::Ui, tone: Tone, text: &str) -> egui::Response {
         f32::INFINITY,
         egui::TextStyle::Small,
     );
-    let layout = &tokens.layout;
-    let (边, 点, 缝) = (layout.chip_padding, layout.chip_dot, layout.chip_gap);
+    let 点 = tokens.layout.chip_dot;
     let 字 = galley.size();
-    let size = egui::vec2(边 + 点 + 缝 + 字.x + 边, layout.chip_height);
+    let size = egui::vec2(边 + 点 + 缝 + 字.x + 边, 高);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(rect, Tokens::builtin().radius.small, 底色);
+    painter.rect_filled(rect, tokens.radius.small, 底色);
     painter.circle_filled(
         egui::pos2(rect.left() + 边 + 点 / 2.0, rect.center().y),
         点 / 2.0,
@@ -1920,6 +1952,42 @@ mod tests {
             t.layout.chip_padding,
         );
         assert_eq!(字号, font_size(&ctx, t.font.size_caption_plus), "标签的字");
+    }
+
+    #[test]
+    fn 只读标签照设计稿_比标签高一截_字是说明字号_高置信那一对颜色() {
+        // 设计稿 `.ro{gap:6px;height:22px;padding:0 9px;font-size:12px;background:var(--hi-soft);color:var(--hi)}`，
+        // 圆点 6（`.ro::before`）。拿主意的人 2026-09-14 定：与 `.chip` 单列一档（挂单 `Q862`）。
+        let t = Tokens::builtin();
+        let ctx = headless::context();
+        install(&ctx);
+        let p = t.color.theme(ctx.theme());
+        let mut 量到 = None;
+        let mut 输出 = None;
+        for _ in 0..2 {
+            输出 = Some(headless::frame(&ctx, headless::input(), |ui| {
+                量到 = Some(read_only(ui, "只读").rect);
+            }));
+        }
+        let (框, 输出) = (量到.expect("画过只读标签"), 输出.expect("跑过帧"));
+        let (_, 字, 字号, 字色) = 画出来的段(&输出)
+            .into_iter()
+            .find(|(画的, ..)| 画的 == "只读")
+            .expect("画了「只读」");
+        assert_eq!(框.height(), t.layout.ro_height, "只读标签的高");
+        assert!(
+            (字.left() - (框.left() + t.layout.ro_padding + t.layout.chip_dot + t.layout.ro_gap))
+                .abs()
+                < 0.5,
+            "字该在左留白、圆点、间距之后：框 {框:?}，字 {字:?}",
+        );
+        assert!(
+            (框.right() - 字.right() - t.layout.ro_padding).abs() < 0.5,
+            "字右边该留 {}：框 {框:?}，字 {字:?}",
+            t.layout.ro_padding,
+        );
+        assert_eq!(字号, t.font.size_small, "只读标签的字");
+        assert_eq!(字色, p.hi, "只读标签的字是高置信色");
     }
 
     #[test]

@@ -504,6 +504,12 @@ pub struct Layout {
     pub chip_padding: f32,
     /// 标签里圆点与字之间。
     pub chip_gap: f32,
+    /// 只读标签的高（设计稿 `.ro`）。
+    pub ro_height: f32,
+    /// 只读标签左右留白。
+    pub ro_padding: f32,
+    /// 只读标签里圆点与字之间。
+    pub ro_gap: f32,
     /// 「名 → 值」两列排时名那一列的宽。
     pub kv_key_width: f32,
     /// 按钮的高。
