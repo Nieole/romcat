@@ -977,3 +977,79 @@ fn 窗口窄于门槛左栏自动收起_宽回来照人选的_自动收起不写
     let 记着的 = std::fs::read_to_string(app.layout().path()).expect("人收起之后该落盘");
     assert!(记着的.contains("左栏 = 收起"), "{记着的}");
 }
+
+/// 同 [`点左栏`]，只是窗口宽 `宽`。
+fn 点左栏_窗口宽(
+    ctx: &egui::Context, app: &mut App, 宽: f32, 字: &str
+) -> egui::FullOutput {
+    let 头一帧 = 跑一帧_窗口宽(ctx, app, 宽, Vec::new());
+    let Some(在) = 左栏里的(&头一帧, 字) else {
+        panic!("左栏里没有「{字}」，没处点：\n{}", 画出来的字(&头一帧));
+    };
+    let 按 = |pressed: bool| egui::Event::PointerButton {
+        pos: 在.center(),
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    跑一帧_窗口宽(
+        ctx,
+        app,
+        宽,
+        vec![egui::Event::PointerMoved(在.center()), 按(true)],
+    );
+    跑一帧_窗口宽(ctx, app, 宽, vec![按(false)]);
+    跑一帧_窗口宽(ctx, app, 宽, Vec::new())
+}
+
+#[test]
+fn 窗口窄时点左栏底下那颗临时展开_不写文件_窗口宽度一变又收回去() {
+    // 拿主意的人 2026-09-14 定（挂单 `Q867`）：窗口窄于门槛、左栏自动收着时，点「»」临时展开，不写进版式文件；
+    // 临时展开时再点「« 收起」收回去；窗口宽度一变，就回到自动收起的规则。
+    let 门槛 = romcat_gui::tokens::Tokens::builtin()
+        .layout
+        .rail_collapse_below;
+    let 窄 = 门槛 - 40.0;
+    let mut app = 待确认(&工作目录("左栏临时展开"));
+    let ctx = headless::context();
+    let 记着的 = |app: &App| std::fs::read_to_string(app.layout().path()).unwrap_or_default();
+    跑一帧_窗口宽(&ctx, &mut app, 窄, Vec::new());
+
+    let out = 点左栏_窗口宽(&ctx, &mut app, 窄, "»");
+    assert!(
+        左栏里的(&out, "切换主库").is_some(),
+        "窄窗口里点「»」该临时展开：\n{}",
+        画出来的字(&out),
+    );
+    assert!(
+        !记着的(&app).contains("左栏"),
+        "临时展开不该写进文件：{}",
+        记着的(&app)
+    );
+
+    let out = 点左栏_窗口宽(&ctx, &mut app, 窄, "« 收起");
+    assert!(
+        左栏里的(&out, "»").is_some() && !画出来的字(&out).contains("切换主库"),
+        "临时展开时点「« 收起」该收回去：\n{}",
+        画出来的字(&out),
+    );
+    assert!(
+        !记着的(&app).contains("左栏"),
+        "收回去也不该写进文件：{}",
+        记着的(&app)
+    );
+
+    点左栏_窗口宽(&ctx, &mut app, 窄, "»");
+    跑一帧_窗口宽(&ctx, &mut app, 窄 + 10.0, Vec::new());
+    let out = 跑一帧_窗口宽(&ctx, &mut app, 窄 + 10.0, Vec::new());
+    assert!(
+        左栏里的(&out, "»").is_some() && !画出来的字(&out).contains("切换主库"),
+        "临时展开之后窗口宽度一变，该回到自动收起：\n{}",
+        画出来的字(&out),
+    );
+    assert!(
+        !记着的(&app).contains("左栏"),
+        "文件一直没被动过：{}",
+        记着的(&app)
+    );
+}

@@ -155,6 +155,9 @@ pub struct App {
     works: Option<u64>,
     /// 左栏底下那句「已保存 N 条裁决」：沉淀库自己数的。`None` 是读不出来。
     verdicts: Option<u64>,
+    /// **窗口窄时人点「»」临时展开了左栏**，记的是点的那一刻窗口多宽。宽度一变就作废，回到自动收起；
+    /// 不写进版式文件（拿主意的人 2026-09-14 定，挂单 `Q867`）。
+    rail_peek: Option<f32>,
     closing: Closing,
 }
 
@@ -209,6 +212,7 @@ impl App {
             switching: false,
             works: None,
             verdicts: None,
+            rail_peek: None,
             closing: Closing::No,
         };
         app.recount();
@@ -658,6 +662,11 @@ impl App {
 
     /// 画左栏：几个计数交进去，按下去的那一下在这儿落实（[`rail`]）。
     fn rail(&mut self, ui: &mut egui::Ui) {
+        // **窗口宽度一变，临时展开就作废**：人拖窗口是在换版式，回到自动收起的规则。
+        let 窗口宽 = ui.ctx().content_rect().width();
+        if self.rail_peek.is_some_and(|点的时候| 点的时候 != 窗口宽) {
+            self.rail_peek = None;
+        }
         let queue = self.queue.queue();
         let 待裁 = if queue.identified() {
             thousands(queue.pending())
@@ -685,6 +694,7 @@ impl App {
             badge: &badge,
             verdicts: self.verdicts,
             chosen_collapsed: self.layout.rail_collapsed(),
+            peeking: self.rail_peek.is_some(),
         };
         match rail::show(ui, &facts) {
             Some(rail::Pressed::Go(view)) => self.view = view,
@@ -694,6 +704,7 @@ impl App {
             // 自己退场（词表**开场**那一条）。一按，这份 `App` 连同它手上那份现场整个退场，不必关窗重开。
             Some(rail::Pressed::SwitchLibrary) => self.switching = true,
             Some(rail::Pressed::Collapse(collapsed)) => self.layout.set_rail_collapsed(collapsed),
+            Some(rail::Pressed::Peek(peeking)) => self.rail_peek = peeking.then_some(窗口宽),
             None => {}
         }
     }

@@ -13,8 +13,9 @@
 //! ## 收不收成窄条
 //!
 //! 人按的「收起 / 展开」记在工作目录的版式文件里；窗口宽不到令牌 `rail-collapse-below` 时自动收起，不记
-//! （[`crate::layout::rail_folded`]）。**自动收着的时候那颗按钮按不下去**：按下去改的是人记下的那一份，
-//! 屏上却一点不变——等窗口宽回来才突然展开或收起，那比按不动更难懂。
+//! （[`crate::layout::rail_folded`]）。**自动收着的时候点「»」是临时展开**，同样不记：再点「« 收起」收回去，
+//! 窗口宽度一变就回到自动收起（拿主意的人 2026-09-14 定，挂单 `Q867`）。这一层只交回按下去的是哪一种
+//! （[`Pressed::Collapse`] 还是 [`Pressed::Peek`]），记不记、什么时候作废由窗口那一层管。
 //!
 //! 设置入口等设置屏（票 31）来了再摆；新手引导主程序眼下没有，栏底不摆那一颗。
 
@@ -65,6 +66,8 @@ pub struct Facts<'a> {
     pub verdicts: Option<u64>,
     /// 人是不是把左栏收起了（版式文件里记的那一份）。
     pub chosen_collapsed: bool,
+    /// 窗口窄、左栏自动收着的时候，人是不是点了「»」临时展开着。
+    pub peeking: bool,
 }
 
 /// 左栏上按下去的那一下。
@@ -74,16 +77,19 @@ pub enum Pressed {
     Go(View),
     /// 回开场换一份库。
     SwitchLibrary,
-    /// 人要把左栏收起（`true`）或展开（`false`）。
+    /// 人要把左栏收起（`true`）或展开（`false`），**记下来**。窗口宽到门槛时按的是这一种。
     Collapse(bool),
+    /// 窗口窄的时候人要临时展开（`true`）或收回去（`false`），**不记**。
+    Peek(bool),
 }
 
 /// 画左栏：占掉这块 `ui` 左边那一截（一块 `egui::Panel::left`）。交回按下去的那一下。
 pub fn show(ui: &mut egui::Ui, facts: &Facts<'_>) -> Option<Pressed> {
     let tokens = Tokens::builtin();
     let 窗口宽 = ui.ctx().content_rect().width();
-    let folded = crate::layout::rail_folded(facts.chosen_collapsed, 窗口宽);
-    let 自动收着 = crate::layout::rail_folded(false, 窗口宽);
+    let folded = crate::layout::rail_folded(facts.chosen_collapsed, facts.peeking, 窗口宽);
+    // 窗口窄不窄：人没收起、也没临时展开时收着，就是窄。
+    let 窄 = crate::layout::rail_folded(false, false, 窗口宽);
     let [上下, 左右] = if folded {
         tokens.space.rail_padding_collapsed
     } else {
@@ -113,22 +119,18 @@ pub fn show(ui: &mut egui::Ui, facts: &Facts<'_>) -> Option<Pressed> {
             }
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                let 按钮 = ui
-                    .add_enabled_ui(!自动收着, |ui| {
-                        ghost_button(ui, if folded { UNFOLD } else { FOLD }, folded)
-                    })
-                    .inner;
+                let 按钮 = ghost_button(ui, if folded { UNFOLD } else { FOLD }, folded);
                 let 按钮 = if folded {
                     按钮.on_hover_text("展开侧栏")
                 } else {
                     按钮.on_hover_text("收起侧栏")
                 };
-                let 按钮 = 按钮.on_disabled_hover_text(format!(
-                    "窗口宽不到 {} 时侧栏自动收着",
-                    tokens.layout.rail_collapse_below
-                ));
                 if 按钮.clicked() {
-                    pressed = Some(Pressed::Collapse(!folded));
+                    pressed = Some(if 窄 {
+                        Pressed::Peek(folded)
+                    } else {
+                        Pressed::Collapse(!folded)
+                    });
                 }
                 if !folded {
                     ui.add_space(tokens.space.rail_foot_gap);
@@ -399,7 +401,7 @@ fn nav_item(ui: &mut egui::Ui, view: View, facts: &Facts<'_>, folded: bool) -> e
 }
 
 /// 栏底那颗**幽灵小按钮**（设计稿 `.btn.ghost.sm`）：平时没底没框，悬停时凹陷底、强调字；占满这一栏宽，
-/// 字靠左（`centered` 时居中）。所在那块 `ui` 被禁用时整颗变淡、按不下去。
+/// 字靠左（`centered` 时居中）。
 fn ghost_button(ui: &mut egui::Ui, text: &str, centered: bool) -> egui::Response {
     let tokens = Tokens::builtin();
     let visuals = ui.visuals().clone();

@@ -33,7 +33,8 @@
 //! 主窗口左边那条导航（[`crate::app`]）也记在这份文件里：**人按了「收起」就记一行**，展开回去就把那一行去掉
 //! （[`Layout::set_rail_collapsed`]）。另有一条**不记**的：窗口宽不到令牌 `rail-collapse-below` 时左栏
 //! 自动收成窄条，宽回来照人自己选的那样（[`rail_folded`]）——那只看当下窗口多宽，写进文件就等于人一缩窗口，
-//! 下次开窗左栏就收着了（拿主意的人 2026-09-14 定，票 `gui-looks-like-the-design/32`）。
+//! 下次开窗左栏就收着了（拿主意的人 2026-09-14 定，票 `gui-looks-like-the-design/32`）。窄的时候人点「»」
+//! 是**临时展开**，同样不记：窗口宽度一变就回到自动收起的规则（挂单 `Q867`）。
 //!
 //! ## 这一层为什么不算领域逻辑
 //!
@@ -430,12 +431,20 @@ const RAIL: &str = "左栏";
 /// 见 [`RAIL`]。
 const RAIL_COLLAPSED: &str = "收起";
 
-/// 左栏**这一帧**收不收成窄条：人收起了，或者窗口宽不到令牌 `rail-collapse-below`。
+/// 左栏**这一帧**收不收成窄条。
 ///
-/// 自动收起只看当下窗口多宽，不改人选的那一份（[`Layout::rail_collapsed`]）——宽回来就照人选的。
+/// - 窗口宽不到令牌 `rail-collapse-below`：收着，除非人点了「»」**临时展开**（`peeking`）。
+/// - 宽到门槛：照人选的那一份（[`Layout::rail_collapsed`]）。
+///
+/// 自动收起与临时展开都只看当下，不改人选的那一份——宽回来就照人选的。临时展开只在窄的时候算数，
+/// 窗口宽度一变就作废，那一下由摆左栏的那一层管（[`crate::app`]）。
 #[must_use]
-pub fn rail_folded(chosen_collapsed: bool, window_width: f32) -> bool {
-    chosen_collapsed || window_width < crate::tokens::Tokens::builtin().layout.rail_collapse_below
+pub fn rail_folded(chosen_collapsed: bool, peeking: bool, window_width: f32) -> bool {
+    if window_width < crate::tokens::Tokens::builtin().layout.rail_collapse_below {
+        !peeking
+    } else {
+        chosen_collapsed
+    }
 }
 
 /// 左栏收着（`folded`）与展开时各多宽：令牌 `rail-collapsed` / `rail-width`。
@@ -560,7 +569,7 @@ mod tests {
             for screen in [View::Browse, View::Queue, View::Sublibraries] {
                 for 横着 in [true, false] {
                     let mut room = if 横着 {
-                        窗口.x - rail_width(rail_folded(false, 窗口.x))
+                        窗口.x - rail_width(rail_folded(false, false, 窗口.x))
                     } else {
                         窗口.y - 屏头
                     };
@@ -677,10 +686,20 @@ mod tests {
     fn 窄于门槛左栏自动收起_宽回来照人自己选的() {
         // 拿主意的人 2026-09-14 定：窗口宽不到门槛时收成窄条，宽回来恢复人选的展开或收起。
         let 门槛 = Tokens::builtin().layout.rail_collapse_below;
-        assert!(rail_folded(false, 门槛 - 1.0), "窄于门槛该自动收起");
-        assert!(!rail_folded(false, 门槛), "宽到门槛就照人选的展开");
-        assert!(rail_folded(true, 门槛 + 400.0), "人收起的，宽窗口里也收着");
-        assert!(rail_folded(true, 门槛 - 1.0));
+        assert!(rail_folded(false, false, 门槛 - 1.0), "窄于门槛该自动收起");
+        assert!(!rail_folded(false, false, 门槛), "宽到门槛就照人选的展开");
+        assert!(
+            rail_folded(true, false, 门槛 + 400.0),
+            "人收起的，宽窗口里也收着"
+        );
+        assert!(rail_folded(true, false, 门槛 - 1.0));
+        // 窄的时候临时展开（挂单 `Q867`）：不管人选的是哪样都展开；宽到门槛就不算数了。
+        assert!(!rail_folded(false, true, 门槛 - 1.0), "窄窗口里临时展开");
+        assert!(
+            !rail_folded(true, true, 门槛 - 1.0),
+            "人收起过也临时展开得了"
+        );
+        assert!(rail_folded(true, true, 门槛), "宽到门槛就照人选的");
         let t = &Tokens::builtin().layout;
         assert_eq!(rail_width(true), t.rail_collapsed);
         assert_eq!(rail_width(false), t.rail_width);
