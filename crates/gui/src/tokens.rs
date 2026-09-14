@@ -383,6 +383,8 @@ pub struct Font {
     pub size_cover_mark: f32,
     /// 表头上排序那枚小箭头。
     pub size_arrow: f32,
+    /// 面板标题（设计稿 `.phead h3`）。
+    pub size_panel_title: f32,
     /// 子库屏空态那张卡的标题（设计稿空态卡 `h3` 的 16px）。只这一处用，不挂成具名档。
     pub size_empty_title: f32,
     /// 行高，字号的倍数。
@@ -474,6 +476,10 @@ pub struct Space {
     pub list_bar_gap: f32,
     /// 表头上的字与排序箭头之间。
     pub sort_arrow_gap: f32,
+    /// 面板标题栏里标题、说明、按钮之间的横向间距（设计稿 `.phead` 的 `gap`）。
+    pub panel_head_gap: f32,
+    /// 库屏两栏之间、右栏几块之间的间距（设计稿 `.libgrid` 的 `gap`）。
+    pub library_gap: f32,
     /// 屏头的内边距：`[上下, 左右]`。
     pub screen_header_padding: [f32; 2],
     /// 屏头里标题、副标题、右侧那一段彼此隔多远。
@@ -614,7 +620,7 @@ pub struct Layout {
     pub input_small_height: f32,
     /// 单行输入框左右留白。
     pub input_padding: f32,
-    /// 图标按钮的边长（设计稿 `.iconbtn`）：浏览屏收起、展开那两颗箭头，子库屏规则行尾那颗「×」「✎」。
+    /// 图标按钮的边长（设计稿 `.iconbtn`）：浏览屏收起、展开那两颗箭头，库屏面板标题栏里那枚折叠标，子库屏规则行尾那颗「×」「✎」。
     pub icon_button: f32,
     /// 分面标签的高。
     pub facet_chip_height: f32,
@@ -642,6 +648,21 @@ pub struct Layout {
     pub check_padding: f32,
     /// 平台那一簇先摆几个，其余收进「更多（N）」。
     pub platforms_visible: usize,
+    /// 工序那一行头两列的宽：`[圆点, 工序名]`（设计稿 `.stage` 的 `grid-template-columns`）。
+    pub stage_columns: [f32; 2],
+    /// 工序圆点的直径（设计稿 `.stage .dot`）。
+    pub stage_dot: f32,
+    /// 工序圆点描边的宽（设计稿 `.stage .dot` 的 `border`）。
+    pub stage_dot_stroke: f32,
+    /// 行左边那条状态竖条的宽（设计稿 `.stage.next`、`.tbl td.st` 的 `inset 3px`）。
+    pub row_stripe: f32,
+    /// 面板标题栏那枚折叠标三角的宽（设计稿 `.iconbtn` 里 13px 字号的 `▾`，照稿图量约 7 点）。
+    pub fold_mark: f32,
+    /// 导出设置那一块前端格式下拉的宽（设计稿 `select.input` 的 `width:150px`）。
+    pub format_select_width: f32,
+    /// 库屏根那张表根名称那一列的宽度上限：超过就截断加「…」、悬停看全名，路径那一列始终留得出地方
+    /// （拿主意的人 2026-09-14 定，稿上没有这一格）。
+    pub root_name_max: f32,
     /// 子库卡上容量条的高（设计稿 `.gauge`）。
     pub gauge_height: f32,
     /// 容量条上「清单之外：还不知道」那一段斜纹一个来回多宽（设计稿 `.gauge .unk`：一半有色、一半空）。

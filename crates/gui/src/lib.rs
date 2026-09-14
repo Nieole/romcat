@@ -122,6 +122,7 @@ pub mod app;
 pub mod bench;
 pub mod browse;
 pub mod claim;
+pub mod clock;
 /// 合成数据。**只在 `demo` feature 下编进来**——交付的客户端里不该有假数据。
 #[cfg(feature = "demo")]
 pub mod demo;

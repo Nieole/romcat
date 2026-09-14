@@ -655,7 +655,7 @@ fn scrim_in(palette: &Palette) -> Color32 {
     palette.scrim
 }
 
-/// 一枚**标签**是哪种语气（设计稿 `.ro`「只读」、`.chip.t-mid`「版本不兼容」；任务屏历史收场那一格的
+/// 一枚**标签**是哪种语气（设计稿 `.ro`「只读」、`.chip.t-mid`「版本不兼容」、`.chip.t-none`「未连接」；任务屏历史收场那一格的
 /// `t-hi` / `t-none` / `t-mid` / `t-lo`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
@@ -663,7 +663,7 @@ pub enum Tone {
     Good,
     /// 留神：令牌 `mid` 那一对。
     Caution,
-    /// 不置可否：令牌 `none` 那一对（设计稿 `.t-none`）——浏览屏「仅文件名」、子库屏「未连接」、任务屏历史里的「已取消」。
+    /// 不置可否：令牌 `none` 那一对（设计稿 `.t-none`）——浏览屏「仅文件名」、库屏上盘不在位的那个根、子库屏「未连接」、任务屏历史里的「已取消」。
     Neutral,
     /// 要紧、出错、出了界：令牌 `lo` 那一对——浏览屏「待确认」（设计稿 `.chip.t-lo`）、任务屏历史里的「失败」、
     /// 子库屏删减建议表头的「超出容量上限」（设计稿 `.trim .th`）。
@@ -732,7 +732,7 @@ pub fn chip(ui: &mut egui::Ui, tone: Tone, text: &str) -> egui::Response {
     )
 }
 
-/// 一枚**不带圆点**的标签（设计稿 `.chip.plain`）：不画点、也不留点那一格，其余同 [`chip`]。
+/// 一枚**不带圆点**的标签（设计稿 `.chip.plain`，库屏根那张表上盘没接上的那一枚）：不画点、也不留点那一格，其余同 [`chip`]。
 pub fn plain_chip(ui: &mut egui::Ui, tone: Tone, text: &str) -> egui::Response {
     let layout = &Tokens::builtin().layout;
     tag(
@@ -1021,6 +1021,51 @@ pub fn section(ui: &mut egui::Ui, text: &str) -> egui::Response {
 /// 一行**帮助字**（设计稿 `.help`）：说明字号、弱字色，摆在它说的那样东西底下。
 pub fn help(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.label(egui::RichText::new(text).small().weak())
+}
+
+/// 一段**弱色的说明**（一整句话，摆在面板正文里）：照可用宽折行，**段末不留孤字**（`no_orphan_width`）。
+///
+/// 第十四版库屏候选图上，空库时数据源那一句「……识别和刮削要用它们。」最后折出一个孤零零的「们。」。
+pub fn weak_paragraph(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let 字 = egui::WidgetText::from(egui::RichText::new(text).weak());
+    let 宽 = no_orphan_width(ui, &字, ui.available_width());
+    ui.scope(|ui| {
+        ui.set_max_width(宽);
+        ui.label(字)
+    })
+    .inner
+}
+
+/// 一段字照 `宽` 折行时，**段末不留孤字**得折在多宽：末行只剩一个字（标点不算）时，把上一行末尾那个字挪下来，
+/// 直到末行至少两个字——中文排版说的「孤字」（W3C《中文排版需求》）。不折行、或末行本来就够两个字，原样交回 `宽`。
+///
+/// 不写一个像素：挪一个字就是把折行宽收到上一行最后那个字的正中，那个字放不下、落到下一行，它前面那个字照样放得下
+/// （收到正中而不是左沿：宽度摆进界面时差一点零头，也不会多挪一个字）；字宽现量。
+fn no_orphan_width(ui: &egui::Ui, text: &egui::WidgetText, 宽: f32) -> f32 {
+    /// 末行至少几个字（标点不算）。
+    const 末行至少: usize = 2;
+    let 是字 = |glyph: &&egui::epaint::text::Glyph| glyph.chr.is_alphanumeric();
+    let mut 宽 = 宽;
+    // 每挪一趟末行至少多一个字，整段有几个字就最多挪几趟。
+    for _ in 0..text.text().chars().count() {
+        let galley = text.clone().into_galley(
+            ui,
+            Some(egui::TextWrapMode::Wrap),
+            宽,
+            egui::FontSelection::Default,
+        );
+        let [.., 上一行, 末行] = galley.rows.as_slice() else {
+            break;
+        };
+        if 末行.glyphs.iter().filter(是字).count() >= 末行至少 {
+            break;
+        }
+        let Some(末字) = 上一行.glyphs.iter().rev().find(是字) else {
+            break;
+        };
+        宽 = 末字.pos.x + 末字.advance_width / 2.0;
+    }
+    宽
 }
 
 /// 两段之间那条一点宽的**分隔线**，颜色取不可交互那一档的描边（令牌 `line`）。
@@ -2279,6 +2324,78 @@ mod tests {
             .find(|(画的, ..)| 画的 == 字)
             .unwrap_or_else(|| panic!("没画「{字}」"));
         (在, 字号)
+    }
+
+    #[test]
+    fn 一段说明折行时段末不留孤字_末行至少两个字() {
+        // 第十四版库屏候选图审稿打回：空库时数据源那一句最后折出一个孤零零的「们。」。
+        let ctx = headless::context();
+        install(&ctx);
+        let 字 = "甲乙丙丁戊己庚辛壬癸子丑。";
+        /// 这一帧画出来的 `字` 那一段，各行的字。
+        fn 各行(output: &egui::FullOutput, 字: &str) -> Vec<String> {
+            fn 找(shape: &egui::epaint::Shape, 字: &str) -> Option<Vec<String>> {
+                match shape {
+                    egui::epaint::Shape::Text(text) if text.galley.text() == 字 => Some(
+                        text.galley
+                            .rows
+                            .iter()
+                            .map(|row| row.glyphs.iter().map(|glyph| glyph.chr).collect())
+                            .collect(),
+                    ),
+                    egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(|one| 找(one, 字)),
+                    _ => None,
+                }
+            }
+            output
+                .shapes
+                .iter()
+                .find_map(|clipped| 找(&clipped.shape, 字))
+                .unwrap_or_else(|| panic!("没画「{字}」"))
+        }
+        // 折行宽卡在「丑」的正中：照 egui 自己折，「丑」连着句号落到第二行，成了孤字。
+        let mut 宽 = None;
+        headless::frame(&ctx, headless::input(), |ui| {
+            let 一行 = egui::WidgetText::from(字).into_galley(
+                ui,
+                Some(egui::TextWrapMode::Extend),
+                f32::INFINITY,
+                egui::FontSelection::Default,
+            );
+            let 丑 = 一行.rows[0].glyphs[11];
+            宽 = Some(丑.pos.x + 丑.advance_width / 2.0);
+        });
+        let 宽 = 宽.expect("量过");
+        let 画 = |段: fn(&mut egui::Ui, &str) -> egui::Response| {
+            headless::frame(&ctx, headless::input(), |ui| {
+                ui.scope(|ui| {
+                    ui.set_max_width(宽);
+                    段(ui, 字);
+                });
+            })
+        };
+        let 照常 = 各行(&画(|ui, 字| ui.weak(字)), 字);
+        assert_eq!(
+            照常,
+            ["甲乙丙丁戊己庚辛壬癸子", "丑。"],
+            "前提：照常折行末行是孤字"
+        );
+
+        let 不留孤字 = 各行(&画(weak_paragraph), 字);
+        assert_eq!(
+            不留孤字,
+            ["甲乙丙丁戊己庚辛壬癸", "子丑。"],
+            "上一行末尾那个字该挪下来，末行凑够两个字、行数不变",
+        );
+
+        // 本来就不折行的一句，宽度原样。
+        let 一行 = 各行(
+            &headless::frame(&ctx, headless::input(), |ui| {
+                weak_paragraph(ui, 字);
+            }),
+            字,
+        );
+        assert_eq!(一行, [字], "放得下的一句不该被折开");
     }
 
     #[test]

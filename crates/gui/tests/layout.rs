@@ -678,9 +678,10 @@ fn 点左栏入口就换到那一屏_屏头写着那一屏_右侧是它原来在
     let mut app = 浏览(&工作目录("左栏切屏"));
     let ctx = headless::context();
     跑(&ctx, &mut app, 2);
-    let 根数 = format!("{} 个根", app.roots().roots().len());
     for (view, 入口, 右侧那一段) in [
-        (View::Library, "库", 根数.as_str()),
+        // 库屏照稿接手屏头之后（票 `gui-looks-like-the-design/06`，挂单 `Q866`）右侧只放「添加根…」，顶栏那句
+        // 「N 个根 · N 个数据源还没下载」照稿不要了：几个根写在左栏导航上。
+        (View::Library, "库", romcat_gui::roots::ADD_ROOT),
         (View::Queue, "待确认", "重新列队列"),
         (View::Browse, "浏览", "刮削…"),
         (View::Sublibraries, "子库", "重新列一遍"),

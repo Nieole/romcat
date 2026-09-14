@@ -198,6 +198,10 @@ impl App {
         // **版式先读出来**：面板尺寸要赶在开窗第一帧画面板之前塞进 egui 那张表里
         // （[`layout::Layout::seed`]），晚一帧人就会看见面板从默认宽度跳一下。
         let layout = layout::Layout::load(&workspace);
+        // **库屏那几块收着没有**也住在这份版式里（票 `gui-looks-like-the-design/06`）：开窗之前交给库屏。
+        for fold in layout::Fold::ALL {
+            roots.set_folded(fold, layout.folded(fold));
+        }
         let workspace_label = Self::shorten_home(&workspace);
         let mut sublibrary = sublibrary::Screen::new(workspace);
         sublibrary.reload(&site);
@@ -404,6 +408,8 @@ impl App {
     pub fn start_stage(&mut self, stage: romcat_core::stage::Stage) {
         let (roots, site, board) = (&mut self.roots, &mut self.site, &mut self.board);
         roots.stages_mut().start(stage, site, board);
+        // **扫描那一道由库屏自己排**（`stages::Section::start` 只留记号）：当场取走，按下去就排上。
+        roots.take_scan(site, board);
     }
 
     /// 浏览那一屏，供测试查「筛出多少行、点开的那一行是什么」。
@@ -501,6 +507,8 @@ impl App {
                         // 重问过了。这一支空着是**故意的**，不是漏了——照抄上面两支
                         // 随手 `reload` 一屏，等于每导一趟就白读一遍几万行。
                         romcat_core::stage::Stage::Export => {}
+                        // **扫描与裁决两支从不经工序段排上任务台**，`take_ran` 交不出它们。
+                        romcat_core::stage::Stage::Scan | romcat_core::stage::Stage::Triage => {}
                     }
                 } else {
                     // **扫完一个根（或者取回一个数据源），待确认队列只重算屏头那个数**：
@@ -563,6 +571,10 @@ impl App {
             self.browse.invalidate(&self.site);
             // 落下、撤回一批改的正是作品归属与裁决条数，左栏那两个数跟着重问。
             self.recount();
+            // **库屏工序段跟着重问一遍**（票 `gui-looks-like-the-design/06`）：裁决那一行与待确认队列屏说的是
+            // 同一个数（挂单 `Q822`），落下、撤回一批之后不重问，回到库屏看见的是裁之前的数，顶上
+            // 「下一步」也还指着裁决。
+            self.roots.stages_mut().reload(&self.site);
         }
         if let Some(jump) = self.sublibrary.take_jump() {
             self.browse
@@ -592,6 +604,15 @@ impl App {
         }
         if let Some(stage) = self.browse.take_asked() {
             self.start_stage(stage);
+        }
+        // **库屏工序段上裁决那一道**（票 `gui-looks-like-the-design/06`）：裁决不排任务，按下去换到
+        // 待确认队列屏——库屏够不着那一屏，只留一个记号（`stages::Section::start`）。
+        if self
+            .roots
+            .stages_mut()
+            .take_handoff(romcat_core::stage::Stage::Triage)
+        {
+            self.view = View::Queue;
         }
     }
 
@@ -698,6 +719,10 @@ impl App {
         // 时刻已经在本帧问过任务台之后了（`Board::settled` 的文档）。
         if self.board.busy() || self.board.settled() {
             ui.ctx().request_repaint();
+        }
+        // **库屏那几块收着没有**：画完这一帧抄回版式；落盘照旧跟着底下那句，手松开了才写。
+        for fold in layout::Fold::ALL {
+            self.layout.set_folded(fold, self.roots.folded(fold));
         }
         // **画完了才问面板有多宽**：这一帧的边界是刚才那几句 `show` 定下来的。
         self.layout.harvest(ui.ctx());
@@ -817,8 +842,10 @@ impl App {
                 ui.label(format!("沉淀库 {}", self.site.store.location()));
             }
             View::Library => {
+                // 库屏照稿重排过（票 `gui-looks-like-the-design/06` 接手挂单 `Q866` / `Q868`）：右侧是稿上那颗「添加根…」，
+                // 原来顶栏上那一句不要了。
                 let (roots, site) = (&mut self.roots, &self.site);
-                roots.status(ui, site);
+                roots.header_actions(ui, site);
             }
             View::Browse => {
                 // **屏头上那颗「★ 收藏」真的写库**（票 `gui-redesign/06`），

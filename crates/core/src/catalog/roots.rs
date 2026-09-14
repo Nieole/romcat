@@ -79,6 +79,17 @@ pub struct LibraryRoot {
     pub scan: Option<RootScan>,
 }
 
+impl LibraryRoot {
+    /// 这个根**完整扫过一趟**没有：扫过，而且上次那一趟不是部分完成的。
+    ///
+    /// 库屏工序段扫描那一行数的是**还没完整扫过一趟的根**（`stage::Stage::Scan`），按下那一行的
+    /// 按钮排的也是这几个——判据只有这一句，两处各写一遍迟早数的与排的对不上。
+    #[must_use]
+    pub fn fully_scanned(&self) -> bool {
+        self.scan.is_some_and(|scan| !scan.interrupted)
+    }
+}
+
 /// 一个根**上次扫描**留下的结果。
 ///
 /// 它住在中立库里而不是跟着盘走，因此**盘没挂上时照样看得见**（ADR-0009 的道理）。
@@ -102,6 +113,18 @@ pub struct RootStats {
     /// 这个根下面记了多少个文件。
     pub files: u64,
     /// 这些文件加起来多少字节。**读不到大小的那些不计**，因此这是个下界（ADR-0021）。
+    pub bytes: u64,
+}
+
+/// 整个库现在装着多少东西：几个根、一共几份文件、多少字节（库屏工序段扫描那一行底下那句小字，
+/// `stage::Stages::detail`）。从库里现折，**不碰磁盘**。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LibraryTotals {
+    /// 几个根。
+    pub roots: u64,
+    /// 这几个根下面一共记了多少个文件。
+    pub files: u64,
+    /// 这些文件加起来多少字节。读不到大小的那些不计，同 [`RootStats::bytes`]，是个下界。
     pub bytes: u64,
 }
 
@@ -266,6 +289,25 @@ impl Catalog {
             )
             .map(|_| ())
             .map_err(|source| self.err(source))
+    }
+
+    /// 整个库现在装着多少东西（[`LibraryTotals`]）：**就是每个根的 [`Self::root_stats`] 加起来**——与库屏根那张表逐行
+    /// 画的是同一组数，没有第二份口径。**不碰磁盘**。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn library_totals(&self) -> Result<LibraryTotals, CatalogError> {
+        let roots = self.roots()?;
+        let mut totals = LibraryTotals {
+            roots: u64::try_from(roots.len()).unwrap_or(u64::MAX),
+            ..LibraryTotals::default()
+        };
+        for root in &roots {
+            let stats = self.root_stats(&root.name)?;
+            totals.files += stats.files;
+            totals.bytes += stats.bytes;
+        }
+        Ok(totals)
     }
 
     /// 一个根现在装着多少东西。**不碰磁盘**，盘没挂上时照样数得出来。

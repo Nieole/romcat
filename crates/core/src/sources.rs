@@ -53,7 +53,7 @@ pub struct SourceStatus {
     pub state: SourceState,
     /// 这一份都覆盖了些什么，给人看的一句。
     pub coverage: String,
-    /// **没取回的话会怎样**。一句话说清代价，那正是「扫完了怎么没认出来」的答案。
+    /// **没下载的话会怎样**。一句话说清代价，那正是「扫完了怎么没认出来」的答案。
     pub cost: &'static str,
 }
 
@@ -111,13 +111,13 @@ impl Source {
         }
     }
 
-    /// 没取回的话会怎样。
+    /// 没下载的话会怎样：每个源一句短话（设计稿数据源那张表 `src()` 的原话，挂单 `Q886` 已裁：照稿；命令行与界面印的是这同一句）。
     #[must_use]
     pub fn cost(self) -> &'static str {
         match self {
-            Self::Dat => "取回前撞不上任何官方发行版，识别只剩文件名那条路",
-            Self::Chinese => "取回前中文名、简介、类型、开发商、发行商一个都补不上",
-            Self::Switch => "取回前 Switch 平台认不出任何东西",
+            Self::Dat => "下载后才能按哈希识别官方发行版",
+            Self::Chinese => "下载后才能补充中文名、简介和类型",
+            Self::Switch => "下载后才能识别 Switch 游戏",
         }
     }
 

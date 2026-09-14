@@ -52,6 +52,14 @@ pub(super) enum MetaKey {
     ///
     /// 读 [`Catalog::exported_at`]，写 [`Catalog::mark_exported`]。
     ExportedAt,
+    /// **上次导出收敛出几个条目**。与 [`Self::ExportedAt`] 同一下落：打了时刻戳的那一趟才记。
+    ///
+    /// 读 [`Catalog::exported_entries`]，写 [`Catalog::mark_exported`]。记这个数之前导出过的库里没有这一行。
+    ExportedEntries,
+    /// **上次导出有没有铺出媒体**（`1` / `0`）。与 [`Self::ExportedAt`] 同一下落。
+    ///
+    /// 读 [`Catalog::exported_with_media`]，写 [`Catalog::mark_exported`]。记这一样之前导出过的库里没有这一行。
+    ExportedWithMedia,
     /// 记住的**前端格式**：适配器报的那个名字。
     ///
     /// 与 [`Self::ExportDir`] 合成一套配置：读 [`Catalog::export_setup`]，
@@ -99,6 +107,8 @@ impl MetaKey {
             Self::LibraryName => "library_name",
             Self::TitlesFoldedAt => "titles_folded_at",
             Self::ExportedAt => "exported_at",
+            Self::ExportedEntries => "exported_entries",
+            Self::ExportedWithMedia => "exported_with_media",
             Self::ExportFormat => "export_format",
             Self::ExportDir => "export_out_dir",
             Self::ShapedScan => "shaped_scan",

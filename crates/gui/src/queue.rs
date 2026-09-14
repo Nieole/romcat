@@ -98,8 +98,8 @@ const TOP_BATCHES: usize = 60;
 /// 每批屏上摆几条随机样本。
 const SAMPLES: usize = 5;
 
-/// 屏底那句「前几批盖住多少」按前几批算。
-const HEADLINE: usize = 5;
+/// 屏底那句「前几批盖住多少」按前几批算：与库屏工序段裁决那一行底下那句同一个数（核心库那一处）。
+const HEADLINE: usize = romcat_core::triage::HEADLINE_BATCHES;
 
 /// 「主库根那一层」在**按目录**那个框里写成什么。
 ///

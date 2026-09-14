@@ -50,7 +50,7 @@
 //! 不是拦界面自己的偏好）。工作目录里那条路径归核心库说了算（那是「工作目录里有什么」
 //! 的唯一一份清单），怎么读写那几行字归这里。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::app::View;
@@ -371,6 +371,34 @@ impl Boundary {
     }
 }
 
+/// 库屏上**收得起来的一块**（票 `gui-looks-like-the-design/06`）：根、数据源、导出设置。
+///
+/// 收没收起来与面板边界拖到哪儿是同一类东西——**这块屏自己的偏好**，与库里有什么无关——所以记在
+/// 同一份文件里（[`Layout`]），不另起一份存储。[`Self::id`] 就是落盘那一行的名字。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fold {
+    /// 落盘那一行的名字。
+    pub id: &'static str,
+}
+
+/// 库屏右边那一栏里的**根**那一块。
+pub const FOLD_ROOTS: Fold = Fold { id: "收起·根" };
+
+/// 库屏右边那一栏里的**数据源**那一块。
+pub const FOLD_SOURCES: Fold = Fold {
+    id: "收起·数据源"
+};
+
+/// 库屏右边那一栏里的**导出设置**那一块。
+pub const FOLD_EXPORT: Fold = Fold {
+    id: "收起·导出设置",
+};
+
+impl Fold {
+    /// 全部三块，照库屏上从上到下的次序。不在这儿的不落盘。
+    pub const ALL: [Self; 3] = [FOLD_ROOTS, FOLD_SOURCES, FOLD_EXPORT];
+}
+
 /// 存下来的数最大认到这儿，点。比任何一块屏都宽，只用来拦离谱的值。
 const SANE: f32 = 4000.0;
 
@@ -402,6 +430,10 @@ pub struct Layout {
     collapsed: BTreeMap<&'static str, bool>,
     /// 上一次真写进文件的收起状态，与 [`Self::saved`] 同一个用处。
     saved_collapsed: BTreeMap<&'static str, bool>,
+    /// 库屏上眼下收着的那几块（[`Fold`]）。没记过的就是摊开的。
+    folded: BTreeSet<&'static str>,
+    /// 上一次真写进文件的收着的那几块。与 `saved` 同一个用处：比出来变了才写盘。
+    folded_saved: BTreeSet<&'static str>,
     /// 人是不是把左栏收起了。**只记人按的**，窗口太窄自动收起的那一下不在这儿（[`rail_folded`]）。
     rail_collapsed: bool,
     /// 上一次真写进文件的那一份里左栏收没收起。
@@ -421,6 +453,7 @@ impl Layout {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let sizes = parse(&text);
         let collapsed = parse_collapsed(&text);
+        let folded = parse_folds(&text);
         let rail_collapsed = parse_rail(&text);
         Self {
             path,
@@ -428,6 +461,8 @@ impl Layout {
             sizes,
             saved_collapsed: collapsed.clone(),
             collapsed,
+            folded_saved: folded.clone(),
+            folded,
             rail_collapsed,
             saved_rail_collapsed: rail_collapsed,
             error: None,
@@ -444,6 +479,21 @@ impl Layout {
     #[must_use]
     pub fn size(&self, boundary: Boundary) -> Option<f32> {
         self.sizes.get(boundary.id).copied()
+    }
+
+    /// 库屏上这一块收着没有。没记过就是摊开的。
+    #[must_use]
+    pub fn folded(&self, fold: Fold) -> bool {
+        self.folded.contains(fold.id)
+    }
+
+    /// 记下库屏上这一块收着还是摊开。**只改内存**：落盘照旧由 [`Self::flush`] 在手松开之后做。
+    pub fn set_folded(&mut self, fold: Fold, folded: bool) {
+        if folded {
+            self.folded.insert(fold.id);
+        } else {
+            self.folded.remove(fold.id);
+        }
     }
 
     /// 人是不是把左栏收起了。窗口太窄时自动收起的那一下不算——那一下问 [`rail_folded`]。
@@ -536,6 +586,7 @@ impl Layout {
     pub fn flush(&mut self) {
         if self.sizes == self.saved
             && self.collapsed == self.saved_collapsed
+            && self.folded == self.folded_saved
             && self.rail_collapsed == self.saved_rail_collapsed
         {
             return;
@@ -544,6 +595,7 @@ impl Layout {
         // 下一次拖动会再试一次——那时人正等着它记住，重试才有意义。
         self.saved = self.sizes.clone();
         self.saved_collapsed = self.collapsed.clone();
+        self.folded_saved = self.folded.clone();
         self.saved_rail_collapsed = self.rail_collapsed;
         self.error = write(&self.path, &self.render()).err();
     }
@@ -566,6 +618,12 @@ impl Layout {
                     boundary.id,
                     if *collapsed { "是" } else { "否" },
                 ));
+            }
+        }
+        // **收着的那几块跟在后面**，照 `Fold::ALL` 的次序；摊开的不写——那是默认。
+        for fold in Fold::ALL {
+            if self.folded(fold) {
+                out.push_str(&format!("{} = 1\n", fold.id));
             }
         }
         // 展开是默认，不写——与没被拖过的边界一个字都不记同一条道理。
@@ -680,6 +738,17 @@ fn parse(text: &str) -> BTreeMap<&'static str, f32> {
         sizes.insert(boundary.id, boundary.clamp(size));
     }
     sizes
+}
+
+/// 读收着的那几块：`名字 = 1` 算收着。**别的值、不认得的名字一律跳过**，理由同 [`parse`]。
+fn parse_folds(text: &str) -> BTreeSet<&'static str> {
+    text.lines()
+        .filter_map(|line| {
+            let (name, value) = line.trim().split_once('=')?;
+            let fold = Fold::ALL.into_iter().find(|it| it.id == name.trim())?;
+            (value.trim() == "1").then_some(fold.id)
+        })
+        .collect()
 }
 
 /// 读左栏那一行：**只有写着「收起」才算收起**，没写、读不懂都是展开（与 [`parse`] 同一条宽容）。
@@ -851,6 +920,8 @@ mod tests {
             saved: BTreeMap::new(),
             collapsed: BTreeMap::new(),
             saved_collapsed: BTreeMap::new(),
+            folded: BTreeSet::new(),
+            folded_saved: BTreeSet::new(),
             rail_collapsed: false,
             saved_rail_collapsed: false,
             error: None,
@@ -923,6 +994,37 @@ mod tests {
             正中剩下(门槛 - 10.0) < FLOOR - 1.0,
             "窄 10 点（{}）左栏展开也摆得开：门槛定高了",
             门槛 - 10.0
+        );
+    }
+
+    #[test]
+    fn 收着的那几块写出去再读回来是同一份_面板边界那几行照旧读得回来() {
+        // 票 `gui-looks-like-the-design/06`：库屏收着的那几块与面板边界住同一份文件。加进来的那几行
+        // 不许把边界那几行挤坏，边界那几行也不许被读成收起来的块。
+        let mut layout = Layout {
+            path: PathBuf::from("/dev/null"),
+            sizes: BTreeMap::new(),
+            saved: BTreeMap::new(),
+            folded: BTreeSet::new(),
+            folded_saved: BTreeSet::new(),
+            rail_collapsed: false,
+            saved_rail_collapsed: false,
+            error: None,
+        };
+        layout.sizes.insert(FILTER.id, 275.0);
+        layout.set_folded(FOLD_ROOTS, true);
+        layout.set_folded(FOLD_EXPORT, true);
+        let text = layout.render();
+        assert_eq!(
+            parse_folds(&text),
+            BTreeSet::from([FOLD_ROOTS.id, FOLD_EXPORT.id])
+        );
+        assert_eq!(parse(&text), layout.sizes, "边界那几行读不回来了");
+        // 摊开就是不写那一行。
+        layout.set_folded(FOLD_ROOTS, false);
+        assert_eq!(
+            parse_folds(&layout.render()),
+            BTreeSet::from([FOLD_EXPORT.id])
         );
     }
 }

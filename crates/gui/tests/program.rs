@@ -1512,19 +1512,27 @@ fn 向导只管第一个根第二个根仍然从库屏加() {
         "主窗口里也摆着添加主库那颗按钮：\n{屏上}",
     );
 
-    // 第二个根从库屏那两个框加进去。
-    打字(
-        &ctx,
-        &mut program,
-        "那块盘上的目录",
-        &romcat_core::path::display(乙.path()),
-    );
-    打字(&ctx, &mut program, "根名（不填", "乙盘");
-    let 屏上 = 点一下(&ctx, &mut program, "+ 添加目录");
+    // 第二个根从库屏屏头「添加根…」加（票 `gui-looks-like-the-design/06` 第二段照稿，挂单 `Q890`）：那颗按钮弹系统的选目录
+    // 窗口，测试点不了，选中之后那一半照 `tests/pick.rs` 的做法递一个固定路径进去（`roots::Screen::picked_root`）。
+    //
+    // 根名照稿取目录名：选的是盘里一个叫「乙盘」的目录。直接选临时目录的话根名是一长串，根名那一列不折行，那一行把
+    // 路径那一列挤没、自己撑得很高，向导加的那个根被挤出这一帧的可视区、画不出来——这一条要验的不是长名字怎么排。
+    let 乙盘 = 乙.path().join("乙盘");
+    std::fs::create_dir_all(&乙盘).expect("建得出目录");
+    {
+        let app = program.app_mut().expect("走完向导进了主窗口");
+        let (screen, site, _) = app.roots_site_and_tasks();
+        screen.picked_root(site, Some(乙盘));
+    }
+    let 屏上 = 跑一帧(&ctx, &mut program);
 
     assert!(屏上.contains("甲盘"), "向导加的那个根没了：\n{屏上}");
     assert!(屏上.contains("乙盘"), "第二个根没加上：\n{屏上}");
-    assert!(屏上.contains("根 · 2 个"), "这个库该有两个根了：\n{屏上}");
+    assert_eq!(
+        program.app_mut().expect("在主窗口里").roots().roots().len(),
+        2,
+        "这个库该有两个根了：\n{屏上}"
+    );
 }
 
 #[test]

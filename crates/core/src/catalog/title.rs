@@ -275,6 +275,39 @@ impl Catalog {
             .map_err(|source| self.err(source))?;
         Ok(u64::try_from(count).unwrap_or(0))
     }
+
+    /// 作品账（[`TitleTally`]）：库里几个作品、其中几个的标题集合里有中文叫法。一句聚合查询，不逐条走标题集合。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn title_tally(&self) -> Result<TitleTally, CatalogError> {
+        let (works, chinese): (i64, i64) = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*),
+                        COUNT(CASE WHEN EXISTS (
+                            SELECT 1 FROM title t WHERE t.work = w.name AND t.language = ?1
+                        ) THEN 1 END)
+                 FROM work w",
+                params![Language::Chinese.code()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|source| self.err(source))?;
+        Ok(TitleTally {
+            works: u64::try_from(works).unwrap_or(0),
+            chinese: u64::try_from(chinese).unwrap_or(0),
+        })
+    }
+}
+
+/// 整理标题之后的**作品**账：库里几个作品，其中几个有中文标题（库屏工序段整理标题那一行底下那句小字，
+/// `stage::Stages::detail`）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TitleTally {
+    /// 作品数。
+    pub works: u64,
+    /// 标题集合里至少有一条中文叫法的作品数。
+    pub chinese: u64,
 }
 
 const SELECT_TITLE: &str = "SELECT work, language, kind, source, value, region, variant_key,

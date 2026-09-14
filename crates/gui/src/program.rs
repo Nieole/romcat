@@ -206,6 +206,17 @@ impl Program {
         }
     }
 
+    /// 主窗口那一态的窗口本体；还在开场时是 `None`。
+    ///
+    /// **测试要它**：系统的选目录窗口测试点不了，选中之后那一半要递一个路径进去（`roots::Screen::picked_root`，
+    /// 同 `tests/pick.rs` 的做法），而那一屏住在窗口本体里。
+    pub fn app_mut(&mut self) -> Option<&mut App> {
+        match &mut self.stage {
+            Stage::Opening(_) => None,
+            Stage::Opened(app) => Some(app.as_mut()),
+        }
+    }
+
     /// 画一帧。`eframe` 与不开窗跑帧的那条路走的是同一个函数。
     ///
     /// **两态之间那一下换在这儿，来回都是**：开场挑中一份并开出现场，这一帧末尾就换成
