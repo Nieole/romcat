@@ -35,7 +35,8 @@
 //!
 //! ## 主窗口外壳
 //!
-//! 左栏与屏头（票 `gui-looks-like-the-design/32`）拍的是整扇主窗口，垫在打开就看见的待确认屏上，喂的是
+//! 左栏与屏头（票 `gui-looks-like-the-design/32`）拍的是整扇主窗口，垫在**任务屏的空台态**上（拿主意的人 2026-09-14 定：
+//! main 上各屏眼下都是旧正文，任务屏空台东西最少，最看得清左栏与屏头），喂的是
 //! 测试手搭的那份小库（`shared::小库`）：主库原名、沉淀库在哪、队列那几批的样本都是定值。**正文那一块
 //! 归各屏自己的票**，它们照稿重排时这几张跟着重批。
 
@@ -45,7 +46,7 @@ use egui::Theme;
 use egui_kittest::{Harness, SnapshotOptions};
 use romcat_core::catalog::{CatalogError, SCHEMA_VERSION};
 use romcat_core::workspace::{CatalogEntry, CatalogFacts, CatalogState, DirUnreadable, Listing};
-use romcat_gui::app::App;
+use romcat_gui::app::{App, View};
 use romcat_gui::opening::Screen;
 use romcat_gui::{font, headless, look, rail};
 
@@ -347,7 +348,7 @@ fn 垫的主窗口(工作目录: &Path) -> App {
     )
 }
 
-/// 开一扇主窗口（打开就是待确认屏）；`收起` 时先按一下栏底那颗「« 收起」，再拍。
+/// 开一扇主窗口，换到任务屏（台上空着）；`收起` 时先按一下栏底那颗「« 收起」，再拍。左栏的计数照旧来自那份小库。
 #[track_caller]
 fn 拍主窗口(名字: &str, 主题: Theme, 收起: bool) {
     if 该跳过(名字) {
@@ -355,6 +356,7 @@ fn 拍主窗口(名字: &str, 主题: Theme, 收起: bool) {
     }
     let 工作目录 = romcat_core::testing::temp_dir("截图门-主窗口");
     let mut app = 垫的主窗口(工作目录.path());
+    app.show_view(View::Tasks);
     let mut harness = 开一个(主题, move |ui| app.ui(ui));
     if 收起 {
         按(&mut harness, rail::FOLD);
