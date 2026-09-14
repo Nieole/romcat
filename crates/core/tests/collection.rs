@@ -394,7 +394,7 @@ fn 中立库里的合集是投影_照沉淀库重建一遍结果一致() {
         现场
             .site
             .catalog
-            .facets()
+            .facets(romcat_core::catalog::NonGameAssets::Hidden)
             .expect("问得出")
             .collections
             .iter()

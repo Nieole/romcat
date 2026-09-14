@@ -1024,7 +1024,8 @@ pub fn paging(catalog: &Catalog) -> PagingCost {
     // SQLite 挑哪一条不是想当然的事，得量出来（票 `gui-redesign/13`）。
     // 挑**最大的那个平台**：量的该是「筛完还剩不少」那种，不是最小的那种。
     if let Some(platform) = catalog
-        .facets()
+        // 与浏览屏默认那一档一样：非游戏资产收起着。
+        .facets(romcat_core::catalog::NonGameAssets::Hidden)
         .ok()
         .and_then(|facets| facets.platforms.first().map(|facet| facet.value.clone()))
     {
