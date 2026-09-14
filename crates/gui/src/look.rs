@@ -541,6 +541,85 @@ fn warn_button_in(palette: &Palette, visuals: &mut egui::Visuals) {
     }
 }
 
+/// 一颗**图标按钮**（设计稿 `.iconbtn`）：边长取令牌 `icon-button`，没底没框、弱字色的一个字形（正文字号），小圆角；
+/// 悬停或拿到焦点时垫凹陷底、描一圈分隔线色、字换成强调字。子库屏规则行尾那颗「×」（移除这条规则）用它。
+///
+/// **字形得在打包的字体里**（[`crate::font`]）：不在的画出来是豆腐块——「✎」就不在，走 [`pencil_button`]。
+/// 无障碍树上报成一颗按钮，名字就是那个字形。
+pub fn icon_button(ui: &mut egui::Ui, glyph: &str) -> egui::Response {
+    icon_button_drawn(ui, glyph, |painter, rect, 字色| {
+        let 字号 = font_size(painter.ctx(), Tokens::builtin().font.size_body);
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            glyph,
+            egui::FontId::proportional(字号),
+            字色,
+        );
+    })
+}
+
+/// 一颗画着**铅笔**的图标按钮（设计稿 `.iconbtn` 里那个「✎」）：打包的字体里没有这个字形，拿线条画——笔身、笔尖、靠笔尾
+/// 的一道箍；一笔宽取令牌 `control-stroke`，占的方块与字形同大（正文字号），底、描边、颜色与 [`icon_button`] 同一档
+/// （拿主意的人 2026-09-14 定）。子库屏规则行尾那颗「✎」（在浏览中编辑这条规则）用它；无障碍树上的名字是「编辑」。
+pub fn pencil_button(ui: &mut egui::Ui) -> egui::Response {
+    icon_button_drawn(ui, "编辑", |painter, rect, 字色| {
+        let tokens = Tokens::builtin();
+        let 边 = font_size(painter.ctx(), tokens.font.size_body);
+        let 方块 = egui::Rect::from_center_size(rect.center(), egui::vec2(边, 边));
+        // 铅笔的形状写在一格单位方块里（左下是笔尖、右上是笔尾），再照方块放大——这几个数是图形，不是间距。
+        let 点 = |x: f32, y: f32| 方块.min + egui::vec2(x, y) * 边;
+        let 笔 = egui::Stroke::new(tokens.layout.control_stroke, 字色);
+        painter.add(egui::Shape::closed_line(
+            vec![
+                点(0.88, 0.28),
+                点(0.72, 0.12),
+                点(0.18, 0.66),
+                点(0.08, 0.92),
+                点(0.34, 0.82),
+            ],
+            笔,
+        ));
+        painter.line_segment([点(0.64, 0.20), 点(0.80, 0.36)], 笔);
+    })
+}
+
+/// 图标按钮的底、描边、悬停与无障碍信息画在一处；中间画什么由 `draw` 定（照这一帧该用的字色）。
+fn icon_button_drawn(
+    ui: &mut egui::Ui,
+    name: &str,
+    draw: impl FnOnce(&egui::Painter, egui::Rect, Color32),
+) -> egui::Response {
+    let tokens = Tokens::builtin();
+    let side = tokens.layout.icon_button;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+    let enabled = ui.is_enabled();
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, name));
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.visuals();
+        let 线 = visuals.widgets.noninteractive.bg_stroke;
+        let (底色, 描边, 字色) = if response.hovered() || response.has_focus() {
+            (visuals.extreme_bg_color, 线, visuals.strong_text_color())
+        } else {
+            (
+                Color32::TRANSPARENT,
+                egui::Stroke::new(线.width, Color32::TRANSPARENT),
+                visuals.weak_text_color(),
+            )
+        };
+        let painter = ui.painter();
+        painter.rect(
+            rect,
+            tokens.radius.small,
+            底色,
+            描边,
+            egui::StrokeKind::Inside,
+        );
+        draw(painter, rect, 字色);
+    }
+    response
+}
+
 /// **置信度四档**画成什么颜色。**全窗口只有这一处回答这个问题。**
 ///
 /// 颜色取自令牌的 `hi` / `mid` / `lo` / `none`，按 `visuals` 是哪一套主题挑那一套：

@@ -560,6 +560,8 @@ pub struct Layout {
     pub impact_dot: f32,
     /// 行首圆点那一列多宽（设计稿 `.impact li`）。
     pub impact_column: f32,
+    /// 图标按钮的边长（设计稿 `.iconbtn`）。
+    pub icon_button: f32,
 }
 
 /// 阴影：一种一格，**形状两套主题共用**，颜色是各主题里同名的那一格（`pop` → `pop-color`）。

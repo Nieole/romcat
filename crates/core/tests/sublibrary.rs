@@ -233,6 +233,45 @@ fn 同一个子库之内规则序号不复用() {
 }
 
 #[test]
+fn 只换第几条规则_序号不变_别的规则一条不碰() {
+    // 票 `gui-looks-like-the-design/20`（拿主意的人 2026-09-14 定）：子库屏规则行上「✎」只改这一条。
+    let mut catalog = 现场();
+    建子库(&mut catalog, "掌机", None);
+    建子库(&mut catalog, "备用卡", None);
+    加规则(&mut catalog, "掌机", "平台=GB");
+    加规则(&mut catalog, "掌机", "平台=PSV");
+    加规则(&mut catalog, "备用卡", "平台=GB");
+    let 新的 = Rule::parse("平台=GB 且 中文=汉化").expect("规则读得懂");
+    assert!(catalog.replace_rule("掌机", 1, &新的).expect("写得进"));
+    let 规则: Vec<(i64, String)> = catalog
+        .sublibrary_rules("掌机")
+        .expect("读得动")
+        .into_iter()
+        .map(|stored| (stored.ordinal, stored.text))
+        .collect();
+    assert_eq!(
+        规则,
+        vec![(1, 新的.text.clone()), (2, "平台=PSV".to_string())],
+        "换掉的不只是第 1 条，或者序号变了"
+    );
+    assert_eq!(
+        catalog.sublibrary_rules("备用卡").expect("读得动")[0].text,
+        "平台=GB",
+        "别的子库的规则被碰了"
+    );
+    assert_eq!(加规则(&mut catalog, "掌机", "平台=SFC"), 3, "发号器被动了");
+    assert!(
+        !catalog.replace_rule("掌机", 9, &新的).expect("读得动"),
+        "不在的那一条该交回 false"
+    );
+    assert_eq!(
+        catalog.sublibrary_rules("掌机").expect("读得动").len(),
+        3,
+        "不在的那一条也写进去了"
+    );
+}
+
+#[test]
 fn 删掉子库交回整份_原样放回去之后与删之前逐列一样() {
     // 票 `gui-looks-like-the-design/20`（拿主意的人 2026-09-14 定）：界面上删掉一个子库之后，提示条上有一颗
     // 「撤销」。放回去的得是**同一份**：规则的序号与下一个发几号、例外、清单一样不差——清单少一行，同步就把

@@ -211,6 +211,7 @@ toast-seconds     = 3.6   # 只有一句话的提示条停多久，秒（设计�
 toast-action-seconds = 6.5  # 带一颗按钮的提示条停多久，秒（设计稿 toast() 的 6500 毫秒）
 impact-dot        = 8     # 弹层里「会怎样」那几条行首圆点的直径（设计稿 .impact li::before 的 8px）
 impact-column     = 18    # 行首圆点那一列多宽（设计稿 .impact li 的 grid-template-columns:18px 1fr）
+icon-button       = 24    # 图标按钮的边长（设计稿 .iconbtn 的 24px）：子库屏规则行尾那颗「×」
 
 # ── 阴影的形状：两套主题共用，颜色是各主题里同名的那一格（pop → pop-color） ──
 # check_tokens.py 不核这一节：设计稿里是一整句 box-shadow，不是分开的几格。

@@ -109,7 +109,7 @@ impl Toast {
                             ui.spacing_mut().item_spacing.x = step(3);
                             ui.label(
                                 egui::RichText::new(&self.text)
-                                    .size(tokens.font.size_small_plus)
+                                    .size(look::font_size(ui.ctx(), tokens.font.size_small_plus))
                                     .color(palette.win),
                             );
                             if let Some(label) = &self.action {

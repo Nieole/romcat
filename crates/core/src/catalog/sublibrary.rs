@@ -722,6 +722,32 @@ impl Catalog {
         Ok(gone > 0)
     }
 
+    /// 把这个子库的**第 `ordinal` 条规则换成这一条**，序号不变。返回那一条本来在不在；不在就一行都不写。
+    ///
+    /// 子库屏规则行上「✎」那条回程走的就是它（票 `gui-looks-like-the-design/20`，拿主意的人 2026-09-14 定）：跳去浏览屏时
+    /// 只把这一条预填进筛选器，调完按「更新到子库」只换回这一条——别的规则、读不懂的那几条、例外一样不碰。与
+    /// [`Self::replace_rules`] 的差别就在这儿：那一条把读得懂的整批换成一条。
+    ///
+    /// **序号照旧**：人照着报告认的是「第 2 条」，改了条件它还是第 2 条；发号器（`next_rule`）不动。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn replace_rule(
+        &mut self,
+        name: &str,
+        ordinal: i64,
+        rule: &Rule,
+    ) -> Result<bool, CatalogError> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE sublibrary_rule SET text = ?3, at = ?4 WHERE sublibrary = ?1 AND ordinal = ?2",
+                params![name, ordinal, rule.text, super::now_secs()],
+            )
+            .map_err(|source| self.err(source))?;
+        Ok(changed > 0)
+    }
+
     /// **扔掉一条读不懂的规则**——读得懂的那几条一条都碰不到。
     ///
     /// 与 [`Self::remove_rule`] 的差别只有一条：它按序号删任何一条，这一条**先读一遍

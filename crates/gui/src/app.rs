@@ -519,6 +519,10 @@ impl App {
         if let Some(jump) = self.sublibrary.take_jump() {
             self.browse
                 .begin_editing(&self.site, &jump.sublibrary, jump.rule, jump.broken);
+            // 规则行上「✎」跳过来的只改那一条（票 `gui-looks-like-the-design/20`）。
+            if let Some(ordinal) = jump.ordinal {
+                self.browse.edit_only(ordinal);
+            }
             self.view = View::Browse;
         }
         // **先丢账再换屏**：回程那一下也会留下记号，丢在前面，`open` 重读到的就是新的。
@@ -760,9 +764,8 @@ impl App {
                 browse.status(ui, site, board);
             }
             View::Sublibraries => {
-                // **抬头上那个「停下」按得动**，所以任务台拿的是可变的那一份。
-                let (sublibrary, site, board) = (&mut self.sublibrary, &self.site, &mut self.board);
-                sublibrary.status(ui, site, board);
+                let (sublibrary, site) = (&mut self.sublibrary, &self.site);
+                sublibrary.status(ui, site);
             }
             View::Tasks => {
                 let (tasks, board) = (&mut self.tasks, &self.board);

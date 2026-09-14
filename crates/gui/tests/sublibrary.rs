@@ -2781,3 +2781,144 @@ fn 卡不在位时卡底只写请先连接设备_路径与怎么办在悬停里(
         "悬停里没写目标路径与怎么办：\n{悬停}"
     );
 }
+
+#[test]
+fn 规则行按叉先问一层_确认之后这一条没了_别的规则与序号不动_容量账作废() {
+    // 拿主意的人 2026-09-14 看子库屏候选图：「选择集中缺少编辑和删除按钮」。每条规则行尾照稿一颗「×」，按下去先弹一层
+    // 确认（`crate::dialog`，确认按钮 `danger`），写清移除的是哪一条、选中的变体会变；确认之后走核心 `Catalog::remove_rule`。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.加规则("掌机", "平台=GBA");
+    场.求值();
+    画两帧(&ctx, &mut 场);
+
+    // 规则按序号排，先画出来的是第 1 条（SFC）那一颗「×」。
+    let 屏上 = 点正好那一段(&ctx, "×", |ui| 场.app.ui(ui));
+    assert!(
+        场.app.sublibrary().rule_dialog_open(),
+        "按了「×」没弹那一层确认"
+    );
+    assert!(
+        屏上.contains("移除规则「SFC」"),
+        "弹层上没写移除的是哪一条：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("选中的变体会变"),
+        "弹层上没说选中的变体会变：\n{屏上}"
+    );
+    assert_eq!(
+        场.app
+            .site()
+            .catalog
+            .sublibrary_rules("掌机")
+            .expect("读得动")
+            .len(),
+        2,
+        "还没确认就删了"
+    );
+
+    let 屏上 = 点最后正好那一段(&ctx, "移除这条规则", |ui| 场.app.ui(ui));
+    assert!(!场.app.sublibrary().rule_dialog_open(), "删完弹层还开着");
+    let 规则 = 场
+        .app
+        .site()
+        .catalog
+        .sublibrary_rules("掌机")
+        .expect("读得动");
+    assert_eq!(规则.len(), 1, "确认之后规则没少一条：{规则:?}");
+    assert_eq!(
+        (规则[0].ordinal, 规则[0].text.as_str()),
+        (2, "平台=GBA"),
+        "删掉的不是按的那一条，或者剩下那一条的序号变了"
+    );
+    assert!(
+        场.app.sublibrary().evaluated("掌机").is_none(),
+        "移除之后卡上还摆着按旧规则算的容量账"
+    );
+    assert!(
+        !屏上.lines().any(|line| line == "SFC") && 屏上.lines().any(|line| line == "GBA"),
+        "卡上的规则列表没跟着变：\n{屏上}"
+    );
+}
+
+#[test]
+fn 规则行按叉再按取消_规则一条都没少() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.加规则("掌机", "平台=GBA");
+    let 之前 = 场
+        .app
+        .site()
+        .catalog
+        .sublibrary_rules("掌机")
+        .expect("读得动");
+    画两帧(&ctx, &mut 场);
+
+    点正好那一段(&ctx, "×", |ui| 场.app.ui(ui));
+    assert!(
+        场.app.sublibrary().rule_dialog_open(),
+        "前提：那一层弹出来了"
+    );
+    let 屏上 = 点正好那一段(&ctx, "取消", |ui| 场.app.ui(ui));
+    assert!(
+        !场.app.sublibrary().rule_dialog_open(),
+        "按了取消弹层还开着"
+    );
+    assert!(!屏上.contains("移除规则「"), "按了取消弹层还画着：\n{屏上}");
+    assert_eq!(
+        场.app
+            .site()
+            .catalog
+            .sublibrary_rules("掌机")
+            .expect("读得动"),
+        之前,
+        "按了取消规则变了"
+    );
+}
+
+#[test]
+fn 规则行按铅笔只改这一条_更新到子库之后其余规则都在() {
+    // 拿主意的人 2026-09-14 定：规则行尾「✎」跳去浏览屏只把这一条预填进筛选器，调完按「更新到子库」只换回这一条
+    // （核心 `Catalog::replace_rule`），别的规则一条不碰、序号照旧。「✎」是线条画的，屏上没有字可认，这一下走界面上
+    // 按那颗按钮走的那个函数。
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.加规则("掌机", "平台=GBA");
+    场.app.sublibrary_and_site().0.edit_rule("掌机", 1);
+    场.app.route();
+    assert_eq!(场.app.view(), View::Browse, "按了「✎」没跳去浏览屏");
+    let 屏上 = 场.屏上筛出来的();
+    assert!(
+        屏上.len() == 2 && 屏上.iter().all(|key| key.contains("/SFC/")),
+        "筛选器里预填的不是只有第 1 条（平台=SFC）：{屏上:?}"
+    );
+
+    {
+        let (browse, _) = 场.app.browse_and_site();
+        browse.set_filter_rule(Some(Rule::parse("平台=SFC 或 平台=GBA").expect("读得懂")));
+    }
+    场.更新到子库();
+    assert_eq!(场.app.view(), View::Sublibraries, "没跳回子库屏");
+    let 规则: Vec<(i64, String)> = 场
+        .app
+        .site()
+        .catalog
+        .sublibrary_rules("掌机")
+        .expect("读得动")
+        .into_iter()
+        .map(|stored| (stored.ordinal, stored.text))
+        .collect();
+    assert_eq!(
+        规则,
+        vec![
+            (1, "平台=SFC 或 平台=GBA".to_string()),
+            (2, "平台=GBA".to_string())
+        ],
+        "「✎」回来换掉的不只是那一条，或者序号变了"
+    );
+}

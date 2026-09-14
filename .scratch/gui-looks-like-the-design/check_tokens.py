@@ -161,6 +161,16 @@ for pattern, key in [
     if int(m[1]) != tokens["layout"][key]:
         problems.append(f"{key}: 设计稿是 {m[1]}px，令牌是 {tokens['layout'][key]}")
 
+# 规则行尾那颗图标按钮（设计稿 .iconbtn）：边长与字号。
+m = re.search(r"\.iconbtn\{width:(\d+)px;[^}]*?font-size:(\d+)px", html)
+if not m:
+    problems.append("找不到 .iconbtn 的 width 与 font-size")
+else:
+    for got, section, key in [(m[1], "layout", "icon-button"), (m[2], "font", "size-body")]:
+        literals += 1
+        if int(got) != tokens[section][key]:
+            problems.append(f"{key}: 设计稿是 {got}px，令牌是 {tokens[section][key]}")
+
 # 两档半号字号（拿主意的人定：照稿加，各分支同一个键名）：设计稿 .tbl th 的 11.5px、.note 的 12.5px。
 for pattern, key in [
     (r"\.tbl th\{[^}]*?font-size:([\d.]+)px", "size-caption-plus"),
