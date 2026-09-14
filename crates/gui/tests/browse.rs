@@ -2941,6 +2941,27 @@ fn 认不出作品的那一行画正题与未关联作品标签_路径从尾部�
         短键.replacen('/', romcat_gui::table::ROOT_SEPARATOR, 1),
         "宽窗口里画得下的短路径不该被截：\n{宽屏上}"
     );
+    // 七、**开了行首封面、宽度更紧**（协调人 2026-09-15 审行首封面那两张打回「未关联作品 …s」）：标签后头连
+    //     文件名末尾几个字都放不下时只画标签、不画路径碎片；画了路径就至少露出 `PATH_MIN_CHARS` 个字。
+    //     标签后头紧跟着的那一段以根名或「…」开头才是路径，否则是平台那一格——那就是没画路径。
+    for _ in 0..2 {
+        headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    }
+    shared::点一下(&ctx, "在每行开头显示封面", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    let 封面一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 封面屏上 = 画出来的字(&封面一帧);
+    let 封面行: Vec<&str> = 封面屏上.lines().collect();
+    for (正题, 键) in [("超级机器人大战R", 长键), ("短", 短键)] {
+        let 标签后头 = 副行(&封面行, 正题);
+        if 标签后头.starts_with(带根名.as_str()) || 标签后头.starts_with('…') {
+            let 尾巴 = 留下的尾巴(&标签后头, 键);
+            assert!(
+                尾巴.chars().count() >= romcat_gui::table::PATH_MIN_CHARS,
+                "开了行首封面，「{正题}」那一行的路径只露出「{标签后头}」：\n{封面屏上}"
+            );
+        }
+    }
 }
 
 #[test]

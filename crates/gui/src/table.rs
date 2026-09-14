@@ -827,21 +827,27 @@ fn two_lines(
                         // **标签的宽度先让出来，剩下的才给路径**：路径长了截的是路径的左边，
                         // 「未关联作品」那几个字总在。
                         let mut room = width;
+                        let mut 标签 = None;
                         if let Some(text) = label {
-                            tag(ui, text);
+                            标签 = Some(tag(ui, text));
                             room -= tag_width(ui, text) + ui.spacing().item_spacing.x;
+                        }
+                        let room = room.max(0.0);
+                        // **标签后头连文件名末尾几个字都放不下，就只画标签**（协调人 2026-09-15 审行首封面那两张
+                        // 定，挂单 `Q878`）：开了行首封面，封面块再占掉一截宽，只露出一两个字母的路径碎片读不出
+                        // 任何东西。完整路径挂在标签的悬停里，详情栏也有。
+                        if !path_tail_fits(ui, &work.name, &small, room) {
+                            if let Some(标签) = 标签 {
+                                标签.on_hover_text(&work.name);
+                            }
+                            return;
                         }
                         // **路径从尾部截断**：截到画得下为止，文件名那一截留着。
                         ui.add(
                             egui::Label::new(
-                                egui::RichText::new(root_and_path(
-                                    ui,
-                                    &work.name,
-                                    &small,
-                                    room.max(0.0),
-                                ))
-                                .font(small)
-                                .color(weak),
+                                egui::RichText::new(root_and_path(ui, &work.name, &small, room))
+                                    .font(small)
+                                    .color(weak),
                             )
                             .extend(),
                         )
@@ -868,6 +874,33 @@ fn right_marks(ui: &mut egui::Ui, work: &WorkRow, hit: Option<SearchHit>) {
     if work.non_game_asset {
         ui.weak(NON_GAME_ASSET_LABEL);
     }
+}
+
+/// 表格副行里的路径**至少露出几个字**（不算「…」）才画：少于这个数，只剩一两个字母的碎片读不出任何东西，
+/// 那一行只画「未关联作品」标签（协调人 2026-09-15 定，挂单 `Q878`）。
+pub const PATH_MIN_CHARS: usize = 4;
+
+/// 这条键的**文件名末尾 [`PATH_MIN_CHARS`] 个字**（前面补「…」）在 `max_width` 里摆不摆得下；文件名本身
+/// 不到这几个字就看整个文件名。**量的是宽度**，拆键由核心库做（[`romcat_core::path::split_root`]）。
+#[must_use]
+pub(crate) fn path_tail_fits(
+    ui: &egui::Ui,
+    key: &str,
+    font: &egui::FontId,
+    max_width: f32,
+) -> bool {
+    let (root, relative) = romcat_core::path::split_root(key);
+    let path = if relative.is_empty() { root } else { relative };
+    let file_name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path);
+    let count = file_name.chars().count();
+    let tail: String = file_name
+        .chars()
+        .skip(count.saturating_sub(PATH_MIN_CHARS))
+        .collect();
+    text_width(ui, &format!("…{tail}"), font) <= max_width
 }
 
 /// 一段字**从左边删字**、补一个「…」，删到量出来的宽度摆得进 `max_width` 为止；

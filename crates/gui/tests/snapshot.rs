@@ -826,6 +826,10 @@ const 正题至少露出: usize = 3;
 /// **只查整枚看得见的标签**：表格是滚动区，视口外头那几行的正题是 `Label`，egui 不画；标签是拿画笔
 /// 直接画的，照样交出一段字、只是被裁剪矩形裁掉——拿它去找正题只会扑空（snap-13 行首封面那两张：
 /// 第三行带标签的整行在表格视口底下）。看不见的行不是「正题被截没了」。
+///
+/// **第二行的路径也查**（协调人 2026-09-15 审行首封面那两张打回「未关联作品 …s」）：标签右边、同一格
+/// （同一个裁剪矩形，表格每一列各裁各的）、同一条横带里的那一段就是路径。没画路径可以——放不下时只画
+/// 标签；画了就至少露出 [`romcat_gui::table::PATH_MIN_CHARS`] 个字，不许只剩一两个。
 #[track_caller]
 fn 带标签的行正题露得出字(harness: &Harness<'_>, 名字: &str) {
     use romcat_gui::table::UNLINKED_LABEL;
@@ -852,10 +856,35 @@ fn 带标签的行正题露得出字(harness: &Harness<'_>, 名字: &str) {
 
     let mut 查过 = 0;
     let mut 截没了 = Vec::new();
-    for (标签, _, _) in 各段
+    let 露出的字 = |galley: &egui::Galley| -> String {
+        galley
+            .rows
+            .iter()
+            .flat_map(|row| row.glyphs.iter().map(|glyph| glyph.chr))
+            .filter(|chr| *chr != '…')
+            .collect()
+    };
+    for (标签, 标签裁剪, _) in 各段
         .iter()
         .filter(|(框, 裁剪, galley)| galley.text() == UNLINKED_LABEL && 裁剪.contains_rect(*框))
     {
+        let 路径 = 各段
+            .iter()
+            .filter(|(框, 裁剪, _)| {
+                裁剪 == 标签裁剪
+                    && 框.min.x >= 标签.max.x
+                    && (框.center().y - 标签.center().y).abs() <= tag_height / 2.0
+            })
+            .min_by(|(甲, _, _), (乙, _, _)| 甲.min.x.total_cmp(&乙.min.x));
+        if let Some((路径框, _, 路径)) = 路径 {
+            let 露出来的 = 露出的字(路径);
+            if 露出来的.chars().count() < romcat_gui::table::PATH_MIN_CHARS {
+                截没了.push(format!(
+                    "标签后头的路径「{}」只露出「{露出来的}」（画在 {路径框:?}）",
+                    路径.text()
+                ));
+            }
+        }
         // 标签那一枚的字画在底色正中，底色左沿比字再往左一份 `tag-padding`；正题与底色左沿对齐。
         let 左沿 = 标签.min.x - tag_padding;
         let Some((正题框, _, 正题)) = 各段
@@ -871,12 +900,7 @@ fn 带标签的行正题露得出字(harness: &Harness<'_>, 名字: &str) {
             continue;
         };
         查过 += 1;
-        let 露出来的: String = 正题
-            .rows
-            .iter()
-            .flat_map(|row| row.glyphs.iter().map(|glyph| glyph.chr))
-            .filter(|chr| *chr != '…')
-            .collect();
+        let 露出来的 = 露出的字(正题);
         if 露出来的.chars().count() < 正题至少露出 {
             截没了.push(format!(
                 "「{}」只露出「{露出来的}」（画在 {正题框:?}）",
@@ -887,7 +911,8 @@ fn 带标签的行正题露得出字(harness: &Harness<'_>, 名字: &str) {
     assert!(查过 > 0, "{名字}：表上一枚「{UNLINKED_LABEL}」标签都没画");
     assert!(
         截没了.is_empty(),
-        "{名字}：带标签的行正题被截得不到 {正题至少露出} 个字：\n{}",
+        "{名字}：带标签的行被截得太短（正题至少 {正题至少露出} 个字，路径没画或至少 {} 个字）：\n{}",
+        romcat_gui::table::PATH_MIN_CHARS,
         截没了.join("\n"),
     );
 }
