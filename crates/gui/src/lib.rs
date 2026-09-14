@@ -146,4 +146,5 @@ pub mod stages;
 pub mod sublibrary;
 pub mod table;
 pub mod task;
+pub mod toast;
 pub mod tokens;

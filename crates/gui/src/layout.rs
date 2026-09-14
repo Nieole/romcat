@@ -1,6 +1,6 @@
 //! **面板边界**：拖得动、记得住、挤不塌。
 //!
-//! 三屏上一共六条边界（[`Boundary::ALL`]），每一条都是一句声明：靠哪一边、默认多宽、
+//! 两屏上一共五条边界（[`Boundary::ALL`]），每一条都是一句声明：靠哪一边、默认多宽、
 //! 最少多宽、最多占整个窗口那一维的几成。**画那一屏的代码不自己写这四个数**
 //! ——写了就会有人只改一处，于是同一条边界在两个地方是两个下限。
 //!
@@ -151,21 +151,13 @@ pub const DECIDE: Boundary = Boundary {
     share: 0.45,
 };
 
-/// 子库屏底下那块：配目标——名字、路径、前端格式、容量上限。
-pub const TARGET: Boundary = Boundary {
-    id: "配目标",
-    screen: View::Sublibraries,
-    side: Side::Bottom,
-    default: 190.0,
-    min: 110.0,
-    share: 0.40,
-};
-
 impl Boundary {
-    /// 全部六条，**照各屏真正摆它们的次序**。不在这儿的边界不落盘。
+    /// 全部五条，**照各屏真正摆它们的次序**。不在这儿的边界不落盘。
     ///
     /// **刮削面板不在这儿**：它从前是浏览屏底下第四块，如今是一层弹层（[`crate::dialog`]），
     /// 不占屏上的地方。工作目录里旧版式文件记着的那一行「刮削面板 = …」读的时候跳过。
+    /// **子库屏底下那块「配目标」也一样**：挪进了「目标设置」那层弹层（票 `gui-looks-like-the-design/20`
+    /// 第二段），旧文件里「配目标 = …」那一行读的时候跳过。
     ///
     /// 次序不是随手排的：面板是**一块接一块**吃地方的（先摆的把地方吃掉一截，后摆的
     /// 看见的是剩下的），而 [`Self::cap`] 第二道正是按「眼下还剩多少」算的。
@@ -174,7 +166,7 @@ impl Boundary {
     // 三屏各自照 `Screen::ui` 里 `show` 的先后排；`rustfmt` 会把它挤成一行，
     // 而这张表的次序**是有意义的**，所以不让它挤。
     #[rustfmt::skip]
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 5] = [
         // 浏览屏（`browse::Screen::ui`）
         EDIT,
         FILTER,
@@ -182,8 +174,6 @@ impl Boundary {
         // 待确认屏逐条那一路（`queue::Screen::ui`）
         DECIDE,
         BATCHES,
-        // 子库屏（`sublibrary::Screen::ui`）
-        TARGET,
     ];
 
     /// 画这块面板。
@@ -273,7 +263,7 @@ const HEADER: &str = "\
 # 它**不在中立库里**——中立库整份可再生，界面偏好放进去会被某一次重扫抹掉。
 ";
 
-/// 六条边界各自拖到哪儿了，以及它落在哪个文件上。
+/// 五条边界各自拖到哪儿了，以及它落在哪个文件上。
 #[derive(Debug)]
 pub struct Layout {
     /// 那份文件在哪。**在工作目录里**（[`romcat_core::workspace::gui_layout_path`]）。
@@ -477,7 +467,7 @@ fn resize_id(boundary: Boundary) -> egui::Id {
 /// 读那几行。**读不懂的行、不认得的名字，一律跳过。**
 ///
 /// 跳过而不是报错：这个文件的全部内容是「面板拖到哪儿」，一行坏掉的代价是那一条回到
-/// 默认宽度。为它把窗口关掉，或者为它把另外六条一起丢掉，都不成比例。
+/// 默认宽度。为它把窗口关掉，或者为它把另外几条一起丢掉，都不成比例。
 fn parse(text: &str) -> BTreeMap<&'static str, f32> {
     let mut sizes = BTreeMap::new();
     for line in text.lines() {
@@ -619,9 +609,10 @@ mod tests {
     }
 
     #[test]
-    fn 三屏都至少有一条拖得动的边界() {
-        // 验收第 1 条点名的三屏。库屏与任务屏各只有一块正文，没有边界可拖。
-        for screen in [View::Browse, View::Queue, View::Sublibraries] {
+    fn 浏览与待确认两屏都至少有一条拖得动的边界() {
+        // 验收第 1 条点名的是三屏；子库屏底下那块「配目标」挪进了弹层（票 `gui-looks-like-the-design/20`
+        // 第二段），于是子库屏与库屏、任务屏一样，只剩一块正文，没有边界可拖。
+        for screen in [View::Browse, View::Queue] {
             assert!(
                 Boundary::ALL.iter().any(|it| it.screen == screen),
                 "{screen:?} 上一条边界都没有",
@@ -641,7 +632,11 @@ mod tests {
              配目标=125.4\n",
         );
         assert_eq!(sizes.get("筛选"), Some(&300.0));
-        assert_eq!(sizes.get("配目标"), Some(&125.4));
+        assert_eq!(
+            sizes.get("配目标"),
+            None,
+            "子库屏那块「配目标」挪进了弹层：旧文件里那一行跳过"
+        );
         assert_eq!(sizes.get("没这条边界"), None, "不认得的名字不该进来");
         assert_eq!(sizes.get("浏览详情"), None, "读不懂的值不该进来");
     }
@@ -667,7 +662,7 @@ mod tests {
             error: None,
         };
         layout.sizes.insert(FILTER.id, 275.0);
-        layout.sizes.insert(TARGET.id, 210.0);
+        layout.sizes.insert(BATCHES.id, 210.0);
         layout.set_rail_collapsed(true);
         let text = layout.render();
         assert!(text.starts_with('#'), "开头那几句给人看的话不能丢");

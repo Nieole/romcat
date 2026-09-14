@@ -175,6 +175,103 @@ fn add_column(
     conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))
 }
 
+/// **删掉之前整份留下来的一个子库**：它那一行、规则、例外、清单，**逐列原样**。
+///
+/// [`Catalog::take_sublibrary`] 交出来，[`Catalog::restore_sublibrary`] 原样放回去——界面上删掉一个子库之后
+/// 提示条上那颗「撤销」靠的就是它（票 `gui-looks-like-the-design/20`，拿主意的人 2026-09-14 定）。
+///
+/// **存的是库里那几列本来的值，不是读成领域类型之后的样子**：规则的序号与下一个发几号（`next_rule`）、
+/// 每一行记下的时刻、清单里认不出类别的那几行（[`Catalog::manifest`] 读的时候跳过它们）都得原样回去——
+/// 读成 [`Manifest`] 再写回的话，那几行就悄悄没了，下一条规则也会从 1 号重新发。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedSublibrary {
+    /// 子库叫什么（主键）。
+    name: String,
+    /// 目标根，NFC 那一份。
+    target: String,
+    /// 目标根，系统给的原始形式。
+    target_raw: Option<String>,
+    /// 前端格式。
+    format: String,
+    /// 容量上限，库里那一格的原值。
+    capacity: Option<i64>,
+    /// 能力档案的名字。
+    capability: Option<String>,
+    /// 下一条规则发几号。
+    next_rule: i64,
+    /// 这一行记下的时刻。
+    at: i64,
+    /// 规则，按序号。
+    rules: Vec<RemovedRule>,
+    /// 例外，按变体的键。
+    exceptions: Vec<RemovedException>,
+    /// 清单，按路径。
+    manifest: Vec<RemovedManifestFile>,
+}
+
+impl RemovedSublibrary {
+    /// 删掉的是哪个子库。
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// 它的目标路径（NFC 那一份，也就是报告里印的那一份）。
+    #[must_use]
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+}
+
+/// [`RemovedSublibrary`] 里的一条规则：`sublibrary_rule` 那几列。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemovedRule {
+    /// 序号。
+    ordinal: i64,
+    /// 原文。
+    text: String,
+    /// 记下的时刻。
+    at: i64,
+}
+
+/// [`RemovedSublibrary`] 里的一条例外：`sublibrary_exception` 那几列。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemovedException {
+    /// 变体的键。
+    variant_key: String,
+    /// 方向，库里那个词的原样。
+    kind: String,
+    /// 用户写的那句「为什么」。
+    note: Option<String>,
+    /// 记下的时刻。
+    at: i64,
+}
+
+/// [`RemovedSublibrary`] 里清单的一行：`sublibrary_manifest` 那几列。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemovedManifestFile {
+    /// 相对子库根的路径。
+    path: String,
+    /// 类别，库里那个词的原样——认不出的也留着。
+    kind: String,
+    /// 目标上那份的大小。
+    bytes: i64,
+    /// 目标上那份的修改时间。
+    mtime_ns: Option<i64>,
+    /// 主库侧的键。
+    source: String,
+    /// 属于哪个变体。
+    variant: String,
+    /// 放上去那一刻主库侧那份的大小。
+    source_bytes: i64,
+    /// 放上去那一刻主库侧那份的修改时间。
+    source_mtime_ns: Option<i64>,
+    /// 工具放过、维护者删了。
+    absent: i64,
+    /// 记下的时刻。
+    at: i64,
+}
+
 impl Catalog {
     /// 新建或改一个子库。
     ///
@@ -270,41 +367,246 @@ impl Catalog {
             .map_err(|source| self.err(source))
     }
 
-    /// 删掉一个子库，连它的规则与例外一起。返回它本来在不在。
+    /// 删掉一个子库，连它的规则、例外与清单一起。返回它本来在不在。
     ///
     /// 例外跟着一起没，与「例外永久记住」不矛盾：**记的是这个子库的口味**，
     /// 子库都不要了，那些决定也就没有归属。
     ///
+    /// 走的是 [`Self::take_sublibrary`] 那一条，只是不要交回来的那一份。
+    ///
     /// # Errors
     /// 写库失败时返回错误。
     pub fn remove_sublibrary(&mut self, name: &str) -> Result<bool, CatalogError> {
+        Ok(self.take_sublibrary(name)?.is_some())
+    }
+
+    /// 删掉一个子库，**删之前把它整份留下来交回**（[`RemovedSublibrary`]）：它那一行、规则、例外、清单。
+    /// 本来就不在时交回 `None`，什么都不删。
+    ///
+    /// 读与删在同一个事务里：读完、删之前别处又加了一条规则的话，那一条跟着删掉了却不在交回的那一份里，
+    /// 撤销之后就少了它。
+    ///
+    /// # Errors
+    /// 读写库失败时返回错误。
+    pub fn take_sublibrary(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<RemovedSublibrary>, CatalogError> {
         let path = self.path.clone();
         let to_err = |source| CatalogError::Sqlite {
             path: path.clone(),
             source,
         };
         let tx = self.conn.transaction().map_err(to_err)?;
+        let row = tx
+            .query_row(
+                "SELECT name, target, target_raw, format, capacity, capability, next_rule, at
+                 FROM sublibrary WHERE name = ?1",
+                params![name],
+                |row| {
+                    Ok(RemovedSublibrary {
+                        name: row.get(0)?,
+                        target: row.get(1)?,
+                        target_raw: row.get(2)?,
+                        format: row.get(3)?,
+                        capacity: row.get(4)?,
+                        capability: row.get(5)?,
+                        next_rule: row.get(6)?,
+                        at: row.get(7)?,
+                        rules: Vec::new(),
+                        exceptions: Vec::new(),
+                        manifest: Vec::new(),
+                    })
+                },
+            )
+            .optional()
+            .map_err(to_err)?;
+        let Some(mut removed) = row else {
+            return Ok(None);
+        };
+        {
+            let mut statement = tx
+                .prepare(
+                    "SELECT ordinal, text, at FROM sublibrary_rule
+                     WHERE sublibrary = ?1 ORDER BY ordinal",
+                )
+                .map_err(to_err)?;
+            let rows = statement
+                .query_map(params![name], |row| {
+                    Ok(RemovedRule {
+                        ordinal: row.get(0)?,
+                        text: row.get(1)?,
+                        at: row.get(2)?,
+                    })
+                })
+                .map_err(to_err)?;
+            removed.rules = rows.collect::<Result<_, _>>().map_err(to_err)?;
+        }
+        {
+            let mut statement = tx
+                .prepare(
+                    "SELECT variant_key, kind, note, at FROM sublibrary_exception
+                     WHERE sublibrary = ?1 ORDER BY variant_key",
+                )
+                .map_err(to_err)?;
+            let rows = statement
+                .query_map(params![name], |row| {
+                    Ok(RemovedException {
+                        variant_key: row.get(0)?,
+                        kind: row.get(1)?,
+                        note: row.get(2)?,
+                        at: row.get(3)?,
+                    })
+                })
+                .map_err(to_err)?;
+            removed.exceptions = rows.collect::<Result<_, _>>().map_err(to_err)?;
+        }
+        {
+            let mut statement = tx
+                .prepare(
+                    "SELECT path, kind, bytes, mtime_ns, source, variant,
+                            source_bytes, source_mtime_ns, absent, at
+                     FROM sublibrary_manifest WHERE sublibrary = ?1 ORDER BY path",
+                )
+                .map_err(to_err)?;
+            let rows = statement
+                .query_map(params![name], |row| {
+                    Ok(RemovedManifestFile {
+                        path: row.get(0)?,
+                        kind: row.get(1)?,
+                        bytes: row.get(2)?,
+                        mtime_ns: row.get(3)?,
+                        source: row.get(4)?,
+                        variant: row.get(5)?,
+                        source_bytes: row.get(6)?,
+                        source_mtime_ns: row.get(7)?,
+                        absent: row.get(8)?,
+                        at: row.get(9)?,
+                    })
+                })
+                .map_err(to_err)?;
+            removed.manifest = rows.collect::<Result<_, _>>().map_err(to_err)?;
+        }
         // **先删子表**：外键检查默认是开着的（见 `catalog::content` 里那段注释）。
-        tx.execute(
-            "DELETE FROM sublibrary_manifest WHERE sublibrary = ?1",
-            params![name],
-        )
-        .map_err(to_err)?;
-        tx.execute(
-            "DELETE FROM sublibrary_exception WHERE sublibrary = ?1",
-            params![name],
-        )
-        .map_err(to_err)?;
-        tx.execute(
-            "DELETE FROM sublibrary_rule WHERE sublibrary = ?1",
-            params![name],
-        )
-        .map_err(to_err)?;
-        let gone = tx
-            .execute("DELETE FROM sublibrary WHERE name = ?1", params![name])
+        for table in [
+            "sublibrary_manifest",
+            "sublibrary_exception",
+            "sublibrary_rule",
+        ] {
+            // 表名是上面这几个写死的字面量，不来自外面。
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE sublibrary = ?1"),
+                params![name],
+            )
+            .map_err(to_err)?;
+        }
+        tx.execute("DELETE FROM sublibrary WHERE name = ?1", params![name])
             .map_err(to_err)?;
         tx.commit().map_err(to_err)?;
-        Ok(gone > 0)
+        Ok(Some(removed))
+    }
+
+    /// 把 [`Self::take_sublibrary`] 交出来的那一份**原样放回去**：那一行、规则（连序号与下一个发几号）、
+    /// 例外、清单，逐列与删之前一样。放回去了交回 `true`。
+    ///
+    /// **同名的子库这会儿已经又有了**（删完之后人又建了一个同名的）时**一行都不写**，交回 `false`：
+    /// 两份揉在一起的话谁的规则、谁的清单都说不清——清单说错了，同步就会去删不是自己放的文件（ADR-0015）。
+    ///
+    /// # Errors
+    /// 读写库失败时返回错误。
+    pub fn restore_sublibrary(
+        &mut self,
+        removed: &RemovedSublibrary,
+    ) -> Result<bool, CatalogError> {
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        let taken: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sublibrary WHERE name = ?1)",
+                params![removed.name],
+                |row| row.get(0),
+            )
+            .map_err(to_err)?;
+        if taken {
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO sublibrary(
+                 name, target, target_raw, format, capacity, capability, next_rule, at)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                removed.name,
+                removed.target,
+                removed.target_raw,
+                removed.format,
+                removed.capacity,
+                removed.capability,
+                removed.next_rule,
+                removed.at,
+            ],
+        )
+        .map_err(to_err)?;
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO sublibrary_rule(sublibrary, ordinal, text, at)
+                     VALUES(?1, ?2, ?3, ?4)",
+                )
+                .map_err(to_err)?;
+            for rule in &removed.rules {
+                insert
+                    .execute(params![removed.name, rule.ordinal, rule.text, rule.at])
+                    .map_err(to_err)?;
+            }
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO sublibrary_exception(sublibrary, variant_key, kind, note, at)
+                     VALUES(?1, ?2, ?3, ?4, ?5)",
+                )
+                .map_err(to_err)?;
+            for exception in &removed.exceptions {
+                insert
+                    .execute(params![
+                        removed.name,
+                        exception.variant_key,
+                        exception.kind,
+                        exception.note,
+                        exception.at,
+                    ])
+                    .map_err(to_err)?;
+            }
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO sublibrary_manifest(
+                         sublibrary, path, kind, bytes, mtime_ns, source, variant,
+                         source_bytes, source_mtime_ns, absent, at)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                )
+                .map_err(to_err)?;
+            for file in &removed.manifest {
+                insert
+                    .execute(params![
+                        removed.name,
+                        file.path,
+                        file.kind,
+                        file.bytes,
+                        file.mtime_ns,
+                        file.source,
+                        file.variant,
+                        file.source_bytes,
+                        file.source_mtime_ns,
+                        file.absent,
+                        file.at,
+                    ])
+                    .map_err(to_err)?;
+            }
+        }
+        tx.commit().map_err(to_err)?;
+        Ok(true)
     }
 
     /// 往选择集里加一条规则，返回它的序号。
@@ -418,6 +720,32 @@ impl Catalog {
             )
             .map_err(|source| self.err(source))?;
         Ok(gone > 0)
+    }
+
+    /// 把这个子库的**第 `ordinal` 条规则换成这一条**，序号不变。返回那一条本来在不在；不在就一行都不写。
+    ///
+    /// 子库屏规则行上「✎」那条回程走的就是它（票 `gui-looks-like-the-design/20`，拿主意的人 2026-09-14 定）：跳去浏览屏时
+    /// 只把这一条预填进筛选器，调完按「更新到子库」只换回这一条——别的规则、读不懂的那几条、例外一样不碰。与
+    /// [`Self::replace_rules`] 的差别就在这儿：那一条把读得懂的整批换成一条。
+    ///
+    /// **序号照旧**：人照着报告认的是「第 2 条」，改了条件它还是第 2 条；发号器（`next_rule`）不动。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn replace_rule(
+        &mut self,
+        name: &str,
+        ordinal: i64,
+        rule: &Rule,
+    ) -> Result<bool, CatalogError> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE sublibrary_rule SET text = ?3, at = ?4 WHERE sublibrary = ?1 AND ordinal = ?2",
+                params![name, ordinal, rule.text, super::now_secs()],
+            )
+            .map_err(|source| self.err(source))?;
+        Ok(changed > 0)
     }
 
     /// **扔掉一条读不懂的规则**——读得懂的那几条一条都碰不到。

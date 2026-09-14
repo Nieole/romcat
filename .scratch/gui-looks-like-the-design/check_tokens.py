@@ -103,6 +103,96 @@ else:
     if int(m[1]) != tokens["layout"]["chip-dot"]:
         problems.append(f"chip-dot: 设计稿是 {m[1]}px，令牌是 {tokens['layout']['chip-dot']}")
 
+# 子库屏（票 gui-looks-like-the-design/20）：容量条的高与「未知」那一段斜纹一个来回、图例色块的边长与圆角、
+# 规则行首序号圆的直径、空态卡的内边距——设计稿里都是字面值，照字面值核。
+for pattern, key in [
+    (r"\.gauge\{[^}]*?height:(\d+)px", "gauge-height"),
+    (r"\.gauge \.unk\{[^}]*?transparent \d+px (\d+)px", "gauge-hatch"),
+    (r"\.legend i\{[^}]*?width:(\d+)px", "legend-swatch"),
+    (r"\.legend i\{[^}]*?border-radius:(\d+)px", "legend-swatch-radius"),
+    (r"\.rule \.rn\{[^}]*?width:(\d+)px", "rule-badge"),
+    (r'<div class="card" style="padding:(\d+)px;text-align:center;max-width:620px', "empty-card-padding"),
+]:
+    m = re.search(pattern, html)
+    if not m:
+        problems.append(f"找不到 {key} 在设计稿里的那个字面值")
+        continue
+    literals += 1
+    if int(m[1]) != tokens["layout"][key]:
+        problems.append(f"{key}: 设计稿是 {m[1]}px，令牌是 {tokens['layout'][key]}")
+
+# 提示条（设计稿 .toast，票 gui-looks-like-the-design/20 删除子库之后那一条）与弹层里「会怎样」那几条（.impact）：
+# 离底边多远、四边留白、按钮描边多淡、停多久、行首圆点多大、那一列多宽——设计稿里都是字面值。
+m = re.search(r"\.toast\{[^}]*?bottom:(\d+)px;[^}]*?padding:(\d+)px (\d+)px (\d+)px (\d+)px", html)
+if not m:
+    problems.append("找不到 .toast 的 bottom 与 padding")
+else:
+    literals += 1
+    if int(m[1]) != tokens["layout"]["toast-bottom"]:
+        problems.append(f"toast-bottom: 设计稿是 {m[1]}px，令牌是 {tokens['layout']['toast-bottom']}")
+    literals += 1
+    got = [int(m[i]) for i in range(2, 6)]
+    if got != tokens["layout"]["toast-padding"]:
+        problems.append(f"toast-padding: 设计稿是 {got}，令牌是 {tokens['layout']['toast-padding']}")
+m = re.search(r"\.toast \.btn\{[^}]*?rgba\(255,255,255,(\.?\d+)\)", html)
+if not m:
+    problems.append("找不到 .toast .btn 的描边")
+else:
+    literals += 1
+    if float(m[1]) != float(tokens["layout"]["toast-button-line"]):
+        problems.append(f"toast-button-line: 设计稿是 {m[1]}，令牌是 {tokens['layout']['toast-button-line']}")
+m = re.search(r"toastT=setTimeout\(.*?act\?(\d+):(\d+)\)", html)
+if not m:
+    problems.append("找不到 toast() 停多久的那两个毫秒数")
+else:
+    for got, key in [(m[1], "toast-action-seconds"), (m[2], "toast-seconds")]:
+        literals += 1
+        if int(got) != round(float(tokens["layout"][key]) * 1000):
+            problems.append(f"{key}: 设计稿是 {got} 毫秒，令牌是 {tokens['layout'][key]} 秒")
+for pattern, key in [
+    (r"\.impact li::before\{[^}]*?width:(\d+)px", "impact-dot"),
+    (r"\.impact li\{[^}]*?grid-template-columns:(\d+)px", "impact-column"),
+]:
+    m = re.search(pattern, html)
+    if not m:
+        problems.append(f"找不到 {key} 在设计稿里的那个字面值")
+        continue
+    literals += 1
+    if int(m[1]) != tokens["layout"][key]:
+        problems.append(f"{key}: 设计稿是 {m[1]}px，令牌是 {tokens['layout'][key]}")
+
+# 规则行尾那颗图标按钮（设计稿 .iconbtn）：边长与字号。
+m = re.search(r"\.iconbtn\{width:(\d+)px;[^}]*?font-size:(\d+)px", html)
+if not m:
+    problems.append("找不到 .iconbtn 的 width 与 font-size")
+else:
+    for got, section, key in [(m[1], "layout", "icon-button"), (m[2], "font", "size-body")]:
+        literals += 1
+        if int(got) != tokens[section][key]:
+            problems.append(f"{key}: 设计稿是 {got}px，令牌是 {tokens[section][key]}")
+
+# 两档半号字号（拿主意的人定：照稿加，各分支同一个键名）：设计稿 .tbl th 的 11.5px、.note 的 12.5px。
+for pattern, key in [
+    (r"\.tbl th\{[^}]*?font-size:([\d.]+)px", "size-caption-plus"),
+    (r"\.note\{[^}]*?font-size:([\d.]+)px", "size-small-plus"),
+]:
+    m = re.search(pattern, html)
+    if not m:
+        problems.append(f"找不到 {key} 在设计稿里的那个字面值")
+        continue
+    literals += 1
+    if float(m[1]) != float(tokens["font"][key]):
+        problems.append(f"{key}: 设计稿是 {m[1]}px，令牌是 {tokens['font'][key]}")
+
+# 子库屏空态那张卡的标题字号：设计稿 renderDevs 里写在 h3 上的字面值。
+m = re.search(r'<h3 style="font-size:(\d+)px">还没有子库</h3>', html)
+if not m:
+    problems.append("找不到子库屏空态卡标题的 font-size")
+else:
+    literals += 1
+    if int(m[1]) != tokens["font"]["size-empty-title"]:
+        problems.append(f"size-empty-title: 设计稿是 {m[1]}px，令牌是 {tokens['font']['size-empty-title']}")
+
 # 底部状态栏里任务那条小进度条（设计稿 .statusbar .mini .bar）：宽。
 m = re.search(r"\.statusbar \.mini \.bar\{[^}]*?width:(\d+)px", html)
 if not m:

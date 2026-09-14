@@ -1035,8 +1035,16 @@ pub fn plan(
         .unwrap_or(0);
     out.over_capacity = over_capacity(sublibrary.capacity, out.after_bytes);
     if out.over_capacity.is_some() {
+        // **裁剪建议落在变体上**（[`Trim`]）：它的去处是一条排除例外，而例外记的是变体的键。
+        // 前端元数据挂在一个记号名下（[`frontend::NOT_A_VARIANT`]），它不是变体、排除不掉——
+        // 列进建议里，子库屏上那颗「排除」就会记下一条指着「（前端元数据）」的例外。它照旧占着
+        // 卡上的地方（算在同步之后那个数里），于是「全排除也还差多少」里有它。
         let mut by_variant: BTreeMap<&str, u64> = BTreeMap::new();
-        for file in &desired.files {
+        for file in desired
+            .files
+            .iter()
+            .filter(|file| file.variant != frontend::NOT_A_VARIANT)
+        {
             *by_variant.entry(file.variant.as_str()).or_default() += file.bytes;
         }
         out.trim_suggestions = trim_suggestions(
@@ -1815,6 +1823,32 @@ mod tests {
             .map(|trim| trim.variant.as_str())
             .collect();
         assert_eq!(建议, vec!["PSV/大.vpk", "SFC/中.zip", "GB/小.zip"]);
+    }
+
+    #[test]
+    fn 裁剪建议不列前端元数据_它不是变体排除不掉_但照旧占着地方() {
+        // 裁剪建议的去处是一条排除例外，例外记的是变体的键。前端元数据挂在一个记号名下，
+        // 列进建议里，子库屏上那颗「排除」就会记下一条指着「（前端元数据）」的例外。
+        let mut 元数据 = 期望("metadata.pegasus.txt", 512);
+        元数据.variant = frontend::NOT_A_VARIANT.to_string();
+        let plan = plan(
+            &子库(Some(4096)),
+            &期望状态(vec![期望("PSV/大.vpk", 4096), 元数据]),
+            &Manifest::empty(),
+            &实际状态(vec![]),
+            Options::default(),
+        );
+        assert_eq!(
+            plan.over_capacity,
+            Some(512),
+            "元数据照旧算在同步之后占多少里"
+        );
+        let 建议: Vec<&str> = plan
+            .trim_suggestions
+            .iter()
+            .map(|trim| trim.variant.as_str())
+            .collect();
+        assert_eq!(建议, vec!["PSV/大.vpk"]);
     }
 
     #[test]
