@@ -24,6 +24,62 @@ fn 建一份库(工作目录: &Path, 名字: &str) {
     drop(Catalog::create(&库文件, &slug.display_name()).expect("建得出中立库"));
 }
 
+/// 按一下弹层页脚上写着 `那几个字` 的那一颗，返回松开之后再画一帧画出来的字。
+///
+/// 不用 `shared::点一下`：那一个按画出来的次序找**头一处含着**这几个字的地方，而「开始扫描」
+/// 在弹层标头那一排里也正好有一处（向导走到第几问），标头那句说明里也含着它。页脚是弹层里
+/// **最后画**的那一段，于是按最后一处正好是这几个字的。
+fn 按页脚上的(
+    ctx: &egui::Context,
+    那几个字: &str,
+    mut 画一帧: impl FnMut(&mut egui::Ui),
+) -> String {
+    let 头一帧 = headless::frame(ctx, headless::input(), &mut 画一帧);
+    let Some(位置) = 最后一处正好画着(&头一帧, 那几个字) else {
+        panic!(
+            "屏上没有正好写着「{那几个字}」的地方，没处按：\n{}",
+            shared::画出来的字(&头一帧)
+        );
+    };
+    let 按 = |pressed: bool| egui::Event::PointerButton {
+        pos: 位置,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    headless::frame(
+        ctx,
+        shared::输入(vec![egui::Event::PointerMoved(位置), 按(true)]),
+        &mut 画一帧,
+    );
+    headless::frame(ctx, shared::输入(vec![按(false)]), &mut 画一帧);
+    shared::跑一帧(ctx, 画一帧)
+}
+
+/// 屏上**正好**写着 `那几个字`、按画出来的次序**最后**那一处的中心点。
+fn 最后一处正好画着(output: &egui::FullOutput, 那几个字: &str) -> Option<egui::Pos2> {
+    fn 找(shape: &egui::epaint::Shape, 那几个字: &str, 最后: &mut Option<egui::Pos2>) {
+        match shape {
+            egui::epaint::Shape::Text(text) => {
+                if text.galley.text() == 那几个字 {
+                    *最后 = Some(egui::Rect::from_min_size(text.pos, text.galley.size()).center());
+                }
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    找(one, 那几个字, 最后);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut 最后 = None;
+    for clipped in &output.shapes {
+        找(&clipped.shape, 那几个字, &mut 最后);
+    }
+    最后
+}
+
 // ——— 开场：换工作目录 ———
 
 #[test]
@@ -33,6 +89,8 @@ fn 开场上选中一个目录立刻列出那个目录里的库() {
     建一份库(甲.path(), "甲那边的库");
     建一份库(乙.path(), "乙那边的库");
     let ctx = headless::context();
+    // 开场左栏的大标题用的是观感基线里的 `hero` 字号（票 `gui-looks-like-the-design/05`），不装就当场 panic。
+    romcat_gui::look::install(&ctx);
     let mut 开场 = Screen::new(甲.path().to_path_buf());
 
     let 屏上 = shared::跑一帧(&ctx, |ui| drop(开场.ui(ui)));
@@ -70,6 +128,8 @@ fn 开场上取消选择器什么都不变() {
     let 甲 = temp_dir("gui-pick-开场取消-甲");
     建一份库(甲.path(), "甲那边的库");
     let ctx = headless::context();
+    // 开场左栏的大标题用的是观感基线里的 `hero` 字号（票 `gui-looks-like-the-design/05`），不装就当场 panic。
+    romcat_gui::look::install(&ctx);
     let mut 开场 = Screen::new(甲.path().to_path_buf());
 
     shared::打字(
@@ -121,8 +181,10 @@ fn 向导里选中一个目录填进选根那一步开始扫描照旧往下走()
         "选中的目录没落进选根那个框：\n{屏上}",
     );
 
+    // 选根那一问之后是第三问（扫描读哪儿、写哪儿），「开始扫描」在那一问的页脚上。
+    shared::点一下(&ctx, "下一步", |ui| drop(向导.show(ui.ctx())));
     let mut 走完 = None;
-    let 屏上 = shared::点一下(&ctx, "开始扫描", |ui| {
+    let 屏上 = 按页脚上的(&ctx, "开始扫描", |ui| {
         if let Outcome::Done(交出来的) = 向导.show(ui.ctx()) {
             走完 = Some(交出来的);
         }
@@ -174,7 +236,7 @@ fn 向导里取消选择器不进下一步也不动已经打的字() {
     let 取消之后 = shared::跑一帧(&ctx, |ui| drop(向导.show(ui.ctx())));
 
     assert!(
-        取消之后.contains("第二步") && 取消之后.contains("开始扫描"),
+        取消之后.contains("选第一个根") && 取消之后.contains("下一步"),
         "取消了选择器，向导却不在选根那一步了：\n{取消之后}",
     );
     assert!(

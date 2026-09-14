@@ -544,8 +544,9 @@ fn 开过一份库之后再启动直接进主窗口不经过开场() {
     for 屏 in ["待确认队列", "库", "浏览", "子库", "任务"] {
         assert!(屏上.contains(屏), "顶栏上没有「{屏}」这一屏：\n{屏上}");
     }
+    // 断的是开场左边那句大标题：开场在画，它就在。
     assert!(
-        !屏上.contains("挑一份库开进去"),
+        !屏上.contains("管理你的模拟器游戏库"),
         "又被开场挡了一道：\n{屏上}",
     );
     // **工作目录是从那条路径反推出来的**：沉淀库跟着工作目录走（`工作目录/verdict/…`），
@@ -956,10 +957,72 @@ fn 摆一块盘(tag: &str) -> TempDir {
     dir
 }
 
-/// 走一趟向导：起名 → 选根 → 开始扫描。返回**按下之后**那一帧画出来的字。
+/// 跑一帧，交出这一帧的产出——要问「那一段画在哪儿」时用。
+fn 跑一帧的产出(ctx: &egui::Context, program: &mut Program) -> egui::FullOutput {
+    headless::frame(ctx, headless::input(), |ui| program.ui(ui))
+}
+
+/// 屏上**正好**写着 `那一段` 的每一处（中心点），按画出来的次序。
 ///
-/// `根名` 空着就是「不填」——那时按目录自己的名字取（验收第 5 条）。
-fn 走一趟向导(
+/// 「含着」不够用的几处要它：弹层标头那一排里的「开始扫描」与页脚上那一颗、开场上几颗按钮与
+/// 旁边句子里恰好含着同几个字的那几句。
+fn 正好画着的(output: &egui::FullOutput, 那一段: &str) -> Vec<egui::Pos2> {
+    fn 找(shape: &egui::epaint::Shape, 那一段: &str, out: &mut Vec<egui::Pos2>) {
+        match shape {
+            egui::epaint::Shape::Text(text) => {
+                if text.galley.text() == 那一段 {
+                    out.push(egui::Rect::from_min_size(text.pos, text.galley.size()).center());
+                }
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    找(one, 那一段, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        找(&clipped.shape, 那一段, &mut out);
+    }
+    out
+}
+
+/// 按一下弹层页脚上写着 `那几个字` 的那一颗，返回松开之后再画一帧画出来的字。
+///
+/// 不用 [`点一下`]：那一个找的是**头一处含着**这几个字的地方，而「开始扫描」在弹层标头那一排
+/// 里也正好有一处（向导走到第几问），标头那句说明里也含着它。页脚是弹层里**最后画**的那一段，
+/// 弹层又画在开场那一屏之上，于是按最后一处正好是这几个字的。
+fn 按页脚上的(ctx: &egui::Context, program: &mut Program, 那几个字: &str) -> String {
+    let 头一帧 = 跑一帧的产出(ctx, program);
+    let Some(位置) = 正好画着的(&头一帧, 那几个字).last().copied() else {
+        panic!(
+            "屏上没有正好写着「{那几个字}」的地方，没处按：\n{}",
+            shared::画出来的字(&头一帧)
+        );
+    };
+    let 按 = |pressed: bool| egui::Event::PointerButton {
+        pos: 位置,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let mut input = headless::input();
+    input.events.push(egui::Event::PointerMoved(位置));
+    input.events.push(按(true));
+    headless::frame(ctx, input, |ui| program.ui(ui));
+    let mut input = headless::input();
+    input.events.push(按(false));
+    headless::frame(ctx, input, |ui| program.ui(ui));
+    跑一帧(ctx, program)
+}
+
+/// 走到向导第三问：起名 → 选根 → 按「下一步」。返回**按下「下一步」之后**那一帧画出来的字。
+///
+/// `根名` 空着就是「不填」——那时按目录自己的名字取（验收第 5 条）。选根那一问上被拦下时就停在
+/// 那一问上，交回的那一帧页脚上还是「下一步」。
+fn 走到第三问(
     ctx: &egui::Context,
     program: &mut Program,
     主库原名: &str,
@@ -978,7 +1041,24 @@ fn 走一趟向导(
     if !根名.is_empty() {
         打字(ctx, program, "根名（不填", 根名);
     }
-    点一下(ctx, program, "开始扫描")
+    点一下(ctx, program, "下一步")
+}
+
+/// 走一趟向导：起名 → 选根 → 读哪儿写哪儿 → 开始扫描。返回**按下之后**那一帧画出来的字。
+///
+/// 选根那一问上被拦下时没有第三问可走，交回的是被拦下的那一帧。
+fn 走一趟向导(
+    ctx: &egui::Context,
+    program: &mut Program,
+    主库原名: &str,
+    根: &Path,
+    根名: &str,
+) -> String {
+    let 屏上 = 走到第三问(ctx, program, 主库原名, 根, 根名);
+    if 屏上.contains("下一步") {
+        return 屏上;
+    }
+    按页脚上的(ctx, program, "开始扫描")
 }
 
 #[test]
@@ -1503,4 +1583,344 @@ fn 开场与添加主库向导上画出来的字里没有星号也没有文档�
             "开场或向导上画出了「{不该有}」：\n{屏上}",
         );
     }
+}
+
+// ——— 照设计稿排的开场与向导（票 `gui-looks-like-the-design/05`）———
+//
+// 断的仍是这一帧**画出来的字**与它们**画在哪儿**；间距、颜色、圆角归截图门（`tests/snapshot.rs`）。
+
+#[test]
+fn 开场左边讲清这个工具做什么外加三条承诺_右边是工作目录() {
+    // 设计稿开场那一屏：左边一句话讲清工具做什么、三条承诺；右边是工作目录与主库那一栏。
+    let 工作目录 = temp_dir("gui-program-开场三条承诺");
+    let (_记忆, 记的) = 记在临时处("gui-program-开场三条承诺-记忆");
+    let mut program = 开场(工作目录.path(), 记的);
+    let ctx = headless::context();
+    跑一帧(&ctx, &mut program);
+    let 产出 = 跑一帧的产出(&ctx, &mut program);
+    let 屏上 = shared::画出来的字(&产出);
+
+    for 该有 in [
+        "管理你的模拟器游戏库",
+        "只读访问 ROM",
+        "扫描、识别和导出都不会修改、移动或重命名任何 ROM 文件",
+        "默认离线运行",
+        "识别和刮削优先使用本地数据源，不产生网络请求",
+        "不确定的结果由你确认",
+        "无法自动确定的进入待确认队列",
+    ] {
+        assert!(屏上.contains(该有), "开场上没有「{该有}」：\n{屏上}");
+    }
+    let (Some(讲清的), Some(工作目录那一栏)) = (
+        正好画着的(&产出, "管理你的模拟器游戏库").first().copied(),
+        正好画着的(&产出, "工作目录").first().copied(),
+    ) else {
+        panic!("开场上找不着那句大标题或工作目录那一栏：\n{屏上}");
+    };
+    assert!(
+        讲清的.x < 工作目录那一栏.x,
+        "大标题该在左、工作目录那一栏该在右：{讲清的:?} 对 {工作目录那一栏:?}",
+    );
+    assert!(
+        工作目录那一栏.x > headless::VIEWPORT[0] / 2.0,
+        "工作目录那一栏不在右半边：{工作目录那一栏:?}",
+    );
+}
+
+#[test]
+fn 空工作目录上右边只有一个主要操作_添加主库() {
+    let 工作目录 = temp_dir("gui-program-开场空的只有一个主要操作");
+    let (_记忆, 记的) = 记在临时处("gui-program-开场空的只有一个主要操作-记忆");
+    let mut program = 开场(工作目录.path(), 记的);
+    let ctx = headless::context();
+    跑一帧(&ctx, &mut program);
+    let 产出 = 跑一帧的产出(&ctx, &mut program);
+    let 屏上 = shared::画出来的字(&产出);
+
+    let 那几颗 = 正好画着的(&产出, "添加主库");
+    assert_eq!(
+        那几颗.len(),
+        1,
+        "空工作目录上摆着的「添加主库」不是正好一颗：\n{屏上}",
+    );
+    let Some(那一句) = 正好画着的(&产出, "还没有库，添加一个主库开始")
+        .first()
+        .copied()
+    else {
+        panic!("空工作目录上没有那句空态：\n{屏上}");
+    };
+    assert!(
+        那一句.x > headless::VIEWPORT[0] / 2.0,
+        "那句空态不在右边那一栏里：{那一句:?}",
+    );
+    assert!(
+        那几颗[0].y > 那一句.y,
+        "「添加主库」该摆在那句空态底下、跟着它说的下一步：{:?} 对 {那一句:?}",
+        那几颗[0],
+    );
+    assert!(
+        屏上.contains("把工作目录指向那份数据所在的位置"),
+        "没说命令行扫过的库怎么在这儿找回来：\n{屏上}",
+    );
+}
+
+#[test]
+fn 有库时右边抬头写着几份_版本对不上的那一份标着版本不兼容() {
+    let 工作目录 = temp_dir("gui-program-开场有库");
+    建一份像样的库(工作目录.path(), "开得了的库", 2, 1_700_000_000);
+    建一份像样的库(工作目录.path(), "另一份开得了的库", 1, 1_700_000_100);
+    let 旧的 = workspace::catalog_path(工作目录.path(), Slug::Named("版本对不上的库"));
+    testing::catalog_at_version(&旧的, 4);
+    let (_记忆, 记的) = 记在临时处("gui-program-开场有库-记忆");
+    let mut program = 开场(工作目录.path(), 记的);
+    let ctx = headless::context();
+    跑一帧(&ctx, &mut program);
+    let 产出 = 跑一帧的产出(&ctx, &mut program);
+    let 屏上 = shared::画出来的字(&产出);
+
+    assert!(
+        屏上.contains("主库 · 3 个"),
+        "抬头没写这个工作目录里有几份：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("版本不兼容"),
+        "版本对不上的那一份没单独标出来：\n{屏上}",
+    );
+    let Some(那一行) = 正好画着的(&产出, "开得了的库").first().copied() else {
+        panic!("那一份库的名字没画出来：\n{屏上}");
+    };
+    assert!(
+        那一行.x > headless::VIEWPORT[0] / 2.0,
+        "库那几行不在右边那一栏里：{那一行:?}",
+    );
+    assert_eq!(
+        正好画着的(&产出, "添加主库").len(),
+        1,
+        "有库时「添加主库」只在抬头那一行上摆一颗：\n{屏上}",
+    );
+}
+
+#[test]
+fn 工作目录读不动时右边不摆添加主库() {
+    // 核心库那句原话说的是「先去看它的权限，别急着再建一份」；这时候再摆一颗「添加主库」，按下去
+    // 起名那一问就会撞上同一个列不开的目录（列不开就查不了重名，挂单 `Q612`）。
+    let 工作目录 = temp_dir("gui-program-开场读不动不摆添加");
+    let 库文件 = 建一份像样的库(工作目录.path(), "列不开也在的库", 1, 1_700_000_000);
+    let 目录 = 库文件.parent().expect("有那个目录").to_path_buf();
+    let Some(_还回去) = testing::revoke(&目录, testing::Revoke::Read) else {
+        return;
+    };
+    let (_记忆, 记的) = 记在临时处("gui-program-开场读不动不摆添加-记忆");
+    let mut program = 开场(工作目录.path(), 记的);
+    let ctx = headless::context();
+    跑一帧(&ctx, &mut program);
+    let 产出 = 跑一帧的产出(&ctx, &mut program);
+    let 屏上 = shared::画出来的字(&产出);
+
+    assert!(屏上.contains("读不动"), "前提：屏上说了读不动：\n{屏上}");
+    assert!(
+        正好画着的(&产出, "添加主库").is_empty(),
+        "工作目录读不动，屏上却摆着「添加主库」：\n{屏上}",
+    );
+}
+
+#[test]
+fn 走向导时开场那一屏照常画在遮罩底下_底下那一行点不动() {
+    // 挂单 `Q667`：从前走向导时那张表与换目录那一行收起来，弹层底下只剩抬头。弹层的遮罩本来就挡着
+    // 点击，收起来那两条理由（在认领新的与开那一份之间犹豫、走到一半换了目录）它已经替着挡了。
+    let 工作目录 = temp_dir("gui-program-向导盖在开场上");
+    建一份像样的库(工作目录.path(), "底下那一份库", 3, 1_700_000_000);
+    let (_记忆, 记的) = 记在临时处("gui-program-向导盖在开场上-记忆");
+    let mut program = 开场(工作目录.path(), 记的);
+    let ctx = headless::context();
+
+    点一下(&ctx, &mut program, "添加主库");
+    let 屏上 = 跑一帧(&ctx, &mut program);
+    assert!(
+        屏上.contains("给这个主库起个名字"),
+        "前提：向导开着：\n{屏上}"
+    );
+    for 该有 in ["底下那一份库", "3 个变体", "换一个工作目录：把路径贴在这儿"]
+    {
+        assert!(
+            屏上.contains(该有),
+            "走向导时开场那一屏收起了「{该有}」：\n{屏上}",
+        );
+    }
+
+    let 屏上 = 点一下(&ctx, &mut program, "打开");
+    assert_eq!(
+        program.window_title(),
+        "romcat — 开场",
+        "遮罩底下那一行点得动：向导开着就开进了一份库",
+    );
+    assert!(
+        屏上.contains("给这个主库起个名字"),
+        "点了遮罩底下那一行，向导没了：\n{屏上}",
+    );
+}
+
+#[test]
+fn 向导起名当场就说收不收_不必先按下一步() {
+    // 设计稿「名称当场校验」：打完字就说，不等按「下一步」。问的仍是核心库建库入口那一处
+    // （`Catalog::refuse_create`），**问一遍一个字节都不写**。
+    let 工作目录 = temp_dir("gui-program-起名当场校验");
+    建一份像样的库(工作目录.path(), "已经在用的名字", 1, 1_700_000_000);
+    // 从开场把这个目录列过一遍之后记起：比的是「起名那一问问过几遍」多没多东西，不算开场列库那一下。
+    let 原样 = {
+        let (_记忆, 记的) = 记在临时处("gui-program-起名当场校验-记忆列库");
+        let mut program = 开场(工作目录.path(), 记的);
+        跑一帧(&headless::context(), &mut program);
+        底下有什么(工作目录.path())
+    };
+
+    // 一、撞上这个工作目录里已经在用的名字。
+    {
+        let (_记忆, 记的) = 记在临时处("gui-program-起名当场校验-记忆甲");
+        let mut program = 开场(工作目录.path(), 记的);
+        let ctx = headless::context();
+        点一下(&ctx, &mut program, "添加主库");
+        打字(&ctx, &mut program, "主库原名，例如", "已经在用的名字");
+        let 屏上 = 跑一帧(&ctx, &mut program);
+        let 那份 = workspace::catalog_path(工作目录.path(), Slug::Named("已经在用的名字"));
+        assert!(
+            屏上.contains("已经在了") && 屏上.contains(&romcat_core::path::display(&那份)),
+            "打完一个撞了的名字，没按下一步就不说：\n{屏上}",
+        );
+        assert!(
+            屏上.contains("给这个主库起个名字") && !屏上.contains("选第一个根"),
+            "没按下一步就离开了起名那一问：\n{屏上}",
+        );
+    }
+
+    // 二、收得下的名字：当场说收得下，并写清那份库会建在哪儿。
+    {
+        let (_记忆, 记的) = 记在临时处("gui-program-起名当场校验-记忆乙");
+        let mut program = 开场(工作目录.path(), 记的);
+        let ctx = headless::context();
+        点一下(&ctx, &mut program, "添加主库");
+        打字(&ctx, &mut program, "主库原名，例如", "新起的名字");
+        let 屏上 = 跑一帧(&ctx, &mut program);
+        assert!(
+            屏上.contains("名称可用"),
+            "打完一个收得下的名字没当场说：\n{屏上}"
+        );
+        let 那份 = workspace::catalog_path(工作目录.path(), Slug::Named("新起的名字"));
+        assert!(
+            屏上.contains(&romcat_core::path::display(&那份)),
+            "没写清这份库会建在哪儿：\n{屏上}",
+        );
+        assert!(
+            屏上.contains("给这个主库起个名字") && !屏上.contains("选第一个根"),
+            "没按下一步就离开了起名那一问：\n{屏上}",
+        );
+    }
+
+    assert_eq!(
+        底下有什么(工作目录.path()),
+        原样,
+        "起名那一问当场问过几遍，工作目录里却多出了东西",
+    );
+}
+
+#[test]
+fn 向导选根那一问当场说这个目录收不收_弹不出选择窗口时的退路常驻在框底下() {
+    let 工作目录 = temp_dir("gui-program-选根当场校验");
+    let 手滑 = 工作目录.path().join("roms");
+    std::fs::create_dir_all(&手滑).expect("建得出目录");
+    let 原样 = 底下有什么(工作目录.path());
+    let (_记忆, 记的) = 记在临时处("gui-program-选根当场校验-记忆");
+    let mut program = 开场(工作目录.path(), 记的);
+    let ctx = headless::context();
+
+    点一下(&ctx, &mut program, "添加主库");
+    打字(&ctx, &mut program, "主库原名，例如", "我的主库");
+    let 屏上 = 点一下(&ctx, &mut program, "下一步");
+    // 挂单 `Q695`：退路不靠悬停——指针不在「选择…」上，那句话也在框底下。
+    assert!(
+        屏上.contains("弹不出选择窗口时（例如远程会话）"),
+        "选根那一问上，弹不出选择窗口时的退路不在屏上：\n{屏上}",
+    );
+
+    打字(
+        &ctx,
+        &mut program,
+        "那块盘上的目录",
+        &romcat_core::path::display(&手滑),
+    );
+    let 屏上 = 跑一帧(&ctx, &mut program);
+    // 说的是加根那一处的原话（`AddRootError::Workspace`），与按下去之后拦下时说的是同一句。
+    assert!(
+        屏上.contains("主库只读") && 屏上.contains("与工作目录"),
+        "填了一个圈进工作目录的目录，没按下一步就不说：\n{屏上}",
+    );
+    assert!(
+        屏上.contains("选第一个根") && 屏上.contains("下一步"),
+        "没按下一步就离开了选根那一问：\n{屏上}",
+    );
+    assert_eq!(
+        底下有什么(工作目录.path()),
+        原样,
+        "选根那一问当场问过一遍，工作目录里却多出了东西",
+    );
+}
+
+#[test]
+fn 向导第三问写清扫描读哪儿写哪儿_走到这一问工作目录里还一个文件都没有() {
+    // 设计稿第三步：主库、根、读取（只读）、写入。**写哪儿**说的是核心库折出来的那个文件
+    // （`workspace::catalog_path`），与按下「开始扫描」那一下建出来的是同一个。
+    let 工作目录 = temp_dir("gui-program-第三问读哪儿写哪儿");
+    let 盘 = 摆一块盘("gui-program-第三问读哪儿写哪儿-盘");
+    let (_记忆, 记的) = 记在临时处("gui-program-第三问读哪儿写哪儿-记忆");
+    let mut program = 开场(工作目录.path(), 记的);
+    let ctx = headless::context();
+
+    let 屏上 = 走到第三问(&ctx, &mut program, "我的主库", 盘.path(), "甲盘");
+    assert!(!屏上.contains("下一步"), "没走到第三问：\n{屏上}");
+    let 产出 = 跑一帧的产出(&ctx, &mut program);
+    for 那一栏 in ["读取", "写入"] {
+        assert!(
+            !正好画着的(&产出, 那一栏).is_empty(),
+            "第三问上没有「{那一栏}」那一栏：\n{屏上}",
+        );
+    }
+    let 库文件 = workspace::catalog_path(工作目录.path(), Slug::Named("我的主库"));
+    for 该有 in [
+        romcat_core::path::display(盘.path()),
+        romcat_core::path::display(&库文件),
+        "甲盘".to_string(),
+    ] {
+        assert!(屏上.contains(&该有), "第三问上没写「{该有}」：\n{屏上}");
+    }
+    assert!(
+        底下有什么(工作目录.path()).is_empty(),
+        "还没按「开始扫描」，工作目录里却多出了 {:?}",
+        底下有什么(工作目录.path()),
+    );
+
+    点一下(&ctx, &mut program, "算了");
+    assert!(
+        底下有什么(工作目录.path()).is_empty(),
+        "在第三问上按了「算了」，工作目录里却多出了 {:?}",
+        底下有什么(工作目录.path()),
+    );
+}
+
+#[test]
+fn 向导标头上排着三问_命名_选择目录_开始扫描() {
+    let 工作目录 = temp_dir("gui-program-向导标头三问");
+    let (_记忆, 记的) = 记在临时处("gui-program-向导标头三问-记忆");
+    let mut program = 开场(工作目录.path(), 记的);
+    let ctx = headless::context();
+
+    点一下(&ctx, &mut program, "添加主库");
+    let 产出 = 跑一帧的产出(&ctx, &mut program);
+    let 屏上 = shared::画出来的字(&产出);
+    for 那一问 in ["命名", "选择目录", "开始扫描"] {
+        assert!(
+            !正好画着的(&产出, 那一问).is_empty(),
+            "向导标头上没有「{那一问}」：\n{屏上}",
+        );
+    }
+    assert!(屏上.contains("共三步"), "向导标头没说一共几步：\n{屏上}");
 }
