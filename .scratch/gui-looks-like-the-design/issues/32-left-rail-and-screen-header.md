@@ -48,8 +48,9 @@
       （左程序、右设计稿任务屏清空历史后截的），入口竖着的位置差 0.5–1.5 点。开场 `opening/catalogs-*`（标签那几行）与 `opening/empty-*`（大号「添加主库」14 号）
       4 张跟着共用字号一起重批，同一个提交入库。
 
-**门禁**（2026-09-14，分支 `q5/gl-32-left-rail-and-screen-header`，`943ff25`，`cargo xtask gate -j 3 --test-threads 3 --keep-going`）：
-fmt、glossary（扫 `crates/` 下 12 份 `.rs` 里新写的 2,247 行，没撞上）、check、clippy、test、doc 六步全绿，`EXIT=0`；test 那一步 76 个测试目标、2,058 条通过、0 失败、2 条 ignored；
-截图门 11 条对着工作树里的候选图通过（候选图未提交）。日志 `/Users/nicoer/dev/game-wt/logs/slot-1-gl32-shots3-gate.log`。
+**门禁**（2026-09-14，分支 `q5/gl-32-left-rail-and-screen-header`，最新 HEAD `845ddd5`——基线入库、勾票之后，`cargo xtask gate -j 3 --test-threads 3 --keep-going`）：
+fmt、glossary（扫 `crates/` 下 12 份 `.rs` 里新写的 2,270 行，没撞上）、check、clippy、test、doc 六步全绿，`EXIT=0`；test 那一步 76 个测试目标、2,059 条通过、0 失败、2 条 ignored；
+截图门 11 条对着入库的基线通过。日志 `/Users/nicoer/dev/game-wt/logs/slot-1-gl32-gate-final.log`。
+（之前在 `943ff25` 上那一趟也六步全绿、2,058 条通过；之后 `333eb59` 换截图垫底、`98f58ca` 窄条按行高撑高各动了代码，所以在最新 HEAD 上重跑。）
 审查两轴各一趟（`/code-review`）：收了屏头折行、没扫过的库画「—」、`Space` 文档、重复 helper；`program.rs` 大盘赛挂钟没修（挂单 `Q864`）。
 挂单 `Q861`–`Q868`。
