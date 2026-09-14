@@ -260,6 +260,11 @@ pub struct Chosen {
     pub language: Language,
     /// 它是哪一种叫法；集合是空的、退回作品名时是 `None`。
     pub kind: Option<TitleKind>,
+    /// 它是哪个源给的；集合是空的、退回作品名时是 `None`。
+    ///
+    /// 换一份优先级表之前说「显示标题由谁的什么改为谁的什么」要它
+    /// （[`scrape::priority::shifts`](crate::scrape::priority::shifts)）。
+    pub source: Option<String>,
     /// 它的置信度；退回作品名时是 `None`。
     pub confidence: Option<Confidence>,
     /// 中文译名走的是世代裂缝的哪一侧。
@@ -334,6 +339,7 @@ pub fn choose(set: &TitleSet, priorities: &Priorities) -> Chosen {
             display: set.work.clone(),
             language: language_of(&set.work, None),
             kind: None,
+            source: None,
             confidence: None,
             seam: None,
             evidence: "标题集合是空的，退回作品名".to_string(),
@@ -369,6 +375,7 @@ pub fn choose(set: &TitleSet, priorities: &Priorities) -> Chosen {
         display: best.value.clone(),
         language: best.language,
         kind: Some(best.kind),
+        source: Some(best.source.clone()),
         confidence: Some(best.confidence),
         seam: best.seam,
         evidence: best.evidence.clone(),

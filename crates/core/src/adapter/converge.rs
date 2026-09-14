@@ -45,11 +45,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::catalog::identify::Standalone;
+use crate::catalog::scrape::ScrapedValue;
 use crate::catalog::{Catalog, CatalogError, ReleaseRow, VariantRow};
 use crate::classify;
 use crate::dat::chinese::ChineseMark;
 use crate::path::file_name_of_key;
-use crate::scrape::priority::Priorities;
+use crate::scrape::priority::{Priorities, Said};
 use crate::scrape::{AnchorKind, Field};
 use crate::shape::Role;
 use crate::title::{self, Chosen, SortFrom};
@@ -273,13 +274,163 @@ pub fn run(
 ///
 /// # Errors
 /// 读中立库失败时返回错误。
-#[allow(clippy::too_many_lines)]
 pub fn run_within(
     catalog: &Catalog,
     priorities: &Priorities,
     adapter: &dyn Adapter,
     only: Option<&BTreeSet<String>>,
 ) -> Result<Converged, CatalogError> {
+    let layout = layout(catalog, only)?;
+    // 票 15 挑出来的**显示标题**与**排序标题**。这一层一个字都不改它。
+    let chosen = chosen_titles(catalog, priorities)?;
+
+    let mut out = Converged {
+        variants: layout.variants,
+        extra_content_members: catalog
+            .member_role_counts()?
+            .get(Role::ExtraContent.code())
+            .copied()
+            .unwrap_or(0),
+        ..Converged::default()
+    };
+    for (why, key) in &layout.excluded {
+        out.count_excluded(*why, key);
+    }
+
+    for (platform, planned) in &layout.platforms {
+        // 这个平台的内容住在哪个**平台目录**下。**从键上数出来，不从平台清单上猜**：
+        // 清单里一个平台可以映射好几个目录别名（`FC` 收 `fc`/`nes`/`famicom`），
+        // 而这里要的是「这份库里实际用的是哪一个」。散在多个目录里就交白卷——
+        // 那时说不出唯一的那一个，路径整条原样写出去。
+        //
+        // 真库上 22 个平台各自都只用一个目录，而其中 **12 个的目录名与平台名对不上**
+        // （`WII` 的目录叫 `Wii`、`PS1` 的叫 `ps`、`WS` 的叫 `wsc`）。ES 家族的
+        // `es_systems.xml` 拿它当 `<name>`，拿平台名顶上去的话，那 12 个在 Android 与
+        // Linux 上（大小写敏感）一个都指不着。
+        let dirs: BTreeSet<&str> = planned
+            .iter()
+            .flat_map(|one| &one.members)
+            .filter_map(|variant| crate::path::platform_of_key(&variant.key))
+            .collect();
+        let directory = match dirs.len() {
+            1 => dirs.iter().next().map(|dir| (*dir).to_string()),
+            _ => None,
+        };
+        // **不给 `shortname`。** Pegasus 拿它去对第三方资源目录（Skraper、ES 的
+        // system 名），而那套名字与我们的平台名不是一回事——FC 在那边叫 `nes`。
+        // 按平台名折一个 `fc` 出来，等于让前端去一个不存在的目录里找封面；
+        // 更糟的是维护者自己写对了的那一行会被这个猜测覆盖掉。**猜不准就不写。**
+        let mut entries = vec![Entry::new(Body::Collection(Collection {
+            name: platform.clone(),
+            directory: directory.clone(),
+            ..Collection::default()
+        }))];
+        for one in planned {
+            *out.preferred.entry(one.why.label()).or_insert(0) += 1;
+            out.entries += 1;
+            out.exported_variants += one.members.len() as u64;
+            if one.members.len() > 1 {
+                out.converged_entries += 1;
+            }
+            match one.anchor {
+                Anchor::Work(_) => out.work_entries += 1,
+                Anchor::Loose(_) => out.loose_entries += 1,
+            }
+            entries.push(Entry::new(Body::Game(build_game(
+                &one.anchor,
+                &one.members,
+                platform,
+                layout.values(one),
+                layout.head_values(one),
+                chosen.get(one.anchor.name()),
+                priorities,
+                one.why,
+            ))));
+        }
+        out.files.push(CollectionFile {
+            // **落点按平台目录，不按平台名。** ES-DE 的 `es_systems.xml` 里
+            // `<name>` 就是那个目录名（`<path>%ROMPATH%/<name>`），gamelist 摆在
+            // `gamelists/<name>/` 下。数不出唯一目录时退回平台名。
+            file_name: adapter.metadata_path(directory.as_deref().unwrap_or(platform)),
+            collection: platform.clone(),
+            doc: Document { entries },
+        });
+    }
+
+    Ok(out)
+}
+
+/// **收敛之前摆齐的料**：哪几个变体做得成条目、按「平台 × 作品（或还没认出作品的变体）」
+/// 分好组、组里首选变体排在最前，外加刮削那一侧按锚点攒好的值。
+///
+/// **导出与「换一份优先级表之前哪几处显示值会变」共用这一份**（[`run_within`]、
+/// [`scrape::priority::shifts`](crate::scrape::priority::shifts)）：哪些变体不导出、条目挂在
+/// 作品上还是变体上、首选变体是谁、条目读哪几条值——两边各拼一次的话，「那一处算不算
+/// 显示值」迟早长出两个答案（ADR-0024）。
+pub(crate) struct Layout {
+    /// 库里（或 `only` 圈出来的那批里）一共几个变体，连不导出的在内。
+    pub(crate) variants: u64,
+    /// 不导出的那些：理由与变体的键，照走到的次序。
+    pub(crate) excluded: Vec<(NotAnEntry, String)>,
+    /// 平台 → 那个平台上的条目，照条目挂的地方排（作品在前，没认出作品的变体在后）。
+    pub(crate) platforms: BTreeMap<String, Vec<Planned>>,
+    /// 作品锚点上的刮削值：作品名 → 那几条。
+    by_work: BTreeMap<String, Vec<ScrapedValue>>,
+    /// 变体锚点上的刮削值：变体的键 → 那几条。
+    by_variant: BTreeMap<String, Vec<ScrapedValue>>,
+}
+
+/// 摆好的一个条目。
+pub(crate) struct Planned {
+    /// 挂在哪儿。
+    pub(crate) anchor: Anchor,
+    /// 名下的变体，**首选变体排在最前**。
+    pub(crate) members: Vec<VariantRow>,
+    /// 首选变体凭什么当上的。
+    pub(crate) why: Preference,
+}
+
+impl Layout {
+    /// 这个条目读哪几条值：认出了作品的读作品上的，没认出的读那个变体自己的。
+    pub(crate) fn values(&self, planned: &Planned) -> &[ScrapedValue] {
+        match &planned.anchor {
+            Anchor::Work(work) => self.by_work.get(work),
+            Anchor::Loose(key) => self.by_variant.get(key),
+        }
+        .map_or(&[], Vec::as_slice)
+    }
+
+    /// 首选变体自己身上的值。**汉化组**从这儿取：它挂在变体上（ADR-0012）。
+    pub(crate) fn head_values(&self, planned: &Planned) -> &[ScrapedValue] {
+        planned
+            .members
+            .first()
+            .and_then(|head| self.by_variant.get(&head.key))
+            .map_or(&[], Vec::as_slice)
+    }
+}
+
+/// 每部作品的**显示标题**与**排序标题**（票 15 的 [`title::choose`]），键是作品名。
+///
+/// 与 [`Layout`] 一样，导出与「换一份优先级表之前哪几处显示值会变」共用。
+pub(crate) fn chosen_titles(
+    catalog: &Catalog,
+    priorities: &Priorities,
+) -> Result<BTreeMap<String, Chosen>, CatalogError> {
+    Ok(title::work_titles(catalog)?
+        .into_iter()
+        .map(|set| {
+            let picked = title::choose(&set, priorities);
+            (set.work, picked)
+        })
+        .collect())
+}
+
+/// 摆料：见 [`Layout`]。`only` 给了就只摆这几个变体。
+pub(crate) fn layout(
+    catalog: &Catalog,
+    only: Option<&BTreeSet<String>>,
+) -> Result<Layout, CatalogError> {
     let variants: Vec<VariantRow> = match only {
         Some(only) => catalog
             .variants()?
@@ -320,28 +471,19 @@ pub fn run_within(
         bucket.entry(subject.to_string()).or_default().push(value);
     })?;
 
-    // 票 15 挑出来的**显示标题**与**排序标题**。这一层一个字都不改它。
-    let mut chosen: BTreeMap<String, Chosen> = BTreeMap::new();
-    for set in title::work_titles(catalog)? {
-        let picked = title::choose(&set, priorities);
-        chosen.insert(set.work.clone(), picked);
-    }
-
-    let mut out = Converged {
+    let mut out = Layout {
         variants: variants.len() as u64,
-        extra_content_members: catalog
-            .member_role_counts()?
-            .get(Role::ExtraContent.code())
-            .copied()
-            .unwrap_or(0),
-        ..Converged::default()
+        excluded: Vec::new(),
+        platforms: BTreeMap::new(),
+        by_work,
+        by_variant,
     };
 
     // 平台 → 作品名（或变体的键）→ 那几个变体。
     let mut grouped: BTreeMap<String, BTreeMap<Anchor, Vec<VariantRow>>> = BTreeMap::new();
     for variant in variants {
         if let Some(why) = excluded(&variant, &abnormal, &not_standalone) {
-            out.count_excluded(why, &variant.key);
+            out.excluded.push((why, variant.key));
             continue;
         }
         let platform = variant
@@ -361,78 +503,26 @@ pub fn run_within(
     }
 
     for (platform, anchors) in grouped {
-        // 这个平台的内容住在哪个**平台目录**下。**从键上数出来，不从平台清单上猜**：
-        // 清单里一个平台可以映射好几个目录别名（`FC` 收 `fc`/`nes`/`famicom`），
-        // 而这里要的是「这份库里实际用的是哪一个」。散在多个目录里就交白卷——
-        // 那时说不出唯一的那一个，路径整条原样写出去。
-        //
-        // 真库上 22 个平台各自都只用一个目录，而其中 **12 个的目录名与平台名对不上**
-        // （`WII` 的目录叫 `Wii`、`PS1` 的叫 `ps`、`WS` 的叫 `wsc`）。ES 家族的
-        // `es_systems.xml` 拿它当 `<name>`，拿平台名顶上去的话，那 12 个在 Android 与
-        // Linux 上（大小写敏感）一个都指不着。
-        let dirs: BTreeSet<&str> = anchors
-            .values()
-            .flatten()
-            .filter_map(|variant| crate::path::platform_of_key(&variant.key))
+        let planned = anchors
+            .into_iter()
+            .map(|(anchor, mut members)| {
+                // **首选变体排在最前。** 同一档之内按键排，同一份库跑两次结果必须一样。
+                let picked = overrides.get(&(anchor.name().to_string(), platform.clone()));
+                members.sort_by(|a, b| {
+                    let rank = |v: &VariantRow| {
+                        (preference_of(v, &marks, &releases, picked), v.key.clone())
+                    };
+                    rank(a).cmp(&rank(b))
+                });
+                let why = preference_of(&members[0], &marks, &releases, picked);
+                Planned {
+                    anchor,
+                    members,
+                    why,
+                }
+            })
             .collect();
-        let directory = match dirs.len() {
-            1 => dirs.iter().next().map(|dir| (*dir).to_string()),
-            _ => None,
-        };
-        // **不给 `shortname`。** Pegasus 拿它去对第三方资源目录（Skraper、ES 的
-        // system 名），而那套名字与我们的平台名不是一回事——FC 在那边叫 `nes`。
-        // 按平台名折一个 `fc` 出来，等于让前端去一个不存在的目录里找封面；
-        // 更糟的是维护者自己写对了的那一行会被这个猜测覆盖掉。**猜不准就不写。**
-        let mut entries = vec![Entry::new(Body::Collection(Collection {
-            name: platform.clone(),
-            directory: directory.clone(),
-            ..Collection::default()
-        }))];
-        for (anchor, mut members) in anchors {
-            // **首选变体排在最前。** 同一档之内按键排，同一份库跑两次结果必须一样。
-            let picked = overrides.get(&(anchor.name().to_string(), platform.clone()));
-            members.sort_by(|a, b| {
-                let rank =
-                    |v: &VariantRow| (preference_of(v, &marks, &releases, picked), v.key.clone());
-                rank(a).cmp(&rank(b))
-            });
-            let head = &members[0];
-            let why = preference_of(head, &marks, &releases, picked);
-            *out.preferred.entry(why.label()).or_insert(0) += 1;
-            out.entries += 1;
-            out.exported_variants += members.len() as u64;
-            if members.len() > 1 {
-                out.converged_entries += 1;
-            }
-            let values = match &anchor {
-                Anchor::Work(work) => {
-                    out.work_entries += 1;
-                    by_work.get(work)
-                }
-                Anchor::Loose(key) => {
-                    out.loose_entries += 1;
-                    by_variant.get(key)
-                }
-            };
-            entries.push(Entry::new(Body::Game(build_game(
-                &anchor,
-                &members,
-                &platform,
-                values.map(Vec::as_slice).unwrap_or_default(),
-                by_variant.get(&head.key).map(Vec::as_slice).unwrap_or(&[]),
-                chosen.get(anchor.name()),
-                priorities,
-                why,
-            ))));
-        }
-        out.files.push(CollectionFile {
-            // **落点按平台目录，不按平台名。** ES-DE 的 `es_systems.xml` 里
-            // `<name>` 就是那个目录名（`<path>%ROMPATH%/<name>`），gamelist 摆在
-            // `gamelists/<name>/` 下。数不出唯一目录时退回平台名。
-            file_name: adapter.metadata_path(directory.as_deref().unwrap_or(&platform)),
-            collection: platform,
-            doc: Document { entries },
-        });
+        out.platforms.insert(platform, planned);
     }
 
     Ok(out)
@@ -440,13 +530,16 @@ pub fn run_within(
 
 /// 一个条目挂在哪儿：一个**作品**，还是一个还没认出作品的**变体**。
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum Anchor {
+pub(crate) enum Anchor {
+    /// 作品名。
     Work(String),
+    /// 还没认出作品的那个变体的键。
     Loose(String),
 }
 
 impl Anchor {
-    fn name(&self) -> &str {
+    /// 作品名，或变体的键。
+    pub(crate) fn name(&self) -> &str {
         match self {
             Self::Work(name) | Self::Loose(name) => name,
         }
@@ -544,6 +637,52 @@ fn has_chinese_language(languages: &str) -> bool {
     })
 }
 
+/// 一个条目上一个字段**写出去的是什么**：谁说的、说的哪几句。这个字段写出去是空的——
+/// 或者退回兜底（标题退回文件名，那不是哪个源说的）——时是 `None`。
+///
+/// **「一个条目的这个字段显示哪个值」只有这一处**：折条目（`build_game`）照它写，换一份
+/// 优先级表之前算「哪几处显示值会变」照它比
+/// （[`scrape::priority::shifts`](crate::scrape::priority::shifts)，ADR-0024）。
+///
+/// - **标题**：认出了作品的，是标题集合挑出来的那一个（`chosen`，票 15）；没认出作品的，
+///   照这张表挑一条。
+/// - **汉化组**：挂在变体上（ADR-0012），从首选变体身上取（`head_values`）。
+/// - **开发商、发行商、类型**：集合字段，胜出那个源的全部值（[`Priorities::pick_all`]）。
+/// - **年份、简介**：挑一条（[`Priorities::pick`]）。
+pub(crate) fn shown(
+    field: Field,
+    platform: &str,
+    values: &[ScrapedValue],
+    head_values: &[ScrapedValue],
+    chosen: Option<&Chosen>,
+    priorities: &Priorities,
+) -> Option<Said> {
+    let one = |value: &ScrapedValue| Said {
+        source: Some(value.source.clone()),
+        values: vec![value.value.clone()],
+    };
+    let label = field.label();
+    match field {
+        Field::Title => match chosen {
+            Some(chosen) => Some(Said {
+                source: chosen.source.clone(),
+                values: vec![chosen.display.clone()],
+            }),
+            None => priorities.pick(label, Some(platform), values).map(one),
+        },
+        Field::TranslationGroup => priorities.pick(label, Some(platform), head_values).map(one),
+        Field::Developer | Field::Publisher | Field::Genre => {
+            let all = priorities.pick_all(label, Some(platform), values);
+            let source = all.first()?.source.clone();
+            Some(Said {
+                source: Some(source),
+                values: all.into_iter().map(|value| value.value.clone()).collect(),
+            })
+        }
+        Field::Year | Field::Description => priorities.pick(label, Some(platform), values).map(one),
+    }
+}
+
 /// 折出一个条目。
 #[allow(clippy::too_many_arguments)]
 fn build_game(
@@ -557,15 +696,10 @@ fn build_game(
     why: Preference,
 ) -> Game {
     let head = &members[0];
-    let merged = priorities.merge(Some(platform), values);
-    let pick = |field: Field| merged.get(field.label()).map(|value| value.value.clone());
-    let pick_all = |field: Field| {
-        priorities
-            .pick_all(field.label(), Some(platform), values)
-            .into_iter()
-            .map(|value| value.value.clone())
-            .collect::<Vec<_>>()
-    };
+    // **每个字段写出去的是什么只问 [`shown`]**：换一份优先级表之前算「哪几处显示值会变」
+    // 问的也是它（ADR-0024）。
+    let written = |field: Field| shown(field, platform, values, head_values, chosen, priorities);
+    let one = |field: Field| written(field).and_then(|said| said.values.into_iter().next());
 
     // **显示标题**：作品级的由票 15 挑（中文优先、官中的官方译名优先）；
     // 还没认出作品的那些只有一条路——刮削收上来的变体级标题，兜底是文件名。
@@ -580,10 +714,8 @@ fn build_game(
             (chosen.sort_from != SortFrom::None).then(|| chosen.sort.clone()),
         ),
         None => {
-            let display = priorities
-                .pick(Field::Title.label(), Some(platform), values)
-                .map(|value| value.value.clone())
-                .unwrap_or_else(|| file_name_of_key(anchor.name()).to_string());
+            let display =
+                one(Field::Title).unwrap_or_else(|| file_name_of_key(anchor.name()).to_string());
             let sort = if title::sortable(&display) {
                 Some(title::sort_title(&display))
             } else {
@@ -618,10 +750,8 @@ fn build_game(
         _ => {}
     }
     // **汉化组挂在变体上**（汉化版是变体不是发行版，ADR-0012），所以从首选变体那一侧取。
-    if let Some(group) =
-        priorities.pick(Field::TranslationGroup.label(), Some(platform), head_values)
-    {
-        extra.insert(GROUP_KEY.to_string(), vec![group.value.clone()]);
+    if let Some(group) = one(Field::TranslationGroup) {
+        extra.insert(GROUP_KEY.to_string(), vec![group]);
     }
 
     if let Anchor::Work(work) = anchor {
@@ -651,14 +781,20 @@ fn build_game(
         // **类型同一条路**：维护者的 `genres:` 底下写了两行，导出只读得出一条的话，
         // 基线合并那一步会拿这一条去比他那两条、判成「变了」，再把整段续行重写成一行
         // ——与开发商那一处是同一个错，所以是同一个修法。
-        developers: pick_all(Field::Developer),
-        publishers: pick_all(Field::Publisher),
-        genres: pick_all(Field::Genre),
+        developers: written(Field::Developer)
+            .map(|said| said.values)
+            .unwrap_or_default(),
+        publishers: written(Field::Publisher)
+            .map(|said| said.values)
+            .unwrap_or_default(),
+        genres: written(Field::Genre)
+            .map(|said| said.values)
+            .unwrap_or_default(),
         tags: Vec::new(),
         players: None,
         summary: None,
-        description: pick(Field::Description),
-        release: pick(Field::Year).and_then(|year| year.parse().ok().map(ReleaseDate::year_only)),
+        description: one(Field::Description),
+        release: one(Field::Year).and_then(|year| year.parse().ok().map(ReleaseDate::year_only)),
         rating: None,
         launch: None,
         workdir: None,
