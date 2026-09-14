@@ -170,6 +170,87 @@ else:
     if shown != L["platforms-visible"]:
         problems.append(f"platforms-visible: 设计稿先摆 {shown} 个，令牌是 {L['platforms-visible']}")
 
+# 两档半号字号（设计稿 .scrhead .sub 的 12.5px、.railfoot .st 的 11.5px）。
+for selector, key in [(r"\.scrhead \.sub\{", "size-small-plus"), (r"\.railfoot \.st\{", "size-caption-plus")]:
+    m = re.search(selector + r"[^}]*?font-size:([\d.]+)px", html)
+    if not m:
+        problems.append(f"找不到 {selector} 的 font-size")
+        continue
+    literals += 1
+    if float(m[1]) != tokens["font"][key]:
+        problems.append(f"{key}: 设计稿是 {m[1]}px，令牌是 {tokens['font'][key]}")
+
+# 屏头与屏体（设计稿 .scrhead / .scrbody）：内边距与间距。
+m = re.search(r"\.scrhead\{[^}]*?gap:(\d+)px;padding:(\d+)px (\d+)px", html)
+if not m:
+    problems.append("找不到 .scrhead 的 gap 与 padding")
+else:
+    header_padding = tokens["space"]["screen-header-padding"]
+    for got, want, key in [(m[1], tokens["space"]["screen-header-gap"], "screen-header-gap"), (m[2], header_padding[0], "screen-header-padding 上下"), (m[3], header_padding[1], "screen-header-padding 左右")]:
+        literals += 1
+        if int(got) != want:
+            problems.append(f"{key}: 设计稿是 {got}px，令牌是 {want}")
+m = re.search(r"\.scrbody\{[^}]*?padding:(\d+)px (\d+)px (\d+)px", html)
+if not m:
+    problems.append("找不到 .scrbody 的 padding")
+else:
+    for got, want, key in zip(m.groups(), tokens["space"]["screen-body-padding"], ["screen-body-padding 上", "screen-body-padding 左右", "screen-body-padding 下"]):
+        literals += 1
+        if int(got) != want:
+            problems.append(f"{key}: 设计稿是 {got}px，令牌是 {want}")
+
+# 左栏（设计稿 .rail / .libsw / .grp / .nav / .railfoot，以及收成窄条的 .main.rcol 那几条）：写的是字面值，照字面值核。
+# 每条：(正则, [(第几组, 令牌节, 令牌键, 取数组第几格或 None)])。
+def token(section, key, at):
+    value = tokens[section][key]
+    return value if at is None else value[at]
+
+
+def check_literals(entries):
+    """逐条核对设计稿里写死的字面值；交回核了几项。"""
+    checked = 0
+    for pattern, checks in entries:
+        m = re.search(pattern, html)
+        if not m:
+            problems.append(f"找不到 {pattern}")
+            continue
+        for group, section, key, at in checks:
+            checked += 1
+            want = token(section, key, at)
+            if float(m[group]) != float(want):
+                where = key if at is None else f"{key}[{at}]"
+                problems.append(f"{where}: 设计稿是 {m[group]}，令牌是 {want}")
+    return checked
+
+rail_literals = [
+    (r"\.rail\{[^}]*?padding:(\d+)px (\d+)px;gap:(\d+)px", [(1, "space", "rail-padding", 0), (2, "space", "rail-padding", 1), (3, "space", "rail-gap", None)]),
+    (r"\.main\.rcol \.rail\{padding:(\d+)px (\d+)px", [(1, "space", "rail-padding-collapsed", 0), (2, "space", "rail-padding-collapsed", 1)]),
+    (r"\.libsw\{[^}]*?gap:(\d+)px;padding:(\d+)px (\d+)px;margin-bottom:(\d+)px", [(1, "space", "rail-switch-gap", None), (2, "space", "rail-switch-padding", 0), (3, "space", "rail-switch-padding", 1), (4, "space", "rail-switch-margin", None)]),
+    (r"\.libsw \.mark\{width:(\d+)px", [(1, "layout", "rail-mark", None)]),
+    (r"\.grp\{[^}]*?padding:(\d+)px (\d+)px (\d+)px;letter-spacing:([\d.]+)em", [(1, "space", "rail-group-padding", 0), (2, "space", "rail-group-padding", 1), (3, "space", "rail-group-padding", 2), (4, "font", "group-tracking", None)]),
+    (r"\.main\.rcol \.grp\{[^}]*?margin:(\d+)px (\d+)px", [(1, "space", "rail-group-margin-collapsed", 0), (2, "space", "rail-group-margin-collapsed", 1)]),
+    (r"\.nav\{[^}]*?height:(\d+)px;padding:0 (\d+)px", [(1, "layout", "nav-height", None), (2, "space", "nav-padding", None)]),
+    (r"\.main\.rcol \.nav\{[^}]*?padding:(\d+)px 0;gap:(\d+)px", [(1, "space", "nav-padding-collapsed", None), (2, "space", "nav-gap-collapsed", None)]),
+    (r"\.main\.rcol \.nav \.badge\{[^}]*?font-size:(\d+)px", [(1, "font", "size-badge-narrow", None)]),
+    (r"\.nav \.badge\.live\{[^}]*?gap:(\d+)px", [(1, "space", "live-badge-gap", None)]),
+    (r"\.nav \.badge\.live::before\{[^}]*?width:(\d+)px", [(1, "layout", "rail-dot", None)]),
+    (r"\.railfoot\{[^}]*?gap:(\d+)px;padding-top:(\d+)px", [(1, "space", "rail-foot-gap", None), (2, "space", "rail-foot-padding", None)]),
+    (r"\.railfoot \.st\{[^}]*?padding:0 (\d+)px;[^}]*?gap:(\d+)px", [(1, "space", "rail-note-padding", None), (2, "space", "rail-note-gap", None)]),
+    (r"\.railfoot \.st::before\{[^}]*?width:(\d+)px", [(1, "layout", "rail-dot", None)]),
+]
+literals += check_literals(rail_literals)
+
+# 标签与按钮的字号（设计稿 .chip / .btn / .btn.sm / .btn.lg），以及标签的高、左右留白、圆点与字的间距。
+shared_literals = [
+    (r"\.chip\{[^}]*?gap:(\d+)px;height:(\d+)px;padding:0 (\d+)px;[^}]*?font-size:([\d.]+)px", [(1, "layout", "chip-gap", None), (2, "layout", "chip-height", None), (3, "layout", "chip-padding", None), (4, "font", "size-caption-plus", None)]),
+    (r"\.ro\{[^}]*?gap:(\d+)px;height:(\d+)px;padding:0 (\d+)px;[^}]*?font-size:(\d+)px", [(1, "layout", "ro-gap", None), (2, "layout", "ro-height", None), (3, "layout", "ro-padding", None), (4, "font", "size-small", None)]),
+    (r"\.ro::before\{[^}]*?width:(\d+)px", [(1, "layout", "chip-dot", None)]),
+    (r"\.btn\{[^}]*?font-size:([\d.]+)px", [(1, "font", "size-small-plus", None)]),
+    (r"\.btn\.sm\{[^}]*?font-size:(\d+)px", [(1, "font", "size-small", None)]),
+    (r"\.btn\.lg\{[^}]*?font-size:(\d+)px", [(1, "font", "size-button-large", None)]),
+]
+literals += check_literals(shared_literals)
+
 if problems:
     print("\n".join(problems))
     sys.exit(1)
