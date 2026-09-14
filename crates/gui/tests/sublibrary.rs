@@ -58,6 +58,21 @@ fn 画两帧(ctx: &egui::Context, 场: &mut 现场) -> String {
     out
 }
 
+/// **没开跑的那一下不许在任务历史里留一条**（票 `gui-looks-like-the-design/07`）：任务历史眼下
+/// 几条，与按下去之前数的一样。多出来的话，把多出来的那一条怎么收的场一并印出来。
+fn 历史没多一条(场: &现场, 之前: usize) {
+    assert_eq!(
+        场.app.tasks().history().len(),
+        之前,
+        "没开跑的那一下在任务历史里多了一条：{:?}",
+        场.app
+            .tasks()
+            .history()
+            .first()
+            .map(|record| record.ending.render()),
+    );
+}
+
 fn 写(path: &Path, bytes: &[u8]) {
     fs::create_dir_all(path.parent().expect("有上级目录")).expect("能建目录");
     fs::write(path, bytes).expect("能写文件");
@@ -640,6 +655,99 @@ fn 没排过差量预览就同步不了() {
     // 目标目录上一个新文件都没出现。
     let 卡上 = fs::read_dir(场.卡.path()).expect("列得开").count();
     assert_eq!(卡上, 1, "卡上除了维护者自己那份存档不该多出东西");
+}
+
+#[test]
+fn 卡不在位时按排差量预览_屏上说清插上读卡器或改目标路径_任务历史不多一条() {
+    // 票 `gui-looks-like-the-design/07`：**卡没插是按下去之前就判得出的**——盘上缺一样东西，
+    // 查一眼那个目录在不在（ADR-0005 修订段「原料还没备齐」）。排上去再在「看一眼目标」那一下
+    // 报失败的话，任务历史里就多一条压根没开跑的「失败」，人会去找哪儿坏了。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    fs::remove_dir_all(场.卡.path()).expect("删得掉");
+    let 历史几条 = 场.app.tasks().history().len();
+
+    场.排预览();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    let screen = 场.app.sublibrary();
+    let 说的 = screen.error().expect("卡不在位该说出口");
+    assert!(说的.contains("目标不在位"), "没说清为什么不行：{说的}");
+    assert!(说的.contains("插上读卡器"), "没说去哪儿办：{说的}");
+    assert!(说的.contains("目标路径"), "没说去哪儿办：{说的}");
+    assert!(
+        屏上.contains(说的),
+        "那句话没画在屏上：{说的}\n屏上：\n{屏上}"
+    );
+    assert!(screen.prepared().is_none(), "卡不在位却排出了一份差量");
+    历史没多一条(&场, 历史几条);
+}
+
+#[test]
+fn 目标路径上是一份文件时排差量预览照旧排上去_任务历史记失败() {
+    // 票 `gui-looks-like-the-design/07` 的另一半：**跑了没成照旧进历史，收场是「失败」。**
+    // 那条路径上**有东西**，按下去之前查一眼看不出缺什么；它不是目录，是「看一眼目标」那一下
+    // 真去列它才撞上的——那一趟开跑过，照实记失败、说清为什么。与上面那条分开的正是这一下。
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    let 卡路径 = 场.卡.path().to_path_buf();
+    fs::remove_dir_all(&卡路径).expect("删得掉");
+    fs::write(&卡路径, "一份文件，不是读卡器挂上来的目录").expect("写得进");
+    let 历史几条 = 场.app.tasks().history().len();
+
+    场.排预览();
+
+    assert_eq!(
+        场.app.tasks().history().len(),
+        历史几条 + 1,
+        "真跑过的那一趟没进任务历史",
+    );
+    let record = &场.app.tasks().history()[0];
+    let Ending::Failed { step, why } = &record.ending else {
+        panic!("目标列不开却把这一趟记成了「{}」", record.ending.render());
+    };
+    assert_eq!(step, "看一眼目标", "说不清停在哪一步");
+    assert!(why.contains("列不开"), "说不清为什么没成：{why}");
+    let 说的 = 场.app.sublibrary().error().expect("失败要说出来");
+    assert!(说的.contains(&record.ending.render()), "{说的}");
+    assert!(
+        场.app.sublibrary().prepared().is_none(),
+        "目标列不开却排出了一份差量"
+    );
+    fs::remove_file(&卡路径).expect("删得掉");
+}
+
+#[test]
+fn 排过差量预览之后卡拔了再按同步_屏上说清插上读卡器_任务历史不多一条_也不在原处建目录() {
+    // 同上，按的是同步。差量预览排出来之后卡被拔了：再按同步，**不排**。排上去的话同步那一趟
+    // 起手就把目标根建出来——卡拔了之后那个路径指着的是本机的盘，于是一份子库被悄悄写进了
+    // 本机一个新建的空目录里。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+    assert!(
+        场.app.sublibrary().prepared().is_some(),
+        "前提：差量预览排出来了：{:?}",
+        场.app.sublibrary().error(),
+    );
+    fs::remove_dir_all(场.卡.path()).expect("删得掉");
+    let 历史几条 = 场.app.tasks().history().len();
+
+    场.同步到底();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    let 说的 = 场.app.sublibrary().error().expect("卡不在位该说出口");
+    assert!(说的.contains("目标不在位"), "没说清为什么不行：{说的}");
+    assert!(说的.contains("插上读卡器"), "没说去哪儿办：{说的}");
+    assert!(
+        屏上.contains(说的),
+        "那句话没画在屏上：{说的}\n屏上：\n{屏上}"
+    );
+    历史没多一条(&场, 历史几条);
+    assert!(!场.卡.path().exists(), "卡不在位，却在原处建出了目录");
 }
 
 #[test]

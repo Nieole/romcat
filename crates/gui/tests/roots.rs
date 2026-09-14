@@ -38,7 +38,7 @@ use romcat_core::identify::fuzzy;
 use romcat_core::scan::CancelToken;
 use romcat_core::scrape::{self, Priorities};
 use romcat_core::site::Site;
-use romcat_core::sources::SourceState;
+use romcat_core::sources::{Source, SourceState};
 use romcat_core::stage::{Behind, Stage, StageRow};
 use romcat_core::task::Ending;
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
@@ -350,6 +350,20 @@ fn 跑一帧(ctx: &egui::Context, app: &mut App) {
     headless::frame(ctx, headless::input(), |ui| app.ui(ui));
 }
 
+/// **没开跑的那一下不许在任务历史里留一条**（票 `gui-looks-like-the-design/07`）：任务历史眼下
+/// 几条，与按下去之前数的一样。多出来的话，把多出来的那一条怎么收的场一并印出来。
+fn 历史没多一条(app: &App, 之前: usize) {
+    assert_eq!(
+        app.tasks().history().len(),
+        之前,
+        "没开跑的那一下在任务历史里多了一条：{:?}",
+        app.tasks()
+            .history()
+            .first()
+            .map(|record| record.ending.render()),
+    );
+}
+
 /// 导出目录里眼下躺着的那几份元数据文件，按路径排好。
 fn 导出去的文件(导出去: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = fs::read_dir(导出去)
@@ -578,6 +592,41 @@ fn 盘没挂上时这个根的上次结果仍然看得见() {
     }
     let 错 = 现场.app.roots().error().expect("该直说");
     assert!(错.contains("不在位"), "{错}");
+}
+
+#[test]
+fn 根不在位时按扫描_屏上说清插上那块盘_任务历史不多一条() {
+    // 票 `gui-looks-like-the-design/07`：盘不在位是按下去之前就判得出的（查一眼那个目录在不在），
+    // 那一下不往任务台上排，只在屏上说为什么不行、去哪儿办——任务历史只记真跑过的。
+    let 库 = 建库("gui-roots-拔盘再扫");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    drop(库);
+    {
+        let (screen, site, _) = 现场.app.roots_site_and_tasks();
+        screen.reload(site);
+    }
+    let 历史几条 = 现场.app.tasks().history().len();
+
+    {
+        let (screen, site, tasks) = 现场.app.roots_site_and_tasks();
+        screen.scan(site, tasks, "主库");
+    }
+    现场.等任务跑完();
+    跑一帧(&ctx, &mut 现场.app);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    let 说的 = 现场.app.roots().error().expect("该直说");
+    assert!(说的.contains("不在位"), "没说清为什么不行：{说的}");
+    assert!(说的.contains("插上那块盘"), "没说去哪儿办：{说的}");
+    assert!(
+        屏上.contains(说的),
+        "那句话没画在屏上：{说的}\n屏上：\n{屏上}"
+    );
+    历史没多一条(&现场.app, 历史几条);
 }
 
 #[test]
@@ -1002,22 +1051,122 @@ fn 外置盘不在位的时候工序那几行照样看得见() {
 }
 
 #[test]
-fn 还没取回那份弹药时识别如实拒绝并说清为什么() {
-    // **偷偷开一份空的 DAT 库跑下去是一句假话**：整库都会落成「未命中」，
-    // 而人会去找哪儿坏了。没有弹药就没有命中率——直说，并指向上面那一段。
+fn 还没取回那份弹药时按识别_屏上说清为什么与去哪儿取_任务历史不多一条() {
+    // 票 `gui-looks-like-the-design/07`：**压根没开跑与跑了没成是两件事。** 没有 DAT 库是
+    // 按下去之前就判得出的（ADR-0005 修订段「原料还没备齐」）——那一下不往任务台上排，
+    // 只在屏上说一句为什么不行、去哪儿办。排上去再在那一趟里报失败的话，任务历史里就多一条
+    // 从没跑过的「失败」，人会去找哪儿坏了。
+    //
+    // **偷偷开一份空的 DAT 库跑下去更不行**：整库都会落成「未命中」。
     let 库 = 建库("gui-stages-没弹药");
+    let ctx = headless::context();
     let mut 现场 = 现场::摆好();
     现场.加根(库.path(), "主库");
     现场.扫("主库");
+    let 历史几条 = 现场.app.tasks().history().len();
+
+    现场.app.start_stage(Stage::Identify);
+    现场.等任务跑完();
+    跑一帧(&ctx, &mut 现场.app);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+
+    assert!(
+        屏上.contains("还没有 DAT 库"),
+        "屏上没说清为什么不行：\n{屏上}"
+    );
+    assert!(屏上.contains("数据源"), "屏上没指向取回它的地方：\n{屏上}");
+    历史没多一条(&现场.app, 历史几条);
+    // 库里一条结论都没多出来。
+    assert_eq!(现场.识别那一行().behind, Behind::Left(2));
+}
+
+#[test]
+fn 取回_dat_那一趟已经排在台上时按识别_排在它后面而不是当场拒() {
+    // 票 `gui-looks-like-the-design/07` 只拒**按下去之前就判得出**的前提。取回 DAT 那一趟已经排在
+    // 台上，「还没有 DAT 库」就判不出来了：轮到识别时它多半已经取回来了（改之前识别就这样排在它
+    // 后面跑成）。当场拒的话，人得干等取回跑完再按一次。
+    //
+    // 取回那一趟**从头到尾排着、一次都不开跑**：台上先摆一趟占位活占着位子——一个网络请求都不发。
+    let 库 = 建库("gui-stages-弹药在路上");
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    let 占位 = 占位活::排上(现场.app.tasks_mut(), "装作在扫一趟库");
+    {
+        let (screen, _, tasks) = 现场.app.roots_site_and_tasks();
+        screen.fetch(tasks, Source::Dat);
+    }
+    let 取回 = 现场
+        .app
+        .tasks()
+        .queued()
+        .into_iter()
+        .find(|(_, name)| name.starts_with("取回"))
+        .map(|(id, _)| id)
+        .expect("取回 DAT 那一趟排上了");
+
+    现场.app.start_stage(Stage::Identify);
+    let 识别 = 现场
+        .app
+        .roots()
+        .stages()
+        .task_of(Stage::Identify)
+        .expect("取回 DAT 已经排在台上，识别该排在它后面，而不是当场拒");
+    assert!(
+        现场.app.roots().stages().error().is_none(),
+        "排上了却还挂着一句拒绝：{:?}",
+        现场.app.roots().stages().error(),
+    );
+
+    // 收拾：排着的两趟撤掉，再按停占位活——取回那一趟一次都没开跑。
+    现场.app.tasks_mut().stop(取回);
+    现场.app.tasks_mut().stop(识别);
+    占位.按停(现场.app.tasks_mut());
+    现场.等任务跑完();
+
+    // 取回那一趟撤掉了，DAT 库仍不在：这时再按识别就当场拒，任务历史不多一条。
+    let 历史几条 = 现场.app.tasks().history().len();
+    现场.app.start_stage(Stage::Identify);
+    assert!(
+        现场.app.roots().stages().task_of(Stage::Identify).is_none(),
+        "取回撤掉之后还没有 DAT 库，识别却排上了",
+    );
+    let 说的 = 现场.app.roots().stages().error().expect("该当场说清");
+    assert!(说的.contains("还没有 DAT 库"), "{说的}");
+    历史没多一条(&现场.app, 历史几条);
+}
+
+#[test]
+fn 那份弹药在却打不开时识别照旧排上去_任务历史记失败() {
+    // 票 `gui-looks-like-the-design/07` 的另一半：**跑了没成照旧进历史，收场是「失败」。**
+    // DAT 库那个文件在，按下去之前查一眼看不出毛病；打不开是真去开它的那一下才撞上的
+    // ——那一趟开跑过，照实记失败、说清为什么。与上面那条分开的正是这一下。
+    let 库 = 建库("gui-stages-弹药坏了");
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    写(
+        &romcat_core::workspace::dat_repo_path(现场.工作区.path()),
+        "这不是一份 SQLite 库".as_bytes(),
+    );
+    let 历史几条 = 现场.app.tasks().history().len();
+
     现场.跑识别();
 
+    assert_eq!(
+        现场.app.tasks().history().len(),
+        历史几条 + 1,
+        "真跑过的那一趟没进任务历史",
+    );
     let record = &现场.app.tasks().history()[0];
     let Ending::Failed { why, .. } = &record.ending else {
-        panic!("没有 DAT 库却把这一趟记成了「{}」", record.ending.render());
+        panic!("DAT 库打不开却把这一趟记成了「{}」", record.ending.render());
     };
-    assert!(why.contains("DAT 库"), "说不清为什么跑不了：{why}");
-    assert!(why.contains("数据源"), "没指向取回它的地方：{why}");
-    // 库里一条结论都没多出来。
+    assert!(why.contains("DAT 库打不开"), "说不清为什么没成：{why}");
+    let 说的 = 现场.app.roots().stages().error().expect("失败要说出来");
+    assert!(说的.contains(&record.ending.render()), "{说的}");
     assert_eq!(现场.识别那一行().behind, Behind::Left(2));
 }
 
@@ -1786,20 +1935,124 @@ fn 停下那一趟不打上次导出的时刻_照写那一趟走完之后那一�
 }
 
 #[test]
-fn 还没选过格式与目录时点导出_当场说清而不是默默不动() {
+fn 还没选过格式与目录时点导出_当场说清而不是默默不动_任务历史不多一条() {
     // **排一趟活的入口只有一个**（`App::start_stage`），票 `09` 的捷径走的也是它。
     // 那时人可能一次都没选过——默默不动的话，他会以为按钮坏了。
+    //
+    // **没选过是按下去之前就判得出的**（票 `gui-looks-like-the-design/07`）：不往任务台上排，
+    // 屏上说一句缺什么、去哪儿选；任务历史里不多一条压根没开跑的「失败」。
     let 库 = 建库("gui-stages-导出没选过");
+    let ctx = headless::context();
     let mut 现场 = 现场::摆好();
     现场.加根(库.path(), "主库");
     现场.扫("主库");
+    let 历史几条 = 现场.app.tasks().history().len();
 
     现场.导出();
+    跑一帧(&ctx, &mut 现场.app);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
     let 说的 = 现场.app.roots().stages().error().expect("该说清");
     assert!(说的.contains("格式"), "没说清缺的是什么：{说的}");
     assert!(说的.contains("目录"), "没说清缺的是什么：{说的}");
+    assert!(说的.contains("工序段底下那一行"), "没说去哪儿选：{说的}");
+    assert!(
+        屏上.contains(说的),
+        "那句话没画在屏上：{说的}\n屏上：\n{屏上}"
+    );
+    assert!(
+        !说的.starts_with("导出 失败"),
+        "没开跑的那一下说成了失败：{说的}"
+    );
+    历史没多一条(&现场.app, 历史几条);
     // 一个字节都没写出去。
     assert_eq!(现场.app.site().catalog.exported_at().expect("读得出"), None);
+}
+
+#[test]
+fn 记着的前端格式这一版没有时点导出_当场说清去哪儿重选_任务历史不多一条() {
+    // 换了一版程序、或者库里记着的是这一版没带的格式：配置读得出来，只是**那个格式这一版没有
+    // 适配器**。这一样按下去之前就判得出（判据在核心里，`ExportSetup::adapter`），不排上去
+    // 再记一条失败（票 `gui-looks-like-the-design/07`）。
+    let 库 = 建库("gui-stages-导出没这个格式");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    let 导出去 = 现场.工作区.path().join("导出去");
+    {
+        let (screen, site, _) = 现场.app.roots_site_and_tasks();
+        site.catalog
+            .set_export_setup(&romcat_core::catalog::ExportSetup {
+                format: "这一版没带的格式".to_string(),
+                out: 导出去.clone(),
+            })
+            .expect("写得进");
+        screen.reload(site);
+    }
+    let 历史几条 = 现场.app.tasks().history().len();
+
+    现场.导出();
+    跑一帧(&ctx, &mut 现场.app);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    let 说的 = 现场.app.roots().stages().error().expect("该说清");
+    assert!(
+        说的.contains("这一版没带的格式"),
+        "没说清是哪个格式：{说的}"
+    );
+    assert!(说的.contains("工序段底下那一行"), "没说去哪儿重选：{说的}");
+    assert!(
+        屏上.contains(说的),
+        "那句话没画在屏上：{说的}\n屏上：\n{屏上}"
+    );
+    历史没多一条(&现场.app, 历史几条);
+    assert!(!导出去.exists(), "没开跑却建出了导出目录");
+}
+
+#[test]
+fn 还没选过导出配置就打开铺媒体_不排那一趟去算_屏上说清去哪儿选_选好之后自己算() {
+    // 媒体的布局随前端格式不同：没选过，「这一趟最多要铺多少」一定算不出来。那是打开开关之前
+    // 就判得出的——排上去再记一条失败，任务历史里就多一条压根没开跑的「失败」
+    // （票 `gui-looks-like-the-design/07`）。屏上那句要说清缺什么、去哪儿选；**选好之后自己算**，
+    // 不逼人关掉再打开。
+    let 库 = 建库("gui-stages-铺媒体没选过");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    let 历史几条 = 现场.app.tasks().history().len();
+
+    现场.打开铺媒体();
+    跑一帧(&ctx, &mut 现场.app);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        屏上.contains("还没选过导出的前端格式与目录") && 屏上.contains("工序段底下那一行"),
+        "屏上没说清缺什么、去哪儿选：\n{屏上}",
+    );
+    历史没多一条(&现场.app, 历史几条);
+
+    现场.选一次导出去哪儿("Pegasus", &现场.工作区.path().join("导出去"));
+    跑一帧(&ctx, &mut 现场.app);
+    现场.等任务跑完();
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        屏上.contains(&romcat_gui::stages::media_cost(0, 0)),
+        "选好之后没自己算：\n{屏上}",
+    );
+    let record = &现场.app.tasks().history()[0];
+    assert_eq!(record.name, romcat_gui::stages::COUNT_MEDIA);
+    assert!(
+        matches!(record.ending, Ending::Done(())),
+        "选好之后那一趟记成了「{}」",
+        record.ending.render(),
+    );
 }
 
 #[test]
