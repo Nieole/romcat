@@ -1123,3 +1123,149 @@ fn 列出来的每一行说得出它是非游戏资产_收起时一行都不标(
     };
     assert_eq!(筛.to_rule(), 筛着列出.to_rule());
 }
+
+/// 一条叫法：作品名是锚点（`title` 那张表的 `work` 列）。
+fn 叫法(
+    work: &str,
+    value: &str,
+    language: romcat_core::title::Language,
+    kind: romcat_core::title::TitleKind,
+) -> romcat_core::catalog::TitleRow {
+    romcat_core::catalog::TitleRow {
+        work: work.to_string(),
+        value: value.to_string(),
+        language,
+        kind,
+        source: "测试".to_string(),
+        region: None,
+        variant_key: None,
+        confidence: Confidence::High,
+        seam: None,
+        evidence: "测试里写进去的".to_string(),
+        seen: 1,
+    }
+}
+
+#[test]
+fn 主列表每行带出显示标题_标题集合是空的或挑出来就是作品名时不带() {
+    use romcat_core::title::{Language, TitleKind};
+
+    let mut catalog = 建库();
+    // 作品00 有一条官中译名；作品01 只有一条与作品名一字不差的官方名；其余作品一条叫法都没有。
+    catalog
+        .put_titles(&[
+            叫法(
+                "作品00",
+                "作品零号",
+                Language::Chinese,
+                TitleKind::Translated,
+            ),
+            叫法("作品01", "作品01", Language::English, TitleKind::Official),
+        ])
+        .expect("写得进标题集合");
+    let priorities = romcat_core::scrape::Priorities::builtin();
+    let query = WorkQuery::default();
+    let rows = catalog
+        .work_page_with_titles(&query, 0, 64, &priorities)
+        .expect("取得出一页");
+    let 行 = |name: &str| {
+        rows.iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("这一页里没有「{name}」"))
+    };
+    assert_eq!(行("作品00").display.as_deref(), Some("作品零号"));
+    assert_eq!(行("作品01").display, None, "挑出来就是作品名：第二行不写");
+    assert_eq!(行("作品02").display, None, "一条叫法都没有：退回作品名");
+    assert!(
+        rows.iter()
+            .filter(|row| matches!(row.anchor, WorkAnchor::Loose(_)))
+            .all(|row| row.display.is_none()),
+        "认不出作品的那几行不带显示标题：它们屏上的名字是正题",
+    );
+
+    // **与详情面板挑的是同一个**（ADR-0024）：点开作品00 的一个变体，详情里的显示标题一字不差。
+    let detail = catalog
+        .variant_detail(&键(0, 0), &priorities, None)
+        .expect("读得动")
+        .expect("有这个变体");
+    assert_eq!(
+        detail.display.map(|chosen| chosen.display).as_deref(),
+        Some("作品零号"),
+    );
+
+    // 带不带显示标题，别的格子一个字都不差：补的只有这一格。
+    let plain = catalog.work_page(&query, 0, 64).expect("取得出一页");
+    let without: Vec<WorkRow> = rows
+        .into_iter()
+        .map(|mut row| {
+            row.display = None;
+            row
+        })
+        .collect();
+    assert_eq!(without, plain);
+}
+
+/// 点开一个作品，交回它底下每个变体的 `(键, 变体简称)`。
+fn 简称们(catalog: &Catalog, 作品: &str) -> Vec<(String, String)> {
+    let query = WorkQuery::default();
+    let anchor = catalog
+        .work_page(&query, 0, 64)
+        .expect("取得出一页")
+        .into_iter()
+        .find(|row| row.name == 作品)
+        .unwrap_or_else(|| panic!("这一页里没有「{作品}」"))
+        .anchor;
+    let detail = catalog
+        .work_detail(&query, &anchor)
+        .expect("读得动")
+        .expect("有这一行");
+    let names = catalog
+        .variant_short_names(&detail, &romcat_core::scrape::Priorities::builtin())
+        .expect("拼得出变体简称");
+    assert_eq!(
+        names.len(),
+        detail.variants.len(),
+        "一个变体一个简称，次序对得上"
+    );
+    detail
+        .variants
+        .iter()
+        .map(|variant| variant.row.key.clone())
+        .zip(names)
+        .collect()
+}
+
+#[test]
+fn 变体简称是哪一种照首选变体那条规则_汉化组取导出写的那个_说不出时退回文件名() {
+    let mut catalog = 建库();
+    // fixture 里每条候选都带着汉化记号，只有高置信那条定下来了：作品00 是变体2，作品01 是变体1。
+    catalog
+        .put_verdict_value(
+            AnchorKind::Variant,
+            &键(0, 2),
+            Field::TranslationGroup,
+            "口袋汉化组",
+            "fixture",
+        )
+        .expect("写得进汉化组");
+    let 叫 = |pairs: &[(String, String)], key: String| {
+        pairs
+            .iter()
+            .find(|(it, _)| *it == key)
+            .map(|(_, name)| name.clone())
+            .unwrap_or_else(|| panic!("详情里没有「{key}」"))
+    };
+
+    let 作品00 = 简称们(&catalog, "作品00");
+    assert_eq!(叫(&作品00, 键(0, 2)), "汉化版 · 口袋汉化组");
+    for n in [0, 1] {
+        assert_eq!(
+            叫(&作品00, 键(0, n)),
+            romcat_core::path::file_name_of_key(&键(0, n)),
+            "候选没定下来、也没有发行版：说不出是哪一种，退回文件名",
+        );
+    }
+    // 定下来了、是汉化版，没人写过汉化组：只写「汉化版」。
+    let 作品01 = 简称们(&catalog, "作品01");
+    assert_eq!(叫(&作品01, 键(1, 1)), "汉化版");
+}

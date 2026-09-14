@@ -58,6 +58,8 @@ pub struct Tokens {
     pub space: Space,
     /// 版式尺寸。
     pub layout: Layout,
+    /// 调色比例。
+    pub mix: Mix,
     /// 阴影：弹层与弹出菜单。
     pub shadow: Shadows,
 }
@@ -352,8 +354,12 @@ pub struct Font {
     pub weight_strong: u16,
     /// 角标、分组标题。
     pub size_caption: f32,
+    /// 表头、图例（设计稿 11.5）。
+    pub size_caption_plus: f32,
     /// 说明文字、表格副行。
     pub size_small: f32,
+    /// 屏头说明、表格行（设计稿 12.5）。
+    pub size_small_plus: f32,
     /// 正文、按钮。
     pub size_body: f32,
     /// 卡片标题、对话框标题。
@@ -362,6 +368,20 @@ pub struct Font {
     pub size_page: f32,
     /// 作品详情页的大标题。
     pub size_hero: f32,
+    /// 分面标签里的条数。
+    pub size_mini: f32,
+    /// 等宽的路径。
+    pub size_path: f32,
+    /// 侧边详情头上的标题。
+    pub size_detail_title: f32,
+    /// 行首封面格里的平台代号。
+    pub size_thumb_code: f32,
+    /// 侧边详情字卡上的标题。
+    pub size_cover_title: f32,
+    /// 侧边详情字卡上的平台代号水印。
+    pub size_cover_mark: f32,
+    /// 表头上排序那枚小箭头。
+    pub size_arrow: f32,
     /// 行高，字号的倍数。
     pub line_height: f32,
 }
@@ -395,6 +415,52 @@ pub struct Space {
     pub catalog_row_padding: [f32; 2],
     /// 开场主库列表那一行里，名字与底下那句之间的竖向间距。
     pub catalog_row_gap: f32,
+    /// 浏览屏左栏内边距。
+    pub filter_pane_padding: f32,
+    /// 浏览屏右栏内边距。
+    pub detail_pane_padding: f32,
+    /// 左右两栏里一段与一段之间。
+    pub pane_gap: f32,
+    /// 一簇分面标签之间。
+    pub facet_gap: f32,
+    /// 分面标签里名字与条数之间。
+    pub facet_chip_gap: f32,
+    /// 提示框内边距：`[上下, 左右]`。
+    pub note_padding: [f32; 2],
+    /// 侧边详情变体卡片内边距：`[上下, 左右]`。
+    pub variant_card_padding: [f32; 2],
+    /// 表格上方「列表」那一条的内边距：`[上下, 左右]`。
+    pub list_bar_padding: [f32; 2],
+    /// 表头一格的内边距：`[上下, 左右]`。
+    pub table_head_padding: [f32; 2],
+    /// 空态那一块上方的留白。
+    pub empty_padding: f32,
+    /// 侧边详情媒体格之间。
+    pub thumb_gap: f32,
+    /// 侧边详情头上封面与字之间。
+    pub detail_head_gap: f32,
+    /// 侧边详情字卡内边距：`[上下, 左右]`。
+    pub title_card_padding: [f32; 2],
+    /// 条件组那个框的内边距。
+    pub rule_box_padding: f32,
+    /// 规则原文那一条的内边距：`[上下, 左右]`。
+    pub rule_text_padding: [f32; 2],
+    /// 一段里小标题与底下内容之间。
+    pub section_gap: f32,
+    /// 变体卡片里上下两行之间、左右两块之间：`[竖, 横]`。
+    pub variant_card_gap: [f32; 2],
+    /// 收起那一栏的窄条上下留白。
+    pub strip_padding: f32,
+    /// 窄条上那颗箭头与竖排栏名之间。
+    pub strip_gap: f32,
+    /// 表格一格左右留白。
+    pub table_cell_padding: f32,
+    /// 表格「作品」那一格里行首封面与字之间。
+    pub cell_gap: f32,
+    /// 「列表」那一条里几样东西之间。
+    pub list_bar_gap: f32,
+    /// 表头上的字与排序箭头之间。
+    pub sort_arrow_gap: f32,
 }
 
 /// 版式尺寸，点。
@@ -459,6 +525,46 @@ pub struct Layout {
     pub input_small_height: f32,
     /// 单行输入框左右留白。
     pub input_padding: f32,
+    /// 图标按钮（收起、展开那两颗箭头）的边长。
+    pub icon_button: f32,
+    /// 分面标签的高。
+    pub facet_chip_height: f32,
+    /// 分面标签左右留白。
+    pub facet_chip_padding: f32,
+    /// 行内标签的高。
+    pub tag_height: f32,
+    /// 行内标签左右留白。
+    pub tag_padding: f32,
+    /// 表格勾选那一列的宽。
+    pub check_column: f32,
+    /// 表格定宽那五列：`[平台, 变体, 容量, 年份, 元数据]`。
+    pub table_columns: [f32; 5],
+    /// 行首封面格顶上那一道平台色的高。
+    pub thumb_list_band: f32,
+    /// 侧边详情头上封面那一格的宽。
+    pub detail_cover_width: f32,
+    /// 字卡顶上那一道平台色的高。
+    pub title_card_band: f32,
+    /// 字卡水印伸出格子多少：`[右, 下]`。
+    pub title_card_mark_offset: [f32; 2],
+    /// 侧边详情媒体一行几格。
+    pub thumbs_per_row: f32,
+    /// 表格勾选那一列左边留白。
+    pub check_padding: f32,
+    /// 平台那一簇先摆几个，其余收进「更多（N）」。
+    pub platforms_visible: usize,
+}
+
+/// 调色比例：两套主题共用。设计稿里写在规则上的字面量（`color-mix` 的百分比、`opacity`）。
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Mix {
+    /// 字卡底色里调进几成平台色。
+    pub title_card_tint: f32,
+    /// 行首平台色块底色里调进几成平台色。
+    pub thumb_list_tint: f32,
+    /// 字卡上平台代号水印的不透明度。
+    pub watermark_opacity: f32,
 }
 
 /// 阴影：一种一格，**形状两套主题共用**，颜色是各主题里同名的那一格（`pop` → `pop-color`）。
@@ -564,6 +670,17 @@ mod tests {
         // 单行输入框：左右留白照设计稿 `.input`；高与同档按钮等高（拿主意的人 2026-09-14 第三次裁，
         // 设计稿 `.input` 写的 30 不照）。
         assert_eq!(tokens.layout.input_padding, 10.0, "设计稿 .input");
+        // 浏览屏表头那五列的宽与两个调色比例：设计稿表头的 style="width:…"、`.tcard` 与 `.lthumb`
+        // 的 `color-mix`、`.tc-wm` 的 `opacity`。
+        assert_eq!(tokens.layout.table_columns, [56.0, 48.0, 86.0, 58.0, 108.0]);
+        assert_eq!(
+            [
+                tokens.mix.title_card_tint,
+                tokens.mix.thumb_list_tint,
+                tokens.mix.watermark_opacity
+            ],
+            [0.22, 0.24, 0.3],
+        );
         assert_eq!(
             [tokens.layout.input_height, tokens.layout.input_small_height],
             [28.0, 24.0],

@@ -37,6 +37,7 @@ use romcat_core::catalog::browse::{
 };
 use romcat_core::filename::Rules;
 use romcat_core::report::{capacity, thousands};
+use romcat_core::scrape::Priorities;
 
 use crate::font;
 use crate::look;
@@ -94,6 +95,9 @@ pub struct Window {
     error: Option<String>,
     /// 查询换过了，总数与内容都得重取。
     stale: bool,
+    /// 挑**显示标题**用的那份优先级表（[`Catalog::work_page_with_titles`]）。与详情面板、导出交的是
+    /// 同一份（[`crate::browse::Screen::set_priorities`]），不然屏上这一行与详情头上是两个名字。
+    priorities: Priorities,
 }
 
 impl Window {
@@ -109,6 +113,15 @@ impl Window {
             reads: 0,
             error: None,
             stale: true,
+            priorities: Priorities::builtin(),
+        }
+    }
+
+    /// 换一份优先级表。**换了就作废**：窗里那几行的显示标题是照旧那一份挑的。
+    pub fn set_priorities(&mut self, priorities: Priorities) {
+        if self.priorities != priorities {
+            self.priorities = priorities;
+            self.invalidate();
         }
     }
 
@@ -219,7 +232,8 @@ impl Window {
     /// 剩下的四分之三留给它。
     fn fill(&mut self, catalog: &Catalog, index: u64) {
         let first = index.saturating_sub(self.span / 4);
-        match catalog.work_page(&self.query, first, self.span) {
+        // 连显示标题一起取：认出作品的那几行主栏印它（`name_cell`）。
+        match catalog.work_page_with_titles(&self.query, first, self.span, &self.priorities) {
             Ok(rows) => {
                 self.first = first;
                 // 整段换掉而不是追加：窗口的行数因此恒等于一页的大小，
@@ -362,163 +376,350 @@ impl Table<'_> {
             rules,
             mut shelf,
         } = self;
+        let tokens = Tokens::builtin();
         // 行首摆封面时一行照令牌 `table-row-cover` 高：两行字旁边还得竖得下那一小格封面。
         let height = if shelf.is_some() {
-            Tokens::builtin().layout.table_row_cover
+            tokens.layout.table_row_cover
         } else {
             row_height()
         };
         let mut opened = None;
         // 行画完之后手上没有那一行的 `Ui` 了（列都加完才拿得到 `response`），
-        // 而焦点那一圈要画在那时——先把上下文留一份。
+        // 而焦点那一圈、行底下那条分隔线要画在那时——先把上下文留一份。
         let ctx = ui.ctx().clone();
         let total_rows = window.total();
         let total = usize::try_from(total_rows).unwrap_or(usize::MAX);
         let (sorted_by, descending) = (query.order, query.descending);
+        // **格子里**照旧用这一屏的间距；**格与格、行与行之间**一点缝都不留，每一格自己让出左右留白
+        // （[`padded`]）——那样定宽那几列正好是稿上写的宽，选中那一行的底色也连成一整条。
+        let spacing = ui.spacing().item_spacing;
+        let cell_x = tokens.space.table_cell_padding;
+        let check = [tokens.layout.check_padding, 0.0];
+        let head_font = egui::FontId::proportional(tokens.font.size_caption_plus);
+        let header_height = ctx.fonts_mut(|fonts| fonts.row_height(&head_font))
+            + 2.0 * tokens.space.table_head_padding[0];
+        let line = ui.visuals().widgets.noninteractive.bg_stroke;
+        let [平台宽, 变体宽, 容量宽, 年份宽, 元数据宽] = tokens.layout.table_columns;
 
-        let mut builder = TableBuilder::new(ui)
-            .striped(true)
-            .resizable(true)
-            .sense(egui::Sense::click())
-            .cell_layout(Layout::left_to_right(Align::Center))
-            // 列宽给定值而不是 `Column::auto()`：自动列宽是按**当前可见的那几行**量出来的，
-            // 滚动时可见行一直在换，列宽就会随滚动跳。
-            .column(Column::initial(30.0).at_least(26.0))
-            .column(Column::initial(320.0).at_least(140.0).clip(true))
-            .column(Column::initial(150.0).at_least(80.0).clip(true))
-            .column(Column::initial(60.0).at_least(50.0))
-            .column(Column::initial(110.0).at_least(70.0).clip(true))
-            .column(Column::initial(64.0).at_least(50.0))
-            .column(Column::remainder().at_least(110.0));
-        if let Some(offset) = scroll_to {
-            builder = builder.vertical_scroll_offset(offset);
-        }
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+            // 表头与行底下那几条分隔线**只横贯这张表**：量的是摆表之前这一栏的宽，不拿行的外框——
+            // 那几条线画在行所在的那一层上，外框一宽出去，线就画到右边那一栏上头了（第二段第三趟截图）。
+            let 表宽 = ui.available_rect_before_wrap().x_range();
+            let mut builder = TableBuilder::new(ui)
+                // **不画斑马纹，行与行之间一条分隔线**（设计稿 `.wtbl td` 的 `border-bottom`）。
+                .striped(false)
+                // **列宽不给拖**：拖得动的列 egui_extras 在每两列之间常画一道竖线，稿上没有。
+                .resizable(false)
+                .sense(egui::Sense::click())
+                .cell_layout(Layout::left_to_right(Align::Center))
+                // 列宽给定值而不是 `Column::auto()`：自动列宽是按**当前可见的那几行**量出来的，
+                // 滚动时可见行一直在换，列宽就会随滚动跳。
+                //
+                // **宽度照稿**（`prototype.html` 的 `.wtbl` 表头，票 `gui-looks-like-the-design/09`）：
+                // 作品那一列吃剩下的，其余几列照令牌 `check-column` 与 `table-columns`。从前作品那一列
+                // 定死 320、元数据吃剩下的，左右两栏都摊开时 1280 宽的窗口里年份与元数据两列被挤出视口。
+                .column(Column::exact(tokens.layout.check_column))
+                .column(Column::remainder().at_least(140.0).clip(true))
+                .column(Column::exact(平台宽).clip(true))
+                .column(Column::exact(变体宽).clip(true))
+                .column(Column::exact(容量宽).clip(true))
+                .column(Column::exact(年份宽).clip(true))
+                .column(Column::exact(元数据宽).clip(true));
+            if let Some(offset) = scroll_to {
+                builder = builder.vertical_scroll_offset(offset);
+            }
 
-        builder
-            .header(24.0, |mut header| {
-                header.col(|ui| {
-                    // 全选那一格。**它选的是「当前这个筛选」**，不是屏上看得见的那几行。
-                    let mut all = picked.is_all();
-                    if ui
-                        .checkbox(&mut all, "")
-                        .on_hover_text(
-                            "全选当前筛选下的每一行。它记的是这个筛选本身，\
-                             不是一万行的身份——换了筛选就作废。",
-                        )
-                        .changed()
-                    {
-                        if all {
-                            picked.select_all();
-                        } else {
-                            picked.clear();
-                        }
+            builder
+                .header(header_height, |mut header| {
+                    let (_, 全选格) = header.col(|ui| {
+                        padded(ui, spacing, check, false, |ui| {
+                            // 全选那一格。**它选的是「当前这个筛选」**，不是屏上看得见的那几行。
+                            let mut all = picked.is_all();
+                            if ui
+                                .checkbox(&mut all, "")
+                                .on_hover_text(
+                                    "全选当前筛选下的每一行。它记的是这个筛选本身，\
+                                     不是一万行的身份——换了筛选就作废。",
+                                )
+                                .changed()
+                            {
+                                if all {
+                                    picked.select_all();
+                                } else {
+                                    picked.clear();
+                                }
+                            }
+                        });
+                    });
+                    let mut 表头 = 全选格.rect;
+                    // **默认那一种排法不画箭头**（照稿；拿主意的人 2026-09-14 定）：人点过表头、
+                    // 换了排法才出箭头。
+                    let 默认 = WorkQuery::default();
+                    let 照默认排 = sorted_by == 默认.order && descending == 默认.descending;
+                    for order in WorkOrder::ALL {
+                        let (_, 这一格) = header.col(|ui| {
+                            let active = sorted_by == order;
+                            let 箭头 = (active && !照默认排).then_some(descending);
+                            if sort_header(ui, spacing, order, 箭头).clicked() {
+                                query.order = order;
+                                // 再点一次同一列就翻方向。
+                                query.descending = active && !descending;
+                            }
+                        });
+                        表头 = 表头.union(这一格.rect);
                     }
-                });
-                for order in WorkOrder::ALL {
-                    header.col(|ui| {
-                        let active = sorted_by == order;
-                        let mark = match (active, descending) {
-                            (false, _) => "",
-                            (true, true) => " ▼",
-                            (true, false) => " ▲",
+                    let (_, 这一格) = header.col(|ui| {
+                        padded(ui, spacing, [cell_x, cell_x], false, |ui| {
+                            // **元数据那一列排不了序**，所以它不是个可点的表头：点了没反应
+                            // 比灰着更糟。
+                            ui.add(egui::Label::new(head_text(ui, "元数据")).selectable(false))
+                                .on_hover_text(
+                                    "这一行的元数据齐不齐、认没认出来（核心库给的短标签），\
+                                     颜色是这一行最高的那档置信度。这一列排不了序。",
+                                );
+                        });
+                    });
+                    表头 = 表头.union(这一格.rect);
+                    // 表头底下一条分隔线，横贯整张表（设计稿 `.tbl th` 的 `border-bottom`）。
+                    egui::Painter::new(
+                        ctx.clone(),
+                        这一格.layer_id,
+                        egui::Rect::from_x_y_ranges(表宽, 表头.expand(line.width).y_range()),
+                    )
+                    .hline(表宽, 表头.bottom() - line.width / 2.0, line);
+                })
+                .body(|body| {
+                    body.rows(height, total, |mut row| {
+                        let index = row.index() as u64;
+                        row.set_selected(*focused == Some(index));
+                        let Some(work) = window.row(catalog, index) else {
+                            // 读不到就留空行：滚动条的长度已经由总数定死，
+                            // 这里少画一行不会让下面的行位移。
+                            for _ in 0..7 {
+                                row.col(|_ui| {});
+                            }
+                            return;
                         };
-                        if ui
-                            .selectable_label(active, format!("{}{mark}", order.label()))
-                            .clicked()
-                        {
-                            query.order = order;
-                            // 再点一次同一列就翻方向。
-                            query.descending = active && !descending;
-                        }
-                    });
-                }
-                header.col(|ui| {
-                    // **元数据那一列排不了序**，所以它不是个可点的表头：点了没反应
-                    // 比灰着更糟。
-                    ui.label("元数据").on_hover_text(
-                        "这一行最高的那档置信度，加上作品这一层缺哪几样\
-                         元数据。这一列排不了序。",
-                    );
-                });
-            })
-            .body(|body| {
-                body.rows(height, total, |mut row| {
-                    let index = row.index() as u64;
-                    row.set_selected(*focused == Some(index));
-                    let Some(work) = window.row(catalog, index) else {
-                        // 读不到就留空行：滚动条的长度已经由总数定死，
-                        // 这里少画一行不会让下面的行位移。
-                        for _ in 0..7 {
-                            row.col(|_ui| {});
-                        }
-                        return;
-                    };
-                    // 焦点那一圈要夹在滚动视口里，而只有格子里头拿得到那个裁剪矩形。
-                    let mut 看得见的 = egui::Rect::NOTHING;
-                    row.col(|ui| {
-                        看得见的 = ui.clip_rect();
-                        let mut on = picked.contains(&work.anchor);
-                        if ui.checkbox(&mut on, "").changed() {
-                            picked.toggle(&work.anchor);
-                        }
-                    });
-                    row.col(|ui| name_cell(ui, work, rules, shelf.as_deref_mut()));
-                    row.col(|ui| {
-                        // **平台是个集合**：一部作品可以横跨好几个平台。
-                        ui.label(work.platforms.join(" / "));
-                    });
-                    // 变体数与容量用等宽：一列扫下来位数对得齐。
-                    row.col(|ui| {
-                        ui.label(font::mono(thousands(work.variants)));
-                    });
-                    row.col(|ui| {
-                        ui.label(font::mono(capacity(work.bytes, work.unreadable_files)));
-                    });
-                    row.col(|ui| {
-                        ui.label(work.year.as_deref().unwrap_or("—"));
-                    });
-                    row.col(|ui| {
-                        // 置信度的颜色与词在五屏里同出一处（规格 69、票 `gui-redesign/12`）：
-                        // 哪一档由核心库说（`WorkRow::tier`），印哪个词也由核心库说
-                        // （`WorkRow::confidence_label`——一条候选都没有时它还要分辨
-                        // **没有候选**与**还没识别**，票 `gui-redesign/17`），
-                        // 什么颜色由 [`crate::look`] 说，这儿一个 `match` 都不写。
-                        // **词一直在**——颜色不是唯一线索。
-                        ui.colored_label(
-                            look::tier_color(work.tier(), ui.visuals()),
-                            format!("{} · {}", work.confidence_label(), work.missing_label()),
+                        // 焦点那一圈与行底下那条线要夹在滚动视口里，而只有格子里头拿得到那个裁剪矩形
+                        // （勾选那一列不裁，它的裁剪矩形就是整个视口）。
+                        let mut 看得见的 = egui::Rect::NOTHING;
+                        row.col(|ui| {
+                            看得见的 = ui.clip_rect();
+                            padded(ui, spacing, check, false, |ui| {
+                                let mut on = picked.contains(&work.anchor);
+                                if ui.checkbox(&mut on, "").changed() {
+                                    picked.toggle(&work.anchor);
+                                }
+                            });
+                        });
+                        row.col(|ui| {
+                            // 行首那一道**置信度色条**：贴着这一格的左沿、与一行一样高（设计稿
+                            // `td.st` 的 `box-shadow:inset 3px 0 0`），颜色与元数据那一枚标签同出一处。
+                            let 格 = ui.max_rect();
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_size(
+                                    格.min,
+                                    egui::vec2(tokens.layout.tier_bar, 格.height()),
+                                ),
+                                0.0,
+                                look::tier_color(work.tier(), ui.visuals()),
+                            );
+                            padded(ui, spacing, [cell_x, cell_x], false, |ui| {
+                                name_cell(ui, work, rules, shelf.as_deref_mut());
+                            });
+                        });
+                        row.col(|ui| {
+                            padded(ui, spacing, [cell_x, cell_x], false, |ui| {
+                                // **平台是个集合**：一部作品可以横跨好几个平台。
+                                ui.label(work.platforms.join(" / "));
+                            });
+                        });
+                        // 变体数与容量靠右，一列扫下来位数对得齐（设计稿 `td.r`）。变体数用等宽；
+                        // **容量用常规体**，照稿——等宽的「256.00 MiB」在这一列里放不下
+                        // （拿主意的人 2026-09-14 定，`font::mono` 那一条写着这个例外）。
+                        row.col(|ui| {
+                            padded(ui, spacing, [cell_x, cell_x], true, |ui| {
+                                ui.label(font::mono(thousands(work.variants)));
+                            });
+                        });
+                        row.col(|ui| {
+                            padded(ui, spacing, [cell_x, cell_x], true, |ui| {
+                                ui.label(capacity(work.bytes, work.unreadable_files));
+                            });
+                        });
+                        row.col(|ui| {
+                            padded(ui, spacing, [cell_x, cell_x], false, |ui| {
+                                ui.label(work.year.as_deref().unwrap_or("—"));
+                            });
+                        });
+                        row.col(|ui| {
+                            padded(ui, spacing, [cell_x, cell_x], false, |ui| {
+                                metadata_chip(ui, work);
+                            });
+                        });
+                        let response = row.response();
+                        // 每一行底下一条分隔线，夹在滚动视口里。
+                        let 这一行 = response.rect;
+                        egui::Painter::new(
+                            ctx.clone(),
+                            response.layer_id,
+                            egui::Rect::from_x_y_ranges(表宽, 看得见的.y_range()),
+                        )
+                        .hline(
+                            表宽,
+                            这一行.bottom() - line.width / 2.0,
+                            line,
                         );
+                        // **焦点落在这一行上要看得见**：行是点得中的，于是 Tab 走得到它
+                        // （票 `gui-redesign/12` 验收第 7 条）。行自己画底色，走不了 egui
+                        // 按钮那条路，得自己描一圈。
+                        look::focus_ring(&ctx, 看得见的, &response);
+                        if response.clicked() {
+                            *focused = Some(index);
+                            // **交一份拷贝出去而不是下标**：详情面板要在这一行滚出视口
+                            // 之后照样摆得出来。只有真点中的那一帧才复制。
+                            opened = Some(work.clone());
+                        }
                     });
-                    // **焦点落在这一行上要看得见**：行是点得中的，于是 Tab 走得到它
-                    // （票 `gui-redesign/12` 验收第 7 条）。行自己画底色，走不了 egui
-                    // 按钮那条路，得自己描一圈。
-                    let response = row.response();
-                    look::focus_ring(&ctx, 看得见的, &response);
-                    if response.clicked() {
-                        *focused = Some(index);
-                        // **交一份拷贝出去而不是下标**：详情面板要在这一行滚出视口
-                        // 之后照样摆得出来。只有真点中的那一帧才复制。
-                        opened = Some(work.clone());
-                    }
                 });
-            });
+        });
         opened
     }
+}
+
+/// 表里一格的**内容区**：左右各让出 `[左, 右]`，间距换回这一屏平常那一份，靠左或靠右摆、上下居中。
+///
+/// 整张表的格与格之间一点缝都不留（[`Table::show`]），留白由每一格自己让。
+fn padded<R>(
+    ui: &mut egui::Ui,
+    spacing: egui::Vec2,
+    [left, right]: [f32; 2],
+    right_aligned: bool,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let mut rect = ui.max_rect();
+    rect.min.x = (rect.min.x + left).min(rect.max.x);
+    rect.max.x = (rect.max.x - right).max(rect.min.x);
+    let layout = if right_aligned {
+        Layout::right_to_left(Align::Center)
+    } else {
+        Layout::left_to_right(Align::Center)
+    };
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(layout), |ui| {
+        ui.spacing_mut().item_spacing = spacing;
+        // 选中那一行 egui_extras 把整行的字换成强调色；照稿选中只换底色（`accent-soft`），字照旧。
+        ui.visuals_mut().override_text_color = None;
+        add(ui)
+    })
+    .inner
+}
+
+/// 表头一格：列名后面跟着排序的小箭头（按这一列排、又不是默认那一种排法时才有）。**整格点得中**：点一下按这一列排，
+/// 再点一下翻方向。变体与容量两列靠右，与底下的数对齐（设计稿 `th.r`）；悬停时列名换成强调字。
+fn sort_header(
+    ui: &mut egui::Ui,
+    spacing: egui::Vec2,
+    order: WorkOrder,
+    direction: Option<bool>,
+) -> egui::Response {
+    let tokens = Tokens::builtin();
+    let cell_x = tokens.space.table_cell_padding;
+    let response = ui.interact(ui.max_rect(), ui.id().with("排序"), egui::Sense::click());
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, order.label()));
+    let 靠右 = matches!(order, WorkOrder::Variants | WorkOrder::Bytes);
+    let 悬停 = response.hovered();
+    padded(ui, spacing, [cell_x, cell_x], 靠右, |ui| {
+        ui.spacing_mut().item_spacing.x = tokens.space.sort_arrow_gap;
+        let mut 列名 = head_text(ui, order.label());
+        if 悬停 {
+            列名 = 列名.color(ui.visuals().strong_text_color());
+        }
+        let 箭头 = direction.map(|down| {
+            egui::Label::new(
+                egui::RichText::new(if down { "▼" } else { "▲" })
+                    .size(tokens.font.size_arrow)
+                    .color(ui.visuals().hyperlink_color),
+            )
+            .selectable(false)
+        });
+        let 列名 = egui::Label::new(列名).selectable(false);
+        // 靠右的那两列从右往左摆：先摆的在最右，所以箭头先摆。
+        if 靠右 {
+            if let Some(箭头) = 箭头 {
+                ui.add(箭头);
+            }
+            ui.add(列名);
+        } else {
+            ui.add(列名);
+            if let Some(箭头) = 箭头 {
+                ui.add(箭头);
+            }
+        }
+    });
+    response
+}
+
+/// 表头上的字：表头字号（令牌 `size-caption-plus`）、弱字色，拉丁与数字加粗（设计稿 `.tbl th`）。
+fn head_text(ui: &egui::Ui, text: &str) -> egui::RichText {
+    egui::RichText::new(text)
+        .size(Tokens::builtin().font.size_caption_plus)
+        .family(font::strong_family())
+        .color(ui.visuals().weak_text_color())
+}
+
+/// 「元数据」那一格：照稿一枚标签（[`look::chip`]）。字是核心库给的短标签（[`WorkRow::meta_label`]：
+/// 完整 / 缺某一项 / 缺 N 项 / 缺全部 / 仅文件名 / 待确认 / 还没识别），颜色是这一行那一档置信度
+/// （[`WorkRow::tier`] → [`look::tier_tone`]）。这儿一个 `match` 都不写。
+///
+/// **置信度的词不在表上**：那一档由行首色条与右栏变体卡片上的标签说——票 `gui-redesign/12` 那条
+/// 「上了色的地方都跟着那个词」，2026-09-14 拿主意的人看图后撤掉，照稿（挂单 `Q872`）。
+fn metadata_chip(ui: &mut egui::Ui, work: &WorkRow) {
+    look::chip(ui, look::tier_tone(work.tier()), &work.meta_label());
+}
+
+/// 根名与相对路径之间那个分隔：认不出作品那一行的副行、侧边详情变体卡片底下那一行都照稿写
+/// 「根名 · 相对路径」（设计稿 `主库 · GBC/汉化/…`，挂单 `Q809`）。
+pub const ROOT_SEPARATOR: &str = " · ";
+
+/// 一条键画成「**根名 · 相对路径**」，宽不过 `max_width`：画不下时只从相对路径的左边删字补「…」，
+/// 根名留着——一眼看得出是哪个根。**拆键由核心库做**（[`romcat_core::path::split_root`]），
+/// 这里只接起来、量宽度。
+#[must_use]
+pub(crate) fn root_and_path(
+    ui: &egui::Ui,
+    key: &str,
+    font: &egui::FontId,
+    max_width: f32,
+) -> String {
+    let (root, relative) = romcat_core::path::split_root(key);
+    if relative.is_empty() {
+        return tail_fit(ui, root, font, max_width);
+    }
+    let head = format!("{root}{ROOT_SEPARATOR}");
+    let room = max_width - text_width(ui, &head, font);
+    format!("{head}{}", tail_fit(ui, relative, font, room.max(0.0)))
 }
 
 /// 「作品」那一格。
 ///
 /// **认不出作品的那一行两行字**（票 `gui-looks-like-the-design/09`）：主栏是**正题**挂一个
-/// 「未关联作品」标签，副行是那份内容在主库里的**相对路径，从尾部截断**。从前那一格直接印
-/// 变体的键——真库里一万六千多行都是一长串路径，而路径的信息在尾巴上，被列宽截掉的正是
-/// 文件名那一截。认不认得出、正题是什么，都是核心库答的（[`WorkRow::title`]）。
+/// 「未关联作品」标签，副行是那份内容在主库里的「**根名 · 相对路径**」，**从尾部截断**
+/// （[`root_and_path`]）。从前那一格直接印变体的键——真库里一万六千多行都是一长串路径，
+/// 而路径的信息在尾巴上，被列宽截掉的正是文件名那一截。认不认得出、正题是什么，都是核心库答的
+/// （[`WorkRow::title`]）。
 ///
-/// 认出作品的那一行照旧一行字。
+/// **认出作品、带着显示标题的那一行也两行字**：主栏是显示标题（中文名多半在这儿），副行小字是作品名
+/// （原名）。显示标题由核心库挑（[`WorkRow::display`]）；取不到时主栏印作品名，第二行不写。
 ///
 /// 「在每行开头显示封面」开着时（`shelf` 是 `Some`），这一格最左边先摆一小格封面或平台色块。
 fn name_cell(ui: &mut egui::Ui, work: &WorkRow, rules: &Rules, shelf: Option<&mut Shelf>) {
+    let tokens = Tokens::builtin();
     if let Some(shelf) = shelf {
         shelf.thumb(ui, work);
+        // 封面格与字之间（设计稿 `.wcell` 的 `gap`）。
+        ui.add_space((tokens.space.cell_gap - ui.spacing().item_spacing.x).max(0.0));
     }
     // **搜索命中在别处时说清楚**：一行名字里一个搜索词都没有的
     // 作品冒在前面，不印这一句就是「凭什么排在这儿」看不出答案。
@@ -528,58 +729,93 @@ fn name_cell(ui: &mut egui::Ui, work: &WorkRow, rules: &Rules, shelf: Option<&mu
     // 是不是由核心库答（`WorkRow::non_game_asset`），这里照着标，
     // 不自己判（ADR-0024）。
     let hit = work.hit.filter(|hit| *hit > SearchHit::Title);
-    let Some(title) = work.title(rules) else {
-        if hit.is_none() && !work.non_game_asset {
-            ui.label(&work.name);
-        } else {
-            // **先把那句话摆到这一格的右头，剩下的宽度才给名字。**
-            // 这一列是定宽加 `clip`，而真库里 DAT 条目名普遍长——
-            // 顺着写的话被截掉的正是那句唯一的答案。反过来摆，
-            // 截掉的是名字，而名字还挂在悬停里。
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                right_marks(ui, work, hit);
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    ui.label(&work.name).on_hover_text(&work.name);
-                });
-            });
-        }
+    if let Some(title) = work.title(rules) {
+        two_lines(ui, work, hit, &title, Some(UNLINKED_LABEL), Second::Path);
         return;
-    };
+    }
+    if let Some(display) = work.display.as_deref() {
+        two_lines(ui, work, hit, display, None, Second::WorkName);
+        return;
+    }
+    // 取不到显示标题的那一行一行字：作品名，拉丁与数字加粗（设计稿 `.w1`）。
+    if hit.is_none() && !work.non_game_asset {
+        ui.add(egui::Label::new(font::strong(&work.name)).truncate());
+    } else {
+        // **先把那句话摆到这一格的右头，剩下的宽度才给名字。**
+        // 这一列是定宽加 `clip`，而真库里 DAT 条目名普遍长——
+        // 顺着写的话被截掉的正是那句唯一的答案。反过来摆，
+        // 截掉的是名字，而名字还挂在悬停里。
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            right_marks(ui, work, hit);
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                ui.add(egui::Label::new(font::strong(&work.name)).truncate())
+                    .on_hover_text(&work.name);
+            });
+        });
+    }
+}
+
+/// 两行字那一格的第二行印什么。
+#[derive(Debug, Clone, Copy)]
+enum Second {
+    /// 认不出作品的那一行：「根名 · 相对路径」，画不下只删相对路径的左边（[`root_and_path`]）。
+    Path,
+    /// 带着显示标题的那一行：作品名（原名），画不下截尾巴。
+    WorkName,
+}
+
+/// 两行字的那一格（设计稿 `.wtxt`）：主栏拉丁与数字加粗，右头照旧挂着搜索命中与非游戏资产那两个
+/// 记号，`label` 给了就跟一枚行内标签；底下一行小字，等宽、弱字色（设计稿 `.w2`），整条挂在悬停里。
+fn two_lines(
+    ui: &mut egui::Ui,
+    work: &WorkRow,
+    hit: Option<SearchHit>,
+    main: &str,
+    label: Option<&str>,
+    second: Second,
+) {
+    let tokens = Tokens::builtin();
     let width = ui.available_width();
-    let line = ui.text_style_height(&egui::TextStyle::Body);
-    let small = egui::TextStyle::Small.resolve(ui.style());
-    let path_font = egui::FontId::new(small.size, egui::FontFamily::Monospace);
+    let small = egui::FontId::monospace(tokens.font.size_path);
     ui.vertical(|ui| {
+        // 两行字之间不另留缝（设计稿 `.wtxt`）。
+        ui.spacing_mut().item_spacing.y = 0.0;
         ui.allocate_ui_with_layout(
-            egui::vec2(width, line),
+            egui::vec2(width, tokens.layout.tag_height),
             Layout::right_to_left(Align::Center),
             |ui| {
                 right_marks(ui, work, hit);
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    // **标签的宽度先让出来，剩下的才给正题**：正题长了截的是正题，
+                    // **标签的宽度先让出来，剩下的才给主栏**：主栏长了截的是主栏，
                     // 「未关联作品」那几个字总在。
-                    let tag = tag_galley(ui, UNLINKED_LABEL);
-                    let room =
-                        ui.available_width() - tag_size(&tag).x - ui.spacing().item_spacing.x;
+                    let room = ui.available_width()
+                        - label.map_or(0.0, |text| {
+                            tag_width(ui, text) + ui.spacing().item_spacing.x
+                        });
                     ui.scope(|ui| {
                         ui.set_max_width(room.max(0.0));
-                        ui.add(egui::Label::new(&title).truncate());
+                        ui.add(egui::Label::new(font::strong(main)).truncate());
                     });
-                    paint_tag(ui, tag);
+                    if let Some(text) = label {
+                        tag(ui, text);
+                    }
                 });
             },
         );
-        // **副行：从尾部截断的相对路径。** 截到画得下为止，整条挂在悬停里。
-        let shown = tail_fit(ui, &work.name, &path_font, width);
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(shown)
-                    .font(path_font)
-                    .color(ui.visuals().weak_text_color()),
+        let weak = ui.visuals().weak_text_color();
+        let second_line = match second {
+            // **路径从尾部截断**：截到画得下为止，文件名那一截留着。
+            Second::Path => egui::Label::new(
+                egui::RichText::new(root_and_path(ui, &work.name, &small, width))
+                    .font(small)
+                    .color(weak),
             )
             .extend(),
-        )
-        .on_hover_text(&work.name);
+            Second::WorkName => {
+                egui::Label::new(egui::RichText::new(&work.name).font(small).color(weak)).truncate()
+            }
+        };
+        ui.add(second_line).on_hover_text(&work.name);
     });
 }
 
@@ -601,16 +837,11 @@ fn right_marks(ui: &mut egui::Ui, work: &WorkRow, hit: Option<SearchHit>) {
 /// 按字数截要么截多了、要么画出格。
 ///
 /// 删几个字是二分找的：删得越多越窄，找「删最少、摆得下」的那一处，一格量十几次。
+///
+/// 侧边详情里变体那一行、文件那一行印的也是这串键，用的是同一个。
 #[must_use]
-fn tail_fit(ui: &egui::Ui, text: &str, font: &egui::FontId, max_width: f32) -> String {
-    let width = |candidate: String| {
-        ui.ctx().fonts_mut(|fonts| {
-            fonts
-                .layout_no_wrap(candidate, font.clone(), egui::Color32::PLACEHOLDER)
-                .size()
-                .x
-        })
-    };
+pub(crate) fn tail_fit(ui: &egui::Ui, text: &str, font: &egui::FontId, max_width: f32) -> String {
+    let width = |candidate: String| text_width(ui, &candidate, font);
     if width(text.to_string()) <= max_width {
         return text.to_string();
     }
@@ -634,29 +865,47 @@ fn tail_fit(ui: &egui::Ui, text: &str, font: &egui::FontId, max_width: f32) -> S
     format!("…{}", &text[starts[low]..])
 }
 
-/// 行上那种**标签**排好的字：小字号、正文次一级的字色（令牌 `ink-2`）。
-fn tag_galley(ui: &egui::Ui, text: &str) -> std::sync::Arc<egui::Galley> {
-    let font = egui::TextStyle::Small.resolve(ui.style());
+/// 这段字用这个字体排成一行**有多宽**（真量出来的，不是数字数）。
+#[must_use]
+pub(crate) fn text_width(ui: &egui::Ui, text: &str, font: &egui::FontId) -> f32 {
+    ui.ctx().fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::PLACEHOLDER)
+            .size()
+            .x
+    })
+}
+
+/// 一枚行内**标签**（[`tag`]）画出来多宽：字宽加左右各一份令牌 `tag-padding`。要先替它留出地方时用。
+#[must_use]
+pub(crate) fn tag_width(ui: &egui::Ui, text: &str) -> f32 {
+    let tokens = Tokens::builtin();
+    text_width(
+        ui,
+        text,
+        &egui::FontId::proportional(tokens.font.size_caption_plus),
+    ) + 2.0 * tokens.layout.tag_padding
+}
+
+/// 画一枚行内**标签**，照稿 `.tag`：凹陷底（令牌 `sunken`）、小圆角、正文次一级的字色（`ink-2`），
+/// 高取 `tag-height`、左右留白取 `tag-padding`、字是 `size-caption-plus`。
+///
+/// 表上认不出作品那一行的「未关联作品」、侧边详情变体卡片上的「首选变体」「非游戏资产」都是它。
+pub(crate) fn tag(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let tokens = Tokens::builtin();
     let color = ui.visuals().text_color();
-    ui.ctx()
-        .fonts_mut(|fonts| fonts.layout_no_wrap(text.to_string(), font, color))
-}
-
-/// 标签连底多大：字的四周各让出令牌里最小那一档间距的一半到一整档。
-fn tag_size(galley: &egui::Galley) -> egui::Vec2 {
-    let step = Tokens::builtin().space.steps[0];
-    galley.size() + egui::vec2(step * 2.0, step)
-}
-
-/// 画一个**标签**：凹陷底（令牌 `sunken`）、小圆角，照稿 `.tag`。
-fn paint_tag(ui: &mut egui::Ui, galley: std::sync::Arc<egui::Galley>) {
-    let (rect, _) = ui.allocate_exact_size(tag_size(&galley), egui::Sense::hover());
-    let radius = Tokens::builtin().radius.small;
-    let painter = ui.painter();
-    painter.rect_filled(rect, radius, ui.visuals().extreme_bg_color);
-    painter.galley(
-        rect.center() - galley.size() / 2.0,
-        galley,
-        ui.visuals().text_color(),
+    let galley = ui.painter().layout_no_wrap(
+        text.to_owned(),
+        egui::FontId::proportional(tokens.font.size_caption_plus),
+        color,
     );
+    let size = egui::vec2(
+        galley.size().x + 2.0 * tokens.layout.tag_padding,
+        tokens.layout.tag_height,
+    );
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, tokens.radius.small, ui.visuals().extreme_bg_color);
+    painter.galley(rect.center() - galley.size() / 2.0, galley, color);
+    response
 }

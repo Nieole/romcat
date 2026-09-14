@@ -434,6 +434,22 @@ pub enum Tone {
     Good,
     /// 留神：令牌 `mid` 那一对。
     Caution,
+    /// 要紧：令牌 `lo` 那一对（设计稿 `.chip.t-lo`「待确认」）。
+    Risk,
+    /// 不置可否：令牌 `none` 那一对（设计稿 `.chip.t-none`「仅文件名」）。
+    Neutral,
+}
+
+/// 一档**置信度**的标签用哪种语气：高置信放心、中置信留神、低置信要紧、没有候选不置可否
+/// （设计稿 `.t-hi` / `.t-mid` / `.t-lo` / `.t-none`）。字那一格与 [`tier_color`] 取的是同一个令牌。
+#[must_use]
+pub fn tier_tone(tier: Tier) -> Tone {
+    match tier {
+        Tier::High => Tone::Good,
+        Tier::Medium => Tone::Caution,
+        Tier::Low => Tone::Risk,
+        Tier::Unidentified => Tone::Neutral,
+    }
 }
 
 /// 那种语气的标签画成什么颜色：`(字, 底)`。**全窗口只有这一处回答。**
@@ -451,6 +467,8 @@ fn tone_colors_in(palette: &Palette, tone: Tone) -> (Color32, Color32) {
     match tone {
         Tone::Good => (palette.hi, palette.hi_soft),
         Tone::Caution => (palette.mid, palette.mid_soft),
+        Tone::Risk => (palette.lo, palette.lo_soft),
+        Tone::Neutral => (palette.none, palette.none_soft),
     }
 }
 
@@ -528,6 +546,227 @@ pub fn note(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) {
             ui.set_width(ui.available_width());
             ui.label(text);
         });
+}
+
+/// 一块**提示框**（设计稿 `.note`）：次级底色、分隔线色描边、中圆角，内边距取令牌 `note-padding`，
+/// 里头的字是 `size-small-plus` 那一档，占满这一栏的宽。
+///
+/// 与 [`note`] 是同一个样子，只是**里头摆什么由调用方给**（判定依据那几行、一句说明）。[`note`] 的留白
+/// 没照令牌走，开场与添加主库向导的基线里画着它，所以不动它，另起这一个。
+pub fn note_box<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let tokens = Tokens::builtin();
+    let [上下, 左右] = tokens.space.note_padding;
+    let (底色, 描边) = (
+        ui.visuals().faint_bg_color,
+        ui.visuals().widgets.noninteractive.bg_stroke,
+    );
+    egui::Frame::new()
+        .fill(底色)
+        .stroke(描边)
+        .corner_radius(tokens.radius.medium)
+        .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.style_mut().override_font_id =
+                Some(egui::FontId::proportional(tokens.font.size_small_plus));
+            add(ui)
+        })
+        .inner
+}
+
+/// 一颗**图标按钮**（设计稿 `.iconbtn`）：边长取令牌 `icon-button` 的方块，平时透明无框、字是弱字色；
+/// 悬停或拿到焦点时铺凹陷底、描一圈分隔线、字换成强调字。收起、展开那两颗箭头用它。
+///
+/// 自己画而不走 `egui::Button`：按钮最矮也有令牌 `button-height` 那么高、两边还留着 `button-padding`，
+/// 塞不进 36 点宽的窄条（设计稿 `.strip`）。
+pub fn icon_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let tokens = Tokens::builtin();
+    let 边长 = tokens.layout.icon_button;
+    let enabled = ui.is_enabled();
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(边长, 边长), egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, text));
+    let visuals = ui.visuals();
+    let 亮 = response.hovered() || response.has_focus();
+    if 亮 {
+        ui.painter().rect(
+            rect,
+            tokens.radius.small,
+            visuals.extreme_bg_color,
+            visuals.widgets.noninteractive.bg_stroke,
+            egui::StrokeKind::Inside,
+        );
+    }
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            tokens.radius.small,
+            egui::Stroke::new(tokens.layout.control_stroke, visuals.selection.stroke.color),
+            egui::StrokeKind::Inside,
+        );
+    }
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        egui::FontId::proportional(tokens.font.size_body),
+        if 亮 {
+            visuals.strong_text_color()
+        } else {
+            visuals.weak_text_color()
+        },
+    );
+    response
+}
+
+/// 一颗**幽灵按钮**（设计稿 `.btn.ghost`）：平时没有底也没有框，悬停、按下时才露出按钮那一层。
+/// 高与留白跟着摆它的那一块走——浏览屏左栏标题行那颗「清除」摆在 [`small_buttons`] 里。
+pub fn ghost_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.add(egui::Button::new(text).frame_when_inactive(false))
+}
+
+/// 一枚**分面标签**（设计稿 `.fchip`）：一个值加上它的条数，点一下收窄到这个值、再点一下放开。
+///
+/// 高、左右留白、值与条数之间取令牌 `facet-chip-height` / `facet-chip-padding` / `facet-chip-gap`；
+/// 值是说明字号（`size-small`），条数是等宽的 `size-mini`、弱字色。平时铺面板底色、描一圈分隔线；
+/// 选中时换成强调那一套——描边 `accent`、底 `accent-soft`、字 `accent-ink`，拉丁与数字加粗。
+pub fn facet_chip(ui: &mut egui::Ui, selected: bool, value: &str, count: &str) -> egui::Response {
+    let tokens = Tokens::builtin();
+    let (字色, 数色, 底色, 描边色, 焦点色) = {
+        let visuals = ui.visuals();
+        let 焦点色 = visuals.selection.stroke.color;
+        if selected {
+            (
+                visuals.hyperlink_color,
+                visuals.hyperlink_color,
+                visuals.selection.bg_fill,
+                焦点色,
+                焦点色,
+            )
+        } else {
+            (
+                visuals.text_color(),
+                visuals.weak_text_color(),
+                visuals.window_fill,
+                visuals.widgets.noninteractive.bg_stroke.color,
+                焦点色,
+            )
+        }
+    };
+    let 字族 = if selected {
+        crate::font::strong_family()
+    } else {
+        egui::FontFamily::Proportional
+    };
+    let 值 = ui.painter().layout_no_wrap(
+        value.to_owned(),
+        egui::FontId::new(tokens.font.size_small, 字族),
+        字色,
+    );
+    let 数 = ui.painter().layout_no_wrap(
+        count.to_owned(),
+        egui::FontId::monospace(tokens.font.size_mini),
+        数色,
+    );
+    let 边 = tokens.layout.facet_chip_padding;
+    let 缝 = if count.is_empty() {
+        0.0
+    } else {
+        tokens.space.facet_chip_gap
+    };
+    let (值宽, 值高, 数高) = (值.size().x, 值.size().y, 数.size().y);
+    let enabled = ui.is_enabled();
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(
+            边 + 值宽 + 缝 + 数.size().x + 边,
+            tokens.layout.facet_chip_height,
+        ),
+        egui::Sense::click(),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            enabled,
+            selected,
+            format!("{value} {count}").trim_end(),
+        )
+    });
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        tokens.radius.small,
+        底色,
+        egui::Stroke::new(tokens.layout.control_stroke, 描边色),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(
+        egui::pos2(rect.left() + 边, rect.center().y - 值高 / 2.0),
+        值,
+        字色,
+    );
+    painter.galley(
+        egui::pos2(rect.left() + 边 + 值宽 + 缝, rect.center().y - 数高 / 2.0),
+        数,
+        数色,
+    );
+    if response.has_focus() {
+        painter.rect_stroke(
+            rect,
+            tokens.radius.small,
+            egui::Stroke::new(2.0 * tokens.layout.control_stroke, 焦点色),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response
+}
+
+/// 分面标签那一簇末尾那颗「更多（N）」/「收起」（设计稿 `.fmore`）：与分面标签一样高、一样的留白，
+/// 描一圈虚线（令牌 `line-2`），字是说明字号、弱字色，悬停时换成强调字。
+pub fn more_chip(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let tokens = Tokens::builtin();
+    let (弱, 强, 线色) = {
+        let visuals = ui.visuals();
+        (
+            visuals.weak_text_color(),
+            visuals.strong_text_color(),
+            visuals.widgets.inactive.bg_stroke.color,
+        )
+    };
+    let 字 = ui.painter().layout_no_wrap(
+        text.to_owned(),
+        egui::FontId::proportional(tokens.font.size_small),
+        弱,
+    );
+    let 边 = tokens.layout.facet_chip_padding;
+    let 字大小 = 字.size();
+    let enabled = ui.is_enabled();
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(边 + 字大小.x + 边, tokens.layout.facet_chip_height),
+        egui::Sense::click(),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, text));
+    let 线宽 = tokens.layout.control_stroke;
+    let 框 = rect.shrink(线宽 / 2.0);
+    // 虚线一段多长、两段之间空多少：浏览器画 `dashed` 大约是线宽的三倍，这里照那个比例。
+    let 段 = 3.0 * 线宽;
+    let painter = ui.painter();
+    painter.extend(egui::Shape::dashed_line(
+        &[
+            框.left_top(),
+            框.right_top(),
+            框.right_bottom(),
+            框.left_bottom(),
+            框.left_top(),
+        ],
+        egui::Stroke::new(线宽, 线色),
+        段,
+        段,
+    ));
+    painter.galley_with_override_text_color(
+        rect.center() - 字大小 / 2.0,
+        字,
+        if response.hovered() { 强 } else { 弱 },
+    );
+    response
 }
 
 /// 一栏的**小标题**（设计稿 `.sec`）：说明字号、弱字色。稿上还加粗，眼下没照，画得与 [`help`] 一样（挂单 `Q770`）。
@@ -668,7 +907,7 @@ mod tests {
     /// ——egui 的 `Visuals` 里没有它们的槽位，而画它们的那几屏还没照稿重排。
     /// 哪一屏第一个用上它，就从这张单子里划掉（下面那条变异测试会提醒）。`hi-soft` 与 `mid-soft`
     /// 由标签（[`tone_colors`]）用上了（票 `gui-looks-like-the-design/05`，开场与添加主库向导）。
-    const NOT_YET_USED: &[&str] = &["ground", "lo-soft", "none-soft"];
+    const NOT_YET_USED: &[&str] = &["ground"];
 
     /// 这套主题下**有映射的每一个颜色**与令牌逐项比，对不上的那几项：`visuals` 的每个颜色槽位，
     /// 加上 `四档`（置信度四档各取哪个颜色）。平台色与播放标直接读令牌、没有映射可接错，
@@ -874,6 +1113,8 @@ mod tests {
         for (tone, [字键, 底键]) in [
             (Tone::Good, ["hi", "hi-soft"]),
             (Tone::Caution, ["mid", "mid-soft"]),
+            (Tone::Risk, ["lo", "lo-soft"]),
+            (Tone::Neutral, ["none", "none-soft"]),
         ] {
             let (字, 底) = 标签(tone);
             颜色.push((format!("标签（{tone:?}）的字"), 字, 字键));

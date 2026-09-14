@@ -46,6 +46,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::app::View;
+use crate::look;
 
 /// 一条边界靠在哪一边。
 ///
@@ -261,8 +262,7 @@ impl Boundary {
     /// 那一栏标题行里的**收起**箭头：左栏「«」、右栏「»」，都指向它收进去的那一边。
     pub fn collapse_button(self, ui: &mut egui::Ui) {
         let (收起, _) = self.arrows();
-        if ui
-            .button(收起)
+        if look::icon_button(ui, 收起)
             .on_hover_text("收起这一栏，只留一条窄条；点窄条上的箭头再展开。")
             .clicked()
         {
@@ -270,7 +270,8 @@ impl Boundary {
         }
     }
 
-    /// 画这块面板；**收起来了就只画一条窄条**：一颗展开的箭头，底下竖着写这一栏叫什么。
+    /// 画这块面板，**底色与内边距照 `frame`**；**收起来了就只画一条窄条**：一颗展开的箭头，底下竖着写
+    /// 这一栏叫什么（设计稿 `.strip`）。
     ///
     /// 收起来时交回 `None`：那一栏的内容这一帧一行都没画。**宽度不丢**——窄条是另一块面板
     /// （id 另起），这条边界自己那格尺寸在 egui 那张表里原样留着，展开回来就是原来那么宽。
@@ -280,11 +281,25 @@ impl Boundary {
         self,
         ui: &mut egui::Ui,
         name: &str,
+        frame: egui::Frame,
         add_contents: impl FnOnce(&mut egui::Ui) -> R,
     ) -> Option<R> {
         if self.side == Side::Bottom || !self.collapsed(ui.ctx()) {
-            return Some(self.show(ui, add_contents));
+            // 与 [`Self::show`] 同一个写法，只是框换成调用方给的那一个：内容头一件事是把地方占满。
+            return Some(
+                self.panel(ui)
+                    .frame(frame)
+                    .show(ui, |ui| {
+                        match self.side {
+                            Side::Left | Side::Right => ui.take_available_width(),
+                            Side::Bottom => ui.take_available_height(),
+                        }
+                        add_contents(ui)
+                    })
+                    .inner,
+            );
         }
+        let tokens = crate::tokens::Tokens::builtin();
         let (_, 展开) = self.arrows();
         let id = egui::Id::new(self.id).with("窄条");
         let strip = if self.side == Side::Left {
@@ -292,24 +307,37 @@ impl Boundary {
         } else {
             egui::Panel::right(id)
         };
+        // 窄条的底是次级底色（设计稿 `.strip`），左右留白正好让那颗图标按钮摆在正中。
+        let 左右 = ((tokens.layout.strip_width - tokens.layout.icon_button) / 2.0).max(0.0);
+        let 窄条框 = egui::Frame::new()
+            .fill(ui.visuals().faint_bg_color)
+            .inner_margin(egui::Margin::from(egui::vec2(
+                左右,
+                tokens.space.strip_padding,
+            )));
         strip
             .resizable(false)
-            .exact_size(crate::tokens::Tokens::builtin().layout.strip_width)
+            .exact_size(tokens.layout.strip_width)
+            .frame(窄条框)
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
-                    if ui
-                        .button(展开)
+                    if look::icon_button(ui, 展开)
                         .on_hover_text(format!("展开{name}"))
                         .clicked()
                     {
                         self.set_collapsed(ui.ctx(), false);
                     }
-                    // **竖着写**：一个字一行，照稿那一条竖排的栏名。
-                    ui.weak(
-                        name.chars()
-                            .map(String::from)
-                            .collect::<Vec<_>>()
-                            .join("\n"),
+                    ui.add_space((tokens.space.strip_gap - ui.spacing().item_spacing.y).max(0.0));
+                    // **竖着写**：一个字一行，照稿那一条竖排的栏名（说明字号、次一级的字色）。
+                    ui.label(
+                        egui::RichText::new(
+                            name.chars()
+                                .map(String::from)
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        )
+                        .small()
+                        .color(ui.visuals().text_color()),
                     );
                 });
             });

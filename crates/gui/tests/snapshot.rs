@@ -37,10 +37,21 @@ use std::path::{Path, PathBuf};
 
 use egui::Theme;
 use egui_kittest::{Harness, SnapshotOptions};
-use romcat_core::catalog::{CatalogError, SCHEMA_VERSION};
+use romcat_core::catalog::browse::PlatformFilter;
+use romcat_core::catalog::identify::{Candidate, Identification, Provenance};
+use romcat_core::catalog::scrape::{Harvested, HarvestedMedia, HarvestedValue};
+use romcat_core::catalog::{Catalog, CatalogError, Confidence, SCHEMA_VERSION, State};
+use romcat_core::dat::Convention;
+use romcat_core::platform::Manifest;
+use romcat_core::scrape::{AnchorKind, Field, MediaKind};
+use romcat_core::shape::{Role, SINGLE_FILE_RULE, Variant};
+use romcat_core::site::Site;
+use romcat_core::testing::{TempDir, temp_dir};
+use romcat_core::verdict::Store;
 use romcat_core::workspace::{CatalogEntry, CatalogFacts, CatalogState, DirUnreadable, Listing};
+use romcat_gui::app::{App, View};
 use romcat_gui::opening::Screen;
-use romcat_gui::{font, headless, look};
+use romcat_gui::{font, headless, layout, look};
 
 /// 比对阈值：一个像素的色差过了多少算坏（每像素 YIQ 色距 0.6）、坏几个像素算红（0 个）。
 ///
@@ -83,7 +94,9 @@ fn 装好(ctx: &egui::Context) -> bool {
     }
     ctx.data_mut(|data| data.insert_temp(装过, true));
     font::install(ctx);
-    look::install(ctx);
+    // **走 `install_once`**：主窗口那一路（`App::ui` 的头一帧）自己也问一遍它。这里直接 `install`
+    // 的话，那一问认不出装过，会再装一遍，把下面关掉的光标闪烁又带回来。
+    look::install_once(ctx);
     ctx.all_styles_mut(|style| style.visuals.text_cursor.blink = false);
     ctx.request_repaint();
     false
@@ -313,4 +326,551 @@ fn 开场_添加主库向导盖在上面_浅色() {
     });
     按(&mut harness, "添加主库");
     拍下(harness, 名字);
+}
+
+// ——— 浏览（票 `gui-looks-like-the-design/09`） ———
+//
+// 浏览屏住在主窗口里（[`App`]），喂一份**手搭的小库**：五个认出来的作品、三个认不出作品的变体，
+// 名字与路径照真库的样子（DAT 条目名、汉化组记号、整理目录）。库与沉淀库全在内存里。
+//
+// 工作目录是一个临时目录——版式偏好往那儿读写，**屏上一个字都不画它**。媒体池不在那儿，
+// 于是封面一律走「没有封面」那一档（详情头上的字卡、行首的平台色块）：没有后台解码要等，
+// 跑到不要重画为止就是稳的那一帧。
+
+/// 基线那份库的根名：变体的键第一段就是它。
+const 浏览的根: &str = "主库";
+
+/// 那一行**认不出作品**、路径长到一格画不下的变体（根底下那一截）。文件名是剥离规则模块自己钉着的
+/// 那一例（剥完是 `超级机器人大战R`），前面垫两层真库里常见的整理目录。
+const 长路径: &str = "【全部汉化】/GBA 汉化合集 第一辑（按首字排好）/超级机器人大战R[星组](v1.2+)(简)(JP)(68.92Mb).zip";
+
+/// 点开来看侧边详情的那个作品。
+const 点开的作品: &str = "Chrono Trigger (Japan)";
+
+/// 一个变体识别落在哪一档。
+#[derive(Debug, Clone, Copy)]
+enum 档 {
+    /// 命中：一条自动通过的候选，候选说的就是它挂的那个作品。
+    命中(Confidence),
+    /// 未命中，带一条低置信、没采纳的候选（候选说的是这个名字）——进待确认队列的那种。
+    待裁决(&'static str),
+    /// 识别跑过了，一条候选都没有。
+    没有候选,
+    /// 结论表里一行都不写。
+    还没识别,
+}
+
+/// 基线里的一个变体。
+struct 一个变体 {
+    平台: &'static str,
+    /// 根底下的相对路径。
+    路径: &'static str,
+    字节: u64,
+    落在: 档,
+    /// 挂在哪个作品上；`None` 是认不出作品。
+    作品: Option<&'static str>,
+}
+
+const MIB: u64 = 1024 * 1024;
+
+/// 八个变体收成八行：五个作品（两个作品底下各两个变体）、三个认不出作品的。
+const 浏览的变体: &[一个变体] = &[
+    一个变体 {
+        平台: "SFC",
+        路径: "Chrono Trigger (Japan).zip",
+        字节: 4 * MIB,
+        落在: 档::命中(Confidence::High),
+        作品: Some(点开的作品),
+    },
+    一个变体 {
+        平台: "SFC",
+        路径: "汉化/时空之轮 (简体中文 v1.2).zip",
+        字节: 4 * MIB,
+        落在: 档::命中(Confidence::Medium),
+        作品: Some(点开的作品),
+    },
+    一个变体 {
+        平台: "GBA",
+        路径: "Gyakuten Saiban (Japan).zip",
+        字节: 8 * MIB,
+        落在: 档::命中(Confidence::High),
+        作品: Some("Gyakuten Saiban (Japan)"),
+    },
+    一个变体 {
+        平台: "GB",
+        路径: "Pocket Monsters - Aka (Japan).zip",
+        字节: MIB,
+        落在: 档::命中(Confidence::High),
+        作品: Some("Pocket Monsters - Aka (Japan)"),
+    },
+    一个变体 {
+        平台: "GB",
+        路径: "汉化/口袋妖怪 红 (口袋汉化组).zip",
+        字节: MIB,
+        落在: 档::命中(Confidence::Medium),
+        作品: Some("Pocket Monsters - Aka (Japan)"),
+    },
+    一个变体 {
+        平台: "FC",
+        路径: "Rockman 2 - Dr. Wily no Nazo (Japan).nes",
+        字节: 256 * 1024,
+        落在: 档::命中(Confidence::High),
+        作品: Some("Rockman 2 - Dr. Wily no Nazo (Japan)"),
+    },
+    一个变体 {
+        平台: "SFC",
+        路径: "Seiken Densetsu 2 (Japan).sfc",
+        字节: 2 * MIB,
+        落在: 档::命中(Confidence::High),
+        作品: Some("Seiken Densetsu 2 (Japan)"),
+    },
+    一个变体 {
+        平台: "GBA",
+        路径: 长路径,
+        字节: 64 * MIB,
+        落在: 档::没有候选,
+        作品: None,
+    },
+    一个变体 {
+        平台: "GBC",
+        路径: "汉化/精灵宝可梦 银[简正确精灵名](完美LOGO+背包等汉化-sss888+RickyL1213).7z",
+        字节: 2 * MIB,
+        落在: 档::待裁决("Pocket Monsters - Gin (Japan)"),
+        作品: None,
+    },
+    一个变体 {
+        平台: "FC",
+        路径: "【中文游戏】/0152 - 1942 - MS汉化组.nes",
+        字节: 40 * 1024,
+        落在: 档::还没识别,
+        作品: None,
+    },
+];
+
+/// 一个作品：`(作品名, 采到的元数据, 有没有封面)`。
+type 一个作品 = (&'static str, &'static [(Field, &'static str)], bool);
+
+/// 五个作品各采到了哪几样元数据、有没有封面。**元数据那一栏齐与缺各有几种**：齐、缺一样、缺几样、缺全部。
+const 浏览的作品: &[一个作品] = &[
+    (
+        点开的作品,
+        &[
+            (Field::Year, "1995"),
+            (Field::Publisher, "Square"),
+            (Field::Developer, "Square"),
+            (Field::Genre, "角色扮演"),
+            (Field::Description, "穿越时空、改写结局的角色扮演游戏。"),
+        ],
+        true,
+    ),
+    (
+        "Gyakuten Saiban (Japan)",
+        &[
+            (Field::Year, "2001"),
+            (Field::Publisher, "Capcom"),
+            (Field::Developer, "Capcom"),
+            (Field::Genre, "文字冒险"),
+        ],
+        false,
+    ),
+    (
+        "Pocket Monsters - Aka (Japan)",
+        &[(Field::Year, "1996"), (Field::Genre, "角色扮演")],
+        true,
+    ),
+    (
+        "Rockman 2 - Dr. Wily no Nazo (Japan)",
+        &[(Field::Year, "1988")],
+        false,
+    ),
+    ("Seiken Densetsu 2 (Japan)", &[], false),
+];
+
+/// 有中文译名的那几个作品：`(作品名, 译名)`。主列表那几行主栏印显示标题、第二行小字印作品名；
+/// 其余作品取不到显示标题，主栏印作品名、第二行不写——两种样子同一张图上都有。
+const 浏览的译名: &[(&str, &str)] = &[
+    (点开的作品, "超时空之钥"),
+    ("Pocket Monsters - Aka (Japan)", "精灵宝可梦 红"),
+    ("Seiken Densetsu 2 (Japan)", "圣剑传说 2"),
+];
+
+/// 浏览屏那一份现场。
+struct 浏览现场 {
+    app: App,
+    /// 工作目录：版式偏好在里头，得活到拍完。
+    目录: TempDir,
+}
+
+/// 一条候选：挂在这个变体自己的主文件上。
+fn 候选(
+    变体: &Variant,
+    accepted: bool,
+    confidence: Confidence,
+    source: &str,
+    game: &str,
+    evidence: &str,
+) -> Candidate {
+    Candidate {
+        member_key: 变体.main_key.clone(),
+        inner: String::new(),
+        confidence,
+        accepted,
+        source: source.to_owned(),
+        dat: format!("{source}.dat"),
+        platform: 变体.platform.clone().unwrap_or_default(),
+        game: game.to_owned(),
+        rom: "rom.bin".to_owned(),
+        hashed_as: Convention::AsIs,
+        dat_convention: Convention::AsIs,
+        evidence: evidence.to_owned(),
+        chinese: None,
+        serial: None,
+        release_id: None,
+    }
+}
+
+/// 搭浏览屏那份库，开一个停在浏览屏上的主窗口。`收起两栏` 时先往工作目录的版式偏好里写上
+/// 左右两栏都收着——走的是开窗时读偏好那一条真路，不是在帧里硬按。
+fn 浏览现场(收起两栏: bool) -> 浏览现场 {
+    let mut catalog = Catalog::open_in_memory().expect("开得出中立库");
+    romcat_core::catalog::roots::add_root(&catalog, None, 浏览的根, Path::new("/主库"))
+        .expect("建得出根");
+
+    let 变体: Vec<Variant> = 浏览的变体
+        .iter()
+        .map(|one| {
+            let key = format!("{浏览的根}/{}/{}", one.平台, one.路径);
+            Variant {
+                main_key: key.clone(),
+                platform: Some(one.平台.to_owned()),
+                rule: SINGLE_FILE_RULE.to_owned(),
+                manual: false,
+                files: 1,
+                bytes: one.字节,
+                unreadable_files: 0,
+                members: vec![(key.clone(), Role::Main)],
+                key,
+            }
+        })
+        .collect();
+    catalog
+        .replace_variants(&变体, 1, &Manifest::default())
+        .expect("写得进变体");
+
+    let mut 作品号 = Vec::new();
+    for (名字, _, _) in 浏览的作品 {
+        let id = catalog
+            .add_work(名字, Provenance::Identified)
+            .expect("建得出作品");
+        作品号.push((*名字, id));
+    }
+    let 译名: Vec<romcat_core::catalog::TitleRow> = 浏览的译名
+        .iter()
+        .map(|(作品, 译名)| romcat_core::catalog::TitleRow {
+            work: (*作品).to_owned(),
+            value: (*译名).to_owned(),
+            language: romcat_core::title::Language::Chinese,
+            kind: romcat_core::title::TitleKind::Translated,
+            source: "中文离线源".to_owned(),
+            region: None,
+            variant_key: None,
+            confidence: Confidence::High,
+            seam: None,
+            evidence: "基线里摆的".to_owned(),
+            seen: 1,
+        })
+        .collect();
+    catalog.put_titles(&译名).expect("写得进标题集合");
+    let 号 = |名字: &str| {
+        作品号
+            .iter()
+            .find(|(it, _)| *it == 名字)
+            .map(|(_, id)| *id)
+            .expect("作品表里有这个作品")
+    };
+
+    let 结论: Vec<Identification> = 浏览的变体
+        .iter()
+        .zip(&变体)
+        .filter_map(|(one, variant)| {
+            let (state, candidates) = match one.落在 {
+                档::命中(confidence) => (
+                    State::Matched,
+                    vec![候选(
+                        variant,
+                        true,
+                        confidence,
+                        "No-Intro",
+                        one.作品.unwrap_or(one.路径),
+                        "CRC-32 与文件大小一致",
+                    )],
+                ),
+                档::待裁决(game) => (
+                    State::Unmatched,
+                    vec![候选(
+                        variant,
+                        false,
+                        Confidence::Low,
+                        "中文离线源",
+                        game,
+                        "名称模糊匹配，平台一致；文件内容改过，对不上 DAT",
+                    )],
+                ),
+                档::没有候选 => (State::Unmatched, Vec::new()),
+                档::还没识别 => return None,
+            };
+            Some(Identification {
+                variant_key: variant.key.clone(),
+                platform: None,
+                standalone: None,
+                state,
+                reason: None,
+                units: 1,
+                nkit: 0,
+                read_bytes: 0,
+                work_id: one.作品.map(&号),
+                release_id: None,
+                candidates,
+            })
+        })
+        .collect();
+    catalog.write_identifications(&结论).expect("写得进结论");
+
+    let mut 采到的 = Vec::new();
+    for (at, (名字, 字段, 有封面)) in 浏览的作品.iter().enumerate() {
+        let mut media = Vec::new();
+        if *有封面 {
+            let hash = format!("{:040x}", at + 1);
+            catalog
+                .put_media(&hash, "png", 86 * 1024)
+                .expect("记得进媒体");
+            media.push(HarvestedMedia {
+                kind: MediaKind::Cover.label().to_owned(),
+                hash,
+                evidence: "基线里摆的一张封面".to_owned(),
+            });
+        }
+        采到的.push(Harvested {
+            anchor: AnchorKind::Work.label().to_owned(),
+            subject: (*名字).to_owned(),
+            source: "No-Intro".to_owned(),
+            input: "基线".to_owned(),
+            values: 字段
+                .iter()
+                .map(|(field, value)| HarvestedValue {
+                    field: field.label().to_owned(),
+                    value: (*value).to_owned(),
+                    evidence: "基线里摆的".to_owned(),
+                })
+                .collect(),
+            media,
+        });
+    }
+    catalog.put_scraped(&采到的).expect("写得进刮削值");
+
+    let 目录 = temp_dir("gui-截图门-浏览");
+    if 收起两栏 {
+        let at = romcat_core::workspace::gui_layout_path(目录.path());
+        std::fs::create_dir_all(at.parent().expect("版式偏好有上一级目录")).expect("建得出目录");
+        std::fs::write(
+            &at,
+            format!(
+                "{} 收起 = 是\n{} 收起 = 是\n",
+                layout::FILTER.id,
+                layout::DETAIL.id
+            ),
+        )
+        .expect("写得下版式偏好");
+    }
+    let site = Site::in_memory(catalog, Store::in_memory().expect("开得出沉淀库"), 浏览的根);
+    let mut app = App::new(site, 目录.path().to_path_buf());
+    app.show_view(View::Browse);
+    浏览现场 { app, 目录 }
+}
+
+/// 浏览屏拍哪一态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum 浏览态 {
+    /// 三栏摊开，点一下那一行认不出作品的：那一行铺着选中的浅底，侧边详情头上是字卡。
+    三栏,
+    /// 打开「在每行开头显示封面」、点一下一个作品：没有媒体池，行首一律是平台色块。
+    行首封面,
+    /// 筛一个库里没有的平台：一行都不剩，表头底下是空态与「清除筛选」。
+    筛空,
+    /// 左右两栏都收着（从工作目录的版式偏好读出来的），点一下那一行认不出作品的。
+    两栏收起,
+}
+
+/// 那一行认不出作品的（长路径那一个）元数据那一格写着的字：一条候选都没有、一样元数据都没采到。
+/// 整张表只有它一行是这个词，按它就是点那一行。
+const 长路径那一行: &str = "仅文件名";
+
+/// 点开的那个作品（五样元数据都齐）元数据那一格写着的字，整张表只有它一行是这个词。
+const 点开的作品那一行: &str = "完整";
+
+/// 搭好浏览屏的那一态、拍一张。CI 上跳过（[`该跳过`]）。
+#[track_caller]
+fn 拍浏览(名字: &str, 主题: Theme, 态: 浏览态) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 浏览现场 { mut app, 目录 } = 浏览现场(态 == 浏览态::两栏收起);
+    if 态 == 浏览态::筛空 {
+        let (browse, _) = app.browse_and_site();
+        browse.query_mut().platform = Some(PlatformFilter::from_label("PS2"));
+    }
+    let mut harness = 开一个(主题, move |ui| app.ui(ui));
+    // **点开一行照人的操作点那一行**：走表格自己那条选中的路，那一行铺上选中的浅底（设计稿
+    // `.wtbl tr[aria-selected]`），侧边详情跟着点开。按的是那一行元数据那一格的字——那一枚标签只认悬停，
+    // 按下去落在那一行上。
+    match 态 {
+        浏览态::三栏 | 浏览态::两栏收起 => 按(&mut harness, 长路径那一行),
+        浏览态::行首封面 => {
+            按(&mut harness, "在每行开头显示封面");
+            按(&mut harness, 点开的作品那一行);
+        }
+        浏览态::筛空 => {}
+    }
+    控件都落在所在那一栏里(&harness, 名字);
+    拍下(harness, 名字);
+    // 拍完才收工作目录：版式偏好一直在里头读写。
+    drop(目录);
+}
+
+/// **每一个可交互的控件都整个落在它所在那一栏的可见区里**（拿主意的人看浏览屏：「按钮都没显示全」）。
+///
+/// 从**无障碍树**读：egui 给每个控件挂一个节点，外框就是它摆出来的那一块——画出界、被旁边一栏或
+/// 窗沿盖掉的那一截，外框里照样算着。「可交互」认的是**点得了或者聚焦得了**；面板本身、拖边界的
+/// 把手与滚动条不算，它们本来就骑在边上。
+///
+/// 一栏是哪一块，问 egui 自己存的面板尺寸：顶栏、左栏（收起时是那条窄条）、右栏（同）、底下那块
+/// 编辑面板，剩下的是表格那一块。控件**上沿的中点**落在哪一栏，就归哪一栏；哪一栏都不落的，本身就是
+/// 问题。按上沿不按中心：滚动区最底下那一个被窗沿截掉一半时，中心已经出了窗，上沿还在它那一栏里。
+///
+/// 面板边上那条拖动把手不算：egui 给它的节点没有角色、只有两份 `resize_grab_radius_side` 那么宽，
+/// 本来就骑在两栏交界上。
+///
+/// **左右两沿必须整个在栏里，竖着只查上沿**：左栏、右栏、编辑面板与表格都是滚动区，最底下那一个
+/// 被滚动区的下沿截掉一截是滚动区本来的样子（设计稿里左栏最底下那一格也截着），滚一下就整个露出来；
+/// 顶栏不滚，上下两沿都查（挂单 `Q871`）。
+#[track_caller]
+fn 控件都落在所在那一栏里(harness: &Harness<'_>, 名字: &str) {
+    use egui::accesskit::{Action, Role};
+    use egui_kittest::kittest::NodeT;
+
+    let ctx = &harness.ctx;
+    let 面板 = |id: egui::Id| egui::PanelState::load(ctx, id).map(|state| state.outer_rect);
+    let 侧栏 = |boundary: layout::Boundary| {
+        if boundary.collapsed(ctx) {
+            面板(egui::Id::new(boundary.id).with("窄条"))
+        } else {
+            面板(egui::Id::new(boundary.id))
+        }
+    };
+    let 窗 = egui::Rect::from_min_size(egui::Pos2::ZERO, headless::VIEWPORT.into());
+    let 顶栏 = 面板(egui::Id::new("顶栏")).expect("顶栏画过");
+    let 左栏 = 侧栏(layout::FILTER).expect("左栏画过");
+    let 右栏 = 侧栏(layout::DETAIL).expect("右栏画过");
+    let 底栏 = 面板(egui::Id::new(layout::EDIT.id)).expect("编辑面板画过");
+    let 表格 = egui::Rect::from_min_max(
+        egui::pos2(左栏.max.x, 顶栏.max.y),
+        egui::pos2(右栏.min.x, 底栏.min.y),
+    );
+    // 次序有讲究：顶栏横跨整个窗宽，先认；编辑面板在表格底下，比表格先认。
+    let 各栏 = [
+        ("顶栏", 顶栏, true),
+        ("左栏", 左栏, false),
+        ("右栏", 右栏, false),
+        ("编辑面板", 底栏, false),
+        ("表格", 表格, false),
+    ];
+
+    let 把手宽 = 2.0
+        * ctx
+            .style_of(ctx.theme())
+            .interaction
+            .resize_grab_radius_side;
+
+    let mut 没显示全 = Vec::new();
+    for node in harness.root().children_recursive() {
+        let data = node.accesskit_node();
+        let 可交互 = data.data().supports_action(Action::Click)
+            || data.data().supports_action(Action::Focus);
+        let 骑在边上 = matches!(
+            data.role(),
+            Role::Pane | Role::Splitter | Role::ScrollBar | Role::Window
+        );
+        if !可交互 || 骑在边上 {
+            continue;
+        }
+        let rect = node.rect();
+        if !rect.is_positive() || !rect.intersects(窗) {
+            continue;
+        }
+        if data.role() == Role::Unknown && rect.width().min(rect.height()) <= 把手宽 + 0.5 {
+            continue;
+        }
+        let 叫什么 = data
+            .label()
+            .or_else(|| data.value())
+            .unwrap_or_else(|| format!("{:?}", data.role()));
+        let 上沿中点 = egui::pos2(rect.center().x, rect.min.y + 0.5);
+        let Some((栏名, 栏, 上下都查)) = 各栏.iter().find(|(_, 栏, _)| 栏.contains(上沿中点))
+        else {
+            没显示全.push(format!("「{叫什么}」{rect:?} 不在任何一栏里"));
+            continue;
+        };
+        let 左右在 = rect.min.x >= 栏.min.x - 0.5 && rect.max.x <= 栏.max.x + 0.5;
+        let 上沿在 = rect.min.y >= 栏.min.y - 0.5;
+        let 下沿在 = !上下都查 || rect.max.y <= 栏.max.y + 0.5;
+        if !(左右在 && 上沿在 && 下沿在) {
+            没显示全.push(format!("「{叫什么}」{rect:?} 伸出了{栏名} {栏:?}"));
+        }
+    }
+    assert!(
+        没显示全.is_empty(),
+        "{名字}：{} 个控件没整个落在所在那一栏里：\n{}",
+        没显示全.len(),
+        没显示全.join("\n"),
+    );
+}
+
+#[test]
+fn 浏览_三栏_浅色() {
+    拍浏览("browse/rows-light", Theme::Light, 浏览态::三栏);
+}
+
+#[test]
+fn 浏览_三栏_暗色() {
+    拍浏览("browse/rows-dark", Theme::Dark, 浏览态::三栏);
+}
+
+#[test]
+fn 浏览_行首封面_浅色() {
+    拍浏览("browse/covers-light", Theme::Light, 浏览态::行首封面);
+}
+
+#[test]
+fn 浏览_行首封面_暗色() {
+    拍浏览("browse/covers-dark", Theme::Dark, 浏览态::行首封面);
+}
+
+#[test]
+fn 浏览_筛空_浅色() {
+    拍浏览("browse/empty-light", Theme::Light, 浏览态::筛空);
+}
+
+#[test]
+fn 浏览_筛空_暗色() {
+    拍浏览("browse/empty-dark", Theme::Dark, 浏览态::筛空);
+}
+
+#[test]
+fn 浏览_两栏收起_浅色() {
+    拍浏览("browse/collapsed-light", Theme::Light, 浏览态::两栏收起);
+}
+
+#[test]
+fn 浏览_两栏收起_暗色() {
+    拍浏览("browse/collapsed-dark", Theme::Dark, 浏览态::两栏收起);
 }
