@@ -420,7 +420,7 @@ impl Screen {
     }
 
     /// **全部下载 / 全部更新**（数据源那一块标题栏右边那颗，[`FETCH_ALL`] / [`REFETCH_ALL`]）：有源没下载时把那几个
-    /// 逐个排上任务台；每个源都下载过了，就把每个源重新下载一遍（[`Self::to_fetch_all`]）。
+    /// 逐个排上任务台；每个源都下载过了，就把每个源重新下载一遍（`Self::to_fetch_all`）。
     ///
     /// **走的就是 [`Self::fetch`]**，不另写一条：任务台一次只跑一趟，排上去的依次跑；已经在台上的不重排。
     pub fn fetch_all(&mut self, tasks: &mut Tasks) {

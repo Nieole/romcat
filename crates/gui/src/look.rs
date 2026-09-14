@@ -725,7 +725,7 @@ pub fn help(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.label(egui::RichText::new(text).small().weak())
 }
 
-/// 一段**弱色的说明**（一整句话，摆在面板正文里）：照可用宽折行，**段末不留孤字**（[`no_orphan_width`]）。
+/// 一段**弱色的说明**（一整句话，摆在面板正文里）：照可用宽折行，**段末不留孤字**（`no_orphan_width`）。
 ///
 /// 第十四版库屏候选图上，空库时数据源那一句「……识别和刮削要用它们。」最后折出一个孤零零的「们。」。
 pub fn weak_paragraph(ui: &mut egui::Ui, text: &str) -> egui::Response {
