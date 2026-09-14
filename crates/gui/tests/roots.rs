@@ -2517,6 +2517,10 @@ fn 打开铺媒体时_按下导出之前屏上先说清这一趟最多要铺几�
     );
     现场.等任务跑完();
 
+    // **先空跑一帧**（同 `点一下` 的「先把界面跑稳」）：开关底下那一句一换，界面把它滚进视口
+    // （`stages::scroll_in_when_new`）；可这一帧里 egui 摆两趟，那一句在第二趟才被挤到视口底下，
+    // 滚动落在下一帧。
+    跑一帧(&ctx, &mut 现场.app);
     let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
         现场.app.ui(ui)
     }));
@@ -2552,6 +2556,10 @@ fn 要铺多少还没算出来时按导出_当场说清_一份都不先铺() {
         screen.stages_mut().set_lay_media(true, site, tasks);
     }
     let ctx = headless::context();
+    // **先空跑一帧**（同 `点一下` 的「先把界面跑稳」）：开关底下那一句一换，界面把它滚进视口
+    // （`stages::scroll_in_when_new`）；可这一帧里 egui 摆两趟，那一句在第二趟才被挤到视口底下，
+    // 滚动落在下一帧。
+    跑一帧(&ctx, &mut 现场.app);
     let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
         现场.app.ui(ui)
     }));
@@ -2840,6 +2848,10 @@ fn 要铺多少那一趟被撤掉时屏上说清_关掉再打开就重算() {
     现场.app.poll_tasks();
 
     let ctx = headless::context();
+    // **先空跑一帧**（同 `点一下` 的「先把界面跑稳」）：开关底下那一句一换，界面把它滚进视口
+    // （`stages::scroll_in_when_new`）；可这一帧里 egui 摆两趟，那一句在第二趟才被挤到视口底下，
+    // 滚动落在下一帧。
+    跑一帧(&ctx, &mut 现场.app);
     let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
         现场.app.ui(ui)
     }));
