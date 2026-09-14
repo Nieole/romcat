@@ -373,6 +373,8 @@ pub struct Font {
     pub size_badge_narrow: f32,
     /// 左栏分组标题的字距，字号的倍数。
     pub group_tracking: f32,
+    /// 大号按钮上的字。
+    pub size_button_large: f32,
 }
 
 /// 粗体覆盖哪些字。
@@ -492,6 +494,12 @@ pub struct Layout {
     pub page_dot: f32,
     /// 标签左边那枚圆点的直径（设计稿 `.chip::before`）。
     pub chip_dot: f32,
+    /// 标签的高。
+    pub chip_height: f32,
+    /// 标签左右留白。
+    pub chip_padding: f32,
+    /// 标签里圆点与字之间。
+    pub chip_gap: f32,
     /// 「名 → 值」两列排时名那一列的宽。
     pub kv_key_width: f32,
     /// 按钮的高。

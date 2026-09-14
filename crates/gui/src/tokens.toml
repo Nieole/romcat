@@ -123,6 +123,7 @@ size-hero    = 24     # 作品详情页的大标题
 line-height  = 1.55
 size-badge-narrow = 10    # 左栏收成窄条后入口底下那个计数（设计稿 .main.rcol .nav .badge 的 10px）
 group-tracking    = 0.08  # 左栏分组标题的字距，字号的倍数（设计稿 .grp 的 letter-spacing:.08em）
+size-button-large = 14    # 大号按钮上的字（设计稿 .btn.lg 的 font-size:14px）
 
 [space]
 steps = [4, 8, 12, 16, 20]   # 间距只从这几档里取
@@ -179,6 +180,9 @@ mark              = 44    # 开场左上角那枚标志的边长
 promise-icon      = 28    # 开场三条承诺前那枚字块的边长
 page-dot          = 20    # 弹层标头「走到第几问」那一圈的直径
 chip-dot          = 6     # 标签左边那枚圆点的直径（设计稿 .chip::before 与 .ro::before 的 6px）
+chip-height       = 20    # 标签的高（设计稿 .chip 的 height:20px）
+chip-padding      = 7     # 标签左右留白（设计稿 .chip 的 padding:0 7px）
+chip-gap          = 5     # 标签里圆点与字之间（设计稿 .chip 的 gap:5px）
 kv-key-width      = 84    # 「名 → 值」两列排时名那一列的宽
 button-height     = 28    # 按钮的高（设计稿 .btn）：弹层页脚、「选择…」
 button-padding    = 12    # 按钮左右留白（设计稿 .btn 的 padding:0 12px）

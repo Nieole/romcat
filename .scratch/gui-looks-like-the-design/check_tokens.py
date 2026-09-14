@@ -166,6 +166,24 @@ for pattern, checks in rail_literals:
             where = key if at is None else f"{key}[{at}]"
             problems.append(f"{where}: 设计稿是 {m[group]}，令牌是 {want}")
 
+# 标签与按钮的字号（设计稿 .chip / .btn / .btn.sm / .btn.lg），以及标签的高、左右留白、圆点与字的间距。
+shared_literals = [
+    (r"\.chip\{[^}]*?gap:(\d+)px;height:(\d+)px;padding:0 (\d+)px;[^}]*?font-size:([\d.]+)px", [(1, "layout", "chip-gap", None), (2, "layout", "chip-height", None), (3, "layout", "chip-padding", None), (4, "font", "size-caption-plus", None)]),
+    (r"\.btn\{[^}]*?font-size:([\d.]+)px", [(1, "font", "size-small-plus", None)]),
+    (r"\.btn\.sm\{[^}]*?font-size:(\d+)px", [(1, "font", "size-small", None)]),
+    (r"\.btn\.lg\{[^}]*?font-size:(\d+)px", [(1, "font", "size-button-large", None)]),
+]
+for pattern, checks in shared_literals:
+    m = re.search(pattern, html)
+    if not m:
+        problems.append(f"找不到 {pattern}")
+        continue
+    for group, section, key, at in checks:
+        literals += 1
+        want = token(section, key, at)
+        if float(m[group]) != float(want):
+            problems.append(f"{key}: 设计稿是 {m[group]}，令牌是 {want}")
+
 if problems:
     print("\n".join(problems))
     sys.exit(1)

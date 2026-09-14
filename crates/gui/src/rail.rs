@@ -446,7 +446,7 @@ fn verdict_note(ui: &mut egui::Ui, verdicts: Option<u64>) {
     let 字 = galley(
         ui,
         &format!("已保存 {数} 条裁决"),
-        egui::FontId::proportional(tokens.font.size_caption_plus),
+        egui::FontId::proportional(look::font_size(ui.ctx(), tokens.font.size_caption_plus)),
         ui.visuals().weak_text_color(),
     );
     let 点 = tokens.layout.rail_dot;
