@@ -28,6 +28,14 @@
 //! [`Layout::flush`] 只在**手松开之后**落盘（`pointer.any_down()` 为假的那一帧），
 //! 而且只在数真变了的时候写。拖一次是一次写，不是六十次。
 //!
+//! ## 左栏收不收起
+//!
+//! 主窗口左边那条导航（[`crate::app`]）也记在这份文件里：**人按了「收起」就记一行**，展开回去就把那一行去掉
+//! （[`Layout::set_rail_collapsed`]）。另有一条**不记**的：窗口宽不到令牌 `rail-collapse-below` 时左栏
+//! 自动收成窄条，宽回来照人自己选的那样（[`rail_folded`]）——那只看当下窗口多宽，写进文件就等于人一缩窗口，
+//! 下次开窗左栏就收着了（拿主意的人 2026-09-14 定，票 `gui-looks-like-the-design/32`）。窄的时候人点「»」
+//! 是**临时展开**，同样不记：窗口宽度一变就回到自动收起的规则（挂单 `Q867`）。
+//!
 //! ## 这一层为什么不算领域逻辑
 //!
 //! 面板拖到哪儿是**这块屏**的事，与库里有什么无关（ADR-0005 拦的是领域判断长在界面里，
@@ -41,7 +49,7 @@ use crate::app::View;
 
 /// 一条边界靠在哪一边。
 ///
-/// **没有 `Top`**：顶栏是那排屏名，高度由内容定死，拖它没有意义。
+/// **没有 `Top`**：顶上是各屏的屏头，高度由内容定死，拖它没有意义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     /// 左栏，拖的是宽。
@@ -194,7 +202,7 @@ impl Boundary {
     /// - **按整个窗口的几成**（[`Self::share`]）。按窗口算而不是按「摆到它那一刻还剩多少」
     ///   算，是为了让上限是个**定数**——后者会让先摆的那块挤后摆的：摊开刮削面板之后，
     ///   底下那块元数据面板的上限跟着缩水，人明明没碰它，它却自己矮了一截。
-    /// - **「眼下还剩多少」减去 [`FLOOR`]**。上一道按的是整个窗口，可面板是摆在顶栏底下、
+    /// - **「眼下还剩多少」减去 [`FLOOR`]**。上一道按的是整个窗口，可面板是摆在左栏右边、屏头底下、
     ///   并且一块接一块地吃地方的——窗口小到 720×480、刮削面板又摊开时，光按几成算会让
     ///   正中那张表只剩七十来点（表头 24 加两行）。这一道是**兜底**：不管前面吃掉多少，
     ///   它后面**一定还剩得下 [`FLOOR`] 点**。
@@ -264,6 +272,10 @@ pub struct Layout {
     sizes: BTreeMap<&'static str, f32>,
     /// **上一次真写进文件的是哪几个数。** 拿它与 [`Self::sizes`] 比，才知道要不要写盘。
     saved: BTreeMap<&'static str, f32>,
+    /// 人是不是把左栏收起了。**只记人按的**，窗口太窄自动收起的那一下不在这儿（[`rail_folded`]）。
+    rail_collapsed: bool,
+    /// 上一次真写进文件的那一份里左栏收没收起。
+    saved_rail_collapsed: bool,
     /// 上一次写盘出的错。**不静默吞掉**：吞了的话人只看见「拖了半天，下次全忘」。
     error: Option<String>,
 }
@@ -276,13 +288,15 @@ impl Layout {
     #[must_use]
     pub fn load(workspace: &Path) -> Self {
         let path = romcat_core::workspace::gui_layout_path(workspace);
-        let sizes = std::fs::read_to_string(&path)
-            .map(|text| parse(&text))
-            .unwrap_or_default();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let sizes = parse(&text);
+        let rail_collapsed = parse_rail(&text);
         Self {
             path,
             saved: sizes.clone(),
             sizes,
+            rail_collapsed,
+            saved_rail_collapsed: rail_collapsed,
             error: None,
         }
     }
@@ -299,7 +313,19 @@ impl Layout {
         self.sizes.get(boundary.id).copied()
     }
 
-    /// 上一次写盘出的错。顶栏上照它画一句。
+    /// 人是不是把左栏收起了。窗口太窄时自动收起的那一下不算——那一下问 [`rail_folded`]。
+    #[must_use]
+    pub fn rail_collapsed(&self) -> bool {
+        self.rail_collapsed
+    }
+
+    /// 人按了「收起」或「展开」。**只在人按的时候调**：自动收起不经过这儿，也就不写进文件。
+    /// 与面板宽度一样，手松开了才落盘（[`Self::flush`]）。
+    pub fn set_rail_collapsed(&mut self, collapsed: bool) {
+        self.rail_collapsed = collapsed;
+    }
+
+    /// 上一次写盘出的错。主窗口在主区最上方照它画一句。
     #[must_use]
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
@@ -361,12 +387,13 @@ impl Layout {
     /// 调它的地方要先确认手已经松开（`App::ui` 那一句）：拖的过程中每帧
     /// 写一次是六十次写盘，而那六十次里有五十九次的值是过路的。
     pub fn flush(&mut self) {
-        if self.sizes == self.saved {
+        if self.sizes == self.saved && self.rail_collapsed == self.saved_rail_collapsed {
             return;
         }
         // 不管写成没写成，都记成「写过了」：写不成时每帧再试一次只是把同一个错刷六十遍。
         // 下一次拖动会再试一次——那时人正等着它记住，重试才有意义。
         self.saved = self.sizes.clone();
+        self.saved_rail_collapsed = self.rail_collapsed;
         self.error = write(&self.path, &self.render()).err();
     }
 
@@ -381,7 +408,49 @@ impl Layout {
                 out.push_str(&format!("{} = {:.0}\n", boundary.id, size));
             }
         }
+        // 展开是默认，不写——与没被拖过的边界一个字都不记同一条道理。
+        if self.rail_collapsed {
+            out.push_str(&format!("{RAIL} = {RAIL_COLLAPSED}\n"));
+        }
         out
+    }
+}
+
+/// 左栏那一行的名字，与它收起时写的那个值。
+const RAIL: &str = "左栏";
+/// 见 [`RAIL`]。
+const RAIL_COLLAPSED: &str = "收起";
+
+/// 左栏**这一帧**收不收成窄条。
+///
+/// - 窗口宽不到令牌 `rail-collapse-below`：收着，除非人点了「»」**临时展开**（`peeking`）。
+/// - 宽到门槛：照人选的那一份（[`Layout::rail_collapsed`]）。
+///
+/// 自动收起与临时展开都只看当下，不改人选的那一份——宽回来就照人选的。临时展开只在窄的时候算数，
+/// 窗口宽度一变就作废，那一下由摆左栏的那一层管（[`crate::app`]）。
+#[must_use]
+pub fn rail_folded(chosen_collapsed: bool, peeking: bool, window_width: f32) -> bool {
+    if window_narrow(window_width) {
+        !peeking
+    } else {
+        chosen_collapsed
+    }
+}
+
+/// 窗口窄到左栏该自动收起了吗：宽不到令牌 `rail-collapse-below`。
+#[must_use]
+pub fn window_narrow(window_width: f32) -> bool {
+    window_width < crate::tokens::Tokens::builtin().layout.rail_collapse_below
+}
+
+/// 左栏收着（`folded`）与展开时各多宽：令牌 `rail-collapsed` / `rail-width`。
+#[must_use]
+pub fn rail_width(folded: bool) -> f32 {
+    let layout = &crate::tokens::Tokens::builtin().layout;
+    if folded {
+        layout.rail_collapsed
+    } else {
+        layout.rail_width
     }
 }
 
@@ -421,6 +490,14 @@ fn parse(text: &str) -> BTreeMap<&'static str, f32> {
     sizes
 }
 
+/// 读左栏那一行：**只有写着「收起」才算收起**，没写、读不懂都是展开（与 [`parse`] 同一条宽容）。
+fn parse_rail(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.split_once('=')
+            .is_some_and(|(name, value)| name.trim() == RAIL && value.trim() == RAIL_COLLAPSED)
+    })
+}
+
 /// 写下去，连目录一起建。
 fn write(path: &Path, text: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
@@ -434,6 +511,7 @@ fn write(path: &Path, text: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tokens::Tokens;
 
     #[test]
     fn 边界的名字互不相同() {
@@ -474,27 +552,34 @@ mod tests {
     #[test]
     fn 一块接一块吃下去正中那块还剩得下地板那么多() {
         // 第二道，也是真正的那道保证：每条边界最多吃到「眼下还剩多少减去 `FLOOR`」，
-        // 于是一块接一块摆完，剩下的还有 `FLOOR`。这儿按**最小窗口**（720×480，
-        // `main.rs` 的 `with_min_inner_size`）连着算一遍，顶栏那 26 点先扣掉。
-        let 最小窗口 = egui::vec2(720.0, 480.0);
-        for screen in [View::Browse, View::Queue, View::Sublibraries] {
-            for 横着 in [true, false] {
-                // 顶栏只吃高，不吃宽。
-                let mut room = if 横着 {
-                    最小窗口.x
-                } else {
-                    最小窗口.y - 26.0
-                };
-                for boundary in Boundary::ALL
-                    .iter()
-                    .filter(|it| it.screen == screen && (it.side != Side::Bottom) == 横着)
-                {
-                    room -= boundary.cap(最小窗口, room);
+        // 于是一块接一块摆完，剩下的还有 `FLOOR`。这儿从**最小窗口**（720 宽，`main.rs` 的
+        // `with_min_inner_size`）到 1600 宽逐点连着算一遍（高取最小的 480）：
+        //
+        // - 横向先扣掉**左栏这个宽度下真画多宽**——人选的是展开（占得最多的那种），窄于门槛时自动收成窄条
+        //   （[`rail_folded`]，票 `gui-looks-like-the-design/32`）；
+        // - 竖向先扣掉**屏头**那一截：上下内边距、按钮那么高的一行、底下那道一点宽的线（[`crate::look::screen_header`]）。
+        let tokens = Tokens::builtin();
+        let 屏头 = 2.0 * tokens.space.screen_header_padding[0] + tokens.layout.button_height + 1.0;
+        for 宽 in 720_u16..=1600 {
+            let 窗口 = egui::vec2(f32::from(宽), 480.0);
+            for screen in [View::Browse, View::Queue, View::Sublibraries] {
+                for 横着 in [true, false] {
+                    let mut room = if 横着 {
+                        窗口.x - rail_width(rail_folded(false, false, 窗口.x))
+                    } else {
+                        窗口.y - 屏头
+                    };
+                    for boundary in Boundary::ALL
+                        .iter()
+                        .filter(|it| it.screen == screen && (it.side != Side::Bottom) == 横着)
+                    {
+                        room -= boundary.cap(窗口, room);
+                    }
+                    assert!(
+                        room >= FLOOR - 1.0,
+                        "{宽} 宽的窗口里 {screen:?} 这一维上全拖到头之后，正中那块只剩 {room} 点",
+                    );
                 }
-                assert!(
-                    room >= FLOOR - 1.0,
-                    "{screen:?} 这一维上全拖到头之后，正中那块只剩 {room} 点",
-                );
             }
         }
     }
@@ -572,12 +657,78 @@ mod tests {
             path: PathBuf::from("/dev/null"),
             sizes: BTreeMap::new(),
             saved: BTreeMap::new(),
+            rail_collapsed: false,
+            saved_rail_collapsed: false,
             error: None,
         };
         layout.sizes.insert(FILTER.id, 275.0);
         layout.sizes.insert(BATCHES.id, 210.0);
+        layout.set_rail_collapsed(true);
         let text = layout.render();
         assert!(text.starts_with('#'), "开头那几句给人看的话不能丢");
         assert_eq!(parse(&text), layout.sizes);
+        assert!(
+            parse_rail(&text),
+            "人收起了左栏，读回来得还是收着的：\n{text}"
+        );
+    }
+
+    #[test]
+    fn 左栏只有写着收起才算收起() {
+        // 没写那一行是头一次打开，默认展开；读不懂的也当没写——与面板宽度那几行同一条规矩。
+        assert!(parse_rail("左栏 = 收起\n"));
+        assert!(parse_rail("# 注释\n筛选 = 300\n左栏=收起\n"));
+        assert!(!parse_rail(""), "没写就是展开");
+        assert!(!parse_rail("左栏 = 展开\n"));
+        assert!(!parse_rail("左栏 = 读不懂\n"));
+    }
+
+    #[test]
+    fn 窄于门槛左栏自动收起_宽回来照人自己选的() {
+        // 拿主意的人 2026-09-14 定：窗口宽不到门槛时收成窄条，宽回来恢复人选的展开或收起。
+        let 门槛 = Tokens::builtin().layout.rail_collapse_below;
+        assert!(rail_folded(false, false, 门槛 - 1.0), "窄于门槛该自动收起");
+        assert!(!rail_folded(false, false, 门槛), "宽到门槛就照人选的展开");
+        assert!(
+            rail_folded(true, false, 门槛 + 400.0),
+            "人收起的，宽窗口里也收着"
+        );
+        assert!(rail_folded(true, false, 门槛 - 1.0));
+        // 窄的时候临时展开（挂单 `Q867`）：不管人选的是哪样都展开；宽到门槛就不算数了。
+        assert!(!rail_folded(false, true, 门槛 - 1.0), "窄窗口里临时展开");
+        assert!(
+            !rail_folded(true, true, 门槛 - 1.0),
+            "人收起过也临时展开得了"
+        );
+        assert!(rail_folded(true, true, 门槛), "宽到门槛就照人选的");
+        let t = &Tokens::builtin().layout;
+        assert_eq!(rail_width(true), t.rail_collapsed);
+        assert_eq!(rail_width(false), t.rail_width);
+    }
+
+    #[test]
+    fn 左栏自动收起的门槛正是浏览屏在左栏展开时还摆得开的那一档() {
+        // 令牌 `rail-collapse-below` 是这么算出来的：左栏展开，浏览屏筛选栏吃到上限、详情栏顶着下限，
+        // 正中还剩得下 `FLOOR` 的最窄窗口。**门槛上摆得开，窄 10 点就摆不开**——定低了，那一截窗口里
+        // 左栏展开着把正中挤没；定高了，本来摆得开的窗口也被收起。
+        let 门槛 = Tokens::builtin().layout.rail_collapse_below;
+        let 正中剩下 = |宽: f32| {
+            let 窗口 = egui::vec2(宽, 480.0);
+            let mut room = 宽 - rail_width(false);
+            for boundary in [FILTER, DETAIL] {
+                room -= boundary.cap(窗口, room);
+            }
+            room
+        };
+        assert!(
+            正中剩下(门槛) >= FLOOR - 1.0,
+            "门槛 {门槛} 上左栏展开，浏览屏正中只剩 {} 点",
+            正中剩下(门槛)
+        );
+        assert!(
+            正中剩下(门槛 - 10.0) < FLOOR - 1.0,
+            "窄 10 点（{}）左栏展开也摆得开：门槛定高了",
+            门槛 - 10.0
+        );
     }
 }
