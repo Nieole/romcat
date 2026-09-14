@@ -1255,36 +1255,35 @@ impl Section {
             )
             .changed();
         if self.lay_media {
-            match &self.media_cost {
+            let visuals = ui.visuals();
+            let (颜色, 那一句) = match &self.media_cost {
                 // **代价画在屏上、画得醒目**：人不会先悬停一颗开关再按导出。
                 MediaCost::Counted { files, bytes } => {
-                    ui.colored_label(ui.visuals().warn_fg_color, media_cost(*files, *bytes));
+                    (visuals.warn_fg_color, media_cost(*files, *bytes))
                 }
-                MediaCost::NotAsked | MediaCost::Counting { .. } => {
-                    ui.weak(
-                        "正在算这一趟最多要铺多少媒体（任务台上看得见它）；\
-                         算出来之前导出按不下去。",
-                    );
-                }
-                MediaCost::NotCounted(why) => {
-                    ui.colored_label(
-                        ui.visuals().error_fg_color,
-                        format!(
-                            "{why}。关掉再打开「{LAY_MEDIA}」就重算一遍；关着它，导出照常按得下去。"
-                        ),
-                    );
-                }
+                MediaCost::NotAsked | MediaCost::Counting { .. } => (
+                    visuals.weak_text_color(),
+                    "正在算这一趟最多要铺多少媒体（任务台上看得见它）；\
+                     算出来之前导出按不下去。"
+                        .to_string(),
+                ),
+                MediaCost::NotCounted(why) => (
+                    visuals.error_fg_color,
+                    format!(
+                        "{why}。关掉再打开「{LAY_MEDIA}」就重算一遍；关着它，导出照常按得下去。"
+                    ),
+                ),
                 // **没去算**：缺的那样东西补上之后自己重算，不叫人关掉再打开。
-                MediaCost::Refused(why) => {
-                    ui.colored_label(
-                        ui.visuals().error_fg_color,
-                        format!(
-                            "这一趟最多要铺多少还算不出来：媒体的布局随前端格式不同。\
-                             {why}选好之后这里自己重算。"
-                        ),
-                    );
-                }
-            }
+                MediaCost::Refused(why) => (
+                    visuals.error_fg_color,
+                    format!(
+                        "这一趟最多要铺多少还算不出来：媒体的布局随前端格式不同。\
+                         {why}选好之后这里自己重算。"
+                    ),
+                ),
+            };
+            let 画在 = ui.colored_label(颜色, &那一句).rect;
+            scroll_in_when_new(ui, 画在, &那一句);
         }
         if 拨了 {
             self.set_lay_media(on, site, tasks);
@@ -1493,6 +1492,39 @@ struct ExportKnobs {
     /// 把**媒体池**里的媒体一起铺进导出目录（[`ExportOptions::media`]）。**默认关**，
     /// 从这一段那颗开关读（[`LAY_MEDIA`]）。
     media: bool,
+}
+
+/// 开关底下那一句**一换就把它滚进视口，只管换了之后那几趟**。
+///
+/// 那一句摆在库屏最底下（导出那一行、「一起铺媒体」开关之下）。每一屏底下加了状态栏、按钮照稿
+/// 加高之后（票 `gui-looks-like-the-design/25`、`/05`），它常常落在视口之外——开了开关、代价也
+/// 算出来了，人却看不见那句「最多要铺多少」，而那句话存在的全部理由就是按导出之前被看见。
+///
+/// 与子库屏摊开差量表同一个办法（`sublibrary.rs` 那一段）：**只管那句话换了之后那几趟**，过了就
+/// 不再管，人往哪儿滚都随他。**认的是那句话本身，不是屏上的高度**：库屏怎么重排，这一条都不跟着改。
+/// 滚了就请 egui 这一帧再摆一趟（`request_discard`），多数时候换过的那一句当帧就画在视口里；一帧最多摆
+/// `max_passes` 趟，不会一直重摆。**开窗头一帧例外**：egui 那一帧本来就摆两趟，那一句在头一趟里还在
+/// 视口里、第二趟控件量好了尺寸才被挤到底下，这时已经没有下一趟可摆，滚动落在下一帧（实测：头一趟
+/// y 634、第二趟 y 770，视口底 762）。
+fn scroll_in_when_new(ui: &egui::Ui, 画在: egui::Rect, 那一句: &str) {
+    let 记号 = egui::Id::new("铺媒体开关底下那一句从第几趟起");
+    let 这一趟 = ui.ctx().cumulative_pass_nr();
+    let 起 = ui.ctx().data_mut(|data| {
+        let 记的 = data.get_temp_mut_or_insert_with(记号, || (那一句.to_string(), 这一趟));
+        if 记的.0 != 那一句 {
+            *记的 = (那一句.to_string(), 这一趟);
+        }
+        记的.1
+    });
+    let 那几趟 = u64::try_from(ui.ctx().options(|options| options.max_passes.get())).unwrap_or(1);
+    if 这一趟 <= 起 + 那几趟 && !ui.clip_rect().contains_rect(画在) {
+        ui.scroll_to_rect_animation(
+            画在,
+            Some(egui::Align::BOTTOM),
+            egui::style::ScrollAnimation::none(),
+        );
+        ui.ctx().request_discard("铺媒体开关底下那一句滚进视口");
+    }
 }
 
 /// 还没有 DAT 库时那句话：为什么不行、去哪儿取；有就是 `None`。

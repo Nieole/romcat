@@ -433,7 +433,9 @@ fn 点一下(ctx: &egui::Context, app: &mut App, 按钮上的字: &str) {
 /// 再把指针挪走。只滚、不读——读字仍由调用方接着那一帧做。
 ///
 /// 工序段底下「一起铺媒体」那几句在库屏正文的最底下：主窗口长出左栏、屏头比从前的顶栏高
-/// （票 `gui-looks-like-the-design/32`）之后，它们落到了视口外，而 egui 不画视口外的字。
+/// （票 `gui-looks-like-the-design/32`）之后，它们落到了视口外，而 egui 不画视口外的字。再加上
+/// 右侧主区底下那条状态栏（票 `gui-looks-like-the-design/25`），连「一起铺媒体」那颗开关本身也落到了
+/// 视口外——找那颗开关之前也得先滚。
 fn 滚到库屏底下(ctx: &egui::Context, app: &mut App) {
     let 指在 = egui::pos2(headless::VIEWPORT[0] * 0.6, headless::VIEWPORT[1] * 0.75);
     let mut 上一帧 = None;
@@ -3130,6 +3132,7 @@ fn 铺媒体开关默认关着_关着时导出与今天一模一样_一份媒体
     // 「关着就一份都不铺」才验得出来——池是空的话，关着与开着铺出去的都是零份。
     let (_库, mut 现场, 导出去, _) = 摆好一张封面("gui-stages-铺媒体默认关");
     let ctx = headless::context();
+    滚到库屏底下(&ctx, &mut 现场.app);
     let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
         现场.app.ui(ui)
     }));
@@ -3184,6 +3187,7 @@ fn 打开铺媒体时_按下导出之前屏上先说清这一趟最多要铺几�
     let (_库, mut 现场, 导出去, _) = 摆好一张封面("gui-stages-铺媒体说代价");
     let ctx = headless::context();
 
+    滚到库屏底下(&ctx, &mut 现场.app);
     点一下(&ctx, &mut 现场.app, romcat_gui::stages::LAY_MEDIA);
     assert!(
         现场.app.roots().stages().lay_media(),
