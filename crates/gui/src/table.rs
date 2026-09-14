@@ -691,6 +691,11 @@ pub const ROOT_SEPARATOR: &str = " · ";
 /// 一条键画成「**根名 · 相对路径**」，宽不过 `max_width`：画不下时只从相对路径的左边删字补「…」，
 /// 根名留着——一眼看得出是哪个根。**拆键由核心库做**（[`romcat_core::path::split_root`]），
 /// 这里只接起来、量宽度。
+///
+/// **一个例外**（拿主意的人 2026-09-14 定，挂单 `Q809`）：写上根名之后，留得下的那一截连**文件名**
+/// （相对路径的最后一段）都摆不全，就省掉根名，只写「…」接相对路径的尾巴——根名那一截宽让给文件名。
+/// 表格里带「未关联作品」标签的那几行，1280 宽的窗口里扣掉标签只剩六十来点，带着根名只留得下一个字。
+/// 判的是**量出来的宽度**，不数字数；省掉根名时开头一律是「…」，人看得出前头还有东西。
 #[must_use]
 pub(crate) fn root_and_path(
     ui: &egui::Ui,
@@ -704,7 +709,22 @@ pub(crate) fn root_and_path(
     }
     let head = format!("{root}{ROOT_SEPARATOR}");
     let room = max_width - text_width(ui, &head, font);
-    format!("{head}{}", tail_fit(ui, relative, font, room.max(0.0)))
+    let with_root = tail_fit(ui, relative, font, room.max(0.0));
+    let file_name = std::path::Path::new(relative)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(relative);
+    // 带着根名时留下的那一截：整条相对路径画得下，或者截过之后（去掉开头那个「…」）还装得下整个文件名。
+    let kept = with_root.strip_prefix('…').unwrap_or(&with_root);
+    if with_root == relative || kept.len() >= file_name.len() {
+        return format!("{head}{with_root}");
+    }
+    let marked = format!("…{relative}");
+    if text_width(ui, &marked, font) <= max_width {
+        marked
+    } else {
+        tail_fit(ui, relative, font, max_width)
+    }
 }
 
 /// 「作品」那一格。

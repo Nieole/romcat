@@ -1244,12 +1244,13 @@ impl Screen {
 
     /// **屏头右侧**属于这一屏的那一段（[`crate::look::screen_header`]，票 `gui-looks-like-the-design/32`
     /// 把它从顶栏原样挪进来，这一票照稿摆）：「刮削…」「★ 收藏」两颗小号按钮（[`look::small_buttons`]，
-    /// 照稿 `.btn.sm`，拿主意的人 2026-09-14 定，挂单 `Q877`），最后是开发用的「字体样张」开关。
+    /// 照稿 `.btn.sm`，拿主意的人 2026-09-14 定，挂单 `Q877`），最后是开发用的「字体样张」开关——
+    /// 只在 `demo` 为真（这扇窗带 `--demo` 启动，[`crate::app::App::mark_demo`]）时摆。
     /// 「N 个作品（共 M）」那一句在表格上方「列表」那一条的右端（[`Self::list_bar`]，挂单 `Q876`）。
     ///
     /// 先同步一次窗口再画：屏头与正文各画各的，而屏头**先画**——不先同步，
     /// 这一屏头一帧的行数就比表格慢一帧（与队列那一屏 `status` 同一条道理）。
-    pub fn status(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
+    pub fn status(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks, demo: bool) {
         self.sync_window(&site.catalog);
         let (刮削, 收藏) = look::small_buttons(ui, |ui| {
             // **「刮削…」摆在屏头**。它只摊开弹层——真按下去那一下在弹层底下，
@@ -1280,10 +1281,12 @@ impl Screen {
         if 收藏 {
             self.favorite(site, tasks);
         }
-        // **开发用的开关只在演示/开发构建里有**（拿主意的人 2026-09-14 定，挂单 `Q874`）：挂在现成的
-        // `demo` 特性上——正式构建里合成数据与实测开关一个字节都不进二进制，这颗开关跟它们同一个待遇。
-        #[cfg(feature = "demo")]
-        ui.toggle_value(&mut self.sample, "字体样张");
+        // **开发用的开关只在演示/开发构建里有**（拿主意的人 2026-09-14 定，挂单 `Q874`）：看的是**运行时**
+        // 那个标记——这扇窗带 `--demo` 启动才摆。不看编译开关：门禁带 `--all-features` 跑截图，照编译开关藏
+        // 的话门禁那一路的截图里就画着它。
+        if demo {
+            ui.toggle_value(&mut self.sample, "字体样张");
+        }
     }
 
     /// 「列表」那一条右端那一句（设计稿 `.tbar .cnt`）：没勾的时候是「**N** 个作品（共 M）」，勾了是

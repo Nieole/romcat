@@ -41,6 +41,7 @@
 //! 归各屏自己的票**，它们照稿重排时这几张跟着重批。
 
 use std::path::{Path, PathBuf};
+#[cfg(feature = "demo")]
 use std::time::Duration;
 
 use egui::Theme;
@@ -54,16 +55,21 @@ use romcat_core::platform::Manifest;
 use romcat_core::scrape::{AnchorKind, Field, MediaKind};
 use romcat_core::shape::{Role, SINGLE_FILE_RULE, Variant};
 use romcat_core::site::Site;
+#[cfg(feature = "demo")]
 use romcat_core::task::Cutoff;
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::verdict::Store;
 use romcat_core::workspace::{CatalogEntry, CatalogFacts, CatalogState, DirUnreadable, Listing};
 use romcat_gui::app::{App, View};
+#[cfg(feature = "demo")]
+use romcat_gui::demo;
 use romcat_gui::opening::Screen;
+#[cfg(feature = "demo")]
 use romcat_gui::task::{Clock, Product};
-use romcat_gui::{demo, font, headless, layout, look, rail};
+use romcat_gui::{font, headless, layout, look, rail};
 
 mod shared;
+#[cfg(feature = "demo")]
 use shared::{一对信号, 占位活};
 
 /// 比对阈值：一个像素的色差过了多少算坏（每像素 YIQ 色距 0.6）、坏几个像素算红（0 个）。
@@ -706,6 +712,9 @@ fn 浏览现场(收起两栏: bool) -> 浏览现场 {
     }
     let site = Site::in_memory(catalog, Store::in_memory().expect("开得出沉淀库"), 浏览的根);
     let mut app = App::new(site, 目录.path().to_path_buf());
+    // 底部状态栏右边印着工作目录（票 25）：这儿是临时目录，每一趟都不一样，照实画的话同一张图一趟一个样——
+    // 与任务屏、主窗口外壳那几张一样定死成设计稿上那一串。
+    app.set_workspace_label(工作目录().display().to_string());
     app.show_view(View::Browse);
     浏览现场 { app, 目录 }
 }
@@ -919,6 +928,20 @@ fn 控件都落在所在那一栏里(harness: &Harness<'_>, 名字: &str) {
         if data.role() == Role::Unknown && rect.width().min(rect.height()) <= 把手宽 + 0.5 {
             continue;
         }
+        // **滚出了视口、被状态栏挡住的那一个不算**（合进票 25 之后）：左右两栏与编辑面板的下沿就是状态栏的上沿，
+        // 滚动区最底下那几个整个滚到了视口底下，上沿中点落进状态栏那一带——那不是状态栏里的控件没摆下，是还没
+        // 滚到（与上面「整个在窗外的不算」同一类）。状态栏只有一行高、贴着窗口底沿：顶沿在状态栏里、却伸出窗口
+        // 底沿的，只能是上头某个滚动区里的；整个落在状态栏里的照旧当状态栏的控件查。
+        // 代价：状态栏里的控件**竖着**伸出窗口底沿的，这一条抓不到（横着伸出去照旧抓得到）。egui 没把每个
+        // 控件被裁掉之后剩多少交给无障碍树，只能按几块面板的外框判。
+        let 滚出视口 = rect.min.y >= 状态栏.min.y - 0.5
+            && rect.max.y > 状态栏.max.y + 0.5
+            && [左栏, 右栏, 底栏]
+                .iter()
+                .any(|栏| 栏.x_range().contains(rect.center().x) && 栏.max.y <= rect.min.y + 0.5);
+        if 滚出视口 {
+            continue;
+        }
         let 叫什么 = data
             .label()
             .or_else(|| data.value())
@@ -986,6 +1009,9 @@ fn 浏览_两栏收起_暗色() {
 
 // ——— 任务屏（票 `gui-looks-like-the-design/25`）———
 //
+// **这一段垫的是合成数据（`demo` 模块），只在 `demo` 特性下编**：截图照正式构建跑时（不开 `demo`）
+// 这几张不跑，门禁带 `--all-features` 时照跑。夹具里别的几段一样都不靠 `demo`。
+//
 // 走整扇主窗口（左栏、屏头、状态栏都在），停在任务屏上。库是合成数据，任务屏上一个变体都不画。
 // **跟着挂钟走的数一律定死**：工作目录（`App::set_workspace_label`）、已用与剩余约、耗时与收场时刻
 // （`App::pin_task_clock`）。进度条只画走了几成的那种，不画来回跑的那种。
@@ -993,6 +1019,7 @@ fn 浏览_两栏收起_暗色() {
 /// 任务屏那几张里定死的钟：已用 3 分 12 秒（剩余约由它折），历史每一趟收场于 2026-09-13 14:05（UTC）；
 /// 本地时区钉成东八区，屏上画「09-13 22:05」。「此刻」也钉在同一天，于是不带年份——
 /// 照实取机器的时区与今年的话，换一台机器、跨一个年，同一张基线就对不上了。
+#[cfg(feature = "demo")]
 fn 任务屏的钟() -> Clock {
     Clock {
         elapsed: Duration::from_secs(192),
@@ -1006,6 +1033,7 @@ fn 任务屏的钟() -> Clock {
 ///
 /// `临时目录名` 各张各用一个：主窗口会往工作目录里写版式偏好，几张共用的话一张写的会落到
 /// 另一张打开的窗口上。
+#[cfg(feature = "demo")]
 fn 任务屏(临时目录名: &str) -> App {
     let mut app = App::new(
         demo::site(demo::synthetic(200).expect("造得出合成数据")).expect("开得出现场"),
@@ -1018,12 +1046,14 @@ fn 任务屏(临时目录名: &str) -> App {
 }
 
 /// 一份不占地方的产物：这几张画的是收场，不是产物里装了什么。
+#[cfg(feature = "demo")]
 fn 一份产物() -> Product {
     Product::Evaluated(Box::default())
 }
 
 /// 历史里摆上四档收场各一趟：**就地跑完**（`Board::run_here`，不开线程），于是一帧都不必等。
 /// 部分完成那一句是核心库同步那一侧的原话（落了 12 件）。
+#[cfg(feature = "demo")]
 fn 摆上四档收场(app: &mut App) {
     let tasks = app.tasks_mut();
     tasks.run_here("算一遍容量", |_| Ok(一份产物()));
@@ -1055,6 +1085,7 @@ fn 摆上四档收场(app: &mut App) {
 /// 即 34%）就停在那儿等信号，**等它报完再开窗**，不数挂钟。台上有活时主窗口每一帧都请求下一帧，
 /// 跑不到「不要重画」，于是数帧：头两帧装字体与观感（[`搭一个`]），再跑几帧让历史表与卡片的列宽
 /// 摆稳；这一屏上没有会动的东西（进度条是走了几成的那种）。
+#[cfg(feature = "demo")]
 fn 拍正在跑(名字: &str, 主题: Theme, 临时目录名: &str) {
     if 该跳过(名字) {
         return;
@@ -1079,18 +1110,21 @@ fn 拍正在跑(名字: &str, 主题: Theme, 临时目录名: &str) {
     占位.放行();
 }
 
+#[cfg(feature = "demo")]
 #[test]
 fn 任务屏_空台_浅色() {
     let mut app = 任务屏("romcat-截图-任务屏-空台-浅色");
     拍("tasks/empty-light", Theme::Light, move |ui| app.ui(ui));
 }
 
+#[cfg(feature = "demo")]
 #[test]
 fn 任务屏_空台_暗色() {
     let mut app = 任务屏("romcat-截图-任务屏-空台-暗色");
     拍("tasks/empty-dark", Theme::Dark, move |ui| app.ui(ui));
 }
 
+#[cfg(feature = "demo")]
 #[test]
 fn 任务屏_正在跑_浅色() {
     拍正在跑(
@@ -1100,6 +1134,7 @@ fn 任务屏_正在跑_浅色() {
     );
 }
 
+#[cfg(feature = "demo")]
 #[test]
 fn 任务屏_正在跑_暗色() {
     拍正在跑(
@@ -1109,6 +1144,7 @@ fn 任务屏_正在跑_暗色() {
     );
 }
 
+#[cfg(feature = "demo")]
 #[test]
 fn 任务屏_四档收场_浅色() {
     let mut app = 任务屏("romcat-截图-任务屏-四档收场-浅色");
@@ -1116,6 +1152,7 @@ fn 任务屏_四档收场_浅色() {
     拍("tasks/history-light", Theme::Light, move |ui| app.ui(ui));
 }
 
+#[cfg(feature = "demo")]
 #[test]
 fn 任务屏_四档收场_暗色() {
     let mut app = 任务屏("romcat-截图-任务屏-四档收场-暗色");

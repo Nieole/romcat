@@ -162,6 +162,10 @@ pub struct App {
     /// **窗口窄时人点「»」临时展开了左栏**，记的是点的那一刻窗口多宽。宽度一变就作废，回到自动收起；
     /// 不写进版式文件（拿主意的人 2026-09-14 定，挂单 `Q867`）。
     rail_peek: Option<f32>,
+    /// **这扇窗是不是带 `--demo` 启动的**（合成数据那一路，`main.rs` 设）。开发用的东西只在它为真时摆出来——
+    /// 浏览屏屏头上那颗「字体样张」（挂单 `Q874`）。看的是运行时，不是编译开关：截图测试不设它，
+    /// 开不开 `demo` 特性截出来的图都一样。
+    demo: bool,
     closing: Closing,
 }
 
@@ -219,6 +223,7 @@ impl App {
             works: None,
             verdicts: None,
             rail_peek: None,
+            demo: false,
             closing: Closing::No,
         };
         app.recount();
@@ -242,6 +247,13 @@ impl App {
         self.library_label = label.into();
         // 名字变了，标题得重发一次。
         self.titled = None;
+    }
+
+    /// 记下**这扇窗是带 `--demo` 启动的**：开发用的东西（浏览屏屏头上那颗「字体样张」）从此摆出来。
+    ///
+    /// 只有 `main.rs` 在合成数据那一路调；截图与别的测试一律不调（挂单 `Q874`）。
+    pub fn mark_demo(&mut self) {
+        self.demo = true;
     }
 
     /// 换掉底部状态栏右边那一段工作目录。
@@ -803,7 +815,7 @@ impl App {
                 // 所以这一屏的屏头拿的是可变的那一份。它同时**往任务台上排活**
                 // ——那一下在真库量级上是几秒的读（票 `parking-3/09`）。
                 let (browse, site, board) = (&mut self.browse, &mut self.site, &mut self.board);
-                browse.status(ui, site, board);
+                browse.status(ui, site, board, self.demo);
             }
             View::Sublibraries => {
                 // **抬头上那个「停下」按得动**，所以任务台拿的是可变的那一份。

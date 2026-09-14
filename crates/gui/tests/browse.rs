@@ -2744,21 +2744,22 @@ fn 非游戏资产默认不列出_屏上说收起了几个_开关打开后列出
     let 标着的 = 核心库标着的(&mut app);
     assert_eq!(标着的.len(), 2, "{标着的:?}");
     // 认不出作品的那一行副行照稿写「根名 · 相对路径」（挂单 `Q809`），屏上认的是那个样子。
-    // 作品那一列窄得摆不下时副行**从尾部截断**（同一条挂单）：根名留着、相对路径左边删字补「…」，
-    // 也算画着——左边多了导航之后，1280 宽的窗口里这一列就只有那么宽。
+    // 作品那一列窄得摆不下时副行**从尾部截断**（同一条挂单）：根名留着、相对路径左边删字补「…」；
+    // 写上根名就把文件名挤没时省掉根名、只写「…尾巴」（Q809 的例外）——这几种都算画着。
+    // 左边多了导航、标签挪到副行开头之后，1280 宽的窗口里这一格就只有那么宽。
     for name in &标着的 {
         let 副行 = name.replacen('/', romcat_gui::table::ROOT_SEPARATOR, 1);
         let (根名, 相对路径) = name.split_once('/').expect("键里带着根名");
         let 截过的开头 = format!("{根名}{}…", romcat_gui::table::ROOT_SEPARATOR);
+        let 是尾巴 = |tail: &str| !tail.is_empty() && 相对路径.ends_with(tail);
         let 画着 = 屏上.lines().any(|line| {
             line == 副行
-                || line
-                    .strip_prefix(截过的开头.as_str())
-                    .is_some_and(|tail| !tail.is_empty() && 相对路径.ends_with(tail))
+                || line.strip_prefix(截过的开头.as_str()).is_some_and(是尾巴)
+                || line.strip_prefix('…').is_some_and(是尾巴)
         });
         assert!(
             画着,
-            "列出来的「{副行}」没画在屏上（整段或从尾部截断都算）：\n{屏上}"
+            "列出来的「{副行}」没画在屏上（整段、从尾部截断、省掉根名的「…尾巴」都算）：\n{屏上}"
         );
     }
     assert_eq!(
@@ -2865,37 +2866,107 @@ fn 认不出作品的那一行画正题与未关联作品标签_路径从尾部�
         !行.contains(&长键),
         "认不出作品的那一行还在整段印原始路径：\n{屏上}"
     );
-    // 四、副行照稿是「根名 · 相对路径」，**从尾部截断**：根名留着，相对路径左边删字补「…」，
-    //     文件名那一截留着（挂单 `Q809`）。
-    let 根名在前 = format!("{}{}…", shared::根, romcat_gui::table::ROOT_SEPARATOR);
-    let 截过的 = 行
-        .iter()
-        .copied()
-        .find(|line| {
-            line.strip_prefix(根名在前.as_str())
-                .is_some_and(|tail| !tail.is_empty() && 长键.ends_with(tail))
-        })
-        .unwrap_or_else(|| panic!("没有一行是「{根名在前}」开头、长键的尾巴：\n{屏上}"));
-    // 「未关联作品」标签挪到第二行、跟路径同一行之后（挂单 `Q878`），路径让出一枚标签的宽，1280 宽的窗口里
-    // 留得下的尾巴更短：要的是尾巴至少几个字、扩展名那一截在。
-    let 尾巴 = 截过的
-        .strip_prefix(根名在前.as_str())
-        .expect("找的时候就认过开头");
+    // 四、副行在标签后头（挂单 `Q878`），照 `Q809` 写「根名 · 相对路径」、画不下从左边删字补「…」；写上根名就会
+    //     把文件名挤没时省掉根名、只写「…尾巴」（Q809 的例外，拿主意的人 2026-09-14 定）。
+    //     副行是正题底下、标签后头那一段；留下来的那一截得是相对路径的**尾巴**（截掉的是左边）。
+    let 副行 = |行: &[&str], 正题: &str| -> String {
+        let 在 = 行
+            .iter()
+            .position(|line| *line == 正题)
+            .unwrap_or_else(|| panic!("没画正题「{正题}」"));
+        assert_eq!(
+            行.get(在 + 1).copied(),
+            Some("未关联作品"),
+            "「{正题}」底下头一样该是标签"
+        );
+        行.get(在 + 2)
+            .copied()
+            .unwrap_or_else(|| panic!("「{正题}」那一行没有副行"))
+            .to_owned()
+    };
+    let 带根名 = format!("{}{}", shared::根, romcat_gui::table::ROOT_SEPARATOR);
+    let 留下的尾巴 = |副行: &str, 键: &str| -> String {
+        let 相对路径 = 键.split_once('/').expect("键里带着根名").1;
+        let 去掉根名 = 副行.strip_prefix(带根名.as_str()).unwrap_or(副行);
+        let 尾巴 = 去掉根名.strip_prefix('…').unwrap_or(去掉根名);
+        assert!(
+            !尾巴.is_empty() && 相对路径.ends_with(尾巴),
+            "副行「{副行}」留下的不是相对路径的尾巴"
+        );
+        尾巴.to_owned()
+    };
+    //     1280 宽的窗口里扣掉标签，这一格只剩六十来点：两行都至少留得下文件名末尾几个字、以 `.zip` 结尾。
+    let 长副行 = 副行(&行, "超级机器人大战R");
+    let 短副行 = 副行(&行, "短");
+    for (那一行, 键) in [(&长副行, 长键), (&短副行, 短键)] {
+        let 尾巴 = 留下的尾巴(那一行, 键);
+        assert!(
+            尾巴.chars().count() >= 4 && 尾巴.ends_with(".zip"),
+            "1280 宽下标签后头的副行该留得下文件名末尾几个字、以 .zip 结尾：「{那一行}」"
+        );
+    }
     assert!(
-        尾巴.chars().count() >= 4 && 截过的.ends_with(".zip"),
-        "截掉的该是左边，文件名的尾巴得留着：{截过的}"
+        长副行.contains('…'),
+        "长路径在 1280 宽下该截过：「{长副行}」"
     );
     // 五、**画得下**：截过的那一段整个落在它那一格的裁剪矩形里，不是画出去再被格子裁掉。
-    let (外框, 裁剪) = 正好这一段的外框(&这一帧, 截过的).expect("刚找到的那一段");
+    let (外框, 裁剪) = 正好这一段的外框(&这一帧, &长副行).expect("刚找到的那一段");
     assert!(
         外框.min.x >= 裁剪.min.x - 0.5 && 外框.max.x <= 裁剪.max.x + 0.5,
         "截过的路径 {外框:?} 伸出了它那一格 {裁剪:?}——那是被裁掉的，不是截到画得下",
     );
-    // 六、**量过宽度才截**：画得下的短路径一个字都不删，只是根名与相对路径之间换成「 · 」。
-    let 短副行 = 短键.replacen('/', romcat_gui::table::ROOT_SEPARATOR, 1);
+    // 六、**宽窗口里宽度够**：两行都照 `Q809` 带着根名；画得下的短路径一个字都不删，只是根名与相对路径之间
+    //     换成「 · 」。窗口只是这一条里拉宽，别的几条照旧是 1280。
+    let 宽窗口 = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(2560.0, headless::VIEWPORT[1]),
+        )),
+        ..Default::default()
+    };
+    for _ in 0..3 {
+        headless::frame(&ctx, 宽窗口.clone(), |ui| app.ui(ui));
+    }
+    let 宽的一帧 = headless::frame(&ctx, 宽窗口, |ui| app.ui(ui));
+    let 宽屏上 = 画出来的字(&宽的一帧);
+    let 宽行: Vec<&str> = 宽屏上.lines().collect();
+    let 宽长副行 = 副行(&宽行, "超级机器人大战R");
     assert!(
-        行.contains(&短副行.as_str()),
-        "画得下的短路径不该被截：\n{屏上}"
+        宽长副行.starts_with(带根名.as_str()),
+        "宽窗口里宽度够，副行该照 Q809 带根名：「{宽长副行}」\n{宽屏上}"
+    );
+    留下的尾巴(&宽长副行, 长键);
+    assert_eq!(
+        副行(&宽行, "短"),
+        短键.replacen('/', romcat_gui::table::ROOT_SEPARATOR, 1),
+        "宽窗口里画得下的短路径不该被截：\n{宽屏上}"
+    );
+}
+
+#[test]
+fn 字体样张开关只在带演示启动的窗口里摆出来() {
+    // 拿主意的人 2026-09-14：「字体样张」只在演示/开发构建里出现（挂单 `Q874`）。看的是**运行时**那个标记
+    // （`App::mark_demo`，只有程序带 `--demo` 启动时 `main.rs` 才设），不看编译开关——这份测试本身就开着
+    // `demo` 特性编，没设标记时屏头上照样不该有它。
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        std::env::temp_dir().join("romcat-测试-浏览-演示标记"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 2);
+    // 认的是**正好画着「字体样张」那一段**：状态栏里印着工作目录，目录名带着这几个字就会被「含有」误认。
+    let 摆着开关 = |屏上: &str| 屏上.lines().any(|line| line == "字体样张");
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        !摆着开关(&屏上),
+        "没带演示启动，屏头上摆出了「字体样张」：\n{屏上}"
+    );
+    app.mark_demo();
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        摆着开关(&屏上),
+        "带演示启动的窗口，屏头上没有「字体样张」：\n{屏上}"
     );
 }
 
