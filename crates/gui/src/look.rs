@@ -551,6 +551,147 @@ pub fn divider(ui: &mut egui::Ui) {
     );
 }
 
+/// 那枚**标志**（设计稿 `.mark`）：强调字色的底，两道窗口底色的横条，左下一小块强调色，画满 `rect`。
+///
+/// 设计稿是按 44 点见方画的，里头那几道条按这个比例缩放；外圈圆角照交进来的那一档。开场左栏那一枚（44 点、
+/// 圆角 `large`）与左栏顶上切换主库那张卡上的那一枚（令牌 `rail-mark`、圆角 `medium`，设计稿 `.libsw .mark`）
+/// 共用这一处（票 `gui-looks-like-the-design/32`）。
+pub fn mark(painter: &egui::Painter, rect: egui::Rect, corner: u8, visuals: &egui::Visuals) {
+    let 格 = rect.width() / 44.0;
+    painter.rect_filled(rect, corner, visuals.strong_text_color());
+    let 横条 = |左: f32, 上: f32, 右: f32| {
+        egui::Rect::from_min_max(
+            rect.min + egui::vec2(左 * 格, 上 * 格),
+            egui::pos2(rect.right() - 右 * 格, rect.top() + (上 + 5.0) * 格),
+        )
+    };
+    painter.rect_filled(横条(9.0, 12.0, 9.0), 2.0 * 格, visuals.panel_fill);
+    painter.rect_filled(横条(9.0, 21.0, 17.0), 2.0 * 格, visuals.panel_fill);
+    let 小块 = egui::Rect::from_min_size(
+        egui::pos2(rect.left() + 9.0 * 格, rect.bottom() - 15.0 * 格),
+        egui::vec2(10.0 * 格, 6.0 * 格),
+    );
+    painter.rect_filled(小块, 2.0 * 格, visuals.selection.stroke.color);
+}
+
+/// 一屏的**屏头**（设计稿 `.scrhead`）：左边是标题（页面标题字号、强调字）与副标题（令牌 `size-small-plus`、
+/// 弱字），右边是这一屏的动作；窗口底色、内边距取令牌 `screen-header-padding`、彼此隔 `screen-header-gap`，
+/// 底下一道分隔线。**占掉这一块地方最上头那一截**（一块 `egui::Panel::top`），屏体接着画在它底下。
+///
+/// `id` 是这块面板的 id，一屏一个。交回的 `response.rect` 是整个屏头。
+///
+/// ## 右侧那一段怎么靠右
+///
+/// egui 的横排从左往右摆，右对齐的那种（`right_to_left`）会把里头的控件倒过来摆。所以这一段照常从左往右摆，
+/// 只是先让出「剩下的宽 − 它有多宽」那么一截。它有多宽，**同一帧里先在一块看不见、按不动的地方摆一遍量出来**
+/// （egui 的 `sizing_pass`），再真摆——`actions` 因此每帧调两遍，只有真摆的那一遍按得动。于是换了宽度的那一帧
+/// 画出来的已经是靠右的样子，不会先在左边画一帧、下一帧才挪过去（测试照上一帧的位置去点，点的正是那一帧）。
+/// 里头要是有占满剩下那一截的东西（一段 `right_to_left`），量到的就是整截，那时照常从副标题后面接着摆。
+///
+/// **不用「量上一帧、宽变了就让 egui 重画这一帧」**（`request_discard`）：egui 一帧最多画两遍，这一遍让屏头用掉，
+/// 同一帧里头一回出现的表格（`egui::Grid` 头一帧也要重画一遍才看得见）就只能隐身一帧——
+/// 任务屏的历史就是这么在换进来的那一帧里一行都没画出来的。
+///
+/// 右侧那一段里的控件间距照这块 `ui` 原来的，不跟着换成屏头那一档。
+pub fn screen_header<R>(
+    ui: &mut egui::Ui,
+    id: impl Into<egui::Id>,
+    title: &str,
+    subtitle: &str,
+    actions: impl FnMut(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    let tokens = Tokens::builtin();
+    let [上下, 左右] = tokens.space.screen_header_padding;
+    let id = id.into();
+    let 框 = egui::Frame::new()
+        .fill(ui.visuals().panel_fill)
+        .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)));
+    egui::Panel::top(id)
+        .resizable(false)
+        .frame(框)
+        .show(ui, |ui| {
+            let 原来的间距 = ui.spacing().item_spacing;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = tokens.space.screen_header_gap;
+                let 强调字 = ui.visuals().strong_text_color();
+                ui.label(egui::RichText::new(title).heading().color(强调字));
+                let 弱字 = ui.visuals().weak_text_color();
+                ui.label(
+                    egui::RichText::new(subtitle)
+                        .font(egui::FontId::proportional(tokens.font.size_small_plus))
+                        .color(弱字),
+                );
+                靠右摆(ui, 原来的间距, actions)
+            })
+            .inner
+        })
+}
+
+/// 在这一行剩下的地方里把 `add` 摆的那一段**靠右**：先在一块看不见、按不动的地方摆一遍量宽，
+/// 让出「剩下的宽 − 它有多宽」，再真摆。见 [`screen_header`]「右侧那一段怎么靠右」。
+fn 靠右摆<R>(
+    ui: &mut egui::Ui, 间距: egui::Vec2, mut add: impl FnMut(&mut egui::Ui) -> R
+) -> R {
+    let 剩下 = ui.available_width();
+    let mut 量 = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("屏头右侧那一段量宽")
+            .max_rect(ui.available_rect_before_wrap())
+            .layout(*ui.layout())
+            .sizing_pass()
+            .invisible(),
+    );
+    量.spacing_mut().item_spacing = 间距;
+    add(&mut 量);
+    let 宽 = 量.min_rect().width();
+    ui.add_space((剩下 - 宽).max(0.0));
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing = 间距;
+        add(ui)
+    })
+    .inner
+}
+
+/// 一屏的**屏体**（设计稿 `.scrbody`）：屏头底下剩下的整块，窗口底色，竖着滚；内边距取令牌
+/// `screen-body-padding`（上、左右、下）。
+///
+/// **内边距在滚动区里面**：滚动条贴着这一块的右沿，底下那一截留白要滚到底才看得见——与稿上
+/// `padding` 写在 `overflow:auto` 那一层是同一个样子。`id_salt` 分开各屏的滚动位置。
+///
+/// 各屏自己的 `CentralPanel` 自带一圈 8 点边距（`egui::Frame::central_panel`），改用它时连那一层一起换掉，
+/// 不要套在外面——套在外面就是两层内边距（票 `gui-looks-like-the-design/32`，由各屏的票接手）。
+pub fn screen_body<R>(
+    ui: &mut egui::Ui,
+    id_salt: impl egui::AsIdSalt,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let [上, 左右, 下] = Tokens::builtin().space.screen_body_padding;
+    let 留白 = egui::Margin {
+        left: 左右 as i8,
+        right: 左右 as i8,
+        top: 上 as i8,
+        bottom: 下 as i8,
+    };
+    egui::CentralPanel::default()
+        .frame(egui::Frame::new().fill(ui.visuals().panel_fill))
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt(id_salt)
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    egui::Frame::new()
+                        .inner_margin(留白)
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            add(ui)
+                        })
+                        .inner
+                })
+                .inner
+        })
+        .inner
+}
+
 /// 一颗写着 `label` 的按钮画出来多宽：字宽加两边的内边距，与 `egui::Button` 自己量的一样。
 ///
 /// 要把按钮摆在一行的右头、先替它留出地方时用。**字照按钮取字的规矩取**：`override_font_id`，
@@ -1285,6 +1426,212 @@ mod tests {
         assert!(
             Tokens::builtin().layout.control_stroke > 0.0,
             "次要按钮得有一圈描边（设计稿 .btn）",
+        );
+    }
+
+    /// 这一帧画出来的每一段字：`(字, 摆在哪儿, 字号, 颜色)`。
+    fn 画出来的段(output: &egui::FullOutput) -> Vec<(String, egui::Rect, f32, Color32)> {
+        fn 收(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect, f32, Color32)>) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    let format = text
+                        .galley
+                        .job
+                        .sections
+                        .first()
+                        .map(|section| section.format.clone())
+                        .unwrap_or_default();
+                    out.push((
+                        text.galley.text().to_owned(),
+                        egui::Rect::from_min_size(text.pos, text.galley.size()),
+                        format.font_id.size,
+                        format.color,
+                    ));
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|one| 收(one, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &output.shapes {
+            收(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// 这一帧画出来的每一条横线：`(竖向位置, 横向范围, 颜色)`。
+    fn 画出来的横线(output: &egui::FullOutput) -> Vec<(f32, egui::Rangef, Color32)> {
+        fn 收(shape: &egui::Shape, out: &mut Vec<(f32, egui::Rangef, Color32)>) {
+            match shape {
+                egui::Shape::LineSegment { points, stroke } if points[0].y == points[1].y => {
+                    out.push((
+                        points[0].y,
+                        egui::Rangef::new(points[0].x, points[1].x),
+                        stroke.color,
+                    ));
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|one| 收(one, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &output.shapes {
+            收(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// 画一帧屏头，右侧那一段是一颗写着 `动作` 的按钮。交回这一帧的产出、**交给屏头的那一块**多大、按钮多大。
+    ///
+    /// 量的是交给它的那一块，不是屏头自己交回来的 `rect`：里头的东西摆出界时，面板的 `rect` 跟着撑宽，
+    /// 拿它当右沿，「靠右」这条断言就永远成立。
+    fn 画屏头(ctx: &egui::Context, 动作: &str) -> (egui::FullOutput, egui::Rect, egui::Rect) {
+        let mut 量到 = None;
+        let output = headless::frame(ctx, headless::input(), |ui| {
+            let 交给它的 = ui.max_rect();
+            let 头 = screen_header(ui, "屏头", "标题", "一句副标题", |ui| {
+                ui.button(动作).rect
+            });
+            量到 = Some((交给它的.intersect(头.response.rect), 头.inner));
+        });
+        let (头, 钮) = 量到.expect("画过屏头");
+        (output, 头, 钮)
+    }
+
+    #[test]
+    fn 屏头照令牌摆_标题副标题靠左_右侧那一段靠右_底下一道线() {
+        // 票 `gui-looks-like-the-design/32`：设计稿 `.scrhead`——标题 18、副标题 12.5 的弱字、右侧动作、
+        // 下边一道线、内边距 14/20、彼此隔 12。
+        let tokens = Tokens::builtin();
+        let [上下, 左右] = tokens.space.screen_header_padding;
+        let ctx = headless::context();
+        install(&ctx);
+        let p = tokens.color.theme(ctx.theme());
+        // 头一帧 egui 还在量尺寸，第二帧才是摆稳的样子。
+        画屏头(&ctx, "动作");
+        let (output, 头, 钮) = 画屏头(&ctx, "动作");
+        let 段 = 画出来的段(&output);
+        let 找 = |字: &str| {
+            段.iter()
+                .find(|(画的, ..)| 画的 == 字)
+                .cloned()
+                .unwrap_or_else(|| panic!("屏头上没画「{字}」：{段:?}"))
+        };
+
+        let (_, 标题, 标题字号, 标题色) = 找("标题");
+        assert_eq!(标题字号, tokens.font.size_page, "标题字号");
+        assert_eq!(标题色, p.ink, "标题是强调字");
+        assert!(
+            (标题.left() - (头.left() + 左右)).abs() < 0.5,
+            "标题左边该离屏头左沿 {左右}：标题 {标题:?}，屏头 {头:?}",
+        );
+        let (_, 副标题, 副标题字号, 副标题色) = 找("一句副标题");
+        assert_eq!(副标题字号, tokens.font.size_small_plus, "副标题字号");
+        assert_eq!(副标题色, p.ink_3, "副标题是弱字");
+        assert!(
+            (副标题.left() - 标题.right() - tokens.space.screen_header_gap).abs() < 0.5,
+            "副标题该紧跟标题、隔 {}：标题 {标题:?}，副标题 {副标题:?}",
+            tokens.space.screen_header_gap,
+        );
+
+        assert!(
+            (钮.right() - (头.right() - 左右)).abs() < 0.5,
+            "右侧那一段该靠右、离右沿 {左右}：按钮 {钮:?}，屏头 {头:?}",
+        );
+        assert!(
+            (钮.top() - (头.top() + 上下)).abs() < 0.5,
+            "右侧那一段该离上沿 {上下}：按钮 {钮:?}，屏头 {头:?}",
+        );
+        let 底线 = 画出来的横线(&output).into_iter().find(|(y, 横, 色)| {
+            *色 == p.line
+                && *y > 钮.bottom() + 上下 - 0.5
+                && *y <= 头.bottom()
+                && 横.span() >= 头.width() - 0.5
+        });
+        assert!(
+            底线.is_some(),
+            "屏头底下该有一道 line 色、横贯整个屏头的线：{:?}",
+            画出来的横线(&output)
+        );
+
+        // **右侧那一段换了宽度，同一帧就靠右**：按钮上的字变长的那一帧不许先画在左边、下一帧才挪过去
+        // ——测试照上一帧的位置去点，点的正是那一帧。
+        let (_, 头, 钮) = 画屏头(&ctx, "长得多的一段动作");
+        assert!(
+            (钮.right() - (头.right() - 左右)).abs() < 0.5,
+            "右侧那一段换了宽度的那一帧没靠右：按钮 {钮:?}，屏头 {头:?}",
+        );
+    }
+
+    /// 画一帧屏体：头一行、中间两屏高的一截、末一行。交回交给屏体的那一块、头一行、末一行、屏体里剩下多宽。
+    fn 画屏体(
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> (egui::Rect, egui::Rect, egui::Rect, f32) {
+        let mut 量到 = None;
+        let mut input = headless::input();
+        input.events = events;
+        headless::frame(ctx, input, |ui| {
+            let 交给它的 = ui.max_rect();
+            let (头一行, 末一行, 宽) = screen_body(ui, "屏体", |ui| {
+                let 宽 = ui.available_width();
+                let 头一行 = ui.label("头一行").rect;
+                ui.add_space(headless::VIEWPORT[1] * 2.0);
+                (头一行, ui.label("末一行").rect, 宽)
+            });
+            量到 = Some((交给它的, 头一行, 末一行, 宽));
+        });
+        量到.expect("画过屏体")
+    }
+
+    #[test]
+    fn 屏体照令牌留内边距_滚到底下面还留着那一截() {
+        // 票 `gui-looks-like-the-design/32`：设计稿 `.scrbody{padding:18px 20px 28px;overflow:auto}`。
+        // 底下那 28 点只有滚到底才看得见，所以真发滚轮事件滚到底再量（`tests/queue.rs` 的办法）。
+        let [上, 左右, 下] = Tokens::builtin().space.screen_body_padding;
+        let ctx = headless::context();
+        install(&ctx);
+        画屏体(&ctx, Vec::new());
+        let (区, 头一行, _, 宽) = 画屏体(&ctx, Vec::new());
+        assert!(
+            (头一行.left() - (区.left() + 左右)).abs() < 0.5,
+            "头一行该离左沿 {左右}：{头一行:?}，交给屏体的 {区:?}",
+        );
+        assert!(
+            (头一行.top() - (区.top() + 上)).abs() < 0.5,
+            "头一行该离上沿 {上}：{头一行:?}，交给屏体的 {区:?}",
+        );
+        assert!(
+            (宽 - (区.width() - 2.0 * 左右)).abs() < 0.5,
+            "屏体里剩下的宽该是左右各让出 {左右}：剩 {宽}，交给屏体的 {区:?}",
+        );
+
+        // 往下滚，滚到末一行不再动为止（等的是它停下，不是等一段时间）。
+        let 滚 = || {
+            vec![
+                egui::Event::PointerMoved(区.center()),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -headless::VIEWPORT[1]),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        };
+        let mut 上一帧 = 画屏体(&ctx, 滚()).2;
+        let mut 停了 = false;
+        for _ in 0..200 {
+            let 这一帧 = 画屏体(&ctx, 滚()).2;
+            if 这一帧 == 上一帧 {
+                停了 = true;
+                break;
+            }
+            上一帧 = 这一帧;
+        }
+        assert!(停了, "滚了两百帧末一行还在动");
+        assert!(
+            (上一帧.bottom() - (区.bottom() - 下)).abs() < 0.5,
+            "滚到底时末一行该离下沿 {下}：{上一帧:?}，交给屏体的 {区:?}",
         );
     }
 

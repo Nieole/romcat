@@ -1,4 +1,4 @@
-//! 窗口本体：五屏由顶栏切换，**待确认队列**是打开工具后看见的那一屏。
+//! 窗口本体：五屏由左栏切换，每屏一个屏头，**待确认队列**是打开工具后看见的那一屏。
 //!
 //! ## 为什么默认是队列而不是封面墙
 //!
@@ -25,12 +25,26 @@
 //! 键盘焦点长什么样；以及[上次拖到哪儿的版式](crate::layout)——六条面板边界的宽度，
 //! 从**工作目录**里读出来塞回 egui。画完一帧再问一遍面板现在多宽，手松开了才落盘。
 //! 窗口标题跟着屏走：`romcat — {哪一份库} — {哪一屏}`，**换屏才发一条命令**。
+//!
+//! ## 左栏与屏头
+//!
+//! 顶栏没了（票 `gui-looks-like-the-design/32`）：导航在[左栏](crate::rail)，「切换主库」是左栏顶上那张卡；
+//! 每屏一个[屏头](crate::look::screen_header)——标题、副标题，右侧是那一屏原来画在顶栏上的那一段
+//! （`<屏>::Screen::status`，原样调进来）。屏里自己画的东西一行没动，照稿重排由各屏自己的票接手。
+//!
+//! ## 左栏的几个数从哪来
+//!
+//! **一个都不在这儿另算**，取的都是现成的那一份：库是库屏手上的根数，待确认是队列里待裁决的条数
+//! （还没跑过识别画「—」），子库是子库屏列出来的个数，任务是台上跑着的加排着的。另两个要问库：
+//! 浏览是核心库按默认那一套筛选数的作品数（[`Catalog::work_total`](romcat_core::catalog::Catalog::work_total)，
+//! 与浏览屏没筛过时的总行数是同一句查询），已保存的裁决是沉淀库自己数的（`Store::counts`）。这两个
+//! **不每帧问**：开库时问一次，库变了再问（[`App::recount`]）——库屏认领完一趟、待确认屏落下或撤回一批。
 
 use std::path::PathBuf;
 
-use egui::{Align, Layout};
-
-use crate::{browse, layout, look, queue, roots, sublibrary, task};
+use crate::{browse, layout, look, queue, rail, roots, sublibrary, task};
+use romcat_core::catalog::WorkQuery;
+use romcat_core::report::thousands;
 use romcat_core::site::Site;
 
 /// 关窗走到哪一拍了。
@@ -45,7 +59,7 @@ pub enum Closing {
 }
 
 /// 看的是哪一屏。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum View {
     /// **待确认队列**：打开工具就是它（ADR-0002）。
     #[default]
@@ -70,7 +84,7 @@ pub enum View {
 }
 
 impl View {
-    /// 顶栏照这个次序摆。
+    /// 全部五屏。左栏里的次序另有一份，照设计稿分组（[`rail::GROUPS`]）。
     pub const ALL: [Self; 5] = [
         Self::Queue,
         Self::Library,
@@ -88,6 +102,16 @@ impl View {
             Self::Browse => "浏览",
             Self::Sublibraries => "子库",
             Self::Tasks => "任务",
+        }
+    }
+
+    /// 左栏入口与屏头上写的名字。**只有待确认队列那一屏与 [`Self::label`] 不同**：左栏与屏头照设计稿写
+    /// 「待确认」，窗口标题留「待确认队列」（拿主意的人 2026-09-14 定，词表**待确认队列**那一条写着）。
+    #[must_use]
+    pub fn nav_label(self) -> &'static str {
+        match self {
+            Self::Queue => "待确认",
+            other => other.label(),
         }
     }
 }
@@ -119,13 +143,18 @@ pub struct App {
     prepared: bool,
     /// 上一次写进窗口标题的是哪一屏。**换屏才发一条命令**，不是每帧发一条。
     titled: Option<View>,
-    /// **人按了顶栏上那颗「换一份库」。**
+    /// **人按了左栏顶上那张「切换主库」。**
     ///
     /// 这一层自己换不了库：五屏全建立在「库一定在」这个前提上，换库那一下要把整份
     /// **现场**换掉，而那件事在 [`Program`](crate::program::Program) 上（ADR-0023）。
     /// 这儿只放下一个记号，由它下一步读走——**放下就不撤**：读到它的那一下这份 `App`
     /// 整个被丢掉，没有「换回来」这回事。
     switching: bool,
+    /// 左栏「浏览」那一项的**作品数**：核心库按默认那一套筛选数的。`None` 是数不出来。
+    /// 不每帧问，见模块文档「左栏的几个数从哪来」。
+    works: Option<u64>,
+    /// 左栏底下那句「已保存 N 条裁决」：沉淀库自己数的。`None` 是读不出来。
+    verdicts: Option<u64>,
     closing: Closing,
 }
 
@@ -164,7 +193,7 @@ impl App {
         // 同一份库在相邻两屏上两个样子，而票 01 把原名落进元数据表存在的全部理由
         // 就是这个（ADR-0023、规格 User Story 5）。
         let library_label = site.display_name();
-        Self {
+        let mut app = Self {
             site,
             view: View::default(),
             queue,
@@ -178,8 +207,20 @@ impl App {
             prepared: false,
             titled: None,
             switching: false,
+            works: None,
+            verdicts: None,
             closing: Closing::No,
-        }
+        };
+        app.recount();
+        app
+    }
+
+    /// 重问左栏上那两个要问库的数：浏览的作品数、已保存的裁决数（模块文档「左栏的几个数从哪来」）。
+    ///
+    /// 开库时一次，之后只在**库变了**的那几下调：库屏认领完一趟（扫描、识别、刮削……）、待确认屏落下或撤回一批。
+    fn recount(&mut self) {
+        self.works = self.site.catalog.work_total(&WorkQuery::default()).ok();
+        self.verdicts = self.site.store.counts().ok().map(|counts| counts.total);
     }
 
     /// 换掉标题里那一段名字。
@@ -211,7 +252,7 @@ impl App {
         &self.layout
     }
 
-    /// **人要换一份库了吗**——顶栏上那颗按钮按下去之后就是真。
+    /// **人要换一份库了吗**——左栏顶上那张「切换主库」按下去之后就是真。
     ///
     /// [`Program`](crate::program::Program) 每帧画完问一次，问到就换回**开场**。
     /// 摆成一个记号而不是让这一层自己动手，是因为换库要换掉整份**现场**，而这一层
@@ -383,6 +424,7 @@ impl App {
             // 时，各自在这儿多认一次。
             if self.roots.settle(&self.site, &done) {
                 self.browse.invalidate(&self.site);
+                self.recount();
                 // **识别跑完了，待确认队列自己重新列过**：那一屏的每一批都是识别结论
                 // 折出来的，不重列的话人得再点一次「重新列队列」——而那正是这一票要
                 // 消掉的那种「还得记住下一步」。这一句住在窗口里而不在库屏里，
@@ -446,7 +488,7 @@ impl App {
     ///   `invalidate`）：选择集变了，上一趟排的差量说的已经不是它了。
     ///
     /// **还有一条比回程更宽的**：例外是**一按就落库**的，而人可以按完例外就点
-    /// 「不改了」、或者干脆从顶栏切回子库屏——那两条路上都没有「更新到子库」。
+    /// 「不改了」、或者干脆从左栏切回子库屏——那两条路上都没有「更新到子库」。
     /// 所以浏览屏每动一次某个子库的选择集就留一个记号（`take_touched`），
     /// 由这一趟转告子库屏把为那一台缓着的差量与容量账丢掉（`Screen::forget`）。
     /// 只认回程的话，子库屏会摆着一份按旧选择集排出来的差量，而「同步」认的正是它
@@ -466,6 +508,8 @@ impl App {
     pub fn route(&mut self) {
         if self.queue.take_changed() {
             self.browse.invalidate(&self.site);
+            // 落下、撤回一批改的正是作品归属与裁决条数，左栏那两个数跟着重问。
+            self.recount();
         }
         if let Some(jump) = self.sublibrary.take_jump() {
             self.browse
@@ -511,7 +555,34 @@ impl App {
         // 人会看见子库屏又闪一下才换过去。点一下 egui 本来就会再要一帧，所以
         // 「下一帧开头结算」在眼里就是「按下去就换」。
         self.route();
-        egui::Panel::top("顶栏").show(ui, |ui| self.top_bar(ui));
+        self.rail(ui);
+        // 换屏发生在左栏里（点一个入口），标题跟着这一帧要看的那一屏改。
+        self.retitle(ui.ctx());
+        // **版式存不下来就说一句**：吞掉的话人只看见「拖了半天，下次全忘」，
+        // 而真正的病在工作目录上（写不动的工作目录还会连累中立库与沉淀库）。
+        // 摆在主区最上方单独一行、只在出错时有（拿主意的人 2026-09-14 定）。
+        if let Some(说的) = self.layout.error() {
+            let 说的 = format!("版式存不下来：{说的}");
+            let [_, 左右] = crate::tokens::Tokens::builtin().space.screen_header_padding;
+            egui::Panel::top("版式存不下来")
+                .resizable(false)
+                .frame(
+                    egui::Frame::new()
+                        .fill(ui.visuals().panel_fill)
+                        .inner_margin(egui::Margin::from(egui::vec2(左右, look::step(1)))),
+                )
+                .show(ui, |ui| {
+                    ui.colored_label(ui.visuals().warn_fg_color, 说的);
+                });
+        }
+        let 副标题 = self.subtitle();
+        look::screen_header(
+            ui,
+            egui::Id::new(("屏头", self.view)),
+            self.view.nav_label(),
+            &副标题,
+            |ui| self.header_actions(ui),
+        );
         match self.view {
             View::Queue => {
                 let (queue, site) = (&mut self.queue, &mut self.site);
@@ -585,65 +656,95 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
     }
 
-    fn top_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            for view in View::ALL {
-                let label = match (view, self.board.running()) {
-                    // **哪一屏上都看得见台上有活在跑**：跑着的时候人多半正在别的屏上。
-                    (View::Tasks, Some(_)) => format!("{} ●", view.label()),
-                    _ => view.label().to_string(),
-                };
-                ui.selectable_value(&mut self.view, view, label);
-            }
-            // 屏名那一排刚画完，`self.view` 已经是这一帧要看的那一屏——标题跟着它改。
-            self.retitle(ui.ctx());
-            ui.separator();
+    /// 画左栏：几个计数交进去，按下去的那一下在这儿落实（[`rail`]）。
+    fn rail(&mut self, ui: &mut egui::Ui) {
+        let queue = self.queue.queue();
+        let 待裁 = if queue.identified() {
+            thousands(queue.pending())
+        } else {
+            "—".to_owned()
+        };
+        let 根 = format!("{} 个根", self.roots.roots().len());
+        let 作品 = self.works.map_or_else(|| "—".to_owned(), thousands);
+        let 子库 = self.sublibrary.list().len().to_string();
+        // **哪一屏上都看得见台上有活在跑**：跑着的时候人多半正在别的屏上。数的是跑着的加排着的。
+        let 任务 = self
+            .board
+            .running()
+            .map(|_| (1 + self.board.queued().len()).to_string());
+        let badge = |view: View| match view {
+            View::Library => rail::Badge::Count(根.clone()),
+            View::Queue => rail::Badge::Count(待裁.clone()),
+            View::Browse => rail::Badge::Count(作品.clone()),
+            View::Sublibraries => rail::Badge::Count(子库.clone()),
+            View::Tasks => 任务.clone().map_or(rail::Badge::Nothing, rail::Badge::Live),
+        };
+        let facts = rail::Facts {
+            library: &self.library_label,
+            current: self.view,
+            badge: &badge,
+            verdicts: self.verdicts,
+            chosen_collapsed: self.layout.rail_collapsed(),
+        };
+        match rail::show(ui, &facts) {
+            Some(rail::Pressed::Go(view)) => self.view = view,
             // **回开场换一份库的那条路**（票 `gui-self-sufficient/04` 验收第 5 条）。
             //
-            // **它不是第六屏**，所以不长成屏名那一排里的一颗：开场是五屏之外的那一屏，
-            // 它交出现场之后自己退场（词表**开场**那一条）。摆一颗按钮在屏名右边——
-            // 一按，这份 `App` 连同它手上那份现场整个退场，不必关窗重开。
-            if ui.button("换一份库").clicked() {
-                self.switching = true;
-            }
-            ui.separator();
-            // **版式存不下来就说一句**：吞掉的话人只看见「拖了半天，下次全忘」，
-            // 而真正的病在工作目录上（写不动的工作目录还会连累中立库与沉淀库）。
-            if let Some(说的) = self.layout.error() {
-                ui.colored_label(ui.visuals().warn_fg_color, format!("版式存不下来：{说的}"));
-                ui.separator();
-            }
-            match self.view {
-                View::Queue => {
-                    let (queue, site) = (&mut self.queue, &self.site);
-                    queue.status(ui, site);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(format!("沉淀库 {}", self.site.store.location()));
-                    });
-                }
-                View::Library => {
-                    let (roots, site) = (&mut self.roots, &self.site);
-                    roots.status(ui, site);
-                }
-                View::Browse => {
-                    // **抬头上那颗「★ 收藏」真的写库**（票 `gui-redesign/06`），
-                    // 所以这一屏的抬头拿的是可变的那一份。它同时**往任务台上排活**
-                    // ——那一下在真库量级上是几秒的读（票 `parking-3/09`）。
-                    let (browse, site, board) = (&mut self.browse, &mut self.site, &mut self.board);
-                    browse.status(ui, site, board);
-                }
-                View::Sublibraries => {
-                    // **顶栏上那个「停下」按得动**，所以任务台拿的是可变的那一份。
-                    let (sublibrary, site, board) =
-                        (&mut self.sublibrary, &self.site, &mut self.board);
-                    sublibrary.status(ui, site, board);
-                }
-                View::Tasks => {
-                    let (tasks, board) = (&mut self.tasks, &self.board);
-                    tasks.status(ui, board);
+            // **它不是第六屏**，所以不长成入口里的一项：开场是五屏之外的那一屏，它交出现场之后
+            // 自己退场（词表**开场**那一条）。一按，这份 `App` 连同它手上那份现场整个退场，不必关窗重开。
+            Some(rail::Pressed::SwitchLibrary) => self.switching = true,
+            Some(rail::Pressed::Collapse(collapsed)) => self.layout.set_rail_collapsed(collapsed),
+            None => {}
+        }
+    }
+
+    /// 屏头上的副标题（设计稿各屏 `.scrhead .sub` 那一句）。
+    fn subtitle(&self) -> String {
+        match self.view {
+            View::Library => "根目录、数据源和处理进度".to_owned(),
+            View::Queue => {
+                let queue = self.queue.queue();
+                if queue.identified() && queue.pending() > 0 {
+                    format!("{} 个变体待确认", thousands(queue.pending()))
+                } else {
+                    "暂无待确认项".to_owned()
                 }
             }
-        });
+            View::Browse => "查找作品，并对选中的内容进行操作".to_owned(),
+            View::Sublibraries => "选择集在「浏览」中编辑，这里负责同步到各台设备".to_owned(),
+            View::Tasks => "查看正在运行、等待中和已完成的任务".to_owned(),
+        }
+    }
+
+    /// 屏头右侧：那一屏原来画在顶栏上的那一段，**原样调进来**（照稿重排由各屏自己的票接手）。
+    fn header_actions(&mut self, ui: &mut egui::Ui) {
+        match self.view {
+            View::Queue => {
+                let (queue, site) = (&mut self.queue, &self.site);
+                queue.status(ui, site);
+                ui.label(format!("沉淀库 {}", self.site.store.location()));
+            }
+            View::Library => {
+                let (roots, site) = (&mut self.roots, &self.site);
+                roots.status(ui, site);
+            }
+            View::Browse => {
+                // **抬头上那颗「★ 收藏」真的写库**（票 `gui-redesign/06`），
+                // 所以这一屏的抬头拿的是可变的那一份。它同时**往任务台上排活**
+                // ——那一下在真库量级上是几秒的读（票 `parking-3/09`）。
+                let (browse, site, board) = (&mut self.browse, &mut self.site, &mut self.board);
+                browse.status(ui, site, board);
+            }
+            View::Sublibraries => {
+                // **抬头上那个「停下」按得动**，所以任务台拿的是可变的那一份。
+                let (sublibrary, site, board) = (&mut self.sublibrary, &self.site, &mut self.board);
+                sublibrary.status(ui, site, board);
+            }
+            View::Tasks => {
+                let (tasks, board) = (&mut self.tasks, &self.board);
+                tasks.status(ui, board);
+            }
+        }
     }
 
     /// 关窗的两拍。

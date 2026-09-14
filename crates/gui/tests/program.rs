@@ -179,6 +179,31 @@ fn 点一下(ctx: &egui::Context, program: &mut Program, 那一段: &str) -> Str
     跑一帧(ctx, program)
 }
 
+/// 同 [`点一下`]，只是点的是屏上**正好**写着 `那一段` 的地方，不是头一处含有它的。
+fn 正好点一下(ctx: &egui::Context, program: &mut Program, 那一段: &str) -> String {
+    let 头一帧 = headless::frame(ctx, headless::input(), |ui| program.ui(ui));
+    let Some(位置) = shared::正好那一段画在哪儿(&头一帧, 那一段) else {
+        panic!(
+            "屏上没有正好写着「{那一段}」的地方，没处点：\n{}",
+            shared::画出来的字(&头一帧)
+        );
+    };
+    let 按 = |pressed: bool| egui::Event::PointerButton {
+        pos: 位置,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let mut input = headless::input();
+    input.events.push(egui::Event::PointerMoved(位置));
+    input.events.push(按(true));
+    headless::frame(ctx, input, |ui| program.ui(ui));
+    let mut input = headless::input();
+    input.events.push(按(false));
+    headless::frame(ctx, input, |ui| program.ui(ui));
+    跑一帧(ctx, program)
+}
+
 #[test]
 fn 一个参数都不给看见的是开场列着这个工作目录里的库() {
     // 双击图标、一个参数都不给：从前这条路是死路（报「说清要开哪份库」并退出），
@@ -235,12 +260,12 @@ fn 给一份现成的库就走完启动进主窗口() {
         program.window_title(),
     );
 
-    // 主窗口真的画出来了：顶栏上五屏的名字都在。
+    // 主窗口真的画出来了：左栏上五屏的名字都在。
     let ctx = headless::context();
     let out = headless::frame(&ctx, headless::input(), |ui| program.ui(ui));
     let 屏上 = shared::画出来的字(&out);
-    for 屏 in ["待确认队列", "库", "浏览", "子库", "任务"] {
-        assert!(屏上.contains(屏), "顶栏上没有「{屏}」这一屏：\n{屏上}");
+    for 屏 in ["待确认", "库", "浏览", "子库", "任务"] {
+        assert!(屏上.contains(屏), "左栏上没有「{屏}」这一屏：\n{屏上}");
     }
 }
 
@@ -396,9 +421,9 @@ fn 在开场上选中一行就进主窗口标题写着那一份库() {
 
     let 屏上 = 点一下(&ctx, &mut program, "打开");
 
-    // 开场退场，主窗口在画：顶栏上五屏的名字都在。
-    for 屏 in ["待确认队列", "库", "浏览", "子库", "任务"] {
-        assert!(屏上.contains(屏), "顶栏上没有「{屏}」这一屏：\n{屏上}");
+    // 开场退场，主窗口在画：左栏上五屏的名字都在。
+    for 屏 in ["待确认", "库", "浏览", "子库", "任务"] {
+        assert!(屏上.contains(屏), "左栏上没有「{屏}」这一屏：\n{屏上}");
     }
     // **标题写的与开场那一行画的是同一个字**：人在开场看见「我的主库」，进去标题还是
     // 「我的主库」，不会变成一串带哈希的文件名（验收第 6 条，票 01 的名字在这儿兑现）。
@@ -541,8 +566,8 @@ fn 开过一份库之后再启动直接进主窗口不经过开场() {
         第二趟.window_title(),
     );
     let 屏上 = 跑一帧(&headless::context(), &mut 第二趟);
-    for 屏 in ["待确认队列", "库", "浏览", "子库", "任务"] {
-        assert!(屏上.contains(屏), "顶栏上没有「{屏}」这一屏：\n{屏上}");
+    for 屏 in ["待确认", "库", "浏览", "子库", "任务"] {
+        assert!(屏上.contains(屏), "左栏上没有「{屏}」这一屏：\n{屏上}");
     }
     // 断的是开场左边那句大标题：开场在画，它就在。
     assert!(
@@ -550,7 +575,7 @@ fn 开过一份库之后再启动直接进主窗口不经过开场() {
         "又被开场挡了一道：\n{屏上}",
     );
     // **工作目录是从那条路径反推出来的**：沉淀库跟着工作目录走（`工作目录/verdict/…`），
-    // 顶栏上写着它在哪儿——反推错了这一句就指到别处去了（验收第 2 条）。
+    // 待确认屏的屏头上写着它在哪儿——反推错了这一句就指到别处去了（验收第 2 条）。
     assert!(
         屏上.contains(&romcat_core::path::display(工作目录.path())),
         "反推出来的不是那份库住的工作目录：\n{屏上}",
@@ -673,7 +698,7 @@ fn 在主窗口里回到开场换一份库换过之后记的是新那份() {
     );
 
     // **主窗口里那条回开场的路**：不必关掉程序重开。
-    let 屏上 = 点一下(&ctx, &mut program, "换一份库");
+    let 屏上 = 点一下(&ctx, &mut program, "切换主库");
     assert_eq!(program.window_title(), "romcat — 开场", "没回到开场");
     assert!(屏上.contains("甲那边的库"), "回到的开场没列出库：\n{屏上}");
 
@@ -699,7 +724,7 @@ fn 在主窗口里回到开场换一份库换过之后记的是新那份() {
         下一趟.window_title(),
     );
     let 屏上 = 跑一帧(&headless::context(), &mut 下一趟);
-    assert!(屏上.contains("待确认队列"), "没直接进主窗口：\n{屏上}");
+    assert!(屏上.contains("切换主库"), "没直接进主窗口：\n{屏上}");
 }
 
 #[test]
@@ -1074,8 +1099,8 @@ fn 在开场上认领一个新主库走完向导就进主窗口() {
     let 屏上 = 走一趟向导(&ctx, &mut program, "我的主库", 盘.path(), "主库");
 
     // 开场退场，主窗口在画。
-    for 屏 in ["待确认队列", "库", "浏览", "子库", "任务"] {
-        assert!(屏上.contains(屏), "顶栏上没有「{屏}」这一屏：\n{屏上}");
+    for 屏 in ["待确认", "库", "浏览", "子库", "任务"] {
+        assert!(屏上.contains(屏), "左栏上没有「{屏}」这一屏：\n{屏上}");
     }
     // **标题写的是人刚起的那个名字**：它这一趟真的落进了中立库的元数据表
     // （`Catalog::create`），而不是从带哈希的文件名截出来的。
@@ -1094,15 +1119,18 @@ fn 在开场上认领一个新主库走完向导就进主窗口() {
     );
 }
 
-/// 一块**大到几帧之内扫不完**的盘：三十个目录，各一百个小文件。
+/// 一块**大到几帧之内扫不完**的盘：一百个目录，各一百个小文件。
 ///
 /// 「报得出进度、按得下停下」只有在扫描还**在跑**的时候才验得到，而这几条是从界面进去
 /// 的——按一下要跑四帧（找位置、按下、松开、再画一帧），实测每帧几十毫秒。四百个文件
 /// 那块盘 121 毫秒就扫完了，正好落在那四帧里，于是屏上只剩一条历史。三千个文件把这个
-/// 差拉开一个数量级。**只往临时目录里写**（ADR-0004）。
+/// 差拉开一个数量级——直到主窗口长出左栏与屏头（票 `gui-looks-like-the-design/32`）：
+/// 进主窗口那头几帧要多排一批新字形，三千个文件的那一趟 185 毫秒扫完，赶在「停下」按下去之前
+/// 收了场。一万个文件再拉开三倍。**这仍是一场与挂钟的赛跑**，真扫描没有等信号的口子（挂单 `Q864`）。
+/// **只往临时目录里写**（ADR-0004）。
 fn 摆一块大盘(tag: &str) -> TempDir {
     let dir = temp_dir(tag);
-    for 组 in 0..30 {
+    for 组 in 0..100 {
         let 目录 = dir.path().join(format!("SFC/第{组:02}组"));
         std::fs::create_dir_all(&目录).expect("建得出目录");
         for i in 0..100 {
@@ -1479,7 +1507,8 @@ fn 向导只管第一个根第二个根仍然从库屏加() {
 
     // **主窗口里没有那颗按钮**：认领是开场的事，进来之后再摆一颗只会让人以为
     // 「加第二块盘」也走它。
-    let 屏上 = 点一下(&ctx, &mut program, "库");
+    // **正好写着「库」的那一处**：左栏顶上那张卡写着主库原名「我的主库」，按「含有」去找点到的是它。
+    let 屏上 = 正好点一下(&ctx, &mut program, "库");
     assert!(
         !屏上.contains("添加主库"),
         "主窗口里也摆着添加主库那颗按钮：\n{屏上}",
@@ -1530,7 +1559,7 @@ fn 向导建完库进主窗口之后那一份被记住下一趟直接进它() {
         下一趟.window_title(),
     );
     let 屏上 = 跑一帧(&headless::context(), &mut 下一趟);
-    assert!(屏上.contains("待确认队列"), "没直接进主窗口：\n{屏上}");
+    assert!(屏上.contains("切换主库"), "没直接进主窗口：\n{屏上}");
 }
 
 #[test]

@@ -394,7 +394,9 @@ impl Screen {
 fn hero_ui(ui: &mut egui::Ui) {
     let tokens = Tokens::builtin();
     let 间隔 = look::step(4);
-    mark(ui, tokens.layout.mark);
+    let 标志 = tokens.layout.mark;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(标志, 标志), egui::Sense::hover());
+    look::mark(ui.painter(), rect, tokens.radius.large, ui.visuals());
     ui.add_space(间隔);
     let 强调 = ui.visuals().strong_text_color();
     ui.label(
@@ -409,34 +411,6 @@ fn hero_ui(ui: &mut egui::Ui) {
         promise_ui(ui, 字, 题, 说);
         ui.add_space(look::step(2));
     }
-}
-
-/// 左栏最上头那枚标志（设计稿 `.mark`）：强调字色的底，两道窗口底色的横条，左下一小块强调色。
-///
-/// 设计稿是按 44 点见方画的，里头那几道条按这个比例缩放。
-fn mark(ui: &mut egui::Ui, size: f32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
-    let visuals = ui.visuals();
-    let 格 = size / 44.0;
-    let painter = ui.painter();
-    painter.rect_filled(
-        rect,
-        Tokens::builtin().radius.large,
-        visuals.strong_text_color(),
-    );
-    let 横条 = |左: f32, 上: f32, 右: f32| {
-        egui::Rect::from_min_max(
-            rect.min + egui::vec2(左 * 格, 上 * 格),
-            egui::pos2(rect.right() - 右 * 格, rect.top() + (上 + 5.0) * 格),
-        )
-    };
-    painter.rect_filled(横条(9.0, 12.0, 9.0), 2.0 * 格, visuals.panel_fill);
-    painter.rect_filled(横条(9.0, 21.0, 17.0), 2.0 * 格, visuals.panel_fill);
-    let 小块 = egui::Rect::from_min_size(
-        egui::pos2(rect.left() + 9.0 * 格, rect.bottom() - 15.0 * 格),
-        egui::vec2(10.0 * 格, 6.0 * 格),
-    );
-    painter.rect_filled(小块, 2.0 * 格, visuals.selection.stroke.color);
 }
 
 /// 一条承诺：左边一枚字块，右边标题与说明（设计稿 `.promise`）。
