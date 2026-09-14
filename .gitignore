@@ -1,3 +1,9 @@
 .DS_Store
 *.tmp
 target/
+
+# 截图门（`crates/gui/tests/snapshot.rs`）比对失败时 egui_kittest 在基线旁边留下的新图、差异图与旧图。
+# 基线本身（`*.png`）入库；这三样只是给人看的现场，不入库。
+*.new.png
+*.diff.png
+*.old.png

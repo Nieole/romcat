@@ -226,6 +226,8 @@ pub struct Dialog<A> {
     title: String,
     /// 标题底下那句说明。
     note: Option<String>,
+    /// 标头那一排「走到第几问」：各问的名字，与眼下是第几问（从 0 数）。
+    pages: Option<(Vec<String>, usize)>,
     /// 多宽。
     width: Width,
     /// 页脚。
@@ -250,6 +252,7 @@ impl<A> Dialog<A> {
             id: egui::Id::new(("弹层", id_salt)),
             title: title.into(),
             note: None,
+            pages: None,
             width: Width::default(),
             footer,
         }
@@ -259,6 +262,20 @@ impl<A> Dialog<A> {
     #[must_use]
     pub fn note(mut self, note: impl Into<String>) -> Self {
         self.note = Some(note.into());
+        self
+    }
+
+    /// **向导那一排「走到第几问」**：画在标题与说明底下，一问一格——走过的打勾、正在问的是强调色、
+    /// 还没到的是弱字（设计稿 `.steps`）。`at` 从 0 数。
+    ///
+    /// 格里只写那一问的名字（「命名」「选择目录」）；整句的说明归 [`Self::note`]。
+    #[must_use]
+    pub fn pages<S: Into<String>>(
+        mut self,
+        labels: impl IntoIterator<Item = S>,
+        at: usize,
+    ) -> Self {
+        self.pages = Some((labels.into_iter().map(Into::into).collect(), at));
         self
     }
 
@@ -279,6 +296,7 @@ impl<A> Dialog<A> {
             id,
             title,
             note,
+            pages,
             width,
             footer,
         } = self;
@@ -363,8 +381,13 @@ impl<A> Dialog<A> {
                         if let Some(note) = note {
                             ui.label(egui::RichText::new(note).small().weak());
                         }
+                        // 设计稿 `.steps` 离说明是 14，取最近那一档。
+                        if let Some((labels, at)) = &pages {
+                            ui.add_space(step(2));
+                            pages_ui(ui, labels, *at);
+                        }
                     });
-                divider(ui);
+                look::divider(ui);
                 let above_body = ui.min_rect().height();
 
                 let body_height =
@@ -395,7 +418,7 @@ impl<A> Dialog<A> {
                             .inner
                     })
                     .inner;
-                divider(ui);
+                look::divider(ui);
 
                 let above_footer = ui.min_rect().height();
                 let clicked = egui::Frame::new()
@@ -503,15 +526,94 @@ fn return_focus(ctx: &egui::Context) {
     }
 }
 
-/// 两段之间那条一点宽的分隔线。
-fn divider(ui: &mut egui::Ui) {
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
-    ui.painter().hline(
-        rect.x_range(),
-        rect.center().y,
-        ui.visuals().widgets.noninteractive.bg_stroke,
-    );
+/// 标头那一排「走到第几问」（[`Dialog::pages`]）。
+///
+/// 每一格：一圈里写着序号（走过的画一个勾），跟着那一问的名字，格与格之间一道细线。颜色：正在问的
+/// 那一圈是主按钮那一档（[`look::primary_button`]），走过的是「放心」那一对标签色
+/// （[`look::tone_colors`]），还没到的是面板底、输入框描边、弱字。
+///
+/// **勾是两段线画的**，不靠字体里有没有 ✓：打包的子集字体里没有它，落到回退链上画成什么说不准。
+fn pages_ui(ui: &mut egui::Ui, labels: &[String], at: usize) {
+    let tokens = Tokens::builtin();
+    let 直径 = tokens.layout.page_dot;
+    let 半径 = 直径 / 2.0;
+    let 缝 = look::step(1);
+    let visuals = ui.visuals().clone();
+    let mut 主按钮 = visuals.clone();
+    look::primary_button(&mut 主按钮);
+    let (放心字, 放心底) = look::tone_colors(look::Tone::Good, &visuals);
+    let 线色 = visuals.widgets.inactive.bg_stroke.color;
+    let 格宽 = ui.available_width() / labels.len().max(1) as f32;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for (i, label) in labels.iter().enumerate() {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(格宽, 直径), egui::Sense::hover());
+            let 圆心 = egui::pos2(rect.left() + 半径, rect.center().y);
+            let (底, 边, 字色) = match i.cmp(&at) {
+                std::cmp::Ordering::Less => (放心底, 放心字, 放心字),
+                std::cmp::Ordering::Equal => {
+                    let 这一档 = &主按钮.widgets.inactive;
+                    (
+                        这一档.bg_fill,
+                        这一档.bg_stroke.color,
+                        这一档.fg_stroke.color,
+                    )
+                }
+                std::cmp::Ordering::Greater => {
+                    (visuals.window_fill, 线色, visuals.weak_text_color())
+                }
+            };
+            let painter = ui.painter();
+            painter.circle(
+                圆心,
+                半径,
+                底,
+                egui::Stroke::new(tokens.layout.control_stroke, 边),
+            );
+            if i < at {
+                let 勾 = egui::Stroke::new(0.15 * 半径, 字色);
+                let 折点 = 圆心 + egui::vec2(-0.1 * 半径, 0.3 * 半径);
+                painter.line_segment([圆心 + egui::vec2(-0.4 * 半径, 0.0), 折点], 勾);
+                painter.line_segment([折点, 圆心 + egui::vec2(0.4 * 半径, -0.3 * 半径)], 勾);
+            } else {
+                let 序号 =
+                    egui::WidgetText::from(egui::RichText::new((i + 1).to_string()).color(字色))
+                        .into_galley(
+                            ui,
+                            Some(egui::TextWrapMode::Extend),
+                            f32::INFINITY,
+                            egui::TextStyle::Name(look::CAPTION.into()),
+                        );
+                painter.galley(圆心 - 序号.size() / 2.0, 序号, 字色);
+            }
+            let 名字色 = if i == at {
+                visuals.strong_text_color()
+            } else {
+                visuals.weak_text_color()
+            };
+            let 名字 = egui::WidgetText::from(egui::RichText::new(label).color(名字色))
+                .into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Small,
+                );
+            let 名字在 = egui::pos2(
+                rect.left() + 直径 + 缝,
+                rect.center().y - 名字.size().y / 2.0,
+            );
+            let 线从 = 名字在.x + 名字.size().x + 缝;
+            painter.galley(名字在, 名字, 名字色);
+            let 线到 = rect.right() - 缝;
+            if i + 1 < labels.len() && 线到 > 线从 {
+                painter.hline(
+                    线从..=线到,
+                    rect.center().y,
+                    egui::Stroke::new(tokens.layout.control_stroke, 线色),
+                );
+            }
+        }
+    });
 }
 
 /// 页脚那一排：退出那一颗靠左，其余几颗照读的次序靠右。返回这一帧按下的是哪一颗。
@@ -528,7 +630,7 @@ fn footer_ui<A>(ui: &mut egui::Ui, footer: &Footer<A>) -> Option<Slot> {
         let wide: f32 = footer
             .rest
             .iter()
-            .map(|button| button_width(ui, &button.label))
+            .map(|button| look::button_width(ui, &button.label))
             .sum::<f32>()
             + gap * footer.rest.len().saturating_sub(1) as f32;
         ui.add_space((ui.available_width() - wide).max(0.0));
@@ -539,17 +641,6 @@ fn footer_ui<A>(ui: &mut egui::Ui, footer: &Footer<A>) -> Option<Slot> {
         }
     });
     clicked
-}
-
-/// 一颗写着 `label` 的按钮画出来多宽：字宽加两边的内边距，与 `egui::Button` 自己量的一样。
-fn button_width(ui: &egui::Ui, label: &str) -> f32 {
-    let galley = egui::WidgetText::from(label).into_galley(
-        ui,
-        Some(egui::TextWrapMode::Extend),
-        f32::INFINITY,
-        egui::TextStyle::Button,
-    );
-    galley.size().x + 2.0 * ui.spacing().button_padding.x
 }
 
 /// 摆一颗页脚按钮。主按钮在一个 `scope` 里换上那一档颜色，别的控件不受影响。

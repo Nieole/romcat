@@ -1009,6 +1009,10 @@ impl Screen {
         let names: Vec<String> = self.list.iter().map(|row| row.name.clone()).collect();
         egui::ScrollArea::vertical()
             .id_salt("设备卡片")
+            // **程序发的滚动当趟就落到布局上**（票 `gui-looks-like-the-design/05`）：摊开差量步骤时
+            // [`Screen::steps_ui`] 把那张表滚进视口；egui 缺省带动画，滚动要晚一趟才挪得动卡片，
+            // 那一趟里表还压在视口底下、后几行没画。只管 `scroll_to_*`，人拿滚轮滚照旧。
+            .animated(false)
             .show(ui, |ui| {
                 for name in names {
                     self.card_ui(ui, site, tasks, &name);
@@ -1401,12 +1405,41 @@ impl Screen {
                 }
             }
         });
+        // **摊开之后把这张表滚进卡片列表的视口，只管摊开那一下**（票 `gui-looks-like-the-design/05`）：
+        // 按钮照稿加高之后卡片里那几行跟着高，这张表常常落在视口底下——摊开了却看不见后几步。
+        let 摊开于 = egui::Id::new(("差量表摊开于第几趟", &plan.sublibrary));
         if self.expanded {
-            // **界面上不按滚动位置**：人自己滚。`scroll_to` 是给实测与测试的
+            // **表里的滚动位置界面不按**：人自己滚。`scroll_to` 是给实测与测试的
             // （[`steps_table`]）。
-            self.steps_drawn = steps_table(ui, plan, None);
+            let 表 = ui.scope(|ui| steps_table(ui, plan, None));
+            self.steps_drawn = 表.inner;
+            let 这一趟 = ui.ctx().cumulative_pass_nr();
+            let 起 = ui
+                .ctx()
+                .data_mut(|data| *data.get_temp_mut_or_insert_with(摊开于, || 这一趟));
+            // **只管摊开之后那几趟**：egui 一帧里最多摆 `max_passes` 趟，头一趟里这张表常常还没摆稳——
+            // 看着在视口里，下一趟却落到了底下；再算上下一帧头一趟。过了这几趟就不再管，人往哪儿滚都随他。
+            let 那几趟 = ui.ctx().options(|options| options.max_passes.get()) as u64;
+            if 这一趟 <= 起 + 那几趟 {
+                let (表框, 视口) = (表.response.rect, ui.clip_rect());
+                let 看全了 = 视口.top() <= 表框.top() && 表框.bottom() <= 视口.bottom();
+                if !看全了 {
+                    // 比视口还高的表看不全：把表头滚进来就算，之后人自己滚。
+                    let 对齐 = if 表框.height() > 视口.height() {
+                        Align::TOP
+                    } else {
+                        Align::BOTTOM
+                    };
+                    ui.scroll_to_rect_animation(
+                        表框,
+                        Some(对齐),
+                        egui::style::ScrollAnimation::none(),
+                    );
+                }
+            }
             return;
         }
+        ui.ctx().data_mut(|data| data.remove::<u64>(摊开于));
         self.steps_drawn = 0;
         for step in plan.steps.iter().take(STEP_SAMPLE) {
             ui.horizontal(|ui| {
