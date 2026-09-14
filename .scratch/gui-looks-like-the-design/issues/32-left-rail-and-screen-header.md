@@ -7,7 +7,7 @@
 
 **Blocked by:** 01、02、03、04。（截图那一条要等 `05`。）
 
-**Status:** ready-for-agent
+**Status:** done
 
 ⚠️ **这张票是切票时漏掉的**：`spec.md` 实现决定三「左栏导航：六个入口各带计数徽标，底部是
 新手引导入口、已保存裁决数与收起按钮。顶栏不再承载导航与动作」，用户故事 3、5，以及测试决定
@@ -41,9 +41,12 @@
       证据：上面几条。开场 7 张在第一个提交 `e04dd19` 上对着入库基线逐像素通过（`slot-1-gl32-shots1.log`，`EXIT_opening=0`）；
       之后拿主意的人加的「共用标签与按钮字号照稿」（`ed88e90`，挂单 `Q862` / `Q863`）让 `catalogs-*`（标签那几行）与 `empty-*`（大号「添加主库」14 号）变了，
       `claiming-light` 与 `unreadable-*` 零像素变化；F5 单列只读标签（`ab4229b`）之后开场 7 张照旧对得上候选图。
-- [ ] 主窗口外壳的基线图入库（左栏展开、收起 × 浅暗）
-      候选图已出、已逐张对过稿，**等拿主意的人点头**：`crates/gui/tests/snapshots/main-window/rail-{expanded,collapsed}-{light,dark}.png`；
-      与设计稿并排：`.scratch/gui-looks-like-the-design/after/32-main-window-*.png`。开场那 4 张重出的候选（`opening/catalogs-*`、`opening/empty-*`）同样等点头。
+- [x] 主窗口外壳的基线图入库（左栏展开、收起 × 浅暗）
+      证据：拿主意的人 2026-09-14 点头，入库提交 `8b566ca`：`crates/gui/tests/snapshots/main-window/rail-{expanded,collapsed}-{light,dark}.png`，
+      垫**任务屏的空台态**（`tests/snapshot.rs` 的 `拍主窗口`，`333eb59`）——第一版垫待确认屏没点头：main 上各屏正文都是旧的，看不出外壳。
+      收起态窄条照稿按行高撑高之后重出（`98f58ca`，`slot-1-gl32-shots5.log`，整份截图门 11 条过）。与设计稿并排：`.scratch/gui-looks-like-the-design/after/32-main-window-*.png`
+      （左程序、右设计稿任务屏清空历史后截的），入口竖着的位置差 0.5–1.5 点。开场 `opening/catalogs-*`（标签那几行）与 `opening/empty-*`（大号「添加主库」14 号）
+      4 张跟着共用字号一起重批，同一个提交入库。
 
 **门禁**（2026-09-14，分支 `q5/gl-32-left-rail-and-screen-header`，`943ff25`，`cargo xtask gate -j 3 --test-threads 3 --keep-going`）：
 fmt、glossary（扫 `crates/` 下 12 份 `.rs` 里新写的 2,247 行，没撞上）、check、clippy、test、doc 六步全绿，`EXIT=0`；test 那一步 76 个测试目标、2,058 条通过、0 失败、2 条 ignored；
