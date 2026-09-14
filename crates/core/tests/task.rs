@@ -512,6 +512,12 @@ fn 同步按停时已经落下东西的那一趟在台上记成停在半路而�
         left_behind.contains("清单"),
         "说不出那份清单还在：{left_behind}",
     );
+    // **下次从哪儿继续也由它说**（票 `gui-looks-like-the-design/25`）：任务屏历史那一行只画
+    // 这一句，界面不另编。清单是增量同步的依据，落过的下一趟不重落。
+    assert!(
+        left_behind.contains("下一趟同步照这份清单接着来，落过的不再重落"),
+        "说不出下一趟从哪儿接着来：{left_behind}",
+    );
 }
 
 #[test]
@@ -539,6 +545,15 @@ fn 同步按停时一件都没落的那一趟也记成停在半路留下的只�
     assert!(
         left_behind.contains("清单"),
         "说不出那份清单还在：{left_behind}",
+    );
+    // 一件都没落时下一趟照样照清单来；「落过的不再重落」这半句这时是空话，别说。
+    assert!(
+        left_behind.contains("下一趟同步照这份清单接着来"),
+        "说不出下一趟从哪儿接着来：{left_behind}",
+    );
+    assert!(
+        !left_behind.contains("落过的"),
+        "一件都没落却说落过的不再重落：{left_behind}",
     );
 }
 
@@ -575,6 +590,12 @@ fn 扫描被叫停时在台上记成停在半路而且说得出断点写下了()
         left_behind.contains("断点写下了"),
         "说不出断点写下了：{left_behind}",
     );
+    // **下次从哪儿继续也由它说**（票 `gui-looks-like-the-design/25`）。「续跑」是扫描那一侧
+    // 的词：界面上的「重扫」就是续跑，命令行是 `--resume`。
+    assert!(
+        left_behind.contains("续跑从断点接着走"),
+        "说不出下一趟从哪儿接着走：{left_behind}",
+    );
 }
 
 #[test]
@@ -599,6 +620,10 @@ fn 没设断点的那一趟被叫停时不许说断点写下了() {
     assert!(
         left_behind.contains("没设断点"),
         "没设断点却说得像有断点：{left_behind}",
+    );
+    assert!(
+        left_behind.contains("下一趟得从头扫") && !left_behind.contains("接着走"),
+        "没设断点，下一趟从哪儿来得说成从头扫：{left_behind}",
     );
 }
 

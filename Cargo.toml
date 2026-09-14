@@ -125,6 +125,16 @@ rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
 # 1.0，两版并存。macOS 上复用已有的 `objc2` 0.6 / `objc2-app-kit` 0.3 / `block2` 0.6，Windows 上复用
 # `windows-sys` 0.61。
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+# **本地时区**（票 `gui-looks-like-the-design/25`）：任务屏历史那一列照稿画本地时间「09-10 09:12」，得知道这台机器
+# 在哪个时区、那一刻比 UTC 快几秒。**只有界面用它**（`crates/gui` 的 `src/task.rs`）；核心库的 `human_time`
+# 与命令行照旧 UTC（挂单 `Q901`）。
+#
+# 为什么是它：这个工作区禁 `unsafe`，`libc::localtime_r` 用不了；`time` 取本地偏移在多线程进程里一律拒绝报
+# （界面就是多线程的）。`jiff` 读系统时区库（Unix 上是 `/etc/localtime` 与 `/usr/share/zoneinfo`，Windows 上
+# 随包带一份），纯 Rust、不联网。只开读系统时区要的那几个特性，`serde`、`logging` 这类一个不开。
+#
+# **钉死 `=0.2.37`**：时区换算差一个补丁版就可能差出一个小时，升版得是一次看得见的改动。
+jiff = { version = "=0.2.37", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 # **截图门**（票 `gui-looks-like-the-design/05`，规格「三层门」的像素层）：界面测试把一屏真的渲染成 PNG，
 # 与入库的基线逐像素比。**只有测试用它**（`crates/gui` 的 dev-dependencies，只在 `tests/snapshot.rs` 里用），
 # 交付出去的二进制一个字节都不多。

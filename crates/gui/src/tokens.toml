@@ -153,6 +153,14 @@ rail-foot-gap          = 6            # 左栏栏底几样之间（设计稿 .ra
 rail-foot-padding      = 10           # 栏底那道线底下空多少（设计稿 .railfoot 的 padding-top:10px）
 rail-note-padding      = 10           # 栏底「已保存 N 条裁决」那一行左右留白（设计稿 .railfoot .st 的 padding:0 10px）
 rail-note-gap          = 6            # 那一行圆点与字之间（设计稿 .railfoot .st 的 gap:6px）
+screen-section-gap   = 18            # 屏体里一块与一块之间（设计稿任务屏 .scrbody.col 的 gap:18px）
+section-title-gap    = 8             # 小标题与底下那一块之间（设计稿任务屏 .col 的 gap:8px）
+card-padding         = 16            # 正在跑那张卡的内边距（设计稿 .runcard 的 padding:16px）
+card-row-gap         = 8             # 那张卡里一排与一排之间（设计稿 .runcard 的 gap:8px 16px 竖向那一半）
+queue-row-padding    = [10, 14]      # 等待中那一行卡片的内边距（上下, 左右）（设计稿 renderTasks 那张卡的 padding:10px 14px）
+empty-padding        = 28            # 空态那一格的内边距（设计稿 .empty 的 padding:28px）
+meta-gap             = 18            # 正在跑那张卡底下那一排，格与格之间（设计稿 .runcard .meta 的 gap:18px）
+table-head-padding   = [7, 10]       # 表头格子内边距（上下, 左右）（设计稿 .tbl th 的 padding:7px 10px）
 
 [layout]
 rail-width        = 196   # 左侧导航展开宽度
@@ -173,6 +181,9 @@ tier-bar          = 3     # 置信度色条宽度
 thumb-list        = [32, 43] # 列表行首封面缩略图（宽, 高）
 card-cover-ratio  = 0.75  # 卡片封面宽高比 3:4
 statusbar         = 30    # 底部状态栏高度
+statusbar-bar     = 120   # 底部状态栏里任务那条小进度条的宽度
+runcard-bar       = 3     # 正在跑那张卡左边那条强调色竖条的宽（设计稿 .runcard 的 box-shadow:inset 3px 0 0）
+runcard-progress  = 8     # 正在跑那张卡上进度条的高（设计稿 .runcard .bar 的 height:8px）
 dialog-width      = [520, 620, 720, 840]   # 对话框只用这几档宽度
 opening-side-width = [440, 560]  # 开场右栏宽度（最窄, 最宽）
 opening-hero-min  = 360   # 开场左栏最窄宽度
