@@ -41,6 +41,7 @@
 //! 归各屏自己的票**，它们照稿重排时这几张跟着重批。
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use egui::Theme;
 use egui_kittest::{Harness, SnapshotOptions};
@@ -53,14 +54,17 @@ use romcat_core::platform::Manifest;
 use romcat_core::scrape::{AnchorKind, Field, MediaKind};
 use romcat_core::shape::{Role, SINGLE_FILE_RULE, Variant};
 use romcat_core::site::Site;
+use romcat_core::task::Cutoff;
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::verdict::Store;
 use romcat_core::workspace::{CatalogEntry, CatalogFacts, CatalogState, DirUnreadable, Listing};
 use romcat_gui::app::{App, View};
 use romcat_gui::opening::Screen;
-use romcat_gui::{font, headless, layout, look, rail};
+use romcat_gui::task::{Clock, Product};
+use romcat_gui::{demo, font, headless, layout, look, rail};
 
 mod shared;
+use shared::{一对信号, 占位活};
 
 /// 比对阈值：一个像素的色差过了多少算坏（每像素 YIQ 色距 0.6）、坏几个像素算红（0 个）。
 ///
@@ -111,8 +115,11 @@ fn 装好(ctx: &egui::Context) -> bool {
     false
 }
 
-/// 开一扇窗：视口 [`headless::VIEWPORT`]、一点一个像素、这一套主题，跑到这一屏不再要重画为止。
-fn 开一个<'a>(主题: Theme, mut 画一帧: impl FnMut(&mut egui::Ui) + 'a) -> Harness<'a> {
+/// 搭一扇窗：视口 [`headless::VIEWPORT`]、一点一个像素、这一套主题，先跑两帧。
+///
+/// 台上有活在跑的那几张用它自己数帧（[`拍正在跑`]）：台上有活时主窗口每一帧都请求下一帧，
+/// 永远跑不到「不要重画」。别的一律走 [`开一个`]。
+fn 搭一个<'a>(主题: Theme, mut 画一帧: impl FnMut(&mut egui::Ui) + 'a) -> Harness<'a> {
     let mut harness = Harness::builder()
         .with_size(headless::VIEWPORT)
         .with_pixels_per_point(1.0)
@@ -131,9 +138,15 @@ fn 开一个<'a>(主题: Theme, mut 画一帧: impl FnMut(&mut egui::Ui) + 'a) -
                 画一帧(ui);
             });
         });
-    // 头一帧只装字体（见 [`装好`]），弹层这类浮层画出来的第二帧才摆稳：先跑两帧，再跑到不要重画
-    // 为止（跑不稳时 `run` 当场炸，并说清是谁一直在要重画）。
+    // 头一帧只装字体（见 [`装好`]），弹层这类浮层画出来的第二帧才摆稳：先跑两帧。跑到不要重画
+    // 为止是 [`开一个`] 的事（跑不稳时 `run` 当场炸，并说清是谁一直在要重画）。
     harness.run_steps(2);
+    harness
+}
+
+/// 开一扇窗（[`搭一个`]），跑到这一屏不再要重画为止。
+fn 开一个<'a>(主题: Theme, 画一帧: impl FnMut(&mut egui::Ui) + 'a) -> Harness<'a> {
+    let mut harness = 搭一个(主题, 画一帧);
     harness.run();
     harness
 }
@@ -828,6 +841,7 @@ fn 带标签的行正题露得出字(harness: &Harness<'_>, 名字: &str) {
 /// 把手与滚动条不算，它们本来就骑在边上。
 ///
 /// 一栏是哪一块，问 egui 自己存的面板尺寸：屏头、左边的导航（票 `gui-looks-like-the-design/32` 的外壳）、
+/// 底部状态栏（票 `gui-looks-like-the-design/25`）、
 /// 筛选那一栏（收起时是那条窄条）、侧边详情（同）、底下那块编辑面板，剩下的是表格那一块。控件**上沿的中点**落在哪一栏，就归哪一栏；哪一栏都不落的，本身就是
 /// 问题。按上沿不按中心：滚动区最底下那一个被窗沿截掉一半时，中心已经出了窗，上沿还在它那一栏里。
 ///
@@ -836,7 +850,7 @@ fn 带标签的行正题露得出字(harness: &Harness<'_>, 名字: &str) {
 ///
 /// **左右两沿必须整个在栏里，竖着只查上沿**：左栏、右栏、编辑面板与表格都是滚动区，最底下那一个
 /// 被滚动区的下沿截掉一截是滚动区本来的样子（设计稿里左栏最底下那一格也截着），滚一下就整个露出来；
-/// 屏头与导航不滚，上下两沿都查（挂单 `Q871`）。
+/// 屏头、导航与状态栏不滚，上下两沿都查（挂单 `Q871`）。
 #[track_caller]
 fn 控件都落在所在那一栏里(harness: &Harness<'_>, 名字: &str) {
     use egui::accesskit::{Action, Role};
@@ -854,6 +868,7 @@ fn 控件都落在所在那一栏里(harness: &Harness<'_>, 名字: &str) {
     let 窗 = egui::Rect::from_min_size(egui::Pos2::ZERO, headless::VIEWPORT.into());
     let 屏头 = 面板(egui::Id::new(("屏头", View::Browse))).expect("屏头画过");
     let 导航 = 面板(egui::Id::new("左栏")).expect("导航画过");
+    let 状态栏 = 面板(egui::Id::new("状态栏")).expect("状态栏画过");
     let 左栏 = 侧栏(layout::FILTER).expect("左栏画过");
     let 右栏 = 侧栏(layout::DETAIL).expect("右栏画过");
     let 底栏 = 面板(egui::Id::new(layout::EDIT.id)).expect("编辑面板画过");
@@ -872,6 +887,7 @@ fn 控件都落在所在那一栏里(harness: &Harness<'_>, 名字: &str) {
     let 各栏 = [
         ("屏头", 屏头, true),
         ("导航", 导航, true),
+        ("状态栏", 状态栏, true),
         ("左栏", 左栏, false),
         ("右栏", 右栏, false),
         ("编辑面板", 底栏, false),
@@ -968,12 +984,152 @@ fn 浏览_两栏收起_暗色() {
     拍浏览("browse/collapsed-dark", Theme::Dark, 浏览态::两栏收起);
 }
 
+// ——— 任务屏（票 `gui-looks-like-the-design/25`）———
+//
+// 走整扇主窗口（左栏、屏头、状态栏都在），停在任务屏上。库是合成数据，任务屏上一个变体都不画。
+// **跟着挂钟走的数一律定死**：工作目录（`App::set_workspace_label`）、已用与剩余约、耗时与收场时刻
+// （`App::pin_task_clock`）。进度条只画走了几成的那种，不画来回跑的那种。
+
+/// 任务屏那几张里定死的钟：已用 3 分 12 秒（剩余约由它折），历史每一趟收场于 2026-09-13 14:05（UTC）；
+/// 本地时区钉成东八区，屏上画「09-13 22:05」。「此刻」也钉在同一天，于是不带年份——
+/// 照实取机器的时区与今年的话，换一台机器、跨一个年，同一张基线就对不上了。
+fn 任务屏的钟() -> Clock {
+    Clock {
+        elapsed: Duration::from_secs(192),
+        ended_at: 1_789_308_300,
+        utc_offset: 8 * 3_600,
+        now: 1_789_308_300,
+    }
+}
+
+/// 一扇停在任务屏上的主窗口：合成数据的库，工作目录与钟都定死。
+///
+/// `临时目录名` 各张各用一个：主窗口会往工作目录里写版式偏好，几张共用的话一张写的会落到
+/// 另一张打开的窗口上。
+fn 任务屏(临时目录名: &str) -> App {
+    let mut app = App::new(
+        demo::site(demo::synthetic(200).expect("造得出合成数据")).expect("开得出现场"),
+        std::env::temp_dir().join(临时目录名),
+    );
+    app.show_view(View::Tasks);
+    app.set_workspace_label(工作目录().display().to_string());
+    app.pin_task_clock(任务屏的钟());
+    app
+}
+
+/// 一份不占地方的产物：这几张画的是收场，不是产物里装了什么。
+fn 一份产物() -> Product {
+    Product::Evaluated(Box::default())
+}
+
+/// 历史里摆上四档收场各一趟：**就地跑完**（`Board::run_here`，不开线程），于是一帧都不必等。
+/// 部分完成那一句是核心库同步那一侧的原话（落了 12 件）。
+fn 摆上四档收场(app: &mut App) {
+    let tasks = app.tasks_mut();
+    tasks.run_here("算一遍容量", |_| Ok(一份产物()));
+    tasks.run_here("排差量预览 · 掌机", |task| {
+        task.stop();
+        task.step("读选择集")?;
+        Ok(一份产物())
+    });
+    tasks.run_here("同步 · 掌机", |task| {
+        task.steps(3);
+        task.step("新增 SFC/幻想传说 汉化版.zip")?;
+        task.stop();
+        task.halfway(
+            "按停时落了 12 件，清单记着到这儿为止目标上真实有什么；\
+             下一趟同步照这份清单接着来，落过的不再重落",
+        );
+        Ok(一份产物())
+    });
+    tasks.run_here("扫描 · 主库", |task| {
+        task.steps(3);
+        task.step("认根")?;
+        Err(Cutoff::failed("根「主库」不在位：/Volumes/新加卷/Game"))
+    });
+}
+
+/// 台上有一趟在跑、后面排着一趟时拍一张。
+///
+/// 跑着的那一趟是共享夹具的占位活：报完进度（四步走到第二步、这一步走了 96,064 / 256,128 件，
+/// 即 34%）就停在那儿等信号，**等它报完再开窗**，不数挂钟。台上有活时主窗口每一帧都请求下一帧，
+/// 跑不到「不要重画」，于是数帧：头两帧装字体与观感（[`搭一个`]），再跑几帧让历史表与卡片的列宽
+/// 摆稳；这一屏上没有会动的东西（进度条是走了几成的那种）。
+fn 拍正在跑(名字: &str, 主题: Theme, 临时目录名: &str) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut app = 任务屏(临时目录名);
+    let (报完了, 等它报完) = 一对信号();
+    let 占位 = 占位活::照这样排上(app.tasks_mut(), "扫描 · 主库", move |task, 等收场| {
+        task.steps(4);
+        task.step("认根")?;
+        task.step("挨个文件过一遍")?;
+        task.tick(96_064, 256_128);
+        报完了.发();
+        等收场.等();
+        task.check()?;
+        Err(Cutoff::failed("占位活放行了"))
+    });
+    等它报完.等();
+    app.tasks_mut().queue("识别 · 全部变体", |_| Ok(一份产物()));
+    let mut harness = 搭一个(主题, move |ui| app.ui(ui));
+    harness.run_steps(6);
+    拍下(harness, 名字);
+    占位.放行();
+}
+
+#[test]
+fn 任务屏_空台_浅色() {
+    let mut app = 任务屏("romcat-截图-任务屏-空台-浅色");
+    拍("tasks/empty-light", Theme::Light, move |ui| app.ui(ui));
+}
+
+#[test]
+fn 任务屏_空台_暗色() {
+    let mut app = 任务屏("romcat-截图-任务屏-空台-暗色");
+    拍("tasks/empty-dark", Theme::Dark, move |ui| app.ui(ui));
+}
+
+#[test]
+fn 任务屏_正在跑_浅色() {
+    拍正在跑(
+        "tasks/running-light",
+        Theme::Light,
+        "romcat-截图-任务屏-正在跑-浅色",
+    );
+}
+
+#[test]
+fn 任务屏_正在跑_暗色() {
+    拍正在跑(
+        "tasks/running-dark",
+        Theme::Dark,
+        "romcat-截图-任务屏-正在跑-暗色",
+    );
+}
+
+#[test]
+fn 任务屏_四档收场_浅色() {
+    let mut app = 任务屏("romcat-截图-任务屏-四档收场-浅色");
+    摆上四档收场(&mut app);
+    拍("tasks/history-light", Theme::Light, move |ui| app.ui(ui));
+}
+
+#[test]
+fn 任务屏_四档收场_暗色() {
+    let mut app = 任务屏("romcat-截图-任务屏-四档收场-暗色");
+    摆上四档收场(&mut app);
+    拍("tasks/history-dark", Theme::Dark, move |ui| app.ui(ui));
+}
+
 // ——— 主窗口外壳（票 `gui-looks-like-the-design/32`） ———
 
 /// 主窗口外壳那几张垫的库：一个根，五个变体各落一档，两个进得了待确认队列。
 ///
 /// 屏上画着的每一样都是定值：主库原名（只活在内存里的那份，名字就是主库标识「主库」）、沉淀库在哪
-/// （「（内存）」）、队列那几批的样本（种子从 0 起）。**工作目录是临时目录，屏上不画它**；收起那一下往里写版式文件。
+/// （「（内存）」）、队列那几批的样本（种子从 0 起）。**工作目录是临时目录，屏上不画它**：底部状态栏上那一截工作目录
+/// 由 [`拍主窗口`] 定死成基线里那一串（同任务屏那几张）；收起那一下往临时目录里写版式文件。
 fn 垫的主窗口(工作目录: &Path) -> App {
     use shared::档;
 
@@ -995,9 +1151,11 @@ fn 拍主窗口(名字: &str, 主题: Theme, 收起: bool) {
     if 该跳过(名字) {
         return;
     }
-    let 工作目录 = romcat_core::testing::temp_dir("截图门-主窗口");
-    let mut app = 垫的主窗口(工作目录.path());
+    let 临时目录 = romcat_core::testing::temp_dir("截图门-主窗口");
+    let mut app = 垫的主窗口(临时目录.path());
     app.show_view(View::Tasks);
+    // 状态栏右边画工作目录（票 `gui-looks-like-the-design/25`）：照实画的是临时目录，带进程号与时刻，一趟一个样。
+    app.set_workspace_label(工作目录().display().to_string());
     let mut harness = 开一个(主题, move |ui| app.ui(ui));
     if 收起 {
         按(&mut harness, rail::FOLD);

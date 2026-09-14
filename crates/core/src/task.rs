@@ -404,23 +404,46 @@ pub enum Ending<T> {
 }
 
 impl<T> Ending<T> {
-    /// 排成给人看的一句话。**四档四句，谁都不许长得跟谁一样。**
+    /// 那一档的**词**，逐字是词表**收场**那四档：完成 / 已取消 / 部分完成 / 失败。
     ///
-    /// 每一句都以词表**收场**那一档的词起头：完成 / 已取消 / 部分完成 / 失败。
-    /// **这四个词只在这儿落一次**——任务台历史、命令行收场那一句、各屏拿着收场结果的
-    /// 通知读的都是它。手上没有 [`Ending`]、只有一份产物或一个标志的几处（被按停时的
-    /// 错误文案、刮削与同步的回执、根那一行上次扫描那一句）自己写词（挂单 `Q573`）。
+    /// **这四个词只在这儿落一次**——[`render`](Self::render) 拿它起头；任务屏历史「结果」
+    /// 那一列只画这个词，说明另摆在任务名底下（票 `gui-looks-like-the-design/25`）。
+    /// 手上没有 [`Ending`]、只有一份产物或一个标志的几处（被按停时的错误文案、刮削与同步的
+    /// 回执、根那一行上次扫描那一句）自己写词（挂单 `Q573`）。
     #[must_use]
-    pub fn render(&self) -> String {
+    pub fn word(&self) -> &'static str {
         match self {
-            Self::Done(_) => "完成".to_string(),
-            Self::Stopped => "已取消".to_string(),
+            Self::Done(_) => "完成",
+            Self::Stopped => "已取消",
+            Self::Halfway { .. } => "部分完成",
+            Self::Failed { .. } => "失败",
+        }
+    }
+
+    /// 那个词后面跟的**半句说明**：部分完成说留下了什么，失败说停在哪一步、为什么。
+    /// 完成与已取消没有下文，是 `None`。
+    #[must_use]
+    pub fn detail(&self) -> Option<String> {
+        match self {
+            Self::Done(_) | Self::Stopped => None,
             // **「为什么收的手」不由这一层写死**：眼下报这一句的两条都是被按停的，
             // 而下一批候选（连着失败太多次主动停了、刮削撞上配额）不是——那半句话
             // 归长入口，这儿只管把它摆进「部分完成」这一档里。
-            Self::Halfway { left_behind, .. } => format!("部分完成：{left_behind}"),
-            Self::Failed { step, why } if step.is_empty() => format!("失败：{why}"),
-            Self::Failed { step, why } => format!("失败：在「{step}」这一步，{why}"),
+            Self::Halfway { left_behind, .. } => Some(left_behind.clone()),
+            Self::Failed { step, why } if step.is_empty() => Some(why.clone()),
+            Self::Failed { step, why } => Some(format!("在「{step}」这一步，{why}")),
+        }
+    }
+
+    /// 排成给人看的一句话。**四档四句，谁都不许长得跟谁一样。**
+    ///
+    /// 以那一档的[词](Self::word)起头，有[下文](Self::detail)就用一个全角冒号接上。
+    /// 命令行收场那一句、各屏拿着收场结果的通知读的都是它。
+    #[must_use]
+    pub fn render(&self) -> String {
+        match self.detail() {
+            None => self.word().to_string(),
+            Some(detail) => format!("{}：{detail}", self.word()),
         }
     }
 
@@ -481,6 +504,11 @@ pub struct Record {
     pub name: String,
     /// 花了多久。
     pub elapsed: Duration,
+    /// 什么时候收的场：UNIX 纪元起的秒。任务屏历史「时间」那一列画的就是它。
+    ///
+    /// **后台跑的那一趟由干活那条线程自己取**，与 [`elapsed`](Self::elapsed) 同一个理由：
+    /// 主线程发现它结束的那一刻要晚上一个轮询间隔。排着队被撤掉的那一趟取撤掉那一刻。
+    pub ended_at: i64,
     /// 怎么收场的。**产物已经归认领它的那一屏**，这儿只留账。
     pub ending: Ending<()>,
 }
@@ -545,8 +573,8 @@ struct Running<T> {
     /// 主线程这边什么时候把它排上去的。**只用来画「已用多久」**——
     /// 记进历史的那个数由干活那条线程自己掐表（见 [`Board::start_next`]）。
     started: Instant,
-    /// 干完之后带回来的：产物，以及**那条线程自己量的耗时**。
-    thread: JoinHandle<(Result<T, Cutoff>, Duration)>,
+    /// 干完之后带回来的：产物，以及**那条线程自己量的耗时与收场时刻**（UNIX 秒）。
+    thread: JoinHandle<(Result<T, Cutoff>, Duration, i64)>,
 }
 
 /// **任务台**：排队、进度、可停、历史。**它不发起操作，只承接。**
@@ -673,7 +701,15 @@ impl<T: Send + 'static> Board<T> {
         let handle = Handle::new();
         let started = Instant::now();
         let result = job(&handle);
-        self.settle(id, name, started.elapsed(), &handle, result);
+        let elapsed = started.elapsed();
+        self.settle(
+            id,
+            name,
+            elapsed,
+            crate::catalog::now_secs(),
+            &handle,
+            result,
+        );
         id
     }
 
@@ -698,6 +734,7 @@ impl<T: Send + 'static> Board<T> {
                     id: job.id,
                     name: job.name.clone(),
                     elapsed: Duration::ZERO,
+                    ended_at: crate::catalog::now_secs(),
                     ending: Ending::Stopped,
                 },
             );
@@ -728,16 +765,24 @@ impl<T: Send + 'static> Board<T> {
         // **耗时取干活那条线程自己量的那个数**，不是主线程发现它结束的那一刻。
         // 后者等于「真实耗时 + 最多一个轮询间隔」——窗口被遮住、一帧都不画的时候，
         // 那个间隔能是好几秒，而历史里那一行会照着虚高的数说「上次花了这么久」。
-        let (result, elapsed) = match running.thread.join() {
-            Ok(pair) => pair,
+        let (result, elapsed, ended_at) = match running.thread.join() {
+            Ok(done) => done,
             // 线程炸了。**不静默结束**：这也是一种失败，得说出口。
-            // 它没能带回自己量的耗时，只好退回主线程这边的表。
+            // 它没能带回自己量的耗时与收场时刻，只好退回主线程这边的表。
             Err(_) => (
                 Err(Cutoff::failed("那条线程炸了。")),
                 running.started.elapsed(),
+                crate::catalog::now_secs(),
             ),
         };
-        self.settle(running.id, running.name, elapsed, &running.handle, result);
+        self.settle(
+            running.id,
+            running.name,
+            elapsed,
+            ended_at,
+            &running.handle,
+            result,
+        );
         self.start_next();
         self.finished.pop_front()
     }
@@ -748,6 +793,7 @@ impl<T: Send + 'static> Board<T> {
         id: u64,
         name: String,
         elapsed: Duration,
+        ended_at: i64,
         handle: &Handle,
         result: Result<T, Cutoff>,
     ) {
@@ -773,6 +819,7 @@ impl<T: Send + 'static> Board<T> {
                 id,
                 name: name.clone(),
                 elapsed,
+                ended_at,
                 ending: ended.forget(),
             },
         );
@@ -797,7 +844,7 @@ impl<T: Send + 'static> Board<T> {
         let thread = std::thread::spawn(move || {
             let at = Instant::now();
             let result = run(&theirs);
-            (result, at.elapsed())
+            (result, at.elapsed(), crate::catalog::now_secs())
         });
         self.running = Some(Running {
             id: job.id,
@@ -1175,5 +1222,70 @@ mod tests {
         assert_eq!(board.history().len(), 1);
         board.clear_history();
         assert!(board.history().is_empty());
+    }
+
+    #[test]
+    fn 四档的词与那半句说明分得开() {
+        // 任务屏历史把**词**摆进「结果」那一列、把**说明**摆到任务名底下
+        // （票 `gui-looks-like-the-design/25`）。词照旧只在这一层落一次：界面拿 `word`，
+        // 不自己写；两半拼起来仍是 `render` 那一句（`四种收场各画各的话` 钉着）。
+        let 部分完成 = Ending::<()>::Halfway {
+            product: (),
+            left_behind: "按停时落了 12 件".to_string(),
+        };
+        let 失败 = Ending::<()>::Failed {
+            step: "看一眼目标".to_string(),
+            why: "卡不在位".to_string(),
+        };
+        let 说不出哪一步 = Ending::<()>::Failed {
+            step: String::new(),
+            why: "卡不在位".to_string(),
+        };
+
+        assert_eq!(Ending::Done(()).word(), "完成");
+        assert_eq!(Ending::<()>::Stopped.word(), "已取消");
+        assert_eq!(部分完成.word(), "部分完成");
+        assert_eq!(失败.word(), "失败");
+
+        assert_eq!(Ending::Done(()).detail(), None);
+        assert_eq!(Ending::<()>::Stopped.detail(), None);
+        assert_eq!(部分完成.detail().as_deref(), Some("按停时落了 12 件"));
+        assert_eq!(
+            失败.detail().as_deref(),
+            Some("在「看一眼目标」这一步，卡不在位"),
+        );
+        assert_eq!(说不出哪一步.detail().as_deref(), Some("卡不在位"));
+    }
+
+    #[test]
+    fn 历史里每一条都记着什么时候收的场() {
+        // 任务屏历史第四列「时间」：**哪一刻收的场由任务台记**，界面只画（ADR-0005）。
+        // 三条路进历史，三条都得记：就地跑完、排着队被撤掉、后台那条线跑完。
+        let 之前 = crate::catalog::now_secs();
+        let mut board: Board<u32> = Board::new();
+        board.run_here("就地跑", |_| Ok(1));
+        // 头一趟**等信号才收场**，于是第二趟稳稳排在队里被撤掉，不靠睡够多久。
+        let (放行, 等着) = std::sync::mpsc::channel::<()>();
+        board.queue("占着台子", move |_| {
+            let _ = 等着.recv();
+            Ok(2)
+        });
+        let 排着的 = board.queue("排着的", |_| Ok(3));
+        board.stop(排着的);
+        drop(放行);
+        for _ in 0..3 {
+            let _ = 等到跑完(&mut board);
+        }
+        let 之后 = crate::catalog::now_secs();
+
+        assert_eq!(board.history().len(), 3);
+        for record in board.history() {
+            assert!(
+                (之前..=之后).contains(&record.ended_at),
+                "「{}」记的收场时刻 {} 不在 {之前}..={之后} 里",
+                record.name,
+                record.ended_at,
+            );
+        }
     }
 }

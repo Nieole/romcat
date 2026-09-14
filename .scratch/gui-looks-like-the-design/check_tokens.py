@@ -170,8 +170,48 @@ else:
     if shown != L["platforms-visible"]:
         problems.append(f"platforms-visible: 设计稿先摆 {shown} 个，令牌是 {L['platforms-visible']}")
 
-# 两档半号字号（设计稿 .scrhead .sub 的 12.5px、.railfoot .st 的 11.5px）。
-for selector, key in [(r"\.scrhead \.sub\{", "size-small-plus"), (r"\.railfoot \.st\{", "size-caption-plus")]:
+# 底部状态栏里任务那条小进度条（设计稿 .statusbar .mini .bar）：宽。
+m = re.search(r"\.statusbar \.mini \.bar\{[^}]*?width:(\d+)px", html)
+if not m:
+    problems.append("找不到 .statusbar .mini .bar 的 width")
+else:
+    literals += 1
+    if int(m[1]) != tokens["layout"]["statusbar-bar"]:
+        problems.append(f"statusbar-bar: 设计稿是 {m[1]}px，令牌是 {tokens['layout']['statusbar-bar']}")
+
+# 正在跑那张卡左边那条强调色竖条（设计稿 .runcard 的 box-shadow:inset 3px 0 0 var(--accent)）：宽。
+m = re.search(r"\.runcard\{[^}]*?box-shadow:inset (\d+)px 0 0 var\(--accent\)", html)
+if not m:
+    problems.append("找不到 .runcard 的 box-shadow")
+else:
+    literals += 1
+    if int(m[1]) != tokens["layout"]["runcard-bar"]:
+        problems.append(f"runcard-bar: 设计稿是 {m[1]}px，令牌是 {tokens['layout']['runcard-bar']}")
+
+# 任务屏（票 gui-looks-like-the-design/25）：块与块、卡片、表格、空态的留白（屏头、屏体的内边距归下面外壳那一段核；
+# 空态 .empty 与表头 .tbl th 的留白与浏览屏同一个令牌，在上面浏览屏那一段核过，这儿不再核一遍）。
+space, layout = tokens["space"], tokens["layout"]
+for pattern, wants in [
+    (r'id="s-task".*?class="scrbody col" style="gap:(\d+)px"', [("screen-section-gap", space["screen-section-gap"])]),
+    (r'id="s-task".*?<div class="col" style="gap:(\d+)px"><span class="sec">正在运行', [("section-title-gap", space["section-title-gap"])]),
+    (r"\.runcard\{padding:(\d+)px;[^}]*?gap:(\d+)px \d+px", [("card-padding", space["card-padding"]), ("card-row-gap", space["card-row-gap"])]),
+    (r"\.runcard \.bar\{[^}]*?height:(\d+)px", [("runcard-progress", layout["runcard-progress"])]),
+    (r"\.runcard \.meta\{[^}]*?gap:(\d+)px", [("meta-gap", space["meta-gap"])]),
+    (r"\$\('#tqueue'\).*?class=\"card row\" style=\"padding:(\d+)px (\d+)px\"", [("queue-row-padding 上下", space["queue-row-padding"][0]), ("queue-row-padding 左右", space["queue-row-padding"][1])]),
+    (r"\.tbl td\{[^}]*?padding:(\d+)px (\d+)px", [("cell-padding 上下", space["cell-padding"][0]), ("cell-padding 左右", space["cell-padding"][1])]),
+]:
+    m = re.search(pattern, html, re.S)
+    if not m:
+        problems.append(f"找不到 {pattern}")
+        continue
+    for got, (key, want) in zip(m.groups(), wants):
+        literals += 1
+        if int(got) != want:
+            problems.append(f"{key}: 设计稿是 {got}px，令牌是 {want}")
+
+# 两档半号字号（拿主意的人裁，挂单 Q840 / Q862）：设计稿 .scrhead .sub、.hist td 的 12.5px，.railfoot .st 的 11.5px
+# （.tbl th 的 11.5px 在上面浏览屏那一段与表头内边距一起核）。
+for selector, key in [(r"\.scrhead \.sub\{", "size-small-plus"), (r"\.hist td\{", "size-small-plus"), (r"\.railfoot \.st\{", "size-caption-plus")]:
     m = re.search(selector + r"[^}]*?font-size:([\d.]+)px", html)
     if not m:
         problems.append(f"找不到 {selector} 的 font-size")

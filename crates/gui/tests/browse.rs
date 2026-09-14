@@ -2570,14 +2570,14 @@ fn 整批收藏排上任务台_跑着的时候屏上有进度也按得停() {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
 
-    // 屏上看得见：这一趟叫什么、走到哪一步、以及那颗「停下」。
+    // 屏上看得见：这一趟叫什么、走到哪一步、以及那颗「停止」。
     // **这一帧不走 `App::ui`**：它头一件事就是问一遍任务台，而那一问会把跑完的那一趟
     // 收走——这里要看的正是它**跑着的时候**屏上长什么样。
     let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
         romcat_gui::task::Screen::new().ui(ui, app.tasks_mut());
     }));
     assert!(屏上.contains("放进「收藏」"), "任务屏上没有这一趟：{屏上}");
-    assert!(屏上.contains("停下"), "按不着「停下」：{屏上}");
+    assert!(屏上.contains("停止"), "按不着「停止」：{屏上}");
     assert!(屏上.contains("折锚"), "屏上说不出它走到哪一步：{屏上}");
 
     // 跑完之后**按号认领**：投影当场生效，回执照旧两种锚各说一句。

@@ -438,6 +438,73 @@ fn primary_button_in(palette: &Palette, visuals: &mut egui::Visuals) {
     }
 }
 
+/// **幽灵按钮**那一档（设计稿 `.btn.ghost`）：未激活时不画底也不画描边，字取次要文字色（`ink-2`）；
+/// 悬停出一块凹陷底（`sunken`）、字换强调字色（`ink`）。按下与拿到焦点那一档描强调色——焦点得看得见。
+/// **全窗口只有这一处回答「幽灵按钮什么颜色」**。
+///
+/// 用法同 [`primary_button`]：在一个 `ui.scope` 里改 `ui.visuals_mut()`。
+pub fn ghost_button(visuals: &mut egui::Visuals) {
+    let theme = egui::Theme::from_dark_mode(visuals.dark_mode);
+    ghost_button_in(Tokens::builtin().color.theme(theme), visuals);
+}
+
+/// 幽灵按钮在这一套颜色里取哪几个。拆出来的理由同 [`tier_color_in`]。
+fn ghost_button_in(palette: &Palette, visuals: &mut egui::Visuals) {
+    let widgets = &mut visuals.widgets;
+    // 每一档：底色、描边、字。
+    for (widget, fill, stroke, ink) in [
+        (
+            &mut widgets.inactive,
+            Color32::TRANSPARENT,
+            Color32::TRANSPARENT,
+            palette.ink_2,
+        ),
+        (
+            &mut widgets.hovered,
+            palette.sunken,
+            Color32::TRANSPARENT,
+            palette.ink,
+        ),
+        (
+            &mut widgets.active,
+            palette.sunken,
+            palette.accent,
+            palette.ink,
+        ),
+    ] {
+        widget.bg_fill = fill;
+        widget.weak_bg_fill = fill;
+        widget.bg_stroke.color = stroke;
+        widget.fg_stroke.color = ink;
+    }
+}
+
+/// **警示按钮**那一档（设计稿 `.btn.warn`）：白底（`panel`）、红字、红描边（`lo`），悬停时照旧红描边——
+/// 拿主意的人定，与库屏「移除」同一档。按下与拿到焦点那一档描强调色，焦点得看得见。
+/// **全窗口只有这一处回答「警示按钮什么颜色」**。
+///
+/// 用法同 [`primary_button`]：在一个 `ui.scope` 里改 `ui.visuals_mut()`。
+pub fn warn_button(visuals: &mut egui::Visuals) {
+    let theme = egui::Theme::from_dark_mode(visuals.dark_mode);
+    warn_button_in(Tokens::builtin().color.theme(theme), visuals);
+}
+
+/// 警示按钮在这一套颜色里取哪几个。拆出来的理由同 [`tier_color_in`]。
+fn warn_button_in(palette: &Palette, visuals: &mut egui::Visuals) {
+    let widgets = &mut visuals.widgets;
+    // 每一档：底色、描边。字一律 `lo`。
+    for (widget, fill, stroke) in [
+        (&mut widgets.inactive, palette.panel, palette.lo),
+        (&mut widgets.hovered, palette.panel, palette.lo),
+        (&mut widgets.active, palette.sunken, palette.accent),
+    ] {
+        widget.bg_fill = fill;
+        widget.weak_bg_fill = fill;
+        widget.bg_stroke.color = stroke;
+        widget.fg_stroke.color = palette.lo;
+    }
+}
+
 /// **置信度四档**画成什么颜色。**全窗口只有这一处回答这个问题。**
 ///
 /// 颜色取自令牌的 `hi` / `mid` / `lo` / `none`，按 `visuals` 是哪一套主题挑那一套：
@@ -477,17 +544,18 @@ fn scrim_in(palette: &Palette) -> Color32 {
     palette.scrim
 }
 
-/// 一枚**标签**说的是好事还是要留神（设计稿 `.ro`「只读」、`.chip.t-mid`「版本不兼容」）。
+/// 一枚**标签**是哪种语气（设计稿 `.ro`「只读」、`.chip.t-mid`「版本不兼容」；任务屏历史收场那一格的
+/// `t-hi` / `t-none` / `t-mid` / `t-lo`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
     /// 放心：令牌 `hi` 那一对（`hi` 的字、`hi-soft` 的底）。
     Good,
     /// 留神：令牌 `mid` 那一对。
     Caution,
-    /// 要紧：令牌 `lo` 那一对（设计稿 `.chip.t-lo`「待确认」）。
-    Risk,
-    /// 不置可否：令牌 `none` 那一对（设计稿 `.chip.t-none`「仅文件名」）。
+    /// 不置可否：令牌 `none` 那一对（设计稿 `.chip.t-none`「仅文件名」；任务屏历史里的「已取消」）。
     Neutral,
+    /// 要紧、出错：令牌 `lo` 那一对（设计稿 `.chip.t-lo`「待确认」；任务屏历史里的「失败」）。
+    Bad,
 }
 
 /// 一档**置信度**的标签用哪种语气：高置信放心、中置信留神、低置信要紧、没有候选不置可否
@@ -497,7 +565,7 @@ pub fn tier_tone(tier: Tier) -> Tone {
     match tier {
         Tier::High => Tone::Good,
         Tier::Medium => Tone::Caution,
-        Tier::Low => Tone::Risk,
+        Tier::Low => Tone::Bad,
         Tier::Unidentified => Tone::Neutral,
     }
 }
@@ -517,8 +585,8 @@ fn tone_colors_in(palette: &Palette, tone: Tone) -> (Color32, Color32) {
     match tone {
         Tone::Good => (palette.hi, palette.hi_soft),
         Tone::Caution => (palette.mid, palette.mid_soft),
-        Tone::Risk => (palette.lo, palette.lo_soft),
         Tone::Neutral => (palette.none, palette.none_soft),
+        Tone::Bad => (palette.lo, palette.lo_soft),
     }
 }
 
@@ -707,12 +775,6 @@ pub fn icon_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
         },
     );
     response
-}
-
-/// 一颗**幽灵按钮**（设计稿 `.btn.ghost`）：平时没有底也没有框，悬停、按下时才露出按钮那一层。
-/// 高与留白跟着摆它的那一块走——浏览屏左栏标题行那颗「清除」摆在 [`small_buttons`] 里。
-pub fn ghost_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    ui.add(egui::Button::new(text).frame_when_inactive(false))
 }
 
 /// 一枚**分面标签**（设计稿 `.fchip`）：一个值加上它的条数，点一下收窄到这个值、再点一下放开。
@@ -1178,10 +1240,10 @@ mod tests {
     /// 一处与令牌对不上的地方：`(令牌键, 哪儿对不上)`。
     type 偏离 = (String, String);
 
-    /// 令牌里**界面还没有一处用上**的颜色：页面背景（设计稿自己用）、低与没有候选那两档的浅底
-    /// ——egui 的 `Visuals` 里没有它们的槽位，而画它们的那几屏还没照稿重排。
+    /// 令牌里**界面还没有一处用上**的颜色：页面背景（设计稿自己用，不进 egui）。
     /// 哪一屏第一个用上它，就从这张单子里划掉（下面那条变异测试会提醒）。`hi-soft` 与 `mid-soft`
-    /// 由标签（[`tone_colors`]）用上了（票 `gui-looks-like-the-design/05`，开场与添加主库向导）。
+    /// 由标签（[`tone_colors`]）用上了（票 `gui-looks-like-the-design/05`，开场与添加主库向导）；
+    /// `none-soft` 与 `lo-soft` 由任务屏历史收场那一格用上了（票 `gui-looks-like-the-design/25`）。
     const NOT_YET_USED: &[&str] = &["ground"];
 
     /// 这套主题下**有映射的每一个颜色**与令牌逐项比，对不上的那几项：`visuals` 的每个颜色槽位，
@@ -1384,12 +1446,12 @@ mod tests {
             颜色.push((format!("四档（{}）", tier.label()), 四档(tier), key));
         }
         颜色.push(("弹层遮罩".to_owned(), 遮罩, "scrim"));
-        // 标签两种语气（[`tone_colors`]）：字与底各一格。
+        // 标签四种语气（[`tone_colors`]）：字与底各一格。
         for (tone, [字键, 底键]) in [
             (Tone::Good, ["hi", "hi-soft"]),
             (Tone::Caution, ["mid", "mid-soft"]),
-            (Tone::Risk, ["lo", "lo-soft"]),
             (Tone::Neutral, ["none", "none-soft"]),
+            (Tone::Bad, ["lo", "lo-soft"]),
         ] {
             let (字, 底) = 标签(tone);
             颜色.push((format!("标签（{tone:?}）的字"), 字, 字键));
@@ -2229,6 +2291,41 @@ mod tests {
         );
         assert_eq!(字号, t.font.size_small, "只读标签的字");
         assert_eq!(字色, p.hi, "只读标签的字是高置信色");
+    }
+
+    #[test]
+    fn 警示按钮的颜色取自令牌() {
+        // 设计稿 `.btn.warn`（拿主意的人定）：白底 `panel`、红字红描边 `lo`，悬停也是红描边。两套主题各查一遍。
+        for theme in [Theme::Dark, Theme::Light] {
+            let p = Tokens::builtin().color.theme(theme);
+            let mut 警示 = theme.default_visuals();
+            warn_button(&mut 警示);
+            let w = &警示.widgets;
+            assert_eq!(w.inactive.weak_bg_fill, p.panel, "{theme:?}");
+            assert_eq!(w.inactive.bg_stroke.color, p.lo, "{theme:?}");
+            assert_eq!(w.inactive.fg_stroke.color, p.lo, "{theme:?}");
+            assert_eq!(w.hovered.bg_stroke.color, p.lo, "{theme:?}");
+        }
+    }
+
+    #[test]
+    fn 幽灵按钮的颜色取自令牌() {
+        // 设计稿 `.btn.ghost`：底与描边透明、字 `ink-2`，悬停出 `sunken` 底、字 `ink`。两套主题各查一遍。
+        for theme in [Theme::Dark, Theme::Light] {
+            let p = Tokens::builtin().color.theme(theme);
+            let mut 幽灵 = theme.default_visuals();
+            ghost_button(&mut 幽灵);
+            let w = &幽灵.widgets;
+            assert_eq!(w.inactive.weak_bg_fill, Color32::TRANSPARENT, "{theme:?}");
+            assert_eq!(
+                w.inactive.bg_stroke.color,
+                Color32::TRANSPARENT,
+                "{theme:?}"
+            );
+            assert_eq!(w.inactive.fg_stroke.color, p.ink_2, "{theme:?}");
+            assert_eq!(w.hovered.weak_bg_fill, p.sunken, "{theme:?}");
+            assert_eq!(w.hovered.fg_stroke.color, p.ink, "{theme:?}");
+        }
     }
 
     #[test]

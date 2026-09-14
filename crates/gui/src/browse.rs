@@ -1956,12 +1956,17 @@ impl Screen {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 layout::FILTER.collapse_button(ui);
                 let 清除 = look::small_buttons(ui, |ui| {
-                    look::ghost_button(ui, "清除")
-                        .on_hover_text(
-                            "把这一栏的条件全部清掉。排序与搜索框不动——\
+                    // 幽灵按钮那一档的颜色只有 `look::ghost_button` 一处回答（与任务屏「清空历史」同一种写法）。
+                    ui.scope(|ui| {
+                        look::ghost_button(ui.visuals_mut());
+                        ui.button("清除")
+                    })
+                    .inner
+                    .on_hover_text(
+                        "把这一栏的条件全部清掉。排序与搜索框不动——\
                              搜索管排序、筛选器管集合，这颗按钮只管后者。",
-                        )
-                        .clicked()
+                    )
+                    .clicked()
                 });
                 if 清除 {
                     // **按钮体只有这一句。** 把那几行抄在这儿的话，钉着
