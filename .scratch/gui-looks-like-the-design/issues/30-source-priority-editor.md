@@ -74,3 +74,9 @@
   `Ui::columns` 三列等宽（`crates/gui/src/scrape.rs` `knobs_ui`）。
 
 挂单：`Q781`–`Q788`。
+
+门禁（实现提交 `88af37d` 上，2026-09-14）：`cargo xtask gate -j 3 --test-threads 3 --keep-going`，
+`TMPDIR` 指到分大小写的盘上，`EXIT=0`，6 条全绿——fmt 1s、glossary 0s、check 18s、clippy 26s、
+test 790s、doc 12s。测试 75 个目标、2,000 条通过、0 失败、2 条忽略；本票两份新测试文件
+`crates/core/tests/priority.rs` 2 条、`crates/gui/tests/priority.rs` 5 条都在里头。
+日志 `/Users/nicoer/dev/game-wt/logs/slot-2-gl30-gate.log`（不进 git）。
