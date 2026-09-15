@@ -362,6 +362,43 @@ pub fn 点一下(
     跑一帧(ctx, 画一帧)
 }
 
+/// **滚到底**：指针停在视口里、真发滚轮事件往下滚，滚到这一帧画出来的字不再变为止（等的是滚动停下，不是等一段时间），
+/// 再把指针挪走，交出挪走之后那一帧画出来的字。
+///
+/// 视口外 egui 不画字：长过一屏的那几块（库屏底下的**库体检**）要先滚进视野才读得到。与 `roots.rs` 那份绑死在主窗口上的
+/// `滚到库屏底下` 同一个办法，收的是「怎么画一帧」那个闭包。
+///
+/// # Panics
+/// 滚了两百帧屏上的字还在变时当场炸——那是一直在动的东西，不是滚到头了。
+pub fn 滚到底(ctx: &egui::Context, mut 画一帧: impl FnMut(&mut egui::Ui)) -> String {
+    use romcat_gui::headless;
+
+    let 指在 = egui::pos2(headless::VIEWPORT[0] * 0.6, headless::VIEWPORT[1] * 0.75);
+    let mut 上一帧 = None;
+    let mut 停了 = false;
+    for _ in 0..200 {
+        let mut input = headless::input();
+        input.events.push(egui::Event::PointerMoved(指在));
+        input.events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -headless::VIEWPORT[1]),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let 这一帧 = 画出来的字(&headless::frame(ctx, input, &mut 画一帧));
+        if 上一帧.as_ref() == Some(&这一帧) {
+            停了 = true;
+            break;
+        }
+        上一帧 = Some(这一帧);
+    }
+    assert!(停了, "滚了两百帧，屏上的字还在动");
+    let mut input = headless::input();
+    input.events.push(egui::Event::PointerGone);
+    headless::frame(ctx, input, &mut 画一帧);
+    跑一帧(ctx, 画一帧)
+}
+
 /// 往屏上那个写着 `框上写着` 的输入框里打一段字。
 ///
 /// 先[点一下](点一下)把焦点放进去，再发一条文本事件——egui 把文本事件交给**拿着焦点**的那个

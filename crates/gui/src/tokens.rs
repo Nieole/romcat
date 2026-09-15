@@ -450,6 +450,8 @@ pub struct Space {
     pub table_head_padding: [f32; 2],
     /// 空态那一块的留白。浏览屏筛空、任务屏空台共用。
     pub empty_padding: f32,
+    /// 库屏**库体检**那一块还没扫描时那一句的留白（设计稿在那一处行内写成 18，不是 `.empty` 的 28）。
+    pub health_empty_padding: f32,
     /// 侧边详情媒体格之间。
     pub thumb_gap: f32,
     /// 侧边详情头上封面与字之间。

@@ -153,6 +153,7 @@ variant-card-padding = [9, 10]    # 侧边详情变体卡片内边距（上下, 
 list-bar-padding     = [8, 14]    # 表格上方「列表」那一条的内边距（上下, 左右）（设计稿 .cbar）
 table-head-padding   = [7, 10]    # 表头一格的内边距（上下, 左右）（设计稿 .tbl th 的 padding:7px 10px）：浏览屏表头、任务屏历史表头
 empty-padding        = 28         # 空态那一块的留白（设计稿 .empty 的 padding:28px）：浏览屏筛空、任务屏空台
+health-empty-padding = 18         # 库屏库体检那一块还没扫描时那一句的留白（设计稿 renderHealth 空态行内写的 padding:18px）
 thumb-gap            = 7          # 侧边详情媒体格之间（设计稿 .thumbs 的 gap:7px）
 detail-head-gap      = 12         # 侧边详情头上封面与字之间（设计稿 .dhead 的 gap:12px）
 title-card-padding   = [9, 8]     # 侧边详情字卡内边距（上下, 左右）（设计稿 .dcover .tcard）

@@ -48,7 +48,7 @@ use romcat_core::task::{Cutoff, Ending};
 
 use crate::clock::Clock;
 use crate::font;
-use crate::layout::{FOLD_EXPORT, FOLD_ROOTS, FOLD_SOURCES, Fold};
+use crate::layout::{FOLD_EXPORT, FOLD_HEALTH, FOLD_ROOTS, FOLD_SOURCES, Fold};
 use crate::look::{self, Tone};
 use crate::task::{Product, Tasks};
 use crate::tokens::Tokens;
@@ -624,8 +624,35 @@ impl Screen {
                 self.side_ui(ui, site, tasks);
             });
         });
+        // 两栏底下通栏的**库体检**那一块（设计稿 `data-panel="health"`，离两栏隔一个 `library-gap`）。
+        ui.add_space(间距);
+        self.health_ui(ui);
         // 工序段扫描那一行按下去只留记号：这一屏自己那条扫描的路接着排（`Self::take_scan`）。
         self.take_scan(site, tasks);
+    }
+
+    /// 这个库有没有一个根**完整扫过一趟**（[`LibraryRoot::fully_scanned`]，ADR-0024）：数据源那一块「还没扫描」那一句、
+    /// 库体检那一块的空态都照它。
+    fn scanned(&self) -> bool {
+        self.roots.iter().any(|row| row.root.fully_scanned())
+    }
+
+    /// 两栏底下通栏的**库体检**那一块（`crate::health`）：标题栏照稿「库体检」、那句说明、「重新体检」、折叠标，收得起来。
+    fn health_ui(&mut self, ui: &mut egui::Ui) {
+        let 扫过 = self.scanned();
+        let mut 收着 = self.folded(FOLD_HEALTH);
+        let mut 标题栏的按钮 = |ui: &mut egui::Ui| {
+            look::small_buttons(ui, |ui| ui.button(crate::health::RECHECK));
+        };
+        foldable_panel(
+            ui,
+            "库体检",
+            crate::health::READ_ONLY,
+            &mut 收着,
+            Some(&mut 标题栏的按钮),
+            |ui| crate::health::body_ui(ui, 扫过),
+        );
+        self.set_folded(FOLD_HEALTH, 收着);
     }
 
     /// 右边那一栏：根、数据源、导出设置三块，**各自收得起来**（[`Fold`]），次序照设计稿。
@@ -999,7 +1026,7 @@ impl Screen {
         let mut 要取 = None;
         // **还没扫描**：一个根都没扫过（或者一个根都没有）。那时有源没取回，就说下一步可以先取回它们。
         // 判据与工序段扫描那一行同一句（`LibraryRoot::fully_scanned`，ADR-0024）：一个根都没完整扫过。
-        let 还没扫描 = !self.roots.iter().any(|row| row.root.fully_scanned());
+        let 还没扫描 = !self.scanned();
         if 还没扫描 && self.sources.iter().any(|status| !status.ready()) {
             // 段末不留孤字（第十四版候选图上这一句最后折出一个孤零零的「们。」）。
             padded(ui, |ui| look::weak_paragraph(ui, SOURCES_BEFORE_SCAN));
