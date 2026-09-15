@@ -207,6 +207,22 @@ pub fn file_name_for(collection: &str, suffix: &str) -> String {
     format!("{}.{suffix}", safe_segment(collection))
 }
 
+/// 一个平台的内容住在哪个**平台目录**下：从这些变体的**键**上数出来，只有一个目录就是它，散在几个目录里交 `None`。
+///
+/// **从键上数，不从平台清单上猜**：清单里一个平台可以映射好几个目录别名，而这里要的是这份库里实际用的是哪一个。
+/// 导出时收敛（[`converge`]）与子库目标设置里的落点预览（`sync::Footprint::landing`）问的是同一件事，从这一处取。
+#[must_use]
+pub fn platform_directory<'a>(keys: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let dirs: BTreeSet<&str> = keys
+        .into_iter()
+        .filter_map(crate::path::platform_of_key)
+        .collect();
+    match dirs.len() {
+        1 => dirs.into_iter().next().map(ToString::to_string),
+        _ => None,
+    }
+}
+
 /// 把一个合集名化成**一段安全的路径**：分隔符与保留字符换成 `_`。
 ///
 /// 合集名里可能有路径分隔符（平台名不会，但清单是数据、用户能改），而它要么当文件名
@@ -307,15 +323,12 @@ pub fn run_within(
         // （`WII` 的目录叫 `Wii`、`PS1` 的叫 `ps`、`WS` 的叫 `wsc`）。ES 家族的
         // `es_systems.xml` 拿它当 `<name>`，拿平台名顶上去的话，那 12 个在 Android 与
         // Linux 上（大小写敏感）一个都指不着。
-        let dirs: BTreeSet<&str> = planned
-            .iter()
-            .flat_map(|one| &one.members)
-            .filter_map(|variant| crate::path::platform_of_key(&variant.key))
-            .collect();
-        let directory = match dirs.len() {
-            1 => dirs.iter().next().map(|dir| (*dir).to_string()),
-            _ => None,
-        };
+        let directory = platform_directory(
+            planned
+                .iter()
+                .flat_map(|one| &one.members)
+                .map(|variant| variant.key.as_str()),
+        );
         // **不给 `shortname`。** Pegasus 拿它去对第三方资源目录（Skraper、ES 的
         // system 名），而那套名字与我们的平台名不是一回事——FC 在那边叫 `nes`。
         // 按平台名折一个 `fc` 出来，等于让前端去一个不存在的目录里找封面；

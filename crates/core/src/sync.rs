@@ -71,6 +71,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::adapter::Adapter;
 use crate::capability::{Conversion, Decision, Filesystem, Profile, RejectReason};
 use crate::catalog::{Catalog, CatalogError, MemberFile};
 use crate::container::Contents;
@@ -1398,6 +1399,62 @@ impl Footprint {
             .into_iter()
             .filter(|row| row.reason == RejectReason::TooBig)
             .collect()
+    }
+}
+
+// ── 落点预览（票 `gui-looks-like-the-design/21`）─────────────────────────────
+
+/// 一份内容**落到设备上的哪儿**：ROM 的落点与它那一份前端元数据的位置，都相对子库根。目标设置弹层里「设备上的位置」
+/// 照它画（拿主意的人 2026-09-15 定：照实际规则，不照稿上的示意）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Landing {
+    /// ROM 落在哪。
+    pub rom: String,
+    /// 它那一份前端元数据落在哪。
+    pub metadata: String,
+}
+
+impl Landing {
+    /// 还没有选择集时（新建子库）拿一个示例名说规则：ROM 落在 `<平台目录>/<文件名>`——子库里的布局照搬主库里的键、剥掉根名
+    /// （挂账 D79）——元数据的位置由适配器答（[`Adapter::metadata_path`]）。
+    #[must_use]
+    pub fn example(adapter: &dyn Adapter, directory: &str, file_name: &str) -> Self {
+        Self {
+            rom: format!("{directory}/{file_name}"),
+            metadata: adapter.metadata_path(directory),
+        }
+    }
+}
+
+impl Footprint {
+    /// **头一个变体的真实落点**：照这份档案折出来的期望状态里按路径排的头一份 ROM（要转格式的是转出来那一份）；元数据位置照
+    /// 导出时收敛的同一条规则——那个平台的内容在主库里只住一个目录就用那个目录名，散在几个目录里退回平台名
+    /// （[`converge::platform_directory`](crate::adapter::converge::platform_directory)）。什么都没选中时是 `None`。
+    #[must_use]
+    pub fn landing(&self, profile: &Profile, adapter: &dyn Adapter) -> Option<Landing> {
+        let desired = self.desired(profile);
+        let first = desired
+            .files
+            .iter()
+            .find(|file| file.kind == FileKind::Rom)?;
+        let directory = match self
+            .platforms
+            .get(&first.variant)
+            .and_then(Option::as_deref)
+        {
+            Some(platform) => crate::adapter::converge::platform_directory(
+                self.platforms
+                    .iter()
+                    .filter(|(_, of)| of.as_deref() == Some(platform))
+                    .map(|(key, _)| key.as_str()),
+            )
+            .unwrap_or_else(|| platform.to_string()),
+            None => path::platform_of_key(&first.source)?.to_string(),
+        };
+        Some(Landing {
+            rom: first.path.clone(),
+            metadata: adapter.metadata_path(&directory),
+        })
     }
 }
 

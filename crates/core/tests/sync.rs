@@ -961,3 +961,40 @@ fn 数一台设备卡上清单之外的文件_路径可以是框里还没存的�
     assert_eq!(新的.count, 2, "还没建的子库没有清单，卡上的都算清单之外");
 }
 
+// ───────────────────────── 落点预览照实际规则（票 `gui-looks-like-the-design/21`，拿主意的人 2026-09-15 定）
+
+#[test]
+fn 落点预览取头一个变体的真实落点_元数据位置照适配器_新建时示例名照同一条规则() {
+    let dir = 建库();
+    let catalog = 扫成库(dir.path());
+    let selected = 选中(&catalog, "平台=FC");
+    let 脚印 = sync::Footprint::gather(&catalog, &selected).expect("读得动");
+    let pegasus = romcat_core::adapter::find("Pegasus").expect("带着 Pegasus");
+    let es = romcat_core::adapter::find("ES-Gamelist").expect("带着 ES");
+
+    let 落点 = 脚印
+        .landing(&Profile::unclaimed(), pegasus.as_ref())
+        .expect("选中了东西就有落点");
+    assert!(
+        落点.rom.starts_with("FC/") && 落点.rom.ends_with(".zip"),
+        "落点剥掉根名、照主库里的平台目录：{落点:?}"
+    );
+    assert_eq!(落点.metadata, "FC.metadata.pegasus.txt");
+    assert_eq!(
+        脚印
+            .landing(&Profile::unclaimed(), es.as_ref())
+            .expect("有落点")
+            .metadata,
+        "gamelists/FC/gamelist.xml"
+    );
+    assert!(
+        sync::Footprint::default()
+            .landing(&Profile::unclaimed(), pegasus.as_ref())
+            .is_none(),
+        "什么都没选中时没有落点可说"
+    );
+
+    let 示例 = sync::Landing::example(es.as_ref(), "GBA", "火焰之纹章 烈火之剑.gba");
+    assert_eq!(示例.rom, "GBA/火焰之纹章 烈火之剑.gba");
+    assert_eq!(示例.metadata, "gamelists/GBA/gamelist.xml");
+}
