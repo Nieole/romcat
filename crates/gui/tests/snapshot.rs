@@ -2044,22 +2044,13 @@ fn 待确认屏(临时目录名: &str) -> App {
     app
 }
 
-/// 逐条那一屏：展开一批有 4–10 个候选的，切到逐条——光标停在那一批头一条上，候选卡片摆得满一排。
+/// 逐条那一屏：照稿走屏头「逐条」那条路进来——待选列表栏头「有多个候选 N 条」，光标停在头一条上。
+///
+/// 合成数据里中文离线源那一次匹配落在一个**单候选**的变体上，不在「有多个候选」那一栏里，这一张照这条路拍不到那一堆
+/// （那一堆由 `tests/queue.rs` 的几条测试钉着）。
 #[cfg(feature = "demo")]
 fn 停在逐条(app: &mut App) {
-    let 多候选 = app
-        .queue()
-        .queue()
-        .batches()
-        .iter()
-        .find(|batch| batch.shape.fanout() == romcat_core::triage::Fanout::Several)
-        .cloned()
-        .expect("合成数据里该有 4–10 个候选那一档");
-    let (screen, _) = app.queue_and_site();
-    if screen.scope().map(|scope| scope.shape).as_ref() != Some(&多候选.shape) {
-        screen.open_batch(&多候选.shape);
-    }
-    screen.show_one_by_one();
+    app.queue_and_site().0.show_multiple();
 }
 
 /// 裁决记录那一块要有东西可画：整批通过最小的那一批能整批通过的、整批拒绝最小的那一批没有候选的，再撤掉头一批——

@@ -400,19 +400,27 @@ fn 置信度四档在两屏上是同一个词() {
 }
 
 #[test]
-fn 每一处上了色的置信度都跟着那个词() {
-    // 验收第 5 条。收之前，逐条那张表的「候选」一栏是一个**光染了色的数字**——
-    // 色觉障碍下那一栏就只剩一个数，读不出它是稳还是悬。逐条那一屏照稿两栏之后（票
-    // `gui-looks-like-the-design/18`），待选列表每一条左沿一道那一档的色，第二行写着那一档的词。
+fn 逐条那一屏的候选卡片标签写着那一档的词_待选列表行只留色条() {
+    // 验收第 5 条（「颜色不是唯一线索」）。逐条那一屏照稿两栏之后（票 `gui-looks-like-the-design/18`），待选列表每一条
+    // 左沿一道那一档的色，**行里不再写那一档的词**——置信度完全照稿（拿主意的人 2026-09-14 定，与浏览屏表格同一条，
+    // 挂单 `Q872`）；那个词写在右边每张候选卡片的标签上。
+    use romcat_core::catalog::identify::Tier;
+
     let mut app = 待确认(&工作目录("颜色不是唯一线索"));
     app.queue_and_site().0.show_one_by_one();
     let ctx = headless::context();
     let 屏上 = 画出来的字(&跑一帧(&ctx, &mut app, Vec::new()));
-    // 那一条的第二行是「平台 · 3 个候选 · 高置信」这个样子：色条旁边跟着档名。
-    let 有一格 = romcat_core::catalog::identify::Tier::ALL
-        .iter()
-        .any(|tier| 屏上.contains(&format!(" · {}", tier.label())));
-    assert!(有一格, "那一栏还是光一个数：\n{屏上}");
+    let 三档 = [Tier::High, Tier::Medium, Tier::Low].map(Tier::label);
+    assert!(
+        屏上.lines().any(|line| 三档.contains(&line)),
+        "候选卡片的标签上没写那一档的词：\n{屏上}"
+    );
+    assert!(
+        !屏上
+            .lines()
+            .any(|line| 三档.iter().any(|词| line.ends_with(&format!(" · {词}")))),
+        "待选列表行里还写着那一档的词：\n{屏上}"
+    );
 }
 
 #[test]

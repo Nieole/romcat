@@ -878,11 +878,10 @@ fn 逐条时屏上真的摆着文件名路径与候选的完整依据() {
         "屏上没有文件名：{}",
         item.name()
     );
-    assert!(
-        屏上.contains(item.directory()),
-        "屏上没有路径：{}",
-        item.directory(),
-    );
+    // 路径照稿写完整的「根名 · 相对路径」（票 09 那一处写法）。
+    let (根名, 相对路径) = romcat_core::path::split_root(&item.variant.key);
+    let 路径 = format!("{根名} · {相对路径}");
+    assert!(屏上.contains(&路径), "屏上没有完整路径：{路径}");
     let 依据 = &item.candidates[0].evidence;
     assert!(
         屏上.contains(依据.as_str()),
@@ -928,14 +927,14 @@ fn 拿得到判据的那些钉在内容上而不是每一条都退到路径() {
     停在(&ctx, &mut app, &有判据的);
     let 屏上 = 详情滚一趟(&ctx, &mut app);
     assert!(
-        屏上.contains(verdict::ANCHOR_CONTENT),
+        屏上.contains(verdict::ANCHOR_CONTENT_SENTENCE),
         "拿得到判据的这一条，详情里没写它钉在内容上：{有判据的}",
     );
 
     停在(&ctx, &mut app, &无判据的);
     let 屏上 = 详情滚一趟(&ctx, &mut app);
     assert!(
-        屏上.contains(verdict::ANCHOR_PATH),
+        屏上.contains(verdict::ANCHOR_PATH_SENTENCE),
         "无判据的这一条该如实说只钉得住本机路径：{无判据的}",
     );
 }
@@ -2614,12 +2613,28 @@ fn 屏头右侧照稿_三枚置信度标签_按批逐条那一对_裁决记录()
         "「沉淀库 在哪」挪进裁决记录抽屉的页脚了，屏头上不该还有：\n{屏上}",
     );
 
-    let _ = 点正好那一颗(&ctx, &mut app, "逐条");
+    let 多候选 = app
+        .queue()
+        .queue()
+        .coverage(triage::HEADLINE_BATCHES)
+        .multiple;
+    let 屏上 = 点正好那一颗(&ctx, &mut app, "逐条");
     assert_eq!(app.queue().mode(), Mode::OneByOne, "按了「逐条」");
     assert!(
         app.queue().scope().is_none(),
-        "屏头那颗「逐条」看的是整个队列，不是默认展开的头一批",
+        "屏头那颗「逐条」看的不是默认展开的头一批",
     );
+    // 照稿（设计稿 `.obolist` 栏头）：屏头「逐条」看的是有多个候选的那些，栏头写「有多个候选 N 条」。
+    assert_eq!(app.queue().queue().selected().len() as u64, 多候选);
+    for 该有 in [
+        "有多个候选".to_string(),
+        format!("{} 条", thousands(多候选)),
+    ] {
+        assert!(
+            屏上.lines().any(|line| line == 该有),
+            "待选列表栏头没有「{该有}」：\n{屏上}"
+        );
+    }
     let _ = 点正好那一颗(&ctx, &mut app, "按批");
     assert_eq!(app.queue().mode(), Mode::Batches, "按了「按批」");
 }
@@ -2870,6 +2885,25 @@ fn 批卡照稿_卡头是形状各段与共同依据_展开后判定依据是那
         !屏上.contains("换一组样本"),
         "样本旁边那颗照稿叫「换一组」：\n{屏上}"
     );
+    // 「作用范围」只在下钻之后说：没下钻时照稿不画，下钻到某一组之后写出来。
+    assert!(
+        !屏上.lines().any(|line| line.starts_with("作用范围：")),
+        "没下钻就画了「作用范围」：\n{屏上}"
+    );
+    let 那一组 = app
+        .queue()
+        .queue()
+        .drill(&Scope::whole(batch.shape.clone()), Axis::Directory)
+        .rows
+        .first()
+        .cloned()
+        .expect("该有一组");
+    app.queue_and_site().0.drill_into(&那一组.label);
+    let 下钻之后 = 画一帧(&ctx, &mut app);
+    assert!(
+        下钻之后.lines().any(|line| line.starts_with("作用范围：")),
+        "下钻之后没说作用范围：\n{下钻之后}"
+    );
 
     let 上一组 = app.queue().samples();
     let _ = 点正好那一颗(&ctx, &mut app, "换一组");
@@ -2939,6 +2973,16 @@ fn 逐条照稿两栏_左边待选列表_右边详情有候选卡片四颗按钮
             屏上.contains(candidate.game.as_str()),
             "候选卡片上没写作品：{}",
             candidate.game
+        );
+    }
+    // 置信度只靠行首那一道色，行里不写那一档的词（照稿，挂单 `Q872`）；词在候选卡片的标签上。
+    for tier in [Tier::High, Tier::Medium, Tier::Low] {
+        assert!(
+            !屏上
+                .lines()
+                .any(|line| line.ends_with(&format!(" · {}", tier.label()))),
+            "待选列表行里还写着「{}」：\n{屏上}",
+            tier.label()
         );
     }
     for 旧的 in ["从哪一批下手", "预览这一批", "← 回到分批"] {

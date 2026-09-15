@@ -448,7 +448,7 @@ impl Screen {
     /// 回到分批那一屏。
     pub fn show_batches(&mut self) {
         self.mode = Mode::Batches;
-        self.picks.shape = None;
+        self.picks.only = None;
         self.picks.clear_axes();
         self.refresh_opened();
     }
@@ -463,11 +463,36 @@ impl Screen {
     /// `Screen::resolve_cursor` 会把它捞回来，于是「逐条看」是从中间开始的。
     pub fn show_one_by_one(&mut self) {
         self.mode = Mode::OneByOne;
-        self.picks.shape = self.open.clone();
+        self.picks.only = self.open.clone().map(Only::Batch);
         self.picks.clear_axes();
         if let Some(label) = self.drill.clone() {
             self.picks.pick(self.axis, &label);
         }
+        self.cursor = None;
+        self.at = 0;
+        self.nth = 0;
+    }
+
+    /// 换到**逐条键盘流**，只看**有多个候选**的那几批：屏头「逐条」走的就是它（设计稿 `.obolist` 栏头「有多个候选」）。
+    ///
+    /// 那几批照整个队列眼下的一级分批取，哪几档算「有多个候选」由核心库说
+    /// （[`Fanout::multiple`](romcat_core::triage::Fanout::multiple)）；队列里一条有多个候选的都没有时看整个队列。
+    /// 展开着的那一批与下钻一并收起，光标从头看起。
+    pub fn show_multiple(&mut self) {
+        self.open = None;
+        self.drill = None;
+        self.picks.only = None;
+        self.picks.clear_axes();
+        self.queue.set_filter(self.picks.filter());
+        let 几批: Vec<Shape> = self
+            .queue
+            .batches()
+            .iter()
+            .filter(|batch| batch.shape.fanout().multiple())
+            .map(|batch| batch.shape.clone())
+            .collect();
+        self.picks.only = (!几批.is_empty()).then_some(Only::Multiple(几批));
+        self.mode = Mode::OneByOne;
         self.cursor = None;
         self.at = 0;
         self.nth = 0;
@@ -1018,12 +1043,8 @@ impl Screen {
             self.mode,
         ) {
             Some(Mode::Batches) if self.mode != Mode::Batches => self.show_batches(),
-            // 屏头这一颗看的是**整个队列**（设计稿 `data-qmode="obo"`）：先收起默认展开的那一批，不然逐条只看得见那一批。
-            Some(Mode::OneByOne) if self.mode != Mode::OneByOne => {
-                self.open = None;
-                self.drill = None;
-                self.show_one_by_one();
-            }
+            // 屏头这一颗看的是**有多个候选**的那几批（设计稿 `data-qmode="obo"` 那一栏的栏头）。
+            Some(Mode::OneByOne) if self.mode != Mode::OneByOne => self.show_multiple(),
             _ => {}
         }
         // 数的是**还在册**的那几批（设计稿 `#lots-n` 只数没撤过的）；撤过的照旧列在抽屉里。
@@ -1406,8 +1427,11 @@ impl Screen {
                         });
                     });
                 });
-                ui.add_space(look::step(1));
-                look::help(ui, &format!("作用范围：{}", scope.label()));
+                // 「作用范围」只在下钻之后说（作用范围不再是整批）；没下钻时照稿不画。
+                if 下钻着.is_some() {
+                    ui.add_space(look::step(1));
+                    look::help(ui, &format!("作用范围：{}", scope.label()));
+                }
             });
         if let Some(axis) = 按下.axis {
             self.set_axis(axis);
@@ -1432,8 +1456,10 @@ impl Screen {
         }
     }
 
-    /// 逐条那一屏左边那栏（设计稿 `.obolist`）：栏头写看的是哪一批、几条，一颗「筛选…」、一颗排序；底下一条一行——
-    /// 文件名（等宽）、「平台 · 几个候选 · 那一档的词」，左沿一道那一档的色，光标那一条垫强调浅底。
+    /// 逐条那一屏左边那栏（设计稿 `.obolist`）：栏头写看的是哪一类（「有多个候选」、某一批的依据形状、整个队列）、几条，
+    /// 一颗「筛选…」、一颗排序；底下一条一行——文件名（等宽）、「平台 · 几个候选」，左沿一道那一档的色，光标那一条垫强调浅底。
+    /// **置信度只靠那一道色**，行里不写那一档的词（照稿，拿主意的人 2026-09-14 定，与浏览屏表格同一条，挂单 `Q872`）；
+    /// 那个词写在右边每张候选卡片的标签上。
     ///
     /// **行是虚拟化的**（`show_rows`），**一个文本框都没有**：见模块文档。
     ///
@@ -1453,9 +1479,9 @@ impl Screen {
         let 条数 = format!("{} 条", thousands_len(self.queue.selected().len()));
         let 标题 = self
             .picks
-            .shape
+            .only
             .as_ref()
-            .map_or_else(|| "整个队列".to_owned(), Shape::label);
+            .map_or_else(|| "整个队列".to_owned(), Only::label);
         let mut 开筛选 = false;
         let mut 换排序 = None;
         let [上, 右, 下, 左] = tokens.space.list_head_padding;
@@ -1488,7 +1514,9 @@ impl Screen {
                 ui.horizontal(|ui| {
                     ui.scope(|ui| {
                         ui.set_max_width(标题宽);
-                        ui.add(egui::Label::new(font::strong(标题.clone())).truncate());
+                        // 从某一批点「逐条处理」进来时是那一批的依据形状，放不下就尾部截断、悬停看全文。
+                        ui.add(egui::Label::new(font::strong(标题.clone())).truncate())
+                            .on_hover_text(标题.as_str());
                     });
                     look::help(ui, &条数);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1567,8 +1595,7 @@ impl Screen {
                     } else if 响应.hovered() {
                         painter.rect_filled(行, 0.0, palette.panel_2);
                     }
-                    // **哪一档由核心库说**（`Item::tier`）——「看第一条候选」那条规则只该有一份。色条旁边那一行字里
-                    // 写着那一档的词：只染色的话，色觉障碍下这一行就只剩一道色（票 `gui-redesign/12` 验收第 5 条）。
+                    // **哪一档由核心库说**（`Item::tier`）——「看第一条候选」那条规则只该有一份。
                     painter.rect_filled(
                         egui::Rect::from_min_size(
                             行.min,
@@ -1603,8 +1630,8 @@ impl Screen {
                         .truncate(),
                     );
                     let 候选 = match item.candidates.len() {
-                        0 => item.tier().label().to_owned(),
-                        n => format!("{n} 个候选 · {}", item.tier().label()),
+                        0 => "没有候选".to_owned(),
+                        n => format!("{n} 个候选"),
                     };
                     字.add(
                         egui::Label::new(
@@ -1688,16 +1715,9 @@ impl Screen {
             return;
         };
         // 不写 `**内容**`：那是命令行报告里的记法，`ui.label` 会把星号照着画出来。
-        let anchored = if item.print.is_some() {
-            format!("{}——换台机器也认得出，可导出分享", verdict::ANCHOR_CONTENT)
-        } else {
-            format!("{}——只在本机成立", verdict::ANCHOR_PATH)
-        };
-        let (key, name, directory) = (
-            item.variant.key.clone(),
-            item.name().to_string(),
-            item.directory().to_string(),
-        );
+        // 那一句由核心库给（设计稿「裁决按文件内容记录，改名或移动后仍然有效」），命令行 `triage list` 印的是同一句。
+        let anchored = verdict::anchor_sentence(item.print.is_some());
+        let (key, name) = (item.variant.key.clone(), item.name().to_string());
         let (state, platform, bytes) = (
             item.state.label(),
             item.variant.platform.clone(),
@@ -1741,18 +1761,18 @@ impl Screen {
                 .color(palette.ink),
         );
         ui.add_space(tokens.space.obo_head_gap);
-        ui.label(
-            egui::RichText::new(&directory)
-                .family(egui::FontFamily::Monospace)
-                .size(look::font_size(ui.ctx(), tokens.font.size_caption_plus))
-                .color(palette.ink_2),
-        );
+        // 完整的「根名 · 相对路径」（设计稿 `主库 · GBA/汉化/…`），画不下从左边删字（票 09 那一处，`table::root_and_path`）。
+        let 路径字 =
+            egui::FontId::monospace(look::font_size(ui.ctx(), tokens.font.size_caption_plus));
+        let 路径 = crate::table::root_and_path(ui, &key, &路径字, ui.available_width());
+        ui.label(egui::RichText::new(路径).font(路径字).color(palette.ink_2))
+            .on_hover_text(key.as_str());
         ui.add_space(look::step(0));
         ui.horizontal_wrapped(|ui| {
             look::inline_tag(ui, platform.as_deref().unwrap_or("平台未知"));
             look::inline_tag(ui, &bytes);
             look::inline_tag(ui, state);
-            look::inline_tag(ui, &format!("裁决钉在{anchored}"));
+            look::inline_tag(ui, anchored);
         });
         if let Some(reason) = &reason {
             ui.add_space(look::step(0));
@@ -2113,8 +2133,8 @@ impl Screen {
             ))
             .width(dialog::Width::Wide)
             .show(ctx, |ui| {
-                if let Some(shape) = &self.picks.shape {
-                    look::help(ui, &format!("只看这一批变体：{}", shape.label()));
+                if let Some(only) = &self.picks.only {
+                    look::help(ui, &format!("只看：{}", only.label()));
                 }
                 look::section(ui, "按识别结论");
                 ui.horizontal_wrapped(|ui| {
@@ -2176,7 +2196,7 @@ impl Screen {
             Some(Pressed::Done) => self.filter_open = false,
             Some(Pressed::Clear) => {
                 self.picks.clear_axes();
-                self.picks.shape = None;
+                self.picks.only = None;
             }
             None => {}
         }
@@ -3676,10 +3696,13 @@ struct OneByOnePressed {
     undo: bool,
 }
 
-/// 候选那几张卡片（设计稿 `.cands`）：一排三张，挨个往下排。点一张就选它（与 `←` `→` 同一件事）。交回这一帧点了第几张。
+/// 候选那几张卡片（设计稿 `.cands`）：一排三张，挨个往下排，**同一排一样高**。点一张就选它（与 `←` `→` 同一件事）。
+/// 交回这一帧点了第几张。
 fn candidate_cards(ui: &mut egui::Ui, cards: &[CandidateCard], nth: usize) -> Option<usize> {
     /// 一排几张（设计稿 `.cands` 的 `repeat(3, …)`）。
     const 每排: usize = 3;
+    /// 量一张卡片多高时给它的地方有多高：足够高，不让它折行之外的地方受限。
+    const 量的高: f32 = 100_000.0;
     let 缝 = Tokens::builtin().space.candidate_gap;
     #[allow(clippy::cast_precision_loss)]
     let 宽 = ((ui.available_width() - 缝 * (每排 - 1) as f32) / 每排 as f32).max(0.0);
@@ -3688,6 +3711,23 @@ fn candidate_cards(ui: &mut egui::Ui, cards: &[CandidateCard], nth: usize) -> Op
         if 排 > 0 {
             ui.add_space(缝);
         }
+        // **同一排一样高**（设计稿 `.cands` 是一张网格，一排里的格子一样高）：先在看不见、按不动的地方把这一排每张
+        // 摆一遍量高（egui 的 `sizing_pass`），取最高的那张，再真摆。
+        let 最高 = 这一排.iter().enumerate().fold(0.0_f32, |最高, (列, card)| {
+            let mut 量 = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(("量候选卡片", 排, 列))
+                    .max_rect(egui::Rect::from_min_size(
+                        ui.cursor().min,
+                        egui::vec2(宽, 量的高),
+                    ))
+                    .layout(Layout::top_down(Align::Min))
+                    .sizing_pass()
+                    .invisible(),
+            );
+            candidate_card(&mut 量, card, 排 * 每排 + 列, false, 0.0);
+            最高.max(量.min_rect().height())
+        });
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 缝;
             for (列, card) in 这一排.iter().enumerate() {
@@ -3697,7 +3737,7 @@ fn candidate_cards(ui: &mut egui::Ui, cards: &[CandidateCard], nth: usize) -> Op
                     Layout::top_down(Align::Min),
                     |ui| {
                         ui.set_width(宽);
-                        if candidate_card(ui, card, 第几张, 第几张 == nth) {
+                        if candidate_card(ui, card, 第几张, 第几张 == nth, 最高) {
                             点了 = Some(第几张);
                         }
                     },
@@ -3709,14 +3749,22 @@ fn candidate_cards(ui: &mut egui::Ui, cards: &[CandidateCard], nth: usize) -> Op
 }
 
 /// 一张候选卡片（设计稿 `.cand`）：面板底、一圈分隔线、大圆角，顶上一道那一档的色；作品、那一档的标签、
-/// 「来源 / 匹配 / 依据」三行。选中那一张描强调色、外头一圈强调浅色（`candidate-ring`）。整张点得动，交回点了没有。
-fn candidate_card(ui: &mut egui::Ui, card: &CandidateCard, 第几张: usize, 选中: bool) -> bool {
+/// 「来源 / 匹配 / 依据」三行（「匹配」那一格等宽，别的常规体）。选中那一张描强调色、外头一圈强调浅色（`candidate-ring`）。
+/// 整张至少 `最矮` 那么高（同一排取最高的那张，[`candidate_cards`]）。整张点得动，交回点了没有。
+fn candidate_card(
+    ui: &mut egui::Ui,
+    card: &CandidateCard,
+    第几张: usize,
+    选中: bool,
+    最矮: f32,
+) -> bool {
     let tokens = Tokens::builtin();
     let palette = look::palette(ui);
     let 线宽 = tokens.layout.control_stroke;
     let 圆角 = tokens.radius.large;
     let 色 = look::tier_color(card.tier, ui.visuals());
     let 整张 = look::barred_card(ui, 色, look::BarEdge::Top, |ui| {
+        ui.set_min_height(最矮);
         egui::Frame::new()
             .inner_margin(egui::Margin::same(tokens.space.candidate_padding as i8))
             .show(ui, |ui| {
@@ -3741,7 +3789,7 @@ fn candidate_card(ui: &mut egui::Ui, card: &CandidateCard, 第几张: usize, 选
                     .spacing([行横, 行竖])
                     .show(ui, |ui| {
                         for (名, 值, 等宽) in [
-                            ("来源", &card.source, true),
+                            ("来源", &card.source, false),
                             ("匹配", &card.matched, true),
                             ("依据", &card.evidence, false),
                         ] {
@@ -3834,14 +3882,41 @@ pub struct Picks {
     candidate_work: String,
     /// 四档结论要不要，与 [`State::ALL`] 同序。
     states: [bool; State::ALL.len()],
-    /// **按依据形状**：一级分批点「逐条看」时填进来。
+    /// **按依据形状**只看哪一类（[`Only`]）：一级分批点「逐条处理」时填那一批，屏头「逐条」时填有多个候选的那几批。
     ///
-    /// 它**没有文本框**——「MAME / gameboy.xml / 中置信 / 含头 / 只有一个候选」不是人
+    /// 它**没有文本框**——「MAME / gameboy.xml / 中置信 / 含头 / 1 个候选」不是人
     /// 打得出来的东西，屏上它只能从卡片上点。命令行那一侧收得下同一批
     /// （`romcat triage --shape`），但走的也不是手打：报告把每一批连
     /// [`Shape::selector`] 折出来的那串字一起印出来，人**照着抄**（票
     /// `queue-followups/08`）。
-    shape: Option<Shape>,
+    only: Option<Only>,
+}
+
+/// 逐条那一屏只看队列里的哪一类：一级分批里的某一批，或者有多个候选的那几批。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Only {
+    /// 一级分批点「逐条处理」进来的那一批变体。
+    Batch(Shape),
+    /// 屏头「逐条」进来的：有多个候选的那几批（设计稿 `.obolist` 栏头「有多个候选」，[`Screen::show_multiple`]）。
+    Multiple(Vec<Shape>),
+}
+
+impl Only {
+    /// 待选列表栏头上写的那几个字。
+    fn label(&self) -> String {
+        match self {
+            Self::Batch(shape) => shape.label(),
+            Self::Multiple(_) => "有多个候选".to_owned(),
+        }
+    }
+
+    /// 折进选择器的那几个形状（[`Filter::shape`]，几个之间是并集）。
+    fn shapes(&self) -> Vec<Shape> {
+        match self {
+            Self::Batch(shape) => vec![shape.clone()],
+            Self::Multiple(shapes) => shapes.clone(),
+        }
+    }
 }
 
 impl Default for Picks {
@@ -3852,7 +3927,7 @@ impl Default for Picks {
             candidate_work: String::new(),
             // 默认那三档：**跳过**不在队列里——它不是「拿不定主意」，是「不该撞 DAT」。
             states: [true, true, true, false],
-            shape: None,
+            only: None,
         }
     }
 }
@@ -3873,7 +3948,7 @@ impl Picks {
             under: one(&self.under),
             name_contains: one(&self.name),
             candidate_work: one(&self.candidate_work),
-            shape: self.shape.clone().into_iter().collect(),
+            shape: self.only.as_ref().map(Only::shapes).unwrap_or_default(),
             states: State::ALL
                 .iter()
                 .zip(self.states)

@@ -83,9 +83,24 @@ impl Fanout {
         }
     }
 
-    /// 屏上写成什么。前面接着一个「都」字：「都只有一个候选」。
+    /// 屏上写成什么：依据形状的末一段（设计稿 `MAME / gameboy.xml / 含头 / 1 个候选`，拿主意的人 2026-09-15 定），
+    /// 命令行 `--shape` 那串字的末一段也是它。
     #[must_use]
     pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "没有候选",
+            Self::One => "1 个候选",
+            Self::Few => "2–3 个候选",
+            Self::Several => "4–10 个候选",
+            Self::Many => "10 个以上候选",
+        }
+    }
+
+    /// 共同依据那句话里的说法，前面接着一个「都」字：「都只有一个候选」（[`Batch::why`]）。
+    ///
+    /// 与 [`Fanout::label`] 分开：那一个是形状的一段（「1 个候选」），这一个是一句话里的谓语。
+    #[must_use]
+    pub fn sentence(self) -> &'static str {
         match self {
             Self::None => "没有候选",
             Self::One => "只有一个候选",
@@ -108,6 +123,12 @@ impl Fanout {
     #[must_use]
     pub fn answerable(self) -> bool {
         self == Self::One
+    }
+
+    /// 这一档是**有多个候选**的吗（两个以上）：问的是「选哪个」，只能逐条选（[`Coverage::multiple`] 数的就是这几档）。
+    #[must_use]
+    pub fn multiple(self) -> bool {
+        !matches!(self, Self::None | Self::One)
     }
 }
 
@@ -377,7 +398,7 @@ impl Batch {
         let mut line = self.shape.label();
         match &self.shape {
             Shape::Candidates { fanout, .. } => {
-                let _ = write!(line, " —— 都{}", fanout.label());
+                let _ = write!(line, " —— 都{}", fanout.sentence());
                 if let Some(shared) = &self.evidence {
                     let _ = write!(line, "，依据都是「{shared}」");
                 }
@@ -1169,8 +1190,8 @@ mod tests {
         // 静悄悄选中零条是最坏的一种：人会以为这一批真的空了。
         let 说了什么 = |text: &str| Shape::parse(text).expect_err("这串字不该认得下来");
         assert!(说了什么("MAME / nes.xml / 含头").contains("不是一个依据形状"));
-        assert!(说了什么("MAME / nes.xml / 很确信 / 含头 / 只有一个候选").contains("置信度"));
-        assert!(说了什么("MAME / nes.xml / 中置信 / 原样 / 只有一个候选").contains("哈希口径"));
+        assert!(说了什么("MAME / nes.xml / 很确信 / 含头 / 1 个候选").contains("置信度"));
+        assert!(说了什么("MAME / nes.xml / 中置信 / 原样 / 1 个候选").contains("哈希口径"));
         assert!(说了什么("MAME / nes.xml / 中置信 / 含头 / 三个候选").contains("候选数"));
         assert!(说了什么("一条候选都没有").contains("少了识别结论"));
         assert!(说了什么("一条候选都没有 / 说不清").contains("认不出结论"));

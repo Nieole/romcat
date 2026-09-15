@@ -295,9 +295,9 @@ impl QueueReport {
             );
             let _ = writeln!(
                 out,
-                "  容量 {}；裁决钉在**{}**上",
+                "  容量 {}；{}",
                 human_bytes(item.bytes),
-                item.anchor,
+                verdict::anchor_sentence(item.anchor == verdict::ANCHOR_CONTENT),
             );
             if let Some(reason) = &item.reason {
                 let _ = writeln!(out, "  理由：{reason}");
