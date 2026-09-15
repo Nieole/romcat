@@ -3483,3 +3483,125 @@ fn 新建时设备上的位置用示例名_目录照实际规则() {
         );
     }
 }
+
+#[test]
+fn 目标设置里改名_保存之后旧名不在_新名规则与覆盖都在_卡片跟着换() {
+    // 拿主意的人 2026-09-15 定：照稿名字可改，核心库一个事务里改名（`Catalog::rename_sublibrary`）。
+    use romcat_core::capability::Override;
+
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    {
+        let form = 场.app.sublibrary_and_site().0.form_mut();
+        form.name = "RG35XX".to_string();
+        form.overrides.insert("SFC".to_string(), Override::Keep);
+    }
+    画两帧(&ctx, &mut 场);
+    点最后正好那一段(&ctx, "保存", |ui| 场.app.ui(ui));
+    assert!(
+        !场.app.sublibrary().target_settings_open(),
+        "改名存下来之后弹层还开着：{:?}",
+        场.app.sublibrary().error()
+    );
+    let 名字: Vec<&str> = 场
+        .app
+        .sublibrary()
+        .list()
+        .iter()
+        .map(|row| row.name.as_str())
+        .collect();
+    assert_eq!(名字, ["RG35XX"], "改名建出了第二台，或者旧名还在");
+    let catalog = &场.app.site().catalog;
+    assert!(catalog.sublibrary("掌机").expect("读得动").is_none());
+    assert_eq!(
+        catalog.sublibrary_rules("RG35XX").expect("读得动").len(),
+        1,
+        "规则没跟着新名过去"
+    );
+    assert_eq!(
+        catalog
+            .capability_overrides("RG35XX")
+            .expect("读得动")
+            .get("SFC"),
+        Some(&Override::Keep),
+        "按平台覆盖没存在新名下"
+    );
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.lines().any(|line| line == "RG35XX"),
+        "卡片没跟着换名字：\n{屏上}"
+    );
+}
+
+#[test]
+fn 改名撞上别的子库_名字那一格当场说_保存关不上() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    let 另一张 = temp_dir("gui-sub-card-2");
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        screen.leave_target_settings();
+        let form = screen.form_mut();
+        form.name = "备份卡".to_string();
+        form.target = romcat_core::path::display(另一张.path());
+        form.capacity = String::new();
+        assert!(screen.save(site), "{:?}", screen.error());
+    }
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    场.app.sublibrary_and_site().0.form_mut().name = "备份卡".to_string();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(屏上.contains("已经有同名的子库。"), "\n{屏上}");
+    点最后正好那一段(&ctx, "保存", |ui| 场.app.ui(ui));
+    assert!(场.app.sublibrary().target_settings_open());
+    assert_eq!(场.app.sublibrary().list().len(), 2, "撞名时两台都该还在");
+}
+
+#[test]
+fn 保存目标设置之后已有的差量预览作废_提示条写差量预览已失效() {
+    // 拿主意的人 2026-09-15 定（F9）：照稿用底边提示条，走共用的 `toast.rs`。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "1GB");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+    assert!(
+        场.app.sublibrary().prepared().is_some(),
+        "前提：排出了一份差量预览"
+    );
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    场.app.sublibrary_and_site().0.form_mut().capacity = "2".to_string();
+    画两帧(&ctx, &mut 场);
+    点最后正好那一段(&ctx, "保存", |ui| 场.app.ui(ui));
+    assert!(
+        场.app.sublibrary().prepared().is_none(),
+        "改过目标设置，那份差量预览该作废"
+    );
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("已保存「掌机」的目标设置。差量预览已失效，同步前需要重新生成。"),
+        "提示条该说差量预览已失效：\n{屏上}"
+    );
+}
+
+#[test]
+fn 新建子库存下之后提示条写已创建() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    {
+        let form = 场.app.sublibrary_and_site().0.form_mut();
+        form.name = "掌机".to_string();
+        form.target = romcat_core::path::display(场.卡.path());
+    }
+    画两帧(&ctx, &mut 场);
+    点最后正好那一段(&ctx, "创建子库", |ui| 场.app.ui(ui));
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("已创建子库「掌机」"),
+        "新建之后提示条该说已创建：\n{屏上}"
+    );
+}

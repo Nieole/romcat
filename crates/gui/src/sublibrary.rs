@@ -83,7 +83,7 @@ use std::path::PathBuf;
 use egui::{Align, Layout};
 use romcat_core::capability::{DEFAULT_PROFILE, Entry, Override, Profile, Recipe, Roster};
 use romcat_core::catalog::CatalogError;
-use romcat_core::catalog::sublibrary::RemovedSublibrary;
+use romcat_core::catalog::sublibrary::{RemovedSublibrary, Renamed};
 use romcat_core::report::{decimal_bytes, human_bytes, thousands};
 use romcat_core::site::Site;
 use romcat_core::sublibrary::report::SelectionReport;
@@ -334,6 +334,9 @@ pub struct Screen {
     counting: Option<(u64, String)>,
     /// 这一串数失败或被停过：字改了之前不再自己排。
     counting_failed: Option<String>,
+    /// 目标设置里存下之后底边那条提示条（拿主意的人 2026-09-15 定，F9）：「已创建子库…」「已保存…差量预览已失效…」。
+    /// **一次只摆一条**：摆它时删除之后那条带「撤销」的就收了。
+    saved: Option<Toast>,
     /// **每台设备**的选择集原文：规则（连库里的序号）、读不懂的那几条、例外。
     ///
     /// 每张卡都摆它自己的规则列表（票 `gui-looks-like-the-design/20`），所以一台不落全读回来
@@ -455,6 +458,7 @@ impl Screen {
             strangers: None,
             counting: None,
             counting_failed: None,
+            saved: None,
             failed: false,
             error: None,
         }
@@ -462,6 +466,9 @@ impl Screen {
 
     /// 重新列一遍库里有哪些子库。
     pub fn reload(&mut self, site: &Site) {
+        // **判过的名字与路径跟着作废**：库里的子库变了（存了、删了、改了名），上一回判的「能用」「被谁占着」说的是变之前。
+        self.vetted = None;
+        self.name_vetted = None;
         match site.catalog.sublibraries() {
             Ok(list) => {
                 self.list = list;
@@ -1387,6 +1394,8 @@ impl Screen {
     /// 「**新建子库**」：打开「新建子库」那层弹层，草稿换成一份空的，没有哪一张卡算摊开着。
     fn begin_new(&mut self) {
         self.forget_strangers();
+        self.vetted = None;
+        self.name_vetted = None;
         self.picked = None;
         self.form = Form::default();
         self.invalidate();
@@ -1405,6 +1414,8 @@ impl Screen {
         self.form.overrides = self.overrides.get(name).cloned().unwrap_or_default();
         self.footprint_failed = None;
         self.forget_strangers();
+        self.vetted = None;
+        self.name_vetted = None;
         self.error = None;
         self.target_dialog = Some(TargetDialog::Of(name.to_string()));
     }
@@ -2879,6 +2890,12 @@ impl Screen {
                     }
                 });
                 match target_verdict.as_ref() {
+                    // 框还空着不是错：照稿一句弱字说目标路径通常是什么（设计稿 `probePath` 空串那一支）。
+                    Some(Ok(Err(TargetRefusal::Empty))) => under(
+                        ui,
+                        "通常是 SD 卡或掌机存储的根目录。无法弹出选择窗口时，也可以直接粘贴路径。",
+                        false,
+                    ),
                     Some(Ok(Err(refusal))) => under(ui, &refusal_line(refusal), true),
                     Some(Err(why)) => under(ui, why, true),
                     Some(Ok(Ok(_))) | None => {}
@@ -3095,6 +3112,44 @@ impl Screen {
             self.form.format.trim().to_string()
         };
         // 两种路径形式怎么折，**由核心的 `Sublibrary::at` 一处说了算**（ADR-0020）。
+        // **改名**（拿主意的人 2026-09-15 定，照稿名字可改）：只在「目标设置…」开着、名字改了的时候。核心一个事务里把规则、例外、
+        // 覆盖、清单挪到新名下（`Catalog::rename_sublibrary`），再照新名存下这一次改的那几格。
+        let dialog_open = self.target_dialog.is_some();
+        let renaming = match &self.target_dialog {
+            Some(TargetDialog::Of(old)) if *old != name => Some(old.clone()),
+            _ => None,
+        };
+        let creating = matches!(self.target_dialog, Some(TargetDialog::New));
+        let before = match &self.target_dialog {
+            Some(TargetDialog::Of(old)) => old.clone(),
+            _ => name.clone(),
+        };
+        let had_preview = self
+            .prepared
+            .as_ref()
+            .is_some_and(|prepared| prepared.sublibrary.name == before);
+        if let Some(old) = &renaming {
+            match site.catalog.rename_sublibrary(old, &name) {
+                Ok(Renamed::Done) => {
+                    self.evaluated.remove(old);
+                    if let Some((of, _)) = self.footprint.as_mut().filter(|(of, _)| of == old) {
+                        of.clone_from(&name);
+                    }
+                }
+                Ok(Renamed::Missing) => {
+                    self.error = Some(format!("改不了名：已经没有叫「{old}」的子库了。"));
+                    return false;
+                }
+                Ok(Renamed::Refused(_)) => {
+                    self.error = Some("已经有同名的子库。".to_string());
+                    return false;
+                }
+                Err(error) => {
+                    self.error = Some(format!("中立库写不动：{error}"));
+                    return false;
+                }
+            }
+        }
         // 按设备容量那一档：卡此刻在位就把总量记下来（换卡跟着变），不在位照旧留着上次读到的。
         let capacity = if self.form.capacity_by_device {
             self.live_total().or_else(|| self.stored_total())
@@ -3128,6 +3183,19 @@ impl Screen {
                 self.notice = Some(line);
                 self.reload(site);
                 self.open(site, &name);
+                // **底边提示条**（F9，照稿）：只在弹层里存下时摆。改过目标设置之后原来那份差量预览已经作废（`open` 走了
+                // `invalidate`），要说出来——「同步」认的正是那一份。
+                if dialog_open {
+                    let text = if creating {
+                        format!("已创建子库「{name}」")
+                    } else if had_preview {
+                        format!("已保存「{name}」的目标设置。差量预览已失效，同步前需要重新生成。")
+                    } else {
+                        format!("已保存「{name}」的目标设置。")
+                    };
+                    self.undo = None;
+                    self.saved = Some(Toast::new(text));
+                }
                 true
             }
             Err(error) => {
@@ -3386,6 +3454,14 @@ impl Screen {
 
     /// 底边那条提示条（[`crate::toast`]）：删掉一台之后那一条，带「撤销」。停够了收起，撤销也跟着没了。
     fn toast_ui(&mut self, ctx: &egui::Context, site: &mut Site) {
+        if self.undo.is_none() {
+            if let Some(saved) = &mut self.saved
+                && saved.show(ctx) == toast::Shown::Expired
+            {
+                self.saved = None;
+            }
+            return;
+        }
         let Some(undo) = &mut self.undo else {
             return;
         };
