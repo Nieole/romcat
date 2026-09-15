@@ -1128,3 +1128,127 @@ fn 排差量预览照这个子库的按平台覆盖判_别的子库照名册() {
         "另一台没覆盖，照名册"
     );
 }
+
+// ——— 子库改名（票 `gui-looks-like-the-design/21`，拿主意的人 2026-09-15 定：照稿名字可改）———
+
+#[test]
+fn 子库改名_目标规则例外覆盖清单都跟过去_旧名不在_新名空白重名当场拒() {
+    use romcat_core::capability::Override;
+    use romcat_core::catalog::sublibrary::Renamed;
+    use romcat_core::sublibrary::target::NameRefusal;
+    use std::collections::BTreeMap;
+
+    let mut catalog = 现场();
+    建子库(&mut catalog, "掌机", Some(64_000_000_000));
+    建子库(&mut catalog, "备用卡", None);
+    加规则(&mut catalog, "掌机", "平台=GB");
+    加规则(&mut catalog, "掌机", "平台=PSV");
+    assert!(catalog.remove_rule("掌机", 1).expect("删得动"));
+    catalog
+        .set_exception("掌机", "库/PSV/大作.vpk", Exception::Include, Some("想玩"))
+        .expect("例外写得进");
+    let 覆盖 = BTreeMap::from([("GB".to_string(), Override::Keep)]);
+    catalog
+        .set_capability_overrides("掌机", &覆盖)
+        .expect("覆盖写得进");
+    let 清单 = 同步清单 {
+        files: vec![ManifestFile {
+            path: "GB/口袋妖怪 汉化.zip".to_string(),
+            kind: FileKind::Rom,
+            stamp: Stamp {
+                bytes: 4096,
+                mtime_ns: Some(1_700_000_000_000_000_000),
+            },
+            source: "库/GB/口袋妖怪 汉化.zip".to_string(),
+            source_stamp: Stamp {
+                bytes: 4096,
+                mtime_ns: None,
+            },
+            variant: "库/GB/口袋妖怪 汉化.zip".to_string(),
+            absent: true,
+        }],
+    };
+    catalog.put_manifest("掌机", &清单).expect("清单写得进");
+    let 读一遍 = |catalog: &Catalog, name: &str| {
+        (
+            catalog.sublibrary(name).expect("读得动").map(|mut row| {
+                row.name = String::new();
+                row
+            }),
+            catalog.sublibrary_rules(name).expect("读得动"),
+            catalog.sublibrary_exceptions(name).expect("读得动"),
+            catalog.capability_overrides(name).expect("读得动"),
+            catalog.manifest(name).expect("读得动"),
+        )
+    };
+    let 之前 = 读一遍(&catalog, "掌机");
+
+    assert_eq!(
+        catalog.rename_sublibrary("掌机", "备用卡").expect("读得动"),
+        Renamed::Refused(NameRefusal::Taken),
+        "重名的当场拒，不揉进备用卡"
+    );
+    assert_eq!(
+        catalog.rename_sublibrary("掌机", "  ").expect("读得动"),
+        Renamed::Refused(NameRefusal::Empty)
+    );
+    assert_eq!(
+        catalog
+            .rename_sublibrary("没这一台", "新名")
+            .expect("读得动"),
+        Renamed::Missing
+    );
+    assert_eq!(读一遍(&catalog, "掌机"), 之前, "拒掉的那几下一行都没动");
+
+    assert_eq!(
+        catalog
+            .rename_sublibrary("掌机", " RG35XX ")
+            .expect("写得动"),
+        Renamed::Done
+    );
+    assert!(
+        catalog.sublibrary("掌机").expect("读得动").is_none(),
+        "旧名还在"
+    );
+    assert_eq!(
+        读一遍(&catalog, "RG35XX"),
+        之前,
+        "目标、规则、例外、覆盖、清单没有原样跟过去"
+    );
+    assert_eq!(
+        catalog.sublibrary_rules("备用卡").expect("读得动").len(),
+        0,
+        "改名不碰别的子库"
+    );
+    assert_eq!(
+        加规则(&mut catalog, "RG35XX", "平台=GB"),
+        3,
+        "发号器没跟过去：下一条该接着发 3 号"
+    );
+}
+
+#[test]
+fn 子库改名之后差量预览与改名之前一样() {
+    let mut 场 = 一张卡::摆好(0);
+    场.建子库("平台=FC", None);
+    let 之前 = 场.排计划().plan;
+    assert_eq!(
+        场.catalog
+            .rename_sublibrary("掌机", "RG35XX")
+            .expect("写得动"),
+        romcat_core::catalog::sublibrary::Renamed::Done
+    );
+    let 之后 = romcat_core::sync::prepare(
+        &场.catalog,
+        场.工作区.path(),
+        "RG35XX",
+        &romcat_core::sync::Request::default(),
+        &romcat_core::task::Handle::new(),
+    )
+    .expect("改名之后排得出计划")
+    .plan;
+    assert_eq!(之后.sublibrary, "RG35XX");
+    assert_eq!(之后.steps, 之前.steps, "改名改动了要做的事");
+    assert_eq!(之后.adds, 之前.adds);
+    assert_eq!(之后.strangers, 之前.strangers);
+}

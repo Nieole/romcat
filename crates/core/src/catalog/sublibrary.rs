@@ -49,6 +49,7 @@ use rusqlite::{OptionalExtension, params};
 use super::{Catalog, CatalogError};
 use crate::capability::Override;
 use crate::path;
+use crate::sublibrary::target::{NameRefusal, vet_name};
 use crate::sublibrary::{
     Discarded, Exception, ExceptionRow, LoadedSelection, Rule, StoredRule, Sublibrary,
 };
@@ -269,6 +270,17 @@ struct RemovedException {
     at: i64,
 }
 
+/// [`Catalog::rename_sublibrary`] 怎么了。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Renamed {
+    /// 改好了。新名与旧名一样时什么都不做，也算改好了。
+    Done,
+    /// 没有叫旧名的子库。
+    Missing,
+    /// 新名字不能用：空着、或者已被别的子库用了（[`vet_name`]）。一行都没动。
+    Refused(NameRefusal),
+}
+
 /// [`RemovedSublibrary`] 里一条按平台覆盖：`sublibrary_override` 那几列。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RemovedOverride {
@@ -398,6 +410,64 @@ impl Catalog {
             .map_err(|source| self.err(source))?;
         rows.collect::<Result<_, _>>()
             .map_err(|source| self.err(source))
+    }
+
+    /// **给一个子库改名**（票 `gui-looks-like-the-design/21`，拿主意的人 2026-09-15 定：照稿名字可改）。
+    ///
+    /// 子库按名字存：规则、例外、按平台覆盖、清单都挂在名字上。所以改名是**在一个事务里按新名放一行、把挂着的
+    /// 几张表挪过去、再删掉旧的那一行**——目标、前端格式、容量上限、能力档案、下一条规则发几号、清单里「你删过、
+    /// 工具记着不补」的那几格原样跟过去，下一趟差量预览与改名之前一模一样。放行一条不挪的，同步就会把自己放过的
+    /// 文件当成清单之外，碰都不敢碰（ADR-0015）。
+    ///
+    /// 新名两头的空白去掉；空着、或者撞上别的子库时一行都不动，交回 [`Renamed::Refused`]（判据是 [`vet_name`]，
+    /// 目标设置弹层当场判的也是它）。
+    ///
+    /// # Errors
+    /// 读写库失败时返回错误。
+    pub fn rename_sublibrary(&mut self, from: &str, to: &str) -> Result<Renamed, CatalogError> {
+        if self.sublibrary(from)?.is_none() {
+            return Ok(Renamed::Missing);
+        }
+        let to = to.trim();
+        if let Err(refusal) = vet_name(self, Some(from), to)? {
+            return Ok(Renamed::Refused(refusal));
+        }
+        if to == from {
+            return Ok(Renamed::Done);
+        }
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        // **先放新的那一行**：挂着的几张表有外键指着 `sublibrary(name)`，挪过去之前新名得已经在。
+        // 这张表往后再加列，这一句的列表要跟着加——漏一列，改名就悄悄把那一格丢了。
+        tx.execute(
+            "INSERT INTO sublibrary(
+                 name, target, target_raw, format, capacity, capability, next_rule, at)
+             SELECT ?2, target, target_raw, format, capacity, capability, next_rule, at
+             FROM sublibrary WHERE name = ?1",
+            params![from, to],
+        )
+        .map_err(to_err)?;
+        for table in [
+            "sublibrary_rule",
+            "sublibrary_exception",
+            "sublibrary_override",
+            "sublibrary_manifest",
+        ] {
+            // 表名是上面这几个写死的字面量，不来自外面。
+            tx.execute(
+                &format!("UPDATE {table} SET sublibrary = ?2 WHERE sublibrary = ?1"),
+                params![from, to],
+            )
+            .map_err(to_err)?;
+        }
+        tx.execute("DELETE FROM sublibrary WHERE name = ?1", params![from])
+            .map_err(to_err)?;
+        tx.commit().map_err(to_err)?;
+        Ok(Renamed::Done)
     }
 
     /// 删掉一个子库，连它的规则、例外与清单一起。返回它本来在不在。
