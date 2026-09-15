@@ -701,6 +701,16 @@ pub struct Layout {
     pub platform_table_columns: [f32; 3],
     /// 目标设置里「自定义」容量上限那一格的宽（设计稿 `DLG.subform`）。
     pub capacity_input_width: f32,
+    /// 单选圆点的直径（设计稿 `.opt input`）。
+    pub radio_diameter: f32,
+    /// 选中时正中那一粒的直径。
+    pub radio_dot: f32,
+    /// 选中时圆心与外圈之间那一道缝的宽。
+    pub radio_gap: f32,
+    /// 单选那一行圆点与名字之间（设计稿 `.opt` 的 `gap`）。
+    pub option_gap: f32,
+    /// 单选那一行上下留白（设计稿 `.opt` 的 `padding`）。
+    pub option_padding: f32,
 }
 
 /// 调色比例：两套主题共用。设计稿里写在规则上的字面量（`color-mix` 的百分比、`opacity`）。

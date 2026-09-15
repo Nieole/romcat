@@ -337,6 +337,9 @@ pub struct Screen {
     /// 目标设置里存下之后底边那条提示条（拿主意的人 2026-09-15 定，F9）：「已创建子库…」「已保存…差量预览已失效…」。
     /// **一次只摆一条**：摆它时删除之后那条带「撤销」的就收了。
     saved: Option<Toast>,
+    /// 库里头一个有平台的变体住的平台目录（`Catalog::sample_platform_directory`）：前端格式那句说明拿它举例。弹层打开时读一次，
+    /// 外层 `None` 是还没读。
+    sample_directory: Option<Option<String>>,
     /// **每台设备**的选择集原文：规则（连库里的序号）、读不懂的那几条、例外。
     ///
     /// 每张卡都摆它自己的规则列表（票 `gui-looks-like-the-design/20`），所以一台不落全读回来
@@ -459,6 +462,7 @@ impl Screen {
             counting: None,
             counting_failed: None,
             saved: None,
+            sample_directory: None,
             failed: false,
             error: None,
         }
@@ -1402,6 +1406,7 @@ impl Screen {
         self.forget_strangers();
         self.vetted = None;
         self.name_vetted = None;
+        self.sample_directory = None;
         self.picked = None;
         self.form = Form::default();
         self.invalidate();
@@ -1422,6 +1427,7 @@ impl Screen {
         self.forget_strangers();
         self.vetted = None;
         self.name_vetted = None;
+        self.sample_directory = None;
         self.error = None;
         self.target_dialog = Some(TargetDialog::Of(name.to_string()));
     }
@@ -2792,6 +2798,15 @@ impl Screen {
                 EXAMPLE_FILE,
             )),
         });
+        // 前端格式那句说明拿哪个平台目录举例：改一台时是它头一个变体真实落在的目录，读选择集之前与新建时是库里头一个有平台的
+        // 变体住的目录（`Catalog::sample_platform_directory`，弹层打开时读一次）。都说不出就不举例。
+        if self.sample_directory.is_none() {
+            self.sample_directory = Some(site.catalog.sample_platform_directory().ok().flatten());
+        }
+        let example_directory = match (&which, &landing) {
+            (TargetDialog::Of(_), Some(landing)) => Some(landing.directory.clone()),
+            _ => self.sample_directory.clone().flatten(),
+        };
         let landing_root = if self.form.target.trim().is_empty() {
             EXAMPLE_ROOT.to_string()
         } else {
@@ -2944,7 +2959,7 @@ impl Screen {
                         form.format = adapters[picked].to_string();
                     }
                 });
-                under(ui, &format_help(&form.format), false);
+                under(ui, &format_help(&form.format, example_directory.as_deref()), false);
 
                 // 字段之间照稿隔一档（设计稿 `.frm` 的 `gap:12px`）。
                 ui.add_space(step(2));
@@ -2990,28 +3005,15 @@ impl Screen {
                     }
                 }
 
-                // 容量上限照稿二选一（设计稿 `.opt`）：一个圆点，右边名字与底下一行小字；自定义时底下一格填数（十进制 GB）。
-                let option_row = |ui: &mut egui::Ui, on: bool, title: &str, sub: &str| -> bool {
-                    let mut clicked = false;
-                    ui.horizontal_top(|ui| {
-                        clicked = ui.radio(on, "").clicked();
-                        ui.vertical(|ui| {
-                            clicked |= ui
-                                .add(egui::Label::new(title).sense(egui::Sense::click()))
-                                .clicked();
-                            look::help(ui, sub);
-                        });
-                    });
-                    clicked
-                };
+                // 容量上限照稿二选一（共用的单选件 `look::radio_option`，设计稿 `.opt`）；自定义时底下一格填数（十进制 GB）。
                 ui.add_space(step(2));
                 ui.horizontal_top(|ui| {
                     field_label(ui, "容量上限");
                     ui.vertical(|ui| {
-                        if option_row(ui, form.capacity_by_device, &device_label, "设备连接时自动读取") {
+                        if look::radio_option(ui, form.capacity_by_device, &device_label, "设备连接时自动读取").clicked() {
                             form.capacity_by_device = true;
                         }
-                        if option_row(ui, !form.capacity_by_device, "自定义", "给存档、截图等留出空间") {
+                        if look::radio_option(ui, !form.capacity_by_device, "自定义", "给存档、截图等留出空间").clicked() {
                             form.capacity_by_device = false;
                         }
                         if !form.capacity_by_device {
@@ -3855,7 +3857,7 @@ fn format_label(adapter: &str) -> &str {
 /// 覆盖」两边都有代码钉着才照稿写：Pegasus 的收藏与游玩时长在它自己的配置目录里，ES-DE 在卡上改过的 gamelist 同步只报不写回
 /// （`crates/core/tests/sync.rs` 那两条）。元数据落在哪由适配器答
 /// （`Adapter::metadata_path`），媒体目录取适配器模块里那两个常量——界面不另写一份文件名。
-fn format_help(adapter: &str) -> String {
+fn format_help(adapter: &str, example_directory: Option<&str>) -> String {
     let name = if adapter.trim().is_empty() {
         PEGASUS
     } else {
@@ -3864,16 +3866,24 @@ fn format_help(adapter: &str) -> String {
     let Some(found) = romcat_core::adapter::find(name) else {
         return format!("这一版没带「{name}」这个前端格式。");
     };
-    // 占位写「平台目录」而不写 `<平台目录>`：适配器拼路径时会把 `<` `>` 这类不收的字符换掉（`converge::safe_segment`）。
-    let metadata = found.metadata_path("平台目录");
+    // 举例的那一份由适配器按那个平台目录折出来（`Adapter::metadata_path`）；说不出平台目录时只说文件名。
+    let example = example_directory.map(|directory| found.metadata_path(directory));
     if name.eq_ignore_ascii_case(ES_GAMELIST) {
+        let where_ = example.map_or_else(
+            || format!("每个平台一份 {}", found.file_name()),
+            |metadata| format!("每个平台一份，例如 {metadata}"),
+        );
         format!(
-            "每个平台一份 {metadata}；媒体放在 {} 目录。前端里的游玩记录和收藏不会被覆盖。",
+            "{where_}；媒体放在 {} 目录。前端里的游玩记录和收藏不会被覆盖。",
             romcat_core::adapter::gamelist::MEDIA_DIR
         )
     } else {
+        let where_ = example.map_or_else(
+            || format!("每个平台一份 {}", found.file_name()),
+            |metadata| format!("每个平台一份，例如 {metadata}"),
+        );
         format!(
-            "每个平台一份 {metadata}，摊在子库根上；媒体放在 {} 目录。前端里的游玩记录和收藏不会被覆盖。",
+            "{where_}，摊在子库根上；媒体放在 {} 目录。前端里的游玩记录和收藏不会被覆盖。",
             romcat_core::adapter::pegasus::MEDIA_DIR
         )
     }
@@ -3974,18 +3984,16 @@ fn landing_box_ui(ui: &mut egui::Ui, root: &str, landing: &romcat_core::sync::La
 /// 维护者看的，带着 Markdown 记号与票号。
 fn profile_help(profile: &Profile) -> String {
     let filesystem = &profile.filesystem;
+    // 这份档案对卡一条约束都不说（「不作声称」那一份）时，「卡是 …」那半句整个不写（`Filesystem::claims_nothing`）。
+    if filesystem.claims_nothing() {
+        return "决定每个平台放到设备上时要不要转换格式。".to_string();
+    }
     let limit = filesystem
         .max_file_bytes
         .map(|bytes| format!("，单文件上限 {}", human_bytes(bytes)))
         .unwrap_or_default();
-    // 拉丁字母的名字前后留空格（「卡是 FAT32」），中文的不留（「卡是无限制」）。
-    let gap = if filesystem.name.starts_with(|c: char| c.is_ascii()) {
-        " "
-    } else {
-        ""
-    };
     format!(
-        "决定每个平台放到设备上时要不要转换格式。卡是{gap}{}{limit}。",
+        "决定每个平台放到设备上时要不要转换格式。卡是 {}{limit}。",
         filesystem.name
     )
 }

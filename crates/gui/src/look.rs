@@ -868,6 +868,69 @@ pub fn note_box<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R
         .inner
 }
 
+/// 一行**单选**（设计稿 `.opt`）：左边一枚圆点，右边名字、底下一行说明小字，整行按得动。圆点选中时是强调色外圈、一道底色缝、
+/// 强调色圆心；没选中是一圈说明字色的细线。直径、圆心、缝、行内间距与上下留白取令牌 `radio-diameter` / `radio-dot` /
+/// `radio-gap` / `option-gap` / `option-padding`；名字 `size-small-plus`、说明 `size-caption-plus`（稿 12.5 / 11.5）。
+///
+/// 交回整行的点击（圆点、名字、说明哪一处按下去都算）。
+pub fn radio_option(ui: &mut egui::Ui, selected: bool, title: &str, note: &str) -> egui::Response {
+    let tokens = Tokens::builtin();
+    let layout = &tokens.layout;
+    let palette = tokens
+        .color
+        .theme(egui::Theme::from_dark_mode(ui.visuals().dark_mode));
+    let 名字号 = font_size(ui.ctx(), tokens.font.size_small_plus);
+    let 说明号 = font_size(ui.ctx(), tokens.font.size_caption_plus);
+    ui.add_space(layout.option_padding);
+    let row = ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = layout.option_gap;
+        let 名字 =
+            egui::WidgetText::from(egui::RichText::new(title).size(名字号).color(palette.ink))
+                .into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Body,
+                );
+        let (dot_rect, dot) = ui.allocate_exact_size(
+            egui::vec2(layout.radio_diameter, 名字.size().y),
+            egui::Sense::click(),
+        );
+        let center = dot_rect.center();
+        let painter = ui.painter();
+        if selected {
+            painter.circle_filled(center, layout.radio_diameter / 2.0, palette.accent);
+            painter.circle_filled(
+                center,
+                layout.radio_dot / 2.0 + layout.radio_gap,
+                palette.panel,
+            );
+            painter.circle_filled(center, layout.radio_dot / 2.0, palette.accent);
+        } else {
+            painter.circle(
+                center,
+                layout.radio_diameter / 2.0 - 0.5,
+                palette.panel,
+                egui::Stroke::new(1.0, palette.ink_3),
+            );
+        }
+        let texts = ui
+            .vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let 名 = ui.add(egui::Label::new(名字).sense(egui::Sense::click()));
+                let 注 = ui.add(
+                    egui::Label::new(egui::RichText::new(note).size(说明号).color(palette.ink_3))
+                        .sense(egui::Sense::click()),
+                );
+                名 | 注
+            })
+            .inner;
+        dot | texts
+    });
+    ui.add_space(layout.option_padding);
+    row.inner
+}
+
 /// 一块**警示框**（设计稿 `.warnbox`）：`lo-soft` 底、描边是分隔线色往 `lo` 挪四成、中圆角，内边距取令牌
 /// `warn-box-padding`，字是 `size-small-plus`；头一句用 `lo` 色、拉丁与数字加粗，后面接着正文色。占满这一栏的宽。
 pub fn warn_box(ui: &mut egui::Ui, head: &str, body: &str) {

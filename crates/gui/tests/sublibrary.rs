@@ -3116,9 +3116,12 @@ fn 前端格式照稿两格分段_界面写es_de_说明句照实际布局写真�
         "界面上不该露出适配器标识：\n{屏上}"
     );
     assert!(
-        屏上.contains("平台目录.metadata.pegasus.txt") && 屏上.contains("media"),
-        "Pegasus 那一句该写真实的元数据文件名与媒体目录：\n{屏上}"
+        屏上.contains(
+            "每个平台一份，例如 GBA.metadata.pegasus.txt，摊在子库根上；媒体放在 media 目录。"
+        ),
+        "Pegasus 那一句该拿库里头一个平台举例、写真实的元数据文件名与媒体目录：\n{屏上}"
     );
+    assert!(!屏上.contains("平台目录"), "说明句里不该裸写占位：\n{屏上}");
 
     点最后正好那一段(&ctx, "ES-DE", |ui| 场.app.ui(ui));
     assert_eq!(
@@ -3128,8 +3131,10 @@ fn 前端格式照稿两格分段_界面写es_de_说明句照实际布局写真�
     );
     let 屏上 = 画两帧(&ctx, &mut 场);
     assert!(
-        屏上.contains("gamelists/平台目录/gamelist.xml") && 屏上.contains("downloaded_media"),
-        "ES-DE 那一句该写真实的 gamelist 位置与媒体目录：\n{屏上}"
+        屏上.contains(
+            "每个平台一份，例如 gamelists/GBA/gamelist.xml；媒体放在 downloaded_media 目录。"
+        ),
+        "ES-DE 那一句该拿库里头一个平台举例、写真实的 gamelist 位置与媒体目录：\n{屏上}"
     );
 }
 
@@ -3475,6 +3480,9 @@ fn 新建时设备上的位置用示例名_目录照实际规则() {
     let ctx = headless::context();
     let mut 场 = 现场::摆好();
     点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    画两帧(&ctx, &mut 场);
+    // 「设备上的位置」在弹层最底下：视口外 egui 不画字，先在弹层内容区上滚到底（等滚动停下）。
+    滚一下(&ctx, &mut 场, -100_000.0);
     let 屏上 = 画两帧(&ctx, &mut 场);
     for 该有 in [
         "/Volumes/SDCARD/GBA/火焰之纹章 烈火之剑.gba",
@@ -3682,4 +3690,41 @@ fn 本机磁盘时连接状态行照稿说不设上限按剩余空间计算_容�
         "容量条的上限该照计划里真用上的那个数"
     );
     assert_eq!(gauge.capacity.is_some(), !可移动);
+}
+
+#[test]
+fn 档案对卡不作声称时不写卡是那半句_有声称时照写() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("决定每个平台放到设备上时要不要转换格式。") && !屏上.contains("卡是"),
+        "不作声称那一份不该拼出「卡是…」：\n{屏上}"
+    );
+    场.app.sublibrary_and_site().0.form_mut().capability = "retroarch-fat32".to_string();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(屏上.contains("卡是 FAT32，单文件上限"), "\n{屏上}");
+}
+
+#[test]
+fn 容量上限按名字那一行就选中那一档() {
+    // 共用的单选件（`look::radio_option`）：圆点与名字、底下那行小字都按得动。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "1GB");
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    画两帧(&ctx, &mut 场);
+    点一下(&ctx, "设备连接时自动读取", |ui| 场.app.ui(ui));
+    assert!(
+        场.app.sublibrary_and_site().0.form_mut().capacity_by_device,
+        "按「设备连接时自动读取」那一行没选中按设备容量"
+    );
+    点一下(&ctx, "给存档、截图等留出空间", |ui| {
+        场.app.ui(ui)
+    });
+    assert!(
+        !场.app.sublibrary_and_site().0.form_mut().capacity_by_device,
+        "按「给存档、截图等留出空间」那一行没选中自定义"
+    );
 }
