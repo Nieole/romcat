@@ -699,6 +699,8 @@ pub struct Layout {
     pub warn_box_padding: [f32; 2],
     /// 能力档案平台表「平台 / 不能用时 / 覆盖」三列的宽；「设备直接能用」占余下的（设计稿 `DLG.subform` 的表头）。
     pub platform_table_columns: [f32; 3],
+    /// 目标设置里「自定义」容量上限那一格的宽（设计稿 `DLG.subform`）。
+    pub capacity_input_width: f32,
 }
 
 /// 调色比例：两套主题共用。设计稿里写在规则上的字面量（`color-mix` 的百分比、`opacity`）。

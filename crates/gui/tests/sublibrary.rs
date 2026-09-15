@@ -2687,7 +2687,8 @@ fn 目标设置原样保存_容量上限的字节数一个都不变() {
     // 那串字读回来是 511,100,000,000，原样按保存不该悄悄改掉上限。
     let ctx = headless::context();
     let mut 场 = 现场::摆好();
-    场.建子库("掌机", "511123456789");
+    // 带上单位 `B`：弹层里「自定义」那一格光写一个数时按 GB 读（旁边写着 GB），这里要的是精确的字节数。
+    场.建子库("掌机", "511123456789B");
     画两帧(&ctx, &mut 场);
 
     点一下(&ctx, "目标设置…", |ui| 场.app.ui(ui));
@@ -3269,5 +3270,115 @@ fn fat32档案下选择集里有超过单文件上限的_当场提醒() {
     assert!(
         屏上.contains("FAT32 单文件上限"),
         "选择集里有超过单文件上限的，挑 FAT32 的档案时该当场提醒：\n{屏上}"
+    );
+}
+
+/// 当目标用的那张卡此刻卷的总量，十进制 GB 一位小数（与屏上「按设备容量（…）」同一个写法）。
+fn 卡的总量(场: &mut 现场) -> u64 {
+    use romcat_core::sublibrary::target::{self, Presence};
+    let workspace = 场.工作区.path().to_path_buf();
+    let catalog = &场.app.site().catalog;
+    match target::vet(catalog, &workspace, Some("掌机"), 场.卡.path()).expect("读得动") {
+        Ok(Presence::Present(volume)) => volume.total.expect("读得出总量"),
+        other => panic!("卡插着：{other:?}"),
+    }
+}
+
+#[test]
+fn 容量上限照稿二选一_按设备容量写出卡的总量_存下来这一档与此刻的总量() {
+    // 拿主意的人 2026-09-15 定：照稿「按设备容量 / 自定义」二选一，按设备容量那一档跟着设备总容量走。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "1GB");
+    let 总量 = 卡的总量(&mut 场);
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    for 该有 in [
+        "设备连接时自动读取",
+        "自定义",
+        "给存档、截图等留出空间",
+        &format!("按设备容量（{}）", decimal_bytes(总量)),
+    ] {
+        assert!(
+            屏上.contains(该有),
+            "容量上限那一格没有「{该有}」：\n{屏上}"
+        );
+    }
+
+    场.app.sublibrary_and_site().0.form_mut().capacity_by_device = true;
+    点最后正好那一段(&ctx, "保存", |ui| 场.app.ui(ui));
+    assert!(
+        !场.app.sublibrary().target_settings_open(),
+        "存下来之后弹层还开着：{:?}",
+        场.app.sublibrary().error()
+    );
+    let 掌机 = &场.app.sublibrary().list()[0];
+    assert!(掌机.capacity_by_device, "按设备容量那一档没存下来");
+    assert_eq!(
+        掌机.capacity,
+        Some(总量),
+        "卡插着时该把此刻的总量记成上次读到的"
+    );
+
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    {
+        let form = 场.app.sublibrary_and_site().0.form_mut();
+        assert!(form.capacity_by_device, "重开时这一档没填回来");
+        form.capacity_by_device = false;
+        form.capacity = "58".to_string();
+    }
+    画两帧(&ctx, &mut 场);
+    点最后正好那一段(&ctx, "保存", |ui| 场.app.ui(ui));
+    let 掌机 = &场.app.sublibrary().list()[0];
+    assert!(!掌机.capacity_by_device, "换回自定义没存下来");
+    assert_eq!(
+        掌机.capacity,
+        Some(58_000_000_000),
+        "自定义那一格照十进制 GB 读"
+    );
+}
+
+#[test]
+fn 按设备容量那一台卡没插_写上次读到的总量_没读过就说不设上限() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        let mut 掌机 = site
+            .catalog
+            .sublibrary("掌机")
+            .expect("读得动")
+            .expect("在");
+        掌机.capacity_by_device = true;
+        掌机.capacity = Some(64_000_000_000);
+        掌机.target = "/Volumes/ROMCAT-NO-SUCH-CARD".to_string();
+        掌机.target_raw = Some(掌机.target.clone());
+        site.catalog.put_sublibrary(&掌机).expect("写得进");
+        screen.reload(site);
+        screen.edit_target("掌机");
+    }
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("按设备容量（64 GB）"),
+        "卡没插时该写上次读到的总量：\n{屏上}"
+    );
+    场.app.sublibrary_and_site().0.leave_target_settings();
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        let mut 掌机 = site
+            .catalog
+            .sublibrary("掌机")
+            .expect("读得动")
+            .expect("在");
+        掌机.capacity = None;
+        site.catalog.put_sublibrary(&掌机).expect("写得进");
+        screen.reload(site);
+        screen.edit_target("掌机");
+    }
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("按设备容量（没读过，不设上限）"),
+        "没读过总量时该说不设上限：\n{屏上}"
     );
 }

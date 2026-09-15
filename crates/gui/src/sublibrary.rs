@@ -179,6 +179,9 @@ pub struct Form {
     pub capacity: String,
     /// **能力档案**的名字。空着就是「不作声称」——不转换、不检查。
     pub capability: String,
+    /// 容量上限是不是**按设备容量**那一档（拿主意的人 2026-09-15 照稿定）：跟着设备总容量走，换卡跟着变
+    /// （`Sublibrary::capacity_by_device`）。关着是「自定义」，上限照 [`Self::capacity`] 那一格。
+    pub capacity_by_device: bool,
     /// 这一台的**按平台覆盖**：平台名 → 覆盖成什么，只影响这个子库（票 `gui-looks-like-the-design/21`）。平台表里改的就是它，
     /// 「保存」时整份存进中立库（`Catalog::set_capability_overrides`）。「目标设置…」打开时照库里那一份填（[`Screen::edit_target`]）。
     pub overrides: BTreeMap<String, Override>,
@@ -193,8 +196,10 @@ impl Form {
     /// 从一个现成的子库填一份草稿。
     #[must_use]
     pub fn of(sublibrary: &Sublibrary) -> Self {
+        // 按设备容量那一档里 `capacity` 记的是上次读到的总量，不是人填的数：自定义那一格空着。
         let kept_capacity = sublibrary
             .capacity
+            .filter(|_| !sublibrary.capacity_by_device)
             .map(|bytes| (decimal_bytes(bytes), bytes));
         Self {
             name: sublibrary.name.clone(),
@@ -205,6 +210,7 @@ impl Form {
                 .map(|(text, _)| text.clone())
                 .unwrap_or_default(),
             capability: sublibrary.capability.clone().unwrap_or_default(),
+            capacity_by_device: sublibrary.capacity_by_device,
             overrides: BTreeMap::new(),
             kept_capacity,
         }
@@ -1500,6 +1506,29 @@ impl Screen {
         self.too_big = Some((profile.name.clone(), self.form.overrides.clone(), rows));
     }
 
+    /// 不存、关上「目标设置」那层弹层：页脚上「取消」、Esc 走的就是它，测试拿它当那一下。
+    pub fn leave_target_settings(&mut self) {
+        self.target_dialog = None;
+        self.error = None;
+    }
+
+    /// 这张卡此刻读得出的**总量**：上一回判目标路径时（[`Self::vet_form`]）目标在位才有。
+    fn live_total(&self) -> Option<u64> {
+        match self.vetted.as_ref().map(|vetted| &vetted.verdict) {
+            Some(Ok(Ok(Presence::Present(volume)))) => volume.total,
+            _ => None,
+        }
+    }
+
+    /// 正在改的那一台**上次读到的总量**：它原来就在按设备容量那一档时，库里 `capacity` 记的就是它。
+    fn stored_total(&self) -> Option<u64> {
+        let editing = self.editing()?;
+        self.list
+            .iter()
+            .find(|row| row.name == editing && row.capacity_by_device)
+            .and_then(|row| row.capacity)
+    }
+
     /// 眼下正在改的是哪一台：「目标设置…」开的那一台；「新建子库」是 `None`；弹层没开时是摊开的那一张
     /// （原先那块「配目标」面板改的就是摊开那一台，程序里直接调 [`Self::save`] 的照旧这么认）。
     fn editing(&self) -> Option<String> {
@@ -2646,6 +2675,11 @@ impl Screen {
             .as_ref()
             .is_some_and(|(_, _, rows)| !rows.is_empty());
         let editing_one = matches!(which, TargetDialog::Of(_));
+        // 「按设备容量」那一格写哪个数：卡在位是此刻的总量，不在位是上次读到的（`Sublibrary::limit` 那条规矩），都没有就说不设上限。
+        let device_label = match self.live_total().or_else(|| self.stored_total()) {
+            Some(bytes) => format!("按设备容量（{}）", decimal_bytes(bytes)),
+            None => "按设备容量（没读过，不设上限）".to_string(),
+        };
         let platforms = self.target_platforms();
         let error = self.error.clone();
         let form = &mut self.form;
@@ -2788,15 +2822,41 @@ impl Screen {
                     }
                 }
 
-                ui.horizontal(|ui| {
+                // 容量上限照稿二选一（设计稿 `.opt`）：一个圆点，右边名字与底下一行小字；自定义时底下一格填数（十进制 GB）。
+                let option_row = |ui: &mut egui::Ui, on: bool, title: &str, sub: &str| -> bool {
+                    let mut clicked = false;
+                    ui.horizontal_top(|ui| {
+                        clicked = ui.radio(on, "").clicked();
+                        ui.vertical(|ui| {
+                            clicked |= ui
+                                .add(egui::Label::new(title).sense(egui::Sense::click()))
+                                .clicked();
+                            look::help(ui, sub);
+                        });
+                    });
+                    clicked
+                };
+                ui.horizontal_top(|ui| {
                     field_label(ui, "容量上限");
-                    let width = ui.available_width();
-                    look::text_input(
-                        ui,
-                        width,
-                        egui::TextEdit::singleline(&mut form.capacity)
-                            .hint_text("如 512GB；空着不设限"),
-                    );
+                    ui.vertical(|ui| {
+                        if option_row(ui, form.capacity_by_device, &device_label, "设备连接时自动读取") {
+                            form.capacity_by_device = true;
+                        }
+                        if option_row(ui, !form.capacity_by_device, "自定义", "给存档、截图等留出空间") {
+                            form.capacity_by_device = false;
+                        }
+                        if !form.capacity_by_device {
+                            ui.horizontal(|ui| {
+                                look::text_input(
+                                    ui,
+                                    layout.capacity_input_width,
+                                    egui::TextEdit::singleline(&mut form.capacity).hint_text("例如 58"),
+                                );
+                                ui.label("GB");
+                            });
+                        }
+                        look::help(ui, "超出上限时只给出删减建议，不会自动删除。");
+                    });
                 });
             });
         if pick_pressed {
@@ -2806,10 +2866,7 @@ impl Screen {
         }
         match shown.pressed {
             None => {}
-            Some(Pressed::Cancel) => {
-                self.target_dialog = None;
-                self.error = None;
-            }
+            Some(Pressed::Cancel) => self.leave_target_settings(),
             Some(Pressed::Save) => {
                 // 存下来才关；没存下来时那句话画在弹层里（[`Self::save`]）。先存再判，不把有副作用的一下写进分支守卫。
                 let saved = self.save(site);
@@ -2831,17 +2888,27 @@ impl Screen {
     pub fn save(&mut self, site: &mut Site) -> bool {
         let written = self.form.capacity.trim();
         let capacity = match &self.form.kept_capacity {
+            // 按设备容量那一档：数在下面判完目标路径之后定（此刻的总量，或者上次读到的）。
+            _ if self.form.capacity_by_device => None,
             // 字没改过：沿用原来的字节数，不重新解析（[`Form::kept_capacity`]）。
             Some((shown, bytes)) if written == shown.trim() => Some(*bytes),
             _ if written.is_empty() => None,
-            _ => match rule::parse_size(written) {
-                Some(bytes) => Some(bytes),
-                None => {
-                    self.error = Some(format!(
-                        "看不懂容量「{written}」。写成 `512GB` 或 `476GiB` 那样，单位得写全。",
-                    ));
-                    return false;
+            // 光一个数：照稿按十进制 GB 读（「58」就是 58 GB，与屏上一位小数的写法同一个单位）。
+            _ => match written.parse::<f64>() {
+                Ok(gigabytes) if gigabytes.is_finite() && gigabytes >= 0.0 => {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let bytes = (gigabytes * 1_000_000_000.0).round() as u64;
+                    Some(bytes)
                 }
+                _ => match rule::parse_size(written) {
+                    Some(bytes) => Some(bytes),
+                    None => {
+                        self.error = Some(format!(
+                            "看不懂容量「{written}」。写一个数（按 GB 算，如 58），或者带上单位（如 476GiB）。",
+                        ));
+                        return false;
+                    }
+                },
             },
         };
         let name = self.form.name.trim().to_string();
@@ -2878,7 +2945,14 @@ impl Screen {
             self.form.format.trim().to_string()
         };
         // 两种路径形式怎么折，**由核心的 `Sublibrary::at` 一处说了算**（ADR-0020）。
+        // 按设备容量那一档：卡此刻在位就把总量记下来（换卡跟着变），不在位照旧留着上次读到的。
+        let capacity = if self.form.capacity_by_device {
+            self.live_total().or_else(|| self.stored_total())
+        } else {
+            capacity
+        };
         let mut sublibrary = Sublibrary::at(&name, &target, &format, capacity);
+        sublibrary.capacity_by_device = self.form.capacity_by_device;
         sublibrary.capability =
             Some(self.form.capability.trim().to_string()).filter(|value| !value.is_empty());
         match site.catalog.put_sublibrary(&sublibrary) {
