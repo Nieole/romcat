@@ -1075,39 +1075,22 @@ fn 浏览_两栏收起_暗色() {
 
 // ——— 作品详情页（票 `gui-looks-like-the-design/15`） ———
 //
-// 同一份浏览屏的现场：双击「Chrono Trigger (Japan)」那一行（五样元数据都齐、两个变体）打开作品详情页——走表格自己
-// 那条双击的路，顶上「第几个 / 共几个」跟着有——再停到要拍的那一面。媒体池不在工作目录里，封面照旧是字卡。
+// 同一份浏览屏的现场：点一下「Chrono Trigger (Japan)」那一行（五样元数据都齐、两个变体）——走表格自己那条选中的路，
+// 顶上「第几个 / 共几个」跟着有——再从「查看详情」那个入口（`Screen::open_page`）打开作品详情页、停到要拍的那一面。
+// 双击打开那条路由 `tests/work.rs` 的「双击主列表一行打开作品详情页…」守着；这里拍的是页面长什么样。
+// 媒体池不在工作目录里，封面照旧是字卡。
 
-/// 双击屏上**正好**写着 `那几个字`、最后画出来的那一处，再把指针挪走、跑到不要重画为止（同 [`按`]）。
-fn 双击(harness: &mut Harness<'_>, 那几个字: &str) {
-    let Some(在) = 最后一处正好画着(harness.output(), 那几个字) else {
-        panic!("屏上没有正好写着「{那几个字}」的地方，没处双击");
-    };
-    let 键 = |pressed: bool| egui::Event::PointerButton {
-        pos: 在,
-        button: egui::PointerButton::Primary,
-        pressed,
-        modifiers: egui::Modifiers::NONE,
-    };
-    harness.event(egui::Event::PointerMoved(在));
-    for _ in 0..2 {
-        harness.event(键(true));
-        harness.event(键(false));
-    }
-    harness.event(egui::Event::PointerGone);
-    harness.step();
-    harness.run_steps(5);
-    harness.run();
-}
-
-/// 搭好浏览屏的现场，双击点开的作品打开作品详情页，停在 `面` 那一面拍一张。CI 上跳过（[`该跳过`]）。
+/// 搭好浏览屏的现场，点开那个作品、打开作品详情页停在 `面` 那一面，拍一张。CI 上跳过（[`该跳过`]）。
+///
+/// **拍之前先认一眼真打开了**：头一趟出图时双击没打开，概览那两张拍成了浏览屏，而两遍核对照样绿——基线比的是
+/// 自己，拍错了屏它看不出来。
 #[track_caller]
 fn 拍详情页(名字: &str, 主题: Theme, 面: Tab) {
     if 该跳过(名字) {
         return;
     }
     let 浏览现场 { mut app, 目录 } = 浏览现场(false);
-    // 换面走的是界面上点那一面的同一个入口（`Screen::open_page`）；交给画帧那个闭包在下一帧开头办。
+    // 打开与换面走的是界面上「查看详情」、点一面的同一个入口（`Screen::open_page`）；交给画帧那个闭包在下一帧开头办。
     let 换面 = std::rc::Rc::new(std::cell::Cell::new(None::<Tab>));
     let 要换 = std::rc::Rc::clone(&换面);
     let mut harness = 开一个(主题, move |ui| {
@@ -1116,12 +1099,14 @@ fn 拍详情页(名字: &str, 主题: Theme, 面: Tab) {
         }
         app.ui(ui);
     });
-    双击(&mut harness, 点开的作品那一行);
-    if 面 != Tab::Overview {
-        换面.set(Some(面));
-        harness.run_steps(2);
-        harness.run();
-    }
+    按(&mut harness, 点开的作品那一行);
+    换面.set(Some(面));
+    harness.run_steps(2);
+    harness.run();
+    assert!(
+        最后一处正好画着(harness.output(), "← 返回浏览").is_some(),
+        "{名字}：作品详情页没打开，拍下来的不是它"
+    );
     拍下(harness, 名字);
     drop(目录);
 }
