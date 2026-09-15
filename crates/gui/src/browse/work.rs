@@ -124,6 +124,9 @@ pub struct Page {
     head: Option<String>,
     /// 每个变体的**文件表**那几行（核心库 `Catalog::file_lines`）：变体的键 → 那几行。
     files: BTreeMap<String, Vec<FileLine>>,
+    /// 这个作品**收没收藏**、收了的钉在哪种锚上（核心库 `collection::favorite_of`）：状态块里「收藏」那一行照它写，只读
+    /// （拿主意的人 2026-09-15 定；收藏按钮与合集那一行归票 13）。没收藏是 `None`。
+    favorite: Option<&'static str>,
     /// 这个作品的**中文版本**（核心库 `Catalog::work_chinese_mark`，与首选变体那条规则同一处判）：头上那枚标签与
     /// 基本信息里「中文版本」那一格照它印；一个中文的都没有是 `None`。
     chinese: Option<ChineseMark>,
@@ -242,7 +245,7 @@ impl Screen {
             return;
         };
         let (返回, 走) = self.page_bar(ui, &title);
-        self.sync_page_details(&site.catalog);
+        self.sync_page_details(site);
         // 保存那一条贴着底边，要赶在正文那一块之前占好地方。
         let 保存条 = self.save_bar(ui);
         let tokens = Tokens::builtin();
@@ -285,6 +288,7 @@ impl Screen {
             });
         match 卡片 {
             Some((key, CardPress::Prefer)) => self.prefer(site, &key),
+            Some((key, CardPress::Restore)) => self.restore_rule(site, &key),
             Some((key, CardPress::Reveal)) => self.reveal(site, &key),
             None => {}
         }
@@ -445,7 +449,8 @@ impl Screen {
     }
 
     /// 作品详情页手上那几份变体详情跟上点开那一行：底下的变体换了（换了作品、库底下变了）就照库里现在的样子重读。
-    fn sync_page_details(&mut self, catalog: &Catalog) {
+    fn sync_page_details(&mut self, site: &Site) {
+        let catalog = &site.catalog;
         let keys: Vec<String> = self
             .work
             .as_ref()
@@ -520,6 +525,13 @@ impl Screen {
                 Err(error) => self.error = Some(format!("中立库读不动：{error}")),
             }
         }
+        let favorite = match romcat_core::collection::favorite_of(site, &keys) {
+            Ok(anchor) => anchor,
+            Err(error) => {
+                self.error = Some(format!("收藏读不动：{error}"));
+                None
+            }
+        };
         let chinese = match self.work.as_ref() {
             Some(work) => match catalog.work_chinese_mark(work) {
                 Ok(mark) => mark,
@@ -532,6 +544,7 @@ impl Screen {
         };
         page.files = files;
         page.chinese = chinese;
+        page.favorite = favorite;
         page.row = row;
         page.head = 头;
         page.groups = groups;
@@ -550,6 +563,23 @@ impl Screen {
             return;
         };
         self.set_preferred(site, &work, &platform, key);
+        if let Some(page) = self.page.as_mut() {
+            page.forget();
+        }
+    }
+
+    /// 「恢复规则选择」：撤掉这个变体所在作品、所在平台上的**首选变体裁决**，回到规则选的那一个（拿主意的人 2026-09-15 定）。
+    /// 走的是侧边详情那一条同一种撤法（`clear_preferred` → `Catalog::clear_preferred_variant`）。
+    fn restore_rule(&mut self, site: &mut Site, key: &str) {
+        let Some((work, platform)) = self
+            .page
+            .as_ref()
+            .and_then(|page| page.details.iter().find(|detail| detail.row.key == key))
+            .and_then(|detail| Some((detail.work.clone()?, detail.row.platform.clone()?)))
+        else {
+            return;
+        };
+        self.clear_preferred(site, &work, &platform);
         if let Some(page) = self.page.as_mut() {
             page.forget();
         }
@@ -1746,8 +1776,22 @@ fn variant_card(
                         )
                         .clicked()
                 });
+            // **只在这个变体就是那条首选裁决指的那一个时摆**：没人裁过，就没有可恢复的。
+            let 裁过的 = detail.preferred.as_deref() == Some(detail.row.key.as_str())
+                && detail.work.is_some()
+                && detail.row.platform.is_some();
+            let 恢复 = 裁过的
+                && look::small_buttons(ui, |ui| {
+                    ui.button("恢复规则选择")
+                        .on_hover_text(
+                            "撤掉这条首选变体裁决，照「汉化 > 官中 > 日版 > 其他」重新选。",
+                        )
+                        .clicked()
+                });
             if 设首选 {
                 Some(CardPress::Prefer)
+            } else if 恢复 {
+                Some(CardPress::Restore)
             } else if 打开 {
                 Some(CardPress::Reveal)
             } else {
@@ -3198,6 +3242,8 @@ enum PageAction {
 enum CardPress {
     /// 「设为首选变体」。
     Prefer,
+    /// 「恢复规则选择」：撤掉这个作品在这个平台上的首选变体裁决。
+    Restore,
     /// 「在文件系统中打开」。
     Reveal,
 }
@@ -3406,6 +3452,29 @@ fn status_card(ui: &mut egui::Ui, work: &WorkDetail, page: &Page) {
                 ui.label(egui::RichText::new(row.meta_label()).size(字号).color(强));
             });
         }
+        // 收藏：只读地写一行（设计稿状态块「收藏」那一格）；收没收藏、钉在哪种锚上由核心库答（`collection::favorite_of`）。
+        ui.add_space(tokens.space.info_list_gap[0]);
+        info_row(ui, "收藏", |ui| {
+            let 留神 = look::tone_colors(look::Tone::Caution, ui.visuals()).0;
+            let mut job = egui::text::LayoutJob::default();
+            let mut 段 = |text: &str, color: egui::Color32| {
+                job.append(
+                    text,
+                    0.0,
+                    egui::TextFormat::simple(egui::FontId::proportional(字号), color),
+                );
+            };
+            match page.favorite {
+                None => 段("未收藏", 强),
+                Some(romcat_core::verdict::ANCHOR_CONTENT) => 段("已收藏 · 按文件内容记录", 强),
+                Some(_) => {
+                    段("已收藏 · ", 强);
+                    段("只按路径记录", 留神);
+                    段("：变体没有内容判据，文件改名或移动后会丢失", 强);
+                }
+            }
+            ui.add(egui::Label::new(job).wrap());
+        });
     });
 }
 

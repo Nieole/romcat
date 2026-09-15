@@ -71,6 +71,7 @@ use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::verdict::Store;
 use romcat_core::workspace::{CatalogEntry, CatalogFacts, CatalogState, DirUnreadable, Listing};
 use romcat_gui::app::{App, View};
+use romcat_gui::browse::work::Tab;
 #[cfg(feature = "demo")]
 use romcat_gui::demo;
 use romcat_gui::layout::{FOLD_EXPORT, FOLD_ROOTS, FOLD_SOURCES};
@@ -1070,6 +1071,119 @@ fn 浏览_两栏收起_浅色() {
 #[test]
 fn 浏览_两栏收起_暗色() {
     拍浏览("browse/collapsed-dark", Theme::Dark, 浏览态::两栏收起);
+}
+
+// ——— 作品详情页（票 `gui-looks-like-the-design/15`） ———
+//
+// 同一份浏览屏的现场：双击「Chrono Trigger (Japan)」那一行（五样元数据都齐、两个变体）打开作品详情页——走表格自己
+// 那条双击的路，顶上「第几个 / 共几个」跟着有——再停到要拍的那一面。媒体池不在工作目录里，封面照旧是字卡。
+
+/// 双击屏上**正好**写着 `那几个字`、最后画出来的那一处，再把指针挪走、跑到不要重画为止（同 [`按`]）。
+fn 双击(harness: &mut Harness<'_>, 那几个字: &str) {
+    let Some(在) = 最后一处正好画着(harness.output(), 那几个字) else {
+        panic!("屏上没有正好写着「{那几个字}」的地方，没处双击");
+    };
+    let 键 = |pressed: bool| egui::Event::PointerButton {
+        pos: 在,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    harness.event(egui::Event::PointerMoved(在));
+    for _ in 0..2 {
+        harness.event(键(true));
+        harness.event(键(false));
+    }
+    harness.event(egui::Event::PointerGone);
+    harness.step();
+    harness.run_steps(5);
+    harness.run();
+}
+
+/// 搭好浏览屏的现场，双击点开的作品打开作品详情页，停在 `面` 那一面拍一张。CI 上跳过（[`该跳过`]）。
+#[track_caller]
+fn 拍详情页(名字: &str, 主题: Theme, 面: Tab) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 浏览现场 { mut app, 目录 } = 浏览现场(false);
+    // 换面走的是界面上点那一面的同一个入口（`Screen::open_page`）；交给画帧那个闭包在下一帧开头办。
+    let 换面 = std::rc::Rc::new(std::cell::Cell::new(None::<Tab>));
+    let 要换 = std::rc::Rc::clone(&换面);
+    let mut harness = 开一个(主题, move |ui| {
+        if let Some(面) = 要换.take() {
+            app.browse_and_site().0.open_page(面);
+        }
+        app.ui(ui);
+    });
+    双击(&mut harness, 点开的作品那一行);
+    if 面 != Tab::Overview {
+        换面.set(Some(面));
+        harness.run_steps(2);
+        harness.run();
+    }
+    拍下(harness, 名字);
+    drop(目录);
+}
+
+#[test]
+fn 详情页_概览_浅色() {
+    拍详情页("work/overview-light", Theme::Light, Tab::Overview);
+}
+
+#[test]
+fn 详情页_概览_暗色() {
+    拍详情页("work/overview-dark", Theme::Dark, Tab::Overview);
+}
+
+#[test]
+fn 详情页_变体与文件_浅色() {
+    拍详情页("work/variants-light", Theme::Light, Tab::Variants);
+}
+
+#[test]
+fn 详情页_变体与文件_暗色() {
+    拍详情页("work/variants-dark", Theme::Dark, Tab::Variants);
+}
+
+#[test]
+fn 详情页_元数据_浅色() {
+    拍详情页("work/metadata-light", Theme::Light, Tab::Metadata);
+}
+
+#[test]
+fn 详情页_元数据_暗色() {
+    拍详情页("work/metadata-dark", Theme::Dark, Tab::Metadata);
+}
+
+#[test]
+fn 详情页_标题_浅色() {
+    拍详情页("work/titles-light", Theme::Light, Tab::Titles);
+}
+
+#[test]
+fn 详情页_标题_暗色() {
+    拍详情页("work/titles-dark", Theme::Dark, Tab::Titles);
+}
+
+#[test]
+fn 详情页_媒体_浅色() {
+    拍详情页("work/media-light", Theme::Light, Tab::Media);
+}
+
+#[test]
+fn 详情页_媒体_暗色() {
+    拍详情页("work/media-dark", Theme::Dark, Tab::Media);
+}
+
+#[test]
+fn 详情页_识别依据_浅色() {
+    拍详情页("work/evidence-light", Theme::Light, Tab::Evidence);
+}
+
+#[test]
+fn 详情页_识别依据_暗色() {
+    拍详情页("work/evidence-dark", Theme::Dark, Tab::Evidence);
 }
 
 // ——— 库 ———

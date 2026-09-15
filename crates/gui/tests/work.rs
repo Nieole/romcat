@@ -333,6 +333,27 @@ fn 变体与文件那一面每个变体一张卡_位置发行版与文件都在_
         Some(不是首选的.row.key.clone()),
         "「设为首选变体」没落成那个平台上的首选变体裁决"
     );
+
+    // **恢复规则选择**（拿主意的人 2026-09-15 定）：有了首选裁决才摆这一颗；按下去撤掉那条裁决，按规则重新选，这一颗跟着收起。
+    let 屏上 = 带着事件跑一帧(&ctx, &mut app, Vec::new());
+    assert!(
+        有这一段(&屏上, "恢复规则选择"),
+        "有首选变体裁决时卡上没摆「恢复规则选择」：\n{屏上}"
+    );
+    按正好(&ctx, &mut app, "恢复规则选择");
+    let (_, site) = app.browse_and_site();
+    assert_eq!(
+        site.catalog
+            .preferred_variant(&work, &平台)
+            .expect("读得出"),
+        None,
+        "「恢复规则选择」没撤掉那条首选变体裁决"
+    );
+    let 屏上 = 带着事件跑一帧(&ctx, &mut app, Vec::new());
+    assert!(
+        !有这一段(&屏上, "恢复规则选择"),
+        "撤掉裁决之后「恢复规则选择」还摆着：\n{屏上}"
+    );
 }
 
 /// 找一个作品，它**头一个变体**满足 `要`。交回作品在 `work` 表里的行号与那个变体（核心库交回来的样子）。
@@ -1150,6 +1171,28 @@ fn 头上那一块与概览照稿_简介基本信息媒体状态四块_编辑元
             .expect("答得出中文版本")
     };
 
+    // 收藏：头一个变体收进收藏，状态块里「收藏」那一行照核心库那一问写（只读，拿主意的人 2026-09-15 定）。
+    let 收藏那一句 = {
+        use romcat_core::collection::{self, FAVORITE};
+
+        let (_, site) = app.browse_and_site();
+        let keys: Vec<String> = site
+            .catalog
+            .work_detail(&WorkQuery::default(), &WorkAnchor::Work(work_id))
+            .expect("读得出")
+            .expect("有这个作品")
+            .variants
+            .iter()
+            .map(|variant| variant.row.key.clone())
+            .collect();
+        collection::add(site, FAVORITE, &keys[..1]).expect("加得进收藏");
+        match collection::favorite_of(site, &keys).expect("问得出") {
+            None => panic!("头一个变体刚收进收藏，核心库却说没收藏"),
+            Some(romcat_core::verdict::ANCHOR_CONTENT) => "已收藏 · 按文件内容记录",
+            Some(_) => "已收藏 · 只按路径记录：变体没有内容判据，文件改名或移动后会丢失",
+        }
+    };
+
     let 屏上 = 打开详情页(&ctx, &mut app, work_id, Tab::Overview);
     // ── 头上那一块：它是什么、叫什么、哪个平台，几格事实，几枚标签（有中文版本时跟着一枚写它）。
     if let Some(mark) = 中文版本 {
@@ -1197,6 +1240,11 @@ fn 头上那一块与概览照稿_简介基本信息媒体状态四块_编辑元
     assert!(
         有这一段(&屏上, "识别") && 有这一段(&屏上, &识别那一句),
         "状态那一块没写逐个变体的识别结论「{识别那一句}」：\n{屏上}"
+    );
+    let 屏上 = 滚到看得见(&ctx, &mut app, 收藏那一句);
+    assert!(
+        有这一段(&屏上, "收藏") && 有这一段(&屏上, 收藏那一句),
+        "状态块里没写收藏那一行「{收藏那一句}」：\n{屏上}"
     );
     let 屏上 = 滚到看得见(&ctx, &mut app, "首选变体");
     let 中文那一格 = 中文版本.map_or("无", |mark| mark.label());
