@@ -1771,7 +1771,11 @@ impl Screen {
         ui.horizontal_wrapped(|ui| {
             look::inline_tag(ui, platform.as_deref().unwrap_or("平台未知"));
             look::inline_tag(ui, &bytes);
-            look::inline_tag(ui, state);
+            // 结论那一枚只在一条候选都没有时画（拿主意的人 2026-09-15 定）：有候选的一律是命中，照稿不画；
+            // 没有候选的分得出是未命中还是无判据，去掉就丢了。
+            if candidates.is_empty() {
+                look::inline_tag(ui, state);
+            }
             look::inline_tag(ui, anchored);
         });
         if let Some(reason) = &reason {
