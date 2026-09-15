@@ -67,6 +67,9 @@ jiff.workspace = true
 # 开场与添加主库向导上那两颗「选择…」弹的系统目录选择器，只在 `src/pick.rs` 里调。
 # 为什么是它、为什么只开 `xdg-portal`，写在根 `Cargo.toml` 那一条上。
 rfd.workspace = true
+# 库体检明细里「在文件系统中打开」交给系统的文件管理器，只在 `src/health.rs` 里调。为什么是它、为什么钉死版本，
+# 写在根 `Cargo.toml` 那一条上。
+open.workspace = true
 romcat-core.workspace = true
 # **令牌**（`src/tokens.toml`：两套主题的颜色、平台色、字号、圆角、间距、版式尺寸）是数据
 # 不是代码，与核心库的 `platforms.toml` / `profiles.toml` 同一条纪律：编进二进制、读得严。

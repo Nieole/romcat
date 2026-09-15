@@ -35,6 +35,15 @@ impl Clock {
         Self::Fixed { now, offset }
     }
 
+    /// 此刻，UNIX 纪元起的秒：读系统时钟，或者钉死的那一刻。「上次体检」记的就是它（`crate::health`）。
+    #[must_use]
+    pub fn now(self) -> i64 {
+        match self {
+            Self::System => system_now(),
+            Self::Fixed { now, .. } => now,
+        }
+    }
+
     /// `at`（UNIX 纪元起的秒）画成本地时间的短格式：与此刻同一年写 `MM-DD HH:MM`，否则 `YYYY-MM-DD HH:MM`。
     #[must_use]
     pub fn short(self, at: i64) -> String {

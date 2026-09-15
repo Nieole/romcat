@@ -126,6 +126,8 @@ pub struct Screen {
     sources: Vec<SourceStatus>,
     /// 第三段：**工序**——这个库还差哪几道步骤。
     stages: crate::stages::Section,
+    /// 两栏底下的**库体检**那一块（[`crate::health::Section`]）。
+    health: crate::health::Section,
     /// 正在跑的那几趟活的任务号，用来禁掉重复按下。
     running: Vec<(u64, Job)>,
     /// 点了「移除」还没点头的那个根。
@@ -160,6 +162,7 @@ impl Screen {
     pub fn new(workspace: PathBuf) -> Self {
         Self {
             stages: crate::stages::Section::new(workspace.clone()),
+            health: crate::health::Section::default(),
             workspace,
             roots: Vec::new(),
             sources: Vec::new(),
@@ -469,6 +472,19 @@ impl Screen {
         if job == Job::Fetch(Source::Dat) {
             self.stages.set_dat_on_board(false);
         }
+        // **扫完一个根，就用扫描交回的那份体检报告**（拿主意的人 2026-09-15 答岔路口 8）：它是从中立库折出来的全库那一份，
+        // 与「重新体检」那一趟算的是同一件事。被按停的那一趟交出的那一份照样是真的——写进中立库的那半份记录是真的。
+        if let (
+            Ending::Done(Product::Scanned(outcome))
+            | Ending::Halfway {
+                product: Product::Scanned(outcome),
+                ..
+            },
+            Job::Scan(_),
+        ) = (&done.ended, &job)
+        {
+            self.health.take_scan(outcome, self.clock.now());
+        }
         match (&done.ended, &job) {
             // **「跑完了」只说给真的跑完的那一趟听。** 被按停的那一趟交出来的产物
             // 长得一模一样，分开的是 `scan` 自己报的那句「停在半路」——不分的话
@@ -626,7 +642,7 @@ impl Screen {
         });
         // 两栏底下通栏的**库体检**那一块（设计稿 `data-panel="health"`，离两栏隔一个 `library-gap`）。
         ui.add_space(间距);
-        self.health_ui(ui);
+        self.health_ui(ui, site, tasks);
         // 工序段扫描那一行按下去只留记号：这一屏自己那条扫描的路接着排（`Self::take_scan`）。
         self.take_scan(site, tasks);
     }
@@ -638,21 +654,75 @@ impl Screen {
     }
 
     /// 两栏底下通栏的**库体检**那一块（`crate::health`）：标题栏照稿「库体检」、那句说明、「重新体检」、折叠标，收得起来。
-    fn health_ui(&mut self, ui: &mut egui::Ui) {
+    fn health_ui(&mut self, ui: &mut egui::Ui, site: &Site, tasks: &mut Tasks) {
         let 扫过 = self.scanned();
+        // 开窗后头一次进库屏、有扫过的根却还没有报告：自动排一趟（`health::Section::auto_check`，岔路口 8）。
+        self.health.auto_check(site, tasks, 扫过);
+        // 疑似同一作品那一格照识别那一道做没做完换话（拿主意的人 2026-09-15 答岔路口 9），判据是工序那一行自己的（`StageRow::settled`）。
+        let 识别过 = self
+            .stages
+            .of(Stage::Identify)
+            .is_some_and(romcat_core::stage::StageRow::settled);
+        let 说明 = self.health.subtitle(self.clock);
+        let 能体检 = 扫过 && !self.health.running();
         let mut 收着 = self.folded(FOLD_HEALTH);
+        // 标题栏那颗按下去只记一笔，画完再排——排活要的是这一块自己，而那颗按钮画在标题栏里（同数据源那一块）。
+        let mut 要体检 = false;
         let mut 标题栏的按钮 = |ui: &mut egui::Ui| {
-            look::small_buttons(ui, |ui| ui.button(crate::health::RECHECK));
+            要体检 = look::small_buttons(ui, |ui| {
+                ui.add_enabled(能体检, egui::Button::new(crate::health::RECHECK))
+                    .on_hover_text(
+                        "从中立库重新出一份体检报告，排到任务台上跑，一次只跑一趟；只读，不改动任何文件",
+                    )
+                    .on_disabled_hover_text(if 扫过 {
+                        "正在体检，跑完再按"
+                    } else {
+                        "扫描完成后才能体检"
+                    })
+                    .clicked()
+            });
         };
+        let health = &mut self.health;
         foldable_panel(
             ui,
             "库体检",
-            crate::health::READ_ONLY,
+            &说明,
             &mut 收着,
             Some(&mut 标题栏的按钮),
-            |ui| crate::health::body_ui(ui, 扫过),
+            |ui| health.body_ui(ui, 扫过, 识别过),
         );
         self.set_folded(FOLD_HEALTH, 收着);
+        // 点了一格就开的那一层明细弹层（`health::Section::dialog_ui`）：每一帧都画，面板收着也画。
+        self.health.dialog_ui(ui.ctx(), site);
+        if 要体检 {
+            self.health.check(site, tasks);
+        }
+    }
+
+    /// **库体检**那一块（测试拿它核对）。
+    #[must_use]
+    pub fn health(&self) -> &crate::health::Section {
+        &self.health
+    }
+
+    /// 排一趟体检上任务台：「重新体检」按的就是它（[`crate::health::Section::check`]）。一次只跑一趟。
+    pub fn check_health(&mut self, site: &Site, tasks: &mut Tasks) {
+        self.health.check(site, tasks);
+    }
+
+    /// 体检明细弹层上「导出清单…」弹的保存对话框交回来的那一个（[`crate::health::Section::export_picked`]）。
+    /// **测试从这儿递路径进去**：系统的保存对话框测试点不了。
+    pub fn health_export_picked(&mut self, site: &Site, picked: Option<PathBuf>) {
+        self.health.export_picked(site, picked);
+    }
+
+    /// 任务台交回来的是不是**库体检**那一趟（[`crate::health::Section::settle`]）：是就认领、交回 `None`；「上次体检」
+    /// 记的是这一屏的钟此刻（[`Self::set_clock`]）。
+    pub fn settle_health(
+        &mut self,
+        done: romcat_core::task::Finished<Product>,
+    ) -> Option<romcat_core::task::Finished<Product>> {
+        self.health.settle(done, self.clock.now())
     }
 
     /// 右边那一栏：根、数据源、导出设置三块，**各自收得起来**（[`Fold`]），次序照设计稿。

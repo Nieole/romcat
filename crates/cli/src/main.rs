@@ -27,6 +27,8 @@ use romcat_core::fs::RealFs;
 use romcat_core::identify;
 use romcat_core::identify::model;
 use romcat_core::path;
+// **主库只读**那一道（ADR-0004）住在核心库：界面上「导出清单…」问的也是它。
+use romcat_core::path::refuse_writing_into_library;
 use romcat_core::platform::Manifest;
 use romcat_core::report::{DuplicateDetails, HealthReport, human_bytes, pad, thousands};
 use romcat_core::scan::aggregate::{Aggregate, Limits};
@@ -6057,19 +6059,6 @@ impl OutputArgs {
 
         !failed
     }
-}
-
-/// 主库只读（ADR-0004）：工具写出去的任何文件都不许落进主库。
-fn refuse_writing_into_library(root: &Path, target: &Path) -> Result<(), String> {
-    let root = romcat_core::path::normalize_existing(root);
-    let target = romcat_core::path::normalize_existing(target);
-    if romcat_core::path::is_inside(&root, &target) {
-        return Err(format!(
-            "输出文件 {} 落在主库内。主库只读，请写到别处。",
-            romcat_core::path::display(&target)
-        ));
-    }
-    Ok(())
 }
 
 /// 同上，用在**不知道主库根在哪**的那几条命令上。

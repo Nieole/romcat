@@ -125,6 +125,12 @@ rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
 # 1.0，两版并存。macOS 上复用已有的 `objc2` 0.6 / `objc2-app-kit` 0.3 / `block2` 0.6，Windows 上复用
 # `windows-sys` 0.61。
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+# **在文件系统中打开**（票 `gui-looks-like-the-design/27`，协调人 2026-09-15 定岔路口 7）：库体检明细里一份文件、一个目录，
+# 按一下交给系统的文件管理器打开**它所在的目录**。**只有界面用它**（`crates/gui` 的 `src/health.rs`），核心库与命令行
+# 一个依赖都不多。**它本来就在锁文件里**（`egui_kittest` 在用），不多拉进来一个包。
+#
+# **钉死 `=5.4.4`**：升版得是一次看得见的改动。两个可选特性（`shellexecute-on-windows`、`insecure`）一个不开。
+open = "=5.4.4"
 # **本地时区**（票 `gui-looks-like-the-design/25`）：任务屏历史那一列照稿画本地时间「09-10 09:12」，得知道这台机器
 # 在哪个时区、那一刻比 UTC 快几秒。**只有界面用它**（`crates/gui` 的 `src/task.rs`）；核心库的 `human_time`
 # 与命令行照旧 UTC（挂单 `Q901`）。

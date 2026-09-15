@@ -479,6 +479,10 @@ impl App {
             if self.roots.stages_mut().settle_media_cost(&done) {
                 continue;
             }
+            // **体检那一趟也先认**（`roots::Screen::settle_health`）：同上，整条只读。
+            let Some(done) = self.roots.settle_health(done) else {
+                continue;
+            };
             // **各屏按任务号认领自己那一趟，不是它的就放过去。** 将来识别与刮削接上来
             // 时，各自在这儿多认一次。
             if self.roots.settle(&self.site, &done) {

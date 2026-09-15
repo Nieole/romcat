@@ -385,6 +385,8 @@ pub struct Font {
     pub size_arrow: f32,
     /// 面板标题（设计稿 `.phead h3`）。
     pub size_panel_title: f32,
+    /// 库体检那几格里的数（设计稿 `.htile b`，等宽）。
+    pub size_health_value: f32,
     /// 子库屏空态那张卡的标题（设计稿空态卡 `h3` 的 16px）。只这一处用，不挂成具名档。
     pub size_empty_title: f32,
     /// 行高，字号的倍数。
@@ -452,6 +454,16 @@ pub struct Space {
     pub empty_padding: f32,
     /// 库屏**库体检**那一块还没扫描时那一句的留白（设计稿在那一处行内写成 18，不是 `.empty` 的 28）。
     pub health_empty_padding: f32,
+    /// 库体检那几格外面那一圈：`[上下, 左右]`（设计稿 `.health`）。
+    pub health_grid_padding: [f32; 2],
+    /// 库体检格与格之间（设计稿 `.health` 的 `gap`）。
+    pub health_grid_gap: f32,
+    /// 库体检一格的内边距：`[上下, 左右]`（设计稿 `.htile`）。
+    pub health_tile_padding: [f32; 2],
+    /// 一格里标题、数、小字之间（设计稿 `.htile` 的 `gap`）。
+    pub health_tile_gap: f32,
+    /// 体检明细一行的内边距：`[上下, 左右]`（设计稿 `.lst>div`）。
+    pub health_list_padding: [f32; 2],
     /// 侧边详情媒体格之间。
     pub thumb_gap: f32,
     /// 侧边详情头上封面与字之间。
@@ -665,6 +677,8 @@ pub struct Layout {
     /// 库屏根那张表根名称那一列的宽度上限：超过就截断加「…」、悬停看全名，路径那一列始终留得出地方
     /// （拿主意的人 2026-09-14 定，稿上没有这一格）。
     pub root_name_max: f32,
+    /// 库体检重复拷贝明细表后四列的宽：平台、份数、单份大小、展开标（设计稿 `dups` 那张表的 `th`）。
+    pub health_dup_columns: [f32; 4],
     /// 子库卡上容量条的高（设计稿 `.gauge`）。
     pub gauge_height: f32,
     /// 容量条上「清单之外：还不知道」那一段斜纹一个来回多宽（设计稿 `.gauge .unk`：一半有色、一半空）。

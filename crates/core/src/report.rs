@@ -1009,9 +1009,11 @@ fn sample_stats(samples: &BTreeMap<ProbeClass, SampleAcc>) -> Vec<SampleStats> {
 }
 
 mod duplicates;
+mod findings;
 mod render;
 
 pub use duplicates::DuplicateDetails;
+pub use findings::{Finding, FindingRow};
 pub use render::{
     capacity, decimal_bytes, heading, human_bytes, human_duration, human_time, pad, thousands,
     width,
@@ -1148,5 +1150,72 @@ mod tests {
         let details = DuplicateDetails::build(&agg, &report);
         assert_eq!(details.groups[0].name, "寄生前夜.bin");
         assert_eq!(details.groups[0].platforms, vec!["PS1", "PS2"]);
+    }
+
+    #[test]
+    fn 每一格的明细_路径原因数量都在_样例截断时说清另有几个() {
+        // 票 27：体检明细弹层与「导出清单…」读的是同一份（`finding_rows` / `render_finding`），措辞在核心库。
+        let 读不到的: Vec<String> = (0..12).map(|n| format!("库/FC/读不到{n:02}.zip")).collect();
+        let 记录: Vec<(&str, Option<u64>)> =
+            读不到的.iter().map(|key| (key.as_str(), None)).collect();
+        let mut agg = 收(&记录);
+        agg.record_stranded(
+            StrandedCompanion {
+                kind: CompanionKind::Save,
+                platform: Some("GBA".to_string()),
+                path: "/lib/GBA/汉化/火焰之纹章.sav".to_string(),
+                main_elsewhere: None,
+            },
+            &Limits::default(),
+        );
+        agg.record_stranded(
+            StrandedCompanion {
+                kind: CompanionKind::Patch,
+                platform: Some("SFC".to_string()),
+                path: "/lib/SFC/汉化/时空之轮.ips".to_string(),
+                main_elsewhere: Some("/lib/SFC/日版".to_string()),
+            },
+            &Limits::default(),
+        );
+        let report = 报告(&agg);
+
+        assert_eq!(report.finding_count(Finding::Unreadable), 12);
+        assert_eq!(
+            report.finding_rows(Finding::Unreadable).len(),
+            10,
+            "样例照报告的上限"
+        );
+        let 不可读 = report.render_finding(Finding::Unreadable);
+        assert!(不可读.contains("不可读"), "{不可读}");
+        assert!(不可读.contains("12 个"), "{不可读}");
+        assert!(不可读.contains("/lib/FC/读不到00.zip"), "{不可读}");
+        assert!(不可读.contains("另有 2 个没列出"), "{不可读}");
+
+        let 落单 = report.finding_rows(Finding::StrandedCompanions);
+        assert_eq!(落单.len(), 2);
+        assert_eq!(落单[1].path, "/lib/SFC/汉化/时空之轮.ips");
+        assert_eq!(
+            落单[1].reason.as_deref(),
+            Some("补丁 · 同名的主文件在另一个目录：/lib/SFC/日版")
+        );
+        assert_eq!(
+            落单[0].folder.as_deref(),
+            Some(std::path::Path::new("/lib/GBA/汉化")),
+            "「在文件系统中打开」打开文件所在的目录"
+        );
+        let 落单明细 = report.render_finding(Finding::StrandedCompanions);
+        assert!(
+            落单明细.contains("/lib/GBA/汉化/火焰之纹章.sav"),
+            "{落单明细}"
+        );
+        assert!(
+            落单明细.contains("存档 · 同一目录里找不到同名的主文件"),
+            "{落单明细}"
+        );
+        assert!(
+            !落单明细.contains("另有"),
+            "全列出来了就不说另有：{落单明细}"
+        );
+        assert!(落单明细.contains("不改动主库里的任何文件"), "{落单明细}");
     }
 }

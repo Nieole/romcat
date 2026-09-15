@@ -682,6 +682,18 @@ impl Roots {
             .map(|(name, path)| (name.as_str(), path.as_path()))
     }
 
+    /// **主库只读**（ADR-0004）：工具写出去的文件落在**任何一个根**里就拒——一份库装着几块盘，只拦其中一块等于
+    /// 另外几块没人守。每个根问的是 [`path::refuse_writing_into_library`] 那一处。
+    ///
+    /// # Errors
+    /// 落在某一个根里时返回一句给人看的话。
+    pub fn refuse_writing_into(&self, target: &Path) -> Result<(), String> {
+        for (_, root) in self.iter() {
+            path::refuse_writing_into_library(root, target)?;
+        }
+        Ok(())
+    }
+
     /// 只有一个根时它叫什么。多于一个、或者一个都没有时是 `None`。
     #[must_use]
     pub fn only(&self) -> Option<&str> {
@@ -838,6 +850,33 @@ mod tests {
 
     fn 一份库() -> Catalog {
         Catalog::open_in_memory().expect("开得了内存库")
+    }
+
+    #[test]
+    fn 工具写出去的文件落在任何一个根里都拒_一个根都不在就放行() {
+        // 一份库装着几块盘：只拦其中一块等于另外几块没人守（ADR-0004）。
+        let catalog = 一份库();
+        catalog.insert_root("主库", "/盘甲/Game").expect("记得下");
+        catalog
+            .insert_root("元数据库", "/盘乙/Pegasus")
+            .expect("记得下");
+        let roots = Roots::load(&catalog).expect("读得出根");
+        assert!(
+            roots
+                .refuse_writing_into(Path::new("/盘乙/Pegasus/清单.txt"))
+                .is_err(),
+            "落在第二个根里也要拒"
+        );
+        assert!(
+            roots
+                .refuse_writing_into(Path::new("/盘甲/Game/FC/清单.txt"))
+                .is_err()
+        );
+        assert!(
+            roots
+                .refuse_writing_into(Path::new("/本机/清单.txt"))
+                .is_ok()
+        );
     }
 
     #[test]
