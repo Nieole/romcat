@@ -30,7 +30,7 @@ pub mod scrape;
 pub mod sublibrary;
 pub mod title;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -44,6 +44,7 @@ use crate::platform::Manifest;
 use crate::report::ReportMeta;
 use crate::scan::aggregate::{
     Aggregate, ContainerFacts, FileObservation, InnerEntryContext, Limits, SampleResult,
+    ShapingDoubt, StrandedCompanion,
 };
 use crate::shape;
 use crate::workspace;
@@ -1766,6 +1767,9 @@ impl Catalog {
             .map_err(|source| self.err(source))?;
         // 库里各有几个容器，按格式分。它是「还没读过几个」的被减数（见下）。
         let mut in_library: BTreeMap<ContainerKind, u64> = BTreeMap::new();
+        // 成型存疑与落单的附属文件那两条判据要的原料（见下）：文件条目，与进了变体的那些键。顺路收，不另读一趟条目表。
+        let mut files: Vec<shape::Entry> = Vec::new();
+        let mut in_variant: HashSet<String> = HashSet::new();
         while let Some(row) = rows.next().map_err(|source| self.err(source))? {
             let key: String = row.get(0).map_err(|source| self.err(source))?;
             if let Some(kind) = ContainerKind::for_path(Path::new(&key)) {
@@ -1789,6 +1793,14 @@ impl Catalog {
                 &FileObservation::derive(manifest, &roots, &key, len, non_utf8 != 0, sample, role),
                 limits,
             );
+            if role.is_some() {
+                in_variant.insert(key.clone());
+            }
+            files.push(shape::Entry {
+                key,
+                is_dir: false,
+                len,
+            });
         }
 
         // 容器的穿透结论与内部构成一样是从库里折出来的：盘不在位时报告照样说得出
@@ -1901,6 +1913,53 @@ impl Catalog {
             if let Some(acc) = aggregate.platforms.get_mut(platform) {
                 acc.variants = counts.variants;
             }
+        }
+
+        // **成型存疑**与**落单的附属文件**（票 `gui-looks-like-the-design/27`）：判据在成型那一层
+        // （`shape::shaping_doubts` / `shape::stranded_companions`，ADR-0024），这里只喂中立库里的条目与变体，
+        // 再把键换成给人看的完整路径。
+        let variants = self.variants()?;
+        let shaped: Vec<shape::Shaped<'_>> = variants
+            .iter()
+            .map(|variant| shape::Shaped {
+                key: &variant.key,
+                rule: &variant.rule,
+                manual: variant.manual,
+            })
+            .collect();
+        let platform_of = |key: &str| {
+            shape::scope_of(manifest, key)
+                .platform()
+                .map(|platform| platform.name.clone())
+        };
+        for doubt in shape::shaping_doubts(&shaped, &files, manifest) {
+            aggregate.record_shaping_doubt(
+                ShapingDoubt {
+                    kind: doubt.kind,
+                    platform: platform_of(&doubt.at),
+                    at: roots.display_key(&doubt.at),
+                    items: doubt
+                        .items
+                        .iter()
+                        .map(|key| roots.display_key(key))
+                        .collect(),
+                },
+                limits,
+            );
+        }
+        for stranded in shape::stranded_companions(&files, &in_variant, manifest) {
+            aggregate.record_stranded(
+                StrandedCompanion {
+                    kind: stranded.kind,
+                    platform: platform_of(&stranded.key),
+                    path: roots.display_key(&stranded.key),
+                    main_elsewhere: stranded
+                        .main_elsewhere
+                        .as_deref()
+                        .map(|dir| roots.display_key(dir)),
+                },
+                limits,
+            );
         }
 
         let mut statement = self

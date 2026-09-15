@@ -15,9 +15,10 @@ use crate::container::{ContainerKind, FailureReason};
 use crate::header::ProbeClass;
 use crate::scan::aggregate::{
     Aggregate, Anomalies, ConflictAcc, ConflictEvidence, ContainerAcc, Counts, ExtensionAcc,
-    Placement, PlatformAcc, PlatformConflict, SampleAcc, ShapingAcc, UNKNOWN_PLATFORM,
+    Placement, PlatformAcc, PlatformConflict, SampleAcc, ShapingAcc, ShapingDoubt,
+    StrandedCompanion, UNKNOWN_PLATFORM,
 };
-use crate::shape::Role;
+use crate::shape::{CompanionKind, DoubtKind, Role};
 
 /// 平台未知时在报告里的显示名。
 pub const UNKNOWN_PLATFORM_LABEL: &str = "（平台未知）";
@@ -138,6 +139,13 @@ pub struct PlatformStats {
 /// 一组重复拷贝。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DuplicateGroupStats {
+    /// 这一组的文件名（头一份记下来的那个，大小写照原样）。旧报告里没有这一栏，读回来时是空的。
+    #[serde(default)]
+    pub name: String,
+    /// 这一组横跨哪几个平台，按名字排：认出平台是规范名，没认出是那个顶层目录名，库根下的散文件是
+    /// [`UNKNOWN_PLATFORM_LABEL`]。**判据只看名字与大小**，所以一组可以横跨几个平台目录。旧报告里没有这一栏，读回来时是空的。
+    #[serde(default)]
+    pub platforms: Vec<String>,
     /// 单份字节数。
     pub size: u64,
     /// 份数。
@@ -193,6 +201,20 @@ pub struct SuspectSummary {
     pub top_duplicates: Vec<DuplicateGroupStats>,
     /// 重复索引是否因超过上限而截断。
     pub index_truncated: bool,
+}
+
+/// **非游戏资产**的汇总（ADR-0010、词表**非游戏资产**）：模拟器要、本身不是游戏的东西，入库但永不导出。
+///
+/// 判据只有 [`classify::non_game_asset`](crate::classify::non_game_asset) 一处（ADR-0024）。**只数入库的那些**——
+/// 落在平台目录里的；未纳入管理的目录不成型、不入库，那里的 `bios/` 不算。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NonGameAssetSummary {
+    /// 文件数。
+    pub files: u64,
+    /// 字节数。元数据读不到的按 0 计入，是个下界（ADR-0021）。
+    pub bytes: u64,
+    /// 路径样例，按中立库的键排，有上限。
+    pub examples: Vec<String>,
 }
 
 /// 一类文件的头部抽样结果。
@@ -438,6 +460,28 @@ pub struct ConflictSummary {
     pub examples: Vec<PlatformConflict>,
 }
 
+/// **成型存疑**的汇总（词表同名条目）：成型规则把文件聚成变体时拿不准的地方。**只报告**，纠正是人的事。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShapingDoubtSummary {
+    /// 一共几处。
+    pub total: u64,
+    /// 按哪一种分：（哪一种, 名字, 几处）。
+    pub by_kind: Vec<(DoubtKind, String, u64)>,
+    /// 样例，按那一处的路径排，有上限。
+    pub examples: Vec<ShapingDoubt>,
+}
+
+/// **落单的附属文件**的汇总（词表**附属文件落单**）：存档、补丁在自己那个目录里找不到同名的主文件。**只报告。**
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StrandedSummary {
+    /// 一共几个。
+    pub total: u64,
+    /// 按哪一种分：（哪一种, 名字, 几个）。
+    pub by_kind: Vec<(CompanionKind, String, u64)>,
+    /// 样例，按路径排，有上限。
+    pub examples: Vec<StrandedCompanion>,
+}
+
 /// 库体检报告。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HealthReport {
@@ -470,6 +514,9 @@ pub struct HealthReport {
     pub extensions: Vec<ExtensionStats>,
     /// 疑似不该入库。
     pub suspects: SuspectSummary,
+    /// **非游戏资产**：入库但永不导出的那些。**旧报告里没有这一项**，读回来时是空的。
+    #[serde(default)]
+    pub non_game_assets: NonGameAssetSummary,
     /// 头部抽样。
     pub samples: Vec<SampleStats>,
     /// 穿透**透明容器**的结果。
@@ -480,6 +527,12 @@ pub struct HealthReport {
     pub scope: ScopeSummary,
     /// 目录声明的平台与文件内容对不上的那些。
     pub conflicts: ConflictSummary,
+    /// **成型存疑**。旧报告里没有这一项，读回来时是空的。
+    #[serde(default)]
+    pub shaping_doubts: ShapingDoubtSummary,
+    /// **落单的附属文件**。旧报告里没有这一项，读回来时是空的。
+    #[serde(default)]
+    pub stranded_companions: StrandedSummary,
     /// 属于三类主线、却没有任何探针可用的文件数。抽样成功率覆盖不到它们。
     pub content_files_without_probe: u64,
     /// 异常与跨平台计数。
@@ -742,11 +795,36 @@ impl HealthReport {
             categories: category_stats(&aggregate.categories, aggregate.totals),
             extensions: extension_stats(&aggregate.extensions, TOP_EXTENSIONS_GLOBAL),
             suspects: suspect_summary(aggregate),
+            non_game_assets: NonGameAssetSummary {
+                files: aggregate.non_game_assets.files,
+                bytes: aggregate.non_game_assets.bytes,
+                examples: aggregate.non_game_asset_examples.clone(),
+            },
             samples: sample_stats(&aggregate.samples),
             containers: container_summary(&aggregate.containers, meta.penetrated_containers),
             shaping: shaping_summary(&aggregate.shaping, &aggregate.unshaped, meta.scan),
             scope: scope_summary(aggregate),
             conflicts: conflict_summary(&aggregate.conflicts),
+            shaping_doubts: ShapingDoubtSummary {
+                total: aggregate.shaping_doubts.by_kind.values().sum(),
+                by_kind: aggregate
+                    .shaping_doubts
+                    .by_kind
+                    .iter()
+                    .map(|(kind, count)| (*kind, kind.label().to_string(), *count))
+                    .collect(),
+                examples: aggregate.shaping_doubts.examples.clone(),
+            },
+            stranded_companions: StrandedSummary {
+                total: aggregate.stranded.by_kind.values().sum(),
+                by_kind: aggregate
+                    .stranded
+                    .by_kind
+                    .iter()
+                    .map(|(kind, count)| (*kind, kind.label().to_string(), *count))
+                    .collect(),
+                examples: aggregate.stranded.examples.clone(),
+            },
             content_files_without_probe: aggregate.content_files_without_probe,
             anomalies: aggregate.anomalies.clone(),
         }
@@ -769,6 +847,18 @@ fn duplicate_groups(aggregate: &Aggregate) -> Vec<DuplicateGroupStats> {
         .values()
         .filter(|group| group.count > 1)
         .map(|group| DuplicateGroupStats {
+            name: group.name.clone(),
+            platforms: group
+                .platforms
+                .iter()
+                .map(|platform| {
+                    if platform == UNKNOWN_PLATFORM {
+                        UNKNOWN_PLATFORM_LABEL.to_string()
+                    } else {
+                        platform.clone()
+                    }
+                })
+                .collect(),
             size: group.size,
             count: group.count,
             paths: group.paths.clone(),
@@ -926,3 +1016,137 @@ pub use render::{
     capacity, decimal_bytes, heading, human_bytes, human_duration, human_time, pad, thousands,
     width,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::Roots;
+    use crate::platform::Manifest;
+    use crate::scan::aggregate::{FileObservation, Limits};
+
+    /// 一条中立库记录的观察结果：根叫「库」、挂在 `/lib`，`len` 是 `None` 就是元数据读不到（ADR-0021）。
+    fn 观察(key: &str, len: Option<u64>) -> FileObservation {
+        FileObservation::derive(
+            &Manifest::builtin(),
+            &Roots::single("库", "/lib"),
+            key,
+            len,
+            false,
+            None,
+            None,
+        )
+    }
+
+    /// 把这几条记录并进一份统计。
+    fn 收(记录: &[(&str, Option<u64>)]) -> Aggregate {
+        let mut agg = Aggregate::default();
+        for (key, len) in 记录 {
+            agg.record_file(&观察(key, *len), &Limits::default());
+        }
+        agg
+    }
+
+    fn 报告(aggregate: &Aggregate) -> HealthReport {
+        HealthReport::build(
+            aggregate,
+            &ReportMeta {
+                root_name: "库".to_string(),
+                root: "/lib".to_string(),
+                interrupted: false,
+                resumed: false,
+                jobs: 1,
+                samples_per_class: 0,
+                penetrated_containers: true,
+                scan: 1,
+                delta: None,
+            },
+        )
+    }
+
+    #[test]
+    fn 非游戏资产数的是平台目录里_bios_目录底下的文件_游戏与未纳入管理的目录不算() {
+        // 判据只有 `classify::non_game_asset` 一处（ADR-0024）；报告只数「入库」的那些——未纳入管理的目录不成型、不入库。
+        let agg = 收(&[
+            ("库/PS1/bios/scph1001.bin", Some(512 * 1024)),
+            ("库/街机/FBA-ROMS/BIOS/neogeo.zip", Some(2048)),
+            ("库/PS1/寄生前夜.bin", Some(4096)),
+            ("库/FC/bios.zip", Some(100)),
+            ("库/杂物/bios/scph1001.bin", Some(512 * 1024)),
+        ]);
+        let assets = 报告(&agg).non_game_assets;
+        assert_eq!(assets.files, 2);
+        assert_eq!(assets.bytes, 512 * 1024 + 2048);
+        assert_eq!(
+            assets.examples,
+            vec![
+                "/lib/PS1/bios/scph1001.bin".to_string(),
+                "/lib/街机/FBA-ROMS/BIOS/neogeo.zip".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn 不可读的样例路径跟着个数一起报_空文件与穿不透的容器不算进来() {
+        // 词表**不可读**：元数据读不到的第三态（ADR-0021）。**穿不透是平行的另一件事**（词表**穿不透**），不并进这一栏；
+        // 真的 0 字节的空文件也不是它。
+        let mut agg = 收(&[
+            ("库/FC/读不到.zip", None),
+            ("库/FC/空的.zip", Some(0)),
+            ("库/FC/好好的.zip", Some(4096)),
+            ("库/杂物/也读不到.bin", None),
+        ]);
+        agg.record_penetration_failure(
+            "/lib/FC/坏包.zip",
+            ContainerKind::Zip,
+            FailureReason::Malformed,
+            "中央目录读不下去",
+            &Limits::default(),
+        );
+        let anomalies = 报告(&agg).anomalies;
+        assert_eq!(anomalies.unreadable, 2);
+        assert_eq!(
+            anomalies.unreadable_examples,
+            vec![
+                "/lib/FC/读不到.zip".to_string(),
+                "/lib/杂物/也读不到.bin".to_string(),
+            ],
+            "样例只列真正读不到元数据的那几个"
+        );
+    }
+
+    #[test]
+    fn 每组重复拷贝带着文件名与它横跨的平台_跨平台的组平台一个不落() {
+        // 明细表照稿四列「内容 / 平台 / 份数 / 单份大小」（拿主意的人 2026-09-15 定）：名字与平台由核心库给，界面不从路径里判。
+        // 判据照旧是同名且同大小，于是一组可以横跨几个平台目录——那几个平台都得报出来。
+        let agg = 收(&[
+            ("库/PS1/中文/寄生前夜.bin", Some(8192)),
+            ("库/PS1/备份/寄生前夜.bin", Some(8192)),
+            ("库/PS2/误放/寄生前夜.bin", Some(8192)),
+            ("库/FC/魂斗罗.nes", Some(2048)),
+            ("库/FC/备份/魂斗罗.nes", Some(2048)),
+        ]);
+        let report = 报告(&agg);
+        let 各组: Vec<(&str, Vec<&str>)> = report
+            .suspects
+            .top_duplicates
+            .iter()
+            .map(|group| {
+                (
+                    group.name.as_str(),
+                    group.platforms.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            各组,
+            vec![
+                ("寄生前夜.bin", vec!["PS1", "PS2"]),
+                ("魂斗罗.nes", vec!["FC"]),
+            ]
+        );
+        // 完整明细与报告出自同一份分组（`duplicate_groups`），带着同样的名字与平台。
+        let details = DuplicateDetails::build(&agg, &report);
+        assert_eq!(details.groups[0].name, "寄生前夜.bin");
+        assert_eq!(details.groups[0].platforms, vec!["PS1", "PS2"]);
+    }
+}

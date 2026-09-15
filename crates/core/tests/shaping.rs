@@ -662,3 +662,43 @@ fn 加一个平台只要给一份清单() {
     assert!(report.shaping.manifest_changed);
     assert!(report.render_text().contains("另一份平台清单"));
 }
+
+#[test]
+fn 报告带着成型存疑与落单的附属文件_数与样例都从中立库折出来() {
+    // 票 `gui-looks-like-the-design/27`：库体检的「成型存疑」「附属文件落单」两格。判据的细节由 `shape::shaping_doubts` 与
+    // `shape::stranded_companions` 的单元测试钉着；这里要证的是它们接在了扫描与报告之间，样例是盘上的完整路径。
+    let dir = temp_dir("shaping-存疑与落单");
+    let root = dir.path();
+    写(&root.join("FDS/某游戏/某游戏 (Disk 1).fds"), &[1u8; 64]);
+    写(&root.join("FDS/某游戏/某游戏 (Disk 2).fds"), &[2u8; 64]);
+    写(&root.join("GBA/汉化/火焰之纹章.sav"), &[3u8; 64]);
+    写(&root.join("GBA/汉化/黄金太阳.gba"), &[4u8; 256]);
+    写(&root.join("GBA/汉化/黄金太阳.sav"), &[5u8; 64]);
+    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+    let report = 扫(root, &mut catalog).report;
+
+    let doubts = &report.shaping_doubts;
+    assert_eq!(doubts.total, 1, "{doubts:?}");
+    let doubt = &doubts.examples[0];
+    assert_eq!(doubt.kind, romcat_core::shape::DoubtKind::UnmergedDiscs);
+    assert_eq!(doubt.platform.as_deref(), Some("FDS"));
+    assert!(doubt.at.ends_with("FDS/某游戏"), "{}", doubt.at);
+    assert_eq!(doubt.items.len(), 2, "{:?}", doubt.items);
+    assert!(
+        doubt.items.iter().all(|path| path.starts_with(&doubt.at)),
+        "{:?}",
+        doubt.items
+    );
+
+    let stranded = &report.stranded_companions;
+    assert_eq!(stranded.total, 1, "{stranded:?}");
+    let one = &stranded.examples[0];
+    assert_eq!(one.kind, romcat_core::shape::CompanionKind::Save);
+    assert_eq!(one.platform.as_deref(), Some("GBA"));
+    assert!(
+        one.path.ends_with("GBA/汉化/火焰之纹章.sav"),
+        "{}",
+        one.path
+    );
+    assert_eq!(one.main_elsewhere, None);
+}

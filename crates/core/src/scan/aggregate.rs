@@ -17,7 +17,7 @@ use crate::container::{ContainerKind, FailureReason};
 use crate::header::{self, ProbeClass, ProbeOutcome};
 use crate::path;
 use crate::platform::{Manifest, Platform};
-use crate::shape::{self, Role, Scope};
+use crate::shape::{self, CompanionKind, DoubtKind, Role, Scope};
 
 /// 「平台未知」在按平台分组时用的键。
 pub const UNKNOWN_PLATFORM: &str = "";
@@ -222,9 +222,83 @@ impl ConflictAcc {
     }
 }
 
+/// 一处**成型存疑**（[`shape::shaping_doubts`]，判据只在那一处），键换成了给人看的完整路径。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShapingDoubt {
+    /// 哪一种。
+    pub kind: DoubtKind,
+    /// 那一处落在哪个平台目录下。
+    pub platform: Option<String>,
+    /// 那一处：几个变体所在的目录，或者被当成一个变体的那个目录。
+    pub at: String,
+    /// 牵涉的那几条：几个变体，或者目录里那几份各自独立的内容。
+    pub items: Vec<String>,
+}
+
+impl ShapingDoubt {
+    /// 给人看的那一句原因。
+    #[must_use]
+    pub fn reason(&self) -> String {
+        match self.kind {
+            DoubtKind::UnmergedDiscs => format!(
+                "{} 个变体只差碟片标记，可能是同一套多碟游戏",
+                self.items.len()
+            ),
+            DoubtKind::CrowdedTree => format!(
+                "整个目录被当成 1 个变体，里面有 {} 份各自独立的内容",
+                self.items.len()
+            ),
+        }
+    }
+}
+
+/// 一个**落单的附属文件**（[`shape::stranded_companions`]，判据只在那一处），键换成了给人看的完整路径。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StrandedCompanion {
+    /// 哪一种：存档或补丁。
+    pub kind: CompanionKind,
+    /// 它落在哪个平台目录下。
+    pub platform: Option<String>,
+    /// 它自己的路径。
+    pub path: String,
+    /// 同一平台目录里别处有同名的主文件时，那个目录的路径。
+    pub main_elsewhere: Option<String>,
+}
+
+impl StrandedCompanion {
+    /// 给人看的那一句原因。
+    #[must_use]
+    pub fn reason(&self) -> String {
+        match &self.main_elsewhere {
+            Some(dir) => format!("同名的主文件在另一个目录：{dir}"),
+            None => "同一目录里找不到同名的主文件".to_string(),
+        }
+    }
+}
+
+/// **成型存疑**的统计。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ShapingDoubtAcc {
+    /// 按哪一种分，各几处。
+    pub by_kind: BTreeMap<DoubtKind, u64>,
+    /// 样例，有上限。
+    pub examples: Vec<ShapingDoubt>,
+}
+
+/// **落单的附属文件**的统计。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct StrandedAcc {
+    /// 按哪一种分，各几个。
+    pub by_kind: BTreeMap<CompanionKind, u64>,
+    /// 样例，有上限。
+    pub examples: Vec<StrandedCompanion>,
+}
+
 /// 一组重复拷贝：同名同大小的多份。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct DuplicateGroup {
+    /// 这一组的文件名：**头一份记下来的那个名字**，大小写照原样（判据比的是小写，名字照给人看的那样留）。
+    pub name: String,
     /// 单份的字节数。
     pub size: u64,
     /// 这一组里有几份。
@@ -232,6 +306,10 @@ pub struct DuplicateGroup {
     /// 组内的路径，最多 [`Limits::max_duplicate_paths_per_group`] 条。
     /// 少于 `count` 条就说明有几份没记下路径。
     pub paths: Vec<String>,
+    /// 这一组横跨哪几个平台：与 [`Aggregate::platforms`] 同一套分组键（认出平台是规范名，没认出是那个顶层目录名，
+    /// 库根下的散文件是 [`UNKNOWN_PLATFORM`]）。**判据只看名字与大小**，所以一组可以横跨几个平台目录。
+    /// 每一份都记上，与路径记没记全无关。
+    pub platforms: BTreeSet<String>,
 }
 
 /// 一类文件的头部抽样结果。
@@ -360,6 +438,10 @@ pub struct Anomalies {
     /// 它们**存在**，只是属性不可得：既不是「已变」也不是「已删」，也不是「空文件」。
     /// 单独计一栏，因为混进任何一栏都会说谎。
     pub unreadable: u64,
+    /// 同上的样例路径，有上限（与别的样例同一个 [`Limits::max_examples`]）。**只列元数据读不到的**——
+    /// **穿不透**的容器是平行的另一件事（词表），不并进来。旧报告里没有这一栏，读回来时是空的。
+    #[serde(default)]
+    pub unreadable_examples: Vec<String>,
     /// 非 UTF-8 路径数。
     pub non_utf8_paths: u64,
     /// 超过 `MAX_PATH` 的路径数。
@@ -427,6 +509,8 @@ pub struct FileObservation {
     pub dir: Option<String>,
     /// 它进了哪个变体（的身份）；`None` 表示没进任何变体。
     pub role: Option<Role>,
+    /// 这份内容是不是**非游戏资产**（[`classify::non_game_asset`]，判据只有那一处）。
+    pub non_game_asset: bool,
     /// 目录声明的平台与文件说自己是什么对不上；对得上或说不准时是 `None`。
     pub conflict: Option<PlatformConflict>,
     /// 小写扩展名。
@@ -494,6 +578,7 @@ impl FileObservation {
             },
             dir: dir.map(ToString::to_string),
             role,
+            non_game_asset: classify::non_game_asset(key),
             conflict,
             extension,
             len,
@@ -581,6 +666,14 @@ pub struct Aggregate {
     pub suspects: BTreeMap<SuspectReason, Counts>,
     /// 疑似不该入库的样例路径。
     pub suspect_examples: BTreeMap<SuspectReason, Vec<String>>,
+    /// **非游戏资产**：落在平台目录里、判据说是非游戏资产的文件（入库但永不导出）。
+    pub non_game_assets: Counts,
+    /// 同上的样例路径。
+    pub non_game_asset_examples: Vec<String>,
+    /// **成型存疑**（[`shape::shaping_doubts`]），从中立库的变体与条目折出来。
+    pub shaping_doubts: ShapingDoubtAcc,
+    /// **落单的附属文件**（[`shape::stranded_companions`]），同上。
+    pub stranded: StrandedAcc,
     /// 重复检测索引，键是「字节数 + 小写文件名」。
     pub duplicate_index: BTreeMap<String, DuplicateGroup>,
     /// 重复检测索引是否因为超过上限而不再收新键。
@@ -633,7 +726,7 @@ impl Aggregate {
                 .clone()
                 .unwrap_or_else(|| UNKNOWN_PLATFORM.to_string()),
         };
-        let platform = self.platforms.entry(platform_key).or_default();
+        let platform = self.platforms.entry(platform_key.clone()).or_default();
         platform.totals.add(len);
         platform.placement.clone_from(&observation.placement);
         if let Some(dir) = &observation.dir {
@@ -650,6 +743,15 @@ impl Aggregate {
                 .entry(classification.category)
                 .or_default()
                 .add(len);
+        }
+        // **非游戏资产只数入库的那些**：未纳入管理的目录不成型、不入库，那里的 `bios/` 不算。
+        if observation.placement.in_scope() && observation.non_game_asset {
+            self.non_game_assets.add(len);
+            push_capped(
+                &mut self.non_game_asset_examples,
+                observation.display_path.clone(),
+                limits.max_examples,
+            );
         }
         platform
             .categories
@@ -689,6 +791,11 @@ impl Aggregate {
         // 混在一起两个数字都会说谎（ADR-0021）。
         if observation.len.is_none() {
             self.anomalies.unreadable += 1;
+            push_capped(
+                &mut self.anomalies.unreadable_examples,
+                observation.display_path.clone(),
+                limits.max_examples,
+            );
         } else if len == 0 {
             self.anomalies.zero_length += 1;
         }
@@ -719,7 +826,7 @@ impl Aggregate {
             self.record_conflict(conflict.clone(), limits);
         }
 
-        self.record_duplicate_candidate(observation, limits);
+        self.record_duplicate_candidate(observation, &platform_key, limits);
         self.record_sample(observation, limits);
     }
 
@@ -735,9 +842,32 @@ impl Aggregate {
         }
     }
 
+    /// 并入一处**成型存疑**。
+    pub fn record_shaping_doubt(&mut self, doubt: ShapingDoubt, limits: &Limits) {
+        *self.shaping_doubts.by_kind.entry(doubt.kind).or_default() += 1;
+        if self.shaping_doubts.examples.len() < limits.max_examples {
+            self.shaping_doubts.examples.push(doubt);
+        }
+    }
+
+    /// 并入一个**落单的附属文件**。
+    pub fn record_stranded(&mut self, stranded: StrandedCompanion, limits: &Limits) {
+        *self.stranded.by_kind.entry(stranded.kind).or_default() += 1;
+        if self.stranded.examples.len() < limits.max_examples {
+            self.stranded.examples.push(stranded);
+        }
+    }
+
     /// 重复检测只覆盖库的内容本身——媒体、元数据与垃圾文件同名同大小是常态，
     /// 报出来只会淹没真正的重复拷贝。
-    fn record_duplicate_candidate(&mut self, observation: &FileObservation, limits: &Limits) {
+    ///
+    /// `platform_key` 是这个文件在 [`Self::platforms`] 里的分组键：一组横跨哪几个平台跟着每一份记上。
+    fn record_duplicate_candidate(
+        &mut self,
+        observation: &FileObservation,
+        platform_key: &str,
+        limits: &Limits,
+    ) {
         let is_content = matches!(
             observation.classification.category,
             Category::TransparentContainer | Category::CompressedImage | Category::BareFile
@@ -758,18 +888,27 @@ impl Aggregate {
                     observation.display_path.clone(),
                     limits.max_duplicate_paths_per_group,
                 );
+                group.platforms.insert(platform_key.to_string());
             }
             None => {
                 if self.duplicate_index.len() >= limits.max_duplicate_keys {
                     self.duplicate_index_truncated = true;
                     return;
                 }
+                let name = Path::new(&observation.display_path)
+                    .file_name()
+                    .map_or_else(
+                        || observation.name_lower.clone(),
+                        |name| name.to_string_lossy().into_owned(),
+                    );
                 self.duplicate_index.insert(
                     key,
                     DuplicateGroup {
+                        name,
                         size: len,
                         count: 1,
                         paths: vec![observation.display_path.clone()],
+                        platforms: BTreeSet::from([platform_key.to_string()]),
                     },
                 );
             }

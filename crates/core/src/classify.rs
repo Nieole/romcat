@@ -14,7 +14,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::path::{extension_lower, file_name_lower};
+use crate::path::{extension_lower, file_name_lower, file_name_of_key};
 
 /// 文件在识别管线里的归属。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -284,6 +284,34 @@ pub fn classify(path: &Path) -> Classification {
     }
 
     result
+}
+
+/// **补丁**的扩展名。它们一个都不在三类主线里——补丁不是内容。
+///
+/// **只写这一处**（ADR-0024：「这是不是补丁」是领域判断）：识别跳过补丁（`identify::scope`）、库体检认落单的补丁
+/// （[`crate::shape::stranded_companions`]）看的是这一张表。
+const PATCH_EXTENSIONS: &[&str] = &[
+    "ips", "ups", "bps", "aps", "ppf", "xdelta", "xdelta3", "vcdiff", "rup", "dps", "ebp",
+];
+
+/// 模拟器**存档**的扩展名：卡带世代的模拟器照「与 ROM 同名、换个扩展名」存下的那几种。它们一个都不在三类主线里
+/// ——存档不是内容。库体检认**附属文件落单**要它（词表，2026-09-15 拿主意的人定）。
+///
+/// **宁可窄不宜宽**：光盘世代的记忆卡（`.mcr` / `.mcd`）是一张卡装好几个游戏，不跟着某一个主文件起名，不在这里。
+const SAVE_EXTENSIONS: &[&str] = &["sav", "srm", "eep", "fla", "sra", "dsv", "rtc"];
+
+/// 这个名字（文件名或中立库的键）的扩展名是不是**补丁**格式；是的话交出小写的扩展名。
+#[must_use]
+pub fn patch_extension(name: &str) -> Option<String> {
+    let ext = extension_lower(Path::new(file_name_of_key(name)))?;
+    PATCH_EXTENSIONS.contains(&ext.as_str()).then_some(ext)
+}
+
+/// 这个名字（文件名或中立库的键）是不是模拟器的**存档**。
+#[must_use]
+pub fn is_save(name: &str) -> bool {
+    extension_lower(Path::new(file_name_of_key(name)))
+        .is_some_and(|ext| SAVE_EXTENSIONS.contains(&ext.as_str()))
 }
 
 /// 这份内容是**非游戏资产**吗（ADR-0010）：模拟器要它，它本身不是游戏。

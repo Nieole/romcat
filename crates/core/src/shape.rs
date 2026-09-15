@@ -843,6 +843,12 @@ fn strip_disc_markers(key: &str, rule: &Rule) -> String {
         .join("/")
 }
 
+mod doubt;
+mod stranded;
+
+pub use doubt::{Doubt, DoubtKind, Shaped, shaping_doubts};
+pub use stranded::{CompanionKind, Stranded, stranded_companions};
+
 #[cfg(test)]
 mod tests {
     use super::*;
