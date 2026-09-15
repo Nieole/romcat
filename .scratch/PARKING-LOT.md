@@ -4091,3 +4091,15 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 - **建议留：** 收尾时让命令行也调同一处判断（ADR-0024），并补一条命令行测试。
 - **谁来裁：** 收尾
 - **状态：** open
+
+### Q945 — ES-DE 2.0 起默认只读 `~/ES-DE/gamelists/`：子库写在卡上的 `gamelists/<平台目录>/gamelist.xml` 默认可能不被读
+
+- **来自：** 票 `gui-looks-like-the-design/21`（核实「前端里的游玩记录和收藏不会被覆盖」时路过发现）
+- **类别：** 需要核实的外部事实
+- **在哪：** 核心 `crates/core/src/adapter/gamelist.rs` 的 `metadata_path`（`gamelists/<平台目录>/gamelist.xml`，子库同步照它落在卡上）；出处 ES-DE `INSTALL.md`：「As of ES-DE 2.0.0 any gamelist.xml files stored in the game system directories (e.g. under `~/ROMs/`) will not get loaded, they are instead required to be placed in the `~/ES-DE/gamelists/` directory tree.」，另有 `LegacyGamelistFileLocation` 设置可以退回先查系统目录
+- **为什么没停线：** 与本票要核实的「会不会盖掉游玩记录」无关，写不出错的东西；卡上那份 ES-DE 读不读得到，要对着真设备上的 ES-DE 目录布局核实。
+- **这张票实际做了什么：** 没改行为；只记下来。
+- **另一条路：** 本票就把 ES-DE 那份元数据的落点改到 ES-DE 自己的 `gamelists/` 目录树（要先弄清卡上 ES-DE 的应用数据目录在哪、子库根与它是什么关系）。
+- **建议留：** 先在一台真装着 ES-DE 的掌机上核实默认读哪里、`LegacyGamelistFileLocation` 开没开，再定落点；定了另开票。
+- **谁来裁：** 拿主意的人
+- **状态：** open

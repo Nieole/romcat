@@ -84,7 +84,7 @@ use egui::{Align, Layout};
 use romcat_core::capability::{DEFAULT_PROFILE, Entry, Override, Profile, Recipe, Roster};
 use romcat_core::catalog::CatalogError;
 use romcat_core::catalog::sublibrary::{RemovedSublibrary, Renamed};
-use romcat_core::report::{decimal_bytes, human_bytes, thousands};
+use romcat_core::report::{decimal_bytes, decimal_gigabytes, human_bytes, thousands};
 use romcat_core::site::Site;
 use romcat_core::sublibrary::report::SelectionReport;
 use romcat_core::sublibrary::target::{self, NameRefusal, Presence, TargetRefusal};
@@ -174,8 +174,8 @@ pub struct Form {
     pub target: String,
     /// 前端格式（适配器名）。空着就是 Pegasus。
     pub format: String,
-    /// 容量上限，如 `512GB`、`476GiB`。空着就是不设限。从现成的子库填进来时写一位小数的十进制（`511.1 GB`，
-    /// 挂单 `Q856`）。
+    /// 容量上限，如 `58`（光一个数按十进制 GB 读）、`476GiB`。空着就是不设限。从现成的子库填进来时写一位小数的十进制 GB 数
+    /// （`511.1`，挂单 `Q856`；后面那个「GB」弹层上写着）。
     pub capacity: String,
     /// **能力档案**的名字。空着就是「不作声称」——不转换、不检查。
     pub capability: String,
@@ -200,7 +200,7 @@ impl Form {
         let kept_capacity = sublibrary
             .capacity
             .filter(|_| !sublibrary.capacity_by_device)
-            .map(|bytes| (decimal_bytes(bytes), bytes));
+            .map(|bytes| (decimal_gigabytes(bytes), bytes));
         Self {
             name: sublibrary.name.clone(),
             target: sublibrary.target.clone(),
@@ -2844,19 +2844,19 @@ impl Screen {
                         },
                     );
                 };
-                // 值那一列底下那一行（设计稿 `.help` / `.err`）：与输入框左边对齐。
+                // 值那一列底下那一行（设计稿 `.help` / `.err`）：与输入框左边对齐，**照可用宽折行**——横排里的字默认不折，
+                // 长一点的说明会把整层弹层撑得比令牌那一档还宽。
                 let under = |ui: &mut egui::Ui, text: &str, error: bool| {
                     ui.horizontal(|ui| {
                         ui.add_space(layout.kv_key_width + ui.spacing().item_spacing.x);
-                        if error {
-                            ui.label(
-                                egui::RichText::new(text)
-                                    .small()
-                                    .color(ui.visuals().error_fg_color),
-                            );
+                        let color = if error {
+                            ui.visuals().error_fg_color
                         } else {
-                            look::help(ui, text);
-                        }
+                            ui.visuals().weak_text_color()
+                        };
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(text).small().color(color)).wrap(),
+                        );
                     });
                 };
 
@@ -2877,6 +2877,8 @@ impl Screen {
                     Some(Ok(Ok(()))) | None => {}
                 }
 
+                // 字段之间照稿隔一档（设计稿 `.frm` 的 `gap:12px`）。
+                ui.add_space(step(2));
                 ui.horizontal(|ui| {
                     field_label(ui, "目标路径");
                     let pick_width = look::button_width(ui, "选择…");
@@ -2922,6 +2924,8 @@ impl Screen {
                     }
                 }
 
+                // 字段之间照稿隔一档（设计稿 `.frm` 的 `gap:12px`）。
+                ui.add_space(step(2));
                 ui.horizontal(|ui| {
                     field_label(ui, "前端格式");
                     let adapters = [PEGASUS, ES_GAMELIST];
@@ -2942,6 +2946,8 @@ impl Screen {
                 });
                 under(ui, &format_help(&form.format), false);
 
+                // 字段之间照稿隔一档（设计稿 `.frm` 的 `gap:12px`）。
+                ui.add_space(step(2));
                 ui.horizontal(|ui| {
                     field_label(ui, "能力档案");
                     let chosen = if form.capability.trim().is_empty() {
@@ -2998,6 +3004,7 @@ impl Screen {
                     });
                     clicked
                 };
+                ui.add_space(step(2));
                 ui.horizontal_top(|ui| {
                     field_label(ui, "容量上限");
                     ui.vertical(|ui| {
@@ -3021,6 +3028,7 @@ impl Screen {
                     });
                 });
                 if let Some(landing) = &landing {
+                    ui.add_space(step(2));
                     ui.horizontal_top(|ui| {
                         field_label(ui, "设备上的位置");
                         ui.vertical(|ui| {
@@ -3970,8 +3978,14 @@ fn profile_help(profile: &Profile) -> String {
         .max_file_bytes
         .map(|bytes| format!("，单文件上限 {}", human_bytes(bytes)))
         .unwrap_or_default();
+    // 拉丁字母的名字前后留空格（「卡是 FAT32」），中文的不留（「卡是无限制」）。
+    let gap = if filesystem.name.starts_with(|c: char| c.is_ascii()) {
+        " "
+    } else {
+        ""
+    };
     format!(
-        "决定每个平台放到设备上时要不要转换格式。卡是 {}{limit}。",
+        "决定每个平台放到设备上时要不要转换格式。卡是{gap}{}{limit}。",
         filesystem.name
     )
 }
