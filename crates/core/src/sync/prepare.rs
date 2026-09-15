@@ -295,7 +295,13 @@ pub fn prepare_selected(
         .as_deref()
         .filter(|name| roster.find(name).is_none())
         .map(ToString::to_string);
-    let profile = roster.find_or_unclaimed(sublibrary.capability.as_deref());
+    // **这个子库自己的按平台覆盖叠上去**（票 `gui-looks-like-the-design/21`）：只影响这一台，名册里那份不动。
+    let overrides = catalog
+        .capability_overrides(&sublibrary.name)
+        .map_err(|error| format!("中立库读不动：{error}"))?;
+    let profile = roster
+        .find_or_unclaimed(sublibrary.capability.as_deref())
+        .with_overrides(&overrides);
     // **报告里印真正生效的那一份，不是子库上记着的那个名字。** 记着的名字在名册里
     // 找不到时上面已经退回了「不作声称」——这时预览与 `--json` 还印着原来那个名字的话，
     // 用户会以为它替自己查过了，而实际上一条都没查（ADR-0017：矩阵错误比不转换更糟）。

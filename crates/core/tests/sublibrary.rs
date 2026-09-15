@@ -1028,3 +1028,103 @@ fn 名字空着或者已被别的子库用了_当场拦下_改自己那一台不
         Ok(())
     );
 }
+
+// ——— 按平台覆盖能力档案的结论（票 `gui-looks-like-the-design/21`）———
+
+#[test]
+fn 按平台覆盖存进去读得回来_只影响这个子库_整份替换_删了撤销原样回来() {
+    use romcat_core::capability::Override;
+    use std::collections::BTreeMap;
+
+    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+    建子库(&mut catalog, "掌机", None);
+    建子库(&mut catalog, "备份卡", None);
+    let 覆盖 = BTreeMap::from([
+        ("PSV".to_string(), Override::Rezip),
+        ("SFC".to_string(), Override::Keep),
+    ]);
+    catalog
+        .set_capability_overrides("掌机", &覆盖)
+        .expect("写得进");
+    assert_eq!(catalog.capability_overrides("掌机").expect("读得回"), 覆盖);
+    assert!(
+        catalog
+            .capability_overrides("备份卡")
+            .expect("读得回")
+            .is_empty(),
+        "覆盖只影响这个子库"
+    );
+
+    // 再存一份是整份替换，不是往上叠：弹层里改掉的那几行不该还留着。
+    let 换 = BTreeMap::from([("GBA".to_string(), Override::Unpack)]);
+    catalog
+        .set_capability_overrides("掌机", &换)
+        .expect("写得进");
+    assert_eq!(catalog.capability_overrides("掌机").expect("读得回"), 换);
+
+    let removed = catalog
+        .take_sublibrary("掌机")
+        .expect("删得动")
+        .expect("在");
+    assert!(
+        catalog
+            .capability_overrides("掌机")
+            .expect("读得回")
+            .is_empty()
+    );
+    assert!(catalog.restore_sublibrary(&removed).expect("放得回"));
+    assert_eq!(
+        catalog.capability_overrides("掌机").expect("读得回"),
+        换,
+        "撤销删除之后覆盖原样回来"
+    );
+}
+
+#[test]
+fn 排差量预览照这个子库的按平台覆盖判_别的子库照名册() {
+    use romcat_core::capability::Override;
+    use std::collections::BTreeMap;
+
+    let mut 场 = 一张卡::摆好(0);
+    let 另一张 = romcat_core::testing::temp_dir("sublib-override-card");
+    for (name, target) in [("掌机", 场.卡.path()), ("备份卡", 另一张.path())] {
+        let mut sublibrary = Sublibrary::at(name, target, "Pegasus", None);
+        sublibrary.capability = Some("retroarch-exfat".to_string());
+        场.catalog.put_sublibrary(&sublibrary).expect("子库写得进");
+        加规则(&mut 场.catalog, name, "平台=FC");
+    }
+    let 排 = |catalog: &Catalog, name: &str| {
+        romcat_core::sync::prepare(
+            catalog,
+            场.工作区.path(),
+            name,
+            &romcat_core::sync::Request::default(),
+            &romcat_core::task::Handle::new(),
+        )
+        .expect("排得出计划")
+    };
+    assert!(
+        排(&场.catalog, "掌机").desired.unsupported.is_empty(),
+        "RetroArch 的 FC 吃 zip，名册里的结论是原样搬"
+    );
+
+    场.catalog
+        .set_capability_overrides(
+            "掌机",
+            &BTreeMap::from([("FC".to_string(), Override::Unpack)]),
+        )
+        .expect("写得进");
+    // 覆盖成「取出为裸文件」：这几份 zip 是假的、穿不透，解不开——照实报出来，说明覆盖真的生效了。
+    let 覆盖后 = 排(&场.catalog, "掌机").desired;
+    assert_eq!(覆盖后.unsupported.len(), 2, "{:?}", 覆盖后.unsupported);
+    assert!(
+        覆盖后
+            .unsupported
+            .iter()
+            .all(|row| row.platform.as_deref() == Some("FC"))
+    );
+    assert!(
+        排(&场.catalog, "备份卡").desired.unsupported.is_empty(),
+        "另一台没覆盖，照名册"
+    );
+}

@@ -113,6 +113,16 @@ impl Profile {
                 Accepts::Anything => {
                     let _ = writeln!(out, "吃    **不作声称**——没查过。工具于是既不转也不报。");
                 }
+                Accepts::Bare { but } => {
+                    let _ = writeln!(
+                        out,
+                        "吃    {}",
+                        but.map_or_else(
+                            || "裸文件（透明容器一律不吃）".to_string(),
+                            |kind| format!("裸文件与 {}", kind.label())
+                        )
+                    );
+                }
                 Accepts::Only(set) => {
                     let list: Vec<&str> = set.iter().map(String::as_str).collect();
                     let _ = writeln!(out, "吃    {}", list.join(" "));

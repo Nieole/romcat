@@ -1,8 +1,10 @@
 //! 中立库里的**子库**与**选择集**：一台目标设备一行，带它的规则与例外。
 //!
-//! ## 四张表各自回答一个问题
+//! ## 五张表各自回答一个问题
 //!
 //! - `sublibrary`：**这台设备是什么样的**——目标路径、前端格式、容量上限。
+//! - `sublibrary_override`：**这台设备在哪几个平台上不听能力档案的**——按平台覆盖档案的结论
+//!   （票 `gui-looks-like-the-design/21`），只影响这一个子库。
 //! - `sublibrary_rule`：**要什么**，可重放的那一半。存的是**规则的原文**而不是求值
 //!   结果——存结果的话「主库新增的内容下次自动进入」就不成立了，那正是规则存在的理由。
 //! - `sublibrary_exception`：**另外还要 / 偏不要什么**，优先于规则的那一半。
@@ -33,13 +35,19 @@
 //! 在打开时就补上，旧库照样打得开。判据是「旧数据会不会被读错」而不是「文件里多了
 //! 点东西」（见 [`SCHEMA_VERSION`](super::SCHEMA_VERSION) 与挂账 D50）。
 //!
+//! 票 `gui-looks-like-the-design/21` 加的 `sublibrary_override` 也是纯加表：老库上它是空的，读出来就是
+//! 「一个平台都没覆盖」——那正是加它之前的唯一可能。
+//!
 //! 票 20 给这两张表各加了一列（`sublibrary.target_raw`、`sublibrary_manifest.absent`），
 //! 判据仍是同一条：两列在老行上取得到的值与加它们之前的唯一可能完全一致，
 //! 于是旧数据读不错。补列的活在 `add_columns` 里，那个函数的注释写着为什么。
 
+use std::collections::BTreeMap;
+
 use rusqlite::{OptionalExtension, params};
 
 use super::{Catalog, CatalogError};
+use crate::capability::Override;
 use crate::path;
 use crate::sublibrary::{
     Discarded, Exception, ExceptionRow, LoadedSelection, Rule, StoredRule, Sublibrary,
@@ -99,6 +107,18 @@ CREATE TABLE IF NOT EXISTS sublibrary_exception(
     note        TEXT,
     at          INTEGER NOT NULL,
     PRIMARY KEY (sublibrary, variant_key)
+) STRICT;
+
+-- **按平台覆盖**能力档案的结论（票 gui-looks-like-the-design/21、ADR-0017「用户可手动覆盖」）。
+-- 只影响这一个子库：名册里那份档案不动，排计划时叠上去（`Profile::with_overrides`）。
+CREATE TABLE IF NOT EXISTS sublibrary_override(
+    sublibrary TEXT    NOT NULL REFERENCES sublibrary(name),
+    -- 平台名，照变体上记的那个写法存；比的时候由矩阵折大小写。
+    platform   TEXT    NOT NULL,
+    -- `不转换` / `zip` / `裸文件`（`Override::code`）。
+    choice     TEXT    NOT NULL,
+    at         INTEGER NOT NULL,
+    PRIMARY KEY (sublibrary, platform)
 ) STRICT;
 
 -- **清单**：某个子库上次导出的完整记录（ADR-0015）。
@@ -207,6 +227,8 @@ pub struct RemovedSublibrary {
     exceptions: Vec<RemovedException>,
     /// 清单，按路径。
     manifest: Vec<RemovedManifestFile>,
+    /// 按平台覆盖，按平台。
+    overrides: Vec<RemovedOverride>,
 }
 
 impl RemovedSublibrary {
@@ -243,6 +265,17 @@ struct RemovedException {
     kind: String,
     /// 用户写的那句「为什么」。
     note: Option<String>,
+    /// 记下的时刻。
+    at: i64,
+}
+
+/// [`RemovedSublibrary`] 里一条按平台覆盖：`sublibrary_override` 那几列。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemovedOverride {
+    /// 平台名。
+    platform: String,
+    /// 库里那个词的原样——认不出的也留着。
+    choice: String,
     /// 记下的时刻。
     at: i64,
 }
@@ -416,6 +449,7 @@ impl Catalog {
                         rules: Vec::new(),
                         exceptions: Vec::new(),
                         manifest: Vec::new(),
+                        overrides: Vec::new(),
                     })
                 },
             )
@@ -487,11 +521,30 @@ impl Catalog {
                 .map_err(to_err)?;
             removed.manifest = rows.collect::<Result<_, _>>().map_err(to_err)?;
         }
+        {
+            let mut statement = tx
+                .prepare(
+                    "SELECT platform, choice, at FROM sublibrary_override
+                     WHERE sublibrary = ?1 ORDER BY platform",
+                )
+                .map_err(to_err)?;
+            let rows = statement
+                .query_map(params![name], |row| {
+                    Ok(RemovedOverride {
+                        platform: row.get(0)?,
+                        choice: row.get(1)?,
+                        at: row.get(2)?,
+                    })
+                })
+                .map_err(to_err)?;
+            removed.overrides = rows.collect::<Result<_, _>>().map_err(to_err)?;
+        }
         // **先删子表**：外键检查默认是开着的（见 `catalog::content` 里那段注释）。
         for table in [
             "sublibrary_manifest",
             "sublibrary_exception",
             "sublibrary_rule",
+            "sublibrary_override",
         ] {
             // 表名是上面这几个写死的字面量，不来自外面。
             tx.execute(
@@ -602,6 +655,17 @@ impl Catalog {
                         file.absent,
                         file.at,
                     ])
+                    .map_err(to_err)?;
+            }
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO sublibrary_override(sublibrary, platform, choice, at)
+                     VALUES(?1, ?2, ?3, ?4)",
+                )
+                .map_err(to_err)?;
+            for row in &removed.overrides {
+                insert
+                    .execute(params![removed.name, row.platform, row.choice, row.at])
                     .map_err(to_err)?;
             }
         }
@@ -889,6 +953,76 @@ impl Catalog {
             .map_err(|source| self.err(source))?;
         rows.collect::<Result<_, _>>()
             .map_err(|source| self.err(source))
+    }
+
+    /// 读一个子库的**按平台覆盖**（票 `gui-looks-like-the-design/21`）：平台名 → 覆盖成什么。一个都没有是空表。
+    ///
+    /// 库里认不出的那个词（被人手改坏了）**跳过**：跳过就是照名册判，而名册里的结论是有来源的——
+    /// 猜一个覆盖出来替用户做决定，正是 ADR-0017 那句「矩阵错误比不转换更糟」说的那种错。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn capability_overrides(
+        &self,
+        name: &str,
+    ) -> Result<BTreeMap<String, Override>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT platform, choice FROM sublibrary_override
+                 WHERE sublibrary = ?1 ORDER BY platform",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![name], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (platform, choice) = row.map_err(|source| self.err(source))?;
+            if let Some(choice) = Override::from_code(&choice) {
+                out.insert(platform, choice);
+            }
+        }
+        Ok(out)
+    }
+
+    /// 换掉一个子库的**按平台覆盖**：**整份替换**，不是往上叠——目标设置里改回「按档案」的那几行就是没了。
+    ///
+    /// # Errors
+    /// 写库失败，或者这个子库不存在时返回错误。
+    pub fn set_capability_overrides(
+        &mut self,
+        name: &str,
+        overrides: &BTreeMap<String, Override>,
+    ) -> Result<(), CatalogError> {
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        tx.execute(
+            "DELETE FROM sublibrary_override WHERE sublibrary = ?1",
+            params![name],
+        )
+        .map_err(to_err)?;
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO sublibrary_override(sublibrary, platform, choice, at)
+                     VALUES(?1, ?2, ?3, ?4)",
+                )
+                .map_err(to_err)?;
+            let at = super::now_secs();
+            for (platform, choice) in overrides {
+                insert
+                    .execute(params![name, platform, choice.code(), at])
+                    .map_err(to_err)?;
+            }
+        }
+        tx.commit().map_err(to_err)
     }
 
     /// 把一个子库的规则与例外读成一份**选择集**。
