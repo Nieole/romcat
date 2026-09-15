@@ -114,6 +114,10 @@ pub enum Product {
         /// 共多少字节。
         bytes: u64,
     },
+    /// 读好了一台设备的**脚印**（`romcat_core::sync::Footprint`，票 `gui-looks-like-the-design/21`）：目标设置弹层里平台表
+    /// 列哪几个平台、换一份档案当场说得出放不下哪几份、落点预览照哪一份，都从它纯算。整条只读，与
+    /// [`Evaluated`](Self::Evaluated) 一样不必写在认领那一步。装箱是因为它带着选择集里每个变体的成员。
+    Footprint(Box<romcat_core::sync::Footprint>),
 }
 
 /// 这个界面上那张**任务台**。

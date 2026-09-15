@@ -81,7 +81,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use egui::{Align, Layout};
-use romcat_core::capability::Roster;
+use romcat_core::capability::{Override, Roster};
 use romcat_core::catalog::CatalogError;
 use romcat_core::catalog::sublibrary::RemovedSublibrary;
 use romcat_core::report::{decimal_bytes, human_bytes, thousands};
@@ -179,6 +179,9 @@ pub struct Form {
     pub capacity: String,
     /// **能力档案**的名字。空着就是「不作声称」——不转换、不检查。
     pub capability: String,
+    /// 这一台的**按平台覆盖**：平台名 → 覆盖成什么，只影响这个子库（票 `gui-looks-like-the-design/21`）。平台表里改的就是它，
+    /// 「保存」时整份存进中立库（`Catalog::set_capability_overrides`）。「目标设置…」打开时照库里那一份填（[`Screen::edit_target`]）。
+    pub overrides: BTreeMap<String, Override>,
     /// 从现成的子库填草稿时（[`Self::of`]），容量那一格**填进去的那串字与它原来的字节数**。
     ///
     /// 那一格写的是一位小数（`511.1 GB`），读回来是 511,100,000,000——人没碰那一格就按保存的话，上限会被
@@ -202,6 +205,7 @@ impl Form {
                 .map(|(text, _)| text.clone())
                 .unwrap_or_default(),
             capability: sublibrary.capability.clone().unwrap_or_default(),
+            overrides: BTreeMap::new(),
             kept_capacity,
         }
     }
@@ -298,6 +302,14 @@ pub struct Screen {
     vetted: Option<Vetted>,
     /// 名字那一格上一回判的结果（[`NameVetted`]）。
     name_vetted: Option<NameVetted>,
+    /// 每台设备的**按平台覆盖**（`Catalog::capability_overrides`），随 [`Self::reload`] 读。「目标设置…」照它填草稿。
+    overrides: BTreeMap<String, BTreeMap<String, Override>>,
+    /// 目标设置弹层里那一台的**脚印**：为哪一台读的、读回来的那一份（`romcat_core::sync::Footprint`）。
+    footprint: Option<(String, romcat_core::sync::Footprint)>,
+    /// 正在台上读的那一趟脚印：任务号、为哪一台读。**它同时是认领凭据**（与 [`Self::evaluating`] 一个写法）。
+    reading_footprint: Option<(u64, String)>,
+    /// 这一台的脚印读失败或被停过：弹层重开之前不再自己排——不然每一帧都往台上排一趟、每一趟都失败。
+    footprint_failed: Option<String>,
     /// **每台设备**的选择集原文：规则（连库里的序号）、读不懂的那几条、例外。
     ///
     /// 每张卡都摆它自己的规则列表（票 `gui-looks-like-the-design/20`），所以一台不落全读回来
@@ -409,6 +421,10 @@ impl Screen {
             notice: None,
             vetted: None,
             name_vetted: None,
+            overrides: BTreeMap::new(),
+            footprint: None,
+            reading_footprint: None,
+            footprint_failed: None,
             failed: false,
             error: None,
         }
@@ -423,6 +439,15 @@ impl Screen {
             }
             Err(error) => self.error = Some(format!("中立库读不动：{error}")),
         }
+        // 每台设备的按平台覆盖：「目标设置…」照它填草稿。读不动的那一台当它一行都没覆盖（照名册判）。
+        self.overrides = self
+            .list
+            .iter()
+            .filter_map(|sublibrary| {
+                let rows = site.catalog.capability_overrides(&sublibrary.name).ok()?;
+                Some((sublibrary.name.clone(), rows))
+            })
+            .collect();
         // **档案名解到哪一份由核心说**：记着的名字在名册里没有时退回「不作声称」
         // ——卡头写的是真会用上的那一份，不是记着的那个名字。
         match Roster::in_workspace(&self.workspace) {
@@ -756,6 +781,10 @@ impl Screen {
     /// 只丢这一台的：折一趟事实全部设备共用，别人那几张卡的数还是好的。
     pub fn forget(&mut self, site: &Site, name: &str) {
         self.evaluated.remove(name);
+        // 选择集变了，为它读的脚印说的已经不是眼下这一批了。
+        if self.footprint.as_ref().is_some_and(|(of, _)| of == name) {
+            self.footprint = None;
+        }
         if let Some(说一句) = self.drop_survey() {
             self.notice = Some(说一句.to_string());
         }
@@ -942,6 +971,8 @@ impl Screen {
         } else if self.syncing == Some(done.id) {
             self.syncing = None;
             self.settle_sync(site, done);
+        } else if let Some((_, name)) = self.reading_footprint.take_if(|(id, _)| *id == done.id) {
+            self.settle_footprint(name, done);
         }
         // 那一趟刚看过目标（或者往上写过）：卡头说的「在不在位」与清单记着几条跟着换过来。
         self.look_at_targets();
@@ -1256,6 +1287,7 @@ impl Screen {
         look::screen_body(ui, "子库屏体", |ui| self.cards_ui(ui, site, tasks));
         // 「目标设置」开着时盖在上面（[`crate::dialog`]）：遮罩盖住整个窗口，底下那一屏点不动。
         let ctx = ui.ctx().clone();
+        self.read_footprint(site, tasks);
         self.target_dialog_ui(&ctx, site);
         // 「删除子库」那层确认弹层同一个路子；删掉之后底边那条提示条盖在最上面（[`crate::toast`]）。
         self.delete_dialog_ui(&ctx, site);
@@ -1334,6 +1366,8 @@ impl Screen {
         if let Some(sublibrary) = self.list.iter().find(|row| row.name == name) {
             self.form = Form::of(sublibrary);
         }
+        self.form.overrides = self.overrides.get(name).cloned().unwrap_or_default();
+        self.footprint_failed = None;
         self.error = None;
         self.target_dialog = Some(TargetDialog::Of(name.to_string()));
     }
@@ -1345,6 +1379,75 @@ impl Screen {
     pub fn picked_target(&mut self, picked: Option<PathBuf>) {
         if let Some(path) = picked {
             self.form.target = romcat_core::path::display(&path);
+        }
+    }
+
+    /// 目标设置弹层里平台表列哪几个平台：这一台选择集里出现的那几个（读回来的脚印，`sync::Footprint::platforms`）。
+    /// 还在读、或者开的是「新建子库」时是 `None`。
+    #[must_use]
+    pub fn target_platforms(&self) -> Option<Vec<String>> {
+        let Some(TargetDialog::Of(name)) = &self.target_dialog else {
+            return None;
+        };
+        self.footprint
+            .as_ref()
+            .filter(|(of, _)| of == name)
+            .map(|(_, footprint)| footprint.platforms())
+    }
+
+    /// 「目标设置…」开着、手上还没有这一台的脚印时，往任务台上排一趟去读（`sync::prepare::footprint`）。读过的、正在读的、
+    /// 这回读失败过的都不重排。**折事实走一遍全库**，所以不在画帧那条线程上读（与 [`Self::evaluate`] 同一条路）。
+    fn read_footprint(&mut self, site: &Site, tasks: &mut Tasks) {
+        let Some(TargetDialog::Of(name)) = self.target_dialog.clone() else {
+            return;
+        };
+        let have = self.footprint.as_ref().is_some_and(|(of, _)| *of == name);
+        let reading = self
+            .reading_footprint
+            .as_ref()
+            .is_some_and(|(_, of)| *of == name);
+        if have || reading || self.footprint_failed.as_deref() == Some(name.as_str()) {
+            return;
+        }
+        let title = format!("读「{name}」的选择集");
+        let id = match site.catalog.read_only() {
+            Ok(reader) => {
+                let of = name.clone();
+                tasks.queue(title, move |task| {
+                    sync::prepare::footprint(&reader, &of, task)
+                        .map(|footprint| Product::Footprint(Box::new(footprint)))
+                })
+            }
+            Err(CatalogError::NotOnDisk { .. }) => tasks.run_here(title, |task| {
+                sync::prepare::footprint(&site.catalog, &name, task)
+                    .map(|footprint| Product::Footprint(Box::new(footprint)))
+            }),
+            Err(why) => {
+                self.footprint_failed = Some(name);
+                self.error = Some(no_second_connection("读选择集", &why));
+                return;
+            }
+        };
+        self.reading_footprint = Some((id, name));
+    }
+
+    /// 读脚印那一趟回来了。
+    fn settle_footprint(&mut self, name: String, done: Finished<Product>) {
+        match done.ended {
+            Ending::Done(Product::Footprint(footprint))
+            | Ending::Halfway {
+                product: Product::Footprint(footprint),
+                ..
+            } => self.footprint = Some((name, *footprint)),
+            Ending::Done(_) | Ending::Halfway { .. } => {}
+            Ending::Stopped => self.footprint_failed = Some(name),
+            Ending::Failed { step, why } => {
+                self.footprint_failed = Some(name);
+                self.error = Some(format!(
+                    "读选择集{}",
+                    Ending::<()>::Failed { step, why }.render()
+                ));
+            }
         }
     }
 
@@ -2643,6 +2746,14 @@ impl Screen {
             Some(self.form.capability.trim().to_string()).filter(|value| !value.is_empty());
         match site.catalog.put_sublibrary(&sublibrary) {
             Ok(()) => {
+                // **按平台覆盖整份存下**：弹层里改回「按档案」的那几行就是没了（`Catalog::set_capability_overrides`）。
+                if let Err(error) = site
+                    .catalog
+                    .set_capability_overrides(&name, &self.form.overrides)
+                {
+                    self.error = Some(format!("中立库写不动：{error}"));
+                    return false;
+                }
                 // **算过的那份跟着作废**：容量上限改了，报告里的「超出多少、砍谁」
                 // 说的还是上一个上限——卡上会出现「上限写着 1 TB、旁边说超了 200 GiB」。
                 // **台上那趟还没认领的也一样**（[`Self::drop_survey`]）：它折报告用的正是

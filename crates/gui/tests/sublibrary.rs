@@ -3022,3 +3022,78 @@ fn 选择目录交回来的路径与贴进框里走同一条路_取消什么都�
         "取消选择器把框里的字动了"
     );
 }
+
+#[test]
+fn 目标设置打开时去读这一台的选择集_平台表只列选择集里出现的平台() {
+    // 设计稿「只列出这个子库选择集中出现的平台」。读选择集要折一遍全库事实，排上任务台，不在画帧线程上跑。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC,GBA");
+    点一下(&ctx, "目标设置…", |ui| 场.app.ui(ui));
+    画两帧(&ctx, &mut 场);
+    场.等任务跑完();
+    画两帧(&ctx, &mut 场);
+    assert_eq!(
+        场.app.sublibrary().target_platforms(),
+        Some(vec!["GBA".to_string(), "SFC".to_string()]),
+        "平台表该只列选择集里出现的 GBA 与 SFC"
+    );
+}
+
+#[test]
+fn 目标设置里按平台覆盖_保存之后存进中立库只影响这一台_重开读得回来() {
+    use romcat_core::capability::Override;
+
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    let 另一张 = temp_dir("gui-sub-card-2");
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        let form = screen.form_mut();
+        form.name = "备份卡".to_string();
+        form.target = romcat_core::path::display(另一张.path());
+        form.capacity = String::new();
+        assert!(screen.save(site), "{:?}", screen.error());
+    }
+    画两帧(&ctx, &mut 场);
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    场.app
+        .sublibrary_and_site()
+        .0
+        .form_mut()
+        .overrides
+        .insert("SFC".to_string(), Override::Unpack);
+    // 弹层头一帧只量多大、不画出来（`crate::dialog`）：先画两帧再按页脚上那一颗。
+    画两帧(&ctx, &mut 场);
+    点最后正好那一段(&ctx, "保存", |ui| 场.app.ui(ui));
+    assert!(
+        !场.app.sublibrary().target_settings_open(),
+        "存下来之后弹层还开着：{:?}",
+        场.app.sublibrary().error()
+    );
+    let catalog = &场.app.site().catalog;
+    assert_eq!(
+        catalog.capability_overrides("掌机").expect("读得动"),
+        std::collections::BTreeMap::from([("SFC".to_string(), Override::Unpack)])
+    );
+    assert!(
+        catalog
+            .capability_overrides("备份卡")
+            .expect("读得动")
+            .is_empty(),
+        "覆盖只影响这个子库"
+    );
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    assert_eq!(
+        场.app
+            .sublibrary_and_site()
+            .0
+            .form_mut()
+            .overrides
+            .get("SFC"),
+        Some(&Override::Unpack),
+        "重开目标设置时覆盖没读回来"
+    );
+}
