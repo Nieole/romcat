@@ -408,27 +408,44 @@ impl Batch {
     }
 }
 
-/// 一屏分批的**账**：分成几批、一共多少条、前几批盖住多少、按批答得了的有多少。
+/// 一屏分批的**账**：分成几批、一共多少条、前几批可一次处理多少、按批答得了的有多少、
+/// 有多个候选与没有候选的各多少。
 ///
-/// 它**算在核心库里**：屏上那句「前 5 批盖住 12,223 条」是这一屏存在的理由本身
+/// 它**算在核心库里**：屏上那句「前 5 批可直接批量处理 12,223 条」是这一屏存在的理由本身
 /// （18,241 条按 5 秒一条是 25 小时），而算它就是走一遍这几批。界面只负责把这几个数
-/// 摆成一句话（ADR-0005）。
+/// 摆出来（ADR-0005）；库屏工序段裁决那一行「前 N 批可一次处理 N 个」说的也是它。
+///
+/// ## 「前几批」只数能整批通过的
+///
+/// 从前数的是次序上的头几批，而那几批在真库上全是「一条候选都没有」——于是屏上与工序段都说
+/// 「可一次处理」一万多条，其实一条都通过不了。**能整批通过的不足那么多批时，前几批就只有那几批**，
+/// 不拿通过不了的凑数。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Coverage {
     /// 一共分成几批。
     pub batches: usize,
     /// 一共多少条。
     pub total: u64,
-    /// 前几批算「前几批」。
+    /// 「前几批」算了几批：只数**能整批通过**的（[`Batch::passable`]）。
     pub head_batches: usize,
-    /// 前几批盖住多少条。
+    /// 前几批盖住多少条——一次按下去就处理得掉的那些。
     pub head: u64,
-    /// 前几批之外还剩几批。
+    /// 前几批之外还剩几批（能不能整批通过的都算）。
     pub rest_batches: usize,
     /// 前几批之外还剩多少条。
     pub rest: u64,
     /// 其中**按批答得了**的（只有一个候选的那些）有多少条。
     pub answerable: u64,
+    /// 前几批之外，**同样只有一个候选**的还有几批。
+    pub rest_answerable_batches: usize,
+    /// 那几批一共多少条。
+    pub rest_answerable: u64,
+    /// **有多个候选**的有多少条：问的是「选哪个」，只能逐条选。
+    pub multiple: u64,
+    /// **没有候选**的有多少条：没有可供确认的候选，不能整批通过。
+    pub bare: u64,
+    /// 没有候选的那些按**识别结论**各多少条，与 [`State::ALL`] 同序（待确认屏虚线框里「其中未命中 N 个、无判据 N 个」）。
+    pub bare_by_state: [u64; State::ALL.len()],
 }
 
 impl Coverage {
@@ -445,36 +462,48 @@ impl Coverage {
     }
 }
 
-/// 数一遍这几批的账。`head` 是「前几批」算几批。
+/// 数一遍这几批的账。`head` 是「前几批」最多算几批——只数能整批通过的，见 [`Coverage`]。
 #[must_use]
 pub fn coverage(batches: &[Batch], head: usize) -> Coverage {
-    let head_batches = head.min(batches.len());
+    let passable: Vec<&Batch> = batches.iter().filter(|batch| batch.passable()).collect();
+    let head_batches = head.min(passable.len());
+    let head_count: u64 = passable
+        .iter()
+        .take(head_batches)
+        .map(|batch| batch.count)
+        .sum();
+    let total: u64 = batches.iter().map(|batch| batch.count).sum();
+    let answerable: u64 = passable.iter().map(|batch| batch.count).sum();
+    // **没有候选只有一种认法**：`Shape::Bare` 那一支（`Shape::fanout` 交 `Fanout::None` 的也正是它）。
+    let mut bare_by_state = [0u64; State::ALL.len()];
+    for batch in batches {
+        if let Shape::Bare { state, .. } = &batch.shape
+            && let Some(at) = State::ALL.iter().position(|one| one == state)
+        {
+            bare_by_state[at] += batch.count;
+        }
+    }
+    let bare: u64 = bare_by_state.iter().sum();
     Coverage {
         batches: batches.len(),
-        total: batches.iter().map(|batch| batch.count).sum(),
+        total,
         head_batches,
-        head: batches
-            .iter()
-            .take(head_batches)
-            .map(|batch| batch.count)
-            .sum(),
+        head: head_count,
         rest_batches: batches.len() - head_batches,
-        rest: batches
-            .iter()
-            .skip(head_batches)
-            .map(|batch| batch.count)
-            .sum(),
-        answerable: batches
-            .iter()
-            .filter(|batch| batch.passable())
-            .map(|batch| batch.count)
-            .sum(),
+        rest: total - head_count,
+        answerable,
+        rest_answerable_batches: passable.len() - head_batches,
+        rest_answerable: answerable - head_count,
+        multiple: total - answerable - bare,
+        bare,
+        bare_by_state,
     }
 }
 
-/// **一级分批**：把这些条目按依据形状分成几十批，多的排前面。
+/// **一级分批**：把这些条目按依据形状分成几十批，**能整批通过的排前面**，同一类里多的排前面。
 ///
-/// 同数按形状定死顺序：同一份库跑两次，屏上那一列卡片得长得一模一样。
+/// 能整批通过的排前面：人打开这一屏先看见一次按得下去的那几批，「前几批」（[`coverage`]）也就是次序上的
+/// 头几批。同数按形状定死顺序：同一份库跑两次，屏上那一列卡片得长得一模一样。
 #[must_use]
 pub fn batches(items: &[Item]) -> Vec<Batch> {
     let mut grouped: BTreeMap<Shape, Vec<&str>> = BTreeMap::new();
@@ -492,7 +521,12 @@ pub fn batches(items: &[Item]) -> Vec<Batch> {
             shape,
         })
         .collect();
-    out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.shape.cmp(&b.shape)));
+    out.sort_by(|a, b| {
+        b.passable()
+            .cmp(&a.passable())
+            .then_with(|| b.count.cmp(&a.count))
+            .then_with(|| a.shape.cmp(&b.shape))
+    });
     out
 }
 
@@ -855,7 +889,97 @@ mod tests {
         assert_eq!((账.head_batches, 账.head), (1, 30));
         assert_eq!((账.rest_batches, 账.rest), (1, 7));
         assert_eq!(账.answerable, 30, "按批答得了的只有单候选那一批");
+        assert_eq!((账.multiple, 账.bare), (0, 7));
         assert!((账.share() - 30.0 * 100.0 / 37.0).abs() < 1e-9);
+    }
+
+    /// 四种形状各一批：没有候选的最多（30 条），两批只有一个候选（8 条、5 条），一批有多个候选（4 条）。
+    fn 四种形状() -> Vec<Item> {
+        let mut items: Vec<Item> = (0..30)
+            .map(|at| 条目(&format!("库/FC/光秃{at}.zip"), vec![]))
+            .collect();
+        items.extend((0..8).map(|at| {
+            条目(
+                &format!("库/FC/单候选{at}.zip"),
+                vec![候选("MAME", "nes.xml", "名字一字不差")],
+            )
+        }));
+        items.extend((0..5).map(|at| {
+            条目(
+                &format!("库/GBA/单候选{at}.zip"),
+                vec![候选("中文离线源", "dump-2026-09-01", "正题模糊匹配")],
+            )
+        }));
+        items.extend((0..4).map(|at| {
+            条目(
+                &format!("库/FC/多候选{at}.zip"),
+                vec![
+                    候选("No-Intro", "nes.dat", "CRC-32 加大小撞上"),
+                    候选("TOSEC", "nes.dat", "CRC-32 加大小撞上"),
+                ],
+            )
+        }));
+        items
+    }
+
+    #[test]
+    fn 能整批通过的批排在前面_同一类里多的在前() {
+        // 从前只按条数排：真库上头几批全是「一条候选都没有」，于是屏上「前 5 批」、库屏工序段
+        // 「前 5 批可一次处理 N 个」说的都是一条都通过不了的那几批。
+        let batches = batches(&四种形状());
+        let 次序: Vec<(bool, u64)> = batches
+            .iter()
+            .map(|batch| (batch.passable(), batch.count))
+            .collect();
+        assert_eq!(
+            次序,
+            vec![(true, 8), (true, 5), (false, 30), (false, 4)],
+            "能整批通过的排前面，同一类里多的在前",
+        );
+    }
+
+    #[test]
+    fn 前几批只数能整批通过的_另有几批同样只有一个候选() {
+        let batches = batches(&四种形状());
+        let 账 = coverage(&batches, 1);
+        assert_eq!((账.batches, 账.total), (4, 47));
+        assert_eq!(
+            (账.head_batches, 账.head),
+            (1, 8),
+            "前 1 批是能整批通过的那 8 条"
+        );
+        assert_eq!(
+            (账.rest_answerable_batches, 账.rest_answerable),
+            (1, 5),
+            "「另有 1 批（5 条）同样只有一个候选」",
+        );
+        assert_eq!(账.answerable, 13);
+        assert_eq!(账.multiple, 4, "有多个候选的条数");
+        assert_eq!(账.bare, 30, "没有候选的条数");
+        // 没有候选的那些按识别结论各多少（待确认屏虚线框里「其中未命中 N 个、无判据 N 个」）。
+        let 按结论: Vec<(State, u64)> = State::ALL.into_iter().zip(账.bare_by_state).collect();
+        assert_eq!(
+            按结论,
+            vec![
+                (State::Matched, 0),
+                (State::Unmatched, 30),
+                (State::NoEvidence, 0),
+                (State::Skipped, 0),
+            ],
+        );
+        assert_eq!((账.rest_batches, 账.rest), (3, 39));
+
+        // 能整批通过的不足 N 批：前 N 批只数得出那几批，**不拿通过不了的凑数**。
+        let 账 = coverage(&batches, 5);
+        assert_eq!((账.head_batches, 账.head), (2, 13));
+        assert_eq!((账.rest_answerable_batches, 账.rest_answerable), (0, 0));
+        assert_eq!((账.rest_batches, 账.rest), (2, 34));
+
+        // 一批能整批通过的都没有：前几批是零批零条。
+        let 光秃 = super::batches(&四种形状()[..30]);
+        let 账 = coverage(&光秃, 5);
+        assert_eq!((账.head_batches, 账.head), (0, 0));
+        assert_eq!((账.bare, 账.total), (30, 30));
     }
 
     #[test]

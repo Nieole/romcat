@@ -295,7 +295,8 @@ impl Queue {
             .map(|(at, _)| at)
     }
 
-    /// 一屏分批的**账**：分成几批、前 `head` 批盖住多少、按批答得了的多少。
+    /// 一屏分批的**账**：分成几批、前 `head` 批（只数能整批通过的）可一次处理多少、按批答得了的多少、
+    /// 有多个候选与没有候选的各多少（[`Coverage`]）。
     #[must_use]
     pub fn coverage(&self, head: usize) -> Coverage {
         batch::coverage(&self.batches, head)

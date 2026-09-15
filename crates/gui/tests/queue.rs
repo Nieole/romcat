@@ -8,14 +8,17 @@
 
 use egui::widgets::text_edit::TextEditState;
 use romcat_core::catalog::State;
-use romcat_core::report::{human_time, thousands};
+use romcat_core::catalog::identify::Tier;
+use romcat_core::report::thousands;
 use romcat_core::scrape::AnchorKind;
 use romcat_core::scrape::zh::{judge, matched_groups};
 use romcat_core::triage::{self, Axis, Draft, Filter, ItemOrder, Overrides, Scope, Shape};
 use romcat_core::verdict::{self, Anchor, MatchVerdict};
 use romcat_gui::app::{App, View};
+use romcat_gui::clock::Clock;
 use romcat_gui::queue::Mode;
 use romcat_gui::table::ROW_HEIGHT;
+use romcat_gui::tokens::Tokens;
 use romcat_gui::{demo, headless};
 
 mod shared;
@@ -87,19 +90,18 @@ fn 停在(ctx: &egui::Context, app: &mut App, key: &str) {
 
 /// 详情那一栏**滚一趟**，把这一路上画出来的字都收起来。
 ///
-/// 底下那块面板默认 268 点高，而一堆匹配有六个字段、每条各带一整句**依据**——
-/// 一屏摆不下是必然的，而 egui 不画视口之外的东西。所以这里滚的是**真的滚轮事件**
-/// （`表格里画多少行文本输入框都是那几个` 也是这么滚一趟的），每一帧收的仍旧是
-/// 那一帧真的画出来的字。
+/// 逐条那一屏右边那一块详情里，候选卡片、键位提示、一堆匹配六个字段各带一句**依据**——
+/// 一屏摆不下是必然的，而 egui 不画视口之外的东西。所以这里滚的是**真的滚轮事件**，
+/// 每一帧收的仍旧是那一帧真的画出来的字。
 fn 详情滚一趟(ctx: &egui::Context, app: &mut App) -> String {
     const STEPS: u32 = 12;
     let mut out = String::new();
     for step in 0..=STEPS {
         let mut input = headless::input();
-        // 指针停在底下那块面板的左半栏里——滚轮归指针底下那块滚动区。
+        // 指针停在右边那一块详情里——滚轮归指针底下那块滚动区。
         input
             .events
-            .push(egui::Event::PointerMoved(egui::pos2(300.0, 700.0)));
+            .push(egui::Event::PointerMoved(egui::pos2(900.0, 500.0)));
         if step > 0 {
             input.events.push(egui::Event::MouseWheel {
                 unit: egui::MouseWheelUnit::Point,
@@ -229,9 +231,10 @@ fn 三个轴各能一次盖住一批() {
 }
 
 #[test]
-fn 表格里画多少行文本输入框都是那几个() {
-    // ADR-0005 的修订段：中文输入放详情面板，不放表格单元格——表格是虚拟化的，
-    // 正在组字的那一行滚出视口时控件就没了，输入法上屏时没人接。
+fn 待选列表里画多少行文本输入框都是那几个() {
+    // ADR-0005 的修订段：中文输入放弹层与详情，不放待选列表的行里——列表是虚拟化的，
+    // 正在组字的那一行滚出视口时控件就没了，输入法上屏时没人接。「手工指定…」那一层开着，
+    // 数得到文本框（表单那几格）；列表滚一整趟，这个数不许变。
     //
     // 这条断言不看代码长什么样，看的是**跑出来的结果**：egui 每画一个 `TextEdit` 就在
     // `ctx.data()` 里留下一份 `TextEditState`，于是「表格里有没有文本框」等价于
@@ -240,8 +243,17 @@ fn 表格里画多少行文本输入框都是那几个() {
         let ctx = headless::context();
         let mut app = 界面(rows);
         // **表格在逐条那一屏上**：批优先是默认的（票 `gui-redesign/09`），
-        // 而这条断言测的是那张虚拟化的表。
-        app.queue_and_site().0.show_one_by_one();
+        // 而这条断言测的是那张虚拟化的表。**看整个队列**（收起默认展开的头一批）：只看头一批的话，
+        // 光标停的那一条落在哪一批跟着规模变——能整批通过的排到前面之后，大的那一份头一批是中文离线源那批，
+        // 详情里多出匹配那一堆的备注框，数的就不是表格了。
+        {
+            let (screen, _) = app.queue_and_site();
+            if let Some(scope) = screen.scope() {
+                screen.open_batch(&scope.shape);
+            }
+            screen.show_one_by_one();
+            screen.open_manual();
+        }
         跑(&ctx, &mut app, 3);
         // 滚一整趟：虚拟化的表格会把不同的行画出来，若单元格里有文本框，这个数会涨。
         const STEPS: u32 = 24;
@@ -261,7 +273,7 @@ fn 表格里画多少行文本输入框都是那几个() {
         少,
         多,
         "队列从 200 条涨到 {} 条、还滚了一整趟，文本输入框却从 {少} 个变成 {多} 个\
-         ——那说明有文本框长在表格单元格里",
+         ——那说明有文本框长在待选列表的行里",
         demo::QUEUE_ROWS,
     );
 }
@@ -714,7 +726,23 @@ fn 二级下钻之后整批拒绝只作用于那一组() {
     let ctx = headless::context();
     let mut app = 界面(demo::QUEUE_ROWS);
     let 原有 = app.queue().queue().pending();
-    let batch = app.queue().queue().batches()[0].clone();
+    // 挑**分得出不止一个目录**的那一批：能整批通过的排在前面之后（票 `gui-looks-like-the-design/18`），头一批
+    // 是单候选的一小批，只落在一个目录里，二级测不出来。
+    let batch = app
+        .queue()
+        .queue()
+        .batches()
+        .iter()
+        .find(|batch| {
+            app.queue()
+                .queue()
+                .drill(&Scope::whole(batch.shape.clone()), Axis::Directory)
+                .rows
+                .len()
+                > 1
+        })
+        .cloned()
+        .expect("合成数据里该有一批落在好几个目录里");
     展开(&mut app, &batch.shape);
     跑(&ctx, &mut app, 1);
     let whole = app.queue().scope().expect("展开了就该有作用范围");
@@ -1757,22 +1785,24 @@ fn 逐条看整个队列(ctx: &egui::Context, app: &mut App) {
     跑(ctx, app, 2);
 }
 
-/// 屏上那张表**画出来的第一行**是哪个变体。
+/// 屏上那一栏待选列表**画出来的第一条**是哪个文件名。
 ///
-/// 表头最后一格写的就是「容量」两个字（[`ItemOrder::Bytes`] 的标签），而这一屏上
-/// 光是这两个字的那一段只有它一处——别处印的是「…｜容量 4.0 KiB」那种整句。
-/// 紧跟着画出来的那一段就是第一行的变体键：表格按列画，那一列是第一列。
+/// 列表在左边、先画，一条头一行是文件名：按画出来的次序，头一段正好是队列里某一条文件名的，就是列表的第一条
+/// （右边详情里那个文件名画在它后头）。
 ///
 /// **看屏上而不是看 `selected()[0]`**：这一条要证的正是「画出来的换了」。
-fn 表上第一行(屏上: &str) -> String {
-    let mut lines = 屏上.lines();
-    lines
-        .by_ref()
-        .position(|line| line == ItemOrder::Bytes.label())
-        .unwrap_or_else(|| panic!("屏上没有那张表的表头：\n{屏上}"));
-    lines
-        .next()
-        .unwrap_or_else(|| panic!("表头底下一行都没画：\n{屏上}"))
+fn 列表上第一条(app: &App, 屏上: &str) -> String {
+    let 名字: std::collections::BTreeSet<&str> = app
+        .queue()
+        .queue()
+        .selected()
+        .iter()
+        .map(romcat_core::triage::Item::name)
+        .collect();
+    屏上
+        .lines()
+        .find(|line| 名字.contains(line))
+        .unwrap_or_else(|| panic!("屏上一条待选的都没画：\n{屏上}"))
         .to_string()
 }
 
@@ -1819,47 +1849,45 @@ fn 按在(ctx: &egui::Context, app: &mut App, 位置: egui::Pos2) -> String {
 }
 
 #[test]
-fn 点一下表头屏上画出来的第一行就换了() {
+fn 点一下列表头上的排序屏上画出来的第一条就换了() {
     // 挂账 `D153`：真机上 16,656 条待裁决，而次序**永远是变体的键**——想按容量或按
-    // 结论找出该先动的那几条，从前只能靠选择器缩小范围。
+    // 结论找出该先动的那几条，从前只能靠选择器缩小范围。逐条那一屏照稿两栏之后
+    // （票 `gui-looks-like-the-design/18`），排序收在待选列表栏头那一颗里。
     let ctx = headless::context();
     let mut app = 界面(demo::QUEUE_ROWS);
     逐条看整个队列(&ctx, &mut app);
 
-    let 先 = 表上第一行(&画出来的字(&headless::frame(
-        &ctx,
-        headless::input(),
-        |ui| app.ui(ui),
-    )));
+    let 头一帧 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    let 先 = 列表上第一条(&app, &头一帧);
     assert_eq!(
         app.queue().queue().order(),
         (ItemOrder::Key, false),
         "列出来那一下就是按变体的键正着排（`queue_rows` 的 `ORDER BY v.key`）",
     );
 
-    // 点「变体 ▲」——正在排的那一列再点一次就**翻方向**。
-    let 屏上 = 点一下(&ctx, &mut app, &format!("{} ▲", ItemOrder::Key.label()));
+    // 点栏头那颗「变体 ▲」打开那几列，再点正在排的「变体」——正在排的那一列再点一次就**翻方向**。
+    let _ = 点正好那一颗(&ctx, &mut app, &format!("{} ▲", ItemOrder::Key.label()));
+    let 屏上 = 点正好那一颗(&ctx, &mut app, ItemOrder::Key.label());
     assert_eq!(
         app.queue().queue().order(),
         (ItemOrder::Key, true),
         "点的是正在排的那一列，该翻方向：\n{屏上}",
     );
-    let 后 = 表上第一行(&屏上);
-    assert_ne!(先, 后, "屏上画出来的第一行没换：\n{屏上}");
+    let 后 = 列表上第一条(&app, &屏上);
+    assert_ne!(先, 后, "屏上画出来的第一条没换：\n{屏上}");
     assert!(
-        屏上.contains(&format!("{} ▼", ItemOrder::Key.label())),
-        "表头上那个箭头没跟着翻：\n{屏上}",
+        屏上
+            .lines()
+            .any(|line| line == format!("{} ▼", ItemOrder::Key.label())),
+        "栏头那颗上的箭头没跟着翻：\n{屏上}",
     );
 
-    // **屏上那一行就是排出来的第一条**：两处对不上的话，人按 Y/N 裁的不是他看的那一条。
+    // **屏上那一条就是排出来的第一条**：两处对不上的话，人按 Y/N 裁的不是他看的那一条。
     let items = app.queue().queue().selected();
-    assert_eq!(
-        后, items[0].variant.key,
-        "画出来的第一行不是排在第一位的那条"
-    );
+    assert_eq!(后, items[0].name(), "画出来的第一条不是排在第一位的那条");
     assert_eq!(
         先,
-        items[items.len() - 1].variant.key,
+        items[items.len() - 1].name(),
         "倒过来之后，原来的第一条该落到最后一条",
     );
 }
@@ -2181,14 +2209,64 @@ fn 画一帧(ctx: &egui::Context, app: &mut App) -> String {
     画出来的字(&headless::frame(ctx, headless::input(), |ui| app.ui(ui)))
 }
 
-/// 裁决记录里这一批**在册**时那一行该写成什么：第几批、什么时候落的、多少条、撤过没有。
+/// 裁决记录里这一批的**主行**：第几批裁决、多少条（拿主意的人 2026-09-15 定，票 `gui-looks-like-the-design/18`）。
+/// 撤没撤过不在这一行的字里——撤过的那一行划删除线、旁边一枚「已撤销」。
 fn 在册那一行(batch: &verdict::Batch) -> String {
+    format!("第 {} 批裁决 · {} 条", batch.id, thousands(batch.rows))
+}
+
+/// 裁决记录里这一批的**副行**：什么时候落的（本地时间的短格式，与任务屏历史、库屏「上次扫描」同一处画，
+/// `clock::Clock`）、裁成什么。
+fn 副行(batch: &verdict::Batch) -> String {
     format!(
-        "第 {} 批裁决 · {} · {} 条 · 在册",
-        batch.id,
-        human_time(batch.decided_at),
-        thousands(batch.rows),
+        "{} · {}",
+        Clock::System.short(batch.decided_at),
+        batch.summary
     )
+}
+
+/// 这一帧里**正好**写着 `那几个字` 的每一段字画在哪儿（左上角），按画出来的次序。
+fn 正好是它的每一处(output: &egui::FullOutput, 那几个字: &str) -> Vec<egui::Pos2> {
+    fn 找(shape: &egui::epaint::Shape, 那几个字: &str, 每一处: &mut Vec<egui::Pos2>) {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == 那几个字 => {
+                每一处.push(text.pos);
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    找(one, 那几个字, 每一处);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut 每一处 = Vec::new();
+    for clipped in &output.shapes {
+        找(&clipped.shape, 那几个字, &mut 每一处);
+    }
+    每一处
+}
+
+/// 这一帧里**含着** `那几个字` 的每一段字画在哪儿（左上角），按画出来的次序。
+fn 含着它的每一处(output: &egui::FullOutput, 那几个字: &str) -> Vec<egui::Pos2> {
+    fn 找(shape: &egui::epaint::Shape, 那几个字: &str, 每一处: &mut Vec<egui::Pos2>) {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.text().contains(那几个字) => {
+                每一处.push(text.pos);
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    找(one, 那几个字, 每一处);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut 每一处 = Vec::new();
+    for clipped in &output.shapes {
+        找(&clipped.shape, 那几个字, &mut 每一处);
+    }
+    每一处
 }
 
 /// 沉淀库里点名的这一批。
@@ -2252,14 +2330,14 @@ fn 撤得掉任意一批裁决不只是最后一批_撤完那些变体当场回�
     // **当场回到队列里**：不重新列、不重跑识别，逐条那张表下一帧就画得出它。
     let 屏上 = 画一帧(&ctx, &mut app);
     assert!(
-        屏上.lines().any(|line| line == 键(丙名)),
+        屏上.lines().any(|line| line == 丙名),
         "撤完丙那一批，丙没回到队列里：\n{屏上}",
     );
     assert_eq!(app.queue().queue().pending(), 1, "只该回来丙那一条");
     // 别的批一条不受牵连：甲、乙那两批照旧在册，它们的变体照旧不在队列里。
     for 名字 in [甲名, 乙名] {
         assert!(
-            !屏上.lines().any(|line| line == 键(名字)),
+            !屏上.lines().any(|line| line == 名字),
             "撤的是丙那一批，{名字} 却也回到了队列里：\n{屏上}",
         );
     }
@@ -2292,10 +2370,15 @@ fn 撤一批被后来还在册的一批盖住时当场拒并说清是哪一批�
         那句话.contains(&format!("第 {乙那一批} 批")),
         "那句话没说清是哪一批盖的：{那句话}",
     );
-    let 屏上 = 画一帧(&ctx, &mut app);
+    // **画在裁决记录那块抽屉里**：逐条那一屏的详情里也画着同一句（整屏那一处），只看「屏上有没有」证不出它在抽屉里。
+    let out = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&out);
+    let 抽屉左沿 = headless::VIEWPORT[0] - Tokens::builtin().layout.drawer_width;
     assert!(
-        屏上.lines().any(|line| line.contains(&那句话)),
-        "拒下的那句话没画在屏上：\n{屏上}",
+        含着它的每一处(&out, &那句话)
+            .iter()
+            .any(|at| at.x > 抽屉左沿),
+        "拒下的那句话没画在裁决记录那块抽屉里：\n{屏上}",
     );
     // **拒下了就一个字都不动**：甲那一批照旧在册，甲照旧不在队列里。
     assert!(
@@ -2304,13 +2387,17 @@ fn 撤一批被后来还在册的一批盖住时当场拒并说清是哪一批�
             .any(|line| line == 在册那一行(&册子上的(&app, 甲那一批))),
         "撤不动的那一批在裁决记录上不该变样：\n{屏上}",
     );
+    assert!(
+        !册子上的(&app, 甲那一批).undone() && !屏上.lines().any(|line| line == "已撤销"),
+        "撤不动的那一批被标成了已撤销：\n{屏上}",
+    );
     assert_eq!(
         app.queue().queue().pending(),
         裁完剩下的,
         "拒下了却有变体回到了队列里",
     );
     assert!(
-        !屏上.lines().any(|line| line == 键(甲名)),
+        !屏上.lines().any(|line| line == 甲名),
         "拒下了，甲却回到了队列里：\n{屏上}",
     );
 
@@ -2325,28 +2412,41 @@ fn 撤一批被后来还在册的一批盖住时当场拒并说清是哪一批�
         );
     }
     跑(&ctx, &mut app, 1);
-    let 屏上 = 画一帧(&ctx, &mut app);
-    // **撤过的那两批仍在裁决记录上**，标着已撤，旁边是「放回」而不是「撤销」。
+    let out = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&out);
+    // **撤过的那两批仍在裁决记录上**，标着已撤销，旁边是「放回」而不是「撤销」。
     for batch in [甲那一批, 乙那一批] {
         let 册子 = 册子上的(&app, batch);
-        let 那一行 = format!(
-            "第 {batch} 批裁决 · {} · 1 条 · 已撤（{}）",
-            human_time(册子.decided_at),
-            human_time(册子.undone_at.expect("撤过了就该有已撤的时刻")),
-        );
-        assert!(
-            屏上.lines().any(|line| line == 那一行),
-            "撤过的那一批从裁决记录上消失了，或者没标已撤：「{那一行}」\n{屏上}",
-        );
+        assert!(册子.undone(), "第 {batch} 批该是撤过的");
+        for 那一行 in [在册那一行(&册子), 副行(&册子)] {
+            assert!(
+                屏上.lines().any(|line| line == 那一行),
+                "撤过的那一批从裁决记录上消失了：「{那一行}」\n{屏上}",
+            );
+        }
     }
     assert_eq!(
-        屏上.lines().filter(|line| *line == "放回").count(),
+        屏上.lines().filter(|line| *line == "已撤销").count(),
         2,
-        "撤过的两批旁边该各有一颗「放回」：\n{屏上}",
+        "撤过的两批旁边该各有一枚「已撤销」：\n{屏上}",
     );
-    assert!(
-        !屏上.lines().any(|line| line == "撤销"),
-        "两批都撤过了，还摆着「撤销」：\n{屏上}",
+    // 数抽屉里的：屏底那条提示条（刚撤完那一批）自己也带一颗「放回」。
+    let 抽屉左沿 = headless::VIEWPORT[0] - Tokens::builtin().layout.drawer_width;
+    let 抽屉里的 = |那几个字: &str| {
+        正好是它的每一处(&out, 那几个字)
+            .iter()
+            .filter(|at| at.x > 抽屉左沿)
+            .count()
+    };
+    assert_eq!(
+        抽屉里的("放回"),
+        2,
+        "撤过的两批旁边该各有一颗「放回」：\n{屏上}"
+    );
+    assert_eq!(
+        抽屉里的("撤销"),
+        0,
+        "两批都撤过了，还摆着「撤销」：\n{屏上}"
     );
     assert_eq!(
         app.queue().queue().pending(),
@@ -2369,7 +2469,7 @@ fn 屏上一批变体与一批裁决两处措辞分得开() {
 
     let 分批那一句 = 屏上
         .lines()
-        .find(|line| line.starts_with("一级 · "))
+        .find(|line| line.starts_with("可整批处理的排在前面 · "))
         .unwrap_or_else(|| panic!("屏上没有一级分批那一句：\n{屏上}"));
     assert!(
         分批那一句.contains("批变体") && !分批那一句.contains("裁决"),
@@ -2381,11 +2481,10 @@ fn 屏上一批变体与一批裁决两处措辞分得开() {
             .any(|line| line == 在册那一行(&册子上的(&app, 落下的))),
         "裁决记录里没有刚落下的那一批：\n{屏上}",
     );
+    // 落下之后那一句走屏底的提示条（拿主意的人 2026-09-15 定，照稿）：说几条，不说「第 N 批」。
     assert!(
-        屏上
-            .lines()
-            .any(|line| line == format!("撤回第 {落下的} 批裁决")),
-        "落下之后那颗按钮没说清撤的是一批裁决：\n{屏上}",
+        屏上.lines().any(|line| line == "已拒绝 1 条"),
+        "落下之后屏底没有那条提示条：\n{屏上}",
     );
     for line in 屏上.lines() {
         if line.contains(&format!("第 {落下的} 批")) {
@@ -2414,7 +2513,7 @@ fn 裁决记录里那颗撤销与放回按下去就是撤销与放回() {
         "按了「撤销」，那一批却没撤：\n{屏上}",
     );
     assert!(
-        屏上.lines().any(|line| line == 键(丙名)),
+        屏上.lines().any(|line| line == 丙名),
         "撤完了，丙没回到队列里：\n{屏上}",
     );
 
@@ -2427,7 +2526,753 @@ fn 裁决记录里那颗撤销与放回按下去就是撤销与放回() {
         "放回之后那一行该回到在册：\n{屏上}",
     );
     assert!(
-        !屏上.lines().any(|line| line == 键(丙名)),
+        !屏上.lines().any(|line| line == 丙名),
         "放回之后丙该再退出队列：\n{屏上}",
+    );
+}
+
+// ——— 照稿重排（票 `gui-looks-like-the-design/18`）———
+
+#[test]
+fn 正文头上三格_前几批只数能整批通过的_与库屏工序段同一个数_另两格是有多个候选与没有候选() {
+    // 设计稿待确认屏正文头上那三格（`.qsum`）。头一格与库屏工序段「前 N 批可一次处理 N 个」出自同一处
+    // （`triage::head_coverage` 与 `Queue::coverage` 走的是同一副），不另造一份数。
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    跑(&ctx, &mut app, 2);
+    let 账 = app.queue().queue().coverage(triage::HEADLINE_BATCHES);
+    let index = verdict::Index::load(&app.site().store, &app.site().library_identity)
+        .expect("读得出沉淀库");
+    assert_eq!(
+        triage::head_coverage(&app.site().catalog, &index, triage::HEADLINE_BATCHES)
+            .expect("算得出前几批"),
+        账,
+        "与库屏工序段说的不是同一个数",
+    );
+    assert!(
+        账.head > 0 && 账.multiple > 0 && 账.bare > 0,
+        "合成数据里三样都该有：{账:?}",
+    );
+
+    let 屏上 = 画一帧(&ctx, &mut app);
+    let 行: Vec<&str> = 屏上.lines().collect();
+    for (数, 说明) in [
+        (
+            账.head,
+            format!("前 {} 批可直接批量处理 · 每条只有一个候选", 账.head_batches),
+        ),
+        (账.multiple, "有多个候选 · 需要逐条选择".to_string()),
+        (账.bare, "没有候选 · 无法批量处理".to_string()),
+    ] {
+        let at = 行
+            .iter()
+            .position(|line| *line == 说明)
+            .unwrap_or_else(|| panic!("屏上没有「{说明}」：\n{屏上}"));
+        assert_eq!(
+            at.checked_sub(1).map(|up| 行[up]),
+            Some(thousands(数).as_str()),
+            "「{说明}」上面那个数不对：\n{屏上}",
+        );
+    }
+    assert!(
+        !屏上.contains("批变体盖住"),
+        "旧的那句「前 N 批变体盖住…」还在：\n{屏上}",
+    );
+}
+
+#[test]
+fn 屏头右侧照稿_三枚置信度标签_按批逐条那一对_裁决记录() {
+    // 设计稿 `.scrhead`：高 / 中 / 低三枚标签、「按批｜逐条」、「裁决记录 N」。原来那句「队列 N 条待裁决；选中 N 条 ·
+    // N 条候选」与第四枚「没有候选 N」照稿删了（拿主意的人 2026-09-15）：待确认几个写在副标题上，没有候选几个写在
+    // 正文第三格；选中几条在逐条那一屏上写着。
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    跑(&ctx, &mut app, 2);
+    let 屏上 = 画一帧(&ctx, &mut app);
+    for (tier, count) in app.queue().queue().tiers().to_vec() {
+        let 那一枚 = format!("{} {}", tier.label(), thousands(count));
+        assert_eq!(
+            屏上.lines().any(|line| line == 那一枚),
+            tier != Tier::Unidentified,
+            "「{那一枚}」该不该在屏头上：\n{屏上}",
+        );
+    }
+    assert!(
+        !屏上.contains("条待裁决"),
+        "屏头上还写着「队列 N 条待裁决」：\n{屏上}"
+    );
+    assert!(
+        屏上.lines().any(|line| line == "裁决记录 0"),
+        "屏头上没有「裁决记录 N」：\n{屏上}",
+    );
+    assert!(
+        屏上.lines().any(|line| line == "重新列队列"),
+        "屏头最右那颗「重新列队列」没了：\n{屏上}",
+    );
+    assert!(
+        !屏上.lines().any(|line| line.starts_with("沉淀库 ")),
+        "「沉淀库 在哪」挪进裁决记录抽屉的页脚了，屏头上不该还有：\n{屏上}",
+    );
+
+    let _ = 点正好那一颗(&ctx, &mut app, "逐条");
+    assert_eq!(app.queue().mode(), Mode::OneByOne, "按了「逐条」");
+    assert!(
+        app.queue().scope().is_none(),
+        "屏头那颗「逐条」看的是整个队列，不是默认展开的头一批",
+    );
+    let _ = 点正好那一颗(&ctx, &mut app, "按批");
+    assert_eq!(app.queue().mode(), Mode::Batches, "按了「按批」");
+}
+
+#[test]
+fn 裁决记录是贴右边的一块抽屉_开着照样裁得动_关闭收得起来() {
+    // 设计稿 `aside.drawer#lots`：浮在正文上、贴右边、宽 380，不是模态（拿主意的人 2026-09-15 定，收挂单 `Q625`、
+    // `Q661`）。开着的时候照样在队列上裁、撤了看队列变。
+    let ctx = headless::context();
+    let mut app = App::new(有两份重复拷贝的现场(), 工作目录());
+    let 丙那一批 = 逐条拒(&ctx, &mut app, &键(丙名));
+    打开裁决记录(&ctx, &mut app);
+
+    let out = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&out);
+    let 左沿 = headless::VIEWPORT[0] - Tokens::builtin().layout.drawer_width;
+    for 那一段 in [
+        "裁决记录".to_string(),
+        "撤销后，相关变体会回到待确认队列".to_string(),
+        在册那一行(&册子上的(&app, 丙那一批)),
+        副行(&册子上的(&app, 丙那一批)),
+        "关闭".to_string(),
+        format!("沉淀库 {}", app.site().store.location()),
+    ] {
+        let 在 = shared::正好那一段画在哪儿(&out, &那一段)
+            .unwrap_or_else(|| panic!("抽屉里没有「{那一段}」：\n{屏上}"));
+        assert!(
+            在.x > 左沿,
+            "「{那一段}」没画在右边那一块抽屉里（x = {}，抽屉左沿 {左沿}）",
+            在.x
+        );
+    }
+
+    // **不是模态**：开着的时候键盘照样归逐条流，按 `N` 就落下一批，抽屉里跟着多一行。
+    let 乙那一批 = 逐条拒(&ctx, &mut app, &键(乙名));
+    let 屏上 = 画一帧(&ctx, &mut app);
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line == 在册那一行(&册子上的(&app, 乙那一批))),
+        "抽屉开着时落下的那一批没列进去：\n{屏上}",
+    );
+
+    let 屏上 = 点正好那一颗(&ctx, &mut app, "关闭");
+    assert!(
+        !屏上
+            .lines()
+            .any(|line| line == "撤销后，相关变体会回到待确认队列"),
+        "按了「关闭」，抽屉还开着：\n{屏上}",
+    );
+}
+
+#[test]
+fn 还没识别时的空态照稿_暂无待确认项_几个变体还没识别_一颗运行识别() {
+    // 设计稿 `#q-empty`。词照词表写「还没识别」（拿主意的人 2026-09-14 定），中文常规体不加粗。
+    use shared::档;
+
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[
+            ("FC", "甲.zip", 档::还没识别),
+            ("FC", "乙.zip", 档::还没识别),
+        ],
+        std::env::temp_dir().join("romcat-测试-队列-空态"),
+    );
+    app.show_view(View::Queue);
+    跑(&ctx, &mut app, 2);
+    assert!(!app.queue().queue().identified(), "前提：一趟识别都没跑过");
+    let 屏上 = 画一帧(&ctx, &mut app);
+    for 那一句 in [
+        "暂无待确认项：2 个变体还没识别",
+        "识别完成后，无法自动确定的结果会出现在这里，并按判定依据自动分批。",
+        "运行识别",
+        "与「库」页面工序中的「识别」是同一个操作。",
+    ] {
+        assert!(
+            屏上.lines().any(|line| line == 那一句),
+            "空态上没有「{那一句}」：\n{屏上}",
+        );
+    }
+}
+
+/// 按批那一屏的正文**真的滚一趟**（滚轮事件），把一路上画出来的字按**头一回画出来的先后**收起来，一段一行、不重复。
+///
+/// 正文比一屏长（展开那一批、虚线框、框下那几批），egui 不画视口之外的东西。先滚回顶上，再一步步往下滚到底。
+fn 正文滚一趟(ctx: &egui::Context, app: &mut App) -> String {
+    const STEPS: u32 = 30;
+    let 指针 = egui::pos2(760.0, 500.0);
+    let 滚 = |dy: f32| {
+        let mut input = headless::input();
+        input.events.push(egui::Event::PointerMoved(指针));
+        input.events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, dy),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        input
+    };
+    for _ in 0..STEPS {
+        headless::frame(ctx, 滚(10_000.0), |ui| app.ui(ui));
+    }
+    let mut 收到的: Vec<String> = Vec::new();
+    for step in 0..=STEPS {
+        let input = if step == 0 {
+            headless::input()
+        } else {
+            滚(-120.0)
+        };
+        let 这一帧 = 画出来的字(&headless::frame(ctx, input, |ui| app.ui(ui)));
+        for line in 这一帧.lines() {
+            if !收到的.iter().any(|seen| seen == line) {
+                收到的.push(line.to_owned());
+            }
+        }
+    }
+    收到的.join("\n")
+}
+
+#[test]
+fn 批列表照稿_能整批通过的先摆前几批_虚线框写着没有候选几个_框下是不能整批通过的批() {
+    // 设计稿 `#batches` 与 `.bare`（拿主意的人 2026-09-15 定）：能整批通过的照稿画成卡片，只先摆前几批，
+    // 余下的收成一句「另有 N 批（M 条）同样只有一个候选。」；接着是「没有候选」那个虚线框；框下列出不能整批通过的批，
+    // 样式同卡片，主按钮是「逐条处理」，留「全部拒绝」，不给「全部通过」。数全是核心库那一处交的（`Coverage`）。
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    跑(&ctx, &mut app, 2);
+    let 账 = app.queue().queue().coverage(triage::HEADLINE_BATCHES);
+    let batches = app.queue().queue().batches().to_vec();
+    // 一屏摆不下：真的滚一趟，按头一回画出来的先后收字（egui 不画视口之外的东西）。
+    let 屏上 = 正文滚一趟(&ctx, &mut app);
+    let 行: Vec<&str> = 屏上.lines().collect();
+    let 第几行 = |那一句: &str| {
+        行.iter()
+            .position(|line| *line == 那一句)
+            .unwrap_or_else(|| panic!("屏上没有「{那一句}」：\n{屏上}"))
+    };
+
+    let 框头 = 第几行(&format!("没有候选 · {} 个", thousands(账.bare)));
+    let 分布: Vec<String> = State::ALL
+        .iter()
+        .zip(账.bare_by_state)
+        .filter(|(_, count)| *count > 0)
+        .map(|(state, count)| format!("{} {} 个", state.label(), thousands(count)))
+        .collect();
+    let 说明 = format!(
+        "其中{}。它们没有可供确认的候选，因此不能批量通过。",
+        分布.join("、")
+    );
+    assert!(第几行(&说明) > 框头, "虚线框里那句说明该在框头底下");
+    assert!(
+        行.contains(&"逐条指定"),
+        "虚线框里没有「逐条指定」：\n{屏上}"
+    );
+    if 账.rest_answerable_batches > 0 {
+        let 另有 = 第几行(&format!(
+            "另有 {} 批（{} 条）同样只有一个候选。",
+            thousands(账.rest_answerable_batches as u64),
+            thousands(账.rest_answerable),
+        ));
+        assert!(另有 < 框头, "「另有 N 批同样只有一个候选」该在虚线框上面");
+    }
+
+    // 框下是不能整批通过的批：一条候选都没有的那一批，卡头第二行（为什么没定下来）画在虚线框底下。
+    let 不能过 = batches
+        .iter()
+        .find(|batch| {
+            matches!(
+                &batch.shape,
+                Shape::Bare {
+                    reason: Some(_),
+                    ..
+                }
+            )
+        })
+        .cloned()
+        .expect("合成数据里该有一批说得出为什么没定下来");
+    let Shape::Bare {
+        reason: Some(理由),
+    ..
+    } = &不能过.shape
+    else {
+        unreachable!()
+    };
+    assert!(第几行(理由) > 框头, "不能整批通过的那一批该摆在虚线框底下");
+
+    展开(&mut app, &不能过.shape);
+    跑(&ctx, &mut app, 1);
+    let 屏上 = 正文滚一趟(&ctx, &mut app);
+    assert!(
+        屏上.lines().any(|line| line == "全部拒绝"),
+        "不能整批通过的那一批照样拒得了：\n{屏上}"
+    );
+    assert!(
+        !屏上.lines().any(|line| line.starts_with("全部通过")),
+        "不能整批通过的那一批不给「全部通过」：\n{屏上}",
+    );
+    assert!(
+        屏上.lines().any(|line| line == "逐条处理"),
+        "不能整批通过的那一批主按钮是「逐条处理」：\n{屏上}"
+    );
+}
+
+#[test]
+fn 批卡照稿_卡头是形状各段与共同依据_展开后判定依据是那句原话_样本旁边换一组() {
+    // 设计稿 `.batch`（拿主意的人 2026-09-15 定）：卡头第一行照依据形状各段排、第二行放那句共同依据；展开后判定依据那一框
+    // 画「判定依据：」加 `Batch::why` 原话，不另编句子；样本旁边那颗叫「换一组」（词表**批**不拿来说样本）。
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    跑(&ctx, &mut app, 2);
+    let batch = app.queue().queue().batches()[0].clone();
+    assert!(batch.passable(), "能整批通过的排在前面，头一批该是它");
+    let Shape::Candidates {
+        source,
+        dat,
+        convention,
+        fanout,
+        ..
+    } = &batch.shape
+    else {
+        panic!("头一批该是有候选的那一支：{:?}", batch.shape);
+    };
+    let 屏上 = 画一帧(&ctx, &mut app);
+    let mut 该有 = vec![
+        source.clone(),
+        dat.clone(),
+        convention.label().to_string(),
+        fanout.label().to_string(),
+        format!("判定依据：{}", batch.why()),
+        format!("全部通过（{} 条）", thousands(batch.count)),
+    ];
+    该有.extend(batch.evidence.clone());
+    for 那一段 in 该有.iter().map(String::as_str).chain([
+        "逐条处理",
+        "全部拒绝",
+        "换一组",
+        "细分",
+        "按目录",
+        "按候选作品",
+        "按命名规律",
+    ]) {
+        assert!(
+            屏上.lines().any(|line| line == 那一段),
+            "屏上没有「{那一段}」：\n{屏上}"
+        );
+    }
+    assert!(
+        !屏上.contains("换一组样本"),
+        "样本旁边那颗照稿叫「换一组」：\n{屏上}"
+    );
+
+    let 上一组 = app.queue().samples();
+    let _ = 点正好那一颗(&ctx, &mut app, "换一组");
+    assert_ne!(app.queue().samples(), 上一组, "按了「换一组」，样本没换");
+}
+
+#[test]
+fn 逐条照稿两栏_左边待选列表_右边详情有候选卡片四颗按钮与键位提示() {
+    // 设计稿 `.obo`（拿主意的人 2026-09-15 定）：左边待选列表，栏头写着看的是哪一批、几条、「筛选…」与排序；右边这一条的
+    // 详情——第几条、文件名、路径，候选一张一张摆成卡片，四颗带键帽的按钮与一颗「手工指定…」，一框键位提示。原来那三块
+    // （分组表、五列的表、底下那张表单）不在了。
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    let 多候选 = app
+        .queue()
+        .queue()
+        .batches()
+        .iter()
+        .find(|batch| batch.shape.fanout() == romcat_core::triage::Fanout::Several)
+        .cloned()
+        .expect("合成数据里该有 4–10 个候选那一档");
+    展开(&mut app, &多候选.shape);
+    app.queue_and_site().0.show_one_by_one();
+    跑(&ctx, &mut app, 2);
+    let item = app
+        .queue()
+        .queue()
+        .selected()
+        .get(app.queue().at())
+        .cloned()
+        .expect("光标底下该有一条");
+    let 共 = app.queue().queue().selected().len() as u64;
+
+    let out = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&out);
+    for 那一段 in [
+        多候选.shape.label(),
+        format!("{} 条", thousands(共)),
+        "筛选…".to_string(),
+        format!("{} ▲", ItemOrder::Key.label()),
+        format!("第 1 条 · 共 {} 条", thousands(共)),
+        format!(
+            "候选 {} 个 · 选择一个，或选择「都不对」",
+            item.candidates.len()
+        ),
+        "通过所选候选".to_string(),
+        "都不对".to_string(),
+        "先放着".to_string(),
+        "撤销上一条".to_string(),
+        "手工指定…".to_string(),
+        "切换候选".to_string(),
+        "先放着（不保存，稍后仍会出现）".to_string(),
+    ] {
+        assert!(
+            屏上.lines().any(|line| line == 那一段),
+            "屏上没有「{那一段}」：\n{屏上}"
+        );
+    }
+    for 键 in ["←", "→", "Y", "N", "空格", "U"] {
+        assert!(
+            屏上.lines().any(|line| line == 键),
+            "键位提示里没有「{键}」：\n{屏上}"
+        );
+    }
+    for candidate in &item.candidates {
+        assert!(
+            屏上.contains(candidate.game.as_str()),
+            "候选卡片上没写作品：{}",
+            candidate.game
+        );
+    }
+    for 旧的 in ["从哪一批下手", "预览这一批", "← 回到分批"] {
+        assert!(!屏上.contains(旧的), "原来那几块还在：「{旧的}」\n{屏上}");
+    }
+
+    // 点第二张候选卡片就选它（与 `→` 同一件事）。
+    let 位置 = shared::那一段画在哪儿(&out, &item.candidates[1].game)
+        .unwrap_or_else(|| panic!("屏上没有第二张候选卡片：\n{屏上}"));
+    let _ = 按在(&ctx, &mut app, 位置);
+    assert_eq!(app.queue().nth(), 1, "点了第二张候选卡片");
+
+    // 点「先放着」走的与 `空格` 同一条路：一个字都不写库，光标往下走一条。
+    let _ = 点正好那一颗(&ctx, &mut app, "先放着");
+    assert_eq!(app.queue().at(), 1, "「先放着」没往下走一条");
+    assert_eq!(app.site().store.counts().expect("读得出").total, 0);
+}
+
+#[test]
+fn 手工指定与筛选各是一层弹层_开着时键盘不接() {
+    // 拿主意的人 2026-09-15 定：手工指定那张表单走 `crate::dialog`；选择器与识别结论那几个勾收进待选列表栏头的「筛选…」。
+    // 两层都是模态弹层，开着的时候逐条流的键盘一个都不接（`dialog::screen_has_keys`）。
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    逐条看整个队列(&ctx, &mut app);
+
+    let 屏上 = 点正好那一颗(&ctx, &mut app, "手工指定…");
+    for 那一段 in [
+        "裁成",
+        "作品",
+        "汉化组",
+        "只裁选中的这一条",
+        "预览这一批",
+        "取消",
+    ] {
+        assert!(
+            屏上.lines().any(|line| line == 那一段),
+            "「手工指定」那一层里没有「{那一段}」：\n{屏上}"
+        );
+    }
+    按(&ctx, &mut app, egui::Key::N);
+    assert!(app.queue().applied().is_none(), "弹层开着时按 N 落下了一批");
+    let _ = 点正好那一颗(&ctx, &mut app, "取消");
+
+    let 屏上 = 点正好那一颗(&ctx, &mut app, "筛选…");
+    for 那一段 in [
+        "按识别结论",
+        "按目录",
+        "按候选作品",
+        "按命名规律",
+        "清除筛选",
+        "完成",
+    ] {
+        assert!(
+            屏上.lines().any(|line| line == 那一段),
+            "「筛选」那一层里没有「{那一段}」：\n{屏上}"
+        );
+    }
+    let 那一组 = app
+        .queue()
+        .queue()
+        .groups(Axis::Directory)
+        .first()
+        .cloned()
+        .expect("该有目录分组");
+    let 名 = if 那一组.label.is_empty() {
+        "（主库根）".to_string()
+    } else {
+        那一组.label.clone()
+    };
+    let _ = 点正好那一颗(
+        &ctx,
+        &mut app,
+        &format!("{}  {名}", thousands(那一组.count)),
+    );
+    assert_eq!(
+        app.queue().queue().selected().len() as u64,
+        那一组.count,
+        "点一组就是一条选择器"
+    );
+    let _ = 点正好那一颗(&ctx, &mut app, "清除筛选");
+    assert_eq!(
+        app.queue().queue().selected().len(),
+        2_000,
+        "清除筛选回到整个队列"
+    );
+    let 屏上 = 点正好那一颗(&ctx, &mut app, "完成");
+    assert!(
+        !屏上.lines().any(|line| line == "清除筛选"),
+        "按了「完成」那一层还开着：\n{屏上}"
+    );
+}
+
+#[test]
+fn 识别跑过而队列裁空时空态不给运行识别_一批能整批通过的都没有时头一格不写前零批() {
+    use shared::档;
+
+    let ctx = headless::context();
+    let 画这一份 = |ctx: &egui::Context, 手上的: &[(&str, &str, 档)], 目录: &str| {
+        let mut app = shared::小库(手上的, std::env::temp_dir().join(目录));
+        app.show_view(View::Queue);
+        跑(ctx, &mut app, 2);
+        let 屏上 = 画一帧(ctx, &mut app);
+        (app, 屏上)
+    };
+    let 说明 = "识别完成后，无法自动确定的结果会出现在这里，并按判定依据自动分批。";
+
+    // 一、识别跑过、队列裁空、库里一个还没识别的都没有：卡上只有标题与说明，按下去什么都不会多出来的那颗不画。
+    let (app, 屏上) = 画这一份(&ctx, &[("FC", "甲.zip", 档::命中)], "romcat-测试-队列-裁空");
+    assert!(
+        app.queue().queue().identified() && app.queue().queue().pending() == 0,
+        "前提：识别跑过、队列是空的"
+    );
+    assert!(
+        屏上.lines().any(|line| line == 说明),
+        "空态卡没画：\n{屏上}"
+    );
+    for 不该有 in ["运行识别", "与「库」页面工序中的「识别」是同一个操作。"]
+    {
+        assert!(
+            !屏上.lines().any(|line| line == 不该有),
+            "库里没有还没识别的，却画了「{不该有}」：\n{屏上}"
+        );
+    }
+
+    // 二、队列裁空、库里还有一个还没识别的：标题带着数，给那颗按钮。
+    let (_, 屏上) = 画这一份(
+        &ctx,
+        &[("FC", "甲.zip", 档::命中), ("FC", "乙.zip", 档::还没识别)],
+        "romcat-测试-队列-裁空还有没识别的",
+    );
+    for 该有 in ["暂无待确认项：1 个变体还没识别", "运行识别"] {
+        assert!(
+            屏上.lines().any(|line| line == 该有),
+            "空态卡上没有「{该有}」：\n{屏上}"
+        );
+    }
+
+    // 三、队列里只有没有候选的：头一格照稿留着，数是 0，说明不写「前 0 批」（库屏工序段这时一句都不说）。
+    let (app, 屏上) = 画这一份(
+        &ctx,
+        &[
+            ("FC", "甲.zip", 档::没有候选),
+            ("FC", "乙.zip", 档::没有候选),
+        ],
+        "romcat-测试-队列-只有没有候选的",
+    );
+    assert_eq!(
+        app.queue()
+            .queue()
+            .coverage(triage::HEADLINE_BATCHES)
+            .head_batches,
+        0,
+        "前提：一批能整批通过的都没有"
+    );
+    let 行: Vec<&str> = 屏上.lines().collect();
+    let at = 行
+        .iter()
+        .position(|line| *line == "可直接批量处理 · 每条只有一个候选")
+        .unwrap_or_else(|| panic!("头一格的说明不对：\n{屏上}"));
+    assert_eq!(
+        at.checked_sub(1).map(|up| 行[up]),
+        Some("0"),
+        "头一格的数不对：\n{屏上}"
+    );
+    assert!(
+        !屏上.lines().any(|line| line.starts_with("前 0 批")),
+        "一批都没有还写「前 0 批」：\n{屏上}"
+    );
+}
+
+/// 一份**手搭的**小现场：七个识别过的变体，各带一条没采纳的低置信候选、各撞一份不同的 DAT——七批都能整批通过。
+///
+/// 合成数据里能整批通过的正好是五批（与「前几批」一样多），摆不出「另有 N 批同样只有一个候选」那一句。
+fn 有七批能整批通过的库() -> App {
+    use romcat_core::catalog::Confidence;
+    use romcat_core::catalog::identify::Identification;
+    use romcat_core::platform::Manifest;
+    use romcat_core::site::Site;
+    use romcat_core::verdict::Store;
+
+    let mut catalog = romcat_core::catalog::Catalog::open_in_memory().expect("开得出中立库");
+    romcat_core::catalog::roots::add_root(
+        &catalog,
+        None,
+        shared::根,
+        std::path::Path::new(&format!("/{}", shared::根)),
+    )
+    .expect("建得出根");
+    let variants: Vec<_> = (0..7)
+        .map(|at| shared::变体("GBA", &format!("第{at}部.gba")))
+        .collect();
+    catalog
+        .replace_variants(&variants, 1, &Manifest::default())
+        .expect("写得进变体");
+    let 结论: Vec<Identification> = variants
+        .iter()
+        .enumerate()
+        .map(|(at, variant)| {
+            let mut 候选 = shared::候选(variant, false, Confidence::Low);
+            候选.dat = format!("第{at}份.dat");
+            Identification {
+                variant_key: variant.key.clone(),
+                platform: None,
+                standalone: None,
+                state: State::Unmatched,
+                reason: None,
+                units: 1,
+                nkit: 0,
+                read_bytes: 0,
+                work_id: None,
+                release_id: None,
+                candidates: vec![候选],
+            }
+        })
+        .collect();
+    catalog.write_identifications(&结论).expect("写得进结论");
+    let store = Store::in_memory().expect("开得出沉淀库");
+    App::new(
+        Site::in_memory(catalog, store, shared::根),
+        std::env::temp_dir().join("romcat-测试-队列-七批"),
+    )
+}
+
+#[test]
+fn 能整批通过的多过前几批时先摆前几批_另有那一句_按列出这几批就全摆出来() {
+    let ctx = headless::context();
+    let mut app = 有七批能整批通过的库();
+    跑(&ctx, &mut app, 2);
+    let 账 = app.queue().queue().coverage(triage::HEADLINE_BATCHES);
+    assert_eq!(
+        (
+            账.head_batches,
+            账.rest_answerable_batches,
+            账.rest_answerable
+        ),
+        (5, 2, 2),
+        "前提：七批里前五批之外还有两批能整批通过"
+    );
+    let 各批的 = |batch: &triage::Batch| match &batch.shape {
+        Shape::Candidates { dat, .. } => dat.clone(),
+        Shape::Bare { .. } => panic!("这七批都该有候选"),
+    };
+    let dats: Vec<String> = app.queue().queue().batches().iter().map(各批的).collect();
+
+    let 屏上 = 正文滚一趟(&ctx, &mut app);
+    for (at, dat) in dats.iter().enumerate() {
+        assert_eq!(
+            屏上.lines().any(|line| line == dat),
+            at < 5,
+            "第 {at} 批（{dat}）该不该先摆出来：\n{屏上}"
+        );
+    }
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line == "另有 2 批（2 条）同样只有一个候选。"),
+        "没写另有几批：\n{屏上}"
+    );
+
+    let _ = 点正好那一颗(&ctx, &mut app, "列出这 2 批");
+    let 屏上 = 正文滚一趟(&ctx, &mut app);
+    for dat in &dats {
+        assert!(
+            屏上.lines().any(|line| line == dat),
+            "按了「列出这 2 批」，{dat} 那一批还没摆出来：\n{屏上}"
+        );
+    }
+    assert!(
+        !屏上.contains("同样只有一个候选。"),
+        "全摆出来了还写着另有几批：\n{屏上}"
+    );
+}
+
+#[test]
+fn 落下一批之后屏底提示条说已通过几条_按撤销就撤掉那一批_撤完带放回() {
+    // 设计稿 `passBatch` 与 `undoLot`：落下一批之后屏底一条「已通过 N 条」带「撤销」，撤完一条「已撤销，N 个变体回到
+    // 待确认队列」（拿主意的人 2026-09-15 定，原来正文顶上那两行回执删了）。两颗按钮走的是裁决记录抽屉里那两颗同一条
+    // 核心库入口（`Screen::undo` / `Screen::redo`）。
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    let 原有 = app.queue().queue().pending();
+    let batch = app
+        .queue()
+        .queue()
+        .batches()
+        .iter()
+        .find(|batch| batch.passable())
+        .cloned()
+        .expect("该有一批能整批通过");
+    {
+        let (screen, site) = app.queue_and_site();
+        screen.pass(site, &Scope::whole(batch.shape.clone()));
+        screen.commit(site);
+    }
+    let 那一批 = app.queue().applied().expect("落下了就该有账").batch;
+    // 提示条是一块 egui 浮层：头一帧只量大小不画（egui 的 `Area` 头一帧看不见），第二帧才画出来。
+    跑(&ctx, &mut app, 1);
+    let 屏上 = 画一帧(&ctx, &mut app);
+    let 那一句 = format!("已通过 {} 条", thousands(batch.count));
+    assert!(
+        屏上.lines().any(|line| line == 那一句),
+        "屏底没有「{那一句}」：\n{屏上}"
+    );
+    for 旧的 in ["裁决已沉淀", "撤回第"] {
+        assert!(!屏上.contains(旧的), "正文顶上那两行回执还在：\n{屏上}");
+    }
+
+    let 屏上 = 点正好那一颗(&ctx, &mut app, "撤销");
+    assert!(
+        册子上的(&app, 那一批).undone(),
+        "按了提示条上的「撤销」，那一批没撤：\n{屏上}"
+    );
+    assert_eq!(
+        app.queue().queue().pending(),
+        原有,
+        "撤完那些变体该回到队列里"
+    );
+    let 那一句 = format!("已撤销，{} 个变体回到待确认队列", thousands(batch.count));
+    assert!(
+        屏上.lines().any(|line| line == 那一句),
+        "撤完屏底没有「{那一句}」：\n{屏上}"
+    );
+
+    let 屏上 = 点正好那一颗(&ctx, &mut app, "放回");
+    assert!(
+        !册子上的(&app, 那一批).undone(),
+        "按了提示条上的「放回」，那一批还撤着：\n{屏上}"
+    );
+    assert_eq!(app.queue().queue().pending(), 原有 - batch.count);
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line == format!("已放回 {} 条", thousands(batch.count))),
+        "放回之后屏底没有那一句：\n{屏上}"
     );
 }

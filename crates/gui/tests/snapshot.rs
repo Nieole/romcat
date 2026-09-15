@@ -2015,3 +2015,172 @@ fn 主窗口_左栏收起_浅色() {
 fn 主窗口_左栏收起_暗色() {
     拍主窗口("main-window/rail-collapsed-dark", Theme::Dark, true);
 }
+
+// ——— 待确认屏（票 `gui-looks-like-the-design/18`）———
+//
+// 走整扇主窗口（左栏、屏头、状态栏都在），停在待确认屏上。按批、逐条、裁决记录三态垫的是合成数据（`demo::queue`，
+// 真机形状的一万六千多条），**只在 `demo` 特性下编**；空态那一态垫测试手搭的小库（`shared::小库`），不靠 `demo`。
+// **跟着挂钟走的数一律定死**：工作目录（`App::set_workspace_label`），裁决记录的时刻与「此刻」
+// （`queue::Screen::set_clock`、`queue::Screen::pin_record_time`）。
+
+/// 待确认屏那几张里定死的「此刻」：2026-09-13 14:05（UTC），本地钉成东八区——屏上画「09-13 22:05」那一天。
+#[cfg(feature = "demo")]
+const 待确认屏的此刻: i64 = 1_789_308_300;
+
+/// 一扇停在待确认屏上的主窗口：合成数据的队列，工作目录、「此刻」与裁决记录的时刻都定死。
+///
+/// `临时目录名` 各张各用一个：主窗口会往工作目录里写版式偏好，几张共用的话一张写的会落到另一张打开的窗口上。
+#[cfg(feature = "demo")]
+fn 待确认屏(临时目录名: &str) -> App {
+    let mut app = App::new(
+        demo::site(demo::queue(demo::QUEUE_ROWS).expect("造得出合成数据")).expect("开得出现场"),
+        std::env::temp_dir().join(临时目录名),
+    );
+    app.show_view(View::Queue);
+    app.set_workspace_label(工作目录().display().to_string());
+    let (screen, _) = app.queue_and_site();
+    screen.set_clock(romcat_gui::clock::Clock::fixed(待确认屏的此刻, 8 * 3_600));
+    screen.pin_record_time(待确认屏的此刻 - 25 * 60);
+    app
+}
+
+/// 逐条那一屏：展开一批有 4–10 个候选的，切到逐条——光标停在那一批头一条上，候选卡片摆得满一排。
+#[cfg(feature = "demo")]
+fn 停在逐条(app: &mut App) {
+    let 多候选 = app
+        .queue()
+        .queue()
+        .batches()
+        .iter()
+        .find(|batch| batch.shape.fanout() == romcat_core::triage::Fanout::Several)
+        .cloned()
+        .expect("合成数据里该有 4–10 个候选那一档");
+    let (screen, _) = app.queue_and_site();
+    if screen.scope().map(|scope| scope.shape).as_ref() != Some(&多候选.shape) {
+        screen.open_batch(&多候选.shape);
+    }
+    screen.show_one_by_one();
+}
+
+/// 裁决记录那一块要有东西可画：整批通过最小的那一批能整批通过的、整批拒绝最小的那一批没有候选的，再撤掉头一批——
+/// 抽屉里在册的与撤过的各一行。走的是界面上按下去的那几条路（`pass` / `reject` / `commit` / `undo`）。
+#[cfg(feature = "demo")]
+fn 落两批撤一批(app: &mut App) {
+    use romcat_core::triage::{Fanout, Scope};
+
+    let batches = app.queue().queue().batches().to_vec();
+    let 能过 = batches
+        .iter()
+        .filter(|batch| batch.passable())
+        .min_by_key(|batch| batch.count)
+        .cloned()
+        .expect("合成数据里该有能整批通过的一批");
+    let 没有候选 = batches
+        .iter()
+        .filter(|batch| batch.shape.fanout() == Fanout::None)
+        .min_by_key(|batch| batch.count)
+        .cloned()
+        .expect("合成数据里该有一批没有候选的");
+    let (screen, site) = app.queue_and_site();
+    screen.pass(site, &Scope::whole(能过.shape));
+    screen.commit(site);
+    let 头一批 = screen.applied().expect("整批通过该落下一批").batch;
+    screen.reject(site, &Scope::whole(没有候选.shape));
+    screen.commit(site);
+    screen.undo(site, 头一批);
+    assert!(screen.error().is_none(), "{:?}", screen.error());
+}
+
+#[cfg(feature = "demo")]
+#[test]
+fn 待确认_按批_浅色() {
+    let mut app = 待确认屏("romcat-截图-待确认-按批-浅色");
+    拍("queue/batches-light", Theme::Light, move |ui| app.ui(ui));
+}
+
+#[cfg(feature = "demo")]
+#[test]
+fn 待确认_按批_暗色() {
+    let mut app = 待确认屏("romcat-截图-待确认-按批-暗色");
+    拍("queue/batches-dark", Theme::Dark, move |ui| app.ui(ui));
+}
+
+#[cfg(feature = "demo")]
+#[test]
+fn 待确认_逐条_浅色() {
+    let mut app = 待确认屏("romcat-截图-待确认-逐条-浅色");
+    停在逐条(&mut app);
+    拍("queue/one-by-one-light", Theme::Light, move |ui| app.ui(ui));
+}
+
+#[cfg(feature = "demo")]
+#[test]
+fn 待确认_逐条_暗色() {
+    let mut app = 待确认屏("romcat-截图-待确认-逐条-暗色");
+    停在逐条(&mut app);
+    拍("queue/one-by-one-dark", Theme::Dark, move |ui| app.ui(ui));
+}
+
+/// 落两批、撤一批，点屏头那颗「裁决记录 1」（数的是还在册的）打开右边那块抽屉，再拍。
+#[cfg(feature = "demo")]
+fn 拍裁决记录(名字: &str, 主题: Theme, 临时目录名: &str) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut app = 待确认屏(临时目录名);
+    落两批撤一批(&mut app);
+    let mut harness = 开一个(主题, move |ui| app.ui(ui));
+    按(&mut harness, "裁决记录 1");
+    拍下(harness, 名字);
+}
+
+#[cfg(feature = "demo")]
+#[test]
+fn 待确认_裁决记录_浅色() {
+    拍裁决记录(
+        "queue/records-light",
+        Theme::Light,
+        "romcat-截图-待确认-裁决记录-浅色",
+    );
+}
+
+#[cfg(feature = "demo")]
+#[test]
+fn 待确认_裁决记录_暗色() {
+    拍裁决记录(
+        "queue/records-dark",
+        Theme::Dark,
+        "romcat-截图-待确认-裁决记录-暗色",
+    );
+}
+
+/// 一趟识别都还没跑过的小库：待确认屏上是那张空态卡。
+#[track_caller]
+fn 拍待确认空态(名字: &str, 主题: Theme) {
+    use shared::档;
+
+    if 该跳过(名字) {
+        return;
+    }
+    let 临时目录 = romcat_core::testing::temp_dir("截图门-待确认空态");
+    let mut app = shared::小库(
+        &[
+            ("FC", "魂斗罗.nes", 档::还没识别),
+            ("SFC", "幻想传说.sfc", 档::还没识别),
+        ],
+        临时目录.path().to_path_buf(),
+    );
+    app.show_view(View::Queue);
+    app.set_workspace_label(工作目录().display().to_string());
+    拍下(开一个(主题, move |ui| app.ui(ui)), 名字);
+}
+
+#[test]
+fn 待确认_空态_浅色() {
+    拍待确认空态("queue/empty-light", Theme::Light);
+}
+
+#[test]
+fn 待确认_空态_暗色() {
+    拍待确认空态("queue/empty-dark", Theme::Dark);
+}

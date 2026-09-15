@@ -965,7 +965,13 @@ fn 工序那几行底下那句小字_数各由一个查询函数交出来_与别
             .coverage(romcat_core::triage::HEADLINE_BATCHES),
         "与待确认队列屏说的不是同一个数"
     );
-    assert_eq!(前几批.head, 2, "前提：两个变体都等着裁决");
+    // **纠错**（票 `gui-looks-like-the-design/18`）：这两个变体一条候选都没有，一个都整批通过不了。从前的口径把
+    // 次序上的头几批都算进「前几批」，这一句于是写着「前 1 批可一次处理 2 个」；前几批只数能整批通过的。
+    assert_eq!(
+        (前几批.bare, 前几批.head_batches, 前几批.head),
+        (2, 0, 0),
+        "前提：两个变体都等着裁决，都没有候选"
+    );
     let mut stages = Stages::survey(&现场.catalog, &现场.store, 主库标识);
     assert_eq!(
         stages.detail(stages.of(Stage::Triage).expect("有裁决那一行")),
@@ -975,11 +981,18 @@ fn 工序那几行底下那句小字_数各由一个查询函数交出来_与别
     stages.set_queue_head(Some(前几批));
     assert_eq!(
         stages.detail(stages.of(Stage::Triage).expect("有裁决那一行")),
-        Some(format!(
-            "前 {} 批可一次处理 {} 个",
-            前几批.head_batches,
-            thousands(前几批.head)
-        ))
+        None,
+        "一批能整批通过的都没有，不说「可一次处理」"
+    );
+    let 有能整批通过的 = romcat_core::triage::batch::Coverage {
+        head_batches: 2,
+        head: 1_234,
+        ..前几批
+    };
+    stages.set_queue_head(Some(有能整批通过的));
+    assert_eq!(
+        stages.detail(stages.of(Stage::Triage).expect("有裁决那一行")),
+        Some("前 2 批可一次处理 1,234 个".to_string())
     );
 
     // **导出**：选过格式与目录、还没跑过时说格式与目录；跑完（前置整理标题也做完了）说格式、那一趟收敛出几个条目，

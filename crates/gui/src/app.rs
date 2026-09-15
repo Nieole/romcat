@@ -561,7 +561,7 @@ impl App {
     /// 走的是同一个入口（[`browse::Screen::invalidate`]），只是那一趟由任务台交回来，
     /// 这一趟就发生在本进程的这一帧里。
     ///
-    /// **还有一条不是跳转的**：待确认队列屏与浏览屏空态上那几颗**捷径**（「跑识别」、
+    /// **还有一条不是跳转的**：待确认队列屏与浏览屏空态上那几颗**捷径**（「运行识别」、
     /// 「折标题」）按下去只留一个记号，由这一趟取走、交给 [`Self::start_stage`]——
     /// 排一趟工序要同时够得着库屏工序段与任务台，而那两屏够不着库屏。
     ///
@@ -675,6 +675,9 @@ impl App {
                 });
         }
         let 副标题 = self.subtitle();
+        // **屏头连屏体那一整块**：待确认屏的裁决记录抽屉贴着它的右沿、从屏头顶上一直到状态栏上沿
+        // （设计稿 `.drawer` 摆在 `section.scr` 里）。左栏、状态栏已经占好了地方，剩下的就是它。
+        let 主区 = ui.available_rect_before_wrap();
         look::screen_header(
             ui,
             egui::Id::new(("屏头", self.view)),
@@ -685,7 +688,7 @@ impl App {
         match self.view {
             View::Queue => {
                 let (queue, site) = (&mut self.queue, &mut self.site);
-                queue.ui(ui, site);
+                queue.ui(ui, site, 主区);
             }
             View::Library => {
                 let (roots, site, board) = (&mut self.roots, &mut self.site, &mut self.board);
@@ -837,9 +840,9 @@ impl App {
     fn header_actions(&mut self, ui: &mut egui::Ui) {
         match self.view {
             View::Queue => {
+                // 照稿重排过（票 `gui-looks-like-the-design/18`）：「沉淀库 在哪」挪进了裁决记录那块抽屉的页脚。
                 let (queue, site) = (&mut self.queue, &self.site);
                 queue.status(ui, site);
-                ui.label(format!("沉淀库 {}", self.site.store.location()));
             }
             View::Library => {
                 // 库屏照稿重排过（票 `gui-looks-like-the-design/06` 接手挂单 `Q866` / `Q868`）：右侧是稿上那颗「添加根…」，

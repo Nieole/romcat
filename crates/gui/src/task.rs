@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use romcat_core::collection;
-use romcat_core::report::{human_duration, human_time};
+use romcat_core::report::human_duration;
 use romcat_core::scan::ScanOutcome;
 use romcat_core::scrape::Outcome as ScrapeOutcome;
 use romcat_core::sources::SourceStatus;
@@ -184,25 +184,21 @@ impl Screen {
     /// 要画的那份历史，每一行连同「时间」那一格画成的字。
     ///
     /// 定了钟就把耗时、收场时刻、时区与此刻一律换成钟上的；没定就是任务台上那一份，时区与此刻取
-    /// 这台机器的（[`local_offset`]、[`now_secs`]）。
+    /// 这台机器的。时刻画成本地短格式只走 [`crate::clock::Clock`] 那一处。
     fn shown_history(&self, history: &[Record]) -> Vec<(Record, String)> {
-        let now = self.clock.map_or_else(now_secs, |clock| clock.now);
-        let now_offset = self
-            .clock
-            .map_or_else(|| local_offset(now), |clock| clock.utc_offset);
         history
             .iter()
             .cloned()
             .map(|mut record| {
-                let offset = match self.clock {
+                let 钟 = match self.clock {
                     Some(clock) => {
                         record.elapsed = clock.elapsed;
                         record.ended_at = clock.ended_at;
-                        clock.utc_offset
+                        crate::clock::Clock::fixed(clock.now, clock.utc_offset)
                     }
-                    None => local_offset(record.ended_at),
+                    None => crate::clock::Clock::System,
                 };
-                let at = local_time(record.ended_at, offset, now, now_offset);
+                let at = 钟.short(record.ended_at);
                 (record, at)
             })
             .collect()
@@ -846,7 +842,7 @@ fn history_cells(ui: &mut egui::Ui, record: &Record, at: &str, columns: Columns,
         egui::RichText::new(elapsed(record.elapsed)).size(行字号),
     );
     ui.add_space(gap);
-    // 本地时间的短格式（[`local_time`]），不是今年的才带年份（挂单 `Q831`）。
+    // 本地时间的短格式（[`crate::clock::Clock::short`]），不是今年的才带年份（挂单 `Q831`）。
     cell(
         ui,
         columns.at,
@@ -875,35 +871,4 @@ fn tone(ending: &Ending<()>) -> Tone {
 /// （[`human_duration`]），免得同一趟活在两处印出不一样的数。
 fn elapsed(elapsed: Duration) -> String {
     human_duration(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
-}
-
-/// 那一刻本地时区比 UTC 快多少秒：读系统时区库（`jiff`；为什么是它写在根 `Cargo.toml` 那一条上）。
-///
-/// **按那一刻算**：夏令时前后，同一个时区快的秒数不一样。时刻出了 `jiff` 认的范围就当 UTC。
-fn local_offset(secs: i64) -> i32 {
-    jiff::Timestamp::from_second(secs)
-        .map_or(0, |at| jiff::tz::TimeZone::system().to_offset(at).seconds())
-}
-
-/// 此刻：UNIX 纪元起的秒。取不到时钟就当 0（于是历史里的时刻一律带年份，不会错说成今年）。
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|since| i64::try_from(since.as_secs()).ok())
-        .unwrap_or(0)
-}
-
-/// 收场时刻排成**本地时间的短格式**（设计稿 `stamp()`）：「09-10 09:12」；不是今年的才带年份，
-/// 「2025-09-10 09:12」。
-///
-/// 年月日时分的换算走核心库 [`human_time`]（公历只在那一处算）：先把时刻挪到本地时区再交给它，
-/// 这里只决定带不带年份。**核心库与命令行照旧 UTC**（挂单 `Q901`）。
-fn local_time(secs: i64, offset: i32, now: i64, now_offset: i32) -> String {
-    let full = human_time(secs.saturating_add(i64::from(offset)));
-    let current = human_time(now.saturating_add(i64::from(now_offset)));
-    match (full.get(..4), current.get(..4), full.get(5..)) {
-        (Some(year), Some(this_year), Some(short)) if year == this_year => short.to_string(),
-        _ => full,
-    }
 }
