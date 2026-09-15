@@ -808,3 +808,72 @@ fn 装得下吗_计划器与子库报告是同一个数_说装得下就真装得
         "说好的「同步之后」与卡上真实占用对不上——它说装得下，卡却可能装不下",
     );
 }
+
+// ───────────────────────── 脚印：读库那一半与按档案折那一半分开（票 `gui-looks-like-the-design/21`）
+//
+// 目标设置弹层里换一份能力档案、改一行按平台覆盖，要当场说出「FAT32 放不下哪几份」。读库（折事实、读成员、
+// 读内部构成）一趟是全库量级，得跑在任务台上；换档案之后那一步是纯的，当场重算。两半合起来必须与
+// `sync::desired` 一口气折出来的一模一样——判断只有一处（ADR-0024）。
+
+#[test]
+fn 脚印读一次库_换一份档案折期望状态不再碰库_与一口气折出来的一样() {
+    let dir = 建库();
+    let catalog = 扫成库(dir.path());
+    let selected = 选中(&catalog, "平台=FC,PSV");
+    let 脚印 = sync::Footprint::gather(&catalog, &selected).expect("读得动");
+    for profile in romcat_core::capability::Roster::builtin().profiles() {
+        assert_eq!(
+            脚印.desired(profile),
+            sync::desired(&catalog, &selected, profile).expect("折得出期望状态"),
+            "档案「{}」下两条路折出来的不一样",
+            profile.name
+        );
+    }
+    assert_eq!(脚印.platforms(), ["FC", "PSV"]);
+}
+
+#[test]
+fn 脚印说得出这份档案的文件系统放不下哪几份_只看单文件上限() {
+    let dir = 建库();
+    let catalog = 扫成库(dir.path());
+    let selected = 选中(&catalog, "平台=FC");
+    let 脚印 = sync::Footprint::gather(&catalog, &selected).expect("读得动");
+    let mut 小卡 = Profile::unclaimed();
+    小卡.filesystem.name = "小卡".to_string();
+    小卡.filesystem.max_file_bytes = Some(3000);
+    let 放不下 = 脚印.too_big(&小卡);
+    assert_eq!(
+        放不下
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<Vec<_>>(),
+        ["FC/超级玛丽.zip"],
+        "4096 字节那一份超过 3000 的上限，2048 那一份放得下"
+    );
+    assert!(放不下.iter().all(|row| row.reason == RejectReason::TooBig));
+    assert!(
+        脚印.too_big(&Profile::unclaimed()).is_empty(),
+        "不设单文件上限时一份都不拦"
+    );
+}
+
+#[test]
+fn 按名字读一台设备的脚印_读选择集折事实求值读成员() {
+    let dir = 建库();
+    let mut catalog = 扫成库(dir.path());
+    let 卡 = temp_dir("sync-footprint-card");
+    catalog
+        .put_sublibrary(&子库(卡.path(), None))
+        .expect("子库写得进");
+    catalog
+        .add_rule("掌机", &Rule::parse("平台=FC").expect("读得懂"))
+        .expect("规则写得进");
+    let 脚印 =
+        sync::prepare::footprint(&catalog, "掌机", &Handle::new()).expect("读得出这一台的脚印");
+    assert_eq!(脚印.platforms(), ["FC"]);
+    assert_eq!(
+        脚印.desired(&Profile::unclaimed()).files.len(),
+        2,
+        "FC 两个变体各一份文件"
+    );
+}

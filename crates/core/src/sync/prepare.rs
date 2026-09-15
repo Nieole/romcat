@@ -168,6 +168,33 @@ pub fn priorities(given: Option<&Path>, workspace: &Path) -> Result<Priorities, 
     Priorities::load(&path).map_err(|error| format!("{error}"))
 }
 
+/// 读一台设备的**脚印**（[`Footprint`](super::Footprint)）：读选择集、折事实、求值、读成员与内部构成。
+///
+/// 目标设置弹层打开时往任务台上排的就是这一趟（票 `gui-looks-like-the-design/21`）：折事实走一遍全库，
+/// 不能跑在画帧那条线程上。拿到之后换档案、改按平台覆盖都是纯的（[`Footprint::desired`](super::Footprint::desired)）。
+///
+/// 整条只读；被叫停时停在哪儿都是干净的。
+///
+/// # Errors
+/// 中立库读不动时返回 [`Cutoff::Failed`]，被叫停时返回 [`Cutoff::Halted`]。
+pub fn footprint(catalog: &Catalog, name: &str, task: &Handle) -> Result<super::Footprint, Cutoff> {
+    task.steps(FOOTPRINT_STEPS);
+    task.step("读选择集")?;
+    let loaded = catalog
+        .selection(name)
+        .map_err(|error| format!("中立库读不动：{error}"))?;
+    task.step("折事实")?;
+    let facts = sublibrary::facts(catalog).map_err(|error| format!("中立库读不动：{error}"))?;
+    task.step("求值选择集")?;
+    let selected = sublibrary::select(&loaded.selection, &facts);
+    task.step("读成员")?;
+    Ok(super::Footprint::gather(catalog, &selected)
+        .map_err(|error| format!("中立库读不动：{error}"))?)
+}
+
+/// [`footprint`] 一共几步。**改了它里头的 `task.step` 就得改这个数。**
+pub const FOOTPRINT_STEPS: u32 = 4;
+
 /// 这一条线一共几步。**改了下面的 `task.step` 就得改这个数**，不然进度条会走过头。
 /// `tests/task.rs::排差量预览一路报得出走到第几步` 盯着这两个数对不对得上。
 const STEPS: u32 = 4 + PLAN_STEPS;
