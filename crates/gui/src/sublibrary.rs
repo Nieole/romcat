@@ -2851,10 +2851,10 @@ impl Screen {
                 // 名那一列靠左（设计稿弹层表单）：`add_sized` 会把字摆在格子正中。
                 let field_label = |ui: &mut egui::Ui, label: &str| {
                     ui.allocate_ui_with_layout(
-                        egui::vec2(layout.kv_key_width, layout.input_height),
+                        egui::vec2(layout.form_label_width, layout.input_height),
                         Layout::left_to_right(Align::Center),
                         |ui| {
-                            ui.set_min_size(egui::vec2(layout.kv_key_width, layout.input_height));
+                            ui.set_min_size(egui::vec2(layout.form_label_width, layout.input_height));
                             ui.label(label);
                         },
                     );
@@ -2863,7 +2863,7 @@ impl Screen {
                 // 长一点的说明会把整层弹层撑得比令牌那一档还宽。
                 let under = |ui: &mut egui::Ui, text: &str, error: bool| {
                     ui.horizontal(|ui| {
-                        ui.add_space(layout.kv_key_width + ui.spacing().item_spacing.x);
+                        ui.add_space(layout.form_label_width + ui.spacing().item_spacing.x);
                         let color = if error {
                             ui.visuals().error_fg_color
                         } else {
@@ -2927,7 +2927,7 @@ impl Screen {
                 if let Some((line, connected)) = &presence_line {
                     if *connected {
                         ui.horizontal(|ui| {
-                            ui.add_space(layout.kv_key_width + ui.spacing().item_spacing.x);
+                            ui.add_space(layout.form_label_width + ui.spacing().item_spacing.x);
                             let (good, _) = look::tone_colors(look::Tone::Good, ui.visuals());
                             ui.add(
                                 egui::Label::new(egui::RichText::new(line).small().color(good))
@@ -2993,7 +2993,7 @@ impl Screen {
                     );
                     if too_big && let Some(limit) = profile.filesystem.max_file_bytes {
                         ui.horizontal(|ui| {
-                            ui.add_space(layout.kv_key_width + ui.spacing().item_spacing.x);
+                            ui.add_space(layout.form_label_width + ui.spacing().item_spacing.x);
                             ui.vertical(|ui| {
                                 look::warn_box(
                                     ui,
@@ -4025,7 +4025,7 @@ fn profile_table_ui(
             .collect(),
         Some(None) => {
             ui.horizontal(|ui| {
-                ui.add_space(layout.kv_key_width + ui.spacing().item_spacing.x);
+                ui.add_space(layout.form_label_width + ui.spacing().item_spacing.x);
                 look::help(ui, "正在读这台设备的选择集……");
             });
             return;
@@ -4047,7 +4047,7 @@ fn profile_table_ui(
     let with_overrides = rows_of.is_some();
     let [平台宽, 转成宽, 覆盖宽] = layout.platform_table_columns;
     ui.horizontal(|ui| {
-        ui.add_space(layout.kv_key_width + ui.spacing().item_spacing.x);
+        ui.add_space(layout.form_label_width + ui.spacing().item_spacing.x);
         ui.vertical(|ui| {
             let visuals = ui.visuals().clone();
             egui::Frame::new()

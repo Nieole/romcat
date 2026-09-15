@@ -600,6 +600,8 @@ pub struct Layout {
     pub ro_gap: f32,
     /// 「名 → 值」两列排时名那一列的宽。
     pub kv_key_width: f32,
+    /// 弹层表单名那一列的宽（设计稿 `.frm`：子库目标设置）。与 [`Self::kv_key_width`]（设计稿 `.kv`）是两格：稿上一个 96、一个 84。
+    pub form_label_width: f32,
     /// 按钮的高。
     pub button_height: f32,
     /// 按钮左右留白。
