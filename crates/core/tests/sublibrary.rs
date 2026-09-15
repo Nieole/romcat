@@ -859,3 +859,172 @@ fn 目标不在位时装不装得下如实说算不出_不给一个数() {
     assert!(json.get("over_capacity").is_none(), "{json}");
     assert!(json["fit"]["Unknown"]["why"].is_string(), "{json}");
 }
+
+// ——— 目标路径当场校验（票 `gui-looks-like-the-design/21`）———
+//
+// 新建子库、改目标设置时，路径一填进来就判一遍：落在主库的根里、属于工作目录、已被别的子库占用，
+// 三种当场拦下并说清是哪一种。**判断在核心里**（`sublibrary::target`），界面只画那句话。
+
+/// 一个根（叫「主库」）挂在 `盘/Game` 上的中立库。
+fn 带一个根(盘: &std::path::Path) -> Catalog {
+    let 根 = 盘.join("Game");
+    std::fs::create_dir_all(&根).expect("能建目录");
+    let catalog = Catalog::open_in_memory().expect("能开中立库");
+    romcat_core::catalog::roots::add_root(
+        &catalog,
+        None,
+        "主库",
+        &romcat_core::path::normalize_existing(&根),
+    )
+    .expect("加得上");
+    catalog
+}
+
+#[test]
+fn 目标落在主库的根里或者把根包在里面_当场拦下并点名是哪个根() {
+    use romcat_core::sublibrary::target::{self, TargetRefusal};
+    use romcat_core::testing::temp_dir;
+
+    let 盘 = temp_dir("sub-target-disk");
+    let 工作区 = temp_dir("sub-target-ws");
+    let catalog = 带一个根(盘.path());
+    let 根 = 盘.path().join("Game");
+    // 根里、根本身、把根包在里面的上一级（同步往 `<平台>/…` 写，平台目录与根同名时就写进了主库）。
+    for 目标 in [根.join("GBA"), 根.clone(), 盘.path().to_path_buf()] {
+        match target::vet(&catalog, 工作区.path(), None, &目标).expect("中立库读得动") {
+            Err(TargetRefusal::InLibrary { root, .. }) => assert_eq!(root, "主库"),
+            other => panic!("{} 该被拦成落在主库里：{other:?}", 目标.display()),
+        }
+    }
+    // 同步那一道闸是同一条判断：把根包在里面的目标，点同步时一样拦下。
+    let 话 = romcat_core::sync::prepare::refuse_target_in_library(&catalog, &[], 盘.path())
+        .expect_err("把根包在里面也该被拒");
+    assert!(话.contains("主库只读"), "红线要说出来：{话}");
+}
+
+#[test]
+fn 目标属于工作目录或者把工作目录包在里面_当场拦下() {
+    use romcat_core::sublibrary::target::{self, TargetRefusal};
+    use romcat_core::testing::temp_dir;
+
+    let 盘 = temp_dir("sub-target-disk");
+    let 外 = temp_dir("sub-target-outer");
+    let 工作区 = 外.path().join("romcat");
+    std::fs::create_dir_all(&工作区).expect("能建目录");
+    let catalog = 带一个根(盘.path());
+    for 目标 in [工作区.join("子库"), 工作区.clone(), 外.path().to_path_buf()] {
+        match target::vet(&catalog, &工作区, None, &目标).expect("中立库读得动") {
+            Err(TargetRefusal::InWorkspace { .. }) => {}
+            other => panic!("{} 该被拦成属于工作目录：{other:?}", 目标.display()),
+        }
+    }
+}
+
+#[test]
+fn 目标已被别的子库占用_相同或者套在一起都拦下_改自己那一台不算() {
+    use romcat_core::sublibrary::target::{self, TargetRefusal};
+    use romcat_core::testing::temp_dir;
+
+    let 盘 = temp_dir("sub-target-disk");
+    let 工作区 = temp_dir("sub-target-ws");
+    let 卡 = temp_dir("sub-target-card");
+    let mut catalog = 带一个根(盘.path());
+    let 掌机的 = 卡.path().join("掌机");
+    catalog
+        .put_sublibrary(&Sublibrary::at("掌机", &掌机的, "Pegasus", None))
+        .expect("子库写得进");
+    for 目标 in [掌机的.clone(), 掌机的.join("里头"), 卡.path().to_path_buf()] {
+        match target::vet(&catalog, 工作区.path(), None, &目标).expect("中立库读得动") {
+            Err(TargetRefusal::Taken { by }) => assert_eq!(by, "掌机"),
+            other => panic!("{} 该被拦成已被「掌机」占用：{other:?}", 目标.display()),
+        }
+    }
+    // 改「掌机」自己的目标设置时，它原来那条路径不算被占。
+    assert!(
+        target::vet(&catalog, 工作区.path(), Some("掌机"), &掌机的)
+            .expect("中立库读得动")
+            .is_ok(),
+        "改自己那一台，原路径不该被拦"
+    );
+}
+
+#[test]
+fn 目标在不在_在就报出卷上的可用空间_不在也照样建得出() {
+    use romcat_core::sublibrary::target::{self, Presence, TargetRefusal};
+    use romcat_core::testing::temp_dir;
+
+    let 盘 = temp_dir("sub-target-disk");
+    let 工作区 = temp_dir("sub-target-ws");
+    let 卡 = temp_dir("sub-target-card");
+    let catalog = 带一个根(盘.path());
+
+    match target::vet(&catalog, 工作区.path(), None, 卡.path()).expect("中立库读得动") {
+        Ok(Presence::Present(volume)) => {
+            #[cfg(unix)]
+            {
+                let 可用 = volume.available.expect("Unix 上读得出可用空间");
+                let 总量 = volume.total.expect("Unix 上读得出总量");
+                assert!(可用 <= 总量, "可用 {可用} 比总量 {总量} 还大");
+            }
+            #[cfg(target_vendor = "apple")]
+            assert!(
+                volume.filesystem.is_some(),
+                "macOS 上读得出文件系统：{volume:?}"
+            );
+            #[cfg(not(unix))]
+            let _ = volume;
+        }
+        other => panic!("插着的卡该报在：{other:?}"),
+    }
+    let 没插 = 卡.path().join("没插上的卡");
+    assert!(
+        matches!(
+            target::vet(&catalog, 工作区.path(), None, &没插).expect("中立库读得动"),
+            Ok(Presence::Absent)
+        ),
+        "不在的目录照样建得出，只是说不在"
+    );
+    let 一份文件 = 卡.path().join("一份文件.txt");
+    std::fs::write(&一份文件, b"x").expect("能写文件");
+    assert!(
+        matches!(
+            target::vet(&catalog, 工作区.path(), None, &一份文件).expect("中立库读得动"),
+            Err(TargetRefusal::NotADirectory)
+        ),
+        "路径上是一份文件时要拦下"
+    );
+    assert!(matches!(
+        target::vet(&catalog, 工作区.path(), None, std::path::Path::new("")).expect("中立库读得动"),
+        Err(TargetRefusal::Empty)
+    ));
+}
+
+#[test]
+fn 名字空着或者已被别的子库用了_当场拦下_改自己那一台不算() {
+    use romcat_core::sublibrary::target::{self, NameRefusal};
+
+    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+    建子库(&mut catalog, "掌机", None);
+    建子库(&mut catalog, "备份卡", None);
+    assert_eq!(
+        target::vet_name(&catalog, None, "  ").expect("读得动"),
+        Err(NameRefusal::Empty)
+    );
+    // 新建一台同名的：核心按名字存，放行就是悄悄把「掌机」的目标设置盖掉。
+    assert_eq!(
+        target::vet_name(&catalog, None, "掌机").expect("读得动"),
+        Err(NameRefusal::Taken)
+    );
+    assert_eq!(
+        target::vet_name(&catalog, Some("掌机"), " 掌机 ").expect("读得动"),
+        Ok(())
+    );
+    assert_eq!(
+        target::vet_name(&catalog, Some("掌机"), "备份卡").expect("读得动"),
+        Err(NameRefusal::Taken)
+    );
+    assert_eq!(
+        target::vet_name(&catalog, None, "新掌机").expect("读得动"),
+        Ok(())
+    );
+}

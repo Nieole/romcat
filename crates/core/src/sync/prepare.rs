@@ -29,6 +29,7 @@ use crate::fs::RealFs;
 use crate::path;
 use crate::scrape::Priorities;
 use crate::scrape::pool::MediaPool;
+use crate::sublibrary::target::library_overlap;
 use crate::sublibrary::{self, Selected, Sublibrary};
 use crate::task::{Cutoff, Halted, Handle};
 use crate::workspace;
@@ -453,22 +454,25 @@ pub fn missing_roots_message(missing: &[String]) -> String {
     )
 }
 
-/// 目标落在主库里就拦下来。
+/// 目标落在主库里、或者把主库的根包在里面，就拦下来。
 ///
 /// **只有真要动手那一步需要这一道。** 排计划从头到尾只读，指哪儿都无所谓；而同步是真的
 /// 往目标上建目录、写文件、删文件——一个手滑的目标路径就会在那块 10 TiB 不可再生的盘里
 /// 动手（ADR-0004）。判据用中立库记着的主库根，于是给不给主库根都拦得住。
 /// **取不到主库根时不拦**：那说明这份库还没扫过，没有边界可守。
 ///
+/// **把根包在里面也拦**：同步往 `<平台目录>/…` 写，平台目录与根同名时就写进了主库。
+///
 /// 它在核心里而不在命令行里，是因为**界面也有一个「同步」按钮**——这道红线不能靠
-/// 每个壳自己记得写一遍。
+/// 每个壳自己记得写一遍。判的那一下是 [`library_overlap`]：新建子库、改目标设置时当场判的也是它
+/// （[`sublibrary::target::vet`](crate::sublibrary::target::vet)，ADR-0024）。
 ///
 /// **判据先把两边折成可比形态**（[`path::is_inside_place`]）：目标过了
 /// [`path::normalize_existing`]，Windows 上于是是 `\\?\D:\…`，而库里的根存的是
 /// display 形态 `D:\…`——不折的话这道红线恒为 false，等于没有。
 ///
 /// # Errors
-/// 目标落在主库里、或者中立库读不动时返回一句给人看的话。
+/// 目标与主库的根撞在一起、或者中立库读不动时返回一句给人看的话。
 pub fn refuse_target_in_library(
     catalog: &Catalog,
     overrides: &[(Option<String>, PathBuf)],
@@ -477,16 +481,25 @@ pub fn refuse_target_in_library(
     let roots = library_roots(catalog, overrides)?;
     let target = path::normalize_existing(target);
     // **每个根都要拦。** 一份中立库装着几块盘，只拦其中一块等于另外几块没人守。
-    for (name, root) in roots.iter() {
-        if path::is_inside_place(root, &target) {
-            return Err(format!(
-                "目标 {} 落在主库的根「{name}」（{}）里。主库只读：\n\
-                 同步会往目标上写文件、删文件，绝不能指着那块盘。\n\
-                 子库要导到别处去——一律走读卡器。",
-                path::display(&target),
-                path::display(root),
-            ));
-        }
-    }
-    Ok(())
+    let Some(overlap) = library_overlap(&roots, &target) else {
+        return Ok(());
+    };
+    let how = if overlap.around {
+        "把主库的根"
+    } else {
+        "落在主库的根"
+    };
+    let tail = if overlap.around {
+        "包在里面"
+    } else {
+        "里"
+    };
+    Err(format!(
+        "目标 {} {how}「{}」（{}）{tail}。主库只读：\n\
+         同步会往目标上写文件、删文件，绝不能指着那块盘。\n\
+         子库要导到别处去——一律走读卡器。",
+        path::display(&target),
+        overlap.root,
+        path::display(&overlap.place),
+    ))
 }

@@ -42,6 +42,7 @@
 
 pub mod report;
 pub mod rule;
+pub mod target;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
