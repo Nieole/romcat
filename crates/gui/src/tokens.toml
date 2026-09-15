@@ -269,6 +269,7 @@ fold-mark         = 7     # 面板标题栏那枚折叠标三角的宽（设计�
 format-select-width = 150 # 导出设置那一块前端格式下拉的宽（设计稿 select.input 的 width:150px）
 root-name-max     = 120   # 库屏根那张表根名称那一列的宽度上限：超过就截断加「…」、悬停看全名，路径那一列始终留得出地方（拿主意的人 2026-09-14 定，稿上没有这一格）
 health-dup-columns = [56, 56, 86, 30] # 库体检重复拷贝明细表后四列的宽：平台、份数、单份大小、展开标（设计稿 dups 那张表 th 的 width:56px / 56px / 86px / 30px）
+health-list-max-height = 420 # 库体检明细列表最多多高：超过就在列表里滚、只画看得见的那几行（照稿用虚拟化列表，拿主意的人 2026-09-15 答；稿上没写这一格）
 gauge-height      = 10    # 子库卡上容量条的高（设计稿 .gauge 的 height:10px）
 gauge-hatch       = 10    # 容量条「清单之外：未知」那一段斜纹一个来回（设计稿 .gauge .unk：5px 有色、5px 空）
 legend-swatch     = 9     # 容量条图例前那一小块颜色的边长（设计稿 .legend i 的 9px）

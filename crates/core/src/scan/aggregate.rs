@@ -306,6 +306,8 @@ pub struct DuplicateGroup {
     /// 组内的路径，最多 [`Limits::max_duplicate_paths_per_group`] 条。
     /// 少于 `count` 条就说明有几份没记下路径。
     pub paths: Vec<String>,
+    /// 组内每一份在中立库里的**键**，与 [`Self::paths`] 一一对应、同一个上限。界面照它写「根名 · 相对路径」。
+    pub keys: Vec<String>,
     /// 这一组横跨哪几个平台：与 [`Aggregate::platforms`] 同一套分组键（认出平台是规范名，没认出是那个顶层目录名，
     /// 库根下的散文件是 [`UNKNOWN_PLATFORM`]）。**判据只看名字与大小**，所以一组可以横跨几个平台目录。
     /// 每一份都记上，与路径记没记全无关。
@@ -501,6 +503,8 @@ impl Default for Limits {
 pub struct FileObservation {
     /// 展示用的完整路径。
     pub display_path: String,
+    /// 这个文件在中立库里的**键**（根名 + 相对那个根、NFC）。重复拷贝明细要它：展示路径拆不回「根名 · 相对路径」。
+    pub key: String,
     /// 文件名转小写，用于重复检测。
     pub name_lower: String,
     /// 这个文件落在范围边界的哪一格。
@@ -567,6 +571,7 @@ impl FileObservation {
         Self {
             over_max_path: path::exceeds_max_path(&display_path),
             display_path,
+            key: key.to_string(),
             name_lower: path::file_name_lower(name),
             placement: match scope {
                 Scope::Platform(platform) => Placement::Platform(platform.name.clone()),
@@ -888,6 +893,11 @@ impl Aggregate {
                     observation.display_path.clone(),
                     limits.max_duplicate_paths_per_group,
                 );
+                push_capped(
+                    &mut group.keys,
+                    observation.key.clone(),
+                    limits.max_duplicate_paths_per_group,
+                );
                 group.platforms.insert(platform_key.to_string());
             }
             None => {
@@ -908,6 +918,7 @@ impl Aggregate {
                         size: len,
                         count: 1,
                         paths: vec![observation.display_path.clone()],
+                        keys: vec![observation.key.clone()],
                         platforms: BTreeSet::from([platform_key.to_string()]),
                     },
                 );

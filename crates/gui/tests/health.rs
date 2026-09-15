@@ -378,14 +378,16 @@ fn 点重复拷贝那一格_明细按可腾出的空间排_展开一组列出全
     );
 
     let 屏上 = 点一下(&ctx, "逆转裁判.gba", |ui| 现场.app.ui(ui));
+    // 岔路口 4：展开后的路径照票 09 写「根名 · 相对路径」（拆键在核心库，界面照 `table::root_and_path` 接起来）。
     for 那一份 in [
         "GBA/汉化/逆转裁判.gba",
         "GBA/备份一/逆转裁判.gba",
         "GBA/备份二/逆转裁判.gba",
     ] {
+        let 画的 = format!("主库 · {那一份}");
         assert!(
-            屏上.lines().any(|line| line.ends_with(那一份)),
-            "展开之后「{那一份}」那一份的路径不在屏上：\n{屏上}"
+            屏上.lines().any(|line| line == 画的),
+            "展开之后「{画的}」那一份不在屏上：\n{屏上}"
         );
     }
     assert!(
@@ -576,4 +578,79 @@ fn 点疑似同一作品那一格_不跳屏也不开明细_只在屏上说一句
         屏上.contains("暂时还给不出疑似同一作品的建议"),
         "识别跑完之后点那一格，屏上没改说实话：\n{屏上}"
     );
+}
+
+/// 一块摆着**十二份落单存档**的盘：`GBA/汉化/落单NN.sav`，同目录里一份主文件都没有。扫描那一趟每类只留十个样例。
+fn 有十二份落单存档的盘() -> TempDir {
+    let 盘 = temp_dir("gui-health-stranded");
+    std::fs::write(盘.path().join("占位.txt"), b"x").expect("写得进");
+    for n in 0..12 {
+        let 落点 = 盘.path().join(format!("GBA/汉化/落单{n:02}.sav"));
+        std::fs::create_dir_all(落点.parent().expect("有上级目录")).expect("建得出目录");
+        std::fs::write(&落点, vec![9_u8; 64]).expect("写得进");
+    }
+    盘
+}
+
+#[test]
+fn 扫描交回的报告每类只留十个样例_重新体检那一趟列全_导出的清单也全() {
+    // 拿主意的人 2026-09-15 答岔路口 2（挂单 `Q959`）：只放开「重新体检」那一趟，其余几格列全、导出也全；底下「另有 N 个」照实写。
+    let ctx = headless::context();
+    let 盘 = 有十二份落单存档的盘();
+    let mut 现场 = 现场::摆好();
+    现场.加根(盘.path(), "主库");
+    现场.扫("主库");
+    let 放清单的地方 = temp_dir("gui-health-full");
+
+    // ── 扫描交回的那一份：十个样例，另有两个没列出
+    滚到底(&ctx, |ui| 现场.app.ui(ui));
+    点一下(&ctx, "附属文件落单", |ui| 现场.app.ui(ui));
+    let 落点 = 放清单的地方.path().join("扫描那一份.txt");
+    {
+        let (screen, site, _) = 现场.app.roots_site_and_tasks();
+        screen.health_export_picked(site, Some(落点.clone()));
+    }
+    let 写出去的 = std::fs::read_to_string(&落点).expect("清单写出去了");
+    assert!(写出去的.contains("另有 2 个没列出"), "{写出去的}");
+    let 屏上 = 滚到底(&ctx, |ui| 现场.app.ui(ui));
+    assert!(
+        屏上.contains("另有 2 个"),
+        "样例截断了，弹层底下没照实说另有几个：\n{屏上}"
+    );
+    点一下(&ctx, "关闭", |ui| 现场.app.ui(ui));
+
+    // ── 重新体检那一趟：列全
+    {
+        let (screen, site, tasks) = 现场.app.roots_site_and_tasks();
+        screen.check_health(site, tasks);
+    }
+    现场.等台上空了();
+    滚到底(&ctx, |ui| 现场.app.ui(ui));
+    点一下(&ctx, "附属文件落单", |ui| 现场.app.ui(ui));
+    let 落点 = 放清单的地方.path().join("重新体检那一份.txt");
+    {
+        let (screen, site, _) = 现场.app.roots_site_and_tasks();
+        screen.health_export_picked(site, Some(落点.clone()));
+    }
+    let 写出去的 = std::fs::read_to_string(&落点).expect("清单写出去了");
+    for n in 0..12 {
+        assert!(
+            写出去的.contains(&format!("落单{n:02}.sav")),
+            "重新体检之后清单里少了第 {n} 份：\n{写出去的}"
+        );
+    }
+    assert!(!写出去的.contains("另有"), "列全了就不说另有：\n{写出去的}");
+    let 屏上 = 跑一帧不动(&ctx, &mut 现场);
+    assert!(
+        !屏上.contains("另有 2 个"),
+        "列全了弹层底下还说另有：\n{屏上}"
+    );
+}
+
+/// 不带事件跑两帧，交出第二帧画出来的字（弹层里的虚拟化列表头一帧在量行高）。
+fn 跑一帧不动(ctx: &egui::Context, 现场: &mut 现场) -> String {
+    headless::frame(ctx, headless::input(), |ui| 现场.app.ui(ui));
+    shared::画出来的字(&headless::frame(ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }))
 }

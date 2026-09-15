@@ -679,6 +679,8 @@ pub struct Layout {
     pub root_name_max: f32,
     /// 库体检重复拷贝明细表后四列的宽：平台、份数、单份大小、展开标（设计稿 `dups` 那张表的 `th`）。
     pub health_dup_columns: [f32; 4],
+    /// 库体检明细列表最多多高：超过就在列表里滚、只画看得见的那几行（虚拟化列表）。
+    pub health_list_max_height: f32,
     /// 子库卡上容量条的高（设计稿 `.gauge`）。
     pub gauge_height: f32,
     /// 容量条上「清单之外：还不知道」那一段斜纹一个来回多宽（设计稿 `.gauge .unk`：一半有色、一半空）。

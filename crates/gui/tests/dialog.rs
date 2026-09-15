@@ -370,6 +370,53 @@ fn 页脚上的主按钮画成强调色_其余几颗不是() {
     );
 }
 
+#[test]
+fn 退出那一颗摆在右边的写法_退出那一颗靠右画成主按钮_其余几颗靠左是幽灵按钮_退出键照旧等于按它() {
+    // 票 `gui-looks-like-the-design/27`：库体检明细弹层照稿（设计稿 `DLG.health` 的 `foot`）——「导出清单…」幽灵按钮在左、
+    // 「关闭」主按钮在右（拿主意的人 2026-09-15 答，挂单 `Q958`）。那一层没有「往前走」的那一颗，关掉就是唯一的出口。
+    // **弹层框架加一种写法**，已有的弹层照旧（退出那一颗靠左）。
+    let ctx = 上下文();
+    let mut 按下的 = None;
+    let mut 画 = |ctx: &egui::Context, events: Vec<egui::Event>| {
+        headless::frame(ctx, 输入(events), |ui| {
+            let ctx = ui.ctx().clone();
+            let footer = Footer::new(Button::new("关上", 按的::关上))
+                .dismiss_on_right()
+                .button(Button::new("导出", 按的::保存).ghost());
+            let shown = Dialog::new("退出靠右", "退出靠右", footer).show(&ctx, |ui| {
+                ui.label("里头");
+            });
+            if shown.pressed.is_some() {
+                按下的 = shown.pressed;
+            }
+        })
+    };
+    // 先跑完淡入再看颜色（同上一条）。
+    for _ in 0..30 {
+        画(&ctx, Vec::new());
+    }
+    let 帧 = 画(&ctx, Vec::new());
+    let 关上 = shared::正好那一段画在哪儿(&帧, "关上").expect("「关上」画出来了");
+    let 导出 = shared::正好那一段画在哪儿(&帧, "导出").expect("「导出」画出来了");
+    assert!(
+        关上.x > 导出.x,
+        "退出那一颗该靠右：关上在 {关上:?}，导出在 {导出:?}"
+    );
+    let 强调色 = Tokens::builtin().color.theme(ctx.theme()).accent;
+    let 强调色的框 = 填着这个颜色的框(&帧, 强调色);
+    assert!(
+        强调色的框.iter().any(|框| 框.contains(关上)),
+        "靠右的退出那一颗该画成主按钮（强调色底）",
+    );
+    assert!(
+        !强调色的框.iter().any(|框| 框.contains(导出)),
+        "靠左的那一颗是幽灵按钮，不填强调色",
+    );
+
+    画(&ctx, vec![按键事件(egui::Key::Escape)]);
+    assert_eq!(按下的, Some(按的::关上), "退出键照旧等于按退出那一颗");
+}
+
 // ——— 宽度与内容区 ———
 
 /// 一层给定宽度、内容区里摆着 `行数` 行字的弹层。

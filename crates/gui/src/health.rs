@@ -36,6 +36,7 @@ use crate::clock::Clock;
 use crate::dialog::{Button, Dialog, Footer, Width};
 use crate::font;
 use crate::look::{self, Tone};
+use crate::table;
 use crate::task::{Product, Tasks};
 use crate::tokens::Tokens;
 
@@ -327,11 +328,14 @@ impl Section {
         let mut 展开 = detail.expanded;
         let mut 要打开: Option<PathBuf> = None;
         let said = self.said.clone();
-        // 退出那一颗靠左（弹层框架定的，Esc 等于按它），「导出清单…」靠右——设计稿是反过来摆的，挂着等拿主意的人看候选图时定。
-        let footer = Footer::new(Button::new("关闭", Pressed::Close)).button(
-            Button::new(EXPORT, Pressed::Export)
-                .hover("把这一格的明细写成一份纯文本，保存到你选的地方；不许写进主库"),
-        );
+        // 照稿：「导出清单…」幽灵按钮在左、「关闭」主按钮在右（拿主意的人 2026-09-15 答，挂单 `Q958`）。Esc 照旧等于「关闭」。
+        let footer = Footer::new(Button::new("关闭", Pressed::Close))
+            .dismiss_on_right()
+            .button(
+                Button::new(EXPORT, Pressed::Export)
+                    .ghost()
+                    .hover("把这一格的明细写成一份纯文本，保存到你选的地方；不许写进主库"),
+            );
         let shown = Dialog::new(
             "库体检明细",
             format!("库体检 · {}", detail.finding.label()),
@@ -464,19 +468,38 @@ fn paint_chevron(ui: &egui::Ui, 格: egui::Rect, 摊开: bool) {
     ));
 }
 
-/// 明细里一条路径（设计稿 `.lst` 那一行）：等宽小一号的路径（超宽截断，悬停看全），右边一颗弱化的「在文件系统中打开」——
-/// 打开 `folder` 那个目录；那块盘不在位（目录不在）时按不下去。交回按了之后要打开的那个目录。
-fn path_row(ui: &mut egui::Ui, 路径: &str, folder: Option<&Path>) -> Option<PathBuf> {
+/// 明细里一条路径（设计稿 `.lst` 那一行）：等宽小一号的路径，右边一颗弱化的「在文件系统中打开」——打开 `folder` 那个目录；
+/// 那块盘不在位（目录不在）时按不下去。交回按了之后要打开的那个目录。
+///
+/// 给了中立库的**键**就照票 09 写「根名 · 相对路径」，放不下才省根名（`table::root_and_path`，拿主意的人 2026-09-15 答
+/// 岔路口 4）；没有键就画那条路径，超宽截断。
+fn path_row(
+    ui: &mut egui::Ui,
+    路径: &str,
+    键: Option<&str>,
+    folder: Option<&Path>,
+) -> Option<PathBuf> {
     let tokens = Tokens::builtin();
     let 按钮宽 = look::small_button_width(ui, OPEN_IN_FILES);
     let 字号 = look::font_size(ui.ctx(), tokens.font.size_caption_plus);
     let mut 要打开 = None;
     ui.horizontal(|ui| {
         let 路径宽 = (ui.available_width() - 按钮宽 - ui.spacing().item_spacing.x).max(0.0);
+        let 画的 = 键.map_or_else(
+            || 路径.to_string(),
+            |键| {
+                table::root_and_path(
+                    ui,
+                    键,
+                    &egui::FontId::new(字号, egui::FontFamily::Monospace),
+                    路径宽,
+                )
+            },
+        );
         cell(
             ui,
             路径宽,
-            font::mono(路径).size(字号).into(),
+            font::mono(画的).size(字号).into(),
             egui::Align::Min,
         );
         let 在位 = folder.is_some_and(Path::is_dir);
@@ -497,9 +520,13 @@ fn path_row(ui: &mut egui::Ui, 路径: &str, folder: Option<&Path>) -> Option<Pa
     要打开
 }
 
-/// 其余几格的明细（设计稿 `DLG.health` 的列表那一支，`.lst`）：一行一条，路径在上、原因在下（弱字），牵涉的那几条跟在底下；
-/// 有路径的一行右边一颗「在文件系统中打开」。行与原因出自核心库（[`HealthReport::finding_rows`]），报告里样例截断时底下说另有几个。
-/// **未纳入管理的目录不画「映射到平台」下拉**（拿主意的人 2026-09-15 答岔路口 10）：只报告、不处理。
+/// 其余几格的明细（设计稿 `DLG.health` 的列表那一支，`.lst`）：一行一条，路径在上、原因在下（弱字），牵涉的那几条并成一行跟在
+/// 底下；有路径的一行右边一颗「在文件系统中打开」。行与原因出自核心库（[`HealthReport::finding_rows`]）；报告里样例截断时底下
+/// 照实说另有几个。**未纳入管理的目录不画「映射到平台」下拉**（拿主意的人 2026-09-15 答岔路口 10）：只报告、不处理。
+///
+/// **虚拟化列表**（拿主意的人 2026-09-15 答，挂单 `Q959`）：「重新体检」那一趟列全之后一格能有几千行，列表最多高到令牌
+/// `health-list-max-height`，在列表里滚、**只画看得见的那几行**。于是一格里每一行长得一样高——路径一行、有原因的格再加一行原因、
+/// 有牵涉的格再加一行（顿号并列、超宽截断）。列表里只有按钮，没有输入框（`crate::dialog` 模块文档那条回收的禁令管的是输入框）。
 fn findings_ui(
     ui: &mut egui::Ui,
     report: &HealthReport,
@@ -515,51 +542,76 @@ fn findings_ui(
         look::help(ui, &format!("没有{}。", finding.label()));
         return;
     }
+    let 行缝 = look::step(0);
+    let 正文高 = ui.text_style_height(&egui::TextStyle::Body);
+    let 小字高 = ui.text_style_height(&egui::TextStyle::Small);
+    // 有「在文件系统中打开」的那一行是横排，横排最矮也有可点控件那么高。
+    let 路径高 = if rows.iter().any(|row| row.folder.is_some()) {
+        ui.spacing().interact_size.y.max(正文高)
+    } else {
+        正文高
+    };
+    let 有原因 = rows.iter().any(|row| row.reason.is_some());
+    let 有牵涉 = rows.iter().any(|row| !row.items.is_empty());
+    let 行高 = 2.0 * 上下
+        + 路径高
+        + if 有原因 { 行缝 + 小字高 } else { 0.0 }
+        + if 有牵涉 { 行缝 + 正文高 } else { 0.0 };
     egui::Frame::new()
         .stroke(线)
         .corner_radius(tokens.radius.large)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 0.0;
-            for (第几行, row) in rows.iter().enumerate() {
-                if 第几行 > 0 {
-                    look::divider(ui);
-                }
-                egui::Frame::new()
-                    .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.spacing_mut().item_spacing.y = look::step(0);
+            egui::ScrollArea::vertical()
+                .id_salt(("库体检明细", finding.label()))
+                .max_height(tokens.layout.health_list_max_height)
+                .auto_shrink([false, true])
+                .show_rows(ui, 行高, rows.len(), |ui, 看得见的| {
+                    for 第几行 in 看得见的 {
+                        let row = &rows[第几行];
+                        let (格, _) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), 行高),
+                            egui::Sense::hover(),
+                        );
+                        if 第几行 > 0 {
+                            ui.painter().hline(格.x_range(), 格.top(), 线);
+                        }
+                        let mut 里头 = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(格.shrink2(egui::vec2(左右, 上下)))
+                                .layout(egui::Layout::top_down(egui::Align::Min)),
+                        );
+                        里头.spacing_mut().item_spacing.y = 行缝;
+                        let 宽 = 里头.available_width();
                         match &row.folder {
                             Some(folder) => {
-                                if let Some(目录) = path_row(ui, &row.path, Some(folder)) {
+                                if let Some(目录) =
+                                    path_row(&mut 里头, &row.path, None, Some(folder))
+                                {
                                     *要打开 = Some(目录);
                                 }
                             }
-                            None => {
-                                let 宽 = ui.available_width();
-                                cell(
-                                    ui,
-                                    宽,
-                                    font::mono(row.path.as_str()).size(字号).into(),
-                                    egui::Align::Min,
-                                );
-                            }
+                            None => cell(
+                                &mut 里头,
+                                宽,
+                                font::mono(row.path.as_str()).size(字号).into(),
+                                egui::Align::Min,
+                            ),
                         }
                         if let Some(reason) = &row.reason {
-                            look::help(ui, reason);
+                            look::help(&mut 里头, reason);
                         }
-                        for item in &row.items {
-                            let 宽 = ui.available_width();
+                        if !row.items.is_empty() {
                             cell(
-                                ui,
+                                &mut 里头,
                                 宽,
-                                font::mono(item.as_str()).size(字号).weak().into(),
+                                font::mono(row.items.join("、")).size(字号).weak().into(),
                                 egui::Align::Min,
                             );
                         }
-                    });
-            }
+                    }
+                });
         });
     let 列出 = u64::try_from(rows.len()).unwrap_or(u64::MAX);
     let 一共 = report.finding_count(finding);
@@ -598,6 +650,9 @@ fn duplicates_ui(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing = egui::vec2(格缝, 0.0);
+            // **行高照稿**（设计稿 `.tbl td` 一行约 36 点）：egui 的横排最矮也有可点控件那么高，这张表里局部把它收成零，
+            // 行高只由字高与格子内边距撑；全窗口那一格不动（拿主意的人 2026-09-15 定）。
+            ui.spacing_mut().interact_size.y = 0.0;
             // 表头（设计稿 `.tbl th`）。
             egui::Frame::new()
                 .inner_margin(egui::Margin::from(egui::vec2(头左右, 头上下)))
@@ -634,13 +689,13 @@ fn duplicates_ui(
                             cell(
                                 ui,
                                 份数宽,
-                                font::mono(thousands(组.count)).into(),
+                                egui::RichText::new(thousands(组.count)).into(),
                                 egui::Align::Max,
                             );
                             cell(
                                 ui,
                                 大小宽,
-                                font::mono(human_bytes(组.size)).into(),
+                                egui::RichText::new(human_bytes(组.size)).into(),
                                 egui::Align::Max,
                             );
                             let 高 = ui.text_style_height(&egui::TextStyle::Body);
@@ -662,8 +717,9 @@ fn duplicates_ui(
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             ui.spacing_mut().item_spacing.y = look::step(1);
-                            for 路径 in &组.paths {
-                                if let Some(目录) = path_row(ui, 路径, Path::new(路径).parent())
+                            for (第几份, 路径) in 组.paths.iter().enumerate() {
+                                let 键 = 组.keys.get(第几份).map(String::as_str);
+                                if let Some(目录) = path_row(ui, 路径, 键, Path::new(路径).parent())
                                 {
                                     *要打开 = Some(目录);
                                 }
@@ -693,7 +749,10 @@ fn duplicates_ui(
 /// 一个字节都不读主库、不写库。
 fn check_run(catalog: &Catalog, task: &Handle) -> Result<Product, Cutoff> {
     task.check()?;
+    // **明细列全**（拿主意的人 2026-09-15 答，挂单 `Q959`）：这一趟样例不设上限、重复拷贝每组记全路径，其余几格的明细
+    // 与导出的清单一个不少。命令行 `romcat report` 照旧每类只留前几个。
     let limits = Limits {
+        max_examples: usize::MAX,
         max_duplicate_paths_per_group: Limits::FULL_DUPLICATE_PATHS_PER_GROUP,
         ..Limits::default()
     };
@@ -702,7 +761,7 @@ fn check_run(catalog: &Catalog, task: &Handle) -> Result<Product, Cutoff> {
         .aggregate(&limits, &Manifest::builtin())
         .map_err(failed)?;
     task.check()?;
-    let report = HealthReport::build(&aggregate, &catalog.report_meta().map_err(failed)?);
+    let report = HealthReport::build_full(&aggregate, &catalog.report_meta().map_err(failed)?);
     let duplicates = DuplicateDetails::build(&aggregate, &report);
     Ok(Product::Checked {
         report: Box::new(report),

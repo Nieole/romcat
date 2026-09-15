@@ -152,6 +152,10 @@ pub struct DuplicateGroupStats {
     pub count: u64,
     /// 组内的路径。可能少于 `count` 条——报告里每组只留几条，完整的在 [`DuplicateDetails`] 里。
     pub paths: Vec<String>,
+    /// 组内每一份在中立库里的**键**，与 `paths` 一一对应（报告截断路径时跟着一起截）。界面照它写「根名 · 相对路径」。
+    /// 旧报告里没有这一栏，读回来时是空的。
+    #[serde(default)]
+    pub keys: Vec<String>,
 }
 
 impl DuplicateGroupStats {
@@ -650,7 +654,7 @@ fn shaping_summary(
     }
 }
 
-fn scope_summary(aggregate: &Aggregate) -> ScopeSummary {
+fn scope_summary(aggregate: &Aggregate, unmapped_cap: usize) -> ScopeSummary {
     let mut summary = ScopeSummary {
         platforms: 0,
         in_scope_files: 0,
@@ -693,7 +697,7 @@ fn scope_summary(aggregate: &Aggregate) -> ScopeSummary {
     unmapped.sort_by(|a, b| b.1.bytes.cmp(&a.1.bytes).then_with(|| a.0.cmp(b.0)));
     summary.unmapped_examples = unmapped
         .iter()
-        .take(TOP_UNMAPPED_DIRS)
+        .take(unmapped_cap)
         .map(|(name, counts)| {
             format!(
                 "{name}（{} 个文件，{}）",
@@ -760,9 +764,22 @@ fn extension_stats(counts: &BTreeMap<String, ExtensionAcc>, limit: usize) -> Vec
 }
 
 impl HealthReport {
-    /// 从扫描状态整理出报告。
+    /// 从扫描状态整理出报告。未纳入管理的目录只列容量最大的前几个——命令行 `romcat report` 印的那一份。
     #[must_use]
     pub fn build(aggregate: &Aggregate, meta: &ReportMeta) -> Self {
+        Self::build_listing(aggregate, meta, TOP_UNMAPPED_DIRS)
+    }
+
+    /// 同 [`Self::build`]，但**明细列全**：未纳入管理的目录一个不少。界面上「重新体检」那一趟用它（拿主意的人 2026-09-15 答，
+    /// 挂单 `Q959`：其余几格列全、导出也全，命令行照旧）。别的几类样例有多少取决于统计那一趟的
+    /// [`Limits::max_examples`](crate::scan::aggregate::Limits::max_examples)——要列全，那一趟得把它放开。
+    #[must_use]
+    pub fn build_full(aggregate: &Aggregate, meta: &ReportMeta) -> Self {
+        Self::build_listing(aggregate, meta, usize::MAX)
+    }
+
+    /// 两种出法共用的那一段：`unmapped_cap` 是未纳入管理的目录最多列几个。
+    fn build_listing(aggregate: &Aggregate, meta: &ReportMeta, unmapped_cap: usize) -> Self {
         let mut platforms: Vec<PlatformStats> = aggregate
             .platforms
             .iter()
@@ -803,7 +820,7 @@ impl HealthReport {
             samples: sample_stats(&aggregate.samples),
             containers: container_summary(&aggregate.containers, meta.penetrated_containers),
             shaping: shaping_summary(&aggregate.shaping, &aggregate.unshaped, meta.scan),
-            scope: scope_summary(aggregate),
+            scope: scope_summary(aggregate, unmapped_cap),
             conflicts: conflict_summary(&aggregate.conflicts),
             shaping_doubts: ShapingDoubtSummary {
                 total: aggregate.shaping_doubts.by_kind.values().sum(),
@@ -862,6 +879,7 @@ fn duplicate_groups(aggregate: &Aggregate) -> Vec<DuplicateGroupStats> {
             size: group.size,
             count: group.count,
             paths: group.paths.clone(),
+            keys: group.keys.clone(),
         })
         .collect();
     groups.sort_by(|a, b| {
@@ -884,6 +902,7 @@ fn suspect_summary(aggregate: &Aggregate) -> SuspectSummary {
     groups.truncate(TOP_DUPLICATE_GROUPS);
     for group in &mut groups {
         group.paths.truncate(TOP_DUPLICATE_PATHS_PER_GROUP);
+        group.keys.truncate(TOP_DUPLICATE_PATHS_PER_GROUP);
     }
 
     let by_reason = SuspectReason::all()
@@ -1217,5 +1236,66 @@ mod tests {
             "全列出来了就不说另有：{落单明细}"
         );
         assert!(落单明细.contains("不改动主库里的任何文件"), "{落单明细}");
+    }
+
+    #[test]
+    fn 重复拷贝每一份都带着中立库的键_与路径一一对应_报告截断时键跟着路径一起截() {
+        // 拿主意的人 2026-09-15 答岔路口 4：展开后的路径照票 09 写「根名 · 相对路径」——拆键要键，展示路径拆不回去。
+        let 记录: Vec<(String, Option<u64>)> = (0..12)
+            .map(|n| (format!("库/GBA/备份{n:02}/逆转裁判.gba"), Some(8192)))
+            .collect();
+        let 借: Vec<(&str, Option<u64>)> =
+            记录.iter().map(|(key, len)| (key.as_str(), *len)).collect();
+        let agg = 收(&借);
+        let report = 报告(&agg);
+        let details = DuplicateDetails::build(&agg, &report);
+
+        let 组 = &details.groups[0];
+        assert_eq!(组.keys.len(), 组.paths.len(), "键与路径一一对应");
+        assert_eq!(组.keys[0], "库/GBA/备份00/逆转裁判.gba");
+        assert_eq!(组.paths[0], "/lib/GBA/备份00/逆转裁判.gba");
+        assert_eq!(组.keys[9], "库/GBA/备份09/逆转裁判.gba");
+
+        let 报告里的 = &report.suspects.top_duplicates[0];
+        assert_eq!(
+            报告里的.keys.len(),
+            报告里的.paths.len(),
+            "报告截断路径时键跟着一起截"
+        );
+    }
+
+    #[test]
+    fn 体检那一趟列全_未纳入管理的目录不再只留前十五个_默认的报告照旧只留前十五个() {
+        // 拿主意的人 2026-09-15 答岔路口 2（挂单 `Q959`）：只放开界面「重新体检」那一趟，其余几格列全、导出也全，命令行照旧。
+        let 目录们: Vec<String> = (0..20).map(|n| format!("库/杂物{n:02}/说明.txt")).collect();
+        let 记录: Vec<(&str, Option<u64>)> =
+            目录们.iter().map(|key| (key.as_str(), Some(16))).collect();
+        let agg = 收(&记录);
+        let meta = ReportMeta {
+            root_name: "库".to_string(),
+            root: "/lib".to_string(),
+            interrupted: false,
+            resumed: false,
+            jobs: 1,
+            samples_per_class: 0,
+            penetrated_containers: true,
+            scan: 1,
+            delta: None,
+        };
+        assert_eq!(
+            HealthReport::build(&agg, &meta)
+                .scope
+                .unmapped_examples
+                .len(),
+            15
+        );
+        let 列全的 = HealthReport::build_full(&agg, &meta);
+        assert_eq!(列全的.scope.unmapped_dirs, 20);
+        assert_eq!(
+            列全的.scope.unmapped_examples.len(),
+            20,
+            "体检那一趟一个都不少"
+        );
+        assert_eq!(列全的.finding_rows(Finding::UnmappedDirs).len(), 20);
     }
 }
