@@ -395,6 +395,22 @@ pub struct Font {
     pub group_tracking: f32,
     /// 大号按钮上的字。
     pub size_button_large: f32,
+    /// 作品详情页元数据那一面值那几行的行高，字号的倍数（设计稿 `.mrow .v`）。
+    pub meta_value_line_height: f32,
+    /// 作品详情页段落卡的标题：设计稿上的半号（14.5），用到时走 [`crate::look::font_size`]。
+    pub size_section_title: f32,
+    /// 没有 ffmpeg 那一块里那个 ▶（设计稿 `.noff i`）。
+    pub size_noff_mark: f32,
+    /// 媒体那一格视频上压的 ▶（设计稿 `.mtile .pv .play`）。
+    pub size_play_mark: f32,
+    /// 作品详情页头上那张字卡的标题（设计稿 `.tc-t`）。
+    pub size_hero_card_title: f32,
+    /// 那张字卡的平台代号水印（设计稿 `.tc-wm`）。
+    pub size_hero_card_mark: f32,
+    /// 概览里简介那一段：设计稿上的半号（13.5），用到时走 [`crate::look::font_size`]。
+    pub size_desc: f32,
+    /// 那一段的行高，字号的倍数（设计稿 `.desc`）。
+    pub desc_line_height: f32,
 }
 
 /// 粗体覆盖哪些字。
@@ -530,6 +546,88 @@ pub struct Space {
     pub queue_row_padding: [f32; 2],
     /// 正在跑那张卡底下那一排，格与格之间的间距。
     pub meta_gap: f32,
+    /// 作品详情页顶上那一条的内边距：`[上下, 左右]`（设计稿 `.wdbar`）。
+    pub work_bar_padding: [f32; 2],
+    /// 那一条里几样东西之间（设计稿 `.wdbar` 的 `gap`）。
+    pub work_bar_gap: f32,
+    /// 作品详情页六个面那一排左右留白（设计稿 `.tabs`）。
+    pub tabs_padding: f32,
+    /// 面与面之间（设计稿 `.tabs` 的 `gap`）。
+    pub tabs_gap: f32,
+    /// 一个面左右留白（设计稿 `.tabs button`）。
+    pub tab_padding: f32,
+    /// 面名与后头那个数之间（设计稿 `.tabs button small`）。
+    pub tab_count_gap: f32,
+    /// 作品详情页一面的正文内边距：`[上, 左右, 下]`（设计稿 `.tabp`）。
+    pub tab_panel_padding: [f32; 3],
+    /// 作品详情页一张卡与下一张之间（设计稿 `.vcard` 的 `margin-bottom`）。
+    pub work_card_gap: f32,
+    /// 那张卡头一行的内边距：`[上下, 左右]`（设计稿 `.vhead`）。
+    pub work_card_head_padding: [f32; 2],
+    /// 头一行里几样东西之间（设计稿 `.vhead` 的 `gap`）。
+    pub work_card_head_gap: f32,
+    /// 那张卡身子的内边距：`[上下, 左右]`（设计稿 `.vbody`）。
+    pub work_card_body_padding: [f32; 2],
+    /// 身子左右两栏之间（设计稿 `.vbody` 的 `gap` 横着那一半）。
+    pub work_card_columns_gap: f32,
+    /// 「名 → 值」两列：`[行与行之间, 名与值之间]`（设计稿 `.infol` 的 `gap`）。
+    pub info_list_gap: [f32; 2],
+    /// 文件表一格的内边距：`[上下, 左右]`（设计稿 `.ftbl th/td`）。
+    pub file_table_cell_padding: [f32; 2],
+    /// 识别依据那一面卡片身子的内边距：`[上下, 左右]`（设计稿 `evTab` 卡里那一块）。
+    pub evidence_card_padding: [f32; 2],
+    /// 作品详情页元数据那一面一行的内边距：`[上下, 左右]`（设计稿 `.mrow`）。
+    pub meta_row_padding: [f32; 2],
+    /// 那一行里 `[上下两块之间, 三列之间]`（设计稿 `.mrow` 的 `gap`）。
+    pub meta_row_gap: [f32; 2],
+    /// 那一行名那一列里名与底下那行小字之间（设计稿 `.mrow .fl small`）。
+    pub meta_label_gap: f32,
+    /// 「其他来源」里一句的内边距：`[上下, 左右]`（设计稿 `.alt`）。
+    pub alt_padding: [f32; 2],
+    /// 那一句里来源、值、按钮之间（设计稿 `.alt` 的 `gap`）。
+    pub alt_gap: f32,
+    /// 「其他来源」一句与下一句之间（设计稿 `.alts` 的 `gap`）。
+    pub alts_gap: f32,
+    /// 来源标签左右留白（设计稿 `.srcb`）。
+    pub source_badge_padding: f32,
+    /// 编辑态下一格底下那一排值之间、一个里来源与值之间（设计稿 `.pickchips` / `.pickchip` 的 `gap`）。
+    pub pick_chip_gap: f32,
+    /// 那一排里一个的左右留白：`[左, 右]`（设计稿 `.pickchip`）。
+    pub pick_chip_padding: [f32; 2],
+    /// 作品详情页编辑态底下那一条的内边距：`[上下, 左右]`（设计稿 `.savebar`）。
+    pub save_bar_padding: [f32; 2],
+    /// 那一条里几样东西之间（设计稿 `.savebar` 的 `gap`）。
+    pub save_bar_gap: f32,
+    /// 作品详情页段落卡的内边距：`[上下, 左右]`（设计稿 `.sect`）。
+    pub section_card_padding: [f32; 2],
+    /// 段落卡标题那一行底下空多少（设计稿 `.sect>.row:first-child`）。
+    pub section_card_title_gap: f32,
+    /// 已隐藏的名称一行上下留白（设计稿 `titleTab` 里那一行）。
+    pub suppressed_row_padding: f32,
+    /// 作品详情页媒体那一面一格与一格之间（设计稿 `.mgrid` 的 `gap`）。
+    pub media_grid_gap: f32,
+    /// 媒体那一格底下字那一块的内边距：`[上下, 左右]`（设计稿 `.mtile .mi`）。
+    pub media_info_padding: [f32; 2],
+    /// 没有 ffmpeg 那一块里几行之间（设计稿 `.noff` 的 `gap`）。
+    pub noff_gap: f32,
+    /// 那一块四周留白（设计稿 `.noff` 的 `padding`）。
+    pub noff_padding: f32,
+    /// 作品详情页头上那一块的内边距：`[上, 左右, 下]`（设计稿 `.hero`）。
+    pub hero_padding: [f32; 3],
+    /// 那一块里封面与右边那一栏之间（设计稿 `.hero` 的 `gap`）。
+    pub hero_gap: f32,
+    /// 头上那几格事实：`[行与行之间, 格与格之间]`（设计稿 `.hfacts` 的 `gap`）。
+    pub hero_facts_gap: [f32; 2],
+    /// 头上那张字卡的内边距：`[上下, 左右]`（设计稿 `.hcover .tcard`）。
+    pub hero_card_padding: [f32; 2],
+    /// 那张字卡里标题、副行之间（设计稿 `.tcard` 的 `gap`）。
+    pub hero_card_gap: f32,
+    /// 概览那一面两栏之间、一块与一块之间（设计稿 `.ov` / `.col` 的 `gap`）。
+    pub overview_gap: f32,
+    /// 概览里媒体那一块三格之间（设计稿 `.mstrip` 的 `gap`）。
+    pub media_strip_gap: f32,
+    /// 头上那几格事实里名与值之间（设计稿 `.hfacts div` 的 `gap`）。
+    pub hero_fact_gap: f32,
 }
 
 /// 版式尺寸，点。
@@ -689,6 +787,48 @@ pub struct Layout {
     pub impact_dot: f32,
     /// 行首圆点那一列多宽（设计稿 `.impact li`）。
     pub impact_column: f32,
+    /// 作品详情页六个面那一排一格的高（设计稿 `.tabs button`）。
+    pub tab_height: f32,
+    /// 选中那一面底下那道强调色线的粗（设计稿 `.tabs button[aria-selected]`）。
+    pub tab_underline: f32,
+    /// 作品详情页元数据那一面一行里 `[名那一列, 动作那一列]` 的宽（设计稿 `.mrow`）。
+    pub meta_row_columns: [f32; 2],
+    /// 来源标签的高（设计稿 `.srcb`）。
+    pub source_badge_height: f32,
+    /// 编辑态下那一排里一个的高（设计稿 `.pickchip`）。
+    pub pick_chip_height: f32,
+    /// 那一个里值最宽摆多少，再长截尾巴（设计稿 `.pickchip b`）。
+    pub pick_chip_max: f32,
+    /// 编辑态下简介那一框几行高（设计稿 `metaTab` 里 `textarea` 的 `rows`）。
+    pub meta_textarea_rows: usize,
+    /// 添加一个名称那一排两个下拉的宽：`[语言, 类型]`（设计稿 `.tadd`）。
+    pub title_add_columns: [f32; 2],
+    /// 作品详情页媒体那一面一格最窄（设计稿 `.mgrid` 的 `minmax`）。
+    pub media_tile_min: f32,
+    /// 没有 ffmpeg 那一块斜纹一道多宽（设计稿 `.noff` 的斜纹）。
+    pub noff_stripe: f32,
+    /// 作品详情页头上封面那一格的宽（设计稿 `.hero`）。
+    pub hero_cover_width: f32,
+    /// 头上那几格事实整排最宽（设计稿 `.hfacts` 的 `max-width`）。
+    pub hero_facts_max: f32,
+    /// 头上那几格事实一排几格（设计稿 `.hfacts`）。
+    pub hero_facts_columns: usize,
+    /// 头上那张字卡的水印伸出格子多少：`[右, 下]`（设计稿 `.tc-wm`）。
+    pub hero_card_mark_offset: [f32; 2],
+    /// 头上那张字卡的标题至多几行（设计稿 `.tc-t`）。
+    pub hero_card_title_rows: usize,
+    /// 概览里媒体那一块摆几格（设计稿 `.mstrip`）。
+    pub media_strip_columns: usize,
+    /// 概览左右两栏的比例：`[左, 右]`（设计稿 `.ov`）。
+    pub overview_columns: [f32; 2],
+    /// 变体卡身子左右两半的比例：`[左, 右]`（设计稿 `.vbody`）。
+    pub work_card_columns: [f32; 2],
+    /// 元数据那一面简介至多几行（设计稿 `.mrow .v.clamp`）。
+    pub meta_clamp_rows: usize,
+    /// 侧边详情头上那张字卡的标题至多几行（设计稿 `.dcover .tc-t`）。
+    pub card_title_rows: usize,
+    /// 字卡副行至多几行（设计稿 `.tc-s`）。
+    pub card_subtitle_rows: usize,
 }
 
 /// 调色比例：两套主题共用。设计稿里写在规则上的字面量（`color-mix` 的百分比、`opacity`）。
@@ -701,6 +841,10 @@ pub struct Mix {
     pub thumb_list_tint: f32,
     /// 字卡上平台代号水印的不透明度。
     pub watermark_opacity: f32,
+    /// 编辑态下改过的那一行底色里调进几成强调色（设计稿 `.mrow.dirty`）。
+    pub dirty_row_tint: f32,
+    /// 作品详情页头上那一块底色里调进几成平台色（设计稿 `.hero`）。
+    pub hero_tint: f32,
 }
 
 /// 阴影：一种一格，**形状两套主题共用**，颜色是各主题里同名的那一格（`pop` → `pop-color`）。

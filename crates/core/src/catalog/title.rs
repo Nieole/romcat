@@ -3,7 +3,7 @@
 //! ## 标题为什么是一张表而不是 `work` 上的一列
 //!
 //! 一个作品在这个库里同时有好几个叫法：No-Intro 的 `Chrono Trigger`、日版条目的
-//! `Chrono Trigger`（**同一串字，语言不同**）、官中版的中文译名、汉化组自取的名字。
+//! `Chrono Trigger`（**同一串字，语言不同**）、官中版的中文译名、汉化组译名。
 //! 塞成一个单值字段，第一件事就是要在写的时候挑一个——而挑哪个**取决于导出到哪个前端**
 //! （`CONTEXT.md` 的**显示标题**词条说的正是这件事）。挑早了，跨格式转换与按中文搜索
 //! 这两件事就都做不了了。
@@ -51,14 +51,14 @@ CREATE TABLE IF NOT EXISTS title(
     work        TEXT    NOT NULL,
     -- 语言码：zh / ja / en / und。**由字形加发行版地区判**，见 `title::language_of`。
     language    TEXT    NOT NULL,
-    -- 官方名 / 译名 / 别名 / 汉化组自取的名。
+    -- 官方名称 / 译名 / 别名 / 汉化组译名。
     kind        TEXT    NOT NULL,
     -- 哪个源给的。`裁决` 是人工来源，重折时一行都不碰。
     source      TEXT    NOT NULL,
     value       TEXT    NOT NULL,
     -- 那一条发行版的地区，**抄下来的**。显示标题靠它分辨官方英文名与日文原名。
     region      TEXT,
-    -- 变体级的叫法（文件名、汉化组自取的名）来自哪个变体；发行版级的是 NULL。
+    -- 变体级的叫法（文件名、汉化组译名）来自哪个变体；发行版级的是 NULL。
     variant_key TEXT,
     confidence  TEXT    NOT NULL,
     -- 中文译名走的是 ADR-0019 那道世代裂缝的哪一侧：独立发行版 / 语言属性。
@@ -79,7 +79,7 @@ pub struct TitleRow {
     pub value: String,
     /// 语言。
     pub language: Language,
-    /// 类型：官方名 / 译名 / 别名 / 汉化组自取的名。
+    /// 类型：官方名称 / 译名 / 别名 / 汉化组译名。
     pub kind: TitleKind,
     /// 哪个源给的。
     pub source: String,
@@ -162,7 +162,26 @@ impl Catalog {
                         evidence = excluded.evidence, seen = excluded.seen",
                 )
                 .map_err(to_err)?;
+            // **旧词写下的同一条先删掉**：旧版程序把类型写成「官方名」「汉化组自取的名」（`TitleKind::legacy_label`），
+            // 主键里带着这个词——不删的话同一条叫法新旧两个词各留一行，屏上列两遍。
+            let mut legacy = tx
+                .prepare(
+                    "DELETE FROM title
+                     WHERE work = ?1 AND language = ?2 AND kind = ?3 AND source = ?4 AND value = ?5",
+                )
+                .map_err(to_err)?;
             for row in rows {
+                if let Some(old) = row.kind.legacy_label() {
+                    legacy
+                        .execute(params![
+                            row.work,
+                            row.language.code(),
+                            old,
+                            row.source,
+                            row.value
+                        ])
+                        .map_err(to_err)?;
+                }
                 insert
                     .execute(params![
                         row.work,

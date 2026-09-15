@@ -83,12 +83,48 @@ pub struct MediaItem {
     pub hash: String,
     /// 扩展名。池里那个文件靠 `(哈希, 扩展名)` 找。
     pub ext: String,
+    /// 这份媒体多大：入池时记下的字节数（`media` 那张表），不查盘。
+    pub bytes: u64,
     /// 它在**媒体池**里的落点；没查池子时是 `None`。
     pub at: Option<PathBuf>,
     /// 池里真有那个文件吗；没查池子时是 `None`。
     pub in_pool: Option<bool>,
     /// **依据**：这条引用是怎么来的。
     pub evidence: String,
+}
+
+/// 一个作品底下几个变体各自那份媒体清单**并成一份**：作品详情页「媒体」那一面与概览里媒体那一块列的就是它
+/// （票 `gui-looks-like-the-design/15`）。
+///
+/// 挂在**作品**上的那几份，每个变体的清单里都有一遍（逐条清单把作品锚点与变体锚点一起交回），并的时候按
+/// `(锚点, 类别, 内容哈希, 扩展名)` 只留头一遍；次序照交进来的次序。
+#[must_use]
+pub fn merge_media_items<'a>(lists: impl IntoIterator<Item = &'a [MediaItem]>) -> Vec<MediaItem> {
+    let mut seen = BTreeSet::new();
+    lists
+        .into_iter()
+        .flatten()
+        .filter(|item| seen.insert((item.anchor, item.kind, item.hash.clone(), item.ext.clone())))
+        .cloned()
+        .collect()
+}
+
+/// 作品详情页「变体与文件」那张文件表里的一行（票 `gui-looks-like-the-design/15`）。
+///
+/// 一个**透明容器**摆成两层：容器自己一行（`role` 是 `None`，屏上写「容器」），里头的文件逐行跟在后面（`inner` 为真，
+/// 身份照这个成员的身份）；裸文件就是一行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileLine {
+    /// 这一行的身份；容器自己那一行是 `None`。
+    pub role: Option<Role>,
+    /// 成员那一行是它的键；容器里头那几行是它在容器里的路径。
+    pub name: String,
+    /// 大小；读不到（ADR-0021 的不可读）是 `None`，不是 0。
+    pub size: Option<u64>,
+    /// CRC-32：容器里头的文件零解压就有，裸文件要识别算过才有；容器自己那一行没有。
+    pub crc32: Option<u32>,
+    /// 是不是容器里头的文件。
+    pub inner: bool,
 }
 
 /// 一条**刮削来的字段值**，连它挂在哪一层。
@@ -303,6 +339,62 @@ impl Catalog {
         }))
     }
 
+    /// 一个变体的**文件表**：成员照键排，每个成员一行，是透明容器的再跟上里头的文件（目录跳过）。最多看头 `limit`
+    /// 个成员——目录树转储一个变体底下能有上万个文件，而这张表是给人扫一眼的。
+    ///
+    /// 大小取扫描记下的那一格（读不到就是 `None`，ADR-0021），CRC-32 取容器头里记着的与识别算过的那一份（裸文件没算过
+    /// 就是 `None`）：**一个字节都不读盘**。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn file_lines(&self, key: &str, limit: usize) -> Result<Vec<FileLine>, CatalogError> {
+        let members = self.variant_members(key)?;
+        let members = &members[..members.len().min(limit)];
+        let keys: Vec<&str> = members.iter().map(|(member, _)| member.as_str()).collect();
+        let facts = self.entry_facts_of(&keys)?;
+        let hashes = self.content_hashes_of(&keys)?;
+        let mut out = Vec::new();
+        for (member, role) in members {
+            let size = match facts.get(member) {
+                Some(super::identify::EntryFact::File(len)) => Some(*len),
+                _ => None,
+            };
+            let inside: Vec<crate::container::InnerEntry> = self
+                .container_entries(member)?
+                .into_iter()
+                .filter(|entry| !entry.is_dir)
+                .collect();
+            if inside.is_empty() {
+                out.push(FileLine {
+                    role: Some(*role),
+                    name: member.clone(),
+                    size,
+                    crc32: hashes
+                        .get(member)
+                        .and_then(|by_inner| by_inner.get(""))
+                        .map(|hash| hash.crc32),
+                    inner: false,
+                });
+                continue;
+            }
+            out.push(FileLine {
+                role: None,
+                name: member.clone(),
+                size,
+                crc32: None,
+                inner: false,
+            });
+            out.extend(inside.into_iter().map(|entry| FileLine {
+                role: Some(*role),
+                name: entry.path,
+                size: Some(entry.size),
+                crc32: entry.crc32,
+                inner: true,
+            }));
+        }
+        Ok(out)
+    }
+
     /// 一个作品的名字；没这一行时是 `None`。
     ///
     /// # Errors
@@ -405,9 +497,17 @@ impl Catalog {
     ) -> Result<bool, CatalogError> {
         self.conn
             .execute(
+                // 类型新旧两个词都认：旧版程序写下的那几行（`TitleKind::legacy_label`）也删得掉。
                 "DELETE FROM title
-                 WHERE work = ?1 AND language = ?2 AND kind = ?3 AND source = ?4 AND value = ?5",
-                params![work, language.code(), kind.label(), source, value],
+                 WHERE work = ?1 AND language = ?2 AND kind IN (?3, ?6) AND source = ?4 AND value = ?5",
+                params![
+                    work,
+                    language.code(),
+                    kind.label(),
+                    source,
+                    value,
+                    kind.legacy_label().unwrap_or(kind.label())
+                ],
             )
             .map(|removed| removed > 0)
             .map_err(|source| self.err(source))
@@ -526,7 +626,7 @@ impl Catalog {
         let mut statement = self
             .conn
             .prepare_cached(
-                "SELECT r.kind, r.source, r.hash, m.ext, r.evidence
+                "SELECT r.kind, r.source, r.hash, m.ext, r.evidence, m.bytes
                  FROM media_ref r JOIN media m ON m.hash = r.hash
                  WHERE r.anchor = ?1 AND r.subject = ?2
                  ORDER BY r.kind, r.source, r.hash",
@@ -540,12 +640,13 @@ impl Catalog {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             })
             .map_err(|source| self.err(source))?;
         let mut out = Vec::new();
         for row in rows {
-            let (label, source, hash, ext, evidence) = row.map_err(|e| self.err(e))?;
+            let (label, source, hash, ext, evidence, bytes) = row.map_err(|e| self.err(e))?;
             // **认不出的类别不静默归进「其他」**：那会把「这是张说明书」与
             // 「这一版不认得这个类别」说成同一件事。认不出就整条不算。
             let Some(kind) = MediaKind::from_label(&label) else {
@@ -559,6 +660,7 @@ impl Catalog {
                 in_pool: pool.map(|pool| pool.contains(&hash, &ext)),
                 hash,
                 ext,
+                bytes: u64::try_from(bytes).unwrap_or(0),
                 evidence,
             });
         }

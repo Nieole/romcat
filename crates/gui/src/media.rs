@@ -536,7 +536,7 @@ pub(crate) fn paint_cover(
 }
 
 /// `object-fit: cover` 取纹理上的哪一块（0 到 1 的坐标）：放大到盖满这一格，多出来的那一边两头各裁一半。
-fn cover_uv(texture: egui::Vec2, frame: egui::Vec2) -> egui::Rect {
+pub(crate) fn cover_uv(texture: egui::Vec2, frame: egui::Vec2) -> egui::Rect {
     let whole = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
     if texture.x <= 0.0 || texture.y <= 0.0 || frame.x <= 0.0 || frame.y <= 0.0 {
         return whole;
@@ -634,9 +634,85 @@ pub(crate) fn title_card(
     ground: egui::Color32,
 ) {
     let tokens = crate::tokens::Tokens::builtin();
-    let radius = tokens.radius.medium;
-    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-    let color = tokens.color.platform.of(platform);
+    card_face(
+        ui,
+        &Face {
+            size,
+            radius: tokens.radius.medium,
+            padding: tokens.space.title_card_padding,
+            gap: 0.0,
+            title,
+            title_size: tokens.font.size_cover_title,
+            title_rows: crate::tokens::Tokens::builtin().layout.card_title_rows,
+            subtitle: None,
+            footer: None,
+            platform,
+            mark_size: tokens.font.size_cover_mark,
+            mark_offset: tokens.layout.title_card_mark_offset,
+            ground,
+        },
+    );
+}
+
+/// 没有封面时**作品详情页头上**摆的大字卡，照稿 `.hcover .tcard`：与侧边详情那张同一套画法（[`title_card`]），
+/// 大一号——大圆角、标题至多四行，底下一行等宽的副行（排序标题，没认出作品的写名字怎么来的），左下角一句「暂无封面」，
+/// 水印也大。
+pub(crate) fn hero_card(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    title: &str,
+    subtitle: &str,
+    platform: &str,
+    ground: egui::Color32,
+) {
+    let tokens = crate::tokens::Tokens::builtin();
+    card_face(
+        ui,
+        &Face {
+            size,
+            radius: tokens.radius.large,
+            padding: tokens.space.hero_card_padding,
+            gap: tokens.space.hero_card_gap,
+            title,
+            title_size: tokens.font.size_hero_card_title,
+            title_rows: tokens.layout.hero_card_title_rows,
+            subtitle: Some(subtitle),
+            footer: Some("暂无封面"),
+            platform,
+            mark_size: tokens.font.size_hero_card_mark,
+            mark_offset: tokens.layout.hero_card_mark_offset,
+            ground,
+        },
+    );
+}
+
+/// 一张字卡长什么样：两种大小各给一份（[`title_card`]、[`hero_card`]）。
+struct Face<'a> {
+    size: egui::Vec2,
+    radius: u8,
+    /// `[上下, 左右]`。
+    padding: [f32; 2],
+    /// 标题与副行之间。
+    gap: f32,
+    title: &'a str,
+    title_size: f32,
+    title_rows: usize,
+    subtitle: Option<&'a str>,
+    footer: Option<&'a str>,
+    platform: &'a str,
+    mark_size: f32,
+    /// `[右, 下]`。
+    mark_offset: [f32; 2],
+    ground: egui::Color32,
+}
+
+/// 照 `face` 画一张字卡：平台色调进次级底色的底、顶上一道平台色、左上角标题（拉丁与数字粗体，中文照旧常规体），
+/// 有副行就跟在标题底下（等宽、至多两行），有底行就贴着底边，右下角伸出格子被裁掉的平台代号水印，外头一圈分隔线。
+fn card_face(ui: &mut egui::Ui, face: &Face<'_>) {
+    let tokens = crate::tokens::Tokens::builtin();
+    let radius = face.radius;
+    let (rect, _) = ui.allocate_exact_size(face.size, egui::Sense::hover());
+    let color = tokens.color.platform.of(face.platform);
     let painter = ui.painter_at(rect);
     painter.rect_filled(
         rect,
@@ -646,33 +722,55 @@ pub(crate) fn title_card(
             .lerp_to_gamma(color, tokens.mix.title_card_tint),
     );
     top_band(&painter, rect, radius, tokens.layout.title_card_band, color);
-    // 标题：拉丁与数字是粗体，中文照旧常规体（字体预算）；至多三行，放不下的尾巴补「…」。
-    let [padding_y, padding_x] = tokens.space.title_card_padding;
+    // 标题：拉丁与数字是粗体，中文照旧常规体（字体预算）；至多那么几行，放不下的尾巴补「…」。
+    let [padding_y, padding_x] = face.padding;
     let ink = ui.visuals().strong_text_color();
     let mut job = egui::text::LayoutJob::simple(
-        title.to_owned(),
-        egui::FontId::new(tokens.font.size_cover_title, crate::font::strong_family()),
+        face.title.to_owned(),
+        egui::FontId::new(face.title_size, crate::font::strong_family()),
         ink,
         rect.width() - 2.0 * padding_x,
     );
-    job.wrap.max_rows = 3;
+    job.wrap.max_rows = face.title_rows;
     job.wrap.break_anywhere = true;
-    painter.galley(
-        rect.min + egui::vec2(padding_x, padding_y),
-        painter.layout_job(job),
-        ink,
-    );
+    let title = painter.layout_job(job);
+    let title_height = title.size().y;
+    painter.galley(rect.min + egui::vec2(padding_x, padding_y), title, ink);
+    if let Some(subtitle) = face.subtitle {
+        let mut job = egui::text::LayoutJob::simple(
+            subtitle.to_owned(),
+            egui::FontId::monospace(tokens.font.size_path),
+            ui.visuals().text_color(),
+            rect.width() - 2.0 * padding_x,
+        );
+        job.wrap.max_rows = crate::tokens::Tokens::builtin().layout.card_subtitle_rows;
+        job.wrap.break_anywhere = true;
+        painter.galley(
+            rect.min + egui::vec2(padding_x, padding_y + title_height + face.gap),
+            painter.layout_job(job),
+            ink,
+        );
+    }
+    if let Some(footer) = face.footer {
+        painter.text(
+            egui::pos2(rect.left() + padding_x, rect.bottom() - padding_y),
+            egui::Align2::LEFT_BOTTOM,
+            footer,
+            egui::FontId::proportional(tokens.font.size_caption),
+            ui.visuals().weak_text_color(),
+        );
+    }
     // 水印照稿伸出格子右下角，伸出去的那一截被格子裁掉。字号直接问令牌：具名字号档要等观感基线
     // 装上的下一帧才有，而点开一行可能就发生在头一帧。
-    let [out_x, out_y] = tokens.layout.title_card_mark_offset;
+    let [out_x, out_y] = face.mark_offset;
     painter.text(
         egui::pos2(rect.right() + out_x, rect.bottom() + out_y),
         egui::Align2::RIGHT_BOTTOM,
-        platform,
-        egui::FontId::new(tokens.font.size_cover_mark, crate::font::strong_family()),
+        face.platform,
+        egui::FontId::new(face.mark_size, crate::font::strong_family()),
         color.gamma_multiply(tokens.mix.watermark_opacity),
     );
-    clear_bottom_corners(&painter, rect, f32::from(radius), ground);
+    clear_bottom_corners(&painter, rect, f32::from(radius), face.ground);
     outline(ui, rect, radius);
 }
 
@@ -744,7 +842,7 @@ impl std::fmt::Debug for Look<'_> {
 /// **池里没那个文件就别说「打开了」**：[`preview::open_externally`] 走的是 `spawn`，
 /// `xdg-open` / `start` 这个进程照样起得来、照样返回成功，而什么都没打开——
 /// 于是屏上那句「交给系统默认程序打开」是句假话。
-fn clicked_on(item: &MediaItem) -> Clicked {
+pub(crate) fn clicked_on(item: &MediaItem) -> Clicked {
     match (&item.at, item.in_pool) {
         (Some(at), Some(true)) => Clicked::Open(at.clone()),
         (_, Some(false)) => Clicked::Nothing(format!(
@@ -818,6 +916,7 @@ mod tests {
             source: "测试".to_string(),
             hash: "abcdef".to_string(),
             ext: "png".to_string(),
+            bytes: 0,
             at: in_pool.map(|_| PathBuf::from("/池/ab/abcdef.png")),
             in_pool,
             evidence: "测试".to_string(),

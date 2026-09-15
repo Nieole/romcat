@@ -1293,7 +1293,7 @@ pub enum SearchHit {
     TitleStart,
     /// 屏上那个名字**含有**搜索词。
     Title,
-    /// **标题集合**里别的叫法（中文名、译名、汉化组自取的名……）以搜索词开头。
+    /// **标题集合**里别的叫法（中文名、译名、汉化组译名……）以搜索词开头。
     AliasStart,
     /// 标题集合里别的叫法**含有**搜索词。
     Alias,
@@ -2084,13 +2084,50 @@ impl Catalog {
         priorities: &crate::scrape::Priorities,
     ) -> Result<Vec<WorkRow>, CatalogError> {
         let mut rows = self.work_page(query, offset, limit)?;
+        self.fill_titles(&mut rows, priorities)?;
+        Ok(rows)
+    }
+
+    /// **主列表上这几行**：照交进来的身份（锚点连它屏上那个名字）补齐变体数、容量、元数据齐不齐、年份、
+    /// 最高置信度与显示标题——与翻页取出来的那几行一模一样（同一趟 `work_page_totals`、`fill_scraped`、
+    /// `fill_confidence`，显示标题同 [`Self::work_page_with_titles`]），次序照交进来的次序。
+    ///
+    /// 作品详情页头上那几枚标签（「元数据：缺简介」、置信度那个词）照它印：与表上那一行是同一处算的（ADR-0024）。
+    /// 按当前筛选算——这一行底下挂着几个变体、容量多大，与屏上那张表写着的是同一个数。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn work_rows(
+        &self,
+        query: &WorkQuery,
+        anchors: &[(WorkAnchor, String)],
+        priorities: &crate::scrape::Priorities,
+    ) -> Result<Vec<WorkRow>, CatalogError> {
+        let picked = anchors
+            .iter()
+            .map(|(anchor, name)| (anchor.clone(), name.clone(), None))
+            .collect();
+        let mut rows = self.work_page_totals(query, picked)?;
+        self.fill_scraped(&mut rows)?;
+        self.fill_confidence(query, &mut rows)?;
+        self.fill_titles(&mut rows, priorities)?;
+        Ok(rows)
+    }
+
+    /// 给认出作品的那几行补上**显示标题**（[`WorkRow::display`]）：这几个作品的叫法一趟读回来
+    /// （[`Self::titles_of_works`]），逐个交给 [`title::choose`](crate::title::choose) 挑。
+    fn fill_titles(
+        &self,
+        rows: &mut [WorkRow],
+        priorities: &crate::scrape::Priorities,
+    ) -> Result<(), CatalogError> {
         let works: Vec<&str> = rows
             .iter()
             .filter(|row| matches!(row.anchor, WorkAnchor::Work(_)))
             .map(|row| row.name.as_str())
             .collect();
         let mut titles = self.titles_of_works(&works)?;
-        for row in &mut rows {
+        for row in rows {
             if !matches!(row.anchor, WorkAnchor::Work(_)) {
                 continue;
             }
@@ -2109,7 +2146,7 @@ impl Catalog {
                 row.display = Some(chosen.display);
             }
         }
-        Ok(rows)
+        Ok(())
     }
 
     /// 一份详情里每个变体的**变体简称**（[`variant_short_name`]），次序与 `detail.variants` 一样。
@@ -2129,30 +2166,15 @@ impl Catalog {
         detail: &WorkDetail,
         priorities: &crate::scrape::Priorities,
     ) -> Result<Vec<String>, CatalogError> {
-        use crate::adapter::converge::{Preference, preference_for, shown};
+        use crate::adapter::converge::{Preference, shown};
 
         let mut out = Vec::with_capacity(detail.variants.len());
         for variant in &detail.variants {
             let key = variant.row.key.as_str();
-            let settled = variant
-                .candidates
-                .iter()
-                .any(|candidate| candidate.accepted);
-            let release = match variant.row.release_id {
-                Some(id) => self.release(id)?,
-                None => None,
-            };
-            if !settled && release.is_none() {
+            let Some(kind) = self.variant_kind(variant)? else {
                 out.push(variant_short_name(None, None, key));
                 continue;
-            }
-            let marks: std::collections::BTreeSet<crate::dat::chinese::ChineseMark> = variant
-                .candidates
-                .iter()
-                .filter(|candidate| candidate.accepted)
-                .filter_map(|candidate| candidate.chinese)
-                .collect();
-            let kind = preference_for(key, &marks, release.as_ref(), None);
+            };
             let team = if kind == Preference::FanTranslated {
                 let values = self.scraped_values(AnchorKind::Variant.label(), key)?;
                 shown(
@@ -2170,6 +2192,74 @@ impl Catalog {
             out.push(variant_short_name(Some(kind), team.as_deref(), key));
         }
         Ok(out)
+    }
+
+    /// 一个作品的**中文版本**（作品详情页「中文版本」那一格，设计稿写「汉化 / 官中」，都不是写「无」）：底下各个变体
+    /// 照[首选变体](crate::adapter::converge::preference_for)那条规则判是哪一种——与变体简称（[`Self::variant_short_names`]）
+    /// 同一处判，不另判——有汉化版就是汉化，没有汉化版、有官中版就是官中，汉化压过官中也是那条规则的次序。
+    ///
+    /// **问规则时不带裁决**：首选变体被人指定时，那个变体在首选规则里排「裁决」那一档，可它是不是汉化版不因此改变。
+    /// 一个中文的都没有是 `None`；认不出作品的那一行问的就是它自己那一个变体。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn work_chinese_mark(
+        &self,
+        detail: &WorkDetail,
+    ) -> Result<Option<crate::dat::chinese::ChineseMark>, CatalogError> {
+        use crate::adapter::converge::Preference;
+        use crate::dat::chinese::ChineseMark;
+
+        let mut best: Option<Preference> = None;
+        for variant in &detail.variants {
+            if let Some(kind @ (Preference::FanTranslated | Preference::OfficialChinese)) =
+                self.variant_kind(variant)?
+            {
+                best = Some(best.map_or(kind, |best| best.min(kind)));
+            }
+        }
+        Ok(best.map(|kind| match kind {
+            Preference::FanTranslated => ChineseMark::FanTranslated,
+            _ => ChineseMark::Official,
+        }))
+    }
+
+    /// 一个变体照[首选变体](crate::adapter::converge::preference_for)那条规则算是**哪一种**（汉化 / 官中 / 日版 / 其他），
+    /// **不带裁决**：被人指成首选的汉化版照样答汉化。一条定下来的候选都没有、也没有发行版链接时说不出是哪一种，
+    /// 交回 `None`。
+    ///
+    /// 中文记号只读**定下来**的候选（与导出那一步同一条路）；变体简称、作品的中文版本、作品详情页上哪几个变体摆
+    /// 汉化组那一行，都从这儿问。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn variant_kind(
+        &self,
+        variant: &WorkVariant,
+    ) -> Result<Option<crate::adapter::converge::Preference>, CatalogError> {
+        let settled = variant
+            .candidates
+            .iter()
+            .any(|candidate| candidate.accepted);
+        let release = match variant.row.release_id {
+            Some(id) => self.release(id)?,
+            None => None,
+        };
+        if !settled && release.is_none() {
+            return Ok(None);
+        }
+        let marks: std::collections::BTreeSet<crate::dat::chinese::ChineseMark> = variant
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.accepted)
+            .filter_map(|candidate| candidate.chinese)
+            .collect();
+        Ok(Some(crate::adapter::converge::preference_for(
+            &variant.row.key,
+            &marks,
+            release.as_ref(),
+            None,
+        )))
     }
 
     /// 第一趟：**这一页是哪几行、按什么次序**。
@@ -2735,6 +2825,25 @@ impl WorkVariant {
             .iter()
             .map(|candidate| candidate.confidence)
             .min()
+    }
+
+    /// **定下来的**那条候选（自动通过或裁决接受的）；一条都没定下来是 `None`。
+    ///
+    /// 作品详情页「发行版」那一格印它撞上的 DAT 条目名（拿主意的人 2026-09-15 定）：挑哪一条由这里答，界面不自己挑（ADR-0024）。
+    #[must_use]
+    pub fn accepted_candidate(&self) -> Option<&Candidate> {
+        self.candidates.iter().find(|candidate| candidate.accepted)
+    }
+
+    /// **判定依据**摆哪一条候选：置信度最高那一档（[`Self::confidence`]）里的头一条；一条候选都没有是 `None`。
+    ///
+    /// 作品详情页「识别依据」那一面上「判定依据：」后头跟的就是它，界面不自己挑（ADR-0024）。
+    #[must_use]
+    pub fn best_candidate(&self) -> Option<&Candidate> {
+        let best = self.confidence()?;
+        self.candidates
+            .iter()
+            .find(|candidate| candidate.confidence == best)
     }
 
     /// 详情面板里这一行印哪个词。与主列表那一栏

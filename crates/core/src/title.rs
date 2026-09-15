@@ -19,10 +19,10 @@
 //! **即使默认启动的是民间汉化版，中文标题仍取官中版的官方译名。** 这两条链路必须分开：
 //! 首选变体那条规则是「汉化 > 官中 > 日版 > 其他」，标题这条是「官中的官方译名 >
 //! 社区译名」——方向正好相反。顺手写成「首选变体的名字就是显示标题」是错的，
-//! 那会把汉化组自取的名字铺满整个前端。
+//! 那会把汉化组译名铺满整个前端。
 //!
 //! 落到代码上：[`choose`] 拿到的只有[标题集合](TitleSet)，**它连变体是不是首选都看不到**。
-//! 汉化版的名字照样在集合里（类型是**汉化组自取的名**），只是排在中文那一档的最后一位。
+//! 汉化版的名字照样在集合里（类型是**汉化组译名**），只是排在中文那一档的最后一位。
 //!
 //! ### 三、世代裂缝（ADR-0019）
 //!
@@ -105,7 +105,8 @@ impl Language {
             Self::Chinese => "中文",
             Self::Japanese => "日文",
             Self::English => "英文",
-            Self::Unknown => "认不出",
+            // 屏上照设计稿写「其他」（拿主意的人 2026-09-15 定）；库里存的是码 `und`，不受这个词影响。
+            Self::Unknown => "其他",
         }
     }
 
@@ -134,14 +135,14 @@ impl Language {
 /// 差别全在这里。塌成一个「中文名」，那条决定就无处可写。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TitleKind {
-    /// **官方名**：原厂在那次发行上用的名字，DAT 的条目名就是它。
+    /// **官方名称**：原厂在那次发行上用的名字，DAT 的条目名就是它。
     Official,
     /// **译名**：原厂的官方翻译。中文这一侧就是**官中版**的官方译名。
     Translated,
-    /// **别名**：既不是官方名也不是译名的一个叫法——库里那些中文文件名多半是这一档，
+    /// **别名**：既不是官方名称也不是译名的一个叫法——库里那些中文文件名多半是这一档，
     /// 谁也没为它背书。
     Alias,
-    /// **汉化组自取的名**：民间汉化版自己起的名字。ADR-0012 明说**绝不拿它当标题**，
+    /// **汉化组译名**：民间汉化版自己起的名字。ADR-0012 明说**绝不拿它当标题**，
     /// 所以它排在中文那一档的最后——但它照样入集合，因为没有别的中文名时它就是唯一的。
     FanName,
 }
@@ -151,10 +152,24 @@ impl TitleKind {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::Official => "官方名",
+            Self::Official => "官方名称",
             Self::Translated => "译名",
             Self::Alias => "别名",
-            Self::FanName => "汉化组自取的名",
+            Self::FanName => "汉化组译名",
+        }
+    }
+
+    /// 这一档**从前**写进库里的那个词（2026-09-15 拿主意的人照稿改词之前是「官方名」「汉化组自取的名」）；
+    /// 没改过词的档是 `None`。
+    ///
+    /// 中立库里人手写的叫法（来源是裁决）重折不碰，旧词会一直留在那几行上：按词去删、去写的那几句 SQL 要把它一起认上
+    /// （`Catalog::put_titles`、`Catalog::remove_title`）。沉淀库那一侧由第 7 条迁移换掉了，用不着它。
+    #[must_use]
+    pub(crate) fn legacy_label(self) -> Option<&'static str> {
+        match self {
+            Self::Official => Some("官方名"),
+            Self::FanName => Some("汉化组自取的名"),
+            Self::Translated | Self::Alias => None,
         }
     }
 
@@ -162,10 +177,11 @@ impl TitleKind {
     #[must_use]
     pub fn from_label(label: &str) -> Option<Self> {
         match label {
-            "官方名" => Some(Self::Official),
+            // **新旧两套词都认**：旧版程序写进库里的是「官方名」「汉化组自取的名」（`Self::legacy_label`）。
+            "官方名称" | "官方名" => Some(Self::Official),
             "译名" => Some(Self::Translated),
             "别名" => Some(Self::Alias),
-            "汉化组自取的名" => Some(Self::FanName),
+            "汉化组译名" | "汉化组自取的名" => Some(Self::FanName),
             _ => None,
         }
     }
@@ -290,12 +306,12 @@ pub struct Chosen {
 /// |---|---|---|---|
 /// | 0 | 任意 | 任意 | **裁决**——人改过的东西不许被任何数据源覆盖 |
 /// | 1 | 中文 | 译名 | **官中版的官方译名**。两侧世代路径都落在这里 |
-/// | 2 | 中文 | 官方名 | 条目名本身就是中文的那些 |
+/// | 2 | 中文 | 官方名称 | 条目名本身就是中文的那些 |
 /// | 3 | 中文 | 别名 | 库里的中文文件名。谁也没背书，所以**低置信**；没人裁过就进队列 |
-/// | 4 | 中文 | 汉化组自取的名 | ADR-0012 明说别拿它当标题，所以排在中文的最后 |
-/// | 5 | 英文 | 官方名 | **官方英文名** |
-/// | 6 | 日文 | 官方名 | **日文原名**（No-Intro 的日版条目名是它的罗马字转写） |
-/// | 7 | 其余 | 别名 / 汉化组自取的名 | **文件名**兜底 |
+/// | 4 | 中文 | 汉化组译名 | ADR-0012 明说别拿它当标题，所以排在中文的最后 |
+/// | 5 | 英文 | 官方名称 | **官方英文名** |
+/// | 6 | 日文 | 官方名称 | **日文原名**（No-Intro 的日版条目名是它的罗马字转写） |
+/// | 7 | 其余 | 别名 / 汉化组译名 | **文件名**兜底 |
 ///
 /// **这张表只在「那个名字说的就是手上这个文件」时才排得动。** 中文离线源同一次撞上的
 /// 那条条目**还叫什么**（[`fuzzy::ALIAS_SOURCE`](crate::identify::fuzzy::ALIAS_SOURCE)）
@@ -564,7 +580,7 @@ pub fn fold(catalog: &Catalog) -> Result<Vec<TitleRow>, CatalogError> {
 
     let mut tally = Tally::default();
 
-    // 一、发行版一侧：**官方名**。一条 DAT 条目就是一次官方发行，它的名字就是官方名。
+    // 一、发行版一侧：**官方名称**。一条 DAT 条目就是一次官方发行，它的名字就是官方名称。
     for (id, release) in &releases {
         let Some(work) = works.get(&release.work_id) else {
             continue;
@@ -586,7 +602,7 @@ pub fn fold(catalog: &Catalog) -> Result<Vec<TitleRow>, CatalogError> {
                 region: release.region.clone(),
                 variant_key: None,
                 // 发行版是从**自动通过**的候选建出来的（精确哈希命中），
-                // 它的条目名就是那次发行的官方名——没有比这更硬的依据。
+                // 它的条目名就是那次发行的官方名称——没有比这更硬的依据。
                 confidence: Confidence::High,
                 seam: None,
                 evidence: format!(
@@ -602,7 +618,7 @@ pub fn fold(catalog: &Catalog) -> Result<Vec<TitleRow>, CatalogError> {
         }
     }
 
-    // 二、变体一侧：**译名 / 汉化组自取的名 / 别名**。
+    // 二、变体一侧：**译名 / 汉化组译名 / 别名**。
     //
     // 官中版的官方译名只可能从这儿来：**DAT 里没有中文**——`Pokemon 4-in-1 (China)
     // (En,Zh) (Pirate)` 是那条官中发行版的**英文条目名**，中文名躺在用户盘上那个文件的
@@ -622,7 +638,7 @@ pub fn fold(catalog: &Catalog) -> Result<Vec<TitleRow>, CatalogError> {
             if value.trim().is_empty() {
                 continue;
             }
-            // **地区那道纠正只用在官方名上，这里不传。** 变体这一侧的值是**盘上那个文件
+            // **地区那道纠正只用在官方名称上，这里不传。** 变体这一侧的值是**盘上那个文件
             // 的名字**，是用户自己起的：一份日版转储被起名叫「勇者斗恶龙」，那就是个
             // 中文名，发行版的地区说不了它是什么语言。反过来，DAT 的条目名确实跟着那次
             // 发行走，所以上面那一轮传了地区。
@@ -733,8 +749,8 @@ fn classify(
     // **中文离线源那一条排第一**（票 11）。它与别的值有一处根本不同：**这串字不是盘上
     // 那个文件的名字**，是中文数据源里那条条目的名字，而且平台与年份两道交叉校验都对上。
     //
-    // 排第一是必须的，不是图省事：下面第一条按「这个变体撞上了汉化条目」判**汉化组自取
-    // 的名**——那句话对文件名成立，对一条来自 wiki 的条目名不成立。让它落到那一档，
+    // 排第一是必须的，不是图省事：下面第一条按「这个变体撞上了汉化条目」判**汉化组译名**
+    // ——那句话对文件名成立，对一条来自 wiki 的条目名不成立。让它落到那一档，
     // 一个有出处的中文名会被记成汉化组起的名字，而 ADR-0012 明说别拿那种名字当标题。
     if source == crate::identify::fuzzy::SOURCE {
         return Classified {
@@ -778,7 +794,7 @@ fn classify(
                 .to_string(),
         };
     }
-    // **汉化版是变体**（ADR-0012）：它的文件名是汉化组自取的名字，不是官方译名。
+    // **汉化版是变体**（ADR-0012）：它的文件名是汉化组译名，不是官方译名。
     // 这一档先判，因为一个汉化版完全可能基于一条带中文语言标记的发行版——
     // 底版说什么语言不改变「这个名字是汉化组起的」这件事。
     if marks.is_some_and(|marks| marks.contains(&ChineseMark::FanTranslated)) {
@@ -789,7 +805,7 @@ fn classify(
             // 而那由类型说了算，不由置信度说了算。
             confidence: Confidence::Medium,
             seam: None,
-            evidence: "它撞上的是一条汉化条目，文件名是汉化组自取的名".to_string(),
+            evidence: "它撞上的是一条汉化条目，文件名是汉化组译名".to_string(),
         };
     }
     if language == Language::Chinese
@@ -1266,7 +1282,7 @@ mod tests {
         assert_eq!(chosen.kind, Some(TitleKind::Translated));
         assert_eq!(chosen.seam, Some(Seam::OwnRelease));
 
-        // 官中不在了，汉化组自取的名才轮得上——它照样在集合里，只是排在最后。
+        // 官中不在了，汉化组译名才轮得上——它照样在集合里，只是排在最后。
         let 只有汉化 = 集合(vec![汉化]);
         assert_eq!(
             choose(&只有汉化, &priorities).display,
@@ -1590,8 +1606,8 @@ mod tests {
     }
 
     #[test]
-    fn 中文离线源给的名字是有出处的别名而不是汉化组自取的名() {
-        // 同一个变体：它撞上了汉化条目，所以**文件名**那一条是汉化组自取的名。
+    fn 中文离线源给的名字是有出处的别名而不是汉化组译名() {
+        // 同一个变体：它撞上了汉化条目，所以**文件名**那一条是汉化组译名。
         // 但中文离线源给的那一串不是盘上那个文件的名字，是数据源里那条条目的名字——
         // 落到汉化组那一档，一个有出处的中文名会被 ADR-0012 那条「别拿它当标题」误伤。
         let marks = BTreeSet::from([ChineseMark::FanTranslated]);
