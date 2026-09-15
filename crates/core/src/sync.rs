@@ -718,6 +718,18 @@ fn settle(canonical: &mut BTreeMap<String, String>, path: &str) -> Option<String
     (real != dir).then(|| format!("{real}/{name}"))
 }
 
+impl TargetState {
+    /// 目标上**眼下实际占多少**（下界：元数据读不到的按 0 计）。计划里「目标现占」与容量上限按剩余空间算时加上的那一份
+    /// （`Sublibrary::limit_on`）都从这一处数。
+    #[must_use]
+    pub fn bytes(&self) -> u64 {
+        self.files
+            .iter()
+            .filter_map(|file| file.stamp.map(|stamp| stamp.bytes))
+            .sum()
+    }
+}
+
 // ── 清单之外（票 `gui-looks-like-the-design/21`）─────────────────────────────
 
 /// 目标上**清单之外**的文件：几个、多大、其中几个元数据读不到。
@@ -1060,11 +1072,7 @@ pub fn plan(
     // 比的是「目标现占 + 净变化」而不是期望总量：卡上的地方是共用的，只算子库自己
     // 那一半会给出一个「装得下」，然后传到一半没空间（挂账 D76）。手动拷进去的存档、
     // 落点被占而这趟根本传不上去的、被改过因而不删的，全都还占着位置。
-    out.actual_bytes = actual
-        .files
-        .iter()
-        .filter_map(|file| file.stamp.map(|stamp| stamp.bytes))
-        .sum();
+    out.actual_bytes = actual.bytes();
     out.after_bytes = signed(out.actual_bytes)
         .saturating_add(out.net_bytes)
         .try_into()

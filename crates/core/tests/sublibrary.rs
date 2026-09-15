@@ -1345,3 +1345,82 @@ fn 排差量预览时按设备容量那一档的上限就是这张卡此刻的�
     };
     assert_eq!(场.排计划().plan.capacity, Some(总量));
 }
+
+// ——— 本机磁盘不设容量上限时按剩余空间算（票 `gui-looks-like-the-design/21`，拿主意的人 2026-09-15 照稿定）———
+
+#[test]
+fn 本机磁盘不设容量上限时按剩余空间算_可移动存储设了上限与未连接的都不适用() {
+    use romcat_core::sublibrary::target::Volume;
+
+    let 本机 = Volume {
+        filesystem: Some("APFS".to_string()),
+        total: Some(500_000_000_000),
+        available: Some(120_000_000_000),
+        removable: false,
+    };
+    let 卡 = Volume {
+        removable: true,
+        ..本机.clone()
+    };
+    let 目标 = std::path::Path::new("/Users/我/roms");
+    let 不设限 = Sublibrary::at("本机", 目标, "Pegasus", None);
+    assert_eq!(
+        不设限.limit_on(Some(&本机), 30_000_000_000),
+        Some(150_000_000_000),
+        "本机磁盘不设上限：目标上已经占着的加上还写得下的"
+    );
+    assert_eq!(
+        不设限.limit_on(Some(&卡), 30_000_000_000),
+        None,
+        "可移动存储不适用"
+    );
+    assert_eq!(
+        不设限.limit_on(None, 30_000_000_000),
+        None,
+        "未连接：没读过就不设上限"
+    );
+    let 设了 = Sublibrary::at("本机", 目标, "Pegasus", Some(58_000_000_000));
+    assert_eq!(
+        设了.limit_on(Some(&本机), 30_000_000_000),
+        Some(58_000_000_000)
+    );
+    let mut 按设备 = 不设限.clone();
+    按设备.capacity_by_device = true;
+    assert_eq!(
+        按设备.limit_on(Some(&本机), 30_000_000_000),
+        Some(500_000_000_000),
+        "按设备容量那一档照旧跟着总量"
+    );
+}
+
+#[test]
+fn 排差量预览时的容量上限照核心那一处判_容量账里带着它() {
+    // 卷上还写得下多少是个活的数（别的进程一写就变），所以不拿两个时刻读的数去逐字节比：只钉住规矩。
+    use romcat_core::sublibrary::target;
+
+    let mut 场 = 一张卡::摆好(4096);
+    场.建子库("平台=FC", None);
+    let plan = 场.排计划().plan;
+    let volume = target::volume(场.卡.path());
+    match (volume.removable, volume.available, plan.capacity) {
+        (true, _, capacity) => assert_eq!(capacity, None, "可移动存储不按剩余空间算"),
+        (false, None, capacity) => assert_eq!(capacity, None, "可用空间读不出就不设上限"),
+        (false, Some(_), Some(capacity)) => assert!(
+            capacity >= plan.actual_bytes,
+            "按剩余空间算的上限至少是目标现占：上限 {capacity}，现占 {}",
+            plan.actual_bytes
+        ),
+        (false, Some(_), None) => panic!("本机磁盘读得出可用空间，计划里却没有上限"),
+    }
+    assert_eq!(
+        sublibrary::Room::of(&plan).capacity,
+        plan.capacity,
+        "容量账里得带着那个上限——容量条照它画"
+    );
+
+    // 自定义设了数的那一档：计划里就是那个数，不去看卷。
+    let mut 掌机 = 场.catalog.sublibrary("掌机").expect("读得动").expect("在");
+    掌机.capacity = Some(58_000_000_000);
+    场.catalog.put_sublibrary(&掌机).expect("写得进");
+    assert_eq!(场.排计划().plan.capacity, Some(58_000_000_000));
+}

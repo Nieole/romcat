@@ -137,6 +137,28 @@ impl Sublibrary {
         }
     }
 
+    /// 这一刻**真用上的容量上限**，看着目标所在的卷（`volume`；目标不在位、没去看时是 `None`）与目标上眼下已经占着多少（`taken`）：
+    ///
+    /// - **按设备容量**那一档：卷此刻的总量，读不出用上次记下的（[`Self::limit`]）；
+    /// - **自定义**、设了数：就是那个数；
+    /// - **本机磁盘不设上限时按剩余空间算**（拿主意的人 2026-09-15 照稿定）：目标上已经占着的加上卷上还写得下的——同步完之后
+    ///   「目标现占 ＋ 净变化」比的正是它。**可移动存储不适用**；卷读不出（没连着）时照按设备容量那一档的做法，没读过就不设上限。
+    ///
+    /// **只有这一处判**（ADR-0024）：排计划时用它，容量条画的是计划里抄出来的那个数。
+    #[must_use]
+    pub fn limit_on(&self, volume: Option<&target::Volume>, taken: u64) -> Option<u64> {
+        if self.capacity_by_device {
+            return self.limit(volume.and_then(|volume| volume.total));
+        }
+        if self.capacity.is_some() {
+            return self.capacity;
+        }
+        volume
+            .filter(|volume| !volume.removable)
+            .and_then(|volume| volume.available)
+            .map(|available| available.saturating_add(taken))
+    }
+
     /// **读盘该用的那条路径**（ADR-0020）。
     ///
     /// 原始形式在就用原始形式；不在（老库、或者路径不是 UTF-8）才退回 NFC 那一份。
@@ -522,6 +544,9 @@ pub struct Room {
     pub over_capacity: Option<u64>,
     /// 超了的话，按体积排序的裁剪建议。**绝不自动截断**（ADR-0016）。
     pub trim_suggestions: Vec<Trim>,
+    /// 这一趟**真用上的容量上限**（[`Sublibrary::limit_on`]）：按设备容量那一档是卡此刻的总量，本机磁盘不设上限时是
+    /// 目标现占加上还写得下的。容量条的「容量上限」照它画，与 [`Self::over_capacity`] 是同一个底。
+    pub capacity: Option<u64>,
 }
 
 impl Room {
@@ -568,6 +593,7 @@ impl Room {
             after_bytes: plan.after_bytes,
             over_capacity: plan.over_capacity,
             trim_suggestions: plan.trim_suggestions.clone(),
+            capacity: plan.capacity,
         }
     }
 }
