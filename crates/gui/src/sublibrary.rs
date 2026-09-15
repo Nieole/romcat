@@ -2751,6 +2751,34 @@ impl Screen {
             .as_ref()
             .is_some_and(|(_, _, rows)| !rows.is_empty());
         let editing_one = matches!(which, TargetDialog::Of(_));
+        // 「设备上的位置」（拿主意的人 2026-09-15 定：照实际规则）：改一台时是这一台头一个变体的真实落点（`Footprint::landing`），
+        // 新建时拿示例名走同一条规则（`Landing::example`）；元数据位置由选的那个前端格式答。还在读选择集时先不画。
+        let format_name = if self.form.format.trim().is_empty() {
+            PEGASUS.to_string()
+        } else {
+            self.form.format.trim().to_string()
+        };
+        let landing = romcat_core::adapter::find(&format_name).and_then(|adapter| match &which {
+            TargetDialog::Of(name) => {
+                let overridden = profile.as_ref().map_or_else(Profile::unclaimed, |profile| {
+                    profile.with_overrides(&self.form.overrides)
+                });
+                self.footprint
+                    .as_ref()
+                    .filter(|(of, _)| of == name)
+                    .and_then(|(_, footprint)| footprint.landing(&overridden, adapter.as_ref()))
+            }
+            TargetDialog::New => Some(romcat_core::sync::Landing::example(
+                adapter.as_ref(),
+                EXAMPLE_DIRECTORY,
+                EXAMPLE_FILE,
+            )),
+        });
+        let landing_root = if self.form.target.trim().is_empty() {
+            EXAMPLE_ROOT.to_string()
+        } else {
+            self.form.target.trim().to_string()
+        };
         // 路径底下那一行（设计稿 `probePath`）：在位照稿写连接状态，清单外文件数数完了才接上那半句；不在位说未连接。
         let presence_line = match self
             .vetted
@@ -2968,6 +2996,18 @@ impl Screen {
                         look::help(ui, "超出上限时只给出删减建议，不会自动删除。");
                     });
                 });
+                if let Some(landing) = &landing {
+                    ui.horizontal_top(|ui| {
+                        field_label(ui, "设备上的位置");
+                        ui.vertical(|ui| {
+                            landing_box_ui(ui, &landing_root, landing);
+                            look::help(
+                                ui,
+                                "按平台分目录，不带根名：两个根里相同的相对路径会在差量预览中报为落点撞车。",
+                            );
+                        });
+                    });
+                }
             });
         if pick_pressed {
             // 起点：框里那一串是个目录就从那儿打开，否则交给系统（`pick::directory` 的文档）。
@@ -3779,6 +3819,58 @@ fn connected_line(
         ));
     }
     line
+}
+
+/// 新建子库时「设备上的位置」拿来举例的那一个：设计稿 `DLG.subform` 的示例。目录照实际规则落在平台目录下（`Landing::example`）。
+const EXAMPLE_DIRECTORY: &str = "GBA";
+
+/// 同上，示例文件名。
+const EXAMPLE_FILE: &str = "火焰之纹章 烈火之剑.gba";
+
+/// 目标路径还没填时「设备上的位置」拿来举例的那个根（设计稿 `DLG.subform` 的 `/Volumes/SDCARD`）。
+const EXAMPLE_ROOT: &str = "/Volumes/SDCARD";
+
+/// 把相对子库根的落点接到根后面：根里写的是反斜杠（Windows 盘符路径）就用反斜杠，否则用 `/`。
+fn join_under(root: &str, relative: &str) -> String {
+    let separator = if root.contains('\\') { '\\' } else { '/' };
+    let relative = if separator == '/' {
+        relative.to_string()
+    } else {
+        relative.replace('/', "\\")
+    };
+    format!(
+        "{}{separator}{relative}",
+        root.trim_end_matches(['/', '\\'])
+    )
+}
+
+/// 「设备上的位置」那一块（设计稿 `.ruletext`）：凹陷底、小圆角、等宽小字，两行——ROM 落在哪、元数据落在哪。
+/// 内边距与浏览屏那条规则原文同一个令牌（`rule-text-padding`）。
+fn landing_box_ui(ui: &mut egui::Ui, root: &str, landing: &romcat_core::sync::Landing) {
+    let tokens = Tokens::builtin();
+    let [上下, 左右] = tokens.space.rule_text_padding;
+    let visuals = ui.visuals().clone();
+    egui::Frame::new()
+        .fill(visuals.extreme_bg_color)
+        .corner_radius(tokens.radius.small)
+        .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for line in [
+                join_under(root, &landing.rom),
+                join_under(root, &landing.metadata),
+            ] {
+                ui.add(
+                    egui::Label::new(
+                        font::mono(line)
+                            .size(tokens.font.size_path)
+                            .color(visuals.widgets.noninteractive.fg_stroke.color),
+                    )
+                    .wrap(),
+                );
+            }
+        });
 }
 
 /// 能力档案下拉底下那一句：**照核心的事实拼**（这份档案的文件系统与单文件上限），不照名册里的「说明」——那一格是写给

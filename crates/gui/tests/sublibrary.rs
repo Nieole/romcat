@@ -3441,3 +3441,45 @@ fn 目标不在位时说未连接_照样建得出() {
         场.app.sublibrary().error()
     );
 }
+
+#[test]
+fn 设备上的位置照实际规则写_改一台时取头一个变体的真实落点_换格式元数据位置跟着变() {
+    // 拿主意的人 2026-09-15 定：落点预览用真实落点——子库里的布局照搬主库的键、剥掉根名；元数据位置由适配器答。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=GBA");
+    let 卡 = romcat_core::path::display(场.卡.path());
+    let 屏上 = 开目标设置等选择集(&ctx, &mut 场, "掌机");
+    for 该有 in [
+        "设备上的位置",
+        &format!("{卡}/GBA/口袋妖怪 绿宝石.zip"),
+        &format!("{卡}/GBA.metadata.pegasus.txt"),
+        "按平台分目录，不带根名：两个根里相同的相对路径会在差量预览中报为落点撞车。",
+    ] {
+        assert!(屏上.contains(该有), "设备上的位置没有「{该有}」：\n{屏上}");
+    }
+    场.app.sublibrary_and_site().0.form_mut().format = "ES-Gamelist".to_string();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains(&format!("{卡}/gamelists/GBA/gamelist.xml")),
+        "换成 ES-DE 之后元数据位置该跟着变：\n{屏上}"
+    );
+}
+
+#[test]
+fn 新建时设备上的位置用示例名_目录照实际规则() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    for 该有 in [
+        "/Volumes/SDCARD/GBA/火焰之纹章 烈火之剑.gba",
+        "/Volumes/SDCARD/GBA.metadata.pegasus.txt",
+    ] {
+        assert!(
+            屏上.contains(该有),
+            "新建时设备上的位置没有「{该有}」：\n{屏上}"
+        );
+    }
+}
