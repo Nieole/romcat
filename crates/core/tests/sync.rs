@@ -998,3 +998,125 @@ fn 落点预览取头一个变体的真实落点_元数据位置照适配器_新
     assert_eq!(示例.rom, "GBA/火焰之纹章 烈火之剑.gba");
     assert_eq!(示例.metadata, "gamelists/GBA/gamelist.xml");
 }
+
+// ───────────────────────── 前端里的游玩记录与收藏不会被覆盖（票 `gui-looks-like-the-design/21`）
+//
+// 目标设置弹层里那句「前端里的游玩记录和收藏不会被覆盖」要有代码钉着才许照稿写（拿主意的人 2026-09-15 定）。前端那一侧的事实：
+// - ES-DE 把 `favorite` / `playcount` / `playtime` / `lastplayed` 记在 gamelist.xml 里（`es-app/src/MetaData.cpp` 的
+//   `gameDecls`），启动游戏时改 `playcount` 与 `lastplayed` 并存回去（`es-app/src/FileData.cpp` 的 `onMetaDataSavePoint`）。
+// - Pegasus 的收藏在 `writableConfigDir()/favorites.txt`、游玩时长在 `writableConfigDir()/stats.db`
+//   （`pegasus_favorites/Favorites.cpp`、`pegasus_playtime/PlaytimeStats.cpp`），一样都不在 metadata.pegasus.txt 里。
+// 导出那一路（写回主库、带底本）由 `adapter::gamelist` 的「导出时用户状态逐条原样搬过去_省略等于清零」钉着。
+
+#[test]
+fn 前端在卡上改过的元数据文件同步不写回去_游玩记录与收藏还在() {
+    // 那份 gamelist 是工具放上去的（清单记着），ES-DE 玩过之后往里写了 favorite / playcount / lastplayed：
+    // 卡上那份与清单对不上 → 报告、本次不动（ADR-0015），这一趟一个字节都不写回去。
+    let 卡 = temp_dir("sync-frontend-state-card");
+    let 路径 = "gamelists/FC/gamelist.xml";
+    let 工具放的 = b"<gameList><game><path>./a.zip</path><name>A</name></game></gameList>";
+    let 前端改过的 = "<gameList><game><path>./a.zip</path><name>A</name>\
+        <favorite>true</favorite><playcount>42</playcount><lastplayed>20240115T203000</lastplayed>\
+        </game></gameList>";
+    写(&卡.path().join(路径), 前端改过的.as_bytes());
+    let 清单 = Manifest {
+        files: vec![ManifestFile {
+            path: 路径.to_string(),
+            kind: FileKind::Metadata,
+            stamp: Stamp {
+                bytes: 工具放的.len() as u64,
+                mtime_ns: None,
+            },
+            source: "gamelist.xml#0000000000000000".to_string(),
+            source_stamp: Stamp {
+                bytes: 工具放的.len() as u64,
+                mtime_ns: None,
+            },
+            variant: sync::frontend::NOT_A_VARIANT.to_string(),
+            absent: false,
+        }],
+    };
+    let desired = Desired {
+        files: vec![DesiredFile {
+            path: 路径.to_string(),
+            kind: FileKind::Metadata,
+            bytes: 128,
+            unreadable: false,
+            source: "gamelist.xml#1111111111111111".to_string(),
+            source_stamp: Stamp {
+                bytes: 128,
+                mtime_ns: None,
+            },
+            variant: sync::frontend::NOT_A_VARIANT.to_string(),
+            convert: None,
+        }],
+        ..Desired::default()
+    };
+    let actual = sync::observe(&RealFs::new(), 卡.path()).expect("看得了目标");
+    let plan = sync::plan(
+        &子库(卡.path(), None),
+        &desired,
+        &清单,
+        &actual,
+        Options {
+            restore_missing: false,
+        },
+    );
+    assert!(
+        plan.steps.iter().all(|step| step.path != 路径),
+        "前端改过的那份 gamelist 被排进了要写的步骤：{:?}",
+        plan.steps
+    );
+    assert!(
+        plan.surprises.iter().any(|surprise| surprise.path == 路径),
+        "改过的那份要报出来"
+    );
+}
+
+#[test]
+fn 同步不碰卡上pegasus的收藏与游玩时长文件() {
+    // Pegasus 的收藏与游玩时长不在它的元数据文件里；卡上若躺着那两份，它们是清单之外的文件，一步都不进计划。
+    let 卡 = temp_dir("sync-pegasus-state-card");
+    写(
+        &卡.path().join("pegasus-frontend/favorites.txt"),
+        b"GBA/a.zip\n",
+    );
+    写(
+        &卡.path().join("pegasus-frontend/stats.db"),
+        b"SQLite format 3\0",
+    );
+    let actual = sync::observe(&RealFs::new(), 卡.path()).expect("看得了目标");
+    let desired = Desired {
+        files: vec![DesiredFile {
+            path: "GBA.metadata.pegasus.txt".to_string(),
+            kind: FileKind::Metadata,
+            bytes: 64,
+            unreadable: false,
+            source: "metadata.pegasus.txt#2222222222222222".to_string(),
+            source_stamp: Stamp {
+                bytes: 64,
+                mtime_ns: None,
+            },
+            variant: sync::frontend::NOT_A_VARIANT.to_string(),
+            convert: None,
+        }],
+        ..Desired::default()
+    };
+    let plan = sync::plan(
+        &子库(卡.path(), None),
+        &desired,
+        &Manifest::default(),
+        &actual,
+        Options {
+            restore_missing: false,
+        },
+    );
+    assert!(
+        plan.steps
+            .iter()
+            .all(|step| !step.path.ends_with("favorites.txt") && !step.path.ends_with("stats.db")),
+        "Pegasus 的收藏或游玩时长文件进了计划：{:?}",
+        plan.steps
+    );
+    assert_eq!(plan.strangers, 2, "那两份是清单之外的文件，只数一数");
+}
