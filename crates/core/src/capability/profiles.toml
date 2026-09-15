@@ -21,6 +21,8 @@
 #   - `"裸文件"`——把**透明容器**里那一份原样取出来（只对**只有一个内容条目**的容器）。
 #   **压缩镜像**之间的互转（cue+bin→chd、wbfs→rvz、zso→cso）这一版做不了：那要外部工具
 #   （chdman / DolphinTool / maxcso）。做不到的一律**如实报出来**，不假装搞定了。
+# - `"说明"`（可省）：**来源里确实说了的那一句限制**，界面上平台表那一行底下照原样画（「不支持 ZSO 与 CSO v2」）。
+#   来源里没说的**空着，不编**；写成一句大白话，不带 `**`、反引号与换行——带了读不进来。
 # - `"来源"` / `"核实日期"`：见上。
 #
 # ## 三个坐标拼出一份档案
@@ -176,6 +178,7 @@
 "平台" = ["PS1"]
 "吃" = ["@光盘裸镜像", "chd", "pbp"]
 "转成" = "裸文件"
+"说明" = "多文件光盘放在压缩包里不可靠：解开时只取出一个文件"
 "来源" = "调研 3.1.2：`content_file_extract_from_archive()` 只抽出一个匹配 `valid_exts` 的文件，多文件光盘的透明容器因此不可靠；3.1.4 与表 2：CHD 与 PBP 的播放由核心（Beetle PSX / SwanStation）提供。**裸镜像那半句是【推断】**：libretro 的 SwanStation 就是 DuckStation 的移植，扩展名照 3.2.2 的 DuckStation 那一行"
 "核实日期" = "2026-08-31"
 
@@ -183,6 +186,7 @@
 "平台" = ["DC"]
 "吃" = ["chd", "gdi", "cdi", "cue", "bin", "iso"]
 "转成" = "裸文件"
+"说明" = "多轨光盘放在压缩包里不可靠：解开时只取出一个文件"
 "来源" = "调研 3.2.2：libretro 的 Flycast 核心与独立版同源，`core/imgread/common.cpp` 的 `drivers[] = {chd_parse, gdi_parse, cdi_parse, cue_parse, cdio_parse}`；3.1.2：透明容器解到临时目录只抽一个文件，多轨光盘因此不可靠"
 "核实日期" = "2026-08-31"
 
@@ -197,6 +201,7 @@
 "平台" = ["PSP"]
 "吃" = ["iso", "cso", "chd", "pbp"]
 "转成" = "裸文件"
+"说明" = "不支持 ZSO 与 CSO v2"
 "来源" = "调研 3.2.2：PPSSPP `Core/FileSystems/BlockDevices.cpp` 的 `constructBlockDevice()` 只认 `CISO` / `\\0PBP` / `MComprHD`，`Core/Loaders.cpp` 只认 .iso/.cso/.chd；⭐ **不支持 ZSO 与 CSO v2**（`hdr.ver > 1` 报 \"CSO version too high!\"，issue #20890 closed as not planned），也不支持 DAX"
 "核实日期" = "2026-08-31"
 
@@ -204,6 +209,7 @@
 "平台" = ["NGC", "WII"]
 "吃" = ["iso", "gcm", "gcz", "ciso", "wbfs", "wia", "rvz", "nfs", "tgc"]
 "转成" = "裸文件"
+"说明" = "不支持 CHD"
 "来源" = "调研 3.2.2：Dolphin `Source/Core/DiscIO/Blob.cpp` 的 `CreateBlobReader()` 按 magic 分派，`BlobType` 枚举是 PLAIN / DIRECTORY / GCZ / CISO / WBFS / TGC / WIA / RVZ / MOD_DESCRIPTOR / NFS / SPLIT_PLAIN——**没有 CHD**"
 "核实日期" = "2026-08-31"
 
@@ -213,6 +219,7 @@
 "平台" = ["街机"]
 "吃" = ["zip", "7z"]
 "转成" = "zip"
+"说明" = "核心直接读压缩包本身，不解开"
 "来源" = "调研 3.1.2：`block_extract = true` 的核心（MAME / FBNeo）拿到的是那个容器的路径本身，不解压"
 "核实日期" = "2026-08-31"
 
@@ -235,6 +242,7 @@
 "平台" = ["SFC"]
 "吃" = ["@卡带裸文件", "zip"]
 "转成" = "zip"
+"说明" = "Snes9x 与 ares 不支持 7z 与 rar"
 "来源" = "调研 3.2.1：Snes9x `memmap.cpp` 只有 `.zip`（minizip）与 `.jma`，源码树里没有任何 rar/7z 的解包代码；ares `desktop-ui/emulator/emulator.cpp` 的过滤器是 `\"*.zip:\"`，`nall/decode/zip.hpp` 是唯一的容器解码器"
 "核实日期" = "2026-08-31"
 
@@ -252,6 +260,7 @@
 "平台" = ["PS1"]
 "吃" = ["cue", "bin", "img", "iso", "ecm", "chd", "mds", "pbp", "ccd", "m3u", "sub"]
 "转成" = "裸文件"
+"说明" = "DuckStation 不吃压缩包"
 "来源" = "调研 3.2.2：DuckStation `src/util/cd_image.cpp` 的 `CDImage::Open()` 扩展名分派；**透明容器一律不吃**"
 "核实日期" = "2026-08-31"
 
@@ -266,6 +275,7 @@
 "平台" = ["PSP"]
 "吃" = ["iso", "cso", "chd", "pbp"]
 "转成" = "裸文件"
+"说明" = "PPSSPP 不支持 ZSO 与 CSO v2"
 "来源" = "调研 3.2.2 与表 2：PPSSPP 只认 .iso/.cso/.chd/.pbp；⭐ **ZSO 与 CSO v2 打不开**（`hdr.ver > 1` 报错，issue closed as not planned），DAX 现版本源码里也没有分派"
 "核实日期" = "2026-08-31"
 
@@ -273,6 +283,7 @@
 "平台" = ["NGC", "WII"]
 "吃" = ["iso", "gcm", "gcz", "ciso", "wbfs", "wia", "rvz", "nfs", "tgc"]
 "转成" = "裸文件"
+"说明" = "WBFS 有损，转 RVZ 要 DolphinTool，这一版做不到"
 "来源" = "调研 3.2.2：Dolphin `Source/Core/DiscIO/Blob.cpp` 的 `BlobType` 枚举；表 2：WBFS 有损、建议转 RVZ，但那要 DolphinTool，这一版做不了"
 "核实日期" = "2026-08-31"
 
@@ -293,6 +304,7 @@
 "平台" = ["PSV"]
 "吃" = ["zip", "vpk", "vci"]
 "转成" = "zip"
+"说明" = "Vita3K 只认 zip、vpk、vci"
 "来源" = "ADR-0014 修订段（Vita3K 只认 .zip / .vpk / .vci）；`docs/research/zstandard-containers.md`：库里 PSV 那批是 tar 套 zst 的双层结构"
 "核实日期" = "2026-08-31"
 
@@ -322,6 +334,7 @@
 [["平台矩阵"."条目"]]
 "平台" = ["SWITCH"]
 "吃" = ["nsp", "xci", "nca", "nro", "nso"]
+"说明" = "不认 nsz 与 xcz"
 "来源" = "`docs/research/switch-identification.md` §6.2：ES-DE `resources/systems/{linux,windows}/es_systems.xml` 的 switch 条目扩展名是 `.nca .nro .nso .nsp .xci`，全文件 `grep -ic \"nsz|xcz\"` = 0；Eden `src/core/loader/loader.cpp` 的 `IdentifyFile()` 同样不认 nsz/xcz"
 "核实日期" = "2026-08-31"
 
@@ -332,6 +345,7 @@
 ]
 "吃" = ["@卡带裸文件", "zip", "7z"]
 "转成" = "zip"
+"说明" = "压缩包只认 zip 与 7z，不认 rar"
 "来源" = "调研 3.3.1：ES-DE USERGUIDE 里系统扩展名列表出现的**透明容器**只有 `.7z .7Z .zip .ZIP`，`.rar` 在整份 USERGUIDE 里出现 0 次"
 "核实日期" = "2026-08-31"
 

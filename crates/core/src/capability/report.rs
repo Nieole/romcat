@@ -135,6 +135,9 @@ impl Profile {
                     .convert_to
                     .map_or("（转不了就如实报出来）", super::Recipe::label),
             );
+            if !entry.note.is_empty() {
+                let _ = writeln!(out, "说明  {}", entry.note);
+            }
             let _ = writeln!(out, "核实  {}", entry.claim.stamp(today));
             let _ = writeln!(out, "来源  {}", entry.claim.cite);
         }

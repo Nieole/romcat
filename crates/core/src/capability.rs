@@ -265,6 +265,9 @@ pub struct Entry {
     pub accepts: Accepts,
     /// 吃不下时往哪儿转；没有就是转不了。
     pub convert_to: Option<Recipe>,
+    /// **来源里确实说了的那一句**（「不支持 ZSO 与 CSO v2」这类），界面上平台表那一行底下照原样画；来源里没说的空着
+    /// ——**不编**（拿主意的人 2026-09-15 定）。名册文件里是可省的「说明」一格，带 Markdown 记号或换行的读不进来。
+    pub note: String,
     /// 「吃」那一格**照名册里的写法**：扩展名组写组名（`卡带裸文件`），不摊开成几十个扩展名；不作声称那一条是空的。
     ///
     /// 界面上「设备直接能用」那一格照它写（票 `gui-looks-like-the-design/21`）。判吃不吃得下走 [`Self::accepts`]，
@@ -419,6 +422,7 @@ impl Override {
             platforms: vec![platform.to_string()],
             accepts,
             convert_to,
+            note: String::new(),
             declared,
             overridden: Some(self),
             claim: Claim {
@@ -932,6 +936,18 @@ impl Roster {
             let mut fallback = None;
             for raw_entry in raw_matrix.entries {
                 let index = entries.len();
+                // **说明是画在界面上的一句话**，照原样画：带着 `**`、反引号或换行的话，屏上就会露出记号来。
+                if raw_entry.note.contains("**")
+                    || raw_entry.note.contains('`')
+                    || raw_entry.note.contains('\n')
+                {
+                    return Err(invalid(format!(
+                        "平台矩阵「{}」里「{}」那一条的说明带着 Markdown 记号或换行。\
+                         说明是画在界面上的一句话，照原样画——写成一句大白话",
+                        raw_matrix.name,
+                        raw_entry.platforms.join("、"),
+                    )));
+                }
                 let mut accepts_set = BTreeSet::new();
                 let mut anything = false;
                 for token in &raw_entry.accepts {
@@ -996,6 +1012,7 @@ impl Roster {
                         Accepts::Only(accepts_set)
                     },
                     convert_to,
+                    note: raw_entry.note,
                     declared,
                     overridden: None,
                     claim: Claim {
@@ -1182,6 +1199,8 @@ struct RawEntry {
     accepts: Vec<String>,
     #[serde(rename = "转成")]
     convert_to: Option<String>,
+    #[serde(rename = "说明", default)]
+    note: String,
     #[serde(rename = "来源")]
     cite: String,
     #[serde(rename = "核实日期")]
@@ -1797,5 +1816,55 @@ mod tests {
             assert_eq!(Override::from_code(choice.code()), Some(choice));
         }
         assert_eq!(Override::from_code("按档案"), None);
+    }
+
+    #[test]
+    fn 条目的说明只在来源里真说了的地方有_没说的空着() {
+        // 界面上平台表那一行底下照它画一句；**不编**：来源里没这句话的条目空着、不画（拿主意的人 2026-09-15 定）。
+        let 独立 = 档案("独立模拟器-exfat");
+        let psp = 独立.matrix.entry_for(Some("PSP")).expect("有 PSP 那一条");
+        assert_eq!(psp.note, "PPSSPP 不支持 ZSO 与 CSO v2");
+        assert!(
+            psp.claim.cite.contains("ZSO 与 CSO v2"),
+            "说明里的话来源里得真有：{}",
+            psp.claim.cite
+        );
+        let fc = 档案("retroarch-exfat");
+        let fc = fc.matrix.entry_for(Some("FC")).expect("有 FC 那一条");
+        assert!(fc.note.is_empty(), "来源里没说的不编：{}", fc.note);
+        for matrix in Roster::builtin().matrices() {
+            for entry in &matrix.entries {
+                if entry.accepts.is_anything() {
+                    assert!(
+                        entry.note.is_empty(),
+                        "矩阵「{}」不作声称的那一条不该带说明：{}",
+                        matrix.name,
+                        entry.note
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn 名册里条目的说明可省_写了原样读进来_带记号或换行的不收() {
+        let 名册 = |说明: &str| {
+            format!(
+                "\"版本\" = 1\n\
+                 [[\"文件系统\"]]\n\"名\" = \"无限制\"\n\"来源\" = \"甲\"\n\"核实日期\" = \"2026-09-01\"\n\
+                 [[\"平台矩阵\"]]\n\"名\" = \"试\"\n\
+                 [[\"平台矩阵\".\"条目\"]]\n\"平台\" = [\"GB\"]\n\"吃\" = [\"gb\"]\n{说明}\"来源\" = \"乙\"\n\"核实日期\" = \"2026-09-01\"\n\
+                 [[\"能力档案\"]]\n\"名\" = \"不作声称\"\n\"平台矩阵\" = \"试\"\n\"文件系统\" = \"无限制\"\n"
+            )
+        };
+        let 没写 = Roster::parse(&名册(""), "（试）").expect("说明可省");
+        assert_eq!(没写.matrices()[0].entries[0].note, "");
+        let 写了 = Roster::parse(&名册("\"说明\" = \"只认 gb\"\n"), "（试）").expect("读得进");
+        assert_eq!(写了.matrices()[0].entries[0].note, "只认 gb");
+        for 坏的 in ["**只认** gb", "只认 `gb`", "只认\\ngb"] {
+            let 错 = Roster::parse(&名册(&format!("\"说明\" = \"{坏的}\"\n")), "（试）")
+                .expect_err("说明是画在界面上的一句话，带记号或换行的不收");
+            assert!(format!("{错}").contains("说明"), "{错}");
+        }
     }
 }
