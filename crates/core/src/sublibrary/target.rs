@@ -69,15 +69,18 @@ pub enum Presence {
 }
 
 /// 目标所在的那个卷。每一格都**读得到才有**，读不到是 `None`，不编一个数。
+///
+/// 由 `sysinfo` 的磁盘接口读（Windows / macOS / Linux 都给，工作区清单里写着为什么挑它）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Volume {
-    /// 文件系统（`exFAT`、`FAT32`……）。眼下只在 macOS 上读得出来：Linux 上 `statfs` 交的是一个魔数，Windows 上不写
-    /// `unsafe` 就问不到——这个工作区禁 `unsafe`。
+    /// 文件系统，写成人认得的样子（`exFAT`、`FAT32`、`APFS`……）。
     pub filesystem: Option<String>,
-    /// 卷的总量，字节。Unix 上读得出。
+    /// 卷的总量，字节。**按设备容量**那一档的上限就是它。
     pub total: Option<u64>,
-    /// 卷上还能写多少，字节（非特权用户看得到的那一份）。Unix 上读得出。
+    /// 卷上还能写多少，字节。
     pub available: Option<u64>,
+    /// 是不是**可移动存储**（SD 卡、U 盘、读卡器挂上来的盘；macOS 上挂着的磁盘映像也算）。读不到时是 `false`。
+    pub removable: bool,
 }
 
 /// 一个子库名字**不能用**的理由。
@@ -198,58 +201,47 @@ pub fn vet_name(
     })
 }
 
-/// 看一眼 `place` 所在的卷（macOS：`statfs`，带文件系统名）。
-#[cfg(target_vendor = "apple")]
+/// 看一眼 `place` 所在的卷：**挂载点是 `place` 的上级里最深的那一个**（`/Volumes/SDCARD/Game` 落在
+/// `/Volumes/SDCARD` 上，不落在 `/` 上）。一个都对不上（列不出卷）时每一格都空着。
 fn volume(place: &Path) -> Volume {
-    let Ok(stat) = rustix::fs::statfs(place) else {
-        return Volume::default();
-    };
-    let block = u64::from(stat.f_bsize);
-    let name: Vec<u8> = stat
-        .f_fstypename
+    use sysinfo::{DiskRefreshKind, Disks};
+
+    let place = path::normalize_existing(place);
+    let disks =
+        Disks::new_with_refreshed_list_specifics(DiskRefreshKind::everything().without_io_usage());
+    let Some(disk) = disks
+        .list()
         .iter()
-        .take_while(|byte| **byte != 0)
-        .map(|byte| byte.cast_unsigned())
-        .collect();
-    Volume {
-        filesystem: std::str::from_utf8(&name).ok().map(filesystem_label),
-        total: block.checked_mul(stat.f_blocks),
-        available: block.checked_mul(stat.f_bavail),
-    }
-}
-
-/// 看一眼 `place` 所在的卷（别的 Unix：POSIX 的 `statvfs`，只有容量，不带文件系统名）。
-#[cfg(all(unix, not(target_vendor = "apple")))]
-fn volume(place: &Path) -> Volume {
-    let Ok(stat) = rustix::fs::statvfs(place) else {
+        .filter(|disk| path::is_inside_place(disk.mount_point(), &place))
+        .max_by_key(|disk| disk.mount_point().as_os_str().len())
+    else {
         return Volume::default();
     };
+    // 总量是 0 说明这一格没读到（真卷不会是 0 字节）：那时可用空间也不可信，两格一起空着。
+    let total = Some(disk.total_space()).filter(|bytes| *bytes > 0);
     Volume {
-        filesystem: None,
-        total: stat.f_frsize.checked_mul(stat.f_blocks),
-        available: stat.f_frsize.checked_mul(stat.f_bavail),
+        filesystem: disk
+            .file_system()
+            .to_str()
+            .filter(|name| !name.is_empty())
+            .map(filesystem_label),
+        total,
+        available: total.map(|_| disk.available_space()),
+        removable: disk.is_removable(),
     }
 }
 
-/// 看一眼 `place` 所在的卷（Windows：不写 `unsafe` 问不到，一格都不填）。
-#[cfg(not(unix))]
-fn volume(_place: &Path) -> Volume {
-    Volume::default()
-}
-
-/// macOS 报的文件系统类型名换成人认得的写法。
+/// 系统报的文件系统类型名换成人认得的写法：macOS 报 `exfat` / `msdos`，Linux 报 `exfat` / `vfat`，Windows 报 `exFAT` / `FAT32`。
 ///
-/// `msdos` 是 FAT 这一族（FAT12 / 16 / 32 都报它）；写成 `FAT32` 是因为 4 GB 以上的 SD 卡出厂不是 FAT32 就是 exFAT，
-/// FAT16 只剩 2 GB 以下的老卡。认不出的原样交回。
-#[cfg(target_vendor = "apple")]
+/// `msdos` 与 `vfat` 是 FAT 这一族（FAT12 / 16 / 32 都报它）；写成 `FAT32` 是因为 4 GB 以上的 SD 卡出厂不是 FAT32 就是
+/// exFAT，FAT16 只剩 2 GB 以下的老卡。认不出的原样交回。
 fn filesystem_label(raw: &str) -> String {
-    match raw {
-        "exfat" => "exFAT",
-        "msdos" => "FAT32",
-        "apfs" => "APFS",
-        "hfs" => "HFS+",
-        "ntfs" => "NTFS",
-        other => other,
+    match raw.to_ascii_lowercase().as_str() {
+        "exfat" => "exFAT".to_string(),
+        "msdos" | "vfat" | "fat32" => "FAT32".to_string(),
+        "apfs" => "APFS".to_string(),
+        "hfs" => "HFS+".to_string(),
+        "ntfs" | "ntfs3" => "NTFS".to_string(),
+        _ => raw.to_string(),
     }
-    .to_string()
 }

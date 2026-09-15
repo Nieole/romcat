@@ -960,19 +960,12 @@ fn 目标在不在_在就报出卷上的可用空间_不在也照样建得出() 
 
     match target::vet(&catalog, 工作区.path(), None, 卡.path()).expect("中立库读得动") {
         Ok(Presence::Present(volume)) => {
-            #[cfg(unix)]
-            {
-                let 可用 = volume.available.expect("Unix 上读得出可用空间");
-                let 总量 = volume.total.expect("Unix 上读得出总量");
-                assert!(可用 <= 总量, "可用 {可用} 比总量 {总量} 还大");
-            }
-            #[cfg(target_vendor = "apple")]
-            assert!(
-                volume.filesystem.is_some(),
-                "macOS 上读得出文件系统：{volume:?}"
-            );
-            #[cfg(not(unix))]
-            let _ = volume;
+            // 三个平台都读得出：可移动与否、文件系统、总量与可用空间（拿主意的人 2026-09-15 定，引一个跨平台依赖）。
+            let 可用 = volume.available.expect("读得出可用空间");
+            let 总量 = volume.total.expect("读得出总量");
+            assert!(可用 <= 总量, "可用 {可用} 比总量 {总量} 还大");
+            assert!(volume.filesystem.is_some(), "读得出文件系统：{volume:?}");
+            let _可移动: bool = volume.removable;
         }
         other => panic!("插着的卡该报在：{other:?}"),
     }
