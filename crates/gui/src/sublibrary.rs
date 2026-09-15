@@ -328,6 +328,12 @@ pub struct Screen {
         BTreeMap<String, Override>,
         Vec<romcat_core::sync::Rejected>,
     )>,
+    /// 目标设置弹层里那条路径上**清单之外**的文件数完了：数的是框里哪一串、数出来多少（`sync::strangers`）。
+    strangers: Option<(String, romcat_core::sync::Strangers)>,
+    /// 正在台上数的那一趟：任务号、数的是哪一串。**它同时是认领凭据**。
+    counting: Option<(u64, String)>,
+    /// 这一串数失败或被停过：字改了之前不再自己排。
+    counting_failed: Option<String>,
     /// **每台设备**的选择集原文：规则（连库里的序号）、读不懂的那几条、例外。
     ///
     /// 每张卡都摆它自己的规则列表（票 `gui-looks-like-the-design/20`），所以一台不落全读回来
@@ -446,6 +452,9 @@ impl Screen {
             roster: None,
             today: None,
             too_big: None,
+            strangers: None,
+            counting: None,
+            counting_failed: None,
             failed: false,
             error: None,
         }
@@ -996,6 +1005,8 @@ impl Screen {
             self.settle_sync(site, done);
         } else if let Some((_, name)) = self.reading_footprint.take_if(|(id, _)| *id == done.id) {
             self.settle_footprint(name, done);
+        } else if let Some((_, text)) = self.counting.take_if(|(id, _)| *id == done.id) {
+            self.settle_strangers(text, done);
         }
         // 那一趟刚看过目标（或者往上写过）：卡头说的「在不在位」与清单记着几条跟着换过来。
         self.look_at_targets();
@@ -1312,6 +1323,7 @@ impl Screen {
         let ctx = ui.ctx().clone();
         self.read_footprint(site, tasks);
         self.target_dialog_ui(&ctx, site);
+        self.count_strangers(site, tasks);
         // 「删除子库」那层确认弹层同一个路子；删掉之后底边那条提示条盖在最上面（[`crate::toast`]）。
         self.delete_dialog_ui(&ctx, site);
         self.rule_dialog_ui(&ctx, site);
@@ -1374,6 +1386,7 @@ impl Screen {
 
     /// 「**新建子库**」：打开「新建子库」那层弹层，草稿换成一份空的，没有哪一张卡算摊开着。
     fn begin_new(&mut self) {
+        self.forget_strangers();
         self.picked = None;
         self.form = Form::default();
         self.invalidate();
@@ -1391,6 +1404,7 @@ impl Screen {
         }
         self.form.overrides = self.overrides.get(name).cloned().unwrap_or_default();
         self.footprint_failed = None;
+        self.forget_strangers();
         self.error = None;
         self.target_dialog = Some(TargetDialog::Of(name.to_string()));
     }
@@ -1504,6 +1518,68 @@ impl Screen {
         }
         let rows = footprint.too_big(&profile.with_overrides(&self.form.overrides));
         self.too_big = Some((profile.name.clone(), self.form.overrides.clone(), rows));
+    }
+
+    /// 丢掉上一回数的清单外文件数：重开弹层时重数（设备可能换过、拷进去过东西）。
+    fn forget_strangers(&mut self) {
+        self.strangers = None;
+        self.counting = None;
+        self.counting_failed = None;
+    }
+
+    /// 目标设置开着、框里那条路径**此刻在位**、还没数过它时，往任务台上排一趟**只读**数清单外文件
+    /// （`sync::prepare::strangers_at`，拿主意的人 2026-09-15 定）。清单是正在改的那一台的；新建时还没有清单，卡上的都算。
+    /// 路径的字改了、或者判出来从不在变成在（设备重新连上），数的那一串对不上，就重数。
+    fn count_strangers(&mut self, site: &Site, tasks: &mut Tasks) {
+        if self.target_dialog.is_none() {
+            return;
+        }
+        let Some(vetted) = self.vetted.as_ref() else {
+            return;
+        };
+        if !matches!(vetted.verdict, Ok(Ok(Presence::Present(_)))) {
+            return;
+        }
+        let text = vetted.text.clone();
+        let done = self.strangers.as_ref().is_some_and(|(of, _)| *of == text);
+        let running = self.counting.as_ref().is_some_and(|(_, of)| *of == text);
+        if done || running || self.counting_failed.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        let name = self
+            .editing()
+            .unwrap_or_else(|| self.form.name.trim().to_string());
+        let title = "数目标上清单之外的文件".to_string();
+        let path = PathBuf::from(&text);
+        let id = match site.catalog.read_only() {
+            Ok(reader) => tasks.queue(title, move |task| {
+                sync::prepare::strangers_at(&reader, &name, &path, task).map(Product::Strangers)
+            }),
+            Err(CatalogError::NotOnDisk { .. }) => tasks.run_here(title, |task| {
+                sync::prepare::strangers_at(&site.catalog, &name, &path, task)
+                    .map(Product::Strangers)
+            }),
+            Err(why) => {
+                self.counting_failed = Some(text);
+                self.error = Some(no_second_connection("数清单之外的文件", &why));
+                return;
+            }
+        };
+        self.counting = Some((id, text));
+    }
+
+    /// 数清单外文件那一趟回来了。
+    fn settle_strangers(&mut self, text: String, done: Finished<Product>) {
+        match done.ended {
+            Ending::Done(Product::Strangers(counted))
+            | Ending::Halfway {
+                product: Product::Strangers(counted),
+                ..
+            } => self.strangers = Some((text, counted)),
+            Ending::Done(_) | Ending::Halfway { .. } | Ending::Stopped | Ending::Failed { .. } => {
+                self.counting_failed = Some(text);
+            }
+        }
     }
 
     /// 不存、关上「目标设置」那层弹层：页脚上「取消」、Esc 走的就是它，测试拿它当那一下。
@@ -2675,6 +2751,26 @@ impl Screen {
             .as_ref()
             .is_some_and(|(_, _, rows)| !rows.is_empty());
         let editing_one = matches!(which, TargetDialog::Of(_));
+        // 路径底下那一行（设计稿 `probePath`）：在位照稿写连接状态，清单外文件数数完了才接上那半句；不在位说未连接。
+        let presence_line = match self
+            .vetted
+            .as_ref()
+            .map(|vetted| (&vetted.text, &vetted.verdict))
+        {
+            Some((text, Ok(Ok(Presence::Present(volume))))) => {
+                let counted = self
+                    .strangers
+                    .as_ref()
+                    .filter(|(of, _)| of == text)
+                    .map(|(_, counted)| counted.count);
+                Some((connected_line(volume, counted), true))
+            }
+            Some((_, Ok(Ok(Presence::Absent)))) => Some((
+                "未连接。设备不在时也能建，插上之后再生成差量预览。".to_string(),
+                false,
+            )),
+            _ => None,
+        };
         // 「按设备容量」那一格写哪个数：卡在位是此刻的总量，不在位是上次读到的（`Sublibrary::limit` 那条规矩），都没有就说不设上限。
         let device_label = match self.live_total().or_else(|| self.stored_total()) {
             Some(bytes) => format!("按设备容量（{}）", decimal_bytes(bytes)),
@@ -2758,6 +2854,20 @@ impl Screen {
                     Some(Ok(Err(refusal))) => under(ui, &refusal_line(refusal), true),
                     Some(Err(why)) => under(ui, why, true),
                     Some(Ok(Ok(_))) | None => {}
+                }
+                if let Some((line, connected)) = &presence_line {
+                    if *connected {
+                        ui.horizontal(|ui| {
+                            ui.add_space(layout.kv_key_width + ui.spacing().item_spacing.x);
+                            let (good, _) = look::tone_colors(look::Tone::Good, ui.visuals());
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(line).small().color(good))
+                                    .wrap(),
+                            );
+                        });
+                    } else {
+                        under(ui, line, false);
+                    }
                 }
 
                 ui.horizontal(|ui| {
@@ -3634,6 +3744,41 @@ fn format_help(adapter: &str) -> String {
             romcat_core::adapter::pegasus::MEDIA_DIR
         )
     }
+}
+
+/// 目标在位时路径底下那一句（设计稿 `probePath` 那句「已连接 · 可移动存储 · exFAT · 容量 …，可用 …」）：读得到的才写，
+/// 读不到的那几格不编；清单外文件数数完了（`counted`）才接上后半句。
+fn connected_line(
+    volume: &romcat_core::sublibrary::target::Volume,
+    counted: Option<u64>,
+) -> String {
+    let mut parts = vec![
+        "已连接".to_string(),
+        if volume.removable {
+            "可移动存储".to_string()
+        } else {
+            "本机磁盘".to_string()
+        },
+    ];
+    if let Some(filesystem) = &volume.filesystem {
+        parts.push(filesystem.clone());
+    }
+    let mut line = parts.join(" · ");
+    if let (Some(total), Some(available)) = (volume.total, volume.available) {
+        line.push_str(&format!(
+            " · 容量 {}，可用 {}",
+            human_bytes(total),
+            human_bytes(available)
+        ));
+    }
+    line.push('。');
+    if let Some(count) = counted {
+        line.push_str(&format!(
+            "目录里已有 {} 个文件，它们不在清单里，工具不会改动。",
+            thousands(count)
+        ));
+    }
+    line
 }
 
 /// 能力档案下拉底下那一句：**照核心的事实拼**（这份档案的文件系统与单文件上限），不照名册里的「说明」——那一格是写给

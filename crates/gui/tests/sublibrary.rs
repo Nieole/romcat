@@ -3382,3 +3382,62 @@ fn 按设备容量那一台卡没插_写上次读到的总量_没读过就说不
         "没读过总量时该说不设上限：\n{屏上}"
     );
 }
+
+#[test]
+fn 目标在位时照稿写已连接与容量可用_清单外文件数数完才画() {
+    // 拿主意的人 2026-09-15 定：连接状态行照稿全写；清单外文件数是只读遍历目标、排上任务台，数出来之前那半句不画。
+    // 卡上躺着维护者自己拷进去的那一份存档：清单里没有它，数出来是 1。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    for 该有 in ["已连接", "容量 ", "可用 "] {
+        assert!(屏上.contains(该有), "卡插着该写「{该有}」：\n{屏上}");
+    }
+    场.等任务跑完();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("目录里已有 1 个文件，它们不在清单里，工具不会改动。"),
+        "数完了该写清单外有几个文件：\n{屏上}"
+    );
+
+    // 路径换到另一个目录：重数。
+    let 另一张 = temp_dir("gui-sub-card-2");
+    写(&另一张.path().join("甲.sav"), b"1");
+    写(&另一张.path().join("乙/丙.png"), b"2");
+    场.app.sublibrary_and_site().0.form_mut().target = romcat_core::path::display(另一张.path());
+    画两帧(&ctx, &mut 场);
+    场.等任务跑完();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("目录里已有 2 个文件，它们不在清单里，工具不会改动。"),
+        "路径改了该重数：\n{屏上}"
+    );
+}
+
+#[test]
+fn 目标不在位时说未连接_照样建得出() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    let 没插 = 场.卡.path().join("没插上的卡");
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    {
+        let form = 场.app.sublibrary_and_site().0.form_mut();
+        form.name = "掌机".to_string();
+        form.target = romcat_core::path::display(&没插);
+    }
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(屏上.contains("未连接"), "目标不在该说未连接：\n{屏上}");
+    assert!(
+        !屏上.contains("目录里已有"),
+        "不在的目录没有文件可数：\n{屏上}"
+    );
+    点最后正好那一段(&ctx, "创建子库", |ui| 场.app.ui(ui));
+    assert_eq!(
+        场.app.sublibrary().list().len(),
+        1,
+        "目标不在位也该建得出：{:?}",
+        场.app.sublibrary().error()
+    );
+}
