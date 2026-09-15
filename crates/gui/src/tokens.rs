@@ -689,6 +689,12 @@ pub struct Layout {
     pub impact_dot: f32,
     /// 行首圆点那一列多宽（设计稿 `.impact li`）。
     pub impact_column: f32,
+    /// 分段按钮外框留白（设计稿 `.seg` 的 `padding`）。
+    pub seg_padding: f32,
+    /// 分段按钮里每一格的高（设计稿 `.seg button` 的 `height`）。
+    pub seg_button_height: f32,
+    /// 分段按钮里每一格左右留白（设计稿 `.seg button` 的 `padding`）。
+    pub seg_button_padding: f32,
 }
 
 /// 调色比例：两套主题共用。设计稿里写在规则上的字面量（`color-mix` 的百分比、`opacity`）。

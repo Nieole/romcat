@@ -274,6 +274,9 @@ toast-seconds     = 3.6   # 只有一句话的提示条停多久，秒（设计�
 toast-action-seconds = 6.5  # 带一颗按钮的提示条停多久，秒（设计稿 toast() 的 6500 毫秒）
 impact-dot        = 8     # 弹层里「会怎样」那几条行首圆点的直径（设计稿 .impact li::before 的 8px）
 impact-column     = 18    # 行首圆点那一列多宽（设计稿 .impact li 的 grid-template-columns:18px 1fr）
+seg-padding       = 2     # 分段按钮外框留白（设计稿 .seg 的 padding:2px）
+seg-button-height = 24    # 分段按钮里每一格的高（设计稿 .seg button 的 height:24px）
+seg-button-padding = 11   # 分段按钮里每一格左右留白（设计稿 .seg button 的 padding:0 11px）
 
 # ── 调色比例：两套主题共用。设计稿里写在规则上的字面量（color-mix 的百分比、opacity），不是 CSS 变量 ──
 [mix]

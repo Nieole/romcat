@@ -1832,9 +1832,13 @@ impl Screen {
     fn head_ui(&self, ui: &mut egui::Ui, sublibrary: &Sublibrary) {
         let Some(profiled) = self.profiled.get(&sublibrary.name) else {
             ui.label(
-                font::mono(format!("{} · {}", sublibrary.target, sublibrary.format))
-                    .size(Tokens::builtin().font.size_small)
-                    .weak(),
+                font::mono(format!(
+                    "{} · {}",
+                    sublibrary.target,
+                    format_label(&sublibrary.format)
+                ))
+                .size(Tokens::builtin().font.size_small)
+                .weak(),
             );
             if let Some(why) = &self.roster_error {
                 ui.colored_label(ui.visuals().warn_fg_color, why);
@@ -1844,7 +1848,10 @@ impl Screen {
         ui.label(
             font::mono(format!(
                 "{} · {} · {} · 能力档案：{}",
-                sublibrary.target, sublibrary.format, profiled.filesystem, profiled.profile,
+                sublibrary.target,
+                format_label(&sublibrary.format),
+                profiled.filesystem,
+                profiled.profile,
             ))
             // 设计稿 `.mono` 是正文的 0.92 倍，落在说明字号那一档。
             .size(Tokens::builtin().font.size_small)
@@ -2646,8 +2653,27 @@ impl Screen {
                     Some(Ok(Ok(_))) | None => {}
                 }
 
+                ui.horizontal(|ui| {
+                    field_label(ui, "前端格式");
+                    let adapters = [PEGASUS, ES_GAMELIST];
+                    let chosen = if form.format.trim().is_empty() {
+                        PEGASUS
+                    } else {
+                        form.format.trim()
+                    };
+                    let at = adapters
+                        .iter()
+                        .position(|name| name.eq_ignore_ascii_case(chosen))
+                        .unwrap_or(0);
+                    let labels: Vec<&str> =
+                        adapters.iter().map(|name| format_label(name)).collect();
+                    if let Some(picked) = look::segmented(ui, &labels, at) {
+                        form.format = adapters[picked].to_string();
+                    }
+                });
+                under(ui, &format_help(&form.format), false);
+
                 for (label, value, hint) in [
-                    ("前端格式", &mut form.format, "空着就是 Pegasus"),
                     ("容量上限", &mut form.capacity, "如 512GB；空着不设限"),
                     ("能力档案", &mut form.capability, "空着就是不作声称"),
                 ] {
@@ -3381,6 +3407,48 @@ fn sync_notice(outcome: &Outcome, elapsed: f64) -> String {
         }
     }
     line
+}
+
+/// Pegasus 适配器的标识（`romcat_core::adapter::find` 认的那个名字）。
+const PEGASUS: &str = "Pegasus";
+
+/// ES 家族那个适配器的标识。**界面上写「ES-DE」**（[`format_label`]），库里存的、命令行认的照旧是它。
+const ES_GAMELIST: &str = "ES-Gamelist";
+
+/// 前端格式在界面上**写成什么**（拿主意的人 2026-09-15 定）：ES 家族那个适配器写「ES-DE」，别的照适配器标识写。
+/// 只换给人看的那几个字：存进库里的、命令行旗标认的、差量预览排的都还是适配器标识。
+fn format_label(adapter: &str) -> &str {
+    if adapter.eq_ignore_ascii_case(ES_GAMELIST) {
+        "ES-DE"
+    } else {
+        adapter
+    }
+}
+
+/// 前端格式底下那一句：**照实际布局写**（拿主意的人 2026-09-15 定，不照稿上的示意）。元数据落在哪由适配器答
+/// （`Adapter::metadata_path`），媒体目录取适配器模块里那两个常量——界面不另写一份文件名。
+fn format_help(adapter: &str) -> String {
+    let name = if adapter.trim().is_empty() {
+        PEGASUS
+    } else {
+        adapter.trim()
+    };
+    let Some(found) = romcat_core::adapter::find(name) else {
+        return format!("这一版没带「{name}」这个前端格式。");
+    };
+    // 占位写「平台目录」而不写 `<平台目录>`：适配器拼路径时会把 `<` `>` 这类不收的字符换掉（`converge::safe_segment`）。
+    let metadata = found.metadata_path("平台目录");
+    if name.eq_ignore_ascii_case(ES_GAMELIST) {
+        format!(
+            "每个平台一份 {metadata}；媒体放在 {} 目录。",
+            romcat_core::adapter::gamelist::MEDIA_DIR
+        )
+    } else {
+        format!(
+            "每个平台一份 {metadata}，摊在子库根上；媒体放在 {} 目录。",
+            romcat_core::adapter::pegasus::MEDIA_DIR
+        )
+    }
 }
 
 /// 目标路径被核心拦下时，弹层里路径底下那一句（设计稿 `probePath`，稿上画了的三句逐字照稿）。

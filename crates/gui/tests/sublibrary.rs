@@ -3097,3 +3097,64 @@ fn 目标设置里按平台覆盖_保存之后存进中立库只影响这一台_
         "重开目标设置时覆盖没读回来"
     );
 }
+
+#[test]
+fn 前端格式照稿两格分段_界面写es_de_说明句照实际布局写真文件名() {
+    // 拿主意的人 2026-09-15 定：界面上统一写「ES-DE」（适配器标识照旧是 `ES-Gamelist`）；说明句照实际布局写，
+    // 文件名与目录取核心库那几个常量与 `Adapter::metadata_path`，不照稿上的示意。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.lines().any(|line| line == "Pegasus") && 屏上.lines().any(|line| line == "ES-DE"),
+        "分段那两格该写 Pegasus 与 ES-DE：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("ES-Gamelist"),
+        "界面上不该露出适配器标识：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("平台目录.metadata.pegasus.txt") && 屏上.contains("media"),
+        "Pegasus 那一句该写真实的元数据文件名与媒体目录：\n{屏上}"
+    );
+
+    点最后正好那一段(&ctx, "ES-DE", |ui| 场.app.ui(ui));
+    assert_eq!(
+        场.app.sublibrary_and_site().0.form_mut().format,
+        "ES-Gamelist",
+        "按「ES-DE」存的该是适配器标识"
+    );
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("gamelists/平台目录/gamelist.xml") && 屏上.contains("downloaded_media"),
+        "ES-DE 那一句该写真实的 gamelist 位置与媒体目录：\n{屏上}"
+    );
+}
+
+#[test]
+fn 卡头的前端格式写es_de_不写适配器标识() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        let form = screen.form_mut();
+        form.name = "掌机".to_string();
+        form.target = romcat_core::path::display(场.卡.path());
+        form.format = "ES-Gamelist".to_string();
+        assert!(screen.save(site), "{:?}", screen.error());
+    }
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    let 卡头: Vec<&str> = 屏上
+        .lines()
+        .filter(|line| line.contains("能力档案："))
+        .collect();
+    assert!(
+        卡头.iter().any(|line| line.contains(" · ES-DE · ")),
+        "卡头该写 ES-DE：{卡头:?}"
+    );
+    assert!(
+        !屏上.contains("ES-Gamelist"),
+        "卡上露出了适配器标识：\n{屏上}"
+    );
+}

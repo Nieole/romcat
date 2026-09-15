@@ -868,6 +868,63 @@ pub fn note_box<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R
         .inner
 }
 
+/// 一组**分段按钮**（设计稿 `.seg`）：凹陷底、分隔线描边、中圆角的外框，里头一格一个选项；选中那一格铺面板底、描一圈
+/// `line-2`、小圆角，字是正文色、拉丁与数字加粗，别的格是次要字色。外框留白、每一格的高与左右留白取令牌 `seg-padding` /
+/// `seg-button-height` / `seg-button-padding`，字是 `size-small`。交回这一帧按了第几格（没按是 `None`）。
+pub fn segmented(ui: &mut egui::Ui, labels: &[&str], selected: usize) -> Option<usize> {
+    let tokens = Tokens::builtin();
+    let layout = &tokens.layout;
+    let palette = tokens
+        .color
+        .theme(egui::Theme::from_dark_mode(ui.visuals().dark_mode));
+    let 字号 = font_size(ui.ctx(), tokens.font.size_small);
+    let mut pressed = None;
+    egui::Frame::new()
+        .fill(palette.sunken)
+        .stroke(egui::Stroke::new(1.0, palette.line))
+        .corner_radius(tokens.radius.medium)
+        .inner_margin(egui::Margin::same(layout.seg_padding as i8))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.horizontal(|ui| {
+                for (at, label) in labels.iter().enumerate() {
+                    let on = at == selected;
+                    let 字 = if on {
+                        crate::font::strong(*label).size(字号).color(palette.ink)
+                    } else {
+                        egui::RichText::new(*label).size(字号).color(palette.ink_2)
+                    };
+                    let galley = egui::WidgetText::from(字).into_galley(
+                        ui,
+                        Some(egui::TextWrapMode::Extend),
+                        f32::INFINITY,
+                        egui::TextStyle::Small,
+                    );
+                    let size = egui::vec2(
+                        galley.size().x + 2.0 * layout.seg_button_padding,
+                        layout.seg_button_height,
+                    );
+                    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+                    if on {
+                        ui.painter().rect(
+                            rect,
+                            tokens.radius.small,
+                            palette.panel,
+                            egui::Stroke::new(1.0, palette.line_2),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                    let 摆在 = rect.center() - galley.size() / 2.0;
+                    ui.painter().galley(摆在, galley, palette.ink);
+                    if response.clicked() {
+                        pressed = Some(at);
+                    }
+                }
+            });
+        });
+    pressed
+}
+
 /// 一枚**分面标签**（设计稿 `.fchip`）：一个值加上它的条数，点一下收窄到这个值、再点一下放开。
 ///
 /// 高、左右留白、值与条数之间取令牌 `facet-chip-height` / `facet-chip-padding` / `facet-chip-gap`；
