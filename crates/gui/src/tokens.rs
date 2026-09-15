@@ -695,6 +695,10 @@ pub struct Layout {
     pub seg_button_height: f32,
     /// 分段按钮里每一格左右留白（设计稿 `.seg button` 的 `padding`）。
     pub seg_button_padding: f32,
+    /// 警示框内边距 `[上下, 左右]`（设计稿 `.warnbox` 的 `padding`）。
+    pub warn_box_padding: [f32; 2],
+    /// 能力档案平台表「平台 / 不能用时 / 覆盖」三列的宽；「设备直接能用」占余下的（设计稿 `DLG.subform` 的表头）。
+    pub platform_table_columns: [f32; 3],
 }
 
 /// 调色比例：两套主题共用。设计稿里写在规则上的字面量（`color-mix` 的百分比、`opacity`）。

@@ -81,7 +81,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use egui::{Align, Layout};
-use romcat_core::capability::{Override, Roster};
+use romcat_core::capability::{DEFAULT_PROFILE, Entry, Override, Profile, Recipe, Roster};
 use romcat_core::catalog::CatalogError;
 use romcat_core::catalog::sublibrary::RemovedSublibrary;
 use romcat_core::report::{decimal_bytes, human_bytes, thousands};
@@ -310,6 +310,18 @@ pub struct Screen {
     reading_footprint: Option<(u64, String)>,
     /// 这一台的脚印读失败或被停过：弹层重开之前不再自己排——不然每一帧都往台上排一趟、每一趟都失败。
     footprint_failed: Option<String>,
+    /// 能力档案名册（`Roster::in_workspace`），随 [`Self::reload`] 读。目标设置弹层里的下拉与平台表照它，不在画帧里读盘。
+    roster: Option<Roster>,
+    /// 「今天」：平台表判「陈旧」用（`Claim::is_stale`）。`None` 是照系统时钟（`capability::today`）；截图测试钉死它
+    /// （[`Self::set_today`]），截图里才没有当前日期。
+    today: Option<String>,
+    /// 这一台选择集在眼下挑的档案（叠上覆盖）下**放不下哪几份**：档案名、覆盖、结果（`Footprint::too_big`）。
+    /// 纯算，但与选择集一样大——只在档案或覆盖变了时重算。
+    too_big: Option<(
+        String,
+        BTreeMap<String, Override>,
+        Vec<romcat_core::sync::Rejected>,
+    )>,
     /// **每台设备**的选择集原文：规则（连库里的序号）、读不懂的那几条、例外。
     ///
     /// 每张卡都摆它自己的规则列表（票 `gui-looks-like-the-design/20`），所以一台不落全读回来
@@ -425,6 +437,9 @@ impl Screen {
             footprint: None,
             reading_footprint: None,
             footprint_failed: None,
+            roster: None,
+            today: None,
+            too_big: None,
             failed: false,
             error: None,
         }
@@ -470,10 +485,12 @@ impl Screen {
                         )
                     })
                     .collect();
+                self.roster = Some(roster);
                 self.roster_error = None;
             }
             Err(error) => {
                 self.profiled.clear();
+                self.roster = None;
                 self.roster_error = Some(format!("能力档案名册读不动：{error}"));
             }
         }
@@ -1449,6 +1466,38 @@ impl Screen {
                 ));
             }
         }
+    }
+
+    /// 钉死平台表判「陈旧」用的「今天」（`YYYY-MM-DD`）：截图测试钉死它，截图里才没有当前日期。
+    pub fn set_today(&mut self, today: &str) {
+        self.today = Some(today.to_string());
+    }
+
+    /// 眼下挑的档案叠上覆盖之后，这一台选择集**放不下哪几份**（`Footprint::too_big`）。档案名与覆盖都没变就照用上一回的。
+    fn refresh_too_big(&mut self, profile: Option<&Profile>) {
+        let editing = match &self.target_dialog {
+            Some(TargetDialog::Of(name)) => name.as_str(),
+            _ => {
+                self.too_big = None;
+                return;
+            }
+        };
+        let (Some(profile), Some((of, footprint))) = (profile, self.footprint.as_ref()) else {
+            self.too_big = None;
+            return;
+        };
+        if of != editing {
+            self.too_big = None;
+            return;
+        }
+        let fresh = self.too_big.as_ref().is_some_and(|(name, overrides, _)| {
+            *name == profile.name && *overrides == self.form.overrides
+        });
+        if fresh {
+            return;
+        }
+        let rows = footprint.too_big(&profile.with_overrides(&self.form.overrides));
+        self.too_big = Some((profile.name.clone(), self.form.overrides.clone(), rows));
     }
 
     /// 眼下正在改的是哪一台：「目标设置…」开的那一台；「新建子库」是 `None`；弹层没开时是摊开的那一张
@@ -2574,6 +2623,30 @@ impl Screen {
                 .enabled(ready)
                 .hover("新建或改写这台设备。目标设备不在位也存得下——子库是持久实体。"),
         );
+        // **能力档案**：名册随 `reload` 读好了；挑的那一份叠上覆盖之后放不下哪几份，只在档案或覆盖变了时重算。
+        let today = self
+            .today
+            .clone()
+            .unwrap_or_else(romcat_core::capability::today);
+        let profile = self.roster.as_ref().map(|roster| {
+            roster.find_or_unclaimed(
+                Some(self.form.capability.trim()).filter(|name| !name.is_empty()),
+            )
+        });
+        let roster_names: Vec<String> = self.roster.as_ref().map_or_else(Vec::new, |roster| {
+            roster
+                .names()
+                .into_iter()
+                .map(ToString::to_string)
+                .collect()
+        });
+        self.refresh_too_big(profile.as_ref());
+        let too_big = self
+            .too_big
+            .as_ref()
+            .is_some_and(|(_, _, rows)| !rows.is_empty());
+        let editing_one = matches!(which, TargetDialog::Of(_));
+        let platforms = self.target_platforms();
         let error = self.error.clone();
         let form = &mut self.form;
         let shown = Dialog::new("目标设置", title, footer)
@@ -2673,20 +2746,58 @@ impl Screen {
                 });
                 under(ui, &format_help(&form.format), false);
 
-                for (label, value, hint) in [
-                    ("容量上限", &mut form.capacity, "如 512GB；空着不设限"),
-                    ("能力档案", &mut form.capability, "空着就是不作声称"),
-                ] {
-                    ui.horizontal(|ui| {
-                        field_label(ui, label);
-                        let width = ui.available_width();
-                        look::text_input(
-                            ui,
-                            width,
-                            egui::TextEdit::singleline(value).hint_text(hint),
-                        );
-                    });
+                ui.horizontal(|ui| {
+                    field_label(ui, "能力档案");
+                    let chosen = if form.capability.trim().is_empty() {
+                        DEFAULT_PROFILE.to_string()
+                    } else {
+                        form.capability.trim().to_string()
+                    };
+                    let width = ui.available_width();
+                    egui::ComboBox::from_id_salt("能力档案")
+                        .width(width)
+                        .selected_text(chosen.clone())
+                        .show_ui(ui, |ui| {
+                            for name in &roster_names {
+                                if ui.selectable_label(*name == chosen, name).clicked() {
+                                    form.capability.clone_from(name);
+                                }
+                            }
+                        });
+                });
+                if let Some(profile) = &profile {
+                    under(ui, &profile_help(profile), false);
+                    profile_table_ui(
+                        ui,
+                        profile,
+                        editing_one.then_some(platforms.as_deref()),
+                        &mut form.overrides,
+                        &today,
+                    );
+                    if too_big && let Some(limit) = profile.filesystem.max_file_bytes {
+                        ui.horizontal(|ui| {
+                            ui.add_space(layout.kv_key_width + ui.spacing().item_spacing.x);
+                            ui.vertical(|ui| {
+                                look::warn_box(
+                                    ui,
+                                    &format!("{} 单文件上限 {}。", profile.filesystem.name, human_bytes(limit)),
+                                    "选择集里有超过这个大小的变体，它们会列在差量预览的「放不进目标」里。",
+                                );
+                            });
+                        });
+                    }
                 }
+
+                ui.horizontal(|ui| {
+                    field_label(ui, "容量上限");
+                    let width = ui.available_width();
+                    look::text_input(
+                        ui,
+                        width,
+                        egui::TextEdit::singleline(&mut form.capacity)
+                            .hint_text("如 512GB；空着不设限"),
+                    );
+                });
             });
         if pick_pressed {
             // 起点：框里那一串是个目录就从那儿打开，否则交给系统（`pick::directory` 的文档）。
@@ -3448,6 +3559,197 @@ fn format_help(adapter: &str) -> String {
             "每个平台一份 {metadata}，摊在子库根上；媒体放在 {} 目录。",
             romcat_core::adapter::pegasus::MEDIA_DIR
         )
+    }
+}
+
+/// 能力档案下拉底下那一句：**照核心的事实拼**（这份档案的文件系统与单文件上限），不照名册里的「说明」——那一格是写给
+/// 维护者看的，带着 Markdown 记号与票号。
+fn profile_help(profile: &Profile) -> String {
+    let filesystem = &profile.filesystem;
+    let limit = filesystem
+        .max_file_bytes
+        .map(|bytes| format!("，单文件上限 {}", human_bytes(bytes)))
+        .unwrap_or_default();
+    format!(
+        "决定每个平台放到设备上时要不要转换格式。卡是 {}{limit}。",
+        filesystem.name
+    )
+}
+
+/// 名册里那几格给人看之前去掉 Markdown 记号（`**`、反引号）：来源原文是写给维护者核对的，界面上照字面露出来不像话。
+fn plain(text: &str) -> String {
+    text.replace("**", "").replace('`', "")
+}
+
+/// **能力档案平台表**（设计稿 `DLG.subform` 那张表）：逐平台写「设备直接能用」「不能用时」，每行底下一句来源里说了的「说明」
+/// 与「核实日期 …」（陈旧时换成警示色「陈旧」，来源去掉记号放悬停）。
+///
+/// `rows_of` 是 `Some(平台表)` 时照这台设备选择集里出现的平台列、带「覆盖」那一列（`None` 是还在读）；是 `None` 时（新建子库）
+/// 按这份档案的条目列、不带覆盖列（拿主意的人 2026-09-15 定）。判断全在核心：哪个平台走哪一条（`Matrix::entry_for`）、
+/// 陈不陈旧（`Claim::is_stale`）。
+fn profile_table_ui(
+    ui: &mut egui::Ui,
+    profile: &Profile,
+    rows_of: Option<Option<&[String]>>,
+    overrides: &mut BTreeMap<String, Override>,
+    today: &str,
+) {
+    let tokens = Tokens::builtin();
+    let layout = &tokens.layout;
+    let rows: Vec<(String, Option<&Entry>)> = match rows_of {
+        Some(Some(platforms)) => platforms
+            .iter()
+            .map(|platform| (platform.clone(), profile.matrix.entry_for(Some(platform))))
+            .collect(),
+        Some(None) => {
+            ui.horizontal(|ui| {
+                ui.add_space(layout.kv_key_width + ui.spacing().item_spacing.x);
+                look::help(ui, "正在读这台设备的选择集……");
+            });
+            return;
+        }
+        None => profile
+            .matrix
+            .entries
+            .iter()
+            .map(|entry| {
+                let platforms = if entry.platforms.iter().any(|platform| platform == "*") {
+                    "其余平台".to_string()
+                } else {
+                    entry.platforms.join("、")
+                };
+                (platforms, Some(entry))
+            })
+            .collect(),
+    };
+    let with_overrides = rows_of.is_some();
+    let [平台宽, 转成宽, 覆盖宽] = layout.platform_table_columns;
+    ui.horizontal(|ui| {
+        ui.add_space(layout.kv_key_width + ui.spacing().item_spacing.x);
+        ui.vertical(|ui| {
+            let visuals = ui.visuals().clone();
+            egui::Frame::new()
+                .stroke(visuals.widgets.noninteractive.bg_stroke)
+                .corner_radius(tokens.radius.large)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    let total = ui.available_width();
+                    let gaps = if with_overrides { 3.0 } else { 2.0 };
+                    let 吃宽 = (total
+                        - 平台宽
+                        - 转成宽
+                        - if with_overrides { 覆盖宽 } else { 0.0 }
+                        - gaps * ui.spacing().item_spacing.x
+                        - 2.0 * f32::from(block_margin().left))
+                    .max(0.0);
+                    let cell = |ui: &mut egui::Ui, width: f32, add: &mut dyn FnMut(&mut egui::Ui)| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(width, 0.0),
+                            Layout::top_down(Align::Min),
+                            |ui| {
+                                ui.set_width(width);
+                                add(ui);
+                            },
+                        );
+                    };
+                    egui::Frame::new()
+                        .inner_margin(block_margin())
+                        .show(ui, |ui| {
+                            ui.horizontal_top(|ui| {
+                                for (text, width) in [("平台", 平台宽), ("设备直接能用", 吃宽), ("不能用时", 转成宽)] {
+                                    cell(ui, width, &mut |ui| {
+                                        ui.label(egui::RichText::new(text).small().weak());
+                                    });
+                                }
+                                if with_overrides {
+                                    cell(ui, 覆盖宽, &mut |ui| {
+                                        ui.label(egui::RichText::new("覆盖").small().weak());
+                                    });
+                                }
+                            });
+                        });
+                    for (platform, entry) in &rows {
+                        look::divider(ui);
+                        egui::Frame::new()
+                            .inner_margin(block_margin())
+                            .show(ui, |ui| {
+                                ui.horizontal_top(|ui| {
+                                    cell(ui, 平台宽, &mut |ui| {
+                                        ui.add(egui::Label::new(font::strong(platform.as_str())).wrap());
+                                    });
+                                    cell(ui, 吃宽, &mut |ui| entry_cell_ui(ui, *entry, today));
+                                    cell(ui, 转成宽, &mut |ui| {
+                                        ui.label(convert_text(*entry));
+                                    });
+                                    if with_overrides {
+                                        cell(ui, 覆盖宽, &mut |ui| {
+                                            let mut chosen = overrides.get(platform).copied();
+                                            egui::ComboBox::from_id_salt(("覆盖", platform.as_str()))
+                                                .width(覆盖宽)
+                                                .selected_text(chosen.map_or("按档案", Override::label))
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(&mut chosen, None, "按档案");
+                                                    for choice in Override::all() {
+                                                        ui.selectable_value(&mut chosen, Some(choice), choice.label());
+                                                    }
+                                                });
+                                            match chosen {
+                                                Some(choice) => {
+                                                    overrides.insert(platform.clone(), choice);
+                                                }
+                                                None => {
+                                                    overrides.remove(platform);
+                                                }
+                                            }
+                                        });
+                                    }
+                                });
+                            });
+                    }
+                });
+            look::help(
+                ui,
+                if with_overrides {
+                    "只列出这个子库选择集中出现的平台。覆盖只影响这个子库。压缩镜像之间的转换（cue/bin → chd 等）需要外部工具，这一版做不到，遇到时会在差量预览中如实列出。"
+                } else {
+                    "按这份档案的条目列出；创建后按选择集中实际出现的平台列出，并可以按平台覆盖。压缩镜像之间的转换（cue/bin → chd 等）需要外部工具，这一版做不到，遇到时会在差量预览中如实列出。"
+                },
+            );
+        });
+    });
+}
+
+/// 平台表「设备直接能用」那一格：吃什么（名册里的写法）、来源里说了的那一句、核实日期（陈旧时一枚「陈旧」）。
+fn entry_cell_ui(ui: &mut egui::Ui, entry: Option<&Entry>, today: &str) {
+    let Some(entry) = entry.filter(|entry| !entry.accepts.is_anything()) else {
+        ui.label("不作声称");
+        look::help(ui, "没有核实过，不转换也不检查");
+        return;
+    };
+    ui.add(egui::Label::new(entry.declared.join("、")).wrap());
+    if !entry.note.is_empty() {
+        look::help(ui, &entry.note);
+    }
+    ui.horizontal(|ui| {
+        look::help(ui, &format!("核实日期 {}", entry.claim.verified))
+            .on_hover_text(plain(&entry.claim.cite));
+        if entry.claim.is_stale(today) {
+            look::plain_chip(ui, look::Tone::Caution, "陈旧");
+        }
+    });
+}
+
+/// 平台表「不能用时」那一格：转成什么（`Recipe`）；不作声称或者转不了是「—」。
+fn convert_text(entry: Option<&Entry>) -> &'static str {
+    match entry.and_then(|entry| {
+        (!entry.accepts.is_anything())
+            .then_some(entry.convert_to)
+            .flatten()
+    }) {
+        Some(Recipe::Rezip) => "zip",
+        Some(Recipe::Unpack) => "取出为裸文件",
+        None => "—",
     }
 }
 

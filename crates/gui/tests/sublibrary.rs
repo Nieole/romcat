@@ -3158,3 +3158,116 @@ fn 卡头的前端格式写es_de_不写适配器标识() {
         "卡上露出了适配器标识：\n{屏上}"
     );
 }
+
+/// 往工作目录里放一份能力档案名册：照内置那一份原文，换掉 `从` 那一串（名册文件改一处就生效，`Roster::in_workspace`）。
+fn 换一处名册(工作区: &Path, 从: &str, 换成: &str) {
+    let 原文 = romcat_core::capability::Roster::builtin_text();
+    assert!(原文.contains(从), "内置名册里没有「{从}」");
+    fs::write(工作区.join("capability.toml"), 原文.replacen(从, 换成, 1)).expect("写得进");
+}
+
+/// 打开这一台的目标设置，等它的选择集读回来，钉死「今天」，交回画出来的字。
+fn 开目标设置等选择集(ctx: &egui::Context, 场: &mut 现场, name: &str) -> String {
+    场.app.sublibrary_and_site().0.set_today("2026-09-15");
+    场.app.sublibrary_and_site().0.edit_target(name);
+    画两帧(ctx, 场);
+    场.等任务跑完();
+    画两帧(ctx, 场)
+}
+
+#[test]
+fn 能力档案表逐平台写吃什么转什么_每行核实日期_来源里说了的那句说明画出来() {
+    // 拿主意的人 2026-09-15 定：每行一小行「核实日期 …」、陈旧时换成警示色「陈旧」；「说明」只画来源里真说了的。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC,GBA");
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        screen.edit_target("掌机");
+        screen.form_mut().capability = "retroarch-exfat".to_string();
+        assert!(screen.save(site), "{:?}", screen.error());
+    }
+    let 屏上 = 开目标设置等选择集(&ctx, &mut 场, "掌机");
+    for 该有 in [
+        "GBA",
+        "SFC",
+        "卡带裸文件、zip、7z、zst、apk",
+        "核实日期 2026-08-31",
+        "按档案",
+    ] {
+        assert!(屏上.contains(该有), "平台表里没有「{该有}」：\n{屏上}");
+    }
+    assert!(!屏上.contains("陈旧"), "内置档案眼下不陈旧：\n{屏上}");
+
+    // 独立模拟器那一份：SFC 那一条来源里说了 Snes9x 与 ares 不认 7z 与 rar。
+    场.app.sublibrary_and_site().0.form_mut().capability = "独立模拟器-exfat".to_string();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("Snes9x 与 ares 不支持 7z 与 rar"),
+        "来源里说了的那句说明没画出来：\n{屏上}"
+    );
+}
+
+#[test]
+fn 核实日期超过半年的声明在平台表上标陈旧() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    换一处名册(
+        场.工作区.path(),
+        "\"核实日期\" = \"2026-08-31\"",
+        "\"核实日期\" = \"2020-01-01\"",
+    );
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC,GBA");
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        screen.edit_target("掌机");
+        screen.form_mut().capability = "retroarch-exfat".to_string();
+        assert!(screen.save(site), "{:?}", screen.error());
+    }
+    let 屏上 = 开目标设置等选择集(&ctx, &mut 场, "掌机");
+    assert!(屏上.contains("陈旧"), "超过 180 天的声明没标出来：\n{屏上}");
+}
+
+#[test]
+fn 新建时平台表按所选档案的条目列_不带覆盖列() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.app.sublibrary_and_site().0.set_today("2026-09-15");
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    场.app.sublibrary_and_site().0.form_mut().capability = "retroarch-exfat".to_string();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("PS1"),
+        "新建时该按档案的条目列出平台：\n{屏上}"
+    );
+    assert!(屏上.contains("核实日期 2026-08-31"), "\n{屏上}");
+    assert!(!屏上.contains("按档案"), "新建时不该带覆盖那一列：\n{屏上}");
+}
+
+#[test]
+fn fat32档案下选择集里有超过单文件上限的_当场提醒() {
+    // ADR-0017 补充段：FAT32 那 4 GiB 放不进去的，挑档案时就说，不等差量预览。fixture 里的 zip 只有几 KiB，
+    // 于是把名册里 FAT32 的单文件上限改小——判据照旧是核心那一处（`Footprint::too_big`）。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    换一处名册(
+        场.工作区.path(),
+        "\"单文件上限\" = 4294967295",
+        "\"单文件上限\" = 3000",
+    );
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    let 屏上 = 开目标设置等选择集(&ctx, &mut 场, "掌机");
+    assert!(
+        !屏上.contains("单文件上限"),
+        "没挑 FAT32 的档案就不该提醒：\n{屏上}"
+    );
+    场.app.sublibrary_and_site().0.form_mut().capability = "retroarch-fat32".to_string();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("FAT32 单文件上限"),
+        "选择集里有超过单文件上限的，挑 FAT32 的档案时该当场提醒：\n{屏上}"
+    );
+}

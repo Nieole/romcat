@@ -277,6 +277,8 @@ impact-column     = 18    # 行首圆点那一列多宽（设计稿 .impact li �
 seg-padding       = 2     # 分段按钮外框留白（设计稿 .seg 的 padding:2px）
 seg-button-height = 24    # 分段按钮里每一格的高（设计稿 .seg button 的 height:24px）
 seg-button-padding = 11   # 分段按钮里每一格左右留白（设计稿 .seg button 的 padding:0 11px）
+warn-box-padding  = [10, 12]  # 警示框内边距（上下, 左右）（设计稿 .warnbox 的 padding:10px 12px）
+platform-table-columns = [64, 110, 130]  # 能力档案平台表「平台 / 不能用时 / 覆盖」三列的宽，「设备直接能用」占余下的（设计稿 DLG.subform 的 th 宽）
 
 # ── 调色比例：两套主题共用。设计稿里写在规则上的字面量（color-mix 的百分比、opacity），不是 CSS 变量 ──
 [mix]

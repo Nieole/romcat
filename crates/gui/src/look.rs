@@ -103,7 +103,7 @@
 //! （`Style::button_style`），哪一档比别的档宽，控件就会在进出那一档的那一帧缩一下——焦点在
 //! 控件之间跳的时候，整排按钮跟着抖。
 
-use egui::Color32;
+use egui::{Align, Color32};
 use romcat_core::catalog::identify::Tier;
 
 use crate::tokens::{Palette, Tokens};
@@ -866,6 +866,50 @@ pub fn note_box<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R
             add(ui)
         })
         .inner
+}
+
+/// 一块**警示框**（设计稿 `.warnbox`）：`lo-soft` 底、描边是分隔线色往 `lo` 挪四成、中圆角，内边距取令牌
+/// `warn-box-padding`，字是 `size-small-plus`；头一句用 `lo` 色、拉丁与数字加粗，后面接着正文色。占满这一栏的宽。
+pub fn warn_box(ui: &mut egui::Ui, head: &str, body: &str) {
+    let tokens = Tokens::builtin();
+    let palette = tokens
+        .color
+        .theme(egui::Theme::from_dark_mode(ui.visuals().dark_mode));
+    let [上下, 左右] = tokens.layout.warn_box_padding;
+    let 字号 = font_size(ui.ctx(), tokens.font.size_small_plus);
+    egui::Frame::new()
+        .fill(palette.lo_soft)
+        .stroke(egui::Stroke::new(
+            1.0,
+            palette.line.lerp_to_gamma(palette.lo, 0.4),
+        ))
+        .corner_radius(tokens.radius.medium)
+        .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let mut job = egui::text::LayoutJob::default();
+            let font = egui::FontId::proportional(字号);
+            crate::font::strong(head)
+                .size(字号)
+                .color(palette.lo)
+                .append_to(
+                    &mut job,
+                    ui.style(),
+                    egui::FontSelection::FontId(font.clone()),
+                    Align::LEFT,
+                );
+            egui::RichText::new(body)
+                .size(字号)
+                .color(palette.ink)
+                .append_to(
+                    &mut job,
+                    ui.style(),
+                    egui::FontSelection::FontId(font),
+                    Align::LEFT,
+                );
+            job.wrap.max_width = ui.available_width();
+            ui.label(job);
+        });
 }
 
 /// 一组**分段按钮**（设计稿 `.seg`）：凹陷底、分隔线描边、中圆角的外框，里头一格一个选项；选中那一格铺面板底、描一圈
