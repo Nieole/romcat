@@ -78,6 +78,10 @@ CREATE TABLE IF NOT EXISTS sublibrary(
     -- 档案本身：矩阵会过时、要能整份换掉，而子库不该跟着一起改。
     -- 这一列由 `add_columns` 给老库补上，见那个函数的注释。
     capability TEXT,
+    -- 容量上限是不是**按设备容量**那一档（票 gui-looks-like-the-design/21）：1 是跟着设备总容量走，
+    -- 这时 `capacity` 记的是上次连上时读到的总容量；0 是自定义，`capacity` 就是那个上限。
+    -- 这一列由 `add_columns` 给老库补上：老行是 0，正是加它之前的唯一可能。
+    capacity_by_device INTEGER NOT NULL DEFAULT 0,
     -- 下一条规则发几号。**只增不减**，于是删掉的号永不复用——见 sublibrary_rule。
     next_rule INTEGER NOT NULL,
     at        INTEGER NOT NULL
@@ -170,6 +174,12 @@ pub(super) fn add_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     add_column(conn, "sublibrary", "capability", "TEXT")?;
     add_column(
         conn,
+        "sublibrary",
+        "capacity_by_device",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column(
+        conn,
         "sublibrary_manifest",
         "absent",
         "INTEGER NOT NULL DEFAULT 0",
@@ -218,6 +228,8 @@ pub struct RemovedSublibrary {
     capacity: Option<i64>,
     /// 能力档案的名字。
     capability: Option<String>,
+    /// 容量上限是不是按设备容量那一档，库里那一格的原值。
+    capacity_by_device: i64,
     /// 下一条规则发几号。
     next_rule: i64,
     /// 这一行记下的时刻。
@@ -332,12 +344,14 @@ impl Catalog {
                 // 改一个已有的子库**不碰 `next_rule`**：发号器是单调的，
                 // 「改一次目标路径」不该让规则的号从头再来。
                 "INSERT INTO sublibrary(
-                     name, target, target_raw, format, capacity, capability, next_rule, at)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)
+                     name, target, target_raw, format, capacity, capability, capacity_by_device,
+                     next_rule, at)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)
                  ON CONFLICT(name) DO UPDATE SET
                     target = excluded.target, target_raw = excluded.target_raw,
                     format = excluded.format,
                     capacity = excluded.capacity, capability = excluded.capability,
+                    capacity_by_device = excluded.capacity_by_device,
                     at = excluded.at",
                 params![
                     sublibrary.name,
@@ -346,6 +360,7 @@ impl Catalog {
                     sublibrary.format,
                     capacity,
                     sublibrary.capability,
+                    i64::from(sublibrary.capacity_by_device),
                     super::now_secs()
                 ],
             )
@@ -360,7 +375,7 @@ impl Catalog {
     pub fn sublibrary(&self, name: &str) -> Result<Option<Sublibrary>, CatalogError> {
         self.conn
             .query_row(
-                "SELECT name, target, target_raw, format, capacity, capability
+                "SELECT name, target, target_raw, format, capacity, capability, capacity_by_device
                  FROM sublibrary WHERE name = ?1",
                 params![name],
                 |row| {
@@ -373,6 +388,7 @@ impl Catalog {
                             .get::<_, Option<i64>>(4)?
                             .and_then(|v| u64::try_from(v).ok()),
                         capability: row.get(5)?,
+                        capacity_by_device: row.get::<_, i64>(6)? != 0,
                     })
                 },
             )
@@ -390,7 +406,7 @@ impl Catalog {
         let mut statement = self
             .conn
             .prepare(
-                "SELECT name, target, target_raw, format, capacity, capability
+                "SELECT name, target, target_raw, format, capacity, capability, capacity_by_device
                  FROM sublibrary ORDER BY name",
             )
             .map_err(|source| self.err(source))?;
@@ -405,6 +421,7 @@ impl Catalog {
                         .get::<_, Option<i64>>(4)?
                         .and_then(|v| u64::try_from(v).ok()),
                     capability: row.get(5)?,
+                    capacity_by_device: row.get::<_, i64>(6)? != 0,
                 })
             })
             .map_err(|source| self.err(source))?;
@@ -445,8 +462,10 @@ impl Catalog {
         // 这张表往后再加列，这一句的列表要跟着加——漏一列，改名就悄悄把那一格丢了。
         tx.execute(
             "INSERT INTO sublibrary(
-                 name, target, target_raw, format, capacity, capability, next_rule, at)
-             SELECT ?2, target, target_raw, format, capacity, capability, next_rule, at
+                 name, target, target_raw, format, capacity, capability, capacity_by_device,
+                 next_rule, at)
+             SELECT ?2, target, target_raw, format, capacity, capability, capacity_by_device,
+                    next_rule, at
              FROM sublibrary WHERE name = ?1",
             params![from, to],
         )
@@ -503,7 +522,8 @@ impl Catalog {
         let tx = self.conn.transaction().map_err(to_err)?;
         let row = tx
             .query_row(
-                "SELECT name, target, target_raw, format, capacity, capability, next_rule, at
+                "SELECT name, target, target_raw, format, capacity, capability, next_rule, at,
+                        capacity_by_device
                  FROM sublibrary WHERE name = ?1",
                 params![name],
                 |row| {
@@ -516,6 +536,7 @@ impl Catalog {
                         capability: row.get(5)?,
                         next_rule: row.get(6)?,
                         at: row.get(7)?,
+                        capacity_by_device: row.get(8)?,
                         rules: Vec::new(),
                         exceptions: Vec::new(),
                         manifest: Vec::new(),
@@ -659,8 +680,9 @@ impl Catalog {
         }
         tx.execute(
             "INSERT INTO sublibrary(
-                 name, target, target_raw, format, capacity, capability, next_rule, at)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 name, target, target_raw, format, capacity, capability, next_rule, at,
+                 capacity_by_device)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 removed.name,
                 removed.target,
@@ -670,6 +692,7 @@ impl Catalog {
                 removed.capability,
                 removed.next_rule,
                 removed.at,
+                removed.capacity_by_device,
             ],
         )
         .map_err(to_err)?;

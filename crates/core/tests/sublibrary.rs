@@ -103,6 +103,7 @@ fn 建子库(catalog: &mut Catalog, name: &str, capacity: Option<u64>) {
             format: "Pegasus".to_string(),
             capacity,
             capability: None,
+            capacity_by_device: false,
         })
         .expect("子库写得进");
 }
@@ -1244,4 +1245,103 @@ fn 子库改名之后差量预览与改名之前一样() {
     assert_eq!(之后.steps, 之前.steps, "改名改动了要做的事");
     assert_eq!(之后.adds, 之前.adds);
     assert_eq!(之后.strangers, 之前.strangers);
+}
+
+// ——— 容量上限「按设备容量」那一档（票 `gui-looks-like-the-design/21`，拿主意的人 2026-09-15 照稿定）———
+
+#[test]
+fn 按设备容量那一档_在位时跟着设备总量_不在位时用上次读到的_没读过不设上限_自定义照记着的() {
+    let mut 按设备 = Sublibrary::at(
+        "掌机",
+        std::path::Path::new("/Volumes/SDCARD"),
+        "Pegasus",
+        None,
+    );
+    按设备.capacity_by_device = true;
+    assert_eq!(按设备.limit(None), None, "没读过设备总量：不设上限");
+    assert_eq!(
+        按设备.limit(Some(128_000_000_000)),
+        Some(128_000_000_000),
+        "在位时就是这张卡的总量"
+    );
+    按设备.capacity = Some(64_000_000_000);
+    assert_eq!(
+        按设备.limit(None),
+        Some(64_000_000_000),
+        "不在位时用上次连上时读到的"
+    );
+    assert_eq!(
+        按设备.limit(Some(256_000_000_000)),
+        Some(256_000_000_000),
+        "换了一张卡，上限跟着变"
+    );
+    let 自定义 = Sublibrary::at(
+        "备用卡",
+        std::path::Path::new("/Volumes/SDCARD"),
+        "Pegasus",
+        Some(58_000_000_000),
+    );
+    assert!(!自定义.capacity_by_device, "新建默认是自定义那一档");
+    assert_eq!(自定义.limit(Some(256_000_000_000)), Some(58_000_000_000));
+}
+
+#[test]
+fn 按设备容量那一档存进去读得回来_删了撤销与改名都跟着() {
+    let mut catalog = 现场();
+    let mut 掌机 = Sublibrary::at(
+        "掌机",
+        std::path::Path::new("/Volumes/SDCARD"),
+        "Pegasus",
+        Some(64_000_000_000),
+    );
+    掌机.capacity_by_device = true;
+    catalog.put_sublibrary(&掌机).expect("子库写得进");
+    let 读 = |catalog: &Catalog, name: &str| catalog.sublibrary(name).expect("读得动").expect("在");
+    assert!(读(&catalog, "掌机").capacity_by_device);
+    assert_eq!(读(&catalog, "掌机").capacity, Some(64_000_000_000));
+
+    let removed = catalog
+        .take_sublibrary("掌机")
+        .expect("删得动")
+        .expect("在");
+    assert!(catalog.restore_sublibrary(&removed).expect("放得回"));
+    assert!(
+        读(&catalog, "掌机").capacity_by_device,
+        "撤销删除之后这一档没回来"
+    );
+
+    assert_eq!(
+        catalog.rename_sublibrary("掌机", "RG35XX").expect("写得动"),
+        romcat_core::catalog::sublibrary::Renamed::Done
+    );
+    assert!(
+        读(&catalog, "RG35XX").capacity_by_device,
+        "改名之后这一档没跟过去"
+    );
+    assert!(
+        catalog
+            .sublibraries()
+            .expect("读得动")
+            .iter()
+            .all(|row| row.capacity_by_device),
+        "列出来的那一份也得带着这一档"
+    );
+}
+
+#[test]
+fn 排差量预览时按设备容量那一档的上限就是这张卡此刻的总量() {
+    use romcat_core::sublibrary::target::{self, Presence};
+
+    let mut 场 = 一张卡::摆好(0);
+    场.建子库("平台=FC", None);
+    let mut 掌机 = 场.catalog.sublibrary("掌机").expect("读得动").expect("在");
+    掌机.capacity_by_device = true;
+    场.catalog.put_sublibrary(&掌机).expect("写得进");
+    let 总量 = match target::vet(&场.catalog, 场.工作区.path(), Some("掌机"), 场.卡.path())
+        .expect("读得动")
+    {
+        Ok(Presence::Present(volume)) => volume.total.expect("读得出卷的总量"),
+        other => panic!("卡插着：{other:?}"),
+    };
+    assert_eq!(场.排计划().plan.capacity, Some(总量));
 }

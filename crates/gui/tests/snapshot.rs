@@ -1557,6 +1557,7 @@ impl 子库现场 {
                 format: "Pegasus".to_owned(),
                 capacity: 上限,
                 capability: 档案.map(ToString::to_string),
+                capacity_by_device: false,
             })
             .expect("写得进子库");
         for 那条 in 规则 {

@@ -361,6 +361,11 @@ pub fn prepare_selected(
     // 找不到时上面已经退回了「不作声称」——这时预览与 `--json` 还印着原来那个名字的话，
     // 用户会以为它替自己查过了，而实际上一条都没查（ADR-0017：矩阵错误比不转换更糟）。
     sublibrary.capability = Some(profile.name.clone());
+    // **容量上限「按设备容量」那一档**（票 `gui-looks-like-the-design/21`）：这张卡此刻读得出总量就用它，读不出退回上次记下的
+    // （`Sublibrary::limit`）。计划里比「超没超」用的就是这个数。
+    if sublibrary.capacity_by_device {
+        sublibrary.capacity = sublibrary.limit(crate::sublibrary::target::volume(&root).total);
+    }
     let priorities = priorities(request.priorities, workspace)?;
     // **不建目录**：排计划那条命令说的是「一个文件都没写」。
     let pool = MediaPool::at(&workspace::media_pool_dir(workspace));

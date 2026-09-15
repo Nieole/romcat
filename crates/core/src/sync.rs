@@ -1566,6 +1566,7 @@ mod tests {
             format: "Pegasus".to_string(),
             capacity,
             capability: None,
+            capacity_by_device: false,
         }
     }
 

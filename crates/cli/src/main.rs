@@ -4274,6 +4274,11 @@ fn run_sublibrary_set(args: &SubSetArgs) -> ExitCode {
             None => existing.as_ref().and_then(|sub| sub.capacity),
         }
     };
+    // **按设备容量那一档照旧留着**（界面上挑的，票 `gui-looks-like-the-design/21`），除非这一趟明说了容量——
+    // 给了 `--capacity` 或 `--no-capacity` 就是自定义那一档。
+    let capacity_by_device = args.capacity.is_none()
+        && !args.no_capacity
+        && existing.as_ref().is_some_and(|sub| sub.capacity_by_device);
     let sublibrary = Sublibrary {
         name: args.name.clone(),
         target,
@@ -4281,6 +4286,7 @@ fn run_sublibrary_set(args: &SubSetArgs) -> ExitCode {
         format,
         capacity,
         capability,
+        capacity_by_device,
     };
     if let Err(error) = catalog.put_sublibrary(&sublibrary) {
         return fail(format!("子库写不进中立库：{error}"));

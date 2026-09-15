@@ -203,7 +203,10 @@ pub fn vet_name(
 
 /// 看一眼 `place` 所在的卷：**挂载点是 `place` 的上级里最深的那一个**（`/Volumes/SDCARD/Game` 落在
 /// `/Volumes/SDCARD` 上，不落在 `/` 上）。一个都对不上（列不出卷）时每一格都空着。
-fn volume(place: &Path) -> Volume {
+///
+/// 查盘，什么时候调由调用方定（模块文档「每调一次都查盘」）。
+#[must_use]
+pub fn volume(place: &Path) -> Volume {
     use sysinfo::{DiskRefreshKind, Disks};
 
     let place = path::normalize_existing(place);

@@ -105,6 +105,10 @@ pub struct Sublibrary {
     /// **默认必须是「不作声称」而不是某份真的矩阵**：一份没人挑过的矩阵替用户做了
     /// 决定，而它可能是错的（ADR-0017：矩阵错误比不转换更糟）。
     pub capability: Option<String>,
+    /// 容量上限是不是**按设备容量**那一档（票 `gui-looks-like-the-design/21`，拿主意的人 2026-09-15 照稿定）：上限跟着设备的
+    /// 总容量走，换一张卡跟着变。这一档里 [`Self::capacity`] 记的是**上次连上时读到的总容量**——设备没连着时就用它，
+    /// 没读过是 `None`（不设上限）。**默认是另一档「自定义」**：[`Self::capacity`] 就是那个上限。
+    pub capacity_by_device: bool,
 }
 
 impl Sublibrary {
@@ -118,6 +122,18 @@ impl Sublibrary {
             format: format.to_string(),
             capacity,
             capability: None,
+            capacity_by_device: false,
+        }
+    }
+
+    /// 这一刻的**容量上限**：按设备容量那一档，设备此刻读得出总量（`device_total`）就是它，读不出用上次记下的；自定义那一档
+    /// 就是记着的那个数。**只有这一处判**（ADR-0024）：排计划、屏上那一格都照它。
+    #[must_use]
+    pub fn limit(&self, device_total: Option<u64>) -> Option<u64> {
+        if self.capacity_by_device {
+            device_total.or(self.capacity)
+        } else {
+            self.capacity
         }
     }
 
