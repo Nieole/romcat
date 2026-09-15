@@ -877,3 +877,87 @@ fn 按名字读一台设备的脚印_读选择集折事实求值读成员() {
         "FC 两个变体各一份文件"
     );
 }
+
+// ───────────────────────── 清单之外的文件只有一处数法（票 `gui-looks-like-the-design/21`）
+//
+// 目标设置弹层里那句「目录里已有 N 个文件，它们不在清单里」与差量预览里那个数必须是同一个数：
+// 界面上各数一遍，迟早数出两个答案（ADR-0024）。
+
+fn 卡上一份清单(path: &str, bytes: u64) -> Manifest {
+    Manifest {
+        files: vec![ManifestFile {
+            path: path.to_string(),
+            kind: FileKind::Rom,
+            stamp: Stamp {
+                bytes,
+                mtime_ns: None,
+            },
+            source: format!("库/{path}"),
+            source_stamp: Stamp {
+                bytes,
+                mtime_ns: None,
+            },
+            variant: format!("库/{path}"),
+            absent: false,
+        }],
+    }
+}
+
+#[test]
+fn 清单之外的文件只有一处数法_单独数的与计划里的一样() {
+    let dir = 建库();
+    let catalog = 扫成库(dir.path());
+    let 卡 = temp_dir("sync-strangers-card");
+    写(&卡.path().join("saves/我的.sav"), &[7u8; 300]);
+    写(&卡.path().join("FC/魂斗罗.zip"), &zip(2048));
+    let actual = sync::observe(&RealFs::new(), 卡.path()).expect("看得了目标");
+    let 清单 = 卡上一份清单("FC/魂斗罗.zip", 2048);
+
+    let 数的 = sync::strangers(&清单, &actual);
+    assert_eq!((数的.count, 数的.bytes, 数的.unreadable), (1, 300, 0));
+
+    let selected = 选中(&catalog, "平台=FC");
+    let desired =
+        sync::desired(&catalog, &selected, &Profile::unclaimed()).expect("折得出期望状态");
+    let plan = sync::plan(
+        &子库(卡.path(), None),
+        &desired,
+        &清单,
+        &actual,
+        Options {
+            restore_missing: false,
+        },
+    );
+    assert_eq!(
+        (
+            plan.strangers,
+            plan.stranger_bytes,
+            plan.stranger_unreadable
+        ),
+        (数的.count, 数的.bytes, 数的.unreadable),
+        "计划里数的与单独数的不是一个数"
+    );
+}
+
+#[test]
+fn 数一台设备卡上清单之外的文件_路径可以是框里还没存的那一条() {
+    let dir = 建库();
+    let mut catalog = 扫成库(dir.path());
+    let 卡 = temp_dir("sync-strangers-card");
+    写(&卡.path().join("saves/我的.sav"), &[7u8; 300]);
+    写(&卡.path().join("FC/魂斗罗.zip"), &zip(2048));
+    catalog
+        .put_sublibrary(&子库(卡.path(), None))
+        .expect("子库写得进");
+    catalog
+        .put_manifest("掌机", &卡上一份清单("FC/魂斗罗.zip", 2048))
+        .expect("清单写得进");
+
+    let 数的 =
+        sync::prepare::strangers_at(&catalog, "掌机", 卡.path(), &Handle::new()).expect("数得出来");
+    assert_eq!((数的.count, 数的.bytes), (1, 300));
+    let 新的 = sync::prepare::strangers_at(&catalog, "还没建的", 卡.path(), &Handle::new())
+        .expect("数得出来");
+    assert_eq!(新的.count, 2, "还没建的子库没有清单，卡上的都算清单之外");
+}
+

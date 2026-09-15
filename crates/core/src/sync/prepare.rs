@@ -195,6 +195,34 @@ pub fn footprint(catalog: &Catalog, name: &str, task: &Handle) -> Result<super::
 /// [`footprint`] 一共几步。**改了它里头的 `task.step` 就得改这个数。**
 pub const FOOTPRINT_STEPS: u32 = 4;
 
+/// 数 `target` 上**清单之外**的文件有几个、多大（[`strangers`](super::strangers)）：清单是 `name` 这个子库记着的那一份，
+/// 还没建的子库没有清单，卡上的都算。目标设置弹层里那句「目录里已有 N 个文件，它们不在清单里，工具不会改动」数的就是它
+/// （票 `gui-looks-like-the-design/21`，拿主意的人 2026-09-15 定）。`target` 可以是框里还没存下来的那一条。
+///
+/// **只读遍历目标**（[`observe`](super::observe)）：卡上文件多时是一趟长活，排到任务台上跑，不在画帧那条线程上跑；
+/// 被叫停时一个字节都没写。
+///
+/// # Errors
+/// 目标列不开、中立库读不动时返回 [`Cutoff::Failed`]，被叫停时返回 [`Cutoff::Halted`]。
+pub fn strangers_at(
+    catalog: &Catalog,
+    name: &str,
+    target: &Path,
+    task: &Handle,
+) -> Result<super::Strangers, Cutoff> {
+    task.steps(STRANGERS_STEPS);
+    task.step("读清单")?;
+    let manifest = catalog
+        .manifest(name)
+        .map_err(|error| format!("中立库读不动：{error}"))?;
+    task.step("看一眼目标")?;
+    let actual = super::observe(&RealFs, target).map_err(|error| format!("{error}"))?;
+    Ok(super::strangers(&manifest, &actual))
+}
+
+/// [`strangers_at`] 一共几步。**改了它里头的 `task.step` 就得改这个数。**
+pub const STRANGERS_STEPS: u32 = 2;
+
 /// 这一条线一共几步。**改了下面的 `task.step` 就得改这个数**，不然进度条会走过头。
 /// `tests/task.rs::排差量预览一路报得出走到第几步` 盯着这两个数对不对得上。
 const STEPS: u32 = 4 + PLAN_STEPS;

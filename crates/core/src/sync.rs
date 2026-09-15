@@ -717,6 +717,45 @@ fn settle(canonical: &mut BTreeMap<String, String>, path: &str) -> Option<String
     (real != dir).then(|| format!("{real}/{name}"))
 }
 
+// ── 清单之外（票 `gui-looks-like-the-design/21`）─────────────────────────────
+
+/// 目标上**清单之外**的文件：几个、多大、其中几个元数据读不到。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct Strangers {
+    /// 几个。
+    pub count: u64,
+    /// 共多少字节；元数据读不到的按 0 计。
+    pub bytes: u64,
+    /// 其中元数据读不到的有几个。
+    pub unreadable: u64,
+}
+
+/// 数目标上**清单之外**的文件——目标上一切不在清单里的东西，**落点被占的那几个也算**。
+///
+/// ADR-0015 的原话是「清单之外的一切文件对工具不存在」，那就该按字面数：漏数哪一个，报告都可能说出「目标上没有清单之外的
+/// 文件」而卡上明明有。**只有这一处数法**：计划里那三个数（[`Plan::strangers`] 那几格）与目标设置弹层里那句「目录里已有
+/// N 个文件，它们不在清单里」都从这里数（ADR-0024）。
+#[must_use]
+pub fn strangers(manifest: &Manifest, actual: &TargetState) -> Strangers {
+    let recorded: BTreeSet<&str> = manifest
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+    let mut out = Strangers::default();
+    for target in &actual.files {
+        if recorded.contains(target.path.as_str()) {
+            continue;
+        }
+        out.count += 1;
+        match target.stamp {
+            Some(stamp) => out.bytes += stamp.bytes,
+            None => out.unreadable += 1,
+        }
+    }
+    out
+}
+
 /// 三方对比，排出计划。**纯函数**：不碰磁盘、不碰中立库、不看时钟。
 ///
 /// 三个输入正是**同步**词条里的三方：`desired` 是主库该有的、`manifest` 是清单
@@ -947,16 +986,11 @@ pub fn plan(
     //
     // **落点被占的那几个也算**：它们同样不在清单里、同样一个字节都不碰。漏数它们，
     // 报告就会说出「目标上没有清单之外的文件」而卡上明明有。
-    for (path, target) in &on_target {
-        if recorded.contains_key(path) {
-            continue;
-        }
-        out.strangers += 1;
-        match target.stamp {
-            Some(stamp) => out.stranger_bytes += stamp.bytes,
-            None => out.stranger_unreadable += 1,
-        }
-    }
+    // `strangers` 在这个函数里是上面那张按落点索引的表，数法走模块里那一处。
+    let counted = self::strangers(manifest, actual);
+    out.strangers = counted.count;
+    out.stranger_bytes = counted.bytes;
+    out.stranger_unreadable = counted.unreadable;
 
     steps.sort_by(|a, b| a.act.cmp(&b.act).then_with(|| a.path.cmp(&b.path)));
     out.surprises
