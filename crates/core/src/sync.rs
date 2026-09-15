@@ -1416,6 +1416,8 @@ impl Footprint {
 /// 照它画（拿主意的人 2026-09-15 定：照实际规则，不照稿上的示意）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Landing {
+    /// 那个平台的内容在子库里住哪个**平台目录**（元数据位置由它折出来）。
+    pub directory: String,
     /// ROM 落在哪。
     pub rom: String,
     /// 它那一份前端元数据落在哪。
@@ -1428,6 +1430,7 @@ impl Landing {
     #[must_use]
     pub fn example(adapter: &dyn Adapter, directory: &str, file_name: &str) -> Self {
         Self {
+            directory: directory.to_string(),
             rom: format!("{directory}/{file_name}"),
             metadata: adapter.metadata_path(directory),
         }
@@ -1460,8 +1463,9 @@ impl Footprint {
             None => path::platform_of_key(&first.source)?.to_string(),
         };
         Some(Landing {
-            rom: first.path.clone(),
             metadata: adapter.metadata_path(&directory),
+            directory,
+            rom: first.path.clone(),
         })
     }
 }

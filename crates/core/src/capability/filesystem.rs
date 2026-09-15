@@ -111,6 +111,17 @@ impl Filesystem {
         }
     }
 
+    /// 这份声明**一条约束都不说**吗（不设单文件上限、不设名字与路径长度、不禁字符、没有保留名）——「不作声称」那一份就是。
+    /// 目标设置里「卡是 …」那半句只在它说了点什么时才写（票 `gui-looks-like-the-design/21`）。
+    #[must_use]
+    pub fn claims_nothing(&self) -> bool {
+        self.max_file_bytes.is_none()
+            && self.max_name_chars.is_none()
+            && self.max_path_chars.is_none()
+            && self.forbidden.is_empty()
+            && self.reserved_stems.is_empty()
+    }
+
     /// 这一份放得进去吗；放不进去就说清是哪一条拦下的。
     ///
     /// `path` 是相对子库根的路径（键，`/` 分隔、NFC）；`prefix_chars` 是子库根本身
@@ -177,5 +188,26 @@ impl Filesystem {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capability::Roster;
+
+    #[test]
+    fn 不作声称的文件系统一条约束都没有_真的文件系统有() {
+        // 目标设置里「卡是 …」那半句只在文件系统真有声称时才写（票 `gui-looks-like-the-design/21`）。
+        assert!(Filesystem::unlimited().claims_nothing());
+        let roster = Roster::builtin();
+        for (name, 不作声称) in [("无限制", true), ("exFAT", false), ("FAT32", false)] {
+            let filesystem = roster
+                .filesystems()
+                .iter()
+                .find(|filesystem| filesystem.name == name)
+                .unwrap_or_else(|| panic!("内置名册里该有「{name}」"));
+            assert_eq!(filesystem.claims_nothing(), 不作声称, "{name}");
+        }
     }
 }

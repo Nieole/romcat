@@ -1081,6 +1081,25 @@ impl Catalog {
         Ok(out)
     }
 
+    /// 库里**头一个有平台的变体**（按键排）住在哪个平台目录下：目标设置里前端格式那句说明拿它举例
+    /// （「每个平台一份，例如 GBA.metadata.pegasus.txt」，票 `gui-looks-like-the-design/21`），界面上不写死平台名。
+    /// 目录照键的第二段（`path::platform_of_key`，与收敛、落点同一个口径）；库里一个有平台的变体都没有时是 `None`。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn sample_platform_directory(&self) -> Result<Option<String>, CatalogError> {
+        let key: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT key FROM variant WHERE platform IS NOT NULL ORDER BY key LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|source| self.err(source))?;
+        Ok(key.and_then(|key| path::platform_of_key(&key).map(ToString::to_string)))
+    }
+
     /// 换掉一个子库的**按平台覆盖**：**整份替换**，不是往上叠——目标设置里改回「按档案」的那几行就是没了。
     ///
     /// # Errors

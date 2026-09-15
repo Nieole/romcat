@@ -1424,3 +1424,19 @@ fn 排差量预览时的容量上限照核心那一处判_容量账里带着它(
     场.catalog.put_sublibrary(&掌机).expect("写得进");
     assert_eq!(场.排计划().plan.capacity, Some(58_000_000_000));
 }
+
+#[test]
+fn 库里头一个有平台的变体住在哪个平台目录_目标设置里那句说明拿它举例() {
+    // 票 `gui-looks-like-the-design/21`：前端格式底下那句「每个平台一份，例如 GBA.metadata.pegasus.txt」拿库里真实的头一个平台
+    // 目录举例，界面上不写死平台名。空库说不出例子。
+    let catalog = 现场();
+    assert_eq!(
+        catalog
+            .sample_platform_directory()
+            .expect("读得动")
+            .as_deref(),
+        Some("GB")
+    );
+    let 空库 = Catalog::open_in_memory().expect("能开中立库");
+    assert_eq!(空库.sample_platform_directory().expect("读得动"), None);
+}
