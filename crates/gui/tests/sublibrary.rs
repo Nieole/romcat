@@ -3605,3 +3605,78 @@ fn 新建子库存下之后提示条写已创建() {
         "新建之后提示条该说已创建：\n{屏上}"
     );
 }
+
+#[test]
+fn 打开目标设置顺带读的选择集与清单外文件数不进任务历史() {
+    // 拿主意的人 2026-09-15 定：打开弹层时顺带跑的小活不进任务历史，跑着时也不摆在任务台那一栏里；人点起来的照旧进。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    let 之前 = 场.app.tasks().history().len();
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    画两帧(&ctx, &mut 场);
+    场.等任务跑完();
+    画两帧(&ctx, &mut 场);
+    场.等任务跑完();
+    assert_eq!(
+        场.app.sublibrary().target_platforms(),
+        Some(vec!["SFC".to_string()]),
+        "前提：选择集读回来了"
+    );
+    历史没多一条(&场, 之前);
+    assert!(场.app.tasks().running().is_none());
+}
+
+#[test]
+fn 前端格式那句照稿写游玩记录和收藏不会被覆盖_两种格式都写() {
+    // 两边都核实过才照稿写（Pegasus 的收藏与游玩时长在它自己的配置目录里；ES-DE 在卡上改过的 gamelist 同步不写回去）。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("前端里的游玩记录和收藏不会被覆盖。"),
+        "\n{屏上}"
+    );
+    场.app.sublibrary_and_site().0.form_mut().format = "ES-Gamelist".to_string();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("前端里的游玩记录和收藏不会被覆盖。"),
+        "\n{屏上}"
+    );
+}
+
+#[test]
+fn 本机磁盘时连接状态行照稿说不设上限按剩余空间计算_容量条照计划里的上限画() {
+    // 测试用的临时目录落在哪种卷上跟机器有关：先问核心它是不是可移动存储，两种情形各钉各的。
+    use romcat_core::sublibrary::target;
+
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    let 可移动 = target::volume(场.卡.path()).removable;
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert_eq!(
+        屏上.contains("本机磁盘不设容量上限时，按剩余空间计算。"),
+        !可移动,
+        "可移动存储 {可移动}：\n{屏上}"
+    );
+    场.app.sublibrary_and_site().0.leave_target_settings();
+    场.求值();
+    let gauge = 场.app.sublibrary().gauge("掌机");
+    let 计划里的 = 场
+        .app
+        .sublibrary()
+        .evaluated("掌机")
+        .and_then(|report| report.fit.known())
+        .map(|room| room.capacity)
+        .expect("卡插着，装不装得下算得出");
+    assert_eq!(
+        gauge.capacity, 计划里的,
+        "容量条的上限该照计划里真用上的那个数"
+    );
+    assert_eq!(gauge.capacity.is_some(), !可移动);
+}

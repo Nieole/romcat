@@ -745,11 +745,17 @@ impl Screen {
                 |room| room.after_bytes.saturating_sub(room.stranger_bytes),
             ),
             strangers: room.as_ref().map(|room| room.stranger_bytes),
-            capacity: self
-                .list
-                .iter()
-                .find(|row| row.name == name)
-                .and_then(|row| row.capacity),
+            // **排过差量、算过容量的照计划里真用上的那个上限画**（`Room::capacity`：按设备容量是卡此刻的总量，本机磁盘不设
+            // 上限时按剩余空间算）——与旁边「超出容量上限」同一个底；都没有时照库里记着的。
+            capacity: room.as_ref().map_or_else(
+                || {
+                    self.list
+                        .iter()
+                        .find(|row| row.name == name)
+                        .and_then(|row| row.capacity)
+                },
+                |room| room.capacity,
+            ),
         }
     }
 
@@ -1443,7 +1449,8 @@ impl Screen {
             .map(|(_, footprint)| footprint.platforms())
     }
 
-    /// 「目标设置…」开着、手上还没有这一台的脚印时，往任务台上排一趟去读（`sync::prepare::footprint`）。读过的、正在读的、
+    /// 「目标设置…」开着、手上还没有这一台的脚印时，往任务台上排一趟**不留历史**的活去读（`sync::prepare::footprint`，
+    /// `Board::queue_quiet`：打开弹层时顺带跑的，不是人点起来的一趟，拿主意的人 2026-09-15 定）。读过的、正在读的、
     /// 这回读失败过的都不重排。**折事实走一遍全库**，所以不在画帧那条线程上读（与 [`Self::evaluate`] 同一条路）。
     fn read_footprint(&mut self, site: &Site, tasks: &mut Tasks) {
         let Some(TargetDialog::Of(name)) = self.target_dialog.clone() else {
@@ -1461,12 +1468,12 @@ impl Screen {
         let id = match site.catalog.read_only() {
             Ok(reader) => {
                 let of = name.clone();
-                tasks.queue(title, move |task| {
+                tasks.queue_quiet(title, move |task| {
                     sync::prepare::footprint(&reader, &of, task)
                         .map(|footprint| Product::Footprint(Box::new(footprint)))
                 })
             }
-            Err(CatalogError::NotOnDisk { .. }) => tasks.run_here(title, |task| {
+            Err(CatalogError::NotOnDisk { .. }) => tasks.run_here_quiet(title, |task| {
                 sync::prepare::footprint(&site.catalog, &name, task)
                     .map(|footprint| Product::Footprint(Box::new(footprint)))
             }),
@@ -1538,7 +1545,7 @@ impl Screen {
         self.counting_failed = None;
     }
 
-    /// 目标设置开着、框里那条路径**此刻在位**、还没数过它时，往任务台上排一趟**只读**数清单外文件
+    /// 目标设置开着、框里那条路径**此刻在位**、还没数过它时，往任务台上排一趟**只读、不留历史**的活数清单外文件
     /// （`sync::prepare::strangers_at`，拿主意的人 2026-09-15 定）。清单是正在改的那一台的；新建时还没有清单，卡上的都算。
     /// 路径的字改了、或者判出来从不在变成在（设备重新连上），数的那一串对不上，就重数。
     fn count_strangers(&mut self, site: &Site, tasks: &mut Tasks) {
@@ -1563,10 +1570,10 @@ impl Screen {
         let title = "数目标上清单之外的文件".to_string();
         let path = PathBuf::from(&text);
         let id = match site.catalog.read_only() {
-            Ok(reader) => tasks.queue(title, move |task| {
+            Ok(reader) => tasks.queue_quiet(title, move |task| {
                 sync::prepare::strangers_at(&reader, &name, &path, task).map(Product::Strangers)
             }),
-            Err(CatalogError::NotOnDisk { .. }) => tasks.run_here(title, |task| {
+            Err(CatalogError::NotOnDisk { .. }) => tasks.run_here_quiet(title, |task| {
                 sync::prepare::strangers_at(&site.catalog, &name, &path, task)
                     .map(Product::Strangers)
             }),
@@ -3836,7 +3843,9 @@ fn format_label(adapter: &str) -> &str {
     }
 }
 
-/// 前端格式底下那一句：**照实际布局写**（拿主意的人 2026-09-15 定，不照稿上的示意）。元数据落在哪由适配器答
+/// 前端格式底下那一句：**照实际布局写**（拿主意的人 2026-09-15 定，不照稿上的示意）。末尾那半句「前端里的游玩记录和收藏不会被
+/// 覆盖」两边都有代码钉着才照稿写：Pegasus 的收藏与游玩时长在它自己的配置目录里，ES-DE 在卡上改过的 gamelist 同步只报不写回
+/// （`crates/core/tests/sync.rs` 那两条）。元数据落在哪由适配器答
 /// （`Adapter::metadata_path`），媒体目录取适配器模块里那两个常量——界面不另写一份文件名。
 fn format_help(adapter: &str) -> String {
     let name = if adapter.trim().is_empty() {
@@ -3851,12 +3860,12 @@ fn format_help(adapter: &str) -> String {
     let metadata = found.metadata_path("平台目录");
     if name.eq_ignore_ascii_case(ES_GAMELIST) {
         format!(
-            "每个平台一份 {metadata}；媒体放在 {} 目录。",
+            "每个平台一份 {metadata}；媒体放在 {} 目录。前端里的游玩记录和收藏不会被覆盖。",
             romcat_core::adapter::gamelist::MEDIA_DIR
         )
     } else {
         format!(
-            "每个平台一份 {metadata}，摊在子库根上；媒体放在 {} 目录。",
+            "每个平台一份 {metadata}，摊在子库根上；媒体放在 {} 目录。前端里的游玩记录和收藏不会被覆盖。",
             romcat_core::adapter::pegasus::MEDIA_DIR
         )
     }
@@ -3888,6 +3897,10 @@ fn connected_line(
         ));
     }
     line.push('。');
+    // 本机磁盘不设上限时按剩余空间算（`Sublibrary::limit_on`，拿主意的人 2026-09-15 照稿定）：照稿说一句。
+    if !volume.removable {
+        line.push_str("本机磁盘不设容量上限时，按剩余空间计算。");
+    }
     if let Some(count) = counted {
         line.push_str(&format!(
             "目录里已有 {} 个文件，它们不在清单里，工具不会改动。",
