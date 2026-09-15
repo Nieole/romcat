@@ -87,6 +87,7 @@ use romcat_core::catalog::sublibrary::RemovedSublibrary;
 use romcat_core::report::{decimal_bytes, human_bytes, thousands};
 use romcat_core::site::Site;
 use romcat_core::sublibrary::report::SelectionReport;
+use romcat_core::sublibrary::target::{self, NameRefusal, Presence, TargetRefusal};
 use romcat_core::sublibrary::{
     BrokenRule, Exception, ExceptionRow, Fit, Gauge, LoadedSelection, Room, Rule, StoredRule,
     Sublibrary, rule,
@@ -134,6 +135,31 @@ enum TargetDialog {
     New,
     /// 卡上「目标设置…」：这一台的草稿。
     Of(String),
+}
+
+/// 目标路径那一格**上一回判的是哪一串、判出来什么**（[`target::vet`]）。
+///
+/// **不在每一帧里判**：判一次要化开路径、看那个卷，挂载点卡住时整个窗口会跟着卡。框里的字、正在改的是哪一台，两样都没变就
+/// 照用上一回的（拿主意的人 2026-09-15 定：只在字改了、或者「选择…」交回来时查一次盘）。
+#[derive(Debug, Clone)]
+struct Vetted {
+    /// 判的是框里哪一串。
+    text: String,
+    /// 判的时候正在改哪一台（新建是 `None`）。
+    editing: Option<String>,
+    /// 判出来什么；中立库读不动时是那句话。
+    verdict: Result<Result<Presence, TargetRefusal>, String>,
+}
+
+/// 名字那一格上一回判的是哪一串、判出来什么（[`target::vet_name`]）。同 [`Vetted`]，只在字变了时再判。
+#[derive(Debug, Clone)]
+struct NameVetted {
+    /// 判的是哪一串。
+    text: String,
+    /// 判的时候正在改哪一台。
+    editing: Option<String>,
+    /// 判出来什么；中立库读不动时是那句话。
+    verdict: Result<Result<(), NameRefusal>, String>,
 }
 
 /// 新建或改一个子库时界面上那份草稿。
@@ -268,6 +294,10 @@ pub struct Screen {
     form: Form,
     /// 「目标设置」那层弹层开没开着、开的是哪一种（[`Self::begin_new`] / [`Self::edit_target`]）。
     target_dialog: Option<TargetDialog>,
+    /// 目标路径那一格上一回判的结果（[`Vetted`]）。
+    vetted: Option<Vetted>,
+    /// 名字那一格上一回判的结果（[`NameVetted`]）。
+    name_vetted: Option<NameVetted>,
     /// **每台设备**的选择集原文：规则（连库里的序号）、读不懂的那几条、例外。
     ///
     /// 每张卡都摆它自己的规则列表（票 `gui-looks-like-the-design/20`），所以一台不落全读回来
@@ -377,6 +407,8 @@ impl Screen {
             syncing: None,
             outcome: None,
             notice: None,
+            vetted: None,
+            name_vetted: None,
             failed: false,
             error: None,
         }
@@ -1304,6 +1336,76 @@ impl Screen {
         }
         self.error = None;
         self.target_dialog = Some(TargetDialog::Of(name.to_string()));
+    }
+
+    /// 目录选择器交回来一个路径（票 `gui-answers-all-six/01` 那条薄封装，[`crate::pick::directory`]）：**填进目标路径那一格，
+    /// 与贴进框里走同一条路**——下一帧照框里的字当场判一遍（[`Self::vet_form`]）。取消（`None`）什么都不动。
+    ///
+    /// 界面上「选择…」交回来走的就是它，测试拿它当那一下（对话框那一层不测，理由在 `pick` 的模块文档里）。
+    pub fn picked_target(&mut self, picked: Option<PathBuf>) {
+        if let Some(path) = picked {
+            self.form.target = romcat_core::path::display(&path);
+        }
+    }
+
+    /// 眼下正在改的是哪一台：「目标设置…」开的那一台；「新建子库」是 `None`；弹层没开时是摊开的那一张
+    /// （原先那块「配目标」面板改的就是摊开那一台，程序里直接调 [`Self::save`] 的照旧这么认）。
+    fn editing(&self) -> Option<String> {
+        match &self.target_dialog {
+            Some(TargetDialog::Of(name)) => Some(name.clone()),
+            Some(TargetDialog::New) => None,
+            None => self.picked.clone(),
+        }
+    }
+
+    /// 草稿里的名字与目标路径**各判一遍**，字与正在改的那一台都没变就照用上一回的（[`Vetted`]、[`NameVetted`]）。
+    /// 判断全在核心（[`target::vet`] / [`target::vet_name`]），这里只记下来。
+    fn vet_form(&mut self, site: &Site) {
+        let editing = self.editing();
+        let text = self.form.target.trim().to_string();
+        if self
+            .vetted
+            .as_ref()
+            .is_none_or(|last| last.text != text || last.editing != editing)
+        {
+            let verdict = target::vet(
+                &site.catalog,
+                &self.workspace,
+                editing.as_deref(),
+                std::path::Path::new(&text),
+            )
+            .map_err(|error| format!("中立库读不动：{error}"));
+            self.vetted = Some(Vetted {
+                text,
+                editing: editing.clone(),
+                verdict,
+            });
+        }
+        let name = self.form.name.trim().to_string();
+        if self
+            .name_vetted
+            .as_ref()
+            .is_none_or(|last| last.text != name || last.editing != editing)
+        {
+            let verdict = target::vet_name(&site.catalog, editing.as_deref(), &name)
+                .map_err(|error| format!("中立库读不动：{error}"));
+            self.name_vetted = Some(NameVetted {
+                text: name,
+                editing,
+                verdict,
+            });
+        }
+    }
+
+    /// 草稿过没过那两道判（[`Self::vet_form`] 之后问）：名字与目标路径都能用才算过。
+    fn form_ready(&self) -> bool {
+        matches!(
+            self.name_vetted.as_ref().map(|vetted| &vetted.verdict),
+            Some(Ok(Ok(())))
+        ) && matches!(
+            self.vetted.as_ref().map(|vetted| &vetted.verdict),
+            Some(Ok(Ok(_)))
+        )
     }
 
     /// 中间那一列：**一台设备一张卡**。
@@ -2335,7 +2437,15 @@ impl Screen {
         let Some(which) = self.target_dialog.clone() else {
             return;
         };
-        let ready = !self.form.name.trim().is_empty() && !self.form.target.trim().is_empty();
+        // **判在画之前**：页脚那颗按不按得动看的是这一帧判出来的（只在字变了时真去判，[`Self::vet_form`]）。
+        self.vet_form(site);
+        let ready = self.form_ready();
+        let target_verdict = self.vetted.as_ref().map(|vetted| vetted.verdict.clone());
+        let name_verdict = self
+            .name_vetted
+            .as_ref()
+            .map(|vetted| vetted.verdict.clone());
+        let mut pick_pressed = false;
         let (title, note, save_label) = match &which {
             TargetDialog::New => (
                 "新建子库".to_string(),
@@ -2364,26 +2474,82 @@ impl Screen {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 let layout = &Tokens::builtin().layout;
+                // 名那一列靠左（设计稿弹层表单）：`add_sized` 会把字摆在格子正中。
+                let field_label = |ui: &mut egui::Ui, label: &str| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(layout.kv_key_width, layout.input_height),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            ui.set_min_size(egui::vec2(layout.kv_key_width, layout.input_height));
+                            ui.label(label);
+                        },
+                    );
+                };
+                // 值那一列底下那一行（设计稿 `.help` / `.err`）：与输入框左边对齐。
+                let under = |ui: &mut egui::Ui, text: &str, error: bool| {
+                    ui.horizontal(|ui| {
+                        ui.add_space(layout.kv_key_width + ui.spacing().item_spacing.x);
+                        if error {
+                            ui.label(
+                                egui::RichText::new(text)
+                                    .small()
+                                    .color(ui.visuals().error_fg_color),
+                            );
+                        } else {
+                            look::help(ui, text);
+                        }
+                    });
+                };
+
+                ui.horizontal(|ui| {
+                    field_label(ui, "名称");
+                    let width = ui.available_width();
+                    look::text_input(
+                        ui,
+                        width,
+                        egui::TextEdit::singleline(&mut form.name)
+                            .hint_text("例如设备型号：RG35XX Plus"),
+                    );
+                });
+                match name_verdict.as_ref() {
+                    Some(Ok(Err(NameRefusal::Empty))) => under(ui, "用来区分不同设备。", false),
+                    Some(Ok(Err(NameRefusal::Taken))) => under(ui, "已经有同名的子库。", true),
+                    Some(Err(why)) => under(ui, why, true),
+                    Some(Ok(Ok(()))) | None => {}
+                }
+
+                ui.horizontal(|ui| {
+                    field_label(ui, "目标路径");
+                    let pick_width = look::button_width(ui, "选择…");
+                    let width = ui.available_width() - pick_width - ui.spacing().item_spacing.x;
+                    look::text_input(
+                        ui,
+                        width,
+                        egui::TextEdit::singleline(&mut form.target)
+                            .font(egui::TextStyle::Monospace)
+                            .hint_text("选择或粘贴路径"),
+                    );
+                    if ui
+                        .button("选择…")
+                        .on_hover_text(crate::pick::FALLBACK_HINT)
+                        .clicked()
+                    {
+                        pick_pressed = true;
+                    }
+                });
+                match target_verdict.as_ref() {
+                    Some(Ok(Err(refusal))) => under(ui, &refusal_line(refusal), true),
+                    Some(Err(why)) => under(ui, why, true),
+                    Some(Ok(Ok(_))) | None => {}
+                }
+
                 for (label, value, hint) in [
-                    ("名称", &mut form.name, "例如设备型号：RG35XX Plus"),
-                    ("目标路径", &mut form.target, "读卡器挂上来的那个目录"),
                     ("前端格式", &mut form.format, "空着就是 Pegasus"),
                     ("容量上限", &mut form.capacity, "如 512GB；空着不设限"),
                     ("能力档案", &mut form.capability, "空着就是不作声称"),
                 ] {
                     ui.horizontal(|ui| {
-                        // 名那一列靠左（设计稿弹层表单）：`add_sized` 会把字摆在格子正中。
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(layout.kv_key_width, layout.input_height),
-                            Layout::left_to_right(Align::Center),
-                            |ui| {
-                                ui.set_min_size(egui::vec2(
-                                    layout.kv_key_width,
-                                    layout.input_height,
-                                ));
-                                ui.label(label);
-                            },
-                        );
+                        field_label(ui, label);
                         let width = ui.available_width();
                         look::text_input(
                             ui,
@@ -2393,6 +2559,11 @@ impl Screen {
                     });
                 }
             });
+        if pick_pressed {
+            // 起点：框里那一串是个目录就从那儿打开，否则交给系统（`pick::directory` 的文档）。
+            let start = PathBuf::from(self.form.target.trim());
+            self.picked_target(crate::pick::directory("选择目标目录", &start));
+        }
         match shown.pressed {
             None => {}
             Some(Pressed::Cancel) => {
@@ -2435,8 +2606,30 @@ impl Screen {
         };
         let name = self.form.name.trim().to_string();
         let target = std::path::PathBuf::from(self.form.target.trim());
-        if let Err(message) = sync::prepare::refuse_target_in_library(&site.catalog, &[], &target) {
-            self.error = Some(message);
+        // **与弹层当场判的是同一道**（[`target::vet`] / [`target::vet_name`]）：页脚那颗按不动时这里本来到不了，
+        // 程序里直接调它的也一样拦下。
+        self.vetted = None;
+        self.name_vetted = None;
+        self.vet_form(site);
+        if !self.form_ready() {
+            let target_line = match self.vetted.as_ref().map(|vetted| &vetted.verdict) {
+                Some(Ok(Err(refusal))) => Some(refusal_line(refusal)),
+                Some(Err(why)) => Some(why.clone()),
+                _ => None,
+            };
+            let name_line = match self.name_vetted.as_ref().map(|vetted| &vetted.verdict) {
+                Some(Ok(Err(NameRefusal::Empty))) => Some("名称没填。".to_string()),
+                Some(Ok(Err(NameRefusal::Taken))) => Some("已经有同名的子库。".to_string()),
+                Some(Err(why)) => Some(why.clone()),
+                _ => None,
+            };
+            self.error = Some(
+                [name_line, target_line]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
             return false;
         }
         let format = if self.form.format.trim().is_empty() {
@@ -3077,6 +3270,24 @@ fn sync_notice(outcome: &Outcome, elapsed: f64) -> String {
         }
     }
     line
+}
+
+/// 目标路径被核心拦下时，弹层里路径底下那一句（设计稿 `probePath`，稿上画了的三句逐字照稿）。
+///
+/// **判断不在这儿**（[`target::vet`]）：这里只把核心交回来的理由说成屏上那句话。
+fn refusal_line(refusal: &TargetRefusal) -> String {
+    match refusal {
+        TargetRefusal::Empty => "通常是 SD 卡或掌机存储的根目录。".to_string(),
+        TargetRefusal::InLibrary { around: false, .. } => {
+            "这个目录在主库的根之内。子库需要写入文件，不能放在只读的主库里。".to_string()
+        }
+        TargetRefusal::InLibrary { around: true, .. } => {
+            "这个目录包含主库的根。子库需要写入文件，不能放在只读的主库里。".to_string()
+        }
+        TargetRefusal::InWorkspace { .. } => "这个目录属于工作目录，请选择其他目录。".to_string(),
+        TargetRefusal::Taken { by } => format!("已被子库「{by}」使用。"),
+        TargetRefusal::NotADirectory => "这条路径是一份文件，不是目录。".to_string(),
+    }
 }
 
 /// 目标设备那个目录不在时那句话：为什么不行、去哪儿办；在就是 `None`。

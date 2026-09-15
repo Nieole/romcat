@@ -1023,8 +1023,9 @@ fn 目标落在主库里当场拦下() {
         }
         screen.save(site);
         let message = screen.error().expect("该被拦下来");
+        // 那句话与目标设置弹层里路径底下那一句是同一句（设计稿 `probePath`，票 `gui-looks-like-the-design/21`）。
         assert!(
-            message.contains("主库只读"),
+            message.contains("只读的主库"),
             "拦下来的理由该说清是主库只读：{message}",
         );
     }
@@ -2920,5 +2921,104 @@ fn 规则行按铅笔只改这一条_更新到子库之后其余规则都在() {
             (2, "平台=GBA".to_string())
         ],
         "「✎」回来换掉的不只是那一条，或者序号变了"
+    );
+}
+
+// ——— 新建子库与目标设置（票 `gui-looks-like-the-design/21`）———
+
+#[test]
+fn 新建子库时路径当场校验_主库里工作目录里被别的子库占着都说清原因_创建子库按不下() {
+    // 设计稿 `probePath` 那三句，逐字照稿；判断在核心库（`sublibrary::target::vet`），这一层只画。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    let 库里 = romcat_core::path::display(&场.库.path().join("SFC"));
+    let 工作目录里 = romcat_core::path::display(&场.工作区.path().join("子库"));
+    let 掌机的 = romcat_core::path::display(场.卡.path());
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    for (目标, 该说) in [
+        (
+            库里,
+            "这个目录在主库的根之内。子库需要写入文件，不能放在只读的主库里。",
+        ),
+        (工作目录里, "这个目录属于工作目录，请选择其他目录。"),
+        (掌机的, "已被子库「掌机」使用。"),
+    ] {
+        {
+            let form = 场.app.sublibrary_and_site().0.form_mut();
+            form.name = "新掌机".to_string();
+            form.target.clone_from(&目标);
+        }
+        let 屏上 = 画两帧(&ctx, &mut 场);
+        assert!(屏上.contains(该说), "路径 {目标} 该说「{该说}」：\n{屏上}");
+        点最后正好那一段(&ctx, "创建子库", |ui| 场.app.ui(ui));
+        assert!(
+            场.app.sublibrary().target_settings_open(),
+            "路径被拦下时按「创建子库」不该关上弹层"
+        );
+        assert_eq!(
+            场.app.sublibrary().list().len(),
+            1,
+            "路径被拦下时不该建出第二台"
+        );
+    }
+}
+
+#[test]
+fn 新建子库时名字已被别的子库用了_当场说出来_建不出同名的也不盖掉原来那一台() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "1GB");
+    let 另一张 = temp_dir("gui-sub-card-2");
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    {
+        let form = 场.app.sublibrary_and_site().0.form_mut();
+        form.name = "掌机".to_string();
+        form.target = romcat_core::path::display(另一张.path());
+    }
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("已经有同名的子库。"),
+        "重名要当场说出来：\n{屏上}"
+    );
+    点最后正好那一段(&ctx, "创建子库", |ui| 场.app.ui(ui));
+    assert!(场.app.sublibrary().target_settings_open());
+    let 掌机 = &场.app.sublibrary().list()[0];
+    assert_eq!(
+        (掌机.capacity, 掌机.target.as_str()),
+        (
+            Some(1_000_000_000),
+            romcat_core::path::display(场.卡.path()).as_str()
+        ),
+        "原来那一台被盖掉了"
+    );
+}
+
+#[test]
+fn 选择目录交回来的路径与贴进框里走同一条路_取消什么都不动() {
+    // 票 `gui-answers-all-six/01` 那条薄封装：对话框那一层不测，交回来之后的那一半在这儿测。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    let 库里 = 场.库.path().join("GBA");
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    场.app
+        .sublibrary_and_site()
+        .0
+        .picked_target(Some(库里.clone()));
+    assert_eq!(
+        场.app.sublibrary_and_site().0.form_mut().target,
+        romcat_core::path::display(&库里),
+        "选中的目录没填进框里"
+    );
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("这个目录在主库的根之内。"),
+        "选中的目录没照贴路径那样当场校验：\n{屏上}"
+    );
+    场.app.sublibrary_and_site().0.picked_target(None);
+    assert_eq!(
+        场.app.sublibrary_and_site().0.form_mut().target,
+        romcat_core::path::display(&库里),
+        "取消选择器把框里的字动了"
     );
 }
