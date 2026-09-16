@@ -750,7 +750,7 @@ impl Aggregate {
                 .add(len);
         }
         // **非游戏资产只数入库的那些**：未纳入管理的目录不成型、不入库，那里的 `bios/` 不算。
-        if observation.placement.in_scope() && observation.non_game_asset {
+        if observation.non_game_asset {
             self.non_game_assets.add(len);
             push_capped(
                 &mut self.non_game_asset_examples,
