@@ -6,9 +6,9 @@
 
 **Blocked by:** 06
 
-**Status:** done
+**Status:** ready-for-agent
 
-收尾证据：基于 `5177b20` 的双轴只读复核未发现 Standards 或 Spec 问题；差异范围为 44 个文件。门禁日志 `/Users/nicoer/dev/game-wt/logs/slot-4-gl27-final-gate.log` 中 fmt、glossary、check、clippy、doc 全绿；`test` 与完整 `cargo test --workspace --all-features --no-fail-fast` 均仅受 Q479 已知真盘失败影响（`romcat-core::sync_run` 5 条、`romcat-gui::layout` 1 个目标）。Q952 保持 open，未改动；其余本票相关挂单按票面已裁定。
+收尾说明：此前证据不完整。完整重复拷贝导出仍有 P1：`FULL_DUPLICATE_PATHS_PER_GROUP` 的有界索引会漏掉第 10001 份路径；需改为按中立库顺序遍历、流式写出后方可恢复 `done`。此前门禁中的 `layout` 失败是并发共享版式偏好竞争，串行 `cargo test -p romcat-gui --features demo --test layout` 已 22 项通过。Q952 保持 open，未改动。
 
 ⚠️ **数不在界面里算**：报告本来就有给界面吃的那一份形态，界面只画它。
 
