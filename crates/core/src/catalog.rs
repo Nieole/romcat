@@ -717,6 +717,7 @@ impl Catalog {
             .set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         // 同 `prepare` 那一句：只读的这一份照样要翻页浏览。
         browse::register_non_game_asset(&twin.conn).map_err(|source| twin.err(source))?;
+        browse::register_duplicate_name(&twin.conn).map_err(|source| twin.err(source))?;
         // **这一份也要等。** WAL 让读与写并行，但写者提交那一刻仍会短暂独占；
         // 默认超时是 0，于是长活那一侧会在扫描提交的那一瞬间拿到一句
         // 「database is locked」而不是等一会儿（同 `Catalog::open` 那条注释）。
@@ -760,6 +761,7 @@ impl Catalog {
         // 函数不落在库文件里，每条连接各挂一次——交得出能浏览的中立库的入口只有这里与
         // `read_only_at`（`stranded_shaping_overrides` 那条临时连接从不浏览，不挂）。
         browse::register_non_game_asset(&catalog.conn).map_err(|source| catalog.err(source))?;
+        browse::register_duplicate_name(&catalog.conn).map_err(|source| catalog.err(source))?;
         // **打开不建库，也不改写一份没建好的库**（挂单 `Q371`）：盘上一个文件却连结构版本那一行
         // 都没有——一个空文件、建到一半断了的那一份——就不是一份建好的中立库。**先核这一行，
         // 再动任何东西**：底下那几句要切 WAL、建表，一旦跑了那个文件就被改写了。只核在不在，

@@ -456,6 +456,25 @@ pub(super) fn register_non_game_asset(conn: &rusqlite::Connection) -> rusqlite::
     )
 }
 
+/// 给重复拷贝导出排序用的确定性键。
+pub(super) fn register_duplicate_name(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    conn.create_scalar_function(
+        "duplicate_name_lower",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let key = ctx
+                .get_raw(0)
+                .as_str()
+                .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
+            Ok(crate::path::file_name_lower(std::path::Path::new(
+                crate::path::file_name_of_key(key),
+            )))
+        },
+    )
+}
+
 /// 把 `LIKE` 的三个元字符转义掉。
 ///
 /// 不转义的话，用户在筛选框里打一个 `%` 就等于「什么都匹配」，打 `_` 会悄悄多匹配一个
