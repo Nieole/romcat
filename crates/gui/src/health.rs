@@ -390,7 +390,7 @@ impl Section {
 
     /// 「导出清单…」那个保存对话框交回来的那一个（`crate::pick::save_file`）：把开着的那一格的明细写成**纯文本**。
     ///
-    /// - **重复拷贝**写的是 [`DuplicateDetails::render_text`]：与 `romcat report --dump-duplicates` 同一份字节。
+    /// - **重复拷贝**当前写入报告保留的有界样例；完整清单由命令行流式导出，浏览明细不承诺列出每一份路径。
     /// - **其余几格**写的是核心库的文本明细（[`HealthReport::render_finding`]）。
     /// - **落点在主库的任何一个根里就拒**，一个字节都不写，那句话画在弹层里（ADR-0004，判据在核心库
     ///   [`Roots::refuse_writing_into`]，命令行问的是同一处）。
