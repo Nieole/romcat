@@ -73,7 +73,7 @@ pub fn classify(status: u16) -> Verdict {
         403 => Verdict::Fatal("这套凭据没有权限（403）"),
         404 => Verdict::Fatal("落点或模型名不存在（404）：`--model-id` 写对了吗"),
         413 => Verdict::Fatal("一个请求装太多了（413）：把 `--model-batch` 调小再来"),
-        _ => Verdict::Fatal("没见过的状态码——停下来问人比接着试安全"),
+        _ => Verdict::Fatal("没见过的状态码——停止后问人比接着试安全"),
     }
 }
 
