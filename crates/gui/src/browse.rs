@@ -2237,15 +2237,21 @@ impl Screen {
         ui: &mut egui::Ui,
         catalog: &Catalog,
     ) -> Option<romcat_core::catalog::browse::WorkRow> {
-        let width = self.card_size.width();
-        let cover = egui::vec2(width, width / Tokens::builtin().layout.card_cover_ratio);
-        let card_height = cover.y + Tokens::builtin().layout.card_info_height;
+        // 设计稿 `.cgrid`：横向 16、纵向 20；不能借全局控件间距，否则卡片墙会挤成表格。
+        const CARD_GAP_X: f32 = 16.0;
+        const CARD_GAP_Y: f32 = 20.0;
+        let min_width = self.card_size.width();
         // 左右留白属于可滚动内容；滚动条本身必须贴着中栏右边界，不能被留白再往里推。
-        let grid_width = (ui.available_width() - 32.0).max(width);
-        let columns = ((grid_width + ui.spacing().item_spacing.x)
-            / (width + ui.spacing().item_spacing.x))
+        let grid_width = (ui.available_width() - 32.0).max(min_width);
+        let columns = ((grid_width + CARD_GAP_X) / (min_width + CARD_GAP_X))
             .floor()
             .max(1.0) as u64;
+        // 与设计稿 `repeat(auto-fill, minmax(--cw, 1fr))` 同义：档位是最小宽度，余宽由
+        // 当前行的所有卡均分。否则第三张卡后会留下比右侧留白大得多的一块空区。
+        let width = (grid_width - CARD_GAP_X * (columns - 1) as f32) / columns as f32;
+        let cover = egui::vec2(width, width / Tokens::builtin().layout.card_cover_ratio);
+        let card_height = cover.y + Tokens::builtin().layout.card_info_height;
+        let card_row_height = card_height + CARD_GAP_Y;
         let card_rows = self.card_window.total().div_ceil(columns) as usize;
         let mut opened = None;
         if self.group_cards {
@@ -2288,11 +2294,12 @@ impl Screen {
                 ui.add_space(look::step(1));
             }
         }
-        egui::ScrollArea::vertical().id_salt("卡片墙").show_rows(
-            ui,
-            card_height,
-            card_rows,
-            |ui, visible| {
+        // `ScrollArea` 默认按内容收缩；卡片恰好排满三列时会把滚动轨留在第三张卡旁边，
+        // 看起来像中栏右侧凭空多了一片空白。两轴都禁止收缩，轨道才会贴到详情栏分隔线。
+        egui::ScrollArea::vertical()
+            .id_salt("卡片墙")
+            .auto_shrink([false, false])
+            .show_rows(ui, card_row_height, card_rows, |ui, visible| {
                 if self.group_cards {
                     let first = visible.start as u64 * columns;
                     if let Some(row) = self.card_window.row(catalog, first) {
@@ -2318,6 +2325,7 @@ impl Screen {
                 for card_row in visible {
                     ui.horizontal(|ui| {
                         ui.add_space(16.0);
+                        ui.spacing_mut().item_spacing.x = CARD_GAP_X;
                         for column in 0..columns {
                             let index = card_row as u64 * columns + column;
                             let Some(row) = self.card_window.row(catalog, index).cloned() else {
@@ -2403,8 +2411,7 @@ impl Screen {
                         }
                     });
                 }
-            },
-        );
+            });
         opened
     }
 
