@@ -528,15 +528,65 @@ impl Shelf {
                 crate::tokens::Tokens::builtin().radius.medium,
                 texture,
             ),
-            None => title_card(
+            None => browse_title_card(
                 ui,
                 size,
                 title,
                 row.platforms.first().map_or("", String::as_str),
-                ui.visuals().panel_fill,
             ),
         }
     }
+}
+
+/// 浏览卡片墙的无封面字卡。它与详情头上的小字卡不是同一版式：卡片墙里的它必须像一张
+/// 可以浏览的封面，有留白的标题区、来源说明与大号平台水印，而非缩略图被放大后的灰块。
+fn browse_title_card(ui: &mut egui::Ui, size: egui::Vec2, title: &str, platform: &str) {
+    let tokens = crate::tokens::Tokens::builtin();
+    let radius = tokens.radius.large;
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let color = tokens.color.platform.of(platform);
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(
+        rect,
+        radius,
+        ui.visuals()
+            .faint_bg_color
+            .lerp_to_gamma(color, tokens.mix.title_card_tint),
+    );
+    top_band(&painter, rect, radius, tokens.layout.title_card_band, color);
+
+    // 空出上半的呼吸感：右上角的平台与中文标签由卡片视图叠上来，标题从中段开始，
+    // 才不会和它们挤成一团。
+    let title_top = (size.y * 0.30).floor();
+    let mut title_job = egui::text::LayoutJob::simple(
+        title.to_owned(),
+        egui::FontId::new(tokens.font.size_cover_title, crate::font::strong_family()),
+        ui.visuals().strong_text_color(),
+        rect.width() - 26.0,
+    );
+    title_job.wrap.max_rows = 4;
+    title_job.wrap.break_anywhere = true;
+    painter.galley(
+        rect.min + egui::vec2(13.0, title_top),
+        painter.layout_job(title_job),
+        ui.visuals().strong_text_color(),
+    );
+    painter.text(
+        rect.left_bottom() + egui::vec2(13.0, -15.0),
+        egui::Align2::LEFT_BOTTOM,
+        "暂无封面",
+        egui::FontId::proportional(tokens.font.size_small),
+        ui.visuals().weak_text_color(),
+    );
+    painter.text(
+        egui::pos2(rect.right() + 4.0, rect.bottom() + 16.0),
+        egui::Align2::RIGHT_BOTTOM,
+        platform,
+        egui::FontId::new(tokens.font.size_cover_mark, crate::font::strong_family()),
+        color.gamma_multiply(tokens.mix.watermark_opacity),
+    );
+    clear_bottom_corners(&painter, rect, f32::from(radius), ui.visuals().panel_fill);
+    outline(ui, rect, radius);
 }
 
 impl Gallery {

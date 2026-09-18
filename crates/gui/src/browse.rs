@@ -133,6 +133,63 @@ impl CardSize {
     }
 }
 
+/// 卡面右上角的身份叠层与底边置信度线。它们压在封面上，而不是占用信息区；这是卡片
+/// 能先被视觉扫描、再读文字的关键层次。
+fn paint_card_overlay(
+    ui: &egui::Ui,
+    card: egui::Rect,
+    cover: egui::Vec2,
+    row: &romcat_core::catalog::browse::WorkRow,
+) {
+    let cover = egui::Rect::from_min_size(card.min, cover);
+    let painter = ui.painter_at(cover);
+    let tokens = Tokens::builtin();
+    let platform = row.platforms.first().map_or("未知", String::as_str);
+    let color = tokens.color.platform.of(platform);
+    let font = egui::FontId::new(tokens.font.size_caption_plus, font::strong_family());
+    let galley = painter.layout_no_wrap(platform.to_owned(), font.clone(), egui::Color32::WHITE);
+    let badge = egui::Rect::from_min_size(
+        egui::pos2(cover.right() - galley.size().x - 14.0, cover.top() + 8.0),
+        galley.size() + egui::vec2(12.0, 6.0),
+    );
+    painter.rect_filled(badge, tokens.radius.small, color);
+    painter.galley(
+        badge.center() - galley.size() / 2.0,
+        galley,
+        egui::Color32::WHITE,
+    );
+    if !row.chinese.is_empty() {
+        let text = row.chinese.join(" / ");
+        let galley = painter.layout_no_wrap(
+            text,
+            egui::FontId::proportional(tokens.font.size_caption_plus),
+            ui.visuals().strong_text_color(),
+        );
+        let badge = egui::Rect::from_min_size(
+            egui::pos2(cover.right() - galley.size().x - 14.0, cover.top() + 34.0),
+            galley.size() + egui::vec2(12.0, 6.0),
+        );
+        painter.rect_filled(
+            badge,
+            tokens.radius.small,
+            ui.visuals().window_fill.gamma_multiply(0.85),
+        );
+        painter.galley(
+            badge.center() - galley.size() / 2.0,
+            galley,
+            ui.visuals().strong_text_color(),
+        );
+    }
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(cover.left(), cover.bottom() - tokens.layout.tier_bar),
+            cover.right_bottom(),
+        ),
+        0.0,
+        look::tier_color(row.tier(), ui.visuals()),
+    );
+}
+
 /// 界面上人工写下的叫法，**依据**里写这一句。
 ///
 /// 没有依据的结论事后无法复核（ADR-0002）。人工写的那条依据只能是「谁在哪儿写的」，
@@ -2038,50 +2095,61 @@ impl Screen {
                 ui.set_width(ui.available_width());
                 ui.spacing_mut().item_spacing =
                     egui::vec2(tokens.space.list_bar_gap, look::step(0));
-                ui.horizontal_wrapped(|ui| {
-                    look::section(ui, "列表");
-                    if ui.button("表格视图").clicked() {
-                        self.view = BrowseView::Table;
-                    }
-                    if ui.button("卡片视图").clicked() {
-                        self.view = BrowseView::Cards;
-                    }
-                    if self.view == BrowseView::Table {
-                        ui.checkbox(
-                            &mut self.list_covers,
-                            egui::RichText::new("在每行开头显示封面")
-                                .size(look::font_size(ui.ctx(), tokens.font.size_small_plus)),
-                        );
-                    } else {
-                        if ui.checkbox(&mut self.group_cards, "按平台分组").changed()
-                            && self.group_cards
-                        {
-                            // 分组的次序由中立库排序，不能只把当前页的卡片在界面里重排。
-                            self.query.order = romcat_core::catalog::browse::WorkOrder::Platform;
+                ui.vertical(|ui| {
+                    // 第一层只回答“看什么、共有多少”，让视图切换与集合规模一眼成组。
+                    ui.horizontal(|ui| {
+                        look::section(ui, "列表");
+                        if ui.button("表格视图").clicked() {
+                            self.view = BrowseView::Table;
                         }
-                        ui.checkbox(&mut self.only_covers, "只显示有封面的");
-                        for (size, label) in [
-                            (CardSize::Small, "小"),
-                            (CardSize::Medium, "中"),
-                            (CardSize::Large, "大"),
-                        ] {
-                            if ui.selectable_label(self.card_size == size, label).clicked() {
-                                self.card_size = size;
+                        if ui.button("卡片视图").clicked() {
+                            self.view = BrowseView::Cards;
+                        }
+                        let 宽 = 这一句.size().x;
+                        let 剩 = ui.available_size_before_wrap().x;
+                        if 宽 < 剩 {
+                            ui.add_space((剩 - 宽).floor());
+                        }
+                        ui.label(这一句.clone());
+                    });
+                    ui.add_space(look::step(1));
+                    // 第二层才是当前呈现方式的控制。卡片不会再和视图、计数争一行。
+                    ui.horizontal_wrapped(|ui| {
+                        if self.view == BrowseView::Table {
+                            ui.checkbox(
+                                &mut self.list_covers,
+                                egui::RichText::new("在每行开头显示封面")
+                                    .size(look::font_size(ui.ctx(), tokens.font.size_small_plus)),
+                            );
+                            look::help(ui, "没有封面的作品显示平台色块");
+                        } else {
+                            look::section(ui, "分组");
+                            if ui.selectable_label(!self.group_cards, "不分组").clicked() {
+                                self.group_cards = false;
                             }
+                            if ui.selectable_label(self.group_cards, "按平台").clicked() {
+                                self.group_cards = true;
+                                // 分组的次序由中立库排序，不能只把当前页的卡片在界面里重排。
+                                self.query.order =
+                                    romcat_core::catalog::browse::WorkOrder::Platform;
+                            }
+                            look::section(ui, "大小");
+                            for (size, label) in [
+                                (CardSize::Small, "小"),
+                                (CardSize::Medium, "中"),
+                                (CardSize::Large, "大"),
+                            ] {
+                                if ui.selectable_label(self.card_size == size, label).clicked() {
+                                    self.card_size = size;
+                                }
+                            }
+                            ui.checkbox(&mut self.only_covers, "只显示有封面的");
+                            look::help(ui, "没有封面的作品显示平台色块");
                         }
-                    }
-                    // 稿上这句后半截是「双击一行打开作品详情」：作品详情页还没有，先不说。
-                    look::help(ui, "没有封面的作品显示平台色块");
+                    });
                     if let Some(说的) = self.shelf.error() {
                         ui.colored_label(ui.visuals().error_fg_color, 说的);
                     }
-                    // 右端那一句：先量出它多宽、空出这一行剩下那一截再摆；摆不下就折到下一行的行首。
-                    let 宽 = 这一句.size().x;
-                    let 剩 = ui.available_size_before_wrap().x;
-                    if 宽 < 剩 {
-                        ui.add_space((剩 - 宽).floor());
-                    }
-                    ui.label(这一句);
                 });
             })
             .response
@@ -2111,100 +2179,113 @@ impl Screen {
             .max(1.0) as u64;
         let card_rows = self.card_window.total().div_ceil(columns) as usize;
         let mut opened = None;
-        egui::ScrollArea::vertical().id_salt("卡片墙").show_rows(
-            ui,
-            card_height,
-            card_rows,
-            |ui, visible| {
-                for card_row in visible {
-                    if self.group_cards {
-                        let first = card_row as u64 * columns;
-                        if let Some(row) = self.card_window.row(catalog, first) {
-                            ui.label(font::strong(
-                                row.platforms.first().map_or("未知", String::as_str),
-                            ));
-                        }
-                    }
-                    ui.horizontal(|ui| {
-                        for column in 0..columns {
-                            let index = card_row as u64 * columns + column;
-                            let Some(row) = self.card_window.row(catalog, index).cloned() else {
-                                break;
-                            };
-                            let title = row
-                                .display
-                                .clone()
-                                .or_else(|| row.title(&self.rules))
-                                .unwrap_or_else(|| row.name.clone());
-                            let (rect, response) = ui.allocate_exact_size(
-                                egui::vec2(
-                                    width,
-                                    cover.y + Tokens::builtin().layout.card_info_height,
-                                ),
-                                egui::Sense::click(),
-                            );
-                            // 这不是一块只能点鼠标的画布。把整张卡申报为按钮，egui 才会
-                            // 把它放进 Tab 顺序，也让辅助技术能读出它是什么作品。
-                            response.widget_info(|| {
-                                egui::WidgetInfo::selected(
-                                    egui::WidgetType::Button,
-                                    true,
-                                    self.picked.contains(&row.anchor),
-                                    &title,
-                                )
-                            });
-                            let mut card = ui.new_child(
-                                egui::UiBuilder::new()
-                                    .max_rect(rect)
-                                    .layout(Layout::top_down(Align::Min)),
-                            );
-                            self.shelf.card(&mut card, cover, &row, &title);
-                            card.add(egui::Label::new(font::strong(&title)).truncate());
-                            card.weak(format!(
-                                "{} · {}",
-                                row.platforms.join(" / "),
-                                row.year.as_deref().unwrap_or("年份未知")
-                            ));
-                            if !row.chinese.is_empty() {
-                                look::chip(
-                                    &mut card,
-                                    look::tier_tone(row.tier()),
-                                    &row.chinese.join(" / "),
-                                );
-                            }
-                            card.weak(format!(
-                                "{} 个变体 · {}",
-                                thousands(row.variants),
-                                row.confidence_label()
-                            ));
-                            let chosen = self.picked.contains(&row.anchor);
-                            if response.hovered() || chosen {
-                                let mut on = chosen;
-                                let check = card.checkbox(&mut on, "选择");
-                                if check.changed() {
-                                    self.picked.toggle(&row.anchor);
+        egui::Frame::new()
+            .inner_margin(egui::Margin::symmetric(16, 14))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt("卡片墙").show_rows(
+                    ui,
+                    card_height,
+                    card_rows,
+                    |ui, visible| {
+                        for card_row in visible {
+                            if self.group_cards {
+                                let first = card_row as u64 * columns;
+                                if let Some(row) = self.card_window.row(catalog, first) {
+                                    ui.label(font::strong(
+                                        row.platforms.first().map_or("未知", String::as_str),
+                                    ));
                                 }
                             }
-                            if response.clicked() {
-                                response.request_focus();
-                                opened = Some(row.clone());
-                            }
-                            if response.has_focus()
-                                && ui.input(|input| input.key_pressed(egui::Key::Enter))
-                            {
-                                opened = Some(row.clone());
-                            }
-                            if response.has_focus()
-                                && ui.input(|input| input.key_pressed(egui::Key::Space))
-                            {
-                                self.picked.toggle(&row.anchor);
-                            }
-                            look::focus_ring(ui.ctx(), ui.clip_rect(), &response);
+                            ui.horizontal(|ui| {
+                                for column in 0..columns {
+                                    let index = card_row as u64 * columns + column;
+                                    let Some(row) = self.card_window.row(catalog, index).cloned()
+                                    else {
+                                        break;
+                                    };
+                                    let title = row
+                                        .display
+                                        .clone()
+                                        .or_else(|| row.title(&self.rules))
+                                        .unwrap_or_else(|| row.name.clone());
+                                    let (rect, response) = ui.allocate_exact_size(
+                                        egui::vec2(
+                                            width,
+                                            cover.y + Tokens::builtin().layout.card_info_height,
+                                        ),
+                                        egui::Sense::click(),
+                                    );
+                                    // 这不是一块只能点鼠标的画布。把整张卡申报为按钮，egui 才会
+                                    // 把它放进 Tab 顺序，也让辅助技术能读出它是什么作品。
+                                    response.widget_info(|| {
+                                        egui::WidgetInfo::selected(
+                                            egui::WidgetType::Button,
+                                            true,
+                                            self.picked.contains(&row.anchor),
+                                            &title,
+                                        )
+                                    });
+                                    let mut card = ui.new_child(
+                                        egui::UiBuilder::new()
+                                            .max_rect(rect)
+                                            .layout(Layout::top_down(Align::Min)),
+                                    );
+                                    self.shelf.card(&mut card, cover, &row, &title);
+                                    paint_card_overlay(&card, rect, cover, &row);
+                                    card.add_space(look::step(2));
+                                    // 卡面里可以有标题，卡面外仍要有稳定的文字区：滚动时才不会只剩
+                                    // 一大片色块，也让有封面与无封面卡的扫描节奏一致。
+                                    card.add(egui::Label::new(font::strong(&title)).truncate());
+                                    card.weak(format!(
+                                        "{} · {} 个变体 · {}",
+                                        row.year.as_deref().unwrap_or("年份未知"),
+                                        thousands(row.variants),
+                                        human_bytes(row.bytes)
+                                    ));
+                                    card.horizontal(|ui| {
+                                        ui.colored_label(
+                                            look::tier_color(row.tier(), ui.visuals()),
+                                            row.confidence_label(),
+                                        );
+                                    });
+                                    let chosen = self.picked.contains(&row.anchor);
+                                    if response.hovered() || chosen {
+                                        let mut on = chosen;
+                                        let check_rect = egui::Rect::from_min_size(
+                                            rect.min + egui::vec2(8.0, 8.0),
+                                            egui::vec2(52.0, 22.0),
+                                        );
+                                        let mut check_ui = ui.new_child(
+                                            egui::UiBuilder::new()
+                                                .max_rect(check_rect)
+                                                .layout(Layout::left_to_right(Align::Center)),
+                                        );
+                                        let check = check_ui.checkbox(&mut on, "选择");
+                                        if check.changed() {
+                                            self.picked.toggle(&row.anchor);
+                                        }
+                                    }
+                                    if response.clicked() {
+                                        response.request_focus();
+                                        opened = Some(row.clone());
+                                    }
+                                    if response.has_focus()
+                                        && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                                    {
+                                        opened = Some(row.clone());
+                                    }
+                                    if response.has_focus()
+                                        && ui.input(|input| input.key_pressed(egui::Key::Space))
+                                    {
+                                        self.picked.toggle(&row.anchor);
+                                    }
+                                    look::focus_ring(ui.ctx(), ui.clip_rect(), &response);
+                                }
+                            });
                         }
-                    });
-                }
-            },
-        );
+                    },
+                );
+            });
         opened
     }
 
