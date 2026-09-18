@@ -198,6 +198,7 @@ impl App {
         // **版式先读出来**：面板尺寸要赶在开窗第一帧画面板之前塞进 egui 那张表里
         // （[`layout::Layout::seed`]），晚一帧人就会看见面板从默认宽度跳一下。
         let layout = layout::Layout::load(&workspace);
+        browse.restore_view_preferences(&layout);
         // **库屏那几块收着没有**也住在这份版式里（票 `gui-looks-like-the-design/06`）：开窗之前交给库屏。
         for fold in layout::Fold::ALL {
             roots.set_folded(fold, layout.folded(fold));
@@ -724,6 +725,7 @@ impl App {
         for fold in layout::Fold::ALL {
             self.layout.set_folded(fold, self.roots.folded(fold));
         }
+        self.browse.save_view_preferences(&mut self.layout);
         // **画完了才问面板有多宽**：这一帧的边界是刚才那几句 `show` 定下来的。
         self.layout.harvest(ui.ctx());
         // **手松开了才写盘**：拖的过程中每帧写一次是六十次写盘，而那六十次里有

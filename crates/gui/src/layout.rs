@@ -71,6 +71,7 @@ pub enum Side {
 
 impl Side {
     /// 这条边界拖的是这个尺寸的哪一维。
+    /// 读取一个呈现偏好；缺席就由调用方使用自己的默认值。
     #[must_use]
     pub fn of(self, size: egui::Vec2) -> f32 {
         match self {
@@ -438,6 +439,9 @@ pub struct Layout {
     rail_collapsed: bool,
     /// 上一次真写进文件的那一份里左栏收没收起。
     saved_rail_collapsed: bool,
+    /// 不属于某条边界、但同样只影响界面呈现的偏好。与面板尺寸共用同一份可删除文件。
+    preferences: BTreeMap<String, String>,
+    saved_preferences: BTreeMap<String, String>,
     /// 上一次写盘出的错。**不静默吞掉**：吞了的话人只看见「拖了半天，下次全忘」。
     error: Option<String>,
 }
@@ -455,6 +459,7 @@ impl Layout {
         let collapsed = parse_collapsed(&text);
         let folded = parse_folds(&text);
         let rail_collapsed = parse_rail(&text);
+        let preferences = parse_preferences(&text);
         Self {
             path,
             saved: sizes.clone(),
@@ -465,6 +470,8 @@ impl Layout {
             folded,
             rail_collapsed,
             saved_rail_collapsed: rail_collapsed,
+            saved_preferences: preferences.clone(),
+            preferences,
             error: None,
         }
     }
@@ -485,6 +492,17 @@ impl Layout {
     #[must_use]
     pub fn folded(&self, fold: Fold) -> bool {
         self.folded.contains(fold.id)
+    }
+
+    /// 读取一个呈现偏好；缺席就由调用方使用自己的默认值。
+    #[must_use]
+    pub fn preference(&self, key: &str) -> Option<&str> {
+        self.preferences.get(key).map(String::as_str)
+    }
+
+    /// 记下一项呈现偏好，随后由 [`Self::flush`] 与版式一并写盘。
+    pub fn set_preference(&mut self, key: &str, value: &str) {
+        self.preferences.insert(key.to_owned(), value.to_owned());
     }
 
     /// 记下库屏上这一块收着还是摊开。**只改内存**：落盘照旧由 [`Self::flush`] 在手松开之后做。
@@ -588,6 +606,7 @@ impl Layout {
             && self.collapsed == self.saved_collapsed
             && self.folded == self.folded_saved
             && self.rail_collapsed == self.saved_rail_collapsed
+            && self.preferences == self.saved_preferences
         {
             return;
         }
@@ -597,6 +616,7 @@ impl Layout {
         self.saved_collapsed = self.collapsed.clone();
         self.folded_saved = self.folded.clone();
         self.saved_rail_collapsed = self.rail_collapsed;
+        self.saved_preferences = self.preferences.clone();
         self.error = write(&self.path, &self.render()).err();
     }
 
@@ -630,8 +650,23 @@ impl Layout {
         if self.rail_collapsed {
             out.push_str(&format!("{RAIL} = {RAIL_COLLAPSED}\n"));
         }
+        for (key, value) in &self.preferences {
+            out.push_str(&format!("视图·{key} = {value}\n"));
+        }
         out
     }
+}
+
+fn parse_preferences(text: &str) -> BTreeMap<String, String> {
+    text.lines()
+        .filter_map(|line| line.trim().split_once('='))
+        .filter_map(|(key, value)| {
+            key.trim()
+                .strip_prefix("视图·")
+                .filter(|key| !key.is_empty())
+                .map(|key| (key.to_owned(), value.trim().to_owned()))
+        })
+        .collect()
 }
 
 /// 收起状态那一行的名字：边界的名字后面缀上它，`筛选 收起 = 是`。

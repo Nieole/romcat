@@ -453,6 +453,17 @@ impl Shelf {
         self.error.as_deref()
     }
 
+    /// 这行的封面是否已经查明；`None` 表示这一帧尚未向核心库询问。
+    #[must_use]
+    pub fn has_cover(&self, row: &WorkRow) -> Option<bool> {
+        self.covers.get(&row.anchor).map(Option::is_some)
+    }
+
+    /// 记录一张当前可见卡片，交给下一帧的 [`Self::sync`] 查询封面。
+    pub fn note(&mut self, row: &WorkRow) {
+        self.seen.push(row.clone());
+    }
+
     /// **画完表之后每帧一次**：这一帧新画到、还没问过的那几行去问核心库要封面，
     /// 画到的那几行要的图交给后台解。
     ///
@@ -503,6 +514,27 @@ impl Shelf {
         match item.and_then(|item| self.gallery.texture(item)) {
             Some(texture) => paint_cover(ui, size, tokens.radius.small, texture),
             None => platform_block(ui, size, row.platforms.first().map_or("", String::as_str)),
+        }
+    }
+
+    /// 卡片视图的封面：仍然由核心库挑哪一张、仍然走这一份后台解码池；没有封面时画字卡。
+    pub(crate) fn card(&mut self, ui: &mut egui::Ui, size: egui::Vec2, row: &WorkRow, title: &str) {
+        self.seen.push(row.clone());
+        let item = self.covers.get(&row.anchor).and_then(Option::as_ref);
+        match item.and_then(|item| self.gallery.texture(item)) {
+            Some(texture) => paint_cover(
+                ui,
+                size,
+                crate::tokens::Tokens::builtin().radius.medium,
+                texture,
+            ),
+            None => title_card(
+                ui,
+                size,
+                title,
+                row.platforms.first().map_or("", String::as_str),
+                ui.visuals().panel_fill,
+            ),
         }
     }
 }
