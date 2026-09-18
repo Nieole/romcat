@@ -24,3 +24,4 @@
 
 - 2026-09-18：已结清 Q803；列表封面、卡片视图、分组、仅封面与卡片大小均保存到工作目录的版式偏好，不写入中立库或子库规则。
 - 验证：`cargo check --workspace --all-features`、`cargo test -p romcat-core --lib catalog::browse --no-fail-fast`、`cargo test -p romcat-gui --test browse '卡片视图' --features demo`、`git diff --check` 均通过。完整 `browse` 测试有一条既有的“未关联作品路径尾部”断言失败，单独复跑同样失败，与本票无关。
+- 2026-09-18：按设计复核后补齐卡片/表格的选中态、排序下拉、封面覆盖率、平台组头与中栏滚动条锚点；移除了“没有封面的作品显示平台色块”提示。`browse/cards-dark` 已接入截图门；本机沙箱没有 WGPU 适配器，不能重批该 PNG（`No adapter found`），其余卡片、核心与工作区检查通过。

@@ -772,6 +772,8 @@ enum 浏览态 {
     筛空,
     /// 左右两栏都收着（从工作目录的版式偏好读出来的），点一下那一行认不出作品的。
     两栏收起,
+    /// 卡片墙：按平台分组，混合有封面和无封面的字卡。
+    卡片,
 }
 
 /// 那一行认不出作品的（长路径那一个）元数据那一格写着的字：一条候选都没有、一样元数据都没采到。
@@ -788,6 +790,9 @@ fn 拍浏览(名字: &str, 主题: Theme, 态: 浏览态) {
         return;
     }
     let 浏览现场 { mut app, 目录 } = 浏览现场(态 == 浏览态::两栏收起);
+    if 态 == 浏览态::卡片 {
+        app.browse_and_site().0.show_cards();
+    }
     if 态 == 浏览态::筛空 {
         let (browse, _) = app.browse_and_site();
         browse.query_mut().platform = Some(PlatformFilter::from_label("PS2"));
@@ -802,7 +807,7 @@ fn 拍浏览(名字: &str, 主题: Theme, 态: 浏览态) {
             按(&mut harness, "在每行开头显示封面");
             按(&mut harness, 点开的作品那一行);
         }
-        浏览态::筛空 => {}
+        浏览态::筛空 | 浏览态::卡片 => {}
     }
     控件都落在所在那一栏里(&harness, 名字);
     if 态 != 浏览态::筛空 {
@@ -1079,6 +1084,11 @@ fn 浏览_两栏收起_浅色() {
 #[test]
 fn 浏览_两栏收起_暗色() {
     拍浏览("browse/collapsed-dark", Theme::Dark, 浏览态::两栏收起);
+}
+
+#[test]
+fn 浏览_卡片_暗色() {
+    拍浏览("browse/cards-dark", Theme::Dark, 浏览态::卡片);
 }
 
 // ——— 库 ———
