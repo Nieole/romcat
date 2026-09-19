@@ -141,14 +141,13 @@ impl CardSize {
     }
 }
 
-/// 卡面右上角的身份叠层与（仅真封面有的）底边置信度线。它们压在封面上，而不是占用信息区；这是卡片
+/// 卡面右上角的身份叠层与底边置信度线。它们压在封面上，而不是占用信息区；这是卡片
 /// 能先被视觉扫描、再读文字的关键层次。
 fn paint_card_overlay(
     ui: &egui::Ui,
     card: egui::Rect,
     cover: egui::Vec2,
     row: &romcat_core::catalog::browse::WorkRow,
-    has_cover: bool,
     chosen: bool,
 ) {
     let cover = egui::Rect::from_min_size(card.min, cover);
@@ -190,16 +189,19 @@ fn paint_card_overlay(
             ui.visuals().strong_text_color(),
         );
     }
-    if has_cover {
-        painter.rect_filled(
-            egui::Rect::from_min_max(
-                egui::pos2(cover.left(), cover.bottom() - tokens.layout.tier_bar),
-                cover.right_bottom(),
-            ),
-            0.0,
-            look::tier_color(row.tier(), ui.visuals()),
-        );
-    }
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(cover.left(), cover.bottom() - tokens.layout.tier_bar),
+            cover.right_bottom(),
+        ),
+        egui::CornerRadius {
+            nw: 0,
+            ne: 0,
+            sw: tokens.radius.medium,
+            se: tokens.radius.medium,
+        },
+        look::tier_color(row.tier(), ui.visuals()),
+    );
     if chosen {
         painter.rect_stroke(
             card.expand(1.0),
@@ -2365,8 +2367,7 @@ impl Screen {
                             );
                             self.shelf.card(&mut card, cover, &row, &title);
                             let chosen = self.picked.contains(&row.anchor);
-                            let has_cover = self.shelf.has_cover(&row).unwrap_or(false);
-                            paint_card_overlay(&card, rect, cover, &row, has_cover, chosen);
+                            paint_card_overlay(&card, rect, cover, &row, chosen);
                             card.add_space(look::step(2));
                             // 卡面里可以有标题，卡面外仍要有稳定的文字区：滚动时才不会只剩
                             // 一大片色块，也让有封面与无封面卡的扫描节奏一致。
@@ -2385,23 +2386,49 @@ impl Screen {
                             });
                             // 选中态只突出整张卡；勾选框只在鼠标靠近时出现，避免它变成第二个
                             // 常驻的选中标记。
+                            let mut 点了选择 = false;
                             if response.hovered() {
-                                let mut on = chosen;
                                 let check_rect = egui::Rect::from_min_size(
                                     rect.min + egui::vec2(8.0, 8.0),
-                                    egui::vec2(52.0, 22.0),
+                                    egui::vec2(22.0, 22.0),
                                 );
-                                let mut check_ui = ui.new_child(
-                                    egui::UiBuilder::new()
-                                        .max_rect(check_rect)
-                                        .layout(Layout::left_to_right(Align::Center)),
+                                let check_fill = if chosen {
+                                    ui.visuals().selection.bg_fill
+                                } else {
+                                    ui.visuals().window_fill.gamma_multiply(0.75)
+                                };
+                                ui.painter().rect_filled(
+                                    check_rect,
+                                    Tokens::builtin().radius.small,
+                                    check_fill,
                                 );
-                                let check = check_ui.checkbox(&mut on, "选择");
-                                if check.changed() {
+                                ui.painter().rect_stroke(
+                                    check_rect,
+                                    Tokens::builtin().radius.small,
+                                    ui.visuals().widgets.active.bg_stroke,
+                                    egui::StrokeKind::Inside,
+                                );
+                                if chosen {
+                                    ui.painter().text(
+                                        check_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "✓",
+                                        egui::FontId::proportional(16.0),
+                                        ui.visuals().strong_text_color(),
+                                    );
+                                }
+                                // 选择框压在整卡点击区里；egui 只会把那一下归给先注册的整卡。
+                                // 因此按整卡响应给出的命中坐标二次判定，而不是再注册一个竞争响应。
+                                if response.clicked()
+                                    && response
+                                        .interact_pointer_pos()
+                                        .is_some_and(|pos| check_rect.contains(pos))
+                                {
                                     self.picked.toggle(&row.anchor);
+                                    点了选择 = true;
                                 }
                             }
-                            if response.clicked() {
+                            if response.clicked() && !点了选择 {
                                 response.request_focus();
                                 opened = Some(row.clone());
                             }
