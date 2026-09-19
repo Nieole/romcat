@@ -141,17 +141,18 @@ impl CardSize {
     }
 }
 
-/// 卡面右上角的身份叠层与底边置信度线。它们压在封面上，而不是占用信息区；这是卡片
+/// 卡面右上角的身份叠层与（仅真封面有的）底边置信度线。它们压在封面上，而不是占用信息区；这是卡片
 /// 能先被视觉扫描、再读文字的关键层次。
 fn paint_card_overlay(
     ui: &egui::Ui,
     card: egui::Rect,
     cover: egui::Vec2,
     row: &romcat_core::catalog::browse::WorkRow,
+    has_cover: bool,
     chosen: bool,
 ) {
     let cover = egui::Rect::from_min_size(card.min, cover);
-    let painter = ui.painter_at(cover);
+    let painter = ui.painter_at(card);
     let tokens = Tokens::builtin();
     let platform = row.platforms.first().map_or("未知", String::as_str);
     let color = tokens.color.platform.of(platform);
@@ -189,18 +190,20 @@ fn paint_card_overlay(
             ui.visuals().strong_text_color(),
         );
     }
-    painter.rect_filled(
-        egui::Rect::from_min_max(
-            egui::pos2(cover.left(), cover.bottom() - tokens.layout.tier_bar),
-            cover.right_bottom(),
-        ),
-        0.0,
-        look::tier_color(row.tier(), ui.visuals()),
-    );
+    if has_cover {
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(cover.left(), cover.bottom() - tokens.layout.tier_bar),
+                cover.right_bottom(),
+            ),
+            0.0,
+            look::tier_color(row.tier(), ui.visuals()),
+        );
+    }
     if chosen {
         painter.rect_stroke(
-            cover.expand(1.0),
-            tokens.radius.small,
+            card.expand(1.0),
+            tokens.radius.medium,
             ui.visuals().selection.stroke,
             egui::StrokeKind::Outside,
         );
@@ -2254,6 +2257,8 @@ impl Screen {
         let card_row_height = card_height + CARD_GAP_Y;
         let card_rows = self.card_window.total().div_ceil(columns) as usize;
         let mut opened = None;
+        // `.cgrid` 的上内边距：即使不显示组头，工具条与第一排卡也不能贴在一起。
+        ui.add_space(14.0);
         if self.group_cards {
             let header = self.card_group_header.clone().or_else(|| {
                 self.card_window.row(catalog, 0).map(|row| {
@@ -2360,7 +2365,8 @@ impl Screen {
                             );
                             self.shelf.card(&mut card, cover, &row, &title);
                             let chosen = self.picked.contains(&row.anchor);
-                            paint_card_overlay(&card, rect, cover, &row, chosen);
+                            let has_cover = self.shelf.has_cover(&row).unwrap_or(false);
+                            paint_card_overlay(&card, rect, cover, &row, has_cover, chosen);
                             card.add_space(look::step(2));
                             // 卡面里可以有标题，卡面外仍要有稳定的文字区：滚动时才不会只剩
                             // 一大片色块，也让有封面与无封面卡的扫描节奏一致。
@@ -2377,7 +2383,9 @@ impl Screen {
                                     row.confidence_label(),
                                 );
                             });
-                            if response.hovered() || chosen {
+                            // 选中态只突出整张卡；勾选框只在鼠标靠近时出现，避免它变成第二个
+                            // 常驻的选中标记。
+                            if response.hovered() {
                                 let mut on = chosen;
                                 let check_rect = egui::Rect::from_min_size(
                                     rect.min + egui::vec2(8.0, 8.0),
