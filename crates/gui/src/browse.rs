@@ -150,6 +150,7 @@ fn paint_card_overlay(
     cover_radius: u8,
     row: &romcat_core::catalog::browse::WorkRow,
     chosen: bool,
+    focused: bool,
 ) {
     let cover = egui::Rect::from_min_size(card.min, cover);
     let painter = ui.painter_at(card);
@@ -201,14 +202,9 @@ fn paint_card_overlay(
         cover_radius,
         look::tier_color(row.tier(), ui.visuals()),
     );
-    if chosen {
-        // 选中态属于封面（设计稿 `.cover`），不能把下面的标题、年份和置信度文字一并框住。
-        painter.rect_stroke(
-            cover.expand(4.0),
-            cover_radius.saturating_add(4),
-            egui::Stroke::new(4.0, ui.visuals().selection.bg_fill.gamma_multiply(0.45)),
-            egui::StrokeKind::Outside,
-        );
+    if chosen || focused {
+        // 选中态和键盘焦点都只落在 `.cover`，且只画一圈：整卡焦点框和双层光晕会把
+        // 信息区误认成卡面的一部分。
         painter.rect_stroke(
             cover.expand(1.0),
             cover_radius,
@@ -2378,7 +2374,15 @@ impl Screen {
                             };
                             self.shelf.card(&mut card, cover, &row, &title);
                             let chosen = self.picked.contains(&row.anchor);
-                            paint_card_overlay(&card, rect, cover, cover_radius, &row, chosen);
+                            paint_card_overlay(
+                                &card,
+                                rect,
+                                cover,
+                                cover_radius,
+                                &row,
+                                chosen,
+                                response.has_focus(),
+                            );
                             card.add_space(look::step(2));
                             // 卡面里可以有标题，卡面外仍要有稳定的文字区：滚动时才不会只剩
                             // 一大片色块，也让有封面与无封面卡的扫描节奏一致。
@@ -2453,7 +2457,6 @@ impl Screen {
                             {
                                 self.picked.toggle(&row.anchor);
                             }
-                            look::focus_ring(ui.ctx(), ui.clip_rect(), &response);
                         }
                     });
                 }
