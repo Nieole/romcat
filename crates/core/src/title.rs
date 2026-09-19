@@ -287,8 +287,10 @@ pub struct Chosen {
     pub seam: Option<Seam>,
     /// **依据**。
     pub evidence: String,
-    /// **排序标题**：与显示标题分开生成。
+    /// **排序标题**：与显示标题分开生成。这是**排序键**（折成大写，排的时候不分大小写）。
     pub sort: String,
+    /// 排序标题**屏上印的写法**：与 [`Self::sort`] 同一串字，只收拾空白、照原样大小写（拿主意的人 2026-09-15 定）。
+    pub sort_shown: String,
     /// 排序标题从哪儿来。
     pub sort_from: SortFrom,
     /// 这个作品一共有几个**中文**叫法。大于一时，选定规则真的起了作用。
@@ -360,6 +362,7 @@ pub fn choose(set: &TitleSet, priorities: &Priorities) -> Chosen {
             seam: None,
             evidence: "标题集合是空的，退回作品名".to_string(),
             sort: sort_title(&set.work),
+            sort_shown: tidy_title(&set.work),
             sort_from: if sortable(&set.work) {
                 SortFrom::Display
             } else {
@@ -370,22 +373,23 @@ pub fn choose(set: &TitleSet, priorities: &Priorities) -> Chosen {
     };
 
     // **排序标题独立生成**：显示标题排得动就用它，排不动就另找一个拉丁标题。
-    let (sort, sort_from) = if sortable(&best.value) {
-        (sort_title(&best.value), SortFrom::Display)
+    let (sort_from_text, sort_from) = if sortable(&best.value) {
+        (best.value.as_str(), SortFrom::Display)
     } else if let Some(latin) = set
         .entries
         .iter()
         .filter(|entry| sortable(&entry.value))
         .min_by_key(|entry| rank(entry, priorities))
     {
-        (sort_title(&latin.value), SortFrom::LatinTitle)
+        (latin.value.as_str(), SortFrom::LatinTitle)
     } else if sortable(&set.work) {
-        (sort_title(&set.work), SortFrom::WorkName)
+        (set.work.as_str(), SortFrom::WorkName)
     } else {
         // 一个拉丁标题都没有。退回显示标题，**并让报告点名**——按码位排等于乱排，
         // 悄悄排掉比排不动更糟。
-        (sort_title(&best.value), SortFrom::None)
+        (best.value.as_str(), SortFrom::None)
     };
+    let (sort, sort_shown) = (sort_title(sort_from_text), tidy_title(sort_from_text));
 
     Chosen {
         display: best.value.clone(),
@@ -396,6 +400,7 @@ pub fn choose(set: &TitleSet, priorities: &Priorities) -> Chosen {
         seam: best.seam,
         evidence: best.evidence.clone(),
         sort,
+        sort_shown,
         sort_from,
         chinese_names,
     }
@@ -485,17 +490,20 @@ fn rank(entry: &TitleRow, priorities: &Priorities) -> Rank {
 /// 用的拉丁标题），两处的类型必须一模一样。
 type Rank = (u8, u8, u8, u8, usize, std::cmp::Reverse<u64>, String);
 
+/// 收拾一串标题的空白：去掉两头的、把中间的压成一个，大小写照原样。排序标题**屏上印的写法**就是它
+/// （[`Chosen::sort_shown`]）；排序键再折一道大写（[`sort_title`]）。
+#[must_use]
+pub fn tidy_title(title: &str) -> String {
+    title.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// 折出一个**排序标题**：去掉两头的空白、把中间的空白压成一个、折成大写。
 ///
 /// **只做这三样**。搬走冠词（`The Legend of Zelda` → `Legend of Zelda, The`）是另一种
 /// 口味，不是所有前端都这么排，挂在 D61。
 #[must_use]
 pub fn sort_title(title: &str) -> String {
-    title
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_uppercase()
+    tidy_title(title).to_uppercase()
 }
 
 /// 这一串字排得动吗——也就是**没有汉字与假名**。
@@ -1648,5 +1656,56 @@ mod tests {
         assert!(!sortable("超时空之轮"));
         assert!(!sortable("ポケモン"));
         assert_eq!(sort_title("  Chrono   Trigger "), "CHRONO TRIGGER");
+    }
+
+    /// **排序标题屏上照原样大小写印，排的时候照旧不分大小写**（拿主意的人 2026-09-15 定）：挑出来的那一个另给一份
+    /// 展示用的写法，排序键一个字不动。
+    #[test]
+    fn 排序标题另给一份原样大小写的展示写法_排序键不动() {
+        let priorities = Priorities::builtin();
+        let set = TitleSet {
+            work: "超时空之轮".to_string(),
+            entries: vec![
+                叫法(
+                    "超时空之轮",
+                    Language::Chinese,
+                    TitleKind::Translated,
+                    "中文离线源",
+                ),
+                叫法(
+                    "超时空之轮",
+                    Language::English,
+                    TitleKind::Official,
+                    "No-Intro",
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(at, mut row)| {
+                if at == 1 {
+                    row.value = "  Chrono   Trigger (Japan) ".to_string();
+                }
+                row
+            })
+            .collect(),
+        };
+        let chosen = choose(&set, &priorities);
+        assert_eq!(chosen.sort_from, SortFrom::LatinTitle);
+        assert_eq!(chosen.sort, "CHRONO TRIGGER (JAPAN)", "排序键照旧折成大写");
+        assert_eq!(
+            chosen.sort_shown, "Chrono Trigger (Japan)",
+            "展示用的那一份照原样大小写，只把空白收拾干净"
+        );
+
+        // 集合是空的、退回作品名那一支也一样。
+        let 空的 = TitleSet {
+            work: "Chrono Trigger".to_string(),
+            entries: Vec::new(),
+        };
+        let chosen = choose(&空的, &priorities);
+        assert_eq!(
+            (chosen.sort.as_str(), chosen.sort_shown.as_str()),
+            ("CHRONO TRIGGER", "Chrono Trigger")
+        );
     }
 }

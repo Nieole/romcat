@@ -3476,3 +3476,62 @@ fn 勾了几行时表格上方那一条写着已选几个作品_清除选择一�
         "一行都没选了，「清除选择」还摆着：\n{屏上}"
     );
 }
+
+/// 这一帧里**文字里含着**这几个字的每一段画在哪儿（外框）。
+fn 含着这几个字的每一段(
+    output: &egui::FullOutput,
+    那几个字: &str,
+) -> Vec<(String, egui::Rect)> {
+    fn 找(shape: &egui::epaint::Shape, 那几个字: &str, out: &mut Vec<(String, egui::Rect)>) {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.text().contains(那几个字) => {
+                out.push((
+                    text.galley.text().to_owned(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                ));
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    找(one, 那几个字, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        找(&clipped.shape, 那几个字, &mut out);
+    }
+    out
+}
+
+/// **「N 个作品（共 M）」固定在表格上方那一条的头一行右端，帮助那句自己折行**（协调人 2026-09-15 定，岔路口 1 选 C）：
+/// 三栏摊开时正中那一栏窄，帮助说全了之后不许把数字挤到第二行行首。
+#[test]
+fn 表格上方那一条的作品数摆在头一行右端_帮助自己折行() {
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    跑(&ctx, &mut app, 3);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 列表 = 含着这几个字的每一段(&这一帧, "列表")
+        .into_iter()
+        .find(|(text, _)| text == "列表")
+        .map(|(_, rect)| rect)
+        .expect("表格上方那一条画着「列表」");
+    let (数那一句, 数) = 含着这几个字的每一段(&这一帧, "个作品（共")
+        .into_iter()
+        .next()
+        .expect("表格上方那一条画着作品数那一句");
+    let (_, 帮助) = 含着这几个字的每一段(&这一帧, "没有封面的作品显示平台色块")
+        .into_iter()
+        .next()
+        .expect("表格上方那一条画着帮助");
+    assert!(
+        (数.center().y - 列表.center().y).abs() <= 4.0,
+        "「{数那一句}」没摆在头一行：列表 {列表:?}，那一句 {数:?}"
+    );
+    assert!(
+        数.min.x >= 帮助.max.x,
+        "「{数那一句}」没摆在帮助右边：帮助 {帮助:?}，那一句 {数:?}"
+    );
+}

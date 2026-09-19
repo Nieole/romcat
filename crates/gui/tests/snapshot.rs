@@ -1080,6 +1080,66 @@ fn 浏览_两栏收起_暗色() {
 // 双击打开那条路由 `tests/work.rs` 的「双击主列表一行打开作品详情页…」守着；这里拍的是页面长什么样。
 // 媒体池不在工作目录里，封面照旧是字卡。
 
+/// 详情页那几张的一张封面：竖版、上下两块色，解出来一眼看得出是一张图而不是占位。
+fn 详情页的封面图() -> Vec<u8> {
+    let image = image::RgbImage::from_fn(300, 400, |_, y| {
+        if y < 260 {
+            image::Rgb([52, 96, 150])
+        } else {
+            image::Rgb([214, 160, 72])
+        }
+    });
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .expect("编得出 PNG");
+    out.into_inner()
+}
+
+/// 给详情页那几张**挂上真的媒体池**（协调人 2026-09-15：图里要是用户真会看到的样子，不是「没查池子」）：点开的作品那张封面
+/// 照库里记着的内容哈希落一张真图，另挂一段「视频」——抽帧程序换成一个不存在的，那一格就是没有 ffmpeg 的占位。
+/// 浏览屏那几张不走这里，照旧没有媒体池（行首是平台色块）。
+fn 挂上媒体池(app: &mut App, 目录: &Path) {
+    use romcat_core::scrape::pool::MediaPool;
+
+    let pool =
+        MediaPool::open(&romcat_core::workspace::media_pool_dir(目录)).expect("开得出媒体池");
+    let 落 = |hash: &str, ext: &str, bytes: &[u8]| {
+        let at = pool.path_of(hash, ext);
+        std::fs::create_dir_all(at.parent().expect("落点有上一级目录")).expect("建得出目录");
+        std::fs::write(&at, bytes).expect("写得下");
+    };
+    let 点开的 = 浏览的作品
+        .iter()
+        .position(|(名字, _, _)| *名字 == 点开的作品)
+        .expect("点开的作品在表里");
+    落(&format!("{:040x}", 点开的 + 1), "png", &详情页的封面图());
+    let 视频 = format!("{:040x}", 0xF1D0_u32);
+    落(&视频, "mp4", &[0u8; 256]);
+    let (browse, site) = app.browse_and_site();
+    site.catalog
+        .put_media(&视频, "mp4", 256)
+        .expect("记得进媒体");
+    site.catalog
+        .put_scraped(&[Harvested {
+            anchor: AnchorKind::Work.label().to_owned(),
+            subject: 点开的作品.to_owned(),
+            source: "ScreenScraper".to_owned(),
+            input: "基线".to_owned(),
+            values: Vec::new(),
+            media: vec![HarvestedMedia {
+                kind: MediaKind::Video.label().to_owned(),
+                hash: 视频,
+                evidence: "基线里摆的一段视频".to_owned(),
+            }],
+        }])
+        .expect("写得进刮削值");
+    browse
+        .gallery_mut()
+        .set_program(romcat_core::scrape::preview::NO_SUCH_PROGRAM);
+    browse.set_pool(Some(pool));
+}
+
 /// 搭好浏览屏的现场，点开那个作品、打开作品详情页停在 `面` 那一面，拍一张。CI 上跳过（[`该跳过`]）。
 ///
 /// **拍之前先认一眼真打开了**：头一趟出图时双击没打开，概览那两张拍成了浏览屏，而两遍核对照样绿——基线比的是
@@ -1090,19 +1150,64 @@ fn 拍详情页(名字: &str, 主题: Theme, 面: Tab) {
         return;
     }
     let 浏览现场 { mut app, 目录 } = 浏览现场(false);
+    挂上媒体池(&mut app, 目录.path());
     // 打开与换面走的是界面上「查看详情」、点一面的同一个入口（`Screen::open_page`）；交给画帧那个闭包在下一帧开头办。
     let 换面 = std::rc::Rc::new(std::cell::Cell::new(None::<Tab>));
     let 要换 = std::rc::Rc::clone(&换面);
+    // 后台那几份图解完没有（封面解出来、视频那一格因为没有 ffmpeg 退成占位）：画帧那个闭包每帧报一次。
+    let 图齐了 = std::rc::Rc::new(std::cell::Cell::new(false));
+    let 报图 = std::rc::Rc::clone(&图齐了);
     let mut harness = 开一个(主题, move |ui| {
         if let Some(面) = 要换.take() {
             app.browse_and_site().0.open_page(面);
         }
         app.ui(ui);
+        let gallery = app.browse().gallery();
+        报图.set(gallery.busy() == 0 && gallery.ready() >= 1 && gallery.lacks_ffmpeg());
     });
-    按(&mut harness, 点开的作品那一行);
+    // 点一下那一行（同 [`按`]，但先不跑到停：后台解图时一直要重画，等图齐了再跑）。
+    let Some(那一行) = 最后一处正好画着(harness.output(), 点开的作品那一行)
+    else {
+        panic!("{名字}：屏上没有「{点开的作品那一行}」那一行");
+    };
+    let 键 = |pressed: bool| egui::Event::PointerButton {
+        pos: 那一行,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    harness.event(egui::Event::PointerMoved(那一行));
+    harness.event(键(true));
+    harness.event(键(false));
+    harness.event(egui::Event::PointerGone);
+    harness.step();
     换面.set(Some(面));
     harness.run_steps(2);
+    // 等后台解完：只跑帧、不看挂钟。
+    for _ in 0..100_000 {
+        if 图齐了.get() {
+            break;
+        }
+        harness.step();
+        std::thread::yield_now();
+    }
+    assert!(图齐了.get(), "{名字}：媒体池里那几份图一直没解完");
     harness.run();
+    // **媒体面滚到整格看得见**（协调人 2026-09-15）：竖版封面那一格连底下「来源 · 大小」一行比头上那一块底下剩的地方高，
+    // 像人一样把指针停在正文里往下滚一截再拍。
+    if 面 == Tab::Media {
+        harness.event(egui::Event::PointerMoved(egui::pos2(800.0, 600.0)));
+        harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -220.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.event(egui::Event::PointerGone);
+        harness.step();
+        harness.run_steps(5);
+        harness.run();
+    }
     assert!(
         最后一处正好画着(harness.output(), "← 返回浏览").is_some(),
         "{名字}：作品详情页没打开，拍下来的不是它"

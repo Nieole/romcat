@@ -1911,48 +1911,61 @@ impl Screen {
                 ui.set_width(ui.available_width());
                 ui.spacing_mut().item_spacing =
                     egui::vec2(tokens.space.list_bar_gap, look::step(0));
-                ui.horizontal_wrapped(|ui| {
-                    look::section(ui, "列表");
-                    ui.checkbox(
-                        &mut self.list_covers,
-                        egui::RichText::new("在每行开头显示封面")
-                            .size(look::font_size(ui.ctx(), tokens.font.size_small_plus)),
+                // 勾了几行时右端那一句后头跟一颗小号幽灵按钮「清除选择」（设计稿 `#clear-pick`）。
+                let 勾了 = self.picked.count(self.window.total()) > 0;
+                let 按钮宽 = if 勾了 {
+                    tokens.space.list_bar_gap + look::small_button_width(ui, CLEAR_PICK)
+                } else {
+                    0.0
+                };
+                // **右端那一句固定在头一行**（协调人 2026-09-15 定，照稿 `.tbar .cnt`）：先量出它连按钮多宽，左边那一截
+                // 只拿剩下的宽、自己折行；那一句与「列表」顶齐，摆在头一行。
+                let 右宽 = 这一句.size().x + 按钮宽;
+                let 行高 = 这一句.size().y;
+                ui.horizontal_top(|ui| {
+                    let 左宽 = (ui.available_width() - 右宽 - tokens.space.list_bar_gap).max(0.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(左宽, 0.0),
+                        Layout::left_to_right(Align::Center).with_main_wrap(true),
+                        |ui| {
+                            ui.set_max_width(左宽);
+                            look::section(ui, "列表");
+                            ui.checkbox(
+                                &mut self.list_covers,
+                                egui::RichText::new("在每行开头显示封面")
+                                    .size(look::font_size(ui.ctx(), tokens.font.size_small_plus)),
+                            );
+                            look::help(ui, "没有封面的作品显示平台色块；双击一行打开作品详情");
+                            if let Some(说的) = self.shelf.error() {
+                                ui.colored_label(ui.visuals().error_fg_color, 说的);
+                            }
+                            // 上一次动作出的错（底下那块编辑面板拆掉之前摆在那块顶上）：一直摆着，直到下一次动作成了。
+                            if let Some(说的) = &self.error {
+                                ui.colored_label(ui.visuals().error_fg_color, 说的);
+                            }
+                        },
                     );
-                    look::help(ui, "没有封面的作品显示平台色块；双击一行打开作品详情");
-                    if let Some(说的) = self.shelf.error() {
-                        ui.colored_label(ui.visuals().error_fg_color, 说的);
-                    }
-                    // 上一次动作出的错（底下那块编辑面板拆掉之前摆在那块顶上）：一直摆着，直到下一次动作成了。
-                    if let Some(说的) = &self.error {
-                        ui.colored_label(ui.visuals().error_fg_color, 说的);
-                    }
-                    // 勾了几行时右端那一句后头跟一颗小号幽灵按钮「清除选择」（设计稿 `#clear-pick`）。
-                    let 勾了 = self.picked.count(self.window.total()) > 0;
-                    let 按钮宽 = if 勾了 {
-                        tokens.space.list_bar_gap + look::small_button_width(ui, CLEAR_PICK)
-                    } else {
-                        0.0
-                    };
-                    // 右端那一句：先量出它多宽、空出这一行剩下那一截再摆；摆不下就折到下一行的行首。
-                    let 宽 = 这一句.size().x + 按钮宽;
-                    let 剩 = ui.available_size_before_wrap().x;
-                    if 宽 < 剩 {
-                        ui.add_space((剩 - 宽).floor());
-                    }
-                    ui.label(这一句);
-                    if 勾了 {
-                        let 清 = look::small_buttons(ui, |ui| {
-                            ui.scope(|ui| {
-                                look::ghost_button(ui.visuals_mut());
-                                ui.button(CLEAR_PICK)
-                            })
-                            .inner
-                            .clicked()
-                        });
-                        if 清 {
-                            self.picked.clear();
-                        }
-                    }
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), 行高),
+                        Layout::right_to_left(Align::Min),
+                        |ui| {
+                            // 右往左摆：先摆的在最右。
+                            if 勾了 {
+                                let 清 = look::small_buttons(ui, |ui| {
+                                    ui.scope(|ui| {
+                                        look::ghost_button(ui.visuals_mut());
+                                        ui.button(CLEAR_PICK)
+                                    })
+                                    .inner
+                                    .clicked()
+                                });
+                                if 清 {
+                                    self.picked.clear();
+                                }
+                            }
+                            ui.label(这一句);
+                        },
+                    );
                 });
             })
             .response

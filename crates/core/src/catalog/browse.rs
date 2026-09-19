@@ -2835,6 +2835,17 @@ impl WorkVariant {
         self.candidates.iter().find(|candidate| candidate.accepted)
     }
 
+    /// **判定依据那一句**：照依据形状各段排（[`Shape::basis`](crate::triage::Shape::basis)）——来源 / DAT / 哈希口径 ·
+    /// 头一条候选自己的依据 · 候选数；一条候选都没有是 `None`（那时屏上照 [`Self::no_candidate_hint`] 说）。
+    ///
+    /// 头一条就是最可信的那一条：中立库交回候选的次序就是按可信程度排的。
+    #[must_use]
+    pub fn basis_line(&self) -> Option<String> {
+        let lead = self.candidates.first()?;
+        crate::triage::Shape::of_candidates(&self.candidates)
+            .map(|shape| shape.basis(&lead.evidence, self.candidates.len()))
+    }
+
     /// **判定依据**摆哪一条候选：置信度最高那一档（[`Self::confidence`]）里的头一条；一条候选都没有是 `None`。
     ///
     /// 作品详情页「识别依据」那一面上「判定依据：」后头跟的就是它，界面不自己挑（ADR-0024）。

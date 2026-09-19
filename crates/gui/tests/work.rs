@@ -412,9 +412,15 @@ fn 识别依据那一面逐变体列出候选来源与置信度_一条候选都�
         头一条.confidence.label()
     );
     assert!(
-        屏上.lines().any(|line| line.starts_with("判定依据：")),
-        "卡上没有「判定依据：」那一句：\n{屏上}"
+        屏上.contains("高置信自动通过；中、低置信进入待确认队列。"),
+        "识别依据那一面的帮助没照稿说全：\n{屏上}"
     );
+    // 「判定依据：」后头照依据形状各段排：来源 / DAT / 哈希口径 · 依据 · 候选数（核心库 `WorkVariant::basis_line`）。
+    let 那一句 = format!(
+        "判定依据：{}",
+        变体.basis_line().expect("有候选的变体说得出依据")
+    );
+    assert!(有这一段(&屏上, &那一句), "卡上没有「{那一句}」：\n{屏上}");
     for 表头 in ["候选", "来源", "置信度"] {
         assert!(
             有这一段(&屏上, 表头),
@@ -510,6 +516,10 @@ fn 元数据那一面每个字段写着用的是哪个源的值_一键改用另�
         .clone();
 
     let 屏上 = 打开详情页(&ctx, &mut app, work_id, Tab::Metadata);
+    assert!(
+        有这一段(&屏上, "标题集合"),
+        "显示标题那一格的徽标该照稿写「标题集合」：\n{屏上}"
+    );
     assert!(
         有这一段(&屏上, &用的.values[0]) && 有这一段(&屏上, &源),
         "简介那一格没写眼下用的是「{源}」说的「{}」：\n{屏上}",
@@ -821,11 +831,25 @@ fn 标题那一面列出标题集合_写明显示标题与排序标题怎么选�
     );
     assert!(
         有这一段(&屏上, "排序标题")
-            && 屏上.contains(&挑的.sort)
+            && 屏上.contains(&挑的.sort_shown)
             && 屏上.contains(挑的.sort_from.label()),
         "没写排序标题（{}）与它从哪儿来（{}）：\n{屏上}",
         挑的.sort,
         挑的.sort_from.label()
+    );
+    // 列宽照稿按比例分：「名称」约占三成，其余几列均摊，「隐藏」贴右（协调人 2026-09-15 定）。
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 头一处 = |text: &str| {
+        每一处画在哪儿(&这一帧, text)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("标题那一面没画「{text}」"))
+    };
+    let (名称, 语言, 隐藏) = (头一处("名称"), 头一处("语言"), 头一处("隐藏"));
+    let 名称占 = (语言.min.x - 名称.min.x) / (隐藏.max.x - 名称.min.x);
+    assert!(
+        (0.25..=0.36).contains(&名称占),
+        "「名称」一列该约占三成，眼下占 {名称占:.2}：名称 {名称:?}，语言 {语言:?}，隐藏 {隐藏:?}"
     );
     for 表头 in ["名称", "语言", "类型", "来源", "使用的变体"] {
         assert!(
@@ -1194,6 +1218,24 @@ fn 头上那一块与概览照稿_简介基本信息媒体状态四块_编辑元
     };
 
     let 屏上 = 打开详情页(&ctx, &mut app, work_id, Tab::Overview);
+    // ── 头上那一块：「平台」那一格照稿写全名，平台表里没写全名的写代号（全名由核心库的平台表给）。
+    let 平台全名 = {
+        let (_, site) = app.browse_and_site();
+        let manifest = romcat_core::platform::Manifest::builtin();
+        site.catalog
+            .work_detail(&WorkQuery::default(), &WorkAnchor::Work(work_id))
+            .expect("读得出")
+            .expect("有这个作品")
+            .platforms
+            .iter()
+            .map(|code| manifest.full_name(code).unwrap_or(code).to_owned())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    };
+    assert!(
+        有这一段(&屏上, &平台全名),
+        "头上「平台」那一格没照平台表写「{平台全名}」：\n{屏上}"
+    );
     // ── 头上那一块：它是什么、叫什么、哪个平台，几格事实，几枚标签（有中文版本时跟着一枚写它）。
     if let Some(mark) = 中文版本 {
         assert!(
@@ -1247,15 +1289,39 @@ fn 头上那一块与概览照稿_简介基本信息媒体状态四块_编辑元
         "状态块里没写收藏那一行「{收藏那一句}」：\n{屏上}"
     );
     let 屏上 = 滚到看得见(&ctx, &mut app, "首选变体");
+    // 基本信息里带来源徽标的那几行：名与值按头一行对齐（岔路口 3 选 A）。挑一格合成数据里有值的。
+    let (那一格, 那一格的值) = [
+        Field::Year,
+        Field::Genre,
+        Field::Developer,
+        Field::Publisher,
+    ]
+    .into_iter()
+    .find_map(|field| {
+        核心库说的(&mut app, &这个条目, field)
+            .shown
+            .map(|said| (field, said.values.join("、")))
+    })
+    .expect("合成数据里这几格总有一格有值");
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 名们 = 每一处画在哪儿(&这一帧, 那一格.label());
+    let 值们 = 每一处画在哪儿(&这一帧, &那一格的值);
+    assert!(
+        名们.iter().any(|名| 值们
+            .iter()
+            .any(|值| 值.min.x > 名.max.x && (值.min.y - 名.min.y).abs() <= 1.5)),
+        "基本信息里「{}」那一行名与值没按头一行对齐：名 {名们:?}，值 {值们:?}",
+        那一格.label()
+    );
     let 中文那一格 = 中文版本.map_or("无", |mark| mark.label());
     assert!(
         有这一段(&屏上, "中文版本") && 有这一段(&屏上, 中文那一格),
         "基本信息里没写中文版本「{中文那一格}」：\n{屏上}"
     );
     assert!(
-        有这一段(&屏上, &首选简称) && 屏上.contains(&挑的.sort),
-        "基本信息里没写首选变体「{首选简称}」或排序标题「{}」：\n{屏上}",
-        挑的.sort
+        有这一段(&屏上, &首选简称) && 屏上.contains(&挑的.sort_shown),
+        "基本信息里没写首选变体「{首选简称}」或排序标题「{}」（照原样大小写）：\n{屏上}",
+        挑的.sort_shown
     );
 
     // ── 「编辑元数据」：换到元数据那一面，直接进编辑态。
@@ -1409,4 +1475,26 @@ fn 在文件系统中打开交给系统的是那个变体在盘上所在的目�
         [盘.join("SFC")],
         "「在文件系统中打开」交出去的不是那个变体在盘上所在的目录"
     );
+}
+
+/// 这一帧里**正好**写着这几个字的每一段画在哪儿（外框），按画出来的次序。
+fn 每一处画在哪儿(output: &egui::FullOutput, 那几个字: &str) -> Vec<egui::Rect> {
+    fn 找(shape: &egui::epaint::Shape, 那几个字: &str, out: &mut Vec<egui::Rect>) {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == 那几个字 => {
+                out.push(egui::Rect::from_min_size(text.pos, text.galley.size()));
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    找(one, 那几个字, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        找(&clipped.shape, 那几个字, &mut out);
+    }
+    out
 }

@@ -829,6 +829,8 @@ pub struct Layout {
     pub card_title_rows: usize,
     /// 字卡副行至多几行（设计稿 `.tc-s`）。
     pub card_subtitle_rows: usize,
+    /// 标题面那张表「名称」一列占表宽几成，其余几列均摊、「隐藏」贴右。
+    pub title_name_share: f32,
 }
 
 /// 调色比例：两套主题共用。设计稿里写在规则上的字面量（`color-mix` 的百分比、`opacity`）。

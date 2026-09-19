@@ -4169,3 +4169,15 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 - **建议留：** 票 `13` 做合集时在作品详情页头上接上「☆ 收藏」「★ 已收藏」，状态块补「合集」那一行。另：这一条原先误记在 GL18 的号段里，协调人 2026-09-15 改号为 Q961（补给本票的备用号段 Q961–Q965）。
 - **谁来裁：** 收尾
 - **状态：** open
+
+### Q962 — 平台表里只有设计稿给过全名的十个平台写了全名，其余二十四个屏上写代号
+
+- **来自：** 票 `gui-looks-like-the-design/15`（拿主意的人 2026-09-15 定：作品详情页头上的平台照稿写全名，全名由核心库的平台表给，表里没全名的写代号并记挂单）
+- **类别：** 规格没说
+- **在哪：** `crates/core/src/platform/platforms.toml` 各平台的 `"全名"`；`Manifest::full_name`；`crates/gui/src/browse/work.rs` 的 `hero_facts`
+- **为什么没停线：** 全名只给人看、不进清单指纹；没写的平台屏上退回规范名，不挡任何验收项。
+- **这张票实际做了什么：** 照设计稿 `PNAME` 给十个平台写了全名：FC 红白机、SFC 超级任天堂、GB Game Boy、GBC Game Boy Color、GBA Game Boy Advance、NDS Nintendo DS、PSP PSP、PSV PS Vita、PS1 PlayStation、MD Mega Drive。其余没写：FDS、3DS、N64、NGC、WII、WIIU、Mega-CD、SMS、GG、32X、SS、DC、PCE、PS2、PS3、VB、WS、NGPC、Lynx、MSX、3DO、SWITCH、XBOX360、街机。
+- **没走的那条：** 这张票里自拟那二十四个的全名（设计稿没给，用词归拿主意的人）。
+- **建议留：** 拿主意的人给一张全名表（或者说「照官方英文名」），补进平台表即可，不动代码。
+- **谁来裁：** 拿主意的人
+- **状态：** open

@@ -706,6 +706,58 @@ struct Face<'a> {
     ground: egui::Color32,
 }
 
+/// 把一串字排成至多 `rows` 行、每行不宽于 `width`，**只在空格处断行**：一个词整个走，不拆开。行数用完还剩字，最后一行
+/// 截尾补「…」；一个词比一行还宽，那个词截尾补「…」。`measure` 量一串字画出来多宽。
+fn lines_at_spaces(
+    text: &str,
+    width: f32,
+    rows: usize,
+    measure: impl Fn(&str) -> f32,
+) -> Vec<String> {
+    let 收住 = |text: &str| -> String {
+        if measure(text) <= width {
+            return text.to_owned();
+        }
+        let chars: Vec<char> = text.chars().collect();
+        (0..chars.len())
+            .rev()
+            .map(|n| format!("{}…", chars[..n].iter().collect::<String>().trim_end()))
+            .find(|line| measure(line) <= width)
+            .unwrap_or_else(|| "…".to_owned())
+    };
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let mut lines = Vec::new();
+    let mut at = 0;
+    while at < words.len() && lines.len() < rows {
+        let last = lines.len() + 1 == rows;
+        let mut line = String::new();
+        let mut next = at;
+        while next < words.len() {
+            let tried = if line.is_empty() {
+                words[next].to_owned()
+            } else {
+                format!("{line} {}", words[next])
+            };
+            if measure(&tried) > width {
+                break;
+            }
+            line = tried;
+            next += 1;
+        }
+        if next == at {
+            line = 收住(words[at]);
+            next = at + 1;
+        }
+        if last && next < words.len() {
+            line = 收住(&words[at..].join(" "));
+            next = words.len();
+        }
+        lines.push(line);
+        at = next;
+    }
+    lines
+}
+
 /// 照 `face` 画一张字卡：平台色调进次级底色的底、顶上一道平台色、左上角标题（拉丁与数字粗体，中文照旧常规体），
 /// 有副行就跟在标题底下（等宽、至多两行），有底行就贴着底边，右下角伸出格子被裁掉的平台代号水印，外头一圈分隔线。
 fn card_face(ui: &mut egui::Ui, face: &Face<'_>) {
@@ -737,17 +789,25 @@ fn card_face(ui: &mut egui::Ui, face: &Face<'_>) {
     let title_height = title.size().y;
     painter.galley(rect.min + egui::vec2(padding_x, padding_y), title, ink);
     if let Some(subtitle) = face.subtitle {
-        let mut job = egui::text::LayoutJob::simple(
-            subtitle.to_owned(),
-            egui::FontId::monospace(tokens.font.size_path),
-            ui.visuals().text_color(),
+        // **只在空格处断行**（协调人 2026-09-15 定）：「CHRONO TRIGGER (JAPAN)」不许把「)」单独挤到下一行；行数用完还剩字、
+        // 或者一个词比一行还宽，截尾补「…」。
+        let font = egui::FontId::monospace(tokens.font.size_path);
+        let color = ui.visuals().text_color();
+        let 量 = |text: &str| {
+            painter
+                .layout_no_wrap(text.to_owned(), font.clone(), color)
+                .size()
+                .x
+        };
+        let lines = lines_at_spaces(
+            subtitle,
             rect.width() - 2.0 * padding_x,
+            tokens.layout.card_subtitle_rows,
+            量,
         );
-        job.wrap.max_rows = crate::tokens::Tokens::builtin().layout.card_subtitle_rows;
-        job.wrap.break_anywhere = true;
         painter.galley(
             rect.min + egui::vec2(padding_x, padding_y + title_height + face.gap),
-            painter.layout_job(job),
+            painter.layout_no_wrap(lines.join("\n"), font, color),
             ink,
         );
     }
@@ -889,6 +949,36 @@ fn upload(ctx: &egui::Context, key: &Key, thumb: &Thumbnail) -> egui::TextureHan
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 一个字一个单位宽的量法：拿字数当宽度，断行的规矩看得清。
+    fn 字数(text: &str) -> f32 {
+        text.chars().count() as f32
+    }
+
+    #[test]
+    fn 字卡副行只在空格处断行_放不下的截尾补省略号() {
+        assert_eq!(
+            lines_at_spaces("CHRONO TRIGGER (JAPAN)", 16.0, 2, 字数),
+            ["CHRONO TRIGGER", "(JAPAN)"],
+            "括号不被单独挤到下一行：整个词一起走"
+        );
+        assert_eq!(
+            lines_at_spaces("Chrono Trigger (Japan)", 30.0, 2, 字数),
+            ["Chrono Trigger (Japan)"],
+            "一行放得下就一行"
+        );
+        assert_eq!(
+            lines_at_spaces("aaa bbb ccc ddd", 7.0, 1, 字数),
+            ["aaa bb…"],
+            "行数用完还剩字：最后一行截尾补「…」"
+        );
+        assert_eq!(
+            lines_at_spaces("abcdefghij klm", 5.0, 2, 字数),
+            ["abcd…", "klm"],
+            "一个词比一行还宽：那个词截尾补「…」"
+        );
+        assert!(lines_at_spaces("   ", 10.0, 2, 字数).is_empty());
+    }
 
     #[test]
     fn 等比缩到框里一个像素都不拉伸() {

@@ -1519,3 +1519,33 @@ fn 几个变体的媒体清单并成一份_作品上那几份只留一遍() {
         ["作品的封面", "甲的视频", "乙的视频"],
     );
 }
+
+#[test]
+fn 判定依据那一句照依据形状各段排_来源_数据文件_哈希口径_依据_候选数() {
+    let catalog = 建库();
+    let 变体 = |作品: &str, at: usize, n: u64| {
+        catalog
+            .work_detail(&WorkQuery::default(), &那一行(&catalog, 作品))
+            .expect("读得动")
+            .expect("有这一行")
+            .variants
+            .into_iter()
+            .find(|variant| variant.row.key == 键(at, n))
+            .expect("在这个作品底下")
+    };
+    // fixture 里每个变体一条候选：No-Intro / gameboy.dat / 原样哈希。
+    assert_eq!(
+        变体("作品00", 0, 2).basis_line().as_deref(),
+        Some("No-Intro / gameboy.dat / 含头 · 合成 fixture 里钉死的依据 · 1 个候选"),
+    );
+    // 认不出作品、一条候选都没有的散落变体：没有这一句（屏上照核心库那句「为什么没定下来」说）。
+    let 散落 = catalog
+        .work_detail(&WorkQuery::default(), &WorkAnchor::Loose(散键(0)))
+        .expect("读得动")
+        .expect("有这一行")
+        .variants
+        .into_iter()
+        .next()
+        .expect("有它自己");
+    assert_eq!(散落.basis_line(), None);
+}

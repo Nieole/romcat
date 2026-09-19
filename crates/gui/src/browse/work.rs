@@ -124,6 +124,9 @@ pub struct Page {
     head: Option<String>,
     /// 每个变体的**文件表**那几行（核心库 `Catalog::file_lines`）：变体的键 → 那几行。
     files: BTreeMap<String, Vec<FileLine>>,
+    /// 头上「平台」那一格印的字：作品的平台照核心库的平台表写全名（`Manifest::full_name`），没写全名的写代号，
+    /// 几个平台之间「 / 」。
+    platform_names: String,
     /// 这个作品**收没收藏**、收了的钉在哪种锚上（核心库 `collection::favorite_of`）：状态块里「收藏」那一行照它写，只读
     /// （拿主意的人 2026-09-15 定；收藏按钮与合集那一行归票 13）。没收藏是 `None`。
     favorite: Option<&'static str>,
@@ -544,6 +547,14 @@ impl Screen {
         };
         page.files = files;
         page.chinese = chinese;
+        page.platform_names = self.work.as_ref().map_or_else(String::new, |work| {
+            let manifest = romcat_core::platform::Manifest::builtin();
+            work.platforms
+                .iter()
+                .map(|code| manifest.full_name(code).unwrap_or(code))
+                .collect::<Vec<_>>()
+                .join(" / ")
+        });
         page.favorite = favorite;
         page.row = row;
         page.head = 头;
@@ -847,7 +858,8 @@ impl Screen {
         // 稿上这句后半截「高置信自动通过；中、低置信进入待确认队列」与 ADR-0002 对不上（中置信是通过但标记），只印前半截。
         look::help(
             ui,
-            "识别只看文件内容（哈希、文件头、序列号），文件名只在无法按内容匹配时作为参考。",
+            "识别只看文件内容（哈希、文件头、序列号），文件名只在无法按内容匹配时作为参考。\
+             高置信自动通过；中、低置信进入待确认队列。",
         );
         ui.add_space(look::step(2));
         for (at, variant) in work.variants.iter().enumerate() {
@@ -1094,7 +1106,7 @@ impl Screen {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = look::step(1);
                         ui.label(
-                            egui::RichText::new(&chosen.sort)
+                            egui::RichText::new(&chosen.sort_shown)
                                 .font(egui::FontId::monospace(小))
                                 .color(强),
                         );
@@ -1167,7 +1179,7 @@ impl Screen {
             self.detail
                 .as_ref()
                 .and_then(|detail| detail.display.as_ref())
-                .map(|chosen| chosen.sort.clone())
+                .map(|chosen| chosen.sort_shown.clone())
                 .unwrap_or_default()
         };
         let mut 动作 = None;
@@ -1339,7 +1351,7 @@ impl Screen {
             ui.add_space(行距);
             info_row(ui, "排序标题", |ui| {
                 ui.label(
-                    egui::RichText::new(chosen.map_or("—", |chosen| chosen.sort.as_str()))
+                    egui::RichText::new(chosen.map_or("—", |chosen| chosen.sort_shown.as_str()))
                         .font(egui::FontId::monospace(字号))
                         .color(强),
                 );
@@ -1361,6 +1373,8 @@ impl Screen {
                 info_row(ui, field.label(), |ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = look::step(1);
+                        // 行高只按徽标那么高算：默认的控件高会把这一行撑高、值往下沉，与左边的名错开（岔路口 3 选 A）。
+                        ui.spacing_mut().interact_size.y = tokens.layout.source_badge_height;
                         match said {
                             Some(said) => {
                                 字(ui, &said.values.join("、"));
@@ -1381,6 +1395,7 @@ impl Screen {
             info_row(ui, "首选变体", |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = look::step(1);
+                    ui.spacing_mut().interact_size.y = tokens.layout.source_badge_height;
                     let Some(key) = page.head.as_deref() else {
                         字(ui, "—");
                         return;
@@ -1836,12 +1851,13 @@ fn evidence_card(ui: &mut egui::Ui, variant: &WorkVariant, short_name: &str) {
         tokens.space.evidence_card_padding,
         |ui| {
             ui.spacing_mut().item_spacing.y = look::step(1);
-            let 最好的 = variant.best_candidate();
-            if 最好的.is_some() || variant.reason.is_some() {
+            // 判定依据那一句照依据形状各段排，由核心库出字（`WorkVariant::basis_line`）。
+            let 依据 = variant.basis_line();
+            if 依据.is_some() || variant.reason.is_some() {
                 look::note_box(ui, |ui| {
                     let 字号 = look::font_size(ui.ctx(), tokens.font.size_small_plus);
                     let (强, 次) = (ui.visuals().strong_text_color(), ui.visuals().text_color());
-                    if let Some(candidate) = 最好的 {
+                    if let Some(依据) = &依据 {
                         let mut job = egui::text::LayoutJob::default();
                         job.append(
                             "判定依据：",
@@ -1849,7 +1865,7 @@ fn evidence_card(ui: &mut egui::Ui, variant: &WorkVariant, short_name: &str) {
                             egui::TextFormat::simple(egui::FontId::proportional(字号), 强),
                         );
                         job.append(
-                            &candidate.evidence,
+                            依据,
                             0.0,
                             egui::TextFormat::simple(egui::FontId::proportional(字号), 次),
                         );
@@ -2580,7 +2596,10 @@ fn field_value(
     let mut 动作 = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = look::step(1);
-        if let Some(said) = &one.shown {
+        if 集合挑的 {
+            // 显示标题由标题集合按规则挑，徽标照稿写「标题集合」（拿主意的人 2026-09-15 定）。
+            source_badge(ui, "标题集合", false);
+        } else if let Some(said) = &one.shown {
             let 源 = said.source.as_deref();
             // 标题集合是空的、退回作品名时，那不是哪个源说的。
             source_badge(ui, 源.unwrap_or("作品名"), 源 == Some(VERDICT));
@@ -2848,6 +2867,16 @@ fn titles_table(ui: &mut egui::Ui, rows: &[TitleRow]) -> Option<TitleAction> {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
             let 表宽 = ui.available_width();
+            // **照稿按比例分**（协调人 2026-09-15 定）：「名称」占令牌 `title-name-share` 那几成，语言、类型、来源、使用的变体
+            // 均摊剩下的（哪一列的字比均摊的宽就照字宽），「隐藏」贴右；名称拿最后剩下的。
+            let 名称占 = (表宽 * tokens.layout.title_name_share).floor();
+            let 均摊 = ((表宽 - 名称占 - 动作宽) / 4.0).floor().max(0.0);
+            let (语言宽, 类型宽, 来源宽, 变体宽) = (
+                语言宽.max(均摊),
+                类型宽.max(均摊),
+                来源宽.max(均摊),
+                变体宽.max(均摊),
+            );
             let 名称宽 = (表宽 - 语言宽 - 类型宽 - 来源宽 - 变体宽 - 动作宽).max(0.0);
             let 表头字 = |text: &str| -> egui::WidgetText {
                 egui::RichText::new(text).font(头.clone()).color(弱).into()
@@ -3310,10 +3339,11 @@ fn hero_facts(ui: &mut egui::Ui, work: &WorkDetail, page: &Page) {
             )
         },
     );
-    let 平台 = if work.platforms.is_empty() {
+    // 照稿写全名，由核心库的平台表给，表里没写全名的写代号（拿主意的人 2026-09-15 定；只在这一格）。
+    let 平台 = if page.platform_names.is_empty() {
         "—".to_owned()
     } else {
-        work.platforms.join(" / ")
+        page.platform_names.clone()
     };
     let 格们 = [
         ("平台", 平台),

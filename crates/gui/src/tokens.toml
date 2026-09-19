@@ -344,6 +344,7 @@ work-card-columns = [0.9, 1.1]   # 变体卡身子左右两半的比例（设计
 meta-clamp-rows   = 3     # 元数据那一面简介至多几行（设计稿 .mrow .v.clamp 的 -webkit-line-clamp:3）
 card-title-rows   = 3     # 侧边详情头上那张字卡的标题至多几行（设计稿 .dcover .tc-t 的 -webkit-line-clamp:3）
 card-subtitle-rows = 2    # 字卡副行至多几行（设计稿 .tc-s 的 -webkit-line-clamp:2）
+title-name-share  = 0.30  # 标题面那张表「名称」一列占表宽几成，其余几列均摊、「隐藏」贴右（协调人 2026-09-15 照稿定）
 
 # ── 调色比例：两套主题共用。设计稿里写在规则上的字面量（color-mix 的百分比、opacity），不是 CSS 变量 ──
 [mix]
