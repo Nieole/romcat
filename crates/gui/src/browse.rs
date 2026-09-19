@@ -147,6 +147,7 @@ fn paint_card_overlay(
     ui: &egui::Ui,
     card: egui::Rect,
     cover: egui::Vec2,
+    cover_radius: u8,
     row: &romcat_core::catalog::browse::WorkRow,
     chosen: bool,
 ) {
@@ -189,23 +190,28 @@ fn paint_card_overlay(
             ui.visuals().strong_text_color(),
         );
     }
-    painter.rect_filled(
-        egui::Rect::from_min_max(
-            egui::pos2(cover.left(), cover.bottom() - tokens.layout.tier_bar),
-            cover.right_bottom(),
-        ),
-        egui::CornerRadius {
-            nw: 0,
-            ne: 0,
-            sw: tokens.radius.medium,
-            se: tokens.radius.medium,
-        },
+    // 设计稿里的 `.cv-tier` 是被封面圆角裁掉的 3px 色带，不是一条另起圆角的横线。
+    // 先用整张封面画圆角，再只留下最下方那一带，才会和有/无封面两种卡面的圆角严丝合缝。
+    let tier_band = egui::Rect::from_min_max(
+        egui::pos2(cover.left(), cover.bottom() - tokens.layout.tier_bar),
+        cover.right_bottom(),
+    );
+    painter.with_clip_rect(tier_band).rect_filled(
+        cover,
+        cover_radius,
         look::tier_color(row.tier(), ui.visuals()),
     );
     if chosen {
+        // 选中态属于封面（设计稿 `.cover`），不能把下面的标题、年份和置信度文字一并框住。
         painter.rect_stroke(
-            card.expand(1.0),
-            tokens.radius.medium,
+            cover.expand(4.0),
+            cover_radius.saturating_add(4),
+            egui::Stroke::new(4.0, ui.visuals().selection.bg_fill.gamma_multiply(0.45)),
+            egui::StrokeKind::Outside,
+        );
+        painter.rect_stroke(
+            cover.expand(1.0),
+            cover_radius,
             ui.visuals().selection.stroke,
             egui::StrokeKind::Outside,
         );
@@ -2365,9 +2371,14 @@ impl Screen {
                                     .max_rect(rect)
                                     .layout(Layout::top_down(Align::Min)),
                             );
+                            let cover_radius = if self.shelf.has_cover(&row) == Some(true) {
+                                Tokens::builtin().radius.medium
+                            } else {
+                                Tokens::builtin().radius.large
+                            };
                             self.shelf.card(&mut card, cover, &row, &title);
                             let chosen = self.picked.contains(&row.anchor);
-                            paint_card_overlay(&card, rect, cover, &row, chosen);
+                            paint_card_overlay(&card, rect, cover, cover_radius, &row, chosen);
                             card.add_space(look::step(2));
                             // 卡面里可以有标题，卡面外仍要有稳定的文字区：滚动时才不会只剩
                             // 一大片色块，也让有封面与无封面卡的扫描节奏一致。
@@ -2384,10 +2395,10 @@ impl Screen {
                                     row.confidence_label(),
                                 );
                             });
-                            // 选中态只突出整张卡；勾选框只在鼠标靠近时出现，避免它变成第二个
-                            // 常驻的选中标记。
+                            // 未选卡只在鼠标靠近时露出选择框；已选卡必须常驻勾选，不能让人移开
+                            // 鼠标就看不出哪些卡被选中了。
                             let mut 点了选择 = false;
-                            if response.hovered() {
+                            if response.hovered() || chosen {
                                 let check_rect = egui::Rect::from_min_size(
                                     rect.min + egui::vec2(8.0, 8.0),
                                     egui::vec2(22.0, 22.0),
