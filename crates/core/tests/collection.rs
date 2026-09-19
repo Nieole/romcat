@@ -603,3 +603,28 @@ fn 排一趟再落下去_与当场收藏那一下一个字不差() {
     };
     assert_eq!(锚(&排一趟), 锚(&当场), "两条路钉的锚不是同一批");
 }
+
+/// **作品详情页状态块那一行「收藏」照它写**（票 `gui-looks-like-the-design/15`，拿主意的人 2026-09-15 定只读地写一行）：
+/// 一个作品底下几个变体里有没有在收藏里的、有的话有没有只钉得住本机路径的——判断在核心库，界面照着挑一句话。
+#[test]
+fn 一个作品收没收藏_收了的里头有只钉得住路径的就照路径说() {
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    collection::add(&mut 现场.site, FAVORITE, &键(&[马里奥, 裸卡带])).expect("加得进");
+    let 问 = |site: &Site, keys: &[&str]| collection::favorite_of(site, &键(keys)).expect("问得出");
+
+    assert_eq!(问(&现场.site, &[勇者]), None, "底下一个都没收藏：未收藏");
+    assert_eq!(
+        问(&现场.site, &[马里奥, 勇者]),
+        Some(ANCHOR_CONTENT),
+        "收了的都钉在内容上：按文件内容记录"
+    );
+    assert_eq!(
+        问(&现场.site, &[马里奥, 裸卡带]),
+        Some(ANCHOR_PATH),
+        "收了的里头有一个只钉得住路径：挪了位置会丢，照路径说"
+    );
+    // 在别的合集里不算收藏。
+    collection::add(&mut 现场.site, "通关过的", &键(&[勇者])).expect("加得进");
+    assert_eq!(问(&现场.site, &[勇者]), None, "在自建合集里不等于收藏了");
+}

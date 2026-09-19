@@ -2922,3 +2922,88 @@ fn 规则行按铅笔只改这一条_更新到子库之后其余规则都在() {
         "「✎」回来换掉的不只是那一条，或者序号变了"
     );
 }
+
+/// **例外挪到右栏**（票 `gui-looks-like-the-design/15` 拆底栏，拿主意的人 2026-09-15 定）：改选择那一趟里，例外按钮与
+/// 备注框摆在右栏选中那张变体卡底下；平常浏览时右栏照稿，一样都不摆。
+#[test]
+fn 改选择时例外按钮与备注框摆在右栏选中那张变体卡底下_不改选择时右栏照稿() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    let 跑一帧 = |场: &mut 现场| headless::frame(&ctx, headless::input(), |ui| 场.app.ui(ui));
+
+    // ── 平常浏览：点开一行，右栏里没有例外那几样。
+    场.app.show_view(View::Browse);
+    跑一帧(&mut 场);
+    let 一行 = {
+        let (browse, site) = 场.app.browse_and_site();
+        site.catalog
+            .work_page(browse.query(), 0, 1)
+            .expect("取得出一页")
+            .into_iter()
+            .next()
+            .expect("有一行")
+            .anchor
+    };
+    {
+        let (browse, site) = 场.app.browse_and_site();
+        browse.open_work(&site.catalog, &一行);
+    }
+    跑一帧(&mut 场);
+    let 屏上 = 画出来的字(&跑一帧(&mut 场));
+    assert!(
+        !屏上.contains("例外 · 子库"),
+        "不改选择时右栏里摆着例外：\n{屏上}"
+    );
+
+    // ── 改选择：右栏选中那张变体卡底下摆着例外那几样，在「判定依据」之前。
+    场.改选择();
+    {
+        // 改选择时浏览屏筛的是这台子库的规则：点开的得是筛得出来的那一行。
+        let (browse, site) = 场.app.browse_and_site();
+        let 一行 = site
+            .catalog
+            .work_page(browse.query(), 0, 1)
+            .expect("取得出一页")
+            .into_iter()
+            .next()
+            .expect("规则筛得出一行")
+            .anchor;
+        browse.open_work(&site.catalog, &一行);
+    }
+    跑一帧(&mut 场);
+    let 这一帧 = 跑一帧(&mut 场);
+    let 屏上 = 画出来的字(&这一帧);
+    let 选中的 = 场
+        .app
+        .browse()
+        .variant_key()
+        .expect("点开一行默认选中一个变体")
+        .to_string();
+    let (根名, 相对) = romcat_core::path::split_root(&选中的);
+    let 卡上的路径 = 正好那一段画在哪儿(&这一帧, &format!("{根名} · {相对}"))
+        .unwrap_or_else(|| panic!("右栏里没画出选中那张卡的路径：\n{屏上}"));
+    let 例外 = 正好那一段画在哪儿(&这一帧, "例外 · 子库「掌机」")
+        .unwrap_or_else(|| panic!("改选择时右栏里没摆出例外：\n{屏上}"));
+    let 判定依据 = 正好那一段画在哪儿(&这一帧, "判定依据")
+        .unwrap_or_else(|| panic!("右栏里没画出判定依据：\n{屏上}"));
+    assert!(
+        卡上的路径.y < 例外.y && 例外.y < 判定依据.y,
+        "例外没摆在选中那张变体卡底下：卡 {卡上的路径:?}、例外 {例外:?}、判定依据 {判定依据:?}"
+    );
+    assert!(
+        egui::PanelState::load(&ctx, egui::Id::new("浏览编辑")).is_none(),
+        "浏览屏底下那块编辑面板还画着"
+    );
+
+    // 按「排除它」真的记下一条例外。
+    点一下(&ctx, &format!("{}它", Exception::Exclude.label()), |ui| {
+        场.app.ui(ui)
+    });
+    let 例外们 = &场.app.browse().editing().expect("还在改").exceptions;
+    assert!(
+        例外们.len() == 1 && 例外们.contains_key(&选中的),
+        "按了排除，例外没记在选中的那个变体上：{例外们:?}"
+    );
+}

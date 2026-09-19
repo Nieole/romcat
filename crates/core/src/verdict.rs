@@ -377,6 +377,13 @@ CREATE TABLE IF NOT EXISTS shaping_override(
     PRIMARY KEY (library, key)
 ) STRICT;
 ",
+    // 7：**标题类型改词**（票 `gui-looks-like-the-design/15`，2026-09-15 拿主意的人照设计稿定）：「官方名」写成
+    // 「官方名称」，「汉化组自取的名」写成「汉化组译名」。压制记录的键里带着这个词，旧词留着就与新写进来的压制
+    // 对不上（撤不掉、同一条压两遍）——沉淀库走顺序迁移，照这一条把旧词换掉。语言存的是码，不受影响。
+    "\
+UPDATE title_suppression SET kind = '官方名称' WHERE kind = '官方名';
+UPDATE title_suppression SET kind = '汉化组译名' WHERE kind = '汉化组自取的名';
+",
 ];
 
 /// 「内容锚」在库里与报告里叫什么。
@@ -2707,6 +2714,47 @@ mod tests {
             .expect("读得到")
             .expect("老裁决还在");
         assert_eq!(back.decision, verdict.decision, "一个字都没变");
+    }
+
+    #[test]
+    fn 第六版的老库带着旧词的压制升上来_读得出来也撤得掉() {
+        // 钉的是**第 7 条迁移**（标题类型改词，票 `gui-looks-like-the-design/15`）：旧版程序把类型写成
+        // 「汉化组自取的名」，升上来之后那条压制照旧算数、照旧撤得掉，一条都不丢。
+        let conn = Connection::open_in_memory().expect("开得出来");
+        for sql in &MIGRATIONS[..6] {
+            conn.execute_batch(sql).expect("建得出第六版");
+        }
+        conn.execute_batch("PRAGMA user_version = 6")
+            .expect("盖得上第六版的版本号");
+        conn.execute(
+            "INSERT INTO title_suppression(work, language, kind, source, value, note,
+                 suppressed_at, lifted_at)
+             VALUES('魂斗罗', 'zh', '汉化组自取的名', '文件名', '魂斗罗 汉化版', NULL, 1, NULL)",
+            [],
+        )
+        .expect("第六版里就记得下");
+        let mut store = Store {
+            conn,
+            path: "（内存）".to_string(),
+        };
+
+        store.migrate().expect("升得上来");
+
+        let 压着的 = store.title_suppressions_of("魂斗罗").expect("读得到");
+        assert_eq!(压着的.len(), 1, "旧词记下的那条压制丢了");
+        assert_eq!(压着的[0].kind, crate::title::TitleKind::FanName);
+        assert!(
+            store
+                .lift_title_suppression(&压着的[0].key())
+                .expect("撤得动"),
+            "旧词记下的那条压制撤不掉"
+        );
+        assert!(
+            store
+                .title_suppressions_of("魂斗罗")
+                .expect("读得到")
+                .is_empty()
+        );
     }
 
     #[test]

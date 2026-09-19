@@ -614,34 +614,18 @@ fn 选中一个变体时变体级的操作只作用于它() {
     // 点开一行默认选中第一个变体：面板的第二三层总得有东西摆。
     assert_eq!(app.browse().variant_key(), Some(变体们[0].as_str()));
 
-    // 挑第二个，往**变体**这一层写一条元数据。
+    // 挑第二个：详情跟着换到它。变体级的操作（改选择时右栏选中那张卡底下那几颗例外按钮）作用的正是这一个
+    // ——按下去落在哪个变体上，钉在 `tests/sublibrary.rs` 的「改选择时例外按钮与备注框…」那一条。
     {
         let (browse, site) = app.browse_and_site();
         browse.pick(&site.catalog, &变体们[1]);
-        let draft = browse.value_draft_mut();
-        draft.field = Field::TranslationGroup;
-        draft.anchor = AnchorKind::Variant;
-        draft.value = "只该落在这一个变体上的汉化组".to_string();
-        let key = 变体们[1].clone();
-        browse.put_value(site, &key);
     }
-    let 落在它头上 = |app: &mut App, key: &str| {
-        let (browse, site) = app.browse_and_site();
-        browse.pick(&site.catalog, key);
-        browse
-            .detail()
-            .expect("点得开")
-            .values
-            .iter()
-            .any(|item| item.value.value == "只该落在这一个变体上的汉化组")
-    };
-    assert!(落在它头上(&mut app, &变体们[1]), "写下去的那条没落库");
-    for other in 变体们.iter().filter(|key| *key != &变体们[1]) {
-        assert!(
-            !落在它头上(&mut app, other),
-            "变体级的改动溅到了同一个作品下的另一个变体 {other}",
-        );
-    }
+    assert_eq!(app.browse().variant_key(), Some(变体们[1].as_str()));
+    assert_eq!(
+        app.browse().detail().map(|detail| detail.row.key.as_str()),
+        Some(变体们[1].as_str()),
+        "选中了第二个，详情里摆的还是别的变体",
+    );
 }
 
 #[test]
@@ -789,57 +773,6 @@ fn 汉化版按中文这一维筛得出来而按语言筛不出来() {
     }
     跑(&ctx, &mut app, 1);
     assert!(app.window().total() > 0, "合成数据里该有日版发行版");
-}
-
-#[test]
-fn 刮削来的元数据看得见也改得动() {
-    // 「**所有元数据编辑收敛在这里完成**」（ADR-0001 的修订段）说的不只是标题与
-    // 首选变体：年份、发行商、简介这几样也会写进导出条目。
-    let mut app = 界面(2_000);
-    let key = 一条认出作品的(&mut app);
-    {
-        let (browse, site) = app.browse_and_site();
-        browse.pick(&site.catalog, &key);
-    }
-    let detail = app.browse().detail().expect("点开得了").clone();
-    assert!(!detail.values.is_empty(), "刮削来的字段一条都没折出来");
-    let work = detail.work.clone().expect("认出了作品");
-
-    {
-        let (browse, site) = app.browse_and_site();
-        let draft = browse.value_draft_mut();
-        draft.field = Field::Description;
-        draft.anchor = AnchorKind::Work;
-        draft.value = "界面上手写的简介".to_string();
-        browse.put_value(site, &work);
-    }
-    let 写完 = app.browse().detail().expect("还在");
-    let 那条 = 写完
-        .values
-        .iter()
-        .find(|item| item.value.value == "界面上手写的简介")
-        .expect("写下去的那条在");
-    // **来源是裁决**，而裁决排在每个字段的最前——写下之后导出真会用它。
-    assert!(那条.is_verdict());
-    assert_eq!(那条.anchor, AnchorKind::Work);
-    assert!(
-        !那条.value.evidence.is_empty(),
-        "没有依据的结论事后无法复核"
-    );
-
-    {
-        let (browse, site) = app.browse_and_site();
-        browse.clear_value(site, AnchorKind::Work, &work, Field::Description);
-    }
-    assert!(
-        app.browse()
-            .detail()
-            .expect("还在")
-            .values
-            .iter()
-            .all(|item| item.value.value != "界面上手写的简介"),
-        "撤掉之后那条还在",
-    );
 }
 
 #[test]
@@ -1109,129 +1042,22 @@ fn 一条有兄弟的(app: &mut App) -> String {
     panic!("合成数据里该有同作品同平台的两个变体");
 }
 
-/// 底下那块编辑面板的**右半栏**滚一趟，把这一路上画出来的字都收起来。
-///
-/// 刮削字段那一栏排在标题集合与首选变体之后，而那块面板默认 260 点高
-/// （`layout::EDIT`）——一屏摆不下是必然的，而 egui 不画视口之外的文字
-/// （`ui.is_rect_visible`）。所以这里滚的是**真的滚轮事件**，而且**指针先停进那一栏**：
-/// 滚轮归指针底下那块滚动区，少了这一下滚的就是别处——挂单 Q20 试过的三条路里，
-/// 滚轮那条栽的正是这里（待确认屏的 `详情滚一趟` 走的也是这条路，挂单 Q169）。
-fn 元数据栏滚一趟(ctx: &egui::Context, app: &mut App) -> String {
-    const STEPS: u32 = 24;
-    let mut out = String::new();
-    for step in 0..=STEPS {
-        let mut input = headless::input();
-        // 指针停在底下那块面板的**右半栏**：左边那 42% 是「它是什么」那一栏
-        // （`facts_column`），改元数据的在右边。
-        input
-            .events
-            .push(egui::Event::PointerMoved(egui::pos2(900.0, 700.0)));
-        if step > 0 {
-            input.events.push(egui::Event::MouseWheel {
-                unit: egui::MouseWheelUnit::Point,
-                delta: egui::vec2(0.0, -150.0),
-                phase: egui::TouchPhase::Move,
-                modifiers: egui::Modifiers::NONE,
-            });
-        }
-        out.push_str(&画出来的字(
-            &headless::frame(ctx, input, |ui| app.ui(ui)),
-        ));
-    }
-    out
-}
-
-/// 这一趟画出来的字里，**以这几个字开头的那一段**。
-///
-/// 一段一行（见 `shared::画出来的字`），而刮削字段那一栏一条值就画成一段：于是
-/// 「屏上那一行写的是什么」问得出来。**挑得准靠的是开头那几个字**（「字段 · 哪一层」）
-/// ——同一趟里还画着挂在悬停里的那份原文，它没有这个开头。
-fn 屏上那一行<'a>(屏上: &'a str, 开头: &str) -> &'a str {
-    屏上
-        .lines()
-        .find(|line| line.starts_with(开头))
-        .unwrap_or_else(|| {
-            panic!(
-                "滚下来画出的 {} 段字里没有以「{开头}」开头的那一段",
-                屏上.lines().count(),
-            )
-        })
-}
-
+/// `one_line` 是公开的（待确认屏画刮削来的值走它）：「原样画得下的**一个字都不动**」只有从函数这一侧看得见——
+/// 屏上画的是同一串字，中间换没换过一份字符串出去，看画出来的那一帧看不出来。
 #[test]
-fn 一条顶到闸上的简介收成一行画得下的那一截() {
-    // 票 03 的第二处边界的界面这一半。中立库里一条简介最多 4,000 字
-    // （`scrape::zh::DESCRIPTION_LIMIT`），而刮削字段那一栏画在一条**横排**里——
-    // 横排不折行，整段原样排进去就是四五万点宽的一行，面板跟着长出一条横向滚动条。
-    //
-    // **断言看的是这一帧真的画出来的字。** 钉在 `one_line` 那个纯函数上只证得了
-    // 「算出来的那一截是对的」，证不了「屏上摆的就是它」——那是挂单 Q20 记着的缺口。
-    let ctx = headless::context();
-    let mut app = 界面(2_000);
-    跑(&ctx, &mut app, 2);
-    let key = 一条认出作品的(&mut app);
-    let 顶到闸上 = "外".repeat(romcat_core::scrape::zh::DESCRIPTION_LIMIT);
-    // **换行也要管**：数据源的排版原样留在值里（规格 18），可横排里一个换行就把那
-    // 一行撑高，底下几条就被挤出视口。摆在**作品**那一层，与变体那一层那条长的分得开。
-    let 带换行 = "　　两个人一起打外星人。\n第二段：外星人赢了。";
-    {
-        let (browse, site) = app.browse_and_site();
-        let work = site
-            .catalog
-            .work_of_variant(&key)
-            .expect("读得出")
-            .expect("这一条认出了作品");
-        site.catalog
-            .put_verdict_value(
-                AnchorKind::Variant,
-                &key,
-                Field::Description,
-                &顶到闸上,
-                "测试摆进去的",
-            )
-            .expect("写得进去");
-        site.catalog
-            .put_verdict_value(
-                AnchorKind::Work,
-                &work,
-                Field::Description,
-                带换行,
-                "测试摆进去的",
-            )
-            .expect("写得进去");
-        browse.pick(&site.catalog, &key);
-    }
-
-    let 屏上 = 元数据栏滚一趟(&ctx, &mut app);
-    // `values_ui` 拼的是「字段 · 哪一层｜来源｜值」：开头那几个字挑得出是哪一条，
-    // 而**值那一段**是最后一个 `｜` 之后那一截——量长度要量它，前头那十一个字是固定开销。
-    let 开头 = |anchor: AnchorKind| format!("{} · {}", Field::Description.label(), anchor.label());
-    let 值那一段 = |line: &str| {
-        line.rsplit('｜')
-            .next()
-            .expect("屏上那一行是「字段 · 哪一层｜来源｜值」")
-            .to_string()
-    };
-    // ——— 长度：屏上摆的是**省略号收住的那一截** ———
-    let 那一截 = 值那一段(屏上那一行(&屏上, &开头(AnchorKind::Variant)));
-    assert!(那一截.ends_with('…'), "收窄过要看得出来：{那一截}");
-    assert!(
-        那一截.chars().count() < 80,
-        "库里那条 {} 个字，屏上这一截画了 {} 个——横排里不折行，面板照旧被撑出去",
-        顶到闸上.chars().count(),
-        那一截.chars().count(),
-    );
-    // ——— 换行：折平成一段画出来，而不是掐掉两头 ———
-    let 折平的 = 值那一段(屏上那一行(&屏上, &开头(AnchorKind::Work)));
-    assert!(
-        折平的.ends_with("第二段：外星人赢了。"),
-        "换行那条没折平：屏上那一行断在换行处，后半段没跟上来｜{折平的}",
-    );
-    assert!(折平的.starts_with('\u{3000}'), "折平不等于掐两头：{折平的}",);
-
-    // 原样画得下的**一个字都不动**——这一条只有从函数那一侧看得见：屏上画的是同一串字，
-    // 中间换没换过一份字符串出去，看画出来的那一帧看不出来。
+fn 一行画得下的值原样不动_带换行的折平_顶到闸上的收住() {
     assert_eq!(browse::one_line("两个人一起打外星人。"), None);
+    assert_eq!(
+        browse::one_line("　　两个人一起打外星人。\n第二段：外星人赢了。").as_deref(),
+        Some("　　两个人一起打外星人。 第二段：外星人赢了。"),
+        "换行折平成一段，不掐两头",
+    );
+    let 收住的 = browse::one_line(&"外".repeat(romcat_core::scrape::zh::DESCRIPTION_LIMIT))
+        .expect("顶到闸上的要收住");
+    assert!(
+        收住的.ends_with('…') && 收住的.chars().count() < 80,
+        "收窄过要看得出来，而且一行画得下：{收住的}"
+    );
 }
 
 #[test]
@@ -1993,7 +1819,7 @@ fn 刮削走任务台而且裁决与手工写的元数据一个字都没动() {
     let mut app = 界面(小库);
     跑(&ctx, &mut app, 2);
 
-    // 人在详情面板上一个字一个字敲进去的那条（`Screen::put_value` 走的就是它）。
+    // 人在详情面板上一个字一个字敲进去的那条（作品详情页上按「保存」落的就是这一种）。
     let 作品 = {
         let (browse, site) = app.browse_and_site();
         let rows = site
@@ -2396,7 +2222,6 @@ fn 删掉一条刮削来的叫法之后屏上分得出压掉了与没采到() {
     // 挂账 D157：刮削来的叫法也删得掉，可**标题集合是折出来的一份投影**——不留记号的话
     // 下一趟重折它又回来了，而界面没解释为什么。这一条钉的是记号落在**沉淀库**里，
     // 而且屏上说得出「压掉了」与「没采到」不是一回事。
-    let ctx = headless::context();
     let mut app = 界面(2_000);
     let key = 一条认出作品的(&mut app);
     {
@@ -2456,17 +2281,8 @@ fn 删掉一条刮削来的叫法之后屏上分得出压掉了与没采到() {
         app.browse().notice(),
     );
 
-    // ── 三、屏上分得出「压掉了」与「没采到」——两者对维护者是不同的意思。
-    let 屏上 = 元数据栏滚一趟(&ctx, &mut app);
-    assert!(
-        屏上.contains("压掉的叫法"),
-        "屏上没摆出压掉的那几条：{屏上}"
-    );
-    assert!(
-        屏上.contains(&刮削来的.value),
-        "压掉的那条要指名道姓，不然人不知道自己压了什么：{屏上}"
-    );
-
+    // ── 三、屏上分得出「压掉了」与「没采到」：作品详情页标题那一面底下列着「已隐藏的名称」，钉在
+    //       `tests/work.rs` 的「标题那一面列出标题集合…」那一条。
     // ── 四、**撤得掉**：这一下不是不可逆的。
     let 那条压制 = app.browse().suppressed()[0].clone();
     {
@@ -2627,18 +2443,8 @@ fn 撤掉一条标题压制之后就地摆着折标题的入口_排的是与库�
         browse.lift_title(site, &那条压制);
     }
 
-    // ── 一、那句回执不再指向命令行，旁边摆着就地的入口。
-    let 屏上 = 元数据栏滚一趟(&ctx, &mut app);
-    assert!(
-        !屏上.contains("romcat titles"),
-        "撤掉压制之后还在叫人去开终端：\n{屏上}",
-    );
-    assert!(屏上.contains("撤掉了对"), "那句回执没了：\n{屏上}",);
-    assert!(
-        屏上.lines().any(|line| line.trim() == "整理标题"),
-        "撤掉压制之后就地没有整理标题那个入口：\n{屏上}",
-    );
-
+    // ── 一、那句回执不再指向命令行，旁边摆着就地的入口：画在作品详情页标题那一面上，钉在 `tests/work.rs` 的
+    //       「标题那一面列出标题集合…」那一条。
     // ── 二、点它排的是**与库屏工序段那一行完全同一趟**：只有 `Section::start` 排出去
     //       的任务号才进得了 `Section::running`，也只有它认领得下来。
     app.browse_and_site().0.ask_fold_titles();
@@ -3347,7 +3153,7 @@ fn 侧边详情摆封面或字卡_平台年份变体数_判定依据_变体列�
     跑到图解完(&ctx, &mut app);
     let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
     let 栏 = 一栏::看(&ctx, &这一帧);
-    // **一个字都不伸出那一栏**：变体那一行、文件那一行印的都是这串长键，得截到画得下，
+    // **一个字都不伸出那一栏**：变体那一行印的是这串长键，得截到画得下，
     // 那一栏也不许被它撑宽（没拖过，就还是默认那么宽）。
     let 伸出去的 = 伸出右栏的字(&ctx, &这一帧);
     assert!(
@@ -3364,7 +3170,6 @@ fn 侧边详情摆封面或字卡_平台年份变体数_判定依据_变体列�
         romcat_gui::layout::DETAIL.default,
     );
     // 变体卡片底下那一行是整条键，在那一栏里折着摆下（上面那条「一个字都不伸出那一栏」管着它折没折）。
-    // 文件那一行在这一栏更底下，滚下去再看（这一条测试的末尾）。
     assert!(
         栏.有这一段(&有封面的.replacen('/', romcat_gui::table::ROOT_SEPARATOR, 1)),
         "变体卡片底下那一行该是「根名 · 相对路径」整条：\n{}",
@@ -3398,9 +3203,10 @@ fn 侧边详情摆封面或字卡_平台年份变体数_判定依据_变体列�
         "封面该画在头上那一块，贴了图的地方：{:?}；「变体 1 个」在 {变体那一行:?}",
         栏.图,
     );
-    // **文件那一行在这一栏底下**，照稿那几段摆开之后一屏装不下：像人一样把指针放在这一栏上往下滚，
-    // 滚一下跑一帧，等它画出来为止（不看挂钟）；再看它是不是从左边截、留着文件名。一路上照旧
-    // 一个字都不许伸出那一栏。看完滚回顶上，底下那一段还要看头上那一块。
+    // **这一栏最底下那一块**（收藏与合集），照稿那几段摆开之后一屏装不下：像人一样把指针放在这一栏上往下滚，
+    // 滚一下跑一帧，等它画出来为止（不看挂钟）。一路上照旧一个字都不许伸出那一栏。文件表归作品详情页
+    // 「变体与文件」那一面（票 `gui-looks-like-the-design/15`），不再垫在这一栏底下。看完滚回顶上，底下那一段
+    // 还要看头上那一块。
     let 栏框 = egui::PanelState::load(&ctx, egui::Id::new(romcat_gui::layout::DETAIL.id))
         .expect("画过")
         .outer_rect;
@@ -3421,21 +3227,18 @@ fn 侧边详情摆封面或字卡_平台年份变体数_判定依据_变体列�
         );
         一栏::看(ctx, &这一帧)
     };
-    let mut 文件那一行 = None;
+    let mut 到了底 = false;
     for _ in 0..40 {
-        文件那一行 = 滚一下(&ctx, &mut app, true)
+        if 滚一下(&ctx, &mut app, true)
             .字
-            .into_iter()
-            .map(|(text, _)| text)
-            .find(|text| text.contains('…') && text.contains("(68.92Mb).zip"));
-        if 文件那一行.is_some() {
+            .iter()
+            .any(|(text, _)| text.starts_with("收藏与合集"))
+        {
+            到了底 = true;
             break;
         }
     }
-    assert!(
-        文件那一行.is_some(),
-        "往下滚到底，文件那一行也该从左边截、留着文件名那一截",
-    );
+    assert!(到了底, "往下滚到底，最底下那一块（收藏与合集）该露出来");
     let mut 回到顶上 = false;
     for _ in 0..60 {
         if 滚一下(&ctx, &mut app, false).有这一段("未关联作品的变体") {
@@ -3627,4 +3430,108 @@ fn 筛不出东西时说清楚并给一颗清除筛选_按下去表就回来() {
         "那一行没画回来：\n{屏上}"
     );
     assert!(!屏上.contains(空态), "表回来了空态那句还挂着：\n{屏上}");
+}
+
+/// **拆掉底栏之后**（票 `gui-looks-like-the-design/15` 收挂单 `Q804`）：改元数据挪进了作品详情页，浏览屏底下那块编辑
+/// 面板没了；选中了多少挪进表格上方那一条（设计稿 `.tbar` 的 `#w-picked` 与 `#clear-pick`），「清除选择」一按就清。
+#[test]
+fn 勾了几行时表格上方那一条写着已选几个作品_清除选择一按就清_底下不再有编辑面板() {
+    let ctx = headless::context();
+    let mut app = 界面(4_000);
+    跑(&ctx, &mut app, 2);
+    let 头几行: Vec<WorkAnchor> = {
+        let (browse, site) = app.browse_and_site();
+        site.catalog
+            .work_page(browse.query(), 0, 3)
+            .expect("取得出一页")
+            .into_iter()
+            .map(|row| row.anchor)
+            .collect()
+    };
+    for anchor in &头几行 {
+        app.browse_and_site().0.picked_mut().toggle(anchor);
+    }
+    跑(&ctx, &mut app, 2);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        屏上.lines().any(|line| line.starts_with("已选 3 个作品")),
+        "表格上方那一条没写选中了几个作品：\n{屏上}"
+    );
+    assert!(
+        屏上.lines().any(|line| line == "清除选择"),
+        "勾了几行却没有「清除选择」：\n{屏上}"
+    );
+    assert!(
+        egui::PanelState::load(&ctx, egui::Id::new("浏览编辑")).is_none(),
+        "浏览屏底下那块编辑面板还画着"
+    );
+
+    let 屏上 = shared::点一下(&ctx, "清除选择", |ui| app.ui(ui));
+    assert!(
+        app.browse().picked().is_empty(app.window().total()),
+        "按了「清除选择」选中的那几行还在"
+    );
+    assert!(
+        !屏上.lines().any(|line| line == "清除选择"),
+        "一行都没选了，「清除选择」还摆着：\n{屏上}"
+    );
+}
+
+/// 这一帧里**文字里含着**这几个字的每一段画在哪儿（外框）。
+fn 含着这几个字的每一段(
+    output: &egui::FullOutput,
+    那几个字: &str,
+) -> Vec<(String, egui::Rect)> {
+    fn 找(shape: &egui::epaint::Shape, 那几个字: &str, out: &mut Vec<(String, egui::Rect)>) {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.text().contains(那几个字) => {
+                out.push((
+                    text.galley.text().to_owned(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                ));
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    找(one, 那几个字, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        找(&clipped.shape, 那几个字, &mut out);
+    }
+    out
+}
+
+/// **「N 个作品（共 M）」固定在表格上方那一条的头一行右端，帮助那句自己折行**（协调人 2026-09-15 定，岔路口 1 选 C）：
+/// 三栏摊开时正中那一栏窄，帮助说全了之后不许把数字挤到第二行行首。
+#[test]
+fn 表格上方那一条的作品数摆在头一行右端_帮助自己折行() {
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    跑(&ctx, &mut app, 3);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 列表 = 含着这几个字的每一段(&这一帧, "列表")
+        .into_iter()
+        .find(|(text, _)| text == "列表")
+        .map(|(_, rect)| rect)
+        .expect("表格上方那一条画着「列表」");
+    let (数那一句, 数) = 含着这几个字的每一段(&这一帧, "个作品（共")
+        .into_iter()
+        .next()
+        .expect("表格上方那一条画着作品数那一句");
+    let (_, 帮助) = 含着这几个字的每一段(&这一帧, "没有封面的作品显示平台色块")
+        .into_iter()
+        .next()
+        .expect("表格上方那一条画着帮助");
+    assert!(
+        (数.center().y - 列表.center().y).abs() <= 4.0,
+        "「{数那一句}」没摆在头一行：列表 {列表:?}，那一句 {数:?}"
+    );
+    assert!(
+        数.min.x >= 帮助.max.x,
+        "「{数那一句}」没摆在帮助右边：帮助 {帮助:?}，那一句 {数:?}"
+    );
 }

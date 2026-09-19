@@ -1887,3 +1887,54 @@ fn 真叫_bios_的根底下的游戏照旧认得出作品() {
         "根叫 BIOS 不让它底下的游戏变成非游戏资产"
     );
 }
+
+/// **文件表那几行**（作品详情页「变体与文件」那张表，票 `gui-looks-like-the-design/15`，拿主意的人 2026-09-15 定核心库补查询）：
+/// 一个透明容器是容器一行、里头的文件逐行带大小与 CRC-32（零解压就在容器头里）；裸文件一行，只扫没识别时 CRC 空着。
+#[test]
+fn 文件表那几行_容器一行里头的文件逐行带大小与校验和_裸文件一行() {
+    use romcat_core::catalog::detail::FileLine;
+    use romcat_core::shape::Role;
+
+    let dir = temp_dir("识别-文件表");
+    let root = dir.path().to_path_buf();
+    let 包 = zip_container(&[ZipEntrySpec::stored("幻想传说.sfc", vec![7u8; 64])]);
+    写(&root.join("SFC/幻想传说.zip"), &包);
+    写(&root.join("SFC/魂斗罗.sfc"), &[1u8; 32]);
+    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+    let mut options = ScanOptions::named(&root, "库");
+    options.jobs = Jobs::Fixed(2);
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
+
+    assert_eq!(
+        catalog
+            .file_lines("库/SFC/幻想传说.zip", 40)
+            .expect("读得出"),
+        [
+            FileLine {
+                role: None,
+                name: "库/SFC/幻想传说.zip".to_string(),
+                size: Some(u64::try_from(包.len()).expect("装得下")),
+                crc32: None,
+                inner: false,
+            },
+            FileLine {
+                role: Some(Role::Main),
+                name: "幻想传说.sfc".to_string(),
+                size: Some(64),
+                // 64 个字节 7 的 CRC-32，另拿 zlib 算的。
+                crc32: Some(0xD53C_59B8),
+                inner: true,
+            },
+        ]
+    );
+    assert_eq!(
+        catalog.file_lines("库/SFC/魂斗罗.sfc", 40).expect("读得出"),
+        [FileLine {
+            role: Some(Role::Main),
+            name: "库/SFC/魂斗罗.sfc".to_string(),
+            size: Some(32),
+            crc32: None,
+            inner: false,
+        }]
+    );
+}
