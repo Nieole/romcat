@@ -77,7 +77,7 @@ use egui::{Align, Layout};
 use romcat_core::catalog::CatalogError;
 use romcat_core::catalog::browse::{
     Facets, NON_GAME_ASSET_LABEL, NonGameAssets, PlatformFilter, Scope, WorkAnchor, WorkDetail,
-    WorkQuery, WorkVariant,
+    WorkOrder, WorkQuery, WorkVariant,
 };
 use romcat_core::catalog::identify::{NOT_RUN_LABEL, Tier};
 use romcat_core::catalog::{Catalog, VariantDetail};
@@ -112,6 +112,113 @@ pub mod work;
 /// 侧边详情变体卡片上**首选变体**那一枚标签上的字（词表**首选变体**条）。哪一个是首选由核心库答
 /// （[`VariantDetail::preferred_now`]），这里只是屏上怎么写。
 const PREFERRED_TAG: &str = "首选变体";
+
+/// 浏览屏两种不改变集合的呈现方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrowseView {
+    Table,
+    Cards,
+}
+
+/// 卡片视图的三档封面宽度。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CardSize {
+    Small,
+    Medium,
+    Large,
+}
+
+/// 卡片工具栏里「默认」指作品名；其余排序沿用表格的领域词。
+fn card_order_label(order: WorkOrder) -> &'static str {
+    match order {
+        WorkOrder::Name => "默认",
+        _ => order.label(),
+    }
+}
+
+impl CardSize {
+    fn width(self) -> f32 {
+        Tokens::builtin().layout.card_widths[match self {
+            Self::Small => 0,
+            Self::Medium => 1,
+            Self::Large => 2,
+        }]
+    }
+}
+
+/// 卡面右上角的身份叠层与底边置信度线。它们压在封面上，而不是占用信息区；这是卡片
+/// 能先被视觉扫描、再读文字的关键层次。
+fn paint_card_overlay(
+    ui: &egui::Ui,
+    card: egui::Rect,
+    cover: egui::Vec2,
+    cover_radius: u8,
+    row: &romcat_core::catalog::browse::WorkRow,
+    chosen: bool,
+    focused: bool,
+) {
+    let cover = egui::Rect::from_min_size(card.min, cover);
+    let painter = ui.painter_at(card);
+    let tokens = Tokens::builtin();
+    let platform = row.platforms.first().map_or("未知", String::as_str);
+    let color = tokens.color.platform.of(platform);
+    let font = egui::FontId::new(tokens.font.size_caption_plus, font::strong_family());
+    let galley = painter.layout_no_wrap(platform.to_owned(), font.clone(), egui::Color32::WHITE);
+    let badge = egui::Rect::from_min_size(
+        egui::pos2(cover.right() - galley.size().x - 14.0, cover.top() + 8.0),
+        galley.size() + egui::vec2(12.0, 6.0),
+    );
+    painter.rect_filled(badge, tokens.radius.small, color);
+    painter.galley(
+        badge.center() - galley.size() / 2.0,
+        galley,
+        egui::Color32::WHITE,
+    );
+    if !row.chinese.is_empty() {
+        let text = row.chinese.join(" / ");
+        let galley = painter.layout_no_wrap(
+            text,
+            egui::FontId::proportional(tokens.font.size_caption_plus),
+            ui.visuals().strong_text_color(),
+        );
+        let badge = egui::Rect::from_min_size(
+            egui::pos2(cover.right() - galley.size().x - 14.0, cover.top() + 34.0),
+            galley.size() + egui::vec2(12.0, 6.0),
+        );
+        painter.rect_filled(
+            badge,
+            tokens.radius.small,
+            ui.visuals().window_fill.gamma_multiply(0.85),
+        );
+        painter.galley(
+            badge.center() - galley.size() / 2.0,
+            galley,
+            ui.visuals().strong_text_color(),
+        );
+    }
+    // 设计稿里的 `.cv-tier` 是被封面圆角裁掉的 3px 色带，不是一条另起圆角的横线。
+    // 先用整张封面画圆角，再只留下最下方那一带，才会和有/无封面两种卡面的圆角严丝合缝。
+    let tier_band = egui::Rect::from_min_max(
+        egui::pos2(cover.left(), cover.bottom() - tokens.layout.tier_bar),
+        cover.right_bottom(),
+    );
+    painter.with_clip_rect(tier_band).rect_filled(
+        cover,
+        cover_radius,
+        look::tier_color(row.tier(), ui.visuals()),
+    );
+    if chosen || focused {
+        // 选中态和键盘焦点都只落在 `.cover`，且只画一圈：整卡焦点框和双层光晕会把
+        // 信息区误认成卡面的一部分。
+        painter.rect_stroke(
+            cover,
+            cover_radius,
+            ui.visuals().selection.stroke,
+            // 卡面贴着分配区边缘；往外画会被裁掉三条边。描在卡面内侧才能完整围住它。
+            egui::StrokeKind::Inside,
+        );
+    }
+}
 
 /// 界面上人工写下的叫法，**依据**里写这一句。
 ///
@@ -241,6 +348,12 @@ pub struct SaveDraft {
 /// 浏览屏。
 pub struct Screen {
     window: Window,
+    /// 卡片墙的虚拟窗口；仅封面模式只改它，不污染主选择集。
+    card_window: Window,
+    /// 卡片工具栏的覆盖率统计。它永远只取有封面的作品，因而不能复用会受开关影响的卡片窗。
+    cover_window: Window,
+    /// 卡片墙滚到哪一组就把哪一组钉在网格上沿；避免每一排重复一遍平台标题。
+    card_group_header: Option<(String, u64)>,
     /// 筛选与排序。**界面上这一份是源头**，[`Window`] 里那一份是它的副本，每帧同步一次。
     query: WorkQuery,
     /// 五个维度各有哪些值可选。换库或改过元数据才重问。
@@ -322,6 +435,12 @@ pub struct Screen {
     gallery: Gallery,
     /// 「**在每行开头显示封面**」那颗开关（票 `gui-looks-like-the-design/09`）。默认关着。
     list_covers: bool,
+    /// 浏览屏的呈现方式；只影响界面，不参与子库的选择集规则。
+    view: BrowseView,
+    /// 卡片的大小与是否按平台分段，同样只是视图偏好。
+    card_size: CardSize,
+    group_cards: bool,
+    only_covers: bool,
     /// 主列表行首那几格封面：问过的、解着的（[`Shelf`]）。与 [`Self::gallery`] 分开一份。
     shelf: Shelf,
     /// 左栏平台那一簇**摊没摊开**：没摊开时只摆头几个（令牌 `platforms-visible`），其余收在
@@ -407,6 +526,9 @@ impl Screen {
         };
         Self {
             window: Window::new(SPAN),
+            card_window: Window::new(SPAN),
+            cover_window: Window::new(SPAN),
+            card_group_header: None,
             query: WorkQuery::default(),
             facets: Facets::default(),
             facets_for: None,
@@ -433,6 +555,10 @@ impl Screen {
             gallery: Gallery::new(),
             short_names: Vec::new(),
             list_covers: false,
+            view: BrowseView::Table,
+            card_size: CardSize::Medium,
+            group_cards: false,
+            only_covers: false,
             shelf: Shelf::default(),
             more_platforms: false,
             cover: None,
@@ -471,6 +597,58 @@ impl Screen {
         // 主列表每行的显示标题也照这一份挑（`Window::set_priorities`）：表上与详情头上得是同一个名字。
         self.window.set_priorities(priorities.clone());
         self.priorities = priorities;
+    }
+
+    /// 切到卡片视图；供窗口恢复偏好与界面测试走同一份状态。
+    pub fn show_cards(&mut self) {
+        self.view = BrowseView::Cards;
+    }
+
+    /// 从工作目录的版式偏好恢复浏览屏呈现方式；这些值绝不参与选择集规则。
+    pub fn restore_view_preferences(&mut self, layout: &layout::Layout) {
+        self.view = if layout.preference("浏览视图") == Some("卡片") {
+            BrowseView::Cards
+        } else {
+            BrowseView::Table
+        };
+        self.list_covers = layout.preference("列表封面") == Some("是");
+        self.group_cards = layout.preference("卡片分组") == Some("平台");
+        self.only_covers = layout.preference("仅封面") == Some("是");
+        self.card_size = match layout.preference("卡片大小") {
+            Some("小") => CardSize::Small,
+            Some("大") => CardSize::Large,
+            _ => CardSize::Medium,
+        };
+    }
+
+    /// 把浏览屏呈现方式交给统一的版式偏好文件落盘。
+    pub fn save_view_preferences(&self, layout: &mut layout::Layout) {
+        layout.set_preference(
+            "浏览视图",
+            if self.view == BrowseView::Cards {
+                "卡片"
+            } else {
+                "表格"
+            },
+        );
+        layout.set_preference("列表封面", if self.list_covers { "是" } else { "否" });
+        layout.set_preference(
+            "卡片分组",
+            if self.group_cards {
+                "平台"
+            } else {
+                "不分组"
+            },
+        );
+        layout.set_preference("仅封面", if self.only_covers { "是" } else { "否" });
+        layout.set_preference(
+            "卡片大小",
+            match self.card_size {
+                CardSize::Small => "小",
+                CardSize::Medium => "中",
+                CardSize::Large => "大",
+            },
+        );
     }
 
     /// 指一份**媒体池**。**目录不在就不指**——「没查」与「查了、没有」得分得开。
@@ -1339,6 +1517,14 @@ impl Screen {
             self.load_work(catalog);
         }
         self.window.sync(catalog);
+        let card_query = self.query.clone().with_covers_only(self.only_covers);
+        self.card_window.set_query(card_query);
+        self.card_window.set_priorities(self.priorities.clone());
+        self.card_window.sync(catalog);
+        let cover_query = self.query.clone().with_covers_only(true);
+        self.cover_window.set_query(cover_query);
+        self.cover_window.set_priorities(self.priorities.clone());
+        self.cover_window.sync(catalog);
         if refiltered || self.filtered.is_none() {
             // **筛出来多少**与**选中多少**是两个数，各数各的：前者换筛选才变，
             // 后者每勾一行就变。合成一个的话，屏上「筛出 N 行」会跟着勾选跳。
@@ -1790,23 +1976,33 @@ impl Screen {
                     ui.separator();
                 }
                 self.list_bar(ui);
-                let opened = Table {
-                    catalog: &site.catalog,
-                    window: &mut self.window,
-                    query: &mut self.query,
-                    focused: &mut self.focused,
-                    picked: &mut self.picked,
-                    scroll_to: self.scroll_to,
-                    rules: &self.rules,
-                    shelf: if self.list_covers {
-                        Some(&mut self.shelf)
-                    } else {
-                        None
-                    },
-                }
-                .show(ui);
+                let opened = match self.view {
+                    BrowseView::Table => Table {
+                        catalog: &site.catalog,
+                        window: &mut self.window,
+                        query: &mut self.query,
+                        focused: &mut self.focused,
+                        picked: &mut self.picked,
+                        scroll_to: self.scroll_to,
+                        rules: &self.rules,
+                        shelf: if self.list_covers {
+                            Some(&mut self.shelf)
+                        } else {
+                            None
+                        },
+                    }
+                    .show(ui),
+                    BrowseView::Cards => {
+                        self.card_grid(ui, &site.catalog)
+                            .map(|row| crate::table::Opened {
+                                row,
+                                index: 0,
+                                page: false,
+                            })
+                    }
+                };
                 // **画完表才问封面**：这一帧画到了哪几行，表画完才知道。
-                if self.list_covers {
+                if self.list_covers || self.view == BrowseView::Cards {
                     self.shelf
                         .sync(ui.ctx(), &mut site.catalog, self.pool.as_ref(), writable);
                 }
@@ -1894,8 +2090,8 @@ impl Screen {
         });
     }
 
-    /// 表格上方「**列表**」那一条（设计稿 `#lbar` 的 `.cbar`）：次级底色、底下一条分隔线，
-    /// 摆一颗「在每行开头显示封面」和一句帮助；右端是「N 个作品（共 M）」那一句（[`Self::count_line`]）。
+    /// 主列表上方的工具条（设计稿 `#lbar` 的 `.cbar`）：次级底色、底下一条分隔线；右端是
+    /// 「N 个作品（共 M）」那一句（[`Self::count_line`]）。
     ///
     /// 稿上那一句在再上面一条 `.tbar` 里，与视图切换、几颗批量按钮做邻居：批量按钮挪进了屏头右侧，
     /// 视图切换归票 `10`，那一条只剩这一句，于是摆进这一条的右端，不另起一条。
@@ -1904,6 +2100,8 @@ impl Screen {
         let [上下, 左右] = tokens.space.list_bar_padding;
         let 线 = ui.visuals().widgets.noninteractive.bg_stroke;
         let 这一句 = self.count_line(ui);
+        let 有封面 = self.cover_window.total();
+        let 作品总数 = self.window.total();
         let 这一条 = egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
             .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
@@ -1911,67 +2109,353 @@ impl Screen {
                 ui.set_width(ui.available_width());
                 ui.spacing_mut().item_spacing =
                     egui::vec2(tokens.space.list_bar_gap, look::step(0));
-                // 勾了几行时右端那一句后头跟一颗小号幽灵按钮「清除选择」（设计稿 `#clear-pick`）。
-                let 勾了 = self.picked.count(self.window.total()) > 0;
-                let 按钮宽 = if 勾了 {
-                    tokens.space.list_bar_gap + look::small_button_width(ui, CLEAR_PICK)
-                } else {
-                    0.0
-                };
-                // **右端那一句固定在头一行**（协调人 2026-09-15 定，照稿 `.tbar .cnt`）：先量出它连按钮多宽，左边那一截
-                // 只拿剩下的宽、自己折行；那一句与「列表」顶齐，摆在头一行。
-                let 右宽 = 这一句.size().x + 按钮宽;
-                let 行高 = 这一句.size().y;
-                ui.horizontal_top(|ui| {
-                    let 左宽 = (ui.available_width() - 右宽 - tokens.space.list_bar_gap).max(0.0);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(左宽, 0.0),
-                        Layout::left_to_right(Align::Center).with_main_wrap(true),
-                        |ui| {
-                            ui.set_max_width(左宽);
-                            look::section(ui, "列表");
+                ui.vertical(|ui| {
+                    // 第一层只回答“看什么、共有多少”，让视图切换与集合规模一眼成组。
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(self.view == BrowseView::Table, "表格")
+                            .clicked()
+                        {
+                            self.view = BrowseView::Table;
+                        }
+                        if ui
+                            .selectable_label(self.view == BrowseView::Cards, "卡片")
+                            .clicked()
+                        {
+                            self.view = BrowseView::Cards;
+                        }
+                        let 宽 = 这一句.size().x;
+                        let 剩 = ui.available_size_before_wrap().x;
+                        if 宽 < 剩 {
+                            ui.add_space((剩 - 宽).floor());
+                        }
+                        ui.label(这一句.clone());
+                        if self.picked.count(self.window.total()) > 0
+                            && look::small_buttons(ui, |ui| {
+                                ui.scope(|ui| {
+                                    look::ghost_button(ui.visuals_mut());
+                                    ui.button(CLEAR_PICK)
+                                })
+                                .inner
+                                .clicked()
+                            })
+                        {
+                            self.picked.clear();
+                        }
+                    });
+                    ui.add_space(look::step(1));
+                    // 第二层才是当前呈现方式的控制。卡片不会再和视图、计数争一行。
+                    ui.horizontal_wrapped(|ui| {
+                        if self.view == BrowseView::Table {
                             ui.checkbox(
                                 &mut self.list_covers,
                                 egui::RichText::new("在每行开头显示封面")
                                     .size(look::font_size(ui.ctx(), tokens.font.size_small_plus)),
                             );
-                            look::help(ui, "没有封面的作品显示平台色块；双击一行打开作品详情");
-                            if let Some(说的) = self.shelf.error() {
-                                ui.colored_label(ui.visuals().error_fg_color, 说的);
-                            }
-                            // 上一次动作出的错（底下那块编辑面板拆掉之前摆在那块顶上）：一直摆着，直到下一次动作成了。
+                            look::help(ui, "双击一行打开作品详情");
                             if let Some(说的) = &self.error {
                                 ui.colored_label(ui.visuals().error_fg_color, 说的);
                             }
-                        },
-                    );
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), 行高),
-                        Layout::right_to_left(Align::Min),
-                        |ui| {
-                            // 右往左摆：先摆的在最右。
-                            if 勾了 {
-                                let 清 = look::small_buttons(ui, |ui| {
-                                    ui.scope(|ui| {
-                                        look::ghost_button(ui.visuals_mut());
-                                        ui.button(CLEAR_PICK)
-                                    })
-                                    .inner
-                                    .clicked()
+                        } else {
+                            look::section(ui, "分组");
+                            if ui.selectable_label(!self.group_cards, "不分组").clicked() {
+                                self.group_cards = false;
+                                self.card_group_header = None;
+                            }
+                            if ui.selectable_label(self.group_cards, "按平台").clicked() {
+                                self.group_cards = true;
+                                self.card_group_header = None;
+                                // 分组的次序由中立库排序，不能只把当前页的卡片在界面里重排。
+                                self.query.order = WorkOrder::Platform;
+                            }
+                            look::section(ui, "排序");
+                            let mut card_order = None;
+                            egui::ComboBox::from_id_salt("卡片排序")
+                                // 平台分组本身就是主排序；组内没有额外字段时，界面上叫「默认」。
+                                .selected_text(if self.group_cards {
+                                    "默认"
+                                } else {
+                                    card_order_label(self.query.order)
+                                })
+                                .show_ui(ui, |ui| {
+                                    for order in WorkOrder::ALL {
+                                        let selected = if self.group_cards {
+                                            order == WorkOrder::Name
+                                        } else {
+                                            self.query.order == order
+                                        };
+                                        if ui
+                                            .selectable_label(selected, card_order_label(order))
+                                            .clicked()
+                                        {
+                                            card_order = Some(order);
+                                        }
+                                    }
                                 });
-                                if 清 {
-                                    self.picked.clear();
+                            if let Some(order) = card_order {
+                                if self.group_cards && order == WorkOrder::Name {
+                                    // 「默认」保留按平台的组序，组内则由中立库的稳定次序决定。
+                                } else {
+                                    self.group_cards = false;
+                                    self.card_group_header = None;
+                                    self.query.order = order;
                                 }
                             }
-                            ui.label(这一句);
-                        },
-                    );
+                            look::section(ui, "大小");
+                            for (size, label) in [
+                                (CardSize::Small, "小"),
+                                (CardSize::Medium, "中"),
+                                (CardSize::Large, "大"),
+                            ] {
+                                if ui.selectable_label(self.card_size == size, label).clicked() {
+                                    self.card_size = size;
+                                }
+                            }
+                            ui.checkbox(&mut self.only_covers, "只显示有封面的");
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.weak(format!(
+                                    "有封面 {} / {}",
+                                    thousands(有封面),
+                                    thousands(作品总数)
+                                ));
+                            });
+                        }
+                    });
+                    if let Some(说的) = self.shelf.error() {
+                        ui.colored_label(ui.visuals().error_fg_color, 说的);
+                    }
                 });
             })
             .response
             .rect;
         ui.painter()
             .hline(这一条.x_range(), 这一条.bottom() - 线.width / 2.0, 线);
+    }
+
+    /// 卡片墙走自己的分页窗：仅封面开关不影响主列表；封面与无封面字卡都复用 [`Shelf`]。
+    fn card_grid(
+        &mut self,
+        ui: &mut egui::Ui,
+        catalog: &Catalog,
+    ) -> Option<romcat_core::catalog::browse::WorkRow> {
+        // 设计稿 `.cgrid`：横向 16、纵向 20；不能借全局控件间距，否则卡片墙会挤成表格。
+        const CARD_GAP_X: f32 = 16.0;
+        const CARD_GAP_Y: f32 = 20.0;
+        let min_width = self.card_size.width();
+        // 左右留白属于可滚动内容；滚动条本身必须贴着中栏右边界，不能被留白再往里推。
+        let grid_width = (ui.available_width() - 32.0).max(min_width);
+        let columns = ((grid_width + CARD_GAP_X) / (min_width + CARD_GAP_X))
+            .floor()
+            .max(1.0) as u64;
+        // 与设计稿 `repeat(auto-fill, minmax(--cw, 1fr))` 同义：档位是最小宽度，余宽由
+        // 当前行的所有卡均分。否则第三张卡后会留下比右侧留白大得多的一块空区。
+        let width = (grid_width - CARD_GAP_X * (columns - 1) as f32) / columns as f32;
+        let cover = egui::vec2(width, width / Tokens::builtin().layout.card_cover_ratio);
+        let card_height = cover.y + Tokens::builtin().layout.card_info_height;
+        let card_row_height = card_height + CARD_GAP_Y;
+        let card_rows = self.card_window.total().div_ceil(columns) as usize;
+        let mut opened = None;
+        // `.cgrid` 的上内边距：即使不显示组头，工具条与第一排卡也不能贴在一起。
+        ui.add_space(14.0);
+        if self.group_cards {
+            let header = self.card_group_header.clone().or_else(|| {
+                self.card_window.row(catalog, 0).map(|row| {
+                    let platform = row
+                        .platforms
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "未知".into());
+                    let count = self
+                        .facets
+                        .platforms
+                        .iter()
+                        .find(|facet| facet.value == platform)
+                        .map(|facet| facet.count)
+                        .unwrap_or(row.variants);
+                    (platform, count)
+                })
+            });
+            if let Some((platform, count)) = header {
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    let (dot, _) =
+                        ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                    ui.painter().rect_filled(
+                        dot,
+                        Tokens::builtin().radius.small,
+                        Tokens::builtin().color.platform.of(&platform),
+                    );
+                    ui.label(font::strong(&platform));
+                    ui.weak(format!("{} 个作品", thousands(count)));
+                });
+                let separator_y = ui.cursor().top();
+                ui.painter().hline(
+                    (ui.min_rect().left() + 16.0)..=(ui.max_rect().right() - 16.0),
+                    separator_y,
+                    ui.visuals().widgets.noninteractive.bg_stroke,
+                );
+                ui.add_space(look::step(1));
+            }
+        }
+        // `ScrollArea` 默认按内容收缩；卡片恰好排满三列时会把滚动轨留在第三张卡旁边，
+        // 看起来像中栏右侧凭空多了一片空白。两轴都禁止收缩，轨道才会贴到详情栏分隔线。
+        egui::ScrollArea::vertical()
+            .id_salt("卡片墙")
+            .auto_shrink([false, false])
+            .show_rows(ui, card_row_height, card_rows, |ui, visible| {
+                if self.group_cards {
+                    let first = visible.start as u64 * columns;
+                    if let Some(row) = self.card_window.row(catalog, first) {
+                        let platform = row
+                            .platforms
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| "未知".into());
+                        let count = self
+                            .facets
+                            .platforms
+                            .iter()
+                            .find(|facet| facet.value == platform)
+                            .map(|facet| facet.count)
+                            .unwrap_or(row.variants);
+                        let header = (platform, count);
+                        if self.card_group_header.as_ref() != Some(&header) {
+                            self.card_group_header = Some(header);
+                            ui.ctx().request_repaint();
+                        }
+                    }
+                }
+                for card_row in visible {
+                    ui.horizontal(|ui| {
+                        ui.add_space(16.0);
+                        ui.spacing_mut().item_spacing.x = CARD_GAP_X;
+                        for column in 0..columns {
+                            let index = card_row as u64 * columns + column;
+                            let Some(row) = self.card_window.row(catalog, index).cloned() else {
+                                break;
+                            };
+                            let title = row
+                                .display
+                                .clone()
+                                .or_else(|| row.title(&self.rules))
+                                .unwrap_or_else(|| row.name.clone());
+                            let (rect, response) = ui.allocate_exact_size(
+                                egui::vec2(
+                                    width,
+                                    cover.y + Tokens::builtin().layout.card_info_height,
+                                ),
+                                egui::Sense::click(),
+                            );
+                            // 这不是一块只能点鼠标的画布。把整张卡申报为按钮，egui 才会
+                            // 把它放进 Tab 顺序，也让辅助技术能读出它是什么作品。
+                            response.widget_info(|| {
+                                egui::WidgetInfo::selected(
+                                    egui::WidgetType::Button,
+                                    true,
+                                    self.picked.contains(&row.anchor),
+                                    &title,
+                                )
+                            });
+                            let mut card = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(rect)
+                                    .layout(Layout::top_down(Align::Min)),
+                            );
+                            let cover_radius = if self.shelf.has_cover(&row) == Some(true) {
+                                Tokens::builtin().radius.medium
+                            } else {
+                                Tokens::builtin().radius.large
+                            };
+                            self.shelf.card(&mut card, cover, &row, &title);
+                            let chosen = self.picked.contains(&row.anchor);
+                            paint_card_overlay(
+                                &card,
+                                rect,
+                                cover,
+                                cover_radius,
+                                &row,
+                                chosen,
+                                response.has_focus(),
+                            );
+                            card.add_space(look::step(2));
+                            // 卡面里可以有标题，卡面外仍要有稳定的文字区：滚动时才不会只剩
+                            // 一大片色块，也让有封面与无封面卡的扫描节奏一致。
+                            card.add(egui::Label::new(font::strong(&title)).truncate());
+                            card.weak(format!(
+                                "{} · {} 个变体 · {}",
+                                row.year.as_deref().unwrap_or("年份未知"),
+                                thousands(row.variants),
+                                human_bytes(row.bytes)
+                            ));
+                            card.horizontal(|ui| {
+                                ui.colored_label(
+                                    look::tier_color(row.tier(), ui.visuals()),
+                                    row.confidence_label(),
+                                );
+                            });
+                            // 未选卡只在鼠标靠近时露出选择框；已选卡必须常驻勾选，不能让人移开
+                            // 鼠标就看不出哪些卡被选中了。
+                            let mut 点了选择 = false;
+                            if response.hovered() || chosen {
+                                let check_rect = egui::Rect::from_min_size(
+                                    rect.min + egui::vec2(8.0, 8.0),
+                                    egui::vec2(22.0, 22.0),
+                                );
+                                let check_fill = if chosen {
+                                    ui.visuals().selection.bg_fill
+                                } else {
+                                    ui.visuals().window_fill.gamma_multiply(0.75)
+                                };
+                                ui.painter().rect_filled(
+                                    check_rect,
+                                    Tokens::builtin().radius.small,
+                                    check_fill,
+                                );
+                                ui.painter().rect_stroke(
+                                    check_rect,
+                                    Tokens::builtin().radius.small,
+                                    ui.visuals().widgets.active.bg_stroke,
+                                    egui::StrokeKind::Inside,
+                                );
+                                if chosen {
+                                    ui.painter().text(
+                                        check_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "✓",
+                                        egui::FontId::proportional(16.0),
+                                        ui.visuals().strong_text_color(),
+                                    );
+                                }
+                                // 选择框压在整卡点击区里；egui 只会把那一下归给先注册的整卡。
+                                // 因此按整卡响应给出的命中坐标二次判定，而不是再注册一个竞争响应。
+                                if response.clicked()
+                                    && response
+                                        .interact_pointer_pos()
+                                        .is_some_and(|pos| check_rect.contains(pos))
+                                {
+                                    self.picked.toggle(&row.anchor);
+                                    点了选择 = true;
+                                }
+                            }
+                            if response.clicked() && !点了选择 {
+                                response.request_focus();
+                                opened = Some(row.clone());
+                            }
+                            if response.has_focus()
+                                && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                            {
+                                opened = Some(row.clone());
+                            }
+                            if response.has_focus()
+                                && ui.input(|input| input.key_pressed(egui::Key::Space))
+                            {
+                                self.picked.toggle(&row.anchor);
+                            }
+                        }
+                    });
+                }
+            });
+        opened
     }
 
     /// 左边那栏，照稿 `.fpane` 从上到下：标题行（「清除」与收起）、搜索框、平台、中文、识别结论、

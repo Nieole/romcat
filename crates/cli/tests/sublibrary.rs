@@ -302,7 +302,7 @@ fn 主库不在位照样看得了选择集_卡不在手边时装不装得下说�
     // 卡还没插：装不装得下比的是目标现占 ＋ 净变化，看不见目标就**不给数**——
     // 不拿选中容量去比上限（挂账 D76）。
     assert!(text.contains("算不出"), "{text}");
-    assert!(text.contains("目标不在位"), "{text}");
+    assert!(text.contains("目标未连接"), "{text}");
     assert!(!text.contains("装得下："), "{text}");
     assert!(!text.contains("装不下"), "{text}");
 

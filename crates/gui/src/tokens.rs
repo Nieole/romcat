@@ -662,6 +662,12 @@ pub struct Layout {
     pub thumb_list: [f32; 2],
     /// 卡片封面宽高比（3:4 写成 0.75）。
     pub card_cover_ratio: f32,
+    /// 卡片视图三档封面宽：小、中、大。
+    pub card_widths: [f32; 3],
+    /// 卡片封面下信息区高度。
+    pub card_info_height: f32,
+    /// 按平台分组时组头高度。
+    pub card_group_height: f32,
     /// 底部状态栏高度。
     pub statusbar: f32,
     /// 底部状态栏里任务那条小进度条的宽度。

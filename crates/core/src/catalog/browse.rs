@@ -1104,6 +1104,8 @@ pub struct WorkRow {
     /// 一条候选都没有时是 `None`，那不是「没撞上」——是**没有候选**或者**还没识别**，
     /// 哪一个由 [`identified`](Self::identified) 分辨。
     pub confidence: Option<Confidence>,
+    /// 已采纳候选的中文身份：汉化 / 官中。
+    pub chinese: Vec<String>,
     /// 底下那些变体**是不是全都跑过识别**（按当前筛选）。
     ///
     /// **它是「还没识别」与「没有候选」之间那条界线**（`CONTEXT.md` 两条词条）：
@@ -1534,6 +1536,8 @@ pub struct WorkQuery {
     pub order: WorkOrder,
     /// 倒着排。
     pub descending: bool,
+    /// 卡片墙的临时呈现条件；不属于筛选器，也不写进子库规则。
+    pub cover_only: bool,
 }
 
 /// 当前筛选里**写不成规则**的那一条。
@@ -1758,6 +1762,7 @@ impl WorkQuery {
             && self.rule == other.rule
             // **非游戏资产那个开关也算筛选**：拨一下，列出来的就换了一批行。
             && self.non_game_assets == other.non_game_assets
+            && self.cover_only == other.cover_only
     }
 
     /// **当前筛选原样变成的那条规则**——「存成子库」按下去时走的就是这里。
@@ -1862,7 +1867,22 @@ impl WorkQuery {
             sql.push_str(&hit_sql);
             args.append(&mut hit_args);
         }
+        if self.cover_only {
+            sql.push_str(if sql.is_empty() { " WHERE " } else { " AND " });
+            sql.push_str(
+                "EXISTS (SELECT 1 FROM media_ref r WHERE r.kind = '封面'
+                 AND ((r.anchor = '作品' AND r.subject = work.name)
+                   OR (r.anchor = '变体' AND r.subject = variant.key)))",
+            );
+        }
         (sql, args)
+    }
+
+    /// 复制出仅供卡片墙使用的“有封面”查询；不改变原选择集。
+    #[must_use]
+    pub fn with_covers_only(mut self, covers_only: bool) -> Self {
+        self.cover_only = covers_only;
+        self
     }
 
     /// 折出 `SELECT` 里那一列**匹配质量的名次**，连它的参数。没搜索时是空的。
@@ -2062,6 +2082,7 @@ impl Catalog {
         let mut out = self.work_page_totals(query, picked)?;
         self.fill_scraped(&mut out)?;
         self.fill_confidence(query, &mut out)?;
+        self.fill_chinese(query, &mut out)?;
         Ok(out)
     }
 
@@ -2485,6 +2506,7 @@ impl Catalog {
                     year: None,
                     missing: WORK_FIELDS.to_vec(),
                     confidence: None,
+                    chinese: Vec::new(),
                 }
             })
             .collect())
@@ -2578,6 +2600,90 @@ impl Catalog {
     /// 变体里最有把握的那条结论。一条候选都没有就留 `None`——那不是「撞过没撞上」
     /// （ADR-0002）；那一行印**没有候选**还是**还没识别**，由
     /// [`WorkRow::identified`] 那一列分辨，不由这一趟说。
+    /// 补上这一页每行已采纳候选带着的中文身份；显示层不从标题或文件名猜。
+    fn fill_chinese(&self, query: &WorkQuery, rows: &mut [WorkRow]) -> Result<(), CatalogError> {
+        let works: Vec<i64> = rows
+            .iter()
+            .filter_map(|row| match row.anchor {
+                WorkAnchor::Work(id) => Some(id),
+                WorkAnchor::Loose(_) => None,
+            })
+            .collect();
+        let loose: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match &row.anchor {
+                WorkAnchor::Loose(key) => Some(key.as_str()),
+                WorkAnchor::Work(_) => None,
+            })
+            .collect();
+        let mut by_work =
+            std::collections::BTreeMap::<i64, std::collections::BTreeSet<String>>::new();
+        if !works.is_empty() {
+            let (where_sql, mut args) = query.where_clause();
+            let sql = format!(
+                "SELECT variant.work_id, candidate.chinese FROM variant
+                   JOIN candidate ON candidate.variant_key = variant.key
+                   LEFT JOIN work ON work.id = variant.work_id
+                  {where_sql}{glue} candidate.accepted <> 0
+                    AND candidate.chinese IS NOT NULL
+                    AND variant.work_id IN ({ids})
+                  GROUP BY variant.work_id, candidate.chinese",
+                glue = if where_sql.is_empty() {
+                    " WHERE"
+                } else {
+                    " AND"
+                },
+                ids = placeholders(works.len()),
+            );
+            args.extend(works.iter().map(|id| Box::new(*id) as Box<dyn ToSql>));
+            let mut statement = self.conn.prepare(&sql).map_err(|source| self.err(source))?;
+            for found in statement
+                .query_map(params_from_iter(args.iter()), |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|source| self.err(source))?
+            {
+                let (id, mark) = found.map_err(|source| self.err(source))?;
+                by_work.entry(id).or_default().insert(mark);
+            }
+        }
+        let mut by_key =
+            std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+        if !loose.is_empty() {
+            let sql = format!(
+                "SELECT candidate.variant_key, candidate.chinese FROM candidate
+                 WHERE candidate.accepted <> 0 AND candidate.chinese IS NOT NULL
+                   AND candidate.variant_key IN ({keys})
+                 GROUP BY candidate.variant_key, candidate.chinese",
+                keys = placeholders(loose.len()),
+            );
+            let args: Vec<Box<dyn ToSql>> = loose
+                .iter()
+                .map(|key| Box::new((*key).to_owned()) as Box<dyn ToSql>)
+                .collect();
+            let mut statement = self.conn.prepare(&sql).map_err(|source| self.err(source))?;
+            for found in statement
+                .query_map(params_from_iter(args.iter()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|source| self.err(source))?
+            {
+                let (key, mark) = found.map_err(|source| self.err(source))?;
+                by_key.entry(key).or_default().insert(mark);
+            }
+        }
+        for row in rows {
+            row.chinese = match &row.anchor {
+                WorkAnchor::Work(id) => by_work.remove(id),
+                WorkAnchor::Loose(key) => by_key.remove(key),
+            }
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        }
+        Ok(())
+    }
+
     fn fill_confidence(&self, query: &WorkQuery, rows: &mut [WorkRow]) -> Result<(), CatalogError> {
         let works: Vec<i64> = rows
             .iter()
@@ -3076,6 +3182,7 @@ mod tests {
             year: None,
             missing: missing.to_vec(),
             confidence,
+            chinese: Vec::new(),
             identified,
             hit: None,
             non_game_asset: false,

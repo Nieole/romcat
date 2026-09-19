@@ -453,6 +453,17 @@ impl Shelf {
         self.error.as_deref()
     }
 
+    /// 这行的封面是否已经查明；`None` 表示这一帧尚未向核心库询问。
+    #[must_use]
+    pub fn has_cover(&self, row: &WorkRow) -> Option<bool> {
+        self.covers.get(&row.anchor).map(Option::is_some)
+    }
+
+    /// 记录一张当前可见卡片，交给下一帧的 [`Self::sync`] 查询封面。
+    pub fn note(&mut self, row: &WorkRow) {
+        self.seen.push(row.clone());
+    }
+
     /// **画完表之后每帧一次**：这一帧新画到、还没问过的那几行去问核心库要封面，
     /// 画到的那几行要的图交给后台解。
     ///
@@ -505,6 +516,77 @@ impl Shelf {
             None => platform_block(ui, size, row.platforms.first().map_or("", String::as_str)),
         }
     }
+
+    /// 卡片视图的封面：仍然由核心库挑哪一张、仍然走这一份后台解码池；没有封面时画字卡。
+    pub(crate) fn card(&mut self, ui: &mut egui::Ui, size: egui::Vec2, row: &WorkRow, title: &str) {
+        self.seen.push(row.clone());
+        let item = self.covers.get(&row.anchor).and_then(Option::as_ref);
+        match item.and_then(|item| self.gallery.texture(item)) {
+            Some(texture) => paint_cover(
+                ui,
+                size,
+                crate::tokens::Tokens::builtin().radius.medium,
+                texture,
+            ),
+            None => browse_title_card(
+                ui,
+                size,
+                title,
+                row.platforms.first().map_or("", String::as_str),
+            ),
+        }
+    }
+}
+
+/// 浏览卡片墙的无封面字卡。它与详情头上的小字卡不是同一版式：卡片墙里的它必须像一张
+/// 可以浏览的封面，有留白的标题区、来源说明与大号平台水印，而非缩略图被放大后的灰块。
+fn browse_title_card(ui: &mut egui::Ui, size: egui::Vec2, title: &str, platform: &str) {
+    let tokens = crate::tokens::Tokens::builtin();
+    let radius = tokens.radius.large;
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let color = tokens.color.platform.of(platform);
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(
+        rect,
+        radius,
+        ui.visuals()
+            .faint_bg_color
+            .lerp_to_gamma(color, tokens.mix.title_card_tint),
+    );
+    top_band(&painter, rect, radius, tokens.layout.title_card_band, color);
+
+    // 空出上半的呼吸感：右上角的平台与中文标签由卡片视图叠上来，标题从中段开始，
+    // 才不会和它们挤成一团。
+    let title_top = (size.y * 0.30).floor();
+    let mut title_job = egui::text::LayoutJob::simple(
+        title.to_owned(),
+        egui::FontId::new(tokens.font.size_cover_title, crate::font::strong_family()),
+        ui.visuals().strong_text_color(),
+        rect.width() - 26.0,
+    );
+    title_job.wrap.max_rows = 4;
+    title_job.wrap.break_anywhere = true;
+    painter.galley(
+        rect.min + egui::vec2(13.0, title_top),
+        painter.layout_job(title_job),
+        ui.visuals().strong_text_color(),
+    );
+    painter.text(
+        rect.left_bottom() + egui::vec2(13.0, -15.0),
+        egui::Align2::LEFT_BOTTOM,
+        "暂无封面",
+        egui::FontId::proportional(tokens.font.size_small),
+        ui.visuals().weak_text_color(),
+    );
+    painter.text(
+        egui::pos2(rect.right() + 4.0, rect.bottom() + 16.0),
+        egui::Align2::RIGHT_BOTTOM,
+        platform,
+        egui::FontId::new(tokens.font.size_cover_mark, crate::font::strong_family()),
+        color.gamma_multiply(tokens.mix.watermark_opacity),
+    );
+    clear_bottom_corners(&painter, rect, f32::from(radius), ui.visuals().panel_fill);
+    outline(ui, rect, radius);
 }
 
 impl Gallery {

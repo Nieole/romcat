@@ -245,6 +245,18 @@ impl SelectionReport {
         let _ = writeln!(out, "容量            {}", human_bytes(self.bytes));
         let _ = writeln!(
             out,
+            "{}",
+            if self.overlaps == 0 {
+                "规则之间没有重复".to_string()
+            } else {
+                format!(
+                    "已去除 {} 个被多条规则同时选中的变体",
+                    thousands(self.overlaps)
+                )
+            }
+        );
+        let _ = writeln!(
+            out,
             "容量是**下界**：元数据读不到的成员按 0 计入（ADR-0021）。"
         );
 

@@ -3373,6 +3373,60 @@ fn 列表每行开头显示封面的开关_有封面贴封面_没封面画平台
 }
 
 #[test]
+fn 卡片视图可切换并画出作品信息() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::没有候选)],
+        std::env::temp_dir().join("romcat-测试-浏览-卡片视图"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 2);
+
+    app.browse_and_site().0.show_cards();
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    for 字 in ["短", "SFC", "年份未知", "1 个变体", "没有候选"] {
+        assert!(屏上.contains(字), "卡片视图没有「{字}」：\n{屏上}");
+    }
+}
+
+#[test]
+fn 卡片工具条显示覆盖率并能改排序() {
+    let ctx = headless::context();
+    let (mut app, _dir) = 一个有封面一个没有的小库();
+    app.browse_and_site().0.show_cards();
+    跑(&ctx, &mut app, 3);
+
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    for 字 in ["排序", "默认", "有封面 1 / 2"] {
+        assert!(屏上.contains(字), "卡片工具条没有「{字}」：\n{屏上}");
+    }
+
+    // 分组时「默认」仍然可点；选具体字段会取消分组，交给中立库按那个字段重排。
+    shared::点一下(&ctx, "默认", |ui| app.ui(ui));
+    shared::点一下(&ctx, "容量", |ui| app.ui(ui));
+    assert_eq!(
+        app.browse().query().order,
+        romcat_core::catalog::browse::WorkOrder::Bytes,
+        "卡片工具条的排序没有同步进查询"
+    );
+}
+
+#[test]
+fn 卡片视图选择记在工作目录而不进中立库() {
+    let ctx = headless::context();
+    let workspace = std::env::temp_dir().join("romcat-测试-浏览-卡片偏好");
+    let mut first = shared::小库(
+        &[("SFC", "短.zip", shared::档::没有候选)],
+        workspace.clone(),
+    );
+    first.show_view(View::Browse);
+    first.browse_and_site().0.show_cards();
+    shared::跑一帧(&ctx, |ui| first.ui(ui));
+    let second = shared::小库(&[("SFC", "短.zip", shared::档::没有候选)], workspace);
+    assert!(second.layout().render().contains("视图·浏览视图 = 卡片"));
+}
+
+#[test]
 fn 筛不出东西时说清楚并给一颗清除筛选_按下去表就回来() {
     const 空态: &str = "没有符合当前筛选条件的作品。";
 
