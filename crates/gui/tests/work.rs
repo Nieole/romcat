@@ -558,6 +558,48 @@ fn 元数据那一面每个字段写着用的是哪个源的值_一键改用另�
         Some(用的),
         "撤销之后没回到原来那一家"
     );
+
+    // **显示标题也是字段**：不能只在编辑态把名称填进框里；平时应能从标题集合中直接选另一来源，
+    // 写成裁决后又撤掉，回到标题集合原来的选择。
+    let 标题原来 = 核心库说的(&mut app, &这个条目, Field::Title)
+        .shown
+        .expect("显示标题在");
+    let 标题集 = {
+        let (_, site) = app.browse_and_site();
+        site.catalog.titles_of(&这个条目.0).expect("读得出标题集合")
+    };
+    let 另一名称 = 标题集
+        .iter()
+        .find(|row| !标题原来.values.contains(&row.value))
+        .expect("合成数据里有另一种名称")
+        .clone();
+    let 标题其他 = format!(
+        "其他 {} 个来源 ▾",
+        标题集
+            .iter()
+            .filter(|row| !标题原来.values.contains(&row.value))
+            .count()
+    );
+    let 屏上 = 按正好(&ctx, &mut app, &标题其他);
+    assert!(
+        有这一段(&屏上, &另一名称.value) && 有这一段(&屏上, "使用这个值"),
+        "显示标题没列出可直接采用的另一来源：\n{屏上}"
+    );
+    按正好(&ctx, &mut app, "使用这个值");
+    assert_eq!(
+        核心库说的(&mut app, &这个条目, Field::Title).shown,
+        Some(Said {
+            source: Some(VERDICT.to_string()),
+            values: vec![另一名称.value.clone()],
+        }),
+        "显示标题改用另一来源没有记成裁决"
+    );
+    按正好(&ctx, &mut app, "撤销手动修改");
+    assert_eq!(
+        核心库说的(&mut app, &这个条目, Field::Title).shown,
+        Some(标题原来),
+        "撤销显示标题的裁决后没有回到标题集合原来的选择"
+    );
 }
 
 /// 一个源在这个作品上说了一句简介：写进中立库的样子与刮削写的一样（`put_scraped` 按「锚点 × 源」整份换掉）。

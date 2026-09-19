@@ -975,16 +975,10 @@ impl Screen {
             行们.push((简称, AnchorKind::Variant, key.as_str(), group));
         }
         // 标题集合里的叫法：编辑态下显示标题那一格底下一排可以点的就是它们（设计稿 `titlesOf`）。
-        let 叫法: Vec<(String, String)> = page
+        let 叫法: Vec<TitleRow> = page
             .details
             .first()
-            .map(|detail| {
-                detail
-                    .titles
-                    .iter()
-                    .map(|row| (row.source.clone(), row.value.clone()))
-                    .collect()
-            })
+            .map(|detail| detail.titles.to_vec())
             .unwrap_or_default();
         let 共 = 行们.len();
         for (at, (层, anchor, subject, one)) in 行们.into_iter().enumerate() {
@@ -1005,7 +999,10 @@ impl Screen {
                     });
                 let 改过 = draft.dirty();
                 let 可点的: Vec<(String, String)> = if 集合挑的 {
-                    叫法.clone()
+                    叫法
+                        .iter()
+                        .map(|row| (row.source.clone(), row.value.clone()))
+                        .collect()
                 } else {
                     one.offered
                         .iter()
@@ -1042,15 +1039,31 @@ impl Screen {
                 &层,
                 画线,
                 false,
-                |ui| field_value(ui, one, anchor, subject, open),
+                |ui| field_value(ui, one, anchor, subject, open, &叫法),
                 |ui| {
-                    (是裁决 && !集合挑的 && ghost_small(ui, "撤销手动修改").clicked()).then(|| {
-                        MetaAction::Revert {
-                            anchor,
-                            subject: subject.to_owned(),
-                            field: one.field,
+                    if 是裁决 && ghost_small(ui, "撤销手动修改").clicked() {
+                        if 集合挑的 {
+                            叫法
+                                .iter()
+                                .find(|row| {
+                                    row.is_verdict()
+                                        && one
+                                            .shown
+                                            .as_ref()
+                                            .is_some_and(|said| said.values.contains(&row.value))
+                                })
+                                .cloned()
+                                .map(MetaAction::RevertTitle)
+                        } else {
+                            Some(MetaAction::Revert {
+                                anchor,
+                                subject: subject.to_owned(),
+                                field: one.field,
+                            })
                         }
-                    })
+                    } else {
+                        None
+                    }
                 },
             );
             动作 = 动作.or(按了);
@@ -1645,6 +1658,33 @@ impl Screen {
                 Ok(()) => {
                     self.refresh(site);
                     self.notice = Some(format!("已改为使用 {source} 的值（记为手动修改）"));
+                }
+                Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+            },
+            MetaAction::UseTitle(row) => {
+                let source = row.source.clone();
+                let verdict = TitleRow {
+                    source: VERDICT.to_owned(),
+                    ..row
+                };
+                match site.catalog.put_titles(&[verdict]) {
+                    Ok(()) => {
+                        self.refresh(site);
+                        self.notice = Some(format!("已改为使用 {source} 的名称（记为手动修改）"));
+                    }
+                    Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+                }
+            }
+            MetaAction::RevertTitle(row) => match site.catalog.remove_title(
+                &row.work,
+                row.language,
+                row.kind,
+                &row.source,
+                &row.value,
+            ) {
+                Ok(_) => {
+                    self.refresh(site);
+                    self.notice = Some("已撤销手动修改，恢复为标题集合的选择".to_owned());
                 }
                 Err(error) => self.error = Some(format!("中立库写不动：{error}")),
             },
@@ -2303,6 +2343,10 @@ enum MetaAction {
         /// 那一句。
         value: String,
     },
+    /// 「使用这个名称」：把标题集合里某个已有名称复制成裁决，成为显示标题。
+    UseTitle(TitleRow),
+    /// 撤掉这条手动加的显示标题，回到标题集合本来的选择。
+    RevertTitle(TitleRow),
     /// 撤销这一格的裁决，回到数据源说了算。
     Revert {
         /// 挂在哪一层。
@@ -2559,6 +2603,7 @@ fn field_value(
     anchor: AnchorKind,
     subject: &str,
     open: bool,
+    title_alts: &[TitleRow],
 ) -> Option<MetaAction> {
     let tokens = Tokens::builtin();
     let 集合挑的 = one.field == Field::Title && anchor == AnchorKind::Work;
@@ -2593,6 +2638,19 @@ fn field_value(
         .iter()
         .filter(|value| !is_shown(one.shown.as_ref(), value))
         .collect();
+    let 别的名称: Vec<&TitleRow> = title_alts
+        .iter()
+        .filter(|row| {
+            !one.shown
+                .as_ref()
+                .is_some_and(|said| said.values.contains(&row.value))
+        })
+        .collect();
+    let 别家数 = if 集合挑的 {
+        别的名称.len()
+    } else {
+        别家.len()
+    };
     let mut 动作 = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = look::step(1);
@@ -2606,24 +2664,21 @@ fn field_value(
         }
         if 集合挑的 {
             look::help(ui, "由标题集合按规则选出");
-        } else if !别家.is_empty() {
-            let 字 = format!(
-                "其他 {} 个来源 {}",
-                别家.len(),
-                if open { "▴" } else { "▾" }
-            );
+        }
+        if 别家数 > 0 {
+            let 字 = format!("其他 {} 个来源 {}", 别家数, if open { "▴" } else { "▾" });
             if ghost_small(ui, &字).clicked() {
                 动作 = Some(MetaAction::Toggle(subject.to_owned(), one.field));
             }
         }
     });
-    if open && !集合挑的 && !别家.is_empty() {
+    if open && 别家数 > 0 {
         ui.add_space(look::step(1));
         for (at, value) in 别家.iter().enumerate() {
             if at > 0 {
                 ui.add_space(tokens.space.alts_gap);
             }
-            if alt_row(ui, value) {
+            if alt_row(ui, &value.source, &value.value) {
                 动作 = Some(MetaAction::UseValue {
                     anchor,
                     subject: subject.to_owned(),
@@ -2631,6 +2686,14 @@ fn field_value(
                     source: value.source.clone(),
                     value: value.value.clone(),
                 });
+            }
+        }
+        for (at, row) in 别的名称.iter().enumerate() {
+            if at > 0 || !别家.is_empty() {
+                ui.add_space(tokens.space.alts_gap);
+            }
+            if alt_row(ui, &row.source, &row.value) {
+                动作 = Some(MetaAction::UseTitle((*row).clone()));
             }
         }
     }
@@ -2646,7 +2709,7 @@ fn is_shown(shown: Option<&Said>, value: &ScrapedValue) -> bool {
 
 /// 「其他来源」里的一句（设计稿 `.alt`）：次级底、一圈描边、中圆角；来源标签、那一句（折行）、右头「使用这个值」。
 /// 按了交回 `true`。
-fn alt_row(ui: &mut egui::Ui, value: &ScrapedValue) -> bool {
+fn alt_row(ui: &mut egui::Ui, source: &str, value: &str) -> bool {
     let tokens = Tokens::builtin();
     let [上下, 左右] = tokens.space.alt_padding;
     let (底色, 线, 字) = {
@@ -2666,14 +2729,14 @@ fn alt_row(ui: &mut egui::Ui, value: &ScrapedValue) -> bool {
             ui.set_width(ui.available_width());
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = tokens.space.alt_gap;
-                source_badge(ui, &value.source, value.source == VERDICT);
+                source_badge(ui, source, source == VERDICT);
                 let 按钮宽 = look::small_button_width(ui, "使用这个值");
                 let 值宽 = (ui.available_width() - 按钮宽 - tokens.space.alt_gap).max(0.0);
                 ui.vertical(|ui| {
                     ui.set_width(值宽);
                     ui.add(
                         egui::Label::new(
-                            egui::RichText::new(&value.value)
+                            egui::RichText::new(value)
                                 .size(look::font_size(ui.ctx(), tokens.font.size_small_plus))
                                 .color(字),
                         )
