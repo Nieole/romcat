@@ -206,10 +206,11 @@ fn paint_card_overlay(
         // 选中态和键盘焦点都只落在 `.cover`，且只画一圈：整卡焦点框和双层光晕会把
         // 信息区误认成卡面的一部分。
         painter.rect_stroke(
-            cover.expand(1.0),
+            cover,
             cover_radius,
             ui.visuals().selection.stroke,
-            egui::StrokeKind::Outside,
+            // 卡面贴着分配区边缘；往外画会被裁掉三条边。描在卡面内侧才能完整围住它。
+            egui::StrokeKind::Inside,
         );
     }
 }
