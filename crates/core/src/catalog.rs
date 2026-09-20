@@ -161,9 +161,10 @@ pub const SCHEMA_VERSION: u32 = 7;
 /// 返回值是给**要回填的那些列**用的：补上的那一刻把旧结论搬进来，只能搬这一次
 /// （`identify::add_columns` 的 `identification.standalone` 是全仓头一例）。
 ///
-/// ⚠️ 三处调用方（`sublibrary` / `identify` / `scrape`）从前各抄了一份这个函数。
-/// 抄出来的几份迟早在「判有没有」那一步上分家，而那一步错了是**静默**的：
-/// 列没补上，读的那一侧只会看见一片 NULL。
+/// ⚠️ 这个函数从前有**两份**，`catalog::sublibrary` 与 `catalog::identify` 各抄了一遍；
+/// 票 `gui-looks-like-the-design/34` 本要抄第三份（`catalog::scrape` 给 `media` 补三列），
+/// 那一下把三处收成了这一处。抄出来的几份迟早在「判有没有」那一步上分家，而那一步错了
+/// 是**静默**的：列没补上，读的那一侧只会看见一片 NULL。
 fn add_column(
     conn: &rusqlite::Connection,
     table: &str,
@@ -830,6 +831,7 @@ impl Catalog {
         sublibrary::add_columns(&catalog.conn).map_err(|source| catalog.err(source))?;
         identify::add_columns(&catalog.conn).map_err(|source| catalog.err(source))?;
         scrape::add_columns(&catalog.conn).map_err(|source| catalog.err(source))?;
+        content::add_columns(&catalog.conn).map_err(|source| catalog.err(source))?;
         let found = catalog.meta_get(MetaKey::SchemaVersion)?;
         match (found.as_deref().map(str::parse::<u32>), birth) {
             // 开头已经核过这一行在不在；这一支只防核完之后另一个连接把它删了——照样不许顺手

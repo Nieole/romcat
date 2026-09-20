@@ -206,6 +206,20 @@ pub(super) fn read_variant_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Vari
     })
 }
 
+/// 补上后来加的列。**纯加列，不改已有列的含义**，所以不动
+/// [`SCHEMA_VERSION`](super::SCHEMA_VERSION)（补列那一下共用 [`add_column`](super::add_column)）。
+///
+/// 票 `gui-looks-like-the-design/34` 加的是 `release.revision`（**发行版那一层的修订**，
+/// 词表**第几版**）。老行上它是 NULL，读的那一侧当「这条条目名里没有修订标记」处理——
+/// 那正是加这一列之前的唯一可能，于是旧数据一行都不会被读错。
+///
+/// **它跟着建表语句走，不塞进别的模块的 `add_columns`**：`release` 这张表建在这个文件里，
+/// 补它的列也该在这儿——两处分家的话，下一个改这张表的人看不见还有一支在给它补列。
+pub(super) fn add_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    super::add_column(conn, "release", "revision", "TEXT")?;
+    Ok(())
+}
+
 /// 一条**发行版**记录读回来的样子。
 ///
 /// `region` 与 `languages` 分开读出来不是冗余：**标题集合**靠它们分辨三件事——

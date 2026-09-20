@@ -1055,4 +1055,35 @@ mod tests {
         assert_eq!(pad("平台", 8), "平台    ");
         assert_eq!(pad("FC", 8), "FC      ");
     }
+
+    #[test]
+    fn 媒体时长排成钟点_零头往下抹() {
+        // 设计稿 `mediaOf` 里那一格写的是 `0:30`。**秒与分都补两位、小时不补**。
+        assert_eq!(media_duration(30_000), "0:30");
+        assert_eq!(media_duration(0), "0:00");
+        assert_eq!(media_duration(95_000), "1:35");
+        assert_eq!(media_duration(3_723_000), "1:02:03");
+        // **零头往下抹**：29.6 秒的片子在播放器上写着 `0:29`，这里不许四舍五入成 `0:30`。
+        assert_eq!(media_duration(29_600), "0:29");
+    }
+
+    #[test]
+    fn 媒体时长与那一条粗估的时长不是同一个数() {
+        // 两者答的是两个问题（各自的文档）：一个是「这段视频多长」，一个是「这趟活跑了多久」。
+        // 同一个毫秒数交给它们，写出来必须不一样——合成一个函数是这条最容易犯的错。
+        assert_eq!(media_duration(95_000), "1:35");
+        assert_eq!(human_duration(95_000), "1 分 35 秒");
+    }
+
+    #[test]
+    fn 像素尺寸中间是乘号不是字母x() {
+        // 稿上画的是 `512 × 682`：U+00D7 连两侧空格。小写字母 `x` 在那一排里会被读成别的东西。
+        assert_eq!(pixel_size(512, 682), "512 × 682");
+        assert_eq!(pixel_size(640, 480), "640 × 480");
+        assert!(
+            !pixel_size(640, 480).contains('x'),
+            "中间那个不许是小写字母 x"
+        );
+        assert!(pixel_size(640, 480).contains('\u{d7}'));
+    }
 }

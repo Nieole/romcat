@@ -330,7 +330,6 @@ pub(super) fn add_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     super::add_column(conn, "content_hash", "bare_sha1", "TEXT")?;
     super::add_column(conn, "identification", "platform", "TEXT")?;
     super::add_column(conn, "identification", "edition", "TEXT")?;
-    super::add_column(conn, "release", "revision", "TEXT")?;
     if super::add_column(conn, "identification", "standalone", "TEXT")? {
         conn.execute(
             "UPDATE identification SET standalone = ?1 WHERE state = ?2 AND instr(reason, ?3) = 1",

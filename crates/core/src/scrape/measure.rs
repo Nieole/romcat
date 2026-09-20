@@ -177,10 +177,13 @@ fn read_frame_size(tail: &str) -> Option<(u32, u32)> {
 
 /// `宽x高` 的一边：2–5 位数字，不带前导零。
 fn read_side(text: &str) -> Option<u32> {
-    let ok = (2..=5).contains(&text.len())
-        && text.bytes().all(|byte| byte.is_ascii_digit())
-        && !text.starts_with('0');
-    ok.then(|| text.parse().ok())?
+    if !(2..=5).contains(&text.len())
+        || !text.bytes().all(|byte| byte.is_ascii_digit())
+        || text.starts_with('0')
+    {
+        return None;
+    }
+    text.parse().ok()
 }
 
 #[cfg(test)]

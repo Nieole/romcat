@@ -678,12 +678,8 @@ impl Catalog {
                     row.get::<_, String>(4)?,
                     row.get::<_, i64>(5)?,
                     // 入池那一刻量下来的三样；**老库里这三格全空**（`catalog::scrape::add_columns`
-                    // 不回填），读回来就是一份空的 `Measured`。
-                    Measured {
-                        width: row.get(6)?,
-                        height: row.get(7)?,
-                        duration_ms: row.get::<_, Option<i64>>(8)?.map(i64::unsigned_abs),
-                    },
+                    // 不回填），读回来就是一份空的 `Measured`。读法与按哈希单问那一支共用。
+                    super::scrape::read_measured(row, 6)?,
                 ))
             })
             .map_err(|source| self.err(source))?;

@@ -1233,7 +1233,7 @@ fn 挂上媒体池(app: &mut App, 目录: &Path) {
 /// （同屏上别处那几个钉死的时刻，`Catalog::mark_exported_at`）。
 const 导出于: i64 = 1_789_729_680;
 
-fn 摆上版本子库与导出(app: &mut App) {
+fn 摆上第几版子库与导出(app: &mut App) {
     use romcat_core::catalog::export::ExportedEntry;
     use romcat_core::catalog::identify::Identification;
     use romcat_core::sublibrary::{Rule, Sublibrary};
@@ -1310,7 +1310,7 @@ fn 拍详情页(名字: &str, 主题: Theme, 面: Tab) {
     }
     let 浏览现场 { mut app, 目录 } = 浏览现场(false);
     挂上媒体池(&mut app, 目录.path());
-    摆上版本子库与导出(&mut app);
+    摆上第几版子库与导出(&mut app);
     // 打开与换面走的是界面上「查看详情」、点一面的同一个入口（`Screen::open_page`）；交给画帧那个闭包在下一帧开头办。
     let 换面 = std::rc::Rc::new(std::cell::Cell::new(None::<Tab>));
     let 要换 = std::rc::Rc::clone(&换面);

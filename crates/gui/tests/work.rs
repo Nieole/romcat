@@ -1585,7 +1585,7 @@ fn 每一处画在哪儿(output: &egui::FullOutput, 那几个字: &str) -> Vec<e
 }
 
 #[test]
-fn 变体卡上版本那一行照核心库写_说不出时写破折号() {
+fn 变体卡上第几版那一格照核心库写_说不出时写破折号() {
     // 票 `gui-looks-like-the-design/34`，词表**第几版**：屏上那一格照设计稿写「版本」。
     // **判断不在界面**——两层怎么挑由 `VariantDetail::edition` 一处判，这里只核对
     // 「核心库说什么、屏上就写什么」。
@@ -1614,7 +1614,7 @@ fn 变体卡上版本那一行照核心库写_说不出时写破折号() {
             .row
             .key
             .clone();
-        记一条裁决说的版本(site, &键, "v1.2");
+        记一条裁决说的第几版(site, &键, "v1.2");
         键
     };
     assert!(!头一个.is_empty());
@@ -1629,7 +1629,7 @@ fn 变体卡上版本那一行照核心库写_说不出时写破折号() {
 ///
 /// 走 `write_identifications` 那条正门：那一列的写者只有它，测试另开一条路就等于
 /// 绕过被测的那段代码。
-fn 记一条裁决说的版本(site: &mut romcat_core::site::Site, key: &str, edition: &str) {
+fn 记一条裁决说的第几版(site: &mut romcat_core::site::Site, key: &str, edition: &str) {
     use romcat_core::catalog::State;
     use romcat_core::catalog::identify::Identification;
 

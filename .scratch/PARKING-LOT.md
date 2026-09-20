@@ -4586,3 +4586,25 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 - **另一条路：** 开一条「把媒体池扫一遍量尺」的活排进任务台。不放在开库那条路上——回填要逐张开真库那 440 张图、逐段拉一百多个进程。
 - **谁来裁：** 拿主意的人
 - **状态：** open
+
+### Q996 — 详情页「子库」「导出」两行读不动时退回「—」与「还没导出」，把不可读压成了「没有」
+
+- **来自：** 票 `gui-looks-like-the-design/34`（收尾两轴审查，Standards 轴挑出）
+- **类别：** 路过发现，不在范围内
+- **在哪：** `crates/gui/src/browse/work.rs` 的 `sync_page_details`：`sublibrary::holding` 与 `Catalog::entry_exported` 出错时只设 `self.error`，两行照旧画「—」与「还没导出」。
+- **为什么没停线：** 红字横幅照样出来，人不会毫不知情；而且**同一个文件里「收藏」那一行早就是这个写法**（`collection::favorite_of` 的 `Err` 分支交 `None`），单改这两行会让同一块里两种写法并存。
+- **这张票实际做了什么：** 照着收藏那一行的既有写法写的，没改。
+- **另一条路：** 把这一族「读不动」与「读出来是没有」在 `Page` 上分成两档（ADR-0021 的第三态），状态块那几行一起改——那是整块的事，不是这两行的事。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q997 — `Catalog::add_release` 七个位置参数，其中五个同型 `Option<&str>`
+
+- **来自：** 票 `gui-looks-like-the-design/34`（收尾两轴审查，Standards 轴挑出）
+- **类别：** 路过发现，不在范围内
+- **在哪：** `crates/core/src/catalog/content.rs` 的 `pub fn add_release`；11 处调用点（`identify.rs` 两处、`demo.rs` 一处、测试若干）。
+- **为什么没停线：** 本票只是在已有的六个后面加了第七个（`revision`），形状是既有的。
+- **这张票实际做了什么：** 加了 `revision` 这一个位置参数，摆在 `origin` 之后。
+- **另一条路：** 把 `platform / region / serial / languages / revision` 捏成一个「这条发行版是什么样」的结构体（Data Clumps），`add_release` 收它加 `work_id` 与 `origin`。传错一个同型参数眼下是静默的。
+- **谁来裁：** 拿主意的人
+- **状态：** open

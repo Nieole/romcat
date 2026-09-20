@@ -171,6 +171,21 @@ pub(super) fn add_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// 从一行里读出**尺寸与时长**那三列，`at` 是头一列（`width`）的序号。
+///
+/// **两处读它**：按哈希单问的 [`Catalog::media_measured`]，与详情那一趟连着媒体引用一起
+/// 查出来的 `catalog::detail::media_at`。各抄一遍的话，哪天列的次序或类型变了，
+/// 会有一处悄悄读错——而读错的样子是「那一格空着」，与「没量过」长得一模一样。
+pub(super) fn read_measured(row: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Measured> {
+    Ok(Measured {
+        width: row.get(at)?,
+        height: row.get(at + 1)?,
+        // 库里是 `INTEGER`（有符号），量出来的时长不会是负数；真读到负数当它是绝对值，
+        // 那比 panic 或者悄悄归零都诚实。
+        duration_ms: row.get::<_, Option<i64>>(at + 2)?.map(i64::unsigned_abs),
+    })
+}
+
 /// 一条要写进去的字段值。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HarvestedValue {
@@ -469,7 +484,13 @@ impl Catalog {
         tx.commit().map_err(to_err)
     }
 
-    /// 一个锚点上的全部字段值，按字段、源排序。
+    /// 一个锚点上的全部字段值，按**字段、源、值**排序。
+    ///
+    /// **排到「值」那一列**，与 [`Self::for_each_scraped_value`] 逐字相同：一个源在一个
+    /// 字段上说得出好几句话（去重键里带着值，见模块文档），只排到源的话，同一份库读两次
+    /// 那几句的次序可能不一样。两条路的次序一分家，照它们各折一份事实的
+    /// `sublibrary::facts` 与 `facts_of` 就会交出两份只差次序的 `VariantFacts`——
+    /// 求值的结论不受影响（都是存在性判断），但「两条路折出来逐字一样」那条测试会时红时绿。
     ///
     /// # Errors
     /// 读库失败时返回错误。
@@ -482,7 +503,7 @@ impl Catalog {
             .conn
             .prepare_cached(
                 "SELECT field, source, value, evidence, at FROM scrape_value
-                 WHERE anchor = ?1 AND subject = ?2 ORDER BY field, source",
+                 WHERE anchor = ?1 AND subject = ?2 ORDER BY field, source, value",
             )
             .map_err(|source| self.err(source))?;
         let rows = statement
@@ -650,6 +671,10 @@ impl Catalog {
 
     /// 池里这一份**入池那一刻量下来的尺寸与时长**（`scrape::measure`）。
     ///
+    /// 屏上那一行不走这一条——它读的是 [`MediaItem::measured`](super::detail::MediaItem)，
+    /// 那一份随详情一次查出来。这一支是**按哈希单问一份**的那道门（票
+    /// `gui-looks-like-the-design/34` 的接缝测试拿它核「入池真量了一次」）。
+    ///
     /// 库里没有这一份、或者那三格空着（老库、以及量不出来的那几种）都交回一份**空的**
     /// [`Measured`]——**两者的处置本来就一样**：屏上那一行退回「来源 · 大小」。
     ///
@@ -660,13 +685,7 @@ impl Catalog {
             .prepare_cached("SELECT width, height, duration_ms FROM media WHERE hash = ?1")
             .and_then(|mut statement| {
                 statement
-                    .query_row(params![hash], |row| {
-                        Ok(Measured {
-                            width: row.get(0)?,
-                            height: row.get(1)?,
-                            duration_ms: row.get::<_, Option<i64>>(2)?.map(i64::unsigned_abs),
-                        })
-                    })
+                    .query_row(params![hash], |row| read_measured(row, 0))
                     .optional()
             })
             .map(Option::unwrap_or_default)

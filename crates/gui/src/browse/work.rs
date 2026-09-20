@@ -2129,8 +2129,9 @@ fn release_facts(
                 true,
             ),
             ("汉化组", 或破折号(汉化组.as_deref()), false),
-            // **版本**：词表**第几版**。等宽——它是 `Rev 1` / `v1.2` 这类记号，与序列号同一档。
-            ("版本", 或破折号(detail.edition()), true),
+            // **版本**：词表**第几版**。**不等宽**——稿上 `varTab` 那张 `dl.infol` 里只有
+            // 发行版与序列号带 `class="mono"`，这一格没有。
+            ("版本", 或破折号(detail.edition()), false),
         ],
     );
 }

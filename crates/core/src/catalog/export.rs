@@ -266,15 +266,33 @@ impl Catalog {
         written: &[ExportedEntry],
         at: i64,
     ) -> Result<(), CatalogError> {
-        self.meta_set(MetaKey::ExportedAt, &at.to_string())?;
-        self.meta_set(MetaKey::ExportedEntries, &entries.to_string())?;
-        self.meta_set(MetaKey::ExportedWithMedia, if media { "1" } else { "0" })?;
         let path = self.path.clone();
         let to_err = |source| CatalogError::Sqlite {
             path: path.clone(),
             source,
         };
         let tx = self.conn.transaction().map_err(to_err)?;
+        {
+            // **整库那三个键与逐条那一批落在同一个事务里。** 时刻戳是同一个还不够：
+            // 分两笔写的话，中途断电会留下「整库说导过了、逐条一条都没有」——而那
+            // 正是这张表要治的那一种分岔（模块文档），只是换了个方向。
+            let mut meta = tx
+                .prepare(
+                    "INSERT INTO meta(key, value) VALUES(?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                )
+                .map_err(to_err)?;
+            for (key, value) in [
+                (MetaKey::ExportedAt, at.to_string()),
+                (MetaKey::ExportedEntries, entries.to_string()),
+                (
+                    MetaKey::ExportedWithMedia,
+                    if media { "1" } else { "0" }.to_string(),
+                ),
+            ] {
+                meta.execute(params![key.as_str(), value]).map_err(to_err)?;
+            }
+        }
         tx.execute(
             "DELETE FROM export_entry WHERE format = ?1",
             params![format],
