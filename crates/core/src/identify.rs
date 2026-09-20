@@ -104,7 +104,9 @@ use crate::catalog::identify::{
     Candidate, CartFactRow, Confidence, ContainerFile, ContentHash, DiscFactRow, EntryFact,
     Identification, ModelAnswerRow, NOT_RUN_LABEL, SwitchFactRow,
 };
-use crate::catalog::{Catalog, CatalogError, KEYS_PER_QUERY, Provenance, Roots, State, VariantRow};
+use crate::catalog::{
+    Catalog, CatalogError, KEYS_PER_QUERY, NewRelease, Provenance, Roots, State, VariantRow,
+};
 use crate::classify::{self, Category};
 use crate::container::{self, ContainerKind, Demand, ReadPlan, volume};
 use crate::dat::chinese::ChineseMark;
@@ -3658,14 +3660,17 @@ impl Projector {
         }
         let id = catalog.add_release(
             work,
-            Some(&candidate.platform),
-            parsed.region.as_deref(),
-            candidate.serial.as_deref(),
-            parsed.languages.as_deref(),
+            &NewRelease {
+                platform: Some(&candidate.platform),
+                region: parsed.region.as_deref(),
+                serial: candidate.serial.as_deref(),
+                languages: parsed.languages.as_deref(),
+                // **修订**：条目名尾巴上那一组 `(Rev 1)` / `(v1.1)`（词表**第几版**上面
+                // 那一层）。一条 DAT 条目就是一条发行版，所以它落在发行版这一行上。
+                // 没有就是没有。
+                revision: parsed.revision.as_deref(),
+            },
             Provenance::Identified,
-            // **修订**：条目名尾巴上那一组 `(Rev 1)` / `(v1.1)`（词表**第几版**上面那一层）。
-            // 一条 DAT 条目就是一条发行版，所以它落在发行版这一行上。没有就是没有。
-            parsed.revision.as_deref(),
         )?;
         self.releases.insert(key, id);
         Ok(id)
@@ -3703,17 +3708,19 @@ impl Projector {
             Some(id) => id,
             None => catalog.add_release(
                 work,
-                platform,
-                facts.region.as_deref(),
-                facts.serial.as_deref(),
-                facts.languages.as_deref(),
+                &NewRelease {
+                    platform,
+                    region: facts.region.as_deref(),
+                    serial: facts.serial.as_deref(),
+                    languages: facts.languages.as_deref(),
+                    // **裁决说的那一版不写在这儿**：这一行会被几个变体共用（上面那把
+                    // 去重键里没有版本），而「汉化打到第几版」是**变体**那一层的事实
+                    // ——写进来会让第一个落库的那一版盖住其余几个。它落在**识别结论**
+                    // 那一行上（`Identification::edition` → `identification.edition`，
+                    // 词表**第几版**下面那一层）。
+                    revision: None,
+                },
                 Provenance::Verdict,
-                // **裁决说的那一版不写在这儿**：这一行会被几个变体共用（上面那把去重键
-                // 里没有版本），而「汉化打到第几版」是**变体**那一层的事实——写进来会
-                // 让第一个落库的那一版盖住其余几个。它落在**识别结论**那一行上
-                // （`Identification::edition` → `identification.edition`，词表**第几版**
-                // 下面那一层）。
-                None,
             )?,
         };
         self.releases.insert(key, id);

@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use romcat_core::catalog::identify::{ContentHash, Identification, Provenance};
 use romcat_core::catalog::scrape::{Harvested, HarvestedValue};
 use romcat_core::catalog::{
-    Candidate, Catalog, CatalogError, Confidence, EntryRecord, State, Verdict,
+    Candidate, Catalog, CatalogError, Confidence, EntryRecord, NewRelease, State, Verdict,
 };
 use romcat_core::collection;
 use romcat_core::dat::Convention;
@@ -1020,16 +1020,20 @@ pub fn browse_shaped(rows: u64, works_count: usize) -> Result<Catalog, CatalogEr
     for (at, work) in works.iter().enumerate() {
         for (which, (region, languages)) in REGIONS.iter().enumerate() {
             let platform = PLATFORMS[(at + which) % PLATFORMS.len()];
+            let serial = format!("SLPS-{:05}", at * 10 + which);
             releases.push(catalog.add_release(
                 *work,
-                Some(platform),
-                Some(region),
-                Some(&format!("SLPS-{:05}", at * 10 + which)),
-                Some(languages),
+                &NewRelease {
+                    platform: Some(platform),
+                    region: Some(region),
+                    serial: Some(&serial),
+                    languages: Some(languages),
+                    // 合成数据里**一条修订标记都不摆**：那一格的常态就是说不出
+                    // （词表**第几版**），摆一个出来等于让基线图上那一行看不出
+                    // 「没有就是没有」长什么样。
+                    revision: None,
+                },
                 Provenance::Identified,
-                // 合成数据里**一条修订标记都不摆**：那一格的常态就是说不出（词表**第几版**），
-                // 摆一个出来等于让基线图上那一行看不出「没有就是没有」长什么样。
-                None,
             )?);
         }
     }

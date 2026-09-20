@@ -220,6 +220,30 @@ pub(super) fn add_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// 要记下来的一条**发行版**：哪个平台、哪个地区、什么序列号、什么语言、第几次修订。
+///
+/// **五样捏成一个结构体，不是五个挨着排的 `Option<&str>`**（票
+/// `gui-looks-like-the-design/34` 的收尾审查挑出来的，clippy 的 `too_many_arguments`
+/// 同时也拦下了它）：[`Catalog::add_release`] 有十来处调用点，五个同型参数挨着传，
+/// 把地区与序列号写颠倒是**静默**的——库里多出一条形状不对的发行版，而没有一条断言会红。
+/// 带上字段名之后，写颠倒当场编译不过。
+///
+/// `languages` 装的是 ADR-0019 那道世代裂缝的数字世代一侧：中文在那里是同一条发行版的
+/// 语言属性，不另成发行版。`revision` 是词表**第几版**上面那一层。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NewRelease<'a> {
+    /// 平台；可空。
+    pub platform: Option<&'a str>,
+    /// 地区；DAT 的名字里认不出来时空着。
+    pub region: Option<&'a str>,
+    /// 序列号；可空。
+    pub serial: Option<&'a str>,
+    /// 语言标记组（`En,Zh-Hans`）；可空。
+    pub languages: Option<&'a str>,
+    /// **修订**：条目名尾巴上那一组 `(Rev 1)` / `(v1.1)`。**空就是名字里没有**，不是「第一版」。
+    pub revision: Option<&'a str>,
+}
+
 /// 一条**发行版**记录读回来的样子。
 ///
 /// `region` 与 `languages` 分开读出来不是冗余：**标题集合**靠它们分辨三件事——
@@ -832,20 +856,13 @@ impl Catalog {
 
     /// 记一个**发行版**，返回它的 id。
     ///
-    /// `languages` 装的是 ADR-0019 那道世代裂缝的数字世代一侧：中文在那里是同一条
-    /// 发行版的语言属性，不另成发行版。
-    ///
     /// # Errors
     /// 写库失败时返回错误。
     pub fn add_release(
         &mut self,
         work_id: i64,
-        platform: Option<&str>,
-        region: Option<&str>,
-        serial: Option<&str>,
-        languages: Option<&str>,
+        said: &NewRelease<'_>,
         origin: Provenance,
-        revision: Option<&str>,
     ) -> Result<i64, CatalogError> {
         self.conn
             .execute(
@@ -853,12 +870,12 @@ impl Catalog {
                  VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     work_id,
-                    platform,
-                    region,
-                    serial,
-                    languages,
+                    said.platform,
+                    said.region,
+                    said.serial,
+                    said.languages,
                     origin.label(),
-                    revision
+                    said.revision
                 ],
             )
             .map_err(|source| self.err(source))?;
@@ -1323,12 +1340,14 @@ mod tests {
         let release = catalog
             .add_release(
                 work,
-                Some("SFC"),
-                Some("日本"),
-                Some("SHVC-TO"),
-                Some("ja"),
+                &NewRelease {
+                    platform: Some("SFC"),
+                    region: Some("日本"),
+                    serial: Some("SHVC-TO"),
+                    languages: Some("ja"),
+                    revision: None,
+                },
                 Provenance::Verdict,
-                None,
             )
             .expect("建得了发行版");
         catalog

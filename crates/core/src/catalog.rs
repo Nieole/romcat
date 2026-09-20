@@ -56,7 +56,7 @@ pub use browse::{
     StateFilter, VariantOrder, VariantQuery, WORK_FIELDS, WorkAnchor, WorkDetail, WorkOrder,
     WorkQuery, WorkRow, WorkVariant,
 };
-pub use content::{MemberFile, ReleaseRow, VariantRow};
+pub use content::{MemberFile, NewRelease, ReleaseRow, VariantRow};
 pub use detail::{MediaHave, MediaItem, Sibling, ValueItem, VariantDetail};
 pub use export::{ExportSetup, ExportSetupError};
 pub use frontend::{SnapshotOrigin, SnapshotRow};

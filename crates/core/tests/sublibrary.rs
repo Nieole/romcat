@@ -6,7 +6,9 @@
 //! 事实是不是真的从三层内容层级、识别结论、刮削结论、合集那几张表折出来的。
 
 use romcat_core::catalog::scrape::{Harvested, HarvestedValue};
-use romcat_core::catalog::{Candidate, Catalog, Confidence, Identification, Provenance, State};
+use romcat_core::catalog::{
+    Candidate, Catalog, Confidence, Identification, NewRelease, Provenance, State,
+};
 use romcat_core::dat::Convention;
 use romcat_core::dat::chinese::ChineseMark;
 use romcat_core::platform::Manifest;
@@ -450,12 +452,14 @@ fn 事实从三层内容层级与刮削结论折出来() {
     let release = catalog
         .add_release(
             work,
-            Some("GB"),
-            Some("Japan"),
-            None,
-            Some("Ja,Zh"),
+            &NewRelease {
+                platform: Some("GB"),
+                region: Some("Japan"),
+                serial: None,
+                languages: Some("Ja,Zh"),
+                revision: None,
+            },
             Provenance::Identified,
-            None,
         )
         .expect("建得了发行版");
     catalog

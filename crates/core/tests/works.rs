@@ -17,7 +17,7 @@ use romcat_core::catalog::browse::{
     WorkQuery, WorkRow,
 };
 use romcat_core::catalog::identify::{Candidate, Identification, NOT_RUN_LABEL, Provenance};
-use romcat_core::catalog::{Catalog, Confidence, State};
+use romcat_core::catalog::{Catalog, Confidence, NewRelease, State};
 use romcat_core::dat::Convention;
 use romcat_core::dat::chinese::ChineseMark;
 use romcat_core::platform::Manifest;
@@ -1593,23 +1593,27 @@ fn 第几版两层一条回退链_裁决压过发行版的修订_都没有就说
     let 带修订 = catalog
         .add_release(
             work,
-            Some("GB"),
-            Some("Japan"),
-            None,
-            None,
+            &NewRelease {
+                platform: Some("GB"),
+                region: Some("Japan"),
+                serial: None,
+                languages: None,
+                revision: Some("Rev 1"),
+            },
             Provenance::Identified,
-            Some("Rev 1"),
         )
         .expect("建得出发行版");
     let 不带 = catalog
         .add_release(
             work,
-            Some("GB"),
-            Some("USA"),
-            None,
-            None,
+            &NewRelease {
+                platform: Some("GB"),
+                region: Some("USA"),
+                serial: None,
+                languages: None,
+                revision: None,
+            },
             Provenance::Identified,
-            None,
         )
         .expect("建得出发行版");
     let 一条结论 = |key: String, release: Option<i64>, edition: Option<&str>| Identification {

@@ -4607,4 +4607,4 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 - **这张票实际做了什么：** 加了 `revision` 这一个位置参数，摆在 `origin` 之后。
 - **另一条路：** 把 `platform / region / serial / languages / revision` 捏成一个「这条发行版是什么样」的结构体（Data Clumps），`add_release` 收它加 `work_id` 与 `origin`。传错一个同型参数眼下是静默的。
 - **谁来裁：** 拿主意的人
-- **状态：** open
+- **状态：** settled —— **本票当场收了**。加上 `revision` 之后它有八个参数，撞上 `clippy::too_many_arguments`（上限七个），门禁把「以后再说」变成了「现在就做」。落成 `catalog::content::NewRelease`；`release_like` 不动（它那把去重键有意不含 `revision`）。
