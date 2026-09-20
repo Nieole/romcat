@@ -5,7 +5,7 @@
 
 **Blocked by:** 20
 
-**Status:** ready-for-agent
+**Status:** done
 
 ⚠️ 容量超限时删减建议里的「排除」、差量预览里**落点撞车**时的「排除这一份」，落的都是
 这里的例外——不是第二套机制。
@@ -75,3 +75,68 @@
 暗色更明显）。为什么不改：这是弹层框架那条既有规矩，不是这一层新写的；**键盘走到哪儿必须看得见**，
 把焦点圈摘掉或挪走都是拿无障碍换一眼好看。另两条路（打开时焦点落到选中的那一格、或给 `Dialog`
 再加一个「焦点先给谁」的槽）都要动共用件，全窗口的弹层都得重验一遍——为这一处不值。
+
+## 门禁
+
+合进 `main`（`a6c0fbb`，票 34 那一批）之后跑**全量门禁**：
+`cargo xtask gate -j 3 --test-threads 3 --keep-going`，日志
+`/Users/nicoer/dev/game-wt/logs/slot-2-gl22-gate-2.log`。**六步全绿**——fmt 1s、glossary 0s、
+check 11s、clippy 13s、test 611s、doc 5s；**78 个测试目标、2,357 项全过、0 失败**。
+词表那一步扫了 `crates/` 下 14 份 `.rs` 里新写的 2,020 行，没撞上。
+
+本票几个目标的数：核心 `sublibrary` 35、界面 `sublibrary` 88、界面 `dialog` 10、
+界面 `snapshot` 75（基线一张都没被改写）。
+
+⚠️ 日志里那四条 `error: unresolved link to NoSuchItem` / `could not document throwaway` 是
+**xtask 自己的夹具**（`romcat-xtask-doc-red-*`，验 doc 那一步撞上坏链接时会不会红），不是红。
+
+头一趟（`slot-2-gl22-gate.log`）三红，都是本票自己的，修在 `6dc4078`：
+
+- **fmt**：新写那几段没按 rustfmt 排（八个文件十四处），重排，一个字没改。
+- **clippy `type_complexity`**：`Dialog` 那一格 `Option<Box<dyn FnOnce(&mut egui::Ui) + 'a>>`
+  写全了太长，起名 `type Head<'a>`。
+- **doc `private_intra_doc_links`**：公开的 `sublibrary_exception_details` 链到了
+  `pub(crate)` 的 `loose_title`，改成链公开的 `WorkRow::title`（本来就是同一支）。
+
+那一趟 `test` 就已经是绿的（640s），这三处一处都没碰它。
+
+## 截图
+
+基线 **16 张**（新 4 张、变动 12 张），拿主意的人 2026-09-20 点头入库（提交 `7c438b8`）。
+收尾两轴审查照改之后，`exceptions-*` 那 4 张**又重出了一次**（提交 `0d1c9fe`）——认不出作品
+的那一行主栏从整串键换成**正题**、排除栏空态换成稿上那句；**卡片相关那 12 张这一轮一张没动**
+（改的是弹层里的字，卡上没有）。带更新一趟、不带更新连跑两趟全绿（75/75），一张基线都没被改写。
+
+**「给共用弹层加两个槽没碰别人」的像素级证据**：不带更新那一趟里
+`opening/claiming-light`（用 `Dialog::pages`，就在改动那块标头里）与
+`library/health-duplicates-{light,dark}`（用 `Footer::dismiss_on_right`，就在改动的
+`footer_ui` 里）都绿；`target-settings-light` 的 diff 图上唯一泛红的是左右两张卡，弹层那一块
+一个像素都没红。刮削弹层与批量裁决计划本来就没有基线，那两层由
+`crates/gui/tests/dialog.rs::没给那两个槽的弹层一点地方都不多占_给了才画出来` 守。
+
+## 收尾两轴审查（只读）
+
+**Standards 轴两处 ADR-0024、Spec 轴一处硬伤，外加编排者转来的一处，全改在 `0d1c9fe`**：
+
+1. **认不出作品的那一行屏上叫什么**，这一层原先自己答「写变体的键」，而 `WorkRow::name` 的文档
+   逐字写着「认不出作品的那一行屏上主栏画的不是它，是 `title()` 那个正题」——同一份未识别内容
+   在浏览屏与这一层是两个名字。改成两处都走那一支。
+2. **「这一行眼下有没有例外」原先拿屏上那串字比**。`work` 表的 `name` 上刻意没有 `UNIQUE`，
+   同名异作是真实存在的。改成按身份比（`Who`），并把话说准：整份都在一向才写「现在是「X」」。
+   为此 `ExceptionDetail` 拆成 `work`（身份）与 `display`（屏上的字）——原先第二趟把显示标题
+   写回 `work`、身份当场丢掉，那正是这一处的根。
+3. **删减建议表上的「排除」没走 `after_exception_changed`**，自己抄了一遍收尾，于是「改过例外
+   之后差量预览失效**并说明**」这条硬要求在两条路上不一样。改成调同一支。
+4. **`open_exceptions` 优先级表读不动时静默退回内置那份**，而 `stages.rs` 逐字写着「不退回内置
+   那份」。改成把那句话摆到屏上、这一层不开（剥离规则同理），配测试
+   `优先级表读不动时手动例外那一层不开_屏上说清为什么`。
+
+其余照改：加完清空搜索框与备注（照稿）；排除栏空态逐字照稿；体积那一格改问
+`ExceptionDetail::missing()`；弹层收尾不再把 `set_exception_search` 内联一遍；
+`set_exceptions` 与 `open_exceptions` 两处文档说准。
+
+审查提的「落点撞车的『排除这一份』没实现」：查过票 `24` 清单第 4 条明写归它，**不属本票**，
+⚠️ 那条没被违反。
+
+挂单：`Q818`、`Q975` 已裁，`Q812` settled（本票收掉），新开 `Q973`（撤不掉整个作品）、
+`Q974`（搜作品只摆前 6 行）、`Q976`（`app.rs` 开窗时静默退回内置优先级表，既有问题，留给票 30）。
