@@ -86,7 +86,8 @@ impl Finding {
             Self::UnmappedDirs => "不在任何平台目录下：照扫照报，只是不进识别与刮削",
             Self::StrandedCompanions => "存档、补丁在自己那个目录里找不到同名的主文件",
             Self::NonGameAssets => {
-                "路径里有一段目录是 bios：模拟器要它，它本身不是游戏，入库但永不导出"
+                "平台目录底下、路径里有一段目录是 bios：模拟器要它，它本身不是游戏，入库但永不导出。\
+                 未纳入管理的目录不入库，那里的 bios 不算在内"
             }
         }
     }

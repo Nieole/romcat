@@ -83,7 +83,7 @@ use romcat_gui::{font, headless, layout, look, rail};
 
 mod shared;
 #[cfg(feature = "demo")]
-use shared::{一对信号, 占位活};
+use shared::{一对信号, 占位活, 等任务台空了};
 
 /// 比对阈值：一个像素的色差过了多少算坏（每像素 YIQ 色距 0.6）、坏几个像素算红（0 个）。
 ///
@@ -1485,14 +1485,7 @@ impl 库屏 {
 fn 先体检一趟(app: &mut App) {
     let (屏, site, tasks) = app.roots_site_and_tasks();
     屏.check_health(site, tasks);
-    for _ in 0..50_000_000_u64 {
-        app.poll_tasks();
-        if !app.tasks().busy() && !app.tasks().settled() {
-            return;
-        }
-        std::thread::yield_now();
-    }
-    panic!("体检那一趟迟迟不收场");
+    等任务台空了(app);
 }
 
 /// **滚到库屏底下**：指针停在正文里、真发滚轮事件往下滚，每一下都跑到不要重画为止；滚到头之后再滚也不动，于是多滚几下不改

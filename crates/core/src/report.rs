@@ -1246,24 +1246,35 @@ mod tests {
         let 记录: Vec<(String, Option<u64>)> = (0..12)
             .map(|n| (format!("库/GBA/备份{n:02}/逆转裁判.gba"), Some(8192)))
             .collect();
-        let 借: Vec<(&str, Option<u64>)> =
-            记录.iter().map(|(key, len)| (key.as_str(), *len)).collect();
-        let agg = 收(&借);
+        // **这一趟按「体检那一趟」的上限收**：默认上限（每组 10 条）正好等于报告展示的条数
+        // （`TOP_DUPLICATE_PATHS_PER_GROUP`），那样报告那一侧的 `truncate` 是空操作，这条就钉不住
+        // 「跟着一起截」（票 27 收尾审查 Spec 轴第 4 条）。
+        let limits = Limits {
+            max_duplicate_paths_per_group: Limits::FULL_DUPLICATE_PATHS_PER_GROUP,
+            ..Limits::default()
+        };
+        let mut agg = Aggregate::default();
+        for (key, len) in &记录 {
+            agg.record_file(&观察(key, *len), &limits);
+        }
         let report = 报告(&agg);
         let details = DuplicateDetails::build(&agg, &report);
 
         let 组 = &details.groups[0];
+        assert_eq!(组.paths.len(), 12, "明细里 12 份一份不少");
         assert_eq!(组.keys.len(), 组.paths.len(), "键与路径一一对应");
         assert_eq!(组.keys[0], "库/GBA/备份00/逆转裁判.gba");
         assert_eq!(组.paths[0], "/lib/GBA/备份00/逆转裁判.gba");
         assert_eq!(组.keys[9], "库/GBA/备份09/逆转裁判.gba");
 
         let 报告里的 = &report.suspects.top_duplicates[0];
+        assert_eq!(报告里的.paths.len(), 10, "报告只展示前 10 条");
         assert_eq!(
             报告里的.keys.len(),
             报告里的.paths.len(),
             "报告截断路径时键跟着一起截"
         );
+        assert_eq!(报告里的.paths_missing(), 2, "报告照实说自己少列了 2 份");
     }
 
     #[test]

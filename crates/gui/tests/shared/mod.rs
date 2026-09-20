@@ -547,3 +547,22 @@ impl 占位活 {
         self.发的.发();
     }
 }
+
+/// 等任务台上的活都**收场并且都认领完**。等的是台上空了这个信号，一轮一轮问，不看挂钟就走。
+///
+/// 界面这几份测试原先各写各的：`tests/roots.rs` 是 600 轮 × 10 毫秒，库体检那两处是逐字同一段
+/// 五千万次自旋——自旋那种写法没有挂钟含义，真卡住时会空转很久（票 27 收尾审查 Standards 轴第 5 条）。
+/// 收在这儿一处，六秒还不收场就当它卡住了。
+///
+/// # Panics
+/// 六秒之内台上还没空。
+pub fn 等任务台空了(app: &mut romcat_gui::app::App) {
+    for _ in 0..6_000 {
+        app.poll_tasks();
+        if !app.tasks().busy() && !app.tasks().settled() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    panic!("任务台上的活迟迟不收场");
+}
