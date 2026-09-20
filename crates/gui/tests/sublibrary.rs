@@ -4200,7 +4200,7 @@ fn 没有例外时两栏各是空态并写明从哪儿加() {
 
     let 屏上 = 画两帧(&ctx, &mut 场);
     assert!(
-        屏上.contains("还没有手动包含的内容。"),
+        屏上.contains("还没有手动包含的作品。"),
         "包含那一栏空着却不是空态：\n{屏上}"
     );
     assert!(
@@ -4212,7 +4212,7 @@ fn 没有例外时两栏各是空态并写明从哪儿加() {
     场.换栏(Exception::Exclude);
     let 屏上 = 画两帧(&ctx, &mut 场);
     assert!(
-        屏上.contains("还没有排除的内容。"),
+        屏上.contains("还没有排除的作品。"),
         "排除那一栏空着却不是空态：\n{屏上}"
     );
     assert!(
@@ -4261,5 +4261,57 @@ fn 子库屏改过例外之后浏览屏缓着的那份跟着重读() {
             .exceptions
             .is_empty(),
         "撤销没转告浏览屏",
+    );
+}
+
+#[test]
+fn 优先级表读不动时手动例外那一层不开_屏上说清为什么() {
+    // 收尾审查（Standards 轴）挑出的：这一层原先在优先级表读不动时**静默退回内置那份**。
+    // 而 `stages.rs` 导出那一段逐字写着「优先级表读不出来就停下，不退回内置那份」——挑**显示标题**
+    // 用的是同一份表，工作目录里那份正是人改过的说法；悄悄换一份，屏上这几行的名字就与他导出去
+    // 看见的对不上，还查不出为什么。折标题、导出、刮削三处都是往上抛，这一处不该是例外。
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    // 工作目录里摆一份读不懂的优先级表。
+    写(
+        &场.工作区.path().join("priorities.toml"),
+        "这不是 TOML = = =".as_bytes(),
+    );
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        screen.reload(site);
+        screen.open_exceptions(site, "掌机");
+    }
+    assert!(
+        场.app.sublibrary().exceptions_open().is_none(),
+        "优先级表读不动，这一层却照样开了"
+    );
+    let 说的 = 场.app.sublibrary().error().expect("该在屏上说一句").to_string();
+    assert!(
+        说的.contains("优先级表读不动"),
+        "没说清是优先级表读不动：{说的}"
+    );
+    assert!(
+        说的.contains("与导出去的对不上"),
+        "没说清为什么不退回内置那份：{说的}"
+    );
+
+    // 换成读得懂的那一份：这一层照常开得出来。
+    写(
+        &场.工作区.path().join("priorities.toml"),
+        // TOML 的裸键只收 ASCII，中文键要加引号。
+        "\"版本\" = 1\n".as_bytes(),
+    );
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        screen.reload(site);
+        screen.open_exceptions(site, "掌机");
+    }
+    assert_eq!(
+        场.app.sublibrary().exceptions_open(),
+        Some("掌机"),
+        "换成读得懂的那一份之后还是开不出来：{:?}",
+        场.app.sublibrary().error(),
     );
 }

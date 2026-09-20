@@ -241,7 +241,11 @@ fn 例外那张表逐条写得出作品平台体积与备注_库里没有那个�
         .expect("例外写得进");
 
     let 表 = catalog
-        .sublibrary_exception_details("掌机", &romcat_core::scrape::Priorities::builtin())
+        .sublibrary_exception_details(
+            "掌机",
+            &romcat_core::scrape::Priorities::builtin(),
+            &romcat_core::filename::Rules::builtin(),
+        )
         .expect("读得动");
     assert_eq!(表.len(), 2, "两条都要在表上");
     // **次序是「时刻倒着排，同一刻按键排」**：这两条是同一秒写进去的（库里记的是秒），
@@ -269,10 +273,10 @@ fn 例外那张表逐条写得出作品平台体积与备注_库里没有那个�
     assert_eq!(没在库里.bytes, None, "库里没有的那一条体积不写 0");
     assert_eq!(没在库里.platform, None);
     assert_eq!(
-        没在库里.title(),
-        "库/GB/盘没插时看不到的.zip",
-        "认不出作品的那一行写变体的键"
+        没在库里.display, "库/GB/盘没插时看不到的.zip",
+        "库里眼下没有这一份时退回那条键"
     );
+    assert_eq!(没在库里.work, None);
 
     let 在库里 = 认一条("库/GB/口袋妖怪 汉化.zip");
     assert_eq!(在库里.row.kind, Exception::Include);
@@ -283,7 +287,12 @@ fn 例外那张表逐条写得出作品平台体积与备注_库里没有那个�
     );
     assert!(在库里.row.at > 0, "时间那一列");
     assert!(!在库里.missing());
-    assert_eq!(在库里.title(), "口袋妖怪 红", "作品那一列");
+    assert_eq!(在库里.display, "口袋妖怪 红", "作品那一列屏上写的字");
+    assert_eq!(
+        在库里.work.as_deref(),
+        Some("口袋妖怪 红"),
+        "身份那一格是 work 表里那个名字"
+    );
     assert_eq!(在库里.platform.as_deref(), Some("GB"));
     assert_eq!(在库里.bytes, Some(4 * 1024 * 1024), "体积那一列");
 }

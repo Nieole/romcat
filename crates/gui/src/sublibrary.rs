@@ -94,6 +94,7 @@ use romcat_core::capability::{DEFAULT_PROFILE, Entry, Override, Profile, Recipe,
 use romcat_core::catalog::CatalogError;
 use romcat_core::catalog::browse::{Scope, WorkAnchor, WorkQuery};
 use romcat_core::catalog::sublibrary::{RemovedSublibrary, Renamed};
+use romcat_core::filename::Rules;
 use romcat_core::report::{decimal_bytes, decimal_gigabytes, human_bytes, thousands};
 use romcat_core::scrape::Priorities;
 use romcat_core::site::Site;
@@ -343,6 +344,18 @@ struct Exceptions {
     priorities: Priorities,
 }
 
+/// 搜索出来这一行**是谁**：拿它去认「这一行眼下有没有例外、是哪一向」。
+///
+/// 与 [`WorkAnchor`] 装的是同一件事，只是换成例外那一侧问得动的形状——例外记在**变体**上
+/// （`ExceptionRow::variant_key`），而它属于哪个作品记在 `ExceptionDetail::work` 上。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Who {
+    /// 认出了作品：`work` 表里那个名字。
+    Work(String),
+    /// 没认出作品：这一行就是那一个变体，键是它自己。
+    Loose(String),
+}
+
 /// 搜索框底下的一条命中（设计稿 `.srch` 一行）：一个**作品**。
 ///
 /// 搜的是作品而不是变体——人记得住的是「口袋妖怪 红」，不是一串相对路径。真正记下去的例外照旧
@@ -351,8 +364,12 @@ struct Exceptions {
 struct Found {
     /// 这一行是谁。**作用范围靠它展开**（`Catalog::scoped_variants`），与浏览屏批量操作同一处。
     anchor: WorkAnchor,
-    /// 屏上写的名字（显示标题挑过的）。
+    /// 屏上写的名字：认出作品的是**显示标题**，认不出的是那个变体的**正题**
+    /// （`table::unlinked_title`，与浏览屏主列表同一支剥）。
     name: String,
+    /// 这一行**是谁**，问「它眼下有没有例外」比的是它：认出作品的是 `work` 表里那个名字，
+    /// 认不出的是那个变体的键。**不拿屏上那串字比**——两个同名的作品是真实存在的。
+    who: Who,
     /// 横跨哪几个平台。
     platforms: Vec<String>,
     /// 底下几个变体。
@@ -397,6 +414,12 @@ pub struct Screen {
     footprint_failed: Option<String>,
     /// 能力档案名册（`Roster::in_workspace`），随 [`Self::reload`] 读。目标设置弹层里的下拉与平台表照它，不在画帧里读盘。
     roster: Option<Roster>,
+    /// **剥离规则**（`sources::rules`，工作目录里那份 `name-rules.toml`）：认不出作品的那一行屏上叫什么，
+    /// 从它剥（`table::unlinked_title`／`WorkRow::title`，与浏览屏主列表同一支、同一份配置）。
+    /// 开屏时读一次；读不动时是那句话（[`Self::rules_error`]），手动例外那层弹层开不出来。
+    rules: Option<Rules>,
+    /// 剥离规则读不动时那句话。
+    rules_error: Option<String>,
     /// 「今天」：平台表判「陈旧」用（`Claim::is_stale`）。`None` 是照系统时钟（`capability::today`）；截图测试钉死它
     /// （[`Self::set_today`]），截图里才没有当前日期。
     today: Option<String>,
@@ -549,6 +572,8 @@ impl Screen {
             reading_footprint: None,
             footprint_failed: None,
             roster: None,
+            rules: None,
+            rules_error: None,
             today: None,
             too_big: None,
             strangers: None,
@@ -611,6 +636,18 @@ impl Screen {
                 self.profiled.clear();
                 self.roster = None;
                 self.roster_error = Some(format!("能力档案名册读不动：{error}"));
+            }
+        }
+        // **剥离规则**：认不出作品的那一行屏上叫什么从它剥。与浏览屏读的是同一份
+        // （工作目录里那份 `name-rules.toml`），交错了同一份内容在两屏上就是两个名字。
+        match romcat_core::sources::rules(&self.workspace) {
+            Ok(rules) => {
+                self.rules = Some(rules);
+                self.rules_error = None;
+            }
+            Err(error) => {
+                self.rules = None;
+                self.rules_error = Some(format!("剥离规则读不动：{error}"));
             }
         }
         self.look_at_targets();
@@ -1276,15 +1313,14 @@ impl Screen {
             .set_exception(name, key, Exception::Exclude, None)
         {
             Ok(()) => {
-                // 台上那趟还没认领的「算一遍容量」算的是排除之前那一套，`forget` 把它弃认；
-                // 紧接着就重排一趟，所以它留下的那句「再按一次」换成下面这句。
-                // 浏览屏可能正开着同一个子库，手上缓着一份例外（挂单 `Q812`）——留个记号让窗口转告它。
-                self.touched = Some(name.to_string());
-                self.forget(site, name);
+                // **收尾走与那层弹层同一条路**（[`Self::after_exception_changed`]）：缓着的差量与容量账
+                // 作废、当场重算、转告浏览屏、差量失效说一句。这儿原先自己抄了一遍，于是同一条硬要求
+                // （「改过例外之后差量预览失效**并说明**」）在两条路上不一样——删减建议这条静静地把
+                // 预览作废掉、那句话不说（收尾审查 Spec 轴挑出，也是 ADR-0024 意义上的第二份实现）。
+                self.after_exception_changed(site, tasks, name);
                 self.notice = Some(format!(
                     "给「{name}」记下了一条排除例外：{key}。盘上的文件一个都没动；容量正在重算。"
                 ));
-                self.evaluate(site, tasks);
             }
             Err(error) => self.error = Some(format!("中立库写不动：{error}")),
         }
@@ -3606,13 +3642,34 @@ impl Screen {
 
     /// 「手动例外」那一行上按「**管理**」：开出那层弹层，管的是 `name` 这一台（票 `gui-looks-like-the-design/22`）。
     ///
-    /// 打开这一下就把**要读库的三样**读齐：优先级表（挑显示标题，与浏览屏、导出、同步读的是同一份）、
-    /// 这一台的例外连库里那个变体是谁。之后画帧不再碰库。
+    /// 打开这一下就把**要读的两样**读齐：优先级表（挑显示标题，与浏览屏、导出、同步读的是同一份），
+    /// 与这一台的例外连库里那个变体是谁。之后画帧不再碰库。
+    ///
+    /// ## 那两份配置读不出来就不开这一层
+    ///
+    /// **不退回内置那份**（与折标题、导出、刮削同一条规矩，`stages.rs` 那一处写着为什么）：挑显示标题、
+    /// 剥正题用的正是工作目录里那两份——那是人**改过的说法**。悄悄换成内置的，屏上这几行的名字就与
+    /// 他导出去看见的对不上，而且查不出为什么。读不动时把那句话摆在屏上（[`Self::error`]），这一层不开。
     ///
     /// 界面上按那颗按钮走的就是它，实测与测试拿它当那一下。
     pub fn open_exceptions(&mut self, site: &Site, name: &str) {
-        let priorities = romcat_core::sync::prepare::priorities(None, &self.workspace)
-            .unwrap_or_else(|_| Priorities::builtin());
+        if let Some(why) = &self.rules_error {
+            self.error = Some(format!(
+                "{why}。手动例外那一层要拿它剥认不出作品的那几行的名字——\
+                 换一份剥出来的名字与导出去的对不上，所以不开。"
+            ));
+            return;
+        }
+        let priorities = match romcat_core::sync::prepare::priorities(None, &self.workspace) {
+            Ok(priorities) => priorities,
+            Err(why) => {
+                self.error = Some(format!(
+                    "优先级表读不动：{why}。手动例外那一层要拿它挑屏上写的作品名——\
+                     换一份挑出来的名字与导出去的对不上，所以不开。"
+                ));
+                return;
+            }
+        };
         self.exceptions = Some(Exceptions {
             name: name.to_string(),
             // **默认停在「包含」那一栏**，照设计稿 `DLG.excl` 的 `st.tab='包含'`。
@@ -3730,6 +3787,13 @@ impl Screen {
             .set_exceptions(&name, &borrowed, tab, note.as_deref())
         {
             Ok(written) => {
+                // **加完把两个框清空**（设计稿 `DLG.excl` 的 `st.q=''; st.note=''`）：备注是**这一条**
+                // 的「为什么」，留着的话下一次添加会默默带上上一条那句话。
+                if let Some(open) = &mut self.exceptions {
+                    open.query.clear();
+                    open.note.clear();
+                    open.found = None;
+                }
                 self.after_exception_changed(site, tasks, &name);
                 self.notice = Some(format!(
                     "给「{name}」{}了「{shown}」：{} 个变体。盘上的文件一个都没动；容量正在重算。",
@@ -3793,7 +3857,13 @@ impl Screen {
         else {
             return;
         };
-        match site.catalog.sublibrary_exception_details(&name, &priorities) {
+        let Some(rules) = self.rules.clone() else {
+            return;
+        };
+        match site
+            .catalog
+            .sublibrary_exception_details(&name, &priorities, &rules)
+        {
             Ok(rows) => {
                 if let Some(open) = &mut self.exceptions {
                     open.rows = rows;
@@ -3823,6 +3893,9 @@ impl Screen {
             }
             return;
         }
+        let Some(rules) = self.rules.clone() else {
+            return;
+        };
         let query = WorkQuery {
             search: text.clone(),
             ..WorkQuery::default()
@@ -3835,9 +3908,16 @@ impl Screen {
                 let hits = rows
                     .into_iter()
                     .map(|row| Found {
-                        // 认不出作品的那一行屏上写的是**变体的键**（那份内容在主库里的相对路径）：
-                        // 它没有作品名，而键指得准是哪一份。
-                        name: row.display.clone().unwrap_or_else(|| row.name.clone()),
+                        // **认不出作品的那一行叫什么由核心答**（`WorkRow::title`，浏览屏主列表
+                        // 走的是同一支）：那是那个变体的**正题**，不是整串相对路径。这一层不另写一套
+                        // ——写了，同一份内容在两屏上就是两个名字（ADR-0024）。
+                        name: crate::table::unlinked_title(&row, &rules)
+                            .or_else(|| row.display.clone())
+                            .unwrap_or_else(|| row.name.clone()),
+                        who: match &row.anchor {
+                            WorkAnchor::Work(_) => Who::Work(row.name.clone()),
+                            WorkAnchor::Loose(key) => Who::Loose(key.clone()),
+                        },
                         anchor: row.anchor,
                         platforms: row.platforms,
                         variants: row.variants,
@@ -3915,13 +3995,18 @@ impl Screen {
                     look::note_box(ui, |ui| {
                         ui.label(
                             egui::RichText::new(match tab {
+                                // **这一栏这一版不照稿**（票面 F3）：稿上写的是「在浏览中勾选作品，
+                                // 『加入子库…』时选『只加入勾选的作品』」，而那层对话框是票 23、眼下
+                                // 还不存在——照稿写等于在空态上指一条按不着的路，而空态的全部价值
+                                // 就是告诉人下一步去哪儿。票 23 落地后换回稿上那句。
                                 Exception::Include => {
-                                    "还没有手动包含的内容。在下面搜作品直接添加；\
+                                    "还没有手动包含的作品。在下面搜作品直接添加；\
                                      也可以在浏览屏的详情面板里对着某一份按「包含它」。"
                                 }
+                                // 这一栏**逐字照稿**：它指的两条路眼下都有。
                                 Exception::Exclude => {
-                                    "还没有排除的内容。容量超限时，删减建议里的「排除」会记在这里；\
-                                     也可以在下面搜作品直接添加。"
+                                    "还没有排除的作品。容量超限时，删减建议里的「排除」会记在这里；\
+                                     也可以在下面搜索添加。"
                                 }
                             })
                             .size(look::font_size(
@@ -3960,13 +4045,9 @@ impl Screen {
                         look::help(ui, "没有匹配的作品");
                     }
                     for (at, hit) in hits.iter().enumerate() {
-                        // 这个作品**眼下在哪一栏**：照稿在那一行末尾说一句，免得人以为自己加了两遍。
-                        let 现在是 = open
-                            .rows
-                            .iter()
-                            .find(|detail| detail.title() == hit.name)
-                            .map(|detail| detail.row.kind);
-                        if hit_row_ui(ui, hit, 现在是) {
+                        // 这一行**眼下有没有例外、是哪一向**：照稿在那一行末尾说一句，免得人以为自己加了两遍。
+                        // **按身份数，不按屏上那串字比**（两个同名的作品是真实存在的）。
+                        if hit_row_ui(ui, hit, 这一行的例外(&open.rows, hit)) {
                             加了 = Some(at);
                         }
                     }
@@ -3977,10 +4058,7 @@ impl Screen {
         // 次序要紧：两个框里的字先写回去（`add_exception` 记下的备注就是人这一帧打的那句），
         // 按下去的那几下跟着办，**搜一遍摆在最后**——搜出来的那一列会整份换掉，
         // 而 `加了` 是这一帧那一列里的第几行。
-        if let Some(open) = &mut self.exceptions {
-            open.query = 搜的;
-            open.note = 备注;
-        }
+        self.set_exception_note(&备注);
         if let Some(按了) = 换栏 {
             self.show_exception_tab(按了);
         }
@@ -3990,7 +4068,14 @@ impl Screen {
         if let Some(at) = 加了 {
             self.add_exception(site, tasks, at);
         }
-        self.search_exceptions(site);
+        // **搜一遍摆在最后**，而且走的是与打字同一条路（[`Self::set_exception_search`]）：
+        // 搜出来的那一列会整份换掉，而上面 `加了` 是这一帧那一列里的第几行。
+        // 加完那一下把框清空了，这儿照着清空之后的字搜——正好把那一列收掉。
+        let 框里 = self
+            .exceptions
+            .as_ref()
+            .map_or_else(String::new, |open| open.query.clone());
+        self.set_exception_search(site, if 加了.is_some() { &框里 } else { &搜的 });
         if shown.pressed.is_some() {
             self.close_exceptions();
         }
@@ -4249,9 +4334,9 @@ fn tally_kinds(kinds: impl Iterator<Item = Exception>) -> (u64, u64) {
 /// （[`Screen::undo_exception`]）。
 ///
 /// **一行是一个变体不是一个作品**：例外落在变体这一层（ADR-0016），一个作品底下那几份各自进出。
-/// 主栏写作品名，副行写**变体的键**——那是那份内容在主库里的相对路径，指得准是哪一份。
-/// **认不出作品的那一行只写一遍键**（主栏），副行不再重复一次：那一行主栏本来印的就是它
-/// （[`ExceptionDetail::title`]），两行印同一串字只是把行撑高。
+/// 主栏写那一行**屏上叫什么**（[`ExceptionDetail::display`]：认出作品的是显示标题，认不出的是那个
+/// 变体的**正题**——两样都由核心一处答，界面不另写一套，ADR-0024），副行一律写**变体的键**，
+/// 那是那份内容在主库里的相对路径、指得准是哪一份。
 ///
 /// **库里眼下没有那个变体**（盘没插、目录改了名）时体积那一格写「—」并在悬停里说清，**不写 0**：
 /// 「没有这一份」与「这一份是空的」不是一件事，而例外照旧记着、不删。
@@ -4317,31 +4402,32 @@ fn exception_table_ui(
                     .show(ui, |ui| {
                         ui.horizontal_top(|ui| {
                             cell(ui, 作品宽, &mut |ui| {
-                                ui.add(egui::Label::new(font::strong(detail.title())).wrap());
-                                // 认不出作品的那一行主栏印的就是键，副行不再重复一遍。
-                                if detail.work.is_some() {
-                                    ui.add(
-                                        egui::Label::new(
-                                            font::mono(&detail.row.variant_key)
-                                                .size(caption)
-                                                .weak(),
-                                        )
-                                        .wrap(),
-                                    );
-                                }
+                                ui.add(
+                                    egui::Label::new(font::strong(detail.display.as_str())).wrap(),
+                                );
+                                // 副行一律印**变体的键**。认不出作品的那一行主栏印的是那个变体的
+                                // **正题**（剥过噪音的那串字），与键不是同一串——两行各说一件事，
+                                // 与浏览屏主列表一个样。
+                                ui.add(
+                                    egui::Label::new(
+                                        font::mono(&detail.row.variant_key).size(caption).weak(),
+                                    )
+                                    .wrap(),
+                                );
                             });
                             cell(ui, 平台宽, &mut |ui| {
                                 ui.label(detail.platform.as_deref().unwrap_or("—"));
                             });
-                            cell(ui, 体积宽, &mut |ui| match detail.bytes {
-                                Some(bytes) => {
-                                    ui.label(human_bytes(bytes));
-                                }
-                                None => {
+                            cell(ui, 体积宽, &mut |ui| {
+                                // **「库里眼下有没有这一份」由核心答**（`ExceptionDetail::missing`），
+                                // 这儿不自己拿容量在不在去猜。
+                                if detail.missing() {
                                     ui.weak("—").on_hover_text(
                                         "这个变体眼下不在库里（盘没插、目录改了名、重新成型换了键）。\
                                          例外是永久记住的，照旧记着、不删。",
                                     );
+                                } else {
+                                    ui.label(human_bytes(detail.bytes.unwrap_or(0)));
                                 }
                             });
                             cell(ui, 备注宽, &mut |ui| match detail.row.note.as_deref() {
@@ -4377,15 +4463,43 @@ fn exception_table_ui(
     撤了
 }
 
+/// 搜出来这一行底下**眼下记着几条例外、各是哪一向**：`(包含几条, 排除几条)`。
+///
+/// **按身份数**（[`Who`]）：认出作品的比 `work` 表里那个名字，认不出的比变体的键。
+/// 拿屏上那串字比会把两个同名的作品当成一个——`work` 表的 `name` 上刻意没有 `UNIQUE`
+/// （`catalog::content` 里那段注释），同名异作是真实存在的。
+fn 这一行的例外(rows: &[ExceptionDetail], hit: &Found) -> (u64, u64) {
+    tally_kinds(
+        rows.iter()
+            .filter(|detail| match &hit.who {
+                Who::Work(name) => detail.work.as_deref() == Some(name.as_str()),
+                Who::Loose(key) => detail.row.variant_key == *key,
+            })
+            .map(|detail| detail.row.kind),
+    )
+}
+
 /// 搜索框底下的一行命中（设计稿 `.srch` 的一颗按钮）：平台、作品名、底下几个变体多大，
 /// 已经有例外的那一行说清**现在是哪一栏**。按下去返回 `true`。
-fn hit_row_ui(ui: &mut egui::Ui, hit: &Found, 现在是: Option<Exception>) -> bool {
+///
+/// `记着的` 是这一行底下眼下记着几条例外（[`这一行的例外`]）。**说得准**：整份都在一向时才写
+/// 「现在是「X」」；只有一部分、或者两向都有时如实写记着几条——一个作品底下五个变体只排除了一个，
+/// 写「现在是「排除」」是在骗人。
+fn hit_row_ui(ui: &mut egui::Ui, hit: &Found, 记着的: (u64, u64)) -> bool {
     let 平台 = if hit.platforms.is_empty() {
         "平台未知".to_string()
     } else {
         hit.platforms.join("、")
     };
-    let 现在 = 现在是.map_or_else(String::new, |kind| format!(" · 现在是「{}」", kind.shown()));
+    let 现在 = match 记着的 {
+        (0, 0) => String::new(),
+        (包含, 0) if 包含 == hit.variants => format!(" · 现在是「{}」", Exception::Include.shown()),
+        (0, 排除) if 排除 == hit.variants => format!(" · 现在是「{}」", Exception::Exclude.shown()),
+        (包含, 排除) => format!(
+            " · 底下已经记着 {} 条例外",
+            thousands(包含.saturating_add(排除))
+        ),
+    };
     let 一行 = format!(
         "{平台} · {} · {} 个变体 · {}{现在}",
         hit.name,

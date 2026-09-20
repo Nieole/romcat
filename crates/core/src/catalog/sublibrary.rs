@@ -999,6 +999,9 @@ impl Catalog {
     /// **同一个变体上再记一条会覆盖方向**（与 [`Self::set_exception`] 同一条 upsert，它就是拿一个键调的这一支）：
     /// 收入与排除是同一个决定的两面，一个变体在一个子库里不可能既收入又排除，因此**从一栏换到另一栏不会留下两条**。
     ///
+    /// 交回**记了几个变体**——就是交进来那几个（同一个键交两遍算一次覆盖，交进来的那份名单由调用方去重，
+    /// 屏上走的那条是 `Catalog::scoped_variants`，它交回来的键本来就不重）。
+    ///
     /// # Errors
     /// 写库失败时返回错误。
     pub fn set_exceptions(
@@ -1094,8 +1097,13 @@ impl Catalog {
     /// **库里眼下没有那个变体的那几条照旧交出来**，平台与容量是 `None`——例外是永久记住的
     /// （ADR-0016），盘没插不该让它从屏上消失。
     ///
-    /// 显示标题由 [`title::choose`](crate::title::choose) 挑，`priorities` 要与浏览屏主列表、详情面板、
-    /// 导出交的是同一份（工作目录里那份优先级表），不然同一个作品在两处是两个名字。
+    /// **屏上那个名字只在一处答**（ADR-0024）：认出作品的走
+    /// [`title::choose`](crate::title::choose)（与浏览屏主列表、详情面板、导出同一处），
+    /// **认不出作品的走那个变体的正题**（[`loose_title`](super::browse::loose_title)，
+    /// 与 [`WorkRow::title`](super::browse::WorkRow::title) 同一支）。
+    ///
+    /// 因此两份配置都要交进来，而且要与那几处交的是同一份：`priorities` 是工作目录里那份优先级表，
+    /// `rules` 是工作目录里那份剥离规则（`sources::rules`）。交错了，同一份内容在两屏上就是两个名字。
     ///
     /// # Errors
     /// 读库失败时返回错误。
@@ -1103,6 +1111,7 @@ impl Catalog {
         &self,
         name: &str,
         priorities: &crate::scrape::Priorities,
+        rules: &crate::filename::Rules,
     ) -> Result<Vec<ExceptionDetail>, CatalogError> {
         // **方向那一列只在一处认**（[`Self::sublibrary_exceptions`]，连同库被人手改坏时退成「排除」
         // 那条判断）：这一趟只在旁边补上库里的事实。
@@ -1116,7 +1125,7 @@ impl Catalog {
             let mut statement = self
                 .conn
                 .prepare(
-                    "SELECT variant.platform, variant.bytes, work.name
+                    "SELECT variant.platform, variant.bytes, variant.main_key, work.name
                        FROM variant LEFT JOIN work ON work.id = variant.work_id
                       WHERE variant.key = ?1",
                 )
@@ -1127,21 +1136,29 @@ impl Catalog {
                         Ok((
                             found.get::<_, Option<String>>(0)?,
                             found.get::<_, i64>(1)?,
-                            found.get::<_, Option<String>>(2)?,
+                            found.get::<_, String>(2)?,
+                            found.get::<_, Option<String>>(3)?,
                         ))
                     })
                     .optional()
                     .map_err(|source| self.err(source))?;
                 details.push(match seen {
-                    Some((platform, bytes, work)) => ExceptionDetail {
+                    Some((platform, bytes, main_key, work)) => ExceptionDetail {
+                        // 认出作品的那一格第二趟换成显示标题；认不出的**就是那个变体的正题**，
+                        // 与浏览屏主列表剥的是同一支。
+                        display: work
+                            .clone()
+                            .unwrap_or_else(|| super::browse::loose_title(rules, &main_key)),
                         row,
                         work,
                         platform,
                         // 容量是下界（ADR-0021）；库里存的是 `INTEGER`，负数只可能是被人手改坏了。
                         bytes: Some(u64::try_from(bytes).unwrap_or(0)),
                     },
-                    // **库里眼下没有这一份**：平台与容量都不写，`missing()` 照它答。
+                    // **库里眼下没有这一份**：平台与容量都不写（`missing()` 照它答），
+                    // 剥正题要的主文件名也不在库里——退回那条键，它至少指得准是哪一份。
                     None => ExceptionDetail {
+                        display: row.variant_key.clone(),
                         row,
                         work: None,
                         platform: None,
@@ -1159,22 +1176,21 @@ impl Catalog {
         let titles = self.titles_of_works(&works)?;
         for detail in &mut details {
             // **同一个作品可以挂着好几条例外**：这份叫法表按作品**查**、不取走，不然第二条就没名字了。
+            // 换的只有 `display` 那一格——`work` 那一格是身份，留着给「这个作品有没有例外」那一问。
             let Some(work) = detail.work.as_deref() else {
                 continue;
             };
             let Some(entries) = titles.get(work) else {
                 continue;
             };
-            detail.work = Some(
-                crate::title::choose(
-                    &crate::title::TitleSet {
-                        work: work.to_string(),
-                        entries: entries.clone(),
-                    },
-                    priorities,
-                )
-                .display,
-            );
+            detail.display = crate::title::choose(
+                &crate::title::TitleSet {
+                    work: work.to_string(),
+                    entries: entries.clone(),
+                },
+                priorities,
+            )
+            .display;
         }
         Ok(details)
     }
