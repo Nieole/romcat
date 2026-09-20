@@ -57,6 +57,7 @@ fn 认出来(
             variant_key: key.to_string(),
             platform: None,
             standalone: None,
+            edition: None,
             state: State::Matched,
             reason: None,
             units: 1,
@@ -154,6 +155,7 @@ fn 建库() -> Catalog {
             None,
             Some("Ja"),
             Provenance::Identified,
+            None,
         )
         .expect("建得出发行版");
     let 多语 = catalog
@@ -164,6 +166,7 @@ fn 建库() -> Catalog {
             None,
             Some("En, Danish"),
             Provenance::Identified,
+            None,
         )
         .expect("建得出发行版");
     let 无语言 = catalog
@@ -174,6 +177,7 @@ fn 建库() -> Catalog {
             None,
             None,
             Provenance::Identified,
+            None,
         )
         .expect("建得出发行版");
 

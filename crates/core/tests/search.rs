@@ -130,6 +130,7 @@ fn 建库() -> Catalog {
             variant_key: 键(at, n),
             platform: None,
             standalone: None,
+            edition: None,
             state: State::Matched,
             reason: None,
             units: 1,

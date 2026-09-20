@@ -168,7 +168,12 @@ fn 收一份媒体(现场: &mut 现场, 变体: &str, kind: MediaKind, bytes: &[
     写(&现场.pool.path_of(&hash, "png"), bytes);
     现场
         .catalog
-        .put_media(&hash, "png", bytes.len() as u64)
+        .put_media(
+            &hash,
+            "png",
+            bytes.len() as u64,
+            romcat_core::scrape::measure::Measured::default(),
+        )
         .expect("池里记得下");
     现场
         .catalog
@@ -647,7 +652,12 @@ fn 子库的媒体按_downloaded_media_铺_条目里一个路径都不写() {
     写(&现场.pool.path_of(&hash, "png"), &bytes);
     现场
         .catalog
-        .put_media(&hash, "png", bytes.len() as u64)
+        .put_media(
+            &hash,
+            "png",
+            bytes.len() as u64,
+            romcat_core::scrape::measure::Measured::default(),
+        )
         .expect("池里记得下");
     现场
         .catalog
@@ -724,7 +734,12 @@ fn 同一个变体的第二张同类图被挤掉_而且这件事说得出口() {
         写(&现场.pool.path_of(&hash, "png"), &字节);
         现场
             .catalog
-            .put_media(&hash, "png", 字节.len() as u64)
+            .put_media(
+                &hash,
+                "png",
+                字节.len() as u64,
+                romcat_core::scrape::measure::Measured::default(),
+            )
             .expect("池里记得下");
         现场
             .catalog
