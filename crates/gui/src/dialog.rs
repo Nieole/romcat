@@ -255,7 +255,10 @@ enum Slot {
 }
 
 /// 一层弹层。
-pub struct Dialog<A> {
+///
+/// `'a` 是[标头那一排](Self::head)那个闭包借着的东西活多久——摆它的那一屏手上的状态。调用方摆弹层
+/// 一律是一条写到底的链（`Dialog::new(..).head(..).show(..)`），那个寿命自己对得上，写不出来。
+pub struct Dialog<'a, A> {
     /// 这一层的 id。
     id: egui::Id,
     /// 标题。
@@ -264,6 +267,10 @@ pub struct Dialog<A> {
     note: Option<String>,
     /// 标头那一排「走到第几问」：各问的名字，与眼下是第几问（从 0 数）。
     pages: Option<(Vec<String>, usize)>,
+    /// 标头底下、分隔线上面那一排（[`Self::head`]）。
+    head: Option<Box<dyn FnOnce(&mut egui::Ui) + 'a>>,
+    /// 页脚左边那句说明字（[`Self::footer_note`]）。
+    footer_note: Option<String>,
     /// 多宽。
     width: Width,
     /// 页脚。
@@ -280,7 +287,7 @@ pub struct Shown<A, R> {
     pub rect: egui::Rect,
 }
 
-impl<A> Dialog<A> {
+impl<'a, A> Dialog<'a, A> {
     /// 一层弹层：`id_salt` 在全窗口里认得出它，`title` 是标题。
     #[must_use]
     pub fn new(id_salt: impl Hash + Debug, title: impl Into<String>, footer: Footer<A>) -> Self {
@@ -289,6 +296,8 @@ impl<A> Dialog<A> {
             title: title.into(),
             note: None,
             pages: None,
+            head: None,
+            footer_note: None,
             width: Width::default(),
             footer,
         }
@@ -315,6 +324,37 @@ impl<A> Dialog<A> {
         self
     }
 
+    /// **标头底下、分隔线上面那一排**（设计稿 `.mhead` 里的 `head`）：分栏那一排、过滤那一排——
+    /// 一眼看得出这一层眼下摆的是哪一份的那种东西。手动例外那层的「包含｜排除」走的就是它
+    /// （票 `gui-looks-like-the-design/22`）。
+    ///
+    /// **它不是内容区**：内容区滚得动，而这一排要一直钉在分隔线上头——滚下去之后看不出自己在哪一栏，
+    /// 正是这一排要防的事。也因此这里**只摆一排挑东西的控件**，别往里塞输入框（会碰到输入法的东西归内容区，
+    /// ADR-0005）。
+    ///
+    /// 给了它，标头那一块的下留白收窄成一档（设计稿拿 `margin-bottom:-14px` 把 `.mhead` 的下留白抵掉，
+    /// 让那一排贴着分隔线；这里换成少留一点，效果是同一个）。**不给就一点地方都不占**，画出来与没有这个槽
+    /// 之前一模一样。
+    #[must_use]
+    pub fn head(mut self, add: impl FnOnce(&mut egui::Ui) + 'a) -> Self {
+        self.head = Some(Box::new(add));
+        self
+    }
+
+    /// **页脚左边那句说明字**（设计稿 `.mfoot` 里那个 `.help`）：这一层的规矩——按完之后还要做什么、
+    /// 这一层改的东西会连累到谁。手动例外那层的「修改例外后，同步前需要重新生成差量预览。」走的就是它。
+    ///
+    /// 摆在页脚而不是内容区末尾：内容区滚得动，这句话滚出去就看不见了，而它说的是**整层**的规矩，
+    /// 不是最后那一段的注脚。
+    ///
+    /// 配 [`Footer::dismiss_on_right`] 才是设计稿那个样子：说明字靠左、退出那一颗贴右当主按钮。
+    /// **不给就一点地方都不占。**
+    #[must_use]
+    pub fn footer_note(mut self, text: impl Into<String>) -> Self {
+        self.footer_note = Some(text.into());
+        self
+    }
+
     /// 多宽：令牌里那四档之一。
     #[must_use]
     pub fn width(mut self, width: Width) -> Self {
@@ -333,6 +373,8 @@ impl<A> Dialog<A> {
             title,
             note,
             pages,
+            head,
+            footer_note,
             width,
             footer,
         } = self;
@@ -405,8 +447,18 @@ impl<A> Dialog<A> {
                 // 三段之间不留缝：分隔线就是缝。段里头照旧用原来的间距。
                 ui.spacing_mut().item_spacing.y = 0.0;
 
+                // **有标头那一排时下留白收窄**（[`Dialog::head`]）：设计稿拿 `margin-bottom:-14px` 把
+                // `.mhead` 的下留白抵掉，让那一排贴着分隔线；这里换成少留一点，效果是同一个。
+                // 没给那个槽时这里一个字都不变——下留白照旧是 `header_pad_y`。
+                //
+                // **没给那个槽时这一句折出来的与从前一模一样**：底下那一行原来就是
+                // `Margin::from(vec2(pad_x, header_pad_y))`，只在有标头那一排时才去改它的下边。
+                let mut header_margin = egui::Margin::from(egui::vec2(pad_x, header_pad_y));
+                if head.is_some() {
+                    header_margin.bottom = egui::Margin::from(egui::vec2(pad_x, step(1))).bottom;
+                }
                 egui::Frame::new()
-                    .inner_margin(egui::Margin::from(egui::vec2(pad_x, header_pad_y)))
+                    .inner_margin(header_margin)
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing = spacing;
                         ui.set_width(ui.available_width());
@@ -421,6 +473,11 @@ impl<A> Dialog<A> {
                         if let Some((labels, at)) = &pages {
                             ui.add_space(step(2));
                             pages_ui(ui, labels, *at);
+                        }
+                        // 设计稿 `.dtabs` 离说明是 12，取最近那一档。
+                        if let Some(head) = head {
+                            ui.add_space(step(2));
+                            head(ui);
                         }
                     });
                 look::divider(ui);
@@ -464,7 +521,7 @@ impl<A> Dialog<A> {
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing = spacing;
                         ui.set_width(ui.available_width());
-                        footer_ui(ui, &footer)
+                        footer_ui(ui, &footer, footer_note.as_deref())
                     })
                     .inner;
                 let measured = ui.min_rect().height() - above_footer;
@@ -656,9 +713,20 @@ fn pages_ui(ui: &mut egui::Ui, labels: &[String], at: usize) {
 ///
 /// **靠右不走 `right_to_left`**：那样摆出来的次序是反的，Tab 从右往左走。先量出右边那几颗
 /// 一共多宽、空出左边那一截，再从左往右摆——看着靠右，Tab 照读的次序走。
-fn footer_ui<A>(ui: &mut egui::Ui, footer: &Footer<A>) -> Option<Slot> {
+fn footer_ui<A>(ui: &mut egui::Ui, footer: &Footer<A>, note: Option<&str>) -> Option<Slot> {
     let mut clicked = None;
     ui.horizontal(|ui| {
+        // **页脚左边那句说明字**（[`Dialog::footer_note`]）：摆在最前头，按钮照旧从它右边接着排。
+        // 没给就一个控件都不摆——那一行画出来与没有这个槽之前一模一样。
+        //
+        // 截断而不是折行：页脚是一行高的，折行会把按钮挤下去；说明字本来就该是一句短话。
+        if let Some(note) = note {
+            ui.add(
+                egui::Label::new(egui::RichText::new(note).small().weak())
+                    .truncate()
+                    .selectable(false),
+            );
+        }
         // 退出那一颗摆右边的写法（[`Footer::dismiss_on_right`]）：其余几颗先从左往右摆，再空出中间、退出那一颗贴右当主按钮。
         if footer.dismiss_on_right {
             for (at, button) in footer.rest.iter().enumerate() {

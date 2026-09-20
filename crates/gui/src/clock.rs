@@ -68,6 +68,28 @@ impl Clock {
     }
 }
 
+/// **库里记着的一个时刻**怎么画：拿哪一刻当「此刻」、本地比 UTC 快多少（[`Clock`]），
+/// 以及截图测试钉死的那个时刻——钉了就一律画成它。
+///
+/// 两样收在一处，是因为画一个时刻两样都要；真窗口那一路 `pinned` 是 `None`，画库里记着的那一刻。
+/// 待确认屏的裁决记录（票 `gui-looks-like-the-design/18`）与子库屏手动例外那张表的「时间」一列
+/// （票 `gui-looks-like-the-design/22`）走的是这一处——两屏各写一份的话，钉死的规矩就会漂开。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RecordClock {
+    /// 本地短格式怎么画。
+    pub clock: Clock,
+    /// 截图测试钉死的那个时刻（UNIX 纪元起的秒）。
+    pub pinned: Option<i64>,
+}
+
+impl RecordClock {
+    /// `at` 画成本地短格式；钉死了时刻就画钉死的那一刻。
+    #[must_use]
+    pub fn short(self, at: i64) -> String {
+        self.clock.short(self.pinned.unwrap_or(at))
+    }
+}
+
 /// 那一刻本地时区比 UTC 快多少秒：读系统时区库。时刻出了 `jiff` 认的范围就当 UTC。
 fn local_offset(secs: i64) -> i32 {
     jiff::Timestamp::from_second(secs)

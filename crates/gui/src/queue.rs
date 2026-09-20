@@ -79,7 +79,7 @@ use romcat_core::verdict;
 // **一行画得下的那一截**收在浏览屏那一处：一条简介在中立库里最多 4,000 字
 // （`scrape::zh::DESCRIPTION_LIMIT`），两屏碰到的是同一个问题，各写一份迟早两种收法。
 use crate::browse::one_line;
-use crate::clock::Clock;
+use crate::clock::{Clock, RecordClock};
 use crate::dialog;
 use crate::font;
 use crate::layout;
@@ -2714,24 +2714,6 @@ impl Screen {
 impl Default for Screen {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// 裁决记录里的时刻怎么画：拿哪一刻当「此刻」、本地比 UTC 快多少（[`Clock`]），以及截图测试钉死的那个时刻——钉了就一律画成它。
-///
-/// 两样收在一处，是因为画一个时刻两样都要；真窗口那一路 `pinned` 是 `None`，画沉淀库里记着的那一刻。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct RecordClock {
-    /// 本地短格式怎么画。
-    clock: Clock,
-    /// 截图测试钉死的那个时刻（UNIX 纪元起的秒）。
-    pinned: Option<i64>,
-}
-
-impl RecordClock {
-    /// `at` 画成本地短格式；钉死了时刻就画钉死的那一刻。
-    fn short(self, at: i64) -> String {
-        self.clock.short(self.pinned.unwrap_or(at))
     }
 }
 
