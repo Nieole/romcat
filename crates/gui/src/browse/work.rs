@@ -3275,6 +3275,10 @@ fn media_preview(ui: &mut egui::Ui, item: &MediaItem, size: egui::Vec2, gallery:
 }
 
 /// 几段排好的字竖着摞起来、在这一块里上下左右居中，段与段之间隔 `gap`。
+///
+/// **交给 `painter.galley` 的那个点是哪儿，由这一段自己的 `halign` 说了算**：`Min` 时是左上角，
+/// `Center` 时是顶边中点，`Max` 时是右上角。不照它分，一段 `halign = Center` 的字会被这里再
+/// 往左挪半个身位——那正是没装 ffmpeg 时那两句话左半截被格子裁掉的原因（右沿正好落在格子正中）。
 fn centered_lines(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -3285,7 +3289,12 @@ fn centered_lines(
         + gap * lines.len().saturating_sub(1) as f32;
     let mut y = rect.center().y - 总高 / 2.0;
     for galley in lines {
-        let x = rect.center().x - galley.size().x / 2.0;
+        let 半宽 = galley.size().x / 2.0;
+        let x = match galley.job.halign {
+            egui::Align::Min => rect.center().x - 半宽,
+            egui::Align::Center => rect.center().x,
+            egui::Align::Max => rect.center().x + 半宽,
+        };
         painter.galley(egui::pos2(x, y), galley.clone(), egui::Color32::PLACEHOLDER);
         y += galley.size().y + gap;
     }
