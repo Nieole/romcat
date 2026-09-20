@@ -12,7 +12,7 @@
 //! 排计划这一路上一个字节都写不出去，是类型保证的，不是纪律。测试因此也能拿
 //! [`MemFs`](crate::fs::MemFs) 在内存里造出整张卡，包括「元数据读不到」那一态。
 //!
-//! ## 卡不在位是错误，不是「空目标」
+//! ## 卡未连接是错误，不是「空目标」
 //!
 //! 把「盘没插」读成「目标上什么都没有」，会让计划变成「清单里的每一条都意外消失了、
 //! 期望里的每一条都要重传」——一份灾难性的预览。所以根目录不在时**直接失败**。
@@ -30,9 +30,9 @@ use super::{Stamp, TargetFile, TargetState};
 /// 目标设备看不成的原因。
 #[derive(Debug, thiserror::Error)]
 pub enum ObserveError {
-    /// 子库根不在位。**卡没插上就该在这里停住**，而不是排出一份「全删全传」的计划。
+    /// 子库根未连接。**卡没插上就该在这里停止**，而不是排出一份「全删全传」的计划。
     #[error(
-        "目标不在位：{path}（{source}）\n插上读卡器，或者 `romcat sublibrary set` 改一下目标路径。"
+        "目标未连接：{path}（{source}）\n插上读卡器，或者 `romcat sublibrary set` 改一下目标路径。"
     )]
     Absent {
         /// 子库根。
@@ -72,7 +72,7 @@ pub enum ObserveError {
 ///   （[`fs::case_insensitive`](crate::fs::case_insensitive)）。仍然只读。
 ///
 /// # Errors
-/// 子库根不在位或列不开时返回错误。
+/// 子库根未连接或列不开时返回错误。
 pub fn observe(fs: &dyn LibraryFs, root: &Path) -> Result<TargetState, ObserveError> {
     let root = fs
         .canonicalize(root)

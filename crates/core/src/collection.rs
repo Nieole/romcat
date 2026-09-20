@@ -390,6 +390,32 @@ pub fn standing(site: &Site, key: &str) -> Result<Vec<(String, &'static str)>, C
     Ok(out.into_iter().collect())
 }
 
+/// 一个作品底下这几个变体**收没收藏**、收了的**钉在哪种锚上**（作品详情页状态块那一行「收藏」照它写，
+/// 票 `gui-looks-like-the-design/15`）。
+///
+/// 一个都不在[收藏](FAVORITE)里是 `None`；收了的里头**有一个只钉得住本机路径**就是
+/// [`ANCHOR_PATH`](crate::verdict::ANCHOR_PATH)——那一个挪了位置就丢，整部作品的收藏说不上「按文件内容记录」；
+/// 都钉在内容上才是 [`ANCHOR_CONTENT`](crate::verdict::ANCHOR_CONTENT)。每个变体钉在哪种锚上照 [`standing`] 说。
+///
+/// # Errors
+/// 两份库有一份读不动时返回错误。
+pub fn favorite_of(site: &Site, keys: &[String]) -> Result<Option<&'static str>, CollectionError> {
+    let mut found = None;
+    for key in keys {
+        let Some((_, anchor)) = standing(site, key)?
+            .into_iter()
+            .find(|(name, _)| name == FAVORITE)
+        else {
+            continue;
+        };
+        if anchor == crate::verdict::ANCHOR_PATH {
+            return Ok(Some(anchor));
+        }
+        found = Some(anchor);
+    }
+    Ok(found)
+}
+
 /// 照沉淀库把中立库里的合集**整份重建**一遍。
 ///
 /// 这是「删掉中立库重扫之后收藏还在」那句话真正的兑现处：识别跑完调它一次

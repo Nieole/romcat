@@ -2066,7 +2066,7 @@ fn 否定裁决把那条叫法从标题集合里也退出去() {
 
     // ── 三、**显示标题不再挑到被否掉的那一条**——这才是用户看得见的那一半。
     let 挑出来的 = 显示标题(&现场);
-    assert_eq!(挑出来的.display, "魂斗罗", "文件名那条汉化组自取的名顶上来");
+    assert_eq!(挑出来的.display, "魂斗罗", "文件名那条汉化组译名顶上来");
     assert_eq!(挑出来的.kind, Some(title::TitleKind::FanName));
     assert!(
         !挑出来的.evidence.contains("中文离线源"),

@@ -55,6 +55,10 @@ required-features = ["demo"]
 name = "task"
 required-features = ["demo"]
 
+[[test]]
+name = "work"
+required-features = ["demo"]
+
 [dependencies]
 # 三个开关（`--catalog` / `--bench` / `--font-check`）本可以手写解析，用 clap 是为了与
 # `romcat-cli` 一套写法，`--help` 也顺带有了。

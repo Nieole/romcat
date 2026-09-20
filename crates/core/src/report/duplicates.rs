@@ -136,7 +136,7 @@ impl DuplicateDetails {
         }
 
         if self.groups.is_empty() {
-            let _ = writeln!(out, "\n没有发现重复拷贝。");
+            let _ = writeln!(out, "\n没有重复。");
             return out;
         }
 
@@ -402,7 +402,7 @@ mod tests {
         let details = 明细(&agg);
         assert_eq!(details.group_count(), 0);
         assert_eq!(details.reclaimable_bytes, 0);
-        assert!(details.render_text().contains("没有发现重复拷贝"));
+        assert!(details.render_text().contains("没有重复"));
     }
 
     #[test]

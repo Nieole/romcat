@@ -411,3 +411,50 @@ fn 识别状态那五档印出去的词认得回来() {
     assert_eq!(StateFilter::from_label("还没识别过"), None);
     assert_eq!(StateFilter::from_label(""), None);
 }
+
+/// **按身份取回主列表那几行**，与翻页取出来的那几行一模一样（作品详情页头上那几枚标签照它印，票
+/// `gui-looks-like-the-design/15`）：变体数、容量、元数据齐不齐、年份、最高置信度、显示标题，一格都不差。
+#[test]
+fn 按身份取回主列表那几行与翻页取出来的一模一样() {
+    use romcat_core::catalog::browse::{WorkAnchor, WorkQuery};
+    use romcat_core::scrape::Priorities;
+
+    let catalog = 合成库(40);
+    let 表 = Priorities::builtin();
+    let query = WorkQuery::default();
+    let 整页 = catalog
+        .work_page_with_titles(&query, 0, MAX_PAGE, &表)
+        .expect("取得出一页");
+    let 认出的 = 整页
+        .iter()
+        .find(|row| matches!(row.anchor, WorkAnchor::Work(_)))
+        .expect("合成库里有认出作品的行")
+        .clone();
+    let 没认出的 = 整页
+        .iter()
+        .find(|row| matches!(row.anchor, WorkAnchor::Loose(_)))
+        .expect("合成库里有没认出作品的行")
+        .clone();
+
+    let 取回的 = catalog
+        .work_rows(
+            &query,
+            &[
+                (没认出的.anchor.clone(), 没认出的.name.clone()),
+                (认出的.anchor.clone(), 认出的.name.clone()),
+            ],
+            &表,
+        )
+        .expect("取得回来");
+    assert_eq!(
+        取回的,
+        [没认出的, 认出的],
+        "按身份取回来的那几行与翻页取出来的对不上，或者次序没照交进去的来"
+    );
+    assert!(
+        catalog
+            .work_rows(&query, &[], &表)
+            .expect("一行都不要也不出错")
+            .is_empty()
+    );
+}

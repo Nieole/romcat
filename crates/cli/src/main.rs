@@ -74,7 +74,7 @@ enum Command {
     Titles(TitlesArgs),
     /// 把维护者手工维护的前端元数据导进中立库。原文逐字节留存，往返实测当场报出档位
     Import(ImportArgs),
-    /// 把中立库导出成前端元数据。作品级收敛，检测到外部改动就停下来、不静默覆盖
+    /// 把中立库导出成前端元数据。作品级收敛，检测到外部改动就停止、不静默覆盖
     Export(ExportArgs),
     /// 列出眼下带的适配器与它们的能力档位——导出前就知道哪个格式会丢掉什么
     Adapters,
@@ -105,7 +105,7 @@ enum Command {
 /// Switch 那一层的几件事。
 #[derive(Debug, Subcommand)]
 enum SwitchCommand {
-    /// 取一次第三方 TitleID 数据库并建成本机索引。`ETag` 没变就整件跳过
+    /// 下载一次第三方 TitleID 数据库并建成本机索引。`ETag` 没变就整件跳过
     Sync(SwitchSyncArgs),
     /// **读一份转储的明文文件名表**——一个密钥都不要，一个字节的内容都不解开
     Read(SwitchReadArgs),
@@ -113,7 +113,7 @@ enum SwitchCommand {
 
 #[derive(Debug, Args)]
 struct SwitchSyncArgs {
-    /// 工作目录：TitleID 索引与取回来的原件存这里
+    /// 工作目录：TitleID 索引与下载来的原件存这里
     #[arg(long, value_name = "目录")]
     workspace: Option<PathBuf>,
 
@@ -121,7 +121,7 @@ struct SwitchSyncArgs {
     #[arg(long)]
     full: bool,
 
-    /// 只说这一趟会干什么，不取也不写
+    /// 只说这一趟会干什么，不下载也不写
     #[arg(long)]
     dry_run: bool,
 
@@ -209,7 +209,7 @@ struct ZhJudgeArgs {
 
 #[derive(Debug, Args)]
 struct ZhSyncArgs {
-    /// 工作目录：中文索引与取回来的原件存这里
+    /// 工作目录：中文索引与下载来的原件存这里
     #[arg(long, value_name = "目录")]
     workspace: Option<PathBuf>,
 
@@ -417,15 +417,15 @@ struct DatSyncArgs {
     #[arg(long = "source", value_name = "源名")]
     only: Vec<String>,
 
-    /// 无视指纹，全部重取
+    /// 无视指纹，全部重新下载
     #[arg(long)]
     full: bool,
 
-    /// 只排计划、报出这一趟会干什么，不取也不写
+    /// 只排计划、报出这一趟会干什么，不下载也不写
     #[arg(long)]
     dry_run: bool,
 
-    /// 工作目录：DAT 库与取回来的原件存这里
+    /// 工作目录：DAT 库与下载来的原件存这里
     #[arg(long, value_name = "目录")]
     workspace: Option<PathBuf>,
 
@@ -1241,7 +1241,7 @@ fn heal_zh_store(
             last = Instant::now();
             eprintln!(
                 "中文索引的结构版本是 {pending}，本程序认得的是 {}——正在从本机那份原件 \
-                 {原件} 就地重建（解开 {}），不会下载任何东西。这要几分钟，Ctrl-C 停得下来。",
+                 {原件} 就地重建（解开 {}），不会下载任何东西。这要几分钟，Ctrl-C 可以停止。",
                 zh::store::SCHEMA_VERSION,
                 human_bytes(at.total),
             );
@@ -2376,7 +2376,7 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
         (Some(fetcher), Some(credentials)) => {
             eprintln!(
                 "在线档：并发上限 {}，两次请求之间至少 {} 毫秒，这一趟最多 {} 个请求。\n\
-                 只对**已确认**的条目发请求；配额超限会当场停下，不重试也不换账号。",
+                 只对**已确认**的条目发请求；配额超限会当场停止，不重试也不换账号。",
                 scrape::online::MAX_CONCURRENCY,
                 limits.interval.as_millis(),
                 thousands(limits.budget),
@@ -4452,7 +4452,7 @@ fn run_sublibrary_rule(args: &SubRuleArgs) -> ExitCode {
          作品^火焰纹章 且 年份>=2000\n  \
          平台=GB,GBA 且 (中文=汉化 或 类型~RPG)\n  \
          平台=SFC 且 都不(语言=En 或 中文=官中)\n\n\
-         连接词两侧要有空白（值里出现「且」「或」不当分隔符）；\
+         组合方式两侧要有空白（值里出现「且」「或」不当分隔符）；\
          同一层里不许既写「且」又写「或」——要混就套括号。"
     );
     ExitCode::SUCCESS
@@ -5113,7 +5113,7 @@ fn run_zh_sync(args: &ZhSyncArgs, cancel: &CancelToken) -> ExitCode {
                 );
             }
             eprintln!(
-                "正在读那份条目表（解开 {}），这要几分钟；Ctrl-C 停得下来，停下之后{}。",
+                "正在读那份条目表（解开 {}），这要几分钟；Ctrl-C 可以停止，停止之后{}。",
                 human_bytes(at.total),
                 // **「原样可用」在等着重建那一档是假话**：那份库这一版读不出来
                 // （`zh::store` 的「代价是这中间 `load` 交出来的是空的」），停下只是
@@ -5157,18 +5157,18 @@ fn run_zh_sync(args: &ZhSyncArgs, cancel: &CancelToken) -> ExitCode {
         // 从前只有后一个出口停得下来，所以这句话从前只说了后者。
         Err(zh::sync::SyncError::Halted(_)) => {
             eprintln!(
-                "取中文数据源{}。停下的地方是干净的：库里一个字都没写，缓存里也没留下\
+                "下载中文数据源{}。停止的地方是干净的：库里一个字都没写，缓存里也没留下\
                  半截原件——手上那份索引原样可用。重跑会从头来一遍；下完了的那份原件\
                  还在缓存里的话不会再下一次（文件名里带着版本，同名就是同一版）。",
                 romcat_core::task::Ending::<()>::Stopped.render(),
             );
             return ExitCode::from(130);
         }
-        Err(error) => return fail(format!("取中文数据源失败：{error}")),
+        Err(error) => return fail(format!("下载中文数据源失败：{error}")),
     };
     if outcome.dry_run {
         eprintln!(
-            "这是 --dry-run：最新的一版是 {}（{}），什么都没取、什么都没写。",
+            "这是 --dry-run：最新的一版是 {}（{}），什么都没下载、什么都没写。",
             outcome.dump,
             human_bytes(outcome.bytes)
         );
@@ -5185,7 +5185,7 @@ fn run_zh_sync(args: &ZhSyncArgs, cancel: &CancelToken) -> ExitCode {
             // **「取回」是句要负责的话**：原件已经在手边时一个字节都没下
             // （`Options::full` 的文档：文件名带着日期，同名就是同一版）。
             if outcome.downloaded {
-                "取回 "
+                "下载 "
             } else {
                 "原件在手边，一个字节都没下——重建自 "
             },
@@ -5384,7 +5384,7 @@ fn print_zh_stats(stats: &zh::store::Stats) {
     );
     if !stats.fields.is_empty() {
         // **这一版索引带了哪些字段**：换了这一行就该重刮一遍（它进刮削那一侧的输入指纹）。
-        println!("  这一版取了：{}", stats.fields);
+        println!("  这一版下载了：{}", stats.fields);
     }
     let mut line = String::new();
     for (platform, count) in stats.by_platform.iter().take(24) {
@@ -5869,7 +5869,7 @@ fn run_dat_sync(args: &DatSyncArgs) -> ExitCode {
 
     for plan in &outcome.plans {
         eprintln!(
-            "{:<10} 取 {}，已是最新 {}，不入库 {}",
+            "{:<10} 下载 {}，已是最新 {}，不入库 {}",
             plan.source,
             plan.to_fetch(),
             plan.up_to_date(),
@@ -5883,11 +5883,11 @@ fn run_dat_sync(args: &DatSyncArgs) -> ExitCode {
         }
     }
     if args.dry_run {
-        eprintln!("这是 --dry-run，什么都没取、什么都没写。");
+        eprintln!("这是 --dry-run，什么都没下载、什么都没写。");
         return ExitCode::SUCCESS;
     }
     eprintln!(
-        "同步完毕：取了 {} 件、跳过 {} 件，写进 {} 份 DAT（另有 {} 份取回来了但没有映射命中，\
+        "同步完毕：下载了 {} 件、跳过 {} 件，写进 {} 份 DAT（另有 {} 份下载了但没有映射命中，\
          不入库）、{} 条条目（汉化 {}、官中 {}）。",
         outcome.fetched,
         outcome.skipped,

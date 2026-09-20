@@ -175,7 +175,7 @@ pub enum RepoError {
     },
     /// 结构版本对不上。
     #[error(
-        "DAT 库 {path} 的结构版本是 {found}，本程序认得的是 {expected}。删掉它重新同步即可——这份库里没有攒出来的东西，全部内容都能重取"
+        "DAT 库 {path} 的结构版本是 {found}，本程序认得的是 {expected}。删掉它重新同步即可——这份库里没有攒出来的东西，全部内容都能重新下载"
     )]
     Version {
         /// DAT 库文件。

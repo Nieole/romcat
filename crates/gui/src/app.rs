@@ -146,8 +146,8 @@ pub struct App {
     workspace_label: String,
     /// **观感基线与上次的版式装过了没有。** 只在开窗第一帧装一次。
     prepared: bool,
-    /// 上一次写进窗口标题的是哪一屏。**换屏才发一条命令**，不是每帧发一条。
-    titled: Option<View>,
+    /// 上一次写进窗口标题的那一句。**标题变了才发一条命令**（换屏、打开或换掉作品详情页），不是每帧发一条。
+    titled: Option<String>,
     /// **人按了左栏顶上那张「切换主库」。**
     ///
     /// 这一层自己换不了库：五屏全建立在「库一定在」这个前提上，换库那一下要把整份
@@ -198,6 +198,7 @@ impl App {
         // **版式先读出来**：面板尺寸要赶在开窗第一帧画面板之前塞进 egui 那张表里
         // （[`layout::Layout::seed`]），晚一帧人就会看见面板从默认宽度跳一下。
         let layout = layout::Layout::load(&workspace);
+        browse.restore_view_preferences(&layout);
         // **库屏那几块收着没有**也住在这份版式里（票 `gui-looks-like-the-design/06`）：开窗之前交给库屏。
         for fold in layout::Fold::ALL {
             roots.set_folded(fold, layout.folded(fold));
@@ -300,7 +301,18 @@ impl App {
     /// 是同一个字，不是那串带哈希的主文件名。
     #[must_use]
     pub fn window_title(&self) -> String {
-        format!("romcat — {} — {}", self.library_label, self.view.label())
+        match self.browse.page_title() {
+            // **作品详情页开着时连作品名一起写**（设计稿 `render` 里 `wdOn` 那一支）：那一层盖住了整块浏览屏，
+            // 截图发出来时「这是哪个作品」也只有标题答得了。
+            Some(work) if self.view == View::Browse => {
+                format!(
+                    "romcat — {} — {} — {work}",
+                    self.library_label,
+                    self.view.label()
+                )
+            }
+            _ => format!("romcat — {} — {}", self.library_label, self.view.label()),
+        }
     }
 
     /// 六条面板边界各自拖到哪儿了。测试拿它核对「存在工作目录里」。
@@ -678,14 +690,18 @@ impl App {
                     ui.colored_label(ui.visuals().warn_fg_color, 说的);
                 });
         }
-        let 副标题 = self.subtitle();
-        look::screen_header(
-            ui,
-            egui::Id::new(("屏头", self.view)),
-            self.view.nav_label(),
-            &副标题,
-            |ui| self.header_actions(ui),
-        );
+        // **作品详情页开着时不画浏览屏的屏头**：稿上 `.wd` 盖住整块屏，它顶上那一条（「← 返回浏览」）就是
+        // 这一层的屏头（票 `gui-looks-like-the-design/15`）。
+        if !(self.view == View::Browse && self.browse.page().is_some()) {
+            let 副标题 = self.subtitle();
+            look::screen_header(
+                ui,
+                egui::Id::new(("屏头", self.view)),
+                self.view.nav_label(),
+                &副标题,
+                |ui| self.header_actions(ui),
+            );
+        }
         match self.view {
             View::Queue => {
                 let (queue, site) = (&mut self.queue, &mut self.site);
@@ -728,6 +744,7 @@ impl App {
         for fold in layout::Fold::ALL {
             self.layout.set_folded(fold, self.roots.folded(fold));
         }
+        self.browse.save_view_preferences(&mut self.layout);
         // **画完了才问面板有多宽**：这一帧的边界是刚才那几句 `show` 定下来的。
         self.layout.harvest(ui.ctx());
         // **手松开了才写盘**：拖的过程中每帧写一次是六十次写盘，而那六十次里有
@@ -754,13 +771,14 @@ impl App {
         self.layout.seed(ctx);
     }
 
-    /// 换屏了就把窗口标题改掉。**换屏才发**，不是每帧发一条。
+    /// 窗口标题变了（换屏、打开或换掉作品详情页）就改掉。**变了才发**，不是每帧发一条。
     fn retitle(&mut self, ctx: &egui::Context) {
-        if self.titled == Some(self.view) {
+        let title = self.window_title();
+        if self.titled.as_deref() == Some(title.as_str()) {
             return;
         }
-        self.titled = Some(self.view);
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+        self.titled = Some(title);
     }
 
     /// 画左栏：几个计数交进去，按下去的那一下在这儿落实（[`rail`]）。

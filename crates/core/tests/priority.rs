@@ -425,3 +425,106 @@ fn 换一份表之前说得出哪几处显示值会变_照导出真会写出去�
             .is_empty()
     );
 }
+
+// ── 一个条目上每个字段眼下写出去的是什么（作品详情页「元数据」那一面照它画，票 `gui-looks-like-the-design/15`） ──
+
+use romcat_core::scrape::Field;
+
+#[test]
+fn 条目上每个字段写出去的是什么与导出同一处算_各个源说的都列着_裁决压过全部() {
+    let 草稿 = temp_dir("优先级-条目上的字段");
+    let 表 = 读一份(
+        草稿.path(),
+        "表.toml",
+        "\"版本\" = 1\n\
+         [[\"字段\"]]\n\"名\" = \"简介\"\n\
+         \"顺序\" = [\"裁决\", \"Pegasus\", \"ES-Gamelist\", \"中文离线源\", \"ScreenScraper\"]\n\
+         [[\"字段\"]]\n\"名\" = \"汉化组\"\n\
+         \"顺序\" = [\"裁决\", \"Pegasus\", \"ES-Gamelist\", \"TOSEC\", \"文件名\"]\n",
+    );
+    let mut catalog = 小库();
+    // 「幻想传说」在 FC 上的首选变体是 `幻想传说-1`（同一档按键排）：汉化组从它身上取。
+    let 字段们 = |catalog: &Catalog| {
+        priority::entry_fields(
+            catalog,
+            AnchorKind::Work,
+            "幻想传说",
+            "FC",
+            Some("主库/FC/幻想传说-1.nes"),
+            &表,
+        )
+        .expect("读得出")
+    };
+    let 那一格 = |字段们: &[priority::FieldShown], field: Field| {
+        字段们
+            .iter()
+            .find(|one| one.field == field)
+            .cloned()
+            .unwrap_or_else(|| panic!("「{}」那一格不在", field.label()))
+    };
+    let 说的 = |one: &priority::FieldShown| -> Vec<(String, String)> {
+        one.offered
+            .iter()
+            .map(|value| (value.source.clone(), value.value.clone()))
+            .collect()
+    };
+
+    let 眼下 = 字段们(&catalog);
+    assert_eq!(
+        眼下.iter().map(|one| one.field).collect::<Vec<_>>(),
+        Field::all(),
+        "字段照 Field::all 的次序一格一格列"
+    );
+    // ── 简介：作品上两家各说一句，写出去的是表里排前面的那一家；变体上挂着的简介不算（导出只读作品上的）。
+    let 简介 = 那一格(&眼下, Field::Description);
+    assert_eq!(简介.shown, Some(说("中文离线源", "中文简介")));
+    assert_eq!(
+        说的(&简介),
+        [
+            ("中文离线源".to_string(), "中文简介".to_string()),
+            ("ScreenScraper".to_string(), "An RPG".to_string()),
+        ],
+        "各个源说的都列着，照表的名次排；变体上的简介不混进来"
+    );
+    // ── 汉化组：只从首选变体身上取，非首选那个变体上的一条都不带。
+    let 汉化组 = 那一格(&眼下, Field::TranslationGroup);
+    assert_eq!(汉化组.shown, Some(说("TOSEC", "甲组")));
+    assert_eq!(
+        说的(&汉化组),
+        [
+            ("TOSEC".to_string(), "甲组".to_string()),
+            ("文件名".to_string(), "乙组".to_string()),
+        ]
+    );
+    // ── 显示标题：认出了作品的由标题集合挑；这份库里集合是空的，退回作品名，不是哪个源说的。
+    assert_eq!(
+        那一格(&眼下, Field::Title).shown,
+        Some(Said {
+            source: None,
+            values: vec!["幻想传说".to_string()],
+        })
+    );
+
+    // ── 人手写一条：写出去的换成它，别家说的照旧列着。
+    catalog
+        .put_verdict_value(
+            AnchorKind::Work,
+            "幻想传说",
+            Field::Description,
+            "手写的简介",
+            "测试",
+        )
+        .expect("写得进裁决");
+    let 写过 = 那一格(&字段们(&catalog), Field::Description);
+    assert_eq!(写过.shown, Some(说("裁决", "手写的简介")));
+    assert_eq!(
+        说的(&写过).first(),
+        Some(&("裁决".to_string(), "手写的简介".to_string())),
+        "裁决排在最前"
+    );
+    assert_eq!(
+        写过.offered.len(),
+        3,
+        "中文离线源与 ScreenScraper 那两句照旧列着"
+    );
+}
