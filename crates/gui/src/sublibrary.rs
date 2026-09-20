@@ -1452,7 +1452,7 @@ impl Screen {
     }
 
     /// 目录选择器交回来一个路径（票 `gui-answers-all-six/01` 那条薄封装，[`crate::pick::directory`]）：**填进目标路径那一格，
-    /// 与贴进框里走同一条路**——下一帧照框里的字当场判一遍（[`Self::vet_form`]）。取消（`None`）什么都不动。
+    /// 与贴进框里走同一条路**——下一帧照框里的字当场判一遍（`vet_form`）。取消（`None`）什么都不动。
     ///
     /// 界面上「选择…」交回来走的就是它，测试拿它当那一下（对话框那一层不测，理由在 `pick` 的模块文档里）。
     pub fn picked_target(&mut self, picked: Option<PathBuf>) {

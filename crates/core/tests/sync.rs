@@ -1064,7 +1064,7 @@ fn 前端在卡上改过的元数据文件同步不写回去_游玩记录与收�
     );
     assert!(
         plan.steps.iter().all(|step| step.path != 路径),
-        "前端改过的那份 gamelist 被排进了要写的步骤：{:?}",
+        "前端改过的那份 gamelist 被排进了要写的那几步：{:?}",
         plan.steps
     );
     assert!(

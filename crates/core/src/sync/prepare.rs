@@ -199,7 +199,7 @@ pub const FOOTPRINT_STEPS: u32 = 4;
 /// 还没建的子库没有清单，卡上的都算。目标设置弹层里那句「目录里已有 N 个文件，它们不在清单里，工具不会改动」数的就是它
 /// （票 `gui-looks-like-the-design/21`，拿主意的人 2026-09-15 定）。`target` 可以是框里还没存下来的那一条。
 ///
-/// **只读遍历目标**（[`observe`](super::observe)）：卡上文件多时是一趟长活，排到任务台上跑，不在画帧那条线程上跑；
+/// **只读遍历目标**（[`observe`](super::observe())）：卡上文件多时是一趟长活，排到任务台上跑，不在画帧那条线程上跑；
 /// 被叫停时一个字节都没写。
 ///
 /// # Errors
@@ -532,7 +532,7 @@ pub fn missing_roots_message(missing: &[String]) -> String {
 ///
 /// 它在核心里而不在命令行里，是因为**界面也有一个「同步」按钮**——这道红线不能靠
 /// 每个壳自己记得写一遍。判的那一下是 [`library_overlap`]：新建子库、改目标设置时当场判的也是它
-/// （[`sublibrary::target::vet`](crate::sublibrary::target::vet)，ADR-0024）。
+/// （[`sublibrary::target::vet`]，ADR-0024）。
 ///
 /// **判据先把两边折成可比形态**（[`path::is_inside_place`]）：目标过了
 /// [`path::normalize_existing`]，Windows 上于是是 `\\?\D:\…`，而库里的根存的是

@@ -210,7 +210,7 @@ pub fn file_name_for(collection: &str, suffix: &str) -> String {
 /// 一个平台的内容住在哪个**平台目录**下：从这些变体的**键**上数出来，只有一个目录就是它，散在几个目录里交 `None`。
 ///
 /// **从键上数，不从平台清单上猜**：清单里一个平台可以映射好几个目录别名，而这里要的是这份库里实际用的是哪一个。
-/// 导出时收敛（[`converge`]）与子库目标设置里的落点预览（`sync::Footprint::landing`）问的是同一件事，从这一处取。
+/// 导出时收敛（[`converge`](self)）与子库目标设置里的落点预览（`sync::Footprint::landing`）问的是同一件事，从这一处取。
 #[must_use]
 pub fn platform_directory<'a>(keys: impl IntoIterator<Item = &'a str>) -> Option<String> {
     let dirs: BTreeSet<&str> = keys
