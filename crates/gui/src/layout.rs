@@ -955,6 +955,8 @@ mod tests {
             folded_saved: BTreeSet::new(),
             rail_collapsed: false,
             saved_rail_collapsed: false,
+            preferences: BTreeMap::new(),
+            saved_preferences: BTreeMap::new(),
             error: None,
         };
         layout.sizes.insert(FILTER.id, 275.0);
@@ -1042,6 +1044,8 @@ mod tests {
             folded_saved: BTreeSet::new(),
             rail_collapsed: false,
             saved_rail_collapsed: false,
+            preferences: BTreeMap::new(),
+            saved_preferences: BTreeMap::new(),
             error: None,
         };
         layout.sizes.insert(FILTER.id, 275.0);
