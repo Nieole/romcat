@@ -872,6 +872,27 @@ impl Screen {
         }
     }
 
+    /// **别处改过某个子库的例外**，手上缓着的那一份跟着重读（挂单 `Q812`）。
+    ///
+    /// 例外是**一按就落库**的，而这一屏「改选择」开着时手上缓着一份——子库屏那层
+    /// 「手动例外」弹层（票 `gui-looks-like-the-design/22`）与删减建议表上的「排除」都写得动它。
+    /// 不转告的话这儿画的是改之前那几条，而人正对着同一个子库。
+    ///
+    /// 与 [`Self::take_touched`] **反向同形**：那一条是这一屏改了、转告子库屏把账丢掉，
+    /// 这一条是子库屏改了、转告这一屏重读。两条都只有窗口够得着两屏（ADR-0005），
+    /// 所以都走 [`App::route`](crate::app::App::route)。
+    ///
+    /// 改的不是这一趟正在改的那个子库、或者压根没在改，就什么都不做。
+    pub fn exceptions_changed(&mut self, site: &Site, name: &str) {
+        if self
+            .editing
+            .as_ref()
+            .is_some_and(|editing| editing.sublibrary == name)
+        {
+            self.reload_exceptions(site);
+        }
+    }
+
     /// 「**不改了**」：放下这一趟，筛选留在屏上不动。
     ///
     /// **不回滚已经记下的例外**：例外是一记就落库的独立决定（ADR-0016 说它「永久
@@ -989,7 +1010,7 @@ impl Screen {
             .set_exception(&name, key, kind, note.as_deref())
         {
             Ok(()) => {
-                self.notice = Some(format!("给「{name}」记下了一条{}例外：{key}", kind.label()));
+                self.notice = Some(format!("给「{name}」记下了一条{}例外：{key}", kind.shown()));
                 if let Some(editing) = &mut self.editing {
                     editing.note.clear();
                 }
@@ -3685,7 +3706,7 @@ fn exception_block(
                 ui.visuals().warn_fg_color,
                 format!(
                     "眼下：{}{}",
-                    row.kind.label(),
+                    row.kind.shown(),
                     row.note
                         .as_deref()
                         .map(|note| format!("（{note}）"))
@@ -3705,7 +3726,7 @@ fn exception_block(
             for kind in [Exception::Include, Exception::Exclude] {
                 let on = current.is_some_and(|row| row.kind == kind);
                 if ui
-                    .add_enabled(!on, egui::Button::new(format!("{}它", kind.label())))
+                    .add_enabled(!on, egui::Button::new(format!("{}它", kind.shown())))
                     .on_hover_text(match kind {
                         Exception::Include => "规则没选中也带上它。",
                         Exception::Exclude => "规则选中了也不带。容量超限时砍谁，落点就是这一条。",
