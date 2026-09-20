@@ -3358,7 +3358,7 @@ impl Screen {
                     ui.label(font::mono(&target).size(tokens.font.size_small));
                 });
                 ui.add_space(step(2));
-                impact_ui(
+                look::impact(
                     ui,
                     &[
                         ("设备上已经同步的文件", false),
@@ -3366,14 +3366,14 @@ impl Screen {
                         ("。删除后它们成为清单外的文件，工具不再管理。", false),
                     ],
                 );
-                impact_ui(
+                look::impact(
                     ui,
                     &[(
                         "如果想同时清空设备：先移除全部规则并同步一次，再删除子库。",
                         false,
                     )],
                 );
-                impact_ui(ui, &[("主库和元数据不受影响。", false)]);
+                look::impact(ui, &[("主库和元数据不受影响。", false)]);
                 if let Some((picked, bytes)) = picked {
                     ui.add_space(step(2));
                     look::help(
@@ -3485,9 +3485,9 @@ impl Screen {
                     ),
                     None => "移除之后选中的变体会变；少多少，按「算一遍容量」之后才看得见。".to_string(),
                 };
-                impact_ui(ui, &[(会怎样.as_str(), false)]);
-                impact_ui(ui, &[("排过的差量预览跟着作废，同步前要重新生成。", false)]);
-                impact_ui(ui, &[("设备上的文件与主库都不受影响。", false)]);
+                look::impact(ui, &[(会怎样.as_str(), false)]);
+                look::impact(ui, &[("排过的差量预览跟着作废，同步前要重新生成。", false)]);
+                look::impact(ui, &[("设备上的文件与主库都不受影响。", false)]);
             });
         match shown.pressed {
             None => {}
@@ -3670,54 +3670,6 @@ fn badge_ui(ui: &egui::Ui, center: egui::Pos2, text: &str) {
         egui::FontId::monospace(tokens.font.size_caption),
         visuals.weak_text_color(),
     );
-}
-
-/// 弹层里「会怎样」的一条（设计稿 `.impact li`）：行首一枚强调色圆点，后面一句半号字，`(字, 要不要强调)`
-/// 一段段接起来（稿上 `<b>` 那几个字是强调字）。
-///
-/// 圆点多大、那一列多宽取令牌 `impact-dot` / `impact-column`；圆点对齐头一行的中线，字折行时不跟着往下挪。
-fn impact_ui(ui: &mut egui::Ui, parts: &[(&str, bool)]) {
-    let tokens = Tokens::builtin();
-    let style = ui.style().clone();
-    let mut job = egui::text::LayoutJob::default();
-    for (text, strong) in parts {
-        let rich = if *strong {
-            font::strong(*text)
-        } else {
-            egui::RichText::new(*text)
-        };
-        rich.size(look::font_size(ui.ctx(), tokens.font.size_small_plus))
-            .append_to(
-                &mut job,
-                &style,
-                egui::FontSelection::Default,
-                Align::Center,
-            );
-    }
-    ui.horizontal_top(|ui| {
-        let column = tokens.layout.impact_column;
-        let width = (ui.available_width() - column - ui.spacing().item_spacing.x).max(0.0);
-        let galley = egui::WidgetText::from(job).into_galley(
-            ui,
-            Some(egui::TextWrapMode::Wrap),
-            width,
-            egui::FontSelection::Default,
-        );
-        #[allow(clippy::cast_precision_loss)]
-        let rows = galley.rows.len().max(1) as f32;
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(column, galley.size().y), egui::Sense::hover());
-        let dot = tokens.layout.impact_dot;
-        ui.painter().circle_filled(
-            egui::pos2(
-                rect.left() + dot / 2.0,
-                rect.top() + galley.size().y / rows / 2.0,
-            ),
-            dot / 2.0,
-            ui.visuals().selection.stroke.color,
-        );
-        ui.label(galley);
-    });
 }
 
 /// 例外分两向各有几条。

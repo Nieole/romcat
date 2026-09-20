@@ -485,13 +485,53 @@ fn ghost_button_in(palette: &Palette, visuals: &mut egui::Visuals) {
 ///
 /// 在一个 `ui.scope` 里换颜色，别的控件不受影响。字取 `on-accent`（强色底上的字那一格），不照稿写死白字
 /// （挂单 `Q894`）。
-pub fn danger_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+///
+/// ## 按不动的那一档为什么不是「照旧画一遍再调淡」
+///
+/// 稿上禁用只有一条规则：`.btn[disabled]{opacity:.45}`——**照背景调淡**。egui 也正是这么干的
+/// （`Ui::add_enabled` 把这一层的画笔往面板底色上兑）。这条规则在浅色里成立，在暗色里不成立，
+/// 因为两套主题的 `lo` 站在面板的**两侧**：
+///
+/// - 浅色 `lo` 是 `#B0392F`（比白面板**暗**），兑一半成了淡粉，一眼就是按不动的。
+/// - 暗色 `lo` 是 `#EC7C70`（比深面板**亮**），兑一半成了 `#834E4C`——**仍旧是一整块亮过底色的实心色**，
+///   看上去与能按的那一颗没两样（实测基线上量出来的就是这个数）。
+///
+/// 所以按不动的那一档换的不是浓淡，是**份量**：实心的危险色底换成**危险色的浅底**（令牌 `lo-soft`）
+/// 加危险色的字——就是 [`chip`] 那一档 [`Tone::Bad`] 的搭配。「实心」与「浅底」的差别在两套主题里
+/// 都是一眼的事，而字还留在危险色那一族里，人看得清自己眼下按不动的是哪一颗。
+/// egui 那层调淡照旧盖在上面，于是两套主题各自又往自己的面板底色退了一步。
+///
+/// **颜色由截图门守**（`library/remove-root-*`），这一层只钉「按不动」那件事本身。
+pub fn danger_button(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
     ui.scope(|ui| {
         let theme = egui::Theme::from_dark_mode(ui.visuals().dark_mode);
-        danger_button_in(Tokens::builtin().color.theme(theme), ui.visuals_mut());
+        let palette = Tokens::builtin().color.theme(theme);
+        if enabled {
+            danger_button_in(palette, ui.visuals_mut());
+        } else {
+            disabled_danger_button_in(palette, ui.visuals_mut());
+        }
         ui.button(text)
     })
     .inner
+}
+
+/// 按不动的危险按钮在这一套颜色里取哪几个：浅底 `lo-soft`、危险色的字与描边。拆出来的理由同 [`tier_color_in`]。
+///
+/// **三档同一套**：按不动的时候 egui 压根不会走到悬停与按下那两档，写齐只是免得哪天有人把它用在
+/// 别的地方时看见一颗半旧半新的按钮。
+fn disabled_danger_button_in(palette: &Palette, visuals: &mut egui::Visuals) {
+    let widgets = &mut visuals.widgets;
+    for widget in [
+        &mut widgets.inactive,
+        &mut widgets.hovered,
+        &mut widgets.active,
+    ] {
+        widget.bg_fill = palette.lo_soft;
+        widget.weak_bg_fill = palette.lo_soft;
+        widget.bg_stroke.color = palette.lo_soft;
+        widget.fg_stroke.color = palette.lo;
+    }
 }
 
 /// 危险按钮在这一套颜色里取哪几个。拆出来的理由同 [`tier_color_in`]。
@@ -1117,6 +1157,72 @@ pub fn section(ui: &mut egui::Ui, text: &str) -> egui::Response {
 /// 一行**帮助字**（设计稿 `.help`）：说明字号、弱字色，摆在它说的那样东西底下。
 pub fn help(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.label(egui::RichText::new(text).small().weak())
+}
+
+/// 弹层里「会怎样」的一条（设计稿 `.impact li`）：行首一枚强调色圆点，后面一句半号字，`(字, 要不要强调)`
+/// 一段段接起来（稿上 `<b>` 那几个字是强调字）。
+///
+/// 圆点多大、那一列多宽取令牌 `impact-dot` / `impact-column`；圆点对齐头一行的中线，字折行时不跟着往下挪。
+///
+/// **住在这一层而不是某一屏里**：子库屏那三处弹层（删子库、删规则、移出此作品）与库屏
+/// 「移除根」画的是同一种东西，一屏一份的话那枚圆点、那一列宽与那一档字号就会各漂各的。
+pub fn impact(ui: &mut egui::Ui, parts: &[(&str, bool)]) {
+    let color = ui.visuals().selection.stroke.color;
+    impact_row(ui, color, parts);
+}
+
+/// 同上，**留神那一档**（设计稿 `.impact li.warn`）：圆点换成令牌 `mid`。
+///
+/// 稿上标 `warn` 的是「这一条会少东西」那几句——移除根那一层里「从库中去掉多少变体」
+/// 与「哪台子库会少多少」用的就是它。
+pub fn impact_warn(ui: &mut egui::Ui, parts: &[(&str, bool)]) {
+    let color = tone_colors(Tone::Caution, ui.visuals()).0;
+    impact_row(ui, color, parts);
+}
+
+/// 画一条，圆点用交进来的那个颜色。
+fn impact_row(ui: &mut egui::Ui, dot_color: Color32, parts: &[(&str, bool)]) {
+    let tokens = Tokens::builtin();
+    let style = ui.style().clone();
+    let mut job = egui::text::LayoutJob::default();
+    for (text, strong) in parts {
+        let rich = if *strong {
+            crate::font::strong(*text)
+        } else {
+            egui::RichText::new(*text)
+        };
+        rich.size(font_size(ui.ctx(), tokens.font.size_small_plus))
+            .append_to(
+                &mut job,
+                &style,
+                egui::FontSelection::Default,
+                Align::Center,
+            );
+    }
+    ui.horizontal_top(|ui| {
+        let column = tokens.layout.impact_column;
+        let width = (ui.available_width() - column - ui.spacing().item_spacing.x).max(0.0);
+        let galley = egui::WidgetText::from(job).into_galley(
+            ui,
+            Some(egui::TextWrapMode::Wrap),
+            width,
+            egui::FontSelection::Default,
+        );
+        #[allow(clippy::cast_precision_loss)]
+        let rows = galley.rows.len().max(1) as f32;
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(column, galley.size().y), egui::Sense::hover());
+        let dot = tokens.layout.impact_dot;
+        ui.painter().circle_filled(
+            egui::pos2(
+                rect.left() + dot / 2.0,
+                rect.top() + galley.size().y / rows / 2.0,
+            ),
+            dot / 2.0,
+            dot_color,
+        );
+        ui.label(galley);
+    });
 }
 
 /// 一段**弱色的说明**（一整句话，摆在面板正文里）：照可用宽折行，**段末不留孤字**（`no_orphan_width`）。
@@ -2297,6 +2403,42 @@ mod tests {
             assert_eq!(
                 危险.widgets.active.bg_stroke.color, p.on_accent,
                 "{theme:?} 焦点圈"
+            );
+        }
+    }
+
+    #[test]
+    fn 按不动的危险按钮换成浅底而不是把实心底调淡() {
+        // 票 `gui-looks-like-the-design/26`：照背景调淡那一条（稿上 `.btn[disabled]{opacity:.45}`）
+        // 在暗色里分不出能不能按——暗色 `lo` 比面板**亮**，兑一半仍旧是一整块实心色。
+        for theme in [Theme::Dark, Theme::Light] {
+            let p = Tokens::builtin().color.theme(theme);
+            let mut 按不动 = egui::Visuals::light();
+            disabled_danger_button_in(p, &mut 按不动);
+            for (档, widget) in [
+                ("inactive", &按不动.widgets.inactive),
+                ("hovered", &按不动.widgets.hovered),
+                ("active", &按不动.widgets.active),
+            ] {
+                assert_eq!(
+                    widget.bg_fill, p.lo_soft,
+                    "{theme:?} 按不动那一档 {档} 的底"
+                );
+                assert_eq!(
+                    widget.weak_bg_fill, p.lo_soft,
+                    "{theme:?} 按不动那一档 {档} 的底"
+                );
+                assert_eq!(
+                    widget.fg_stroke.color, p.lo,
+                    "{theme:?} 按不动那一档 {档} 的字"
+                );
+            }
+            // **两档不许撞脸**：撞上了，屏上就分不出能按与不能按。
+            let mut 能按 = egui::Visuals::light();
+            danger_button_in(p, &mut 能按);
+            assert_ne!(
+                能按.widgets.inactive.bg_fill, 按不动.widgets.inactive.bg_fill,
+                "{theme:?} 能按与按不动的底色撞脸了"
             );
         }
     }
