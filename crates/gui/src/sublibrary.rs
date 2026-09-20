@@ -2851,8 +2851,12 @@ impl Screen {
             )),
             _ => None,
         };
-        // 「按设备容量」那一格写哪个数：卡在位是此刻的总量，不在位是上次读到的（`Sublibrary::limit` 那条规矩），都没有就说不设上限。
-        let device_label = match self.live_total().or_else(|| self.stored_total()) {
+        // 「按设备容量」那一格写哪个数：这条规矩在核心库（`sublibrary::device_limit`）——卡在位是此刻的总量，
+        // 不在位是上次读到的，都没有就说不设上限。
+        let device_label = match romcat_core::sublibrary::device_limit(
+            self.stored_total(),
+            self.live_total(),
+        ) {
             Some(bytes) => format!("按设备容量（{}）", decimal_bytes(bytes)),
             None => "按设备容量（没读过，不设上限）".to_string(),
         };
@@ -2962,7 +2966,9 @@ impl Screen {
                 ui.add_space(step(2));
                 ui.horizontal(|ui| {
                     field_label(ui, "前端格式");
-                    let adapters = [PEGASUS, ES_GAMELIST];
+                    // 这一版带了哪几个适配器由核心库答（`adapter::names`）：界面不另写一份清单，
+                    // 添一个适配器这一排就多一格（ADR-0024）。
+                    let adapters = romcat_core::adapter::names();
                     let chosen = if form.format.trim().is_empty() {
                         PEGASUS
                     } else {
@@ -3186,9 +3192,10 @@ impl Screen {
                 }
             }
         }
-        // 按设备容量那一档：卡此刻在位就把总量记下来（换卡跟着变），不在位照旧留着上次读到的。
+        // 按设备容量那一档：卡此刻在位就把总量记下来（换卡跟着变），不在位照旧留着上次读到的——
+        // 判在核心库那一处（`sublibrary::device_limit`），屏上那一行写的也是它。
         let capacity = if self.form.capacity_by_device {
-            self.live_total().or_else(|| self.stored_total())
+            romcat_core::sublibrary::device_limit(self.stored_total(), self.live_total())
         } else {
             capacity
         };

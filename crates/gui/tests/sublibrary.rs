@@ -3144,6 +3144,29 @@ fn 前端格式照稿两格分段_界面写es_de_说明句照实际布局写真�
 }
 
 #[test]
+fn 前端格式那排跟着核心带的适配器清单走_界面不另写一份() {
+    // ADR-0024：这一版带了哪几个适配器只有核心库答得上（`adapter::names`）。界面另写一份清单的话，
+    // 添一个适配器这一排就选不到它——这条钉的是「那一排照核心那份清单画」，不是钉死眼下有哪两格。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    for 标识 in romcat_core::adapter::names() {
+        // 界面上 ES 家族那个写「ES-DE」（拿主意的人 2026-09-15 定），别的照标识写。
+        let 屏上写的 = if 标识.eq_ignore_ascii_case("ES-Gamelist") {
+            "ES-DE"
+        } else {
+            标识
+        };
+        assert!(
+            屏上.contains(屏上写的),
+            "前端格式那一排少了「{屏上写的}」：\n{屏上}"
+        );
+    }
+}
+
+#[test]
 fn 卡头的前端格式写es_de_不写适配器标识() {
     let ctx = headless::context();
     let mut 场 = 现场::摆好();

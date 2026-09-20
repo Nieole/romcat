@@ -111,6 +111,16 @@ pub struct Sublibrary {
     pub capacity_by_device: bool,
 }
 
+/// 「**按设备容量**」那一档这一刻的上限：设备此刻读得出总量（`device_total`）就是它，读不出用上次记下的那个数
+/// （`remembered`，上一回连上时读到的总量），两个都没有就是不设上限。
+///
+/// 单拎出来是因为**手上还没有 [`Sublibrary`] 的时候也要答这个问题**：新建那层弹层里「按设备容量（…）」那一行
+/// 写的就是它，那时候这一台还没存进库里。这条规矩只该有一处（ADR-0024）——[`Sublibrary::limit`] 走的也是它。
+#[must_use]
+pub fn device_limit(remembered: Option<u64>, device_total: Option<u64>) -> Option<u64> {
+    device_total.or(remembered)
+}
+
 impl Sublibrary {
     /// 从一条**系统给的**目标路径造一个子库：两种形式一次填齐。
     #[must_use]
@@ -126,12 +136,12 @@ impl Sublibrary {
         }
     }
 
-    /// 这一刻的**容量上限**：按设备容量那一档，设备此刻读得出总量（`device_total`）就是它，读不出用上次记下的；自定义那一档
-    /// 就是记着的那个数。**只有这一处判**（ADR-0024）：排计划、屏上那一格都照它。
+    /// 这一刻的**容量上限**：按设备容量那一档照 [`device_limit`]，自定义那一档就是记着的那个数。
+    /// **只有这一处判**（ADR-0024）：排计划、屏上那一格都照它。
     #[must_use]
     pub fn limit(&self, device_total: Option<u64>) -> Option<u64> {
         if self.capacity_by_device {
-            device_total.or(self.capacity)
+            device_limit(self.capacity, device_total)
         } else {
             self.capacity
         }
