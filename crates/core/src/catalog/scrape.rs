@@ -677,29 +677,6 @@ impl Catalog {
         Ok(())
     }
 
-    /// 按重复拷贝判据的顺序逐条遍历文件，供完整导出流式分组。
-    /// SQLite 负责排序，调用方只需保留当前 `(小写文件名, 大小)` 组。
-    pub fn for_each_duplicate_file(
-        &self,
-        each: &mut dyn FnMut(&str, u64) -> Result<(), CatalogError>,
-    ) -> Result<(), CatalogError> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT key, len FROM entry WHERE kind = 0 AND len IS NOT NULL ORDER BY len, duplicate_name_lower(key), key")
-            .map_err(|source| self.err(source))?;
-        let mut rows = statement.query([]).map_err(|source| self.err(source))?;
-        while let Some(row) = rows.next().map_err(|source| self.err(source))? {
-            let key: String = row.get(0).map_err(|source| self.err(source))?;
-            let len: u64 = row
-                .get::<_, i64>(1)
-                .ok()
-                .and_then(|value| u64::try_from(value).ok())
-                .unwrap_or(0);
-            each(&key, len)?;
-        }
-        Ok(())
-    }
-
     /// 媒体池的家底。
     ///
     /// # Errors

@@ -165,9 +165,10 @@ impl DuplicateGroupStats {
         self.size.saturating_mul(self.count.saturating_sub(1))
     }
 
-    /// 这一组有几份没记下路径。要处理这几份得放开
+    /// 这一组有几份没记下路径。要处理这几份，把
     /// [`Limits::max_duplicate_paths_per_group`](crate::scan::aggregate::Limits::max_duplicate_paths_per_group)
-    /// 重扫一遍。
+    /// 放开到 [`Limits::FULL_DUPLICATE_PATHS_PER_GROUP`](crate::scan::aggregate::Limits::FULL_DUPLICATE_PATHS_PER_GROUP)
+    /// 再折一份统计就行——**不必重扫主库**，统计一律从中立库折出来。
     #[must_use]
     pub fn paths_missing(&self) -> u64 {
         let listed = u64::try_from(self.paths.len()).unwrap_or(u64::MAX);
@@ -1085,8 +1086,9 @@ mod tests {
     }
 
     #[test]
-    fn 非游戏资产数平台与未纳入管理目录_bios_底下的文件_游戏不算() {
-        // 判据只有 `classify::non_game_asset` 一处（ADR-0024）；ADR-0011 修订要求库体检覆盖未映射目录。
+    fn 非游戏资产数的是平台目录里_bios_目录底下的文件_游戏与未纳入管理的目录不算() {
+        // 判据只有 `classify::non_game_asset` 一处（ADR-0024）；报告只数「入库」的那些——未纳入管理的目录不成型、不入库
+        // （挂单 `Q956`，拿主意的人 2026-09-15 定，2026-09-20 复裁维持）。
         let agg = 收(&[
             ("库/PS1/bios/scph1001.bin", Some(512 * 1024)),
             ("库/街机/FBA-ROMS/BIOS/neogeo.zip", Some(2048)),
@@ -1095,14 +1097,13 @@ mod tests {
             ("库/杂物/bios/scph1001.bin", Some(512 * 1024)),
         ]);
         let assets = 报告(&agg).non_game_assets;
-        assert_eq!(assets.files, 3);
-        assert_eq!(assets.bytes, 512 * 1024 * 2 + 2048);
+        assert_eq!(assets.files, 2);
+        assert_eq!(assets.bytes, 512 * 1024 + 2048);
         assert_eq!(
             assets.examples,
             vec![
                 "/lib/PS1/bios/scph1001.bin".to_string(),
                 "/lib/街机/FBA-ROMS/BIOS/neogeo.zip".to_string(),
-                "/lib/杂物/bios/scph1001.bin".to_string(),
             ]
         );
     }

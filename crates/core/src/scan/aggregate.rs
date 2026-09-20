@@ -476,12 +476,18 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// 导出完整重复拷贝清单时，每组保留的路径数上限。
+    /// 导出完整重复拷贝清单时的「每组路径上限」：**不设上限**。
     ///
-    /// 不设成无上限：断点里存着这份索引，一个病态目录（同名同大小的几十万份）
-    /// 能把它撑爆。一万条足够覆盖任何真实情况——真库里最大的一组也就个位数份——
-    /// 且真被截断时清单会明说少了几份。
-    pub const FULL_DUPLICATE_PATHS_PER_GROUP: usize = 10_000;
+    /// 原先是一万条，理由写的是「断点里存着这份索引」——那句话不成立：断点
+    /// （[`crate::scan::checkpoint::Checkpoint`]）里只有还没扫完的目录与耗时，
+    /// 这份索引从来不进断点。报告一律由 [`crate::catalog::Catalog::aggregate`] 从中立库
+    /// 按键顺序折出来（见 [`crate::scan`] 模块开头第二条），索引只在那一趟里活着。
+    ///
+    /// 于是上限只会让**导出的清单说谎**：一组超过一万份时，第 10001 份的路径
+    /// 再也拿不回来，而「明细能导出成一份清单」要的正是每一份（票 27）。
+    /// 内存也用不着这道闸——折统计那一趟本来就把每个键都拿在手上
+    /// （`Catalog::aggregate` 的 `files`），组内路径顶多与文件数同量级。
+    pub const FULL_DUPLICATE_PATHS_PER_GROUP: usize = usize::MAX;
 }
 
 impl Default for Limits {
@@ -750,7 +756,7 @@ impl Aggregate {
                 .add(len);
         }
         // **非游戏资产只数入库的那些**：未纳入管理的目录不成型、不入库，那里的 `bios/` 不算。
-        if observation.non_game_asset {
+        if observation.placement.in_scope() && observation.non_game_asset {
             self.non_game_assets.add(len);
             push_capped(
                 &mut self.non_game_asset_examples,

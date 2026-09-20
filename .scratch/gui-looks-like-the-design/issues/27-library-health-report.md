@@ -8,7 +8,11 @@
 
 **Status:** ready-for-agent
 
-收尾说明：此前证据不完整。完整重复拷贝导出仍有 P1：`FULL_DUPLICATE_PATHS_PER_GROUP` 的有界索引会漏掉第 10001 份路径；需改为按中立库顺序遍历、流式写出后方可恢复 `done`。此前门禁中的 `layout` 失败是并发共享版式偏好竞争，串行 `cargo test -p romcat-gui --features demo --test layout` 已 22 项通过。Q952 保持 open，未改动。
+收尾说明（2026-09-20）：2026-09-16 另一个会话在这棵树上记了两件事，拿主意的人 2026-09-20 各裁了一条——
+
+- **完整导出那条 P1 本票修好了**：`Limits::FULL_DUPLICATE_PATHS_PER_GROUP` 原先是一万条，一组超过一万份就漏掉第 10001 份路径。它给的理由「断点里存着这份索引」不成立（断点 `scan::checkpoint::Checkpoint` 里只有没扫完的目录与耗时），统计一律由 `Catalog::aggregate` 从中立库**按键顺序**折出来，索引只在那一趟里活着。这一趟把那道闸撤了（常量留着，值改成不设上限），命令行 `romcat report --dump-duplicates` 与界面「导出清单…」共用同一条路、同一份字节。测试 `crates/core/src/report/duplicates.rs::组内份数超过原先那道一万条的上限也写全`（10,001 份，每一份都在，不说「另有」）。
+- **非游戏资产照 2026-09-15 的口径改回**：只数平台目录里的（`placement.in_scope()` 那道闸），挂单 `Q956` 已裁。
+- 此前门禁里 `layout` 那两条红是并发共用版式偏好文件的竞争，串行 `cargo test -p romcat-gui --features demo --test layout` 22 条全过；`sync_run` 那 5 条是本机既有失败（挂单 `Q479`）。`Q952` 保持 open，没动。
 
 ⚠️ **数不在界面里算**：报告本来就有给界面吃的那一份形态，界面只画它。
 
@@ -51,6 +55,7 @@
   - 拒写的判断从命令行挪进核心库，两边共用：`crates/core/src/path.rs::工具写出去的文件落在主库里就拒_说清是哪个文件_落在别处放行`、`crates/core/src/catalog/roots.rs::工具写出去的文件落在任何一个根里都拒_一个根都不在就放行`。
   - 按钮照稿写「导出清单…」（词表「清单」条补了一句），「导出清单…」幽灵按钮在左、「关闭」主按钮在右（`Q958` 已裁）：`crates/gui/tests/dialog.rs::退出那一颗摆在右边的写法_退出那一颗靠右画成主按钮_其余几颗靠左是幽灵按钮_退出键照旧等于按它`。
   - 「重新体检」那一趟列全，导出也全（`HealthReport::build_full`）：`crates/gui/tests/health.rs::扫描交回的报告每类只留十个样例_重新体检那一趟列全_导出的清单也全`、`crates/core/src/report.rs::体检那一趟列全_未纳入管理的目录不再只留前十五个_默认的报告照旧只留前十五个`。
+  - 组内份数再多也写全（2026-09-20 修掉原先一万条那道闸）：`crates/core/src/report/duplicates.rs::组内份数超过原先那道一万条的上限也写全`。
   - ⚠️ **保留**：系统保存对话框本身测不了（同 `tests/pick.rs`），选中之后那一半递固定路径进去验。
 - [x] 「重新体检」排进任务台，跑的时候概要上说明白正在体检
   - 测试 `crates/gui/tests/health.rs::开窗后头一次进库屏有扫过的根_自动排一趟体检_跑着时说正在体检_收场后写上次体检的时刻_一次只跑一趟`：
