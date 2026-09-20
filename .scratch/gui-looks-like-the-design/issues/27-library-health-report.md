@@ -6,7 +6,7 @@
 
 **Blocked by:** 06
 
-**Status:** ready-for-agent
+**Status:** done
 
 收尾说明（2026-09-20）：2026-09-16 另一个会话在这棵树上记了两件事，拿主意的人 2026-09-20 各裁了一条——
 
@@ -102,3 +102,19 @@
     - 没变 2 张：`scanned-{light,dark}`。
   - 出图的是 `crates/gui/tests/snapshot.rs::库屏_体检_{浅色,暗色}`、`库屏_重复拷贝明细弹层_{浅色,暗色}`。库屏扫过的那几张开窗前先体检一趟（`先体检一趟`），自动排的那一趟就不会在拍图时跑着。
   - `/Users/nicoer/dev/game-wt/logs/slot-4-gl27-snap-2.log`：带更新出库屏 10 张 10 过，不带更新整份截图门连跑两遍，45 过、45 过。
+  - **2026-09-20 重出 `health-duplicates` 那一对**：判据文案统一到核心库之后弹层那段说明变字（拿主意的人当天裁的第 1 条）。变的只有那一段：与上一版逐像素比，浅色、暗色的差都落在 `x 303–971 · y 284–314` 那一条内，弹层没变高、表格与页脚一个像素没动；格子小字措辞原样搬进核心库，八格那两张与空的、三块收起四张都没变。先不带更新验一遍（57 过、那一对如期红），带更新只重出这一对（2 过），再不带更新连跑两遍（59 过、59 过）。日志 `slot-4-gl27-final-snap-verify.log`、`-update.log`、`-check.log`。
+
+**终版门禁**（2026-09-20，跑在合过 `main` `57bec44` 的这棵树上，HEAD `f19df2d`）：
+`TMPDIR=… CARGO_INCREMENTAL=0 cargo xtask gate -j 3 --test-threads 3 --keep-going`，日志
+`/Users/nicoer/dev/game-wt/logs/slot-4-gl27-final-gate-2.log`，末行 `EXIT=0`。
+
+| 步骤 | 耗时 | 结果 |
+|---|---|---|
+| fmt | 1s | 绿 |
+| glossary | 0s | 绿（范围：相对 `main` 的 merge base `57bec44` 以来，28 份 `.rs` 里新写的 3831 行，没撞上） |
+| check | 20s | 绿 |
+| clippy | 33s | 绿 |
+| test | 603s | 绿 |
+| doc | 4s | 绿 |
+
+六条全绿。这一趟里与这张票相关的几个测试目标：核心库 lib 1,004 过、`shaping` 13 过、`fixture_library` 13 过、`sync_run` 26 过；界面 `health` 9 过、`dialog` 9 过、`layout` 22 过、`snapshot` 59 过、lib 66 过。
