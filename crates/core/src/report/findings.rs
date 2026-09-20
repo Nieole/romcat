@@ -71,7 +71,32 @@ impl Finding {
         }
     }
 
+    /// 格子上那行小字：同一条判据的**短写法**，摆在库体检概要那八格上（设计稿 `.htile` 的 `sub`）。
+    ///
+    /// 与 [`Self::criterion`] 说的是同一件事，只是长短不同：判据那一句印在导出的清单抬头、
+    /// 也垫在明细弹层的标题底下，这一句摆在格子上。两句**挨着放**，改一处时另一处就在眼前——
+    /// 界面里原先各手写了一套，已经开始漂（票 27 收尾审查 Standards 轴第 1 条，拿主意的人
+    /// 2026-09-20 定「判据文案统一到核心库一处，格子小字也从同一处出」）。
+    ///
+    /// **重复拷贝那一格交回 `None`**：稿上那一格的小字写的是「可腾出 N」——那是报告里的一个数，
+    /// 不是一句固定的话。
+    #[must_use]
+    pub fn hint(self) -> Option<&'static str> {
+        match self {
+            Self::Duplicates => None,
+            Self::PlatformConflicts => Some("目录只是强先验，内容可以推翻它"),
+            Self::ShapingDoubts => Some("多碟没合在一起、目录拆错"),
+            Self::Unreadable => Some("文件名拿得到，元数据读不到"),
+            Self::UnmappedDirs => Some("不在任何平台目录下，不进识别与刮削"),
+            Self::StrandedCompanions => Some("存档、补丁找不到对应的主文件"),
+            Self::NonGameAssets => Some("BIOS 等，入库但不导出"),
+        }
+    }
+
     /// 判据，一句话（与词表对应条目同一个意思）。
+    ///
+    /// **这一句是判据的唯一出处**：导出的清单抬头印它，界面明细弹层标题底下那段说明也拿它起头
+    /// （界面只在后面接自己的政策句）。短写法见 [`Self::hint`]。
     #[must_use]
     pub fn criterion(self) -> &'static str {
         match self {

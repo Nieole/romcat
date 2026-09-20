@@ -133,32 +133,25 @@ enum Pressed {
 /// 这里的「清单」指体检明细写出去的那份文本，不是子库的清单——词表「清单」条写着这一处）。
 pub const EXPORT: &str = "导出清单…";
 
-/// 明细弹层标题底下那句说明（设计稿 `HD` 那几句，与词表对不上的照实改）。
-fn note_of(finding: Finding) -> &'static str {
-    match finding {
+/// 明细弹层标题底下那句说明：**核心库的判据**（[`Finding::criterion`]，与导出的清单抬头同一句）
+/// 接上这一层自己的那句政策话。
+///
+/// 判据不在这儿另写一套（ADR-0024；拿主意的人 2026-09-20 定「判据文案统一到核心库一处」）——
+/// 原先界面手写了七句，与核心库那七句已经开始漂：弹层说「判据不读内容」，导出的清单说
+/// 「不读内容，也不算哈希」（票 27 收尾审查 Standards 轴第 1 条）。设计稿 `HD` 那几句里
+/// 判据那一半由核心库出，剩下的「只发现并报告」「这里不改动任何文件」这类话是界面自己的。
+fn note_of(finding: Finding) -> String {
+    let 政策 = match finding {
         Finding::Duplicates => {
-            "同名且同大小的文件存在多份——判据不读内容，动手前请自己核一眼。只发现并报告，绝不自动删除；主库只读，\
-             要清理请在文件系统中手动处理。同一个作品的不同转储是不同的变体，不算重复拷贝。"
+            "只发现并报告，绝不自动删除；主库只读，要清理请在文件系统中手动处理。同一个作品的不同转储是不同的变体，不算重复拷贝。"
         }
-        Finding::PlatformConflicts => {
-            "目录说的平台与文件内容说的不一致。目录只是强先验，内容可以推翻它；这里只报告，不改动任何文件。"
-        }
-        Finding::ShapingDoubts => {
-            "成型规则把文件聚成变体时拿不准的地方。不处理也不影响使用；这里只报告，不改动任何文件。"
-        }
-        Finding::Unreadable => {
-            "文件名拿得到，但元数据读不出来。它们如实记为「不可读」，既不算已变，也不算已删。"
-        }
-        Finding::UnmappedDirs => {
-            "这些目录不在任何平台目录下：扫描照常读它们，库体检照样列出来，只是不进识别与刮削。列在这里，作为整理的依据。"
-        }
-        Finding::StrandedCompanions => {
-            "存档、补丁这类附属文件在自己那个目录里找不到同名的主文件，没有归入任何变体。这里只报告，不改动任何文件。"
-        }
-        Finding::NonGameAssets => {
-            "模拟器需要、但本身不是游戏的文件。入库但永不导出；在「浏览」中打开「显示非游戏资产」可以查看。"
-        }
-    }
+        Finding::PlatformConflicts | Finding::ShapingDoubts => "这里只报告，不改动任何文件。",
+        Finding::Unreadable => "它们如实记为「不可读」，既不算已变，也不算已删。",
+        Finding::UnmappedDirs => "列在这里，作为整理的依据。",
+        Finding::StrandedCompanions => "它们没有归入任何变体；这里只报告，不改动任何文件。",
+        Finding::NonGameAssets => "在「浏览」中打开「显示非游戏资产」可以查看。",
+    };
+    format!("{}。{政策}", finding.criterion())
 }
 
 impl Section {
@@ -391,9 +384,12 @@ impl Section {
 
     /// 「导出清单…」那个保存对话框交回来的那一个（`crate::pick::save_file`）：把开着的那一格的明细写成**纯文本**。
     ///
-    /// - **重复拷贝**写的是 [`DuplicateDetails::render_text`]：每一组、组内每一份路径都在（体检那一趟不设上限，
-    ///   [`Limits::FULL_DUPLICATE_PATHS_PER_GROUP`](romcat_core::scan::aggregate::Limits::FULL_DUPLICATE_PATHS_PER_GROUP)），
-    ///   与 `romcat report --dump-duplicates` 同一份字节。
+    /// - **重复拷贝**写的是 [`DuplicateDetails::render_text`]。⚠️ **「与 `romcat report --dump-duplicates` 同一份字节」
+    ///   只在点过「重新体检」之后成立**：那一趟每组路径不设上限
+    ///   （[`Limits::FULL_DUPLICATE_PATHS_PER_GROUP`](romcat_core::scan::aggregate::Limits::FULL_DUPLICATE_PATHS_PER_GROUP)，
+    ///   见 `check_run`），每一组、组内每一份路径都在。而**扫完一个根交回的那一份**用的是扫描的默认上限
+    ///   （每组 10 条），一组超过 10 份时导出的清单照实写「另有 N 份没记下路径」，字节与命令行不同
+    ///   （拿主意的人 2026-09-20 定：扫描那一趟不放开，挂单 `Q959` 记着这条边界）。
     /// - **其余几格**写的是核心库的文本明细（[`HealthReport::render_finding`]）。
     /// - **落点在主库的任何一个根里就拒**，一个字节都不写，那句话画在弹层里（ADR-0004，判据在核心库
     ///   [`Roots::refuse_writing_into`]，命令行问的是同一处）。
@@ -835,18 +831,18 @@ fn face(tile: Tile, report: &HealthReport, identified: bool) -> Face {
         };
     };
     let count = report.finding_count(finding);
-    let sub = match finding {
-        Finding::Duplicates => format!(
-            "可腾出 {}",
-            human_bytes(report.suspects.duplicate_reclaimable_bytes)
-        ),
-        Finding::PlatformConflicts => "目录只是强先验，内容可以推翻它".to_string(),
-        Finding::ShapingDoubts => "多碟没合在一起、目录拆错".to_string(),
-        Finding::Unreadable => "文件名拿得到，元数据读不到".to_string(),
-        Finding::UnmappedDirs => "不在任何平台目录下，不进识别与刮削".to_string(),
-        Finding::StrandedCompanions => "存档、补丁找不到对应的主文件".to_string(),
-        Finding::NonGameAssets => "BIOS 等，入库但不导出".to_string(),
-    };
+    // 小字出自核心库那一处（`Finding::hint`，判据的短写法）：界面不另写一套（ADR-0024；拿主意的人
+    // 2026-09-20 定「判据文案统一到核心库一处，格子小字也从同一处出」）。重复拷贝那一格稿上写的是
+    // 「可腾出 N」——那是报告里的一个数，所以 `hint()` 对它交回 `None`。
+    let sub = finding.hint().map_or_else(
+        || {
+            format!(
+                "可腾出 {}",
+                human_bytes(report.suspects.duplicate_reclaimable_bytes)
+            )
+        },
+        ToString::to_string,
+    );
     // 色条照稿配色（`.htile.warn` / `.bad`），**数为零的格不画**（拿主意的人 2026-09-15 答岔路口 11）。
     let tone = match finding {
         Finding::Duplicates | Finding::PlatformConflicts | Finding::ShapingDoubts => {
