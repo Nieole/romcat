@@ -1957,6 +1957,7 @@ impl 子库现场 {
                 format: "Pegasus".to_owned(),
                 capacity: 上限,
                 capability: 档案.map(ToString::to_string),
+                capacity_by_device: false,
             })
             .expect("写得进子库");
         for 那条 in 规则 {
@@ -2157,11 +2158,72 @@ fn 拍目标设置弹层(名字: &str, 主题: Theme) {
     if 该跳过(名字) {
         return;
     }
-    let mut 现场 = 两台设备();
+    let mut 现场 = 钉死今天(两台设备());
     let mut harness = 开一个(主题, move |ui| {
         现场.app.ui(ui);
     });
     按(&mut harness, "目标设置…");
+    拍下(harness, 名字);
+}
+
+/// 平台表判「陈旧」用的「今天」钉死（票 `gui-looks-like-the-design/21`）：截图里才没有当前日期。内置档案的核实日期是
+/// 2026-08-31，钉在 2026-09-15 不陈旧。
+fn 钉死今天(mut 现场: 子库现场) -> 子库现场 {
+    现场.app.sublibrary_and_site().0.set_today("2026-09-15");
+    现场
+}
+
+/// **目标设置弹层滚到底**（拿主意的人 2026-09-15 定，F11）：同上打开右边那张卡的「目标设置…」，在弹层内容区上滚到底再拍——
+/// 能力档案表、容量上限与「设备上的位置」都在这一张里。
+///
+/// **「看得全」写成断言**：「设备上的位置」正好画了一处、整个在视口里。哪天弹层内容长到滚不下、或者滚动没停下来就拍，
+/// 这里当场红。
+fn 拍目标设置弹层滚到底(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 钉死今天(两台设备());
+    let mut harness = 开一个(主题, move |ui| {
+        现场.app.ui(ui);
+    });
+    按(&mut harness, "目标设置…");
+    let 正中 = egui::pos2(headless::VIEWPORT[0] / 2.0, headless::VIEWPORT[1] / 2.0);
+    harness.event(egui::Event::PointerMoved(正中));
+    harness.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -100_000.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    });
+    // egui 的滚轮带平滑，一下要分好几帧走完：`Harness::run` 最多跑四步，碰上它就停不下来。逐帧跑到
+    // `InputState::is_scrolling` 说停了为止（与 `tests/sublibrary.rs` 的 `滚一下` 同一个等法），不看挂钟。
+    for _ in 0..240 {
+        harness.step();
+        if !harness.ctx.input(|input| input.is_scrolling()) {
+            break;
+        }
+    }
+    harness.event(egui::Event::PointerGone);
+    harness.run();
+    let 视口 = egui::Rect::from_min_size(egui::Pos2::ZERO, headless::VIEWPORT.into());
+    let 位置 = 正好画着的每一处(harness.output(), "设备上的位置");
+    assert!(
+        位置.len() == 1 && 视口.contains_rect(位置[0]),
+        "滚到底了「设备上的位置」却没整个在画面里：{位置:?}"
+    );
+    拍下(harness, 名字);
+}
+
+/// **新建子库弹层**（F11）：屏头「新建子库」按下去，停在弹层顶部。
+fn 拍新建子库弹层(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 钉死今天(两台设备());
+    let mut harness = 开一个(主题, move |ui| {
+        现场.app.ui(ui);
+    });
+    按(&mut harness, "新建子库");
     拍下(harness, 名字);
 }
 
@@ -2173,6 +2235,26 @@ fn 子库_目标设置弹层_浅色() {
 #[test]
 fn 子库_目标设置弹层_暗色() {
     拍目标设置弹层("sublibrary/target-settings-dark", Theme::Dark);
+}
+
+#[test]
+fn 子库_目标设置弹层滚到底_浅色() {
+    拍目标设置弹层滚到底("sublibrary/target-settings-bottom-light", Theme::Light);
+}
+
+#[test]
+fn 子库_目标设置弹层滚到底_暗色() {
+    拍目标设置弹层滚到底("sublibrary/target-settings-bottom-dark", Theme::Dark);
+}
+
+#[test]
+fn 子库_新建子库弹层_浅色() {
+    拍新建子库弹层("sublibrary/new-sublibrary-light", Theme::Light);
+}
+
+#[test]
+fn 子库_新建子库弹层_暗色() {
+    拍新建子库弹层("sublibrary/new-sublibrary-dark", Theme::Dark);
 }
 
 /// **删掉一台之后的提示条**：两台设备那一屏上删掉右边那张卡（「Retroid Pocket 5」），底边提示条上一颗「撤销」

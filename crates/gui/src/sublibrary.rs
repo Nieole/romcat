@@ -81,12 +81,13 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use egui::{Align, Layout};
-use romcat_core::capability::Roster;
+use romcat_core::capability::{DEFAULT_PROFILE, Entry, Override, Profile, Recipe, Roster};
 use romcat_core::catalog::CatalogError;
-use romcat_core::catalog::sublibrary::RemovedSublibrary;
-use romcat_core::report::{decimal_bytes, human_bytes, thousands};
+use romcat_core::catalog::sublibrary::{RemovedSublibrary, Renamed};
+use romcat_core::report::{decimal_bytes, decimal_gigabytes, human_bytes, thousands};
 use romcat_core::site::Site;
 use romcat_core::sublibrary::report::SelectionReport;
+use romcat_core::sublibrary::target::{self, NameRefusal, Presence, TargetRefusal};
 use romcat_core::sublibrary::{
     BrokenRule, Exception, ExceptionRow, Fit, Gauge, LoadedSelection, Room, Rule, StoredRule,
     Sublibrary, rule,
@@ -136,11 +137,36 @@ enum TargetDialog {
     Of(String),
 }
 
+/// 目标路径那一格**上一回判的是哪一串、判出来什么**（[`target::vet`]）。
+///
+/// **不在每一帧里判**：判一次要化开路径、看那个卷，挂载点卡住时整个窗口会跟着卡。框里的字、正在改的是哪一台，两样都没变就
+/// 照用上一回的（拿主意的人 2026-09-15 定：只在字改了、或者「选择…」交回来时查一次盘）。
+#[derive(Debug, Clone)]
+struct Vetted {
+    /// 判的是框里哪一串。
+    text: String,
+    /// 判的时候正在改哪一台（新建是 `None`）。
+    editing: Option<String>,
+    /// 判出来什么；中立库读不动时是那句话。
+    verdict: Result<Result<Presence, TargetRefusal>, String>,
+}
+
+/// 名字那一格上一回判的是哪一串、判出来什么（[`target::vet_name`]）。同 [`Vetted`]，只在字变了时再判。
+#[derive(Debug, Clone)]
+struct NameVetted {
+    /// 判的是哪一串。
+    text: String,
+    /// 判的时候正在改哪一台。
+    editing: Option<String>,
+    /// 判出来什么；中立库读不动时是那句话。
+    verdict: Result<Result<(), NameRefusal>, String>,
+}
+
 /// 新建或改一个子库时界面上那份草稿。
 ///
 /// **每一格都会碰到输入法**（目标路径里有中文目录名是常态），所以这几个控件摆在「目标设置」那层弹层的
 /// 内容区里：内容区每帧把整份内容都摆一遍，正在组字的那一格不会凭空消失（[`crate::dialog`]、ADR-0005）。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Form {
     /// 子库叫什么。一台目标设备一个。
     pub name: String,
@@ -148,11 +174,17 @@ pub struct Form {
     pub target: String,
     /// 前端格式（适配器名）。空着就是 Pegasus。
     pub format: String,
-    /// 容量上限，如 `512GB`、`476GiB`。空着就是不设限。从现成的子库填进来时写一位小数的十进制（`511.1 GB`，
-    /// 挂单 `Q856`）。
+    /// 容量上限，如 `58`（光一个数按十进制 GB 读）、`476GiB`。空着就是不设限。从现成的子库填进来时写一位小数的十进制 GB 数
+    /// （`511.1`，挂单 `Q856`；后面那个「GB」弹层上写着）。
     pub capacity: String,
     /// **能力档案**的名字。空着就是「不作声称」——不转换、不检查。
     pub capability: String,
+    /// 容量上限是不是**按设备容量**那一档（拿主意的人 2026-09-15 照稿定）：跟着设备总容量走，换卡跟着变
+    /// （`Sublibrary::capacity_by_device`）。关着是「自定义」，上限照 [`Self::capacity`] 那一格。
+    pub capacity_by_device: bool,
+    /// 这一台的**按平台覆盖**：平台名 → 覆盖成什么，只影响这个子库（票 `gui-looks-like-the-design/21`）。平台表里改的就是它，
+    /// 「保存」时整份存进中立库（`Catalog::set_capability_overrides`）。「目标设置…」打开时照库里那一份填（[`Screen::edit_target`]）。
+    pub overrides: BTreeMap<String, Override>,
     /// 从现成的子库填草稿时（[`Self::of`]），容量那一格**填进去的那串字与它原来的字节数**。
     ///
     /// 那一格写的是一位小数（`511.1 GB`），读回来是 511,100,000,000——人没碰那一格就按保存的话，上限会被
@@ -160,13 +192,34 @@ pub struct Form {
     kept_capacity: Option<(String, u64)>,
 }
 
+impl Default for Form {
+    /// 新建那层弹层上的空草稿。
+    ///
+    /// **容量上限默认落在「按设备容量」那一档**（设计稿）：新建时多半还没插上卡，这一档等于「插上之后跟着卡走」，
+    /// 换一张卡上限跟着变；「自定义」是人填的那一档，空着虽然同样不设限，但换卡不会跟着变，不是一件事。
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            target: String::new(),
+            format: String::new(),
+            capacity: String::new(),
+            capability: String::new(),
+            capacity_by_device: true,
+            overrides: BTreeMap::new(),
+            kept_capacity: None,
+        }
+    }
+}
+
 impl Form {
     /// 从一个现成的子库填一份草稿。
     #[must_use]
     pub fn of(sublibrary: &Sublibrary) -> Self {
+        // 按设备容量那一档里 `capacity` 记的是上次读到的总量，不是人填的数：自定义那一格空着。
         let kept_capacity = sublibrary
             .capacity
-            .map(|bytes| (decimal_bytes(bytes), bytes));
+            .filter(|_| !sublibrary.capacity_by_device)
+            .map(|bytes| (decimal_gigabytes(bytes), bytes));
         Self {
             name: sublibrary.name.clone(),
             target: sublibrary.target.clone(),
@@ -176,6 +229,8 @@ impl Form {
                 .map(|(text, _)| text.clone())
                 .unwrap_or_default(),
             capability: sublibrary.capability.clone().unwrap_or_default(),
+            capacity_by_device: sublibrary.capacity_by_device,
+            overrides: BTreeMap::new(),
             kept_capacity,
         }
     }
@@ -268,6 +323,42 @@ pub struct Screen {
     form: Form,
     /// 「目标设置」那层弹层开没开着、开的是哪一种（[`Self::begin_new`] / [`Self::edit_target`]）。
     target_dialog: Option<TargetDialog>,
+    /// 目标路径那一格上一回判的结果（[`Vetted`]）。
+    vetted: Option<Vetted>,
+    /// 名字那一格上一回判的结果（[`NameVetted`]）。
+    name_vetted: Option<NameVetted>,
+    /// 每台设备的**按平台覆盖**（`Catalog::capability_overrides`），随 [`Self::reload`] 读。「目标设置…」照它填草稿。
+    overrides: BTreeMap<String, BTreeMap<String, Override>>,
+    /// 目标设置弹层里那一台的**脚印**：为哪一台读的、读回来的那一份（`romcat_core::sync::Footprint`）。
+    footprint: Option<(String, romcat_core::sync::Footprint)>,
+    /// 正在台上读的那一趟脚印：任务号、为哪一台读。**它同时是认领凭据**（与 [`Self::evaluating`] 一个写法）。
+    reading_footprint: Option<(u64, String)>,
+    /// 这一台的脚印读失败或被停过：弹层重开之前不再自己排——不然每一帧都往台上排一趟、每一趟都失败。
+    footprint_failed: Option<String>,
+    /// 能力档案名册（`Roster::in_workspace`），随 [`Self::reload`] 读。目标设置弹层里的下拉与平台表照它，不在画帧里读盘。
+    roster: Option<Roster>,
+    /// 「今天」：平台表判「陈旧」用（`Claim::is_stale`）。`None` 是照系统时钟（`capability::today`）；截图测试钉死它
+    /// （[`Self::set_today`]），截图里才没有当前日期。
+    today: Option<String>,
+    /// 这一台选择集在眼下挑的档案（叠上覆盖）下**放不下哪几份**：档案名、覆盖、结果（`Footprint::too_big`）。
+    /// 纯算，但与选择集一样大——只在档案或覆盖变了时重算。
+    too_big: Option<(
+        String,
+        BTreeMap<String, Override>,
+        Vec<romcat_core::sync::Rejected>,
+    )>,
+    /// 目标设置弹层里那条路径上**清单之外**的文件数完了：数的是框里哪一串、数出来多少（`sync::strangers`）。
+    strangers: Option<(String, romcat_core::sync::Strangers)>,
+    /// 正在台上数的那一趟：任务号、数的是哪一串。**它同时是认领凭据**。
+    counting: Option<(u64, String)>,
+    /// 这一串数失败或被停过：字改了之前不再自己排。
+    counting_failed: Option<String>,
+    /// 目标设置里存下之后底边那条提示条（拿主意的人 2026-09-15 定，F9）：「已创建子库…」「已保存…差量预览已失效…」。
+    /// **一次只摆一条**：摆它时删除之后那条带「撤销」的就收了。
+    saved: Option<Toast>,
+    /// 库里头一个有平台的变体住的平台目录（`Catalog::sample_platform_directory`）：前端格式那句说明拿它举例。弹层打开时读一次，
+    /// 外层 `None` 是还没读。
+    sample_directory: Option<Option<String>>,
     /// **每台设备**的选择集原文：规则（连库里的序号）、读不懂的那几条、例外。
     ///
     /// 每张卡都摆它自己的规则列表（票 `gui-looks-like-the-design/20`），所以一台不落全读回来
@@ -377,6 +468,20 @@ impl Screen {
             syncing: None,
             outcome: None,
             notice: None,
+            vetted: None,
+            name_vetted: None,
+            overrides: BTreeMap::new(),
+            footprint: None,
+            reading_footprint: None,
+            footprint_failed: None,
+            roster: None,
+            today: None,
+            too_big: None,
+            strangers: None,
+            counting: None,
+            counting_failed: None,
+            saved: None,
+            sample_directory: None,
             failed: false,
             error: None,
         }
@@ -384,6 +489,9 @@ impl Screen {
 
     /// 重新列一遍库里有哪些子库。
     pub fn reload(&mut self, site: &Site) {
+        // **判过的名字与路径跟着作废**：库里的子库变了（存了、删了、改了名），上一回判的「能用」「被谁占着」说的是变之前。
+        self.vetted = None;
+        self.name_vetted = None;
         match site.catalog.sublibraries() {
             Ok(list) => {
                 self.list = list;
@@ -391,6 +499,15 @@ impl Screen {
             }
             Err(error) => self.error = Some(format!("中立库读不动：{error}")),
         }
+        // 每台设备的按平台覆盖：「目标设置…」照它填草稿。读不动的那一台当它一行都没覆盖（照名册判）。
+        self.overrides = self
+            .list
+            .iter()
+            .filter_map(|sublibrary| {
+                let rows = site.catalog.capability_overrides(&sublibrary.name).ok()?;
+                Some((sublibrary.name.clone(), rows))
+            })
+            .collect();
         // **档案名解到哪一份由核心说**：记着的名字在名册里没有时退回「不作声称」
         // ——卡头写的是真会用上的那一份，不是记着的那个名字。
         match Roster::in_workspace(&self.workspace) {
@@ -413,10 +530,12 @@ impl Screen {
                         )
                     })
                     .collect();
+                self.roster = Some(roster);
                 self.roster_error = None;
             }
             Err(error) => {
                 self.profiled.clear();
+                self.roster = None;
                 self.roster_error = Some(format!("能力档案名册读不动：{error}"));
             }
         }
@@ -649,11 +768,17 @@ impl Screen {
                 |room| room.after_bytes.saturating_sub(room.stranger_bytes),
             ),
             strangers: room.as_ref().map(|room| room.stranger_bytes),
-            capacity: self
-                .list
-                .iter()
-                .find(|row| row.name == name)
-                .and_then(|row| row.capacity),
+            // **排过差量、算过容量的照计划里真用上的那个上限画**（`Room::capacity`：按设备容量是卡此刻的总量，本机磁盘不设
+            // 上限时按剩余空间算）——与旁边「超出容量上限」同一个底；都没有时照库里记着的。
+            capacity: room.as_ref().map_or_else(
+                || {
+                    self.list
+                        .iter()
+                        .find(|row| row.name == name)
+                        .and_then(|row| row.capacity)
+                },
+                |room| room.capacity,
+            ),
         }
     }
 
@@ -724,6 +849,10 @@ impl Screen {
     /// 只丢这一台的：折一趟事实全部设备共用，别人那几张卡的数还是好的。
     pub fn forget(&mut self, site: &Site, name: &str) {
         self.evaluated.remove(name);
+        // 选择集变了，为它读的脚印说的已经不是眼下这一批了。
+        if self.footprint.as_ref().is_some_and(|(of, _)| of == name) {
+            self.footprint = None;
+        }
         if let Some(说一句) = self.drop_survey() {
             self.notice = Some(说一句.to_string());
         }
@@ -910,6 +1039,10 @@ impl Screen {
         } else if self.syncing == Some(done.id) {
             self.syncing = None;
             self.settle_sync(site, done);
+        } else if let Some((_, name)) = self.reading_footprint.take_if(|(id, _)| *id == done.id) {
+            self.settle_footprint(name, done);
+        } else if let Some((_, text)) = self.counting.take_if(|(id, _)| *id == done.id) {
+            self.settle_strangers(text, done);
         }
         // 那一趟刚看过目标（或者往上写过）：卡头说的「在不在位」与清单记着几条跟着换过来。
         self.look_at_targets();
@@ -1224,7 +1357,9 @@ impl Screen {
         look::screen_body(ui, "子库屏体", |ui| self.cards_ui(ui, site, tasks));
         // 「目标设置」开着时盖在上面（[`crate::dialog`]）：遮罩盖住整个窗口，底下那一屏点不动。
         let ctx = ui.ctx().clone();
+        self.read_footprint(site, tasks);
         self.target_dialog_ui(&ctx, site);
+        self.count_strangers(site, tasks);
         // 「删除子库」那层确认弹层同一个路子；删掉之后底边那条提示条盖在最上面（[`crate::toast`]）。
         self.delete_dialog_ui(&ctx, site);
         self.rule_dialog_ui(&ctx, site);
@@ -1287,6 +1422,10 @@ impl Screen {
 
     /// 「**新建子库**」：打开「新建子库」那层弹层，草稿换成一份空的，没有哪一张卡算摊开着。
     fn begin_new(&mut self) {
+        self.forget_strangers();
+        self.vetted = None;
+        self.name_vetted = None;
+        self.sample_directory = None;
         self.picked = None;
         self.form = Form::default();
         self.invalidate();
@@ -1302,8 +1441,271 @@ impl Screen {
         if let Some(sublibrary) = self.list.iter().find(|row| row.name == name) {
             self.form = Form::of(sublibrary);
         }
+        self.form.overrides = self.overrides.get(name).cloned().unwrap_or_default();
+        self.footprint_failed = None;
+        self.forget_strangers();
+        self.vetted = None;
+        self.name_vetted = None;
+        self.sample_directory = None;
         self.error = None;
         self.target_dialog = Some(TargetDialog::Of(name.to_string()));
+    }
+
+    /// 目录选择器交回来一个路径（票 `gui-answers-all-six/01` 那条薄封装，[`crate::pick::directory`]）：**填进目标路径那一格，
+    /// 与贴进框里走同一条路**——下一帧照框里的字当场判一遍（`vet_form`）。取消（`None`）什么都不动。
+    ///
+    /// 界面上「选择…」交回来走的就是它，测试拿它当那一下（对话框那一层不测，理由在 `pick` 的模块文档里）。
+    pub fn picked_target(&mut self, picked: Option<PathBuf>) {
+        if let Some(path) = picked {
+            self.form.target = romcat_core::path::display(&path);
+        }
+    }
+
+    /// 目标设置弹层里平台表列哪几个平台：这一台选择集里出现的那几个（读回来的脚印，`sync::Footprint::platforms`）。
+    /// 还在读、或者开的是「新建子库」时是 `None`。
+    #[must_use]
+    pub fn target_platforms(&self) -> Option<Vec<String>> {
+        let Some(TargetDialog::Of(name)) = &self.target_dialog else {
+            return None;
+        };
+        self.footprint
+            .as_ref()
+            .filter(|(of, _)| of == name)
+            .map(|(_, footprint)| footprint.platforms())
+    }
+
+    /// 「目标设置…」开着、手上还没有这一台的脚印时，往任务台上排一趟**不留历史**的活去读（`sync::prepare::footprint`，
+    /// `Board::queue_quiet`：打开弹层时顺带跑的，不是人点起来的一趟，拿主意的人 2026-09-15 定）。读过的、正在读的、
+    /// 这回读失败过的都不重排。**折事实走一遍全库**，所以不在画帧那条线程上读（与 [`Self::evaluate`] 同一条路）。
+    fn read_footprint(&mut self, site: &Site, tasks: &mut Tasks) {
+        let Some(TargetDialog::Of(name)) = self.target_dialog.clone() else {
+            return;
+        };
+        let have = self.footprint.as_ref().is_some_and(|(of, _)| *of == name);
+        let reading = self
+            .reading_footprint
+            .as_ref()
+            .is_some_and(|(_, of)| *of == name);
+        if have || reading || self.footprint_failed.as_deref() == Some(name.as_str()) {
+            return;
+        }
+        let title = format!("读「{name}」的选择集");
+        let id = match site.catalog.read_only() {
+            Ok(reader) => {
+                let of = name.clone();
+                tasks.queue_quiet(title, move |task| {
+                    sync::prepare::footprint(&reader, &of, task)
+                        .map(|footprint| Product::Footprint(Box::new(footprint)))
+                })
+            }
+            Err(CatalogError::NotOnDisk { .. }) => tasks.run_here_quiet(title, |task| {
+                sync::prepare::footprint(&site.catalog, &name, task)
+                    .map(|footprint| Product::Footprint(Box::new(footprint)))
+            }),
+            Err(why) => {
+                self.footprint_failed = Some(name);
+                self.error = Some(no_second_connection("读选择集", &why));
+                return;
+            }
+        };
+        self.reading_footprint = Some((id, name));
+    }
+
+    /// 读脚印那一趟回来了。
+    fn settle_footprint(&mut self, name: String, done: Finished<Product>) {
+        match done.ended {
+            Ending::Done(Product::Footprint(footprint))
+            | Ending::Halfway {
+                product: Product::Footprint(footprint),
+                ..
+            } => self.footprint = Some((name, *footprint)),
+            Ending::Done(_) | Ending::Halfway { .. } => {}
+            Ending::Stopped => self.footprint_failed = Some(name),
+            Ending::Failed { step, why } => {
+                self.footprint_failed = Some(name);
+                self.error = Some(format!(
+                    "读选择集{}",
+                    Ending::<()>::Failed { step, why }.render()
+                ));
+            }
+        }
+    }
+
+    /// 钉死平台表判「陈旧」用的「今天」（`YYYY-MM-DD`）：截图测试钉死它，截图里才没有当前日期。
+    pub fn set_today(&mut self, today: &str) {
+        self.today = Some(today.to_string());
+    }
+
+    /// 眼下挑的档案叠上覆盖之后，这一台选择集**放不下哪几份**（`Footprint::too_big`）。档案名与覆盖都没变就照用上一回的。
+    fn refresh_too_big(&mut self, profile: Option<&Profile>) {
+        let editing = match &self.target_dialog {
+            Some(TargetDialog::Of(name)) => name.as_str(),
+            _ => {
+                self.too_big = None;
+                return;
+            }
+        };
+        let (Some(profile), Some((of, footprint))) = (profile, self.footprint.as_ref()) else {
+            self.too_big = None;
+            return;
+        };
+        if of != editing {
+            self.too_big = None;
+            return;
+        }
+        let fresh = self.too_big.as_ref().is_some_and(|(name, overrides, _)| {
+            *name == profile.name && *overrides == self.form.overrides
+        });
+        if fresh {
+            return;
+        }
+        let rows = footprint.too_big(&profile.with_overrides(&self.form.overrides));
+        self.too_big = Some((profile.name.clone(), self.form.overrides.clone(), rows));
+    }
+
+    /// 丢掉上一回数的清单外文件数：重开弹层时重数（设备可能换过、拷进去过东西）。
+    fn forget_strangers(&mut self) {
+        self.strangers = None;
+        self.counting = None;
+        self.counting_failed = None;
+    }
+
+    /// 目标设置开着、框里那条路径**此刻在位**、还没数过它时，往任务台上排一趟**只读、不留历史**的活数清单外文件
+    /// （`sync::prepare::strangers_at`，拿主意的人 2026-09-15 定）。清单是正在改的那一台的；新建时还没有清单，卡上的都算。
+    /// 路径的字改了、或者判出来从不在变成在（设备重新连上），数的那一串对不上，就重数。
+    fn count_strangers(&mut self, site: &Site, tasks: &mut Tasks) {
+        if self.target_dialog.is_none() {
+            return;
+        }
+        let Some(vetted) = self.vetted.as_ref() else {
+            return;
+        };
+        if !matches!(vetted.verdict, Ok(Ok(Presence::Present(_)))) {
+            return;
+        }
+        let text = vetted.text.clone();
+        let done = self.strangers.as_ref().is_some_and(|(of, _)| *of == text);
+        let running = self.counting.as_ref().is_some_and(|(_, of)| *of == text);
+        if done || running || self.counting_failed.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        let name = self
+            .editing()
+            .unwrap_or_else(|| self.form.name.trim().to_string());
+        let title = "数目标上清单之外的文件".to_string();
+        let path = PathBuf::from(&text);
+        let id = match site.catalog.read_only() {
+            Ok(reader) => tasks.queue_quiet(title, move |task| {
+                sync::prepare::strangers_at(&reader, &name, &path, task).map(Product::Strangers)
+            }),
+            Err(CatalogError::NotOnDisk { .. }) => tasks.run_here_quiet(title, |task| {
+                sync::prepare::strangers_at(&site.catalog, &name, &path, task)
+                    .map(Product::Strangers)
+            }),
+            Err(why) => {
+                self.counting_failed = Some(text);
+                self.error = Some(no_second_connection("数清单之外的文件", &why));
+                return;
+            }
+        };
+        self.counting = Some((id, text));
+    }
+
+    /// 数清单外文件那一趟回来了。
+    fn settle_strangers(&mut self, text: String, done: Finished<Product>) {
+        match done.ended {
+            Ending::Done(Product::Strangers(counted))
+            | Ending::Halfway {
+                product: Product::Strangers(counted),
+                ..
+            } => self.strangers = Some((text, counted)),
+            Ending::Done(_) | Ending::Halfway { .. } | Ending::Stopped | Ending::Failed { .. } => {
+                self.counting_failed = Some(text);
+            }
+        }
+    }
+
+    /// 不存、关上「目标设置」那层弹层：页脚上「取消」、Esc 走的就是它，测试拿它当那一下。
+    pub fn leave_target_settings(&mut self) {
+        self.target_dialog = None;
+        self.error = None;
+    }
+
+    /// 这张卡此刻读得出的**总量**：上一回判目标路径时（[`Self::vet_form`]）目标在位才有。
+    fn live_total(&self) -> Option<u64> {
+        match self.vetted.as_ref().map(|vetted| &vetted.verdict) {
+            Some(Ok(Ok(Presence::Present(volume)))) => volume.total,
+            _ => None,
+        }
+    }
+
+    /// 正在改的那一台**上次读到的总量**：它原来就在按设备容量那一档时，库里 `capacity` 记的就是它。
+    fn stored_total(&self) -> Option<u64> {
+        let editing = self.editing()?;
+        self.list
+            .iter()
+            .find(|row| row.name == editing && row.capacity_by_device)
+            .and_then(|row| row.capacity)
+    }
+
+    /// 眼下正在改的是哪一台：「目标设置…」开的那一台；「新建子库」是 `None`；弹层没开时是摊开的那一张
+    /// （原先那块「配目标」面板改的就是摊开那一台，程序里直接调 [`Self::save`] 的照旧这么认）。
+    fn editing(&self) -> Option<String> {
+        match &self.target_dialog {
+            Some(TargetDialog::Of(name)) => Some(name.clone()),
+            Some(TargetDialog::New) => None,
+            None => self.picked.clone(),
+        }
+    }
+
+    /// 草稿里的名字与目标路径**各判一遍**，字与正在改的那一台都没变就照用上一回的（[`Vetted`]、[`NameVetted`]）。
+    /// 判断全在核心（[`target::vet`] / [`target::vet_name`]），这里只记下来。
+    fn vet_form(&mut self, site: &Site) {
+        let editing = self.editing();
+        let text = self.form.target.trim().to_string();
+        if self
+            .vetted
+            .as_ref()
+            .is_none_or(|last| last.text != text || last.editing != editing)
+        {
+            let verdict = target::vet(
+                &site.catalog,
+                &self.workspace,
+                editing.as_deref(),
+                std::path::Path::new(&text),
+            )
+            .map_err(|error| format!("中立库读不动：{error}"));
+            self.vetted = Some(Vetted {
+                text,
+                editing: editing.clone(),
+                verdict,
+            });
+        }
+        let name = self.form.name.trim().to_string();
+        if self
+            .name_vetted
+            .as_ref()
+            .is_none_or(|last| last.text != name || last.editing != editing)
+        {
+            let verdict = target::vet_name(&site.catalog, editing.as_deref(), &name)
+                .map_err(|error| format!("中立库读不动：{error}"));
+            self.name_vetted = Some(NameVetted {
+                text: name,
+                editing,
+                verdict,
+            });
+        }
+    }
+
+    /// 草稿过没过那两道判（[`Self::vet_form`] 之后问）：名字与目标路径都能用才算过。
+    fn form_ready(&self) -> bool {
+        matches!(
+            self.name_vetted.as_ref().map(|vetted| &vetted.verdict),
+            Some(Ok(Ok(())))
+        ) && matches!(
+            self.vetted.as_ref().map(|vetted| &vetted.verdict),
+            Some(Ok(Ok(_)))
+        )
     }
 
     /// 中间那一列：**一台设备一张卡**。
@@ -1627,9 +2029,13 @@ impl Screen {
     fn head_ui(&self, ui: &mut egui::Ui, sublibrary: &Sublibrary) {
         let Some(profiled) = self.profiled.get(&sublibrary.name) else {
             ui.label(
-                font::mono(format!("{} · {}", sublibrary.target, sublibrary.format))
-                    .size(Tokens::builtin().font.size_small)
-                    .weak(),
+                font::mono(format!(
+                    "{} · {}",
+                    sublibrary.target,
+                    format_label(&sublibrary.format)
+                ))
+                .size(Tokens::builtin().font.size_small)
+                .weak(),
             );
             if let Some(why) = &self.roster_error {
                 ui.colored_label(ui.visuals().warn_fg_color, why);
@@ -1639,7 +2045,10 @@ impl Screen {
         ui.label(
             font::mono(format!(
                 "{} · {} · {} · 能力档案：{}",
-                sublibrary.target, sublibrary.format, profiled.filesystem, profiled.profile,
+                sublibrary.target,
+                format_label(&sublibrary.format),
+                profiled.filesystem,
+                profiled.profile,
             ))
             // 设计稿 `.mono` 是正文的 0.92 倍，落在说明字号那一档。
             .size(Tokens::builtin().font.size_small)
@@ -2335,7 +2744,15 @@ impl Screen {
         let Some(which) = self.target_dialog.clone() else {
             return;
         };
-        let ready = !self.form.name.trim().is_empty() && !self.form.target.trim().is_empty();
+        // **判在画之前**：页脚那颗按不按得动看的是这一帧判出来的（只在字变了时真去判，[`Self::vet_form`]）。
+        self.vet_form(site);
+        let ready = self.form_ready();
+        let target_verdict = self.vetted.as_ref().map(|vetted| vetted.verdict.clone());
+        let name_verdict = self
+            .name_vetted
+            .as_ref()
+            .map(|vetted| vetted.verdict.clone());
+        let mut pick_pressed = false;
         let (title, note, save_label) = match &which {
             TargetDialog::New => (
                 "新建子库".to_string(),
@@ -2354,6 +2771,94 @@ impl Screen {
                 .enabled(ready)
                 .hover("新建或改写这台设备。目标设备不在位也存得下——子库是持久实体。"),
         );
+        // **能力档案**：名册随 `reload` 读好了；挑的那一份叠上覆盖之后放不下哪几份，只在档案或覆盖变了时重算。
+        let today = self
+            .today
+            .clone()
+            .unwrap_or_else(romcat_core::capability::today);
+        let profile = self.roster.as_ref().map(|roster| {
+            roster.find_or_unclaimed(
+                Some(self.form.capability.trim()).filter(|name| !name.is_empty()),
+            )
+        });
+        let roster_names: Vec<String> = self.roster.as_ref().map_or_else(Vec::new, |roster| {
+            roster
+                .names()
+                .into_iter()
+                .map(ToString::to_string)
+                .collect()
+        });
+        self.refresh_too_big(profile.as_ref());
+        let too_big = self
+            .too_big
+            .as_ref()
+            .is_some_and(|(_, _, rows)| !rows.is_empty());
+        let editing_one = matches!(which, TargetDialog::Of(_));
+        // 「设备上的位置」（拿主意的人 2026-09-15 定：照实际规则）：改一台时是这一台头一个变体的真实落点（`Footprint::landing`），
+        // 新建时拿示例名走同一条规则（`Landing::example`）；元数据位置由选的那个前端格式答。还在读选择集时先不画。
+        let format_name = if self.form.format.trim().is_empty() {
+            PEGASUS.to_string()
+        } else {
+            self.form.format.trim().to_string()
+        };
+        let landing = romcat_core::adapter::find(&format_name).and_then(|adapter| match &which {
+            TargetDialog::Of(name) => {
+                let overridden = profile.as_ref().map_or_else(Profile::unclaimed, |profile| {
+                    profile.with_overrides(&self.form.overrides)
+                });
+                self.footprint
+                    .as_ref()
+                    .filter(|(of, _)| of == name)
+                    .and_then(|(_, footprint)| footprint.landing(&overridden, adapter.as_ref()))
+            }
+            TargetDialog::New => Some(romcat_core::sync::Landing::example(
+                adapter.as_ref(),
+                EXAMPLE_DIRECTORY,
+                EXAMPLE_FILE,
+            )),
+        });
+        // 前端格式那句说明拿哪个平台目录举例：改一台时是它头一个变体真实落在的目录，读选择集之前与新建时是库里头一个有平台的
+        // 变体住的目录（`Catalog::sample_platform_directory`，弹层打开时读一次）。都说不出就不举例。
+        if self.sample_directory.is_none() {
+            self.sample_directory = Some(site.catalog.sample_platform_directory().ok().flatten());
+        }
+        let example_directory = match (&which, &landing) {
+            (TargetDialog::Of(_), Some(landing)) => Some(landing.directory.clone()),
+            _ => self.sample_directory.clone().flatten(),
+        };
+        let landing_root = if self.form.target.trim().is_empty() {
+            EXAMPLE_ROOT.to_string()
+        } else {
+            self.form.target.trim().to_string()
+        };
+        // 路径底下那一行（设计稿 `probePath`）：在位照稿写连接状态，清单外文件数数完了才接上那半句；不在位说未连接。
+        let presence_line = match self
+            .vetted
+            .as_ref()
+            .map(|vetted| (&vetted.text, &vetted.verdict))
+        {
+            Some((text, Ok(Ok(Presence::Present(volume))))) => {
+                let counted = self
+                    .strangers
+                    .as_ref()
+                    .filter(|(of, _)| of == text)
+                    .map(|(_, counted)| counted.count);
+                Some((connected_line(volume, counted), true))
+            }
+            Some((_, Ok(Ok(Presence::Absent)))) => Some((
+                "未连接。设备不在时也能建，插上之后再生成差量预览。".to_string(),
+                false,
+            )),
+            _ => None,
+        };
+        // 「按设备容量」那一格写哪个数：这条规矩在核心库（`sublibrary::device_limit`）——卡在位是此刻的总量，
+        // 不在位是上次读到的，都没有就说不设上限。
+        let device_label =
+            match romcat_core::sublibrary::device_limit(self.stored_total(), self.live_total()) {
+                Some(bytes) => format!("按设备容量（{}）", decimal_bytes(bytes)),
+                None => "按设备容量（没读过，不设上限）".to_string(),
+            };
+        let platforms = self.target_platforms();
         let error = self.error.clone();
         let form = &mut self.form;
         let shown = Dialog::new("目标设置", title, footer)
@@ -2364,41 +2869,214 @@ impl Screen {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 let layout = &Tokens::builtin().layout;
-                for (label, value, hint) in [
-                    ("名称", &mut form.name, "例如设备型号：RG35XX Plus"),
-                    ("目标路径", &mut form.target, "读卡器挂上来的那个目录"),
-                    ("前端格式", &mut form.format, "空着就是 Pegasus"),
-                    ("容量上限", &mut form.capacity, "如 512GB；空着不设限"),
-                    ("能力档案", &mut form.capability, "空着就是不作声称"),
-                ] {
+                // 名那一列靠左（设计稿弹层表单）：`add_sized` 会把字摆在格子正中。
+                let field_label = |ui: &mut egui::Ui, label: &str| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(layout.form_label_width, layout.input_height),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            ui.set_min_size(egui::vec2(layout.form_label_width, layout.input_height));
+                            ui.label(label);
+                        },
+                    );
+                };
+                // 值那一列底下那一行（设计稿 `.help` / `.err`）：与输入框左边对齐，**照可用宽折行**——横排里的字默认不折，
+                // 长一点的说明会把整层弹层撑得比令牌那一档还宽。
+                let under = |ui: &mut egui::Ui, text: &str, error: bool| {
                     ui.horizontal(|ui| {
-                        // 名那一列靠左（设计稿弹层表单）：`add_sized` 会把字摆在格子正中。
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(layout.kv_key_width, layout.input_height),
-                            Layout::left_to_right(Align::Center),
-                            |ui| {
-                                ui.set_min_size(egui::vec2(
-                                    layout.kv_key_width,
-                                    layout.input_height,
-                                ));
-                                ui.label(label);
-                            },
+                        ui.add_space(layout.form_label_width + ui.spacing().item_spacing.x);
+                        let color = if error {
+                            ui.visuals().error_fg_color
+                        } else {
+                            ui.visuals().weak_text_color()
+                        };
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(text).small().color(color)).wrap(),
                         );
-                        let width = ui.available_width();
-                        look::text_input(
-                            ui,
-                            width,
-                            egui::TextEdit::singleline(value).hint_text(hint),
-                        );
+                    });
+                };
+
+                ui.horizontal(|ui| {
+                    field_label(ui, "名称");
+                    let width = ui.available_width();
+                    look::text_input(
+                        ui,
+                        width,
+                        egui::TextEdit::singleline(&mut form.name)
+                            .hint_text("例如设备型号：RG35XX Plus"),
+                    );
+                });
+                match name_verdict.as_ref() {
+                    Some(Ok(Err(NameRefusal::Empty))) => under(ui, "用来区分不同设备。", false),
+                    Some(Ok(Err(NameRefusal::Taken))) => under(ui, "已经有同名的子库。", true),
+                    Some(Err(why)) => under(ui, why, true),
+                    Some(Ok(Ok(()))) | None => {}
+                }
+
+                // 字段之间照稿隔一档（设计稿 `.frm` 的 `gap:12px`）。
+                ui.add_space(step(2));
+                ui.horizontal(|ui| {
+                    field_label(ui, "目标路径");
+                    let pick_width = look::button_width(ui, "选择…");
+                    let width = ui.available_width() - pick_width - ui.spacing().item_spacing.x;
+                    look::text_input(
+                        ui,
+                        width,
+                        egui::TextEdit::singleline(&mut form.target)
+                            .font(egui::TextStyle::Monospace)
+                            .hint_text("选择或粘贴路径"),
+                    );
+                    if ui
+                        .button("选择…")
+                        .on_hover_text(crate::pick::FALLBACK_HINT)
+                        .clicked()
+                    {
+                        pick_pressed = true;
+                    }
+                });
+                match target_verdict.as_ref() {
+                    // 框还空着不是错：照稿一句弱字说目标路径通常是什么（设计稿 `probePath` 空串那一支）。
+                    Some(Ok(Err(TargetRefusal::Empty))) => under(
+                        ui,
+                        "通常是 SD 卡或掌机存储的根目录。无法弹出选择窗口时，也可以直接粘贴路径。",
+                        false,
+                    ),
+                    Some(Ok(Err(refusal))) => under(ui, &refusal_line(refusal), true),
+                    Some(Err(why)) => under(ui, why, true),
+                    Some(Ok(Ok(_))) | None => {}
+                }
+                if let Some((line, connected)) = &presence_line {
+                    if *connected {
+                        ui.horizontal(|ui| {
+                            ui.add_space(layout.form_label_width + ui.spacing().item_spacing.x);
+                            let (good, _) = look::tone_colors(look::Tone::Good, ui.visuals());
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(line).small().color(good))
+                                    .wrap(),
+                            );
+                        });
+                    } else {
+                        under(ui, line, false);
+                    }
+                }
+
+                // 字段之间照稿隔一档（设计稿 `.frm` 的 `gap:12px`）。
+                ui.add_space(step(2));
+                ui.horizontal(|ui| {
+                    field_label(ui, "前端格式");
+                    // 这一版带了哪几个适配器由核心库答（`adapter::names`）：界面不另写一份清单，
+                    // 添一个适配器这一排就多一格（ADR-0024）。
+                    let adapters = romcat_core::adapter::names();
+                    let chosen = if form.format.trim().is_empty() {
+                        PEGASUS
+                    } else {
+                        form.format.trim()
+                    };
+                    let 这一排: Vec<(&str, &str)> = adapters
+                        .iter()
+                        .map(|name| (*name, format_label(name)))
+                        .collect();
+                    let 选中 = adapters
+                        .iter()
+                        .find(|name| name.eq_ignore_ascii_case(chosen))
+                        .copied()
+                        .unwrap_or(adapters[0]);
+                    if let Some(picked) = look::segmented(ui, &这一排, 选中) {
+                        form.format = picked.to_string();
+                    }
+                });
+                under(ui, &format_help(&form.format, example_directory.as_deref()), false);
+
+                // 字段之间照稿隔一档（设计稿 `.frm` 的 `gap:12px`）。
+                ui.add_space(step(2));
+                ui.horizontal(|ui| {
+                    field_label(ui, "能力档案");
+                    let chosen = if form.capability.trim().is_empty() {
+                        DEFAULT_PROFILE.to_string()
+                    } else {
+                        form.capability.trim().to_string()
+                    };
+                    let width = ui.available_width();
+                    egui::ComboBox::from_id_salt("能力档案")
+                        .width(width)
+                        .selected_text(chosen.clone())
+                        .show_ui(ui, |ui| {
+                            for name in &roster_names {
+                                if ui.selectable_label(*name == chosen, name).clicked() {
+                                    form.capability.clone_from(name);
+                                }
+                            }
+                        });
+                });
+                if let Some(profile) = &profile {
+                    under(ui, &profile_help(profile), false);
+                    profile_table_ui(
+                        ui,
+                        profile,
+                        editing_one.then_some(platforms.as_deref()),
+                        &mut form.overrides,
+                        &today,
+                    );
+                    if too_big && let Some(limit) = profile.filesystem.max_file_bytes {
+                        ui.horizontal(|ui| {
+                            ui.add_space(layout.form_label_width + ui.spacing().item_spacing.x);
+                            ui.vertical(|ui| {
+                                look::warn_box(
+                                    ui,
+                                    &format!("{} 单文件上限 {}。", profile.filesystem.name, human_bytes(limit)),
+                                    "选择集里有超过这个大小的变体，它们会列在差量预览的「放不进目标」里。",
+                                );
+                            });
+                        });
+                    }
+                }
+
+                // 容量上限照稿二选一（共用的单选件 `look::radio_option`，设计稿 `.opt`）；自定义时底下一格填数（十进制 GB）。
+                ui.add_space(step(2));
+                ui.horizontal_top(|ui| {
+                    field_label(ui, "容量上限");
+                    ui.vertical(|ui| {
+                        if look::radio_option(ui, form.capacity_by_device, &device_label, "设备连接时自动读取").clicked() {
+                            form.capacity_by_device = true;
+                        }
+                        if look::radio_option(ui, !form.capacity_by_device, "自定义", "给存档、截图等留出空间").clicked() {
+                            form.capacity_by_device = false;
+                        }
+                        if !form.capacity_by_device {
+                            ui.horizontal(|ui| {
+                                look::text_input(
+                                    ui,
+                                    layout.capacity_input_width,
+                                    egui::TextEdit::singleline(&mut form.capacity).hint_text("例如 58"),
+                                );
+                                ui.label("GB");
+                            });
+                        }
+                        look::help(ui, "超出上限时只给出删减建议，不会自动删除。");
+                    });
+                });
+                if let Some(landing) = &landing {
+                    ui.add_space(step(2));
+                    ui.horizontal_top(|ui| {
+                        field_label(ui, "设备上的位置");
+                        ui.vertical(|ui| {
+                            landing_box_ui(ui, &landing_root, landing);
+                            look::help(
+                                ui,
+                                "按平台分目录，不带根名：两个根里相同的相对路径会在差量预览中报为落点撞车。",
+                            );
+                        });
                     });
                 }
             });
+        if pick_pressed {
+            // 起点：框里那一串是个目录就从那儿打开，否则交给系统（`pick::directory` 的文档）。
+            let start = PathBuf::from(self.form.target.trim());
+            self.picked_target(crate::pick::directory("选择目标目录", &start));
+        }
         match shown.pressed {
             None => {}
-            Some(Pressed::Cancel) => {
-                self.target_dialog = None;
-                self.error = None;
-            }
+            Some(Pressed::Cancel) => self.leave_target_settings(),
             Some(Pressed::Save) => {
                 // 存下来才关；没存下来时那句话画在弹层里（[`Self::save`]）。先存再判，不把有副作用的一下写进分支守卫。
                 let saved = self.save(site);
@@ -2420,23 +3098,55 @@ impl Screen {
     pub fn save(&mut self, site: &mut Site) -> bool {
         let written = self.form.capacity.trim();
         let capacity = match &self.form.kept_capacity {
+            // 按设备容量那一档：数在下面判完目标路径之后定（此刻的总量，或者上次读到的）。
+            _ if self.form.capacity_by_device => None,
             // 字没改过：沿用原来的字节数，不重新解析（[`Form::kept_capacity`]）。
             Some((shown, bytes)) if written == shown.trim() => Some(*bytes),
             _ if written.is_empty() => None,
-            _ => match rule::parse_size(written) {
-                Some(bytes) => Some(bytes),
-                None => {
-                    self.error = Some(format!(
-                        "看不懂容量「{written}」。写成 `512GB` 或 `476GiB` 那样，单位得写全。",
-                    ));
-                    return false;
+            // 光一个数：照稿按十进制 GB 读（「58」就是 58 GB，与屏上一位小数的写法同一个单位）。
+            _ => match written.parse::<f64>() {
+                Ok(gigabytes) if gigabytes.is_finite() && gigabytes >= 0.0 => {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let bytes = (gigabytes * 1_000_000_000.0).round() as u64;
+                    Some(bytes)
                 }
+                _ => match rule::parse_size(written) {
+                    Some(bytes) => Some(bytes),
+                    None => {
+                        self.error = Some(format!(
+                            "看不懂容量「{written}」。写一个数（按 GB 算，如 58），或者带上单位（如 476GiB）。",
+                        ));
+                        return false;
+                    }
+                },
             },
         };
         let name = self.form.name.trim().to_string();
         let target = std::path::PathBuf::from(self.form.target.trim());
-        if let Err(message) = sync::prepare::refuse_target_in_library(&site.catalog, &[], &target) {
-            self.error = Some(message);
+        // **与弹层当场判的是同一道**（[`target::vet`] / [`target::vet_name`]）：页脚那颗按不动时这里本来到不了，
+        // 程序里直接调它的也一样拦下。
+        self.vetted = None;
+        self.name_vetted = None;
+        self.vet_form(site);
+        if !self.form_ready() {
+            let target_line = match self.vetted.as_ref().map(|vetted| &vetted.verdict) {
+                Some(Ok(Err(refusal))) => Some(refusal_line(refusal)),
+                Some(Err(why)) => Some(why.clone()),
+                _ => None,
+            };
+            let name_line = match self.name_vetted.as_ref().map(|vetted| &vetted.verdict) {
+                Some(Ok(Err(NameRefusal::Empty))) => Some("名称没填。".to_string()),
+                Some(Ok(Err(NameRefusal::Taken))) => Some("已经有同名的子库。".to_string()),
+                Some(Err(why)) => Some(why.clone()),
+                _ => None,
+            };
+            self.error = Some(
+                [name_line, target_line]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
             return false;
         }
         let format = if self.form.format.trim().is_empty() {
@@ -2445,11 +3155,65 @@ impl Screen {
             self.form.format.trim().to_string()
         };
         // 两种路径形式怎么折，**由核心的 `Sublibrary::at` 一处说了算**（ADR-0020）。
+        // **改名**（拿主意的人 2026-09-15 定，照稿名字可改）：只在「目标设置…」开着、名字改了的时候。核心一个事务里把规则、例外、
+        // 覆盖、清单挪到新名下（`Catalog::rename_sublibrary`），再照新名存下这一次改的那几格。
+        let dialog_open = self.target_dialog.is_some();
+        let renaming = match &self.target_dialog {
+            Some(TargetDialog::Of(old)) if *old != name => Some(old.clone()),
+            _ => None,
+        };
+        let creating = matches!(self.target_dialog, Some(TargetDialog::New));
+        let before = match &self.target_dialog {
+            Some(TargetDialog::Of(old)) => old.clone(),
+            _ => name.clone(),
+        };
+        let had_preview = self
+            .prepared
+            .as_ref()
+            .is_some_and(|prepared| prepared.sublibrary.name == before);
+        if let Some(old) = &renaming {
+            match site.catalog.rename_sublibrary(old, &name) {
+                Ok(Renamed::Done) => {
+                    self.evaluated.remove(old);
+                    if let Some((of, _)) = self.footprint.as_mut().filter(|(of, _)| of == old) {
+                        of.clone_from(&name);
+                    }
+                }
+                Ok(Renamed::Missing) => {
+                    self.error = Some(format!("改不了名：已经没有叫「{old}」的子库了。"));
+                    return false;
+                }
+                Ok(Renamed::Refused(_)) => {
+                    self.error = Some("已经有同名的子库。".to_string());
+                    return false;
+                }
+                Err(error) => {
+                    self.error = Some(format!("中立库写不动：{error}"));
+                    return false;
+                }
+            }
+        }
+        // 按设备容量那一档：卡此刻在位就把总量记下来（换卡跟着变），不在位照旧留着上次读到的——
+        // 判在核心库那一处（`sublibrary::device_limit`），屏上那一行写的也是它。
+        let capacity = if self.form.capacity_by_device {
+            romcat_core::sublibrary::device_limit(self.stored_total(), self.live_total())
+        } else {
+            capacity
+        };
         let mut sublibrary = Sublibrary::at(&name, &target, &format, capacity);
+        sublibrary.capacity_by_device = self.form.capacity_by_device;
         sublibrary.capability =
             Some(self.form.capability.trim().to_string()).filter(|value| !value.is_empty());
         match site.catalog.put_sublibrary(&sublibrary) {
             Ok(()) => {
+                // **按平台覆盖整份存下**：弹层里改回「按档案」的那几行就是没了（`Catalog::set_capability_overrides`）。
+                if let Err(error) = site
+                    .catalog
+                    .set_capability_overrides(&name, &self.form.overrides)
+                {
+                    self.error = Some(format!("中立库写不动：{error}"));
+                    return false;
+                }
                 // **算过的那份跟着作废**：容量上限改了，报告里的「超出多少、砍谁」
                 // 说的还是上一个上限——卡上会出现「上限写着 1 TB、旁边说超了 200 GiB」。
                 // **台上那趟还没认领的也一样**（[`Self::drop_survey`]）：它折报告用的正是
@@ -2463,6 +3227,19 @@ impl Screen {
                 self.notice = Some(line);
                 self.reload(site);
                 self.open(site, &name);
+                // **底边提示条**（F9，照稿）：只在弹层里存下时摆。改过目标设置之后原来那份差量预览已经作废（`open` 走了
+                // `invalidate`），要说出来——「同步」认的正是那一份。
+                if dialog_open {
+                    let text = if creating {
+                        format!("已创建子库「{name}」")
+                    } else if had_preview {
+                        format!("已保存「{name}」的目标设置。差量预览已失效，同步前需要重新生成。")
+                    } else {
+                        format!("已保存「{name}」的目标设置。")
+                    };
+                    self.undo = None;
+                    self.saved = Some(Toast::new(text));
+                }
                 true
             }
             Err(error) => {
@@ -2721,6 +3498,14 @@ impl Screen {
 
     /// 底边那条提示条（[`crate::toast`]）：删掉一台之后那一条，带「撤销」。停够了收起，撤销也跟着没了。
     fn toast_ui(&mut self, ctx: &egui::Context, site: &mut Site) {
+        if self.undo.is_none() {
+            if let Some(saved) = &mut self.saved
+                && saved.show(ctx) == toast::Shown::Expired
+            {
+                self.saved = None;
+            }
+            return;
+        }
         let Some(undo) = &mut self.undo else {
             return;
         };
@@ -3077,6 +3862,362 @@ fn sync_notice(outcome: &Outcome, elapsed: f64) -> String {
         }
     }
     line
+}
+
+/// Pegasus 适配器的标识（`romcat_core::adapter::find` 认的那个名字）。
+const PEGASUS: &str = "Pegasus";
+
+/// ES 家族那个适配器的标识。**界面上写「ES-DE」**（[`format_label`]），库里存的、命令行认的照旧是它。
+const ES_GAMELIST: &str = "ES-Gamelist";
+
+/// 前端格式在界面上**写成什么**（拿主意的人 2026-09-15 定）：ES 家族那个适配器写「ES-DE」，别的照适配器标识写。
+/// 只换给人看的那几个字：存进库里的、命令行旗标认的、差量预览排的都还是适配器标识。
+fn format_label(adapter: &str) -> &str {
+    if adapter.eq_ignore_ascii_case(ES_GAMELIST) {
+        "ES-DE"
+    } else {
+        adapter
+    }
+}
+
+/// 前端格式底下那一句：**照实际布局写**（拿主意的人 2026-09-15 定，不照稿上的示意）。末尾那半句「前端里的游玩记录和收藏不会被
+/// 覆盖」两边都有代码钉着才照稿写：Pegasus 的收藏与游玩时长在它自己的配置目录里，ES-DE 在卡上改过的 gamelist 同步只报不写回
+/// （`crates/core/tests/sync.rs` 那两条）。元数据落在哪由适配器答
+/// （`Adapter::metadata_path`），媒体目录取适配器模块里那两个常量——界面不另写一份文件名。
+fn format_help(adapter: &str, example_directory: Option<&str>) -> String {
+    let name = if adapter.trim().is_empty() {
+        PEGASUS
+    } else {
+        adapter.trim()
+    };
+    let Some(found) = romcat_core::adapter::find(name) else {
+        return format!("这一版没带「{name}」这个前端格式。");
+    };
+    // 举例的那一份由适配器按那个平台目录折出来（`Adapter::metadata_path`）；说不出平台目录时只说文件名。
+    let example = example_directory.map(|directory| found.metadata_path(directory));
+    if name.eq_ignore_ascii_case(ES_GAMELIST) {
+        let where_ = example.map_or_else(
+            || format!("每个平台一份 {}", found.file_name()),
+            |metadata| format!("每个平台一份，例如 {metadata}"),
+        );
+        format!(
+            "{where_}；媒体放在 {} 目录。前端里的游玩记录和收藏不会被覆盖。",
+            romcat_core::adapter::gamelist::MEDIA_DIR
+        )
+    } else {
+        let where_ = example.map_or_else(
+            || format!("每个平台一份 {}", found.file_name()),
+            |metadata| format!("每个平台一份，例如 {metadata}"),
+        );
+        format!(
+            "{where_}，摊在子库根上；媒体放在 {} 目录。前端里的游玩记录和收藏不会被覆盖。",
+            romcat_core::adapter::pegasus::MEDIA_DIR
+        )
+    }
+}
+
+/// 目标在位时路径底下那一句（设计稿 `probePath` 那句「已连接 · 可移动存储 · exFAT · 容量 …，可用 …」）：读得到的才写，
+/// 读不到的那几格不编；清单外文件数数完了（`counted`）才接上后半句。
+fn connected_line(
+    volume: &romcat_core::sublibrary::target::Volume,
+    counted: Option<u64>,
+) -> String {
+    let mut parts = vec![
+        "已连接".to_string(),
+        if volume.removable {
+            "可移动存储".to_string()
+        } else {
+            "本机磁盘".to_string()
+        },
+    ];
+    if let Some(filesystem) = &volume.filesystem {
+        parts.push(filesystem.clone());
+    }
+    let mut line = parts.join(" · ");
+    if let (Some(total), Some(available)) = (volume.total, volume.available) {
+        line.push_str(&format!(
+            " · 容量 {}，可用 {}",
+            human_bytes(total),
+            human_bytes(available)
+        ));
+    }
+    line.push('。');
+    // 本机磁盘不设上限时按剩余空间算（`Sublibrary::limit_on`，拿主意的人 2026-09-15 照稿定）：照稿说一句。
+    if !volume.removable {
+        line.push_str("本机磁盘不设容量上限时，按剩余空间计算。");
+    }
+    if let Some(count) = counted {
+        line.push_str(&format!(
+            "目录里已有 {} 个文件，它们不在清单里，工具不会改动。",
+            thousands(count)
+        ));
+    }
+    line
+}
+
+/// 新建子库时「设备上的位置」拿来举例的那一个：设计稿 `DLG.subform` 的示例。目录照实际规则落在平台目录下（`Landing::example`）。
+const EXAMPLE_DIRECTORY: &str = "GBA";
+
+/// 同上，示例文件名。
+const EXAMPLE_FILE: &str = "火焰之纹章 烈火之剑.gba";
+
+/// 目标路径还没填时「设备上的位置」拿来举例的那个根（设计稿 `DLG.subform` 的 `/Volumes/SDCARD`）。
+const EXAMPLE_ROOT: &str = "/Volumes/SDCARD";
+
+/// 把相对子库根的落点接到根后面：根里写的是反斜杠（Windows 盘符路径）就用反斜杠，否则用 `/`。
+fn join_under(root: &str, relative: &str) -> String {
+    let separator = if root.contains('\\') { '\\' } else { '/' };
+    let relative = if separator == '/' {
+        relative.to_string()
+    } else {
+        relative.replace('/', "\\")
+    };
+    format!(
+        "{}{separator}{relative}",
+        root.trim_end_matches(['/', '\\'])
+    )
+}
+
+/// 「设备上的位置」那一块（设计稿 `.ruletext`）：凹陷底、小圆角、等宽小字，两行——ROM 落在哪、元数据落在哪。
+/// 内边距与浏览屏那条规则原文同一个令牌（`rule-text-padding`）。
+fn landing_box_ui(ui: &mut egui::Ui, root: &str, landing: &romcat_core::sync::Landing) {
+    let tokens = Tokens::builtin();
+    let [上下, 左右] = tokens.space.rule_text_padding;
+    let visuals = ui.visuals().clone();
+    egui::Frame::new()
+        .fill(visuals.extreme_bg_color)
+        .corner_radius(tokens.radius.small)
+        .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for line in [
+                join_under(root, &landing.rom),
+                join_under(root, &landing.metadata),
+            ] {
+                ui.add(
+                    egui::Label::new(
+                        font::mono(line)
+                            .size(tokens.font.size_path)
+                            .color(visuals.widgets.noninteractive.fg_stroke.color),
+                    )
+                    .wrap(),
+                );
+            }
+        });
+}
+
+/// 能力档案下拉底下那一句：**照核心的事实拼**（这份档案的文件系统与单文件上限），不照名册里的「说明」——那一格是写给
+/// 维护者看的，带着 Markdown 记号与票号。
+fn profile_help(profile: &Profile) -> String {
+    let filesystem = &profile.filesystem;
+    // 这份档案对卡一条约束都不说（「不作声称」那一份）时，「卡是 …」那半句整个不写（`Filesystem::claims_nothing`）。
+    if filesystem.claims_nothing() {
+        return "决定每个平台放到设备上时要不要转换格式。".to_string();
+    }
+    let limit = filesystem
+        .max_file_bytes
+        .map(|bytes| format!("，单文件上限 {}", human_bytes(bytes)))
+        .unwrap_or_default();
+    format!(
+        "决定每个平台放到设备上时要不要转换格式。卡是 {}{limit}。",
+        filesystem.name
+    )
+}
+
+/// 名册里那几格给人看之前去掉 Markdown 记号（`**`、反引号）：来源原文是写给维护者核对的，界面上照字面露出来不像话。
+fn plain(text: &str) -> String {
+    text.replace("**", "").replace('`', "")
+}
+
+/// **能力档案平台表**（设计稿 `DLG.subform` 那张表）：逐平台写「设备直接能用」「不能用时」，每行底下一句来源里说了的「说明」
+/// 与「核实日期 …」（陈旧时换成警示色「陈旧」，来源去掉记号放悬停）。
+///
+/// `rows_of` 是 `Some(平台表)` 时照这台设备选择集里出现的平台列、带「覆盖」那一列（`None` 是还在读）；是 `None` 时（新建子库）
+/// 按这份档案的条目列、不带覆盖列（拿主意的人 2026-09-15 定）。判断全在核心：哪个平台走哪一条（`Matrix::entry_for`）、
+/// 陈不陈旧（`Claim::is_stale`）。
+fn profile_table_ui(
+    ui: &mut egui::Ui,
+    profile: &Profile,
+    rows_of: Option<Option<&[String]>>,
+    overrides: &mut BTreeMap<String, Override>,
+    today: &str,
+) {
+    let tokens = Tokens::builtin();
+    let layout = &tokens.layout;
+    let rows: Vec<(String, Option<&Entry>)> = match rows_of {
+        Some(Some(platforms)) => platforms
+            .iter()
+            .map(|platform| (platform.clone(), profile.matrix.entry_for(Some(platform))))
+            .collect(),
+        Some(None) => {
+            ui.horizontal(|ui| {
+                ui.add_space(layout.form_label_width + ui.spacing().item_spacing.x);
+                look::help(ui, "正在读这台设备的选择集……");
+            });
+            return;
+        }
+        None => profile
+            .matrix
+            .entries
+            .iter()
+            .map(|entry| {
+                let platforms = if entry.platforms.iter().any(|platform| platform == "*") {
+                    "其余平台".to_string()
+                } else {
+                    entry.platforms.join("、")
+                };
+                (platforms, Some(entry))
+            })
+            .collect(),
+    };
+    let with_overrides = rows_of.is_some();
+    let [平台宽, 转成宽, 覆盖宽] = layout.platform_table_columns;
+    ui.horizontal(|ui| {
+        ui.add_space(layout.form_label_width + ui.spacing().item_spacing.x);
+        ui.vertical(|ui| {
+            let visuals = ui.visuals().clone();
+            egui::Frame::new()
+                .stroke(visuals.widgets.noninteractive.bg_stroke)
+                .corner_radius(tokens.radius.large)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    let total = ui.available_width();
+                    let gaps = if with_overrides { 3.0 } else { 2.0 };
+                    let 吃宽 = (total
+                        - 平台宽
+                        - 转成宽
+                        - if with_overrides { 覆盖宽 } else { 0.0 }
+                        - gaps * ui.spacing().item_spacing.x
+                        - 2.0 * f32::from(block_margin().left))
+                    .max(0.0);
+                    let cell = |ui: &mut egui::Ui, width: f32, add: &mut dyn FnMut(&mut egui::Ui)| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(width, 0.0),
+                            Layout::top_down(Align::Min),
+                            |ui| {
+                                ui.set_width(width);
+                                add(ui);
+                            },
+                        );
+                    };
+                    egui::Frame::new()
+                        .inner_margin(block_margin())
+                        .show(ui, |ui| {
+                            ui.horizontal_top(|ui| {
+                                for (text, width) in [("平台", 平台宽), ("设备直接能用", 吃宽), ("不能用时", 转成宽)] {
+                                    cell(ui, width, &mut |ui| {
+                                        ui.label(egui::RichText::new(text).small().weak());
+                                    });
+                                }
+                                if with_overrides {
+                                    cell(ui, 覆盖宽, &mut |ui| {
+                                        ui.label(egui::RichText::new("覆盖").small().weak());
+                                    });
+                                }
+                            });
+                        });
+                    for (platform, entry) in &rows {
+                        look::divider(ui);
+                        egui::Frame::new()
+                            .inner_margin(block_margin())
+                            .show(ui, |ui| {
+                                ui.horizontal_top(|ui| {
+                                    cell(ui, 平台宽, &mut |ui| {
+                                        ui.add(egui::Label::new(font::strong(platform.as_str())).wrap());
+                                    });
+                                    cell(ui, 吃宽, &mut |ui| entry_cell_ui(ui, *entry, today));
+                                    cell(ui, 转成宽, &mut |ui| {
+                                        ui.label(convert_text(*entry));
+                                    });
+                                    if with_overrides {
+                                        cell(ui, 覆盖宽, &mut |ui| {
+                                            let mut chosen = overrides.get(platform).copied();
+                                            egui::ComboBox::from_id_salt(("覆盖", platform.as_str()))
+                                                .width(覆盖宽)
+                                                .selected_text(chosen.map_or("按档案", Override::label))
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(&mut chosen, None, "按档案");
+                                                    for choice in Override::all() {
+                                                        ui.selectable_value(&mut chosen, Some(choice), choice.label());
+                                                    }
+                                                });
+                                            match chosen {
+                                                Some(choice) => {
+                                                    overrides.insert(platform.clone(), choice);
+                                                }
+                                                None => {
+                                                    overrides.remove(platform);
+                                                }
+                                            }
+                                        });
+                                    }
+                                });
+                            });
+                    }
+                });
+            look::help(
+                ui,
+                if with_overrides {
+                    "只列出这个子库选择集中出现的平台。覆盖只影响这个子库。压缩镜像之间的转换（cue/bin → chd 等）需要外部工具，这一版做不到，遇到时会在差量预览中如实列出。"
+                } else {
+                    "按这份档案的条目列出；创建后按选择集中实际出现的平台列出，并可以按平台覆盖。压缩镜像之间的转换（cue/bin → chd 等）需要外部工具，这一版做不到，遇到时会在差量预览中如实列出。"
+                },
+            );
+        });
+    });
+}
+
+/// 平台表「设备直接能用」那一格：吃什么（名册里的写法）、来源里说了的那一句、核实日期（陈旧时一枚「陈旧」）。
+fn entry_cell_ui(ui: &mut egui::Ui, entry: Option<&Entry>, today: &str) {
+    let Some(entry) = entry.filter(|entry| !entry.accepts.is_anything()) else {
+        ui.label("不作声称");
+        look::help(ui, "没有核实过，不转换也不检查");
+        return;
+    };
+    ui.add(egui::Label::new(entry.declared.join("、")).wrap());
+    if !entry.note.is_empty() {
+        look::help(ui, &entry.note);
+    }
+    ui.horizontal(|ui| {
+        look::help(ui, &format!("核实日期 {}", entry.claim.verified))
+            .on_hover_text(plain(&entry.claim.cite));
+        if entry.claim.is_stale(today) {
+            look::plain_chip(ui, look::Tone::Caution, "陈旧");
+        }
+    });
+}
+
+/// 平台表「不能用时」那一格：转成什么（`Recipe`）；不作声称或者转不了是「—」。
+fn convert_text(entry: Option<&Entry>) -> &'static str {
+    match entry.and_then(|entry| {
+        (!entry.accepts.is_anything())
+            .then_some(entry.convert_to)
+            .flatten()
+    }) {
+        Some(Recipe::Rezip) => "zip",
+        Some(Recipe::Unpack) => "取出为裸文件",
+        None => "—",
+    }
+}
+
+/// 目标路径被核心拦下时，弹层里路径底下那一句（设计稿 `probePath`，稿上画了的三句逐字照稿）。
+///
+/// **判断不在这儿**（[`target::vet`]）：这里只把核心交回来的理由说成屏上那句话。
+fn refusal_line(refusal: &TargetRefusal) -> String {
+    match refusal {
+        TargetRefusal::Empty => "通常是 SD 卡或掌机存储的根目录。".to_string(),
+        TargetRefusal::InLibrary { around: false, .. } => {
+            "这个目录在主库的根之内。子库需要写入文件，不能放在只读的主库里。".to_string()
+        }
+        TargetRefusal::InLibrary { around: true, .. } => {
+            "这个目录包含主库的根。子库需要写入文件，不能放在只读的主库里。".to_string()
+        }
+        TargetRefusal::InWorkspace { .. } => "这个目录属于工作目录，请选择其他目录。".to_string(),
+        TargetRefusal::Taken { by } => format!("已被子库「{by}」使用。"),
+        TargetRefusal::NotADirectory => "这条路径是一份文件，不是目录。".to_string(),
+    }
 }
 
 /// 目标设备那个目录不在时那句话：为什么不行、去哪儿办；在就是 `None`。

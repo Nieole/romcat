@@ -29,6 +29,7 @@ use crate::fs::RealFs;
 use crate::path;
 use crate::scrape::Priorities;
 use crate::scrape::pool::MediaPool;
+use crate::sublibrary::target::library_overlap;
 use crate::sublibrary::{self, Selected, Sublibrary};
 use crate::task::{Cutoff, Halted, Handle};
 use crate::workspace;
@@ -167,6 +168,61 @@ pub fn priorities(given: Option<&Path>, workspace: &Path) -> Result<Priorities, 
     Priorities::load(&path).map_err(|error| format!("{error}"))
 }
 
+/// 读一台设备的**脚印**（[`Footprint`](super::Footprint)）：读选择集、折事实、求值、读成员与内部构成。
+///
+/// 目标设置弹层打开时往任务台上排的就是这一趟（票 `gui-looks-like-the-design/21`）：折事实走一遍全库，
+/// 不能跑在画帧那条线程上。拿到之后换档案、改按平台覆盖都是纯的（[`Footprint::desired`](super::Footprint::desired)）。
+///
+/// 整条只读；被叫停时停在哪儿都是干净的。
+///
+/// # Errors
+/// 中立库读不动时返回 [`Cutoff::Failed`]，被叫停时返回 [`Cutoff::Halted`]。
+pub fn footprint(catalog: &Catalog, name: &str, task: &Handle) -> Result<super::Footprint, Cutoff> {
+    task.steps(FOOTPRINT_STEPS);
+    task.step("读选择集")?;
+    let loaded = catalog
+        .selection(name)
+        .map_err(|error| format!("中立库读不动：{error}"))?;
+    task.step("折事实")?;
+    let facts = sublibrary::facts(catalog).map_err(|error| format!("中立库读不动：{error}"))?;
+    task.step("求值选择集")?;
+    let selected = sublibrary::select(&loaded.selection, &facts);
+    task.step("读成员")?;
+    Ok(super::Footprint::gather(catalog, &selected)
+        .map_err(|error| format!("中立库读不动：{error}"))?)
+}
+
+/// [`footprint`] 一共几步。**改了它里头的 `task.step` 就得改这个数。**
+pub const FOOTPRINT_STEPS: u32 = 4;
+
+/// 数 `target` 上**清单之外**的文件有几个、多大（[`strangers`](super::strangers)）：清单是 `name` 这个子库记着的那一份，
+/// 还没建的子库没有清单，卡上的都算。目标设置弹层里那句「目录里已有 N 个文件，它们不在清单里，工具不会改动」数的就是它
+/// （票 `gui-looks-like-the-design/21`，拿主意的人 2026-09-15 定）。`target` 可以是框里还没存下来的那一条。
+///
+/// **只读遍历目标**（[`observe`](super::observe())）：卡上文件多时是一趟长活，排到任务台上跑，不在画帧那条线程上跑；
+/// 被叫停时一个字节都没写。
+///
+/// # Errors
+/// 目标列不开、中立库读不动时返回 [`Cutoff::Failed`]，被叫停时返回 [`Cutoff::Halted`]。
+pub fn strangers_at(
+    catalog: &Catalog,
+    name: &str,
+    target: &Path,
+    task: &Handle,
+) -> Result<super::Strangers, Cutoff> {
+    task.steps(STRANGERS_STEPS);
+    task.step("读清单")?;
+    let manifest = catalog
+        .manifest(name)
+        .map_err(|error| format!("中立库读不动：{error}"))?;
+    task.step("看一眼目标")?;
+    let actual = super::observe(&RealFs, target).map_err(|error| format!("{error}"))?;
+    Ok(super::strangers(&manifest, &actual))
+}
+
+/// [`strangers_at`] 一共几步。**改了它里头的 `task.step` 就得改这个数。**
+pub const STRANGERS_STEPS: u32 = 2;
+
 /// 这一条线一共几步。**改了下面的 `task.step` 就得改这个数**，不然进度条会走过头。
 /// `tests/task.rs::排差量预览一路报得出走到第几步` 盯着这两个数对不对得上。
 const STEPS: u32 = 4 + PLAN_STEPS;
@@ -294,11 +350,23 @@ pub fn prepare_selected(
         .as_deref()
         .filter(|name| roster.find(name).is_none())
         .map(ToString::to_string);
-    let profile = roster.find_or_unclaimed(sublibrary.capability.as_deref());
+    // **这个子库自己的按平台覆盖叠上去**（票 `gui-looks-like-the-design/21`）：只影响这一台，名册里那份不动。
+    let overrides = catalog
+        .capability_overrides(&sublibrary.name)
+        .map_err(|error| format!("中立库读不动：{error}"))?;
+    let profile = roster
+        .find_or_unclaimed(sublibrary.capability.as_deref())
+        .with_overrides(&overrides);
     // **报告里印真正生效的那一份，不是子库上记着的那个名字。** 记着的名字在名册里
     // 找不到时上面已经退回了「不作声称」——这时预览与 `--json` 还印着原来那个名字的话，
     // 用户会以为它替自己查过了，而实际上一条都没查（ADR-0017：矩阵错误比不转换更糟）。
     sublibrary.capability = Some(profile.name.clone());
+    // **这一趟真用上的容量上限**（票 `gui-looks-like-the-design/21`）：按设备容量那一档跟着这张卡此刻的总量；本机磁盘不设上限
+    // 时按剩余空间算（目标现占加上还写得下的）。判断只有一处（`Sublibrary::limit_on`），计划里比「超没超」用的就是这个数。
+    // 设了数的自定义那一档不必去看卷。
+    let volume = (sublibrary.capacity_by_device || sublibrary.capacity.is_none())
+        .then(|| crate::sublibrary::target::volume(&root));
+    sublibrary.capacity = sublibrary.limit_on(volume.as_ref(), actual.bytes());
     let priorities = priorities(request.priorities, workspace)?;
     // **不建目录**：排计划那条命令说的是「一个文件都没写」。
     let pool = MediaPool::at(&workspace::media_pool_dir(workspace));
@@ -453,22 +521,25 @@ pub fn missing_roots_message(missing: &[String]) -> String {
     )
 }
 
-/// 目标落在主库里就拦下来。
+/// 目标落在主库里、或者把主库的根包在里面，就拦下来。
 ///
 /// **只有真要动手那一步需要这一道。** 排计划从头到尾只读，指哪儿都无所谓；而同步是真的
 /// 往目标上建目录、写文件、删文件——一个手滑的目标路径就会在那块 10 TiB 不可再生的盘里
 /// 动手（ADR-0004）。判据用中立库记着的主库根，于是给不给主库根都拦得住。
 /// **取不到主库根时不拦**：那说明这份库还没扫过，没有边界可守。
 ///
+/// **把根包在里面也拦**：同步往 `<平台目录>/…` 写，平台目录与根同名时就写进了主库。
+///
 /// 它在核心里而不在命令行里，是因为**界面也有一个「同步」按钮**——这道红线不能靠
-/// 每个壳自己记得写一遍。
+/// 每个壳自己记得写一遍。判的那一下是 [`library_overlap`]：新建子库、改目标设置时当场判的也是它
+/// （[`sublibrary::target::vet`]，ADR-0024）。
 ///
 /// **判据先把两边折成可比形态**（[`path::is_inside_place`]）：目标过了
 /// [`path::normalize_existing`]，Windows 上于是是 `\\?\D:\…`，而库里的根存的是
 /// display 形态 `D:\…`——不折的话这道红线恒为 false，等于没有。
 ///
 /// # Errors
-/// 目标落在主库里、或者中立库读不动时返回一句给人看的话。
+/// 目标与主库的根撞在一起、或者中立库读不动时返回一句给人看的话。
 pub fn refuse_target_in_library(
     catalog: &Catalog,
     overrides: &[(Option<String>, PathBuf)],
@@ -477,16 +548,25 @@ pub fn refuse_target_in_library(
     let roots = library_roots(catalog, overrides)?;
     let target = path::normalize_existing(target);
     // **每个根都要拦。** 一份中立库装着几块盘，只拦其中一块等于另外几块没人守。
-    for (name, root) in roots.iter() {
-        if path::is_inside_place(root, &target) {
-            return Err(format!(
-                "目标 {} 落在主库的根「{name}」（{}）里。主库只读：\n\
-                 同步会往目标上写文件、删文件，绝不能指着那块盘。\n\
-                 子库要导到别处去——一律走读卡器。",
-                path::display(&target),
-                path::display(root),
-            ));
-        }
-    }
-    Ok(())
+    let Some(overlap) = library_overlap(&roots, &target) else {
+        return Ok(());
+    };
+    let how = if overlap.around {
+        "把主库的根"
+    } else {
+        "落在主库的根"
+    };
+    let tail = if overlap.around {
+        "包在里面"
+    } else {
+        "里"
+    };
+    Err(format!(
+        "目标 {} {how}「{}」（{}）{tail}。主库只读：\n\
+         同步会往目标上写文件、删文件，绝不能指着那块盘。\n\
+         子库要导到别处去——一律走读卡器。",
+        path::display(&target),
+        overlap.root,
+        path::display(&overlap.place),
+    ))
 }

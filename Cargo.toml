@@ -102,6 +102,13 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 # （`crates/core/Cargo.toml` 的 `cfg(unix)`）。Windows 上这一问答不出来，交给建库那一下自己报错
 # （挂单 `Q611`）。
 rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
+# **目标所在的那个卷**：可移动存储与否、文件系统、总量与可用空间（票 `gui-looks-like-the-design/21`，拿主意的人
+# 2026-09-15 定引一个跨平台依赖）。新建子库、改目标设置时照它说「已连接 · 可移动存储 · exFAT · 容量 …，可用 …」。
+#
+# 锁文件里原来没有能一次答这四样的：`rustix` 的 `statfs` 只在 Unix 上有、Linux 上交的是魔数，Windows 上不写 `unsafe`
+# 就问不到，而这个工作区禁 `unsafe`。`sysinfo` 的磁盘接口在 Windows / macOS / Linux 上四样都给（`Disk::is_removable`、
+# `file_system`、`total_space`、`available_space`），只开 `disk` 这一个特性：进程、网络、传感器那几块一行都不编进来。
+sysinfo = { version = "0.39", default-features = false, features = ["disk"] }
 # **系统目录选择器**（票 `gui-answers-all-six/01`，挂单 `Q387`）：开场换工作目录、添加主库向导选第一个根，
 # 按一下弹系统的选目录对话框，不必把一条 10 TB 盘上的绝对路径手打进单行框。**只有界面用它**
 # （`crates/gui/Cargo.toml`，只在 `src/pick.rs` 里调），核心库与命令行一个依赖都不多。

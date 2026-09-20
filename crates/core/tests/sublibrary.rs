@@ -103,6 +103,7 @@ fn 建子库(catalog: &mut Catalog, name: &str, capacity: Option<u64>) {
             format: "Pegasus".to_string(),
             capacity,
             capability: None,
+            capacity_by_device: false,
         })
         .expect("子库写得进");
 }
@@ -859,4 +860,584 @@ fn 目标不在位时装不装得下如实说算不出_不给一个数() {
     let json = serde_json::to_value(&report).expect("序列化得了");
     assert!(json.get("over_capacity").is_none(), "{json}");
     assert!(json["fit"]["Unknown"]["why"].is_string(), "{json}");
+}
+
+// ——— 目标路径当场校验（票 `gui-looks-like-the-design/21`）———
+//
+// 新建子库、改目标设置时，路径一填进来就判一遍：落在主库的根里、属于工作目录、已被别的子库占用，
+// 三种当场拦下并说清是哪一种。**判断在核心里**（`sublibrary::target`），界面只画那句话。
+
+/// 一个根（叫「主库」）挂在 `盘/Game` 上的中立库。
+fn 带一个根(盘: &std::path::Path) -> Catalog {
+    let 根 = 盘.join("Game");
+    std::fs::create_dir_all(&根).expect("能建目录");
+    let catalog = Catalog::open_in_memory().expect("能开中立库");
+    romcat_core::catalog::roots::add_root(
+        &catalog,
+        None,
+        "主库",
+        &romcat_core::path::normalize_existing(&根),
+    )
+    .expect("加得上");
+    catalog
+}
+
+#[test]
+fn 目标落在主库的根里或者把根包在里面_当场拦下并点名是哪个根() {
+    use romcat_core::sublibrary::target::{self, TargetRefusal};
+    use romcat_core::testing::temp_dir;
+
+    let 盘 = temp_dir("sub-target-disk");
+    let 工作区 = temp_dir("sub-target-ws");
+    let catalog = 带一个根(盘.path());
+    let 根 = 盘.path().join("Game");
+    // 根里、根本身、把根包在里面的上一级（同步往 `<平台>/…` 写，平台目录与根同名时就写进了主库）。
+    for 目标 in [根.join("GBA"), 根.clone(), 盘.path().to_path_buf()] {
+        match target::vet(&catalog, 工作区.path(), None, &目标).expect("中立库读得动") {
+            Err(TargetRefusal::InLibrary { root, .. }) => assert_eq!(root, "主库"),
+            other => panic!("{} 该被拦成落在主库里：{other:?}", 目标.display()),
+        }
+    }
+    // 同步那一道闸是同一条判断：把根包在里面的目标，点同步时一样拦下。
+    let 话 = romcat_core::sync::prepare::refuse_target_in_library(&catalog, &[], 盘.path())
+        .expect_err("把根包在里面也该被拒");
+    assert!(话.contains("主库只读"), "红线要说出来：{话}");
+}
+
+#[test]
+fn 目标属于工作目录或者把工作目录包在里面_当场拦下() {
+    use romcat_core::sublibrary::target::{self, TargetRefusal};
+    use romcat_core::testing::temp_dir;
+
+    let 盘 = temp_dir("sub-target-disk");
+    let 外 = temp_dir("sub-target-outer");
+    let 工作区 = 外.path().join("romcat");
+    std::fs::create_dir_all(&工作区).expect("能建目录");
+    let catalog = 带一个根(盘.path());
+    for 目标 in [工作区.join("子库"), 工作区.clone(), 外.path().to_path_buf()] {
+        match target::vet(&catalog, &工作区, None, &目标).expect("中立库读得动") {
+            Err(TargetRefusal::InWorkspace { .. }) => {}
+            other => panic!("{} 该被拦成属于工作目录：{other:?}", 目标.display()),
+        }
+    }
+}
+
+#[test]
+fn 目标已被别的子库占用_相同或者套在一起都拦下_改自己那一台不算() {
+    use romcat_core::sublibrary::target::{self, TargetRefusal};
+    use romcat_core::testing::temp_dir;
+
+    let 盘 = temp_dir("sub-target-disk");
+    let 工作区 = temp_dir("sub-target-ws");
+    let 卡 = temp_dir("sub-target-card");
+    let mut catalog = 带一个根(盘.path());
+    let 掌机的 = 卡.path().join("掌机");
+    catalog
+        .put_sublibrary(&Sublibrary::at("掌机", &掌机的, "Pegasus", None))
+        .expect("子库写得进");
+    for 目标 in [掌机的.clone(), 掌机的.join("里头"), 卡.path().to_path_buf()] {
+        match target::vet(&catalog, 工作区.path(), None, &目标).expect("中立库读得动") {
+            Err(TargetRefusal::Taken { by }) => assert_eq!(by, "掌机"),
+            other => panic!("{} 该被拦成已被「掌机」占用：{other:?}", 目标.display()),
+        }
+    }
+    // 改「掌机」自己的目标设置时，它原来那条路径不算被占。
+    assert!(
+        target::vet(&catalog, 工作区.path(), Some("掌机"), &掌机的)
+            .expect("中立库读得动")
+            .is_ok(),
+        "改自己那一台，原路径不该被拦"
+    );
+}
+
+#[test]
+fn 目标在不在_在就报出卷上的可用空间_不在也照样建得出() {
+    use romcat_core::sublibrary::target::{self, Presence, TargetRefusal};
+    use romcat_core::testing::temp_dir;
+
+    let 盘 = temp_dir("sub-target-disk");
+    let 工作区 = temp_dir("sub-target-ws");
+    let 卡 = temp_dir("sub-target-card");
+    let catalog = 带一个根(盘.path());
+
+    match target::vet(&catalog, 工作区.path(), None, 卡.path()).expect("中立库读得动") {
+        Ok(Presence::Present(volume)) => {
+            // 三个平台都读得出：可移动与否、文件系统、总量与可用空间（拿主意的人 2026-09-15 定，引一个跨平台依赖）。
+            let 可用 = volume.available.expect("读得出可用空间");
+            let 总量 = volume.total.expect("读得出总量");
+            assert!(可用 <= 总量, "可用 {可用} 比总量 {总量} 还大");
+            assert!(volume.filesystem.is_some(), "读得出文件系统：{volume:?}");
+            let _可移动: bool = volume.removable;
+        }
+        other => panic!("插着的卡该报在：{other:?}"),
+    }
+    let 没插 = 卡.path().join("没插上的卡");
+    assert!(
+        matches!(
+            target::vet(&catalog, 工作区.path(), None, &没插).expect("中立库读得动"),
+            Ok(Presence::Absent)
+        ),
+        "不在的目录照样建得出，只是说不在"
+    );
+    let 一份文件 = 卡.path().join("一份文件.txt");
+    std::fs::write(&一份文件, b"x").expect("能写文件");
+    assert!(
+        matches!(
+            target::vet(&catalog, 工作区.path(), None, &一份文件).expect("中立库读得动"),
+            Err(TargetRefusal::NotADirectory)
+        ),
+        "路径上是一份文件时要拦下"
+    );
+    assert!(matches!(
+        target::vet(&catalog, 工作区.path(), None, std::path::Path::new("")).expect("中立库读得动"),
+        Err(TargetRefusal::Empty)
+    ));
+}
+
+#[test]
+fn 名字空着或者已被别的子库用了_当场拦下_改自己那一台不算() {
+    use romcat_core::sublibrary::target::{self, NameRefusal};
+
+    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+    建子库(&mut catalog, "掌机", None);
+    建子库(&mut catalog, "备份卡", None);
+    assert_eq!(
+        target::vet_name(&catalog, None, "  ").expect("读得动"),
+        Err(NameRefusal::Empty)
+    );
+    // 新建一台同名的：核心按名字存，放行就是悄悄把「掌机」的目标设置盖掉。
+    assert_eq!(
+        target::vet_name(&catalog, None, "掌机").expect("读得动"),
+        Err(NameRefusal::Taken)
+    );
+    assert_eq!(
+        target::vet_name(&catalog, Some("掌机"), " 掌机 ").expect("读得动"),
+        Ok(())
+    );
+    assert_eq!(
+        target::vet_name(&catalog, Some("掌机"), "备份卡").expect("读得动"),
+        Err(NameRefusal::Taken)
+    );
+    assert_eq!(
+        target::vet_name(&catalog, None, "新掌机").expect("读得动"),
+        Ok(())
+    );
+}
+
+// ——— 按平台覆盖能力档案的结论（票 `gui-looks-like-the-design/21`）———
+
+#[test]
+fn 按平台覆盖存进去读得回来_只影响这个子库_整份替换_删了撤销原样回来() {
+    use romcat_core::capability::Override;
+    use std::collections::BTreeMap;
+
+    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+    建子库(&mut catalog, "掌机", None);
+    建子库(&mut catalog, "备份卡", None);
+    let 覆盖 = BTreeMap::from([
+        ("PSV".to_string(), Override::Rezip),
+        ("SFC".to_string(), Override::Keep),
+    ]);
+    catalog
+        .set_capability_overrides("掌机", &覆盖)
+        .expect("写得进");
+    assert_eq!(catalog.capability_overrides("掌机").expect("读得回"), 覆盖);
+    assert!(
+        catalog
+            .capability_overrides("备份卡")
+            .expect("读得回")
+            .is_empty(),
+        "覆盖只影响这个子库"
+    );
+
+    // 再存一份是整份替换，不是往上叠：弹层里改掉的那几行不该还留着。
+    let 换 = BTreeMap::from([("GBA".to_string(), Override::Unpack)]);
+    catalog
+        .set_capability_overrides("掌机", &换)
+        .expect("写得进");
+    assert_eq!(catalog.capability_overrides("掌机").expect("读得回"), 换);
+
+    let removed = catalog
+        .take_sublibrary("掌机")
+        .expect("删得动")
+        .expect("在");
+    assert!(
+        catalog
+            .capability_overrides("掌机")
+            .expect("读得回")
+            .is_empty()
+    );
+    assert!(catalog.restore_sublibrary(&removed).expect("放得回"));
+    assert_eq!(
+        catalog.capability_overrides("掌机").expect("读得回"),
+        换,
+        "撤销删除之后覆盖原样回来"
+    );
+}
+
+#[test]
+fn 排差量预览照这个子库的按平台覆盖判_别的子库照名册() {
+    use romcat_core::capability::Override;
+    use std::collections::BTreeMap;
+
+    let mut 场 = 一张卡::摆好(0);
+    let 另一张 = romcat_core::testing::temp_dir("sublib-override-card");
+    for (name, target) in [("掌机", 场.卡.path()), ("备份卡", 另一张.path())] {
+        let mut sublibrary = Sublibrary::at(name, target, "Pegasus", None);
+        sublibrary.capability = Some("retroarch-exfat".to_string());
+        场.catalog.put_sublibrary(&sublibrary).expect("子库写得进");
+        加规则(&mut 场.catalog, name, "平台=FC");
+    }
+    let 排 = |catalog: &Catalog, name: &str| {
+        romcat_core::sync::prepare(
+            catalog,
+            场.工作区.path(),
+            name,
+            &romcat_core::sync::Request::default(),
+            &romcat_core::task::Handle::new(),
+        )
+        .expect("排得出计划")
+    };
+    assert!(
+        排(&场.catalog, "掌机").desired.unsupported.is_empty(),
+        "RetroArch 的 FC 吃 zip，名册里的结论是原样搬"
+    );
+
+    场.catalog
+        .set_capability_overrides(
+            "掌机",
+            &BTreeMap::from([("FC".to_string(), Override::Unpack)]),
+        )
+        .expect("写得进");
+    // 覆盖成「取出为裸文件」：这几份 zip 是假的、穿不透，解不开——照实报出来，说明覆盖真的生效了。
+    let 覆盖后 = 排(&场.catalog, "掌机").desired;
+    assert_eq!(覆盖后.unsupported.len(), 2, "{:?}", 覆盖后.unsupported);
+    assert!(
+        覆盖后
+            .unsupported
+            .iter()
+            .all(|row| row.platform.as_deref() == Some("FC"))
+    );
+    assert!(
+        排(&场.catalog, "备份卡").desired.unsupported.is_empty(),
+        "另一台没覆盖，照名册"
+    );
+}
+
+// ——— 子库改名（票 `gui-looks-like-the-design/21`，拿主意的人 2026-09-15 定：照稿名字可改）———
+
+#[test]
+fn 子库改名_目标规则例外覆盖清单都跟过去_旧名不在_新名空白重名当场拒() {
+    use romcat_core::capability::Override;
+    use romcat_core::catalog::sublibrary::Renamed;
+    use romcat_core::sublibrary::target::NameRefusal;
+    use std::collections::BTreeMap;
+
+    let mut catalog = 现场();
+    建子库(&mut catalog, "掌机", Some(64_000_000_000));
+    建子库(&mut catalog, "备用卡", None);
+    加规则(&mut catalog, "掌机", "平台=GB");
+    加规则(&mut catalog, "掌机", "平台=PSV");
+    assert!(catalog.remove_rule("掌机", 1).expect("删得动"));
+    catalog
+        .set_exception("掌机", "库/PSV/大作.vpk", Exception::Include, Some("想玩"))
+        .expect("例外写得进");
+    let 覆盖 = BTreeMap::from([("GB".to_string(), Override::Keep)]);
+    catalog
+        .set_capability_overrides("掌机", &覆盖)
+        .expect("覆盖写得进");
+    let 清单 = 同步清单 {
+        files: vec![ManifestFile {
+            path: "GB/口袋妖怪 汉化.zip".to_string(),
+            kind: FileKind::Rom,
+            stamp: Stamp {
+                bytes: 4096,
+                mtime_ns: Some(1_700_000_000_000_000_000),
+            },
+            source: "库/GB/口袋妖怪 汉化.zip".to_string(),
+            source_stamp: Stamp {
+                bytes: 4096,
+                mtime_ns: None,
+            },
+            variant: "库/GB/口袋妖怪 汉化.zip".to_string(),
+            absent: true,
+        }],
+    };
+    catalog.put_manifest("掌机", &清单).expect("清单写得进");
+    let 读一遍 = |catalog: &Catalog, name: &str| {
+        (
+            catalog.sublibrary(name).expect("读得动").map(|mut row| {
+                row.name = String::new();
+                row
+            }),
+            catalog.sublibrary_rules(name).expect("读得动"),
+            catalog.sublibrary_exceptions(name).expect("读得动"),
+            catalog.capability_overrides(name).expect("读得动"),
+            catalog.manifest(name).expect("读得动"),
+        )
+    };
+    let 之前 = 读一遍(&catalog, "掌机");
+
+    assert_eq!(
+        catalog.rename_sublibrary("掌机", "备用卡").expect("读得动"),
+        Renamed::Refused(NameRefusal::Taken),
+        "重名的当场拒，不揉进备用卡"
+    );
+    assert_eq!(
+        catalog.rename_sublibrary("掌机", "  ").expect("读得动"),
+        Renamed::Refused(NameRefusal::Empty)
+    );
+    assert_eq!(
+        catalog
+            .rename_sublibrary("没这一台", "新名")
+            .expect("读得动"),
+        Renamed::Missing
+    );
+    assert_eq!(读一遍(&catalog, "掌机"), 之前, "拒掉的那几下一行都没动");
+
+    assert_eq!(
+        catalog
+            .rename_sublibrary("掌机", " RG35XX ")
+            .expect("写得动"),
+        Renamed::Done
+    );
+    assert!(
+        catalog.sublibrary("掌机").expect("读得动").is_none(),
+        "旧名还在"
+    );
+    assert_eq!(
+        读一遍(&catalog, "RG35XX"),
+        之前,
+        "目标、规则、例外、覆盖、清单没有原样跟过去"
+    );
+    assert_eq!(
+        catalog.sublibrary_rules("备用卡").expect("读得动").len(),
+        0,
+        "改名不碰别的子库"
+    );
+    assert_eq!(
+        加规则(&mut catalog, "RG35XX", "平台=GB"),
+        3,
+        "发号器没跟过去：下一条该接着发 3 号"
+    );
+}
+
+#[test]
+fn 子库改名之后差量预览与改名之前一样() {
+    let mut 场 = 一张卡::摆好(0);
+    场.建子库("平台=FC", None);
+    let 之前 = 场.排计划().plan;
+    assert_eq!(
+        场.catalog
+            .rename_sublibrary("掌机", "RG35XX")
+            .expect("写得动"),
+        romcat_core::catalog::sublibrary::Renamed::Done
+    );
+    let 之后 = romcat_core::sync::prepare(
+        &场.catalog,
+        场.工作区.path(),
+        "RG35XX",
+        &romcat_core::sync::Request::default(),
+        &romcat_core::task::Handle::new(),
+    )
+    .expect("改名之后排得出计划")
+    .plan;
+    assert_eq!(之后.sublibrary, "RG35XX");
+    assert_eq!(之后.steps, 之前.steps, "改名改动了要做的事");
+    assert_eq!(之后.adds, 之前.adds);
+    assert_eq!(之后.strangers, 之前.strangers);
+}
+
+// ——— 容量上限「按设备容量」那一档（票 `gui-looks-like-the-design/21`，拿主意的人 2026-09-15 照稿定）———
+
+#[test]
+fn 按设备容量那一档_在位时跟着设备总量_不在位时用上次读到的_没读过不设上限_自定义照记着的() {
+    let mut 按设备 = Sublibrary::at(
+        "掌机",
+        std::path::Path::new("/Volumes/SDCARD"),
+        "Pegasus",
+        None,
+    );
+    按设备.capacity_by_device = true;
+    assert_eq!(按设备.limit(None), None, "没读过设备总量：不设上限");
+    assert_eq!(
+        按设备.limit(Some(128_000_000_000)),
+        Some(128_000_000_000),
+        "在位时就是这张卡的总量"
+    );
+    按设备.capacity = Some(64_000_000_000);
+    assert_eq!(
+        按设备.limit(None),
+        Some(64_000_000_000),
+        "不在位时用上次连上时读到的"
+    );
+    assert_eq!(
+        按设备.limit(Some(256_000_000_000)),
+        Some(256_000_000_000),
+        "换了一张卡，上限跟着变"
+    );
+    let 自定义 = Sublibrary::at(
+        "备用卡",
+        std::path::Path::new("/Volumes/SDCARD"),
+        "Pegasus",
+        Some(58_000_000_000),
+    );
+    assert!(!自定义.capacity_by_device, "新建默认是自定义那一档");
+    assert_eq!(自定义.limit(Some(256_000_000_000)), Some(58_000_000_000));
+}
+
+#[test]
+fn 按设备容量那一档存进去读得回来_删了撤销与改名都跟着() {
+    let mut catalog = 现场();
+    let mut 掌机 = Sublibrary::at(
+        "掌机",
+        std::path::Path::new("/Volumes/SDCARD"),
+        "Pegasus",
+        Some(64_000_000_000),
+    );
+    掌机.capacity_by_device = true;
+    catalog.put_sublibrary(&掌机).expect("子库写得进");
+    let 读 = |catalog: &Catalog, name: &str| catalog.sublibrary(name).expect("读得动").expect("在");
+    assert!(读(&catalog, "掌机").capacity_by_device);
+    assert_eq!(读(&catalog, "掌机").capacity, Some(64_000_000_000));
+
+    let removed = catalog
+        .take_sublibrary("掌机")
+        .expect("删得动")
+        .expect("在");
+    assert!(catalog.restore_sublibrary(&removed).expect("放得回"));
+    assert!(
+        读(&catalog, "掌机").capacity_by_device,
+        "撤销删除之后这一档没回来"
+    );
+
+    assert_eq!(
+        catalog.rename_sublibrary("掌机", "RG35XX").expect("写得动"),
+        romcat_core::catalog::sublibrary::Renamed::Done
+    );
+    assert!(
+        读(&catalog, "RG35XX").capacity_by_device,
+        "改名之后这一档没跟过去"
+    );
+    assert!(
+        catalog
+            .sublibraries()
+            .expect("读得动")
+            .iter()
+            .all(|row| row.capacity_by_device),
+        "列出来的那一份也得带着这一档"
+    );
+}
+
+#[test]
+fn 排差量预览时按设备容量那一档的上限就是这张卡此刻的总量() {
+    use romcat_core::sublibrary::target::{self, Presence};
+
+    let mut 场 = 一张卡::摆好(0);
+    场.建子库("平台=FC", None);
+    let mut 掌机 = 场.catalog.sublibrary("掌机").expect("读得动").expect("在");
+    掌机.capacity_by_device = true;
+    场.catalog.put_sublibrary(&掌机).expect("写得进");
+    let 总量 = match target::vet(&场.catalog, 场.工作区.path(), Some("掌机"), 场.卡.path())
+        .expect("读得动")
+    {
+        Ok(Presence::Present(volume)) => volume.total.expect("读得出卷的总量"),
+        other => panic!("卡插着：{other:?}"),
+    };
+    assert_eq!(场.排计划().plan.capacity, Some(总量));
+}
+
+// ——— 本机磁盘不设容量上限时按剩余空间算（票 `gui-looks-like-the-design/21`，拿主意的人 2026-09-15 照稿定）———
+
+#[test]
+fn 本机磁盘不设容量上限时按剩余空间算_可移动存储设了上限与未连接的都不适用() {
+    use romcat_core::sublibrary::target::Volume;
+
+    let 本机 = Volume {
+        filesystem: Some("APFS".to_string()),
+        total: Some(500_000_000_000),
+        available: Some(120_000_000_000),
+        removable: false,
+    };
+    let 卡 = Volume {
+        removable: true,
+        ..本机.clone()
+    };
+    let 目标 = std::path::Path::new("/Users/我/roms");
+    let 不设限 = Sublibrary::at("本机", 目标, "Pegasus", None);
+    assert_eq!(
+        不设限.limit_on(Some(&本机), 30_000_000_000),
+        Some(150_000_000_000),
+        "本机磁盘不设上限：目标上已经占着的加上还写得下的"
+    );
+    assert_eq!(
+        不设限.limit_on(Some(&卡), 30_000_000_000),
+        None,
+        "可移动存储不适用"
+    );
+    assert_eq!(
+        不设限.limit_on(None, 30_000_000_000),
+        None,
+        "未连接：没读过就不设上限"
+    );
+    let 设了 = Sublibrary::at("本机", 目标, "Pegasus", Some(58_000_000_000));
+    assert_eq!(
+        设了.limit_on(Some(&本机), 30_000_000_000),
+        Some(58_000_000_000)
+    );
+    let mut 按设备 = 不设限.clone();
+    按设备.capacity_by_device = true;
+    assert_eq!(
+        按设备.limit_on(Some(&本机), 30_000_000_000),
+        Some(500_000_000_000),
+        "按设备容量那一档照旧跟着总量"
+    );
+}
+
+#[test]
+fn 排差量预览时的容量上限照核心那一处判_容量账里带着它() {
+    // 卷上还写得下多少是个活的数（别的进程一写就变），所以不拿两个时刻读的数去逐字节比：只钉住规矩。
+    use romcat_core::sublibrary::target;
+
+    let mut 场 = 一张卡::摆好(4096);
+    场.建子库("平台=FC", None);
+    let plan = 场.排计划().plan;
+    let volume = target::volume(场.卡.path());
+    match (volume.removable, volume.available, plan.capacity) {
+        (true, _, capacity) => assert_eq!(capacity, None, "可移动存储不按剩余空间算"),
+        (false, None, capacity) => assert_eq!(capacity, None, "可用空间读不出就不设上限"),
+        (false, Some(_), Some(capacity)) => assert!(
+            capacity >= plan.actual_bytes,
+            "按剩余空间算的上限至少是目标现占：上限 {capacity}，现占 {}",
+            plan.actual_bytes
+        ),
+        (false, Some(_), None) => panic!("本机磁盘读得出可用空间，计划里却没有上限"),
+    }
+    assert_eq!(
+        sublibrary::Room::of(&plan).capacity,
+        plan.capacity,
+        "容量账里得带着那个上限——容量条照它画"
+    );
+
+    // 自定义设了数的那一档：计划里就是那个数，不去看卷。
+    let mut 掌机 = 场.catalog.sublibrary("掌机").expect("读得动").expect("在");
+    掌机.capacity = Some(58_000_000_000);
+    场.catalog.put_sublibrary(&掌机).expect("写得进");
+    assert_eq!(场.排计划().plan.capacity, Some(58_000_000_000));
+}
+
+#[test]
+fn 库里头一个有平台的变体住在哪个平台目录_目标设置里那句说明拿它举例() {
+    // 票 `gui-looks-like-the-design/21`：前端格式底下那句「每个平台一份，例如 GBA.metadata.pegasus.txt」拿库里真实的头一个平台
+    // 目录举例，界面上不写死平台名。空库说不出例子。
+    let catalog = 现场();
+    assert_eq!(
+        catalog
+            .sample_platform_directory()
+            .expect("读得动")
+            .as_deref(),
+        Some("GB")
+    );
+    let 空库 = Catalog::open_in_memory().expect("能开中立库");
+    assert_eq!(空库.sample_platform_directory().expect("读得动"), None);
 }

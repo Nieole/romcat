@@ -71,8 +71,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::adapter::Adapter;
 use crate::capability::{Conversion, Decision, Filesystem, Profile, RejectReason};
-use crate::catalog::{Catalog, CatalogError};
+use crate::catalog::{Catalog, CatalogError, MemberFile};
+use crate::container::Contents;
 use crate::path;
 use crate::sublibrary::{Selected, Sublibrary, Trim, over_capacity, trim_suggestions};
 
@@ -716,6 +718,57 @@ fn settle(canonical: &mut BTreeMap<String, String>, path: &str) -> Option<String
     (real != dir).then(|| format!("{real}/{name}"))
 }
 
+impl TargetState {
+    /// 目标上**眼下实际占多少**（下界：元数据读不到的按 0 计）。计划里「目标现占」与容量上限按剩余空间算时加上的那一份
+    /// （`Sublibrary::limit_on`）都从这一处数。
+    #[must_use]
+    pub fn bytes(&self) -> u64 {
+        self.files
+            .iter()
+            .filter_map(|file| file.stamp.map(|stamp| stamp.bytes))
+            .sum()
+    }
+}
+
+// ── 清单之外（票 `gui-looks-like-the-design/21`）─────────────────────────────
+
+/// 目标上**清单之外**的文件：几个、多大、其中几个元数据读不到。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct Strangers {
+    /// 几个。
+    pub count: u64,
+    /// 共多少字节；元数据读不到的按 0 计。
+    pub bytes: u64,
+    /// 其中元数据读不到的有几个。
+    pub unreadable: u64,
+}
+
+/// 数目标上**清单之外**的文件——目标上一切不在清单里的东西，**落点被占的那几个也算**。
+///
+/// ADR-0015 的原话是「清单之外的一切文件对工具不存在」，那就该按字面数：漏数哪一个，报告都可能说出「目标上没有清单之外的
+/// 文件」而卡上明明有。**只有这一处数法**：计划里那三个数（[`Plan::strangers`] 那几格）与目标设置弹层里那句「目录里已有
+/// N 个文件，它们不在清单里」都从这里数（ADR-0024）。
+#[must_use]
+pub fn strangers(manifest: &Manifest, actual: &TargetState) -> Strangers {
+    let recorded: BTreeSet<&str> = manifest
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+    let mut out = Strangers::default();
+    for target in &actual.files {
+        if recorded.contains(target.path.as_str()) {
+            continue;
+        }
+        out.count += 1;
+        match target.stamp {
+            Some(stamp) => out.bytes += stamp.bytes,
+            None => out.unreadable += 1,
+        }
+    }
+    out
+}
+
 /// 三方对比，排出计划。**纯函数**：不碰磁盘、不碰中立库、不看时钟。
 ///
 /// 三个输入正是**同步**词条里的三方：`desired` 是主库该有的、`manifest` 是清单
@@ -946,16 +999,11 @@ pub fn plan(
     //
     // **落点被占的那几个也算**：它们同样不在清单里、同样一个字节都不碰。漏数它们，
     // 报告就会说出「目标上没有清单之外的文件」而卡上明明有。
-    for (path, target) in &on_target {
-        if recorded.contains_key(path) {
-            continue;
-        }
-        out.strangers += 1;
-        match target.stamp {
-            Some(stamp) => out.stranger_bytes += stamp.bytes,
-            None => out.stranger_unreadable += 1,
-        }
-    }
+    // `strangers` 在这个函数里是上面那张按落点索引的表，数法走模块里那一处。
+    let counted = self::strangers(manifest, actual);
+    out.strangers = counted.count;
+    out.stranger_bytes = counted.bytes;
+    out.stranger_unreadable = counted.unreadable;
 
     steps.sort_by(|a, b| a.act.cmp(&b.act).then_with(|| a.path.cmp(&b.path)));
     out.surprises
@@ -1024,11 +1072,7 @@ pub fn plan(
     // 比的是「目标现占 + 净变化」而不是期望总量：卡上的地方是共用的，只算子库自己
     // 那一半会给出一个「装得下」，然后传到一半没空间（挂账 D76）。手动拷进去的存档、
     // 落点被占而这趟根本传不上去的、被改过因而不删的，全都还占着位置。
-    out.actual_bytes = actual
-        .files
-        .iter()
-        .filter_map(|file| file.stamp.map(|stamp| stamp.bytes))
-        .sum();
+    out.actual_bytes = actual.bytes();
     out.after_bytes = signed(out.actual_bytes)
         .saturating_add(out.net_bytes)
         .try_into()
@@ -1186,115 +1230,244 @@ pub fn desired(
     selected: &Selected,
     profile: &Profile,
 ) -> Result<Desired, CatalogError> {
-    let picked: BTreeSet<String> = selected
-        .picked
-        .iter()
-        .map(|variant| variant.key.clone())
-        .collect();
-    let platforms: BTreeMap<&str, Option<&str>> = selected
-        .picked
-        .iter()
-        .map(|variant| (variant.key.as_str(), variant.platform.as_deref()))
-        .collect();
-    let members = catalog.variant_files(&picked)?;
+    Ok(Footprint::gather(catalog, selected)?.desired(profile))
+}
 
-    // 主文件里凡是**透明容器**的，把内部构成一次取回来。转换要不要得起、转出来多大，
-    // 全看这一份——而它零解压就在中立库里躺着（调研第 5 部分 L4）。
-    let container_mains: BTreeSet<String> = members
-        .iter()
-        .filter(|member| member.is_main && member.is_file)
-        .filter(|member| {
-            crate::container::ContainerKind::for_path(Path::new(&member.key)).is_some()
+/// 一份选择集在主库里的**脚印**：选中了哪些变体、各自属于哪个平台、它们的成员文件，以及主文件里透明容器的
+/// 内部构成。
+///
+/// 它是 [`desired`] 拆开的两半（票 `gui-looks-like-the-design/21`）：**读库**那一半是 [`Self::gather`]，全库量级，
+/// 要跑在任务台上；**按一份能力档案折期望状态**那一半是 [`Self::desired`]，纯的——目标设置弹层里换一份档案、改一行
+/// 按平台覆盖，当场重算，不再碰库。[`desired`] 就是这两半接起来，于是两条路折出来的永远是同一个值（ADR-0024）。
+#[derive(Debug, Clone, Default)]
+pub struct Footprint {
+    /// 选中的变体（键）→ 平台。
+    platforms: BTreeMap<String, Option<String>>,
+    /// 选中变体的成员。
+    members: Vec<MemberFile>,
+    /// 主文件里凡是透明容器的，它的内部构成（按主文件的键）。
+    contents: BTreeMap<String, Contents>,
+}
+
+impl Footprint {
+    /// **读库那一半**：选中变体的成员，与主文件里透明容器的内部构成。
+    ///
+    /// 内部构成早在扫描那一趟零解压读进中立库了（ADR-0014），这里只是取回来——主库可以不在位。
+    ///
+    /// # Errors
+    /// 读中立库失败时返回错误。
+    pub fn gather(catalog: &Catalog, selected: &Selected) -> Result<Self, CatalogError> {
+        let picked: BTreeSet<String> = selected
+            .picked
+            .iter()
+            .map(|variant| variant.key.clone())
+            .collect();
+        let platforms = selected
+            .picked
+            .iter()
+            .map(|variant| (variant.key.clone(), variant.platform.clone()))
+            .collect();
+        let members = catalog.variant_files(&picked)?;
+
+        // 主文件里凡是**透明容器**的，把内部构成一次取回来。转换要不要得起、转出来多大，
+        // 全看这一份——而它零解压就在中立库里躺着（调研第 5 部分 L4）。
+        let container_mains: BTreeSet<String> = members
+            .iter()
+            .filter(|member| member.is_main && member.is_file)
+            .filter(|member| {
+                crate::container::ContainerKind::for_path(Path::new(&member.key)).is_some()
+            })
+            .map(|member| member.key.clone())
+            .collect();
+        let contents = catalog.container_contents(&container_mains)?;
+        Ok(Self {
+            platforms,
+            members,
+            contents,
         })
-        .map(|member| member.key.clone())
-        .collect();
-    let contents = catalog.container_contents(&container_mains)?;
-
-    // 一个变体的主文件判出来的处置，全变体共用一份结论。
-    let mut verdicts: BTreeMap<&str, Decision> = BTreeMap::new();
-    let mut out = Desired::default();
-    for member in &members {
-        if !member.is_main || !member.is_file {
-            continue;
-        }
-        let platform = platforms
-            .get(member.variant_key.as_str())
-            .copied()
-            .flatten();
-        let decision = crate::capability::decide(
-            profile,
-            platform,
-            &member.key,
-            member.len.unwrap_or(0),
-            contents.get(&member.key),
-        );
-        if let Decision::Unsupported { want, why } = &decision {
-            out.unsupported.push(Unsupported {
-                // 与落点同一个口径：这是**子库里**那条路径，不带根名。
-                path: path::relative_of_key(&member.key).to_string(),
-                variant: member.variant_key.clone(),
-                platform: platform.map(ToString::to_string),
-                bytes: member.len.unwrap_or(0),
-                want: want.clone(),
-                why: why.clone(),
-            });
-        }
-        verdicts.insert(member.variant_key.as_str(), decision);
     }
 
-    let mut has_file: BTreeSet<&str> = BTreeSet::new();
-    for member in &members {
-        if !member.is_file {
-            out.non_files += 1;
-            continue;
-        }
-        has_file.insert(member.variant_key.as_str());
-        // **只有主文件会被转**。附属文件与内部资源原样搬：它们不是交给模拟器启动的
-        // 那一份，转它们既没有依据也没有落点。
-        let conversion = match verdicts.get(member.variant_key.as_str()) {
-            Some(Decision::Convert(conversion)) if member.is_main => Some((**conversion).clone()),
-            _ => None,
-        };
-        // **落点剥掉根名。** 子库里的布局照搬变体的键（挂账 D79），而键的第一段是
-        // 根名（`path::library_key`）——照搬进去的话，卡上多出一层 `主库/`，
-        // 而前端认平台靠的正是**顶层那一级目录**（ADR-0013、`es_systems.xml` 的
-        // `<name>`）。剥掉之后卡上的形状与主库变成一组根之前一模一样。
-        //
-        // 源那一格照旧是**完整的键**：读主库要靠它第一段查出那块盘在哪
-        // （`catalog::roots::Roots`）。两格分开，正是因为它们答的不是同一个问题。
-        // 转格式那一支的落点已经在 `capability` 那边剥过了。
-        let (path, bytes) = match &conversion {
-            Some(conversion) => (conversion.path.clone(), conversion.bytes),
-            None => (
-                path::relative_of_key(&member.key).to_string(),
+    /// 选中的变体分属哪几个平台：按名字排、不重复。**没定出平台的变体不在里头**——它们走矩阵的兜底那一条，
+    /// 没有一个平台名可以按平台覆盖。
+    #[must_use]
+    pub fn platforms(&self) -> Vec<String> {
+        self.platforms
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// **按一份能力档案折期望状态**那一半：纯的，一个字节的库都不读。处置见 [`desired`] 的文档。
+    #[must_use]
+    pub fn desired(&self, profile: &Profile) -> Desired {
+        // 一个变体的主文件判出来的处置，全变体共用一份结论。
+        let mut verdicts: BTreeMap<&str, Decision> = BTreeMap::new();
+        let mut out = Desired::default();
+        for member in &self.members {
+            if !member.is_main || !member.is_file {
+                continue;
+            }
+            let platform = self
+                .platforms
+                .get(&member.variant_key)
+                .and_then(Option::as_deref);
+            let decision = crate::capability::decide(
+                profile,
+                platform,
+                &member.key,
                 member.len.unwrap_or(0),
-            ),
-        };
-        out.files.push(DesiredFile {
-            path,
-            kind: FileKind::Rom,
-            bytes,
-            unreadable: member.len.is_none(),
-            source: member.key.clone(),
-            source_stamp: Stamp {
-                bytes: member.len.unwrap_or(0),
-                mtime_ns: member.mtime_ns,
-            },
-            variant: member.variant_key.clone(),
-            convert: conversion,
-        });
-        if member.len.is_none() {
-            out.unreadable += 1;
+                self.contents.get(&member.key),
+            );
+            if let Decision::Unsupported { want, why } = &decision {
+                out.unsupported.push(Unsupported {
+                    // 与落点同一个口径：这是**子库里**那条路径，不带根名。
+                    path: path::relative_of_key(&member.key).to_string(),
+                    variant: member.variant_key.clone(),
+                    platform: platform.map(ToString::to_string),
+                    bytes: member.len.unwrap_or(0),
+                    want: want.clone(),
+                    why: why.clone(),
+                });
+            }
+            verdicts.insert(member.variant_key.as_str(), decision);
+        }
+
+        let mut has_file: BTreeSet<&str> = BTreeSet::new();
+        for member in &self.members {
+            if !member.is_file {
+                out.non_files += 1;
+                continue;
+            }
+            has_file.insert(member.variant_key.as_str());
+            // **只有主文件会被转**。附属文件与内部资源原样搬：它们不是交给模拟器启动的
+            // 那一份，转它们既没有依据也没有落点。
+            let conversion = match verdicts.get(member.variant_key.as_str()) {
+                Some(Decision::Convert(conversion)) if member.is_main => {
+                    Some((**conversion).clone())
+                }
+                _ => None,
+            };
+            // **落点剥掉根名。** 子库里的布局照搬变体的键（挂账 D79），而键的第一段是
+            // 根名（`path::library_key`）——照搬进去的话，卡上多出一层 `主库/`，
+            // 而前端认平台靠的正是**顶层那一级目录**（ADR-0013、`es_systems.xml` 的
+            // `<name>`）。剥掉之后卡上的形状与主库变成一组根之前一模一样。
+            //
+            // 源那一格照旧是**完整的键**：读主库要靠它第一段查出那块盘在哪
+            // （`catalog::roots::Roots`）。两格分开，正是因为它们答的不是同一个问题。
+            // 转格式那一支的落点已经在 `capability` 那边剥过了。
+            let (path, bytes) = match &conversion {
+                Some(conversion) => (conversion.path.clone(), conversion.bytes),
+                None => (
+                    path::relative_of_key(&member.key).to_string(),
+                    member.len.unwrap_or(0),
+                ),
+            };
+            out.files.push(DesiredFile {
+                path,
+                kind: FileKind::Rom,
+                bytes,
+                unreadable: member.len.is_none(),
+                source: member.key.clone(),
+                source_stamp: Stamp {
+                    bytes: member.len.unwrap_or(0),
+                    mtime_ns: member.mtime_ns,
+                },
+                variant: member.variant_key.clone(),
+                convert: conversion,
+            });
+            if member.len.is_none() {
+                out.unreadable += 1;
+            }
+        }
+        out.files.sort_by(|a, b| a.path.cmp(&b.path));
+        out.unsupported.sort_by(|a, b| a.path.cmp(&b.path));
+        out.empty_variants = self
+            .platforms
+            .keys()
+            .filter(|key| !has_file.contains(key.as_str()))
+            .cloned()
+            .collect();
+        out
+    }
+
+    /// 这份档案的**文件系统放不下哪几份**：超过单文件上限的那几条——差量预览「放不进目标」那一栏里
+    /// [`RejectReason::TooBig`] 那几行，判据就是那一栏用的 [`Desired::screen`]。
+    ///
+    /// FAT32 那 4 GiB 走的就是这条（ADR-0017 补充段）：目标设置里挑了一份 FAT32 的档案，当场说出选择集里
+    /// 哪几份放不进去，不必等到排差量预览。落点撞车、文件名不收的字符不在这里：那几条要看完整路径与卡上实际有什么。
+    #[must_use]
+    pub fn too_big(&self, profile: &Profile) -> Vec<Rejected> {
+        let mut desired = self.desired(profile);
+        desired.screen(&profile.filesystem, 0);
+        desired
+            .rejected
+            .into_iter()
+            .filter(|row| row.reason == RejectReason::TooBig)
+            .collect()
+    }
+}
+
+// ── 落点预览（票 `gui-looks-like-the-design/21`）─────────────────────────────
+
+/// 一份内容**落到设备上的哪儿**：ROM 的落点与它那一份前端元数据的位置，都相对子库根。目标设置弹层里「设备上的位置」
+/// 照它画（拿主意的人 2026-09-15 定：照实际规则，不照稿上的示意）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Landing {
+    /// 那个平台的内容在子库里住哪个**平台目录**（元数据位置由它折出来）。
+    pub directory: String,
+    /// ROM 落在哪。
+    pub rom: String,
+    /// 它那一份前端元数据落在哪。
+    pub metadata: String,
+}
+
+impl Landing {
+    /// 还没有选择集时（新建子库）拿一个示例名说规则：ROM 落在 `<平台目录>/<文件名>`——子库里的布局照搬主库里的键、剥掉根名
+    /// （挂账 D79）——元数据的位置由适配器答（[`Adapter::metadata_path`]）。
+    #[must_use]
+    pub fn example(adapter: &dyn Adapter, directory: &str, file_name: &str) -> Self {
+        Self {
+            directory: directory.to_string(),
+            rom: format!("{directory}/{file_name}"),
+            metadata: adapter.metadata_path(directory),
         }
     }
-    out.files.sort_by(|a, b| a.path.cmp(&b.path));
-    out.unsupported.sort_by(|a, b| a.path.cmp(&b.path));
-    out.empty_variants = picked
-        .iter()
-        .filter(|key| !has_file.contains(key.as_str()))
-        .cloned()
-        .collect();
-    Ok(out)
+}
+
+impl Footprint {
+    /// **头一个变体的真实落点**：照这份档案折出来的期望状态里按路径排的头一份 ROM（要转格式的是转出来那一份）；元数据位置照
+    /// 导出时收敛的同一条规则——那个平台的内容在主库里只住一个目录就用那个目录名，散在几个目录里退回平台名
+    /// （[`converge::platform_directory`](crate::adapter::converge::platform_directory)）。什么都没选中时是 `None`。
+    #[must_use]
+    pub fn landing(&self, profile: &Profile, adapter: &dyn Adapter) -> Option<Landing> {
+        let desired = self.desired(profile);
+        let first = desired
+            .files
+            .iter()
+            .find(|file| file.kind == FileKind::Rom)?;
+        let directory = match self
+            .platforms
+            .get(&first.variant)
+            .and_then(Option::as_deref)
+        {
+            Some(platform) => crate::adapter::converge::platform_directory(
+                self.platforms
+                    .iter()
+                    .filter(|(_, of)| of.as_deref() == Some(platform))
+                    .map(|(key, _)| key.as_str()),
+            )
+            .unwrap_or_else(|| platform.to_string()),
+            None => path::platform_of_key(&first.source)?.to_string(),
+        };
+        Some(Landing {
+            metadata: adapter.metadata_path(&directory),
+            directory,
+            rom: first.path.clone(),
+        })
+    }
 }
 
 impl Desired {
@@ -1405,6 +1578,7 @@ mod tests {
             format: "Pegasus".to_string(),
             capacity,
             capability: None,
+            capacity_by_device: false,
         }
     }
 

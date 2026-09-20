@@ -41,7 +41,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::container::Contents;
+use crate::container::{ContainerKind, Contents};
 use crate::path::fold;
 
 pub use filesystem::{Filesystem, RejectReason};
@@ -149,15 +149,34 @@ pub enum Accepts {
     Anything,
     /// 就这些扩展名（小写、不带点）。
     Only(BTreeSet<String>),
+    /// **裸文件都吃，透明容器一律不吃**——`but` 那一种容器除外，照样吃。
+    ///
+    /// 名册文件里写不出这一种：它只由一个子库自己的[按平台覆盖](Override)造出来（票
+    /// `gui-looks-like-the-design/21`）。「是不是透明容器」照 [`ContainerKind::for_path`] 那一处判，
+    /// 不在这里另列一份扩展名。
+    Bare {
+        /// 照样吃的那一种容器；`None` 是一种都不吃。
+        but: Option<ContainerKind>,
+    },
 }
 
 impl Accepts {
     /// 吃得下这个扩展名吗。
     #[must_use]
     pub fn takes(&self, extension: &str) -> bool {
+        self.takes_key(&format!("_.{extension}"))
+    }
+
+    /// 吃得下这一份吗：`key` 是它的键或者文件名，看的是扩展名（[`Self::Bare`] 看它是不是透明容器）。
+    #[must_use]
+    pub fn takes_key(&self, key: &str) -> bool {
         match self {
             Self::Anything => true,
-            Self::Only(set) => set.contains(extension),
+            Self::Only(set) => set.contains(&extension_of(key)),
+            Self::Bare { but } => match ContainerKind::for_path(Path::new(key)) {
+                None => true,
+                Some(kind) => Some(kind) == *but,
+            },
         }
     }
 
@@ -246,6 +265,16 @@ pub struct Entry {
     pub accepts: Accepts,
     /// 吃不下时往哪儿转；没有就是转不了。
     pub convert_to: Option<Recipe>,
+    /// **来源里确实说了的那一句**（「不支持 ZSO 与 CSO v2」这类），界面上平台表那一行底下照原样画；来源里没说的空着
+    /// ——**不编**（拿主意的人 2026-09-15 定）。名册文件里是可省的「说明」一格，带 Markdown 记号或换行的读不进来。
+    pub note: String,
+    /// 「吃」那一格**照名册里的写法**：扩展名组写组名（`卡带裸文件`），不摊开成几十个扩展名；不作声称那一条是空的。
+    ///
+    /// 界面上「设备直接能用」那一格照它写（票 `gui-looks-like-the-design/21`）。判吃不吃得下走 [`Self::accepts`]，
+    /// 不走它。
+    pub declared: Vec<String>,
+    /// 这一条是不是一个子库自己的[按平台覆盖](Override)（[`Profile::with_overrides`]）；名册里的声明是 `None`。
+    pub overridden: Option<Override>,
     /// 出处。
     pub claim: Claim,
 }
@@ -312,12 +341,111 @@ impl Profile {
     /// 这份档案里有几条声明是陈旧的。
     #[must_use]
     pub fn stale_claims(&self, today: &str) -> usize {
+        // **覆盖不是声明**：它没有来源、没有核实日期可言，算进来的话每覆盖一行就多一条「陈旧」。
         self.matrix
             .entries
             .iter()
-            .filter(|entry| entry.claim.is_stale(today))
+            .filter(|entry| entry.overridden.is_none() && entry.claim.is_stale(today))
             .count()
             + usize::from(self.filesystem.claim.is_stale(today))
+    }
+}
+
+/// 一个子库对某个平台**覆盖**档案的结论（票 `gui-looks-like-the-design/21`、ADR-0017「用户可手动覆盖」）。
+///
+/// **只影响那一个子库**：名册里那份档案一个字不动，覆盖存在子库自己名下（中立库 `sublibrary_override`），
+/// 排计划时叠上去（[`Profile::with_overrides`]）。
+///
+/// 三种都是**整条换掉**那个平台的声明，不是只换「转成」那一格——名册里不作声称的平台（`*`）也覆盖得了：
+/// 那一格吃什么都行，只换「转成」的话等于没覆盖。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub enum Override {
+    /// **不转换**：这个平台不作声称——原样搬，既不转也不报。
+    Keep,
+    /// **转成 zip**：别的透明容器重打包成 zip；zip 与裸文件原样搬。
+    Rezip,
+    /// **取出为裸文件**：透明容器（连 zip）里那一份原样取出来；裸文件原样搬。
+    Unpack,
+}
+
+impl Override {
+    /// 全部三种，按界面上列的顺序。
+    #[must_use]
+    pub fn all() -> [Self; 3] {
+        [Self::Keep, Self::Rezip, Self::Unpack]
+    }
+
+    /// 给人看的那个说法。
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Keep => "不转换",
+            Self::Rezip => "转成 zip",
+            Self::Unpack => "取出为裸文件",
+        }
+    }
+
+    /// 存进中立库的那个词。与 [`Self::label`] 分开：改给人看的说法不该让库里那一行读不回来。
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Keep => "不转换",
+            Self::Rezip => "zip",
+            Self::Unpack => "裸文件",
+        }
+    }
+
+    /// 从库里那个词读回来；认不出是 `None`。
+    #[must_use]
+    pub fn from_code(code: &str) -> Option<Self> {
+        Self::all().into_iter().find(|choice| choice.code() == code)
+    }
+
+    /// 这一种覆盖在 `platform` 上换成的那一条声明。
+    fn entry(self, platform: &str) -> Entry {
+        let (accepts, convert_to, declared) = match self {
+            Self::Keep => (Accepts::Anything, None, Vec::new()),
+            Self::Rezip => (
+                Accepts::Bare {
+                    but: Some(ContainerKind::Zip),
+                },
+                Some(Recipe::Rezip),
+                vec!["裸文件".to_string(), "zip".to_string()],
+            ),
+            Self::Unpack => (
+                Accepts::Bare { but: None },
+                Some(Recipe::Unpack),
+                vec!["裸文件".to_string()],
+            ),
+        };
+        Entry {
+            platforms: vec![platform.to_string()],
+            accepts,
+            convert_to,
+            note: String::new(),
+            declared,
+            overridden: Some(self),
+            claim: Claim {
+                cite: format!("这个子库自己的覆盖：{}。不是名册里的声明", self.label()),
+                verified: String::new(),
+            },
+        }
+    }
+}
+
+impl Profile {
+    /// 这份档案叠上一个子库自己的**按平台覆盖**之后的样子。名册里那一份不动，交回的是另一份。
+    ///
+    /// 平台名照矩阵的口径折（大小写、NFC），于是覆盖里写的 `gba` 管得着变体上的 `GBA`。
+    #[must_use]
+    pub fn with_overrides(&self, overrides: &BTreeMap<String, Override>) -> Self {
+        let mut profile = self.clone();
+        for (platform, choice) in overrides {
+            let index = profile.matrix.entries.len();
+            profile.matrix.entries.push(choice.entry(platform));
+            profile.matrix.by_platform.insert(fold(platform), index);
+        }
+        profile
     }
 }
 
@@ -391,7 +519,7 @@ pub fn decide(
         return Decision::Unclaimed;
     }
     let extension = extension_of(key);
-    if entry.accepts.takes(&extension) {
+    if entry.accepts.takes_key(key) {
         return Decision::AsIs;
     }
     let Some(recipe) = entry.convert_to else {
@@ -519,7 +647,7 @@ fn unpack(contents: &Contents, entry: &Entry, key: &str, bytes: u64, want: &str)
     }
     // 解出来的那一份目标也吃不下，就别白解一趟：zip 里套着 rar 正是这种。
     let inner_extension = extension_of(name);
-    if !entry.accepts.takes(&inner_extension) {
+    if !entry.accepts.takes_key(name) {
         return Decision::Unsupported {
             want: want.to_string(),
             why: format!("解出来是 `.{inner_extension}`，目标同样吃不下——解了也白解"),
@@ -542,8 +670,11 @@ fn unpack(contents: &Contents, entry: &Entry, key: &str, bytes: u64, want: &str)
 /// **配方的落点排在最前面**：一个平台可能认几十种扩展名，按字典序列前八个的话，
 /// 用户最需要看见的那一个（「转成 zip 就能玩」）多半根本排不进来。
 fn describe(accepts: &Accepts, convert_to: Option<Recipe>) -> String {
-    let Accepts::Only(set) = accepts else {
-        return "（不作声称）".to_string();
+    let set = match accepts {
+        Accepts::Anything => return "（不作声称）".to_string(),
+        Accepts::Bare { but: None } => return "裸文件（透明容器一律不吃）".to_string(),
+        Accepts::Bare { but: Some(kind) } => return format!("{} 或裸文件", kind.label()),
+        Accepts::Only(set) => set,
     };
     let mut head: Vec<&str> = Vec::new();
     if let Some(Recipe::Rezip) = convert_to {
@@ -805,6 +936,18 @@ impl Roster {
             let mut fallback = None;
             for raw_entry in raw_matrix.entries {
                 let index = entries.len();
+                // **说明是画在界面上的一句话**，照原样画：带着 `**`、反引号或换行的话，屏上就会露出记号来。
+                if raw_entry.note.contains("**")
+                    || raw_entry.note.contains('`')
+                    || raw_entry.note.contains('\n')
+                {
+                    return Err(invalid(format!(
+                        "平台矩阵「{}」里「{}」那一条的说明带着 Markdown 记号或换行。\
+                         说明是画在界面上的一句话，照原样画——写成一句大白话",
+                        raw_matrix.name,
+                        raw_entry.platforms.join("、"),
+                    )));
+                }
                 let mut accepts_set = BTreeSet::new();
                 let mut anything = false;
                 for token in &raw_entry.accepts {
@@ -855,6 +998,12 @@ impl Roster {
                         )));
                     }
                 }
+                let declared = raw_entry
+                    .accepts
+                    .iter()
+                    .filter(|token| *token != "*")
+                    .map(|token| token.strip_prefix('@').unwrap_or(token).to_string())
+                    .collect();
                 entries.push(Entry {
                     platforms: raw_entry.platforms,
                     accepts: if anything {
@@ -863,6 +1012,9 @@ impl Roster {
                         Accepts::Only(accepts_set)
                     },
                     convert_to,
+                    note: raw_entry.note,
+                    declared,
+                    overridden: None,
                     claim: Claim {
                         cite: raw_entry.cite,
                         verified: raw_entry.verified,
@@ -1047,6 +1199,8 @@ struct RawEntry {
     accepts: Vec<String>,
     #[serde(rename = "转成")]
     convert_to: Option<String>,
+    #[serde(rename = "说明", default)]
+    note: String,
     #[serde(rename = "来源")]
     cite: String,
     #[serde(rename = "核实日期")]
@@ -1559,5 +1713,158 @@ mod tests {
         let text = Roster::builtin_text();
         let roster = Roster::parse(text, "（导出的）").expect("导出来那份读得回去");
         assert_eq!(roster.names(), Roster::builtin().names());
+    }
+
+    #[test]
+    fn 每条声明原样记着写法_扩展名组按组名列_不摊开() {
+        // 界面上「设备直接能用」那一格照它写：摊开的话卡带那一组六十来个扩展名，一格装不下也读不完。
+        let profile = 档案("retroarch-exfat");
+        let fc = profile.matrix.entry_for(Some("FC")).expect("有 FC 那一条");
+        assert_eq!(fc.declared, ["卡带裸文件", "zip", "7z", "zst", "apk"]);
+        let 兜底 = profile.matrix.entry_for(Some("PSV")).expect("有兜底那一条");
+        assert!(兜底.accepts.is_anything());
+        assert!(
+            兜底.declared.is_empty(),
+            "不作声称那一条没有写法可列：{:?}",
+            兜底.declared
+        );
+    }
+
+    #[test]
+    fn 按平台覆盖叠在档案上_不转换就不作声称_转成zip重打包别的容器_取出为裸文件连zip也解() {
+        let 名册里的 = 档案("retroarch-exfat");
+        let 覆盖 = BTreeMap::from([
+            ("PSV".to_string(), Override::Rezip),
+            ("SFC".to_string(), Override::Keep),
+            ("gba".to_string(), Override::Unpack),
+        ]);
+        let profile = 名册里的.with_overrides(&覆盖);
+
+        // PSV 名册里不作声称；覆盖成「转成 zip」：只裹一份的 tar.zst 重打包，裸文件与 zip 原样搬。
+        let 包 = 内容(&[("TWEWY.vpk", 4096)]);
+        let Decision::Convert(conversion) = decide(
+            &profile,
+            Some("PSV"),
+            "库/PSV/TWEWY.vpk.tar.zst",
+            2048,
+            Some(&包),
+        ) else {
+            panic!("覆盖成转成 zip 之后，tar.zst 该被重打包");
+        };
+        assert_eq!(conversion.recipe, Recipe::Rezip);
+        assert_eq!(
+            decide(&profile, Some("PSV"), "库/PSV/大作.vpk", 2048, None),
+            Decision::AsIs
+        );
+        assert_eq!(
+            decide(&profile, Some("PSV"), "库/PSV/大作.zip", 2048, None),
+            Decision::AsIs
+        );
+
+        // SFC 名册里 rar 转不了、会报出来；覆盖成「不转换」：不作声称，既不转也不报。
+        assert_eq!(
+            decide(&profile, Some("SFC"), "库/SFC/魂斗罗.rar", 600, None),
+            Decision::Unclaimed
+        );
+
+        // GBA（覆盖里写的平台名大小写不同也认）：zip 里只裹一份的解出来，裸文件原样。
+        let 包 = 内容(&[("口袋妖怪.gba", 8192)]);
+        let Decision::Convert(conversion) = decide(
+            &profile,
+            Some("GBA"),
+            "库/GBA/口袋妖怪.zip",
+            2048,
+            Some(&包),
+        ) else {
+            panic!("覆盖成取出为裸文件之后，zip 该被解开");
+        };
+        assert_eq!(conversion.recipe, Recipe::Unpack);
+        assert_eq!(conversion.path, "GBA/口袋妖怪.gba");
+        assert_eq!(
+            decide(&profile, Some("GBA"), "库/GBA/口袋妖怪.gba", 8192, None),
+            Decision::AsIs
+        );
+
+        // 没覆盖的平台照名册：RetroArch 的 FC 吃 7z。
+        let 包 = 内容(&[("魂斗罗.nes", 1024)]);
+        assert_eq!(
+            decide(&profile, Some("FC"), "库/FC/魂斗罗.7z", 600, Some(&包)),
+            Decision::AsIs
+        );
+
+        // 覆盖不是名册里的声明：不算陈旧；名册里那一份一个字没动。
+        assert_eq!(profile.stale_claims(今天), 名册里的.stale_claims(今天));
+        assert_eq!(
+            profile
+                .matrix
+                .entry_for(Some("SFC"))
+                .and_then(|entry| entry.overridden),
+            Some(Override::Keep)
+        );
+        assert_eq!(
+            档案("retroarch-exfat")
+                .matrix
+                .entry_for(Some("SFC"))
+                .map(|entry| entry.overridden),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn 覆盖存进库里的那个词读得回来() {
+        for choice in Override::all() {
+            assert_eq!(Override::from_code(choice.code()), Some(choice));
+        }
+        assert_eq!(Override::from_code("按档案"), None);
+    }
+
+    #[test]
+    fn 条目的说明只在来源里真说了的地方有_没说的空着() {
+        // 界面上平台表那一行底下照它画一句；**不编**：来源里没这句话的条目空着、不画（拿主意的人 2026-09-15 定）。
+        let 独立 = 档案("独立模拟器-exfat");
+        let psp = 独立.matrix.entry_for(Some("PSP")).expect("有 PSP 那一条");
+        assert_eq!(psp.note, "PPSSPP 不支持 ZSO 与 CSO v2");
+        assert!(
+            psp.claim.cite.contains("ZSO 与 CSO v2"),
+            "说明里的话来源里得真有：{}",
+            psp.claim.cite
+        );
+        let fc = 档案("retroarch-exfat");
+        let fc = fc.matrix.entry_for(Some("FC")).expect("有 FC 那一条");
+        assert!(fc.note.is_empty(), "来源里没说的不编：{}", fc.note);
+        for matrix in Roster::builtin().matrices() {
+            for entry in &matrix.entries {
+                if entry.accepts.is_anything() {
+                    assert!(
+                        entry.note.is_empty(),
+                        "矩阵「{}」不作声称的那一条不该带说明：{}",
+                        matrix.name,
+                        entry.note
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn 名册里条目的说明可省_写了原样读进来_带记号或换行的不收() {
+        let 名册 = |说明: &str| {
+            format!(
+                "\"版本\" = 1\n\
+                 [[\"文件系统\"]]\n\"名\" = \"无限制\"\n\"来源\" = \"甲\"\n\"核实日期\" = \"2026-09-01\"\n\
+                 [[\"平台矩阵\"]]\n\"名\" = \"试\"\n\
+                 [[\"平台矩阵\".\"条目\"]]\n\"平台\" = [\"GB\"]\n\"吃\" = [\"gb\"]\n{说明}\"来源\" = \"乙\"\n\"核实日期\" = \"2026-09-01\"\n\
+                 [[\"能力档案\"]]\n\"名\" = \"不作声称\"\n\"平台矩阵\" = \"试\"\n\"文件系统\" = \"无限制\"\n"
+            )
+        };
+        let 没写 = Roster::parse(&名册(""), "（试）").expect("说明可省");
+        assert_eq!(没写.matrices()[0].entries[0].note, "");
+        let 写了 = Roster::parse(&名册("\"说明\" = \"只认 gb\"\n"), "（试）").expect("读得进");
+        assert_eq!(写了.matrices()[0].entries[0].note, "只认 gb");
+        for 坏的 in ["**只认** gb", "只认 `gb`", "只认\\ngb"] {
+            let 错 = Roster::parse(&名册(&format!("\"说明\" = \"{坏的}\"\n")), "（试）")
+                .expect_err("说明是画在界面上的一句话，带记号或换行的不收");
+            assert!(format!("{错}").contains("说明"), "{错}");
+        }
     }
 }

@@ -145,6 +145,9 @@ impl 现场 {
             let form = screen.form_mut();
             form.name = name.to_string();
             form.target = target;
+            // 这个夹具建的都是**自定义**那一档的子库（`capacity` 空着就是不设限）：
+            // 新建弹层默认落在「按设备容量」上，这里显式换回自定义，免得上限跟着那张卡走。
+            form.capacity_by_device = false;
             capacity.clone_into(&mut form.capacity);
         }
         screen.save(site);
@@ -1023,8 +1026,9 @@ fn 目标落在主库里当场拦下() {
         }
         screen.save(site);
         let message = screen.error().expect("该被拦下来");
+        // 那句话与目标设置弹层里路径底下那一句是同一句（设计稿 `probePath`，票 `gui-looks-like-the-design/21`）。
         assert!(
-            message.contains("主库只读"),
+            message.contains("只读的主库"),
             "拦下来的理由该说清是主库只读：{message}",
         );
     }
@@ -2688,14 +2692,15 @@ fn 目标设置原样保存_容量上限的字节数一个都不变() {
     // 那串字读回来是 511,100,000,000，原样按保存不该悄悄改掉上限。
     let ctx = headless::context();
     let mut 场 = 现场::摆好();
-    场.建子库("掌机", "511123456789");
+    // 带上单位 `B`：弹层里「自定义」那一格光写一个数时按 GB 读（旁边写着 GB），这里要的是精确的字节数。
+    场.建子库("掌机", "511123456789B");
     画两帧(&ctx, &mut 场);
 
     点一下(&ctx, "目标设置…", |ui| 场.app.ui(ui));
     assert_eq!(
         场.app.sublibrary_and_site().0.form_mut().capacity,
-        "511.1 GB",
-        "弹层里的容量上限不是一位小数的十进制"
+        "511.1",
+        "弹层里的容量上限不是一位小数的十进制 GB 数（GB 写在那一格后面）"
     );
     点正好那一段(&ctx, "保存", |ui| 场.app.ui(ui));
     assert!(
@@ -2923,6 +2928,866 @@ fn 规则行按铅笔只改这一条_更新到子库之后其余规则都在() {
         ],
         "「✎」回来换掉的不只是那一条，或者序号变了"
     );
+}
+
+// ——— 新建子库与目标设置（票 `gui-looks-like-the-design/21`）———
+
+#[test]
+fn 新建子库时路径当场校验_主库里工作目录里被别的子库占着都说清原因_创建子库按不下() {
+    // 设计稿 `probePath` 那三句，逐字照稿；判断在核心库（`sublibrary::target::vet`），这一层只画。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    let 库里 = romcat_core::path::display(&场.库.path().join("SFC"));
+    let 工作目录里 = romcat_core::path::display(&场.工作区.path().join("子库"));
+    let 掌机的 = romcat_core::path::display(场.卡.path());
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    for (目标, 该说) in [
+        (
+            库里,
+            "这个目录在主库的根之内。子库需要写入文件，不能放在只读的主库里。",
+        ),
+        (工作目录里, "这个目录属于工作目录，请选择其他目录。"),
+        (掌机的, "已被子库「掌机」使用。"),
+    ] {
+        {
+            let form = 场.app.sublibrary_and_site().0.form_mut();
+            form.name = "新掌机".to_string();
+            form.target.clone_from(&目标);
+        }
+        let 屏上 = 画两帧(&ctx, &mut 场);
+        assert!(屏上.contains(该说), "路径 {目标} 该说「{该说}」：\n{屏上}");
+        点最后正好那一段(&ctx, "创建子库", |ui| 场.app.ui(ui));
+        assert!(
+            场.app.sublibrary().target_settings_open(),
+            "路径被拦下时按「创建子库」不该关上弹层"
+        );
+        assert_eq!(
+            场.app.sublibrary().list().len(),
+            1,
+            "路径被拦下时不该建出第二台"
+        );
+    }
+}
+
+#[test]
+fn 新建子库时名字已被别的子库用了_当场说出来_建不出同名的也不盖掉原来那一台() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "1GB");
+    let 另一张 = temp_dir("gui-sub-card-2");
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    {
+        let form = 场.app.sublibrary_and_site().0.form_mut();
+        form.name = "掌机".to_string();
+        form.target = romcat_core::path::display(另一张.path());
+    }
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("已经有同名的子库。"),
+        "重名要当场说出来：\n{屏上}"
+    );
+    点最后正好那一段(&ctx, "创建子库", |ui| 场.app.ui(ui));
+    assert!(场.app.sublibrary().target_settings_open());
+    let 掌机 = &场.app.sublibrary().list()[0];
+    assert_eq!(
+        (掌机.capacity, 掌机.target.as_str()),
+        (
+            Some(1_000_000_000),
+            romcat_core::path::display(场.卡.path()).as_str()
+        ),
+        "原来那一台被盖掉了"
+    );
+}
+
+#[test]
+fn 选择目录交回来的路径与贴进框里走同一条路_取消什么都不动() {
+    // 票 `gui-answers-all-six/01` 那条薄封装：对话框那一层不测，交回来之后的那一半在这儿测。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    let 库里 = 场.库.path().join("GBA");
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    场.app
+        .sublibrary_and_site()
+        .0
+        .picked_target(Some(库里.clone()));
+    assert_eq!(
+        场.app.sublibrary_and_site().0.form_mut().target,
+        romcat_core::path::display(&库里),
+        "选中的目录没填进框里"
+    );
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("这个目录在主库的根之内。"),
+        "选中的目录没照贴路径那样当场校验：\n{屏上}"
+    );
+    场.app.sublibrary_and_site().0.picked_target(None);
+    assert_eq!(
+        场.app.sublibrary_and_site().0.form_mut().target,
+        romcat_core::path::display(&库里),
+        "取消选择器把框里的字动了"
+    );
+}
+
+#[test]
+fn 目标设置打开时去读这一台的选择集_平台表只列选择集里出现的平台() {
+    // 设计稿「只列出这个子库选择集中出现的平台」。读选择集要折一遍全库事实，排上任务台，不在画帧线程上跑。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC,GBA");
+    点一下(&ctx, "目标设置…", |ui| 场.app.ui(ui));
+    画两帧(&ctx, &mut 场);
+    场.等任务跑完();
+    画两帧(&ctx, &mut 场);
+    assert_eq!(
+        场.app.sublibrary().target_platforms(),
+        Some(vec!["GBA".to_string(), "SFC".to_string()]),
+        "平台表该只列选择集里出现的 GBA 与 SFC"
+    );
+}
+
+#[test]
+fn 目标设置里按平台覆盖_保存之后存进中立库只影响这一台_重开读得回来() {
+    use romcat_core::capability::Override;
+
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    let 另一张 = temp_dir("gui-sub-card-2");
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        let form = screen.form_mut();
+        form.name = "备份卡".to_string();
+        form.target = romcat_core::path::display(另一张.path());
+        form.capacity = String::new();
+        assert!(screen.save(site), "{:?}", screen.error());
+    }
+    画两帧(&ctx, &mut 场);
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    场.app
+        .sublibrary_and_site()
+        .0
+        .form_mut()
+        .overrides
+        .insert("SFC".to_string(), Override::Unpack);
+    // 弹层头一帧只量多大、不画出来（`crate::dialog`）：先画两帧再按页脚上那一颗。
+    画两帧(&ctx, &mut 场);
+    点最后正好那一段(&ctx, "保存", |ui| 场.app.ui(ui));
+    assert!(
+        !场.app.sublibrary().target_settings_open(),
+        "存下来之后弹层还开着：{:?}",
+        场.app.sublibrary().error()
+    );
+    let catalog = &场.app.site().catalog;
+    assert_eq!(
+        catalog.capability_overrides("掌机").expect("读得动"),
+        std::collections::BTreeMap::from([("SFC".to_string(), Override::Unpack)])
+    );
+    assert!(
+        catalog
+            .capability_overrides("备份卡")
+            .expect("读得动")
+            .is_empty(),
+        "覆盖只影响这个子库"
+    );
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    assert_eq!(
+        场.app
+            .sublibrary_and_site()
+            .0
+            .form_mut()
+            .overrides
+            .get("SFC"),
+        Some(&Override::Unpack),
+        "重开目标设置时覆盖没读回来"
+    );
+}
+
+#[test]
+fn 前端格式照稿两格分段_界面写es_de_说明句照实际布局写真文件名() {
+    // 拿主意的人 2026-09-15 定：界面上统一写「ES-DE」（适配器标识照旧是 `ES-Gamelist`）；说明句照实际布局写，
+    // 文件名与目录取核心库那几个常量与 `Adapter::metadata_path`，不照稿上的示意。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.lines().any(|line| line == "Pegasus") && 屏上.lines().any(|line| line == "ES-DE"),
+        "分段那两格该写 Pegasus 与 ES-DE：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("ES-Gamelist"),
+        "界面上不该露出适配器标识：\n{屏上}"
+    );
+    assert!(
+        屏上.contains(
+            "每个平台一份，例如 GBA.metadata.pegasus.txt，摊在子库根上；媒体放在 media 目录。"
+        ),
+        "Pegasus 那一句该拿库里头一个平台举例、写真实的元数据文件名与媒体目录：\n{屏上}"
+    );
+    assert!(!屏上.contains("平台目录"), "说明句里不该裸写占位：\n{屏上}");
+
+    点最后正好那一段(&ctx, "ES-DE", |ui| 场.app.ui(ui));
+    assert_eq!(
+        场.app.sublibrary_and_site().0.form_mut().format,
+        "ES-Gamelist",
+        "按「ES-DE」存的该是适配器标识"
+    );
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains(
+            "每个平台一份，例如 gamelists/GBA/gamelist.xml；媒体放在 downloaded_media 目录。"
+        ),
+        "ES-DE 那一句该拿库里头一个平台举例、写真实的 gamelist 位置与媒体目录：\n{屏上}"
+    );
+}
+
+#[test]
+fn 前端格式那排跟着核心带的适配器清单走_界面不另写一份() {
+    // ADR-0024：这一版带了哪几个适配器只有核心库答得上（`adapter::names`）。界面另写一份清单的话，
+    // 添一个适配器这一排就选不到它——这条钉的是「那一排照核心那份清单画」，不是钉死眼下有哪两格。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    for 标识 in romcat_core::adapter::names() {
+        // 界面上 ES 家族那个写「ES-DE」（拿主意的人 2026-09-15 定），别的照标识写。
+        let 屏上写的 = if 标识.eq_ignore_ascii_case("ES-Gamelist") {
+            "ES-DE"
+        } else {
+            标识
+        };
+        assert!(
+            屏上.contains(屏上写的),
+            "前端格式那一排少了「{屏上写的}」：\n{屏上}"
+        );
+    }
+}
+
+#[test]
+fn 卡头的前端格式写es_de_不写适配器标识() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        let form = screen.form_mut();
+        form.name = "掌机".to_string();
+        form.target = romcat_core::path::display(场.卡.path());
+        form.format = "ES-Gamelist".to_string();
+        assert!(screen.save(site), "{:?}", screen.error());
+    }
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    let 卡头: Vec<&str> = 屏上
+        .lines()
+        .filter(|line| line.contains("能力档案："))
+        .collect();
+    assert!(
+        卡头.iter().any(|line| line.contains(" · ES-DE · ")),
+        "卡头该写 ES-DE：{卡头:?}"
+    );
+    assert!(
+        !屏上.contains("ES-Gamelist"),
+        "卡上露出了适配器标识：\n{屏上}"
+    );
+}
+
+/// 往工作目录里放一份能力档案名册：照内置那一份原文，换掉 `从` 那一串（名册文件改一处就生效，`Roster::in_workspace`）。
+fn 换一处名册(工作区: &Path, 从: &str, 换成: &str) {
+    let 原文 = romcat_core::capability::Roster::builtin_text();
+    assert!(原文.contains(从), "内置名册里没有「{从}」");
+    fs::write(工作区.join("capability.toml"), 原文.replacen(从, 换成, 1)).expect("写得进");
+}
+
+/// 打开这一台的目标设置，等它的选择集读回来，钉死「今天」，交回画出来的字。
+fn 开目标设置等选择集(ctx: &egui::Context, 场: &mut 现场, name: &str) -> String {
+    场.app.sublibrary_and_site().0.set_today("2026-09-15");
+    场.app.sublibrary_and_site().0.edit_target(name);
+    画两帧(ctx, 场);
+    场.等任务跑完();
+    画两帧(ctx, 场)
+}
+
+#[test]
+fn 能力档案表逐平台写吃什么转什么_每行核实日期_来源里说了的那句说明画出来() {
+    // 拿主意的人 2026-09-15 定：每行一小行「核实日期 …」、陈旧时换成警示色「陈旧」；「说明」只画来源里真说了的。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC,GBA");
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        screen.edit_target("掌机");
+        screen.form_mut().capability = "retroarch-exfat".to_string();
+        assert!(screen.save(site), "{:?}", screen.error());
+    }
+    let 屏上 = 开目标设置等选择集(&ctx, &mut 场, "掌机");
+    for 该有 in [
+        "GBA",
+        "SFC",
+        "卡带裸文件、zip、7z、zst、apk",
+        "核实日期 2026-08-31",
+        "按档案",
+    ] {
+        assert!(屏上.contains(该有), "平台表里没有「{该有}」：\n{屏上}");
+    }
+    assert!(!屏上.contains("陈旧"), "内置档案眼下不陈旧：\n{屏上}");
+
+    // 独立模拟器那一份：SFC 那一条来源里说了 Snes9x 与 ares 不认 7z 与 rar。
+    场.app.sublibrary_and_site().0.form_mut().capability = "独立模拟器-exfat".to_string();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("Snes9x 与 ares 不支持 7z 与 rar"),
+        "来源里说了的那句说明没画出来：\n{屏上}"
+    );
+}
+
+#[test]
+fn 核实日期超过半年的声明在平台表上标陈旧() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    换一处名册(
+        场.工作区.path(),
+        "\"核实日期\" = \"2026-08-31\"",
+        "\"核实日期\" = \"2020-01-01\"",
+    );
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC,GBA");
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        screen.edit_target("掌机");
+        screen.form_mut().capability = "retroarch-exfat".to_string();
+        assert!(screen.save(site), "{:?}", screen.error());
+    }
+    let 屏上 = 开目标设置等选择集(&ctx, &mut 场, "掌机");
+    assert!(屏上.contains("陈旧"), "超过 180 天的声明没标出来：\n{屏上}");
+}
+
+#[test]
+fn 新建时平台表按所选档案的条目列_不带覆盖列() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.app.sublibrary_and_site().0.set_today("2026-09-15");
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    场.app.sublibrary_and_site().0.form_mut().capability = "retroarch-exfat".to_string();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("PS1"),
+        "新建时该按档案的条目列出平台：\n{屏上}"
+    );
+    assert!(屏上.contains("核实日期 2026-08-31"), "\n{屏上}");
+    assert!(!屏上.contains("按档案"), "新建时不该带覆盖那一列：\n{屏上}");
+}
+
+#[test]
+fn fat32档案下选择集里有超过单文件上限的_当场提醒() {
+    // ADR-0017 补充段：FAT32 那 4 GiB 放不进去的，挑档案时就说，不等差量预览。fixture 里的 zip 只有几 KiB，
+    // 于是把名册里 FAT32 的单文件上限改小——判据照旧是核心那一处（`Footprint::too_big`）。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    换一处名册(
+        场.工作区.path(),
+        "\"单文件上限\" = 4294967295",
+        "\"单文件上限\" = 3000",
+    );
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    let 屏上 = 开目标设置等选择集(&ctx, &mut 场, "掌机");
+    assert!(
+        !屏上.contains("单文件上限"),
+        "没挑 FAT32 的档案就不该提醒：\n{屏上}"
+    );
+    场.app.sublibrary_and_site().0.form_mut().capability = "retroarch-fat32".to_string();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("FAT32 单文件上限"),
+        "选择集里有超过单文件上限的，挑 FAT32 的档案时该当场提醒：\n{屏上}"
+    );
+}
+
+/// 当目标用的那张卡此刻卷的总量，十进制 GB 一位小数（与屏上「按设备容量（…）」同一个写法）。
+fn 卡的总量(场: &mut 现场) -> u64 {
+    use romcat_core::sublibrary::target::{self, Presence};
+    let workspace = 场.工作区.path().to_path_buf();
+    let catalog = &场.app.site().catalog;
+    match target::vet(catalog, &workspace, Some("掌机"), 场.卡.path()).expect("读得动") {
+        Ok(Presence::Present(volume)) => volume.total.expect("读得出总量"),
+        other => panic!("卡插着：{other:?}"),
+    }
+}
+
+#[test]
+fn 容量上限照稿二选一_按设备容量写出卡的总量_存下来这一档与此刻的总量() {
+    // 拿主意的人 2026-09-15 定：照稿「按设备容量 / 自定义」二选一，按设备容量那一档跟着设备总容量走。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "1GB");
+    let 总量 = 卡的总量(&mut 场);
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    for 该有 in [
+        "设备连接时自动读取",
+        "自定义",
+        "给存档、截图等留出空间",
+        &format!("按设备容量（{}）", decimal_bytes(总量)),
+    ] {
+        assert!(
+            屏上.contains(该有),
+            "容量上限那一格没有「{该有}」：\n{屏上}"
+        );
+    }
+
+    场.app.sublibrary_and_site().0.form_mut().capacity_by_device = true;
+    点最后正好那一段(&ctx, "保存", |ui| 场.app.ui(ui));
+    assert!(
+        !场.app.sublibrary().target_settings_open(),
+        "存下来之后弹层还开着：{:?}",
+        场.app.sublibrary().error()
+    );
+    let 掌机 = &场.app.sublibrary().list()[0];
+    assert!(掌机.capacity_by_device, "按设备容量那一档没存下来");
+    assert_eq!(
+        掌机.capacity,
+        Some(总量),
+        "卡插着时该把此刻的总量记成上次读到的"
+    );
+
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    {
+        let form = 场.app.sublibrary_and_site().0.form_mut();
+        assert!(form.capacity_by_device, "重开时这一档没填回来");
+        form.capacity_by_device = false;
+        form.capacity = "58".to_string();
+    }
+    画两帧(&ctx, &mut 场);
+    点最后正好那一段(&ctx, "保存", |ui| 场.app.ui(ui));
+    let 掌机 = &场.app.sublibrary().list()[0];
+    assert!(!掌机.capacity_by_device, "换回自定义没存下来");
+    assert_eq!(
+        掌机.capacity,
+        Some(58_000_000_000),
+        "自定义那一格照十进制 GB 读"
+    );
+}
+
+#[test]
+fn 按设备容量那一台卡没插_写上次读到的总量_没读过就说不设上限() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        let mut 掌机 = site
+            .catalog
+            .sublibrary("掌机")
+            .expect("读得动")
+            .expect("在");
+        掌机.capacity_by_device = true;
+        掌机.capacity = Some(64_000_000_000);
+        掌机.target = "/Volumes/ROMCAT-NO-SUCH-CARD".to_string();
+        掌机.target_raw = Some(掌机.target.clone());
+        site.catalog.put_sublibrary(&掌机).expect("写得进");
+        screen.reload(site);
+        screen.edit_target("掌机");
+    }
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("按设备容量（64 GB）"),
+        "卡没插时该写上次读到的总量：\n{屏上}"
+    );
+    场.app.sublibrary_and_site().0.leave_target_settings();
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        let mut 掌机 = site
+            .catalog
+            .sublibrary("掌机")
+            .expect("读得动")
+            .expect("在");
+        掌机.capacity = None;
+        site.catalog.put_sublibrary(&掌机).expect("写得进");
+        screen.reload(site);
+        screen.edit_target("掌机");
+    }
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("按设备容量（没读过，不设上限）"),
+        "没读过总量时该说不设上限：\n{屏上}"
+    );
+}
+
+#[test]
+fn 目标在位时照稿写已连接与容量可用_清单外文件数数完才画() {
+    // 拿主意的人 2026-09-15 定：连接状态行照稿全写；清单外文件数是只读遍历目标、排上任务台，数出来之前那半句不画。
+    // 卡上躺着维护者自己拷进去的那一份存档：清单里没有它，数出来是 1。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    for 该有 in ["已连接", "容量 ", "可用 "] {
+        assert!(屏上.contains(该有), "卡插着该写「{该有}」：\n{屏上}");
+    }
+    场.等任务跑完();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("目录里已有 1 个文件，它们不在清单里，工具不会改动。"),
+        "数完了该写清单外有几个文件：\n{屏上}"
+    );
+
+    // 路径换到另一个目录：重数。
+    let 另一张 = temp_dir("gui-sub-card-2");
+    写(&另一张.path().join("甲.sav"), b"1");
+    写(&另一张.path().join("乙/丙.png"), b"2");
+    场.app.sublibrary_and_site().0.form_mut().target = romcat_core::path::display(另一张.path());
+    画两帧(&ctx, &mut 场);
+    场.等任务跑完();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("目录里已有 2 个文件，它们不在清单里，工具不会改动。"),
+        "路径改了该重数：\n{屏上}"
+    );
+}
+
+#[test]
+fn 目标不在位时说未连接_照样建得出() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    let 没插 = 场.卡.path().join("没插上的卡");
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    {
+        let form = 场.app.sublibrary_and_site().0.form_mut();
+        form.name = "掌机".to_string();
+        form.target = romcat_core::path::display(&没插);
+    }
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(屏上.contains("未连接"), "目标不在该说未连接：\n{屏上}");
+    assert!(
+        !屏上.contains("目录里已有"),
+        "不在的目录没有文件可数：\n{屏上}"
+    );
+    点最后正好那一段(&ctx, "创建子库", |ui| 场.app.ui(ui));
+    assert_eq!(
+        场.app.sublibrary().list().len(),
+        1,
+        "目标不在位也该建得出：{:?}",
+        场.app.sublibrary().error()
+    );
+}
+
+#[test]
+fn 设备上的位置照实际规则写_改一台时取头一个变体的真实落点_换格式元数据位置跟着变() {
+    // 拿主意的人 2026-09-15 定：落点预览用真实落点——子库里的布局照搬主库的键、剥掉根名；元数据位置由适配器答。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=GBA");
+    let 卡 = romcat_core::path::display(场.卡.path());
+    开目标设置等选择集(&ctx, &mut 场, "掌机");
+    // 「设备上的位置」在弹层最底下：视口外 egui 不画字，先在弹层内容区上滚到底（等滚动停下）。
+    滚一下(&ctx, &mut 场, -100_000.0);
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    for 该有 in [
+        "设备上的位置",
+        &format!("{卡}/GBA/口袋妖怪 绿宝石.zip"),
+        &format!("{卡}/GBA.metadata.pegasus.txt"),
+        "按平台分目录，不带根名：两个根里相同的相对路径会在差量预览中报为落点撞车。",
+    ] {
+        assert!(屏上.contains(该有), "设备上的位置没有「{该有}」：\n{屏上}");
+    }
+    场.app.sublibrary_and_site().0.form_mut().format = "ES-Gamelist".to_string();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains(&format!("{卡}/gamelists/GBA/gamelist.xml")),
+        "换成 ES-DE 之后元数据位置该跟着变：\n{屏上}"
+    );
+}
+
+#[test]
+fn 新建时设备上的位置用示例名_目录照实际规则() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    画两帧(&ctx, &mut 场);
+    // 「设备上的位置」在弹层最底下：视口外 egui 不画字，先在弹层内容区上滚到底（等滚动停下）。
+    滚一下(&ctx, &mut 场, -100_000.0);
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    for 该有 in [
+        "/Volumes/SDCARD/GBA/火焰之纹章 烈火之剑.gba",
+        "/Volumes/SDCARD/GBA.metadata.pegasus.txt",
+    ] {
+        assert!(
+            屏上.contains(该有),
+            "新建时设备上的位置没有「{该有}」：\n{屏上}"
+        );
+    }
+}
+
+#[test]
+fn 目标设置里改名_保存之后旧名不在_新名规则与覆盖都在_卡片跟着换() {
+    // 拿主意的人 2026-09-15 定：照稿名字可改，核心库一个事务里改名（`Catalog::rename_sublibrary`）。
+    use romcat_core::capability::Override;
+
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    {
+        let form = 场.app.sublibrary_and_site().0.form_mut();
+        form.name = "RG35XX".to_string();
+        form.overrides.insert("SFC".to_string(), Override::Keep);
+    }
+    画两帧(&ctx, &mut 场);
+    点最后正好那一段(&ctx, "保存", |ui| 场.app.ui(ui));
+    assert!(
+        !场.app.sublibrary().target_settings_open(),
+        "改名存下来之后弹层还开着：{:?}",
+        场.app.sublibrary().error()
+    );
+    let 名字: Vec<&str> = 场
+        .app
+        .sublibrary()
+        .list()
+        .iter()
+        .map(|row| row.name.as_str())
+        .collect();
+    assert_eq!(名字, ["RG35XX"], "改名建出了第二台，或者旧名还在");
+    let catalog = &场.app.site().catalog;
+    assert!(catalog.sublibrary("掌机").expect("读得动").is_none());
+    assert_eq!(
+        catalog.sublibrary_rules("RG35XX").expect("读得动").len(),
+        1,
+        "规则没跟着新名过去"
+    );
+    assert_eq!(
+        catalog
+            .capability_overrides("RG35XX")
+            .expect("读得动")
+            .get("SFC"),
+        Some(&Override::Keep),
+        "按平台覆盖没存在新名下"
+    );
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.lines().any(|line| line == "RG35XX"),
+        "卡片没跟着换名字：\n{屏上}"
+    );
+}
+
+#[test]
+fn 改名撞上别的子库_名字那一格当场说_保存关不上() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    let 另一张 = temp_dir("gui-sub-card-2");
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        screen.leave_target_settings();
+        let form = screen.form_mut();
+        form.name = "备份卡".to_string();
+        form.target = romcat_core::path::display(另一张.path());
+        form.capacity = String::new();
+        assert!(screen.save(site), "{:?}", screen.error());
+    }
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    场.app.sublibrary_and_site().0.form_mut().name = "备份卡".to_string();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(屏上.contains("已经有同名的子库。"), "\n{屏上}");
+    点最后正好那一段(&ctx, "保存", |ui| 场.app.ui(ui));
+    assert!(场.app.sublibrary().target_settings_open());
+    assert_eq!(场.app.sublibrary().list().len(), 2, "撞名时两台都该还在");
+}
+
+#[test]
+fn 保存目标设置之后已有的差量预览作废_提示条写差量预览已失效() {
+    // 拿主意的人 2026-09-15 定（F9）：照稿用底边提示条，走共用的 `toast.rs`。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "1GB");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+    assert!(
+        场.app.sublibrary().prepared().is_some(),
+        "前提：排出了一份差量预览"
+    );
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    场.app.sublibrary_and_site().0.form_mut().capacity = "2".to_string();
+    画两帧(&ctx, &mut 场);
+    点最后正好那一段(&ctx, "保存", |ui| 场.app.ui(ui));
+    assert!(
+        场.app.sublibrary().prepared().is_none(),
+        "改过目标设置，那份差量预览该作废"
+    );
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("已保存「掌机」的目标设置。差量预览已失效，同步前需要重新生成。"),
+        "提示条该说差量预览已失效：\n{屏上}"
+    );
+}
+
+#[test]
+fn 新建子库存下之后提示条写已创建() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    {
+        let form = 场.app.sublibrary_and_site().0.form_mut();
+        form.name = "掌机".to_string();
+        form.target = romcat_core::path::display(场.卡.path());
+    }
+    画两帧(&ctx, &mut 场);
+    点最后正好那一段(&ctx, "创建子库", |ui| 场.app.ui(ui));
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("已创建子库「掌机」"),
+        "新建之后提示条该说已创建：\n{屏上}"
+    );
+}
+
+#[test]
+fn 打开目标设置顺带读的选择集与清单外文件数不进任务历史() {
+    // 拿主意的人 2026-09-15 定：打开弹层时顺带跑的小活不进任务历史，跑着时也不摆在任务台那一栏里；人点起来的照旧进。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    let 之前 = 场.app.tasks().history().len();
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    画两帧(&ctx, &mut 场);
+    场.等任务跑完();
+    画两帧(&ctx, &mut 场);
+    场.等任务跑完();
+    assert_eq!(
+        场.app.sublibrary().target_platforms(),
+        Some(vec!["SFC".to_string()]),
+        "前提：选择集读回来了"
+    );
+    历史没多一条(&场, 之前);
+    assert!(场.app.tasks().running().is_none());
+}
+
+#[test]
+fn 前端格式那句照稿写游玩记录和收藏不会被覆盖_两种格式都写() {
+    // 两边都核实过才照稿写（Pegasus 的收藏与游玩时长在它自己的配置目录里；ES-DE 在卡上改过的 gamelist 同步不写回去）。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("前端里的游玩记录和收藏不会被覆盖。"),
+        "\n{屏上}"
+    );
+    场.app.sublibrary_and_site().0.form_mut().format = "ES-Gamelist".to_string();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("前端里的游玩记录和收藏不会被覆盖。"),
+        "\n{屏上}"
+    );
+}
+
+#[test]
+fn 本机磁盘时连接状态行照稿说不设上限按剩余空间计算_容量条照计划里的上限画() {
+    // 测试用的临时目录落在哪种卷上跟机器有关：先问核心它是不是可移动存储，两种情形各钉各的。
+    use romcat_core::sublibrary::target;
+
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    let 可移动 = target::volume(场.卡.path()).removable;
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert_eq!(
+        屏上.contains("本机磁盘不设容量上限时，按剩余空间计算。"),
+        !可移动,
+        "可移动存储 {可移动}：\n{屏上}"
+    );
+    场.app.sublibrary_and_site().0.leave_target_settings();
+    场.求值();
+    let gauge = 场.app.sublibrary().gauge("掌机");
+    let 计划里的 = 场
+        .app
+        .sublibrary()
+        .evaluated("掌机")
+        .and_then(|report| report.fit.known())
+        .map(|room| room.capacity)
+        .expect("卡插着，装不装得下算得出");
+    assert_eq!(
+        gauge.capacity, 计划里的,
+        "容量条的上限该照计划里真用上的那个数"
+    );
+    assert_eq!(gauge.capacity.is_some(), !可移动);
+}
+
+#[test]
+fn 档案对卡不作声称时不写卡是那半句_有声称时照写() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("决定每个平台放到设备上时要不要转换格式。") && !屏上.contains("卡是"),
+        "不作声称那一份不该拼出「卡是…」：\n{屏上}"
+    );
+    场.app.sublibrary_and_site().0.form_mut().capability = "retroarch-fat32".to_string();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(屏上.contains("卡是 FAT32，单文件上限"), "\n{屏上}");
+}
+
+#[test]
+fn 容量上限按名字那一行就选中那一档() {
+    // 共用的单选件（`look::radio_option`）：圆点与名字、底下那行小字都按得动。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "1GB");
+    场.app.sublibrary_and_site().0.edit_target("掌机");
+    画两帧(&ctx, &mut 场);
+    点一下(&ctx, "设备连接时自动读取", |ui| 场.app.ui(ui));
+    assert!(
+        场.app.sublibrary_and_site().0.form_mut().capacity_by_device,
+        "按「设备连接时自动读取」那一行没选中按设备容量"
+    );
+    点一下(&ctx, "给存档、截图等留出空间", |ui| {
+        场.app.ui(ui)
+    });
+    assert!(
+        !场.app.sublibrary_and_site().0.form_mut().capacity_by_device,
+        "按「给存档、截图等留出空间」那一行没选中自定义"
+    );
+}
+
+#[test]
+fn 新建子库时容量上限默认按设备容量_存下来也是这一档() {
+    // 设计稿上新建那层弹层这一档默认就是「按设备容量」（插上卡跟着卡的总量走）。
+    // 「自定义」空着虽然也是不设限，但它是人填的那一档，换张卡不会跟着变——不是一件事。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    assert!(
+        场.app.sublibrary_and_site().0.form_mut().capacity_by_device,
+        "新建弹层上这一档默认不是「按设备容量」"
+    );
+    let 目标 = romcat_core::path::display(场.卡.path());
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        {
+            let form = screen.form_mut();
+            form.name = "掌机".to_string();
+            form.target = 目标;
+        }
+        screen.save(site);
+        assert!(screen.error().is_none(), "{:?}", screen.error());
+    }
+    let 掌机 = 场
+        .app
+        .sublibrary_and_site()
+        .1
+        .catalog
+        .sublibrary("掌机")
+        .expect("读得出")
+        .expect("建出来了");
+    assert!(掌机.capacity_by_device, "默认这一档没一路存进库里");
 }
 
 /// **例外挪到右栏**（票 `gui-looks-like-the-design/15` 拆底栏，拿主意的人 2026-09-15 定）：改选择那一趟里，例外按钮与

@@ -42,6 +42,7 @@
 
 pub mod report;
 pub mod rule;
+pub mod target;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -104,6 +105,20 @@ pub struct Sublibrary {
     /// **默认必须是「不作声称」而不是某份真的矩阵**：一份没人挑过的矩阵替用户做了
     /// 决定，而它可能是错的（ADR-0017：矩阵错误比不转换更糟）。
     pub capability: Option<String>,
+    /// 容量上限是不是**按设备容量**那一档（票 `gui-looks-like-the-design/21`，拿主意的人 2026-09-15 照稿定）：上限跟着设备的
+    /// 总容量走，换一张卡跟着变。这一档里 [`Self::capacity`] 记的是**上次连上时读到的总容量**——设备没连着时就用它，
+    /// 没读过是 `None`（不设上限）。**默认是另一档「自定义」**：[`Self::capacity`] 就是那个上限。
+    pub capacity_by_device: bool,
+}
+
+/// 「**按设备容量**」那一档这一刻的上限：设备此刻读得出总量（`device_total`）就是它，读不出用上次记下的那个数
+/// （`remembered`，上一回连上时读到的总量），两个都没有就是不设上限。
+///
+/// 单拎出来是因为**手上还没有 [`Sublibrary`] 的时候也要答这个问题**：新建那层弹层里「按设备容量（…）」那一行
+/// 写的就是它，那时候这一台还没存进库里。这条规矩只该有一处（ADR-0024）——[`Sublibrary::limit`] 走的也是它。
+#[must_use]
+pub fn device_limit(remembered: Option<u64>, device_total: Option<u64>) -> Option<u64> {
+    device_total.or(remembered)
 }
 
 impl Sublibrary {
@@ -117,7 +132,41 @@ impl Sublibrary {
             format: format.to_string(),
             capacity,
             capability: None,
+            capacity_by_device: false,
         }
+    }
+
+    /// 这一刻的**容量上限**：按设备容量那一档照 [`device_limit`]，自定义那一档就是记着的那个数。
+    /// **只有这一处判**（ADR-0024）：排计划、屏上那一格都照它。
+    #[must_use]
+    pub fn limit(&self, device_total: Option<u64>) -> Option<u64> {
+        if self.capacity_by_device {
+            device_limit(self.capacity, device_total)
+        } else {
+            self.capacity
+        }
+    }
+
+    /// 这一刻**真用上的容量上限**，看着目标所在的卷（`volume`；目标不在位、没去看时是 `None`）与目标上眼下已经占着多少（`taken`）：
+    ///
+    /// - **按设备容量**那一档：卷此刻的总量，读不出用上次记下的（[`Self::limit`]）；
+    /// - **自定义**、设了数：就是那个数；
+    /// - **本机磁盘不设上限时按剩余空间算**（拿主意的人 2026-09-15 照稿定）：目标上已经占着的加上卷上还写得下的——同步完之后
+    ///   「目标现占 ＋ 净变化」比的正是它。**可移动存储不适用**；卷读不出（没连着）时照按设备容量那一档的做法，没读过就不设上限。
+    ///
+    /// **只有这一处判**（ADR-0024）：排计划时用它，容量条画的是计划里抄出来的那个数。
+    #[must_use]
+    pub fn limit_on(&self, volume: Option<&target::Volume>, taken: u64) -> Option<u64> {
+        if self.capacity_by_device {
+            return self.limit(volume.and_then(|volume| volume.total));
+        }
+        if self.capacity.is_some() {
+            return self.capacity;
+        }
+        volume
+            .filter(|volume| !volume.removable)
+            .and_then(|volume| volume.available)
+            .map(|available| available.saturating_add(taken))
     }
 
     /// **读盘该用的那条路径**（ADR-0020）。
@@ -505,6 +554,9 @@ pub struct Room {
     pub over_capacity: Option<u64>,
     /// 超了的话，按体积排序的裁剪建议。**绝不自动截断**（ADR-0016）。
     pub trim_suggestions: Vec<Trim>,
+    /// 这一趟**真用上的容量上限**（[`Sublibrary::limit_on`]）：按设备容量那一档是卡此刻的总量，本机磁盘不设上限时是
+    /// 目标现占加上还写得下的。容量条的「容量上限」照它画，与 [`Self::over_capacity`] 是同一个底。
+    pub capacity: Option<u64>,
 }
 
 impl Room {
@@ -551,6 +603,7 @@ impl Room {
             after_bytes: plan.after_bytes,
             over_capacity: plan.over_capacity,
             trim_suggestions: plan.trim_suggestions.clone(),
+            capacity: plan.capacity,
         }
     }
 }

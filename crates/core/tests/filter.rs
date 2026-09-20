@@ -668,6 +668,7 @@ fn 旧的平铺规则原样解析() {
             format: "Pegasus".to_string(),
             capacity: None,
             capability: None,
+            capacity_by_device: false,
         })
         .expect("子库写得进");
     let 老规则 = Rule::parse("平台=GB,GBA 且 中文=汉化").expect("读得懂");

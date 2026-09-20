@@ -4281,6 +4281,111 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 - **建议留：** 走了的这条。
 - **谁来裁：** 拿主意的人
 - **状态：** 已裁：不可读小字照词表写「文件名拿得到，元数据读不到」；疑似同一作品识别后写「暂时还给不出这一项」；成型存疑小字照稿留「多碟没合在一起、目录拆错」（拿主意的人 2026-09-15 答）
+### Q941 — 目标路径「套在一起」两个方向都算：主库的根、工作目录、别的子库；同步那道闸从此也拦「把根包在里面」
+
+- **来自：** 票 `gui-looks-like-the-design/21`
+- **类别：** 规格没说
+- **在哪：** `crates/core/src/sublibrary/target.rs` 的 `vet` / `library_overlap`；`crates/core/src/sync/prepare.rs` 的 `refuse_target_in_library`（改成调 `library_overlap`）；测试 `crates/core/tests/sublibrary.rs` 的 `目标落在主库的根里或者把根包在里面_…`、`目标属于工作目录或者把工作目录包在里面_…`、`目标已被别的子库占用_相同或者套在一起都拦下_…`
+- **为什么没停线：** 票只写了「至少挡住三种」，没说包含关系算不算；收紧只会多拦，不会写出错的东西。
+- **这张票实际做了什么：** 三种都按「相等、目标在它里面、它在目标里面」拦下，与加根那道 `roots::check_placement` 同一个口径。「落在主库里」那一条抽成 `library_overlap`，界面当场判与点同步时那道闸共用——于是同步也开始拦「目标把主库的根包在里面」（同步往 `<平台目录>/…` 写，平台目录与根同名时就写进了主库）。改自己那一台时，它原来那条路径不算被占。
+- **另一条路：** 只拦「目标在里面」（含相等），同步那道闸照旧只拦「落在根里」。
+- **建议留：** 走了的这条。主库是 10 TB 不可再生的盘（ADR-0004），多拦的代价只是人换一个子目录。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q942 — 按平台覆盖的三种各自换掉整条声明，覆盖不算陈旧，库里认不出的词照名册判
+
+- **来自：** 票 `gui-looks-like-the-design/21`
+- **类别：** 规格没说
+- **在哪：** `crates/core/src/capability.rs` 的 `Override`、`Profile::with_overrides`、`Accepts::Bare`；中立库新表 `sublibrary_override`（`crates/core/src/catalog/sublibrary.rs` 的 `capability_overrides` / `set_capability_overrides`，删子库与撤销时一并带走、放回）；`sync::prepare::prepare_selected` 叠上去；测试 `capability.rs` 的 `按平台覆盖叠在档案上_…`、`tests/sublibrary.rs` 的 `按平台覆盖存进去读得回来_…`、`排差量预览照这个子库的按平台覆盖判_别的子库照名册`
+- **为什么没停线：** 设计稿只画了下拉里的四个词（按档案 / 不转换 / 转成 zip / 取出为裸文件），没说各自怎么判；语义全在核心一处，推翻只改 `Override::entry`。
+- **这张票实际做了什么：**
+  - 覆盖**整条换掉**那个平台的声明，不只换「不能用时」那一格——名册里不作声称（`*`）的平台只换那一格等于没覆盖。
+  - 「不转换」＝对这个平台不作声称，原样搬，不转也不报。
+  - 「转成 zip」＝裸文件与 zip 原样，别的透明容器重打包成 zip。
+  - 「取出为裸文件」＝裸文件原样，透明容器（连 zip）里只裹一份的解出来。
+  - 「是不是透明容器」照 `ContainerKind::for_path` 判。覆盖的来源写「这个子库自己的覆盖」，不算陈旧。
+  - 存库是整份替换；库里认不出的词跳过、照名册判。纯加表，结构版本不加。
+- **另一条路：** 覆盖只换「转成」那一格，保留名册里「吃什么」；或者「不转换」＝原样搬但照样报出吃不下。
+- **建议留：** 走了的这条：下拉里每一项对人说的都是「这个平台就这么办」，只换半条会让不作声称那几行的下拉失效。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q943 — 目标设置里判路径与名字：只在框里的字改了、或者「选择…」交回来时判一次，不每帧判
+
+- **来自：** 票 `gui-looks-like-the-design/21`
+- **类别：** 规格没说
+- **在哪：** `crates/gui/src/sublibrary.rs` 的 `Screen::vet_form`（`Vetted` / `NameVetted` 记着上一回判的是哪一串、在改哪一台）、`Screen::picked_target`；测试 `crates/gui/tests/sublibrary.rs` 的 `新建子库时路径当场校验_…`、`选择目录交回来的路径与贴进框里走同一条路_取消什么都不动`
+- **为什么没停线：** 两条路都写不出错的东西，只差查盘的时机；协调人 2026-09-15 已点头这条。
+- **这张票实际做了什么：** 判一次要化开路径、看那个卷（`sublibrary::target::vet`），挂载点卡住时整个窗口跟着卡，所以画帧里只比「框里的字、正在改哪一台」变没变，变了才真去判。「选择…」交回来的路径填进同一个框，下一帧照同一条路判。`save()` 存之前清掉缓着的结果再判一遍，程序里直接调它也拦得住。
+- **另一条路：** 每一帧都判一遍（始终是这一刻的真相，插上卡马上换过来）。
+- **建议留：** 走了的这条（与 `Q855` 卡头「未连接」不在画帧里查盘同一个理由）。代价是插上卡而字没改时，那一行要等下一次改字、换一台或重开弹层才换过来。
+- **谁来裁：** 拿主意的人（协调人已转达：这条对）
+- **状态：** open
+
+### Q944 — 命令行 `romcat sublibrary set` 没走新的目标路径判断：只拦主库，工作目录与别的子库占着都放行
+
+- **来自：** 票 `gui-looks-like-the-design/21`（回报岔路口时路过发现）
+- **类别：** 路过发现，不在范围内
+- **在哪：** `crates/cli/src/main.rs` 的 `sublibrary set` 那一支（`Sublibrary { … }` 那一处）；判断在 `crates/core/src/sublibrary/target.rs` 的 `vet` / `vet_name`
+- **为什么没停线：** 既有问题，界面这一侧已经挡住；命令行是后台入口（ADR-0023），不在本票的验收里。
+- **这张票实际做了什么：** 没动命令行。界面的「目标设置」弹层与 `Screen::save` 走 `target::vet` / `target::vet_name`；同步那道闸（`refuse_target_in_library`）与之共用「主库」那一条。
+- **另一条路：** 本票顺手让命令行也调 `target::vet`，拦下工作目录与被别的子库占用的目标。
+- **建议留：** 收尾时让命令行也调同一处判断（ADR-0024），并补一条命令行测试。
+- **谁来裁：** 收尾
+- **状态：** open
+
+### Q945 — ES-DE 2.0 起默认只读 `~/ES-DE/gamelists/`：子库写在卡上的 `gamelists/<平台目录>/gamelist.xml` 默认可能不被读
+
+- **来自：** 票 `gui-looks-like-the-design/21`（核实「前端里的游玩记录和收藏不会被覆盖」时路过发现）
+- **类别：** 需要核实的外部事实
+- **在哪：** 核心 `crates/core/src/adapter/gamelist.rs` 的 `metadata_path`（`gamelists/<平台目录>/gamelist.xml`，子库同步照它落在卡上）；出处 ES-DE `INSTALL.md`：「As of ES-DE 2.0.0 any gamelist.xml files stored in the game system directories (e.g. under `~/ROMs/`) will not get loaded, they are instead required to be placed in the `~/ES-DE/gamelists/` directory tree.」，另有 `LegacyGamelistFileLocation` 设置可以退回先查系统目录
+- **为什么没停线：** 与本票要核实的「会不会盖掉游玩记录」无关，写不出错的东西；卡上那份 ES-DE 读不读得到，要对着真设备上的 ES-DE 目录布局核实。
+- **这张票实际做了什么：** 没改行为；只记下来。
+- **另一条路：** 本票就把 ES-DE 那份元数据的落点改到 ES-DE 自己的 `gamelists/` 目录树（要先弄清卡上 ES-DE 的应用数据目录在哪、子库根与它是什么关系）。
+- **建议留：** 先在一台真装着 ES-DE 的掌机上核实默认读哪里、`LegacyGamelistFileLocation` 开没开，再定落点；定了另开票。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q946 — 待确认屏与刮削弹层里的单选框还是 egui 自带的黑点，没换成共用的 `look::radio_option`
+
+- **来自：** 票 `gui-looks-like-the-design/21`（协调人对稿时点名）
+- **类别：** 路过发现，不在范围内
+- **在哪：** `crates/gui/src/queue.rs` 的 `radio_value` 四处（919、1542、1567、1569 行）、`crates/gui/src/scrape.rs` 的 `.radio(`（644 行）；共用件 `crates/gui/src/look.rs` 的 `radio_option`
+- **为什么没停线：** 那几处不在本票的屏上；换了会动待确认屏、刮削弹层的截图基线。
+- **这张票实际做了什么：** 只把子库目标设置里容量上限那一处换成 `look::radio_option`（选中强调色圆点、没选中细圈，令牌 `radio-*` / `option-*`）；那五处没动。
+- **另一条路：** 本票顺手把那五处都换掉，一起重出受影响的截图。
+- **建议留：** 收尾时一并换成共用件，照各屏的票重出截图。
+- **另一处同类：** 名那一列的宽在设计稿里本来就是两格——`.frm`（弹层表单）96、`.kv`（添加主库向导）84，于是令牌也拆成两格
+  （`form-label-width` / `kv-key-width`，拿主意的人 2026-09-15 定照稿，协调人 2026-09-20 追认）。**两个都不在 `check_tokens.py` 的核对范围里**：
+  那份脚本只核颜色，版式令牌与设计稿对不对得上眼下没有机器在守。收尾时一并看要不要让它也核版式那几格。
+- **谁来裁：** 收尾
+- **状态：** open
+
+### Q947 — 分大小写那块盘没挂上时，编译在 `ring` / `zstd-sys` 处退出 1，报的却是 clang 的错
+
+- **来自：** 票 `gui-looks-like-the-design/21`（重出候选图连挂三趟）
+- **类别：** 机器与流程
+- **在哪：** 约定里所有测试与门禁都带 `TMPDIR=/Users/nicoer/dev/game-wt/cs/tmp`；那是稀疏映像 `/Users/nicoer/dev/game-wt/romcat-cs.sparseimage` 挂在 `/Users/nicoer/dev/game-wt/cs` 上的目录。映像没挂载时那个路径不存在，`cc` 造不出临时文件，报 `clang: error: unable to make temporary file: No such file or directory`，cargo 只说 `failed to run custom build command for ring / zstd-sys`，看上去像 C 工具链坏了。
+- **为什么没停线：** 挂回去就好了：`hdiutil attach -nobrowse -mountpoint /Users/nicoer/dev/game-wt/cs /Users/nicoer/dev/game-wt/romcat-cs.sparseimage`。
+- **这张票实际做了什么：** 挂回原挂载点，继续出图；没改仓库里的东西。
+- **另一条路：** 跑门禁的那条命令先核一眼挂载点在不在，不在就当场说清楚（`xtask gate` 起手加一道检查）。
+- **建议留：** 在 `xtask gate` 或长活那份说明里加一句「TMPDIR 指的那块盘没挂上时会报成 C 工具链的错」，省下一次排查。
+- **谁来裁：** 编排者
+- **状态：** open
+
+### Q948 — ego-browser 窗口停在 maximized 时截不出图，CDP 一直超时
+
+- **来自：** 票 `gui-looks-like-the-design/21`（拿设计稿对图时）
+- **类别：** 机器与流程
+- **在哪：** `page.screenshot()` 与直调 `Page.captureScreenshot` 都报 `CdpRequestTimeoutError`，页面本身活着（`goto`、`click`、`evaluate` 都正常）。`Browser.getWindowForTarget` 显示 `windowState: "maximized"`；用 `Browser.setWindowBounds` 把它改成 `normal` 之后截图立刻就好了。
+- **为什么没停线：** 改一次窗口状态就过去了；顺带用 `Emulation.setDeviceMetricsOverride` 把视口钉成 1280×800，和我们的截图同一个尺寸，好逐格比。
+- **这张票实际做了什么：** 只改了浏览器窗口状态与视口，没改仓库里的东西。
+- **另一条路：** 每次对稿前先核一眼窗口状态，或在对稿的那份说明里写死这两步。
+- **建议留：** 写进「看网页一律 ego-browser」那条约定：先 `setWindowBounds` 成 normal、再 `setDeviceMetricsOverride` 成 1280×800，然后才截。
+- **谁来裁：** 编排者
+- **状态：** open
+
 ### Q921 — 根因：作品详情页上的手动修改、手加的名称、首选变体裁决都落在中立库，删库重扫就丢
 
 - **来自：** 票 `gui-looks-like-the-design/15`（实现时查到的根因；协调人 2026-09-15 定不停线、记这一条）
@@ -4423,4 +4528,28 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 - **没走的那条：** 这张票里自拟那二十四个的全名（设计稿没给，用词归拿主意的人）。
 - **建议留：** 拿主意的人给一张全名表（或者说「照官方英文名」），补进平台表即可，不动代码。
 - **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q949 — `Accepts::takes` 眼下一个调用方都没有，而且多段扩展名会判错
+
+- **来自：** 票 `gui-looks-like-the-design/21`（收尾两轴审查，Standards 轴挑出）
+- **类别：** 路过发现，不在范围内
+- **在哪：** `crates/core/src/capability.rs` 的 `Accepts::takes`（`pub fn takes(&self, extension: &str) -> bool`）。本票把按键判的那条抽成 `takes_key` 之后，`takes` 改成 `takes_key(&format!("_.{extension}"))`，全仓零调用方、也没有测试单独钉它；拿 `tar.zst` 这类多段扩展名喂进去，折出来的假键与真键对不上，会判错。
+- **为什么没停线：** 没有调用方，屏上与命令行都走 `takes_key`，眼下错不出来。
+- **这张票实际做了什么：** 没动它——删一支公开 API 是另一件事，且本票的门禁已经绿了。
+- **另一条路：** 本票直接删掉 `takes`，只留 `takes_key`。
+- **建议留：** 删掉它；真需要「按扩展名问」的那一天，另给一支按扩展名判的，别拿假键去喂按键判的那支。
+- **谁来裁：** 编排者
+- **状态：** open
+
+### Q950 — 目标设置弹层照稿还差两处：容量填错时按钮照样按得动、选择集空时「设备上的位置」整格不画
+
+- **来自：** 票 `gui-looks-like-the-design/21`（收尾两轴审查，Spec 轴挑出）
+- **类别：** 规格没说全
+- **在哪：** `crates/gui/src/sublibrary.rs` 的 `form_ready`（只看名字与目标路径两道判）与 `target_dialog_ui` 里「设备上的位置」那一格（`if let Some(landing)`，`sync::Footprint::landing` 在选择集一份 ROM 都没有时交 `None`）。
+- **为什么没停线：** 两处都不会写错东西：容量看不懂时按下去当场在弹层顶上报一句、什么都不存；第六格不画时屏上只是少一块，不会给出错的落点。票面「表单六项齐」那一格的六样在有内容的子库上都齐。
+- **这张票实际做了什么：** 没改。设计稿 `DLG.subform` 的 `capOk` 是把「创建子库 / 保存」按住并在格旁写「请输入数字。」，我们是按下去才报；刚建好、还没加内容的子库打开目标设置时第六格整个不画，稿上那一格永远在（新建时拿示例名画）。
+- **另一条路：** 本票就把两处补上——`form_ready` 加一道容量判、第六格在没有落点时照新建那一套用示例名画（或照平台表那样先写一句「正在读…」），各配一条测试。
+- **建议留：** 一并补上，两处都在同一层弹层里，补完重出那三对截图。
+- **谁来裁：** 拿主意的人（第一处是照稿与否，第二处是空态上写什么）
 - **状态：** open

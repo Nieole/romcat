@@ -122,6 +122,13 @@ pub enum Product {
         /// 重复拷贝的完整明细：每一组、记下的每一份。
         duplicates: Box<romcat_core::report::DuplicateDetails>,
     },
+    /// 读好了一台设备的**脚印**（`romcat_core::sync::Footprint`，票 `gui-looks-like-the-design/21`）：目标设置弹层里平台表
+    /// 列哪几个平台、换一份档案当场说得出放不下哪几份、落点预览照哪一份，都从它纯算。整条只读，与
+    /// [`Evaluated`](Self::Evaluated) 一样不必写在认领那一步。装箱是因为它带着选择集里每个变体的成员。
+    Footprint(Box<romcat_core::sync::Footprint>),
+    /// 数完了一条目标路径上**清单之外**的文件（`romcat_core::sync::prepare::strangers_at`，票 `gui-looks-like-the-design/21`）：
+    /// 目标设置弹层里那句「目录里已有 N 个文件，它们不在清单里」。整条只读遍历目标，不必写在认领那一步。
+    Strangers(romcat_core::sync::Strangers),
 }
 
 /// 这个界面上那张**任务台**。

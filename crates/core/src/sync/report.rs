@@ -703,6 +703,7 @@ mod tests {
             format: "Pegasus".to_string(),
             capacity: Some(4096),
             capability: None,
+            capacity_by_device: false,
         }
     }
 

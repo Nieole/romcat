@@ -72,6 +72,22 @@ pub fn decimal_bytes(bytes: u64) -> String {
     }
 }
 
+/// **容量上限**那一格里填的数：十进制 GB，最多一位小数、末尾的 `.0` 去掉（「64」「511.1」）。与 [`decimal_bytes`] 同一条
+/// 取整规矩，只是单位钉死在 GB——目标设置弹层里那一格后面写着「GB」（拿主意的人 2026-09-15 定），数里再带单位就重了。
+///
+/// 同 [`decimal_bytes`]：**一位小数是给人看的，写不回去**。
+#[must_use]
+pub fn decimal_gigabytes(bytes: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let tenths = (bytes as f64 / 100_000_000.0).round();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let tenths = tenths as u64;
+    match tenths % 10 {
+        0 => format!("{}", tenths / 10),
+        frac => format!("{}.{frac}", tenths / 10),
+    }
+}
+
 /// 一段时长排成人看得懂的样子。
 ///
 /// **只给粗估用**，因此刻意粗：一小时以上不报秒、一分钟以上不报小数。一个看着精确的
@@ -987,6 +1003,16 @@ mod tests {
         assert_eq!(decimal_bytes(2_000_000_000_000), "2 TB");
         // 进位之后到了 1000 的升一档，不写「1000 KB」。
         assert_eq!(decimal_bytes(999_960), "1 MB");
+    }
+
+    #[test]
+    fn 容量上限那一格的数照十进制_gb_最多一位小数_不带单位() {
+        // 票 `gui-looks-like-the-design/21`：弹层里「自定义」那一格后面写着 GB，格里只填数。
+        assert_eq!(decimal_gigabytes(64_000_000_000), "64");
+        assert_eq!(decimal_gigabytes(128_000_000_000), "128");
+        assert_eq!(decimal_gigabytes(511_123_456_789), "511.1");
+        assert_eq!(decimal_gigabytes(1_950_000_000), "2");
+        assert_eq!(decimal_gigabytes(4096), "0");
     }
 
     #[test]

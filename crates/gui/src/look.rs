@@ -103,7 +103,7 @@
 //! （`Style::button_style`），哪一档比别的档宽，控件就会在进出那一档的那一帧缩一下——焦点在
 //! 控件之间跳的时候，整排按钮跟着抖。
 
-use egui::Color32;
+use egui::{Align, Color32};
 use romcat_core::catalog::identify::Tier;
 
 use crate::tokens::{Palette, Tokens};
@@ -868,6 +868,113 @@ pub fn note_box<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R
         .inner
 }
 
+/// 一行**单选**（设计稿 `.opt`）：左边一枚圆点，右边名字、底下一行说明小字，整行按得动。圆点选中时是强调色外圈、一道底色缝、
+/// 强调色圆心；没选中是一圈说明字色的细线。直径、圆心、缝、行内间距与上下留白取令牌 `radio-diameter` / `radio-dot` /
+/// `radio-gap` / `option-gap` / `option-padding`；名字 `size-small-plus`、说明 `size-caption-plus`（稿 12.5 / 11.5）。
+///
+/// 交回整行的点击（圆点、名字、说明哪一处按下去都算）。
+pub fn radio_option(ui: &mut egui::Ui, selected: bool, title: &str, note: &str) -> egui::Response {
+    let tokens = Tokens::builtin();
+    let layout = &tokens.layout;
+    let palette = tokens
+        .color
+        .theme(egui::Theme::from_dark_mode(ui.visuals().dark_mode));
+    let 名字号 = font_size(ui.ctx(), tokens.font.size_small_plus);
+    let 说明号 = font_size(ui.ctx(), tokens.font.size_caption_plus);
+    ui.add_space(layout.option_padding);
+    let row = ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = layout.option_gap;
+        let 名字 =
+            egui::WidgetText::from(egui::RichText::new(title).size(名字号).color(palette.ink))
+                .into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Body,
+                );
+        let (dot_rect, dot) = ui.allocate_exact_size(
+            egui::vec2(layout.radio_diameter, 名字.size().y),
+            egui::Sense::click(),
+        );
+        let center = dot_rect.center();
+        let painter = ui.painter();
+        if selected {
+            painter.circle_filled(center, layout.radio_diameter / 2.0, palette.accent);
+            painter.circle_filled(
+                center,
+                layout.radio_dot / 2.0 + layout.radio_gap,
+                palette.panel,
+            );
+            painter.circle_filled(center, layout.radio_dot / 2.0, palette.accent);
+        } else {
+            painter.circle(
+                center,
+                layout.radio_diameter / 2.0 - 0.5,
+                palette.panel,
+                egui::Stroke::new(1.0, palette.ink_3),
+            );
+        }
+        let texts = ui
+            .vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let 名 = ui.add(egui::Label::new(名字).sense(egui::Sense::click()));
+                let 注 = ui.add(
+                    egui::Label::new(egui::RichText::new(note).size(说明号).color(palette.ink_3))
+                        .sense(egui::Sense::click()),
+                );
+                名 | 注
+            })
+            .inner;
+        dot | texts
+    });
+    ui.add_space(layout.option_padding);
+    row.inner
+}
+
+/// 一块**警示框**（设计稿 `.warnbox`）：`lo-soft` 底、描边是分隔线色往 `lo` 挪四成、中圆角，内边距取令牌
+/// `warn-box-padding`，字是 `size-small-plus`；头一句用 `lo` 色、拉丁与数字加粗，后面接着正文色。占满这一栏的宽。
+pub fn warn_box(ui: &mut egui::Ui, head: &str, body: &str) {
+    let tokens = Tokens::builtin();
+    let palette = tokens
+        .color
+        .theme(egui::Theme::from_dark_mode(ui.visuals().dark_mode));
+    let [上下, 左右] = tokens.layout.warn_box_padding;
+    let 字号 = font_size(ui.ctx(), tokens.font.size_small_plus);
+    egui::Frame::new()
+        .fill(palette.lo_soft)
+        .stroke(egui::Stroke::new(
+            1.0,
+            palette.line.lerp_to_gamma(palette.lo, 0.4),
+        ))
+        .corner_radius(tokens.radius.medium)
+        .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let mut job = egui::text::LayoutJob::default();
+            let font = egui::FontId::proportional(字号);
+            crate::font::strong(head)
+                .size(字号)
+                .color(palette.lo)
+                .append_to(
+                    &mut job,
+                    ui.style(),
+                    egui::FontSelection::FontId(font.clone()),
+                    Align::LEFT,
+                );
+            egui::RichText::new(body)
+                .size(字号)
+                .color(palette.ink)
+                .append_to(
+                    &mut job,
+                    ui.style(),
+                    egui::FontSelection::FontId(font),
+                    Align::LEFT,
+                );
+            job.wrap.max_width = ui.available_width();
+            ui.label(job);
+        });
+}
+
 /// 一枚**分面标签**（设计稿 `.fchip`）：一个值加上它的条数，点一下收窄到这个值、再点一下放开。
 ///
 /// 高、左右留白、值与条数之间取令牌 `facet-chip-height` / `facet-chip-padding` / `facet-chip-gap`；
@@ -1580,7 +1687,11 @@ pub fn barred_card<R>(
 /// （`panel`）、字取正文色（`ink`）、描一圈 `line-2`；没选中的透明底、次要字色（`ink-2`），悬停时字换正文色。
 /// 设计稿选中那一颗加粗，中文不加粗（字体预算），这里一律常规体。拿到焦点那一颗描一圈强调色。
 ///
-/// 待确认屏屏头的「按批｜逐条」、一批里「按目录｜按候选作品｜按命名规律」那一排用它。
+/// 待确认屏屏头的「按批｜逐条」、一批里「按目录｜按候选作品｜按命名规律」那一排，以及子库「目标设置」弹层里
+/// 的前端格式那一排（票 `gui-looks-like-the-design/21`），用的都是它。
+///
+/// 合票 18 与票 21 时两边**各自加过一个同名的 `segmented`**：一个交回下标、一个直接交回选中的那个值。
+/// 留下这一个泛型的——它是超集，调用方不必再自己在下标与值之间来回映射。
 pub fn segmented<T: Copy + PartialEq>(
     ui: &mut egui::Ui,
     options: &[(T, &str)],

@@ -798,6 +798,8 @@ pub struct Layout {
     pub ro_gap: f32,
     /// 「名 → 值」两列排时名那一列的宽。
     pub kv_key_width: f32,
+    /// 弹层表单名那一列的宽（设计稿 `.frm`：子库目标设置）。与 [`Self::kv_key_width`]（设计稿 `.kv`）是两格：稿上一个 96、一个 84。
+    pub form_label_width: f32,
     /// 按钮的高。
     pub button_height: f32,
     /// 按钮左右留白。
@@ -921,6 +923,22 @@ pub struct Layout {
     pub kbd_bottom: f32,
     /// 中文离线源那一堆里字段名那一列的宽（设计稿 `.mgroup dl`）。
     pub match_key_width: f32,
+    /// 警示框内边距 `[上下, 左右]`（设计稿 `.warnbox` 的 `padding`）。
+    pub warn_box_padding: [f32; 2],
+    /// 能力档案平台表「平台 / 不能用时 / 覆盖」三列的宽；「设备直接能用」占余下的（设计稿 `DLG.subform` 的表头）。
+    pub platform_table_columns: [f32; 3],
+    /// 目标设置里「自定义」容量上限那一格的宽（设计稿 `DLG.subform`）。
+    pub capacity_input_width: f32,
+    /// 单选圆点的直径（设计稿 `.opt input`）。
+    pub radio_diameter: f32,
+    /// 选中时正中那一粒的直径。
+    pub radio_dot: f32,
+    /// 选中时圆心与外圈之间那一道缝的宽。
+    pub radio_gap: f32,
+    /// 单选那一行圆点与名字之间（设计稿 `.opt` 的 `gap`）。
+    pub option_gap: f32,
+    /// 单选那一行上下留白（设计稿 `.opt` 的 `padding`）。
+    pub option_padding: f32,
     /// 作品详情页六个面那一排一格的高（设计稿 `.tabs button`）。
     pub tab_height: f32,
     /// 选中那一面底下那道强调色线的粗（设计稿 `.tabs button[aria-selected]`）。

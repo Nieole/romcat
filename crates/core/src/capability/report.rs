@@ -113,6 +113,16 @@ impl Profile {
                 Accepts::Anything => {
                     let _ = writeln!(out, "吃    **不作声称**——没查过。工具于是既不转也不报。");
                 }
+                Accepts::Bare { but } => {
+                    let _ = writeln!(
+                        out,
+                        "吃    {}",
+                        but.map_or_else(
+                            || "裸文件（透明容器一律不吃）".to_string(),
+                            |kind| format!("裸文件与 {}", kind.label())
+                        )
+                    );
+                }
                 Accepts::Only(set) => {
                     let list: Vec<&str> = set.iter().map(String::as_str).collect();
                     let _ = writeln!(out, "吃    {}", list.join(" "));
@@ -125,6 +135,9 @@ impl Profile {
                     .convert_to
                     .map_or("（转不了就如实报出来）", super::Recipe::label),
             );
+            if !entry.note.is_empty() {
+                let _ = writeln!(out, "说明  {}", entry.note);
+            }
             let _ = writeln!(out, "核实  {}", entry.claim.stamp(today));
             let _ = writeln!(out, "来源  {}", entry.claim.cite);
         }

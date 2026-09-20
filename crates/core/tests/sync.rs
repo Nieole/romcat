@@ -808,3 +808,315 @@ fn 装得下吗_计划器与子库报告是同一个数_说装得下就真装得
         "说好的「同步之后」与卡上真实占用对不上——它说装得下，卡却可能装不下",
     );
 }
+
+// ───────────────────────── 脚印：读库那一半与按档案折那一半分开（票 `gui-looks-like-the-design/21`）
+//
+// 目标设置弹层里换一份能力档案、改一行按平台覆盖，要当场说出「FAT32 放不下哪几份」。读库（折事实、读成员、
+// 读内部构成）一趟是全库量级，得跑在任务台上；换档案之后那一步是纯的，当场重算。两半合起来必须与
+// `sync::desired` 一口气折出来的一模一样——判断只有一处（ADR-0024）。
+
+#[test]
+fn 脚印读一次库_换一份档案折期望状态不再碰库_与一口气折出来的一样() {
+    let dir = 建库();
+    let catalog = 扫成库(dir.path());
+    let selected = 选中(&catalog, "平台=FC,PSV");
+    let 脚印 = sync::Footprint::gather(&catalog, &selected).expect("读得动");
+    for profile in romcat_core::capability::Roster::builtin().profiles() {
+        assert_eq!(
+            脚印.desired(profile),
+            sync::desired(&catalog, &selected, profile).expect("折得出期望状态"),
+            "档案「{}」下两条路折出来的不一样",
+            profile.name
+        );
+    }
+    assert_eq!(脚印.platforms(), ["FC", "PSV"]);
+}
+
+#[test]
+fn 脚印说得出这份档案的文件系统放不下哪几份_只看单文件上限() {
+    let dir = 建库();
+    let catalog = 扫成库(dir.path());
+    let selected = 选中(&catalog, "平台=FC");
+    let 脚印 = sync::Footprint::gather(&catalog, &selected).expect("读得动");
+    let mut 小卡 = Profile::unclaimed();
+    小卡.filesystem.name = "小卡".to_string();
+    小卡.filesystem.max_file_bytes = Some(3000);
+    let 放不下 = 脚印.too_big(&小卡);
+    assert_eq!(
+        放不下
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<Vec<_>>(),
+        ["FC/超级玛丽.zip"],
+        "4096 字节那一份超过 3000 的上限，2048 那一份放得下"
+    );
+    assert!(放不下.iter().all(|row| row.reason == RejectReason::TooBig));
+    assert!(
+        脚印.too_big(&Profile::unclaimed()).is_empty(),
+        "不设单文件上限时一份都不拦"
+    );
+}
+
+#[test]
+fn 按名字读一台设备的脚印_读选择集折事实求值读成员() {
+    let dir = 建库();
+    let mut catalog = 扫成库(dir.path());
+    let 卡 = temp_dir("sync-footprint-card");
+    catalog
+        .put_sublibrary(&子库(卡.path(), None))
+        .expect("子库写得进");
+    catalog
+        .add_rule("掌机", &Rule::parse("平台=FC").expect("读得懂"))
+        .expect("规则写得进");
+    let 脚印 =
+        sync::prepare::footprint(&catalog, "掌机", &Handle::new()).expect("读得出这一台的脚印");
+    assert_eq!(脚印.platforms(), ["FC"]);
+    assert_eq!(
+        脚印.desired(&Profile::unclaimed()).files.len(),
+        2,
+        "FC 两个变体各一份文件"
+    );
+}
+
+// ───────────────────────── 清单之外的文件只有一处数法（票 `gui-looks-like-the-design/21`）
+//
+// 目标设置弹层里那句「目录里已有 N 个文件，它们不在清单里」与差量预览里那个数必须是同一个数：
+// 界面上各数一遍，迟早数出两个答案（ADR-0024）。
+
+fn 卡上一份清单(path: &str, bytes: u64) -> Manifest {
+    Manifest {
+        files: vec![ManifestFile {
+            path: path.to_string(),
+            kind: FileKind::Rom,
+            stamp: Stamp {
+                bytes,
+                mtime_ns: None,
+            },
+            source: format!("库/{path}"),
+            source_stamp: Stamp {
+                bytes,
+                mtime_ns: None,
+            },
+            variant: format!("库/{path}"),
+            absent: false,
+        }],
+    }
+}
+
+#[test]
+fn 清单之外的文件只有一处数法_单独数的与计划里的一样() {
+    let dir = 建库();
+    let catalog = 扫成库(dir.path());
+    let 卡 = temp_dir("sync-strangers-card");
+    写(&卡.path().join("saves/我的.sav"), &[7u8; 300]);
+    写(&卡.path().join("FC/魂斗罗.zip"), &zip(2048));
+    let actual = sync::observe(&RealFs::new(), 卡.path()).expect("看得了目标");
+    let 清单 = 卡上一份清单("FC/魂斗罗.zip", 2048);
+
+    let 数的 = sync::strangers(&清单, &actual);
+    assert_eq!((数的.count, 数的.bytes, 数的.unreadable), (1, 300, 0));
+
+    let selected = 选中(&catalog, "平台=FC");
+    let desired =
+        sync::desired(&catalog, &selected, &Profile::unclaimed()).expect("折得出期望状态");
+    let plan = sync::plan(
+        &子库(卡.path(), None),
+        &desired,
+        &清单,
+        &actual,
+        Options {
+            restore_missing: false,
+        },
+    );
+    assert_eq!(
+        (
+            plan.strangers,
+            plan.stranger_bytes,
+            plan.stranger_unreadable
+        ),
+        (数的.count, 数的.bytes, 数的.unreadable),
+        "计划里数的与单独数的不是一个数"
+    );
+}
+
+#[test]
+fn 数一台设备卡上清单之外的文件_路径可以是框里还没存的那一条() {
+    let dir = 建库();
+    let mut catalog = 扫成库(dir.path());
+    let 卡 = temp_dir("sync-strangers-card");
+    写(&卡.path().join("saves/我的.sav"), &[7u8; 300]);
+    写(&卡.path().join("FC/魂斗罗.zip"), &zip(2048));
+    catalog
+        .put_sublibrary(&子库(卡.path(), None))
+        .expect("子库写得进");
+    catalog
+        .put_manifest("掌机", &卡上一份清单("FC/魂斗罗.zip", 2048))
+        .expect("清单写得进");
+
+    let 数的 =
+        sync::prepare::strangers_at(&catalog, "掌机", 卡.path(), &Handle::new()).expect("数得出来");
+    assert_eq!((数的.count, 数的.bytes), (1, 300));
+    let 新的 = sync::prepare::strangers_at(&catalog, "还没建的", 卡.path(), &Handle::new())
+        .expect("数得出来");
+    assert_eq!(新的.count, 2, "还没建的子库没有清单，卡上的都算清单之外");
+}
+
+// ───────────────────────── 落点预览照实际规则（票 `gui-looks-like-the-design/21`，拿主意的人 2026-09-15 定）
+
+#[test]
+fn 落点预览取头一个变体的真实落点_元数据位置照适配器_新建时示例名照同一条规则() {
+    let dir = 建库();
+    let catalog = 扫成库(dir.path());
+    let selected = 选中(&catalog, "平台=FC");
+    let 脚印 = sync::Footprint::gather(&catalog, &selected).expect("读得动");
+    let pegasus = romcat_core::adapter::find("Pegasus").expect("带着 Pegasus");
+    let es = romcat_core::adapter::find("ES-Gamelist").expect("带着 ES");
+
+    let 落点 = 脚印
+        .landing(&Profile::unclaimed(), pegasus.as_ref())
+        .expect("选中了东西就有落点");
+    assert!(
+        落点.rom.starts_with("FC/") && 落点.rom.ends_with(".zip"),
+        "落点剥掉根名、照主库里的平台目录：{落点:?}"
+    );
+    assert_eq!(落点.metadata, "FC.metadata.pegasus.txt");
+    assert_eq!(
+        脚印
+            .landing(&Profile::unclaimed(), es.as_ref())
+            .expect("有落点")
+            .metadata,
+        "gamelists/FC/gamelist.xml"
+    );
+    assert!(
+        sync::Footprint::default()
+            .landing(&Profile::unclaimed(), pegasus.as_ref())
+            .is_none(),
+        "什么都没选中时没有落点可说"
+    );
+
+    let 示例 = sync::Landing::example(es.as_ref(), "GBA", "火焰之纹章 烈火之剑.gba");
+    assert_eq!(示例.rom, "GBA/火焰之纹章 烈火之剑.gba");
+    assert_eq!(示例.metadata, "gamelists/GBA/gamelist.xml");
+}
+
+// ───────────────────────── 前端里的游玩记录与收藏不会被覆盖（票 `gui-looks-like-the-design/21`）
+//
+// 目标设置弹层里那句「前端里的游玩记录和收藏不会被覆盖」要有代码钉着才许照稿写（拿主意的人 2026-09-15 定）。前端那一侧的事实：
+// - ES-DE 把 `favorite` / `playcount` / `playtime` / `lastplayed` 记在 gamelist.xml 里（`es-app/src/MetaData.cpp` 的
+//   `gameDecls`），启动游戏时改 `playcount` 与 `lastplayed` 并存回去（`es-app/src/FileData.cpp` 的 `onMetaDataSavePoint`）。
+// - Pegasus 的收藏在 `writableConfigDir()/favorites.txt`、游玩时长在 `writableConfigDir()/stats.db`
+//   （`pegasus_favorites/Favorites.cpp`、`pegasus_playtime/PlaytimeStats.cpp`），一样都不在 metadata.pegasus.txt 里。
+// 导出那一路（写回主库、带底本）由 `adapter::gamelist` 的「导出时用户状态逐条原样搬过去_省略等于清零」钉着。
+
+#[test]
+fn 前端在卡上改过的元数据文件同步不写回去_游玩记录与收藏还在() {
+    // 那份 gamelist 是工具放上去的（清单记着），ES-DE 玩过之后往里写了 favorite / playcount / lastplayed：
+    // 卡上那份与清单对不上 → 报告、本次不动（ADR-0015），这一趟一个字节都不写回去。
+    let 卡 = temp_dir("sync-frontend-state-card");
+    let 路径 = "gamelists/FC/gamelist.xml";
+    let 工具放的 = b"<gameList><game><path>./a.zip</path><name>A</name></game></gameList>";
+    let 前端改过的 = "<gameList><game><path>./a.zip</path><name>A</name>\
+        <favorite>true</favorite><playcount>42</playcount><lastplayed>20240115T203000</lastplayed>\
+        </game></gameList>";
+    写(&卡.path().join(路径), 前端改过的.as_bytes());
+    let 清单 = Manifest {
+        files: vec![ManifestFile {
+            path: 路径.to_string(),
+            kind: FileKind::Metadata,
+            stamp: Stamp {
+                bytes: 工具放的.len() as u64,
+                mtime_ns: None,
+            },
+            source: "gamelist.xml#0000000000000000".to_string(),
+            source_stamp: Stamp {
+                bytes: 工具放的.len() as u64,
+                mtime_ns: None,
+            },
+            variant: sync::frontend::NOT_A_VARIANT.to_string(),
+            absent: false,
+        }],
+    };
+    let desired = Desired {
+        files: vec![DesiredFile {
+            path: 路径.to_string(),
+            kind: FileKind::Metadata,
+            bytes: 128,
+            unreadable: false,
+            source: "gamelist.xml#1111111111111111".to_string(),
+            source_stamp: Stamp {
+                bytes: 128,
+                mtime_ns: None,
+            },
+            variant: sync::frontend::NOT_A_VARIANT.to_string(),
+            convert: None,
+        }],
+        ..Desired::default()
+    };
+    let actual = sync::observe(&RealFs::new(), 卡.path()).expect("看得了目标");
+    let plan = sync::plan(
+        &子库(卡.path(), None),
+        &desired,
+        &清单,
+        &actual,
+        Options {
+            restore_missing: false,
+        },
+    );
+    assert!(
+        plan.steps.iter().all(|step| step.path != 路径),
+        "前端改过的那份 gamelist 被排进了要写的那几步：{:?}",
+        plan.steps
+    );
+    assert!(
+        plan.surprises.iter().any(|surprise| surprise.path == 路径),
+        "改过的那份要报出来"
+    );
+}
+
+#[test]
+fn 同步不碰卡上pegasus的收藏与游玩时长文件() {
+    // Pegasus 的收藏与游玩时长不在它的元数据文件里；卡上若躺着那两份，它们是清单之外的文件，一步都不进计划。
+    let 卡 = temp_dir("sync-pegasus-state-card");
+    写(
+        &卡.path().join("pegasus-frontend/favorites.txt"),
+        b"GBA/a.zip\n",
+    );
+    写(
+        &卡.path().join("pegasus-frontend/stats.db"),
+        b"SQLite format 3\0",
+    );
+    let actual = sync::observe(&RealFs::new(), 卡.path()).expect("看得了目标");
+    let desired = Desired {
+        files: vec![DesiredFile {
+            path: "GBA.metadata.pegasus.txt".to_string(),
+            kind: FileKind::Metadata,
+            bytes: 64,
+            unreadable: false,
+            source: "metadata.pegasus.txt#2222222222222222".to_string(),
+            source_stamp: Stamp {
+                bytes: 64,
+                mtime_ns: None,
+            },
+            variant: sync::frontend::NOT_A_VARIANT.to_string(),
+            convert: None,
+        }],
+        ..Desired::default()
+    };
+    let plan = sync::plan(
+        &子库(卡.path(), None),
+        &desired,
+        &Manifest::default(),
+        &actual,
+        Options {
+            restore_missing: false,
+        },
+    );
+    assert!(
+        plan.steps
+            .iter()
+            .all(|step| !step.path.ends_with("favorites.txt") && !step.path.ends_with("stats.db")),
+        "Pegasus 的收藏或游玩时长文件进了计划：{:?}",
+        plan.steps
+    );
+    assert_eq!(plan.strangers, 2, "那两份是清单之外的文件，只数一数");
+}

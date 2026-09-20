@@ -1,8 +1,10 @@
 //! 中立库里的**子库**与**选择集**：一台目标设备一行，带它的规则与例外。
 //!
-//! ## 四张表各自回答一个问题
+//! ## 五张表各自回答一个问题
 //!
 //! - `sublibrary`：**这台设备是什么样的**——目标路径、前端格式、容量上限。
+//! - `sublibrary_override`：**这台设备在哪几个平台上不听能力档案的**——按平台覆盖档案的结论
+//!   （票 `gui-looks-like-the-design/21`），只影响这一个子库。
 //! - `sublibrary_rule`：**要什么**，可重放的那一半。存的是**规则的原文**而不是求值
 //!   结果——存结果的话「主库新增的内容下次自动进入」就不成立了，那正是规则存在的理由。
 //! - `sublibrary_exception`：**另外还要 / 偏不要什么**，优先于规则的那一半。
@@ -33,14 +35,21 @@
 //! 在打开时就补上，旧库照样打得开。判据是「旧数据会不会被读错」而不是「文件里多了
 //! 点东西」（见 [`SCHEMA_VERSION`](super::SCHEMA_VERSION) 与挂账 D50）。
 //!
+//! 票 `gui-looks-like-the-design/21` 加的 `sublibrary_override` 也是纯加表：老库上它是空的，读出来就是
+//! 「一个平台都没覆盖」——那正是加它之前的唯一可能。
+//!
 //! 票 20 给这两张表各加了一列（`sublibrary.target_raw`、`sublibrary_manifest.absent`），
 //! 判据仍是同一条：两列在老行上取得到的值与加它们之前的唯一可能完全一致，
 //! 于是旧数据读不错。补列的活在 `add_columns` 里，那个函数的注释写着为什么。
 
+use std::collections::BTreeMap;
+
 use rusqlite::{OptionalExtension, params};
 
 use super::{Catalog, CatalogError};
+use crate::capability::Override;
 use crate::path;
+use crate::sublibrary::target::{NameRefusal, vet_name};
 use crate::sublibrary::{
     Discarded, Exception, ExceptionRow, LoadedSelection, Rule, StoredRule, Sublibrary,
 };
@@ -69,6 +78,10 @@ CREATE TABLE IF NOT EXISTS sublibrary(
     -- 档案本身：矩阵会过时、要能整份换掉，而子库不该跟着一起改。
     -- 这一列由 `add_columns` 给老库补上，见那个函数的注释。
     capability TEXT,
+    -- 容量上限是不是**按设备容量**那一档（票 gui-looks-like-the-design/21）：1 是跟着设备总容量走，
+    -- 这时 `capacity` 记的是上次连上时读到的总容量；0 是自定义，`capacity` 就是那个上限。
+    -- 这一列由 `add_columns` 给老库补上：老行是 0，正是加它之前的唯一可能。
+    capacity_by_device INTEGER NOT NULL DEFAULT 0,
     -- 下一条规则发几号。**只增不减**，于是删掉的号永不复用——见 sublibrary_rule。
     next_rule INTEGER NOT NULL,
     at        INTEGER NOT NULL
@@ -99,6 +112,18 @@ CREATE TABLE IF NOT EXISTS sublibrary_exception(
     note        TEXT,
     at          INTEGER NOT NULL,
     PRIMARY KEY (sublibrary, variant_key)
+) STRICT;
+
+-- **按平台覆盖**能力档案的结论（票 gui-looks-like-the-design/21、ADR-0017「用户可手动覆盖」）。
+-- 只影响这一个子库：名册里那份档案不动，排计划时叠上去（`Profile::with_overrides`）。
+CREATE TABLE IF NOT EXISTS sublibrary_override(
+    sublibrary TEXT    NOT NULL REFERENCES sublibrary(name),
+    -- 平台名，照变体上记的那个写法存；比的时候由矩阵折大小写。
+    platform   TEXT    NOT NULL,
+    -- `不转换` / `zip` / `裸文件`（`Override::code`）。
+    choice     TEXT    NOT NULL,
+    at         INTEGER NOT NULL,
+    PRIMARY KEY (sublibrary, platform)
 ) STRICT;
 
 -- **清单**：某个子库上次导出的完整记录（ADR-0015）。
@@ -149,6 +174,12 @@ pub(super) fn add_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     add_column(conn, "sublibrary", "capability", "TEXT")?;
     add_column(
         conn,
+        "sublibrary",
+        "capacity_by_device",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column(
+        conn,
         "sublibrary_manifest",
         "absent",
         "INTEGER NOT NULL DEFAULT 0",
@@ -197,6 +228,8 @@ pub struct RemovedSublibrary {
     capacity: Option<i64>,
     /// 能力档案的名字。
     capability: Option<String>,
+    /// 容量上限是不是按设备容量那一档，库里那一格的原值。
+    capacity_by_device: i64,
     /// 下一条规则发几号。
     next_rule: i64,
     /// 这一行记下的时刻。
@@ -207,6 +240,8 @@ pub struct RemovedSublibrary {
     exceptions: Vec<RemovedException>,
     /// 清单，按路径。
     manifest: Vec<RemovedManifestFile>,
+    /// 按平台覆盖，按平台。
+    overrides: Vec<RemovedOverride>,
 }
 
 impl RemovedSublibrary {
@@ -243,6 +278,28 @@ struct RemovedException {
     kind: String,
     /// 用户写的那句「为什么」。
     note: Option<String>,
+    /// 记下的时刻。
+    at: i64,
+}
+
+/// [`Catalog::rename_sublibrary`] 怎么了。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Renamed {
+    /// 改好了。新名与旧名一样时什么都不做，也算改好了。
+    Done,
+    /// 没有叫旧名的子库。
+    Missing,
+    /// 新名字不能用：空着、或者已被别的子库用了（[`vet_name`]）。一行都没动。
+    Refused(NameRefusal),
+}
+
+/// [`RemovedSublibrary`] 里一条按平台覆盖：`sublibrary_override` 那几列。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemovedOverride {
+    /// 平台名。
+    platform: String,
+    /// 库里那个词的原样——认不出的也留着。
+    choice: String,
     /// 记下的时刻。
     at: i64,
 }
@@ -287,12 +344,14 @@ impl Catalog {
                 // 改一个已有的子库**不碰 `next_rule`**：发号器是单调的，
                 // 「改一次目标路径」不该让规则的号从头再来。
                 "INSERT INTO sublibrary(
-                     name, target, target_raw, format, capacity, capability, next_rule, at)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)
+                     name, target, target_raw, format, capacity, capability, capacity_by_device,
+                     next_rule, at)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)
                  ON CONFLICT(name) DO UPDATE SET
                     target = excluded.target, target_raw = excluded.target_raw,
                     format = excluded.format,
                     capacity = excluded.capacity, capability = excluded.capability,
+                    capacity_by_device = excluded.capacity_by_device,
                     at = excluded.at",
                 params![
                     sublibrary.name,
@@ -301,6 +360,7 @@ impl Catalog {
                     sublibrary.format,
                     capacity,
                     sublibrary.capability,
+                    i64::from(sublibrary.capacity_by_device),
                     super::now_secs()
                 ],
             )
@@ -315,7 +375,7 @@ impl Catalog {
     pub fn sublibrary(&self, name: &str) -> Result<Option<Sublibrary>, CatalogError> {
         self.conn
             .query_row(
-                "SELECT name, target, target_raw, format, capacity, capability
+                "SELECT name, target, target_raw, format, capacity, capability, capacity_by_device
                  FROM sublibrary WHERE name = ?1",
                 params![name],
                 |row| {
@@ -328,6 +388,7 @@ impl Catalog {
                             .get::<_, Option<i64>>(4)?
                             .and_then(|v| u64::try_from(v).ok()),
                         capability: row.get(5)?,
+                        capacity_by_device: row.get::<_, i64>(6)? != 0,
                     })
                 },
             )
@@ -345,7 +406,7 @@ impl Catalog {
         let mut statement = self
             .conn
             .prepare(
-                "SELECT name, target, target_raw, format, capacity, capability
+                "SELECT name, target, target_raw, format, capacity, capability, capacity_by_device
                  FROM sublibrary ORDER BY name",
             )
             .map_err(|source| self.err(source))?;
@@ -360,11 +421,72 @@ impl Catalog {
                         .get::<_, Option<i64>>(4)?
                         .and_then(|v| u64::try_from(v).ok()),
                     capability: row.get(5)?,
+                    capacity_by_device: row.get::<_, i64>(6)? != 0,
                 })
             })
             .map_err(|source| self.err(source))?;
         rows.collect::<Result<_, _>>()
             .map_err(|source| self.err(source))
+    }
+
+    /// **给一个子库改名**（票 `gui-looks-like-the-design/21`，拿主意的人 2026-09-15 定：照稿名字可改）。
+    ///
+    /// 子库按名字存：规则、例外、按平台覆盖、清单都挂在名字上。所以改名是**在一个事务里按新名放一行、把挂着的
+    /// 几张表挪过去、再删掉旧的那一行**——目标、前端格式、容量上限、能力档案、下一条规则发几号、清单里「你删过、
+    /// 工具记着不补」的那几格原样跟过去，下一趟差量预览与改名之前一模一样。放行一条不挪的，同步就会把自己放过的
+    /// 文件当成清单之外，碰都不敢碰（ADR-0015）。
+    ///
+    /// 新名两头的空白去掉；空着、或者撞上别的子库时一行都不动，交回 [`Renamed::Refused`]（判据是 [`vet_name`]，
+    /// 目标设置弹层当场判的也是它）。
+    ///
+    /// # Errors
+    /// 读写库失败时返回错误。
+    pub fn rename_sublibrary(&mut self, from: &str, to: &str) -> Result<Renamed, CatalogError> {
+        if self.sublibrary(from)?.is_none() {
+            return Ok(Renamed::Missing);
+        }
+        let to = to.trim();
+        if let Err(refusal) = vet_name(self, Some(from), to)? {
+            return Ok(Renamed::Refused(refusal));
+        }
+        if to == from {
+            return Ok(Renamed::Done);
+        }
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        // **先放新的那一行**：挂着的几张表有外键指着 `sublibrary(name)`，挪过去之前新名得已经在。
+        // 这张表往后再加列，这一句的列表要跟着加——漏一列，改名就悄悄把那一格丢了。
+        tx.execute(
+            "INSERT INTO sublibrary(
+                 name, target, target_raw, format, capacity, capability, capacity_by_device,
+                 next_rule, at)
+             SELECT ?2, target, target_raw, format, capacity, capability, capacity_by_device,
+                    next_rule, at
+             FROM sublibrary WHERE name = ?1",
+            params![from, to],
+        )
+        .map_err(to_err)?;
+        for table in [
+            "sublibrary_rule",
+            "sublibrary_exception",
+            "sublibrary_override",
+            "sublibrary_manifest",
+        ] {
+            // 表名是上面这几个写死的字面量，不来自外面。
+            tx.execute(
+                &format!("UPDATE {table} SET sublibrary = ?2 WHERE sublibrary = ?1"),
+                params![from, to],
+            )
+            .map_err(to_err)?;
+        }
+        tx.execute("DELETE FROM sublibrary WHERE name = ?1", params![from])
+            .map_err(to_err)?;
+        tx.commit().map_err(to_err)?;
+        Ok(Renamed::Done)
     }
 
     /// 删掉一个子库，连它的规则、例外与清单一起。返回它本来在不在。
@@ -400,7 +522,8 @@ impl Catalog {
         let tx = self.conn.transaction().map_err(to_err)?;
         let row = tx
             .query_row(
-                "SELECT name, target, target_raw, format, capacity, capability, next_rule, at
+                "SELECT name, target, target_raw, format, capacity, capability, next_rule, at,
+                        capacity_by_device
                  FROM sublibrary WHERE name = ?1",
                 params![name],
                 |row| {
@@ -413,9 +536,11 @@ impl Catalog {
                         capability: row.get(5)?,
                         next_rule: row.get(6)?,
                         at: row.get(7)?,
+                        capacity_by_device: row.get(8)?,
                         rules: Vec::new(),
                         exceptions: Vec::new(),
                         manifest: Vec::new(),
+                        overrides: Vec::new(),
                     })
                 },
             )
@@ -487,11 +612,30 @@ impl Catalog {
                 .map_err(to_err)?;
             removed.manifest = rows.collect::<Result<_, _>>().map_err(to_err)?;
         }
+        {
+            let mut statement = tx
+                .prepare(
+                    "SELECT platform, choice, at FROM sublibrary_override
+                     WHERE sublibrary = ?1 ORDER BY platform",
+                )
+                .map_err(to_err)?;
+            let rows = statement
+                .query_map(params![name], |row| {
+                    Ok(RemovedOverride {
+                        platform: row.get(0)?,
+                        choice: row.get(1)?,
+                        at: row.get(2)?,
+                    })
+                })
+                .map_err(to_err)?;
+            removed.overrides = rows.collect::<Result<_, _>>().map_err(to_err)?;
+        }
         // **先删子表**：外键检查默认是开着的（见 `catalog::content` 里那段注释）。
         for table in [
             "sublibrary_manifest",
             "sublibrary_exception",
             "sublibrary_rule",
+            "sublibrary_override",
         ] {
             // 表名是上面这几个写死的字面量，不来自外面。
             tx.execute(
@@ -536,8 +680,9 @@ impl Catalog {
         }
         tx.execute(
             "INSERT INTO sublibrary(
-                 name, target, target_raw, format, capacity, capability, next_rule, at)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 name, target, target_raw, format, capacity, capability, next_rule, at,
+                 capacity_by_device)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 removed.name,
                 removed.target,
@@ -547,6 +692,7 @@ impl Catalog {
                 removed.capability,
                 removed.next_rule,
                 removed.at,
+                removed.capacity_by_device,
             ],
         )
         .map_err(to_err)?;
@@ -602,6 +748,17 @@ impl Catalog {
                         file.absent,
                         file.at,
                     ])
+                    .map_err(to_err)?;
+            }
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO sublibrary_override(sublibrary, platform, choice, at)
+                     VALUES(?1, ?2, ?3, ?4)",
+                )
+                .map_err(to_err)?;
+            for row in &removed.overrides {
+                insert
+                    .execute(params![removed.name, row.platform, row.choice, row.at])
                     .map_err(to_err)?;
             }
         }
@@ -889,6 +1046,95 @@ impl Catalog {
             .map_err(|source| self.err(source))?;
         rows.collect::<Result<_, _>>()
             .map_err(|source| self.err(source))
+    }
+
+    /// 读一个子库的**按平台覆盖**（票 `gui-looks-like-the-design/21`）：平台名 → 覆盖成什么。一个都没有是空表。
+    ///
+    /// 库里认不出的那个词（被人手改坏了）**跳过**：跳过就是照名册判，而名册里的结论是有来源的——
+    /// 猜一个覆盖出来替用户做决定，正是 ADR-0017 那句「矩阵错误比不转换更糟」说的那种错。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn capability_overrides(
+        &self,
+        name: &str,
+    ) -> Result<BTreeMap<String, Override>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT platform, choice FROM sublibrary_override
+                 WHERE sublibrary = ?1 ORDER BY platform",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![name], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (platform, choice) = row.map_err(|source| self.err(source))?;
+            if let Some(choice) = Override::from_code(&choice) {
+                out.insert(platform, choice);
+            }
+        }
+        Ok(out)
+    }
+
+    /// 库里**头一个有平台的变体**（按键排）住在哪个平台目录下：目标设置里前端格式那句说明拿它举例
+    /// （「每个平台一份，例如 GBA.metadata.pegasus.txt」，票 `gui-looks-like-the-design/21`），界面上不写死平台名。
+    /// 目录照键的第二段（`path::platform_of_key`，与收敛、落点同一个口径）；库里一个有平台的变体都没有时是 `None`。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn sample_platform_directory(&self) -> Result<Option<String>, CatalogError> {
+        let key: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT key FROM variant WHERE platform IS NOT NULL ORDER BY key LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|source| self.err(source))?;
+        Ok(key.and_then(|key| path::platform_of_key(&key).map(ToString::to_string)))
+    }
+
+    /// 换掉一个子库的**按平台覆盖**：**整份替换**，不是往上叠——目标设置里改回「按档案」的那几行就是没了。
+    ///
+    /// # Errors
+    /// 写库失败，或者这个子库不存在时返回错误。
+    pub fn set_capability_overrides(
+        &mut self,
+        name: &str,
+        overrides: &BTreeMap<String, Override>,
+    ) -> Result<(), CatalogError> {
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        tx.execute(
+            "DELETE FROM sublibrary_override WHERE sublibrary = ?1",
+            params![name],
+        )
+        .map_err(to_err)?;
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO sublibrary_override(sublibrary, platform, choice, at)
+                     VALUES(?1, ?2, ?3, ?4)",
+                )
+                .map_err(to_err)?;
+            let at = super::now_secs();
+            for (platform, choice) in overrides {
+                insert
+                    .execute(params![name, platform, choice.code(), at])
+                    .map_err(to_err)?;
+            }
+        }
+        tx.commit().map_err(to_err)
     }
 
     /// 把一个子库的规则与例外读成一份**选择集**。

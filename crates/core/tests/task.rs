@@ -73,6 +73,7 @@ impl 现场 {
                 format: "pegasus".to_string(),
                 capacity: None,
                 capability: None,
+                capacity_by_device: false,
             })
             .expect("建得出子库");
         catalog
@@ -247,6 +248,7 @@ fn 后台那份只读连接读得到同一份库而且写不动() {
         format: "pegasus".to_string(),
         capacity: None,
         capability: None,
+        capacity_by_device: false,
     });
     assert!(写不动.is_err(), "只读连接居然写进去了");
     assert_eq!(

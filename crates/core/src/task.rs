@@ -563,12 +563,16 @@ struct Queued<T> {
     id: u64,
     name: String,
     job: Job<T>,
+    /// **不留历史**的活（[`Board::queue_quiet`]）。
+    quiet: bool,
 }
 
 /// 正在跑的那一趟。
 struct Running<T> {
     id: u64,
     name: String,
+    /// **不留历史**的活（[`Board::queue_quiet`]）。
+    quiet: bool,
     handle: Handle,
     /// 主线程这边什么时候把它排上去的。**只用来画「已用多久」**——
     /// 记进历史的那个数由干活那条线程自己掐表（见 [`Board::start_next`]）。
@@ -630,23 +634,37 @@ impl<T> Board<T> {
         !self.finished.is_empty()
     }
 
-    /// 正在跑的那一趟。
+    /// 正在跑的那一趟。**不留历史的活不算**（[`Self::queue_quiet`]）：任务屏与状态栏只列人自己点起来的活。
     #[must_use]
     pub fn running(&self) -> Option<Live> {
-        self.running.as_ref().map(|running| Live {
-            id: running.id,
-            name: running.name.clone(),
-            elapsed: running.started.elapsed(),
-            progress: running.handle.progress(),
-            stopping: running.handle.stopped(),
-        })
+        self.running
+            .as_ref()
+            .filter(|running| !running.quiet)
+            .and_then(|running| self.live(running.id))
     }
 
-    /// 排着队还没轮到的那几趟，按先来后到。
+    /// 按任务号查**正在跑**的那一趟的进度，不留历史的活也查得到：打开弹层时顺带跑的小活，进度只在弹层里画。
+    /// 不在跑（还排着、跑完了、号对不上）时是 `None`。
+    #[must_use]
+    pub fn live(&self, id: u64) -> Option<Live> {
+        self.running
+            .as_ref()
+            .filter(|running| running.id == id)
+            .map(|running| Live {
+                id: running.id,
+                name: running.name.clone(),
+                elapsed: running.started.elapsed(),
+                progress: running.handle.progress(),
+                stopping: running.handle.stopped(),
+            })
+    }
+
+    /// 排着队还没轮到的那几趟，按先来后到。**不留历史的活不列**（[`Self::queue_quiet`]）。
     #[must_use]
     pub fn queued(&self) -> Vec<(u64, String)> {
         self.queued
             .iter()
+            .filter(|job| !job.quiet)
             .map(|job| (job.id, job.name.clone()))
             .collect()
     }
@@ -673,11 +691,29 @@ impl<T: Send + 'static> Board<T> {
         name: impl Into<String>,
         job: impl FnOnce(&Handle) -> Result<T, Cutoff> + Send + 'static,
     ) -> u64 {
+        self.enqueue(name.into(), Box::new(job), false)
+    }
+
+    /// 排一趟**不留历史**的活（票 `gui-looks-like-the-design/21`，拿主意的人 2026-09-15 定）：跑法与 [`Self::queue`] 一样，
+    /// 产物照旧按号交回，只是**收场之后不进历史**，跑着、排着时也不列在 [`Self::running`] / [`Self::queued`] 里。
+    ///
+    /// 给打开弹层时顺带跑的小活用（读这台设备的选择集、数清单外文件）：那不是人点起来的一趟活，记进历史只是噪音。
+    /// 进度要画的话按号问 [`Self::live`]。**人自己点起来的活一律走 [`Self::queue`]。**
+    pub fn queue_quiet(
+        &mut self,
+        name: impl Into<String>,
+        job: impl FnOnce(&Handle) -> Result<T, Cutoff> + Send + 'static,
+    ) -> u64 {
+        self.enqueue(name.into(), Box::new(job), true)
+    }
+
+    fn enqueue(&mut self, name: String, job: Job<T>, quiet: bool) -> u64 {
         let id = self.take_id();
         self.queued.push_back(Queued {
             id,
-            name: name.into(),
-            job: Box::new(job),
+            name,
+            job,
+            quiet,
         });
         self.start_next();
         id
@@ -696,8 +732,25 @@ impl<T: Send + 'static> Board<T> {
         name: impl Into<String>,
         job: impl FnOnce(&Handle) -> Result<T, Cutoff>,
     ) -> u64 {
+        self.run_here_as(name.into(), job, false)
+    }
+
+    /// **就地跑一趟不留历史的活**：[`Self::run_here`] 的跑法，[`Self::queue_quiet`] 的账——产物照旧按号交回，收场不进历史。
+    pub fn run_here_quiet(
+        &mut self,
+        name: impl Into<String>,
+        job: impl FnOnce(&Handle) -> Result<T, Cutoff>,
+    ) -> u64 {
+        self.run_here_as(name.into(), job, true)
+    }
+
+    fn run_here_as(
+        &mut self,
+        name: String,
+        job: impl FnOnce(&Handle) -> Result<T, Cutoff>,
+        quiet: bool,
+    ) -> u64 {
         let id = self.take_id();
-        let name = name.into();
         let handle = Handle::new();
         let started = Instant::now();
         let result = job(&handle);
@@ -705,6 +758,7 @@ impl<T: Send + 'static> Board<T> {
         self.settle(
             id,
             name,
+            quiet,
             elapsed,
             crate::catalog::now_secs(),
             &handle,
@@ -727,17 +781,19 @@ impl<T: Send + 'static> Board<T> {
         if let Some(at) = self.queued.iter().position(|job| job.id == id) {
             let job = self.queued.remove(at).expect("刚找到的位置");
             // **撤掉的那一趟照样交回给排它的人**：不然排活的那一屏会一直记着
-            // 「我还有一趟在排」，那个按钮就再也按不动了。
-            self.history.insert(
-                0,
-                Record {
-                    id: job.id,
-                    name: job.name.clone(),
-                    elapsed: Duration::ZERO,
-                    ended_at: crate::catalog::now_secs(),
-                    ending: Ending::Stopped,
-                },
-            );
+            // 「我还有一趟在排」，那个按钮就再也按不动了。不留历史的活照旧不进历史。
+            if !job.quiet {
+                self.history.insert(
+                    0,
+                    Record {
+                        id: job.id,
+                        name: job.name.clone(),
+                        elapsed: Duration::ZERO,
+                        ended_at: crate::catalog::now_secs(),
+                        ending: Ending::Stopped,
+                    },
+                );
+            }
             self.finished.push_back(Finished {
                 id: job.id,
                 name: job.name,
@@ -778,6 +834,7 @@ impl<T: Send + 'static> Board<T> {
         self.settle(
             running.id,
             running.name,
+            running.quiet,
             elapsed,
             ended_at,
             &running.handle,
@@ -788,10 +845,12 @@ impl<T: Send + 'static> Board<T> {
     }
 
     /// 把一趟的结果折成收场、记进历史、放进待认领那一格。
+    #[allow(clippy::too_many_arguments)]
     fn settle(
         &mut self,
         id: u64,
         name: String,
+        quiet: bool,
         elapsed: Duration,
         ended_at: i64,
         handle: &Handle,
@@ -813,16 +872,18 @@ impl<T: Send + 'static> Board<T> {
         // 的走 [`Ending::Halfway`]，没报过的才是「跑完了」。写过东西的活被叫停时
         // 走的正是前者——它照旧交出产物（清单、断点），可这一趟只走了一半。
         let ended = Ending::of(result, handle);
-        self.history.insert(
-            0,
-            Record {
-                id,
-                name: name.clone(),
-                elapsed,
-                ended_at,
-                ending: ended.forget(),
-            },
-        );
+        if !quiet {
+            self.history.insert(
+                0,
+                Record {
+                    id,
+                    name: name.clone(),
+                    elapsed,
+                    ended_at,
+                    ending: ended.forget(),
+                },
+            );
+        }
         self.finished.push_back(Finished {
             id,
             name,
@@ -849,6 +910,7 @@ impl<T: Send + 'static> Board<T> {
         self.running = Some(Running {
             id: job.id,
             name: job.name,
+            quiet: job.quiet,
             handle,
             started: Instant::now(),
             thread,
@@ -1287,5 +1349,63 @@ mod tests {
                 record.ended_at,
             );
         }
+    }
+
+    #[test]
+    fn 不留历史的活跑完不进历史_跑着时不在台上那两栏里_按号查得到进度() {
+        // 票 `gui-looks-like-the-design/21`（拿主意的人 2026-09-15 定）：打开弹层时顺带跑的小活（读选择集、数清单外文件）
+        // 不进任务历史，跑着时也不摆在任务屏与状态栏里——那两处只列人自己点起来的活。
+        let mut board: Board<u32> = Board::new();
+        let 就地 = board.run_here_quiet("读选择集", |_| Ok(1));
+        assert!(board.history().is_empty(), "就地跑完的不留历史的活进了历史");
+        let done = board.poll().expect("产物照旧交得出来");
+        assert_eq!((done.id, done.name.as_str()), (就地, "读选择集"));
+
+        let (放行, 等着) = std::sync::mpsc::channel::<()>();
+        let 后台 = board.queue_quiet("数清单之外的文件", move |_| {
+            let _ = 等着.recv();
+            Ok(2)
+        });
+        assert!(board.busy(), "它照样占着台上那个位子");
+        assert!(
+            board.running().is_none(),
+            "不留历史的活不该摆在任务台那一栏里"
+        );
+        assert_eq!(
+            board.live(后台).map(|live| live.id),
+            Some(后台),
+            "按号查得到它的进度，弹层里照它画"
+        );
+        let 人点的 = board.queue("算一遍容量", |_| Ok(3));
+        assert_eq!(board.queued(), vec![(人点的, "算一遍容量".to_string())]);
+        drop(放行);
+        let mut 收到 = Vec::new();
+        while 收到.len() < 2 {
+            if let Some(done) = board.poll() {
+                收到.push(done.id);
+            }
+        }
+        assert_eq!(收到, vec![后台, 人点的]);
+        assert_eq!(board.history().len(), 1, "只有人自己点起来的那一趟进历史");
+        assert_eq!(board.history()[0].id, 人点的);
+    }
+
+    #[test]
+    fn 排着队的不留历史的活撤掉也不进历史() {
+        let mut board: Board<u32> = Board::new();
+        let (放行, 等着) = std::sync::mpsc::channel::<()>();
+        let 占位 = board.queue("占着位子", move |_| {
+            let _ = 等着.recv();
+            Ok(0)
+        });
+        let 小活 = board.queue_quiet("读选择集", |_| Ok(1));
+        assert!(board.queued().is_empty(), "排着的不留历史的活也不列出来");
+        board.stop(小活);
+        let 撤掉的 = board.poll().expect("撤掉的那一趟照旧交回给排它的人");
+        assert_eq!(撤掉的.id, 小活);
+        assert!(board.history().is_empty(), "撤掉的不留历史的活进了历史");
+        drop(放行);
+        while board.poll().is_none() {}
+        assert_eq!(board.history()[0].id, 占位);
     }
 }
