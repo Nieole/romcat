@@ -92,8 +92,10 @@ pub struct Queue {
     /// 与 `groups` 一起在换选择器时算一遍：分批本来就要走完全部条目，而走完了不留着
     /// 等于每帧再走一遍。真机上这是一万八千条一趟——与三个轴那三趟同一个量级。
     batches: Vec<Batch>,
-    /// 选中的那些按**四档**各有多少条。屏头上那几个数。
+    /// 选中的那些按**四档**各有多少条。
     tiers: [(Tier, u64); Tier::ALL.len()],
+    /// **整个队列**按四档各有多少条，不随选择器动。屏头上那三枚标签数的是它。
+    all_tiers: [(Tier, u64); Tier::ALL.len()],
     /// 队列**换过几次样子**：换选择器、换排序、裁完一批、撤回一批，各算一次。
     ///
     /// 界面拿它当**缓存的钥匙**：展开那一批的二级分组与随机样本只在这个数变了之后
@@ -143,6 +145,7 @@ impl Queue {
             groups: Default::default(),
             batches: Vec::new(),
             tiers: batch::by_tier(&[]),
+            all_tiers: batch::by_tier(&[]),
             revision: 0,
             printed: BTreeSet::new(),
         };
@@ -166,6 +169,7 @@ impl Queue {
             groups: Default::default(),
             batches: Vec::new(),
             tiers: batch::by_tier(&[]),
+            all_tiers: batch::by_tier(&[]),
             revision: 0,
             printed: BTreeSet::new(),
         }
@@ -259,6 +263,16 @@ impl Queue {
     #[must_use]
     pub fn tiers(&self) -> &[(Tier, u64)] {
         &self.tiers
+    }
+
+    /// **整个队列**按四档各有多少条，**不随选择器动**：屏头那三枚标签数的是它（设计稿 `.scrhead`，拿主意的人
+    /// 2026-09-15 定）——人换一套选择器、切到逐条只看有多个候选的那几批，屏头那三个数不该跟着跳。
+    ///
+    /// 口径与 [`Queue::pending`] 一样：**跳过**不算（它不是「拿不定主意」）。要「选中的那些各有多少条」，
+    /// 看 [`Queue::tiers`]。
+    #[must_use]
+    pub fn all_tiers(&self) -> &[(Tier, u64)] {
+        &self.all_tiers
     }
 
     /// 选中的那些一共挂着多少条**候选**。屏头上「N 变体 · M 条候选」的后一个数。
@@ -518,6 +532,19 @@ impl Queue {
         self.groups = Axis::ALL.map(|axis| tally(self.selected(), axis));
         self.batches = batch::batches(self.selected());
         self.tiers = batch::by_tier(self.selected());
+        // **整个队列那一份**：屏头三枚标签数的是它，换选择器不该让它跳（设计稿 `.scrhead`）。口径与
+        // [`Queue::pending`] 一样——**跳过**不算，它不是「拿不定主意」。与上面几样一起算：这一趟本来就走完了
+        // 选中的那些，整个队列多走一遍是同一个量级。
+        let mut all = batch::by_tier(&[]);
+        for item in &self.items {
+            if item.state == crate::catalog::State::Skipped {
+                continue;
+            }
+            if let Some(格) = all.iter_mut().find(|(tier, _)| *tier == item.tier()) {
+                格.1 += 1;
+            }
+        }
+        self.all_tiers = all;
         self.revision = self.revision.wrapping_add(1);
     }
 }

@@ -2593,7 +2593,7 @@ fn 屏头右侧照稿_三枚置信度标签_按批逐条那一对_裁决记录()
     let mut app = 界面(demo::QUEUE_ROWS);
     跑(&ctx, &mut app, 2);
     let 屏上 = 画一帧(&ctx, &mut app);
-    for (tier, count) in app.queue().queue().tiers().to_vec() {
+    for (tier, count) in app.queue().queue().all_tiers().to_vec() {
         let 那一枚 = format!("{} {}", tier.label(), thousands(count));
         assert_eq!(
             屏上.lines().any(|line| line == 那一枚),
@@ -2629,8 +2629,24 @@ fn 屏头右侧照稿_三枚置信度标签_按批逐条那一对_裁决记录()
         app.queue().scope().is_none(),
         "屏头那颗「逐条」看的不是默认展开的头一批",
     );
-    // 照稿（设计稿 `.obolist` 栏头）：屏头「逐条」看的是有多个候选的那些，栏头写「有多个候选 N 条」。
+    // 照稿（设计稿 `.obolist` 栏头）：屏头「逐条」看的是有多个候选的那些，栏头写「有多个候选 N 条」，
+    // 详情抬头写「第 1 条 · 共 N 条有多个候选」。
     assert_eq!(app.queue().queue().selected().len() as u64, 多候选);
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line == format!("第 1 条 · 共 {} 条有多个候选", thousands(多候选))),
+        "详情抬头没照稿写全：\n{屏上}"
+    );
+    // 屏头那三枚数的是整个队列，切到逐条之后照旧（设计稿 `.scrhead`）。
+    for (tier, count) in app.queue().queue().all_tiers().to_vec() {
+        let 那一枚 = format!("{} {}", tier.label(), thousands(count));
+        assert_eq!(
+            屏上.lines().any(|line| line == 那一枚),
+            tier != Tier::Unidentified,
+            "切到逐条之后「{那一枚}」该不该在屏头上：\n{屏上}",
+        );
+    }
     for 该有 in [
         "有多个候选".to_string(),
         format!("{} 条", thousands(多候选)),
@@ -2966,6 +2982,19 @@ fn 逐条照稿两栏_左边待选列表_右边详情有候选卡片四颗按钮
             屏上.lines().any(|line| line == 那一段),
             "屏上没有「{那一段}」：\n{屏上}"
         );
+    }
+    // 候选卡片的标题只写作品名，中文身份另起一枚标签（照稿）。
+    for candidate in &item.candidates {
+        assert!(
+            屏上.lines().any(|line| line == candidate.game),
+            "候选卡片的标题不是光作品名：\n{屏上}"
+        );
+        if let Some(mark) = candidate.chinese {
+            assert!(
+                屏上.lines().any(|line| line == mark.label()),
+                "中文身份那一枚标签没画：\n{屏上}"
+            );
+        }
     }
     for 键 in ["←", "→", "Y", "N", "空格", "U"] {
         assert!(

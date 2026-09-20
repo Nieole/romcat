@@ -1027,7 +1027,8 @@ impl Screen {
         self.sync();
         // **三档一眼看得出哪批稳、哪批悬**（规格 37）。颜色与标签同出一处（[`look::tier_tone`]、[`Tier::label`]）。
         // 第四档「**没有候选**」不在屏头（照稿，拿主意的人 2026-09-15 定）：它的数写在正文第三格。
-        for (tier, count) in self.queue.tiers() {
+        // 数的是**整个队列**，不随选择器动（设计稿 `.scrhead`）——切到逐条只看有多个候选的那几批时，这三个数照旧。
+        for (tier, count) in self.queue.all_tiers() {
             if *tier == Tier::Unidentified {
                 continue;
             }
@@ -1729,10 +1730,8 @@ impl Screen {
             .iter()
             .map(|candidate| CandidateCard {
                 tier: Tier::of(Some(candidate.confidence)),
-                game: match candidate.chinese {
-                    Some(mark) => format!("{} · {}", candidate.game, mark.label()),
-                    None => candidate.game.clone(),
-                },
+                game: candidate.game.clone(),
+                mark: candidate.chinese.map(|mark| mark.label().to_owned()),
                 source: candidate.source.clone(),
                 matched: format!("{} · {}", candidate.dat, candidate.hashed_as.label()),
                 evidence: candidate.evidence.clone(),
@@ -1748,9 +1747,11 @@ impl Screen {
         look::section(
             ui,
             &format!(
-                "第 {} 条 · 共 {} 条",
+                "第 {} 条 · 共 {} 条{}",
                 thousands(at as u64 + 1),
-                thousands_len(共)
+                thousands_len(共),
+                // 「共 N 条有多个候选」：后面跟的是左边那一栏的名字（设计稿 `.obodet` 抬头）。
+                self.picks.only.as_ref().map_or("", Only::head_suffix),
             ),
         );
         ui.add_space(tokens.space.obo_head_gap);
@@ -3675,8 +3676,10 @@ fn samples_column(ui: &mut egui::Ui, samples: &[Sample]) -> bool {
 struct CandidateCard {
     /// 这条候选落在四档里的哪一档。
     tier: Tier,
-    /// 作品（带着中文身份的话跟在后头）。
+    /// 作品。**只有作品名**：中文身份另起一枚标签（照稿，拿主意的人 2026-09-15 定）。
     game: String,
+    /// 这条候选的**中文身份**（汉化版、官中），没有就是 `None`。
+    mark: Option<String>,
     /// 哪个数据源。
     source: String,
     /// 撞的哪一份 DAT、按哪套哈希口径。
@@ -3783,7 +3786,12 @@ fn candidate_card(
                     )
                     .wrap(),
                 );
-                look::chip(ui, look::tier_tone(card.tier), card.tier.label());
+                ui.horizontal(|ui| {
+                    look::chip(ui, look::tier_tone(card.tier), card.tier.label());
+                    if let Some(mark) = &card.mark {
+                        look::chip(ui, look::Tone::Neutral, mark);
+                    }
+                });
                 let 字号 = look::font_size(ui.ctx(), tokens.font.size_caption_plus);
                 let 等宽字号 = tokens.font.size_caption;
                 let [行竖, 行横] = tokens.space.candidate_row_gap;
@@ -3911,6 +3919,15 @@ impl Only {
         match self {
             Self::Batch(shape) => shape.label(),
             Self::Multiple(_) => "有多个候选".to_owned(),
+        }
+    }
+
+    /// 详情抬头「共 N 条…」后面跟的那几个字（设计稿 `.obodet` 抬头）：有多个候选那一栏自己有名字，
+    /// 某一批那一栏的名字太长（整串依据形状），栏头上已经写着，这里不重复。
+    fn head_suffix(&self) -> &'static str {
+        match self {
+            Self::Batch(_) => "",
+            Self::Multiple(_) => "有多个候选",
         }
     }
 
