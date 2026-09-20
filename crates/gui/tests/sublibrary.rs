@@ -4112,8 +4112,9 @@ fn 撤掉一条例外之后合计与容量条跟着变() {
     assert_eq!(排掉之后.bytes, 全都要.bytes - 那么大);
     let 屏上 = 画两帧(&ctx, &mut 场);
     assert!(
-        屏上.lines().any(|line| line
-            == format!("合计 2 个变体 · {}", human_bytes(排掉之后.bytes))),
+        屏上
+            .lines()
+            .any(|line| line == format!("合计 2 个变体 · {}", human_bytes(排掉之后.bytes))),
         "合计那一行没跟着例外变：\n{屏上}"
     );
 
@@ -4131,8 +4132,9 @@ fn 撤掉一条例外之后合计与容量条跟着变() {
     assert_eq!(撤掉之后.bytes, 全都要.bytes);
     let 屏上 = 画两帧(&ctx, &mut 场);
     assert!(
-        屏上.lines().any(|line| line
-            == format!("合计 3 个变体 · {}", human_bytes(全都要.bytes))),
+        屏上
+            .lines()
+            .any(|line| line == format!("合计 3 个变体 · {}", human_bytes(全都要.bytes))),
         "撤销之后合计那一行没跟着变：\n{屏上}"
     );
     assert!(
@@ -4208,7 +4210,10 @@ fn 没有例外时两栏各是空态并写明从哪儿加() {
         屏上.contains("在下面搜作品直接添加"),
         "空态没写明从哪儿加：\n{屏上}"
     );
-    assert!(!屏上.lines().any(|line| line == "撤销"), "空着却画出了表身：\n{屏上}");
+    assert!(
+        !屏上.lines().any(|line| line == "撤销"),
+        "空着却画出了表身：\n{屏上}"
+    );
 
     场.换栏(Exception::Exclude);
     let 屏上 = 画两帧(&ctx, &mut 场);
@@ -4235,7 +4240,12 @@ fn 子库屏改过例外之后浏览屏缓着的那份跟着重读() {
     // 浏览屏上开始改这个子库——人既没按「更新到子库」也没按「不改了」，就从左栏切回了子库屏。
     场.改选择();
     assert!(
-        场.app.browse().editing().expect("在改").exceptions.is_empty(),
+        场.app
+            .browse()
+            .editing()
+            .expect("在改")
+            .exceptions
+            .is_empty(),
         "前提：浏览屏手上一条例外都没有"
     );
     场.app.show_view(View::Sublibraries);
@@ -4288,7 +4298,12 @@ fn 优先级表读不动时手动例外那一层不开_屏上说清为什么() {
         场.app.sublibrary().exceptions_open().is_none(),
         "优先级表读不动，这一层却照样开了"
     );
-    let 说的 = 场.app.sublibrary().error().expect("该在屏上说一句").to_string();
+    let 说的 = 场
+        .app
+        .sublibrary()
+        .error()
+        .expect("该在屏上说一句")
+        .to_string();
     assert!(
         说的.contains("优先级表读不动"),
         "没说清是优先级表读不动：{说的}"

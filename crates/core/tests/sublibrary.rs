@@ -241,7 +241,12 @@ fn 例外那张表逐条写得出作品平台体积与备注_库里没有那个�
         .expect("例外写得进");
     // **库里眼下没有这个变体**：盘没插、目录改了名。例外照旧记着，不删（ADR-0016）。
     catalog
-        .set_exception("掌机", "库/GB/盘没插时看不到的.zip", Exception::Exclude, None)
+        .set_exception(
+            "掌机",
+            "库/GB/盘没插时看不到的.zip",
+            Exception::Exclude,
+            None,
+        )
         .expect("例外写得进");
 
     let 表 = catalog

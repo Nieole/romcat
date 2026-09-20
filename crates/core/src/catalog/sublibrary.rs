@@ -1080,8 +1080,8 @@ impl Catalog {
     ///
     /// **屏上那个名字只在一处答**（ADR-0024）：认出作品的走
     /// [`title::choose`](crate::title::choose)（与浏览屏主列表、详情面板、导出同一处），
-    /// **认不出作品的走那个变体的正题**（[`loose_title`](super::browse::loose_title)，
-    /// 与 [`WorkRow::title`](super::browse::WorkRow::title) 同一支）。
+    /// **认不出作品的走那个变体的正题**——与
+    /// [`WorkRow::title`](super::browse::WorkRow::title) 同一支（`browse::loose_title`）。
     ///
     /// 因此两份配置都要交进来，而且要与那几处交的是同一份：`priorities` 是工作目录里那份优先级表，
     /// `rules` 是工作目录里那份剥离规则（`sources::rules`）。交错了，同一份内容在两屏上就是两个名字。
@@ -1097,7 +1097,10 @@ impl Catalog {
         // **方向那一列只在一处认**（[`Self::sublibrary_exceptions`]，连同库被人手改坏时退成「排除」
         // 那条判断）：这一趟只在旁边补上库里的事实。
         let mut rows = self.sublibrary_exceptions(name)?;
-        rows.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.variant_key.cmp(&b.variant_key)));
+        rows.sort_by(|a, b| {
+            b.at.cmp(&a.at)
+                .then_with(|| a.variant_key.cmp(&b.variant_key))
+        });
         // 头一趟：库里眼下有没有这一份、它是谁。**逐条按主键取**，不拼一条长 `IN`——例外一台
         // 几十条，每一条都是一次索引定位，而把几十个键塞进一条 SQL 要跟着分批（`KEYS_PER_QUERY`）。
         // 这一步 `work` 那一格装的还是**作品名**，显示标题在第二趟里换。

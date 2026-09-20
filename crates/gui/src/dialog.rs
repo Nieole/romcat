@@ -254,6 +254,11 @@ enum Slot {
     Rest(usize),
 }
 
+/// [标头那一排](Dialog::head)画什么：收一个 `Ui` 的闭包，画完就丢。
+///
+/// 起个名字是因为它写全了太长（`clippy::type_complexity`），而这个名字比那一串更说得清它是什么。
+type Head<'a> = Box<dyn FnOnce(&mut egui::Ui) + 'a>;
+
 /// 一层弹层。
 ///
 /// `'a` 是[标头那一排](Self::head)那个闭包借着的东西活多久——摆它的那一屏手上的状态。调用方摆弹层
@@ -268,7 +273,7 @@ pub struct Dialog<'a, A> {
     /// 标头那一排「走到第几问」：各问的名字，与眼下是第几问（从 0 数）。
     pages: Option<(Vec<String>, usize)>,
     /// 标头底下、分隔线上面那一排（[`Self::head`]）。
-    head: Option<Box<dyn FnOnce(&mut egui::Ui) + 'a>>,
+    head: Option<Head<'a>>,
     /// 页脚左边那句说明字（[`Self::footer_note`]）。
     footer_note: Option<String>,
     /// 多宽。

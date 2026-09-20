@@ -3750,27 +3750,25 @@ impl Screen {
     ///
     /// 界面上按那一行走的就是它，实测与测试拿它当那一下。
     pub fn add_exception(&mut self, site: &mut Site, tasks: &mut Tasks, at: usize) {
-        let Some((name, tab, note, anchor, shown)) =
-            self.exceptions.as_ref().and_then(|open| {
-                let hit = open.found.as_ref()?.1.get(at)?;
-                let note = open.note.trim().to_string();
-                Some((
-                    open.name.clone(),
-                    open.tab,
-                    (!note.is_empty()).then_some(note),
-                    hit.anchor.clone(),
-                    hit.name.clone(),
-                ))
-            })
-        else {
+        let Some((name, tab, note, anchor, shown)) = self.exceptions.as_ref().and_then(|open| {
+            let hit = open.found.as_ref()?.1.get(at)?;
+            let note = open.note.trim().to_string();
+            Some((
+                open.name.clone(),
+                open.tab,
+                (!note.is_empty()).then_some(note),
+                hit.anchor.clone(),
+                hit.name.clone(),
+            ))
+        }) else {
             return;
         };
         // **作用范围靠核心展开**（`Catalog::scoped_variants`，与浏览屏批量操作同一处）：屏上这一行写着
         // 几个变体，按下去就记几条——两处各数一遍的话，写进去的与屏上写着的迟早对不上。
-        let keys = match site
-            .catalog
-            .scoped_variants(&WorkQuery::default(), Scope::Rows(std::slice::from_ref(&anchor)))
-        {
+        let keys = match site.catalog.scoped_variants(
+            &WorkQuery::default(),
+            Scope::Rows(std::slice::from_ref(&anchor)),
+        ) {
             Ok(keys) => keys,
             Err(error) => {
                 self.error = Some(format!("中立库读不动：{error}"));
@@ -3946,10 +3944,9 @@ impl Screen {
         // **页脚只有一颗**（设计稿 `DLG.excl` 的 `foot`），所以它就是退出那一颗：Esc 与它按下去是同一件事。
         // 这一层没有「取消」——例外是**一按就记下的**，没有半截状态要回滚。
         // 照稿摆法：说明字靠左、「完成」贴右当主按钮（[`Footer::dismiss_on_right`] + [`Dialog::footer_note`]）。
-        let footer = Footer::new(
-            Button::new("完成", ()).hover("例外是一按就记下的，这颗只是关上这一层。"),
-        )
-        .dismiss_on_right();
+        let footer =
+            Footer::new(Button::new("完成", ()).hover("例外是一按就记下的，这颗只是关上这一层。"))
+                .dismiss_on_right();
         let tokens = Tokens::builtin();
         let clock = self.exception_clock;
         let mut 换栏 = None;
@@ -4009,10 +4006,7 @@ impl Screen {
                                      也可以在下面搜索添加。"
                                 }
                             })
-                            .size(look::font_size(
-                                ui.ctx(),
-                                tokens.font.size_small_plus,
-                            )),
+                            .size(look::font_size(ui.ctx(), tokens.font.size_small_plus)),
                         );
                     });
                 } else {
@@ -4493,8 +4487,12 @@ fn hit_row_ui(ui: &mut egui::Ui, hit: &Found, 记着的: (u64, u64)) -> bool {
     };
     let 现在 = match 记着的 {
         (0, 0) => String::new(),
-        (包含, 0) if 包含 == hit.variants => format!(" · 现在是「{}」", Exception::Include.shown()),
-        (0, 排除) if 排除 == hit.variants => format!(" · 现在是「{}」", Exception::Exclude.shown()),
+        (包含, 0) if 包含 == hit.variants => {
+            format!(" · 现在是「{}」", Exception::Include.shown())
+        }
+        (0, 排除) if 排除 == hit.variants => {
+            format!(" · 现在是「{}」", Exception::Exclude.shown())
+        }
         (包含, 排除) => format!(
             " · 底下已经记着 {} 条例外",
             thousands(包含.saturating_add(排除))

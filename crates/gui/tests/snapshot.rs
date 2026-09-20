@@ -2498,7 +2498,12 @@ fn 拍手动例外弹层(名字: &str, 主题: Theme) {
     按(&mut harness, "管理");
     let 视口 = egui::Rect::from_min_size(egui::Pos2::ZERO, headless::VIEWPORT.into());
     let 撤销 = 正好画着的每一处(harness.output(), "撤销");
-    assert_eq!(撤销.len(), 2, "包含那一栏两条，屏上画出了 {} 颗「撤销」", 撤销.len());
+    assert_eq!(
+        撤销.len(),
+        2,
+        "包含那一栏两条，屏上画出了 {} 颗「撤销」",
+        撤销.len()
+    );
     assert!(
         撤销.iter().all(|rect| 视口.contains_rect(*rect)),
         "表里有一行被视口截了一半：{撤销:?}"
@@ -2525,7 +2530,10 @@ fn 拍手动例外空态(名字: &str, 主题: Theme) {
     let harness = 开一个(主题, move |ui| {
         现场.app.ui(ui);
     });
-    let 命中 = 正好画着的每一处(harness.output(), "还没有排除的作品。容量超限时，删减建议里的「排除」会记在这里；也可以在下面搜索添加。");
+    let 命中 = 正好画着的每一处(
+        harness.output(),
+        "还没有排除的作品。容量超限时，删减建议里的「排除」会记在这里；也可以在下面搜索添加。",
+    );
     assert_eq!(命中.len(), 1, "排除那一栏的空态没画出来");
     拍下(harness, 名字);
 }
