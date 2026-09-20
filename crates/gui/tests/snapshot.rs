@@ -2098,6 +2098,7 @@ impl 子库现场 {
                 variant_key: (*key).to_string(),
                 platform: None,
                 standalone: None,
+                edition: None,
                 state: State::Matched,
                 reason: None,
                 units: 1,

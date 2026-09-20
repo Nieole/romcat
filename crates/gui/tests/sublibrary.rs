@@ -274,6 +274,7 @@ impl 现场 {
                 variant_key: (*key).to_string(),
                 platform: None,
                 standalone: None,
+                edition: None,
                 state: romcat_core::catalog::State::Matched,
                 reason: None,
                 units: 1,

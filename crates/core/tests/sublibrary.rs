@@ -207,6 +207,7 @@ fn 挂到作品(catalog: &mut Catalog, name: &str, keys: &[&str]) -> i64 {
             variant_key: (*key).to_string(),
             platform: None,
             standalone: None,
+            edition: None,
             state: State::Matched,
             reason: None,
             units: 1,
