@@ -2853,13 +2853,11 @@ impl Screen {
         };
         // 「按设备容量」那一格写哪个数：这条规矩在核心库（`sublibrary::device_limit`）——卡在位是此刻的总量，
         // 不在位是上次读到的，都没有就说不设上限。
-        let device_label = match romcat_core::sublibrary::device_limit(
-            self.stored_total(),
-            self.live_total(),
-        ) {
-            Some(bytes) => format!("按设备容量（{}）", decimal_bytes(bytes)),
-            None => "按设备容量（没读过，不设上限）".to_string(),
-        };
+        let device_label =
+            match romcat_core::sublibrary::device_limit(self.stored_total(), self.live_total()) {
+                Some(bytes) => format!("按设备容量（{}）", decimal_bytes(bytes)),
+                None => "按设备容量（没读过，不设上限）".to_string(),
+            };
         let platforms = self.target_platforms();
         let error = self.error.clone();
         let form = &mut self.form;
