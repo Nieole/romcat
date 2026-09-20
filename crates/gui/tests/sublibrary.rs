@@ -145,6 +145,9 @@ impl 现场 {
             let form = screen.form_mut();
             form.name = name.to_string();
             form.target = target;
+            // 这个夹具建的都是**自定义**那一档的子库（`capacity` 空着就是不设限）：
+            // 新建弹层默认落在「按设备容量」上，这里显式换回自定义，免得上限跟着那张卡走。
+            form.capacity_by_device = false;
             capacity.clone_into(&mut form.capacity);
         }
         screen.save(site);
@@ -3727,4 +3730,37 @@ fn 容量上限按名字那一行就选中那一档() {
         !场.app.sublibrary_and_site().0.form_mut().capacity_by_device,
         "按「给存档、截图等留出空间」那一行没选中自定义"
     );
+}
+
+#[test]
+fn 新建子库时容量上限默认按设备容量_存下来也是这一档() {
+    // 设计稿上新建那层弹层这一档默认就是「按设备容量」（插上卡跟着卡的总量走）。
+    // 「自定义」空着虽然也是不设限，但它是人填的那一档，换张卡不会跟着变——不是一件事。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    点一下(&ctx, "新建子库", |ui| 场.app.ui(ui));
+    assert!(
+        场.app.sublibrary_and_site().0.form_mut().capacity_by_device,
+        "新建弹层上这一档默认不是「按设备容量」"
+    );
+    let 目标 = romcat_core::path::display(场.卡.path());
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        {
+            let form = screen.form_mut();
+            form.name = "掌机".to_string();
+            form.target = 目标;
+        }
+        screen.save(site);
+        assert!(screen.error().is_none(), "{:?}", screen.error());
+    }
+    let 掌机 = 场
+        .app
+        .sublibrary_and_site()
+        .1
+        .catalog
+        .sublibrary("掌机")
+        .expect("读得出")
+        .expect("建出来了");
+    assert!(掌机.capacity_by_device, "默认这一档没一路存进库里");
 }

@@ -697,6 +697,9 @@ pub fn sublibrary(
             let form = screen.form_mut();
             form.name = name.to_string();
             form.target = romcat_core::path::display(target);
+            // 量的这一台走**自定义**那一档：上限是这趟实测给死的那个数，
+            // 不跟着卡走（新建弹层默认是「按设备容量」）。
+            form.capacity_by_device = false;
             form.capacity = capacity
                 .map(romcat_core::report::human_bytes)
                 .unwrap_or_default();

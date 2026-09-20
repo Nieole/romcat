@@ -166,7 +166,7 @@ struct NameVetted {
 ///
 /// **每一格都会碰到输入法**（目标路径里有中文目录名是常态），所以这几个控件摆在「目标设置」那层弹层的
 /// 内容区里：内容区每帧把整份内容都摆一遍，正在组字的那一格不会凭空消失（[`crate::dialog`]、ADR-0005）。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Form {
     /// 子库叫什么。一台目标设备一个。
     pub name: String,
@@ -190,6 +190,25 @@ pub struct Form {
     /// 那一格写的是一位小数（`511.1 GB`），读回来是 511,100,000,000——人没碰那一格就按保存的话，上限会被
     /// 悄悄改掉。所以字没改过就沿用原来的字节数，不重新解析（拿主意的人 2026-09-14 定）。
     kept_capacity: Option<(String, u64)>,
+}
+
+impl Default for Form {
+    /// 新建那层弹层上的空草稿。
+    ///
+    /// **容量上限默认落在「按设备容量」那一档**（设计稿）：新建时多半还没插上卡，这一档等于「插上之后跟着卡走」，
+    /// 换一张卡上限跟着变；「自定义」是人填的那一档，空着虽然同样不设限，但换卡不会跟着变，不是一件事。
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            target: String::new(),
+            format: String::new(),
+            capacity: String::new(),
+            capability: String::new(),
+            capacity_by_device: true,
+            overrides: BTreeMap::new(),
+            kept_capacity: None,
+        }
+    }
 }
 
 impl Form {
