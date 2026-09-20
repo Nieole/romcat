@@ -64,7 +64,9 @@ pub use identify::{
     AcceptedCandidate, Candidate, CandidateCounts, Confidence, ContentHash, EntryFact,
     EntryRelease, Identification, Provenance, SourceCount, State,
 };
-pub use roots::{AddRootError, LibraryRoot, RootScan, RootStats, Roots};
+pub use roots::{
+    AddRootError, LibraryRoot, RootRemoval, RootScan, RootStats, Roots, SublibraryLoss,
+};
 pub use title::TitleRow;
 
 /// 中立库的结构版本。**读到对不上的版本直接让用户删库重扫。**

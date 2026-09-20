@@ -452,13 +452,10 @@ pub(crate) fn layout(
             .collect(),
         None => catalog.variants()?,
     };
-    let works = catalog.work_names()?;
     let releases = catalog.releases()?;
     let overrides = catalog.preferred_variants()?;
-    let abnormal = catalog.abnormal_main_members()?;
-
-    // 识别那一趟判过的「自己不能独立运行」，读落了库的结论即可（ADR-0024 推论 3）。
-    let not_standalone = catalog.not_standalone()?;
+    // 「一个变体落进哪个前端条目」那一处判断（[`Entries`]），连它要的那几份查表。
+    let entries = Entries::load(catalog)?;
 
     // 变体上的中文记号：**汉化压过官中**（`dat::chinese::mark_of` 同一条纪律）。
     let mut marks: BTreeMap<String, BTreeSet<ChineseMark>> = BTreeMap::new();
@@ -495,24 +492,15 @@ pub(crate) fn layout(
     // 平台 → 作品名（或变体的键）→ 那几个变体。
     let mut grouped: BTreeMap<String, BTreeMap<Anchor, Vec<VariantRow>>> = BTreeMap::new();
     for variant in variants {
-        if let Some(why) = excluded(&variant, &abnormal, &not_standalone) {
-            out.excluded.push((why, variant.key));
-            continue;
+        match entries.of(&variant) {
+            Err(why) => out.excluded.push((why, variant.key)),
+            Ok((platform, anchor)) => grouped
+                .entry(platform)
+                .or_default()
+                .entry(anchor)
+                .or_default()
+                .push(variant),
         }
-        let platform = variant
-            .platform
-            .clone()
-            .unwrap_or_else(|| crate::report::UNKNOWN_PLATFORM_LABEL.to_string());
-        let anchor = match variant.work_id.and_then(|id| works.get(&id)) {
-            Some(work) => Anchor::Work(work.clone()),
-            None => Anchor::Loose(variant.key.clone()),
-        };
-        grouped
-            .entry(platform)
-            .or_default()
-            .entry(anchor)
-            .or_default()
-            .push(variant);
     }
 
     for (platform, anchors) in grouped {
@@ -556,6 +544,55 @@ impl Anchor {
         match self {
             Self::Work(name) | Self::Loose(name) => name,
         }
+    }
+}
+
+/// **一个变体落进哪个前端条目**：平台 × 锚点，连「它根本做不成条目」那一档。
+///
+/// ## 为什么提成一份东西
+///
+/// 不止导出在问它（ADR-0024 推论 1）。[移除一个根](crate::catalog::roots::RootRemoval)
+/// 之前要说清「下次导出少多少条目」，算的正是同一套分组与同一套排除——两处各写一遍，
+/// 屏上说少 212 条、真导出时少的是另一个数，而**那一下按下去就回不来了**。
+///
+/// 三份查表一起读进来是因为它们缺一不可：角色被人改过的主成员、识别那一趟判过的
+/// 「自己不能独立运行」、以及**非游戏资产**那一处判断（[`classify::non_game_asset`]）。
+pub(crate) struct Entries {
+    /// 作品行号 → 作品名。
+    works: BTreeMap<i64, String>,
+    /// 角色被人改过的主成员。
+    abnormal: BTreeMap<String, String>,
+    /// 识别那一趟判过的「自己不能独立运行」，读落了库的结论即可（ADR-0024 推论 3）。
+    not_standalone: BTreeMap<String, Standalone>,
+}
+
+impl Entries {
+    /// 读那三份查表。
+    ///
+    /// # Errors
+    /// 读中立库失败时返回错误。
+    pub(crate) fn load(catalog: &Catalog) -> Result<Self, CatalogError> {
+        Ok(Self {
+            works: catalog.work_names()?,
+            abnormal: catalog.abnormal_main_members()?,
+            not_standalone: catalog.not_standalone()?,
+        })
+    }
+
+    /// 这个变体落进哪个前端条目；做不成条目的答 `Err`，连为什么。
+    pub(crate) fn of(&self, variant: &VariantRow) -> Result<(String, Anchor), NotAnEntry> {
+        if let Some(why) = excluded(variant, &self.abnormal, &self.not_standalone) {
+            return Err(why);
+        }
+        let platform = variant
+            .platform
+            .clone()
+            .unwrap_or_else(|| crate::report::UNKNOWN_PLATFORM_LABEL.to_string());
+        let anchor = match variant.work_id.and_then(|id| self.works.get(&id)) {
+            Some(work) => Anchor::Work(work.clone()),
+            None => Anchor::Loose(variant.key.clone()),
+        };
+        Ok((platform, anchor))
     }
 }
 

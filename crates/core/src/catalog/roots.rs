@@ -38,10 +38,12 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, params, params_from_iter};
 use unicode_normalization::{IsNormalized, is_nfd_quick};
 
+use super::browse::{self, WORK_FROM_BASE, WORK_GROUP_BY};
 use super::{Catalog, CatalogError, now_secs};
+use crate::adapter::converge;
 use crate::fs::{DirCache, LibraryFs};
 use crate::path;
 
@@ -126,6 +128,41 @@ pub struct LibraryTotals {
     pub files: u64,
     /// 这些文件加起来多少字节。读不到大小的那些不计，同 [`RootStats::bytes`]，是个下界。
     pub bytes: u64,
+}
+
+/// **移除一个根的代价**：按下那一下之前该看见的那笔账。
+///
+/// 四个数各答一个问题，而它们都只在中立库里算——**主库一个字节都不读**（ADR-0004）。
+/// 账里一条「留得住的」都不列：**裁决、收藏与合集住沉淀库、锚在内容锚上**，这个根加回来
+/// 它们照旧生效，所以它们不是代价（`CONTEXT.md` 的**沉淀库**与**内容锚**）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RootRemoval {
+    /// 从中立库里去掉多少**变体**。与 [`Catalog::remove_root`] 真去掉的那个数是同一个
+    /// （两处都问 [`Catalog::root_stats`]），屏上先说的与事后报的因此对得上。
+    pub variants: u64,
+    /// 多少行**会从浏览里消失**：那几部作品底下的变体全都来自这个根。
+    ///
+    /// 「一行是什么」照浏览屏那一处判断数（`catalog::browse` 的 `WORK_GROUP_BY`，ADR-0024）：认出作品的
+    /// 按作品归堆，没认出来的一个变体一行；**非游戏资产照主列表的默认档收起**，
+    /// 不然屏上这个数会比人真看得见的那张表多出一截。
+    pub works: u64,
+    /// 下次**导出**少多少条前端条目。
+    ///
+    /// 条目怎么分堆、哪几类压根不成条目（**补丁**、**附属内容**、**非游戏资产**）照导出
+    /// 那一处判断算（`adapter::converge` 的 `Entries`，ADR-0013 与 ADR-0024）——两处各写一遍的话，
+    /// 屏上说少 212 条、真导出时少的会是另一个数。
+    pub entries: u64,
+    /// 哪个**子库**的选择集会少多少，一台一条；一个都不少的那台不列。
+    pub sublibraries: Vec<SublibraryLoss>,
+}
+
+/// 一台**子库**的选择集会少多少。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SublibraryLoss {
+    /// 子库名。
+    pub name: String,
+    /// 它的选择集里有多少个变体来自这个根。
+    pub variants: u64,
 }
 
 /// 加一个根为什么被拒。
@@ -338,6 +375,118 @@ impl Catalog {
             files: u64::try_from(files).unwrap_or(0),
             bytes: u64::try_from(bytes).unwrap_or(0),
         })
+    }
+
+    /// **移除一个根之前算一遍代价**（[`RootRemoval`]）：去掉多少变体、浏览里少几行、
+    /// 下次导出少几条、哪台子库少多少。
+    ///
+    /// ## 一个字节都不读主库
+    ///
+    /// 四个数全从中立库里折（ADR-0001）。盘没挂上的那个根照样算得出来——而那正是最常
+    /// 被移除的那一种。
+    ///
+    /// ## 这一趟不便宜
+    ///
+    /// 后三个数各要走一遍全库：浏览那一行是一次分组（走索引 `variant_group`），
+    /// 导出那个数是一趟 `converge::Entries` 加一遍变体表，子库那几条是一趟
+    /// [`sublibrary::facts`](crate::sublibrary::facts) 加逐台求值——真库量级上
+    /// `facts` 自己就是 343 毫秒（`crates/core/src/sublibrary.rs` 的 `survey`）。
+    /// 所以**这一支不许进画帧那条线程上每帧都跑的地方**：界面按下「移除…」时算一次、
+    /// 把结果攥在手里（`romcat_gui::roots`）。
+    ///
+    /// **这个根一个变体都没有时后三样直接是 0**：没扫过的根移除起来没有代价，
+    /// 也就不值得为它走三遍全库。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn root_removal(&self, name: &str) -> Result<RootRemoval, CatalogError> {
+        let prefix = format!("{name}/");
+        let variants = self.root_stats(name)?.variants;
+        let mut out = RootRemoval {
+            variants,
+            ..RootRemoval::default()
+        };
+        if variants == 0 {
+            return Ok(out);
+        }
+        out.works = self.works_only_under(&prefix)?;
+        out.entries = self.entries_only_under(&prefix)?;
+        out.sublibraries = self.sublibraries_losing(&prefix)?;
+        Ok(out)
+    }
+
+    /// 浏览屏上有几行**整行都来自这个根**——移除之后那几行就没了。
+    ///
+    /// **`FROM`、`WHERE` 与分组三样全是从浏览屏那一处取的**（[`WorkQuery::where_clause`]、
+    /// [`WORK_FROM_BASE`]、[`WORK_GROUP_BY`]，与 [`Catalog::work_total`] 逐字同一套）：
+    /// 自己写一句「默认收起非游戏资产」出来，就是 ADR-0024 推论 1 那种第二份判据——
+    /// 哪天主列表的默认档改了，屏上这个数会悄悄比人真看得见的那张表多出一截。
+    ///
+    /// 只多一句 `HAVING`：它数的是「这一堆里有几个变体**不在**这个根底下」，答 0 就是整堆都在。
+    /// 那两个 `?` 排在筛选那几个参数后面——`where_clause` 交回来的是位置参数。
+    fn works_only_under(&self, prefix: &str) -> Result<u64, CatalogError> {
+        let (where_sql, mut args) = browse::WorkQuery::default().where_clause();
+        let sql = format!(
+            "SELECT COUNT(*) FROM \
+             (SELECT variant.work_id{WORK_FROM_BASE}{where_sql}{WORK_GROUP_BY} \
+              HAVING SUM(CASE WHEN substr(variant.key, 1, length(?)) = ? THEN 0 ELSE 1 END) = 0)"
+        );
+        args.push(Box::new(prefix.to_string()));
+        args.push(Box::new(prefix.to_string()));
+        let count: i64 = self
+            .conn
+            .query_row(&sql, params_from_iter(args.iter()), |row| row.get(0))
+            .map_err(|source| self.err(source))?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    /// 下次导出少多少条前端条目：**整条都来自这个根**的那几条。
+    fn entries_only_under(&self, prefix: &str) -> Result<u64, CatalogError> {
+        let entries = converge::Entries::load(self)?;
+        // 条目 → 它底下的变体是不是全在这个根底下。做不成条目的那几个一开始就不算数。
+        let mut whole: BTreeMap<(String, converge::Anchor), bool> = BTreeMap::new();
+        for variant in self.variants()? {
+            let mine = variant.key.starts_with(prefix);
+            let Ok(at) = entries.of(&variant) else {
+                continue;
+            };
+            whole
+                .entry(at)
+                .and_modify(|all| *all &= mine)
+                .or_insert(mine);
+        }
+        Ok(u64::try_from(whole.values().filter(|all| **all).count()).unwrap_or(u64::MAX))
+    }
+
+    /// 哪台子库的选择集会少多少。
+    ///
+    /// **事实折一趟，全部子库共用**（同 [`sublibrary::survey`](crate::sublibrary::survey)）：
+    /// 大头是走一遍全库，一台一折的话五张卡就是五趟。
+    ///
+    /// 读不懂的规则照旧跳过（[`Catalog::selection`]），不让一条坏规则把整笔账搅黄。
+    fn sublibraries_losing(&self, prefix: &str) -> Result<Vec<SublibraryLoss>, CatalogError> {
+        let list = self.sublibraries()?;
+        if list.is_empty() {
+            return Ok(Vec::new());
+        }
+        let facts = crate::sublibrary::facts(self)?;
+        let mut out = Vec::new();
+        for one in list {
+            let loaded = self.selection(&one.name)?;
+            let selected = crate::sublibrary::select(&loaded.selection, &facts);
+            let gone = selected
+                .picked
+                .iter()
+                .filter(|picked| picked.key.starts_with(prefix))
+                .count();
+            if gone > 0 {
+                out.push(SublibraryLoss {
+                    name: one.name,
+                    variants: u64::try_from(gone).unwrap_or(u64::MAX),
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// 移除一个根：这个根下面的记录整批删掉，返回**去掉了多少变体**。
