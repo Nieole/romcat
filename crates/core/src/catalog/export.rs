@@ -1,12 +1,29 @@
-//! **导出**记在中立库里的那两样：这一趟往哪个前端格式、哪个目录写，以及上次是什么时候。
+//! **导出**记在中立库里的那几样：这一趟往哪个前端格式、哪个目录写，上次是什么时候，
+//! 以及**上次把哪几个条目写了出去**。
 //!
-//! ## 为什么是元数据表上的键，不是一张新表
+//! ## 为什么前三样是元数据表上的键，不是一张新表
 //!
-//! 这三样都是**整份库一份**的账：前端格式一个、目录一个、上次导出的时刻一个。
-//! 一张表存三行等于给每一行配一把主键去锁一个单例，而**加一张表要升结构版本**
-//! ——升版的意思是让人删掉重扫一份 8.60 TiB 的库（`SCHEMA_VERSION` 的文档）。
-//! 元数据表是键值表，**加几个键是纯加**：已有的表一列没动、一条语义没改，
-//! 旧库拿新程序打开照样能用，读不到就是「还没选过 / 还没导过」。
+//! 那三样都是**整份库一份**的账：前端格式一个、目录一个、上次导出的时刻一个。
+//! 一张表存三行等于给每一行配一把主键去锁一个单例。元数据表是键值表，
+//! **加几个键是纯加**：已有的表一列没动、一条语义没改，旧库拿新程序打开照样能用，
+//! 读不到就是「还没选过 / 还没导过」。
+//!
+//! ## 而第四样**只能是一张表**
+//!
+//! 作品详情页状态块「导出」那一行要答的是**这一条**上次几点写出去的（票
+//! `gui-looks-like-the-design/34`）。整库那一个时刻答不了它：导出**整库级、不挑选**
+//! （`CONTEXT.md` 的**导出**条），于是上次导出时在库里的每个作品都写出去了——可
+//! **上次导出之后才扫进来的那些没有**，拿整库那个时刻去答，它们会跟着说「已导出」。
+//! 那正是这一行最该答对的一种情形：状态块里别的几行（识别、元数据、收藏）说的都是
+//! 「这一条怎么样」，只有它在说整库，而人读不出这个切换。
+//!
+//! **加一张表不等于升结构版本**（[`SCHEMA_VERSION`](super::SCHEMA_VERSION) 的文档，判据是
+//! 「旧数据会不会被读错」）：[`EXPORT_SCHEMA`] 是**纯加表**，已有的表一列没动、一条语义
+//! 没改，`CREATE TABLE IF NOT EXISTS` 在开库时补上，老库读出来就是空的——那时那一行
+//! 如实说「还没导出」。刮削那五张表、标题集合、底本、子库那三张都是同一档先例。
+//!
+//! **每趟导出整份重写**（[`Catalog::mark_exported`]）：导出不挑选，所以「这一趟写出去的
+//! 那批」就是这一刻的全部；留着上一趟的行会让**已经从库里消失的作品**永远说着「已导出」。
 //!
 //! ## 它与 [`ExportOptions`](crate::adapter::transfer::ExportOptions) 分工不同
 //!
@@ -17,9 +34,57 @@
 
 use std::path::PathBuf;
 
+use rusqlite::{OptionalExtension, params};
+
 use super::meta::MetaKey;
 use super::{Catalog, CatalogError, now_secs};
 use crate::adapter;
+use crate::scrape::AnchorKind;
+
+/// **上次导出把哪几个条目写了出去**那张表。
+pub(super) const EXPORT_SCHEMA: &str = "\
+-- 上次导出写出去的**一个前端条目**。作品详情页状态块「导出」那一行读它。
+--
+-- 键与刮削那几张表同一套**自然键**（`catalog::scrape` 的模块文档）：认出作品的挂
+-- **作品名**，没认出来的挂**变体的键**。挂行号的话，重跑一次识别这张表整份成孤儿。
+CREATE TABLE IF NOT EXISTS export_entry(
+    -- `作品` 或 `变体`（`AnchorKind::label`）。
+    anchor   TEXT NOT NULL,
+    -- 作品名，或还没认出作品的那个变体的键。
+    subject  TEXT NOT NULL,
+    -- 写进哪个平台那一份。**一个作品可以跨几个平台各出一个条目**，所以它在键里。
+    platform TEXT NOT NULL,
+    -- 哪个前端格式（`Pegasus`）。换个格式重导一趟是另一批行。
+    format   TEXT NOT NULL,
+    -- 那一趟的时刻。**与 `exported_at` 是同一个数**：同一处打戳、同一道闸。
+    at       INTEGER NOT NULL,
+    PRIMARY KEY (anchor, subject, platform, format)
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS export_entry_subject ON export_entry(anchor, subject);
+";
+
+/// 导出写出去的**一个条目**是谁：挂在哪一层、叫什么、哪个平台。
+///
+/// 收敛那一趟（`adapter::converge::run`）一条条交出来，打戳那一下整批落库。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportedEntry {
+    /// 挂在**作品**上还是**变体**上。
+    pub anchor: AnchorKind,
+    /// 作品名，或还没认出作品的那个变体的键。
+    pub subject: String,
+    /// 写进哪个平台那一份。
+    pub platform: String,
+}
+
+/// **这一条上次写进前端格式是什么时候**：哪个格式、什么时刻。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportMark {
+    /// 哪个前端格式。
+    pub format: String,
+    /// UNIX 纪元起的秒。
+    pub at: i64,
+}
 
 /// 记住的那套**导出**配置：往哪个前端格式写、写到哪个目录。
 ///
@@ -153,19 +218,125 @@ impl Catalog {
             .and_then(|value| value.trim().parse::<i64>().ok()))
     }
 
-    /// 记下**这一趟导出**的时刻、这一趟收敛出几个**条目**（`entries`），与这一趟有没有铺出**媒体**（`media`）——库屏工序段导出
-    /// 那一行底下那句小字说的正是后两样（`stage::Stages::detail`）。
+    /// 记下**这一趟导出**的时刻、这一趟收敛出几个**条目**（`entries`）、这一趟有没有铺出
+    /// **媒体**（`media`），以及**写出去的是哪几个条目**（`written`，写进 `format` 那个格式）。
+    /// 库屏工序段导出那一行底下那句小字说的正是中间两样（`stage::Stages::detail`）。
     ///
     /// **只有真把一趟导出走完了才调它**（`adapter::transfer::export_task` 的末尾）：
     /// 只排计划那一趟一个字节都没写，按停那一趟只写了一部分，撞上外面有人动过的那一趟
-    /// 有几份没写——三者都说不上「导过了」。
+    /// 有几份没写——三者都说不上「导过了」。逐条那批因此与整库那个时刻**同一道闸、同一个
+    /// 时刻戳**：两处分了家，屏上就会有一条说「导过了」、另一条说「没有」。
+    ///
+    /// **这个格式上一趟写的那批先整份删掉**：导出不挑选（`CONTEXT.md` 的**导出**条），
+    /// 所以这一趟写出去的就是此刻的全部；留着上一趟的行，会让已经从库里消失的作品
+    /// 永远说着「已导出」。**别的格式那几批不动**——换个格式重导一趟不该把这一趟抹掉。
+    ///
+    /// 整批落在**一个事务**里：真库上这是 28,529 行（`docs/library-facts.md` 的条目数），
+    /// 逐条各提交一次是两万多次 fsync。
     ///
     /// # Errors
     /// 写库失败时返回错误。
-    pub fn mark_exported(&self, entries: u64, media: bool) -> Result<(), CatalogError> {
-        self.meta_set(MetaKey::ExportedAt, &now_secs().to_string())?;
+    pub fn mark_exported(
+        &mut self,
+        entries: u64,
+        media: bool,
+        format: &str,
+        written: &[ExportedEntry],
+    ) -> Result<(), CatalogError> {
+        self.mark_exported_at(entries, media, format, written, now_secs())
+    }
+
+    /// 同 [`Self::mark_exported`]，但时刻由调用方说。
+    ///
+    /// 分成两支的形状与 [`Verdict::now`](crate::verdict::Verdict::now) /
+    /// [`at`](crate::verdict::Verdict::at) 同源，理由也同源：**这一趟的每一行共用一个
+    /// 时刻**——元数据表上那个数与逐条那几行必须是同一个，各取一次的话，一批几万行会跨过
+    /// 秒界，于是屏上「整库上次导出」与「这一条上次导出」差着一秒，而它们说的是同一趟。
+    /// 把那个数提成参数，这件事在类型上就说得出来。
+    ///
+    /// **截图基线走的也是它**：挂钟出来的基线每重出一次就变一次，那种基线拦不住任何东西。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn mark_exported_at(
+        &mut self,
+        entries: u64,
+        media: bool,
+        format: &str,
+        written: &[ExportedEntry],
+        at: i64,
+    ) -> Result<(), CatalogError> {
+        self.meta_set(MetaKey::ExportedAt, &at.to_string())?;
         self.meta_set(MetaKey::ExportedEntries, &entries.to_string())?;
-        self.meta_set(MetaKey::ExportedWithMedia, if media { "1" } else { "0" })
+        self.meta_set(MetaKey::ExportedWithMedia, if media { "1" } else { "0" })?;
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        tx.execute(
+            "DELETE FROM export_entry WHERE format = ?1",
+            params![format],
+        )
+        .map_err(to_err)?;
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO export_entry(anchor, subject, platform, format, at)
+                     VALUES(?1,?2,?3,?4,?5)
+                     ON CONFLICT(anchor, subject, platform, format) DO UPDATE SET at = excluded.at",
+                )
+                .map_err(to_err)?;
+            for one in written {
+                insert
+                    .execute(params![
+                        one.anchor.label(),
+                        one.subject,
+                        one.platform,
+                        format,
+                        at
+                    ])
+                    .map_err(to_err)?;
+            }
+        }
+        tx.commit().map_err(to_err)
+    }
+
+    /// **这一条上次写进前端格式是什么时候**；一趟都没导过、或者这一条那一趟还不在库里
+    /// 就是 `None`。
+    ///
+    /// 作品详情页状态块「导出」那一行读它（票 `gui-looks-like-the-design/34`）。
+    /// 一个作品跨几个平台各出一个条目时取**最近的那一趟**——那一行说的是「这部作品
+    /// 上次写出去是什么时候」，几个平台各写一遍并不让它变成几件事。
+    ///
+    /// **`None` 与「整库导过了」不是同一件事**：上次导出之后才扫进来的作品在这儿就是
+    /// `None`，而 [`Self::exported_at`] 有值。那正是这张表存在的理由（模块文档）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn entry_exported(
+        &self,
+        anchor: AnchorKind,
+        subject: &str,
+    ) -> Result<Option<ExportMark>, CatalogError> {
+        self.conn
+            .prepare_cached(
+                "SELECT format, at FROM export_entry
+                 WHERE anchor = ?1 AND subject = ?2
+                 ORDER BY at DESC, format LIMIT 1",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_row(params![anchor.label(), subject], |row| {
+                        Ok(ExportMark {
+                            format: row.get(0)?,
+                            at: row.get(1)?,
+                        })
+                    })
+                    .optional()
+            })
+            .map_err(|source| self.err(source))
     }
 
     /// **上次导出有没有铺出媒体**；一趟都没导过、或者这份库是记这一样之前导出的，就是 `None`。

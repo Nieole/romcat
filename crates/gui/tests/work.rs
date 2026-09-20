@@ -1016,15 +1016,24 @@ fn png(width: u32, height: u32) -> Vec<u8> {
 }
 
 /// 往池里落一份、中立库里记一条，交回内容哈希。
+///
+/// `measured` 是**入池那一刻量下来的**那三样（`scrape::measure`）：详情页媒体那一格
+/// 底下那行照它写「来源 · 尺寸 · 时长 · 大小」。交一份空的就是「没量过」。
 fn 入池(
     pool: &romcat_core::scrape::pool::MediaPool,
     catalog: &mut romcat_core::catalog::Catalog,
     bytes: &[u8],
     ext: &str,
+    measured: romcat_core::scrape::measure::Measured,
 ) -> String {
     let (hash, _) = pool.take_bytes(bytes, ext).expect("落得进池");
     catalog
-        .put_media(&hash, ext, u64::try_from(bytes.len()).unwrap_or(0))
+        .put_media(
+            &hash,
+            ext,
+            u64::try_from(bytes.len()).unwrap_or(0),
+            measured,
+        )
         .expect("记得进库");
     hash
 }
@@ -1051,9 +1060,32 @@ fn 带媒体池的现场(
     let WorkAnchor::Work(work_id) = 一行.anchor else {
         unreachable!("上面挑的就是认出了作品的行");
     };
-    let 封面 = 入池(&pool, &mut catalog, &png(600, 800), "png");
+    let 封面 = 入池(
+        &pool,
+        &mut catalog,
+        &png(600, 800),
+        "png",
+        romcat_core::scrape::measure::Measured {
+            width: Some(600),
+            height: Some(800),
+            duration_ms: None,
+        },
+    );
     // 一份「视频」：字节是什么不要紧——抽帧那条路在拉进程那一步就该退化。
-    let 片子 = 入池(&pool, &mut catalog, &[0x00; 256], "mp4");
+    //
+    // **它的三样是量过的**：量尺在**入池**那一刻跑，而这台机器眼下没有 ffmpeg 只挡得住
+    // **抽首帧**——库里记着的那三格照样读得回来。那正是换过机器之后真会看到的样子。
+    let 片子 = 入池(
+        &pool,
+        &mut catalog,
+        &[0x00; 256],
+        "mp4",
+        romcat_core::scrape::measure::Measured {
+            width: Some(640),
+            height: Some(480),
+            duration_ms: Some(30_000),
+        },
+    );
     catalog
         .put_scraped(&[Harvested {
             anchor: AnchorKind::Work.label().to_string(),
@@ -1121,9 +1153,11 @@ fn 媒体那一面_没有ffmpeg时视频占位并说明原因_播放交给系统
         有这一段(&屏上, "封面"),
         "媒体那一面没把封面一格一格列出来：\n{屏上}"
     );
-    // 每一格底下写「来源 · 大小」（设计稿 `.mi .help`；尺寸与时长那两样归票 34）。大小是入池那份字节有多大。
+    // 每一格底下写「来源 · 尺寸 · 时长 · 大小」（设计稿 `.mi .help`，票 34）。尺寸与时长是
+    // **入池那一刻量下来的**（`scrape::measure`），大小是入池那份字节有多大。
     let 封面那一句 = format!(
-        "测试 · {}",
+        "测试 · {} · {}",
+        romcat_core::report::pixel_size(600, 800),
         romcat_core::report::human_bytes(u64::try_from(png(600, 800).len()).unwrap_or(0))
     );
     // 媒体那几格在头上那一块底下，滚下去才看得见（egui 不画视口外的字）。
@@ -1133,10 +1167,18 @@ fn 媒体那一面_没有ffmpeg时视频占位并说明原因_播放交给系统
         "封面那一格底下没写「{封面那一句}」：\n{屏上}"
     );
     // 合成数据给这个作品另挂着几份池里没有的封面：视频那一格排在后头，滚下去才看得见（egui 不画视口外的字）。
+    //
+    // 视频那一句**四段都在**：时长排在尺寸后面（设计稿 `mediaOf` 的 `640 × 480 · 0:30`）。
+    // **这台机器没有 ffmpeg 只挡得住抽首帧**——那一格是占位，而库里记着的三格照样读得回来。
+    let 视频那一句 = format!(
+        "测试 · {} · {} · 256 B",
+        romcat_core::report::pixel_size(640, 480),
+        romcat_core::report::media_duration(30_000)
+    );
     let 屏上 = 滚到看得见(&ctx, &mut app, "播放");
     assert!(
-        有这一段(&屏上, "视频") && 有这一段(&屏上, "测试 · 256 B"),
-        "媒体那一面没把视频一格一格列出来，或者底下没写「测试 · 256 B」：\n{屏上}"
+        有这一段(&屏上, "视频") && 有这一段(&屏上, &视频那一句),
+        "媒体那一面没把视频一格一格列出来，或者底下没写「{视频那一句}」：\n{屏上}"
     );
 
     按正好(&ctx, &mut app, "播放");
@@ -1484,6 +1526,7 @@ fn 在文件系统中打开交给系统的是那个变体在盘上所在的目�
         .write_identifications(&[Identification {
             variant_key: key,
             platform: None,
+            edition: None,
             standalone: None,
             state: State::Matched,
             reason: None,
@@ -1539,4 +1582,164 @@ fn 每一处画在哪儿(output: &egui::FullOutput, 那几个字: &str) -> Vec<e
         找(&clipped.shape, 那几个字, &mut out);
     }
     out
+}
+
+#[test]
+fn 变体卡上版本那一行照核心库写_说不出时写破折号() {
+    // 票 `gui-looks-like-the-design/34`，词表**第几版**：屏上那一格照设计稿写「版本」。
+    // **判断不在界面**——两层怎么挑由 `VariantDetail::edition` 一处判，这里只核对
+    // 「核心库说什么、屏上就写什么」。
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    跑(&ctx, &mut app, 3);
+    let work_id = 一个有得挑首选的作品(&mut app);
+
+    // 合成数据里一条修订标记都没有，也没人裁过——那一格该是「—」。
+    let 屏上 = 打开详情页(&ctx, &mut app, work_id, Tab::Variants);
+    assert!(
+        有这一段(&屏上, "版本"),
+        "变体卡上该有「版本」那一行（设计稿 `.vbody` 那张 dl.infol 的最后一格）：\n{屏上}"
+    );
+
+    // 给头一个变体记一条**裁决说的那一版**，屏上那一格跟着写它。
+    let 头一个 = {
+        let (browse, site) = app.browse_and_site();
+        browse.open_work(&site.catalog, &WorkAnchor::Work(work_id));
+        let 键 = browse
+            .work()
+            .expect("点开了")
+            .variants
+            .first()
+            .expect("底下有变体")
+            .row
+            .key
+            .clone();
+        记一条裁决说的版本(site, &键, "v1.2");
+        键
+    };
+    assert!(!头一个.is_empty());
+    let 屏上 = 打开详情页(&ctx, &mut app, work_id, Tab::Variants);
+    assert!(
+        有这一段(&屏上, "v1.2"),
+        "裁决说了第几版，那一格就该写它（词表**第几版**：裁决 > 发行版的修订 > 说不出）：\n{屏上}"
+    );
+}
+
+/// 往识别结论上记一条**裁决说的第几版**（`identification.edition`）。
+///
+/// 走 `write_identifications` 那条正门：那一列的写者只有它，测试另开一条路就等于
+/// 绕过被测的那段代码。
+fn 记一条裁决说的版本(site: &mut romcat_core::site::Site, key: &str, edition: &str) {
+    use romcat_core::catalog::State;
+    use romcat_core::catalog::identify::Identification;
+
+    let 原来的 = site
+        .catalog
+        .variant(key)
+        .expect("读得出")
+        .expect("有这个变体");
+    site.catalog
+        .write_identifications(&[Identification {
+            variant_key: key.to_owned(),
+            platform: None,
+            standalone: None,
+            edition: Some(edition.to_owned()),
+            state: State::Matched,
+            reason: None,
+            units: 1,
+            nkit: 0,
+            read_bytes: 0,
+            work_id: 原来的.work_id,
+            release_id: 原来的.release_id,
+            candidates: Vec::new(),
+        }])
+        .expect("写得进");
+}
+
+#[test]
+fn 状态块上子库与导出两行照核心库写_都答不出时说没有() {
+    // 票 `gui-looks-like-the-design/34`：状态块「子库」「导出」两行。
+    // **两样的判断都在核心库**——落在哪几个子库里走求值那一处（`sublibrary::holding`，
+    // 与同步那一趟同一个函数），上次几点写出去的读导出那一趟逐条记下的账。
+    use romcat_core::scrape::AnchorKind;
+    use romcat_core::sublibrary::{Rule, Sublibrary};
+
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    跑(&ctx, &mut app, 3);
+    let work_id = 一个有得挑首选的作品(&mut app);
+
+    // 一、一个子库都没有、一趟也没导过：两行照实说。
+    let 屏上 = 打开详情页(&ctx, &mut app, work_id, Tab::Overview);
+    assert!(
+        有这一段(&屏上, "子库"),
+        "状态块该有「子库」那一行：\n{屏上}"
+    );
+    assert!(
+        有这一段(&屏上, "还没导出"),
+        "一趟都没导过时照实说「还没导出」，不拿整库那个时刻顶上去：\n{屏上}"
+    );
+
+    // 二、建一个收得住它的子库、再记一趟导出。
+    let (作品名, 平台) = {
+        let (browse, site) = app.browse_and_site();
+        browse.open_work(&site.catalog, &WorkAnchor::Work(work_id));
+        let work = browse.work().expect("点开了");
+        let 平台 = work
+            .variants
+            .iter()
+            .find_map(|variant| variant.row.platform.clone())
+            .expect("底下总有一个说得出平台的变体");
+        (work.name.clone(), 平台)
+    };
+    {
+        let (_, site) = app.browse_and_site();
+        site.catalog
+            .put_sublibrary(&Sublibrary {
+                name: "掌机".to_owned(),
+                target: "/Volumes/SDCARD/掌机".to_owned(),
+                target_raw: Some("/Volumes/SDCARD/掌机".to_owned()),
+                format: "Pegasus".to_owned(),
+                capacity: None,
+                capability: None,
+                capacity_by_device: false,
+            })
+            .expect("子库写得进");
+        site.catalog
+            .add_rule(
+                "掌机",
+                &Rule::parse(&format!("平台={平台}")).expect("规则读得懂"),
+            )
+            .expect("规则写得进");
+        site.catalog
+            .mark_exported(
+                1,
+                false,
+                "Pegasus",
+                &[romcat_core::catalog::export::ExportedEntry {
+                    anchor: AnchorKind::Work,
+                    subject: 作品名.clone(),
+                    platform: 平台.clone(),
+                }],
+            )
+            .expect("记得下");
+    }
+    // 重开一次详情页：`open_page` 造的是一份新的 `Page`，于是这一帧照库里现在的样子重读。
+    let 屏上 = 打开详情页(&ctx, &mut app, work_id, Tab::Overview);
+    assert!(
+        有这一段(&屏上, "掌机"),
+        "规则收得住它，「子库」那一行就该列出这个子库：\n{屏上}"
+    );
+    let 那一趟 = {
+        let (_, site) = app.browse_and_site();
+        site.catalog.exported_at().expect("读得出").expect("打上了")
+    };
+    let 导出那一句 = format!(
+        "已导出到 Pegasus · {}",
+        romcat_core::report::human_time(那一趟)
+    );
+    assert!(
+        有这一段(&屏上, &导出那一句),
+        "导出那一趟逐条记下的账里有它，这一行就该写「{导出那一句}」：\n{屏上}"
+    );
 }

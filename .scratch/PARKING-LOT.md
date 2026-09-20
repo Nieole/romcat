@@ -4553,3 +4553,36 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 - **建议留：** 一并补上，两处都在同一层弹层里，补完重出那三对截图。
 - **谁来裁：** 拿主意的人（第一处是照稿与否，第二处是空态上写什么）
 - **状态：** open
+
+### Q993 — `release.revision` 眼下只有 DAT 那一条路在写，刮削那一侧的「修订」没有落点
+
+- **来自：** 票 `gui-looks-like-the-design/34`
+- **类别：** 路过发现，不在范围内
+- **在哪：** `crates/core/src/catalog/content.rs` 的 `release.revision` 那一列；唯一的写者是 `crates/core/src/identify.rs` 的 `Projector::dat_release`。
+- **为什么没停线：** 这张票要的两层（裁决 + DAT 条目名）都已经有落点，而在线源那一维**眼下一个源都没在报**。
+- **这张票实际做了什么：** 只接了 DAT 那一条写者；`scrape::Field` 一列没加。
+- **另一条路：** 在线源（ScreenScraper 等）也报得出版本号。真要接，得先定它是 `Field` 上的一维、还是直接写 `release.revision`——两条路各写一份就是同一件事的第二个判据（ADR-0024）。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q994 — 卡带内部头读出来的版本号仍只躺在 JSON 里，与「第几版」那条链不通
+
+- **来自：** 票 `gui-looks-like-the-design/34`
+- **类别：** 路过发现，不在范围内
+- **在哪：** `crates/core/src/identify/cart.rs:233` `Facts::version`、`crates/core/src/identify/ident.rs:111` `Ident::version`；落在 `content_cart.facts` / `content_switch.facts` 的 JSON 整段里，不单独成列。
+- **为什么没停线：** 回退链按拿主意的人 2026-09-20 的裁决只有两层（裁决 > DAT 修订）。
+- **这张票实际做了什么：** 没动它。`VariantDetail::edition` 那条链上没有这一层。
+- **另一条路：** 给它补一列、接进那条链。**但先得答一问**：卡带头里那个 mask ROM version、DAT 名里的 `(Rev 1)`、汉化第几版——这三个是不是同一件事？答不清就别接，接上去就是第三个答案。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q995 — 老库里入过池的媒体那三格永远空着，没有补齐的入口
+
+- **来自：** 票 `gui-looks-like-the-design/34`
+- **类别：** 路过发现，不在范围内
+- **在哪：** `crates/core/src/catalog/scrape.rs` 的 `add_columns`（`media` 上新补的 `width` / `height` / `duration_ms` **不回填**）与 `Catalog::put_media`（那三格「空着才补」）。
+- **为什么没停线：** 空着时屏上照实退回「来源 · 大小」，不骗人；而多出来的那两段是装饰性的。
+- **这张票实际做了什么：** 只在**入池**那一刻量一次（`scrape::pool::adopt_into`）。于是重新刮削走过入池那一段的会自己补齐，只在池里躺着、没人再刮的那些永远空着。
+- **另一条路：** 开一条「把媒体池扫一遍量尺」的活排进任务台。不放在开库那条路上——回填要逐张开真库那 440 张图、逐段拉一百多个进程。
+- **谁来裁：** 拿主意的人
+- **状态：** open

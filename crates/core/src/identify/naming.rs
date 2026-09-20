@@ -45,14 +45,22 @@ pub struct Parsed {
     pub region: Option<String>,
     /// 语言；没有语言标记组就是 `None`。
     pub languages: Option<String>,
+    /// **修订**：`(Rev 1)` / `(Rev A)` / `(v1.1)` 那一组，原样（不含括号）。
+    ///
+    /// 它是词表**第几版**上面那一层——**发行版**那一层，说的是官方又发了一遍
+    /// （ADR-0008 划的线正落在这儿）。没有这样一组标记就是 `None`，**不拿「初版」或
+    /// `1.0` 去补**（2026-09-20 拿主意的人定）：那是把「不知道」伪装成「知道」，
+    /// 与 [`tosec_year`] 不认 `199x` 是同一条道理。
+    pub revision: Option<String>,
 }
 
-/// 从条目名（与它的 `cloneof`）读出作品、地区与语言。
+/// 从条目名（与它的 `cloneof`）读出作品、地区、语言与修订。
 #[must_use]
 pub fn parse(name: &str, cloneof: Option<&str>) -> Parsed {
     let work = cloneof.map_or_else(|| work_title(name), work_title);
     let mut region = None;
     let mut languages = None;
+    let mut revision = None;
     for (index, group) in rounds(name).enumerate() {
         if index == 0 && region.is_none() {
             let trimmed = group.trim();
@@ -63,15 +71,54 @@ pub fn parse(name: &str, cloneof: Option<&str>) -> Parsed {
                 region = Some(trimmed.to_string());
             }
         }
-        if languages.is_none() && is_language_list(group) {
+        let language_group = is_language_list(group);
+        if languages.is_none() && language_group {
             languages = Some(group.trim().to_string());
+        }
+        // **语言那一判照旧排在前头、口径一个字没改**：`(Rev A)` 仍旧不许被当成语言
+        // （[`is_language_list`] 的注释与那条测试说的就是这件事）。变的只是它被挡下来
+        // 之后有人接手了——从前挡住就没了下文，于是「这是第几版」在库里没有任何落点。
+        if revision.is_none()
+            && !language_group
+            && let Some(mark) = revision_mark(group)
+        {
+            revision = Some(mark);
         }
     }
     Parsed {
         work,
         region,
         languages,
+        revision,
     }
+}
+
+/// 这一组标记是**修订**吗；是就交回原样（去掉两头空白）。
+///
+/// 只认 No-Intro / Redump 与 TOSEC 真在用的那两种写法，**认不出一律留空**——这一层的
+/// 纪律是「宁可少说」（模块文档），而错的元数据比缺的元数据难查得多：
+///
+/// - `Rev 1` / `Rev A` / `Rev 10`：`Rev` 后面跟一段字母数字。
+/// - `v1.1` / `v1.03`：小写 `v` 后面跟一段数字打头的字。
+///
+/// **不认光板的 `1.1`**：TOSEC 的括号里什么都有，一串带点的数字更可能是年份或容量。
+fn revision_mark(group: &str) -> Option<String> {
+    let trimmed = group.trim();
+    let body = match trimmed.split_once(' ') {
+        Some((head, tail)) if head.eq_ignore_ascii_case("rev") => tail.trim(),
+        _ => {
+            let tail = trimmed.strip_prefix('v')?;
+            if !tail.starts_with(|c: char| c.is_ascii_digit()) {
+                return None;
+            }
+            tail
+        }
+    };
+    let ok = !body.is_empty()
+        && body
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    ok.then(|| trimmed.to_string())
 }
 
 /// 剥掉尾巴上的标记组，留下正题。
@@ -188,6 +235,42 @@ mod tests {
         );
         assert_eq!(parse("Foo (Japan) (Rev A)", None).languages, None);
         assert_eq!(parse("Foo (Japan)", None).languages, None);
+    }
+
+    #[test]
+    fn 条目名尾巴上的修订标记读得出来() {
+        // 词表**第几版**上面那一层：官方又发了一遍。
+        assert_eq!(
+            parse("Foo (Japan) (Rev 1)", None).revision.as_deref(),
+            Some("Rev 1")
+        );
+        assert_eq!(
+            parse("Foo (USA) (Rev A)", None).revision.as_deref(),
+            Some("Rev A")
+        );
+        assert_eq!(
+            parse("Foo (Japan) (v1.1)", None).revision.as_deref(),
+            Some("v1.1")
+        );
+    }
+
+    #[test]
+    fn 没有修订标记就是没有_不拿初版去补() {
+        // 2026-09-20 拿主意的人定：设计稿在这一格画的是 `1.0`，而「没有修订标记」与
+        // 「这是第一版」不是同一件事——编一个出来是把不知道伪装成知道。
+        assert_eq!(parse("Foo (Japan)", None).revision, None);
+        assert_eq!(parse("Chrono Trigger (USA)", None).revision, None);
+    }
+
+    #[test]
+    fn 语言组地区与年份都不许被当成修订() {
+        // 三样都在括号里，认岔一样就会有一个错的版本号画到屏上。
+        assert_eq!(parse("Foo (Japan) (En,Ja,Zh)", None).revision, None);
+        assert_eq!(parse("Foo (1990)(Publisher)", None).revision, None);
+        // 光板的 `1.1` 不认：TOSEC 的括号里带点的数字更可能是年份或容量。
+        assert_eq!(parse("Foo (Japan) (1.1)", None).revision, None);
+        // `Video` 不是 `v` 开头那一档——后面得跟数字。
+        assert_eq!(parse("Foo (Video)", None).revision, None);
     }
 
     #[test]

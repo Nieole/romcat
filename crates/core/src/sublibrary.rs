@@ -969,37 +969,157 @@ pub fn facts(catalog: &Catalog) -> Result<Vec<VariantFacts>, CatalogError> {
             .map(crate::catalog::ReleaseRow::language_codes)
             .unwrap_or_default();
         let joined = collections.get(&variant.key).cloned().unwrap_or_default();
-        let mut row = VariantFacts {
-            platform: variant.platform,
-            bytes: variant.bytes,
-            languages,
-            chinese: chinese
-                .get(&variant.key)
-                .map(|marks| marks.iter().map(|mark| (*mark).to_string()).collect())
-                .unwrap_or_default(),
-            // **收藏就是那个名字定死的合集**：两样从同一份成员关系里折出来，
-            // 不给它们留下各说各的余地（`catalog::filter` 那一侧也是同一条判据）。
-            favorite: joined
-                .iter()
-                .any(|name| name == crate::collection::FAVORITE),
-            collections: joined,
-            ..VariantFacts::default()
-        };
-        for values in [
+        let marks = chinese
+            .get(&variant.key)
+            .map(|marks| marks.iter().map(|mark| (*mark).to_string()).collect())
+            .unwrap_or_default();
+        // **作品锚点与变体锚点合起来看**：年份挂在作品上、汉化组挂在变体上，而规则
+        // 不该要求用户先弄清某个字段挂在哪一层。
+        let scraped = [
             work.as_ref().and_then(|name| by_work.get(name)),
             by_variant.get(&variant.key),
         ]
         .into_iter()
         .flatten()
-        {
-            for (into, value) in values {
-                into.absorb(&mut row, value);
+        .flatten()
+        .map(|(into, value)| (*into, value.as_str()));
+        out.push(fold_one(variant, work, languages, joined, marks, scraped));
+    }
+    Ok(out)
+}
+
+/// 把**一个变体**折成 [`select`] 要的那份事实。
+///
+/// **两条路共用这一段**：全库那一趟（[`facts`]，几张大表一次读完再逐行装配）与
+/// 按键那一趟（[`facts_of`]，几条按键查询）。各写一遍的话，「一个变体在选择集眼里
+/// 长什么样」就有了两份定义——而两份定义里只要有一处漏掉一维，屏上说「它在这个子库
+/// 里」而同步时不搬它，人核对不了（ADR-0024 那条规矩的原话：**判断只许一处**）。
+fn fold_one<'a>(
+    variant: crate::catalog::VariantRow,
+    work: Option<String>,
+    languages: Vec<String>,
+    collections: Vec<String>,
+    chinese: Vec<String>,
+    scraped: impl Iterator<Item = (ScrapedInto, &'a str)>,
+) -> VariantFacts {
+    let mut row = VariantFacts {
+        platform: variant.platform,
+        bytes: variant.bytes,
+        languages,
+        chinese,
+        // **收藏就是那个名字定死的合集**：两样从同一份成员关系里折出来，
+        // 不给它们留下各说各的余地（`catalog::filter` 那一侧也是同一条判据）。
+        favorite: collections
+            .iter()
+            .any(|name| name == crate::collection::FAVORITE),
+        collections,
+        ..VariantFacts::default()
+    };
+    for (into, value) in scraped {
+        into.absorb(&mut row, value);
+    }
+    row.work = work;
+    row.key = variant.key;
+    row
+}
+
+/// 把**指名的这几个变体**折成事实，一条全库扫描都不走。
+///
+/// [`facts`] 那一趟读的是几张整表（真库 46,444 个变体、78,902 条刮削值，实测 343 毫秒，
+/// 挂账 D156）。**作品详情页问的是三五个变体**，而那一页是画帧那条线程上开的——
+/// 一帧的预算是 16 毫秒，为三个变体扫一遍全库差着两个数量级。这一条因此逐样走**按键的
+/// 查询**（`variants_of` / `release` / `collections_of` / `candidates_of` /
+/// `scraped_values`），条数与 `keys` 成正比。
+///
+/// 折出来的形状与 [`facts`] **逐字一样**（两条都走 [`fold_one`]），于是拿它喂
+/// [`select`] 得到的结论，与整库求值时那个变体落在哪一档**必然一致**：`select` 对每个
+/// 变体的判断只看它自己那一份事实，不看别的变体。
+///
+/// 库里没有的键**一声不响地跳过**——照 [`facts`] 的形状，那种键本来就折不出事实。
+///
+/// # Errors
+/// 读中立库失败时返回错误。
+pub fn facts_of(catalog: &Catalog, keys: &[&str]) -> Result<Vec<VariantFacts>, CatalogError> {
+    let mut out = Vec::with_capacity(keys.len());
+    for variant in catalog.variants_of(keys)? {
+        let work = match variant.work_id {
+            Some(id) => catalog.work_name(id)?,
+            None => None,
+        };
+        let languages = match variant.release_id {
+            Some(id) => catalog
+                .release(id)?
+                .and_then(|release| release.languages)
+                .map(|languages| crate::catalog::ReleaseRow::language_codes(&languages))
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let collections = catalog.collections_of(&variant.key)?;
+        // 变体上的中文记号，从**自动通过**的候选上读回来（与 `facts`、`adapter::converge`
+        // 同一条路）。`BTreeSet` 去重：一个变体可能有好几条自动通过的候选都带同一个记号。
+        let marks: BTreeSet<&'static str> = catalog
+            .candidates_of(&variant.key)?
+            .iter()
+            .filter(|candidate| candidate.accepted)
+            .filter_map(|candidate| candidate.chinese)
+            .map(crate::dat::chinese::ChineseMark::label)
+            .collect();
+        let mut scraped: Vec<(ScrapedInto, String)> = Vec::new();
+        for (anchor, subject) in [
+            (AnchorKind::Work, work.as_deref()),
+            (AnchorKind::Variant, Some(variant.key.as_str())),
+        ] {
+            let Some(subject) = subject else { continue };
+            for value in catalog.scraped_values(anchor.label(), subject)? {
+                if let Some(into) = ScrapedInto::of(&value.field) {
+                    scraped.push((into, value.value));
+                }
             }
         }
-        row.work = work;
-        row.key = variant.key;
-        out.push(row);
+        out.push(fold_one(
+            variant,
+            work,
+            languages,
+            collections,
+            marks.into_iter().map(str::to_string).collect(),
+            scraped.iter().map(|(into, value)| (*into, value.as_str())),
+        ));
     }
+    Ok(out)
+}
+
+/// **这几个变体落在哪几个子库的选择集里**，按子库名排好。
+///
+/// 作品详情页状态块「子库」那一行问的就是它（票 `gui-looks-like-the-design/34`）：
+/// 一部作品底下那几个变体，只要有一个被某个子库选中，那个子库就列出来——子库选的是
+/// **变体**不是前端条目（`CONTEXT.md` 的**子库**条、模块文档「选中的是变体」那一段），
+/// 而屏上那一行说的是这部**作品**。
+///
+/// **判断一处都不在这儿**：求值走的是 [`select`]，与子库屏、容量条、差量预览、真正
+/// 同步那一趟**同一个函数**（ADR-0024）。这里只是把范围缩到这几个键上，再把交回来的
+/// 那批按子库名收一收。于是「详情页说它在这个子库里」与「同步时真会搬它」不可能分岔。
+///
+/// **例外照样算数**：`select` 先看例外后看规则（「优先于规则」在代码里就长成那样），
+/// 所以手工收入的那一条在这儿列得出来，手工排除的那一条列不出来——正是 ADR-0016 要的。
+///
+/// # Errors
+/// 读中立库失败时返回错误。
+pub fn holding(catalog: &Catalog, keys: &[&str]) -> Result<Vec<String>, CatalogError> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let facts = facts_of(catalog, keys)?;
+    if facts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for sublibrary in catalog.sublibraries()? {
+        let selection = catalog.selection(&sublibrary.name)?;
+        if !select(&selection.selection, &facts).picked.is_empty() {
+            out.push(sublibrary.name);
+        }
+    }
+    out.sort();
     Ok(out)
 }
 

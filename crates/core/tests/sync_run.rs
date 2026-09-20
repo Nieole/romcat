@@ -24,6 +24,7 @@ use romcat_core::catalog::Roots;
 use romcat_core::catalog::scrape::{Harvested, HarvestedMedia};
 use romcat_core::fs::{DirEntry, LibraryFs, MemFs, ReadSeek, RealFs};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
+use romcat_core::scrape::measure::Measured;
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::priority::Priorities;
 use romcat_core::scrape::{AnchorKind, MediaKind};
@@ -112,7 +113,7 @@ impl 现场 {
         let at = self.pool.path_of(&hash, "png");
         写(&at, bytes);
         self.catalog
-            .put_media(&hash, "png", bytes.len() as u64)
+            .put_media(&hash, "png", bytes.len() as u64, Measured::default())
             .expect("池里记得下");
         self.catalog
             .put_scraped(&[Harvested {

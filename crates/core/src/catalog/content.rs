@@ -78,7 +78,15 @@ CREATE TABLE IF NOT EXISTS release(
     region    TEXT,
     serial    TEXT,
     languages TEXT,
-    origin    TEXT NOT NULL
+    origin    TEXT NOT NULL,
+    -- **修订**：DAT 条目名尾巴上那一组 `(Rev 1)` / `(v1.1)`（`identify::naming::parse`）。
+    -- 它是词表**第几版**上面那一层——官方又发了一遍，是**发行版**那一层的事实，
+    -- 所以住在这张表上，而不是变体那一侧。
+    --
+    -- 可空，**空就是「这条条目名里没有修订标记」**，不是「第一版」（词表**第几版**，
+    -- 2026-09-20 拿主意的人定）。那正是加这一列之前的唯一可能，于是老行一条都不会被
+    -- 读错。这一列由 `catalog::identify::add_columns` 给老库补上。
+    revision  TEXT
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS release_work ON release(work_id);
@@ -218,6 +226,12 @@ pub struct ReleaseRow {
     pub serial: Option<String>,
     /// 语言标记组（`En,Zh-Hans`）；可空。
     pub languages: Option<String>,
+    /// **修订**：DAT 条目名尾巴上那一组 `(Rev 1)` / `(v1.1)`（`identify::naming::parse`）。
+    ///
+    /// 词表**第几版**上面那一层。**空就是「名字里没有修订标记」，不是「第一版」**——
+    /// 挑哪一层由 [`VariantDetail::edition`](super::detail::VariantDetail::edition) 一处判，
+    /// 这里只如实交回读到的东西。
+    pub revision: Option<String>,
 }
 
 impl ReleaseRow {
@@ -817,12 +831,21 @@ impl Catalog {
         serial: Option<&str>,
         languages: Option<&str>,
         origin: Provenance,
+        revision: Option<&str>,
     ) -> Result<i64, CatalogError> {
         self.conn
             .execute(
-                "INSERT INTO release(work_id, platform, region, serial, languages, origin)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-                params![work_id, platform, region, serial, languages, origin.label()],
+                "INSERT INTO release(work_id, platform, region, serial, languages, origin, revision)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    work_id,
+                    platform,
+                    region,
+                    serial,
+                    languages,
+                    origin.label(),
+                    revision
+                ],
             )
             .map_err(|source| self.err(source))?;
         Ok(self.conn.last_insert_rowid())
@@ -938,7 +961,9 @@ impl Catalog {
     pub fn releases(&self) -> Result<BTreeMap<i64, ReleaseRow>, CatalogError> {
         let mut statement = self
             .conn
-            .prepare("SELECT id, work_id, platform, region, serial, languages FROM release")
+            .prepare(
+                "SELECT id, work_id, platform, region, serial, languages, revision FROM release",
+            )
             .map_err(|source| self.err(source))?;
         let rows = statement
             .query_map([], |row| {
@@ -949,6 +974,7 @@ impl Catalog {
                     region: row.get(3)?,
                     serial: row.get(4)?,
                     languages: row.get(5)?,
+                    revision: row.get(6)?,
                 })
             })
             .map_err(|source| self.err(source))?;
@@ -1288,6 +1314,7 @@ mod tests {
                 Some("SHVC-TO"),
                 Some("ja"),
                 Provenance::Verdict,
+                None,
             )
             .expect("建得了发行版");
         catalog

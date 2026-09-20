@@ -17,13 +17,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use egui::{Align, Layout};
 use romcat_core::catalog::browse::{WorkAnchor, WorkDetail, WorkRow, WorkVariant};
 use romcat_core::catalog::detail::{FileLine, MediaItem};
+use romcat_core::catalog::export::ExportMark;
 use romcat_core::catalog::identify::{Candidate, NOT_RUN_LABEL, State, Tier};
 use romcat_core::catalog::roots::Roots;
 use romcat_core::catalog::scrape::ScrapedValue;
 use romcat_core::catalog::{Catalog, Confidence, TitleRow, VariantDetail};
 use romcat_core::dat::chinese::ChineseMark;
 use romcat_core::fs::RealFs;
-use romcat_core::report::{capacity, human_bytes, thousands};
+use romcat_core::report::{self, capacity, human_bytes, human_time, thousands};
 use romcat_core::scrape::priority::{self, FieldShown, Said, VERDICT};
 use romcat_core::scrape::{AnchorKind, Field, MediaKind, preview};
 use romcat_core::shape::Role;
@@ -133,6 +134,13 @@ pub struct Page {
     /// 这个作品的**中文版本**（核心库 `Catalog::work_chinese_mark`，与首选变体那条规则同一处判）：头上那枚标签与
     /// 基本信息里「中文版本」那一格照它印；一个中文的都没有是 `None`。
     chinese: Option<ChineseMark>,
+    /// 这个作品底下那几个变体**落在哪几个子库的选择集里**（核心库 `sublibrary::holding`，
+    /// 与子库屏、容量条、差量预览、真正同步那一趟**同一个求值函数**）：状态块里「子库」那一行照它写。
+    /// 一个都没落进是空的。
+    sublibraries: Vec<String>,
+    /// 这个作品**上次写进前端格式是什么时候**（核心库 `Catalog::entry_exported`）：状态块里「导出」那一行照它写。
+    /// **一趟都没导过、或者上次导出那会儿它还不在库里**都是 `None`——那与「整库导过了」不是同一件事。
+    exported: Option<ExportMark>,
 }
 
 /// 编辑态下一格的草稿。
@@ -174,6 +182,8 @@ impl Page {
         self.row = None;
         self.head = None;
         self.files.clear();
+        self.sublibraries.clear();
+        self.exported = None;
     }
 }
 
@@ -545,8 +555,27 @@ impl Screen {
             },
             None => None,
         };
+        // **子库**与**导出**那两行（票 `gui-looks-like-the-design/34`）。两样的判断都在核心库：
+        // 「落在哪几个子库里」走求值那一处（`sublibrary::holding`，ADR-0024），
+        // 「上次几点写出去的」读导出那一趟逐条记下的账（`Catalog::entry_exported`）。
+        let mut sublibraries = Vec::new();
+        let mut exported = None;
+        if let Some(work) = self.work.as_ref() {
+            let 键: Vec<&str> = keys.iter().map(String::as_str).collect();
+            match romcat_core::sublibrary::holding(catalog, &键) {
+                Ok(names) => sublibraries = names,
+                Err(error) => self.error = Some(format!("中立库读不动：{error}")),
+            }
+            let (anchor, subject) = work.anchor.scrape_anchor(&work.name);
+            match catalog.entry_exported(anchor, subject) {
+                Ok(mark) => exported = mark,
+                Err(error) => self.error = Some(format!("中立库读不动：{error}")),
+            }
+        }
         page.files = files;
         page.chinese = chinese;
+        page.sublibraries = sublibraries;
+        page.exported = exported;
         page.platform_names = self.work.as_ref().map_or_else(String::new, |work| {
             let manifest = romcat_core::platform::Manifest::builtin();
             work.platforms
@@ -2053,7 +2082,11 @@ fn table_row(
 }
 
 /// 变体卡片左半：发行版那几格（设计稿 `.vbody` 左边那张 `dl.infol`）——发行版（已接受那条候选的 DAT 条目名）、地区、
-/// 语言、序列号、汉化组。没有发行版链接、或者那一格说不出来的写「—」。「版本」那一行核心库没有这一格，眼下不画（岔路口 4c）。
+/// 语言、序列号、汉化组、版本。没有发行版链接、或者那一格说不出来的写「—」。
+///
+/// 「版本」那一格写的是词表**第几版**（屏上照设计稿写「版本」）：**两层怎么挑由核心库一处判**
+/// （`VariantDetail::edition`——裁决 > 发行版的修订 > 说不出），界面只把它印出来。
+/// **说不出时写「—」**，不拿 `1.0` 去补（2026-09-20 拿主意的人定；稿上那一格画的是 `1.0`）。
 fn release_facts(
     ui: &mut egui::Ui,
     variant: &WorkVariant,
@@ -2096,6 +2129,8 @@ fn release_facts(
                 true,
             ),
             ("汉化组", 或破折号(汉化组.as_deref()), false),
+            // **版本**：词表**第几版**。等宽——它是 `Rev 1` / `v1.2` 这类记号，与序列号同一档。
+            ("版本", 或破折号(detail.edition()), true),
         ],
     );
 }
@@ -3165,11 +3200,12 @@ fn media_tile(
                                 .size(tokens.font.size_body)
                                 .color(强),
                         );
-                        // 「来源 · 大小」（设计稿 `.mi .help`）；稿上夹在中间的尺寸与时长核心库还答不出，归票 34。
-                        look::help(
-                            ui,
-                            &format!("{} · {}", item.source, human_bytes(item.bytes)),
-                        );
+                        // 「来源 · 尺寸 · 时长 · 大小」（设计稿 `.mi .help` 那一行，`mediaOf` 的
+                        // `src` / `dim` / `size`）。中间两段是**入池那一刻量下来的**
+                        // （`scrape::measure`）；量不出来的那几段整段不写，于是老库与没装
+                        // ffmpeg 的机器上这一行退回「来源 · 大小」——不写「未知」，那是
+                        // 拿一句废话占一格。
+                        look::help(ui, &media_facts(item));
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing.x = look::step(1);
                             if preview::is_video(&item.ext) {
@@ -3525,7 +3561,14 @@ fn description_card(ui: &mut egui::Ui, page: &Page) -> Option<PageAction> {
 }
 
 /// 状态那一块（设计稿 `ovTab` 右边第二块 `.sect`）：识别——逐个变体的识别结论照出现的次序数个数（词是核心库的
-/// `State::label` 与「还没识别」）；元数据——表上那一行的短标签。
+/// `State::label` 与「还没识别」）；元数据——表上那一行的短标签；收藏、子库、导出各一行。
+///
+/// **稿上夹在「收藏」与「子库」中间的「合集」那一行不在这儿**：它连同那颗「加入合集…」归票 13，
+/// 这一块照稿的次序把位置给它留着。
+///
+/// 「子库」与「导出」两行的判断**一个字都不在这儿**（票 `gui-looks-like-the-design/34`）：
+/// 落在哪几个子库里由求值那一处答（`sublibrary::holding`），上次几点写出去的由导出那一趟
+/// 逐条记下的账答（`Catalog::entry_exported`）。界面只把它们印出来。
 fn status_card(ui: &mut egui::Ui, work: &WorkDetail, page: &Page) {
     let tokens = Tokens::builtin();
     let 字号 = look::font_size(ui.ctx(), tokens.font.size_small_plus);
@@ -3577,7 +3620,51 @@ fn status_card(ui: &mut egui::Ui, work: &WorkDetail, page: &Page) {
             }
             ui.add(egui::Label::new(job).wrap());
         });
+        // 子库：落在哪几个子库的选择集里，名字之间「、」（设计稿 `ovTab` 的 `subs`）。
+        // **一个都没落进写「—」**——与别处「那一格说不出来」同一个记号。
+        ui.add_space(tokens.space.info_list_gap[0]);
+        info_row(ui, "子库", |ui| {
+            let 话 = if page.sublibraries.is_empty() {
+                "—".to_owned()
+            } else {
+                page.sublibraries.join("、")
+            };
+            ui.add(egui::Label::new(egui::RichText::new(话).size(字号).color(强)).wrap());
+        });
+        // 导出：「已导出到 Pegasus · 09-03 15:41」（设计稿 `ovTab` 那一行）。
+        //
+        // **没有那一条就说「还没导出」**，不拿整库那个时刻顶上去：上次导出之后才扫进来的
+        // 作品在这儿本来就该是「还没导出」，而整库那个数会让它跟着说「已导出」——
+        // 那正是这一行最该答对的一种情形（`catalog::export` 的模块文档）。
+        ui.add_space(tokens.space.info_list_gap[0]);
+        info_row(ui, "导出", |ui| {
+            let 话 = page.exported.as_ref().map_or_else(
+                || "还没导出".to_owned(),
+                |mark| format!("已导出到 {} · {}", mark.format, human_time(mark.at)),
+            );
+            ui.add(egui::Label::new(egui::RichText::new(话).size(字号).color(强)).wrap());
+        });
     });
+}
+
+/// 媒体那一格底下那行小字：「来源 · 尺寸 · 时长 · 大小」（设计稿 `mediaOf` 的 `src · dim · size`）。
+///
+/// **中间两段量不出来就整段不写**：这一版不解的图片格式、半截文件、这台机器上没有 ffmpeg，
+/// 以及老库里加那三列之前就已经入过池的那些（`catalog::scrape::add_columns` 不回填）——
+/// 四种都归到同一个处置上，因为对这一行来说它们是同一件事：**没量过**。
+///
+/// 数怎么排由核心库说（`report::pixel_size` / `report::media_duration`），与报告、命令行
+/// 印的是同一个数。
+fn media_facts(item: &MediaItem) -> String {
+    let mut 几段 = vec![item.source.clone()];
+    if let Some((width, height)) = item.measured.size() {
+        几段.push(report::pixel_size(width, height));
+    }
+    if let Some(ms) = item.measured.duration_ms {
+        几段.push(report::media_duration(ms));
+    }
+    几段.push(human_bytes(item.bytes));
+    几段.join(" · ")
 }
 
 /// 概览里媒体那一块的一格（设计稿 `.mstrip div`）：凹陷底、中圆角、一圈分隔线；解出来的盖满这一格，没有 ffmpeg 抽不出

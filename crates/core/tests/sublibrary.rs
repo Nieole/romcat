@@ -37,6 +37,7 @@ fn 标上中文(catalog: &mut Catalog, key: &str, mark: ChineseMark) {
             variant_key: key.to_string(),
             platform: None,
             standalone: None,
+            edition: None,
             state: State::Matched,
             reason: None,
             units: 1,
@@ -454,6 +455,7 @@ fn 事实从三层内容层级与刮削结论折出来() {
             None,
             Some("Ja,Zh"),
             Provenance::Identified,
+            None,
         )
         .expect("建得了发行版");
     catalog
@@ -1440,4 +1442,99 @@ fn 库里头一个有平台的变体住在哪个平台目录_目标设置里那�
     );
     let 空库 = Catalog::open_in_memory().expect("能开中立库");
     assert_eq!(空库.sample_platform_directory().expect("读得动"), None);
+}
+
+#[test]
+fn 按键折出来的事实与全库折出来的那一份逐字一样() {
+    // 票 `gui-looks-like-the-design/34`：作品详情页问的是三五个变体，全库那一趟在真库上
+    // 是 343 毫秒（挂账 D156），而那一页开在画帧线程上。按键那条路因此另走一遍查询——
+    // **折出来的形状必须一模一样**，否则「详情页说它在这个子库里」与「同步时真搬它」
+    // 会分岔，而那种岔用户核对不了。
+    let mut catalog = 现场();
+    catalog
+        .put_scraped(&[Harvested {
+            anchor: romcat_core::scrape::AnchorKind::Variant.label().to_string(),
+            subject: "库/GB/口袋妖怪 汉化.zip".to_string(),
+            source: "测试源".to_string(),
+            input: "一轮".to_string(),
+            values: vec![HarvestedValue {
+                field: Field::Genre.label().to_string(),
+                value: "角色扮演".to_string(),
+                evidence: "测试".to_string(),
+            }],
+            media: Vec::new(),
+        }])
+        .expect("刮削值写得进");
+    // **收藏就是那个名字定死的合集**：两条路都得从这同一份成员关系里折出 `favorite`。
+    let 收藏 = catalog
+        .add_collection(romcat_core::collection::FAVORITE)
+        .expect("建得了合集");
+    catalog
+        .add_to_collection(收藏, "库/GB/口袋妖怪 汉化.zip")
+        .expect("收藏得上");
+
+    let 全库 = sublibrary::facts(&catalog).expect("全库折得出");
+    let 键: Vec<&str> = 全库.iter().map(|one| one.key.as_str()).collect();
+    let 按键 = sublibrary::facts_of(&catalog, &键).expect("按键折得出");
+    assert_eq!(按键, 全库, "两条路折出来的事实得逐字一样");
+
+    // 库里没有的键一声不响地跳过——那种键本来就折不出事实。
+    assert!(
+        sublibrary::facts_of(&catalog, &["库/GB/压根不存在.zip"])
+            .expect("折得出")
+            .is_empty()
+    );
+}
+
+#[test]
+fn 一个变体落在哪几个子库里由求值那一处答_例外照样优先于规则() {
+    // 票 `gui-looks-like-the-design/34`：状态块「子库」那一行。**判断不在界面、也不另写
+    // 一份**——走的是 `select`，与子库屏、容量条、差量预览、真正同步那一趟同一个函数
+    // （ADR-0024）。
+    let mut catalog = 现场();
+    建子库(&mut catalog, "掌机", None);
+    建子库(&mut catalog, "备用卡", None);
+    建子库(&mut catalog, "空子库", None);
+    加规则(&mut catalog, "掌机", "平台=GB");
+    加规则(&mut catalog, "备用卡", "平台=PSV");
+
+    let 汉化 = "库/GB/口袋妖怪 汉化.zip";
+    assert_eq!(
+        sublibrary::holding(&catalog, &[汉化]).expect("答得出"),
+        vec!["掌机".to_string()],
+        "规则选中它的那一个列出来；没有规则的那个子库不列"
+    );
+
+    // **例外优先于规则**（ADR-0016）：手工排除之后这一行就不该再说它在掌机里。
+    catalog
+        .set_exception("掌机", 汉化, Exception::Exclude, None)
+        .expect("例外写得进");
+    assert_eq!(
+        sublibrary::holding(&catalog, &[汉化]).expect("答得出"),
+        Vec::<String>::new(),
+        "手工排除掉的不许还列着——那正是「优先于规则」"
+    );
+
+    // 反过来：一条规则都选不中它的子库，手工收入之后就该列出来。
+    catalog
+        .set_exception("备用卡", 汉化, Exception::Include, None)
+        .expect("例外写得进");
+    assert_eq!(
+        sublibrary::holding(&catalog, &[汉化]).expect("答得出"),
+        vec!["备用卡".to_string()]
+    );
+
+    // 一部作品底下几个变体：**只要有一个被选中，那个子库就算数**——子库选的是变体，
+    // 而屏上那一行说的是这部作品。
+    assert_eq!(
+        sublibrary::holding(&catalog, &[汉化, "库/PSV/大作.vpk"]).expect("答得出"),
+        vec!["备用卡".to_string()],
+        "PSV 那个变体落在备用卡的规则里"
+    );
+    assert!(
+        sublibrary::holding(&catalog, &[])
+            .expect("答得出")
+            .is_empty(),
+        "一个键都不给时问的是空集"
+    );
 }

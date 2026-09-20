@@ -149,6 +149,41 @@ pub use title::TitleRow;
 /// 照旧不写迁移代码。
 pub const SCHEMA_VERSION: u32 = 7;
 
+/// 一张表上缺了这一列就补上；已经有了就什么都不做。**这一次是不是真补了**由返回值说。
+///
+/// **补列这件事全仓只有这一处**：判有没有走 `PRAGMA table_info`，因此重复调用安全，
+/// 而 [`Catalog::open`] 每开一次库就把 `add_columns` 那几支跑一遍。
+///
+/// 它不动 [`SCHEMA_VERSION`]——判据是「旧数据会不会被读错」，而纯加一列的老行取得到的
+/// 含义与从前完全一致（见那个常量的文档）。**新列必须让老行取得到那个含义**，否则要
+/// 的就不是这个函数，是升版。
+///
+/// 返回值是给**要回填的那些列**用的：补上的那一刻把旧结论搬进来，只能搬这一次
+/// （`identify::add_columns` 的 `identification.standalone` 是全仓头一例）。
+///
+/// ⚠️ 三处调用方（`sublibrary` / `identify` / `scrape`）从前各抄了一份这个函数。
+/// 抄出来的几份迟早在「判有没有」那一步上分家，而那一步错了是**静默**的：
+/// 列没补上，读的那一侧只会看见一片 NULL。
+fn add_column(
+    conn: &rusqlite::Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> rusqlite::Result<bool> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(false);
+        }
+    }
+    drop(rows);
+    drop(statement);
+    // 表名与列名都是调用方写死的字面量，不来自外面。
+    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+    Ok(true)
+}
+
 /// `prepare_cached` 那张表留几条。
 ///
 /// **默认那 16 条不够用了**（票 `parking-3/09`）：按一批键取行的那几条 SQL 是照段长
@@ -789,10 +824,12 @@ impl Catalog {
         catalog.batch(title::TITLE_SCHEMA)?;
         catalog.batch(frontend::FRONTEND_SCHEMA)?;
         catalog.batch(sublibrary::SUBLIBRARY_SCHEMA)?;
+        catalog.batch(export::EXPORT_SCHEMA)?;
         // 建完表再补列：票 18、19 建的那两张表在老库里已经存在，
         // `CREATE TABLE IF NOT EXISTS` 对它们一个字都不改（见 `add_columns`）。
         sublibrary::add_columns(&catalog.conn).map_err(|source| catalog.err(source))?;
         identify::add_columns(&catalog.conn).map_err(|source| catalog.err(source))?;
+        scrape::add_columns(&catalog.conn).map_err(|source| catalog.err(source))?;
         let found = catalog.meta_get(MetaKey::SchemaVersion)?;
         match (found.as_deref().map(str::parse::<u32>), birth) {
             // 开头已经核过这一行在不在；这一支只防核完之后另一个连接把它删了——照样不许顺手

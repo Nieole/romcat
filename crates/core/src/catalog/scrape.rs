@@ -45,6 +45,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rusqlite::{OptionalExtension, params};
 
 use super::{Catalog, CatalogError};
+use crate::scrape::measure::Measured;
 use crate::scrape::priority::VERDICT;
 use crate::scrape::{AnchorKind, Field};
 
@@ -75,7 +76,20 @@ CREATE TABLE IF NOT EXISTS media(
     hash  TEXT PRIMARY KEY,
     ext   TEXT    NOT NULL,
     bytes INTEGER NOT NULL,
-    at    INTEGER NOT NULL
+    at    INTEGER NOT NULL,
+    -- **尺寸与时长**：入池那一刻量一次记下来（`scrape::measure`，票
+    -- `gui-looks-like-the-design/34`）。媒体池是内容寻址的，同一串字节量出来永远一样，
+    -- 所以这三样与 `bytes` 同一档账——不是每次画帧现量。
+    --
+    -- 三列**可空，而且空是有含义的**：这一版不解的图片格式、半截文件、以及这台机器上
+    -- 没有 ffmpeg，三种都留空（ADR-0021：**不可读**是第三态，不是零）。老库里此前已经
+    -- 入过池的那些也全空着——屏上那一行照样退回「来源 · 大小」，不为这三个数逼人重扫
+    -- 一份 8.60 TiB 的库。
+    --
+    -- 这三列由 `add_columns` 给老库补上，见那个函数的注释。
+    width       INTEGER,
+    height      INTEGER,
+    duration_ms INTEGER
 ) STRICT;
 
 -- 谁引用了那份媒体。一份媒体被多个锚点引用，这里多几行，池里仍然只有一个文件。
@@ -137,6 +151,25 @@ CREATE TABLE IF NOT EXISTS scrape_probe(
     PRIMARY KEY (anchor, subject, source)
 ) STRICT;
 ";
+
+/// 补上后来加的列。**纯加列，不改已有列的含义**，所以不动
+/// [`SCHEMA_VERSION`](super::SCHEMA_VERSION)（与 `catalog::sublibrary::add_columns`、
+/// `catalog::identify::add_columns` 同一条路，补列那一下共用 [`add_column`](super::add_column)）。
+///
+/// 票 `gui-looks-like-the-design/34` 加的是 `media` 上那三列**尺寸与时长**。老行上它们是
+/// NULL，读的那一侧当「没量过」处理——而那正是加这三列之前的唯一可能，于是旧数据一行
+/// 都不会被读错；旧程序写 `media` 时列名单里没有它们，照样写得进。
+///
+/// **不回填**：回填要把池里那 440 张图逐张开一遍、那 178 段视频逐段拉一个进程
+/// （`docs/library-facts.md`），而这一趟跑在**开库**那条路上——开一次库卡上十几秒，
+/// 换来的只是几个装饰性的数。老库里那几格就此留空，屏上退回「来源 · 大小」
+/// （`scrape::measure` 的模块文档）；重新刮削那一趟走过入池，它们自己会补齐。
+pub(super) fn add_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    super::add_column(conn, "media", "width", "INTEGER")?;
+    super::add_column(conn, "media", "height", "INTEGER")?;
+    super::add_column(conn, "media", "duration_ms", "INTEGER")?;
+    Ok(())
+}
 
 /// 一条要写进去的字段值。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -572,23 +605,71 @@ impl Catalog {
             .map_err(|source| self.err(source))
     }
 
-    /// 往池里记一份媒体。**同一个哈希只记一次**——已经有了就什么都不做。
+    /// 往池里记一份媒体，连**入池那一刻量出来的尺寸与时长**（`scrape::measure`）。
+    ///
+    /// **哪一份内容、多大、什么时候进来的只记一次**——已经有了就不动那三格：媒体池是
+    /// 内容寻址的，同一个哈希说的就是同一串字节，第二次进来的那一份不会比第一次大。
+    ///
+    /// **量出来的那三格反过来是「空着才补」**：老库里此前入过池的那些三格全空
+    /// （`add_columns` 不回填），重新刮削走过这里时顺手把它们填上；而已经量到数的那几格
+    /// 不许被后来一趟量不出来的（那台机器上没装 ffmpeg）抹回空——**「没量出来」盖掉
+    /// 「量到了」是净亏**。
     ///
     /// # Errors
     /// 写库失败时返回错误。
-    pub fn put_media(&mut self, hash: &str, ext: &str, bytes: u64) -> Result<(), CatalogError> {
+    pub fn put_media(
+        &mut self,
+        hash: &str,
+        ext: &str,
+        bytes: u64,
+        measured: Measured,
+    ) -> Result<(), CatalogError> {
         self.conn
             .execute(
-                "INSERT INTO media(hash, ext, bytes, at) VALUES(?1,?2,?3,?4)
-                 ON CONFLICT(hash) DO NOTHING",
+                "INSERT INTO media(hash, ext, bytes, at, width, height, duration_ms)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7)
+                 ON CONFLICT(hash) DO UPDATE SET
+                     width       = coalesce(width,       excluded.width),
+                     height      = coalesce(height,      excluded.height),
+                     duration_ms = coalesce(duration_ms, excluded.duration_ms)",
                 params![
                     hash,
                     ext,
                     i64::try_from(bytes).unwrap_or(i64::MAX),
-                    super::now_secs()
+                    super::now_secs(),
+                    measured.width,
+                    measured.height,
+                    measured
+                        .duration_ms
+                        .map(|ms| i64::try_from(ms).unwrap_or(i64::MAX)),
                 ],
             )
             .map(|_| ())
+            .map_err(|source| self.err(source))
+    }
+
+    /// 池里这一份**入池那一刻量下来的尺寸与时长**（`scrape::measure`）。
+    ///
+    /// 库里没有这一份、或者那三格空着（老库、以及量不出来的那几种）都交回一份**空的**
+    /// [`Measured`]——**两者的处置本来就一样**：屏上那一行退回「来源 · 大小」。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn media_measured(&self, hash: &str) -> Result<Measured, CatalogError> {
+        self.conn
+            .prepare_cached("SELECT width, height, duration_ms FROM media WHERE hash = ?1")
+            .and_then(|mut statement| {
+                statement
+                    .query_row(params![hash], |row| {
+                        Ok(Measured {
+                            width: row.get(0)?,
+                            height: row.get(1)?,
+                            duration_ms: row.get::<_, Option<i64>>(2)?.map(i64::unsigned_abs),
+                        })
+                    })
+                    .optional()
+            })
+            .map(Option::unwrap_or_default)
             .map_err(|source| self.err(source))
     }
 

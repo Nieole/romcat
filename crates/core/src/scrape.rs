@@ -46,6 +46,7 @@
 pub mod dat;
 pub mod estimate;
 pub mod local;
+pub mod measure;
 pub mod online;
 pub mod pool;
 pub mod preview;

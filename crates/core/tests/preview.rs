@@ -16,6 +16,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use romcat_core::catalog::Catalog;
+use romcat_core::scrape::measure::Measured;
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::preview::{self, EDGE, Loader, Missing, Preview};
 use romcat_core::testing::{TempDir, temp_dir};
@@ -51,7 +52,7 @@ fn 现场(tag: &str) -> (TempDir, MediaPool, Catalog) {
 fn 入池(pool: &MediaPool, catalog: &mut Catalog, bytes: &[u8], ext: &str) -> String {
     let (hash, _) = pool.take_bytes(bytes, ext).expect("落得进池");
     catalog
-        .put_media(&hash, ext, bytes.len() as u64)
+        .put_media(&hash, ext, bytes.len() as u64, Measured::default())
         .expect("记得进库");
     hash
 }
@@ -287,7 +288,7 @@ fn 抽出来的首帧落进池里再交回来等着记库() {
     );
     // 而记库那一半是调用方的事——这里补上，下一次打开就走「不重抽」那条。
     catalog
-        .put_media(&frame.hash, "png", frame.bytes)
+        .put_media(&frame.hash, "png", frame.bytes, Measured::default())
         .expect("记得进");
     catalog.put_media_frame(&片子, &frame.hash).expect("记得进");
     assert_eq!(
@@ -362,4 +363,67 @@ fn 打不开的东西如实报一句话而不是崩() {
     if let Err(说的) = 结果 {
         assert!(说的.contains("不存在的片子.mp4"), "{说的}");
     }
+}
+
+#[test]
+fn 入池那一刻量一次尺寸_图片读得出宽高而视频那一格留空() {
+    // 票 `gui-looks-like-the-design/34`：媒体格照稿写「来源 · 尺寸 · 时长 · 大小」，
+    // 中间两段是**入池那一刻量下来的**（`scrape::measure`），不是每次画帧现量。
+    //
+    // 这一条走 `pool::store` 那条正门（在线那一侧下回来的整块），落点是两条进池的路
+    // **共用的那一段收尾**——主库那一侧走的是同一段。
+    let (_dir, pool, mut catalog) = 现场("量尺-入池量一次");
+    // 量视频那个程序换成一个不存在的：**这台机器装没装 ffmpeg 都测得到这条退化路**。
+    let pool = pool.probing_with(preview::NO_SUCH_PROGRAM);
+
+    let (图, _) = romcat_core::scrape::pool::store(&pool, &mut catalog, &png(640, 480), "png")
+        .expect("收得进");
+    let (片子, _) =
+        romcat_core::scrape::pool::store(&pool, &mut catalog, &[0x00; 256], "mp4").expect("收得进");
+
+    let 量到的 = |hash: &str| catalog.media_measured(hash).expect("读得出");
+    assert_eq!(
+        量到的(&图).size(),
+        Some((640, 480)),
+        "图片的宽高该在入池那一刻读出来（只读文件头）"
+    );
+    assert_eq!(量到的(&图).duration_ms, None, "图片没有时长");
+    assert!(
+        量到的(&片子).is_empty(),
+        "这台机器上没有那个程序——视频那三格留空，而且**不报错**：视频照样进了池"
+    );
+    assert!(
+        pool.contains(&片子, "mp4"),
+        "量不出来不该挡住入池（ADR-0021：不可读是第三态，不是失败）"
+    );
+}
+
+#[test]
+fn 量不出来的那几格空着_后来量到了补得上_而且不许被再量不出来的抹掉() {
+    // `put_media` 那一条：哪份内容、多大、什么时候进来的只记一次；量出来的三格
+    // **空着才补**。「没量出来」盖掉「量到了」是净亏——老库补齐那条路靠的就是它。
+    let (_dir, pool, mut catalog) = 现场("量尺-空着才补");
+    let 字节 = png(320, 240);
+    let hash = 入池(&pool, &mut catalog, &字节, "png");
+    assert!(catalog.media_measured(&hash).expect("读得出").is_empty());
+
+    let 量到 = Measured {
+        width: Some(320),
+        height: Some(240),
+        duration_ms: None,
+    };
+    catalog
+        .put_media(&hash, "png", 字节.len() as u64, 量到)
+        .expect("补得上");
+    assert_eq!(catalog.media_measured(&hash).expect("读得出"), 量到);
+
+    // 换一台没装 ffmpeg 的机器重跑一趟刮削：交回来的是空的，**不许把已有的抹掉**。
+    catalog
+        .put_media(&hash, "png", 字节.len() as u64, Measured::default())
+        .expect("写得进");
+    assert_eq!(
+        catalog.media_measured(&hash).expect("读得出"),
+        量到,
+        "「没量出来」盖掉「量到了」是净亏"
+    );
 }

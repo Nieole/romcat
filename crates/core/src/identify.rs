@@ -1005,6 +1005,8 @@ fn identify_variant(
             reason: Some(skip.recorded()),
             platform: platform_of(variant, &units).map(ToString::to_string),
             standalone: skip.standalone(),
+            // **识别这一层不说第几版**：那只有人说得出（ADR-0008），走裁决那条路。
+            edition: None,
             units: 0,
             nkit: 0,
             read_bytes: 0,
@@ -3312,6 +3314,10 @@ fn assemble(
         // 判出来的平台**落下来**：刮削读它，不再拿目录那一列判一次（票
         // `one-criterion-per-thing/03`）。
         platform: platform_of(variant, units).map(ToString::to_string),
+        // **识别这一层不说第几版**：自动识别只保证做到发行版级（ADR-0008），
+        // 而「这是谁汉化的第几版」只有人说得出——它走裁决那条路（`Projector::project`）。
+        // 发行版那一层的**修订**不在这儿：那是 DAT 条目名里的事实，落在 `release.revision`。
+        edition: None,
         // 能不能独立运行由 `identify_variant` 拿齐依据再填：TitleID 那一条这里还够不着。
         standalone: None,
         units: usable,
@@ -3657,6 +3663,9 @@ impl Projector {
             candidate.serial.as_deref(),
             parsed.languages.as_deref(),
             Provenance::Identified,
+            // **修订**：条目名尾巴上那一组 `(Rev 1)` / `(v1.1)`（词表**第几版**上面那一层）。
+            // 一条 DAT 条目就是一条发行版，所以它落在发行版这一行上。没有就是没有。
+            parsed.revision.as_deref(),
         )?;
         self.releases.insert(key, id);
         Ok(id)
@@ -3699,6 +3708,11 @@ impl Projector {
                 facts.serial.as_deref(),
                 facts.languages.as_deref(),
                 Provenance::Verdict,
+                // **裁决说的那一版不写在这儿**：这一行会被几个变体共用（上面那把去重键
+                // 里没有版本），而「汉化打到第几版」是**变体**那一层的事实——写进来会
+                // 让第一个落库的那一版盖住其余几个。它落在候选那一行上
+                // （`Candidate::edition`，词表**第几版**下面那一层）。
+                None,
             )?,
         };
         self.releases.insert(key, id);
@@ -3727,10 +3741,17 @@ impl Projector {
         member: &str,
         inner: &str,
     ) -> Result<Option<Identification>, CatalogError> {
+        // **第几版**里变体那一层：只有人说得出（ADR-0008），所以只有裁决这条路填它。
+        // 发行版那一层的**修订**不在这儿——那是 DAT 条目名里的事实，落在 `release.revision`。
+        let edition = match &found.decision {
+            Decision::Release(facts) => facts.version.clone(),
+            Decision::NoRelease { .. } | Decision::Unknown => None,
+        };
         let record = |work_id, release_id, state_of, reason, candidates| Identification {
             variant_key: variant.key.clone(),
             state: state_of,
             reason,
+            edition: edition.clone(),
             // **裁决不判平台**：它没看过内容。识别那一趟替它补上（`ask_verdicts`），
             // 命令行与界面直接落的这一条不盖掉识别判过的那个（`write_identifications`）。
             platform: None,
