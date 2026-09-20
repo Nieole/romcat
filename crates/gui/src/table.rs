@@ -70,7 +70,7 @@ pub const UNLINKED_LABEL: &str = "未关联作品";
 /// **这一行是不是「未关联作品」，是的话它的正题是什么**（不是就 `None`）。
 ///
 /// 判据不在这儿：认不认得出作品由核心库答（[`WorkRow::title`]／[`WorkAnchor::Loose`]，
-/// ADR-0024），这里只是把那一问**收在一处**——表格那一路（[`name_cell`]）与卡片墙
+/// ADR-0024），这里只是把那一问**收在一处**——表格那一路（`table::name_cell`）与卡片墙
 /// （`browse::Screen::card_grid`）都从这儿问，两边才不会各写一套判据、有一天判得不一样。
 ///
 /// `rules` 是剥正题的那份规则，两路交进来的都是工作目录里那份 `name-rules.toml`。

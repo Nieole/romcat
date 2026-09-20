@@ -151,7 +151,7 @@ impl Gallery {
     /// 换一个抽首帧的程序。**测试拿它走「ffmpeg 不在」那条路。**
     ///
     /// **什么时候叫都算数**：记在这一层，池子还没指进来、或者之后又换了一个池子，
-    /// 换过的这个都还在（[`Self::program`]）。
+    /// 换过的这个都还在（记在 `Gallery` 自己那一格 `program` 上）。
     pub fn set_program(&mut self, program: &str) {
         self.program = Some(program.to_owned());
         if let Some(loader) = self.loader.as_mut() {
