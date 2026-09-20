@@ -1,10 +1,11 @@
-//! **提示条**（设计稿 `.toast`）：窗口底边居中浮着的一条深色小条——一句话，可带一颗按钮，停一会儿自己收起。
+//! **提示条**（设计稿 `.toast`）：窗口底边居中浮着的一小条——一句话，可带一颗按钮，停一会儿自己收起。
 //!
 //! 这一层只画、只计时，**不记事**：那句话说的是哪件事、按钮按下去做什么、收起来之后要丢掉什么，都归叫它的
 //! 那一屏。于是换走一屏时由那一屏自己决定丢不丢（子库屏删掉一个子库之后那颗「撤销」，换屏就丢）。
 //!
-//! 颜色与尺寸都取令牌：底是 `ink`、字是 `win`（正文色与窗口底色对调，设计稿 `.toast` 的
-//! `background:var(--ink);color:var(--win)`），字号 `size-small-plus`，圆角 `large`，阴影与弹出菜单同一份
+//! 颜色与尺寸都取令牌：底是 `panel-2`、字是 `ink`、描边 `line-2`——**同色系**，浅色主题浅药丸深字、暗色主题
+//! 深药丸浅字（拿主意的人 2026-09-20 定）。设计稿 `.toast` 写的是 `background:var(--ink);color:var(--win)`，
+//! 而 `--ink` 随主题翻转，暗色下那一块太扎眼，所以这一处不照稿。字号 `size-small-plus`，圆角 `large`，阴影与弹出菜单同一份
 //! （`popup_shadow`，令牌 `[shadow.pop]`）；离窗口底边多远、四边留白、按钮描边多淡、停多久取 `[layout]` 里
 //! `toast-` 开头那几格。
 //!
@@ -94,7 +95,11 @@ impl Toast {
             )
             .show(ctx, |ui| {
                 egui::Frame::new()
-                    .fill(palette.ink)
+                    // **同色系**（拿主意的人 2026-09-20 定）：浅色主题浅药丸深字、暗色主题深药丸浅字。
+                    // 设计稿 `.toast` 用的是会随主题翻转的 `--ink`（浅色下深药丸、暗色下浅药丸），
+                    // 那一块在暗色下太扎眼，这里照拿主意的人定的改成跟着面板走，取比面板深/浅一档的 `panel-2`，再加描边与投影托起来。
+                    .fill(palette.panel_2)
+                    .stroke(egui::Stroke::new(1.0, palette.line_2))
                     .corner_radius(tokens.radius.large)
                     .shadow(style.visuals.popup_shadow)
                     .inner_margin(egui::Margin {
@@ -110,7 +115,7 @@ impl Toast {
                             ui.label(
                                 egui::RichText::new(&self.text)
                                     .size(look::font_size(ui.ctx(), tokens.font.size_small_plus))
-                                    .color(palette.win),
+                                    .color(palette.ink),
                             );
                             if let Some(label) = &self.action {
                                 pressed = look::small_buttons(ui, |ui| {
@@ -139,16 +144,18 @@ impl Toast {
 
 /// 提示条上那颗按钮（设计稿 `.toast .btn`）：透明底、字与提示条的字同色，描边是字色的几成（`line`）；
 /// 悬停与拿到焦点那两档描边换成整份字色，看得出按得着、焦点在哪儿。
+///
+/// 字色取 [`Palette::ink`]，跟着提示条那块面板走（**同色系**，拿主意的人 2026-09-20 定）。
 fn button_colors(palette: &Palette, line: f32, visuals: &mut egui::Visuals) {
     let widgets = &mut visuals.widgets;
     for (widget, stroke) in [
-        (&mut widgets.inactive, palette.win.gamma_multiply(line)),
-        (&mut widgets.hovered, palette.win),
-        (&mut widgets.active, palette.win),
+        (&mut widgets.inactive, palette.ink.gamma_multiply(line)),
+        (&mut widgets.hovered, palette.ink),
+        (&mut widgets.active, palette.ink),
     ] {
         widget.bg_fill = egui::Color32::TRANSPARENT;
         widget.weak_bg_fill = egui::Color32::TRANSPARENT;
         widget.bg_stroke.color = stroke;
-        widget.fg_stroke.color = palette.win;
+        widget.fg_stroke.color = palette.ink;
     }
 }

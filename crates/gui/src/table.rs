@@ -67,6 +67,18 @@ pub fn row_height() -> f32 {
 /// 那种行——卡片视图与作品详情页挂的是同一个标签，所以摆在这儿一处。
 pub const UNLINKED_LABEL: &str = "未关联作品";
 
+/// **这一行是不是「未关联作品」，是的话它的正题是什么**（不是就 `None`）。
+///
+/// 判据不在这儿：认不认得出作品由核心库答（[`WorkRow::title`]／[`WorkAnchor::Loose`]，
+/// ADR-0024），这里只是把那一问**收在一处**——表格那一路（`table::name_cell`）与卡片墙
+/// （`browse::Screen::card_grid`）都从这儿问，两边才不会各写一套判据、有一天判得不一样。
+///
+/// `rules` 是剥正题的那份规则，两路交进来的都是工作目录里那份 `name-rules.toml`。
+#[must_use]
+pub fn unlinked_title(work: &WorkRow, rules: &Rules) -> Option<String> {
+    work.title(rules)
+}
+
 /// 窗口默认一次取多少行。
 ///
 /// 视口撑死几十行，取 512 是给上下滚动留预取余量：往下翻过 3/4 个窗口才需要再查一次库。
@@ -330,6 +342,17 @@ impl Picked {
     }
 }
 
+/// 表上这一帧**点开**的那一行。
+#[derive(Debug, Clone)]
+pub struct Opened {
+    /// 那一行的一份拷贝：侧边详情要在它滚出视口之后照样摆得出来。
+    pub row: WorkRow,
+    /// 它在全序里是第几行。
+    pub index: u64,
+    /// **双击**的：打开作品详情页，而不只是侧边详情（设计稿双击一行打开作品详情）。
+    pub page: bool,
+}
+
 /// 一张主列表。
 ///
 /// 它**直接改 `query`**：点表头就是换排序，而排序是中立库那一层的事，界面这边只是把
@@ -361,11 +384,11 @@ pub struct Table<'a> {
 }
 
 impl Table<'_> {
-    /// 画出来，返回这一帧里被点开的那一行。
+    /// 画出来，返回这一帧里被点开的那一行（[`Opened`]）。
     ///
-    /// 返回的是**一份拷贝**而不是下标：详情面板要在那一行滚出视口之后照样显示得出来。
+    /// 带着**一份拷贝**而不只是下标：详情面板要在那一行滚出视口之后照样显示得出来。
     #[allow(clippy::too_many_lines)]
-    pub fn show(self, ui: &mut egui::Ui) -> Option<WorkRow> {
+    pub fn show(self, ui: &mut egui::Ui) -> Option<Opened> {
         let Self {
             catalog,
             window,
@@ -405,6 +428,9 @@ impl Table<'_> {
 
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+            // **格子里的字不许接住点击**：egui 的标签默认可选中，会把按下去那一下当成选字——点在作品名上（双击尤其如此）
+            // 那一行就既选不中、也打不开作品详情页，只有点在字外头的空白处才算数（票 `gui-looks-like-the-design/15`）。
+            ui.style_mut().interaction.selectable_labels = false;
             // 表头与行底下那几条分隔线**只横贯这张表**：量的是摆表之前这一栏的宽，不拿行的外框——
             // 那几条线画在行所在的那一层上，外框一宽出去，线就画到右边那一栏上头了（第二段第三趟截图）。
             let 表宽 = ui.available_rect_before_wrap().x_range();
@@ -579,9 +605,14 @@ impl Table<'_> {
                         look::focus_ring(&ctx, 看得见的, &response);
                         if response.clicked() {
                             *focused = Some(index);
-                            // **交一份拷贝出去而不是下标**：详情面板要在这一行滚出视口
+                            // **交一份拷贝出去而不只是下标**：详情面板要在这一行滚出视口
                             // 之后照样摆得出来。只有真点中的那一帧才复制。
-                            opened = Some(work.clone());
+                            opened = Some(Opened {
+                                row: work.clone(),
+                                index,
+                                // 双击的第二下松开时，`clicked` 与 `double_clicked` 同时为真。
+                                page: response.double_clicked(),
+                            });
                         }
                     });
                 });
@@ -755,7 +786,7 @@ fn name_cell(ui: &mut egui::Ui, work: &WorkRow, rules: &Rules, shelf: Option<&mu
     // 是不是由核心库答（`WorkRow::non_game_asset`），这里照着标，
     // 不自己判（ADR-0024）。
     let hit = work.hit.filter(|hit| *hit > SearchHit::Title);
-    if let Some(title) = work.title(rules) {
+    if let Some(title) = unlinked_title(work, rules) {
         two_lines(ui, work, hit, &title, Some(UNLINKED_LABEL), Second::Path);
         return;
     }

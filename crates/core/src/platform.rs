@@ -120,6 +120,9 @@ pub struct Rule {
 pub struct Platform {
     /// 规范名，报告与中立库里用它。
     pub name: String,
+    /// **全名**：作品详情页头上那一格照稿写它（`Game Boy`、`超级任天堂`）。表里没写是 `None`，屏上退回规范名。
+    /// 只给人看，**不进指纹**（[`Manifest::fingerprint`]）：改它不该让已经成型的库作废。
+    pub full_name: Option<String>,
     /// 认哪些顶层目录名（已折成小写并规范化成 NFC）。
     pub dirs: Vec<String>,
     /// 只可能属于这个平台的扩展名（已折成小写）。
@@ -224,6 +227,8 @@ struct RawManifest {
 struct RawPlatform {
     #[serde(rename = "名")]
     name: String,
+    #[serde(rename = "全名", default)]
+    full_name: Option<String>,
     #[serde(rename = "目录", default)]
     dirs: Vec<String>,
     #[serde(rename = "扩展名", default)]
@@ -404,6 +409,7 @@ impl Manifest {
             }
             platforms.push(Platform {
                 name: raw_platform.name,
+                full_name: raw_platform.full_name,
                 dirs,
                 extensions,
                 rules: raw_platform.rules,
@@ -551,6 +557,15 @@ impl Manifest {
             eat(&dir.dir);
         }
         hash
+    }
+
+    /// 这个平台的**全名**（按规范名找）；表里没写全名、或者没这个平台时是 `None`，屏上退回规范名。
+    #[must_use]
+    pub fn full_name(&self, platform: &str) -> Option<&str> {
+        self.platforms
+            .iter()
+            .find(|one| one.name == platform)
+            .and_then(|one| one.full_name.as_deref())
     }
 
     /// 按名字取一条成型规则。
@@ -787,5 +802,28 @@ mod tests {
 "#,
         );
         assert!(message.contains("范围外"), "{message}");
+    }
+
+    /// **全名只给人看**（作品详情页头上那一格照稿写全名，拿主意的人 2026-09-15 定）：表里写了就交回，没写的交回 `None`
+    /// 由屏上退回代号；改全名不该让已经成型的库作废，所以它不进指纹。
+    #[test]
+    fn 平台表里有全名的交回全名_没写的是空_全名不进指纹() {
+        let manifest = Manifest::builtin();
+        assert_eq!(manifest.full_name("GB"), Some("Game Boy"));
+        assert_eq!(manifest.full_name("SFC"), Some("超级任天堂"));
+        assert_eq!(manifest.full_name("FDS"), None, "表里没写全名的平台交回空");
+        assert_eq!(manifest.full_name("没这个平台"), None);
+        let 去掉全名: String = Manifest::builtin_text()
+            .lines()
+            .filter(|line| !line.starts_with("\"全名\""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let 没全名的 = Manifest::parse(&去掉全名, "内置").expect("编得出来");
+        assert_eq!(没全名的.full_name("GB"), None);
+        assert_eq!(
+            没全名的.fingerprint(),
+            manifest.fingerprint(),
+            "全名只给人看，改它不该让已经成型的库作废"
+        );
     }
 }

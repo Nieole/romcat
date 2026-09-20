@@ -368,7 +368,7 @@ fn 标题以集合形式落库每条带语言地区来源与类型() {
     let 汉化 = 集合
         .iter()
         .find(|row| row.value == "魂斗罗 中文版")
-        .expect("汉化组自取的名照样入集合");
+        .expect("汉化组译名照样入集合");
     assert_eq!(汉化.kind, TitleKind::FanName);
     assert_eq!(
         汉化.region, None,
@@ -408,7 +408,7 @@ fn 中文标题取官中的官方译名而不是汉化版文件名() {
             .expect("读得出")
             .iter()
             .any(|row| row.value == "魂斗罗 中文版"),
-        "汉化组自取的名不是被扔掉了，是排在后面"
+        "汉化组译名不是被扔掉了，是排在后面"
     );
     assert!(chosen.chinese_names >= 2, "这部作品有不止一个中文叫法");
 }
@@ -1000,5 +1000,85 @@ fn 裁决来源的叫法删掉就是删掉_不为它记压制() {
     assert!(
         !集合里有(&现场, "Contra", "魂斗羅"),
         "重折本来就不会把裁决来源的那条折回来",
+    );
+}
+
+/// **旧库读得出来**（票 `gui-looks-like-the-design/15`：标题类型照设计稿改词，2026-09-15 拿主意的人定）。
+///
+/// 旧版程序把类型写成「官方名」「汉化组自取的名」。中立库里人手写的叫法（来源是裁决）重折不碰，旧词会一直留在
+/// 那几行上：读回来得认得出是哪一种，再写同一条不许留两行，删也得删得掉。
+#[test]
+fn 旧词写下的叫法读得出来_再写同一条不留两行_删得掉() {
+    use romcat_core::catalog::{Catalog, Confidence, TitleRow};
+    use romcat_core::title::{Language, TitleKind};
+
+    let dir = romcat_core::testing::temp_dir("标题-旧词");
+    let 库 = dir.path().join("小库.sqlite");
+    drop(Catalog::create(&库, "小库").expect("建得出中立库"));
+    {
+        let conn = rusqlite::Connection::open(&库).expect("开得出");
+        for (kind, value) in [("官方名", "Contra"), ("汉化组自取的名", "魂斗罗 汉化版")]
+        {
+            conn.execute(
+                "INSERT INTO title(work, language, kind, source, value, region, variant_key,
+                     confidence, seam, evidence, seen)
+                 VALUES('魂斗罗', 'en', ?1, '裁决', ?2, NULL, NULL, '高置信', NULL, '旧版程序写的', 1)",
+                rusqlite::params![kind, value],
+            )
+            .expect("写得进旧词");
+        }
+    }
+    let mut catalog = Catalog::open(&库).expect("开得出");
+    let 类型们 = |catalog: &Catalog| -> Vec<(String, TitleKind)> {
+        catalog
+            .titles_of("魂斗罗")
+            .expect("读得出")
+            .into_iter()
+            .map(|row| (row.value, row.kind))
+            .collect()
+    };
+    assert_eq!(
+        类型们(&catalog),
+        [
+            ("Contra".to_string(), TitleKind::Official),
+            ("魂斗罗 汉化版".to_string(), TitleKind::FanName),
+        ],
+        "旧词写下的两条没认出是哪一种"
+    );
+
+    // 再写同一条（新词）：旧词那一行换掉，不留两行。
+    catalog
+        .put_titles(&[TitleRow {
+            work: "魂斗罗".to_string(),
+            value: "Contra".to_string(),
+            language: Language::English,
+            kind: TitleKind::Official,
+            source: "裁决".to_string(),
+            region: None,
+            variant_key: None,
+            confidence: Confidence::High,
+            seam: None,
+            evidence: "新版程序写的".to_string(),
+            seen: 1,
+        }])
+        .expect("写得进");
+    assert_eq!(类型们(&catalog).len(), 2, "同一条叫法新旧两个词各留了一行");
+
+    // 旧词写下的那一条删得掉。
+    assert!(
+        catalog
+            .remove_title(
+                "魂斗罗",
+                Language::English,
+                TitleKind::FanName,
+                "裁决",
+                "魂斗罗 汉化版"
+            )
+            .expect("删得动"),
+        "旧词写下的那一条删不掉"
+    );
+    assert_eq!(
+        类型们(&catalog),
+        [("Contra".to_string(), TitleKind::Official)]
     );
 }

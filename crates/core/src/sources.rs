@@ -1,8 +1,8 @@
 //! **数据源**在本机那几份镜像现在是什么状况。
 //!
-//! 三个源——DAT 仓库、**中文离线源**、Switch 数据库——各是一份本地镜像，取一次用很久
-//! （README 的「三份数据分得很清」）。这个模块只回答一句话：**这一份取回来了没有、
-//! 有多少条、什么时候取的**。
+//! 三个源——DAT 仓库、**中文离线源**、Switch 数据库——各是一份本地镜像，下载一次用很久
+//! （README 的「三份数据分得很清」）。这个模块只回答一句话：**这一份下载了没有、
+//! 有多少条、什么时候下载的**。
 //!
 //! ## 为什么这一层在核心库里
 //!
@@ -12,8 +12,8 @@
 //!
 //! ## 读不动不等于空
 //!
-//! 某一份库打不开时那一行的 `state` 是 [`SourceState::Broken`]，**不是「还没取回」**
-//! （ADR-0021 那条纪律）：前者要人去看一眼，后者按一下「取回」就好。
+//! 某一份库打不开时那一行的 `state` 是 [`SourceState::Broken`]，**不是「还没下载」**
+//! （ADR-0021 那条纪律）：前者要人去看一眼，后者按一下「下载」就好。
 
 use std::path::Path;
 use std::time::Duration;
@@ -28,14 +28,14 @@ use crate::zh;
 /// 一份镜像现在处在哪一档。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceState {
-    /// 取回来了，有这么多条。
+    /// 下载了，有这么多条。
     Ready {
         /// 条数。
         records: u64,
-        /// 上次取回的时刻（UNIX 纪元起的秒）；这份库没记时刻时是 `None`。
+        /// 上次下载的时刻（UNIX 纪元起的秒）；这份库没记时刻时是 `None`。
         fetched_at: Option<i64>,
     },
-    /// **还没取回。** 这一档要在界面上被明确标出来。
+    /// **还没下载。** 这一档要在界面上被明确标出来。
     Missing,
     /// 库在那儿但读不动。
     Broken {
@@ -58,13 +58,13 @@ pub struct SourceStatus {
 }
 
 impl SourceStatus {
-    /// 取回来了吗。
+    /// 下载了吗。
     #[must_use]
     pub fn ready(&self) -> bool {
         matches!(self.state, SourceState::Ready { .. })
     }
 
-    /// 有多少条；没取回或者读不动时是 0。
+    /// 有多少条；没下载或者读不动时是 0。
     #[must_use]
     pub fn records(&self) -> u64 {
         match &self.state {
@@ -73,7 +73,7 @@ impl SourceStatus {
         }
     }
 
-    /// 上次取回的时刻。
+    /// 上次下载的时刻。
     #[must_use]
     pub fn fetched_at(&self) -> Option<i64> {
         match &self.state {
@@ -83,7 +83,7 @@ impl SourceStatus {
     }
 }
 
-/// 一个源用哪个名字点名重取。命令行与界面共用这一套。
+/// 一个源用哪个名字点名重新下载。命令行与界面共用这一套。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     /// DAT 仓库（`romcat dat sync`）。
@@ -228,34 +228,34 @@ fn broken(why: &str) -> SourceState {
     }
 }
 
-/// 取一个数据源时**两次请求之间至少隔多久**。
+/// 下载一个数据源时**两次请求之间至少隔多久**。
 ///
 /// 与命令行那三条子命令的默认值同一个数（`--throttle-ms`）。在线源赌的是账号与 IP
 /// （ADR-0007），界面上那个按钮与命令行按的必须是同一条限流。
 pub const THROTTLE: Duration = Duration::from_millis(500);
 
-/// **取回一个数据源。联网。**
+/// **下载一个数据源。联网。**
 ///
-/// 这一层在核心库里而不在界面里，是因为「取哪一份、用哪套清单、限多快的流」是领域判断
-/// （ADR-0005）。界面那个「重取」按钮与命令行的 `dat sync` / `zh sync` / `switch sync`
-/// 走同一条路，于是两边取回来的东西一模一样。
+/// 这一层在核心库里而不在界面里，是因为「下载哪一份、用哪套清单、限多快的流」是领域判断
+/// （ADR-0005）。界面那个「重新下载」按钮与命令行的 `dat sync` / `zh sync` / `switch sync`
+/// 走同一条路，于是两边下载来的东西一模一样。
 ///
 /// 清单、平台清单与剥离规则**先看工作目录里有没有，没有才用内置的那一份**——
 /// 与命令行的取法同一条（`ManifestArgs::load` 那几个）。
 ///
-/// `task` 报进度，「停下」只接得动一段：**中文离线源那一条整条接住了**——下载那
+/// `task` 报进度，「停止」只接得动一段：**中文离线源那一条整条接住了**——下载那
 /// 435 MB 与随后读那份原件的几分钟都收中断信号（[`zh::sync::Context`]），
-/// 按下停下在**当前这一块**读完就收手，不等整份下完；缓存里也不留半截。
+/// 按下停止在**当前这一块**读完就收手，不等整份下完；缓存里也不留半截。
 /// 另外两条还接不住：`dat::sync::run` / `titledb::sync::sync` 两个入口不收中断信号，
-/// 那两趟**下载开跑之后停不下来**（排着队还没轮到的停得掉，那一步在
+/// 那两趟**下载运行之后停不下来**（排着队还没轮到的停得掉，那一步在
 /// [`Handle::step`] 上）。剩下那两段记在挂单 `Q62` 上。这里如实说，不摆一个按了
 /// 没反应的承诺出来。
 ///
 /// # Errors
-/// 取数、解析或写库失败时返回 [`Cutoff::Failed`]；被叫停时返回 [`Cutoff::Halted`]。
+/// 下载、解析或写库失败时返回 [`Cutoff::Failed`]；被叫停时返回 [`Cutoff::Halted`]。
 pub fn refetch(source: Source, workspace: &Path, task: &Handle) -> Result<SourceStatus, Cutoff> {
     task.steps(1);
-    task.step(&format!("取 {}", source.label()))?;
+    task.step(&format!("下载 {}", source.label()))?;
     let fetcher = HttpFetcher::with_throttle(THROTTLE);
     match source {
         Source::Dat => {
@@ -264,7 +264,7 @@ pub fn refetch(source: Source, workspace: &Path, task: &Handle) -> Result<Source
                 .map_err(|error| format!("DAT 库打不开：{error}"))?;
             let options = crate::dat::sync::SyncOptions::new(workspace);
             crate::dat::sync::run(&fetcher, &mut repo, &registry, &options)
-                .map_err(|error| format!("取 DAT 失败：{error}"))?;
+                .map_err(|error| format!("下载 DAT 失败：{error}"))?;
         }
         Source::Chinese => {
             let manifest = manifest(workspace)?;
@@ -290,11 +290,11 @@ pub fn refetch(source: Source, workspace: &Path, task: &Handle) -> Result<Source
             )
             // **按停下不折成一句「失败」。** 折的是**支**不是话：任务台按
             // [`Cutoff`] 落在哪一支分「停了」与「失败」（`task::Board::settle`）。
-            // 一律折成 `Failed`、前头再加一句「取中文离线源失败：」的话，
+            // 一律折成 `Failed`、前头再加一句「下载中文离线源失败：」的话，
             // 界面上那一趟就成了失败，用户会以为自己按坏了什么。
             .map_err(|error| match error {
                 zh::sync::SyncError::Halted(_) => Cutoff::Halted,
-                error => Cutoff::failed(format!("取中文离线源失败：{error}")),
+                error => Cutoff::failed(format!("下载中文离线源失败：{error}")),
             })?;
         }
         Source::Switch => {
@@ -308,7 +308,7 @@ pub fn refetch(source: Source, workspace: &Path, task: &Handle) -> Result<Source
                 regions: true,
             };
             crate::titledb::sync::sync(&fetcher, &mut store, &options)
-                .map_err(|error| format!("取 Switch 数据库失败：{error}"))?;
+                .map_err(|error| format!("下载 Switch 数据库失败：{error}"))?;
         }
     }
     Ok(source.survey(workspace))
@@ -362,15 +362,15 @@ mod tests {
     use crate::testing::temp_dir;
 
     #[test]
-    fn 一个源都没取过时三行都明说还没取回() {
+    fn 一个源都没下载过时三行都明说还没下载() {
         let workspace = temp_dir("数据源");
         let rows = survey(workspace.path());
         assert_eq!(rows.len(), 3);
         for row in &rows {
-            assert_eq!(row.state, SourceState::Missing, "{} 该是还没取回", row.name);
+            assert_eq!(row.state, SourceState::Missing, "{} 该是还没下载", row.name);
             assert!(!row.ready());
             assert_eq!(row.records(), 0);
-            assert!(!row.cost.is_empty(), "{} 得说清没取回的代价", row.name);
+            assert!(!row.cost.is_empty(), "{} 得说清没下载的代价", row.name);
         }
     }
 }

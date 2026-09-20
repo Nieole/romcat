@@ -525,6 +525,7 @@ fn 报告数得出选中多少条与多少容量() {
     assert_eq!(report.variants, 3);
     assert_eq!(report.bytes, 3 * 1024 * 1024 * 1024 + 6 * 1024 * 1024);
     assert_eq!(report.platforms.len(), 2);
+    assert!(report.render_text().contains("规则之间没有重复"));
 }
 
 #[test]
@@ -848,7 +849,7 @@ fn 目标不在位时装不装得下如实说算不出_不给一个数() {
         "选中多少只问中立库，卡不在手边照样算得出"
     );
     match &report.fit {
-        Fit::Unknown { why } => assert!(why.contains("目标不在位"), "{why}"),
+        Fit::Unknown { why } => assert!(why.contains("目标未连接"), "{why}"),
         Fit::Known(room) => panic!("卡不在手边却给了一个数：{room:?}"),
     }
     let text = report.render_text();

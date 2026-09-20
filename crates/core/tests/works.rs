@@ -1269,3 +1269,283 @@ fn 变体简称是哪一种照首选变体那条规则_汉化组取导出写的�
     let 作品01 = 简称们(&catalog, "作品01");
     assert_eq!(叫(&作品01, 键(1, 1)), "汉化版");
 }
+
+/// 点开一个作品（或一行认不出作品的），交回核心库答的**中文版本**。
+fn 中文版本(catalog: &Catalog, anchor: &WorkAnchor) -> Option<ChineseMark> {
+    let detail = catalog
+        .work_detail(&WorkQuery::default(), anchor)
+        .expect("读得动")
+        .expect("有这一行");
+    catalog.work_chinese_mark(&detail).expect("答得出中文版本")
+}
+
+/// 这一页里叫 `作品` 的那一行。
+fn 那一行(catalog: &Catalog, 作品: &str) -> WorkAnchor {
+    catalog
+        .work_page(&WorkQuery::default(), 0, 64)
+        .expect("取得出一页")
+        .into_iter()
+        .find(|row| row.name == 作品)
+        .unwrap_or_else(|| panic!("这一页里没有「{作品}」"))
+        .anchor
+}
+
+#[test]
+fn 作品的中文版本照首选变体那条规则判_汉化压过官中_首选被裁决指定时照样答得出() {
+    let mut catalog = 建库();
+    // fixture 里每个作品定下来的那一个变体带着汉化记号。
+    assert_eq!(
+        中文版本(&catalog, &那一行(&catalog, "作品00")),
+        Some(ChineseMark::FanTranslated),
+    );
+
+    // 改几个作品的识别结论：作品03 定下来的那一个是官中；作品04 定下来的那一个一个中文记号都没有；
+    // 作品05 两个都定下来了，一个官中、一个汉化。
+    let 结论 = |catalog: &Catalog, at: usize, n: u64, chinese: Option<ChineseMark>| {
+        let WorkAnchor::Work(work_id) = 那一行(catalog, &format!("作品{at:02}")) else {
+            panic!("作品{at:02} 该是认出作品的一行");
+        };
+        let mut 候选 = 候选(&键(at, n), Confidence::High, "测试改过的依据");
+        候选.chinese = chinese;
+        Identification {
+            variant_key: 键(at, n),
+            platform: None,
+            standalone: None,
+            state: State::Matched,
+            reason: None,
+            units: 1,
+            nkit: 0,
+            read_bytes: 0,
+            work_id: Some(work_id),
+            release_id: None,
+            candidates: vec![候选],
+        }
+    };
+    let records = vec![
+        结论(&catalog, 3, 2, Some(ChineseMark::Official)),
+        结论(&catalog, 4, 1, None),
+        结论(&catalog, 5, 0, Some(ChineseMark::Official)),
+        结论(&catalog, 5, 1, Some(ChineseMark::FanTranslated)),
+    ];
+    catalog
+        .write_identifications(&records)
+        .expect("写得进识别结论");
+    assert_eq!(
+        中文版本(&catalog, &那一行(&catalog, "作品03")),
+        Some(ChineseMark::Official),
+    );
+    assert_eq!(
+        中文版本(&catalog, &那一行(&catalog, "作品05")),
+        Some(ChineseMark::FanTranslated),
+        "汉化与官中都有：照首选变体那条规则，汉化压过官中",
+    );
+
+    // **首选变体被裁决指定时照样答得出**：作品01 定下来的那个汉化版被人指成首选，首选规则里它排「裁决」那一档，
+    // 可它是汉化版这件事不因此改变。
+    catalog
+        .set_preferred_variant("作品01", PLATFORMS[1], &键(1, 1))
+        .expect("裁得了首选变体");
+    let 作品01 = 那一行(&catalog, "作品01");
+    let WorkAnchor::Work(_) = &作品01 else {
+        panic!("作品01 该是认出作品的一行");
+    };
+    let 详情 = catalog
+        .variant_detail(&键(1, 1), &romcat_core::scrape::Priorities::builtin(), None)
+        .expect("读得动")
+        .expect("有这个变体");
+    assert_eq!(
+        详情.siblings.first().map(|sibling| sibling.preference),
+        Some(romcat_core::adapter::converge::Preference::Verdict),
+        "前提：那个汉化版眼下是裁决指定的首选"
+    );
+    assert_eq!(
+        中文版本(&catalog, &作品01),
+        Some(ChineseMark::FanTranslated)
+    );
+    let 作品01详情 = catalog
+        .work_detail(&WorkQuery::default(), &作品01)
+        .expect("读得动")
+        .expect("有这一行");
+    let 那个汉化版 = 作品01详情
+        .variants
+        .iter()
+        .find(|variant| variant.row.key == 键(1, 1))
+        .expect("在作品01 底下");
+    assert_eq!(
+        catalog.variant_kind(那个汉化版).expect("答得出"),
+        Some(romcat_core::adapter::converge::Preference::FanTranslated),
+        "变体是哪一种也不因裁决改变",
+    );
+
+    // 一个中文记号都没有：没有中文版本；认不出作品、一条候选都没有的散落变体也一样。
+    assert_eq!(中文版本(&catalog, &那一行(&catalog, "作品04")), None);
+    assert_eq!(中文版本(&catalog, &WorkAnchor::Loose(散键(0))), None);
+}
+
+#[test]
+fn 变体上定下来的那条候选与判定依据摆的那一条由核心库挑() {
+    let mut catalog = 建库();
+    // 作品04 的变体0 改成两条都没定下来的候选：一条低置信、一条中置信。
+    let WorkAnchor::Work(work_id) = 那一行(&catalog, "作品04") else {
+        panic!("作品04 该是认出作品的一行");
+    };
+    let mut 中 = 候选(&键(4, 0), Confidence::Medium, "测试改过的依据");
+    中.accepted = false;
+    let mut 低 = 候选(&键(4, 0), Confidence::Low, "测试改过的依据");
+    低.accepted = false;
+    catalog
+        .write_identifications(&[Identification {
+            variant_key: 键(4, 0),
+            platform: None,
+            standalone: None,
+            state: State::Unmatched,
+            reason: None,
+            units: 1,
+            nkit: 0,
+            read_bytes: 0,
+            work_id: Some(work_id),
+            release_id: None,
+            candidates: vec![低, 中],
+        }])
+        .expect("写得进识别结论");
+    let 变体 = |作品: &str, at: usize, n: u64| {
+        catalog
+            .work_detail(&WorkQuery::default(), &那一行(&catalog, 作品))
+            .expect("读得动")
+            .expect("有这一行")
+            .variants
+            .into_iter()
+            .find(|variant| variant.row.key == 键(at, n))
+            .expect("在这个作品底下")
+    };
+
+    // fixture：作品00 的变体2 那条高置信候选定下来了。
+    let 定了的 = 变体("作品00", 0, 2);
+    assert_eq!(
+        定了的
+            .accepted_candidate()
+            .map(|candidate| candidate.game.as_str()),
+        Some("某条 DAT 条目"),
+    );
+    assert_eq!(
+        定了的
+            .best_candidate()
+            .map(|candidate| candidate.confidence),
+        Some(Confidence::High),
+    );
+    let 没定的 = 变体("作品04", 4, 0);
+    assert!(
+        没定的.accepted_candidate().is_none(),
+        "两条都没定下来：交不出定下来的那条"
+    );
+    assert_eq!(
+        没定的
+            .best_candidate()
+            .map(|candidate| candidate.confidence),
+        Some(Confidence::Medium),
+        "判定依据摆置信度最高的那一条",
+    );
+}
+
+#[test]
+fn 作品详情页上哪几个变体摆汉化组那一行由核心库答_汉化版或身上有汉化组值的() {
+    let mut catalog = 建库();
+    // 作品00：变体2 是定下来的汉化版；变体0 不是汉化版，身上摆着一条汉化组值；变体1 两样都没有。
+    for (n, 组) in [(2, "口袋汉化组"), (0, "某汉化组")] {
+        catalog
+            .put_verdict_value(
+                AnchorKind::Variant,
+                &键(0, n),
+                Field::TranslationGroup,
+                组,
+                "fixture",
+            )
+            .expect("写得进汉化组");
+    }
+    let 作品00 = catalog
+        .work_detail(&WorkQuery::default(), &那一行(&catalog, "作品00"))
+        .expect("读得动")
+        .expect("有这一行");
+    let 行 = romcat_core::scrape::priority::translation_groups(
+        &catalog,
+        &作品00,
+        &romcat_core::scrape::Priorities::builtin(),
+    )
+    .expect("答得出");
+    let 摆的: Vec<(String, Vec<String>)> = 行
+        .into_iter()
+        .map(|(key, group)| (key, group.shown.map(|said| said.values).unwrap_or_default()))
+        .collect();
+    assert_eq!(
+        摆的,
+        [
+            (键(0, 0), vec!["某汉化组".to_string()]),
+            (键(0, 2), vec!["口袋汉化组".to_string()]),
+        ],
+        "汉化版一行、身上有汉化组值的一行，两样都没有的不摆",
+    );
+}
+
+#[test]
+fn 几个变体的媒体清单并成一份_作品上那几份只留一遍() {
+    use romcat_core::catalog::detail::{MediaItem, merge_media_items};
+    use romcat_core::scrape::MediaKind;
+
+    let 一份 = |anchor: AnchorKind, kind: MediaKind, hash: &str| MediaItem {
+        anchor,
+        kind,
+        source: "测试".to_owned(),
+        hash: hash.to_owned(),
+        ext: "png".to_owned(),
+        bytes: 1,
+        at: None,
+        in_pool: None,
+        evidence: "测试".to_owned(),
+    };
+    let 甲 = vec![
+        一份(AnchorKind::Work, MediaKind::Cover, "作品的封面"),
+        一份(AnchorKind::Variant, MediaKind::Video, "甲的视频"),
+    ];
+    let 乙 = vec![
+        一份(AnchorKind::Work, MediaKind::Cover, "作品的封面"),
+        一份(AnchorKind::Variant, MediaKind::Video, "乙的视频"),
+    ];
+    let 并了 = merge_media_items([甲.as_slice(), 乙.as_slice()]);
+    assert_eq!(
+        并了
+            .iter()
+            .map(|item| item.hash.as_str())
+            .collect::<Vec<_>>(),
+        ["作品的封面", "甲的视频", "乙的视频"],
+    );
+}
+
+#[test]
+fn 判定依据那一句照依据形状各段排_来源_数据文件_哈希口径_依据_候选数() {
+    let catalog = 建库();
+    let 变体 = |作品: &str, at: usize, n: u64| {
+        catalog
+            .work_detail(&WorkQuery::default(), &那一行(&catalog, 作品))
+            .expect("读得动")
+            .expect("有这一行")
+            .variants
+            .into_iter()
+            .find(|variant| variant.row.key == 键(at, n))
+            .expect("在这个作品底下")
+    };
+    // fixture 里每个变体一条候选：No-Intro / gameboy.dat / 原样哈希。
+    assert_eq!(
+        变体("作品00", 0, 2).basis_line().as_deref(),
+        Some("No-Intro / gameboy.dat / 含头 · 合成 fixture 里钉死的依据 · 1 个候选"),
+    );
+    // 认不出作品、一条候选都没有的散落变体：没有这一句（屏上照核心库那句「为什么没定下来」说）。
+    let 散落 = catalog
+        .work_detail(&WorkQuery::default(), &WorkAnchor::Loose(散键(0)))
+        .expect("读得动")
+        .expect("有这一行")
+        .variants
+        .into_iter()
+        .next()
+        .expect("有它自己");
+    assert_eq!(散落.basis_line(), None);
+}
