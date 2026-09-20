@@ -6,7 +6,7 @@
 
 **Blocked by:** 20
 
-**Status:** ready-for-agent
+**Status:** done
 
 ⚠️ **能力档案 = 平台矩阵 × 文件系统**（ADR-0017）。屏上要逐平台列出「设备直接能用什么」
 与「不能用时转成什么」，并**带上来源与核实日期**——矩阵错误比不转换更糟，超过 180 天的
@@ -58,3 +58,7 @@
 - **新建时容量上限默认那一档**：`新建子库时容量上限默认按设备容量_存下来也是这一档`（提交 `edcfc1d`）。这一条票面原先没写，是拿设计稿逐张对图时发现的：我们默认落在「自定义」，稿上默认是「按设备容量」。
 
 截图基线那六张出了三趟：带更新一趟、不带更新两趟全绿（`slot-3-gl21-snap-6.log`），逐像素稳定。对稿用的设计稿截图留在 `/Users/nicoer/dev/game-wt/design-refs/sublibrary/`（八张，与候选图同名一一对应）。
+
+2026-09-20 收尾：合进 `main`（`57bec44`）之后跑**全量门禁**（`cargo xtask gate -j 3 --test-threads 3 --keep-going`，日志 `slot-3-gl21-gate-2.log`），**六步全绿**：fmt 1s、glossary 1s、check 13s、clippy 17s、test 631s、doc 5s；整套 **2,265 项全过、0 失败**。头一趟（`slot-3-gl21-gate.log`）两红，都是本票自己的，已修在提交 `a559ab4`：词表那一处断言里的「步骤」（`crates/core/tests/sync.rs`）与四处文档链接（公开文档链到私有的 `vet_form`、`converge` 模块自指、一处冗余的显式链接目标、`observe` 函数与模块同名的歧义）。
+
+截图门另单跑过一趟不带更新的（`slot-3-gl21-snapgate.log`）：整份 `snapshot` **59 张全过**，一张基线都没被改写；本票这六张与 `main` 上那一批（含按新配色重出的 `sublibrary/deleted-toast-{light,dark}.png`）都对得上。
