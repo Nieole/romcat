@@ -2124,24 +2124,24 @@ impl Screen {
                         {
                             self.view = BrowseView::Cards;
                         }
-                        let 宽 = 这一句.size().x;
-                        let 剩 = ui.available_size_before_wrap().x;
-                        if 宽 < 剩 {
-                            ui.add_space((剩 - 宽).floor());
-                        }
-                        ui.label(这一句.clone());
-                        if self.picked.count(self.window.total()) > 0
-                            && look::small_buttons(ui, |ui| {
-                                ui.scope(|ui| {
-                                    look::ghost_button(ui.visuals_mut());
-                                    ui.button(CLEAR_PICK)
+                        // 计数与「清除选择」**贴着右端从右往左排**。先前是拿剩余宽度把计数推到
+                        // 右端、按钮跟在它后面：那时按钮被挤出这一行，字还画着、点下去却没反应
+                        // （票 `gui-looks-like-the-design/10` 重排这一条之后出的）。
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if self.picked.count(self.window.total()) > 0
+                                && look::small_buttons(ui, |ui| {
+                                    ui.scope(|ui| {
+                                        look::ghost_button(ui.visuals_mut());
+                                        ui.button(CLEAR_PICK)
+                                    })
+                                    .inner
+                                    .clicked()
                                 })
-                                .inner
-                                .clicked()
-                            })
-                        {
-                            self.picked.clear();
-                        }
+                            {
+                                self.picked.clear();
+                            }
+                            ui.label(这一句.clone());
+                        });
                     });
                     ui.add_space(look::step(1));
                     // 第二层才是当前呈现方式的控制。卡片不会再和视图、计数争一行。
