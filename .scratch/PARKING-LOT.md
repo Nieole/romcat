@@ -4113,5 +4113,32 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 - **这张票实际做了什么：** 只把子库目标设置里容量上限那一处换成 `look::radio_option`（选中强调色圆点、没选中细圈，令牌 `radio-*` / `option-*`）；那五处没动。
 - **另一条路：** 本票顺手把那五处都换掉，一起重出受影响的截图。
 - **建议留：** 收尾时一并换成共用件，照各屏的票重出截图。
+- **另一处同类：** 名那一列的宽在设计稿里本来就是两格——`.frm`（弹层表单）96、`.kv`（添加主库向导）84，于是令牌也拆成两格
+  （`form-label-width` / `kv-key-width`，拿主意的人 2026-09-15 定照稿，协调人 2026-09-20 追认）。**两个都不在 `check_tokens.py` 的核对范围里**：
+  那份脚本只核颜色，版式令牌与设计稿对不对得上眼下没有机器在守。收尾时一并看要不要让它也核版式那几格。
 - **谁来裁：** 收尾
+- **状态：** open
+
+### Q947 — 分大小写那块盘没挂上时，编译在 `ring` / `zstd-sys` 处退出 1，报的却是 clang 的错
+
+- **来自：** 票 `gui-looks-like-the-design/21`（重出候选图连挂三趟）
+- **类别：** 机器与流程
+- **在哪：** 约定里所有测试与门禁都带 `TMPDIR=/Users/nicoer/dev/game-wt/cs/tmp`；那是稀疏映像 `/Users/nicoer/dev/game-wt/romcat-cs.sparseimage` 挂在 `/Users/nicoer/dev/game-wt/cs` 上的目录。映像没挂载时那个路径不存在，`cc` 造不出临时文件，报 `clang: error: unable to make temporary file: No such file or directory`，cargo 只说 `failed to run custom build command for ring / zstd-sys`，看上去像 C 工具链坏了。
+- **为什么没停线：** 挂回去就好了：`hdiutil attach -nobrowse -mountpoint /Users/nicoer/dev/game-wt/cs /Users/nicoer/dev/game-wt/romcat-cs.sparseimage`。
+- **这张票实际做了什么：** 挂回原挂载点，继续出图；没改仓库里的东西。
+- **另一条路：** 跑门禁的那条命令先核一眼挂载点在不在，不在就当场说清楚（`xtask gate` 起手加一道检查）。
+- **建议留：** 在 `xtask gate` 或长活那份说明里加一句「TMPDIR 指的那块盘没挂上时会报成 C 工具链的错」，省下一次排查。
+- **谁来裁：** 编排者
+- **状态：** open
+
+### Q948 — ego-browser 窗口停在 maximized 时截不出图，CDP 一直超时
+
+- **来自：** 票 `gui-looks-like-the-design/21`（拿设计稿对图时）
+- **类别：** 机器与流程
+- **在哪：** `page.screenshot()` 与直调 `Page.captureScreenshot` 都报 `CdpRequestTimeoutError`，页面本身活着（`goto`、`click`、`evaluate` 都正常）。`Browser.getWindowForTarget` 显示 `windowState: "maximized"`；用 `Browser.setWindowBounds` 把它改成 `normal` 之后截图立刻就好了。
+- **为什么没停线：** 改一次窗口状态就过去了；顺带用 `Emulation.setDeviceMetricsOverride` 把视口钉成 1280×800，和我们的截图同一个尺寸，好逐格比。
+- **这张票实际做了什么：** 只改了浏览器窗口状态与视口，没改仓库里的东西。
+- **另一条路：** 每次对稿前先核一眼窗口状态，或在对稿的那份说明里写死这两步。
+- **建议留：** 写进「看网页一律 ego-browser」那条约定：先 `setWindowBounds` 成 normal、再 `setDeviceMetricsOverride` 成 1280×800，然后才截。
+- **谁来裁：** 编排者
 - **状态：** open
