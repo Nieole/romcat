@@ -1,6 +1,6 @@
 //! **面板边界**：拖得动、记得住、挤不塌。
 //!
-//! 两屏上一共四条边界（[`Boundary::ALL`]），每一条都是一句声明：靠哪一边、默认多宽、
+//! 两屏上一共三条边界（[`Boundary::ALL`]），每一条都是一句声明：靠哪一边、默认多宽、
 //! 最少多宽、最多占整个窗口那一维的几成。**画那一屏的代码不自己写这四个数**
 //! ——写了就会有人只改一处，于是同一条边界在两个地方是两个下限。
 //!
@@ -71,6 +71,7 @@ pub enum Side {
 
 impl Side {
     /// 这条边界拖的是这个尺寸的哪一维。
+    /// 读取一个呈现偏好；缺席就由调用方使用自己的默认值。
     #[must_use]
     pub fn of(self, size: egui::Vec2) -> f32 {
         match self {
@@ -133,16 +134,6 @@ pub const DETAIL: Boundary = Boundary {
     share: 0.45,
 };
 
-/// 浏览屏底下那块：看与改选中那个变体的元数据。**输入法全在这一块上。**
-pub const EDIT: Boundary = Boundary {
-    id: "浏览编辑",
-    screen: View::Browse,
-    side: Side::Bottom,
-    default: 260.0,
-    min: 110.0,
-    share: 0.40,
-};
-
 /// 待确认屏逐条那一路左边那栏：待选列表（设计稿 `.obo` 的左栏，默认 300）。
 ///
 /// 落盘的键照旧叫「批量」：从前这一栏装的是分组表，改名会让人上一次拖出来的宽度作废。
@@ -156,7 +147,7 @@ pub const QUEUE_LIST: Boundary = Boundary {
 };
 
 impl Boundary {
-    /// 全部四条，**照各屏真正摆它们的次序**。不在这儿的边界不落盘。
+    /// 全部三条，**照各屏真正摆它们的次序**。不在这儿的边界不落盘。
     ///
     /// **待确认屏逐条那一路底下那块「裁决面板」不在这儿**：逐条那一屏照稿换成了两栏，手工指定那张表单挪进了一层弹层
     /// （票 `gui-looks-like-the-design/18`），旧文件里「裁决面板 = …」那一行读的时候跳过。
@@ -165,6 +156,8 @@ impl Boundary {
     /// 不占屏上的地方。工作目录里旧版式文件记着的那一行「刮削面板 = …」读的时候跳过。
     /// **子库屏底下那块「配目标」也一样**：挪进了「目标设置」那层弹层（票 `gui-looks-like-the-design/20`
     /// 第二段），旧文件里「配目标 = …」那一行读的时候跳过。
+    /// **浏览屏底下那块「浏览编辑」拆掉了**：改元数据归作品详情页（票 `gui-looks-like-the-design/15` 收挂单 `Q804`），
+    /// 旧文件里「浏览编辑 = …」那一行读的时候跳过。
     ///
     /// 次序不是随手排的：面板是**一块接一块**吃地方的（先摆的把地方吃掉一截，后摆的
     /// 看见的是剩下的），而 [`Self::cap`] 第二道正是按「眼下还剩多少」算的。
@@ -173,10 +166,8 @@ impl Boundary {
     // 三屏各自照 `Screen::ui` 里 `show` 的先后排；`rustfmt` 会把它挤成一行，
     // 而这张表的次序**是有意义的**，所以不让它挤。
     #[rustfmt::skip]
-    pub const ALL: [Self; 4] = [
-        // 浏览屏（`browse::Screen::ui`；底栏如今只占正中那一栏、摆在左右两栏之后——
-        // 它与左右两栏不同轴，吃的不是同一维的地方，这一行的先后不影响账）
-        EDIT,
+    pub const ALL: [Self; 3] = [
+        // 浏览屏（`browse::Screen::ui`）
         FILTER,
         DETAIL,
         // 待确认屏逐条那一路（`queue::Screen::ui`）
@@ -411,7 +402,7 @@ const HEADER: &str = "\
 # 它**不在中立库里**——中立库整份可再生，界面偏好放进去会被某一次重扫抹掉。
 ";
 
-/// 五条边界各自拖到哪儿了，以及它落在哪个文件上。
+/// 三条边界各自拖到哪儿了，以及它落在哪个文件上。
 #[derive(Debug)]
 pub struct Layout {
     /// 那份文件在哪。**在工作目录里**（[`romcat_core::workspace::gui_layout_path`]）。
@@ -432,6 +423,9 @@ pub struct Layout {
     rail_collapsed: bool,
     /// 上一次真写进文件的那一份里左栏收没收起。
     saved_rail_collapsed: bool,
+    /// 不属于某条边界、但同样只影响界面呈现的偏好。与面板尺寸共用同一份可删除文件。
+    preferences: BTreeMap<String, String>,
+    saved_preferences: BTreeMap<String, String>,
     /// 上一次写盘出的错。**不静默吞掉**：吞了的话人只看见「拖了半天，下次全忘」。
     error: Option<String>,
 }
@@ -449,6 +443,7 @@ impl Layout {
         let collapsed = parse_collapsed(&text);
         let folded = parse_folds(&text);
         let rail_collapsed = parse_rail(&text);
+        let preferences = parse_preferences(&text);
         Self {
             path,
             saved: sizes.clone(),
@@ -459,6 +454,8 @@ impl Layout {
             folded,
             rail_collapsed,
             saved_rail_collapsed: rail_collapsed,
+            saved_preferences: preferences.clone(),
+            preferences,
             error: None,
         }
     }
@@ -479,6 +476,17 @@ impl Layout {
     #[must_use]
     pub fn folded(&self, fold: Fold) -> bool {
         self.folded.contains(fold.id)
+    }
+
+    /// 读取一个呈现偏好；缺席就由调用方使用自己的默认值。
+    #[must_use]
+    pub fn preference(&self, key: &str) -> Option<&str> {
+        self.preferences.get(key).map(String::as_str)
+    }
+
+    /// 记下一项呈现偏好，随后由 [`Self::flush`] 与版式一并写盘。
+    pub fn set_preference(&mut self, key: &str, value: &str) {
+        self.preferences.insert(key.to_owned(), value.to_owned());
     }
 
     /// 记下库屏上这一块收着还是摊开。**只改内存**：落盘照旧由 [`Self::flush`] 在手松开之后做。
@@ -582,6 +590,7 @@ impl Layout {
             && self.collapsed == self.saved_collapsed
             && self.folded == self.folded_saved
             && self.rail_collapsed == self.saved_rail_collapsed
+            && self.preferences == self.saved_preferences
         {
             return;
         }
@@ -591,6 +600,7 @@ impl Layout {
         self.saved_collapsed = self.collapsed.clone();
         self.folded_saved = self.folded.clone();
         self.saved_rail_collapsed = self.rail_collapsed;
+        self.saved_preferences = self.preferences.clone();
         self.error = write(&self.path, &self.render()).err();
     }
 
@@ -624,8 +634,23 @@ impl Layout {
         if self.rail_collapsed {
             out.push_str(&format!("{RAIL} = {RAIL_COLLAPSED}\n"));
         }
+        for (key, value) in &self.preferences {
+            out.push_str(&format!("视图·{key} = {value}\n"));
+        }
         out
     }
+}
+
+fn parse_preferences(text: &str) -> BTreeMap<String, String> {
+    text.lines()
+        .filter_map(|line| line.trim().split_once('='))
+        .filter_map(|(key, value)| {
+            key.trim()
+                .strip_prefix("视图·")
+                .filter(|key| !key.is_empty())
+                .map(|key| (key.to_owned(), value.trim().to_owned()))
+        })
+        .collect()
 }
 
 /// 收起状态那一行的名字：边界的名字后面缀上它，`筛选 收起 = 是`。
@@ -884,13 +909,19 @@ mod tests {
              没这条边界 = 100\n\
              浏览详情 = 读不懂\n\
              这行没有等号\n\
-             配目标=125.4\n",
+             配目标=125.4\n\
+             浏览编辑 = 260\n",
         );
         assert_eq!(sizes.get("筛选"), Some(&300.0));
         assert_eq!(
             sizes.get("配目标"),
             None,
             "子库屏那块「配目标」挪进了弹层：旧文件里那一行跳过"
+        );
+        assert_eq!(
+            sizes.get("浏览编辑"),
+            None,
+            "浏览屏底下那块编辑面板拆掉了：旧文件里那一行跳过"
         );
         assert_eq!(sizes.get("没这条边界"), None, "不认得的名字不该进来");
         assert_eq!(sizes.get("浏览详情"), None, "读不懂的值不该进来");
@@ -918,6 +949,8 @@ mod tests {
             folded_saved: BTreeSet::new(),
             rail_collapsed: false,
             saved_rail_collapsed: false,
+            preferences: BTreeMap::new(),
+            saved_preferences: BTreeMap::new(),
             error: None,
         };
         layout.sizes.insert(FILTER.id, 275.0);
@@ -1005,6 +1038,8 @@ mod tests {
             folded_saved: BTreeSet::new(),
             rail_collapsed: false,
             saved_rail_collapsed: false,
+            preferences: BTreeMap::new(),
+            saved_preferences: BTreeMap::new(),
             error: None,
         };
         layout.sizes.insert(FILTER.id, 275.0);

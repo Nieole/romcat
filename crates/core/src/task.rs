@@ -925,7 +925,7 @@ mod tests {
             .render(),
             Ending::<()>::Failed {
                 step: "看一眼目标".to_string(),
-                why: "卡不在位".to_string(),
+                why: "卡未连接".to_string(),
             }
             .render(),
         ];
@@ -936,12 +936,12 @@ mod tests {
         assert_eq!(四句[0], "完成");
         assert_eq!(四句[1], "已取消");
         assert_eq!(四句[2], "部分完成：按停时落了 12 件");
-        assert_eq!(四句[3], "失败：在「看一眼目标」这一步，卡不在位");
+        assert_eq!(四句[3], "失败：在「看一眼目标」这一步，卡未连接");
         let 说不出哪一步 = Ending::<()>::Failed {
             step: String::new(),
-            why: "卡不在位".to_string(),
+            why: "卡未连接".to_string(),
         };
-        assert_eq!(说不出哪一步.render(), "失败：卡不在位");
+        assert_eq!(说不出哪一步.render(), "失败：卡未连接");
         // 被按停交上来的那句错话也从这一档的词起头，不另写一个。
         assert!(
             Halted
@@ -1129,17 +1129,17 @@ mod tests {
             task.steps(3);
             task.step("读选择集")?;
             task.step("看一眼目标")?;
-            Err(Cutoff::failed("卡不在位"))
+            Err(Cutoff::failed("卡未连接"))
         });
         let done = 等到跑完(&mut board);
         let Ending::Failed { step, why } = done.ended else {
             panic!("该是失败");
         };
         assert_eq!(step, "看一眼目标");
-        assert_eq!(why, "卡不在位");
+        assert_eq!(why, "卡未连接");
         assert_eq!(
             board.history()[0].ending.render(),
-            "失败：在「看一眼目标」这一步，卡不在位",
+            "失败：在「看一眼目标」这一步，卡未连接",
         );
     }
 
@@ -1235,11 +1235,11 @@ mod tests {
         };
         let 失败 = Ending::<()>::Failed {
             step: "看一眼目标".to_string(),
-            why: "卡不在位".to_string(),
+            why: "卡未连接".to_string(),
         };
         let 说不出哪一步 = Ending::<()>::Failed {
             step: String::new(),
-            why: "卡不在位".to_string(),
+            why: "卡未连接".to_string(),
         };
 
         assert_eq!(Ending::Done(()).word(), "完成");
@@ -1252,9 +1252,9 @@ mod tests {
         assert_eq!(部分完成.detail().as_deref(), Some("按停时落了 12 件"));
         assert_eq!(
             失败.detail().as_deref(),
-            Some("在「看一眼目标」这一步，卡不在位"),
+            Some("在「看一眼目标」这一步，卡未连接"),
         );
-        assert_eq!(说不出哪一步.detail().as_deref(), Some("卡不在位"));
+        assert_eq!(说不出哪一步.detail().as_deref(), Some("卡未连接"));
     }
 
     #[test]

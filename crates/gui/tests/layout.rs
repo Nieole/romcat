@@ -265,7 +265,7 @@ fn 拖到极限时不塌陷也不把正中那块挤没() {
     let ctx = headless::context();
     跑(&ctx, &mut app, 3);
 
-    for boundary in [layout::FILTER, layout::DETAIL, layout::EDIT] {
+    for boundary in [layout::FILTER, layout::DETAIL] {
         let 拖到底 = 拖到(&ctx, &mut app, boundary, -2000.0);
         assert!(
             拖到底 >= boundary.min,
@@ -283,7 +283,7 @@ fn 拖到极限时不塌陷也不把正中那块挤没() {
         );
     }
 
-    for boundary in [layout::FILTER, layout::DETAIL, layout::EDIT] {
+    for boundary in [layout::FILTER, layout::DETAIL] {
         let 拖到底 = 拖到(&ctx, &mut app, boundary, 5000.0);
         assert!(
             拖到底 <= 上限(boundary) + 1.0,
@@ -294,14 +294,9 @@ fn 拖到极限时不塌陷也不把正中那块挤没() {
     }
     let 视口 = egui::Vec2::from(headless::VIEWPORT);
     let 正中宽 = 视口.x - 多宽(&ctx, layout::FILTER) - 多宽(&ctx, layout::DETAIL);
-    let 正中高 = 视口.y - 多宽(&ctx, layout::EDIT);
     assert!(
         正中宽 >= layout::FLOOR,
         "左右两栏拖到底之后，正中那张表只剩 {正中宽} 点宽",
-    );
-    assert!(
-        正中高 >= layout::FLOOR,
-        "底栏拖到底之后，正中那张表只剩 {正中高} 点高",
     );
 }
 

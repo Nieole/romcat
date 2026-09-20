@@ -71,6 +71,7 @@ use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::verdict::Store;
 use romcat_core::workspace::{CatalogEntry, CatalogFacts, CatalogState, DirUnreadable, Listing};
 use romcat_gui::app::{App, View};
+use romcat_gui::browse::work::Tab;
 #[cfg(feature = "demo")]
 use romcat_gui::demo;
 use romcat_gui::layout::{FOLD_EXPORT, FOLD_ROOTS, FOLD_SOURCES};
@@ -772,6 +773,8 @@ enum 浏览态 {
     筛空,
     /// 左右两栏都收着（从工作目录的版式偏好读出来的），点一下那一行认不出作品的。
     两栏收起,
+    /// 卡片墙：按平台分组，混合有封面和无封面的字卡。
+    卡片,
 }
 
 /// 那一行认不出作品的（长路径那一个）元数据那一格写着的字：一条候选都没有、一样元数据都没采到。
@@ -788,6 +791,9 @@ fn 拍浏览(名字: &str, 主题: Theme, 态: 浏览态) {
         return;
     }
     let 浏览现场 { mut app, 目录 } = 浏览现场(态 == 浏览态::两栏收起);
+    if 态 == 浏览态::卡片 {
+        app.browse_and_site().0.show_cards();
+    }
     if 态 == 浏览态::筛空 {
         let (browse, _) = app.browse_and_site();
         browse.query_mut().platform = Some(PlatformFilter::from_label("PS2"));
@@ -802,7 +808,7 @@ fn 拍浏览(名字: &str, 主题: Theme, 态: 浏览态) {
             按(&mut harness, "在每行开头显示封面");
             按(&mut harness, 点开的作品那一行);
         }
-        浏览态::筛空 => {}
+        浏览态::筛空 | 浏览态::卡片 => {}
     }
     控件都落在所在那一栏里(&harness, 名字);
     if 态 != 浏览态::筛空 {
@@ -925,13 +931,13 @@ fn 带标签的行正题露得出字(harness: &Harness<'_>, 名字: &str) {
 ///
 /// 一栏是哪一块，问 egui 自己存的面板尺寸：屏头、左边的导航（票 `gui-looks-like-the-design/32` 的外壳）、
 /// 底部状态栏（票 `gui-looks-like-the-design/25`）、
-/// 筛选那一栏（收起时是那条窄条）、侧边详情（同）、底下那块编辑面板，剩下的是表格那一块。控件**上沿的中点**落在哪一栏，就归哪一栏；哪一栏都不落的，本身就是
+/// 筛选那一栏（收起时是那条窄条）、侧边详情（同），剩下的是表格那一块。控件**上沿的中点**落在哪一栏，就归哪一栏；哪一栏都不落的，本身就是
 /// 问题。按上沿不按中心：滚动区最底下那一个被窗沿截掉一半时，中心已经出了窗，上沿还在它那一栏里。
 ///
 /// 面板边上那条拖动把手不算：egui 给它的节点没有角色、只有两份 `resize_grab_radius_side` 那么宽，
 /// 本来就骑在两栏交界上。
 ///
-/// **左右两沿必须整个在栏里，竖着只查上沿**：左栏、右栏、编辑面板与表格都是滚动区，最底下那一个
+/// **左右两沿必须整个在栏里，竖着只查上沿**：左栏、右栏与表格都是滚动区，最底下那一个
 /// 被滚动区的下沿截掉一截是滚动区本来的样子（设计稿里左栏最底下那一格也截着），滚一下就整个露出来；
 /// 屏头、导航与状态栏不滚，上下两沿都查（挂单 `Q871`）。
 #[track_caller]
@@ -954,26 +960,17 @@ fn 控件都落在所在那一栏里(harness: &Harness<'_>, 名字: &str) {
     let 状态栏 = 面板(egui::Id::new("状态栏")).expect("状态栏画过");
     let 左栏 = 侧栏(layout::FILTER).expect("左栏画过");
     let 右栏 = 侧栏(layout::DETAIL).expect("右栏画过");
-    let 底栏 = 面板(egui::Id::new(layout::EDIT.id)).expect("编辑面板画过");
-    // 编辑面板只占正中那一栏。egui 存下的面板外框会被**伸出去的内容撑宽**——伸到侧边详情底下那一截
-    // 照样算在外框里，拿它当边就抓不到伸出去的控件（合进外壳之后第八趟截图：「中文」下拉伸到详情底下，
-    // 这条断言没红）。横着拿正中那一栏的左右两沿夹住。
-    let 底栏 = egui::Rect::from_min_max(
-        egui::pos2(底栏.min.x.max(左栏.max.x), 底栏.min.y),
-        egui::pos2(底栏.max.x.min(右栏.min.x), 底栏.max.y),
-    );
     let 表格 = egui::Rect::from_min_max(
         egui::pos2(左栏.max.x, 屏头.max.y),
-        egui::pos2(右栏.min.x, 底栏.min.y),
+        egui::pos2(右栏.min.x, 状态栏.min.y),
     );
-    // 次序有讲究：屏头横跨导航右边整个宽，先认；编辑面板在表格底下，比表格先认。
+    // 次序有讲究：屏头横跨导航右边整个宽，先认。
     let 各栏 = [
         ("屏头", 屏头, true),
         ("导航", 导航, true),
         ("状态栏", 状态栏, true),
         ("左栏", 左栏, false),
         ("右栏", 右栏, false),
-        ("编辑面板", 底栏, false),
         ("表格", 表格, false),
     ];
 
@@ -1002,7 +999,7 @@ fn 控件都落在所在那一栏里(harness: &Harness<'_>, 名字: &str) {
         if data.role() == Role::Unknown && rect.width().min(rect.height()) <= 把手宽 + 0.5 {
             continue;
         }
-        // **滚出了视口、被状态栏挡住的那一个不算**（合进票 25 之后）：左右两栏与编辑面板的下沿就是状态栏的上沿，
+        // **滚出了视口、被状态栏挡住的那一个不算**（合进票 25 之后）：左右两栏的下沿就是状态栏的上沿，
         // 滚动区最底下那几个整个滚到了视口底下，上沿中点落进状态栏那一带——那不是状态栏里的控件没摆下，是还没
         // 滚到（与上面「整个在窗外的不算」同一类）。状态栏只有一行高、贴着窗口底沿：顶沿在状态栏里、却伸出窗口
         // 底沿的，只能是上头某个滚动区里的；整个落在状态栏里的照旧当状态栏的控件查。
@@ -1010,7 +1007,7 @@ fn 控件都落在所在那一栏里(harness: &Harness<'_>, 名字: &str) {
         // 控件被裁掉之后剩多少交给无障碍树，只能按几块面板的外框判。
         let 滚出视口 = rect.min.y >= 状态栏.min.y - 0.5
             && rect.max.y > 状态栏.max.y + 0.5
-            && [左栏, 右栏, 底栏]
+            && [左栏, 右栏]
                 .iter()
                 .any(|栏| 栏.x_range().contains(rect.center().x) && 栏.max.y <= rect.min.y + 0.5);
         if 滚出视口 {
@@ -1079,6 +1076,214 @@ fn 浏览_两栏收起_浅色() {
 #[test]
 fn 浏览_两栏收起_暗色() {
     拍浏览("browse/collapsed-dark", Theme::Dark, 浏览态::两栏收起);
+}
+
+// ——— 作品详情页（票 `gui-looks-like-the-design/15`） ———
+//
+// 同一份浏览屏的现场：点一下「Chrono Trigger (Japan)」那一行（五样元数据都齐、两个变体）——走表格自己那条选中的路，
+// 顶上「第几个 / 共几个」跟着有——再从「查看详情」那个入口（`Screen::open_page`）打开作品详情页、停到要拍的那一面。
+// 双击打开那条路由 `tests/work.rs` 的「双击主列表一行打开作品详情页…」守着；这里拍的是页面长什么样。
+// 媒体池不在工作目录里，封面照旧是字卡。
+
+/// 详情页那几张的一张封面：竖版、上下两块色，解出来一眼看得出是一张图而不是占位。
+fn 详情页的封面图() -> Vec<u8> {
+    let image = image::RgbImage::from_fn(300, 400, |_, y| {
+        if y < 260 {
+            image::Rgb([52, 96, 150])
+        } else {
+            image::Rgb([214, 160, 72])
+        }
+    });
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .expect("编得出 PNG");
+    out.into_inner()
+}
+
+/// 给详情页那几张**挂上真的媒体池**（协调人 2026-09-15：图里要是用户真会看到的样子，不是「没查池子」）：点开的作品那张封面
+/// 照库里记着的内容哈希落一张真图，另挂一段「视频」——抽帧程序换成一个不存在的，那一格就是没有 ffmpeg 的占位。
+/// 浏览屏那几张不走这里，照旧没有媒体池（行首是平台色块）。
+fn 挂上媒体池(app: &mut App, 目录: &Path) {
+    use romcat_core::scrape::pool::MediaPool;
+
+    let pool =
+        MediaPool::open(&romcat_core::workspace::media_pool_dir(目录)).expect("开得出媒体池");
+    let 落 = |hash: &str, ext: &str, bytes: &[u8]| {
+        let at = pool.path_of(hash, ext);
+        std::fs::create_dir_all(at.parent().expect("落点有上一级目录")).expect("建得出目录");
+        std::fs::write(&at, bytes).expect("写得下");
+    };
+    let 点开的 = 浏览的作品
+        .iter()
+        .position(|(名字, _, _)| *名字 == 点开的作品)
+        .expect("点开的作品在表里");
+    落(&format!("{:040x}", 点开的 + 1), "png", &详情页的封面图());
+    let 视频 = format!("{:040x}", 0xF1D0_u32);
+    落(&视频, "mp4", &[0u8; 256]);
+    let (browse, site) = app.browse_and_site();
+    site.catalog
+        .put_media(&视频, "mp4", 256)
+        .expect("记得进媒体");
+    site.catalog
+        .put_scraped(&[Harvested {
+            anchor: AnchorKind::Work.label().to_owned(),
+            subject: 点开的作品.to_owned(),
+            source: "ScreenScraper".to_owned(),
+            input: "基线".to_owned(),
+            values: Vec::new(),
+            media: vec![HarvestedMedia {
+                kind: MediaKind::Video.label().to_owned(),
+                hash: 视频,
+                evidence: "基线里摆的一段视频".to_owned(),
+            }],
+        }])
+        .expect("写得进刮削值");
+    browse
+        .gallery_mut()
+        .set_program(romcat_core::scrape::preview::NO_SUCH_PROGRAM);
+    browse.set_pool(Some(pool));
+}
+
+/// 搭好浏览屏的现场，点开那个作品、打开作品详情页停在 `面` 那一面，拍一张。CI 上跳过（[`该跳过`]）。
+///
+/// **拍之前先认一眼真打开了**：头一趟出图时双击没打开，概览那两张拍成了浏览屏，而两遍核对照样绿——基线比的是
+/// 自己，拍错了屏它看不出来。
+#[track_caller]
+fn 拍详情页(名字: &str, 主题: Theme, 面: Tab) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 浏览现场 { mut app, 目录 } = 浏览现场(false);
+    挂上媒体池(&mut app, 目录.path());
+    // 打开与换面走的是界面上「查看详情」、点一面的同一个入口（`Screen::open_page`）；交给画帧那个闭包在下一帧开头办。
+    let 换面 = std::rc::Rc::new(std::cell::Cell::new(None::<Tab>));
+    let 要换 = std::rc::Rc::clone(&换面);
+    // 后台那几份图解完没有（封面解出来、视频那一格因为没有 ffmpeg 退成占位）：画帧那个闭包每帧报一次。
+    let 图齐了 = std::rc::Rc::new(std::cell::Cell::new(false));
+    let 报图 = std::rc::Rc::clone(&图齐了);
+    let mut harness = 开一个(主题, move |ui| {
+        if let Some(面) = 要换.take() {
+            app.browse_and_site().0.open_page(面);
+        }
+        app.ui(ui);
+        let gallery = app.browse().gallery();
+        报图.set(gallery.busy() == 0 && gallery.ready() >= 1 && gallery.lacks_ffmpeg());
+    });
+    // 点一下那一行（同 [`按`]，但先不跑到停：后台解图时一直要重画，等图齐了再跑）。
+    let Some(那一行) = 最后一处正好画着(harness.output(), 点开的作品那一行)
+    else {
+        panic!("{名字}：屏上没有「{点开的作品那一行}」那一行");
+    };
+    let 键 = |pressed: bool| egui::Event::PointerButton {
+        pos: 那一行,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    harness.event(egui::Event::PointerMoved(那一行));
+    harness.event(键(true));
+    harness.event(键(false));
+    harness.event(egui::Event::PointerGone);
+    harness.step();
+    换面.set(Some(面));
+    harness.run_steps(2);
+    // 等后台解完：只跑帧、不看挂钟。
+    for _ in 0..100_000 {
+        if 图齐了.get() {
+            break;
+        }
+        harness.step();
+        std::thread::yield_now();
+    }
+    assert!(图齐了.get(), "{名字}：媒体池里那几份图一直没解完");
+    harness.run();
+    // **媒体面滚到整格看得见**（协调人 2026-09-15）：竖版封面那一格连底下「来源 · 大小」一行比头上那一块底下剩的地方高，
+    // 像人一样把指针停在正文里往下滚一截再拍。
+    if 面 == Tab::Media {
+        harness.event(egui::Event::PointerMoved(egui::pos2(800.0, 600.0)));
+        harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -220.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.event(egui::Event::PointerGone);
+        harness.step();
+        harness.run_steps(5);
+        harness.run();
+    }
+    assert!(
+        最后一处正好画着(harness.output(), "← 返回浏览").is_some(),
+        "{名字}：作品详情页没打开，拍下来的不是它"
+    );
+    拍下(harness, 名字);
+    drop(目录);
+}
+
+#[test]
+fn 详情页_概览_浅色() {
+    拍详情页("work/overview-light", Theme::Light, Tab::Overview);
+}
+
+#[test]
+fn 详情页_概览_暗色() {
+    拍详情页("work/overview-dark", Theme::Dark, Tab::Overview);
+}
+
+#[test]
+fn 详情页_变体与文件_浅色() {
+    拍详情页("work/variants-light", Theme::Light, Tab::Variants);
+}
+
+#[test]
+fn 详情页_变体与文件_暗色() {
+    拍详情页("work/variants-dark", Theme::Dark, Tab::Variants);
+}
+
+#[test]
+fn 详情页_元数据_浅色() {
+    拍详情页("work/metadata-light", Theme::Light, Tab::Metadata);
+}
+
+#[test]
+fn 详情页_元数据_暗色() {
+    拍详情页("work/metadata-dark", Theme::Dark, Tab::Metadata);
+}
+
+#[test]
+fn 详情页_标题_浅色() {
+    拍详情页("work/titles-light", Theme::Light, Tab::Titles);
+}
+
+#[test]
+fn 详情页_标题_暗色() {
+    拍详情页("work/titles-dark", Theme::Dark, Tab::Titles);
+}
+
+#[test]
+fn 详情页_媒体_浅色() {
+    拍详情页("work/media-light", Theme::Light, Tab::Media);
+}
+
+#[test]
+fn 详情页_媒体_暗色() {
+    拍详情页("work/media-dark", Theme::Dark, Tab::Media);
+}
+
+#[test]
+fn 详情页_识别依据_浅色() {
+    拍详情页("work/evidence-light", Theme::Light, Tab::Evidence);
+}
+
+#[test]
+fn 详情页_识别依据_暗色() {
+    拍详情页("work/evidence-dark", Theme::Dark, Tab::Evidence);
+}
+
+#[test]
+fn 浏览_卡片_暗色() {
+    拍浏览("browse/cards-dark", Theme::Dark, 浏览态::卡片);
 }
 
 // ——— 库 ———

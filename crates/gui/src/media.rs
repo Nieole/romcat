@@ -453,6 +453,17 @@ impl Shelf {
         self.error.as_deref()
     }
 
+    /// 这行的封面是否已经查明；`None` 表示这一帧尚未向核心库询问。
+    #[must_use]
+    pub fn has_cover(&self, row: &WorkRow) -> Option<bool> {
+        self.covers.get(&row.anchor).map(Option::is_some)
+    }
+
+    /// 记录一张当前可见卡片，交给下一帧的 [`Self::sync`] 查询封面。
+    pub fn note(&mut self, row: &WorkRow) {
+        self.seen.push(row.clone());
+    }
+
     /// **画完表之后每帧一次**：这一帧新画到、还没问过的那几行去问核心库要封面，
     /// 画到的那几行要的图交给后台解。
     ///
@@ -505,6 +516,77 @@ impl Shelf {
             None => platform_block(ui, size, row.platforms.first().map_or("", String::as_str)),
         }
     }
+
+    /// 卡片视图的封面：仍然由核心库挑哪一张、仍然走这一份后台解码池；没有封面时画字卡。
+    pub(crate) fn card(&mut self, ui: &mut egui::Ui, size: egui::Vec2, row: &WorkRow, title: &str) {
+        self.seen.push(row.clone());
+        let item = self.covers.get(&row.anchor).and_then(Option::as_ref);
+        match item.and_then(|item| self.gallery.texture(item)) {
+            Some(texture) => paint_cover(
+                ui,
+                size,
+                crate::tokens::Tokens::builtin().radius.medium,
+                texture,
+            ),
+            None => browse_title_card(
+                ui,
+                size,
+                title,
+                row.platforms.first().map_or("", String::as_str),
+            ),
+        }
+    }
+}
+
+/// 浏览卡片墙的无封面字卡。它与详情头上的小字卡不是同一版式：卡片墙里的它必须像一张
+/// 可以浏览的封面，有留白的标题区、来源说明与大号平台水印，而非缩略图被放大后的灰块。
+fn browse_title_card(ui: &mut egui::Ui, size: egui::Vec2, title: &str, platform: &str) {
+    let tokens = crate::tokens::Tokens::builtin();
+    let radius = tokens.radius.large;
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let color = tokens.color.platform.of(platform);
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(
+        rect,
+        radius,
+        ui.visuals()
+            .faint_bg_color
+            .lerp_to_gamma(color, tokens.mix.title_card_tint),
+    );
+    top_band(&painter, rect, radius, tokens.layout.title_card_band, color);
+
+    // 空出上半的呼吸感：右上角的平台与中文标签由卡片视图叠上来，标题从中段开始，
+    // 才不会和它们挤成一团。
+    let title_top = (size.y * 0.30).floor();
+    let mut title_job = egui::text::LayoutJob::simple(
+        title.to_owned(),
+        egui::FontId::new(tokens.font.size_cover_title, crate::font::strong_family()),
+        ui.visuals().strong_text_color(),
+        rect.width() - 26.0,
+    );
+    title_job.wrap.max_rows = 4;
+    title_job.wrap.break_anywhere = true;
+    painter.galley(
+        rect.min + egui::vec2(13.0, title_top),
+        painter.layout_job(title_job),
+        ui.visuals().strong_text_color(),
+    );
+    painter.text(
+        rect.left_bottom() + egui::vec2(13.0, -15.0),
+        egui::Align2::LEFT_BOTTOM,
+        "暂无封面",
+        egui::FontId::proportional(tokens.font.size_small),
+        ui.visuals().weak_text_color(),
+    );
+    painter.text(
+        egui::pos2(rect.right() + 4.0, rect.bottom() + 16.0),
+        egui::Align2::RIGHT_BOTTOM,
+        platform,
+        egui::FontId::new(tokens.font.size_cover_mark, crate::font::strong_family()),
+        color.gamma_multiply(tokens.mix.watermark_opacity),
+    );
+    clear_bottom_corners(&painter, rect, f32::from(radius), ui.visuals().panel_fill);
+    outline(ui, rect, radius);
 }
 
 impl Gallery {
@@ -536,7 +618,7 @@ pub(crate) fn paint_cover(
 }
 
 /// `object-fit: cover` 取纹理上的哪一块（0 到 1 的坐标）：放大到盖满这一格，多出来的那一边两头各裁一半。
-fn cover_uv(texture: egui::Vec2, frame: egui::Vec2) -> egui::Rect {
+pub(crate) fn cover_uv(texture: egui::Vec2, frame: egui::Vec2) -> egui::Rect {
     let whole = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
     if texture.x <= 0.0 || texture.y <= 0.0 || frame.x <= 0.0 || frame.y <= 0.0 {
         return whole;
@@ -634,9 +716,137 @@ pub(crate) fn title_card(
     ground: egui::Color32,
 ) {
     let tokens = crate::tokens::Tokens::builtin();
-    let radius = tokens.radius.medium;
-    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-    let color = tokens.color.platform.of(platform);
+    card_face(
+        ui,
+        &Face {
+            size,
+            radius: tokens.radius.medium,
+            padding: tokens.space.title_card_padding,
+            gap: 0.0,
+            title,
+            title_size: tokens.font.size_cover_title,
+            title_rows: crate::tokens::Tokens::builtin().layout.card_title_rows,
+            subtitle: None,
+            footer: None,
+            platform,
+            mark_size: tokens.font.size_cover_mark,
+            mark_offset: tokens.layout.title_card_mark_offset,
+            ground,
+        },
+    );
+}
+
+/// 没有封面时**作品详情页头上**摆的大字卡，照稿 `.hcover .tcard`：与侧边详情那张同一套画法（[`title_card`]），
+/// 大一号——大圆角、标题至多四行，底下一行等宽的副行（排序标题，没认出作品的写名字怎么来的），左下角一句「暂无封面」，
+/// 水印也大。
+pub(crate) fn hero_card(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    title: &str,
+    subtitle: &str,
+    platform: &str,
+    ground: egui::Color32,
+) {
+    let tokens = crate::tokens::Tokens::builtin();
+    card_face(
+        ui,
+        &Face {
+            size,
+            radius: tokens.radius.large,
+            padding: tokens.space.hero_card_padding,
+            gap: tokens.space.hero_card_gap,
+            title,
+            title_size: tokens.font.size_hero_card_title,
+            title_rows: tokens.layout.hero_card_title_rows,
+            subtitle: Some(subtitle),
+            footer: Some("暂无封面"),
+            platform,
+            mark_size: tokens.font.size_hero_card_mark,
+            mark_offset: tokens.layout.hero_card_mark_offset,
+            ground,
+        },
+    );
+}
+
+/// 一张字卡长什么样：两种大小各给一份（[`title_card`]、[`hero_card`]）。
+struct Face<'a> {
+    size: egui::Vec2,
+    radius: u8,
+    /// `[上下, 左右]`。
+    padding: [f32; 2],
+    /// 标题与副行之间。
+    gap: f32,
+    title: &'a str,
+    title_size: f32,
+    title_rows: usize,
+    subtitle: Option<&'a str>,
+    footer: Option<&'a str>,
+    platform: &'a str,
+    mark_size: f32,
+    /// `[右, 下]`。
+    mark_offset: [f32; 2],
+    ground: egui::Color32,
+}
+
+/// 把一串字排成至多 `rows` 行、每行不宽于 `width`，**只在空格处断行**：一个词整个走，不拆开。行数用完还剩字，最后一行
+/// 截尾补「…」；一个词比一行还宽，那个词截尾补「…」。`measure` 量一串字画出来多宽。
+fn lines_at_spaces(
+    text: &str,
+    width: f32,
+    rows: usize,
+    measure: impl Fn(&str) -> f32,
+) -> Vec<String> {
+    let 收住 = |text: &str| -> String {
+        if measure(text) <= width {
+            return text.to_owned();
+        }
+        let chars: Vec<char> = text.chars().collect();
+        (0..chars.len())
+            .rev()
+            .map(|n| format!("{}…", chars[..n].iter().collect::<String>().trim_end()))
+            .find(|line| measure(line) <= width)
+            .unwrap_or_else(|| "…".to_owned())
+    };
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let mut lines = Vec::new();
+    let mut at = 0;
+    while at < words.len() && lines.len() < rows {
+        let last = lines.len() + 1 == rows;
+        let mut line = String::new();
+        let mut next = at;
+        while next < words.len() {
+            let tried = if line.is_empty() {
+                words[next].to_owned()
+            } else {
+                format!("{line} {}", words[next])
+            };
+            if measure(&tried) > width {
+                break;
+            }
+            line = tried;
+            next += 1;
+        }
+        if next == at {
+            line = 收住(words[at]);
+            next = at + 1;
+        }
+        if last && next < words.len() {
+            line = 收住(&words[at..].join(" "));
+            next = words.len();
+        }
+        lines.push(line);
+        at = next;
+    }
+    lines
+}
+
+/// 照 `face` 画一张字卡：平台色调进次级底色的底、顶上一道平台色、左上角标题（拉丁与数字粗体，中文照旧常规体），
+/// 有副行就跟在标题底下（等宽、至多两行），有底行就贴着底边，右下角伸出格子被裁掉的平台代号水印，外头一圈分隔线。
+fn card_face(ui: &mut egui::Ui, face: &Face<'_>) {
+    let tokens = crate::tokens::Tokens::builtin();
+    let radius = face.radius;
+    let (rect, _) = ui.allocate_exact_size(face.size, egui::Sense::hover());
+    let color = tokens.color.platform.of(face.platform);
     let painter = ui.painter_at(rect);
     painter.rect_filled(
         rect,
@@ -646,33 +856,63 @@ pub(crate) fn title_card(
             .lerp_to_gamma(color, tokens.mix.title_card_tint),
     );
     top_band(&painter, rect, radius, tokens.layout.title_card_band, color);
-    // 标题：拉丁与数字是粗体，中文照旧常规体（字体预算）；至多三行，放不下的尾巴补「…」。
-    let [padding_y, padding_x] = tokens.space.title_card_padding;
+    // 标题：拉丁与数字是粗体，中文照旧常规体（字体预算）；至多那么几行，放不下的尾巴补「…」。
+    let [padding_y, padding_x] = face.padding;
     let ink = ui.visuals().strong_text_color();
     let mut job = egui::text::LayoutJob::simple(
-        title.to_owned(),
-        egui::FontId::new(tokens.font.size_cover_title, crate::font::strong_family()),
+        face.title.to_owned(),
+        egui::FontId::new(face.title_size, crate::font::strong_family()),
         ink,
         rect.width() - 2.0 * padding_x,
     );
-    job.wrap.max_rows = 3;
+    job.wrap.max_rows = face.title_rows;
     job.wrap.break_anywhere = true;
-    painter.galley(
-        rect.min + egui::vec2(padding_x, padding_y),
-        painter.layout_job(job),
-        ink,
-    );
+    let title = painter.layout_job(job);
+    let title_height = title.size().y;
+    painter.galley(rect.min + egui::vec2(padding_x, padding_y), title, ink);
+    if let Some(subtitle) = face.subtitle {
+        // **只在空格处断行**（协调人 2026-09-15 定）：「CHRONO TRIGGER (JAPAN)」不许把「)」单独挤到下一行；行数用完还剩字、
+        // 或者一个词比一行还宽，截尾补「…」。
+        let font = egui::FontId::monospace(tokens.font.size_path);
+        let color = ui.visuals().text_color();
+        let 量 = |text: &str| {
+            painter
+                .layout_no_wrap(text.to_owned(), font.clone(), color)
+                .size()
+                .x
+        };
+        let lines = lines_at_spaces(
+            subtitle,
+            rect.width() - 2.0 * padding_x,
+            tokens.layout.card_subtitle_rows,
+            量,
+        );
+        painter.galley(
+            rect.min + egui::vec2(padding_x, padding_y + title_height + face.gap),
+            painter.layout_no_wrap(lines.join("\n"), font, color),
+            ink,
+        );
+    }
+    if let Some(footer) = face.footer {
+        painter.text(
+            egui::pos2(rect.left() + padding_x, rect.bottom() - padding_y),
+            egui::Align2::LEFT_BOTTOM,
+            footer,
+            egui::FontId::proportional(tokens.font.size_caption),
+            ui.visuals().weak_text_color(),
+        );
+    }
     // 水印照稿伸出格子右下角，伸出去的那一截被格子裁掉。字号直接问令牌：具名字号档要等观感基线
     // 装上的下一帧才有，而点开一行可能就发生在头一帧。
-    let [out_x, out_y] = tokens.layout.title_card_mark_offset;
+    let [out_x, out_y] = face.mark_offset;
     painter.text(
         egui::pos2(rect.right() + out_x, rect.bottom() + out_y),
         egui::Align2::RIGHT_BOTTOM,
-        platform,
-        egui::FontId::new(tokens.font.size_cover_mark, crate::font::strong_family()),
+        face.platform,
+        egui::FontId::new(face.mark_size, crate::font::strong_family()),
         color.gamma_multiply(tokens.mix.watermark_opacity),
     );
-    clear_bottom_corners(&painter, rect, f32::from(radius), ground);
+    clear_bottom_corners(&painter, rect, f32::from(radius), face.ground);
     outline(ui, rect, radius);
 }
 
@@ -744,7 +984,7 @@ impl std::fmt::Debug for Look<'_> {
 /// **池里没那个文件就别说「打开了」**：[`preview::open_externally`] 走的是 `spawn`，
 /// `xdg-open` / `start` 这个进程照样起得来、照样返回成功，而什么都没打开——
 /// 于是屏上那句「交给系统默认程序打开」是句假话。
-fn clicked_on(item: &MediaItem) -> Clicked {
+pub(crate) fn clicked_on(item: &MediaItem) -> Clicked {
     match (&item.at, item.in_pool) {
         (Some(at), Some(true)) => Clicked::Open(at.clone()),
         (_, Some(false)) => Clicked::Nothing(format!(
@@ -792,6 +1032,36 @@ fn upload(ctx: &egui::Context, key: &Key, thumb: &Thumbnail) -> egui::TextureHan
 mod tests {
     use super::*;
 
+    /// 一个字一个单位宽的量法：拿字数当宽度，断行的规矩看得清。
+    fn 字数(text: &str) -> f32 {
+        text.chars().count() as f32
+    }
+
+    #[test]
+    fn 字卡副行只在空格处断行_放不下的截尾补省略号() {
+        assert_eq!(
+            lines_at_spaces("CHRONO TRIGGER (JAPAN)", 16.0, 2, 字数),
+            ["CHRONO TRIGGER", "(JAPAN)"],
+            "括号不被单独挤到下一行：整个词一起走"
+        );
+        assert_eq!(
+            lines_at_spaces("Chrono Trigger (Japan)", 30.0, 2, 字数),
+            ["Chrono Trigger (Japan)"],
+            "一行放得下就一行"
+        );
+        assert_eq!(
+            lines_at_spaces("aaa bbb ccc ddd", 7.0, 1, 字数),
+            ["aaa bb…"],
+            "行数用完还剩字：最后一行截尾补「…」"
+        );
+        assert_eq!(
+            lines_at_spaces("abcdefghij klm", 5.0, 2, 字数),
+            ["abcd…", "klm"],
+            "一个词比一行还宽：那个词截尾补「…」"
+        );
+        assert!(lines_at_spaces("   ", 10.0, 2, 字数).is_empty());
+    }
+
     #[test]
     fn 等比缩到框里一个像素都不拉伸() {
         // 一张 2:1 的横图塞进 3:4 的竖格子：宽度顶满、高度按比例留白。
@@ -818,6 +1088,7 @@ mod tests {
             source: "测试".to_string(),
             hash: "abcdef".to_string(),
             ext: "png".to_string(),
+            bytes: 0,
             at: in_pool.map(|_| PathBuf::from("/池/ab/abcdef.png")),
             in_pool,
             evidence: "测试".to_string(),

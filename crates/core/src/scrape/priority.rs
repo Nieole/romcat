@@ -38,7 +38,7 @@ use crate::adapter::converge::{self, Anchor};
 use crate::catalog::scrape::ScrapedValue;
 use crate::catalog::{Catalog, CatalogError};
 use crate::scrape::{AnchorKind, Field};
-use crate::title::Chosen;
+use crate::title::{Chosen, TitleSet};
 
 /// 内置的那一份优先级表。
 const BUILTIN: &str = include_str!("priorities.toml");
@@ -473,6 +473,23 @@ impl Priorities {
         })
     }
 
+    /// 一条值在这个字段上排第几的**排序键**：[`Priorities::pick`] 那四层（表里的名次、采集时刻新的优先、源名、
+    /// 值本身）。挑出胜出的那一条与把几条排出先后（[`entry_fields`]）用的是同一把键——两处各写一遍，
+    /// 「排第一的」与「挑出来的」迟早对不上。
+    fn order_key(
+        &self,
+        field: &str,
+        platform: Option<&str>,
+        value: &ScrapedValue,
+    ) -> (usize, std::cmp::Reverse<i64>, String, String) {
+        (
+            self.rank(field, platform, &value.source),
+            std::cmp::Reverse(value.at),
+            value.source.clone(),
+            value.value.clone(),
+        )
+    }
+
     /// 从一堆候选值里选出胜出的那一个。
     ///
     /// 排序键四层，缺一不可：
@@ -493,14 +510,7 @@ impl Priorities {
         values
             .iter()
             .filter(|value| value.field == field)
-            .min_by_key(|value| {
-                (
-                    self.rank(field, platform, &value.source),
-                    std::cmp::Reverse(value.at),
-                    value.source.clone(),
-                    value.value.clone(),
-                )
-            })
+            .min_by_key(|value| self.order_key(field, platform, value))
     }
 
     /// 胜出那个**源**在这个字段上说的**全部**值。
@@ -712,6 +722,126 @@ pub fn shifts(
         }
     }
     Ok(found)
+}
+
+/// 一个条目上**一个字段眼下写出去的是什么**，连这个字段上各个源各说了什么。
+///
+/// 作品详情页「元数据」那一面照它画：每一格写着眼下用的是哪个源的值（`shown`），「其他来源」列的是 `offered`
+/// 里别的那几条，「使用这个值」拿其中一条写成裁决。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldShown {
+    /// 哪个字段。
+    pub field: Field,
+    /// 写出去的是谁说的什么；这个字段写出去是空的时是 `None`。
+    pub shown: Option<Said>,
+    /// 这个字段上**每个源说的每一条**（裁决也在里头），照这份表的名次排（名次一样时照 [`Priorities::pick`] 那几层）。
+    ///
+    /// 条目挂在作品上时显示标题由标题集合挑，那一格这里是空的——叫法都在标题集合里。
+    pub offered: Vec<ScrapedValue>,
+}
+
+/// 作品详情页上**哪几个变体摆汉化组那一行**、各自那一格写出去的是什么（票 `gui-looks-like-the-design/15`）。
+///
+/// 汉化组挂在变体上（ADR-0012）：认出作品的，**汉化版**（`Catalog::variant_kind` 照首选变体那条规则答，不带裁决）或者
+/// 身上已经有汉化组值的变体各一行，次序照作品底下变体的次序；那一格照 [`entry_fields`] 算，与导出同一处。
+///
+/// # Errors
+/// 读库失败时返回错误。
+pub fn translation_groups(
+    catalog: &Catalog,
+    work: &crate::catalog::browse::WorkDetail,
+    priorities: &Priorities,
+) -> Result<Vec<(String, FieldShown)>, CatalogError> {
+    let mut out = Vec::new();
+    for variant in &work.variants {
+        let key = variant.row.key.as_str();
+        let fan = catalog.variant_kind(variant)? == Some(converge::Preference::FanTranslated);
+        let platform = variant.row.platform.as_deref().unwrap_or("");
+        if let Some(group) = entry_fields(
+            catalog,
+            AnchorKind::Variant,
+            key,
+            platform,
+            Some(key),
+            priorities,
+        )?
+        .into_iter()
+        .find(|one| one.field == Field::TranslationGroup)
+        .filter(|group| fan || !group.offered.is_empty())
+        {
+            out.push((key.to_owned(), group));
+        }
+    }
+    Ok(out)
+}
+
+/// **一个条目上每个字段眼下写出去的是什么**，照 [`Field::all`] 的次序一格一格列。
+///
+/// 与导出折条目、换表之前数「哪几处显示值会变」（[`shifts`]）问的是**同一处**（`converge::shown`，ADR-0024）：
+/// 认出了作品的条目读作品上的值，汉化组读首选变体身上的（`head`，给 `None` 就是没有），显示标题是标题集合挑出来的
+/// 那一个（[`crate::title::choose`]）；没认出作品的条目读那个变体自己的值，显示标题照这份表挑。
+///
+/// `anchor` 与 `subject` 是条目挂在哪儿：作品与作品名，或变体与变体的键。`platform` 是这个条目在哪个平台上
+/// ——按平台的覆盖照它取。
+///
+/// # Errors
+/// 读中立库失败时返回错误。
+pub fn entry_fields(
+    catalog: &Catalog,
+    anchor: AnchorKind,
+    subject: &str,
+    platform: &str,
+    head: Option<&str>,
+    priorities: &Priorities,
+) -> Result<Vec<FieldShown>, CatalogError> {
+    let values = catalog.scraped_values(anchor.label(), subject)?;
+    let head_values = match head {
+        Some(key) => catalog.scraped_values(AnchorKind::Variant.label(), key)?,
+        None => Vec::new(),
+    };
+    let chosen = match anchor {
+        AnchorKind::Work => Some(crate::title::choose(
+            &TitleSet {
+                work: subject.to_string(),
+                entries: catalog.titles_of(subject)?,
+            },
+            priorities,
+        )),
+        AnchorKind::Variant => None,
+    };
+    Ok(Field::all()
+        .into_iter()
+        .map(|field| {
+            let label = field.label();
+            // 汉化组挂在变体上（ADR-0012），读首选变体身上的；别的字段读条目自己挂的那一层。
+            let from: &[ScrapedValue] = if field == Field::TranslationGroup {
+                &head_values
+            } else {
+                &values
+            };
+            let mut offered: Vec<ScrapedValue> = if field == Field::Title && chosen.is_some() {
+                Vec::new()
+            } else {
+                from.iter()
+                    .filter(|value| value.field == label)
+                    .cloned()
+                    .collect()
+            };
+            offered.sort_by_key(|value| priorities.order_key(label, Some(platform), value));
+            FieldShown {
+                field,
+                shown: converge::shown(
+                    field,
+                    platform,
+                    &values,
+                    &head_values,
+                    chosen.as_ref(),
+                    priorities,
+                ),
+                offered,
+            }
+        })
+        .collect())
 }
 
 #[cfg(test)]

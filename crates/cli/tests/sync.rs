@@ -167,7 +167,7 @@ fn 目标不在位时停住并说清怎么办() {
     );
     let text = 出来的话(&out);
     assert!(!out.status.success(), "{text}");
-    assert!(text.contains("目标不在位"), "{text}");
+    assert!(text.contains("目标未连接"), "{text}");
     assert!(text.contains("插上读卡器"), "{text}");
 }
 

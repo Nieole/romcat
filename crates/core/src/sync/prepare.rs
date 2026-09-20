@@ -443,11 +443,11 @@ pub fn missing_roots(prepared: &Prepared, roots: &Roots) -> Vec<String> {
     missing.into_iter().collect()
 }
 
-/// 这几个根不在位时该对人说的那句话。
+/// 这几个根未连接时该对人说的那句话。
 #[must_use]
 pub fn missing_roots_message(missing: &[String]) -> String {
     format!(
-        "主库这几个根不在位：{}。\n\
+        "主库这几个根未连接：{}。\n\
          搬 ROM 要真的去读它们。插上外置盘，或者给 `--library-root 根名=路径`。",
         missing.join("、")
     )

@@ -30,7 +30,7 @@ use shared::画出来的字;
 /// **版式偏好**（面板拖到哪儿）。共用的话，维护者开一次演示窗口把某块面板拖高一截，
 /// 下一次跑这几条测试屏上就少了几行——而断言数的正好是行数。
 fn 工作目录() -> std::path::PathBuf {
-    std::env::temp_dir().join("romcat-测试-队列")
+    shared::干净工作目录("romcat-测试-队列")
 }
 
 fn 界面(rows: u64) -> App {
@@ -2719,7 +2719,7 @@ fn 还没识别时的空态照稿_暂无待确认项_几个变体还没识别_�
             ("FC", "甲.zip", 档::还没识别),
             ("FC", "乙.zip", 档::还没识别),
         ],
-        std::env::temp_dir().join("romcat-测试-队列-空态"),
+        shared::干净工作目录("romcat-测试-队列-空态"),
     );
     app.show_view(View::Queue);
     跑(&ctx, &mut app, 2);
@@ -3121,7 +3121,7 @@ fn 识别跑过而队列裁空时空态不给运行识别_一批能整批通过�
 
     let ctx = headless::context();
     let 画这一份 = |ctx: &egui::Context, 手上的: &[(&str, &str, 档)], 目录: &str| {
-        let mut app = shared::小库(手上的, std::env::temp_dir().join(目录));
+        let mut app = shared::小库(手上的, shared::干净工作目录(目录));
         app.show_view(View::Queue);
         跑(ctx, &mut app, 2);
         let 屏上 = 画一帧(ctx, &mut app);
@@ -3242,7 +3242,7 @@ fn 有七批能整批通过的库() -> App {
     let store = Store::in_memory().expect("开得出沉淀库");
     App::new(
         Site::in_memory(catalog, store, shared::根),
-        std::env::temp_dir().join("romcat-测试-队列-七批"),
+        shared::干净工作目录("romcat-测试-队列-七批"),
     )
 }
 

@@ -475,7 +475,7 @@ fn 卡不在位时停住_而不是排出一份全删全传的计划() {
     let 目标 = temp_dir("sync-target-gone");
     let 不在了 = 目标.path().join("没插上");
     let error = sync::observe(&RealFs::new(), &不在了).expect_err("停住");
-    assert!(format!("{error}").contains("目标不在位"), "{error}");
+    assert!(format!("{error}").contains("目标未连接"), "{error}");
 }
 
 #[test]

@@ -29,9 +29,10 @@
 //!    **简介**；命中在哪一条决定这一行排哪一档（`SearchHit`，折在中立库那一层）。
 //!    **它进不了子库的规则**——子库要的是集合不是顺序，所以搜索框里还有字的时候
 //!    「存成子库」当场挡住（挂单 Q70）。
-//! 3. **这一行到底是什么**——右边那块面板的三层：**作品** → **变体**（每个带置信度与
-//!    **依据**）→ **文件**（含附属文件与内部资源）→ **媒体**（封面与截图内嵌画出来，
-//!    视频是一张抽出来的首帧加一个播放标，[`crate::media`]）。
+//! 3. **这一行到底是什么**——右边那块面板：**作品** → **变体**（每个带置信度与
+//!    **依据**）→ **媒体**（封面与截图内嵌画出来，视频是一张抽出来的首帧加一个播放标，
+//!    [`crate::media`]）。一部作品的全部情况——变体与文件、元数据、标题、媒体、识别依据——在
+//!    **作品详情页**（[`work`]，双击一行或点「查看详情」打开，票 `gui-looks-like-the-design/15`）。
 //!
 //! ## 收藏与合集：同一套成员关系
 //!
@@ -47,8 +48,8 @@
 //!
 //! - 选中主列表的行 ＝ 选中这些**作品**，批量操作作用于它们的变体
 //!   （[`Catalog::scoped_variants`]，随当前筛选收窄；不筛的时候就是全部变体）。
-//! - 在详情面板里选中某一个**变体** ＝ 变体级的操作只作用于它：改它的元数据、
-//!   把首选变体裁给它、看它的文件。
+//! - 在详情面板里选中某一个**变体** ＝ 变体级的操作只作用于它：改选择那一趟里给它记一条
+//!   例外、看它凭什么落在这一档。
 //!
 //! 两件事各有各的状态（[`Picked`] 与 [`Screen::variant_key`]），混成一件的话，
 //! 翻着看就会把批量操作的范围改掉。
@@ -56,13 +57,14 @@
 //! ## 所有元数据编辑收敛在这里（ADR-0001 的修订段）
 //!
 //! 主库的 Pegasus 文件不再是编辑入口。于是这一屏必须真的改得动库：加一条**裁决**来源的
-//! 叫法、删一条叫法、指定或撤销**首选变体**、写下一个刮削字段值。这几件事各自都只是
-//! 一次中立库写入——领域判断一条都不在这里。
+//! 叫法、隐藏一条叫法、指定**首选变体**、手动改写一个字段值。这几件事都在**作品详情页**上做
+//! （[`work`]；浏览屏底下那块编辑面板拆掉了，收挂单 `Q804`），各自都只是一次写入——领域判断一条都不在这里。
 //!
-//! ## 中文输入全在底下那块面板里
+//! ## 中文输入不进虚拟化的区域
 //!
 //! 一个 [`egui::TextEdit`] 都不进表格单元格：表格是虚拟化的，正在组字的那一行一旦滚出
-//! 视口，那个控件就不存在了（ADR-0005 的修订段）。
+//! 视口，那个控件就不存在了（ADR-0005 的修订段）。文本框只在不虚拟化的那几处：左栏、右栏选中那张
+//! 变体卡底下的例外备注、作品详情页的元数据与标题两面。
 //!
 //! 左边那一栏上半的五个维度是**选**出来的不是打出来的，值从中立库现问
 //! （[`Catalog::facets`]）；下半那棵条件组里每条子句有一个值要打，而**那一栏不虚拟化**
@@ -75,16 +77,16 @@ use egui::{Align, Layout};
 use romcat_core::catalog::CatalogError;
 use romcat_core::catalog::browse::{
     Facets, NON_GAME_ASSET_LABEL, NonGameAssets, PlatformFilter, Scope, WorkAnchor, WorkDetail,
-    WorkQuery, WorkVariant,
+    WorkOrder, WorkQuery, WorkVariant,
 };
 use romcat_core::catalog::identify::{NOT_RUN_LABEL, Tier};
 use romcat_core::catalog::{Catalog, VariantDetail};
 use romcat_core::collection::{self, Applied, FAVORITE};
 use romcat_core::filename::Rules;
-use romcat_core::report::{capacity, human_bytes, thousands};
+use romcat_core::report::{human_bytes, thousands};
+use romcat_core::scrape::Priorities;
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::priority::VERDICT;
-use romcat_core::scrape::{AnchorKind, Field, Priorities};
 use romcat_core::site::Site;
 use romcat_core::stage::Stage;
 use romcat_core::sublibrary::{
@@ -100,19 +102,129 @@ use crate::layout;
 use crate::look;
 use crate::media::{Gallery, Shelf};
 use crate::scrape;
-use crate::table::{Picked, SPAN, Table, UNLINKED_LABEL, Window, tail_fit, text_width};
+use crate::table::{Picked, SPAN, Table, UNLINKED_LABEL, Window, tail_fit};
 use crate::task::{Product, Tasks};
+use crate::toast::{self, Toast};
 use crate::tokens::Tokens;
+
+pub mod work;
 
 /// 侧边详情变体卡片上**首选变体**那一枚标签上的字（词表**首选变体**条）。哪一个是首选由核心库答
 /// （[`VariantDetail::preferred_now`]），这里只是屏上怎么写。
 const PREFERRED_TAG: &str = "首选变体";
 
+/// 浏览屏两种不改变集合的呈现方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrowseView {
+    Table,
+    Cards,
+}
+
+/// 卡片视图的三档封面宽度。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CardSize {
+    Small,
+    Medium,
+    Large,
+}
+
+/// 卡片工具栏里「默认」指作品名；其余排序沿用表格的领域词。
+fn card_order_label(order: WorkOrder) -> &'static str {
+    match order {
+        WorkOrder::Name => "默认",
+        _ => order.label(),
+    }
+}
+
+impl CardSize {
+    fn width(self) -> f32 {
+        Tokens::builtin().layout.card_widths[match self {
+            Self::Small => 0,
+            Self::Medium => 1,
+            Self::Large => 2,
+        }]
+    }
+}
+
+/// 卡面右上角的身份叠层与底边置信度线。它们压在封面上，而不是占用信息区；这是卡片
+/// 能先被视觉扫描、再读文字的关键层次。
+fn paint_card_overlay(
+    ui: &egui::Ui,
+    card: egui::Rect,
+    cover: egui::Vec2,
+    cover_radius: u8,
+    row: &romcat_core::catalog::browse::WorkRow,
+    chosen: bool,
+    focused: bool,
+) {
+    let cover = egui::Rect::from_min_size(card.min, cover);
+    let painter = ui.painter_at(card);
+    let tokens = Tokens::builtin();
+    let platform = row.platforms.first().map_or("未知", String::as_str);
+    let color = tokens.color.platform.of(platform);
+    let font = egui::FontId::new(tokens.font.size_caption_plus, font::strong_family());
+    let galley = painter.layout_no_wrap(platform.to_owned(), font.clone(), egui::Color32::WHITE);
+    let badge = egui::Rect::from_min_size(
+        egui::pos2(cover.right() - galley.size().x - 14.0, cover.top() + 8.0),
+        galley.size() + egui::vec2(12.0, 6.0),
+    );
+    painter.rect_filled(badge, tokens.radius.small, color);
+    painter.galley(
+        badge.center() - galley.size() / 2.0,
+        galley,
+        egui::Color32::WHITE,
+    );
+    if !row.chinese.is_empty() {
+        let text = row.chinese.join(" / ");
+        let galley = painter.layout_no_wrap(
+            text,
+            egui::FontId::proportional(tokens.font.size_caption_plus),
+            ui.visuals().strong_text_color(),
+        );
+        let badge = egui::Rect::from_min_size(
+            egui::pos2(cover.right() - galley.size().x - 14.0, cover.top() + 34.0),
+            galley.size() + egui::vec2(12.0, 6.0),
+        );
+        painter.rect_filled(
+            badge,
+            tokens.radius.small,
+            ui.visuals().window_fill.gamma_multiply(0.85),
+        );
+        painter.galley(
+            badge.center() - galley.size() / 2.0,
+            galley,
+            ui.visuals().strong_text_color(),
+        );
+    }
+    // 设计稿里的 `.cv-tier` 是被封面圆角裁掉的 3px 色带，不是一条另起圆角的横线。
+    // 先用整张封面画圆角，再只留下最下方那一带，才会和有/无封面两种卡面的圆角严丝合缝。
+    let tier_band = egui::Rect::from_min_max(
+        egui::pos2(cover.left(), cover.bottom() - tokens.layout.tier_bar),
+        cover.right_bottom(),
+    );
+    painter.with_clip_rect(tier_band).rect_filled(
+        cover,
+        cover_radius,
+        look::tier_color(row.tier(), ui.visuals()),
+    );
+    if chosen || focused {
+        // 选中态和键盘焦点都只落在 `.cover`，且只画一圈：整卡焦点框和双层光晕会把
+        // 信息区误认成卡面的一部分。
+        painter.rect_stroke(
+            cover,
+            cover_radius,
+            ui.visuals().selection.stroke,
+            // 卡面贴着分配区边缘；往外画会被裁掉三条边。描在卡面内侧才能完整围住它。
+            egui::StrokeKind::Inside,
+        );
+    }
+}
+
 /// 界面上人工写下的叫法，**依据**里写这一句。
 ///
 /// 没有依据的结论事后无法复核（ADR-0002）。人工写的那条依据只能是「谁在哪儿写的」，
 /// 但那也比空着强——半年后看见一个来路不明的中文名，至少知道它是自己敲的。
-const HAND_WRITTEN: &str = "浏览屏的详情面板上人工写的";
+const HAND_WRITTEN: &str = "作品详情页上人工写的";
 
 /// 底下那块面板里，**标题集合**最多列几条。
 ///
@@ -154,10 +266,8 @@ const VALUE_SHOWN: usize = 60;
 /// 它是公开的，因为「原样画得下的**一个字都不动**」这一条只有从**函数这一侧**看得见：
 /// 屏上画的是同一串字，中间换没换过一份字符串出去，看画出来的那一帧看不出来。
 ///
-/// 「收成一行画得下的那一截」那一半**钉在画出来的那一帧上**：那一行画在详情面板深处，
-/// egui 不画视口之外的文字，但指针停进那一栏再滚真的滚轮就够得着它
-/// （`crates/gui/tests/browse.rs` 的 `一条顶到闸上的简介收成一行画得下的那一截`，
-/// 挂单 Q20）。
+/// 三样都钉在 `crates/gui/tests/browse.rs` 的 `一行画得下的值原样不动_带换行的折平_顶到闸上的收住` 上。浏览屏底下
+/// 那块编辑面板拆掉之后（票 `gui-looks-like-the-design/15`），拿它画刮削来的值的是待确认屏；作品详情页上的值折行画全。
 #[must_use]
 pub fn one_line(value: &str) -> Option<String> {
     let flat = value.replace(['\n', '\r'], " ");
@@ -186,29 +296,6 @@ impl Default for TitleDraft {
             // 人在这儿手敲的绝大多数是中文译名——那正是这个项目缺的那一半。
             language: Language::Chinese,
             kind: TitleKind::Translated,
-        }
-    }
-}
-
-/// 写下一个**刮削字段值**时界面上那份草稿。
-#[derive(Debug, Clone)]
-pub struct ValueDraft {
-    /// 哪个字段。
-    pub field: Field,
-    /// 挂在**作品**上还是**变体**上。年份挂作品、汉化组挂变体（ADR-0012）。
-    pub anchor: AnchorKind,
-    /// 值本身。**会碰到输入法**，所以它在详情面板里。
-    pub value: String,
-}
-
-impl Default for ValueDraft {
-    fn default() -> Self {
-        Self {
-            // 简介是最想手写的那一个：离线档撞上一条中文条目就有（`scrape::zh`），
-            // 而撞不上的那些正是没人替它写过一句话的。
-            field: Field::Description,
-            anchor: AnchorKind::Work,
-            value: String::new(),
         }
     }
 }
@@ -261,6 +348,12 @@ pub struct SaveDraft {
 /// 浏览屏。
 pub struct Screen {
     window: Window,
+    /// 卡片墙的虚拟窗口；仅封面模式只改它，不污染主选择集。
+    card_window: Window,
+    /// 卡片工具栏的覆盖率统计。它永远只取有封面的作品，因而不能复用会受开关影响的卡片窗。
+    cover_window: Window,
+    /// 卡片墙滚到哪一组就把哪一组钉在网格上沿；避免每一排重复一遍平台标题。
+    card_group_header: Option<(String, u64)>,
     /// 筛选与排序。**界面上这一份是源头**，[`Window`] 里那一份是它的副本，每帧同步一次。
     query: WorkQuery,
     /// 五个维度各有哪些值可选。换库或改过元数据才重问。
@@ -342,6 +435,12 @@ pub struct Screen {
     gallery: Gallery,
     /// 「**在每行开头显示封面**」那颗开关（票 `gui-looks-like-the-design/09`）。默认关着。
     list_covers: bool,
+    /// 浏览屏的呈现方式；只影响界面，不参与子库的选择集规则。
+    view: BrowseView,
+    /// 卡片的大小与是否按平台分段，同样只是视图偏好。
+    card_size: CardSize,
+    group_cards: bool,
+    only_covers: bool,
     /// 主列表行首那几格封面：问过的、解着的（[`Shelf`]）。与 [`Self::gallery`] 分开一份。
     shelf: Shelf,
     /// 左栏平台那一簇**摊没摊开**：没摊开时只摆头几个（令牌 `platforms-visible`），其余收在
@@ -373,8 +472,6 @@ pub struct Screen {
     collecting: Option<u64>,
     /// 加一条叫法的草稿。
     title_draft: TitleDraft,
-    /// 写下一个刮削字段值的草稿。
-    value_draft: ValueDraft,
     /// 上一次动作的回执。
     notice: Option<String>,
     /// **刚撤掉一条压制**那一句，连它旁边那颗就地的「折标题」。
@@ -384,6 +481,9 @@ pub struct Screen {
     /// ——合成一格的话，那颗「折标题」会挂在「首选变体裁给了 X」这类回执旁边。
     /// 换一个作品就收掉（[`Self::sync_suppressed`]）：那时人已经不在刚才那条叫法上了。
     lift_notice: Option<String>,
+    /// 回执浮在窗口底边那条**提示条**上（设计稿 `.toast`，[`crate::toast`]）：[`Self::notice`] 换了一句就换一条，
+    /// 停够了连那句回执一起收掉。
+    toast: Option<Toast>,
     /// 人在这一屏按下的那道**工序**的捷径，等窗口取走。
     ///
     /// **这一屏排不了活**：排一趟工序要同时够得着库屏那一段与**任务台**，而屏与屏
@@ -397,6 +497,11 @@ pub struct Screen {
     error: Option<String>,
     /// 字体样张开着没有。
     sample: bool,
+    /// **打开外部程序**那一下：播放视频、看原图、打开位置，都交给它。默认是系统默认程序
+    /// （`preview::open_externally`）；测试换成只记下交出去的是哪个文件（[`Screen::set_opener`]），不拉起真的播放器。
+    opener: Opener,
+    /// **作品详情页**开着时是 `Some`（[`work`]）：那时这一屏只画它，三栏与屏头都被它盖住。
+    page: Option<work::Page>,
     /// 把表格的滚动位置强按到这个像素偏移。**只有量帧率时才设**，真界面上永远是 `None`。
     pub scroll_to: Option<f32>,
 }
@@ -421,6 +526,9 @@ impl Screen {
         };
         Self {
             window: Window::new(SPAN),
+            card_window: Window::new(SPAN),
+            cover_window: Window::new(SPAN),
+            card_group_header: None,
             query: WorkQuery::default(),
             facets: Facets::default(),
             facets_for: None,
@@ -447,6 +555,10 @@ impl Screen {
             gallery: Gallery::new(),
             short_names: Vec::new(),
             list_covers: false,
+            view: BrowseView::Table,
+            card_size: CardSize::Medium,
+            group_cards: false,
+            only_covers: false,
             shelf: Shelf::default(),
             more_platforms: false,
             cover: None,
@@ -457,14 +569,26 @@ impl Screen {
             suppressed_for: None,
             collecting: None,
             title_draft: TitleDraft::default(),
-            value_draft: ValueDraft::default(),
             notice: None,
             lift_notice: None,
+            toast: None,
             asked: None,
             error,
             sample: false,
+            opener: Box::new(romcat_core::scrape::preview::open_externally),
+            page: None,
             scroll_to: None,
         }
+    }
+
+    /// 换掉**打开外部程序**那一下（默认是系统默认程序，`romcat_core::scrape::preview::open_externally`）。
+    ///
+    /// 测试拿它记下「交给系统的是哪个文件」，不拉起真的播放器；真窗口那一路不必调。
+    pub fn set_opener(
+        &mut self,
+        opener: impl FnMut(&std::path::Path) -> Result<(), String> + 'static,
+    ) {
+        self.opener = Box::new(opener);
     }
 
     /// 换一份优先级表。**导出用哪一份，这里就该用哪一份**——两份不一样的话，
@@ -473,6 +597,58 @@ impl Screen {
         // 主列表每行的显示标题也照这一份挑（`Window::set_priorities`）：表上与详情头上得是同一个名字。
         self.window.set_priorities(priorities.clone());
         self.priorities = priorities;
+    }
+
+    /// 切到卡片视图；供窗口恢复偏好与界面测试走同一份状态。
+    pub fn show_cards(&mut self) {
+        self.view = BrowseView::Cards;
+    }
+
+    /// 从工作目录的版式偏好恢复浏览屏呈现方式；这些值绝不参与选择集规则。
+    pub fn restore_view_preferences(&mut self, layout: &layout::Layout) {
+        self.view = if layout.preference("浏览视图") == Some("卡片") {
+            BrowseView::Cards
+        } else {
+            BrowseView::Table
+        };
+        self.list_covers = layout.preference("列表封面") == Some("是");
+        self.group_cards = layout.preference("卡片分组") == Some("平台");
+        self.only_covers = layout.preference("仅封面") == Some("是");
+        self.card_size = match layout.preference("卡片大小") {
+            Some("小") => CardSize::Small,
+            Some("大") => CardSize::Large,
+            _ => CardSize::Medium,
+        };
+    }
+
+    /// 把浏览屏呈现方式交给统一的版式偏好文件落盘。
+    pub fn save_view_preferences(&self, layout: &mut layout::Layout) {
+        layout.set_preference(
+            "浏览视图",
+            if self.view == BrowseView::Cards {
+                "卡片"
+            } else {
+                "表格"
+            },
+        );
+        layout.set_preference("列表封面", if self.list_covers { "是" } else { "否" });
+        layout.set_preference(
+            "卡片分组",
+            if self.group_cards {
+                "平台"
+            } else {
+                "不分组"
+            },
+        );
+        layout.set_preference("仅封面", if self.only_covers { "是" } else { "否" });
+        layout.set_preference(
+            "卡片大小",
+            match self.card_size {
+                CardSize::Small => "小",
+                CardSize::Medium => "中",
+                CardSize::Large => "大",
+            },
+        );
     }
 
     /// 指一份**媒体池**。**目录不在就不指**——「没查」与「查了、没有」得分得开。
@@ -1003,11 +1179,6 @@ impl Screen {
         &mut self.title_draft
     }
 
-    /// 写下一个刮削字段值的草稿，供实测与测试填。
-    pub fn value_draft_mut(&mut self) -> &mut ValueDraft {
-        &mut self.value_draft
-    }
-
     /// 点开主列表的一行。**界面上点那一行走的就是它**，测试拿它当那一下。
     ///
     /// 顺带把这一行底下的**第一个变体**选中：详情面板的第二层与第三层总得有东西摆，
@@ -1021,52 +1192,6 @@ impl Screen {
     pub fn pick(&mut self, catalog: &Catalog, key: &str) {
         self.variant = Some(key.to_string());
         self.load_detail(catalog);
-    }
-
-    /// 把草稿里那个字段值写下，**来源记作裁决**。
-    ///
-    /// 优先级表把裁决排在每个字段的最前，所以写下之后**导出真会用它**。
-    /// 界面上「写下」那个按钮走的就是它。
-    pub fn put_value(&mut self, site: &mut Site, subject: &str) {
-        let value = self.value_draft.value.trim().to_string();
-        if value.is_empty() {
-            return;
-        }
-        match site.catalog.put_verdict_value(
-            self.value_draft.anchor,
-            subject,
-            self.value_draft.field,
-            &value,
-            HAND_WRITTEN,
-        ) {
-            Ok(()) => {
-                self.notice = Some(format!(
-                    "{} 记成了「{value}」，来源是裁决——导出会用它。",
-                    self.value_draft.field.label(),
-                ));
-                self.value_draft.value.clear();
-                self.load_detail(&site.catalog);
-            }
-            Err(error) => self.error = Some(format!("中立库写不动：{error}")),
-        }
-    }
-
-    /// 撤掉一条**裁决**来源的字段值，让别的源重新说了算。
-    pub fn clear_value(
-        &mut self,
-        site: &mut Site,
-        anchor: AnchorKind,
-        subject: &str,
-        field: Field,
-    ) {
-        match site.catalog.clear_verdict_value(anchor, subject, field) {
-            Ok(true) => {
-                self.notice = Some(format!("撤掉了人工写的{}。", field.label()));
-                self.load_detail(&site.catalog);
-            }
-            Ok(false) => self.notice = Some("本来就没人写过。".to_string()),
-            Err(error) => self.error = Some(format!("中立库写不动：{error}")),
-        }
     }
 
     /// 把草稿里那条叫法写进**标题集合**，**来源记作裁决**。
@@ -1188,6 +1313,10 @@ impl Screen {
     /// 人看见的是一行，动到的是另一行。不在了就退回这一行的第一个变体；
     /// 一个都不剩就一起清掉。
     fn load_work(&mut self, catalog: &Catalog) {
+        // 作品详情页手上那几份变体详情是照上一趟读的：这一趟重读了，它们跟着作废。
+        if let Some(page) = self.page.as_mut() {
+            page.forget();
+        }
         let Some(anchor) = self.opened.clone() else {
             self.work = None;
             self.cover = None;
@@ -1388,6 +1517,14 @@ impl Screen {
             self.load_work(catalog);
         }
         self.window.sync(catalog);
+        let card_query = self.query.clone().with_covers_only(self.only_covers);
+        self.card_window.set_query(card_query);
+        self.card_window.set_priorities(self.priorities.clone());
+        self.card_window.sync(catalog);
+        let cover_query = self.query.clone().with_covers_only(true);
+        self.cover_window.set_query(cover_query);
+        self.cover_window.set_priorities(self.priorities.clone());
+        self.cover_window.sync(catalog);
         if refiltered || self.filtered.is_none() {
             // **筛出来多少**与**选中多少**是两个数，各数各的：前者换筛选才变，
             // 后者每勾一行就变。合成一个的话，屏上「筛出 N 行」会跟着勾选跳。
@@ -1795,6 +1932,12 @@ impl Screen {
         self.sync_media(ui.ctx(), site, writable);
         // **刮削是一层弹层**（[`crate::dialog`]），不占这一屏的地方：摊开着才画，盖在整屏上头。
         self.scrape.show(ui.ctx(), site, tasks);
+        self.notice_toast(ui.ctx());
+        // **作品详情页开着就只画它**（票 `gui-looks-like-the-design/15`）：稿上它盖住整块屏。
+        if self.page.is_some() {
+            self.page_ui(ui, site);
+            return;
+        }
         // **三栏：左筛选 / 中表格 / 右详情**（票 `gui-looks-like-the-design/09`）。左右两栏
         // 从顶到底，拖得动、收得起来、下次打开还记得；怎么拖、收起来长什么样、记在哪儿，全在
         // [`crate::layout`] 那一份声明里（票 `gui-redesign/12`）。两栏的底色与内边距照稿：
@@ -1821,56 +1964,79 @@ impl Screen {
             self.filter_panel(ui, site, tasks);
         });
         layout::DETAIL.show_collapsible(ui, "详情", 右栏, |ui| self.detail_panel(ui, site));
-        // **底下那块编辑面板只占正中那一栏**：摆在左右两栏之前的话它横跨整屏，
-        // 两侧那两栏被它削掉一截，表格也被挤成中间一条缝。
+        // **底下那块编辑面板拆掉了**（票 `gui-looks-like-the-design/15` 收挂单 `Q804`）：改元数据归作品详情页，
+        // 选中数在表格上方那一条，改选择时的例外摆在右栏选中那张变体卡底下。正中那一栏从上到下就是表。
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE)
+            .frame(egui::Frame::NONE.fill(正中底))
             .show(ui, |ui| {
-                layout::EDIT.show(ui, |ui| self.edit_panel(ui, site));
-                egui::CentralPanel::default()
-                    .frame(egui::Frame::NONE.fill(正中底))
-                    .show(ui, |ui| {
-                        // 「列表」那一条、表头、表身一块接一块，中间不留缝（设计稿 `.tpane`）。
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        if self.sample {
-                            self.font_sample(ui);
-                            ui.separator();
-                        }
-                        self.list_bar(ui);
-                        let opened = Table {
-                            catalog: &site.catalog,
-                            window: &mut self.window,
-                            query: &mut self.query,
-                            focused: &mut self.focused,
-                            picked: &mut self.picked,
-                            scroll_to: self.scroll_to,
-                            rules: &self.rules,
-                            shelf: if self.list_covers {
-                                Some(&mut self.shelf)
-                            } else {
-                                None
-                            },
-                        }
-                        .show(ui);
-                        // **画完表才问封面**：这一帧画到了哪几行，表画完才知道。
-                        if self.list_covers {
-                            self.shelf.sync(
-                                ui.ctx(),
-                                &mut site.catalog,
-                                self.pool.as_ref(),
-                                writable,
-                            );
-                        }
-                        // **一行都没有时说清为什么空着**：表头照旧在（排序、全选都还点得着），
-                        // 空态那一句摆在表头底下（照稿 `.empty` 是表里的一行）。
-                        if self.window.total() == 0 && self.window.error().is_none() {
-                            self.empty_state(ui);
-                        }
-                        if let Some(row) = opened {
-                            self.open_work(&site.catalog, &row.anchor);
-                        }
-                    });
+                // 「列表」那一条、表头、表身一块接一块，中间不留缝（设计稿 `.tpane`）。
+                ui.spacing_mut().item_spacing.y = 0.0;
+                if self.sample {
+                    self.font_sample(ui);
+                    ui.separator();
+                }
+                self.list_bar(ui);
+                let opened = match self.view {
+                    BrowseView::Table => Table {
+                        catalog: &site.catalog,
+                        window: &mut self.window,
+                        query: &mut self.query,
+                        focused: &mut self.focused,
+                        picked: &mut self.picked,
+                        scroll_to: self.scroll_to,
+                        rules: &self.rules,
+                        shelf: if self.list_covers {
+                            Some(&mut self.shelf)
+                        } else {
+                            None
+                        },
+                    }
+                    .show(ui),
+                    BrowseView::Cards => {
+                        self.card_grid(ui, &site.catalog)
+                            .map(|row| crate::table::Opened {
+                                row,
+                                index: 0,
+                                page: false,
+                            })
+                    }
+                };
+                // **画完表才问封面**：这一帧画到了哪几行，表画完才知道。
+                if self.list_covers || self.view == BrowseView::Cards {
+                    self.shelf
+                        .sync(ui.ctx(), &mut site.catalog, self.pool.as_ref(), writable);
+                }
+                // **一行都没有时说清为什么空着**：表头照旧在（排序、全选都还点得着），
+                // 空态那一句摆在表头底下（照稿 `.empty` 是表里的一行）。
+                if self.window.total() == 0 && self.window.error().is_none() {
+                    self.empty_state(ui);
+                }
+                if let Some(opened) = opened {
+                    self.open_work(&site.catalog, &opened.row.anchor);
+                    // **双击的打开作品详情页**，停在概览（设计稿双击一行 → 概览）。
+                    if opened.page {
+                        self.open_page(work::Tab::Overview);
+                    }
+                }
             });
+    }
+
+    /// 上一次动作的回执照稿浮在窗口底边那条**提示条**上（[`crate::toast`]）：三栏与作品详情页都走这一处。
+    /// 回执换了一句就换一条提示条；停够了收起，那句回执也跟着收掉（[`Self::notice`] 回到 `None`）。
+    fn notice_toast(&mut self, ctx: &egui::Context) {
+        let Some(说的) = self.notice.as_deref() else {
+            self.toast = None;
+            return;
+        };
+        if self.toast.as_ref().is_none_or(|toast| toast.text() != 说的) {
+            self.toast = Some(Toast::new(说的));
+        }
+        if let Some(toast) = self.toast.as_mut()
+            && toast.show(ctx) == toast::Shown::Expired
+        {
+            self.toast = None;
+            self.notice = None;
+        }
     }
 
     /// **主列表一行都没有时**正中那一栏摆什么（票 `gui-looks-like-the-design/09`）。
@@ -1924,8 +2090,8 @@ impl Screen {
         });
     }
 
-    /// 表格上方「**列表**」那一条（设计稿 `#lbar` 的 `.cbar`）：次级底色、底下一条分隔线，
-    /// 摆一颗「在每行开头显示封面」和一句帮助；右端是「N 个作品（共 M）」那一句（[`Self::count_line`]）。
+    /// 主列表上方的工具条（设计稿 `#lbar` 的 `.cbar`）：次级底色、底下一条分隔线；右端是
+    /// 「N 个作品（共 M）」那一句（[`Self::count_line`]）。
     ///
     /// 稿上那一句在再上面一条 `.tbar` 里，与视图切换、几颗批量按钮做邻居：批量按钮挪进了屏头右侧，
     /// 视图切换归票 `10`，那一条只剩这一句，于是摆进这一条的右端，不另起一条。
@@ -1934,6 +2100,8 @@ impl Screen {
         let [上下, 左右] = tokens.space.list_bar_padding;
         let 线 = ui.visuals().widgets.noninteractive.bg_stroke;
         let 这一句 = self.count_line(ui);
+        let 有封面 = self.cover_window.total();
+        let 作品总数 = self.window.total();
         let 这一条 = egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
             .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
@@ -1941,31 +2109,359 @@ impl Screen {
                 ui.set_width(ui.available_width());
                 ui.spacing_mut().item_spacing =
                     egui::vec2(tokens.space.list_bar_gap, look::step(0));
-                ui.horizontal_wrapped(|ui| {
-                    look::section(ui, "列表");
-                    ui.checkbox(
-                        &mut self.list_covers,
-                        egui::RichText::new("在每行开头显示封面")
-                            .size(look::font_size(ui.ctx(), tokens.font.size_small_plus)),
+                ui.vertical(|ui| {
+                    // 第一层只回答“看什么、共有多少”，让视图切换与集合规模一眼成组。
+                    // 左端视图切换、右端计数与「清除选择」，交给 [`egui::Sides`] 各排各的。
+                    //
+                    // 自己算位置的两种写法都塌过：拿剩余宽度把计数推到右端、按钮跟在它后面时，按钮被挤出
+                    // 行外——字还画着、点下去没反应（票 `gui-looks-like-the-design/15` 那条「清除选择一按就清」
+                    // 因此红）；改成在从左往右的行里嵌一个从右往左的子块，那个子块吃掉全部剩余宽度，把这一条
+                    // 的需求宽度撑大、连带挤窄了表格主栏，认不出作品那一行的副行就画不下了。
+                    egui::Sides::new().show(
+                        ui,
+                        |ui| {
+                            if ui
+                                .selectable_label(self.view == BrowseView::Table, "表格")
+                                .clicked()
+                            {
+                                self.view = BrowseView::Table;
+                            }
+                            if ui
+                                .selectable_label(self.view == BrowseView::Cards, "卡片")
+                                .clicked()
+                            {
+                                self.view = BrowseView::Cards;
+                            }
+                        },
+                        |ui| {
+                            if self.picked.count(self.window.total()) > 0
+                                && look::small_buttons(ui, |ui| {
+                                    ui.scope(|ui| {
+                                        look::ghost_button(ui.visuals_mut());
+                                        ui.button(CLEAR_PICK)
+                                    })
+                                    .inner
+                                    .clicked()
+                                })
+                            {
+                                self.picked.clear();
+                            }
+                            ui.label(这一句.clone());
+                        },
                     );
-                    // 稿上这句后半截是「双击一行打开作品详情」：作品详情页还没有，先不说。
-                    look::help(ui, "没有封面的作品显示平台色块");
+                    ui.add_space(look::step(1));
+                    // 第二层才是当前呈现方式的控制。卡片不会再和视图、计数争一行。
+                    ui.horizontal_wrapped(|ui| {
+                        if self.view == BrowseView::Table {
+                            ui.checkbox(
+                                &mut self.list_covers,
+                                egui::RichText::new("在每行开头显示封面")
+                                    .size(look::font_size(ui.ctx(), tokens.font.size_small_plus)),
+                            );
+                            look::help(ui, "双击一行打开作品详情");
+                            if let Some(说的) = &self.error {
+                                ui.colored_label(ui.visuals().error_fg_color, 说的);
+                            }
+                        } else {
+                            look::section(ui, "分组");
+                            if ui.selectable_label(!self.group_cards, "不分组").clicked() {
+                                self.group_cards = false;
+                                self.card_group_header = None;
+                            }
+                            if ui.selectable_label(self.group_cards, "按平台").clicked() {
+                                self.group_cards = true;
+                                self.card_group_header = None;
+                                // 分组的次序由中立库排序，不能只把当前页的卡片在界面里重排。
+                                self.query.order = WorkOrder::Platform;
+                            }
+                            look::section(ui, "排序");
+                            let mut card_order = None;
+                            egui::ComboBox::from_id_salt("卡片排序")
+                                // 平台分组本身就是主排序；组内没有额外字段时，界面上叫「默认」。
+                                .selected_text(if self.group_cards {
+                                    "默认"
+                                } else {
+                                    card_order_label(self.query.order)
+                                })
+                                .show_ui(ui, |ui| {
+                                    for order in WorkOrder::ALL {
+                                        let selected = if self.group_cards {
+                                            order == WorkOrder::Name
+                                        } else {
+                                            self.query.order == order
+                                        };
+                                        if ui
+                                            .selectable_label(selected, card_order_label(order))
+                                            .clicked()
+                                        {
+                                            card_order = Some(order);
+                                        }
+                                    }
+                                });
+                            if let Some(order) = card_order {
+                                if self.group_cards && order == WorkOrder::Name {
+                                    // 「默认」保留按平台的组序，组内则由中立库的稳定次序决定。
+                                } else {
+                                    self.group_cards = false;
+                                    self.card_group_header = None;
+                                    self.query.order = order;
+                                }
+                            }
+                            look::section(ui, "大小");
+                            for (size, label) in [
+                                (CardSize::Small, "小"),
+                                (CardSize::Medium, "中"),
+                                (CardSize::Large, "大"),
+                            ] {
+                                if ui.selectable_label(self.card_size == size, label).clicked() {
+                                    self.card_size = size;
+                                }
+                            }
+                            ui.checkbox(&mut self.only_covers, "只显示有封面的");
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.weak(format!(
+                                    "有封面 {} / {}",
+                                    thousands(有封面),
+                                    thousands(作品总数)
+                                ));
+                            });
+                        }
+                    });
                     if let Some(说的) = self.shelf.error() {
                         ui.colored_label(ui.visuals().error_fg_color, 说的);
                     }
-                    // 右端那一句：先量出它多宽、空出这一行剩下那一截再摆；摆不下就折到下一行的行首。
-                    let 宽 = 这一句.size().x;
-                    let 剩 = ui.available_size_before_wrap().x;
-                    if 宽 < 剩 {
-                        ui.add_space((剩 - 宽).floor());
-                    }
-                    ui.label(这一句);
                 });
             })
             .response
             .rect;
         ui.painter()
             .hline(这一条.x_range(), 这一条.bottom() - 线.width / 2.0, 线);
+    }
+
+    /// 卡片墙走自己的分页窗：仅封面开关不影响主列表；封面与无封面字卡都复用 [`Shelf`]。
+    fn card_grid(
+        &mut self,
+        ui: &mut egui::Ui,
+        catalog: &Catalog,
+    ) -> Option<romcat_core::catalog::browse::WorkRow> {
+        // 设计稿 `.cgrid`：横向 16、纵向 20；不能借全局控件间距，否则卡片墙会挤成表格。
+        const CARD_GAP_X: f32 = 16.0;
+        const CARD_GAP_Y: f32 = 20.0;
+        let min_width = self.card_size.width();
+        // 左右留白属于可滚动内容；滚动条本身必须贴着中栏右边界，不能被留白再往里推。
+        let grid_width = (ui.available_width() - 32.0).max(min_width);
+        let columns = ((grid_width + CARD_GAP_X) / (min_width + CARD_GAP_X))
+            .floor()
+            .max(1.0) as u64;
+        // 与设计稿 `repeat(auto-fill, minmax(--cw, 1fr))` 同义：档位是最小宽度，余宽由
+        // 当前行的所有卡均分。否则第三张卡后会留下比右侧留白大得多的一块空区。
+        let width = (grid_width - CARD_GAP_X * (columns - 1) as f32) / columns as f32;
+        let cover = egui::vec2(width, width / Tokens::builtin().layout.card_cover_ratio);
+        let card_height = cover.y + Tokens::builtin().layout.card_info_height;
+        let card_row_height = card_height + CARD_GAP_Y;
+        let card_rows = self.card_window.total().div_ceil(columns) as usize;
+        let mut opened = None;
+        // `.cgrid` 的上内边距：即使不显示组头，工具条与第一排卡也不能贴在一起。
+        ui.add_space(14.0);
+        if self.group_cards {
+            let header = self.card_group_header.clone().or_else(|| {
+                self.card_window.row(catalog, 0).map(|row| {
+                    let platform = row
+                        .platforms
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "未知".into());
+                    let count = self
+                        .facets
+                        .platforms
+                        .iter()
+                        .find(|facet| facet.value == platform)
+                        .map(|facet| facet.count)
+                        .unwrap_or(row.variants);
+                    (platform, count)
+                })
+            });
+            if let Some((platform, count)) = header {
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    let (dot, _) =
+                        ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                    ui.painter().rect_filled(
+                        dot,
+                        Tokens::builtin().radius.small,
+                        Tokens::builtin().color.platform.of(&platform),
+                    );
+                    ui.label(font::strong(&platform));
+                    ui.weak(format!("{} 个作品", thousands(count)));
+                });
+                let separator_y = ui.cursor().top();
+                ui.painter().hline(
+                    (ui.min_rect().left() + 16.0)..=(ui.max_rect().right() - 16.0),
+                    separator_y,
+                    ui.visuals().widgets.noninteractive.bg_stroke,
+                );
+                ui.add_space(look::step(1));
+            }
+        }
+        // `ScrollArea` 默认按内容收缩；卡片恰好排满三列时会把滚动轨留在第三张卡旁边，
+        // 看起来像中栏右侧凭空多了一片空白。两轴都禁止收缩，轨道才会贴到详情栏分隔线。
+        egui::ScrollArea::vertical()
+            .id_salt("卡片墙")
+            .auto_shrink([false, false])
+            .show_rows(ui, card_row_height, card_rows, |ui, visible| {
+                if self.group_cards {
+                    let first = visible.start as u64 * columns;
+                    if let Some(row) = self.card_window.row(catalog, first) {
+                        let platform = row
+                            .platforms
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| "未知".into());
+                        let count = self
+                            .facets
+                            .platforms
+                            .iter()
+                            .find(|facet| facet.value == platform)
+                            .map(|facet| facet.count)
+                            .unwrap_or(row.variants);
+                        let header = (platform, count);
+                        if self.card_group_header.as_ref() != Some(&header) {
+                            self.card_group_header = Some(header);
+                            ui.ctx().request_repaint();
+                        }
+                    }
+                }
+                for card_row in visible {
+                    ui.horizontal(|ui| {
+                        ui.add_space(16.0);
+                        ui.spacing_mut().item_spacing.x = CARD_GAP_X;
+                        for column in 0..columns {
+                            let index = card_row as u64 * columns + column;
+                            let Some(row) = self.card_window.row(catalog, index).cloned() else {
+                                break;
+                            };
+                            let title = row
+                                .display
+                                .clone()
+                                .or_else(|| row.title(&self.rules))
+                                .unwrap_or_else(|| row.name.clone());
+                            let (rect, response) = ui.allocate_exact_size(
+                                egui::vec2(
+                                    width,
+                                    cover.y + Tokens::builtin().layout.card_info_height,
+                                ),
+                                egui::Sense::click(),
+                            );
+                            // 这不是一块只能点鼠标的画布。把整张卡申报为按钮，egui 才会
+                            // 把它放进 Tab 顺序，也让辅助技术能读出它是什么作品。
+                            response.widget_info(|| {
+                                egui::WidgetInfo::selected(
+                                    egui::WidgetType::Button,
+                                    true,
+                                    self.picked.contains(&row.anchor),
+                                    &title,
+                                )
+                            });
+                            let mut card = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(rect)
+                                    .layout(Layout::top_down(Align::Min)),
+                            );
+                            let cover_radius = if self.shelf.has_cover(&row) == Some(true) {
+                                Tokens::builtin().radius.medium
+                            } else {
+                                Tokens::builtin().radius.large
+                            };
+                            self.shelf.card(&mut card, cover, &row, &title);
+                            let chosen = self.picked.contains(&row.anchor);
+                            paint_card_overlay(
+                                &card,
+                                rect,
+                                cover,
+                                cover_radius,
+                                &row,
+                                chosen,
+                                response.has_focus(),
+                            );
+                            card.add_space(look::step(2));
+                            // 卡面里可以有标题，卡面外仍要有稳定的文字区：滚动时才不会只剩
+                            // 一大片色块，也让有封面与无封面卡的扫描节奏一致。
+                            card.add(egui::Label::new(font::strong(&title)).truncate());
+                            card.weak(format!(
+                                "{} · {} 个变体 · {}",
+                                row.year.as_deref().unwrap_or("年份未知"),
+                                thousands(row.variants),
+                                human_bytes(row.bytes)
+                            ));
+                            card.horizontal(|ui| {
+                                ui.colored_label(
+                                    look::tier_color(row.tier(), ui.visuals()),
+                                    row.confidence_label(),
+                                );
+                            });
+                            // 未选卡只在鼠标靠近时露出选择框；已选卡必须常驻勾选，不能让人移开
+                            // 鼠标就看不出哪些卡被选中了。
+                            let mut 点了选择 = false;
+                            if response.hovered() || chosen {
+                                let check_rect = egui::Rect::from_min_size(
+                                    rect.min + egui::vec2(8.0, 8.0),
+                                    egui::vec2(22.0, 22.0),
+                                );
+                                let check_fill = if chosen {
+                                    ui.visuals().selection.bg_fill
+                                } else {
+                                    ui.visuals().window_fill.gamma_multiply(0.75)
+                                };
+                                ui.painter().rect_filled(
+                                    check_rect,
+                                    Tokens::builtin().radius.small,
+                                    check_fill,
+                                );
+                                ui.painter().rect_stroke(
+                                    check_rect,
+                                    Tokens::builtin().radius.small,
+                                    ui.visuals().widgets.active.bg_stroke,
+                                    egui::StrokeKind::Inside,
+                                );
+                                if chosen {
+                                    ui.painter().text(
+                                        check_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "✓",
+                                        egui::FontId::proportional(16.0),
+                                        ui.visuals().strong_text_color(),
+                                    );
+                                }
+                                // 选择框压在整卡点击区里；egui 只会把那一下归给先注册的整卡。
+                                // 因此按整卡响应给出的命中坐标二次判定，而不是再注册一个竞争响应。
+                                if response.clicked()
+                                    && response
+                                        .interact_pointer_pos()
+                                        .is_some_and(|pos| check_rect.contains(pos))
+                                {
+                                    self.picked.toggle(&row.anchor);
+                                    点了选择 = true;
+                                }
+                            }
+                            if response.clicked() && !点了选择 {
+                                response.request_focus();
+                                opened = Some(row.clone());
+                            }
+                            if response.has_focus()
+                                && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                            {
+                                opened = Some(row.clone());
+                            }
+                            if response.has_focus()
+                                && ui.input(|input| input.key_pressed(egui::Key::Space))
+                            {
+                                self.picked.toggle(&row.anchor);
+                            }
+                        }
+                    });
+                }
+            });
+        opened
     }
 
     /// 左边那栏，照稿 `.fpane` 从上到下：标题行（「清除」与收起）、搜索框、平台、中文、识别结论、
@@ -2503,11 +2999,6 @@ impl Screen {
         }
     }
 
-    /// 右边那块面板：**作品 → 变体 → 文件**。
-    ///
-    /// **这一份不复制一遍再画**：一行底下可以挂着上百个变体、每个又带着几条候选，
-    /// 每帧克隆一次就是每帧几百次分配。所以画的时候只借（`as_ref`），点中哪个变体
-    /// 攒在 `pick` 里，出了这个闭包再去改自己。
     /// **每帧一次**：跟后台那条解码线程对一次账——跑完的图收进来、这一屏缺的排出去，
     /// 顺带把刚抽出来的首帧记进中立库（票 `gui-redesign/07`）。
     ///
@@ -2523,14 +3014,21 @@ impl Screen {
         // 两张表里一行都没有，下次打开照样重抽。
         //
         // 抄一份：问后台那一下要动 `self.gallery`，而 `items` 是从 `self.detail` 借的。
-        let items = self
-            .detail
-            .as_ref()
-            .map(|detail| detail.media_items.clone())
-            .unwrap_or_default();
+        // **作品详情页开着时解那一页列出来的那几份**（每个变体的都在里头）；平常解侧边详情选中那个变体的。
+        let items = self.page_media_items().unwrap_or_else(|| {
+            self.detail
+                .as_ref()
+                .map(|detail| detail.media_items.clone())
+                .unwrap_or_default()
+        });
         self.gallery.sync(ctx, &mut site.catalog, &items, writable);
     }
 
+    /// 右边那块面板：**作品 → 变体 → 判定依据 → 媒体 → 合集**；改选择那一趟里，选中那张变体卡底下多一块例外。
+    ///
+    /// **这一份不复制一遍再画**：一行底下可以挂着上百个变体、每个又带着几条候选，
+    /// 每帧克隆一次就是每帧几百次分配。所以画的时候只借（`as_ref`），点中哪个变体、按了哪颗例外
+    /// 攒在外头，出了这个闭包再去改自己。
     fn detail_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
         // 标题行：这一栏叫什么，右头那颗「收起」。点没点开一行都在。
         ui.horizontal(|ui| {
@@ -2547,17 +3045,37 @@ impl Screen {
         let mut pick: Option<String> = None;
         // 点了哪一格图。
         let mut open: Option<crate::media::Clicked> = None;
+        // 点了「查看详情」或「编辑元数据」：要打开作品详情页的哪一面、进不进编辑态。
+        let mut 去详情页: Option<(work::Tab, bool)> = None;
+        // **改选择那一趟里例外摆在选中那张变体卡底下**（拿主意的人 2026-09-15 定）：备注框要改得动，
+        // 先抄一份出来画，画完有改动再写回去。平常浏览时一样都不摆，也不留空位。
+        let mut 备注 = self.editing.as_ref().map(|editing| editing.note.clone());
+        let mut 例外: Option<Option<Exception>> = None;
         let this = &*self;
         let Some(work) = this.work.as_ref() else {
             return;
         };
         // **照稿的次序**（票 `gui-looks-like-the-design/09`）：头上那一块（封面或字卡、它是什么、
-        // 叫什么、哪个平台哪一年、几个变体）→ 变体 → 判定依据 → 媒体；合集与文件垫在后头，
-        // 作品详情页那一票接走之前它们照旧在这儿看得到。
+        // 叫什么、哪个平台哪一年、几个变体）→ 变体 → 判定依据 → 媒体；合集垫在后头，合集那一票接走之前
+        // 它照旧在这儿看得到。文件表归作品详情页「变体与文件」那一面（票 `gui-looks-like-the-design/15`）。
         egui::ScrollArea::vertical()
             .id_salt("作品详情")
             .show(ui, |ui| {
                 this.detail_head(ui, work);
+
+                // 头上那一块底下一排两颗小号按钮（设计稿 `.dhead` 后头那一排）：打开作品详情页，停在概览或元数据那一面。
+                pane_gap(ui);
+                去详情页 = page_buttons(ui);
+                // 认不出作品的那一行：名字是怎么来的——没有作品链接**本身就是一条信息**（照稿摆在两颗按钮底下）。
+                if matches!(work.anchor, WorkAnchor::Loose(_)) {
+                    pane_gap(ui);
+                    look::note_box(ui, |ui| {
+                        ui.label(
+                            "这个名字是从文件名剥出来的正题（剥掉了汉化组、版本号这类记号）：\
+                             识别还没认出它属于哪个作品，所以这一行就是它自己。",
+                        );
+                    });
+                }
 
                 pane_gap(ui);
                 section_title(
@@ -2575,6 +3093,16 @@ impl Screen {
                     if this.variant_card(ui, variant, preferred, 简称) {
                         pick = Some(variant.row.key.clone());
                     }
+                    let 选中的 = this.variant.as_deref() == Some(variant.row.key.as_str());
+                    if let (true, Some(editing), Some(备注)) =
+                        (选中的, &this.editing, 备注.as_mut())
+                    {
+                        section_gap(ui);
+                        if let Some(按了) = exception_block(ui, editing, &variant.row.key, 备注)
+                        {
+                            例外 = Some(按了);
+                        }
+                    }
                 }
 
                 pane_gap(ui);
@@ -2583,52 +3111,57 @@ impl Screen {
                 open = this.media_ui(ui);
                 pane_gap(ui);
                 this.collections_ui(ui);
-                pane_gap(ui);
-                this.files_ui(ui);
             });
+        if let (Some(editing), Some(备注)) = (self.editing.as_mut(), 备注) {
+            editing.note = 备注;
+        }
+        if let (Some(按了), Some(key)) = (例外, self.variant.clone()) {
+            match 按了 {
+                Some(kind) => self.set_exception(site, &key, kind),
+                None => self.clear_exception(site, &key),
+            }
+        }
         if let Some(key) = pick {
             self.pick(&site.catalog, &key);
         }
-        match open {
-            None => {}
-            // **窗口里一个字节都不解码**：播放与看原图都交给系统默认程序
-            // （规格的 Out of Scope）。调不起来时如实说一句，不崩。
-            Some(crate::media::Clicked::Open(at)) => {
-                match romcat_core::scrape::preview::open_externally(&at) {
-                    Ok(()) => {
-                        self.notice = Some(format!(
-                            "交给系统默认程序打开：{}",
-                            romcat_core::path::display(&at),
-                        ));
-                    }
-                    Err(说的) => self.error = Some(说的),
-                }
+        if let Some((tab, 编辑)) = 去详情页 {
+            self.open_page(tab);
+            if 编辑 {
+                self.begin_meta_edit();
             }
-            // 点了、可这一格指不出文件。**说一句为什么**，别让人以为界面坏了。
-            Some(crate::media::Clicked::Nothing(为什么)) => self.notice = Some(为什么),
+        }
+        // **窗口里一个字节都不解码**：播放与看原图都交给系统默认程序，与作品详情页同一条路（`open_media`）。
+        if let Some(clicked) = open {
+            self.open_media(clicked);
         }
     }
 
-    /// 侧边详情**头上那一块**（设计稿 `.dhead`）：左边封面或字卡（令牌 `detail-cover-width` 那么宽、
-    /// 高按 `card-cover-ratio` 折），右边它是什么（作品 / 未关联作品的变体）、叫什么、哪个平台哪一年、
-    /// 底下几个变体。
-    ///
-    /// 认不出作品的那一行**标题是正题**（`WorkDetail::title`，与表上那一行主栏同一处剥），
-    /// 底下再用一块提示框说这个名字是怎么来的——没有作品链接**本身就是一条信息**。
-    fn detail_head(&self, ui: &mut egui::Ui, work: &WorkDetail) {
-        let tokens = Tokens::builtin();
-        let loose = matches!(work.anchor, WorkAnchor::Loose(_));
-        // 认出作品的：**显示标题**（选中那个变体的详情里挑好的，与表上那一行主栏同一处 `title::choose`）；
-        // 取不到时作品名。
-        let title = work
-            .title(&self.rules)
+    /// 点开那一行**屏上叫什么**：认不出作品的是正题（`WorkDetail::title`，与表上那一行主栏同一处剥），认出的是
+    /// 选中那个变体的详情里挑好的**显示标题**（与表上那一行主栏同一处 `title::choose`），取不到时作品名。
+    /// 侧边详情头上与作品详情页顶上印的是同一个。
+    fn work_title(&self, work: &WorkDetail) -> String {
+        work.title(&self.rules)
             .or_else(|| {
                 self.detail
                     .as_ref()
                     .and_then(|detail| detail.display.as_ref())
                     .map(|chosen| chosen.display.clone())
             })
-            .unwrap_or_else(|| work.name.clone());
+            .unwrap_or_else(|| work.name.clone())
+    }
+
+    /// 侧边详情**头上那一块**（设计稿 `.dhead`）：左边封面或字卡（令牌 `detail-cover-width` 那么宽、
+    /// 高按 `card-cover-ratio` 折），右边它是什么（作品 / 未关联作品的变体）、叫什么、哪个平台哪一年、
+    /// 底下几个变体。
+    ///
+    /// 认不出作品的那一行**标题是正题**（`WorkDetail::title`，与表上那一行主栏同一处剥）；说这个名字是怎么来的
+    /// 那块提示框摆在这一块底下两颗按钮之后（`Self::detail_panel`，照稿的次序）。
+    fn detail_head(&self, ui: &mut egui::Ui, work: &WorkDetail) {
+        let tokens = Tokens::builtin();
+        let loose = matches!(work.anchor, WorkAnchor::Loose(_));
+        // 认出作品的：**显示标题**（选中那个变体的详情里挑好的，与表上那一行主栏同一处 `title::choose`）；
+        // 取不到时作品名。
+        let title = self.work_title(work);
         let platform = work.platforms.first().map_or("", String::as_str);
         let 宽 = tokens.layout.detail_cover_width;
         let size = egui::vec2(宽, 宽 / tokens.layout.card_cover_ratio);
@@ -2679,15 +3212,6 @@ impl Screen {
                 ui.weak(format!("{} 个变体", work.variants.len()));
             });
         });
-        if loose {
-            pane_gap(ui);
-            look::note_box(ui, |ui| {
-                ui.label(
-                    "这个名字是从文件名剥出来的正题（剥掉了汉化组、版本号这类记号）：\
-                     识别还没认出它属于哪个作品，所以这一行就是它自己。",
-                );
-            });
-        }
     }
 
     /// **判定依据**：选中那个变体凭什么落在这一档——识别结论、没定下来的理由、每条候选与它的依据。
@@ -2882,30 +3406,6 @@ impl Screen {
         }
     }
 
-    /// 详情面板第三层：选中那个变体的**全部文件**，含附属文件与内部资源。
-    fn files_ui(&self, ui: &mut egui::Ui) {
-        let Some(detail) = &self.detail else {
-            ui.weak("选一个变体，看它有哪些文件。");
-            return;
-        };
-        section_title(ui, &format!("文件 · {} 个", detail.members.len()), None);
-        section_gap(ui);
-        // 键从左边截到画得下、整条挂在悬停里：与变体那一行同一个办法（[`Self::variant_card`]）。
-        let body = egui::TextStyle::Body.resolve(ui.style());
-        for (key, role) in detail.members.iter().take(TOP_MEMBERS) {
-            let head = format!("{}  ", role.code());
-            let room = ui.available_width() - text_width(ui, &head, &body);
-            ui.label(format!("{head}{}", tail_fit(ui, key, &body, room.max(0.0))))
-                .on_hover_text(key);
-        }
-        if detail.members.len() > TOP_MEMBERS {
-            ui.weak(format!(
-                "……另有 {} 个没列",
-                detail.members.len() - TOP_MEMBERS
-            ));
-        }
-    }
-
     /// 详情面板的**媒体**那一块：几格缩略图，底下那份逐条清单收在折叠里。
     ///
     /// **图直接画出来**（票 `gui-redesign/07`）：jpg 与 png 内嵌显示，视频是一张抽出来的
@@ -3016,385 +3516,6 @@ impl Screen {
         open
     }
 
-    /// 底下那块面板：**改**选中那个变体的元数据。这一栏里的每一个文本框都会碰到输入法。
-    fn edit_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
-        ui.add_space(4.0);
-        if let Some(error) = &self.error {
-            ui.colored_label(ui.visuals().error_fg_color, error);
-        }
-        if let Some(notice) = &self.notice {
-            ui.colored_label(ui.visuals().warn_fg_color, notice);
-        }
-        // **撤掉一条压制之后那一句，连它旁边就地的下一步**（票 `gui-self-sufficient/09`）。
-        // 画的时候不改自己：按下去的那一下先记下来，画完再动。
-        let mut 要折 = false;
-        if let Some(说的) = &self.lift_notice {
-            ui.horizontal_wrapped(|ui| {
-                ui.colored_label(ui.visuals().warn_fg_color, 说的);
-                要折 = ui
-                    .button("整理标题")
-                    .on_hover_text(
-                        "排到任务台上跑，期间照常用别的屏；按得停。\
-                         与库屏上「整理标题」那一行是同一趟——跑完这一屏的显示标题跟着更新。",
-                    )
-                    .clicked();
-            });
-        }
-        if 要折 {
-            self.ask_fold_titles();
-        }
-        // **搜索框搬到了左栏顶上**（票 `gui-looks-like-the-design/09`，照稿 `.fpane`）：那一栏同样
-        // 不虚拟化，正在组字的那一框不会凭空消失（ADR-0005）。这儿只留「选中了多少」那一句。
-        ui.horizontal_wrapped(|ui| {
-            ui.label(format!(
-                "选中 {} 条，作用于 {} 个变体",
-                thousands(self.picked.count(self.window.total())),
-                scope_label(self.scope),
-            ))
-            .on_hover_text(
-                "选中主列表的行 ＝ 选中这些作品，批量操作作用于它们的变体。\
-                 刮削、存成子库、加收藏按下去动的就是这一批。",
-            );
-            if look::small_buttons(ui, |ui| ui.button("全不选").clicked()) {
-                self.picked.clear();
-            }
-        });
-        ui.separator();
-        if self.detail.is_none() {
-            ui.weak("在右边选一个变体，改它的元数据。改动只作用于那一个变体。");
-            return;
-        }
-        let available = ui.available_width();
-        ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2((available * 0.42).max(240.0), ui.available_height()),
-                Layout::top_down(Align::Min),
-                |ui| self.facts_column(ui),
-            );
-            ui.separator();
-            ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), ui.available_height()),
-                Layout::top_down(Align::Min),
-                |ui| self.edit_column(ui, site),
-            );
-        });
-    }
-
-    /// 左半：选中那个变体是什么。识别结论、作品、发行版、合集。
-    fn facts_column(&mut self, ui: &mut egui::Ui) {
-        let Some(detail) = &self.detail else {
-            return;
-        };
-        egui::ScrollArea::vertical()
-            .id_salt("变体详情")
-            .show(ui, |ui| {
-                ui.label(font::strong(&detail.row.key));
-                ui.label(format!(
-                    "平台 {}｜成型规则 {}｜{} 个文件｜{}",
-                    detail.row.platform.as_deref().unwrap_or("未知"),
-                    detail.row.rule,
-                    detail.row.files,
-                    capacity(detail.row.bytes, detail.row.unreadable_files),
-                ));
-                ui.label(match detail.state {
-                    Some(state) => format!("识别结论：{}", state.label()),
-                    // 那四个字走常量而不是抄一遍（词表**还没识别**条）。
-                    None => format!("识别结论：{NOT_RUN_LABEL}"),
-                });
-                if let Some(reason) = &detail.reason {
-                    ui.label(format!("为什么没定下来：{reason}"));
-                }
-                ui.label(format!(
-                    "作品：{}",
-                    detail.work.as_deref().unwrap_or("还没认出来"),
-                ));
-                match &detail.release {
-                    Some(release) => ui.label(format!(
-                        "发行版：地区 {}｜序列号 {}｜语言 {}",
-                        release.region.as_deref().unwrap_or("—"),
-                        release.serial.as_deref().unwrap_or("—"),
-                        if detail.languages.is_empty() {
-                            "—".to_string()
-                        } else {
-                            detail.languages.join(", ")
-                        },
-                    )),
-                    // 没有发行版链接**本身就是一条信息**：同人移植与 homebrew 直接挂在
-                    // 作品下，识别管线不拿它们去撞 DAT（`CONTEXT.md` 的「变体」词条）。
-                    None => ui.label("发行版：没有链接——同人移植与 homebrew 就是这样"),
-                };
-                ui.label(format!(
-                    "合集：{}",
-                    if detail.collections.is_empty() {
-                        "—".to_string()
-                    } else {
-                        detail.collections.join("、")
-                    },
-                ));
-            });
-    }
-
-    /// 右半：**改**。标题集合、首选变体、刮削字段值。
-    fn edit_column(&mut self, ui: &mut egui::Ui, site: &mut Site) {
-        let Some(detail) = self.detail.clone() else {
-            return;
-        };
-        let mut dirty = false;
-        egui::ScrollArea::vertical()
-            .id_salt("元数据编辑")
-            .show(ui, |ui| {
-                // **例外只在「改选择」那一趟里露面**：它是子库的东西，不是变体的属性。
-                // 平常浏览时摆一个「排除掉」在这儿，人会问「排除出哪儿」。
-                if self.editing.is_some() {
-                    self.exception_ui(ui, site, &detail);
-                    ui.separator();
-                }
-                dirty |= self.titles_ui(ui, site, &detail);
-                ui.separator();
-                dirty |= self.preferred_ui(ui, site, &detail);
-                ui.separator();
-                dirty |= self.values_ui(ui, site, &detail);
-            });
-        if dirty {
-            self.load_detail(&site.catalog);
-        }
-    }
-
-    /// **例外**：把选中这个变体含进来，或者排除掉。
-    ///
-    /// **优先于规则、永久记住**（ADR-0016）：规则表达不了「这个我小时候玩过」
-    /// 「这个太占地方先不带」这类个人口味。落在**变体**这一层——那正是例外与规则的
-    /// 分工：规则说「要什么内容」，例外说「另外还要 / 偏不要这一份」。
-    ///
-    /// 它在**这一屏**而不在子库屏，因为「哪一份」只有在详情面板里才指得准：
-    /// 子库屏上人手里只有一串键。
-    fn exception_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, detail: &VariantDetail) {
-        let Some(editing) = &self.editing else {
-            return;
-        };
-        let name = editing.sublibrary.clone();
-        let key = detail.row.key.clone();
-        let current = editing.exceptions.get(&key).cloned();
-        ui.label(font::strong(format!("例外 · 子库「{name}」")));
-        match &current {
-            None => {
-                ui.weak("这个变体上还没有例外：进不进选择集，眼下由规则说了算。");
-            }
-            Some(row) => {
-                ui.colored_label(
-                    ui.visuals().warn_fg_color,
-                    format!(
-                        "眼下：{}{}",
-                        row.kind.label(),
-                        row.note
-                            .as_deref()
-                            .map(|note| format!("（{note}）"))
-                            .unwrap_or_default(),
-                    ),
-                );
-            }
-        }
-        if let Some(editing) = &mut self.editing {
-            ui.add(
-                egui::TextEdit::singleline(&mut editing.note)
-                    .desired_width(ui.available_size_before_wrap().x.min(240.0))
-                    .hint_text("为什么（半年后你会想知道）"),
-            );
-        }
-        ui.horizontal_wrapped(|ui| {
-            for kind in [Exception::Include, Exception::Exclude] {
-                let on = current.as_ref().is_some_and(|row| row.kind == kind);
-                if ui
-                    .add_enabled(!on, egui::Button::new(format!("{}它", kind.label())))
-                    .on_hover_text(match kind {
-                        Exception::Include => "规则没选中也带上它。",
-                        Exception::Exclude => "规则选中了也不带。容量超限时砍谁，落点就是这一条。",
-                    })
-                    .clicked()
-                {
-                    self.set_exception(site, &key, kind);
-                }
-            }
-            if ui
-                .add_enabled(current.is_some(), egui::Button::new("撤掉"))
-                .on_hover_text("撤掉之后这个变体进不进选择集重新由规则说了算。")
-                .clicked()
-            {
-                self.clear_exception(site, &key);
-            }
-        });
-    }
-
-    /// **标题集合**：全部叫法，加一条、删一条。
-    fn titles_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, detail: &VariantDetail) -> bool {
-        ui.label(font::strong("标题集合"));
-        let Some(work) = detail.work.clone() else {
-            ui.weak("这个变体还没认出属于哪个作品，标题集合无从谈起。");
-            return false;
-        };
-        if let Some(chosen) = &detail.display {
-            ui.label(format!(
-                "显示标题：{}（{}）｜排序标题：{}（来自{}）",
-                chosen.display,
-                chosen.language.label(),
-                chosen.sort,
-                chosen.sort_from.label(),
-            ));
-        }
-        let mut dirty = false;
-        let mut remove: Option<romcat_core::catalog::TitleRow> = None;
-        for row in detail.titles.iter().take(TOP_TITLES) {
-            // **一条叫法长了就在这一栏里折**：横排里的字默认不折，伸出去会把这一栏撑宽，后面几行跟着按
-            // 撑宽了的宽度折、摆——底下那颗「中文」下拉就伸到侧边详情底下去了（合进外壳之后第八趟截图）。
-            ui.horizontal_top(|ui| {
-                if ui
-                    .small_button("删")
-                    .on_hover_text(
-                        "从标题集合里去掉这一条叫法。刮削来的也删得掉——\
-                         删掉之后记一条压制，重新整理标题也不会把它加回来（底下「压掉的叫法」\
-                         那一栏列着，也撤得掉）。",
-                    )
-                    .clicked()
-                {
-                    remove = Some(row.clone());
-                }
-                let line = format!(
-                    "{}｜{} {}｜{}｜{} 个变体这么叫",
-                    row.value,
-                    row.language.label(),
-                    row.kind.label(),
-                    row.source,
-                    row.seen,
-                );
-                if row.is_verdict() {
-                    ui.add(egui::Label::new(font::strong(line)).wrap())
-                        .on_hover_text(&row.evidence);
-                } else {
-                    ui.add(egui::Label::new(line).wrap())
-                        .on_hover_text(&row.evidence);
-                }
-            });
-        }
-        if detail.titles.len() > TOP_TITLES {
-            ui.weak(format!(
-                "……另有 {} 条没列",
-                detail.titles.len() - TOP_TITLES
-            ));
-        }
-        if detail.titles.is_empty() {
-            // **「压掉了」与「没采到」是两件事**：前者是人自己做过的动作，后者是刮削
-            // 一条都没采到。合成一句「一条叫法都没有」，人会去重跑刮削，而问题其实
-            // 出在他上个月按过的那个「删」上。
-            if self.suppressed_of(&work).is_empty() {
-                ui.weak("一条叫法都没有——一条都没采到，显示标题会退回作品名。");
-            } else {
-                ui.weak(format!(
-                    "集合里一条叫法都没有：底下那 {} 条是你压掉的，不是没采到。\
-                     显示标题会退回作品名。",
-                    self.suppressed_of(&work).len(),
-                ));
-            }
-        }
-        dirty |= self.suppressed_ui(ui, site, &work);
-        if let Some(row) = remove {
-            self.suppress_title(site, &row);
-            dirty = true;
-        }
-
-        // **排不下就折行**：底下那块编辑面板只占正中那一栏，输入框、两个下拉、一颗按钮挤一行会伸出去。
-        ui.horizontal_wrapped(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.title_draft.value)
-                    .desired_width(ui.available_size_before_wrap().x.min(220.0))
-                    .hint_text("加一条叫法"),
-            );
-            let 下拉宽 = ui.spacing().combo_width;
-            wrap_unless_room(ui, 下拉宽);
-            egui::ComboBox::from_id_salt("叫法语言")
-                .selected_text(self.title_draft.language.label())
-                .show_ui(ui, |ui| {
-                    for language in Language::all() {
-                        ui.selectable_value(
-                            &mut self.title_draft.language,
-                            language,
-                            language.label(),
-                        );
-                    }
-                });
-            wrap_unless_room(ui, 下拉宽);
-            egui::ComboBox::from_id_salt("叫法类型")
-                .selected_text(self.title_draft.kind.label())
-                .show_ui(ui, |ui| {
-                    for kind in TitleKind::all() {
-                        ui.selectable_value(&mut self.title_draft.kind, kind, kind.label());
-                    }
-                });
-            let ready = !self.title_draft.value.trim().is_empty();
-            let 按钮宽 = look::button_width(ui, "加进集合");
-            wrap_unless_room(ui, 按钮宽);
-            if ui
-                .add_enabled(ready, egui::Button::new("加进集合"))
-                .on_hover_text("来源记作「裁决」：人改过的东西不许被任何数据源覆盖")
-                .clicked()
-            {
-                dirty |= self.write_title(site, &work, detail);
-            }
-        });
-        dirty
-    }
-
-    /// **压掉的叫法**：人删过、重折不许折回来的那几条，连一个「恢复」。
-    ///
-    /// 摆在标题集合底下而不是另开一屏：人是在这儿按的「删」，也该在这儿看得见自己按过
-    /// 什么。**它与「没采到」是两件事**——上面那句空集合的话按这一栏在不在分两种写法。
-    fn suppressed_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, work: &str) -> bool {
-        if self.suppressed_of(work).is_empty() {
-            return false;
-        }
-        ui.weak(format!(
-            "压掉的叫法 · {} 条——是你删的，重新整理标题也不会把它加回来。\
-             记在沉淀库里：中立库删掉重扫也不丢。",
-            self.suppressed_of(work).len(),
-        ));
-        let mut lift: Option<TitleSuppression> = None;
-        for one in self.suppressed_of(work).iter().take(TOP_TITLES) {
-            // 与标题集合那几行同一条道理：长了就在这一栏里折，不把这一栏撑宽。
-            ui.horizontal_top(|ui| {
-                if ui
-                    .small_button("恢复")
-                    .on_hover_text(
-                        "撤掉这条压制。下一趟整理标题之后它回到标题集合里\
-                         ——这一屏不当场整理，那要走遍全库。",
-                    )
-                    .clicked()
-                {
-                    lift = Some(one.clone());
-                }
-                ui.add(
-                    egui::Label::new(format!(
-                        "{}｜{} {}｜{}",
-                        one.value,
-                        one.language.label(),
-                        one.kind.label(),
-                        one.source,
-                    ))
-                    .wrap(),
-                );
-            });
-        }
-        if self.suppressed_of(work).len() > TOP_TITLES {
-            ui.weak(format!(
-                "……另有 {} 条压掉的没列",
-                self.suppressed_of(work).len() - TOP_TITLES
-            ));
-        }
-        if let Some(one) = lift {
-            self.lift_title(site, &one);
-            return true;
-        }
-        false
-    }
-
     /// 把草稿里那条叫法写进标题集合，**来源记作裁决**。写成了就返回 `true`。
     fn write_title(&mut self, site: &mut Site, work: &str, detail: &VariantDetail) -> bool {
         let value = self.title_draft.value.trim().to_string();
@@ -3420,7 +3541,7 @@ impl Screen {
         };
         match site.catalog.put_titles(&[row]) {
             Ok(()) => {
-                self.notice = Some(format!("「{value}」进了标题集合，来源是裁决。"));
+                self.notice = Some(format!("已添加名称「{value}」（记为裁决）"));
                 self.title_draft.value.clear();
                 true
             }
@@ -3429,201 +3550,6 @@ impl Screen {
                 false
             }
         }
-    }
-
-    /// **刮削来的字段值**：看得见，也改得动。
-    ///
-    /// 「所有元数据编辑收敛在这里完成」（ADR-0001 的修订段）说的不只是标题与首选变体
-    /// ——年份、发行商、开发商、类型、简介、汉化组这几样也会写进导出条目
-    /// （`adapter::converge`），主库的元数据文件既然不再是编辑入口，它们就得在这儿改。
-    fn values_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, detail: &VariantDetail) -> bool {
-        ui.label(font::strong("刮削来的元数据"));
-        ui.weak("同一个字段可以有好几条，各个源的值并存、不互相覆盖；裁决排在最前，导出用它。");
-        let mut dirty = false;
-        let mut clear: Option<(AnchorKind, Field)> = None;
-        for item in &detail.values {
-            ui.horizontal_top(|ui| {
-                if item.is_verdict() {
-                    if ui
-                        .small_button("撤")
-                        .on_hover_text("撤掉这条人工写的，让别的源重新说了算")
-                        .clicked()
-                        && let Some(field) = Field::all()
-                            .into_iter()
-                            .find(|field| field.label() == item.value.field)
-                    {
-                        clear = Some((item.anchor, field));
-                    }
-                } else {
-                    ui.add_space(24.0);
-                }
-                // **一行画得下的那一截**：简介能有 4,000 字，先收成一行（见 `one_line`）；收过的那一行
-                // 仍长过这一栏就在栏里折，不把这一栏撑宽（与标题集合那几行同一条道理）。
-                let short = one_line(&item.value.value);
-                let line = format!(
-                    "{} · {}｜{}｜{}",
-                    item.value.field,
-                    item.anchor.label(),
-                    item.value.source,
-                    short.as_deref().unwrap_or(&item.value.value),
-                );
-                let response = if item.is_verdict() {
-                    ui.add(egui::Label::new(font::strong(line)).wrap())
-                } else {
-                    ui.add(egui::Label::new(line).wrap())
-                };
-                if short.is_some() {
-                    // 收窄过的那些，整段挂在悬停里——**面板上画不下不等于看不到**。
-                    // 用 `on_hover_ui` 而不是拼一个大字符串：那个闭包只在真悬停时才跑。
-                    response.on_hover_ui(|ui| {
-                        // **限宽**。不限的话悬停框跟着最长那一行铺开——简介闸在 4,000 字
-                        // （票 `offline-chinese-fields/03`），一段没有换行的中文会把这个
-                        // 框拉成一条横穿屏幕的线，反倒比截断更看不清。
-                        ui.set_max_width(420.0);
-                        ui.label(&item.value.value);
-                        ui.separator();
-                        ui.label(&item.value.evidence);
-                    });
-                } else {
-                    response.on_hover_text(&item.value.evidence);
-                }
-            });
-        }
-        if detail.values.is_empty() {
-            // **不指向终端**（票 `gui-self-sufficient/09` 验收第 5 条）：刮削在界面上
-            // 早有自己的入口，那颗「刮削…」就在这一屏的屏头上。
-            ui.weak("一条刮削结论都没有。点屏头那颗「刮削…」采一趟，或者在这儿手写。");
-        }
-        // 作品未知时只挂得到变体那一层——**作品锚点是作品名**，没有名字就没有锚点。
-        let anchors: Vec<AnchorKind> = if detail.work.is_some() {
-            vec![AnchorKind::Work, AnchorKind::Variant]
-        } else {
-            vec![AnchorKind::Variant]
-        };
-        if !anchors.contains(&self.value_draft.anchor) {
-            self.value_draft.anchor = AnchorKind::Variant;
-        }
-        // 排不下就折行，同标题集合那一行。
-        ui.horizontal_wrapped(|ui| {
-            egui::ComboBox::from_id_salt("字段")
-                .selected_text(self.value_draft.field.label())
-                .show_ui(ui, |ui| {
-                    for field in Field::all() {
-                        ui.selectable_value(&mut self.value_draft.field, field, field.label());
-                    }
-                });
-            let 下拉宽 = ui.spacing().combo_width;
-            wrap_unless_room(ui, 下拉宽);
-            egui::ComboBox::from_id_salt("挂在哪一层")
-                .selected_text(self.value_draft.anchor.label())
-                .show_ui(ui, |ui| {
-                    for anchor in &anchors {
-                        ui.selectable_value(&mut self.value_draft.anchor, *anchor, anchor.label());
-                    }
-                });
-            wrap_unless_room(ui, 220.0);
-            ui.add(
-                egui::TextEdit::singleline(&mut self.value_draft.value)
-                    .desired_width(ui.available_size_before_wrap().x.min(220.0))
-                    .hint_text("写下这个字段的值"),
-            );
-            let subject = match self.value_draft.anchor {
-                AnchorKind::Work => detail.work.clone(),
-                AnchorKind::Variant => Some(detail.row.key.clone()),
-            };
-            let ready = !self.value_draft.value.trim().is_empty() && subject.is_some();
-            let 按钮宽 = look::button_width(ui, "写下");
-            wrap_unless_room(ui, 按钮宽);
-            if ui
-                .add_enabled(ready, egui::Button::new("写下"))
-                .on_hover_text("来源记作「裁决」：它排在每个字段的最前，导出真会用它")
-                .clicked()
-                && let Some(subject) = subject
-            {
-                self.put_value(site, &subject);
-                dirty = true;
-            }
-        });
-        if let Some((anchor, field)) = clear {
-            let subject = match anchor {
-                AnchorKind::Work => detail.work.clone(),
-                AnchorKind::Variant => Some(detail.row.key.clone()),
-            };
-            if let Some(subject) = subject {
-                self.clear_value(site, anchor, &subject, field);
-                dirty = true;
-            }
-        }
-        dirty
-    }
-
-    /// **首选变体**：这个作品在这个平台上默认启动哪一个。
-    fn preferred_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, detail: &VariantDetail) -> bool {
-        ui.label(font::strong("首选变体"));
-        let (Some(work), Some(platform)) = (detail.work.clone(), detail.row.platform.clone())
-        else {
-            ui.weak("作品或平台还没定下来，首选变体无从谈起。");
-            return false;
-        };
-        // ADR-0012 那条**必须写在人眼前**：改首选不会改中文标题的来源。
-        match detail.chinese_title() {
-            Some(row) => ui.label(format!(
-                "中文标题取的是「{}」（{}｜{}），与首选变体无关——\
-                 首选启动汉化版，中文名照旧取官中版的官方译名。",
-                row.value,
-                row.kind.label(),
-                row.source,
-            )),
-            None => ui.label(
-                "这个作品还没有中文叫法。首选变体改成汉化版也不会凭空生出一个中文名——\
-                 那两件事是分开的。",
-            ),
-        };
-        let mut dirty = false;
-        let mut clear = false;
-        let mut set: Option<String> = None;
-        for sibling in &detail.siblings {
-            let first = detail.preferred_now() == Some(sibling.row.key.as_str());
-            let label = format!(
-                "{}{}  {}｜{}",
-                if first { "▶ " } else { "   " },
-                sibling.preference.label(),
-                sibling.row.key,
-                human_bytes(sibling.row.bytes),
-            );
-            if ui
-                .selectable_label(first, label)
-                .on_hover_text("点它就把首选变体裁给这一个")
-                .clicked()
-                && !first
-            {
-                set = Some(sibling.row.key.clone());
-            }
-        }
-        if detail.siblings.len() <= 1 {
-            ui.weak("这个平台上这部作品只有这一个变体，没得选。");
-        }
-        ui.horizontal_wrapped(|ui| {
-            match &detail.preferred {
-                Some(key) => ui.label(format!("眼下是裁决指定的：{key}")),
-                None => ui.label("眼下没人裁过，按规则算：汉化 > 官中 > 日版 > 其他"),
-            };
-            if ui
-                .add_enabled(detail.preferred.is_some(), egui::Button::new("撤掉裁决"))
-                .clicked()
-            {
-                clear = true;
-            }
-        });
-        if clear {
-            self.clear_preferred(site, &work, &platform);
-            dirty = true;
-        }
-        if let Some(key) = set {
-            self.set_preferred(site, &work, &platform, &key);
-            dirty = true;
-        }
-        dirty
     }
 
     /// 字体样张：把 egui 内置字体缺的那几类字**摆出来给人看**。
@@ -3719,18 +3645,82 @@ fn non_game_asset_label(rows: Option<u64>) -> String {
     }
 }
 
-/// 折行横排里摆下一件之前先量一下：这一行剩下的地方摆不下 `width` 那么宽，就先换一行。
+/// 右栏选中那张变体卡底下的**例外**那一块，只在「改选择」那一趟里摆（拿主意的人 2026-09-15 定）：把这个变体
+/// 收进来或者排除掉，旁边留一句为什么。按了哪一颗交回那一下：`Some(方向)` 是记一条，`None` 是撤掉。
 ///
-/// egui 的折行横排只在一件东西自己量得出多宽时折；下拉框这种里头再套一层横排的复合控件量不准，
-/// 会整颗伸出这一栏去（第二段第三趟截图断言抓到的「译名」那一颗）。
+/// **优先于规则、永久记住**（ADR-0016）：规则表达不了「这个我小时候玩过」「这个太占地方先不带」这类个人口味。
+/// 落在**变体**这一层——规则说「要什么内容」，例外说「另外还要 / 偏不要这一份」。它在浏览屏而不在子库屏，
+/// 因为「哪一份」只有在详情里才指得准：子库屏上人手里只有一串键。
 ///
-/// 量的是**这一行还剩多少**（`available_size_before_wrap`）：折行横排里 `available_width` 答的是
-/// 整行的宽，拿它量永远「摆得下」。
-fn wrap_unless_room(ui: &mut egui::Ui, width: f32) {
-    if ui.available_size_before_wrap().x < width {
-        ui.end_row();
+/// 备注框在右栏那块不虚拟化的滚动区里，组字时不会凭空消失（ADR-0005）；它的身份钉在固定的名字上。
+fn exception_block(
+    ui: &mut egui::Ui,
+    editing: &Editing,
+    key: &str,
+    note: &mut String,
+) -> Option<Option<Exception>> {
+    let current = editing.exceptions.get(key);
+    let mut 按了 = None;
+    ui.label(font::strong(format!(
+        "例外 · 子库「{}」",
+        editing.sublibrary
+    )));
+    match current {
+        None => {
+            look::help(ui, "这个变体上还没有例外：进不进选择集，眼下由规则说了算。");
+        }
+        Some(row) => {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!(
+                    "眼下：{}{}",
+                    row.kind.label(),
+                    row.note
+                        .as_deref()
+                        .map(|note| format!("（{note}）"))
+                        .unwrap_or_default(),
+                ),
+            );
+        }
     }
+    ui.add(
+        egui::TextEdit::singleline(note)
+            .id_salt("例外备注")
+            .desired_width(ui.available_width())
+            .hint_text("为什么（半年后你会想知道）"),
+    );
+    look::small_buttons(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            for kind in [Exception::Include, Exception::Exclude] {
+                let on = current.is_some_and(|row| row.kind == kind);
+                if ui
+                    .add_enabled(!on, egui::Button::new(format!("{}它", kind.label())))
+                    .on_hover_text(match kind {
+                        Exception::Include => "规则没选中也带上它。",
+                        Exception::Exclude => "规则选中了也不带。容量超限时砍谁，落点就是这一条。",
+                    })
+                    .clicked()
+                {
+                    按了 = Some(Some(kind));
+                }
+            }
+            if ui
+                .add_enabled(current.is_some(), egui::Button::new("撤掉"))
+                .on_hover_text("撤掉之后这个变体进不进选择集重新由规则说了算。")
+                .clicked()
+            {
+                按了 = Some(None);
+            }
+        });
+    });
+    按了
 }
+
+/// **打开外部程序**那一下：拿到一个路径交给系统（播放视频、看原图、打开位置），不成时交回一句为什么。
+type Opener = Box<dyn FnMut(&std::path::Path) -> Result<(), String>>;
+
+/// 表格上方那一条右端「清除选择」那颗按钮上的字（设计稿 `#clear-pick`）。
+const CLEAR_PICK: &str = "清除选择";
 
 /// 作用范围那个数画成什么。**数不出来就说数不出来**，不摆一个 0 出去。
 fn scope_label(scope: Option<u64>) -> String {
@@ -3739,6 +3729,33 @@ fn scope_label(scope: Option<u64>) -> String {
 
 /// 左右两栏里**一段与一段之间**的留白（设计稿 `.fpane` / `.dpane` 的 `gap`）：扣掉 egui 自己在两件
 /// 东西之间留的那一份竖向间距，合起来正好是令牌 `pane-gap`。
+/// 侧边详情头上那一块底下那一排：「查看详情」（主按钮）与「编辑元数据」，都是小号（设计稿 `.btn.sm`）。
+/// 按了哪一颗，交回要打开作品详情页的哪一面、进不进编辑态（「编辑元数据」直接进，设计稿 `openWD(i,'edit')`）。
+fn page_buttons(ui: &mut egui::Ui) -> Option<(work::Tab, bool)> {
+    look::small_buttons(ui, |ui| {
+        ui.horizontal(|ui| {
+            // 两颗之间照稿 `.row` 的 `gap:8px`。
+            ui.spacing_mut().item_spacing.x = look::step(1);
+            let 看 = ui
+                .scope(|ui| {
+                    look::primary_button(ui.visuals_mut());
+                    ui.button("查看详情")
+                })
+                .inner
+                .clicked();
+            let 改 = ui.button("编辑元数据").clicked();
+            if 看 {
+                Some((work::Tab::Overview, false))
+            } else if 改 {
+                Some((work::Tab::Metadata, true))
+            } else {
+                None
+            }
+        })
+        .inner
+    })
+}
+
 fn pane_gap(ui: &mut egui::Ui) {
     let gap = Tokens::builtin().space.pane_gap - ui.spacing().item_spacing.y;
     ui.add_space(gap.max(0.0));

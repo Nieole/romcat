@@ -31,8 +31,8 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use crate::catalog::State;
 use crate::catalog::identify::{Confidence, Tier};
+use crate::catalog::{Candidate, State};
 use crate::dat::Convention;
 
 use super::{Axis, GroupRow, Item};
@@ -170,19 +170,32 @@ impl Shape {
     /// 取的是**第一条候选**——理由见模块文档：整批通过就是 `--pick 1`。
     #[must_use]
     pub fn of(item: &Item) -> Self {
-        match item.candidates.first() {
-            Some(lead) => Self::Candidates {
-                source: lead.source.clone(),
-                dat: lead.dat.clone(),
-                confidence: lead.confidence,
-                convention: lead.hashed_as,
-                fanout: Fanout::of(item.candidates.len()),
-            },
-            None => Self::Bare {
-                state: item.state,
-                reason: item.reason.clone(),
-            },
-        }
+        Self::of_candidates(&item.candidates).unwrap_or_else(|| Self::Bare {
+            state: item.state,
+            reason: item.reason.clone(),
+        })
+    }
+
+    /// 一个变体的这几条候选落在哪个**有候选**的形状里；一条都没有是 `None`（那一支要结论与理由，候选说不出来）。
+    ///
+    /// 与 [`Self::of`] 同一处折：待确认屏上一批的形状、作品详情页上一个变体的判定依据，说的是同一个形状。
+    #[must_use]
+    pub fn of_candidates(candidates: &[Candidate]) -> Option<Self> {
+        let lead = candidates.first()?;
+        Some(Self::Candidates {
+            source: lead.source.clone(),
+            dat: lead.dat.clone(),
+            confidence: lead.confidence,
+            convention: lead.hashed_as,
+            fanout: Fanout::of(candidates.len()),
+        })
+    }
+
+    /// **判定依据那一句**（设计稿 `No-Intro / gb.dat / 含头 · CRC-32 与文件大小一致 · 1 个候选`）：形状的前半截
+    /// （[`Self::label`]）、那条候选自己的依据、候选数，各段之间一个「 · 」。作品详情页识别依据那一面印它。
+    #[must_use]
+    pub fn basis(&self, evidence: &str, candidates: usize) -> String {
+        format!("{} · {evidence} · {candidates} 个候选", self.label())
     }
 
     /// 这一条的依据形状正是这一个吗。
