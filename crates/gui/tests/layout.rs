@@ -169,7 +169,7 @@ fn 描边(output: &egui::FullOutput) -> Vec<egui::Color32> {
 /// 地方——而且它开着的时候底下那几条边界反倒拖不动（弹层盖在整屏上头）。
 fn 摆开(app: &mut App, screen: View) {
     app.show_view(screen);
-    // 逐条那一路才有左栏与裁决面板；分批那一路整屏就是一列卡片。
+    // 逐条那一路才有左栏（待选列表）；分批那一路整屏就是一列卡片。
     if screen == View::Queue {
         app.queue_and_site().0.show_one_by_one();
     }
@@ -395,22 +395,27 @@ fn 置信度四档在两屏上是同一个词() {
 }
 
 #[test]
-fn 每一处上了色的置信度都跟着那个词() {
-    // 验收第 5 条。收之前，逐条那张表的「候选」一栏是一个**光染了色的数字**——
-    // 色觉障碍下那一栏就只剩一个数，读不出它是稳还是悬。
+fn 逐条那一屏的候选卡片标签写着那一档的词_待选列表行只留色条() {
+    // 验收第 5 条（「颜色不是唯一线索」）。逐条那一屏照稿两栏之后（票 `gui-looks-like-the-design/18`），待选列表每一条
+    // 左沿一道那一档的色，**行里不再写那一档的词**——置信度完全照稿（拿主意的人 2026-09-14 定，与浏览屏表格同一条，
+    // 挂单 `Q872`）；那个词写在右边每张候选卡片的标签上。
+    use romcat_core::catalog::identify::Tier;
+
     let mut app = 待确认(&工作目录("颜色不是唯一线索"));
     app.queue_and_site().0.show_one_by_one();
     let ctx = headless::context();
     let 屏上 = 画出来的字(&跑一帧(&ctx, &mut app, Vec::new()));
+    let 三档 = [Tier::High, Tier::Medium, Tier::Low].map(Tier::label);
     assert!(
-        屏上.contains("候选 · 置信度"),
-        "那一栏的表头该说清它画的是什么：\n{屏上}",
+        屏上.lines().any(|line| 三档.contains(&line)),
+        "候选卡片的标签上没写那一档的词：\n{屏上}"
     );
-    // 那一栏的每一格是「3 · 高置信」这个样子：数字后面跟着档名。
-    let 有一格 = romcat_core::catalog::identify::Tier::ALL
-        .iter()
-        .any(|tier| 屏上.contains(&format!(" · {}", tier.label())));
-    assert!(有一格, "那一栏还是光一个数：\n{屏上}");
+    assert!(
+        !屏上
+            .lines()
+            .any(|line| 三档.iter().any(|词| line.ends_with(&format!(" · {词}")))),
+        "待选列表行里还写着那一档的词：\n{屏上}"
+    );
 }
 
 #[test]
@@ -774,8 +779,9 @@ fn 跑一帧_窗口宽(
 
 #[test]
 fn 左栏的计数取各屏与核心库现成的那个数() {
-    // 不另算一份（票 `gui-looks-like-the-design/32`）：待确认是队列里待裁决的条数——屏头右侧那一段
-    // 「队列 N 条待裁决」说的是同一个数；库是根数；子库是子库屏列出来的个数；台上没活时任务不画数。
+    // 不另算一份（票 `gui-looks-like-the-design/32`）：待确认是队列里待裁决的条数——屏头副标题
+    // 「N 个变体待确认」说的是同一个数（原来屏头右侧那句「队列 N 条待裁决」照稿删了，票 18）；库是根数；
+    // 子库是子库屏列出来的个数；台上没活时任务不画数。
     let mut app = 待确认(&工作目录("左栏计数-待确认"));
     let ctx = headless::context();
     跑(&ctx, &mut app, 2);
@@ -783,8 +789,10 @@ fn 左栏的计数取各屏与核心库现成的那个数() {
     let 屏上 = 画出来的字(&out);
     let 待裁 = 左栏计数(&out, "待确认").unwrap_or_else(|| panic!("待确认那一项没画数：\n{屏上}"));
     assert!(
-        屏上.contains(&format!("队列 {待裁} 条待裁决")),
-        "左栏说 {待裁}，屏头右侧那一段说的不是这个数：\n{屏上}",
+        屏上
+            .lines()
+            .any(|line| line == format!("{待裁} 个变体待确认")),
+        "左栏说 {待裁}，屏头副标题说的不是这个数：\n{屏上}",
     );
     assert_eq!(
         左栏计数(&out, "库"),

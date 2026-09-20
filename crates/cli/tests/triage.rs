@@ -702,7 +702,7 @@ fn 报告印出来的那串字照抄一条就选中同一批() {
     // 不带的话粘到别处开的是另一份库。
     assert!(
         文本.contains(
-            "romcat triage decide --shape 'GoodNES / GoodNES 3.23 / 中置信 / 含头 / 只有一个候选' \
+            "romcat triage decide --shape 'GoodNES / GoodNES 3.23 / 中置信 / 含头 / 1 个候选' \
              --library '小库' --pick 1 --dry-run"
         ),
         "{文本}"
@@ -789,7 +789,7 @@ fn 报告印出来的那串字照抄一条就选中同一批() {
     let 筛过的 = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(筛过的.contains("从最值钱的那一批下手（1 条）"), "{筛过的}");
     assert!(
-        筛过的.contains("只有一个候选' --name '甲' --library '小库' --pick 1 --dry-run"),
+        筛过的.contains("1 个候选' --name '甲' --library '小库' --pick 1 --dry-run"),
         "这一趟的 `--name` 没带上，粘过去跑的就是另一批：{筛过的}"
     );
 }

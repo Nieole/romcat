@@ -385,7 +385,7 @@ pub struct Font {
     pub size_arrow: f32,
     /// 面板标题（设计稿 `.phead h3`）。
     pub size_panel_title: f32,
-    /// 子库屏空态那张卡的标题（设计稿空态卡 `h3` 的 16px）。只这一处用，不挂成具名档。
+    /// 空态那张卡的标题（设计稿子库屏空态卡与待确认屏 `#q-empty` 的 `h3` 都是 16px）。不挂成具名档。
     pub size_empty_title: f32,
     /// 行高，字号的倍数。
     pub line_height: f32,
@@ -395,6 +395,12 @@ pub struct Font {
     pub group_tracking: f32,
     /// 大号按钮上的字。
     pub size_button_large: f32,
+    /// 待确认屏正文头上三格里的数（设计稿 `.qcell .v`）。
+    pub size_summary_count: f32,
+    /// 一批变体卡头上那个条数（设计稿 `.bhead .cnt`）。
+    pub size_batch_count: f32,
+    /// 候选卡片上作品那一行（设计稿 `.cand .t`）。
+    pub size_candidate_title: f32,
     /// 作品详情页元数据那一面值那几行的行高，字号的倍数（设计稿 `.mrow .v`）。
     pub meta_value_line_height: f32,
     /// 作品详情页段落卡的标题：设计稿上的半号（14.5），用到时走 [`crate::look::font_size`]。
@@ -546,6 +552,80 @@ pub struct Space {
     pub queue_row_padding: [f32; 2],
     /// 正在跑那张卡底下那一排，格与格之间的间距。
     pub meta_gap: f32,
+    /// 待确认屏正文头上三格之间（设计稿 `.qsum` 的 `gap`）。
+    pub queue_summary_gap: f32,
+    /// 三格底下空多少（设计稿 `.qsum` 的 `margin-bottom`）。
+    pub queue_summary_margin: f32,
+    /// 三格每一格的内边距：`[上下, 左右]`（设计稿 `.qcell`）。
+    pub queue_cell_padding: [f32; 2],
+    /// 裁决记录抽屉里一行、页脚那句说明的内边距：`[上下, 左右]`（设计稿 `.lot`）。
+    pub record_row_padding: [f32; 2],
+    /// 待确认屏空态那张卡上面空多少（设计稿 `#q-empty .card` 的 `margin`）。
+    pub empty_state_margin: f32,
+    /// 那张卡的内边距（设计稿 `#q-empty .card` 的 `padding`）。
+    pub empty_state_padding: f32,
+    /// 那张卡里标题后、说明后、按钮后各空多少：`[标题后, 说明后, 按钮后]`。
+    pub empty_state_gaps: [f32; 3],
+    /// 一批变体卡片与卡片之间（设计稿 `.batch` 的 `margin-bottom`）。
+    pub batch_gap: f32,
+    /// 卡头内边距：`[上下, 左右]`（设计稿 `.bhead`）。
+    pub batch_head_padding: [f32; 2],
+    /// 卡头里几列之间（设计稿 `.bhead` 的 `gap`）。
+    pub batch_head_gap: f32,
+    /// 展开之后那一块的内边距：`[上, 左右, 下]`（设计稿 `.bbody`）。
+    pub batch_body_padding: [f32; 3],
+    /// 展开之后那一块里几排之间、两栏之间（设计稿 `.bbody` 的 `gap`）。
+    pub batch_body_gap: f32,
+    /// 判定依据那一框的内边距：`[上下, 左右]`（设计稿 `.why`）。
+    pub why_padding: [f32; 2],
+    /// 随机样本一行上下留白（设计稿 `.smp`）。
+    pub sample_row_padding: f32,
+    /// 「没有候选」那个虚线框上面空多少（设计稿 `.bare` 的 `margin-top`）。
+    pub bare_margin: f32,
+    /// 那个虚线框的内边距：`[上下, 左右]`（设计稿 `.bare`）。
+    pub bare_padding: [f32; 2],
+    /// 虚线框里头一行与底下那句说明之间（设计稿 `.bare .help` 的 `margin-top`）。
+    pub bare_note_gap: f32,
+    /// 卡头第一行依据形状各段之间：`[上下, 左右]`（设计稿 `.shape` 的 `gap`）。
+    pub shape_gap: [f32; 2],
+    /// 卡头两行字之间（设计稿 `.bhead .why1` 的 `margin-top`）。
+    pub batch_line_gap: f32,
+    /// 候选卡片里「来源 / 匹配 / 依据」那几行之间：`[上下, 左右]`（设计稿 `.cand dl` 的 `gap`）。
+    pub candidate_row_gap: [f32; 2],
+    /// 展开之后「细分」底下各组一行与一行之间（设计稿 `.dist` 的 `gap` 竖向那一半）。
+    pub dist_row_gap: f32,
+    /// 逐条那一屏待选列表栏头的内边距：`[上, 右, 下, 左]`（设计稿 `.obolist .ptitle`）。
+    pub list_head_padding: [f32; 4],
+    /// 待选列表一条的内边距：`[上, 右, 下, 左]`（设计稿 `.oboit`）。
+    pub list_item_padding: [f32; 4],
+    /// 逐条那一屏详情的内边距：`[上下, 左右]`（设计稿 `.obodet`）。
+    pub detail_padding: [f32; 2],
+    /// 详情里一块与一块之间（设计稿 `.obodet` 的 `gap`）。
+    pub detail_gap: f32,
+    /// 逐条那一屏详情抬头那几行之间（设计稿 `.obodet` 头一块的 `gap`）。
+    pub obo_head_gap: f32,
+    /// 候选卡片之间（设计稿 `.cands` 的 `gap`）。
+    pub candidate_gap: f32,
+    /// 候选卡片的内边距（设计稿 `.cand`）。
+    pub candidate_padding: f32,
+    /// 候选卡片里一排与一排之间（设计稿 `.cand` 的 `gap`）。
+    pub candidate_inner_gap: f32,
+    /// 键位提示那一框的内边距：`[上下, 左右]`（设计稿 `.keys`）。
+    pub keys_padding: [f32; 2],
+    /// 键位提示里一组与一组之间：`[上下, 左右]`（设计稿 `.keys` 的 `gap`）。
+    pub keys_gap: [f32; 2],
+    /// 一组键位提示里键帽与字之间（设计稿 `.keys span` 的 `gap`）。
+    pub key_hint_gap: f32,
+    /// 键帽的内边距：`[上下, 左右]`（设计稿 `.kbd`）。
+    pub kbd_padding: [f32; 2],
+    /// 带键帽的按钮里字与键帽之间（设计稿 `.btn` 的 `gap`）。
+    pub key_button_gap: f32,
+    /// 中文离线源那一堆头上那一条的内边距：`[上下, 左右]`（设计稿 `.mgroup .gh`）。
+    pub match_head_padding: [f32; 2],
+    /// 那一堆里字段那几行的内边距：`[上下, 左右]`（设计稿 `.mgroup dl`）。
+    pub match_row_padding: [f32; 2],
+    /// 那几行之间、字段名与值之间：`[上下, 左右]`（设计稿 `.mgroup dl` 的 `gap`）。
+    pub match_row_gap: [f32; 2],
     /// 作品详情页顶上那一条的内边距：`[上下, 左右]`（设计稿 `.wdbar`）。
     pub work_bar_padding: [f32; 2],
     /// 那一条里几样东西之间（设计稿 `.wdbar` 的 `gap`）。
@@ -793,6 +873,36 @@ pub struct Layout {
     pub impact_dot: f32,
     /// 行首圆点那一列多宽（设计稿 `.impact li`）。
     pub impact_column: f32,
+    /// 右侧抽屉的宽：待确认屏的裁决记录（设计稿 `.drawer`）。
+    pub drawer_width: f32,
+    /// 分段开关外框与里头按钮之间（设计稿 `.seg` 的 `padding`）。
+    pub seg_padding: f32,
+    /// 分段开关里一颗的高（设计稿 `.seg button`）。
+    pub seg_button_height: f32,
+    /// 分段开关里一颗的左右留白（设计稿 `.seg button`）。
+    pub seg_button_padding: f32,
+    /// 待确认屏空态那张卡最宽多宽（设计稿 `#q-empty .card` 的 `max-width`）。
+    pub empty_state_width: f32,
+    /// 一批变体展开之后左「细分」右「随机样本」两栏的宽比（设计稿 `.bbody`）。
+    pub batch_body_columns: [f32; 2],
+    /// 一批变体卡头上条数那一列的宽（设计稿 `.bhead`）。
+    pub batch_count_width: f32,
+    /// 卡头最右折叠标那一列的宽（设计稿 `.bhead`）。
+    pub batch_chevron_column: f32,
+    /// 折叠标那个折角的边长（设计稿 `.chev`）。
+    pub chevron: f32,
+    /// 折叠标那两道线的宽（设计稿 `.chev` 的 `border`）。
+    pub chevron_stroke: f32,
+    /// 随机样本一行中间那枚箭头那一列的宽（设计稿 `.smp`）。
+    pub sample_arrow_column: f32,
+    /// 候选卡片里「来源 / 匹配 / 依据」那一列的宽（设计稿 `.cand dl`）。
+    pub candidate_key_width: f32,
+    /// 选中那张候选卡片外头那一圈强调浅色的宽（设计稿 `.cand[aria-selected]`）。
+    pub candidate_ring: f32,
+    /// 键帽底边那一道的宽（设计稿 `.kbd` 的 `border-bottom-width`）。
+    pub kbd_bottom: f32,
+    /// 中文离线源那一堆里字段名那一列的宽（设计稿 `.mgroup dl`）。
+    pub match_key_width: f32,
     /// 作品详情页六个面那一排一格的高（设计稿 `.tabs button`）。
     pub tab_height: f32,
     /// 选中那一面底下那道强调色线的粗（设计稿 `.tabs button[aria-selected]`）。
@@ -849,6 +959,8 @@ pub struct Mix {
     pub thumb_list_tint: f32,
     /// 字卡上平台代号水印的不透明度。
     pub watermark_opacity: f32,
+    /// 按不动的控件淡到几成（设计稿 `.btn[disabled]` 的 `opacity`）。
+    pub disabled_opacity: f32,
     /// 编辑态下改过的那一行底色里调进几成强调色（设计稿 `.mrow.dirty`）。
     pub dirty_row_tint: f32,
     /// 作品详情页头上那一块底色里调进几成平台色（设计稿 `.hero`）。

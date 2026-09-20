@@ -988,23 +988,12 @@ pub fn more_chip(ui: &mut egui::Ui, text: &str) -> egui::Response {
         egui::Sense::click(),
     );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, text));
-    let 线宽 = tokens.layout.control_stroke;
-    let 框 = rect.shrink(线宽 / 2.0);
-    // 虚线一段多长、两段之间空多少：浏览器画 `dashed` 大约是线宽的三倍，这里照那个比例。
-    let 段 = 3.0 * 线宽;
     let painter = ui.painter();
-    painter.extend(egui::Shape::dashed_line(
-        &[
-            框.left_top(),
-            框.right_top(),
-            框.right_bottom(),
-            框.left_bottom(),
-            框.left_top(),
-        ],
-        egui::Stroke::new(线宽, 线色),
-        段,
-        段,
-    ));
+    dashed_outline(
+        painter,
+        rect,
+        egui::Stroke::new(tokens.layout.control_stroke, 线色),
+    );
     painter.galley_with_override_text_color(
         rect.center() - 字大小 / 2.0,
         字,
@@ -1329,6 +1318,347 @@ pub fn tier_label(ui: &mut egui::Ui, tier: Tier) -> egui::Response {
 pub fn tier_tag(ui: &mut egui::Ui, tier: Tier) -> egui::Response {
     tier_bar(ui, tier);
     tier_label(ui, tier)
+}
+
+/// 一枚**行内标签**（设计稿 `.tag`）：凹陷底（`sunken`）、小圆角、次要字色（`ink-2`），高 `tag-height`、左右留白
+/// `tag-padding`，字取半号 `size-caption-plus`（按倍率取整，[`font_size`]）。待确认屏逐条那一屏抬头上的平台、容量、
+/// 裁决钉在哪几枚用它。
+pub fn inline_tag(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let tokens = Tokens::builtin();
+    let palette = palette(ui);
+    let 字号 = font_size(ui.ctx(), tokens.font.size_caption_plus);
+    let 字 = ui.painter().layout_no_wrap(
+        text.to_owned(),
+        egui::FontId::proportional(字号),
+        palette.ink_2,
+    );
+    let 边 = tokens.layout.tag_padding;
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(字.size().x + 2.0 * 边, tokens.layout.tag_height),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    painter.rect_filled(rect, tokens.radius.small, palette.sunken);
+    painter.galley(
+        egui::pos2(rect.left() + 边, rect.center().y - 字.size().y / 2.0),
+        字,
+        palette.ink_2,
+    );
+    response
+}
+
+/// 一枚**键帽**（设计稿 `.kbd`）：面板底、描一圈 `line-2`、底边描得粗一些（`kbd-bottom`），字是等宽的 `size-caption`、
+/// 次要字色，四边留白 `kbd-padding`。待确认屏逐条那一屏的键位提示用它。
+pub fn kbd(ui: &mut egui::Ui, key: &str) -> egui::Response {
+    let (尺寸, 字) = kbd_galley(ui, key);
+    let (rect, response) = ui.allocate_exact_size(尺寸, egui::Sense::hover());
+    paint_kbd(ui, rect, 字, 1.0);
+    response
+}
+
+/// 一枚键帽多大，连它上面那个字排好。
+fn kbd_galley(ui: &egui::Ui, key: &str) -> (egui::Vec2, std::sync::Arc<egui::Galley>) {
+    let tokens = Tokens::builtin();
+    let 字号 = font_size(ui.ctx(), tokens.font.size_caption);
+    let 字 = ui.painter().layout_no_wrap(
+        key.to_owned(),
+        egui::FontId::monospace(字号),
+        egui::Color32::PLACEHOLDER,
+    );
+    let [上下, 左右] = tokens.space.kbd_padding;
+    let 尺寸 = egui::vec2(
+        字.size().x + 2.0 * 左右,
+        字.size().y + 2.0 * 上下 + tokens.layout.kbd_bottom,
+    );
+    (尺寸, 字)
+}
+
+/// 在 `rect` 里画一枚键帽；`淡` 是这一枚画几成深（按不动的按钮上那一枚淡一半）。
+fn paint_kbd(ui: &egui::Ui, rect: egui::Rect, 字: std::sync::Arc<egui::Galley>, 淡: f32) {
+    let tokens = Tokens::builtin();
+    let palette = palette(ui);
+    let 线宽 = tokens.layout.control_stroke;
+    let 线色 = palette.line_2.gamma_multiply(淡);
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        tokens.radius.small,
+        palette.panel.gamma_multiply(淡),
+        egui::Stroke::new(线宽, 线色),
+        egui::StrokeKind::Inside,
+    );
+    // 底边描得粗一些：在那一道描边里头再描一道。
+    let 加粗 = (tokens.layout.kbd_bottom - 线宽).max(0.0);
+    if 加粗 > 0.0 {
+        painter.hline(
+            rect.x_range().shrink(f32::from(tokens.radius.small)),
+            rect.bottom() - 线宽 - 加粗 / 2.0,
+            egui::Stroke::new(加粗, 线色),
+        );
+    }
+    let 摆在 = egui::pos2(
+        rect.center().x - 字.size().x / 2.0,
+        rect.center().y - (字.size().y + 加粗) / 2.0,
+    );
+    painter.galley_with_override_text_color(摆在, 字, palette.ink_2.gamma_multiply(淡));
+}
+
+/// 一颗**带键帽的按钮**（设计稿 `.btn` 里嵌一枚 `.kbd`）：字在左、键帽在右，中间隔 `key-button-gap`。高、左右留白、底色、描边与
+/// 字色照这块 `ui` 眼下的按钮样式——在 `ui.scope` 里换成主按钮、幽灵按钮就跟着换；字号照 [`buttons`] 那一块换上的那一档。
+/// `enabled` 为假时按不动、整颗淡下去（设计稿 `.btn[disabled]` 的 `opacity`，令牌 `disabled-opacity`）。无障碍树上报成一颗
+/// 按钮，名字是按钮上的字。待确认屏逐条那一屏「通过所选候选 Y」那四颗用它。
+pub fn key_button(ui: &mut egui::Ui, label: &str, key: &str, enabled: bool) -> egui::Response {
+    let tokens = Tokens::builtin();
+    let 字体 = ui
+        .style()
+        .override_font_id
+        .clone()
+        .unwrap_or_else(|| egui::TextStyle::Body.resolve(ui.style()));
+    let 字 = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), 字体, egui::Color32::PLACEHOLDER);
+    let (键尺寸, 键字) = kbd_galley(ui, key);
+    let 留白 = ui.spacing().button_padding;
+    let 缝 = tokens.space.key_button_gap;
+    let 宽 = 留白.x + 字.size().x + 缝 + 键尺寸.x + 留白.x;
+    let 高 = ui
+        .spacing()
+        .interact_size
+        .y
+        .max(字.size().y.max(键尺寸.y) + 2.0 * 留白.y);
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(宽, 高), sense);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    if ui.is_rect_visible(rect) {
+        let 淡 = if enabled {
+            1.0
+        } else {
+            tokens.mix.disabled_opacity
+        };
+        let visuals = if enabled {
+            *ui.style().interact(&response)
+        } else {
+            ui.style().visuals.widgets.inactive
+        };
+        let painter = ui.painter();
+        painter.rect(
+            rect.expand(visuals.expansion),
+            visuals.corner_radius,
+            visuals.weak_bg_fill.gamma_multiply(淡),
+            egui::Stroke::new(
+                visuals.bg_stroke.width,
+                visuals.bg_stroke.color.gamma_multiply(淡),
+            ),
+            egui::StrokeKind::Inside,
+        );
+        painter.galley_with_override_text_color(
+            egui::pos2(rect.left() + 留白.x, rect.center().y - 字.size().y / 2.0),
+            字,
+            visuals.text_color().gamma_multiply(淡),
+        );
+        let 键框 = egui::Rect::from_min_size(
+            egui::pos2(
+                rect.right() - 留白.x - 键尺寸.x,
+                rect.center().y - 键尺寸.y / 2.0,
+            ),
+            键尺寸,
+        );
+        paint_kbd(ui, 键框, 键字, 淡);
+    }
+    response
+}
+
+/// 这一块 `ui` 眼下那一套主题的颜色（令牌 `[color.light]` / `[color.dark]`）。自己画底色、描边、字色的控件从这儿取。
+#[must_use]
+pub fn palette(ui: &egui::Ui) -> &'static crate::tokens::Palette {
+    Tokens::builtin()
+        .color
+        .theme(egui::Theme::from_dark_mode(ui.visuals().dark_mode))
+}
+
+/// 一颗**小号幽灵按钮**（设计稿 `.btn.ghost.sm`）：[`small_buttons`] 那一档的高与字，[`ghost_button`] 那一档的颜色。
+pub fn small_ghost_button(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response {
+    small_buttons(ui, |ui| {
+        ui.scope(|ui| {
+            ghost_button(ui.visuals_mut());
+            ui.button(text)
+        })
+        .inner
+    })
+}
+
+/// 虚线一段多长、两段之间空多少，是线宽的几倍：浏览器画 `dashed` 大约是这个比例。
+const DASH_RATIO: f32 = 3.0;
+
+/// 一圈**虚线**描边，画在 `rect` 里头（设计稿 `border: 1px dashed`）。一段多长、两段之间空多少都是线宽的三倍（`DASH_RATIO`）。
+pub fn dashed_outline(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    let 框 = rect.shrink(stroke.width / 2.0);
+    dashed(
+        painter,
+        &[
+            框.left_top(),
+            框.right_top(),
+            框.right_bottom(),
+            框.left_bottom(),
+            框.left_top(),
+        ],
+        stroke,
+    );
+}
+
+/// 一道横的**虚线**（设计稿 `border-bottom: 1px dashed`），段长同 [`dashed_outline`]。
+pub fn dashed_hline(painter: &egui::Painter, x: egui::Rangef, y: f32, stroke: egui::Stroke) {
+    dashed(
+        painter,
+        &[egui::pos2(x.min, y), egui::pos2(x.max, y)],
+        stroke,
+    );
+}
+
+/// 沿着这几个点画一串虚线。
+fn dashed(painter: &egui::Painter, points: &[egui::Pos2], stroke: egui::Stroke) {
+    let 段 = DASH_RATIO * stroke.width;
+    painter.extend(egui::Shape::dashed_line(points, stroke, 段, 段));
+}
+
+/// 色条贴在卡片的哪一边。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarEdge {
+    /// 左沿（设计稿 `box-shadow: inset 3px 0 0`）。
+    Left,
+    /// 顶上（设计稿 `box-shadow: inset 0 3px 0`）。
+    Top,
+}
+
+/// 一张**带色条的卡片**的底：面板底、大圆角，`edge` 那一边一道 `bar` 色、宽 `tier-bar`（设计稿 `.batch`、`.cand`、`.mgroup`）。
+/// 里头摆什么由 `add` 给；描边由调用方描（选中时颜色不同）。交回整张的 `InnerResponse`。
+///
+/// **底要垫在字底下，而多高要摆完才知道**：先占两层位置，摆完量出整张再填。
+pub fn barred_card<R>(
+    ui: &mut egui::Ui,
+    bar: egui::Color32,
+    edge: BarEdge,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    let tokens = Tokens::builtin();
+    let 面 = palette(ui).panel;
+    let 圆角 = tokens.radius.large;
+    ui.vertical(|ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let 色底 = ui.painter().add(egui::Shape::Noop);
+        let 面底 = ui.painter().add(egui::Shape::Noop);
+        let inner = add(ui);
+        let 整张 = ui.min_rect();
+        let 面那一块 = match edge {
+            BarEdge::Left => egui::Rect::from_min_max(
+                egui::pos2(整张.left() + tokens.layout.tier_bar, 整张.top()),
+                整张.max,
+            ),
+            BarEdge::Top => egui::Rect::from_min_max(
+                egui::pos2(整张.left(), 整张.top() + tokens.layout.tier_bar),
+                整张.max,
+            ),
+        };
+        ui.painter()
+            .set(色底, egui::epaint::RectShape::filled(整张, 圆角, bar));
+        ui.painter()
+            .set(面底, egui::epaint::RectShape::filled(面那一块, 圆角, 面));
+        inner
+    })
+}
+
+/// 一组**分段开关**（设计稿 `.seg`）：几颗挨着的按钮，每一颗是 `options` 里的一项（值与写在上面的字），`selected` 那一颗是选中的。
+/// 交回这一帧按下的那一项的值。
+///
+/// 外框铺凹陷底（`sunken`）、描一圈分隔线色（`line`）、中圆角，与里头的按钮之间留 `seg-padding`；每一颗高
+/// `seg-button-height`、左右留白 `seg-button-padding`、小圆角，字取说明字号 `size-small`。**选中那一颗**铺面板底
+/// （`panel`）、字取正文色（`ink`）、描一圈 `line-2`；没选中的透明底、次要字色（`ink-2`），悬停时字换正文色。
+/// 设计稿选中那一颗加粗，中文不加粗（字体预算），这里一律常规体。拿到焦点那一颗描一圈强调色。
+///
+/// 待确认屏屏头的「按批｜逐条」、一批里「按目录｜按候选作品｜按命名规律」那一排用它。
+pub fn segmented<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    options: &[(T, &str)],
+    selected: T,
+) -> Option<T> {
+    let tokens = Tokens::builtin();
+    let palette = palette(ui);
+    let 外边 = tokens.layout.seg_padding;
+    let 高 = tokens.layout.seg_button_height;
+    let 留白 = tokens.layout.seg_button_padding;
+    let 字号 = font_size(ui.ctx(), tokens.font.size_small);
+    let 字: Vec<std::sync::Arc<egui::Galley>> = options
+        .iter()
+        .map(|(_, label)| {
+            ui.painter().layout_no_wrap(
+                (*label).to_owned(),
+                egui::FontId::proportional(字号),
+                palette.ink,
+            )
+        })
+        .collect();
+    let 宽: f32 = 字.iter().map(|one| one.size().x + 2.0 * 留白).sum();
+    let (外框, _) = ui.allocate_exact_size(
+        egui::vec2(宽 + 2.0 * 外边, 高 + 2.0 * 外边),
+        egui::Sense::hover(),
+    );
+    let 线宽 = tokens.layout.control_stroke;
+    ui.painter().rect(
+        外框,
+        tokens.radius.medium,
+        palette.sunken,
+        egui::Stroke::new(线宽, palette.line),
+        egui::StrokeKind::Inside,
+    );
+    let mut 按下 = None;
+    let mut 左 = 外框.left() + 外边;
+    for (at, ((value, label), galley)) in options.iter().zip(字).enumerate() {
+        let 这一颗 = egui::Rect::from_min_size(
+            egui::pos2(左, 外框.top() + 外边),
+            egui::vec2(galley.size().x + 2.0 * 留白, 高),
+        );
+        左 = 这一颗.right();
+        let response = ui.interact(这一颗, ui.id().with(("分段开关", at)), egui::Sense::click());
+        let 选中 = *value == selected;
+        let enabled = ui.is_enabled();
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, enabled, 选中, *label)
+        });
+        let painter = ui.painter();
+        if 选中 {
+            painter.rect(
+                这一颗,
+                tokens.radius.small,
+                palette.panel,
+                egui::Stroke::new(线宽, palette.line_2),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if response.has_focus() {
+            painter.rect_stroke(
+                这一颗,
+                tokens.radius.small,
+                egui::Stroke::new(2.0 * 线宽, palette.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
+        let 字色 = if 选中 || response.hovered() {
+            palette.ink
+        } else {
+            palette.ink_2
+        };
+        let 摆在 = 这一颗.center() - galley.size() / 2.0;
+        painter.galley_with_override_text_color(摆在, galley, 字色);
+        if response.clicked() {
+            按下 = Some(*value);
+        }
+    }
+    按下
 }
 
 /// 给一个**自己画底色的可点件**补上焦点那一圈：表格的行、缩略图那几格。

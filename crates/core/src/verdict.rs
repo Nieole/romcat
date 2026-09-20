@@ -392,6 +392,23 @@ pub const ANCHOR_CONTENT: &str = "内容";
 /// 「路径锚」在库里与报告里叫什么。
 pub const ANCHOR_PATH: &str = "路径";
 
+/// 裁决钉在**内容锚**上时给人看的那一句（设计稿逐条详情那枚标签的原话，拿主意的人 2026-09-15 定）。
+/// 界面逐条详情与命令行 `triage list` 的条目行读的都是它（[`anchor_sentence`]）。
+pub const ANCHOR_CONTENT_SENTENCE: &str = "裁决按文件内容记录，改名或移动后仍然有效";
+
+/// 裁决只钉得住**路径锚**时那一句：与 [`ANCHOR_CONTENT_SENTENCE`] 对着写。
+pub const ANCHOR_PATH_SENTENCE: &str = "裁决按本机路径记录，改名或移动后失效";
+
+/// 一条裁决会钉在什么上，给人看的那一句：拿得到内容判据（`content` 为真）就是内容锚那一句，否则是路径锚那一句。
+#[must_use]
+pub fn anchor_sentence(content: bool) -> &'static str {
+    if content {
+        ANCHOR_CONTENT_SENTENCE
+    } else {
+        ANCHOR_PATH_SENTENCE
+    }
+}
+
 /// 沉淀库读写不了的原因。
 #[derive(Debug, thiserror::Error)]
 pub enum VerdictError {

@@ -1,6 +1,6 @@
 //! **面板边界**：拖得动、记得住、挤不塌。
 //!
-//! 两屏上一共四条边界（[`Boundary::ALL`]），每一条都是一句声明：靠哪一边、默认多宽、
+//! 两屏上一共三条边界（[`Boundary::ALL`]），每一条都是一句声明：靠哪一边、默认多宽、
 //! 最少多宽、最多占整个窗口那一维的几成。**画那一屏的代码不自己写这四个数**
 //! ——写了就会有人只改一处，于是同一条边界在两个地方是两个下限。
 //!
@@ -134,28 +134,23 @@ pub const DETAIL: Boundary = Boundary {
     share: 0.45,
 };
 
-/// 待确认屏逐条那一路左边那栏：选择器与整批操作。
-pub const BATCHES: Boundary = Boundary {
+/// 待确认屏逐条那一路左边那栏：待选列表（设计稿 `.obo` 的左栏，默认 300）。
+///
+/// 落盘的键照旧叫「批量」：从前这一栏装的是分组表，改名会让人上一次拖出来的宽度作废。
+pub const QUEUE_LIST: Boundary = Boundary {
     id: "批量",
     screen: View::Queue,
     side: Side::Left,
-    default: 320.0,
+    default: 300.0,
     min: 180.0,
     share: 0.40,
 };
 
-/// 待确认屏逐条那一路底下那块：这一条是什么、候选、裁决表单。
-pub const DECIDE: Boundary = Boundary {
-    id: "裁决面板",
-    screen: View::Queue,
-    side: Side::Bottom,
-    default: 268.0,
-    min: 120.0,
-    share: 0.45,
-};
-
 impl Boundary {
-    /// 全部四条，**照各屏真正摆它们的次序**。不在这儿的边界不落盘。
+    /// 全部三条，**照各屏真正摆它们的次序**。不在这儿的边界不落盘。
+    ///
+    /// **待确认屏逐条那一路底下那块「裁决面板」不在这儿**：逐条那一屏照稿换成了两栏，手工指定那张表单挪进了一层弹层
+    /// （票 `gui-looks-like-the-design/18`），旧文件里「裁决面板 = …」那一行读的时候跳过。
     ///
     /// **刮削面板不在这儿**：它从前是浏览屏底下第四块，如今是一层弹层（[`crate::dialog`]），
     /// 不占屏上的地方。工作目录里旧版式文件记着的那一行「刮削面板 = …」读的时候跳过。
@@ -171,13 +166,12 @@ impl Boundary {
     // 三屏各自照 `Screen::ui` 里 `show` 的先后排；`rustfmt` 会把它挤成一行，
     // 而这张表的次序**是有意义的**，所以不让它挤。
     #[rustfmt::skip]
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 3] = [
         // 浏览屏（`browse::Screen::ui`）
         FILTER,
         DETAIL,
         // 待确认屏逐条那一路（`queue::Screen::ui`）
-        DECIDE,
-        BATCHES,
+        QUEUE_LIST,
     ];
 
     /// 画这块面板。
@@ -408,7 +402,7 @@ const HEADER: &str = "\
 # 它**不在中立库里**——中立库整份可再生，界面偏好放进去会被某一次重扫抹掉。
 ";
 
-/// 四条边界各自拖到哪儿了，以及它落在哪个文件上。
+/// 三条边界各自拖到哪儿了，以及它落在哪个文件上。
 #[derive(Debug)]
 pub struct Layout {
     /// 那份文件在哪。**在工作目录里**（[`romcat_core::workspace::gui_layout_path`]）。
@@ -940,7 +934,7 @@ mod tests {
         let sizes = parse("筛选 = 0\n浏览详情 = 999999\n批量 = -5\n");
         assert_eq!(sizes.get("筛选"), Some(&FILTER.min));
         assert_eq!(sizes.get("浏览详情"), Some(&SANE));
-        assert_eq!(sizes.get("批量"), Some(&BATCHES.min));
+        assert_eq!(sizes.get("批量"), Some(&QUEUE_LIST.min));
     }
 
     #[test]
@@ -960,7 +954,7 @@ mod tests {
             error: None,
         };
         layout.sizes.insert(FILTER.id, 275.0);
-        layout.sizes.insert(BATCHES.id, 210.0);
+        layout.sizes.insert(QUEUE_LIST.id, 210.0);
         layout.set_rail_collapsed(true);
         let text = layout.render();
         assert!(text.starts_with('#'), "开头那几句给人看的话不能丢");

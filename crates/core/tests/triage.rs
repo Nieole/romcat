@@ -1655,6 +1655,31 @@ fn 队列列一次之后换选择器不再读库() {
 }
 
 #[test]
+fn 屏头那份四档计数数的是整个队列_换选择器不跳() {
+    // 设计稿 `.scrhead`：屏头三枚置信度标签数的是整个队列（拿主意的人 2026-09-15 定）。选中那一份另有一处
+    // （`Queue::tiers`）——两处混用的话，人换个选择器就以为库里的账变了。
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    let index = verdict::Index::load(&现场.store, 主库标识).expect("读得出沉淀库");
+    let mut queue = triage::Queue::load(&现场.catalog, &index).expect("列得出队列");
+    let 整队 = queue.all_tiers().to_vec();
+    assert_eq!(
+        整队.iter().map(|(_, count)| *count).sum::<u64>(),
+        queue.pending(),
+        "整队那份四档计数该与待裁决那个数对得上（都不含跳过）",
+    );
+    assert_eq!(queue.tiers(), queue.all_tiers(), "没筛之前两份一样");
+
+    queue.set_filter(triage::Axis::Directory.filter("库/FC"));
+    assert!(
+        queue.selected().len() < 整队.iter().map(|(_, count)| *count).sum::<u64>() as usize,
+        "前提：这一筛该筛掉一些",
+    );
+    assert_eq!(queue.all_tiers().to_vec(), 整队, "整队那份跟着选择器跳了");
+    assert_ne!(queue.tiers(), queue.all_tiers(), "选中那份该跟着选择器走");
+}
+
+#[test]
 fn 裁完的当场从队列里消失() {
     // ADR-0002 说队列是主界面，而一个裁完了还留在原地的条目会被人再问一遍。
     let mut 现场 = 建现场();
