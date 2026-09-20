@@ -102,7 +102,7 @@ use crate::layout;
 use crate::look;
 use crate::media::{Gallery, Shelf};
 use crate::scrape;
-use crate::table::{Picked, SPAN, Table, UNLINKED_LABEL, Window, tail_fit};
+use crate::table::{Picked, SPAN, Table, UNLINKED_LABEL, Window, tail_fit, unlinked_title};
 use crate::task::{Product, Tasks};
 use crate::toast::{self, Toast};
 use crate::tokens::Tokens;
@@ -2340,10 +2340,13 @@ impl Screen {
                             let Some(row) = self.card_window.row(catalog, index).cloned() else {
                                 break;
                             };
+                            // **认不认得出作品，问表格那一路同一处**（[`unlinked_title`]）：
+                            // 判据在核心库（ADR-0024），卡片这边不另写一套，不然有一天两处判得不一样。
+                            let 未关联 = unlinked_title(&row, &self.rules);
                             let title = row
                                 .display
                                 .clone()
-                                .or_else(|| row.title(&self.rules))
+                                .or_else(|| 未关联.clone())
                                 .unwrap_or_else(|| row.name.clone());
                             let (rect, response) = ui.allocate_exact_size(
                                 egui::vec2(
@@ -2394,6 +2397,14 @@ impl Screen {
                                 human_bytes(row.bytes)
                             ));
                             card.horizontal(|ui| {
+                                // **卡面也挂那枚「未关联作品」**（稿上没画，拿主意的人 2026-09-20 定）：
+                                // 与表格那一路同一句词、同一枚标签（[`UNLINKED_LABEL`] 与
+                                // [`crate::table::tag`]，照稿 `.tag`）。摆在置信度前头，跟表上标签领着第二行一个位置。
+                                // 挂在这一行而不另起一行，是因为卡面下半截高度是定死的
+                                // （令牌 `card-info-height`），多一行会把最后一行挤出卡外。
+                                if 未关联.is_some() {
+                                    crate::table::tag(ui, UNLINKED_LABEL);
+                                }
                                 ui.colored_label(
                                     look::tier_color(row.tier(), ui.visuals()),
                                     row.confidence_label(),
