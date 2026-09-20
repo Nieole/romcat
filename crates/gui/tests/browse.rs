@@ -3389,6 +3389,139 @@ fn 卡片视图可切换并画出作品信息() {
     }
 }
 
+/// 一份**认出一个作品、另有两行认不出**的小库：卡片墙上那枚「未关联作品」要的正是这副样子。
+///
+/// **不走 [`shared::小库`]**：它写的结论一律 `work_id: None`，三行会全落成「未关联作品」，
+/// 分不出已关联那一档。这里照它那一套搭，只把 GBA 那一行接到一个真作品上。
+fn 一张认出作品两张没有的小库() -> App {
+    use romcat_core::catalog::identify::{Candidate, Identification, Provenance};
+    use romcat_core::catalog::{Catalog, Confidence, State};
+    use romcat_core::platform::Manifest;
+    use romcat_core::shape::Variant;
+    use romcat_core::site::Site;
+    use romcat_core::verdict::Store;
+
+    let mut catalog = Catalog::open_in_memory().expect("开得出中立库");
+    romcat_core::catalog::roots::add_root(
+        &catalog,
+        None,
+        shared::根,
+        std::path::Path::new("/主库"),
+    )
+    .expect("建得出根");
+    let 认出的 = shared::变体("GBA", 长路径);
+    let 没候选的 = shared::变体("SFC", "短.zip");
+    let 还没识别的 = shared::变体("FC", "另一个.nes");
+    catalog
+        .replace_variants(
+            &[认出的.clone(), 没候选的.clone(), 还没识别的],
+            1,
+            &Manifest::default(),
+        )
+        .expect("写得进变体");
+    let work = catalog
+        .add_work(shared::候选作品, Provenance::Identified)
+        .expect("建得出作品");
+    let 一条 =
+        |variant: &Variant, state: State, work_id, candidates: Vec<Candidate>| Identification {
+            variant_key: variant.key.clone(),
+            platform: None,
+            standalone: None,
+            state,
+            reason: None,
+            units: 1,
+            nkit: 0,
+            read_bytes: 0,
+            work_id,
+            release_id: None,
+            candidates,
+        };
+    catalog
+        .write_identifications(&[
+            一条(
+                &认出的,
+                State::Matched,
+                Some(work),
+                vec![shared::候选(&认出的, true, Confidence::High)],
+            ),
+            一条(&没候选的, State::Unmatched, None, Vec::new()),
+            // 「还没识别」那一行**结论表里一行都不写**（`shared::档::还没识别`）。
+        ])
+        .expect("写得进结论");
+    let store = Store::in_memory().expect("开得出沉淀库");
+    let mut app = App::new(
+        Site::in_memory(catalog, store, shared::根),
+        shared::干净工作目录("romcat-测试-浏览-卡片未关联标签"),
+    );
+    app.show_view(View::Browse);
+    app
+}
+
+#[test]
+fn 卡片墙上认不出作品的那几张挂着未关联作品标签_认出的不挂() {
+    // **卡面也挂那枚标签**（稿上没画，拿主意的人 2026-09-20 定）。
+    //
+    // 这一条**认的是卡片**，不是拿表格那把尺子来量：截图门里 `带标签的行正题露得出字`
+    // 查的是表格那两行怎么截断，而卡片墙上根本没有行。这里问的是「哪一张卡面上有那枚标签」——
+    // 标签摆在卡面下半截那一行的最左边，于是与那张卡的标题**左沿对齐**、就落在它下头
+    // `card-info-height` 那一截里。
+    let ctx = headless::context();
+    let mut app = 一张认出作品两张没有的小库();
+    跑(&ctx, &mut app, 2);
+    app.browse_and_site().0.show_cards();
+    跑(&ctx, &mut app, 2);
+
+    let 中 = 一栏::正中(
+        &ctx,
+        &headless::frame(&ctx, headless::input(), |ui| app.ui(ui)),
+    );
+    // 同一张卡上标题画**两遍**（封面里一遍、卡面下半截一遍）；标签跟的是下面那一遍。
+    let 卡面标题 = |名字: &str| -> egui::Rect {
+        中.字
+            .iter()
+            .filter(|(text, _)| text == 名字)
+            .map(|(_, rect)| *rect)
+            .max_by(|甲, 乙| 甲.min.y.total_cmp(&乙.min.y))
+            .unwrap_or_else(|| panic!("卡片墙上没有「{名字}」这张卡：\n{}", 中.全文()))
+    };
+    let 令牌 = romcat_gui::tokens::Tokens::builtin();
+    let (下半截, 留白) = (令牌.layout.card_info_height, 令牌.layout.tag_padding);
+    let 挂着标签 = |名字: &str| -> bool {
+        let 标题 = 卡面标题(名字);
+        中.字.iter().any(|(text, rect)| {
+            // 收上来的是**那几个字**画在哪儿，而标签的底色比字再往左一份 `tag-padding`
+            // （`table::tag`）——底色的左沿才是与卡面标题对齐的那一条。
+            text == romcat_gui::table::UNLINKED_LABEL
+                && (rect.min.x - 留白 - 标题.min.x).abs() <= 1.0
+                && rect.min.y >= 标题.min.y
+                && rect.max.y <= 标题.min.y + 下半截
+        })
+    };
+
+    for 名字 in ["短", "另一个"] {
+        assert!(
+            挂着标签(名字),
+            "认不出作品的那张卡「{名字}」该挂着「{}」：\n{}",
+            romcat_gui::table::UNLINKED_LABEL,
+            中.全文(),
+        );
+    }
+    assert!(
+        !挂着标签(shared::候选作品),
+        "认出了作品的那张卡「{}」不该挂「{}」：\n{}",
+        shared::候选作品,
+        romcat_gui::table::UNLINKED_LABEL,
+        中.全文(),
+    );
+    // 一共就画两枚——多一枚说明判据跑到别的卡上去了。
+    let 几枚 = 中
+        .字
+        .iter()
+        .filter(|(text, _)| *text == romcat_gui::table::UNLINKED_LABEL)
+        .count();
+    assert_eq!(几枚, 2, "卡片墙上该正好两枚标签：\n{}", 中.全文());
+}
+
 #[test]
 fn 卡片工具条显示覆盖率并能改排序() {
     let ctx = headless::context();
