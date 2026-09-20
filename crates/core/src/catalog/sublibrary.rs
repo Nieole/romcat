@@ -51,7 +51,8 @@ use crate::capability::Override;
 use crate::path;
 use crate::sublibrary::target::{NameRefusal, vet_name};
 use crate::sublibrary::{
-    Discarded, Exception, ExceptionRow, LoadedSelection, Rule, StoredRule, Sublibrary,
+    Discarded, Exception, ExceptionDetail, ExceptionRow, LoadedSelection, Rule, StoredRule,
+    Sublibrary,
 };
 use crate::sync::{FileKind, Manifest, ManifestFile, Stamp};
 
@@ -986,22 +987,57 @@ impl Catalog {
         kind: Exception,
         note: Option<&str>,
     ) -> Result<(), CatalogError> {
-        self.conn
-            .execute(
-                "INSERT INTO sublibrary_exception(sublibrary, variant_key, kind, note, at)
-                 VALUES(?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(sublibrary, variant_key) DO UPDATE SET
-                    kind = excluded.kind, note = excluded.note, at = excluded.at",
-                params![
-                    name,
-                    path::nfc(variant_key).into_owned(),
-                    kind.label(),
-                    note,
-                    super::now_secs()
-                ],
-            )
-            .map_err(|source| self.err(source))?;
+        self.set_exceptions(name, std::slice::from_ref(&variant_key), kind, note)?;
         Ok(())
+    }
+
+    /// 一批变体**整批**记成同一个方向的例外，一个事务里写完。交回写了几条。
+    ///
+    /// 屏上「搜索作品直接添加」那一下走的就是它（票 `gui-looks-like-the-design/22`）：一个**作品**底下
+    /// 常常挂着好几个变体，而例外落在**变体**这一层——一条一条写的话，中途写不动就会留下半个作品。
+    ///
+    /// **同一个变体上再记一条会覆盖方向**（与 [`Self::set_exception`] 同一条 upsert，它就是拿一个键调的这一支）：
+    /// 收入与排除是同一个决定的两面，一个变体在一个子库里不可能既收入又排除，因此**从一栏换到另一栏不会留下两条**。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn set_exceptions(
+        &mut self,
+        name: &str,
+        variant_keys: &[&str],
+        kind: Exception,
+        note: Option<&str>,
+    ) -> Result<usize, CatalogError> {
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let at = super::now_secs();
+        let tx = self.conn.transaction().map_err(to_err)?;
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO sublibrary_exception(sublibrary, variant_key, kind, note, at)
+                     VALUES(?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(sublibrary, variant_key) DO UPDATE SET
+                        kind = excluded.kind, note = excluded.note, at = excluded.at",
+                )
+                .map_err(to_err)?;
+            for variant_key in variant_keys {
+                insert
+                    .execute(params![
+                        name,
+                        path::nfc(variant_key).into_owned(),
+                        kind.label(),
+                        note,
+                        at
+                    ])
+                    .map_err(to_err)?;
+            }
+        }
+        tx.commit().map_err(to_err)?;
+        Ok(variant_keys.len())
     }
 
     /// 忘掉一条例外——从此这个变体听规则的。返回它本来在不在。
@@ -1046,6 +1082,101 @@ impl Catalog {
             .map_err(|source| self.err(source))?;
         rows.collect::<Result<_, _>>()
             .map_err(|source| self.err(source))
+    }
+
+    /// 读一个子库的例外，**连库里那个变体眼下是谁**（[`ExceptionDetail`]）：作品（显示标题）、平台、容量。
+    /// 手动例外那张表（票 `gui-looks-like-the-design/22`）逐条写的就是它。
+    ///
+    /// **按记下的时刻倒着排**，同一刻的按键排：刚记的那一条摆最上面——人刚按完「包含」，
+    /// 第一眼要看见的就是它进没进去。（[`Self::sublibrary_exceptions`] 那一份照旧按键排：
+    /// 求值不看次序，而报告里要的是一份稳定的名单。）
+    ///
+    /// **库里眼下没有那个变体的那几条照旧交出来**，平台与容量是 `None`——例外是永久记住的
+    /// （ADR-0016），盘没插不该让它从屏上消失。
+    ///
+    /// 显示标题由 [`title::choose`](crate::title::choose) 挑，`priorities` 要与浏览屏主列表、详情面板、
+    /// 导出交的是同一份（工作目录里那份优先级表），不然同一个作品在两处是两个名字。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn sublibrary_exception_details(
+        &self,
+        name: &str,
+        priorities: &crate::scrape::Priorities,
+    ) -> Result<Vec<ExceptionDetail>, CatalogError> {
+        // **方向那一列只在一处认**（[`Self::sublibrary_exceptions`]，连同库被人手改坏时退成「排除」
+        // 那条判断）：这一趟只在旁边补上库里的事实。
+        let mut rows = self.sublibrary_exceptions(name)?;
+        rows.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.variant_key.cmp(&b.variant_key)));
+        // 头一趟：库里眼下有没有这一份、它是谁。**逐条按主键取**，不拼一条长 `IN`——例外一台
+        // 几十条，每一条都是一次索引定位，而把几十个键塞进一条 SQL 要跟着分批（`KEYS_PER_QUERY`）。
+        // 这一步 `work` 那一格装的还是**作品名**，显示标题在第二趟里换。
+        let mut details: Vec<ExceptionDetail> = Vec::with_capacity(rows.len());
+        {
+            let mut statement = self
+                .conn
+                .prepare(
+                    "SELECT variant.platform, variant.bytes, work.name
+                       FROM variant LEFT JOIN work ON work.id = variant.work_id
+                      WHERE variant.key = ?1",
+                )
+                .map_err(|source| self.err(source))?;
+            for row in rows {
+                let seen = statement
+                    .query_row(params![row.variant_key], |found| {
+                        Ok((
+                            found.get::<_, Option<String>>(0)?,
+                            found.get::<_, i64>(1)?,
+                            found.get::<_, Option<String>>(2)?,
+                        ))
+                    })
+                    .optional()
+                    .map_err(|source| self.err(source))?;
+                details.push(match seen {
+                    Some((platform, bytes, work)) => ExceptionDetail {
+                        row,
+                        work,
+                        platform,
+                        // 容量是下界（ADR-0021）；库里存的是 `INTEGER`，负数只可能是被人手改坏了。
+                        bytes: Some(u64::try_from(bytes).unwrap_or(0)),
+                    },
+                    // **库里眼下没有这一份**：平台与容量都不写，`missing()` 照它答。
+                    None => ExceptionDetail {
+                        row,
+                        work: None,
+                        platform: None,
+                        bytes: None,
+                    },
+                });
+            }
+        }
+        // 第二趟：这几条指到的作品那几份叫法一起读回来，逐个交给 `title::choose`
+        // （与 `work_page_with_titles` 同一处挑）。
+        let works: Vec<&str> = details
+            .iter()
+            .filter_map(|detail| detail.work.as_deref())
+            .collect();
+        let titles = self.titles_of_works(&works)?;
+        for detail in &mut details {
+            // **同一个作品可以挂着好几条例外**：这份叫法表按作品**查**、不取走，不然第二条就没名字了。
+            let Some(work) = detail.work.as_deref() else {
+                continue;
+            };
+            let Some(entries) = titles.get(work) else {
+                continue;
+            };
+            detail.work = Some(
+                crate::title::choose(
+                    &crate::title::TitleSet {
+                        work: work.to_string(),
+                        entries: entries.clone(),
+                    },
+                    priorities,
+                )
+                .display,
+            );
+        }
+        Ok(details)
     }
 
     /// 读一个子库的**按平台覆盖**（票 `gui-looks-like-the-design/21`）：平台名 → 覆盖成什么。一个都没有是空表。
