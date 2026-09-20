@@ -7,7 +7,9 @@
 **Blocked by:** 01、02、03；撤任意一批由 `gui-answers-all-six/06` 提供。
 （截图那一条要等 `05`。）
 
-**Status:** ready-for-agent
+**Status:** done
+
+**门禁：** 2026-09-20 在 `q5/gl-18-queue-screen-rearranged` 上跑 `cargo xtask gate -j 3 --test-threads 3 --keep-going`（并过 main `57bec44`），六步全绿：fmt 1s、glossary 1s、check 0s、clippy 0s、test 636s（2,225 条通过、0 失败）、doc 5s。截图门 63 张（其中本票八张）不带更新连跑两遍都绿。
 
 ⚠️ **裁决记录那一块的能力由 `gui-answers-all-six/06` 建**（从沉淀库列批、撤任意一批、
 被后来的批盖住时拦下）——本票**只重排它**，不重写一份撤销逻辑。两张动同一屏，不排同一波。
