@@ -3054,7 +3054,12 @@ impl 现场 {
         写(&池.path_of(&hash, "png"), bytes);
         let (_, site, _) = self.app.roots_site_and_tasks();
         site.catalog
-            .put_media(&hash, "png", bytes.len() as u64)
+            .put_media(
+                &hash,
+                "png",
+                bytes.len() as u64,
+                romcat_core::scrape::measure::Measured::default(),
+            )
             .expect("池里记得下");
         site.catalog
             .put_scraped(&[Harvested {

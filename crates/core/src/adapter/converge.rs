@@ -44,6 +44,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::catalog::export::ExportedEntry;
 use crate::catalog::identify::Standalone;
 use crate::catalog::scrape::ScrapedValue;
 use crate::catalog::{Catalog, CatalogError, ReleaseRow, VariantRow};
@@ -166,6 +167,14 @@ pub struct Converged {
     pub extra_content_members: u64,
     /// 多于一个变体、也就是**收敛真的起了作用**的条目有几个。
     pub converged_entries: u64,
+    /// **这一趟收敛出来的每个条目是谁**：挂在哪一层、叫什么、哪个平台。
+    ///
+    /// 导出走完之后整批落进 `export_entry`（[`Catalog::mark_exported`]），作品详情页
+    /// 状态块「导出」那一行读的就是它（票 `gui-looks-like-the-design/34`）。
+    ///
+    /// **与 [`Self::entries`] 那个数同一处产出**：那个计数与这份名单在同一个循环里攒，
+    /// 两处分开数迟早会给出「写了 28,529 个条目」而名单里只有 28,528 条的那种账。
+    pub written: Vec<ExportedEntry>,
 }
 
 impl Converged {
@@ -349,6 +358,16 @@ pub fn run_within(
                 Anchor::Work(_) => out.work_entries += 1,
                 Anchor::Loose(_) => out.loose_entries += 1,
             }
+            // **这个条目是谁**：认出作品的挂作品名，没认出来的挂那个变体的键——与刮削
+            // 那几张表同一套自然键（`catalog::scrape` 的模块文档）。
+            out.written.push(ExportedEntry {
+                anchor: match one.anchor {
+                    Anchor::Work(_) => AnchorKind::Work,
+                    Anchor::Loose(_) => AnchorKind::Variant,
+                },
+                subject: one.anchor.name().to_string(),
+                platform: platform.clone(),
+            });
             entries.push(Entry::new(Body::Game(build_game(
                 &one.anchor,
                 &one.members,
@@ -874,6 +893,7 @@ mod tests {
                 region: Some("Japan".to_string()),
                 serial: None,
                 languages: Some("Ja".to_string()),
+                revision: None,
             },
         );
         let 日 = 变体("FC/日版.zip", Some(9));

@@ -17,10 +17,11 @@ use romcat_core::catalog::browse::{
     WorkQuery, WorkRow,
 };
 use romcat_core::catalog::identify::{Candidate, Identification, NOT_RUN_LABEL, Provenance};
-use romcat_core::catalog::{Catalog, Confidence, State};
+use romcat_core::catalog::{Catalog, Confidence, NewRelease, State};
 use romcat_core::dat::Convention;
 use romcat_core::dat::chinese::ChineseMark;
 use romcat_core::platform::Manifest;
+use romcat_core::scrape::measure::Measured;
 use romcat_core::scrape::priority::VERDICT;
 use romcat_core::scrape::{AnchorKind, Field};
 use romcat_core::shape::{Role, Variant};
@@ -128,6 +129,7 @@ fn 建库() -> Catalog {
                 variant_key: 键(at, n),
                 platform: None,
                 standalone: None,
+                edition: None,
                 state: State::Matched,
                 reason: None,
                 units: 1,
@@ -298,6 +300,7 @@ fn 连识别都没跑过的与跑过了没候选的在同一张表上印两个�
             variant_key: 跑过了.clone(),
             platform: None,
             standalone: None,
+            edition: None,
             state: State::Unmatched,
             reason: None,
             units: 1,
@@ -408,6 +411,7 @@ fn 一行底下只要还剩一个变体没跑过识别这一行就说还没识�
         variant_key: key,
         platform: None,
         standalone: None,
+        edition: None,
         state: State::Unmatched,
         reason: None,
         units: 1,
@@ -1311,6 +1315,7 @@ fn 作品的中文版本照首选变体那条规则判_汉化压过官中_首选
             variant_key: 键(at, n),
             platform: None,
             standalone: None,
+            edition: None,
             state: State::Matched,
             reason: None,
             units: 1,
@@ -1398,6 +1403,7 @@ fn 变体上定下来的那条候选与判定依据摆的那一条由核心库�
             variant_key: 键(4, 0),
             platform: None,
             standalone: None,
+            edition: None,
             state: State::Unmatched,
             reason: None,
             units: 1,
@@ -1498,6 +1504,7 @@ fn 几个变体的媒体清单并成一份_作品上那几份只留一遍() {
         hash: hash.to_owned(),
         ext: "png".to_owned(),
         bytes: 1,
+        measured: Measured::default(),
         at: None,
         in_pool: None,
         evidence: "测试".to_owned(),
@@ -1548,4 +1555,118 @@ fn 判定依据那一句照依据形状各段排_来源_数据文件_哈希口�
         .next()
         .expect("有它自己");
     assert_eq!(散落.basis_line(), None);
+}
+
+#[test]
+fn 第几版两层一条回退链_裁决压过发行版的修订_都没有就说不出() {
+    // 票 `gui-looks-like-the-design/34`，词表**第几版**（2026-09-20 拿主意的人定）：
+    // 裁决 > DAT 条目名里的修订 > 说不出。**挑哪一层只在核心库一处判**（ADR-0024），
+    // 界面只把它印出来。
+    use romcat_core::catalog::identify::Provenance;
+    use romcat_core::scrape::Priorities;
+
+    let mut catalog = Catalog::open_in_memory().expect("开得出中立库");
+    let 键 = |n: usize| format!("库/GB/第{n}份.zip");
+    catalog
+        .replace_variants(
+            &(0..3)
+                .map(|n| Variant {
+                    key: 键(n),
+                    platform: Some("GB".to_owned()),
+                    rule: romcat_core::shape::SINGLE_FILE_RULE.to_owned(),
+                    main_key: 键(n),
+                    manual: false,
+                    files: 1,
+                    bytes: 1_000,
+                    unreadable_files: 0,
+                    members: vec![(键(n), Role::Main)],
+                })
+                .collect::<Vec<_>>(),
+            1,
+            &Manifest::default(),
+        )
+        .expect("变体写得进");
+    let work = catalog
+        .add_work("口袋妖怪", Provenance::Identified)
+        .expect("建得出作品");
+    // 头一条发行版名字里带修订，第二条不带——发行版那一层的两种情形。
+    let 带修订 = catalog
+        .add_release(
+            work,
+            &NewRelease {
+                platform: Some("GB"),
+                region: Some("Japan"),
+                serial: None,
+                languages: None,
+                revision: Some("Rev 1"),
+            },
+            Provenance::Identified,
+        )
+        .expect("建得出发行版");
+    let 不带 = catalog
+        .add_release(
+            work,
+            &NewRelease {
+                platform: Some("GB"),
+                region: Some("USA"),
+                serial: None,
+                languages: None,
+                revision: None,
+            },
+            Provenance::Identified,
+        )
+        .expect("建得出发行版");
+    let 一条结论 = |key: String, release: Option<i64>, edition: Option<&str>| Identification {
+        variant_key: key,
+        platform: None,
+        standalone: None,
+        edition: edition.map(str::to_owned),
+        state: State::Matched,
+        reason: None,
+        units: 1,
+        nkit: 0,
+        read_bytes: 0,
+        work_id: Some(work),
+        release_id: release,
+        candidates: Vec::new(),
+    };
+    catalog
+        .write_identifications(&[
+            // 甲：发行版带修订，没人裁过 → 听发行版那一层的。
+            一条结论(键(0), Some(带修订), None),
+            // 乙：发行版也带修订，**但人裁过** → 裁决压过它。
+            一条结论(键(1), Some(带修订), Some("v1.2")),
+            // 丙：发行版不带修订，也没人裁过 → 说不出。
+            一条结论(键(2), Some(不带), None),
+        ])
+        .expect("结论写得进");
+    for (n, release) in [(0, Some(带修订)), (1, Some(带修订)), (2, Some(不带))] {
+        catalog
+            .link_variant(&键(n), Some(work), release)
+            .expect("挂得上");
+    }
+
+    let 第几版 = |key: &str| {
+        catalog
+            .variant_detail(key, &Priorities::builtin(), None)
+            .expect("读得出")
+            .expect("有这个变体")
+            .edition()
+            .map(str::to_owned)
+    };
+    assert_eq!(
+        第几版(&键(0)).as_deref(),
+        Some("Rev 1"),
+        "没人裁过时看已接受那条候选撞上的 DAT 条目名里的修订"
+    );
+    assert_eq!(
+        第几版(&键(1)).as_deref(),
+        Some("v1.2"),
+        "裁决说了就听裁决——「这是谁汉化的第几版」只有人说得出（ADR-0008）"
+    );
+    assert_eq!(
+        第几版(&键(2)),
+        None,
+        "名字里没有修订标记就是没有，不拿 1.0 去补（2026-09-20 拿主意的人定）"
+    );
 }

@@ -201,7 +201,14 @@ fn 挂上(catalog: &mut romcat_core::catalog::Catalog, 变体: &str, hash: &str,
     use romcat_core::catalog::scrape::{Harvested, HarvestedMedia};
     use romcat_core::scrape::{AnchorKind, MediaKind};
 
-    catalog.put_media(hash, "png", bytes).expect("池里记得下");
+    catalog
+        .put_media(
+            hash,
+            "png",
+            bytes,
+            romcat_core::scrape::measure::Measured::default(),
+        )
+        .expect("池里记得下");
     catalog
         .put_scraped(&[Harvested {
             anchor: AnchorKind::Variant.label().to_string(),

@@ -1552,6 +1552,7 @@ mod tests {
             region: region.map(ToString::to_string),
             serial: None,
             languages: languages.map(ToString::to_string),
+            revision: None,
         };
         let 哪一侧 = |release: ReleaseRow, marks: Option<&BTreeSet<ChineseMark>>| {
             chinese_release(Some(&release), marks).map(|chinese| chinese.seam)
@@ -1598,6 +1599,7 @@ mod tests {
             region: Some("Taiwan".to_string()),
             serial: None,
             languages: Some("En,Zh".to_string()),
+            revision: None,
         };
         let marks = BTreeSet::from([ChineseMark::FanTranslated, ChineseMark::Official]);
         let chinese = chinese_release(Some(&release), Some(&marks));

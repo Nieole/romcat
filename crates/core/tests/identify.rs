@@ -1161,7 +1161,12 @@ fn 作品锚点在重跑识别之后仍然指得中() {
     // 往作品锚点上挂两样东西：一条刮削值（年份）与一份媒体。
     现场
         .catalog
-        .put_media("deadbeef", "png", 1)
+        .put_media(
+            "deadbeef",
+            "png",
+            1,
+            romcat_core::scrape::measure::Measured::default(),
+        )
         .expect("媒体池收得下");
     现场
         .catalog

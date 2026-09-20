@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use romcat_core::catalog::identify::{ContentHash, Identification, Provenance};
 use romcat_core::catalog::scrape::{Harvested, HarvestedValue};
 use romcat_core::catalog::{
-    Candidate, Catalog, CatalogError, Confidence, EntryRecord, State, Verdict,
+    Candidate, Catalog, CatalogError, Confidence, EntryRecord, NewRelease, State, Verdict,
 };
 use romcat_core::collection;
 use romcat_core::dat::Convention;
@@ -401,6 +401,7 @@ pub fn queue_with_zh(rows: u64) -> Result<(Catalog, Option<ZhMatch>), CatalogErr
                 variant_key: key.clone(),
                 platform: None,
                 standalone: None,
+                edition: None,
                 state,
                 reason: (state == State::NoEvidence)
                     .then(|| REASONS[(n as usize) % REASONS.len()].to_string()),
@@ -929,6 +930,7 @@ pub fn browse_shaped(rows: u64, works_count: usize) -> Result<Catalog, CatalogEr
     use romcat_core::catalog::scrape::HarvestedMedia;
     use romcat_core::catalog::title::TitleRow;
     use romcat_core::dat::chinese::ChineseMark;
+    use romcat_core::scrape::measure::Measured;
     use romcat_core::scrape::priority::VERDICT;
     use romcat_core::scrape::{AnchorKind, Field, MediaKind};
     use romcat_core::title::{Language, TitleKind};
@@ -1018,12 +1020,19 @@ pub fn browse_shaped(rows: u64, works_count: usize) -> Result<Catalog, CatalogEr
     for (at, work) in works.iter().enumerate() {
         for (which, (region, languages)) in REGIONS.iter().enumerate() {
             let platform = PLATFORMS[(at + which) % PLATFORMS.len()];
+            let serial = format!("SLPS-{:05}", at * 10 + which);
             releases.push(catalog.add_release(
                 *work,
-                Some(platform),
-                Some(region),
-                Some(&format!("SLPS-{:05}", at * 10 + which)),
-                Some(languages),
+                &NewRelease {
+                    platform: Some(platform),
+                    region: Some(region),
+                    serial: Some(&serial),
+                    languages: Some(languages),
+                    // 合成数据里**一条修订标记都不摆**：那一格的常态就是说不出
+                    // （词表**第几版**），摆一个出来等于让基线图上那一行看不出
+                    // 「没有就是没有」长什么样。
+                    revision: None,
+                },
                 Provenance::Identified,
             )?);
         }
@@ -1052,6 +1061,7 @@ pub fn browse_shaped(rows: u64, works_count: usize) -> Result<Catalog, CatalogEr
             variant_key: key_of(i),
             platform: None,
             standalone: None,
+            edition: None,
             state,
             reason: (state == State::NoEvidence)
                 .then(|| REASONS[(i as usize) % REASONS.len()].to_string()),
@@ -1194,7 +1204,23 @@ pub fn browse_shaped(rows: u64, works_count: usize) -> Result<Catalog, CatalogEr
                 continue;
             }
             let hash = format!("{:040x}", at * 2 + salt);
-            catalog.put_media(&hash, "png", 64 * 1024)?;
+            // **尺寸照真库的形状摆**：封面是竖的、截图是横的（`scrape::measure` 入池
+            // 那一刻量下来的那两格）。合成数据里没有视频，所以时长那一格一直是空的。
+            let (width, height) = if kind == MediaKind::Cover {
+                (512, 682)
+            } else {
+                (320, 240)
+            };
+            catalog.put_media(
+                &hash,
+                "png",
+                64 * 1024,
+                Measured {
+                    width: Some(width),
+                    height: Some(height),
+                    duration_ms: None,
+                },
+            )?;
             media.push(HarvestedMedia {
                 kind: kind.label().to_string(),
                 hash,
