@@ -67,6 +67,18 @@ pub fn row_height() -> f32 {
 /// 那种行——卡片视图与作品详情页挂的是同一个标签，所以摆在这儿一处。
 pub const UNLINKED_LABEL: &str = "未关联作品";
 
+/// **这一行是不是「未关联作品」，是的话它的正题是什么**（不是就 `None`）。
+///
+/// 判据不在这儿：认不认得出作品由核心库答（[`WorkRow::title`]／[`WorkAnchor::Loose`]，
+/// ADR-0024），这里只是把那一问**收在一处**——表格那一路（`table::name_cell`）与卡片墙
+/// （`browse::Screen::card_grid`）都从这儿问，两边才不会各写一套判据、有一天判得不一样。
+///
+/// `rules` 是剥正题的那份规则，两路交进来的都是工作目录里那份 `name-rules.toml`。
+#[must_use]
+pub fn unlinked_title(work: &WorkRow, rules: &Rules) -> Option<String> {
+    work.title(rules)
+}
+
 /// 窗口默认一次取多少行。
 ///
 /// 视口撑死几十行，取 512 是给上下滚动留预取余量：往下翻过 3/4 个窗口才需要再查一次库。
@@ -774,7 +786,7 @@ fn name_cell(ui: &mut egui::Ui, work: &WorkRow, rules: &Rules, shelf: Option<&mu
     // 是不是由核心库答（`WorkRow::non_game_asset`），这里照着标，
     // 不自己判（ADR-0024）。
     let hit = work.hit.filter(|hit| *hit > SearchHit::Title);
-    if let Some(title) = work.title(rules) {
+    if let Some(title) = unlinked_title(work, rules) {
         two_lines(ui, work, hit, &title, Some(UNLINKED_LABEL), Second::Path);
         return;
     }

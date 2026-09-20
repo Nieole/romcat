@@ -1553,7 +1553,9 @@ fn 卡不在手边算得出选中多少_装不装得下如实说算不出() {
     // 4KB 比 12KiB 小——可那只是选中容量；卡不在手边，现占算不出。
     match &report.fit {
         romcat_core::sublibrary::Fit::Unknown { why } => {
-            assert!(why.contains("目标不在位"), "{why}");
+            // 这句话是**核心库那一层**说的（`sync::observe`），词与核心自己那条断言同一个
+            // （`crates/core/tests/sublibrary.rs` 的 `目标不在位时装不装得下如实说算不出_不给一个数`）。
+            assert!(why.contains("目标未连接"), "{why}");
         }
         romcat_core::sublibrary::Fit::Known(room) => {
             panic!("卡不在手边却给了一个数：{room:?}");

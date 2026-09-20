@@ -241,6 +241,43 @@ fn ffmpeg不在时视频那一格是占位而不是报错() {
 }
 
 #[test]
+fn 换过的抽帧程序换一次池子也还在() {
+    // **换池子不该把换过的抽帧程序一起丢掉**：那个程序跟着的是这台机器（装没装 ffmpeg），
+    // 不是这个池子。丢了的话后台会去拉这台机器上真的 ffmpeg——装了的机器上视频那一格
+    // 落进的是「首帧抽不出来」，而不是「没装 ffmpeg」那一档。
+    //
+    // 这条守的是**真出过的一次**：截图门里作品详情页那 12 条，夹具先换程序、后指池子，
+    // 一指池子换过的那个就没了，于是 `lacks_ffmpeg()` 永远为假、等到跑满十万帧才失败。
+    let ctx = headless::context();
+    let mut 场 = 现场("gui-媒体-换池子不丢程序");
+    let (browse, _) = 场.app.browse_and_site();
+    browse.gallery_mut().set_program(preview::NO_SUCH_PROGRAM);
+    // 再指一次同一个池子——夹具那边是「先换程序、后指池子」，同一副形状。
+    browse.set_pool(Some(场.pool.clone()));
+    等图(&ctx, &mut 场.app, Duration::from_secs(20));
+
+    let 视频 = 场
+        .app
+        .browse()
+        .detail()
+        .expect("点开得了")
+        .media_items
+        .iter()
+        .find(|item| item.hash == 场.片子)
+        .expect("那条视频该列出来")
+        .clone();
+    let look = 场.app.browse().gallery().look(&视频);
+    let Look::Missing(why) = look else {
+        panic!("换过的程序还在的话，视频那一格该是占位，实际是 {look:?}");
+    };
+    assert!(
+        why.is_no_ffmpeg(),
+        "换过的抽帧程序被换池子丢了——该说的是「没这个程序」，实际是 {why:?}",
+    );
+    assert!(场.app.browse().gallery().lacks_ffmpeg());
+}
+
+#[test]
 fn 切换选中那一帧不解码() {
     // 「大图不拖慢翻行——切换选中时不阻塞画帧」。**头一帧只把活排出去**，
     // 图是后面某一帧的事：解码若摊在画帧那条线程上，第一帧结束时它就已经在了。
