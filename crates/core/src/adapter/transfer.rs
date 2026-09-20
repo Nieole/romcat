@@ -818,7 +818,9 @@ pub fn export_task(
             .media
             .as_ref()
             .is_some_and(|media| media.linked + media.copied + media.already > 0);
-        catalog.mark_exported(report.entries, 铺了媒体)?;
+        // **逐条那批与整库那个时刻同一道闸、同一个时刻戳**（`Catalog::mark_exported`）：
+        // 两处分了家，屏上就会有一行说「导过了」、另一行说「没有」。
+        catalog.mark_exported(report.entries, 铺了媒体, adapter.name(), &converged.written)?;
     }
     Ok(report)
 }

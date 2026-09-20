@@ -193,6 +193,7 @@ pub fn 小库(
                 variant_key: variant.key.clone(),
                 platform: None,
                 standalone: None,
+                edition: None,
                 state,
                 reason: None,
                 units: 1,

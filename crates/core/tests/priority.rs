@@ -187,6 +187,7 @@ fn 小库() -> Catalog {
             variant_key: format!("{根}/{path}"),
             platform: None,
             standalone: None,
+            edition: None,
             state: State::Matched,
             reason: None,
             units: 1,

@@ -163,7 +163,7 @@ CREATE TABLE IF NOT EXISTS sublibrary_manifest(
 /// 给老表补上后面几张票加的那几列。
 ///
 /// `CREATE TABLE IF NOT EXISTS` 对**已经存在**的表一个字都不改，于是加一列得单独走
-/// 一趟 `ALTER TABLE`。判有没有走 `PRAGMA table_info`，因此重复调用是安全的。
+/// 一趟 `ALTER TABLE`。补列那一下走 [`add_column`](super::add_column)——**全仓只有那一处**。
 ///
 /// **这不算结构版本加 1**（见 [`SCHEMA_VERSION`](crate::catalog::SCHEMA_VERSION)）：
 /// 判据是「旧数据会不会被读错」。三列在老行上都取得到一个与从前完全一致的含义
@@ -171,40 +171,21 @@ CREATE TABLE IF NOT EXISTS sublibrary_manifest(
 /// 「它就在目标上」，`capability` 为 NULL 就是「没挑过能力档案，不转换也不检查」，
 /// 那正是加这几列之前的唯一可能。反过来，旧版程序按列名取值，多几列它也照样读得动。
 pub(super) fn add_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    add_column(conn, "sublibrary", "target_raw", "TEXT")?;
-    add_column(conn, "sublibrary", "capability", "TEXT")?;
-    add_column(
+    super::add_column(conn, "sublibrary", "target_raw", "TEXT")?;
+    super::add_column(conn, "sublibrary", "capability", "TEXT")?;
+    super::add_column(
         conn,
         "sublibrary",
         "capacity_by_device",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
-    add_column(
+    super::add_column(
         conn,
         "sublibrary_manifest",
         "absent",
         "INTEGER NOT NULL DEFAULT 0",
-    )
-}
-
-/// 一张表上缺了这一列就补上；已经有了就什么都不做。
-fn add_column(
-    conn: &rusqlite::Connection,
-    table: &str,
-    column: &str,
-    decl: &str,
-) -> rusqlite::Result<()> {
-    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let mut rows = statement.query([])?;
-    while let Some(row) = rows.next()? {
-        if row.get::<_, String>(1)? == column {
-            return Ok(());
-        }
-    }
-    drop(rows);
-    drop(statement);
-    // 表名与列名都是这个文件里写死的字面量，不来自外面。
-    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))
+    )?;
+    Ok(())
 }
 
 /// **删掉之前整份留下来的一个子库**：它那一行、规则、例外、清单，**逐列原样**。

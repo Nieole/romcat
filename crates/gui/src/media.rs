@@ -24,6 +24,7 @@ use std::path::PathBuf;
 use romcat_core::catalog::Catalog;
 use romcat_core::catalog::browse::{WorkAnchor, WorkRow};
 use romcat_core::catalog::detail::MediaItem;
+use romcat_core::scrape::measure::Measured;
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::scrape::preview::{self, EDGE, Frame, Key, Loader, Missing, Preview, Thumbnail};
 
@@ -261,8 +262,12 @@ impl Gallery {
             for frame in std::mem::take(&mut self.pending) {
                 // **先 put_media 再 put_media_frame**：`media_frame.frame` 指着
                 // `media(hash)`，反过来写外键当场不认。
+                //
+                // **首帧那一行不记尺寸**（交一份空的 `Measured`）：它是抽出来的一张
+                // 内部图，`media_ref` 里没有它，永远不会成为详情页上的一格——那三格
+                // 记了也没人读，而抽帧那条路手上没有量尺要的那个落点。
                 let recorded = catalog
-                    .put_media(&frame.hash, "png", frame.bytes)
+                    .put_media(&frame.hash, "png", frame.bytes, Measured::default())
                     .and_then(|()| catalog.put_media_frame(&frame.video, &frame.hash));
                 if let Err(source) = recorded {
                     出的错 = Some(format!("首帧记不进中立库：{source}"));
@@ -1108,6 +1113,7 @@ mod tests {
             hash: "abcdef".to_string(),
             ext: "png".to_string(),
             bytes: 0,
+            measured: Measured::default(),
             at: in_pool.map(|_| PathBuf::from("/池/ab/abcdef.png")),
             in_pool,
             evidence: "测试".to_string(),

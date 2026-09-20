@@ -430,6 +430,7 @@ fn 不说平台的结论写回去不盖掉识别判定的那个() {
             variant_key: key.clone(),
             platform: None,
             standalone: None,
+            edition: None,
             state: State::Skipped,
             reason: None,
             units: 1,

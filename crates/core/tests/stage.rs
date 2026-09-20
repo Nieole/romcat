@@ -1039,7 +1039,8 @@ fn 工序那几行底下那句小字_数各由一个查询函数交出来_与别
     // 铺出了媒体的那一趟（`transfer::export` 末尾照那一趟的媒体账记 `true`），那一句照实换成连媒体也写了。
     现场
         .catalog
-        .mark_exported(报告.entries, true)
+        // 这一条量的是库屏那一行底下那句小字，逐条那批与它无关——交一份空的名单。
+        .mark_exported(报告.entries, true, "Pegasus", &[])
         .expect("记得下");
     let stages = Stages::survey(&现场.catalog, &现场.store, 主库标识);
     assert_eq!(
@@ -1596,4 +1597,96 @@ fn 挡下一份_写成了别的几份_那一趟也不打时刻戳() {
     );
     assert_eq!(现场.catalog.exported_at().expect("读得出"), None);
     assert!(现场.导出那一行().render().contains("还没跑过"));
+}
+
+#[test]
+fn 逐条记下导出去的是谁_真库量级上那一笔写库的代价量得出来() {
+    // 票 `gui-looks-like-the-design/34` 里那条**预测**的实测：`mark_exported` 多写的那
+    // 28,529 行（真库的条目数，`docs/library-facts.md`）在一趟 2.7 秒的导出里占多少。
+    //
+    // **不断言一个时间上限**——挂钟在忙机器上不稳，钉一个数就是钉一条会随机变红的测试。
+    // 这里断言的是**量得出来**与**行为对**：整批写完、读得回来、再写一趟是整份重写
+    // 而不是越堆越多。真数打在测试输出里，票面照它写（`cargo test -- --nocapture`）。
+    use romcat_core::catalog::export::ExportedEntry;
+    use romcat_core::scrape::AnchorKind;
+
+    /// 真库上导出收敛出几个条目（`docs/library-facts.md`）。
+    const 条目数: usize = 28_529;
+    /// 真库里的平台目录数量级（同上）。摆几个是为了让 `platform` 那一列不是同一个字。
+    const 几个平台: [&str; 4] = ["FC", "GB", "PS1", "PSP"];
+
+    let mut catalog = Catalog::open_in_memory().expect("开得出中立库");
+    let 写出去的: Vec<ExportedEntry> = (0..条目数)
+        .map(|n| ExportedEntry {
+            anchor: AnchorKind::Work,
+            subject: format!("作品{n:05}"),
+            platform: 几个平台[n % 几个平台.len()].to_owned(),
+        })
+        .collect();
+
+    let 起手 = std::time::Instant::now();
+    catalog
+        .mark_exported(条目数 as u64, false, "Pegasus", &写出去的)
+        .expect("记得下");
+    let 头一趟 = 起手.elapsed();
+
+    let 起手 = std::time::Instant::now();
+    catalog
+        .mark_exported(条目数 as u64, false, "Pegasus", &写出去的)
+        .expect("记得下");
+    let 第二趟 = 起手.elapsed();
+    println!(
+        "逐条记账 {} 行：头一趟 {:?}，重写一趟（先整份删掉）{:?}",
+        条目数, 头一趟, 第二趟
+    );
+
+    // 行为：每一条都读得回来，时刻与整库那个数是同一个。
+    let 时刻 = catalog.exported_at().expect("读得出").expect("打上了");
+    let 头一条 = catalog
+        .entry_exported(AnchorKind::Work, "作品00000")
+        .expect("读得出")
+        .expect("记下了");
+    assert_eq!(头一条.format, "Pegasus");
+    assert_eq!(头一条.at, 时刻, "逐条那批与整库那个时刻得是同一个数");
+
+    // **整份重写，不累积**：下一趟少写一个作品，那一个就该跟着消失——留着它的话，
+    // 已经从库里消失的作品会永远说着「已导出」。
+    catalog
+        .mark_exported((条目数 - 1) as u64, false, "Pegasus", &写出去的[1..])
+        .expect("记得下");
+    assert_eq!(
+        catalog
+            .entry_exported(AnchorKind::Work, "作品00000")
+            .expect("读得出"),
+        None,
+        "这一趟没写它，上一趟那一行就该整份被删掉"
+    );
+    assert!(
+        catalog
+            .entry_exported(AnchorKind::Work, "作品00001")
+            .expect("读得出")
+            .is_some(),
+        "这一趟写了的照旧在"
+    );
+
+    // **别的格式那几批不动**：换个格式重导一趟不该把这一趟抹掉。
+    catalog
+        .mark_exported(
+            1,
+            false,
+            "ES-DE",
+            &[ExportedEntry {
+                anchor: AnchorKind::Work,
+                subject: "作品00001".to_owned(),
+                platform: "FC".to_owned(),
+            }],
+        )
+        .expect("记得下");
+    assert!(
+        catalog
+            .entry_exported(AnchorKind::Work, "作品00002")
+            .expect("读得出")
+            .is_some(),
+        "换个格式导一趟，Pegasus 那一批一条都不该少"
+    );
 }

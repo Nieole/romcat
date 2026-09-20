@@ -3103,7 +3103,12 @@ fn 一个有封面一个没有的小库() -> (App, romcat_core::testing::TempDir
     {
         let (_, site) = app.browse_and_site();
         site.catalog
-            .put_media(&hash, "png", bytes.len() as u64)
+            .put_media(
+                &hash,
+                "png",
+                bytes.len() as u64,
+                romcat_core::scrape::measure::Measured::default(),
+            )
             .expect("记得进库");
         site.catalog
             .put_scraped(&[romcat_core::catalog::scrape::Harvested {
@@ -3427,6 +3432,7 @@ fn 一张认出作品两张没有的小库() -> App {
             variant_key: variant.key.clone(),
             platform: None,
             standalone: None,
+            edition: None,
             state,
             reason: None,
             units: 1,

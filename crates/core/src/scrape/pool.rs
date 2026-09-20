@@ -107,6 +107,15 @@ pub enum Ingested {
 #[derive(Debug, Clone)]
 pub struct MediaPool {
     root: PathBuf,
+    /// 量视频那一下调的外部程序（[`preview::FFMPEG`](super::preview::FFMPEG)）。
+    ///
+    /// **它挂在池上，不是给 [`ingest`] 与 [`store`] 各加一个参数**：两条进池的路前半截
+    /// 不同、收尾那一段共用（`adopt_into`），而量尺正落在那一段上——挂在池上，加它
+    /// 这件事在两条路的签名上一个字都不改。
+    ///
+    /// **换得掉是为了测得到「它不在」那条路**（[`Self::probing_with`]），理由同
+    /// [`preview::extract_frame`](super::preview::extract_frame) 那个参数。
+    prober: String,
 }
 
 /// 临时文件的编号。同一个进程里连着收几百份媒体，名字不能撞。
@@ -132,7 +141,18 @@ impl MediaPool {
     pub fn at(root: &Path) -> Self {
         Self {
             root: root.to_path_buf(),
+            prober: super::preview::FFMPEG.to_string(),
         }
+    }
+
+    /// 换一个**量视频**用的程序。**测试拿它走「ffmpeg 不在」那条路。**
+    ///
+    /// 这不是绕开验收——验收要的正是那条退化路走得通（视频照样入池，只是那三格空着），
+    /// 而不是「跑测试这台机器碰巧没装」。
+    #[must_use]
+    pub fn probing_with(mut self, program: &str) -> Self {
+        self.prober = program.to_string();
+        self
     }
 
     /// 池里那个**临时落脚处**。硬链接探测拿它当源那一头（`sync::execute::probe`）：
@@ -377,13 +397,19 @@ fn temp_path(pool: &MediaPool) -> PathBuf {
     ))
 }
 
-/// 一份算好哈希的临时文件收尾进池：定扩展名、改名、记库。
+/// 一份算好哈希的临时文件收尾进池：定扩展名、**量一次尺寸与时长**、改名、记库。
 ///
 /// **两条进池的路共用这一段**——主库那份边读边算，在线那份整块下回来，前半截不同，
 /// 从这里起一模一样。各写一遍的话，同一张图迟早会在池里躺成两份。
 ///
 /// 扩展名**以库里记的那一个为准**：同一串字节以 `.jpg` 与 `.jpeg` 两个名字进来，
 /// 各按各的落盘就成了两个文件，「只存一份」当场失效。
+///
+/// **量尺就在这里，全仓只有这一处**（[`measure`](super::measure) 的模块文档）：媒体池是
+/// 内容寻址的，同一串字节量出来的数永远一样，所以那三样与 `media.bytes` 同一档账——
+/// 入池记一次，不是每次画帧现量。量的是**临时文件那一份**，趁它还没改名进池：改名之后
+/// 落点要靠 `(哈希, 扩展名)` 拼，而这一趟手上现成就有路径。
+/// **量不出来不是错误**，那三格留空就是了（ADR-0021）。
 ///
 /// # Errors
 /// 中立库读写不了、或者池写不进时返回错误。
@@ -398,8 +424,9 @@ fn adopt_into(
     let ext = catalog
         .media_ext(hash)?
         .unwrap_or_else(|| ext_hint.to_string());
+    let measured = super::measure::measure(temp, &ext, &pool.prober);
     let fresh = pool.adopt(temp, hash, &ext)?;
-    catalog.put_media(hash, &ext, bytes)?;
+    catalog.put_media(hash, &ext, bytes, measured)?;
     Ok(fresh)
 }
 
@@ -483,9 +510,7 @@ mod tests {
 
     #[test]
     fn 落点按哈希前两位分片() {
-        let pool = MediaPool {
-            root: PathBuf::from("/池"),
-        };
+        let pool = MediaPool::at(Path::new("/池"));
         assert_eq!(
             pool.path_of("abcdef", "jpg"),
             PathBuf::from("/池/ab/abcdef.jpg")
