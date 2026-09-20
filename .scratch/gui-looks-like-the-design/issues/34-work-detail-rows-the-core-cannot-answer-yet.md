@@ -45,6 +45,23 @@
   - 基线重出 **3 对 6 张**，另九张一个像素没动；逐张变在哪见 Comments。
   - 证据：`crates/gui/tests/work.rs::变体卡上第几版那一格照核心库写_说不出时写破折号`、`::状态块上子库与导出两行照核心库写_都答不出时说没有`。
 - [x] 门禁全绿
+  - `cargo xtask gate --keep-going` **六步全绿**（`slot-4-gl34-gate-4.log`，提交 `1869f98` 那棵树）：
+
+    | 步 | 用时 | 命令 |
+    |---|---|---|
+    | fmt | 2s | `cargo fmt --all --check` |
+    | glossary | 1s | `cargo xtask glossary` |
+    | check | 24s | `cargo check --workspace` |
+    | clippy | 22s | `cargo clippy --workspace --all-targets --all-features` |
+    | test | 781s | `cargo test --workspace --all-features` |
+    | doc | 5s | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --lib --bins` |
+
+    整套 **78 个测试二进制、0 失败**。
+  - `glossary` 那一步扫了 `crates/` 下 **43 份 `.rs` 里新写的 2,122 行**（标识符与字符串字面量，不含注释），**没撞上**——新条目**第几版**的避用词「版本 / Version / 修订号」一条都没进新代码，屏上那一格的标签走的是词表里「屏上照稿写某某」那条豁免。
+  - **`SCHEMA_VERSION` 仍是 7**：这张票动的库全是**纯加**——`media` 补三列（宽 / 高 / 时长）、`identification` 补一列（`edition`）、`release` 补一列（`revision`），三处都走 `catalog::add_column`；`export_entry` 是**纯加表**。老库打得开、旧程序照样能用，一个人都不必删库重扫。
+  - **`sync_run.rs` 这一趟一条没红**（票 15 收尾时本机 APFS 上曾留 5 项基线失败，挂单 `Q479`）：门禁跑在**分大小写的 `TMPDIR`** 上（`/Users/nicoer/dev/game-wt/cs/tmp`）。
+  - 中途红过两轮，都在收尾那两步、都是这张票自己引的：clippy 的 `too_many_arguments`（`add_release` 八个参数，见 `Q997`，提交 `02f1ad2`）与 doc 的 **4 条指向私有项的文档链接**（`EXPORT_SCHEMA` / `revision_mark` / `fold_one` 三个是 `pub(super)` 或私有，`preview::extract_frame` 是路径没写全；提交 `1869f98`）。
+    ⚠️ 日志里另有 `unresolved link to NoSuchItem` / `could not document throwaway` 几行——**那不是失败**，是 `xtask` 自己造一个临时 crate 验证「doc 这一步真的会红」，属于门禁自检。
 
 顺手收掉的一处**重复实现**：`add_column`（补列那一下）从前在 `catalog::sublibrary` 与 `catalog::identify` 各抄了一份，这张票本要再抄第三份。三份收成 `catalog::add_column` 一处——抄出来的几份迟早在「判有没有」那一步上分家，而那一步错了是**静默**的：列没补上，读的那一侧只会看见一片 NULL。
 
