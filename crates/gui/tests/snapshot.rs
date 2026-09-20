@@ -1085,6 +1085,14 @@ fn 浏览_两栏收起_暗色() {
 // 双击打开那条路由 `tests/work.rs` 的「双击主列表一行打开作品详情页…」守着；这里拍的是页面长什么样。
 // 媒体池不在工作目录里，封面照旧是字卡。
 
+/// 等后台那几份图解完**最多跑几帧**。
+///
+/// 解一张 300×400 的 PNG 是毫秒级的事，而视频那一格连进程都拉不起来（抽帧程序换成了一个
+/// 不存在的，[`挂上媒体池`]），当场就退化成占位。几十帧就该齐，这个数是留给慢机器的余量。
+/// **给得明确是为了等不到时当场说话**：从前写的是十万帧，一条要空转四五分钟才肯报错，
+/// 而报出来的那句话还不说是哪一项没满足。
+const 等图最多几帧: usize = 2_000;
+
 /// 详情页那几张的一张封面：竖版、上下两块色，解出来一眼看得出是一张图而不是占位。
 fn 详情页的封面图() -> Vec<u8> {
     let image = image::RgbImage::from_fn(300, 400, |_, y| {
@@ -1162,12 +1170,16 @@ fn 拍详情页(名字: &str, 主题: Theme, 面: Tab) {
     // 后台那几份图解完没有（封面解出来、视频那一格因为没有 ffmpeg 退成占位）：画帧那个闭包每帧报一次。
     let 图齐了 = std::rc::Rc::new(std::cell::Cell::new(false));
     let 报图 = std::rc::Rc::clone(&图齐了);
+    // 等不到时得说得出是哪一项不满足：跑着几件、解出几张、有没有「没装 ffmpeg」那一档。
+    let 图况 = std::rc::Rc::new(std::cell::Cell::new((usize::MAX, usize::MAX, false)));
+    let 报况 = std::rc::Rc::clone(&图况);
     let mut harness = 开一个(主题, move |ui| {
         if let Some(面) = 要换.take() {
             app.browse_and_site().0.open_page(面);
         }
         app.ui(ui);
         let gallery = app.browse().gallery();
+        报况.set((gallery.busy(), gallery.ready(), gallery.lacks_ffmpeg()));
         报图.set(gallery.busy() == 0 && gallery.ready() >= 1 && gallery.lacks_ffmpeg());
     });
     // 点一下那一行（同 [`按`]，但先不跑到停：后台解图时一直要重画，等图齐了再跑）。
@@ -1188,15 +1200,20 @@ fn 拍详情页(名字: &str, 主题: Theme, 面: Tab) {
     harness.step();
     换面.set(Some(面));
     harness.run_steps(2);
-    // 等后台解完：只跑帧、不看挂钟。
-    for _ in 0..100_000 {
-        if 图齐了.get() {
-            break;
-        }
+    // 等后台解完：只跑帧、不看挂钟（挂钟在忙机器上不稳，帧数各处一样）。
+    // **上限给得明确**：够用就好，等不到是有毛病，不是慢——从前那十万帧要烧四五分钟才肯说话。
+    let mut 跑了几帧 = 0;
+    while !图齐了.get() && 跑了几帧 < 等图最多几帧 {
         harness.step();
+        跑了几帧 += 1;
         std::thread::yield_now();
     }
-    assert!(图齐了.get(), "{名字}：媒体池里那几份图一直没解完");
+    let (跑着, 解出, 缺编解码) = 图况.get();
+    assert!(
+        图齐了.get(),
+        "{名字}：媒体池里那几份图一直没解完——跑满 {跑了几帧} 帧之后后台还跑着 {跑着} 件、\
+         解出 {解出} 张、「没装 ffmpeg」那一档是 {缺编解码}（要的是：跑着 0、解出 ≥1、没装 ffmpeg 为真）"
+    );
     harness.run();
     // **媒体面滚到整格看得见**（协调人 2026-09-15）：竖版封面那一格连底下「来源 · 大小」一行比头上那一块底下剩的地方高，
     // 像人一样把指针停在正文里往下滚一截再拍。

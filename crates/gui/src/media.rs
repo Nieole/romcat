@@ -85,6 +85,14 @@ pub struct Gallery {
     /// 后台那条解码线程。**媒体池不在位时是 `None`**——那时这一栏如实说「没查池子」，
     /// 而不是摆一屏「找不到文件」。
     loader: Option<Loader>,
+    /// **抽首帧拿哪个程序**（[`Self::set_program`] 换过的那个）；`None` 是照
+    /// [`Loader`] 自己那个默认的来。
+    ///
+    /// 记在这一层而不是只记在 [`Self::loader`] 上，因为**它跟着的是这台机器，不是这个
+    /// 池子**：换池子会另起一条后台线程（[`Self::set_pool`]），换过的程序不该跟着上一条
+    /// 线程一起没了。池子还没指进来时也照记——否则「先换程序、后指池子」那个顺序会
+    /// 一声不响地白换一场（截图门那 12 条详情页红了就是栽在这儿）。
+    program: Option<String>,
     /// 传上显卡的那些。
     textures: HashMap<Key, egui::TextureHandle>,
     /// 没解出来的那些各是为什么。
@@ -106,6 +114,7 @@ impl std::fmt::Debug for Gallery {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Gallery")
             .field("loader", &self.loader.is_some())
+            .field("program", &self.program)
             .field("textures", &self.textures.len())
             .field("missing", &self.missing.len())
             .field("pending", &self.pending.len())
@@ -125,16 +134,26 @@ impl Gallery {
     ///
     /// 换池子时**连缓存一起丢**：同一个内容哈希在两个池子里指的是两个文件，
     /// 留着上一份的纹理等于把上一份库的封面画在这一份库的行上。
+    ///
+    /// 丢的只是「这个池子里解出来的那些」。[`Self::set_program`] 换过的程序**跟着这台
+    /// 机器走、不跟着池子走**，所以要补回新起的那条线程上。
     pub fn set_pool(&mut self, pool: Option<MediaPool>) {
         self.textures.clear();
         self.missing.clear();
         self.pending.clear();
         self.error = None;
         self.loader = pool.map(|pool| Loader::start(pool, EDGE));
+        if let (Some(loader), Some(program)) = (self.loader.as_mut(), self.program.as_deref()) {
+            loader.set_program(program);
+        }
     }
 
     /// 换一个抽首帧的程序。**测试拿它走「ffmpeg 不在」那条路。**
+    ///
+    /// **什么时候叫都算数**：记在这一层，池子还没指进来、或者之后又换了一个池子，
+    /// 换过的这个都还在（[`Self::program`]）。
     pub fn set_program(&mut self, program: &str) {
+        self.program = Some(program.to_owned());
         if let Some(loader) = self.loader.as_mut() {
             loader.set_program(program);
         }
