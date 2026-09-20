@@ -1031,7 +1031,7 @@ fn fold_one<'a>(
 /// 查询**（`variants_of` / `release` / `collections_of` / `candidates_of` /
 /// `scraped_values`），条数与 `keys` 成正比。
 ///
-/// 折出来的形状与 [`facts`] **逐字一样**（两条都走 [`fold_one`]），于是拿它喂
+/// 折出来的形状与 [`facts`] **逐字一样**（两条都走 `fold_one`），于是拿它喂
 /// [`select`] 得到的结论，与整库求值时那个变体落在哪一档**必然一致**：`select` 对每个
 /// 变体的判断只看它自己那一份事实，不看别的变体。
 ///

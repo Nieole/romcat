@@ -4598,7 +4598,7 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 - **谁来裁：** 拿主意的人
 - **状态：** open
 
-### Q997 — `Catalog::add_release` 七个位置参数，其中五个同型 `Option<&str>`
+### Q997 — `Catalog::add_release` 八个位置参数，其中五个同型 `Option<&str>`（本票已收）
 
 - **来自：** 票 `gui-looks-like-the-design/34`（收尾两轴审查，Standards 轴挑出）
 - **类别：** 路过发现，不在范围内

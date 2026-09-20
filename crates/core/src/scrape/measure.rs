@@ -62,7 +62,8 @@ impl Measured {
 ///
 /// `program` 是量视频那个外部程序（[`preview::FFMPEG`](super::preview::FFMPEG)）。
 /// **单独收进来是为了让「它不在」那条路测得到**——验收要的正是那条退化路走得通，
-/// 而不是「跑测试这台机器碰巧没装」（同 [`preview::extract_frame`] 的那个参数）。
+/// 而不是「跑测试这台机器碰巧没装」（同 [`extract_frame`](super::preview::extract_frame)
+/// 的那个参数）。
 ///
 /// 认不出是图也不是视频的（`normalized_ext` 收得下、但既不解码也不是视频的那些）
 /// 交回空的一份。
