@@ -2111,23 +2111,29 @@ impl Screen {
                     egui::vec2(tokens.space.list_bar_gap, look::step(0));
                 ui.vertical(|ui| {
                     // 第一层只回答“看什么、共有多少”，让视图切换与集合规模一眼成组。
-                    ui.horizontal(|ui| {
-                        if ui
-                            .selectable_label(self.view == BrowseView::Table, "表格")
-                            .clicked()
-                        {
-                            self.view = BrowseView::Table;
-                        }
-                        if ui
-                            .selectable_label(self.view == BrowseView::Cards, "卡片")
-                            .clicked()
-                        {
-                            self.view = BrowseView::Cards;
-                        }
-                        // 计数与「清除选择」**贴着右端从右往左排**。先前是拿剩余宽度把计数推到
-                        // 右端、按钮跟在它后面：那时按钮被挤出这一行，字还画着、点下去却没反应
-                        // （票 `gui-looks-like-the-design/10` 重排这一条之后出的）。
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // 左端视图切换、右端计数与「清除选择」，交给 [`egui::Sides`] 各排各的。
+                    //
+                    // 自己算位置的两种写法都塌过：拿剩余宽度把计数推到右端、按钮跟在它后面时，按钮被挤出
+                    // 行外——字还画着、点下去没反应（票 `gui-looks-like-the-design/15` 那条「清除选择一按就清」
+                    // 因此红）；改成在从左往右的行里嵌一个从右往左的子块，那个子块吃掉全部剩余宽度，把这一条
+                    // 的需求宽度撑大、连带挤窄了表格主栏，认不出作品那一行的副行就画不下了。
+                    egui::Sides::new().show(
+                        ui,
+                        |ui| {
+                            if ui
+                                .selectable_label(self.view == BrowseView::Table, "表格")
+                                .clicked()
+                            {
+                                self.view = BrowseView::Table;
+                            }
+                            if ui
+                                .selectable_label(self.view == BrowseView::Cards, "卡片")
+                                .clicked()
+                            {
+                                self.view = BrowseView::Cards;
+                            }
+                        },
+                        |ui| {
                             if self.picked.count(self.window.total()) > 0
                                 && look::small_buttons(ui, |ui| {
                                     ui.scope(|ui| {
@@ -2141,8 +2147,8 @@ impl Screen {
                                 self.picked.clear();
                             }
                             ui.label(这一句.clone());
-                        });
-                    });
+                        },
+                    );
                     ui.add_space(look::step(1));
                     // 第二层才是当前呈现方式的控制。卡片不会再和视图、计数争一行。
                     ui.horizontal_wrapped(|ui| {

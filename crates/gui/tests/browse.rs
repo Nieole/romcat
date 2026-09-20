@@ -42,7 +42,7 @@ const ROWS: u64 = demo::BROWSE_VARIANTS;
 /// **版式偏好**（面板拖到哪儿）。共用的话，维护者开一次演示窗口把某块面板拖高一截，
 /// 下一次跑这几条测试屏上就少了几行——而断言数的正好是行数。
 fn 工作目录() -> std::path::PathBuf {
-    std::env::temp_dir().join("romcat-测试-浏览")
+    shared::干净工作目录("romcat-测试-浏览")
 }
 
 fn 界面(rows: u64) -> App {
@@ -2481,7 +2481,7 @@ fn 夹着非游戏资产的小库() -> App {
             ("街机", "BIOS/neogeo.zip", 档::还没识别),
             ("SFC", "bios.sfc", 档::没有候选),
         ],
-        std::env::temp_dir().join("romcat-测试-浏览-非游戏资产"),
+        shared::干净工作目录("romcat-测试-浏览-非游戏资产"),
     );
     app.show_view(View::Browse);
     app
@@ -2640,7 +2640,7 @@ fn 两行认不出作品的小库() -> App {
             ),
             ("SFC", "短.zip", 档::命中),
         ],
-        std::env::temp_dir().join("romcat-测试-浏览-未关联作品"),
+        shared::干净工作目录("romcat-测试-浏览-未关联作品"),
     );
     app.show_view(View::Browse);
     app
@@ -2778,7 +2778,7 @@ fn 字体样张开关只在带演示启动的窗口里摆出来() {
     let ctx = headless::context();
     let mut app = shared::小库(
         &[("SFC", "短.zip", shared::档::命中)],
-        std::env::temp_dir().join("romcat-测试-浏览-演示标记"),
+        shared::干净工作目录("romcat-测试-浏览-演示标记"),
     );
     app.show_view(View::Browse);
     跑(&ctx, &mut app, 2);
@@ -2864,7 +2864,7 @@ fn 左右两栏收得起来_关掉再打开还收着_展开回到原来那么宽
     const 详情栏里的: &str = "点主列表里的一行，看它包含哪几个变体。";
 
     // **版式偏好往工作目录里写**：先清干净，上一趟收起来的不该带进这一趟。
-    let 目录 = std::env::temp_dir().join("romcat-测试-浏览-收起");
+    let 目录 = shared::干净工作目录("romcat-测试-浏览-收起");
     let _ = std::fs::remove_dir_all(&目录);
     let 开 = || {
         let mut app = shared::小库(&[("SFC", "短.zip", shared::档::命中)], 目录.clone());
@@ -3377,7 +3377,7 @@ fn 卡片视图可切换并画出作品信息() {
     let ctx = headless::context();
     let mut app = shared::小库(
         &[("SFC", "短.zip", shared::档::没有候选)],
-        std::env::temp_dir().join("romcat-测试-浏览-卡片视图"),
+        shared::干净工作目录("romcat-测试-浏览-卡片视图"),
     );
     app.show_view(View::Browse);
     跑(&ctx, &mut app, 2);
@@ -3414,7 +3414,7 @@ fn 卡片工具条显示覆盖率并能改排序() {
 #[test]
 fn 卡片视图选择记在工作目录而不进中立库() {
     let ctx = headless::context();
-    let workspace = std::env::temp_dir().join("romcat-测试-浏览-卡片偏好");
+    let workspace = shared::干净工作目录("romcat-测试-浏览-卡片偏好");
     let mut first = shared::小库(
         &[("SFC", "短.zip", shared::档::没有候选)],
         workspace.clone(),
@@ -3433,7 +3433,7 @@ fn 筛不出东西时说清楚并给一颗清除筛选_按下去表就回来() {
     let ctx = headless::context();
     let mut app = shared::小库(
         &[("SFC", "短.zip", shared::档::命中)],
-        std::env::temp_dir().join("romcat-测试-浏览-空态"),
+        shared::干净工作目录("romcat-测试-浏览-空态"),
     );
     app.show_view(View::Browse);
     跑(&ctx, &mut app, 3);
