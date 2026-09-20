@@ -59,7 +59,7 @@
 
 截图基线那六张出了三趟：带更新一趟、不带更新两趟全绿（`slot-3-gl21-snap-6.log`），逐像素稳定。对稿用的设计稿截图留在 `/Users/nicoer/dev/game-wt/design-refs/sublibrary/`（八张，与候选图同名一一对应）。
 
-2026-09-20 收尾：合进 `main`（`57bec44`）之后跑**全量门禁**（`cargo xtask gate -j 3 --test-threads 3 --keep-going`，日志 `slot-3-gl21-gate-2.log`），**六步全绿**：fmt 1s、glossary 1s、check 13s、clippy 17s、test 631s、doc 5s；整套 **2,265 项全过、0 失败**。头一趟（`slot-3-gl21-gate.log`）两红，都是本票自己的，已修在提交 `a559ab4`：词表那一处断言里的「步骤」（`crates/core/tests/sync.rs`）与四处文档链接（公开文档链到私有的 `vet_form`、`converge` 模块自指、一处冗余的显式链接目标、`observe` 函数与模块同名的歧义）。
+2026-09-20 收尾：合进 `main`（`57bec44`）之后跑**全量门禁**（`cargo xtask gate -j 3 --test-threads 3 --keep-going`）。收尾审查那两处改完又跑了一趟，**以最后这趟为准**（日志 `slot-3-gl21-gate-4.log`）：**六步全绿**——fmt 1s、glossary 1s、check 2s、clippy 3s、test 506s、doc 4s；整套 **2,266 项全过、0 失败**。（中间 `slot-3-gl21-gate-2.log` 那趟也是六步全绿、2,265 项；`gate-3` 只红在 fmt，是手写那段 `match` 没按 rustfmt 排，修在 `467222b`。）头一趟（`slot-3-gl21-gate.log`）两红，都是本票自己的，已修在提交 `a559ab4`：词表那一处断言里的「步骤」（`crates/core/tests/sync.rs`）与四处文档链接（公开文档链到私有的 `vet_form`、`converge` 模块自指、一处冗余的显式链接目标、`observe` 函数与模块同名的歧义）。
 
 截图门另单跑过一趟不带更新的（`slot-3-gl21-snapgate.log`）：整份 `snapshot` **59 张全过**，一张基线都没被改写；本票这六张与 `main` 上那一批（含按新配色重出的 `sublibrary/deleted-toast-{light,dark}.png`）都对得上。
 
