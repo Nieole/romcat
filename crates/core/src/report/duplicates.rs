@@ -281,6 +281,46 @@ mod tests {
         assert!(!text.contains("另有"));
     }
 
+    /// 一组的份数多过原先那道一万条的闸，照样每一份都写出去。
+    ///
+    /// 那道闸原先是 `FULL_DUPLICATE_PATHS_PER_GROUP = 10_000`，理由写的是「断点里存着这份索引」——
+    /// 断点里其实没有它（`scan::checkpoint::Checkpoint`），于是那道闸只剩一个效果：
+    /// 第 10001 份的路径再也拿不回来，而「明细能导出成一份清单」要的正是每一份（票 27）。
+    #[test]
+    fn 组内份数超过原先那道一万条的上限也写全() {
+        const 份数: usize = 10_001;
+        let limits = Limits {
+            max_duplicate_paths_per_group: Limits::FULL_DUPLICATE_PATHS_PER_GROUP,
+            ..Limits::default()
+        };
+        let mut agg = Aggregate::default();
+        for copy in 0..份数 {
+            agg.record_file(
+                &观察(&format!("库/FC/备份{copy}/魂斗罗.zip"), 4096),
+                &limits,
+            );
+        }
+        let details = 明细(&agg);
+        assert_eq!(details.groups[0].paths.len(), 份数, "组内一份都不能少");
+        assert_eq!(
+            details.groups[0].keys.len(),
+            份数,
+            "键与路径一一对应，一起记全"
+        );
+        assert_eq!(details.groups_with_missing_paths, 0);
+
+        let text = details.render_text();
+        assert!(
+            text.contains("/lib/FC/备份10000/魂斗罗.zip"),
+            "第 10001 份的路径必须在明细里"
+        );
+        assert!(
+            !text.contains("另有"),
+            "记全了就不说另有：\n{}",
+            &text[..400]
+        );
+    }
+
     /// 明细要记全，报告却不能跟着膨胀——两处的上限是分开的。
     #[test]
     fn 明细记全路径时报告仍然只留每组前十条() {

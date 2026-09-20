@@ -51,3 +51,16 @@ pub fn directory(title: &str, start: &Path) -> Option<PathBuf> {
     }
     dialog.pick_folder()
 }
+
+/// 弹一个**保存文件**的对话框，标题是 `title`，文件名那一格预填 `file_name`。选好了交回那个路径，取消了（或者对话框压根
+/// 弹不出来）交回 `None`。库体检明细弹层上「导出清单…」弹的就是它（票 `gui-looks-like-the-design/27`）。
+///
+/// 同 [`directory`]：**只交回一个可空的路径**，选好之后写什么、写不写得进、落在不在主库里，都在调用方那条路上
+/// （`health::Section::export_picked`），测试递一个路径进去就验得着。**同步**：对话框关上之前不返回。
+#[must_use]
+pub fn save_file(title: &str, file_name: &str) -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title(title)
+        .set_file_name(file_name)
+        .save_file()
+}

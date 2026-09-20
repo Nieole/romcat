@@ -356,7 +356,7 @@ impl Boundary {
     }
 }
 
-/// 库屏上**收得起来的一块**（票 `gui-looks-like-the-design/06`）：根、数据源、导出设置。
+/// 库屏上**收得起来的一块**（票 `gui-looks-like-the-design/06`）：根、数据源、导出设置，与库体检（票 `gui-looks-like-the-design/27`）。
 ///
 /// 收没收起来与面板边界拖到哪儿是同一类东西——**这块屏自己的偏好**，与库里有什么无关——所以记在
 /// 同一份文件里（[`Layout`]），不另起一份存储。[`Self::id`] 就是落盘那一行的名字。
@@ -379,9 +379,14 @@ pub const FOLD_EXPORT: Fold = Fold {
     id: "收起·导出设置",
 };
 
+/// 库屏两栏底下通栏的**库体检**那一块（票 `gui-looks-like-the-design/27`）。
+pub const FOLD_HEALTH: Fold = Fold {
+    id: "收起·库体检"
+};
+
 impl Fold {
-    /// 全部三块，照库屏上从上到下的次序。不在这儿的不落盘。
-    pub const ALL: [Self; 3] = [FOLD_ROOTS, FOLD_SOURCES, FOLD_EXPORT];
+    /// 全部四块，照库屏上从上到下的次序：右栏三块，再是两栏底下的库体检。不在这儿的不落盘。
+    pub const ALL: [Self; 4] = [FOLD_ROOTS, FOLD_SOURCES, FOLD_EXPORT, FOLD_HEALTH];
 }
 
 /// 存下来的数最大认到这儿，点。比任何一块屏都宽，只用来拦离谱的值。

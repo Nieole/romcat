@@ -376,6 +376,43 @@ pub fn 点一下(
     跑一帧(ctx, 画一帧)
 }
 
+/// **滚到底**：指针停在视口里、真发滚轮事件往下滚，滚到这一帧画出来的字不再变为止（等的是滚动停下，不是等一段时间），
+/// 再把指针挪走，交出挪走之后那一帧画出来的字。
+///
+/// 视口外 egui 不画字：长过一屏的那几块（库屏底下的**库体检**）要先滚进视野才读得到。与 `roots.rs` 那份绑死在主窗口上的
+/// `滚到库屏底下` 同一个办法，收的是「怎么画一帧」那个闭包。
+///
+/// # Panics
+/// 滚了两百帧屏上的字还在变时当场炸——那是一直在动的东西，不是滚到头了。
+pub fn 滚到底(ctx: &egui::Context, mut 画一帧: impl FnMut(&mut egui::Ui)) -> String {
+    use romcat_gui::headless;
+
+    let 指在 = egui::pos2(headless::VIEWPORT[0] * 0.6, headless::VIEWPORT[1] * 0.75);
+    let mut 上一帧 = None;
+    let mut 停了 = false;
+    for _ in 0..200 {
+        let mut input = headless::input();
+        input.events.push(egui::Event::PointerMoved(指在));
+        input.events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -headless::VIEWPORT[1]),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let 这一帧 = 画出来的字(&headless::frame(ctx, input, &mut 画一帧));
+        if 上一帧.as_ref() == Some(&这一帧) {
+            停了 = true;
+            break;
+        }
+        上一帧 = Some(这一帧);
+    }
+    assert!(停了, "滚了两百帧，屏上的字还在动");
+    let mut input = headless::input();
+    input.events.push(egui::Event::PointerGone);
+    headless::frame(ctx, input, &mut 画一帧);
+    跑一帧(ctx, 画一帧)
+}
+
 /// 往屏上那个写着 `框上写着` 的输入框里打一段字。
 ///
 /// 先[点一下](点一下)把焦点放进去，再发一条文本事件——egui 把文本事件交给**拿着焦点**的那个
@@ -523,4 +560,23 @@ impl 占位活 {
     pub fn 放行(self) {
         self.发的.发();
     }
+}
+
+/// 等任务台上的活都**收场并且都认领完**。等的是台上空了这个信号，一轮一轮问，不看挂钟就走。
+///
+/// 界面这几份测试原先各写各的：`tests/roots.rs` 是 600 轮 × 10 毫秒，库体检那两处是逐字同一段
+/// 五千万次自旋——自旋那种写法没有挂钟含义，真卡住时会空转很久（票 27 收尾审查 Standards 轴第 5 条）。
+/// 收在这儿一处，六秒还不收场就当它卡住了。
+///
+/// # Panics
+/// 六秒之内台上还没空。
+pub fn 等任务台空了(app: &mut romcat_gui::app::App) {
+    for _ in 0..6_000 {
+        app.poll_tasks();
+        if !app.tasks().busy() && !app.tasks().settled() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    panic!("任务台上的活迟迟不收场");
 }

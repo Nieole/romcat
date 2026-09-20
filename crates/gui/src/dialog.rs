@@ -64,6 +64,8 @@
 //!   内容比这还长时是内容区自己滚。
 //! - **页脚**：退出那一颗靠左，其余几颗照读的次序靠右——看着靠右，Tab 照读的次序走。往前走的
 //!   那一颗（「下一步」「开始扫描」「开始刮削」「落下」）标上 [`Button::primary`]，画成强调色底。
+//!   **没有往前走那一颗的只读弹层**（库体检明细）另有一种写法：退出那一颗靠右画成主按钮，其余几颗靠左
+//!   （[`Footer::dismiss_on_right`]，常配 [`Button::ghost`]）。
 //! - **宽度只取令牌里那四档**（[`Width`]），不许现编一个数；窗口比那一档还窄时收进窗口里。
 //! - **Esc 关最上面那一层**，等于按退出那一颗（[`Shown::pressed`] 交回的就是它的动作）。
 //!   两层叠着时一下只退一层。
@@ -133,6 +135,8 @@ pub struct Button<A> {
     primary: bool,
     /// 是不是删掉东西的那一颗。
     danger: bool,
+    /// 是不是弱化的那一颗（幽灵按钮）。
+    ghost: bool,
     /// 指针停在上面时说的那句话。
     hover: Option<String>,
 }
@@ -147,8 +151,17 @@ impl<A> Button<A> {
             enabled: true,
             primary: false,
             danger: false,
+            ghost: false,
             hover: None,
         }
+    }
+
+    /// **弱化的那一颗**（幽灵按钮，设计稿 `.btn.ghost`）：平时不描边不填色，悬停才垫底色（[`look::ghost_button`]）。
+    /// 库体检明细弹层上靠左的「导出清单…」标它。与 [`Self::primary`]、[`Self::danger`] 不同时标。
+    #[must_use]
+    pub fn ghost(mut self) -> Self {
+        self.ghost = true;
+        self
     }
 
     /// 按得动没有。
@@ -189,6 +202,8 @@ pub struct Footer<A> {
     dismiss: Button<A>,
     /// 其余几颗，照读的次序。
     rest: Vec<Button<A>>,
+    /// 退出那一颗摆在右边（[`Self::dismiss_on_right`]）。
+    dismiss_on_right: bool,
 }
 
 impl<A> Footer<A> {
@@ -198,7 +213,17 @@ impl<A> Footer<A> {
         Self {
             dismiss,
             rest: Vec::new(),
+            dismiss_on_right: false,
         }
+    }
+
+    /// **退出那一颗摆在右边、画成主按钮**，其余几颗照读的次序靠左（设计稿 `DLG.health` 的页脚：左边幽灵按钮「导出清单…」、
+    /// 右边主按钮「关闭」）。给**没有「往前走」那一颗**的只读弹层用：关掉就是这一层唯一的出口（票
+    /// `gui-looks-like-the-design/27`，挂单 `Q958`）。Esc 照旧等于按退出那一颗；已有的弹层不标它，照旧退出那一颗靠左。
+    #[must_use]
+    pub fn dismiss_on_right(mut self) -> Self {
+        self.dismiss_on_right = true;
+        self
     }
 
     /// 再摆一颗。
@@ -634,7 +659,21 @@ fn pages_ui(ui: &mut egui::Ui, labels: &[String], at: usize) {
 fn footer_ui<A>(ui: &mut egui::Ui, footer: &Footer<A>) -> Option<Slot> {
     let mut clicked = None;
     ui.horizontal(|ui| {
-        if add_button(ui, &footer.dismiss).clicked() {
+        // 退出那一颗摆右边的写法（[`Footer::dismiss_on_right`]）：其余几颗先从左往右摆，再空出中间、退出那一颗贴右当主按钮。
+        if footer.dismiss_on_right {
+            for (at, button) in footer.rest.iter().enumerate() {
+                if add_button(ui, button, button.primary).clicked() {
+                    clicked = Some(Slot::Rest(at));
+                }
+            }
+            let wide = look::button_width(ui, &footer.dismiss.label);
+            ui.add_space((ui.available_width() - wide).max(0.0));
+            if add_button(ui, &footer.dismiss, true).clicked() {
+                clicked = Some(Slot::Dismiss);
+            }
+            return;
+        }
+        if add_button(ui, &footer.dismiss, footer.dismiss.primary).clicked() {
             clicked = Some(Slot::Dismiss);
         }
         let gap = ui.spacing().item_spacing.x;
@@ -646,7 +685,7 @@ fn footer_ui<A>(ui: &mut egui::Ui, footer: &Footer<A>) -> Option<Slot> {
             + gap * footer.rest.len().saturating_sub(1) as f32;
         ui.add_space((ui.available_width() - wide).max(0.0));
         for (at, button) in footer.rest.iter().enumerate() {
-            if add_button(ui, button).clicked() {
+            if add_button(ui, button, button.primary).clicked() {
                 clicked = Some(Slot::Rest(at));
             }
         }
@@ -654,14 +693,21 @@ fn footer_ui<A>(ui: &mut egui::Ui, footer: &Footer<A>) -> Option<Slot> {
     clicked
 }
 
-/// 摆一颗页脚按钮。主按钮、危险按钮在一个 `scope` 里换上那一档颜色，别的控件不受影响。
-fn add_button<A>(ui: &mut egui::Ui, button: &Button<A>) -> egui::Response {
+/// 摆一颗页脚按钮。主按钮、危险按钮、幽灵按钮在一个 `scope` 里换上那一档颜色，别的控件不受影响。`primary` 是这一颗
+/// 这一回画不画成主按钮：退出那一颗摆右边时由页脚替它定（[`Footer::dismiss_on_right`]）。
+fn add_button<A>(ui: &mut egui::Ui, button: &Button<A>, primary: bool) -> egui::Response {
     let add = |ui: &mut egui::Ui| {
         ui.add_enabled(button.enabled, egui::Button::new(button.label.as_str()))
     };
-    let response = if button.primary {
+    let response = if primary {
         ui.scope(|ui| {
             look::primary_button(ui.visuals_mut());
+            add(ui)
+        })
+        .inner
+    } else if button.ghost {
+        ui.scope(|ui| {
+            look::ghost_button(ui.visuals_mut());
             add(ui)
         })
         .inner

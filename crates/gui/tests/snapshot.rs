@@ -83,7 +83,7 @@ use romcat_gui::{font, headless, layout, look, rail};
 
 mod shared;
 #[cfg(feature = "demo")]
-use shared::{一对信号, 占位活};
+use shared::{一对信号, 占位活, 等任务台空了};
 
 /// 比对阈值：一个像素的色差过了多少算坏（每像素 YIQ 色距 0.6）、坏几个像素算红（0 个）。
 ///
@@ -1440,6 +1440,7 @@ impl 库屏 {
         屏.list_roots(画的);
         屏.set_clock(库屏的钟());
         app.set_workspace_label(工作目录().display().to_string());
+        先体检一趟(&mut app);
         Self {
             app,
             _工作区: 工作区,
@@ -1456,6 +1457,105 @@ impl 库屏 {
         }
         现场
     }
+
+    /// 一个根完整扫过一趟、**体检报告里几格都有东西**（票 `gui-looks-like-the-design/27`）：两组重复拷贝、两面磁碟各成
+    /// 一个变体、一份落单的存档、一份 BIOS、一个未纳入管理的目录。不可读与平台不符在临时目录里造不出来，那两格是 0。
+    /// 根那一行的路径与上次扫描时刻交成定值，同 [`Self::扫过两个根`]。
+    fn 有体检发现() -> Self {
+        let 工作区 = temp_dir("snapshot-库屏-体检");
+        let mut site = 开库(工作区.path());
+        let 盘 = temp_dir("snapshot-库屏-体检盘");
+        for (相对, 字节) in [
+            ("FC/魂斗罗.zip", zip(2_048)),
+            ("FC/备份/魂斗罗.zip", zip(2_048)),
+            ("GBA/汉化/逆转裁判.gba", vec![7_u8; 8_192]),
+            ("GBA/备份一/逆转裁判.gba", vec![7_u8; 8_192]),
+            ("GBA/备份二/逆转裁判.gba", vec![7_u8; 8_192]),
+            ("FDS/某游戏/某游戏 (Disk 1).fds", vec![1_u8; 64]),
+            ("FDS/某游戏/某游戏 (Disk 2).fds", vec![2_u8; 64]),
+            ("GBA/汉化/火焰之纹章.sav", vec![3_u8; 64]),
+            ("PS1/bios/scph1001.bin", vec![4_u8; 512]),
+            ("杂物/说明.txt", vec![5_u8; 16]),
+        ] {
+            let 落点 = 盘.path().join(相对);
+            std::fs::create_dir_all(落点.parent().expect("有上级目录")).expect("建得出目录");
+            std::fs::write(&落点, 字节).expect("写得进");
+        }
+        let 目录 = romcat_core::path::normalize_existing(盘.path());
+        roots::add_root(&site.catalog, Some(工作区.path()), "主库", &目录).expect("加得上根");
+        let mut options = ScanOptions::named(&目录, "主库");
+        options.workspace = Some(工作区.path().to_path_buf());
+        options.jobs = Jobs::Fixed(1);
+        scan::scan(&RealFs::new(), &mut site.catalog, &options, &Handle::new()).expect("扫得完");
+        let 记下的 = site
+            .catalog
+            .root("主库")
+            .expect("读得出根")
+            .and_then(|root| root.scan)
+            .expect("扫完记下了上次扫描");
+        site.catalog
+            .record_root_scan(
+                "主库",
+                &RootScan {
+                    // 东八区 2026-09-03 14:58，用时 37 分钟（同扫过两个根那一份）。
+                    at: 1_788_418_680,
+                    elapsed_ms: 2_220_000,
+                    ..记下的
+                },
+            )
+            .expect("记得下");
+        let mut app = App::new(site, 工作区.path().to_path_buf());
+        app.show_view(View::Library);
+        let (屏, _, _) = app.roots_site_and_tasks();
+        let 画的: Vec<RootRow> = 屏
+            .roots()
+            .iter()
+            .map(|row| RootRow {
+                root: LibraryRoot {
+                    path: "/Volumes/新加卷/Game".to_owned(),
+                    ..row.root.clone()
+                },
+                stats: row.stats,
+                mounted: true,
+            })
+            .collect();
+        屏.list_roots(画的);
+        屏.set_clock(库屏的钟());
+        app.set_workspace_label(工作目录().display().to_string());
+        先体检一趟(&mut app);
+        Self {
+            app,
+            _工作区: 工作区,
+            _盘: vec![盘],
+        }
+    }
+}
+
+/// **开窗之前先体检一趟、等它收场**（票 `gui-looks-like-the-design/27`）：有扫过的根、还没有报告时，库屏头一帧会自动排一趟
+/// 体检上任务台，而台上有活时主窗口每一帧都要重画，截图就跑不到「不要重画」。「上次体检」照库屏那只定死的钟记。
+/// **等的是台上空了这个信号**，一轮一轮问，不看挂钟。
+fn 先体检一趟(app: &mut App) {
+    let (屏, site, tasks) = app.roots_site_and_tasks();
+    屏.check_health(site, tasks);
+    等任务台空了(app);
+}
+
+/// **滚到库屏底下**：指针停在正文里、真发滚轮事件往下滚，每一下都跑到不要重画为止；滚到头之后再滚也不动，于是多滚几下不改
+/// 那一帧的样子。最后把指针挪走——基线里不该有指针三角与悬停底色。库体检那一块在库屏最底下，1280×800 里要滚才看得见。
+fn 滚到库屏底下(harness: &mut Harness<'_>) {
+    let 指在 = egui::pos2(headless::VIEWPORT[0] * 0.6, headless::VIEWPORT[1] * 0.75);
+    for _ in 0..20 {
+        harness.event(egui::Event::PointerMoved(指在));
+        harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -headless::VIEWPORT[1]),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.run();
+    }
+    harness.event(egui::Event::PointerGone);
+    harness.run();
 }
 
 /// 库屏那几张画时刻用的钟：此刻钉在 2026-09-14 08:00（UTC），本地钉在东八区。**截图里不许有当前时间**，
@@ -1731,6 +1831,49 @@ fn 库屏_三块收起_暗色() {
     拍("library/folded-dark", Theme::Dark, move |ui| {
         现场.app.ui(ui)
     });
+}
+
+/// **库体检那一块**（票 `gui-looks-like-the-design/27`）：一个根扫过、体检过，八格各有数；滚到库屏底下拍。
+fn 拍体检(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 库屏::有体检发现();
+    let mut harness = 开一个(主题, move |ui| 现场.app.ui(ui));
+    滚到库屏底下(&mut harness);
+    拍下(harness, 名字);
+}
+
+#[test]
+fn 库屏_体检_浅色() {
+    拍体检("library/health-light", Theme::Light);
+}
+
+#[test]
+fn 库屏_体检_暗色() {
+    拍体检("library/health-dark", Theme::Dark);
+}
+
+/// **重复拷贝明细弹层**：同一份库，滚到库屏底下按「重复拷贝」那一格（照「目标设置弹层」那两张的写法：[`开一个`] + [`按`]）。
+fn 拍重复拷贝明细(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 库屏::有体检发现();
+    let mut harness = 开一个(主题, move |ui| 现场.app.ui(ui));
+    滚到库屏底下(&mut harness);
+    按(&mut harness, "重复拷贝");
+    拍下(harness, 名字);
+}
+
+#[test]
+fn 库屏_重复拷贝明细弹层_浅色() {
+    拍重复拷贝明细("library/health-duplicates-light", Theme::Light);
+}
+
+#[test]
+fn 库屏_重复拷贝明细弹层_暗色() {
+    拍重复拷贝明细("library/health-duplicates-dark", Theme::Dark);
 }
 
 // ——— 子库 ———

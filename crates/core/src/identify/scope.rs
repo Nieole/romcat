@@ -27,8 +27,8 @@ use std::path::Path;
 
 use crate::catalog::VariantRow;
 use crate::catalog::identify::Standalone;
-use crate::classify::{self, Category};
-use crate::path::{extension_lower, file_name_of_key};
+use crate::classify::{self, Category, patch_extension};
+use crate::path::file_name_of_key;
 
 use super::switch::{Facts, Kind};
 
@@ -113,11 +113,6 @@ pub const PATCH: &str = "补丁";
 
 /// 「没有发行版链接」那一类在报告与库里叫什么。
 pub const NO_RELEASE: &str = "没有发行版链接";
-
-/// 补丁的扩展名。它们一个都不在 [`classify`] 的三类主线里——补丁不是内容。
-const PATCH_EXTENSIONS: &[&str] = &[
-    "ips", "ups", "bps", "aps", "ppf", "xdelta", "xdelta3", "vcdiff", "rup", "dps", "ebp",
-];
 
 /// 名字里出现这些词，说明它自称是补丁。
 const PATCH_WORDS: &[&str] = &["补丁", "patch"];
@@ -307,12 +302,6 @@ fn homebrew_of(name: &str, platform: Option<&str>) -> Option<Skip> {
 /// 跳过、另一边当依据，而那两个结论互相矛盾。
 fn title_id_prefix(name: &str) -> Option<String> {
     super::serial::title_id_head(name).map(|id| id.chars().take(4).collect())
-}
-
-/// 这个名字的扩展名是不是补丁格式。
-fn patch_extension(name: &str) -> Option<String> {
-    let ext = extension_lower(Path::new(file_name_of_key(name)))?;
-    PATCH_EXTENSIONS.contains(&ext.as_str()).then_some(ext)
 }
 
 /// 这份内容能不能独立运行——**透明容器**、**压缩镜像**与**裸文件**都算（ADR-0013：

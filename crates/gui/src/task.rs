@@ -114,6 +114,14 @@ pub enum Product {
         /// 共多少字节。
         bytes: u64,
     },
+    /// 出了一份**库体检**（库屏「重新体检」，票 `gui-looks-like-the-design/27`）：报告，连同同一份统计折出来的重复拷贝
+    /// 完整明细。整条只读，与 [`Evaluated`](Self::Evaluated) 一样不必写在认领那一步。装箱是因为两样都大。
+    Checked {
+        /// 体检报告。
+        report: Box<romcat_core::report::HealthReport>,
+        /// 重复拷贝的完整明细：每一组、记下的每一份。
+        duplicates: Box<romcat_core::report::DuplicateDetails>,
+    },
 }
 
 /// 这个界面上那张**任务台**。

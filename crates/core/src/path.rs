@@ -557,6 +557,26 @@ pub fn is_same_place(a: &Path, b: &Path) -> bool {
     Path::new(left.as_ref()) == Path::new(right.as_ref())
 }
 
+/// **主库只读**（ADR-0004）：工具写出去的文件落在这个根里就拒，交回给人看的那句话。
+///
+/// 命令行导出报告、明细与界面上「导出清单…」都问这一处（原先只在命令行里，票
+/// `gui-looks-like-the-design/27` 挪进核心库两边共用）。一份库装着几个根时逐个问，走
+/// [`crate::catalog::Roots::refuse_writing_into`]。两边先落成真实路径、再折成可比形态比（[`is_inside_place`]）。
+///
+/// # Errors
+/// 落在这个根里时返回一句给人看的话。
+pub fn refuse_writing_into_library(root: &Path, target: &Path) -> Result<(), String> {
+    let root = normalize_existing(root);
+    let target = normalize_existing(target);
+    if is_inside_place(&root, &target) {
+        return Err(format!(
+            "输出文件 {} 落在主库内。主库只读，请写到别处。",
+            display(&target)
+        ));
+    }
+    Ok(())
+}
+
 /// `inner` 是否落在 `outer` 之内（含相等）：先折成[可比形态](comparable_text)再比。
 ///
 /// [`is_inside`] 的带前缀归一版本。守只读边界（ADR-0004）、拦套叠的根、从路径折回键，
@@ -630,6 +650,21 @@ fn fold_windows_shape(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 工具写出去的文件落在主库里就拒_说清是哪个文件_落在别处放行() {
+        // ADR-0004：命令行导出明细、界面「导出清单…」都走这一道（原先只在命令行里）。
+        let root = Path::new("/Volumes/ROMs");
+        let refused = refuse_writing_into_library(root, Path::new("/Volumes/ROMs/FC/x/体检.txt"))
+            .expect_err("落在主库里要拒");
+        assert!(
+            refused.contains("体检.txt") && refused.contains("落在主库内"),
+            "{refused}"
+        );
+        assert!(refuse_writing_into_library(root, Path::new("/tmp/体检.txt")).is_ok());
+        // 只比到段：`/Volumes/ROMs2` 不在 `/Volumes/ROMs` 里。
+        assert!(refuse_writing_into_library(root, Path::new("/Volumes/ROMs2/体检.txt")).is_ok());
+    }
 
     #[test]
     fn 盘符绝对路径加扩展长度前缀() {

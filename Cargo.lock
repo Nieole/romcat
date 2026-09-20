@@ -3261,6 +3261,7 @@ dependencies = [
  "egui_kittest",
  "image",
  "jiff",
+ "open",
  "rfd",
  "romcat-core",
  "serde",
