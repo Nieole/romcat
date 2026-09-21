@@ -86,6 +86,7 @@ use romcat_gui::demo;
 use romcat_gui::layout::{FOLD_EXPORT, FOLD_ROOTS, FOLD_SOURCES};
 use romcat_gui::opening::Screen;
 use romcat_gui::roots::RootRow;
+use romcat_gui::settings::Section;
 #[cfg(feature = "demo")]
 use romcat_gui::task::{Clock, Product};
 use romcat_gui::{font, headless, layout, look, rail};
@@ -3172,4 +3173,84 @@ fn 待确认_空态_浅色() {
 #[test]
 fn 待确认_空态_暗色() {
     拍待确认空态("queue/empty-dark", Theme::Dark);
+}
+
+// ——— 设置（票 `gui-looks-like-the-design/31`） ———
+
+/// **设置那一屏**：一份刚建出来的库开在设置上，八节里挑一节拍。
+///
+/// 三样钉死，照旧是为了「每台机器每一趟都一样」：底部状态栏与工作目录那一节印的那一段短写
+/// （`App::set_workspace_label`）、数据源那张表的时刻（`库屏的钟`），以及**探 ffmpeg 那个程序名**
+/// ——那一格照实探这台机器，而门禁那几台有的装了有的没装（`Screen::probe_with`，指一个必定
+/// 不存在的名字，画出来一律是「没找到」那一档，设计稿上画的也是这一档）。
+struct 设置屏 {
+    app: App,
+    _工作区: TempDir,
+}
+
+impl 设置屏 {
+    fn 停在(节: Section) -> Self {
+        let 工作区 = temp_dir("snapshot-设置屏");
+        let site = 开库(工作区.path());
+        let mut app = App::new(site, 工作区.path().to_path_buf());
+        app.show_view(View::Settings);
+        app.set_workspace_label(工作目录().display().to_string());
+        let screen = app.settings_mut();
+        screen.show_section(节);
+        screen.probe_with(romcat_core::scrape::preview::NO_SUCH_PROGRAM);
+        screen.pin_clock(库屏的钟());
+        Self {
+            app,
+            _工作区: 工作区,
+        }
+    }
+}
+
+#[track_caller]
+fn 拍设置屏(名字: &str, 主题: Theme, 节: Section) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 设置屏::停在(节);
+    拍下(开一个(主题, move |ui| 现场.app.ui(ui)), 名字);
+}
+
+#[test]
+fn 设置_常规_浅色() {
+    拍设置屏("settings/general-light", Theme::Light, Section::General);
+}
+
+#[test]
+fn 设置_常规_暗色() {
+    拍设置屏("settings/general-dark", Theme::Dark, Section::General);
+}
+
+#[test]
+fn 设置_工作目录_浅色() {
+    拍设置屏("settings/workspace-light", Theme::Light, Section::Workspace);
+}
+
+#[test]
+fn 设置_工作目录_暗色() {
+    拍设置屏("settings/workspace-dark", Theme::Dark, Section::Workspace);
+}
+
+#[test]
+fn 设置_数据源_浅色() {
+    拍设置屏("settings/sources-light", Theme::Light, Section::Sources);
+}
+
+#[test]
+fn 设置_数据源_暗色() {
+    拍设置屏("settings/sources-dark", Theme::Dark, Section::Sources);
+}
+
+#[test]
+fn 设置_快捷键_浅色() {
+    拍设置屏("settings/keys-light", Theme::Light, Section::Keys);
+}
+
+#[test]
+fn 设置_快捷键_暗色() {
+    拍设置屏("settings/keys-dark", Theme::Dark, Section::Keys);
 }

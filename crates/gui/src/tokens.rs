@@ -726,6 +726,28 @@ pub struct Space {
     pub media_strip_gap: f32,
     /// 头上那几格事实里名与值之间（设计稿 `.hfacts div` 的 `gap`）。
     pub hero_fact_gap: f32,
+    /// 设置屏左边那一列与右边内容之间（设计稿 `.sets` 的 `gap`）。
+    pub settings_gap: f32,
+    /// 设置屏左边那一列两节之间（设计稿 `.sets nav` 的 `gap`）。
+    pub settings_nav_gap: f32,
+    /// 设置屏左边那一列一节的左右留白（设计稿 `.sets nav button` 的 `padding`）。
+    pub settings_nav_padding: f32,
+    /// 设置屏左边那一列与那道竖线之间（设计稿 `.sets nav` 的 `padding-right`）。
+    pub settings_nav_divider: f32,
+    /// 设置屏右边内容里一行与一行之间（设计稿 `.sset` 的 `gap`）。
+    pub settings_body_gap: f32,
+    /// 设置屏一行里：`[上下两样之间, 名与值两列之间]`（设计稿 `.srow` 的 `gap`）。
+    pub settings_row_gap: [f32; 2],
+    /// 设置屏一行底下那道线上头留多少（设计稿 `.srow` 的 `padding-bottom`）。
+    pub settings_row_bottom: f32,
+    /// 设置屏名那一列比值那一列低多少（设计稿 `.srow>b` 的 `padding-top`）。
+    pub settings_label_top: f32,
+    /// 快捷键表：`[行与行之间, 左右两列之间]`（设计稿 `.kgrid` 的 `gap`）。
+    pub keys_grid_gap: [f32; 2],
+    /// 快捷键表一条的上下留白（设计稿 `.kgrid div` 的 `padding`）。
+    pub keys_row_padding: f32,
+    /// 快捷键表一条里说明与键帽之间至少留多少（设计稿 `.kgrid div` 的 `gap`）。
+    pub keys_row_gap: f32,
 }
 
 /// 版式尺寸，点。
@@ -993,6 +1015,14 @@ pub struct Layout {
     pub card_subtitle_rows: usize,
     /// 标题面那张表「名称」一列占表宽几成，其余几列均摊、「隐藏」贴右。
     pub title_name_share: f32,
+    /// 设置屏左边那一列的宽（设计稿 `.sets` 的 `grid-template-columns`）。
+    pub settings_nav_width: f32,
+    /// 设置屏左边那一列一节的高（设计稿 `.sets nav button` 的 `height`）。
+    pub settings_nav_height: f32,
+    /// 设置屏右边内容里名那一列的宽（设计稿 `.srow` 的 `grid-template-columns`）。
+    pub settings_row_label: f32,
+    /// 设置屏「主库原名」那一格输入框的宽。设计稿上没有这一格，取这一档的理由写在令牌文件那一行。
+    pub settings_name_width: f32,
 }
 
 /// 调色比例：两套主题共用。设计稿里写在规则上的字面量（`color-mix` 的百分比、`opacity`）。

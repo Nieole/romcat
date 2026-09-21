@@ -291,6 +291,17 @@ hero-card-gap        = 6             # 那张字卡里标题、副行之间（�
 overview-gap         = 18            # 概览那一面两栏之间、一块与一块之间（设计稿 .ov 与 .col 的 gap:18px）
 media-strip-gap      = 8             # 概览里媒体那一块三格之间（设计稿 .mstrip 的 gap:8px）
 hero-fact-gap        = 2             # 头上那几格事实里名与值之间（设计稿 .hfacts div 的 gap:2px）
+settings-gap         = 18            # 设置屏左边那一列与右边内容之间（设计稿 .sets 的 gap:18px）
+settings-nav-gap     = 2             # 左边那一列两节之间（设计稿 .sets nav 的 gap:2px）
+settings-nav-padding = 10            # 左边那一列一节的左右留白（设计稿 .sets nav button 的 padding:0 10px）
+settings-nav-divider = 12            # 左边那一列与那道竖线之间（设计稿 .sets nav 的 padding-right:12px）
+settings-body-gap    = 14            # 右边内容里一行与一行之间（设计稿 .sset 的 gap:14px）
+settings-row-gap     = [10, 16]      # 一行里：上下两样之间、名与值两列之间（设计稿 .srow 的 gap:10px 16px）
+settings-row-bottom  = 14            # 一行底下那道线上头留多少（设计稿 .srow 的 padding-bottom:14px）
+settings-label-top   = 4             # 名那一列比值那一列低多少（设计稿 .srow>b 的 padding-top:4px）
+keys-grid-gap        = [4, 28]       # 快捷键表：行与行之间、左右两列之间（设计稿 .kgrid 的 gap:4px 28px）
+keys-row-padding     = 6             # 快捷键表一条的上下留白（设计稿 .kgrid div 的 padding:6px 0）
+keys-row-gap         = 12            # 一条里说明与键帽之间至少留多少（设计稿 .kgrid div 的 gap:12px）
 
 [layout]
 rail-width        = 196   # 左侧导航展开宽度
@@ -380,6 +391,12 @@ toast-action-seconds = 6.5  # 带一颗按钮的提示条停多久，秒（设�
 impact-dot        = 8     # 弹层里「会怎样」那几条行首圆点的直径（设计稿 .impact li::before 的 8px）
 impact-column     = 18    # 行首圆点那一列多宽（设计稿 .impact li 的 grid-template-columns:18px 1fr）
 drawer-width      = 380   # 右侧抽屉的宽：待确认屏的裁决记录（设计稿 .drawer 的 width:380px）
+settings-nav-width = 168  # 设置屏左边那一列的宽（设计稿 .sets 的 grid-template-columns:168px）
+settings-nav-height = 32  # 左边那一列一节的高（设计稿 .sets nav button 的 height:32px）
+settings-row-label = 150  # 右边内容里名那一列的宽（设计稿 .srow 的 grid-template-columns:150px）
+settings-name-width = 240 # 设置屏「主库原名」那一格输入框的宽。**设计稿上没有这一格**（改名是票 31 补的落点，
+                          # 见 .scratch/gui-looks-like-the-design/issues/31-settings-screen.md），取这一档是因为
+                          # 真库那几个名字（「我的主库」「Game 盘」）摆得下，又不会把旁边那颗「改名」挤出这一栏。
 seg-padding       = 2     # 分段开关外框与里头按钮之间（设计稿 .seg 的 padding:2px）
 seg-button-height = 24    # 分段开关里一颗的高（设计稿 .seg button 的 height:24px）
 seg-button-padding = 11   # 分段开关里一颗的左右留白（设计稿 .seg button 的 padding:0 11px）
