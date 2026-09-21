@@ -85,12 +85,15 @@
 
 | 步 | 秒 | 跑的是什么 |
 |---|---|---|
-| fmt | 1 | `cargo fmt --all --check` |
-| glossary | 0 | `cargo xtask glossary` |
-| check | 8 | `cargo check --workspace`（**不开 `--all-features`**：交付那份还编得过） |
-| clippy | 15 | `cargo clippy --workspace --all-targets --all-features` |
-| test | 700 | `cargo test --workspace --all-features -- --test-threads=3`，**2451 条** |
-| doc | 6 | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --lib --bins` |
+| fmt | 2 | `cargo fmt --all --check` |
+| glossary | 1 | `cargo xtask glossary` |
+| check | 17 | `cargo check --workspace`（**不开 `--all-features`**：交付那份还编得过） |
+| clippy | 23 | `cargo clippy --workspace --all-targets --all-features` |
+| test | 1208 | `cargo test --workspace --all-features -- --test-threads=3`，**2488 条** |
+| doc | 11 | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --lib --bins` |
+
+这一趟跑的是**合过票 24、28、29 之后**的树（`ab44073`）——不是这张票单独那一趟（那一趟
+`EXIT=0`、六步全绿、2451 条，数在提交 `3a35a17` 里）。
 
 `doc` 那一步只剩两条既有的 cargo 警告（bin 与 lib 同名的 `output filename collision`，note 里
 自己写着是已知 bug），**没有断链**。设计稿核对脚本 `check_tokens.py` 一致，276 项。
