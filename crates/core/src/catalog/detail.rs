@@ -34,6 +34,7 @@ use super::title::TitleRow;
 use super::{Catalog, CatalogError};
 use crate::adapter::converge::{Preference, preference_for};
 use crate::dat::chinese::ChineseMark;
+use crate::scrape::measure::Measured;
 use crate::scrape::pool::MediaPool;
 use crate::scrape::{AnchorKind, MediaKind};
 use crate::shape::Role;
@@ -85,6 +86,11 @@ pub struct MediaItem {
     pub ext: String,
     /// 这份媒体多大：入池时记下的字节数（`media` 那张表），不查盘。
     pub bytes: u64,
+    /// **尺寸与时长**：同样是入池那一刻量下来的（`scrape::measure`），不查盘。
+    ///
+    /// 老库里入过池的那些、以及量不出来的那些（这一版不解的格式、半截文件、这台机器上
+    /// 没有 ffmpeg）三格全空——屏上那一行那时退回「来源 · 大小」。
+    pub measured: Measured,
     /// 它在**媒体池**里的落点；没查池子时是 `None`。
     pub at: Option<PathBuf>,
     /// 池里真有那个文件吗；没查池子时是 `None`。
@@ -160,6 +166,9 @@ pub struct VariantDetail {
     pub work: Option<String>,
     /// 基于哪条**发行版**；同人移植与 homebrew 没有，那本身就是给识别管线的信号。
     pub release: Option<ReleaseRow>,
+    /// **裁决说它是第几版**（`identification.edition`）。读它走 [`Self::edition`]——
+    /// 挑哪一层的判断在那儿，不在这一格上。
+    decided_edition: Option<String>,
     /// 在哪几个**合集**里（与平台正交，ADR-0011）。
     pub collections: Vec<String>,
     /// 发行版标着的语言，拆开的。
@@ -205,6 +214,28 @@ impl VariantDetail {
     #[must_use]
     pub fn is_preferred(&self) -> bool {
         self.preferred_now() == Some(self.row.key.as_str())
+    }
+
+    /// 这个变体**第几版**（词表**第几版**）；说不出是 `None`。
+    ///
+    /// **两层，一条回退链，这里是唯一一处判它的地方**（ADR-0024，2026-09-20 拿主意的人定）：
+    ///
+    /// 1. **裁决说了的听裁决**——「这是谁汉化的第几版」本来就只有人说得出（ADR-0008），
+    ///    它挂在**变体**这一层（`identification.edition`）。
+    /// 2. 没裁过的看**发行版**那一层的**修订**——已接受那条候选撞上的 DAT 条目名尾巴上
+    ///    那一组 `(Rev 1)` / `(v1.1)`（`release.revision`，`identify::naming::parse` 读出来的）。
+    /// 3. **都没有就是说不出**。**不拿「初版」或 `1.0` 去补**——设计稿在那一格画的是
+    ///    `1.0`，而「名字里没有修订标记」与「这是第一版」不是同一件事，编一个出来是把
+    ///    不知道伪装成知道。屏上那时写「—」。
+    ///
+    /// **文件名里剥出来的那一截不在这条链上**（`filename::Parsed::version`）：那一截只
+    /// 拿去剥**正题**，当第几版用就成了第三个答案——与词表**变体简称**里汉化组那一条
+    /// 逐字同理。
+    #[must_use]
+    pub fn edition(&self) -> Option<&str> {
+        self.decided_edition
+            .as_deref()
+            .or_else(|| self.release.as_ref()?.revision.as_deref())
     }
 
     /// **中文标题**取的是哪一条叫法（ADR-0012）。
@@ -285,6 +316,7 @@ impl Catalog {
             Some((state, reason)) => (Some(state), reason),
             None => (None, None),
         };
+        let decided_edition = self.decided_edition(key)?;
         let titles = match &work {
             Some(work) => self.titles_of(work)?,
             None => Vec::new(),
@@ -325,6 +357,7 @@ impl Catalog {
             row,
             work,
             release,
+            decided_edition,
             languages,
             state,
             reason,
@@ -417,7 +450,8 @@ impl Catalog {
     pub fn release(&self, id: i64) -> Result<Option<ReleaseRow>, CatalogError> {
         self.conn
             .prepare_cached(
-                "SELECT id, work_id, platform, region, serial, languages FROM release WHERE id = ?1",
+                "SELECT id, work_id, platform, region, serial, languages, revision
+                 FROM release WHERE id = ?1",
             )
             .and_then(|mut statement| {
                 statement
@@ -429,6 +463,7 @@ impl Catalog {
                             region: row.get(3)?,
                             serial: row.get(4)?,
                             languages: row.get(5)?,
+                            revision: row.get(6)?,
                         })
                     })
                     .optional()
@@ -626,7 +661,8 @@ impl Catalog {
         let mut statement = self
             .conn
             .prepare_cached(
-                "SELECT r.kind, r.source, r.hash, m.ext, r.evidence, m.bytes
+                "SELECT r.kind, r.source, r.hash, m.ext, r.evidence, m.bytes,
+                        m.width, m.height, m.duration_ms
                  FROM media_ref r JOIN media m ON m.hash = r.hash
                  WHERE r.anchor = ?1 AND r.subject = ?2
                  ORDER BY r.kind, r.source, r.hash",
@@ -641,12 +677,16 @@ impl Catalog {
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, i64>(5)?,
+                    // 入池那一刻量下来的三样；**老库里这三格全空**（`catalog::scrape::add_columns`
+                    // 不回填），读回来就是一份空的 `Measured`。读法与按哈希单问那一支共用。
+                    super::scrape::read_measured(row, 6)?,
                 ))
             })
             .map_err(|source| self.err(source))?;
         let mut out = Vec::new();
         for row in rows {
-            let (label, source, hash, ext, evidence, bytes) = row.map_err(|e| self.err(e))?;
+            let (label, source, hash, ext, evidence, bytes, measured) =
+                row.map_err(|e| self.err(e))?;
             // **认不出的类别不静默归进「其他」**：那会把「这是张说明书」与
             // 「这一版不认得这个类别」说成同一件事。认不出就整条不算。
             let Some(kind) = MediaKind::from_label(&label) else {
@@ -661,6 +701,7 @@ impl Catalog {
                 hash,
                 ext,
                 bytes: u64::try_from(bytes).unwrap_or(0),
+                measured,
                 evidence,
             });
         }

@@ -66,6 +66,7 @@ fn 认出一部作品(catalog: &mut Catalog, 平台: &str, 作品: &str) {
             variant_key: variant.key,
             platform: None,
             standalone: None,
+            edition: None,
             state: State::Matched,
             reason: None,
             units: 1,

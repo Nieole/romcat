@@ -78,7 +78,15 @@ CREATE TABLE IF NOT EXISTS release(
     region    TEXT,
     serial    TEXT,
     languages TEXT,
-    origin    TEXT NOT NULL
+    origin    TEXT NOT NULL,
+    -- **修订**：DAT 条目名尾巴上那一组 `(Rev 1)` / `(v1.1)`（`identify::naming::parse`）。
+    -- 它是词表**第几版**上面那一层——官方又发了一遍，是**发行版**那一层的事实，
+    -- 所以住在这张表上，而不是变体那一侧。
+    --
+    -- 可空，**空就是「这条条目名里没有修订标记」**，不是「第一版」（词表**第几版**，
+    -- 2026-09-20 拿主意的人定）。那正是加这一列之前的唯一可能，于是老行一条都不会被
+    -- 读错。这一列由 `catalog::identify::add_columns` 给老库补上。
+    revision  TEXT
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS release_work ON release(work_id);
@@ -198,6 +206,44 @@ pub(super) fn read_variant_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Vari
     })
 }
 
+/// 补上后来加的列。**纯加列，不改已有列的含义**，所以不动
+/// [`SCHEMA_VERSION`](super::SCHEMA_VERSION)（补列那一下共用 [`add_column`](super::add_column)）。
+///
+/// 票 `gui-looks-like-the-design/34` 加的是 `release.revision`（**发行版那一层的修订**，
+/// 词表**第几版**）。老行上它是 NULL，读的那一侧当「这条条目名里没有修订标记」处理——
+/// 那正是加这一列之前的唯一可能，于是旧数据一行都不会被读错。
+///
+/// **它跟着建表语句走，不塞进别的模块的 `add_columns`**：`release` 这张表建在这个文件里，
+/// 补它的列也该在这儿——两处分家的话，下一个改这张表的人看不见还有一支在给它补列。
+pub(super) fn add_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    super::add_column(conn, "release", "revision", "TEXT")?;
+    Ok(())
+}
+
+/// 要记下来的一条**发行版**：哪个平台、哪个地区、什么序列号、什么语言、第几次修订。
+///
+/// **五样捏成一个结构体，不是五个挨着排的 `Option<&str>`**（票
+/// `gui-looks-like-the-design/34` 的收尾审查挑出来的，clippy 的 `too_many_arguments`
+/// 同时也拦下了它）：[`Catalog::add_release`] 有十来处调用点，五个同型参数挨着传，
+/// 把地区与序列号写颠倒是**静默**的——库里多出一条形状不对的发行版，而没有一条断言会红。
+/// 带上字段名之后，写颠倒当场编译不过。
+///
+/// `languages` 装的是 ADR-0019 那道世代裂缝的数字世代一侧：中文在那里是同一条发行版的
+/// 语言属性，不另成发行版。`revision` 是词表**第几版**上面那一层。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NewRelease<'a> {
+    /// 平台；可空。
+    pub platform: Option<&'a str>,
+    /// 地区；DAT 的名字里认不出来时空着。
+    pub region: Option<&'a str>,
+    /// 序列号；可空。
+    pub serial: Option<&'a str>,
+    /// 语言标记组（`En,Zh-Hans`）；可空。
+    pub languages: Option<&'a str>,
+    /// **修订**：条目名尾巴上那一组 `(Rev 1)` / `(v1.1)`。**空就是名字里没有**，不是「第一版」。
+    pub revision: Option<&'a str>,
+}
+
 /// 一条**发行版**记录读回来的样子。
 ///
 /// `region` 与 `languages` 分开读出来不是冗余：**标题集合**靠它们分辨三件事——
@@ -218,6 +264,12 @@ pub struct ReleaseRow {
     pub serial: Option<String>,
     /// 语言标记组（`En,Zh-Hans`）；可空。
     pub languages: Option<String>,
+    /// **修订**：DAT 条目名尾巴上那一组 `(Rev 1)` / `(v1.1)`（`identify::naming::parse`）。
+    ///
+    /// 词表**第几版**上面那一层。**空就是「名字里没有修订标记」，不是「第一版」**——
+    /// 挑哪一层由 [`VariantDetail::edition`](super::detail::VariantDetail::edition) 一处判，
+    /// 这里只如实交回读到的东西。
+    pub revision: Option<String>,
 }
 
 impl ReleaseRow {
@@ -804,25 +856,27 @@ impl Catalog {
 
     /// 记一个**发行版**，返回它的 id。
     ///
-    /// `languages` 装的是 ADR-0019 那道世代裂缝的数字世代一侧：中文在那里是同一条
-    /// 发行版的语言属性，不另成发行版。
-    ///
     /// # Errors
     /// 写库失败时返回错误。
     pub fn add_release(
         &mut self,
         work_id: i64,
-        platform: Option<&str>,
-        region: Option<&str>,
-        serial: Option<&str>,
-        languages: Option<&str>,
+        said: &NewRelease<'_>,
         origin: Provenance,
     ) -> Result<i64, CatalogError> {
         self.conn
             .execute(
-                "INSERT INTO release(work_id, platform, region, serial, languages, origin)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-                params![work_id, platform, region, serial, languages, origin.label()],
+                "INSERT INTO release(work_id, platform, region, serial, languages, origin, revision)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    work_id,
+                    said.platform,
+                    said.region,
+                    said.serial,
+                    said.languages,
+                    origin.label(),
+                    said.revision
+                ],
             )
             .map_err(|source| self.err(source))?;
         Ok(self.conn.last_insert_rowid())
@@ -938,7 +992,9 @@ impl Catalog {
     pub fn releases(&self) -> Result<BTreeMap<i64, ReleaseRow>, CatalogError> {
         let mut statement = self
             .conn
-            .prepare("SELECT id, work_id, platform, region, serial, languages FROM release")
+            .prepare(
+                "SELECT id, work_id, platform, region, serial, languages, revision FROM release",
+            )
             .map_err(|source| self.err(source))?;
         let rows = statement
             .query_map([], |row| {
@@ -949,6 +1005,7 @@ impl Catalog {
                     region: row.get(3)?,
                     serial: row.get(4)?,
                     languages: row.get(5)?,
+                    revision: row.get(6)?,
                 })
             })
             .map_err(|source| self.err(source))?;
@@ -1283,10 +1340,13 @@ mod tests {
         let release = catalog
             .add_release(
                 work,
-                Some("SFC"),
-                Some("日本"),
-                Some("SHVC-TO"),
-                Some("ja"),
+                &NewRelease {
+                    platform: Some("SFC"),
+                    region: Some("日本"),
+                    serial: Some("SHVC-TO"),
+                    languages: Some("ja"),
+                    revision: None,
+                },
                 Provenance::Verdict,
             )
             .expect("建得了发行版");

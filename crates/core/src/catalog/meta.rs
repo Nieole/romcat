@@ -101,7 +101,12 @@ pub(super) enum MetaKey {
 
 impl MetaKey {
     /// 这个键落在盘上的那串字。
-    const fn as_str(self) -> &'static str {
+    ///
+    /// `pub(super)`：只给 [`catalog`](super) 这一层以内看。`catalog::export` 写导出那一趟
+    /// 的账时要把这三个键与逐条那一批**落在同一个事务里**，于是它得自己拿着键名去拼
+    /// 那一句 upsert，走不了 [`Catalog::meta_set`]（那一支握着 `&self.conn`，事务开着时
+    /// 借不动）。外头照旧够不着——按键读写那两支不收字符串就是为了这个（模块文档）。
+    pub(super) const fn as_str(self) -> &'static str {
         match self {
             Self::SchemaVersion => "schema_version",
             Self::LibraryName => "library_name",

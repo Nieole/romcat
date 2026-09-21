@@ -67,10 +67,11 @@ use romcat_core::dat::Convention;
 use romcat_core::fs::RealFs;
 use romcat_core::platform::Manifest;
 use romcat_core::scan::{self, Jobs, ScanOptions};
+use romcat_core::scrape::measure::Measured;
 use romcat_core::scrape::{AnchorKind, Field, MediaKind};
 use romcat_core::shape::{SINGLE_FILE_RULE, Variant};
 use romcat_core::site::Site;
-use romcat_core::sublibrary::{Rule, Sublibrary};
+use romcat_core::sublibrary::{Exception, Rule, Sublibrary};
 #[cfg(feature = "demo")]
 use romcat_core::task::Cutoff;
 use romcat_core::task::Handle;
@@ -702,6 +703,7 @@ fn 浏览现场(收起两栏: bool) -> 浏览现场 {
                 variant_key: variant.key.clone(),
                 platform: None,
                 standalone: None,
+                edition: None,
                 state,
                 reason: None,
                 units: 1,
@@ -720,8 +722,19 @@ fn 浏览现场(收起两栏: bool) -> 浏览现场 {
         let mut media = Vec::new();
         if *有封面 {
             let hash = format!("{:040x}", at + 1);
+            // 尺寸就是 [`详情页的封面图`] 那张真图的宽高——媒体那一格照稿写
+            // 「来源 · 尺寸 · 大小」，基线上那个数得与池里真躺着的那张对得上。
             catalog
-                .put_media(&hash, "png", 86 * 1024)
+                .put_media(
+                    &hash,
+                    "png",
+                    86 * 1024,
+                    Measured {
+                        width: Some(300),
+                        height: Some(400),
+                        duration_ms: None,
+                    },
+                )
                 .expect("记得进媒体");
             media.push(HarvestedMedia {
                 kind: MediaKind::Cover.label().to_owned(),
@@ -1178,8 +1191,21 @@ fn 挂上媒体池(app: &mut App, 目录: &Path) {
     let 视频 = format!("{:040x}", 0xF1D0_u32);
     落(&视频, "mp4", &[0u8; 256]);
     let (browse, site) = app.browse_and_site();
+    // **这一段的尺寸与时长是量过的**：量尺在**入池**那一刻跑（`scrape::measure`），
+    // 而这台机器眼下没有 ffmpeg 只挡得住**抽首帧**——库里记着的那三格照样读得回来。
+    // 基线上因此是「视频那一格是占位、底下那行却写着 640 × 480 · 0:30」，
+    // 那正是真库里换过机器之后会看到的样子。
     site.catalog
-        .put_media(&视频, "mp4", 256)
+        .put_media(
+            &视频,
+            "mp4",
+            256,
+            Measured {
+                width: Some(640),
+                height: Some(480),
+                duration_ms: Some(30_000),
+            },
+        )
         .expect("记得进媒体");
     site.catalog
         .put_scraped(&[Harvested {
@@ -1201,6 +1227,87 @@ fn 挂上媒体池(app: &mut App, 目录: &Path) {
     browse.set_pool(Some(pool));
 }
 
+/// 基线里那一趟导出是什么时候（UNIX 纪元起的秒，屏上按 UTC 画成 `2026-09-18 11:08`）。
+///
+/// **定死**：拿挂钟出来的基线每重出一次就变一次，那种基线拦不住任何东西——所以走
+/// `Catalog::mark_exported_at` 而不是 `mark_exported`，与屏上别处那几个钉死的时刻同一个做法。
+const 导出于: i64 = 1_789_729_680;
+
+/// 详情页那几张的**第几版、子库、导出**三样（票 `gui-looks-like-the-design/34`）。
+///
+/// 三样都摆成**用户真会看到的样子**（协调人 2026-09-15 那条「图里要是用户真会看到的样子」）：
+///
+/// - **第几版**：汉化那个变体记一条裁决说的 `v1.2`（它的文件名里就写着），原版那个一条
+///   修订标记都没有——于是变体卡那一面**两种情形各有一个**。画面里只看得见「说不出」那一档
+///   （带 `v1.2` 的那张卡在折叠线以下），那一档有 `tests/work.rs` 里的文字测试钉着。
+/// - **子库**：一个收得住 SFC 的子库，名字照设计稿。
+/// - **导出**：这个作品真写出去过一趟，时刻与整库那个数是同一个（[`导出于`]）。
+fn 摆上第几版子库与导出(app: &mut App) {
+    use romcat_core::catalog::export::ExportedEntry;
+    use romcat_core::catalog::identify::Identification;
+    use romcat_core::sublibrary::{Rule, Sublibrary};
+
+    let (_, site) = app.browse_and_site();
+    let 汉化那个 = "主库/SFC/汉化/时空之轮 (简体中文 v1.2).zip";
+    let 原来的 = site
+        .catalog
+        .variant(汉化那个)
+        .expect("读得动")
+        .expect("基线里有这个变体");
+    // **候选原样写回去**：`write_identifications` 先把这个变体的候选整批删掉再插——
+    // 不带上原来那几条的话，这一行的置信度标签、识别结论与「识别依据」那一面全跟着变，
+    // 而这张票动的只是「版本」那一格。
+    let 原来的候选 = site.catalog.candidates_of(汉化那个).expect("读得动");
+    site.catalog
+        .write_identifications(&[Identification {
+            variant_key: 汉化那个.to_owned(),
+            platform: None,
+            standalone: None,
+            // 裁决那一层：「这是谁汉化的第几版」只有人说得出（ADR-0008、词表**第几版**）。
+            edition: Some("v1.2".to_owned()),
+            state: site
+                .catalog
+                .identification_of(汉化那个)
+                .expect("读得动")
+                .map_or(State::Matched, |(state, _)| state),
+            reason: None,
+            units: 1,
+            nkit: 0,
+            read_bytes: 0,
+            work_id: 原来的.work_id,
+            release_id: 原来的.release_id,
+            candidates: 原来的候选,
+        }])
+        .expect("写得进结论");
+    site.catalog
+        .put_sublibrary(&Sublibrary {
+            name: "RG35XX Plus".to_owned(),
+            target: "/Volumes/SDCARD/Roms".to_owned(),
+            target_raw: Some("/Volumes/SDCARD/Roms".to_owned()),
+            format: "Pegasus".to_owned(),
+            capacity: None,
+            capability: None,
+            capacity_by_device: false,
+        })
+        .expect("子库写得进");
+    site.catalog
+        .add_rule("RG35XX Plus", &Rule::parse("平台=SFC").expect("规则读得懂"))
+        .expect("规则写得进");
+    site.catalog
+        .mark_exported_at(
+            1,
+            false,
+            "Pegasus",
+            &[ExportedEntry {
+                anchor: AnchorKind::Work,
+                subject: 点开的作品.to_owned(),
+                platform: "SFC".to_owned(),
+            }],
+            导出于,
+        )
+        .expect("记得下");
+}
+
 /// 搭好浏览屏的现场，点开那个作品、打开作品详情页停在 `面` 那一面，拍一张。CI 上跳过（[`该跳过`]）。
 ///
 /// **拍之前先认一眼真打开了**：头一趟出图时双击没打开，概览那两张拍成了浏览屏，而两遍核对照样绿——基线比的是
@@ -1212,6 +1319,7 @@ fn 拍详情页(名字: &str, 主题: Theme, 面: Tab) {
     }
     let 浏览现场 { mut app, 目录 } = 浏览现场(false);
     挂上媒体池(&mut app, 目录.path());
+    摆上第几版子库与导出(&mut app);
     // 打开与换面走的是界面上「查看详情」、点一面的同一个入口（`Screen::open_page`）；交给画帧那个闭包在下一帧开头办。
     let 换面 = std::rc::Rc::new(std::cell::Cell::new(None::<Tab>));
     let 要换 = std::rc::Rc::clone(&换面);
@@ -1985,6 +2093,45 @@ impl 子库现场 {
         screen.reload(site);
     }
 
+    /// 把几个变体挂到同一个作品底下（识别结论）——例外那张表的「作品」一列才写得出名字。
+    fn 挂到作品(&mut self, 作品: &str, keys: &[&str]) {
+        let (screen, site) = self.app.sublibrary_and_site();
+        let work = site
+            .catalog
+            .add_work(作品, Provenance::Identified)
+            .expect("建得出作品");
+        let records: Vec<Identification> = keys
+            .iter()
+            .map(|key| Identification {
+                variant_key: (*key).to_string(),
+                platform: None,
+                standalone: None,
+                edition: None,
+                state: State::Matched,
+                reason: None,
+                units: 1,
+                nkit: 0,
+                read_bytes: 0,
+                work_id: Some(work),
+                release_id: None,
+                candidates: Vec::new(),
+            })
+            .collect();
+        site.catalog
+            .write_identifications(&records)
+            .expect("识别结论写得进");
+        screen.reload(site);
+    }
+
+    /// 往库里记一条例外。
+    fn 记一条例外(&mut self, name: &str, key: &str, kind: Exception, note: Option<&str>) {
+        let (screen, site) = self.app.sublibrary_and_site();
+        site.catalog
+            .set_exception(name, key, kind, note)
+            .expect("例外写得进");
+        screen.reload(site);
+    }
+
     /// 按一下「算一遍容量」，等它收回来。内存里的库就地跑完，认领在 `App::poll_tasks` 里。
     fn 算一遍容量(&mut self) {
         {
@@ -2291,6 +2438,132 @@ fn 子库_删除后提示条_浅色() {
 #[test]
 fn 子库_删除后提示条_暗色() {
     拍删除后提示条("sublibrary/deleted-toast-dark", Theme::Dark);
+}
+
+/// **手动例外那两对里定死的「此刻」**：2026-09-03 14:58（UTC），本地钉成东八区——屏上画「09-03 22:58」那一天。
+///
+/// 例外记下的那一刻是中立库照挂钟写下的，照实画一趟一个样，所以整张表那一列由
+/// `sublibrary::Screen::pin_exception_time` 钉死（与待确认屏定死裁决记录的时刻同一个用处、同一处实现）。
+const 例外那两对的此刻: i64 = 1_788_447_480;
+
+/// 这两对拍的是哪一台。
+const 记着例外的那一台: &str = "RG35XX Plus";
+
+/// **手动例外那两对的现场**：一台设备、一条规则，库里挂了两个作品，两样跟着挂钟走的都钉死。
+///
+/// 第三个变体（黄金太阳）**故意不挂作品**：认不出作品的那一行主栏写的是变体的键，
+/// 两种样子要在同一张基线上并排。
+fn 记着例外的一台(带上例外: bool) -> 子库现场 {
+    let mut 现场 = 子库现场::摆好();
+    现场.记一台(
+        记着例外的那一台,
+        不在位的目标,
+        false,
+        Some(64_000_000_000),
+        None,
+        &["平台=SFC"],
+    );
+    现场.挂到作品("圣剑传说 3", &["库/SFC/圣剑传说 3 汉化版.zip"]);
+    现场.挂到作品("口袋妖怪 绿宝石", &["库/GBA/口袋妖怪 绿宝石.zip"]);
+    if 带上例外 {
+        for (键, 方向, 为什么) in [
+            (
+                "库/GBA/口袋妖怪 绿宝石.zip",
+                Exception::Include,
+                Some("小时候玩的就是这一版"),
+            ),
+            ("库/GBA/黄金太阳 开启的封印.zip", Exception::Include, None),
+            (
+                "库/SFC/圣剑传说 3 汉化版.zip",
+                Exception::Exclude,
+                Some("有新版汉化，旧版不带"),
+            ),
+        ] {
+            现场.记一条例外(记着例外的那一台, 键, 方向, 为什么);
+        }
+    }
+    现场.算一遍容量();
+    {
+        let screen = 现场.app.sublibrary_and_site().0;
+        screen.set_clock(romcat_gui::clock::Clock::fixed(例外那两对的此刻, 8 * 3_600));
+        screen.pin_exception_time(例外那两对的此刻 - 3_600);
+    }
+    现场
+}
+
+/// **手动例外弹层**（票 `gui-looks-like-the-design/22`）：卡上例外那一行按「管理」，停在「包含」那一栏——
+/// 表上一行一条，作品（认不出作品的那一行写变体的键）、平台、体积、备注、时间与行尾「撤销」都在。
+///
+/// **「看得全」写成断言**：包含那一栏两条，屏上就得画出两颗「撤销」，而且每一颗都整个在视口里。
+fn 拍手动例外弹层(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 记着例外的一台(true);
+    let mut harness = 开一个(主题, move |ui| {
+        现场.app.ui(ui);
+    });
+    按(&mut harness, "管理");
+    let 视口 = egui::Rect::from_min_size(egui::Pos2::ZERO, headless::VIEWPORT.into());
+    let 撤销 = 正好画着的每一处(harness.output(), "撤销");
+    assert_eq!(
+        撤销.len(),
+        2,
+        "包含那一栏两条，屏上画出了 {} 颗「撤销」",
+        撤销.len()
+    );
+    assert!(
+        撤销.iter().all(|rect| 视口.contains_rect(*rect)),
+        "表里有一行被视口截了一半：{撤销:?}"
+    );
+    拍下(harness, 名字);
+}
+
+/// **手动例外弹层的空态与搜作品**：一条例外都没有的一台，停在「排除」那一栏（空态写明这一栏平时从哪儿来），
+/// 搜索框里打着字、底下摆着命中的那一行。
+///
+/// 开弹层、换栏、搜一下都**走界面上那几条路**（`open_exceptions` / `show_exception_tab` /
+/// `set_exception_search`），只是不靠敲键盘——搜索框里的字靠事件打进去要好几帧，而这一张要的是打完的样子。
+fn 拍手动例外空态(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 记着例外的一台(false);
+    {
+        let (screen, site) = 现场.app.sublibrary_and_site();
+        screen.open_exceptions(site, 记着例外的那一台);
+        screen.show_exception_tab(Exception::Exclude);
+        screen.set_exception_search(site, "口袋");
+    }
+    let harness = 开一个(主题, move |ui| {
+        现场.app.ui(ui);
+    });
+    let 命中 = 正好画着的每一处(
+        harness.output(),
+        "还没有排除的作品。容量超限时，删减建议里的「排除」会记在这里；也可以在下面搜索添加。",
+    );
+    assert_eq!(命中.len(), 1, "排除那一栏的空态没画出来");
+    拍下(harness, 名字);
+}
+
+#[test]
+fn 子库_手动例外弹层_浅色() {
+    拍手动例外弹层("sublibrary/exceptions-light", Theme::Light);
+}
+
+#[test]
+fn 子库_手动例外弹层_暗色() {
+    拍手动例外弹层("sublibrary/exceptions-dark", Theme::Dark);
+}
+
+#[test]
+fn 子库_手动例外空态_浅色() {
+    拍手动例外空态("sublibrary/exceptions-empty-light", Theme::Light);
+}
+
+#[test]
+fn 子库_手动例外空态_暗色() {
+    拍手动例外空态("sublibrary/exceptions-empty-dark", Theme::Dark);
 }
 
 // ——— 任务屏（票 `gui-looks-like-the-design/25`）———

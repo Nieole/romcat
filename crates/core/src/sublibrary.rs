@@ -188,7 +188,7 @@ pub enum Exception {
 }
 
 impl Exception {
-    /// 存进库、也打给用户的那个词。
+    /// **存进库、命令行印出来**的那个词。
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -197,7 +197,20 @@ impl Exception {
         }
     }
 
-    /// 从词认回来。
+    /// **界面上写的**那个词（挂单 `Q818`，拿主意的人照设计稿定）：收入那一档屏上写「包含」。
+    ///
+    /// 与 [`Self::label`] 分开，走的是票 `gui-looks-like-the-design/21` 里前端格式那一条同样的路
+    /// （界面写「ES-DE」、适配器标识与库里存的值不动）：**库里存的那个词是键**，换它要动结构版本，
+    /// 而换来的只是一个更顺口的说法。两个词说的是同一件事，[`Self::from_label`] 照旧只认存进去的那一个。
+    #[must_use]
+    pub fn shown(self) -> &'static str {
+        match self {
+            Self::Include => "包含",
+            Self::Exclude => "排除",
+        }
+    }
+
+    /// 从词认回来。**认的是存进库的那个词**（[`Self::label`]），不是屏上写的那个。
     #[must_use]
     pub fn from_label(label: &str) -> Option<Self> {
         Some(match label {
@@ -222,6 +235,49 @@ pub struct ExceptionRow {
     pub note: Option<String>,
     /// 什么时候记下的（Unix 秒）。
     pub at: i64,
+}
+
+/// 一条例外**摆到屏上要的那几样**：例外自己，加上库里那个变体眼下是谁。
+///
+/// 它是一条**读出来的联查**，不是第二份例外：[`ExceptionRow`] 照旧是存下来的那一份，这里只在旁边
+/// 补上作品、平台与容量，好让手动例外那张表（票 `gui-looks-like-the-design/22`）写得出「作品、平台、体积、备注与时间」。
+///
+/// **库里眼下没有那个变体是常态，不是错**（盘没插、目录改了名、重新成型换了键的写法）：那时
+/// [`platform`](Self::platform) 与 [`bytes`](Self::bytes) 都是 `None`，例外照旧记着、不删
+/// （ADR-0016，见 `catalog::sublibrary` 模块文档「例外为什么不给变体挂外键」）。
+/// **容量不写 0**——「没有这一份」与「这一份是空的」不是一件事。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExceptionDetail {
+    /// 存下来的那一条。
+    pub row: ExceptionRow,
+    /// 这个变体属于**哪个作品**——`work` 表里那个名字，**身份不是显示用的字**。
+    ///
+    /// 识别还没认出作品、或者库里眼下没有这个变体时是 `None`。问「这个作品是不是已经有例外了」
+    /// 比的是它，不是 [`display`](Self::display)：两个同名的作品是真实存在的（`work` 表的 `name`
+    /// 上刻意没有 `UNIQUE`），拿屏上那串字比会把它们当成一个。
+    pub work: Option<String>,
+    /// **屏上主栏写的那个名字**：认出作品的写显示标题（`title::choose` 挑的，与浏览屏主列表、
+    /// 详情面板、导出同一处挑），认不出的写那个变体的**正题**（`WorkRow::title` 剥的那一个，
+    /// 与浏览屏主列表同一处剥）。
+    ///
+    /// **与 [`work`](Self::work) 分开两格**：那一格是身份、这一格是给人看的字。合成一格的话，
+    /// 第二趟把显示标题写回去就把身份冲掉了，而「这个作品有没有例外」正是要拿身份问的。
+    ///
+    /// 库里眼下没有这个变体（盘没插、目录改了名）时退回**变体的键**——那时剥正题要的主文件名
+    /// 也不在库里，而键至少指得准是哪一份。
+    pub display: String,
+    /// 平台；平台未知、或者库里眼下没有这个变体时是 `None`。
+    pub platform: Option<String>,
+    /// 容量（下界，ADR-0021）；**库里眼下没有这个变体时是 `None`**。
+    pub bytes: Option<u64>,
+}
+
+impl ExceptionDetail {
+    /// 库里眼下**没有**这个变体。屏上要说得出口：那一行的体积画不出来，不是 0。
+    #[must_use]
+    pub fn missing(&self) -> bool {
+        self.bytes.is_none()
+    }
 }
 
 /// 一个子库的**选择集**：规则打底，例外覆盖。
@@ -969,37 +1025,157 @@ pub fn facts(catalog: &Catalog) -> Result<Vec<VariantFacts>, CatalogError> {
             .map(crate::catalog::ReleaseRow::language_codes)
             .unwrap_or_default();
         let joined = collections.get(&variant.key).cloned().unwrap_or_default();
-        let mut row = VariantFacts {
-            platform: variant.platform,
-            bytes: variant.bytes,
-            languages,
-            chinese: chinese
-                .get(&variant.key)
-                .map(|marks| marks.iter().map(|mark| (*mark).to_string()).collect())
-                .unwrap_or_default(),
-            // **收藏就是那个名字定死的合集**：两样从同一份成员关系里折出来，
-            // 不给它们留下各说各的余地（`catalog::filter` 那一侧也是同一条判据）。
-            favorite: joined
-                .iter()
-                .any(|name| name == crate::collection::FAVORITE),
-            collections: joined,
-            ..VariantFacts::default()
-        };
-        for values in [
+        let marks = chinese
+            .get(&variant.key)
+            .map(|marks| marks.iter().map(|mark| (*mark).to_string()).collect())
+            .unwrap_or_default();
+        // **作品锚点与变体锚点合起来看**：年份挂在作品上、汉化组挂在变体上，而规则
+        // 不该要求用户先弄清某个字段挂在哪一层。
+        let scraped = [
             work.as_ref().and_then(|name| by_work.get(name)),
             by_variant.get(&variant.key),
         ]
         .into_iter()
         .flatten()
-        {
-            for (into, value) in values {
-                into.absorb(&mut row, value);
+        .flatten()
+        .map(|(into, value)| (*into, value.as_str()));
+        out.push(fold_one(variant, work, languages, joined, marks, scraped));
+    }
+    Ok(out)
+}
+
+/// 把**一个变体**折成 [`select`] 要的那份事实。
+///
+/// **两条路共用这一段**：全库那一趟（[`facts`]，几张大表一次读完再逐行装配）与
+/// 按键那一趟（[`facts_of`]，几条按键查询）。各写一遍的话，「一个变体在选择集眼里
+/// 长什么样」就有了两份定义——而两份定义里只要有一处漏掉一维，屏上说「它在这个子库
+/// 里」而同步时不搬它，人核对不了（ADR-0024 那条规矩的原话：**判断只许一处**）。
+fn fold_one<'a>(
+    variant: crate::catalog::VariantRow,
+    work: Option<String>,
+    languages: Vec<String>,
+    collections: Vec<String>,
+    chinese: Vec<String>,
+    scraped: impl Iterator<Item = (ScrapedInto, &'a str)>,
+) -> VariantFacts {
+    let mut row = VariantFacts {
+        platform: variant.platform,
+        bytes: variant.bytes,
+        languages,
+        chinese,
+        // **收藏就是那个名字定死的合集**：两样从同一份成员关系里折出来，
+        // 不给它们留下各说各的余地（`catalog::filter` 那一侧也是同一条判据）。
+        favorite: collections
+            .iter()
+            .any(|name| name == crate::collection::FAVORITE),
+        collections,
+        ..VariantFacts::default()
+    };
+    for (into, value) in scraped {
+        into.absorb(&mut row, value);
+    }
+    row.work = work;
+    row.key = variant.key;
+    row
+}
+
+/// 把**指名的这几个变体**折成事实，一条全库扫描都不走。
+///
+/// [`facts`] 那一趟读的是几张整表（真库 46,444 个变体、78,902 条刮削值，实测 343 毫秒，
+/// 挂账 D156）。**作品详情页问的是三五个变体**，而那一页是画帧那条线程上开的——
+/// 一帧的预算是 16 毫秒，为三个变体扫一遍全库差着两个数量级。这一条因此逐样走**按键的
+/// 查询**（`variants_of` / `release` / `collections_of` / `candidates_of` /
+/// `scraped_values`），条数与 `keys` 成正比。
+///
+/// 折出来的形状与 [`facts`] **逐字一样**（两条都走 `fold_one`），于是拿它喂
+/// [`select`] 得到的结论，与整库求值时那个变体落在哪一档**必然一致**：`select` 对每个
+/// 变体的判断只看它自己那一份事实，不看别的变体。
+///
+/// 库里没有的键**一声不响地跳过**——照 [`facts`] 的形状，那种键本来就折不出事实。
+///
+/// # Errors
+/// 读中立库失败时返回错误。
+pub fn facts_of(catalog: &Catalog, keys: &[&str]) -> Result<Vec<VariantFacts>, CatalogError> {
+    let mut out = Vec::with_capacity(keys.len());
+    for variant in catalog.variants_of(keys)? {
+        let work = match variant.work_id {
+            Some(id) => catalog.work_name(id)?,
+            None => None,
+        };
+        let languages = match variant.release_id {
+            Some(id) => catalog
+                .release(id)?
+                .and_then(|release| release.languages)
+                .map(|languages| crate::catalog::ReleaseRow::language_codes(&languages))
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let collections = catalog.collections_of(&variant.key)?;
+        // 变体上的中文记号，从**自动通过**的候选上读回来（与 `facts`、`adapter::converge`
+        // 同一条路）。`BTreeSet` 去重：一个变体可能有好几条自动通过的候选都带同一个记号。
+        let marks: BTreeSet<&'static str> = catalog
+            .candidates_of(&variant.key)?
+            .iter()
+            .filter(|candidate| candidate.accepted)
+            .filter_map(|candidate| candidate.chinese)
+            .map(crate::dat::chinese::ChineseMark::label)
+            .collect();
+        let mut scraped: Vec<(ScrapedInto, String)> = Vec::new();
+        for (anchor, subject) in [
+            (AnchorKind::Work, work.as_deref()),
+            (AnchorKind::Variant, Some(variant.key.as_str())),
+        ] {
+            let Some(subject) = subject else { continue };
+            for value in catalog.scraped_values(anchor.label(), subject)? {
+                if let Some(into) = ScrapedInto::of(&value.field) {
+                    scraped.push((into, value.value));
+                }
             }
         }
-        row.work = work;
-        row.key = variant.key;
-        out.push(row);
+        out.push(fold_one(
+            variant,
+            work,
+            languages,
+            collections,
+            marks.into_iter().map(str::to_string).collect(),
+            scraped.iter().map(|(into, value)| (*into, value.as_str())),
+        ));
     }
+    Ok(out)
+}
+
+/// **这几个变体落在哪几个子库的选择集里**，按子库名排好。
+///
+/// 作品详情页状态块「子库」那一行问的就是它（票 `gui-looks-like-the-design/34`）：
+/// 一部作品底下那几个变体，只要有一个被某个子库选中，那个子库就列出来——子库选的是
+/// **变体**不是前端条目（`CONTEXT.md` 的**子库**条、模块文档「选中的是变体」那一段），
+/// 而屏上那一行说的是这部**作品**。
+///
+/// **判断一处都不在这儿**：求值走的是 [`select`]，与子库屏、容量条、差量预览、真正
+/// 同步那一趟**同一个函数**（ADR-0024）。这里只是把范围缩到这几个键上，再把交回来的
+/// 那批按子库名收一收。于是「详情页说它在这个子库里」与「同步时真会搬它」不可能分岔。
+///
+/// **例外照样算数**：`select` 先看例外后看规则（「优先于规则」在代码里就长成那样），
+/// 所以手工收入的那一条在这儿列得出来，手工排除的那一条列不出来——正是 ADR-0016 要的。
+///
+/// # Errors
+/// 读中立库失败时返回错误。
+pub fn holding(catalog: &Catalog, keys: &[&str]) -> Result<Vec<String>, CatalogError> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let facts = facts_of(catalog, keys)?;
+    if facts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for sublibrary in catalog.sublibraries()? {
+        let selection = catalog.selection(&sublibrary.name)?;
+        if !select(&selection.selection, &facts).picked.is_empty() {
+            out.push(sublibrary.name);
+        }
+    }
+    out.sort();
     Ok(out)
 }
 
