@@ -3162,6 +3162,25 @@ impl Catalog {
     /// 否则面板上写的与列表上写的会是两个数。
     fn work_year(&self, anchor: &WorkAnchor, name: &str) -> Result<Option<String>, CatalogError> {
         let (kind, name) = anchor.scrape_anchor(name);
+        self.scraped_year(kind, name)
+    }
+
+    /// **一个作品的年份**，取法与主列表那一列、详情面板那一格同一处（`Catalog::work_year`）。
+    ///
+    /// 逐个作品问，**不做全库那一趟**：问它的那一处（[`same_work`](crate::triage::same_work)
+    /// 那条「平台与年份一致」的线索）手上只有成对的那几个作品名，而全库作品九千多个。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn work_year_of(&self, work: &str) -> Result<Option<String>, CatalogError> {
+        self.scraped_year(AnchorKind::Work, work)
+    }
+
+    /// 一个锚点上**屏上写着的那个年份**：裁决优先，其次最早的那一个（一部作品跨地区
+    /// 先后发行好几次，最早的那次才是它的年份）。
+    ///
+    /// **这一句 SQL 只有这一处**：两个入口各抄一份的话，改了一处就会有两个年份同时摆在屏上。
+    fn scraped_year(&self, kind: AnchorKind, name: &str) -> Result<Option<String>, CatalogError> {
         self.conn
             .prepare_cached(
                 "SELECT COALESCE(MIN(CASE WHEN source = ?3 THEN value END), MIN(value))

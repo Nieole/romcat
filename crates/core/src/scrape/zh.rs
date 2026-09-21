@@ -128,7 +128,7 @@
 //! ——数据源的原次序在中立库的上一层（`zh::store` 那张 `subject_fact` 的 `ord`）好好留着，
 //! 但跨不过中立库那一层，`scrape_value` 上没有对应的一列。记在挂单 Q27。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::catalog::{Catalog, CatalogError, TitleRow};
 use crate::identify::fuzzy;
@@ -1306,6 +1306,32 @@ pub fn matched_groups(
 /// **中文离线源一次匹配产出叫法的那两路**：中文名与别名。一次裁决管的正是这两路
 /// （[`judge`] 否定时清的、[`matched_groups`] 归堆时认的都是它们）。
 const MATCH_SOURCES: [&str; 2] = [fuzzy::SOURCE, fuzzy::ALIAS_SOURCE];
+
+/// **全库每个锚点各撞上了哪几条中文条目**：`(锚点种类, 锚点) → 条目号`。
+///
+/// [`matched_groups`] 问的是「这**一个变体**身上那几次匹配」，一次一个变体；这一支
+/// 答的是同一个问题的全库那一份，**一趟读回来**——[`same_work`](crate::triage::same_work)
+/// 要判「两个作品的名字是不是指向同一条条目」，而真库上变体四万多个，一个一个问是
+/// 四万次查库。
+///
+/// **认法与 [`matched_groups`] 是同一处**（同一组源名 `MATCH_SOURCES`、同一个
+/// [`zh::entry_in`]，ADR-0024）：两处各认一遍的话，屏上那条建议引的条目号与队列里
+/// 归的那一堆迟早对不上。
+///
+/// # Errors
+/// 读中立库失败时返回错误。
+pub fn entry_marks(
+    catalog: &Catalog,
+) -> Result<BTreeMap<(AnchorKind, String), BTreeSet<u32>>, CatalogError> {
+    let mut out: BTreeMap<(AnchorKind, String), BTreeSet<u32>> = BTreeMap::new();
+    for (kind, subject, value) in catalog.scraped_values_of_sources(&MATCH_SOURCES)? {
+        let Some(entry) = zh::entry_in(&value.evidence) else {
+            continue;
+        };
+        out.entry((kind, subject)).or_default().insert(entry);
+    }
+    Ok(out)
+}
 
 /// 标题集合里这一条叫法，是**人肯定过的那一次匹配**带来的吗（挂账 `D128`）。
 ///
