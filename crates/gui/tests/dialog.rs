@@ -762,13 +762,51 @@ fn 那一段画在哪儿(output: &egui::FullOutput, 那几个字: &str) -> Optio
         .find_map(|clipped| 找(&clipped.shape, 那几个字))
 }
 
+/// 屏上那几道**横线**画在哪儿（`painter.hline` 留下的线段），按画出来的次序。
+///
+/// `只看这一行`：只要竖直位置与它差不到几点的那几道——弹层里还有分隔线，而那几道与
+/// 「走到第几问」那一排不在同一行上。
+fn 横线们(
+    output: &egui::FullOutput, 只看这一行: f32
+) -> Vec<std::ops::RangeInclusive<f32>> {
+    fn 找(
+        shape: &egui::epaint::Shape,
+        只看这一行: f32,
+        每一道: &mut Vec<std::ops::RangeInclusive<f32>>,
+    ) {
+        match shape {
+            egui::epaint::Shape::LineSegment { points, .. } => {
+                let [甲, 乙] = points;
+                if (甲.y - 乙.y).abs() < 0.5 && (甲.y - 只看这一行).abs() < 4.0 {
+                    每一道.push(甲.x.min(乙.x)..=甲.x.max(乙.x));
+                }
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    找(one, 只看这一行, 每一道);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut 每一道 = Vec::new();
+    for clipped in &output.shapes {
+        找(&clipped.shape, 只看这一行, &mut 每一道);
+    }
+    每一道
+}
+
 #[test]
-fn 走到第几问那一排贯通左右而且几格等宽() {
+fn 走到第几问那一排贯通左右而且中间不断() {
     // **拿主意的人 2026-09-21 定，与设计稿不同**：稿上 `.step:last-child::after{display:none}`，
-    // 末一格里的东西靠左、右边那一截空着，整条只画到三分之二处。这里要的是整条从左内缘
-    // 贯到右内缘，**而几格仍等宽**——所以变的只是末一格里那两样靠右摆。
+    // 末一问那一格里的东西靠左、右边空着，整条只画到三分之二处。
+    //
+    // **头一版按「几格等宽」摆，两端对上了、中间却断着**：末一问那一节被推到自己格子的右端，
+    // 而上一格的连线只画到它自己格子的边界，中间空出一百九十点。所以这一条断的不再是
+    // 「几格等宽」，而是**两端贴边 + 每一道连线接满 + 两道连线等长**——「中间断没断」
+    // 才是「贯通」的直接判据。
     let ctx = 上下文();
-    let 哪几问 = ["选择作品", "核对变体", "确认合并"];
+    let 哪几问 = ["命名", "选择目录", "开始扫描"];
     let mut 层 = 一层::new(Width::Widest, 3).走到第几问(&哪几问, 0);
     let mut output = 跑这一层(&ctx, &mut 层, headless::VIEWPORT, Vec::new());
     for _ in 0..2 {
@@ -781,26 +819,51 @@ fn 走到第几问那一排贯通左右而且几格等宽() {
             那一段画在哪儿(&output, 那几个字).unwrap_or_else(|| panic!("屏上没有「{那几个字}」"))
         })
         .collect();
+    let 直径 = Tokens::builtin().layout.page_dot;
+    let 缝 = look::step(1);
+    let 边框 = ctx.style_of(ctx.theme()).visuals.window_stroke.width;
+    let 内边距 = Tokens::builtin().space.dialog_padding[1];
 
-    // **几格等宽**：头两问都是「圆点 + 名字」靠左摆，两问名字的左缘之差就是一格的宽。
-    let 格宽 = 每一问[1].left() - 每一问[0].left();
-    assert!(格宽 > 0.0, "第二问没排在第一问右边：{每一问:?}");
-    // 末一问靠右摆，拿它的右缘反推它那一格的右缘：第一格的左缘 + 三格 = 末一格的右缘。
-    let 圆点那一截 = Tokens::builtin().layout.page_dot + look::step(1);
-    let 末格右缘 = 每一问[0].left() - 圆点那一截 + 3.0 * 格宽;
+    // 一、**两端贴边**：头一问的圆点贴左内缘，末一问的名字贴右内缘。
+    let (左内缘, 右内缘) = (画在.left() + 边框 + 内边距, 画在.right() - 边框 - 内边距);
+    let 头一问圆点左 = 每一问[0].left() - 直径 - 缝;
     assert!(
-        (每一问[2].right() - 末格右缘).abs() < 1.0,
-        "三格没等宽：末一问的右缘在 {}，按等宽算该在 {末格右缘}",
+        (头一问圆点左 - 左内缘).abs() < 0.5,
+        "头一问没贴左内缘：圆点左沿在 {头一问圆点左}，左内缘在 {左内缘}",
+    );
+    assert!(
+        (每一问[2].right() - 右内缘).abs() < 0.5,
+        "末一问没贴右内缘：名字右缘在 {}，右内缘在 {右内缘}",
         每一问[2].right(),
     );
 
-    // **贯通左右**：末一问的右缘就是内容区的右内缘（这一层的右边框往里收一道边框加一道内边距）。
-    let 边框 = ctx.style_of(ctx.theme()).visuals.window_stroke.width;
-    let 内边距 = Tokens::builtin().space.dialog_padding[1];
-    let 右内缘 = 画在.right() - 边框 - 内边距;
+    // 二、**每一道连线接满**：左端接着上一问名字的右缘，右端接着下一问圆点的左沿，
+    // 两头各留一道令牌里那个缝，**中间不许留空**。
+    let 每一道 = 横线们(&output, 每一问[0].center().y);
+    assert_eq!(
+        每一道.len(),
+        2,
+        "三问之间该有两道连线，画出了 {} 道",
+        每一道.len()
+    );
+    for (i, 这一道) in 每一道.iter().enumerate() {
+        let 该从 = 每一问[i].right() + 缝;
+        let 该到 = 每一问[i + 1].left() - 直径 - 缝 - 缝;
+        assert!(
+            (这一道.start() - 该从).abs() < 0.5 && (这一道.end() - 该到).abs() < 0.5,
+            "第 {} 道连线没接满：画在 {:?}，该是 {该从}..={该到}",
+            i + 1,
+            这一道,
+        );
+    }
+
+    // 三、**两道连线等长**。节点本身宽度不一（「命名」两个字、另两问各四个字），按节点中心
+    // 等距会让两道一长一短；眼睛读到的「间距」是中间那道线，所以等的是线。
+    let 长 = |这一道: &std::ops::RangeInclusive<f32>| 这一道.end() - 这一道.start();
     assert!(
-        (每一问[2].right() - 右内缘).abs() < 0.5,
-        "末一问没贯到右内缘：它的右缘在 {}，右内缘在 {右内缘}",
-        每一问[2].right(),
+        (长(&每一道[0]) - 长(&每一道[1])).abs() < 0.5,
+        "两道连线不等长：{} 与 {}",
+        长(&每一道[0]),
+        长(&每一道[1]),
     );
 }

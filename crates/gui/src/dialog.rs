@@ -641,38 +641,49 @@ fn pages_ui(ui: &mut egui::Ui, labels: &[String], at: usize) {
     look::primary_button(&mut 主按钮);
     let (放心字, 放心底) = look::tone_colors(look::Tone::Good, &visuals);
     let 线色 = visuals.widgets.inactive.bg_stroke.color;
-    let 格宽 = ui.available_width() / labels.len().max(1) as f32;
-    // 先量一遍每一问的名字多宽：**末一问要贴着右内缘摆**，得先知道它那一格里的东西一共多宽。
-    let 名字宽: Vec<f32> = labels
+    // **先量一遍每一问那一节有多宽**（圆点 + 缝 + 名字）：整条怎么摊开要先知道这个。
+    let 每节宽: Vec<f32> = labels
         .iter()
         .map(|label| {
-            egui::WidgetText::from(egui::RichText::new(label))
-                .into_galley(
-                    ui,
-                    Some(egui::TextWrapMode::Extend),
-                    f32::INFINITY,
-                    egui::TextStyle::Small,
-                )
-                .size()
-                .x
+            直径 + 缝
+                + egui::WidgetText::from(egui::RichText::new(label))
+                    .into_galley(
+                        ui,
+                        Some(egui::TextWrapMode::Extend),
+                        f32::INFINITY,
+                        egui::TextStyle::Small,
+                    )
+                    .size()
+                    .x
         })
         .collect();
+    // **整条从左内缘贯到右内缘，中间不断**（拿主意的人 2026-09-21 定，**与设计稿不同**：
+    // 稿上 `.step:last-child::after{display:none}`，末一问那一格里的东西靠左、右边空着，
+    // 整条只画到三分之二处）。
+    //
+    // **摊开的口径是「两段连线等长」，不是「几格等宽」，也不是「节点中心等距」**：
+    //
+    // - **几格等宽**是上一版，它正是断开的成因：末一问那一节被推到自己格子的右端，而上一格的
+    //   连线只画到它自己格子的边界——中间必然空出一大截。
+    // - **节点中心等距**在几节宽度不一时看着还是不匀：添加主库向导那三问是「命名」两个字、
+    //   「选择目录」「开始扫描」各四个字，按中心等距会让头一段连线明显比第二段长。
+    // - **连线等长**才是眼睛真正读到的「间距」——节点各自多宽，中间那道线一样长。
+    //
+    // 于是：头一问贴左内缘，末一问贴右内缘（`Σ每节宽 + 段数 × (连线长 + 两道缝) = 全宽`
+    // 这一式自己保证），中间那几问按次序摆下去。
+    let 全宽 = ui.available_width();
+    let 段数 = labels.len().saturating_sub(1);
+    // 名字长到摆不下时连线收成零，几节挨着摆——那时末一问会越过右内缘，但那比把名字截掉好。
+    let 连线长 = if 段数 == 0 {
+        0.0
+    } else {
+        ((全宽 - 每节宽.iter().sum::<f32>() - 2.0 * 段数 as f32 * 缝) / 段数 as f32).max(0.0)
+    };
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(全宽, 直径), egui::Sense::hover());
+        let mut 起点 = rect.left();
         for (i, label) in labels.iter().enumerate() {
-            let 末一问 = i + 1 == labels.len();
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(格宽, 直径), egui::Sense::hover());
-            // **整条从左内缘贯到右内缘，三格仍等宽**（拿主意的人 2026-09-21 定，**与设计稿不同**：
-            // 稿上 `.step:last-child::after{display:none}`，末一格里的东西靠左、右边那一截空着，
-            // 整条只画到三分之二处）。等宽照旧（每格 `格宽`），变的只是**末一格里那两样靠右摆**
-            // ——它右边没有连线可拉，靠左摆就等于让整条断在那儿。
-            //
-            // 摆不下时退回靠左（`max(rect.left())`）：名字比一格还宽的话，贴右会把它挤进上一格。
-            let 起点 = if 末一问 {
-                (rect.right() - 直径 - 缝 - 名字宽[i]).max(rect.left())
-            } else {
-                rect.left()
-            };
             let 圆心 = egui::pos2(起点 + 半径, rect.center().y);
             let (底, 边, 字色) = match i.cmp(&at) {
                 std::cmp::Ordering::Less => (放心底, 放心字, 放心字),
@@ -724,16 +735,18 @@ fn pages_ui(ui: &mut egui::Ui, labels: &[String], at: usize) {
                     egui::TextStyle::Small,
                 );
             let 名字在 = egui::pos2(起点 + 直径 + 缝, rect.center().y - 名字.size().y / 2.0);
-            let 线从 = 名字在.x + 名字.size().x + 缝;
             painter.galley(名字在, 名字, 名字色);
-            let 线到 = rect.right() - 缝;
-            if !末一问 && 线到 > 线从 {
+            // 连线**接满**：从这一问名字的右缘留一道缝起笔，到下一问圆点的左沿前一道缝收笔。
+            // 中间不许留空——留空整条就断了，而「断没断」与「两端对不对」是两件事。
+            let 线从 = 起点 + 每节宽[i] + 缝;
+            if i + 1 < labels.len() && 连线长 > 0.0 {
                 painter.hline(
-                    线从..=线到,
+                    线从..=线从 + 连线长,
                     rect.center().y,
                     egui::Stroke::new(tokens.layout.control_stroke, 线色),
                 );
             }
+            起点 = 线从 + 连线长 + 缝;
         }
     });
 }
