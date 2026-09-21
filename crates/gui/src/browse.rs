@@ -383,6 +383,13 @@ pub struct Screen {
     /// 它住在这一屏里而不是自成一屏，是因为它的**范围**就是这一屏筛出来的那一批——
     /// 挪到别处去，那批东西就得再传一遍，而传着传着两边的数就对不上了。
     scrape: scrape::Panel,
+    /// **成型纠正**那一层（票 `gui-looks-like-the-design/29`）：作品详情「变体」那一面
+    /// 「调整成型…」与「撤销成型纠正」开的就是它。
+    fixer: crate::shaping::Fixer,
+    /// 刚落过一笔人工纠正、等窗口去库屏那一处排一趟重新成型（[`Screen::take_reshaped`]）。
+    ///
+    /// **全窗口只有库屏那一处排它**：两处各排一趟的话，报告会有两份各说各的。
+    reshaped: bool,
     /// 「**改选择**」跳过来了，正在改这个子库的选择集。`None` 是平常的浏览。
     editing: Option<Editing>,
     /// 「更新到子库」按完了，等窗口把人送回子库屏（[`crate::app::App::route`]）。
@@ -538,6 +545,8 @@ impl Screen {
             non_game_assets: None,
             save: SaveDraft::default(),
             scrape: scrape::Panel::new(workspace),
+            fixer: crate::shaping::Fixer::default(),
+            reshaped: false,
             editing: None,
             returned: None,
             touched: None,
@@ -1603,6 +1612,17 @@ impl Screen {
     /// 刮削面板，供测试与实测拨旋钮、按「开始刮削」。
     pub fn scrape_mut(&mut self) -> &mut scrape::Panel {
         &mut self.scrape
+    }
+
+    /// **成型纠正**那一层（测试拿它核对）。
+    #[must_use]
+    pub fn fixer(&self) -> &crate::shaping::Fixer {
+        &self.fixer
+    }
+
+    /// 刚落过一笔人工纠正：窗口据此去库屏那一处排一趟重新成型。问过就清掉。
+    pub fn take_reshaped(&mut self) -> bool {
+        std::mem::take(&mut self.reshaped)
     }
 
     /// **按「刮削…」那一下**：把这一批展开成变体的键，摊开刮削面板。

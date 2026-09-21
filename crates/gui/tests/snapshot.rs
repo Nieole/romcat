@@ -223,6 +223,31 @@ fn 按(harness: &mut Harness<'_>, 那几个字: &str) {
     harness.run();
 }
 
+/// 按一下屏上**正好**写着 `那几个字`、**头一处**画出来的地方（其余同 [`按`]）。
+///
+/// 同一句话屏上摆着好几处、要按的是**上面**那一处时用它——成型存疑那一层里一行一颗「处理…」。
+fn 按头一处(harness: &mut Harness<'_>, 那几个字: &str) {
+    let Some(在) = 正好画着的每一处(harness.output(), 那几个字)
+        .first()
+        .map(egui::Rect::center)
+    else {
+        panic!("屏上没有正好写着「{那几个字}」的地方，没处按");
+    };
+    let 键 = |pressed: bool| egui::Event::PointerButton {
+        pos: 在,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    harness.event(egui::Event::PointerMoved(在));
+    harness.event(键(true));
+    harness.event(键(false));
+    harness.event(egui::Event::PointerGone);
+    harness.step();
+    harness.run_steps(5);
+    harness.run();
+}
+
 /// 屏上**正好**写着 `那几个字`、按画出来的次序**最后**那一处的中心点。
 fn 最后一处正好画着(output: &egui::FullOutput, 那几个字: &str) -> Option<egui::Pos2> {
     正好画着的每一处(output, 那几个字)
@@ -1580,7 +1605,7 @@ impl 库屏 {
     /// （3DS **向下兼容** NDS，**改不改都行**）。根那一行的路径与上次扫描时刻交成定值，同 [`Self::有体检发现`]。
     fn 有平台不符() -> Self {
         let 工作区 = temp_dir("snapshot-库屏-平台纠正");
-        let mut site = 开库(工作区.path());
+        let site = 开库(工作区.path());
         let 盘 = temp_dir("snapshot-库屏-平台纠正盘");
         for (相对, 字节) in [
             ("fc/日版/塞尔达传说.fds", vec![1_u8; 64]),
@@ -1597,52 +1622,7 @@ impl 库屏 {
             std::fs::create_dir_all(落点.parent().expect("有上级目录")).expect("建得出目录");
             std::fs::write(&落点, 字节).expect("写得进");
         }
-        let 目录 = romcat_core::path::normalize_existing(盘.path());
-        roots::add_root(&site.catalog, Some(工作区.path()), "主库", &目录).expect("加得上根");
-        let mut options = ScanOptions::named(&目录, "主库");
-        options.workspace = Some(工作区.path().to_path_buf());
-        options.jobs = Jobs::Fixed(1);
-        scan::scan(&RealFs::new(), &mut site.catalog, &options, &Handle::new()).expect("扫得完");
-        let 记下的 = site
-            .catalog
-            .root("主库")
-            .expect("读得出根")
-            .and_then(|root| root.scan)
-            .expect("扫完记下了上次扫描");
-        site.catalog
-            .record_root_scan(
-                "主库",
-                &RootScan {
-                    at: 1_788_418_680,
-                    elapsed_ms: 2_220_000,
-                    ..记下的
-                },
-            )
-            .expect("记得下");
-        let mut app = App::new(site, 工作区.path().to_path_buf());
-        app.show_view(View::Library);
-        let (屏, _, _) = app.roots_site_and_tasks();
-        let 画的: Vec<RootRow> = 屏
-            .roots()
-            .iter()
-            .map(|row| RootRow {
-                root: LibraryRoot {
-                    path: "/Volumes/新加卷/Game".to_owned(),
-                    ..row.root.clone()
-                },
-                stats: row.stats,
-                mounted: true,
-            })
-            .collect();
-        屏.list_roots(画的);
-        屏.set_clock(库屏的钟());
-        app.set_workspace_label(工作目录().display().to_string());
-        先体检一趟(&mut app);
-        Self {
-            app,
-            _工作区: 工作区,
-            _盘: vec![盘],
-        }
+        Self::扫一个根摆好(工作区, site, 盘)
     }
 
     /// 一个根完整扫过一趟、**体检报告里几格都有东西**（票 `gui-looks-like-the-design/27`）：两组重复拷贝、两面磁碟各成
@@ -1650,7 +1630,7 @@ impl 库屏 {
     /// 根那一行的路径与上次扫描时刻交成定值，同 [`Self::扫过两个根`]。
     fn 有体检发现() -> Self {
         let 工作区 = temp_dir("snapshot-库屏-体检");
-        let mut site = 开库(工作区.path());
+        let site = 开库(工作区.path());
         let 盘 = temp_dir("snapshot-库屏-体检盘");
         for (相对, 字节) in [
             ("FC/魂斗罗.zip", zip(2_048)),
@@ -1668,6 +1648,35 @@ impl 库屏 {
             std::fs::create_dir_all(落点.parent().expect("有上级目录")).expect("建得出目录");
             std::fs::write(&落点, 字节).expect("写得进");
         }
+        Self::扫一个根摆好(工作区, site, 盘)
+    }
+    /// 一个根完整扫过一趟、**体检报告里两种成型存疑各有一处**（票 `gui-looks-like-the-design/29`）：
+    /// `FDS/某游戏/` 底下两面磁碟各成一个变体（**多碟没合在一起**），`ps3/动作合集/` 是一棵目录树、
+    /// 却直接躺着两份各自独立的内容（**一个目录被当成一个变体**）。根那一行的路径与上次扫描时刻交成
+    /// 定值，同 [`Self::有体检发现`]。
+    fn 有成型存疑() -> Self {
+        let 工作区 = temp_dir("snapshot-库屏-成型纠正");
+        let site = 开库(工作区.path());
+        let 盘 = temp_dir("snapshot-库屏-成型纠正盘");
+        for (相对, 字节) in [
+            ("FDS/最终幻想/最终幻想 (Disk 1).fds", vec![1_u8; 64]),
+            ("FDS/最终幻想/最终幻想 (Disk 2).fds", vec![2_u8; 64]),
+            ("ps3/动作游戏合集/PS3_GAME/USRDIR/EBOOT.BIN", vec![3_u8; 64]),
+            ("ps3/动作游戏合集/怪物猎人 携带版.iso", vec![4_u8; 2_048]),
+            ("ps3/动作游戏合集/铁拳 黑暗复苏.iso", vec![5_u8; 2_048]),
+        ] {
+            let 落点 = 盘.path().join(相对);
+            std::fs::create_dir_all(落点.parent().expect("有上级目录")).expect("建得出目录");
+            std::fs::write(&落点, 字节).expect("写得进");
+        }
+        Self::扫一个根摆好(工作区, site, 盘)
+    }
+
+    /// 一个根、一块盘：扫一遍、把根那一行的路径与上次扫描时刻交成定值、体检一趟。
+    ///
+    /// **三处 fixture 共用**（[`Self::有体检发现`]、[`Self::有平台不符`]、[`Self::有成型存疑`]）：
+    /// 它们只在盘上摆什么不同，摆好之后那十几行逐字相同——抄第三遍时那几行就会各漂各的。
+    fn 扫一个根摆好(工作区: TempDir, mut site: Site, 盘: TempDir) -> Self {
         let 目录 = romcat_core::path::normalize_existing(盘.path());
         roots::add_root(&site.catalog, Some(工作区.path()), "主库", &目录).expect("加得上根");
         let mut options = ScanOptions::named(&目录, "主库");
@@ -2077,6 +2086,80 @@ fn 库屏_平台纠正_浅色() {
 #[test]
 fn 库屏_平台纠正_暗色() {
     拍平台纠正("library/platfix-dark", Theme::Dark);
+}
+
+/// **成型存疑那一格的明细**（票 `gui-looks-like-the-design/29`，设计稿 `DLG.shapes`）：滚到库屏底下
+/// 按「成型存疑」那一格——一行一处，路径在上、凭什么在下，右头一颗「处理…」。
+///
+/// **拍的是刚开那一下**：两处都还没处理，各摆着一颗「处理…」——那正是这一票验收第 1 条前半句
+/// （从库体检的「成型存疑」进得去）与第 6 条（逐处确认，不一次性全改）的样子。
+fn 拍成型存疑(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 库屏::有成型存疑();
+    let mut harness = 开一个(主题, move |ui| 现场.app.ui(ui));
+    滚到库屏底下(&mut harness);
+    按(&mut harness, "成型存疑");
+    拍下(harness, 名字);
+}
+
+/// **调整成型 · 多碟那一支**（设计稿 `DLG.shape` 的 `disc` 那一支）：明细里**头一处**那颗「处理…」
+/// ——同一个目录里两面磁碟各成一个变体。勾选、线索、纠正后的主文件与附属文件都在这一屏里。
+fn 拍合成多碟(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 库屏::有成型存疑();
+    let mut harness = 开一个(主题, move |ui| 现场.app.ui(ui));
+    滚到库屏底下(&mut harness);
+    按(&mut harness, "成型存疑");
+    按头一处(&mut harness, "处理…");
+    拍下(harness, 名字);
+}
+
+/// **调整成型 · 目录那一支**（设计稿 `DLG.shape` 的 `dir` 那一支）：明细里**最后**那颗「处理…」
+/// ——一棵目录树里直接躺着两份各自独立的内容。
+fn 拍拆开目录(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 库屏::有成型存疑();
+    let mut harness = 开一个(主题, move |ui| 现场.app.ui(ui));
+    滚到库屏底下(&mut harness);
+    按(&mut harness, "成型存疑");
+    按(&mut harness, "处理…");
+    拍下(harness, 名字);
+}
+
+#[test]
+fn 库屏_成型存疑明细_浅色() {
+    拍成型存疑("library/shaping-doubts-light", Theme::Light);
+}
+
+#[test]
+fn 库屏_成型存疑明细_暗色() {
+    拍成型存疑("library/shaping-doubts-dark", Theme::Dark);
+}
+
+#[test]
+fn 库屏_调整成型_合成多碟_浅色() {
+    拍合成多碟("library/shaping-merge-light", Theme::Light);
+}
+
+#[test]
+fn 库屏_调整成型_合成多碟_暗色() {
+    拍合成多碟("library/shaping-merge-dark", Theme::Dark);
+}
+
+#[test]
+fn 库屏_调整成型_拆开目录_浅色() {
+    拍拆开目录("library/shaping-split-light", Theme::Light);
+}
+
+#[test]
+fn 库屏_调整成型_拆开目录_暗色() {
+    拍拆开目录("library/shaping-split-dark", Theme::Dark);
 }
 
 #[test]

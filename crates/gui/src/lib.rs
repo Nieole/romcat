@@ -150,6 +150,7 @@ pub mod recent;
 pub mod roots;
 pub mod scrape;
 pub mod settings;
+pub mod shaping;
 pub mod site;
 pub mod stages;
 pub mod sublibrary;

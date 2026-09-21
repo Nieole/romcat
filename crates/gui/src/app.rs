@@ -514,6 +514,13 @@ impl App {
             }
             // **体检那一趟也先认**（`roots::Screen::settle_health`）：同上，整条只读。
             let Some(done) = self.roots.settle_health(done) else {
+                // **重新成型那一趟例外**（票 `gui-looks-like-the-design/29`）：它交回的是同一样
+                // 东西（一份新报告），可它**把变体整批换过了**——浏览屏那几页与屏头那些数因此
+                // 作废。这一句住在窗口里而不在库屏里，因为只有这儿够得着两屏（ADR-0005）。
+                if self.roots.take_reshaped() {
+                    self.browse.invalidate(&self.site);
+                    self.recount();
+                }
                 continue;
             };
             // **各屏按任务号认领自己那一趟，不是它的就放过去。** 将来识别与刮削接上来
@@ -779,6 +786,13 @@ impl App {
                 if let Some(priorities) = browse.scrape_mut().priority_mut().take_saved() {
                     browse.set_priorities(priorities);
                     browse.refresh(site);
+                }
+                // **作品详情那一面刚落过一笔成型纠正**（票 `gui-looks-like-the-design/29`）：
+                // 纠正只写沉淀库，中立库里的变体要重算一遍才跟着变。**全窗口只有库屏那一处排
+                // 重新成型**，报告才不会两份各说各的。
+                if browse.take_reshaped() {
+                    let (roots, site, board) = (&mut self.roots, &mut self.site, &mut self.board);
+                    roots.reshape(site, board);
                 }
             }
             View::Sublibraries => {

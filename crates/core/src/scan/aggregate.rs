@@ -253,6 +253,10 @@ impl ConflictAcc {
 }
 
 /// 一处**成型存疑**（[`shape::shaping_doubts`]，判据只在那一处），键换成了给人看的完整路径。
+///
+/// **两套路径都在，各有各的用处**（票 `gui-looks-like-the-design/29`）：`at` / `items` 是给人看的
+/// 完整路径，明细那一行印它、「在文件系统中打开」打开它；`at_key` / `item_keys` 是**中立库的键**，
+/// **人工纠正记的是键**（沉淀库里那几行、`shape::fix`），而展示路径折回键是折不回去的。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShapingDoubt {
     /// 哪一种。
@@ -263,22 +267,23 @@ pub struct ShapingDoubt {
     pub at: String,
     /// 牵涉的那几条：几个变体，或者目录里那几份各自独立的内容。
     pub items: Vec<String>,
+    /// 那一处的**中立库的键**（[`Self::at`] 的那一条）。
+    pub at_key: String,
+    /// 牵涉的那几条的**中立库的键**（[`Self::items`] 一一对应），**人工纠正落的就是它们**。
+    pub item_keys: Vec<String>,
 }
 
 impl ShapingDoubt {
-    /// 给人看的那一句原因。
+    /// 给人看的那一句原因。**话只有一处**（[`shape::Doubt::reason`]）：这一份是它折成展示路径之后的样子，
+    /// 「凭什么」那一句两边说的必须是同一句。
     #[must_use]
     pub fn reason(&self) -> String {
-        match self.kind {
-            DoubtKind::UnmergedDiscs => format!(
-                "{} 个变体只差碟片标记，可能是同一套多碟游戏",
-                self.items.len()
-            ),
-            DoubtKind::CrowdedTree => format!(
-                "整个目录被当成 1 个变体，里面有 {} 份各自独立的内容",
-                self.items.len()
-            ),
+        shape::Doubt {
+            kind: self.kind,
+            at: self.at_key.clone(),
+            items: self.item_keys.clone(),
         }
+        .reason()
     }
 }
 

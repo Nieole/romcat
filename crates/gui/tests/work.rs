@@ -11,7 +11,7 @@ use romcat_gui::browse::work::Tab;
 use romcat_gui::{demo, headless};
 
 mod shared;
-use shared::{正好那一段画在哪儿, 点一下, 画出来的字};
+use shared::{正好那一段画在哪儿, 点一下, 画出来的字, 等任务台空了};
 
 /// 六个面，照稿上的次序。
 const 六个面: [&str; 6] = ["概览", "变体与文件", "元数据", "标题", "媒体", "识别依据"];
@@ -1742,4 +1742,245 @@ fn 状态块上子库与导出两行照核心库写_都答不出时说没有() {
         有这一段(&屏上, &导出那一句),
         "导出那一趟逐条记下的账里有它，这一行就该写「{导出那一句}」：\n{屏上}"
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 成型纠正（票 `gui-looks-like-the-design/29`）：从**变体**那一面进得去，也撤得掉
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 一份真落在临时目录里的小库：`FDS/某游戏/` 底下两面磁碟，FDS 没声明多碟同族，两面各成一个变体
+/// ——**多碟没合在一起**。**一个字节都不碰真盘。**
+fn 有多碟存疑的库() -> (
+    App,
+    romcat_core::testing::TempDir,
+    romcat_core::testing::TempDir,
+) {
+    摆一份库(&[
+        ("FDS/某游戏/某游戏 (Disk 1).fds", vec![1_u8; 64]),
+        ("FDS/某游戏/某游戏 (Disk 2).fds", vec![2_u8; 64]),
+    ])
+}
+
+/// 一份真落在临时目录里的小库：`ps3/动作合集/` 是一棵目录树（`PS3_GAME` 是锚），却**直接**躺着
+/// 两份各自独立的内容——**一个目录被当成一个变体**。**一个字节都不碰真盘。**
+fn 有目录存疑的库() -> (
+    App,
+    romcat_core::testing::TempDir,
+    romcat_core::testing::TempDir,
+) {
+    摆一份库(&[
+        ("ps3/动作合集/PS3_GAME/USRDIR/EBOOT.BIN", vec![1_u8; 64]),
+        ("ps3/动作合集/甲.iso", vec![2_u8; 2048]),
+        ("ps3/动作合集/乙.7z", vec![3_u8; 2048]),
+    ])
+}
+
+/// 把这几份文件摆进一块临时「盘」，扫一遍，交出一扇停在浏览屏上的主窗口。
+fn 摆一份库(
+    盘上的: &[(&str, Vec<u8>)],
+) -> (
+    App,
+    romcat_core::testing::TempDir,
+    romcat_core::testing::TempDir,
+) {
+    use romcat_core::catalog::Catalog;
+    use romcat_core::catalog::roots;
+    use romcat_core::fs::RealFs;
+    use romcat_core::scan::{self, Jobs, ScanOptions};
+    use romcat_core::site::Site;
+    use romcat_core::task::Handle;
+    use romcat_core::testing::temp_dir;
+
+    let 工作区 = temp_dir("gui-work-shaping-ws");
+    let 盘 = temp_dir("gui-work-shaping-disk");
+    for (相对, 字节) in 盘上的 {
+        let 落点 = 盘.path().join(相对);
+        std::fs::create_dir_all(落点.parent().expect("有上级目录")).expect("建得出目录");
+        std::fs::write(&落点, 字节).expect("写得进");
+    }
+    let 库文件 = 工作区.path().join("catalog").join("fixture.sqlite3");
+    drop(Catalog::create(&库文件, "fixture").expect("建得出中立库"));
+    let mut site = Site::open_file(工作区.path(), &库文件, None).expect("开得出现场");
+    let 目录 = romcat_core::path::normalize_existing(盘.path());
+    roots::add_root(&site.catalog, Some(工作区.path()), "主库", &目录).expect("加得上根");
+    let mut options = ScanOptions::named(&目录, "主库");
+    options.workspace = Some(工作区.path().to_path_buf());
+    options.jobs = Jobs::Fixed(1);
+    scan::scan(&RealFs::new(), &mut site.catalog, &options, &Handle::new()).expect("扫得完");
+    let mut app = App::new(site, 工作区.path().to_path_buf());
+    app.show_view(View::Browse);
+    (app, 工作区, 盘)
+}
+
+/// 打开第一面写着这个键的那一行的**作品详情页**，停在「变体与文件」那一面。
+fn 开变体那一面(app: &mut App, key: &str) {
+    let (browse, site) = app.browse_and_site();
+    browse.open_work(&site.catalog, &WorkAnchor::Loose(key.to_string()));
+    browse.open_page(Tab::Variants);
+}
+
+/// 库里眼下有哪几个变体：（键, 是不是人工纠正出来的），按键排。
+fn 库里的变体(app: &mut App) -> Vec<(String, bool)> {
+    let (_, site) = app.browse_and_site();
+    let mut out: Vec<(String, bool)> = site
+        .catalog
+        .variants()
+        .expect("读得出变体")
+        .into_iter()
+        .map(|row| (row.key, row.manual))
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn 作品详情变体那一面也进得去成型纠正_合成之后那张卡撤得掉_撤完回到规则原本的结果() {
+    // 票 29 验收第 1 条后半句（**从作品详情的变体那一面也进得去**）与第 5 条
+    // （**能撤销，撤销后回到规则原本的结果**）。
+    let ctx = headless::context();
+    let (mut app, _工作区, _盘) = 有多碟存疑的库();
+    开变体那一面(&mut app, "主库/FDS/某游戏/某游戏 (Disk 1).fds");
+    跑(&ctx, &mut app, 2);
+
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    assert!(
+        屏上.contains("多碟没合在一起") && 屏上.contains("2 个变体只差碟片标记"),
+        "变体那一面没说这一处成型存疑（核心库那一句）：\n{屏上}"
+    );
+    assert!(
+        有这一段(&屏上, "调整成型…"),
+        "变体那一面进不去成型纠正：\n{屏上}"
+    );
+
+    let 屏上 = 点一下(&ctx, "调整成型…", |ui| app.ui(ui));
+    assert!(
+        有这一段(&屏上, "调整成型 · 某游戏"),
+        "「调整成型…」开的不是那一层：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("记为人工纠正") && !屏上.contains("记为裁决"),
+        "屏上该说「记为人工纠正」：\n{屏上}"
+    );
+    // **这条入口说不出「全库一共几处」**（那个数只有全库那份体检报告答得出），于是**不凑一个数**，
+    // 只说去哪儿逐处确认——票面验收第 6 条在两条入口上说的是同一句规矩（ADR-0024）。
+    assert!(
+        屏上.contains("的其余几处，列在库体检的「成型存疑」里") && !屏上.contains("的另有"),
+        "这条入口不该自己数一个「另有 N 处」出来：\n{屏上}"
+    );
+
+    点一下(&ctx, "合成一个变体", |ui| app.ui(ui));
+    等任务台空了(&mut app);
+    跑(&ctx, &mut app, 3);
+    assert_eq!(
+        库里的变体(&mut app),
+        vec![("主库/FDS/某游戏/某游戏 (Disk 1).fds".to_string(), true)],
+        "两面磁碟没合成一个人工纠正出来的变体"
+    );
+
+    // ——— 撤销：那张卡上一颗，撤完回到成型规则原本的结果 ———
+    开变体那一面(&mut app, "主库/FDS/某游戏/某游戏 (Disk 1).fds");
+    跑(&ctx, &mut app, 2);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    assert!(
+        有这一段(&屏上, "撤销成型纠正"),
+        "人工纠正出来的那张卡上没有撤销：\n{屏上}"
+    );
+
+    点一下(&ctx, "撤销成型纠正", |ui| app.ui(ui));
+    等任务台空了(&mut app);
+    跑(&ctx, &mut app, 3);
+    assert_eq!(
+        库里的变体(&mut app),
+        vec![
+            ("主库/FDS/某游戏/某游戏 (Disk 1).fds".to_string(), false),
+            ("主库/FDS/某游戏/某游戏 (Disk 2).fds".to_string(), false),
+        ],
+        "撤销之后没回到成型规则原本的结果（两面磁碟各自成一个变体）"
+    );
+}
+
+#[test]
+fn 拆开一个目录之后_那几张卡上任意一颗撤销都整处一起撤_回到规则原本的结果() {
+    // 票 29 验收第 5 条「撤销后**回到规则原本的结果**」：拆开落的是那几份内容**各一行**，
+    // 只撤其中一份的话剩下那几份还各自成变体——而那个目录本身不落行、压根没有「撤这一份」
+    // 可按。所以按任意一张卡上的撤销，撤的是**一整处**（核心库 `Catalog::shaping_fix_group`）。
+    let ctx = headless::context();
+    let (mut app, _工作区, _盘) = 有目录存疑的库();
+    开变体那一面(&mut app, "主库/ps3/动作合集");
+    跑(&ctx, &mut app, 2);
+
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    assert!(
+        屏上.contains("一个目录被当成一个变体") && 有这一段(&屏上, "调整成型…"),
+        "变体那一面没说这一处成型存疑：\n{屏上}"
+    );
+    点一下(&ctx, "调整成型…", |ui| app.ui(ui));
+    // 「拆成 2 个变体」屏上有两处：那一档单选的名字与页脚那颗按钮；点后者。
+    点最后一个(&ctx, &mut app, "拆成 2 个变体");
+    等任务台空了(&mut app);
+    跑(&ctx, &mut app, 3);
+    assert_eq!(
+        库里的变体(&mut app),
+        vec![
+            ("主库/ps3/动作合集".to_string(), false),
+            ("主库/ps3/动作合集/乙.7z".to_string(), true),
+            ("主库/ps3/动作合集/甲.iso".to_string(), true),
+        ],
+        "那两份独立内容没各自成变体"
+    );
+
+    // 打开**其中一份**，按它那张卡上的撤销：两份一起撤。
+    开变体那一面(&mut app, "主库/ps3/动作合集/甲.iso");
+    跑(&ctx, &mut app, 2);
+    let 屏上 = 点一下(&ctx, "撤销成型纠正", |ui| app.ui(ui));
+    assert!(
+        屏上.contains("同一下拆出来的 2 份一起撤"),
+        "撤销那句回话没说清撤的是一整处：\n{屏上}"
+    );
+    等任务台空了(&mut app);
+    跑(&ctx, &mut app, 3);
+    assert_eq!(
+        库里的变体(&mut app),
+        vec![("主库/ps3/动作合集".to_string(), false)],
+        "撤销之后没回到成型规则原本的结果（整个目录一个变体）"
+    );
+}
+
+/// 点屏上**最后**一处含着这几个字的地方（同一句话屏上有好几处时用它）。
+fn 点最后一个(ctx: &egui::Context, app: &mut App, 那一段: &str) -> String {
+    let 头一帧 = headless::frame(ctx, headless::input(), |ui| app.ui(ui));
+    let mut 位置 = None;
+    fn 找(shape: &egui::epaint::Shape, 那一段: &str, out: &mut Option<egui::Pos2>) {
+        match shape {
+            egui::epaint::Shape::Text(text) => {
+                if text.galley.text().contains(那一段) {
+                    *out = Some(egui::Rect::from_min_size(text.pos, text.galley.size()).center());
+                }
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    找(one, 那一段, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    for clipped in &头一帧.shapes {
+        找(&clipped.shape, 那一段, &mut 位置);
+    }
+    let 在 = 位置.unwrap_or_else(|| panic!("屏上没有「{那一段}」，没处点"));
+    let 按 = |pressed: bool| egui::Event::PointerButton {
+        pos: 在,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let mut input = headless::input();
+    input.events.push(egui::Event::PointerMoved(在));
+    input.events.push(按(true));
+    headless::frame(ctx, input, |ui| app.ui(ui));
+    let mut input = headless::input();
+    input.events.push(按(false));
+    headless::frame(ctx, input, |ui| app.ui(ui));
+    画出来的字(&headless::frame(ctx, headless::input(), |ui| app.ui(ui)))
 }
