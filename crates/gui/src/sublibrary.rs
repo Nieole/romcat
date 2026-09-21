@@ -529,6 +529,14 @@ pub struct Screen {
     /// 虚拟化的表只画视口里的行，于是按了「全部展开」却一行都看不见。摊开那一下把它滚到
     /// 视口顶上：看得见几行由视口多高决定，与上面那几段（按钮多高、规则几条）无关。
     reveal_steps: bool,
+    /// 上一帧差量账那**五格各画在哪儿**（[`tally_ui`] 交回来的）。
+    ///
+    /// 它是「五格等宽等高、上下缘对齐」那条的**量具**，与 [`Self::steps_drawn`] 同一个路子：
+    /// 不比像素，数这一帧真的摆出来的几何。稿上那一排是个**等分的 grid**，而上一版让内容
+    /// 决定宽高，出来五格宽 80–100 点不等、只有一行小字的那一格还矮了将近二十点。
+    ///
+    /// [`Self::steps_drawn`]: Self::steps_drawn
+    diff_tiles: Vec<egui::Rect>,
     /// 异常那一块眼下摆的是哪一栏（[`Anomaly`]）。摊开另一台时回到头一栏（[`Self::open`]）。
     anomaly: Anomaly,
     /// 下一趟差量预览要不要**把设备上缺失的那些补回去**（`sync::Request::restore_missing`）。
@@ -622,6 +630,7 @@ impl Screen {
             prepare_ms: 0.0,
             expanded: false,
             reveal_steps: false,
+            diff_tiles: Vec::new(),
             anomaly: Anomaly::all()[0],
             restore_missing: false,
             steps_drawn: 0,
@@ -890,6 +899,12 @@ impl Screen {
     pub fn expand(&mut self, on: bool) {
         self.expanded = on;
         self.reveal_steps = on;
+    }
+
+    /// 上一帧差量账那五格各画在哪儿。见这个字段的文档：它是「等宽等高、上下缘对齐」的量具。
+    #[must_use]
+    pub fn diff_tiles(&self) -> &[egui::Rect] {
+        &self.diff_tiles
     }
 
     /// 异常那一块眼下摆的是哪一栏。
@@ -2790,7 +2805,7 @@ impl Screen {
     ) {
         let plan = &prepared.plan;
         ui.separator();
-        tally_ui(ui, plan, self.prepare_ms);
+        self.diff_tiles = tally_ui(ui, plan, self.prepare_ms);
         concerns_ui(ui, prepared);
         self.steps_ui(ui, plan);
         self.anomalies_ui(ui, site, tasks, plan);
@@ -3210,60 +3225,112 @@ impl Screen {
 ///
 /// [`Plan::surprises`]: romcat_core::sync::Plan::surprises
 /// [`Plan::rejected`]: romcat_core::sync::Plan::rejected
-fn tally_ui(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan, prepare_ms: f64) {
+fn tally_ui(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan, prepare_ms: f64) -> Vec<egui::Rect> {
     let 放不进 = plan.rejected_tally();
-    // 五格照稿：大数字前的正负号也照稿（新增 `+`、删除 `−`），别的三格不带号。
-    let 五格 = [
+    // 五格照稿：大数字前的正负号也照稿（新增 `＋`、删除 `－`），别的三格不带号。
+    //
+    // 小字那一行写成**几个不可断的字段**，不是一整串：折行只许发生在字段与字段之间。
+    // 一整串交给 egui 去折的话，它在中日韩字之间随处都断得下去——上一版就折出了
+    // 「新增 · 690」＋「B」（数值与单位分了家）与「异常 · 不处」＋「理」（词被拦腰切断）。
+    let 五格: [(String, Vec<String>); 5] = [
         (
             format!("＋{}", thousands(plan.adds.files)),
-            format!("新增 · {}", human_bytes(plan.adds.bytes)),
+            vec!["新增".to_string(), human_bytes(plan.adds.bytes)],
         ),
         (
             format!("－{}", thousands(plan.deletes.files)),
-            format!("删除 · 释放 {}", human_bytes(plan.deletes.bytes)),
+            vec![
+                "删除".to_string(),
+                "释放".to_string(),
+                human_bytes(plan.deletes.bytes),
+            ],
         ),
         (
             thousands(plan.keeps.files),
-            format!("不动 · {}", human_bytes(plan.keeps.bytes)),
+            vec!["不动".to_string(), human_bytes(plan.keeps.bytes)],
         ),
         (
             thousands(plan.surprises.len() as u64),
             // **不给容量**：这几条各占各的地方（没了的在卡上一个字节都不占，落点被占那几个
             // 占着地方的是别人的文件），凑一个总数出来不对应卡上任何一件事。
-            "异常 · 不处理".to_string(),
+            vec!["异常".to_string(), "不处理".to_string()],
         ),
         (
             thousands(放不进.files),
-            format!("放不进目标 · {}", human_bytes(放不进.bytes)),
+            vec!["放不进目标".to_string(), human_bytes(放不进.bytes)],
         ),
     ];
     let tokens = Tokens::builtin();
     let 缝 = tokens.space.diff_gap;
+    let [上下, 左右] = tokens.space.diff_tile_padding;
+    let 行距 = tokens.space.health_tile_gap;
+    let 数字号 = tokens.font.size_diff_value;
+    let 小字号 = look::font_size(ui.ctx(), tokens.font.size_caption_plus);
+    let 强色 = ui.visuals().strong_text_color();
+    let 弱色 = ui.visuals().weak_text_color();
+
+    let 宽 = ((ui.available_width() - 4.0 * 缝) / 5.0).max(0.0);
+    let 内宽 = (宽 - 2.0 * 左右).max(0.0);
+    // 先把五格的字**整个排一遍**，再算一个所有格共用的高——「等高」不能指望各画各的之后
+    // 碰巧一样齐（上一版就是这么塌的：只有一行小字的那一格框跟着缩了将近二十点）。
+    // **稿上那个「·」要么五格都有、要么五格都没有**：只有一格摆得下就它一个带点，一排看着参差。
+    // 全摆得下就照稿写成一行（`新增 · 690 B`），只要有一格摆不下，五格一律折成字段、空格连。
+    let 照稿一行 = 五格
+        .iter()
+        .all(|(_, 字段)| 一行照稿(ui, 字段, 小字号, 弱色).size().x <= 内宽);
+    let 排好: Vec<(
+        std::sync::Arc<egui::Galley>,
+        Vec<std::sync::Arc<egui::Galley>>,
+    )> = 五格
+        .iter()
+        .map(|(数, 字段)| {
+            let 数 = ui
+                .painter()
+                .layout_no_wrap(数.clone(), egui::FontId::monospace(数字号), 强色);
+            let 几行 = 折成几行(ui, 字段, 内宽, 小字号, 弱色, 照稿一行);
+            (数, 几行)
+        })
+        .collect();
+    let 数高 = 排好
+        .iter()
+        .map(|(数, _)| 数.size().y)
+        .fold(0.0_f32, f32::max);
+    let 行高 = 排好
+        .iter()
+        .flat_map(|(_, 几行)| 几行.iter().map(|行| 行.size().y))
+        .fold(0.0_f32, f32::max);
+    let 最多几行 = 排好
+        .iter()
+        .map(|(_, 几行)| 几行.len())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let 高 = 上下 * 2.0 + 数高 + 行距 + 行高 * 最多几行 as f32 + 行距 * (最多几行 - 1) as f32;
+
+    let 圆角 = tokens.radius.medium;
+    let palette = look::palette(ui);
+    let 线 = ui.visuals().widgets.noninteractive.bg_stroke;
+    let mut 几格 = Vec::with_capacity(排好.len());
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 缝;
-        let 宽 = ((ui.available_width() - 4.0 * 缝) / 5.0).max(0.0);
-        let 内宽 = (宽 - 2.0 * tokens.space.diff_tile_padding[1]).max(0.0);
-        // **小字换行，不截断**（稿里 `.diff small` 就是会换行的普通行内文字）：卡片在两栏版式里
-        // 只有半屏宽，一格摊到九十点上下，「新增 · 220.72 MiB」截出来是「新增 · 69…」——
-        // 那一格于是什么都没说。换行之后几格高矮不一，所以**先量一遍、取最高的那一个**，
-        // 五格的小字框一律照它，底边才齐（稿上那是个等高的 grid）。
-        let 小字号 = look::font_size(ui.ctx(), tokens.font.size_caption_plus);
-        let 小字高 = 五格
-            .iter()
-            .map(|(_, 小字)| {
-                ui.painter()
-                    .layout(
-                        小字.clone(),
-                        egui::FontId::proportional(小字号),
-                        ui.visuals().weak_text_color(),
-                        内宽,
-                    )
-                    .size()
-                    .y
-            })
-            .fold(0.0_f32, f32::max);
-        for (数, 小字) in &五格 {
-            diff_tile_ui(ui, 宽, 小字高, 数, 小字);
+        for (数, 几行) in 排好 {
+            // **一格一个定死的矩形**：宽由容器五等分、高五格共用一个，都不由内容说了算。
+            // 等宽等高于是是**构造上**的事实，不是「碰巧排出来一样」（`Screen::diff_tiles`
+            // 把这几个矩形交出去，测试拿它逐格断上缘、下缘与宽）。
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(宽, 高), egui::Sense::hover());
+            let painter = ui.painter();
+            painter.rect_filled(rect, 圆角, palette.panel_2);
+            painter.rect_stroke(rect, 圆角, 线, egui::StrokeKind::Inside);
+            let 左 = rect.left() + 左右;
+            let mut 顶 = rect.top() + 上下;
+            painter.galley(egui::pos2(左, 顶), 数, 强色);
+            顶 += 数高 + 行距;
+            for 行 in 几行 {
+                let 这一行高 = 行.size().y;
+                painter.galley(egui::pos2(左, 顶), 行, 弱色);
+                顶 += 这一行高 + 行距;
+            }
+            几格.push(rect);
         }
     });
     // **小字那一行**：表上才有的那两样。零的不写。
@@ -3304,61 +3371,64 @@ fn tally_ui(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan, prepare_ms: f64) 
         human_bytes(plan.after_bytes),
         human_bytes(plan.actual_bytes),
     ));
+    几格
 }
 
-/// 差量账里的一格（设计稿 `.diff div`）：面板二号底、分隔线色描边、中圆角，内边距取令牌；
-/// 数是等宽、`size-diff-value` 那一档，底下半号说明字号的弱字，**换行不截断**。
+/// 一格小字**照稿写成一行**是什么样：字段之间点一个「·」（`新增 · 690 B`）。
 ///
-/// `小字高` 由调用方量好后一律传同一个：五格的小字长短不一，各画各的高度底边就参差
-/// （稿上那是个等高的 grid）。
-///
-/// 与库体检那一格（`health::tile_ui`）长得像而不共用：那一格三段、按得下去、有语气色条，
-/// 这一格两段、不接交互。硬凑成一支的话，两边各自的规矩都得塞进同一串参数里。
-fn diff_tile_ui(ui: &mut egui::Ui, 宽: f32, 小字高: f32, 数: &str, 小字: &str) {
-    let tokens = Tokens::builtin();
-    let [上下, 左右] = tokens.space.diff_tile_padding;
-    let 圆角 = tokens.radius.medium;
-    let palette = look::palette(ui);
-    let 小字号 = look::font_size(ui.ctx(), tokens.font.size_caption_plus);
-    let rect = egui::Frame::new()
-        .fill(palette.panel_2)
-        .corner_radius(圆角)
-        .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
-        .show(ui, |ui| {
-            let 内宽 = (宽 - 2.0 * 左右).max(0.0);
-            ui.set_min_width(内宽);
-            ui.set_max_width(内宽);
-            ui.spacing_mut().item_spacing.y = tokens.space.health_tile_gap;
-            ui.vertical(|ui| {
-                ui.add(
-                    egui::Label::new(
-                        font::mono(数)
-                            .size(tokens.font.size_diff_value)
-                            .color(ui.visuals().strong_text_color()),
-                    )
-                    .truncate(),
-                );
-                ui.allocate_ui_with_layout(
-                    egui::vec2(内宽, 小字高),
-                    egui::Layout::top_down(Align::Min),
-                    |ui| {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(小字)
-                                    .size(小字号)
-                                    .color(ui.visuals().weak_text_color()),
-                            )
-                            .wrap(),
-                        );
-                    },
-                );
-            });
-        })
-        .response
-        .rect;
-    let 线 = ui.visuals().widgets.noninteractive.bg_stroke;
+/// 单独一支是因为「五格是不是都摆得下」要在折之前问一遍——只有一格摆得下就它一个带点，
+/// 一排看着参差（[`tally_ui`] 里那个 `照稿一行`）。
+fn 一行照稿(
+    ui: &egui::Ui,
+    字段: &[String],
+    字号: f32,
+    颜色: egui::Color32,
+) -> std::sync::Arc<egui::Galley> {
+    let 文字 = match 字段 {
+        [头, 尾 @ ..] if !尾.is_empty() => format!("{头} · {}", 尾.join(" ")),
+        _ => 字段.join(" "),
+    };
     ui.painter()
-        .rect_stroke(rect, 圆角, 线, egui::StrokeKind::Inside);
+        .layout_no_wrap(文字, egui::FontId::proportional(字号), 颜色)
+}
+
+/// 把一格小字的那几个**字段**折成几行，**折行只发生在字段与字段之间**。
+///
+/// 一整串交给 egui 去折是不行的：它在中日韩字之间随处都断得下去，于是「690 B」断成
+/// 「690」＋「B」（数值与单位分了家）、「不处理」断成「不处」＋「理」（词被拦腰切断）
+/// ——拿主意的人 2026-09-21 为这两处打回过一版。这里每一行自己 `layout_no_wrap`，
+/// 一个字段永远整个留在一行上。
+///
+/// `照稿一行` 为真（五格都摆得下）时照稿写成一行；否则贪心往下折，同一行上的字段用一个
+/// 空格连。**断点因此只可能落在字段与字段之间。**
+fn 折成几行(
+    ui: &egui::Ui,
+    字段: &[String],
+    内宽: f32,
+    字号: f32,
+    颜色: egui::Color32,
+    照稿一行: bool,
+) -> Vec<std::sync::Arc<egui::Galley>> {
+    if 照稿一行 {
+        return vec![一行照稿(ui, 字段, 字号, 颜色)];
+    }
+    let 排 = |文字: String| {
+        ui.painter()
+            .layout_no_wrap(文字, egui::FontId::proportional(字号), 颜色)
+    };
+    let mut 几行: Vec<String> = Vec::new();
+    for 一个 in 字段 {
+        match 几行.last_mut() {
+            // 能跟上一行挤在一起就挤；挤不下另起一行。**一个字段自己再宽也不拆**——
+            // 拆了就是这一轮要治的那件事。
+            Some(上一行) if 排(format!("{上一行} {一个}")).size().x <= 内宽 => {
+                上一行.push(' ');
+                上一行.push_str(一个);
+            }
+            _ => 几行.push(一个.clone()),
+        }
+    }
+    几行.into_iter().map(排).collect()
 }
 
 /// 折期望状态与排计划时那几件**要说出口**的怪事：核心报的那几条，以及**目标吃不下而

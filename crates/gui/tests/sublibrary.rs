@@ -4471,37 +4471,59 @@ fn 三方对比照稿一排五个大数字_新增删除不动异常与放不进�
     let 屏上 = 画两帧整张卡(&ctx, &mut 场);
     let plan = &场.app.sublibrary().prepared().expect("排得出来").plan;
     let 放不进 = plan.rejected_tally();
-    // **五格照稿**：每一格一个大数字加一行小字，两样都得画在屏上。
-    for (数, 小字) in [
+    // **五格照稿**：每一格一个大数字，底下小字里那几个**字段**（标签、释放、多大）。
+    //
+    // 小字断句由格子多宽决定（摆得下写成一行「新增 · 141 B」，摆不下就折），所以**不断整串**
+    // ——断的是「每个字段都整个画在屏上、一个都没被折断」。上一版正是折出了「新增 · 690」＋「B」
+    // 与「异常 · 不处」＋「理」（拿主意的人 2026-09-21 打回）。
+    // 一个字段「整个画着」= 某一行里它**连在一起**出现，左右要么是行头行尾、要么是分隔符。
+    // 断的正是「没被折到两行上」：折断了的话，没有哪一行还连着写得出它。
+    let 整个画着 = |字段: &str| {
+        let 是分隔 = |c: char| c == ' ' || c == '·';
+        屏上.lines().any(|line| {
+            line.match_indices(字段).any(|(at, _)| {
+                let 前 = line[..at].chars().next_back();
+                let 后 = line[at + 字段.len()..].chars().next();
+                前.is_none_or(是分隔) && 后.is_none_or(是分隔)
+            })
+        })
+    };
+    for (数, 字段) in [
         (
             format!("＋{}", plan.adds.files),
-            format!("新增 · {}", human_bytes(plan.adds.bytes)),
+            vec!["新增".to_string(), human_bytes(plan.adds.bytes)],
         ),
         (
             format!("－{}", plan.deletes.files),
-            format!("删除 · 释放 {}", human_bytes(plan.deletes.bytes)),
+            vec![
+                "删除".to_string(),
+                "释放".to_string(),
+                human_bytes(plan.deletes.bytes),
+            ],
         ),
         (
             plan.keeps.files.to_string(),
-            format!("不动 · {}", human_bytes(plan.keeps.bytes)),
+            vec!["不动".to_string(), human_bytes(plan.keeps.bytes)],
         ),
         (
             plan.surprises.len().to_string(),
-            "异常 · 不处理".to_string(),
+            vec!["异常".to_string(), "不处理".to_string()],
         ),
         (
             放不进.files.to_string(),
-            format!("放不进目标 · {}", human_bytes(放不进.bytes)),
+            vec!["放不进目标".to_string(), human_bytes(放不进.bytes)],
         ),
     ] {
         assert!(
             屏上.lines().any(|line| line == 数),
             "五格里少了「{数}」那个数：\n{屏上}",
         );
-        assert!(
-            屏上.lines().any(|line| line == 小字),
-            "「{数}」那一格底下少了小字「{小字}」：\n{屏上}",
-        );
+        for 一个 in &字段 {
+            assert!(
+                整个画着(一个),
+                "「{数}」那一格的小字里，「{一个}」没整个画出来（多半被折断了）：\n{屏上}",
+            );
+        }
     }
 
     // **屏上那几个数就是计划里那几个**：两处各数一遍的话，一处改了另一处会静静地说着旧数。
@@ -4537,6 +4559,30 @@ fn 三方对比照稿一排五个大数字_新增删除不动异常与放不进�
         放不进.files,
         "「放不进目标」那一栏与那一格对不上：\n{屏上}",
     );
+
+    // **五格等宽等高、上下缘齐**（拿主意的人 2026-09-21 看合并向导那几张图时立的新要求：
+    // 「排版也要调整一下，至少要对齐文字」）。拿的是这一帧真的摆出来的矩形（`Screen::diff_tiles`），
+    // 不比像素：稿上那一排是个**等分的 grid**，宽高都不该由内容说了算。
+    let 五格 = 场.app.sublibrary().diff_tiles().to_vec();
+    assert_eq!(五格.len(), 5, "差量账该是五格：{五格:?}");
+    let 头一格 = 五格[0];
+    for (第几格, 这一格) in 五格.iter().enumerate() {
+        assert!(
+            (这一格.top() - 头一格.top()).abs() < 0.5,
+            "第 {} 格的上缘与头一格对不齐：{五格:?}",
+            第几格 + 1,
+        );
+        assert!(
+            (这一格.bottom() - 头一格.bottom()).abs() < 0.5,
+            "第 {} 格的下缘与头一格对不齐（矮的那一格是小字少一行跟着缩了）：{五格:?}",
+            第几格 + 1,
+        );
+        assert!(
+            (这一格.width() - 头一格.width()).abs() < 0.5,
+            "第 {} 格的宽与头一格不一样（宽让内容决定了）：{五格:?}",
+            第几格 + 1,
+        );
+    }
 
     // **变体数写在小字里，不塞进悬停**（截图门看不到悬停，等于没有）：人认得的单位是变体。
     assert!(
