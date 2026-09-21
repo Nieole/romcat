@@ -160,17 +160,19 @@
 
 `cargo check --all-targets --all-features -j 3` 绿（`CHECK=0`）。
 
-`cargo xtask gate -j 3 --test-threads 3 --keep-going`（日志 `/Users/nicoer/dev/game-wt/logs/slot-3-gl24-gate.log`，
-`EXIT=0`）：**六步全绿**——fmt 1s、glossary 0s、check 11s、clippy 12s、test 609s、doc 6s；
-整套 **2,389 项全过、0 失败**。词表那一步扫了 6 份 `.rs` 里新写的 1,716 行，没撞上
-（中途红过两处：测试里两句话写了「步骤」，词表 `_Gate_` 要「工序」，改在 `302d0bc`）。
+`cargo xtask gate -j 3 --test-threads 3 --keep-going`，**以最后这一趟为准**
+（日志 `/Users/nicoer/dev/game-wt/logs/slot-3-gl24-gate3.log`，`EXIT=0`，跑的是
+`Q1020` 照稿、`Q1026` 改叫「不动」都落完的那一版）：**六步全绿**——fmt 1s、glossary 0s、
+check 7s、clippy 13s、test 805s、doc 13s；整套 **2,390 项全过、0 失败**。
+词表那一步扫了 7 份 `.rs` 里新写的 1,934 行，没撞上。
 
-⚠️ **那一趟是 `Q1020` 照稿改之前的**。改完之后跑的是窄跑（要棒才跑全量）：
-`cargo clippy -p romcat-gui --all-targets --all-features -- -D warnings` 绿、
-`cargo fmt --all --check` 绿、`cargo xtask glossary` 绿（扫 7 份 `.rs` 里新写的 1,922 行，没撞上）、
-`check_tokens.py` 一致（250 项）、`cargo test -p romcat-gui --test sublibrary` **97 项全过**、
-整份 `snapshot` **81 张全过**（连跑两遍），日志 `/Users/nicoer/dev/game-wt/logs/slot-3-gl24-verify.log`。
-**全量门禁待补一趟**（`Q1020` 改完的那一版）。
+前两趟：`slot-3-gl24-gate.log` 是**照稿改之前**的那一版，六步全绿、2,389 项
+（词表那一步中途红过两处：测试里两句话写了「步骤」，词表 `_Gate_` 要「工序」，改在 `302d0bc`）；
+`slot-3-gl24-gate2.log` 红在 `doc` 一条——我在 Rust 文档注释里用了词表的 `[[词]]` 写法，
+rustdoc 读成 intra-doc link、找不到那个项，`-D warnings` 下是红，改在 `cb01705`。
+
+窄跑另有一遍（`slot-3-gl24-verify.log`）：`check_tokens.py` 一致（250 项）、
+`cargo test -p romcat-gui --test sublibrary` 97 项全过、整份 `snapshot` 81 张全过（连跑两遍）。
 
 收尾两轴审查（只读，各一个 agent）各挑出真缺陷，全部照改在提交 `8451967`：Standards 轴的
 「补回那一格数说少了、同步过一趟就整个不画」（H1）与三处 ADR-0024 重复（H2、H3、M1、M4），
