@@ -28,11 +28,13 @@
 //! 打开时把没跑过的接着跑完。**往前迁得动，往后（库比程序新）如实拒绝并说清**——
 //! 那时该换新程序，而不是删库。
 //!
-//! 眼下六条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
+//! 眼下八条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
 //! 第 3 条建 `verdict_batch` 与 `verdict_batch_row` 两张表（**批**，见下一节），
 //! 第 4 条建 `collection_member` 表（**合集**与**收藏**，见再下一节），
-//! 第 5 条建 `title_suppression` 表（**压掉的叫法**，见倒数第二节），
-//! 第 6 条建 `shaping_override` 表（**成型的人工纠正**，见最后一节）。
+//! 第 5 条建 `title_suppression` 表（**压掉的叫法**），
+//! 第 6 条建 `shaping_override` 表（**成型的人工纠正**，见最后一节），
+//! 第 7 条把标题类型那两个旧词换掉，
+//! 第 8 条建 `platform_correction` 表（**平台纠正**，见倒数第二节）。
 //! 加这几条时库还是空的，但那不改变纪律——**永远不要求删库**，中立库那条「版本一变就
 //! 重建」的便宜路子在这份库上不许走。
 //!
@@ -153,6 +155,22 @@
 //! **只在本机这一份主库里成立**。表按**主库标识**分开；**导出不带它**——[`Store::export`]
 //! 只折裁决与匹配裁决两张表，与路径锚默认不导出同一个理由：对别人没用，还顺带把自己的
 //! 目录结构交出去了。
+//!
+//! ## **平台纠正**：一对平台上的一个决定，不是一条条改
+//!
+//! 「`gb/` 目录里躺着一批 GBC 游戏」这件事，人是**按一对平台**下决定的：整组按内容改，
+//! 或者整组保持目录的说法（票 `gui-looks-like-the-design/28`）。所以这里记的就是那一对
+//! 平台上的一个决定（[`PlatformCorrection`]），不是几千条各记一行——那几千条是**可再生的**
+//! （库体检每一趟都重新数得出来），人下的那一个决定才是不可再生的那一样。
+//!
+//! **两种都记得住**：「按内容改」与「保持目录的说法」各是一档（[`PlatformDecision`]）。
+//! 只记前一种的话，后一种每做一次体检就要再问一遍，而票面点名要收掉这件事。
+//!
+//! **撤掉不删行**（`undone_at`，同 [`TitleSuppression`] 与 `verdict_batch.undone_at`）：
+//! 撤销本身也是人的动作，删掉行就说不出「他定过又撤回来了」。
+//!
+//! **键是主库标识加那一对平台**，与**路径锚**同一个处境：一组说的是「这份主库的那几个
+//! 目录里」，换一份主库指的是另一批文件。所以它按主库标识分开，**导出也不带它**。
 //!
 //! 票 `one-criterion-per-thing/07` 之前的中立库里那张 `shaping_override` 表，开现场时搬进来
 //! 一次（[`carry_over_shaping_overrides`](crate::site::carry_over_shaping_overrides)），
@@ -384,6 +402,32 @@ CREATE TABLE IF NOT EXISTS shaping_override(
 UPDATE title_suppression SET kind = '官方名称' WHERE kind = '官方名';
 UPDATE title_suppression SET kind = '汉化组译名' WHERE kind = '汉化组自取的名';
 ",
+    // 8：**平台纠正**（票 `gui-looks-like-the-design/28`）。一条说的是「这份主库里
+    // 『目录说 A、内容是 B』那一组，人定的是按哪个算」。
+    "\
+-- 一条**平台纠正**。键是主库标识加那一对平台：人是按一对平台下决定的，不是一条一条下的
+-- （见模块文档）。**盘上一个字节都不动**（ADR-0004）——改的只是「这一组按哪个平台算」。
+CREATE TABLE IF NOT EXISTS platform_correction(
+    id         INTEGER PRIMARY KEY,
+    -- 哪一份主库。与**路径锚**同一个处境：换一份主库，同一对平台指的是另一批文件。
+    library    TEXT    NOT NULL,
+    -- 目录说的那个平台。**这一列永远是目录说的**，与中立库 `variant.platform` 那一列同义——
+    -- 它是平台冲突那张报表的对照物，纠正过也不许改它（票 `one-criterion-per-thing/03`）。
+    declared   TEXT    NOT NULL,
+    -- 内容说的那个平台。
+    implied    TEXT    NOT NULL,
+    -- 按内容 / 保持。**两种都记得住**：只记前一种的话，后一种每体检一趟就要再问一遍。
+    decision   TEXT    NOT NULL,
+    decided_at INTEGER NOT NULL,
+    -- 撤掉的时刻。非空就是已经撤了——**撤掉不删行**（同 `title_suppression.lifted_at`）。
+    undone_at  INTEGER
+) STRICT;
+
+-- 一对平台上**同时只有一个说了算的决定**；撤掉的那些不占这个位子，所以人可以改主意。
+CREATE UNIQUE INDEX IF NOT EXISTS platform_correction_live
+    ON platform_correction(library, declared, implied) WHERE undone_at IS NULL;
+CREATE INDEX IF NOT EXISTS platform_correction_library ON platform_correction(library);
+",
 ];
 
 /// 「内容锚」在库里与报告里叫什么。
@@ -444,6 +488,62 @@ pub enum VerdictError {
     /// 导入的文件读不懂。
     #[error("这份裁决文件读不懂：{0}")]
     Format(String),
+}
+
+/// 「目录说 A、内容是 B」那一组，人定的是按哪个算（票 `gui-looks-like-the-design/28`）。
+///
+/// **两档都记得住**：只记「按内容改」的话，「保持目录的说法」每体检一趟就要再问一遍。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PlatformDecision {
+    /// **按内容改**：这一组按内容说的那个平台算，下一趟识别拿新平台重新匹配。
+    ByContent,
+    /// **保持目录的说法**：目录说的那个就是对的，这一组不再提示。
+    KeepDeclared,
+}
+
+impl PlatformDecision {
+    /// 库里存的短码。**它是键**，换它要动结构版本。
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::ByContent => "按内容",
+            Self::KeepDeclared => "保持",
+        }
+    }
+
+    /// 从库里那个短码读回来；认不出是 `None`。
+    #[must_use]
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "按内容" => Some(Self::ByContent),
+            "保持" => Some(Self::KeepDeclared),
+            _ => None,
+        }
+    }
+}
+
+/// 一条**平台纠正**：那一对平台上人定下来的那个决定。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformCorrection {
+    /// 目录说的那个平台。
+    pub declared: String,
+    /// 内容说的那个平台。
+    pub implied: String,
+    /// 按哪个算。
+    pub decision: PlatformDecision,
+    /// 什么时候定的，UNIX 纪元起的秒。
+    pub decided_at: i64,
+}
+
+impl PlatformCorrection {
+    /// 这一条管的是不是「目录说 `declared`、内容是 `implied`」那一组。
+    ///
+    /// **一处**：屏上那一层与识别那一趟都从这儿问（原先两处各手写一遍 `a == b && c == d`，
+    /// 改一条就会有一处漏改；票 28 收尾审查 Standards 轴第 3 条）。
+    #[must_use]
+    pub fn is_for(&self, declared: &str, implied: &str) -> bool {
+        self.declared == declared && self.implied == implied
+    }
 }
 
 /// 一条裁决钉在什么上。
@@ -1853,6 +1953,123 @@ impl Store {
         Ok(rows.into_iter().flatten().collect())
     }
 
+    // ── 平台纠正：一对平台上的一个决定（票 `gui-looks-like-the-design/28`） ──
+
+    /// 这份主库上**说了算的那些平台纠正**：撤掉的不在里面，按下决定的先后排（新的在后）。
+    ///
+    /// `library` 是**主库标识**：一组说的是「这份主库那几个目录里」，换一份主库指的是
+    /// 另一批文件（同 [`Store::shaping_overrides`]）。
+    ///
+    /// # Errors
+    /// 读库失败、或者库里那一档的短码认不出来时返回错误。
+    pub fn platform_corrections(
+        &self,
+        library: &str,
+    ) -> Result<Vec<PlatformCorrection>, VerdictError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT declared, implied, decision, decided_at
+                 FROM platform_correction
+                 WHERE library = ?1 AND undone_at IS NULL
+                 ORDER BY decided_at, id",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![library], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (declared, implied, decision, decided_at) =
+                row.map_err(|source| self.err(source))?;
+            // 短码认不出来只可能是库被人改过。**不悄悄丢掉这一条**：丢掉的后果是那一组
+            // 又开始计数，而人明明处理过它。
+            let decision = PlatformDecision::from_code(&decision).ok_or_else(|| {
+                VerdictError::Format(format!(
+                    "沉淀库里 {declared} → {implied} 那条平台纠正记着「{decision}」，\
+                     本程序只认「{}」与「{}」",
+                    PlatformDecision::ByContent.code(),
+                    PlatformDecision::KeepDeclared.code(),
+                ))
+            })?;
+            out.push(PlatformCorrection {
+                declared,
+                implied,
+                decision,
+                decided_at,
+            });
+        }
+        Ok(out)
+    }
+
+    /// 记一条平台纠正：这份主库里「目录说 `declared`、内容是 `implied`」那一组，按 `decision` 算。
+    ///
+    /// 同一组上已经有一条说了算的就**先撤掉它再落新的**——人改了主意，不攒出两条都算数的。
+    /// 撤掉的那一行留着（见模块文档）。
+    ///
+    /// **盘上一个字节都不动**（ADR-0004）：这里只写沉淀库。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn set_platform_correction(
+        &mut self,
+        library: &str,
+        declared: &str,
+        implied: &str,
+        decision: PlatformDecision,
+    ) -> Result<(), VerdictError> {
+        let now = now_secs();
+        let path = self.path.clone();
+        let to_err = |source| VerdictError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        tx.execute(
+            "UPDATE platform_correction SET undone_at = ?4
+             WHERE library = ?1 AND declared = ?2 AND implied = ?3 AND undone_at IS NULL",
+            params![library, declared, implied, now],
+        )
+        .map_err(to_err)?;
+        tx.execute(
+            "INSERT INTO platform_correction(library, declared, implied, decision, decided_at)
+             VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![library, declared, implied, decision.code(), now],
+        )
+        .map_err(to_err)?;
+        tx.commit().map_err(to_err)
+    }
+
+    /// 撤掉这一组上说了算的那条平台纠正，交回原来有没有这一条。
+    ///
+    /// **行留着**，只填 `undone_at`：撤销本身也是人的动作（见模块文档）。撤完这一组就回到
+    /// 「还没处理」，库体检那一格重新数它。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn undo_platform_correction(
+        &mut self,
+        library: &str,
+        declared: &str,
+        implied: &str,
+    ) -> Result<bool, VerdictError> {
+        self.conn
+            .execute(
+                "UPDATE platform_correction SET undone_at = ?4
+                 WHERE library = ?1 AND declared = ?2 AND implied = ?3 AND undone_at IS NULL",
+                params![library, declared, implied, now_secs()],
+            )
+            .map(|changed| changed > 0)
+            .map_err(|source| self.err(source))
+    }
+
     // ── 成型的人工纠正：人说这几个条目是一个变体（票 `one-criterion-per-thing/07`） ──
 
     /// 这份主库的全部**人工纠正**：条目的键 → 它该归到哪个变体。成型照它
@@ -2938,6 +3155,131 @@ mod tests {
         );
         // 新那张表真的建出来了，而且是空的——升级不会凭空并起谁的文件。
         assert!(store.shaping_overrides("主库").expect("读得到").is_empty());
+    }
+
+    #[test]
+    fn 平台纠正按主库分开_两种决定都记得住_撤掉之后行还在() {
+        // 票 `gui-looks-like-the-design/28`：人是**按一对平台**下决定的。
+        // **两种都记得住**——只记「按内容改」的话，「保持目录的说法」每体检一趟就要再问一遍。
+        let mut store = Store::in_memory().expect("开得出来");
+        assert!(
+            store
+                .platform_corrections("主库")
+                .expect("读得出")
+                .is_empty()
+        );
+
+        store
+            .set_platform_correction("主库", "GBA", "NDS", PlatformDecision::ByContent)
+            .expect("记得下");
+        store
+            .set_platform_correction("主库", "GBC", "GB", PlatformDecision::KeepDeclared)
+            .expect("记得下");
+        store
+            .set_platform_correction("别的库", "FC", "FDS", PlatformDecision::ByContent)
+            .expect("记得下");
+
+        let 这一份: Vec<(String, String, PlatformDecision)> = store
+            .platform_corrections("主库")
+            .expect("读得出")
+            .into_iter()
+            .map(|one| (one.declared, one.implied, one.decision))
+            .collect();
+        assert_eq!(
+            这一份,
+            vec![
+                (
+                    "GBA".to_string(),
+                    "NDS".to_string(),
+                    PlatformDecision::ByContent
+                ),
+                (
+                    "GBC".to_string(),
+                    "GB".to_string(),
+                    PlatformDecision::KeepDeclared
+                ),
+            ],
+            "两档都记得住，而且只看这一份主库的",
+        );
+
+        // 改主意：同一组上说了算的只有一条，不攒出两条都算数的。
+        store
+            .set_platform_correction("主库", "GBA", "NDS", PlatformDecision::KeepDeclared)
+            .expect("记得下");
+        let 说了算的: Vec<PlatformDecision> = store
+            .platform_corrections("主库")
+            .expect("读得出")
+            .into_iter()
+            .filter(|one| one.declared == "GBA")
+            .map(|one| one.decision)
+            .collect();
+        assert_eq!(说了算的, vec![PlatformDecision::KeepDeclared]);
+
+        assert!(
+            store
+                .undo_platform_correction("主库", "GBA", "NDS")
+                .expect("撤得掉")
+        );
+        assert!(
+            !store
+                .platform_corrections("主库")
+                .expect("读得出")
+                .iter()
+                .any(|one| one.declared == "GBA"),
+            "撤掉之后这一组回到「还没处理」，库体检那一格重新数它",
+        );
+        assert!(
+            !store
+                .undo_platform_correction("主库", "GBA", "NDS")
+                .expect("撤得掉"),
+            "本来就没有说了算的那一条",
+        );
+
+        // **撤掉不删行**：撤销本身也是人的动作（同 `title_suppression.lifted_at`）。
+        let 行数: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM platform_correction WHERE library = '主库' AND declared = 'GBA'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("数得出");
+        assert_eq!(行数, 2, "改主意盖掉的那一条与撤掉的这一条都留着");
+
+        assert_eq!(
+            store.platform_corrections("别的库").expect("读得出").len(),
+            1,
+            "别的主库那一条一个字不动",
+        );
+    }
+
+    #[test]
+    fn 第七版的老库升上来之后平台纠正那张表就建好了() {
+        // 与「第三版的老库带着裁决和批升上来」同一个形状、同一条理由，钉的是**第 8 条迁移**。
+        // 这份库不可再生，「升上来之后老东西还在」是它唯一不能出错的地方。
+        let conn = Connection::open_in_memory().expect("开得出来");
+        for sql in &MIGRATIONS[..7] {
+            conn.execute_batch(sql).expect("建得出第七版");
+        }
+        conn.execute_batch("PRAGMA user_version = 7")
+            .expect("盖得上第七版的版本号");
+        let mut store = Store {
+            conn,
+            path: "（内存）".to_string(),
+        };
+        let verdict = 汉化裁决();
+        store.put(&verdict).expect("第七版里就存得进");
+
+        store.migrate().expect("升得上来");
+
+        assert!(
+            store.find(&verdict.anchor).expect("读得到").is_some(),
+            "老裁决一条都不许丢"
+        );
+        store
+            .set_platform_correction("主库", "FC", "FDS", PlatformDecision::ByContent)
+            .expect("升上来之后这张表就记得下了");
+        assert_eq!(store.platform_corrections("主库").expect("读得出").len(), 1);
     }
 
     #[test]

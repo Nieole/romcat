@@ -112,13 +112,15 @@ use crate::container::{self, ContainerKind, Demand, ReadPlan, volume};
 use crate::dat::chinese::ChineseMark;
 use crate::dat::{Convention, DatRepo, Hit, Matched, RepoError};
 use crate::fs::{DirCache, LibraryFs};
-use crate::path::file_name_of_key;
+use crate::path::{self, file_name_of_key};
+use crate::platform::Manifest;
 use crate::report::thousands;
 use crate::scan::CancelToken;
+use crate::scan::aggregate::conflicting_platform;
 use crate::shape::Role;
 use crate::task::Handle;
 use crate::titledb;
-use crate::verdict::{self, Decision, Verdict};
+use crate::verdict::{self, Decision, PlatformCorrection, PlatformDecision, Verdict};
 
 use fingerprint::{Fingerprint, Headerless, Want};
 use fuzzy::Naming;
@@ -179,6 +181,9 @@ pub struct Options {
     pub max_read_bytes: Option<u64>,
     /// 每算完多少个变体就把这一批结论写进中立库。
     pub write_batch: usize,
+    /// **平台纠正**：人对「目录说 A、内容是 B」那几组定过的决定（票
+    /// `gui-looks-like-the-design/28`）。`None` 是一条都没定过，这一趟照旧只看内容与目录。
+    pub decided_platforms: Option<DecidedPlatforms>,
 }
 
 impl Options {
@@ -190,7 +195,71 @@ impl Options {
             read_library: true,
             max_read_bytes: None,
             write_batch: 2_000,
+            decided_platforms: None,
         }
+    }
+}
+
+/// 人对平台下过的那些决定，摆成识别问得动的样子（票 `gui-looks-like-the-design/28`）。
+///
+/// **它自己不判任何事**：一个变体撞上的是哪一组，问的是核心库那一处判据
+/// （[`conflicting_platform`]，ADR-0024）；这里只记着「那一组人定的是什么」，
+/// 并把那份清单拿在手上好去问。
+#[derive(Debug, Clone)]
+pub struct DecidedPlatforms {
+    /// 判「撞上哪一组」要用的那份平台清单。
+    manifest: Manifest,
+    /// 那一对平台 → 人定的那一档。
+    by_pair: BTreeMap<(String, String), PlatformDecision>,
+}
+
+impl DecidedPlatforms {
+    /// 从沉淀库读回来的那些纠正摆成一份。
+    #[must_use]
+    pub fn new(manifest: &Manifest, corrections: &[PlatformCorrection]) -> Self {
+        Self {
+            manifest: manifest.clone(),
+            by_pair: corrections
+                .iter()
+                .map(|one| ((one.declared.clone(), one.implied.clone()), one.decision))
+                .collect(),
+        }
+    }
+
+    /// 一条都没定过。
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_pair.is_empty()
+    }
+
+    /// 这个变体上人说了什么；它没撞上任何一组、或者那一组人还没定过，都是 `None`。
+    ///
+    /// **撞上哪一组由那一处判据说了算**：变体的哪个成员（容器里的算内部那条路径）
+    /// 的扩展名只可能属于别的平台，那一对就是它这一组。先撞上的那一组算数——
+    /// 一个变体的成员分属两组是病态情形（成型该把它们分开），按第一条办比按谁都不办诚实。
+    fn decide(&self, variant: &VariantRow, units: &[ContentUnit]) -> Option<String> {
+        let declared = self.manifest.platform_named(variant.platform.as_deref()?)?;
+        for unit in units {
+            let path = if unit.inner.is_empty() {
+                &unit.member
+            } else {
+                &unit.inner
+            };
+            let Some(extension) = path::extension_lower(Path::new(file_name_of_key(path))) else {
+                continue;
+            };
+            let Some((declared, implied)) =
+                conflicting_platform(&self.manifest, Some(declared), &extension)
+            else {
+                continue;
+            };
+            let decision = self.by_pair.get(&(declared.clone(), implied.clone()))?;
+            return Some(match decision {
+                PlatformDecision::ByContent => implied,
+                PlatformDecision::KeepDeclared => declared,
+            });
+        }
+        None
     }
 }
 
@@ -425,6 +494,8 @@ pub fn run(
         // 库里已有的发行版先认领上：接着算的那一趟不清发行版（`start_or_continue`），
         // 从头算的那一趟刚清完，认领的是一张空表。
         projector: Projector::adopting(catalog)?,
+        // 人定过的那些平台纠正：判「这个变体按哪个平台算」时**它先说话**（`platform_of`）。
+        decided_platforms: options.decided_platforms.clone(),
         ..Run::default()
     };
     let mut batch: Vec<Identification> = Vec::new();
@@ -909,6 +980,9 @@ struct Run {
     neighbours: Neighbours,
     /// 模型推断那一层这一趟干了什么。
     model: model::ModelCount,
+    /// **平台纠正**：人对那几组「目录说 A、内容是 B」定过的决定（票
+    /// `gui-looks-like-the-design/28`）。从 [`Options`] 上搬过来，一趟里不变。
+    decided_platforms: Option<DecidedPlatforms>,
     /// **落到模型推断这一层、而缓存里还没有答案**的那些问题，连它们的提问指纹。
     ///
     /// 攒起来等主循环跑完再打包问，而不是边跑边问：批量打包本来就要求先把一批凑齐，
@@ -1005,7 +1079,7 @@ fn identify_variant(
             variant_key: variant.key.clone(),
             state: State::Skipped,
             reason: Some(skip.recorded()),
-            platform: platform_of(variant, &units).map(ToString::to_string),
+            platform: platform_of(variant, &units, state),
             standalone: skip.standalone(),
             // **识别这一层不说第几版**：那只有人说得出（ADR-0008），走裁决那条路。
             edition: None,
@@ -2212,7 +2286,7 @@ fn ask_verdicts(
         // **裁决不判平台，识别替它判**。这一问排在探卡带头之前，units 上还没有卡带头，
         // 判出来的是目录声明的那个（挂单 `Q602`）。
         Some(mut record) => {
-            record.platform = platform_of(variant, units).map(ToString::to_string);
+            record.platform = platform_of(variant, units, state);
             // **能不能独立运行同样由识别替它判**：人裁的是它是哪个发行版，不是它能不能独立
             // 运行。Switch 那一层这一趟不跑，TitleID 从中立库里算过的那份取，不读盘
             // （票 `one-criterion-per-thing/05`）。
@@ -3148,7 +3222,8 @@ fn assemble(
         // No-Intro 的名字里根本没有年份（`scrape::dat` 的那张对照表）。
         let year = naming::year_in(scored.iter().map(|(candidate, _)| candidate.game.as_str()));
         let names = names_of(variant, units, state);
-        let found = fuzzy::candidates(naming, variant, &names, platform_of(variant, units), year);
+        let 按哪个平台算 = platform_of(variant, units, state);
+        let found = fuzzy::candidates(naming, variant, &names, 按哪个平台算.as_deref(), year);
         state.fuzzy.variants += 1;
         state.fuzzy.tried += found.tried;
         state.fuzzy.garbled += found.garbled;
@@ -3315,7 +3390,7 @@ fn assemble(
         reason,
         // 判出来的平台**落下来**：刮削读它，不再拿目录那一列判一次（票
         // `one-criterion-per-thing/03`）。
-        platform: platform_of(variant, units).map(ToString::to_string),
+        platform: platform_of(variant, units, state),
         // **识别这一层不说第几版**：自动识别只保证做到发行版级（ADR-0008），
         // 而「这是谁汉化的第几版」只有人说得出——它走裁决那条路（`Projector::project`）。
         // 发行版那一层的**修订**不在这儿：那是 DAT 条目名里的事实，落在 `release.revision`。
@@ -3333,15 +3408,26 @@ fn assemble(
 
 /// 平台交叉校验拿哪一个平台去校。
 ///
-/// **内容说的那个优先**：卡带内部头读出来的平台是从字节里来的，而目录只是强先验
-/// （ADR-0011：目录声明必须能被文件内容推翻）。真库里 `psp/` 目录下混着整包的
-/// FC / GB / SFC ROM——按目录判，它们的中文名会被整批判成「平台对不上」而一条不产出。
+/// **一条回退链，三层**：
 ///
-/// 头读不出来（没探过、不是卡带、光盘世代）才退回目录那一个。
+/// 1. **人说了的听人说的**——**平台纠正**里定过的那一组（票 `gui-looks-like-the-design/28`）。
+///    「按内容改」就按内容说的那个算，「保持目录的说法」就按目录那个算。人一条条看出来的
+///    判断压得过工具猜出来的，与[[第几版]]那条回退链同一个形状。
+/// 2. **内容说的那个**：卡带内部头读出来的平台是从字节里来的，而目录只是强先验
+///    （ADR-0011：目录声明必须能被文件内容推翻）。真库里 `psp/` 目录下混着整包的
+///    FC / GB / SFC ROM——按目录判，它们的中文名会被整批判成「平台对不上」而一条不产出。
+/// 3. 头读不出来（没探过、不是卡带、光盘世代）才退回**目录声明**的那一个。
 ///
 /// **判断只有这一处，结论落进中立库**（`identification.platform`，票
 /// `one-criterion-per-thing/03`）：刮削读那一列，不自己拿目录声明再判一次（ADR-0024 推论 3）。
-fn platform_of<'a>(variant: &'a VariantRow, units: &'a [ContentUnit]) -> Option<&'a str> {
+/// 「这个变体撞上了平台纠正的哪一组」同样不在这儿另判，问的是
+/// [`conflicting_platform`] 那一处（[`DecidedPlatforms::decide`]）。
+fn platform_of(variant: &VariantRow, units: &[ContentUnit], state: &Run) -> Option<String> {
+    if let Some(fixes) = &state.decided_platforms
+        && let Some(decided) = fixes.decide(variant, units)
+    {
+        return Some(decided);
+    }
     units
         .iter()
         .find_map(|unit| {
@@ -3350,6 +3436,7 @@ fn platform_of<'a>(variant: &'a VariantRow, units: &'a [ContentUnit]) -> Option<
                 .and_then(|facts| facts.platform.as_deref())
         })
         .or(variant.platform.as_deref())
+        .map(ToString::to_string)
 }
 
 /// 这个变体拿哪几个名字去撞文件名那一层。
@@ -3866,22 +3953,130 @@ mod tests {
         }
     }
 
+    /// 一趟什么都没定过的识别：回退链只剩内容与目录那两层。
+    fn 没纠正过() -> Run {
+        Run::default()
+    }
+
+    /// 一趟带着几条平台纠正的识别。
+    fn 纠正过(定过的: &[(&str, &str, PlatformDecision)]) -> Run {
+        let corrections: Vec<PlatformCorrection> = 定过的
+            .iter()
+            .map(|(declared, implied, decision)| PlatformCorrection {
+                declared: (*declared).to_string(),
+                implied: (*implied).to_string(),
+                decision: *decision,
+                decided_at: 0,
+            })
+            .collect();
+        Run {
+            decided_platforms: Some(DecidedPlatforms::new(&Manifest::builtin(), &corrections)),
+            ..Run::default()
+        }
+    }
+
     #[test]
     fn 平台交叉校验先听内容的再听目录的() {
         // ADR-0011：目录声明必须能被文件内容推翻。真库里 `psp/` 目录下混着整包的
         // FC / GB / SFC ROM——按目录判，它们的中文名会被整批判成「平台对不上」。
         let variant = 变体("psp/整理包/超级马里奥.zip", Some("PSP"));
         let units = vec![一份内容("psp/整理包/超级马里奥.zip", Some("FC"))];
-        assert_eq!(platform_of(&variant, &units), Some("FC"));
+        assert_eq!(
+            platform_of(&variant, &units, &没纠正过()).as_deref(),
+            Some("FC")
+        );
     }
 
     #[test]
     fn 内容说不出平台时才退回目录() {
         let variant = 变体("PSV/游戏.7z", Some("PSV"));
         let units = vec![一份内容("PSV/游戏.7z", None)];
-        assert_eq!(platform_of(&variant, &units), Some("PSV"));
+        assert_eq!(
+            platform_of(&variant, &units, &没纠正过()).as_deref(),
+            Some("PSV")
+        );
         // 连目录都说不出时就是说不出——那一道校验会记成「说不出」，不许当成「对得上」。
-        assert_eq!(platform_of(&变体("游戏.7z", None), &units), None);
+        assert_eq!(
+            platform_of(&变体("游戏.7z", None), &units, &没纠正过()),
+            None
+        );
+    }
+
+    #[test]
+    fn 平台纠正说按内容改之后这个变体按新平台算() {
+        // 票 `gui-looks-like-the-design/28`：`gba/` 目录里那份 `.nds`，人定了「按内容改」，
+        // 下一趟识别就按 NDS 去撞——**盘上那个文件一个字节都没动**（ADR-0004）。
+        let variant = 变体("GBA/汉化/逆转裁判4.nds", Some("GBA"));
+        let units = vec![一份内容("GBA/汉化/逆转裁判4.nds", None)];
+        assert_eq!(
+            platform_of(&variant, &units, &没纠正过()).as_deref(),
+            Some("GBA"),
+            "没人定过的时候照旧退回目录说的那个"
+        );
+        let 定过 = 纠正过(&[("GBA", "NDS", PlatformDecision::ByContent)]);
+        assert_eq!(
+            platform_of(&variant, &units, &定过).as_deref(),
+            Some("NDS"),
+            "人说按内容改，就按内容说的那个算"
+        );
+    }
+
+    #[test]
+    fn 平台纠正说保持目录的说法时内容说的话也压不过它() {
+        // 「保持」不是「什么都不做」：它要压得过内容那一层，否则人定完下一趟识别照旧
+        // 按内容算，而那正是他说不要的（票 28「两种都记得住」）。
+        let variant = 变体("3DS/合集/雷顿教授.nds", Some("3DS"));
+        let units = vec![一份内容("3DS/合集/雷顿教授.nds", Some("NDS"))];
+        assert_eq!(
+            platform_of(&variant, &units, &没纠正过()).as_deref(),
+            Some("NDS"),
+            "没人定过的时候内容说了算"
+        );
+        let 定过 = 纠正过(&[("3DS", "NDS", PlatformDecision::KeepDeclared)]);
+        assert_eq!(
+            platform_of(&variant, &units, &定过).as_deref(),
+            Some("3DS"),
+            "人说保持目录的说法，就按目录那个算"
+        );
+    }
+
+    #[test]
+    fn 定的是别的组时这个变体一点不受影响() {
+        let variant = 变体("GBA/汉化/逆转裁判4.nds", Some("GBA"));
+        let units = vec![一份内容("GBA/汉化/逆转裁判4.nds", None)];
+        let 定过别的组 = 纠正过(&[("FC", "FDS", PlatformDecision::ByContent)]);
+        assert_eq!(
+            platform_of(&variant, &units, &定过别的组).as_deref(),
+            Some("GBA"),
+            "一组一个决定，别的组一个字都不受影响"
+        );
+        // 扩展名说不准的（`.zip` 跨平台）压根不属于任何一组，纠正碰不到它。
+        let 说不准 = 变体("GBA/汉化/逆转裁判4.zip", Some("GBA"));
+        let 说不准的内容 = vec![一份内容("GBA/汉化/逆转裁判4.zip", None)];
+        assert_eq!(
+            platform_of(
+                &说不准,
+                &说不准的内容,
+                &纠正过(&[("GBA", "NDS", PlatformDecision::ByContent)])
+            )
+            .as_deref(),
+            Some("GBA")
+        );
+    }
+
+    #[test]
+    fn 容器里那份内容的扩展名也算数() {
+        // 库里 91.1% 的容量在**透明容器**里，只看容器自己的名字等于放过大头——
+        // 判据那一处（`conflicting_platform`）裸文件与容器内部共用，这里也共用。
+        let variant = 变体("GBA/合集.zip", Some("GBA"));
+        let mut unit = 一份内容("GBA/合集.zip", None);
+        unit.inner = "节奏天国 黄金版.nds".to_string();
+        unit.in_container = true;
+        let 定过 = 纠正过(&[("GBA", "NDS", PlatformDecision::ByContent)]);
+        assert_eq!(
+            platform_of(&variant, &[unit], &定过).as_deref(),
+            Some("NDS")
+        );
     }
 
     fn 一条候选(source: &str, confidence: Confidence, platform: &str) -> Candidate {

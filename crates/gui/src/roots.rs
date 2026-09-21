@@ -893,7 +893,7 @@ impl Screen {
     }
 
     /// 两栏底下通栏的**库体检**那一块（`crate::health`）：标题栏照稿「库体检」、那句说明、「重新体检」、折叠标，收得起来。
-    fn health_ui(&mut self, ui: &mut egui::Ui, site: &Site, tasks: &mut Tasks) {
+    fn health_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         let 扫过 = self.scanned();
         // 开窗后头一次进库屏、有扫过的根却还没有报告：自动排一趟（`health::Section::auto_check`，岔路口 8）。
         self.health.auto_check(site, tasks, 扫过);
@@ -921,6 +921,9 @@ impl Screen {
                     .clicked()
             });
         };
+        // 画八格之前先把**平台纠正**那一份合出来：目录与内容平台不符那一格数的是「还没处理的那几组」
+        // （票 `gui-looks-like-the-design/28`），那个数由核心库交（`PlatformCorrections::remaining`）。
+        self.health.ensure_corrections(site);
         let health = &mut self.health;
         foldable_panel(
             ui,
@@ -933,6 +936,8 @@ impl Screen {
         self.set_folded(FOLD_HEALTH, 收着);
         // 点了一格就开的那一层明细弹层（`health::Section::dialog_ui`）：每一帧都画，面板收着也画。
         self.health.dialog_ui(ui.ctx(), site);
+        // **平台纠正**那一层同理（票 `gui-looks-like-the-design/28`）：目录与内容平台不符那一格点进去开的是它。
+        self.health.platfix_ui(ui.ctx(), site);
         if 要体检 {
             self.health.check(site, tasks);
         }

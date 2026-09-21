@@ -1574,6 +1574,76 @@ impl 库屏 {
         现场
     }
 
+    /// 一个根完整扫过一趟、**体检报告里有两组「目录说 A、内容是 B」**（票 `gui-looks-like-the-design/28`）：
+    /// `fc/` 底下两份 `.fds`（FC 跑不了磁碟机的游戏，**只能改**），`3ds/` 底下一份头部字节是真的 `.nds`
+    /// （3DS **向下兼容** NDS，**改不改都行**）。根那一行的路径与上次扫描时刻交成定值，同 [`Self::有体检发现`]。
+    fn 有平台不符() -> Self {
+        let 工作区 = temp_dir("snapshot-库屏-平台纠正");
+        let mut site = 开库(工作区.path());
+        let 盘 = temp_dir("snapshot-库屏-平台纠正盘");
+        for (相对, 字节) in [
+            ("fc/日版/塞尔达传说.fds", vec![1_u8; 64]),
+            ("fc/合集/银河战士.fds", vec![2_u8; 64]),
+            (
+                "3ds/合集/雷顿教授与最后的时间旅行.nds",
+                romcat_core::testing::cart::padded(
+                    &romcat_core::testing::cart::NDS_GYAKUTEN_KENJI,
+                    1 << 16,
+                ),
+            ),
+        ] {
+            let 落点 = 盘.path().join(相对);
+            std::fs::create_dir_all(落点.parent().expect("有上级目录")).expect("建得出目录");
+            std::fs::write(&落点, 字节).expect("写得进");
+        }
+        let 目录 = romcat_core::path::normalize_existing(盘.path());
+        roots::add_root(&site.catalog, Some(工作区.path()), "主库", &目录).expect("加得上根");
+        let mut options = ScanOptions::named(&目录, "主库");
+        options.workspace = Some(工作区.path().to_path_buf());
+        options.jobs = Jobs::Fixed(1);
+        scan::scan(&RealFs::new(), &mut site.catalog, &options, &Handle::new()).expect("扫得完");
+        let 记下的 = site
+            .catalog
+            .root("主库")
+            .expect("读得出根")
+            .and_then(|root| root.scan)
+            .expect("扫完记下了上次扫描");
+        site.catalog
+            .record_root_scan(
+                "主库",
+                &RootScan {
+                    at: 1_788_418_680,
+                    elapsed_ms: 2_220_000,
+                    ..记下的
+                },
+            )
+            .expect("记得下");
+        let mut app = App::new(site, 工作区.path().to_path_buf());
+        app.show_view(View::Library);
+        let (屏, _, _) = app.roots_site_and_tasks();
+        let 画的: Vec<RootRow> = 屏
+            .roots()
+            .iter()
+            .map(|row| RootRow {
+                root: LibraryRoot {
+                    path: "/Volumes/新加卷/Game".to_owned(),
+                    ..row.root.clone()
+                },
+                stats: row.stats,
+                mounted: true,
+            })
+            .collect();
+        屏.list_roots(画的);
+        屏.set_clock(库屏的钟());
+        app.set_workspace_label(工作目录().display().to_string());
+        先体检一趟(&mut app);
+        Self {
+            app,
+            _工作区: 工作区,
+            _盘: vec![盘],
+        }
+    }
+
     /// 一个根完整扫过一趟、**体检报告里几格都有东西**（票 `gui-looks-like-the-design/27`）：两组重复拷贝、两面磁碟各成
     /// 一个变体、一份落单的存档、一份 BIOS、一个未纳入管理的目录。不可读与平台不符在临时目录里造不出来，那两格是 0。
     /// 根那一行的路径与上次扫描时刻交成定值，同 [`Self::扫过两个根`]。
@@ -1980,6 +2050,32 @@ fn 拍重复拷贝明细(名字: &str, 主题: Theme) {
     滚到库屏底下(&mut harness);
     按(&mut harness, "重复拷贝");
     拍下(harness, 名字);
+}
+
+/// **平台纠正那一层**（票 `gui-looks-like-the-design/28`，设计稿 `DLG.platfix`）：滚到库屏底下按
+/// 「目录与内容平台不符」那一格——它点进去开的不是明细弹层，是这一层。
+///
+/// **拍的是刚开那一下**：两组都还没定，各摆着「按内容改」与「保持」两颗按钮，改不改都行的那一组
+/// 底下多一句——稿上就是这个样子，而「每组两条出路」正是这一票的验收第 2 条。
+fn 拍平台纠正(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 库屏::有平台不符();
+    let mut harness = 开一个(主题, move |ui| 现场.app.ui(ui));
+    滚到库屏底下(&mut harness);
+    按(&mut harness, "目录与内容平台不符");
+    拍下(harness, 名字);
+}
+
+#[test]
+fn 库屏_平台纠正_浅色() {
+    拍平台纠正("library/platfix-light", Theme::Light);
+}
+
+#[test]
+fn 库屏_平台纠正_暗色() {
+    拍平台纠正("library/platfix-dark", Theme::Dark);
 }
 
 #[test]

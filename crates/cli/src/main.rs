@@ -1814,6 +1814,27 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
     let mut options = identify::Options::new(roots);
     options.read_library = !args.no_read_library;
     options.max_read_bytes = args.max_read_mib.map(|mib| mib.saturating_mul(1 << 20));
+    // **平台纠正**：人在界面上按组定过的那些「按内容改 / 保持目录的说法」（票
+    // `gui-looks-like-the-design/28`）。判「这个变体按哪个平台算」时它先说话
+    // （`identify::platform_of`）——命令行不读它的话，人在界面上定完、回终端挂后台跑一趟
+    // 识别（ADR-0023 说的正是这条分工）就等于没定。
+    //
+    // ⚠️ **平台清单两边取的路子不同**：这里走老规矩那条链（工作目录里的 `platforms.toml`），
+    // 界面那一侧一律用内置那一份。自带清单时两边会分出不同的组——那是界面整条路子上的既有
+    // 口径（库体检那一趟也是内置），挂单 `Q1031` 记着。
+    let corrections = match store.platform_corrections(&slug.text()) {
+        Ok(rows) => rows,
+        Err(error) => return fail(format!("沉淀库里的平台纠正读不动：{error}")),
+    };
+    if !corrections.is_empty() {
+        // 平台清单照**老规矩**那条链取（工作目录里的 `platforms.toml`，没有就用内置那一份）——
+        // `romcat identify` 本来就没有 `--manifest` 这个开关。
+        let manifest = match (ManifestArgs { manifest: None }).load(&workspace) {
+            Ok(manifest) => manifest,
+            Err(message) => return fail(message),
+        };
+        options.decided_platforms = Some(identify::DecidedPlatforms::new(&manifest, &corrections));
+    }
 
     // **文件名那一层**（票 11）：剥离规则加中文离线索引。取过数才跑得起来——
     // 没取过就如实说一句，识别照跑，只是少一层。

@@ -27,11 +27,15 @@ use std::path::{Path, PathBuf};
 
 use romcat_core::catalog::{Catalog, CatalogError, Roots};
 use romcat_core::platform::Manifest;
-use romcat_core::report::{DuplicateDetails, Finding, HealthReport, human_bytes, thousands};
+use romcat_core::report::{
+    CorrectionGroup, CorrectionGroups, DuplicateDetails, Finding, HealthReport, human_bytes,
+    thousands,
+};
 use romcat_core::scan::ScanOutcome;
 use romcat_core::scan::aggregate::Limits;
 use romcat_core::site::Site;
 use romcat_core::task::{Cutoff, Ending, Finished, Handle};
+use romcat_core::verdict::PlatformDecision;
 
 use crate::clock::Clock;
 use crate::dialog::{Button, Dialog, Footer, Width};
@@ -55,6 +59,27 @@ pub const CHECK_TASK: &str = "库体检 · 全部根";
 
 /// 还没扫描时这一块画的那一句（设计稿 `renderHealth` 空态原话）。
 pub const BEFORE_SCAN: &str = "扫描完成后生成体检报告。";
+
+/// **平台纠正**那一层的标题（设计稿 `DLG.platfix` 原话，票 `gui-looks-like-the-design/28`）。
+pub const PLATFIX: &str = "平台纠正";
+
+/// 平台纠正那一层页脚上那颗按钮（设计稿原话）。
+pub const PLATFIX_DONE: &str = "完成";
+
+/// 平台纠正那一层末尾那一句。
+///
+/// **前半句照设计稿**；后半句是这一票**照实补的**：稿上那句副标题写着「导出和同步时按纠正后的
+/// 平台放置」，可导出目录名取的是**键里那一级目录**（`path::platform_of_key`），同步读的是
+/// 中立库里**目录声明的那一列**——两处眼下都不读纠正。**屏上不许许一句做不到的话**
+/// （票 28 收尾审查 Spec 轴第 1 条），所以这里如实说，那件事记在挂单 `Q1033` 上。
+pub const PLATFIX_FOOTNOTE: &str =
+    "改了平台的变体会在下次识别时按新平台重新匹配；导出与同步眼下仍按目录放置。";
+
+/// 平台纠正那一层里定过之后那颗「撤销」（设计稿原话）。
+pub const PLATFIX_UNDO: &str = "撤销";
+
+/// 一条都不剩时那一层里说的这一句。
+pub const PLATFIX_NONE: &str = "目录与内容都对得上，没有要纠正的。";
 
 /// 疑似同一作品那一格的标题（设计稿原话）。
 pub const SAME_WORK: &str = "疑似同一作品";
@@ -100,6 +125,14 @@ pub struct Section {
     said: Option<Result<String, String>>,
     /// 点了疑似同一作品那一格之后，画在八格底下的那一句（不跳屏、不开明细，岔路口 9）。
     notice: Option<String>,
+    /// **平台纠正**那一层开着没有（票 `gui-looks-like-the-design/28`）。
+    platfix: bool,
+    /// 报告里那几组加上人定过的决定，**核心库合出来的那一份**（[`CorrectionGroups`]）；
+    /// 还没合过是 `None`。界面一个数都不自己算（ADR-0005、ADR-0024）。
+    ///
+    /// **缓着而不是每帧现读**：它要读沉淀库，而这一层画在画帧那条线程上。报告换了、
+    /// 或者人刚定过一条，就扔掉重合（[`Section::forget_corrections`]）。
+    corrections: Option<CorrectionGroups>,
 }
 
 /// 明细弹层里「在文件系统中打开」那颗按钮上的字（设计稿原话）。
@@ -110,6 +143,9 @@ const NOT_MOUNTED: &str = "未连接：那块盘眼下不在位，打不开";
 
 /// 重复拷贝明细那张表最多摆几组；其余的在重复拷贝明细全文里（导出去的那一份列全部）。
 const DUPLICATE_ROWS: usize = 50;
+
+/// **平台纠正**里一组摆几条样例（设计稿 `DLG.platfix` 的 `g.ex` 两条，底下写「另有 N 条」）。
+const PLATFIX_EXAMPLES: usize = 2;
 
 /// 眼下开着的那一层明细弹层。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +194,7 @@ impl Section {
     /// 扫完一个根：拿扫描交回的那份报告，连同一份统计折出重复拷贝的完整明细。`at` 是认领那一刻。
     pub fn take_scan(&mut self, outcome: &ScanOutcome, at: i64) {
         self.error = None;
+        self.forget_corrections();
         self.checked = Some(Checked {
             report: outcome.report.clone(),
             duplicates: DuplicateDetails::build(&outcome.aggregate, &outcome.report),
@@ -169,6 +206,44 @@ impl Section {
     #[must_use]
     pub fn checked(&self) -> Option<&Checked> {
         self.checked.as_ref()
+    }
+
+    /// 把缓着的那份**平台纠正**扔掉，下一帧重合：报告换了、或者人刚定过一条。
+    fn forget_corrections(&mut self) {
+        self.corrections = None;
+    }
+
+    /// 合一份**平台纠正**：报告里那几组 + 沉淀库里人定过的决定，合的是核心库
+    /// （[`CorrectionGroups::build`]）。读沉淀库没成就当一条都没定过——那时屏上会把
+    /// 处理过的组重新问一遍，而**不会**把人定过的东西说成没定过。
+    pub(crate) fn ensure_corrections(&mut self, site: &Site) {
+        if self.corrections.is_some() {
+            return;
+        }
+        let Some(checked) = &self.checked else {
+            return;
+        };
+        let decided = site
+            .store
+            .platform_corrections(&site.library_identity)
+            .unwrap_or_default();
+        self.corrections = Some(CorrectionGroups::build(
+            &checked.report,
+            &Manifest::builtin(),
+            &decided,
+        ));
+    }
+
+    /// 眼下那一份**平台纠正**（测试拿它核对）。
+    #[must_use]
+    pub fn corrections(&self) -> Option<&CorrectionGroups> {
+        self.corrections.as_ref()
+    }
+
+    /// **平台纠正**那一层开着没有（测试拿它核对）。
+    #[must_use]
+    pub fn platfix_open(&self) -> bool {
+        self.platfix
     }
 
     /// 台上有没有一趟体检（排着队也算）。
@@ -234,6 +309,7 @@ impl Section {
         match done.ended {
             Ending::Done(Product::Checked { report, duplicates }) => {
                 self.error = None;
+                self.forget_corrections();
                 self.checked = Some(Checked {
                     report: *report,
                     duplicates: *duplicates,
@@ -276,8 +352,16 @@ impl Section {
             );
             return;
         };
-        let 点了 = tiles_ui(ui, &checked.report, identified);
+        let 点了 = tiles_ui(ui, &checked.report, self.corrections.as_ref(), identified);
         match 点了 {
+            // **目录与内容平台不符**那一格点进去不是明细，是**平台纠正**那一层（设计稿
+            // `HEALTH` 里这一格的 `data-dg="open:platfix"`，票 `gui-looks-like-the-design/28`）：
+            // 那一层既列得出明细，又按得下决定。
+            Some(Tile::Finding(Finding::PlatformConflicts)) => {
+                self.platfix = true;
+                self.said = None;
+                self.notice = None;
+            }
             Some(Tile::Finding(finding)) => {
                 self.detail = Some(Detail {
                     finding,
@@ -311,6 +395,128 @@ impl Section {
                 });
             ui.add_space(上下);
         }
+    }
+
+    /// 画开着的那一层**平台纠正**（设计稿 `DLG.platfix`，票 `gui-looks-like-the-design/28`）：
+    /// 按组列出「从哪个平台 → 到哪个平台、多少条、凭什么、两条样例」，每组两条出路——
+    /// **按内容改**与**保持目录的说法**，定过的那一组摊在那儿说「已改为 X」/「已保持 X」，
+    /// 旁边一颗「撤销」。
+    ///
+    /// **一个数都不在这儿算**：组、条数、判据、「改不改都行」那一句全由核心库交出来
+    /// （[`CorrectionGroups`]，ADR-0005、ADR-0024）。**盘上一个字节都不动**（ADR-0004）：
+    /// 按下去只往**沉淀库**写一条决定，文件不移动、不改名。
+    pub(crate) fn platfix_ui(&mut self, ctx: &egui::Context, site: &mut Site) {
+        if !self.platfix {
+            return;
+        }
+        self.ensure_corrections(site);
+        let Some(fixes) = &self.corrections else {
+            return;
+        };
+        // 副标题：**判据那一句出自核心库**（`Finding::criterion`，与导出的清单抬头同一句），
+        // 后面接的是这一层自己的政策话（同明细弹层 `note_of` 那条先例）。
+        let note = format!(
+            "{}。共 {} 条目录与内容不符，按组处理；纠正记为人工纠正，不移动任何文件。",
+            Finding::PlatformConflicts.criterion(),
+            thousands(fixes.remaining()),
+        );
+        let mut 按了: Option<(String, String, Option<PlatformDecision>)> = None;
+        let said = self.said.clone();
+        let footer = Footer::new(Button::new(PLATFIX_DONE, Pressed::Close)).dismiss_on_right();
+        let shown = Dialog::new(PLATFIX, PLATFIX.to_string(), footer)
+            .note(note)
+            .width(Width::Wide)
+            .show(ctx, |ui| {
+                match &said {
+                    Some(Ok(said)) => {
+                        ui.weak(said);
+                    }
+                    Some(Err(said)) => {
+                        ui.colored_label(ui.visuals().error_fg_color, said);
+                    }
+                    None => {}
+                }
+                if fixes.is_empty() {
+                    look::help(ui, PLATFIX_NONE);
+                    return;
+                }
+                for group in fixes.groups() {
+                    if let Some(按下的) = platfix_group_ui(ui, group) {
+                        按了 = Some((
+                            group.group.declared.clone(),
+                            group.group.implied.clone(),
+                            按下的,
+                        ));
+                    }
+                    ui.add_space(look::step(2));
+                }
+                look::help(ui, PLATFIX_FOOTNOTE);
+            });
+        if shown.pressed == Some(Pressed::Close) {
+            self.platfix = false;
+            self.said = None;
+        }
+        if let Some((declared, implied, 决定)) = 按了 {
+            self.said = Some(self.decide(site, &declared, &implied, 决定));
+            self.forget_corrections();
+        }
+    }
+
+    /// 往**沉淀库**落一条平台纠正，或者撤掉说了算的那一条。交回画在那一层里的那句回话。
+    ///
+    /// **只写沉淀库**：盘上的文件一个字节都不动（ADR-0004），中立库也不动——
+    /// 下一趟识别读这一条重新匹配（`identify::platform_of`）。
+    fn decide(
+        &self,
+        site: &mut Site,
+        declared: &str,
+        implied: &str,
+        决定: Option<PlatformDecision>,
+    ) -> Result<String, String> {
+        let library = site.library_identity.clone();
+        let 条数 = self
+            .corrections
+            .as_ref()
+            .and_then(|那一层| {
+                那一层
+                    .groups()
+                    .iter()
+                    .find(|one| one.group.declared == declared && one.group.implied == implied)
+            })
+            .map_or(0, |one| one.group.count);
+        match 决定 {
+            Some(PlatformDecision::ByContent) => site
+                .store
+                .set_platform_correction(&library, declared, implied, PlatformDecision::ByContent)
+                .map(|()| {
+                    format!(
+                        "已把 {} 条改为 {implied}（记为人工纠正）；下次识别按新平台重新匹配，盘上的文件一个字节都没动",
+                        thousands(条数)
+                    )
+                }),
+            Some(PlatformDecision::KeepDeclared) => site
+                .store
+                .set_platform_correction(&library, declared, implied, PlatformDecision::KeepDeclared)
+                .map(|()| {
+                    format!(
+                        "已确认保持 {declared}，这 {} 条不再提示",
+                        thousands(条数)
+                    )
+                }),
+            // **交回值不许丢**：本来就没有说了算的那一条时说「已撤销」是骗人的
+            // （票 28 收尾审查 Standards 轴第 7 条）。
+            None => site
+                .store
+                .undo_platform_correction(&library, declared, implied)
+                .map(|撤掉了| {
+                    if 撤掉了 {
+                        "已撤销平台纠正，这一组恢复为目录给出的平台".to_string()
+                    } else {
+                        "这一组上没有说了算的纠正，什么都没撤".to_string()
+                    }
+                }),
+        }
+        .map_err(|why| format!("这一下没记进沉淀库：{why}"))
     }
 
     /// 画开着的那一层**明细弹层**（设计稿 `DLG.health`）：标题「库体检 · 那一格」、那句说明、明细，页脚「关闭」。
@@ -744,6 +950,148 @@ fn duplicates_ui(
     look::help(ui, &那一句);
 }
 
+/// **平台纠正**里的一组（设计稿 `.pgrp`）：头一行是两枚平台标、这一组叫什么、多少条，定过的那一组
+/// 右边摆一枚标与一颗「撤销」；正文是判据那一句、两条样例、「另有 N 条」，还没定过的底下摆两颗按钮。
+///
+/// 交回**按下去要做什么**：`Some(Some(档))` 是定成那一档，`Some(None)` 是撤销，`None` 是这一帧什么都没按。
+fn platfix_group_ui(
+    ui: &mut egui::Ui,
+    group: &CorrectionGroup,
+) -> Option<Option<PlatformDecision>> {
+    let tokens = Tokens::builtin();
+    let [头上下, 头左右] = tokens.space.table_head_padding;
+    let [正上下, 正左右] = tokens.space.cell_padding;
+    let 线 = ui.visuals().widgets.noninteractive.bg_stroke;
+    let mut 按了 = None;
+    egui::Frame::new()
+        .stroke(线)
+        .corner_radius(tokens.radius.large)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            // ── 头一行（设计稿 `.pgrp .gh`）：凹一格的底，底下一条线。
+            egui::Frame::new()
+                .fill(ui.visuals().faint_bg_color)
+                .inner_margin(egui::Margin::from(egui::vec2(头左右, 头上下)))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal_wrapped(|ui| {
+                        platform_badge(ui, &group.group.declared);
+                        ui.label("→");
+                        platform_badge(ui, &group.group.implied);
+                        ui.label(font::strong(group.headline()));
+                        look::help(ui, &format!("{} 条", thousands(group.group.count)));
+                        if let Some(settled) = group.settled() {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let 撤销 = look::small_buttons(ui, |ui| {
+                                        ui.scope(|ui| {
+                                            look::ghost_button(ui.visuals_mut());
+                                            ui.button(PLATFIX_UNDO)
+                                                .on_hover_text(
+                                                    "撤掉这一组的决定，它回到还没处理，库体检那一格重新数它",
+                                                )
+                                                .clicked()
+                                        })
+                                        .inner
+                                    });
+                                    if 撤销 {
+                                        按了 = Some(None);
+                                    }
+                                    look::chip(ui, Tone::Good, &settled);
+                                },
+                            );
+                        }
+                    });
+                });
+            look::divider(ui);
+            // ── 正文（设计稿 `.pgrp .gb`）：判据、样例、两颗按钮。
+            egui::Frame::new()
+                .inner_margin(egui::Margin::from(egui::vec2(正左右, 正上下)))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = look::step(1);
+                    look::help(ui, &group.reason());
+                    // 样例照票 09 写「根名 · 相对路径」（`table::root_and_path`，同明细弹层那一行）：
+                    // 核心库交的是**中立库的键**，盘在哪儿是这一层拼的事，基线图里也就不会有
+                    // 某一台机器上那条临时目录。
+                    let 字号 = look::font_size(ui.ctx(), tokens.font.size_caption_plus);
+                    let 字体 = egui::FontId::new(字号, egui::FontFamily::Monospace);
+                    for 样例 in group.group.examples.iter().take(PLATFIX_EXAMPLES) {
+                        let 宽 = ui.available_width();
+                        let 画的 = table::root_and_path(ui, 样例, &字体, 宽);
+                        ui.label(font::mono(画的).size(字号));
+                    }
+                    let 少了 = group
+                        .group
+                        .count
+                        .saturating_sub(u64::try_from(PLATFIX_EXAMPLES).unwrap_or(0));
+                    if 少了 > 0 {
+                        look::help(ui, &format!("另有 {} 条", thousands(少了)));
+                    }
+                    if group.pending() {
+                        ui.horizontal_wrapped(|ui| {
+                            let 改 = look::small_buttons(ui, |ui| {
+                                ui.scope(|ui| {
+                                    look::primary_button(ui.visuals_mut());
+                                    ui.button(format!(
+                                        "按内容改为 {}（{} 条）",
+                                        group.group.implied,
+                                        thousands(group.group.count)
+                                    ))
+                                    .on_hover_text(
+                                        "只往沉淀库记一条决定：盘上的文件不移动、不改名，下次识别按新平台重新匹配",
+                                    )
+                                    .clicked()
+                                })
+                                .inner
+                            });
+                            if 改 {
+                                按了 = Some(Some(PlatformDecision::ByContent));
+                            }
+                            let 保持 = look::small_buttons(ui, |ui| {
+                                ui.button(format!("保持 {}", group.group.declared))
+                                    .on_hover_text("这一组按目录说的算，下一趟体检不再问它")
+                                    .clicked()
+                            });
+                            if 保持 {
+                                按了 = Some(Some(PlatformDecision::KeepDeclared));
+                            }
+                            if let Some(那一句) = group.interchangeable_note() {
+                                look::help(ui, &那一句);
+                            }
+                        });
+                    }
+                });
+        });
+    按了
+}
+
+/// 一枚**平台标**（设计稿 `.hplat`）：平台色的底、白字、小圆角。高与左右留白跟标签同一对令牌
+/// （`chip-height` / `chip-padding`，与稿上那两个数逐字相同），字取 `size-caption-plus` 的粗体。
+fn platform_badge(ui: &mut egui::Ui, platform: &str) {
+    let tokens = Tokens::builtin();
+    let 字号 = look::font_size(ui.ctx(), tokens.font.size_caption_plus);
+    let color = tokens.color.platform.of(platform);
+    let galley = ui.painter().layout_no_wrap(
+        platform.to_owned(),
+        egui::FontId::new(字号, font::strong_family()),
+        egui::Color32::WHITE,
+    );
+    let 高 = tokens.layout.chip_height.max(galley.size().y);
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(galley.size().x + 2.0 * tokens.layout.chip_padding, 高),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, tokens.radius.small, color);
+    painter.galley(
+        rect.center() - galley.size() / 2.0,
+        galley,
+        egui::Color32::WHITE,
+    );
+}
+
 /// 体检那一趟：从中立库折出全库的统计，出报告，连同重复拷贝的完整明细（**每组记全路径**，明细弹层要列得出全部）。
 /// 一个字节都不读主库、不写库。
 fn check_run(catalog: &Catalog, task: &Handle) -> Result<Product, Cutoff> {
@@ -816,7 +1164,12 @@ struct Face {
 
 /// 这一格画成什么样。数与单位、标题出自核心库（[`HealthReport::finding_count`]、[`Finding`]）；小字照设计稿，
 /// 与词表对不上的两句改成实话（不可读说的是元数据；未纳入管理的目录照扫照报，只是不进识别与刮削——岔路口 10）。
-fn face(tile: Tile, report: &HealthReport, identified: bool) -> Face {
+fn face(
+    tile: Tile,
+    report: &HealthReport,
+    fixes: Option<&CorrectionGroups>,
+    identified: bool,
+) -> Face {
     let Tile::Finding(finding) = tile else {
         return Face {
             label: SAME_WORK,
@@ -830,19 +1183,32 @@ fn face(tile: Tile, report: &HealthReport, identified: bool) -> Face {
             tone: None,
         };
     };
-    let count = report.finding_count(finding);
+    // **目录与内容平台不符**那一格数的是**还没处理的那几组**（票 `gui-looks-like-the-design/28`）：
+    // 处理过的组不再计数，小字改说「已处理 N 组」。两个数都由核心库交出来
+    // （`CorrectionGroups::remaining` / `handled_note`），界面一个都不自己算。
+    let 纠正 = (finding == Finding::PlatformConflicts)
+        .then_some(fixes)
+        .flatten();
+    let count = 纠正.map_or_else(
+        || report.finding_count(finding),
+        CorrectionGroups::remaining,
+    );
     // 小字出自核心库那一处（`Finding::hint`，判据的短写法）：界面不另写一套（ADR-0024；拿主意的人
     // 2026-09-20 定「判据文案统一到核心库一处，格子小字也从同一处出」）。重复拷贝那一格稿上写的是
     // 「可腾出 N」——那是报告里的一个数，所以 `hint()` 对它交回 `None`。
-    let sub = finding.hint().map_or_else(
-        || {
-            format!(
-                "可腾出 {}",
-                human_bytes(report.suspects.duplicate_reclaimable_bytes)
+    let sub = 纠正
+        .and_then(CorrectionGroups::handled_note)
+        .unwrap_or_else(|| {
+            finding.hint().map_or_else(
+                || {
+                    format!(
+                        "可腾出 {}",
+                        human_bytes(report.suspects.duplicate_reclaimable_bytes)
+                    )
+                },
+                ToString::to_string,
             )
-        },
-        ToString::to_string,
-    );
+        });
     // 色条照稿配色（`.htile.warn` / `.bad`），**数为零的格不画**（拿主意的人 2026-09-15 答岔路口 11）。
     let tone = match finding {
         Finding::Duplicates | Finding::PlatformConflicts | Finding::ShapingDoubts => {
@@ -861,7 +1227,12 @@ fn face(tile: Tile, report: &HealthReport, identified: bool) -> Face {
 }
 
 /// 八格（设计稿 `.health`）：四列等宽，格与格之间、外面一圈取令牌。交回这一帧点了哪一格。
-fn tiles_ui(ui: &mut egui::Ui, report: &HealthReport, identified: bool) -> Option<Tile> {
+fn tiles_ui(
+    ui: &mut egui::Ui,
+    report: &HealthReport,
+    fixes: Option<&CorrectionGroups>,
+    identified: bool,
+) -> Option<Tile> {
     let tokens = Tokens::builtin();
     let [外上下, 外左右] = tokens.space.health_grid_padding;
     let 缝 = tokens.space.health_grid_gap;
@@ -878,7 +1249,7 @@ fn tiles_ui(ui: &mut egui::Ui, report: &HealthReport, identified: bool) -> Optio
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 缝;
                     for tile in 这一行 {
-                        if tile_ui(ui, 宽, &face(*tile, report, identified)).clicked() {
+                        if tile_ui(ui, 宽, &face(*tile, report, fixes, identified)).clicked() {
                             点了 = Some(*tile);
                         }
                     }
