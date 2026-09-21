@@ -19,7 +19,10 @@
 //!
 //! 「各自独立的内容」**宁可窄不宜宽**：透明容器、压缩镜像、光盘镜像 `.iso`，或者清单里「只可能属于某一个平台」的扩展名
 //! （`.vpk`、`.xci` 之流）。`.bin`、`.sfo` 这类同时也是转储自己的数据文件（PSV 的 `eboot.bin`），不算；分卷的非入口段
-//! 跟着入口段算一份。**直接躺着**只看目录这一层：转储的分区目录（`app/`、`PS3_GAME/`）底下是它自己的内部资源。
+//! 跟着入口段算一份；**已经自成一个变体的那一份也不算**——人把这一处**拆开**过之后（`super::fix::split`），拆出去的
+//! 那几份各自是一个变体，这一处就不再存疑（与上一段「不是人工纠正出来的变体」同一个道理：人看过的地方不再问第二遍。
+//! 词表**成型存疑**条 2026-09-21 补了这一句）。**直接躺着**只看目录这一层：转储的分区目录（`app/`、`PS3_GAME/`）
+//! 底下是它自己的内部资源。
 //!
 //! ## 只发现并报告
 //!
@@ -78,6 +81,29 @@ pub struct Doubt {
     pub at: String,
     /// 牵涉的那几条，按键排：几个变体的键；或者目录里那几个独立内容的键。
     pub items: Vec<String>,
+}
+
+impl Doubt {
+    /// 给人看的那一句原因：凭什么说这一处存疑。
+    ///
+    /// **长在这儿**而不是长在[报告那一份](crate::scan::aggregate::ShapingDoubt)上：那一份是这一份折成
+    /// 展示路径之后的样子，而「凭什么」与路径无关——界面从作品详情那一面拿到的是这一份
+    /// （`Catalog::shaping_doubts_near`），那时报告那一份还不存在。
+    #[must_use]
+    pub fn reason(&self) -> String {
+        match self.kind {
+            DoubtKind::UnmergedDiscs => {
+                format!(
+                    "{} 个变体只差碟片标记，可能是同一套多碟游戏",
+                    self.items.len()
+                )
+            }
+            DoubtKind::CrowdedTree => format!(
+                "整个目录被当成 1 个变体，里面有 {} 份各自独立的内容",
+                self.items.len()
+            ),
+        }
+    }
 }
 
 /// 找出**成型存疑**的地方，按那一处的键排（判据见模块文档）。
@@ -161,10 +187,15 @@ fn crowded_trees(variants: &[Shaped<'_>], entries: &[Entry], manifest: &Manifest
     if roots.is_empty() {
         return Vec::new();
     }
+    // **已经自成一个变体的那一份不算**：人工纠正**拆开**过这个目录之后（票
+    // `gui-looks-like-the-design/29`，`shape::fix::split`），拆出去的那几份各自是一个变体
+    // ——它们不再是「这个目录里躺着、却被当成转储一部分」的东西，这一处也就不再存疑。
+    // 拆之前不会命中：目录树认下的子树里，文件一律是那棵树的成员（[`super::plan`]）。
+    let own_variant: BTreeSet<&str> = variants.iter().map(|variant| variant.key).collect();
     // 变体的目录 →（去掉扩展名、折过的名字 → 叫这个名字的那几份独立内容）。
     let mut inside: BTreeMap<&str, BTreeMap<String, Vec<&str>>> = BTreeMap::new();
     for entry in entries {
-        if entry.is_dir {
+        if entry.is_dir || own_variant.contains(entry.key.as_str()) {
             continue;
         }
         let Some(dir) = parent_of(&entry.key) else {
@@ -355,6 +386,29 @@ mod tests {
                     "ps3/动作合集/甲.iso".to_string()
                 ],
             )]
+        );
+    }
+
+    #[test]
+    fn 拆开过的目录不再存疑_拆出去的那几份已经各自是一个变体() {
+        // 票 `gui-looks-like-the-design/29`：人按「拆成 N 个变体」之后这一处就算处理过了，
+        // 下一趟体检不该再问一遍（同多碟那一处「人工纠正过的不再存疑」）。
+        let 盘 = [
+            "ps3/动作合集/PS3_GAME/USRDIR/EBOOT.BIN",
+            "ps3/动作合集/甲.iso",
+            "ps3/动作合集/乙.7z",
+        ];
+        assert_eq!(存疑(&盘, &[]).len(), 1, "拆之前该报这一处");
+        assert!(
+            存疑(
+                &盘,
+                &[
+                    ("ps3/动作合集/甲.iso", "ps3/动作合集/甲.iso"),
+                    ("ps3/动作合集/乙.7z", "ps3/动作合集/乙.7z"),
+                ],
+            )
+            .is_empty(),
+            "拆开之后还在问同一处"
         );
     }
 

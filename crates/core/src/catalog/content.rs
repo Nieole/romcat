@@ -341,7 +341,164 @@ pub struct MemberFile {
     pub is_main: bool,
 }
 
+/// 「这条键**直接**躺在 `?1` 那个目录里」这句 SQL：前缀对得上，而剩下那一截里没有第二道 `/`。
+///
+/// 变体那张表与条目那张表各查一次（[`Catalog::variants_directly_under`]、
+/// [`Catalog::entries_directly_under`]），判据得是同一句——分开写两遍，改一处就会漏另一处。
+const DIRECTLY_UNDER: &str =
+    "substr(key, 1, length(?1)) = ?1 AND instr(substr(key, length(?1) + 1), '/') = 0";
+
 impl Catalog {
+    /// **与这个变体同一处一起人工纠正出来的那几个变体**（连它自己），交给
+    /// [`fix::undo`](crate::shape::fix::undo) 算要清掉哪几条键（票 `gui-looks-like-the-design/29`）。
+    ///
+    /// 两种人工纠正落下来的形状不同，撤起来的范围也就不同：
+    ///
+    /// - **合成**把几个变体并成一个，这一处**就是那一个**变体——交回它自己一份。
+    /// - **拆开**把一棵目录树里那几份内容各拆成一个变体，这一处于是有**好几个**。认出这种的判据是
+    ///   「**它所在的那个目录本身也是一个变体**」——那个目录就是被拆开的那棵树；同一个目录里其余
+    ///   **人工纠正出来的**变体，正是同一下拆出来的那几份。
+    ///
+    /// 那个目录本身**不落任何一行**（[`fix::split`](crate::shape::fix::split)），所以它不在交回的
+    /// 名单里，也不必在——清掉那几份，下一趟成型它自己就把它们吞回去了。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn shaping_fix_group(
+        &self,
+        key: &str,
+    ) -> Result<Vec<crate::shape::fix::Members>, CatalogError> {
+        let 一份 = |key: &str| -> Result<Option<crate::shape::fix::Members>, CatalogError> {
+            let Some(row) = self.variant(key)? else {
+                return Ok(None);
+            };
+            Ok(Some(crate::shape::fix::Members {
+                key: row.key.clone(),
+                main_key: row.main_key,
+                members: self
+                    .variant_members(&row.key)?
+                    .into_iter()
+                    .map(|(key, _)| key)
+                    .collect(),
+            }))
+        };
+        let Some(dir) = key.rsplit_once('/').map(|(dir, _)| dir) else {
+            return Ok(一份(key)?.into_iter().collect());
+        };
+        // 所在的目录本身不是变体：这一处只有它自己（合成，或者一份内容单独纠过）。
+        if self.variant(dir)?.is_none() {
+            return Ok(一份(key)?.into_iter().collect());
+        }
+        let mut out = Vec::new();
+        for (one, _, manual) in self.variants_directly_under(dir)? {
+            if manual && let Some(members) = 一份(&one)? {
+                out.push(members);
+            }
+        }
+        Ok(out)
+    }
+
+    /// **这几个变体跟前有没有一处成型存疑**（票 `gui-looks-like-the-design/29`）。
+    ///
+    /// 作品详情页的**变体**那一面问它：那一页手上只有一个作品底下那几个变体，而整份体检报告是从全库折
+    /// 出来的（[`Catalog::aggregate`]），画一帧的功夫读不动。
+    ///
+    /// **判据不在这儿另立一份**（ADR-0024）：算的仍旧是 [`shaping_doubts`](crate::shape::shaping_doubts)，
+    /// 这里只负责把**够它判的那一小块**捞出来喂进去。捞得下是因为两条判据都只看**一层目录**——多碟那条
+    /// 看同一个目录里的几个变体，目录那条看一个目录树变体**直接**躺着的那几份内容。所以捞的是：这几个
+    /// 变体所在目录下的**直接**变体，加上这几个变体**直接**装着的那些条目。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn shaping_doubts_near(
+        &self,
+        keys: &[&str],
+        manifest: &Manifest,
+    ) -> Result<Vec<crate::shape::Doubt>, CatalogError> {
+        let mut dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for key in keys {
+            if let Some((dir, _)) = key.rsplit_once('/') {
+                dirs.insert(dir.to_string());
+            }
+        }
+        let mut variants: Vec<(String, String, bool)> = Vec::new();
+        for dir in &dirs {
+            variants.extend(self.variants_directly_under(dir)?);
+        }
+        variants.sort();
+        variants.dedup();
+        let mut entries: Vec<crate::shape::Entry> = Vec::new();
+        for key in keys {
+            entries.extend(self.entries_directly_under(key)?);
+        }
+        let shaped: Vec<crate::shape::Shaped<'_>> = variants
+            .iter()
+            .map(|(key, rule, manual)| crate::shape::Shaped {
+                key,
+                rule,
+                manual: *manual,
+            })
+            .collect();
+        Ok(crate::shape::shaping_doubts(&shaped, &entries, manifest))
+    }
+
+    /// 这个目录**直接**装着的那几个变体：（键, 哪条规则成的型, 是不是人工纠正出来的）。
+    fn variants_directly_under(
+        &self,
+        dir: &str,
+    ) -> Result<Vec<(String, String, bool)>, CatalogError> {
+        let prefix = format!("{dir}/");
+        let mut statement = self
+            .conn
+            .prepare_cached(&format!(
+                "SELECT key, rule, manual FROM variant WHERE {DIRECTLY_UNDER} ORDER BY key"
+            ))
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![prefix], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)? != 0,
+                ))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|source| self.err(source))?);
+        }
+        Ok(out)
+    }
+
+    /// 这个目录**直接**装着的那几个条目（成型那条判据吃的那三样）。
+    fn entries_directly_under(&self, dir: &str) -> Result<Vec<crate::shape::Entry>, CatalogError> {
+        let prefix = format!("{dir}/");
+        let mut statement = self
+            .conn
+            .prepare_cached(&format!(
+                "SELECT key, kind, len FROM entry WHERE {DIRECTLY_UNDER} ORDER BY key"
+            ))
+            .map_err(|source| self.err(source))?;
+        let mut rows = statement
+            .query(params![prefix])
+            .map_err(|source| self.err(source))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|source| self.err(source))? {
+            let kind: i64 = row.get(1).map_err(|source| self.err(source))?;
+            if kind != super::KIND_FILE && kind != super::KIND_DIR {
+                continue;
+            }
+            // `len` 是 `NULL` 就是**元数据读不到**（ADR-0021），不是 0 字节（同 `shape_entries`）。
+            let len: Option<i64> = row.get(2).map_err(|source| self.err(source))?;
+            out.push(crate::shape::Entry {
+                key: row.get(0).map_err(|source| self.err(source))?,
+                is_dir: kind == super::KIND_DIR,
+                len: len.and_then(|len| u64::try_from(len).ok()),
+            });
+        }
+        Ok(out)
+    }
+
     /// 供**成型**读的条目表：键、是不是目录、大小。
     ///
     /// # Errors

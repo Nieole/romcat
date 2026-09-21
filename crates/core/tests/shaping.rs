@@ -702,3 +702,77 @@ fn 报告带着成型存疑与落单的附属文件_数与样例都从中立库�
     );
     assert_eq!(one.main_elsewhere, None);
 }
+
+#[test]
+fn 拆开一个目录的人工纠正_当场生效_也熬得过删库重扫() {
+    // 票 `gui-looks-like-the-design/29` 验收第 3、4 条：**目录拆成多个变体**，纠正落**沉淀库**、
+    // 永久保留——删掉中立库重扫，拆开的样子还在。要落哪几行由核心库一处答（`shape::fix::split`），
+    // 屏上只是把人按的那一下转发过来。
+    let dir = temp_dir("shaping-split");
+    写(
+        &dir.path().join("ps3/动作合集/PS3_GAME/USRDIR/EBOOT.BIN"),
+        &[1u8; 64],
+    );
+    写(&dir.path().join("ps3/动作合集/甲.iso"), &[2u8; 2048]);
+    写(&dir.path().join("ps3/动作合集/乙.7z"), &[3u8; 2048]);
+    let 工作目录 = temp_dir("shaping-split-ws");
+    let (库文件, mut site) = 建现场(工作目录.path());
+
+    let 扫 = |site: &mut Site| {
+        let mut options = ScanOptions::named(dir.path(), "库");
+        options.jobs = Jobs::Fixed(1);
+        options.shaping_overrides = site.shaping_overrides().expect("读得出沉淀库");
+        scan::scan(&RealFs::new(), &mut site.catalog, &options, &Handle::new()).expect("扫得完")
+    };
+    let 这个目录底下的变体 = |site: &Site| {
+        let mut out: Vec<(String, bool)> = site
+            .catalog
+            .variants()
+            .expect("读得出变体")
+            .into_iter()
+            .filter(|row| row.key.starts_with("库/ps3/"))
+            .map(|row| (row.key, row.manual))
+            .collect();
+        out.sort();
+        out
+    };
+
+    扫(&mut site);
+    assert_eq!(
+        这个目录底下的变体(&site),
+        vec![("库/ps3/动作合集".to_string(), false)],
+        "拆之前整个目录是一个变体"
+    );
+
+    // 人按下「拆成 2 个变体」：要落哪几行由核心库那一处答。
+    let 纠正 = romcat_core::shape::fix::split(&[
+        "库/ps3/动作合集/甲.iso".to_string(),
+        "库/ps3/动作合集/乙.7z".to_string(),
+    ])
+    .expect("两份内容拆得开");
+    let 标识 = site.library_identity.clone();
+    for (key, to) in &纠正 {
+        site.store
+            .set_shaping_override(&标识, key, to)
+            .expect("记得下");
+    }
+    扫(&mut site);
+    let 拆开的 = vec![
+        ("库/ps3/动作合集".to_string(), false),
+        ("库/ps3/动作合集/乙.7z".to_string(), true),
+        ("库/ps3/动作合集/甲.iso".to_string(), true),
+    ];
+    assert_eq!(这个目录底下的变体(&site), 拆开的, "纠正当场就生效了");
+
+    // **删掉中立库重扫**：沉淀库不跟着走，拆开的样子还在。
+    drop(site);
+    删库(&库文件);
+    let (_, mut site) = 建现场(工作目录.path());
+    assert!(这个目录底下的变体(&site).is_empty(), "新库里本来什么都没有");
+    扫(&mut site);
+    assert_eq!(
+        这个目录底下的变体(&site),
+        拆开的,
+        "删掉中立库重扫之后，拆开的那几个变体没了"
+    );
+}

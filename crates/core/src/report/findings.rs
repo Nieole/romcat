@@ -119,14 +119,24 @@ impl Finding {
 }
 
 /// 明细里的一行。
+///
+/// **两套路径**（票 `gui-looks-like-the-design/29`）：[`Self::path`] 与 [`Self::items`] 是给人看的
+/// **完整路径**，「导出清单…」写出去的那份纯文本印它们；[`Self::key`] 与 [`Self::item_keys`] 是
+/// **中立库的键**，**屏上画的是它们**——照票 09 写「根名 · 相对路径」（`table::root_and_path`）。
+/// 分两套是因为**完整路径里有这台机器上那条目录**：画它的话，截图基线每换一台机器就红一次
+/// （票 28 收尾自审在平台纠正那几条样例上抓过同一件事）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FindingRow {
     /// 这一行说的是哪儿：一份文件或一个目录的完整路径；未纳入管理的目录是那个目录的名字，连着文件数与容量。
     pub path: String,
+    /// 同上那一处的**中立库的键**；给不出键的（未纳入管理的目录只有名字）是 `None`。
+    pub key: Option<String>,
     /// 为什么列在这儿；光看路径就说得清的是 `None`。
     pub reason: Option<String>,
     /// 这一行牵涉的那几条：成型存疑的那几个变体或几份独立内容、一组重复拷贝的那几份；别的格空着。
     pub items: Vec<String>,
+    /// 同上那几条的**中立库的键**（与 [`Self::items`] 一一对应）；给不出键的是空的。
+    pub item_keys: Vec<String>,
     /// 「在文件系统中打开」打开哪个目录：文件是它所在的目录，目录是它自己；只有名字、没有路径的是 `None`。
     pub folder: Option<PathBuf>,
 }
@@ -136,8 +146,10 @@ impl FindingRow {
     fn file(path: &str, reason: Option<String>) -> Self {
         Self {
             path: path.to_string(),
+            key: None,
             reason,
             items: Vec::new(),
+            item_keys: Vec::new(),
             folder: Path::new(path).parent().map(Path::to_path_buf),
         }
     }
@@ -169,6 +181,7 @@ impl HealthReport {
                 .iter()
                 .map(|group| FindingRow {
                     path: group.name.clone(),
+                    key: None,
                     reason: Some(format!(
                         "{} · 可腾出 {} · 每份 {} · 共 {} 份",
                         group.platforms.join("、"),
@@ -177,6 +190,7 @@ impl HealthReport {
                         thousands(group.count),
                     )),
                     items: group.paths.clone(),
+                    item_keys: Vec::new(),
                     folder: None,
                 })
                 .collect(),
@@ -202,11 +216,13 @@ impl HealthReport {
                 .iter()
                 .map(|doubt| FindingRow {
                     path: doubt.at.clone(),
+                    key: Some(doubt.at_key.clone()),
                     reason: Some(match &doubt.platform {
                         Some(platform) => format!("{platform} · {}", doubt.reason()),
                         None => doubt.reason(),
                     }),
                     items: doubt.items.clone(),
+                    item_keys: doubt.item_keys.clone(),
                     folder: Some(PathBuf::from(&doubt.at)),
                 })
                 .collect(),
@@ -222,8 +238,10 @@ impl HealthReport {
                 .iter()
                 .map(|example| FindingRow {
                     path: example.clone(),
+                    key: None,
                     reason: None,
                     items: Vec::new(),
+                    item_keys: Vec::new(),
                     folder: None,
                 })
                 .collect(),
