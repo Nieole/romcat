@@ -25,10 +25,18 @@
 //!
 //! 屏上画着的每一样都得是定值：工作目录的路径、主库原名、变体数、上次扫描时刻。从真盘上列的话，
 //! 临时目录每一趟都是另一串，像素跟着变。所以开场那几态走 [`Screen::listed`]，把核心库那个类型
-//! （[`Listing`]）直接交进去。视口是 [`headless::VIEWPORT`]，一点一个像素。**例外只有一对**：子库屏超限那两张
-//! （`sublibrary/over-capacity-*`）是 1280×960——整张卡连删减表底下的灰框与按钮都要拍全，800 高装不下（拿主意的人
-//! 2026-09-14 定，挂单 `Q895`；[`开一扇`]）。**浅色与暗色各拍一张**：
-//! 两套主题各取令牌里的一套，只拍一套的话，另一套颜色接错了没人看得见。
+//! （[`Listing`]）直接交进去。视口是 [`headless::VIEWPORT`]，一点一个像素。**例外眼下有两对**，都是 1280×960
+//! （[`开一扇`]），都因为「那一屏要拍全的东西 800 高装不下」：
+//!
+//! - 子库屏超限那两张（`sublibrary/over-capacity-*`）——整张卡连删减表底下的灰框与按钮都要拍全
+//!   （拿主意的人 2026-09-14 定，挂单 `Q895`）。
+//! - 待确认屏下钻那两张（`queue/drill-*`）——就地那一框把底下那一排顶出了 800，而那一排上
+//!   「通过剩余的 N 条」正是票 `gui-looks-like-the-design/19` 第 4 条验收的原话（票 19 加，照前一对的先例）。
+//!
+//! 两对都把**「看得全」写成断言**（[`拍超限`]、[`拍下钻`]）：该在画面里的每一样都得整个在视口内，
+//! 哪天那一屏长高把它们挤出去，这里当场红，不会悄悄拍一张截掉半截的基线。
+//!
+//! **浅色与暗色各拍一张**：两套主题各取令牌里的一套，只拍一套的话，另一套颜色接错了没人看得见。
 //!
 //! ## 往后每一屏加一张
 //!
@@ -2987,6 +2995,119 @@ fn 待确认_逐条_暗色() {
     let mut app = 待确认屏("romcat-截图-待确认-逐条-暗色");
     停在逐条(&mut app);
     拍("queue/one-by-one-dark", Theme::Dark, move |ui| app.ui(ui));
+}
+
+/// **一批里再下钻**那一态（票 `gui-looks-like-the-design/19`）：展开一批能整批通过、又切得出好几项的，
+/// 就地把头一项整批通过掉，再下钻到第二项。一张图里同时有这几样：
+///
+/// - 每一项底下那条**占比条**，分母是这一批本来多少条；
+/// - 裁完的那一项**划着删除线、旁边一枚「已通过」**，点不动；
+/// - 「细分」那一排**锁在当初那个轴上**，另两颗淡着，底下一句为什么；
+/// - 第二项底下**就地那一框**：「只看：…」、这一部分的样本、「通过这 N 条 ｜ 逐条处理 ｜ 拒绝这 N 条」；
+/// - 底下那一排改口说**「通过剩余的 N 条」「拒绝剩余的 N 条」**。
+///
+/// 挑哪一批、哪个轴由数据当场定（与 `tests/queue.rs` 那几条同一个挑法），不写死——合成数据是定值，
+/// 挑法定死了，挑出来的那一批就是定值。
+#[cfg(feature = "demo")]
+fn 停在下钻(app: &mut App) {
+    use romcat_core::triage::{Axis, Scope, Shape};
+
+    let 能过: Vec<Shape> = app
+        .queue()
+        .queue()
+        .batches()
+        .iter()
+        .filter(|batch| batch.passable())
+        .map(|batch| batch.shape.clone())
+        .collect();
+    let (shape, axis) = 能过
+        .into_iter()
+        .find_map(|shape| {
+            let axis = Axis::ALL.into_iter().find(|axis| {
+                app.queue()
+                    .queue()
+                    .drill(&Scope::whole(shape.clone()), *axis)
+                    .rows
+                    .len()
+                    > 2
+            })?;
+            Some((shape, axis))
+        })
+        .expect("合成数据里该有一批能整批通过、又切得出好几项的");
+    // `open_batch` 是开关：已经展开着的那一批再点一次是收起来。
+    if app.queue().scope().map(|scope| scope.shape).as_ref() != Some(&shape) {
+        app.queue_and_site().0.open_batch(&shape);
+    }
+    app.queue_and_site().0.set_axis(axis);
+    let 几项: Vec<String> = app
+        .queue()
+        .breakdown()
+        .expect("展开了就该有细分")
+        .rows
+        .iter()
+        .map(|row| row.label.clone())
+        .collect();
+    let (screen, site) = app.queue_and_site();
+    screen.pass(site, &Scope::under(shape, axis, &几项[0]));
+    screen.commit(site);
+    assert!(screen.error().is_none(), "{:?}", screen.error());
+    screen.drill_into(&几项[1]);
+}
+
+/// 下钻那一对的画面（点）：宽照旧，高 960——**就地那一框把底下那一排顶出了 800**，
+/// 而那一排上「通过剩余的 N 条」正是这一票第 4 条验收的原话，800 高拍不到它
+/// （与子库超限那一对同一个理由，见 [`超限那一对的画面`]）。
+#[cfg(feature = "demo")]
+const 下钻那一对的画面: [f32; 2] = [1280.0, 960.0];
+
+/// 下钻那一对：画面 1280×960，这一票的整条链一张拍全。
+///
+/// **「看得全」写成断言**（照子库超限那一对的做法）：裁完那一项的「已通过」、底下那一排
+/// 两颗「剩余」按钮，每一样都得**整个**在画面里——egui 不画整个落在裁剪区外的控件，
+/// 哪天细分那一栏长高把它们挤出去，这里当场红，不会悄悄拍一张截掉半截的基线。
+#[cfg(feature = "demo")]
+fn 拍下钻(名字: &str, 主题: Theme, 临时目录名: &str) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut app = 待确认屏(临时目录名);
+    停在下钻(&mut app);
+    let 剩下 =
+        romcat_core::report::thousands(app.queue().breakdown().expect("下钻着就该有细分").left);
+    let harness = 开一扇(主题, 下钻那一对的画面, move |ui| app.ui(ui));
+    let 视口 = egui::Rect::from_min_size(egui::Pos2::ZERO, 下钻那一对的画面.into());
+    for 那一段 in [
+        format!("通过剩余的 {剩下} 条"),
+        format!("拒绝剩余的 {剩下} 条"),
+        "已通过".to_owned(),
+    ] {
+        let 在 = 正好画着的每一处(harness.output(), &那一段);
+        assert!(
+            在.len() == 1 && 视口.contains_rect(在[0]),
+            "「{那一段}」没整个在画面里：{在:?}"
+        );
+    }
+    拍下(harness, 名字);
+}
+
+#[cfg(feature = "demo")]
+#[test]
+fn 待确认_下钻_浅色() {
+    拍下钻(
+        "queue/drill-light",
+        Theme::Light,
+        "romcat-截图-待确认-下钻-浅色",
+    );
+}
+
+#[cfg(feature = "demo")]
+#[test]
+fn 待确认_下钻_暗色() {
+    拍下钻(
+        "queue/drill-dark",
+        Theme::Dark,
+        "romcat-截图-待确认-下钻-暗色",
+    );
 }
 
 /// 落两批、撤一批，点屏头那颗「裁决记录 1」（数的是还在册的）打开右边那块抽屉，再拍。
