@@ -973,6 +973,9 @@ pub fn radio_option(ui: &mut egui::Ui, selected: bool, title: &str, note: &str) 
 
 /// 一块**警示框**（设计稿 `.warnbox`）：`lo-soft` 底、描边是分隔线色往 `lo` 挪四成、中圆角，内边距取令牌
 /// `warn-box-padding`，字是 `size-small-plus`；头一句用 `lo` 色、拉丁与数字加粗，后面接着正文色。占满这一栏的宽。
+///
+/// **`head` 给空串就只画正文**：警示只有一句、而那一句另有出处时走这条（设置屏那一段配额提醒摆的是
+/// `crate::scrape::QUOTA_WARNING`——把它拆成「粗体一句 + 正文」，就是在第二处再写一遍同一件事）。
 pub fn warn_box(ui: &mut egui::Ui, head: &str, body: &str) {
     let tokens = Tokens::builtin();
     let palette = tokens
@@ -1013,6 +1016,66 @@ pub fn warn_box(ui: &mut egui::Ui, head: &str, body: &str) {
             job.wrap.max_width = ui.available_width();
             ui.label(job);
         });
+}
+
+/// 一颗**开关**（设计稿 `.switch`）：一个小滑块加它右边的字，点一下拨一次。
+///
+/// 滑块的外框宽高与里头那粒圆点的直径取令牌 `settings-switch`，与字之间取 `settings-switch-gap`，
+/// 字是说明字号 `size-small-plus`。**拨开是强调色的底、圆点滑到右边**；关着是 `line-2` 的底、
+/// 圆点在左边。圆点一律是白的（稿上就是 `#fff`，两套主题共用）。整颗（滑块连字）都点得动，
+/// 拿到焦点描一圈强调色。
+///
+/// 交回来的 [`egui::Response`]：`changed()` 为真就是这一帧被拨了，`on` 已经是拨完之后那一档。
+pub fn switch(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
+    let tokens = Tokens::builtin();
+    let palette = palette(ui);
+    let [宽, 高, 圆点] = tokens.layout.settings_switch;
+    let 缝 = tokens.space.settings_switch_gap;
+    let 字 = egui::WidgetText::from(
+        egui::RichText::new(label)
+            .size(font_size(ui.ctx(), tokens.font.size_small_plus))
+            .color(palette.ink),
+    )
+    .into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Body,
+    );
+    let 整颗 = egui::vec2(宽 + 缝 + 字.size().x, 高.max(字.size().y));
+    let (rect, mut response) = ui.allocate_exact_size(整颗, egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    let 滑块 = egui::Rect::from_min_size(
+        egui::pos2(rect.left(), rect.center().y - 高 / 2.0),
+        egui::vec2(宽, 高),
+    );
+    let painter = ui.painter();
+    painter.rect_filled(
+        滑块,
+        高 / 2.0,
+        if *on { palette.accent } else { palette.line_2 },
+    );
+    // 圆点离两头各留一份（稿上 `left:2px` / `left:14px`，14 = 30 − 2 − 14）。
+    let 边距 = (高 - 圆点) / 2.0;
+    let 圆心 = egui::pos2(
+        if *on {
+            滑块.right() - 边距 - 圆点 / 2.0
+        } else {
+            滑块.left() + 边距 + 圆点 / 2.0
+        },
+        滑块.center().y,
+    );
+    painter.circle_filled(圆心, 圆点 / 2.0, Color32::WHITE);
+    painter.galley(
+        egui::pos2(滑块.right() + 缝, rect.center().y - 字.size().y / 2.0),
+        字,
+        palette.ink,
+    );
+    focus_ring(ui.ctx(), rect, &response);
+    response
 }
 
 /// 一枚**分面标签**（设计稿 `.fchip`）：一个值加上它的条数，点一下收窄到这个值、再点一下放开。

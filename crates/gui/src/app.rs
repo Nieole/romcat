@@ -218,7 +218,7 @@ impl App {
         for fold in layout::Fold::ALL {
             roots.set_folded(fold, layout.folded(fold));
         }
-        let workspace_label = Self::shorten_home(&workspace);
+        let workspace_label = shorten_home(&workspace);
         let workspace_for_settings = workspace.clone();
         let mut sublibrary = sublibrary::Screen::new(workspace);
         sublibrary.reload(&site);
@@ -294,20 +294,6 @@ impl App {
     /// 真窗口那一路不必调。
     pub fn pin_task_clock(&mut self, clock: task::Clock) {
         self.tasks.pin_clock(clock);
-    }
-
-    /// 工作目录排成给人看的样子：落在 `HOME` 底下的缩成 `~/…`，别处照原样。
-    fn shorten_home(workspace: &std::path::Path) -> String {
-        std::env::var_os("HOME")
-            .and_then(|home| {
-                workspace
-                    .strip_prefix(&home)
-                    .ok()
-                    .map(|rest| std::path::Path::new("~").join(rest))
-            })
-            .unwrap_or_else(|| workspace.to_path_buf())
-            .display()
-            .to_string()
     }
 
     /// 窗口标题：**开的是哪一份库、看的是哪一屏**（验收第 6 条）。
@@ -809,6 +795,7 @@ impl App {
                     site: &self.site,
                     workspace_label: &self.workspace_label,
                     verdicts: self.verdicts,
+                    open_last: settings::open_last(&self.layout),
                 };
                 self.settings.ui(ui, &facts);
                 self.settle_settings();
@@ -855,7 +842,7 @@ impl App {
         // 没记过就一个字都不碰：egui 默认跟随系统，而截图那一路正靠这一条——
         // 临时工作目录里没有这份偏好，两张基线各自按自己要的那套主题画。
         if let Some(记着的) = self.layout.preference(settings::THEME_KEY)
-            && let Some(挑的) = theme_of(记着的)
+            && let Some(挑的) = settings::theme_of(记着的)
         {
             ctx.set_theme(挑的);
         }
@@ -898,12 +885,16 @@ impl App {
     /// 换工作目录要整份退回开场（那件事在 [`Program`](crate::program::Program) 上）、
     /// 外观那一档记进版式文件（版式归窗口管）、优先级表保存后要换进浏览屏（够得着两屏的只有窗口）。
     fn settle_settings(&mut self) {
-        if let Some(renamed) = self.settings.take_renamed() {
-            self.library_label = renamed.name;
+        if let Some(新名) = self.settings.take_renamed() {
+            self.library_label = 新名;
+        }
+        if let Some(开着) = self.settings.take_open_last() {
+            self.layout
+                .set_preference(settings::OPEN_LAST_KEY, if 开着 { "是" } else { "否" });
         }
         if let Some(挑的) = self.settings.take_theme() {
             self.layout
-                .set_preference(settings::THEME_KEY, theme_label(挑的));
+                .set_preference(settings::THEME_KEY, settings::theme_label(挑的));
         }
         if let Some(去处) = self.settings.take_workspace() {
             self.switch_workspace = Some(去处);
@@ -1053,21 +1044,19 @@ impl App {
     }
 }
 
-/// 「外观」那一档记进版式文件时写成什么。与 [`theme_of`] 是一对，两头用的是屏上那几个字。
-fn theme_label(preference: egui::ThemePreference) -> &'static str {
-    match preference {
-        egui::ThemePreference::System => "跟随系统",
-        egui::ThemePreference::Light => "浅色",
-        egui::ThemePreference::Dark => "深色",
-    }
-}
-
-/// 版式文件里记着的那一档读回来。认不出来的当没记过——版式那一份人改得动，也删得掉。
-fn theme_of(记着的: &str) -> Option<egui::ThemePreference> {
-    match 记着的 {
-        "跟随系统" => Some(egui::ThemePreference::System),
-        "浅色" => Some(egui::ThemePreference::Light),
-        "深色" => Some(egui::ThemePreference::Dark),
-        _ => None,
-    }
+/// 一条路径排成给人看的样子：落在 `HOME` 底下的缩成 `~/…`，别处照原样。
+///
+/// **摆在模块上而不在 `App` 里**：底部状态栏那一段工作目录走它（[`App::new`]），设置屏
+/// 「导出目录」那一格也走它（`crate::settings`）——两处各写一份，同一条路径在相邻两格里
+/// 就会一个带 `~`、一个不带。
+pub(crate) fn shorten_home(path: &std::path::Path) -> String {
+    std::env::var_os("HOME")
+        .and_then(|home| {
+            path.strip_prefix(&home)
+                .ok()
+                .map(|rest| std::path::Path::new("~").join(rest))
+        })
+        .unwrap_or_else(|| path.to_path_buf())
+        .display()
+        .to_string()
 }

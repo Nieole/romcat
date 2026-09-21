@@ -206,6 +206,7 @@ fn 换工作目录先过主库只读那道判据() {
         site: &site,
         workspace_label: 工作目录字样,
         verdicts: None,
+        open_last: true,
     };
     let mut screen = settings::Screen::new(工作区.path().to_path_buf());
     screen.show_section(Section::Workspace);
@@ -498,4 +499,92 @@ fn 工作目录这一格读的是窗口交进来的那一句() {
         "媒体池那一行印的不是工作目录底下那一份：\n{}",
         画出来的字(&out),
     );
+}
+
+// ——— 「启动时直接打开上次使用的主库」：六颗开关里唯一接得上的那一颗 ———
+
+#[test]
+fn 启动那颗开关拨一下就记进版式文件() {
+    let (mut app, _工作区) = 开在设置屏上("设置屏-启动时");
+    let ctx = headless::context();
+    跑一帧(&ctx, |ui| app.ui(ui));
+    // 默认开着：版式文件里没记过这一格（`settings::open_last` 那条退路）。
+    assert!(
+        settings::open_last(app.layout()),
+        "没记过的时候不该是关着的",
+    );
+    正好点一下(&ctx, settings::OPEN_LAST, |ui| app.ui(ui));
+    assert!(
+        !settings::open_last(app.layout()),
+        "拨了一下还是开着：{:?}",
+        app.layout().preference(settings::OPEN_LAST_KEY),
+    );
+    // 再拨回去。
+    正好点一下(&ctx, settings::OPEN_LAST, |ui| app.ui(ui));
+    assert!(settings::open_last(app.layout()), "拨不回去");
+}
+
+/// **关掉之后启动那条路真的先进开场**：屏上说关着、启动照样开，是这一条要防的。
+#[test]
+fn 关掉之后启动先进开场而不是直接开上次那份() {
+    use romcat_core::workspace::{self, Slug};
+    use romcat_gui::program::Program;
+    use romcat_gui::recent::Recent;
+    use romcat_gui::site::Locate;
+
+    let 工作区 = temp_dir("设置屏-启动时-开场");
+    let 库文件 = workspace::catalog_path(工作区.path(), Slug::Named("主库"));
+    drop(romcat_core::catalog::Catalog::create(&库文件, "主库").expect("建得出中立库"));
+    let recent = Recent::at(工作区.path().join("上次开的那份.txt"));
+    recent.remember(&库文件);
+
+    // 开着（没记过）：直接开进主窗口。
+    let program = Program::start_with(&Locate::default(), recent.clone()).expect("开得出来");
+    assert!(
+        program.window_title().contains("主库"),
+        "默认那一档没有直接开上次那份：{}",
+        program.window_title(),
+    );
+
+    // 关掉：先进开场。
+    let mut layout = romcat_gui::layout::Layout::load(工作区.path());
+    layout.set_preference(settings::OPEN_LAST_KEY, "否");
+    layout.flush();
+    let program = Program::start_with(&Locate::default(), recent).expect("开得出来");
+    assert_eq!(
+        program.window_title(),
+        "romcat — 开场",
+        "关掉之后还是直接开了上次那份",
+    );
+}
+
+/// **导出目录那一格也不整条印绝对路径**：`HOME` 那一截缩成 `~`，与底部状态栏、工作目录那一格同一句。
+#[test]
+fn 导出目录不整条印绝对路径() {
+    let Some(家) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        // 没有 `HOME` 的机器上这一条什么都验不了（缩写那一步本来就不发生）。
+        return;
+    };
+    let (mut app, _工作区) = 开在设置屏上("设置屏-导出目录");
+    let 落点 = 家.join("盘甲").join("Game");
+    app.site()
+        .catalog
+        .set_export_setup(&romcat_core::catalog::export::ExportSetup {
+            format: "Pegasus".to_owned(),
+            out: 落点.clone(),
+        })
+        .expect("记得下导出设置");
+    app.settings_mut().show_section(Section::Export);
+    let ctx = headless::context();
+    跑一帧(&ctx, |ui| app.ui(ui));
+    let 屏上 = 跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        屏上.contains("~/盘甲/Game"),
+        "导出目录没缩成 `~` 那一条：\n{屏上}",
+    );
+    assert!(
+        !屏上.contains(&落点.display().to_string()),
+        "导出目录整条印了绝对路径：\n{屏上}",
+    );
+    assert!(屏上.contains("Pegasus"), "没印设过的那个前端格式：\n{屏上}");
 }

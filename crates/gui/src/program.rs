@@ -120,6 +120,15 @@ impl Program {
         // 正是为了白拿这个（验收第 2 条）。另写一条推断只会与它分家。
         let 上次那条 = Locate::at_catalog(&记的那份);
         let workspace = 上次那条.workspace_dir();
+        // **人在设置屏上把「启动时直接打开上次使用的主库」关掉了**（票
+        // `gui-looks-like-the-design/31`）：那就先列出这个工作目录里有哪些库，挑一份打开。
+        // 记的那一份照旧记着——关掉的是「直接开」，不是「记不记」。
+        //
+        // 读的是设置屏那一句（`settings::open_last`），不另判一次：各判一次迟早出现
+        // 「屏上说关着、启动照样开」。没记过就是开着，与这一条加上来之前一模一样。
+        if !crate::settings::open_last(&crate::layout::Layout::load(&workspace)) {
+            return Ok(Self::opening_with(workspace, recent));
+        }
         match 上次那条.open() {
             Ok(site) => Ok(Self::opened_with(site, workspace, recent)),
             // **退回开场，并说清是哪一条原因**（验收第 4 条）：挪走了、删了、结构版本

@@ -3247,6 +3247,46 @@ fn 设置_数据源_暗色() {
 }
 
 #[test]
+fn 设置_刮削_浅色() {
+    拍设置屏("settings/scrape-light", Theme::Light, Section::Scrape);
+}
+
+#[test]
+fn 设置_刮削_暗色() {
+    拍设置屏("settings/scrape-dark", Theme::Dark, Section::Scrape);
+}
+
+#[test]
+fn 设置_导出_浅色() {
+    拍设置屏("settings/export-light", Theme::Light, Section::Export);
+}
+
+#[test]
+fn 设置_导出_暗色() {
+    拍设置屏("settings/export-dark", Theme::Dark, Section::Export);
+}
+
+#[test]
+fn 设置_工具_浅色() {
+    拍设置屏("settings/tools-light", Theme::Light, Section::Tools);
+}
+
+#[test]
+fn 设置_工具_暗色() {
+    拍设置屏("settings/tools-dark", Theme::Dark, Section::Tools);
+}
+
+#[test]
+fn 设置_关于_浅色() {
+    拍设置屏("settings/about-light", Theme::Light, Section::About);
+}
+
+#[test]
+fn 设置_关于_暗色() {
+    拍设置屏("settings/about-dark", Theme::Dark, Section::About);
+}
+
+#[test]
 fn 设置_快捷键_浅色() {
     拍设置屏("settings/keys-light", Theme::Light, Section::Keys);
 }

@@ -106,12 +106,52 @@ pub const SUBTITLE: &str = "工作目录、数据源、刮削与导出的默认�
 /// 「外观」那一档记在版式文件里的键（[`crate::layout::Layout::preference`]）。
 pub const THEME_KEY: &str = "外观";
 
-/// 「外观」三档写在屏上的字，与记进版式文件的值是同一个。
+/// 「启动时直接打开上次使用的主库」记在版式文件里的键。
+pub const OPEN_LAST_KEY: &str = "启动时打开上次那份";
+
+/// 那颗开关上写的字（设计稿 `sw('openLast', …)`）。
+pub const OPEN_LAST: &str = "直接打开上次使用的主库";
+
+/// **启动时直接开上次那份吗。** 没记过就是开着——那正是眼下的行为，也是词表**上次开的那份**
+/// 那一条写的（`CONTEXT.md`）：下次启动直接开进主窗口。
+///
+/// 读它的有两处：设置屏那颗开关画成哪一档，以及
+/// [`Program::start_with`](crate::program::Program::start_with) 到底开不开。**两处读同一句**——
+/// 各判一次，迟早出现「屏上说关着、启动照样开」。
+#[must_use]
+pub fn open_last(layout: &crate::layout::Layout) -> bool {
+    layout.preference(OPEN_LAST_KEY) != Some("否")
+}
+
+/// 「外观」三档写在屏上的字，**与记进版式文件的值是同一个**。
+///
+/// 屏上那一排、写盘、读回来三处都读它（[`theme_label`] 与 [`theme_of`]）：各抄一份的话，
+/// 改一处，存进去的那个值就读不回来了，而且一声不吭。
 const THEMES: [(egui::ThemePreference, &str); 3] = [
     (egui::ThemePreference::System, "跟随系统"),
     (egui::ThemePreference::Light, "浅色"),
     (egui::ThemePreference::Dark, "深色"),
 ];
+
+/// 那一档外观记进版式文件时写成什么（`THEMES` 那一份字）。
+#[must_use]
+pub fn theme_label(preference: egui::ThemePreference) -> &'static str {
+    THEMES
+        .iter()
+        .find(|(一档, _)| *一档 == preference)
+        .map_or("跟随系统", |(_, 字)| *字)
+}
+
+/// 版式文件里记着的那一档读回来（`THEMES` 那一份字）。
+///
+/// 认不出来的当没记过——版式那一份人改得动，也删得掉。
+#[must_use]
+pub fn theme_of(记着的: &str) -> Option<egui::ThemePreference> {
+    THEMES
+        .iter()
+        .find(|(_, 字)| *字 == 记着的)
+        .map(|(一档, _)| *一档)
+}
 
 /// 改名那颗按钮上的字。
 pub const RENAME: &str = "改名";
@@ -135,15 +175,6 @@ pub const REPROBE: &str = "重新检测";
 /// 「撞上外部修改」那一格的值：这一项**不给自动覆盖的开关**。
 pub const EXTERNAL_EDIT: &str = "总是停下，逐份列出";
 
-/// 主库改名改完之后，这一屏交给窗口的那一下。
-///
-/// 窗口标题与左栏顶上那张卡印的是开现场那一刻取的那个名字（`App::library_label`），改完名
-/// 不转告一声就还是旧的，得关窗重开才换——而这一屏上刚刚才说「改完了」。
-pub struct Renamed {
-    /// 改成了什么。
-    pub name: String,
-}
-
 /// 设置那一屏。
 pub struct Screen {
     /// 工作目录：数据源、优先级表、媒体池都在它下面。
@@ -155,21 +186,26 @@ pub struct Screen {
     /// 上一次按「改名」的回话：`Ok` 是改成了，`Err` 是核心库拒的那句话。
     renamed: Option<Result<String, String>>,
     /// 改成了、还没被窗口取走的那个名字。
-    handed: Option<Renamed>,
+    handed: Option<String>,
     /// 人挑好了、还没被窗口取走的那个新工作目录。
     switch_to: Option<PathBuf>,
     /// 换工作目录被拒的那句话（核心库说的）。
     refused: Option<String>,
     /// 三个数据源现在什么状况。`None` 是这一趟还没问过。
     sources: Option<Vec<SourceStatus>>,
-    /// 探 ffmpeg 用哪个程序名。测试拿它走「它不在」那条路（`preview::NO_SUCH_PROGRAM`）。
-    probe: String,
-    /// 探出来的那一份：`Ok` 是版本，`Err` 是核心库说的那句话。`None` 是这一趟还没探过。
-    ffmpeg: Option<Result<String, String>>,
+    /// 探 ffmpeg 探的是哪个程序。测试拿它走「它不在」那条路（`preview::NO_SUCH_PROGRAM`）。
+    ffmpeg_program: String,
+    /// 探出来的那一份：`Ok` 是版本，`Err` 是核心库交回的那一档。`None` 是这一趟还没探过。
+    ///
+    /// **收着核心库那个类型、不当场折成一句话**：「没装」与「装了但跑不起来」是两档
+    /// （`Missing::is_no_ffmpeg`），屏上要分开说，而分那一刀是核心库的事（ADR-0024）。
+    ffmpeg: Option<Result<String, preview::Missing>>,
     /// ScreenScraper 的账号给了没有。`None` 是这一趟还没问过。
     account: Option<bool>,
     /// 人刚在「外观」那一排上挑的那一档，还没被窗口记进版式文件。
     theme_pick: Option<egui::ThemePreference>,
+    /// 人刚把「启动时」那颗开关拨到的那一档，还没被窗口记进版式文件。
+    open_last_pick: Option<bool>,
     /// 数据源优先级那一层弹层。**与刮削面板那一颗开的是同一种**（挂单 `Q782`）。
     priority: priority::Editor,
     /// 画时刻拿哪一刻当此刻。截图那一路钉死。
@@ -190,10 +226,11 @@ impl Screen {
             switch_to: None,
             refused: None,
             sources: None,
-            probe: preview::FFMPEG.to_string(),
+            ffmpeg_program: preview::FFMPEG.to_string(),
             ffmpeg: None,
             account: None,
             theme_pick: None,
+            open_last_pick: None,
             clock: crate::clock::Clock::default(),
         }
     }
@@ -215,7 +252,7 @@ impl Screen {
     /// 照实画的话同一张基线在两台机器上是两个样子。测试指 `preview::NO_SUCH_PROGRAM`，
     /// 画出来的一律是「没找到」那一档——设计稿上那一格画的也正是这一档。
     pub fn probe_with(&mut self, program: impl Into<String>) {
-        self.probe = program.into();
+        self.ffmpeg_program = program.into();
         self.ffmpeg = None;
     }
 
@@ -246,8 +283,11 @@ impl Screen {
             .map(|said| said.as_deref().map_err(String::as_str))
     }
 
-    /// **改名改成了、还没转告窗口的那一下**：窗口取走它去换标题与左栏那张卡上的名字。
-    pub fn take_renamed(&mut self) -> Option<Renamed> {
+    /// **改名改成了、还没转告窗口的那一下**：交出来的是新名字，窗口拿它去换标题与左栏那张卡。
+    ///
+    /// 窗口标题与那张卡印的是开现场那一刻取的那个名字（`App::library_label`），改完名不转告
+    /// 一声就还是旧的，得关窗重开才换——而这一屏上刚刚才说「改完了」。
+    pub fn take_renamed(&mut self) -> Option<String> {
         self.handed.take()
     }
 
@@ -260,6 +300,12 @@ impl Screen {
     /// [`crate::layout::Layout`]）。这一层不自己落盘——偏好落哪儿只有一处写。
     pub fn take_theme(&mut self) -> Option<egui::ThemePreference> {
         self.theme_pick.take()
+    }
+
+    /// **人刚把「启动时」那颗开关拨到的那一档**：窗口取走它记进版式文件（同 [`Self::take_theme`]，
+    /// 偏好落哪儿只有一处写）。
+    pub fn take_open_last(&mut self) -> Option<bool> {
+        self.open_last_pick.take()
     }
 
     /// 数据源优先级那一层，改得动的那一份：窗口取走它保存下来的那份表换进浏览屏
@@ -394,6 +440,20 @@ impl Screen {
             }
             look::help(ui, "跟随系统时，换一次系统主题，界面跟着换。");
         });
+        Self::一行(ui, "启动时", |ui| {
+            // **这一颗是六颗开关里唯一接得上的**（挂单 `Q1074`）：状态是现成的
+            // （`crate::recent` 记着上次开的那份），落点也是现成的（版式文件那份通用键值面）。
+            // 另外五颗今天一个落点都没有，那几格摆的是一句实话加一个去处。
+            let mut 开着 = self.open_last_pick.unwrap_or(facts.open_last);
+            if look::switch(ui, &mut 开着, OPEN_LAST).changed() {
+                self.open_last_pick = Some(开着);
+            }
+            look::help(
+                ui,
+                "关掉之后每次启动都先列出这个工作目录里有哪些库，挑一份打开。\
+                 上次那份打不开时（挪走了、删了、库文件结构版本对不上），照样会先列出来。",
+            );
+        });
         self.rename(ui, facts);
         Self::一行(ui, "界面语言", |ui| {
             // **平常的字，不画成标签**：稿上这一格是一句话，标签那一档（`look::read_only`）
@@ -428,20 +488,17 @@ impl Screen {
                     Ok(()) => {
                         let 新名 = facts.site.display_name();
                         self.name_draft = Some(新名.clone());
-                        self.handed = Some(Renamed {
-                            name: 新名.clone()
-                        });
+                        self.handed = Some(新名.clone());
                         Ok(新名)
                     }
                     Err(why) => Err(format!("{why}")),
                 });
             }
             match &self.renamed {
+                // **平常的一句话**：`look::impact` 是弹层里「会怎样」那一档（行首一枚圆点），
+                // 这儿说的是「已经怎样了」，借那一档会让人以为还有下一步。
                 Some(Ok(名字)) => {
-                    look::impact(
-                        ui,
-                        &[("这个库现在叫「", false), (名字, true), ("」", false)],
-                    );
+                    ui.label(format!("这个库现在叫「{名字}」。"));
                 }
                 Some(Err(why)) => {
                     ui.colored_label(ui.visuals().error_fg_color, why);
@@ -473,11 +530,15 @@ impl Screen {
             );
         });
         Self::一行(ui, "媒体池", |ui| {
-            Self::路径行(ui, &format!("{}/media", facts.workspace_label), None);
+            Self::路径行(ui, &self.媒体池(facts), None);
             look::help(
                 ui,
                 "封面、截图与视频按内容存在这儿，同一张图不会存两份；各前端的媒体目录由它铺出来。",
             );
+            // **媒体池单独换不了**（挂单 `Q1076`）：它的位置由工作目录折出来
+            // （`workspace::media_pool_dir`），核心库今天没有第二个落点。稿上那颗「更改…」
+            // 因此不摆——摆了按下去也无处可去。
+            look::help(ui, "媒体池跟着工作目录走，眼下单独换不了。");
         });
         Self::一行(ui, "里头装着", |ui| {
             self.占用表(ui, facts);
@@ -492,6 +553,24 @@ impl Screen {
     /// 而后一条正是核心库那三种拒绝里的头一种。
     pub fn draft_name(&mut self, name: impl Into<String>) {
         self.name_draft = Some(name.into());
+    }
+
+    /// 媒体池那条路画成什么：工作目录那一段短写，加上**核心库折出来的那个末级目录名**。
+    ///
+    /// **不自己拼「/media」**：那个名字由 `workspace::media_pool_dir` 说了算（ADR-0024），
+    /// 两处各拼一次，哪天核心库换了个目录名，屏上还照旧印着旧的。前半截仍是窗口交进来的
+    /// 那一段短写——绝对路径不上屏（见 [`Self::路径行`]）。
+    fn 媒体池(&self, facts: &Facts<'_>) -> String {
+        let 池 = romcat_core::workspace::media_pool_dir(&self.workspace);
+        match 池.strip_prefix(&self.workspace) {
+            Ok(尾) => format!(
+                "{}/{}",
+                facts.workspace_label,
+                romcat_core::path::display(尾)
+            ),
+            // 折出来的那条不在工作目录底下（今天不会，真出了就照实印它自己那一条）。
+            Err(_) => romcat_core::path::display(&池),
+        }
     }
 
     /// 人按了「更换…」：弹系统选择窗口，挑回来的那个交给 [`Self::offer_workspace`]。
@@ -528,14 +607,15 @@ impl Screen {
     /// 走一遍求和），而条数是现成的。数字那一列**右对齐**——右对齐才比得出大小。
     fn 占用表(&mut self, ui: &mut egui::Ui, facts: &Facts<'_>) {
         self.survey();
-        let mut 几行: Vec<(String, String)> = vec![(
+        let mut 几行: Vec<(String, String, Option<String>)> = vec![(
             "裁决记录".to_owned(),
             facts
                 .verdicts
                 .map_or_else(|| "—".to_owned(), |多少| format!("{} 条", thousands(多少))),
+            None,
         )];
         for status in self.sources.iter().flatten() {
-            几行.push((status.name.to_owned(), 条数(status)));
+            几行.push((status.name.to_owned(), 条数(status), None));
         }
         数字表(ui, "工作目录里头装着", &几行);
     }
@@ -586,7 +666,7 @@ impl Screen {
     fn 数据源表(&mut self, ui: &mut egui::Ui) {
         self.survey();
         let clock = self.clock;
-        let 几行: Vec<(String, String, String)> = self
+        let 几行: Vec<(String, String, Option<String>)> = self
             .sources
             .iter()
             .flatten()
@@ -594,24 +674,10 @@ impl Screen {
                 let 时刻 = status
                     .fetched_at()
                     .map_or_else(|| "——".to_owned(), |at| clock.short(at));
-                (status.name.to_owned(), 条数(status), 时刻)
+                (status.name.to_owned(), 条数(status), Some(时刻))
             })
             .collect();
-        let tokens = Tokens::builtin();
-        let [行缝, 列缝] = tokens.space.cell_padding;
-        let 数宽 = 最宽(ui, 几行.iter().map(|(_, 数, _)| 数.as_str()));
-        egui::Grid::new("设置屏数据源")
-            .num_columns(3)
-            .min_col_width(0.0)
-            .spacing(egui::vec2(2.0 * 列缝, 行缝))
-            .show(ui, |ui| {
-                for (名, 数, 时刻) in &几行 {
-                    ui.label(名);
-                    靠右(ui, 数宽, 数);
-                    ui.label(egui::RichText::new(时刻).small().weak());
-                    ui.end_row();
-                }
-            });
+        数字表(ui, "设置屏数据源", &几行);
     }
 
     /// **刮削**：那几个旋钮每趟自己点，记不住。
@@ -659,7 +725,9 @@ impl Screen {
         Self::一行(ui, "导出目录", |ui| {
             match &设过 {
                 Some(setup) => {
-                    Self::路径行(ui, &romcat_core::path::display(&setup.out), None);
+                    // **HOME 那一截缩成 `~`**：与底部状态栏、工作目录那一格走同一句
+                    // （`crate::app::shorten_home`），屏上不整条印一台机器上的绝对路径。
+                    Self::路径行(ui, &crate::app::shorten_home(&setup.out), None);
                 }
                 None => {
                     look::help(ui, "还没设过。");
@@ -674,8 +742,8 @@ impl Screen {
             ui.label(font::strong("默认不铺"));
             look::help(
                 ui,
-                "要铺的话，在「库」那一屏导出设置那一块按「导出」之前勾上——这一勾每趟自己点，\
-                 不记住；关掉只写元数据，前端里就没有封面。",
+                "要铺的话，在「库」那一屏工序那一段「导出」那一行上勾「一起铺媒体」，再按导出——\
+                 这一勾每趟自己点，不记住；不勾就只写元数据文件，前端里没有封面。",
             );
         });
         Self::一行(ui, "撞上外部修改", |ui| {
@@ -693,21 +761,32 @@ impl Screen {
     fn tools(&mut self, ui: &mut egui::Ui) {
         Self::一行(ui, "ffmpeg", |ui| {
             if self.ffmpeg.is_none() {
-                self.ffmpeg = Some(探一下(&self.probe));
+                self.ffmpeg = Some(探一下(&self.ffmpeg_program));
             }
             ui.horizontal(|ui| {
                 match &self.ffmpeg {
                     Some(Ok(版本)) => {
                         look::read_only(ui, &format!("已找到 · {版本}"));
+                        ui.label(font::mono(&self.ffmpeg_program));
                     }
-                    Some(Err(why)) => {
+                    // **没装那一档照稿只说两样**（设计稿 `.chip.t-mid` + 一行等宽）：
+                    // 一枚「没找到」，加上找的是哪个程序。核心库那句整话
+                    // （`Missing::render`）不印在这儿——它后半截「视频照样点得开」与底下
+                    // 那句说明是同一件事，印两遍就是同一句话占了两行。
+                    Some(Err(why)) if why.is_no_ffmpeg() => {
                         look::chip(ui, look::Tone::Caution, "没找到");
-                        ui.label(egui::RichText::new(why).small().weak());
+                        ui.label(font::mono(&self.ffmpeg_program));
+                    }
+                    // **装了、可探不动**（退了个非零、跑不起来）：这一档与「没装」不是一回事，
+                    // 那句为什么由核心库说。
+                    Some(Err(why)) => {
+                        look::chip(ui, look::Tone::Bad, "探不动");
+                        ui.label(egui::RichText::new(why.render()).small().weak());
                     }
                     None => {}
                 }
                 if look::small_buttons(ui, |ui| ui.button(REPROBE)).clicked() {
-                    self.ffmpeg = Some(探一下(&self.probe));
+                    self.ffmpeg = Some(探一下(&self.ffmpeg_program));
                 }
             });
             look::help(
@@ -844,9 +923,9 @@ fn 间隔() -> String {
     format!("{秒:.0} 秒")
 }
 
-/// 探一下 ffmpeg：核心库那一处判据（`preview::probe`），这一层只把话转出来。
-fn 探一下(program: &str) -> Result<String, String> {
-    preview::probe(program).map_err(|why| why.render())
+/// 探一下 ffmpeg：核心库那一处判据（`preview::probe`），这一层只把它交回来的那一档摆出来。
+fn 探一下(program: &str) -> Result<String, preview::Missing> {
+    preview::probe(program)
 }
 
 /// 数字那几列用的**等宽字**：与 `font::mono` 画出来的是同一档。
@@ -884,19 +963,30 @@ fn 靠右(ui: &mut egui::Ui, 宽: f32, 字: &str) {
     ui.painter().galley(落点, galley, ui.visuals().text_color());
 }
 
-/// 一张「名 → 数」两列表：名靠左，**数靠右**。
-fn 数字表(ui: &mut egui::Ui, id: &str, 几行: &[(String, String)]) {
+/// 一张「名 → 数（→ 一句小字）」的表：名靠左，**数靠右**，第三格给了才画。
+///
+/// 工作目录那一节「里头装着」与数据源那一节「本机那几份」用的是同一张——两张各写一份的话，
+/// 数字那一列的对齐规矩就会在相邻两节里各漂各的（截图门那条「数字那一列右对齐」量的正是它）。
+fn 数字表(ui: &mut egui::Ui, id: &str, 几行: &[(String, String, Option<String>)]) {
     let tokens = Tokens::builtin();
     let [行缝, 列缝] = tokens.space.cell_padding;
-    let 数宽 = 最宽(ui, 几行.iter().map(|(_, 数)| 数.as_str()));
+    let 数宽 = 最宽(ui, 几行.iter().map(|(_, 数, _)| 数.as_str()));
+    let 几列 = if 几行.iter().any(|(_, _, 尾)| 尾.is_some()) {
+        3
+    } else {
+        2
+    };
     egui::Grid::new(id)
-        .num_columns(2)
+        .num_columns(几列)
         .min_col_width(0.0)
         .spacing(egui::vec2(2.0 * 列缝, 行缝))
         .show(ui, |ui| {
-            for (名, 数) in 几行 {
+            for (名, 数, 尾) in 几行 {
                 ui.label(名);
                 靠右(ui, 数宽, 数);
+                if let Some(一句) = 尾 {
+                    ui.label(egui::RichText::new(一句).small().weak());
+                }
                 ui.end_row();
             }
         });
@@ -910,4 +1000,6 @@ pub struct Facts<'a> {
     pub workspace_label: &'a str,
     /// 沉淀库里已保存多少条裁决；读不出来是 `None`。左栏底下那句用的是同一个数。
     pub verdicts: Option<u64>,
+    /// 启动时直接开上次那份吗（[`open_last`] 从版式文件里读出来的那一档）。
+    pub open_last: bool,
 }

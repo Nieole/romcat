@@ -742,6 +742,8 @@ pub struct Space {
     pub settings_row_bottom: f32,
     /// 设置屏名那一列比值那一列低多少（设计稿 `.srow>b` 的 `padding-top`）。
     pub settings_label_top: f32,
+    /// 开关那个小滑块与它旁边的字之间（设计稿 `.switch` 的 `gap`）。
+    pub settings_switch_gap: f32,
     /// 快捷键表：`[行与行之间, 左右两列之间]`（设计稿 `.kgrid` 的 `gap`）。
     pub keys_grid_gap: [f32; 2],
     /// 快捷键表一条的上下留白（设计稿 `.kgrid div` 的 `padding`）。
@@ -1021,6 +1023,8 @@ pub struct Layout {
     pub settings_nav_height: f32,
     /// 设置屏右边内容里名那一列的宽（设计稿 `.srow` 的 `grid-template-columns`）。
     pub settings_row_label: f32,
+    /// 开关那个小滑块：`[外框宽, 外框高, 里头圆点的直径]`（设计稿 `.switch i` 与 `.switch i::after`）。
+    pub settings_switch: [f32; 3],
     /// 设置屏「主库原名」那一格输入框的宽。设计稿上没有这一格，取这一档的理由写在令牌文件那一行。
     pub settings_name_width: f32,
 }
