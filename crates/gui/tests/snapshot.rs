@@ -2213,6 +2213,9 @@ fn 库屏_移除根弹层_暗色() {
 /// 子库那几张的现场：几个临时目录（跟着窗口一起活到拍完）与窗口本身。
 struct 子库现场 {
     主库: TempDir,
+    /// 第二个**根**（主库是一组根）：只有差量异常那两对要它——两个根里同一条相对路径
+    /// 剥掉根名之后落在卡上同一个文件上，那正是**落点撞车**。别的几张摆 `None`。
+    _另一块盘: Option<TempDir>,
     _工作区: TempDir,
     卡: TempDir,
     app: App,
@@ -2221,6 +2224,22 @@ struct 子库现场 {
 impl 子库现场 {
     /// 扫好一份小主库、开出窗口、换到子库屏。一个子库都还没有。
     fn 摆好() -> Self {
+        Self::摆好带(None)
+    }
+
+    /// 同 [`Self::摆好`]，外加**第二个根**：里头摆着 `又一份` 那几条相对路径，与头一个根
+    /// 扫进**同一份中立库**（主库是一组根）。两个根里同一条相对路径会在差量预览里撞车。
+    fn 摆好带另一块盘(又一份: &[(&str, usize)]) -> Self {
+        let 另一块盘 = temp_dir("snap-sub-lib2");
+        for (相对, 多大) in 又一份 {
+            let 在 = 另一块盘.path().join(相对);
+            std::fs::create_dir_all(在.parent().expect("有上级目录")).expect("能建目录");
+            std::fs::write(&在, zip(*多大)).expect("能写文件");
+        }
+        Self::摆好带(Some(另一块盘))
+    }
+
+    fn 摆好带(另一块盘: Option<TempDir>) -> Self {
         let 主库 = temp_dir("snap-sub-lib");
         for (相对, 多大) in [
             ("SFC/幻想传说 汉化版.zip", 4096),
@@ -2233,9 +2252,15 @@ impl 子库现场 {
             std::fs::write(&在, zip(多大)).expect("能写文件");
         }
         let mut catalog = Catalog::open_in_memory().expect("开得出中立库");
-        let mut options = ScanOptions::named(主库.path(), "库");
-        options.jobs = Jobs::Fixed(2);
-        scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
+        let mut roots: Vec<(&str, &Path)> = vec![("库", 主库.path())];
+        if let Some(第二个) = &另一块盘 {
+            roots.push(("另一块盘", 第二个.path()));
+        }
+        for (名字, 根) in roots {
+            let mut options = ScanOptions::named(根, 名字);
+            options.jobs = Jobs::Fixed(2);
+            scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
+        }
         let site = Site::in_memory(catalog, Store::in_memory().expect("开得出沉淀库"), "库");
         let 工作区 = temp_dir("snap-sub-ws");
         let 卡 = temp_dir("snap-sub-card");
@@ -2247,6 +2272,7 @@ impl 子库现场 {
         app.show_view(View::Sublibraries);
         Self {
             主库,
+            _另一块盘: 另一块盘,
             _工作区: 工作区,
             卡,
             app,
@@ -2336,6 +2362,66 @@ impl 子库现场 {
             .set_exception(name, key, kind, note)
             .expect("例外写得进");
         screen.reload(site);
+    }
+
+    /// 直接把一份**清单**摆进中立库（`Catalog::put_manifest`）。
+    ///
+    /// **不走真的同步**：同步会往屏上写一句「同步用了 0.0 秒」，那个数跟着挂钟走，
+    /// 基线里就不定了。三类异常是摆出来的、不是跑出来的——它们各自由核心与界面那几条
+    /// 测试钉着，这一对要的是**画成什么样**。
+    fn 记一份清单(&mut self, name: &str, 几条: &[(&str, u64)]) {
+        use romcat_core::sync::{FileKind, Manifest, ManifestFile, Stamp};
+
+        let files = 几条
+            .iter()
+            .map(|(相对, 多大)| ManifestFile {
+                path: (*相对).to_string(),
+                kind: FileKind::Rom,
+                stamp: Stamp {
+                    bytes: *多大,
+                    mtime_ns: None,
+                },
+                source: format!("库/{相对}"),
+                source_stamp: Stamp {
+                    bytes: *多大,
+                    mtime_ns: None,
+                },
+                variant: format!("库/{相对}"),
+                absent: false,
+            })
+            .collect();
+        let (screen, site) = self.app.sublibrary_and_site();
+        site.catalog
+            .put_manifest(name, &Manifest { files })
+            .expect("清单写得进");
+        screen.reload(site);
+    }
+
+    /// 摊开一张卡：差量预览摆在摊开那一张底下。
+    fn 摊开(&mut self, name: &str) {
+        let (screen, site) = self.app.sublibrary_and_site();
+        screen.open(site, name);
+    }
+
+    /// 排一趟差量预览，等它收回来；跟着把「排它用了 N ms」钉死。
+    fn 排一遍差量(&mut self) {
+        {
+            let (screen, site, tasks) = self.app.sublibrary_site_and_tasks();
+            screen.preview(site, tasks);
+        }
+        for _ in 0..8 {
+            self.app.poll_tasks();
+            if self.app.sublibrary().previewing().is_none() && !self.app.tasks().busy() {
+                break;
+            }
+        }
+        let screen = self.app.sublibrary_and_site().0;
+        assert!(
+            screen.prepared().is_some(),
+            "差量没排出来：{:?}",
+            screen.error(),
+        );
+        screen.pin_prepare_ms(排它用了多少毫秒);
     }
 
     /// 按一下「算一遍容量」，等它收回来。内存里的库就地跑完，认领在 `App::poll_tasks` 里。
@@ -2770,6 +2856,129 @@ fn 子库_手动例外空态_浅色() {
 #[test]
 fn 子库_手动例外空态_暗色() {
     拍手动例外空态("sublibrary/exceptions-empty-dark", Theme::Dark);
+}
+
+// ——— 差量预览里的异常（票 `gui-looks-like-the-design/24`）———
+//
+// 差量预览摆在卡片下半截，**800 高的画面里整块落在画面外**，而 egui 不画整个落在裁剪区外的
+// 东西。与超限那一对同一个处置（挂单 `Q895`）：画面放高，整张卡一次拍全，不滚——滚到底拍的话
+// 图顶上那一行只露出下半截，字被切掉一半，看着像画坏了（票 20 第二段对稿时被打回过）。
+
+/// 差量异常那两对拍的是哪一台。
+const 摆着异常的那一台: &str = "RG35XX Plus";
+
+/// 差量账旁边那句「排它用了 N ms」在基线里定死成这个数（`sublibrary::Screen::pin_prepare_ms`）。
+/// 照实画的话一趟一个样——与例外那张表上的时刻同一个用处。
+const 排它用了多少毫秒: f64 = 343.0;
+
+/// 差量异常那两对的画面：宽照旧，高 1180——整张卡连差量账、步骤、异常那一块与底下的
+/// 「同步」都要拍全（[`搭一扇`]，模块文档「视口定死」那一节的第二处例外）。
+const 差量那几对的画面: [f32; 2] = [1280.0, 1180.0];
+
+/// **差量异常那两对的现场**：一台在位的设备，库是**两个根**，清单里记着两条，卡上被人动过手脚。
+///
+/// 四类异常在这一屏上各有一条：
+///
+/// - **设备上缺失**：清单记着圣剑传说，卡上没有——人在掌机上删了它。
+/// - **被修改过**：卡上那份黄金太阳与清单记的大小对不上，已经不是工具放的那一份。
+/// - **目标位置被占用**：口袋妖怪的落点上挡着一个清单之外的文件。
+/// - **放不进目标**：两个根里同一条相对路径（幻想传说）撞在卡上同一个文件上。
+///
+/// **元数据读不到**那一栏故意空着：造一个 `stat` 不动的文件各平台做法不一样，造出来也只是在验
+/// 平台。空着那一栏画成什么样，正是这一对要守的东西之一。
+fn 摆着异常的一台() -> 子库现场 {
+    // 第二个根里同一条相对路径：剥掉根名之后与头一个根的那一份落在卡上同一个文件上。
+    let mut 现场 = 子库现场::摆好带另一块盘(&[("SFC/幻想传说 汉化版.zip", 9_000)]);
+    现场.记一台(
+        摆着异常的那一台,
+        "/Volumes/SDCARD",
+        true,
+        Some(64_000_000_000),
+        None,
+        &["平台=SFC,GBA"],
+    );
+    // 卡上：黄金太阳被别的工具改过（大小对不上清单），口袋妖怪的落点被一份清单之外的文件占着，
+    // 圣剑传说被人删了。
+    for (相对, 内容) in [
+        ("GBA/黄金太阳 开启的封印.zip", "别的工具改过它"),
+        (
+            "GBA/口袋妖怪 绿宝石.zip",
+            "我自己拷进来的，工具连看都不该看",
+        ),
+    ] {
+        let 在 = 现场.卡.path().join(相对);
+        std::fs::create_dir_all(在.parent().expect("有上级目录")).expect("能建目录");
+        std::fs::write(&在, 内容.as_bytes()).expect("能写文件");
+    }
+    现场.记一份清单(
+        摆着异常的那一台,
+        &[
+            ("GBA/黄金太阳 开启的封印.zip", 3_072),
+            ("SFC/圣剑传说 3 汉化版.zip", 8_192),
+        ],
+    );
+    现场.摊开(摆着异常的那一台);
+    现场.排一遍差量();
+    现场
+}
+
+/// 拍差量预览那一块：停在 `摆在哪一栏` 那一栏上。
+fn 拍差量异常(名字: &str, 主题: Theme, 摆在哪一栏: romcat_gui::sublibrary::Anomaly) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 摆着异常的一台();
+    现场.app.sublibrary_and_site().0.show_anomaly(摆在哪一栏);
+    let harness = 开一扇(主题, 差量那几对的画面, move |ui| {
+        现场.app.ui(ui);
+    });
+    // **「看得全」写成断言**：五个栏名与底下那颗「同步」都整个在画面里。哪天卡片长高、
+    // 异常那一块被挤出画面，这里当场红，不会悄悄拍一张截掉半块的基线。
+    let 视口 = egui::Rect::from_min_size(egui::Pos2::ZERO, 差量那几对的画面.into());
+    for 该在画面里 in ["异常", "同步"] {
+        let 在 = 正好画着的每一处(harness.output(), 该在画面里);
+        assert!(
+            在.iter().any(|rect| 视口.contains_rect(*rect)),
+            "「{该在画面里}」没整个在画面里：{在:?}"
+        );
+    }
+    拍下(harness, 名字);
+}
+
+#[test]
+fn 子库_差量异常_设备上缺失_浅色() {
+    拍差量异常(
+        "sublibrary/anomalies-missing-light",
+        Theme::Light,
+        romcat_gui::sublibrary::Anomaly::Surprise(romcat_core::sync::SurpriseKind::Gone),
+    );
+}
+
+#[test]
+fn 子库_差量异常_设备上缺失_暗色() {
+    拍差量异常(
+        "sublibrary/anomalies-missing-dark",
+        Theme::Dark,
+        romcat_gui::sublibrary::Anomaly::Surprise(romcat_core::sync::SurpriseKind::Gone),
+    );
+}
+
+#[test]
+fn 子库_差量异常_放不进目标_浅色() {
+    拍差量异常(
+        "sublibrary/anomalies-nofit-light",
+        Theme::Light,
+        romcat_gui::sublibrary::Anomaly::NoFit,
+    );
+}
+
+#[test]
+fn 子库_差量异常_放不进目标_暗色() {
+    拍差量异常(
+        "sublibrary/anomalies-nofit-dark",
+        Theme::Dark,
+        romcat_gui::sublibrary::Anomaly::NoFit,
+    );
 }
 
 // ——— 任务屏（票 `gui-looks-like-the-design/25`）———
