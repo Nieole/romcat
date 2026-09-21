@@ -170,16 +170,22 @@
 `cargo check --all-targets --all-features -j 3` 绿（`CHECK=0`）。
 
 `cargo xtask gate -j 3 --test-threads 3 --keep-going`，**以最后这一趟为准**
-（日志 `/Users/nicoer/dev/game-wt/logs/slot-3-gl24-gate4.log`，`EXIT=0`，跑的是版式对齐那三处
-照改完、四张基线入库之后的那一版）：**六步全绿**——fmt 3s、glossary 1s、check 6s、clippy 13s、
-test 1,118s、doc 5s；整套 **2,390 项全过、0 失败**。
+（日志 `/Users/nicoer/dev/game-wt/logs/slot-3-gl24-gate5.log`，**`EXIT=0`**，日志头三行印着
+worktree、分支与提交 `e1a2815`）：**六步全绿**——fmt 1s、glossary 0s、check 0s、clippy 0s、
+test 860s、doc 0s（前四步与末一步是热缓存，上一趟刚编过）；整套 **2,390 项全过、0 失败**。
 词表那一步扫了 7 份 `.rs` 里新写的 2,051 行，没撞上。
+
+⚠️ **`gate4` 那一趟不作数，重跑了一趟才有这份数**：`slot-3-gl24-gate4.log` 里六步的汇总表
+写着全绿、也印出了「6 条全绿。」，**但日志末尾没有 `EXIT=` 那一行**（进程已经结束）。
+`docs/agents/long-jobs.md` 的判据是「结果按日志最后一行 `EXIT=` 读；没有这一行，
+就是被截断了或还没跑完，**不是红，也不是绿**」——照它办，重跑。两趟的六步与总项数一致。
 
 前三趟：`slot-3-gl24-gate.log` 是**照稿改之前**那一版，六步全绿、2,389 项（词表那一步中途红过
 两处：测试里两句话写了「步骤」，词表 `_Gate_` 要「工序」，改在 `302d0bc`）；
 `slot-3-gl24-gate2.log` 红在 `doc` 一条——Rust 文档注释里用了词表的 `[[词]]` 写法，rustdoc 读成
 intra-doc link、找不到那个项，`-D warnings` 下是红，改在 `cb01705`（已立成规矩，挂单 `Q1080`）；
-`slot-3-gl24-gate3.log` 是版式对齐那三处**照改之前**那一版，六步全绿、2,390 项。
+`slot-3-gl24-gate3.log` 是版式对齐那三处**照改之前**那一版，六步全绿、2,390 项；
+`slot-3-gl24-gate4.log` 是跑对了版本、但末尾缺 `EXIT=` 的那一趟（见上面那条 ⚠️）。
 
 窄跑另有两遍：`slot-3-gl24-verify.log`（`check_tokens.py` 一致 250 项、
 `cargo test -p romcat-gui --test sublibrary` 97 项全过、整份 `snapshot` 81 张全过 ×2）与
