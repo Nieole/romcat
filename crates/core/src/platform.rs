@@ -127,6 +127,13 @@ pub struct Platform {
     pub dirs: Vec<String>,
     /// 只可能属于这个平台的扩展名（已折成小写）。
     pub extensions: Vec<String>,
+    /// **这台机器跑得了哪几个平台的游戏**（规范名）。表里没写就是空。
+    ///
+    /// 它只回答**平台纠正**里的一件事：「目录说 A、内容是 B」这一组里 A 跑得了 B 的游戏，
+    /// 那有意放在 A 目录也说得通（票 `gui-looks-like-the-design/28` 的「改不改都行」那一类）。
+    /// **它不改变哪些算不符**——那由 [`Manifest::platform_for_extension`] 那一条判据说了算；
+    /// 也**不进指纹**（同 [`Self::full_name`]）：改它不该让已经成型的库作废。
+    pub back_compat: Vec<String>,
     /// 用哪几条成型规则，按名字引用。
     pub rules: Vec<String>,
 }
@@ -233,6 +240,8 @@ struct RawPlatform {
     dirs: Vec<String>,
     #[serde(rename = "扩展名", default)]
     extensions: Vec<String>,
+    #[serde(rename = "向下兼容", default)]
+    back_compat: Vec<String>,
     #[serde(rename = "成型", default)]
     rules: Vec<String>,
 }
@@ -412,8 +421,23 @@ impl Manifest {
                 full_name: raw_platform.full_name,
                 dirs,
                 extensions,
+                back_compat: raw_platform.back_compat,
                 rules: raw_platform.rules,
             });
+        }
+
+        // 向下兼容列的是平台的**规范名**，写错一个字就会悄悄失效（屏上少一句「改不改都行」，
+        // 没有任何人会发现）。整表读完之后一次核完——先核的话，`WIIU 向下兼容 WII` 这种
+        // 指向后面那一条的写法会被冤枉。
+        for index in 0..platforms.len() {
+            for guest in platforms[index].back_compat.clone() {
+                if !platforms.iter().any(|one| one.name == guest) {
+                    return Err(invalid(format!(
+                        "平台「{}」说它向下兼容「{guest}」，可清单里没有这个平台",
+                        platforms[index].name
+                    )));
+                }
+            }
         }
 
         let mut out_of_scope = Vec::new();
@@ -557,6 +581,32 @@ impl Manifest {
             eat(&dir.dir);
         }
         hash
+    }
+
+    /// 按**规范名**取一个平台；没这个平台是 `None`。
+    ///
+    /// 手上只有平台名、却要问一条与这个平台有关的判据时用它
+    /// （[`conflicting_platform`](crate::scan::aggregate::conflicting_platform) 收的正是 `&Platform`）。
+    #[must_use]
+    pub fn platform_named(&self, name: &str) -> Option<&Platform> {
+        self.platforms.iter().find(|one| one.name == name)
+    }
+
+    /// `host` 那台机器跑不跑得了 `guest` 那个平台的游戏（两个都是规范名）。
+    ///
+    /// **平台纠正**问的就是它：「目录说 A、内容是 B」这一组里它为真，就是
+    /// **改不改都行**的那一类——GBC 跑得了 GB 的卡，有意把 GB 游戏放在 `gbc/` 目录里
+    /// 说得通（票 `gui-looks-like-the-design/28`）。**它不判哪些算不符**，只给那一句话。
+    ///
+    /// 同一个平台不算：那压根不是一条冲突。
+    #[must_use]
+    pub fn runs_games_of(&self, host: &str, guest: &str) -> bool {
+        host != guest
+            && self
+                .platforms
+                .iter()
+                .find(|one| one.name == host)
+                .is_some_and(|one| one.back_compat.iter().any(|name| name == guest))
     }
 
     /// 这个平台的**全名**（按规范名找）；表里没写全名、或者没这个平台时是 `None`，屏上退回规范名。
@@ -806,6 +856,51 @@ mod tests {
 
     /// **全名只给人看**（作品详情页头上那一格照稿写全名，拿主意的人 2026-09-15 定）：表里写了就交回，没写的交回 `None`
     /// 由屏上退回代号；改全名不该让已经成型的库作废，所以它不进指纹。
+    /// **向下兼容只回答「改不改都行」那一句**（票 `gui-looks-like-the-design/28`）：它不判哪些算不符，
+    /// 也不进指纹——改它不该让已经成型的库作废（同全名那一条）。
+    #[test]
+    fn 向下兼容说得出哪台机器跑得了哪个平台的游戏_它不进指纹() {
+        let manifest = Manifest::builtin();
+        assert!(manifest.runs_games_of("GBC", "GB"), "GBC 跑得了 GB 的卡");
+        assert!(manifest.runs_games_of("3DS", "NDS"));
+        assert!(
+            !manifest.runs_games_of("GB", "GBC"),
+            "反过来不成立：GB 跑不了 GBC 专用卡"
+        );
+        assert!(!manifest.runs_games_of("GBA", "NDS"));
+        assert!(
+            !manifest.runs_games_of("GB", "GB"),
+            "同一个平台压根不是一条冲突"
+        );
+        assert!(!manifest.runs_games_of("没这个平台", "GB"));
+
+        let 去掉向下兼容: String = Manifest::builtin_text()
+            .lines()
+            .filter(|line| !line.starts_with("\"向下兼容\""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let 没有的 = Manifest::parse(&去掉向下兼容, "内置").expect("编得出来");
+        assert!(!没有的.runs_games_of("GBC", "GB"));
+        assert_eq!(
+            没有的.fingerprint(),
+            manifest.fingerprint(),
+            "向下兼容不进指纹：改它不该让已经成型的库作废"
+        );
+    }
+
+    #[test]
+    fn 向下兼容指着清单里没有的平台就当场说不清楚() {
+        let 写错了 = format!(
+            "{}\n\n[[\"平台\"]]\n\"名\" = \"新机器\"\n\"目录\" = [\"newbox\"]\n\"向下兼容\" = [\"打错的名字\"]\n",
+            Manifest::builtin_text()
+        );
+        let why = Manifest::parse(&写错了, "内置").expect_err("该拦下来");
+        assert!(
+            why.to_string().contains("打错的名字"),
+            "说得出是哪个名字写错了：{why}"
+        );
+    }
+
     #[test]
     fn 平台表里有全名的交回全名_没写的是空_全名不进指纹() {
         let manifest = Manifest::builtin();

@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use crate::catalog::ScanDelta;
 use crate::classify::{Category, SuspectReason};
@@ -463,6 +464,60 @@ pub struct ConflictSummary {
     pub by_evidence: Vec<(ConflictEvidence, String, u64)>,
     /// 样例。
     pub examples: Vec<PlatformConflict>,
+    /// **按「从哪个平台 → 到哪个平台」分的组**，条数多的在前（同样多时按平台名排，报告才稳定）。
+    ///
+    /// **平台纠正**处理的就是这些组（票 `gui-looks-like-the-design/28`）：人是按一对平台
+    /// 下决定的，不是一条一条下的。
+    #[serde(default)]
+    pub groups: Vec<ConflictGroup>,
+}
+
+/// 一组「目录说 A、内容是 B」。判据与分组都在核心库一处（[`conflicting_platform`]，ADR-0024）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictGroup {
+    /// 目录说的那个平台。
+    pub declared: String,
+    /// 内容说的那个平台。
+    pub implied: String,
+    /// 这一组几条。
+    pub count: u64,
+    /// 说这句话的那几个扩展名（小写、按字母序）。
+    pub extensions: Vec<String>,
+    /// 这一组按凭据分类，照 [`ConflictEvidence::all`] 的次序。
+    pub by_evidence: Vec<(ConflictEvidence, String, u64)>,
+    /// 这一组的样例路径，有上限（体检那一趟不设上限）。
+    pub examples: Vec<String>,
+}
+
+impl ConflictGroup {
+    /// 这一组凭什么这么判，一句话：判据是「这个扩展名只可能属于那一个平台」（[`conflicting_platform`]），
+    /// 所以这一句说得出是哪几个扩展名、又有多少条的内容真验过。
+    #[must_use]
+    pub fn reason(&self) -> String {
+        let 扩展名 = self
+            .extensions
+            .iter()
+            .map(|one| format!(".{one}"))
+            .collect::<Vec<_>>()
+            .join("、");
+        let mut out = format!(
+            "扩展名 {扩展名} 只可能属于 {}（平台清单），而这几条躺在 {} 目录下",
+            self.implied, self.declared
+        );
+        for (evidence, label, count) in &self.by_evidence {
+            let 这一句 = match evidence {
+                ConflictEvidence::Confirmed => "头部抽样也确认了内容确实是那个格式",
+                ConflictEvidence::ExtensionOnly => "没被抽样到，内容没验过",
+                ConflictEvidence::InsideContainer => "在透明容器里面",
+            };
+            let _ = write!(
+                out,
+                "；{label} {} 条（{这一句}）",
+                render::thousands(*count)
+            );
+        }
+        out
+    }
 }
 
 /// **成型存疑**的汇总（词表同名条目）：成型规则把文件聚成变体时拿不准的地方。**只报告**，纠正是人的事。
@@ -714,16 +769,39 @@ fn scope_summary(aggregate: &Aggregate, unmapped_cap: usize) -> ScopeSummary {
 }
 
 fn conflict_summary(acc: &ConflictAcc) -> ConflictSummary {
-    ConflictSummary {
-        total: acc.total(),
-        by_evidence: ConflictEvidence::all()
+    let by_evidence = |counts: &BTreeMap<ConflictEvidence, u64>| {
+        ConflictEvidence::all()
             .into_iter()
             .filter_map(|evidence| {
-                let count = acc.by_evidence.get(&evidence).copied()?;
+                let count = counts.get(&evidence).copied()?;
                 Some((evidence, evidence.label().to_string(), count))
             })
-            .collect(),
+            .collect::<Vec<_>>()
+    };
+    let mut groups: Vec<ConflictGroup> = acc
+        .by_pair
+        .iter()
+        .map(|((declared, implied), group)| ConflictGroup {
+            declared: declared.clone(),
+            implied: implied.clone(),
+            count: group.count,
+            extensions: group.extensions.iter().cloned().collect(),
+            by_evidence: by_evidence(&group.by_evidence),
+            examples: group.examples.clone(),
+        })
+        .collect();
+    // 条数多的在前；一样多时按平台名排——同一份中立库出的报告次序得是死的。
+    groups.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.declared.cmp(&b.declared))
+            .then_with(|| a.implied.cmp(&b.implied))
+    });
+    ConflictSummary {
+        total: acc.total(),
+        by_evidence: by_evidence(&acc.by_evidence),
         examples: acc.examples.clone(),
+        groups,
     }
 }
 
@@ -1028,10 +1106,12 @@ fn sample_stats(samples: &BTreeMap<ProbeClass, SampleAcc>) -> Vec<SampleStats> {
     list
 }
 
+mod correction;
 mod duplicates;
 mod findings;
 mod render;
 
+pub use correction::{CorrectionGroup, PlatformCorrections};
 pub use duplicates::DuplicateDetails;
 pub use findings::{Finding, FindingRow};
 pub use render::{
@@ -1083,6 +1163,145 @@ mod tests {
                 delta: None,
             },
         )
+    }
+
+    #[test]
+    fn 平台冲突按从哪个平台到哪个平台分组_条数多的在前_每组带扩展名判据与样例() {
+        // 票 28：**平台纠正按组处理**——人是按一对平台下决定的，不是一条一条下的。
+        // 分组的判据与那一格的数同源（`conflicting_platform`，ADR-0024）。
+        let agg = 收(&[
+            ("库/GBA/汉化/逆转裁判4.nds", Some(8192)),
+            ("库/GBA/合集/节奏天国.nds", Some(8192)),
+            ("库/GBA/合集/雷顿教授.srl", Some(8192)),
+            ("库/FC/日版/塞尔达传说.fds", Some(2048)),
+            ("库/GBA/汉化/火焰之纹章.gba", Some(4096)),
+            ("库/杂物/放错的.nds", Some(8192)),
+        ]);
+        let conflicts = 报告(&agg).conflicts;
+        assert_eq!(
+            conflicts.total, 4,
+            "未纳入管理的目录不算——它本来就不进识别管线"
+        );
+        let 各组: Vec<(&str, &str, u64)> = conflicts
+            .groups
+            .iter()
+            .map(|group| (group.declared.as_str(), group.implied.as_str(), group.count))
+            .collect();
+        assert_eq!(
+            各组,
+            vec![("GBA", "NDS", 3), ("FC", "FDS", 1)],
+            "条数多的那一组在前"
+        );
+        let 头一组 = &conflicts.groups[0];
+        assert_eq!(
+            头一组.extensions,
+            vec!["nds".to_string(), "srl".to_string()],
+            "说这句话的那几个扩展名都列出来"
+        );
+        assert_eq!(
+            头一组.examples,
+            vec![
+                "库/GBA/汉化/逆转裁判4.nds".to_string(),
+                "库/GBA/合集/节奏天国.nds".to_string(),
+                "库/GBA/合集/雷顿教授.srl".to_string(),
+            ],
+            "样例是这一组自己的、记的是中立库的键（不是某一台机器上那条路径），按键排报告才稳定"
+        );
+        let 理由 = 头一组.reason();
+        assert!(
+            理由.contains(".nds") && 理由.contains(".srl"),
+            "理由说得出是哪几个扩展名：{理由}"
+        );
+        assert!(
+            理由.contains("NDS") && 理由.contains("GBA"),
+            "理由说得出从哪个平台到哪个平台：{理由}"
+        );
+    }
+
+    #[test]
+    fn 处理过的组不再算进库体检那一格_两种决定都算处理过_撤销之后重新算() {
+        // 票 28：「处理过的组在库体检概要里不再计数」。**报告本身一条不少**——
+        // 主库只读（ADR-0004），盘上的目录与扩展名照旧对不上，撤销要回得去。
+        use crate::verdict::{PlatformCorrection, PlatformDecision};
+        let agg = 收(&[
+            ("库/GBA/汉化/逆转裁判4.nds", Some(8192)),
+            ("库/GBA/合集/节奏天国.nds", Some(8192)),
+            ("库/FC/日版/塞尔达传说.fds", Some(2048)),
+        ]);
+        let report = 报告(&agg);
+        let manifest = Manifest::builtin();
+        let 定过 = |几条: &[(&str, &str, PlatformDecision)]| {
+            几条
+                .iter()
+                .map(|(declared, implied, decision)| PlatformCorrection {
+                    declared: (*declared).to_string(),
+                    implied: (*implied).to_string(),
+                    decision: *decision,
+                    decided_at: 0,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let 一条都没定 = PlatformCorrections::build(&report, &manifest, &[]);
+        assert_eq!(一条都没定.remaining(), 3);
+        assert_eq!(一条都没定.handled(), 0);
+        assert_eq!(一条都没定.handled_note(), None);
+
+        let 改了一组 = PlatformCorrections::build(
+            &report,
+            &manifest,
+            &定过(&[("GBA", "NDS", PlatformDecision::ByContent)]),
+        );
+        assert_eq!(改了一组.remaining(), 1, "处理过的那两条不再计数");
+        assert_eq!(改了一组.handled_note().as_deref(), Some("已处理 1 组"));
+        assert_eq!(
+            改了一组.groups()[0].settled().as_deref(),
+            Some("已改为 NDS")
+        );
+
+        let 保持那一组 = PlatformCorrections::build(
+            &report,
+            &manifest,
+            &定过(&[("FC", "FDS", PlatformDecision::KeepDeclared)]),
+        );
+        assert_eq!(
+            保持那一组.remaining(),
+            2,
+            "「保持目录的说法」也算处理过——否则每体检一趟就要再问一遍"
+        );
+        assert_eq!(
+            保持那一组.groups()[1].settled().as_deref(),
+            Some("已保持 FC")
+        );
+
+        assert_eq!(
+            报告(&agg).conflicts.total,
+            3,
+            "报告说的是盘上的事实：处理过也一条不少，撤销才回得去"
+        );
+    }
+
+    #[test]
+    fn 目录那台机器跑得了内容那个平台的游戏时说明改不改都行_跑不了的不说() {
+        // 票 28 那条 ⚠️：GBC 向下兼容 GB，有意放在 GBC 目录也说得通——**屏上要说明白**。
+        // 判据是平台清单里的 `向下兼容`（`Manifest::runs_games_of`），不在这一层另写。
+        let manifest = Manifest::builtin();
+        let 改不改都行 = 收(&[("库/3DS/合集/雷顿教授.nds", Some(8192))]);
+        let 那一层 = PlatformCorrections::build(&报告(&改不改都行), &manifest, &[]);
+        let one = &那一层.groups()[0];
+        assert!(one.interchangeable, "3DS 跑得了 NDS 的卡");
+        assert_eq!(
+            one.interchangeable_note().as_deref(),
+            Some("3DS 能运行 NDS 的游戏，保持也不影响游玩"),
+            "改不改都行那一句要说出来"
+        );
+
+        let 只能改 = 收(&[("库/GBA/汉化/逆转裁判4.nds", Some(8192))]);
+        let 那一层 = PlatformCorrections::build(&报告(&只能改), &manifest, &[]);
+        let one = &那一层.groups()[0];
+        assert!(!one.interchangeable, "GBA 跑不了 NDS 的卡");
+        assert_eq!(one.interchangeable_note(), None, "跑不了就不说这一句");
+        assert_eq!(one.headline(), "GBA 目录里的 NDS 游戏");
     }
 
     #[test]

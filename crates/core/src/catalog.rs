@@ -1932,6 +1932,7 @@ impl Catalog {
                 &InnerEntryContext {
                     manifest,
                     display_path: display,
+                    key: container_key,
                     scope: shape::scope_of(manifest, container_key),
                 },
                 &inner,
