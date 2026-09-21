@@ -512,6 +512,8 @@ fn 退出那一颗摆在右边的写法_退出那一颗靠右画成主按钮_其
 struct 一层 {
     width: Width,
     行数: usize,
+    /// 标头那一排「走到第几问」摆哪几问、停在第几问；不摆就是 `None`。
+    问: Option<(Vec<String>, usize)>,
     /// 上一帧这一层（连边框）画在哪儿。
     画在: Option<egui::Rect>,
 }
@@ -521,20 +523,30 @@ impl 一层 {
         Self {
             width,
             行数,
+            问: None,
             画在: None,
         }
+    }
+
+    /// 摆上「走到第几问」那一排。
+    fn 走到第几问(mut self, 哪几问: &[&str], 第几问: usize) -> Self {
+        self.问 = Some((哪几问.iter().map(|one| (*one).to_owned()).collect(), 第几问));
+        self
     }
 
     fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let 行数 = self.行数;
-        let shown = Dialog::new(
+        let mut dialog = Dialog::new(
             "量一量",
             "量一量",
             Footer::new(Button::new("关上", 按的::关上)),
         )
-        .width(self.width)
-        .show(&ctx, |ui| {
+        .width(self.width);
+        if let Some((哪几问, 第几问)) = self.问.clone() {
+            dialog = dialog.pages(哪几问, 第几问);
+        }
+        let shown = dialog.show(&ctx, |ui| {
             for n in 0..行数 {
                 ui.label(format!("第{n}行"));
             }
@@ -731,5 +743,64 @@ fn 没给那两个槽的弹层一点地方都不多占_给了才画出来() {
     assert!(
         无槽的框.height() < 带槽的框.height(),
         "给了标头那一排，这一层却没变高：无槽 {无槽的框:?}、带槽 {带槽的框:?}",
+    );
+}
+
+/// 屏上**正好**写着这几个字的那一段画在哪儿（整段的外框）。
+fn 那一段画在哪儿(output: &egui::FullOutput, 那几个字: &str) -> Option<egui::Rect> {
+    fn 找(shape: &egui::epaint::Shape, 那几个字: &str) -> Option<egui::Rect> {
+        match shape {
+            egui::epaint::Shape::Text(text) => (text.galley.text() == 那几个字)
+                .then(|| egui::Rect::from_min_size(text.pos, text.galley.size())),
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(|one| 找(one, 那几个字)),
+            _ => None,
+        }
+    }
+    output
+        .shapes
+        .iter()
+        .find_map(|clipped| 找(&clipped.shape, 那几个字))
+}
+
+#[test]
+fn 走到第几问那一排贯通左右而且几格等宽() {
+    // **拿主意的人 2026-09-21 定，与设计稿不同**：稿上 `.step:last-child::after{display:none}`，
+    // 末一格里的东西靠左、右边那一截空着，整条只画到三分之二处。这里要的是整条从左内缘
+    // 贯到右内缘，**而几格仍等宽**——所以变的只是末一格里那两样靠右摆。
+    let ctx = 上下文();
+    let 哪几问 = ["选择作品", "核对变体", "确认合并"];
+    let mut 层 = 一层::new(Width::Widest, 3).走到第几问(&哪几问, 0);
+    let mut output = 跑这一层(&ctx, &mut 层, headless::VIEWPORT, Vec::new());
+    for _ in 0..2 {
+        output = 跑这一层(&ctx, &mut 层, headless::VIEWPORT, Vec::new());
+    }
+    let 画在 = 层.画在.expect("画过了");
+    let 每一问: Vec<egui::Rect> = 哪几问
+        .iter()
+        .map(|那几个字| {
+            那一段画在哪儿(&output, 那几个字).unwrap_or_else(|| panic!("屏上没有「{那几个字}」"))
+        })
+        .collect();
+
+    // **几格等宽**：头两问都是「圆点 + 名字」靠左摆，两问名字的左缘之差就是一格的宽。
+    let 格宽 = 每一问[1].left() - 每一问[0].left();
+    assert!(格宽 > 0.0, "第二问没排在第一问右边：{每一问:?}");
+    // 末一问靠右摆，拿它的右缘反推它那一格的右缘：第一格的左缘 + 三格 = 末一格的右缘。
+    let 圆点那一截 = Tokens::builtin().layout.page_dot + look::step(1);
+    let 末格右缘 = 每一问[0].left() - 圆点那一截 + 3.0 * 格宽;
+    assert!(
+        (每一问[2].right() - 末格右缘).abs() < 1.0,
+        "三格没等宽：末一问的右缘在 {}，按等宽算该在 {末格右缘}",
+        每一问[2].right(),
+    );
+
+    // **贯通左右**：末一问的右缘就是内容区的右内缘（这一层的右边框往里收一道边框加一道内边距）。
+    let 边框 = ctx.style_of(ctx.theme()).visuals.window_stroke.width;
+    let 内边距 = Tokens::builtin().space.dialog_padding[1];
+    let 右内缘 = 画在.right() - 边框 - 内边距;
+    assert!(
+        (每一问[2].right() - 右内缘).abs() < 0.5,
+        "末一问没贯到右内缘：它的右缘在 {}，右内缘在 {右内缘}",
+        每一问[2].right(),
     );
 }

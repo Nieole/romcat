@@ -642,11 +642,38 @@ fn pages_ui(ui: &mut egui::Ui, labels: &[String], at: usize) {
     let (放心字, 放心底) = look::tone_colors(look::Tone::Good, &visuals);
     let 线色 = visuals.widgets.inactive.bg_stroke.color;
     let 格宽 = ui.available_width() / labels.len().max(1) as f32;
+    // 先量一遍每一问的名字多宽：**末一问要贴着右内缘摆**，得先知道它那一格里的东西一共多宽。
+    let 名字宽: Vec<f32> = labels
+        .iter()
+        .map(|label| {
+            egui::WidgetText::from(egui::RichText::new(label))
+                .into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Small,
+                )
+                .size()
+                .x
+        })
+        .collect();
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         for (i, label) in labels.iter().enumerate() {
+            let 末一问 = i + 1 == labels.len();
             let (rect, _) = ui.allocate_exact_size(egui::vec2(格宽, 直径), egui::Sense::hover());
-            let 圆心 = egui::pos2(rect.left() + 半径, rect.center().y);
+            // **整条从左内缘贯到右内缘，三格仍等宽**（拿主意的人 2026-09-21 定，**与设计稿不同**：
+            // 稿上 `.step:last-child::after{display:none}`，末一格里的东西靠左、右边那一截空着，
+            // 整条只画到三分之二处）。等宽照旧（每格 `格宽`），变的只是**末一格里那两样靠右摆**
+            // ——它右边没有连线可拉，靠左摆就等于让整条断在那儿。
+            //
+            // 摆不下时退回靠左（`max(rect.left())`）：名字比一格还宽的话，贴右会把它挤进上一格。
+            let 起点 = if 末一问 {
+                (rect.right() - 直径 - 缝 - 名字宽[i]).max(rect.left())
+            } else {
+                rect.left()
+            };
+            let 圆心 = egui::pos2(起点 + 半径, rect.center().y);
             let (底, 边, 字色) = match i.cmp(&at) {
                 std::cmp::Ordering::Less => (放心底, 放心字, 放心字),
                 std::cmp::Ordering::Equal => {
@@ -696,14 +723,11 @@ fn pages_ui(ui: &mut egui::Ui, labels: &[String], at: usize) {
                     f32::INFINITY,
                     egui::TextStyle::Small,
                 );
-            let 名字在 = egui::pos2(
-                rect.left() + 直径 + 缝,
-                rect.center().y - 名字.size().y / 2.0,
-            );
+            let 名字在 = egui::pos2(起点 + 直径 + 缝, rect.center().y - 名字.size().y / 2.0);
             let 线从 = 名字在.x + 名字.size().x + 缝;
             painter.galley(名字在, 名字, 名字色);
             let 线到 = rect.right() - 缝;
-            if i + 1 < labels.len() && 线到 > 线从 {
+            if !末一问 && 线到 > 线从 {
                 painter.hline(
                     线从..=线到,
                     rect.center().y,

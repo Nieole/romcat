@@ -808,29 +808,30 @@ impl Wizard {
             let 字段宽 = Tokens::builtin().layout.conflict_key_width;
             let 余下 = (ui.available_width() - 字段宽 - 2.0 * 缝).max(0.0);
             let 值宽 = 余下 / 2.0;
-            egui::Grid::new("字段冲突")
-                .num_columns(3)
-                .striped(true)
-                .spacing(egui::vec2(缝, look::step(1)))
-                .show(ui, |ui| {
-                    列(ui, 字段宽, &mut |ui| {
-                        look::section(ui, "字段");
+            // **一行一行自己摆，不走 `egui::Grid`**：网格把每一格竖直居中，于是「标题」那一行
+            // （右边两条选项、行高一倍）的字段名浮在半空，而稿上 `.ctbl td{vertical-align:top}`
+            // 是**两边都靠上**（拿主意的人 2026-09-21 定，照稿）。`horizontal_top` 加明说了宽的
+            // 几格才摆得出「两边都靠上」。隔行底色自己画：先占一个位子，量完这一行再填回去。
+            ui.spacing_mut().item_spacing.y = look::step(1);
+            ui.horizontal_top(|ui| {
+                for (那几个字, 宽) in [("字段", 字段宽), ("保留作品", 值宽), ("其他作品", 值宽)]
+                {
+                    列(ui, 宽, &mut |ui| {
+                        look::section(ui, 那几个字);
                     });
-                    列(ui, 值宽, &mut |ui| {
-                        look::section(ui, "保留作品");
-                    });
-                    列(ui, 值宽, &mut |ui| {
-                        look::section(ui, "其他作品");
-                    });
-                    ui.end_row();
-                    for conflict in &self.conflicts {
-                        let 眼下 = self.pick_of(conflict);
+                    ui.add_space(缝);
+                }
+            });
+            let 隔行底 = ui.visuals().faint_bg_color;
+            for (第几行, conflict) in self.conflicts.iter().enumerate() {
+                let 眼下 = self.pick_of(conflict);
+                let 底 = ui.painter().add(egui::Shape::Noop);
+                let 这一行 = ui
+                    .horizontal_top(|ui| {
                         列(ui, 字段宽, &mut |ui| {
                             ui.label(font::strong(conflict.field.label()));
                         });
-                        // **每一格里再起一竖**：[`look::radio_option`] 头一句是 `add_space`，
-                        // 而 egui 的网格布局上 `add_space` 当场炸（「add_space makes no sense
-                        // in a grid layout」）。竖排那一层不是网格，摆得下。
+                        ui.add_space(缝);
                         列(ui, 值宽, &mut |ui| match &conflict.keep {
                             Some(said) => {
                                 let 整句 = said.values.join("、");
@@ -847,6 +848,7 @@ impl Wizard {
                                 look::help(ui, "（空）");
                             }
                         });
+                        ui.add_space(缝);
                         列(ui, 值宽, &mut |ui| {
                             for (at, offer) in conflict.others.iter().enumerate() {
                                 let 整句 = offer.said.values.join("、");
@@ -865,9 +867,20 @@ impl Wizard {
                                 }
                             }
                         });
-                        ui.end_row();
-                    }
-                });
+                    })
+                    .response
+                    .rect;
+                if 第几行 % 2 == 0 {
+                    ui.painter().set(
+                        底,
+                        egui::Shape::rect_filled(
+                            这一行.expand2(egui::vec2(0.0, look::step(1) / 2.0)),
+                            0.0,
+                            隔行底,
+                        ),
+                    );
+                }
+            }
         });
         for (field, at) in 选 {
             self.picks.insert(field, at);
