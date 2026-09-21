@@ -100,31 +100,33 @@
 
 ## 门禁
 
-**终版那一趟跑在提交 `c3ed9f7` 那棵树上**（`slot-2-gl16-终版-截图门与门禁.log`，`GATE=0`，
-汇总表印「6 条全绿」）。之前几趟（`slot-2-gl16-gate.log`、`gate2.log`、`gate3.log`）都因为
-后来又动过界面而作废，数字不作数。
+**终版那一趟跑在合完 main 之后那棵树上**（提交 `37e73c5`，merge base 是 `83f887a`——
+票 24／28／29 都在里头；日志 `slot-2-gl16-合后门禁.log`，`GATE=0`，汇总表印「6 条全绿」）。
+之前几趟（`gate.log`、`gate2.log`、`gate3.log`、`终版-截图门与门禁.log`）都因为后来又动过
+或者又合过 main 而作废，数字不作数。
 
 | 步 | 用时 | 命令 |
 |---|---|---|
-| fmt | 1s | `cargo fmt --all --check` |
-| glossary | 0s | `cargo xtask glossary` |
-| check | 2s | `cargo check --workspace` |
-| clippy | 5s | `cargo clippy --workspace --all-targets --all-features` |
-| test | 800s | `cargo test --workspace --all-features` |
-| doc | 0s | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --lib --bins` |
+| fmt | 2s | `cargo fmt --all --check` |
+| glossary | 1s | `cargo xtask glossary` |
+| check | 38s | `cargo check --workspace` |
+| clippy | 41s | `cargo clippy --workspace --all-targets --all-features` |
+| test | 1097s | `cargo test --workspace --all-features` |
+| doc | 7s | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --lib --bins` |
 
-**另跑一趟 `--no-fail-fast`**（`slot-2-gl16-终版-nofailfast.log`，`EXIT=0`）：
-**81 个测试二进制、合计 2,432 项、0 失败**。门禁 `test` 那一步不带 `--no-fail-fast`，
-一红就把后面整批二进制挡掉（`docs/agents/long-jobs.md`），所以另跑这一趟——
-它证明的是「不止没在第一处红上停，是真的一条都没红」。
+**另跑一趟 `--no-fail-fast`**（`slot-2-gl16-合后nofailfast.log`，`EXIT=0`）：
+**82 个测试二进制、合计 2,491 项、0 失败**，红的二进制 0 个。门禁 `test` 那一步不带
+`--no-fail-fast`，一红就把后面整批二进制挡掉（`docs/agents/long-jobs.md`），所以另跑这一趟
+——它证明的是「不止没在第一处红上停，是真的一条都没红」。
 
-`glossary` 那一步：范围是**相对 `main` 的 merge base（`1bd74b2`）以来的改动**，
-扫了 `crates/` 下 **12 份 `.rs` 里新写的 4,667 行**（标识符与字符串字面量，不含注释），
+`glossary` 那一步：范围是**相对 `main` 的 merge base（`83f887a`）以来的改动**，
+扫了 `crates/` 下 **12 份 `.rs` 里新写的 4,693 行**（标识符与字符串字面量，不含注释），
 **没撞上**。
 
 **`sublibrary/exceptions-*` 那张脆基线（`Q1014`）这几趟一次都没中**，不在本票账上。
 
-**截图门**：两趟不带更新各 **87 过 0 红**。基线动了 **37 张**——新增 8 张（`merge/`）、
+**截图门**：合完 main 之后两趟不带更新各 **99 过 0 红**（库里一共 99 张：本票之前是 87，
+票 24 加 4 张、票 28 加 2 张、票 29 加 6 张）。本票动了 **37 张**——新增 8 张（`merge/`）、
 改动 28 张（`browse/` 10、`work/` 12、`merge/` 6 重出）、连带 1 张
 （`opening/claiming-light`，票 05 的基线被共用弹层那一层带着重出）。分两批经拿主意的人
 点头入库（2026-09-21：先 30 张，版式返工后 7 张）。
