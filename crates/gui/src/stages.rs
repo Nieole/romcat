@@ -1597,6 +1597,20 @@ fn identify_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Prod
             .model_answers()
             .map_err(|error| Cutoff::failed(format!("问过的答案读不动：{error}")))?,
     );
+    // **平台纠正**：人在库屏上按组定过的那些「按内容改 / 保持目录的说法」（票
+    // `gui-looks-like-the-design/28`）。判「这个变体按哪个平台算」时它先说话
+    // （`identify::platform_of`）——这一趟不读它的话，人定完再跑一趟识别等于没定。
+    let mut options = identify::Options::new(roots);
+    let corrections = site
+        .store
+        .platform_corrections(&site.library_identity)
+        .map_err(|error| Cutoff::failed(format!("沉淀库里的平台纠正读不动：{error}")))?;
+    if !corrections.is_empty() {
+        options.decided_platforms = Some(identify::DecidedPlatforms::new(
+            &romcat_core::platform::Manifest::builtin(),
+            &corrections,
+        ));
+    }
     identify::run_task(
         &RealFs::new(),
         &mut site.catalog,
@@ -1607,7 +1621,7 @@ fn identify_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Prod
             guessing: &model_layer(&answers),
             titledb: titledb.as_ref(),
         },
-        &identify::Options::new(roots),
+        &options,
         task,
     )
     .map(|outcome| Product::Identified(Box::new(outcome)))

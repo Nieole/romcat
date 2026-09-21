@@ -5021,24 +5021,29 @@ fn 没有有效预览时同步按不下去_屏上说清为什么() {
         场.app.sublibrary().syncing().is_none(),
         "灰着的按钮排出了一趟同步",
     );
-    // **为什么按不动，屏上写着**：照稿那条提示框。
+    // **为什么按不动，屏上常驻着**：照稿那条提示框。ADR-0005「『不禁按钮』那一条什么时候
+    // 允许同时画灰」那一节的第二条——不许只挂在按不动那颗的悬停上，那正好是人最不会去碰的地方。
     assert!(
         屏上.contains("同步前需要先生成差量预览"),
         "没说清为什么还不能同步：\n{屏上}",
     );
 
     // 走 `Screen::sync`（与那颗按钮同一支）同样拦得住，一个文件都不动，屏上说一句。
+    // ADR-0005 那一节的第一条：**守卫拒得明明白白**，不许是光秃的 `return`——有人绕过界面
+    // 直接调它时也得听见原因；那句话与按不动那颗悬停里写的是**同一个常量**（`NO_PREVIEW`）。
     {
         let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
         screen.sync(site, tasks);
     }
+    let 拒下时说的 = 场
+        .app
+        .sublibrary()
+        .error()
+        .expect("拒下时得说一句")
+        .to_string();
     assert!(
-        场.app
-            .sublibrary()
-            .error()
-            .is_some_and(|why| why.contains("还没排过差量预览")),
-        "{:?}",
-        场.app.sublibrary().error(),
+        拒下时说的.contains("还没排过差量预览") && 拒下时说的.contains("生成差量预览"),
+        "拒得不明不白：既要说清为什么，也要说去哪儿办。眼下是：{拒下时说的}",
     );
 
     // 排一趟之后按得动了。

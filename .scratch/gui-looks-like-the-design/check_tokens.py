@@ -161,6 +161,11 @@ literal_pairs(".ruletext", r"\.ruletext\{[^}]*?font-size:(\d+)px;[^}]*?padding:(
 literal_pairs(".iconbtn", r"\.iconbtn\{width:(\d+)px;height:(\d+)px", [(1, L["icon-button"], "icon-button 宽"), (2, L["icon-button"], "icon-button 高")])
 literal_pairs(".strip", r"\.strip\{[^}]*?gap:(\d+)px;padding:(\d+)px 0", [(1, S["strip-gap"], "strip-gap"), (2, S["strip-padding"], "strip-padding")])
 
+# 待确认屏「细分」那一栏底下那条占比条，与下钻之后就地那一框（票 gui-looks-like-the-design/19）。
+literal_pairs(".dist .b", r"\.dist \.b\{[^}]*?height:(\d+)px", [(1, L["dist-bar"], "dist-bar")])
+literal_pairs(".dist .b i", r"\.dist \.b i\{[^}]*?opacity:([\d.]+)", [(1, M["dist-bar-opacity"], "dist-bar-opacity")])
+literal_pairs(".drill", r"\.drill\{[^}]*?var\(--accent\) (\d+%),[^}]*?padding:(\d+)px (\d+)px;[^}]*?gap:(\d+)px", [(1, M["drill-tint"], "drill-tint"), (2, S["drill-padding"][0], "drill-padding 上下"), (3, S["drill-padding"][1], "drill-padding 左右"), (4, S["drill-gap"], "drill-gap")])
+
 # 平台那一簇先摆几个：「更多（N）」前头没带 data-more 的那几枚。
 plats = re.search(r'<span class="sec">平台</span>\s*<div class="facet">(.*?)id="more-plat"', html, re.S)
 if not plats:

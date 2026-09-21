@@ -1932,6 +1932,7 @@ impl Catalog {
                 &InnerEntryContext {
                     manifest,
                     display_path: display,
+                    key: container_key,
                     scope: shape::scope_of(manifest, container_key),
                 },
                 &inner,
@@ -1984,6 +1985,10 @@ impl Catalog {
                         .iter()
                         .map(|key| roots.display_key(key))
                         .collect(),
+                    // **键也留着**：人工纠正落的是中立库的键（票 `gui-looks-like-the-design/29`），
+                    // 而上面那两样已经折成了盘上的路径，折不回去。
+                    at_key: doubt.at.clone(),
+                    item_keys: doubt.items.clone(),
                 },
                 limits,
             );

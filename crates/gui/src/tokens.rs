@@ -614,6 +614,10 @@ pub struct Space {
     pub candidate_row_gap: [f32; 2],
     /// 展开之后「细分」底下各组一行与一行之间（设计稿 `.dist` 的 `gap` 竖向那一半）。
     pub dist_row_gap: f32,
+    /// 下钻到某一组之后**就地那一框**的内边距：`[上下, 左右]`（设计稿 `.drill` 的 `padding`）。
+    pub drill_padding: [f32; 2],
+    /// 就地那一框里一排与一排之间（设计稿 `.drill` 的 `gap`）。
+    pub drill_gap: f32,
     /// 逐条那一屏待选列表栏头的内边距：`[上, 右, 下, 左]`（设计稿 `.obolist .ptitle`）。
     pub list_head_padding: [f32; 4],
     /// 待选列表一条的内边距：`[上, 右, 下, 左]`（设计稿 `.oboit`）。
@@ -776,6 +780,8 @@ pub struct Layout {
     pub runcard_bar: f32,
     /// 正在跑那张卡上进度条的高。
     pub runcard_progress: f32,
+    /// 「细分」底下每一项那条占比条的高（设计稿 `.dist .b` 的 `height`）。
+    pub dist_bar: f32,
     /// 对话框只用这几档宽度。
     pub dialog_width: [f32; 4],
     /// 开场右栏宽度：`[最窄, 最宽]`。
@@ -1011,6 +1017,10 @@ pub struct Mix {
     pub dirty_row_tint: f32,
     /// 作品详情页头上那一块底色里调进几成平台色（设计稿 `.hero`）。
     pub hero_tint: f32,
+    /// 「细分」底下那条占比条上填的那一截淡到几成（设计稿 `.dist .b i` 的 `opacity`）。
+    pub dist_bar_opacity: f32,
+    /// 下钻到某一组之后就地那一框底色里调进几成强调色（设计稿 `.drill` 的 `color-mix`）。
+    pub drill_tint: f32,
 }
 
 /// 阴影：一种一格，**形状两套主题共用**，颜色是各主题里同名的那一格（`pop` → `pop-color`）。

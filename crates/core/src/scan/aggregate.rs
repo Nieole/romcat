@@ -198,8 +198,36 @@ pub struct PlatformConflict {
     pub declared: String,
     /// 文件说自己是哪个平台。
     pub implied: String,
+    /// **中立库里的键**（根名 + 相对那个根；容器内部写成 `容器的键 › 内部路径`）。
+    ///
+    /// 与 [`Self::path`] 两样都留着：那一条是展示路径（拼上了根在盘上的位置），印在报告里；
+    /// 这一条是键，**平台纠正**屏上照票 09 写成「根名 · 相对路径」（`table::root_and_path`）
+    /// ——基线图里不许有某一台机器上那条临时目录。旧报告里没有这一样，读回来是空串。
+    #[serde(default)]
+    pub key: String,
+    /// **说这句话的那个扩展名**（已折成小写）：判据是「这个扩展名只可能属于那一个平台」
+    /// （[`conflicting_platform`]），所以理由要说得出是哪一个。旧报告里没有这一样，读回来是空串。
+    #[serde(default)]
+    pub extension: String,
     /// 凭什么算数。
     pub evidence: ConflictEvidence,
+}
+
+/// **一组**「目录说 A、内容是 B」：**平台纠正**按它分组处理（票 `gui-looks-like-the-design/28`）。
+///
+/// 分组的键就是那一对平台，因为人做的决定是按这一对下的：「`gb/` 目录里的那些 GBC 游戏，
+/// 全部按内容改」。样例与凭据跟着这一组各记一份——概要那一层的 [`ConflictAcc::examples`]
+/// 是**全库前几条**，落到某一组头上可能一条都没有。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ConflictGroupAcc {
+    /// 这一组几条。
+    pub count: u64,
+    /// 这一组按凭据分类计数。
+    pub by_evidence: BTreeMap<ConflictEvidence, u64>,
+    /// 这一组里出现过的扩展名（小写、去重）：理由那一句说的就是它们。
+    pub extensions: BTreeSet<String>,
+    /// 这一组的样例，**中立库里的键**（[`PlatformConflict::key`]），有上限。
+    pub examples: Vec<String>,
 }
 
 /// 目录声明的平台与文件内容对不上的那些。
@@ -212,6 +240,8 @@ pub struct ConflictAcc {
     pub by_evidence: BTreeMap<ConflictEvidence, u64>,
     /// 样例，有上限。
     pub examples: Vec<PlatformConflict>,
+    /// **按「从哪个平台 → 到哪个平台」分组**：平台纠正按组处理，每组的数、凭据、扩展名与样例都在这儿。
+    pub by_pair: BTreeMap<(String, String), ConflictGroupAcc>,
 }
 
 impl ConflictAcc {
@@ -223,6 +253,10 @@ impl ConflictAcc {
 }
 
 /// 一处**成型存疑**（[`shape::shaping_doubts`]，判据只在那一处），键换成了给人看的完整路径。
+///
+/// **两套路径都在，各有各的用处**（票 `gui-looks-like-the-design/29`）：`at` / `items` 是给人看的
+/// 完整路径，明细那一行印它、「在文件系统中打开」打开它；`at_key` / `item_keys` 是**中立库的键**，
+/// **人工纠正记的是键**（沉淀库里那几行、`shape::fix`），而展示路径折回键是折不回去的。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShapingDoubt {
     /// 哪一种。
@@ -233,22 +267,23 @@ pub struct ShapingDoubt {
     pub at: String,
     /// 牵涉的那几条：几个变体，或者目录里那几份各自独立的内容。
     pub items: Vec<String>,
+    /// 那一处的**中立库的键**（[`Self::at`] 的那一条）。
+    pub at_key: String,
+    /// 牵涉的那几条的**中立库的键**（[`Self::items`] 一一对应），**人工纠正落的就是它们**。
+    pub item_keys: Vec<String>,
 }
 
 impl ShapingDoubt {
-    /// 给人看的那一句原因。
+    /// 给人看的那一句原因。**话只有一处**（[`shape::Doubt::reason`]）：这一份是它折成展示路径之后的样子，
+    /// 「凭什么」那一句两边说的必须是同一句。
     #[must_use]
     pub fn reason(&self) -> String {
-        match self.kind {
-            DoubtKind::UnmergedDiscs => format!(
-                "{} 个变体只差碟片标记，可能是同一套多碟游戏",
-                self.items.len()
-            ),
-            DoubtKind::CrowdedTree => format!(
-                "整个目录被当成 1 个变体，里面有 {} 份各自独立的内容",
-                self.items.len()
-            ),
+        shape::Doubt {
+            kind: self.kind,
+            at: self.at_key.clone(),
+            items: self.item_keys.clone(),
         }
+        .reason()
     }
 }
 
@@ -573,8 +608,10 @@ impl FileObservation {
             let (declared, implied) = conflicting_platform(manifest, scope.platform(), extension)?;
             Some(PlatformConflict {
                 path: display_path.clone(),
+                key: key.to_string(),
                 declared,
                 implied,
+                extension: extension.to_string(),
                 evidence: evidence_of(sample.as_ref())?,
             })
         });
@@ -608,6 +645,9 @@ impl FileObservation {
 
 /// 目录声明的平台与这个扩展名说的平台对不对得上；对得上或说不准时是 `None`。
 ///
+/// **「哪些算不符」只有这一处判据**（ADR-0024）：库体检那一格数的是它，**平台纠正**
+/// 按它分组，下一趟识别也从它问「这个变体撞上的是哪一组」——三处都不许自己再判一遍。
+///
 /// 两条闸，少一条这份清单就成了噪音：
 ///
 /// 1. **只看在范围内的东西**。未映射的顶层目录本来就不进识别管线，拿它报冲突没有意义。
@@ -615,7 +655,7 @@ impl FileObservation {
 ///    「只可能属于这一个平台」的（见 `platform/platforms.toml`）。
 ///
 /// 裸文件与**容器内部文件**共用这一个判据——两处各写一遍的话，改一条就会有一处漏改。
-fn conflicting_platform(
+pub fn conflicting_platform(
     manifest: &Manifest,
     declared: Option<&Platform>,
     extension: &str,
@@ -649,6 +689,8 @@ pub struct InnerEntryContext<'a> {
     pub manifest: &'a Manifest,
     /// 容器的展示路径。
     pub display_path: &'a str,
+    /// 容器在**中立库里的键**：平台纠正屏上照它写「根名 · 相对路径」（[`PlatformConflict::key`]）。
+    pub key: &'a str,
     /// 容器落在范围的哪一格。
     pub scope: Scope<'a>,
 }
@@ -845,13 +887,29 @@ impl Aggregate {
         self.record_sample(observation, limits);
     }
 
-    /// 并入一条平台冲突。
+    /// 并入一条平台冲突：全库的计数与样例各记一份，**那一对平台自己那一组**也记一份。
+    ///
+    /// 两份都要，是因为它们答的不是同一个问题：概要那一格问「一共几条」，
+    /// **平台纠正**问「这一对平台有几条、长什么样」——全库前几条样例落到某一组头上可能一条都没有。
     pub fn record_conflict(&mut self, conflict: PlatformConflict, limits: &Limits) {
         *self
             .conflicts
             .by_evidence
             .entry(conflict.evidence)
             .or_default() += 1;
+        let group = self
+            .conflicts
+            .by_pair
+            .entry((conflict.declared.clone(), conflict.implied.clone()))
+            .or_default();
+        group.count += 1;
+        *group.by_evidence.entry(conflict.evidence).or_default() += 1;
+        if !conflict.extension.is_empty() {
+            group.extensions.insert(conflict.extension.clone());
+        }
+        if group.examples.len() < limits.max_examples {
+            group.examples.push(conflict.key.clone());
+        }
         if self.conflicts.examples.len() < limits.max_examples {
             self.conflicts.examples.push(conflict);
         }
@@ -1014,8 +1072,10 @@ impl Aggregate {
             self.record_conflict(
                 PlatformConflict {
                     path: format!("{} › {inner_path}", container.display_path),
+                    key: format!("{} › {inner_path}", container.key),
                     declared,
                     implied,
+                    extension: extension.clone(),
                     evidence: ConflictEvidence::InsideContainer,
                 },
                 limits,

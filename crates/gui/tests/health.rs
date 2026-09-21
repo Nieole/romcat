@@ -14,6 +14,7 @@ use romcat_core::platform::Manifest;
 use romcat_core::report::{DuplicateDetails, HealthReport, human_bytes};
 use romcat_core::scan::aggregate::Limits;
 use romcat_core::site::Site;
+use romcat_core::testing::cart;
 use romcat_core::testing::sample::zip;
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_gui::app::{App, View};
@@ -102,6 +103,37 @@ fn 有体检发现的盘() -> TempDir {
         std::fs::write(&落点, 字节).expect("写得进");
     }
     盘
+}
+
+/// 一块只往临时目录里写的「盘」，专为**平台纠正**摆的（票 `gui-looks-like-the-design/28`）：
+/// 两组「目录说 A、内容是 B」，一组只能改、一组改不改都行。**一个字节都不碰真盘。**
+///
+/// - `fc/` 底下两份 `.fds`：扩展名只可能属于 FDS，而 FC 跑不了磁碟机的游戏——**只能改**。
+/// - `3ds/` 底下一份 `.nds`，头部字节是真的（`testing::cart`）：3DS **向下兼容** NDS，
+///   有意放在 `3ds/` 也说得通——**改不改都行**。
+fn 有平台不符的盘() -> TempDir {
+    let 盘 = temp_dir("gui-platfix-disk");
+    let 摆 = |相对: &str, 字节: Vec<u8>| {
+        let 落点 = 盘.path().join(相对);
+        std::fs::create_dir_all(落点.parent().expect("有上级目录")).expect("建得出目录");
+        std::fs::write(&落点, 字节).expect("写得进");
+    };
+    摆("fc/日版/塞尔达传说.fds", vec![1_u8; 64]);
+    摆("fc/合集/银河战士.fds", vec![2_u8; 64]);
+    摆(
+        "3ds/合集/雷顿教授.nds",
+        cart::padded(&cart::NDS_GYAKUTEN_KENJI, 1 << 16),
+    );
+    盘
+}
+
+/// 摆好一份有平台不符的库，滚到库屏底下，交出现场。
+fn 摆好平台不符的现场(ctx: &egui::Context, 盘: &TempDir) -> 现场 {
+    let mut 现场 = 现场::摆好();
+    现场.加根(盘.path(), "主库");
+    现场.扫("主库");
+    滚到底(ctx, |ui| 现场.app.ui(ui));
+    现场
 }
 
 /// 库体检里 `标题` 那一格画的数与小字：一格里标题、数、小字是连着画的三段。取**最后**一处写着这个标题的——
@@ -647,4 +679,474 @@ fn 跑一帧不动(ctx: &egui::Context, 现场: &mut 现场) -> String {
     shared::画出来的字(&headless::frame(ctx, headless::input(), |ui| {
         现场.app.ui(ui)
     }))
+}
+
+#[test]
+fn 点目录与内容平台不符那一格_开的是平台纠正那一层_按组列出从哪到哪几条凭什么两条样例与两条出路() {
+    // 票 28 验收第 1、2 条：**按组列出**（从什么平台 → 到什么平台、多少条、理由、样例），
+    // **每组两条出路**。设计稿 `HEALTH` 里这一格点进去开的正是 `DLG.platfix`，不是明细弹层。
+    let ctx = headless::context();
+    let 盘 = 有平台不符的盘();
+    let mut 现场 = 摆好平台不符的现场(&ctx, &盘);
+
+    let 屏上 = 点一下(&ctx, "目录与内容平台不符", |ui| 现场.app.ui(ui));
+    assert!(
+        有一行正好是(&屏上, "平台纠正"),
+        "点了那一格，开的不是平台纠正那一层：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("库体检 · 目录与内容平台不符"),
+        "这一格不该退回明细弹层：\n{屏上}"
+    );
+    // 一组：从哪个平台到哪个平台、叫什么、多少条。条数多的那一组在前（核心库排的）。
+    assert!(
+        屏上.contains("FC 目录里的 FDS 游戏"),
+        "没按组说清从哪个平台到哪个平台：\n{屏上}"
+    );
+    assert!(有一行正好是(&屏上, "2 条"), "没说这一组多少条：\n{屏上}");
+    assert!(
+        屏上.contains(".fds") && 屏上.contains("只可能属于 FDS"),
+        "没说凭什么这么判：\n{屏上}"
+    );
+    // 两条样例，第三条没有就不写「另有」。
+    assert!(
+        屏上.lines().any(|line| line.ends_with("塞尔达传说.fds"))
+            && 屏上.lines().any(|line| line.ends_with("银河战士.fds")),
+        "这一组的两条样例没列出来：\n{屏上}"
+    );
+    // 两条出路。
+    assert!(
+        有一行正好是(&屏上, "按内容改为 FDS（2 条）") && 有一行正好是(&屏上, "保持 FC"),
+        "一组没给出「按内容改」与「保持目录的说法」两条出路：\n{屏上}"
+    );
+    // 改不改都行的那一类要说明白（票面那条 ⚠️）。
+    assert!(
+        屏上.contains("3DS 能运行 NDS 的游戏，保持也不影响游玩"),
+        "3DS 向下兼容 NDS，那一组没说「改不改都行」：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("不移动任何文件"),
+        "那一层没说清纠正不移动文件（ADR-0004）：\n{屏上}"
+    );
+    // **屏上说「记为人工纠正」而不是「记为裁决」**（拿主意的人 2026-09-21 裁，挂单 `Q1032`）：
+    // 落下来的是 `platform_correction` 那张表，与**成型的人工纠正**同族，撤销**不走裁决记录**。
+    assert!(
+        屏上.contains("记为人工纠正") && !屏上.contains("记为裁决"),
+        "屏上该说「记为人工纠正」，它走的不是裁决记录：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("改了平台的变体会在下次识别时按新平台重新匹配"),
+        "那一层末尾没说下一趟识别会重新匹配：\n{屏上}"
+    );
+    // **屏上不许许一句做不到的话**：导出与同步眼下不读纠正（挂单 `Q1033`），
+    // 稿上那句「导出和同步时按纠正后的平台放置」因此改成实话（收尾审查 Spec 轴第 1 条）。
+    assert!(
+        屏上.contains("导出与同步眼下仍按目录放置"),
+        "那一层没说清导出与同步还没跟上：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("导出和同步时按纠正后的平台放置"),
+        "屏上不许许一句做不到的话：\n{屏上}"
+    );
+}
+
+#[test]
+fn 按内容改之后那一组摊着说已改为_那一格的数跟着降_撤销回得去() {
+    // 票 28 验收第 3、6 条：纠正**可撤销**，处理过的组**在库体检概要里不再计数**。
+    let ctx = headless::context();
+    let 盘 = 有平台不符的盘();
+    let mut 现场 = 摆好平台不符的现场(&ctx, &盘);
+    assert_eq!(
+        那一格(&滚到底(&ctx, |ui| 现场.app.ui(ui)), "目录与内容平台不符").0,
+        "3 条"
+    );
+
+    点一下(&ctx, "目录与内容平台不符", |ui| 现场.app.ui(ui));
+    let 屏上 = 点一下(&ctx, "按内容改为 FDS（2 条）", |ui| 现场.app.ui(ui));
+    assert!(
+        屏上.contains("已改为 FDS"),
+        "定完那一组没摊着说「已改为 FDS」：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("记为人工纠正") && 屏上.contains("一个字节都没动"),
+        "定完那一句回话没说清记成了什么、盘上动没动：\n{屏上}"
+    );
+    assert!(
+        !有一行正好是(&屏上, "按内容改为 FDS（2 条）"),
+        "定过的那一组不该还摆着两颗按钮：\n{屏上}"
+    );
+    assert!(
+        有一行正好是(&屏上, "撤销"),
+        "定过的那一组没有「撤销」：\n{屏上}"
+    );
+
+    点一下(&ctx, "完成", |ui| 现场.app.ui(ui));
+    let 屏上 = 滚到底(&ctx, |ui| 现场.app.ui(ui));
+    assert_eq!(
+        那一格(&屏上, "目录与内容平台不符"),
+        ("1 条".to_string(), "已处理 1 组".to_string()),
+        "处理过的那一组还算在概要里：\n{屏上}"
+    );
+
+    // 撤销：那一组回到还没处理，概要重新数它。
+    点一下(&ctx, "目录与内容平台不符", |ui| 现场.app.ui(ui));
+    let 屏上 = 点一下(&ctx, "撤销", |ui| 现场.app.ui(ui));
+    assert!(
+        有一行正好是(&屏上, "按内容改为 FDS（2 条）"),
+        "撤销之后那一组没回到还没处理：\n{屏上}"
+    );
+    点一下(&ctx, "完成", |ui| 现场.app.ui(ui));
+    let 屏上 = 滚到底(&ctx, |ui| 现场.app.ui(ui));
+    assert_eq!(那一格(&屏上, "目录与内容平台不符").0, "3 条");
+    assert!(
+        !屏上.contains("已处理"),
+        "撤销之后小字还写着已处理：\n{屏上}"
+    );
+}
+
+#[test]
+fn 保持目录的说法也记得住_那一组不再问第二遍() {
+    // 票 28 验收第 2 条后半句「两种都记得住」：「保持」不记下来的话，每体检一趟就要再问一遍。
+    let ctx = headless::context();
+    let 盘 = 有平台不符的盘();
+    let mut 现场 = 摆好平台不符的现场(&ctx, &盘);
+
+    点一下(&ctx, "目录与内容平台不符", |ui| 现场.app.ui(ui));
+    let 屏上 = 点一下(&ctx, "保持 FC", |ui| 现场.app.ui(ui));
+    assert!(
+        屏上.contains("已保持 FC"),
+        "定完那一组没摊着说「已保持 FC」：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("不再提示"),
+        "那一句回话没说清这一组不再问第二遍：\n{屏上}"
+    );
+
+    点一下(&ctx, "完成", |ui| 现场.app.ui(ui));
+    let 屏上 = 滚到底(&ctx, |ui| 现场.app.ui(ui));
+    assert_eq!(
+        那一格(&屏上, "目录与内容平台不符"),
+        ("1 条".to_string(), "已处理 1 组".to_string())
+    );
+}
+
+#[test]
+fn 纠正一整轮_盘上的文件一个字节都没动() {
+    // **主库只读**（ADR-0004）：这一层只往沉淀库写一条决定。目标目录整份快照前后逐字节相同
+    // ——照票 26「移除一个根不动盘上的任何一个字节」那条的形状写。
+    let ctx = headless::context();
+    let 盘 = 有平台不符的盘();
+    let mut 现场 = 摆好平台不符的现场(&ctx, &盘);
+    let 之前 = 盘上快照(盘.path());
+
+    点一下(&ctx, "目录与内容平台不符", |ui| 现场.app.ui(ui));
+    点一下(&ctx, "按内容改为 FDS（2 条）", |ui| 现场.app.ui(ui));
+    点一下(&ctx, "保持 3DS", |ui| 现场.app.ui(ui));
+    点一下(&ctx, "撤销", |ui| 现场.app.ui(ui));
+    点一下(&ctx, "完成", |ui| 现场.app.ui(ui));
+
+    assert_eq!(
+        之前,
+        盘上快照(盘.path()),
+        "纠正不移动、不改名、不改写主库里的任何一个文件"
+    );
+}
+
+/// 一个目录整份的样子：每个文件的相对路径 → 它的字节。
+fn 盘上快照(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut 待走 = vec![dir.to_path_buf()];
+    while let Some(这一层) = 待走.pop() {
+        for 项 in std::fs::read_dir(&这一层).expect("读得动目录") {
+            let 路 = 项.expect("读得动一项").path();
+            if 路.is_dir() {
+                待走.push(路);
+            } else {
+                let 相对 = 路
+                    .strip_prefix(dir)
+                    .expect("在这个目录下面")
+                    .to_string_lossy()
+                    .into_owned();
+                out.insert(相对, std::fs::read(&路).expect("读得动"));
+            }
+        }
+    }
+    out
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 成型纠正（票 `gui-looks-like-the-design/29`）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 一块只往临时目录里写的「盘」，专为**成型纠正**摆的：两种成型存疑各一处。**一个字节都不碰真盘。**
+///
+/// - `FDS/某游戏/` 与 `FDS/某游戏乙/` 底下各两面磁碟：FDS 没声明多碟同族，两面各成一个变体——
+///   **多碟没合在一起**，而且**同结构的有两处**（逐处确认，不一次性全改）。
+/// - `ps3/动作合集/` 是一棵目录树（`PS3_GAME` 是锚），可它**直接**躺着两份各自独立的内容——
+///   **一个目录被当成一个变体**。
+fn 有成型存疑的盘() -> TempDir {
+    let 盘 = temp_dir("gui-shaping-disk");
+    for (相对, 字节) in [
+        ("FDS/某游戏/某游戏 (Disk 1).fds", vec![1_u8; 64]),
+        ("FDS/某游戏/某游戏 (Disk 2).fds", vec![2_u8; 64]),
+        // **同结构的另一处**：验收第 6 条要的是「同样的另几处列在库体检里逐处确认」。
+        ("FDS/某游戏乙/某游戏乙 (Disk 1).fds", vec![6_u8; 64]),
+        ("FDS/某游戏乙/某游戏乙 (Disk 2).fds", vec![7_u8; 64]),
+        ("ps3/动作合集/PS3_GAME/USRDIR/EBOOT.BIN", vec![3_u8; 64]),
+        ("ps3/动作合集/甲.iso", vec![4_u8; 2048]),
+        ("ps3/动作合集/乙.7z", vec![5_u8; 2048]),
+    ] {
+        let 落点 = 盘.path().join(相对);
+        std::fs::create_dir_all(落点.parent().expect("有上级目录")).expect("建得出目录");
+        std::fs::write(&落点, 字节).expect("写得进");
+    }
+    盘
+}
+
+/// 摆好一份有成型存疑的库，滚到库屏底下，交出现场。
+fn 摆好成型存疑的现场(ctx: &egui::Context, 盘: &TempDir) -> 现场 {
+    let mut 现场 = 现场::摆好();
+    现场.加根(盘.path(), "主库");
+    现场.扫("主库");
+    滚到底(ctx, |ui| 现场.app.ui(ui));
+    现场
+}
+
+/// 库里眼下有哪几个变体：（键, 是不是人工纠正出来的），按键排。
+fn 库里的变体(现场: &mut 现场) -> Vec<(String, bool)> {
+    let (_, site, _) = 现场.app.roots_site_and_tasks();
+    let mut out: Vec<(String, bool)> = site
+        .catalog
+        .variants()
+        .expect("读得出变体")
+        .into_iter()
+        .map(|row| (row.key, row.manual))
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn 点成型存疑那一格_明细一行一颗处理_开的是调整成型那一层_说清现在怎样与纠正后怎样() {
+    // 票 29 验收第 1 条前半句（**从库体检的「成型存疑」进得去**）与第 2 条中段
+    // （**预览合成后的主文件与附属文件**）。
+    let ctx = headless::context();
+    let 盘 = 有成型存疑的盘();
+    let mut 现场 = 摆好成型存疑的现场(&ctx, &盘);
+    assert_eq!(
+        那一格(&滚到底(&ctx, |ui| 现场.app.ui(ui)), "成型存疑").0,
+        "3 处"
+    );
+
+    let 屏上 = 点一下(&ctx, "成型存疑", |ui| 现场.app.ui(ui));
+    assert!(
+        有一行正好是(&屏上, "库体检 · 成型存疑"),
+        "点了那一格没开明细：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("处理…"),
+        "成型存疑那一格的明细里没有进得去的门：\n{屏上}"
+    );
+    // **判据那一句仍旧出自核心库**，后面接的政策话改成了实话：这一格点得下去。
+    assert!(
+        屏上.contains("这一格点得进去：记下的是人工纠正") && 屏上.contains("一个字节都不动"),
+        "那一层没说清按下去会发生什么、盘上动不动：\n{屏上}"
+    );
+
+    let 屏上 = 点一下(&ctx, "处理…", |ui| 现场.app.ui(ui));
+    assert!(
+        有一行正好是(&屏上, "调整成型 · 某游戏"),
+        "「处理…」开的不是调整成型那一层：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("现在：这 2 个变体各自独立"),
+        "没说清这一处现在是什么样：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("2 个变体只差碟片标记"),
+        "没说凭什么判这一处存疑（核心库那一句）：\n{屏上}"
+    );
+    // **预览合成后的主文件与附属文件**（验收第 2 条）：附属文件**逐条列出来**，不是只说个数
+    // ——只说个数的话，人看不出合进来的是不是他勾的那几份。
+    assert!(
+        屏上.contains("主文件：某游戏 (Disk 1).fds") && 屏上.contains("附属文件 1 个："),
+        "没预览合成之后的主文件与附属文件：\n{屏上}"
+    );
+    assert!(
+        有一行正好是(&屏上, "某游戏 (Disk 2).fds"),
+        "附属文件没逐条列出来：\n{屏上}"
+    );
+    // 「合成几个」数的是**勾中的**那几个。
+    assert!(
+        屏上.contains("勾中的 2 个变体合成 1 个"),
+        "没说清勾中的那几个会合成一个：\n{屏上}"
+    );
+    assert!(
+        有一行正好是(&屏上, "合成一个变体"),
+        "那一层页脚上没有「合成一个变体」：\n{屏上}"
+    );
+    // **屏上说「记为人工纠正」而不是「记为裁决」**（票 28 那条先例，挂单 `Q1032`）。
+    assert!(
+        屏上.contains("记为人工纠正") && !屏上.contains("记为裁决"),
+        "屏上该说「记为人工纠正」，它落的是自己那张表、撤销不走裁决记录：\n{屏上}"
+    );
+    // **屏上不许许一句做不到的话**：稿上那句「按文件内容永久保留」不真——那张表的键是路径。
+    assert!(
+        屏上.contains("按路径永久记住") && !屏上.contains("按文件内容永久保留"),
+        "纠正锚在路径上，屏上不许说成锚在内容上：\n{屏上}"
+    );
+    // **逐处确认，不一次性全改**（验收第 6 条）。
+    assert!(
+        屏上.contains("同样是「多碟没合在一起」的另有 1 处")
+            && 屏上.contains("列在库体检的「成型存疑」里"),
+        "没说清同结构的其余几处在哪儿逐处确认：\n{屏上}"
+    );
+}
+
+#[test]
+fn 合成一处多碟_那两个变体并成一个_成型存疑那一格跟着降_盘上一个字节都没动() {
+    // 票 29 验收第 2 条（**合成后变体数跟着变**）与「主库只读」（ADR-0004）。
+    let ctx = headless::context();
+    let 盘 = 有成型存疑的盘();
+    let mut 现场 = 摆好成型存疑的现场(&ctx, &盘);
+    let 之前 = 盘上快照(盘.path());
+    assert_eq!(
+        库里的变体(&mut 现场)
+            .iter()
+            .filter(|(key, _)| key.contains("FDS/某游戏/"))
+            .count(),
+        2,
+        "合之前那两面磁碟该是两个变体"
+    );
+
+    点一下(&ctx, "成型存疑", |ui| 现场.app.ui(ui));
+    点一下(&ctx, "处理…", |ui| 现场.app.ui(ui));
+    let 屏上 = 点一下(&ctx, "合成一个变体", |ui| 现场.app.ui(ui));
+    assert!(
+        屏上.contains("已把 2 个变体合成一个（记为人工纠正）"),
+        "按完没说清落成了什么：\n{屏上}"
+    );
+    现场.等台上空了();
+    let 屏上 = 跑一帧不动(&ctx, &mut 现场);
+
+    let 那几个: Vec<(String, bool)> = 库里的变体(&mut 现场)
+        .into_iter()
+        .filter(|(key, _)| key.contains("FDS/某游戏/"))
+        .collect();
+    assert_eq!(
+        那几个,
+        vec![("主库/FDS/某游戏/某游戏 (Disk 1).fds".to_string(), true)],
+        "两面磁碟没合成一个人工纠正出来的变体：\n{屏上}"
+    );
+    点一下(&ctx, "关闭", |ui| 现场.app.ui(ui));
+    let 屏上 = 滚到底(&ctx, |ui| 现场.app.ui(ui));
+    assert_eq!(
+        那一格(&屏上, "成型存疑").0,
+        "2 处",
+        "纠正过的那一处还算在概要里：\n{屏上}"
+    );
+    assert_eq!(
+        之前,
+        盘上快照(盘.path()),
+        "成型纠正不移动、不改名、不改写主库里的任何一个文件"
+    );
+}
+
+#[test]
+fn 一个目录被当成一个变体那一处_拆成几个变体_拆出来的各自在库里() {
+    // 票 29 验收第 3 条：**目录拆成多个变体，拆开后各自参与下一趟识别**——「各自参与识别」
+    // 的前提就是它们各自是一个变体（识别按变体跑，`identify::run`）。
+    let ctx = headless::context();
+    let 盘 = 有成型存疑的盘();
+    let mut 现场 = 摆好成型存疑的现场(&ctx, &盘);
+    assert!(
+        库里的变体(&mut 现场)
+            .iter()
+            .any(|(key, _)| key == "主库/ps3/动作合集"),
+        "拆之前整个目录该是一个变体"
+    );
+
+    点一下(&ctx, "成型存疑", |ui| 现场.app.ui(ui));
+    // 两处各一颗「处理…」，这一处排在后面：点的是**最后**那一颗。
+    let 屏上 = 点最后一个(&ctx, &mut 现场, "处理…");
+    assert!(
+        有一行正好是(&屏上, "调整成型 · 动作合集"),
+        "开的不是那个目录那一处：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("现在：整个目录被当成 1 个变体") && 屏上.contains("甲.iso"),
+        "没说清这个目录里头有哪几份：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("拆成 2 个变体，每份内容一个") && 屏上.contains("拆开后各自参与下一趟识别"),
+        "没说清拆完会怎样：\n{屏上}"
+    );
+
+    // 「拆成 2 个变体」屏上有两处：那一档单选的名字与页脚那颗按钮；页脚那颗最后画。
+    let 屏上 = 点最后一个(&ctx, &mut 现场, "拆成 2 个变体");
+    assert!(
+        屏上.contains("已拆成 2 个变体（记为人工纠正）"),
+        "按完没说清落成了什么：\n{屏上}"
+    );
+    现场.等台上空了();
+    跑一帧不动(&ctx, &mut 现场);
+
+    let 那几个: Vec<(String, bool)> = 库里的变体(&mut 现场)
+        .into_iter()
+        .filter(|(key, _)| key.starts_with("主库/ps3/"))
+        .collect();
+    assert_eq!(
+        那几个,
+        vec![
+            ("主库/ps3/动作合集".to_string(), false),
+            ("主库/ps3/动作合集/乙.7z".to_string(), true),
+            ("主库/ps3/动作合集/甲.iso".to_string(), true),
+        ],
+        "那两份独立内容没各自成变体（剩下的那份转储该照旧是一个变体）"
+    );
+}
+
+/// 点屏上**最后**一处写着这几个字的地方（同一句话屏上有好几处时用它）。
+fn 点最后一个(ctx: &egui::Context, 现场: &mut 现场, 那一段: &str) -> String {
+    let 头一帧 = headless::frame(ctx, headless::input(), |ui| 现场.app.ui(ui));
+    let 位置 =
+        最后一处画在哪儿(&头一帧, 那一段).unwrap_or_else(|| panic!("屏上没有「{那一段}」，没处点"));
+    let 按 = |pressed: bool| egui::Event::PointerButton {
+        pos: 位置,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let mut input = headless::input();
+    input.events.push(egui::Event::PointerMoved(位置));
+    input.events.push(按(true));
+    headless::frame(ctx, input, |ui| 现场.app.ui(ui));
+    let mut input = headless::input();
+    input.events.push(按(false));
+    headless::frame(ctx, input, |ui| 现场.app.ui(ui));
+    跑一帧不动(ctx, 现场)
+}
+
+/// 屏上**最后**一处含着这几个字的地方画在哪儿（中心点）。
+fn 最后一处画在哪儿(output: &egui::FullOutput, 那一段: &str) -> Option<egui::Pos2> {
+    fn 找(shape: &egui::epaint::Shape, 那一段: &str, out: &mut Option<egui::Pos2>) {
+        match shape {
+            egui::epaint::Shape::Text(text) => {
+                if text.galley.text().contains(那一段) {
+                    *out = Some(egui::Rect::from_min_size(text.pos, text.galley.size()).center());
+                }
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    找(one, 那一段, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = None;
+    for clipped in &output.shapes {
+        找(&clipped.shape, 那一段, &mut out);
+    }
+    out
 }
