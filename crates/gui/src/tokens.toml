@@ -406,7 +406,6 @@ conflict-key-width = 90   # 合并向导第三步字段冲突表「字段」那�
 suspicion-padding = [12, 14]  # 疑似同一作品那张建议卡的内边距（上下, 左右）（设计稿 .sugg 的 padding:12px 14px）
 suspicion-gap     = 8     # 那张卡里一段与一段之间（设计稿 .sugg 的 gap:8px）
 suspicion-reason-gap = 3  # 那张卡里理由一条与一条之间（设计稿 .sugg ul 的 gap:3px）
-suspicion-reason-indent = 18  # 理由那一列缩进多少（设计稿 .sugg ul 的 padding-left:18px）
 exception-note-width = 220  # 手动例外弹层里「备注（可选）」那一格的宽（设计稿 DLG.excl 的 width:220px）
 radio-diameter    = 13    # 单选圆点的直径（设计稿 .opt input 是浏览器默认的 13px）
 radio-dot         = 5     # 选中时正中那一粒强调色的直径（设计稿 accent-color 画出来的样子）

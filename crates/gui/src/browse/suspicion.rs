@@ -32,10 +32,6 @@ pub const SECTION: &str = "整理建议";
 /// 那一簇里那颗分面标签上的字（设计稿 `#dup-chip`）。
 pub const FACET: &str = "疑似同一作品";
 
-/// 那一簇底下那句说明：它与「识别结论」那一簇同一个处境——**只用于浏览，不写进规则**
-/// （票 12 的验收第 3 条点名要屏上说出来）。
-pub const BROWSE_ONLY: &str = "只用于浏览，不写入规则";
-
 /// 卡片上「不是同一个」那一颗（设计稿 `data-mw="no:"`）。
 pub const NOT_SAME: &str = "不是同一个";
 

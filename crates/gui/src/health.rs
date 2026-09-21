@@ -89,8 +89,13 @@ pub const SAME_WORK: &str = "疑似同一作品";
 /// 疑似同一作品那一格在**识别还没做完**时底下那句（票 27 原话）。
 pub const SAME_WORK_BEFORE_IDENTIFY: &str = "识别完成后才有";
 
-/// 疑似同一作品那一格在**识别做完之后**底下那句小字（设计稿 `HEALTH` 那一格的原话）。
+/// 疑似同一作品那一格在**有建议时**底下那句小字（设计稿 `HEALTH` 那一格的原话）。
 pub const SAME_WORK_SUB: &str = "可以合并为一个作品";
+
+/// 那一格**一条建议都没有**时底下那句（设计稿 `renderHealth` 里 `if(!dupw)` 那一支的原话）。
+///
+/// 八格里只有这一格给零态另写了一句：别的格子零就是零，而这一格的零是「都处理干净了」。
+pub const SAME_WORK_NONE: &str = "没有待处理的建议";
 
 /// 刚扫完一个根、这一项还没算过时那一格底下那句。
 ///
@@ -321,7 +326,11 @@ impl Section {
         }
         // **沉淀库那一半在排活这一下就读好**：后台那条线程手里只有中立库的第二份只读连接，
         // 而「人说过哪一对不是同一个」是沉淀库里的事。那是一句小查询（同 `corrections`
-        // 读人定过的平台纠正），读不动就当没有——建议多提一对，好过整趟体检不跑。
+        // 读人定过的平台纠正）。
+        //
+        // **读不动时当作一条否定都没有**：人标记过「不是同一个」的那几对会**全部重新
+        // 出现**，那一格的数与跳过去之后筛出来的那几行跟着变多。宁可如此，也好过整趟
+        // 体检不跑——这一趟余下七格说的是盘上的事实，与沉淀库读不读得动无关。
         let dismissed = site
             .store
             .not_same_works(&site.library_identity)
@@ -444,11 +453,16 @@ impl Section {
                 self.said = None;
                 self.notice = None;
             }
-            // 疑似同一作品：**不跳屏、不开明细**，只在八格底下说一句（拿主意的人 2026-09-15 答岔路口 9；跳到浏览屏
-            // 「整理建议」由票 17 接上，挂单 `Q957`）。
             // **疑似同一作品**：算过而且有建议的，跳到浏览屏「整理建议」那一簇上
             // （挂单 `Q957`，票 27 验收最后一条）；算不出或者一条都没有的**不跳**
             // ——跳过去是一张空表，比留在原地说一句更让人摸不着头脑。
+            //
+            // **识别没做完先答那一句**（设计稿 `data-hdup` 那个监听器头一行 `if(!S.idDone)`）：
+            // 那时哪怕体检跑过一趟，算出来的也只是「照眼下这批还没认出作品的东西看」，
+            // 不是这个库最后的样子。
+            Some(Tile::SameWork) if !identified => {
+                self.notice = Some(SAME_WORK_CLICKED_BEFORE_IDENTIFY.to_string());
+            }
             Some(Tile::SameWork) => {
                 let 建议 = self
                     .checked
@@ -460,8 +474,7 @@ impl Section {
                         None
                     }
                     Some(_) => Some(SAME_WORK_CLICKED_NONE.to_string()),
-                    None if identified => Some(SAME_WORK_CLICKED_AFTER_SCAN.to_string()),
-                    None => Some(SAME_WORK_CLICKED_BEFORE_IDENTIFY.to_string()),
+                    None => Some(SAME_WORK_CLICKED_AFTER_SCAN.to_string()),
                 };
             }
             None => {}
@@ -1400,26 +1413,37 @@ fn face(
 ) -> Face {
     let Tile::Finding(finding) = tile else {
         // **疑似同一作品那一格的数就是核心库交回来的条数**（`same_work::survey_apart`）：
-        // 界面一条都不自己判（ADR-0024）。还没算过这一项时照旧画「—」。
-        let Some(found) = suspicions else {
-            return Face {
-                label: SAME_WORK,
-                value: "—".to_string(),
-                sub: if identified {
-                    SAME_WORK_AFTER_SCAN
-                } else {
-                    SAME_WORK_BEFORE_IDENTIFY
-                }
-                .to_string(),
-                tone: None,
-            };
+        // 界面一条都不自己判（ADR-0024）。
+        //
+        // **识别没做完一律画「—」**（设计稿 `renderHealth` 最后那一行 `if(!S.idDone)`
+        // 是一条后置的覆盖，压在算出来的数上头）：那时库里的作品还没立全，
+        // 算出来的数明天就不是这个数。还没算过这一项的照旧画「—」。
+        let sub = match (identified, suspicions) {
+            (false, _) => SAME_WORK_BEFORE_IDENTIFY,
+            (true, None) => SAME_WORK_AFTER_SCAN,
+            (true, Some(found)) => {
+                let count = u64::try_from(found.len()).unwrap_or(u64::MAX);
+                return Face {
+                    label: SAME_WORK,
+                    value: format!("{} 组", thousands(count)),
+                    // 零那一档另有一句（稿上八格里只有这一格给零态写了话）。
+                    sub: if count == 0 {
+                        SAME_WORK_NONE.to_string()
+                    } else {
+                        SAME_WORK_SUB.to_string()
+                    },
+                    // **这一格稿上不上色**（`HEALTH` 里它的 `c` 是空的，
+                    // `renderHealth` 那一支也从不给它上色）：它不是「库里有毛病」，
+                    // 是「有几件事可以顺手办」。
+                    tone: None,
+                };
+            }
         };
-        let count = u64::try_from(found.len()).unwrap_or(u64::MAX);
         return Face {
             label: SAME_WORK,
-            value: format!("{} 组", thousands(count)),
-            sub: SAME_WORK_SUB.to_string(),
-            tone: (count > 0).then_some(Tone::Caution),
+            value: "—".to_string(),
+            sub: sub.to_string(),
+            tone: None,
         };
     };
     // **目录与内容平台不符**那一格数的是**还没处理的那几组**（票 `gui-looks-like-the-design/28`）：

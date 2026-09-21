@@ -24,7 +24,7 @@ use romcat_core::title::{Language, TitleKind};
 use romcat_core::triage::same_work;
 use romcat_core::verdict::Store;
 use romcat_gui::app::{App, View};
-use romcat_gui::browse::suspicion;
+use romcat_gui::browse::{self, suspicion};
 use romcat_gui::headless;
 
 mod shared;
@@ -39,6 +39,8 @@ const 甲的译名: &str = "精灵宝可梦 红";
 const 乙的译名: &str = "口袋妖怪 红";
 /// 完全不参与这件事的第三个作品。
 const 丙: &str = "Seiken Densetsu 2 (Japan)";
+/// **还没认出作品**的那一份：合并的两侧都得说得出作品名，它不参与这件事。
+const 散: &str = "认不出这是什么";
 /// 两边撞上的那条中文条目。
 const 条目: u32 = 4312;
 
@@ -102,7 +104,7 @@ fn 界面() -> App {
     let mut catalog = Catalog::open_in_memory().expect("开得出中立库");
     romcat_core::catalog::roots::add_root(&catalog, None, 根, std::path::Path::new("/主库"))
         .expect("建得出根");
-    let variants: Vec<Variant> = [甲, 乙, 丙].iter().map(|名字| 变体(名字)).collect();
+    let variants: Vec<Variant> = [甲, 乙, 丙, 散].iter().map(|名字| 变体(名字)).collect();
     catalog
         .replace_variants(&variants, 1, &Manifest::default())
         .expect("写得进变体");
@@ -174,7 +176,7 @@ fn 左栏整理建议那颗标签的数出自核心库_按下去之后表里只�
     );
     // 它与「识别结论」同一个处境：只用于浏览、不写进规则——屏上说出来（票 12 验收第 3 条）。
     assert!(
-        屏上.contains(suspicion::BROWSE_ONLY),
+        屏上.contains(browse::BROWSE_ONLY),
         "没说清它不写进规则：\n{屏上}"
     );
 
@@ -295,8 +297,7 @@ fn 作品详情页概览那一面上也摆着同一张建议卡() {
 }
 
 #[test]
-fn 认不出作品的那一行不摆建议卡() {
-    // 合并的两侧都得说得出作品名，所以没有作品链接的那一行不参与这件事。
+fn 不在任何一条建议里的作品不摆建议卡() {
     let ctx = headless::context();
     let mut app = 界面();
     assert!(!核心库怎么说(&mut app).is_empty(), "夹具里该有建议");
@@ -305,5 +306,23 @@ fn 认不出作品的那一行不摆建议卡() {
     assert!(
         !屏上.contains("可能与"),
         "不在任何一条建议里的作品身上摆了建议卡：\n{屏上}"
+    );
+}
+
+#[test]
+fn 还没认出作品的那一行不摆建议卡_那道闸真走得到() {
+    // 合并的两侧都得说得出作品名（`WorkAnchor::Loose` 那一支），所以没有作品链接的
+    // 那一行不参与这件事——上面那条点的是认得出作品的行，钉不到这道闸上。
+    let ctx = headless::context();
+    let mut app = 界面();
+    跑一帧(&ctx, |ui| app.ui(ui));
+    let 屏上 = 点一下(&ctx, 散, |ui| app.ui(ui));
+    assert!(
+        屏上.contains("未关联作品") || 屏上.contains("这个名字是从文件名剥出来的"),
+        "点开的不是那一行还没认出作品的：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("可能与"),
+        "还没认出作品的那一行身上摆了建议卡：\n{屏上}"
     );
 }

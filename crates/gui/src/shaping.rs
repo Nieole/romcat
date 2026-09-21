@@ -578,6 +578,9 @@ pub fn reshape(site: &mut Site, tasks: &mut Tasks) -> Result<u64, String> {
     };
     // **沉淀库那一半在排活这一下就读好**（同 `health::Section::check`）：台上那条线程手里
     // 只有中立库，而「人说过哪一对不是同一个」是沉淀库里的事。
+    //
+    // **读不动时当作一条否定都没有**：人标记过「不是同一个」的那几对会全部重新出现。
+    // 宁可如此，也好过这一趟重新成型白跑——它真正要办的是重新成型，那一半与沉淀库无关。
     let dismissed = site
         .store
         .not_same_works(&site.library_identity)

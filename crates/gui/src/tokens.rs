@@ -955,8 +955,6 @@ pub struct Layout {
     pub suspicion_gap: f32,
     /// 那张卡里理由一条与一条之间（设计稿 `.sugg ul` 的 `gap`）。
     pub suspicion_reason_gap: f32,
-    /// 理由那一列缩进多少（设计稿 `.sugg ul` 的 `padding-left`）。
-    pub suspicion_reason_indent: f32,
     /// 手动例外弹层里「备注（可选）」那一格的宽（设计稿 `DLG.excl`）。
     pub exception_note_width: f32,
     /// 单选圆点的直径（设计稿 `.opt input`）。

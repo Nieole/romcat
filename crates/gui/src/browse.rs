@@ -116,6 +116,14 @@ pub mod work;
 /// （[`VariantDetail::preferred_now`]），这里只是屏上怎么写。
 const PREFERRED_TAG: &str = "首选变体";
 
+/// 左栏那两簇**只用于浏览**的分面底下那句说明：**识别结论**与**整理建议**
+/// （设计稿 `.fpane` 里这两簇各带一句 `.help`）。
+///
+/// **一句话只有一处**：两簇各写一份的话，改了一处屏上就同时摆着两种说法。
+/// 它们不写进子库的规则这件事由核心库那一侧答（`WorkQuery::to_rule` 的
+/// `Unruly::State` 与 `Unruly::Suspected`），这里只是屏上怎么写。
+pub const BROWSE_ONLY: &str = "只用于浏览，不写入规则";
+
 /// 浏览屏两种不改变集合的呈现方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BrowseView {
@@ -909,6 +917,8 @@ impl Screen {
     /// 重问一次筛选面板上的可选值。开库时与改过元数据之后各一次。
     pub fn reload(&mut self, site: &Site) {
         self.reload_facets(&site.catalog);
+        // **疑似同一作品那一份也在这儿重取**（票 `gui-looks-like-the-design/17`）：
+        // 它与左栏那几档分面同一个处境——库底下一变，缓着的那一份就过期了。
         self.reload_suspicions(site);
     }
 
@@ -942,6 +952,9 @@ impl Screen {
     fn shown_names(&self, catalog: &Catalog) -> BTreeMap<String, String> {
         let names = self.suspected_works();
         let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+        // **读不动就退回作品名**：卡上那个名字会与表里那一行写的不一样（那正是这一格
+        // 要防的事），可那也只是难看；扫出来的建议本身照旧摆得出来，理由也照旧列得出。
+        // 真正的那句错由 [`Self::reload_suspicions`] 说——它与这一趟是同一下。
         let Ok(sets) = catalog.titles_of_works(&borrowed) else {
             return BTreeMap::new();
         };
@@ -992,16 +1005,26 @@ impl Screen {
     pub(super) fn do_suspicion(&mut self, site: &mut Site, deed: &suspicion::Deed) {
         match deed {
             suspicion::Deed::Merge(works) => {
-                let anchors: Vec<WorkAnchor> = works
-                    .iter()
-                    .filter_map(|name| match site.catalog.work_named(name) {
-                        Ok(Some(id)) => Some(WorkAnchor::Work(id)),
-                        _ => None,
-                    })
-                    .collect();
-                if anchors.len() < 2 {
-                    self.notice = Some(merge::NEED_TWO.to_string());
-                    return;
+                let mut anchors: Vec<WorkAnchor> = Vec::new();
+                for name in works {
+                    match site.catalog.work_named(name) {
+                        Ok(Some(id)) => anchors.push(WorkAnchor::Work(id)),
+                        // **缓着的那份建议过期了**：那个作品已经被并掉、或者库重扫过了。
+                        // 不复用屏头那颗「合并作品…」的那句（人刚在一张卡上按了一颗，
+                        // 根本没有「勾选」这回事）——说实话，并就地重取一份建议。
+                        Ok(None) => {
+                            self.notice = Some(format!(
+                                "《{name}》已经不在库里了，这条建议过期了——已经重取了一份。"
+                            ));
+                            self.reload_suspicions(site);
+                            return;
+                        }
+                        // **不静默**：读不动就说读不动。
+                        Err(error) => {
+                            self.notice = Some(format!("中立库读不动：{error}"));
+                            return;
+                        }
+                    }
                 }
                 // **不带当前筛选**：向导第二步要核对的是这两个作品**全部**的变体，
                 // 而「整理建议」那颗标签正筛着这一对——照筛过的展开会少列几个
@@ -2989,7 +3012,7 @@ impl Screen {
                 facet_chips(ui, "中文", &self.facets.chinese, &mut self.query.chinese);
 
                 pane_gap(ui);
-                section_title(ui, "识别结论", Some("只用于浏览，不写入规则"));
+                section_title(ui, "识别结论", Some(BROWSE_ONLY));
                 section_gap(ui);
                 let mut state = self.query.state;
                 chip_cluster(ui, |ui| {
@@ -3020,7 +3043,7 @@ impl Screen {
                 // **整理建议**（设计稿 `#dup-chip` 那一簇）：一颗标签，数的是核心库交回来的
                 // 那几条建议（`same_work::survey`）——界面一个数都不自己算（ADR-0024）。
                 // 它与「识别结论」同一个处境：**只用于浏览，不写进规则**。
-                section_title(ui, suspicion::SECTION, Some(suspicion::BROWSE_ONLY));
+                section_title(ui, suspicion::SECTION, Some(BROWSE_ONLY));
                 section_gap(ui);
                 let 建议数 = self.suspicions.len();
                 let mut 只看建议 = self.query.suspected.is_some();

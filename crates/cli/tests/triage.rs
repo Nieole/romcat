@@ -880,3 +880,153 @@ fn 导出不许把那份_json_写进主库() {
     );
     assert!(写别处.exists(), "写到工作目录里该成功");
 }
+
+/// **疑似同一作品**：命令行列出来的那几句，与核心库当场算出来的逐字相等。
+///
+/// 票 `gui-looks-like-the-design/17` 验收第 1 条要的是「命令行与界面读同一处」。
+/// 界面那一侧有 `crates/gui/tests/suspicion.rs` 钉着，这一条钉命令行那一侧：
+/// **判断、阈值与那几句理由一个字都不在命令行这一层。**
+#[test]
+fn 疑似同一作品列出来的那几句与核心库逐字相等_不是同一个记下来就不再提() {
+    use romcat_core::catalog::identify::{Identification, Provenance};
+    use romcat_core::catalog::scrape::{Harvested, HarvestedValue};
+    use romcat_core::scrape::{AnchorKind, Field};
+    use romcat_core::triage::same_work;
+    use romcat_core::verdict::Store;
+
+    const 甲: &str = "Pocket Monsters - Aka (Japan)";
+    const 乙: &str = "Pocket Monster - Red Version (Japan)";
+
+    let (library, workspace) = 现场();
+    扫并识别(library.path(), workspace.path());
+
+    // 手摆一对：同一个平台、同一年，两边的名字在中文离线源里指向同一条条目。
+    {
+        let mut catalog = 开中立库(workspace.path());
+        let 变体们: Vec<String> = catalog
+            .variants()
+            .expect("读得动")
+            .into_iter()
+            .map(|row| row.key)
+            .take(2)
+            .collect();
+        assert_eq!(变体们.len(), 2, "这份小库该有两个以上变体");
+        let mut 结论 = Vec::new();
+        for (at, (名字, 叫作)) in [(甲, "精灵宝可梦 红"), (乙, "口袋妖怪 红")]
+            .into_iter()
+            .enumerate()
+        {
+            let work = catalog
+                .add_work(名字, Provenance::Identified)
+                .expect("建得出作品");
+            结论.push(Identification {
+                variant_key: 变体们[at].clone(),
+                state: State::Matched,
+                reason: None,
+                platform: Some("FC".to_string()),
+                standalone: None,
+                edition: None,
+                units: 1,
+                nkit: 0,
+                read_bytes: 0,
+                work_id: Some(work),
+                release_id: None,
+                candidates: Vec::new(),
+            });
+            catalog
+                .put_verdict_value(AnchorKind::Work, 名字, Field::Year, "1996", "夹具")
+                .expect("写得进年份");
+            catalog
+                .put_scraped(&[Harvested {
+                    anchor: AnchorKind::Variant.label().to_string(),
+                    subject: 变体们[at].clone(),
+                    source: "中文离线源".to_string(),
+                    input: "夹具".to_string(),
+                    values: vec![HarvestedValue {
+                        field: Field::Title.label().to_string(),
+                        value: 叫作.to_string(),
+                        evidence: format!(
+                            "「{叫作}」撞上了中文离线源{}4312：名字一字不差",
+                            romcat_core::zh::ENTRY_MARK
+                        ),
+                    }],
+                    media: Vec::new(),
+                }])
+                .expect("写得进刮削值");
+        }
+        catalog
+            .write_identifications(&结论)
+            .expect("写得进识别结论");
+    }
+
+    let 选库 = ["--library", "小库", "--workspace"];
+    let ws = workspace.path().to_string_lossy().to_string();
+    let mut 列 = vec!["triage", "same-work"];
+    列.extend(选库);
+    列.push(&ws);
+    let out = 跑(&列);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let 印出来的 = String::from_utf8_lossy(&out.stdout).to_string();
+
+    // **核心库当场算一遍**：命令行印的每一句都得逐字在里头。
+    let catalog = 开中立库(workspace.path());
+    let store =
+        Store::open(&workspace::verdict_store_path(workspace.path())).expect("开得出沉淀库");
+    let 建议 = same_work::survey(&catalog, &store, "小库").expect("扫得动");
+    assert_eq!(建议.len(), 1, "该正好一对：{建议:?}");
+    for 一句 in 建议[0].reasons() {
+        assert!(
+            印出来的.contains(&一句),
+            "这一句没印出来：{一句}\n{印出来的}"
+        );
+    }
+    assert!(印出来的.contains(甲) && 印出来的.contains(乙), "{印出来的}");
+    drop((catalog, store));
+
+    // **「不是同一个」记下来就不再提**，撤掉又回来。
+    let mut 否 = vec!["triage", "same-work"];
+    否.extend(选库);
+    否.push(&ws);
+    否.extend(["--not-same", 甲, 乙]);
+    let out = 跑(&否);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = 跑(&列);
+    let 之后 = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        之后.contains("没有疑似同一作品的建议"),
+        "记过之后还在提：\n{之后}"
+    );
+
+    let mut 撤 = 否.clone();
+    撤.push("--undo");
+    let out = 跑(&撤);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = 跑(&列);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(甲),
+        "撤掉之后该重新提出来"
+    );
+
+    // **`--not-same` 给两遍不许悄悄忽略**。
+    let mut 两遍 = 否.clone();
+    两遍.extend(["--not-same", "丙", "丁"]);
+    let out = 跑(&两遍);
+    assert!(!out.status.success(), "四个名字该当场拒了");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("一次只收一对"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

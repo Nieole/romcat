@@ -3928,6 +3928,15 @@ fn run_triage_same_work(args: &TriageSameWorkArgs) -> ExitCode {
         Ok(site) => site,
         Err(message) => return fail(message),
     };
+    // `--not-same` 给两遍时 clap 把四个值攒进同一个 `Vec`。**不许悄悄忽略**：
+    // 那时人以为自己记了两对，实际一对都没记。
+    if !args.not_same.is_empty() && args.not_same.len() != 2 {
+        return fail(format!(
+            "`--not-same` 一次只收一对作品，收到了 {} 个名字：{}。\n             要记好几对就分几趟跑。",
+            args.not_same.len(),
+            args.not_same.join("、"),
+        ));
+    }
     if let [left, right] = args.not_same.as_slice() {
         if args.undo {
             return match same_work::undo_not_same(
@@ -3976,8 +3985,9 @@ fn run_triage_same_work(args: &TriageSameWorkArgs) -> ExitCode {
         }
     }
     println!(
-        "\n合并一对：`romcat triage same-work{} --not-same '<作品>' '<另一个作品>'` 记的是\n\
-         「不是同一个」；要真的合并请在界面上走合并作品那三步——它要人逐个核对变体与字段。",
+        "\n否掉一对（记下「不是同一个」，以后不再提）：\n  \
+         `romcat triage same-work{} --not-same '<作品>' '<另一个作品>'`\n\
+         真要合并请在界面上走合并作品那三步——它要人逐个核对变体与字段。",
         args.common.选择器(),
     );
     ExitCode::SUCCESS
