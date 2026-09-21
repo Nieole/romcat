@@ -183,7 +183,7 @@ pub struct Options {
     pub write_batch: usize,
     /// **平台纠正**：人对「目录说 A、内容是 B」那几组定过的决定（票
     /// `gui-looks-like-the-design/28`）。`None` 是一条都没定过，这一趟照旧只看内容与目录。
-    pub platform_fixes: Option<PlatformFixes>,
+    pub decided_platforms: Option<DecidedPlatforms>,
 }
 
 impl Options {
@@ -195,7 +195,7 @@ impl Options {
             read_library: true,
             max_read_bytes: None,
             write_batch: 2_000,
-            platform_fixes: None,
+            decided_platforms: None,
         }
     }
 }
@@ -206,14 +206,14 @@ impl Options {
 /// （[`conflicting_platform`]，ADR-0024）；这里只记着「那一组人定的是什么」，
 /// 并把那份清单拿在手上好去问。
 #[derive(Debug, Clone)]
-pub struct PlatformFixes {
+pub struct DecidedPlatforms {
     /// 判「撞上哪一组」要用的那份平台清单。
     manifest: Manifest,
     /// 那一对平台 → 人定的那一档。
     by_pair: BTreeMap<(String, String), PlatformDecision>,
 }
 
-impl PlatformFixes {
+impl DecidedPlatforms {
     /// 从沉淀库读回来的那些纠正摆成一份。
     #[must_use]
     pub fn new(manifest: &Manifest, corrections: &[PlatformCorrection]) -> Self {
@@ -495,7 +495,7 @@ pub fn run(
         // 从头算的那一趟刚清完，认领的是一张空表。
         projector: Projector::adopting(catalog)?,
         // 人定过的那些平台纠正：判「这个变体按哪个平台算」时**它先说话**（`platform_of`）。
-        platform_fixes: options.platform_fixes.clone(),
+        decided_platforms: options.decided_platforms.clone(),
         ..Run::default()
     };
     let mut batch: Vec<Identification> = Vec::new();
@@ -982,7 +982,7 @@ struct Run {
     model: model::ModelCount,
     /// **平台纠正**：人对那几组「目录说 A、内容是 B」定过的决定（票
     /// `gui-looks-like-the-design/28`）。从 [`Options`] 上搬过来，一趟里不变。
-    platform_fixes: Option<PlatformFixes>,
+    decided_platforms: Option<DecidedPlatforms>,
     /// **落到模型推断这一层、而缓存里还没有答案**的那些问题，连它们的提问指纹。
     ///
     /// 攒起来等主循环跑完再打包问，而不是边跑边问：批量打包本来就要求先把一批凑齐，
@@ -3421,9 +3421,9 @@ fn assemble(
 /// **判断只有这一处，结论落进中立库**（`identification.platform`，票
 /// `one-criterion-per-thing/03`）：刮削读那一列，不自己拿目录声明再判一次（ADR-0024 推论 3）。
 /// 「这个变体撞上了平台纠正的哪一组」同样不在这儿另判，问的是
-/// [`conflicting_platform`] 那一处（[`PlatformFixes::decide`]）。
+/// [`conflicting_platform`] 那一处（[`DecidedPlatforms::decide`]）。
 fn platform_of(variant: &VariantRow, units: &[ContentUnit], state: &Run) -> Option<String> {
-    if let Some(fixes) = &state.platform_fixes
+    if let Some(fixes) = &state.decided_platforms
         && let Some(decided) = fixes.decide(variant, units)
     {
         return Some(decided);
@@ -3970,7 +3970,7 @@ mod tests {
             })
             .collect();
         Run {
-            platform_fixes: Some(PlatformFixes::new(&Manifest::builtin(), &corrections)),
+            decided_platforms: Some(DecidedPlatforms::new(&Manifest::builtin(), &corrections)),
             ..Run::default()
         }
     }

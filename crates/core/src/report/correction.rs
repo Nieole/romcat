@@ -15,7 +15,7 @@
 //! **主库只读**（ADR-0004）：纠正一个字节都不动盘上的文件，所以目录名与扩展名照旧
 //! 对不上，下一趟体检照旧数得出这一组。**报告说的是盘上的事实，纠正说的是人的决定**
 //! ——两样分开，撤销才回得去。概要那一格要的是**还没处理的那些**，由
-//! [`PlatformCorrections::remaining`] 交出来。
+//! [`CorrectionGroups::remaining`] 交出来。
 
 use crate::platform::Manifest;
 use crate::verdict::{PlatformCorrection, PlatformDecision};
@@ -82,11 +82,11 @@ impl CorrectionGroup {
 
 /// 屏上「平台纠正」那一层的全部内容。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PlatformCorrections {
+pub struct CorrectionGroups {
     groups: Vec<CorrectionGroup>,
 }
 
-impl PlatformCorrections {
+impl CorrectionGroups {
     /// 把报告里的组与沉淀库里的决定对起来。
     ///
     /// **只列报告里有的组**：人定过、可盘上已经不再有那一组的（文件挪走了、根移除了），
@@ -104,7 +104,7 @@ impl PlatformCorrections {
             .map(|group| CorrectionGroup {
                 decision: decided
                     .iter()
-                    .find(|one| one.declared == group.declared && one.implied == group.implied)
+                    .find(|one| one.is_for(&group.declared, &group.implied))
                     .map(|one| one.decision),
                 interchangeable: manifest.runs_games_of(&group.declared, &group.implied),
                 group: group.clone(),

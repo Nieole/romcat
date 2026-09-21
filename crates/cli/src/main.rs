@@ -1816,7 +1816,12 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
     options.max_read_bytes = args.max_read_mib.map(|mib| mib.saturating_mul(1 << 20));
     // **平台纠正**：人在界面上按组定过的那些「按内容改 / 保持目录的说法」（票
     // `gui-looks-like-the-design/28`）。判「这个变体按哪个平台算」时它先说话
-    // （`identify::platform_of`）——两台机器上跑同一趟识别得出同一个答案，所以命令行也读它。
+    // （`identify::platform_of`）——命令行不读它的话，人在界面上定完、回终端挂后台跑一趟
+    // 识别（ADR-0023 说的正是这条分工）就等于没定。
+    //
+    // ⚠️ **平台清单两边取的路子不同**：这里走老规矩那条链（工作目录里的 `platforms.toml`），
+    // 界面那一侧一律用内置那一份。自带清单时两边会分出不同的组——那是界面整条路子上的既有
+    // 口径（库体检那一趟也是内置），挂单 `Q1031` 记着。
     let corrections = match store.platform_corrections(&slug.text()) {
         Ok(rows) => rows,
         Err(error) => return fail(format!("沉淀库里的平台纠正读不动：{error}")),
@@ -1828,7 +1833,7 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
             Ok(manifest) => manifest,
             Err(message) => return fail(message),
         };
-        options.platform_fixes = Some(identify::PlatformFixes::new(&manifest, &corrections));
+        options.decided_platforms = Some(identify::DecidedPlatforms::new(&manifest, &corrections));
     }
 
     // **文件名那一层**（票 11）：剥离规则加中文离线索引。取过数才跑得起来——

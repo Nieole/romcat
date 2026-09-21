@@ -535,6 +535,17 @@ pub struct PlatformCorrection {
     pub decided_at: i64,
 }
 
+impl PlatformCorrection {
+    /// 这一条管的是不是「目录说 `declared`、内容是 `implied`」那一组。
+    ///
+    /// **一处**：屏上那一层与识别那一趟都从这儿问（原先两处各手写一遍 `a == b && c == d`，
+    /// 改一条就会有一处漏改；票 28 收尾审查 Standards 轴第 3 条）。
+    #[must_use]
+    pub fn is_for(&self, declared: &str, implied: &str) -> bool {
+        self.declared == declared && self.implied == implied
+    }
+}
+
 /// 一条裁决钉在什么上。
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Anchor {

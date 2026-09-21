@@ -923,7 +923,7 @@ impl Screen {
         };
         // 画八格之前先把**平台纠正**那一份合出来：目录与内容平台不符那一格数的是「还没处理的那几组」
         // （票 `gui-looks-like-the-design/28`），那个数由核心库交（`PlatformCorrections::remaining`）。
-        self.health.ensure_fixes(site);
+        self.health.ensure_corrections(site);
         let health = &mut self.health;
         foldable_panel(
             ui,

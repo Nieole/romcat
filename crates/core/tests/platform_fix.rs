@@ -13,9 +13,9 @@ use std::path::Path;
 use romcat_core::catalog::{Catalog, Roots};
 use romcat_core::dat::repo::DatRepo;
 use romcat_core::fs::RealFs;
-use romcat_core::identify::{self, Options, PlatformFixes, fuzzy};
+use romcat_core::identify::{self, DecidedPlatforms, Options, fuzzy};
 use romcat_core::platform::Manifest;
-use romcat_core::report::{HealthReport, PlatformCorrections};
+use romcat_core::report::{CorrectionGroups, HealthReport};
 use romcat_core::scan::aggregate::Limits;
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::task::Handle;
@@ -87,8 +87,8 @@ fn 体检(现场: &现场) -> HealthReport {
     )
 }
 
-fn 那一层(现场: &现场) -> PlatformCorrections {
-    PlatformCorrections::build(
+fn 那一层(现场: &现场) -> CorrectionGroups {
+    CorrectionGroups::build(
         &体检(现场),
         &Manifest::builtin(),
         &现场
@@ -105,7 +105,7 @@ fn 跑一趟识别(现场: &mut 现场) {
         .platform_corrections(LIBRARY)
         .expect("读得出人定过的那些");
     let mut options = Options::new(Roots::single("库", 现场.dir.path()));
-    options.platform_fixes = Some(PlatformFixes::new(&Manifest::builtin(), &corrections));
+    options.decided_platforms = Some(DecidedPlatforms::new(&Manifest::builtin(), &corrections));
     let repo = DatRepo::in_memory().expect("开得出 DAT 库");
     identify::run(
         &RealFs::new(),

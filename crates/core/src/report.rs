@@ -1111,7 +1111,7 @@ mod duplicates;
 mod findings;
 mod render;
 
-pub use correction::{CorrectionGroup, PlatformCorrections};
+pub use correction::{CorrectionGroup, CorrectionGroups};
 pub use duplicates::DuplicateDetails;
 pub use findings::{Finding, FindingRow};
 pub use render::{
@@ -1242,12 +1242,12 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        let 一条都没定 = PlatformCorrections::build(&report, &manifest, &[]);
+        let 一条都没定 = CorrectionGroups::build(&report, &manifest, &[]);
         assert_eq!(一条都没定.remaining(), 3);
         assert_eq!(一条都没定.handled(), 0);
         assert_eq!(一条都没定.handled_note(), None);
 
-        let 改了一组 = PlatformCorrections::build(
+        let 改了一组 = CorrectionGroups::build(
             &report,
             &manifest,
             &定过(&[("GBA", "NDS", PlatformDecision::ByContent)]),
@@ -1259,7 +1259,7 @@ mod tests {
             Some("已改为 NDS")
         );
 
-        let 保持那一组 = PlatformCorrections::build(
+        let 保持那一组 = CorrectionGroups::build(
             &report,
             &manifest,
             &定过(&[("FC", "FDS", PlatformDecision::KeepDeclared)]),
@@ -1287,7 +1287,7 @@ mod tests {
         // 判据是平台清单里的 `向下兼容`（`Manifest::runs_games_of`），不在这一层另写。
         let manifest = Manifest::builtin();
         let 改不改都行 = 收(&[("库/3DS/合集/雷顿教授.nds", Some(8192))]);
-        let 那一层 = PlatformCorrections::build(&报告(&改不改都行), &manifest, &[]);
+        let 那一层 = CorrectionGroups::build(&报告(&改不改都行), &manifest, &[]);
         let one = &那一层.groups()[0];
         assert!(one.interchangeable, "3DS 跑得了 NDS 的卡");
         assert_eq!(
@@ -1297,7 +1297,7 @@ mod tests {
         );
 
         let 只能改 = 收(&[("库/GBA/汉化/逆转裁判4.nds", Some(8192))]);
-        let 那一层 = PlatformCorrections::build(&报告(&只能改), &manifest, &[]);
+        let 那一层 = CorrectionGroups::build(&报告(&只能改), &manifest, &[]);
         let one = &那一层.groups()[0];
         assert!(!one.interchangeable, "GBA 跑不了 NDS 的卡");
         assert_eq!(one.interchangeable_note(), None, "跑不了就不说这一句");

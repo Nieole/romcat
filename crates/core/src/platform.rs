@@ -603,9 +603,7 @@ impl Manifest {
     pub fn runs_games_of(&self, host: &str, guest: &str) -> bool {
         host != guest
             && self
-                .platforms
-                .iter()
-                .find(|one| one.name == host)
+                .platform_named(host)
                 .is_some_and(|one| one.back_compat.iter().any(|name| name == guest))
     }
 

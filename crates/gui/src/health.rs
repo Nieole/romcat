@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use romcat_core::catalog::{Catalog, CatalogError, Roots};
 use romcat_core::platform::Manifest;
 use romcat_core::report::{
-    CorrectionGroup, DuplicateDetails, Finding, HealthReport, PlatformCorrections, human_bytes,
+    CorrectionGroup, CorrectionGroups, DuplicateDetails, Finding, HealthReport, human_bytes,
     thousands,
 };
 use romcat_core::scan::ScanOutcome;
@@ -66,8 +66,14 @@ pub const PLATFIX: &str = "平台纠正";
 /// 平台纠正那一层页脚上那颗按钮（设计稿原话）。
 pub const PLATFIX_DONE: &str = "完成";
 
-/// 平台纠正那一层末尾那一句（设计稿原话）。
-pub const PLATFIX_FOOTNOTE: &str = "改了平台的变体会在下次识别时按新平台重新匹配。";
+/// 平台纠正那一层末尾那一句。
+///
+/// **前半句照设计稿**；后半句是这一票**照实补的**：稿上那句副标题写着「导出和同步时按纠正后的
+/// 平台放置」，可导出目录名取的是**键里那一级目录**（`path::platform_of_key`），同步读的是
+/// 中立库里**目录声明的那一列**——两处眼下都不读纠正。**屏上不许许一句做不到的话**
+/// （票 28 收尾审查 Spec 轴第 1 条），所以这里如实说，那件事记在挂单 `Q1033` 上。
+pub const PLATFIX_FOOTNOTE: &str =
+    "改了平台的变体会在下次识别时按新平台重新匹配；导出与同步眼下仍按目录放置。";
 
 /// 平台纠正那一层里定过之后那颗「撤销」（设计稿原话）。
 pub const PLATFIX_UNDO: &str = "撤销";
@@ -121,12 +127,12 @@ pub struct Section {
     notice: Option<String>,
     /// **平台纠正**那一层开着没有（票 `gui-looks-like-the-design/28`）。
     platfix: bool,
-    /// 报告里那几组加上人定过的决定，**核心库合出来的那一份**（[`PlatformCorrections`]）；
+    /// 报告里那几组加上人定过的决定，**核心库合出来的那一份**（[`CorrectionGroups`]）；
     /// 还没合过是 `None`。界面一个数都不自己算（ADR-0005、ADR-0024）。
     ///
     /// **缓着而不是每帧现读**：它要读沉淀库，而这一层画在画帧那条线程上。报告换了、
-    /// 或者人刚定过一条，就扔掉重合（[`Section::forget_fixes`]）。
-    fixes: Option<PlatformCorrections>,
+    /// 或者人刚定过一条，就扔掉重合（[`Section::forget_corrections`]）。
+    corrections: Option<CorrectionGroups>,
 }
 
 /// 明细弹层里「在文件系统中打开」那颗按钮上的字（设计稿原话）。
@@ -188,7 +194,7 @@ impl Section {
     /// 扫完一个根：拿扫描交回的那份报告，连同一份统计折出重复拷贝的完整明细。`at` 是认领那一刻。
     pub fn take_scan(&mut self, outcome: &ScanOutcome, at: i64) {
         self.error = None;
-        self.forget_fixes();
+        self.forget_corrections();
         self.checked = Some(Checked {
             report: outcome.report.clone(),
             duplicates: DuplicateDetails::build(&outcome.aggregate, &outcome.report),
@@ -203,15 +209,15 @@ impl Section {
     }
 
     /// 把缓着的那份**平台纠正**扔掉，下一帧重合：报告换了、或者人刚定过一条。
-    fn forget_fixes(&mut self) {
-        self.fixes = None;
+    fn forget_corrections(&mut self) {
+        self.corrections = None;
     }
 
     /// 合一份**平台纠正**：报告里那几组 + 沉淀库里人定过的决定，合的是核心库
-    /// （[`PlatformCorrections::build`]）。读沉淀库没成就当一条都没定过——那时屏上会把
+    /// （[`CorrectionGroups::build`]）。读沉淀库没成就当一条都没定过——那时屏上会把
     /// 处理过的组重新问一遍，而**不会**把人定过的东西说成没定过。
-    pub(crate) fn ensure_fixes(&mut self, site: &Site) {
-        if self.fixes.is_some() {
+    pub(crate) fn ensure_corrections(&mut self, site: &Site) {
+        if self.corrections.is_some() {
             return;
         }
         let Some(checked) = &self.checked else {
@@ -221,7 +227,7 @@ impl Section {
             .store
             .platform_corrections(&site.library_identity)
             .unwrap_or_default();
-        self.fixes = Some(PlatformCorrections::build(
+        self.corrections = Some(CorrectionGroups::build(
             &checked.report,
             &Manifest::builtin(),
             &decided,
@@ -230,8 +236,8 @@ impl Section {
 
     /// 眼下那一份**平台纠正**（测试拿它核对）。
     #[must_use]
-    pub fn fixes(&self) -> Option<&PlatformCorrections> {
-        self.fixes.as_ref()
+    pub fn corrections(&self) -> Option<&CorrectionGroups> {
+        self.corrections.as_ref()
     }
 
     /// **平台纠正**那一层开着没有（测试拿它核对）。
@@ -303,7 +309,7 @@ impl Section {
         match done.ended {
             Ending::Done(Product::Checked { report, duplicates }) => {
                 self.error = None;
-                self.forget_fixes();
+                self.forget_corrections();
                 self.checked = Some(Checked {
                     report: *report,
                     duplicates: *duplicates,
@@ -346,7 +352,7 @@ impl Section {
             );
             return;
         };
-        let 点了 = tiles_ui(ui, &checked.report, self.fixes.as_ref(), identified);
+        let 点了 = tiles_ui(ui, &checked.report, self.corrections.as_ref(), identified);
         match 点了 {
             // **目录与内容平台不符**那一格点进去不是明细，是**平台纠正**那一层（设计稿
             // `HEALTH` 里这一格的 `data-dg="open:platfix"`，票 `gui-looks-like-the-design/28`）：
@@ -397,24 +403,23 @@ impl Section {
     /// 旁边一颗「撤销」。
     ///
     /// **一个数都不在这儿算**：组、条数、判据、「改不改都行」那一句全由核心库交出来
-    /// （[`PlatformCorrections`]，ADR-0005、ADR-0024）。**盘上一个字节都不动**（ADR-0004）：
+    /// （[`CorrectionGroups`]，ADR-0005、ADR-0024）。**盘上一个字节都不动**（ADR-0004）：
     /// 按下去只往**沉淀库**写一条决定，文件不移动、不改名。
     pub(crate) fn platfix_ui(&mut self, ctx: &egui::Context, site: &mut Site) {
         if !self.platfix {
             return;
         }
-        self.ensure_fixes(site);
-        let (Some(fixes), Some(checked)) = (&self.fixes, &self.checked) else {
+        self.ensure_corrections(site);
+        let Some(fixes) = &self.corrections else {
             return;
         };
         // 副标题：**判据那一句出自核心库**（`Finding::criterion`，与导出的清单抬头同一句），
         // 后面接的是这一层自己的政策话（同明细弹层 `note_of` 那条先例）。
         let note = format!(
-            "{}。共 {} 条目录与内容不符，按组处理；纠正记为裁决，不移动任何文件，导出和同步时按纠正后的平台放置。",
+            "{}。共 {} 条目录与内容不符，按组处理；纠正记为裁决，不移动任何文件。",
             Finding::PlatformConflicts.criterion(),
             thousands(fixes.remaining()),
         );
-        let _ = checked;
         let mut 按了: Option<(String, String, Option<PlatformDecision>)> = None;
         let said = self.said.clone();
         let footer = Footer::new(Button::new(PLATFIX_DONE, Pressed::Close)).dismiss_on_right();
@@ -453,7 +458,7 @@ impl Section {
         }
         if let Some((declared, implied, 决定)) = 按了 {
             self.said = Some(self.decide(site, &declared, &implied, 决定));
-            self.forget_fixes();
+            self.forget_corrections();
         }
     }
 
@@ -470,10 +475,10 @@ impl Section {
     ) -> Result<String, String> {
         let library = site.library_identity.clone();
         let 条数 = self
-            .fixes
+            .corrections
             .as_ref()
-            .and_then(|fixes| {
-                fixes
+            .and_then(|那一层| {
+                那一层
                     .groups()
                     .iter()
                     .find(|one| one.group.declared == declared && one.group.implied == implied)
@@ -498,10 +503,18 @@ impl Section {
                         thousands(条数)
                     )
                 }),
+            // **交回值不许丢**：本来就没有说了算的那一条时说「已撤销」是骗人的
+            // （票 28 收尾审查 Standards 轴第 7 条）。
             None => site
                 .store
                 .undo_platform_correction(&library, declared, implied)
-                .map(|_| "已撤销平台纠正，这一组恢复为目录给出的平台".to_string()),
+                .map(|撤掉了| {
+                    if 撤掉了 {
+                        "已撤销平台纠正，这一组恢复为目录给出的平台".to_string()
+                    } else {
+                        "这一组上没有说了算的纠正，什么都没撤".to_string()
+                    }
+                }),
         }
         .map_err(|why| format!("这一下没记进沉淀库：{why}"))
     }
@@ -1154,7 +1167,7 @@ struct Face {
 fn face(
     tile: Tile,
     report: &HealthReport,
-    fixes: Option<&PlatformCorrections>,
+    fixes: Option<&CorrectionGroups>,
     identified: bool,
 ) -> Face {
     let Tile::Finding(finding) = tile else {
@@ -1172,19 +1185,19 @@ fn face(
     };
     // **目录与内容平台不符**那一格数的是**还没处理的那几组**（票 `gui-looks-like-the-design/28`）：
     // 处理过的组不再计数，小字改说「已处理 N 组」。两个数都由核心库交出来
-    // （`PlatformCorrections::remaining` / `handled_note`），界面一个都不自己算。
+    // （`CorrectionGroups::remaining` / `handled_note`），界面一个都不自己算。
     let 纠正 = (finding == Finding::PlatformConflicts)
         .then_some(fixes)
         .flatten();
     let count = 纠正.map_or_else(
         || report.finding_count(finding),
-        PlatformCorrections::remaining,
+        CorrectionGroups::remaining,
     );
     // 小字出自核心库那一处（`Finding::hint`，判据的短写法）：界面不另写一套（ADR-0024；拿主意的人
     // 2026-09-20 定「判据文案统一到核心库一处，格子小字也从同一处出」）。重复拷贝那一格稿上写的是
     // 「可腾出 N」——那是报告里的一个数，所以 `hint()` 对它交回 `None`。
     let sub = 纠正
-        .and_then(PlatformCorrections::handled_note)
+        .and_then(CorrectionGroups::handled_note)
         .unwrap_or_else(|| {
             finding.hint().map_or_else(
                 || {
@@ -1217,7 +1230,7 @@ fn face(
 fn tiles_ui(
     ui: &mut egui::Ui,
     report: &HealthReport,
-    fixes: Option<&PlatformCorrections>,
+    fixes: Option<&CorrectionGroups>,
     identified: bool,
 ) -> Option<Tile> {
     let tokens = Tokens::builtin();
