@@ -262,6 +262,29 @@ fn 按不是同一个之后那一对不再提_那句回话不说记为裁决() {
 }
 
 #[test]
+fn 作品详情页概览那一面上也摆着同一张建议卡() {
+    // 票面：「在浏览**与作品详情**里看到」。两处画的是同一份（`browse::suspicion::cards`）。
+    let ctx = headless::context();
+    let mut app = 界面();
+    let 理由 = 核心库怎么说(&mut app);
+    跑一帧(&ctx, |ui| app.ui(ui));
+    点一下(&ctx, suspicion::FACET, |ui| app.ui(ui));
+    点一下(&ctx, 乙的译名, |ui| app.ui(ui));
+    let 屏上 = 点一下(&ctx, "查看详情", |ui| app.ui(ui));
+
+    assert!(
+        屏上.contains(&format!("可能与《{甲的译名}》是同一个作品")),
+        "作品详情页概览那一面上没有建议卡：\n{屏上}"
+    );
+    for 一句 in &理由 {
+        assert!(
+            屏上.contains(一句.as_str()),
+            "详情页上这一句没画出来：{一句}\n{屏上}"
+        );
+    }
+}
+
+#[test]
 fn 认不出作品的那一行不摆建议卡() {
     // 合并的两侧都得说得出作品名，所以没有作品链接的那一行不参与这件事。
     let ctx = headless::context();
