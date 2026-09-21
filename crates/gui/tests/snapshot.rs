@@ -2677,9 +2677,8 @@ fn 拍下钻(名字: &str, 主题: Theme, 临时目录名: &str) {
     }
     let mut app = 待确认屏(临时目录名);
     停在下钻(&mut app);
-    let 剩下 = romcat_core::report::thousands(
-        app.queue().breakdown().expect("下钻着就该有细分").left,
-    );
+    let 剩下 =
+        romcat_core::report::thousands(app.queue().breakdown().expect("下钻着就该有细分").left);
     let harness = 开一扇(主题, 下钻那一对的画面, move |ui| app.ui(ui));
     let 视口 = egui::Rect::from_min_size(egui::Pos2::ZERO, 下钻那一对的画面.into());
     for 那一段 in [
