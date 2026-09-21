@@ -1630,60 +1630,21 @@ impl Screen {
         }
     }
 
-    /// **屏头右侧**属于这一屏的那一段（[`crate::look::screen_header`]，票 `gui-looks-like-the-design/32`
-    /// 把它从顶栏原样挪进来，这一票照稿摆）：「刮削…」「★ 收藏」两颗小号按钮（[`look::small_buttons`]，
-    /// 照稿 `.btn.sm`，拿主意的人 2026-09-14 定，挂单 `Q877`），最后是开发用的「字体样张」开关——
-    /// 只在 `demo` 为真（这扇窗带 `--demo` 启动，[`crate::app::App::mark_demo`]）时摆。
-    /// 「N 个作品（共 M）」那一句在表格上方「列表」那一条的右端（`Self::list_bar`，挂单 `Q876`）。
+    /// **屏头右侧**属于这一屏的那一段（[`crate::look::screen_header`]）。
     ///
-    /// 先同步一次窗口再画：屏头与正文各画各的，而屏头**先画**——不先同步，
-    /// 这一屏头一帧的行数就比表格慢一帧（与队列那一屏 `status` 同一条道理）。
-    pub fn status(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks, demo: bool) {
-        self.sync_window(&site.catalog);
-        let (刮削, 收藏, 合并) = look::small_buttons(ui, |ui| {
-            // **「刮削…」摆在屏头**。它只摊开弹层——真按下去那一下在弹层底下，
-            // 因为按之前该先看清那本账；作用于哪一批，弹层标题上写着。
-            let 刮削 = ui
-                .button("刮削…")
-                .on_hover_text(
-                    "对勾中的那几个作品取元数据与媒体。四个旋钮定清楚要干什么，\
-                     按下去之前就看得见会发多少网络请求、大概多久。",
-                )
-                .clicked();
-            // **「★ 收藏」也摆在屏头**：它是这一屏按得最勤的一下（勾一批、按一下、接着筛下一批）。
-            // 取消收藏与自建合集是低频的，摆在左栏最底下。
-            let 收藏 = ui
-                .button("★ 收藏")
-                .on_hover_text(
-                    "把勾中的那一批全放进收藏。落沉淀库、锚在内容上——\
-                     删掉中立库重扫、改名、挪目录都还在。无判据的那些只钉得住本机路径，\
-                     按完的回执里会点名说有几个。\n\n\
-                     取消收藏与自建合集在左栏最底下：加收藏按得最勤，所以只有它在屏头。",
-                )
-                .clicked();
-            // **「合并作品…」摆在这一排**：稿上它与「刮削…」「★ 收藏」同在工具条那一组
-            // （`.tbar .acts`），而那一组在这个仓库里整组挪进了屏头（挂单 `Q876`／`Q877`）。
-            let 合并 = ui
-                .button(merge::MERGE)
-                .on_hover_text(
-                    "把被识别成不同作品、其实是同一个游戏的变体归到一起。\n\n\
-                     勾两个或更多作品再按。只写入裁决记录，不会移动或修改任何文件。",
-                )
-                .clicked();
-            (刮削, 收藏, 合并)
-        });
-        if 刮削 {
-            self.open_scrape(&site.catalog);
-        }
-        if 收藏 {
-            self.favorite(site, tasks);
-        }
-        if 合并 {
-            self.open_merge(site);
-        }
-        // **开发用的开关只在演示/开发构建里有**（拿主意的人 2026-09-14 定，挂单 `Q874`）：看的是**运行时**
-        // 那个标记——这扇窗带 `--demo` 启动才摆。不看编译开关：门禁带 `--all-features` 跑截图，照编译开关藏
-        // 的话门禁那一路的截图里就画着它。
+    /// **照稿它几乎是空的**（拿主意的人 2026-09-22 对着 `prototype.html` 裁的，挂单 `Q1102`）：
+    /// 稿上 `#s-browse .scrhead` 里只有标题与那句副标题，另有两样**默认不画**的——
+    /// 「正在编辑子库「…」的选择集」那句话与那颗「更新子库」（`hidden`，**归票 `23`**：
+    /// 从浏览屏改子库的选择集是那一票的活，位置照稿在这儿，条件是「正在改哪个子库」）。
+    ///
+    /// **那几颗批量按钮不在这儿**：稿上它们从来就在表格上方那一条的右端
+    /// （`.tbar .acts`，见 `Screen::action_bar`）。票 09 把它们整组挪进了屏头
+    /// （挂单 `Q876`／`Q877`，那时拿主意的人点过头），这一票照稿挪了回去。
+    ///
+    /// 于是这儿只剩**开发用的那一个开关**——只在 `demo` 为真（这扇窗带 `--demo` 启动，
+    /// [`crate::app::App::mark_demo`]）时摆，挂单 `Q874`。**不看编译开关**：门禁带
+    /// `--all-features` 跑截图，照编译开关藏的话门禁那一路的截图里就画着它。
+    pub fn status(&mut self, ui: &mut egui::Ui, demo: bool) {
         if demo {
             ui.toggle_value(&mut self.sample, "字体样张");
         }
@@ -2246,7 +2207,15 @@ impl Screen {
                     self.font_sample(ui);
                     ui.separator();
                 }
-                self.list_bar(ui);
+                // **按下去要干的事在这一层做**：那一组摆在哪一行要先量宽再定，
+                // 而那段摆位的活不该连着两份库的可变借用一起拖进去。
+                if let Some(按了) = self.list_bar(ui) {
+                    match 按了 {
+                        Action::Scrape => self.open_scrape(&site.catalog),
+                        Action::Favorite => self.favorite(site, tasks),
+                        Action::Merge => self.open_merge(site),
+                    }
+                }
                 let opened = match self.view {
                     BrowseView::Table => Table {
                         catalog: &site.catalog,
@@ -2412,18 +2381,62 @@ impl Screen {
         });
     }
 
-    /// 主列表上方的工具条（设计稿 `#lbar` 的 `.cbar`）：次级底色、底下一条分隔线；右端是
-    /// 「N 个作品（共 M）」那一句（[`Self::count_line`]）。
+    /// 工具条右端那一组**批量操作**要多宽（设计稿 `.tbar .acts`）。
     ///
-    /// 稿上那一句在再上面一条 `.tbar` 里，与视图切换、几颗批量按钮做邻居：批量按钮挪进了屏头右侧，
-    /// 视图切换归票 `10`，那一条只剩这一句，于是摆进这一条的右端，不另起一条。
-    fn list_bar(&mut self, ui: &mut egui::Ui) {
+    /// **在 `look::small_buttons` 那一块外头量**（`look::small_button_width` 的文档写着
+    /// 为什么）：那一块是个 `ui.scope`，哪怕里头什么都不摆，它也在横排里占一格间距——
+    /// 进去再量，量的那一下就把后面摆的东西往右推了一格。
+    ///
+    /// **字照按钮取字的规矩取**：egui 0.36 的按钮只认 `override_font_id`，
+    /// `TextStyle::Button` 那一格它根本不读（`look::sized_buttons` 的文档）。头一版在这儿
+    /// 拿 `TextStyle::Button` 量，量的是正文那一档 13、画的是小号 12，三颗十来个字**高估
+    /// 十点上下**——整组右端贴不住右沿，而且比该折的时候早折。
+    fn action_width(ui: &egui::Ui) -> f32 {
+        let 间距 = ui.spacing().item_spacing.x;
+        ACTIONS
+            .iter()
+            .map(|一颗| look::small_button_width(ui, 一颗.label()))
+            .sum::<f32>()
+            + 间距 * (ACTIONS.len() as f32 - 1.0)
+    }
+
+    /// 画那一组，交回**按了哪一颗**。
+    ///
+    /// **只画、不动库**：按下去要干的事（摊开刮削弹层、放进收藏、开合并向导）由
+    /// [`Self::ui`] 那一层去做。这么分是因为这一组摆在哪一行要先量宽再定
+    /// （[`Self::list_bar`]），而那段摆位的活不该连着两份库的可变借用一起拖进来。
+    fn action_buttons(ui: &mut egui::Ui) -> Option<Action> {
+        look::small_buttons(ui, |ui| {
+            let mut 按了 = None;
+            for 一颗 in ACTIONS {
+                if ui.button(一颗.label()).on_hover_text(一颗.hint()).clicked() {
+                    按了 = Some(一颗);
+                }
+            }
+            按了
+        })
+    }
+
+    /// 主列表上方那一条（设计稿 `.tbar` 与 `.cbar` 两层叠在一个框里）：次级底色、
+    /// 底下一条分隔线。
+    ///
+    /// **第一层照稿是 `.tbar`**：视图切换、「N 个作品（共 M）」那一句
+    /// （[`Self::count_line`]）、选中数与「清除选择」一路从左往右，那几颗批量操作
+    /// **整组靠右**（[`Self::action_bar`]）。**第二层是 `.cbar`**：当前这种呈现方式
+    /// 自己的那几样（表格是「在每行开头显示封面」，卡片是分组／排序／大小）。
+    ///
+    /// ⚠️ **「N 个作品（共 M）」这一票挪回了左边**（挂单 `Q1102`）。票 09 把它摆在这一条的
+    /// **右端**（挂单 `Q876`，拿主意的人 2026-09-14 定；同一处落点 09-15 又确认过一次），
+    /// 当时的依据写着「批量按钮挪进了屏头，稿上那一条只剩这一句」——**那几颗按钮这一票
+    /// 挪回来了，依据跟着不成立**，而稿上 `.cnt` 明写着紧跟在 `.seg` 后头。
+    fn list_bar(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let tokens = Tokens::builtin();
         let [上下, 左右] = tokens.space.list_bar_padding;
         let 线 = ui.visuals().widgets.noninteractive.bg_stroke;
         let 这一句 = self.count_line(ui);
         let 有封面 = self.cover_window.total();
         let 作品总数 = self.window.total();
+        let mut 按了 = None;
         let 这一条 = egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
             .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
@@ -2432,45 +2445,67 @@ impl Screen {
                 ui.spacing_mut().item_spacing =
                     egui::vec2(tokens.space.list_bar_gap, look::step(0));
                 ui.vertical(|ui| {
-                    // 第一层只回答“看什么、共有多少”，让视图切换与集合规模一眼成组。
-                    // 左端视图切换、右端计数与「清除选择」，交给 [`egui::Sides`] 各排各的。
+                    // **照稿这一条的次序**（`.tbar`）：视图切换、作品数、选中数与「清除选择」
+                    // 一路从左往右，那几颗批量操作**整组靠右**（`.acts` 的 `margin-left:auto`）。
                     //
-                    // 自己算位置的两种写法都塌过：拿剩余宽度把计数推到右端、按钮跟在它后面时，按钮被挤出
-                    // 行外——字还画着、点下去没反应（票 `gui-looks-like-the-design/15` 那条「清除选择一按就清」
-                    // 因此红）；改成在从左往右的行里嵌一个从右往左的子块，那个子块吃掉全部剩余宽度，把这一条
-                    // 的需求宽度撑大、连带挤窄了表格主栏，认不出作品那一行的副行就画不下了。
-                    egui::Sides::new().show(
-                        ui,
-                        |ui| {
-                            if ui
-                                .selectable_label(self.view == BrowseView::Table, "表格")
-                                .clicked()
-                            {
-                                self.view = BrowseView::Table;
-                            }
-                            if ui
-                                .selectable_label(self.view == BrowseView::Cards, "卡片")
-                                .clicked()
-                            {
-                                self.view = BrowseView::Cards;
-                            }
-                        },
-                        |ui| {
-                            if self.picked.count(self.window.total()) > 0
-                                && look::small_buttons(ui, |ui| {
-                                    ui.scope(|ui| {
-                                        look::ghost_button(ui.visuals_mut());
-                                        ui.button(CLEAR_PICK)
-                                    })
-                                    .inner
-                                    .clicked()
+                    // ## 摆不下的时候整组换一行——**自己分行，不交给 egui 折**
+                    //
+                    // 稿上是 `.tbar{flex-wrap:wrap}` 加 `.acts{flex-wrap:nowrap}`。
+                    // 头一版想拿 `horizontal_wrapped` 加「把这一行剩下的宽占掉」去逼它折行，
+                    // **那是错的**：`add_space` 只把光标往前推，不触发换行，于是那三颗被摆到
+                    // 行外、连画都没画出来（合并向导那条测试当场红——**屏上压根没有「合并作品…」**）。
+                    // 那正是票 `10` 栽过的头一条路。
+                    //
+                    // 所以这儿**先量后分行**：量出那一组要多宽（[`Self::action_width`]），
+                    // 这一行的剩余宽度装得下就摆同一行的右头，装不下就另起一行、在那一行里靠右。
+                    // 两条路都是普通的 `ui.horizontal`，摆哪儿由算出来的数说了算，不靠布局器的脾气。
+                    let 要多宽 = Self::action_width(ui);
+                    let mut 同一行摆得下 = true;
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(self.view == BrowseView::Table, "表格")
+                            .clicked()
+                        {
+                            self.view = BrowseView::Table;
+                        }
+                        if ui
+                            .selectable_label(self.view == BrowseView::Cards, "卡片")
+                            .clicked()
+                        {
+                            self.view = BrowseView::Cards;
+                        }
+                        // **作品数照稿紧跟在视图切换后头**（`.tbar` 里 `.seg` 之后就是
+                        // `.cnt`），不在这一条的右端。票 09 把它摆到右端，理由是
+                        // 「批量按钮挪进了屏头，稿上那一条只剩这一句」（挂单 `Q876`）
+                        // ——那几颗按钮这一票挪回来了，那条理由跟着不成立。
+                        ui.label(这一句.clone());
+                        if self.picked.count(self.window.total()) > 0
+                            && look::small_buttons(ui, |ui| {
+                                ui.scope(|ui| {
+                                    look::ghost_button(ui.visuals_mut());
+                                    ui.button(CLEAR_PICK)
                                 })
-                            {
-                                self.picked.clear();
-                            }
-                            ui.label(这一句.clone());
-                        },
-                    );
+                                .inner
+                                .clicked()
+                            })
+                        {
+                            self.picked.clear();
+                        }
+                        // 比的时候松一像素：宽是浮点算出来的，差一丝就白换一行，
+                        // 而白换一行比挤一丝难看得多。**只松在「换不换行」这一步**，
+                        // 靠右那一步照旧按算出来的数垫，所以松这一点不会把按钮推出行外。
+                        同一行摆得下 = ui.available_width() + 1.0 >= 要多宽;
+                        if 同一行摆得下 {
+                            ui.add_space((ui.available_width() - 要多宽).max(0.0));
+                            按了 = Self::action_buttons(ui);
+                        }
+                    });
+                    if !同一行摆得下 {
+                        ui.horizontal(|ui| {
+                            ui.add_space((ui.available_width() - 要多宽).max(0.0));
+                            按了 = Self::action_buttons(ui);
+                        });
+                    }
                     ui.add_space(look::step(1));
                     // 第二层才是当前呈现方式的控制。卡片不会再和视图、计数争一行。
                     ui.horizontal_wrapped(|ui| {
@@ -2575,6 +2610,7 @@ impl Screen {
             .rect;
         ui.painter()
             .hline(这一条.x_range(), 这一条.bottom() - 线.width / 2.0, 线);
+        按了
     }
 
     /// 卡片墙走自己的分页窗：仅封面开关不影响主列表；封面与无封面字卡都复用 [`Shelf`]。
@@ -4108,8 +4144,73 @@ fn exception_block(
 /// **打开外部程序**那一下：拿到一个路径交给系统（播放视频、看原图、打开位置），不成时交回一句为什么。
 type Opener = Box<dyn FnMut(&std::path::Path) -> Result<(), String>>;
 
-/// 表格上方那一条右端「清除选择」那颗按钮上的字（设计稿 `#clear-pick`）。
+/// 表格上方那一条上「清除选择」那颗按钮上的字（设计稿 `#clear-pick`）。
+///
+/// 照稿它在**左边那一流**里（`.seg`、`.cnt`、选中数之后，那一组批量操作之前），
+/// 不在这一条的右端——右端是 `.acts`（挂单 `Q1102`）。
 const CLEAR_PICK: &str = "清除选择";
+
+/// 表格上方那一条右端那一组**批量操作**里的一颗（设计稿 `.tbar .acts`）。
+///
+/// **摆成一个闭集合**：这一组要先量宽、再决定摆在哪一行（`Screen::action_width` 与
+/// `Screen::list_bar`），而**量的与画的必须是同一批按钮、同一串字**——各写一遍的话，
+/// 加了一颗却没加进量的那一处，摆出来就差一截，而那种错在屏上是「最右一颗贴着边」
+/// 或者「早折了一行」这种说不清的样子。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// 「刮削…」（稿上 `#open-scrape`）。
+    Scrape,
+    /// 「★ 收藏」（稿上 `#fav`）。
+    Favorite,
+    /// 「合并作品…」（稿上 `#merge-btn`，票 `16` 做的）。
+    Merge,
+}
+
+/// 这一组照稿的次序，**量宽与画都走它**。
+///
+/// 稿上是五颗：**刮削… / ★ 收藏 / 加入合集… / 合并作品… / 加入子库…**。
+/// 今天摆得出三颗，另外两颗**位置照稿留着**，各归一张票：
+///
+/// - **「加入合集…」归票 `13`**（收藏与合集的弹层），摆在「★ 收藏」与「合并作品…」之间；
+/// - **「加入子库…」归票 `23`**（从浏览屏加入子库），摆在最右，稿上是 `btn sm pri`
+///   ——**这一组里唯一的主按钮**。
+///
+/// 写在这儿是为了那两票不必各自再想一遍摆在哪：次序是稿定的，不是先到先得。
+const ACTIONS: [Action; 3] = [Action::Scrape, Action::Favorite, Action::Merge];
+
+impl Action {
+    /// 按钮上的字。
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Scrape => "刮削…",
+            Self::Favorite => "★ 收藏",
+            Self::Merge => merge::MERGE,
+        }
+    }
+
+    /// 悬停里那一段。
+    fn hint(self) -> &'static str {
+        match self {
+            // **「刮削…」只摊开弹层**——真按下去那一下在弹层底下，因为按之前该先看清
+            // 那本账；作用于哪一批，弹层标题上写着。
+            Self::Scrape => {
+                "对勾中的那几个作品取元数据与媒体。四个旋钮定清楚要干什么，\
+                 按下去之前就看得见会发多少网络请求、大概多久。"
+            }
+            Self::Favorite => {
+                "把勾中的那一批全放进收藏。落沉淀库、锚在内容上——\
+                 删掉中立库重扫、改名、挪目录都还在。无判据的那些只钉得住本机路径，\
+                 按完的回执里会点名说有几个。\n\n\
+                 取消收藏与自建合集在左栏最底下：加收藏按得最勤，所以只有它在这一组里。"
+            }
+            Self::Merge => {
+                "把被识别成不同作品、其实是同一个游戏的变体归到一起。\n\n\
+                 勾两个或更多作品再按。只写入裁决记录，不会移动或修改任何文件。"
+            }
+        }
+    }
+}
 
 /// 刚落下一批裁决时，底边那条提示条上那颗按钮上的字（设计稿 `doMerge` 末尾那个 `toast`）。
 const UNDO: &str = "撤销";

@@ -1016,11 +1016,13 @@ impl App {
                 roots.header_actions(ui, site);
             }
             View::Browse => {
-                // **屏头上那颗「★ 收藏」真的写库**（票 `gui-redesign/06`），
-                // 所以这一屏的屏头拿的是可变的那一份。它同时**往任务台上排活**
-                // ——那一下在真库量级上是几秒的读（票 `parking-3/09`）。
-                let (browse, site, board) = (&mut self.browse, &mut self.site, &mut self.board);
-                browse.status(ui, site, board, self.demo);
+                // **浏览屏的屏头右边，照稿只剩开发用的那一个开关**
+                // （拿主意的人 2026-09-22 对着稿裁的，挂单 `Q1102`）：
+                // 稿上 `#s-browse .scrhead` 里只有标题、那句副标题，以及两样**默认不画**的
+                // 东西（「正在编辑子库…」与「更新子库」，归票 `23`）。
+                // 那几颗批量按钮稿上从来就在**表格上方那一条**的右端（`.tbar .acts`），
+                // 票 09 把它们整组挪到了屏头（挂单 `Q876`／`Q877`），这一票挪回去。
+                self.browse.status(ui, self.demo);
             }
             View::Sublibraries => {
                 let (sublibrary, site) = (&mut self.sublibrary, &self.site);
