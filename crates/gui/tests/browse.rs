@@ -1291,7 +1291,7 @@ fn 按规则筛(ctx: &egui::Context, app: &mut App, text: &str) -> u64 {
 }
 
 #[test]
-fn 三种连接在筛选器上各自成立而且组嵌得动() {
+fn 三种组合方式在筛选器上各自成立而且组嵌得动() {
     let ctx = headless::context();
     let mut app = 界面(ROWS);
     跑(&ctx, &mut app, 2);

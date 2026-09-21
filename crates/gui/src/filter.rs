@@ -211,14 +211,14 @@ fn draft_of(group: &Group) -> Draft {
     }
 }
 
-/// 画一个组：连接词、里面那几项、以及「+ 子句」「+ 分组」。
+/// 画一个组：组合方式、里面那几项、以及「+ 子句」「+ 分组」。
 ///
 /// 那一行**排不下就折行**（票 `gui-looks-like-the-design/09`）：浏览屏左栏默认只有两百来点宽，
-/// 连接词、两颗按钮挤在一行会伸出那一栏。
+/// 组合方式、两颗按钮挤在一行会伸出那一栏。
 fn group_ui(ui: &mut egui::Ui, draft: &mut Draft, depth: usize, changed: &mut bool) {
     ui.horizontal_wrapped(|ui| {
         let before = draft.join;
-        ComboBox::from_id_salt(("连接", depth, ui.id()))
+        ComboBox::from_id_salt(("组合方式", depth, ui.id()))
             .selected_text(draft.join.label())
             .width(96.0)
             .show_ui(ui, |ui| {

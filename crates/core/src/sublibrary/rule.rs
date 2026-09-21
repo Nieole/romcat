@@ -128,7 +128,7 @@ impl Join {
     pub const ALL: [Self; 3] = [Self::All, Self::Any, Self::None];
 }
 
-/// 一个**组**：一种连接，加上里面那几项。
+/// 一个**组**：一种组合方式，加上里面那几项。
 ///
 /// 一条规则的顶层就是一个组（[`Rule::root`]），组里可以再套组——嵌多深都行。
 #[derive(Debug, Clone, PartialEq)]
@@ -1360,7 +1360,7 @@ mod tests {
     }
 
     #[test]
-    fn 三种连接各自成立而且组嵌得下去() {
+    fn 三种组合方式各自成立而且组嵌得下去() {
         let rule = Rule::parse("平台=GB 且 (作品^口袋 或 类型~RPG) 且 都不(语言=En 或 中文=汉化)")
             .expect("读得懂");
         assert_eq!(rule.root.join, Join::All);

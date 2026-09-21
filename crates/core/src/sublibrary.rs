@@ -903,7 +903,7 @@ fn matches(rule: &Rule, facts: &VariantFacts) -> bool {
     holds(&rule.root, facts)
 }
 
-/// 这个组成立吗。三种连接各算各的，**空组按各自的中性元算**：
+/// 这个组成立吗。三种组合方式各算各的，**空组按各自的中性元算**：
 /// 「全部满足」与「都不满足」空着成立（没有一项不成立），「任一满足」空着不成立。
 fn holds(group: &Group, facts: &VariantFacts) -> bool {
     let mut each = group.nodes.iter().map(|node| match node {
