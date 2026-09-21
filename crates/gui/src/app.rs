@@ -924,9 +924,13 @@ impl App {
     ///
     /// ## `Esc` 一层一层退
     ///
-    /// 这里**一个 `Esc` 都不接**，那一下三层各自收各自的：右键菜单（`egui::Popup`）、
-    /// 弹层（[`crate::dialog`] 里那一处 `consume_key`）、作品详情页上那颗「返回浏览」。
-    /// 最上面那一层先收，因为上面两层开着时这一处压根不跑（门 1 与门 3）。
+    /// 这里**一个 `Esc` 都不接**。那一下收的是**浮起来的那两层**，各自收各自的：
+    /// 右键菜单由 `egui::Popup` 自己收（`browse::menu`），弹层由 [`crate::dialog`] 那一处
+    /// `consume_key` 收。**一下只退一层**，因为上面那两层开着时这一处压根不跑（门 1 与门 3），
+    /// 而两层叠着时 `dialog` 自己只退最上面那一层。
+    ///
+    /// 屏与屏之间**不归 `Esc` 管**：作品详情页回三栏走的是它顶上那颗「← 返回浏览」，
+    /// 屏上那张表里 `Esc` 那一条写的也是「关闭对话框或菜单」（[`crate::keys`]）。
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if !crate::dialog::screen_has_keys(ctx)
             || egui::Popup::is_any_open(ctx)

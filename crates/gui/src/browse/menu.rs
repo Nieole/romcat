@@ -178,12 +178,6 @@ impl Menu {
         egui::Popup::open_id(ctx, id());
     }
 
-    /// 菜单眼下贴着哪一行；没开着就是 `None`。
-    #[must_use]
-    pub fn anchor(&self) -> Option<&WorkAnchor> {
-        self.open.as_ref().map(|open| &open.anchor)
-    }
-
     /// 收起来。
     pub fn close(&mut self, ctx: &egui::Context) {
         self.open = None;

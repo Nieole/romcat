@@ -741,13 +741,7 @@ impl Screen {
             return;
         }
         let rows = rows.to_vec();
-        self.merging = Some(merge::Wizard::open(
-            &site.catalog,
-            &self.query,
-            &self.rules,
-            &self.priorities,
-            &rows,
-        ));
+        self.open_merge_rows(site, &rows);
     }
 
     /// 作品详情页头上那颗「**合并…**」：从这一个作品起头开一层向导，第一步再搜别的作品加进来。
@@ -755,13 +749,7 @@ impl Screen {
         let Some(anchor) = self.opened.clone() else {
             return;
         };
-        self.merging = Some(merge::Wizard::open(
-            &site.catalog,
-            &self.query,
-            &self.rules,
-            &self.priorities,
-            &[anchor],
-        ));
+        self.open_merge_rows(site, &[anchor]);
     }
 
     /// 变体卡头一行右头那颗「**移出此作品…**」。
@@ -1968,22 +1956,33 @@ impl Screen {
         joining: bool,
         doing: &str,
     ) {
-        // **一趟没跑完就别排第二趟**：两趟一起落，后一趟算的是前一趟落库之前那份库。
-        //
-        // 这句话里**不带动词**：`doing` 说的是**这一次**按的那一下，而还在跑的是**上一趟**
-        // ——先按 ★ 再按 ☆，写成「上一趟取消收藏还在跑」就是句假话。
-        if self.collecting.is_some() {
-            self.error = Some(
-                "上一趟还在跑（收藏与合集一次只排一趟）。\
-                 任务屏上看得见它走到哪儿了，也按得停。"
-                    .to_string(),
-            );
+        if self.上一趟还在跑() {
             return;
         }
         let Some(keys) = self.scoped_keys(&site.catalog, doing) else {
             return;
         };
         self.queue_collection_keys(site, tasks, name, joining, keys, doing);
+    }
+
+    /// **一趟没跑完就别排第二趟**：两趟一起落，后一趟算的是前一趟落库之前那份库。
+    /// 还在跑就摆一句话出来，并交回 `true`。
+    ///
+    /// 这句话里**不带动词**：按的那一下是加收藏还是取消收藏，说的是**这一次**，而还在跑的是
+    /// **上一趟**——先按 ★ 再按 ☆，写成「上一趟取消收藏还在跑」就是句假话。
+    ///
+    /// **那句话只有这一处**：排活有两个入口（[`Self::queue_collection`] 按勾中的那一批，
+    /// [`Self::queue_collection_keys`] 按交进来的那几个键），两处各写一份迟早说成两句话。
+    fn 上一趟还在跑(&mut self) -> bool {
+        if self.collecting.is_none() {
+            return false;
+        }
+        self.error = Some(
+            "上一趟还在跑（收藏与合集一次只排一趟）。\
+             任务屏上看得见它走到哪儿了，也按得停。"
+                .to_string(),
+        );
+        true
     }
 
     /// 同 [`Self::queue_collection`]，只是**作用范围由调用方交进来**。
@@ -2000,12 +1999,7 @@ impl Screen {
         keys: Vec<String>,
         doing: &str,
     ) {
-        if self.collecting.is_some() {
-            self.error = Some(
-                "上一趟还在跑（收藏与合集一次只排一趟）。\
-                 任务屏上看得见它走到哪儿了，也按得停。"
-                    .to_string(),
-            );
+        if self.上一趟还在跑() {
             return;
         }
         let title = format!(
@@ -2366,7 +2360,12 @@ impl Screen {
         self.queue_collection_keys(site, tasks, FAVORITE, joining, keys, doing);
     }
 
-    /// 从这几行开一层合并向导。勾中那一批、或者只有光标底下这一个，都走它。
+    /// **开一层合并向导，就这一处。** 屏头那颗「合并作品…」（勾中那一批，
+    /// [`Self::open_merge`]）、作品详情页头上那颗「合并…」（[`Self::open_merge_here`]）、
+    /// 右键菜单里那一项，三处交进来的只是**带上哪几行**不同。
+    ///
+    /// 拦在前头的那几条（勾不够两个、全选那一档开不了）归 [`Self::open_merge`]：那是
+    /// 「屏头那颗按下去算不算数」，不是「向导怎么开」。
     pub fn open_merge_rows(&mut self, site: &Site, rows: &[WorkAnchor]) {
         self.merging = Some(merge::Wizard::open(
             &site.catalog,
@@ -2947,6 +2946,11 @@ impl Screen {
                                     .max_rect(rect)
                                     .layout(Layout::top_down(Align::Min)),
                             );
+                            // **卡面上的字不许接住点击**（表格那一路早就这么干了，
+                            // `table::Table::show`）：egui 的标签默认可选中，会把按在标题或
+                            // 那几行小字上的那一下当成选字——于是点在卡面的字上整张卡收不到，
+                            // 右键更是摊不开菜单。整张卡才是那个按钮。
+                            card.style_mut().interaction.selectable_labels = false;
                             let cover_radius = if self.shelf.has_cover(&row) == Some(true) {
                                 Tokens::builtin().radius.medium
                             } else {
