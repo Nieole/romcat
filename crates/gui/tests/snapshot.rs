@@ -59,7 +59,7 @@ use egui::accesskit::Role;
 use egui_kittest::kittest::Queryable;
 use egui_kittest::{Harness, SnapshotOptions};
 use romcat_core::catalog::browse::PlatformFilter;
-use romcat_core::catalog::identify::{Candidate, Identification, Provenance};
+use romcat_core::catalog::identify::{Candidate, Identification, Provenance, Tier};
 use romcat_core::catalog::roots::{self, LibraryRoot, RootScan};
 use romcat_core::catalog::scrape::{Harvested, HarvestedMedia, HarvestedValue};
 use romcat_core::catalog::{Catalog, CatalogError, Confidence, SCHEMA_VERSION, State};
@@ -86,13 +86,21 @@ use romcat_gui::demo;
 use romcat_gui::layout::{FOLD_EXPORT, FOLD_ROOTS, FOLD_SOURCES};
 use romcat_gui::opening::Screen;
 use romcat_gui::roots::RootRow;
+use romcat_gui::settings::Section;
 #[cfg(feature = "demo")]
 use romcat_gui::task::{Clock, Product};
 use romcat_gui::{font, headless, layout, look, rail};
 
 mod shared;
+// **`等任务台空了` 不带门**：它只问任务台忙不忙（`App::poll_tasks` / `App::tasks`），与合成数据
+// 无关，而**不带 `demo` 也要编的那几张**要它——库屏那几个夹具开窗之前都先体检一趟
+// （`先体检一趟`）。从前它搭着旁边两个的顺风车写在同一行 `#[cfg(feature = "demo")]` 上，
+// 于是 `cargo check --all-targets`（不带 `--all-features`）当场红，而门禁一步都不跑这个组合
+// （挂单 `Q1081` / `Q1082`）。
+use shared::等任务台空了;
+// 这两个是占位活那一路的，只有 `demo` 开着时才有测试用得上。
 #[cfg(feature = "demo")]
-use shared::{一对信号, 占位活, 等任务台空了};
+use shared::{一对信号, 占位活};
 
 /// 比对阈值：一个像素的色差过了多少算坏（每像素 YIQ 色距 0.6）、坏几个像素算红（0 个）。
 ///
@@ -278,6 +286,130 @@ fn 正好画着的每一处(output: &egui::FullOutput, 那几个字: &str) -> Ve
         找(&clipped.shape, 那几个字, &mut 每一处);
     }
     每一处
+}
+
+/// 屏上**含有** `那一段` 的每一段画在哪儿（整段的外框，折了行也算在里头），按画出来的次序。
+///
+/// [`正好画着的每一处`] 认的是**整段一字不差**，而「会怎样」那几条是
+/// `look::impact` 把几截拼成的**一个** `LayoutJob`、还会折行——按整段去认认不出来，
+/// 所以另有这一支。要断言「这一段看得全」时拿它交回的那个框去比视口。
+fn 画着的每一处含(output: &egui::FullOutput, 那一段: &str) -> Vec<egui::Rect> {
+    fn 找(shape: &egui::epaint::Shape, 那一段: &str, 每一处: &mut Vec<egui::Rect>) {
+        match shape {
+            egui::epaint::Shape::Text(text) => {
+                if text.galley.text().contains(那一段) {
+                    每一处.push(egui::Rect::from_min_size(text.pos, text.galley.size()));
+                }
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    找(one, 那一段, 每一处);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut 每一处 = Vec::new();
+    for clipped in &output.shapes {
+        找(&clipped.shape, 那一段, &mut 每一处);
+    }
+    每一处
+}
+
+/// **弹层里**认得下的每一段画在哪儿，按画出来的次序。
+///
+/// 为什么要把弹层切出来：弹层与它底下那一屏画在同一张图上，而「4.00 MiB」「1995」这种字
+/// 两边都有（底下那张主列表的容量、年份那两列也这么写）。按整段的字去认分不开，按画出来的
+/// 次序也分不开。**按裁剪框分得开**：弹层里每一段的裁剪框横着铺满这一层（左右两边都贴着
+/// 这一层的边），而底下那一屏的每一块各自被自己那一栏夹着——正中那一栏起在四百多点上，
+/// 够不着弹层的左边。
+///
+/// [`正好画着的每一处`] 与 [`画着的每一处含`] 认的是整段或子串；一列里那几段的字各不相同时
+/// （「保留作品自带」与「来自「某某」」）只能按这一支挑。
+fn 弹层里的每一段<'a>(
+    output: &egui::FullOutput,
+    画面: [f32; 2],
+    认: impl Fn(&str) -> bool + 'a,
+) -> Vec<egui::Rect> {
+    fn 找(
+        shape: &egui::epaint::Shape, 认: &dyn Fn(&str) -> bool, 每一处: &mut Vec<egui::Rect>
+    ) {
+        match shape {
+            egui::epaint::Shape::Text(text) => {
+                if 认(text.galley.text()) {
+                    每一处.push(egui::Rect::from_min_size(text.pos, text.galley.size()));
+                }
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    找(one, 认, 每一处);
+                }
+            }
+            _ => {}
+        }
+    }
+    // 这一层多宽、摆在哪儿：共用弹层那一层自己说了算（居中、宽取令牌里最宽那一档）。
+    let 宽 = romcat_gui::dialog::Width::Widest.points();
+    let (左, 右) = ((画面[0] - 宽) / 2.0, (画面[0] + 宽) / 2.0);
+    let mut 每一处 = Vec::new();
+    for clipped in &output.shapes {
+        if clipped.clip_rect.left() > 左 + 4.0 || clipped.clip_rect.right() < 右 - 4.0 {
+            continue;
+        }
+        找(&clipped.shape, &认, &mut 每一处);
+    }
+    每一处
+}
+
+/// 屏上那几道**横线**画在哪儿（`painter.hline` 留下的线段），只看竖直位置与 `只看这一行`
+/// 差不到几点的那几道——一屏上横线多得很，「走到第几问」那一排只占一行。
+fn 横线们(
+    output: &egui::FullOutput, 只看这一行: f32
+) -> Vec<std::ops::RangeInclusive<f32>> {
+    fn 找(
+        shape: &egui::epaint::Shape,
+        只看这一行: f32,
+        每一道: &mut Vec<std::ops::RangeInclusive<f32>>,
+    ) {
+        match shape {
+            egui::epaint::Shape::LineSegment { points, .. } => {
+                let [甲, 乙] = points;
+                if (甲.y - 乙.y).abs() < 0.5 && (甲.y - 只看这一行).abs() < 4.0 {
+                    每一道.push(甲.x.min(乙.x)..=甲.x.max(乙.x));
+                }
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    找(one, 只看这一行, 每一道);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut 每一道 = Vec::new();
+    for clipped in &output.shapes {
+        找(&clipped.shape, 只看这一行, &mut 每一道);
+    }
+    每一道
+}
+
+/// **一列里那几段的左缘对得齐吗**：全等才算齐（差半个点都不算）。
+///
+/// 对齐是这几张图的**验收**，所以写成断言而不是只靠基线：基线只说「与上次一样」，
+/// 而上次也可能是歪的。比的是**这几段画在哪儿**（`Galley` 的位置），不是像素。
+#[track_caller]
+fn 一列上对得齐(每一处: &[egui::Rect], 该有几段: usize, 哪一列: &str) {
+    assert_eq!(
+        每一处.len(),
+        该有几段,
+        "{哪一列}该有 {该有几段} 段，屏上画出了 {} 段：{每一处:?}",
+        每一处.len(),
+    );
+    let 左缘: Vec<f32> = 每一处.iter().map(|rect| rect.left()).collect();
+    assert!(
+        左缘.windows(2).all(|两个| (两个[0] - 两个[1]).abs() < 0.5),
+        "{哪一列}没立成一列，几段的左缘是 {左缘:?}",
+    );
 }
 
 /// 把这扇窗此刻的样子与 `tests/snapshots/<名字>.png` 比。对不上时当场红。
@@ -1479,6 +1611,328 @@ fn 详情页_识别依据_暗色() {
     拍详情页("work/evidence-dark", Theme::Dark, Tab::Evidence);
 }
 
+// ——— 合并作品与移出此作品 ———
+//
+// 两层都垫在浏览屏那份现场上（[`浏览现场`]）：屏上画着的每一样都是定值。
+// 合并向导拍**三步各一对**，移出那一层拍**刚开那一下**（稿上 `st.mode='new'`：
+// 「新建一个作品」选着、名字框里是默认名）。
+
+/// 合并向导那几张勾的是**哪三个作品**。
+///
+/// 三个而不是两个，是为了让这几张图各自示范得出该示范的东西：
+///
+/// - **两个 SFC 的**（`Chrono Trigger` 与 `Seiken Densetsu 2`）：合并之后 SFC 那一侧
+///   真的少一个前端条目——第三步那句「前端条目 N → M」这才示范得出「从多少变多少」。
+///   只勾跨平台的两个时，收敛按**作品 × 平台**走，条目数一个不减（屏上是「8 → 8」），
+///   而那是这张图唯一该说清的数。
+/// - **外加一个 GBA 的**（`Gyakuten Saiban`）：第一步那条「这些作品分属不同平台」的提示、
+///   第二步按平台分两组各挑一个首选，都靠它。
+/// - **三个**还让第一步每一行右头那颗「移除」露出来（稿上 `m.ids.length>2` 才画）。
+const 合并的那三个: [&str; 3] = [
+    点开的作品,
+    "Seiken Densetsu 2 (Japan)",
+    "Gyakuten Saiban (Japan)",
+];
+
+/// 勾上 [`合并的那三个`]，不经表格——表上勾选框那一格在基线里是个小方块，
+/// 点它要先滚到那一行，而这几张要看的是弹层。
+fn 勾上那三个(app: &mut App) {
+    let 行: Vec<romcat_core::catalog::browse::WorkAnchor> = {
+        let (_, site) = app.browse_and_site();
+        合并的那三个
+            .iter()
+            .map(|名字| {
+                let id = site
+                    .catalog
+                    .work_named(名字)
+                    .expect("读得动")
+                    .expect("作品表里有它");
+                romcat_core::catalog::browse::WorkAnchor::Work(id)
+            })
+            .collect()
+    };
+    let (browse, _) = app.browse_and_site();
+    for anchor in 行 {
+        browse.picked_mut().toggle(&anchor);
+    }
+}
+
+/// 确认那一对拍多高（点）：第三步那一层装得下字段冲突表、两个勾选框与「合并后会发生什么」
+/// 整块——**最后一条不许被页脚切半行**（截图门这一关的判据是**看得全**，同子库屏超限那一对
+/// 与队列屏下钻那一对，模块文档「视口定死」那一节的例外）。底下那条断言把这件事写死。
+const 确认那一对的画面: [f32; 2] = [1280.0, 960.0];
+
+/// 给 SFC 那组第二个变体（`汉化/时空之轮 (简体中文 v1.2).zip`）记一条**带汉化记号**的
+/// 已接受候选——**只给合并向导那几张**，不动别的屏的基线。
+///
+/// 为什么非有它不可：第二步那句说明写着默认选中的那一个是按「汉化 > 官中 > 日版 > 其他」
+/// 选出来的，而这是这条规则在整个界面上**唯一**的示范。夹具里两个 SFC 变体身上一条汉化记号
+/// 都没有时，核心库照规则答的是「两个都是原版、平手、按键排」——屏上两行都标「原版」，
+/// 默认落在头一个，**与「取头一个」那种错做法一模一样**：图示范不出规则，断言也钉不住它。
+///
+/// 记号落在**候选**上而不是从文件名剥：「是哪一种」与首选变体同一处判（词表**变体简称**），
+/// 文件名里那个「汉化」一个字都不作数。
+fn 记上汉化记号(app: &mut App) {
+    let (_, site) = app.browse_and_site();
+    let key = "主库/SFC/汉化/时空之轮 (简体中文 v1.2).zip";
+    let 原来的 = site
+        .catalog
+        .variant(key)
+        .expect("读得动")
+        .expect("夹具里有这一份");
+    let mut 那一条 = 候选(
+        &romcat_core::shape::Variant {
+            key: key.to_owned(),
+            main_key: key.to_owned(),
+            platform: Some("SFC".to_owned()),
+            rule: SINGLE_FILE_RULE.to_owned(),
+            manual: false,
+            files: 1,
+            bytes: 原来的.bytes,
+            unreadable_files: 0,
+            members: Vec::new(),
+        },
+        true,
+        Confidence::Medium,
+        "中文离线源",
+        "Chrono Trigger (Japan)",
+        "名称模糊匹配，平台一致",
+    );
+    那一条.chinese = Some(romcat_core::dat::chinese::ChineseMark::FanTranslated);
+    site.catalog
+        .write_identifications(&[Identification {
+            variant_key: key.to_owned(),
+            state: State::Matched,
+            reason: None,
+            platform: None,
+            standalone: None,
+            edition: None,
+            units: 1,
+            nkit: 0,
+            read_bytes: 0,
+            work_id: 原来的.work_id,
+            release_id: 原来的.release_id,
+            candidates: vec![那一条],
+        }])
+        .expect("识别结论写得进");
+}
+
+/// **合并向导**走到第 `第几步` 步（从 1 数），拍一张。CI 上跳过（[`该跳过`]）。
+#[track_caller]
+fn 拍合并向导(名字: &str, 主题: Theme, 第几步: usize) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 浏览现场 { mut app, 目录 } = 浏览现场(false);
+    记上汉化记号(&mut app);
+    勾上那三个(&mut app);
+    // 第三步那一层比另外两步高一截，1280×800 装不下（见 [`确认那一对的画面`]）。
+    let 画面 = if 第几步 == 3 {
+        确认那一对的画面
+    } else {
+        headless::VIEWPORT
+    };
+    let mut harness = 开一扇(主题, 画面, move |ui| app.ui(ui));
+    按(&mut harness, romcat_gui::browse::merge::MERGE);
+    for _ in 1..第几步 {
+        按(&mut harness, "下一步");
+    }
+    // **步骤条贯通左右、中间不断**（拿主意的人 2026-09-21 定，**与设计稿不同**）。
+    //
+    // 这里断的是**三段与两道连线之间的几何**，不写死弹层摆在哪儿：每一道连线的左端接着
+    // 上一问名字的右缘、右端接着下一问圆点的左沿（两头各一道令牌里那个缝），而且**两道等长**。
+    // 「中间断没断」才是「贯通」的直接判据——上一版按「几格等宽」摆，两端对上了、中间却
+    // 空出一百九十点。
+    //
+    // **「两端就是这一层的左右内缘」另有一条钉着**
+    // （`tests/dialog.rs::走到第几问那一排贯通左右而且中间不断`）：那一条量得到 `Shown::rect`，
+    // 绝对位置在那儿断。这里不重复写死坐标——弹层摆在哪儿不是这一票的事。
+    {
+        let 每一问: Vec<egui::Rect> = ["选择作品", "核对变体", "确认合并"]
+            .iter()
+            .map(|那几个字| {
+                let 每一处 = 正好画着的每一处(harness.output(), 那几个字);
+                assert_eq!(每一处.len(), 1, "「{那几个字}」该正好画一段");
+                每一处[0]
+            })
+            .collect();
+        let 直径 = romcat_gui::tokens::Tokens::builtin().layout.page_dot;
+        let 缝 = look::step(1);
+        let 每一道 = 横线们(harness.output(), 每一问[0].center().y);
+        assert_eq!(
+            每一道.len(),
+            2,
+            "三问之间该有两道连线，画出了 {} 道",
+            每一道.len(),
+        );
+        for (i, 这一道) in 每一道.iter().enumerate() {
+            let 该从 = 每一问[i].right() + 缝;
+            let 该到 = 每一问[i + 1].left() - 直径 - 缝 - 缝;
+            assert!(
+                (这一道.start() - 该从).abs() < 0.5 && (这一道.end() - 该到).abs() < 0.5,
+                "第 {} 道连线没接满：画在 {:?}，该是 {该从}..={该到}",
+                i + 1,
+                这一道,
+            );
+        }
+        let 长 = |这一道: &std::ops::RangeInclusive<f32>| 这一道.end() - 这一道.start();
+        assert!(
+            (长(&每一道[0]) - 长(&每一道[1])).abs() < 0.5,
+            "两道连线不等长：{} 与 {}",
+            长(&每一道[0]),
+            长(&每一道[1]),
+        );
+    }
+    // **对齐写成断言**（拿主意的人 2026-09-21 看图提的版式返工）：同一列那几段的左缘得全等。
+    // 只靠基线拦不住——基线只说「与上次一样」，而上次也可能是歪的。
+    match 第几步 {
+        1 => 一列上对得齐(
+            &弹层里的每一段(harness.output(), 画面, |text| text.contains(" 个变体 · ")),
+            3,
+            "第一步那三行的「平台 · 年份 · 几个变体 · 置信度」",
+        ),
+        2 => {
+            一列上对得齐(
+                &弹层里的每一段(harness.output(), 画面, |text| {
+                    text == "保留作品自带" || text.starts_with("来自「")
+                }),
+                4,
+                "第二步「来自哪儿」那一列",
+            );
+            // 置信度那一列写的是**四档里的哪一个词**（核心库 `Tier::label`，
+            // 「没有候选」那一档不带「置信」两个字）——照四档认，别按字尾猜。
+            let 四档: Vec<&str> = [Tier::High, Tier::Medium, Tier::Low, Tier::Unidentified]
+                .iter()
+                .map(|档| 档.label())
+                .collect();
+            一列上对得齐(
+                &弹层里的每一段(harness.output(), 画面, |text| 四档.contains(&text)),
+                4,
+                "第二步置信度那一列",
+            );
+            一列上对得齐(
+                &弹层里的每一段(harness.output(), 画面, |text| text.ends_with(" MiB")),
+                4,
+                "第二步体积那一列",
+            );
+        }
+        _ => {
+            // 字段冲突那张表**摊满这一层**：三列的表头就是那三列的左缘，头一列（字段）窄、
+            // 后两列分余下的。由着 `Grid` 按内容收窄的话，三列会挤在左边三分之二里、
+            // 右边空着一大块（那正是这次返工要治的）。
+            let 表头 = |那几个字: &str| {
+                let 每一处 = 弹层里的每一段(harness.output(), 画面, |text| text == 那几个字);
+                assert_eq!(每一处.len(), 1, "表头「{那几个字}」该正好画一段");
+                每一处[0]
+            };
+            let (字段, 保留, 其他) = (表头("字段"), 表头("保留作品"), 表头("其他作品"));
+            let 头一列 = 保留.left() - 字段.left();
+            let 第二列 = 其他.left() - 保留.left();
+            assert!(
+                第二列 > 头一列 * 2.0,
+                "后两列没分掉余下的宽：字段那一列占 {头一列}，保留作品那一列只占 {第二列}",
+            );
+            // 每一列的值立成一列，而且与它的表头对齐：不是跟着前面的字流走。
+            let 保留列 = 弹层里的每一段(harness.output(), 画面, |text| {
+                ["超时空之钥", "1995", "Square", "角色扮演"].contains(&text)
+            });
+            一列上对得齐(&保留列, 5, "第三步「保留作品」那一列");
+            assert!(
+                (保留列[0].left() - 保留.left()).abs() < 24.0,
+                "「保留作品」那一列的值（{}）没跟它的表头（{}）对齐",
+                保留列[0].left(),
+                保留.left(),
+            );
+        }
+    }
+    if 第几步 == 3 {
+        // **看得全**：「会怎样」那几条里最后那一条整段都得在视口里，不许被页脚切掉半行。
+        let 视口 = egui::Rect::from_min_size(egui::Pos2::ZERO, 画面.into());
+        let 最后一条 = 画着的每一处含(harness.output(), "各自撤得掉");
+        assert_eq!(
+            最后一条.len(),
+            1,
+            "「会怎样」最后一条该正好画出一段来，画出了 {} 段",
+            最后一条.len(),
+        );
+        assert!(
+            视口.contains_rect(最后一条[0]),
+            "「会怎样」最后一条被切了：{:?} 不在 {视口:?} 里",
+            最后一条[0],
+        );
+    }
+    拍下(harness, 名字);
+    drop(目录);
+}
+
+#[test]
+fn 合并向导_选择作品_浅色() {
+    拍合并向导("merge/step1-light", Theme::Light, 1);
+}
+
+#[test]
+fn 合并向导_选择作品_暗色() {
+    拍合并向导("merge/step1-dark", Theme::Dark, 1);
+}
+
+#[test]
+fn 合并向导_核对变体_浅色() {
+    拍合并向导("merge/step2-light", Theme::Light, 2);
+}
+
+#[test]
+fn 合并向导_核对变体_暗色() {
+    拍合并向导("merge/step2-dark", Theme::Dark, 2);
+}
+
+#[test]
+fn 合并向导_确认合并_浅色() {
+    拍合并向导("merge/step3-light", Theme::Light, 3);
+}
+
+#[test]
+fn 合并向导_确认合并_暗色() {
+    拍合并向导("merge/step3-dark", Theme::Dark, 3);
+}
+
+/// **移出此作品**那一层：打开作品详情页停在「变体与文件」，按头一张变体卡上那颗
+/// 「移出此作品…」（[`按`] 点的是**最后一处**，也就是最底下那张卡的那一颗）。
+#[track_caller]
+fn 拍移出此作品(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 浏览现场 { mut app, 目录 } = 浏览现场(false);
+    {
+        let anchor = {
+            let (_, site) = app.browse_and_site();
+            romcat_core::catalog::browse::WorkAnchor::Work(
+                site.catalog
+                    .work_named(点开的作品)
+                    .expect("读得动")
+                    .expect("作品表里有它"),
+            )
+        };
+        let (browse, site) = app.browse_and_site();
+        browse.open_work(&site.catalog, &anchor);
+        browse.open_page(Tab::Variants);
+    }
+    let mut harness = 开一个(主题, move |ui| app.ui(ui));
+    按(&mut harness, romcat_gui::browse::merge::SPLIT);
+    拍下(harness, 名字);
+    drop(目录);
+}
+
+#[test]
+fn 移出此作品弹层_浅色() {
+    拍移出此作品("merge/split-light", Theme::Light);
+}
+
+#[test]
+fn 移出此作品弹层_暗色() {
+    拍移出此作品("merge/split-dark", Theme::Dark);
+}
+
 // ——— 库 ———
 
 /// 库屏那几张基线用的现场：一份落在临时工作目录里的中立库，交出**整个窗口**（左栏、屏头加库屏的屏体）。
@@ -2212,6 +2666,9 @@ fn 库屏_移除根弹层_暗色() {
 /// 子库那几张的现场：几个临时目录（跟着窗口一起活到拍完）与窗口本身。
 struct 子库现场 {
     主库: TempDir,
+    /// 第二个**根**（主库是一组根）：只有差量异常那两对要它——两个根里同一条相对路径
+    /// 剥掉根名之后落在卡上同一个文件上，那正是**落点撞车**。别的几张摆 `None`。
+    _另一块盘: Option<TempDir>,
     _工作区: TempDir,
     卡: TempDir,
     app: App,
@@ -2220,6 +2677,22 @@ struct 子库现场 {
 impl 子库现场 {
     /// 扫好一份小主库、开出窗口、换到子库屏。一个子库都还没有。
     fn 摆好() -> Self {
+        Self::摆好带(None)
+    }
+
+    /// 同 [`Self::摆好`]，外加**第二个根**：里头摆着 `又一份` 那几条相对路径，与头一个根
+    /// 扫进**同一份中立库**（主库是一组根）。两个根里同一条相对路径会在差量预览里撞车。
+    fn 摆好带另一块盘(又一份: &[(&str, usize)]) -> Self {
+        let 另一块盘 = temp_dir("snap-sub-lib2");
+        for (相对, 多大) in 又一份 {
+            let 在 = 另一块盘.path().join(相对);
+            std::fs::create_dir_all(在.parent().expect("有上级目录")).expect("能建目录");
+            std::fs::write(&在, zip(*多大)).expect("能写文件");
+        }
+        Self::摆好带(Some(另一块盘))
+    }
+
+    fn 摆好带(另一块盘: Option<TempDir>) -> Self {
         let 主库 = temp_dir("snap-sub-lib");
         for (相对, 多大) in [
             ("SFC/幻想传说 汉化版.zip", 4096),
@@ -2232,9 +2705,15 @@ impl 子库现场 {
             std::fs::write(&在, zip(多大)).expect("能写文件");
         }
         let mut catalog = Catalog::open_in_memory().expect("开得出中立库");
-        let mut options = ScanOptions::named(主库.path(), "库");
-        options.jobs = Jobs::Fixed(2);
-        scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
+        let mut roots: Vec<(&str, &Path)> = vec![("库", 主库.path())];
+        if let Some(第二个) = &另一块盘 {
+            roots.push(("另一块盘", 第二个.path()));
+        }
+        for (名字, 根) in roots {
+            let mut options = ScanOptions::named(根, 名字);
+            options.jobs = Jobs::Fixed(2);
+            scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
+        }
         let site = Site::in_memory(catalog, Store::in_memory().expect("开得出沉淀库"), "库");
         let 工作区 = temp_dir("snap-sub-ws");
         let 卡 = temp_dir("snap-sub-card");
@@ -2246,6 +2725,7 @@ impl 子库现场 {
         app.show_view(View::Sublibraries);
         Self {
             主库,
+            _另一块盘: 另一块盘,
             _工作区: 工作区,
             卡,
             app,
@@ -2335,6 +2815,66 @@ impl 子库现场 {
             .set_exception(name, key, kind, note)
             .expect("例外写得进");
         screen.reload(site);
+    }
+
+    /// 直接把一份**清单**摆进中立库（`Catalog::put_manifest`）。
+    ///
+    /// **不走真的同步**：同步会往屏上写一句「同步用了 0.0 秒」，那个数跟着挂钟走，
+    /// 基线里就不定了。三类异常是摆出来的、不是跑出来的——它们各自由核心与界面那几条
+    /// 测试钉着，这一对要的是**画成什么样**。
+    fn 记一份清单(&mut self, name: &str, 几条: &[(&str, u64)]) {
+        use romcat_core::sync::{FileKind, Manifest, ManifestFile, Stamp};
+
+        let files = 几条
+            .iter()
+            .map(|(相对, 多大)| ManifestFile {
+                path: (*相对).to_string(),
+                kind: FileKind::Rom,
+                stamp: Stamp {
+                    bytes: *多大,
+                    mtime_ns: None,
+                },
+                source: format!("库/{相对}"),
+                source_stamp: Stamp {
+                    bytes: *多大,
+                    mtime_ns: None,
+                },
+                variant: format!("库/{相对}"),
+                absent: false,
+            })
+            .collect();
+        let (screen, site) = self.app.sublibrary_and_site();
+        site.catalog
+            .put_manifest(name, &Manifest { files })
+            .expect("清单写得进");
+        screen.reload(site);
+    }
+
+    /// 摊开一张卡：差量预览摆在摊开那一张底下。
+    fn 摊开(&mut self, name: &str) {
+        let (screen, site) = self.app.sublibrary_and_site();
+        screen.open(site, name);
+    }
+
+    /// 排一趟差量预览，等它收回来；跟着把「排它用了 N ms」钉死。
+    fn 排一遍差量(&mut self) {
+        {
+            let (screen, site, tasks) = self.app.sublibrary_site_and_tasks();
+            screen.preview(site, tasks);
+        }
+        for _ in 0..8 {
+            self.app.poll_tasks();
+            if self.app.sublibrary().previewing().is_none() && !self.app.tasks().busy() {
+                break;
+            }
+        }
+        let screen = self.app.sublibrary_and_site().0;
+        assert!(
+            screen.prepared().is_some(),
+            "差量没排出来：{:?}",
+            screen.error(),
+        );
+        screen.pin_prepare_ms(排它用了多少毫秒);
     }
 
     /// 按一下「算一遍容量」，等它收回来。内存里的库就地跑完，认领在 `App::poll_tasks` 里。
@@ -2769,6 +3309,129 @@ fn 子库_手动例外空态_浅色() {
 #[test]
 fn 子库_手动例外空态_暗色() {
     拍手动例外空态("sublibrary/exceptions-empty-dark", Theme::Dark);
+}
+
+// ——— 差量预览里的异常（票 `gui-looks-like-the-design/24`）———
+//
+// 差量预览摆在卡片下半截，**800 高的画面里整块落在画面外**，而 egui 不画整个落在裁剪区外的
+// 东西。与超限那一对同一个处置（挂单 `Q895`）：画面放高，整张卡一次拍全，不滚——滚到底拍的话
+// 图顶上那一行只露出下半截，字被切掉一半，看着像画坏了（票 20 第二段对稿时被打回过）。
+
+/// 差量异常那两对拍的是哪一台。
+const 摆着异常的那一台: &str = "RG35XX Plus";
+
+/// 差量账旁边那句「排它用了 N ms」在基线里定死成这个数（`sublibrary::Screen::pin_prepare_ms`）。
+/// 照实画的话一趟一个样——与例外那张表上的时刻同一个用处。
+const 排它用了多少毫秒: f64 = 343.0;
+
+/// 差量异常那两对的画面：宽照旧，高 1180——整张卡连差量账、步骤、异常那一块与底下的
+/// 「同步」都要拍全（[`搭一扇`]，模块文档「视口定死」那一节的第二处例外）。
+const 差量那几对的画面: [f32; 2] = [1280.0, 1180.0];
+
+/// **差量异常那两对的现场**：一台在位的设备，库是**两个根**，清单里记着两条，卡上被人动过手脚。
+///
+/// 四类异常在这一屏上各有一条：
+///
+/// - **设备上缺失**：清单记着圣剑传说，卡上没有——人在掌机上删了它。
+/// - **被修改过**：卡上那份黄金太阳与清单记的大小对不上，已经不是工具放的那一份。
+/// - **目标位置被占用**：口袋妖怪的落点上挡着一个清单之外的文件。
+/// - **放不进目标**：两个根里同一条相对路径（幻想传说）撞在卡上同一个文件上。
+///
+/// **元数据读不到**那一栏故意空着：造一个 `stat` 不动的文件各平台做法不一样，造出来也只是在验
+/// 平台。空着那一栏画成什么样，正是这一对要守的东西之一。
+fn 摆着异常的一台() -> 子库现场 {
+    // 第二个根里同一条相对路径：剥掉根名之后与头一个根的那一份落在卡上同一个文件上。
+    let mut 现场 = 子库现场::摆好带另一块盘(&[("SFC/幻想传说 汉化版.zip", 9_000)]);
+    现场.记一台(
+        摆着异常的那一台,
+        "/Volumes/SDCARD",
+        true,
+        Some(64_000_000_000),
+        None,
+        &["平台=SFC,GBA"],
+    );
+    // 卡上：黄金太阳被别的工具改过（大小对不上清单），口袋妖怪的落点被一份清单之外的文件占着，
+    // 圣剑传说被人删了。
+    for (相对, 内容) in [
+        ("GBA/黄金太阳 开启的封印.zip", "别的工具改过它"),
+        (
+            "GBA/口袋妖怪 绿宝石.zip",
+            "我自己拷进来的，工具连看都不该看",
+        ),
+    ] {
+        let 在 = 现场.卡.path().join(相对);
+        std::fs::create_dir_all(在.parent().expect("有上级目录")).expect("能建目录");
+        std::fs::write(&在, 内容.as_bytes()).expect("能写文件");
+    }
+    现场.记一份清单(
+        摆着异常的那一台,
+        &[
+            ("GBA/黄金太阳 开启的封印.zip", 3_072),
+            ("SFC/圣剑传说 3 汉化版.zip", 8_192),
+        ],
+    );
+    现场.摊开(摆着异常的那一台);
+    现场.排一遍差量();
+    现场
+}
+
+/// 拍差量预览那一块：停在 `摆在哪一栏` 那一栏上。
+fn 拍差量异常(名字: &str, 主题: Theme, 摆在哪一栏: romcat_gui::sublibrary::Anomaly) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 摆着异常的一台();
+    现场.app.sublibrary_and_site().0.show_anomaly(摆在哪一栏);
+    let harness = 开一扇(主题, 差量那几对的画面, move |ui| {
+        现场.app.ui(ui);
+    });
+    // **「看得全」写成断言**：五个栏名与底下那颗「同步」都整个在画面里。哪天卡片长高、
+    // 异常那一块被挤出画面，这里当场红，不会悄悄拍一张截掉半块的基线。
+    let 视口 = egui::Rect::from_min_size(egui::Pos2::ZERO, 差量那几对的画面.into());
+    for 该在画面里 in ["异常", "同步"] {
+        let 在 = 正好画着的每一处(harness.output(), 该在画面里);
+        assert!(
+            在.iter().any(|rect| 视口.contains_rect(*rect)),
+            "「{该在画面里}」没整个在画面里：{在:?}"
+        );
+    }
+    拍下(harness, 名字);
+}
+
+#[test]
+fn 子库_差量异常_设备上缺失_浅色() {
+    拍差量异常(
+        "sublibrary/anomalies-missing-light",
+        Theme::Light,
+        romcat_gui::sublibrary::Anomaly::Surprise(romcat_core::sync::SurpriseKind::Gone),
+    );
+}
+
+#[test]
+fn 子库_差量异常_设备上缺失_暗色() {
+    拍差量异常(
+        "sublibrary/anomalies-missing-dark",
+        Theme::Dark,
+        romcat_gui::sublibrary::Anomaly::Surprise(romcat_core::sync::SurpriseKind::Gone),
+    );
+}
+
+#[test]
+fn 子库_差量异常_放不进目标_浅色() {
+    拍差量异常(
+        "sublibrary/anomalies-nofit-light",
+        Theme::Light,
+        romcat_gui::sublibrary::Anomaly::NoFit,
+    );
+}
+
+#[test]
+fn 子库_差量异常_放不进目标_暗色() {
+    拍差量异常(
+        "sublibrary/anomalies-nofit-dark",
+        Theme::Dark,
+        romcat_gui::sublibrary::Anomaly::NoFit,
+    );
 }
 
 // ——— 任务屏（票 `gui-looks-like-the-design/25`）———
@@ -3255,4 +3918,125 @@ fn 待确认_空态_浅色() {
 #[test]
 fn 待确认_空态_暗色() {
     拍待确认空态("queue/empty-dark", Theme::Dark);
+}
+
+// ——— 设置（票 `gui-looks-like-the-design/31`） ———
+
+/// **设置那一屏**：一份刚建出来的库开在设置上，八节里挑一节拍。
+///
+/// 三样钉死，照旧是为了「每台机器每一趟都一样」：底部状态栏与工作目录那一节印的那一段短写
+/// （`App::set_workspace_label`）、数据源那张表的时刻（`库屏的钟`），以及**探 ffmpeg 那个程序名**
+/// ——那一格照实探这台机器，而门禁那几台有的装了有的没装（`Screen::probe_with`，指一个必定
+/// 不存在的名字，画出来一律是「没找到」那一档，设计稿上画的也是这一档）。
+struct 设置屏 {
+    app: App,
+    _工作区: TempDir,
+}
+
+impl 设置屏 {
+    fn 停在(节: Section) -> Self {
+        let 工作区 = temp_dir("snapshot-设置屏");
+        let site = 开库(工作区.path());
+        let mut app = App::new(site, 工作区.path().to_path_buf());
+        app.show_view(View::Settings);
+        app.set_workspace_label(工作目录().display().to_string());
+        let screen = app.settings_mut();
+        screen.show_section(节);
+        screen.probe_with(romcat_core::scrape::preview::NO_SUCH_PROGRAM);
+        screen.pin_account(false);
+        screen.pin_clock(库屏的钟());
+        Self {
+            app,
+            _工作区: 工作区,
+        }
+    }
+}
+
+#[track_caller]
+fn 拍设置屏(名字: &str, 主题: Theme, 节: Section) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 设置屏::停在(节);
+    拍下(开一个(主题, move |ui| 现场.app.ui(ui)), 名字);
+}
+
+#[test]
+fn 设置_常规_浅色() {
+    拍设置屏("settings/general-light", Theme::Light, Section::General);
+}
+
+#[test]
+fn 设置_常规_暗色() {
+    拍设置屏("settings/general-dark", Theme::Dark, Section::General);
+}
+
+#[test]
+fn 设置_工作目录_浅色() {
+    拍设置屏("settings/workspace-light", Theme::Light, Section::Workspace);
+}
+
+#[test]
+fn 设置_工作目录_暗色() {
+    拍设置屏("settings/workspace-dark", Theme::Dark, Section::Workspace);
+}
+
+#[test]
+fn 设置_数据源_浅色() {
+    拍设置屏("settings/sources-light", Theme::Light, Section::Sources);
+}
+
+#[test]
+fn 设置_数据源_暗色() {
+    拍设置屏("settings/sources-dark", Theme::Dark, Section::Sources);
+}
+
+#[test]
+fn 设置_刮削_浅色() {
+    拍设置屏("settings/scrape-light", Theme::Light, Section::Scrape);
+}
+
+#[test]
+fn 设置_刮削_暗色() {
+    拍设置屏("settings/scrape-dark", Theme::Dark, Section::Scrape);
+}
+
+#[test]
+fn 设置_导出_浅色() {
+    拍设置屏("settings/export-light", Theme::Light, Section::Export);
+}
+
+#[test]
+fn 设置_导出_暗色() {
+    拍设置屏("settings/export-dark", Theme::Dark, Section::Export);
+}
+
+#[test]
+fn 设置_工具_浅色() {
+    拍设置屏("settings/tools-light", Theme::Light, Section::Tools);
+}
+
+#[test]
+fn 设置_工具_暗色() {
+    拍设置屏("settings/tools-dark", Theme::Dark, Section::Tools);
+}
+
+#[test]
+fn 设置_关于_浅色() {
+    拍设置屏("settings/about-light", Theme::Light, Section::About);
+}
+
+#[test]
+fn 设置_关于_暗色() {
+    拍设置屏("settings/about-dark", Theme::Dark, Section::About);
+}
+
+#[test]
+fn 设置_快捷键_浅色() {
+    拍设置屏("settings/keys-light", Theme::Light, Section::Keys);
+}
+
+#[test]
+fn 设置_快捷键_暗色() {
+    拍设置屏("settings/keys-dark", Theme::Dark, Section::Keys);
 }

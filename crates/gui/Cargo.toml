@@ -1,6 +1,6 @@
 [package]
 name = "romcat-gui"
-description = "romcat 界面：五屏（库 / 浏览 / 待确认 / 子库 / 任务）的窗口壳"
+description = "romcat 界面：六屏（库 / 浏览 / 待确认 / 子库 / 任务 / 设置）的窗口壳"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

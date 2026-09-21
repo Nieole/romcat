@@ -512,6 +512,8 @@ fn 退出那一颗摆在右边的写法_退出那一颗靠右画成主按钮_其
 struct 一层 {
     width: Width,
     行数: usize,
+    /// 标头那一排「走到第几问」摆哪几问、停在第几问；不摆就是 `None`。
+    问: Option<(Vec<String>, usize)>,
     /// 上一帧这一层（连边框）画在哪儿。
     画在: Option<egui::Rect>,
 }
@@ -521,20 +523,30 @@ impl 一层 {
         Self {
             width,
             行数,
+            问: None,
             画在: None,
         }
+    }
+
+    /// 摆上「走到第几问」那一排。
+    fn 走到第几问(mut self, 哪几问: &[&str], 第几问: usize) -> Self {
+        self.问 = Some((哪几问.iter().map(|one| (*one).to_owned()).collect(), 第几问));
+        self
     }
 
     fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let 行数 = self.行数;
-        let shown = Dialog::new(
+        let mut dialog = Dialog::new(
             "量一量",
             "量一量",
             Footer::new(Button::new("关上", 按的::关上)),
         )
-        .width(self.width)
-        .show(&ctx, |ui| {
+        .width(self.width);
+        if let Some((哪几问, 第几问)) = self.问.clone() {
+            dialog = dialog.pages(哪几问, 第几问);
+        }
+        let shown = dialog.show(&ctx, |ui| {
             for n in 0..行数 {
                 ui.label(format!("第{n}行"));
             }
@@ -731,5 +743,127 @@ fn 没给那两个槽的弹层一点地方都不多占_给了才画出来() {
     assert!(
         无槽的框.height() < 带槽的框.height(),
         "给了标头那一排，这一层却没变高：无槽 {无槽的框:?}、带槽 {带槽的框:?}",
+    );
+}
+
+/// 屏上**正好**写着这几个字的那一段画在哪儿（整段的外框）。
+fn 那一段画在哪儿(output: &egui::FullOutput, 那几个字: &str) -> Option<egui::Rect> {
+    fn 找(shape: &egui::epaint::Shape, 那几个字: &str) -> Option<egui::Rect> {
+        match shape {
+            egui::epaint::Shape::Text(text) => (text.galley.text() == 那几个字)
+                .then(|| egui::Rect::from_min_size(text.pos, text.galley.size())),
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(|one| 找(one, 那几个字)),
+            _ => None,
+        }
+    }
+    output
+        .shapes
+        .iter()
+        .find_map(|clipped| 找(&clipped.shape, 那几个字))
+}
+
+/// 屏上那几道**横线**画在哪儿（`painter.hline` 留下的线段），按画出来的次序。
+///
+/// `只看这一行`：只要竖直位置与它差不到几点的那几道——弹层里还有分隔线，而那几道与
+/// 「走到第几问」那一排不在同一行上。
+fn 横线们(
+    output: &egui::FullOutput, 只看这一行: f32
+) -> Vec<std::ops::RangeInclusive<f32>> {
+    fn 找(
+        shape: &egui::epaint::Shape,
+        只看这一行: f32,
+        每一道: &mut Vec<std::ops::RangeInclusive<f32>>,
+    ) {
+        match shape {
+            egui::epaint::Shape::LineSegment { points, .. } => {
+                let [甲, 乙] = points;
+                if (甲.y - 乙.y).abs() < 0.5 && (甲.y - 只看这一行).abs() < 4.0 {
+                    每一道.push(甲.x.min(乙.x)..=甲.x.max(乙.x));
+                }
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    找(one, 只看这一行, 每一道);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut 每一道 = Vec::new();
+    for clipped in &output.shapes {
+        找(&clipped.shape, 只看这一行, &mut 每一道);
+    }
+    每一道
+}
+
+#[test]
+fn 走到第几问那一排贯通左右而且中间不断() {
+    // **拿主意的人 2026-09-21 定，与设计稿不同**：稿上 `.step:last-child::after{display:none}`，
+    // 末一问那一格里的东西靠左、右边空着，整条只画到三分之二处。
+    //
+    // **头一版按「几格等宽」摆，两端对上了、中间却断着**：末一问那一节被推到自己格子的右端，
+    // 而上一格的连线只画到它自己格子的边界，中间空出一百九十点。所以这一条断的不再是
+    // 「几格等宽」，而是**两端贴边 + 每一道连线接满 + 两道连线等长**——「中间断没断」
+    // 才是「贯通」的直接判据。
+    let ctx = 上下文();
+    let 哪几问 = ["命名", "选择目录", "开始扫描"];
+    let mut 层 = 一层::new(Width::Widest, 3).走到第几问(&哪几问, 0);
+    let mut output = 跑这一层(&ctx, &mut 层, headless::VIEWPORT, Vec::new());
+    for _ in 0..2 {
+        output = 跑这一层(&ctx, &mut 层, headless::VIEWPORT, Vec::new());
+    }
+    let 画在 = 层.画在.expect("画过了");
+    let 每一问: Vec<egui::Rect> = 哪几问
+        .iter()
+        .map(|那几个字| {
+            那一段画在哪儿(&output, 那几个字).unwrap_or_else(|| panic!("屏上没有「{那几个字}」"))
+        })
+        .collect();
+    let 直径 = Tokens::builtin().layout.page_dot;
+    let 缝 = look::step(1);
+    let 边框 = ctx.style_of(ctx.theme()).visuals.window_stroke.width;
+    let 内边距 = Tokens::builtin().space.dialog_padding[1];
+
+    // 一、**两端贴边**：头一问的圆点贴左内缘，末一问的名字贴右内缘。
+    let (左内缘, 右内缘) = (画在.left() + 边框 + 内边距, 画在.right() - 边框 - 内边距);
+    let 头一问圆点左 = 每一问[0].left() - 直径 - 缝;
+    assert!(
+        (头一问圆点左 - 左内缘).abs() < 0.5,
+        "头一问没贴左内缘：圆点左沿在 {头一问圆点左}，左内缘在 {左内缘}",
+    );
+    assert!(
+        (每一问[2].right() - 右内缘).abs() < 0.5,
+        "末一问没贴右内缘：名字右缘在 {}，右内缘在 {右内缘}",
+        每一问[2].right(),
+    );
+
+    // 二、**每一道连线接满**：左端接着上一问名字的右缘，右端接着下一问圆点的左沿，
+    // 两头各留一道令牌里那个缝，**中间不许留空**。
+    let 每一道 = 横线们(&output, 每一问[0].center().y);
+    assert_eq!(
+        每一道.len(),
+        2,
+        "三问之间该有两道连线，画出了 {} 道",
+        每一道.len()
+    );
+    for (i, 这一道) in 每一道.iter().enumerate() {
+        let 该从 = 每一问[i].right() + 缝;
+        let 该到 = 每一问[i + 1].left() - 直径 - 缝 - 缝;
+        assert!(
+            (这一道.start() - 该从).abs() < 0.5 && (这一道.end() - 该到).abs() < 0.5,
+            "第 {} 道连线没接满：画在 {:?}，该是 {该从}..={该到}",
+            i + 1,
+            这一道,
+        );
+    }
+
+    // 三、**两道连线等长**。节点本身宽度不一（「命名」两个字、另两问各四个字），按节点中心
+    // 等距会让两道一长一短；眼睛读到的「间距」是中间那道线，所以等的是线。
+    let 长 = |这一道: &std::ops::RangeInclusive<f32>| 这一道.end() - 这一道.start();
+    assert!(
+        (长(&每一道[0]) - 长(&每一道[1])).abs() < 0.5,
+        "两道连线不等长：{} 与 {}",
+        长(&每一道[0]),
+        长(&每一道[1]),
     );
 }
