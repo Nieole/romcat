@@ -61,6 +61,7 @@
 //! 它只动沉淀库，理由与出口都写在 [`forget`] 上。
 
 pub mod batch;
+pub mod merge;
 pub mod queue;
 pub mod report;
 
