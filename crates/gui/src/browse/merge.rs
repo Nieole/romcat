@@ -20,7 +20,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use romcat_core::catalog::browse::{WorkAnchor, WorkDetail, WorkQuery};
+use romcat_core::catalog::browse::{WorkAnchor, WorkDetail, WorkQuery, WorkVariant};
 use romcat_core::catalog::identify::Tier;
 use romcat_core::catalog::{Catalog, CatalogError};
 use romcat_core::filename::Rules;
@@ -53,9 +53,12 @@ const STEPS: [&str; 3] = ["选择作品", "核对变体", "确认合并"];
 /// 弹层内容区自己滚得动，而少列几行只会让人以为库里没有。
 const FOUND: usize = 8;
 
-/// 一格值最多印多少个字（设计稿第三步 `esc(r.kv).slice(0,80)`）：简介在中立库里最长 4,000 字，
-/// 整段塞进那一格会把三栏撑塌。
-const CELL: usize = 80;
+/// 一格值最多印多少个字（设计稿第三步 `esc(r.kv).slice(0,80)`，那是拉丁字母的 80）：
+/// 简介在中立库里最长 4,000 字，整段塞进那一格会把三栏撑塌。
+///
+/// **取的是汉字数**：这一层最宽 840 点、三栏分下来一栏三百出头，半号字的汉字一行摆得下
+/// 二十几个。剪掉的那一截**停在指针上说得出来**（`on_hover_text` 交的是整句）。
+const CELL: usize = 26;
 
 /// 参与合并的一**行**：浏览表上的一行（一个作品，或一个还没认出作品的变体）。
 #[derive(Debug, Clone)]
@@ -67,6 +70,10 @@ struct Party {
     work: Option<String>,
     /// 屏上那个名字。
     title: String,
+    /// 年份；一条都没刮到时是 `None`（屏上照词表那句写「年份未知」）。
+    year: Option<String>,
+    /// 底下那些变体里**最高的那档置信度**（与表上那一行同一条口径，`WorkRow::confidence`）。
+    tier: Tier,
     /// 底下那几个变体（**照当前筛选**展开，与屏上那一行写着的变体数同一个数）。
     variants: Vec<PartyVariant>,
 }
@@ -107,6 +114,15 @@ impl Party {
             anchor: anchor.clone(),
             work,
             title: title_of(&detail, rules),
+            year: detail.year.clone(),
+            // 一条候选都没有时是 `None`，[`Tier::of`] 把它折成「没有候选」那一档。
+            tier: Tier::of(
+                detail
+                    .variants
+                    .iter()
+                    .filter_map(WorkVariant::confidence)
+                    .min(),
+            ),
             variants: detail
                 .variants
                 .iter()
@@ -207,9 +223,11 @@ impl Wizard {
                 Err(failed) => error = Some(format!("中立库读不动：{failed}")),
             }
         }
-        // **默认保留变体最多的那一个**（拿主意的人 2026-09-21 待裁，暂按这一条）：
-        // 合并的本意就是把少的并进多的，而这句话屏上解释得清。同数时按作品名定序，
-        // 于是同一批行开两次向导，默认推荐的是同一个。
+        // **默认保留变体最多的那一个**（拿主意的人 2026-09-21 定）：合并的本意就是把少的
+        // 并进多的，而这句话屏上解释得清。**稿上那套四项加权分不照抄**
+        // （`bestOf`：置信度×2 + 有封面 + 元数据完整 + 变体数×0.1）——它是一条会落进
+        // 界面里的新领域判断，而且屏上解释不了「凭什么推荐这一个」。
+        // 同数时按屏上那个名字定序，于是同一批行开两次向导，默认推荐的是同一个。
         let keep = best_keep(&parties);
         Self {
             step: 0,
@@ -454,15 +472,20 @@ impl Wizard {
             let 当得了 = party.work.is_some();
             look::card(ui, egui::Vec2::splat(look::step(2)), |ui| {
                 ui.horizontal(|ui| {
+                    // 照稿那一行（`.mwit` 里那句 `help`）：平台 · 年份 · 几个变体。
                     let 一句 = format!(
-                        "{} · {} 个变体",
+                        "{} · {} · {} 个变体",
                         平台们(party),
+                        party.year.as_deref().unwrap_or("年份未知"),
                         thousands(party.variants.len() as u64),
                     );
                     if look::radio_option(ui, 是保留, &party.title, &一句).clicked() && 当得了
                     {
                         换保留 = Some(at);
                     }
+                    // 置信度那一档也照稿摆在名字后头。哪一档由核心库答（`WorkVariant::confidence`
+                    // 取最高的那一条，与表上那一行同一条口径），这里只印。
+                    look::tier_tag(ui, party.tier);
                     if 是保留 {
                         table::tag(ui, "保留");
                     }
@@ -697,41 +720,57 @@ impl Wizard {
             look::help(ui, "没有冲突的字段。");
         }
         let mut 选 = Vec::new();
-        for conflict in &self.conflicts {
-            let 眼下 = self.pick_of(conflict);
-            look::card(ui, egui::Vec2::splat(look::step(2)), |ui| {
-                ui.label(font::strong(conflict.field.label()));
-                match &conflict.keep {
-                    Some(said) => {
-                        if look::radio_option(
-                            ui,
-                            眼下 == KEEP_VALUE,
-                            &剪一段(&said.values.join("、")),
-                            &format!("保留作品《{keep}》"),
-                        )
-                        .clicked()
-                        {
-                            选.push((conflict.field, KEEP_VALUE));
-                        }
+        // **一张三栏表**（设计稿 `.ctbl`）：字段 / 保留作品 / 其他作品，一个字段一行。
+        // 一个字段摆一张卡的话，五个冲突就把「合并后会发生什么」整块推到折叠线以下——
+        // 而那一块正是这一步要人看清的东西。
+        look::card(ui, egui::Vec2::splat(look::step(2)), |ui| {
+            egui::Grid::new("字段冲突")
+                .num_columns(3)
+                .striped(true)
+                .spacing(egui::vec2(look::step(3), look::step(1)))
+                .show(ui, |ui| {
+                    look::section(ui, "字段");
+                    look::section(ui, "保留作品");
+                    look::section(ui, "其他作品");
+                    ui.end_row();
+                    for conflict in &self.conflicts {
+                        let 眼下 = self.pick_of(conflict);
+                        ui.label(font::strong(conflict.field.label()));
+                        // **每一格里再起一竖**：[`look::radio_option`] 头一句是 `add_space`，
+                        // 而 egui 的网格布局上 `add_space` 当场炸（「add_space makes no sense
+                        // in a grid layout」）。竖排那一层不是网格，摆得下。
+                        ui.vertical(|ui| match &conflict.keep {
+                            Some(said) => {
+                                let 整句 = said.values.join("、");
+                                if look::radio_option(ui, 眼下 == KEEP_VALUE, &剪一段(&整句), "")
+                                    .on_hover_text(&整句)
+                                    .clicked()
+                                {
+                                    选.push((conflict.field, KEEP_VALUE));
+                                }
+                            }
+                            // 保留作品这一格空着时那一格**选不了**（稿上那颗单选钮是 `disabled`）：
+                            // 没有值可用，默认就是别人的那一个。
+                            None => {
+                                look::help(ui, "（空）");
+                            }
+                        });
+                        ui.vertical(|ui| {
+                            for (at, offer) in conflict.others.iter().enumerate() {
+                                let 整句 = offer.said.values.join("、");
+                                let 这一格 = format!("{}  · {}", 剪一段(&整句), offer.work);
+                                if look::radio_option(ui, 眼下 == at, &这一格, "")
+                                    .on_hover_text(&整句)
+                                    .clicked()
+                                {
+                                    选.push((conflict.field, at));
+                                }
+                            }
+                        });
+                        ui.end_row();
                     }
-                    None => {
-                        look::help(ui, &format!("保留作品《{keep}》这一格是空的"));
-                    }
-                }
-                for (at, offer) in conflict.others.iter().enumerate() {
-                    if look::radio_option(
-                        ui,
-                        眼下 == at,
-                        &剪一段(&offer.said.values.join("、")),
-                        &format!("《{}》", offer.work),
-                    )
-                    .clicked()
-                    {
-                        选.push((conflict.field, at));
-                    }
-                }
-            });
-        }
+                });
+        });
         for (field, at) in 选 {
             self.picks.insert(field, at);
         }
@@ -873,6 +912,10 @@ pub struct Split {
     short: String,
     /// 它所在的平台。
     platform: Option<String>,
+    /// 它的置信度那一档（照稿摆在那张卡右头）。
+    tier: Tier,
+    /// 它多大。
+    bytes: u64,
     /// 移到新建的作品（真）还是另一个已有作品（假）。
     fresh: bool,
     /// 新建那一档：框里打的名字。
@@ -903,6 +946,7 @@ impl Split {
         short: &str,
         platform: Option<&str>,
     ) -> Self {
+        let 这一个 = work.variants.iter().find(|one| one.row.key == key);
         let title = title_of(work, rules);
         // 新建那一档的默认名字照稿：原作品名加上变体简称头一段（「幻想传说（汉化版）」）。
         let 起名 = format!("{title}（{}）", short.split(" · ").next().unwrap_or(short));
@@ -915,6 +959,8 @@ impl Split {
             key: key.to_string(),
             short: short.to_string(),
             platform: platform.map(ToString::to_string),
+            tier: Tier::of(这一个.and_then(WorkVariant::confidence)),
+            bytes: 这一个.map_or(0, |one| one.row.bytes),
             fresh: true,
             name: 起名,
             query: String::new(),
@@ -968,9 +1014,19 @@ impl Split {
                     ui.colored_label(ui.visuals().error_fg_color, 说的);
                     ui.add_space(look::step(1));
                 }
+                // 照稿那一行（`DLG.split` 里那个 `.vrow`）：简称与位置在左，
+                // 置信度与体积在右头。
                 look::card(ui, egui::Vec2::splat(look::step(2)), |ui| {
-                    ui.label(font::strong(&self.short));
-                    look::help(ui, &self.key);
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(font::strong(&self.short));
+                            look::help(ui, &self.key);
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            look::help(ui, &human_bytes(self.bytes));
+                            look::tier_tag(ui, self.tier);
+                        });
+                    });
                 });
                 ui.add_space(look::step(1));
                 look::section(ui, "移到");
