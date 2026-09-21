@@ -107,6 +107,7 @@ use crate::task::{Product, Tasks};
 use crate::toast::{self, Toast};
 use crate::tokens::Tokens;
 
+pub mod merge;
 pub mod work;
 
 /// 侧边详情变体卡片上**首选变体**那一枚标签上的字（词表**首选变体**条）。哪一个是首选由核心库答
@@ -394,6 +395,10 @@ pub struct Screen {
     /// 「不改了」、或者直接从顶栏切回子库屏——那两条路上没有「更新到子库」，
     /// 只认 `returned` 的话，子库屏会摆着一份按旧选择集排出来的差量，而「同步」认的正是它。
     touched: Option<String>,
+    /// **合并作品向导**开着时是 `Some`（票 `gui-looks-like-the-design/16`）。
+    merging: Option<merge::Wizard>,
+    /// **移出此作品**那一层开着时是 `Some`。它从作品详情页某一张变体卡上开。
+    splitting: Option<merge::Split>,
     /// 高亮的是哪一行（全序下标）。
     focused: Option<u64>,
     /// 选中了哪几行——**批量操作的作用范围**。与 [`Self::focused`] 不是一回事。
@@ -541,6 +546,8 @@ impl Screen {
             editing: None,
             returned: None,
             touched: None,
+            merging: None,
+            splitting: None,
             focused: None,
             picked: Picked::default(),
             opened: None,
@@ -684,6 +691,171 @@ impl Screen {
         self.reload(site);
         self.load_work(&site.catalog);
         self.load_detail(&site.catalog);
+    }
+
+    /// 按屏头那颗「**合并作品…**」：勾中的那几行开一层向导。
+    ///
+    /// **勾两个以上才开得了**，而且**全选那一档开不了**（设计稿 `#merge-btn` 的
+    /// `S.pickAll?[]:[...S.picked]`）：合并要人逐个核对变体与字段，一万多行核对不过来，
+    /// 而「全选」本身不是一批身份、是一个筛选条件。
+    pub fn open_merge(&mut self, site: &Site) {
+        let Scope::Rows(rows) = self.picked.scope() else {
+            self.notice = Some(merge::NEED_TWO.to_string());
+            return;
+        };
+        if rows.len() < 2 {
+            self.notice = Some(merge::NEED_TWO.to_string());
+            return;
+        }
+        let rows = rows.to_vec();
+        self.merging = Some(merge::Wizard::open(
+            &site.catalog,
+            &self.query,
+            &self.rules,
+            &self.priorities,
+            &rows,
+        ));
+    }
+
+    /// 作品详情页头上那颗「**合并…**」：从这一个作品起头开一层向导，第一步再搜别的作品加进来。
+    pub fn open_merge_here(&mut self, site: &Site) {
+        let Some(anchor) = self.opened.clone() else {
+            return;
+        };
+        self.merging = Some(merge::Wizard::open(
+            &site.catalog,
+            &self.query,
+            &self.rules,
+            &self.priorities,
+            &[anchor],
+        ));
+    }
+
+    /// 变体卡头一行右头那颗「**移出此作品…**」。
+    pub fn open_split(&mut self, key: &str) {
+        let Some(work) = self.work.as_ref() else {
+            return;
+        };
+        let Some(at) = work
+            .variants
+            .iter()
+            .position(|variant| variant.row.key == key)
+        else {
+            return;
+        };
+        let Some(variant) = work.variants.get(at) else {
+            return;
+        };
+        let short = self
+            .short_names
+            .get(at)
+            .cloned()
+            .unwrap_or_else(|| variant.row.key.clone());
+        self.splitting = Some(merge::Split::open(
+            work,
+            &self.rules,
+            &variant.row.key,
+            &short,
+            variant.row.platform.as_deref(),
+        ));
+    }
+
+    /// 画合并向导与「移出此作品」那两层；按下「合并」「移出」就落下去。
+    fn merge_ui(&mut self, ctx: &egui::Context, site: &mut Site) {
+        if let Some(wizard) = self.merging.as_mut() {
+            match wizard.ui(ctx, site, &self.priorities) {
+                None => {}
+                Some(merge::Done::Close) => self.merging = None,
+                Some(merge::Done::Apply) => self.apply_merge(site),
+            }
+        }
+        if let Some(split) = self.splitting.as_mut() {
+            match split.ui(ctx, site, &self.priorities) {
+                None => {}
+                Some(merge::Done::Close) => self.splitting = None,
+                Some(merge::Done::Apply) => self.apply_split(site),
+            }
+        }
+    }
+
+    /// 真合并：**先落那一批裁决**，再办顺手的那三样（别名、字段选值、首选变体）。
+    ///
+    /// 次序是有意的：裁决那一批是主干，落不下去就一样都不该做——那三样各自都是中立库里
+    /// 独立的一笔账，撤销那一批不连带（挂单 `Q1012`），先做的话会留下
+    /// 「名字并了、变体没并」那种半吊子。
+    fn apply_merge(&mut self, site: &mut Site) {
+        let Some(wizard) = self.merging.take() else {
+            return;
+        };
+        let Some(planned) = wizard.planned() else {
+            return;
+        };
+        let keep = planned.into_work().to_string();
+        let 几个 = planned.verdicts();
+        if let Err(failed) =
+            romcat_core::triage::merge::apply(&mut site.catalog, &mut site.store, planned)
+        {
+            self.error = Some(format!("合并落不下去：{failed}"));
+            return;
+        }
+        let mut 顺手 = Vec::new();
+        if let Err(failed) =
+            romcat_core::triage::merge::keep_aliases(&mut site.catalog, &keep, &wizard.aliases())
+        {
+            顺手.push(format!("别名没留下：{failed}"));
+        }
+        for (field, offer) in wizard.adopted() {
+            if let Err(failed) = romcat_core::triage::merge::adopt(
+                &mut site.catalog,
+                &self.priorities,
+                &keep,
+                field,
+                &offer,
+            ) {
+                顺手.push(format!("{} 那一格没改成：{failed}", field.label()));
+            }
+        }
+        for (work, platform, key) in wizard.preferred() {
+            if let Err(failed) = site.catalog.set_preferred_variant(&work, &platform, &key) {
+                顺手.push(format!("{platform} 的首选变体没记下：{failed}"));
+            }
+        }
+        self.error = (!顺手.is_empty()).then(|| 顺手.join("；"));
+        self.picked.clear();
+        self.notice = Some(format!(
+            "已合并：{} 个变体归入「{keep}」。要撤销去「待确认 → 裁决记录」。",
+            thousands(几个)
+        ));
+        self.after_regroup(site);
+    }
+
+    /// 真移出：一条裁决，同一条撤销路。
+    fn apply_split(&mut self, site: &mut Site) {
+        let Some(split) = self.splitting.take() else {
+            return;
+        };
+        let Some(planned) = split.planned() else {
+            return;
+        };
+        let into = planned.into_work().to_string();
+        match romcat_core::triage::merge::apply(&mut site.catalog, &mut site.store, planned) {
+            Ok(_) => {
+                self.notice = Some(format!("已移到「{into}」。要撤销去「待确认 → 裁决记录」。"));
+                self.after_regroup(site);
+            }
+            Err(failed) => self.error = Some(format!("移不出去：{failed}")),
+        }
+    }
+
+    /// 合并 / 移出落下之后：手上缓着的那几份全过期了。
+    ///
+    /// 作品那一行的身份（`work_id`）可能刚刚没了（那个作品一个变体都不剩），所以
+    /// **点开的那一行也放掉**——留着它，详情面板会一直读一个已经不在的作品。
+    fn after_regroup(&mut self, site: &Site) {
+        if let Some(page) = self.page.as_mut() {
+            page.forget();
+        }
+        self.refresh(site);
     }
 
     /// 重问一次筛选面板上的可选值。开库时与改过元数据之后各一次。
@@ -1429,7 +1601,7 @@ impl Screen {
     /// 这一屏头一帧的行数就比表格慢一帧（与队列那一屏 `status` 同一条道理）。
     pub fn status(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks, demo: bool) {
         self.sync_window(&site.catalog);
-        let (刮削, 收藏) = look::small_buttons(ui, |ui| {
+        let (刮削, 收藏, 合并) = look::small_buttons(ui, |ui| {
             // **「刮削…」摆在屏头**。它只摊开弹层——真按下去那一下在弹层底下，
             // 因为按之前该先看清那本账；作用于哪一批，弹层标题上写着。
             let 刮削 = ui
@@ -1450,13 +1622,24 @@ impl Screen {
                      取消收藏与自建合集在左栏最底下：加收藏按得最勤，所以只有它在屏头。",
                 )
                 .clicked();
-            (刮削, 收藏)
+            // **「合并作品…」摆在这一排**：稿上它与「刮削…」「★ 收藏」同在工具条那一组
+            // （`.tbar .acts`），而那一组在这个仓库里整组挪进了屏头（挂单 `Q876`／`Q877`）。
+            let 合并 = ui
+                .button(merge::MERGE)
+                .on_hover_text(
+                    "把被识别成不同作品、其实是同一个游戏的变体归到一起。\n\n                     勾两个或更多作品再按。只写入裁决记录，不会移动或修改任何文件。",
+                )
+                .clicked();
+            (刮削, 收藏, 合并)
         });
         if 刮削 {
             self.open_scrape(&site.catalog);
         }
         if 收藏 {
             self.favorite(site, tasks);
+        }
+        if 合并 {
+            self.open_merge(site);
         }
         // **开发用的开关只在演示/开发构建里有**（拿主意的人 2026-09-14 定，挂单 `Q874`）：看的是**运行时**
         // 那个标记——这扇窗带 `--demo` 启动才摆。不看编译开关：门禁带 `--all-features` 跑截图，照编译开关藏
@@ -1953,6 +2136,8 @@ impl Screen {
         self.sync_media(ui.ctx(), site, writable);
         // **刮削是一层弹层**（[`crate::dialog`]），不占这一屏的地方：摊开着才画，盖在整屏上头。
         self.scrape.show(ui.ctx(), site, tasks);
+        // **合并向导与「移出此作品」也是弹层**：盖在整屏上头，三栏与作品详情页都由这一处画。
+        self.merge_ui(ui.ctx(), site);
         self.notice_toast(ui.ctx());
         // **作品详情页开着就只画它**（票 `gui-looks-like-the-design/15`）：稿上它盖住整块屏。
         if self.page.is_some() {

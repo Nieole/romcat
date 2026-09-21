@@ -1446,6 +1446,121 @@ fn 详情页_识别依据_暗色() {
     拍详情页("work/evidence-dark", Theme::Dark, Tab::Evidence);
 }
 
+// ——— 合并作品与移出此作品 ———
+//
+// 两层都垫在浏览屏那份现场上（[`浏览现场`]）：屏上画着的每一样都是定值。
+// 合并向导拍**三步各一对**，移出那一层拍**刚开那一下**（稿上 `st.mode='new'`：
+// 「新建一个作品」选着、名字框里是默认名）。
+
+/// 勾上前两个作品（表上排最前的那两行），不经表格——表上勾选框那一格在基线里是个小方块，
+/// 点它要先滚到那一行，而这几张要看的是弹层。
+fn 勾上前两个(app: &mut App) {
+    let 行: Vec<romcat_core::catalog::browse::WorkAnchor> = {
+        let (_, site) = app.browse_and_site();
+        浏览的作品
+            .iter()
+            .take(2)
+            .map(|(名字, _, _)| {
+                let id = site
+                    .catalog
+                    .work_named(名字)
+                    .expect("读得动")
+                    .expect("作品表里有它");
+                romcat_core::catalog::browse::WorkAnchor::Work(id)
+            })
+            .collect()
+    };
+    let (browse, _) = app.browse_and_site();
+    for anchor in 行 {
+        browse.picked_mut().toggle(&anchor);
+    }
+}
+
+/// **合并向导**走到第 `第几步` 步（从 1 数），拍一张。CI 上跳过（[`该跳过`]）。
+#[track_caller]
+fn 拍合并向导(名字: &str, 主题: Theme, 第几步: usize) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 浏览现场 { mut app, 目录 } = 浏览现场(false);
+    勾上前两个(&mut app);
+    let mut harness = 开一个(主题, move |ui| app.ui(ui));
+    按(&mut harness, romcat_gui::browse::merge::MERGE);
+    for _ in 1..第几步 {
+        按(&mut harness, "下一步");
+    }
+    拍下(harness, 名字);
+    drop(目录);
+}
+
+#[test]
+fn 合并向导_选择作品_浅色() {
+    拍合并向导("merge/step1-light", Theme::Light, 1);
+}
+
+#[test]
+fn 合并向导_选择作品_暗色() {
+    拍合并向导("merge/step1-dark", Theme::Dark, 1);
+}
+
+#[test]
+fn 合并向导_核对变体_浅色() {
+    拍合并向导("merge/step2-light", Theme::Light, 2);
+}
+
+#[test]
+fn 合并向导_核对变体_暗色() {
+    拍合并向导("merge/step2-dark", Theme::Dark, 2);
+}
+
+#[test]
+fn 合并向导_确认合并_浅色() {
+    拍合并向导("merge/step3-light", Theme::Light, 3);
+}
+
+#[test]
+fn 合并向导_确认合并_暗色() {
+    拍合并向导("merge/step3-dark", Theme::Dark, 3);
+}
+
+/// **移出此作品**那一层：打开作品详情页停在「变体与文件」，按头一张变体卡上那颗
+/// 「移出此作品…」（[`按`] 点的是**最后一处**，也就是最底下那张卡的那一颗）。
+#[track_caller]
+fn 拍移出此作品(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 浏览现场 { mut app, 目录 } = 浏览现场(false);
+    {
+        let anchor = {
+            let (_, site) = app.browse_and_site();
+            romcat_core::catalog::browse::WorkAnchor::Work(
+                site.catalog
+                    .work_named(点开的作品)
+                    .expect("读得动")
+                    .expect("作品表里有它"),
+            )
+        };
+        let (browse, site) = app.browse_and_site();
+        browse.open_work(&site.catalog, &anchor);
+        browse.open_page(Tab::Variants);
+    }
+    let mut harness = 开一个(主题, move |ui| app.ui(ui));
+    按(&mut harness, romcat_gui::browse::merge::SPLIT);
+    拍下(harness, 名字);
+    drop(目录);
+}
+
+#[test]
+fn 移出此作品弹层_浅色() {
+    拍移出此作品("merge/split-light", Theme::Light);
+}
+
+#[test]
+fn 移出此作品弹层_暗色() {
+    拍移出此作品("merge/split-dark", Theme::Dark);
+}
+
 // ——— 库 ———
 
 /// 库屏那几张基线用的现场：一份落在临时工作目录里的中立库，交出**整个窗口**（左栏、屏头加库屏的屏体）。
