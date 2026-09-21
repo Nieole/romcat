@@ -110,16 +110,29 @@ pub fn split(contents: &[String]) -> Option<BTreeMap<String, String>> {
     )
 }
 
-/// **撤销**：这个变体上的人工纠正要清掉哪几条键。
+/// **撤销**：这一处的人工纠正要清掉哪几条键。
 ///
-/// 清的是它**全部成员**那几行——合成落的是每个成员一行，拆开落的是那一份内容一行，两种都在里头。
-/// 清完重新成型，这几条回到规则算出来的地方（票 29 验收第 5 条「撤销后回到规则原本的结果」）。
+/// `spot` 是**同一处一起纠正出来的那几个变体**（[`Catalog::shaping_fix_group`](crate::catalog::Catalog::shaping_fix_group)
+/// 折得出来）：
+///
+/// - **合成**落的是每个成员一行、都指向同一个主文件，于是这一处只有**一个**变体——清它全部成员就完了。
+/// - **拆开**落的是那几份内容**各一行**，这一处于是有**好几个**变体。只清其中一个的话，剩下几份还各自
+///   成变体——**回不到规则原本的结果**（票 29 验收第 5 条逐字要的就是这个），而那个目录本身不落行、
+///   压根没有「撤这一份」那颗按钮可按。所以这一处得整处一起撤。
+///
+/// 清完重新成型，这几条回到规则算出来的地方。
 #[must_use]
-pub fn undo(variant: &Members) -> Vec<String> {
-    let mut keys = variant.members.clone();
-    if !keys.contains(&variant.main_key) {
-        keys.push(variant.main_key.clone());
-    }
+pub fn undo(spot: &[Members]) -> Vec<String> {
+    let mut keys: Vec<String> = spot
+        .iter()
+        .flat_map(|variant| {
+            variant
+                .members
+                .iter()
+                .cloned()
+                .chain(std::iter::once(variant.main_key.clone()))
+        })
+        .collect();
     keys.sort();
     keys.dedup();
     keys
@@ -300,6 +313,58 @@ mod tests {
     }
 
     #[test]
+    fn 拆开那一处要整处一起撤_只撤一份回不到规则原本的结果() {
+        // 票 29 验收第 5 条「撤销后**回到规则原本的结果**」：拆开落的是那几份内容各一行，
+        // 只清其中一份的话，剩下那几份还各自成变体——那不是规则原本的结果。
+        let entries = 条目(&[
+            "库/ps3/动作合集/PS3_GAME/USRDIR/EBOOT.BIN",
+            "库/ps3/动作合集/甲.iso",
+            "库/ps3/动作合集/乙.7z",
+        ]);
+        let manifest = Manifest::builtin();
+        let 甲 = "库/ps3/动作合集/甲.iso".to_string();
+        let 乙 = "库/ps3/动作合集/乙.7z".to_string();
+        let 纠正 = split(&[甲.clone(), 乙.clone()]).expect("拆得开");
+        let 一份 = |key: &String| Members {
+            key: key.clone(),
+            main_key: key.clone(),
+            members: vec![key.clone()],
+        };
+        let 成什么样 = |纠正: &BTreeMap<String, String>| {
+            plan(&entries, &manifest, 纠正)
+                .variants
+                .iter()
+                .map(|v| v.key.clone())
+                .collect::<Vec<_>>()
+        };
+
+        // 只撤一份：剩下那一份还各自成变体。
+        let mut 少撤了 = 纠正.clone();
+        for key in undo(&[一份(&甲)]) {
+            少撤了.remove(&key);
+        }
+        assert_eq!(
+            成什么样(&少撤了),
+            vec![
+                "库/ps3/动作合集".to_string(),
+                "库/ps3/动作合集/乙.7z".to_string(),
+            ],
+            "只撤一份就该还剩一份挂着——这正是不能只撤一份的理由"
+        );
+
+        // 整处一起撤：回到规则原本的结果（整个目录一个变体）。
+        let mut 整处撤 = 纠正;
+        for key in undo(&[一份(&甲), 一份(&乙)]) {
+            整处撤.remove(&key);
+        }
+        assert_eq!(
+            成什么样(&整处撤),
+            vec!["库/ps3/动作合集".to_string()],
+            "整处撤完没回到规则原本的结果"
+        );
+    }
+
+    #[test]
     fn 撤销清的是这个变体全部成员那几行_清完回到规则原本的结果() {
         let entries = 条目(&[
             "库/FDS/某游戏/某游戏 (Disk 1).fds",
@@ -320,7 +385,7 @@ mod tests {
         ])
         .expect("合得成");
         let 合出来的 = plan(&entries, &manifest, &纠正).variants.remove(0);
-        let 要清的 = undo(&Members {
+        let 要清的 = undo(&[Members {
             key: 合出来的.key.clone(),
             main_key: 合出来的.main_key.clone(),
             members: 合出来的
@@ -328,7 +393,7 @@ mod tests {
                 .iter()
                 .map(|(key, _)| key.clone())
                 .collect(),
-        });
+        }]);
         assert_eq!(
             要清的,
             vec![

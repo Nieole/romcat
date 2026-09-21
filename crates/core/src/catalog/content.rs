@@ -341,7 +341,63 @@ pub struct MemberFile {
     pub is_main: bool,
 }
 
+/// 「这条键**直接**躺在 `?1` 那个目录里」这句 SQL：前缀对得上，而剩下那一截里没有第二道 `/`。
+///
+/// 变体那张表与条目那张表各查一次（[`Catalog::variants_directly_under`]、
+/// [`Catalog::entries_directly_under`]），判据得是同一句——分开写两遍，改一处就会漏另一处。
+const DIRECTLY_UNDER: &str =
+    "substr(key, 1, length(?1)) = ?1 AND instr(substr(key, length(?1) + 1), '/') = 0";
+
 impl Catalog {
+    /// **与这个变体同一处一起人工纠正出来的那几个变体**（连它自己），交给
+    /// [`fix::undo`](crate::shape::fix::undo) 算要清掉哪几条键（票 `gui-looks-like-the-design/29`）。
+    ///
+    /// 两种人工纠正落下来的形状不同，撤起来的范围也就不同：
+    ///
+    /// - **合成**把几个变体并成一个，这一处**就是那一个**变体——交回它自己一份。
+    /// - **拆开**把一棵目录树里那几份内容各拆成一个变体，这一处于是有**好几个**。认出这种的判据是
+    ///   「**它所在的那个目录本身也是一个变体**」——那个目录就是被拆开的那棵树；同一个目录里其余
+    ///   **人工纠正出来的**变体，正是同一下拆出来的那几份。
+    ///
+    /// 那个目录本身**不落任何一行**（[`fix::split`](crate::shape::fix::split)），所以它不在交回的
+    /// 名单里，也不必在——清掉那几份，下一趟成型它自己就把它们吞回去了。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn shaping_fix_group(
+        &self,
+        key: &str,
+    ) -> Result<Vec<crate::shape::fix::Members>, CatalogError> {
+        let 一份 = |key: &str| -> Result<Option<crate::shape::fix::Members>, CatalogError> {
+            let Some(row) = self.variant(key)? else {
+                return Ok(None);
+            };
+            Ok(Some(crate::shape::fix::Members {
+                key: row.key.clone(),
+                main_key: row.main_key,
+                members: self
+                    .variant_members(&row.key)?
+                    .into_iter()
+                    .map(|(key, _)| key)
+                    .collect(),
+            }))
+        };
+        let Some(dir) = key.rsplit_once('/').map(|(dir, _)| dir) else {
+            return Ok(一份(key)?.into_iter().collect());
+        };
+        // 所在的目录本身不是变体：这一处只有它自己（合成，或者一份内容单独纠过）。
+        if self.variant(dir)?.is_none() {
+            return Ok(一份(key)?.into_iter().collect());
+        }
+        let mut out = Vec::new();
+        for (one, _, manual) in self.variants_directly_under(dir)? {
+            if manual && let Some(members) = 一份(&one)? {
+                out.push(members);
+            }
+        }
+        Ok(out)
+    }
+
     /// **这几个变体跟前有没有一处成型存疑**（票 `gui-looks-like-the-design/29`）。
     ///
     /// 作品详情页的**变体**那一面问它：那一页手上只有一个作品底下那几个变体，而整份体检报告是从全库折
@@ -394,12 +450,9 @@ impl Catalog {
         let prefix = format!("{dir}/");
         let mut statement = self
             .conn
-            .prepare_cached(
-                "SELECT key, rule, manual FROM variant
-                 WHERE substr(key, 1, length(?1)) = ?1
-                   AND instr(substr(key, length(?1) + 1), '/') = 0
-                 ORDER BY key",
-            )
+            .prepare_cached(&format!(
+                "SELECT key, rule, manual FROM variant WHERE {DIRECTLY_UNDER} ORDER BY key"
+            ))
             .map_err(|source| self.err(source))?;
         let rows = statement
             .query_map(params![prefix], |row| {
@@ -422,12 +475,9 @@ impl Catalog {
         let prefix = format!("{dir}/");
         let mut statement = self
             .conn
-            .prepare_cached(
-                "SELECT key, kind, len FROM entry
-                 WHERE substr(key, 1, length(?1)) = ?1
-                   AND instr(substr(key, length(?1) + 1), '/') = 0
-                 ORDER BY key",
-            )
+            .prepare_cached(&format!(
+                "SELECT key, kind, len FROM entry WHERE {DIRECTLY_UNDER} ORDER BY key"
+            ))
             .map_err(|source| self.err(source))?;
         let mut rows = statement
             .query(params![prefix])

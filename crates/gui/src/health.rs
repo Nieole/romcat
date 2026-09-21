@@ -621,7 +621,10 @@ impl Section {
             self.said = reveal(&folder).err().map(Err);
         }
         // 「处理…」：对着这一行那一处开**成型纠正**那一层（票 `gui-looks-like-the-design/29`）。
-        // **同一种一共几处由核心库数**（`ShapingDoubtSummary::by_kind`），这一层只把那个数交过去。
+        //
+        // 交过去的是**中立库的键**那一份（`shape::Doubt`）——人工纠正记的是键，而报告里那一份
+        // 的 `at` / `items` 已经折成了盘上的完整路径。**同一种全库一共几处由核心库数**
+        // （`ShapingDoubtSummary::by_kind`，票 27 留下的那一格），这一层只把那个数交过去。
         if let Some(第几行) = 要处理
             && let Some(doubt) = self
                 .checked
@@ -629,20 +632,24 @@ impl Section {
                 .and_then(|checked| checked.report.shaping_doubts.examples.get(第几行))
                 .cloned()
         {
-            let 同种 = self
-                .checked
-                .as_ref()
-                .and_then(|checked| {
-                    checked
-                        .report
-                        .shaping_doubts
-                        .by_kind
-                        .iter()
-                        .find(|(kind, _, _)| *kind == doubt.kind)
-                        .map(|(_, _, count)| *count)
-                })
-                .unwrap_or(1);
-            self.fixer.open_doubt(&site.catalog, &doubt, 同种);
+            let 同种 = self.checked.as_ref().and_then(|checked| {
+                checked
+                    .report
+                    .shaping_doubts
+                    .by_kind
+                    .iter()
+                    .find(|(kind, _, _)| *kind == doubt.kind)
+                    .map(|(_, _, count)| *count)
+            });
+            self.fixer.open_doubt(
+                &site.catalog,
+                &romcat_core::shape::Doubt {
+                    kind: doubt.kind,
+                    at: doubt.at_key.clone(),
+                    items: doubt.item_keys.clone(),
+                },
+                同种,
+            );
         }
     }
 

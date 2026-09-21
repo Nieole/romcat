@@ -274,19 +274,16 @@ pub struct ShapingDoubt {
 }
 
 impl ShapingDoubt {
-    /// 给人看的那一句原因。
+    /// 给人看的那一句原因。**话只有一处**（[`shape::Doubt::reason`]）：这一份是它折成展示路径之后的样子，
+    /// 「凭什么」那一句两边说的必须是同一句。
     #[must_use]
     pub fn reason(&self) -> String {
-        match self.kind {
-            DoubtKind::UnmergedDiscs => format!(
-                "{} 个变体只差碟片标记，可能是同一套多碟游戏",
-                self.items.len()
-            ),
-            DoubtKind::CrowdedTree => format!(
-                "整个目录被当成 1 个变体，里面有 {} 份各自独立的内容",
-                self.items.len()
-            ),
+        shape::Doubt {
+            kind: self.kind,
+            at: self.at_key.clone(),
+            items: self.item_keys.clone(),
         }
+        .reason()
     }
 }
 

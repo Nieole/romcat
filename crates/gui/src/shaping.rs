@@ -27,8 +27,8 @@ use std::path::Path;
 use romcat_core::catalog::{Catalog, CatalogError};
 use romcat_core::platform::Manifest;
 use romcat_core::report::{DuplicateDetails, HealthReport, human_bytes, thousands};
-use romcat_core::scan::aggregate::{Limits, ShapingDoubt};
-use romcat_core::shape::{self, DoubtKind, fix};
+use romcat_core::scan::aggregate::Limits;
+use romcat_core::shape::{self, Doubt, DoubtKind, fix};
 use romcat_core::site::Site;
 use romcat_core::task::{Cutoff, Handle};
 
@@ -77,17 +77,23 @@ pub const UNDO: &str = "撤销成型纠正";
 /// 重新成型那一趟在任务台上叫什么。
 pub const RESHAPE_TASK: &str = "重新成型 · 全库";
 
+/// 合成的预览里最多逐条列几个**附属文件**，其余写「另有 N 个」。
+///
+/// 多碟合成的成员数按张数算（一张碟一个 `.cue` 一个 `.bin`），十条够摆得下十碟；
+/// 再多就不是给人一眼核对的了。
+const COMPANIONS: usize = 10;
+
 /// 眼下开着的那一层「调整成型」。
 #[derive(Debug, Clone)]
-struct Case {
+struct Spot {
     /// 哪一种存疑。
     kind: DoubtKind,
     /// 那一处，给人看的完整路径（标题上那一截取它的末级）。
     at: String,
     /// 核心库那一句「凭什么说这里存疑」。
     reason: String,
-    /// 同一种存疑一共几处（「另有 N 处」说的就是它）。
-    total: u64,
+    /// 同一种存疑**全库**一共几处（「同样的另有 N 处」说的就是它）；说不出是 `None`。
+    same_kind: Option<u64>,
     /// 多碟那一支：牵涉的那几个变体，连它们的成员、文件数与大小。
     variants: Vec<Candidate>,
     /// 目录那一支：那几份各自独立的内容的键。
@@ -107,7 +113,7 @@ struct Candidate {
     bytes: u64,
 }
 
-impl Case {
+impl Spot {
     /// 勾中的那几个变体（多碟那一支）。
     fn picked(&self) -> Vec<fix::Members> {
         self.variants
@@ -143,7 +149,7 @@ enum Pressed {
 #[derive(Debug, Default)]
 pub struct Fixer {
     /// 眼下开着的那一处；没开是 `None`。
-    open: Option<Case>,
+    open: Option<Spot>,
     /// 按下去之后那句回话：`Ok` 是落成了，`Err` 是没落成。画在开它的那一屏上。
     said: Option<Result<String, String>>,
     /// 落过一笔、该重新成型了：拿着它的那一屏每帧问一次（[`Self::take_applied`]）。
@@ -163,8 +169,9 @@ impl Fixer {
         self.said.as_ref()
     }
 
-    /// 把那句回话擦掉（换了一处、关掉那一层时）。
-    pub fn forget(&mut self) {
+    /// 把这一层连同那句回话一起关掉：画它的那一屏自己走了（作品详情页关了）时收拾这一下。
+    pub fn close(&mut self) {
+        self.open = None;
         self.said = None;
     }
 
@@ -176,35 +183,36 @@ impl Fixer {
     /// 对着一处**成型存疑**开这一层。读的是中立库里那几个变体与它们的成员——**只读几个键**，
     /// 摊在画帧这条线程上没问题。
     ///
+    /// 吃的是核心库那一份 [`shape::Doubt`]（装的是**中立库的键**），不是报告里折成展示路径的那一份
+    /// （[`ShapingDoubt`]）——人工纠正记的是键。从库体检那一格进来的人把报告那一份的
+    /// `at_key` / `item_keys` 折回这一份。
+    ///
+    /// `same_kind` 是**同一种存疑全库一共几处**，用来说「同样的另有 N 处」；**说不出那个数就交
+    /// `None`**（作品详情那一面手上只有这一个作品跟前那几处，数得出的是另一个数），那时屏上不写数。
+    ///
     /// 读不出来就把话说清楚，不开一层空的。
-    pub fn open_doubt(&mut self, catalog: &Catalog, doubt: &ShapingDoubt, total: u64) {
+    pub fn open_doubt(&mut self, catalog: &Catalog, doubt: &Doubt, same_kind: Option<u64>) {
         self.said = None;
-        let case = match build(catalog, doubt, total) {
-            Ok(case) => case,
-            Err(why) => {
-                self.said = Some(Err(why));
-                return;
-            }
-        };
-        self.open = Some(case);
+        match read_spot(catalog, doubt, same_kind) {
+            Ok(spot) => self.open = Some(spot),
+            Err(why) => self.said = Some(Err(why)),
+        }
     }
 
     /// 画开着的那一层。交回 `true` 表示这一帧落过一笔（拿着它的那一屏据此排重新成型）。
     ///
     /// **每一帧都画**：弹层开没开着记在这一层上，不跟着底下那一屏的面板收起。
     pub fn ui(&mut self, ctx: &egui::Context, site: &mut Site) {
-        let Some(case) = self.open.clone() else {
+        let Some(spot) = self.open.clone() else {
             return;
         };
-        let 够了 = match case.kind {
-            DoubtKind::UnmergedDiscs => case.picked().len() >= 2,
-            DoubtKind::CrowdedTree => case.contents.len() >= 2,
-        };
-        let 往前 = match case.kind {
+        // **按不动只有一种情形**：多碟那一支勾中的不够两个——屏上常驻着那句理由（`NEED_TWO`，
+        // 画在 `merge_body` 里；ADR-0005 修订段要的那两条）。拆那一支开得出来就一定够两份
+        // （`read_spot` 那道闸），没有第二种按不动的态。
+        let 够了 = spot.kind != DoubtKind::UnmergedDiscs || spot.picked().len() >= 2;
+        let 往前 = match spot.kind {
             DoubtKind::UnmergedDiscs => MERGE.to_string(),
-            DoubtKind::CrowdedTree => {
-                format!("拆成 {} 个变体", thousands(case.contents.len() as u64))
-            }
+            DoubtKind::CrowdedTree => format!("拆成 {} 个变体", thousands(数(spot.contents.len()))),
         };
         let footer = Footer::new(Button::new(CANCEL, Pressed::Cancel)).button(
             Button::new(往前, Pressed::Go)
@@ -213,14 +221,14 @@ impl Fixer {
                 .hover("只往沉淀库记下这一处该怎么聚；盘上的文件不移动、不改名"),
         );
         let mut 勾了: Option<usize> = None;
-        let shown = Dialog::new(FIX, format!("{FIX} · {}", case.headline()), footer)
+        let shown = Dialog::new(FIX, format!("{FIX} · {}", spot.headline()), footer)
             .note(FIX_NOTE)
             .width(Width::Wide)
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = look::step(1);
-                match case.kind {
-                    DoubtKind::UnmergedDiscs => 勾了 = merge_body(ui, &case),
-                    DoubtKind::CrowdedTree => split_body(ui, &case),
+                match spot.kind {
+                    DoubtKind::UnmergedDiscs => 勾了 = merge_body(ui, &spot),
+                    DoubtKind::CrowdedTree => split_body(ui, &spot),
                 }
                 look::help(ui, FIX_FOOTNOTE);
             });
@@ -228,7 +236,7 @@ impl Fixer {
             && let Some(one) = self
                 .open
                 .as_mut()
-                .and_then(|case| case.variants.get_mut(at))
+                .and_then(|spot| spot.variants.get_mut(at))
         {
             one.picked = !one.picked;
         }
@@ -237,7 +245,7 @@ impl Fixer {
                 self.open = None;
             }
             Some(Pressed::Go) => {
-                self.said = Some(self.apply(site, &case));
+                self.said = Some(self.apply(site, &spot));
                 self.open = None;
             }
             None => {}
@@ -245,53 +253,70 @@ impl Fixer {
     }
 
     /// 往**沉淀库**落这一处的人工纠正。交回画在底下那一屏上的那句回话。
-    fn apply(&mut self, site: &mut Site, case: &Case) -> Result<String, String> {
-        let (overrides, 说的) = match case.kind {
+    fn apply(&mut self, site: &mut Site, spot: &Spot) -> Result<String, String> {
+        let (overrides, 说的) = match spot.kind {
             DoubtKind::UnmergedDiscs => {
-                let picked = case.picked();
+                let picked = spot.picked();
                 let (overrides, merged) =
                     fix::merge(&picked).ok_or_else(|| NEED_TWO.to_string())?;
                 let 话 = format!(
                     "已把 {} 个变体合成一个（记为人工纠正）：主文件是 {}，附属文件 {} 个；盘上的文件一个字节都没动",
-                    thousands(picked.len() as u64),
+                    thousands(数(picked.len())),
                     name_of(&merged.main),
-                    thousands(merged.companions.len() as u64),
+                    thousands(数(merged.companions.len())),
                 );
                 (overrides, 话)
             }
             DoubtKind::CrowdedTree => {
-                let overrides = fix::split(&case.contents)
-                    .ok_or_else(|| "至少要有两份各自独立的内容才拆得开。".to_string())?;
+                // `read_spot` 那道闸保证这里至少两份，`fix::split` 因此交不回 `None`。
+                let overrides = fix::split(&spot.contents)
+                    .ok_or_else(|| "这一处只剩一份内容了，没什么可拆的。".to_string())?;
                 let 话 = format!(
                     "已拆成 {} 个变体（记为人工纠正）：它们各自参与下一趟识别；盘上的文件一个字节都没动",
-                    thousands(case.contents.len() as u64),
+                    thousands(数(spot.contents.len())),
                 );
                 (overrides, 话)
             }
         };
-        write(site, &overrides, &[])?;
+        record(site, &overrides, &[])?;
         self.applied = true;
         Ok(说的)
     }
 
-    /// **撤销**一个变体上的人工纠正：清掉它全部成员那几行（[`fix::undo`]），交回那句回话。
+    /// **撤销这一处**的人工纠正：清掉[同一处一起纠正出来的那几个变体](fix::undo)全部成员那几行，
+    /// 交回那句回话。
+    ///
+    /// `spot` 由核心库折（`Catalog::shaping_fix_group`）：**拆开**那一处落的是那几份内容各一行，
+    /// 只撤其中一份回不到成型规则原本的结果。
     ///
     /// 清完要重新成型，这几条才回到规则算出来的地方——所以它也把[该重新成型了](Self::take_applied)
     /// 那个记号放下。
-    pub fn undo(&mut self, site: &mut Site, variant: &fix::Members) {
-        let keys = fix::undo(variant);
-        self.said =
-            Some(write(site, &BTreeMap::new(), &keys).map(|()| {
+    pub fn undo(&mut self, site: &mut Site, spot: &[fix::Members]) {
+        let keys = fix::undo(spot);
+        let 几份 = spot.len();
+        self.said = Some(record(site, &BTreeMap::new(), &keys).map(|()| {
+            if 几份 > 1 {
+                format!(
+                    "已撤销这一处的人工纠正（同一下拆出来的 {} 份一起撤）：重新成型之后回到成型规则原本的结果",
+                    thousands(数(几份))
+                )
+            } else {
                 "已撤销这一处的人工纠正：重新成型之后回到成型规则原本的结果".to_string()
-            }));
+            }
+        }));
         if self.said.as_ref().is_some_and(Result::is_ok) {
             self.applied = true;
         }
     }
 }
 
-/// 往沉淀库写这一批人工纠正：`set` 是要落的几行，`clear` 是要清掉的几条键。
-fn write(site: &mut Site, set: &BTreeMap<String, String>, clear: &[String]) -> Result<(), String> {
+/// 屏上要印的一个计数从 `usize` 折成 `u64`：这几处数的都是屏上摆着的那几行，溢不出去。
+fn 数(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
+}
+
+/// 往沉淀库记这一批人工纠正：`set` 是要落的几行，`clear` 是要清掉的几条键。
+fn record(site: &mut Site, set: &BTreeMap<String, String>, clear: &[String]) -> Result<(), String> {
     let library = site.library_identity.clone();
     for key in clear {
         site.store
@@ -307,18 +332,18 @@ fn write(site: &mut Site, set: &BTreeMap<String, String>, clear: &[String]) -> R
 }
 
 /// 从中立库摊开一处存疑：那几个变体连成员（多碟），或者那几份独立内容（目录）。
-fn build(catalog: &Catalog, doubt: &ShapingDoubt, total: u64) -> Result<Case, String> {
-    let mut case = Case {
+fn read_spot(catalog: &Catalog, doubt: &Doubt, same_kind: Option<u64>) -> Result<Spot, String> {
+    let mut spot = Spot {
         kind: doubt.kind,
         at: doubt.at.clone(),
         reason: doubt.reason(),
-        total,
+        same_kind,
         variants: Vec::new(),
         contents: Vec::new(),
     };
     match doubt.kind {
         DoubtKind::UnmergedDiscs => {
-            let keys: Vec<&str> = doubt.item_keys.iter().map(String::as_str).collect();
+            let keys: Vec<&str> = doubt.items.iter().map(String::as_str).collect();
             let rows = catalog
                 .variants_of(&keys)
                 .map_err(|why| format!("中立库读不出来：{why}"))?;
@@ -332,7 +357,7 @@ fn build(catalog: &Catalog, doubt: &ShapingDoubt, total: u64) -> Result<Case, St
                     .get(&row.key)
                     .map(|list| list.iter().map(|(key, _)| key.clone()).collect())
                     .unwrap_or_else(|| vec![row.main_key.clone()]);
-                case.variants.push(Candidate {
+                spot.variants.push(Candidate {
                     picked: true,
                     files: row.files,
                     bytes: row.bytes,
@@ -343,19 +368,26 @@ fn build(catalog: &Catalog, doubt: &ShapingDoubt, total: u64) -> Result<Case, St
                     },
                 });
             }
-            if case.variants.len() < 2 {
+            if spot.variants.len() < 2 {
                 return Err("这一处的变体在中立库里已经不在了，重新体检一趟再看。".to_string());
             }
         }
-        DoubtKind::CrowdedTree => case.contents.clone_from(&doubt.item_keys),
+        DoubtKind::CrowdedTree => {
+            // **少于两份不开这一层**：一份内容的目录本来就该是一个变体，没什么可拆的
+            // （`fix::split` 那一条同样的闸）。开出来的话页脚那颗按不动，而屏上说不出为什么。
+            if doubt.items.len() < 2 {
+                return Err("这一处在中立库里只剩一份内容了，重新体检一趟再看。".to_string());
+            }
+            spot.contents.clone_from(&doubt.items);
+        }
     }
-    Ok(case)
+    Ok(spot)
 }
 
 /// 多碟那一支的正文（设计稿 `DLG.shape` 的 `disc` 那一支）：勾选、线索、纠正后的预览、会怎样。
 ///
 /// 交回这一帧点了第几行的勾。
-fn merge_body(ui: &mut egui::Ui, case: &Case) -> Option<usize> {
+fn merge_body(ui: &mut egui::Ui, spot: &Spot) -> Option<usize> {
     let tokens = Tokens::builtin();
     let 字号 = look::font_size(ui.ctx(), tokens.font.size_caption_plus);
     let 字体 = egui::FontId::new(字号, egui::FontFamily::Monospace);
@@ -364,10 +396,10 @@ fn merge_body(ui: &mut egui::Ui, case: &Case) -> Option<usize> {
         ui,
         &format!(
             "现在：这 {} 个变体各自独立",
-            thousands(case.variants.len() as u64)
+            thousands(数(spot.variants.len()))
         ),
     );
-    for (at, one) in case.variants.iter().enumerate() {
+    for (at, one) in spot.variants.iter().enumerate() {
         let 线 = ui.visuals().widgets.noninteractive.bg_stroke;
         let [上下, 左右] = tokens.space.cell_padding;
         egui::Frame::new()
@@ -399,9 +431,9 @@ fn merge_body(ui: &mut egui::Ui, case: &Case) -> Option<usize> {
                 });
             });
     }
-    look::note(ui, format!("线索：{}", case.reason));
+    look::note(ui, format!("线索：{}", spot.reason));
     look::section(ui, "纠正后");
-    let picked = case.picked();
+    let picked = spot.picked();
     match fix::merge(&picked) {
         Some((_, merged)) => {
             look::impact(
@@ -410,21 +442,42 @@ fn merge_body(ui: &mut egui::Ui, case: &Case) -> Option<usize> {
                     ("主文件：", false),
                     (&name_of(&merged.main), true),
                     (
-                        &format!(
-                            "，附属文件 {} 个（一共 {} 个文件成员）",
-                            thousands(merged.companions.len() as u64),
-                            thousands(merged.files() as u64),
-                        ),
+                        &format!("（一共 {} 个文件成员）", thousands(数(merged.files()))),
                         false,
                     ),
                 ],
             );
+            // **附属文件逐条列出来**（票面第 2 条「预览合成后的主文件与**附属文件**」）：
+            // 只说个数的话，人看不出合进来的是不是他勾的那几份。长了就说「另有 N 个」。
+            look::impact(
+                ui,
+                &[(
+                    &format!("附属文件 {} 个：", thousands(数(merged.companions.len()))),
+                    false,
+                )],
+            );
+            // 缩进到与那一条「会怎样」的字对齐（`impact` 那枚圆点占的那一列）。
+            let 缩 = tokens.layout.impact_column;
+            for 一条 in merged.companions.iter().take(COMPANIONS) {
+                ui.horizontal(|ui| {
+                    ui.add_space(缩);
+                    ui.label(font::mono(name_of(一条)).size(字号));
+                });
+            }
+            let 少了 = merged.companions.len().saturating_sub(COMPANIONS);
+            if 少了 > 0 {
+                ui.horizontal(|ui| {
+                    ui.add_space(缩);
+                    look::help(ui, &format!("另有 {} 个", thousands(数(少了))));
+                });
+            }
+            // **数的是勾中的那几个**，不是这一处全部候选：勾掉一个，这句话得跟着变。
             look::impact(
                 ui,
                 &[(
                     &format!(
-                        "这一处的变体从 {} 个变为 1 个；记为人工纠正，不移动或修改任何文件。",
-                        thousands(case.variants.len() as u64)
+                        "勾中的 {} 个变体合成 1 个；记为人工纠正，不移动或修改任何文件。",
+                        thousands(数(picked.len()))
                     ),
                     false,
                 )],
@@ -434,12 +487,12 @@ fn merge_body(ui: &mut egui::Ui, case: &Case) -> Option<usize> {
             ui.colored_label(ui.visuals().error_fg_color, NEED_TWO);
         }
     }
-    others(ui, case);
+    same_kind_note(ui, spot);
     勾了
 }
 
 /// 目录那一支的正文（设计稿 `DLG.shape` 的 `dir` 那一支）：里头有哪几份、线索、纠正为、会怎样。
-fn split_body(ui: &mut egui::Ui, case: &Case) {
+fn split_body(ui: &mut egui::Ui, spot: &Spot) {
     let tokens = Tokens::builtin();
     let 字号 = look::font_size(ui.ctx(), tokens.font.size_caption_plus);
     look::section(ui, "现在：整个目录被当成 1 个变体");
@@ -451,39 +504,42 @@ fn split_body(ui: &mut egui::Ui, case: &Case) {
         .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            for key in &case.contents {
+            for key in &spot.contents {
                 ui.label(font::mono(name_of(key)).size(字号));
             }
         });
-    look::note(ui, format!("线索：{}", case.reason));
+    look::note(ui, format!("线索：{}", spot.reason));
     look::section(ui, "纠正为");
     look::radio_option(
         ui,
         true,
         &format!(
             "拆成 {} 个变体，每份内容一个",
-            thousands(case.contents.len() as u64)
+            thousands(数(spot.contents.len()))
         ),
         "拆开后各自参与下一趟识别：按内容命中的直接归入对应作品，其余进待确认队列",
     );
     look::impact(ui, &[("记为人工纠正，不移动或修改任何文件。", false)]);
-    others(ui, case);
+    same_kind_note(ui, spot);
 }
 
-/// 「同样结构的另有 N 处」那一句（票面验收第 6 条：**逐处确认，不一次性全改**）。
+/// 「同样结构的其余几处在哪儿」那一句（票面验收第 6 条：**逐处确认，不一次性全改**）。
 ///
-/// 数取核心库按种类分的那一格（`ShapingDoubtSummary::by_kind`），**界面不自己数**。
-fn others(ui: &mut egui::Ui, case: &Case) {
-    let 别处 = case.total.saturating_sub(1);
-    if 别处 == 0 {
-        return;
-    }
+/// **数说不出就不写数**：那个数只有**全库**那一份报告答得出（`ShapingDoubtSummary::by_kind`，
+/// 库体检那条入口交得进来），而作品详情那一面手上只有这一个作品跟前那几处——**界面不自己凑一个**
+/// （ADR-0024）。两条入口那句话的后半截是同一句，人从哪儿进来读到的规矩都一样。
+fn same_kind_note(ui: &mut egui::Ui, spot: &Spot) {
+    let 另有 = match spot.same_kind {
+        Some(全库) if 全库 > 1 => format!("的另有 {} 处", thousands(全库 - 1)),
+        // 全库就这一处：那句「去哪儿逐处确认」就不必说了。
+        Some(_) => return,
+        None => "的其余几处".to_string(),
+    };
     look::help(
         ui,
         &format!(
-            "同样是「{}」的另有 {} 处，列在库体检的「成型存疑」里——逐处确认，这一下只改这一处。",
-            case.kind.label(),
-            thousands(别处),
+            "同样是「{}」{另有}，列在库体检的「成型存疑」里——逐处确认，这一下只改这一处。",
+            spot.kind.label(),
         ),
     );
 }
