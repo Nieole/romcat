@@ -41,6 +41,7 @@ use crate::clock::Clock;
 use crate::dialog::{Button, Dialog, Footer, Width};
 use crate::font;
 use crate::look::{self, Tone};
+use crate::shaping;
 use crate::table;
 use crate::task::{Product, Tasks};
 use crate::tokens::Tokens;
@@ -133,6 +134,14 @@ pub struct Section {
     /// **缓着而不是每帧现读**：它要读沉淀库，而这一层画在画帧那条线程上。报告换了、
     /// 或者人刚定过一条，就扔掉重合（[`Section::forget_corrections`]）。
     corrections: Option<CorrectionGroups>,
+    /// **成型纠正**那一层（票 `gui-looks-like-the-design/29`）：成型存疑那一格的明细里
+    /// 一行一颗「处理…」开的就是它。
+    fixer: shaping::Fixer,
+    /// 台上那一趟**重新成型**的任务号。它交回的产物与体检那一趟同形（一份新报告），
+    /// 所以照旧由 [`Section::settle`] 认领。
+    reshaping: Option<u64>,
+    /// 刚重新成型过：窗口据此让浏览屏那几页作废、屏头那些数重算（[`Section::take_reshaped`]）。
+    reshaped: bool,
 }
 
 /// 明细弹层里「在文件系统中打开」那颗按钮上的字（设计稿原话）。
@@ -181,7 +190,15 @@ fn note_of(finding: Finding) -> String {
         Finding::Duplicates => {
             "只发现并报告，绝不自动删除；主库只读，要清理请在文件系统中手动处理。同一个作品的不同转储是不同的变体，不算重复拷贝。"
         }
-        Finding::PlatformConflicts | Finding::ShapingDoubts => "这里只报告，不改动任何文件。",
+        Finding::PlatformConflicts => "这里只报告，不改动任何文件。",
+        // **成型存疑这一格点得下去**（票 `gui-looks-like-the-design/29`）：判据只发现并报告
+        // （`shape::doubt` 模块文档），纠正走人工纠正那条正门——那扇门就在这一行右头。
+        // 盘上照旧一个字节都不动（ADR-0004）。
+        // **这一句里不写那颗按钮上的字**：写了的话屏上同一句话出现两处，
+        // 而按名字找那一颗的人（测试与读屏）会点到先画出来的那一句上。
+        Finding::ShapingDoubts => {
+            "这一格点得进去：记下的是人工纠正，改的只是这些条目归哪个变体；盘上的文件一个字节都不动。"
+        }
         Finding::Unreadable => "它们如实记为「不可读」，既不算已变，也不算已删。",
         Finding::UnmappedDirs => "列在这里，作为整理的依据。",
         Finding::StrandedCompanions => "它们没有归入任何变体；这里只报告，不改动任何文件。",
@@ -306,6 +323,11 @@ impl Section {
             return Some(done);
         }
         self.running = None;
+        // 重新成型那一趟与体检那一趟交回的是同一样东西（一份新报告），认领的路子因此也是同一条；
+        // 差别只在**变体整批换过了**，浏览屏那几页与屏头那些数得跟着作废（`App::poll_tasks`）。
+        if self.reshaping.take() == Some(done.id) {
+            self.reshaped = true;
+        }
         match done.ended {
             Ending::Done(Product::Checked { report, duplicates }) => {
                 self.error = None;
@@ -527,7 +549,10 @@ impl Section {
         };
         let mut 展开 = detail.expanded;
         let mut 要打开: Option<PathBuf> = None;
+        let mut 要处理: Option<usize> = None;
         let said = self.said.clone();
+        // 成型纠正那一层落过一笔之后那句回话，画在这一层里（同平台纠正那一处的做法）。
+        let 纠正说的 = self.fixer.said().cloned();
         // 照稿：「导出清单…」幽灵按钮在左、「关闭」主按钮在右（拿主意的人 2026-09-15 答，挂单 `Q958`）。Esc 照旧等于「关闭」。
         let footer = Footer::new(Button::new("关闭", Pressed::Close))
             .dismiss_on_right()
@@ -553,11 +578,20 @@ impl Section {
                 }
                 None => {}
             }
+            match &纠正说的 {
+                Some(Ok(said)) => {
+                    ui.weak(said);
+                }
+                Some(Err(said)) => {
+                    ui.colored_label(ui.visuals().error_fg_color, said);
+                }
+                None => {}
+            }
             match detail.finding {
                 Finding::Duplicates => {
                     duplicates_ui(ui, &checked.duplicates, &mut 展开, &mut 要打开);
                 }
-                other => findings_ui(ui, &checked.report, other, &mut 要打开),
+                other => findings_ui(ui, &checked.report, other, &mut 要打开, &mut 要处理),
             }
         });
         match shown.pressed {
@@ -586,6 +620,73 @@ impl Section {
         if let Some(folder) = 要打开 {
             self.said = reveal(&folder).err().map(Err);
         }
+        // 「处理…」：对着这一行那一处开**成型纠正**那一层（票 `gui-looks-like-the-design/29`）。
+        //
+        // 交过去的是**中立库的键**那一份（`shape::Doubt`）——人工纠正记的是键，而报告里那一份
+        // 的 `at` / `items` 已经折成了盘上的完整路径。**同一种全库一共几处由核心库数**
+        // （`ShapingDoubtSummary::by_kind`，票 27 留下的那一格），这一层只把那个数交过去。
+        if let Some(第几行) = 要处理
+            && let Some(doubt) = self
+                .checked
+                .as_ref()
+                .and_then(|checked| checked.report.shaping_doubts.examples.get(第几行))
+                .cloned()
+        {
+            let 同种 = self.checked.as_ref().and_then(|checked| {
+                checked
+                    .report
+                    .shaping_doubts
+                    .by_kind
+                    .iter()
+                    .find(|(kind, _, _)| *kind == doubt.kind)
+                    .map(|(_, _, count)| *count)
+            });
+            self.fixer.open_doubt(
+                &site.catalog,
+                &romcat_core::shape::Doubt {
+                    kind: doubt.kind,
+                    at: doubt.at_key.clone(),
+                    items: doubt.item_keys.clone(),
+                },
+                同种,
+            );
+        }
+    }
+
+    /// 画开着的那一层**成型纠正**（`crate::shaping`）：每一帧都画，库体检那一块收着时也画。
+    ///
+    /// 落过一笔就排一趟**重新成型**上任务台——纠正只写沉淀库，中立库里的变体要重算一遍才跟着变
+    /// （票 29 验收第 2、3 条「变体数跟着变」「拆开后各自参与下一趟识别」）。
+    pub(crate) fn fixer_ui(&mut self, ctx: &egui::Context, site: &mut Site, tasks: &mut Tasks) {
+        self.fixer.ui(ctx, site);
+        if self.fixer.take_applied() {
+            self.reshape(site, tasks);
+        }
+    }
+
+    /// **排一趟重新成型上任务台**：照沉淀库里的人工纠正把变体整批重算，顺手重出一份体检报告。
+    ///
+    /// 交回的产物与体检那一趟同形，所以照旧由 [`Section::settle`] 按任务号认领。
+    pub fn reshape(&mut self, site: &mut Site, tasks: &mut Tasks) {
+        match shaping::reshape(site, tasks) {
+            Ok(id) => {
+                self.error = None;
+                self.reshaping = Some(id);
+                self.running = Some(id);
+            }
+            Err(why) => self.error = Some(why),
+        }
+    }
+
+    /// **刚重新成型过**：窗口据此让浏览屏那几页作废、屏头那些数重算。问过就清掉。
+    pub fn take_reshaped(&mut self) -> bool {
+        std::mem::take(&mut self.reshaped)
+    }
+
+    /// 成型纠正那一层（测试拿它核对）。
+    #[must_use]
+    pub fn fixer(&self) -> &shaping::Fixer {
+        &self.fixer
     }
 
     /// 「导出清单…」那个保存对话框交回来的那一个（`crate::pick::save_file`）：把开着的那一格的明细写成**纯文本**。
@@ -737,6 +838,7 @@ fn findings_ui(
     report: &HealthReport,
     finding: Finding,
     要打开: &mut Option<PathBuf>,
+    要处理: &mut Option<usize>,
 ) {
     let tokens = Tokens::builtin();
     let [上下, 左右] = tokens.space.health_list_padding;
@@ -758,9 +860,17 @@ fn findings_ui(
     };
     let 有原因 = rows.iter().any(|row| row.reason.is_some());
     let 有牵涉 = rows.iter().any(|row| !row.items.is_empty());
+    // **成型存疑那一行右头多一颗「处理…」**（票 `gui-looks-like-the-design/29`）：它与那句原因排在同一行，
+    // 于是那一行至少有可点控件那么高。
+    let 能处理 = finding == Finding::ShapingDoubts;
+    let 原因高 = if 能处理 {
+        ui.spacing().interact_size.y.max(小字高)
+    } else {
+        小字高
+    };
     let 行高 = 2.0 * 上下
         + 路径高
-        + if 有原因 { 行缝 + 小字高 } else { 0.0 }
+        + if 有原因 { 行缝 + 原因高 } else { 0.0 }
         + if 有牵涉 { 行缝 + 正文高 } else { 0.0 };
     egui::Frame::new()
         .stroke(线)
@@ -791,9 +901,15 @@ fn findings_ui(
                         let 宽 = 里头.available_width();
                         match &row.folder {
                             Some(folder) => {
-                                if let Some(目录) =
-                                    path_row(&mut 里头, &row.path, None, Some(folder))
-                                {
+                                // **给了键就画键**（照票 09 写「根名 · 相对路径」）：完整路径里带着
+                                // 这台机器上那条目录，画它的话截图基线每换一台机器就红一次
+                                // （票 28 收尾自审在平台纠正那几条样例上抓过同一件事）。
+                                if let Some(目录) = path_row(
+                                    &mut 里头,
+                                    &row.path,
+                                    row.key.as_deref(),
+                                    Some(folder),
+                                ) {
                                     *要打开 = Some(目录);
                                 }
                             }
@@ -805,13 +921,54 @@ fn findings_ui(
                             ),
                         }
                         if let Some(reason) = &row.reason {
-                            look::help(&mut 里头, reason);
+                            if 能处理 {
+                                里头.horizontal(|ui| {
+                                    ui.set_height(原因高);
+                                    let 按钮宽 = look::small_button_width(ui, shaping::HANDLE);
+                                    let 剩 = (ui.available_width()
+                                        - 按钮宽
+                                        - ui.spacing().item_spacing.x)
+                                        .max(0.0);
+                                    ui.scope(|ui| {
+                                        ui.set_width(剩);
+                                        look::help(ui, reason);
+                                    });
+                                    let 按了 = look::small_buttons(ui, |ui| {
+                                        ui.scope(|ui| {
+                                            look::primary_button(ui.visuals_mut());
+                                            ui.button(shaping::HANDLE)
+                                                .on_hover_text(
+                                                    "看清这一处，再决定合成一个变体还是拆成几个；盘上的文件一个字节都不动",
+                                                )
+                                                .clicked()
+                                        })
+                                        .inner
+                                    });
+                                    if 按了 {
+                                        *要处理 = Some(第几行);
+                                    }
+                                });
+                            } else {
+                                look::help(&mut 里头, reason);
+                            }
                         }
                         if !row.items.is_empty() {
+                            // 同上：有键就画键那一份，一条一条过 `table::root_and_path` 再并起来。
+                            let 画的 = if row.item_keys.is_empty() {
+                                row.items.join("、")
+                            } else {
+                                let 字体 =
+                                    egui::FontId::new(字号, egui::FontFamily::Monospace);
+                                row.item_keys
+                                    .iter()
+                                    .map(|键| table::root_and_path(&里头, 键, &字体, 宽))
+                                    .collect::<Vec<_>>()
+                                    .join("、")
+                            };
                             cell(
                                 &mut 里头,
                                 宽,
-                                font::mono(row.items.join("、")).size(字号).weak().into(),
+                                font::mono(画的).size(字号).weak().into(),
                                 egui::Align::Min,
                             );
                         }

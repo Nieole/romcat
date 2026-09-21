@@ -750,7 +750,14 @@ fn collect(
             variant.main_key.clone_from(key);
         }
     }
-    by_variant.into_values().collect()
+    // **一个文件成员都没有的不成变体**（票 `gui-looks-like-the-design/29`）：**拆开**一棵目录树
+    // 之后，那几份独立内容各自走了，剩下的目录可能只有它自己一个成员——那是一条谁也代表不了、
+    // 却照样进识别与导出的记录，比不成型还糟。变体是「磁盘上一份实际可玩的东西」（词表**变体**），
+    // 一个文件都没有的东西不可玩。
+    by_variant
+        .into_values()
+        .filter(|variant| variant.files > 0)
+        .collect()
 }
 
 /// 剥掉每一级路径末尾的碟片标记之后，两条键相同的变体是同一个东西。
@@ -844,6 +851,7 @@ fn strip_disc_markers(key: &str, rule: &Rule) -> String {
 }
 
 mod doubt;
+pub mod fix;
 mod stranded;
 
 pub use doubt::{Doubt, DoubtKind, Shaped, shaping_doubts};
