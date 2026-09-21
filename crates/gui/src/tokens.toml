@@ -232,6 +232,8 @@ shape-gap            = [4, 6]        # 卡头第一行依据形状各段之间�
 batch-line-gap       = 2             # 卡头两行字之间（设计稿 .bhead .why1 的 margin-top:2px）
 candidate-row-gap    = [2, 8]        # 候选卡片里「来源 / 匹配 / 依据」那几行之间（上下, 左右）（设计稿 .cand dl 的 gap:2px 8px）
 dist-row-gap         = 6             # 展开之后「细分」底下各组一行与一行之间（设计稿 .dist 的 gap:6px 10px 竖向那一半）
+drill-padding        = [12, 14]      # 下钻到某一组之后就地那一框的内边距（上下, 左右）（设计稿 .drill 的 padding:12px 14px）
+drill-gap            = 8             # 就地那一框里一排与一排之间（设计稿 .drill 的 gap:8px）
 list-head-padding    = [10, 12, 10, 16]  # 逐条那一屏待选列表栏头的内边距（上, 右, 下, 左）（设计稿 .obolist .ptitle 的 padding:10px 12px 10px 16px）
 list-item-padding    = [9, 14, 9, 16]    # 待选列表一条的内边距（上, 右, 下, 左）（设计稿 .oboit 的 padding:9px 14px 9px 16px）
 detail-padding       = [18, 22]      # 逐条那一屏详情的内边距（上下, 左右）（设计稿 .obodet 的 padding:18px 22px）
@@ -315,6 +317,7 @@ statusbar         = 30    # 底部状态栏高度
 statusbar-bar     = 120   # 底部状态栏里任务那条小进度条的宽度
 runcard-bar       = 3     # 正在跑那张卡左边那条强调色竖条的宽（设计稿 .runcard 的 box-shadow:inset 3px 0 0）
 runcard-progress  = 8     # 正在跑那张卡上进度条的高（设计稿 .runcard .bar 的 height:8px）
+dist-bar          = 3     # 「细分」底下每一项那条占比条的高（设计稿 .dist .b 的 height:3px）
 dialog-width      = [520, 620, 720, 840]   # 对话框只用这几档宽度
 opening-side-width = [440, 560]  # 开场右栏宽度（最窄, 最宽）
 opening-hero-min  = 360   # 开场左栏最窄宽度
@@ -430,6 +433,8 @@ watermark-opacity = 0.3   # 字卡上平台代号水印的不透明度（设计�
 disabled-opacity  = 0.45  # 按不动的控件淡到几成（设计稿 .btn[disabled] 的 opacity:.45）
 dirty-row-tint    = 0.07  # 编辑态下改过的那一行底色里调进几成强调色（设计稿 .mrow.dirty 的 color-mix(… 7%)）
 hero-tint         = 0.09  # 作品详情页头上那一块底色里调进几成平台色（设计稿 .hero 的 color-mix(… 9%)）
+dist-bar-opacity  = 0.7   # 「细分」底下占比条上填的那一截淡到几成（设计稿 .dist .b i 的 opacity:.7）
+drill-tint        = 0.05  # 下钻之后就地那一框底色里调进几成强调色（设计稿 .drill 的 color-mix(… 5%)）
 
 # ── 阴影的形状：两套主题共用，颜色是各主题里同名的那一格（pop → pop-color） ──
 # check_tokens.py 不核这一节：设计稿里是一整句 box-shadow，不是分开的几格。

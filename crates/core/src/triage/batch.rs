@@ -695,6 +695,338 @@ pub fn drill(members: &[&Item], axis: Axis) -> Drill {
     out
 }
 
+/// 一部分裁成了什么。
+///
+/// 只有两档，因为**下钻那一层能落下的只有「这一部分整个通过」与「整个拒绝」**——
+/// 「手工指定」天生是逐条的动作，它不作用于一整组。屏上那两颗按钮照稿写的是
+/// 「通过这 N 条」「拒绝这 N 条」，说的就是这两档。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartKind {
+    /// 整批通过：采用第一条候选。
+    Passed,
+    /// 整批拒绝：记成「我看过了，认不出」。
+    Rejected,
+}
+
+impl PartKind {
+    /// 屏上那一项旁边那枚标签上写什么。
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Passed => "已通过",
+            Self::Rejected => "已拒绝",
+        }
+    }
+
+    /// 同一件事的**动词**：「这一部分通过了」那句话里的那两个字。
+    ///
+    /// 单给一支，不拿 [`Self::label`] 剥字头：剥出来的那一句从此跟着标签走
+    /// ——把标签改成「通过了」，那句话当场变成「这一部分通过了了」。
+    #[must_use]
+    pub fn verb(self) -> &'static str {
+        match self {
+            Self::Passed => "通过",
+            Self::Rejected => "拒绝",
+        }
+    }
+}
+
+/// **这一批下面已经就地裁完的一部分**：按某个轴下钻出来的那一组，整批落下过一次裁决。
+///
+/// 只记**下钻那一层**落下的。一级整批落下之后这一批整个从队列里消失，屏上没有「剩下的
+/// 部分」可说；而下钻落下一部分之后这一批还在，屏上那一栏要同时说清「这一项处理过了」
+/// 与「还剩这些」——那两句话都只有记着这一条才说得出。
+///
+/// 落下的仍旧是**一批裁决**（[`verdict::Batch`](crate::verdict::Batch)），不另造一套：
+/// [`Part::batch`] 指的就是它，撤销照旧以它为粒度。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Part {
+    /// 哪一批下面的哪一组。`drill` 必不为空——整批那一层不记（见上）。
+    pub scope: Scope,
+    /// 落下的时候这一组有多少条。
+    ///
+    /// **落下时记住，不事后再数**：这些条一落下就从队列里消失了，再数是零，
+    /// 而屏上那一行要写的正是「这一项当时有多少条」。
+    pub count: u64,
+    /// 通过还是拒绝。
+    pub kind: PartKind,
+    /// 落成了第几**批裁决**（[`verdict::Batch::id`](crate::verdict::Batch::id)）。
+    /// 那一批撤掉，这一条跟着作废（[`Parts::keep`]）。
+    ///
+    /// 叫 `batch` 不叫 `lot`：后者正是词表**批**那一条 `_Gate_` 里的「批号」，
+    /// 而这个东西全仓早有名字——[`Applied::batch`](super::Applied::batch)、
+    /// [`undo_batch`](super::undo_batch) 指的都是它。
+    pub batch: i64,
+}
+
+/// 眼下这一屏上，各批已经就地裁完的那几部分。
+///
+/// **它不是第二份账**：条数、撤没撤都以沉淀库那一批裁决为准，这里存的是沉淀库答不出的
+/// 那一半——**那一批裁决当初作用在哪一批的哪一组上**。沉淀库只记「落了哪些条」，
+/// 折不回「按目录 · `GB/汉化/`」这一句。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Parts {
+    done: Vec<Part>,
+    revision: u64,
+}
+
+impl Parts {
+    /// 记下刚落下的这一部分。`scope` 不带下钻那一层时**一个字都不记**并交回 `false`
+    /// ——整批那一层不归这里管。
+    ///
+    /// **同一组落下过两次就记两条，后一条不盖掉前一条**：头一趟里有几条落不下去
+    /// （[`Plan::blocked`](super::Plan::blocked)）时那一组还剩着，人会再裁一次——
+    /// 盖掉的话头一批的账就从这里消失了，而它在裁决记录里还在册，撤掉它屏上也不会有反应。
+    /// 同一批裁决（`batch` 相同）重记才是覆盖：那是同一件事说了两遍。
+    pub fn record(&mut self, scope: Scope, count: u64, kind: PartKind, batch: i64) -> bool {
+        if scope.drill.is_none() {
+            return false;
+        }
+        self.done.retain(|part| part.batch != batch);
+        self.done.push(Part {
+            scope,
+            count,
+            kind,
+            batch,
+        });
+        self.revision += 1;
+        true
+    }
+
+    /// 只留下 `live` 认的那几批裁决对应的部分。
+    ///
+    /// **撤销以一批裁决为粒度**：那一批撤掉，那些变体当场回到队列，这一项就不再是
+    /// 「处理过的」——屏上那一行要重新变成点得动的，细分方式也跟着解开。
+    pub fn keep(&mut self, live: impl Fn(i64) -> bool) {
+        let 原先 = self.done.len();
+        self.done.retain(|part| live(part.batch));
+        if self.done.len() != 原先 {
+            self.revision += 1;
+        }
+    }
+
+    /// 换过几次样子。缓着细分那一栏的人拿它认「这一份还作数吗」。
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// 这一批的细分方式**锁在哪个轴上**；一部分都没处理过就是 `None`。
+    ///
+    /// 锁的理由是**数对不上**：已经按一个轴处理掉一部分之后，换个轴再切一刀，两套切法
+    /// 会重叠——新那一栏里每一项含着多少条已经处理掉的，谁也说不出。
+    #[must_use]
+    pub fn locked_axis(&self, shape: &Shape) -> Option<Axis> {
+        self.under(shape).next().map(|(axis, _, _)| axis)
+    }
+
+    /// 这一批已经就地处理掉多少条。
+    #[must_use]
+    pub fn done_in(&self, shape: &Shape) -> u64 {
+        self.under(shape).map(|(_, _, part)| part.count).sum()
+    }
+
+    /// 这一批下面已经处理掉的那几部分，连它们各自落在哪个轴的哪一组上。
+    fn under(&self, shape: &Shape) -> impl Iterator<Item = (Axis, &str, &Part)> {
+        self.done.iter().filter_map(move |part| {
+            if &part.scope.shape != shape {
+                return None;
+            }
+            let (axis, label) = part.scope.drill.as_ref()?;
+            Some((*axis, label.as_str(), part))
+        })
+    }
+}
+
+/// **细分那一栏该画什么**：这一批按某个轴切成哪几组、每一组多少条、占这一批几成、
+/// 哪几组已经整批裁过了，以及这一批还剩多少条、细分方式锁没锁住。
+///
+/// 词表**批**那一条分开了两个词：切出来的那些叫**组**，其中**已经整批裁过**的那一组叫
+/// **一部分**（[`Part`]）。这里的一行（[`Slice`]）两样都装得下——画的可能是一个还没裁的组，
+/// 也可能是一个已经裁过的一部分，靠 [`Slice::done`] 分开。
+///
+/// 不直接拿 [`Drill`] 画，是因为**处理掉的那一项会从 [`Drill`] 里消失**：那些条一落下
+/// 就退出了队列，再数一遍就少一项——而屏上那一项必须还在，标着「已通过」，不然人只会
+/// 以为自己刚才什么也没做。「还剩多少」「换不换得了轴」出自同一处，各算各的迟早三个数
+/// 对不上，而按钮上写的正是那个数。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Breakdown {
+    /// 各项，多的排前面。
+    pub rows: Vec<Slice>,
+    /// 这一批**本来**有多少条：还剩的，加上**整组都已经退出队列**的那几部分。占比条的分母。
+    ///
+    /// **它不一定等于 `left + done`。** 一部分里有几条落不下去时
+    /// （[`Plan::blocked`](super::Plan::blocked)，少见），那一组还在队列里
+    /// ——它那几条已经算在 `left` 里，`done` 里也有它整份，两下相加就重复了。
+    /// 这一格只加真的数不到的那一截，所以各项占比照旧正好凑成一整批。
+    pub whole: u64,
+    /// 还剩多少条没裁——**整批操作那两颗按钮上写的就是它**。
+    pub left: u64,
+    /// 人在这一批上已经就地裁掉多少条——**卡头那句「已处理 N 条」写的是它**。
+    ///
+    /// 数的是落下去的全部，不管那一组裁没裁干净；分母那一格（`whole`）另有算法，见上。
+    pub done: u64,
+    /// 细分方式锁在这个轴上（[`Parts::locked_axis`]）。
+    pub locked: Option<Axis>,
+    /// 这个轴上**一组都没落进**的有几条（[`Drill::ungrouped`] 原样带过来）。
+    pub ungrouped: u64,
+    /// 落进**不止一组**的有几条（[`Drill::overlapping`]）。
+    pub overlapping: u64,
+}
+
+impl Breakdown {
+    /// 各项加起来正好是这一批吗。**按目录那个轴永远为真**，那正是它做默认分法的理由。
+    ///
+    /// 与 [`Drill::adds_up`] 问的是同一件事，差别在**数的是哪一套账**：那一支数眼下还在
+    /// 队列里的，这一支数屏上真摆着的那几项（含已经裁掉、`drill` 再也数不到的那几个）。
+    /// 裁掉一部分之后拿那一支去说这句话，屏上的数与话里的数就对不上了。
+    #[must_use]
+    pub fn adds_up(&self) -> bool {
+        self.overlapping == 0
+            && self.rows.iter().map(|row| row.count).sum::<u64>() + self.ungrouped == self.whole
+    }
+
+    /// **加不加得起来要说出口**：各项加起来大过这一批时那句话；加得起来就是 `None`。
+    ///
+    /// 屏上「1,204 ＋ 918 ＋ 576」加起来大过这一批的条数时，人只会以为工具算错了
+    /// ——只有按目录那个轴一条只落一个组，另两个轴一条能落进好几组、也能一组都不落。
+    #[must_use]
+    pub fn tally_note(&self) -> Option<String> {
+        if self.adds_up() {
+            return None;
+        }
+        Some(format!(
+            "这个轴上一条能落进好几组，所以各项加起来 {} 大过这一批的 {} 条；\
+             另有 {} 条一组都没落进。按目录那个轴是分得干净的。",
+            crate::report::thousands(self.rows.iter().map(|row| row.count).sum::<u64>()),
+            crate::report::thousands(self.whole),
+            crate::report::thousands(self.ungrouped),
+        ))
+    }
+
+    /// 换细分方式为什么被挡住，一句人话；没锁住就是 `None`。
+    #[must_use]
+    pub fn axis_refusal(&self) -> Option<String> {
+        self.locked.map(axis_refusal)
+    }
+
+    /// 这一批已经处理掉一部分了吗——屏上那几处「剩余」的措辞由它定。
+    #[must_use]
+    pub fn partly_done(&self) -> bool {
+        self.done > 0
+    }
+}
+
+/// **换细分方式为什么被挡住**那一句：这一批已经按 `locked` 那个轴裁掉过一部分了。
+///
+/// 收成自由函数、而不是只长在 [`Breakdown`] 上，因为**两处都要说这一句**：屏上那一排
+/// 底下常驻的那一行（走 [`Breakdown::axis_refusal`]），与真正挡住换轴的那道守卫拒下时
+/// 交出来的那一句。ADR-0005 的「再修订」一节逐字要求这两句**只许有一处**——各写一份
+/// 就回到了那条规矩本来要防的「两份迟早分叉」。
+#[must_use]
+pub fn axis_refusal(locked: Axis) -> String {
+    format!(
+        "已{}处理了一部分；换细分方式前，请先在裁决记录中撤销那几批",
+        locked.label()
+    )
+}
+
+/// 细分那一栏的一行。
+///
+/// 与 [`GroupRow`] 长得几乎一样（名字 ＋ 条数），**不复用它**：那一支数的是「眼下队列里
+/// 按这个轴分出来的组」，一条裁掉的都不认识——它是 [`tally`](super::tally) 与报告那一路
+/// 的类型，命令行印的表也是它。这一支要多说两件只有屏上才有的事（裁过没有、还剩多少），
+/// 硬加进 `GroupRow` 的话，命令行那张表上会凭空多出两列永远是空的。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Slice {
+    /// 这一项叫什么。**它同时是选择器的值**——[`Axis::filter`] 拿它折出选择器。
+    pub label: String,
+    /// 这一项一共多少条。整组都裁掉了的那几项记的是**落下时**的条数（[`Part::count`]）。
+    pub count: u64,
+    /// 这一项眼下队列里**还剩**多少条；整组裁干净了就是 0。
+    ///
+    /// **屏上那一项点不点得动看的是它，不是裁没裁过**：少见的情形下一部分里有几条落不下去
+    /// （[`Plan::blocked`](super::Plan::blocked)），那一项裁过了却还剩着——它得还点得动，
+    /// 点进去把剩下的几条再裁一次才算完。
+    pub left: u64,
+    /// 裁过没有、裁成什么；没裁过是 `None`。
+    pub done: Option<PartKind>,
+}
+
+impl Slice {
+    /// 这一项占整批的几成——屏上那条占比条的长短。单项永远在 0.0 到 1.0 之间。
+    ///
+    /// 分母是这一批**本来**有多少条（[`Breakdown::whole`]），不是眼下还剩多少：拿剩下的
+    /// 当分母，裁掉一项之后余下那几项的条会一起变长，而它们一条都没变。
+    ///
+    /// ⚠️ **各项加起来只有按目录那个轴正好是一整批**：另两个轴上一条能落进好几组，
+    /// 几条加起来会大过 1.0——那不是算错了，而是 [`Breakdown::tally_note`] 要说出口的那件事。
+    #[must_use]
+    pub fn share(&self, whole: u64) -> f64 {
+        if whole == 0 {
+            return 0.0;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.count as f64 / whole as f64
+        }
+    }
+}
+
+/// 把这一批眼下的下钻结果与**已经处理掉的那几部分**合成屏上那一栏。
+///
+/// `drilled` 数的是**整批**（[`Scope::whole`]）——下钻只收窄整批操作的作用范围，
+/// 那一栏本身不该跟着只剩一行。
+#[must_use]
+pub fn breakdown(drilled: &Drill, parts: &Parts, shape: &Shape, axis: Axis) -> Breakdown {
+    let mut rows: Vec<Slice> = drilled
+        .rows
+        .iter()
+        .map(|row| Slice {
+            label: row.label.clone(),
+            count: row.count,
+            left: row.count,
+            done: None,
+        })
+        .collect();
+    // 这一批这个轴上裁过的那几部分里，**整组都已经退出队列的**有多少条。
+    //
+    // 只数这些，是因为它们正是 `drilled` 再也数不到的那一截——占比的分母要的是
+    // 「这一批本来多少条」，而 `drilled.total` 只剩眼下还在队列里的。少见的情形下一部分
+    // 里会有几条落不下去（[`Plan::blocked`](super::Plan::blocked)），那一组于是还在
+    // `drilled` 里：它那几条已经算进 `drilled.total` 了，整份再加一遍就是重复计数。
+    let mut 退出队列的 = 0;
+    for (处理时的轴, label, part) in parts.under(shape) {
+        // 锁着轴的时候这一条永远成立；换轴被挡住之前落下的那几部分不混进别的轴。
+        if 处理时的轴 != axis {
+            continue;
+        }
+        if let Some(at) = rows.iter().position(|row| row.label == label) {
+            // 这一组还在队列里，也就是它没裁干净。标上裁过，条数照旧是眼下还剩的那些
+            // ——屏上那一项于是还点得动，剩下的几条再裁一次就完了。
+            rows[at].done = Some(part.kind);
+        } else {
+            退出队列的 += part.count;
+            rows.push(Slice {
+                label: label.to_string(),
+                count: part.count,
+                left: 0,
+                done: Some(part.kind),
+            });
+        }
+    }
+    rows.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.label.cmp(&b.label)));
+    Breakdown {
+        rows,
+        whole: drilled.total + 退出队列的,
+        left: drilled.total,
+        done: parts.done_in(shape),
+        locked: parts.locked_axis(shape),
+        ungrouped: drilled.ungrouped,
+        overlapping: drilled.overlapping,
+    }
+}
+
 /// **一条随机样本**：屏上常驻三样里的第三样。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sample {
@@ -1084,6 +1416,130 @@ mod tests {
             "按目录一条只落一个组，各组之和就该是这一批",
         );
         assert_eq!(drilled.rows.len(), 3);
+    }
+
+    /// 这一批眼下的下钻结果，连它的依据形状。
+    fn 一批加它的细分(n: usize) -> (Vec<Item>, Shape) {
+        let items = 一批(n);
+        let shape = Shape::of(&items[0]);
+        (items, shape)
+    }
+
+    /// 眼下队列里还剩 `members` 这些条时，这一批在这个轴上的下钻。
+    fn 下钻(items: &[Item], axis: Axis) -> Drill {
+        let members: Vec<&Item> = items.iter().collect();
+        drill(&members, axis)
+    }
+
+    #[test]
+    fn 细分每一项都说得出占整批的几成() {
+        // 屏上那条占比条的长短就是它。一项都没处理掉时，各项加起来正好是整批。
+        let (items, shape) = 一批加它的细分(30);
+        let 细分 = breakdown(&下钻(&items, Axis::Directory), &Parts::default(), &shape, Axis::Directory);
+        assert_eq!((细分.whole, 细分.left, 细分.done), (30, 30, 0));
+        assert!(细分.locked.is_none());
+        let 加起来: f64 = 细分.rows.iter().map(|row| row.share(细分.whole)).sum();
+        assert!((加起来 - 1.0).abs() < 1e-9, "各项占比加起来不是一整批：{细分:?}");
+        assert!(细分.rows.iter().all(|row| row.done.is_none()));
+    }
+
+    #[test]
+    fn 处理掉一项之后那一项还在栏上标着已通过_占比一条都没变() {
+        // 那些条一落下就退出队列，`drill` 再数就少一项——而屏上那一项必须还在，
+        // 不然人只会以为自己刚才什么也没做。占比条的分母是**本来**多少条，所以
+        // 余下那几项的条一点都不该变长。
+        let (items, shape) = 一批加它的细分(30);
+        let 原先 = breakdown(&下钻(&items, Axis::Directory), &Parts::default(), &shape, Axis::Directory);
+        let 那一项 = 原先.rows[0].clone();
+
+        // 那一组落下之后队列里只剩别的组。
+        let 剩下: Vec<Item> = items
+            .iter()
+            .filter(|item| item.directory() != 那一项.label)
+            .cloned()
+            .collect();
+        let mut parts = Parts::default();
+        assert!(parts.record(
+            Scope::under(shape.clone(), Axis::Directory, &那一项.label),
+            那一项.count,
+            PartKind::Passed,
+            7,
+        ));
+        let 之后 = breakdown(&下钻(&剩下, Axis::Directory), &parts, &shape, Axis::Directory);
+
+        assert_eq!(之后.rows.len(), 原先.rows.len(), "处理掉的那一项从栏上消失了");
+        let 标着 = 之后
+            .rows
+            .iter()
+            .find(|row| row.label == 那一项.label)
+            .expect("处理掉的那一项该还在栏上");
+        assert_eq!(标着.done, Some(PartKind::Passed));
+        assert_eq!(标着.count, 那一项.count, "标着的那一项该记落下时的条数");
+        assert_eq!(标着.left, 0, "整组裁干净了，那一项该一条都不剩");
+        assert_eq!(标着.done.map(PartKind::label), Some("已通过"));
+        assert!(
+            之后.rows.iter().filter(|row| row.done.is_none()).all(|row| row.left == row.count),
+            "没裁过的那几项，还剩的就该是它全部：{之后:?}",
+        );
+        assert_eq!((之后.whole, 之后.left, 之后.done), (30, 30 - 那一项.count, 那一项.count));
+        for 这一行 in &之后.rows {
+            let 原来 = 原先
+                .rows
+                .iter()
+                .find(|row| row.label == 这一行.label)
+                .expect("项没变");
+            assert!(
+                (这一行.share(之后.whole) - 原来.share(原先.whole)).abs() < 1e-9,
+                "处理掉一项之后别的项占比跟着变了：{这一行:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn 处理过一部分之后细分方式锁住_撤掉那一批就解开() {
+        // 两套切法会重叠，数就对不上了——挡住，并说得出为什么。
+        let (items, shape) = 一批加它的细分(30);
+        let 那一项 = 下钻(&items, Axis::Directory).rows[0].clone();
+        let mut parts = Parts::default();
+        parts.record(
+            Scope::under(shape.clone(), Axis::Directory, &那一项.label),
+            那一项.count,
+            PartKind::Rejected,
+            7,
+        );
+        assert_eq!(parts.locked_axis(&shape), Some(Axis::Directory));
+        let 细分 = breakdown(&下钻(&items, Axis::Directory), &parts, &shape, Axis::Directory);
+        assert!(细分.partly_done());
+        assert_eq!(
+            细分.axis_refusal().as_deref(),
+            Some("已按目录处理了一部分；换细分方式前，请先在裁决记录中撤销那几批"),
+        );
+
+        // 别的批一个字都不锁。
+        let 别的批 = Shape::Bare {
+            state: State::Unmatched,
+            reason: None,
+        };
+        assert_eq!(parts.locked_axis(&别的批), None);
+
+        // 那一批裁决撤掉，这一项就不再是处理过的。
+        parts.keep(|batch| batch != 7);
+        assert_eq!(parts.locked_axis(&shape), None);
+        let 撤完 = breakdown(&下钻(&items, Axis::Directory), &parts, &shape, Axis::Directory);
+        assert!(!撤完.partly_done());
+        assert_eq!(撤完.axis_refusal(), None);
+        assert!(撤完.rows.iter().all(|row| row.done.is_none()));
+    }
+
+    #[test]
+    fn 整批那一层不记成一部分() {
+        // 一级整批落下之后这一批整个从队列里消失，屏上没有「剩下的部分」可说。
+        let (items, shape) = 一批加它的细分(30);
+        let mut parts = Parts::default();
+        assert!(!parts.record(Scope::whole(shape.clone()), 30, PartKind::Passed, 7));
+        assert_eq!(parts.done_in(&shape), 0);
+        assert_eq!(parts.locked_axis(&shape), None);
+        let _ = items;
     }
 
     #[test]

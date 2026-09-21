@@ -1050,6 +1050,496 @@ fn drilled_first(drill: &romcat_core::triage::Drill) -> romcat_core::triage::Gro
     drill.rows.first().cloned().expect("该有一组")
 }
 
+// ——— 一批里再下钻，并在任意一层整批处理（票 `gui-looks-like-the-design/19`）———
+
+/// 一份合成数据的界面，展开着一批**能整批通过、而且切得出不止一项**的，连那一批的依据形状与切得动它的那个轴。
+///
+/// 「不止一项」是这几条测试的前提：只切得出一项的那一批，裁掉那一项就等于裁掉整批
+/// ——卡片当场收起来，「剩下的部分仍能整批处理」根本无从验起。
+///
+/// **轴不写死成按目录**：一批的键是依据形状，而源与 DAT 多半只覆盖一个平台，于是合成数据里
+/// 能整批通过的那几批按目录往往只落在一个目录下。哪个轴切得动由这里当场挑。
+fn 展开一批能过的(ctx: &egui::Context) -> (App, Shape, Axis) {
+    let mut app = 界面(demo::QUEUE_ROWS);
+    let 能过: Vec<Shape> = app
+        .queue()
+        .queue()
+        .batches()
+        .iter()
+        .filter(|batch| batch.passable())
+        .map(|batch| batch.shape.clone())
+        .collect();
+    let (shape, axis) = 能过
+        .into_iter()
+        .find_map(|shape| {
+            let axis = Axis::ALL.into_iter().find(|axis| {
+                app.queue()
+                    .queue()
+                    .drill(&Scope::whole(shape.clone()), *axis)
+                    .rows
+                    .len()
+                    > 1
+            })?;
+            Some((shape, axis))
+        })
+        .expect("合成数据里该有一批能整批通过、又切得出好几项的");
+    展开(&mut app, &shape);
+    跑(ctx, &mut app, 1);
+    (app, shape, axis)
+}
+
+/// 下钻到这个轴上最大的那一项，交回它的名字与条数。
+fn 下钻到头一项(ctx: &egui::Context, app: &mut App, axis: Axis) -> (String, u64) {
+    {
+        let (screen, _) = app.queue_and_site();
+        screen.set_axis(axis);
+    }
+    let 细分 = app
+        .queue()
+        .breakdown()
+        .expect("展开了就该有细分")
+        .rows
+        .first()
+        .cloned()
+        .expect("这个轴上该切得出一项");
+    {
+        let (screen, _) = app.queue_and_site();
+        screen.drill_into(&细分.label);
+    }
+    跑(ctx, app, 1);
+    (细分.label, 细分.count)
+}
+
+/// 就地把下钻着的那一组整批裁掉（`通过` 为假时是拒绝），交回落下的那一批裁决的编号。
+fn 就地裁掉(app: &mut App, 通过: bool) -> i64 {
+    let scope = app.queue().scope().expect("下钻了才裁得动一部分");
+    {
+        let (screen, site) = app.queue_and_site();
+        if 通过 {
+            screen.pass(site, &scope);
+        } else {
+            screen.reject(site, &scope);
+        }
+        screen.commit(site);
+    }
+    assert!(app.queue().error().is_none(), "{:?}", app.queue().error());
+    app.queue().applied().expect("落下了就该有账").batch
+}
+
+#[test]
+fn 三种细分都切得动_每一项都写着条数与占比() {
+    // 验收第 1 条。占比的分母是这一批**本来**多少条，所以一项都没裁掉时，各项加起来正好是一整批。
+    let ctx = headless::context();
+    let (mut app, _, _) = 展开一批能过的(&ctx);
+    for axis in Axis::ALL {
+        {
+            let (screen, _) = app.queue_and_site();
+            screen.set_axis(axis);
+        }
+        let 屏上 = 画一帧(&ctx, &mut app);
+        let 细分 = app.queue().breakdown().expect("展开了就该有细分").clone();
+        assert!(
+            !细分.rows.is_empty(),
+            "{} 这个轴上一项都切不出来",
+            axis.label(),
+        );
+        assert_eq!(细分.whole, 细分.left, "一项都没裁掉时还剩的就是整批");
+        for row in 细分.rows.iter().take(3) {
+            assert!(
+                屏上.contains(&thousands(row.count)),
+                "{} 这个轴上「{}」那一项的条数没写在屏上：\n{屏上}",
+                axis.label(),
+                row.label,
+            );
+            let 占比 = row.share(细分.whole);
+            assert!(
+                (0.0..=1.0).contains(&占比) && 占比 > 0.0,
+                "占比算歪了：{row:?} 占 {占比}",
+            );
+        }
+        // 屏上摆得下的那几项，占比加起来不该大过一整批。
+        let 加起来: f64 = 细分.rows.iter().map(|row| row.share(细分.whole)).sum();
+        if 细分.locked.is_none() && axis == Axis::Directory {
+            assert!(
+                (加起来 - 1.0).abs() < 1e-9,
+                "按目录那个轴一条只落一个组，各项占比该正好凑成一整批：{加起来}",
+            );
+        }
+    }
+}
+
+#[test]
+fn 点一项只看这一部分_就地那一框给的是这一部分的样本() {
+    // 验收第 2 条。右栏那一栏照稿数的始终是整批——下钻收窄的是整批操作的作用范围，
+    // 而「这一批长什么样」那句话不跟着只剩一组。
+    let ctx = headless::context();
+    let (mut app, shape, axis) = 展开一批能过的(&ctx);
+    let 整批的样本 = app.queue().samples();
+    let (那一项, 条数) = 下钻到头一项(&ctx, &mut app, axis);
+
+    let 那一组 = app.queue().scope().expect("下钻了就该有作用范围");
+    assert_eq!(那一组, Scope::under(shape, axis, &那一项));
+    assert_eq!(app.queue().queue().count(&那一组), 条数);
+
+    let 这一部分的样本 = app.queue().drilled_samples();
+    assert!(!这一部分的样本.is_empty(), "就地那一框里一条样本都没有");
+    let 这一部分的键: std::collections::BTreeSet<String> = app
+        .queue()
+        .queue()
+        .selected()
+        .iter()
+        .filter(|item| 那一组.holds(item))
+        .map(|item| item.variant.key.clone())
+        .collect();
+    assert_eq!(这一部分的键.len() as u64, 条数);
+    for one in &这一部分的样本 {
+        assert!(
+            这一部分的键.contains(&one.key),
+            "就地那一框里摆着不属于这一部分的样本：{one:?}",
+        );
+    }
+    assert_eq!(
+        app.queue().samples(),
+        整批的样本,
+        "下钻把右栏那一栏的样本也收窄了",
+    );
+
+    let 屏上 = 画一帧(&ctx, &mut app);
+    assert!(
+        屏上.contains(&format!("只看：{那一项}")),
+        "就地那一框没说在只看哪一部分：\n{屏上}",
+    );
+    assert!(
+        屏上.contains("返回整批"),
+        "就地那一框里没有返回整批那一颗：\n{屏上}",
+    );
+}
+
+#[test]
+fn 就地整批通过之后那一项标着已通过_剩下的仍旧整批处理得动() {
+    // 验收第 3、4 条。这一层落下的仍旧是**一批裁决**，那一项的条退出队列——而屏上那一项
+    // 必须还在，不然人只会以为自己刚才什么也没做；底下那一排跟着改口说「剩余」。
+    let ctx = headless::context();
+    let (mut app, shape, axis) = 展开一批能过的(&ctx);
+    let 原有 = app.queue().queue().pending();
+    let 整批 = app.queue().breakdown().expect("展开了就该有细分").whole;
+    let (那一项, 条数) = 下钻到头一项(&ctx, &mut app, axis);
+    就地裁掉(&mut app, true);
+    跑(&ctx, &mut app, 1);
+
+    assert_eq!(
+        app.queue().queue().pending(),
+        原有 - 条数,
+        "就地整批通过该只落下这一部分",
+    );
+    let 细分 = app.queue().breakdown().expect("还展开着就该有细分").clone();
+    assert_eq!((细分.whole, 细分.done, 细分.left), (整批, 条数, 整批 - 条数));
+    let 标着 = 细分
+        .rows
+        .iter()
+        .find(|row| row.label == 那一项)
+        .expect("裁完的那一项该还在细分那一栏上");
+    assert_eq!(标着.done, Some(triage::PartKind::Passed));
+    assert_eq!(标着.count, 条数, "标着的那一项该记落下时的条数");
+
+    let 屏上 = 画一帧(&ctx, &mut app);
+    // **按行精确比**：屏底那条提示条这会儿正写着「已通过 N 条」，`contains("已通过")`
+    // 被它满足——把那一项旁边那枚标签整个删掉，那样的断言照样绿。
+    assert!(
+        屏上.lines().any(|line| line == "已通过"),
+        "裁完的那一项旁边没标出那枚「已通过」：\n{屏上}",
+    );
+    assert!(
+        屏上.lines().any(|line| line == 那一项),
+        "裁完的那一项从细分那一栏上消失了：\n{屏上}",
+    );
+    // 剩下的部分照旧整批处理得动，按钮上写的是还剩多少。
+    assert!(
+        屏上.contains(&format!("通过剩余的 {} 条", thousands(细分.left))),
+        "底下那一排没写明还剩多少：\n{屏上}",
+    );
+    assert!(
+        屏上.contains(&format!("拒绝剩余的 {} 条", thousands(细分.left))),
+        "拒绝那一颗没写明还剩多少：\n{屏上}",
+    );
+    assert!(
+        !屏上.contains(&format!("全部通过（{} 条）", thousands(细分.left))),
+        "裁过一部分之后还说「全部通过」：\n{屏上}",
+    );
+    // 按下去落的是整批剩下的那些，不是刚裁过的那一组。
+    {
+        let (screen, site) = app.queue_and_site();
+        screen.pass(site, &Scope::whole(shape));
+    }
+    assert_eq!(
+        app.queue().pending().expect("排得出计划").decided.len() as u64,
+        细分.left,
+        "底下那一排该作用在剩下的部分上",
+    );
+}
+
+#[test]
+fn 就地整批拒绝也落成一批裁决_进裁决记录也撤得掉_撤完那一项回到栏上() {
+    // 验收第 3 条那一半：每一层落下的都是**一批裁决**，不另造一套。
+    let ctx = headless::context();
+    let (mut app, _, axis) = 展开一批能过的(&ctx);
+    let 原有 = app.queue().queue().pending();
+    let (那一项, 条数) = 下钻到头一项(&ctx, &mut app, axis);
+    let id = 就地裁掉(&mut app, false);
+    跑(&ctx, &mut app, 1);
+
+    let 那一批 = 册子上的(&app, id);
+    assert_eq!(那一批.rows, 条数);
+    assert!(!那一批.undone());
+    打开裁决记录(&ctx, &mut app);
+    let 屏上 = 画一帧(&ctx, &mut app);
+    assert!(
+        屏上.contains(&在册那一行(&那一批)),
+        "就地落下的那一批没进裁决记录：\n{屏上}",
+    );
+
+    {
+        let (screen, site) = app.queue_and_site();
+        screen.undo(site, id);
+    }
+    跑(&ctx, &mut app, 1);
+    assert_eq!(
+        app.queue().queue().pending(),
+        原有,
+        "撤掉之后那一部分该整个回到队列里",
+    );
+    let 细分 = app.queue().breakdown().expect("还展开着就该有细分").clone();
+    assert!(!细分.partly_done(), "撤掉了还算裁过一部分");
+    assert_eq!(
+        细分
+            .rows
+            .iter()
+            .find(|row| row.label == 那一项)
+            .expect("那一项该回到栏上")
+            .done,
+        None,
+        "撤掉之后那一项还标着已裁完",
+    );
+}
+
+#[test]
+fn 就地那一框里的逐条处理按下去真的收窄到这一组() {
+    // 这一颗原先是**死的**：它与底下那一排共用一格记号，而那一排后画、是平赋值
+    // （`= …clicked()`），把框里按下的那一下抹成了 `false`。一格记号管一颗之后才活。
+    //
+    // 只钉框里这一颗：底下那一排作用在整批剩下的那些上，由
+    // `就地整批通过之后那一项标着已通过_剩下的仍旧整批处理得动` 那条钉着（它按下去之后
+    // 断言排出的计划条数正好是 `breakdown.left`）。
+    let ctx = headless::context();
+    let (mut app, shape, axis) = 展开一批能过的(&ctx);
+    let 整批 = app.queue().queue().count(&Scope::whole(shape));
+    let (那一项, 条数) = 下钻到头一项(&ctx, &mut app, axis);
+    assert!(条数 < 整批, "这一组该只是整批的一部分，不然分不出两颗的差别");
+
+    // **按框头定位**：就地那一框被细分那一栏顶在屏幕中段，而底下那一排这时多半已经被
+    // 推出视口了——「屏上恰好两颗」是靠不住的判据。框里那颗是「只看：…」底下最近的那一颗。
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 框头 = 正好是它的每一处(&这一帧, &format!("只看：{那一项}"))
+        .first()
+        .copied()
+        .expect("下钻之后就地那一框该开着");
+    let 框里那颗 = 正好是它的每一处(&这一帧, "逐条处理")
+        .into_iter()
+        .filter(|一处| 一处.y > 框头.y)
+        .min_by(|a, b| a.y.total_cmp(&b.y))
+        .expect("就地那一框里该有一颗「逐条处理」");
+    按在(&ctx, &mut app, 框里那颗);
+    跑(&ctx, &mut app, 1);
+
+    assert_eq!(app.queue().mode(), Mode::OneByOne, "按了没换到逐条");
+    assert_eq!(
+        app.queue().queue().selected().len() as u64,
+        条数,
+        "框里那一颗该把队列收窄到「{那一项}」这一组，而不是整批那 {整批} 条",
+    );
+}
+
+#[test]
+fn 就地落下的那一批裁决在记录上认得出是哪一组() {
+    // 挡住换轴那句话让人「先在裁决记录中撤销那几批」——记录上只写「第 N 批裁决 · M 条」
+    // 的话，人根本挑不出该撤哪几批（设计稿 `passPart` 给那一行的 label 也带着这一段）。
+    let ctx = headless::context();
+    let (mut app, _, axis) = 展开一批能过的(&ctx);
+    let 那一组 = {
+        let (那一项, _) = 下钻到头一项(&ctx, &mut app, axis);
+        那一项
+    };
+    let 作用范围 = app.queue().scope().expect("下钻了就该有作用范围").label();
+    let id = 就地裁掉(&mut app, true);
+    跑(&ctx, &mut app, 1);
+
+    let 那一批 = 册子上的(&app, id);
+    assert_eq!(
+        那一批.note.as_deref(),
+        Some(作用范围.as_str()),
+        "就地落下的那一批没记下它作用在哪一组上",
+    );
+    assert!(
+        作用范围.contains(&那一组),
+        "作用范围那句话里该有这一组的名字：{作用范围}",
+    );
+
+    // ⚠️ **只钉到这里**：裁决记录那一行眼下把备注画在**悬停**里（`records_drawer` 里那个
+    // `悬停`），屏上那两行字是「第 N 批裁决 · M 条」与「时刻 · summary」——`画出来的字`
+    // 读不到悬停，所以「人在屏上认不认得出是哪一组」这一半没法在这一层钉。
+    // 要它上屏得动记录那一行的样式（票 18 定的），那是另一个岔路口，记在挂单 `Q966`。
+    打开裁决记录(&ctx, &mut app);
+    let 屏上 = 画一帧(&ctx, &mut app);
+    assert!(
+        屏上.contains(&在册那一行(&那一批)),
+        "就地落下的那一批没进裁决记录：\n{屏上}",
+    );
+}
+
+#[test]
+fn 处理过一部分之后换细分方式被挡住并说清为什么_撤掉那一批就解开() {
+    // 验收第 5 条。两套切法会重叠，数就对不上了——挡住，并说得出为什么。
+    let ctx = headless::context();
+    let (mut app, _, axis) = 展开一批能过的(&ctx);
+    let _ = 下钻到头一项(&ctx, &mut app, axis);
+    let id = 就地裁掉(&mut app, true);
+    跑(&ctx, &mut app, 1);
+
+    let 那句话 = app
+        .queue()
+        .breakdown()
+        .expect("还展开着就该有细分")
+        .axis_refusal()
+        .expect("裁过一部分就该挡住换轴");
+    assert_eq!(
+        那句话,
+        format!(
+            "已{}处理了一部分；换细分方式前，请先在裁决记录中撤销那几批",
+            axis.label(),
+        ),
+    );
+    let 屏上 = 画一帧(&ctx, &mut app);
+    assert!(屏上.contains(&那句话), "挡住了却没说为什么：\n{屏上}");
+
+    // 换轴一个字都不动。
+    let 换成 = Axis::ALL
+        .into_iter()
+        .find(|one| *one != axis)
+        .expect("三个轴里该有别的");
+    {
+        let (screen, _) = app.queue_and_site();
+        screen.set_axis(换成);
+    }
+    跑(&ctx, &mut app, 1);
+    assert_eq!(
+        app.queue().axis(),
+        axis,
+        "换细分方式没被挡住：那一排真换过去了",
+    );
+    // **守卫那一侧拒下时也得说得出理由**，不许是光秃的返回（ADR-0005「再修订：『不禁按钮』
+    // 那一条什么时候允许同时画灰」，拿主意的人 2026-09-20 定）；而且它与屏上那一排底下
+    // 常驻的那一行**是同一句**——各写一份迟早两个说法。
+    assert_eq!(
+        app.queue().error(),
+        Some(那句话.as_str()),
+        "换轴被挡下了却一声不吭",
+    );
+    assert_eq!(
+        app.queue().breakdown().expect("还展开着").locked,
+        Some(axis),
+        "锁着的轴不该跟着变",
+    );
+    assert!(
+        app.queue()
+            .breakdown()
+            .expect("还展开着")
+            .rows
+            .iter()
+            .any(|row| row.done.is_some()),
+        "换轴之后裁完的那一项不见了——那一排换过去了",
+    );
+
+    // 撤掉那一批就解开。
+    {
+        let (screen, site) = app.queue_and_site();
+        screen.undo(site, id);
+    }
+    跑(&ctx, &mut app, 1);
+    assert_eq!(app.queue().breakdown().expect("还展开着").locked, None);
+    {
+        let (screen, _) = app.queue_and_site();
+        screen.set_axis(换成);
+    }
+    跑(&ctx, &mut app, 1);
+    assert!(
+        app.queue().scope().is_some(),
+        "撤完之后那一批该还展开着",
+    );
+    assert_eq!(app.queue().axis(), 换成, "撤完之后该换得动轴了");
+    assert_eq!(
+        app.queue().error(),
+        None,
+        "换成了，上一次那句拒绝该跟着作废",
+    );
+    assert!(
+        app.queue()
+            .breakdown()
+            .expect("还展开着")
+            .axis_refusal()
+            .is_none(),
+        "撤完了还挡着",
+    );
+}
+
+#[test]
+fn 下钻处理之后屏头批头与左栏徽标那几个数仍旧一致() {
+    // 验收第 6 条。三处画的是同一个数（`Queue::pending`），批头那个大数是这一批眼下还剩多少
+    // ——它们一起变，不然屏上会有两个互相打架的数。
+    let ctx = headless::context();
+    let (mut app, shape, axis) = 展开一批能过的(&ctx);
+    let (_, 条数) = 下钻到头一项(&ctx, &mut app, axis);
+    就地裁掉(&mut app, true);
+    跑(&ctx, &mut app, 1);
+
+    let 屏上 = 画一帧(&ctx, &mut app);
+    let 待确认 = app.queue().queue().pending();
+    assert!(
+        屏上.contains(&format!("{} 个变体待确认", thousands(待确认))),
+        "屏头那个数没跟着换：\n{屏上}",
+    );
+    assert_eq!(
+        app.queue()
+            .queue()
+            .batches()
+            .iter()
+            .map(|batch| batch.count)
+            .sum::<u64>(),
+        待确认,
+        "各批条数加起来与屏头那个数对不上",
+    );
+    let 这一批 = app
+        .queue()
+        .queue()
+        .batches()
+        .iter()
+        .find(|batch| batch.shape == shape)
+        .expect("裁掉一部分之后这一批该还在")
+        .clone();
+    assert!(
+        屏上.contains(&format!("已处理 {} 条，剩余 {} 条", thousands(条数), thousands(这一批.count))),
+        "批头没说清裁掉了多少、还剩多少：\n{屏上}",
+    );
+    // 左栏那枚徽标画的是同一个数（`App::rail` 的「待裁」）：屏上正好写着它的地方至少有那一处。
+    assert!(
+        !正好是它的每一处(
+            &headless::frame(&ctx, headless::input(), |ui| app.ui(ui)),
+            &thousands(待确认),
+        )
+        .is_empty(),
+        "左栏徽标上那个数不见了",
+    );
+}
+
 #[test]
 fn 识别与刮削的待确认在同一条队列里() {
     // 验收第 9 条。中文离线源是**刮削那一侧的数据源**，它撞出来的候选与 DAT 的候选
@@ -2906,10 +3396,12 @@ fn 批卡照稿_卡头是形状各段与共同依据_展开后判定依据是那
         !屏上.contains("换一组样本"),
         "样本旁边那颗照稿叫「换一组」：\n{屏上}"
     );
-    // 「作用范围」只在下钻之后说：没下钻时照稿不画，下钻到某一组之后写出来。
+    // **下钻着的那一组说在就地那一框里**（票 `gui-looks-like-the-design/19` 照稿换的）：
+    // 票 18 那一趟拿屏底一句「作用范围：…」说它，而底下那一排从此始终作用于整批剩下的部分
+    // ——那一句留着就会与按钮上写的数打架。没下钻时那一框照稿不画。
     assert!(
-        !屏上.lines().any(|line| line.starts_with("作用范围：")),
-        "没下钻就画了「作用范围」：\n{屏上}"
+        !屏上.lines().any(|line| line.starts_with("只看：")),
+        "没下钻就开了就地那一框：\n{屏上}"
     );
     let 那一组 = app
         .queue()
@@ -2921,10 +3413,23 @@ fn 批卡照稿_卡头是形状各段与共同依据_展开后判定依据是那
         .expect("该有一组");
     app.queue_and_site().0.drill_into(&那一组.label);
     let 下钻之后 = 画一帧(&ctx, &mut app);
+    for 那一段 in [
+        format!("只看：{}", 那一组.label),
+        format!("通过这 {} 条", thousands(那一组.count)),
+        format!("拒绝这 {} 条", thousands(那一组.count)),
+        "返回整批".to_owned(),
+    ] {
+        assert!(
+            下钻之后.lines().any(|line| line == 那一段),
+            "就地那一框里没有「{那一段}」：\n{下钻之后}"
+        );
+    }
     assert!(
-        下钻之后.lines().any(|line| line.starts_with("作用范围：")),
-        "下钻之后没说作用范围：\n{下钻之后}"
+        下钻之后.contains(&format!("全部通过（{} 条）", thousands(batch.count))),
+        "下钻把底下那一排也收窄了——它该始终作用于整批：\n{下钻之后}"
     );
+    app.queue_and_site().0.drill_out();
+    跑(&ctx, &mut app, 1);
 
     let 上一组 = app.queue().samples();
     let _ = 点正好那一颗(&ctx, &mut app, "换一组");

@@ -1697,6 +1697,20 @@ pub fn segmented<T: Copy + PartialEq>(
     options: &[(T, &str)],
     selected: T,
 ) -> Option<T> {
+    segmented_where(ui, options, selected, |_| true)
+}
+
+/// 与 [`segmented`] 同一排，只是**某几颗按不动**：`enabled` 说不的那几颗字淡到 `disabled-opacity`、
+/// 点不响，也不接悬停与焦点（设计稿待确认屏「细分」那一排处理过一部分之后的 `disabled`）。
+///
+/// 为什么不整排 `add_enabled_ui(false, …)`：稿上**选中那一颗照旧是亮的**，淡的只有另外几颗
+/// ——整排一起淡的话，屏上连「眼下按的是哪个轴」都看不出来了，而那正是挡住换轴时最该说清的一件事。
+pub fn segmented_where<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    options: &[(T, &str)],
+    selected: T,
+    enabled: impl Fn(T) -> bool,
+) -> Option<T> {
     let tokens = Tokens::builtin();
     let palette = palette(ui);
     let 外边 = tokens.layout.seg_padding;
@@ -1734,11 +1748,20 @@ pub fn segmented<T: Copy + PartialEq>(
             egui::vec2(galley.size().x + 2.0 * 留白, 高),
         );
         左 = 这一颗.right();
-        let response = ui.interact(这一颗, ui.id().with(("分段开关", at)), egui::Sense::click());
+        let 按得动 = enabled(*value);
+        let response = ui.interact(
+            这一颗,
+            ui.id().with(("分段开关", at)),
+            if 按得动 {
+                egui::Sense::click()
+            } else {
+                egui::Sense::hover()
+            },
+        );
         let 选中 = *value == selected;
-        let enabled = ui.is_enabled();
+        let 可交互 = ui.is_enabled() && 按得动;
         response.widget_info(|| {
-            egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, enabled, 选中, *label)
+            egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, 可交互, 选中, *label)
         });
         let painter = ui.painter();
         if 选中 {
@@ -1762,6 +1785,11 @@ pub fn segmented<T: Copy + PartialEq>(
             palette.ink
         } else {
             palette.ink_2
+        };
+        let 字色 = if 按得动 {
+            字色
+        } else {
+            字色.gamma_multiply(tokens.mix.disabled_opacity)
         };
         let 摆在 = 这一颗.center() - galley.size() / 2.0;
         painter.galley_with_override_text_color(摆在, galley, 字色);

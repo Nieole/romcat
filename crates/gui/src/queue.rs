@@ -69,10 +69,10 @@ use romcat_core::report::{capacity, thousands};
 use romcat_core::scrape::AnchorKind;
 use romcat_core::scrape::zh::{Judged, MatchGroup, judge, matched_groups};
 use romcat_core::stage::Stage;
-use romcat_core::triage::batch::Coverage;
+use romcat_core::triage::batch::{Coverage, breakdown};
 use romcat_core::triage::{
-    Applied, Axis, Batch, Draft, Drill, Filter, ItemOrder, Overrides, Plan, Queue, Sample, Scope,
-    Shape, TriageError, Undone,
+    Applied, Axis, Batch, Breakdown, Draft, Filter, ItemOrder, Overrides, PartKind, Parts,
+    Plan, Queue, Sample, Scope, Shape, Slice, TriageError, Undone,
 };
 use romcat_core::verdict;
 
@@ -99,6 +99,11 @@ const TOP_BATCHES: usize = 60;
 
 /// 每批屏上摆几条随机样本。
 const SAMPLES: usize = 5;
+
+/// 下钻到某一组之后，**就地那一框**里摆几条样本（设计稿 `drillHTML` 的 `Math.min(4, …)`）。
+///
+/// 比整批那一栏少一条：那一框是插在细分那一栏中间的，摆满五条就把底下那几项挤出屏外了。
+const DRILL_SAMPLES: usize = 4;
 
 /// 屏底那句「前几批盖住多少」按前几批算：与库屏工序段裁决那一行底下那句同一个数（核心库那一处）。
 const HEADLINE: usize = romcat_core::triage::HEADLINE_BATCHES;
@@ -136,13 +141,22 @@ pub struct Screen {
     /// 里看细一点。下钻只该收窄**整批操作的作用范围**（[`Scope`]），一级那一列卡片
     /// 一个字都不该动。
     drill: Option<String>,
+    /// 各批下面**已经就地裁完的那几部分**（[`Parts`]）。
+    ///
+    /// **它不是第二份账**：落了多少条、撤没撤都以沉淀库那一批裁决为准，这里存的是沉淀库
+    /// 答不出的那一半——那一批裁决当初作用在哪一批的哪一组上。沉淀库只记落了哪些条，
+    /// 折不回「按目录 · `GB/汉化/`」这一句，而屏上那一项要标着「已通过」正需要它。
+    ///
+    /// **裁决记录每重列一遍就跟着对一次**（[`Screen::refresh_records`]）：撤掉的那一批
+    /// 对应的那一项当场作废，那一行重新点得动，细分方式也跟着解开。
+    parts: Parts,
     /// 能整批通过的批**全都摆出来了没有**：默认只先摆前几批（与正文头一格说的是同几批），余下的收成一句，按「列出这 N 批」才摆。
     all_passable: bool,
     /// 样本那一组的号。**「换一组」就是把它加一**。
     seed: u64,
-    /// 展开那一批算出来的东西：条数、二级分组、随机样本。
+    /// 展开那一批算出来的东西：条数、细分那一栏、两处随机样本。
     ///
-    /// **缓着而不是每帧重算**：这三样各要走一遍这一批的全部条目，一批一万两千条上，
+    /// **缓着而不是每帧重算**：这几样各要走一遍这一批的全部条目，一批一万两千条上，
     /// 每帧重算就是每帧几万次分配。钥匙里的 [`Queue::revision`] 管住「队列变了」这一半
     /// ——裁完一批、撤回一批、换个选择器，它都会变。
     opened: Option<Opened>,
@@ -328,6 +342,7 @@ impl Screen {
             open: None,
             axis: Axis::Directory,
             drill: None,
+            parts: Parts::default(),
             all_passable: false,
             seed: 0,
             opened: None,
@@ -505,10 +520,21 @@ impl Screen {
         } else {
             self.open = Some(shape.clone());
         }
-        self.axis = Axis::Directory;
+        self.axis = self.locked_or_default();
         self.drill = None;
         self.seed = 0;
         self.refresh_opened();
+    }
+
+    /// 展开着那一批锁在哪个轴上；没锁就是默认的**按目录**。
+    ///
+    /// **打开就停在锁着的那个轴上**：处理过一部分的那一批退回按目录的话，那一排上选中的
+    /// 与底下真画的不是同一个轴，而另外两颗还按不动——屏上自相矛盾。
+    fn locked_or_default(&self) -> Axis {
+        self.open
+            .as_ref()
+            .and_then(|shape| self.parts.locked_axis(shape))
+            .unwrap_or(Axis::Directory)
     }
 
     /// 眼下展开的那一批连它的下钻，也就是**整批操作的作用范围**。
@@ -522,14 +548,33 @@ impl Screen {
     }
 
     /// 二级换个轴分。换轴就是换了一套分法，下钻跟着作废。
+    ///
+    /// **已经按一个轴裁掉一部分之后换不动**：两套切法会重叠，新那一栏里每一项含着多少条
+    /// 已经裁掉的，谁也说不出——屏上的数当场变成假话。锁在哪个轴上由核心库说
+    /// （[`Parts::locked_axis`]）。先在裁决记录里撤掉那几批就解开了。
+    ///
+    /// **这道守卫拒下时要说得出理由**，不是光秃地返回：那一排上另两颗虽然也画成了按不动的，
+    /// 但拒绝的那一句得在这儿——有人绕过界面直接调它时也得听见原因（ADR-0005「再修订：
+    /// 『不禁按钮』那一条什么时候允许同时画灰」，拿主意的人 2026-09-20 定）。
+    /// 那句话与屏上那一排底下常驻的那一行**是同一句**（核心库的
+    /// [`axis_refusal`](romcat_core::triage::axis_refusal)）。
     pub fn set_axis(&mut self, axis: Axis) {
+        if let Some(shape) = &self.open
+            && let Some(锁) = self.parts.locked_axis(shape)
+            && 锁 != axis
+        {
+            self.error = Some(romcat_core::triage::axis_refusal(锁));
+            return;
+        }
+        // 换成了，上一次拒绝那句话跟着作废——留着的话屏上会一直挂着一条早就不成立的理由。
+        self.error = None;
         self.axis = axis;
         self.drill = None;
         self.seed = 0;
         self.refresh_opened();
     }
 
-    /// **下钻**到二级的某一组；再点一次回到整批。
+    /// **下钻**到二级的某一组；再点一次返回整批。
     pub fn drill_into(&mut self, label: &str) {
         self.drill = if self.drill.as_deref() == Some(label) {
             None
@@ -540,7 +585,7 @@ impl Screen {
         self.refresh_opened();
     }
 
-    /// 回到整批：把下钻那一层放掉。
+    /// 返回整批：把下钻那一层放掉。屏上那颗「返回整批」走的就是它。
     pub fn drill_out(&mut self) {
         self.drill = None;
         self.seed = 0;
@@ -553,13 +598,35 @@ impl Screen {
         self.refresh_opened();
     }
 
-    /// 眼下这一批屏上摆着的那几条样本。
+    /// 眼下这一批屏上摆着的那几条样本。**数的始终是整批**（照稿，见 [`samples_column`]）。
     #[must_use]
     pub fn samples(&self) -> Vec<Sample> {
         self.opened
             .as_ref()
             .map(|opened| opened.samples.clone())
             .unwrap_or_default()
+    }
+
+    /// 下钻着的那一组屏上摆着的那几条样本——**就地那一框**里的（[`drill_box`]）；没下钻时是空的。
+    #[must_use]
+    pub fn drilled_samples(&self) -> Vec<Sample> {
+        self.opened
+            .as_ref()
+            .map(|opened| opened.drilled_samples.clone())
+            .unwrap_or_default()
+    }
+
+    /// 二级眼下按哪个轴分。锁住的时候它就是锁着的那个轴（[`Parts::locked_axis`]）。
+    #[must_use]
+    pub fn axis(&self) -> Axis {
+        self.axis
+    }
+
+    /// 展开那一批的**细分**：各项、占比、哪几项已经就地裁完、还剩多少条、锁没锁住轴。
+    /// 一批都没展开时是 `None`。
+    #[must_use]
+    pub fn breakdown(&self) -> Option<&Breakdown> {
+        self.opened.as_ref().map(|opened| &opened.breakdown)
     }
 
     /// 把展开那一批算出来的三样对齐到眼下的作用范围上。**算过的不再算。**
@@ -573,6 +640,7 @@ impl Screen {
             scope,
             axis: self.axis,
             seed: self.seed,
+            parts: self.parts.revision(),
         };
         if self.opened.as_ref().map(|opened| &opened.basis) == Some(&basis) {
             return;
@@ -580,10 +648,21 @@ impl Screen {
         // 二级那张表数的是**整批**：下钻只是把整批操作收窄，那张表本身不该跟着只剩一行
         // ——不然下钻一次就再也回不去了，屏上看不见还有哪些组。
         let whole = Scope::whole(basis.scope.shape.clone());
+        let drilled = self.queue.drill(&whole, basis.axis);
+        let breakdown = breakdown(&drilled, &self.parts, &basis.scope.shape, basis.axis);
+        // 下钻着的那一组的样本只在下钻之后要——就地那一框里摆的是它。
+        let drilled_samples = if basis.scope.drill.is_some() {
+            self.queue.sample(&basis.scope, basis.seed, DRILL_SAMPLES)
+        } else {
+            Vec::new()
+        };
         self.opened = Some(Opened {
             count: self.queue.count(&basis.scope),
-            drill: self.queue.drill(&whole, basis.axis),
-            samples: self.queue.sample(&basis.scope, basis.seed, SAMPLES),
+            breakdown,
+            // **右栏那一栏始终数整批**（照稿）：下钻收窄的是整批操作的作用范围，
+            // 而「这一批长什么样」那句话不该跟着只剩一组。
+            samples: self.queue.sample(&whole, basis.seed, SAMPLES),
+            drilled_samples,
             basis,
         });
     }
@@ -690,6 +769,16 @@ impl Screen {
             Ok(records) => self.records = records,
             Err(error) => self.error = Some(format!("沉淀库读不动：{error}")),
         }
+        // **撤没撤以沉淀库为准**：撤掉的那一批对应的那一部分当场作废——那一项重新点得动，
+        // 细分方式跟着解开。自己另记一份撤销状态的话，命令行撤的那几批这里永远不知道。
+        let 在册: std::collections::BTreeSet<i64> = self
+            .records
+            .iter()
+            .filter(|batch| !batch.undone())
+            .map(|batch| batch.id)
+            .collect();
+        self.parts.keep(|batch| 在册.contains(&batch));
+        self.refresh_opened();
     }
 
     /// **裁决记录**那一块：落过的每一批裁决，新的在前。
@@ -1242,6 +1331,8 @@ impl Screen {
         let 圆角 = tokens.radius.large;
         let 选择器 = format!("命令行上是 `--shape '{}'`", batch.shape.selector());
         let 色 = look::tier_color(batch.tier(), ui.visuals());
+        // 这一批已经就地裁掉多少条（[`Parts::done_in`]）：卡头第二行那句「已处理 N 条」说的是它。
+        let 裁掉的 = self.parts.done_in(&batch.shape);
         let mut hit = false;
         let 整张 = look::barred_card(ui, 色, look::BarEdge::Left, |ui| {
             // 悬停那一层要垫在字底下：先占位置，量完卡头再填。
@@ -1252,7 +1343,7 @@ impl Screen {
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.style_mut().interaction.selectable_labels = false;
-                    batch_head(ui, batch, open);
+                    batch_head(ui, batch, open, 裁掉的);
                 });
             let 头响应 = ui.interact(
                 头.response.rect,
@@ -1300,23 +1391,30 @@ impl Screen {
 
     /// 展开之后那一块（设计稿 `.bbody`）：判定依据、左「细分」右「随机样本」两栏、按钮一排。
     ///
-    /// 判定依据那一框画「判定依据：」加 [`Batch::why`] 原话，不另编句子（拿主意的人 2026-09-15 定）。「细分」那一栏照稿换了样子，
-    /// **下钻的意思照旧**：点一组就把整批操作收窄到那一组上，按钮上的数跟着变（就地那一框与占比条是票
-    /// `gui-looks-like-the-design/19` 的事）。能整批通过的那一批主按钮是「全部通过（N 条）」；不能的主按钮是「逐条处理」、
-    /// 不给「全部通过」，「全部拒绝」照留（拿主意的人 2026-09-15 定）。
+    /// 判定依据那一框画「判定依据：」加 [`Batch::why`] 原话，不另编句子（拿主意的人 2026-09-15 定）。
+    /// 能整批通过的那一批主按钮是「全部通过（N 条）」；不能的主按钮是「逐条处理」、不给「全部通过」，
+    /// 「全部拒绝」照留（拿主意的人 2026-09-15 定）。
+    ///
+    /// **底下那一排始终作用于整批**（票 `gui-looks-like-the-design/19`，照稿）：下钻要落的那两下摆在
+    /// 就地那一框里（[`drill_box`]），这一排说的是**剩下的部分**——已经就地裁掉一部分之后那两颗改写
+    /// 「通过剩余的 N 条」「拒绝剩余的 N 条」，N 是核心库给的 [`Breakdown::left`]。
+    /// 两处各作用于一层，正是「每一层都能整批过或整批拒」那句话的落点。
     fn opened_card(&mut self, ui: &mut egui::Ui, site: &mut Site, batch: &Batch, 选择器: &str) {
         let Some(opened) = self.opened.clone() else {
             return;
         };
+        // 下钻着的那一组（就地那一框那两颗作用在它上面）与整批（底下那一排作用在它上面）。
         let scope = opened.basis.scope.clone();
+        let whole = Scope::whole(batch.shape.clone());
         let tokens = Tokens::builtin();
         let palette = look::palette(ui);
         let 线宽 = tokens.layout.control_stroke;
         let [上, 左右, 下] = tokens.space.batch_body_padding;
         let 缝 = tokens.space.batch_body_gap;
-        let count = opened.count;
+        let 剩下 = opened.breakdown.left;
+        let 裁过一部分 = opened.breakdown.partly_done();
         let passable = batch.passable();
-        let (axis, 下钻着) = (self.axis, self.drill.clone());
+        let 色 = look::tier_color(batch.tier(), ui.visuals());
         // 画的时候不改自己：按下去的那一下先记下来，画完再动。
         let mut 按下 = BodyPressed::default();
         egui::Frame::new()
@@ -1368,7 +1466,7 @@ impl Screen {
                         Layout::top_down(Align::Min),
                         |ui| {
                             ui.set_width(左宽);
-                            drill_column(ui, &opened.drill, axis, 下钻着.as_deref(), &mut 按下);
+                            drill_column(ui, &opened, 色, &mut 按下);
                         },
                     );
                     ui.allocate_ui_with_layout(
@@ -1388,11 +1486,12 @@ impl Screen {
                                 .scope(|ui| {
                                     look::primary_button(ui.visuals_mut());
                                     ui.add_enabled(
-                                        count > 0,
-                                        egui::Button::new(format!(
-                                            "全部通过（{} 条）",
-                                            thousands(count)
-                                        )),
+                                        剩下 > 0,
+                                        egui::Button::new(if 裁过一部分 {
+                                            format!("通过剩余的 {} 条", thousands(剩下))
+                                        } else {
+                                            format!("全部通过（{} 条）", thousands(剩下))
+                                        }),
                                     )
                                 })
                                 .inner
@@ -1418,7 +1517,14 @@ impl Screen {
                             按下.reject = ui
                                 .scope(|ui| {
                                     look::warn_button(ui.visuals_mut());
-                                    ui.add_enabled(count > 0, egui::Button::new("全部拒绝"))
+                                    ui.add_enabled(
+                                        剩下 > 0,
+                                        egui::Button::new(if 裁过一部分 {
+                                            format!("拒绝剩余的 {} 条", thousands(剩下))
+                                        } else {
+                                            "全部拒绝".to_owned()
+                                        }),
+                                    )
                                 })
                                 .inner
                                 .on_hover_text(
@@ -1428,11 +1534,6 @@ impl Screen {
                         });
                     });
                 });
-                // 「作用范围」只在下钻之后说（作用范围不再是整批）；没下钻时照稿不画。
-                if 下钻着.is_some() {
-                    ui.add_space(look::step(1));
-                    look::help(ui, &format!("作用范围：{}", scope.label()));
-                }
             });
         if let Some(axis) = 按下.axis {
             self.set_axis(axis);
@@ -1446,14 +1547,28 @@ impl Screen {
         if 按下.resample {
             self.resample();
         }
+        // **底下那一排作用于整批，就地那一框里那两颗只作用于下钻着的那一组**：
+        // 「剩下的部分仍旧整批处理得动」就是这么成立的。
         if 按下.pass {
-            self.pass(site, &scope);
-        }
-        if 按下.one_by_one {
-            self.show_one_by_one();
+            self.pass(site, &whole);
         }
         if 按下.reject {
+            self.reject(site, &whole);
+        }
+        if 按下.drilled_pass {
+            self.pass(site, &scope);
+        }
+        if 按下.drilled_reject {
             self.reject(site, &scope);
+        }
+        // 底下那一排说的是**整批剩下的**，所以先把下钻那一层放掉再逐条看；
+        // 就地那一框里那一颗逐条看的正是下钻着的那一组。
+        if 按下.one_by_one {
+            self.drill_out();
+            self.show_one_by_one();
+        }
+        if 按下.drilled_one_by_one {
+            self.show_one_by_one();
         }
     }
 
@@ -2365,6 +2480,7 @@ impl Screen {
             scope,
             &Draft {
                 pick: Some(1),
+                note: Self::scope_note(scope),
                 ..Draft::default()
             },
         );
@@ -2377,9 +2493,20 @@ impl Screen {
             scope,
             &Draft {
                 unknown: true,
+                note: Self::scope_note(scope),
                 ..Draft::default()
             },
         );
+    }
+
+    /// 下钻那一层落下时记在那一批裁决上的**那一句为什么**：作用范围原话
+    /// （[`Scope::label`]，形如「MAME / gameboy.xml / 含头 · 按目录 GB/汉化/」）。
+    ///
+    /// **裁决记录里那一行要认得出这是哪一组**（设计稿 `passPart` 给它的 label 带着同一段）：
+    /// 挡住换轴那句话让人「先在裁决记录中撤销那几批」，而记录上只写「第 N 批裁决 · M 条」
+    /// 的话，人根本挑不出该撤哪几批。整批那一层不写——那一行本来就是整批，没有可补的。
+    fn scope_note(scope: &Scope) -> Option<String> {
+        scope.drill.is_some().then(|| scope.label())
     }
 
     /// 给一个范围排一次计划。**整批操作按下去走的就是它。**
@@ -2392,7 +2519,13 @@ impl Screen {
         }) {
             Ok(plan) => {
                 self.error = None;
-                self.pending = Some(self.hold(plan, Verdicted::of(draft)));
+                // 带下钻那一层的才记成**一部分**：整批那一层落下之后这一批整个从队列里消失，
+                // 屏上没有「剩下的部分」可说（核心库 [`Parts::record`] 也照这条拒下）。
+                // 条数趁现在数——落下之后这一组就空了，再数是零。
+                // 条数趁现在数——落下之后这一组就空了，再数是零。**记不记由核心库说**
+                // （[`Parts::record`] 对整批那一层一个字都不记），这里一律把范围交下去。
+                let drilled = Some((scope.clone(), self.queue.count(scope)));
+                self.pending = Some(self.hold(plan, Verdicted::of(draft), drilled));
             }
             Err(message) => self.error = Some(message),
         }
@@ -2408,18 +2541,20 @@ impl Screen {
         }) {
             Ok(plan) => {
                 self.error = None;
-                self.pending = Some(self.hold(plan, Verdicted::of(draft)));
+                self.pending = Some(self.hold(plan, Verdicted::of(draft), None));
             }
             Err(message) => self.error = Some(message),
         }
     }
 
-    /// 把刚排出来的计划挂起来，**记下它是照着哪一版队列排的**。
-    fn hold(&self, plan: Plan, kind: Verdicted) -> Pending {
+    /// 把刚排出来的计划挂起来，**记下它是照着哪一版队列排的**，以及它作用在下钻出来的
+    /// 哪一组上、那一组当时有多少条。
+    fn hold(&self, plan: Plan, kind: Verdicted, drilled: Option<(Scope, u64)>) -> Pending {
         Pending {
             plan,
             revision: self.queue.revision(),
             kind,
+            drilled,
         }
     }
 
@@ -2463,7 +2598,7 @@ impl Screen {
             /// 「落下」。
             Apply,
         }
-        let (plan, kind) = (pending.plan, pending.kind);
+        let (plan, kind, drilled) = (pending.plan, pending.kind, pending.drilled);
         // **一层弹层**（[`dialog`]）：说明是那句总账，内容区是明细，页脚「取消 ｜ 落下」。
         // 明细不再自己套一层滚动区——弹层的内容区本来就滚得动，页脚一直在屏上。
         let note = format!(
@@ -2513,13 +2648,14 @@ impl Screen {
                 }
             });
         match shown.pressed {
-            Some(Pressed::Apply) => self.apply_plan(site, &plan, kind),
+            Some(Pressed::Apply) => self.apply_plan(site, &plan, kind, drilled),
             Some(Pressed::Cancel) => {}
             None => {
                 self.pending = Some(Pending {
                     plan,
                     revision: pending.revision,
                     kind,
+                    drilled,
                 });
             }
         }
@@ -2528,16 +2664,34 @@ impl Screen {
     /// 落下等着的那份计划。**模态框里「落下」按下去走的就是它。**
     pub fn commit(&mut self, site: &mut Site) {
         if let Some(pending) = self.pending.take() {
-            self.apply_plan(site, &pending.plan, pending.kind);
+            self.apply_plan(site, &pending.plan, pending.kind, pending.drilled);
         }
     }
 
     /// 真的落下：写沉淀库、当场在中立库里兑现、把裁完的从队列里去掉。
-    fn apply_plan(&mut self, site: &mut Site, plan: &Plan, kind: Verdicted) {
+    ///
+    /// 落的是**下钻出来的那一组**时还多一步：把这一部分记进 [`Parts`]。不记的话它那些条
+    /// 一落下就从队列里消失，屏上那一项跟着不见——人只会以为自己刚才什么也没做。
+    fn apply_plan(
+        &mut self,
+        site: &mut Site,
+        plan: &Plan,
+        kind: Verdicted,
+        drilled: Option<(Scope, u64)>,
+    ) {
         match self.queue.apply(&mut site.catalog, &mut site.store, plan) {
             Ok(applied) => {
                 self.error = None;
                 self.receipt = Some(Receipt::applied(kind, &applied));
+                if let Some((scope, 条数)) = drilled
+                    && let Some(kind) = kind.part_kind()
+                    // **记不记由核心库说**：整批那一层它一个字都不记，交回 `false`。
+                    && self.parts.record(scope, 条数, kind, applied.batch)
+                {
+                    // 这一组裁完了，就地那一框跟着收起：作用范围回到整批，
+                    // 底下那两颗按钮写的就是「剩余的 N 条」。
+                    self.drill = None;
+                }
                 self.applied = Some(applied);
                 self.undone = None;
                 self.changed = true;
@@ -2748,6 +2902,17 @@ struct Pending {
     revision: u64,
     /// 这份计划裁成哪一类：落下之后提示条上说「已通过」还是「已拒绝」（[`Verdicted`]）。
     kind: Verdicted,
+    /// 这份计划作用在**下钻出来的哪一组**上，连那一组当时有多少条；整批那一层与逐条那一路
+    /// 都是 `None`。落下之后它才成为一**部分**（[`Parts`]）——在那之前它只是一组。
+    ///
+    /// **落下之后要记一条**（[`Parts`]）：那一项从此标着「已通过」，剩下的部分照旧整批
+    /// 处理得动。计划书开着的那段时间里人可以换个下钻，所以这一格跟着计划走，
+    /// 不去落下的那一刻读屏上眼下的作用范围。
+    ///
+    /// **条数在这儿一起记下**，不拿落下之后那笔账里的「落了几条」当它：几个变体共享同一条
+    /// **内容锚**（几份**重复拷贝**）时落成的是同一条裁决，那个数会小于这一组的变体数——而屏上
+    /// 那一项写的、占比条量的都是**变体**有多少条。
+    drilled: Option<(Scope, u64)>,
 }
 
 /// 一次裁决裁成哪一类，只为提示条上那一句用（设计稿 `toast(\`已${kind} …\`)`）。**判断在草稿里**（[`Draft`]），这里只折成词。
@@ -2774,11 +2939,23 @@ impl Verdicted {
     }
 
     /// 提示条上那个动词。
+    ///
+    /// 前两档**从核心库取**（[`PartKind::label`]）：屏上那一项旁边那枚标签写的是同两个词，
+    /// 各存一份字面量的话，改一处另一处就跟着说岔了。
     fn word(self) -> &'static str {
+        match self.part_kind() {
+            Some(kind) => kind.label(),
+            None => "已裁决",
+        }
+    }
+
+    /// 折成**一部分**裁成了什么（[`PartKind`]）；「手工指定」那一档折不出来——
+    /// 它天生是逐条的动作，作用不到一整组上。
+    fn part_kind(self) -> Option<PartKind> {
         match self {
-            Self::Passed => "已通过",
-            Self::Rejected => "已拒绝",
-            Self::Decided => "已裁决",
+            Self::Passed => Some(PartKind::Passed),
+            Self::Rejected => Some(PartKind::Rejected),
+            Self::Decided => None,
         }
     }
 }
@@ -2852,7 +3029,7 @@ impl Receipt {
     }
 }
 
-/// 展开那一批算出来的三样是**照着什么**算的。四样凑齐才认得出「这一份还作数吗」。
+/// 展开那一批算出来的那几样是**照着什么**算的。五样凑齐才认得出「这一份还作数吗」。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Basis {
     /// 队列换过几次样子（[`Queue::revision`]）：裁完一批、撤回一批、换个选择器它都会变。
@@ -2863,22 +3040,33 @@ struct Basis {
     axis: Axis,
     /// 样本是第几组。
     seed: u64,
+    /// 已经裁完的那几部分换过几次样子（[`Parts::revision`]）：细分那一栏上哪几项标着
+    /// 「已通过」由它定，而落下一部分、撤掉一部分都不必然换掉队列那一版
+    /// （撤销之后队列重列过，落下之后也是——但这一格自己变，缓的那份才不会漏掉）。
+    parts: u64,
 }
 
-/// 展开那一批算出来的三样：条数、二级分组、随机样本。
+/// 展开那一批算出来的那几样：条数、细分那一栏、两处随机样本。
 ///
-/// **三样一起缓**，因为它们出自同一次「走一遍这一批」；分开缓的话，谁先谁后失效
-/// 会让屏上那三样各说各的——「全部通过（3,053 条）」底下摆的是另一批的样本。
+/// **一起缓**，因为它们出自同一次「走一遍这一批」；分开缓的话，谁先谁后失效
+/// 会让屏上那几样各说各的——「全部通过（3,053 条）」底下摆的是另一批的样本。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Opened {
     /// 这一份是照着什么算出来的。
     basis: Basis,
-    /// 作用范围里有多少条。
+    /// **下钻着的那一组**有多少条——就地那一框里写的、那两颗按钮上写的都是它。
+    /// 没下钻时它等于 [`Breakdown::left`]（两边都是「这一批还剩多少」）。
     count: u64,
-    /// **整批**在这个轴上的二级分组。下钻只是把整批操作收窄，这张表照旧数整批。
-    drill: Drill,
-    /// 作用范围里的随机样本。
+    /// **细分那一栏画的就是它**：各项、占比、哪几项已经就地裁完、还剩多少条、锁没锁住轴，
+    /// 连「加不加得起来」那句话。
+    breakdown: Breakdown,
+    /// **整批**的随机样本：右栏那一栏画的。下钻不收窄它——照稿，右栏说的始终是这一批。
     samples: Vec<Sample>,
+    /// **下钻着的那一组**的样本：就地那一框里摆的。没下钻时是空的。
+    ///
+    /// 不叫 `part_samples`：词表**批**那一条里的**一部分**专指已经整批裁过的那一组，
+    /// 而这几条样本是给人看**还没裁**的那一组的。
+    drilled_samples: Vec<Sample>,
 }
 
 /// **一堆来自同一次匹配的字段**：条目号、依据、那几个值，连底下那两颗按钮。
@@ -3326,7 +3514,12 @@ fn bare_box(ui: &mut egui::Ui, 账: &Coverage) -> bool {
 /// 两行字（拿主意的人 2026-09-15 定）：第一行照**依据形状**各段排——有候选的是「源 / DAT / 哈希口径 / 候选数」，DAT 那一段
 /// 等宽；一条候选都没有的是核心库那半截（`Shape::label`）。第二行放那句共同依据：有候选的是各条逐字一样的那一段
 /// （[`Batch::evidence`]），一条候选都没有的是「为什么没定下来」；凑不出来就只有一行。
-fn batch_head(ui: &mut egui::Ui, batch: &Batch, open: bool) {
+///
+/// **就地裁掉过一部分的那一批，第二行先说那件事**：「已处理 N 条，剩余 M 条 · 」再接那句共同依据
+/// （`裁掉的` 是核心库的 [`Parts::done_in`]，票 `gui-looks-like-the-design/19`）。左边那个大数**本来就是剩余**
+/// ——它数的是眼下队列里这一批还有多少条，裁掉的那些一落下就退出了队列。不说这一句的话，屏上那个数
+/// 会毫无来由地变小。
+fn batch_head(ui: &mut egui::Ui, batch: &Batch, open: bool, 裁掉的: u64) {
     let tokens = Tokens::builtin();
     let palette = look::palette(ui);
     let 形状字号 = look::font_size(ui.ctx(), tokens.font.size_small_plus);
@@ -3334,6 +3527,19 @@ fn batch_head(ui: &mut egui::Ui, batch: &Batch, open: bool) {
     let 第二行 = match &batch.shape {
         Shape::Candidates { .. } => batch.evidence.clone(),
         Shape::Bare { reason, .. } => reason.clone(),
+    };
+    let 第二行 = if 裁掉的 > 0 {
+        let 前缀 = format!(
+            "已处理 {} 条，剩余 {} 条",
+            thousands(裁掉的),
+            thousands(batch.count),
+        );
+        Some(match 第二行 {
+            Some(那句) => format!("{前缀} · {那句}"),
+            None => 前缀,
+        })
+    } else {
+        第二行
     };
     let 量 = |字体: egui::FontId| {
         ui.painter()
@@ -3460,47 +3666,77 @@ fn chevron(ui: &mut egui::Ui, open: bool) {
 struct BodyPressed {
     /// 「细分」那一排换了轴。
     axis: Option<Axis>,
-    /// 「回到整批」。
+    /// 「返回整批」。
     whole: bool,
     /// 点了「细分」底下的哪一组。
     into: Option<String>,
     /// 「换一组」。
     resample: bool,
-    /// 「全部通过（N 条）」。
+    /// 底下那一排的「全部通过（N 条）」／「通过剩余的 N 条」。**作用于整批**。
     pass: bool,
-    /// 「逐条处理」。
+    /// 底下那一排的「逐条处理」：逐条看**这一批剩下的**。
     one_by_one: bool,
-    /// 「全部拒绝」。
+    /// 就地那一框里的「逐条处理」：逐条看**下钻着的那一组**。
+    ///
+    /// 与上面那一格分开，不是图清楚——**合着用会被覆盖掉**。这一框先画、底下那一排后画，
+    /// 而那一排是平赋值（`= …clicked()`）：框里按下的那一下会被后画的那一颗抹成 `false`，
+    /// 按钮从此是死的。两格各管一处，顺带把「逐条看哪一层」也分开了。
+    drilled_one_by_one: bool,
+    /// 底下那一排的「全部拒绝」／「拒绝剩余的 N 条」。**作用于整批**。
     reject: bool,
+    /// 就地那一框里的「通过这 N 条」。**只作用于下钻着的那一组**。
+    drilled_pass: bool,
+    /// 就地那一框里的「拒绝这 N 条」。**只作用于下钻着的那一组**。
+    drilled_reject: bool,
 }
 
-/// 展开之后左边那一栏（设计稿 `distHTML`）：「细分」、三个轴那一排分段开关、这个轴上各组一行（组名等宽、条数靠右）。
+/// 展开之后左边那一栏（设计稿 `distHTML`）：「细分」、三个轴那一排分段开关、这个轴上各项一行
+/// （项名等宽、条数靠右，一行底下一条**占比条**），点一项就在那一行底下**就地**开一框（[`drill_box`]），
+/// 末尾一句照稿的说明。
 ///
-/// **样子照稿、意思照旧**（拿主意的人 2026-09-15 定）：点一组就是下钻，整批操作收窄到那一组上，再点一次回到整批；
-/// 下钻着的那一组垫强调浅底。占比条与就地那一框是票 `gui-looks-like-the-design/19` 的事。
-fn drill_column(
-    ui: &mut egui::Ui,
-    drilled: &Drill,
-    axis: Axis,
-    on: Option<&str>,
-    pressed: &mut BodyPressed,
-) {
+/// 各项、占比与「哪几项已经裁完」都由核心库算（[`Breakdown`]）：占比条的分母是这一批**本来**多少条，
+/// 不是眼下还剩多少——拿剩下的当分母，裁掉一项之后余下那几项的条会一起变长，而它们一条都没变。
+///
+/// **裁完的那几项照旧在栏上**：项名划一道删除线、点不动，旁边一枚「已通过」或「已拒绝」。那些条一落下
+/// 就退出了队列，不记着的话那一行当场消失——人只会以为自己刚才什么也没做。
+///
+/// **处理过一部分之后那一排换不动轴**：两套切法会重叠，屏上的数当场变成假话（[`Breakdown::axis_refusal`]
+/// 那一句画在那一排底下）。撤掉那几批就解开。
+///
+/// **下钻不再收窄底下那一排按钮**（票 `gui-looks-like-the-design/19`，照稿）：这一层要落的那两下摆在就地
+/// 那一框里，底下那一排说的始终是「剩下的部分」。
+fn drill_column(ui: &mut egui::Ui, opened: &Opened, 色: egui::Color32, pressed: &mut BodyPressed) {
     let tokens = Tokens::builtin();
     let palette = look::palette(ui);
+    let axis = opened.basis.axis;
+    let 细分 = &opened.breakdown;
+    let 下钻着 = opened
+        .basis
+        .scope
+        .drill
+        .as_ref()
+        .map(|(_, label)| label.as_str());
+    let 挡住 = 细分.axis_refusal();
     ui.style_mut().interaction.selectable_labels = false;
     ui.horizontal(|ui| {
         look::section(ui, "细分");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let 各轴 = Axis::ALL.map(|one| (one, one.label()));
-            if let Some(换成) = look::segmented(ui, &各轴, axis)
+            // 挡住的时候只有眼下这一颗还按得动：另两颗按下去会换出一套重叠的切法。
+            if let Some(换成) =
+                look::segmented_where(ui, &各轴, axis, |one| 挡住.is_none() || one == axis)
                 && 换成 != axis
             {
                 pressed.axis = Some(换成);
             }
         });
     });
+    if let Some(那一句) = &挡住 {
+        ui.add_space(look::step(1));
+        look::help(ui, 那一句);
+    }
     ui.add_space(look::step(1));
-    if drilled.rows.is_empty() {
+    if 细分.rows.is_empty() {
         look::help(ui, empty_axis(axis));
     }
     let 字号 = look::font_size(ui.ctx(), tokens.font.size_caption_plus);
@@ -3513,16 +3749,42 @@ fn drill_column(
         )
         .size()
         .y;
-    for row in drilled.rows.iter().take(TOP) {
+    // **裁完的那几项一定摆出来**：排第几由条数定，而「我刚做过那一下」不该因为它碰巧是一小项
+    // 就整个看不见——那时屏上只剩卡头那句「已处理 N 条」，人找不到它落在哪一项上。
+    let 摆出来: Vec<&Slice> = 细分
+        .rows
+        .iter()
+        .take(TOP)
+        .chain(细分.rows.iter().skip(TOP).filter(|row| row.done.is_some()))
+        .collect();
+    for row in &摆出来 {
         let 名 = if row.label.is_empty() {
             "（主库根）"
         } else {
             row.label.as_str()
         };
-        let 是它 = on == Some(row.label.as_str());
-        let (行, 响应) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 行高), egui::Sense::click());
-        if 是它 || 响应.hovered() {
+        let 是它 = 下钻着 == Some(row.label.as_str());
+        let 裁过 = row.done;
+        // **裁干净了才点不动**：裁过却还剩着的那一项（少见，有几条落不下去）照旧点得进去，
+        // 把剩下的几条再裁一次。
+        let 裁干净了 = row.left == 0;
+        // **带标签那一行按标签那么高**：那枚标签固定 `tag-height`，比等宽字那一行高
+        // 一截，照字行高分配的话它会上下串到占比条与上一行上（设计稿那张 grid 的行高
+        // 本来也是被标签撑开的）。
+        let 这一行的高 = if 裁过.is_some() {
+            行高.max(tokens.layout.tag_height)
+        } else {
+            行高
+        };
+        let (行, 响应) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), 这一行的高),
+            if 裁干净了 {
+                egui::Sense::hover()
+            } else {
+                egui::Sense::click()
+            },
+        );
+        if 是它 || (响应.hovered() && !裁干净了) {
             ui.painter().rect_filled(
                 行.expand2(egui::vec2(look::step(0), tokens.space.dist_row_gap / 2.0)),
                 tokens.radius.small,
@@ -3545,57 +3807,202 @@ fn drill_column(
                 .size(字号)
                 .color(palette.ink_2),
         );
+        if let Some(kind) = 裁过 {
+            look::inline_tag(&mut 这一行, kind.label());
+        }
         这一行.with_layout(Layout::left_to_right(Align::Center), |ui| {
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(名)
-                        .family(egui::FontFamily::Monospace)
-                        .size(字号)
-                        .color(palette.accent_ink)
-                        .underline(),
-                )
-                .truncate(),
-            );
+            let 字 = egui::RichText::new(名)
+                .family(egui::FontFamily::Monospace)
+                .size(字号);
+            // 划删除线的是**裁干净了**的那几项；裁过还剩着的照旧是条点得动的链接，
+            // 「裁过」那件事由旁边那枚标签说。
+            let 字 = if 裁干净了 {
+                字.color(palette.ink_3).strikethrough()
+            } else {
+                字.color(palette.accent_ink).underline()
+            };
+            ui.add(egui::Label::new(字).truncate());
         });
-        if 响应
-            .on_hover_text("下钻：只看这一组，整批操作也只作用于它；再点一次回到整批")
-            .clicked()
-        {
+        // 裁干净那一行分的是 `Sense::hover`，`clicked()` 在它上面永远是假——两支于是
+        // 走同一条路，只有悬停那句话不一样。
+        let 悬停 = match 裁过.filter(|_| 裁干净了) {
+            Some(kind) => format!(
+                "这一部分{}了，落成了一批裁决——在裁决记录里撤得掉，撤掉之后它回到队列里。",
+                kind.verb(),
+            ),
+            None => "下钻：只看这一组，就在这一层整批通过或拒绝；再点一次返回整批。\
+                     剩下的照旧整批处理得动。"
+                .to_owned(),
+        };
+        if 响应.on_hover_text(悬停).clicked() {
             pressed.into = Some(row.label.clone());
+        }
+        // 占比条紧贴在这一行底下（设计稿 `.dist .b` 的 `margin-top:-3px` 把行距吃掉条那么高）。
+        ui.add_space(tokens.space.dist_row_gap - tokens.layout.dist_bar);
+        share_bar(ui, row.share(细分.whole), 色);
+        if 是它 {
+            drill_box(ui, opened, pressed);
         }
         ui.add_space(tokens.space.dist_row_gap);
     }
-    if drilled.rows.len() > TOP {
-        look::help(
-            ui,
-            &format!("……另有 {} 组没列", thousands_len(drilled.rows.len() - TOP)),
-        );
-    }
-    // **加不加得起来要说出口**：只有按目录那个轴一条只落一个组。
-    if !drilled.adds_up() {
+    if 细分.rows.len() > 摆出来.len() {
         look::help(
             ui,
             &format!(
-                "这个轴上一条能落进好几组，所以各组加起来 {} 大过这一批的 {} 条；\
-                 另有 {} 条一组都没落进。按目录那个轴是分得干净的。",
-                thousands(drilled.rows.iter().map(|row| row.count).sum::<u64>()),
-                thousands(drilled.total),
-                thousands(drilled.ungrouped),
+                "……另有 {} 项没列",
+                thousands_len(细分.rows.len() - 摆出来.len())
             ),
         );
     }
-    if on.is_some() && look::small_ghost_button(ui, "回到整批").clicked() {
-        pressed.whole = true;
+    // **加不加得起来要说出口**：只有按目录那个轴一条只落一个组。话由核心库说
+    // （[`Breakdown::tally_note`]）——它数的正是屏上这几项，裁掉一部分之后两边照旧对得上。
+    if let Some(那一句) = 细分.tally_note() {
+        look::help(ui, &那一句);
+    }
+    // 稿上这一句写的是「某一部分 / 这一部分」；词表**批**那一条把**一部分**定成了
+    // 「已经整批裁过的那一组」，而这句说的是还没裁的，所以照词表改口叫**组**。
+    look::help(
+        ui,
+        "问题通常集中在某一组。点一项只看这一组，并在这一层整批通过或拒绝；剩下的仍可整批处理。",
+    );
+}
+
+/// 一项底下那条**占比条**（设计稿 `.dist .b`）：凹陷底的槽、左边填 `share` 那么长的一截，
+/// 高 `dist-bar`、小圆角，填的那一截取这一批那一档的色、淡到 `dist-bar-opacity`。
+///
+/// **它是那一行的第二遍表达**：条数已经写在右边了，这条只为「一眼看出问题集中在哪一项」——
+/// 所以它的分母是整批，各项的长短之间才比得出来。
+fn share_bar(ui: &mut egui::Ui, share: f64, 色: egui::Color32) {
+    let tokens = Tokens::builtin();
+    let palette = look::palette(ui);
+    let (槽, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), tokens.layout.dist_bar),
+        egui::Sense::hover(),
+    );
+    // 圆角取 `legend-swatch-radius`（2）：稿上 `.dist .b` 与图例那一小块写的是同一个 2px，
+    // `radius.small` 是 4，语义上不是同一格。
+    let 圆角 = tokens.layout.legend_swatch_radius;
+    ui.painter().rect_filled(槽, 圆角, palette.sunken);
+    #[allow(clippy::cast_possible_truncation)]
+    let 长 = (槽.width() * share.clamp(0.0, 1.0) as f32).max(0.0);
+    if 长 > 0.0 {
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(槽.min, egui::vec2(长, 槽.height())),
+            圆角,
+            色.gamma_multiply(tokens.mix.dist_bar_opacity),
+        );
     }
 }
 
-/// 展开之后右边那一栏（设计稿 `.bbody` 右栏）：「随机样本 N 条」、一颗小号幽灵「换一组」，底下每条一行：文件名（等宽）
-/// → 第一条候选，两头放不下就截断、悬停看全文。按下「换一组」返回 `true`。
+/// 下钻到某一项之后，**就地在那一行底下开的那一框**（设计稿 `.drill`）：描一圈强调色、底色是面板里
+/// 调进 `drill-tint` 那么些强调色、大圆角。头一排「只看：这一项」、这一部分多少条、一颗「返回整批」；
+/// 中间几条这一部分的样本；底下「通过这 N 条」「逐条处理」「拒绝这 N 条」。
+///
+/// **就地开在那一行底下**，不是另开一屏：人是顺着那一栏点下来的，看的是同一份分布，
+/// 换个地方摆就要在两处之间来回对「我点的是哪一项」。
+///
+/// **这一层落下的仍旧是一批裁决**：与底下那一排走同一条路（[`Screen::pass`] / [`Screen::reject`]），
+/// 照旧进裁决记录、照旧撤得掉——词表**批**那一条分开的两件事，屏上不另造第三种说法。
+fn drill_box(ui: &mut egui::Ui, opened: &Opened, pressed: &mut BodyPressed) {
+    let tokens = Tokens::builtin();
+    let palette = look::palette(ui);
+    let Some((_, label)) = &opened.basis.scope.drill else {
+        return;
+    };
+    let 名 = if label.is_empty() {
+        "（主库根）"
+    } else {
+        label.as_str()
+    };
+    let count = opened.count;
+    let [上下, 左右] = tokens.space.drill_padding;
+    ui.add_space(tokens.space.dist_row_gap);
+    egui::Frame::new()
+        .fill(
+            palette
+                .panel
+                .lerp_to_gamma(palette.accent, tokens.mix.drill_tint),
+        )
+        .stroke(egui::Stroke::new(
+            tokens.layout.control_stroke,
+            palette.accent,
+        ))
+        .corner_radius(tokens.radius.large)
+        .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = tokens.space.drill_gap;
+            // 照稿（`drillHTML` 头一行）：「只看：…」与条数挨着摆在左边，弹簧在条数之后，
+            // 「返回整批」贴右边。名字长了就截断，条数一个字都不许截。
+            ui.horizontal(|ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    pressed.whole = look::small_ghost_button(ui, "返回整批")
+                        .on_hover_text("把整批操作放回整批；已经落下的那几批不受影响。")
+                        .clicked();
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!("只看：{名}"))
+                                    .size(look::font_size(ui.ctx(), tokens.font.size_small))
+                                    .color(palette.ink),
+                            )
+                            .truncate(),
+                        );
+                        look::help(ui, &format!("{} 条", thousands(count)));
+                    });
+                });
+            });
+            sample_rows(ui, &opened.drilled_samples);
+            // 照稿这三颗是**小号**（`.btn.sm`）：这一框是插在细分那一栏中间的，
+            // 用默认那一档会把底下几项挤得太远。
+            ui.horizontal(|ui| {
+                look::small_buttons(ui, |ui| {
+                    pressed.drilled_pass = ui
+                        .scope(|ui| {
+                            look::primary_button(ui.visuals_mut());
+                            ui.add_enabled(
+                                count > 0,
+                                egui::Button::new(format!("通过这 {} 条", thousands(count))),
+                            )
+                        })
+                        .inner
+                        .on_hover_text(
+                            "只通过这一组：采用第一条候选。落下的仍旧是一批裁决，撤得回来。",
+                        )
+                        .clicked();
+                    pressed.drilled_one_by_one = ui
+                        .button("逐条处理")
+                        .on_hover_text("把队列收窄到这一组，一条一条看。")
+                        .clicked();
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        pressed.drilled_reject = ui
+                            .scope(|ui| {
+                                look::warn_button(ui.visuals_mut());
+                                ui.add_enabled(
+                                    count > 0,
+                                    egui::Button::new(format!("拒绝这 {} 条", thousands(count))),
+                                )
+                            })
+                            .inner
+                            .on_hover_text(
+                                "只拒绝这一组：记成「我看过了，认不出」。落下的仍旧是一批裁决，撤得回来。",
+                            )
+                            .clicked();
+                    });
+                });
+            });
+        });
+    ui.add_space(tokens.space.dist_row_gap);
+}
+
+/// 展开之后右边那一栏（设计稿 `.bbody` 右栏）：「随机样本 N 条」、一颗小号幽灵「换一组」，底下每条一行
+/// （[`sample_rows`]）。按下「换一组」返回 `true`。
+///
+/// **它数的始终是整批**（照稿）：下钻收窄的是整批操作的作用范围，而「这一批长什么样」那句话不跟着
+/// 只剩一组；下钻那一部分的样本摆在就地那一框里（[`drill_box`]）。
 ///
 /// 那颗叫「换一组」不叫稿上的「换一批」：词表**批**不拿来说样本（拿主意的人 2026-09-15 定）。
 fn samples_column(ui: &mut egui::Ui, samples: &[Sample]) -> bool {
-    let tokens = Tokens::builtin();
-    let palette = look::palette(ui);
     let mut 换 = false;
     ui.horizontal(|ui| {
         look::section(ui, &format!("随机样本 {} 条", samples.len()));
@@ -3603,6 +4010,28 @@ fn samples_column(ui: &mut egui::Ui, samples: &[Sample]) -> bool {
             换 = look::small_ghost_button(ui, "换一组").clicked();
         });
     });
+    sample_rows(ui, samples);
+    换
+}
+
+/// 样本那几行（设计稿 `.smp`）：一条一行——文件名（等宽）→ 第一条候选，两头放不下就截断、悬停看全文，
+/// 行与行之间一道虚线。
+///
+/// **右栏与就地那一框摆的是同一种行**：两处各画一遍的话，一处改了字号另一处不会跟着，
+/// 而它们是同一样东西的两处摆法。
+fn sample_rows(ui: &mut egui::Ui, samples: &[Sample]) {
+    // **行距由这一栏自己说了算**：行与行之间照稿只隔那一道虚线（间距在 `sample-row-padding`
+    // 里），而这几行可能摆在一块把纵向间距撑开过的容器里（就地那一框的 `drill-gap` 是 8）
+    // ——不按住的话样本之间会平白裂开一道缝。
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        sample_rows_inner(ui, samples);
+    });
+}
+
+fn sample_rows_inner(ui: &mut egui::Ui, samples: &[Sample]) {
+    let tokens = Tokens::builtin();
+    let palette = look::palette(ui);
     let 文件字号 = look::font_size(ui.ctx(), tokens.font.size_caption_plus);
     let 候选字号 = look::font_size(ui.ctx(), tokens.font.size_small);
     let 量 = |字体: egui::FontId| {
@@ -3668,7 +4097,6 @@ fn samples_column(ui: &mut egui::Ui, samples: &[Sample]) -> bool {
             );
         }
     }
-    换
 }
 
 /// 逐条那一屏一张候选卡片上要写的几样：画的时候从核心库那条候选里抄出来，不借着光标底下那一条（它借着队列）。
