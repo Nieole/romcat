@@ -3061,6 +3061,24 @@ pub struct WorkDetail {
 }
 
 impl WorkDetail {
+    /// 这一行**最高的那档置信度**：底下那些变体里最好的那一条候选（ADR-0002）；
+    /// 一条候选都没有时是 `None`。
+    ///
+    /// **与表上那一行（[`WorkRow::confidence`]）是同一条口径**，只是折的地方不同：那一支在
+    /// SQL 里折整张表（主列表一次几百行），这一支折**手上这一份**。要上色、要标档的地方
+    /// 从这两支里取，**不自己再 `match` 一遍候选**（ADR-0024；[`Confidence`] 那一条上
+    /// 逐字写着「屏上要上色的地方拿它，不自己 match」）。
+    ///
+    /// ⚠️ 它数的是 [`variants`](Self::variants) 那一份，而那一份**随当前筛选收窄**
+    /// ——与表上那一行看见的是同一批变体，所以两处说的是同一个数。
+    #[must_use]
+    pub fn confidence(&self) -> Option<Confidence> {
+        self.variants
+            .iter()
+            .filter_map(WorkVariant::confidence)
+            .min()
+    }
+
     /// 点开的是**认不出作品的那一行**时，它的**正题**；点开的是一个作品时是 `None`。
     ///
     /// 与主列表那一行（[`WorkRow::title`]）同一处剥：侧边详情头上写的，就是表上那一行主栏

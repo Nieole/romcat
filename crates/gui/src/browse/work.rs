@@ -310,6 +310,7 @@ impl Screen {
         match 卡片 {
             Some((key, CardPress::Prefer)) => self.prefer(site, &key),
             Some((key, CardPress::Restore)) => self.restore_rule(site, &key),
+            Some((key, CardPress::Split)) => self.open_split(site, &key),
             Some((key, CardPress::Reveal)) => self.reveal(site, &key),
             Some((_, CardPress::Adjust(第几处))) => self.adjust_shaping(site, 第几处),
             Some((key, CardPress::UndoShaping)) => self.undo_shaping(site, &key),
@@ -1408,6 +1409,15 @@ impl Screen {
                                         "只对这一个作品取元数据与媒体。按下去之前看得见要发多少请求、大概多久。",
                                     )
                                     .clicked();
+                                // **「合并…」照稿摆在这儿**（稿上夹在「加入合集…」与
+                                // 「在文件系统中打开」之间；收藏与合集那两颗归票 13，位置留着）。
+                                let 合并 = ui
+                                    .button(super::merge::MERGE_ONE)
+                                    .on_hover_text(
+                                        "把这个作品与别的作品合并成一个：第一步里搜出要并进来的那几个。\n\n\
+                                         只写入裁决记录，不会移动或修改任何文件。",
+                                    )
+                                    .clicked();
                                 let 打开 = ui
                                     .scope(|ui| {
                                         look::ghost_button(ui.visuals_mut());
@@ -1423,6 +1433,8 @@ impl Screen {
                                     Some(PageAction::EditMeta)
                                 } else if 刮削 {
                                     Some(PageAction::Scrape)
+                                } else if 合并 {
+                                    Some(PageAction::Merge)
                                 } else if 打开 {
                                     哪一个.map(PageAction::Reveal)
                                 } else {
@@ -1640,6 +1652,7 @@ impl Screen {
     fn apply_page(&mut self, site: &Site, action: PageAction) {
         match action {
             PageAction::EditMeta => self.begin_meta_edit(),
+            PageAction::Merge => self.open_merge_here(site),
             PageAction::Reveal(key) => self.reveal(site, &key),
             PageAction::ShowTab(tab) => {
                 if let Some(page) = self.page.as_mut() {
@@ -1954,6 +1967,13 @@ fn variant_card(
         |ui| {
             // 右往左摆：先摆的在最右（设计稿 `.vhead` 里「在文件系统中打开」排在最后）。
             let 打开 = ghost_small(ui, "在文件系统中打开").clicked();
+            // **「移出此作品…」照稿排在它前面**：合并的反向操作，同样一条裁决、撤得回来。
+            let 移出 = ghost_small(ui, super::merge::SPLIT)
+                .on_hover_text(
+                    "把这个变体从这个作品移出，放到新建的作品或另一个已有作品。\n\n\
+                     同样只写入裁决记录，可以在「待确认 → 裁决记录」中撤销。",
+                )
+                .clicked();
             let 挑得了 = !detail.is_preferred()
                 && !detail.siblings.is_empty()
                 && detail.work.is_some()
@@ -1994,6 +2014,8 @@ fn variant_card(
                 Some(CardPress::Restore)
             } else if 撤成型 {
                 Some(CardPress::UndoShaping)
+            } else if 移出 {
+                Some(CardPress::Split)
             } else if 打开 {
                 Some(CardPress::Reveal)
             } else {
@@ -3489,6 +3511,8 @@ enum PageAction {
     ShowTab(Tab),
     /// 「刮削此作品」：摊开刮削那一层弹层，范围就是这个作品底下那几个变体。
     Scrape,
+    /// 「合并…」：从这一个作品起头开合并向导。
+    Merge,
     /// 「在文件系统中打开」：这个变体在盘上所在的目录交给系统。
     Reveal(String),
 }
@@ -3500,6 +3524,8 @@ enum CardPress {
     Prefer,
     /// 「恢复规则选择」：撤掉这个作品在这个平台上的首选变体裁决。
     Restore,
+    /// 「移出此作品…」：摊开那一层弹层。
+    Split,
     /// 「在文件系统中打开」。
     Reveal,
     /// 「调整成型…」：开**成型纠正**那一层，说的是这一面上第几处存疑
