@@ -188,7 +188,7 @@ pub enum Exception {
 }
 
 impl Exception {
-    /// 存进库、也打给用户的那个词。
+    /// **存进库、命令行印出来**的那个词。
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -197,7 +197,20 @@ impl Exception {
         }
     }
 
-    /// 从词认回来。
+    /// **界面上写的**那个词（挂单 `Q818`，拿主意的人照设计稿定）：收入那一档屏上写「包含」。
+    ///
+    /// 与 [`Self::label`] 分开，走的是票 `gui-looks-like-the-design/21` 里前端格式那一条同样的路
+    /// （界面写「ES-DE」、适配器标识与库里存的值不动）：**库里存的那个词是键**，换它要动结构版本，
+    /// 而换来的只是一个更顺口的说法。两个词说的是同一件事，[`Self::from_label`] 照旧只认存进去的那一个。
+    #[must_use]
+    pub fn shown(self) -> &'static str {
+        match self {
+            Self::Include => "包含",
+            Self::Exclude => "排除",
+        }
+    }
+
+    /// 从词认回来。**认的是存进库的那个词**（[`Self::label`]），不是屏上写的那个。
     #[must_use]
     pub fn from_label(label: &str) -> Option<Self> {
         Some(match label {
@@ -222,6 +235,49 @@ pub struct ExceptionRow {
     pub note: Option<String>,
     /// 什么时候记下的（Unix 秒）。
     pub at: i64,
+}
+
+/// 一条例外**摆到屏上要的那几样**：例外自己，加上库里那个变体眼下是谁。
+///
+/// 它是一条**读出来的联查**，不是第二份例外：[`ExceptionRow`] 照旧是存下来的那一份，这里只在旁边
+/// 补上作品、平台与容量，好让手动例外那张表（票 `gui-looks-like-the-design/22`）写得出「作品、平台、体积、备注与时间」。
+///
+/// **库里眼下没有那个变体是常态，不是错**（盘没插、目录改了名、重新成型换了键的写法）：那时
+/// [`platform`](Self::platform) 与 [`bytes`](Self::bytes) 都是 `None`，例外照旧记着、不删
+/// （ADR-0016，见 `catalog::sublibrary` 模块文档「例外为什么不给变体挂外键」）。
+/// **容量不写 0**——「没有这一份」与「这一份是空的」不是一件事。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExceptionDetail {
+    /// 存下来的那一条。
+    pub row: ExceptionRow,
+    /// 这个变体属于**哪个作品**——`work` 表里那个名字，**身份不是显示用的字**。
+    ///
+    /// 识别还没认出作品、或者库里眼下没有这个变体时是 `None`。问「这个作品是不是已经有例外了」
+    /// 比的是它，不是 [`display`](Self::display)：两个同名的作品是真实存在的（`work` 表的 `name`
+    /// 上刻意没有 `UNIQUE`），拿屏上那串字比会把它们当成一个。
+    pub work: Option<String>,
+    /// **屏上主栏写的那个名字**：认出作品的写显示标题（`title::choose` 挑的，与浏览屏主列表、
+    /// 详情面板、导出同一处挑），认不出的写那个变体的**正题**（`WorkRow::title` 剥的那一个，
+    /// 与浏览屏主列表同一处剥）。
+    ///
+    /// **与 [`work`](Self::work) 分开两格**：那一格是身份、这一格是给人看的字。合成一格的话，
+    /// 第二趟把显示标题写回去就把身份冲掉了，而「这个作品有没有例外」正是要拿身份问的。
+    ///
+    /// 库里眼下没有这个变体（盘没插、目录改了名）时退回**变体的键**——那时剥正题要的主文件名
+    /// 也不在库里，而键至少指得准是哪一份。
+    pub display: String,
+    /// 平台；平台未知、或者库里眼下没有这个变体时是 `None`。
+    pub platform: Option<String>,
+    /// 容量（下界，ADR-0021）；**库里眼下没有这个变体时是 `None`**。
+    pub bytes: Option<u64>,
+}
+
+impl ExceptionDetail {
+    /// 库里眼下**没有**这个变体。屏上要说得出口：那一行的体积画不出来，不是 0。
+    #[must_use]
+    pub fn missing(&self) -> bool {
+        self.bytes.is_none()
+    }
 }
 
 /// 一个子库的**选择集**：规则打底，例外覆盖。

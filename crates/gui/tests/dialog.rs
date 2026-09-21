@@ -564,3 +564,83 @@ fn 内容比一屏长时内容区滚动而页脚不被顶出去() {
         "滚的是内容区，页脚却跟着动了",
     );
 }
+
+/// 这一帧画出来的字，一段一行。
+fn 屏上的字(帧: &egui::FullOutput) -> Vec<String> {
+    shared::画出来的字(帧)
+        .lines()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// 画一层弹层：`带槽` 为真时给上「标头那一排」与「页脚说明字」两个槽，否则一个都不给。
+/// 交回这一帧与这一层连边框画在哪儿。
+fn 画一层带不带槽(ctx: &egui::Context, 带槽: bool) -> (egui::FullOutput, egui::Rect) {
+    let mut 画在哪儿 = egui::Rect::NOTHING;
+    let 帧 = headless::frame(ctx, headless::input(), |ui| {
+        let ctx = ui.ctx().clone();
+        let footer = Footer::new(Button::new("关上", 按的::关上));
+        let mut 层 = Dialog::new("带不带槽", "带不带槽", footer).note("标题底下那句说明");
+        if 带槽 {
+            层 = 层
+                .head(|ui| {
+                    ui.label("标头那一排");
+                })
+                .footer_note("页脚左边那句");
+        }
+        画在哪儿 = 层
+            .show(&ctx, |ui| {
+                ui.label("里头的一句话");
+            })
+            .rect;
+    });
+    (帧, 画在哪儿)
+}
+
+#[test]
+fn 没给那两个槽的弹层一点地方都不多占_给了才画出来() {
+    // 票 `gui-looks-like-the-design/22` 给共用弹层加了两个槽（`Dialog::head` / `Dialog::footer_note`）。
+    // **加槽不许改已有弹层的默认行为**：全窗口十几处弹层都走这一份，多留一档间距就是十几张基线一起变红。
+    // 这一条钉住两头——没给槽时屏上一个字都不多、这一层一个点都不高；给了槽两样都画得出来。
+    let ctx = 上下文();
+    // 先跑完淡入：弹层打开时从透明淡进来，量高度要等它落定（同上面那两条）。
+    for _ in 0..30 {
+        画一层带不带槽(&ctx, false);
+    }
+    let (无槽的帧, 无槽的框) = 画一层带不带槽(&ctx, false);
+    let 无槽 = 屏上的字(&无槽的帧);
+    assert_eq!(
+        无槽,
+        vec![
+            "带不带槽".to_string(),
+            "标题底下那句说明".to_string(),
+            "里头的一句话".to_string(),
+            "关上".to_string(),
+        ],
+        "没给槽的弹层屏上多画了东西",
+    );
+
+    let ctx = 上下文();
+    for _ in 0..30 {
+        画一层带不带槽(&ctx, true);
+    }
+    let (带槽的帧, 带槽的框) = 画一层带不带槽(&ctx, true);
+    let 带槽 = 屏上的字(&带槽的帧);
+    assert!(
+        带槽.contains(&"标头那一排".to_string()) && 带槽.contains(&"页脚左边那句".to_string()),
+        "给了槽却没画出来：{带槽:?}",
+    );
+    // 标头那一排画在**标题说明与内容区之间**，页脚那句画在页脚里——照读的次序摆着。
+    let 第几行 = |字: &str| 带槽.iter().position(|line| line == 字);
+    assert!(
+        第几行("标题底下那句说明") < 第几行("标头那一排")
+            && 第几行("标头那一排") < 第几行("里头的一句话")
+            && 第几行("里头的一句话") < 第几行("页脚左边那句"),
+        "两个槽没摆在照稿那两个位置上：{带槽:?}",
+    );
+    // 给了槽才多占地方：没给的那一层不比给了的高。
+    assert!(
+        无槽的框.height() < 带槽的框.height(),
+        "给了标头那一排，这一层却没变高：无槽 {无槽的框:?}、带槽 {带槽的框:?}",
+    );
+}

@@ -929,6 +929,10 @@ pub struct Layout {
     pub platform_table_columns: [f32; 3],
     /// 目标设置里「自定义」容量上限那一格的宽（设计稿 `DLG.subform`）。
     pub capacity_input_width: f32,
+    /// 手动例外表「平台 / 体积 / 时间 / 撤销」四列的宽；「作品」与「备注」分余下的（设计稿 `DLG.excl` 的表头）。
+    pub exception_table_columns: [f32; 4],
+    /// 手动例外弹层里「备注（可选）」那一格的宽（设计稿 `DLG.excl`）。
+    pub exception_note_width: f32,
     /// 单选圆点的直径（设计稿 `.opt input`）。
     pub radio_diameter: f32,
     /// 选中时正中那一粒的直径。

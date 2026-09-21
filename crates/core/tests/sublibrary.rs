@@ -196,6 +196,151 @@ fn 例外优先于规则且不被规则重算覆盖() {
     assert_eq!(求值(&catalog, "掌机").0, 3);
 }
 
+/// 把几个变体挂到同一个作品底下（识别结论），交回那个作品的号。
+fn 挂到作品(catalog: &mut Catalog, name: &str, keys: &[&str]) -> i64 {
+    let work = catalog
+        .add_work(name, Provenance::Identified)
+        .expect("建得出作品");
+    let records: Vec<Identification> = keys
+        .iter()
+        .map(|key| Identification {
+            variant_key: (*key).to_string(),
+            platform: None,
+            standalone: None,
+            edition: None,
+            state: State::Matched,
+            reason: None,
+            units: 1,
+            nkit: 0,
+            read_bytes: 0,
+            work_id: Some(work),
+            release_id: None,
+            candidates: Vec::new(),
+        })
+        .collect();
+    catalog
+        .write_identifications(&records)
+        .expect("识别结论写得进");
+    work
+}
+
+#[test]
+fn 例外那张表逐条写得出作品平台体积与备注_库里没有那个变体的照旧在() {
+    // 票 `gui-looks-like-the-design/22`：手动例外那张表逐条显示作品、平台、体积、备注与时间。
+    // 作品名照**显示标题**那一处挑（与浏览屏主列表、详情面板同一份），别处不另挑一遍（ADR-0024）。
+    let mut catalog = 现场();
+    建子库(&mut catalog, "掌机", None);
+    挂到作品(&mut catalog, "口袋妖怪 红", &["库/GB/口袋妖怪 汉化.zip"]);
+    catalog
+        .set_exception(
+            "掌机",
+            "库/GB/口袋妖怪 汉化.zip",
+            Exception::Include,
+            Some("小时候玩的就是这一版"),
+        )
+        .expect("例外写得进");
+    // **库里眼下没有这个变体**：盘没插、目录改了名。例外照旧记着，不删（ADR-0016）。
+    catalog
+        .set_exception(
+            "掌机",
+            "库/GB/盘没插时看不到的.zip",
+            Exception::Exclude,
+            None,
+        )
+        .expect("例外写得进");
+
+    let 表 = catalog
+        .sublibrary_exception_details(
+            "掌机",
+            &romcat_core::scrape::Priorities::builtin(),
+            &romcat_core::filename::Rules::builtin(),
+        )
+        .expect("读得动");
+    assert_eq!(表.len(), 2, "两条都要在表上");
+    // **次序是「时刻倒着排，同一刻按键排」**：这两条是同一秒写进去的（库里记的是秒），
+    // 所以这里看得见的是后半句。写成「照这条规矩排好了」而不是「第几条是谁」——
+    // 断言挂在规矩上，不挂在这一趟碰巧几点几秒。
+    let 照规矩 = {
+        let mut 照规矩 = 表.clone();
+        照规矩.sort_by(|a, b| {
+            b.row
+                .at
+                .cmp(&a.row.at)
+                .then_with(|| a.row.variant_key.cmp(&b.row.variant_key))
+        });
+        照规矩
+    };
+    assert_eq!(表, 照规矩, "没按「时刻倒着排、同一刻按键排」摆");
+
+    let 认一条 = |key: &str| {
+        表.iter()
+            .find(|detail| detail.row.variant_key == key)
+            .unwrap_or_else(|| panic!("表上没有「{key}」"))
+    };
+    let 没在库里 = 认一条("库/GB/盘没插时看不到的.zip");
+    assert!(没在库里.missing(), "库里没有这个变体，这一条该说得出口");
+    assert_eq!(没在库里.bytes, None, "库里没有的那一条体积不写 0");
+    assert_eq!(没在库里.platform, None);
+    assert_eq!(
+        没在库里.display, "库/GB/盘没插时看不到的.zip",
+        "库里眼下没有这一份时退回那条键"
+    );
+    assert_eq!(没在库里.work, None);
+
+    let 在库里 = 认一条("库/GB/口袋妖怪 汉化.zip");
+    assert_eq!(在库里.row.kind, Exception::Include);
+    assert_eq!(
+        在库里.row.note.as_deref(),
+        Some("小时候玩的就是这一版"),
+        "备注那一列"
+    );
+    assert!(在库里.row.at > 0, "时间那一列");
+    assert!(!在库里.missing());
+    assert_eq!(在库里.display, "口袋妖怪 红", "作品那一列屏上写的字");
+    assert_eq!(
+        在库里.work.as_deref(),
+        Some("口袋妖怪 红"),
+        "身份那一格是 work 表里那个名字"
+    );
+    assert_eq!(在库里.platform.as_deref(), Some("GB"));
+    assert_eq!(在库里.bytes, Some(4 * 1024 * 1024), "体积那一列");
+}
+
+#[test]
+fn 一个作品整批记成例外_从一栏换到另一栏不留两条() {
+    // 票 `gui-looks-like-the-design/22`：「搜索作品直接添加为包含或排除；同一个作品从一栏换到
+    // 另一栏时不会留下两条」。例外落在**变体**这一层，一个作品底下那几个变体整批写。
+    let mut catalog = 现场();
+    建子库(&mut catalog, "掌机", None);
+    let 两份 = ["库/GB/口袋妖怪 汉化.zip", "库/GB/官中版.zip"];
+    挂到作品(&mut catalog, "口袋妖怪 红", &两份);
+
+    assert_eq!(
+        catalog
+            .set_exceptions("掌机", &两份, Exception::Include, Some("小时候玩过"))
+            .expect("例外写得进"),
+        2,
+    );
+    let 表 = catalog.sublibrary_exceptions("掌机").expect("读得动");
+    assert_eq!(表.len(), 2);
+    assert!(表.iter().all(|row| row.kind == Exception::Include));
+
+    // 换到另一栏：还是两条，方向全变了——不是四条。
+    catalog
+        .set_exceptions("掌机", &两份, Exception::Exclude, None)
+        .expect("例外写得进");
+    let 表 = catalog.sublibrary_exceptions("掌机").expect("读得动");
+    assert_eq!(表.len(), 2, "换一栏留下了两份记录");
+    assert!(
+        表.iter().all(|row| row.kind == Exception::Exclude),
+        "换过去的方向没落到每一份上：{表:?}"
+    );
+    assert!(
+        表.iter().all(|row| row.note.is_none()),
+        "换栏时那一句备注该跟着换成新的（这一趟没写备注）"
+    );
+}
+
 #[test]
 fn 一个主库上多个子库互不干扰() {
     let mut catalog = 现场();

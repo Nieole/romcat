@@ -3074,7 +3074,7 @@ impl WorkDetail {
 /// 剥完一个字都不剩时退回主文件名。
 ///
 /// [`WorkRow::title`] 与 [`WorkDetail::title`] 都走这一处——「剥完空了怎么办」只说一次。
-fn loose_title(rules: &crate::filename::Rules, main_key: &str) -> String {
+pub(crate) fn loose_title(rules: &crate::filename::Rules, main_key: &str) -> String {
     let parsed = rules.parse_main_key(main_key);
     if parsed.title.trim().is_empty() {
         crate::path::file_name_of_key(main_key).to_string()
