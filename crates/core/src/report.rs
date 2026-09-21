@@ -1036,7 +1036,7 @@ pub use duplicates::DuplicateDetails;
 pub use findings::{Finding, FindingRow};
 pub use render::{
     capacity, decimal_bytes, decimal_gigabytes, heading, human_bytes, human_duration, human_time,
-    pad, thousands, width,
+    media_duration, pad, pixel_size, thousands, width,
 };
 
 #[cfg(test)]

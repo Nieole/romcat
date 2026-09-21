@@ -98,7 +98,21 @@ CREATE TABLE IF NOT EXISTS identification(
     -- 附属内容，存的是 `Standalone::code`。判断只有 `identify::scope::standalone` 那一处，
     -- 导出那道闸读这一列、不自己再判（ADR-0024 推论 3）。NULL 是这条结论不说：裁决落成的
     -- 结论没看过内容、识别这一趟没拿齐依据，或者是加这一列之前识别的那些行。
-    standalone  TEXT
+    standalone  TEXT,
+    -- **第几版**里**变体**那一层：汉化打到第几版（词表**第几版**，票
+    -- `gui-looks-like-the-design/34`）。**只有裁决说得出**——自动识别只保证做到发行版级
+    -- （ADR-0008），所以这一列的唯一写者是裁决落成结论那条路（`identify::Projector::project`
+    -- 读 `verdict::Facts::version`）。
+    --
+    -- **它不与 `release.revision` 合成一列**：那一行按「作品 + 平台 + 地区 + 序列号 + 语言」
+    -- 去重、几个变体共用，而「这一份汉化是第几版」逐个变体各不相同——合进去等于让头一个
+    -- 落库的版本盖住其余几个。两层怎么挑由 `catalog::detail::VariantDetail::edition`
+    -- 一处判（ADR-0024）。
+    --
+    -- NULL 是没人裁过（也包括加这一列之前识别的那些行），那正是加它之前的唯一可能。
+    -- 写库时 `None` **不盖掉**库里已有的那个，理由同 `platform`：识别那一趟不说这件事。
+    -- 这一列由 `add_columns` 给老库补上。
+    edition     TEXT
 ) STRICT;
 
 -- 算过的哈希。**同一份内容的两套口径都在这里**：`crc32`/`size` 是含头（原样），
@@ -312,10 +326,11 @@ CREATE TABLE IF NOT EXISTS verdict_batch_shadow_candidate(
 /// 算」的识别不重算已有结论的变体。旧结论只有一处可搬——那一版把它写在理由的开头。
 /// Switch 的补丁与附属内容旧版从没判过，没有可搬的，重跑一趟识别才落下来。
 pub(super) fn add_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    add_column(conn, "content_hash", "sha1", "TEXT")?;
-    add_column(conn, "content_hash", "bare_sha1", "TEXT")?;
-    add_column(conn, "identification", "platform", "TEXT")?;
-    if add_column(conn, "identification", "standalone", "TEXT")? {
+    super::add_column(conn, "content_hash", "sha1", "TEXT")?;
+    super::add_column(conn, "content_hash", "bare_sha1", "TEXT")?;
+    super::add_column(conn, "identification", "platform", "TEXT")?;
+    super::add_column(conn, "identification", "edition", "TEXT")?;
+    if super::add_column(conn, "identification", "standalone", "TEXT")? {
         conn.execute(
             "UPDATE identification SET standalone = ?1 WHERE state = ?2 AND instr(reason, ?3) = 1",
             params![
@@ -332,27 +347,6 @@ pub(super) fn add_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
 /// （`identify::scope::Skip::recorded`）。**这是一段历史**：搬的是旧程序写下的行，
 /// 日后那句话怎么改，旧行上写着的都是这个样子。
 const OLD_PATCH_REASON: &str = "补丁：";
-
-/// 一张表上缺了这一列就补上；已经有了就什么都不做。返回这一次是不是真补了。
-fn add_column(
-    conn: &rusqlite::Connection,
-    table: &str,
-    column: &str,
-    decl: &str,
-) -> rusqlite::Result<bool> {
-    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let mut rows = statement.query([])?;
-    while let Some(row) = rows.next()? {
-        if row.get::<_, String>(1)? == column {
-            return Ok(false);
-        }
-    }
-    drop(rows);
-    drop(statement);
-    // 表名与列名都是这个文件里写死的字面量，不来自外面。
-    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
-    Ok(true)
-}
 
 /// 一条候选的**置信度**（ADR-0002）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -816,6 +810,12 @@ pub struct Identification {
     /// 没拿齐依据（有一份 Switch 容器没读到）也不说。「能跑」是判过的一个答案，明写成
     /// [`Standalone::Runs`]。写库时 `None` 不盖掉库里已有的那个，`Runs` 盖得掉。
     pub standalone: Option<Standalone>,
+    /// **第几版**里**变体**那一层：汉化打到第几版（词表**第几版**）。
+    ///
+    /// **只有裁决说得出**（ADR-0008：自动识别只保证做到发行版级），所以识别那几层一律
+    /// 交 `None`，而裁决落成结论那条路把 [`verdict::Facts::version`](crate::verdict::Facts)
+    /// 放进来。写库时 `None` 不盖掉库里已有的那个，理由同 [`Self::platform`]。
+    pub edition: Option<String>,
     /// 拿了几份内容去撞。
     pub units: u64,
     /// 这个变体里有几份是 NKit 处理过的镜像。
@@ -1925,15 +1925,16 @@ impl Catalog {
             let mut insert_identification = tx
                 .prepare(
                     "INSERT INTO identification(variant_key, state, reason, units, candidates,
-                         accepted, nkit, read_bytes, platform, standalone)
-                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                         accepted, nkit, read_bytes, platform, standalone, edition)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
                      ON CONFLICT(variant_key) DO UPDATE SET
                         state = excluded.state, reason = excluded.reason,
                         units = excluded.units, candidates = excluded.candidates,
                         accepted = excluded.accepted, nkit = excluded.nkit,
                         read_bytes = excluded.read_bytes,
                         platform = COALESCE(excluded.platform, platform),
-                        standalone = COALESCE(excluded.standalone, standalone)",
+                        standalone = COALESCE(excluded.standalone, standalone),
+                        edition = COALESCE(excluded.edition, edition)",
                 )
                 .map_err(to_err)?;
             let mut link = tx
@@ -1959,6 +1960,7 @@ impl Catalog {
                         i64::try_from(record.read_bytes).unwrap_or(i64::MAX),
                         record.platform,
                         record.standalone.map(Standalone::code),
+                        record.edition.as_deref(),
                     ])
                     .map_err(to_err)?;
                 for candidate in &record.candidates {
@@ -2887,6 +2889,25 @@ impl Catalog {
                 },
             )
             .optional()
+            .map_err(|source| self.err(source))
+    }
+
+    /// 这个变体**裁决说它是第几版**（`identification.edition`，词表**第几版**下面那一层）。
+    ///
+    /// 没人裁过、或者这一行是加那一列之前识别的，都是 `None`——**两者的处置一样**，
+    /// 那时看的是发行版那一层的修订（`VariantDetail::edition` 一处判）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn decided_edition(&self, variant_key: &str) -> Result<Option<String>, CatalogError> {
+        self.conn
+            .query_row(
+                "SELECT edition FROM identification WHERE variant_key = ?1",
+                params![variant_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
             .map_err(|source| self.err(source))
     }
 

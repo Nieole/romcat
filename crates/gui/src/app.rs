@@ -571,6 +571,12 @@ impl App {
     /// 只认回程的话，子库屏会摆着一份按旧选择集排出来的差量，而「同步」认的正是它
     /// （ADR-0016）。
     ///
+    /// **这一条还有反向的一条**（挂单 `Q812`）：子库屏也改得动例外了——「手动例外」那层弹层
+    /// （票 `gui-looks-like-the-design/22`）与删减建议表上的「排除」。那时浏览屏「改选择」可能正开着
+    /// 同一个子库，手上缓着的是改之前那几条，而它的详情面板上就写着「眼下：包含（…）」。
+    /// 所以子库屏也留一个记号（`sublibrary::Screen::take_touched`），由这一趟转告浏览屏重读
+    /// （`browse::Screen::exceptions_changed`）。**两条同形**：谁改了谁留记号，窗口负责转告。
+    ///
     /// **还有一条与跳转无关、但同样只有这儿够得着两屏的**：待确认屏落下一批、撤回一批
     /// 之后，浏览屏缓着的那几行（置信度那一列画的正是裁决改的东西）也过期了。队列那一屏
     /// 留一个记号（`queue::Screen::take_changed`），由这一趟转告浏览屏——与库屏扫完一个根
@@ -626,6 +632,12 @@ impl App {
         // **先丢账再换屏**：回程那一下也会留下记号，丢在前面，`open` 重读到的就是新的。
         if let Some(name) = self.browse.take_touched() {
             self.sublibrary.forget(&self.site, &name);
+        }
+        // **反向的那一条**（挂单 `Q812`）：子库屏也改得动例外了——「手动例外」那层弹层
+        // （票 `gui-looks-like-the-design/22`）与删减建议表上的「排除」。浏览屏「改选择」若正开着同一个子库，
+        // 它手上缓着的是改之前那几条，而那一面板上就摆着「眼下：包含（…）」。
+        if let Some(name) = self.sublibrary.take_touched() {
+            self.browse.exceptions_changed(&self.site, &name);
         }
         if let Some(name) = self.browse.take_return() {
             self.sublibrary.reload(&self.site);

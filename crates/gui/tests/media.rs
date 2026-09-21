@@ -140,7 +140,12 @@ fn 现场(tag: &str) -> 现场 {
 fn 入池(pool: &MediaPool, catalog: &mut Catalog, bytes: &[u8], ext: &str) -> String {
     let (hash, _) = pool.take_bytes(bytes, ext).expect("落得进池");
     catalog
-        .put_media(&hash, ext, u64::try_from(bytes.len()).unwrap_or(0))
+        .put_media(
+            &hash,
+            ext,
+            u64::try_from(bytes.len()).unwrap_or(0),
+            romcat_core::scrape::measure::Measured::default(),
+        )
         .expect("记得进库");
     hash
 }

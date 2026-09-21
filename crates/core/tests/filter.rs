@@ -19,7 +19,9 @@ use romcat_core::catalog::browse::{
     MAX_PAGE, PlatformFilter, StateFilter, Unruly, VariantQuery, WorkQuery,
 };
 use romcat_core::catalog::scrape::{Harvested, HarvestedValue};
-use romcat_core::catalog::{Candidate, Catalog, Confidence, Identification, Provenance, State};
+use romcat_core::catalog::{
+    Candidate, Catalog, Confidence, Identification, NewRelease, Provenance, State,
+};
 use romcat_core::dat::Convention;
 use romcat_core::dat::chinese::ChineseMark;
 use romcat_core::platform::Manifest;
@@ -57,6 +59,7 @@ fn 认出来(
             variant_key: key.to_string(),
             platform: None,
             standalone: None,
+            edition: None,
             state: State::Matched,
             reason: None,
             units: 1,
@@ -149,30 +152,39 @@ fn 建库() -> Catalog {
     let 日版 = catalog
         .add_release(
             口袋,
-            Some("GB"),
-            Some("JP"),
-            None,
-            Some("Ja"),
+            &NewRelease {
+                platform: Some("GB"),
+                region: Some("JP"),
+                serial: None,
+                languages: Some("Ja"),
+                revision: None,
+            },
             Provenance::Identified,
         )
         .expect("建得出发行版");
     let 多语 = catalog
         .add_release(
             火纹,
-            Some("GBA"),
-            Some("EU"),
-            None,
-            Some("En, Danish"),
+            &NewRelease {
+                platform: Some("GBA"),
+                region: Some("EU"),
+                serial: None,
+                languages: Some("En, Danish"),
+                revision: None,
+            },
             Provenance::Identified,
         )
         .expect("建得出发行版");
     let 无语言 = catalog
         .add_release(
             圣剑,
-            Some("SFC"),
-            Some("JP"),
-            None,
-            None,
+            &NewRelease {
+                platform: Some("SFC"),
+                region: Some("JP"),
+                serial: None,
+                languages: None,
+                revision: None,
+            },
             Provenance::Identified,
         )
         .expect("建得出发行版");

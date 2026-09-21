@@ -107,6 +107,32 @@ pub fn human_duration(ms: u64) -> String {
     }
 }
 
+/// **一份媒体自己有多长**排成钟点：`0:30`、`1:02:03`（设计稿 `mediaOf` 的 `dim`）。
+///
+/// **它不是 [`human_duration`]**，两者答的是两个问题。那一条量的是「这趟活跑了多久」，
+/// 刻意粗（一小时以上不报秒）——那个数是把字节数乘一个常量估出来的，写细了是骗人。
+/// 这一条量的是**这段视频本身多长**，是从文件里读出来的确数，人拿它对的是播放器上
+/// 那个进度条，差一秒就对不上。
+#[must_use]
+pub fn media_duration(ms: u64) -> String {
+    // **零头往下抹**：播放器上那个数就是这么显示的，四舍五入会让 29.6 秒的片子在这里
+    // 写成 `0:30`、在播放器上写着 `0:29`。
+    let secs = ms / 1000;
+    if secs >= 3600 {
+        format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+    } else {
+        format!("{}:{:02}", secs / 60, secs % 60)
+    }
+}
+
+/// 像素尺寸排成 `640 × 480`（设计稿 `mediaOf` 的 `dim`）。
+///
+/// 中间那个是乘号 `×`（U+00D7）连两侧空格，不是小写字母 `x`——稿上画的就是它。
+#[must_use]
+pub fn pixel_size(width: u32, height: u32) -> String {
+    format!("{width} × {height}")
+}
+
 /// 一个 UNIX 纪元起的秒排成 `YYYY-MM-DD HH:MM`（UTC）。
 ///
 /// 公历换算走 [`capability::from_day_number`](crate::capability)——**公式只有一处**。
@@ -1028,5 +1054,36 @@ mod tests {
         assert_eq!(width("FC"), 2);
         assert_eq!(pad("平台", 8), "平台    ");
         assert_eq!(pad("FC", 8), "FC      ");
+    }
+
+    #[test]
+    fn 媒体时长排成钟点_零头往下抹() {
+        // 设计稿 `mediaOf` 里那一格写的是 `0:30`。**秒与分都补两位、小时不补**。
+        assert_eq!(media_duration(30_000), "0:30");
+        assert_eq!(media_duration(0), "0:00");
+        assert_eq!(media_duration(95_000), "1:35");
+        assert_eq!(media_duration(3_723_000), "1:02:03");
+        // **零头往下抹**：29.6 秒的片子在播放器上写着 `0:29`，这里不许四舍五入成 `0:30`。
+        assert_eq!(media_duration(29_600), "0:29");
+    }
+
+    #[test]
+    fn 媒体时长与那一条粗估的时长不是同一个数() {
+        // 两者答的是两个问题（各自的文档）：一个是「这段视频多长」，一个是「这趟活跑了多久」。
+        // 同一个毫秒数交给它们，写出来必须不一样——合成一个函数是这条最容易犯的错。
+        assert_eq!(media_duration(95_000), "1:35");
+        assert_eq!(human_duration(95_000), "1 分 35 秒");
+    }
+
+    #[test]
+    fn 像素尺寸中间是乘号不是字母x() {
+        // 稿上画的是 `512 × 682`：U+00D7 连两侧空格。小写字母 `x` 在那一排里会被读成别的东西。
+        assert_eq!(pixel_size(512, 682), "512 × 682");
+        assert_eq!(pixel_size(640, 480), "640 × 480");
+        assert!(
+            !pixel_size(640, 480).contains('x'),
+            "中间那个不许是小写字母 x"
+        );
+        assert!(pixel_size(640, 480).contains('\u{d7}'));
     }
 }

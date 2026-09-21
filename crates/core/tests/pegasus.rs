@@ -318,7 +318,12 @@ fn 收一份媒体(
     写(&现场.池().path_of(&hash, "png"), bytes);
     现场
         .catalog
-        .put_media(&hash, "png", bytes.len() as u64)
+        .put_media(
+            &hash,
+            "png",
+            bytes.len() as u64,
+            romcat_core::scrape::measure::Measured::default(),
+        )
         .expect("池里记得下");
     现场
         .catalog
@@ -1419,5 +1424,105 @@ fn 维护者用续行写的多值_一次往返一家都不少() {
     assert!(
         !text.contains("developer: "),
         "库里与他写的是同一批，就不该重写这一行：{text}"
+    );
+}
+
+#[test]
+fn 导出逐条记下写出去的是谁_之后扫进来的作品照实说还没导出() {
+    // 票 `gui-looks-like-the-design/34`：作品详情页状态块「导出」那一行。
+    //
+    // **整库那一个时刻答不了它**——导出整库级、不挑选（词表**导出**），所以拿
+    // `exported_at` 去答的话，上次导出之后才扫进来的作品会跟着说「已导出」，
+    // 而那正是这一行最该答对的一种情形。
+    use romcat_core::scrape::AnchorKind;
+
+    let mut 现场 = 建现场();
+    let report = 导出(&mut 现场, false);
+    let 时刻 = 现场
+        .catalog
+        .exported_at()
+        .expect("读得出")
+        .expect("走完了就该打上时刻戳");
+
+    // 一、写出去的每个条目都记下了，而且**与整库那个时刻是同一个数**（同一道闸、同一趟）。
+    let 魂斗罗 = 现场
+        .catalog
+        .entry_exported(AnchorKind::Work, "Contra")
+        .expect("读得出")
+        .expect("这一条这一趟真写出去了");
+    assert_eq!(魂斗罗.format, "Pegasus");
+    assert_eq!(
+        魂斗罗.at, 时刻,
+        "逐条那批与整库那个时刻分了家，屏上就会有一行说导过了、另一行说没有"
+    );
+
+    // 二、**压根不在这份库里的作品**问出来是 `None`——不是「整库导过了所以它也导过了」。
+    assert_eq!(
+        现场
+            .catalog
+            .entry_exported(AnchorKind::Work, "这个作品不存在")
+            .expect("读得出"),
+        None
+    );
+
+    // 三、导出**之后**才进来的那个作品：整库那一行说「导过了」，而它自己照实说「还没」。
+    现场
+        .catalog
+        .add_work(
+            "刚扫进来的",
+            romcat_core::catalog::identify::Provenance::Identified,
+        )
+        .expect("建得出作品");
+    assert!(
+        现场.catalog.exported_at().expect("读得出").is_some(),
+        "整库那一行照旧说导过了"
+    );
+    assert_eq!(
+        现场
+            .catalog
+            .entry_exported(AnchorKind::Work, "刚扫进来的")
+            .expect("读得出"),
+        None,
+        "上次导出那会儿它还不在库里——这一行不许跟着说「已导出」"
+    );
+
+    // 四、**每趟整份重写**：再导一趟，这一条的时刻跟着换，行数不累积。
+    assert!(report.entries > 0, "这份 fixture 得真收敛出条目来");
+    let 行数 = |catalog: &romcat_core::catalog::Catalog| {
+        catalog
+            .entry_exported(AnchorKind::Work, "Contra")
+            .expect("读得出")
+            .is_some()
+    };
+    assert!(行数(&现场.catalog));
+}
+
+#[test]
+fn 只排计划那一趟一条逐条的账都不记() {
+    // 与整库那个时刻同一道闸：`dry_run` 一个字节都没写，说不上「导过了」。
+    use romcat_core::scrape::AnchorKind;
+
+    let mut 现场 = 建现场();
+    let out = 现场.out().to_path_buf();
+    transfer::export(
+        &mut 现场.catalog,
+        &Pegasus,
+        &Priorities::builtin(),
+        &ExportOptions {
+            out,
+            dry_run: true,
+            force: false,
+            media: None,
+        },
+    )
+    .expect("排得出计划");
+    assert_eq!(现场.catalog.exported_at().expect("读得出"), None);
+    assert_eq!(
+        现场
+            .catalog
+            .entry_exported(AnchorKind::Work, "Contra")
+            .expect("读得出"),
+        None,
+        "只排计划那一趟一条逐条的账都不该记"
     );
 }

@@ -261,6 +261,89 @@ impl 现场 {
         self.等任务跑完();
     }
 
+    /// 把几个变体挂到同一个作品底下（识别结论）——库里有「作品」，搜作品才搜得着。
+    fn 挂到作品(&mut self, 作品: &str, keys: &[&str]) {
+        let (screen, site) = self.app.sublibrary_and_site();
+        let work = site
+            .catalog
+            .add_work(作品, romcat_core::catalog::Provenance::Identified)
+            .expect("建得出作品");
+        let records: Vec<romcat_core::catalog::Identification> = keys
+            .iter()
+            .map(|key| romcat_core::catalog::Identification {
+                variant_key: (*key).to_string(),
+                platform: None,
+                standalone: None,
+                edition: None,
+                state: romcat_core::catalog::State::Matched,
+                reason: None,
+                units: 1,
+                nkit: 0,
+                read_bytes: 0,
+                work_id: Some(work),
+                release_id: None,
+                candidates: Vec::new(),
+            })
+            .collect();
+        site.catalog
+            .write_identifications(&records)
+            .expect("识别结论写得进");
+        screen.reload(site);
+    }
+
+    /// 直接往中立库里摆一条例外（浏览屏那条路自己在 `tests/browse.rs` 里验）。
+    fn 记一条例外(&mut self, name: &str, key: &str, kind: Exception, note: Option<&str>) {
+        let (screen, site) = self.app.sublibrary_and_site();
+        site.catalog
+            .set_exception(name, key, kind, note)
+            .expect("例外写得进");
+        screen.reload(site);
+    }
+
+    /// 打开「手动例外」那层弹层。
+    fn 管理例外(&mut self, name: &str) {
+        let (screen, site) = self.app.sublibrary_and_site();
+        screen.open_exceptions(site, name);
+    }
+
+    /// 弹层里换一栏。
+    fn 换栏(&mut self, tab: Exception) {
+        self.app.sublibrary_and_site().0.show_exception_tab(tab);
+    }
+
+    /// 弹层里搜一下作品。
+    fn 搜作品(&mut self, 字: &str) {
+        let (screen, site) = self.app.sublibrary_and_site();
+        screen.set_exception_search(site, 字);
+    }
+
+    /// 搜出来的第 `at` 行按下去：整批记成眼下这一栏的例外，跟着等重算那一趟跑完。
+    fn 加第几行(&mut self, at: usize) {
+        {
+            let (screen, site, tasks) = self.app.sublibrary_site_and_tasks();
+            screen.add_exception(site, tasks, at);
+        }
+        self.等任务跑完();
+    }
+
+    /// 撤掉一条例外，跟着等重算那一趟跑完。
+    fn 撤例外(&mut self, key: &str) {
+        {
+            let (screen, site, tasks) = self.app.sublibrary_site_and_tasks();
+            screen.undo_exception(site, tasks, key);
+        }
+        self.等任务跑完();
+    }
+
+    /// 库里这个子库眼下记着哪几条例外。
+    fn 库里的例外(&self, name: &str) -> Vec<romcat_core::sublibrary::ExceptionRow> {
+        self.app
+            .site()
+            .catalog
+            .sublibrary_exceptions(name)
+            .expect("读得动")
+    }
+
     /// 点同步，然后等它跑完。**它也进任务队列**（票 `gui-redesign/15`），
     /// 所以等法与排差量预览、算一遍容量三条一模一样。
     fn 同步到底(&mut self) {
@@ -3865,12 +3948,386 @@ fn 改选择时例外按钮与备注框摆在右栏选中那张变体卡底下_�
     );
 
     // 按「排除它」真的记下一条例外。
-    点一下(&ctx, &format!("{}它", Exception::Exclude.label()), |ui| {
+    点一下(&ctx, &format!("{}它", Exception::Exclude.shown()), |ui| {
         场.app.ui(ui)
     });
     let 例外们 = &场.app.browse().editing().expect("还在改").exceptions;
     assert!(
         例外们.len() == 1 && 例外们.contains_key(&选中的),
         "按了排除，例外没记在选中的那个变体上：{例外们:?}"
+    );
+}
+
+// ——— 手动例外：包含与排除（票 `gui-looks-like-the-design/22`）———
+//
+// ADR-0016：**例外优先于规则、永久记住**。这一层弹层把那句话变成屏上看得见的东西：两栏各自摆着
+// 手挑过什么、每一条为什么、什么时候挑的，每一条都撤得掉。容量超限时删减建议里的「排除」、差量预览
+// 里落点撞车时的「排除这一份」，落的都是这里的例外——不是第二套机制。
+
+/// 这一台眼下卡上「手动例外」那一行右边那颗「管理」在不在屏上。
+fn 有管理按钮(ctx: &egui::Context, 场: &mut 现场) -> bool {
+    画两帧(ctx, 场).lines().any(|line| line == "管理")
+}
+
+#[test]
+fn 手动例外两栏逐条写作品平台体积备注与时间_每条都撤得掉() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.挂到作品("口袋妖怪 绿宝石", &["库/GBA/口袋妖怪 绿宝石.zip"]);
+    场.记一条例外(
+        "掌机",
+        "库/GBA/口袋妖怪 绿宝石.zip",
+        Exception::Include,
+        Some("小时候玩的就是这一版"),
+    );
+    场.记一条例外(
+        "掌机",
+        "库/SFC/幻想传说 汉化版.zip",
+        Exception::Exclude,
+        Some("有新版汉化，旧版不带"),
+    );
+    let 口袋多大 = fs::metadata(场.库.path().join("GBA/口袋妖怪 绿宝石.zip"))
+        .expect("在")
+        .len();
+
+    // 卡上那一行右边照稿一颗「管理」；按下去开出弹层。
+    assert!(有管理按钮(&ctx, &mut 场), "卡上例外那一行没有「管理」");
+    点正好那一段(&ctx, "管理", |ui| 场.app.ui(ui));
+    assert_eq!(场.app.sublibrary().exceptions_open(), Some("掌机"));
+
+    // 包含那一栏：表头六列齐，作品、平台、体积、备注、时间逐格写得出。
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    for 那一行 in [
+        "手动例外 · 掌机",
+        "包含 1",
+        "排除 1",
+        "作品",
+        "平台",
+        "体积",
+        "备注",
+        "时间",
+        "口袋妖怪 绿宝石",
+        "库/GBA/口袋妖怪 绿宝石.zip",
+        "GBA",
+        &human_bytes(口袋多大),
+        "小时候玩的就是这一版",
+        "撤销",
+    ] {
+        assert!(
+            屏上.lines().any(|line| line == 那一行),
+            "包含那一栏上没有「{那一行}」：\n{屏上}"
+        );
+    }
+    assert!(
+        !屏上.contains("有新版汉化，旧版不带"),
+        "排除那一条串进了包含栏：\n{屏上}"
+    );
+
+    // 换到排除那一栏：另一条才在。
+    场.换栏(Exception::Exclude);
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("有新版汉化，旧版不带"),
+        "排除那一栏上没有那一条：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("小时候玩的就是这一版"),
+        "包含那一条串进了排除栏：\n{屏上}"
+    );
+}
+
+#[test]
+fn 搜作品直接加成包含或排除_同一个作品换一栏不留两条() {
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    // 一个作品底下两个变体：例外落在**变体**这一层，整批记上。
+    let 两份 = ["库/SFC/幻想传说 汉化版.zip", "库/SFC/圣剑传说 3 汉化版.zip"];
+    场.挂到作品("传说系列", &两份);
+    场.管理例外("掌机");
+
+    场.搜作品("传说");
+    assert_eq!(
+        场.app.sublibrary().exception_hits(),
+        vec!["传说系列"],
+        "搜不着那个作品",
+    );
+    场.app
+        .sublibrary_and_site()
+        .0
+        .set_exception_note("先带上再说");
+    场.加第几行(0);
+    let 例外 = 场.库里的例外("掌机");
+    assert_eq!(例外.len(), 2, "一个作品底下两个变体，该整批记上：{例外:?}");
+    assert!(例外.iter().all(|row| row.kind == Exception::Include));
+    assert!(
+        例外
+            .iter()
+            .all(|row| row.note.as_deref() == Some("先带上再说")),
+        "备注没跟着记上：{例外:?}"
+    );
+
+    // 换一栏再加一次：还是两条，方向全换过去——不是四条。
+    场.换栏(Exception::Exclude);
+    场.搜作品("传说");
+    场.加第几行(0);
+    let 例外 = 场.库里的例外("掌机");
+    assert_eq!(例外.len(), 2, "换一栏留下了两份记录：{例外:?}");
+    assert!(
+        例外.iter().all(|row| row.kind == Exception::Exclude),
+        "换过去的方向没落到每一份上：{例外:?}"
+    );
+}
+
+#[test]
+fn 撤掉一条例外之后合计与容量条跟着变() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC,GBA");
+    场.求值();
+    let 全都要 = 场
+        .app
+        .sublibrary()
+        .evaluated("掌机")
+        .expect("算过了")
+        .clone();
+    assert_eq!(全都要.picked, 3);
+
+    let 排掉的 = "库/SFC/圣剑传说 3 汉化版.zip";
+    let 那么大 = fs::metadata(场.库.path().join("SFC/圣剑传说 3 汉化版.zip"))
+        .expect("在")
+        .len();
+    场.记一条例外("掌机", 排掉的, Exception::Exclude, None);
+    场.求值();
+    let 排掉之后 = 场
+        .app
+        .sublibrary()
+        .evaluated("掌机")
+        .expect("算过了")
+        .clone();
+    assert_eq!(排掉之后.picked, 2, "排除例外没起作用");
+    assert_eq!(排掉之后.bytes, 全都要.bytes - 那么大);
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line == format!("合计 2 个变体 · {}", human_bytes(排掉之后.bytes))),
+        "合计那一行没跟着例外变：\n{屏上}"
+    );
+
+    // 撤掉它：合计与容量条跟着回来。
+    场.管理例外("掌机");
+    场.换栏(Exception::Exclude);
+    场.撤例外(排掉的);
+    assert!(场.库里的例外("掌机").is_empty(), "撤销没把那一条忘掉");
+    let 撤掉之后 = 场
+        .app
+        .sublibrary()
+        .evaluated("掌机")
+        .expect("撤完当场重算了一遍");
+    assert_eq!(撤掉之后.picked, 3, "撤销之后那一份没回到选择集里");
+    assert_eq!(撤掉之后.bytes, 全都要.bytes);
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line == format!("合计 3 个变体 · {}", human_bytes(全都要.bytes))),
+        "撤销之后合计那一行没跟着变：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("没有手动例外"),
+        "撤光了卡上那一行还写着有例外：\n{屏上}"
+    );
+}
+
+#[test]
+fn 手动例外弹层上写明优先于规则并永久记住() {
+    // ADR-0016 那句话得在屏上，不只在文档里：例外表达的是规则表达不了的个人口味，
+    // 人得知道它不会被下一次改规则冲掉。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.管理例外("掌机");
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("例外优先于规则，并且永久记住。"),
+        "弹层上没写明优先于规则、永久记住：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("「包含」是规则没选中也要带上的")
+            && 屏上.contains("「排除」是规则选中了也不带的"),
+        "弹层上没写清两栏各是什么：\n{屏上}"
+    );
+}
+
+#[test]
+fn 改过例外之后差量预览作废并说明() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.挂到作品("口袋妖怪 绿宝石", &["库/GBA/口袋妖怪 绿宝石.zip"]);
+    场.排预览();
+    assert!(场.app.sublibrary().prepared().is_some(), "前提：排过一趟");
+
+    场.管理例外("掌机");
+    场.搜作品("口袋");
+    场.加第几行(0);
+    assert!(
+        场.app.sublibrary().prepared().is_none(),
+        "改过例外，那份差量预览还挂着"
+    );
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("差量预览已失效"),
+        "改过例外没说那份差量预览失效了：\n{屏上}"
+    );
+    // 这一层弹层上一直写着这条规矩，不等人改了才冒出来。
+    assert!(
+        屏上.contains("修改例外后，同步前需要重新生成差量预览。"),
+        "弹层上没写明改完要重排差量预览：\n{屏上}"
+    );
+}
+
+#[test]
+fn 没有例外时两栏各是空态并写明从哪儿加() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.管理例外("掌机");
+
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("还没有手动包含的作品。"),
+        "包含那一栏空着却不是空态：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("在下面搜作品直接添加"),
+        "空态没写明从哪儿加：\n{屏上}"
+    );
+    assert!(
+        !屏上.lines().any(|line| line == "撤销"),
+        "空着却画出了表身：\n{屏上}"
+    );
+
+    场.换栏(Exception::Exclude);
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    assert!(
+        屏上.contains("还没有排除的作品。"),
+        "排除那一栏空着却不是空态：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("容量超限时，删减建议里的「排除」会记在这里"),
+        "排除那一栏的空态没写明它平时从哪儿来：\n{屏上}"
+    );
+}
+
+#[test]
+fn 子库屏改过例外之后浏览屏缓着的那份跟着重读() {
+    // 挂单 `Q812`：例外是**一按就落库**的，而浏览屏「改选择」开着时手上缓着一份。票 22 让
+    // 子库屏也改得动例外（「手动例外」弹层、删减建议表上的「排除」），撞上的概率跟着抬高——
+    // 不转告的话，浏览屏详情面板上写着的「眼下：…」说的是改之前那一条。
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.挂到作品("口袋妖怪 绿宝石", &["库/GBA/口袋妖怪 绿宝石.zip"]);
+
+    // 浏览屏上开始改这个子库——人既没按「更新到子库」也没按「不改了」，就从左栏切回了子库屏。
+    场.改选择();
+    assert!(
+        场.app
+            .browse()
+            .editing()
+            .expect("在改")
+            .exceptions
+            .is_empty(),
+        "前提：浏览屏手上一条例外都没有"
+    );
+    场.app.show_view(View::Sublibraries);
+
+    // 在「手动例外」弹层里加一条。
+    场.管理例外("掌机");
+    场.搜作品("口袋");
+    场.加第几行(0);
+    场.app.route();
+    let 例外 = &场.app.browse().editing().expect("还在改").exceptions;
+    assert!(
+        例外.contains_key("库/GBA/口袋妖怪 绿宝石.zip"),
+        "子库屏加的那一条没转告浏览屏：{例外:?}"
+    );
+
+    // 撤掉之后同样跟着没。
+    场.撤例外("库/GBA/口袋妖怪 绿宝石.zip");
+    场.app.route();
+    assert!(
+        场.app
+            .browse()
+            .editing()
+            .expect("还在改")
+            .exceptions
+            .is_empty(),
+        "撤销没转告浏览屏",
+    );
+}
+
+#[test]
+fn 优先级表读不动时手动例外那一层不开_屏上说清为什么() {
+    // 收尾审查（Standards 轴）挑出的：这一层原先在优先级表读不动时**静默退回内置那份**。
+    // 而 `stages.rs` 导出那一段逐字写着「优先级表读不出来就停下，不退回内置那份」——挑**显示标题**
+    // 用的是同一份表，工作目录里那份正是人改过的说法；悄悄换一份，屏上这几行的名字就与他导出去
+    // 看见的对不上，还查不出为什么。折标题、导出、刮削三处都是往上抛，这一处不该是例外。
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    // 工作目录里摆一份读不懂的优先级表。
+    写(
+        &场.工作区.path().join("priorities.toml"),
+        "这不是 TOML = = =".as_bytes(),
+    );
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        screen.reload(site);
+        screen.open_exceptions(site, "掌机");
+    }
+    assert!(
+        场.app.sublibrary().exceptions_open().is_none(),
+        "优先级表读不动，这一层却照样开了"
+    );
+    let 说的 = 场
+        .app
+        .sublibrary()
+        .error()
+        .expect("该在屏上说一句")
+        .to_string();
+    assert!(
+        说的.contains("优先级表读不动"),
+        "没说清是优先级表读不动：{说的}"
+    );
+    assert!(
+        说的.contains("与导出去的对不上"),
+        "没说清为什么不退回内置那份：{说的}"
+    );
+
+    // 换成读得懂的那一份：这一层照常开得出来。
+    写(
+        &场.工作区.path().join("priorities.toml"),
+        // TOML 的裸键只收 ASCII，中文键要加引号。
+        "\"版本\" = 1\n".as_bytes(),
+    );
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        screen.reload(site);
+        screen.open_exceptions(site, "掌机");
+    }
+    assert_eq!(
+        场.app.sublibrary().exceptions_open(),
+        Some("掌机"),
+        "换成读得懂的那一份之后还是开不出来：{:?}",
+        场.app.sublibrary().error(),
     );
 }

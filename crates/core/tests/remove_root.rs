@@ -46,6 +46,8 @@ fn 识别(key: &str, work: Option<i64>, standalone: Option<Standalone>) -> Ident
     Identification {
         variant_key: key.to_string(),
         platform: None,
+        // **第几版只有裁决说得出**（ADR-0008）：这份合成 fixture 走的是识别那条路，交 `None`。
+        edition: None,
         standalone,
         state: State::Matched,
         reason: None,
