@@ -4465,7 +4465,10 @@ fn 三方对比的数字齐_新增更新删除保留异常与放不进目标六�
         "变体",
         "容量",
     ] {
-        assert!(屏上.lines().any(|line| line == 一行), "账上少了「{一行}」这一行：\n{屏上}");
+        assert!(
+            屏上.lines().any(|line| line == 一行),
+            "账上少了「{一行}」这一行：\n{屏上}"
+        );
     }
 
     // **屏上那个「异常」的数就是计划里对不上的那几件**：两处各数一遍的话，一处改了
@@ -4477,7 +4480,9 @@ fn 三方对比的数字齐_新增更新删除保留异常与放不进目标六�
         plan.surprises,
     );
     assert!(
-        屏上.lines().any(|line| line == plan.surprises.len().to_string()),
+        屏上
+            .lines()
+            .any(|line| line == plan.surprises.len().to_string()),
         "屏上没有「异常」那个数 {}：\n{屏上}",
         plan.surprises.len(),
     );
@@ -4506,9 +4511,10 @@ fn 四类异常分栏列出_每一栏写明工具不会做什么() {
     }
 
     for kind in SurpriseKind::all() {
-        场.app.sublibrary_and_site().0.show_anomaly(
-            romcat_gui::sublibrary::Anomaly::Surprise(kind),
-        );
+        场.app
+            .sublibrary_and_site()
+            .0
+            .show_anomaly(romcat_gui::sublibrary::Anomaly::Surprise(kind));
         let 屏上 = 画两帧整张卡(&ctx, &mut 场);
         // **那句话由核心答**（`SurpriseKind::refusal`）：命令行与这一屏说的是同一件事。
         let 该说的 = kind.refusal().replace("**", "").replace('`', "");
@@ -4637,7 +4643,10 @@ fn 落点撞车列出撞的是哪两份_排除其中一份之后另一份正常�
         "库/SFC/幻想传说 汉化版.zip",
         "另一块盘/SFC/幻想传说 汉化版.zip",
     ] {
-        assert!(屏上.lines().any(|line| line == 键), "屏上没有「{键}」：\n{屏上}");
+        assert!(
+            屏上.lines().any(|line| line == 键),
+            "屏上没有「{键}」：\n{屏上}"
+        );
     }
     assert_eq!(
         屏上.lines().filter(|line| *line == "排除这一份").count(),

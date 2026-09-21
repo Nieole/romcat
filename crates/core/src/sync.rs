@@ -657,7 +657,8 @@ impl Plan {
                 成堆.entry(path::fold(&row.path)).or_default().push(row);
             }
         }
-        成堆.into_values()
+        成堆
+            .into_values()
             .map(|files| Collision {
                 // 只差大小写的那一种，几条的落点写法各不相同：取按路径排在头一个的那个写法。
                 path: files
@@ -2488,7 +2489,12 @@ mod tests {
             .collect();
         assert_eq!(来自, ["甲/FC/魂斗罗.zip", "乙/FC/魂斗罗.zip"]);
         // **没撞的那一条不进来**：它照旧要传。
-        assert!(desired.files.iter().any(|one| one.path == "FC/沙罗曼蛇.zip"));
+        assert!(
+            desired
+                .files
+                .iter()
+                .any(|one| one.path == "FC/沙罗曼蛇.zip")
+        );
     }
 
     #[test]

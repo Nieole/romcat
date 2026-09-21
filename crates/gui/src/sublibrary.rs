@@ -2885,11 +2885,7 @@ impl Screen {
         plan: &romcat_core::sync::Plan,
     ) {
         let 数 = |tab: Anomaly| match tab {
-            Anomaly::Surprise(kind) => plan
-                .surprises
-                .iter()
-                .filter(|one| one.kind == kind)
-                .count(),
+            Anomaly::Surprise(kind) => plan.surprises.iter().filter(|one| one.kind == kind).count(),
             Anomaly::NoFit => plan.rejected.len(),
         };
         ui.add_space(step(3));
@@ -2971,13 +2967,7 @@ impl Screen {
     ///
     /// 勾一下要**重排一趟**（[`Self::set_restore_missing`]）：那份计划是排它那一刻按这个
     /// 开关排出来的，光把勾画上去，上面那几个数说的还是没补回的那一趟。
-    fn restore_ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        site: &Site,
-        tasks: &mut Tasks,
-         几个: usize,
-    ) {
+    fn restore_ui(&mut self, ui: &mut egui::Ui, site: &Site, tasks: &mut Tasks, 几个: usize) {
         ui.add_space(step(2));
         let mut on = self.restore_missing;
         if ui
@@ -3173,7 +3163,13 @@ fn tally_ui(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan, prepare_ms: f64) 
     struct 一行(&'static str, u64, u64, Option<u64>, &'static str);
 
     let 几行 = [
-        一行("新增", plan.adds.files, plan.adds.variants, Some(plan.adds.bytes), ""),
+        一行(
+            "新增",
+            plan.adds.files,
+            plan.adds.variants,
+            Some(plan.adds.bytes),
+            "",
+        ),
         一行(
             "更新",
             plan.updates.files,
