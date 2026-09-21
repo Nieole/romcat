@@ -42,7 +42,7 @@
 
 use std::path::PathBuf;
 
-use crate::{browse, layout, look, queue, rail, roots, settings, sublibrary, task};
+use crate::{browse, dialog, layout, look, queue, rail, roots, settings, sublibrary, task};
 use romcat_core::catalog::WorkQuery;
 use romcat_core::report::thousands;
 use romcat_core::site::Site;
@@ -56,6 +56,31 @@ pub enum Closing {
     Deferred,
     /// 已经把关闭命令发出去了。
     Sent,
+}
+
+/// **这一下是不是「单按了这个键」**：按下、而且**没带 `⌘` / `Ctrl` / `Alt`**。
+///
+/// 照的是设计稿那一支（`if(typing||mod&&k.toLowerCase()!=='a')return`）：带修饰键的那几下
+/// 各有各的归处（`⌘ A` 全选、`⌘ F` 搜索），剩下的一概不接——不然 macOS 上 `Ctrl+F`
+/// （系统里那是「光标右移」）会被当成收藏。
+///
+/// **看的是那一下自己带的修饰键**，不是 `InputState::modifiers` 那份「眼下按着什么」：
+/// 后者由开窗那一层每帧填，测试里合成的输入填不出来——而这道门正是测试要钉的。
+/// `shift` 不算：`?` 在多数键盘上就得按 `shift` 才打得出来。
+fn 单键按下(ctx: &egui::Context, key: egui::Key) -> bool {
+    ctx.input(|input| {
+        input.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Key {
+                    key: 按的,
+                    modifiers,
+                    pressed: true,
+                    ..
+                } if *按的 == key && !(modifiers.command || modifiers.ctrl || modifiers.alt)
+            )
+        })
+    })
 }
 
 /// 看的是哪一屏。
@@ -157,6 +182,11 @@ pub struct App {
     prepared: bool,
     /// 上一次写进窗口标题的那一句。**标题变了才发一条命令**（换屏、打开或换掉作品详情页），不是每帧发一条。
     titled: Option<String>,
+    /// **按 `?` 摊开的那层快捷键表**开着没有（票 `gui-looks-like-the-design/14`）。
+    ///
+    /// 开没开着由画它的那一屏自己记——这一层是窗口，因为 `?` 在哪一屏上按都摊得开
+    /// （[`crate::dialog`] 那一条「弹层开没开着是画它的那一屏自己记着的」）。
+    keys_sheet: bool,
     /// **人按了左栏顶上那张「切换主库」。**
     ///
     /// 这一层自己换不了库：六屏全建立在「库一定在」这个前提上，换库那一下要把整份
@@ -242,6 +272,7 @@ impl App {
             workspace_label,
             prepared: false,
             titled: None,
+            keys_sheet: false,
             switching: false,
             switch_workspace: None,
             works: None,
@@ -712,6 +743,7 @@ impl App {
         // 「下一帧开头结算」在眼里就是「按下去就换」。
         self.route();
         self.shortcuts(ui.ctx());
+        self.keys_sheet(ui.ctx());
         // **换到别的屏，子库屏删掉一台之后留着的那一份撤销就丢掉**（拿主意的人 2026-09-14 定）：提示条上
         // 那颗「撤销」只在子库屏摆着的时候按得着。
         if self.view != View::Sublibraries {
@@ -872,24 +904,142 @@ impl App {
         self.titled = Some(title);
     }
 
-    /// **全局快捷键。** 眼下只有一个：`⌘/Ctrl+,` 打开设置。
+    /// **全窗口的快捷键，全在这一处**（票 `gui-looks-like-the-design/14`）。
     ///
     /// 摆在窗口这一层而不在某一屏里，理由与 [`Self::start_stage`] 同一条：**只有这儿够得着
-    /// 「看的是哪一屏」**（ADR-0005：屏与屏之间不该互相拿着对方）。
+    /// 「看的是哪一屏」**（ADR-0005：屏与屏之间不该互相拿着对方）。浏览屏那几下
+    /// （`↑` `↓` / `Enter` / `空格` / `⌘ A` / `F` / `E`）因此也接在这儿，不在那一屏里另开一个
+    /// 键盘入口——**一件事一个判据**（ADR-0024）：「这一下算不算快捷键」的那三道门只有一份。
     ///
-    /// 两道门抄的是逐条那一处（`queue::Screen::keyboard`）：**有一层弹层开着不接**
-    /// （[`crate::dialog::screen_has_keys`]，egui 的 `Modal` 拦得住指针、拦不住键盘），
-    /// **光标在文本框里也不接**——那一栏里正打着中文。
+    /// ## 三道门
     ///
-    /// **切屏那六下（`⌘/Ctrl+1–6`）、搜索、`?` 不在这儿**：那几下是票
-    /// `gui-looks-like-the-design/14` 的验收，这张票只欠 `⌘/Ctrl+,` 这一下（挂单 `Q1061`）。
+    /// 前两道抄的是逐条那一处（`queue::Screen::keyboard`）：
+    ///
+    /// 1. **有一层弹层开着不接**（[`crate::dialog::screen_has_keys`]）——egui 的 `Modal`
+    ///    拦得住指针、拦不住键盘。
+    /// 2. **光标在文本框里不接**——那一栏里正打着中文，`F` 是用户要的字母不是命令。
+    /// 3. **有一层浮层摊着不接**（[`egui::Popup::is_any_open`]）——右键菜单、下拉都算。
+    ///    菜单摊着时 `Esc` 该收的是菜单，那一下归 egui 那一层收（`browse::menu`）；这里再接
+    ///    一遍，就成了一下退两层。
+    ///
+    /// ## `Esc` 一层一层退
+    ///
+    /// 这里**一个 `Esc` 都不接**，那一下三层各自收各自的：右键菜单（`egui::Popup`）、
+    /// 弹层（[`crate::dialog`] 里那一处 `consume_key`）、作品详情页上那颗「返回浏览」。
+    /// 最上面那一层先收，因为上面两层开着时这一处压根不跑（门 1 与门 3）。
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if !crate::dialog::screen_has_keys(ctx) || ctx.egui_wants_keyboard_input() {
+        if !crate::dialog::screen_has_keys(ctx)
+            || egui::Popup::is_any_open(ctx)
+            || ctx.egui_wants_keyboard_input()
+        {
             return;
+        }
+        self.switch_view_keys(ctx);
+        self.browse_keys(ctx);
+    }
+
+    /// 走到哪一屏、开哪一层：`⌘/Ctrl+1–6`、`⌘/Ctrl+,`、`⌘/Ctrl+F`、`?`。
+    fn switch_view_keys(&mut self, ctx: &egui::Context) {
+        const 数字: [egui::Key; 6] = [
+            egui::Key::Num1,
+            egui::Key::Num2,
+            egui::Key::Num3,
+            egui::Key::Num4,
+            egui::Key::Num5,
+            egui::Key::Num6,
+        ];
+        // **第几下就是左栏上从上往下第几个**（[`rail::order`]）：屏上摆着的次序与键上数的
+        // 次序是同一份，不在这儿另列一遍。
+        for (at, view) in rail::order().into_iter().enumerate() {
+            let Some(key) = 数字.get(at).copied() else {
+                break;
+            };
+            let 这一下 = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, key);
+            if ctx.input_mut(|input| input.consume_shortcut(&这一下)) {
+                self.show_view(view);
+            }
         }
         let 设置 = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Comma);
         if ctx.input_mut(|input| input.consume_shortcut(&设置)) {
             self.view = View::Settings;
+        }
+        // **搜索**：换到浏览屏、把筛选栏展开（收着时那一框连画都不画）、光标放进去。
+        // 放进去那一下由浏览屏在画那一框的那一帧落实（`browse::Screen::focus_search`）。
+        let 搜索 = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::F);
+        if ctx.input_mut(|input| input.consume_shortcut(&搜索)) {
+            self.view = View::Browse;
+            layout::FILTER.set_collapsed(ctx, false);
+            self.browse.focus_search();
+        }
+        // **`?` 看快捷键**：一层弹层，摆的是全仓那唯一一份表（[`crate::keys`]）。
+        let 快捷键 = egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::Questionmark);
+        if ctx.input_mut(|input| input.consume_shortcut(&快捷键)) {
+            self.keys_sheet = true;
+        }
+    }
+
+    /// 浏览屏那几下：`↑` `↓` 挪高亮、`Enter` 打开、`空格` 勾选、`⌘/Ctrl+A` 全选、
+    /// `F` 收藏、`E` 编辑元数据。
+    ///
+    /// **只在浏览屏、而且作品详情页没开着时才接**（设计稿 `S.screen!=='browse'||S.wd`）：
+    /// 详情页盖住整块屏，那时 `F` 与 `E` 说的是另一件事。
+    fn browse_keys(&mut self, ctx: &egui::Context) {
+        if self.view != View::Browse || self.browse.page().is_some() {
+            return;
+        }
+        let 全选 = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::A);
+        if ctx.input_mut(|input| input.consume_shortcut(&全选)) {
+            self.browse.select_all();
+        }
+        let (往上, 往下, 打开, 勾选, 收藏, 编辑) = (
+            单键按下(ctx, egui::Key::ArrowUp),
+            单键按下(ctx, egui::Key::ArrowDown),
+            单键按下(ctx, egui::Key::Enter),
+            单键按下(ctx, egui::Key::Space),
+            单键按下(ctx, egui::Key::F),
+            单键按下(ctx, egui::Key::E),
+        );
+        if 往上 {
+            self.browse.step_focus(&self.site.catalog, false);
+        }
+        if 往下 {
+            self.browse.step_focus(&self.site.catalog, true);
+        }
+        if 打开 {
+            self.browse.open_focused(&self.site.catalog);
+        }
+        if 勾选 {
+            self.browse.toggle_pick_focused(&self.site.catalog);
+        }
+        if 收藏 {
+            self.browse
+                .toggle_favorite_focused(&self.site, &mut self.board);
+        }
+        if 编辑 {
+            self.browse.edit_focused(&self.site.catalog);
+        }
+    }
+
+    /// **按 `?` 摊开的那层快捷键表**（设计稿 `DLG.keys`）。
+    ///
+    /// 摆的是全仓那唯一一份表，连**怎么画**也是那一处（[`crate::keys::table`]）——设置屏
+    /// 「快捷键」那一节画的是同一个函数。照稿 `w:620`，也就是[默认那一档](crate::dialog::Width::Standard)。
+    fn keys_sheet(&mut self, ctx: &egui::Context) {
+        if !self.keys_sheet {
+            return;
+        }
+        /// 页脚上按下去的那一颗。
+        enum 按的 {
+            知道了,
+        }
+        let footer = dialog::Footer::new(dialog::Button::new("知道了", 按的::知道了).primary())
+            .dismiss_on_right();
+        let shown = dialog::Dialog::new("快捷键", "快捷键", footer)
+            .note(crate::keys::NOTE)
+            .width(dialog::Width::Standard)
+            .show(ctx, crate::keys::table);
+        if shown.pressed.is_some() {
+            self.keys_sheet = false;
         }
     }
 
