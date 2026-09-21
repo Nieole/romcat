@@ -228,6 +228,32 @@ impl Plan {
                     pad(reason.label(), 18),
                     thousands(rows.len() as u64),
                 );
+                // **撞车按撞在一起的那一处归堆印**（[`Plan::collisions`]）：一条一条平铺着报，
+                // 读的人得自己拿路径去配对，而撞在一起的几行落点一模一样（剥掉了根名）。
+                // 归堆是核心一处的事，命令行与界面配出来的对子因此是同一批（ADR-0024）。
+                if reason == RejectReason::Collision {
+                    let 几处 = self.collisions();
+                    for 一处 in 几处.iter().take(EXAMPLES) {
+                        let _ = writeln!(out, "  {}  撞上 {} 份", 一处.path, 一处.files.len());
+                        for file in &一处.files {
+                            let _ = writeln!(out, "    来自 {}", file.source);
+                        }
+                    }
+                    if 几处.len() > EXAMPLES {
+                        let _ = writeln!(
+                            out,
+                            "  …… 另有 {} 处。",
+                            thousands((几处.len() - EXAMPLES) as u64)
+                        );
+                    }
+                    let _ = writeln!(
+                        out,
+                        "  **撞上的一个都不放行**：放行其中一个等于由排序决定谁留下，\n\
+                         下一趟排序变了赢家就换人。排除其中一份（记成这个子库的一条例外），\n\
+                         另一份下一趟就正常复制。"
+                    );
+                    continue;
+                }
                 for file in rows.iter().take(EXAMPLES) {
                     let _ = writeln!(out, "  {}", file.path);
                     let _ = writeln!(out, "    {}", file.detail);
