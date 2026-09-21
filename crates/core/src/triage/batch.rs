@@ -1435,11 +1435,19 @@ mod tests {
     fn 细分每一项都说得出占整批的几成() {
         // 屏上那条占比条的长短就是它。一项都没处理掉时，各项加起来正好是整批。
         let (items, shape) = 一批加它的细分(30);
-        let 细分 = breakdown(&下钻(&items, Axis::Directory), &Parts::default(), &shape, Axis::Directory);
+        let 细分 = breakdown(
+            &下钻(&items, Axis::Directory),
+            &Parts::default(),
+            &shape,
+            Axis::Directory,
+        );
         assert_eq!((细分.whole, 细分.left, 细分.done), (30, 30, 0));
         assert!(细分.locked.is_none());
         let 加起来: f64 = 细分.rows.iter().map(|row| row.share(细分.whole)).sum();
-        assert!((加起来 - 1.0).abs() < 1e-9, "各项占比加起来不是一整批：{细分:?}");
+        assert!(
+            (加起来 - 1.0).abs() < 1e-9,
+            "各项占比加起来不是一整批：{细分:?}"
+        );
         assert!(细分.rows.iter().all(|row| row.done.is_none()));
     }
 
@@ -1449,7 +1457,12 @@ mod tests {
         // 不然人只会以为自己刚才什么也没做。占比条的分母是**本来**多少条，所以
         // 余下那几项的条一点都不该变长。
         let (items, shape) = 一批加它的细分(30);
-        let 原先 = breakdown(&下钻(&items, Axis::Directory), &Parts::default(), &shape, Axis::Directory);
+        let 原先 = breakdown(
+            &下钻(&items, Axis::Directory),
+            &Parts::default(),
+            &shape,
+            Axis::Directory,
+        );
         let 那一项 = 原先.rows[0].clone();
 
         // 那一组落下之后队列里只剩别的组。
@@ -1465,9 +1478,18 @@ mod tests {
             PartKind::Passed,
             7,
         ));
-        let 之后 = breakdown(&下钻(&剩下, Axis::Directory), &parts, &shape, Axis::Directory);
+        let 之后 = breakdown(
+            &下钻(&剩下, Axis::Directory),
+            &parts,
+            &shape,
+            Axis::Directory,
+        );
 
-        assert_eq!(之后.rows.len(), 原先.rows.len(), "处理掉的那一项从栏上消失了");
+        assert_eq!(
+            之后.rows.len(),
+            原先.rows.len(),
+            "处理掉的那一项从栏上消失了"
+        );
         let 标着 = 之后
             .rows
             .iter()
@@ -1478,10 +1500,17 @@ mod tests {
         assert_eq!(标着.left, 0, "整组裁干净了，那一项该一条都不剩");
         assert_eq!(标着.done.map(PartKind::label), Some("已通过"));
         assert!(
-            之后.rows.iter().filter(|row| row.done.is_none()).all(|row| row.left == row.count),
+            之后
+                .rows
+                .iter()
+                .filter(|row| row.done.is_none())
+                .all(|row| row.left == row.count),
             "没裁过的那几项，还剩的就该是它全部：{之后:?}",
         );
-        assert_eq!((之后.whole, 之后.left, 之后.done), (30, 30 - 那一项.count, 那一项.count));
+        assert_eq!(
+            (之后.whole, 之后.left, 之后.done),
+            (30, 30 - 那一项.count, 那一项.count)
+        );
         for 这一行 in &之后.rows {
             let 原来 = 原先
                 .rows
@@ -1508,7 +1537,12 @@ mod tests {
             7,
         );
         assert_eq!(parts.locked_axis(&shape), Some(Axis::Directory));
-        let 细分 = breakdown(&下钻(&items, Axis::Directory), &parts, &shape, Axis::Directory);
+        let 细分 = breakdown(
+            &下钻(&items, Axis::Directory),
+            &parts,
+            &shape,
+            Axis::Directory,
+        );
         assert!(细分.partly_done());
         assert_eq!(
             细分.axis_refusal().as_deref(),
@@ -1525,7 +1559,12 @@ mod tests {
         // 那一批裁决撤掉，这一项就不再是处理过的。
         parts.keep(|batch| batch != 7);
         assert_eq!(parts.locked_axis(&shape), None);
-        let 撤完 = breakdown(&下钻(&items, Axis::Directory), &parts, &shape, Axis::Directory);
+        let 撤完 = breakdown(
+            &下钻(&items, Axis::Directory),
+            &parts,
+            &shape,
+            Axis::Directory,
+        );
         assert!(!撤完.partly_done());
         assert_eq!(撤完.axis_refusal(), None);
         assert!(撤完.rows.iter().all(|row| row.done.is_none()));

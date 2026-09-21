@@ -1418,7 +1418,10 @@ fn 两颗整批按钮各作用于一层_框里那颗只盖这一组_底下那一
     let (mut app, shape, axis) = 展开一批能过的(&ctx);
     let 整批 = app.queue().queue().count(&Scope::whole(shape));
     let (那一项, 条数) = 下钻到头一项(&ctx, &mut app, axis);
-    assert!(条数 < 整批, "这一组该只是整批的一部分，不然两颗盖住的数一样，分不出接没接反");
+    assert!(
+        条数 < 整批,
+        "这一组该只是整批的一部分，不然两颗盖住的数一样，分不出接没接反"
+    );
 
     // **两次都在下钻着的时候点**：落下之后 `apply_plan` 会把下钻那一层放掉，那一刻
     // 作用范围本来就等于整批——那时再点，两颗接反了也看不出来。
@@ -1434,10 +1437,16 @@ fn 两颗整批按钮各作用于一层_框里那颗只盖这一组_底下那一
 
     // ——— 底下那一排那颗：照旧盖整批，不受下钻影响 ———
     assert!(
-        app.queue().scope().is_some_and(|scope| scope.drill.is_some()),
+        app.queue()
+            .scope()
+            .is_some_and(|scope| scope.drill.is_some()),
         "这一步要在下钻着的时候点，不然分不出两颗接没接反",
     );
-    在高窗里点(&ctx, &mut app, &format!("全部通过（{} 条）", thousands(整批)));
+    在高窗里点(
+        &ctx,
+        &mut app,
+        &format!("全部通过（{} 条）", thousands(整批)),
+    );
     assert_eq!(
         计划条数(&app),
         整批,

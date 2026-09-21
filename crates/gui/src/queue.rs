@@ -603,7 +603,8 @@ impl Screen {
         self.refresh_opened();
     }
 
-    /// 眼下这一批屏上摆着的那几条样本。**数的始终是整批**（照稿，见 [`samples_column`]）。
+    /// 眼下这一批屏上摆着的那几条样本。**数的始终是整批**：下钻收窄的是整批操作的作用范围，
+    /// 而「这一批长什么样」那句话不跟着只剩一组（照稿）。
     #[must_use]
     pub fn samples(&self) -> Vec<Sample> {
         self.opened
@@ -612,7 +613,7 @@ impl Screen {
             .unwrap_or_default()
     }
 
-    /// 下钻着的那一组屏上摆着的那几条样本——**就地那一框**里的（[`drill_box`]）；没下钻时是空的。
+    /// 下钻着的那一组屏上摆着的那几条样本——**就地那一框**里摆的；没下钻时是空的。
     #[must_use]
     pub fn drilled_samples(&self) -> Vec<Sample> {
         self.opened
