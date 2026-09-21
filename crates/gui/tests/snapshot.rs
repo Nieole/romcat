@@ -59,7 +59,7 @@ use egui::accesskit::Role;
 use egui_kittest::kittest::Queryable;
 use egui_kittest::{Harness, SnapshotOptions};
 use romcat_core::catalog::browse::PlatformFilter;
-use romcat_core::catalog::identify::{Candidate, Identification, Provenance};
+use romcat_core::catalog::identify::{Candidate, Identification, Provenance, Tier};
 use romcat_core::catalog::roots::{self, LibraryRoot, RootScan};
 use romcat_core::catalog::scrape::{Harvested, HarvestedMedia, HarvestedValue};
 use romcat_core::catalog::{Catalog, CatalogError, Confidence, SCHEMA_VERSION, State};
@@ -281,6 +281,70 @@ fn 画着的每一处含(output: &egui::FullOutput, 那一段: &str) -> Vec<egui
         找(&clipped.shape, 那一段, &mut 每一处);
     }
     每一处
+}
+
+/// **弹层里**认得下的每一段画在哪儿，按画出来的次序。
+///
+/// 为什么要把弹层切出来：弹层与它底下那一屏画在同一张图上，而「4.00 MiB」「1995」这种字
+/// 两边都有（底下那张主列表的容量、年份那两列也这么写）。按整段的字去认分不开，按画出来的
+/// 次序也分不开。**按裁剪框分得开**：弹层里每一段的裁剪框横着铺满这一层（左右两边都贴着
+/// 这一层的边），而底下那一屏的每一块各自被自己那一栏夹着——正中那一栏起在四百多点上，
+/// 够不着弹层的左边。
+///
+/// [`正好画着的每一处`] 与 [`画着的每一处含`] 认的是整段或子串；一列里那几段的字各不相同时
+/// （「保留作品自带」与「来自「某某」」）只能按这一支挑。
+fn 弹层里的每一段<'a>(
+    output: &egui::FullOutput,
+    画面: [f32; 2],
+    认: impl Fn(&str) -> bool + 'a,
+) -> Vec<egui::Rect> {
+    fn 找(
+        shape: &egui::epaint::Shape, 认: &dyn Fn(&str) -> bool, 每一处: &mut Vec<egui::Rect>
+    ) {
+        match shape {
+            egui::epaint::Shape::Text(text) => {
+                if 认(text.galley.text()) {
+                    每一处.push(egui::Rect::from_min_size(text.pos, text.galley.size()));
+                }
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    找(one, 认, 每一处);
+                }
+            }
+            _ => {}
+        }
+    }
+    // 这一层多宽、摆在哪儿：共用弹层那一层自己说了算（居中、宽取令牌里最宽那一档）。
+    let 宽 = romcat_gui::dialog::Width::Widest.points();
+    let (左, 右) = ((画面[0] - 宽) / 2.0, (画面[0] + 宽) / 2.0);
+    let mut 每一处 = Vec::new();
+    for clipped in &output.shapes {
+        if clipped.clip_rect.left() > 左 + 4.0 || clipped.clip_rect.right() < 右 - 4.0 {
+            continue;
+        }
+        找(&clipped.shape, &认, &mut 每一处);
+    }
+    每一处
+}
+
+/// **一列里那几段的左缘对得齐吗**：全等才算齐（差半个点都不算）。
+///
+/// 对齐是这几张图的**验收**，所以写成断言而不是只靠基线：基线只说「与上次一样」，
+/// 而上次也可能是歪的。比的是**这几段画在哪儿**（`Galley` 的位置），不是像素。
+#[track_caller]
+fn 一列上对得齐(每一处: &[egui::Rect], 该有几段: usize, 哪一列: &str) {
+    assert_eq!(
+        每一处.len(),
+        该有几段,
+        "{哪一列}该有 {该有几段} 段，屏上画出了 {} 段：{每一处:?}",
+        每一处.len(),
+    );
+    let 左缘: Vec<f32> = 每一处.iter().map(|rect| rect.left()).collect();
+    assert!(
+        左缘.windows(2).all(|两个| (两个[0] - 两个[1]).abs() < 0.5),
+        "{哪一列}没立成一列，几段的左缘是 {左缘:?}",
+    );
 }
 
 /// 把这扇窗此刻的样子与 `tests/snapshots/<名字>.png` 比。对不上时当场红。
@@ -1607,6 +1671,68 @@ fn 拍合并向导(名字: &str, 主题: Theme, 第几步: usize) {
     按(&mut harness, romcat_gui::browse::merge::MERGE);
     for _ in 1..第几步 {
         按(&mut harness, "下一步");
+    }
+    // **对齐写成断言**（拿主意的人 2026-09-21 看图提的版式返工）：同一列那几段的左缘得全等。
+    // 只靠基线拦不住——基线只说「与上次一样」，而上次也可能是歪的。
+    match 第几步 {
+        1 => 一列上对得齐(
+            &弹层里的每一段(harness.output(), 画面, |text| text.contains(" 个变体 · ")),
+            3,
+            "第一步那三行的「平台 · 年份 · 几个变体 · 置信度」",
+        ),
+        2 => {
+            一列上对得齐(
+                &弹层里的每一段(harness.output(), 画面, |text| {
+                    text == "保留作品自带" || text.starts_with("来自「")
+                }),
+                4,
+                "第二步「来自哪儿」那一列",
+            );
+            // 置信度那一列写的是**四档里的哪一个词**（核心库 `Tier::label`，
+            // 「没有候选」那一档不带「置信」两个字）——照四档认，别按字尾猜。
+            let 四档: Vec<&str> = [Tier::High, Tier::Medium, Tier::Low, Tier::Unidentified]
+                .iter()
+                .map(|档| 档.label())
+                .collect();
+            一列上对得齐(
+                &弹层里的每一段(harness.output(), 画面, |text| 四档.contains(&text)),
+                4,
+                "第二步置信度那一列",
+            );
+            一列上对得齐(
+                &弹层里的每一段(harness.output(), 画面, |text| text.ends_with(" MiB")),
+                4,
+                "第二步体积那一列",
+            );
+        }
+        _ => {
+            // 字段冲突那张表**摊满这一层**：三列的表头就是那三列的左缘，头一列（字段）窄、
+            // 后两列分余下的。由着 `Grid` 按内容收窄的话，三列会挤在左边三分之二里、
+            // 右边空着一大块（那正是这次返工要治的）。
+            let 表头 = |那几个字: &str| {
+                let 每一处 = 弹层里的每一段(harness.output(), 画面, |text| text == 那几个字);
+                assert_eq!(每一处.len(), 1, "表头「{那几个字}」该正好画一段");
+                每一处[0]
+            };
+            let (字段, 保留, 其他) = (表头("字段"), 表头("保留作品"), 表头("其他作品"));
+            let 头一列 = 保留.left() - 字段.left();
+            let 第二列 = 其他.left() - 保留.left();
+            assert!(
+                第二列 > 头一列 * 2.0,
+                "后两列没分掉余下的宽：字段那一列占 {头一列}，保留作品那一列只占 {第二列}",
+            );
+            // 每一列的值立成一列，而且与它的表头对齐：不是跟着前面的字流走。
+            let 保留列 = 弹层里的每一段(harness.output(), 画面, |text| {
+                ["超时空之钥", "1995", "Square", "角色扮演"].contains(&text)
+            });
+            一列上对得齐(&保留列, 5, "第三步「保留作品」那一列");
+            assert!(
+                (保留列[0].left() - 保留.left()).abs() < 24.0,
+                "「保留作品」那一列的值（{}）没跟它的表头（{}）对齐",
+                保留列[0].left(),
+                保留.left(),
+            );
+        }
     }
     if 第几步 == 3 {
         // **看得全**：「会怎样」那几条里最后那一条整段都得在视口里，不许被页脚切掉半行。

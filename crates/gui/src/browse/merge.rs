@@ -33,6 +33,7 @@ use crate::dialog::{Button, Dialog, Footer, Width};
 use crate::font;
 use crate::look;
 use crate::table;
+use crate::tokens::Tokens;
 
 /// 浏览屏工具条上那颗按钮上的字（设计稿 `#merge-btn`）。
 pub const MERGE: &str = "合并作品…";
@@ -525,20 +526,23 @@ impl Wizard {
             let 当得了 = row.work.is_some();
             look::card(ui, egui::Vec2::splat(look::step(2)), |ui| {
                 ui.horizontal(|ui| {
-                    // 照稿那一行（`.mwit` 里那句 `help`）：平台 · 年份 · 几个变体。
+                    // **照稿那一行**（`.mwit` 里那句 `help`）：平台 · 年份 · 几个变体 · 置信度。
+                    //
+                    // **置信度那个词收在这一句里，不另摆一枚标签**：稿上它就是这句话的末一段
+                    // （`${TIER[w.tier]}`）。另摆一枚的话它紧跟在作品名后头，而名字长短不一，
+                    // 三行的标签就永远对不齐（拿主意的人 2026-09-21 看图挑出）。
+                    // 哪一档照旧由核心库答（`WorkDetail::confidence`），这里只印那个词。
                     let 一句 = format!(
-                        "{} · {} · {} 个变体",
+                        "{} · {} · {} 个变体 · {}",
                         平台那一句(row),
                         row.year.as_deref().unwrap_or("年份未知"),
                         thousands(row.variants.len() as u64),
+                        row.tier.label(),
                     );
                     if look::radio_option(ui, 是保留, &row.title, &一句).clicked() && 当得了
                     {
                         换保留 = Some(at);
                     }
-                    // 置信度那一档也照稿摆在名字后头。哪一档由核心库答（`WorkVariant::confidence`
-                    // 取最高的那一条，与表上那一行同一条口径），这里只印。
-                    look::tier_tag(ui, row.tier);
                     if 是保留 {
                         table::tag(ui, "保留");
                     }
@@ -699,11 +703,24 @@ impl Wizard {
                     look::help(ui, &format!("{} 个变体", thousands(还剩 as u64)));
                 });
                 look::divider(ui);
+                // **一行摆成明说了宽的几列**（设计稿 `.vrow` 的 `grid-template-columns`）：
+                // 跟着前面的字流走的话，名字长一点后面整排就往右挪一点，四行之间永远参差
+                // （拿主意的人 2026-09-21 看图挑出）。列宽取令牌 `merge-row-columns`，
+                // 变体那一列占余下的——与手动例外那张表（`sublibrary::exception_table_ui`）
+                // 同一种摆法。
+                let [来自宽, 置信宽, 体积宽, 首选宽] = Tokens::builtin().layout.merge_row_columns;
+                let 变体宽 = (ui.available_width()
+                    - 来自宽
+                    - 置信宽
+                    - 体积宽
+                    - 首选宽
+                    - 4.0 * ui.spacing().item_spacing.x)
+                    .max(0.0);
                 for (at, variant) in 这组 {
                     let 自带 = at == self.keep;
                     let mut 勾着 = 自带 || !self.excluded.contains(&variant.key);
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
+                    ui.horizontal_top(|ui| {
+                        列(ui, 变体宽, &mut |ui| {
                             // **勾选框把变体简称当标签**（稿上那是分开的两栏）：egui 里一个
                             // 光秃秃的小方块是个很小的靶子，而这一步正是要人逐个点过去。
                             // **保留作品自己的变体勾不掉**：它们本来就在那儿，这一层不是删东西的地方。
@@ -719,17 +736,24 @@ impl Wizard {
                             }
                             look::help(ui, &variant.key);
                         });
-                        look::help(
-                            ui,
-                            &if 自带 {
-                                "保留作品自带".to_string()
-                            } else {
-                                format!("来自「{}」", self.rows[at].title)
-                            },
-                        );
-                        look::tier_tag(ui, variant.tier);
-                        look::help(ui, &human_bytes(variant.bytes));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        列(ui, 来自宽, &mut |ui| {
+                            look::help(
+                                ui,
+                                &if 自带 {
+                                    "保留作品自带".to_string()
+                                } else {
+                                    format!("来自「{}」", self.rows[at].title)
+                                },
+                            );
+                        });
+                        列(ui, 置信宽, &mut |ui| {
+                            // **横着摆**：那一枚是一道色条加一个词，竖排那一层会把它拆成两行。
+                            ui.horizontal(|ui| look::tier_tag(ui, variant.tier));
+                        });
+                        列(ui, 体积宽, &mut |ui| {
+                            look::help(ui, &human_bytes(variant.bytes));
+                        });
+                        列(ui, 首选宽, &mut |ui| {
                             let 是首选 = 首选.as_deref() == Some(variant.key.as_str());
                             if ui
                                 .add_enabled(勾着, egui::RadioButton::new(是首选, "首选"))
@@ -777,22 +801,37 @@ impl Wizard {
         // 一个字段摆一张卡的话，五个冲突就把「合并后会发生什么」整块推到折叠线以下——
         // 而那一块正是这一步要人看清的东西。
         look::card(ui, egui::Vec2::splat(look::step(2)), |ui| {
+            // **三列明说宽度、摊满这一层**（设计稿 `.ctbl` 的 `<th style="width:90px">` 加两列
+            // 分余下的）：由着 `Grid` 按内容收窄的话，表框画满整宽而内容只到三分之二，
+            // 右边空着一大块（拿主意的人 2026-09-21 看图挑出）。
+            let 缝 = look::step(3);
+            let 字段宽 = Tokens::builtin().layout.conflict_key_width;
+            let 余下 = (ui.available_width() - 字段宽 - 2.0 * 缝).max(0.0);
+            let 值宽 = 余下 / 2.0;
             egui::Grid::new("字段冲突")
                 .num_columns(3)
                 .striped(true)
-                .spacing(egui::vec2(look::step(3), look::step(1)))
+                .spacing(egui::vec2(缝, look::step(1)))
                 .show(ui, |ui| {
-                    look::section(ui, "字段");
-                    look::section(ui, "保留作品");
-                    look::section(ui, "其他作品");
+                    列(ui, 字段宽, &mut |ui| {
+                        look::section(ui, "字段");
+                    });
+                    列(ui, 值宽, &mut |ui| {
+                        look::section(ui, "保留作品");
+                    });
+                    列(ui, 值宽, &mut |ui| {
+                        look::section(ui, "其他作品");
+                    });
                     ui.end_row();
                     for conflict in &self.conflicts {
                         let 眼下 = self.pick_of(conflict);
-                        ui.label(font::strong(conflict.field.label()));
+                        列(ui, 字段宽, &mut |ui| {
+                            ui.label(font::strong(conflict.field.label()));
+                        });
                         // **每一格里再起一竖**：[`look::radio_option`] 头一句是 `add_space`，
                         // 而 egui 的网格布局上 `add_space` 当场炸（「add_space makes no sense
                         // in a grid layout」）。竖排那一层不是网格，摆得下。
-                        ui.vertical(|ui| match &conflict.keep {
+                        列(ui, 值宽, &mut |ui| match &conflict.keep {
                             Some(said) => {
                                 let 整句 = said.values.join("、");
                                 if look::radio_option(ui, 眼下 == Pick::Keep, &剪一段(&整句), "")
@@ -808,7 +847,7 @@ impl Wizard {
                                 look::help(ui, "（空）");
                             }
                         });
-                        ui.vertical(|ui| {
+                        列(ui, 值宽, &mut |ui| {
                             for (at, offer) in conflict.others.iter().enumerate() {
                                 let 整句 = offer.said.values.join("、");
                                 // **值与来源同字时不写两遍**：标题那一行的值常常就是作品名，
@@ -946,6 +985,21 @@ fn best_keep(rows: &[Row]) -> usize {
             )
         })
         .map_or(0, |(at, _)| at)
+}
+
+/// 一行里**明说了多宽的一格**：把一竖排的内容框在这么宽里，于是上下几行同一列对得齐。
+///
+/// 与手动例外那张表（`sublibrary::exception_table_ui` 里那个 `cell`）同一种写法——
+/// 跟着前面的字流走的话，前面长一点后面整排就往右挪一点。**对齐不靠数空格、不靠填空白**。
+fn 列(ui: &mut egui::Ui, 宽: f32, add: &mut dyn FnMut(&mut egui::Ui)) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(宽, 0.0),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.set_width(宽);
+            add(ui);
+        },
+    );
 }
 
 /// 这几个变体涉及哪几个平台，**去重、照走到的次序**。

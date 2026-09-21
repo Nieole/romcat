@@ -937,6 +937,12 @@ pub struct Layout {
     pub capacity_input_width: f32,
     /// 手动例外表「平台 / 体积 / 时间 / 撤销」四列的宽；「作品」与「备注」分余下的（设计稿 `DLG.excl` 的表头）。
     pub exception_table_columns: [f32; 4],
+    /// 合并向导第二步一行里「来自哪儿 / 置信度 / 体积 / 首选」四列的宽；变体那一列占余下的
+    /// （设计稿 `.vrow` 的 `grid-template-columns`）。
+    pub merge_row_columns: [f32; 4],
+    /// 合并向导第三步字段冲突表「字段」那一列的宽；「保留作品」与「其他作品」分余下的
+    /// （设计稿 `.ctbl` 的表头）。
+    pub conflict_key_width: f32,
     /// 手动例外弹层里「备注（可选）」那一格的宽（设计稿 `DLG.excl`）。
     pub exception_note_width: f32,
     /// 单选圆点的直径（设计稿 `.opt input`）。
