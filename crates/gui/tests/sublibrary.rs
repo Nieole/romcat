@@ -4459,7 +4459,7 @@ fn 这一类几条(场: &现场, kind: romcat_core::sync::SurpriseKind) -> usize
 }
 
 #[test]
-fn 三方对比照稿一排五个大数字_新增删除保留异常与放不进目标() {
+fn 三方对比照稿一排五个大数字_新增删除不动异常与放不进目标() {
     // 票面头一条：**数字要齐**。少一个数，人就得自己拿别处的数去凑——而「异常」与
     // 「放不进目标」这两个数别处没有，凑不出来。
     // 拿主意的人 2026-09-21 裁（挂单 `Q1020`）：**照稿一排五个大数字方块**，
@@ -4483,7 +4483,7 @@ fn 三方对比照稿一排五个大数字_新增删除保留异常与放不进�
         ),
         (
             plan.keeps.files.to_string(),
-            format!("保留 · {}", human_bytes(plan.keeps.bytes)),
+            format!("不动 · {}", human_bytes(plan.keeps.bytes)),
         ),
         (
             plan.surprises.len().to_string(),

@@ -3183,8 +3183,12 @@ impl Screen {
     }
 }
 
-/// 差量的账（设计稿 `diffHTML` 的 `.diff`）：**一排五个大数字**——新增 / 删除 / 保留 / 异常 /
+/// 差量的账（设计稿 `diffHTML` 的 `.diff`）：**一排五个大数字**——新增 / 删除 / 不动 / 异常 /
 /// 放不进目标——底下一行小字，加上净变化那一句。
+///
+/// 稿上第三格写的是「保留」，**屏上写「不动」**（词表**不动**，2026-09-21 拿主意的人定）：
+/// 「保留」在这个仓库里已经被占了两次——[[合并作品]]的「选一个保留」与[[平台纠正]]的
+/// 「保持目录的说法」——三处并着叫，下一个人必然并回去。
 ///
 /// ## 五个大数字照稿，多出来的两样进小字
 ///
@@ -3220,7 +3224,7 @@ fn tally_ui(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan, prepare_ms: f64) 
         ),
         (
             thousands(plan.keeps.files),
-            format!("保留 · {}", human_bytes(plan.keeps.bytes)),
+            format!("不动 · {}", human_bytes(plan.keeps.bytes)),
         ),
         (
             thousands(plan.surprises.len() as u64),
@@ -3276,7 +3280,7 @@ fn tally_ui(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan, prepare_ms: f64) 
         ("新增", plan.adds.variants),
         ("更新", plan.updates.variants),
         ("删除", plan.deletes.variants),
-        ("保留", plan.keeps.variants),
+        ("不动", plan.keeps.variants),
         ("异常", plan.surprise_variants()),
         ("放不进目标", 放不进.variants),
     ]

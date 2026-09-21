@@ -47,7 +47,7 @@ impl Plan {
         line(&mut out, "新增", self.adds, None);
         line(&mut out, "更新", self.updates, Some(self.updates_before));
         line(&mut out, "删除", self.deletes, None);
-        line(&mut out, "保持", self.keeps, None);
+        line(&mut out, "不动", self.keeps, None);
         let _ = writeln!(out, "{}{}", pad("净变化", 12), signed_bytes(self.net_bytes));
         let _ = writeln!(
             out,
