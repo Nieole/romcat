@@ -6,7 +6,7 @@
 
 **Blocked by:** 27；纠正落沉淀库由 `one-criterion-per-thing/07` 提供。
 
-**Status:** ready-for-agent（实现做完、两轴审查照改完；**全量门禁还没跑**——等编排者给棒）
+**Status:** done
 
 ⚠️ **人工纠正聚合结果是一等公民功能**（词表**成型规则**）——不是补丁，是这套模型承认
 规则会出错之后留的正门。
@@ -107,3 +107,31 @@
 三份库屏截图 fixture 的建库收尾收进 `扫一个根摆好`、作品详情与命令行两条建库脚手架收进 `摆一份库`。
 **记着没动**：「落过一笔 → 重新成型 → 作废浏览屏」这条摊在六个文件里（各屏认领自己那一趟是这个
 代码库既有的形状）；`roots::reshape` / `take_reshaped` 是对库体检那一块的纯转发（仓里同形先例已有）。
+
+
+## 全量门禁（2026-09-21，`cargo xtask gate -j 3 --test-threads 3 --keep-going`）
+
+带 `TMPDIR=/Users/nicoer/dev/game-wt/cs/tmp CARGO_INCREMENTAL=0`，跑在 `/Users/nicoer/dev/game-wt/slot-4`。
+
+**跑了两趟。**
+
+**头一趟**（日志 `/Users/nicoer/dev/game-wt/logs/slot-4-gl29-gate.log`）：**五绿一红**——
+fmt 2s、glossary 1s、check 16s、clippy 22s、test 949s（2,428 passed / 0 failed）、
+**doc 10s 红**：`shaping.rs` 里 `[`ShapingDoubt`]` 在删掉那个没用上的 `use` 之后成了断链
+（`-D rustdoc::broken-intra-doc-links`）。补成全路径。
+
+**第二趟**（日志 `…/slot-4-gl29-gate-2.log`，跑的是最终那棵树）：**六条全绿，`EXIT=0`**——
+fmt 1s、glossary 0s、check 3s、clippy 4s、**test 635s**、doc 5s。
+test 那一步 **80 个目标**（6 份 unittests + 71 个集成测试二进制 + 3 份文档测试）
+合计 **2,428 passed / 0 failed / 2 ignored**。
+
+**截图门**：三屏六张新基线（`library/shaping-{doubts,merge,split}-{light,dark}`）。
+先不带更新探一趟 —— 只有这六张红（缺基线），别人的一张没动；按名字筛着出图；出完
+**不带更新连跑两遍，两遍都 87/87 全绿**（61.9s / 62.8s），第二趟门禁里那一遍是第三次绿。
+脆基线 `sublibrary/exceptions-*`（挂单 `Q1014`）这几趟一次都没红。
+
+**出图自审量过的对齐**（编排者 2026-09-21 交代）：合成那一支的附属文件列表原先缩 18 点、
+落在圆点与字之间（实测左缘 321，上下两条 330），改成 `impact_column + item_spacing.x`；
+拆开那一支那一条「会怎样」紧挨着上面那一档单选、两行的字差 5 点（324 对 329），
+而那句话标题底下与末尾各说过一次，删掉它。量过没改的两处：两行变体右头的
+「N 个文件 · 大小」右缘都在 965，成型存疑明细两行的「处理…」右缘都在 963、左缘都在 317。
