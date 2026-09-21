@@ -3183,97 +3183,113 @@ impl Screen {
     }
 }
 
-/// 差量的账：**新增 / 更新 / 删除 / 保留 / 异常 / 放不进目标**各几个文件、几个变体、多大，
-/// 加上净变化。
+/// 差量的账（设计稿 `diffHTML` 的 `.diff`）：**一排五个大数字**——新增 / 删除 / 保留 / 异常 /
+/// 放不进目标——底下一行小字，加上净变化那一句。
 ///
-/// 设计稿 `diffHTML` 那一排摆的是五个数（新增、删除、保留、异常、放不进目标）。这里多摆
-/// **更新**那一行：稿上那份模型没有更新这回事，而真的有——把它并进新增，屏上那个「新增」
-/// 就会含着一批其实是重传的文件。
+/// ## 五个大数字照稿，多出来的两样进小字
 ///
-/// **异常**与**放不进目标**分开两行，不并成一个数：前者是目标上对不上、本次一律不动的
-/// （[`Plan::surprises`]），后者是**这一趟压根传不上去**的（[`Plan::rejected`]），处置办法
-/// 完全不同。两行的「变体」一列数的是**涉及几个变体**——人认得的是这个数。
+/// 拿主意的人 2026-09-21 裁：**照稿一排五个方块，底下加一行小字把表上多出来的那两样补齐**
+/// （挂单 `Q1020`）。那两样是稿上那份模型答不出的，而它们是真的：
+///
+/// - **更新**。稿上没有「更新」这回事，可计划器分得出[新增](Act::Add)与[重传](Act::Update)。
+///   **绝不并进新增那个大数字**：并了的话，屏上那个「新增」就含着一批其实是重传已有那一份的
+///   文件，而人照它去估这一趟要往卡上写多少全新的东西。小字里单说一句。
+/// - **每一类涉及几个变体**。词表里人认得的单位是**变体**，不是文件——五个大数字数的都是文件。
+///
+/// **两样都摆在屏上，不塞进悬停**：截图门看不到悬停，等于没有（`docs/agents/long-jobs.md`）。
+/// 零的那几档**不写空话**（照票 `26` 的裁定）：更新是零就不提更新，变体数只写非零的那几档。
+///
+/// ## 异常与放不进目标是两个格子，不并成一个
+///
+/// 前者是目标上对不上、**本次一律不动**的（[`Plan::surprises`]），后者是**这一趟压根传不上去**
+/// 的（[`Plan::rejected`]），处置办法完全不同。
 ///
 /// [`Plan::surprises`]: romcat_core::sync::Plan::surprises
 /// [`Plan::rejected`]: romcat_core::sync::Plan::rejected
 fn tally_ui(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan, prepare_ms: f64) {
-    /// 一行账：几个文件、涉及几个变体、多少容量（**容量说不出来时是 `None`**）。
-    struct 一行(&'static str, u64, u64, Option<u64>, &'static str);
-
     let 放不进 = plan.rejected_tally();
-    let 几行 = [
-        一行(
-            "新增",
-            plan.adds.files,
-            plan.adds.variants,
-            Some(plan.adds.bytes),
-            "",
+    // 五格照稿：大数字前的正负号也照稿（新增 `+`、删除 `−`），别的三格不带号。
+    let 五格 = [
+        (
+            format!("＋{}", thousands(plan.adds.files)),
+            format!("新增 · {}", human_bytes(plan.adds.bytes)),
         ),
-        一行(
-            "更新",
-            plan.updates.files,
-            plan.updates.variants,
-            Some(plan.updates.bytes),
-            "",
+        (
+            format!("－{}", thousands(plan.deletes.files)),
+            format!("删除 · 释放 {}", human_bytes(plan.deletes.bytes)),
         ),
-        一行(
-            "删除",
-            plan.deletes.files,
-            plan.deletes.variants,
-            Some(plan.deletes.bytes),
-            "",
+        (
+            thousands(plan.keeps.files),
+            format!("保留 · {}", human_bytes(plan.keeps.bytes)),
         ),
-        一行(
-            "保留",
-            plan.keeps.files,
-            plan.keeps.variants,
-            Some(plan.keeps.bytes),
-            "",
+        (
+            thousands(plan.surprises.len() as u64),
+            // **不给容量**：这几条各占各的地方（没了的在卡上一个字节都不占，落点被占那几个
+            // 占着地方的是别人的文件），凑一个总数出来不对应卡上任何一件事。
+            "异常 · 不处理".to_string(),
         ),
-        一行(
-            "异常",
-            plan.surprises.len() as u64,
-            // **两个数都由核心答**（`Plan::surprise_variants` / `Plan::rejected_tally`）：
-            // 这一层自己再数一遍的话，命令行与 `--json` 里永远没有这两个数，只有界面有。
-            plan.surprise_variants(),
-            // **容量这一格说不出来，就不给数**（那两支的文档写着为什么）。
-            None,
-            "目标上对不上的那几件，本次一律不动。逐类看下面那一块。",
-        ),
-        一行(
-            "放不进目标",
-            放不进.files,
-            放不进.variants,
-            Some(放不进.bytes),
-            "这一趟传不上去的那几份，既不新增也不删除。逐类看下面那一块。",
+        (
+            thousands(放不进.files),
+            format!("放不进目标 · {}", human_bytes(放不进.bytes)),
         ),
     ];
-    egui::Grid::new(format!("差量账 · {}", plan.sublibrary))
-        .num_columns(4)
-        .spacing([16.0, 4.0])
-        .show(ui, |ui| {
-            ui.label(font::strong(""));
-            ui.label(font::strong("文件"));
-            ui.label(font::strong("变体"));
-            ui.label(font::strong("容量"));
-            ui.end_row();
-            for 一行(what, files, variants, bytes, 悬停) in 几行 {
-                let 这一格 = ui.label(what);
-                if !悬停.is_empty() {
-                    这一格.on_hover_text(悬停);
-                }
-                // 数量与容量用等宽：几行账竖着比大小。
-                ui.label(font::mono(thousands(files)));
-                ui.label(font::mono(thousands(variants)));
-                match bytes {
-                    Some(bytes) => ui.label(font::mono(human_bytes(bytes))),
-                    None => ui
-                        .label(font::mono("—"))
-                        .on_hover_text("这几条各占各的地方，凑不出一个说得通的总数。"),
-                };
-                ui.end_row();
-            }
-        });
+    let tokens = Tokens::builtin();
+    let 缝 = tokens.space.diff_gap;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 缝;
+        let 宽 = ((ui.available_width() - 4.0 * 缝) / 5.0).max(0.0);
+        let 内宽 = (宽 - 2.0 * tokens.space.diff_tile_padding[1]).max(0.0);
+        // **小字换行，不截断**（稿里 `.diff small` 就是会换行的普通行内文字）：卡片在两栏版式里
+        // 只有半屏宽，一格摊到九十点上下，「新增 · 220.72 MiB」截出来是「新增 · 69…」——
+        // 那一格于是什么都没说。换行之后几格高矮不一，所以**先量一遍、取最高的那一个**，
+        // 五格的小字框一律照它，底边才齐（稿上那是个等高的 grid）。
+        let 小字号 = look::font_size(ui.ctx(), tokens.font.size_caption_plus);
+        let 小字高 = 五格
+            .iter()
+            .map(|(_, 小字)| {
+                ui.painter()
+                    .layout(
+                        小字.clone(),
+                        egui::FontId::proportional(小字号),
+                        ui.visuals().weak_text_color(),
+                        内宽,
+                    )
+                    .size()
+                    .y
+            })
+            .fold(0.0_f32, f32::max);
+        for (数, 小字) in &五格 {
+            diff_tile_ui(ui, 宽, 小字高, 数, 小字);
+        }
+    });
+    // **小字那一行**：表上才有的那两样。零的不写。
+    ui.add_space(step(1));
+    let mut 补齐 = Vec::new();
+    if plan.updates.files > 0 {
+        补齐.push(format!(
+            "其中 {} 个是重传已有的那一份（{}），**没算进上面的新增**",
+            thousands(plan.updates.files),
+            human_bytes(plan.updates.bytes),
+        ));
+    }
+    let 变体数: Vec<String> = [
+        ("新增", plan.adds.variants),
+        ("更新", plan.updates.variants),
+        ("删除", plan.deletes.variants),
+        ("保留", plan.keeps.variants),
+        ("异常", plan.surprise_variants()),
+        ("放不进目标", 放不进.variants),
+    ]
+    .into_iter()
+    .filter(|(_, 几个)| *几个 > 0)
+    .map(|(什么, 几个)| format!("{什么} {} 个", thousands(几个)))
+    .collect();
+    if !变体数.is_empty() {
+        补齐.push(format!("按变体数：{}", 变体数.join("、")));
+    }
+    if !补齐.is_empty() {
+        look::help(ui, &plain(&补齐.join("；")));
+    }
     let net = if plan.net_bytes >= 0 {
         format!("＋{}", human_bytes(plan.net_bytes.unsigned_abs()))
     } else {
@@ -3284,6 +3300,61 @@ fn tally_ui(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan, prepare_ms: f64) 
         human_bytes(plan.after_bytes),
         human_bytes(plan.actual_bytes),
     ));
+}
+
+/// 差量账里的一格（设计稿 `.diff div`）：面板二号底、分隔线色描边、中圆角，内边距取令牌；
+/// 数是等宽、`size-diff-value` 那一档，底下半号说明字号的弱字，**换行不截断**。
+///
+/// `小字高` 由调用方量好后一律传同一个：五格的小字长短不一，各画各的高度底边就参差
+/// （稿上那是个等高的 grid）。
+///
+/// 与库体检那一格（`health::tile_ui`）长得像而不共用：那一格三段、按得下去、有语气色条，
+/// 这一格两段、不接交互。硬凑成一支的话，两边各自的规矩都得塞进同一串参数里。
+fn diff_tile_ui(ui: &mut egui::Ui, 宽: f32, 小字高: f32, 数: &str, 小字: &str) {
+    let tokens = Tokens::builtin();
+    let [上下, 左右] = tokens.space.diff_tile_padding;
+    let 圆角 = tokens.radius.medium;
+    let palette = look::palette(ui);
+    let 小字号 = look::font_size(ui.ctx(), tokens.font.size_caption_plus);
+    let rect = egui::Frame::new()
+        .fill(palette.panel_2)
+        .corner_radius(圆角)
+        .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
+        .show(ui, |ui| {
+            let 内宽 = (宽 - 2.0 * 左右).max(0.0);
+            ui.set_min_width(内宽);
+            ui.set_max_width(内宽);
+            ui.spacing_mut().item_spacing.y = tokens.space.health_tile_gap;
+            ui.vertical(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        font::mono(数)
+                            .size(tokens.font.size_diff_value)
+                            .color(ui.visuals().strong_text_color()),
+                    )
+                    .truncate(),
+                );
+                ui.allocate_ui_with_layout(
+                    egui::vec2(内宽, 小字高),
+                    egui::Layout::top_down(Align::Min),
+                    |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(小字)
+                                    .size(小字号)
+                                    .color(ui.visuals().weak_text_color()),
+                            )
+                            .wrap(),
+                        );
+                    },
+                );
+            });
+        })
+        .response
+        .rect;
+    let 线 = ui.visuals().widgets.noninteractive.bg_stroke;
+    ui.painter()
+        .rect_stroke(rect, 圆角, 线, egui::StrokeKind::Inside);
 }
 
 /// 折期望状态与排计划时那几件**要说出口**的怪事：核心报的那几条，以及**目标吃不下而

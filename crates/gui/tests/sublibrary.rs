@@ -326,6 +326,19 @@ impl 现场 {
         self.等任务跑完();
     }
 
+    /// 改过主库里那份文件之后**重扫一遍**：中立库里那个戳跟着变，差量才说得出「更新」。
+    ///
+    /// **这是夹具在动自己那块临时盘**，不是工具在写主库（ADR-0004）——工具那一侧照旧一个
+    /// 字节都不写，这几行只是把「主库那份被别处改过了」这件事摆出来。
+    fn 重扫(&mut self) {
+        let 根 = self.库.path().to_path_buf();
+        let (screen, site) = self.app.sublibrary_and_site();
+        let mut options = ScanOptions::named(&根, "库");
+        options.jobs = Jobs::Fixed(2);
+        scan::scan(&RealFs::new(), &mut site.catalog, &options, &Handle::new()).expect("扫得动");
+        screen.reload(site);
+    }
+
     /// 勾上或取消「同步时补回」那一格，跟着等重排那一趟差量跑完。
     fn 勾上补回(&mut self, on: bool) {
         {
@@ -4446,49 +4459,68 @@ fn 这一类几条(场: &现场, kind: romcat_core::sync::SurpriseKind) -> usize
 }
 
 #[test]
-fn 三方对比的数字齐_新增更新删除保留异常与放不进目标六行都在() {
+fn 三方对比照稿一排五个大数字_新增删除保留异常与放不进目标() {
     // 票面头一条：**数字要齐**。少一个数，人就得自己拿别处的数去凑——而「异常」与
     // 「放不进目标」这两个数别处没有，凑不出来。
+    // 拿主意的人 2026-09-21 裁（挂单 `Q1020`）：**照稿一排五个大数字方块**，
+    // 底下一行小字把表上才有的那两样补齐。
     let ctx = headless::context();
     let mut 场 = 现场::摆好();
     摆出异常(&mut 场);
 
     let 屏上 = 画两帧整张卡(&ctx, &mut 场);
-    for 一行 in [
-        "新增",
-        "更新",
-        "删除",
-        "保留",
-        "异常",
-        "放不进目标",
-        "文件",
-        "变体",
-        "容量",
+    let plan = &场.app.sublibrary().prepared().expect("排得出来").plan;
+    let 放不进 = plan.rejected_tally();
+    // **五格照稿**：每一格一个大数字加一行小字，两样都得画在屏上。
+    for (数, 小字) in [
+        (
+            format!("＋{}", plan.adds.files),
+            format!("新增 · {}", human_bytes(plan.adds.bytes)),
+        ),
+        (
+            format!("－{}", plan.deletes.files),
+            format!("删除 · 释放 {}", human_bytes(plan.deletes.bytes)),
+        ),
+        (
+            plan.keeps.files.to_string(),
+            format!("保留 · {}", human_bytes(plan.keeps.bytes)),
+        ),
+        (
+            plan.surprises.len().to_string(),
+            "异常 · 不处理".to_string(),
+        ),
+        (
+            放不进.files.to_string(),
+            format!("放不进目标 · {}", human_bytes(放不进.bytes)),
+        ),
     ] {
         assert!(
-            屏上.lines().any(|line| line == 一行),
-            "账上少了「{一行}」这一行：\n{屏上}"
+            屏上.lines().any(|line| line == 数),
+            "五格里少了「{数}」那个数：\n{屏上}",
+        );
+        assert!(
+            屏上.lines().any(|line| line == 小字),
+            "「{数}」那一格底下少了小字「{小字}」：\n{屏上}",
         );
     }
 
     // **屏上那几个数就是计划里那几个**：两处各数一遍的话，一处改了另一处会静静地说着旧数。
     // 断的是**加得起来**这条规矩，不是某个字面量：五个栏名后面那几个数，头四个加起来是
-    // 「异常」那一行，末一个是「放不进目标」那一行。
-    let plan = &场.app.sublibrary().prepared().expect("排得出来").plan;
+    // 「异常」那一格，末一个是「放不进目标」那一格。
     assert!(
         plan.surprises.len() >= 3,
         "这份夹具该凑出至少三类异常：{:?}",
         plan.surprises,
     );
+    // 分段开关上那一颗整段写着「<栏名> <数>」。**认「后面就是一个数」那一条**：
+    // 同样以栏名打头的还有五格里的小字（「放不进目标 · 12.79 KiB」），它跟的不是光一个数。
     let 栏上的数 = |栏: romcat_gui::sublibrary::Anomaly| -> u64 {
         let 前缀 = format!("{} ", 栏.shown());
         屏上
             .lines()
-            .find_map(|line| line.strip_prefix(&前缀))
+            .filter_map(|line| line.strip_prefix(&前缀))
+            .find_map(|尾巴| 尾巴.trim().parse::<u64>().ok())
             .unwrap_or_else(|| panic!("屏上没有「{}」那一栏：\n{屏上}", 栏.shown()))
-            .trim()
-            .parse()
-            .expect("栏名后面跟着一个数")
     };
     let 四类加起来: u64 = romcat_gui::sublibrary::Anomaly::all()
         .into_iter()
@@ -4498,12 +4530,97 @@ fn 三方对比的数字齐_新增更新删除保留异常与放不进目标六�
     assert_eq!(
         四类加起来,
         plan.surprises.len() as u64,
-        "四栏加起来与账上「异常」那一行对不上：\n{屏上}",
+        "四栏加起来与「异常」那一格对不上：\n{屏上}",
     );
     assert_eq!(
         栏上的数(romcat_gui::sublibrary::Anomaly::NoFit),
-        plan.rejected_tally().files,
-        "「放不进目标」那一栏与账上那一行对不上：\n{屏上}",
+        放不进.files,
+        "「放不进目标」那一栏与那一格对不上：\n{屏上}",
+    );
+
+    // **变体数写在小字里，不塞进悬停**（截图门看不到悬停，等于没有）：人认得的单位是变体。
+    assert!(
+        屏上.lines().any(|line| line.starts_with("按变体数：")),
+        "小字里没有变体数那一句：\n{屏上}",
+    );
+    for (什么, 几个) in [
+        ("新增", plan.adds.variants),
+        ("异常", plan.surprise_variants()),
+        ("放不进目标", 放不进.variants),
+    ] {
+        if 几个 > 0 {
+            assert!(
+                屏上.contains(&format!("{什么} {几个} 个")),
+                "小字里少了「{什么}」的变体数：\n{屏上}",
+            );
+        }
+    }
+    // **零的那几档不写空话**（照票 26 的裁定）：这份夹具里删除是零，小字里就不该提删除的变体数。
+    assert_eq!(
+        plan.deletes.variants, 0,
+        "这份夹具本来就没有删除，这条断言才成立"
+    );
+    assert!(!屏上.contains("删除 0 个"), "零的那一档写了空话：\n{屏上}",);
+}
+
+#[test]
+fn 更新那一档不并进新增_小字里单说一句() {
+    // 拿主意的人 2026-09-21 裁下「照稿一排五个大数字」时点名保住的那一条：**更新不许悄悄
+    // 算进新增**。并了的话，屏上那个「新增」就含着一批其实是重传已有那一份的文件，
+    // 而人照它去估这一趟要往卡上写多少全新的东西——那正是我们当初不照稿的唯一实质理由。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+    场.同步到底();
+    assert!(
+        场.app.sublibrary().error().is_none(),
+        "{:?}",
+        场.app.sublibrary().error()
+    );
+
+    // 主库那一份被别处改过了（夹具动的是自己那块临时盘），重扫之后差量该说「更新」。
+    写(&场.库.path().join("SFC/幻想传说 汉化版.zip"), &zip(6000));
+    场.重扫();
+    场.摊开("掌机");
+    场.排预览();
+
+    // **先把要比的数抄出来**：底下要可变借一次窗口去画帧。
+    let (新增几个, 更新几个, 更新几个变体) = {
+        let plan = &场.app.sublibrary().prepared().expect("排得出来").plan;
+        assert!(
+            plan.updates.files > 0,
+            "这份夹具没造出更新来：{:?}",
+            plan.updates
+        );
+        (plan.adds.files, plan.updates.files, plan.updates.variants)
+    };
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+
+    // **反向断言**：新增那个大数字就是新增本身，不是新增加更新。
+    assert!(
+        屏上.lines().any(|line| line == format!("＋{新增几个}")),
+        "新增那个大数字不是 {新增几个}：\n{屏上}",
+    );
+    assert!(
+        !屏上
+            .lines()
+            .any(|line| line == format!("＋{}", 新增几个 + 更新几个)),
+        "更新被悄悄算进了新增那个大数字：\n{屏上}",
+    );
+    // **更新那一档在小字里单说一句**，摆在屏上而不是悬停里。
+    assert!(
+        屏上.contains(&format!("其中 {更新几个} 个是重传已有的那一份")),
+        "小字里没把更新那一档说出来：\n{屏上}",
+    );
+    assert!(
+        屏上.contains("没算进上面的新增"),
+        "没说清更新不在新增那个数里：\n{屏上}",
+    );
+    assert!(
+        屏上.contains(&format!("更新 {更新几个变体} 个")),
+        "小字里少了更新那一档的变体数：\n{屏上}",
     );
 }
 
