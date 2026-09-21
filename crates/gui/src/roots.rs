@@ -16,8 +16,17 @@
 //! ## 领域判断一条都不在这里
 //!
 //! 加一个根要拦哪几种情况（重名、套在一起、圈进工作目录）在
-//! [`romcat_core::catalog::roots::add_root`]；一个源取回来了没有、有多少条、
+//! [`romcat_core::catalog::roots::add_root`]；**移除一个根要付什么代价**——去掉多少变体、
+//! 浏览里少几行、下次导出少几条、哪台子库少多少——在
+//! [`Catalog::root_removal`](romcat_core::catalog::Catalog::root_removal)，
+//! 那四个数各自复用浏览与导出已有的那一处判断（ADR-0024）；一个源取回来了没有、有多少条、
 //! 上次什么时候取的在 [`romcat_core::sources`]。这一层只画、只转发（ADR-0005）。
+//!
+//! ## 「移除根」那一层为什么是当场算
+//!
+//! 算那四个数要走几遍全库，而这一下是**人主动按的、罕见的一下**——与工序那几行同一条
+//! 先例（`CONTEXT.md` 的**工序**）。所以按下「移除…」那一帧算一次、攥在 [`Removing`] 里，
+//! 往后每帧只画不算。真库上量到超过一秒就改排任务台（挂单 `Q983` 写着翻的条件）。
 //!
 //! ## 长活一律排到任务台上
 //!
@@ -37,7 +46,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use romcat_core::catalog::Catalog;
-use romcat_core::catalog::roots::{self, LibraryRoot, RootStats};
+use romcat_core::catalog::roots::{self, LibraryRoot, RootRemoval, RootStats};
 use romcat_core::fs::RealFs;
 use romcat_core::report::{human_duration, thousands};
 use romcat_core::scan::{self, CheckpointOptions, Jobs, ScanOptions};
@@ -47,6 +56,7 @@ use romcat_core::stage::Stage;
 use romcat_core::task::{Cutoff, Ending};
 
 use crate::clock::Clock;
+use crate::dialog::{Button, Dialog, Footer, Width};
 use crate::font;
 use crate::layout::{FOLD_EXPORT, FOLD_HEALTH, FOLD_ROOTS, FOLD_SOURCES, Fold};
 use crate::look::{self, Tone};
@@ -61,6 +71,46 @@ pub const REFETCH_ALL: &str = "全部更新";
 
 /// 根那张表里扫过的根那颗按钮（设计稿「重新扫描」，与工序段扫描那一行做完时那颗同一个说法）。
 const RESCAN: &str = "重新扫描";
+
+/// 根那一行上开「移除根」那一层的那颗按钮（设计稿 `dg:rmroot` 那颗写的就是带省略号的这三个字：
+/// 按下去开的是一层弹层，不是当场就移）。
+pub const REMOVE: &str = "移除…";
+
+/// 「移除根」那一层页脚上真按下去那一颗（设计稿 `.btn.danger`）。
+pub const REMOVE_ROOT: &str = "移除根";
+
+/// 「移除根」那一层里**文件动不动**那一条（设计稿原话）。**一个字节都不动是 ADR-0004**，
+/// 屏上说的与工具真干的是同一件事。
+const KEEPS_FILES: [(&str, bool); 3] = [
+    ("这个根上的文件", false),
+    ("一个字节都不动", true),
+    ("，工作目录里的库文件会变小。", false),
+];
+
+/// 「移除根」那一层里**只动这一支**那一条。
+///
+/// **稿上没有这一条，票面点名要它**（票 `gui-looks-like-the-design/26` 的 ⚠️：
+/// 「变体的键是「根名 + 相对路径」……所以移除一个根只影响它自己那一支……**这两句要说给用户听**」）。
+/// 另一句在 [`KEEPS_VERDICTS`] 里。两句合起来才是这一下敢按的全部理由。
+const ONLY_THIS_ROOT: [(&str, bool); 3] = [
+    ("别的根", false),
+    ("一条都不少", true),
+    (
+        "：变体的键是「根名 + 相对路径」，同名的东西在别的盘上各算各的。",
+        false,
+    ),
+];
+
+/// 「移除根」那一层里**留得住的那几样**（设计稿原话）：裁决、收藏与合集住**沉淀库**、锚在
+/// **内容锚**上，所以这个根加回来它们照旧生效（`CONTEXT.md`）。
+const KEEPS_VERDICTS: [(&str, bool); 3] = [
+    ("裁决、收藏、合集按文件内容记录，", false),
+    ("会保留", true),
+    (
+        "：以后重新添加这个根，或者同样的文件出现在别的根里，它们仍然有效。",
+        false,
+    ),
+];
 
 /// 盘不在位的根，上次扫描那一格挂的那枚小标签（设计稿原话，挂单 `Q829` 已裁：照稿；词表里原来那个「连接」改名「组合方式」）。
 const UNMOUNTED: &str = "未连接";
@@ -93,6 +143,68 @@ pub const ADD_ROOT: &str = "添加根…";
 /// 窗口窄了两栏一起收窄，不叠成一栏。
 const LEFT_SHARE: f32 = 1.25 / 2.25;
 
+/// 「移除根」那一层里**逐条说明代价**那一张单子（设计稿 `ul.impact`）。
+///
+/// 一条一句话，次序照稿：**会少什么**（留神那一档）、**文件不动**、**留得住什么**、
+/// **哪台子库会少多少**（留神那一档）、**导出少几条**。
+///
+/// **零的那几条不画**：一个作品都不消失时不写「0 个作品会消失」——那句话只会让人多读一遍
+/// 才发现它什么都没说。一台子库都不少时那一条整条不画（同稿：稿上只画有影响的那一台）。
+fn removal_impact_ui(ui: &mut egui::Ui, impact: &RootRemoval) {
+    // 头一条分三种，说的是三件不同的事：
+    //
+    // - **这个根还没扫过**（库里一条记录都没有）：没有代价可说，直说没有。
+    //   这一支不走底下那两句——「这些作品」那时指不着任何东西。
+    // - **有变体、但一部作品都不会消失**：那是好消息，写出来（拿主意的人 2026-09-20 定；稿上没画）。
+    // - **照稿那一种**：去掉多少变体、其中多少作品会从浏览里消失。
+    if impact.variants == 0 {
+        look::impact(
+            ui,
+            &[(
+                "这个根还没扫过，中立库里一条记录都没有——移除它不去掉任何变体。",
+                false,
+            )],
+        );
+    } else {
+        let 变体 = format!("{} 个变体", thousands(impact.variants));
+        let 后半 = if impact.works > 0 {
+            format!(
+                "。其中 {} 个作品只有来自这个根的变体，它们会从浏览中消失。",
+                thousands(impact.works)
+            )
+        } else {
+            "。这些变体所属的作品在别的根里还有变体，浏览里一行都不会消失。".to_owned()
+        };
+        look::impact_warn(
+            ui,
+            &[
+                ("从库中去掉 ", false),
+                (变体.as_str(), true),
+                (后半.as_str(), false),
+            ],
+        );
+    }
+    look::impact(ui, &KEEPS_FILES);
+    look::impact(ui, &ONLY_THIS_ROOT);
+    look::impact(ui, &KEEPS_VERDICTS);
+    for one in &impact.sublibraries {
+        let 那一句 = format!(
+            "子库「{}」的选择集会少 {} 个变体，下次同步时会从设备上删除它们\
+             （同步前的差量预览会列出来）。",
+            one.name,
+            thousands(one.variants)
+        );
+        look::impact_warn(ui, &[(那一句.as_str(), false)]);
+    }
+    if impact.entries > 0 {
+        let 那一句 = format!(
+            "下次导出时，前端里对应的 {} 个条目会被移除。",
+            thousands(impact.entries)
+        );
+        look::impact(ui, &[(那一句.as_str(), false)]);
+    }
+}
+
 /// 贴一个根的目录那个框里的提示字（[开场那条向导](crate::claim)第二步那一框）。
 ///
 /// **摆在这一屏**：加根那条路（[`add_root_from_fields`]）在这儿，向导与库屏走的是同一条——同一件事在相邻两处换个说法，
@@ -117,6 +229,29 @@ pub struct RootRow {
     pub mounted: bool,
 }
 
+/// 「移除根」那一层开着时手上攥的东西。
+///
+/// **代价按下「移除…」那一下算一次，攥在这儿**：算它要走几遍全库
+/// （[`Catalog::root_removal`](romcat_core::catalog::Catalog::root_removal)），
+/// 每帧现算就是每帧卡一下。
+#[derive(Debug, Clone)]
+pub struct Removing {
+    /// 移的是哪个根。
+    pub root: LibraryRoot,
+    /// 这一下的代价（[`RootRemoval`]）。
+    pub impact: RootRemoval,
+    /// 那一格勾上了没有。**没勾上「移除根」按不动**（票 `gui-looks-like-the-design/26` 验收第 3 条）。
+    pub agreed: bool,
+}
+
+/// 「移除根」那一层页脚上按的是哪一颗。
+enum Pressed {
+    /// 取消——Esc 等于按它。
+    Cancel,
+    /// 真移。
+    Remove,
+}
+
 /// 库那一屏。
 pub struct Screen {
     /// 工作目录：加根时拿它守住「中立库不许被圈进主库」（ADR-0004），
@@ -130,8 +265,10 @@ pub struct Screen {
     health: crate::health::Section,
     /// 正在跑的那几趟活的任务号，用来禁掉重复按下。
     running: Vec<(u64, Job)>,
-    /// 点了「移除」还没点头的那个根。
-    removing: Option<String>,
+    /// 点了「移除…」、那一层还开着的那个根（[`Removing`]）。
+    removing: Option<Removing>,
+    /// 刚移掉的那个根叫什么，等窗口那一层取走（[`Screen::take_removed`]）。
+    removed: Option<String>,
     error: Option<String>,
     notice: Option<String>,
     /// 右边那一栏里眼下收着的那几块（[`Fold`]）。开窗时从版式偏好里交进来、每帧画完抄回去
@@ -168,6 +305,7 @@ impl Screen {
             sources: Vec::new(),
             running: Vec::new(),
             removing: None,
+            removed: None,
             error: None,
             notice: None,
             folded: BTreeSet::new(),
@@ -288,22 +426,121 @@ impl Screen {
         }
     }
 
-    /// 移除一个根：**这个根下面的记录整批删掉**，返回去掉了多少变体。
+    /// 按下「移除…」：**算一遍代价**（[`RootRemoval`]），开「移除根」那一层。
     ///
-    /// 丢掉的全是可再生的（中立库整份可再生）；**沉淀库一个字都不动**。
+    /// 算这一下要走几遍全库，所以只在按下去的这一帧算一次、攥在 [`Removing`] 里
+    /// ——每帧现算就是每帧卡一下。算不出来（库读不动）就不开那一层，把话说在屏上：
+    /// **代价看不见的时候不该让人按下去**。
+    pub fn begin_removing(&mut self, site: &Site, name: &str) {
+        let Some(row) = self.roots.iter().find(|row| row.root.name == name) else {
+            return;
+        };
+        match site.catalog.root_removal(name) {
+            Ok(impact) => {
+                self.error = None;
+                self.removing = Some(Removing {
+                    root: row.root.clone(),
+                    impact,
+                    agreed: false,
+                });
+            }
+            Err(error) => self.error = Some(format!("算不出移除这个根的代价：{error}")),
+        }
+    }
+
+    /// 「移除根」那一层眼下开着的是哪个根；没开着就是 `None`。测试拿它核对。
+    #[must_use]
+    pub fn removing(&self) -> Option<&Removing> {
+        self.removing.as_ref()
+    }
+
+    /// 勾没勾那一格。**测试与真窗口走同一条路**：勾上之前「移除根」按不动。
+    pub fn set_agreed(&mut self, agreed: bool) {
+        if let Some(removing) = &mut self.removing {
+            removing.agreed = agreed;
+        }
+    }
+
+    /// 收回「移除…」那一下：那一层关上，一个根都不动。
+    ///
+    /// **「取消」得真的取消。** 一个只能前进不能后退的破坏性确认，比不加确认更坏。
+    pub fn cancel_removing(&mut self) {
+        self.removing = None;
+    }
+
+    /// 刚移掉的那个根叫什么，取走就没了。
+    ///
+    /// **住在这儿而不是由这一屏自己转告别的屏**（ADR-0005）：移掉一个根之后过期的不止
+    /// 这一屏——左栏那个作品数、浏览屏缓着的那几行、待确认队列里指着那几个变体的批
+    /// 全过期了，而**只有窗口那一层同时够得着它们**（`App::route`）。
+    pub fn take_removed(&mut self) -> Option<String> {
+        self.removed.take()
+    }
+
+    /// 移除一个根：**这个根下面的记录整批删掉**。
+    ///
+    /// 丢掉的全是可再生的（中立库整份可再生）；**沉淀库一个字都不动**，
+    /// 主库上的文件更是一个字节都不动（ADR-0004）。
     pub fn remove_root(&mut self, site: &mut Site, name: &str) {
         match site.catalog.remove_root(name) {
             Ok(gone) => {
                 self.error = None;
                 self.removing = None;
+                self.removed = Some(name.to_string());
+                // 照设计稿那句回执：说清去掉了多少，也说清**加回来就恢复**——那正是这一下
+                // 之所以敢按的理由（裁决锚在内容锚上）。括号里那半句把词表的词
+                // **沉淀库**保住（拿主意的人 2026-09-20 定）：稿上那句只说「裁决都还在」，
+                // 而「它们住在哪儿、为什么还在」正是这半句答的。
                 self.notice = Some(format!(
-                    "移除了根「{name}」，从中立库里去掉 {} 个变体。\
-                     沉淀库一条都没动——那里面是你亲手定的东西。",
+                    "已移除根「{name}」，库中去掉 {} 个变体。\
+                     重新添加这个根即可恢复，裁决都还在（沉淀库一条都没动）。",
                     thousands(gone)
                 ));
                 self.reload(site);
             }
             Err(error) => self.error = Some(format!("移不掉：{error}")),
+        }
+    }
+
+    /// 「移除根」那一层（设计稿 `DLG.rmroot`）：**说清代价，勾了才按得动**。
+    ///
+    /// 页脚那颗是危险按钮（稿上 `.btn.danger`）；Esc 等于「取消」。
+    fn removal_ui(&mut self, ctx: &egui::Context, site: &mut Site) {
+        let Some(removing) = &self.removing else {
+            return;
+        };
+        let name = removing.root.name.clone();
+        let impact = removing.impact.clone();
+        let mut agreed = removing.agreed;
+        let footer = Footer::new(Button::new("取消", Pressed::Cancel)).button(
+            Button::new(REMOVE_ROOT, Pressed::Remove)
+                .danger()
+                .enabled(agreed)
+                .hover("只动中立库里的记录：主库上的文件一个字节都不改"),
+        );
+        let shown = Dialog::new("移除根", format!("移除根「{name}」"), footer)
+            // 副标题照稿（`sub`）：这个根在哪、上次扫出来多少变体。**那个数与底下第一条是同一个**
+            // ——两处都是 `Catalog::root_stats` 折出来的，稿上也是同一个 3,102。
+            .note(format!(
+                "{} · 上次扫描 {} 个变体",
+                removing.root.path,
+                thousands(impact.variants)
+            ))
+            .width(Width::Standard)
+            .show(ctx, |ui| {
+                removal_impact_ui(ui, &impact);
+                ui.add_space(look::step(2));
+                // 勾上才按得动那一格（设计稿 `label.opt`）：说的数与第一条里那个是同一个。
+                ui.checkbox(
+                    &mut agreed,
+                    format!("我知道这会从库中去掉 {} 个变体", thousands(impact.variants)),
+                );
+            });
+        self.set_agreed(agreed);
+        match shown.pressed {
+            None => {}
+            Some(Pressed::Cancel) => self.cancel_removing(),
+            Some(Pressed::Remove) => self.remove_root(site, &name),
         }
     }
 
@@ -643,6 +880,8 @@ impl Screen {
         // 两栏底下通栏的**库体检**那一块（设计稿 `data-panel="health"`，离两栏隔一个 `library-gap`）。
         ui.add_space(间距);
         self.health_ui(ui, site, tasks);
+        // 「移除根」那一层：每一帧都画，右栏那一块收着也画（同库体检那一层明细）。
+        self.removal_ui(ui.ctx(), site);
         // 工序段扫描那一行按下去只留记号：这一屏自己那条扫描的路接着排（`Self::take_scan`）。
         self.take_scan(site, tasks);
     }
@@ -813,9 +1052,7 @@ impl Screen {
 
     fn roots_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         let mut 要扫 = None;
-        let mut 要移除 = None;
         let mut 要点头 = None;
-        let mut 要收回 = false;
         // 画的时候不改自己：按下去的那几下先记下来，画完再动
         // （借用检查器要的，也让「按一下发生什么」读起来是一条直线）。
         let roots = self.roots.clone();
@@ -886,8 +1123,8 @@ impl Screen {
                     let 并排宽 = look::small_button_width(ui, RESCAN)
                         .max(look::small_button_width(ui, "扫描"))
                         + ui.spacing().item_spacing.x
-                        + look::small_button_width(ui, "移除");
-                    let 叠起宽 = [RESCAN, "扫描", "移除"]
+                        + look::small_button_width(ui, REMOVE);
+                    let 叠起宽 = [RESCAN, "扫描", REMOVE]
                         .into_iter()
                         .map(|字| look::small_button_width(ui, 字))
                         .fold(0.0, f32::max);
@@ -1000,30 +1237,17 @@ impl Screen {
                                         {
                                             要扫 = Some(row.root.name.clone());
                                         }
-                                        if self.removing.as_deref() == Some(row.root.name.as_str())
-                                        {
-                                            ui.colored_label(
-                                                ui.visuals().warn_fg_color,
-                                                format!(
-                                                    "会去掉 {} 个变体",
-                                                    thousands(row.stats.variants)
-                                                ),
-                                            );
-                                            if ui.button("确认移除").clicked() {
-                                                要移除 = Some(row.root.name.clone());
-                                            }
-                                            // **「算了」得真的算了。** 一个只能前进不能后退的破坏性确认，
-                                            // 比不加确认更坏。
-                                            if ui.button("算了").clicked() {
-                                                要收回 = true;
-                                            }
-                                        } else if ui
+                                        if ui
                                             .add_enabled(
                                                 !忙,
                                                 egui::Button::new(
-                                                    egui::RichText::new("移除").color(警示色),
+                                                    egui::RichText::new(REMOVE).color(警示色),
                                                 )
                                                 .fill(egui::Color32::TRANSPARENT),
+                                            )
+                                            .on_hover_text(
+                                                "先算一遍代价：去掉多少变体、浏览里少几行、\
+                                                 下次导出少几条、哪台子库会少多少",
                                             )
                                             .clicked()
                                         {
@@ -1072,17 +1296,11 @@ impl Screen {
                 });
         }
 
-        if 要收回 {
-            self.removing = None;
-        }
         if let Some(name) = 要点头 {
-            self.removing = Some(name);
+            self.begin_removing(site, &name);
         }
         if let Some(name) = 要扫 {
             self.scan(site, tasks, &name);
-        }
-        if let Some(name) = 要移除 {
-            self.remove_root(site, &name);
         }
 
         // 一个根都没有时这一块说清去哪儿加（照稿这一块里不摆贴路径的表单，加根在屏头「添加根…」，`Self::picked_root`）。

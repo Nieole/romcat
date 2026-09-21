@@ -104,6 +104,95 @@ fn 弹层开着时底下那一屏的快捷键不生效_按退出键关得掉() {
     assert_eq!(屏.按过几次, 1, "弹层关上之后底下那一屏的 N 还是不生效");
 }
 
+/// 页脚上一颗**危险按钮**，能不能按由外头拨（票 `gui-looks-like-the-design/26`）。
+struct 危险那一颗屏 {
+    /// 那一颗按得动吗。
+    能按: bool,
+    /// 真按下去过几次。
+    按下过: usize,
+}
+
+impl 危险那一颗屏 {
+    fn ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let footer = Footer::new(Button::new("取消", 按的::关上))
+            .button(Button::new("删掉", 按的::保存).danger().enabled(self.能按));
+        let shown = Dialog::new("危险", "删掉一样东西", footer).show(&ctx, |ui| {
+            ui.label("按下去就真删了");
+        });
+        if shown.pressed == Some(按的::保存) {
+            self.按下过 += 1;
+        }
+    }
+}
+
+/// 屏上正好写着那几个字的地方在哪儿。
+fn 字画在哪儿(output: &egui::FullOutput, 那几个字: &str) -> Option<egui::Pos2> {
+    fn 找(shape: &egui::epaint::Shape, 那几个字: &str, out: &mut Option<egui::Pos2>) {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == 那几个字 => {
+                *out = Some(egui::Rect::from_min_size(text.pos, text.galley.size()).center());
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    找(one, 那几个字, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = None;
+    for shape in &output.shapes {
+        找(&shape.shape, 那几个字, &mut out);
+    }
+    out
+}
+
+#[test]
+fn 页脚上按不动的危险按钮真的按不下去_拨成能按就按得下去() {
+    // 票 `gui-looks-like-the-design/26` 验收第 3 条那一半的底：颜色由截图门守，
+    // 「按不动」这件事本身由这一条钉着。走的是屏上那条一模一样的路——真发指针事件去点它。
+    let ctx = 上下文();
+    let mut 屏 = 危险那一颗屏 {
+        能按: false,
+        按下过: 0,
+    };
+    // 头一帧在量这一层多大，第二帧才摆稳。
+    跑一帧危险(&ctx, &mut 屏, Vec::new());
+    let 稳了 = 跑一帧危险(&ctx, &mut 屏, Vec::new());
+    let 在 = 字画在哪儿(&稳了, "删掉").expect("屏上有这颗按钮");
+
+    跑一帧危险(&ctx, &mut 屏, 点一下(在));
+    跑一帧危险(&ctx, &mut 屏, Vec::new());
+    assert_eq!(屏.按下过, 0, "按不动的那一颗被按下去了");
+
+    屏.能按 = true;
+    跑一帧危险(&ctx, &mut 屏, Vec::new());
+    跑一帧危险(&ctx, &mut 屏, 点一下(在));
+    跑一帧危险(&ctx, &mut 屏, Vec::new());
+    assert_eq!(屏.按下过, 1, "拨成能按之后还是按不下去");
+}
+
+/// 在 `在` 那一点按下再松开。
+fn 点一下(在: egui::Pos2) -> Vec<egui::Event> {
+    let 键 = |pressed: bool| egui::Event::PointerButton {
+        pos: 在,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    vec![egui::Event::PointerMoved(在), 键(true), 键(false)]
+}
+
+/// 带着这几个事件跑一帧危险那一颗屏。
+fn 跑一帧危险(
+    ctx: &egui::Context,
+    屏: &mut 危险那一颗屏,
+    events: Vec<egui::Event>,
+) -> egui::FullOutput {
+    headless::frame(ctx, 输入(events), |ui| 屏.ui(ui))
+}
+
 // ——— 焦点与一层一层退 ———
 
 /// 一颗「打开」，打开的那一层里头只有一个输入框。记下两样的 id。

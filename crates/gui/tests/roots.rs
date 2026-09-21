@@ -551,7 +551,7 @@ fn 新根落在工作目录里时被拒绝() {
 }
 
 #[test]
-fn 移除一个根时说得出会去掉多少变体_而且只去掉它自己那一支() {
+fn 移除一个根之前那一层逐条说清代价_勾了才按得动() {
     let 甲 = 建库("gui-roots-移甲");
     let 乙 = 建库("gui-roots-移乙");
     let mut 现场 = 现场::摆好();
@@ -571,16 +571,42 @@ fn 移除一个根时说得出会去掉多少变体_而且只去掉它自己那�
         .variants;
     assert!(会去掉 > 0);
 
+    // 按「移除…」：**开一层，不当场就移**。
     {
         let (screen, site, _) = 现场.app.roots_site_and_tasks();
+        screen.begin_removing(site, "元数据库");
+    }
+    let 这一层 = 现场.app.roots().removing().expect("那一层该开着").clone();
+    assert_eq!(这一层.root.name, "元数据库");
+    assert_eq!(
+        这一层.impact.variants, 会去掉,
+        "屏上先说的就是真会去掉的那个数"
+    );
+    assert!(!这一层.agreed, "刚开的时候那一格不许是勾上的——勾了才按得动");
+    assert_eq!(
+        现场.app.roots().roots().len(),
+        2,
+        "开那一层的时候一个根都还没动"
+    );
+
+    // 勾上，按「移除根」。
+    {
+        let (screen, site, _) = 现场.app.roots_site_and_tasks();
+        screen.set_agreed(true);
+        assert!(screen.removing().expect("还开着").agreed);
         screen.remove_root(site, "元数据库");
     }
+    assert!(现场.app.roots().removing().is_none(), "移完那一层该关上");
     let 话 = 现场.app.roots().notice().expect("该说一句");
     assert!(
         话.contains(&会去掉.to_string()),
         "按下去之前看见的那个数，就是它该说的那个数：{话}"
     );
-    assert!(话.contains("沉淀库"), "得说清沉淀库没被动：{话}");
+    assert!(
+        话.contains("重新添加这个根即可恢复"),
+        "得说清加回来就恢复：{话}"
+    );
+    assert!(话.contains("裁决"), "得说清裁决还在：{话}");
     assert_eq!(现场.app.roots().roots().len(), 1);
     assert!(
         现场
@@ -590,6 +616,166 @@ fn 移除一个根时说得出会去掉多少变体_而且只去掉它自己那�
             .contains("主库/FC/魂斗罗.zip")
             .expect("查得到"),
         "另一个根一条都不许少"
+    );
+}
+
+#[test]
+fn 那一层逐条说清会少什么_也说清什么留得住() {
+    // 验收第 1、2 条：去掉多少变体、多少作品消失、导出少多少条各说一句；
+    // 裁决、收藏与合集**会保留**，加回来就恢复。
+    let 库 = 建库("gui-roots-移了说清");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    {
+        let (screen, site, _) = 现场.app.roots_site_and_tasks();
+        screen.begin_removing(site, "主库");
+    }
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    for 那一句 in [
+        "移除根「主库」",
+        "从库中去掉 ",
+        "一个字节都不动",
+        // 票面 ⚠️ 那两句：只影响它自己那一支、裁决留得住——**两句都要说给用户听**。
+        "一条都不少",
+        "根名 + 相对路径",
+        "会保留",
+        "以后重新添加这个根",
+        "我知道这会从库中去掉",
+        "移除根",
+        "取消",
+    ] {
+        assert!(屏上.contains(那一句), "那一层该说「{那一句}」：\n{屏上}");
+    }
+    assert!(
+        屏上.contains("下次导出时，前端里对应的"),
+        "导出少多少条也得说一句：\n{屏上}"
+    );
+}
+
+#[test]
+fn 还没扫过的根那一层不说去掉多少_直说没有代价() {
+    // 审查挑出来的：`variants == 0` 时「这些变体所属的作品……」那句指不着任何东西。
+    let 库 = 建库("gui-roots-没扫过就移");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    {
+        let (screen, site, _) = 现场.app.roots_site_and_tasks();
+        screen.begin_removing(site, "主库");
+    }
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        屏上.contains("这个根还没扫过"),
+        "没扫过的根该直说没有代价：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("它们会从浏览中消失"),
+        "不该说作品会消失：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("所属的作品"),
+        "更不该说「这些变体所属的作品」——一个变体都没有：\n{屏上}"
+    );
+}
+
+#[test]
+fn 没勾上那一格的时候移除根按不动() {
+    // 验收第 3 条。走的是界面上那条一模一样的路：真点那颗按钮。
+    let 库 = 建库("gui-roots-没勾");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    {
+        let (screen, site, _) = 现场.app.roots_site_and_tasks();
+        screen.begin_removing(site, "主库");
+    }
+    点一下(&ctx, &mut 现场.app, "移除根");
+    assert_eq!(
+        现场.app.roots().roots().len(),
+        1,
+        "没勾上那一格，按下去什么都不该发生"
+    );
+    assert!(现场.app.roots().removing().is_some(), "那一层还开着");
+
+    现场.app.roots_site_and_tasks().0.set_agreed(true);
+    点一下(&ctx, &mut 现场.app, "移除根");
+    assert!(现场.app.roots().roots().is_empty(), "勾上之后按得动了");
+}
+
+#[test]
+fn 那一层取消掉的话一个根都不动() {
+    let 库 = 建库("gui-roots-移了又算了");
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+
+    {
+        let (screen, site, _) = 现场.app.roots_site_and_tasks();
+        screen.begin_removing(site, "主库");
+        screen.set_agreed(true);
+    }
+    // 「取消」走的是这一层自己那条路（页脚与 Esc 交回来的是同一个动作）。
+    现场.app.roots_site_and_tasks().0.cancel_removing();
+    assert!(现场.app.roots().removing().is_none());
+    assert_eq!(现场.app.roots().roots().len(), 1, "根还在");
+    assert!(
+        现场
+            .app
+            .site()
+            .catalog
+            .contains("主库/FC/魂斗罗.zip")
+            .expect("查得到")
+    );
+}
+
+#[test]
+fn 移除一个根之后左栏那个作品数与工序那几个数跟着变() {
+    // 验收第 4 条：根列表、左栏徽标与工序那几个数都得跟着变。左栏那个作品数与浏览屏
+    // 缓着的那几行由窗口那一层转告（`App::route`），库屏自己够不着它们。
+    let 库 = 建库("gui-roots-移了重数");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    现场.扫("主库");
+    现场.app.route();
+    let 之前 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(之前.contains("1 个根"), "左栏库那一格先说 1 个根：\n{之前}");
+
+    {
+        let (screen, site, _) = 现场.app.roots_site_and_tasks();
+        screen.begin_removing(site, "主库");
+        screen.set_agreed(true);
+        screen.remove_root(site, "主库");
+    }
+    现场.app.route();
+    let 之后 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        现场.app.ui(ui)
+    }));
+    assert!(
+        之后.contains("0 个根"),
+        "左栏库那一格跟着变成 0 个根：\n{之后}"
+    );
+    assert!(现场.app.roots().roots().is_empty(), "根那张表也跟着空了");
+    // 工序那一段：扫描那一行重新回到「一个根都没有」那一档。
+    let 扫描 = 现场
+        .app
+        .roots()
+        .stages()
+        .of(Stage::Scan)
+        .expect("有扫描那一行")
+        .clone();
+    assert!(
+        !扫描.settled(),
+        "一个根都没有了，扫描那一行不该还报「做完了」：{扫描:?}"
     );
 }
 

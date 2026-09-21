@@ -589,6 +589,28 @@ impl App {
     ///
     /// 每帧一次。测试与实测拿它当那一下——**走的是界面上那条一模一样的路**。
     pub fn route(&mut self) {
+        // **移掉一个根之后，别的屏也得跟着变**（票 `gui-looks-like-the-design/26` 验收第 4 条）。
+        // 根那张表与工序那几行由库屏自己重读了（`roots::Screen::reload`），够不着的三样在这儿：
+        // 左栏那个作品数、浏览屏缓着的那几行、待确认队列里指着那几个变体的批——
+        // **只有窗口这一层同时够得着它们**（ADR-0005，同上面裁决那一支）。
+        if self.roots.take_removed().is_some() {
+            self.browse.invalidate(&self.site);
+            self.recount();
+            self.queue.reload(&self.site);
+            // **每一台子库缓着的那份账也作废**：弹层上一句刚说「子库「X」的选择集会少 N 个
+            // 变体」，缓着的选择集与差量预览说的却还是移除之前那一批——而「同步」认的正是
+            // 那份差量（ADR-0016）。稿上按下去做的也是这一下（`S.subs.forEach(s=>{s.planned=false;})`）。
+            // **一台都不漏**：规则里有没有引到这个根，是选择集求值才答得出的事。
+            for name in self
+                .sublibrary
+                .list()
+                .iter()
+                .map(|one| one.name.clone())
+                .collect::<Vec<_>>()
+            {
+                self.sublibrary.forget(&self.site, &name);
+            }
+        }
         if self.queue.take_changed() {
             self.browse.invalidate(&self.site);
             // 落下、撤回一批改的正是作品归属与裁决条数，左栏那两个数跟着重问。
