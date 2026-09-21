@@ -785,8 +785,10 @@ fn add_button<A>(ui: &mut egui::Ui, button: &Button<A>, primary: bool) -> egui::
         })
         .inner
     } else if button.danger {
+        // **按不动的那一档另有一套颜色**（[`look::danger_button`]）：照背景调淡那一条在暗色里
+        // 分不出能不能按。调淡照旧由 `add_enabled_ui` 盖在上面。
         ui.add_enabled_ui(button.enabled, |ui| {
-            look::danger_button(ui, button.label.as_str())
+            look::danger_button(ui, button.label.as_str(), button.enabled)
         })
         .inner
     } else {

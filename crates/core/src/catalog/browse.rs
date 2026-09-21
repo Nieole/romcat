@@ -421,7 +421,7 @@ const VARIANT_BROWSE_FROM: &str = " FROM variant LEFT JOIN work ON work.id = var
 ///
 /// **只有这一处写这个名字**：挂到连接上（`register_non_game_asset`）与每一条查询问它，
 /// 都从这里取。名字带着程序名，免得哪天撞上 SQLite 自己或别的扩展的函数。
-const NON_GAME_ASSET_FN: &str = "romcat_non_game_asset";
+pub(super) const NON_GAME_ASSET_FN: &str = "romcat_non_game_asset";
 
 /// 把**非游戏资产**那一处判断（[`crate::classify::non_game_asset`]）挂到这条连接上，
 /// SQL 里问 `romcat_non_game_asset(键)`，答 `1` / `0`。
@@ -1679,7 +1679,7 @@ const WORK_TOTAL_COLUMNS: &str = "\
 ///
 /// 单独拆出来是给[数总行数](Catalog::work_total)用的——**那一条不必连年份那一张**：
 /// 年份既不进 `WHERE` 也不进它的 `ORDER BY`，多连一张表只是白扫一遍。
-const WORK_FROM_BASE: &str = "
+pub(super) const WORK_FROM_BASE: &str = "
     FROM variant
     LEFT JOIN work ON work.id = variant.work_id";
 
@@ -1718,7 +1718,12 @@ const WORK_FROM: &str = concat!(
 ///
 /// **不能只写 `GROUP BY work_id`**：`NULL` 在 `GROUP BY` 里是同一堆，那会把真库里
 /// 一多半的变体压成一行。
-const WORK_GROUP_BY: &str =
+///
+/// **「浏览屏上一行是什么」只有这一句**（ADR-0024）：数总行数、翻一页、以及
+/// [移除一个根之前数「会消失几行」](super::roots::RootRemoval) 读的都是它。
+/// **那一支连 `WHERE` 也是从 [`WorkQuery::where_clause`] 取的**，不自己写一份
+/// 「默认收起非游戏资产」——那正是 ADR-0024 推论 1 拦的那种第二份判据。
+pub(super) const WORK_GROUP_BY: &str =
     " GROUP BY variant.work_id, CASE WHEN variant.work_id IS NULL THEN variant.key END";
 
 /// 年份那条 join 的四个参数，按 [`WORK_FROM`] 里的出现次序。
@@ -1859,7 +1864,7 @@ impl WorkQuery {
     ///
     /// 搜索那一条**也落在 `WHERE` 而不是 `HAVING`**：三条命中路都是逐行判得了的，
     /// 搁在 `HAVING` 里就得先把全部行分完组才筛得掉。
-    fn where_clause(&self) -> (String, Vec<Box<dyn ToSql>>) {
+    pub(super) fn where_clause(&self) -> (String, Vec<Box<dyn ToSql>>) {
         let (mut sql, mut args) = self.variant_filter().where_clause();
         if let Some(search) = Search::new(&self.search) {
             let (hit_sql, mut hit_args) = search.filter();

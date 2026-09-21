@@ -1851,7 +1851,7 @@ const 空库右栏的按钮: &[(&str, usize)] = &[("全部下载", 1), ("下载"
 /// 扫过两个根时右栏里该看得见的那几颗：每个根一颗「重新扫描」一颗「移除」，外加空库时那几颗。
 const 扫过的库右栏的按钮: &[(&str, usize)] = &[
     ("重新扫描", 2),
-    ("移除", 2),
+    (romcat_gui::roots::REMOVE, 2),
     ("全部下载", 1),
     ("下载", 3),
     ("选择…", 1),
@@ -1982,6 +1982,32 @@ fn 库屏_重复拷贝明细弹层_浅色() {
 #[test]
 fn 库屏_重复拷贝明细弹层_暗色() {
     拍重复拷贝明细("library/health-duplicates-dark", Theme::Dark);
+}
+
+/// **「移除根」那一层**（票 `gui-looks-like-the-design/26`，设计稿 `DLG.rmroot`）：同一份扫过两个根的库，
+/// 按第二个根那一行的「移除…」——[`按`] 点的是**最后一处**写着那几个字的地方，正好是稿上那一行
+/// （盘不在位的「元数据库」）。
+///
+/// **拍的是刚开那一下**：那一格还没勾上，页脚「移除根」按不动——稿上 `st.ok=false` 就是这个样子，
+/// 而「勾了才按得动」正是这一票的验收第 3 条。
+fn 拍移除根(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 库屏::扫过两个根();
+    let mut harness = 开一个(主题, move |ui| 现场.app.ui(ui));
+    按(&mut harness, romcat_gui::roots::REMOVE);
+    拍下(harness, 名字);
+}
+
+#[test]
+fn 库屏_移除根弹层_浅色() {
+    拍移除根("library/remove-root-light", Theme::Light);
+}
+
+#[test]
+fn 库屏_移除根弹层_暗色() {
+    拍移除根("library/remove-root-dark", Theme::Dark);
 }
 
 // ——— 子库 ———
