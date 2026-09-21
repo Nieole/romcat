@@ -198,6 +198,27 @@ fn 发行版(
     }
 }
 
+/// 一条带**汉化记号**的已接受候选：首选变体那条规则拿它分档。
+fn 汉化候选(key: &str) -> romcat_core::catalog::identify::Candidate {
+    romcat_core::catalog::identify::Candidate {
+        member_key: key.to_string(),
+        inner: String::new(),
+        confidence: romcat_core::catalog::Confidence::High,
+        accepted: true,
+        source: "合成".to_string(),
+        dat: "合成.dat".to_string(),
+        platform: "GB".to_string(),
+        game: "某条 DAT 条目".to_string(),
+        rom: "rom.bin".to_string(),
+        hashed_as: romcat_core::dat::Convention::AsIs,
+        dat_convention: romcat_core::dat::Convention::AsIs,
+        evidence: "夹具".to_string(),
+        chinese: Some(ChineseMark::FanTranslated),
+        serial: None,
+        release_id: None,
+    }
+}
+
 fn 排一趟(现场: &现场, kind: Kind, into: &str, 变体: &[&str]) -> merge::Regrouping {
     let keys: Vec<String> = 变体.iter().map(|相对| 键(相对)).collect();
     merge::plan(&现场.catalog, &现场.store, 主库标识, kind, into, &keys).expect("排得出计划")
@@ -707,4 +728,85 @@ fn 夹具摆出来的是三个作品加一份还没认出作品的() {
     assert_eq!(挂在(&现场.catalog, 乙一).as_deref(), Some(乙));
     assert_eq!(挂在(&现场.catalog, 丙一).as_deref(), Some(丙));
     assert_eq!(挂在(&现场.catalog, 散一), None);
+}
+
+#[test]
+fn 移走之后还剩几个变体由核心库数_数的是整份库不是筛过的那一份() {
+    let 现场 = 建现场();
+    // 甲底下两个变体，移走一个还剩一个；乙底下一个，移走就空了。
+    let 剩 = merge::remaining(&现场.catalog, &[&键(甲一)]).expect("数得出来");
+    assert_eq!(剩.get(甲).copied(), Some(1), "甲移走一个该还剩一个：{剩:?}");
+    assert!(
+        !剩.contains_key(乙) && !剩.contains_key(丙),
+        "没动过的作品不该出现在这份账上：{剩:?}",
+    );
+
+    let 剩 = merge::remaining(&现场.catalog, &[&键(乙一)]).expect("数得出来");
+    assert_eq!(
+        剩.get(乙).copied(),
+        Some(0),
+        "乙底下只有这一个，移走就一个变体都不剩：{剩:?}",
+    );
+
+    // 两个一起移走：甲空不了（还剩一个），乙空了。
+    let 剩 = merge::remaining(&现场.catalog, &[&键(甲一), &键(乙一)]).expect("数得出来");
+    assert_eq!(剩.get(甲).copied(), Some(1));
+    assert_eq!(剩.get(乙).copied(), Some(0));
+
+    // **还没认出作品的那一个不属于任何作品**，这份账上一格都没有。
+    let 剩 = merge::remaining(&现场.catalog, &[&键(散一)]).expect("数得出来");
+    assert!(剩.is_empty(), "散着的那一个不该记在谁头上：{剩:?}");
+}
+
+#[test]
+fn 首选变体照规则挑_汉化压过其他_人裁过的压过规则() {
+    let mut 现场 = 建现场();
+    // 甲底下两个 GB 变体：给第二个记上汉化记号，规则就该挑它（汉化 > 官中 > 日版 > 其他）。
+    现场
+        .catalog
+        .write_identifications(&[Identification {
+            variant_key: 键(甲二),
+            state: State::Matched,
+            reason: None,
+            platform: Some("GB".to_string()),
+            standalone: None,
+            edition: None,
+            units: 1,
+            nkit: 0,
+            read_bytes: 0,
+            work_id: 现场
+                .catalog
+                .variant(&键(甲二))
+                .expect("读得动")
+                .expect("有这一行")
+                .work_id,
+            release_id: None,
+            candidates: vec![汉化候选(&键(甲二))],
+        }])
+        .expect("写得进");
+
+    let keys = [键(甲一), 键(甲二)];
+    let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+    assert_eq!(
+        merge::preferred_pick(&现场.catalog, 甲, "GB", &keys).expect("挑得出来"),
+        Some(键(甲二)),
+        "规则该挑那个汉化版",
+    );
+
+    // **人裁过的压过规则**：把首选裁给另一个，它就排到最前。
+    现场
+        .catalog
+        .set_preferred_variant(甲, "GB", &键(甲一))
+        .expect("记得下");
+    assert_eq!(
+        merge::preferred_pick(&现场.catalog, 甲, "GB", &keys).expect("挑得出来"),
+        Some(键(甲一)),
+        "人裁过的那一条该压过规则（词表**首选变体**：规则可被裁决覆盖）",
+    );
+
+    assert_eq!(
+        merge::preferred_pick(&现场.catalog, 甲, "GB", &[]).expect("挑得出来"),
+        None,
+        "一个变体都没有时说不出来",
+    );
 }

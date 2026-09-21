@@ -53,6 +53,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::adapter::converge;
 use crate::catalog::identify::Candidate;
 use crate::catalog::{Catalog, CatalogError, Confidence, State, TitleRow, VariantRow};
+use crate::dat::chinese::ChineseMark;
 use crate::identify;
 use crate::scrape::priority::{Priorities, Said, VERDICT, entry_fields};
 use crate::scrape::{AnchorKind, Field};
@@ -160,7 +161,12 @@ impl Regrouping {
         &self.into
     }
 
-    /// 从哪几个作品来的。**别名要留的就是这几个名字**（[`keep_aliases`]）。
+    /// 从哪几个作品来的（去重、排过序）；还没认出作品的那些不在里面。
+    ///
+    /// ⚠️ **它不是「该留作别名的那几个名字」**：留别名的是[一个变体都不剩的那几个](Impact::emptied)
+    /// ——还剩变体的作品照旧在浏览列表里、名字就是它自己，把它记成别人的别名只是噪声
+    /// （[`keep_aliases`] 收的就是 `emptied` 那一份）。这一支答的是**这一趟动了谁**，
+    /// 第三步那句摘要与屏上「从哪儿来」写它。
     #[must_use]
     pub fn from(&self) -> &[String] {
         &self.from
@@ -384,48 +390,126 @@ pub struct Impact {
 /// # Errors
 /// 读中立库失败时返回错误。
 pub fn impact(catalog: &Catalog, regrouping: &Regrouping) -> Result<Impact, CatalogError> {
-    let moving: BTreeSet<&str> = regrouping.moving().into_iter().collect();
+    let keys = regrouping.moving();
+    let moving: BTreeSet<&str> = keys.iter().copied().collect();
     let entries = converge::Entries::load(catalog)?;
-    let works = catalog.work_names()?;
     let mut before: BTreeSet<(String, converge::Anchor)> = BTreeSet::new();
     let mut after: BTreeSet<(String, converge::Anchor)> = BTreeSet::new();
-    // 作品名 → 这一趟之后它底下还剩几个变体。
-    let mut left: BTreeMap<&str, u64> = BTreeMap::new();
-    for name in &regrouping.from {
-        left.insert(name.as_str(), 0);
-    }
     for variant in catalog.variants()? {
-        let mine = moving.contains(variant.key.as_str());
-        if !mine
-            && let Some(name) = variant.work_id.and_then(|id| works.get(&id))
-            && let Some(rest) = left.get_mut(name.as_str())
-        {
-            *rest += 1;
-        }
         // 做不成条目的那几个（**补丁**、**附属内容**、**非游戏资产**）一开始就不算数。
         let Ok((platform, anchor)) = entries.of(&variant) else {
             continue;
         };
         before.insert((platform.clone(), anchor.clone()));
-        let anchor = if mine {
+        let anchor = if moving.contains(variant.key.as_str()) {
             converge::Anchor::Work(regrouping.into.clone())
         } else {
             anchor
         };
         after.insert((platform, anchor));
     }
-    let keys = regrouping.moving();
     Ok(Impact {
         verdicts: regrouping.verdicts(),
         entries_before: u64::try_from(before.len()).unwrap_or(u64::MAX),
         entries_after: u64::try_from(after.len()).unwrap_or(u64::MAX),
-        emptied: left
+        emptied: remaining(catalog, &keys)?
             .into_iter()
             .filter(|(_, rest)| *rest == 0)
-            .map(|(name, _)| name.to_string())
+            .map(|(name, _)| name)
             .collect(),
         sublibraries: crate::sublibrary::holding(catalog, &keys)?,
     })
+}
+
+/// 这几个变体移走之后，**它们原来那几个作品各还剩几个变体**：作品名 → 还剩几个。
+///
+/// **「那个作品会不会一个变体都不剩」只在这一处判**（ADR-0024）：合并第三步那句
+/// 「《某某》的名字留作别名」（[`Impact::emptied`] 就是这一份里数到零的那几个）与移出那一层
+/// 那句「「某某」还剩 N 个变体 / 没有变体了，会从浏览列表中消失」说的是同一件事。
+/// 两处各数一遍的话，屏上那两句迟早各说一个数——而界面手上那一份变体是**筛过的**
+/// （`WorkDetail::variants` 随当前筛选收窄），照它数出来的「还剩几个」一开筛就会说错
+/// （同 `catalog::roots::works_only_under` 上逐字警告过的那一条）。
+///
+/// **数的是整份中立库，不过任何筛选**：作品会不会从浏览列表里消失，与人眼下筛着什么无关。
+/// 还没认出作品的那些变体不属于任何作品，不在这份账里。
+///
+/// # Errors
+/// 读中立库失败时返回错误。
+pub fn remaining(
+    catalog: &Catalog,
+    moving: &[&str],
+) -> Result<BTreeMap<String, u64>, CatalogError> {
+    let moving: BTreeSet<&str> = moving.iter().copied().collect();
+    let works = catalog.work_names()?;
+    let mut left: BTreeMap<String, u64> = BTreeMap::new();
+    let mut rows = Vec::new();
+    for variant in catalog.variants()? {
+        let Some(name) = variant.work_id.and_then(|id| works.get(&id)) else {
+            continue;
+        };
+        rows.push((name.clone(), moving.contains(variant.key.as_str())));
+    }
+    // 先把**动过的那几个作品**各摆一格零，再数留下来的：一个变体都不剩的那几个
+    // 正是「格子还在、数是零」的那几个。少了这一步，它们压根不会出现在账上。
+    for (name, mine) in &rows {
+        if *mine {
+            left.entry(name.clone()).or_insert(0);
+        }
+    }
+    for (name, mine) in rows {
+        if !mine && let Some(rest) = left.get_mut(&name) {
+            *rest += 1;
+        }
+    }
+    Ok(left)
+}
+
+/// 这几个变体里，**首选变体**那条规则挑哪一个（`work` 在 `platform` 上）。
+///
+/// **规则只有一处实现**（[`converge::preference_for`]，汉化 > 官中 > 日版 > 其他，
+/// 人裁过的一律让路）——这一支只是拿它在**手上这几个变体**之间排一遍名，与详情面板那一处
+/// （`Catalog::variant_detail` 的 `rank_siblings`）问的是同一句话。
+///
+/// 界面拿它**画默认选中的那一个**，而**不是**拿它去落裁决：默认值与规则算出来的是同一个，
+/// 再把它写成一条「首选变体裁决」等于把一条规则冻成一条覆盖——下一次识别、下一次刮削
+/// 都再也改不动它了（词表**首选变体**：规则「可被裁决覆盖」，不是反过来）。
+///
+/// 同一档之内按键排，于是同一批变体问两遍答的是同一个。一个都没有时是 `None`。
+///
+/// # Errors
+/// 读中立库失败时返回错误。
+pub fn preferred_pick(
+    catalog: &Catalog,
+    work: &str,
+    platform: &str,
+    keys: &[&str],
+) -> Result<Option<String>, CatalogError> {
+    // 人已经在这个作品、这个平台上裁过首选变体的，那一条压过规则（`Preference::Verdict`）。
+    let picked = catalog.preferred_variant(work, platform)?;
+    let mut best: Option<(converge::Preference, String)> = None;
+    for key in keys {
+        let Some(row) = catalog.variant(key)? else {
+            continue;
+        };
+        let marks: BTreeSet<ChineseMark> = catalog
+            .candidates_of(key)?
+            .into_iter()
+            .filter(|candidate| candidate.accepted)
+            .filter_map(|candidate| candidate.chinese)
+            .collect();
+        let release = match row.release_id {
+            Some(id) => catalog.release(id)?,
+            None => None,
+        };
+        let rank = converge::preference_for(key, &marks, release.as_ref(), picked.as_deref());
+        if best
+            .as_ref()
+            .is_none_or(|(had, key0)| (rank, *key) < (*had, key0.as_str()))
+        {
+            best = Some((rank, (*key).to_string()));
+        }
+    }
+    Ok(best.map(|(_, key)| key))
 }
 
 /// 别的作品在这个字段上说的那一句。

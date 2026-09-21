@@ -60,9 +60,13 @@ const FOUND: usize = 8;
 /// 二十几个。剪掉的那一截**停在指针上说得出来**（`on_hover_text` 交的是整句）。
 const CELL: usize = 26;
 
-/// 参与合并的一**行**：浏览表上的一行（一个作品，或一个还没认出作品的变体）。
+/// 参与这一趟的**一行**：浏览表上的一行（一个**作品**，或一个还没认出作品的**变体**），
+/// 连它底下那几个变体。
+///
+/// 叫「行」而不另起名字：屏上人勾的就是表上那几行，核心库那一侧认的也是
+/// [`WorkAnchor`]（`WorkRow::anchor`）。
 #[derive(Debug, Clone)]
-struct Party {
+struct Row {
     /// 表上那一行的身份。
     anchor: WorkAnchor,
     /// **作品名**——核心库那一侧认的是它；还没认出作品的那一行是 `None`，
@@ -75,12 +79,12 @@ struct Party {
     /// 底下那些变体里**最高的那档置信度**（与表上那一行同一条口径，`WorkRow::confidence`）。
     tier: Tier,
     /// 底下那几个变体（**照当前筛选**展开，与屏上那一行写着的变体数同一个数）。
-    variants: Vec<PartyVariant>,
+    variants: Vec<RowVariant>,
 }
 
 /// 一行底下的一个变体。
 #[derive(Debug, Clone)]
-struct PartyVariant {
+struct RowVariant {
     /// 变体的键。
     key: String,
     /// **变体简称**（核心库 `Catalog::variant_short_names` 拼的）；拼不出时是文件名。
@@ -93,7 +97,7 @@ struct PartyVariant {
     bytes: u64,
 }
 
-impl Party {
+impl Row {
     /// 读一行：名字、底下那几个变体。
     fn load(
         catalog: &Catalog,
@@ -115,19 +119,15 @@ impl Party {
             work,
             title: title_of(&detail, rules),
             year: detail.year.clone(),
-            // 一条候选都没有时是 `None`，[`Tier::of`] 把它折成「没有候选」那一档。
-            tier: Tier::of(
-                detail
-                    .variants
-                    .iter()
-                    .filter_map(WorkVariant::confidence)
-                    .min(),
-            ),
+            // **哪一档由核心库答**（`WorkDetail::confidence`，与表上那一行同一条口径）：
+            // 界面不自己 match 一遍候选（ADR-0024）。一条候选都没有时 `Tier::of` 把它
+            // 折成「没有候选」那一档。
+            tier: Tier::of(detail.confidence()),
             variants: detail
                 .variants
                 .iter()
                 .zip(shorts)
-                .map(|(variant, short)| PartyVariant {
+                .map(|(variant, short)| RowVariant {
                     key: variant.row.key.clone(),
                     short,
                     platform: variant
@@ -158,6 +158,20 @@ enum Pressed {
     Go,
 }
 
+/// 人在第二步上**亲手点下**的一条首选变体裁决：这个作品在这个平台上默认启动这一个。
+///
+/// 捏成一个结构而不是三个 `String` 的元组：三样本来就结伴出生、结伴落库，
+/// 而三个同型的 `String` 挨在一起，调用处写反了编译器不会说话。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preferred {
+    /// 哪个作品（合并之后保留的那个）。
+    pub work: String,
+    /// 哪个平台。
+    pub platform: String,
+    /// 默认启动哪个变体。
+    pub variant_key: String,
+}
+
 /// 画完这一帧，摆它的那一屏要办的事。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Done {
@@ -173,25 +187,36 @@ pub struct Wizard {
     /// 走到第几步（从 0 数）。
     step: usize,
     /// 参与的那几行。
-    parties: Vec<Party>,
+    rows: Vec<Row>,
     /// 其中第几个是**保留的作品**。
     keep: usize,
     /// **取消勾选**的那几个变体：它们不归入，仍留在原来的作品里。
     excluded: BTreeSet<String>,
-    /// 每个平台挑了哪个**首选变体**：平台 → 变体的键。
-    preferred: BTreeMap<String, String>,
+    /// **人真的点过**的首选变体：平台 → 变体的键。
+    ///
+    /// ⚠️ **只装人点过的那几个**。屏上默认选中的那一个由核心库照首选变体那条规则算
+    /// （[`merge::preferred_pick`]，存在 [`Self::defaults`] 里），**人没动过就一个字都不写**
+    /// ——把规则算出来的那一个写成「首选变体裁决」等于把一条规则冻成一条覆盖，而词表
+    /// **首选变体**说的是规则「可被裁决覆盖」，不是反过来（两轴审查各挑出一次，
+    /// 2026-09-21 照改）。
+    picked_preferred: BTreeMap<String, String>,
+    /// 每个平台**照规则**该选哪一个（核心库 [`merge::preferred_pick`] 算的）：平台 → 变体的键。
+    /// 屏上那颗单选钮默认落在它身上；它**不落库**。
+    defaults: BTreeMap<String, String>,
+    /// [`Self::defaults`] 过期了吗（换了保留的作品、勾掉过变体）。真时下一次画第二步重算。
+    defaults_stale: bool,
     /// 第一步「添加其他作品」框里打的字。
     query: String,
     /// 搜出来的那几行（不含已经在里头的）。
-    found: Vec<Party>,
+    found: Vec<Row>,
     /// `found` 是照哪几个字搜的。与框里的字不一样就重搜。
     found_for: Option<String>,
     /// 把被合并作品的名称保留为**别名**。
     alias: bool,
     /// 第三步：有冲突的那几个字段。
     conflicts: Vec<merge::Conflict>,
-    /// 逐项选了谁：字段 → `others` 里的第几个；[`KEEP_VALUE`] 是保留作品那一格。
-    picks: BTreeMap<Field, usize>,
+    /// 逐项选了谁：字段 → 选的是哪一格。
+    picks: BTreeMap<Field, Pick>,
     /// 第三步那份账（按「下一步」进第三步那一下算一次，**不每帧算**）。
     impact: Option<merge::Impact>,
     /// 排好的计划。
@@ -200,8 +225,17 @@ pub struct Wizard {
     error: Option<String>,
 }
 
-/// [`Wizard::picks`] 里表示「用保留作品那一格」的那个数。
-const KEEP_VALUE: usize = usize::MAX;
+/// 第三步一个字段上**选的是哪一格**。
+///
+/// 一个枚举而不是一个哨兵值（原先是 `usize::MAX`）：`pick_of` / `adopted` / 画那张表三处
+/// 都得记着那个约定，而枚举自己说得出它是什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pick {
+    /// 保留作品那一格。
+    Keep,
+    /// 别的作品里的第几个（[`merge::Conflict::others`] 的下标）。
+    Other(usize),
+}
 
 impl Wizard {
     /// 从浏览屏勾中的那几行、或者从作品详情页那一个作品开一层。
@@ -212,13 +246,13 @@ impl Wizard {
         query: &WorkQuery,
         rules: &Rules,
         priorities: &Priorities,
-        rows: &[WorkAnchor],
+        anchors: &[WorkAnchor],
     ) -> Self {
-        let mut parties = Vec::new();
+        let mut rows = Vec::new();
         let mut error = None;
-        for anchor in rows {
-            match Party::load(catalog, query, rules, priorities, anchor) {
-                Ok(Some(party)) => parties.push(party),
+        for anchor in anchors {
+            match Row::load(catalog, query, rules, priorities, anchor) {
+                Ok(Some(row)) => rows.push(row),
                 Ok(None) => {}
                 Err(failed) => error = Some(format!("中立库读不动：{failed}")),
             }
@@ -228,13 +262,15 @@ impl Wizard {
         // （`bestOf`：置信度×2 + 有封面 + 元数据完整 + 变体数×0.1）——它是一条会落进
         // 界面里的新领域判断，而且屏上解释不了「凭什么推荐这一个」。
         // 同数时按屏上那个名字定序，于是同一批行开两次向导，默认推荐的是同一个。
-        let keep = best_keep(&parties);
+        let keep = best_keep(&rows);
         Self {
             step: 0,
-            parties,
+            rows,
             keep,
             excluded: BTreeSet::new(),
-            preferred: BTreeMap::new(),
+            picked_preferred: BTreeMap::new(),
+            defaults: BTreeMap::new(),
+            defaults_stale: true,
             query: String::new(),
             found: Vec::new(),
             found_for: None,
@@ -271,7 +307,9 @@ impl Wizard {
     pub fn adopted(&self) -> Vec<(Field, merge::Offer)> {
         let mut out = Vec::new();
         for conflict in &self.conflicts {
-            let at = self.pick_of(conflict);
+            let Pick::Other(at) = self.pick_of(conflict) else {
+                continue;
+            };
             if let Some(offer) = conflict.others.get(at) {
                 out.push((conflict.field, offer.clone()));
             }
@@ -279,42 +317,49 @@ impl Wizard {
         out
     }
 
-    /// 第二步逐平台挑的**首选变体**：`(作品名, 平台, 变体的键)`。
+    /// 第二步里**人真的点过**的首选变体，一条一格。
+    ///
+    /// **人没点过的平台一条都不在里面**：屏上那颗默认落在核心库照规则算出来的那一个身上
+    /// （[`Self::defaults`]），把它也写下去等于拿一条裁决把规则冻住。
     #[must_use]
-    pub fn preferred(&self) -> Vec<(String, String, String)> {
+    pub fn preferred(&self) -> Vec<Preferred> {
         let Some(work) = self.keep_work() else {
             return Vec::new();
         };
-        self.preferred
+        self.picked_preferred
             .iter()
             .filter(|(_, key)| !self.excluded.contains(key.as_str()))
-            .map(|(platform, key)| (work.to_string(), platform.clone(), key.clone()))
+            .map(|(platform, key)| Preferred {
+                work: work.to_string(),
+                platform: platform.clone(),
+                variant_key: key.clone(),
+            })
             .collect()
     }
 
     /// 保留的那个作品名；保留的那一行还没认出作品时是 `None`。
     fn keep_work(&self) -> Option<&str> {
-        self.parties.get(self.keep)?.work.as_deref()
+        self.rows.get(self.keep)?.work.as_deref()
     }
 
     /// 这个字段眼下选的是哪一格。
     ///
     /// 默认照稿：**保留作品有值就用它的；保留作品那一格空着，就用别人的补上。**
-    fn pick_of(&self, conflict: &merge::Conflict) -> usize {
+    fn pick_of(&self, conflict: &merge::Conflict) -> Pick {
         match self.picks.get(&conflict.field) {
-            Some(at) => *at,
-            None if conflict.keep.is_some() => KEEP_VALUE,
-            None => 0,
+            Some(pick) => *pick,
+            None if conflict.keep.is_some() => Pick::Keep,
+            None => Pick::Other(0),
         }
     }
 
     /// 这一批要归入的变体：参与的那几行底下的，减去保留作品自己的、减去取消勾选的。
     fn moving(&self) -> Vec<String> {
-        self.parties
+        self.rows
             .iter()
             .enumerate()
             .filter(|(at, _)| *at != self.keep)
-            .flat_map(|(_, party)| party.variants.iter())
+            .flat_map(|(_, row)| row.variants.iter())
             .filter(|variant| !self.excluded.contains(&variant.key))
             .map(|variant| variant.key.clone())
             .collect()
@@ -322,35 +367,43 @@ impl Wizard {
 
     /// 参与的那几行涉及哪几个平台，照走到的次序。
     fn platforms(&self) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        for party in &self.parties {
-            for variant in &party.variants {
-                if !out.contains(&variant.platform) {
-                    out.push(variant.platform.clone());
-                }
-            }
-        }
-        out
+        平台们(self.rows.iter().flat_map(|row| row.variants.iter()))
     }
 
-    /// 这个平台上默认挑谁当**首选变体**：保留作品自己那几个里的头一个，
-    /// 一个都没有就是这个平台上的头一个。**真正的首选规则在核心库**
-    /// （`converge::preference_for`，汉化 > 官中 > 日版 > 其他）——这里只给一个起手的默认值，
-    /// 落下去那一条裁决说的是「人挑了这一个」。
-    fn default_preferred(&self, platform: &str) -> Option<String> {
-        let mut first = None;
-        for (at, party) in self.parties.iter().enumerate() {
-            for variant in &party.variants {
-                if variant.platform != platform || self.excluded.contains(&variant.key) {
-                    continue;
+    /// 每个平台上**照规则**该选哪一个，重算一遍——**过期了才算**（它要问库）。
+    ///
+    /// 规则本身一条都不在这儿（ADR-0024）：[`merge::preferred_pick`] 拿
+    /// `converge::preference_for`（汉化 > 官中 > 日版 > 其他，人裁过的让路）在手上这几个
+    /// 变体之间排一遍名，与详情面板那一处问的是同一句话。
+    fn sync_defaults(&mut self, site: &Site) {
+        if !self.defaults_stale {
+            return;
+        }
+        self.defaults_stale = false;
+        self.defaults.clear();
+        let Some(keep) = self.keep_work().map(ToString::to_string) else {
+            return;
+        };
+        for platform in self.platforms() {
+            let keys: Vec<&str> = self
+                .rows
+                .iter()
+                .enumerate()
+                .flat_map(|(at, row)| row.variants.iter().map(move |one| (at, one)))
+                .filter(|(at, one)| {
+                    one.platform == platform
+                        && (*at == self.keep || !self.excluded.contains(&one.key))
+                })
+                .map(|(_, one)| one.key.as_str())
+                .collect();
+            match merge::preferred_pick(&site.catalog, &keep, &platform, &keys) {
+                Ok(Some(key)) => {
+                    self.defaults.insert(platform, key);
                 }
-                if at == self.keep {
-                    return Some(variant.key.clone());
-                }
-                first.get_or_insert_with(|| variant.key.clone());
+                Ok(None) => {}
+                Err(failed) => self.error = Some(format!("中立库读不动：{failed}")),
             }
         }
-        first
     }
 
     /// 进第三步那一下要算的：字段冲突、会发生什么、计划。**只在这一下算一次**——
@@ -365,11 +418,11 @@ impl Wizard {
             return;
         };
         let sources: Vec<String> = self
-            .parties
+            .rows
             .iter()
             .enumerate()
             .filter(|(at, _)| *at != self.keep)
-            .filter_map(|(_, party)| party.work.clone())
+            .filter_map(|(_, row)| row.work.clone())
             .collect();
         match merge::conflicts(&site.catalog, priorities, &keep, &sources) {
             Ok(rows) => self.conflicts = rows,
@@ -404,11 +457,11 @@ impl Wizard {
     ) -> Option<Done> {
         // **页脚先搭好再画内容区**（共用弹层那一层的规矩）：按不按得动看的是这一帧画之前的状态。
         let 走得了 = match self.step {
-            0 => self.parties.len() >= 2 && self.keep_work().is_some(),
+            0 => self.rows.len() >= 2 && self.keep_work().is_some(),
             1 => !self.moving().is_empty(),
             _ => self.planned.as_ref().is_some_and(|one| one.verdicts() > 0),
         };
-        let 几个 = self.parties.len();
+        let 几个 = self.rows.len();
         let mut footer = Footer::new(Button::new("取消", Pressed::Cancel));
         if self.step > 0 {
             footer = footer.button(Button::new("上一步", Pressed::Back));
@@ -434,7 +487,7 @@ impl Wizard {
                 }
                 match self.step {
                     0 => self.step_pick(ui, site, priorities),
-                    1 => self.step_variants(ui),
+                    1 => self.step_variants(ui, site),
                     _ => self.step_confirm(ui),
                 }
             });
@@ -466,33 +519,33 @@ impl Wizard {
         ui.add_space(look::step(1));
         let mut 换保留 = None;
         let mut 去掉 = None;
-        for (at, party) in self.parties.iter().enumerate() {
+        for (at, row) in self.rows.iter().enumerate() {
             let 是保留 = at == self.keep;
             // 还没认出作品的那一行**当不了保留的那一侧**：它没有作品名可以留作别名。
-            let 当得了 = party.work.is_some();
+            let 当得了 = row.work.is_some();
             look::card(ui, egui::Vec2::splat(look::step(2)), |ui| {
                 ui.horizontal(|ui| {
                     // 照稿那一行（`.mwit` 里那句 `help`）：平台 · 年份 · 几个变体。
                     let 一句 = format!(
                         "{} · {} · {} 个变体",
-                        平台们(party),
-                        party.year.as_deref().unwrap_or("年份未知"),
-                        thousands(party.variants.len() as u64),
+                        平台那一句(row),
+                        row.year.as_deref().unwrap_or("年份未知"),
+                        thousands(row.variants.len() as u64),
                     );
-                    if look::radio_option(ui, 是保留, &party.title, &一句).clicked() && 当得了
+                    if look::radio_option(ui, 是保留, &row.title, &一句).clicked() && 当得了
                     {
                         换保留 = Some(at);
                     }
                     // 置信度那一档也照稿摆在名字后头。哪一档由核心库答（`WorkVariant::confidence`
                     // 取最高的那一条，与表上那一行同一条口径），这里只印。
-                    look::tier_tag(ui, party.tier);
+                    look::tier_tag(ui, row.tier);
                     if 是保留 {
                         table::tag(ui, "保留");
                     }
                     if !当得了 {
                         look::help(ui, "还没认出作品，当不了保留的那一个");
                     }
-                    if self.parties.len() > 2 {
+                    if self.rows.len() > 2 {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if look::small_ghost_button(ui, "移除").clicked() {
                                 去掉 = Some(at);
@@ -505,19 +558,21 @@ impl Wizard {
         if let Some(at) = 换保留 {
             self.keep = at;
             // 换了保留的那一个，第二步挑的首选与第三步选的值都跟着作废。
-            self.preferred.clear();
+            self.picked_preferred.clear();
+            self.defaults_stale = true;
             self.picks.clear();
         }
         if let Some(at) = 去掉 {
-            self.parties.remove(at);
-            if self.keep >= self.parties.len() || self.keep == at {
-                self.keep = best_keep(&self.parties);
+            self.rows.remove(at);
+            if self.keep >= self.rows.len() || self.keep == at {
+                self.keep = best_keep(&self.rows);
             } else if self.keep > at {
                 self.keep -= 1;
             }
-            self.preferred.clear();
+            self.picked_preferred.clear();
+            self.defaults_stale = true;
         }
-        if self.parties.len() < 2 {
+        if self.rows.len() < 2 {
             ui.add_space(look::step(1));
             ui.colored_label(ui.visuals().error_fg_color, "至少需要两个作品。");
         }
@@ -538,16 +593,22 @@ impl Wizard {
         );
         self.search(site, priorities);
         let mut 加 = None;
-        for party in &self.found {
+        for row in &self.found {
             ui.horizontal(|ui| {
-                ui.label(&party.title);
+                // 照稿 `mwResults` 那一行：平台标签 + 名字 + 年份 · 变体数。
+                table::tag(ui, &平台那一句(row));
+                ui.label(&row.title);
                 look::help(
                     ui,
-                    &format!("{} 个变体", thousands(party.variants.len() as u64)),
+                    &format!(
+                        "{} · {} 个变体",
+                        row.year.as_deref().unwrap_or("年份未知"),
+                        thousands(row.variants.len() as u64),
+                    ),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if look::small_buttons(ui, |ui| ui.button("添加").clicked()) {
-                        加 = Some(party.clone());
+                        加 = Some(row.clone());
                     }
                 });
             });
@@ -555,11 +616,11 @@ impl Wizard {
         if self.found.is_empty() {
             look::help(ui, "没有匹配的作品");
         }
-        if let Some(party) = 加 {
-            self.parties.push(party);
+        if let Some(row) = 加 {
+            self.rows.push(row);
             self.found_for = None;
             self.query.clear();
-            self.preferred.clear();
+            self.defaults_stale = true;
         }
     }
 
@@ -570,40 +631,26 @@ impl Wizard {
         }
         self.found_for = Some(self.query.clone());
         self.found.clear();
-        let query = WorkQuery {
-            search: self.query.clone(),
-            ..WorkQuery::default()
-        };
-        let 已有: BTreeSet<&WorkAnchor> = self.parties.iter().map(|party| &party.anchor).collect();
-        let rows = match site.catalog.work_page_with_titles(
-            &query,
-            0,
-            (FOUND + 已有.len()) as u64,
-            priorities,
-        ) {
+        let 已有: BTreeSet<&WorkAnchor> = self.rows.iter().map(|row| &row.anchor).collect();
+        let 搜到的 = match 搜作品(site, priorities, &self.query, 已有.len()) {
             Ok(rows) => rows,
             Err(failed) => {
                 self.error = Some(format!("中立库读不动：{failed}"));
                 return;
             }
         };
-        for row in rows {
-            if 已有.contains(&row.anchor) || self.found.len() >= FOUND {
+        for (anchor, _) in 搜到的 {
+            if 已有.contains(&anchor) || self.found.len() >= FOUND {
                 continue;
             }
-            // 只有认出作品的那些加得进来当被合并的一侧也好、保留的一侧也好——散着的那一行
-            // 在浏览屏上勾得中，这个搜索框里不列：搜的是「作品」。
-            if !matches!(row.anchor, WorkAnchor::Work(_)) {
-                continue;
-            }
-            match Party::load(
+            match Row::load(
                 &site.catalog,
                 &WorkQuery::default(),
                 &Rules::builtin(),
                 priorities,
-                &row.anchor,
+                &anchor,
             ) {
-                Ok(Some(party)) => self.found.push(party),
+                Ok(Some(row)) => self.found.push(row),
                 Ok(None) => {}
                 Err(failed) => self.error = Some(format!("中立库读不动：{failed}")),
             }
@@ -611,20 +658,30 @@ impl Wizard {
     }
 
     /// 第二步：**核对变体**，按平台分组，每组各挑一个首选。
-    fn step_variants(&mut self, ui: &mut egui::Ui) {
+    ///
+    /// **默认选中的那一个由核心库照规则算**（[`merge::preferred_pick`]），算完攥在
+    /// [`Self::defaults`] 里——它要问库，不能每帧算。人点过的那几个另存
+    /// （[`Self::picked_preferred`]），**只有那几个才落库**。
+    fn step_variants(&mut self, ui: &mut egui::Ui, site: &Site) {
+        self.sync_defaults(site);
         look::help(
             ui,
             "取消勾选的变体不会合并，仍留在原来的作品中。首选变体是前端默认启动的那一个，每个平台一个。",
+        );
+        look::help(
+            ui,
+            "默认选中的那一个是按「汉化 > 官中 > 日版 > 其他」选出来的；不动它就照这条规则来，\
+             点一下才记成裁决。",
         );
         ui.add_space(look::step(1));
         let mut 翻 = None;
         let mut 挑 = Vec::new();
         for platform in self.platforms() {
-            let 这组: Vec<(usize, &PartyVariant)> = self
-                .parties
+            let 这组: Vec<(usize, &RowVariant)> = self
+                .rows
                 .iter()
                 .enumerate()
-                .flat_map(|(at, party)| party.variants.iter().map(move |one| (at, one)))
+                .flat_map(|(at, row)| row.variants.iter().map(move |one| (at, one)))
                 .filter(|(_, one)| one.platform == platform)
                 .collect();
             let 还剩 = 这组
@@ -632,10 +689,10 @@ impl Wizard {
                 .filter(|(at, one)| *at == self.keep || !self.excluded.contains(&one.key))
                 .count();
             let 首选 = self
-                .preferred
+                .picked_preferred
                 .get(&platform)
-                .cloned()
-                .or_else(|| self.default_preferred(&platform));
+                .or_else(|| self.defaults.get(&platform))
+                .cloned();
             look::card(ui, egui::Vec2::splat(look::step(2)), |ui| {
                 ui.horizontal(|ui| {
                     table::tag(ui, &platform);
@@ -667,7 +724,7 @@ impl Wizard {
                             &if 自带 {
                                 "保留作品自带".to_string()
                             } else {
-                                format!("来自「{}」", self.parties[at].title)
+                                format!("来自「{}」", self.rows[at].title)
                             },
                         );
                         look::tier_tag(ui, variant.tier);
@@ -684,20 +741,16 @@ impl Wizard {
                     });
                 }
             });
-            // 默认那一个也记下来：落下去那一条裁决说的是「这个平台默认启动这一个」，
-            // 人没动过时记的就是屏上画着的那一个。
-            if let Some(key) = 首选 {
-                self.preferred.entry(platform).or_insert(key);
-            }
         }
         if let Some(key) = 翻 {
             if !self.excluded.remove(&key) {
                 self.excluded.insert(key);
             }
-            self.preferred.clear();
+            // 勾掉一个之后规则该挑谁可能就变了，默认值跟着作废；人点过的那几个留着。
+            self.defaults_stale = true;
         }
         for (platform, key) in 挑 {
-            self.preferred.insert(platform, key);
+            self.picked_preferred.insert(platform, key);
         }
         if self.moving().is_empty() {
             ui.add_space(look::step(1));
@@ -742,11 +795,11 @@ impl Wizard {
                         ui.vertical(|ui| match &conflict.keep {
                             Some(said) => {
                                 let 整句 = said.values.join("、");
-                                if look::radio_option(ui, 眼下 == KEEP_VALUE, &剪一段(&整句), "")
+                                if look::radio_option(ui, 眼下 == Pick::Keep, &剪一段(&整句), "")
                                     .on_hover_text(&整句)
                                     .clicked()
                                 {
-                                    选.push((conflict.field, KEEP_VALUE));
+                                    选.push((conflict.field, Pick::Keep));
                                 }
                             }
                             // 保留作品这一格空着时那一格**选不了**（稿上那颗单选钮是 `disabled`）：
@@ -759,11 +812,11 @@ impl Wizard {
                             for (at, offer) in conflict.others.iter().enumerate() {
                                 let 整句 = offer.said.values.join("、");
                                 let 这一格 = format!("{}  · {}", 剪一段(&整句), offer.work);
-                                if look::radio_option(ui, 眼下 == at, &这一格, "")
+                                if look::radio_option(ui, 眼下 == Pick::Other(at), &这一格, "")
                                     .on_hover_text(&整句)
                                     .clicked()
                                 {
-                                    选.push((conflict.field, at));
+                                    选.push((conflict.field, Pick::Other(at)));
                                 }
                             }
                         });
@@ -777,7 +830,21 @@ impl Wizard {
 
         ui.add_space(look::step(2));
         ui.checkbox(&mut self.alias, "把被合并作品的名称保留为别名");
-        look::help(ui, "搜索这些名称仍能找到合并后的作品");
+        // **说清留的是哪几个名字**（Spec 轴挑出）：留的是**一个变体都不剩**的那几个
+        // （核心库 `Impact::emptied`）。第二步取消掉某个变体、那个作品还剩变体时，
+        // 它照旧在浏览列表里、名字就是它自己，不必记成别人的别名——但屏上得说出来，
+        // 不然人以为勾了就每个都留。
+        look::help(
+            ui,
+            &match self.impact.as_ref().map(|impact| impact.emptied.clone()) {
+                Some(names) if !names.is_empty() => format!(
+                    "留的是并空了的那几个：《{}》。搜这些名称仍能找到合并后的作品。",
+                    names.join("》《"),
+                ),
+                _ => "这一趟没有作品会被并空：它们都还剩变体、照旧在浏览列表里，名字不必留作别名。"
+                    .to_string(),
+            },
+        );
         // **「以后扫描到的也自动归入」画成不可选**，并写明原因与眼下的走法（票面 ⚠️ 第二条）。
         let mut 永不 = false;
         ui.add_enabled_ui(false, |ui| {
@@ -861,29 +928,37 @@ impl Wizard {
 
 /// 默认保留哪一个：**变体最多的那一个**，同数时按屏上那个名字定序（全序，开两次向导推荐的是同一个）。
 /// 还没认出作品的那几行当不了保留的一侧，一律排在后面。
-fn best_keep(parties: &[Party]) -> usize {
-    parties
-        .iter()
+fn best_keep(rows: &[Row]) -> usize {
+    rows.iter()
         .enumerate()
-        .max_by_key(|(at, party)| {
+        .max_by_key(|(at, row)| {
             (
-                party.work.is_some(),
-                party.variants.len(),
-                std::cmp::Reverse(party.title.clone()),
+                row.work.is_some(),
+                row.variants.len(),
+                std::cmp::Reverse(row.title.clone()),
                 std::cmp::Reverse(*at),
             )
         })
         .map_or(0, |(at, _)| at)
 }
 
-/// 这一行涉及哪几个平台，写成一句。
-fn 平台们(party: &Party) -> String {
-    let mut out: Vec<&str> = Vec::new();
-    for variant in &party.variants {
-        if !out.contains(&variant.platform.as_str()) {
-            out.push(&variant.platform);
+/// 这几个变体涉及哪几个平台，**去重、照走到的次序**。
+///
+/// 收成一处：第一步那一行写「GB / GBC」与第二步按平台分组问的是同一句话，
+/// 各写一遍的话两处的次序迟早不一样。
+fn 平台们<'a>(variants: impl Iterator<Item = &'a RowVariant>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for variant in variants {
+        if !out.contains(&variant.platform) {
+            out.push(variant.platform.clone());
         }
     }
+    out
+}
+
+/// 一行涉及哪几个平台，写成屏上那一句（几个平台之间「 / 」）；一个都说不出时写平台未知那一档的词。
+fn 平台那一句(row: &Row) -> String {
+    let out = 平台们(row.variants.iter());
     if out.is_empty() {
         return romcat_core::report::UNKNOWN_PLATFORM_LABEL.to_string();
     }
@@ -928,8 +1003,15 @@ pub struct Split {
     found_for: Option<String>,
     /// 已有那一档：挑中的那个作品名。
     target: Option<String>,
-    /// 这个作品移走这一个之后还剩几个变体。
-    left: usize,
+    /// 这个作品移走这一个之后**还剩几个变体**——**核心库数的**（[`merge::remaining`]，
+    /// 与合并第三步那句「并空了的那几个」同一处判，ADR-0024）。
+    ///
+    /// 不拿手上那一份 `WorkDetail::variants` 减一：那一份**随当前筛选收窄**，
+    /// 一开筛屏上就会说错「没有变体了，会从浏览列表中消失」（Standards 轴挑出，2026-09-21 照改）。
+    left: u64,
+    /// 移走这一个之后，这个作品在这个平台上的**首选变体**照规则该是哪一个
+    /// （核心库 [`merge::preferred_pick`]）；说不出、或者移走的本来就不是首选时是 `None`。
+    next_preferred: Option<String>,
     /// 排好的计划。
     planned: Option<merge::Regrouping>,
     /// 这一层自己那句错。
@@ -940,25 +1022,82 @@ impl Split {
     /// 从作品详情页某一张变体卡上开一层。
     #[must_use]
     pub fn open(
+        catalog: &Catalog,
         work: &WorkDetail,
         rules: &Rules,
         key: &str,
         short: &str,
-        platform: Option<&str>,
     ) -> Self {
         let 这一个 = work.variants.iter().find(|one| one.row.key == key);
+        let platform = 这一个.and_then(|one| one.row.platform.clone());
         let title = title_of(work, rules);
-        // 新建那一档的默认名字照稿：原作品名加上变体简称头一段（「幻想传说（汉化版）」）。
-        let 起名 = format!("{title}（{}）", short.split(" · ").next().unwrap_or(short));
+        let from_work = match work.anchor {
+            WorkAnchor::Work(_) => Some(work.name.clone()),
+            WorkAnchor::Loose(_) => None,
+        };
+        let mut error = None;
+        let mut 认: Box<dyn FnMut(CatalogError)> = Box::new(|failed: CatalogError| {
+            error.get_or_insert_with(|| format!("中立库读不动：{failed}"));
+        });
+
+        // **默认名字里「是哪一种」由核心库答**（`variant_kind` → `variant_short_name`），
+        // **不把变体简称按「 · 」剖回去**——那就成了「这是哪一种」的第二个答案，与词表
+        // **变体简称**、**第几版**两条上「不从文件名剥」逐字同一条道理（ADR-0024，
+        // Standards 轴挑出，2026-09-21 照改）。稿上那一手（`l.split(' · ')[0]`）不照抄。
+        let 哪一种 = 这一个
+            .and_then(|one| match catalog.variant_kind(one) {
+                Ok(kind) => Some(romcat_core::catalog::browse::variant_short_name(
+                    kind, None, key,
+                )),
+                Err(failed) => {
+                    认(failed);
+                    None
+                }
+            })
+            .unwrap_or_else(|| short.to_string());
+        let 起名 = format!("{title}（{哪一种}）");
+
+        // 移走之后还剩几个、首选变体照规则该换成谁——两样都问核心库。
+        let mut left = 0;
+        let mut next_preferred = None;
+        if let Some(from) = from_work.as_deref() {
+            match merge::remaining(catalog, &[key]) {
+                Ok(rest) => left = rest.get(from).copied().unwrap_or(0),
+                Err(failed) => 认(failed),
+            }
+            if let Some(platform) = platform.as_deref() {
+                // 只有**移走的正是眼下那一个首选**时才说这句话：别的时候首选一个字没变。
+                let 眼下 = match catalog.preferred_variant(from, platform) {
+                    Ok(had) => had,
+                    Err(failed) => {
+                        认(failed);
+                        None
+                    }
+                };
+                if 眼下.as_deref() == Some(key) {
+                    let 剩下的: Vec<&str> = work
+                        .variants
+                        .iter()
+                        .filter(|one| {
+                            one.row.key != key && one.row.platform.as_deref() == Some(platform)
+                        })
+                        .map(|one| one.row.key.as_str())
+                        .collect();
+                    match merge::preferred_pick(catalog, from, platform, &剩下的) {
+                        Ok(pick) => next_preferred = pick,
+                        Err(failed) => 认(failed),
+                    }
+                }
+            }
+        }
+        drop(认);
+
         Self {
             from: title,
-            from_work: match work.anchor {
-                WorkAnchor::Work(_) => Some(work.name.clone()),
-                WorkAnchor::Loose(_) => None,
-            },
+            from_work,
             key: key.to_string(),
             short: short.to_string(),
-            platform: platform.map(ToString::to_string),
+            platform,
             tier: Tier::of(这一个.and_then(WorkVariant::confidence)),
             bytes: 这一个.map_or(0, |one| one.row.bytes),
             fresh: true,
@@ -967,9 +1106,10 @@ impl Split {
             found: Vec::new(),
             found_for: None,
             target: None,
-            left: work.variants.len().saturating_sub(1),
+            left,
+            next_preferred,
             planned: None,
-            error: None,
+            error,
         }
     }
 
@@ -1111,15 +1251,19 @@ impl Split {
                         ),
                     ],
                 );
-                let 剩 = if self.left > 0 {
-                    format!(
-                        "「{}」还剩 {} 个变体。",
-                        self.from,
-                        thousands(self.left as u64)
-                    )
+                // 照稿 `DLG.split` 那一条：还剩几个 + 首选变体改成谁。
+                // 两个数都是核心库答的（`merge::remaining` / `merge::preferred_pick`）。
+                let mut 剩 = if self.left > 0 {
+                    format!("「{}」还剩 {} 个变体。", self.from, thousands(self.left))
                 } else {
                     format!("「{}」没有变体了，会从浏览列表中消失。", self.from)
                 };
+                if let Some(next) = &self.next_preferred {
+                    剩.push_str(&format!(
+                        "移走的正是它眼下的首选变体，改由「{}」顶上（照「汉化 > 官中 > 日版 > 其他」重选）。",
+                        romcat_core::path::file_name_of_key(next),
+                    ));
+                }
                 if self.left > 0 {
                     look::impact(ui, &[(&剩, false)]);
                 } else {
@@ -1174,26 +1318,43 @@ impl Split {
         }
         self.found_for = Some(self.query.clone());
         self.found.clear();
-        let query = WorkQuery {
-            search: self.query.clone(),
-            ..WorkQuery::default()
-        };
-        match site
-            .catalog
-            .work_page_with_titles(&query, 0, (FOUND + 1) as u64, priorities)
-        {
+        match 搜作品(site, priorities, &self.query, 1) {
             Ok(rows) => {
-                for row in rows {
-                    if !matches!(row.anchor, WorkAnchor::Work(_))
-                        || Some(&row.name) == self.from_work.as_ref()
-                        || self.found.len() >= FOUND
-                    {
+                for (_, name) in rows {
+                    if Some(&name) == self.from_work.as_ref() || self.found.len() >= FOUND {
                         continue;
                     }
-                    self.found.push(row.name);
+                    self.found.push(name);
                 }
             }
             Err(failed) => self.error = Some(format!("中立库读不动：{failed}")),
         }
     }
+}
+
+/// 两处搜索框共用的那一趟：按名字搜**作品**，交回 `(那一行的身份, 作品名)`，最多
+/// `FOUND + 还要滤掉几个` 行。
+///
+/// **只交认出了作品的那些**：还没认出作品的那一行在浏览屏上勾得中（合并的被合并一侧收它），
+/// 但这两个框搜的是「作品」——搜出一堆路径来对人没有用。
+///
+/// 多取 `skip` 行是因为调用方还要再滤一遍（已经在向导里的、正在移出的那个作品自己），
+/// 不多取的话滤完就不够 [`FOUND`] 行。
+fn 搜作品(
+    site: &Site,
+    priorities: &Priorities,
+    text: &str,
+    skip: usize,
+) -> Result<Vec<(WorkAnchor, String)>, CatalogError> {
+    let query = WorkQuery {
+        search: text.to_string(),
+        ..WorkQuery::default()
+    };
+    Ok(site
+        .catalog
+        .work_page_with_titles(&query, 0, (FOUND + skip) as u64, priorities)?
+        .into_iter()
+        .filter(|row| matches!(row.anchor, WorkAnchor::Work(_)))
+        .map(|row| (row.anchor, row.name))
+        .collect())
 }

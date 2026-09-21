@@ -302,7 +302,7 @@ impl Screen {
         match 卡片 {
             Some((key, CardPress::Prefer)) => self.prefer(site, &key),
             Some((key, CardPress::Restore)) => self.restore_rule(site, &key),
-            Some((key, CardPress::Split)) => self.open_split(&key),
+            Some((key, CardPress::Split)) => self.open_split(site, &key),
             Some((key, CardPress::Reveal)) => self.reveal(site, &key),
             None => {}
         }
@@ -1308,7 +1308,8 @@ impl Screen {
                                 let 合并 = ui
                                     .button(super::merge::MERGE_ONE)
                                     .on_hover_text(
-                                        "把这个作品与别的作品合并成一个：第一步里搜出要并进来的那几个。\n\n                                         只写入裁决记录，不会移动或修改任何文件。",
+                                        "把这个作品与别的作品合并成一个：第一步里搜出要并进来的那几个。\n\n\
+                                         只写入裁决记录，不会移动或修改任何文件。",
                                     )
                                     .clicked();
                                 let 打开 = ui
@@ -1863,7 +1864,8 @@ fn variant_card(
             // **「移出此作品…」照稿排在它前面**：合并的反向操作，同样一条裁决、撤得回来。
             let 移出 = ghost_small(ui, super::merge::SPLIT)
                 .on_hover_text(
-                    "把这个变体从这个作品移出，放到新建的作品或另一个已有作品。\n\n                     同样只写入裁决记录，可以在「待确认 → 裁决记录」中撤销。",
+                    "把这个变体从这个作品移出，放到新建的作品或另一个已有作品。\n\n\
+                     同样只写入裁决记录，可以在「待确认 → 裁决记录」中撤销。",
                 )
                 .clicked();
             let 挑得了 = !detail.is_preferred()

@@ -399,6 +399,10 @@ pub struct Screen {
     merging: Option<merge::Wizard>,
     /// **移出此作品**那一层开着时是 `Some`。它从作品详情页某一张变体卡上开。
     splitting: Option<merge::Split>,
+    /// 刚落下的那一**批裁决**是第几批：底边那条提示条上那颗「撤销」撤的就是它
+    /// （设计稿 `doMerge` / `doSplit` 末尾那一下）。提示条停够了就跟着没了——
+    /// 之后照旧走待确认屏的**裁决记录**。
+    just_landed: Option<i64>,
     /// 高亮的是哪一行（全序下标）。
     focused: Option<u64>,
     /// 选中了哪几行——**批量操作的作用范围**。与 [`Self::focused`] 不是一回事。
@@ -548,6 +552,7 @@ impl Screen {
             touched: None,
             merging: None,
             splitting: None,
+            just_landed: None,
             focused: None,
             picked: Picked::default(),
             opened: None,
@@ -732,7 +737,7 @@ impl Screen {
     }
 
     /// 变体卡头一行右头那颗「**移出此作品…**」。
-    pub fn open_split(&mut self, key: &str) {
+    pub fn open_split(&mut self, site: &Site, key: &str) {
         let Some(work) = self.work.as_ref() else {
             return;
         };
@@ -752,11 +757,11 @@ impl Screen {
             .cloned()
             .unwrap_or_else(|| variant.row.key.clone());
         self.splitting = Some(merge::Split::open(
+            &site.catalog,
             work,
             &self.rules,
             &variant.row.key,
             &short,
-            variant.row.platform.as_deref(),
         ));
     }
 
@@ -784,7 +789,10 @@ impl Screen {
     /// 独立的一笔账，撤销那一批不连带（挂单 `Q1012`），先做的话会留下
     /// 「名字并了、变体没并」那种半吊子。
     fn apply_merge(&mut self, site: &mut Site) {
-        let Some(wizard) = self.merging.take() else {
+        // **落成了才把这一层收掉**：`triage::apply` 真会拒（计划过期，`StalePlan`），
+        // 那时先收掉的话，人在三步里勾的、挑的、选的一并没了，只剩一行错
+        // （自审挑出，2026-09-21 照改）。
+        let Some(wizard) = self.merging.as_ref() else {
             return;
         };
         let Some(planned) = wizard.planned() else {
@@ -792,12 +800,18 @@ impl Screen {
         };
         let keep = planned.into_work().to_string();
         let 几个 = planned.verdicts();
-        if let Err(failed) =
-            romcat_core::triage::merge::apply(&mut site.catalog, &mut site.store, planned)
-        {
-            self.error = Some(format!("合并落不下去：{failed}"));
+        let batch =
+            match romcat_core::triage::merge::apply(&mut site.catalog, &mut site.store, planned) {
+                Ok(账) => 账.batch,
+                Err(failed) => {
+                    self.error = Some(format!("合并落不下去：{failed}"));
+                    return;
+                }
+            };
+        let Some(wizard) = self.merging.take() else {
             return;
-        }
+        };
+        self.just_landed = Some(batch);
         let mut 顺手 = Vec::new();
         if let Err(failed) =
             romcat_core::triage::merge::keep_aliases(&mut site.catalog, &keep, &wizard.aliases())
@@ -815,9 +829,13 @@ impl Screen {
                 顺手.push(format!("{} 那一格没改成：{failed}", field.label()));
             }
         }
-        for (work, platform, key) in wizard.preferred() {
-            if let Err(failed) = site.catalog.set_preferred_variant(&work, &platform, &key) {
-                顺手.push(format!("{platform} 的首选变体没记下：{failed}"));
+        // **只写人亲手点过的那几条**：没点过的平台照规则来，写下去等于把规则冻成覆盖。
+        for one in wizard.preferred() {
+            if let Err(failed) =
+                site.catalog
+                    .set_preferred_variant(&one.work, &one.platform, &one.variant_key)
+            {
+                顺手.push(format!("{} 的首选变体没记下：{failed}", one.platform));
             }
         }
         self.error = (!顺手.is_empty()).then(|| 顺手.join("；"));
@@ -831,7 +849,8 @@ impl Screen {
 
     /// 真移出：一条裁决，同一条撤销路。
     fn apply_split(&mut self, site: &mut Site) {
-        let Some(split) = self.splitting.take() else {
+        // 同 [`Self::apply_merge`]：落成了才收掉这一层。
+        let Some(split) = self.splitting.as_ref() else {
             return;
         };
         let Some(planned) = split.planned() else {
@@ -839,7 +858,9 @@ impl Screen {
         };
         let into = planned.into_work().to_string();
         match romcat_core::triage::merge::apply(&mut site.catalog, &mut site.store, planned) {
-            Ok(_) => {
+            Ok(账) => {
+                self.splitting = None;
+                self.just_landed = Some(账.batch);
                 self.notice = Some(format!("已移到「{into}」。要撤销去「待确认 → 裁决记录」。"));
                 self.after_regroup(site);
             }
@@ -1627,7 +1648,8 @@ impl Screen {
             let 合并 = ui
                 .button(merge::MERGE)
                 .on_hover_text(
-                    "把被识别成不同作品、其实是同一个游戏的变体归到一起。\n\n                     勾两个或更多作品再按。只写入裁决记录，不会移动或修改任何文件。",
+                    "把被识别成不同作品、其实是同一个游戏的变体归到一起。\n\n\
+                     勾两个或更多作品再按。只写入裁决记录，不会移动或修改任何文件。",
                 )
                 .clicked();
             (刮削, 收藏, 合并)
@@ -2138,7 +2160,7 @@ impl Screen {
         self.scrape.show(ui.ctx(), site, tasks);
         // **合并向导与「移出此作品」也是弹层**：盖在整屏上头，三栏与作品详情页都由这一处画。
         self.merge_ui(ui.ctx(), site);
-        self.notice_toast(ui.ctx());
+        self.notice_toast(ui.ctx(), site);
         // **作品详情页开着就只画它**（票 `gui-looks-like-the-design/15`）：稿上它盖住整块屏。
         if self.page.is_some() {
             self.page_ui(ui, site);
@@ -2229,19 +2251,55 @@ impl Screen {
 
     /// 上一次动作的回执照稿浮在窗口底边那条**提示条**上（[`crate::toast`]）：三栏与作品详情页都走这一处。
     /// 回执换了一句就换一条提示条；停够了收起，那句回执也跟着收掉（[`Self::notice`] 回到 `None`）。
-    fn notice_toast(&mut self, ctx: &egui::Context) {
+    fn notice_toast(&mut self, ctx: &egui::Context, site: &mut Site) {
         let Some(说的) = self.notice.as_deref() else {
             self.toast = None;
+            self.just_landed = None;
             return;
         };
         if self.toast.as_ref().is_none_or(|toast| toast.text() != 说的) {
-            self.toast = Some(Toast::new(说的));
+            // **刚落下一批裁决时那条提示条上多一颗「撤销」**（设计稿 `doMerge` / `doSplit`
+            // 末尾那一下）：刚按完那一秒是最可能改主意的一秒，而那时人还没想到要去裁决记录里找。
+            self.toast = Some(match self.just_landed {
+                Some(_) => Toast::new(说的).action(UNDO),
+                None => Toast::new(说的),
+            });
         }
-        if let Some(toast) = self.toast.as_mut()
-            && toast.show(ctx) == toast::Shown::Expired
-        {
-            self.toast = None;
-            self.notice = None;
+        let Some(toast) = self.toast.as_mut() else {
+            return;
+        };
+        match toast.show(ctx) {
+            toast::Shown::Showing => {}
+            toast::Shown::Expired => {
+                self.toast = None;
+                self.notice = None;
+                self.just_landed = None;
+            }
+            toast::Shown::Pressed => {
+                self.toast = None;
+                if let Some(batch) = self.just_landed.take() {
+                    self.undo_batch(site, batch);
+                }
+            }
+        }
+    }
+
+    /// 撤掉刚落下的那一**批裁决**：提示条上那颗「撤销」按的就是它。
+    ///
+    /// **走的是既有那条按批撤销的路**（`triage::undo_batch`，与待确认屏的**裁决记录**、
+    /// 命令行 `romcat triage undo` 同一处）：沉淀库与中立库两边一起退回这一批落下之前的样子。
+    /// 别名、第三步选的字段值与首选变体**不跟着撤**（挂单 `Q1012`）——屏上第三步那一段
+    /// 已经把这句话说全了。
+    fn undo_batch(&mut self, site: &mut Site, batch: i64) {
+        match romcat_core::triage::undo_batch(&mut site.catalog, &mut site.store, batch) {
+            Ok(账) => {
+                self.notice = Some(format!(
+                    "已撤销：{} 个变体回到原来的作品。别名、选过的字段值与首选变体留着。",
+                    thousands(账.variants)
+                ));
+                self.after_regroup(site);
+            }
+            Err(failed) => self.error = Some(format!("撤不掉：{failed}")),
         }
     }
 
@@ -3938,6 +3996,9 @@ type Opener = Box<dyn FnMut(&std::path::Path) -> Result<(), String>>;
 
 /// 表格上方那一条右端「清除选择」那颗按钮上的字（设计稿 `#clear-pick`）。
 const CLEAR_PICK: &str = "清除选择";
+
+/// 刚落下一批裁决时，底边那条提示条上那颗按钮上的字（设计稿 `doMerge` 末尾那个 `toast`）。
+const UNDO: &str = "撤销";
 
 /// 作用范围那个数画成什么。**数不出来就说数不出来**，不摆一个 0 出去。
 fn scope_label(scope: Option<u64>) -> String {

@@ -658,3 +658,85 @@ fn 夹具摆出来的是三个作品四个变体() {
         assert!(屏上.contains(作品), "表上没有「{作品}」：\n{屏上}");
     }
 }
+
+#[test]
+fn 人没点过首选变体时一条首选裁决都不落() {
+    let ctx = headless::context();
+    let mut app = 界面("romcat-测试-合并-首选不乱落");
+    走到第几步(&ctx, &mut app, 3);
+    点一下(&ctx, "合并 2 个作品", |ui| app.ui(ui));
+
+    // **一条都不该有**：屏上默认选中的那一个是核心库照「汉化 > 官中 > 日版 > 其他」算的，
+    // 把它也写下去等于拿一条裁决把规则冻住（词表**首选变体**：规则可被裁决覆盖，不是反过来）。
+    let (_, site) = app.browse_and_site();
+    let 裁过的 = site.catalog.preferred_variants().expect("读得动");
+    assert!(
+        裁过的.is_empty(),
+        "人一下都没点，却落下了首选变体裁决：{裁过的:?}",
+    );
+}
+
+#[test]
+fn 别名只留并空了的那几个_屏上说清是哪几个() {
+    let ctx = headless::context();
+    let mut app = 界面("romcat-测试-合并-别名说清");
+    走到第几步(&ctx, &mut app, 3);
+    let 屏上 = 滚到底(&ctx, |ui| app.ui(ui));
+    assert!(
+        屏上.contains(&format!("留的是并空了的那几个：《{乙}》")),
+        "没说清留的是哪几个名字：\n{屏上}",
+    );
+
+    点一下(&ctx, "合并 2 个作品", |ui| app.ui(ui));
+    let (_, site) = app.browse_and_site();
+    let 叫法 = site.catalog.titles_of(甲).expect("读得动");
+    assert!(
+        叫法.iter().any(|row| row.value == 乙),
+        "并空了的那个名字该留作别名：{叫法:?}",
+    );
+    // 没参与的那个作品的名字**不该**被记成别名。
+    assert!(
+        !叫法.iter().any(|row| row.value == 丙),
+        "没参与的作品名被记成别名了：{叫法:?}",
+    );
+}
+
+#[test]
+fn 刚落下那一批时提示条上有撤销_按一下变体就回到原来的作品() {
+    let ctx = headless::context();
+    let mut app = 界面("romcat-测试-合并-提示条撤销");
+    走到第几步(&ctx, &mut app, 3);
+    let 之后 = 点一下(&ctx, "合并 2 个作品", |ui| app.ui(ui));
+    assert!(
+        有这一段(&之后, "撤销"),
+        "提示条上没有那颗「撤销」：\n{之后}"
+    );
+    assert_eq!(
+        挂在(&mut app, &键("GB", "精灵宝可梦 红.zip")).as_deref(),
+        Some(甲),
+    );
+
+    // 按下去走的是**既有那条按批撤销的路**（`triage::undo_batch`）。
+    let 撤了 = 正好点一下(&ctx, "撤销", |ui| app.ui(ui));
+    assert!(撤了.contains("已撤销"), "没给回执：\n{撤了}");
+    assert_eq!(
+        挂在(&mut app, &键("GB", "精灵宝可梦 红.zip")).as_deref(),
+        Some(乙),
+        "按了「撤销」变体没回到原来的作品",
+    );
+}
+
+#[test]
+fn 移出那一层的默认名字里那几个字由核心库答_不是把变体简称剖回去() {
+    let ctx = headless::context();
+    let mut app = 界面("romcat-测试-移出-默认名字");
+    打开详情页(&ctx, &mut app, 甲);
+    点一下(&ctx, "移出此作品…", |ui| app.ui(ui));
+    let 开了 = 稳一稳(&ctx, &mut app);
+
+    // 甲底下那两个变体身上没有汉化记号，核心库答的是「原版」（`variant_short_name`）。
+    assert!(
+        开了.contains(&format!("{甲}（原版）")),
+        "默认名字里那几个字不对：\n{开了}",
+    );
+}
