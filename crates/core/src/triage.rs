@@ -65,7 +65,10 @@ pub mod merge;
 pub mod queue;
 pub mod report;
 
-pub use batch::{Batch, Drill, Fanout, Sample, Scope, Shape};
+pub use batch::{
+    Batch, Breakdown, Drill, Fanout, Part, PartKind, Parts, Sample, Scope, Shape, Slice,
+    axis_refusal,
+};
 pub use queue::Queue;
 
 use std::collections::{BTreeMap, BTreeSet};
