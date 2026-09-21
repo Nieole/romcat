@@ -79,6 +79,19 @@ pub fn unlinked_title(work: &WorkRow, rules: &Rules) -> Option<String> {
     work.title(rules)
 }
 
+/// **这一行屏上叫什么**：主栏那一行印的那个名字。
+///
+/// 三处要它：表格那一格（`name_cell`）、卡片墙的卡面、右键菜单顶上那一行连「复制名称」
+/// （[`crate::browse::menu`]）。摆在这儿一处，是因为它是一条**次序**——认不出作品的那一行
+/// 印正题、认出来的印显示标题、都没有才印作品名。三处各写一遍，屏上同一行在三处就会
+/// 叫三个名字，而「复制名称」复制的那个会与人眼前看见的不是同一个（ADR-0024）。
+#[must_use]
+pub fn row_name(work: &WorkRow, rules: &Rules) -> String {
+    unlinked_title(work, rules)
+        .or_else(|| work.display.clone())
+        .unwrap_or_else(|| work.name.clone())
+}
+
 /// 窗口默认一次取多少行。
 ///
 /// 视口撑死几十行，取 512 是给上下滚动留预取余量：往下翻过 3/4 个窗口才需要再查一次库。
@@ -353,6 +366,20 @@ pub struct Opened {
     pub page: bool,
 }
 
+/// 表上或卡片墙上这一帧**右键按下**的那一行（[`crate::browse::menu`] 那一层贴着它摊开）。
+///
+/// **两路共用这一个**：表格与卡片墙各自认出「这一下是右键、按在哪一行」，交出来的是同一份
+/// ——菜单上摆哪几项由那一层一处说了算（ADR-0024）。
+#[derive(Debug, Clone)]
+pub struct RightClicked {
+    /// 那一行的一份拷贝。
+    pub row: WorkRow,
+    /// 它在全序里是第几行；卡片墙那一路也数得出来。
+    pub index: u64,
+    /// 按下去那一下指针在哪儿——菜单贴着它摊开（设计稿 `ctxOpen(e.clientX,e.clientY,…)`）。
+    pub at: egui::Pos2,
+}
+
 /// 一张主列表。
 ///
 /// 它**直接改 `query`**：点表头就是换排序，而排序是中立库那一层的事，界面这边只是把
@@ -381,6 +408,18 @@ pub struct Table<'a> {
     /// **行首那一小格封面**：「在每行开头显示封面」开着时是 `Some`，关着是 `None`
     /// ——那时行首什么都不摆，行也照令牌矮回 `table-row`。
     pub shelf: Option<&'a mut Shelf>,
+    /// **右键按在哪一行**：这一帧按了就落一份在这儿（[`RightClicked`]）。
+    ///
+    /// 不走返回值那一条（[`Opened`]）：右键**不打开**任何东西，它只摊开一层菜单，
+    /// 而那一层归浏览屏画（[`crate::browse::menu`]）。两件事各走各的口子，读代码的人
+    /// 不必先分辨这一帧交回来的那一行是「点开了」还是「右键了」。
+    pub menu: &'a mut Option<RightClicked>,
+    /// **把高亮那一行滚进视口**：`↑` `↓` 刚挪过高亮的那一帧是 `true`。
+    ///
+    /// 滚**最少那么多**（`align` 给 `None`）而不是滚到正中：设计稿那一路
+    /// （`scrollIntoView({block:'nearest'})`）也是这样——翻着看时整张表跟着跳，
+    /// 上下文就全没了。
+    pub scroll_focused: bool,
 }
 
 impl Table<'_> {
@@ -398,6 +437,8 @@ impl Table<'_> {
             scroll_to,
             rules,
             mut shelf,
+            menu,
+            scroll_focused,
         } = self;
         let tokens = Tokens::builtin();
         // 行首摆封面时一行照令牌 `table-row-cover` 高：两行字旁边还得竖得下那一小格封面。
@@ -454,6 +495,9 @@ impl Table<'_> {
                 .column(Column::exact(容量宽).clip(true))
                 .column(Column::exact(年份宽).clip(true))
                 .column(Column::exact(元数据宽).clip(true));
+            if scroll_focused && let Some(at) = *focused {
+                builder = builder.scroll_to_row(usize::try_from(at).unwrap_or(usize::MAX), None);
+            }
             if let Some(offset) = scroll_to {
                 builder = builder.vertical_scroll_offset(offset);
             }
@@ -603,6 +647,19 @@ impl Table<'_> {
                         // （票 `gui-redesign/12` 验收第 7 条）。行自己画底色，走不了 egui
                         // 按钮那条路，得自己描一圈。
                         look::focus_ring(&ctx, 看得见的, &response);
+                        // **右键也换高亮**（设计稿 `contextmenu` 那一路先 `S.sel=i` 再
+                        // `render()`）：菜单上那几项动的就是这一行，屏上得看得出是哪一行。
+                        // 侧边详情跟着换，由浏览屏在下一帧办（`Screen::settle_menu`）。
+                        if response.secondary_clicked()
+                            && let Some(at) = response.interact_pointer_pos()
+                        {
+                            *focused = Some(index);
+                            *menu = Some(RightClicked {
+                                row: work.clone(),
+                                index,
+                                at,
+                            });
+                        }
                         if response.clicked() {
                             *focused = Some(index);
                             // **交一份拷贝出去而不只是下标**：详情面板要在这一行滚出视口
