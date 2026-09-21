@@ -52,6 +52,14 @@ pub(super) const CONTENT_SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS work(
     id     INTEGER PRIMARY KEY,
     name   TEXT NOT NULL,
+    -- **排序标题**（词表那一条）：主列表按「作品」排时排的是它，不是上面那个 `name`。
+    -- 中文显示标题按码位排等于乱排，所以排序另取一个拉丁标题（`title::choose` 的
+    -- `Chosen::sort`，折成大写、排的时候不分大小写）。
+    --
+    -- **它是折出来的一份投影，不是谁手填的**：`title::write_sort_titles` 在折标题那一趟
+    -- 顺手算完写下来。**没折过的库这一列全是 NULL**，那时排序 `COALESCE` 退回 `name`。
+    -- 这一列由 `add_columns` 给老库补上。
+    sort_title TEXT,
     -- 这一行是**识别**自己造的，还是**裁决**定下来的（票 07）。重跑识别只清掉
     -- 自己上一轮造的、如今没人再指着的那些（`Catalog::drop_unheld_identified_works`）。
     origin TEXT NOT NULL
@@ -215,8 +223,14 @@ pub(super) fn read_variant_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Vari
 ///
 /// **它跟着建表语句走，不塞进别的模块的 `add_columns`**：`release` 这张表建在这个文件里，
 /// 补它的列也该在这儿——两处分家的话，下一个改这张表的人看不见还有一支在给它补列。
+///
+/// 票 `gui-looks-like-the-design/11` 加的是 `work.sort_title`（**排序标题**，词表那一条）。
+/// 老行上它是 NULL，排序那一侧 `COALESCE` 退回作品名——那正是加这一列之前唯一的排法，
+/// 于是旧库一行都不会被排错，只是**还没折过标题的库按作品名排**
+/// （`title::write_sort_titles` 折一趟就有了）。
 pub(super) fn add_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     super::add_column(conn, "release", "revision", "TEXT")?;
+    super::add_column(conn, "work", "sort_title", "TEXT")?;
     Ok(())
 }
 

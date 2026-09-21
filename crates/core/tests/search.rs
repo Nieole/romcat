@@ -434,6 +434,57 @@ fn 搜索与筛选叠加时结果既满足条件又按质量排() {
     assert!(!结果.iter().any(|(name, _)| name == "合金弹头 2"));
 }
 
+/// **搜索着的时候默认按匹配质量排；人点过表头就以他点的那一列为准**
+/// （票 `gui-looks-like-the-design/11` 验收第 4 条）。
+///
+/// 「匹配得好的排前面」是搜索框唯一的产品承诺，所以它是**默认**那一种次序；但按容量
+/// 排着找大文件的人打几个字把范围缩小一点时，他要的是「这几个字圈出来的那批里最大的
+/// 是哪个」——那时把次序换掉就是替他改了正在做的事。表头再点一下回到默认那一种
+/// （[`WorkQuery::sorted_by_default`]），不必先把搜索词删掉。
+#[test]
+fn 搜索着的时候默认按匹配质量排_点过表头就以表头为准() {
+    let catalog = 建库();
+
+    // 一、默认那一种排法：匹配质量是第一把键，`hit` 一路不减。
+    let 默认 = 搜词(&catalog, 中文词);
+    assert!(默认.len() >= 3, "至少得搜出三行才谈得上次序：{默认:?}");
+    let mut 上一档 = SearchHit::TitleStart;
+    for (name, hit) in &默认 {
+        assert!(
+            *hit >= 上一档,
+            "默认那一种排法没按匹配质量排，「{name}」排到了更好的一档前面：{默认:?}"
+        );
+        上一档 = *hit;
+    }
+
+    // 二、人点了「容量」那个表头：**以它为准**。
+    let 按容量 = WorkQuery {
+        search: 中文词.to_string(),
+        order: WorkOrder::Bytes,
+        descending: true,
+        ..WorkQuery::default()
+    };
+    assert!(!按容量.sorted_by_default(), "点过表头了就不是默认那一种");
+    let 行 = catalog.work_page(&按容量, 0, 64).expect("取得出一页");
+    let 容量: Vec<u64> = 行.iter().map(|row| row.bytes).collect();
+    let mut 从大到小 = 容量.clone();
+    从大到小.sort_unstable_by(|a, b| b.cmp(a));
+    assert_eq!(
+        容量, 从大到小,
+        "点了「容量」表头，屏上却还按匹配质量排：{行:?}"
+    );
+
+    // 三、**换的只是顺序，不是集合**：搜出来的还是同一批行。
+    let mut 按容量的名字: Vec<String> = 行.into_iter().map(|row| row.name).collect();
+    let mut 默认的名字: Vec<String> = 默认.iter().map(|(name, _)| name.clone()).collect();
+    按容量的名字.sort();
+    默认的名字.sort();
+    assert_eq!(
+        按容量的名字, 默认的名字,
+        "换个排法连搜出来的那一批都换了——搜索管的是顺序与集合，排序只管顺序",
+    );
+}
+
 #[test]
 fn 存成子库时只带条件不带顺序() {
     // **验收第 5 条**。两半各钉一遍。

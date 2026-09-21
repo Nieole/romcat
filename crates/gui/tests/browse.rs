@@ -392,6 +392,135 @@ fn 五列都排得了序而且换排序真的换了次序() {
     );
 }
 
+/// 按一下主列表**表头**上那一列。
+///
+/// **不走 `shared::点一下`**，两处过不去：
+///
+/// 1. 「平台」这类词**左栏也有一处**（条件组里维度那个下拉），而 `shared::点一下` 按
+///    「含有」找**头一处**，点到的是左栏那一个。所以这里按**整段一字不差**找，
+///    再取**最靠右**的那一处——主列表在左栏右边。
+/// 2. **取 galley 的中心点会点到隔壁那一列**：实测点「容量」选中的是「年份」。
+///    靠右那两列（变体、容量）的列名画在自己这一格的右头，而这一层量到的 galley 矩形
+///    与屏上那几个字的位置**对不齐**（`Shape::Text` 的 `pos` 在这条路上不是最终屏幕
+///    坐标——基线图 `snapshots/browse/rows-*.png` 上那几个字是正常右对齐的，没有出格）。
+///    没有去追那个偏移是哪儿来的：这条测试要的是「点得中这一列」，不是「量得准这一格」。
+///
+/// 于是点的是那几个字的**左缘**而不是中心。**点没点中由断言兜着**：底下那条测试点了
+/// 作品、容量、年份三列，每一下都断言选中的是哪一列，点错列当场红。
+/// **要量表头的对齐，去看基线图，别拿这儿的矩形当真。**
+fn 点表头(ctx: &egui::Context, 列名: &str, mut 画一帧: impl FnMut(&mut egui::Ui)) {
+    fn 收(shape: &egui::epaint::Shape, 列名: &str, out: &mut Vec<egui::Rect>) {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == 列名 => {
+                out.push(egui::Rect::from_min_size(text.pos, text.galley.size()));
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    收(one, 列名, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let 头一帧 = headless::frame(ctx, headless::input(), &mut 画一帧);
+    let mut 处处 = Vec::new();
+    for clipped in &头一帧.shapes {
+        收(&clipped.shape, 列名, &mut 处处);
+    }
+    // 主列表在屏子中间那一大块：左栏那一份（如果有）在它左边。取**最靠右**的那一处。
+    let Some(那一格) = 处处.into_iter().max_by(|a, b| a.min.x.total_cmp(&b.min.x)) else {
+        panic!(
+            "屏上没有正好写着「{列名}」的表头：\n{}",
+            shared::画出来的字(&头一帧)
+        );
+    };
+    let 位置 = egui::pos2(那一格.min.x + 2.0, 那一格.center().y);
+    let 按 = |pressed: bool| egui::Event::PointerButton {
+        pos: 位置,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    headless::frame(
+        ctx,
+        shared::输入(vec![egui::Event::PointerMoved(位置), 按(true)]),
+        &mut 画一帧,
+    );
+    headless::frame(ctx, shared::输入(vec![按(false)]), &mut 画一帧);
+    shared::跑一帧(ctx, 画一帧);
+}
+
+/// **点表头：一下正着、两下倒着、三下回到默认那一种**
+/// （票 `gui-looks-like-the-design/11` 验收第 1 条）。
+///
+/// 第三下要紧的是**搜索着的时候**：默认那一种排法就是按匹配质量排
+/// （`WorkQuery::sorted_by_default`），没有这一下的话，人点过一次表头就再也回不到
+/// 「匹配得好的排前面」，除非把搜索词删掉重打。
+///
+/// **默认那一列（作品）只有两态**：默认那一种就是它正着排，它的第三态与第一态是同一个。
+#[test]
+fn 点表头一下正着两下倒着三下回到默认() {
+    let ctx = headless::context();
+    let mut app = 界面(ROWS);
+    跑(&ctx, &mut app, 2);
+    let 排法 = |app: &mut App| {
+        let (browse, _) = app.browse_and_site();
+        let query = browse.query();
+        (query.order, query.descending, query.sorted_by_default())
+    };
+    assert_eq!(
+        排法(&mut app),
+        (WorkOrder::Name, false, true),
+        "一进屏本该是默认那一种排法",
+    );
+
+    // 一下：按这一列正着排。
+    点表头(&ctx, "容量", |ui| app.ui(ui));
+    assert_eq!(
+        排法(&mut app),
+        (WorkOrder::Bytes, false, false),
+        "点头一下没换成按容量正着排",
+    );
+
+    // 两下：同一列翻方向。
+    点表头(&ctx, "容量", |ui| app.ui(ui));
+    assert_eq!(
+        排法(&mut app),
+        (WorkOrder::Bytes, true, false),
+        "再点一下没翻成倒着排",
+    );
+
+    // 三下：回到默认那一种。
+    点表头(&ctx, "容量", |ui| app.ui(ui));
+    assert_eq!(
+        排法(&mut app),
+        (WorkOrder::Name, false, true),
+        "点第三下没回到默认那一种排法",
+    );
+
+    // 换一列照样走这三下——不是只有容量那一列特殊。
+    点表头(&ctx, "年份", |ui| app.ui(ui));
+    assert_eq!(排法(&mut app), (WorkOrder::Year, false, false));
+    点表头(&ctx, "年份", |ui| app.ui(ui));
+    assert_eq!(排法(&mut app), (WorkOrder::Year, true, false));
+    点表头(&ctx, "年份", |ui| app.ui(ui));
+    assert_eq!(排法(&mut app), (WorkOrder::Name, false, true));
+
+    // **作品那一列只有两态**：默认那一种就是它正着排。
+    点表头(&ctx, "作品", |ui| app.ui(ui));
+    assert_eq!(
+        排法(&mut app),
+        (WorkOrder::Name, true, false),
+        "点默认那一列该直接翻成倒着排",
+    );
+    点表头(&ctx, "作品", |ui| app.ui(ui));
+    assert_eq!(
+        排法(&mut app),
+        (WorkOrder::Name, false, true),
+        "再点一下该回到默认那一种",
+    );
+}
+
 #[test]
 fn 五个维度筛得动而且筛选下推到中立库() {
     let ctx = headless::context();
