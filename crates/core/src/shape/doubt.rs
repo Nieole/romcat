@@ -161,10 +161,15 @@ fn crowded_trees(variants: &[Shaped<'_>], entries: &[Entry], manifest: &Manifest
     if roots.is_empty() {
         return Vec::new();
     }
+    // **已经自成一个变体的那一份不算**：人工纠正**拆开**过这个目录之后（票
+    // `gui-looks-like-the-design/29`，`shape::fix::split`），拆出去的那几份各自是一个变体
+    // ——它们不再是「这个目录里躺着、却被当成转储一部分」的东西，这一处也就不再存疑。
+    // 拆之前不会命中：目录树认下的子树里，文件一律是那棵树的成员（[`super::plan`]）。
+    let own_variant: BTreeSet<&str> = variants.iter().map(|variant| variant.key).collect();
     // 变体的目录 →（去掉扩展名、折过的名字 → 叫这个名字的那几份独立内容）。
     let mut inside: BTreeMap<&str, BTreeMap<String, Vec<&str>>> = BTreeMap::new();
     for entry in entries {
-        if entry.is_dir {
+        if entry.is_dir || own_variant.contains(entry.key.as_str()) {
             continue;
         }
         let Some(dir) = parent_of(&entry.key) else {
@@ -355,6 +360,29 @@ mod tests {
                     "ps3/动作合集/甲.iso".to_string()
                 ],
             )]
+        );
+    }
+
+    #[test]
+    fn 拆开过的目录不再存疑_拆出去的那几份已经各自是一个变体() {
+        // 票 `gui-looks-like-the-design/29`：人按「拆成 N 个变体」之后这一处就算处理过了，
+        // 下一趟体检不该再问一遍（同多碟那一处「人工纠正过的不再存疑」）。
+        let 盘 = [
+            "ps3/动作合集/PS3_GAME/USRDIR/EBOOT.BIN",
+            "ps3/动作合集/甲.iso",
+            "ps3/动作合集/乙.7z",
+        ];
+        assert_eq!(存疑(&盘, &[]).len(), 1, "拆之前该报这一处");
+        assert!(
+            存疑(
+                &盘,
+                &[
+                    ("ps3/动作合集/甲.iso", "ps3/动作合集/甲.iso"),
+                    ("ps3/动作合集/乙.7z", "ps3/动作合集/乙.7z"),
+                ],
+            )
+            .is_empty(),
+            "拆开之后还在问同一处"
         );
     }
 
