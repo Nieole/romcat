@@ -230,6 +230,10 @@ impl Plan {
                 );
                 // **撞车按撞在一起的那一处归堆印**（[`Plan::collisions`]）：一条一条平铺着报，
                 // 读的人得自己拿路径去配对，而撞在一起的几行落点一模一样（剥掉了根名）。
+                // 这一类该去哪儿办，由 `RejectReason::advice` 一处答（ADR-0024）。
+                if let Some(怎么办) = reason.advice() {
+                    let _ = writeln!(out, "  {怎么办}");
+                }
                 // 归堆是核心一处的事，命令行与界面配出来的对子因此是同一批（ADR-0024）。
                 if reason == RejectReason::Collision {
                     let 几处 = self.collisions();
@@ -352,6 +356,9 @@ impl Plan {
                     pad(kind.label(), 10),
                     thousands(rows.len() as u64)
                 );
+                // **这一类工具不会做什么，逐类说一遍**——那句话由 `SurpriseKind::refusal`
+                // 一处答，命令行与界面印的是同一份（ADR-0024）。
+                let _ = writeln!(out, "  {}", kind.refusal());
                 for surprise in rows.iter().take(SURPRISE_EXAMPLES) {
                     let _ = writeln!(
                         out,
@@ -389,11 +396,11 @@ impl Plan {
             }
             let _ = writeln!(
                 out,
-                "这些**本次一律不动**。清单说有、实际没了的**不会静默补回**——那可能是你\n\
-                 在掌机上有意删的（ADR-0015）。想让它别再回来，记一条例外：\n\
+                "想让没了的那些别再回来，记一条例外：\n\
                  `romcat sublibrary except {} --exclude <变体的键>`；\n\
-                 想补回来，这次加上 `--restore`。",
+                 想补回来，这次加上 `--restore`（这一趟会多传 {} 个）。",
                 self.sublibrary,
+                thousands(self.restorable),
             );
         }
         if self.unlistable_dirs > 0 {

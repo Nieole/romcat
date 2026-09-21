@@ -4471,20 +4471,39 @@ fn 三方对比的数字齐_新增更新删除保留异常与放不进目标六�
         );
     }
 
-    // **屏上那个「异常」的数就是计划里对不上的那几件**：两处各数一遍的话，一处改了
-    // 另一处会静静地说着旧数。
+    // **屏上那几个数就是计划里那几个**：两处各数一遍的话，一处改了另一处会静静地说着旧数。
+    // 断的是**加得起来**这条规矩，不是某个字面量：五个栏名后面那几个数，头四个加起来是
+    // 「异常」那一行，末一个是「放不进目标」那一行。
     let plan = &场.app.sublibrary().prepared().expect("排得出来").plan;
     assert!(
         plan.surprises.len() >= 3,
         "这份夹具该凑出至少三类异常：{:?}",
         plan.surprises,
     );
-    assert!(
+    let 栏上的数 = |栏: romcat_gui::sublibrary::Anomaly| -> u64 {
+        let 前缀 = format!("{} ", 栏.shown());
         屏上
             .lines()
-            .any(|line| line == plan.surprises.len().to_string()),
-        "屏上没有「异常」那个数 {}：\n{屏上}",
-        plan.surprises.len(),
+            .find_map(|line| line.strip_prefix(&前缀))
+            .unwrap_or_else(|| panic!("屏上没有「{}」那一栏：\n{屏上}", 栏.shown()))
+            .trim()
+            .parse()
+            .expect("栏名后面跟着一个数")
+    };
+    let 四类加起来: u64 = romcat_gui::sublibrary::Anomaly::all()
+        .into_iter()
+        .filter(|栏| !matches!(栏, romcat_gui::sublibrary::Anomaly::NoFit))
+        .map(栏上的数)
+        .sum();
+    assert_eq!(
+        四类加起来,
+        plan.surprises.len() as u64,
+        "四栏加起来与账上「异常」那一行对不上：\n{屏上}",
+    );
+    assert_eq!(
+        栏上的数(romcat_gui::sublibrary::Anomaly::NoFit),
+        plan.rejected_tally().files,
+        "「放不进目标」那一栏与账上那一行对不上：\n{屏上}",
     );
 }
 
@@ -4603,6 +4622,72 @@ fn 设备上缺失的可以选择补回_默认不补_勾上之后那几个才进
 }
 
 #[test]
+fn 同步过一趟之后那几个还缺着_补回那一格照旧摆得出而且数得对() {
+    // 收尾审查（Standards 轴 H1）挑出的：`restore_missing` 补的是**两批**——这一趟才发现
+    // 没了的（`SurpriseKind::Gone`），与上一趟就记着不补的（`Plan::withheld`）。后一批
+    // **刻意不进**对不上的那一堆（上一趟已经报过一次了）。拿「设备上缺失」那一栏的条数当
+    // 「补回会补几个」的话：数说少了；而同步过一趟之后清单里那几条被标成「记着不补」，
+    // 那一栏空了，整格「同步时补回」就不画了——人在界面上再也补不回来，只能回终端。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    摆出异常(&mut 场);
+    assert_eq!(
+        场.app
+            .sublibrary()
+            .prepared()
+            .expect("排得出来")
+            .plan
+            .withheld,
+        0
+    );
+
+    // 同步一趟：那一条「没了」被记进清单的 `absent`，下一趟起它是「你删过、工具记着不补」。
+    场.同步到底();
+    assert!(
+        场.app.sublibrary().error().is_none(),
+        "{:?}",
+        场.app.sublibrary().error()
+    );
+    场.排预览();
+
+    let plan = &场.app.sublibrary().prepared().expect("排得出来").plan;
+    assert_eq!(plan.withheld, 1, "上一趟删掉的那条该记成「记着不补」");
+    assert_eq!(
+        这一类几条(&场, romcat_core::sync::SurpriseKind::Gone),
+        0,
+        "记着不补的那一批不该再报成意外——上一趟已经报过一次了",
+    );
+    assert_eq!(plan.restorable, 1, "补回会补几个，核心一处答");
+
+    // **那一栏空了，那一格照旧摆得出，数也对。**
+    场.app
+        .sublibrary_and_site()
+        .0
+        .show_anomaly(romcat_gui::sublibrary::Anomaly::Surprise(
+            romcat_core::sync::SurpriseKind::Gone,
+        ));
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    assert!(
+        屏上.contains("同步时补回这 1 个文件"),
+        "同步过一趟之后，界面上补不回来了：\n{屏上}",
+    );
+    assert!(
+        屏上.contains("你删过、工具记着不补"),
+        "没说清这一批是上一趟就记着不补的：\n{屏上}",
+    );
+
+    // 勾上之后它真的进计划。
+    场.勾上补回(true);
+    let plan = &场.app.sublibrary().prepared().expect("重排得出来").plan;
+    assert_eq!(
+        plan.steps.iter().filter(|step| step.restore).count(),
+        1,
+        "记着不补的那一条勾上之后也该补回：{:?}",
+        plan.steps.iter().map(|step| &step.path).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn 落点撞车列出撞的是哪两份_排除其中一份之后另一份正常复制() {
     // 票面第四条，词表**落点撞车**：两个根里同一条相对路径落在卡上同一个文件上
     // （子库里的落点剥掉了根名，ADR-0013）。**撞上的一个都不放行**——放行其中一个等于由排序
@@ -4650,8 +4735,8 @@ fn 落点撞车列出撞的是哪两份_排除其中一份之后另一份正常�
     }
     assert_eq!(
         屏上.lines().filter(|line| *line == "排除这一份").count(),
-        2,
-        "两份该各摆一颗「排除这一份」：\n{屏上}",
+        撞车[0].files.len(),
+        "撞上几份就该摆几颗「排除这一份」：\n{屏上}",
     );
 
     // 排除其中一份：**记成这个子库的一条排除例外**（ADR-0016，不是第二套机制），
@@ -4719,6 +4804,23 @@ fn 放不进目标一栏含撞车超单文件上限与文件名不收的字符�
     assert!(
         屏上.contains("落点撞车、超过单文件上限、文件名里有目标不收的字符"),
         "整栏那句说明没写清收哪三种：\n{屏上}",
+    );
+    // **几个小标题的数加得起来**：撞车那一段写的是「N 份，撞成 M 处」——只写「M 处」的话，
+    // 栏上那个数（按份）与栏里那几个数就加不起来，人只会以为哪儿漏了。
+    let plan = &场.app.sublibrary().prepared().expect("排得出来").plan;
+    let 撞上几份: usize = plan.collisions().iter().map(|一处| 一处.files.len()).sum();
+    assert!(
+        屏上.contains(&format!(
+            "{} · {撞上几份} 份，撞成 {} 处",
+            RejectReason::Collision.label(),
+            plan.collisions().len(),
+        )),
+        "撞车那一段没把「几份」与「几处」一起说清：\n{屏上}",
+    );
+    assert_eq!(
+        撞上几份 as u64,
+        plan.rejected_tally().files,
+        "这份夹具里放不进目标的该全是撞车的",
     );
 }
 

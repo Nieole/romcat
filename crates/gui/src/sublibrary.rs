@@ -188,7 +188,7 @@ pub enum Anomaly {
 impl Anomaly {
     /// 屏上那一栏的名字。前四栏的字由核心答（[`SurpriseKind::shown`]），这一层不另写一份。
     #[must_use]
-    fn shown(self) -> &'static str {
+    pub fn shown(self) -> &'static str {
         match self {
             Self::Surprise(kind) => kind.shown(),
             Self::NoFit => "放不进目标",
@@ -196,7 +196,8 @@ impl Anomaly {
     }
 
     /// 从左到右那五栏，照[报告里那个次序](SurpriseKind::all)，放不进目标摆在末尾。
-    fn all() -> [Self; 5] {
+    #[must_use]
+    pub fn all() -> [Self; 5] {
         let [gone, changed, occupied, unreadable] = SurpriseKind::all();
         [
             Self::Surprise(gone),
@@ -2930,7 +2931,6 @@ impl Screen {
             .collect();
         if rows.is_empty() {
             ui.weak(format!("没有{}的。", kind.shown()));
-            return;
         }
         for one in rows.iter().take(ANOMALY_ROWS) {
             ui.horizontal(|ui| {
@@ -2956,7 +2956,19 @@ impl Screen {
             ));
         }
         if kind == SurpriseKind::Gone {
-            self.restore_ui(ui, site, tasks, rows.len());
+            // **上一趟就记着不补的那一批也在这一栏底下说一句。** 它们刻意不进
+            // [对不上的那一堆](romcat_core::sync::Plan::surprises)（上一趟已经报过一次了），
+            // 可「补回」补的正是它们加上面这几条——不说的话，勾上之后进计划的比屏上写的多。
+            if plan.withheld > 0 {
+                look::help(
+                    ui,
+                    &format!(
+                        "另有 {} 个是你删过、工具记着不补的：选择集还要它们，但它们不会自己长回来。",
+                        thousands(plan.withheld),
+                    ),
+                );
+            }
+            self.restore_ui(ui, site, tasks, plan.restorable);
         }
     }
 
@@ -2967,25 +2979,32 @@ impl Screen {
     ///
     /// 勾一下要**重排一趟**（[`Self::set_restore_missing`]）：那份计划是排它那一刻按这个
     /// 开关排出来的，光把勾画上去，上面那几个数说的还是没补回的那一趟。
-    fn restore_ui(&mut self, ui: &mut egui::Ui, site: &Site, tasks: &mut Tasks, 几个: usize) {
+    fn restore_ui(&mut self, ui: &mut egui::Ui, site: &Site, tasks: &mut Tasks, 能补几个: u64) {
+        // **勾着的时候哪怕一个都补不了也得画得出来**：不画的话，那个勾就成了屏上看不见、
+        // 却还管着下一趟计划的开关，人取消不掉它。
+        if 能补几个 == 0 && !self.restore_missing {
+            return;
+        }
         ui.add_space(step(2));
         let mut on = self.restore_missing;
         if ui
-            .checkbox(
-                &mut on,
-                format!("同步时补回这 {} 个文件", thousands(几个 as u64)),
+            .add_enabled(
+                能补几个 > 0 || self.restore_missing,
+                egui::Checkbox::new(
+                    &mut on,
+                    format!("同步时补回这 {} 个文件", thousands(能补几个)),
+                ),
             )
-            .on_hover_text(
-                "只补清单里记录过的文件——清单之外的东西工具一律不碰（ADR-0015）。\n\
-                 勾上或取消都要重排一趟差量：同步认的是排它那一刻的那份计划。",
-            )
+            .on_hover_text("勾上或取消都要重排一趟差量：同步认的是排它那一刻的那份计划。")
             .changed()
         {
             self.set_restore_missing(site, tasks, on);
         }
+        // **这半句照稿摆在那一格底下，不藏进悬停**（设计稿 `opt` 里那行 `<small>`）：
+        // 「补回会不会碰到我自己拷进去的东西」是人勾之前就要看见的答案，不是悬停半秒的奖励。
         look::help(
             ui,
-            "只补清单里记录过的文件；勾上之后这几个进「新增」，上面那几个数跟着重排一趟。",
+            "只补清单里记录过的文件——清单之外的东西工具一律不碰（ADR-0015）。",
         );
     }
 
@@ -3005,12 +3024,21 @@ impl Screen {
         let name = self.picked.clone().unwrap_or_default();
         // 撞车归堆由核心一处算（`Plan::collisions`）：命令行与这一屏配出来的对子是同一批。
         let 撞车 = plan.collisions();
+        let 撞上几份: u64 = 撞车.iter().map(|一处| 一处.files.len() as u64).sum();
         ui.add_space(step(2));
-        ui.label(font::strong(format!(
-            "{} · {}",
-            RejectReason::Collision.label(),
-            thousands(撞车.len() as u64)
-        )));
+        // **写「几份（撞成几处）」而不是光写几处**：上头那颗分段按钮上的「放不进目标 N」
+        // 数的是**份**，几个小标题加起来得对得上那个数——两个数写成同一个「标签 · 数」的
+        // 形状却加不起来，人只会以为哪儿漏了。
+        ui.label(font::strong(if 撞车.is_empty() {
+            format!("{} · 0", RejectReason::Collision.label())
+        } else {
+            format!(
+                "{} · {} 份，撞成 {} 处",
+                RejectReason::Collision.label(),
+                thousands(撞上几份),
+                thousands(撞车.len() as u64),
+            )
+        }));
         look::help(ui, CLASH_HELP);
         if 撞车.is_empty() {
             ui.weak("没有撞车的文件。");
@@ -3034,14 +3062,22 @@ impl Screen {
                     // 按钮**靠右对齐**（照稿 `.lst` 那几行）：跟在长短不一的键后面的话，
                     // 几颗按钮各停在各的位置上，读的人得横着找。
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if look::small_buttons(ui, |ui| ui.button("排除这一份"))
-                            .on_hover_text(
-                                "把这一份记成这个子库的一条排除例外，另一份下一趟就正常复制。\
-                                 盘上的文件一个字节都不动；记完这份差量作废，要重排一趟。",
-                            )
-                            .clicked()
-                        {
-                            排除掉 = Some(file.variant.clone());
+                        // **前端元数据排不掉**：它挂在一个记号名下、不是变体，而例外落在变体
+                        // 这一层（ADR-0016）。画那颗按钮的话，按下去会往库里写一条指着
+                        // 「（前端元数据）」的例外——排不掉这份文件，还得人手去撤。
+                        // 那一问由核心答（`sync::is_variant`），与裁剪建议那一侧同一处。
+                        if sync::is_variant(&file.variant) {
+                            if look::small_buttons(ui, |ui| ui.button("排除这一份"))
+                                .on_hover_text(
+                                    "把这一份记成这个子库的一条排除例外，另一份下一趟就正常复制。\
+                                     盘上的文件一个字节都不动；记完这份差量作废，要重排一趟。",
+                                )
+                                .clicked()
+                            {
+                                排除掉 = Some(file.variant.clone());
+                            }
+                        } else {
+                            look::help(ui, "前端元数据不是变体，排除不掉");
                         }
                         ui.weak(human_bytes(file.bytes));
                     });
@@ -3075,9 +3111,11 @@ impl Screen {
                 reason.label(),
                 thousands(rows.len() as u64)
             )));
-            // **这一类该怎么办，写在它自己那一段底下。** 撞车有按钮可按，这几类没有——
-            // 不说去哪儿办的话，人只会对着一行红字发呆（票 `gui-looks-like-the-design/07`）。
-            if let Some(怎么办) = 怎么办(reason) {
+            // **这一类该怎么办，写在它自己那一段底下**（票 `gui-looks-like-the-design/07`：
+            // 不说去哪儿办的话，人只会对着一行字发呆）。那句话由核心答（`RejectReason::advice`），
+            // 命令行与这一屏印的是同一份。**一条都没有时不说**：目标本来就是 exFAT 时，
+            // 在「超过单文件上限 · 0」底下劝人换一张 exFAT 的卡是句蠢话。
+            if let Some(怎么办) = reason.advice().filter(|_| !rows.is_empty()) {
                 look::help(ui, 怎么办);
             }
             for one in rows.iter().take(ANOMALY_ROWS) {
@@ -3162,6 +3200,7 @@ fn tally_ui(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan, prepare_ms: f64) 
     /// 一行账：几个文件、涉及几个变体、多少容量（**容量说不出来时是 `None`**）。
     struct 一行(&'static str, u64, u64, Option<u64>, &'static str);
 
+    let 放不进 = plan.rejected_tally();
     let 几行 = [
         一行(
             "新增",
@@ -3194,18 +3233,18 @@ fn tally_ui(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan, prepare_ms: f64) 
         一行(
             "异常",
             plan.surprises.len() as u64,
-            数出几个变体(plan.surprises.iter().map(|one| one.variant.as_str())),
-            // **容量这一格说不出来，就不给数。** 这几条各占多少地方是各算各的：没了的那些
-            // 在卡上一个字节都不占，落点被占那几个占着地方的是别人的文件。凑一个总数出来，
-            // 那个数不对应卡上任何一件事（`Gauge` 的文档：这一屏不许有两份对不上的账）。
+            // **两个数都由核心答**（`Plan::surprise_variants` / `Plan::rejected_tally`）：
+            // 这一层自己再数一遍的话，命令行与 `--json` 里永远没有这两个数，只有界面有。
+            plan.surprise_variants(),
+            // **容量这一格说不出来，就不给数**（那两支的文档写着为什么）。
             None,
             "目标上对不上的那几件，本次一律不动。逐类看下面那一块。",
         ),
         一行(
             "放不进目标",
-            plan.rejected.len() as u64,
-            数出几个变体(plan.rejected.iter().map(|one| one.variant.as_str())),
-            Some(plan.rejected.iter().map(|one| one.bytes).sum()),
+            放不进.files,
+            放不进.variants,
+            Some(放不进.bytes),
             "这一趟传不上去的那几份，既不新增也不删除。逐类看下面那一块。",
         ),
     ];
@@ -3254,7 +3293,7 @@ fn tally_ui(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan, prepare_ms: f64) 
 /// 各写一遍的话，界面上会少掉其中一两条——而这几条正是「为什么这一趟少选出来这么多」
 /// 的答案。
 ///
-/// **放不进目标的**与**目标上对不上的**不在这儿**：它们一类一栏摆在异常那一块里
+/// **放不进目标的**与**目标上对不上的**不在这儿：它们一类一栏摆在异常那一块里
 /// （[`Screen::anomalies_ui`]）。这儿留下的两段是「整趟活的毛病」，不是「哪几个文件的毛病」
 /// ——混在一处的话，人得先把两种东西分拣开才读得下去。
 fn concerns_ui(ui: &mut egui::Ui, prepared: &Prepared) {
@@ -3288,28 +3327,6 @@ fn concerns_ui(ui: &mut egui::Ui, prepared: &Prepared) {
             ));
         }
     }
-}
-
-/// 「放不进目标」那一栏里，某一类**去哪儿办**；撞车那一类另有一段（[`CLASH_HELP`]），不在这儿。
-///
-/// **主库只读**（ADR-0004）：这几类工具一份都改不了，路只有「在主库里自己改」或者「换一张卡」。
-/// 说不出路的那几类不写——一句废话比不写更糟。
-fn 怎么办(reason: RejectReason) -> Option<&'static str> {
-    Some(match reason {
-        RejectReason::TooBig => {
-            "换一张 exFAT 的卡，或者把这几份从选择集里排除——FAT32 的单文件上限是 4 GiB。"
-        }
-        RejectReason::BadName | RejectReason::NameTooLong => {
-            "在主库里改掉那个名字，重新扫描就好。工具不会替你改：主库只读（ADR-0004）。"
-        }
-        RejectReason::PathTooLong => "把目标路径挪浅一层，或者在主库里把那几层目录名改短。",
-        RejectReason::Collision => return None,
-    })
-}
-
-/// 一批行里**涉及几个不同的变体**。人认得的是这个数，不是文件数。
-fn 数出几个变体<'a>(keys: impl Iterator<Item = &'a str>) -> u64 {
-    keys.collect::<std::collections::BTreeSet<_>>().len() as u64
 }
 
 impl Screen {
