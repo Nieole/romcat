@@ -157,7 +157,7 @@
 （画面也从 1280×1340 收到 1280×1180：差量账从七行的表收成一排五格，卡片短了一截）。**动的就是这四张**——不带更新跑一趟整份
 `snapshot`，红的正好是这四条，`cards-*` / `deleted-toast-*` / `over-capacity-*` 一张都没碰到
 （那三对上没有排过的差量预览）。重拍按名字筛着出（`-- 差量异常`），没有整套 `UPDATE_SNAPSHOTS=1`。
-**这一轮四张还没入库，等点头。**
+**这一轮四张（版式对齐那三处照改之后重出的）拿主意的人 2026-09-21 点头入库**，提交 `703089e`。
 
 出图三趟：先不带更新探路（红的是那四条）→ 按名字筛着带更新出图 → 不带更新连跑两遍，
 整份 `snapshot` **81 张全过、一张基线都没被改写**（`slot-3-gl24-verify.log`）。
@@ -170,18 +170,20 @@
 `cargo check --all-targets --all-features -j 3` 绿（`CHECK=0`）。
 
 `cargo xtask gate -j 3 --test-threads 3 --keep-going`，**以最后这一趟为准**
-（日志 `/Users/nicoer/dev/game-wt/logs/slot-3-gl24-gate3.log`，`EXIT=0`，跑的是
-`Q1020` 照稿、`Q1026` 改叫「不动」都落完的那一版）：**六步全绿**——fmt 1s、glossary 0s、
-check 7s、clippy 13s、test 805s、doc 13s；整套 **2,390 项全过、0 失败**。
-词表那一步扫了 7 份 `.rs` 里新写的 1,934 行，没撞上。
+（日志 `/Users/nicoer/dev/game-wt/logs/slot-3-gl24-gate4.log`，`EXIT=0`，跑的是版式对齐那三处
+照改完、四张基线入库之后的那一版）：**六步全绿**——fmt 3s、glossary 1s、check 6s、clippy 13s、
+test 1,118s、doc 5s；整套 **2,390 项全过、0 失败**。
+词表那一步扫了 7 份 `.rs` 里新写的 2,051 行，没撞上。
 
-前两趟：`slot-3-gl24-gate.log` 是**照稿改之前**的那一版，六步全绿、2,389 项
-（词表那一步中途红过两处：测试里两句话写了「步骤」，词表 `_Gate_` 要「工序」，改在 `302d0bc`）；
-`slot-3-gl24-gate2.log` 红在 `doc` 一条——我在 Rust 文档注释里用了词表的 `[[词]]` 写法，
-rustdoc 读成 intra-doc link、找不到那个项，`-D warnings` 下是红，改在 `cb01705`。
+前三趟：`slot-3-gl24-gate.log` 是**照稿改之前**那一版，六步全绿、2,389 项（词表那一步中途红过
+两处：测试里两句话写了「步骤」，词表 `_Gate_` 要「工序」，改在 `302d0bc`）；
+`slot-3-gl24-gate2.log` 红在 `doc` 一条——Rust 文档注释里用了词表的 `[[词]]` 写法，rustdoc 读成
+intra-doc link、找不到那个项，`-D warnings` 下是红，改在 `cb01705`（已立成规矩，挂单 `Q1080`）；
+`slot-3-gl24-gate3.log` 是版式对齐那三处**照改之前**那一版，六步全绿、2,390 项。
 
-窄跑另有一遍（`slot-3-gl24-verify.log`）：`check_tokens.py` 一致（250 项）、
-`cargo test -p romcat-gui --test sublibrary` 97 项全过、整份 `snapshot` 81 张全过（连跑两遍）。
+窄跑另有两遍：`slot-3-gl24-verify.log`（`check_tokens.py` 一致 250 项、
+`cargo test -p romcat-gui --test sublibrary` 97 项全过、整份 `snapshot` 81 张全过 ×2）与
+`slot-3-gl24-verify2.log`（同上，跑的是版式对齐照改之后那一版）。
 
 收尾两轴审查（只读，各一个 agent）各挑出真缺陷，全部照改在提交 `8451967`：Standards 轴的
 「补回那一格数说少了、同步过一趟就整个不画」（H1）与三处 ADR-0024 重复（H2、H3、M1、M4），
