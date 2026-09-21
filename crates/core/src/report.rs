@@ -472,7 +472,7 @@ pub struct ConflictSummary {
     pub groups: Vec<ConflictGroup>,
 }
 
-/// 一组「目录说 A、内容是 B」。判据与分组都在核心库一处（[`conflicting_platform`]，ADR-0024）。
+/// 一组「目录说 A、内容是 B」。判据与分组都在核心库一处（[`conflicting_platform`](crate::scan::aggregate::conflicting_platform)，ADR-0024）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConflictGroup {
     /// 目录说的那个平台。
@@ -490,7 +490,7 @@ pub struct ConflictGroup {
 }
 
 impl ConflictGroup {
-    /// 这一组凭什么这么判，一句话：判据是「这个扩展名只可能属于那一个平台」（[`conflicting_platform`]），
+    /// 这一组凭什么这么判，一句话：判据是「这个扩展名只可能属于那一个平台」（[`conflicting_platform`](crate::scan::aggregate::conflicting_platform)），
     /// 所以这一句说得出是哪几个扩展名、又有多少条的内容真验过。
     #[must_use]
     pub fn reason(&self) -> String {
