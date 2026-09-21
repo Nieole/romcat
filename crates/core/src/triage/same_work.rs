@@ -216,6 +216,9 @@ pub fn survey_apart(
         clues.entry(pair).or_default().insert(clue);
     }
     let dismissed: BTreeSet<&[String; 2]> = dismissed.iter().map(|one| &one.works).collect();
+    // **一个作品的年份只问一次**：一个作品可以出现在好几对里（`A` 与 `B`、`A` 与 `C`），
+    // 各问一次就是同一句 SQL 跑好几遍。
+    let mut years: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut out = Vec::new();
     for (pair, found) in clues {
         // **人看过了、说不是同一个**：那一对从此不提（[`Store::set_not_same_work`]）。
@@ -244,7 +247,7 @@ pub fn survey_apart(
         }
         // **佐证最后补**：它立不了案，所以排在立了案的那几条后面——屏上那一列读下来
         // 是「凭这个，还有这个佐证」。
-        if let Some(clue) = platform_and_year(catalog, &pair, &shared)? {
+        if let Some(clue) = platform_and_year(catalog, &mut years, &pair, &shared)? {
             found.push(clue);
         }
         out.push(Suspicion {
@@ -360,7 +363,7 @@ fn naming_clues(
     }
     let mut out = Vec::new();
     for (_, works) in by_key {
-        if works.len() < 2 {
+        if works.len() < 2 || works.len() > CROWDED {
             continue;
         }
         let said: Vec<(&String, &(String, String))> = works.iter().collect();
@@ -380,6 +383,17 @@ fn naming_clues(
     }
     Ok(out)
 }
+
+/// 同一串字（或者同一条中文条目）底下挤着**多少个作品**就不提了。
+///
+/// **它是一道防炸的闸，不是一条判据**：一堆里两两成对是 `k(k-1)/2`，`k` 大起来这一趟
+/// 会当场炸成十万对、再各问两次年份。而真到了那个数，那也不是「两个数据库对同一部作品
+/// 的命名差异」——是某个名字太泛（剥完只剩 `disc`、`demo` 这类），或者中文离线源那一条
+/// 条目被一整个系列共用。两种都不是人想逐对看的东西。
+///
+/// 取 8：真库上同一部作品的叫法最多也就几条（DAT 两三个源、中文名、别名），
+/// 一部作品被识别成八个以上的作品是另一种病，不该由这一处来提。
+const CROWDED: usize = 8;
 
 /// 一条叫法**出自作品名自己**时，理由那一句里写的出处。
 ///
@@ -420,7 +434,7 @@ fn chinese_clues(
     }
     let mut out = Vec::new();
     for (entry, works) in by_entry {
-        if works.len() < 2 {
+        if works.len() < 2 || works.len() > CROWDED {
             continue;
         }
         let works: Vec<&str> = works.into_iter().collect();
@@ -442,12 +456,19 @@ fn chinese_clues(
 /// 常常差一年（首发地区不同），拿它当否决闸会把真该提的那些整片挡掉。
 fn platform_and_year(
     catalog: &Catalog,
+    years: &mut BTreeMap<String, Option<String>>,
     pair: &[String; 2],
     shared: &[String],
 ) -> Result<Option<Clue>, CatalogError> {
+    for work in pair {
+        if !years.contains_key(work) {
+            let year = catalog.work_year_of(work)?;
+            years.insert(work.clone(), year);
+        }
+    }
     let (Some(left), Some(right)) = (
-        catalog.work_year_of(&pair[0])?,
-        catalog.work_year_of(&pair[1])?,
+        years.get(&pair[0]).cloned().flatten(),
+        years.get(&pair[1]).cloned().flatten(),
     ) else {
         return Ok(None);
     };
