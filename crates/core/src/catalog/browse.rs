@@ -1783,6 +1783,10 @@ impl WorkQuery {
             // **非游戏资产那个开关也算筛选**：拨一下，列出来的就换了一批行。
             && self.non_game_assets == other.non_game_assets
             && self.cover_only == other.cover_only
+            // **「整理建议」那颗标签也算筛选**：按一下换的是一批行，而且空态那一句要靠它
+            // 分清「筛没了」与「库里本来就没有」——漏了它，按着那颗标签把最后一对合掉
+            // 之后，屏上会对着一个装着东西的库说「库里还没有能列出来的东西」。
+            && self.suspected == other.suspected
     }
 
     /// **当前筛选原样变成的那条规则**——「存成子库」按下去时走的就是这里。
