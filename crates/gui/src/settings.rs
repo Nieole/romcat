@@ -857,6 +857,12 @@ impl Screen {
                 );
                 ui.add_space(tokens.space.keys_row_padding);
                 let (线框, _) = ui.allocate_exact_size(egui::vec2(宽, 1.0), egui::Sense::hover());
+                // **这道线画满这一格，与那枚键帽的右缘同一条线**（两样都落在 830.000，实测）。
+                //
+                // 它**看着**比键帽短一截：虚线的段与空当都是 3 点，402 点正好是 67 个来回，
+                // 于是最后那 3 点落在空当上——最后一段实线停在 827，而键帽右缘在 830。
+                // 那是虚线的排法，不是没对齐（CSS 的 `border-bottom:dashed` 一样会这样）。
+                // 这一处编排者读图时按「两种右缘」报过一次，量过：**键帽五枚全在 830.000**。
                 look::dashed_hline(
                     ui.painter(),
                     线框.x_range(),
