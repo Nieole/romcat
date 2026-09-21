@@ -3198,6 +3198,7 @@ impl 设置屏 {
         let screen = app.settings_mut();
         screen.show_section(节);
         screen.probe_with(romcat_core::scrape::preview::NO_SUCH_PROGRAM);
+        screen.pin_account(false);
         screen.pin_clock(库屏的钟());
         Self {
             app,

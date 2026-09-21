@@ -166,6 +166,8 @@ pub struct Screen {
     probe: String,
     /// 探出来的那一份：`Ok` 是版本，`Err` 是核心库说的那句话。`None` 是这一趟还没探过。
     ffmpeg: Option<Result<String, String>>,
+    /// ScreenScraper 的账号给了没有。`None` 是这一趟还没问过。
+    account: Option<bool>,
     /// 人刚在「外观」那一排上挑的那一档，还没被窗口记进版式文件。
     theme_pick: Option<egui::ThemePreference>,
     /// 数据源优先级那一层弹层。**与刮削面板那一颗开的是同一种**（挂单 `Q782`）。
@@ -190,6 +192,7 @@ impl Screen {
             sources: None,
             probe: preview::FFMPEG.to_string(),
             ffmpeg: None,
+            account: None,
             theme_pick: None,
             clock: crate::clock::Clock::default(),
         }
@@ -214,6 +217,14 @@ impl Screen {
     pub fn probe_with(&mut self, program: impl Into<String>) {
         self.probe = program.into();
         self.ffmpeg = None;
+    }
+
+    /// ScreenScraper 的账号算不算给了。
+    ///
+    /// **截图那一路要它**，与 [`Self::probe_with`] 同一个理由：账号读的是开工具之前给的那四个
+    /// 环境变量，而门禁那几台机器上给没给不一定——照实画的话，同一张基线在两台机器上是两个样子。
+    pub fn pin_account(&mut self, 给了: bool) {
+        self.account = Some(给了);
     }
 
     /// 画时刻拿哪一刻当此刻（数据源那张表的「上次更新」）。
@@ -545,17 +556,21 @@ impl Screen {
             look::help(ui, "同一个字段有好几个源给了值时，显示哪一个。");
         });
         Self::一行(ui, "ScreenScraper", |ui| {
-            let 给了 = romcat_core::scrape::online::Credentials::from_env().is_some();
+            let 给了 = *self.account.get_or_insert_with(|| {
+                romcat_core::scrape::online::Credentials::from_env().is_some()
+            });
             if 给了 {
                 look::read_only(ui, "账号已给");
             } else {
                 look::chip(ui, look::Tone::Caution, "账号没给");
             }
+            // **那四个名字不整条写**：整条排下来一行摆不下，折行会把一个标识符从半中间劈开
+            // （`SCREENSCRAPER_` 一行、`SSPASSWORD` 下一行）。共同的前缀提到前面，后半截用顿号
+            // 断得开，怎么折都不会劈开一个名字。
             look::help(
                 ui,
-                "账号眼下只认开工具之前给的那四个环境变量（SCREENSCRAPER_DEVID、\
-                 SCREENSCRAPER_DEVPASSWORD、SCREENSCRAPER_SSID、SCREENSCRAPER_SSPASSWORD），\
-                 屏上还存不下来，也还测不了连接。",
+                "账号眼下只认开工具之前给好的那四个环境变量（SCREENSCRAPER_ 打头的 DEVID、\
+                 DEVPASSWORD、SSID、SSPASSWORD）；屏上还存不下来，也还测不了连接。",
             );
             look::help(
                 ui,
