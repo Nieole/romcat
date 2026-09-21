@@ -92,8 +92,15 @@ use romcat_gui::task::{Clock, Product};
 use romcat_gui::{font, headless, layout, look, rail};
 
 mod shared;
+// **`等任务台空了` 不带门**：它只问任务台忙不忙（`App::poll_tasks` / `App::tasks`），与合成数据
+// 无关，而**不带 `demo` 也要编的那几张**要它——库屏那几个夹具开窗之前都先体检一趟
+// （`先体检一趟`）。从前它搭着旁边两个的顺风车写在同一行 `#[cfg(feature = "demo")]` 上，
+// 于是 `cargo check --all-targets`（不带 `--all-features`）当场红，而门禁一步都不跑这个组合
+// （挂单 `Q1081` / `Q1082`）。
+use shared::等任务台空了;
+// 这两个是占位活那一路的，只有 `demo` 开着时才有测试用得上。
 #[cfg(feature = "demo")]
-use shared::{一对信号, 占位活, 等任务台空了};
+use shared::{一对信号, 占位活};
 
 /// 比对阈值：一个像素的色差过了多少算坏（每像素 YIQ 色距 0.6）、坏几个像素算红（0 个）。
 ///
