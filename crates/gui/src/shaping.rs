@@ -184,7 +184,8 @@ impl Fixer {
     /// 摊在画帧这条线程上没问题。
     ///
     /// 吃的是核心库那一份 [`shape::Doubt`]（装的是**中立库的键**），不是报告里折成展示路径的那一份
-    /// （[`ShapingDoubt`]）——人工纠正记的是键。从库体检那一格进来的人把报告那一份的
+    /// （[`ShapingDoubt`](romcat_core::scan::aggregate::ShapingDoubt)）——人工纠正记的是键。
+    /// 从库体检那一格进来的人把报告那一份的
     /// `at_key` / `item_keys` 折回这一份。
     ///
     /// `same_kind` 是**同一种存疑全库一共几处**，用来说「同样的另有 N 处」；**说不出那个数就交
@@ -456,8 +457,10 @@ fn merge_body(ui: &mut egui::Ui, spot: &Spot) -> Option<usize> {
                     false,
                 )],
             );
-            // 缩进到与那一条「会怎样」的字对齐（`impact` 那枚圆点占的那一列）。
-            let 缩 = tokens.layout.impact_column;
+            // **缩进到与上面那一条「会怎样」的字同一条线上**：`look::impact` 把圆点摆进
+            // `impact-column` 那一列，再由 `horizontal_top` 隔一个 `item_spacing.x` 才画字
+            // ——少算那一格的话，这几行会落在圆点与字之间，屏上与谁都对不齐（实测差 9 点）。
+            let 缩 = tokens.layout.impact_column + ui.spacing().item_spacing.x;
             for 一条 in merged.companions.iter().take(COMPANIONS) {
                 ui.horizontal(|ui| {
                     ui.add_space(缩);
@@ -472,13 +475,13 @@ fn merge_body(ui: &mut egui::Ui, spot: &Spot) -> Option<usize> {
                 });
             }
             // **数的是勾中的那几个**，不是这一处全部候选：勾掉一个，这句话得跟着变。
+            //
+            // **不在这儿再说一遍「记为人工纠正、不移动任何文件」**：那句话标题底下那段说明
+            // 与这一层末尾那一句各说过一次了，第三遍只会把这几条「这一下会怎样」冲淡。
             look::impact(
                 ui,
                 &[(
-                    &format!(
-                        "勾中的 {} 个变体合成 1 个；记为人工纠正，不移动或修改任何文件。",
-                        thousands(数(picked.len()))
-                    ),
+                    &format!("勾中的 {} 个变体合成 1 个。", thousands(数(picked.len()))),
                     false,
                 )],
             );
@@ -519,7 +522,10 @@ fn split_body(ui: &mut egui::Ui, spot: &Spot) {
         ),
         "拆开后各自参与下一趟识别：按内容命中的直接归入对应作品，其余进待确认队列",
     );
-    look::impact(ui, &[("记为人工纠正，不移动或修改任何文件。", false)]);
+    // **这一支不再摆一条「会怎样」**：要说的那句（记为人工纠正、不移动任何文件）标题底下那段说明
+    // 与末尾那一句已经各说过一次，而摆在这儿它紧挨着上面那一档单选——**两行的字对不齐**
+    // （单选的字落在 `radio-diameter` + `radio-gap` 那一列，圆点的字落在 `impact-column` 那一列，
+    // 实测差 5 点）。合成那一支的三条「会怎样」说的是这一处独有的事实，那三条留着。
     same_kind_note(ui, spot);
 }
 
