@@ -31,6 +31,8 @@ use romcat_core::scan::aggregate::Limits;
 use romcat_core::shape::{self, Doubt, DoubtKind, fix};
 use romcat_core::site::Site;
 use romcat_core::task::{Cutoff, Handle};
+use romcat_core::triage::same_work;
+use romcat_core::verdict::NotSameWork;
 
 use crate::dialog::{Button, Dialog, Footer, Width};
 use crate::font;
@@ -574,15 +576,21 @@ pub fn reshape(site: &mut Site, tasks: &mut Tasks) -> Result<u64, String> {
         }
         Err(why) => return Err(format!("中立库读不出来：{why}")),
     };
+    // **沉淀库那一半在排活这一下就读好**（同 `health::Section::check`）：台上那条线程手里
+    // 只有中立库，而「人说过哪一对不是同一个」是沉淀库里的事。
+    let dismissed = site
+        .store
+        .not_same_works(&site.library_identity)
+        .unwrap_or_default();
     match site.catalog.file().map(Path::to_path_buf) {
         Some(file) => Ok(tasks.queue(RESHAPE_TASK, move |task| {
             let mut catalog =
                 Catalog::open(&file).map_err(|why| Cutoff::failed(why.to_string()))?;
-            reshape_run(&mut catalog, &overrides, scan, task)
+            reshape_run(&mut catalog, &overrides, &dismissed, scan, task)
         })),
         // 只活在内存里的那一份分不出第二份连接，就地跑完（同库体检那一处）。
         None => Ok(tasks.run_here(RESHAPE_TASK, |task| {
-            reshape_run(&mut site.catalog, &overrides, scan, task)
+            reshape_run(&mut site.catalog, &overrides, &dismissed, scan, task)
         })),
     }
 }
@@ -591,6 +599,7 @@ pub fn reshape(site: &mut Site, tasks: &mut Tasks) -> Result<u64, String> {
 fn reshape_run(
     catalog: &mut Catalog,
     overrides: &BTreeMap<String, String>,
+    dismissed: &[NotSameWork],
     scan: i64,
     task: &Handle,
 ) -> Result<Product, Cutoff> {
@@ -608,8 +617,13 @@ fn reshape_run(
     let aggregate = catalog.aggregate(&limits, &manifest).map_err(failed)?;
     let report = HealthReport::build_full(&aggregate, &catalog.report_meta().map_err(failed)?);
     let duplicates = DuplicateDetails::build(&aggregate, &report);
+    task.check()?;
+    // **重新成型换掉的正是变体**，疑似同一作品跟着变：与「重新体检」那一趟同一处算
+    // （`same_work::survey_apart`），不另算一套。
+    let suspicions = same_work::survey_apart(catalog, dismissed).map_err(failed)?;
     Ok(Product::Checked {
         report: Box::new(report),
         duplicates: Box::new(duplicates),
+        suspicions: Box::new(suspicions),
     })
 }

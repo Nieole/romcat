@@ -1538,6 +1538,15 @@ pub struct WorkQuery {
     pub descending: bool,
     /// 卡片墙的临时呈现条件；不属于筛选器，也不写进子库规则。
     pub cover_only: bool,
+    /// 只要**这几个作品**：浏览屏左栏「整理建议」那一簇点下去之后收窄到
+    /// [疑似同一作品](crate::triage::same_work)那几对里的作品。
+    ///
+    /// 名字由界面从核心库那份建议里取（`Suspicion::works`），**这一层不判断谁疑似谁**。
+    /// 还没认出作品的那几行一个都不在里面——它们没有作品名，也不参与合并。
+    ///
+    /// **它进不了子库的规则**（[`Unruly::Suspected`]）：那是一份会变的建议，
+    /// 不是「我要什么内容」。
+    pub suspected: Option<Vec<String>>,
 }
 
 /// 当前筛选里**写不成规则**的那一条。
@@ -1555,6 +1564,9 @@ pub enum Unruly {
     /// 选的是**平台未知**那一档。写成规则要把全部已知平台列一遍，而清单一变那条规则
     /// 就悄悄失效——宁可不写。
     UnknownPlatform,
+    /// 按**整理建议**筛了。规则语言里没有这一维——子库的规则是「我要什么内容」，
+    /// 而「这两个作品疑似是同一个」是一份会变的建议：合掉一对它就少一条。
+    Suspected,
     /// 这一维选中的值**里面带逗号**，而逗号是规则里的值分隔符，写进去会被读成两个值。
     Comma(Dimension),
     /// 这一维选中的值里有规则语言的记号（两侧带空白的连接词、或者没配对的括号），
@@ -1578,6 +1590,9 @@ impl Unruly {
                 .to_string(),
             Self::UnknownPlatform => "还筛着「平台未知」。写成规则要把全部已知平台列一遍，\
                                       而清单一变那条规则就悄悄失效——先把平台设回「不筛」。"
+                .to_string(),
+            Self::Suspected => "还筛着「整理建议」。那是一份会变的建议不是内容，\
+                                合掉一对它就少一条，写不进子库的规则——先把它关掉。"
                 .to_string(),
             Self::Comma(dimension) => format!(
                 "选中的那个{}里带逗号，而逗号是规则里的值分隔符，写进去会被读成两个值。",
@@ -1792,6 +1807,9 @@ impl WorkQuery {
         if self.state.is_some() {
             return Err(Unruly::State);
         }
+        if self.suspected.is_some() {
+            return Err(Unruly::Suspected);
+        }
         let mut nodes: Vec<Node> = Vec::new();
         match &self.platform {
             None => {}
@@ -1879,6 +1897,19 @@ impl WorkQuery {
                  AND ((r.anchor = '作品' AND r.subject = work.name)
                    OR (r.anchor = '变体' AND r.subject = variant.key)))",
             );
+        }
+        // **整理建议那一簇**：收窄到点名的那几个作品。名单空着时一行都不该留下——
+        // 「建议一条都没有」与「不筛」是两回事，`IN ()` 写不出来，直接写一句永假的。
+        if let Some(works) = &self.suspected {
+            sql.push_str(if sql.is_empty() { " WHERE " } else { " AND " });
+            if works.is_empty() {
+                sql.push('0');
+            } else {
+                sql.push_str(&format!("work.name IN ({})", placeholders(works.len())));
+                for work in works {
+                    args.push(Box::new(work.clone()));
+                }
+            }
         }
         (sql, args)
     }

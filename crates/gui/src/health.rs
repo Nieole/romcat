@@ -35,7 +35,8 @@ use romcat_core::scan::ScanOutcome;
 use romcat_core::scan::aggregate::Limits;
 use romcat_core::site::Site;
 use romcat_core::task::{Cutoff, Ending, Finished, Handle};
-use romcat_core::verdict::PlatformDecision;
+use romcat_core::triage::same_work::{self, Suspicion};
+use romcat_core::verdict::{NotSameWork, PlatformDecision};
 
 use crate::clock::Clock;
 use crate::dialog::{Button, Dialog, Footer, Width};
@@ -88,14 +89,28 @@ pub const SAME_WORK: &str = "疑似同一作品";
 /// 疑似同一作品那一格在**识别还没做完**时底下那句（票 27 原话）。
 pub const SAME_WORK_BEFORE_IDENTIFY: &str = "识别完成后才有";
 
-/// 疑似同一作品那一格在**识别做完之后**底下那句实话：判断还没接上，界面不自己算一个（拿主意的人 2026-09-15 答岔路口 9）。
-pub const SAME_WORK_NOT_YET: &str = "暂时还给不出这一项";
+/// 疑似同一作品那一格在**识别做完之后**底下那句小字（设计稿 `HEALTH` 那一格的原话）。
+pub const SAME_WORK_SUB: &str = "可以合并为一个作品";
+
+/// 刚扫完一个根、这一项还没算过时那一格底下那句。
+///
+/// **扫描那一趟不算它**：扫描交回的报告折的是盘上那份统计，而这一项要走一遍识别之后的
+/// 中立库（`same_work::survey_apart`）——顺路算等于把一趟全库扫描挂在认领那一下上。
+pub const SAME_WORK_AFTER_SCAN: &str = "重新体检后才有";
+
+/// 还没算过这一项时点那一格，八格底下说的那一句。
+pub const SAME_WORK_CLICKED_AFTER_SCAN: &str =
+    "按上面的「重新体检」再算一趟，就有疑似同一作品的建议。";
 
 /// 识别还没做完时点疑似同一作品那一格，八格底下说的那一句（设计稿点那一格时那句提示，照票改成「识别完成后才有」）。
 pub const SAME_WORK_CLICKED_BEFORE_IDENTIFY: &str = "识别完成后才有疑似同一作品的建议。";
 
-/// 识别做完之后点疑似同一作品那一格，八格底下说的那一句实话：这一项的判断还没接上，不跳到浏览屏去（挂单 `Q957`）。
-pub const SAME_WORK_CLICKED_NOT_YET: &str = "暂时还给不出疑似同一作品的建议。";
+/// 识别做完、一条建议都没有时点那一格，八格底下说的那一句：不跳屏——跳过去是一张空表。
+pub const SAME_WORK_CLICKED_NONE: &str = "没有疑似同一作品的建议。";
+
+/// 点那一格跳到浏览屏之后，那一屏底边提示条上那一句（设计稿那条 toast）。
+pub const SAME_WORK_JUMPED: &str =
+    "只显示疑似同一作品的建议。可以直接合并，也可以标记为不是同一个。";
 
 /// 一份体检的结果。
 #[derive(Debug)]
@@ -104,6 +119,9 @@ pub struct Checked {
     pub report: HealthReport,
     /// 同一份统计折出来的重复拷贝完整明细：每一组、记下的每一份（[`DuplicateDetails`]）。
     pub duplicates: DuplicateDetails,
+    /// **疑似同一作品**那几条建议，核心库交回来的那一份（票 `gui-looks-like-the-design/17`）。
+    /// 那一格的数就是它的条数——界面一个数都不自己算（ADR-0005、ADR-0024）。
+    pub suspicions: Option<Vec<Suspicion>>,
     /// 什么时候出的，UNIX 纪元起的秒：「上次体检」画的就是它。
     pub at: i64,
 }
@@ -124,8 +142,12 @@ pub struct Section {
     /// 明细弹层里按下去之后那句回话，画在弹层里：`Ok` 是办成了（清单写到了哪儿），`Err` 是没办成（打不开那个目录、
     /// 落点在主库里……）。
     said: Option<Result<String, String>>,
-    /// 点了疑似同一作品那一格之后，画在八格底下的那一句（不跳屏、不开明细，岔路口 9）。
+    /// 点了疑似同一作品那一格、而这一项还给不出建议时，画在八格底下的那一句。
     notice: Option<String>,
+    /// 点了疑似同一作品那一格、而**确实有建议**：人要去浏览屏「整理建议」那一簇
+    /// （挂单 `Q957`）。**这一层够不着那一屏**（ADR-0005），所以只留个记号，
+    /// 由窗口那一层取走（`App::route`）。
+    jump: bool,
     /// **平台纠正**那一层开着没有（票 `gui-looks-like-the-design/28`）。
     platfix: bool,
     /// 报告里那几组加上人定过的决定，**核心库合出来的那一份**（[`CorrectionGroups`]）；
@@ -215,8 +237,17 @@ impl Section {
         self.checked = Some(Checked {
             report: outcome.report.clone(),
             duplicates: DuplicateDetails::build(&outcome.aggregate, &outcome.report),
+            // **扫描那一趟不算疑似同一作品**（见 [`SAME_WORK_AFTER_SCAN`]）：那一格回到
+            // 「还没算过」，按「重新体检」再算一趟。
+            suspicions: None,
             at,
         });
+    }
+
+    /// 点了疑似同一作品那一格、而且确实有建议：人要去浏览屏「整理建议」那一簇。
+    /// **取走这个记号**（挂单 `Q957`）——跳屏由窗口那一层办（ADR-0005）。
+    pub fn take_jump(&mut self) -> bool {
+        std::mem::take(&mut self.jump)
     }
 
     /// 眼下画着的那一份；还没体检过是 `None`。测试拿它核对。
@@ -288,11 +319,21 @@ impl Section {
         if self.running.is_some() {
             return;
         }
+        // **沉淀库那一半在排活这一下就读好**：后台那条线程手里只有中立库的第二份只读连接，
+        // 而「人说过哪一对不是同一个」是沉淀库里的事。那是一句小查询（同 `corrections`
+        // 读人定过的平台纠正），读不动就当没有——建议多提一对，好过整趟体检不跑。
+        let dismissed = site
+            .store
+            .not_same_works(&site.library_identity)
+            .unwrap_or_default();
         let id = match site.catalog.read_only() {
-            Ok(reader) => tasks.queue(CHECK_TASK, move |task| check_run(&reader, task)),
-            Err(CatalogError::NotOnDisk { .. }) => {
-                tasks.run_here(CHECK_TASK, |task| check_run(&site.catalog, task))
+            Ok(reader) => {
+                let dismissed = dismissed.clone();
+                tasks.queue(CHECK_TASK, move |task| check_run(&reader, &dismissed, task))
             }
+            Err(CatalogError::NotOnDisk { .. }) => tasks.run_here(CHECK_TASK, |task| {
+                check_run(&site.catalog, &dismissed, task)
+            }),
             // 别的原因是**意外**：直说，不退到画帧这条线程上偷偷算一遍（同工序段算要铺多少媒体那一处）。
             Err(why) => {
                 self.error = Some(format!(
@@ -329,12 +370,17 @@ impl Section {
             self.reshaped = true;
         }
         match done.ended {
-            Ending::Done(Product::Checked { report, duplicates }) => {
+            Ending::Done(Product::Checked {
+                report,
+                duplicates,
+                suspicions,
+            }) => {
                 self.error = None;
                 self.forget_corrections();
                 self.checked = Some(Checked {
                     report: *report,
                     duplicates: *duplicates,
+                    suspicions: Some(*suspicions),
                     at: now,
                 });
             }
@@ -374,7 +420,13 @@ impl Section {
             );
             return;
         };
-        let 点了 = tiles_ui(ui, &checked.report, self.corrections.as_ref(), identified);
+        let 点了 = tiles_ui(
+            ui,
+            &checked.report,
+            self.corrections.as_ref(),
+            identified,
+            checked.suspicions.as_deref(),
+        );
         match 点了 {
             // **目录与内容平台不符**那一格点进去不是明细，是**平台纠正**那一层（设计稿
             // `HEALTH` 里这一格的 `data-dg="open:platfix"`，票 `gui-looks-like-the-design/28`）：
@@ -394,15 +446,23 @@ impl Section {
             }
             // 疑似同一作品：**不跳屏、不开明细**，只在八格底下说一句（拿主意的人 2026-09-15 答岔路口 9；跳到浏览屏
             // 「整理建议」由票 17 接上，挂单 `Q957`）。
+            // **疑似同一作品**：算过而且有建议的，跳到浏览屏「整理建议」那一簇上
+            // （挂单 `Q957`，票 27 验收最后一条）；算不出或者一条都没有的**不跳**
+            // ——跳过去是一张空表，比留在原地说一句更让人摸不着头脑。
             Some(Tile::SameWork) => {
-                self.notice = Some(
-                    if identified {
-                        SAME_WORK_CLICKED_NOT_YET
-                    } else {
-                        SAME_WORK_CLICKED_BEFORE_IDENTIFY
+                let 建议 = self
+                    .checked
+                    .as_ref()
+                    .and_then(|checked| checked.suspicions.as_deref());
+                self.notice = match 建议 {
+                    Some(found) if !found.is_empty() => {
+                        self.jump = true;
+                        None
                     }
-                    .to_string(),
-                );
+                    Some(_) => Some(SAME_WORK_CLICKED_NONE.to_string()),
+                    None if identified => Some(SAME_WORK_CLICKED_AFTER_SCAN.to_string()),
+                    None => Some(SAME_WORK_CLICKED_BEFORE_IDENTIFY.to_string()),
+                };
             }
             None => {}
         }
@@ -1251,7 +1311,11 @@ fn platform_badge(ui: &mut egui::Ui, platform: &str) {
 
 /// 体检那一趟：从中立库折出全库的统计，出报告，连同重复拷贝的完整明细（**每组记全路径**，明细弹层要列得出全部）。
 /// 一个字节都不读主库、不写库。
-fn check_run(catalog: &Catalog, task: &Handle) -> Result<Product, Cutoff> {
+fn check_run(
+    catalog: &Catalog,
+    dismissed: &[NotSameWork],
+    task: &Handle,
+) -> Result<Product, Cutoff> {
     task.check()?;
     // **明细列全**（拿主意的人 2026-09-15 答，挂单 `Q959`）：这一趟样例不设上限、重复拷贝每组记全路径，其余几格的明细
     // 与导出的清单一个不少。命令行 `romcat report` 照旧每类只留前几个。
@@ -1267,9 +1331,15 @@ fn check_run(catalog: &Catalog, task: &Handle) -> Result<Product, Cutoff> {
     task.check()?;
     let report = HealthReport::build_full(&aggregate, &catalog.report_meta().map_err(failed)?);
     let duplicates = DuplicateDetails::build(&aggregate, &report);
+    task.check()?;
+    // **疑似同一作品**不在报告里：报告折的是扫描留下的那份统计，而这一条要走一遍识别
+    // 之后的中立库（`same_work::survey_apart`）。跟着这一趟回来是因为两者同一个处境——
+    // 都只读、都贵、都不许进画帧那条线程。
+    let suspicions = same_work::survey_apart(catalog, dismissed).map_err(failed)?;
     Ok(Product::Checked {
         report: Box::new(report),
         duplicates: Box::new(duplicates),
+        suspicions: Box::new(suspicions),
     })
 }
 
@@ -1326,18 +1396,30 @@ fn face(
     report: &HealthReport,
     fixes: Option<&CorrectionGroups>,
     identified: bool,
+    suspicions: Option<&[Suspicion]>,
 ) -> Face {
     let Tile::Finding(finding) = tile else {
+        // **疑似同一作品那一格的数就是核心库交回来的条数**（`same_work::survey_apart`）：
+        // 界面一条都不自己判（ADR-0024）。还没算过这一项时照旧画「—」。
+        let Some(found) = suspicions else {
+            return Face {
+                label: SAME_WORK,
+                value: "—".to_string(),
+                sub: if identified {
+                    SAME_WORK_AFTER_SCAN
+                } else {
+                    SAME_WORK_BEFORE_IDENTIFY
+                }
+                .to_string(),
+                tone: None,
+            };
+        };
+        let count = u64::try_from(found.len()).unwrap_or(u64::MAX);
         return Face {
             label: SAME_WORK,
-            value: "—".to_string(),
-            sub: if identified {
-                SAME_WORK_NOT_YET
-            } else {
-                SAME_WORK_BEFORE_IDENTIFY
-            }
-            .to_string(),
-            tone: None,
+            value: format!("{} 组", thousands(count)),
+            sub: SAME_WORK_SUB.to_string(),
+            tone: (count > 0).then_some(Tone::Caution),
         };
     };
     // **目录与内容平台不符**那一格数的是**还没处理的那几组**（票 `gui-looks-like-the-design/28`）：
@@ -1389,6 +1471,7 @@ fn tiles_ui(
     report: &HealthReport,
     fixes: Option<&CorrectionGroups>,
     identified: bool,
+    suspicions: Option<&[Suspicion]>,
 ) -> Option<Tile> {
     let tokens = Tokens::builtin();
     let [外上下, 外左右] = tokens.space.health_grid_padding;
@@ -1406,7 +1489,9 @@ fn tiles_ui(
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 缝;
                     for tile in 这一行 {
-                        if tile_ui(ui, 宽, &face(*tile, report, fixes, identified)).clicked() {
+                        if tile_ui(ui, 宽, &face(*tile, report, fixes, identified, suspicions))
+                            .clicked()
+                        {
                             点了 = Some(*tile);
                         }
                     }

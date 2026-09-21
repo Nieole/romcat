@@ -1469,6 +1469,19 @@ impl Screen {
             ui.vertical(|ui| {
                 ui.set_width(左宽);
                 ui.spacing_mut().item_spacing.y = 缝;
+                // **疑似同一作品那几张建议卡打头**（设计稿 `ovTab` 的 `suggHTML(i)` 就摆在
+                // 左栏第一块）。认不出作品的那一行没有作品名，不参与这件事。
+                if !matches!(work.anchor, WorkAnchor::Loose(_))
+                    && super::suspicion::any_for(&self.suspicions, &work.name)
+                    && let Some(按了) = super::suspicion::cards(
+                        ui,
+                        &self.suspicions,
+                        &work.name,
+                        &self.suspicion_titles,
+                    )
+                {
+                    动作 = Some(PageAction::Suspicion(按了));
+                }
                 if let Some(按了) = description_card(ui, page) {
                     动作 = Some(按了);
                 }
@@ -1649,10 +1662,11 @@ impl Screen {
     }
 
     /// 办头上那一块与概览那一面上按下去的那一下。
-    fn apply_page(&mut self, site: &Site, action: PageAction) {
+    fn apply_page(&mut self, site: &mut Site, action: PageAction) {
         match action {
             PageAction::EditMeta => self.begin_meta_edit(),
             PageAction::Merge => self.open_merge_here(site),
+            PageAction::Suspicion(deed) => self.do_suspicion(site, &deed),
             PageAction::Reveal(key) => self.reveal(site, &key),
             PageAction::ShowTab(tab) => {
                 if let Some(page) = self.page.as_mut() {
@@ -3513,6 +3527,8 @@ enum PageAction {
     Scrape,
     /// 「合并…」：从这一个作品起头开合并向导。
     Merge,
+    /// **疑似同一作品**那张建议卡上按了一颗（票 `gui-looks-like-the-design/17`）。
+    Suspicion(super::suspicion::Deed),
     /// 「在文件系统中打开」：这个变体在盘上所在的目录交给系统。
     Reveal(String),
 }

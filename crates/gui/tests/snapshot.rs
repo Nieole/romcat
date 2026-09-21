@@ -589,6 +589,7 @@ enum 档 {
 }
 
 /// 基线里的一个变体。
+#[derive(Debug, Clone, Copy)]
 struct 一个变体 {
     平台: &'static str,
     /// 根底下的相对路径。
@@ -722,6 +723,25 @@ const 浏览的译名: &[(&str, &str)] = &[
     ("Seiken Densetsu 2 (Japan)", "圣剑传说 2"),
 ];
 
+/// **疑似同一作品**那一态才摆的第六个作品（票 `gui-looks-like-the-design/17`，
+/// 设计稿 `SUGG` 里打头那一对）：另一个数据库把同一部游戏叫作另一个名字，
+/// 识别因此建成了两个作品。
+///
+/// **只有那一态摆它**：别的态照旧是五个作品、八行，那几张基线的内容一个字都不动。
+const 疑似的作品: &str = "Pocket Monster - Red Version (Japan)";
+
+/// 它与 `Pocket Monsters - Aka (Japan)` 在**中文离线源**里撞上的是同一条条目。
+const 疑似的条目: u32 = 4312;
+
+/// 它那一个变体：与那一个作品同一个平台（GB），不然平台那道硬闸就过不去。
+const 疑似的变体: 一个变体 = 一个变体 {
+    平台: "GB",
+    路径: "Pocket Monster - Red Version (Japan).zip",
+    字节: MIB,
+    落在: 档::命中(Confidence::High),
+    作品: Some(疑似的作品),
+};
+
 /// 浏览屏那一份现场。
 struct 浏览现场 {
     app: App,
@@ -760,11 +780,22 @@ fn 候选(
 /// 搭浏览屏那份库，开一个停在浏览屏上的主窗口。`收起两栏` 时先往工作目录的版式偏好里写上
 /// 左右两栏都收着——走的是开窗时读偏好那一条真路，不是在帧里硬按。
 fn 浏览现场(收起两栏: bool) -> 浏览现场 {
+    浏览现场_(收起两栏, false)
+}
+
+/// 同上，`疑似` 为真时多摆一个作品与它那一个变体，于是库里**有一对疑似同一作品**
+/// （[`疑似的作品`]）。别的态一律走 `false`，那几张基线的内容一个字都不动。
+fn 浏览现场_(收起两栏: bool, 疑似: bool) -> 浏览现场 {
     let mut catalog = Catalog::open_in_memory().expect("开得出中立库");
     romcat_core::catalog::roots::add_root(&catalog, None, 浏览的根, Path::new("/主库"))
         .expect("建得出根");
 
-    let 变体: Vec<Variant> = 浏览的变体
+    let 这一趟的变体: Vec<一个变体> = 浏览的变体
+        .iter()
+        .copied()
+        .chain(疑似.then_some(疑似的变体))
+        .collect();
+    let 变体: Vec<Variant> = 这一趟的变体
         .iter()
         .map(|one| {
             let key = format!("{浏览的根}/{}/{}", one.平台, one.路径);
@@ -787,13 +818,27 @@ fn 浏览现场(收起两栏: bool) -> 浏览现场 {
         .expect("写得进变体");
 
     let mut 作品号 = Vec::new();
-    for (名字, _, _) in 浏览的作品 {
+    let 这一趟的作品: Vec<一个作品> = 浏览的作品
+        .iter()
+        .copied()
+        .chain(疑似.then_some((
+            疑似的作品,
+            &[(Field::Year, "1996"), (Field::Genre, "角色扮演")][..],
+            false,
+        )))
+        .collect();
+    for (名字, _, _) in &这一趟的作品 {
         let id = catalog
             .add_work(名字, Provenance::Identified)
             .expect("建得出作品");
         作品号.push((*名字, id));
     }
-    let 译名: Vec<romcat_core::catalog::TitleRow> = 浏览的译名
+    let 这一趟的译名: Vec<(&str, &str)> = 浏览的译名
+        .iter()
+        .copied()
+        .chain(疑似.then_some((疑似的作品, "口袋妖怪 红")))
+        .collect();
+    let 译名: Vec<romcat_core::catalog::TitleRow> = 这一趟的译名
         .iter()
         .map(|(作品, 译名)| romcat_core::catalog::TitleRow {
             work: (*作品).to_owned(),
@@ -818,7 +863,7 @@ fn 浏览现场(收起两栏: bool) -> 浏览现场 {
             .expect("作品表里有这个作品")
     };
 
-    let 结论: Vec<Identification> = 浏览的变体
+    let 结论: Vec<Identification> = 这一趟的变体
         .iter()
         .zip(&变体)
         .filter_map(|(one, variant)| {
@@ -867,7 +912,7 @@ fn 浏览现场(收起两栏: bool) -> 浏览现场 {
     catalog.write_identifications(&结论).expect("写得进结论");
 
     let mut 采到的 = Vec::new();
-    for (at, (名字, 字段, 有封面)) in 浏览的作品.iter().enumerate() {
+    for (at, (名字, 字段, 有封面)) in 这一趟的作品.iter().enumerate() {
         let mut media = Vec::new();
         if *有封面 {
             let hash = format!("{:040x}", at + 1);
@@ -909,6 +954,33 @@ fn 浏览现场(收起两栏: bool) -> 浏览现场 {
     }
     catalog.put_scraped(&采到的).expect("写得进刮削值");
 
+    // **中文离线源那一次匹配**：两个作品底下的 GB 变体撞上的是同一条条目，于是核心库
+    // 说得出「这两个名字指向同一条条目」（`same_work::survey`）。依据里那个条目号照
+    // `zh::ENTRY_MARK` 拼——认它的是核心库那一处，这里不自己编一套格式。
+    if 疑似 {
+        let 撞上 = |路径: &str, 叫作: &str| Harvested {
+            anchor: AnchorKind::Variant.label().to_owned(),
+            subject: format!("{浏览的根}/GB/{路径}"),
+            source: "中文离线源".to_owned(),
+            input: "基线".to_owned(),
+            values: vec![HarvestedValue {
+                field: Field::Title.label().to_owned(),
+                value: 叫作.to_owned(),
+                evidence: format!(
+                    "「{叫作}」撞上了中文离线源{}{疑似的条目}：名字一字不差",
+                    romcat_core::zh::ENTRY_MARK
+                ),
+            }],
+            media: Vec::new(),
+        };
+        catalog
+            .put_scraped(&[
+                撞上("Pocket Monsters - Aka (Japan).zip", "精灵宝可梦 红"),
+                撞上("Pocket Monster - Red Version (Japan).zip", "口袋妖怪 红"),
+            ])
+            .expect("写得进刮削值");
+    }
+
     let 目录 = temp_dir("gui-截图门-浏览");
     if 收起两栏 {
         let at = romcat_core::workspace::gui_layout_path(目录.path());
@@ -945,6 +1017,9 @@ enum 浏览态 {
     两栏收起,
     /// 卡片墙：按平台分组，混合有封面和无封面的字卡。
     卡片,
+    /// **整理建议**（票 `gui-looks-like-the-design/17`）：左栏「疑似同一作品」那颗标签按下去，
+    /// 表里只剩那一对；点开其中一个，侧边详情里摆着那张建议卡——凭什么、两颗按钮。
+    整理建议,
 }
 
 /// 卡片墙往下滚几个点再拍（[`拍浏览`] 的卡片那一态）。
@@ -966,7 +1041,7 @@ fn 拍浏览(名字: &str, 主题: Theme, 态: 浏览态) {
     if 该跳过(名字) {
         return;
     }
-    let 浏览现场 { mut app, 目录 } = 浏览现场(态 == 浏览态::两栏收起);
+    let 浏览现场 { mut app, 目录 } = 浏览现场_(态 == 浏览态::两栏收起, 态 == 浏览态::整理建议);
     if 态 == 浏览态::卡片 {
         app.browse_and_site().0.show_cards();
     }
@@ -983,6 +1058,12 @@ fn 拍浏览(名字: &str, 主题: Theme, 态: 浏览态) {
         浏览态::行首封面 => {
             按(&mut harness, "在每行开头显示封面");
             按(&mut harness, 点开的作品那一行);
+        }
+        // **整理建议**：照人的操作按左栏那颗标签，再点开那一对里的一个——
+        // 屏上那颗标签写的数与表里摆的行由这一下当场对上。
+        浏览态::整理建议 => {
+            按(&mut harness, "疑似同一作品");
+            按(&mut harness, "口袋妖怪 红");
         }
         浏览态::筛空 | 浏览态::卡片 => {}
     }
@@ -1011,7 +1092,7 @@ fn 拍浏览(名字: &str, 主题: Theme, 态: 浏览态) {
     // 判据也同一处出（`table::unlinked_title`）。可卡面上它摆在下半截那一行的最左边，没有「正题在它
     // 正上方、路径在它右边」这副结构，拿这把尺子量不着。卡片那一路由
     // `tests/browse.rs` 的 `卡片墙上认不出作品的那几张挂着未关联作品标签_认出的不挂` 守着。
-    if !matches!(态, 浏览态::筛空 | 浏览态::卡片) {
+    if !matches!(态, 浏览态::筛空 | 浏览态::卡片 | 浏览态::整理建议) {
         带标签的行正题露得出字(&harness, 名字);
     }
     拍下(harness, 名字);
@@ -1286,6 +1367,16 @@ fn 浏览_卡片_浅色() {
 #[test]
 fn 浏览_卡片_暗色() {
     拍浏览("browse/cards-dark", Theme::Dark, 浏览态::卡片);
+}
+
+#[test]
+fn 浏览_整理建议_浅色() {
+    拍浏览("browse/suspicion-light", Theme::Light, 浏览态::整理建议);
+}
+
+#[test]
+fn 浏览_整理建议_暗色() {
+    拍浏览("browse/suspicion-dark", Theme::Dark, 浏览态::整理建议);
 }
 
 // ——— 作品详情页（票 `gui-looks-like-the-design/15`） ———

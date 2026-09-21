@@ -627,6 +627,12 @@ impl App {
             // 「下一步」也还指着裁决。
             self.roots.stages_mut().reload(&self.site);
         }
+        // **库体检里点了「疑似同一作品」那一格**（挂单 `Q957`）：跳到浏览屏，
+        // 左栏「整理建议」那颗标签按下去。**只有窗口这一层同时够得着两屏**（ADR-0005）。
+        if self.roots.take_health_jump() {
+            self.browse.show_suspicions(&self.site);
+            self.view = View::Browse;
+        }
         if let Some(jump) = self.sublibrary.take_jump() {
             self.browse
                 .begin_editing(&self.site, &jump.sublibrary, jump.rule, jump.broken);

@@ -949,6 +949,14 @@ pub struct Layout {
     /// 合并向导第三步字段冲突表「字段」那一列的宽；「保留作品」与「其他作品」分余下的
     /// （设计稿 `.ctbl` 的表头）。
     pub conflict_key_width: f32,
+    /// 疑似同一作品那张建议卡的内边距（上下, 左右）（设计稿 `.sugg` 的 `padding`）。
+    pub suspicion_padding: [f32; 2],
+    /// 那张卡里一段与一段之间（设计稿 `.sugg` 的 `gap`）。
+    pub suspicion_gap: f32,
+    /// 那张卡里理由一条与一条之间（设计稿 `.sugg ul` 的 `gap`）。
+    pub suspicion_reason_gap: f32,
+    /// 理由那一列缩进多少（设计稿 `.sugg ul` 的 `padding-left`）。
+    pub suspicion_reason_indent: f32,
     /// 手动例外弹层里「备注（可选）」那一格的宽（设计稿 `DLG.excl`）。
     pub exception_note_width: f32,
     /// 单选圆点的直径（设计稿 `.opt input`）。
@@ -1027,6 +1035,8 @@ pub struct Mix {
     pub dist_bar_opacity: f32,
     /// 下钻到某一组之后就地那一框底色里调进几成强调色（设计稿 `.drill` 的 `color-mix`）。
     pub drill_tint: f32,
+    /// 疑似同一作品那张建议卡底色里调进几成强调色（设计稿 `.sugg` 的 `color-mix`）。
+    pub suspicion_tint: f32,
 }
 
 /// 阴影：一种一格，**形状两套主题共用**，颜色是各主题里同名的那一格（`pop` → `pop-color`）。

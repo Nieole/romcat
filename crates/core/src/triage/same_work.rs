@@ -189,6 +189,24 @@ pub fn survey(
     store: &Store,
     library: &str,
 ) -> Result<Vec<Suspicion>, SuspicionError> {
+    Ok(survey_apart(catalog, &store.not_same_works(library)?)?)
+}
+
+/// 同 [`survey`]，只是**沉淀库那一半已经在手上**。
+///
+/// 库体检那一趟走这一条：它跑在后台那条线程上、手里只有中立库的第二份只读连接
+/// （`health::check_run`），而「人说过不是同一个」那一小份在排活那一下就读好了、
+/// 一并搬了过去。
+///
+/// **判断照旧只有一处**：两个入口走的是同一段代码，差的只是那份否定从哪儿来
+/// （ADR-0024 推论 3——缓存可以有好几份，算它的那段代码只有一份）。
+///
+/// # Errors
+/// 读中立库失败时返回错误。
+pub fn survey_apart(
+    catalog: &Catalog,
+    dismissed: &[NotSameWork],
+) -> Result<Vec<Suspicion>, CatalogError> {
     let held = holdings(catalog)?;
     let mut clues: BTreeMap<[String; 2], BTreeSet<Clue>> = BTreeMap::new();
     for (pair, clue) in naming_clues(catalog, &held)? {
@@ -197,11 +215,7 @@ pub fn survey(
     for (pair, clue) in chinese_clues(catalog, &held)? {
         clues.entry(pair).or_default().insert(clue);
     }
-    let dismissed: BTreeSet<[String; 2]> = store
-        .not_same_works(library)?
-        .into_iter()
-        .map(|one: NotSameWork| one.works)
-        .collect();
+    let dismissed: BTreeSet<&[String; 2]> = dismissed.iter().map(|one| &one.works).collect();
     let mut out = Vec::new();
     for (pair, found) in clues {
         // **人看过了、说不是同一个**：那一对从此不提（[`Store::set_not_same_work`]）。
