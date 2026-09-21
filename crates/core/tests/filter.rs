@@ -901,3 +901,74 @@ fn 筛选结果的条数与真正命中的条数一致() {
     assert_eq!(行数, 3);
     assert_eq!(变体数, 4);
 }
+
+/// **写得成规则、却筛不出东西的那几条：点得出名，但绝不当错拦住**
+/// （票 `gui-looks-like-the-design/12`）。
+///
+/// 这条钉的是那道界线：`RuleError` 说「读不成」，要拦；`Thin` 说「读得成、眼下筛不出
+/// 东西」，只提醒。拦住后者是错的——合集可以是待会儿才建的，平台清单也会长，
+/// 而「现在选不中、将来选得中」正是**规则**这个东西的用法。
+#[test]
+fn 筛不出东西的子句点得出名而且不当错拦住() {
+    use romcat_core::sublibrary::{Clause, Dimension, KnownValues, ThinClause};
+
+    let manifest = Manifest::builtin();
+    let collections = ["通关过的".to_string(), "收藏".to_string()];
+    let known = KnownValues {
+        platforms: &manifest,
+        collections: &collections,
+    };
+    let 判 = |text: &str| sublibrary::thin_clause(&Clause::parse(text).expect("读得成"), &known);
+
+    // 一、认得出的平台、建过的合集：一条都不报。
+    assert!(判("平台=GB").is_empty(), "GB 是平台清单里的");
+    assert!(判("合集=通关过的").is_empty(), "这个合集库里有");
+
+    // 二、认不出的平台名——**一条子句里几个值就逐个点名**。
+    assert_eq!(
+        判("平台=GBX"),
+        vec![ThinClause::UnknownPlatform("GBX".into())]
+    );
+    assert_eq!(
+        判("平台=GB,GBX"),
+        vec![ThinClause::UnknownPlatform("GBX".into())],
+        "认得出的那个不该跟着被点名"
+    );
+
+    // 三、还没建的合集。
+    assert_eq!(
+        判("合集=还没建的"),
+        vec![ThinClause::NoCollection("还没建的".into())]
+    );
+
+    // 四、**评分整维没有源**：不看运算符、也不看值。
+    assert_eq!(
+        判("评分>=0.8"),
+        vec![ThinClause::NoSource(Dimension::Rating)]
+    );
+
+    // 五、**子串那几个运算符不判值**：`平台~GB` 本来就不是拿一个平台名去对，
+    //     `GB` 撞得上 `GBA`，拿清单去挑它的错是判错了题。
+    assert!(判("平台~GB").is_empty());
+    assert!(判("合集~通关").is_empty());
+
+    // 六、**`!=` 上不判，而且理由正好是反的**：`平台=没这个平台` 一个变体都选不中，
+    //     可 `平台!=没这个平台` **全中**——认不出来的那个值在 `!=` 上等于「这一条没起
+    //     作用」，不是「选不中」。照 `=` 那套话去说就把意思说反了（挂单 `Q1101`）。
+    assert!(
+        判("平台!=没这个平台").is_empty(),
+        "`!=` 上认不出的值不该按「选不中」报——那一条其实全中"
+    );
+    assert!(判("合集!=还没建的").is_empty());
+
+    // 六、**这几条照样读得成、存得进规则**——`Thin` 不是错。
+    for text in ["平台=GBX", "合集=还没建的", "评分>=0.8"] {
+        assert!(Clause::parse(text).is_ok(), "「{text}」该读得成");
+        assert!(
+            !sublibrary::thin_clause(&Clause::parse(text).expect("读得成"), &known)[0]
+                .advice()
+                .is_empty(),
+            "「{text}」得说得出为什么筛不出东西"
+        );
+    }
+}

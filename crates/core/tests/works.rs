@@ -550,6 +550,62 @@ fn 年份没刮到的那些两个方向都排在末尾() {
     }
 }
 
+/// **屏上那句「N 个条件」怎么数**（票 `gui-looks-like-the-design/12`，挂单 `Q806`；
+/// 口径是拿主意的人 2026-09-21 定的）。
+///
+/// 数在核心库数**一次**，窄条与空态两处都问它——各数一遍的话屏上会说出两个数
+/// （ADR-0024）。这条把口径逐项钉死，尤其是**不算**的那两样。
+#[test]
+fn 屏上那个条件数等于分面加生效子句加非游戏资产开关() {
+    use romcat_core::sublibrary::Rule;
+
+    // 一个条件都没有。
+    assert_eq!(WorkQuery::default().filter_count(), 0);
+
+    // 分面：选了值的才算，一个算一个。
+    let 一个分面 = WorkQuery {
+        platform: Some(PlatformFilter::Named("GB".into())),
+        ..WorkQuery::default()
+    };
+    assert_eq!(一个分面.filter_count(), 1);
+
+    // 条件组：数的是**生效的子句**，嵌套的组不另算一个——组是括号，不是条件。
+    let 嵌套 = WorkQuery {
+        rule: Some(Rule::parse("平台=GB 且 (中文=汉化 或 类型~RPG)").expect("读得懂")),
+        ..WorkQuery::default()
+    };
+    assert_eq!(嵌套.filter_count(), 3, "三条子句、两个组，数的是子句");
+
+    // 非游戏资产那颗开关：摊开着算一个。
+    let 摊开着 = WorkQuery {
+        non_game_assets: NonGameAssets::Listed,
+        ..WorkQuery::default()
+    };
+    assert_eq!(摊开着.filter_count(), 1);
+
+    // **搜索词不算**：它管顺序不管集合。
+    let 搜着 = WorkQuery {
+        search: "口袋".into(),
+        ..WorkQuery::default()
+    };
+    assert_eq!(
+        搜着.filter_count(),
+        0,
+        "搜索词算进「筛选条件」就是在屏上说它缩小了这一批"
+    );
+
+    // 三样各来一点，加起来；搜索词照旧不算。
+    let 三样 = WorkQuery {
+        platform: Some(PlatformFilter::Named("GB".into())),
+        collection: Some("通关过的".into()),
+        rule: Some(Rule::parse("年份>=1990").expect("读得懂")),
+        non_game_assets: NonGameAssets::Listed,
+        search: "口袋".into(),
+        ..WorkQuery::default()
+    };
+    assert_eq!(三样.filter_count(), 4, "两个分面 + 一条子句 + 那颗开关");
+}
+
 #[test]
 fn 筛选下推之后行与聚合一起收窄() {
     let catalog = 建库();

@@ -1946,6 +1946,44 @@ impl WorkQuery {
         self
     }
 
+    /// 屏上那句「**N 个条件**」里的那个 N（票 `gui-looks-like-the-design/12`，挂单 `Q806`）。
+    ///
+    /// **口径是拿主意的人 2026-09-21 定的**，两处照着印（收起筛选栏之后那根窄条、
+    /// 筛空时那句空态）——**数在核心库数一次**，界面两处都问它，各数一遍就会在屏上
+    /// 说出两个数（ADR-0024）。
+    ///
+    /// 数的是**几样筛选加起来的个数**：
+    ///
+    /// - 五个分面里**选了值的**那几个（平台、合集、语言、中文、识别结论）；
+    /// - 条件组里**真正生效的子句**数（[`Rule::clauses`] 深度优先数到底，嵌套的组不另算
+    ///   一个——组是括号，不是条件）；
+    /// - **非游戏资产那颗开关**，摊开着算一个。
+    ///
+    /// **搜索词不算**：它管顺序不管集合（`Unruly::Search` 早把这条界线钉死了），
+    /// 算进来就是在屏上说「搜索缩小了这一批」。
+    ///
+    /// **没填完的子句不算**：它们本来就不在 [`rule`](Self::rule) 里
+    /// （界面那一层的 `Filter` 折规则时就筛掉了），而且屏上另有一句「还有 N 条没生效」
+    /// 专门说它们——两句话各说各的，不重不漏。
+    ///
+    /// **`cover_only` 也不算**：它是卡片墙的临时呈现条件，连子库规则都进不去。
+    #[must_use]
+    pub fn filter_count(&self) -> usize {
+        let facets = [
+            self.platform.is_some(),
+            self.collection.is_some(),
+            self.language.is_some(),
+            self.chinese.is_some(),
+            self.state.is_some(),
+        ]
+        .into_iter()
+        .filter(|on| *on)
+        .count();
+        let clauses = self.rule.as_ref().map_or(0, |rule| rule.clauses().len());
+        let non_game_assets = usize::from(self.non_game_assets == NonGameAssets::Listed);
+        facets + clauses + non_game_assets
+    }
+
     /// 折出 `SELECT` 里那一列**匹配质量的名次**，连它的参数。没搜索时是空的。
     ///
     /// 它拼在 [`WORK_ANCHOR_COLUMNS`] 与 [`WorkOrder::select`] 后面，所以它的参数排在

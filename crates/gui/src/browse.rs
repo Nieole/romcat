@@ -128,11 +128,20 @@ enum CardSize {
     Large,
 }
 
-/// 卡片工具栏里「默认」指作品名；其余排序沿用表格的领域词。
-fn card_order_label(order: WorkOrder) -> &'static str {
+/// 卡片工具条那个排序下拉里，一档叫什么（设计稿 `#csort`）。
+///
+/// **`None` 是「默认」那一档，不是某一列**（挂单 `Q1098`，拿主意的人 2026-09-21 定照稿
+/// 拆回两个）：稿上「默认」与「名称」本来就是两个选项，票 09 把它们合成了一个，于是
+/// `(作品, 倒着)` 在这个下拉上照样显示「默认」——而那一刻库里排的并不是默认那一种。
+///
+/// 两档的差别是**方向**：「默认」把排法整个按回 [`WorkQuery::default`]（作品、正着），
+/// 「名称」只把列换成作品、方向照旧。所以从表头倒着排过来的人选「名称」还是倒着的，
+/// 选「默认」才回到正着。
+fn card_order_label(order: Option<WorkOrder>) -> &'static str {
     match order {
-        WorkOrder::Name => "默认",
-        _ => order.label(),
+        None => "默认",
+        Some(WorkOrder::Name) => "名称",
+        Some(other) => other.label(),
     }
 }
 
@@ -2001,10 +2010,24 @@ impl Screen {
                 tokens.space.detail_pane_padding,
                 tokens.space.detail_pane_padding,
             )));
-        layout::FILTER.show_collapsible(ui, "筛选", 左栏, |ui| {
+        // **收起之后那根窄条上写着筛了几个条件**（照稿 `.fstrip` 与 `renderFilterCount`，
+        // 挂单 `Q806`）：收起来正是「看不见自己筛了什么」最危险的那一刻——屏上少了一半行，
+        // 而左栏已经卷起来了。数法在核心库一处（`WorkQuery::filter_count`），
+        // **与筛空时那句空态印的是同一个数**。
+        //
+        // **一个都没有时照稿写「无条件」**，不是什么都不写：窄条上空着读起来是
+        // 「这一栏没话说」，而它其实有话说——「眼下没筛」。
+        let 筛了几个 = self.query.filter_count();
+        let 窄条上 = if 筛了几个 > 0 {
+            format!("{筛了几个}个条件")
+        } else {
+            "无条件".to_string()
+        };
+        layout::FILTER.show_collapsible(ui, "筛选", Some(&窄条上), 左栏, |ui| {
             self.filter_panel(ui, site, tasks);
         });
-        layout::DETAIL.show_collapsible(ui, "详情", 右栏, |ui| self.detail_panel(ui, site));
+        layout::DETAIL
+            .show_collapsible(ui, "详情", None, 右栏, |ui| self.detail_panel(ui, site));
         // **底下那块编辑面板拆掉了**（票 `gui-looks-like-the-design/15` 收挂单 `Q804`）：改元数据归作品详情页，
         // 选中数在表格上方那一条，改选择时的例外摆在右栏选中那张变体卡底下。正中那一栏从上到下就是表。
         egui::CentralPanel::default()
@@ -2104,7 +2127,22 @@ impl Screen {
         ui.add_space(Tokens::builtin().space.empty_padding);
         ui.vertical_centered(|ui| {
             if 筛过 {
-                ui.weak("没有符合当前筛选条件的作品。");
+                // **空态那句带上条件数**（照稿 `.empty` 那句，挂单 `Q806`；数法见
+                // `WorkQuery::filter_count`）：「筛不出东西」与「筛了几样才筛不出东西」是
+                // 两件事——人得先知道自己叠了几层，才知道该松哪一层。**这个数与收起后那根
+                // 窄条上的是同一个**。
+                //
+                // **数出来是 0 就不写那个数**：`筛过` 问的是 `WorkQuery::same_filter`，
+                // 它把搜索词与「只显示有封面的」也算进「筛过」，而那两样按定下来的口径
+                // **不算条件**（搜索管顺序不管集合；封面是卡片墙的临时呈现）。于是只拨了
+                // 「只显示有封面的」而筛空时，两处问的不是同一件事，照写就会在屏上印出
+                // 「没有符合当前 0 个筛选条件的作品」——一句自相矛盾的话。
+                let 几个 = self.query.filter_count();
+                if 几个 > 0 {
+                    ui.weak(format!("没有符合当前 {几个} 个筛选条件的作品。"));
+                } else {
+                    ui.weak("没有符合当前筛选条件的作品。");
+                }
                 ui.add_space(steps[1]);
                 let 清除 = look::small_buttons(ui, |ui| {
                     ui.button("清除筛选")
@@ -2216,36 +2254,53 @@ impl Screen {
                                 self.query.order = WorkOrder::Platform;
                             }
                             look::section(ui, "排序");
-                            let mut card_order = None;
+                            // **「默认」与「名称」是两档，不是一档**（照稿 `#csort`，
+                            // 挂单 `Q1098`）：眼下是不是默认那一种由核心库答
+                            // （`WorkQuery::sorted_by_default`），这一层只照着显示——
+                            // 界面自己再比一遍 `order == Name` 的话，从表头倒着排过来的
+                            // `(作品, 倒着)` 会在这儿显示成「默认」，而库里排的并不是它
+                            // （ADR-0024）。
+                            let mut 选了: Option<Option<WorkOrder>> = None;
+                            let 眼下 = if self.group_cards || self.query.sorted_by_default() {
+                                // 平台分组本身就是主排序，组内不另排——界面上同样叫「默认」。
+                                None
+                            } else {
+                                Some(self.query.order)
+                            };
                             egui::ComboBox::from_id_salt("卡片排序")
-                                // 平台分组本身就是主排序；组内没有额外字段时，界面上叫「默认」。
-                                .selected_text(if self.group_cards {
-                                    "默认"
-                                } else {
-                                    card_order_label(self.query.order)
-                                })
+                                .selected_text(card_order_label(眼下))
                                 .show_ui(ui, |ui| {
-                                    for order in WorkOrder::ALL {
-                                        let selected = if self.group_cards {
-                                            order == WorkOrder::Name
-                                        } else {
-                                            self.query.order == order
-                                        };
+                                    for one in std::iter::once(None).chain(WorkOrder::ALL.map(Some))
+                                    {
                                         if ui
-                                            .selectable_label(selected, card_order_label(order))
+                                            .selectable_label(眼下 == one, card_order_label(one))
                                             .clicked()
                                         {
-                                            card_order = Some(order);
+                                            选了 = Some(one);
                                         }
                                     }
                                 });
-                            if let Some(order) = card_order {
-                                if self.group_cards && order == WorkOrder::Name {
-                                    // 「默认」保留按平台的组序，组内则由中立库的稳定次序决定。
-                                } else {
-                                    self.group_cards = false;
-                                    self.card_group_header = None;
-                                    self.query.order = order;
+                            // **分组着的时候点「默认」＝什么都不做**：那一档此刻显示的就是
+                            // 它，而按平台分组本身就是主排序。不挡这一下的话，人点一下
+                            // 当前显示的那一项，分组会**静悄悄**关掉（票 09 原先专门留了
+                            // 一支挡它，这一票重做下拉时漏掉了，`/code-review` 抓出来的）。
+                            if 选了 == Some(None) && self.group_cards {
+                                选了 = None;
+                            }
+                            if let Some(one) = 选了 {
+                                self.group_cards = false;
+                                self.card_group_header = None;
+                                match one {
+                                    // **「默认」把排法整个按回默认那一种**——方向也回正着，
+                                    // 否则它与「名称」是同一个状态，两档就白拆了。
+                                    None => {
+                                        let 默认 = WorkQuery::default();
+                                        self.query.order = 默认.order;
+                                        self.query.descending = 默认.descending;
+                                    }
+                                    // 挑一列只换列，**方向照旧**：从表头倒着排过来的人
+                                    // 在这儿挑一列，不该被顺手翻回正着。
+                                    Some(order) => self.query.order = order,
                                 }
                             }
                             look::section(ui, "大小");
@@ -2584,7 +2639,19 @@ impl Screen {
                      它进不了子库的规则——子库要的是集合不是顺序，\
                      「存成子库」之前得先把它清空。",
                 );
-                look::help(ui, "搜索结果按匹配程度排序。");
+                // **这一句要连「默认」一起说**（票 `gui-looks-like-the-design/11` 改了口径，
+                // 挂单 `Q1099`）：搜索着的时候按匹配程度排的**只是默认那一种排法**，
+                // 人点过表头就以他点的那一列为准（`WorkQuery::sorted_by_default`）。
+                // 原先那句话不带「默认」，点过表头之后它就成了假话。
+                // **「怎么回到默认」放悬停，不放屏上那一行**：左栏只有两百来点宽，
+                // 这一句每多一截就多折一行，而它底下压着平台、中文、识别结论那几簇标签
+                // ——三行的说明会把最底下「语言」那一段整个挤出视口。屏上那一行说
+                // **默认是什么、怎么改**，「怎么回去」在悬停里。
+                look::help(ui, "搜索结果默认按匹配程度排序；点表头可以改成按那一列排。")
+                    .on_hover_text(
+                        "「默认」那一种排法就是按匹配程度排。点过表头之后以你点的那一列为准；\
+                         在同一个表头上点到第三下就回到默认那一种——不必把搜索词删掉重打。",
+                    );
 
                 pane_gap(ui);
                 section_title(ui, "平台", None)
@@ -2683,6 +2750,25 @@ impl Screen {
     fn rule_box(&mut self, ui: &mut egui::Ui) -> bool {
         let tokens = Tokens::builtin();
         let 留白 = tokens.space.rule_box_padding;
+        // **判「这条子句筛不筛得出东西」要的那点上下文**（票 `gui-looks-like-the-design/12`）：
+        // 平台认不认得出由**平台清单**说了算（界面一律用内置那一份，挂单 `Q1031`）；
+        // 库里有哪几个合集由中立库那份投影说了算（分面那一趟已经问回来了，不另查一遍）。
+        // **判在核心库**（`sublibrary::thin`），这一层只把这两样交出去。
+        // **内置清单只建一次**：`Manifest::builtin()` 要解一遍 TOML、编一遍那批模式，
+        // 而这儿是**画帧线**——每帧建一份的话，光摆着不动也在烧 CPU。
+        static 平台清单: std::sync::OnceLock<romcat_core::platform::Manifest> =
+            std::sync::OnceLock::new();
+        let platforms = 平台清单.get_or_init(romcat_core::platform::Manifest::builtin);
+        let collections: Vec<String> = self
+            .facets
+            .collections
+            .iter()
+            .map(|facet| facet.value.clone())
+            .collect();
+        let known = romcat_core::sublibrary::KnownValues {
+            platforms,
+            collections: &collections,
+        };
         egui::Frame::new()
             .fill(ui.visuals().window_fill)
             .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
@@ -2690,7 +2776,7 @@ impl Screen {
             .inner_margin(egui::Margin::from(egui::vec2(留白, 留白)))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                self.filter.ui(ui)
+                self.filter.ui(ui, &known)
             })
             .inner
     }

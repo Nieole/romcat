@@ -268,7 +268,7 @@ impl Dimension {
             Self::Genre => "刮削来的类型",
             Self::Work => "作品名，配 `~` 取子串，如 `作品~火焰纹章`",
             Self::Year => "刮削来的发行年份，如 `年份>=1990`",
-            Self::Rating => "评分，写 0–1 的小数或 `80%`",
+            Self::Rating => "评分，写 0–1 的小数或 `80%`——眼下没有源，筛不出东西",
             Self::Size => "变体的容量，如 `体积<=64MiB`（是下界）",
             Self::Developer => "刮削来的开发商，如 `开发商^Game Freak`",
             Self::Publisher => "刮削来的发行商",
@@ -300,6 +300,20 @@ impl Dimension {
     #[must_use]
     pub fn from_label(label: &str) -> Option<Self> {
         Self::all().into_iter().find(|d| d.label() == label)
+    }
+
+    /// 这一维**眼下没有源**——写得出规则，可中立库里还没有哪个源在写它，所以筛不出东西。
+    ///
+    /// **只有这一处答这件事**（ADR-0024）：`评分` 没有源这句话本来散在三处（本枚举的
+    /// 文档、`Dimension::hint` 那半句、以及选择集报告点名那一档），D68 真落地那天要改三处，
+    /// 漏一处就是屏上还在说「筛不出东西」而它其实筛得出来了。
+    ///
+    /// 与[选择集报告](super::Selected::thin_dimensions)那一档**问的不是同一件事**：
+    /// 那一个是**求完值**答「这一维在这份库里一条数据都没有」（可能只是这份库还没刮到），
+    /// 这一个是**整个本仓还没有这个源**，与手上是哪份库无关。
+    #[must_use]
+    pub fn no_source(self) -> bool {
+        matches!(self, Self::Rating)
     }
 
     /// 这个维度装的是文字还是数。

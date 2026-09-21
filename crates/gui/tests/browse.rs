@@ -3670,12 +3670,72 @@ fn 卡片工具条显示覆盖率并能改排序() {
     }
 
     // 分组时「默认」仍然可点；选具体字段会取消分组，交给中立库按那个字段重排。
-    shared::点一下(&ctx, "默认", |ui| app.ui(ui));
-    shared::点一下(&ctx, "容量", |ui| app.ui(ui));
+    //
+    // **按整段一字不差点**（`点正好`）：左栏那句「搜索结果默认按匹配程度排序……」里也有
+    // 「默认」两个字，按「含有」找头一处会点到那句话上，下拉压根打不开。
+    shared::点正好(&ctx, "默认", |ui| app.ui(ui));
+    shared::点正好(&ctx, "容量", |ui| app.ui(ui));
     assert_eq!(
         app.browse().query().order,
         romcat_core::catalog::browse::WorkOrder::Bytes,
         "卡片工具条的排序没有同步进查询"
+    );
+}
+
+/// **卡片下拉上「默认」与「名称」是两档**（票 `gui-looks-like-the-design/12`，挂单
+/// `Q1098`，拿主意的人 2026-09-21 定照稿拆回两个）。
+///
+/// 票 09 把两档合成了一个（`Name => "默认"`），于是从表头倒着排过来的 `(作品, 倒着)`
+/// 在这个下拉上照样显示「默认」——**而那一刻库里排的并不是默认那一种**，
+/// 搜索着的时候它也不再按匹配质量排（票 `11` 的 `WorkQuery::sorted_by_default`）。
+#[test]
+fn 卡片下拉上默认与名称是两档_倒着排时不再显示默认() {
+    use romcat_core::catalog::browse::WorkOrder;
+
+    let ctx = headless::context();
+    let (mut app, _dir) = 一个有封面一个没有的小库();
+    app.browse_and_site().0.show_cards();
+    跑(&ctx, &mut app, 3);
+
+    // 一进来是默认那一种排法：下拉上写「默认」。
+    //
+    // **按整行比，不用「含有」**：左栏那句「搜索结果默认按匹配程度排序……」里也有这两个
+    // 字，按含有找的话这条测试在任何实现上都是绿的（第一版就这么假绿过一次）。
+    let 下拉上写着 = |屏上: &str, 字: &str| 屏上.lines().any(|line| line == 字);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        下拉上写着(&屏上, "默认"),
+        "默认那一种排法下，卡片下拉该写「默认」：\n{屏上}"
+    );
+
+    // **把排法换成「作品、倒着」**——那正是从表头点过来的那个状态。
+    {
+        let query = app.browse_and_site().0.query_mut();
+        query.order = WorkOrder::Name;
+        query.descending = true;
+    }
+    跑(&ctx, &mut app, 2);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        !app.browse().query().sorted_by_default(),
+        "这个状态本来就不是默认那一种，不然这条测试验不到要害"
+    );
+    assert!(
+        下拉上写着(&屏上, "名称"),
+        "按作品倒着排时，卡片下拉该写「名称」：\n{屏上}"
+    );
+    assert!(
+        !下拉上写着(&屏上, "默认"),
+        "按作品倒着排，下拉上却还写着「默认」——那一刻库里排的并不是默认那一种：\n{屏上}"
+    );
+
+    // **选「默认」把方向也按回去**，否则它与「名称」是同一个状态、两档就白拆了。
+    // 先点开下拉（那时它写着「名称」），再点那一档。
+    shared::点正好(&ctx, "名称", |ui| app.ui(ui));
+    shared::点正好(&ctx, "默认", |ui| app.ui(ui));
+    assert!(
+        app.browse().query().sorted_by_default(),
+        "选了「默认」之后该回到默认那一种排法（列与方向都回）"
     );
 }
 
@@ -3696,7 +3756,9 @@ fn 卡片视图选择记在工作目录而不进中立库() {
 
 #[test]
 fn 筛不出东西时说清楚并给一颗清除筛选_按下去表就回来() {
-    const 空态: &str = "没有符合当前筛选条件的作品。";
+    // **空态那句带着条件数**（照稿，挂单 `Q806`）：这一趟摊开了非游戏资产、又筛了一个
+    // 平台，按定下来的口径就是 **2 个**（那颗开关算一个、分面算一个）。
+    const 空态: &str = "没有符合当前 2 个筛选条件的作品。";
 
     let ctx = headless::context();
     let mut app = shared::小库(
@@ -3863,5 +3925,114 @@ fn 表格上方那一条的作品数摆在头一行右端_帮助自己折行() {
     assert!(
         帮助.min.y > 数.max.y,
         "帮助那句没有另起一行：那一句 {数:?}，帮助 {帮助:?}"
+    );
+}
+
+/// **收起后那根窄条与筛空时那句空态，印的是同一个条件数**
+/// （票 `gui-looks-like-the-design/12`，挂单 `Q806`；口径是拿主意的人 2026-09-21 定的）。
+///
+/// 两处各数一遍的话，屏上会说出两个数——所以数在核心库数**一次**
+/// （`WorkQuery::filter_count`），这两处都问它（ADR-0024）。
+///
+/// 夹具**三样各有一点**，正是口径里要加起来的那三样：一个分面（平台）、条件组里一条
+/// **生效的**子句、以及非游戏资产那颗开关。外加一个**不该算**的搜索词——它管顺序不管
+/// 集合，算进来就是在屏上说搜索缩小了这一批。
+#[test]
+fn 收起后的窄条与筛空时的空态印的是同一个条件数() {
+    use romcat_core::catalog::browse::NonGameAssets;
+    use romcat_core::sublibrary::Rule;
+
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-条件数"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+
+    {
+        let query = app.browse_and_site().0.query_mut();
+        // 一个分面：库里没有 FC，于是这一趟一行都不剩、空态画得出来。
+        query.platform = Some(PlatformFilter::from_label("FC"));
+        // 一条生效的子句。
+        query.rule = Some(Rule::parse("年份>=1990").expect("读得懂"));
+        // 那颗开关。
+        query.non_game_assets = NonGameAssets::Listed;
+        // **不该算的那一样。**
+        query.search = "口袋".to_string();
+        assert_eq!(query.filter_count(), 3, "口径：两样加一条子句，搜索词不算");
+    }
+    跑(&ctx, &mut app, 2);
+
+    // 一、空态那句。
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert_eq!(app.window().total(), 0, "这个筛选下该一行都不剩");
+    assert!(
+        屏上.contains("没有符合当前 3 个筛选条件的作品。"),
+        "空态那句没写条件数、或者数得不对：\n{屏上}"
+    );
+
+    // 二、把左栏收起来，窄条上竖着写的是同一个数（照稿 `.fstrip`「筛选 · 3 个条件」）。
+    let 屏上 = 点这半边的(&ctx, "«", true, |ui| app.ui(ui));
+    assert!(
+        屏上.contains("筛\n选\n·\n3\n个\n条\n件"),
+        "收起后那根窄条上没竖着写「筛选·3个条件」：\n{屏上}"
+    );
+}
+
+/// **筛不出东西的子句：屏上逐条点名，但一条都不拦**
+/// （票 `gui-looks-like-the-design/12`）。
+///
+/// 三档各来一条：认不出的平台名、还没建的合集、以及**评分**那一维（立着但眼下没有源）。
+/// 判在核心库一处（`sublibrary::thin`），这一层只把它印出来（ADR-0024）。
+///
+/// **与「还有 N 条没生效」是两件事**：那一段说的是**没填完或者填错了**的，它们不进规则；
+/// 这一段说的是**读得成、也进了规则**、只是眼下一个变体都选不中的。把后者也拦下来是错的
+/// ——合集可以是待会儿才建的，平台清单也会长。
+#[test]
+fn 筛不出东西的子句屏上逐条点名但不拦着() {
+    let ctx = headless::context();
+    // **用小库不用合成数据**：合成数据那份左栏长得多（平台与语言各一大簇），
+    // 条件组那一段会被 `ScrollArea` 剔到视口外，屏上根本读不到那几句话。
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-筛不出东西"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+
+    let text = "平台=没这个平台 且 合集=还没建的 且 评分>=0.8";
+    let rule = romcat_core::sublibrary::Rule::parse(text).expect("读得懂");
+    app.browse_and_site().0.set_filter_rule(Some(rule.clone()));
+    跑(&ctx, &mut app, 2);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+
+    // 一、三条都点到名，而且数目写出来。
+    assert!(
+        屏上.contains("有 3 条筛不出东西："),
+        "屏上没说有几条筛不出东西：\n{屏上}"
+    );
+    for 该说的 in ["没这个平台", "还没建的", "评分"] {
+        assert!(
+            屏上.contains(该说的),
+            "「{该说的}」那一条没被点名：\n{屏上}"
+        );
+    }
+
+    // 二、**一条都没被拦**：三条照样进了规则，屏上那行规则原文一字不少。
+    assert_eq!(
+        app.browse()
+            .query()
+            .rule
+            .as_ref()
+            .map(|one| one.text.clone()),
+        Some(text.to_string()),
+        "筛不出东西的子句被悄悄扔掉了——那会让存出去的子库比屏上说的宽",
+    );
+
+    // 三、**它不是「没生效」**：那一段说的是没填完或填错的，这一趟一条都没有。
+    assert!(
+        !屏上.contains("还有 1 条没生效") && !屏上.contains("还有 3 条没生效"),
+        "把「筛不出东西」说成了「没生效」，两件事混了：\n{屏上}"
     );
 }

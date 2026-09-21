@@ -27,7 +27,7 @@
 //! 「还有 N 条没生效」，红的。
 
 use egui::ComboBox;
-use romcat_core::sublibrary::{Clause, Dimension, Group, Join, Node, Op, Rule};
+use romcat_core::sublibrary::{Clause, Dimension, Group, Join, KnownValues, Node, Op, Rule};
 
 /// 界面上那棵**条件组**树。
 ///
@@ -123,11 +123,38 @@ impl Filter {
     }
 
     /// 画这一栏。**返回「改过没有」**：改过就得把窗口作废重取。
-    pub fn ui(&mut self, ui: &mut egui::Ui) -> bool {
+    ///
+    /// `known` 是判「这条子句筛不筛得出东西」要的那点上下文（平台清单、库里有哪几个
+    /// 合集）。**判在核心库**（`sublibrary::thin`），这一层只把它交出去、再把交回来的
+    /// 话印出来（ADR-0024）。
+    pub fn ui(&mut self, ui: &mut egui::Ui, known: &KnownValues<'_>) -> bool {
         let mut changed = false;
         group_ui(ui, &mut self.root, 0, &mut changed);
         if changed {
             self.refresh();
+        }
+        // **筛不出东西的那几条**（票 `gui-looks-like-the-design/12`）：与底下「没生效」
+        // 那一段是两件事，颜色也不一样——**这几条是生效的**，只是眼下一个都选不中。
+        // 当成错印成红的，人会去「改正」一条本来没错的规则（合集可以是待会儿才建的）。
+        let 筛不出: Vec<String> = self
+            .rule
+            .iter()
+            .flat_map(Rule::clauses)
+            .flat_map(|clause| romcat_core::sublibrary::thin_clause(clause, known))
+            .map(|thin| thin.advice())
+            .collect();
+        if !筛不出.is_empty() {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!("有 {} 条筛不出东西：", 筛不出.len()),
+            )
+            .on_hover_text(
+                "这几条读得成、也存得进子库的规则，只是眼下一个变体都选不中。\
+                 不拦着你——合集可以是待会儿才建的，平台清单也会长。",
+            );
+            for line in 筛不出 {
+                ui.colored_label(ui.visuals().warn_fg_color, format!("　{line}"));
+            }
         }
         if !self.pending.is_empty() {
             ui.colored_label(
