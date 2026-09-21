@@ -141,6 +141,9 @@ pub struct Page {
     /// 这个作品**上次写进前端格式是什么时候**（核心库 `Catalog::entry_exported`）：状态块里「导出」那一行照它写。
     /// **一趟都没导过、或者上次导出那会儿它还不在库里**都是 `None`——那与「整库导过了」不是同一件事。
     exported: Option<ExportMark>,
+    /// 这几个变体跟前有没有一处**成型存疑**（核心库 `Catalog::shaping_doubts_near`，判据与库体检那一格
+    /// 同一处，ADR-0024）：「变体」那一面头上那块建议照它画（票 `gui-looks-like-the-design/29`）。
+    doubts: Vec<romcat_core::shape::Doubt>,
 }
 
 /// 编辑态下一格的草稿。
@@ -184,6 +187,7 @@ impl Page {
         self.files.clear();
         self.sublibraries.clear();
         self.exported = None;
+        self.doubts.clear();
     }
 }
 
@@ -303,7 +307,17 @@ impl Screen {
             Some((key, CardPress::Prefer)) => self.prefer(site, &key),
             Some((key, CardPress::Restore)) => self.restore_rule(site, &key),
             Some((key, CardPress::Reveal)) => self.reveal(site, &key),
+            Some((_, CardPress::Adjust(第几处))) => self.adjust_shaping(site, 第几处),
+            Some((key, CardPress::UndoShaping)) => self.undo_shaping(site, &key),
             None => {}
+        }
+        // **成型纠正那一层每一帧都画**：它开没开着记在这一屏上（`crate::dialog` 那条规矩）。
+        self.fixer.ui(ui.ctx(), site);
+        if self.fixer.take_applied() {
+            self.reshaped = true;
+            if let Some(page) = self.page.as_mut() {
+                page.forget();
+            }
         }
         if let Some(action) = 元数据 {
             self.apply_meta(site, action);
@@ -584,6 +598,22 @@ impl Screen {
                 .collect::<Vec<_>>()
                 .join(" / ")
         });
+        // **成型存疑**（票 `gui-looks-like-the-design/29`）：判据在核心库一处，这里只把这几个变体
+        // 跟前那一小块捞出来问一遍（`Catalog::shaping_doubts_near`）。
+        let 存疑 = {
+            let 借: Vec<&str> = keys.iter().map(String::as_str).collect();
+            match catalog.shaping_doubts_near(&借, &romcat_core::platform::Manifest::builtin()) {
+                Ok(doubts) => doubts,
+                Err(error) => {
+                    self.error = Some(format!("中立库读不动：{error}"));
+                    Vec::new()
+                }
+            }
+        };
+        let Some(page) = self.page.as_mut() else {
+            return;
+        };
+        page.doubts = 存疑;
         page.favorite = favorite;
         page.row = row;
         page.head = 头;
@@ -606,6 +636,62 @@ impl Screen {
         if let Some(page) = self.page.as_mut() {
             page.forget();
         }
+    }
+
+    /// 「调整成型…」：对着这一面上第 `at` 处**成型存疑**开**成型纠正**那一层（`crate::shaping`）。
+    ///
+    /// 这一面手上的存疑是核心库按这几个变体跟前那一小块判出来的（`Catalog::shaping_doubts_near`），
+    /// 与库体检那一格同一处判据；那一层要的那份 [`ShapingDoubt`] 由这里折一份出来——**键在里头**，
+    /// 给人看的路径就是键本身折出来的「根名 / 相对路径」。
+    fn adjust_shaping(&mut self, site: &mut Site, at: usize) {
+        let Some(doubt) = self
+            .page
+            .as_ref()
+            .and_then(|page| page.doubts.get(at))
+            .cloned()
+        else {
+            return;
+        };
+        let 同种 = self.page.as_ref().map_or(1, |page| {
+            page.doubts
+                .iter()
+                .filter(|one| one.kind == doubt.kind)
+                .count() as u64
+        });
+        let shown = romcat_core::scan::aggregate::ShapingDoubt {
+            kind: doubt.kind,
+            platform: None,
+            at: doubt.at.clone(),
+            items: doubt.items.clone(),
+            at_key: doubt.at.clone(),
+            item_keys: doubt.items.clone(),
+        };
+        self.fixer.open_doubt(&site.catalog, &shown, 同种);
+    }
+
+    /// 「撤销成型纠正」：清掉这个变体上那几行人工纠正（核心库 `shape::fix::undo`），回到成型规则
+    /// 原本的结果（票 29 验收第 5 条）。
+    fn undo_shaping(&mut self, site: &mut Site, key: &str) {
+        let members = match site.catalog.variant_members(key) {
+            Ok(members) => members.into_iter().map(|(key, _)| key).collect(),
+            Err(error) => {
+                self.error = Some(format!("中立库读不动：{error}"));
+                return;
+            }
+        };
+        let main = self
+            .page
+            .as_ref()
+            .and_then(|page| page.details.iter().find(|one| one.row.key == key))
+            .map_or_else(|| key.to_string(), |one| one.row.main_key.clone());
+        self.fixer.undo(
+            site,
+            &romcat_core::shape::fix::Members {
+                key: key.to_string(),
+                main_key: main,
+                members,
+            },
+        );
     }
 
     /// 「恢复规则选择」：撤掉这个变体所在作品、所在平台上的**首选变体裁决**，回到规则选的那一个（拿主意的人 2026-09-15 定）。
@@ -837,6 +923,30 @@ impl Screen {
         look::help(ui, "首选变体是前端默认启动的那一个。");
         ui.add_space(look::step(2));
         let mut 设首选 = None;
+        // **成型存疑那一块建议**（设计稿 `shapeSuspect`，票 `gui-looks-like-the-design/29`）：
+        // 哪一处存疑、凭什么，都由核心库答（`Catalog::shaping_doubts_near`，ADR-0024）。
+        for (at, doubt) in page.doubts.iter().enumerate() {
+            let 按了 = look::note_box(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = look::step(1);
+                ui.label(crate::font::strong(doubt.kind.label()));
+                look::help(ui, &doubt_reason(doubt));
+                look::small_buttons(ui, |ui| {
+                    ui.scope(|ui| {
+                        look::primary_button(ui.visuals_mut());
+                        ui.button(crate::shaping::ADJUST)
+                            .on_hover_text(
+                                "成型规则会出错，人工纠正是正门；记为人工纠正，盘上的文件一个字节都不动",
+                            )
+                            .clicked()
+                    })
+                    .inner
+                })
+            });
+            if 按了 {
+                设首选 = Some((String::new(), CardPress::Adjust(at)));
+            }
+            ui.add_space(tokens.space.work_card_gap);
+        }
         for (at, variant) in work.variants.iter().enumerate() {
             let Some(detail) = page
                 .details
@@ -1872,10 +1982,22 @@ fn variant_card(
                         )
                         .clicked()
                 });
+            // **人工纠正出来的变体才摆撤销**（票 `gui-looks-like-the-design/29`）：是不是人工纠正
+            // 出来的由核心库记着（`VariantRow::manual`），这一层不自己认。
+            let 撤成型 = detail.row.manual
+                && look::small_buttons(ui, |ui| {
+                    ui.button(crate::shaping::UNDO)
+                        .on_hover_text(
+                            "清掉这一处的人工纠正，重新成型之后回到成型规则原本的结果；盘上的文件一个字节都不动。",
+                        )
+                        .clicked()
+                });
             if 设首选 {
                 Some(CardPress::Prefer)
             } else if 恢复 {
                 Some(CardPress::Restore)
+            } else if 撤成型 {
+                Some(CardPress::UndoShaping)
             } else if 打开 {
                 Some(CardPress::Reveal)
             } else {
@@ -3375,6 +3497,19 @@ enum PageAction {
     Reveal(String),
 }
 
+/// 一处存疑凭什么：**核心库那一句**（`scan::aggregate::ShapingDoubt::reason`），这一层不另写一句。
+fn doubt_reason(doubt: &romcat_core::shape::Doubt) -> String {
+    romcat_core::scan::aggregate::ShapingDoubt {
+        kind: doubt.kind,
+        platform: None,
+        at: doubt.at.clone(),
+        items: doubt.items.clone(),
+        at_key: doubt.at.clone(),
+        item_keys: doubt.items.clone(),
+    }
+    .reason()
+}
+
 /// 变体卡片头一行右头按下去的是哪一颗。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CardPress {
@@ -3384,6 +3519,11 @@ enum CardPress {
     Restore,
     /// 「在文件系统中打开」。
     Reveal,
+    /// 「调整成型…」：开**成型纠正**那一层，说的是这一面上第几处存疑
+    /// （票 `gui-looks-like-the-design/29`）。
+    Adjust(usize),
+    /// 「撤销成型纠正」：清掉这个变体上那几行人工纠正，回到成型规则原本的结果。
+    UndoShaping,
 }
 
 /// 头一个平台上的**首选变体**：那个平台上某个变体的详情里核心库排好的第一名（`VariantDetail::preferred_now`）。

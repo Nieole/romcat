@@ -938,6 +938,8 @@ impl Screen {
         self.health.dialog_ui(ui.ctx(), site);
         // **平台纠正**那一层同理（票 `gui-looks-like-the-design/28`）：目录与内容平台不符那一格点进去开的是它。
         self.health.platfix_ui(ui.ctx(), site);
+        // **成型纠正**那一层（票 `gui-looks-like-the-design/29`）：成型存疑明细里一行一颗「处理…」开的是它。
+        self.health.fixer_ui(ui.ctx(), site, tasks);
         if 要体检 {
             self.health.check(site, tasks);
         }
@@ -952,6 +954,17 @@ impl Screen {
     /// 排一趟体检上任务台：「重新体检」按的就是它（[`crate::health::Section::check`]）。一次只跑一趟。
     pub fn check_health(&mut self, site: &Site, tasks: &mut Tasks) {
         self.health.check(site, tasks);
+    }
+
+    /// 排一趟**重新成型**上任务台（[`crate::health::Section::reshape`]）：作品详情那一面落过一笔
+    /// 人工纠正之后，窗口转到这儿来排——**全窗口只有一处排它**，报告才不会两份各说各的。
+    pub fn reshape(&mut self, site: &mut Site, tasks: &mut Tasks) {
+        self.health.reshape(site, tasks);
+    }
+
+    /// 刚重新成型过（[`crate::health::Section::take_reshaped`]）。
+    pub fn take_reshaped(&mut self) -> bool {
+        self.health.take_reshaped()
     }
 
     /// 体检明细弹层上「导出清单…」弹的保存对话框交回来的那一个（[`crate::health::Section::export_picked`]）。

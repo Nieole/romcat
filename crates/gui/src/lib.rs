@@ -143,6 +143,7 @@ pub mod rail;
 pub mod recent;
 pub mod roots;
 pub mod scrape;
+pub mod shaping;
 pub mod site;
 pub mod stages;
 pub mod sublibrary;
