@@ -416,7 +416,7 @@ impl Section {
         // 副标题：**判据那一句出自核心库**（`Finding::criterion`，与导出的清单抬头同一句），
         // 后面接的是这一层自己的政策话（同明细弹层 `note_of` 那条先例）。
         let note = format!(
-            "{}。共 {} 条目录与内容不符，按组处理；纠正记为裁决，不移动任何文件。",
+            "{}。共 {} 条目录与内容不符，按组处理；纠正记为人工纠正，不移动任何文件。",
             Finding::PlatformConflicts.criterion(),
             thousands(fixes.remaining()),
         );
@@ -490,7 +490,7 @@ impl Section {
                 .set_platform_correction(&library, declared, implied, PlatformDecision::ByContent)
                 .map(|()| {
                     format!(
-                        "已把 {} 条改为 {implied}（记为裁决）；下次识别按新平台重新匹配，盘上的文件一个字节都没动",
+                        "已把 {} 条改为 {implied}（记为人工纠正）；下次识别按新平台重新匹配，盘上的文件一个字节都没动",
                         thousands(条数)
                     )
                 }),
