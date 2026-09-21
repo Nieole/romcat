@@ -90,10 +90,23 @@ struct 现场 {
     store: Store,
 }
 
+/// 同一串字底下再挤几个作品（[`建现场_`] 的那个参数）：防炸那道闸的门槛是 8。
+const 挤: usize = 9;
+
+/// 那一堆里第 `n` 个叫什么。
+fn 挤的名字(n: usize) -> String {
+    format!("某个太泛的名字 第{n}作")
+}
+
 /// 一份合成的小库：四对作品，各自摆成上面那四种情形。
 fn 建现场() -> 现场 {
+    建现场_(false)
+}
+
+/// 同上；`太挤` 为真时再摆 [`挤`] 个作品，它们各有一条**一模一样**的叫法。
+fn 建现场_(太挤: bool) -> 现场 {
     let mut catalog = Catalog::open_in_memory().expect("开得出中立库");
-    let 摆法 = [
+    let mut 摆法: Vec<(&str, String)> = [
         ("GB", 甲),
         ("GB", 乙),
         ("GB", 丙),
@@ -102,14 +115,22 @@ fn 建现场() -> 现场 {
         ("GBA", 己),
         ("SFC", 庚),
         ("PS1", 辛),
-    ];
+    ]
+    .iter()
+    .map(|(平台, 名字)| (*平台, (*名字).to_string()))
+    .collect();
+    if 太挤 {
+        for n in 0..挤 {
+            摆法.push(("GB", 挤的名字(n)));
+        }
+    }
     let variants: Vec<Variant> = 摆法.iter().map(|(平台, 名字)| 变体(平台, 名字)).collect();
     catalog
         .replace_variants(&variants, 1, &Manifest::default())
         .expect("写得进变体");
 
     let mut records = Vec::new();
-    for (平台, 名字) in 摆法 {
+    for (平台, 名字) in &摆法 {
         let work = catalog
             .add_work(名字, Provenance::Identified)
             .expect("建得出作品");
@@ -117,7 +138,7 @@ fn 建现场() -> 现场 {
             variant_key: 键(平台, 名字),
             state: State::Matched,
             reason: None,
-            platform: Some(平台.to_string()),
+            platform: Some((*平台).to_string()),
             standalone: None,
             edition: None,
             units: 1,
@@ -157,9 +178,14 @@ fn 建现场() -> 现场 {
         .expect("写得进刮削值");
 
     // **DAT 那两个数据库对丙各有一个叫法**：它们与丁的作品名归一之后是同一串字。
-    catalog
-        .put_titles(&[叫法(丙, "塞尔达传说·时空之章", "No-Intro")])
-        .expect("写得进标题集合");
+    let mut 叫法们 = vec![叫法(丙, "塞尔达传说·时空之章", "No-Intro")];
+    if 太挤 {
+        // 挤在一堆的那几个各有一条**一模一样**的叫法：归一之后撞在同一串字上。
+        for n in 0..挤 {
+            叫法们.push(叫法(&挤的名字(n), "同一串字", "No-Intro"));
+        }
+    }
+    catalog.put_titles(&叫法们).expect("写得进标题集合");
 
     现场 {
         catalog,
@@ -285,6 +311,24 @@ fn 说过不是同一个只管这一份主库() {
         这一对(&扫一趟(&现场), 甲, 乙).is_some(),
         "作品名只在一份主库的中立库里成立，别人库里的决定管不到这儿",
     );
+}
+
+#[test]
+fn 同一串字底下挤着太多作品时整堆不提() {
+    // 防炸的那道闸：一堆里两两成对是 k(k-1)/2。真到那个数也不是「两个数据库对同一部
+    // 作品的命名差异」，是某个名字太泛——不该由这一处来问人。
+    let 现场 = 建现场_(true);
+    let 建议 = 扫一趟(&现场);
+    let 挤的那些: Vec<String> = (0..挤).map(挤的名字).collect();
+    assert!(
+        建议
+            .iter()
+            .all(|one| !one.works.iter().any(|名字| 挤的那些.contains(名字))),
+        "挤在一堆的那些不该被两两配对：{建议:?}",
+    );
+    // 原先那两对照旧提得出来——这道闸只挡那一堆。
+    assert!(这一对(&建议, 甲, 乙).is_some(), "别的对不该被连累");
+    assert!(这一对(&建议, 丙, 丁).is_some(), "别的对不该被连累");
 }
 
 #[test]
