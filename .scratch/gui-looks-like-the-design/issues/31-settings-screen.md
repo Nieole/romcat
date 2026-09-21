@@ -76,7 +76,26 @@
       与数据源名册；⚠️ 许可没有结构化字段，只说得出「以各家自己的说明为准」（挂单 `Q1067`）。
 - [x] 这一屏的基线图入库 —— **八节各一对，共十六张**：
       `settings/{general,workspace,sources,scrape,export,tools,keys,about}-{light,dark}`。
-      跟着机器变的三样都钉死了：工作目录那一段短写、数据源那张表的时刻、探 ffmpeg 那个程序名
-      与 ScreenScraper 账号给没给（`probe_with` / `pin_account` / `pin_clock`）。
+      跟着机器变的四样都钉死了：工作目录那一段短写、数据源那张表的时刻、探 ffmpeg 那个程序名
+      与 ScreenScraper 账号给没给（`probe_with` / `pin_account` / `pin_clock`）——后两样是出完图
+      逐张比时才发现的，不钉死的话同一张基线在两台机器上是两个样子。
+
+**门禁**（2026-09-21，`cargo xtask gate -j 3 --test-threads 3 --keep-going`，**六步全绿**）：
+
+| 步 | 秒 | 跑的是什么 |
+|---|---|---|
+| fmt | 1 | `cargo fmt --all --check` |
+| glossary | 0 | `cargo xtask glossary` |
+| check | 8 | `cargo check --workspace`（**不开 `--all-features`**：交付那份还编得过） |
+| clippy | 15 | `cargo clippy --workspace --all-targets --all-features` |
+| test | 700 | `cargo test --workspace --all-features -- --test-threads=3`，**2451 条** |
+| doc | 6 | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --lib --bins` |
+
+`doc` 那一步只剩两条既有的 cargo 警告（bin 与 lib 同名的 `output filename collision`，note 里
+自己写着是已知 bug），**没有断链**。设计稿核对脚本 `check_tokens.py` 一致，276 项。
+
+**重出的那 74 张只差左栏那一行，量过**：逐张与 `HEAD` 比，差异像素最靠右只到 **x = 46**
+（左栏展开 196 点宽、收起 68 点），一张都没跑出左栏；尺寸 74 张一张没变，新出的 16 张
+全是 1280×800。另外把左栏那一项摘掉重跑过一趟——81 张旧基线一张不红。
       ⚠️ **左栏多了「设置」这一项，另外 74 张带左栏的旧基线也全部重出**（差的只有那一行：
       摘掉那一项重跑，81 张一张不红，验过）。不带更新连跑两遍：89 过、89 过。
