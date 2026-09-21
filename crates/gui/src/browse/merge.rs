@@ -47,6 +47,12 @@ pub const SPLIT: &str = "移出此作品…";
 /// 勾得不够时说的那一句（设计稿 `#merge-btn` 那条 toast）。
 pub const NEED_TWO: &str = "请勾选两个或更多作品，或在作品详情中点「合并…」";
 
+/// 取消勾选的那几行上，「首选」那颗单选钮为什么按不动。
+///
+/// 与 [`merge::ALREADY_HELD`] 同一条规矩（ADR-0005 再修订那一节）：**屏上常驻着这条理由**
+/// ——那一行整行调淡、勾选框空着（照稿 `.vrow.off{opacity:.5}`），停到那颗上说的也是这一句。
+const NO_PREFER: &str = "取消勾选的变体不归入，也就没有首选可挑";
+
 /// 三步的名字，照稿（`steps`）。
 const STEPS: [&str; 3] = ["选择作品", "核对变体", "确认合并"];
 
@@ -720,6 +726,12 @@ impl Wizard {
                     let 自带 = at == self.keep;
                     let mut 勾着 = 自带 || !self.excluded.contains(&variant.key);
                     ui.horizontal_top(|ui| {
+                        // **取消勾选的那一行整行调淡**（照稿 `.vrow.off{opacity:.5}`）：
+                        // 「首选」那颗在这一行上按不动，而按不动的理由得在屏上常驻、
+                        // 不能只挂在悬停里（ADR-0005 再修订那一节的第 2 条）。
+                        if !勾着 {
+                            ui.set_opacity(0.5);
+                        }
                         列(ui, 变体宽, &mut |ui| {
                             // **勾选框把变体简称当标签**（稿上那是分开的两栏）：egui 里一个
                             // 光秃秃的小方块是个很小的靶子，而这一步正是要人逐个点过去。
@@ -729,7 +741,7 @@ impl Wizard {
                                     !自带,
                                     egui::Checkbox::new(&mut 勾着, font::strong(&variant.short)),
                                 )
-                                .on_disabled_hover_text("保留作品自己的变体")
+                                .on_disabled_hover_text(merge::ALREADY_HELD)
                                 .changed()
                             {
                                 翻 = Some(variant.key.clone());
@@ -757,6 +769,7 @@ impl Wizard {
                             let 是首选 = 首选.as_deref() == Some(variant.key.as_str());
                             if ui
                                 .add_enabled(勾着, egui::RadioButton::new(是首选, "首选"))
+                                .on_disabled_hover_text(NO_PREFER)
                                 .clicked()
                             {
                                 挑.push((platform.clone(), variant.key.clone()));

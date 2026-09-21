@@ -198,6 +198,13 @@ pub struct DesiredFile {
 pub struct Rejected {
     /// 本来要落在目标上的哪条路径。
     pub path: String,
+    /// **主库侧的键**：这一份是从哪儿来的。
+    ///
+    /// [`Self::path`] 剥掉了根名（子库里的落点一律不带根名，ADR-0013），于是**落点撞车**
+    /// 那一栏里撞在一起的几行 `path` 一模一样——不带这一格的话，屏上几行长得没有分别，
+    /// 人看不出撞的是哪两块盘（挂单 `Q57`）。[`Self::detail`] 那句话里也印着它，
+    /// 可那是一句给人读的话，取不出来当一颗按钮的参数。
+    pub source: String,
     /// 这是个什么文件。
     pub kind: FileKind,
     /// 多大。
@@ -206,6 +213,14 @@ pub struct Rejected {
     pub variant: String,
     /// 哪一条约束拦下的。
     pub reason: RejectReason,
+    /// [撞车](RejectReason::Collision)的那几条**只差大小写**（或只差 NFC/NFD）吗；别的原因一律 `false`。
+    ///
+    /// **在判出来的那一刻记下**（[`Desired::screen`]），不事后从几条落点的文本反推：
+    /// [`align`] 在排计划之前会把落点的**目录段**折到卡上真实的写法上，只差目录段大小写撞上的
+    /// 那一处，折完几条落点就逐字相同了——那时再反推，答出来的是 `false`，而同一行的
+    /// [`Self::detail`] 还写着「目标大小写不敏感时它们是同一个文件」。同一个判断两处各算一遍，
+    /// 还会对不上（ADR-0024）。
+    pub only_folded: bool,
     /// 说清楚是怎么回事。
     pub detail: String,
     /// 上面那个 [`Self::bytes`] 是**估**出来的吗。
@@ -452,6 +467,49 @@ impl SurpriseKind {
         }
     }
 
+    /// **界面上那一栏的名字**（照设计稿 `ANOM`）。
+    ///
+    /// 与 [`Self::label`] 分开，走的是[例外](crate::sublibrary::Exception::shown)那一条同样的路：
+    /// 报告与命令行印的是那个短词（一栏排版，宽度有限），屏上一栏的标题要自己把话说完整
+    /// ——「没了」单独摆在一颗分段按钮上读不出是谁没了。
+    #[must_use]
+    pub fn shown(self) -> &'static str {
+        match self {
+            Self::Gone => "设备上缺失",
+            Self::Changed => "被修改过",
+            Self::Occupied => "目标位置被占用",
+            Self::Unreadable => "元数据读不到",
+        }
+    }
+
+    /// 这一类**工具不会做什么**，以及为什么。
+    ///
+    /// 每一类的处置各不相同（[`plan`] 的模块文档那四条），而「不覆盖、不删除」这件事
+    /// 正是维护者要从这一屏上看走的东西：不说清楚，他会以为工具已经替他处理妥当。
+    /// 放在这儿而不是各印各的，是因为命令行那一份与界面那一份**说的必须是同一件事**
+    /// ——两处各写一遍，改了一处就会有一处在骗人（ADR-0024 的那条纪律）。
+    #[must_use]
+    pub fn refusal(self) -> &'static str {
+        match self {
+            Self::Gone => {
+                "清单里有、设备上找不到的文件。那可能是你在掌机上有意删的，\
+                 所以**不会静默补回**（ADR-0015）：默认不补，要补得你明说。"
+            }
+            Self::Changed => {
+                "设备上那一份和清单记的对不上（大小或修改时间变了），它已经不是工具放的那一份。\
+                 **不覆盖，也不删除。**"
+            }
+            Self::Occupied => {
+                "落点上挡着一个**清单之外**的文件，多半是你自己拷进去的。\
+                 **不覆盖，也不删除**——清单之外的文件工具一律不碰（ADR-0015）。"
+            }
+            Self::Unreadable => {
+                "设备上这个文件的元数据读不到（ADR-0021 的第三态）：既不算在、也不算不在。\
+                 说不清是什么的**一律不动**。"
+            }
+        }
+    }
+
     /// 报告里固定的排列顺序。
     #[must_use]
     pub fn all() -> [Self; 4] {
@@ -516,7 +574,11 @@ pub struct Plan {
     pub updates_before: u64,
     /// 删除的账；`bytes` 是腾出来的容量。
     pub deletes: Tally,
-    /// 原样留着、这次一个字节都不用动的账。
+    /// **不动**那一档的账：两边一样，这一趟一个字节都不用动。
+    ///
+    /// 屏上与命令行都写「不动」（词表**不动**，2026-09-21 拿主意的人定）。
+    /// **它不是「合并作品」里那个「选一个保留」**，也不是平台纠正里的「保持目录的说法」
+    /// ——三处各是一件事，词表**不动**那一条点名说着。
     pub keeps: Tally,
     /// 净变化：`新增 + 更新后 - 更新前 - 删除`。
     pub net_bytes: i64,
@@ -546,6 +608,16 @@ pub struct Plan {
     /// 它们不是[意外](Surprise)——上一趟已经报过一次了，这一趟只是**继续不补**。
     /// 想让它们回来，这次加 `--restore`；想让它们从此不再被念叨，记一条**例外**。
     pub withheld: u64,
+    /// 开上[补回](Options::restore_missing)这一趟**会多传几个**。
+    ///
+    /// 它数的是两批：这一趟才发现没了的（[`SurpriseKind::Gone`]），与上一趟就记着不补的
+    /// （[`Self::withheld`]）。**落点上有东西挡着的那几个不算**——补回不是覆盖别人的许可，
+    /// 它们进的是[落点被占](SurpriseKind::Occupied)那一栏，一步都长不出来。
+    ///
+    /// **开关开没开，这个数都一样**：它答的是「补回会补几个」，不是「这一趟补了几个」。
+    /// 界面上那一格「同步时补回这 N 个文件」照它写——不在这儿数，界面就得自己把两批凑
+    /// 一遍，而第二批压根不在 [`Self::surprises`] 里，凑出来的数只会比真的少（ADR-0024）。
+    pub restorable: u64,
     /// 目标上列不开的目录数。
     pub unlistable_dirs: u64,
     /// 主库侧元数据读不到的成员数：这几个的容量没算进账里（ADR-0021）。
@@ -589,6 +661,106 @@ impl Plan {
     pub fn touched(&self) -> u64 {
         self.steps.len() as u64
     }
+
+    /// **目标上对不上的那几件**涉及几个不同的变体。人认得的是这个数，不是文件数。
+    ///
+    /// 与[几笔账](Tally)里那一列同一个数法。**不给容量**：这几条各占各的地方——没了的在卡上
+    /// 一个字节都不占，落点被占那几个占着地方的是别人的文件——凑一个总数出来，那个数不对应
+    /// 卡上任何一件事。
+    #[must_use]
+    pub fn surprise_variants(&self) -> u64 {
+        distinct(self.surprises.iter().map(|one| one.variant.as_str()))
+    }
+
+    /// **放不进目标的那几份**折成一笔账：几份、涉及几个变体、一共多大。
+    ///
+    /// 容量是**它们本来要占的**那么多：撞在一起的几份各算各的（最终一份都不落，所以这是
+    /// 「传不上去的一共多大」，不是「少占了多少」）。
+    #[must_use]
+    pub fn rejected_tally(&self) -> Tally {
+        Tally {
+            files: self.rejected.len() as u64,
+            variants: distinct(self.rejected.iter().map(|one| one.variant.as_str())),
+            bytes: self.rejected.iter().map(|one| one.bytes).sum(),
+        }
+    }
+
+    /// 把[放不进目标](Rejected)里**落点撞车**那几条，按撞在一起的那条落点归成一处一处。
+    ///
+    /// 差量预览要回答的是「撞的是**哪两份**」——一条一条平铺着报，读的人得自己拿路径去
+    /// 配对，而两条撞在一起的行 [`Rejected::path`] 一模一样（落点剥掉了根名，ADR-0013），
+    /// 光看屏上那一列分不出是两份还是画重了。归堆这件事因此是这一处的事，不是画它那一层
+    /// 的事（ADR-0024）：命令行与界面配出来的对子必须是同一批。
+    ///
+    /// 归堆的键是**折起来的路径**（[`path::fold`]，小写 + NFC），与 [`Desired::screen`]
+    /// 判撞车用的是同一个折法——只差大小写的那一种在目标上本来就是同一个文件。
+    #[must_use]
+    pub fn collisions(&self) -> Vec<Collision> {
+        let mut 成堆: BTreeMap<String, Vec<&Rejected>> = BTreeMap::new();
+        for row in &self.rejected {
+            if row.reason == RejectReason::Collision {
+                成堆.entry(path::fold(&row.path)).or_default().push(row);
+            }
+        }
+        成堆
+            .into_values()
+            .map(|mut files| {
+                // **一处里头按主库侧那条键排**：`rejected` 只按 `(原因, 落点)` 排，而撞在一起的
+                // 几条落点逐字相同，它们的相对次序于是没有任何规矩保证。屏上那几行、报告里那几行
+                // 与截图基线都吃着这个次序，得当场定死（与 `align` 那句「输入按路径排过，于是
+                // 这个选择是确定的」同一条纪律）。
+                files.sort_by(|a, b| a.source.cmp(&b.source));
+                Collision {
+                    // 只差大小写的那一种，几条的落点写法各不相同：取按路径排在头一个的那个写法。
+                    path: files
+                        .iter()
+                        .map(|row| row.path.as_str())
+                        .min()
+                        .unwrap_or_default()
+                        .to_string(),
+                    only_folded: files.iter().any(|row| row.only_folded),
+                    files: files.into_iter().cloned().collect(),
+                }
+            })
+            .collect()
+    }
+}
+
+/// 这个**变体的键**真指着一个变体吗——也就是说，它记得成一条**例外**吗。
+///
+/// **前端元数据挂在一个记号名下**（[`frontend::NOT_A_VARIANT`]）：它不是变体，而例外落在变体
+/// 这一层（ADR-0016），于是拿这个键去记例外只会在手动例外那张表上留一条看不懂的脏记录，
+/// 还排不掉那份文件。
+///
+/// 裁剪建议那一侧（[`prepare_selected`] 折 [`Plan::trim_suggestions`] 时）与差量预览里撞车
+/// 那一段上的「排除这一份」问的是同一句话。**两处各判一遍的话，一处忘了挡，那颗按钮就会往
+/// 库里写一条排不掉的例外**——票 20 已经在裁剪那条路上挡过一次（ADR-0024）。
+#[must_use]
+pub fn is_variant(key: &str) -> bool {
+    key != frontend::NOT_A_VARIANT
+}
+
+/// 一处**落点撞车**：不止一份内容要落到目标设备上同一条路径。
+///
+/// **撞上的一个都不放行**（`CONTEXT.md` 的**落点撞车**）：留一个放行等于由排序决定谁留下，
+/// 下一趟排序变了赢家就换人，卡上那份会莫名其妙地改内容。排除其中一份——记成这个子库的
+/// 一条**例外**（ADR-0016），不是第二套机制——剩下那一份下一趟就正常复制。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Collision {
+    /// 撞在一起的那条落点，相对子库根。
+    ///
+    /// 只差大小写的那一种几条各有各的写法，这里取按路径排在头一个的那个。
+    pub path: String,
+    /// 撞上的那几份，[`Plan::rejected`] 里的原样，**按主库侧那条键排**。**至少两条。**
+    ///
+    /// 次序在这儿定死：`rejected` 只按 `(原因, 落点)` 排，而撞在一起的几条落点逐字相同，
+    /// 不定的话屏上那几行与报告里那几行会各是一个次序。
+    pub files: Vec<Rejected>,
+    /// 撞上的几条**只差大小写**（或只差 NFC/NFD）吗。
+    ///
+    /// 是的话，它们在**不分大小写**的目标（exFAT / FAT32 / Windows / 默认 APFS）上才是
+    /// 同一个文件；分大小写的目标上这是一次保守误报，取舍见 [`plan`] 的函数文档。
+    pub only_folded: bool,
 }
 
 /// [`align`] 挪动了哪几条落点：原来的键 → 折齐之后的键。
@@ -800,7 +972,7 @@ pub fn strangers(manifest: &Manifest, actual: &TargetState) -> Strangers {
 /// |---|---|---|---|
 /// | 有 | 无 | 无 | **新增** |
 /// | 有 | 无 | 有（逐字或折起来一样） | **落点被占**——不覆盖，报告 |
-/// | 有 | 有 | 对得上 | 一样就**保持**，主库那份变了就**更新** |
+/// | 有 | 有 | 对得上 | 一样就**不动**，主库那份变了就**更新** |
 /// | 有 | 有 | 没了 | **报告**；默认不补回（ADR-0015） |
 /// | 有 | 有 | 对不上 | **报告**，本次不动 |
 /// | 无 | 有 | 对得上 | **删除** |
@@ -872,7 +1044,7 @@ pub fn plan(
     let mut steps: Vec<Step> = Vec::new();
     let mut keeps: Vec<&DesiredFile> = Vec::new();
 
-    // ── 期望这一侧：新增、更新、保持，以及落点被占。
+    // ── 期望这一侧：新增、更新、不动，以及落点被占。
     for (path, file) in &wanted {
         // 落点上有个**清单之外**的东西挡着吗。逐字先问一次（那是常态），
         // 折起来再问一次（目标多半大小写不敏感，见函数文档）。清单里记着的那些
@@ -896,8 +1068,12 @@ pub fn plan(
         // 目标上眼下还是没有它，就只数一数——不当意外报第二遍，也不重新变成一条新增。
         if previous.absent && !on_target.contains_key(path) {
             out.withheld += 1;
+            // **补回也要看落点**：明知故犯不是静默，但它也不是覆盖别人的许可。挡着的那几个
+            // 补回不了，所以也不算进「补回会补几个」（[`Plan::restorable`]）。
+            if blocking.is_none() {
+                out.restorable += 1;
+            }
             if options.restore_missing {
-                // **补回也要看落点**：明知故犯不是静默，但它也不是覆盖别人的许可。
                 match blocking {
                     Some(target) => out.surprises.push(occupied(path, target, &file.variant)),
                     None => steps.push(step(Act::Add, file, 0, true)),
@@ -925,9 +1101,12 @@ pub fn plan(
                     variant: file.variant.clone(),
                     still_wanted: true,
                 });
+                // 我们放的那份没了，可落点上换了个清单之外的东西站着
+                // （只差大小写就看不见它）——补回去等于顶掉它，所以挡着的不算能补。
+                if blocking.is_none() {
+                    out.restorable += 1;
+                }
                 if options.restore_missing {
-                    // 我们放的那份没了，可落点上换了个清单之外的东西站着
-                    // （只差大小写就看不见它）——补回去等于顶掉它。
                     match blocking {
                         Some(target) => out.surprises.push(occupied(path, target, &file.variant)),
                         None => steps.push(step(Act::Add, file, 0, true)),
@@ -1087,7 +1266,7 @@ pub fn plan(
         for file in desired
             .files
             .iter()
-            .filter(|file| file.variant != frontend::NOT_A_VARIANT)
+            .filter(|file| is_variant(&file.variant))
         {
             *by_variant.entry(file.variant.as_str()).or_default() += file.bytes;
         }
@@ -1525,10 +1704,11 @@ impl Desired {
         let mut keep = Vec::with_capacity(self.files.len());
         for file in std::mem::take(&mut self.files) {
             let folded = path::fold(&file.path);
+            let 只差大小写 = only_folded.contains(&folded);
             let verdict = if collided.contains(&folded) {
                 Some((
                     RejectReason::Collision,
-                    if only_folded.contains(&folded) {
+                    if 只差大小写 {
                         format!(
                             "不止一份内容要落到这条路径上——目标大小写不敏感时它们是同一个文件；\
                              这一份来自 {}",
@@ -1550,10 +1730,12 @@ impl Desired {
             match verdict {
                 Some((reason, detail)) => self.rejected.push(Rejected {
                     path: file.path,
+                    source: file.source,
                     kind: file.kind,
                     bytes: file.bytes,
                     variant: file.variant,
                     reason,
+                    only_folded: reason == RejectReason::Collision && 只差大小写,
                     detail,
                     estimated: file.convert.is_some_and(|conversion| conversion.estimated),
                 }),
@@ -2352,6 +2534,119 @@ mod tests {
             desired.rejected[0].detail.contains("大小写不敏感"),
             "得说清是折起来撞上的：{}",
             desired.rejected[0].detail
+        );
+    }
+
+    #[test]
+    fn 撞在一起的归成一处_每一份带着主库侧那条完整的键() {
+        // 票 `gui-looks-like-the-design/24`：差量预览要答的是「撞的是**哪两份**」。
+        // 撞在一起的几行落点一模一样（子库里的落点剥掉了根名，ADR-0013），只有主库侧
+        // 那条完整的键分得出是哪两块盘（挂单 `Q57`）——归堆与那条键都在这一处。
+        let mut 甲 = 期望("FC/魂斗罗.zip", 1024);
+        甲.source = "甲/FC/魂斗罗.zip".to_string();
+        甲.variant = "甲/FC/魂斗罗.zip".to_string();
+        let mut 乙 = 期望("FC/魂斗罗.zip", 2048);
+        乙.source = "乙/FC/魂斗罗.zip".to_string();
+        乙.variant = "乙/FC/魂斗罗.zip".to_string();
+        let 另一条 = 期望("FC/沙罗曼蛇.zip", 512);
+        let mut desired = 期望状态(vec![甲, 乙, 另一条]);
+        desired.screen(&Filesystem::unlimited(), 0);
+
+        let plan = Plan {
+            rejected: desired.rejected.clone(),
+            ..Plan::default()
+        };
+        let 撞车 = plan.collisions();
+        assert_eq!(撞车.len(), 1, "撞的是一处：{撞车:?}");
+        assert_eq!(撞车[0].path, "FC/魂斗罗.zip");
+        assert!(!撞车[0].only_folded, "这两条逐字一样，不是只差大小写");
+        let 来自: Vec<&str> = 撞车[0]
+            .files
+            .iter()
+            .map(|one| one.source.as_str())
+            .collect();
+        // **按主库侧那条键排**（`Collision::files` 的文档）：次序在核心定死，屏上那几行、
+        // 报告里那几行与截图基线才有一个说得出来的依据。
+        assert_eq!(来自, ["乙/FC/魂斗罗.zip", "甲/FC/魂斗罗.zip"]);
+        // **没撞的那一条不进来**：它照旧要传。
+        assert!(
+            desired
+                .files
+                .iter()
+                .any(|one| one.path == "FC/沙罗曼蛇.zip")
+        );
+    }
+
+    #[test]
+    fn 只差大小写撞上的那一处_说得出是只差大小写() {
+        let mut 甲 = 期望("FC/Contra.zip", 1024);
+        甲.source = "甲/FC/Contra.zip".to_string();
+        let mut 乙 = 期望("FC/contra.zip", 1024);
+        乙.source = "乙/FC/contra.zip".to_string();
+        let mut desired = 期望状态(vec![甲, 乙]);
+        desired.screen(&Filesystem::unlimited(), 0);
+        let plan = Plan {
+            rejected: desired.rejected.clone(),
+            ..Plan::default()
+        };
+        let 撞车 = plan.collisions();
+        assert_eq!(撞车.len(), 1);
+        assert!(撞车[0].only_folded, "该说出这是只差大小写的那一种");
+        // 落点取按路径排在头一个的那个写法——几条各有各的写法，得定一个。
+        assert_eq!(撞车[0].path, "FC/Contra.zip");
+    }
+
+    #[test]
+    fn 每一类对不上的事都说得出屏上叫什么_以及工具不会做什么() {
+        // 票 `gui-looks-like-the-design/24`：四类异常一类一栏，**每一类写明工具不会做什么**。
+        // 两样都在这一处答（ADR-0024）：命令行与界面说的必须是同一件事。
+        for kind in SurpriseKind::all() {
+            assert!(!kind.shown().is_empty());
+            assert_ne!(
+                kind.shown(),
+                kind.label(),
+                "屏上那个名字与报告里那个短词该分开：{}",
+                kind.label(),
+            );
+        }
+        // **逐类断各自该说的那件事**，不拿一句「含『不』」当橡皮图章——
+        // 「读不到」里就有个「不」，那条断言拦不住任何回归。
+        assert_eq!(SurpriseKind::Gone.shown(), "设备上缺失");
+        assert!(SurpriseKind::Gone.refusal().contains("默认不补"));
+        assert!(SurpriseKind::Changed.refusal().contains("不覆盖"));
+        assert!(SurpriseKind::Changed.refusal().contains("不删除"));
+        assert!(SurpriseKind::Occupied.refusal().contains("不覆盖"));
+        assert!(SurpriseKind::Occupied.refusal().contains("一律不碰"));
+        assert!(SurpriseKind::Unreadable.refusal().contains("一律不动"));
+    }
+
+    #[test]
+    fn 前端元数据不是变体_记不成例外() {
+        // 例外落在**变体**这一层（ADR-0016）。前端元数据挂在一个记号名下，拿它去记例外
+        // 只会在手动例外那张表上留一条看不懂的脏记录，还排不掉那份文件。
+        // 裁剪建议那一侧与差量预览里撞车那一段上的「排除这一份」问的是**同一句话**。
+        assert!(!is_variant(frontend::NOT_A_VARIANT));
+        assert!(is_variant("库/SFC/幻想传说 汉化版.zip"));
+    }
+
+    #[test]
+    fn 放不进目标那几类都说得出该去哪儿办_撞车那一类不在这儿说() {
+        // 撞车有得办（排除其中一份），那句话跟着那一段自己走；别的几类只能去主库里改名
+        // 或者换一张卡——不说去哪儿办的话，人只会对着一行字发呆。
+        for reason in RejectReason::all() {
+            match reason {
+                RejectReason::Collision => assert!(reason.advice().is_none()),
+                _ => {
+                    let 怎么办 = reason.advice().expect("说得出该去哪儿办");
+                    assert!(!怎么办.is_empty(), "{}", reason.label());
+                }
+            }
+        }
+        assert!(
+            RejectReason::BadName
+                .advice()
+                .is_some_and(|一句| 一句.contains("主库只读")),
+            "得说清工具不会替人改名：主库只读（ADR-0004）",
         );
     }
 

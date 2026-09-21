@@ -326,6 +326,28 @@ impl 现场 {
         self.等任务跑完();
     }
 
+    /// 改过主库里那份文件之后**重扫一遍**：中立库里那个戳跟着变，差量才说得出「更新」。
+    ///
+    /// **这是夹具在动自己那块临时盘**，不是工具在写主库（ADR-0004）——工具那一侧照旧一个
+    /// 字节都不写，这几行只是把「主库那份被别处改过了」这件事摆出来。
+    fn 重扫(&mut self) {
+        let 根 = self.库.path().to_path_buf();
+        let (screen, site) = self.app.sublibrary_and_site();
+        let mut options = ScanOptions::named(&根, "库");
+        options.jobs = Jobs::Fixed(2);
+        scan::scan(&RealFs::new(), &mut site.catalog, &options, &Handle::new()).expect("扫得动");
+        screen.reload(site);
+    }
+
+    /// 勾上或取消「同步时补回」那一格，跟着等重排那一趟差量跑完。
+    fn 勾上补回(&mut self, on: bool) {
+        {
+            let (screen, site, tasks) = self.app.sublibrary_site_and_tasks();
+            screen.set_restore_missing(site, tasks, on);
+        }
+        self.等任务跑完();
+    }
+
     /// 撤掉一条例外，跟着等重算那一趟跑完。
     fn 撤例外(&mut self, key: &str) {
         {
@@ -4330,4 +4352,730 @@ fn 优先级表读不动时手动例外那一层不开_屏上说清为什么() {
         "换成读得懂的那一份之后还是开不出来：{:?}",
         场.app.sublibrary().error(),
     );
+}
+
+// ───────────────────────── 差量预览里的异常（票 `gui-looks-like-the-design/24`）
+//
+// 这一段钉的是票面那七条。它们都是「不这么做会出事」而不是「这样比较好看」：
+//
+// - **三方对比的数字要齐**：少一个数，人就得自己拿别处的数去凑，而凑出来的那个数没人核得了。
+// - **一类一栏，每一栏写明工具不会做什么**：ADR-0015 那条硬约束（不静默补回、清单之外一律
+//   不碰）与 ADR-0021 的第三态，人只有在这儿才读得到。
+// - **设备上缺失默认不补**（ADR-0015）：那可能是他在掌机上有意删的。
+// - **撞上的一个都不放行**（词表**落点撞车**）：排除其中一份，剩下那一份才正常复制，
+//   而那条排除落的是**手动例外**，不是第二套机制。
+// - **没有有效预览就按不动同步**（ADR-0016）。
+
+/// 连画两帧，**画面放高**，交出后一帧画在屏上的字。
+///
+/// 差量预览那一块摆在卡片下半截，1280×800 的视口里整块落在视口外——**egui 不画整个落在
+/// 裁剪区外的东西**，于是断言会以「屏上没有这一段」的样子红，而界面一点毛病都没有。
+/// `shared::滚到底` 验的是「滚下去看得见」，这几条验的是「写着什么」：滚到哪儿不该
+/// 成为断言的一部分，所以这里一帧把整张卡画出来。超限那一对截图为同一个理由用
+/// 1280×960（挂单 `Q895`）。
+fn 画两帧整张卡(ctx: &egui::Context, 场: &mut 现场) -> String {
+    let mut out = String::new();
+    for _ in 0..2 {
+        let mut input = headless::input();
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(headless::VIEWPORT[0], 2400.0),
+        ));
+        out = 画出来的字(&headless::frame(ctx, input, |ui| 场.app.ui(ui)));
+    }
+    out
+}
+
+/// 按一下屏上**正好**写着那一段字的地方，交出松开之后再画一帧画出来的字。
+///
+/// 与 `shared::点一下` 只差找法：那一个按「含有」找，而「同步」这两个字也在屏头那句
+/// 「……这里负责同步到各台设备」里。
+///
+/// # Panics
+/// 屏上没有正好写着那一段的地方时当场炸——没处点的话，底下那条断言测的是「什么都没按」。
+fn 按正好(ctx: &egui::Context, 那一段: &str, 场: &mut 现场) -> String {
+    let 头一帧 = headless::frame(ctx, headless::input(), |ui| 场.app.ui(ui));
+    let Some(位置) = 正好那一段画在哪儿(&头一帧, 那一段) else {
+        panic!(
+            "屏上没有正好写着「{那一段}」的地方，没处点：\n{}",
+            画出来的字(&头一帧)
+        );
+    };
+    let 按 = |pressed: bool| egui::Event::PointerButton {
+        pos: 位置,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let mut input = headless::input();
+    input.events.push(egui::Event::PointerMoved(位置));
+    input.events.push(按(true));
+    headless::frame(ctx, input, |ui| 场.app.ui(ui));
+    let mut input = headless::input();
+    input.events.push(按(false));
+    headless::frame(ctx, input, |ui| 场.app.ui(ui));
+    画出来的字(&headless::frame(ctx, headless::input(), |ui| 场.app.ui(ui)))
+}
+
+/// 卡上那份**清单之外**的落点：选择集迟早要它，而它先被一个不是工具放的文件占着。
+const 被占的落点: &str = "GBA/口袋妖怪 绿宝石.zip";
+
+/// 同步之后在卡上动手脚，凑出**设备上缺失 / 被修改过 / 目标位置被占用**三类异常，再排一趟差量。
+///
+/// 四类里的**元数据读不到**造不出来（要一个 `stat` 不动的文件，各平台做法不一样，
+/// 而造得出来也只是在验平台而不是验这一屏）——那一栏由「空着时写什么」那条断言钉住。
+fn 摆出异常(场: &mut 现场) {
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+    场.同步到底();
+
+    // **设备上缺失**：工具放上去的一份，被人在掌机上删掉了。
+    let 删掉的 = 场.卡.path().join("SFC/幻想传说 汉化版.zip");
+    assert!(删掉的.exists(), "上一趟同步没把它放上去，这条前提不成立");
+    fs::remove_file(&删掉的).expect("删得掉");
+    // **被修改过**：卡上那一份已经不是工具放的那一份了。
+    写(
+        &场.卡.path().join("SFC/圣剑传说 3 汉化版.zip"),
+        "别的工具改过它".as_bytes(),
+    );
+    // **目标位置被占用**：落点上先摆一个清单之外的文件，再把那个平台加进选择集。
+    写(&场.卡.path().join(被占的落点), "我自己拷进来的".as_bytes());
+    场.加规则("掌机", "平台=GBA");
+    场.排预览();
+}
+
+/// 这一趟计划里，某一类异常有几条。
+fn 这一类几条(场: &现场, kind: romcat_core::sync::SurpriseKind) -> usize {
+    场.app
+        .sublibrary()
+        .prepared()
+        .expect("排得出来")
+        .plan
+        .surprises
+        .iter()
+        .filter(|one| one.kind == kind)
+        .count()
+}
+
+#[test]
+fn 三方对比照稿一排五个大数字_新增删除不动异常与放不进目标() {
+    // 票面头一条：**数字要齐**。少一个数，人就得自己拿别处的数去凑——而「异常」与
+    // 「放不进目标」这两个数别处没有，凑不出来。
+    // 拿主意的人 2026-09-21 裁（挂单 `Q1020`）：**照稿一排五个大数字方块**，
+    // 底下一行小字把表上才有的那两样补齐。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    摆出异常(&mut 场);
+
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    let plan = &场.app.sublibrary().prepared().expect("排得出来").plan;
+    let 放不进 = plan.rejected_tally();
+    // **五格照稿**：每一格一个大数字，底下小字里那几个**字段**（标签、释放、多大）。
+    //
+    // 小字断句由格子多宽决定（摆得下写成一行「新增 · 141 B」，摆不下就折），所以**不断整串**
+    // ——断的是「每个字段都整个画在屏上、一个都没被折断」。上一版正是折出了「新增 · 690」＋「B」
+    // 与「异常 · 不处」＋「理」（拿主意的人 2026-09-21 打回）。
+    // 一个字段「整个画着」= 某一行里它**连在一起**出现，左右要么是行头行尾、要么是分隔符。
+    // 断的正是「没被折到两行上」：折断了的话，没有哪一行还连着写得出它。
+    let 整个画着 = |字段: &str| {
+        let 是分隔 = |c: char| c == ' ' || c == '·';
+        屏上.lines().any(|line| {
+            line.match_indices(字段).any(|(at, _)| {
+                let 前 = line[..at].chars().next_back();
+                let 后 = line[at + 字段.len()..].chars().next();
+                前.is_none_or(是分隔) && 后.is_none_or(是分隔)
+            })
+        })
+    };
+    for (数, 字段) in [
+        (
+            format!("＋{}", plan.adds.files),
+            vec!["新增".to_string(), human_bytes(plan.adds.bytes)],
+        ),
+        (
+            format!("－{}", plan.deletes.files),
+            vec![
+                "删除".to_string(),
+                "释放".to_string(),
+                human_bytes(plan.deletes.bytes),
+            ],
+        ),
+        (
+            plan.keeps.files.to_string(),
+            vec!["不动".to_string(), human_bytes(plan.keeps.bytes)],
+        ),
+        (
+            plan.surprises.len().to_string(),
+            vec!["异常".to_string(), "不处理".to_string()],
+        ),
+        (
+            放不进.files.to_string(),
+            vec!["放不进目标".to_string(), human_bytes(放不进.bytes)],
+        ),
+    ] {
+        assert!(
+            屏上.lines().any(|line| line == 数),
+            "五格里少了「{数}」那个数：\n{屏上}",
+        );
+        for 一个 in &字段 {
+            assert!(
+                整个画着(一个),
+                "「{数}」那一格的小字里，「{一个}」没整个画出来（多半被折断了）：\n{屏上}",
+            );
+        }
+    }
+
+    // **屏上那几个数就是计划里那几个**：两处各数一遍的话，一处改了另一处会静静地说着旧数。
+    // 断的是**加得起来**这条规矩，不是某个字面量：五个栏名后面那几个数，头四个加起来是
+    // 「异常」那一格，末一个是「放不进目标」那一格。
+    assert!(
+        plan.surprises.len() >= 3,
+        "这份夹具该凑出至少三类异常：{:?}",
+        plan.surprises,
+    );
+    // 分段开关上那一颗整段写着「<栏名> <数>」。**认「后面就是一个数」那一条**：
+    // 同样以栏名打头的还有五格里的小字（「放不进目标 · 12.79 KiB」），它跟的不是光一个数。
+    let 栏上的数 = |栏: romcat_gui::sublibrary::Anomaly| -> u64 {
+        let 前缀 = format!("{} ", 栏.shown());
+        屏上
+            .lines()
+            .filter_map(|line| line.strip_prefix(&前缀))
+            .find_map(|尾巴| 尾巴.trim().parse::<u64>().ok())
+            .unwrap_or_else(|| panic!("屏上没有「{}」那一栏：\n{屏上}", 栏.shown()))
+    };
+    let 四类加起来: u64 = romcat_gui::sublibrary::Anomaly::all()
+        .into_iter()
+        .filter(|栏| !matches!(栏, romcat_gui::sublibrary::Anomaly::NoFit))
+        .map(栏上的数)
+        .sum();
+    assert_eq!(
+        四类加起来,
+        plan.surprises.len() as u64,
+        "四栏加起来与「异常」那一格对不上：\n{屏上}",
+    );
+    assert_eq!(
+        栏上的数(romcat_gui::sublibrary::Anomaly::NoFit),
+        放不进.files,
+        "「放不进目标」那一栏与那一格对不上：\n{屏上}",
+    );
+
+    // **五格等宽等高、上下缘齐**（拿主意的人 2026-09-21 看合并向导那几张图时立的新要求：
+    // 「排版也要调整一下，至少要对齐文字」）。拿的是这一帧真的摆出来的矩形（`Screen::diff_tiles`），
+    // 不比像素：稿上那一排是个**等分的 grid**，宽高都不该由内容说了算。
+    let 五格 = 场.app.sublibrary().diff_tiles().to_vec();
+    assert_eq!(五格.len(), 5, "差量账该是五格：{五格:?}");
+    let 头一格 = 五格[0];
+    for (第几格, 这一格) in 五格.iter().enumerate() {
+        assert!(
+            (这一格.top() - 头一格.top()).abs() < 0.5,
+            "第 {} 格的上缘与头一格对不齐：{五格:?}",
+            第几格 + 1,
+        );
+        assert!(
+            (这一格.bottom() - 头一格.bottom()).abs() < 0.5,
+            "第 {} 格的下缘与头一格对不齐（矮的那一格是小字少一行跟着缩了）：{五格:?}",
+            第几格 + 1,
+        );
+        assert!(
+            (这一格.width() - 头一格.width()).abs() < 0.5,
+            "第 {} 格的宽与头一格不一样（宽让内容决定了）：{五格:?}",
+            第几格 + 1,
+        );
+    }
+
+    // **变体数写在小字里，不塞进悬停**（截图门看不到悬停，等于没有）：人认得的单位是变体。
+    assert!(
+        屏上.lines().any(|line| line.starts_with("按变体数：")),
+        "小字里没有变体数那一句：\n{屏上}",
+    );
+    for (什么, 几个) in [
+        ("新增", plan.adds.variants),
+        ("异常", plan.surprise_variants()),
+        ("放不进目标", 放不进.variants),
+    ] {
+        if 几个 > 0 {
+            assert!(
+                屏上.contains(&format!("{什么} {几个} 个")),
+                "小字里少了「{什么}」的变体数：\n{屏上}",
+            );
+        }
+    }
+    // **零的那几档不写空话**（照票 26 的裁定）：这份夹具里删除是零，小字里就不该提删除的变体数。
+    assert_eq!(
+        plan.deletes.variants, 0,
+        "这份夹具本来就没有删除，这条断言才成立"
+    );
+    assert!(!屏上.contains("删除 0 个"), "零的那一档写了空话：\n{屏上}",);
+}
+
+#[test]
+fn 更新那一档不并进新增_小字里单说一句() {
+    // 拿主意的人 2026-09-21 裁下「照稿一排五个大数字」时点名保住的那一条：**更新不许悄悄
+    // 算进新增**。并了的话，屏上那个「新增」就含着一批其实是重传已有那一份的文件，
+    // 而人照它去估这一趟要往卡上写多少全新的东西——那正是我们当初不照稿的唯一实质理由。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+    场.同步到底();
+    assert!(
+        场.app.sublibrary().error().is_none(),
+        "{:?}",
+        场.app.sublibrary().error()
+    );
+
+    // 主库那一份被别处改过了（夹具动的是自己那块临时盘），重扫之后差量该说「更新」。
+    写(&场.库.path().join("SFC/幻想传说 汉化版.zip"), &zip(6000));
+    场.重扫();
+    场.摊开("掌机");
+    场.排预览();
+
+    // **先把要比的数抄出来**：底下要可变借一次窗口去画帧。
+    let (新增几个, 更新几个, 更新几个变体) = {
+        let plan = &场.app.sublibrary().prepared().expect("排得出来").plan;
+        assert!(
+            plan.updates.files > 0,
+            "这份夹具没造出更新来：{:?}",
+            plan.updates
+        );
+        (plan.adds.files, plan.updates.files, plan.updates.variants)
+    };
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+
+    // **反向断言**：新增那个大数字就是新增本身，不是新增加更新。
+    assert!(
+        屏上.lines().any(|line| line == format!("＋{新增几个}")),
+        "新增那个大数字不是 {新增几个}：\n{屏上}",
+    );
+    assert!(
+        !屏上
+            .lines()
+            .any(|line| line == format!("＋{}", 新增几个 + 更新几个)),
+        "更新被悄悄算进了新增那个大数字：\n{屏上}",
+    );
+    // **更新那一档在小字里单说一句**，摆在屏上而不是悬停里。
+    assert!(
+        屏上.contains(&format!("其中 {更新几个} 个是重传已有的那一份")),
+        "小字里没把更新那一档说出来：\n{屏上}",
+    );
+    assert!(
+        屏上.contains("没算进上面的新增"),
+        "没说清更新不在新增那个数里：\n{屏上}",
+    );
+    assert!(
+        屏上.contains(&format!("更新 {更新几个变体} 个")),
+        "小字里少了更新那一档的变体数：\n{屏上}",
+    );
+}
+
+#[test]
+fn 四类异常分栏列出_每一栏写明工具不会做什么() {
+    // 票面第二条。五栏（四类对不上的加上「放不进目标」）一栏一栏摆，**栏名后面跟着这一栏几条**；
+    // 栏里头一句是核心那句「工具不会做什么」——不写的话，人会以为工具已经替他处理妥当。
+    use romcat_core::sync::SurpriseKind;
+
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    摆出异常(&mut 场);
+
+    // 五个栏名一直摆着（哪一栏空着也摆）：零也要说出口，不然人分不出「查过、没有」与「压根没查」。
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    for 栏 in [
+        "设备上缺失",
+        "被修改过",
+        "目标位置被占用",
+        "元数据读不到",
+        "放不进目标",
+    ] {
+        assert!(屏上.contains(栏), "少了「{栏}」那一栏：\n{屏上}");
+    }
+
+    for kind in SurpriseKind::all() {
+        场.app
+            .sublibrary_and_site()
+            .0
+            .show_anomaly(romcat_gui::sublibrary::Anomaly::Surprise(kind));
+        let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+        // **那句话由核心答**（`SurpriseKind::refusal`）：命令行与这一屏说的是同一件事。
+        let 该说的 = kind.refusal().replace("**", "").replace('`', "");
+        assert!(
+            屏上.contains(&该说的),
+            "「{}」那一栏没写明工具不会做什么。该说：{该说的}\n屏上：\n{屏上}",
+            kind.shown(),
+        );
+        let 几条 = 这一类几条(&场, kind);
+        if 几条 == 0 {
+            assert!(
+                屏上.contains(&format!("没有{}的。", kind.shown())),
+                "「{}」那一栏空着，却没写清是空的：\n{屏上}",
+                kind.shown(),
+            );
+        }
+    }
+
+    // 三类真凑出来的各至少一条，这条测试才不是在验一屏空表。
+    assert_eq!(这一类几条(&场, SurpriseKind::Gone), 1);
+    assert_eq!(这一类几条(&场, SurpriseKind::Changed), 1);
+    assert!(这一类几条(&场, SurpriseKind::Occupied) >= 1);
+}
+
+#[test]
+fn 设备上缺失的可以选择补回_默认不补_勾上之后那几个才进计划() {
+    // 票面第三条，ADR-0015：清单说有、目标上没了的**不静默补回**——那可能是维护者在掌机上
+    // 有意删的。勾上它是「明知故犯」：那几条照旧列在「设备上缺失」那一栏里，只是同时也进计划。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    摆出异常(&mut 场);
+
+    assert!(
+        !场.app.sublibrary().restore_missing(),
+        "一进来就替人勾上了「补回」",
+    );
+    assert!(
+        场.app
+            .sublibrary()
+            .prepared()
+            .expect("排得出来")
+            .plan
+            .steps
+            .iter()
+            .all(|step| !step.restore),
+        "默认那一趟里混进了补回那几步",
+    );
+    // 那一格照稿写着还缺几个。
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    assert!(
+        屏上.contains("同步时补回这 1 个文件"),
+        "「设备上缺失」那一栏底下没有那一格：\n{屏上}",
+    );
+    assert!(
+        屏上.contains("只补清单里记录过的文件"),
+        "没说清补回只碰清单里记录过的文件：\n{屏上}",
+    );
+
+    场.勾上补回(true);
+    assert!(场.app.sublibrary().restore_missing());
+    let plan = &场.app.sublibrary().prepared().expect("重排得出来").plan;
+    let 补回的: Vec<_> = plan.steps.iter().filter(|step| step.restore).collect();
+    assert_eq!(
+        补回的.len(),
+        1,
+        "勾上之后那一个没进计划：{:?}",
+        plan.steps.iter().map(|step| &step.path).collect::<Vec<_>>(),
+    );
+    assert_eq!(补回的[0].path, "SFC/幻想传说 汉化版.zip");
+    // **照旧报出来**：补回不是把它从异常里抹掉，那是静默补回。
+    assert_eq!(这一类几条(&场, romcat_core::sync::SurpriseKind::Gone), 1);
+
+    // 取消勾选再重排一趟，那一步又没了。
+    场.勾上补回(false);
+    assert!(
+        场.app
+            .sublibrary()
+            .prepared()
+            .expect("重排得出来")
+            .plan
+            .steps
+            .iter()
+            .all(|step| !step.restore),
+        "取消之后还留着补回那几步",
+    );
+}
+
+#[test]
+fn 同步过一趟之后那几个还缺着_补回那一格照旧摆得出而且数得对() {
+    // 收尾审查（Standards 轴 H1）挑出的：`restore_missing` 补的是**两批**——这一趟才发现
+    // 没了的（`SurpriseKind::Gone`），与上一趟就记着不补的（`Plan::withheld`）。后一批
+    // **刻意不进**对不上的那一堆（上一趟已经报过一次了）。拿「设备上缺失」那一栏的条数当
+    // 「补回会补几个」的话：数说少了；而同步过一趟之后清单里那几条被标成「记着不补」，
+    // 那一栏空了，整格「同步时补回」就不画了——人在界面上再也补不回来，只能回终端。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    摆出异常(&mut 场);
+    assert_eq!(
+        场.app
+            .sublibrary()
+            .prepared()
+            .expect("排得出来")
+            .plan
+            .withheld,
+        0
+    );
+
+    // 同步一趟：那一条「没了」被记进清单的 `absent`，下一趟起它是「你删过、工具记着不补」。
+    场.同步到底();
+    assert!(
+        场.app.sublibrary().error().is_none(),
+        "{:?}",
+        场.app.sublibrary().error()
+    );
+    场.排预览();
+
+    let plan = &场.app.sublibrary().prepared().expect("排得出来").plan;
+    assert_eq!(plan.withheld, 1, "上一趟删掉的那条该记成「记着不补」");
+    assert_eq!(
+        这一类几条(&场, romcat_core::sync::SurpriseKind::Gone),
+        0,
+        "记着不补的那一批不该再报成意外——上一趟已经报过一次了",
+    );
+    assert_eq!(plan.restorable, 1, "补回会补几个，核心一处答");
+
+    // **那一栏空了，那一格照旧摆得出，数也对。**
+    场.app
+        .sublibrary_and_site()
+        .0
+        .show_anomaly(romcat_gui::sublibrary::Anomaly::Surprise(
+            romcat_core::sync::SurpriseKind::Gone,
+        ));
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    assert!(
+        屏上.contains("同步时补回这 1 个文件"),
+        "同步过一趟之后，界面上补不回来了：\n{屏上}",
+    );
+    assert!(
+        屏上.contains("你删过、工具记着不补"),
+        "没说清这一批是上一趟就记着不补的：\n{屏上}",
+    );
+
+    // 勾上之后它真的进计划。
+    场.勾上补回(true);
+    let plan = &场.app.sublibrary().prepared().expect("重排得出来").plan;
+    assert_eq!(
+        plan.steps.iter().filter(|step| step.restore).count(),
+        1,
+        "记着不补的那一条勾上之后也该补回：{:?}",
+        plan.steps.iter().map(|step| &step.path).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn 落点撞车列出撞的是哪两份_排除其中一份之后另一份正常复制() {
+    // 票面第四条，词表**落点撞车**：两个根里同一条相对路径落在卡上同一个文件上
+    // （子库里的落点剥掉了根名，ADR-0013）。**撞上的一个都不放行**——放行其中一个等于由排序
+    // 决定谁留下。屏上得说清撞的是**哪两份**：落点那一条两边一模一样，只有主库侧那条完整的键
+    // 分得出是哪两块盘（挂单 `Q57`）。
+    let ctx = headless::context();
+    let 另一块盘 = temp_dir("gui-sub-lib2-clash");
+    写(&另一块盘.path().join("SFC/幻想传说 汉化版.zip"), &zip(9999));
+    let mut 场 = 现场::摆好带(Some(&另一块盘));
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+
+    // 核心把撞在一起的归成一处（`Plan::collisions`）：一处两份。
+    let 撞车 = 场
+        .app
+        .sublibrary()
+        .prepared()
+        .expect("排得出来")
+        .plan
+        .collisions();
+    assert_eq!(撞车.len(), 1, "该只有一处撞车：{撞车:?}");
+    assert_eq!(撞车[0].path, "SFC/幻想传说 汉化版.zip");
+    assert_eq!(撞车[0].files.len(), 2, "撞的是两份");
+
+    场.app
+        .sublibrary_and_site()
+        .0
+        .show_anomaly(romcat_gui::sublibrary::Anomaly::NoFit);
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    assert!(屏上.contains("落点撞车"), "没说这是落点撞车：\n{屏上}");
+    assert!(
+        屏上.contains("撞上的一个都不放行"),
+        "没把「一个都不放行」写在屏上：\n{屏上}",
+    );
+    // **撞的是哪两份**：两条完整的键都画出来了，两颗「排除这一份」各摆一颗。
+    for 键 in [
+        "库/SFC/幻想传说 汉化版.zip",
+        "另一块盘/SFC/幻想传说 汉化版.zip",
+    ] {
+        assert!(
+            屏上.lines().any(|line| line == 键),
+            "屏上没有「{键}」：\n{屏上}"
+        );
+    }
+    assert_eq!(
+        屏上.lines().filter(|line| *line == "排除这一份").count(),
+        撞车[0].files.len(),
+        "撞上几份就该摆几颗「排除这一份」：\n{屏上}",
+    );
+
+    // 排除其中一份：**记成这个子库的一条排除例外**（ADR-0016，不是第二套机制），
+    // 备注写清为什么。盘上一个字节都不动。
+    let 排除掉 = 撞车[0].files[1].variant.clone();
+    let 卡上原样 = 卡上有什么(场.卡.path());
+    {
+        let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
+        screen.exclude_collided(site, tasks, "掌机", &排除掉);
+    }
+    场.等任务跑完();
+    let 例外 = 场.库里的例外("掌机");
+    assert_eq!(例外.len(), 1, "{例外:?}");
+    assert_eq!(例外[0].variant_key, 排除掉);
+    assert_eq!(例外[0].kind, Exception::Exclude);
+    assert_eq!(例外[0].note.as_deref(), Some("落点撞车，保留另一份"));
+    assert_eq!(卡上有什么(场.卡.path()), 卡上原样, "盘上的文件被动过了");
+
+    // **那份差量当场作废**（改过例外就得重排，票 22）：重排一趟之后不撞了，
+    // 剩下那一份正常复制。
+    assert!(
+        场.app.sublibrary().prepared().is_none(),
+        "记完例外那份旧差量还摆着",
+    );
+    场.排预览();
+    let plan = &场.app.sublibrary().prepared().expect("重排得出来").plan;
+    assert!(plan.collisions().is_empty(), "还撞着：{:?}", plan.rejected);
+    assert!(
+        plan.steps
+            .iter()
+            .any(|step| step.path == "SFC/幻想传说 汉化版.zip"),
+        "排除了一份，剩下那一份却还是没传：{:?}",
+        plan.steps.iter().map(|step| &step.path).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn 放不进目标一栏含撞车超单文件上限与文件名不收的字符三种() {
+    // 票面第五条。三种归在同一栏里（词表**落点撞车**末句），**三个小标题一直摆着**：
+    // 零也要说出口，不然人分不出「查过、没有」与「压根没查」。
+    let ctx = headless::context();
+    let 另一块盘 = temp_dir("gui-sub-lib2-nofit");
+    写(&另一块盘.path().join("SFC/幻想传说 汉化版.zip"), &zip(9999));
+    let mut 场 = 现场::摆好带(Some(&另一块盘));
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+    场.app
+        .sublibrary_and_site()
+        .0
+        .show_anomaly(romcat_gui::sublibrary::Anomaly::NoFit);
+
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    for 小标题 in [
+        RejectReason::Collision.label(),
+        RejectReason::TooBig.label(),
+        RejectReason::BadName.label(),
+    ] {
+        assert!(
+            屏上.contains(小标题),
+            "「放不进目标」那一栏少了「{小标题}」：\n{屏上}",
+        );
+    }
+    // 整栏那句话照稿写着这一栏收哪三种。
+    assert!(
+        屏上.contains("落点撞车、超过单文件上限、文件名里有目标不收的字符"),
+        "整栏那句说明没写清收哪三种：\n{屏上}",
+    );
+    // **几个小标题的数加得起来**：撞车那一段写的是「N 份，撞成 M 处」——只写「M 处」的话，
+    // 栏上那个数（按份）与栏里那几个数就加不起来，人只会以为哪儿漏了。
+    let plan = &场.app.sublibrary().prepared().expect("排得出来").plan;
+    let 撞上几份: usize = plan.collisions().iter().map(|一处| 一处.files.len()).sum();
+    assert!(
+        屏上.contains(&format!(
+            "{} · {撞上几份} 份，撞成 {} 处",
+            RejectReason::Collision.label(),
+            plan.collisions().len(),
+        )),
+        "撞车那一段没把「几份」与「几处」一起说清：\n{屏上}",
+    );
+    assert_eq!(
+        撞上几份 as u64,
+        plan.rejected_tally().files,
+        "这份夹具里放不进目标的该全是撞车的",
+    );
+}
+
+#[test]
+fn 没有有效预览时同步按不下去_屏上说清为什么() {
+    // 票面第六条，ADR-0016：**同步前必须预览差量，且这是硬要求不是优化项**——
+    // 「永远不能点了同步就开始传」。手上没有这一台的一份有效预览时那颗「同步」按不动，
+    // 而**按不动的理由写在屏上**（设计稿 `.note`，票 `gui-looks-like-the-design/07`：
+    // 拒绝要说清为什么、去哪儿办）。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.建子库("备份卡", "");
+    场.加规则("掌机", "平台=SFC");
+    场.加规则("备份卡", "平台=GBA");
+    场.摊开("掌机");
+    assert_eq!(场.app.sublibrary().picked(), Some("掌机"));
+    assert!(场.app.sublibrary().prepared().is_none());
+
+    // **摊开那一张的「同步」在差量底下**，没排过就压根不画；屏上那一颗是没摊开那一张的，
+    // 而它手上也没有预览，于是按不动。按得动的话，那一下会先把「备份卡」摊开再去同步
+    // （`actions_ui` 的 `Pressed::Sync`），于是「摊开的还是掌机」就是「那一下没按响」。
+    let 屏上 = 按正好(&ctx, "同步", &mut 场);
+    assert_eq!(
+        场.app.sublibrary().picked(),
+        Some("掌机"),
+        "没有预览，那颗「同步」却按响了：\n{屏上}",
+    );
+    assert!(
+        场.app.sublibrary().error().is_none(),
+        "按不动的按钮不该留下一句错：{:?}",
+        场.app.sublibrary().error(),
+    );
+    assert!(
+        场.app.sublibrary().syncing().is_none(),
+        "灰着的按钮排出了一趟同步",
+    );
+    // **为什么按不动，屏上常驻着**：照稿那条提示框。ADR-0005「『不禁按钮』那一条什么时候
+    // 允许同时画灰」那一节的第二条——不许只挂在按不动那颗的悬停上，那正好是人最不会去碰的地方。
+    assert!(
+        屏上.contains("同步前需要先生成差量预览"),
+        "没说清为什么还不能同步：\n{屏上}",
+    );
+
+    // 走 `Screen::sync`（与那颗按钮同一支）同样拦得住，一个文件都不动，屏上说一句。
+    // ADR-0005 那一节的第一条：**守卫拒得明明白白**，不许是光秃的 `return`——有人绕过界面
+    // 直接调它时也得听见原因；那句话与按不动那颗悬停里写的是**同一个常量**（`NO_PREVIEW`）。
+    {
+        let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
+        screen.sync(site, tasks);
+    }
+    let 拒下时说的 = 场
+        .app
+        .sublibrary()
+        .error()
+        .expect("拒下时得说一句")
+        .to_string();
+    assert!(
+        拒下时说的.contains("还没排过差量预览") && 拒下时说的.contains("生成差量预览"),
+        "拒得不明不白：既要说清为什么，也要说去哪儿办。眼下是：{拒下时说的}",
+    );
+
+    // 排一趟之后按得动了。
+    场.排预览();
+    assert!(场.app.sublibrary().prepared().is_some());
+    场.同步到底();
+    assert!(
+        场.app.sublibrary().outcome().is_some(),
+        "排过差量之后同步没跑起来：{:?}",
+        场.app.sublibrary().error(),
+    );
+}
+
+#[test]
+fn 装不装得下与容量条说的是同一个数_两处都照那份计划() {
+    // 票面末一条：「装得下吗」与子库屏说的是同一个数（`one-criterion-per-thing/01` 那个底），
+    // **两处不许各算一份**。排过差量之后那笔账照的是这份计划（目标现占 ＋ 净变化），
+    // 容量条上「选中」那一段与它同底——不然会出现「条子画到九成、旁边说超了 200 MiB」。
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "1GB");
+    场.加规则("掌机", "平台=SFC");
+    场.求值();
+    场.排预览();
+
+    let screen = 场.app.sublibrary();
+    let plan = &screen.prepared().expect("排得出来").plan;
+    let gauge = screen.gauge("掌机");
+    assert_eq!(
+        gauge.taken(),
+        plan.after_bytes,
+        "容量条画满那个数与计划里「同步完之后目标上占多少」对不上",
+    );
+    assert_eq!(gauge.strangers, Some(plan.stranger_bytes));
+    assert_eq!(gauge.capacity, plan.capacity, "两处的上限不是同一个");
 }
