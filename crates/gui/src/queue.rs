@@ -71,8 +71,8 @@ use romcat_core::scrape::zh::{Judged, MatchGroup, judge, matched_groups};
 use romcat_core::stage::Stage;
 use romcat_core::triage::batch::{Coverage, breakdown};
 use romcat_core::triage::{
-    Applied, Axis, Batch, Breakdown, Draft, Filter, ItemOrder, Overrides, PartKind, Parts,
-    Plan, Queue, Sample, Scope, Shape, Slice, TriageError, Undone,
+    Applied, Axis, Batch, Breakdown, Draft, Filter, ItemOrder, Overrides, PartKind, Parts, Plan,
+    Queue, Sample, Scope, Shape, Slice, TriageError, Undone,
 };
 use romcat_core::verdict;
 
@@ -558,13 +558,17 @@ impl Screen {
     /// 『不禁按钮』那一条什么时候允许同时画灰」，拿主意的人 2026-09-20 定）。
     /// 那句话与屏上那一排底下常驻的那一行**是同一句**（核心库的
     /// [`axis_refusal`](romcat_core::triage::axis_refusal)）。
-    pub fn set_axis(&mut self, axis: Axis) {
+    ///
+    /// 交回**换成了没有**。换轴的入口只许有这一个（ADR-0005 那一节要求「真正挡住的是那个
+    /// 唯一的入口」），别处要换轴一律走它、照它的回话决定后面那半步做不做
+    /// （[`Screen::pick`]）。
+    pub fn set_axis(&mut self, axis: Axis) -> bool {
         if let Some(shape) = &self.open
             && let Some(锁) = self.parts.locked_axis(shape)
             && 锁 != axis
         {
             self.error = Some(romcat_core::triage::axis_refusal(锁));
-            return;
+            return false;
         }
         // 换成了，上一次拒绝那句话跟着作废——留着的话屏上会一直挂着一条早就不成立的理由。
         self.error = None;
@@ -572,6 +576,7 @@ impl Screen {
         self.drill = None;
         self.seed = 0;
         self.refresh_opened();
+        true
     }
 
     /// **下钻**到二级的某一组；再点一次返回整批。
@@ -1048,9 +1053,14 @@ impl Screen {
     }
 
     /// 点中分组表的一行。**界面上点下去走的就是它**，实测与测试拿它当那一下。
+    ///
+    /// **换轴那一半走 [`Screen::set_axis`]**，不自己赋值：`self.axis` 与展开那一批的细分轴
+    /// 是同一格，而它可能锁着（已经就地裁过一部分）。两个入口各拼一道判断正是 ADR-0005
+    /// 那一节要防的事——挡住了就整个不做，免得选择器换了而轴没换，屏上两头对不上。
     pub fn pick(&mut self, axis: Axis, label: &str) {
-        self.axis = axis;
-        self.picks.pick(axis, label);
+        if self.set_axis(axis) {
+            self.picks.pick(axis, label);
+        }
     }
 
     /// 点一下表头：**换一列排**。界面上点那一下走的就是它，实测与测试拿它当那一下。
@@ -2519,12 +2529,11 @@ impl Screen {
         }) {
             Ok(plan) => {
                 self.error = None;
-                // 带下钻那一层的才记成**一部分**：整批那一层落下之后这一批整个从队列里消失，
-                // 屏上没有「剩下的部分」可说（核心库 [`Parts::record`] 也照这条拒下）。
-                // 条数趁现在数——落下之后这一组就空了，再数是零。
-                // 条数趁现在数——落下之后这一组就空了，再数是零。**记不记由核心库说**
-                // （[`Parts::record`] 对整批那一层一个字都不记），这里一律把范围交下去。
-                let drilled = Some((scope.clone(), self.queue.count(scope)));
+                // **记不记由核心库说**：整批那一层落下之后这一批整个从队列里消失，屏上没有
+                // 「剩下的部分」可说，[`Parts::record`] 对它一个字都不记——所以这里一律把
+                // 范围交下去，不在界面层再拼一道同样的判断。
+                // 条数趁现在数：落下之后这一组就空了，再数是零。
+                let drilled = Some(Drilled::new(scope.clone(), self.queue.count(scope)));
                 self.pending = Some(self.hold(plan, Verdicted::of(draft), drilled));
             }
             Err(message) => self.error = Some(message),
@@ -2549,7 +2558,7 @@ impl Screen {
 
     /// 把刚排出来的计划挂起来，**记下它是照着哪一版队列排的**，以及它作用在下钻出来的
     /// 哪一组上、那一组当时有多少条。
-    fn hold(&self, plan: Plan, kind: Verdicted, drilled: Option<(Scope, u64)>) -> Pending {
+    fn hold(&self, plan: Plan, kind: Verdicted, drilled: Option<Drilled>) -> Pending {
         Pending {
             plan,
             revision: self.queue.revision(),
@@ -2677,16 +2686,18 @@ impl Screen {
         site: &mut Site,
         plan: &Plan,
         kind: Verdicted,
-        drilled: Option<(Scope, u64)>,
+        drilled: Option<Drilled>,
     ) {
         match self.queue.apply(&mut site.catalog, &mut site.store, plan) {
             Ok(applied) => {
                 self.error = None;
                 self.receipt = Some(Receipt::applied(kind, &applied));
-                if let Some((scope, 条数)) = drilled
+                if let Some(drilled) = drilled
                     && let Some(kind) = kind.part_kind()
                     // **记不记由核心库说**：整批那一层它一个字都不记，交回 `false`。
-                    && self.parts.record(scope, 条数, kind, applied.batch)
+                    && self
+                        .parts
+                        .record(drilled.scope, drilled.count, kind, applied.batch)
                 {
                     // 这一组裁完了，就地那一框跟着收起：作用范围回到整批，
                     // 底下那两颗按钮写的就是「剩余的 N 条」。
@@ -2902,17 +2913,34 @@ struct Pending {
     revision: u64,
     /// 这份计划裁成哪一类：落下之后提示条上说「已通过」还是「已拒绝」（[`Verdicted`]）。
     kind: Verdicted,
-    /// 这份计划作用在**下钻出来的哪一组**上，连那一组当时有多少条；整批那一层与逐条那一路
-    /// 都是 `None`。落下之后它才成为一**部分**（[`Parts`]）——在那之前它只是一组。
-    ///
-    /// **落下之后要记一条**（[`Parts`]）：那一项从此标着「已通过」，剩下的部分照旧整批
-    /// 处理得动。计划书开着的那段时间里人可以换个下钻，所以这一格跟着计划走，
-    /// 不去落下的那一刻读屏上眼下的作用范围。
-    ///
-    /// **条数在这儿一起记下**，不拿落下之后那笔账里的「落了几条」当它：几个变体共享同一条
-    /// **内容锚**（几份**重复拷贝**）时落成的是同一条裁决，那个数会小于这一组的变体数——而屏上
-    /// 那一项写的、占比条量的都是**变体**有多少条。
-    drilled: Option<(Scope, u64)>,
+    /// 这份计划作用在**下钻出来的哪一组**上；整批那一层与逐条那一路都是 `None`。
+    drilled: Option<Drilled>,
+}
+
+/// 一份计划作用在**下钻出来的哪一组**上，连那一组**落下之前**有多少条。
+///
+/// 两样捆在一起，因为它们从排计划到落下一路同行（[`Screen::preview_scope`] → [`Screen::hold`]
+/// → [`Pending::drilled`] → [`Screen::apply_plan`]），而且**只有凑齐了才记得成一部分**
+/// （[`Parts::record`] 两样都要）。拆成一对散值传的话，四个签名各拆一遍元组，
+/// 谁也说不出那个 `u64` 数的是什么。
+///
+/// **条数在排计划那一刻就记下**，不拿落下之后那笔账里的「落了几条」当它：几个变体共享同一条
+/// **内容锚**（几份**重复拷贝**）时落成的是同一条裁决，那个数会小于这一组的变体数——而屏上
+/// 那一项写的、占比条量的都是**变体**有多少条。
+///
+/// **跟着计划走，不在落下那一刻读屏上眼下的作用范围**：计划书开着的那段时间里人换得了下钻。
+#[derive(Debug, Clone)]
+struct Drilled {
+    /// 哪一批下面的哪一组。
+    scope: Scope,
+    /// 那一组落下之前有多少条**变体**。
+    count: u64,
+}
+
+impl Drilled {
+    fn new(scope: Scope, count: u64) -> Self {
+        Self { scope, count }
+    }
 }
 
 /// 一次裁决裁成哪一类，只为提示条上那一句用（设计稿 `toast(\`已${kind} …\`)`）。**判断在草稿里**（[`Draft`]），这里只折成词。
@@ -4022,79 +4050,80 @@ fn samples_column(ui: &mut egui::Ui, samples: &[Sample]) -> bool {
 fn sample_rows(ui: &mut egui::Ui, samples: &[Sample]) {
     // **行距由这一栏自己说了算**：行与行之间照稿只隔那一道虚线（间距在 `sample-row-padding`
     // 里），而这几行可能摆在一块把纵向间距撑开过的容器里（就地那一框的 `drill-gap` 是 8）
-    // ——不按住的话样本之间会平白裂开一道缝。
+    // ——不按住的话样本之间会平白裂开一道缝。这一层 `scope` 就是为了把它按住。
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
-        sample_rows_inner(ui, samples);
+        rows(ui, samples);
     });
-}
 
-fn sample_rows_inner(ui: &mut egui::Ui, samples: &[Sample]) {
-    let tokens = Tokens::builtin();
-    let palette = look::palette(ui);
-    let 文件字号 = look::font_size(ui.ctx(), tokens.font.size_caption_plus);
-    let 候选字号 = look::font_size(ui.ctx(), tokens.font.size_small);
-    let 量 = |字体: egui::FontId| {
-        ui.painter()
-            .layout_no_wrap("字".to_owned(), 字体, egui::Color32::PLACEHOLDER)
-            .size()
-            .y
-    };
-    let 字高 = 量(egui::FontId::monospace(文件字号)).max(量(egui::FontId::proportional(候选字号)));
-    let 留白 = tokens.space.sample_row_padding;
-    let 缝 = look::step(1);
-    let 箭头宽 = tokens.layout.sample_arrow_column;
-    let 线宽 = tokens.layout.control_stroke;
-    for (at, one) in samples.iter().enumerate() {
-        let (行, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), 字高 + 2.0 * 留白),
-            egui::Sense::hover(),
-        );
-        let 里 = 行.shrink2(egui::vec2(0.0, 留白));
-        let 半 = ((里.width() - 箭头宽 - 2.0 * 缝) / 2.0).max(0.0);
-        let 左格 = egui::Rect::from_min_size(里.min, egui::vec2(半, 里.height()));
-        let 箭格 = egui::Rect::from_min_size(
-            egui::pos2(左格.right() + 缝, 里.top()),
-            egui::vec2(箭头宽, 里.height()),
-        );
-        let 右格 = egui::Rect::from_min_size(
-            egui::pos2(箭格.right() + 缝, 里.top()),
-            egui::vec2(半, 里.height()),
-        );
-        let 候选 = one
-            .candidate
-            .clone()
-            .unwrap_or_else(|| "一条候选都没有".to_owned());
-        for (格, 字) in [
-            (
-                左格,
-                egui::RichText::new(&one.name)
-                    .family(egui::FontFamily::Monospace)
-                    .size(文件字号)
-                    .color(palette.ink),
-            ),
-            (箭格, egui::RichText::new("→").color(palette.ink_4)),
-            (
-                右格,
-                egui::RichText::new(候选)
-                    .size(候选字号)
-                    .color(palette.ink_2),
-            ),
-        ] {
-            let mut 这一格 = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(格)
-                    .layout(Layout::left_to_right(Align::Center)),
+    fn rows(ui: &mut egui::Ui, samples: &[Sample]) {
+        let tokens = Tokens::builtin();
+        let palette = look::palette(ui);
+        let 文件字号 = look::font_size(ui.ctx(), tokens.font.size_caption_plus);
+        let 候选字号 = look::font_size(ui.ctx(), tokens.font.size_small);
+        let 量 = |字体: egui::FontId| {
+            ui.painter()
+                .layout_no_wrap("字".to_owned(), 字体, egui::Color32::PLACEHOLDER)
+                .size()
+                .y
+        };
+        let 字高 =
+            量(egui::FontId::monospace(文件字号)).max(量(egui::FontId::proportional(候选字号)));
+        let 留白 = tokens.space.sample_row_padding;
+        let 缝 = look::step(1);
+        let 箭头宽 = tokens.layout.sample_arrow_column;
+        let 线宽 = tokens.layout.control_stroke;
+        for (at, one) in samples.iter().enumerate() {
+            let (行, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), 字高 + 2.0 * 留白),
+                egui::Sense::hover(),
             );
-            这一格.add(egui::Label::new(字).truncate());
-        }
-        if at + 1 < samples.len() {
-            look::dashed_hline(
-                ui.painter(),
-                行.x_range(),
-                行.bottom(),
-                egui::Stroke::new(线宽, palette.line),
+            let 里 = 行.shrink2(egui::vec2(0.0, 留白));
+            let 半 = ((里.width() - 箭头宽 - 2.0 * 缝) / 2.0).max(0.0);
+            let 左格 = egui::Rect::from_min_size(里.min, egui::vec2(半, 里.height()));
+            let 箭格 = egui::Rect::from_min_size(
+                egui::pos2(左格.right() + 缝, 里.top()),
+                egui::vec2(箭头宽, 里.height()),
             );
+            let 右格 = egui::Rect::from_min_size(
+                egui::pos2(箭格.right() + 缝, 里.top()),
+                egui::vec2(半, 里.height()),
+            );
+            let 候选 = one
+                .candidate
+                .clone()
+                .unwrap_or_else(|| "一条候选都没有".to_owned());
+            for (格, 字) in [
+                (
+                    左格,
+                    egui::RichText::new(&one.name)
+                        .family(egui::FontFamily::Monospace)
+                        .size(文件字号)
+                        .color(palette.ink),
+                ),
+                (箭格, egui::RichText::new("→").color(palette.ink_4)),
+                (
+                    右格,
+                    egui::RichText::new(候选)
+                        .size(候选字号)
+                        .color(palette.ink_2),
+                ),
+            ] {
+                let mut 这一格 = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(格)
+                        .layout(Layout::left_to_right(Align::Center)),
+                );
+                这一格.add(egui::Label::new(字).truncate());
+            }
+            if at + 1 < samples.len() {
+                look::dashed_hline(
+                    ui.painter(),
+                    行.x_range(),
+                    行.bottom(),
+                    egui::Stroke::new(线宽, palette.line),
+                );
+            }
         }
     }
 }

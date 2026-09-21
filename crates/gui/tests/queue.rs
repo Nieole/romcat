@@ -1233,7 +1233,10 @@ fn 就地整批通过之后那一项标着已通过_剩下的仍旧整批处理�
         "就地整批通过该只落下这一部分",
     );
     let 细分 = app.queue().breakdown().expect("还展开着就该有细分").clone();
-    assert_eq!((细分.whole, 细分.done, 细分.left), (整批, 条数, 整批 - 条数));
+    assert_eq!(
+        (细分.whole, 细分.done, 细分.left),
+        (整批, 条数, 整批 - 条数)
+    );
     let 标着 = 细分
         .rows
         .iter()
@@ -1334,7 +1337,10 @@ fn 就地那一框里的逐条处理按下去真的收窄到这一组() {
     let (mut app, shape, axis) = 展开一批能过的(&ctx);
     let 整批 = app.queue().queue().count(&Scope::whole(shape));
     let (那一项, 条数) = 下钻到头一项(&ctx, &mut app, axis);
-    assert!(条数 < 整批, "这一组该只是整批的一部分，不然分不出两颗的差别");
+    assert!(
+        条数 < 整批,
+        "这一组该只是整批的一部分，不然分不出两颗的差别"
+    );
 
     // **按框头定位**：就地那一框被细分那一栏顶在屏幕中段，而底下那一排这时多半已经被
     // 推出视口了——「屏上恰好两颗」是靠不住的判据。框里那颗是「只看：…」底下最近的那一颗。
@@ -1356,6 +1362,86 @@ fn 就地那一框里的逐条处理按下去真的收窄到这一组() {
         app.queue().queue().selected().len() as u64,
         条数,
         "框里那一颗该把队列收窄到「{那一项}」这一组，而不是整批那 {整批} 条",
+    );
+}
+
+/// 用一扇**更高的**窗跑一帧，事件照给。
+///
+/// 就地那一框把底下那一排顶出了默认那 800 高的视口，而 **egui 不画整个落在裁剪区外的控件**
+/// ——点不到的按钮测不出它接在哪一层。截图门那边同一个问题是拿 1280×960 解的
+/// （`snapshot.rs` 的 `下钻那一对的画面`），这里同理。
+fn 高窗一帧(ctx: &egui::Context, app: &mut App, 事件: Vec<egui::Event>) -> egui::FullOutput {
+    let mut input = headless::input();
+    input.screen_rect = Some(egui::Rect::from_min_size(
+        egui::Pos2::ZERO,
+        egui::vec2(headless::VIEWPORT[0], 1200.0),
+    ));
+    input.events = 事件;
+    headless::frame(ctx, input, |ui| app.ui(ui))
+}
+
+/// 在那扇高窗里点一下**正好**写着 `那一段` 的地方。
+fn 在高窗里点(ctx: &egui::Context, app: &mut App, 那一段: &str) {
+    let 这一帧 = 高窗一帧(ctx, app, Vec::new());
+    let Some(位置) = shared::正好那一段画在哪儿(&这一帧, 那一段) else {
+        panic!(
+            "屏上没有正好写着「{那一段}」的那一段，没处点：\n{}",
+            画出来的字(&这一帧)
+        );
+    };
+    let 按 = |pressed: bool| egui::Event::PointerButton {
+        pos: 位置,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    高窗一帧(ctx, app, vec![egui::Event::PointerMoved(位置), 按(true)]);
+    高窗一帧(ctx, app, vec![按(false)]);
+    高窗一帧(ctx, app, Vec::new());
+}
+
+/// 眼下那份计划盖住多少条。
+fn 计划条数(app: &App) -> u64 {
+    app.queue()
+        .pending()
+        .expect("按下去该排出一份计划")
+        .decided
+        .len() as u64
+}
+
+#[test]
+fn 两颗整批按钮各作用于一层_框里那颗只盖这一组_底下那一排盖剩下的() {
+    // **点真按钮**。这两颗接反了（框里那颗接整批、底下那一排接下钻着的那一组），光靠
+    // 「测试自己把 scope 交进去调 `pass()`」是照样全绿的——那种断言验的是自己刚设进去的值。
+    // 而「每一层都能整批过」与「剩下的仍能整批处理」正是这张票第 3、4 条验收本身。
+    let ctx = headless::context();
+    let (mut app, shape, axis) = 展开一批能过的(&ctx);
+    let 整批 = app.queue().queue().count(&Scope::whole(shape));
+    let (那一项, 条数) = 下钻到头一项(&ctx, &mut app, axis);
+    assert!(条数 < 整批, "这一组该只是整批的一部分，不然两颗盖住的数一样，分不出接没接反");
+
+    // **两次都在下钻着的时候点**：落下之后 `apply_plan` 会把下钻那一层放掉，那一刻
+    // 作用范围本来就等于整批——那时再点，两颗接反了也看不出来。
+    // ——— 就地那一框里那颗：只该盖住这一组 ———
+    在高窗里点(&ctx, &mut app, &format!("通过这 {} 条", thousands(条数)));
+    assert_eq!(
+        计划条数(&app),
+        条数,
+        "框里那颗该只盖住「{那一项}」这一组，不是整批那 {整批} 条",
+    );
+    在高窗里点(&ctx, &mut app, "取消");
+    assert!(app.queue().pending().is_none(), "按了取消，计划书该关上");
+
+    // ——— 底下那一排那颗：照旧盖整批，不受下钻影响 ———
+    assert!(
+        app.queue().scope().is_some_and(|scope| scope.drill.is_some()),
+        "这一步要在下钻着的时候点，不然分不出两颗接没接反",
+    );
+    在高窗里点(&ctx, &mut app, &format!("全部通过（{} 条）", thousands(整批)));
+    assert_eq!(
+        计划条数(&app),
+        整批,
+        "底下那一排该盖住整批，不是下钻着的那一组",
     );
 }
 
@@ -1471,10 +1557,7 @@ fn 处理过一部分之后换细分方式被挡住并说清为什么_撤掉那�
         screen.set_axis(换成);
     }
     跑(&ctx, &mut app, 1);
-    assert!(
-        app.queue().scope().is_some(),
-        "撤完之后那一批该还展开着",
-    );
+    assert!(app.queue().scope().is_some(), "撤完之后那一批该还展开着",);
     assert_eq!(app.queue().axis(), 换成, "撤完之后该换得动轴了");
     assert_eq!(
         app.queue().error(),
@@ -1526,7 +1609,11 @@ fn 下钻处理之后屏头批头与左栏徽标那几个数仍旧一致() {
         .expect("裁掉一部分之后这一批该还在")
         .clone();
     assert!(
-        屏上.contains(&format!("已处理 {} 条，剩余 {} 条", thousands(条数), thousands(这一批.count))),
+        屏上.contains(&format!(
+            "已处理 {} 条，剩余 {} 条",
+            thousands(条数),
+            thousands(这一批.count)
+        )),
         "批头没说清裁掉了多少、还剩多少：\n{屏上}",
     );
     // 左栏那枚徽标画的是同一个数（`App::rail` 的「待裁」）：屏上正好写着它的地方至少有那一处。
