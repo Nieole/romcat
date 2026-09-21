@@ -4814,3 +4814,29 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
   「按变体反查它属于哪一批」在核心库立起来（与票 17 的「疑似同一作品」一趟做更划算）。
 - **谁来裁：** 编排者
 - **状态：** open
+
+### Q1014 — `sublibrary/exceptions-{light,dark}` 是一对**挂钟依赖的脆基线**：例外那两行的次序随机器忙不忙换
+
+- **来自：** 票 `gui-looks-like-the-design/16`（跑截图门探路时路过撞上；**不是这张票引的**）
+- **类别：** 路过发现，归票 22 那条线（拿主意的人 2026-09-21 定：不在本票收）
+- **在哪：**
+  - 夹具 `crates/gui/tests/snapshot.rs` 的 `记着例外的一台`：三条例外**逐条**调
+    `子库现场::记一条例外` → `Catalog::set_exception`。
+  - `crates/core/src/catalog/sublibrary.rs` 的 `set_exceptions` 里 `let at = super::now_secs();`
+    ——**每调一次取一次挂钟**。
+  - `Catalog::sublibrary_exception_details` 按 `b.at.cmp(&a.at).then_with(|| a.variant_key.cmp(&b.variant_key))`
+    排：**时刻倒序，同一刻才退回按键排**。
+- **根因（一句）：** 两条例外落在**同一秒**时按键排（口袋妖怪在前，＝现有基线）；机器忙、两次调用
+  **跨过秒界**时按时刻排（黄金太阳的 `at` 大一秒，排到前面）→ 红。
+  屏上那个时刻字串是 `sublibrary::Screen::pin_exception_time` 钉死的，**钉的是显示、不是排序键**，
+  所以看图只看得出两行换了位置、时刻字样一模一样。
+- **怎么复现：** 单独跑 `cargo test -p romcat-gui --all-features --test snapshot 子库_手动例外弹层`
+  **六趟全绿**；整套 85 条并跑、机器忙时 `sublibrary/exceptions-dark` 红（5,115 个像素对不上，
+  票 16 探路那一趟实测；同一趟 `-light` 绿——两条测试各建各的现场，各自撞运气）。
+- **修法：** 照票 34 `Catalog::mark_exported_at` 的形状，给核心库加一条**带显式时刻**的例外写入口
+  （`set_exceptions_at(name, keys, kind, note, at)`，`set_exceptions` 拿 `now_secs()` 调它），
+  夹具把三条的 `at` 钉死成互不相同的定值。**排序那一处一个字不用改**——它本来就对。
+- **为什么本票不收：** 它要动子库屏那一面的核心库入口，而票 16 已经在改浏览屏与详情页两处的屏头，
+  再伸一只手进去会把撞车面扩大（拿主意的人 2026-09-21 定）。
+- **谁来裁：** 编排者（排给票 22 那条线）
+- **状态：** open
