@@ -389,6 +389,8 @@ pub struct Font {
     pub size_health_value: f32,
     /// 空态那张卡的标题（设计稿子库屏空态卡与待确认屏 `#q-empty` 的 `h3` 都是 16px）。不挂成具名档。
     pub size_empty_title: f32,
+    /// 差量账那五格里的数（设计稿 `.diff b`，等宽）。
+    pub size_diff_value: f32,
     /// 行高，字号的倍数。
     pub line_height: f32,
     /// 左栏收成窄条后入口底下那个计数的字号。
@@ -486,6 +488,10 @@ pub struct Space {
     pub health_tile_gap: f32,
     /// 体检明细一行的内边距：`[上下, 左右]`（设计稿 `.lst>div`）。
     pub health_list_padding: [f32; 2],
+    /// 差量账一格的内边距（上下, 左右）。
+    pub diff_tile_padding: [f32; 2],
+    /// 差量账格与格之间。
+    pub diff_gap: f32,
     /// 侧边详情媒体格之间。
     pub thumb_gap: f32,
     /// 侧边详情头上封面与字之间。
