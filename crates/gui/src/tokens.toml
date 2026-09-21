@@ -306,6 +306,9 @@ settings-switch-gap  = 8             # 开关那个小滑块与它旁边的字�
 keys-grid-gap        = [4, 28]       # 快捷键表：行与行之间、左右两列之间（设计稿 .kgrid 的 gap:4px 28px）
 keys-row-padding     = 6             # 快捷键表一条的上下留白（设计稿 .kgrid div 的 padding:6px 0）
 keys-row-gap         = 12            # 一条里说明与键帽之间至少留多少（设计稿 .kgrid div 的 gap:12px）
+keys-group-gap       = 14            # 快捷键表两组之间。设计稿里这一格由摆它的那一块给，两处都是 14：
+                                     # 设置屏 .sset 的 gap:14px、按 ? 那层弹层 .mbody 的 gap:14px。
+                                     # 这份表在两处摆着，所以它自带一个，不借设置屏那一个的名字。
 menu-padding         = 5             # 右键菜单四周留白（设计稿 .ctx 的 padding:5px）
 menu-item-padding    = 10            # 右键菜单一项的左右留白（设计稿 .ctx button 的 padding:0 10px）
 menu-item-gap        = 10            # 一项里那句话与右边快捷键提示之间至少留多少（设计稿 .ctx button 的 gap:10px）

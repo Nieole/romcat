@@ -444,6 +444,8 @@ settings_literals = [
     (r"\.switch i::after\{[^}]*?width:(\d+)px", [(1, "layout", "settings-switch", 2)]),
     (r"\.kgrid\{[^}]*?gap:(\d+)px (\d+)px", [(1, "space", "keys-grid-gap", 0), (2, "space", "keys-grid-gap", 1)]),
     (r"\.kgrid div\{[^}]*?gap:(\d+)px;padding:(\d+)px 0", [(1, "space", "keys-row-gap", None), (2, "space", "keys-row-padding", None)]),
+    # 快捷键表两组之间：设置屏那一节由 .sset 给，按 ? 那层弹层由 .mbody 给——两处都是 14。
+    (r"\.mbody\{[^}]*?gap:(\d+)px", [(1, "space", "keys-group-gap", None)]),
 ]
 literals += check_literals(settings_literals)
 

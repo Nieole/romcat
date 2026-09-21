@@ -151,12 +151,12 @@ fn 右键一行摊开菜单() {
     ] {
         assert!(画的.contains(一项), "菜单上该有「{一项}」：\n{画的}");
     }
-    // 右边那一列提示照设计稿写，取的是全仓那一份（`keys::OPEN` 那几个常量）。
+    // 右边那一列提示照设计稿写，取的是全仓那一份（`keys::打开键` 那几个常量）。
     for 提示 in [
-        romcat_gui::keys::OPEN,
-        romcat_gui::keys::EDIT,
-        romcat_gui::keys::PICK,
-        romcat_gui::keys::FAVORITE,
+        romcat_gui::keys::打开键,
+        romcat_gui::keys::编辑键,
+        romcat_gui::keys::勾选键,
+        romcat_gui::keys::收藏键,
     ] {
         assert!(画的.contains(提示), "菜单上该有提示「{提示}」：\n{画的}");
     }
@@ -556,6 +556,69 @@ fn 回车打开作品详情页() {
         画的 = 跑(&ctx, &mut app, Vec::new());
     }
     assert!(画的.contains("返回浏览"), "该进作品详情页了：\n{画的}");
+}
+
+/// **摆着卡片墙时，跟高亮走的那几下一下都不接**（挂单 `Q1142`）。
+///
+/// 高亮是**表格**背后那扇窗的行序号，而卡片墙背后是另一扇窗、另一份查询——照着按下去，
+/// 勾中的会是人看不见的另一行，比什么都不发生坏得多。卡片墙自己那条路照旧走得通：
+/// Tab 走到一张卡，`Enter` / `空格` 由那张卡自己接。
+#[test]
+fn 摆着卡片墙时跟高亮走的那几下不接() {
+    let ctx = headless::context();
+    let mut app = 界面();
+    // 先在表格上挪一下高亮，好让「不接」不是因为压根没有高亮。
+    跑(&ctx, &mut app, Vec::new());
+    跑(
+        &ctx,
+        &mut app,
+        键(egui::Key::ArrowDown, egui::Modifiers::NONE),
+    );
+    跑(&ctx, &mut app, Vec::new());
+    app.browse_and_site().0.show_cards();
+    跑(&ctx, &mut app, Vec::new());
+    跑(&ctx, &mut app, 键(egui::Key::Space, egui::Modifiers::NONE));
+    跑(&ctx, &mut app, Vec::new());
+    assert_eq!(
+        app.browse_and_site().0.picked().count(2),
+        0,
+        "卡片墙上那一下不该勾中表格那份高亮指着的行"
+    );
+    // **全选不在那道门里头**：它选的是当前这个筛选，与光标落在哪一行无关。
+    跑(&ctx, &mut app, 键(egui::Key::A, 修饰键()));
+    跑(&ctx, &mut app, Vec::new());
+    assert!(
+        app.browse_and_site().0.picked().is_all(),
+        "卡片墙上 ⌘/Ctrl+A 照样全选"
+    );
+}
+
+/// **切屏与搜索那几下先关掉作品详情页**（设计稿 `S.wd=false`）：它盖住整块屏，
+/// 留着的话换回浏览屏看见的还是它。
+#[test]
+fn 切屏与搜索先关掉作品详情页() {
+    let ctx = headless::context();
+    let mut app = 界面();
+    跑(&ctx, &mut app, Vec::new());
+    跑(
+        &ctx,
+        &mut app,
+        键(egui::Key::ArrowDown, egui::Modifiers::NONE),
+    );
+    跑(&ctx, &mut app, Vec::new());
+    跑(&ctx, &mut app, 键(egui::Key::Enter, egui::Modifiers::NONE));
+    for _ in 0..3 {
+        跑(&ctx, &mut app, Vec::new());
+    }
+    assert!(app.browse_and_site().0.page().is_some(), "该开着详情页");
+    跑(&ctx, &mut app, 键(egui::Key::F, 修饰键()));
+    for _ in 0..4 {
+        跑(&ctx, &mut app, Vec::new());
+    }
+    assert!(
+        app.browse_and_site().0.page().is_none(),
+        "⌘/Ctrl+F 该先把详情页关掉"
+    );
 }
 
 /// **作品详情页开着时浏览屏那几下一个都不接**（设计稿 `S.wd`）：那一屏盖住整块屏，

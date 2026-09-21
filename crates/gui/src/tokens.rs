@@ -756,6 +756,8 @@ pub struct Space {
     pub keys_row_padding: f32,
     /// 快捷键表一条里说明与键帽之间至少留多少（设计稿 `.kgrid div` 的 `gap`）。
     pub keys_row_gap: f32,
+    /// 快捷键表两组之间：设计稿里由摆它的那一块给（`.sset` 与 `.mbody` 都是 14）。
+    pub keys_group_gap: f32,
     /// 右键菜单四周留白（设计稿 `.ctx` 的 `padding`）。
     pub menu_padding: f32,
     /// 右键菜单一项的左右留白（设计稿 `.ctx button` 的 `padding`）。

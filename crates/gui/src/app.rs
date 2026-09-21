@@ -960,6 +960,9 @@ impl App {
             };
             let 这一下 = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, key);
             if ctx.input_mut(|input| input.consume_shortcut(&这一下)) {
+                // **先关掉作品详情页**（设计稿 `S.wd=false` 在 `go(...)` 之前）：它盖住整块屏，
+                // 留着的话换回浏览屏时看见的还是它。
+                self.browse.close_page();
                 self.show_view(view);
             }
         }
@@ -971,6 +974,8 @@ impl App {
         // 放进去那一下由浏览屏在画那一框的那一帧落实（`browse::Screen::focus_search`）。
         let 搜索 = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::F);
         if ctx.input_mut(|input| input.consume_shortcut(&搜索)) {
+            // 详情页盖住整块屏，那一框在它底下——不关掉的话记号会一直悬着（设计稿 `S.wd=false`）。
+            self.browse.close_page();
             self.view = View::Browse;
             layout::FILTER.set_collapsed(ctx, false);
             self.browse.focus_search();
@@ -987,6 +992,15 @@ impl App {
     ///
     /// **只在浏览屏、而且作品详情页没开着时才接**（设计稿 `S.screen!=='browse'||S.wd`）：
     /// 详情页盖住整块屏，那时 `F` 与 `E` 说的是另一件事。
+    ///
+    /// **摆着卡片墙时，跟高亮走的那六下一下都不接**（挂单 `Q1142`）：高亮是表格背后那扇窗的
+    /// **行序号**，而卡片墙背后是另一扇窗——在卡上按空格会勾中人看不见的另一行，比什么都不
+    /// 发生坏得多。卡片墙自己那条路照旧走得通：Tab 走到一张卡，`Enter` / `空格` 由那张卡
+    /// 自己接（`browse::Screen::card_grid`）。设计稿拿
+    /// `if(e.target.closest('.gcard'))return` 挡的是同一件事。
+    ///
+    /// **`⌘/Ctrl+A` 不在这道门里头**：全选的是**当前这个筛选**（ADR-0016），与光标落在哪一行
+    /// 无关，两种视图上说的是同一件事。
     fn browse_keys(&mut self, ctx: &egui::Context) {
         if self.view != View::Browse || self.browse.page().is_some() {
             return;
@@ -994,6 +1008,9 @@ impl App {
         let 全选 = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::A);
         if ctx.input_mut(|input| input.consume_shortcut(&全选)) {
             self.browse.select_all();
+        }
+        if self.browse.showing_cards() {
+            return;
         }
         let (往上, 往下, 打开, 勾选, 收藏, 编辑) = (
             单键按下(ctx, egui::Key::ArrowUp),

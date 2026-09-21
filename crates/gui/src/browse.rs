@@ -639,7 +639,16 @@ impl Screen {
         self.priorities = priorities;
     }
 
-    /// 切到卡片视图；供窗口恢复偏好与界面测试走同一份状态。
+    /// **眼下摆的是卡片墙吗**：键盘那几下要问它（`App::browse_keys`）。
+    ///
+    /// 挪高亮那几下走的是表格背后那扇窗的**行序号**（[`Self::step_focus`]），而卡片墙背后
+    /// 是另一扇窗、另一份查询——同一个数在两边指的不是同一行（挂单 `Q1142`）。
+    #[must_use]
+    pub fn showing_cards(&self) -> bool {
+        self.view == BrowseView::Cards
+    }
+
+    /// 换成卡片墙（实测与截图门用）。    /// 切到卡片视图；供窗口恢复偏好与界面测试走同一份状态。
     pub fn show_cards(&mut self) {
         self.view = BrowseView::Cards;
     }
@@ -2227,27 +2236,36 @@ impl Screen {
             .is_some();
         self.menu.open(
             ctx,
-            menu::Open {
+            menu::Facts {
                 at: 按的.at,
-                title: crate::table::row_name(&按的.row, &self.rules),
+                title: crate::table::row_name(&按的.row, &self.rules)
+                    .text()
+                    .to_owned(),
                 picked: self.picked.contains(&按的.row.anchor),
-                merging: self.merging_with(&按的.row.anchor),
+                merging: self.merge_rows_with(&按的.row.anchor).len() as u64,
                 anchor: 按的.row.anchor,
                 favorited,
             },
         );
     }
 
-    /// 菜单里「合并」那一项要带上几个作品：**勾中的那一批连光标底下这一行算在内**。
+    /// 菜单里「合并」那一项**要带上哪几行**：勾中的那一批，连光标底下这一行算在内。
     ///
-    /// 全选那一档只算这一行（设计稿 `S.pickAll?2:…` 与 `openMerge(S.pickAll?[i]:…)`）：
-    /// 「全选」不是一批身份，是一个筛选条件，合并要人逐个核对变体（[`Self::open_merge`]）。
-    fn merging_with(&self, anchor: &WorkAnchor) -> u64 {
+    /// **屏上写的那句话与按下去真合的那一批出自这一处**（挂单 `Q1148`）：菜单上写着
+    /// 「合并勾选的 N 个作品…」，按下去开的向导里就该是那 N 个——两处各数一遍，迟早不一样
+    /// （ADR-0024）。
+    ///
+    /// **全选那一档只带这一行**（设计稿 `openMerge(S.pickAll?[i]:…)`）：「全选」不是一批身份，
+    /// 是一个筛选条件，而合并要人逐个核对变体（[`Self::open_merge`]）。
+    fn merge_rows_with(&self, anchor: &WorkAnchor) -> Vec<WorkAnchor> {
         let Scope::Rows(rows) = self.picked.scope() else {
-            return 1;
+            return vec![anchor.clone()];
         };
-        let 算上这一行 = u64::from(!rows.contains(anchor));
-        rows.len() as u64 + 算上这一行
+        let mut rows = rows.to_vec();
+        if !rows.contains(anchor) {
+            rows.push(anchor.clone());
+        }
+        rows
     }
 
     /// 这一行底下那几个变体的键。读不动库时是空的——调用方各自说话。
@@ -2259,10 +2277,10 @@ impl Screen {
 
     /// 画那一层菜单；按下去的那一项当场办。
     fn menu_ui(&mut self, ctx: &egui::Context, site: &mut Site, tasks: &mut Tasks) {
-        let Some((pressed, open)) = self.menu.ui(ctx) else {
+        let Some((pressed, facts)) = self.menu.ui(ctx) else {
             return;
         };
-        self.apply_menu(ctx, site, tasks, pressed, &open);
+        self.apply_menu(ctx, site, tasks, pressed, &facts);
     }
 
     /// 菜单上按下去的那一项。
@@ -2277,11 +2295,11 @@ impl Screen {
         site: &mut Site,
         tasks: &mut Tasks,
         pressed: menu::Pressed,
-        open: &menu::Open,
+        facts: &menu::Facts,
     ) {
-        let anchor = &open.anchor;
+        let anchor = &facts.anchor;
         match pressed {
-            menu::Pressed::Open => {
+            menu::Pressed::OpenDetail => {
                 self.open_work(&site.catalog, anchor);
                 self.open_page(work::Tab::Overview);
             }
@@ -2289,13 +2307,7 @@ impl Screen {
             menu::Pressed::TogglePick => self.picked.toggle(anchor),
             menu::Pressed::ToggleFavorite => self.toggle_favorite_of(site, tasks, anchor),
             menu::Pressed::Merge => {
-                let mut rows = match self.picked.scope() {
-                    Scope::Rows(rows) => rows.to_vec(),
-                    Scope::AllExcept(_) => Vec::new(),
-                };
-                if !rows.contains(anchor) {
-                    rows.push(anchor.clone());
-                }
+                let rows = self.merge_rows_with(anchor);
                 self.open_merge_rows(site, &rows);
             }
             menu::Pressed::Scrape => {
@@ -2311,8 +2323,8 @@ impl Screen {
             // **复制的是菜单顶上那一行写着的那个名字**：屏上摆着什么就复制什么
             // （设计稿 `toast(\`已复制：${w.t}\`)`）。
             menu::Pressed::CopyName => {
-                ctx.copy_text(open.title.clone());
-                self.notice = Some(format!("已复制：{}", open.title));
+                ctx.copy_text(facts.title.clone());
+                self.notice = Some(format!("已复制：{}", facts.title));
             }
         }
     }
@@ -2923,7 +2935,7 @@ impl Screen {
                             // 判据在核心库（ADR-0024），卡片这边不另写一套，不然有一天两处判得不一样。
                             let 未关联 = unlinked_title(&row, &self.rules);
                             // 这一行屏上叫什么，问表格那一路同一处（`table::row_name`）。
-                            let title = crate::table::row_name(&row, &self.rules);
+                            let title = crate::table::row_name(&row, &self.rules).text().to_owned();
                             let (rect, response) = ui.allocate_exact_size(
                                 egui::vec2(
                                     width,
@@ -3043,7 +3055,6 @@ impl Screen {
                                 response.request_focus();
                                 self.menu_click = Some(crate::table::RightClicked {
                                     row: row.clone(),
-                                    index,
                                     at,
                                 });
                             }

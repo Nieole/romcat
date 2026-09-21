@@ -1,7 +1,7 @@
 //! **右键菜单**：浏览屏上一行或一张卡右键按下去摊开的那一层（设计稿 `.ctx`）。
 //!
 //! 表格那一路与卡片墙那一路**共用这一层**：两边各自认出「这一下是右键、按在哪一行」，
-//! 之后交给这儿的是同一份[开单](Open)——菜单上摆哪几项、每一项写什么字、按下去交回什么，
+//! 之后交给这儿的是同一份[开单](Facts)——菜单上摆哪几项、每一项写什么字、按下去交回什么，
 //! 只有这一处说了算。两边各画一份的话，同一个动作在表上与卡上迟早写成两句话。
 //!
 //! ## 这一层只画和转发（ADR-0005、ADR-0024）
@@ -12,7 +12,7 @@
 //!   「筛选加手动例外」（ADR-0016），由核心库展开。
 //! - 「收没收藏」问的是核心库的 [`romcat_core::collection::favorite_of`]——**不是**界面
 //!   自己记一个 `fav` 标志。屏上这一句与筛选面板上「收藏」那一格说的因此是同一件事。
-//! - 「合并这一下要带上哪几个作品」照的是勾中的那一批（[`Open::merging`]），而合并本身
+//! - 「合并这一下要带上哪几个作品」照的是勾中的那一批（[`Facts::merging`]），而合并本身
 //!   开不开得了由 [`merge::Wizard`] 自己说。
 //!
 //! 菜单收到的是**已经答完的那几个事实**，它只负责把答案写成屏上那句话。
@@ -51,7 +51,7 @@ use super::merge;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pressed {
     /// 打开作品详情。
-    Open,
+    OpenDetail,
     /// 编辑元数据：进作品详情页的元数据那一面、当场进编辑态。
     EditMeta,
     /// 勾选 / 取消勾选这一行。
@@ -73,7 +73,7 @@ pub enum Pressed {
 /// 几个事实**在右键按下去那一下问一次**，不是每帧问一遍：菜单摊开的那几秒里库不会变，
 /// 而「这一行收没收藏」是一次读库（[`romcat_core::collection::favorite_of`]）。
 #[derive(Debug, Clone)]
-pub struct Open {
+pub struct Facts {
     /// 摊在屏上哪儿：右键按下去那一下指针在的地方。
     pub at: egui::Pos2,
     /// 哪一行。
@@ -104,7 +104,7 @@ enum Line {
     Rule,
 }
 
-impl Open {
+impl Facts {
     /// 这一份开单摊开来是哪几条，照设计稿的次序。
     fn lines(&self) -> Vec<Line> {
         let item = |label: String, hint: &'static str, pressed: Pressed| {
@@ -115,8 +115,8 @@ impl Open {
             })
         };
         vec![
-            item("打开详情".to_owned(), keys::OPEN, Pressed::Open),
-            item("编辑元数据".to_owned(), keys::EDIT, Pressed::EditMeta),
+            item("打开详情".to_owned(), keys::打开键, Pressed::OpenDetail),
+            item("编辑元数据".to_owned(), keys::编辑键, Pressed::EditMeta),
             item(
                 if self.picked {
                     "取消勾选"
@@ -124,7 +124,7 @@ impl Open {
                     "勾选"
                 }
                 .to_owned(),
-                keys::PICK,
+                keys::勾选键,
                 Pressed::TogglePick,
             ),
             item(
@@ -134,7 +134,7 @@ impl Open {
                     "收藏"
                 }
                 .to_owned(),
-                keys::FAVORITE,
+                keys::收藏键,
                 Pressed::ToggleFavorite,
             ),
             Line::Rule,
@@ -163,7 +163,7 @@ fn id() -> egui::Id {
 /// 浏览屏手上那一层右键菜单：开着时是 `Some`。
 #[derive(Debug, Default)]
 pub struct Menu {
-    open: Option<Open>,
+    open: Option<Facts>,
 }
 
 impl Menu {
@@ -173,8 +173,8 @@ impl Menu {
     /// 那一份记忆同时是全窗口「眼下有没有浮层摊着」那一问的答案
     /// （[`egui::Popup::is_any_open`]），而读快捷键之前正要问那一句（`App::shortcuts`）。
     /// 各记各的，就会出现菜单摊着、单键快捷键照接的那一帧。
-    pub fn open(&mut self, ctx: &egui::Context, open: Open) {
-        self.open = Some(open);
+    pub fn open(&mut self, ctx: &egui::Context, facts: Facts) {
+        self.open = Some(facts);
         egui::Popup::open_id(ctx, id());
     }
 
@@ -186,14 +186,14 @@ impl Menu {
 
     /// 画这一帧；按下去的那一项**连它贴的那一行整份**一起交出来。
     ///
-    /// 交的是整份[开单](Open)而不只是那一行是谁：「复制名称」复制的得是**屏上摆着的那个
+    /// 交的是整份[开单](Facts)而不只是那一行是谁：「复制名称」复制的得是**屏上摆着的那个
     /// 名字**，而那一句话就写在开单上——回头再去库里问一次，问出来的可能已经不是人眼前
     /// 那一个了。
     ///
     /// **Esc 与点别处由 egui 那一层收**（`Popup` 自己认 `Key::Escape` 与
     /// `CloseOnClickOutside`），这里只跟着它把手上那份开单扔掉——Esc 一层一层退那一条
     /// 因此不用在这儿再写一遍：菜单摊着时最上面的一层就是它。
-    pub fn ui(&mut self, ctx: &egui::Context) -> Option<(Pressed, Open)> {
+    pub fn ui(&mut self, ctx: &egui::Context) -> Option<(Pressed, Facts)> {
         let open = self.open.clone()?;
         let lines = open.lines();
         let 一层 = egui::Popup::new(

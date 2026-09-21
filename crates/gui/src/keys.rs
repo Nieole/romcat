@@ -43,13 +43,13 @@ pub const MODIFIER: &str = if cfg!(target_os = "macos") {
 ///
 /// **同一个键屏上只许有一种写法**：两处各写一份，哪天改了一处，屏上就有一处说的是旧话
 /// ——而人是照着屏上那几个字去按的。
-pub const OPEN: &str = "Enter";
-/// 见 [`OPEN`]。
-pub const PICK: &str = "空格";
-/// 见 [`OPEN`]。
-pub const FAVORITE: &str = "F";
-/// 见 [`OPEN`]。
-pub const EDIT: &str = "E";
+pub const 打开键: &str = "Enter";
+/// 见 [`打开键`]。
+pub const 勾选键: &str = "空格";
+/// 见 [`打开键`]。
+pub const 收藏键: &str = "F";
+/// 见 [`打开键`]。
+pub const 编辑键: &str = "E";
 
 /// **按 `?` 摊开那层弹层的副标题**（设计稿 `DLG.keys` 的 `sub`）。
 ///
@@ -93,11 +93,11 @@ pub fn groups() -> Vec<Group> {
             title: "浏览",
             keys: vec![
                 ("上一个 / 下一个作品", "↑ ↓".to_owned()),
-                ("打开作品详情", OPEN.to_owned()),
-                ("勾选 / 取消勾选", PICK.to_owned()),
+                ("打开作品详情", 打开键.to_owned()),
+                ("勾选 / 取消勾选", 勾选键.to_owned()),
                 ("全选筛选结果", format!("{MODIFIER} A")),
-                ("收藏 / 取消收藏", FAVORITE.to_owned()),
-                ("编辑元数据", EDIT.to_owned()),
+                ("收藏 / 取消收藏", 收藏键.to_owned()),
+                ("编辑元数据", 编辑键.to_owned()),
                 ("更多操作", "右键".to_owned()),
             ],
         },
@@ -143,7 +143,7 @@ pub fn table(ui: &mut egui::Ui) {
             });
             ui.add_space(行缝);
         }
-        ui.add_space(tokens.space.settings_body_gap);
+        ui.add_space(tokens.space.keys_group_gap);
     }
 }
 
@@ -234,7 +234,7 @@ mod tests {
         assert_eq!(切屏.1, format!("{MODIFIER} 1 – 6"));
     }
 
-    /// **浏览那一组里那几个键，与右键菜单里那一列提示取的是同一份**（[`OPEN`] 那几个常量）。
+    /// **浏览那一组里那几个键，与右键菜单里那一列提示取的是同一份**（[`打开键`] 那几个常量）。
     ///
     /// 表上写一份、菜单里又写一份的话，改了一处屏上就有一处说的是旧话——而人正是照着
     /// 屏上那几个字去按的。
@@ -243,10 +243,10 @@ mod tests {
         let 浏览 = groups().remove(1);
         assert_eq!(浏览.title, "浏览");
         for (什么, 该是) in [
-            ("打开作品详情", OPEN),
-            ("勾选 / 取消勾选", PICK),
-            ("收藏 / 取消收藏", FAVORITE),
-            ("编辑元数据", EDIT),
+            ("打开作品详情", 打开键),
+            ("勾选 / 取消勾选", 勾选键),
+            ("收藏 / 取消收藏", 收藏键),
+            ("编辑元数据", 编辑键),
         ] {
             let 这一条 = 浏览
                 .keys

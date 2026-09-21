@@ -79,17 +79,48 @@ pub fn unlinked_title(work: &WorkRow, rules: &Rules) -> Option<String> {
     work.title(rules)
 }
 
-/// **这一行屏上叫什么**：主栏那一行印的那个名字。
+/// **这一行屏上叫什么**：主栏那一行印的那个名字，以及副行该跟什么。
 ///
 /// 三处要它：表格那一格（`name_cell`）、卡片墙的卡面、右键菜单顶上那一行连「复制名称」
-/// （[`crate::browse::menu`]）。摆在这儿一处，是因为它是一条**次序**——认不出作品的那一行
-/// 印正题、认出来的印显示标题、都没有才印作品名。三处各写一遍，屏上同一行在三处就会
-/// 叫三个名字，而「复制名称」复制的那个会与人眼前看见的不是同一个（ADR-0024）。
+/// （`crate::browse::menu`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowName {
+    /// **认不出作品**：主栏是那份内容的**正题**，副行是「未关联作品」标签加根名与相对路径。
+    Loose(String),
+    /// 认出来、而且挑得出**显示标题**：主栏是它，副行小字是作品名。
+    Display(String),
+    /// 挑不出显示标题：主栏就是**作品名**，副行不写。
+    WorkName(String),
+}
+
+impl RowName {
+    /// 主栏那一行印的那几个字。
+    #[must_use]
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Loose(text) | Self::Display(text) | Self::WorkName(text) => text,
+        }
+    }
+}
+
+/// **这一行屏上叫什么，只有这一处判**（ADR-0024）。
+///
+/// 它是一条**次序**：认不出作品的那一行印正题、认出来的印显示标题、都挑不出才印作品名。
+/// 三处各写一遍，屏上同一行在三处就会叫三个名字——而「复制名称」复制的那个会与人眼前
+/// 看见的不是同一个。
+///
+/// 交回的不只是那几个字，还有**是哪一支**：表格那一格照它决定副行写什么
+/// （`name_cell`），而「主栏印谁」与「副行跟什么」本来就是同一个决定的两半，
+/// 拆开就又是两处判据。
 #[must_use]
-pub fn row_name(work: &WorkRow, rules: &Rules) -> String {
-    unlinked_title(work, rules)
-        .or_else(|| work.display.clone())
-        .unwrap_or_else(|| work.name.clone())
+pub fn row_name(work: &WorkRow, rules: &Rules) -> RowName {
+    if let Some(title) = unlinked_title(work, rules) {
+        return RowName::Loose(title);
+    }
+    if let Some(display) = work.display.clone() {
+        return RowName::Display(display);
+    }
+    RowName::WorkName(work.name.clone())
 }
 
 /// 窗口默认一次取多少行。
@@ -374,8 +405,6 @@ pub struct Opened {
 pub struct RightClicked {
     /// 那一行的一份拷贝。
     pub row: WorkRow,
-    /// 它在全序里是第几行；卡片墙那一路也数得出来。
-    pub index: u64,
     /// 按下去那一下指针在哪儿——菜单贴着它摊开（设计稿 `ctxOpen(e.clientX,e.clientY,…)`）。
     pub at: egui::Pos2,
 }
@@ -656,7 +685,6 @@ impl Table<'_> {
                             *focused = Some(index);
                             *menu = Some(RightClicked {
                                 row: work.clone(),
-                                index,
                                 at,
                             });
                         }
@@ -843,13 +871,18 @@ fn name_cell(ui: &mut egui::Ui, work: &WorkRow, rules: &Rules, shelf: Option<&mu
     // 是不是由核心库答（`WorkRow::non_game_asset`），这里照着标，
     // 不自己判（ADR-0024）。
     let hit = work.hit.filter(|hit| *hit > SearchHit::Title);
-    if let Some(title) = unlinked_title(work, rules) {
-        two_lines(ui, work, hit, &title, Some(UNLINKED_LABEL), Second::Path);
-        return;
-    }
-    if let Some(display) = work.display.as_deref() {
-        two_lines(ui, work, hit, display, None, Second::WorkName);
-        return;
+    // **主栏印谁、副行跟什么，问同一处**（[`row_name`]，ADR-0024）：卡片墙与右键菜单
+    // 照的是同一个答案，三处不会各叫各的名字。
+    match row_name(work, rules) {
+        RowName::Loose(title) => {
+            two_lines(ui, work, hit, &title, Some(UNLINKED_LABEL), Second::Path);
+            return;
+        }
+        RowName::Display(display) => {
+            two_lines(ui, work, hit, &display, None, Second::WorkName);
+            return;
+        }
+        RowName::WorkName(_) => {}
     }
     // 取不到显示标题的那一行一行字：作品名，拉丁与数字加粗（设计稿 `.w1`）。
     if hit.is_none() && !work.non_game_asset {
