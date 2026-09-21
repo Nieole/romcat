@@ -255,6 +255,34 @@ fn 正好画着的每一处(output: &egui::FullOutput, 那几个字: &str) -> Ve
     每一处
 }
 
+/// 屏上**含有** `那一段` 的每一段画在哪儿（整段的外框，折了行也算在里头），按画出来的次序。
+///
+/// [`正好画着的每一处`] 认的是**整段一字不差**，而「会怎样」那几条是
+/// `look::impact` 把几截拼成的**一个** `LayoutJob`、还会折行——按整段去认认不出来，
+/// 所以另有这一支。要断言「这一段看得全」时拿它交回的那个框去比视口。
+fn 画着的每一处含(output: &egui::FullOutput, 那一段: &str) -> Vec<egui::Rect> {
+    fn 找(shape: &egui::epaint::Shape, 那一段: &str, 每一处: &mut Vec<egui::Rect>) {
+        match shape {
+            egui::epaint::Shape::Text(text) => {
+                if text.galley.text().contains(那一段) {
+                    每一处.push(egui::Rect::from_min_size(text.pos, text.galley.size()));
+                }
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    找(one, 那一段, 每一处);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut 每一处 = Vec::new();
+    for clipped in &output.shapes {
+        找(&clipped.shape, 那一段, &mut 每一处);
+    }
+    每一处
+}
+
 /// 把这扇窗此刻的样子与 `tests/snapshots/<名字>.png` 比。对不上时当场红。
 #[track_caller]
 fn 拍下(mut harness: Harness<'_>, 名字: &str) {
@@ -1460,15 +1488,31 @@ fn 详情页_识别依据_暗色() {
 // 合并向导拍**三步各一对**，移出那一层拍**刚开那一下**（稿上 `st.mode='new'`：
 // 「新建一个作品」选着、名字框里是默认名）。
 
-/// 勾上前两个作品（表上排最前的那两行），不经表格——表上勾选框那一格在基线里是个小方块，
+/// 合并向导那几张勾的是**哪三个作品**。
+///
+/// 三个而不是两个，是为了让这几张图各自示范得出该示范的东西：
+///
+/// - **两个 SFC 的**（`Chrono Trigger` 与 `Seiken Densetsu 2`）：合并之后 SFC 那一侧
+///   真的少一个前端条目——第三步那句「前端条目 N → M」这才示范得出「从多少变多少」。
+///   只勾跨平台的两个时，收敛按**作品 × 平台**走，条目数一个不减（屏上是「8 → 8」），
+///   而那是这张图唯一该说清的数。
+/// - **外加一个 GBA 的**（`Gyakuten Saiban`）：第一步那条「这些作品分属不同平台」的提示、
+///   第二步按平台分两组各挑一个首选，都靠它。
+/// - **三个**还让第一步每一行右头那颗「移除」露出来（稿上 `m.ids.length>2` 才画）。
+const 合并的那三个: [&str; 3] = [
+    点开的作品,
+    "Seiken Densetsu 2 (Japan)",
+    "Gyakuten Saiban (Japan)",
+];
+
+/// 勾上 [`合并的那三个`]，不经表格——表上勾选框那一格在基线里是个小方块，
 /// 点它要先滚到那一行，而这几张要看的是弹层。
-fn 勾上前两个(app: &mut App) {
+fn 勾上那三个(app: &mut App) {
     let 行: Vec<romcat_core::catalog::browse::WorkAnchor> = {
         let (_, site) = app.browse_and_site();
-        浏览的作品
+        合并的那三个
             .iter()
-            .take(2)
-            .map(|(名字, _, _)| {
+            .map(|名字| {
                 let id = site
                     .catalog
                     .work_named(名字)
@@ -1484,6 +1528,66 @@ fn 勾上前两个(app: &mut App) {
     }
 }
 
+/// 确认那一对拍多高（点）：第三步那一层装得下字段冲突表、两个勾选框与「合并后会发生什么」
+/// 整块——**最后一条不许被页脚切半行**（截图门这一关的判据是**看得全**，同子库屏超限那一对
+/// 与队列屏下钻那一对，模块文档「视口定死」那一节的例外）。底下那条断言把这件事写死。
+const 确认那一对的画面: [f32; 2] = [1280.0, 960.0];
+
+/// 给 SFC 那组第二个变体（`汉化/时空之轮 (简体中文 v1.2).zip`）记一条**带汉化记号**的
+/// 已接受候选——**只给合并向导那几张**，不动别的屏的基线。
+///
+/// 为什么非有它不可：第二步那句说明写着默认选中的那一个是按「汉化 > 官中 > 日版 > 其他」
+/// 选出来的，而这是这条规则在整个界面上**唯一**的示范。夹具里两个 SFC 变体身上一条汉化记号
+/// 都没有时，核心库照规则答的是「两个都是原版、平手、按键排」——屏上两行都标「原版」，
+/// 默认落在头一个，**与「取头一个」那种错做法一模一样**：图示范不出规则，断言也钉不住它。
+///
+/// 记号落在**候选**上而不是从文件名剥：「是哪一种」与首选变体同一处判（词表**变体简称**），
+/// 文件名里那个「汉化」一个字都不作数。
+fn 记上汉化记号(app: &mut App) {
+    let (_, site) = app.browse_and_site();
+    let key = "主库/SFC/汉化/时空之轮 (简体中文 v1.2).zip";
+    let 原来的 = site
+        .catalog
+        .variant(key)
+        .expect("读得动")
+        .expect("夹具里有这一份");
+    let mut 那一条 = 候选(
+        &romcat_core::shape::Variant {
+            key: key.to_owned(),
+            main_key: key.to_owned(),
+            platform: Some("SFC".to_owned()),
+            rule: SINGLE_FILE_RULE.to_owned(),
+            manual: false,
+            files: 1,
+            bytes: 原来的.bytes,
+            unreadable_files: 0,
+            members: Vec::new(),
+        },
+        true,
+        Confidence::Medium,
+        "中文离线源",
+        "Chrono Trigger (Japan)",
+        "名称模糊匹配，平台一致",
+    );
+    那一条.chinese = Some(romcat_core::dat::chinese::ChineseMark::FanTranslated);
+    site.catalog
+        .write_identifications(&[Identification {
+            variant_key: key.to_owned(),
+            state: State::Matched,
+            reason: None,
+            platform: None,
+            standalone: None,
+            edition: None,
+            units: 1,
+            nkit: 0,
+            read_bytes: 0,
+            work_id: 原来的.work_id,
+            release_id: 原来的.release_id,
+            candidates: vec![那一条],
+        }])
+        .expect("识别结论写得进");
+}
+
 /// **合并向导**走到第 `第几步` 步（从 1 数），拍一张。CI 上跳过（[`该跳过`]）。
 #[track_caller]
 fn 拍合并向导(名字: &str, 主题: Theme, 第几步: usize) {
@@ -1491,11 +1595,34 @@ fn 拍合并向导(名字: &str, 主题: Theme, 第几步: usize) {
         return;
     }
     let 浏览现场 { mut app, 目录 } = 浏览现场(false);
-    勾上前两个(&mut app);
-    let mut harness = 开一个(主题, move |ui| app.ui(ui));
+    记上汉化记号(&mut app);
+    勾上那三个(&mut app);
+    // 第三步那一层比另外两步高一截，1280×800 装不下（见 [`确认那一对的画面`]）。
+    let 画面 = if 第几步 == 3 {
+        确认那一对的画面
+    } else {
+        headless::VIEWPORT
+    };
+    let mut harness = 开一扇(主题, 画面, move |ui| app.ui(ui));
     按(&mut harness, romcat_gui::browse::merge::MERGE);
     for _ in 1..第几步 {
         按(&mut harness, "下一步");
+    }
+    if 第几步 == 3 {
+        // **看得全**：「会怎样」那几条里最后那一条整段都得在视口里，不许被页脚切掉半行。
+        let 视口 = egui::Rect::from_min_size(egui::Pos2::ZERO, 画面.into());
+        let 最后一条 = 画着的每一处含(harness.output(), "各自撤得掉");
+        assert_eq!(
+            最后一条.len(),
+            1,
+            "「会怎样」最后一条该正好画出一段来，画出了 {} 段",
+            最后一条.len(),
+        );
+        assert!(
+            视口.contains_rect(最后一条[0]),
+            "「会怎样」最后一条被切了：{:?} 不在 {视口:?} 里",
+            最后一条[0],
+        );
     }
     拍下(harness, 名字);
     drop(目录);

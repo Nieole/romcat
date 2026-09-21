@@ -4878,8 +4878,16 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
   屏上那个时刻字串是 `sublibrary::Screen::pin_exception_time` 钉死的，**钉的是显示、不是排序键**，
   所以看图只看得出两行换了位置、时刻字样一模一样。
 - **怎么复现：** 单独跑 `cargo test -p romcat-gui --all-features --test snapshot 子库_手动例外弹层`
-  **六趟全绿**；整套 85 条并跑、机器忙时 `sublibrary/exceptions-dark` 红（5,115 个像素对不上，
-  票 16 探路那一趟实测；同一趟 `-light` 绿——两条测试各建各的现场，各自撞运气）。
+  **六趟全绿**；整套并跑、机器忙时随机红一张。
+- **实测（票 16，2026-09-21，同一棵树、同一份代码、一个字没改）：两个主题各红过一次**
+  ——这坐实了它与浅暗无关、纯粹是撞两次 `set_exception` 跨没跨秒界：
+  - `sublibrary/exceptions-**dark**` 红，5,115 个像素（日志 `slot-2-gl16-snapshot-探路.log`，
+    整套 85 条那一趟；同趟 `-light` 绿）；
+  - `sublibrary/exceptions-**light**` 红，5,108 个像素（日志 `slot-2-gl16-截图门验收2.log`
+    第 2 趟，整套 87 条；**同一份日志的第 1 趟 87 过 0 红**）。
+  两条测试各建各的现场、各自撞运气，所以哪一张中是随机的。
+- ⚠️ **别拿 `UPDATE_SNAPSHOTS=1` 整套重批**：它红的时候记的是一个**错的次序**，整套重批会把
+  那个错次序烤成基线。票 16 出图时因此分四趟按名字筛着出。
 - **修法：** 照票 34 `Catalog::mark_exported_at` 的形状，给核心库加一条**带显式时刻**的例外写入口
   （`set_exceptions_at(name, keys, kind, note, at)`，`set_exceptions` 拿 `now_secs()` 调它），
   夹具把三条的 `at` 钉死成互不相同的定值。**排序那一处一个字不用改**——它本来就对。

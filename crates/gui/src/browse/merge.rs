@@ -320,7 +320,7 @@ impl Wizard {
     /// 第二步里**人真的点过**的首选变体，一条一格。
     ///
     /// **人没点过的平台一条都不在里面**：屏上那颗默认落在核心库照规则算出来的那一个身上
-    /// （[`Self::defaults`]），把它也写下去等于拿一条裁决把规则冻住。
+    /// （`Wizard` 里那份 `defaults`），把它也写下去等于拿一条裁决把规则冻住。
     #[must_use]
     pub fn preferred(&self) -> Vec<Preferred> {
         let Some(work) = self.keep_work() else {
@@ -811,7 +811,13 @@ impl Wizard {
                         ui.vertical(|ui| {
                             for (at, offer) in conflict.others.iter().enumerate() {
                                 let 整句 = offer.said.values.join("、");
-                                let 这一格 = format!("{}  · {}", 剪一段(&整句), offer.work);
+                                // **值与来源同字时不写两遍**：标题那一行的值常常就是作品名，
+                                // 写成「某某 · 某某」读起来像出了错（审查挑出，2026-09-21 照改）。
+                                let 这一格 = if 整句 == offer.work {
+                                    剪一段(&整句)
+                                } else {
+                                    format!("{}  · {}", 剪一段(&整句), offer.work)
+                                };
                                 if look::radio_option(ui, 眼下 == Pick::Other(at), &这一格, "")
                                     .on_hover_text(&整句)
                                     .clicked()
