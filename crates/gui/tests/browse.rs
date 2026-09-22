@@ -3044,6 +3044,47 @@ fn 左右两栏收得起来_关掉再打开还收着_展开回到原来那么宽
     );
 }
 
+#[test]
+fn 管理合集那颗按钮顶在筛选栏右边沿_与同栏右对齐的说明字齐头() {
+    // 稿上 `.fpane` 那一行是 `<span class="sec">收藏与合集</span><span class="sp"></span>
+    // <button class="btn ghost sm">管理合集…</button>`，`.sp` 是 `flex:1`——一整格空当把按钮
+    // 推到这一栏的右边沿。头一版没摆那格空当，按钮跟在标题后头、离右边沿差出七十来个像素。
+    //
+    // **拿什么当右边沿**：同一栏里「条件组」那一行的说明字是 `section_title` 用同一套办法
+    // 右对齐的，它的右沿就是这一栏画字能到的最右处。按钮的字比它再往里缩一份按钮左右留白
+    // （字在按钮框里居中，框的右沿才贴着边），所以两边差的正好是那一份留白。
+    //
+    // 不量图、只量矩形：这一栏里同名的字在表格与右栏里也画着，靠 `一栏::筛选栏` 圈出来。
+    let ctx = headless::context();
+    let mut app = 界面(200);
+    跑(&ctx, &mut app, 2);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 栏 = 一栏::筛选栏(&ctx, &这一帧);
+
+    let 按钮字 = 栏.正好那一段在哪儿("管理合集…");
+    let 右对齐的说明 = 栏.正好那一段在哪儿("存成子库时就是规则");
+    let 留白 = romcat_gui::tokens::Tokens::builtin()
+        .layout
+        .button_small_padding;
+
+    let 差 = 右对齐的说明.right() - 按钮字.right();
+    assert!(
+        (差 - 留白).abs() <= 1.5,
+        "「管理合集…」没顶在筛选栏右边沿：它的右沿 {}，同栏右对齐的说明字右沿 {}，\n\
+         差 {差}，按一份按钮留白应当是 {留白}",
+        按钮字.right(),
+        右对齐的说明.right(),
+    );
+    // 标题还在它左边，两段字没叠在一起。
+    let 标题 = 栏.正好那一段在哪儿("收藏与合集");
+    assert!(
+        标题.right() < 按钮字.left(),
+        "标题 {:?} 与按钮 {:?} 叠上了",
+        标题,
+        按钮字,
+    );
+}
+
 /// 右边那一栏（侧边详情）这一帧画了什么：几段字连它们的外框、贴了图的那几块、纯色块。
 ///
 /// **只收那一栏里的**：同一个平台名、同一句「1 个变体」在左栏与表格里也画着，混进来的话
@@ -3059,6 +3100,14 @@ impl 一栏 {
     fn 看(ctx: &egui::Context, output: &egui::FullOutput) -> Self {
         let 栏 = egui::PanelState::load(ctx, egui::Id::new(romcat_gui::layout::DETAIL.id))
             .expect("侧边详情那一栏画过")
+            .outer_rect;
+        Self::看这一块(output, 栏)
+    }
+
+    /// **筛选栏**（浏览屏最左那一栏）。
+    fn 筛选栏(ctx: &egui::Context, output: &egui::FullOutput) -> Self {
+        let 栏 = egui::PanelState::load(ctx, egui::Id::new(romcat_gui::layout::FILTER.id))
+            .expect("筛选栏那一栏画过")
             .outer_rect;
         Self::看这一块(output, 栏)
     }
@@ -4002,6 +4051,26 @@ fn 收起后的窄条与筛空时的空态印的是同一个条件数() {
     );
 }
 
+/// 一帧**够高、读得到左栏底下那几句话**的输入。
+///
+/// **为什么不用 [`headless::input`] 那个 1280×800**：左栏是一个 `ScrollArea`，而 egui 的
+/// `Label` 滚出视口就**不画**（不是画了被裁掉）——屏上那份字里于是一个字都不剩。左栏这半年
+/// 一直在长（票 17 加了「整理建议」一簇，这一票在「收藏与合集」那一行加了颗按钮），
+/// 量下来：加按钮之前那几句话正好卡在 800 上**一个像素都不剩**，加了之后要 810。
+///
+/// 于是这儿把窗口放高。**这条测试要钉的是屏上说了什么，不是默认窗口恰好差几个像素**
+/// ——拿 800 去钉，等于让下一个往左栏加东西的人替这条 12 票的测试背账。
+/// 「默认窗口下那句警告在不在折线以下」是另一件事，记在挂单 `Q1104` 里。
+fn 够高的一帧() -> egui::RawInput {
+    egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(headless::VIEWPORT[0], 1200.0),
+        )),
+        ..Default::default()
+    }
+}
+
 /// **筛不出东西的子句：屏上逐条点名，但一条都不拦**
 /// （票 `gui-looks-like-the-design/12`）。
 ///
@@ -4027,7 +4096,7 @@ fn 筛不出东西的子句屏上逐条点名但不拦着() {
     let rule = romcat_core::sublibrary::Rule::parse(text).expect("读得懂");
     app.browse_and_site().0.set_filter_rule(Some(rule.clone()));
     跑(&ctx, &mut app, 2);
-    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    let 屏上 = shared::画出来的字(&headless::frame(&ctx, 够高的一帧(), |ui| app.ui(ui)));
 
     // 一、三条都点到名，而且数目写出来。
     assert!(

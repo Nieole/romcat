@@ -3595,10 +3595,20 @@ impl Screen {
                          勾一批、按一下、接着筛下一批。往自建合集里加也在那一条上\
                          （「加入合集…」）；改名与删除在这儿的「管理合集…」里。",
                     );
+                    // **顶到这一栏右头**：稿上 `<span class="sp">` 是 `flex:1`，一整格空当把按钮
+                    // 推到 `.fpane` 的右边沿。这儿照 `section_title` 里帮助字那一段的办法——先量宽、
+                    // 再空出这一行剩下的那一截。量宽要在 `look::small_buttons` 那一块**外头**量：
+                    // 它那一块自己在横排里占一格间距，在里头量就把按钮往右推了一格。
+                    // 不走从右往左的横排：`section_title` 里那条注解记着它在滚动区里把字摆出过栏外。
+                    let 按钮宽 = look::small_button_width(ui, collections::MANAGE);
+                    let 剩 = ui.available_size_before_wrap().x;
+                    if 按钮宽 < 剩 {
+                        ui.add_space((剩 - 按钮宽).floor());
+                    }
                     管理 = look::small_buttons(ui, |ui| {
                         ui.scope(|ui| {
                             look::ghost_button(ui.visuals_mut());
-                            ui.button("管理合集…")
+                            ui.button(collections::MANAGE)
                         })
                         .inner
                         .on_hover_text(
