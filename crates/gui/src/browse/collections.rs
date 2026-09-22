@@ -12,7 +12,8 @@
 //! - **改名**走 [`collection::rename`]，它连引用那个合集的子库规则一起改；
 //! - **删除**走 [`collection::drop_all`]（＝把成员全部移出），
 //!   **写着它的规则一个字不改**，理由在那个函数的文档里；
-//! - **有几条规则写着它**走 [`collection::rules_naming`]，删之前那句警告要它。
+//! - **有几条规则提到它**走 [`collection::rules_naming`]，删之前那句警告要它。
+//!   （那一趟不看运算符，`合集!=X` 也算，所以屏上只说「提到」——见 [`删除确认`]。）
 //!
 //! ## 两处都不自己数数
 //!
@@ -41,12 +42,12 @@ pub const MANAGE: &str = "管理合集…";
 pub struct Manage {
     /// 正在改名的是哪一个（原名），以及框里正打着的新名字。
     renaming: Option<(String, String)>,
-    /// 正等着确认删掉的是哪一个，以及**有几条子库规则写着它**。
+    /// 正等着确认删掉的是哪一个，以及**有几条子库规则提到它**（`None` 是数不出来）。
     ///
     /// 那个数在按下「删除…」那一下问一次就存着：删除确认那一段每帧都要印它，
     /// 而它要走遍每个子库的每条规则（[`collection::rules_naming`]）——
     /// 每帧问一次就是把那趟遍历摆到画帧线上。
-    deleting: Option<(String, usize)>,
+    deleting: Option<(String, Option<usize>)>,
 }
 
 /// 「管理合集」里按下去要干的那一件事。
@@ -101,13 +102,14 @@ impl Manage {
     /// 画「管理合集」。交回 `(还开着吗, 按下去要干什么)`。
     ///
     /// `collections` 是分面那一趟问回来的「哪几个合集、各几个作品」；
-    /// `rules_naming` 是问「有几条子库规则写着这个合集」的那一下——**由调用方递进来**，
+    /// `rules_naming` 是问「有几条子库规则提到这个合集」的那一下——**由调用方递进来**，
     /// 这一层够不着中立库（而且那一趟要遍历每个子库的每条规则，不能每帧跑）。
+    /// 它交回 `None` 是**数不出来**，不是零（见 [`删除确认`]）。
     pub fn ui(
         &mut self,
         ctx: &egui::Context,
         collections: &[Facet],
-        rules_naming: &mut dyn FnMut(&str) -> usize,
+        rules_naming: &mut dyn FnMut(&str) -> Option<usize>,
     ) -> (bool, Option<Managed>) {
         let footer =
             Footer::new(Button::new("完成", Pressed::Dismiss).primary()).dismiss_on_right();
@@ -131,7 +133,7 @@ impl Manage {
         &mut self,
         ui: &mut egui::Ui,
         collections: &[Facet],
-        rules_naming: &mut dyn FnMut(&str) -> usize,
+        rules_naming: &mut dyn FnMut(&str) -> Option<usize>,
     ) -> Option<Managed> {
         let mut 动作 = None;
         // ── 收藏那一行：**照稿写明它改不动也删不掉** ──────────────────────────
@@ -279,7 +281,7 @@ fn 一行(ui: &mut egui::Ui, name: &str, count: u64) -> (bool, bool, bool) {
     let mut out = (false, false, false);
     ui.horizontal_top(|ui| {
         ui.label(font::strong(name));
-        look::help(ui, &format!("· {}", 多少个作品(count)));
+        look::help(ui, &format!("· {}", 多少个变体(count)));
         let (筛, 改, 删) = look::small_buttons(ui, |ui| {
             let 筛 = ui.button("按它筛选").clicked();
             let 改 = ui.button("改名").clicked();
@@ -297,22 +299,34 @@ fn 一行(ui: &mut egui::Ui, name: &str, count: u64) -> (bool, bool, bool) {
 /// 删除确认那一块（照稿那个 `warnbox`）：交回 `Some(true)` 是真删，
 /// `Some(false)` 是取消，`None` 是还没定。
 ///
-/// **写着它的那几条规则照实说**：删完那几条筛不出东西，而这一层**不替人改它们**
+/// **写着它的那几条规则照实说**：这一层**不替人改它们**
 /// （理由在 [`collection::drop_all`] 的文档里）。
-fn 删除确认(ui: &mut egui::Ui, name: &str, count: u64, 几条规则: usize) -> Option<bool> {
+///
+/// `几条规则` 是 `None` 时说「数不出来」，**不写 0**：读不动中立库与「一条都没有」
+/// 是两件事，把前者印成后者就是现编一个数（同一条规矩下 `Q1103` 拦掉过一个 N）。
+///
+/// ⚠️ **那句话不许说「写着 `合集=X`、删完筛不出东西」。** `Rule::names_collection`
+/// 不看运算符，`合集!=X` 也算在内，而对它那三句全是反的：不是 `合集=`，
+/// 删掉之后它选中的是**更多**，也没有什么可「救回来」。所以只说「提到」，
+/// 不承诺方向——同一个形状上票 12 的 `thin_clause` 栽过一次（挂单 `Q1101`）。
+fn 删除确认(
+    ui: &mut egui::Ui,
+    name: &str,
+    count: u64,
+    几条规则: Option<usize>,
+) -> Option<bool> {
     let mut 定了 = None;
-    let 那句话 = if 几条规则 > 0 {
-        format!(
-            "就是把它的 {} 全部移出，作品本身不受影响。\
-             子库里有 {几条规则} 条规则写着「合集={name}」，删除后它们筛不出东西\
-             ——那几条规则留着不动，你可以再建一个同名的合集把它们救回来。",
-            多少个作品(count),
-        )
-    } else {
-        format!(
-            "就是把它的 {} 全部移出，作品本身不受影响。",
-            多少个作品(count),
-        )
+    let 头一句 = format!(
+        "就是把它的 {} 全部移出，作品本身不受影响。",
+        多少个变体(count)
+    );
+    let 那句话 = match 几条规则 {
+        Some(0) => 头一句,
+        Some(几条) => format!(
+            "{头一句}子库里有 {几条} 条规则提到这个合集，删除后那几条筛出来的会跟着变\
+             ——它们留着不动，你可以再建一个同名的合集把它们救回来。"
+        ),
+        None => format!("{头一句}有几条子库规则提到这个合集，这会儿数不出来（中立库读不动）。"),
     };
     look::warn_box(ui, &format!("删除合集「{name}」"), &那句话);
     ui.horizontal_top(|ui| {
@@ -334,7 +348,8 @@ fn 删除确认(ui: &mut egui::Ui, name: &str, count: u64, 几条规则: usize) 
 impl Join {
     /// 画「加入合集」。交回 `(还开着吗, 加进哪个合集)`。
     ///
-    /// `scope` 是屏上那句「把……加入合集」里的那一段（勾了几个、还是全部筛选结果）。
+    /// `scope` 是屏上那句「把……加入合集」里的那一段，**调用方已经接好量词**
+    /// （「勾中的 1,284 个变体」）。这一层不碰那个数，也不替它认单位。
     ///
     /// ⚠️ **稿上这儿还有一句「其中 N 个只能按路径记录」，这一版印不出那个 `N`**
     /// （挂单 `Q1103`）：那个数要为这一批每个变体折一次内容判据
@@ -396,7 +411,7 @@ impl Join {
     fn body(&mut self, ui: &mut egui::Ui, collections: &[Facet]) {
         for 一个 in collections.iter().filter(|一个| 一个.value != FAVORITE) {
             let 选中 = self.target.as_deref() == Some(一个.value.as_str());
-            if look::radio_option(ui, 选中, &一个.value, &多少个作品(一个.count)).clicked()
+            if look::radio_option(ui, 选中, &一个.value, &多少个变体(一个.count)).clicked()
             {
                 self.target = Some(一个.value.clone());
             }
@@ -447,14 +462,24 @@ impl Join {
     }
 }
 
-/// 「N 个作品」那半句。
-fn 多少个作品(count: u64) -> String {
-    format!("{} 个作品", romcat_core::report::thousands(count))
+/// 「N 个变体」那半句。
+///
+/// ⚠️ **写「变体」不写「作品」，因为这个数数的就是变体。** 它来自
+/// [`Facet::count`]，核心库那一侧写着「这个值选中多少个变体」，那条 SQL 是
+/// `COUNT(*) FROM collection_variant`——一行一个变体。
+/// 稿上 `DLG.coll` 那几处写的是「N 个作品」（`c.ids` 装的是作品下标），
+/// **那是另一个数**：一部作品挂三个变体，稿上写 1、这儿的来源是 3。
+///
+/// 要照稿写「个作品」得在合集这一维上另问一趟 `COUNT(DISTINCT work_id)`，
+/// 那就破了这一屏「屏上的数只有一个来源、不自己数第二遍」的规矩（模块头那一段）。
+/// 与其印一个单位对不上的数，不如照实写它是什么——挂单 `Q1107`。
+fn 多少个变体(count: u64) -> String {
+    format!("{} 个变体", romcat_core::report::thousands(count))
 }
 
 /// 这个合集在分面上写着几个。分面里没有它就是 0——**不另查一遍库**。
 fn 几个(collections: &[Facet], name: &str) -> String {
-    多少个作品(
+    多少个变体(
         collections
             .iter()
             .find(|一个| 一个.value == name)

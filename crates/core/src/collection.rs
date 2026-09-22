@@ -94,6 +94,19 @@ pub enum CollectionError {
          只是名字由本仓定死（`collection::FAVORITE`）。"
     )]
     Reserved,
+    /// 改名改到第三步，一条子库规则**重造不回来**。
+    ///
+    /// 正常路上碰不到：新名字写不进规则这件事，[`check_name`] 的
+    /// [`BadName::Unwritable`] 那一档在第一步就拦住了。**碰到了就是那一闸漏了。**
+    /// 这一档交上来而不是静默留着那条旧规则，是因为静默的代价是一句假回执
+    /// ——「没有哪条子库规则写着它」，而那个子库从此一行都选不出来。
+    ///
+    /// ⚠️ **这一档交上来时，沉淀库与投影已经改完了。** 合集的名字是新的，
+    /// 剩下的是那几条还指着旧名的规则；照 `合集=新名` 重新存一遍子库就收拾干净了。
+    #[error(
+        "合集改名了，可有一条子库规则改不回来（{0}）。合集的名字已经是新的，             那几条还写着旧名的规则得自己再存一遍。"
+    )]
+    RuleRewrite(String),
     /// 被按停了。**读那一半整条只读**，所以这一档停在哪儿都是干净的。
     ///
     /// **这一句想怎么写就怎么写。** 任务台分「停了」与「失败」看的是
@@ -165,9 +178,13 @@ pub struct Projected {
 /// 一个**合集**的名字用不得的那几种（票 `gui-looks-like-the-design/13`，稿上
 /// `collNameErr` 那四条）。
 ///
-/// **四条判在一处**（ADR-0024）：建合集、改名、以及日后命令行那条路，问的都是
-/// [`check_name`]。界面自己判字符串的话，「加入合集」那个弹层与「改名」那个弹层
-/// 迟早对同一个名字给出两种答复。
+/// **这几条判在一处**（ADR-0024）：「加入合集」与「改名」那两个弹层问的都是
+/// [`check_name`]。界面自己判字符串的话，两个弹层迟早对同一个名字给出两种答复。
+///
+/// ⚠️ **核心库这一层眼下不替调用方问**：[`plan`] 门口只判了名字空不空，
+/// `add` / `remove` 一条都不判。也就是说今天**只有界面那两处在问**，
+/// 日后接命令行那条路时要自己记得问一遍，或者把这几条挪进 [`plan`]
+/// （挂单 `Q1106`）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BadName {
     /// 空的（或者只有空白）。
@@ -179,6 +196,15 @@ pub enum BadName {
     /// 名字里有逗号。**逗号是规则里的值分隔符**（`合集=甲,乙`），
     /// 带着它的名字写进规则会被读成两个值。
     Comma,
+    /// 这个名字**写进规则读回来就不是它自己了**：两侧带空白的连接词（`甲 或 乙`）、
+    /// 不配对的括号之类。判据是 [`crate::catalog::browse::writable_value`]，
+    /// 也就是 `Clause::build` 那两道闸——**不在这儿另写一份**。
+    ///
+    /// 拦它的理由比「读着别扭」重的多：放过去的话，改名那一趟会在
+    /// [`rename`] 的第三步悄悄失败——沉淀库改完了、投影重建了，而写着
+    /// `合集=旧名` 的子库规则原样留着，回执却报「没有哪条子库规则写着它」。
+    /// 那个子库从此一行都选不出来，屏上不红。
+    Unwritable,
 }
 
 impl BadName {
@@ -190,6 +216,9 @@ impl BadName {
             Self::Reserved => format!("「{FAVORITE}」是默认的那一组，请换一个名称。"),
             Self::Taken => "已经有同名的合集。".to_string(),
             Self::Comma => "名称里不能有逗号——规则里用逗号分隔多个值。".to_string(),
+            Self::Unwritable => "这个名称写不进规则（两侧带空白的「且 / 或 / 非」，\
+                 或者不配对的括号）。请换一个，否则 `合集=这个名称` 筛不出东西。"
+                .to_string(),
         }
     }
 }
@@ -203,7 +232,7 @@ impl BadName {
 /// 这一步——忘了的话「 通关过的」与「通关过的」会在库里各占一行。
 ///
 /// # Errors
-/// 名字空着、与**收藏**重名、已经有同名的、或者带着逗号时交回 [`BadName`]。
+/// 名字空着、与**收藏**重名、已经有同名的、带着逗号、或者**写不进规则**时交回 [`BadName`]。
 pub fn check_name(name: &str, existing: &[String]) -> Result<String, BadName> {
     let name = name.trim();
     if name.is_empty() {
@@ -216,6 +245,14 @@ pub fn check_name(name: &str, existing: &[String]) -> Result<String, BadName> {
     // 打出来的是全角那一个——放它进去，屏上那条规则读起来就是两个值。
     if name.contains(',') || name.contains('，') {
         return Err(BadName::Comma);
+    }
+    // **「写得进规则吗」只有一处判据**（ADR-0024）：`Clause::build` 那两道闸的包装。
+    // 在这儿另写一份字符串判断的话，两份迟早互不覆盖——票 13 之前正是这样：
+    // 这儿只拦逗号，而那一处还拦括号与两侧带空白的连接词，于是
+    // `送朋友的 或 备份` 建得出来、筛不出来，改名还会把子库悄悄改空
+    // （见 [`BadName::Unwritable`]）。
+    if !crate::catalog::browse::writable_value(crate::sublibrary::Dimension::Collection, name) {
+        return Err(BadName::Unwritable);
     }
     if existing.iter().any(|一个| 一个 == name) {
         return Err(BadName::Taken);
@@ -642,7 +679,10 @@ pub fn rename(site: &mut Site, from: &str, to: &str) -> Result<Renamed, Collecti
             let Ok(rule) = Rule::parse(&一条.text) else {
                 continue;
             };
-            if let Some(改过的) = rule.with_collection_renamed(from, &to) {
+            let 改过的 = rule
+                .with_collection_renamed(from, &to)
+                .map_err(|坏了| CollectionError::RuleRewrite(坏了.to_string()))?;
+            if let Some(改过的) = 改过的 {
                 site.catalog
                     .replace_rule(&子库.name, 一条.ordinal, &改过的)?;
                 rules += 1;

@@ -597,19 +597,14 @@ impl Rule {
     /// 删一个合集之前屏上要说「子库里有 N 条规则写着它，删完那几条筛不出东西」
     /// （稿上 `DLG.coll` 那个警告框），数的就是它。
     ///
-    /// **与 [`Self::with_collection_renamed`] 同一条口径**：只认
-    /// [`Dimension::Collection`] 那一维、逐个值一字不差地比。两处各写一份的话，
-    /// 「警告说有 2 条」与「改名真改了 3 条」就会对不上。
+    /// **与 [`Self::with_collection_renamed`] 同一条口径**：两处问的是同一个
+    /// [`clause_names_collection`]。各写一份的话，「警告说有 2 条」与
+    /// 「改名真改了 3 条」就会对不上——ADR-0024 那条推论管的正是这件事。
     #[must_use]
     pub fn names_collection(&self, name: &str) -> bool {
-        self.clauses().iter().any(|clause| {
-            clause.dimension == Dimension::Collection
-                && clause
-                    .raw
-                    .split(',')
-                    .map(str::trim)
-                    .any(|一个| 一个 == name)
-        })
+        self.clauses()
+            .iter()
+            .any(|clause| clause_names_collection(clause, name))
     }
 
     /// 把这条规则里**合集**那一维上叫 `from` 的值改成 `to`；一处都没改就交回 `None`。
@@ -626,11 +621,15 @@ impl Rule {
     ///
     /// 改完那一条走 [`Clause::build`] 重造（与手打那行字同一条路），
     /// 于是印出去照样读得回来。
-    #[must_use]
-    pub fn with_collection_renamed(&self, from: &str, to: &str) -> Option<Self> {
+    ///
+    /// # Errors
+    /// 新名字**写不进规则**时交回 [`RuleError`]。正常路上碰不到——
+    /// `collection::check_name` 的 `Unwritable` 那一档在改名那一步就拦住了；
+    /// 碰到了就是那一闸漏了，**得让调用方看见**，不许静默把那条规则留着指向旧名。
+    pub fn with_collection_renamed(&self, from: &str, to: &str) -> Result<Option<Self>, RuleError> {
         let mut 改过 = false;
-        let root = rename_in_group(&self.root, from, to, &mut 改过);
-        改过.then(|| Self::from_group(root))
+        let root = rename_in_group(&self.root, from, to, &mut 改过)?;
+        Ok(改过.then(|| Self::from_group(root)))
     }
 
     /// 这条规则**一眼认得出的短名**（设计稿 `autoName`）：`平台 · 其余`，如「FC · 汉化」「PSP · 汉化和官中」。
@@ -767,43 +766,70 @@ impl fmt::Display for Group {
 }
 
 /// [`Rule::with_collection_renamed`] 的递归那一半：一层一层重建。
-fn rename_in_group(group: &Group, from: &str, to: &str, 改过: &mut bool) -> Group {
+fn rename_in_group(
+    group: &Group,
+    from: &str,
+    to: &str,
+    改过: &mut bool,
+) -> Result<Group, RuleError> {
     let nodes = group
         .nodes
         .iter()
         .map(|node| match node {
-            Node::Clause(clause) => Node::Clause(rename_in_clause(clause, from, to, 改过)),
-            Node::Group(inner) => Node::Group(rename_in_group(inner, from, to, 改过)),
+            Node::Clause(clause) => rename_in_clause(clause, from, to, 改过).map(Node::Clause),
+            Node::Group(inner) => rename_in_group(inner, from, to, 改过).map(Node::Group),
         })
-        .collect();
-    Group::new(group.join, nodes)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Group::new(group.join, nodes))
+}
+
+/// **这条子句写着这个合集吗**：只认 [`Dimension::Collection`] 那一维，
+/// 逐个值**一字不差**地比。
+///
+/// [`Rule::names_collection`]（数给屏上那句警告看）与 [`rename_in_clause`]（真去改）
+/// 问的都是它。**一处判据**（ADR-0024）：各写一份的话，警告数出来的那几条与改名真改
+/// 的那几条会是两批。
+///
+/// ⚠️ **它不看运算符。** `合集!=送朋友的` 也算「写着这个合集」——那是有意的：
+/// 改名时那一条**必须**跟着改（不改的话它排除的就成了一个不存在的名字，
+/// 于是什么都不排除、那个子库悄悄变宽）。**可它对屏上那句话不成立**：
+/// 删掉之后 `!=` 那一条选中的是**更多**而不是更少。所以数给「删除」那句警告看的时候，
+/// 话得说成「有 N 条规则**提到**这个合集」，不许说成「写着 `合集=X`、删完筛不出东西」
+/// ——同一个形状上票 12 的 `thin_clause` 已经栽过一次（挂单 `Q1101`）。
+fn clause_names_collection(clause: &Clause, name: &str) -> bool {
+    clause.dimension == Dimension::Collection
+        && clause
+            .raw
+            .split(',')
+            .map(str::trim)
+            .any(|一个| 一个 == name)
 }
 
 /// 一条子句里那几个值逐个比：**只动合集那一维**，而且**一字不差才算**。
 ///
-/// 重造走 [`Clause::build`]。**造不出来就原样留着**：那只可能是新名字本身写不进规则
-/// （比如带着逗号），而那件事该在改名那一步就被 `collection::check_name` 拦住——
-/// 真漏到这儿，宁可让那条规则照旧指着旧名（选不出东西、但读得懂），
-/// 也不把它换成一条读不回来的原文。
-fn rename_in_clause(clause: &Clause, from: &str, to: &str, 改过: &mut bool) -> Clause {
-    if clause.dimension != Dimension::Collection {
-        return clause.clone();
+/// 重造走 [`Clause::build`]。**造不出来是个错，不是一种结果**：新名字写不进规则这件事
+/// 该在改名那一步就被 `collection::check_name` 的 `Unwritable` 那一档拦住
+/// （票 13 之前拦不住，于是这儿静默 `clause.clone()`，调用方数到的改动是 0、
+/// 屏上回执写「没有哪条子库规则写着它」，而那条规则还指着旧名）。
+/// 真漏到这儿就往上交错误，让调用方去说，别再悄悄留着。
+fn rename_in_clause(
+    clause: &Clause,
+    from: &str,
+    to: &str,
+    改过: &mut bool,
+) -> Result<Clause, RuleError> {
+    if !clause_names_collection(clause, from) {
+        return Ok(clause.clone());
     }
-    let 值们: Vec<&str> = clause.raw.split(',').map(str::trim).collect();
-    if !值们.contains(&from) {
-        return clause.clone();
-    }
-    let 换过的: Vec<&str> = 值们
-        .iter()
-        .map(|一个| if *一个 == from { to } else { *一个 })
+    let 换过的: Vec<&str> = clause
+        .raw
+        .split(',')
+        .map(str::trim)
+        .map(|一个| if 一个 == from { to } else { 一个 })
         .collect();
-    match Clause::build(clause.dimension, clause.op, &换过的.join(",")) {
-        Ok(新的) => {
-            *改过 = true;
-            新的
-        }
-        Err(_) => clause.clone(),
-    }
+    let 新的 = Clause::build(clause.dimension, clause.op, &换过的.join(","))?;
+    *改过 = true;
+    Ok(新的)
 }
 
 /// 把一个组印回文本。`nested` 是「它套在别的组里」——那时要加括号。

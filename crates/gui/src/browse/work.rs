@@ -3809,8 +3809,10 @@ fn description_card(ui: &mut egui::Ui, page: &Page) -> Option<PageAction> {
 /// 状态那一块（设计稿 `ovTab` 右边第二块 `.sect`）：识别——逐个变体的识别结论照出现的次序数个数（词是核心库的
 /// `State::label` 与「还没识别」）；元数据——表上那一行的短标签；收藏、子库、导出各一行。
 ///
-/// **稿上夹在「收藏」与「子库」中间的「合集」那一行不在这儿**：它连同那颗「加入合集…」归票 13，
-/// 这一块照稿的次序把位置给它留着。
+/// **稿上夹在「收藏」与「子库」中间的那一行「合集」就在这儿**（票 13）：列出这部作品进了哪几个
+/// 自建合集，每一个后头一颗「×」就地移出。**收藏不在这一行里**——它是那个默认的一组，
+/// 上头「收藏」那一行已经说了它，两处都写就成了同一件事说两遍。
+/// 稿上这一行末尾还有一颗「加入合集…」，眼下没摆（票 13 没做，挂单 `Q1108`）。
 ///
 /// 「子库」与「导出」两行的判断**一个字都不在这儿**（票 `gui-looks-like-the-design/34`）：
 /// 落在哪几个子库里由求值那一处答（`sublibrary::holding`），上次几点写出去的由导出那一趟
@@ -3844,7 +3846,9 @@ fn status_card(ui: &mut egui::Ui, work: &WorkDetail, page: &Page) -> Option<Page
                 ui.label(egui::RichText::new(row.meta_label()).size(字号).color(强));
             });
         }
-        // 收藏：只读地写一行（设计稿状态块「收藏」那一格）；收没收藏、钉在哪种锚上由核心库答（`collection::favorite_of`）。
+        // 收藏：只读地写一行（设计稿状态块「收藏」那一格）；收没收藏、钉在哪种锚上由核心库答
+        // （`collection::standing_of_work`——它一趟把收藏与自建合集的锚一起答了，
+        // 底下「合集」那一行读的是同一份，不会对同一批变体报出两种锚）。
         ui.add_space(tokens.space.info_list_gap[0]);
         info_row(ui, "收藏", |ui| {
             let 留神 = look::tone_colors(look::Tone::Caution, ui.visuals()).0;

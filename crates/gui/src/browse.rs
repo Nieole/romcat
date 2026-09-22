@@ -853,8 +853,10 @@ impl Screen {
             let catalog = &site.catalog;
             // **「有几条规则写着它」按下「删除…」那一下才问**（弹层那一层存着那个数）：
             // 它要走遍每个子库的每条规则，每帧问一次就是把那趟遍历摆到画帧线上。
-            let mut 几条规则 =
-                |name: &str| collection::rules_naming(catalog, name).unwrap_or_default();
+            // **读不动就交 `None`，不交 0**：「一条都没有」与「数不出来」是两件事，
+            // 把后者印成前者就是现编一个数（同一条规矩下 `Q1103` 拦掉过一个 N，
+            // `Screen::scope` 的文档也记着同一个形状）。
+            let mut 几条规则 = |name: &str| collection::rules_naming(catalog, name).ok();
             let (还开着, 动作) = manage.ui(ctx, &self.facets.collections, &mut 几条规则);
             if !还开着 {
                 self.manage_collections = None;
@@ -870,7 +872,15 @@ impl Screen {
                 None => {}
             }
         }
-        let 这一批 = scope_label(self.scope_total());
+        // **带上量词，而且照实写是「变体」**（稿上那句是「把勾选的 N 个作品加入合集。」）。
+        // `scope_label` 只把数折成字、不带单位，别处每个调用方都自己接
+        // （「· N 个变体」「（共 N）」）；这儿一度漏了，屏上就是「把1,284加入合集。」。
+        // 而 `Screen::scope` 那个数数的是**变体**，不是作品——同 `collections::多少个变体`
+        // 那一段的账（挂单 `Q1107`）。`？` 那一档是数不出来，不是零。
+        let 这一批 = match self.scope_total() {
+            Some(几个) => format!("勾中的 {} 个变体", thousands(几个)),
+            None => "勾中的那一批（数不出来）".to_string(),
+        };
         let collections = self.facets.collections.clone();
         if let Some(join) = self.join_collection_dialog.as_mut() {
             let (还开着, 加进) = join.ui(ctx, &collections, &这一批);
@@ -894,13 +904,15 @@ impl Screen {
                 self.error = None;
                 self.notice = Some(if 账.rules > 0 {
                     format!(
-                        "「{from}」改叫「{to}」了（{} 条成员关系跟着改）。                         写着这个合集的 {} 条子库规则一并更新。",
+                        "「{from}」改叫「{to}」了（{} 条成员关系跟着改）。\
+                         写着这个合集的 {} 条子库规则一并更新。",
                         thousands(账.members as u64),
                         thousands(账.rules as u64),
                     )
                 } else {
                     format!(
-                        "「{from}」改叫「{to}」了（{} 条成员关系跟着改）。                         没有哪条子库规则写着它。",
+                        "「{from}」改叫「{to}」了（{} 条成员关系跟着改）。\
+                         没有哪条子库规则写着它。",
                         thousands(账.members as u64),
                     )
                 });
@@ -914,7 +926,8 @@ impl Screen {
     /// **写着它的那几条子库规则一个字不改**，那是核心库那一处有意的决定——
     /// 删完那个合集还可能再建一个同名的回来。回执里照实说。
     fn drop_collection(&mut self, site: &mut Site, name: &str) {
-        let 几条规则 = collection::rules_naming(&site.catalog, name).unwrap_or_default();
+        // 同上：读不动是 `None`，回执里那半句就不说数目（`Q1103` 那条规矩）。
+        let 几条规则 = collection::rules_naming(&site.catalog, name).ok();
         match collection::drop_all(site, name) {
             Ok(移出了) => {
                 self.refresh(site);
@@ -927,13 +940,17 @@ impl Screen {
                 self.notice = Some(format!(
                     "合集「{name}」删掉了：{} 条成员关系移出，作品本身一个字没动。{}",
                     thousands(移出了 as u64),
-                    if 几条规则 > 0 {
-                        format!(
-                            "子库里那 {} 条写着它的规则留着不动——再建一个同名的合集就又筛得出来了。",
-                            thousands(几条规则 as u64),
-                        )
-                    } else {
-                        String::new()
+                    match 几条规则 {
+                        Some(0) => String::new(),
+                        // **只说「提到」**：`names_collection` 不看运算符，`合集!=X` 也算在内，
+                        // 而对它「删完筛不出东西」是反的（挂单 `Q1101` 同一个形状）。
+                        Some(几条) => format!(
+                            "子库里那 {} 条提到它的规则留着不动——再建一个同名的合集就又筛得出来了。",
+                            thousands(几条 as u64),
+                        ),
+                        None => "子库里有几条规则提到它，这会儿数不出来（中立库读不动）；\
+                                 那几条规则留着不动。"
+                            .to_string(),
                     },
                 ));
             }
@@ -2180,13 +2197,19 @@ impl Screen {
     ///
     /// **一个都没勾就别动库**：与「刮削…」同一条规矩——摆出一份「作用于 0 个变体」
     /// 的回执，人只会对着它猜哪儿出了问题。
+    ///
+    /// **那个动词得说按下去的是哪一颗**：一行都没勾时屏上那句话会把它嵌进去
+    /// （「一行都没勾。……**加收藏**的作用范围就是勾中的那一批。」）。
+    /// 往自建合集里加却说「加收藏」，人会以为自己按错了按钮。
     fn join(&mut self, site: &Site, tasks: &mut Tasks, name: &str) {
-        self.queue_collection(site, tasks, name, true, "加收藏");
+        let doing = 这一下叫什么(name, true);
+        self.queue_collection(site, tasks, name, true, &doing);
     }
 
     /// 把勾中的那一批从一个合集里拿出来。
     fn part(&mut self, site: &Site, tasks: &mut Tasks, name: &str) {
-        self.queue_collection(site, tasks, name, false, "取消收藏");
+        let doing = 这一下叫什么(name, false);
+        self.queue_collection(site, tasks, name, false, &doing);
     }
 
     /// **把这一下排上[任务台](crate::task)**：读那一半跑在画帧那条线程之外。
@@ -3015,7 +3038,7 @@ impl Screen {
     ///
     /// **第一层照稿是 `.tbar`**：视图切换、「N 个作品（共 M）」那一句
     /// （[`Self::count_line`]）、选中数与「清除选择」一路从左往右，那几颗批量操作
-    /// **整组靠右**（[`Self::action_bar`]）。**第二层是 `.cbar`**：当前这种呈现方式
+    /// **整组靠右**（[`Self::action_buttons`]）。**第二层是 `.cbar`**：当前这种呈现方式
     /// 自己的那几样（表格是「在每行开头显示封面」，卡片是分组／排序／大小）。
     ///
     /// ⚠️ **「N 个作品（共 M）」这一票挪回了左边**（挂单 `Q1102`）。票 09 把它摆在这一条的
@@ -3457,8 +3480,13 @@ impl Screen {
     }
 
     /// 左边那栏，照稿 `.fpane` 从上到下：标题行（「清除」与收起）、搜索框、平台、中文、识别结论、
-    /// 收藏与合集、条件组、「显示非游戏资产」那颗开关；稿上没画、这一票之前就有的那几样（取消收藏、
-    /// 合集的加减、语言、存成子库）缩成小号垫在最底下（拿主意的人第 6 问的答复，挂单 `Q873`）。
+    /// 收藏与合集（抬头右头一颗「管理合集…」）、整理建议、条件组、「显示非游戏资产」那颗开关；
+    /// 稿上没画、这一票之前就有的那两样（语言、存成子库）缩成小号垫在最底下
+    /// （拿主意的人第 6 问的答复，挂单 `Q873`）。
+    ///
+    /// **「取消收藏、合集的加减」那一簇不在了**：票 `gui-looks-like-the-design/13`
+    /// 把它们搬进了该去的地方（加入合集走表格上方那一条与弹层，改名删除走「管理合集…」，
+    /// 取消收藏走右键菜单与 `F`），`Q873` 就此收口。
     ///
     /// **两套筛法各管一段**（挂单 `Q73`）：分面标签各自带着条数（`Catalog::facets` 一次
     /// `GROUP BY` 问出来的），那是用来**摸清库里有什么**的；条件组里的值要打出来，那是用来
@@ -3682,8 +3710,12 @@ impl Screen {
                 // 票 09 把「☆ 取消收藏」、合集名输入框与「加入合集 / 移出合集」缩成小号
                 // 垫在这儿（稿上没画，拿主意的人 2026-09-14 定「功能不丢、等弹层做出来
                 // 再搬」）。**这一票搬完了**：往合集里加走表格上方那一条的「加入合集…」，
-                // 改名与删除走这一栏抬头那颗「管理合集…」，取消收藏走作品详情页那一行
-                // 合集上的「移出」。于是这儿照稿什么都不摆。
+                // 改名与删除走这一栏抬头那颗「管理合集…」，**取消收藏走右键菜单那一项与 `F` 键**
+                // （票 14 加的）。于是这儿照稿什么都不摆。
+                //
+                // ⚠️ 这儿一度写着「取消收藏走作品详情页那一行合集上的『移出』」，**不成立**：
+                // 那一行是自建合集，`work::Page` 把**收藏**从名单里滤掉了（`work.rs` 那一段
+                // 「收藏不在这一行里」写着理由）。
 
                 pane_gap(ui);
                 section_title(ui, "语言", None).on_hover_text(
@@ -4836,7 +4868,7 @@ impl Action {
                 "把勾中的那一批全放进收藏。落沉淀库、锚在内容上——\
                  删掉中立库重扫、改名、挪目录都还在。无判据的那些只钉得住本机路径，\
                  按完的回执里会点名说有几个。\n\n\
-                 取消收藏与自建合集在左栏最底下：加收藏按得最勤，所以只有它在这一组里。"
+                 已经收藏的要取消，在那一行上按右键选「取消收藏」，或者按 F。"
             }
             Self::Join => {
                 "把勾中的那一批放进一个合集——选一个已有的，或者当场起个名字建一个。\
@@ -4854,6 +4886,20 @@ impl Action {
 const UNDO: &str = "撤销";
 
 /// 作用范围那个数画成什么。**数不出来就说数不出来**，不摆一个 0 出去。
+/// 这一下按的到底叫什么（屏上那几句提示里嵌的那个动词）。
+///
+/// **收藏是那个默认的一组**，它与自建合集走同一套成员关系，可屏上不该叫它「加入合集」
+/// ——按钮上写的是「★ 收藏」。自建的那些反过来：按的是「加入合集…」，
+/// 说成「加收藏」人会以为自己按错了。
+fn 这一下叫什么(name: &str, joining: bool) -> String {
+    match (name == FAVORITE, joining) {
+        (true, true) => "加收藏".to_string(),
+        (true, false) => "取消收藏".to_string(),
+        (false, true) => format!("加入合集「{name}」"),
+        (false, false) => format!("移出合集「{name}」"),
+    }
+}
+
 fn scope_label(scope: Option<u64>) -> String {
     scope.map_or_else(|| "？".to_string(), thousands)
 }

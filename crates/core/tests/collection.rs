@@ -629,12 +629,17 @@ fn 一个作品收没收藏_收了的里头有只钉得住路径的就照路径�
     assert_eq!(问(&现场.site, &[勇者]), None, "在自建合集里不等于收藏了");
 }
 
-/// **改名：四条校验判在一处**（票 `gui-looks-like-the-design/13`，稿上 `collNameErr`）。
+/// **改名：那几条校验判在一处**（票 `gui-looks-like-the-design/13`，稿上 `collNameErr`）。
 ///
 /// 界面自己判字符串的话，「加入合集」那个弹层与「改名」那个弹层迟早对同一个名字给出
 /// 两种答复（ADR-0024）。
+///
+/// 「**写得进规则吗**」那一条尤其不许在这儿另写一份：判据在
+/// `catalog::browse::writable_value`（也就是 `Clause::build` 那两道闸）。
+/// 第一版在这儿只拦了逗号，于是 `甲 或 乙` 这类名字建得出来、筛不出来
+/// ——底下 `名字写不进规则时…` 那一条钉的就是这个。
 #[test]
-fn 合集名那四条校验判在一处() {
+fn 合集名那几条校验判在一处() {
     use romcat_core::collection::{BadName, check_name};
 
     let 已有 = ["通关过的".to_string(), "送朋友的".to_string()];
@@ -661,12 +666,32 @@ fn 合集名那四条校验判在一处() {
         "全角逗号也得拦：中文输入法下打出来的是这一个"
     );
 
+    // 二之二、**写不进规则的那一档**：判据与「存成子库」那一步同一个
+    // （`catalog::browse::writable_value`），不在 `check_name` 里另写一份。
+    for 写不进的 in ["甲 或 乙", "甲 且 乙", "口袋(日版", "甲) 乙"] {
+        assert_eq!(
+            check_name(写不进的, &已有),
+            Err(BadName::Unwritable),
+            "「{写不进的}」写进规则读回来就不是它自己了，得在起名这一步就拦住"
+        );
+        assert!(
+            !romcat_core::catalog::browse::writable_value(
+                romcat_core::sublibrary::Dimension::Collection,
+                写不进的,
+            ),
+            "这一条拦的理由得与「存成子库」那一步是同一个判据"
+        );
+    }
+    // 连接词**两侧没有空白**时不是连接词，照样用得上（`reads_as_joiner` 那条口径）。
+    assert_eq!(check_name("甲或乙", &已有).expect("用得上"), "甲或乙");
+
     // 三、**每一条都说得出怎么才行**（ADR-0005 那条「不禁按钮」）。
     for 哪一条 in [
         BadName::Empty,
         BadName::Reserved,
         BadName::Taken,
         BadName::Comma,
+        BadName::Unwritable,
     ] {
         assert!(!哪一条.advice().is_empty(), "{哪一条:?} 说不出为什么不行");
     }
@@ -747,6 +772,60 @@ fn 改名连引用它的子库规则一起改_收藏改不得() {
     assert!(
         规则们.contains(&"平台=FC".to_string()),
         "与这个合集无关那条规则被动了：{规则们:?}"
+    );
+
+    // 二之二、**改成一个写不进规则的名字：一个字都不许写**。
+    //
+    // 这一条钉的是一条真出过的路：`check_name` 从前只拦逗号，于是 `甲 或 乙` 放行，
+    // 沉淀库先改完、投影重建完，到第三步 `Clause::build` 才失败——那时那条规则
+    // 静默留着指向旧名，而回执报「没有哪条子库规则写着它」。那个子库从此一行都选不出来，
+    // 屏上不红。现在它在第一步就被 `BadName::Unwritable` 挡住。
+    let 坏名字 = "给小明的 或 备份";
+    let 挡住了 = collection::rename(&mut 现场.site, "给小明的", 坏名字);
+    assert!(
+        matches!(
+            挡住了,
+            Err(collection::CollectionError::Name(
+                collection::BadName::Unwritable
+            ))
+        ),
+        "写不进规则的名字该在改名第一步就挡住，实际是 {挡住了:?}"
+    );
+    // **挡住＝什么都没写**：三处各核一遍，别只核屏上那句话。
+    assert_eq!(
+        筛(&现场.site.catalog, "合集=给小明的"),
+        改前,
+        "挡住之后投影被动过了"
+    );
+    // **这一条只能问沉淀库，问不得规则**：`合集=给小明的 或 备份` 本身读不回来
+    // ——那正是拦它的理由。
+    let 库里有的: Vec<String> = 现场
+        .site
+        .store
+        .collections()
+        .expect("读得出")
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        !库里有的.iter().any(|一个| 一个 == 坏名字),
+        "挡住之后沉淀库里却多了一个叫这个的合集：{库里有的:?}"
+    );
+    assert!(
+        库里有的.iter().any(|一个| 一个 == "给小明的"),
+        "挡住之后旧名字没了：{库里有的:?}"
+    );
+    let 规则们: Vec<String> = 现场
+        .site
+        .catalog
+        .sublibrary_rules("掌机")
+        .expect("读得出")
+        .into_iter()
+        .map(|一条| 一条.text)
+        .collect();
+    assert!(
+        规则们.contains(&"合集=给小明的".to_string()),
+        "挡住之后那条规则被动过了：{规则们:?}"
     );
 
     // 三、**收藏改不得**。

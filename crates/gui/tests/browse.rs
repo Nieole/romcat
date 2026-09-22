@@ -4193,15 +4193,15 @@ fn 排序那句说明只在搜索着的时候才出现() {
 /// **真按一下**。
 #[test]
 fn 批量那一组整组靠右_摆不下就整组换行_不拆散也点得中() {
-    /// 照稿的次序。今天摆得出这三颗，「加入合集…」（票 13）与「加入子库…」（票 23）
-    /// 位置留着。
+    /// 照稿的次序。「加入合集…」是票 13 补上的（挂单 `Q1102`）；
+    /// 稿上这一条还有「加入子库…」，那一颗等票 23。
     const 照稿次序: [&str; 4] = ["刮削…", "★ 收藏", "加入合集…", "合并作品…"];
 
     let ctx = headless::context();
     let mut app = 界面(ROWS);
     跑(&ctx, &mut app, 3);
 
-    /// 那三颗各画在哪儿，按屏上从左到右排好。
+    /// 那几颗各画在哪儿，按屏上从左到右排好。
     fn 那一组(帧: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
         let mut 几颗: Vec<(String, egui::Rect)> = 照稿次序
             .iter()
@@ -4473,6 +4473,137 @@ fn 管理合集那一层改得动名字_收藏那一行写明改不动() {
     );
 }
 
+/// **「管理合集」那一层：删除＝把成员全部移出，写着它的子库规则一个字不改**
+/// （票 `gui-looks-like-the-design/13`）。
+///
+/// 三件事一起钉：
+///
+/// 1. 删之前那句警告**说得出有几条子库规则提到它**（那个数按下「删除…」那一下才问）；
+/// 2. 按下去之后**库里真的空了**——断的是分面与沉淀库，不是屏上那句回执；
+/// 3. **那几条子库规则原样留着**。这是核心库那一处有意的决定（`collection::drop_all`
+///    的文档写着理由：删完还可能再建一个同名的回来），屏上那句回执与它得是同一口径。
+///
+/// 另外钉一条容易忘的：**正被筛着的那个合集删掉时，筛选栏那一维要跟着清掉**，
+/// 不然屏上筛着一个已经不在的合集，一行都不剩而看不出为什么。
+#[test]
+fn 管理合集那一层删得掉_成员全部移出而规则原样留着() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-删合集"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+
+    // 现场：一个自建合集，外加一条写着它的子库规则、一条与它无关的。
+    {
+        let (browse, site) = app.browse_and_site();
+        let keys = site
+            .catalog
+            .variant_page(&romcat_core::catalog::browse::VariantQuery::default(), 0, 8)
+            .expect("取得出变体")
+            .into_iter()
+            .map(|row| row.key)
+            .collect::<Vec<_>>();
+        romcat_core::collection::add(site, "送朋友的", &keys).expect("加得进");
+        site.catalog
+            .put_sublibrary(&romcat_core::sublibrary::Sublibrary::at(
+                "掌机",
+                std::path::Path::new("/Volumes/SDCARD/掌机"),
+                "Pegasus",
+                None,
+            ))
+            .expect("建得出子库");
+        for 一条 in ["合集=送朋友的", "平台=SFC"] {
+            site.catalog
+                .add_rule(
+                    "掌机",
+                    &romcat_core::sublibrary::Rule::parse(一条).expect("读得懂"),
+                )
+                .expect("加得进规则");
+        }
+        browse.invalidate(site);
+    }
+    跑(&ctx, &mut app, 3);
+
+    // 一之一、**先按「按它筛选」筛着**（顺带钉住那一颗）：删完这一维该跟着清掉。
+    shared::点正好(&ctx, "管理合集…", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    点弹层里的(&ctx, "按它筛选", "", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 3);
+    assert_eq!(
+        app.browse().query().collection.as_deref(),
+        Some("送朋友的"),
+        "按了「按它筛选」，筛选栏那一维没跟着设上"
+    );
+
+    // 一、再摊开一次、按「删除…」，那句警告说得出有几条规则提到它。
+    shared::点正好(&ctx, "管理合集…", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    let 屏上 = 点弹层里的(&ctx, "删除…", "", |ui| app.ui(ui));
+    assert!(
+        屏上.contains("1 条规则提到这个合集"),
+        "删之前那句警告没说清有几条子库规则提到它：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("作品本身不受影响"),
+        "删之前那句警告没说清作品本身不动：\n{屏上}"
+    );
+
+    // 二、按「删除合集」。
+    let 屏上 = 点弹层里的(&ctx, "删除合集", "", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+
+    // 三、**库里真的空了**——断分面与沉淀库，不断屏上那句话。
+    let 分面: Vec<String> = app
+        .browse()
+        .facets()
+        .collections
+        .iter()
+        .map(|一个| 一个.value.clone())
+        .collect();
+    assert!(
+        !分面.iter().any(|一个| 一个 == "送朋友的"),
+        "删完分面上还有它：{分面:?}\n屏上：\n{屏上}\n回执：{:?}／{:?}",
+        app.browse().notice(),
+        app.browse().error(),
+    );
+    let 沉淀库里: Vec<String> = app
+        .site()
+        .store
+        .collections()
+        .expect("读得出")
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        !沉淀库里.iter().any(|一个| 一个 == "送朋友的"),
+        "删完沉淀库里还有它：{沉淀库里:?}"
+    );
+
+    // 四、**那两条子库规则原样留着**（核心库那一处有意的决定）。
+    let 规则们: Vec<String> = app
+        .site()
+        .catalog
+        .sublibrary_rules("掌机")
+        .expect("读得出")
+        .into_iter()
+        .map(|一条| 一条.text)
+        .collect();
+    assert_eq!(
+        规则们,
+        vec!["合集=送朋友的".to_string(), "平台=SFC".to_string()],
+        "删合集不该动子库规则——再建一个同名的就又筛得出来了"
+    );
+
+    // 五、**正被筛着的那一维跟着清掉**。
+    assert_eq!(
+        app.browse().query().collection,
+        None,
+        "删掉正被筛着的那个合集之后，筛选栏那一维没跟着清掉"
+    );
+}
+
 /// **「加入合集」那个弹层：新建一个合集，把勾中的那一批放进去**
 /// （票 `gui-looks-like-the-design/13`）。
 ///
@@ -4513,24 +4644,44 @@ fn 加入合集那一层建得出新合集_名字写不得时加不进() {
     );
 
     // 二、**名字写不得时「加入」按不动，而且屏上说得出为什么**（ADR-0005）。
-    let 屏上 = 点弹层里的(&ctx, "例如：通关过的", "带,逗号", |ui| app.ui(ui));
-    assert!(
-        屏上.contains("名称里不能有逗号"),
-        "名字带逗号却没说为什么不行：\n{屏上}"
-    );
-
-    // 三、**换个用得上的名字**：把逗号那一段删掉，改成个好名字。
-    点弹层里的(&ctx, "带,逗号", "", |ui| app.ui(ui));
-    for _ in 0..8 {
-        headless::frame(
-            &ctx,
-            shared::输入(vec![
-                shared::按键事件(egui::Key::End),
-                shared::按键事件(egui::Key::Backspace),
-            ]),
-            |ui| app.ui(ui),
+    //
+    // 两档各来一个：带逗号的（逗号是规则里的值分隔符），以及**写不进规则**的
+    // （两侧带空白的连接词）。后者第一版漏掉了——`check_name` 当时只拦逗号，
+    // 于是 `甲 或 乙` 建得出来、`合集=甲 或 乙` 筛不出东西，改名还会把子库悄悄改空。
+    for (打什么, 该说的) in [("带,逗号", "名称里不能有逗号"), ("甲 或 乙", "写不进规则")]
+    {
+        let 屏上 = 点弹层里的(&ctx, "例如：通关过的", 打什么, |ui| app.ui(ui));
+        assert!(
+            屏上.contains(该说的),
+            "名字「{打什么}」用不得，屏上却没说为什么：\n{屏上}"
         );
+        // **「加不进」得真的加不进**：按一下「加入」，库里一个合集都不许多出来。
+        // 只断屏上那句错的话，按钮真按得动时这一条照样绿。
+        点弹层里的(&ctx, "加入", "", |ui| app.ui(ui));
+        跑(&ctx, &mut app, 3);
+        let 沉淀库里 = app.site().store.collections().expect("读得出");
+        assert!(
+            沉淀库里.is_empty(),
+            "名字用不得却加进去了：{沉淀库里:?}\n回执：{:?}／{:?}",
+            app.browse().notice(),
+            app.browse().error(),
+        );
+        // 把打进去的擦掉，好让下一档从空框开始。
+        点弹层里的(&ctx, 打什么, "", |ui| app.ui(ui));
+        for _ in 0..打什么.chars().count() {
+            headless::frame(
+                &ctx,
+                shared::输入(vec![
+                    shared::按键事件(egui::Key::End),
+                    shared::按键事件(egui::Key::Backspace),
+                ]),
+                |ui| app.ui(ui),
+            );
+        }
     }
+
+    // 三、**换个用得上的名字**（上一步已经把框擦空了）。
+    点弹层里的(&ctx, "例如：通关过的", "", |ui| app.ui(ui));
     headless::frame(
         &ctx,
         shared::输入(vec![egui::Event::Text("送朋友的".to_string())]),
