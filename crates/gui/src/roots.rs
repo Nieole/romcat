@@ -962,6 +962,12 @@ impl Screen {
         self.health.reshape(site, tasks);
     }
 
+    /// 库体检里点了疑似同一作品那一格、而且确实有建议（[`crate::health::Section::take_jump`]）：
+    /// 人要去浏览屏「整理建议」那一簇。
+    pub fn take_health_jump(&mut self) -> bool {
+        self.health.take_jump()
+    }
+
     /// 刚重新成型过（[`crate::health::Section::take_reshaped`]）。
     pub fn take_reshaped(&mut self) -> bool {
         self.health.take_reshaped()

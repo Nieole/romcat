@@ -64,6 +64,7 @@ pub mod batch;
 pub mod merge;
 pub mod queue;
 pub mod report;
+pub mod same_work;
 
 pub use batch::{
     Batch, Breakdown, Drill, Fanout, Part, PartKind, Parts, Sample, Scope, Shape, Slice,

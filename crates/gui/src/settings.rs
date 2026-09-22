@@ -335,7 +335,7 @@ impl Screen {
                         Section::Scrape => self.scrape(ui),
                         Section::Export => self.export(ui, facts),
                         Section::Tools => self.tools(ui),
-                        Section::Keys => self.keys(ui),
+                        Section::Keys => Self::keys(ui),
                         Section::About => self.about(ui),
                     }
                 });
@@ -808,69 +808,13 @@ impl Screen {
         });
     }
 
-    /// **快捷键**：摆的是全仓那唯一一份表（[`keys`]）。
-    ///
-    /// 照稿分两列（`.kgrid`）：一条里说明靠左、键帽靠右，底下一道虚线。**左右各是一列**——
-    /// 同一列里那几枚键帽的右缘是同一条线（数字与键帽一类靠右对齐才比得出来），截图门钉着这一条。
-    /// 靠左靠右走 [`egui::Sides`]，不自己算位置：上一轮在浏览屏上自算位置把按钮挤出过行外。
-    fn keys(&mut self, ui: &mut egui::Ui) {
-        let tokens = Tokens::builtin();
-        let [行缝, 列缝] = tokens.space.keys_grid_gap;
-        let 列宽 = ((ui.available_width() - 列缝) / 2.0).max(1.0);
-        for group in keys::groups() {
-            look::section(ui, group.title);
-            ui.add_space(行缝);
-            for 一排 in group.keys.chunks(2) {
-                // **顶对齐**（`horizontal_top`，不是 `horizontal`）：`horizontal` 是
-                // `Align::Center`，而这一排里每一格要的高是现长出来的——左边那一格先长完，
-                // 右边那一格就被按着那个高居中，整格往下掉半格（实测 15 点），两列对不上。
-                ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing.x = 列缝;
-                    for (管什么, 键) in 一排 {
-                        Self::一条快捷键(ui, 列宽, 管什么, 键);
-                    }
-                });
-                ui.add_space(行缝);
-            }
-            ui.add_space(tokens.space.settings_body_gap);
-        }
-        look::help(ui, keys::NOTE);
-    }
-
-    /// 快捷键表上的一条：说明靠左、键帽靠右，底下一道虚线（设计稿 `.kgrid div`）。
-    fn 一条快捷键(ui: &mut egui::Ui, 宽: f32, 管什么: &str, 键: &str) {
-        let tokens = Tokens::builtin();
-        ui.allocate_ui_with_layout(
-            egui::vec2(宽, 0.0),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                ui.set_width(宽);
-                ui.add_space(tokens.space.keys_row_padding);
-                egui::Sides::new().spacing(tokens.space.keys_row_gap).show(
-                    ui,
-                    |ui| {
-                        ui.label(egui::RichText::new(管什么).size(tokens.font.size_small_plus));
-                    },
-                    |ui| {
-                        look::kbd(ui, 键);
-                    },
-                );
-                ui.add_space(tokens.space.keys_row_padding);
-                let (线框, _) = ui.allocate_exact_size(egui::vec2(宽, 1.0), egui::Sense::hover());
-                // **这道线画满这一格，与那枚键帽的右缘同一条线**（两样都落在 830.000，实测）。
-                //
-                // 它**看着**比键帽短一截：虚线的段与空当都是 3 点，402 点正好是 67 个来回，
-                // 于是最后那 3 点落在空当上——最后一段实线停在 827，而键帽右缘在 830。
-                // 那是虚线的排法，不是没对齐（CSS 的 `border-bottom:dashed` 一样会这样）。
-                // 这一处编排者读图时按「两种右缘」报过一次，量过：**键帽五枚全在 830.000**。
-                look::dashed_hline(
-                    ui.painter(),
-                    线框.x_range(),
-                    线框.center().y,
-                    ui.visuals().widgets.noninteractive.bg_stroke,
-                );
-            },
-        );
+    /// **快捷键**：摆的是全仓那唯一一份表（[`keys`]），连**怎么画**也是那一处
+    /// （[`keys::table`]）——票 `gui-looks-like-the-design/14` 按 `?` 打开的那层弹层调的是同一个函数。
+    fn keys(ui: &mut egui::Ui) {
+        keys::table(ui);
+        // 这一节底下那句话照稿是「随时按 ? 查看这张表。」（设计稿 `t==='keys'` 那一支）；
+        // 修饰键那一句归按 `?` 摊开的那层弹层的副标题说（`keys::NOTE`），不在这儿再印一遍。
+        look::help(ui, keys::SEE_SHEET);
     }
 
     /// **关于**：版本、库文件结构版本、数据源与许可。

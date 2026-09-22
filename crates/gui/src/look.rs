@@ -1632,6 +1632,15 @@ pub fn kbd(ui: &mut egui::Ui, key: &str) -> egui::Response {
     response
 }
 
+/// **一枚键帽多大**，不画。
+///
+/// 摆它的那一处要先知道它占多宽，剩下的宽才给它左边那句话（快捷键表一条里那句说明要
+/// 折行，[`crate::keys::table`]）。量与画走的是同一段排版（`kbd_galley`）——各算各的迟早差一两点。
+#[must_use]
+pub fn kbd_size(ui: &egui::Ui, key: &str) -> egui::Vec2 {
+    kbd_galley(ui, key).0
+}
+
 /// 一枚键帽多大，连它上面那个字排好。
 fn kbd_galley(ui: &egui::Ui, key: &str) -> (egui::Vec2, std::sync::Arc<egui::Galley>) {
     let tokens = Tokens::builtin();

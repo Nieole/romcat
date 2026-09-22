@@ -597,6 +597,7 @@ enum 档 {
 }
 
 /// 基线里的一个变体。
+#[derive(Debug, Clone, Copy)]
 struct 一个变体 {
     平台: &'static str,
     /// 根底下的相对路径。
@@ -730,6 +731,25 @@ const 浏览的译名: &[(&str, &str)] = &[
     ("Seiken Densetsu 2 (Japan)", "圣剑传说 2"),
 ];
 
+/// **疑似同一作品**那一态才摆的第六个作品（票 `gui-looks-like-the-design/17`，
+/// 设计稿 `SUGG` 里打头那一对）：另一个数据库把同一部游戏叫作另一个名字，
+/// 识别因此建成了两个作品。
+///
+/// **只有那一态摆它**：别的态照旧是五个作品、八行，那几张基线的内容一个字都不动。
+const 疑似的作品: &str = "Pocket Monster - Red Version (Japan)";
+
+/// 它与 `Pocket Monsters - Aka (Japan)` 在**中文离线源**里撞上的是同一条条目。
+const 疑似的条目: u32 = 4312;
+
+/// 它那一个变体：与那一个作品同一个平台（GB），不然平台那道硬闸就过不去。
+const 疑似的变体: 一个变体 = 一个变体 {
+    平台: "GB",
+    路径: "Pocket Monster - Red Version (Japan).zip",
+    字节: MIB,
+    落在: 档::命中(Confidence::High),
+    作品: Some(疑似的作品),
+};
+
 /// 浏览屏那一份现场。
 struct 浏览现场 {
     app: App,
@@ -768,11 +788,22 @@ fn 候选(
 /// 搭浏览屏那份库，开一个停在浏览屏上的主窗口。`收起两栏` 时先往工作目录的版式偏好里写上
 /// 左右两栏都收着——走的是开窗时读偏好那一条真路，不是在帧里硬按。
 fn 浏览现场(收起两栏: bool) -> 浏览现场 {
+    浏览现场_(收起两栏, false)
+}
+
+/// 同上，`疑似` 为真时多摆一个作品与它那一个变体，于是库里**有一对疑似同一作品**
+/// （[`疑似的作品`]）。别的态一律走 `false`，那几张基线的内容一个字都不动。
+fn 浏览现场_(收起两栏: bool, 疑似: bool) -> 浏览现场 {
     let mut catalog = Catalog::open_in_memory().expect("开得出中立库");
     romcat_core::catalog::roots::add_root(&catalog, None, 浏览的根, Path::new("/主库"))
         .expect("建得出根");
 
-    let 变体: Vec<Variant> = 浏览的变体
+    let 这一趟的变体: Vec<一个变体> = 浏览的变体
+        .iter()
+        .copied()
+        .chain(疑似.then_some(疑似的变体))
+        .collect();
+    let 变体: Vec<Variant> = 这一趟的变体
         .iter()
         .map(|one| {
             let key = format!("{浏览的根}/{}/{}", one.平台, one.路径);
@@ -795,13 +826,27 @@ fn 浏览现场(收起两栏: bool) -> 浏览现场 {
         .expect("写得进变体");
 
     let mut 作品号 = Vec::new();
-    for (名字, _, _) in 浏览的作品 {
+    let 这一趟的作品: Vec<一个作品> = 浏览的作品
+        .iter()
+        .copied()
+        .chain(疑似.then_some((
+            疑似的作品,
+            &[(Field::Year, "1996"), (Field::Genre, "角色扮演")][..],
+            false,
+        )))
+        .collect();
+    for (名字, _, _) in &这一趟的作品 {
         let id = catalog
             .add_work(名字, Provenance::Identified)
             .expect("建得出作品");
         作品号.push((*名字, id));
     }
-    let 译名: Vec<romcat_core::catalog::TitleRow> = 浏览的译名
+    let 这一趟的译名: Vec<(&str, &str)> = 浏览的译名
+        .iter()
+        .copied()
+        .chain(疑似.then_some((疑似的作品, "口袋妖怪 红")))
+        .collect();
+    let 译名: Vec<romcat_core::catalog::TitleRow> = 这一趟的译名
         .iter()
         .map(|(作品, 译名)| romcat_core::catalog::TitleRow {
             work: (*作品).to_owned(),
@@ -826,7 +871,7 @@ fn 浏览现场(收起两栏: bool) -> 浏览现场 {
             .expect("作品表里有这个作品")
     };
 
-    let 结论: Vec<Identification> = 浏览的变体
+    let 结论: Vec<Identification> = 这一趟的变体
         .iter()
         .zip(&变体)
         .filter_map(|(one, variant)| {
@@ -875,7 +920,7 @@ fn 浏览现场(收起两栏: bool) -> 浏览现场 {
     catalog.write_identifications(&结论).expect("写得进结论");
 
     let mut 采到的 = Vec::new();
-    for (at, (名字, 字段, 有封面)) in 浏览的作品.iter().enumerate() {
+    for (at, (名字, 字段, 有封面)) in 这一趟的作品.iter().enumerate() {
         let mut media = Vec::new();
         if *有封面 {
             let hash = format!("{:040x}", at + 1);
@@ -917,6 +962,33 @@ fn 浏览现场(收起两栏: bool) -> 浏览现场 {
     }
     catalog.put_scraped(&采到的).expect("写得进刮削值");
 
+    // **中文离线源那一次匹配**：两个作品底下的 GB 变体撞上的是同一条条目，于是核心库
+    // 说得出「这两个名字指向同一条条目」（`same_work::survey`）。依据里那个条目号照
+    // `zh::ENTRY_MARK` 拼——认它的是核心库那一处，这里不自己编一套格式。
+    if 疑似 {
+        let 撞上 = |路径: &str, 叫作: &str| Harvested {
+            anchor: AnchorKind::Variant.label().to_owned(),
+            subject: format!("{浏览的根}/GB/{路径}"),
+            source: "中文离线源".to_owned(),
+            input: "基线".to_owned(),
+            values: vec![HarvestedValue {
+                field: Field::Title.label().to_owned(),
+                value: 叫作.to_owned(),
+                evidence: format!(
+                    "「{叫作}」撞上了中文离线源{}{疑似的条目}：名字一字不差",
+                    romcat_core::zh::ENTRY_MARK
+                ),
+            }],
+            media: Vec::new(),
+        };
+        catalog
+            .put_scraped(&[
+                撞上("Pocket Monsters - Aka (Japan).zip", "精灵宝可梦 红"),
+                撞上("Pocket Monster - Red Version (Japan).zip", "口袋妖怪 红"),
+            ])
+            .expect("写得进刮削值");
+    }
+
     let 目录 = temp_dir("gui-截图门-浏览");
     if 收起两栏 {
         let at = romcat_core::workspace::gui_layout_path(目录.path());
@@ -953,6 +1025,9 @@ enum 浏览态 {
     两栏收起,
     /// 卡片墙：按平台分组，混合有封面和无封面的字卡。
     卡片,
+    /// **整理建议**（票 `gui-looks-like-the-design/17`）：左栏「疑似同一作品」那颗标签按下去，
+    /// 表里只剩那一对；点开其中一个，侧边详情里摆着那张建议卡——凭什么、两颗按钮。
+    整理建议,
 }
 
 /// 卡片墙往下滚几个点再拍（[`拍浏览`] 的卡片那一态）。
@@ -974,7 +1049,7 @@ fn 拍浏览(名字: &str, 主题: Theme, 态: 浏览态) {
     if 该跳过(名字) {
         return;
     }
-    let 浏览现场 { mut app, 目录 } = 浏览现场(态 == 浏览态::两栏收起);
+    let 浏览现场 { mut app, 目录 } = 浏览现场_(态 == 浏览态::两栏收起, 态 == 浏览态::整理建议);
     if 态 == 浏览态::卡片 {
         app.browse_and_site().0.show_cards();
     }
@@ -991,6 +1066,12 @@ fn 拍浏览(名字: &str, 主题: Theme, 态: 浏览态) {
         浏览态::行首封面 => {
             按(&mut harness, "在每行开头显示封面");
             按(&mut harness, 点开的作品那一行);
+        }
+        // **整理建议**：照人的操作按左栏那颗标签，再点开那一对里的一个——
+        // 屏上那颗标签写的数与表里摆的行由这一下当场对上。
+        浏览态::整理建议 => {
+            按(&mut harness, "疑似同一作品");
+            按(&mut harness, "口袋妖怪 红");
         }
         浏览态::筛空 | 浏览态::卡片 => {}
     }
@@ -1019,12 +1100,162 @@ fn 拍浏览(名字: &str, 主题: Theme, 态: 浏览态) {
     // 判据也同一处出（`table::unlinked_title`）。可卡面上它摆在下半截那一行的最左边，没有「正题在它
     // 正上方、路径在它右边」这副结构，拿这把尺子量不着。卡片那一路由
     // `tests/browse.rs` 的 `卡片墙上认不出作品的那几张挂着未关联作品标签_认出的不挂` 守着。
-    if !matches!(态, 浏览态::筛空 | 浏览态::卡片) {
+    // **整理建议那一态也跳过**：那一屏上两行都是认出作品的，一行带标签的都没有，
+    // 这把尺子量的正是「带标签的那一行」——没有可量的东西。
+    if !matches!(态, 浏览态::筛空 | 浏览态::卡片 | 浏览态::整理建议) {
         带标签的行正题露得出字(&harness, 名字);
     }
     拍下(harness, 名字);
     // 拍完才收工作目录：版式偏好一直在里头读写。
     drop(目录);
+}
+
+// ——— 右键菜单与快捷键表（票 `gui-looks-like-the-design/14`） ———
+
+/// **右键**按一下屏上正好写着 `那几个字`、最后画出来的那一处；其余同 [`按`]。
+fn 右键按(harness: &mut Harness<'_>, 那几个字: &str) {
+    let Some(在) = 最后一处正好画着(harness.output(), 那几个字) else {
+        panic!("屏上没有正好写着「{那几个字}」的地方，没处右键");
+    };
+    let 键 = |pressed: bool| egui::Event::PointerButton {
+        pos: 在,
+        button: egui::PointerButton::Secondary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    harness.event(egui::Event::PointerMoved(在));
+    harness.event(键(true));
+    harness.event(键(false));
+    harness.event(egui::Event::PointerGone);
+    harness.step();
+    // 菜单是下一帧才摊开的（`browse::Screen::settle_menu`），浮层还要一帧才摆稳。
+    harness.run_steps(6);
+    harness.run();
+}
+
+/// **右键菜单摊在一行上**那一张：三栏摆着，菜单贴着右键那一下。
+///
+/// **指针先挪走再拍**（同 [`按`]）：基线里不该有指针三角，也不该有哪一项挂着悬停底色
+/// ——那一项每换一次指针位置就换一次样子，拍出来的基线跟着飘。
+#[track_caller]
+fn 拍右键菜单(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 浏览现场 { mut app, 目录 } = 浏览现场(false);
+    let mut harness = 开一个(主题, move |ui| app.ui(ui));
+    // **按在作品名那一格上**（不是最右边那一格）——挑这一格有三条理由，都是量过／看过的
+    // （协调人 2026-09-22 裁定这一手留着，挂单 `Q1141`）：
+    //
+    // 1. 菜单贴着右键那一下摊开。按最右边那一格的话它**整层落在右边那块详情栏上头**，
+    //    挡住的正是右键那一下刚换过去的那份详情——这一张就说不清「右键之后屏上什么样」。
+    // 2. **暗色里那样拍看不出菜单的边**：菜单与详情栏同是令牌 `panel`。那一圈描边补上了
+    //    （`menu::菜单框`），可基线该拍的是稿上常见的那种落法——菜单落在**表**上。
+    // 3. 顺带把「卡面／格子里的字不许接住点击」那一条也走了一遍：这一格是字，那一下得
+    //    归整行（挂单 `Q1147` 在卡片墙上撞的是同一件事）。
+    右键按(&mut harness, 右键那一行);
+    菜单那一列提示立成一列(&harness, 名字);
+    拍下(harness, 名字);
+    drop(目录);
+}
+
+/// 右键按在哪一行：那一行**作品名那一格**上写着的字。整张表只有它一行是这个名字。
+const 右键那一行: &str = "超级机器人大战R";
+
+/// 菜单上那几项的字，照设计稿的次序（`browse::menu` 那一份清单）。
+const 菜单那几项: [&str; 8] = [
+    "打开详情",
+    "编辑元数据",
+    "勾选",
+    "收藏",
+    "合并…",
+    "刮削此作品",
+    "在文件系统中打开",
+    "复制名称",
+];
+
+/// **菜单上那一列快捷键提示立得住**：每一项占满整个菜单的内宽，提示一律贴着
+/// 「右缘 − `menu-item-padding`」摆——于是那一列的右缘是同一条线（设计稿
+/// `.ctx button span` 的 `margin-left:auto`）。
+///
+/// **量的是控件自己的矩形**（无障碍树上那一份），不是像素比、也不是测试里量到的
+/// 那一段字的外框：`Shape::Text` 的 `pos` 在这条路上不是最终屏幕坐标（票 11 差点
+/// 据此报一个不存在的错位）。提示那几段字是拿画笔直接画的，没有自己的控件矩形——
+/// 而它们摆在哪儿完全由**所在那一项**的矩形定，所以量那一项就够了：
+/// 各项的左缘、右缘都是同一条线，那一列提示的右缘就也是。
+#[track_caller]
+fn 菜单那一列提示立成一列(harness: &Harness<'_>, 名字: &str) {
+    // **屏上同一句话不止一处时取最后那一处**：菜单是一层浮层（`Order::Foreground`），
+    // 无障碍树上排在最后——而「编辑元数据」这一句，右边那栏详情上也有一颗按钮写着它
+    // （右键那一下把详情换成了这一行）。
+    let 各项: Vec<egui::Rect> = 菜单那几项
+        .iter()
+        .map(|一项| {
+            harness
+                .query_all_by_role_and_label(Role::Button, 一项)
+                .map(|node| node.rect())
+                .next_back()
+                .unwrap_or_else(|| panic!("{名字}：菜单上没有「{一项}」"))
+        })
+        .collect();
+    assert_eq!(
+        各项.len(),
+        菜单那几项.len(),
+        "{名字}：菜单上该有 {} 项",
+        菜单那几项.len()
+    );
+    let 左缘: Vec<f32> = 各项.iter().map(|rect| rect.left()).collect();
+    let 右缘: Vec<f32> = 各项.iter().map(|rect| rect.right()).collect();
+    assert!(
+        左缘.windows(2).all(|两个| (两个[0] - 两个[1]).abs() < 0.5),
+        "{名字}：菜单各项的左缘不是同一条线，是 {左缘:?}"
+    );
+    assert!(
+        右缘.windows(2).all(|两个| (两个[0] - 两个[1]).abs() < 0.5),
+        "{名字}：菜单各项的右缘不是同一条线——那一列提示就立不住，是 {右缘:?}"
+    );
+}
+
+/// **按 `?` 摊开的那层快捷键表**那一张：盖在浏览屏上头。
+#[track_caller]
+fn 拍快捷键表(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 浏览现场 { mut app, 目录 } = 浏览现场(false);
+    let mut harness = 开一个(主题, move |ui| app.ui(ui));
+    harness.event(egui::Event::Key {
+        key: egui::Key::Questionmark,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.step();
+    harness.run_steps(6);
+    harness.run();
+    拍下(harness, 名字);
+    drop(目录);
+}
+
+#[test]
+fn 浏览_右键菜单_浅色() {
+    拍右键菜单("browse/context-menu-light", Theme::Light);
+}
+
+#[test]
+fn 浏览_右键菜单_暗色() {
+    拍右键菜单("browse/context-menu-dark", Theme::Dark);
+}
+
+#[test]
+fn 浏览_快捷键表_浅色() {
+    拍快捷键表("browse/keys-sheet-light", Theme::Light);
+}
+
+#[test]
+fn 浏览_快捷键表_暗色() {
+    拍快捷键表("browse/keys-sheet-dark", Theme::Dark);
 }
 
 /// 带「未关联作品」标签的那一行，正题至少露出这么多个字（不算截断补上的「…」）。
@@ -1294,6 +1525,16 @@ fn 浏览_卡片_浅色() {
 #[test]
 fn 浏览_卡片_暗色() {
     拍浏览("browse/cards-dark", Theme::Dark, 浏览态::卡片);
+}
+
+#[test]
+fn 浏览_整理建议_浅色() {
+    拍浏览("browse/suspicion-light", Theme::Light, 浏览态::整理建议);
+}
+
+#[test]
+fn 浏览_整理建议_暗色() {
+    拍浏览("browse/suspicion-dark", Theme::Dark, 浏览态::整理建议);
 }
 
 // ——— 作品详情页（票 `gui-looks-like-the-design/15`） ———

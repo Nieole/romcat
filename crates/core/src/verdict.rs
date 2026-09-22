@@ -172,6 +172,18 @@
 //! **键是主库标识加那一对平台**，与**路径锚**同一个处境：一组说的是「这份主库的那几个
 //! 目录里」，换一份主库指的是另一批文件。所以它按主库标识分开，**导出也不带它**。
 //!
+//! ## **「不是同一个作品」**：人否掉的那一条建议
+//!
+//! 「这两个作品疑似是同一个」的建议由 [`same_work`](crate::triage::same_work) 给；人看过
+//! 之后说「不是同一个」，记的就是 [`NotSameWork`] 这一行，那一对从此不再提。
+//!
+//! **只记否定这一档**，与平台纠正那一处「两种都记得住」正相反，而这不是不一致：
+//! 平台纠正的两档（按内容改 / 保持目录的说法）**都不改库里的归属**，不记下来就每体检一趟
+//! 再问一遍；而这里的肯定那一档按下去是**合并作品**，落成的是一批裁决、两个作品当场并成
+//! 一个——建议自然不再出现，再记一行就是同一件事两处说。
+//!
+//! 键是**主库标识加那一对作品名**（排过序，[`work_pair`]），撤掉照旧不删行。
+//!
 //! 票 `one-criterion-per-thing/07` 之前的中立库里那张 `shaping_override` 表，开现场时搬进来
 //! 一次（[`carry_over_shaping_overrides`](crate::site::carry_over_shaping_overrides)），
 //! 旧表原样留着、不再读。**结构版本对不上、开不进去的旧库**，列出来或试着打开的那一下
@@ -428,6 +440,36 @@ CREATE UNIQUE INDEX IF NOT EXISTS platform_correction_live
     ON platform_correction(library, declared, implied) WHERE undone_at IS NULL;
 CREATE INDEX IF NOT EXISTS platform_correction_library ON platform_correction(library);
 ",
+    // 9：**「不是同一个作品」**（票 `gui-looks-like-the-design/17`）。一条说的是「这份主库里
+    // 那两个作品，人看过了，它们不是同一个」——疑似同一作品那一处判断从此不再提这一对。
+    "\
+-- 人对一条**疑似同一作品**的建议下的否定：这两个作品不是同一个，以后别再提。
+--
+-- **键是主库标识加那一对作品名**（排过序），与**平台纠正**同一个处境：作品名只在这一份
+-- 主库的中立库里成立，换一份主库指的是另一批内容。所以它按主库标识分开，**导出也不带它**
+-- （`Store::export` 只折裁决与匹配裁决两张表）。
+--
+-- **只记否定这一档**：肯定那一档不落这儿——人说「是同一个」时按下去的是**合并作品**，
+-- 那落成的是一批**裁决**，合完两个作品本来就并成了一个，建议自然不再出现。
+-- 再记一行等于同一件事两处说。
+CREATE TABLE IF NOT EXISTS not_same_work(
+    id         INTEGER PRIMARY KEY,
+    -- 哪一份主库。
+    library    TEXT    NOT NULL,
+    -- 那一对作品名，**排过序**：`left_work` 一律是字典序在前的那个。不排的话同一对会存成
+    -- 两行，而查的时候只按一种次序问，于是「记过却还在提示」。
+    left_work  TEXT    NOT NULL,
+    right_work TEXT    NOT NULL,
+    decided_at INTEGER NOT NULL,
+    -- 撤掉的时刻。非空就是已经撤了——**撤掉不删行**（同 `platform_correction.undone_at`）。
+    undone_at  INTEGER
+) STRICT;
+
+-- 一对作品上**同时只有一条说了算的**；撤掉的那些不占这个位子，所以人可以改主意。
+CREATE UNIQUE INDEX IF NOT EXISTS not_same_work_live
+    ON not_same_work(library, left_work, right_work) WHERE undone_at IS NULL;
+CREATE INDEX IF NOT EXISTS not_same_work_library ON not_same_work(library);
+",
 ];
 
 /// 「内容锚」在库里与报告里叫什么。
@@ -543,6 +585,37 @@ impl PlatformCorrection {
     #[must_use]
     pub fn is_for(&self, declared: &str, implied: &str) -> bool {
         self.declared == declared && self.implied == implied
+    }
+}
+
+/// 两个**作品**名排成一个有序对：字典序在前的那个在 `[0]`。
+///
+/// **一处**：落库那一侧与判断那一侧
+/// （[`same_work`](crate::triage::same_work)）用的是同一个次序。各排各的话，
+/// 同一对会存成两行，而查的时候只按一种次序问——于是「记过却还在提示」。
+#[must_use]
+pub fn work_pair(a: &str, b: &str) -> [String; 2] {
+    if a <= b {
+        [a.to_string(), b.to_string()]
+    } else {
+        [b.to_string(), a.to_string()]
+    }
+}
+
+/// 一条**「这两个作品不是同一个」**：人对一条疑似同一作品的建议下的否定。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NotSameWork {
+    /// 那一对作品名，排过序（[`work_pair`]）。
+    pub works: [String; 2],
+    /// 什么时候定的，UNIX 纪元起的秒。
+    pub decided_at: i64,
+}
+
+impl NotSameWork {
+    /// 这一条管的是不是这一对（次序随便给）。
+    #[must_use]
+    pub fn is_for(&self, a: &str, b: &str) -> bool {
+        self.works == work_pair(a, b)
     }
 }
 
@@ -2087,6 +2160,101 @@ impl Store {
                 "UPDATE platform_correction SET undone_at = ?4
                  WHERE library = ?1 AND declared = ?2 AND implied = ?3 AND undone_at IS NULL",
                 params![library, declared, implied, now_secs()],
+            )
+            .map(|changed| changed > 0)
+            .map_err(|source| self.err(source))
+    }
+
+    // ── 「不是同一个作品」：人否掉的那几条建议（票 `gui-looks-like-the-design/17`） ──
+
+    /// 这份主库上**说了算的那几条「不是同一个作品」**：撤掉的不在里面，按定下来的先后排
+    /// （新的在后）。
+    ///
+    /// `library` 是**主库标识**：作品名只在这一份主库的中立库里成立（同
+    /// [`Self::platform_corrections`]）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn not_same_works(&self, library: &str) -> Result<Vec<NotSameWork>, VerdictError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT left_work, right_work, decided_at
+                 FROM not_same_work
+                 WHERE library = ?1 AND undone_at IS NULL
+                 ORDER BY decided_at, id",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![library], |row| {
+                Ok(NotSameWork {
+                    works: [row.get::<_, String>(0)?, row.get::<_, String>(1)?],
+                    decided_at: row.get::<_, i64>(2)?,
+                })
+            })
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
+    /// 记一条「这两个作品不是同一个」。次序随便给——落库前排成有序对（[`work_pair`]）。
+    ///
+    /// 同一对上已经有一条说了算的就**先撤掉它再落新的**（同
+    /// [`Self::set_platform_correction`]）：人改主意不攒出两条都算数的，
+    /// 而撤掉的那一行留着。
+    ///
+    /// **盘上一个字节都不动**（ADR-0004）：这里只写沉淀库。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn set_not_same_work(
+        &mut self,
+        library: &str,
+        a: &str,
+        b: &str,
+    ) -> Result<(), VerdictError> {
+        let [left, right] = work_pair(a, b);
+        let now = now_secs();
+        let path = self.path.clone();
+        let to_err = |source| VerdictError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        tx.execute(
+            "UPDATE not_same_work SET undone_at = ?4
+             WHERE library = ?1 AND left_work = ?2 AND right_work = ?3 AND undone_at IS NULL",
+            params![library, left, right, now],
+        )
+        .map_err(to_err)?;
+        tx.execute(
+            "INSERT INTO not_same_work(library, left_work, right_work, decided_at)
+             VALUES(?1, ?2, ?3, ?4)",
+            params![library, left, right, now],
+        )
+        .map_err(to_err)?;
+        tx.commit().map_err(to_err)
+    }
+
+    /// 撤掉这一对上说了算的那条「不是同一个作品」，交回原来有没有这一条。
+    ///
+    /// **行留着**，只填 `undone_at`：撤销本身也是人的动作（见模块文档）。撤完这一对就回到
+    /// 「还没看过」，建议那一处重新提它。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn undo_not_same_work(
+        &mut self,
+        library: &str,
+        a: &str,
+        b: &str,
+    ) -> Result<bool, VerdictError> {
+        let [left, right] = work_pair(a, b);
+        self.conn
+            .execute(
+                "UPDATE not_same_work SET undone_at = ?4
+                 WHERE library = ?1 AND left_work = ?2 AND right_work = ?3 AND undone_at IS NULL",
+                params![library, left, right, now_secs()],
             )
             .map(|changed| changed > 0)
             .map_err(|source| self.err(source))

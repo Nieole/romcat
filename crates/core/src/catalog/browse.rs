@@ -1594,6 +1594,15 @@ pub struct WorkQuery {
     pub descending: bool,
     /// 卡片墙的临时呈现条件；不属于筛选器，也不写进子库规则。
     pub cover_only: bool,
+    /// 只要**这几个作品**：浏览屏左栏「整理建议」那一簇点下去之后收窄到
+    /// [疑似同一作品](crate::triage::same_work)那几对里的作品。
+    ///
+    /// 名字由界面从核心库那份建议里取（`Suspicion::works`），**这一层不判断谁疑似谁**。
+    /// 还没认出作品的那几行一个都不在里面——它们没有作品名，也不参与合并。
+    ///
+    /// **它进不了子库的规则**（[`Unruly::Suspected`]）：那是一份会变的建议，
+    /// 不是「我要什么内容」。
+    pub suspected: Option<Vec<String>>,
 }
 
 /// 当前筛选里**写不成规则**的那一条。
@@ -1611,6 +1620,9 @@ pub enum Unruly {
     /// 选的是**平台未知**那一档。写成规则要把全部已知平台列一遍，而清单一变那条规则
     /// 就悄悄失效——宁可不写。
     UnknownPlatform,
+    /// 按**整理建议**筛了。规则语言里没有这一维——子库的规则是「我要什么内容」，
+    /// 而「这两个作品疑似是同一个」是一份会变的建议：合掉一对它就少一条。
+    Suspected,
     /// 这一维选中的值**里面带逗号**，而逗号是规则里的值分隔符，写进去会被读成两个值。
     Comma(Dimension),
     /// 这一维选中的值里有规则语言的记号（两侧带空白的连接词、或者没配对的括号），
@@ -1634,6 +1646,9 @@ impl Unruly {
                 .to_string(),
             Self::UnknownPlatform => "还筛着「平台未知」。写成规则要把全部已知平台列一遍，\
                                       而清单一变那条规则就悄悄失效——先把平台设回「不筛」。"
+                .to_string(),
+            Self::Suspected => "还筛着「整理建议」。那是一份会变的建议不是内容，\
+                                合掉一对它就少一条，写不进子库的规则——先把它关掉。"
                 .to_string(),
             Self::Comma(dimension) => format!(
                 "选中的那个{}里带逗号，而逗号是规则里的值分隔符，写进去会被读成两个值。",
@@ -1824,6 +1839,10 @@ impl WorkQuery {
             // **非游戏资产那个开关也算筛选**：拨一下，列出来的就换了一批行。
             && self.non_game_assets == other.non_game_assets
             && self.cover_only == other.cover_only
+            // **「整理建议」那颗标签也算筛选**：按一下换的是一批行，而且空态那一句要靠它
+            // 分清「筛没了」与「库里本来就没有」——漏了它，按着那颗标签把最后一对合掉
+            // 之后，屏上会对着一个装着东西的库说「库里还没有能列出来的东西」。
+            && self.suspected == other.suspected
     }
 
     /// **当前筛选原样变成的那条规则**——「存成子库」按下去时走的就是这里。
@@ -1847,6 +1866,9 @@ impl WorkQuery {
         }
         if self.state.is_some() {
             return Err(Unruly::State);
+        }
+        if self.suspected.is_some() {
+            return Err(Unruly::Suspected);
         }
         let mut nodes: Vec<Node> = Vec::new();
         match &self.platform {
@@ -1935,6 +1957,19 @@ impl WorkQuery {
                  AND ((r.anchor = '作品' AND r.subject = work.name)
                    OR (r.anchor = '变体' AND r.subject = variant.key)))",
             );
+        }
+        // **整理建议那一簇**：收窄到点名的那几个作品。名单空着时一行都不该留下——
+        // 「建议一条都没有」与「不筛」是两回事，`IN ()` 写不出来，直接写一句永假的。
+        if let Some(works) = &self.suspected {
+            sql.push_str(if sql.is_empty() { " WHERE " } else { " AND " });
+            if works.is_empty() {
+                sql.push('0');
+            } else {
+                sql.push_str(&format!("work.name IN ({})", placeholders(works.len())));
+                for work in works {
+                    args.push(Box::new(work.clone()));
+                }
+            }
         }
         (sql, args)
     }
@@ -3277,6 +3312,25 @@ impl Catalog {
     /// 否则面板上写的与列表上写的会是两个数。
     fn work_year(&self, anchor: &WorkAnchor, name: &str) -> Result<Option<String>, CatalogError> {
         let (kind, name) = anchor.scrape_anchor(name);
+        self.scraped_year(kind, name)
+    }
+
+    /// **一个作品的年份**，取法与主列表那一列、详情面板那一格同一处（`Catalog::work_year`）。
+    ///
+    /// 逐个作品问，**不做全库那一趟**：问它的那一处（[`same_work`](crate::triage::same_work)
+    /// 那条「平台与年份一致」的线索）手上只有成对的那几个作品名，而全库作品九千多个。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn work_year_of(&self, work: &str) -> Result<Option<String>, CatalogError> {
+        self.scraped_year(AnchorKind::Work, work)
+    }
+
+    /// 一个锚点上**屏上写着的那个年份**：裁决优先，其次最早的那一个（一部作品跨地区
+    /// 先后发行好几次，最早的那次才是它的年份）。
+    ///
+    /// **这一句 SQL 只有这一处**：两个入口各抄一份的话，改了一处就会有两个年份同时摆在屏上。
+    fn scraped_year(&self, kind: AnchorKind, name: &str) -> Result<Option<String>, CatalogError> {
         self.conn
             .prepare_cached(
                 "SELECT COALESCE(MIN(CASE WHEN source = ?3 THEN value END), MIN(value))

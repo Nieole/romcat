@@ -94,6 +94,7 @@ use romcat_core::sublibrary::{
 };
 use romcat_core::task::{Cutoff, Ending, Finished};
 use romcat_core::title::{self, Language, TitleKind};
+use romcat_core::triage::same_work::{self, Suspicion};
 use romcat_core::verdict::TitleSuppression;
 
 use crate::filter::Filter;
@@ -108,12 +109,32 @@ use crate::toast::{self, Toast};
 use crate::tokens::Tokens;
 
 pub mod collections;
+pub mod menu;
 pub mod merge;
+pub mod suspicion;
 pub mod work;
+
+/// 搜索框那个认得出的 id：`⌘/Ctrl+F` 要把光标放进去，得先叫得出它的名字。
+fn 搜索框() -> egui::Id {
+    egui::Id::new("浏览屏搜索框")
+}
 
 /// 侧边详情变体卡片上**首选变体**那一枚标签上的字（词表**首选变体**条）。哪一个是首选由核心库答
 /// （[`VariantDetail::preferred_now`]），这里只是屏上怎么写。
 const PREFERRED_TAG: &str = "首选变体";
+
+/// 左栏那两簇**只用于浏览**的分面底下那句说明：**识别结论**与**整理建议**。
+///
+/// ⚠️ **稿上只有「识别结论」那一簇带这句 `.help`**（`prototype.html:1101`）；
+/// 「整理建议」那一簇稿上只有标题与那颗标签，**没有这一句**（`:1113`–`:1116`，
+/// 合 main 之后逐行复核过）。给它也写上一句是票 12 验收第 3 条点名要的
+/// （「只用于浏览的分面（识别结论、整理建议）不写进规则，**屏上说明**」），
+/// 挂单 `Q1130`。
+///
+/// **一句话只有一处**：两簇各写一份的话，改了一处屏上就同时摆着两种说法。
+/// 它们不写进子库的规则这件事由核心库那一侧答（`WorkQuery::to_rule` 的
+/// `Unruly::State` 与 `Unruly::Suspected`），这里只是屏上怎么写。
+pub const BROWSE_ONLY: &str = "只用于浏览，不写入规则";
 
 /// 浏览屏两种不改变集合的呈现方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -412,6 +433,20 @@ pub struct Screen {
     /// 「不改了」、或者直接从顶栏切回子库屏——那两条路上没有「更新到子库」，
     /// 只认 `returned` 的话，子库屏会摆着一份按旧选择集排出来的差量，而「同步」认的正是它。
     touched: Option<String>,
+    /// **疑似同一作品**那几条建议，核心库交回来的那一份（票 `gui-looks-like-the-design/17`）。
+    ///
+    /// **缓着而不是每帧现扫**：那一趟要走一遍全库变体表、一遍全库标题集合
+    /// （`same_work::survey` 的文档），而这一屏画在画帧那条线程上。库底下变了就整份重扫
+    /// （[`Screen::reload`]，与左栏那几档分面同一处）。**一个数都不在这一层算**
+    /// （ADR-0005、ADR-0024）：左栏那颗标签上的「N 组」数的就是它。
+    suspicions: Vec<Suspicion>,
+    /// 那几条建议牵着的作品，**屏上那个名字**：作品名 → 显示标题。
+    ///
+    /// 建议里带的是**作品名**（那是库里的锚点），而屏上主列表、详情面板印的一律是
+    /// **显示标题**（`title::choose` 挑的那一个）。卡片上照作品名写的话，屏上同一部作品
+    /// 会有两个名字——表里写「精灵宝可梦 红」、卡片上写「Pocket Monsters - Aka (Japan)」。
+    /// 挑的那一处与主列表同一个（`title::choose`，ADR-0024），这里只是拿它多问几个作品。
+    suspicion_titles: BTreeMap<String, String>,
     /// **合并作品向导**开着时是 `Some`（票 `gui-looks-like-the-design/16`）。
     merging: Option<merge::Wizard>,
     /// **移出此作品**那一层开着时是 `Some`。它从作品详情页某一张变体卡上开。
@@ -534,6 +569,15 @@ pub struct Screen {
     page: Option<work::Page>,
     /// 把表格的滚动位置强按到这个像素偏移。**只有量帧率时才设**，真界面上永远是 `None`。
     pub scroll_to: Option<f32>,
+    /// **右键菜单**那一层（[`menu`]）：表格与卡片墙共用这一层。
+    menu: menu::Menu,
+    /// 这一帧右键按在哪一行；表格与卡片墙各自落一份进来，这一屏取走、开出菜单
+    /// （[`Self::settle_menu`]）。
+    menu_click: Option<crate::table::RightClicked>,
+    /// `↑` `↓` 刚挪过高亮：下一帧画表格时把那一行滚进视口。
+    scroll_to_focused: bool,
+    /// `⌘/Ctrl+F` 按过了：画搜索框的那一帧把光标放进去（[`Self::focus_search`]）。
+    focus_search: bool,
 }
 
 impl Screen {
@@ -606,6 +650,8 @@ impl Screen {
             join_collection_dialog: None,
             collecting: None,
             title_draft: TitleDraft::default(),
+            suspicions: Vec::new(),
+            suspicion_titles: BTreeMap::new(),
             notice: None,
             lift_notice: None,
             toast: None,
@@ -615,6 +661,10 @@ impl Screen {
             opener: Box::new(romcat_core::scrape::preview::open_externally),
             page: None,
             scroll_to: None,
+            menu: menu::Menu::default(),
+            menu_click: None,
+            scroll_to_focused: false,
+            focus_search: false,
         }
     }
 
@@ -636,7 +686,16 @@ impl Screen {
         self.priorities = priorities;
     }
 
-    /// 切到卡片视图；供窗口恢复偏好与界面测试走同一份状态。
+    /// **眼下摆的是卡片墙吗**：键盘那几下要问它（`App::browse_keys`）。
+    ///
+    /// 挪高亮那几下走的是表格背后那扇窗的**行序号**（[`Self::step_focus`]），而卡片墙背后
+    /// 是另一扇窗、另一份查询——同一个数在两边指的不是同一行（挂单 `Q1142`）。
+    #[must_use]
+    pub fn showing_cards(&self) -> bool {
+        self.view == BrowseView::Cards
+    }
+
+    /// 换成卡片墙（实测与截图门用）。    /// 切到卡片视图；供窗口恢复偏好与界面测试走同一份状态。
     pub fn show_cards(&mut self) {
         self.view = BrowseView::Cards;
     }
@@ -738,13 +797,7 @@ impl Screen {
             return;
         }
         let rows = rows.to_vec();
-        self.merging = Some(merge::Wizard::open(
-            &site.catalog,
-            &self.query,
-            &self.rules,
-            &self.priorities,
-            &rows,
-        ));
+        self.open_merge_rows(site, &rows);
     }
 
     /// 作品详情页头上那颗「**合并…**」：从这一个作品起头开一层向导，第一步再搜别的作品加进来。
@@ -752,13 +805,7 @@ impl Screen {
         let Some(anchor) = self.opened.clone() else {
             return;
         };
-        self.merging = Some(merge::Wizard::open(
-            &site.catalog,
-            &self.query,
-            &self.rules,
-            &self.priorities,
-            &[anchor],
-        ));
+        self.open_merge_rows(site, &[anchor]);
     }
 
     /// 变体卡头一行右头那颗「**移出此作品…**」。
@@ -1010,6 +1057,145 @@ impl Screen {
     /// 重问一次筛选面板上的可选值。开库时与改过元数据之后各一次。
     pub fn reload(&mut self, site: &Site) {
         self.reload_facets(&site.catalog);
+        // **疑似同一作品那一份也在这儿重取**（票 `gui-looks-like-the-design/17`）：
+        // 它与左栏那几档分面同一个处境——库底下一变，缓着的那一份就过期了。
+        self.reload_suspicions(site);
+    }
+
+    /// 重扫一趟**疑似同一作品**，并把「整理建议」那颗标签筛着的名单跟着换一份。
+    ///
+    /// **判断一个字都不在这儿**（ADR-0024）：哪两个作品疑似是同一个、人说过哪一对不是
+    /// 同一个，全由核心库那一处答（`same_work::survey`）。
+    ///
+    /// **筛着的名单要跟着换**：合掉一对之后那两个作品并成了一个，名单不换的话，
+    /// 屏上那颗标签写着新的组数，表里却还按旧名单摆着行——两个数当场对不上
+    /// （票面验收第 4 条）。
+    ///
+    /// 读不动时只记下那句错、不每帧重试，与 [`Self::reload_facets`] 一样。
+    fn reload_suspicions(&mut self, site: &Site) {
+        match same_work::survey(&site.catalog, &site.store, &site.library_identity) {
+            Ok(found) => {
+                self.suspicions = found;
+                self.suspicion_titles = self.shown_names(&site.catalog);
+                if self.query.suspected.is_some() {
+                    self.query.suspected = Some(self.suspected_works());
+                }
+            }
+            Err(error) => self.error = Some(format!("疑似同一作品扫不动：{error}")),
+        }
+    }
+
+    /// 那几条建议牵着的作品，**屏上那个名字**（[`Screen::suspicion_titles`]）。
+    ///
+    /// 挑显示标题走的是主列表那一处（[`title::choose`]），只是喂给它的是这几个作品的
+    /// 标题集合；挑出来与作品名一样的不进表——卡片上照作品名写就是了。
+    fn shown_names(&self, catalog: &Catalog) -> BTreeMap<String, String> {
+        let names = self.suspected_works();
+        let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+        // **读不动就退回作品名**：卡上那个名字会与表里那一行写的不一样（那正是这一格
+        // 要防的事），可那也只是难看；扫出来的建议本身照旧摆得出来，理由也照旧列得出。
+        // 真正的那句错由 [`Self::reload_suspicions`] 说——它与这一趟是同一下。
+        let Ok(sets) = catalog.titles_of_works(&borrowed) else {
+            return BTreeMap::new();
+        };
+        let mut out = BTreeMap::new();
+        for (work, entries) in sets {
+            let chosen = title::choose(
+                &title::TitleSet {
+                    work: work.clone(),
+                    entries,
+                },
+                &self.priorities,
+            );
+            if chosen.display != work {
+                out.insert(work, chosen.display);
+            }
+        }
+        out
+    }
+
+    /// **只看疑似同一作品那几对**：库体检里点了那一格跳过来时，把左栏「整理建议」那颗
+    /// 标签按下去（挂单 `Q957`，设计稿点那一格之后那两句 toast）。
+    ///
+    /// 先重扫一趟再筛：库屏那份建议是**体检那一趟**算的，跟屏上这一份不是同一次
+    /// （ADR-0024 推论 3：缓存可以有好几份），跳过来时按这一屏自己刚算的那一份筛，
+    /// 屏上那颗标签写的数与表里摆的行才对得上。
+    pub fn show_suspicions(&mut self, site: &Site) {
+        self.reload_suspicions(site);
+        self.query.suspected = Some(self.suspected_works());
+        self.window.invalidate();
+        self.notice = Some(crate::health::SAME_WORK_JUMPED.to_string());
+    }
+
+    /// 那几条建议一共牵着哪几个作品（去重、排过序）：「整理建议」那颗标签筛的就是它们。
+    fn suspected_works(&self) -> Vec<String> {
+        let mut out: BTreeMap<&str, ()> = BTreeMap::new();
+        for one in &self.suspicions {
+            for work in &one.works {
+                out.insert(work.as_str(), ());
+            }
+        }
+        out.into_keys().map(str::to_string).collect()
+    }
+
+    /// 人按了建议卡上那两颗之一。
+    ///
+    /// **「合并…」**开合并向导（那一层自己走三步、落一批裁决）；**「不是同一个」**
+    /// 记进沉淀库那一张表，随后整份重扫——那一对当场从屏上消失。
+    pub(super) fn do_suspicion(&mut self, site: &mut Site, deed: &suspicion::Deed) {
+        match deed {
+            suspicion::Deed::Merge(works) => {
+                let mut anchors: Vec<WorkAnchor> = Vec::new();
+                for name in works {
+                    match site.catalog.work_named(name) {
+                        Ok(Some(id)) => anchors.push(WorkAnchor::Work(id)),
+                        // **缓着的那份建议过期了**：那个作品已经被并掉、或者库重扫过了。
+                        // 不复用屏头那颗「合并作品…」的那句（人刚在一张卡上按了一颗，
+                        // 根本没有「勾选」这回事）——说实话，并就地重取一份建议。
+                        Ok(None) => {
+                            self.notice = Some(format!(
+                                "《{name}》已经不在库里了，这条建议过期了——已经重取了一份。"
+                            ));
+                            self.reload_suspicions(site);
+                            return;
+                        }
+                        // **不静默**：读不动就说读不动。
+                        Err(error) => {
+                            self.notice = Some(format!("中立库读不动：{error}"));
+                            return;
+                        }
+                    }
+                }
+                // **不带当前筛选**：向导第二步要核对的是这两个作品**全部**的变体，
+                // 而「整理建议」那颗标签正筛着这一对——照筛过的展开会少列几个
+                // （`Wizard::open` 收的那份查询就是用来展变体的）。
+                let query = WorkQuery {
+                    non_game_assets: self.query.non_game_assets,
+                    ..WorkQuery::default()
+                };
+                self.merging = Some(merge::Wizard::open(
+                    &site.catalog,
+                    &query,
+                    &self.rules,
+                    &self.priorities,
+                    &anchors,
+                ));
+            }
+            suspicion::Deed::NotSame(works) => {
+                match same_work::not_same(
+                    &mut site.store,
+                    &site.library_identity,
+                    &works[0],
+                    &works[1],
+                ) {
+                    Ok(()) => {
+                        self.notice = Some(suspicion::NOT_SAME_SAID.to_string());
+                        self.reload_suspicions(site);
+                    }
+                    Err(error) => self.notice = Some(format!("沉淀库写不动：{error}")),
+                }
+            }
+        }
     }
 
     /// 照眼下那颗「显示非游戏资产」开关，重问一次左栏那几档各有哪些值、各多少个。
@@ -2029,21 +2215,52 @@ impl Screen {
         joining: bool,
         doing: &str,
     ) {
-        // **一趟没跑完就别排第二趟**：两趟一起落，后一趟算的是前一趟落库之前那份库。
-        //
-        // 这句话里**不带动词**：`doing` 说的是**这一次**按的那一下，而还在跑的是**上一趟**
-        // ——先按 ★ 再按 ☆，写成「上一趟取消收藏还在跑」就是句假话。
-        if self.collecting.is_some() {
-            self.error = Some(
-                "上一趟还在跑（收藏与合集一次只排一趟）。\
-                 任务屏上看得见它走到哪儿了，也按得停。"
-                    .to_string(),
-            );
+        if self.上一趟还在跑() {
             return;
         }
         let Some(keys) = self.scoped_keys(&site.catalog, doing) else {
             return;
         };
+        self.queue_collection_keys(site, tasks, name, joining, keys, doing);
+    }
+
+    /// **一趟没跑完就别排第二趟**：两趟一起落，后一趟算的是前一趟落库之前那份库。
+    /// 还在跑就摆一句话出来，并交回 `true`。
+    ///
+    /// 这句话里**不带动词**：按的那一下是加收藏还是取消收藏，说的是**这一次**，而还在跑的是
+    /// **上一趟**——先按 ★ 再按 ☆，写成「上一趟取消收藏还在跑」就是句假话。
+    ///
+    /// **那句话只有这一处**：排活有两个入口（[`Self::queue_collection`] 按勾中的那一批，
+    /// [`Self::queue_collection_keys`] 按交进来的那几个键），两处各写一份迟早说成两句话。
+    fn 上一趟还在跑(&mut self) -> bool {
+        if self.collecting.is_none() {
+            return false;
+        }
+        self.error = Some(
+            "上一趟还在跑（收藏与合集一次只排一趟）。\
+             任务屏上看得见它走到哪儿了，也按得停。"
+                .to_string(),
+        );
+        true
+    }
+
+    /// 同 [`Self::queue_collection`]，只是**作用范围由调用方交进来**。
+    ///
+    /// 分出这一半，是因为收藏这一下有两种范围：屏头那颗 ★ 与左栏那几颗作用于**勾中的那一批**
+    /// （[`Self::scoped_keys`]），而右键菜单里那一项与 `F` 那一下作用于**光标底下这一行**
+    /// ——范围不同，排活、落库、那本账一个字都不该不同。
+    fn queue_collection_keys(
+        &mut self,
+        site: &Site,
+        tasks: &mut Tasks,
+        name: &str,
+        joining: bool,
+        keys: Vec<String>,
+        doing: &str,
+    ) {
+        if self.上一趟还在跑() {
+            return;
+        }
         let title = format!(
             "{}「{name}」· {} 个变体",
             if joining { "放进" } else { "拿出" },
@@ -2247,6 +2464,260 @@ impl Screen {
         };
     }
 
+    // ── 右键菜单与键盘（票 `gui-looks-like-the-design/14`） ───────────────────────
+
+    /// **这一帧右键按在哪一行**，就贴着那一下摊开一层菜单。
+    ///
+    /// 表格与卡片墙各自认出那一下、落一份 [`crate::table::RightClicked`] 进来，
+    /// 这里取走。菜单要的那几个事实**在这一下问一次**，不是每帧问一遍：
+    /// 「收没收藏」是一次读库（[`collection::favorite_of`]），摊开的那几秒里它不会变。
+    fn settle_menu(&mut self, ctx: &egui::Context, site: &Site) {
+        let Some(按的) = self.menu_click.take() else {
+            return;
+        };
+        // **右键那一行跟着点开**（设计稿 `S.sel=i; S.varSel=0; render()`）：菜单上那几项
+        // 动的就是它，侧边详情摆的也得是它。表格那一路已经把高亮挪过去了。
+        self.open_work(&site.catalog, &按的.row.anchor);
+        let keys = self.row_keys(&site.catalog, &按的.row.anchor);
+        // **收没收藏由核心库答**（ADR-0024）：与作品详情页状态块那一行照的是同一处。
+        // 读不动就当没收藏——菜单上那一项照旧按得动，按下去那条路自己会说话。
+        let favorited = collection::favorite_of(site, &keys)
+            .unwrap_or(None)
+            .is_some();
+        self.menu.open(
+            ctx,
+            menu::Facts {
+                at: 按的.at,
+                title: crate::table::row_name(&按的.row, &self.rules)
+                    .text()
+                    .to_owned(),
+                picked: self.picked.contains(&按的.row.anchor),
+                merging: self.merge_rows_with(&按的.row.anchor).len() as u64,
+                anchor: 按的.row.anchor,
+                favorited,
+            },
+        );
+    }
+
+    /// 菜单里「合并」那一项**要带上哪几行**：勾中的那一批，连光标底下这一行算在内。
+    ///
+    /// **屏上写的那句话与按下去真合的那一批出自这一处**（挂单 `Q1148`）：菜单上写着
+    /// 「合并勾选的 N 个作品…」，按下去开的向导里就该是那 N 个——两处各数一遍，迟早不一样
+    /// （ADR-0024）。
+    ///
+    /// **全选那一档只带这一行**（设计稿 `openMerge(S.pickAll?[i]:…)`）：「全选」不是一批身份，
+    /// 是一个筛选条件，而合并要人逐个核对变体（[`Self::open_merge`]）。
+    fn merge_rows_with(&self, anchor: &WorkAnchor) -> Vec<WorkAnchor> {
+        let Scope::Rows(rows) = self.picked.scope() else {
+            return vec![anchor.clone()];
+        };
+        let mut rows = rows.to_vec();
+        if !rows.contains(anchor) {
+            rows.push(anchor.clone());
+        }
+        rows
+    }
+
+    /// 这一行底下那几个变体的键。读不动库时是空的——调用方各自说话。
+    fn row_keys(&self, catalog: &Catalog, anchor: &WorkAnchor) -> Vec<String> {
+        catalog
+            .scoped_variants(&self.query, Scope::Rows(std::slice::from_ref(anchor)))
+            .unwrap_or_default()
+    }
+
+    /// 画那一层菜单；按下去的那一项当场办。
+    fn menu_ui(&mut self, ctx: &egui::Context, site: &mut Site, tasks: &mut Tasks) {
+        let Some((pressed, facts)) = self.menu.ui(ctx) else {
+            return;
+        };
+        self.apply_menu(ctx, site, tasks, pressed, &facts);
+    }
+
+    /// 菜单上按下去的那一项。
+    ///
+    /// **每一项走的都是屏上别处那颗按钮走的同一个入口**：打开详情走 [`Self::open_work`]、
+    /// 编辑元数据走作品详情页那一处、刮削走那层弹层、在文件系统中打开走
+    /// [`Self::reveal_row`]。菜单不另开一条路——另开一条，两条迟早不一样
+    /// （ADR-0005：界面不许自己长出第二份判断）。
+    fn apply_menu(
+        &mut self,
+        ctx: &egui::Context,
+        site: &mut Site,
+        tasks: &mut Tasks,
+        pressed: menu::Pressed,
+        facts: &menu::Facts,
+    ) {
+        let anchor = &facts.anchor;
+        match pressed {
+            menu::Pressed::OpenDetail => {
+                self.open_work(&site.catalog, anchor);
+                self.open_page(work::Tab::Overview);
+            }
+            menu::Pressed::EditMeta => self.edit_meta_of(&site.catalog, anchor),
+            menu::Pressed::TogglePick => self.picked.toggle(anchor),
+            menu::Pressed::ToggleFavorite => self.toggle_favorite_of(site, tasks, anchor),
+            menu::Pressed::Merge => {
+                let rows = self.merge_rows_with(anchor);
+                self.open_merge_rows(site, &rows);
+            }
+            menu::Pressed::Scrape => {
+                let keys = self.row_keys(&site.catalog, anchor);
+                if keys.is_empty() {
+                    self.notice = Some("这个作品底下一个变体都没有，没什么可刮的。".to_owned());
+                } else {
+                    let shown = u64::try_from(keys.len()).unwrap_or(u64::MAX);
+                    self.scrape.open(keys, shown);
+                }
+            }
+            menu::Pressed::Reveal => self.reveal_row(site, anchor),
+            // **复制的是菜单顶上那一行写着的那个名字**：屏上摆着什么就复制什么
+            // （设计稿 `toast(\`已复制：${w.t}\`)`）。
+            menu::Pressed::CopyName => {
+                ctx.copy_text(facts.title.clone());
+                self.notice = Some(format!("已复制：{}", facts.title));
+            }
+        }
+    }
+
+    /// 「**编辑元数据**」：打开这个作品的详情页、停在元数据那一面、当场进编辑态。
+    /// 与详情页头上那颗按钮走的是同一处（`work::Screen::begin_meta_edit`）。
+    fn edit_meta_of(&mut self, catalog: &Catalog, anchor: &WorkAnchor) {
+        self.open_work(catalog, anchor);
+        self.open_page(work::Tab::Metadata);
+        self.begin_meta_edit();
+    }
+
+    /// 「**在文件系统中打开**」：这一行底下头一个变体所在的目录。
+    ///
+    /// 键折回盘上真名走核心库那一处（`Roots::real_path`，ADR-0020），与作品详情页头上
+    /// 那颗按钮同一个函数（`Screen::reveal`）。**只读**，一个字节都不碰（ADR-0004）。
+    fn reveal_row(&mut self, site: &Site, anchor: &WorkAnchor) {
+        let keys = self.row_keys(&site.catalog, anchor);
+        let Some(key) = keys.first().cloned() else {
+            self.notice = Some("这个作品底下一个变体都没有，盘上没有对应的位置。".to_owned());
+            return;
+        };
+        self.reveal(site, &key);
+    }
+
+    /// 「**收藏 / 取消收藏**」这一行：范围就是这一行底下那几个变体。
+    ///
+    /// **收没收藏由核心库答**（[`collection::favorite_of`]，ADR-0024），不是界面自己记一个
+    /// 标志；排活、落库、那本账与屏头那颗 ★ 走的是同一条路（[`Self::queue_collection_keys`]）。
+    fn toggle_favorite_of(&mut self, site: &Site, tasks: &mut Tasks, anchor: &WorkAnchor) {
+        let keys = self.row_keys(&site.catalog, anchor);
+        if keys.is_empty() {
+            self.notice = Some("这个作品底下一个变体都没有，没什么可收藏的。".to_owned());
+            return;
+        }
+        let 收着的 = match collection::favorite_of(site, &keys) {
+            Ok(收着的) => 收着的,
+            Err(error) => {
+                self.error = Some(format!("{error}"));
+                return;
+            }
+        };
+        let joining = 收着的.is_none();
+        let doing = if joining { "加收藏" } else { "取消收藏" };
+        self.queue_collection_keys(site, tasks, FAVORITE, joining, keys, doing);
+    }
+
+    /// **开一层合并向导，就这一处。** 屏头那颗「合并作品…」（勾中那一批，
+    /// [`Self::open_merge`]）、作品详情页头上那颗「合并…」（[`Self::open_merge_here`]）、
+    /// 右键菜单里那一项，三处交进来的只是**带上哪几行**不同。
+    ///
+    /// 拦在前头的那几条（勾不够两个、全选那一档开不了）归 [`Self::open_merge`]：那是
+    /// 「屏头那颗按下去算不算数」，不是「向导怎么开」。
+    pub fn open_merge_rows(&mut self, site: &Site, rows: &[WorkAnchor]) {
+        self.merging = Some(merge::Wizard::open(
+            &site.catalog,
+            &self.query,
+            &self.rules,
+            &self.priorities,
+            rows,
+        ));
+    }
+
+    // ── 键盘那几下（`App::shortcuts` 调，票 `gui-looks-like-the-design/14`） ──
+
+    /// **高亮往上／往下挪一行**（`↑` `↓`）。一行都没高亮时落在头一行上。
+    ///
+    /// 只在**表格**那一路走得动：卡片墙背后那扇窗是另一份查询（只看有封面的那一批），
+    /// 下标不在同一个空间里（挂单 `Q1142`）。
+    pub fn step_focus(&mut self, catalog: &Catalog, 往下: bool) {
+        let 总数 = self.window.total();
+        if 总数 == 0 {
+            return;
+        }
+        let at = match self.focused {
+            None => 0,
+            Some(at) if 往下 => (at + 1).min(总数 - 1),
+            Some(at) => at.saturating_sub(1),
+        };
+        self.focused = Some(at);
+        self.scroll_focused_into_view();
+        if let Some(anchor) = self.window.row(catalog, at).map(|row| row.anchor.clone()) {
+            self.open_work(catalog, &anchor);
+        }
+    }
+
+    /// 挪到的那一行要看得见：交给表格那一层下一帧滚过去。
+    fn scroll_focused_into_view(&mut self) {
+        // 表格那一层每帧按 `focused` 画选中底色；滚过去由 egui 的 `scroll_to_rect` 办，
+        // 而那要拿得到那一行的矩形——只有画它的那一帧才有。这里留个记号就够了。
+        self.scroll_to_focused = true;
+    }
+
+    /// **打开高亮那一行的作品详情页**（`Enter`）。
+    pub fn open_focused(&mut self, catalog: &Catalog) {
+        let Some(anchor) = self.focused_anchor(catalog) else {
+            return;
+        };
+        self.open_work(catalog, &anchor);
+        self.open_page(work::Tab::Overview);
+    }
+
+    /// **勾选 / 取消勾选高亮那一行**（`空格`）。
+    pub fn toggle_pick_focused(&mut self, catalog: &Catalog) {
+        if let Some(anchor) = self.focused_anchor(catalog) {
+            self.picked.toggle(&anchor);
+        }
+    }
+
+    /// **全选筛出来的那一批**（`⌘/Ctrl+A`）：选中集就是当前这个筛选本身（ADR-0016）。
+    pub fn select_all(&mut self) {
+        self.picked.select_all();
+    }
+
+    /// **收藏 / 取消收藏高亮那一行**（`F`）。
+    pub fn toggle_favorite_focused(&mut self, site: &Site, tasks: &mut Tasks) {
+        let Some(anchor) = self.focused_anchor(&site.catalog) else {
+            return;
+        };
+        self.toggle_favorite_of(site, tasks, &anchor);
+    }
+
+    /// **编辑高亮那一行的元数据**（`E`）。
+    pub fn edit_focused(&mut self, catalog: &Catalog) {
+        if let Some(anchor) = self.focused_anchor(catalog) {
+            self.edit_meta_of(catalog, &anchor);
+        }
+    }
+
+    /// 高亮那一行是谁；一行都没高亮（或者读不到）时是 `None`。
+    fn focused_anchor(&mut self, catalog: &Catalog) -> Option<WorkAnchor> {
+        let at = self.focused?;
+        self.window.row(catalog, at).map(|row| row.anchor.clone())
+    }
+
+    /// **把光标放进搜索框**（`⌘/Ctrl+F`）：留个记号，画那一框的那一帧落实。
+    ///
+    /// 不在这儿直接 `request_focus`：那一框这一帧还没画出来（筛选栏收起来时连画都不画），
+    /// 而焦点只给得了已经在这一帧里摆过的控件。
+    pub fn focus_search(&mut self) {
+        self.focus_search = true;
+    }
+
     /// 画一帧。
     pub fn ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         self.sync_window(&site.catalog);
@@ -2260,7 +2731,12 @@ impl Screen {
         self.scrape.show(ui.ctx(), site, tasks);
         // **合并向导与「移出此作品」也是弹层**：盖在整屏上头，三栏与作品详情页都由这一处画。
         self.merge_ui(ui.ctx(), site);
+        // **收藏与合集那两个弹层**（票 `gui-looks-like-the-design/13`）。
         self.collection_dialogs(ui.ctx(), site, tasks);
+        // **右键菜单**（票 `gui-looks-like-the-design/14`）：上一帧表格或卡片墙认下的那一下，
+        // 这一帧摊开、这一帧画。两句挨着摆，按下右键与菜单出现之间才只差一帧。
+        self.settle_menu(ui.ctx(), site);
+        self.menu_ui(ui.ctx(), site, tasks);
         self.notice_toast(ui.ctx(), site);
         // **作品详情页开着就只画它**（票 `gui-looks-like-the-design/15`）：稿上它盖住整块屏。
         if self.page.is_some() {
@@ -2345,6 +2821,8 @@ impl Screen {
                         } else {
                             None
                         },
+                        menu: &mut self.menu_click,
+                        scroll_focused: std::mem::take(&mut self.scroll_to_focused),
                     }
                     .show(ui),
                     BrowseView::Cards => {
@@ -2833,11 +3311,8 @@ impl Screen {
                             // **认不认得出作品，问表格那一路同一处**（[`unlinked_title`]）：
                             // 判据在核心库（ADR-0024），卡片这边不另写一套，不然有一天两处判得不一样。
                             let 未关联 = unlinked_title(&row, &self.rules);
-                            let title = row
-                                .display
-                                .clone()
-                                .or_else(|| 未关联.clone())
-                                .unwrap_or_else(|| row.name.clone());
+                            // 这一行屏上叫什么，问表格那一路同一处（`table::row_name`）。
+                            let title = crate::table::row_name(&row, &self.rules).text().to_owned();
                             let (rect, response) = ui.allocate_exact_size(
                                 egui::vec2(
                                     width,
@@ -2860,6 +3335,11 @@ impl Screen {
                                     .max_rect(rect)
                                     .layout(Layout::top_down(Align::Min)),
                             );
+                            // **卡面上的字不许接住点击**（表格那一路早就这么干了，
+                            // `table::Table::show`）：egui 的标签默认可选中，会把按在标题或
+                            // 那几行小字上的那一下当成选字——于是点在卡面的字上整张卡收不到，
+                            // 右键更是摊不开菜单。整张卡才是那个按钮。
+                            card.style_mut().interaction.selectable_labels = false;
                             let cover_radius = if self.shelf.has_cover(&row) == Some(true) {
                                 Tokens::builtin().radius.medium
                             } else {
@@ -2944,6 +3424,17 @@ impl Screen {
                                     点了选择 = true;
                                 }
                             }
+                            // **右键摊菜单**：与表格那一路认的是同一件事，交出来的也是同一份
+                            // （`table::RightClicked`）——菜单上摆哪几项由 [`menu`] 一处说了算。
+                            if response.secondary_clicked()
+                                && let Some(at) = response.interact_pointer_pos()
+                            {
+                                response.request_focus();
+                                self.menu_click = Some(crate::table::RightClicked {
+                                    row: row.clone(),
+                                    at,
+                                });
+                            }
                             if response.clicked() && !点了选择 {
                                 response.request_focus();
                                 opened = Some(row.clone());
@@ -3020,13 +3511,19 @@ impl Screen {
 
                 // **搜索框**（设计稿 `.field`）：管顺序不管集合，所以它不在条件里、进不了子库的规则。
                 let width = ui.available_width();
-                look::text_input(
+                let 搜索框 = look::text_input(
                     ui,
                     width,
                     egui::TextEdit::singleline(&mut self.query.search)
+                        .id(搜索框())
                         .hint_text("搜索名称、别名或简介"),
-                )
-                .on_hover_text(
+                );
+                // **`⌘/Ctrl+F` 那一下在这儿落实**（[`Self::focus_search`]）：焦点只给得了
+                // 这一帧已经摆过的控件，而这一框在筛选栏收起来时连画都不画。
+                if std::mem::take(&mut self.focus_search) {
+                    搜索框.request_focus();
+                }
+                搜索框.on_hover_text(
                     "搜索管排序，筛选器管集合。三条路都找：屏上这个名字、\
                      标题集合里别的叫法（中文名就在这儿）、简介。\
                      命中在哪一条决定这一行排哪一档，权重内置、不用配。\n\
@@ -3073,7 +3570,7 @@ impl Screen {
                 facet_chips(ui, "中文", &self.facets.chinese, &mut self.query.chinese);
 
                 pane_gap(ui);
-                section_title(ui, "识别结论", Some("只用于浏览，不写入规则"));
+                section_title(ui, "识别结论", Some(BROWSE_ONLY));
                 section_gap(ui);
                 let mut state = self.query.state;
                 chip_cluster(ui, |ui| {
@@ -3121,6 +3618,27 @@ impl Screen {
                     &self.facets.collections,
                     &mut self.query.collection,
                 );
+
+                pane_gap(ui);
+                // **整理建议**（设计稿 `#dup-chip` 那一簇）：一颗标签，数的是核心库交回来的
+                // 那几条建议（`same_work::survey`）——界面一个数都不自己算（ADR-0024）。
+                // 它与「识别结论」同一个处境：**只用于浏览，不写进规则**。
+                section_title(ui, suspicion::SECTION, Some(BROWSE_ONLY));
+                section_gap(ui);
+                let 建议数 = self.suspicions.len();
+                let mut 只看建议 = self.query.suspected.is_some();
+                chip_cluster(ui, |ui| {
+                    if look::facet_chip(ui, 只看建议, suspicion::FACET, &suspicion::groups(建议数))
+                        .on_hover_text(
+                            "只看核心库认为可能是同一个作品的那几对。\n\
+                         可以直接合并，也可以标记为不是同一个。",
+                        )
+                        .clicked()
+                    {
+                        只看建议 = !只看建议;
+                    }
+                });
+                self.query.suspected = 只看建议.then(|| self.suspected_works());
 
                 pane_gap(ui);
                 section_title(ui, "条件组", Some("存成子库时就是规则")).on_hover_text(
@@ -3561,6 +4079,8 @@ impl Screen {
         // 先抄一份出来画，画完有改动再写回去。平常浏览时一样都不摆，也不留空位。
         let mut 备注 = self.editing.as_ref().map(|editing| editing.note.clone());
         let mut 例外: Option<Option<Exception>> = None;
+        // 建议卡上按了哪一颗；攒在外头，出了这个闭包再去办（同上面那几样）。
+        let mut 建议: Option<suspicion::Deed> = None;
         let this = &*self;
         let Some(work) = this.work.as_ref() else {
             return;
@@ -3576,6 +4096,15 @@ impl Screen {
                 // 头上那一块底下一排两颗小号按钮（设计稿 `.dhead` 后头那一排）：打开作品详情页，停在概览或元数据那一面。
                 pane_gap(ui);
                 去详情页 = page_buttons(ui);
+                // **疑似同一作品那张建议卡**照稿摆在这两颗按钮底下（设计稿 `#detail` 里的
+                // `suggHTML(S.sel)`）。认不出作品的那一行没有作品名，也就不参与合并。
+                if !matches!(work.anchor, WorkAnchor::Loose(_))
+                    && suspicion::any_for(&this.suspicions, &work.name)
+                {
+                    pane_gap(ui);
+                    建议 =
+                        suspicion::cards(ui, &this.suspicions, &work.name, &this.suspicion_titles);
+                }
                 // 认不出作品的那一行：名字是怎么来的——没有作品链接**本身就是一条信息**（照稿摆在两颗按钮底下）。
                 if matches!(work.anchor, WorkAnchor::Loose(_)) {
                     pane_gap(ui);
@@ -3633,6 +4162,9 @@ impl Screen {
         }
         if let Some(key) = pick {
             self.pick(&site.catalog, &key);
+        }
+        if let Some(deed) = 建议 {
+            self.do_suspicion(site, &deed);
         }
         if let Some((tab, 编辑)) = 去详情页 {
             self.open_page(tab);

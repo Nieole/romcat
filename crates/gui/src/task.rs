@@ -121,6 +121,10 @@ pub enum Product {
         report: Box<romcat_core::report::HealthReport>,
         /// 重复拷贝的完整明细：每一组、记下的每一份。
         duplicates: Box<romcat_core::report::DuplicateDetails>,
+        /// **疑似同一作品**那几条建议（票 `gui-looks-like-the-design/17`）。它不在体检报告
+        /// 里——报告折的是扫描留下的那份统计，而这一条要走一遍识别之后的中立库。
+        /// 跟着这一趟回来是因为两者同一个处境：都只读、都贵、都不许进画帧那条线程。
+        suspicions: Box<Vec<romcat_core::triage::same_work::Suspicion>>,
     },
     /// 读好了一台设备的**脚印**（`romcat_core::sync::Footprint`，票 `gui-looks-like-the-design/21`）：目标设置弹层里平台表
     /// 列哪几个平台、换一份档案当场说得出放不下哪几份、落点预览照哪一份，都从它纯算。整条只读，与
