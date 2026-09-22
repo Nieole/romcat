@@ -393,11 +393,11 @@ struct Undo {
     toast: Toast,
 }
 
-#[derive(Debug)]
 /// **撤销撤得回来的那两样**：删掉的一台子库，或者删掉的一条规则。
 ///
 /// 两样共用一条提示条与一颗「撤销」（`Undo` 只留**一份**：再删一下，上一份就丢了
 /// ——与删子库那一套同一条规矩）。
+#[derive(Debug)]
 enum Undoable {
     /// 删之前整份留下来的那一台（[`Catalog::take_sublibrary`](romcat_core::catalog::Catalog::take_sublibrary)）。
     Sublibrary(Box<RemovedSublibrary>),
@@ -884,12 +884,13 @@ impl Screen {
         // ——一遍在规则里当正常的，一遍在下面当坏的。
         let broken: std::collections::BTreeSet<i64> =
             loaded.broken.iter().map(|row| row.ordinal).collect();
-        let labels = loaded
-            .selection
-            .rules
+        // **人起过名字就显示那个**（票 `gui-looks-like-the-design/23` 给
+        // `sublibrary_rule` 加了 `name` 那一列）。走 `StoredRule::shown_name`
+        // ——全仓问「这条规则叫什么」只这一处；从前这儿一律 `rule.label()` 现拼，
+        // 于是「加入子库」那一格起的名字**写进了库、屏上再也见不着**。
+        let labels = stored
             .iter()
-            .zip(&loaded.ordinals)
-            .map(|(rule, ordinal)| (*ordinal, rule.label()))
+            .map(|一条| (一条.ordinal, 一条.shown_name()))
             .collect();
         self.selections.insert(
             name.to_string(),
@@ -1029,25 +1030,17 @@ impl Screen {
     /// [`Fit`]: romcat_core::sublibrary::Fit
     #[must_use]
     pub fn gauge(&self, name: &str) -> Gauge {
-        let room = self.room_of(name);
-        Gauge {
-            picked: room.as_ref().map_or_else(
-                || self.evaluated.get(name).map_or(0, |report| report.bytes),
-                |room| room.after_bytes.saturating_sub(room.stranger_bytes),
-            ),
-            strangers: room.as_ref().map(|room| room.stranger_bytes),
-            // **排过差量、算过容量的照计划里真用上的那个上限画**（`Room::capacity`：按设备容量是卡此刻的总量，本机磁盘不设
-            // 上限时按剩余空间算）——与旁边「超出容量上限」同一个底；都没有时照库里记着的。
-            capacity: room.as_ref().map_or_else(
-                || {
-                    self.list
-                        .iter()
-                        .find(|row| row.name == name)
-                        .and_then(|row| row.capacity)
-                },
-                |room| room.capacity,
-            ),
-        }
+        // **这三个数走核心那一处 `Gauge::of`**（浏览屏挑选栏那根条子用的是同一个）：
+        // 看过目标的照 `Room` 填、只算过容量的照报告填、都没有的就是「还没算过」。
+        // 这儿只负责把三样递进去——**哪一样优先由领域定**，不由这一屏定。
+        Gauge::of(
+            self.evaluated.get(name),
+            self.room_of(name).as_ref(),
+            self.list
+                .iter()
+                .find(|row| row.name == name)
+                .and_then(|row| row.capacity),
+        )
     }
 
     /// 这一台卡上那笔**装得下吗**的账：排过差量的照那份计划，没排过的照「算一遍容量」
@@ -1746,7 +1739,9 @@ impl Screen {
     }
 
     /// 「**新建子库**」：打开「新建子库」那层弹层，草稿换成一份空的，没有哪一张卡算摊开着。
-    fn begin_new(&mut self) {
+    /// **摊开「新建子库」那层表单**（屏头那颗，以及浏览屏「加入子库」那一层底下
+    /// 那颗「新建子库…」按的都是它）。
+    pub fn begin_new(&mut self) {
         self.forget_strangers();
         self.vetted = None;
         self.name_vetted = None;
@@ -4189,10 +4184,9 @@ impl Screen {
         match site.catalog.take_rule(name, ordinal) {
             Ok(Some(rule)) => {
                 self.forget(site, name);
-                let 叫什么 = rule.name.clone().unwrap_or_else(|| {
-                    romcat_core::sublibrary::Rule::parse(&rule.text)
-                        .map_or_else(|_| rule.text.clone(), |读通的| 读通的.label())
-                });
+                // 名字走全仓那一处（`RemovedRule::shown_name` → `shown_rule_name`）：
+                // 在这儿另拼一份的话，提示条上那个名字会与子库屏上那个对不上。
+                let 叫什么 = rule.shown_name();
                 self.notice = None;
                 self.undo = Some(Undo {
                     toast: Toast::new(format!(

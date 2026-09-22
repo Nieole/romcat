@@ -549,6 +549,12 @@ pub struct Screen {
         std::collections::BTreeMap<String, romcat_core::sublibrary::report::SelectionReport>,
     /// **那份报告作废了**：刚加进去一条，得重算一趟，不然挑选栏上的累计还是上一趟的数。
     sublibrary_stale: bool,
+    /// 上一趟**各台现状**算砸了（或者被按停了），连同那句为什么；`None` 是没砸过。
+    ///
+    /// 记着它有两个用处：屏上照实写「算不出」而不是一直「正在算…」
+    /// （没人在算的时候印「正在算…」与印 0 是同一种假话），
+    /// 以及**别每帧重排**那一趟 343 毫秒的活。
+    sublibrary_survey_failed: Option<String>,
     /// 正在算的那一趟**各台现状**（`survey`）是第几号；`None` 是没在算。
     ///
     /// 与预估那一趟分开排：**那一趟是「加进去之后」，这一趟是「眼下各台是什么样」**，
@@ -559,6 +565,11 @@ pub struct Screen {
     /// 人换一台、换一种方式，上一趟那个数就不作数了——**得认得出来**，
     /// 不然屏上会拿着上一台的数当这一台的。
     sublibrary_estimated_for: Option<(String, sublibrary::Mode)>,
+    /// **有人按了「新建子库…」**：窗口那一层下一帧取走，把人送去子库屏并摊开那层表单。
+    ///
+    /// 与 `returned` 分开：那个是「改完了送回去」，这个是「去建一台新的」，
+    /// 两件事落在同一格里的话，窗口那一层分不出该不该开表单。
+    new_sublibrary_asked: bool,
     /// 那一层「加入到」那一列此刻列着哪几台，**连它们各自那几个数**。
     ///
     /// 条数一查就有；选中多少、多大要折一遍事实（343 毫秒），所以先摆 `None`
@@ -686,11 +697,13 @@ impl Screen {
             add_to_sublibrary: None,
             sublibrary_estimating: None,
             sublibrary_surveying: None,
+            sublibrary_survey_failed: None,
             picking: None,
             sublibrary_reports: std::collections::BTreeMap::new(),
             sublibrary_stale: false,
             sublibrary_estimated_for: None,
             sublibrary_devices: Vec::new(),
+            new_sublibrary_asked: false,
             sublibrary_estimate: sublibrary::Estimate::Working,
             join_collection_dialog: None,
             collecting: None,
@@ -900,6 +913,13 @@ impl Screen {
         // 写在 `collections::Recorded` 的文档里。
         //
         // **读不动就照实说，不拿一份空名单顶上去**——空名单在屏上读作「一个合集都没有」。
+        // **一个弹层都没开着就不查库**：`Store::collections()` 是沉淀库上一趟
+        // `GROUP BY` 全表聚合，摆在这儿每帧跑一遍就是把它放到了画帧线上
+        // ——而这个函数再往下八行，自己正为同一个理由把「有几条规则写着它」
+        // 推迟到按下「删除…」那一下。`Q1109` 裁的是「问沉淀库」，没说每帧问。
+        if self.manage_collections.is_none() && self.join_collection_dialog.is_none() {
+            return;
+        }
         let 账本 = match 合集账本(site) {
             Ok(几个) => Some(几个),
             Err(读不动) => {
@@ -967,6 +987,10 @@ impl Screen {
         };
         // 当前筛选折成的那条规则：`Ok(None)` 是一个条件都没筛，`Err` 是有写错的子句。
         let 折出来的 = self.query.to_rule();
+        // **折不成规则时那句「为什么」由 `Unruly` 自己分档说**（搜索框里还有字、
+        // 筛着识别结论、平台未知、带逗号……各有各的一句）。
+        // 从前这儿一律套上「条件组里有写错的子句」那个抬头——**搜索框里有字不是写错了子句**，
+        // 而 ADR-0005 要的是「灰着说得出为什么」：**说出一个错的为什么比不说更坏**。
         let (rule, unruly) = match &折出来的 {
             Ok(有的) => (有的.as_ref(), None),
             Err(不成) => (None, Some(不成.advice())),
@@ -995,8 +1019,13 @@ impl Screen {
             sublibrary::Out::Closed => self.add_to_sublibrary = None,
             sublibrary::Out::NewDevice => {
                 self.add_to_sublibrary = None;
-                // 一台子库都没有时那一颗：把人送去子库屏建一个。
-                self.returned = Some(String::new());
+                // **把人送去子库屏，并且把那层「新建子库」表单开着**。
+                //
+                // 从前这儿只置了一个空名字的 `returned`，于是 `App::route` 拿它去
+                // `open(site, "")`——库里没有叫空字符串的子库，那层表单**并没有打开**，
+                // 人落在一块什么都没选中的屏上，还得自己再找屏头那颗「新建子库」。
+                // 按钮上写着「新建子库」，它就得真把那一步摆出来。
+                self.new_sublibrary_asked = true;
             }
             sublibrary::Out::Add(deed) => {
                 self.add_to_sublibrary = None;
@@ -1020,9 +1049,19 @@ impl Screen {
         };
         self.queue_survey(site, tasks);
         let 报告 = self.sublibrary_reports.get(&name);
-        let 几条规则 = 报告.map_or(0, |一份| 一份.rules.len());
+        // **「几条规则」含读不懂的那几条**：人问的是「这台库里有几行规则」。
+        // `SelectionReport::rules` 只装读得懂的，坏的在 `broken_rules` 里另摆
+        // ——只数前者的话，库里躺着一条读不懂的规则时，这儿写「2 条」而弹层
+        // 那一列写「3 条」（它数的是 `sublibrary_rules().len()`）。同一个数两处各数各的。
+        let 几条规则 = 报告.map_or(0, |一份| 一份.rules.len() + 一份.broken_rules.len());
         let 累计 = 报告.map_or_else(
-            || "正在算…".to_string(),
+            || {
+                // **算砸了就说算砸了**：这时没人在算，印「正在算…」与印 0 是同一种假话。
+                self.sublibrary_survey_failed.clone().map_or_else(
+                    || "正在算…".to_string(),
+                    |为什么| format!("算不出：{为什么}"),
+                )
+            },
             |一份| {
                 format!(
                     "{几条规则} 条规则 · {} 个变体 · {}{}",
@@ -1035,13 +1074,21 @@ impl Screen {
             },
         );
         // 当前筛选折成的那条规则，以及它在这台里是不是已经有了。
+        //
+        // **读不动不许吞成「不重复」**：`.ok()` 吞掉的话那颗主按钮照样亮着、
+        // 悬停照样说「加进去」，而人按下去会撞上一条其实已经在的规则。
         let 这一条 = self.query.to_rule().ok().flatten();
-        let 已经有了 = 这一条.as_ref().and_then(|rule| {
-            site.catalog
-                .sublibrary_rules(&name)
-                .ok()
-                .and_then(|几条| Rule::same_one_in(&几条, rule))
-        });
+        let mut 读不动 = None;
+        let 已经有了 =
+            这一条
+                .as_ref()
+                .and_then(|rule| match site.catalog.sublibrary_rules(&name) {
+                    Ok(几条) => Rule::same_one_in(&几条, rule),
+                    Err(错) => {
+                        读不动 = Some(format!("中立库读不动，说不准这一条在不在：{错}"));
+                        None
+                    }
+                });
         let 勾了 = self.picked.count(self.window.total());
         let mut 按了 = None;
         let tokens = Tokens::builtin();
@@ -1060,24 +1107,40 @@ impl Screen {
                     });
                     if let Some(一份) = 报告 {
                         let tokens = Tokens::builtin();
+                        // **这三个数走核心那一处 `Gauge::of`**，不在这儿手搓：
+                        // 看过目标的那一台要照 `Room` 填（选中 ＝ after − 清单之外），
+                        // 没看过的才照报告填。手搓一份的话，同一台设备在这儿与子库屏上
+                        // 会画出两根不同的条子，而 `Gauge` 的文档把那条恒等式写死了。
+                        let room = 一份.fit.known();
                         look::gauge_bar(
                             ui,
                             egui::vec2(
                                 tokens.layout.pick_gauge_width,
                                 tokens.layout.pick_gauge_height,
                             ),
-                            &romcat_core::sublibrary::Gauge {
-                                picked: 一份.bytes,
-                                strangers: 一份.fit.known().map(|room| room.stranger_bytes),
-                                capacity: 一份.capacity,
-                            },
-                            一份
-                                .fit
-                                .known()
-                                .and_then(|room| room.over_capacity)
-                                .is_some(),
+                            &romcat_core::sublibrary::Gauge::of(Some(一份), room, 一份.capacity),
+                            room.and_then(|room| room.over_capacity).is_some(),
                         );
                     }
+                    // **照稿那一句「当前筛选：X · N 个变体」**（`renderPickbar`）：
+                    // 挑选模式的整个卖点就是「换一个平台、看一眼、点一下」，
+                    // **眼下这一条筛的是什么、有多少个**正是那一眼要看的东西
+                    // ——那颗按钮只在「加入当前筛选 / 已在选择集中」之间改口，
+                    // 说不出筛的是哪一条。
+                    look::help(
+                        ui,
+                        &format!(
+                            "当前筛选：{} · {}",
+                            这一条
+                                .as_ref()
+                                .map_or_else(|| "（还折不成一条规则）".to_string(), Rule::label),
+                            // 数不出来就说数不出来（同 `Screen::scope`：`None` 不是零）。
+                            self.scope.map_or_else(
+                                || "变体数算不出".to_string(),
+                                |几个| format!("{} 个变体", thousands(几个)),
+                            ),
+                        ),
+                    );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         按了 = look::small_buttons(ui, |ui| {
                             let mut 按了 = None;
@@ -1113,7 +1176,7 @@ impl Screen {
                             {
                                 按了 = Some(Picking::AddPicked);
                             }
-                            let 加得了 = 这一条.is_some() && 已经有了.is_none();
+                            let 加得了 = 这一条.is_some() && 已经有了.is_none() && 读不动.is_none();
                             if ui
                                 .scope(|ui| {
                                     look::primary_button(ui.visuals_mut());
@@ -1127,12 +1190,16 @@ impl Screen {
                                     )
                                 })
                                 .inner
-                                .on_hover_text(match (&这一条, 已经有了) {
-                                    (None, _) => "当前筛选还折不成一条规则，先把条件组理顺。",
-                                    (_, Some(_)) => {
-                                        "这一条已经在这台的选择集里了。换一个平台再加一条。"
+                                .on_hover_text(match (&这一条, 已经有了, &读不动) {
+                                    (_, _, Some(错)) => 错.clone(),
+                                    (None, _, _) => {
+                                        "当前筛选还折不成一条规则，先把条件组理顺。".to_string()
                                     }
-                                    _ => "把当前筛选作为一条规则加进去。",
+                                    (_, Some(_), _) => {
+                                        "这一条已经在这台的选择集里了。换一个平台再加一条。"
+                                            .to_string()
+                                    }
+                                    _ => "把当前筛选作为一条规则加进去。".to_string(),
                                 })
                                 .clicked()
                             {
@@ -1183,9 +1250,17 @@ impl Screen {
         if !self.sublibrary_reports.is_empty() && !self.sublibrary_stale {
             return;
         }
-        self.sublibrary_stale = false;
-        let Ok(几台) = site.catalog.sublibraries() else {
+        // **上一趟算砸了就别再自动重排**：不挡的话第一趟一失败，`reports` 还是空的、
+        // 守卫全不命中，于是**每帧排一趟 343 毫秒的活**。
+        if self.sublibrary_survey_failed.is_some() {
             return;
+        }
+        let 几台 = match site.catalog.sublibraries() {
+            Ok(几台) => 几台,
+            Err(读不动) => {
+                self.sublibrary_survey_failed = Some(format!("中立库读不动：{读不动}"));
+                return;
+            }
         };
         let workspace = self.workspace.clone();
         let title = "算各台子库眼下的容量".to_string();
@@ -1198,9 +1273,12 @@ impl Screen {
                 romcat_core::sublibrary::survey(&site.catalog, &workspace, &几台, task)
                     .map(|reports| Product::Evaluated(Box::new(reports)))
             }),
-            // 开不出第二份连接时那几个数就一直是「正在算…」——这一档不该让整层打不开，
-            // 所以只是不排，不报错。
-            Err(_) => return,
+            // 开不出第二份连接：**照实记下来**，屏上写「算不出」而不是一直「正在算…」
+            // ——没人在算的时候印「正在算…」与印 0 是同一种假话，只是更难查。
+            Err(why) => {
+                self.sublibrary_survey_failed = Some(format!("另开一份只读连接没开出来：{why}"));
+                return;
+            }
         });
     }
 
@@ -1334,9 +1412,15 @@ impl Screen {
             ..
         }) = done.ended
         else {
-            // 停了或者失败了，那几个数就一直写着「正在算…」——**不拿 0 顶上去**。
+            // **停了或者失败了就记下来**：不拿 0 顶上去，也不一直写「正在算…」
+            // ——那时没人在算。记了之后 `queue_survey` 不再每帧重排。
+            self.sublibrary_survey_failed = Some("算砸了或者被按停了".to_string());
             return None;
         };
+        // **算成了才清「作废」那个记号**：清在排下去那一步的话，那一趟要是失败了，
+        // 记号已经没了、报告还是旧的，于是挑选栏上的累计从此定格在旧数而屏上一个字不说。
+        self.sublibrary_stale = false;
+        self.sublibrary_survey_failed = None;
         for 一台 in &mut self.sublibrary_devices {
             if let Some(报告) = 几份.get(&一台.name) {
                 一台.picked = Some(报告.picked);
@@ -1393,8 +1477,12 @@ impl Screen {
                 ) {
                     Ok(落了几条) => {
                         self.error = None;
+                        // **屏上写「包含」不写「收入」**（词表**例外**那一条、挂单 `Q818`：
+                        // 屏上照稿写「包含 / 排除」，库里存的值与命令行照旧是「收入 / 排除」）。
+                        // 那个词由核心一处答——`Exception::shown()`，不在这儿写字面量。
                         self.notice = Some(format!(
-                            "「{name}」收入了 {} 个变体（手动例外，不随筛选条件变）。",
+                            "「{name}」{}了 {} 个变体（手动例外，不随筛选条件变）。",
+                            romcat_core::sublibrary::Exception::Include.shown(),
                             thousands(落了几条 as u64),
                         ));
                     }
@@ -1403,9 +1491,11 @@ impl Screen {
             }
         }
         self.touched = Some(name.clone());
-        // **刚加进去一条，上一趟那份报告就不作数了**：挑选栏上的累计要当场更新
-        // （验收第 5 条），所以标脏、下一帧重算一趟。
+        // **刚加进去一条，上一趟那份报告与那一趟预估都不作数了**：挑选栏上的累计要当场
+        // 更新（验收第 5 条），而「加完 → 再开这一层」是最常走的一条路——
+        // 不清那个记号的话第二次开出来预估永远停在「正在算…」。
         self.sublibrary_stale = true;
+        self.sublibrary_estimated_for = None;
         if deed.keep_picking {
             // **留在这一屏接着挑**（设计稿 `S.pick`）：顶上那条挑选栏从这一下起常驻。
             self.picking = Some(name);
@@ -1446,6 +1536,7 @@ impl Screen {
         };
         let mut devices = Vec::with_capacity(几台.len());
         for 一台 in 几台 {
+            let 报告 = self.sublibrary_reports.get(&一台.name);
             let 规则们 = match site.catalog.sublibrary_rules(&一台.name) {
                 Ok(几条) => 几条,
                 Err(读不动) => {
@@ -1458,15 +1549,25 @@ impl Screen {
                     .as_ref()
                     .and_then(|rule| Rule::same_one_in(&规则们, rule)),
                 rules: 规则们.len(),
-                picked: None,
-                bytes: None,
+                // **算过的那几台就把数填上**：`survey` 那一份还躺在手上，
+                // 重新摆成 `None` 的话屏上写着「正在算…」而那个数其实就在手边
+                //（`Device::line` 的「还没算出来」是指真的还没算，不是算了不拿）。
+                picked: 报告.map(|一份| 一份.picked),
+                bytes: 报告.map(|一份| 一份.bytes),
                 capacity: 一台.capacity,
                 name: 一台.name,
             });
         }
-        self.add_to_sublibrary = Some(sublibrary::AddTo::open(&devices, None));
+        // **默认选正在挑的那一台**（照稿 `S.as={dev: S.pick ? S.pick.dev : 0}`）：
+        // 挑选模式下从工具条开这一层，人要加的多半还是正在挑的那台。
+        self.add_to_sublibrary = Some(sublibrary::AddTo::open(&devices, self.picking.as_deref()));
         self.sublibrary_devices = devices;
         self.sublibrary_estimate = sublibrary::Estimate::Working;
+        // ⚠️ **这一句不能漏**：`queue_addition` 拿「上一趟是照哪一档算的」挡重排，
+        // 不清掉的话第二次开这一层（同一台、同一种加入方式）守卫直接命中、那一趟不排，
+        // 于是预估**永远停在「正在算…」，而「加入」那两颗是亮的**——人按下去就是盲加。
+        // 而且筛选换过了，上一趟那个数本来也不作数。
+        self.sublibrary_estimated_for = None;
         self.error = None;
     }
 
@@ -2059,6 +2160,11 @@ impl Screen {
             }
             Err(error) => self.error = Some(format!("中立库写不动：{error}")),
         }
+    }
+
+    /// **有人按了「新建子库…」吗**；取过就没（窗口一帧问一次）。
+    pub fn take_new_sublibrary_asked(&mut self) -> bool {
+        std::mem::take(&mut self.new_sublibrary_asked)
     }
 
     /// 把「更新到子库」那一下取走。**取过就没了**：窗口一帧问一次。

@@ -515,7 +515,8 @@ fn 多少个成员(count: u64) -> String {
     format!("{} 个成员", romcat_core::report::thousands(count))
 }
 
-/// 这个合集在分面上写着几个。分面里没有它就是 0——**不另查一遍库**。
+/// 这个合集在**沉淀库那本账**上记着几个成员（[`Recorded`]）。账上没有它就是 0。
+/// **不另查一遍库**——那本账是外头一次问好递进来的。
 fn 几个(collections: &[Recorded], name: &str) -> String {
     多少个成员(
         collections

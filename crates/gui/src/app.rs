@@ -712,6 +712,14 @@ impl App {
         if let Some(name) = self.sublibrary.take_touched() {
             self.browse.exceptions_changed(&self.site, &name);
         }
+        // **浏览屏「加入子库」那一层底下那颗「新建子库…」**（票 `23`）：
+        // 送去子库屏，并且**把那层表单开着**——按钮上写着「新建子库」，
+        // 只把人送到一块空屏上等于它什么都没建。
+        if self.browse.take_new_sublibrary_asked() {
+            self.sublibrary.reload(&self.site);
+            self.sublibrary.begin_new();
+            self.view = View::Sublibraries;
+        }
         if let Some(name) = self.browse.take_return() {
             self.sublibrary.reload(&self.site);
             self.sublibrary.open(&self.site, &name);

@@ -1913,7 +1913,9 @@ fn 拿走一条规则再放回去_序号与名字都原样() {
     assert_eq!(剩下的.len(), 1);
     assert_eq!(剩下的[0].ordinal, 第二条);
 
-    // 二、**原样放回去**：序号、原文、名字、记下的时刻，四样都是原来那份。
+    // 二、**原样放回去**：序号、原文、名字三样都是原来那份。
+    // （`at` 也原样回去——`restore_rule` 写的就是 `rule.at`——但 `StoredRule` 不带它，
+    // 这儿读不到，所以不在这条里断；说了不验比不说更坏。）
     assert!(catalog.restore_rule("掌机", &拿走的).expect("放得回"));
     let 回来了 = catalog.sublibrary_rules("掌机").expect("读得出");
     assert_eq!(回来了.len(), 2);

@@ -33,7 +33,7 @@
 //! 「一项都不摆」翻成了**正面断言**（两项都在、按下去各自摊开该摊的那一层）。
 //!
 //! 与快捷键表同一条纪律（[`crate::keys`] 的「接一个列一个」）：**屏上不许印一件做不到的事**。
-//! 哪一项摆上来，`tests/menu.rs` 那条 `做不到的那两项一项都不摆` 就翻成正面断言。
+//! 钉着这一条的是 `tests/menu.rs::那两项做得到了就摆上来_按下去各自摊开该摊的那一层`。
 
 use romcat_core::catalog::browse::WorkAnchor;
 use romcat_core::report::thousands;

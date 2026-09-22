@@ -424,21 +424,32 @@ pub struct StoredRule {
     pub name: Option<String>,
 }
 
+/// **屏上这条规则叫什么**：人起过名字就是那个，没起过就拿 [`Rule::label`] 从原文现拼
+/// （稿上 `autoName`）。原文读不回来时退回原文本身——那时现拼不出来，
+/// 而印一句空的比印原文更难查。只打了空白**等于没起过**。
+///
+/// **全仓问「这条规则叫什么」只走这一处**（ADR-0024）：屏上、报告、命令行各拼一遍的话，
+/// 同一条规则在三处会有三个名字，而人照着其中一个去找另一处就找不着。
+///
+/// ⚠️ 收的是**两个字段**而不是某一个结构体：库里那一条（[`StoredRule`]）、
+/// 删之前留下来的那一条（`catalog::RemovedRule`）、界面上刚起好还没落库的那一份，
+/// 三处形状不同而这一问是同一个——判断收什么由领域定，不由第一个调用方的手头数据定
+/// （ADR-0024 推论 2）。
+#[must_use]
+pub fn shown_rule_name(name: Option<&str>, text: &str) -> String {
+    if let Some(起过的) = name
+        && !起过的.trim().is_empty()
+    {
+        return 起过的.to_string();
+    }
+    Rule::parse(text).map_or_else(|_| text.to_string(), |读通的| 读通的.label())
+}
+
 impl StoredRule {
-    /// **屏上这条规则叫什么**：人起过名字就是那个，没起过就拿 [`Rule::label`] 从原文现拼
-    /// （稿上 `autoName`）。原文读不回来时退回原文本身——那时现拼不出来，
-    /// 而印一句空的比印原文更难查。
-    ///
-    /// **全仓问「这条规则叫什么」只走这一处**：屏上、报告、命令行各拼一遍的话，
-    /// 同一条规则在三处会有三个名字，而人照着其中一个去找另一处就找不着。
+    /// **屏上这条规则叫什么**——走全仓那一处 [`shown_rule_name`]。
     #[must_use]
     pub fn shown_name(&self) -> String {
-        if let Some(起过的) = self.name.as_deref()
-            && !起过的.trim().is_empty()
-        {
-            return 起过的.to_string();
-        }
-        Rule::parse(&self.text).map_or_else(|_| self.text.clone(), |读通的| 读通的.label())
+        shown_rule_name(self.name.as_deref(), &self.text)
     }
 }
 
@@ -1410,8 +1421,9 @@ pub struct Addition {
 ///
 /// ## 为什么不便宜
 ///
-/// 大头是 [`facts`] 走一遍全库（真机 **343 毫秒**，挂账 D156），再加两趟
-/// [`fit`]（各走一遍排计划那半条线）。**摆不上画帧线**——调用方得排任务台
+/// 大头是 [`facts`] 走一遍全库（真机 **343 毫秒**，挂账 D156），再加**一趟**
+/// [`fit`]（走一遍排计划那半条线；「加之前」那一份只在内存里求值，不排计划）。
+/// **摆不上画帧线**——调用方得排任务台
 /// （票 23 的界面就是这么做的，挂单 `Q1181`）。
 ///
 /// # Errors
@@ -1424,8 +1436,10 @@ pub fn addition(
     adding: Adding<'_>,
     task: &Handle,
 ) -> Result<Addition, Cutoff> {
-    // 折事实一步，加之前加之后各走一遍排计划那半条线。
-    task.steps(crate::sync::PLAN_STEPS.saturating_mul(2).saturating_add(1));
+    // **折事实一步、算装不装得下一步，再加那一趟排计划那半条线**。
+    // 照实报：多报的话任务台上那根进度条永远走不到头（从前这儿写的是
+    // `PLAN_STEPS * 2 + 1` ＝ 17 步，而实际只走 10 步）。
+    task.steps(crate::sync::PLAN_STEPS.saturating_add(2));
     task.step("折事实")?;
     let facts = facts(catalog).map_err(|error| format!("中立库读不动：{error}"))?;
     let loaded = catalog
@@ -1472,7 +1486,13 @@ pub fn addition(
     // **重复 ＝ 这一条自己命中多少 − 它真新增多少**。规则那一档的「自己命中多少」
     // 读加完那一份的 `rule_hits` 最后一格（刚添进去的就是它）；例外那一档是这一批的个数。
     let 自己命中 = match adding {
-        Adding::Rule(_) => 加之后.rule_hits.last().copied().unwrap_or(0),
+        // **刚 push 进去那一条就是最后一格**（`rule_hits` 与 `rules` 等长）。
+        // 取不到就是求值器的形状变了——那时宁可坏得响，也别当成 0
+        // 悄悄把「重复」算成整条命中。
+        Adding::Rule(_) => *加之后
+            .rule_hits
+            .last()
+            .expect("刚添进去的那一条在 rule_hits 的最后一格"),
         Adding::Exceptions(keys) => keys.len() as u64,
     };
     let overlap = 自己命中.saturating_sub(added);
@@ -1490,6 +1510,49 @@ pub fn addition(
         before_bytes: 加之前.bytes,
         after: after_fit,
     })
+}
+
+impl Gauge {
+    /// **照一份选择集报告折出这三个数**（看过目标的那一台再给一份 [`Room`]）。
+    ///
+    /// **填这三个数只走这一处**（ADR-0024）：本类型的文档把那条恒等式写死了
+    /// ——`over_capacity(capacity, taken())` 必须等于旁边那行字用的那个超出量，
+    /// 而要它成立就得**看过目标的照 `Room` 填、没看过的照报告填**，两档不能混。
+    /// 各屏手搓一份的话，同一台设备在两屏上会画出两根不同的条子
+    /// （票 `gui-looks-like-the-design/23` 的挑选栏差点就是第二份）。
+    /// 三样各有可能缺席，所以**三样都收 `Option`**：
+    ///
+    /// - `room`：**看过目标**才有（排过差量预览、或者算容量那一趟卡在手边）。
+    ///   有它就照它填——选中 ＝ `after_bytes − stranger_bytes`，上限 ＝ 计划里真用上的那个。
+    /// - `report`：**算过容量**才有。没有 `room` 时选中照它的 `bytes` 填。
+    /// - `fallback_capacity`：两样都说不出上限时，库里记着的那个。
+    ///
+    /// 两样都没有就是「还没算过」：选中 0、清单之外**未知**（画成斜纹，不画成零）。
+    #[must_use]
+    pub fn of(
+        report: Option<&report::SelectionReport>,
+        room: Option<&Room>,
+        fallback_capacity: Option<u64>,
+    ) -> Self {
+        Self {
+            picked: room.map_or_else(
+                || report.map_or(0, |report| report.bytes),
+                |room| room.after_bytes.saturating_sub(room.stranger_bytes),
+            ),
+            strangers: room.map(|room| room.stranger_bytes),
+            // **排过差量、算过容量的照计划里真用上的那个上限画**（`Room::capacity`：
+            // 按设备容量是卡此刻的总量，本机磁盘不设上限时按剩余空间算）——
+            // 与旁边「超出容量上限」同一个底；都没有时照库里记着的。
+            capacity: room.map_or_else(
+                || {
+                    report
+                        .and_then(|report| report.capacity)
+                        .or(fallback_capacity)
+                },
+                |room| room.capacity,
+            ),
+        }
+    }
 }
 
 /// 规则用得上的那几个刮削字段，以及它落进事实的哪一格。

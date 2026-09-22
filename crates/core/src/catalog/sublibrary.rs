@@ -273,6 +273,15 @@ pub struct RemovedRule {
     pub at: i64,
 }
 
+impl RemovedRule {
+    /// **屏上这条规则叫什么**——走全仓那一处
+    /// [`shown_rule_name`](crate::sublibrary::shown_rule_name)，不在这儿另拼一份。
+    #[must_use]
+    pub fn shown_name(&self) -> String {
+        crate::sublibrary::shown_rule_name(self.name.as_deref(), &self.text)
+    }
+}
+
 /// [`RemovedSublibrary`] 里的一条例外：`sublibrary_exception` 那几列。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RemovedException {

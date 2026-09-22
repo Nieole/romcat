@@ -103,17 +103,12 @@ pub struct Deed {
 }
 
 impl Deed {
-    /// 屏上这条规则叫什么：人起过就是那个，没起过拿 `Rule::label()` 现拼。
-    ///
-    /// **与 `StoredRule::shown_name` 同一条口径**——回执里写的那个名字，
-    /// 必须与人下一眼在子库屏上看见的是同一个。
+    /// 屏上这条规则叫什么——走全仓那一处
+    /// [`romcat_core::sublibrary::shown_rule_name`]，**不在这儿另拼一份**：
+    /// 回执里写的那个名字，必须与人下一眼在子库屏上看见的是同一个。
     #[must_use]
     pub fn rule_name_or(&self, rule: &Rule) -> String {
-        if self.rule_name.is_empty() {
-            rule.label()
-        } else {
-            self.rule_name.clone()
-        }
+        romcat_core::sublibrary::shown_rule_name(Some(&self.rule_name), &rule.text)
     }
 }
 
@@ -222,15 +217,19 @@ impl AddTo {
             .button(
                 Button::new("加入并继续挑选", Pressed::AddAndPick)
                     .enabled(拦住.is_none())
-                    .hover(拦住.unwrap_or(
-                        "加进去，并且留在这一屏接着换下一个平台——顶上那一条会记着累计。",
-                    )),
+                    .hover(拦住.clone().unwrap_or_else(|| {
+                        "加进去，并且留在这一屏接着换下一个平台——顶上那一条会记着累计。".to_string()
+                    })),
             )
             .button(
                 Button::new("加入", Pressed::Add)
                     .primary()
                     .enabled(拦住.is_none())
-                    .hover(拦住.unwrap_or("加进去，然后回到子库屏。")),
+                    .hover(
+                        拦住
+                            .clone()
+                            .unwrap_or_else(|| "加进去，然后回到子库屏。".to_string()),
+                    ),
             );
         let shown = Dialog::new("加入子库", "加入子库", footer)
             .note(
@@ -286,17 +285,22 @@ impl AddTo {
 
     /// **按不动吗**；按不动就交回那句「为什么」（ADR-0005 那条「不禁按钮」：
     /// 灰着必须说得出为什么、以及怎么才能不灰）。
-    fn blocked(&self, facts: &Facts<'_>) -> Option<&'static str> {
+    fn blocked(&self, facts: &Facts<'_>) -> Option<String> {
         if self.target.is_none() {
-            return Some("先选一台设备。");
+            return Some("先选一台设备。".to_string());
         }
         match self.mode() {
             Mode::Rule => {
-                if facts.unruly.is_some() {
-                    return Some("条件组里有写错的子句，改正之后才能加入。");
+                // **把 `Unruly` 自己那句原样交上去**：搜索框里还有字、筛着识别结论、
+                // 平台未知……各是一句不同的话。一律套「条件组里有写错的子句」那个抬头
+                // 是**说了一个错的为什么**，比不说更坏（ADR-0005）。
+                if let Some(为什么) = facts.unruly {
+                    return Some(为什么.to_string());
                 }
                 if facts.rule.is_none() {
-                    return Some("一个条件都没筛——那样加进去的规则会把整个库收进这个子库。");
+                    return Some(
+                        "一个条件都没筛——那样加进去的规则会把整个库收进这个子库。".to_string(),
+                    );
                 }
                 // **这一条不等预估那一趟**：判重只要读一遍这台的规则（`Q1180`），
                 // 而预估要折一遍事实（343 毫秒）。让「按不动」等那么久，
@@ -305,14 +309,12 @@ impl AddTo {
                     .chosen(facts)
                     .is_some_and(|一台| 一台.duplicate.is_some())
                 {
-                    return Some("这个子库里已经有同一条规则了。");
+                    return Some("这个子库里已经有同一条规则了。".to_string());
                 }
                 None
             }
-            Mode::Picked => (facts.picked > 0).then_some(()).map_or(
-                Some("先在列表里勾选作品，或者改用「作为规则加入」。"),
-                |()| None,
-            ),
+            Mode::Picked => (facts.picked == 0)
+                .then(|| "先在列表里勾选作品，或者改用「作为规则加入」。".to_string()),
         }
     }
 
@@ -419,8 +421,11 @@ impl AddTo {
                     );
                 });
             }
-            if let Some(写错了) = facts.unruly {
-                look::warn_box(ui, "条件组里有写错的子句", 写错了);
+            // **抬头照那一句自己的口径写**：`Unruly` 那几档里只有一部分真是「写错的子句」
+            // （带逗号、写不进规则），另几档是「搜索框里还有字」「筛着只用于浏览的那几维」
+            // ——那几档不是错，是**这一批折不成一条规则**。
+            if let Some(为什么) = facts.unruly {
+                look::warn_box(ui, "这一批眼下折不成一条规则", 为什么);
             }
         }
 
