@@ -4539,6 +4539,99 @@ fn 管理合集那一层改得动名字_收藏那一行写明改不动() {
     );
 }
 
+/// **筛选筛不着的合集，照样列得出、改得动、删得掉**
+/// （挂单 `Q1109`，拿主意的人 2026-09-22 裁）。
+///
+/// 「管理合集」那一层从前列的是左栏那份**分面**，而分面走的是中立库里的投影
+/// （`JOIN collection_variant`）、还跟着「列出非游戏资产」那颗开关走。于是两种情形下
+/// 一个合集会从这一层里**整个消失**——成员全是路径锚而那些文件眼下不在库里
+/// （换了根、或删了根还没重扫），或者成员全是非游戏资产而那颗开关收着。
+/// 消失之后既改不了名也删不掉，**而核心库那两条路本来是按沉淀库办的，能力一直在**。
+///
+/// 这一条造的是头一种：往沉淀库里记一条**库里没有对应变体**的成员关系。
+/// 它在分面上一定不出现（投影里没有它），而弹层里必须出现。
+#[test]
+fn 筛不着的合集在管理合集里照样列得出() {
+    use romcat_core::verdict::{Anchor, Membership};
+
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-筛不着的合集"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+
+    // 往沉淀库里记一条锚——**故意挑一份库里没有的内容**，于是投影落不到任何变体。
+    const 名字: &str = "换过根的那一批";
+    {
+        let (browse, site) = app.browse_and_site();
+        site.store
+            .join(&[Membership::now(
+                名字,
+                Anchor::Content {
+                    crc32: 0xDEAD_BEEF,
+                    size: 1_234_567,
+                    sha1: None,
+                },
+            )])
+            .expect("记得进沉淀库");
+        browse.invalidate(site);
+    }
+    跑(&ctx, &mut app, 3);
+
+    // 一、**分面上没有它**——这一条是前提，不成立的话底下测的就不是 `Q1109`。
+    assert!(
+        !app.browse()
+            .facets()
+            .collections
+            .iter()
+            .any(|一个| 一个.value == 名字),
+        "这条成员关系居然投影出了变体，这一条的前提不成立了"
+    );
+
+    // 二、**弹层里有它，还写得出记了几个成员**。
+    shared::点正好(&ctx, "管理合集…", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        屏上.contains(名字),
+        "筛选筛不着的合集没列在「管理合集」里——它就此改不动也删不掉：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("1 个成员"),
+        "没写出它记了几个成员（数的是沉淀库那本账，一行一条锚）：\n{屏上}"
+    );
+
+    // 三、**改得动**：改完沉淀库里是新名字。
+    点弹层里的(&ctx, "改名", "", |ui| app.ui(ui));
+    点弹层里的(&ctx, 名字, "", |ui| app.ui(ui));
+    headless::frame(
+        &ctx,
+        shared::输入(vec![
+            shared::按键事件(egui::Key::End),
+            egui::Event::Text("·改".to_string()),
+        ]),
+        |ui| app.ui(ui),
+    );
+    点弹层里的(&ctx, "保存", "", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    let 沉淀库里: Vec<String> = app
+        .site()
+        .store
+        .collections()
+        .expect("读得出")
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        沉淀库里.iter().any(|一个| 一个 == "换过根的那一批·改"),
+        "改名没落到沉淀库：{沉淀库里:?}\n回执：{:?}／{:?}",
+        app.browse().notice(),
+        app.browse().error(),
+    );
+}
+
 /// **「管理合集」那一层：删除＝把成员全部移出，写着它的子库规则一个字不改**
 /// （票 `gui-looks-like-the-design/13`）。
 ///

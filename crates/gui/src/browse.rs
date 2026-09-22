@@ -849,7 +849,22 @@ impl Screen {
     ///   它作用于勾中的那一批，全选那一档在真库上要为四万多个变体各折一次内容判据，
     ///   那是秒级的读，不能摆在画帧线上。
     fn collection_dialogs(&mut self, ctx: &egui::Context, site: &mut Site, tasks: &mut Tasks) {
-        if let Some(manage) = self.manage_collections.as_mut() {
+        // **库里有哪几个合集，问沉淀库、不问分面**（拿主意的人 2026-09-22 裁，挂单 `Q1109`）。
+        // 分面那份跟着当下筛选走，于是换了根、或者收着「列出非游戏资产」那颗开关时，
+        // 有的合集会从弹层里整个消失、连带改不动也删不掉。理由与那两个数为什么不一样，
+        // 写在 `collections::Recorded` 的文档里。
+        //
+        // **读不动就照实说，不拿一份空名单顶上去**——空名单在屏上读作「一个合集都没有」。
+        let 账本 = match 合集账本(site) {
+            Ok(几个) => Some(几个),
+            Err(读不动) => {
+                self.error = Some(format!("沉淀库读不动，列不出合集：{读不动}"));
+                None
+            }
+        };
+        if let Some(manage) = self.manage_collections.as_mut()
+            && let Some(账本) = 账本.as_deref()
+        {
             let catalog = &site.catalog;
             // **「有几条规则写着它」按下「删除…」那一下才问**（弹层那一层存着那个数）：
             // 它要走遍每个子库的每条规则，每帧问一次就是把那趟遍历摆到画帧线上。
@@ -857,7 +872,7 @@ impl Screen {
             // 把后者印成前者就是现编一个数（同一条规矩下 `Q1103` 拦掉过一个 N，
             // `Screen::scope` 的文档也记着同一个形状）。
             let mut 几条规则 = |name: &str| collection::rules_naming(catalog, name).ok();
-            let (还开着, 动作) = manage.ui(ctx, &self.facets.collections, &mut 几条规则);
+            let (还开着, 动作) = manage.ui(ctx, 账本, &mut 几条规则);
             if !还开着 {
                 self.manage_collections = None;
             }
@@ -881,9 +896,11 @@ impl Screen {
             Some(几个) => format!("勾中的 {} 个变体", thousands(几个)),
             None => "勾中的那一批（数不出来）".to_string(),
         };
-        let collections = self.facets.collections.clone();
-        if let Some(join) = self.join_collection_dialog.as_mut() {
-            let (还开着, 加进) = join.ui(ctx, &collections, &这一批);
+        // 「加入合集」那一层同理：列已有的合集、判重名，问的都是沉淀库那本账。
+        if let Some(join) = self.join_collection_dialog.as_mut()
+            && let Some(账本) = 账本.as_deref()
+        {
+            let (还开着, 加进) = join.ui(ctx, 账本, &这一批);
             if !还开着 {
                 self.join_collection_dialog = None;
             }
@@ -2823,10 +2840,15 @@ impl Screen {
                     match 按了 {
                         Action::Scrape => self.open_scrape(&site.catalog),
                         Action::Favorite => self.favorite(site, tasks),
-                        Action::Join => {
-                            self.join_collection_dialog =
-                                Some(collections::Join::open(&self.facets.collections));
-                        }
+                        Action::Join => match 合集账本(site) {
+                            // 默认选中哪一个要看库里有哪几个——同样问沉淀库（`Q1109`）。
+                            Ok(账本) => {
+                                self.join_collection_dialog = Some(collections::Join::open(&账本));
+                            }
+                            Err(读不动) => {
+                                self.error = Some(format!("沉淀库读不动，开不了这一层：{读不动}"));
+                            }
+                        },
                         Action::Merge => self.open_merge(site),
                     }
                 }
@@ -3658,6 +3680,12 @@ impl Screen {
                 }
                 section_gap(ui);
                 // 库里有哪几个合集、各几条（照稿 `#coll-facet`），点一下按它收窄。
+                //
+                // ⚠️ **这儿这个数跟着当下筛选走，「管理合集」那一层那个数不跟——两处不一样
+                // 是对的，不是哪边错了。** 这一维问的是「眼下这份筛选底下还点得出几个」，
+                // 所以它必须跟着筛选；那一层问的是「这个合集里一共记了几个」，与筛选无关。
+                // 单位也不同：这儿数变体，那儿数成员关系（一行一条锚）。
+                // 整段账记在 `collections::Recorded` 的文档里（挂单 `Q1109`）。
                 facet_chips(
                     ui,
                     "合集",
@@ -4894,6 +4922,25 @@ impl Action {
 const UNDO: &str = "撤销";
 
 /// 作用范围那个数画成什么。**数不出来就说数不出来**，不摆一个 0 出去。
+/// **库里有哪几个合集、各记了几个成员**：问沉淀库那本账，不问分面。
+///
+/// 为什么不拿分面、以及屏上那两个数为什么不一样，写在 [`collections::Recorded`]
+/// 的文档里（拿主意的人 2026-09-22 裁，挂单 `Q1109`）。
+///
+/// # Errors
+/// 沉淀库读不动时交回错误。**调用方要把它说出来，不许拿一份空名单顶上去**
+/// ——空名单在屏上读作「一个合集都没有」。
+fn 合集账本(
+    site: &Site,
+) -> Result<Vec<collections::Recorded>, romcat_core::verdict::VerdictError> {
+    Ok(site
+        .store
+        .collections()?
+        .into_iter()
+        .map(|(name, members)| collections::Recorded { name, members })
+        .collect())
+}
+
 /// 这一下按的到底叫什么（屏上那几句提示里嵌的那个动词）。
 ///
 /// **收藏是那个默认的一组**，它与自建合集走同一套成员关系，可屏上不该叫它「加入合集」
