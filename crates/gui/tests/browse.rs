@@ -3572,6 +3572,72 @@ fn 卡片视图可切换并画出作品信息() {
     }
 }
 
+/// **卡片那一条上并排两组分段开关，各认各的**（票 `gui-looks-like-the-design/13`）。
+///
+/// 稿上 `.cbar` 里「分组」与「卡片大小」是**两组 `.seg`**（`aria-label="分组"` /
+/// `aria-label="卡片大小"`）。照稿改过来那一下当场撞了 egui 的 id：
+/// `look::segmented` 从前拿 `(“分段开关”, 下标)` 认每一颗，而**同一个 `Ui` 里摆两组时
+/// `ui.id()` 是同一个、下标又都从 0 数起**，于是两组的第 0 颗、第 1 颗各自重号。
+///
+/// 撞上之后有两件事：屏上画出「First use of Widget ID」那行红字，
+/// 而且**按一组的第 0 颗会连着动另一组的第 0 颗**。
+///
+/// ⚠️ **这条 bug 那一轮所有行为测试都是绿的**——是照着重出的基线图看出来的。
+/// 所以这一条两头都断：红字不许出现（最通用的那一头），
+/// 以及**按「小」不许把分组关掉**（撞号真会干的那件事：「小」与「不分组」都是第 0 颗）。
+#[test]
+fn 卡片那一条上两组分段开关互不串号() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[
+            ("SFC", "短.zip", shared::档::命中),
+            ("GBA", "另一个.zip", shared::档::命中),
+        ],
+        shared::干净工作目录("romcat-测试-浏览-两组分段"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 2);
+    app.browse_and_site().0.show_cards();
+    跑(&ctx, &mut app, 2);
+
+    // 一、**屏上不许有 egui 的撞号红字**。它是 egui 自己画上去的，
+    // 一行都不该出现在成品屏上。
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    for 红字 in ["Widget ID", "First use", "Second use"] {
+        assert!(
+            !屏上.contains(红字),
+            "屏上出现了 egui 的撞号红字「{红字}」——同一个 `Ui` 里两组分段开关重号了：\n{屏上}"
+        );
+    }
+    // 两组都在屏上（不在的话底下那两步测的是空气）。
+    for 一颗 in ["不分组", "按平台", "小", "中", "大"] {
+        assert!(屏上.contains(一颗), "卡片那一条上没有「{一颗}」：\n{屏上}");
+    }
+
+    // 二、按「按平台」——分组的次序由中立库排，所以它看得见地落在查询上。
+    shared::点正好(&ctx, "按平台", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    assert_eq!(
+        app.browse().query().order,
+        WorkOrder::Platform,
+        "按了「按平台」，分组没生效"
+    );
+
+    // 三、**按大小那一组的第 0 颗（「小」），分组不许被带着动**。
+    // 撞号的时候正是这一下把「不分组」一起按了。
+    shared::点正好(&ctx, "小", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    assert_eq!(
+        app.browse().query().order,
+        WorkOrder::Platform,
+        "按了大小那一组的「小」，分组却被带着关掉了——两组分段开关串号了"
+    );
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    for 红字 in ["Widget ID", "First use", "Second use"] {
+        assert!(!屏上.contains(红字), "按过之后冒出撞号红字：\n{屏上}");
+    }
+}
+
 /// 一份**认出一个作品、另有两行认不出**的小库：卡片墙上那枚「未关联作品」要的正是这副样子。
 ///
 /// **不走 [`shared::小库`]**：它写的结论一律 `work_id: None`，三行会全落成「未关联作品」，

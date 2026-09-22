@@ -3078,17 +3078,16 @@ impl Screen {
                     let 要多宽 = Self::action_width(ui);
                     let mut 同一行摆得下 = true;
                     ui.horizontal(|ui| {
-                        if ui
-                            .selectable_label(self.view == BrowseView::Table, "表格")
-                            .clicked()
-                        {
-                            self.view = BrowseView::Table;
-                        }
-                        if ui
-                            .selectable_label(self.view == BrowseView::Cards, "卡片")
-                            .clicked()
-                        {
-                            self.view = BrowseView::Cards;
+                        // **一组分段开关，不是两颗各自独立的按钮**（设计稿 `.seg`，
+                        // `aria-label="视图"`）：整组一个下沉底的外框，选中那一颗铺面板底浮起来。
+                        // 走全仓那一份 [`look::segmented`]——队列屏、设置屏、子库屏用的是同一个。
+                        // 从前这儿是两颗 `ui.selectable_label`，各画各的、连不起来。
+                        if let Some(换成) = look::segmented(
+                            ui,
+                            &[(BrowseView::Table, "表格"), (BrowseView::Cards, "卡片")],
+                            self.view,
+                        ) {
+                            self.view = 换成;
                         }
                         // **作品数照稿紧跟在视图切换后头**（`.tbar` 里 `.seg` 之后就是
                         // `.cnt`），不在这一条的右端。票 09 把它摆到右端，理由是
@@ -3137,15 +3136,19 @@ impl Screen {
                             }
                         } else {
                             look::section(ui, "分组");
-                            if ui.selectable_label(!self.group_cards, "不分组").clicked() {
-                                self.group_cards = false;
+                            // 同上：稿上 `aria-label="分组"` 那一组也是 `.seg`。
+                            if let Some(分组) = look::segmented(
+                                ui,
+                                &[(false, "不分组"), (true, "按平台")],
+                                self.group_cards,
+                            ) && 分组 != self.group_cards
+                            {
+                                self.group_cards = 分组;
                                 self.card_group_header = None;
-                            }
-                            if ui.selectable_label(self.group_cards, "按平台").clicked() {
-                                self.group_cards = true;
-                                self.card_group_header = None;
-                                // 分组的次序由中立库排序，不能只把当前页的卡片在界面里重排。
-                                self.query.order = WorkOrder::Platform;
+                                if 分组 {
+                                    // 分组的次序由中立库排序，不能只把当前页的卡片在界面里重排。
+                                    self.query.order = WorkOrder::Platform;
+                                }
                             }
                             look::section(ui, "排序");
                             // **「默认」与「名称」是两档，不是一档**（照稿 `#csort`，
@@ -3198,14 +3201,19 @@ impl Screen {
                                 }
                             }
                             look::section(ui, "大小");
-                            for (size, label) in [
-                                (CardSize::Small, "小"),
-                                (CardSize::Medium, "中"),
-                                (CardSize::Large, "大"),
-                            ] {
-                                if ui.selectable_label(self.card_size == size, label).clicked() {
-                                    self.card_size = size;
-                                }
+                            // 同上：稿上 `aria-label="卡片大小"` 那一组也是 `.seg`。
+                            // **这一条与上头「分组」挨着摆在同一条 `.cbar` 里**——
+                            // 一组连起来、一组散着，两种样子并排摆比两组都散着还难看。
+                            if let Some(换成) = look::segmented(
+                                ui,
+                                &[
+                                    (CardSize::Small, "小"),
+                                    (CardSize::Medium, "中"),
+                                    (CardSize::Large, "大"),
+                                ],
+                                self.card_size,
+                            ) {
+                                self.card_size = 换成;
                             }
                             ui.checkbox(&mut self.only_covers, "只显示有封面的");
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
