@@ -628,3 +628,297 @@ fn 一个作品收没收藏_收了的里头有只钉得住路径的就照路径�
     collection::add(&mut 现场.site, "通关过的", &键(&[勇者])).expect("加得进");
     assert_eq!(问(&现场.site, &[勇者]), None, "在自建合集里不等于收藏了");
 }
+
+/// **改名：那几条校验判在一处**（票 `gui-looks-like-the-design/13`，稿上 `collNameErr`）。
+///
+/// 界面自己判字符串的话，「加入合集」那个弹层与「改名」那个弹层迟早对同一个名字给出
+/// 两种答复（ADR-0024）。
+///
+/// 「**写得进规则吗**」那一条尤其不许在这儿另写一份：判据在
+/// `catalog::browse::writable_value`（也就是 `Clause::build` 那两道闸）。
+/// 第一版在这儿只拦了逗号，于是 `甲 或 乙` 这类名字建得出来、筛不出来
+/// ——底下 `名字写不进规则时…` 那一条钉的就是这个。
+#[test]
+fn 合集名那几条校验判在一处() {
+    use romcat_core::collection::{BadName, check_name};
+
+    let 已有 = ["通关过的".to_string(), "送朋友的".to_string()];
+
+    // 一、过得去的：**交回来的是收拾过空白的那一串**，调用方忘不掉 trim。
+    assert_eq!(
+        check_name("  新的一组 ", &已有).expect("用得上"),
+        "新的一组"
+    );
+
+    // 二、四条各撞一次。
+    assert_eq!(check_name("", &已有), Err(BadName::Empty));
+    assert_eq!(
+        check_name("   ", &已有),
+        Err(BadName::Empty),
+        "只有空白也算空"
+    );
+    assert_eq!(check_name(FAVORITE, &已有), Err(BadName::Reserved));
+    assert_eq!(check_name("通关过的", &已有), Err(BadName::Taken));
+    assert_eq!(check_name("甲,乙", &已有), Err(BadName::Comma));
+    assert_eq!(
+        check_name("甲，乙", &已有),
+        Err(BadName::Comma),
+        "全角逗号也得拦：中文输入法下打出来的是这一个"
+    );
+
+    // 二之二、**写不进规则的那一档**：判据与「存成子库」那一步同一个
+    // （`catalog::browse::writable_value`），不在 `check_name` 里另写一份。
+    for 写不进的 in ["甲 或 乙", "甲 且 乙", "口袋(日版", "甲) 乙"] {
+        assert_eq!(
+            check_name(写不进的, &已有),
+            Err(BadName::Unwritable),
+            "「{写不进的}」写进规则读回来就不是它自己了，得在起名这一步就拦住"
+        );
+        assert!(
+            !romcat_core::catalog::browse::writable_value(
+                romcat_core::sublibrary::Dimension::Collection,
+                写不进的,
+            ),
+            "这一条拦的理由得与「存成子库」那一步是同一个判据"
+        );
+    }
+    // 连接词**两侧没有空白**时不是连接词，照样用得上（`reads_as_joiner` 那条口径）。
+    assert_eq!(check_name("甲或乙", &已有).expect("用得上"), "甲或乙");
+
+    // 三、**每一条都说得出怎么才行**（ADR-0005 那条「不禁按钮」）。
+    for 哪一条 in [
+        BadName::Empty,
+        BadName::Reserved,
+        BadName::Taken,
+        BadName::Comma,
+        BadName::Unwritable,
+    ] {
+        assert!(!哪一条.advice().is_empty(), "{哪一条:?} 说不出为什么不行");
+    }
+
+    // 四、**改名要把被改的那一个先剔掉**，不然「改成它自己」会被判成重名。
+    let 剔掉之后: Vec<String> = 已有
+        .iter()
+        .filter(|一个| *一个 != "通关过的")
+        .cloned()
+        .collect();
+    assert_eq!(
+        check_name("通关过的", &剔掉之后).expect("改成它自己该过得去"),
+        "通关过的",
+    );
+}
+
+/// **改名：成员关系、投影、以及写着 `合集=旧名` 的子库规则，三样一起改**
+/// （票 `gui-looks-like-the-design/13`）。
+///
+/// 规则不跟着改的话，那个子库**第二天就选不出东西了**——而且屏上不会红，
+/// 只是那一批悄悄变空。
+#[test]
+fn 改名连引用它的子库规则一起改_收藏改不得() {
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    collection::add(&mut 现场.site, "送朋友的", &键(&[马里奥, 勇者])).expect("加得进");
+
+    // 一个子库，两条规则：一条指着这个合集，一条与它无关。
+    现场
+        .site
+        .catalog
+        .put_sublibrary(&sublibrary::Sublibrary::at(
+            "掌机",
+            std::path::Path::new("/Volumes/SDCARD/掌机"),
+            "Pegasus",
+            None,
+        ))
+        .expect("建得出子库");
+    for text in ["合集=送朋友的", "平台=FC"] {
+        现场
+            .site
+            .catalog
+            .add_rule("掌机", &Rule::parse(text).expect("读得懂"))
+            .expect("加得进规则");
+    }
+
+    let 改前 = 筛(&现场.site.catalog, "合集=送朋友的");
+    assert!(!改前.is_empty(), "改名之前这个合集本该筛得出东西");
+
+    let 账 = collection::rename(&mut 现场.site, "送朋友的", "给小明的").expect("改得动");
+    assert!(账.members > 0, "沉淀库里那批成员关系没换名字");
+    assert_eq!(账.rules, 1, "该跟着改的只有指着这个合集那一条");
+
+    // 一、**新名字筛得出同一批，旧名字筛不出东西了**。
+    assert_eq!(
+        筛(&现场.site.catalog, "合集=给小明的"),
+        改前,
+        "改名之后新名字该筛出改名之前那一批"
+    );
+    assert!(
+        筛(&现场.site.catalog, "合集=送朋友的").is_empty(),
+        "旧名字还筛得出东西——投影没跟着重建"
+    );
+
+    // 二、**子库那两条规则**：指着它的那条改了，无关那条一个字没动。
+    let 规则们: Vec<String> = 现场
+        .site
+        .catalog
+        .sublibrary_rules("掌机")
+        .expect("读得出")
+        .into_iter()
+        .map(|一条| 一条.text)
+        .collect();
+    assert!(
+        规则们.contains(&"合集=给小明的".to_string()),
+        "指着这个合集那条规则没跟着改：{规则们:?}"
+    );
+    assert!(
+        规则们.contains(&"平台=FC".to_string()),
+        "与这个合集无关那条规则被动了：{规则们:?}"
+    );
+
+    // 二之二、**改成一个写不进规则的名字：一个字都不许写**。
+    //
+    // 这一条钉的是一条真出过的路：`check_name` 从前只拦逗号，于是 `甲 或 乙` 放行，
+    // 沉淀库先改完、投影重建完，到第三步 `Clause::build` 才失败——那时那条规则
+    // 静默留着指向旧名，而回执报「没有哪条子库规则写着它」。那个子库从此一行都选不出来，
+    // 屏上不红。现在它在第一步就被 `BadName::Unwritable` 挡住。
+    let 坏名字 = "给小明的 或 备份";
+    let 挡住了 = collection::rename(&mut 现场.site, "给小明的", 坏名字);
+    assert!(
+        matches!(
+            挡住了,
+            Err(collection::CollectionError::Name(
+                collection::BadName::Unwritable
+            ))
+        ),
+        "写不进规则的名字该在改名第一步就挡住，实际是 {挡住了:?}"
+    );
+    // **挡住＝什么都没写**：三处各核一遍，别只核屏上那句话。
+    assert_eq!(
+        筛(&现场.site.catalog, "合集=给小明的"),
+        改前,
+        "挡住之后投影被动过了"
+    );
+    // **这一条只能问沉淀库，问不得规则**：`合集=给小明的 或 备份` 本身读不回来
+    // ——那正是拦它的理由。
+    let 库里有的: Vec<String> = 现场
+        .site
+        .store
+        .collections()
+        .expect("读得出")
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        !库里有的.iter().any(|一个| 一个 == 坏名字),
+        "挡住之后沉淀库里却多了一个叫这个的合集：{库里有的:?}"
+    );
+    assert!(
+        库里有的.iter().any(|一个| 一个 == "给小明的"),
+        "挡住之后旧名字没了：{库里有的:?}"
+    );
+    let 规则们: Vec<String> = 现场
+        .site
+        .catalog
+        .sublibrary_rules("掌机")
+        .expect("读得出")
+        .into_iter()
+        .map(|一条| 一条.text)
+        .collect();
+    assert!(
+        规则们.contains(&"合集=给小明的".to_string()),
+        "挡住之后那条规则被动过了：{规则们:?}"
+    );
+
+    // 三、**收藏改不得**。
+    assert!(
+        matches!(
+            collection::rename(&mut 现场.site, FAVORITE, "我的最爱"),
+            Err(CollectionError::Reserved)
+        ),
+        "收藏那一组的名字是定死的，该拦住"
+    );
+
+    // 四、**新名字过不了校验就一个字都不写**。
+    assert!(matches!(
+        collection::rename(&mut 现场.site, "给小明的", "带,逗号"),
+        Err(CollectionError::Name(_))
+    ));
+    assert_eq!(
+        筛(&现场.site.catalog, "合集=给小明的"),
+        改前,
+        "校验没过却把库改了"
+    );
+}
+
+/// **删掉一个合集＝把成员全部移出；写着它的子库规则一个字不改**
+/// （票 `gui-looks-like-the-design/13`）。
+///
+/// 与[改名](romcat_core::collection::rename)正相反，而那是有意的：改名之后旧名字
+/// **再没有了**，规则不跟着改就成了一条永远选不中的死规则；删除之后
+/// `合集=这个名字` **还可能再活过来**（人重新建一个同名的，成员关系照内容锚重新挂上）。
+/// 替人把那几条规则删掉，等于替他决定「这个合集不会再回来」。
+#[test]
+fn 删合集是把成员全部移出_写着它的规则照旧留着_收藏删不得() {
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    collection::add(&mut 现场.site, "送朋友的", &键(&[马里奥, 勇者])).expect("加得进");
+    现场
+        .site
+        .catalog
+        .put_sublibrary(&sublibrary::Sublibrary::at(
+            "掌机",
+            std::path::Path::new("/Volumes/SDCARD/掌机"),
+            "Pegasus",
+            None,
+        ))
+        .expect("建得出子库");
+    现场
+        .site
+        .catalog
+        .add_rule("掌机", &Rule::parse("合集=送朋友的").expect("读得懂"))
+        .expect("加得进规则");
+
+    // **屏上那句警告要的那个数**：删之前说清有几条规则写着它。
+    assert_eq!(
+        collection::rules_naming(&现场.site.catalog, "送朋友的").expect("数得出"),
+        1,
+    );
+    // 一字不差才算：`送朋友` 不是 `送朋友的`。
+    assert_eq!(
+        collection::rules_naming(&现场.site.catalog, "送朋友").expect("数得出"),
+        0,
+        "子串不该算——那正是不拿字符串去比的理由",
+    );
+
+    let 移出了 = collection::drop_all(&mut 现场.site, "送朋友的").expect("删得掉");
+    assert!(移出了 > 0, "一条成员都没移出");
+
+    // 一、这个合集从投影里没了，筛不出东西。
+    assert!(
+        筛(&现场.site.catalog, "合集=送朋友的").is_empty(),
+        "删完还筛得出东西"
+    );
+    // 二、**那条规则原样留着**。
+    let 规则们: Vec<String> = 现场
+        .site
+        .catalog
+        .sublibrary_rules("掌机")
+        .expect("读得出")
+        .into_iter()
+        .map(|一条| 一条.text)
+        .collect();
+    assert_eq!(
+        规则们,
+        vec!["合集=送朋友的".to_string()],
+        "删合集顺手改了子库规则——那是替人决定「这个合集不会再回来」",
+    );
+    // 三、**作品本身不受影响**：变体还在库里。
+    assert!(
+        !筛(&现场.site.catalog, "平台=FC").is_empty(),
+        "删合集把作品也带走了"
+    );
+    // 四、**收藏删不得**。
+    assert!(matches!(
+        collection::drop_all(&mut 现场.site, FAVORITE),
+        Err(CollectionError::Reserved)
+    ));
+}

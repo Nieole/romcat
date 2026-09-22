@@ -1929,7 +1929,15 @@ pub fn segmented_where<T: Copy + PartialEq>(
         let 按得动 = enabled(*value);
         let response = ui.interact(
             这一颗,
-            ui.id().with(("分段开关", at)),
+            // **认这一颗的身份要带上它写的字**：只拿 `(“分段开关”, 下标)` 的话，
+            // **同一个 `Ui` 里摆两组分段开关就撞 id**——两组的 `ui.id()` 是同一个，
+            // 下标又都从 0 数起。撞上之后 egui 在屏上画出「First use of Widget ID」
+            // 那行红字，而且两组的点击会认成同一颗。
+            //
+            // 浏览屏卡片那一条上正好并排摆着「不分组｜按平台」与「小｜中｜大」两组
+            // （票 `gui-looks-like-the-design/13` 照稿改过来时撞上的）。
+            // 带上字之后两组各认各的。**这一改一个像素都不动**——id 只管交互身份，不进绘制。
+            ui.id().with(("分段开关", *label, at)),
             if 按得动 {
                 egui::Sense::click()
             } else {

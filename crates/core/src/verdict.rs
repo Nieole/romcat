@@ -1821,6 +1821,34 @@ impl Store {
         Ok(changed)
     }
 
+    /// 把一个合集**改名**：那一组成员关系上的名字整批换掉。交回换了几条。
+    ///
+    /// **只动这一张表**。中立库里那两张是投影，照沉淀库重建
+    /// （`collection::project`）；而写着 `合集=旧名` 的子库规则要跟着改，
+    /// 那是 `collection::rename` 那一趟里的另一步——**这一层不知道规则的事**。
+    ///
+    /// ⚠️ **`to` 已经有成员时这一句会失败，不会「两批并成一批」。** 同一张表上
+    /// 立着两条唯一索引（`collection_member_content` 与 `collection_member_path`，
+    /// 见 [`Store::open`] 那一段建表），只要有一条锚同时挂在 `from` 与 `to` 上，
+    /// 这句裸 `UPDATE` 就撞约束、整趟交回 [`VerdictError::Sqlite`]。
+    ///
+    /// 今天走不到：`collection::rename` 先用**沉淀库**那份名单过了
+    /// [`check_name`](crate::collection::check_name) 的
+    /// [`Taken`](crate::collection::BadName::Taken)。日后真要「把甲并进乙」，
+    /// **得在这儿另写一条**（`ON CONFLICT` 或者先删后插），不是调用方不拦就自然成立。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误；`to` 已经有重合的成员时也走这一支（见上）。
+    pub fn rename_collection(&mut self, from: &str, to: &str) -> Result<usize, VerdictError> {
+        let path = self.path.clone();
+        self.conn
+            .execute(
+                "UPDATE collection_member SET name = ?2 WHERE name = ?1",
+                params![from, to],
+            )
+            .map_err(|source| VerdictError::Sqlite { path, source })
+    }
+
     /// 这条锚在哪几个合集里，按名字排。
     ///
     /// # Errors

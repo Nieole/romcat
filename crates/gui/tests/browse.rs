@@ -3044,6 +3044,47 @@ fn 左右两栏收得起来_关掉再打开还收着_展开回到原来那么宽
     );
 }
 
+#[test]
+fn 管理合集那颗按钮顶在筛选栏右边沿_与同栏右对齐的说明字齐头() {
+    // 稿上 `.fpane` 那一行是 `<span class="sec">收藏与合集</span><span class="sp"></span>
+    // <button class="btn ghost sm">管理合集…</button>`，`.sp` 是 `flex:1`——一整格空当把按钮
+    // 推到这一栏的右边沿。头一版没摆那格空当，按钮跟在标题后头、离右边沿差出七十来个像素。
+    //
+    // **拿什么当右边沿**：同一栏里「条件组」那一行的说明字是 `section_title` 用同一套办法
+    // 右对齐的，它的右沿就是这一栏画字能到的最右处。按钮的字比它再往里缩一份按钮左右留白
+    // （字在按钮框里居中，框的右沿才贴着边），所以两边差的正好是那一份留白。
+    //
+    // 不量图、只量矩形：这一栏里同名的字在表格与右栏里也画着，靠 `一栏::筛选栏` 圈出来。
+    let ctx = headless::context();
+    let mut app = 界面(200);
+    跑(&ctx, &mut app, 2);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 栏 = 一栏::筛选栏(&ctx, &这一帧);
+
+    let 按钮字 = 栏.正好那一段在哪儿("管理合集…");
+    let 右对齐的说明 = 栏.正好那一段在哪儿("存成子库时就是规则");
+    let 留白 = romcat_gui::tokens::Tokens::builtin()
+        .layout
+        .button_small_padding;
+
+    let 差 = 右对齐的说明.right() - 按钮字.right();
+    assert!(
+        (差 - 留白).abs() <= 1.5,
+        "「管理合集…」没顶在筛选栏右边沿：它的右沿 {}，同栏右对齐的说明字右沿 {}，\n\
+         差 {差}，按一份按钮留白应当是 {留白}",
+        按钮字.right(),
+        右对齐的说明.right(),
+    );
+    // 标题还在它左边，两段字没叠在一起。
+    let 标题 = 栏.正好那一段在哪儿("收藏与合集");
+    assert!(
+        标题.right() < 按钮字.left(),
+        "标题 {:?} 与按钮 {:?} 叠上了",
+        标题,
+        按钮字,
+    );
+}
+
 /// 右边那一栏（侧边详情）这一帧画了什么：几段字连它们的外框、贴了图的那几块、纯色块。
 ///
 /// **只收那一栏里的**：同一个平台名、同一句「1 个变体」在左栏与表格里也画着，混进来的话
@@ -3059,6 +3100,14 @@ impl 一栏 {
     fn 看(ctx: &egui::Context, output: &egui::FullOutput) -> Self {
         let 栏 = egui::PanelState::load(ctx, egui::Id::new(romcat_gui::layout::DETAIL.id))
             .expect("侧边详情那一栏画过")
+            .outer_rect;
+        Self::看这一块(output, 栏)
+    }
+
+    /// **筛选栏**（浏览屏最左那一栏）。
+    fn 筛选栏(ctx: &egui::Context, output: &egui::FullOutput) -> Self {
+        let 栏 = egui::PanelState::load(ctx, egui::Id::new(romcat_gui::layout::FILTER.id))
+            .expect("筛选栏那一栏画过")
             .outer_rect;
         Self::看这一块(output, 栏)
     }
@@ -3523,6 +3572,72 @@ fn 卡片视图可切换并画出作品信息() {
     }
 }
 
+/// **卡片那一条上并排两组分段开关，各认各的**（票 `gui-looks-like-the-design/13`）。
+///
+/// 稿上 `.cbar` 里「分组」与「卡片大小」是**两组 `.seg`**（`aria-label="分组"` /
+/// `aria-label="卡片大小"`）。照稿改过来那一下当场撞了 egui 的 id：
+/// `look::segmented` 从前拿 `(“分段开关”, 下标)` 认每一颗，而**同一个 `Ui` 里摆两组时
+/// `ui.id()` 是同一个、下标又都从 0 数起**，于是两组的第 0 颗、第 1 颗各自重号。
+///
+/// 撞上之后有两件事：屏上画出「First use of Widget ID」那行红字，
+/// 而且**按一组的第 0 颗会连着动另一组的第 0 颗**。
+///
+/// ⚠️ **这条 bug 那一轮所有行为测试都是绿的**——是照着重出的基线图看出来的。
+/// 所以这一条两头都断：红字不许出现（最通用的那一头），
+/// 以及**按「小」不许把分组关掉**（撞号真会干的那件事：「小」与「不分组」都是第 0 颗）。
+#[test]
+fn 卡片那一条上两组分段开关互不串号() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[
+            ("SFC", "短.zip", shared::档::命中),
+            ("GBA", "另一个.zip", shared::档::命中),
+        ],
+        shared::干净工作目录("romcat-测试-浏览-两组分段"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 2);
+    app.browse_and_site().0.show_cards();
+    跑(&ctx, &mut app, 2);
+
+    // 一、**屏上不许有 egui 的撞号红字**。它是 egui 自己画上去的，
+    // 一行都不该出现在成品屏上。
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    for 红字 in ["Widget ID", "First use", "Second use"] {
+        assert!(
+            !屏上.contains(红字),
+            "屏上出现了 egui 的撞号红字「{红字}」——同一个 `Ui` 里两组分段开关重号了：\n{屏上}"
+        );
+    }
+    // 两组都在屏上（不在的话底下那两步测的是空气）。
+    for 一颗 in ["不分组", "按平台", "小", "中", "大"] {
+        assert!(屏上.contains(一颗), "卡片那一条上没有「{一颗}」：\n{屏上}");
+    }
+
+    // 二、按「按平台」——分组的次序由中立库排，所以它看得见地落在查询上。
+    shared::点正好(&ctx, "按平台", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    assert_eq!(
+        app.browse().query().order,
+        WorkOrder::Platform,
+        "按了「按平台」，分组没生效"
+    );
+
+    // 三、**按大小那一组的第 0 颗（「小」），分组不许被带着动**。
+    // 撞号的时候正是这一下把「不分组」一起按了。
+    shared::点正好(&ctx, "小", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    assert_eq!(
+        app.browse().query().order,
+        WorkOrder::Platform,
+        "按了大小那一组的「小」，分组却被带着关掉了——两组分段开关串号了"
+    );
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    for 红字 in ["Widget ID", "First use", "Second use"] {
+        assert!(!屏上.contains(红字), "按过之后冒出撞号红字：\n{屏上}");
+    }
+}
+
 /// 一份**认出一个作品、另有两行认不出**的小库：卡片墙上那枚「未关联作品」要的正是这副样子。
 ///
 /// **不走 [`shared::小库`]**：它写的结论一律 `work_id: None`，三行会全落成「未关联作品」，
@@ -3930,14 +4045,23 @@ fn 表格上方那一条的作品数摆在头一行_紧跟视图切换_帮助自
         帮助.min.y > 数.max.y,
         "帮助那句没有另起一行：那一句 {数:?}，帮助 {帮助:?}"
     );
-    // **这个数在那一组批量操作的左边**（稿上 `.cnt` 在 `.acts` 之前，挂单 `Q1102`）。
+    // **这个数在那一组批量操作之前**（稿上 `.cnt` 在 `.acts` 之前，挂单 `Q1102`）。
+    //
+    // **「之前」要分两种情形量**：那一组摆得下时与这个数同一行，比的是 x；摆不下时整组
+    // 换到第二行（票 `13` 把那一组填到四颗之后，两栏摊开着就是这一档），那时比的是 y。
+    // 只比 x 的话，换行之后这条断言会拿第二行的 x 去比第一行的 x——而那没有意义。
     let (_, 头一颗) = 含着这几个字的每一段(&这一帧, "刮削…")
         .into_iter()
         .next()
-        .expect("那一条右端画着批量操作那一组");
+        .expect("那一条画着批量操作那一组");
+    let 同一行 = (头一颗.center().y - 数.center().y).abs() <= 4.0;
     assert!(
-        数.max.x < 头一颗.min.x,
-        "作品数飘到那一组批量操作右边去了：那一句 {数:?}，头一颗 {头一颗:?}"
+        if 同一行 {
+            数.max.x < 头一颗.min.x
+        } else {
+            数.max.y <= 头一颗.min.y
+        },
+        "作品数跑到那一组批量操作后头去了：那一句 {数:?}，头一颗 {头一颗:?}（同一行：{同一行}）"
     );
 }
 
@@ -3993,6 +4117,26 @@ fn 收起后的窄条与筛空时的空态印的是同一个条件数() {
     );
 }
 
+/// 一帧**够高、读得到左栏底下那几句话**的输入。
+///
+/// **为什么不用 [`headless::input`] 那个 1280×800**：左栏是一个 `ScrollArea`，而 egui 的
+/// `Label` 滚出视口就**不画**（不是画了被裁掉）——屏上那份字里于是一个字都不剩。左栏这半年
+/// 一直在长（票 17 加了「整理建议」一簇，这一票在「收藏与合集」那一行加了颗按钮），
+/// 量下来：加按钮之前那几句话正好卡在 800 上**一个像素都不剩**，加了之后要 810。
+///
+/// 于是这儿把窗口放高。**这条测试要钉的是屏上说了什么，不是默认窗口恰好差几个像素**
+/// ——拿 800 去钉，等于让下一个往左栏加东西的人替这条 12 票的测试背账。
+/// 「默认窗口下那句警告在不在折线以下」是另一件事，记在挂单 `Q1104` 里。
+fn 够高的一帧() -> egui::RawInput {
+    egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(headless::VIEWPORT[0], 1200.0),
+        )),
+        ..Default::default()
+    }
+}
+
 /// **筛不出东西的子句：屏上逐条点名，但一条都不拦**
 /// （票 `gui-looks-like-the-design/12`）。
 ///
@@ -4018,7 +4162,7 @@ fn 筛不出东西的子句屏上逐条点名但不拦着() {
     let rule = romcat_core::sublibrary::Rule::parse(text).expect("读得懂");
     app.browse_and_site().0.set_filter_rule(Some(rule.clone()));
     跑(&ctx, &mut app, 2);
-    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    let 屏上 = shared::画出来的字(&headless::frame(&ctx, 够高的一帧(), |ui| app.ui(ui)));
 
     // 一、三条都点到名，而且数目写出来。
     assert!(
@@ -4115,15 +4259,15 @@ fn 排序那句说明只在搜索着的时候才出现() {
 /// **真按一下**。
 #[test]
 fn 批量那一组整组靠右_摆不下就整组换行_不拆散也点得中() {
-    /// 照稿的次序。今天摆得出这三颗，「加入合集…」（票 13）与「加入子库…」（票 23）
-    /// 位置留着。
-    const 照稿次序: [&str; 3] = ["刮削…", "★ 收藏", "合并作品…"];
+    /// 照稿的次序。「加入合集…」是票 13 补上的（挂单 `Q1102`）；
+    /// 稿上这一条还有「加入子库…」，那一颗等票 23。
+    const 照稿次序: [&str; 4] = ["刮削…", "★ 收藏", "加入合集…", "合并作品…"];
 
     let ctx = headless::context();
     let mut app = 界面(ROWS);
     跑(&ctx, &mut app, 3);
 
-    /// 那三颗各画在哪儿，按屏上从左到右排好。
+    /// 那几颗各画在哪儿，按屏上从左到右排好。
     fn 那一组(帧: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
         let mut 几颗: Vec<(String, egui::Rect)> = 照稿次序
             .iter()
@@ -4151,14 +4295,25 @@ fn 批量那一组整组靠右_摆不下就整组换行_不拆散也点得中() 
         assert_eq!(屏上次序, 照稿次序, "这一组的次序与稿上不一样");
     }
 
-    // 右栏那块面板的左沿：拿它当「中间那一栏的右边界」。按钮越过它就是盖到右栏上了。
-    let 帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
-    let 右栏左沿 = 含着这几个字的每一段(&帧, "点主列表里的一行")
-        .into_iter()
-        .next()
-        .map_or(headless::VIEWPORT[0], |(_, rect)| rect.min.x);
+    /// 中间那一栏的**右边界**：右栏摊开着就是它那块面板的左沿，收起来了就是视口右缘
+    /// 减去那根窄条。按钮越过它就是盖到右栏上了。
+    fn 中栏右边界(帧: &egui::FullOutput) -> f32 {
+        含着这几个字的每一段(帧, "点主列表里的一行")
+            .into_iter()
+            .next()
+            .map_or_else(
+                || headless::VIEWPORT[0] - romcat_gui::tokens::Tokens::builtin().layout.strip_width,
+                |(_, rect)| rect.min.x,
+            )
+    }
 
-    // ── 一、没勾行：摆得下，落在同一行的右头 ────────────────────────────────
+    // ── 一、**把两栏收起来**：中间那一栏宽了，四颗摆得下，落在同一行的右头 ──
+    //
+    // 两栏摊开时中间只有五百多点，而稿上这一组是五颗（今天四颗）——**摆不下才是常态**。
+    // 所以「摆得下」那条路得先把地方腾出来，不然这一条永远只验到换行那一支。
+    romcat_gui::layout::FILTER.set_collapsed(&ctx, true);
+    romcat_gui::layout::DETAIL.set_collapsed(&ctx, true);
+    跑(&ctx, &mut app, 2);
     let 帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
     let 几颗 = 那一组(&帧);
     断整组不拆散(&几颗);
@@ -4174,20 +4329,27 @@ fn 批量那一组整组靠右_摆不下就整组换行_不拆散也点得中() 
     // **靠右**：最后一颗的右沿**贴着中间那一栏的右边界**（稿上 `.acts` 的
     // `margin-left:auto`）。这么断比「与作品数之间空多少」稳——那个间隙随作品数那一句
     // 多长而变，库一换就不作数了；贴不贴右沿是「有没有靠右」本身。
-    let 贴右沿 = |几颗: &[(String, egui::Rect)]| 右栏左沿 - 几颗[几颗.len() - 1].1.max.x;
+    let 贴右沿 = |帧: &egui::FullOutput, 几颗: &[(String, egui::Rect)]| {
+        中栏右边界(帧) - 几颗[几颗.len() - 1].1.max.x
+    };
     assert!(
-        贴右沿(&几颗) < 60.0,
-        "这一组没靠右：最后一颗右沿离中间那一栏的右边界还有 {}（那一栏右边界 {右栏左沿}）",
-        贴右沿(&几颗),
+        贴右沿(&帧, &几颗) < 60.0,
+        "这一组没靠右：最后一颗右沿离中间那一栏的右边界还有 {}",
+        贴右沿(&帧, &几颗),
     );
     for (字, rect) in &几颗 {
         assert!(
-            rect.max.x < 右栏左沿,
-            "「{字}」越过了中间那一栏的右边界（{rect:?}，右栏左沿 {右栏左沿}）",
+            rect.max.x < 中栏右边界(&帧),
+            "「{字}」越过了中间那一栏的右边界（{rect:?}，右边界 {}）",
+            中栏右边界(&帧),
         );
     }
 
-    // ── 二、勾一行：左边变宽，这一组整组换到第二行 ──────────────────────────
+    // ── 二、**两栏摊开**：中间那一栏窄回来，这一组整组换到第二行 ────────────
+    romcat_gui::layout::FILTER.set_collapsed(&ctx, false);
+    romcat_gui::layout::DETAIL.set_collapsed(&ctx, false);
+    // 顺带勾一行：作品数变成「已选 N 个作品 · M 个变体」、还多出一颗「清除选择」，
+    // 左边更挤——换行那条路走得更实。
     {
         let (browse, site) = app.browse_and_site();
         let anchor = site
@@ -4213,13 +4375,13 @@ fn 批量那一组整组靠右_摆不下就整组换行_不拆散也点得中() 
     );
     // 换了行照旧**靠右**：同一条尺子量第二行。
     assert!(
-        贴右沿(&几颗) < 60.0,
+        贴右沿(&帧, &几颗) < 60.0,
         "换行之后这一组没靠右：最后一颗右沿离右边界还有 {}",
-        贴右沿(&几颗),
+        贴右沿(&帧, &几颗),
     );
     for (字, rect) in &几颗 {
         assert!(
-            rect.max.x < 右栏左沿,
+            rect.max.x < 中栏右边界(&帧),
             "换行之后「{字}」越过了中间那一栏的右边界（{rect:?}）",
         );
     }
@@ -4229,5 +4391,389 @@ fn 批量那一组整组靠右_摆不下就整组换行_不拆散也点得中() 
     assert!(
         屏上.contains("刮削"),
         "按了「刮削…」什么都没发生——多半是它画在行外，点不中：\n{屏上}"
+    );
+}
+
+/// 按一下**弹层里**正好写着 `这几个字` 的那一处，接着（`字` 非空时）打进去几个字。
+///
+/// ⚠️ **弹层的图形画在最后**（它盖在整屏上头），所以「屏上正好写着这几个字的头一处」
+/// 找到的是**底下那一屏**的那一处，不是弹层里的。`shared::点正好` 与 `shared::打字`
+/// 取的都是头一处——真栽过一次：「管理合集」里那个改名输入框预填着合集名，而左栏
+/// 分面上也有同一个名字，于是那一下点到了左栏的分面标签，字打进了空处，
+/// 改名于是「把『通关过的』改成『通关过的』」。
+///
+/// 这儿取**最后一处**：弹层在最上面那一层。
+fn 点弹层里的(
+    ctx: &egui::Context,
+    这几个字: &str,
+    字: &str,
+    mut 画一帧: impl FnMut(&mut egui::Ui),
+) -> String {
+    fn 收(shape: &egui::epaint::Shape, 这几个字: &str, out: &mut Vec<egui::Pos2>) {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == 这几个字 => {
+                out.push(egui::Rect::from_min_size(text.pos, text.galley.size()).center());
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    收(one, 这几个字, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let 头一帧 = headless::frame(ctx, headless::input(), &mut 画一帧);
+    let mut 处处 = Vec::new();
+    for clipped in &头一帧.shapes {
+        收(&clipped.shape, 这几个字, &mut 处处);
+    }
+    let 位置 = *处处.last().unwrap_or_else(|| {
+        panic!(
+            "弹层里没有正好写着「{这几个字}」的地方：\n{}",
+            画出来的字(&头一帧)
+        )
+    });
+    let 按 = |pressed: bool| egui::Event::PointerButton {
+        pos: 位置,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    headless::frame(
+        ctx,
+        shared::输入(vec![egui::Event::PointerMoved(位置), 按(true)]),
+        &mut 画一帧,
+    );
+    headless::frame(ctx, shared::输入(vec![按(false)]), &mut 画一帧);
+    if !字.is_empty() {
+        headless::frame(
+            ctx,
+            shared::输入(vec![egui::Event::Text(字.to_string())]),
+            &mut 画一帧,
+        );
+    }
+    shared::跑一帧(ctx, 画一帧)
+}
+
+/// **「管理合集」那个弹层：改名走核心库那一趟，屏上照实印回执**
+/// （票 `gui-looks-like-the-design/13`，设计稿 `DLG.coll`）。
+///
+/// **收藏那一行照稿写明改不动也删不掉**——ADR-0005 那条「不禁按钮」在这儿的样子是
+/// 那一行本来就没有那两颗，而屏上说得出为什么。
+#[test]
+fn 管理合集那一层改得动名字_收藏那一行写明改不动() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-管理合集"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+
+    // 先有一个自建合集：直接走核心库那条路铺好现场。
+    {
+        let (browse, site) = app.browse_and_site();
+        let keys = site
+            .catalog
+            .variant_page(&romcat_core::catalog::browse::VariantQuery::default(), 0, 8)
+            .expect("取得出变体")
+            .into_iter()
+            .map(|row| row.key)
+            .collect::<Vec<_>>();
+        romcat_core::collection::add(site, "通关过的", &keys).expect("加得进");
+        browse.invalidate(site);
+    }
+    跑(&ctx, &mut app, 3);
+
+    // 一、左栏抬头那颗「管理合集…」把弹层摊开。
+    shared::点正好(&ctx, "管理合集…", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        屏上.contains("合集是你自己起名的一组作品"),
+        "「管理合集」那一层没摊开：\n{屏上}"
+    );
+    // **收藏那一行照稿写明它改不动也删不掉**。
+    assert!(
+        屏上.contains("默认的一组，不能改名或删除"),
+        "收藏那一行没写明改不动：\n{屏上}"
+    );
+    assert!(屏上.contains("通关过的"), "那个自建合集没列出来：\n{屏上}");
+
+    // 二、按「改名」、打上新名字、按「保存」。
+    点弹层里的(&ctx, "改名", "", |ui| app.ui(ui));
+    // 框里预填着原名；**把光标挪到末尾再打**，不然字插在点到的那一处中间。
+    点弹层里的(&ctx, "通关过的", "", |ui| app.ui(ui));
+    headless::frame(
+        &ctx,
+        shared::输入(vec![
+            shared::按键事件(egui::Key::End),
+            egui::Event::Text("·改".to_string()),
+        ]),
+        |ui| app.ui(ui),
+    );
+    let 屏上 = 点弹层里的(&ctx, "保存", "", |ui| app.ui(ui));
+
+    // 三、**回执照实说**：改了几条成员关系、有没有子库规则跟着改。
+    assert!(
+        屏上.contains("改叫") && 屏上.contains("成员关系"),
+        "改完没说清动了什么：\n{屏上}"
+    );
+    // 四、**库里真的改了**：新名字在分面上，旧名字不在了。
+    let 分面: Vec<String> = app
+        .browse()
+        .facets()
+        .collections
+        .iter()
+        .map(|一个| 一个.value.clone())
+        .collect();
+    assert!(
+        分面.iter().any(|一个| 一个 == "通关过的·改"),
+        "改完分面上没有新名字：{分面:?}\n屏上：\n{屏上}\n回执：{:?}／{:?}",
+        app.browse().notice(),
+        app.browse().error(),
+    );
+    assert!(
+        !分面.iter().any(|一个| 一个 == "通关过的"),
+        "旧名字还在分面上：{分面:?}"
+    );
+}
+
+/// **「管理合集」那一层：删除＝把成员全部移出，写着它的子库规则一个字不改**
+/// （票 `gui-looks-like-the-design/13`）。
+///
+/// 三件事一起钉：
+///
+/// 1. 删之前那句警告**说得出有几条子库规则提到它**（那个数按下「删除…」那一下才问）；
+/// 2. 按下去之后**库里真的空了**——断的是分面与沉淀库，不是屏上那句回执；
+/// 3. **那几条子库规则原样留着**。这是核心库那一处有意的决定（`collection::drop_all`
+///    的文档写着理由：删完还可能再建一个同名的回来），屏上那句回执与它得是同一口径。
+///
+/// 另外钉一条容易忘的：**正被筛着的那个合集删掉时，筛选栏那一维要跟着清掉**，
+/// 不然屏上筛着一个已经不在的合集，一行都不剩而看不出为什么。
+#[test]
+fn 管理合集那一层删得掉_成员全部移出而规则原样留着() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-删合集"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+
+    // 现场：一个自建合集，外加一条写着它的子库规则、一条与它无关的。
+    {
+        let (browse, site) = app.browse_and_site();
+        let keys = site
+            .catalog
+            .variant_page(&romcat_core::catalog::browse::VariantQuery::default(), 0, 8)
+            .expect("取得出变体")
+            .into_iter()
+            .map(|row| row.key)
+            .collect::<Vec<_>>();
+        romcat_core::collection::add(site, "送朋友的", &keys).expect("加得进");
+        site.catalog
+            .put_sublibrary(&romcat_core::sublibrary::Sublibrary::at(
+                "掌机",
+                std::path::Path::new("/Volumes/SDCARD/掌机"),
+                "Pegasus",
+                None,
+            ))
+            .expect("建得出子库");
+        for 一条 in ["合集=送朋友的", "平台=SFC"] {
+            site.catalog
+                .add_rule(
+                    "掌机",
+                    &romcat_core::sublibrary::Rule::parse(一条).expect("读得懂"),
+                )
+                .expect("加得进规则");
+        }
+        browse.invalidate(site);
+    }
+    跑(&ctx, &mut app, 3);
+
+    // 一之一、**先按「按它筛选」筛着**（顺带钉住那一颗）：删完这一维该跟着清掉。
+    shared::点正好(&ctx, "管理合集…", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    点弹层里的(&ctx, "按它筛选", "", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 3);
+    assert_eq!(
+        app.browse().query().collection.as_deref(),
+        Some("送朋友的"),
+        "按了「按它筛选」，筛选栏那一维没跟着设上"
+    );
+
+    // 一、再摊开一次、按「删除…」，那句警告说得出有几条规则提到它。
+    shared::点正好(&ctx, "管理合集…", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    let 屏上 = 点弹层里的(&ctx, "删除…", "", |ui| app.ui(ui));
+    assert!(
+        屏上.contains("1 条规则提到这个合集"),
+        "删之前那句警告没说清有几条子库规则提到它：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("作品本身不受影响"),
+        "删之前那句警告没说清作品本身不动：\n{屏上}"
+    );
+
+    // 二、按「删除合集」。
+    let 屏上 = 点弹层里的(&ctx, "删除合集", "", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+
+    // 三、**库里真的空了**——断分面与沉淀库，不断屏上那句话。
+    let 分面: Vec<String> = app
+        .browse()
+        .facets()
+        .collections
+        .iter()
+        .map(|一个| 一个.value.clone())
+        .collect();
+    assert!(
+        !分面.iter().any(|一个| 一个 == "送朋友的"),
+        "删完分面上还有它：{分面:?}\n屏上：\n{屏上}\n回执：{:?}／{:?}",
+        app.browse().notice(),
+        app.browse().error(),
+    );
+    let 沉淀库里: Vec<String> = app
+        .site()
+        .store
+        .collections()
+        .expect("读得出")
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        !沉淀库里.iter().any(|一个| 一个 == "送朋友的"),
+        "删完沉淀库里还有它：{沉淀库里:?}"
+    );
+
+    // 四、**那两条子库规则原样留着**（核心库那一处有意的决定）。
+    let 规则们: Vec<String> = app
+        .site()
+        .catalog
+        .sublibrary_rules("掌机")
+        .expect("读得出")
+        .into_iter()
+        .map(|一条| 一条.text)
+        .collect();
+    assert_eq!(
+        规则们,
+        vec!["合集=送朋友的".to_string(), "平台=SFC".to_string()],
+        "删合集不该动子库规则——再建一个同名的就又筛得出来了"
+    );
+
+    // 五、**正被筛着的那一维跟着清掉**。
+    assert_eq!(
+        app.browse().query().collection,
+        None,
+        "删掉正被筛着的那个合集之后，筛选栏那一维没跟着清掉"
+    );
+}
+
+/// **「加入合集」那个弹层：新建一个合集，把勾中的那一批放进去**
+/// （票 `gui-looks-like-the-design/13`）。
+///
+/// 那一颗在表格上方那一条的批量操作里，位置照稿排在「★ 收藏」与「合并作品…」之间
+/// （挂单 `Q1102`）。
+#[test]
+fn 加入合集那一层建得出新合集_名字写不得时加不进() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-加入合集"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+
+    // 勾一行——那一组作用于勾中的那一批。
+    {
+        let (browse, site) = app.browse_and_site();
+        let anchor = site
+            .catalog
+            .work_page(browse.query(), 0, 1)
+            .expect("取得出一行")
+            .remove(0)
+            .anchor;
+        browse.picked_mut().toggle(&anchor);
+    }
+    跑(&ctx, &mut app, 2);
+
+    // 一、那一颗把弹层摊开；库里还没有合集，所以默认落在「新建合集」那一档。
+    shared::点正好(&ctx, "加入合集…", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(屏上.contains("新建合集"), "那一层没摊开：\n{屏上}");
+    // **挂不住内容锚那件事照实说，但不现编那个数**（挂单 `Q1103`）。
+    assert!(
+        屏上.contains("只钉得住本机路径"),
+        "没说清无判据那一档会怎样：\n{屏上}"
+    );
+
+    // 二、**名字写不得时「加入」按不动，而且屏上说得出为什么**（ADR-0005）。
+    //
+    // 两档各来一个：带逗号的（逗号是规则里的值分隔符），以及**写不进规则**的
+    // （两侧带空白的连接词）。后者第一版漏掉了——`check_name` 当时只拦逗号，
+    // 于是 `甲 或 乙` 建得出来、`合集=甲 或 乙` 筛不出东西，改名还会把子库悄悄改空。
+    for (打什么, 该说的) in [("带,逗号", "名称里不能有逗号"), ("甲 或 乙", "写不进规则")]
+    {
+        let 屏上 = 点弹层里的(&ctx, "例如：通关过的", 打什么, |ui| app.ui(ui));
+        assert!(
+            屏上.contains(该说的),
+            "名字「{打什么}」用不得，屏上却没说为什么：\n{屏上}"
+        );
+        // **「加不进」得真的加不进**：按一下「加入」，库里一个合集都不许多出来。
+        // 只断屏上那句错的话，按钮真按得动时这一条照样绿。
+        点弹层里的(&ctx, "加入", "", |ui| app.ui(ui));
+        跑(&ctx, &mut app, 3);
+        let 沉淀库里 = app.site().store.collections().expect("读得出");
+        assert!(
+            沉淀库里.is_empty(),
+            "名字用不得却加进去了：{沉淀库里:?}\n回执：{:?}／{:?}",
+            app.browse().notice(),
+            app.browse().error(),
+        );
+        // 把打进去的擦掉，好让下一档从空框开始。
+        点弹层里的(&ctx, 打什么, "", |ui| app.ui(ui));
+        for _ in 0..打什么.chars().count() {
+            headless::frame(
+                &ctx,
+                shared::输入(vec![
+                    shared::按键事件(egui::Key::End),
+                    shared::按键事件(egui::Key::Backspace),
+                ]),
+                |ui| app.ui(ui),
+            );
+        }
+    }
+
+    // 三、**换个用得上的名字**（上一步已经把框擦空了）。
+    点弹层里的(&ctx, "例如：通关过的", "", |ui| app.ui(ui));
+    headless::frame(
+        &ctx,
+        shared::输入(vec![egui::Event::Text("送朋友的".to_string())]),
+        |ui| app.ui(ui),
+    );
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        !屏上.contains("名称里不能有逗号"),
+        "名字改好了那句错还挂着：\n{屏上}"
+    );
+
+    // 四、按「加入」——那一趟排上任务台，跑完认领才落库。
+    点弹层里的(&ctx, "加入", "", |ui| app.ui(ui));
+    shared::等任务台空了(&mut app);
+    跑(&ctx, &mut app, 3);
+
+    // 五、**库里真的有了这个合集**，分面上带着数。
+    let 分面: Vec<(String, u64)> = app
+        .browse()
+        .facets()
+        .collections
+        .iter()
+        .map(|一个| (一个.value.clone(), 一个.count))
+        .collect();
+    assert!(
+        分面.iter().any(|(名, 几个)| 名 == "送朋友的" && *几个 > 0),
+        "建出来的那个合集没进分面：{分面:?}"
     );
 }
