@@ -90,7 +90,7 @@ use romcat_core::scrape::priority::VERDICT;
 use romcat_core::site::Site;
 use romcat_core::stage::Stage;
 use romcat_core::sublibrary::{
-    BrokenRule, Dimension, Discarded, Exception, ExceptionRow, LoadedSelection, Rule, Sublibrary,
+    BrokenRule, Discarded, Exception, ExceptionRow, LoadedSelection, Rule, Sublibrary,
 };
 use romcat_core::task::{Cutoff, Ending, Finished};
 use romcat_core::title::{self, Language, TitleKind};
@@ -107,6 +107,7 @@ use crate::task::{Product, Tasks};
 use crate::toast::{self, Toast};
 use crate::tokens::Tokens;
 
+pub mod collections;
 pub mod merge;
 pub mod work;
 
@@ -491,6 +492,10 @@ pub struct Screen {
     suppressed: Vec<TitleSuppression>,
     /// [`Self::suppressed`] 是照哪个作品读的。与眼下这个不一样就重读。
     suppressed_for: Option<String>,
+    /// 「**管理合集**」那个弹层（票 `13`，设计稿 `DLG.coll`）；`None` 是没开着。
+    manage_collections: Option<collections::Manage>,
+    /// 「**加入合集**」那个弹层；`None` 是没开着。
+    join_collection_dialog: Option<collections::Join>,
     /// 台上那趟**整批收藏**（或者自建合集的加减）是第几号。`None` 是眼下没排着。
     ///
     /// **按号认领**，与别的屏一个写法：台上跑的可能是别人排的活。
@@ -597,6 +602,8 @@ impl Screen {
             standing_for: None,
             suppressed: Vec::new(),
             suppressed_for: None,
+            manage_collections: None,
+            join_collection_dialog: None,
             collecting: None,
             title_draft: TitleDraft::default(),
             notice: None,
@@ -784,6 +791,109 @@ impl Screen {
     }
 
     /// 画合并向导与「移出此作品」那两层；按下「合并」「移出」就落下去。
+    /// **收藏与合集那两个弹层**（票 `13`）：与合并向导同一处摆，盖在整屏上头。
+    ///
+    /// 三件动作的落点各不相同，这儿分得清楚：
+    ///
+    /// - **按它筛选**只改筛选，不写库；
+    /// - **改名**与**删除**是**当场落库**：成员关系量级几百到几千（人一条条点出来的），
+    ///   走 `collection::rename` / `drop_all` 就地做完；
+    /// - **加入合集**走的是**任务台**那条老路（[`Self::join_collection`]）：
+    ///   它作用于勾中的那一批，全选那一档在真库上要为四万多个变体各折一次内容判据，
+    ///   那是秒级的读，不能摆在画帧线上。
+    fn collection_dialogs(&mut self, ctx: &egui::Context, site: &mut Site, tasks: &mut Tasks) {
+        if let Some(manage) = self.manage_collections.as_mut() {
+            let catalog = &site.catalog;
+            // **「有几条规则写着它」按下「删除…」那一下才问**（弹层那一层存着那个数）：
+            // 它要走遍每个子库的每条规则，每帧问一次就是把那趟遍历摆到画帧线上。
+            let mut 几条规则 =
+                |name: &str| collection::rules_naming(catalog, name).unwrap_or_default();
+            let (还开着, 动作) = manage.ui(ctx, &self.facets.collections, &mut 几条规则);
+            if !还开着 {
+                self.manage_collections = None;
+            }
+            match 动作 {
+                Some(collections::Managed::Filter(name)) => {
+                    self.query.collection = Some(name);
+                }
+                Some(collections::Managed::Rename { from, to }) => {
+                    self.rename_collection(site, &from, &to);
+                }
+                Some(collections::Managed::Drop(name)) => self.drop_collection(site, &name),
+                None => {}
+            }
+        }
+        let 这一批 = scope_label(self.scope_total());
+        let collections = self.facets.collections.clone();
+        if let Some(join) = self.join_collection_dialog.as_mut() {
+            let (还开着, 加进) = join.ui(ctx, &collections, &这一批);
+            if !还开着 {
+                self.join_collection_dialog = None;
+            }
+            if let Some(name) = 加进 {
+                // 走任务台那条老路：那一趟的读那一半整条只读，写在认领那一步落。
+                self.collection = name;
+                self.join_collection(site, tasks);
+            }
+        }
+    }
+
+    /// 给一个合集**改名**：核心库那一趟连引用它的子库规则一起改（`collection::rename`），
+    /// 这一层只把回执原样印出来。
+    fn rename_collection(&mut self, site: &mut Site, from: &str, to: &str) {
+        match collection::rename(site, from, to) {
+            Ok(账) => {
+                self.refresh(site);
+                self.error = None;
+                self.notice = Some(if 账.rules > 0 {
+                    format!(
+                        "「{from}」改叫「{to}」了（{} 条成员关系跟着改）。                         写着这个合集的 {} 条子库规则一并更新。",
+                        thousands(账.members as u64),
+                        thousands(账.rules as u64),
+                    )
+                } else {
+                    format!(
+                        "「{from}」改叫「{to}」了（{} 条成员关系跟着改）。                         没有哪条子库规则写着它。",
+                        thousands(账.members as u64),
+                    )
+                });
+            }
+            Err(error) => self.error = Some(format!("{error}")),
+        }
+    }
+
+    /// **删掉一个合集＝把成员全部移出**（`collection::drop_all`）。
+    ///
+    /// **写着它的那几条子库规则一个字不改**，那是核心库那一处有意的决定——
+    /// 删完那个合集还可能再建一个同名的回来。回执里照实说。
+    fn drop_collection(&mut self, site: &mut Site, name: &str) {
+        let 几条规则 = collection::rules_naming(&site.catalog, name).unwrap_or_default();
+        match collection::drop_all(site, name) {
+            Ok(移出了) => {
+                self.refresh(site);
+                self.error = None;
+                // 删掉的那个合集要是正被筛着，筛选栏里那一维跟着清掉——
+                // 不清的话屏上筛着一个已经不在的合集，一行都不剩而看不出为什么。
+                if self.query.collection.as_deref() == Some(name) {
+                    self.query.collection = None;
+                }
+                self.notice = Some(format!(
+                    "合集「{name}」删掉了：{} 条成员关系移出，作品本身一个字没动。{}",
+                    thousands(移出了 as u64),
+                    if 几条规则 > 0 {
+                        format!(
+                            "子库里那 {} 条写着它的规则留着不动——再建一个同名的合集就又筛得出来了。",
+                            thousands(几条规则 as u64),
+                        )
+                    } else {
+                        String::new()
+                    },
+                ));
+            }
+            Err(error) => self.error = Some(format!("{error}")),
+        }
+    }
+
     fn merge_ui(&mut self, ctx: &egui::Context, site: &mut Site) {
         if let Some(wizard) = self.merging.as_mut() {
             match wizard.ui(ctx, site, &self.priorities) {
@@ -2150,6 +2260,7 @@ impl Screen {
         self.scrape.show(ui.ctx(), site, tasks);
         // **合并向导与「移出此作品」也是弹层**：盖在整屏上头，三栏与作品详情页都由这一处画。
         self.merge_ui(ui.ctx(), site);
+        self.collection_dialogs(ui.ctx(), site, tasks);
         self.notice_toast(ui.ctx(), site);
         // **作品详情页开着就只画它**（票 `gui-looks-like-the-design/15`）：稿上它盖住整块屏。
         if self.page.is_some() {
@@ -2192,7 +2303,7 @@ impl Screen {
             "无条件".to_string()
         };
         layout::FILTER.show_collapsible(ui, "筛选", Some(&窄条上), 左栏, |ui| {
-            self.filter_panel(ui, site, tasks);
+            self.filter_panel(ui, site);
         });
         layout::DETAIL
             .show_collapsible(ui, "详情", None, 右栏, |ui| self.detail_panel(ui, site));
@@ -2213,6 +2324,10 @@ impl Screen {
                     match 按了 {
                         Action::Scrape => self.open_scrape(&site.catalog),
                         Action::Favorite => self.favorite(site, tasks),
+                        Action::Join => {
+                            self.join_collection_dialog =
+                                Some(collections::Join::open(&self.facets.collections));
+                        }
                         Action::Merge => self.open_merge(site),
                     }
                 }
@@ -2857,7 +2972,7 @@ impl Screen {
     /// **两套筛法各管一段**（挂单 `Q73`）：分面标签各自带着条数（`Catalog::facets` 一次
     /// `GROUP BY` 问出来的），那是用来**摸清库里有什么**的；条件组里的值要打出来，那是用来
     /// **说清楚要哪一批**的。没有条数的下拉框，人只能一个个点开试。两套之间是「且」：一层层收窄。
-    fn filter_panel(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
+    fn filter_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
         // **扔掉一条坏规则那一下不能在画的中途走**：`self.editing` 那会儿还借着。
         // 记下序号，这一栏画完再动手。
         let mut 扔掉 = None;
@@ -2972,10 +3087,32 @@ impl Screen {
                 self.query.state = state;
 
                 pane_gap(ui);
-                section_title(ui, "收藏与合集", None).on_hover_text(
-                    "加收藏那一下在屏头（「★ 收藏」），因为它按得最勤：\
-                     勾一批、按一下、接着筛下一批。取消收藏与自建合集的加减在这一栏最底下。",
-                );
+                // **抬头那一行右头一颗「管理合集…」**（照稿 `.fpane` 那一段：
+                // `<span class="sec">收藏与合集</span><span class="sp"></span>
+                // <button class="btn ghost sm">管理合集…</button>`，挂单 `Q873`）。
+                // 改名、删除、按它筛选都在那一层里（票 `13`）。
+                let mut 管理 = false;
+                ui.horizontal_top(|ui| {
+                    section_title(ui, "收藏与合集", None).on_hover_text(
+                        "加收藏那一下在表格上方那一条（「★ 收藏」），因为它按得最勤：\
+                         勾一批、按一下、接着筛下一批。往自建合集里加也在那一条上\
+                         （「加入合集…」）；改名与删除在这儿的「管理合集…」里。",
+                    );
+                    管理 = look::small_buttons(ui, |ui| {
+                        ui.scope(|ui| {
+                            look::ghost_button(ui.visuals_mut());
+                            ui.button("管理合集…")
+                        })
+                        .inner
+                        .on_hover_text(
+                            "改名、删除、按它筛选。删除就是把成员全部移出，作品本身不受影响。",
+                        )
+                        .clicked()
+                    });
+                });
+                if 管理 {
+                    self.manage_collections = Some(collections::Manage::default());
+                }
                 section_gap(ui);
                 // 库里有哪几个合集、各几条（照稿 `#coll-facet`），点一下按它收窄。
                 facet_chips(
@@ -3012,9 +3149,13 @@ impl Screen {
                 pane_gap(ui);
                 self.non_game_asset_switch(ui);
 
-                // ── 稿上没画、这一票之前就有的那几样，缩成小号垫在最底下（挂单 `Q873`）──
-                pane_gap(ui);
-                self.collection_actions(ui, site, tasks);
+                // ── 挂单 `Q873` 收口（票 `13`）──────────────────────────────────
+                //
+                // 票 09 把「☆ 取消收藏」、合集名输入框与「加入合集 / 移出合集」缩成小号
+                // 垫在这儿（稿上没画，拿主意的人 2026-09-14 定「功能不丢、等弹层做出来
+                // 再搬」）。**这一票搬完了**：往合集里加走表格上方那一条的「加入合集…」，
+                // 改名与删除走这一栏抬头那颗「管理合集…」，取消收藏走作品详情页那一行
+                // 合集上的「移出」。于是这儿照稿什么都不摆。
 
                 pane_gap(ui);
                 section_title(ui, "语言", None).on_hover_text(
@@ -3172,62 +3313,6 @@ impl Screen {
                 }
             });
         扔掉
-    }
-
-    /// **取消收藏与自建合集的加减**（票 `gui-redesign/06`）：稿上没画，缩成小号垫在左栏最底下，
-    /// 等票 `13` 的弹层接走（挂单 `Q873`）。库里有哪几个合集那一簇标签照稿留在「收藏与合集」那一段。
-    ///
-    /// 作用范围是勾中的那一批，不是筛出来的全部；成员关系落沉淀库。这几句不写在屏上（票 `03`：
-    /// 屏上不出现写给开发者的解释），留在这里和各颗按钮的悬停里。
-    ///
-    /// **加收藏那一下不在这儿，在屏头**（原型钉的位置）：它按得最勤，不该藏在左栏底下。
-    fn collection_actions(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
-        let 取消 = look::small_buttons(ui, |ui| {
-            ui.button("☆ 取消收藏")
-                .on_hover_text("把勾中的那一批从收藏里拿出来。两种锚都拿，星星不会点不灭。")
-                .clicked()
-        });
-        if 取消 {
-            self.unfavorite(site, tasks);
-        }
-        let width = ui.available_width();
-        look::small_text_input(
-            ui,
-            width,
-            egui::TextEdit::singleline(&mut self.collection).hint_text("合集的名字，例如 通关过的"),
-        );
-        let name = self.collection.trim().to_string();
-        // **名字里带着规则语言的记号就当场说清。** 建得出来而筛不出来，比建不出来更坏
-        // ——那时人只会以为收藏这件事坏了（折规则那一步的判据在核心库里，一处说了算）。
-        let 写得进规则 = !name.is_empty()
-            && romcat_core::catalog::browse::writable_value(Dimension::Collection, &name);
-        if !name.is_empty() && !写得进规则 {
-            ui.colored_label(
-                ui.visuals().warn_fg_color,
-                "这个名字写不进规则（带着逗号、括号、或者两侧带空白的连接词）。\
-                 加得进去，但 `合集=这个名字` 筛不出来，存成子库时也会被挡下。",
-            );
-        }
-        let (加入, 移出) = look::small_buttons(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                let 加入 = ui
-                    .add_enabled(!name.is_empty(), egui::Button::new("加入合集"))
-                    .on_hover_text("没有这个合集就顺手建出来——一个合集就是它那些成员。")
-                    .clicked();
-                let 移出 = ui
-                    .add_enabled(!name.is_empty(), egui::Button::new("移出合集"))
-                    .on_hover_text("一条成员都不剩的合集，从筛选栏那一维里消失。")
-                    .clicked();
-                (加入, 移出)
-            })
-            .inner
-        });
-        if 加入 {
-            self.join_collection(site, tasks);
-        }
-        if 移出 {
-            self.leave_collection(site, tasks);
-        }
     }
 
     /// 「**存成子库**」：把当前筛选原样变成一条规则。
@@ -4162,6 +4247,8 @@ pub enum Action {
     Scrape,
     /// 「★ 收藏」（稿上 `#fav`）。
     Favorite,
+    /// 「加入合集…」（稿上 `data-dg="open:coll|add"`，票 `13` 做的）。
+    Join,
     /// 「合并作品…」（稿上 `#merge-btn`，票 `16` 做的）。
     Merge,
 }
@@ -4169,14 +4256,18 @@ pub enum Action {
 /// 这一组照稿的次序，**量宽与画都走它**。
 ///
 /// 稿上是五颗：**刮削… / ★ 收藏 / 加入合集… / 合并作品… / 加入子库…**。
-/// 今天摆得出三颗，另外两颗**位置照稿留着**，各归一张票：
+/// 今天摆得出四颗（「加入合集…」票 `13` 填上了），**最后一颗位置照稿留着**：
 ///
-/// - **「加入合集…」归票 `13`**（收藏与合集的弹层），摆在「★ 收藏」与「合并作品…」之间；
 /// - **「加入子库…」归票 `23`**（从浏览屏加入子库），摆在最右，稿上是 `btn sm pri`
 ///   ——**这一组里唯一的主按钮**。
 ///
-/// 写在这儿是为了那两票不必各自再想一遍摆在哪：次序是稿定的，不是先到先得。
-const ACTIONS: [Action; 3] = [Action::Scrape, Action::Favorite, Action::Merge];
+/// 写在这儿是为了那一票不必再想一遍摆在哪：次序是稿定的，不是先到先得。
+const ACTIONS: [Action; 4] = [
+    Action::Scrape,
+    Action::Favorite,
+    Action::Join,
+    Action::Merge,
+];
 
 impl Action {
     /// 按钮上的字。
@@ -4185,6 +4276,7 @@ impl Action {
         match self {
             Self::Scrape => "刮削…",
             Self::Favorite => "★ 收藏",
+            Self::Join => "加入合集…",
             Self::Merge => merge::MERGE,
         }
     }
@@ -4203,6 +4295,10 @@ impl Action {
                  删掉中立库重扫、改名、挪目录都还在。无判据的那些只钉得住本机路径，\
                  按完的回执里会点名说有几个。\n\n\
                  取消收藏与自建合集在左栏最底下：加收藏按得最勤，所以只有它在这一组里。"
+            }
+            Self::Join => {
+                "把勾中的那一批放进一个合集——选一个已有的，或者当场起个名字建一个。\
+                 落沉淀库、锚在内容上：删掉中立库重扫、改名、挪目录都还在。"
             }
             Self::Merge => {
                 "把被识别成不同作品、其实是同一个游戏的变体归到一起。\n\n\
