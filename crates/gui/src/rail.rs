@@ -35,6 +35,18 @@ pub const GROUPS: [(&str, &[View]); 3] = [
     ("后台", &[View::Tasks, View::Settings]),
 ];
 
+/// 左栏那六个入口**从上到下**的次序。
+///
+/// `⌘/Ctrl+1–6` 数的就是它（票 `gui-looks-like-the-design/14`）：屏上摆着的次序与键上数的次序
+/// **是同一份**（[`GROUPS`]）。另记一份的话，哪天分组一改，第 3 下按到的就不再是屏上第三个。
+#[must_use]
+pub fn order() -> Vec<View> {
+    GROUPS
+        .iter()
+        .flat_map(|(_, views)| views.iter().copied())
+        .collect()
+}
+
 /// 切换主库那张卡上的那句话。
 pub const SWITCH: &str = "切换主库";
 /// 展开时栏底那颗按钮上的字。

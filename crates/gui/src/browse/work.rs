@@ -1622,7 +1622,7 @@ impl Screen {
     ///
     /// 键折回盘上真名走核心库那一处（`Roots::real_path`，ADR-0020）；那块盘没插上、文件挪走了时说一句，不崩。
     /// **只读**：一个字节都不碰（ADR-0004）。
-    fn reveal(&mut self, site: &Site, key: &str) {
+    pub(super) fn reveal(&mut self, site: &Site, key: &str) {
         let roots = match Roots::load(&site.catalog) {
             Ok(roots) => roots,
             Err(error) => {

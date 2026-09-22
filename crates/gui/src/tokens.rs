@@ -756,6 +756,18 @@ pub struct Space {
     pub keys_row_padding: f32,
     /// 快捷键表一条里说明与键帽之间至少留多少（设计稿 `.kgrid div` 的 `gap`）。
     pub keys_row_gap: f32,
+    /// 快捷键表两组之间：设计稿里由摆它的那一块给（`.sset` 与 `.mbody` 都是 14）。
+    pub keys_group_gap: f32,
+    /// 右键菜单四周留白（设计稿 `.ctx` 的 `padding`）。
+    pub menu_padding: f32,
+    /// 右键菜单一项的左右留白（设计稿 `.ctx button` 的 `padding`）。
+    pub menu_item_padding: f32,
+    /// 菜单一项里那句话与右边快捷键提示之间至少留多少（设计稿 `.ctx button` 的 `gap`）。
+    pub menu_item_gap: f32,
+    /// 菜单里那道分隔线：`[上下留多少, 左右缩进多少]`（设计稿 `.ctx hr` 的 `margin`）。
+    pub menu_rule_margin: [f32; 2],
+    /// 菜单顶上那一行：`[上, 左右, 下]`（设计稿 `.ctx .hd` 的 `padding`）。
+    pub menu_head_padding: [f32; 3],
 }
 
 /// 版式尺寸，点。
@@ -782,6 +794,12 @@ pub struct Layout {
     pub detail_pane_width: f32,
     /// 作品表格行高（等高行）。
     pub table_row: f32,
+    /// 右键菜单最窄多宽（设计稿 `.ctx` 的 `min-width`）。
+    pub menu_min_width: f32,
+    /// 右键菜单一项的高（设计稿 `.ctx button` 的 `height`）。
+    pub menu_item_height: f32,
+    /// 菜单顶上那一行最宽多少，再宽就省略号（设计稿 `.ctx .hd` 的 `max-width`）。
+    pub menu_head_width: f32,
     /// 打开「在每行开头显示封面」后的行高。
     pub table_row_cover: f32,
     /// 置信度色条宽度。

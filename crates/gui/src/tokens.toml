@@ -306,6 +306,14 @@ settings-switch-gap  = 8             # 开关那个小滑块与它旁边的字�
 keys-grid-gap        = [4, 28]       # 快捷键表：行与行之间、左右两列之间（设计稿 .kgrid 的 gap:4px 28px）
 keys-row-padding     = 6             # 快捷键表一条的上下留白（设计稿 .kgrid div 的 padding:6px 0）
 keys-row-gap         = 12            # 一条里说明与键帽之间至少留多少（设计稿 .kgrid div 的 gap:12px）
+keys-group-gap       = 14            # 快捷键表两组之间。设计稿里这一格由摆它的那一块给，两处都是 14：
+                                     # 设置屏 .sset 的 gap:14px、按 ? 那层弹层 .mbody 的 gap:14px。
+                                     # 这份表在两处摆着，所以它自带一个，不借设置屏那一个的名字。
+menu-padding         = 5             # 右键菜单四周留白（设计稿 .ctx 的 padding:5px）
+menu-item-padding    = 10            # 右键菜单一项的左右留白（设计稿 .ctx button 的 padding:0 10px）
+menu-item-gap        = 10            # 一项里那句话与右边快捷键提示之间至少留多少（设计稿 .ctx button 的 gap:10px）
+menu-rule-margin     = [4, 2]        # 菜单里那道分隔线：上下留多少、左右缩进多少（设计稿 .ctx hr 的 margin:4px 2px）
+menu-head-padding    = [6, 10, 4]    # 菜单顶上那一行（这一行是谁）的上、左右、下留白（设计稿 .ctx .hd 的 padding:6px 10px 4px）
 
 [layout]
 rail-width        = 196   # 左侧导航展开宽度
@@ -321,6 +329,9 @@ strip-width       = 36    # 面板折叠后的窄条
 filter-pane-width = 232   # 浏览页筛选栏
 detail-pane-width = 296   # 浏览页侧边详情
 table-row         = 46    # 作品表格行高（等高行）
+menu-min-width    = 196   # 右键菜单最窄多宽（设计稿 .ctx 的 min-width:196px）
+menu-item-height  = 30    # 右键菜单一项的高（设计稿 .ctx button 的 height:30px）
+menu-head-width   = 260   # 菜单顶上那一行最宽多少，再宽就省略号（设计稿 .ctx .hd 的 max-width:260px）
 table-row-cover   = 58    # 打开「在每行开头显示封面」后的行高
 tier-bar          = 3     # 置信度色条宽度
 thumb-list        = [32, 43] # 列表行首封面缩略图（宽, 高）

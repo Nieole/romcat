@@ -444,8 +444,21 @@ settings_literals = [
     (r"\.switch i::after\{[^}]*?width:(\d+)px", [(1, "layout", "settings-switch", 2)]),
     (r"\.kgrid\{[^}]*?gap:(\d+)px (\d+)px", [(1, "space", "keys-grid-gap", 0), (2, "space", "keys-grid-gap", 1)]),
     (r"\.kgrid div\{[^}]*?gap:(\d+)px;padding:(\d+)px 0", [(1, "space", "keys-row-gap", None), (2, "space", "keys-row-padding", None)]),
+    # 快捷键表两组之间：设置屏那一节由 .sset 给，按 ? 那层弹层由 .mbody 给——两处都是 14。
+    (r"\.mbody\{[^}]*?gap:(\d+)px", [(1, "space", "keys-group-gap", None)]),
 ]
 literals += check_literals(settings_literals)
+
+# 右键菜单（票 gui-looks-like-the-design/14）：设计稿 .ctx 那一簇。
+# 新立一个令牌就往这儿补一条——「绿着没人看」比红了更危险（挂单 Q1083）。
+menu_literals = [
+    (r"\.ctx\{[^}]*?min-width:(\d+)px;padding:(\d+)px", [(1, "layout", "menu-min-width", None), (2, "space", "menu-padding", None)]),
+    (r"\.ctx button\{[^}]*?gap:(\d+)px;width:100%;height:(\d+)px;padding:0 (\d+)px;[^}]*?font-size:([\d.]+)px", [(1, "space", "menu-item-gap", None), (2, "layout", "menu-item-height", None), (3, "space", "menu-item-padding", None), (4, "font", "size-small-plus", None)]),
+    (r"\.ctx button span\{[^}]*?font-size:(\d+)px", [(1, "font", "size-caption", None)]),
+    (r"\.ctx hr\{[^}]*?margin:(\d+)px (\d+)px", [(1, "space", "menu-rule-margin", 0), (2, "space", "menu-rule-margin", 1)]),
+    (r"\.ctx \.hd\{padding:(\d+)px (\d+)px (\d+)px;font-size:([\d.]+)px;[^}]*?max-width:(\d+)px", [(1, "space", "menu-head-padding", 0), (2, "space", "menu-head-padding", 1), (3, "space", "menu-head-padding", 2), (4, "font", "size-caption-plus", None), (5, "layout", "menu-head-width", None)]),
+]
+literals += check_literals(menu_literals)
 
 if problems:
     print("\n".join(problems))

@@ -1027,6 +1027,154 @@ fn 拍浏览(名字: &str, 主题: Theme, 态: 浏览态) {
     drop(目录);
 }
 
+// ——— 右键菜单与快捷键表（票 `gui-looks-like-the-design/14`） ———
+
+/// **右键**按一下屏上正好写着 `那几个字`、最后画出来的那一处；其余同 [`按`]。
+fn 右键按(harness: &mut Harness<'_>, 那几个字: &str) {
+    let Some(在) = 最后一处正好画着(harness.output(), 那几个字) else {
+        panic!("屏上没有正好写着「{那几个字}」的地方，没处右键");
+    };
+    let 键 = |pressed: bool| egui::Event::PointerButton {
+        pos: 在,
+        button: egui::PointerButton::Secondary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    harness.event(egui::Event::PointerMoved(在));
+    harness.event(键(true));
+    harness.event(键(false));
+    harness.event(egui::Event::PointerGone);
+    harness.step();
+    // 菜单是下一帧才摊开的（`browse::Screen::settle_menu`），浮层还要一帧才摆稳。
+    harness.run_steps(6);
+    harness.run();
+}
+
+/// **右键菜单摊在一行上**那一张：三栏摆着，菜单贴着右键那一下。
+///
+/// **指针先挪走再拍**（同 [`按`]）：基线里不该有指针三角，也不该有哪一项挂着悬停底色
+/// ——那一项每换一次指针位置就换一次样子，拍出来的基线跟着飘。
+#[track_caller]
+fn 拍右键菜单(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 浏览现场 { mut app, 目录 } = 浏览现场(false);
+    let mut harness = 开一个(主题, move |ui| app.ui(ui));
+    // **按在作品名那一格上**（不是最右边那一格）——挑这一格有三条理由，都是量过／看过的
+    // （协调人 2026-09-22 裁定这一手留着，挂单 `Q1141`）：
+    //
+    // 1. 菜单贴着右键那一下摊开。按最右边那一格的话它**整层落在右边那块详情栏上头**，
+    //    挡住的正是右键那一下刚换过去的那份详情——这一张就说不清「右键之后屏上什么样」。
+    // 2. **暗色里那样拍看不出菜单的边**：菜单与详情栏同是令牌 `panel`。那一圈描边补上了
+    //    （`menu::菜单框`），可基线该拍的是稿上常见的那种落法——菜单落在**表**上。
+    // 3. 顺带把「卡面／格子里的字不许接住点击」那一条也走了一遍：这一格是字，那一下得
+    //    归整行（挂单 `Q1147` 在卡片墙上撞的是同一件事）。
+    右键按(&mut harness, 右键那一行);
+    菜单那一列提示立成一列(&harness, 名字);
+    拍下(harness, 名字);
+    drop(目录);
+}
+
+/// 右键按在哪一行：那一行**作品名那一格**上写着的字。整张表只有它一行是这个名字。
+const 右键那一行: &str = "超级机器人大战R";
+
+/// 菜单上那几项的字，照设计稿的次序（`browse::menu` 那一份清单）。
+const 菜单那几项: [&str; 8] = [
+    "打开详情",
+    "编辑元数据",
+    "勾选",
+    "收藏",
+    "合并…",
+    "刮削此作品",
+    "在文件系统中打开",
+    "复制名称",
+];
+
+/// **菜单上那一列快捷键提示立得住**：每一项占满整个菜单的内宽，提示一律贴着
+/// 「右缘 − `menu-item-padding`」摆——于是那一列的右缘是同一条线（设计稿
+/// `.ctx button span` 的 `margin-left:auto`）。
+///
+/// **量的是控件自己的矩形**（无障碍树上那一份），不是像素比、也不是测试里量到的
+/// 那一段字的外框：`Shape::Text` 的 `pos` 在这条路上不是最终屏幕坐标（票 11 差点
+/// 据此报一个不存在的错位）。提示那几段字是拿画笔直接画的，没有自己的控件矩形——
+/// 而它们摆在哪儿完全由**所在那一项**的矩形定，所以量那一项就够了：
+/// 各项的左缘、右缘都是同一条线，那一列提示的右缘就也是。
+#[track_caller]
+fn 菜单那一列提示立成一列(harness: &Harness<'_>, 名字: &str) {
+    // **屏上同一句话不止一处时取最后那一处**：菜单是一层浮层（`Order::Foreground`），
+    // 无障碍树上排在最后——而「编辑元数据」这一句，右边那栏详情上也有一颗按钮写着它
+    // （右键那一下把详情换成了这一行）。
+    let 各项: Vec<egui::Rect> = 菜单那几项
+        .iter()
+        .map(|一项| {
+            harness
+                .query_all_by_role_and_label(Role::Button, 一项)
+                .map(|node| node.rect())
+                .next_back()
+                .unwrap_or_else(|| panic!("{名字}：菜单上没有「{一项}」"))
+        })
+        .collect();
+    assert_eq!(
+        各项.len(),
+        菜单那几项.len(),
+        "{名字}：菜单上该有 {} 项",
+        菜单那几项.len()
+    );
+    let 左缘: Vec<f32> = 各项.iter().map(|rect| rect.left()).collect();
+    let 右缘: Vec<f32> = 各项.iter().map(|rect| rect.right()).collect();
+    assert!(
+        左缘.windows(2).all(|两个| (两个[0] - 两个[1]).abs() < 0.5),
+        "{名字}：菜单各项的左缘不是同一条线，是 {左缘:?}"
+    );
+    assert!(
+        右缘.windows(2).all(|两个| (两个[0] - 两个[1]).abs() < 0.5),
+        "{名字}：菜单各项的右缘不是同一条线——那一列提示就立不住，是 {右缘:?}"
+    );
+}
+
+/// **按 `?` 摊开的那层快捷键表**那一张：盖在浏览屏上头。
+#[track_caller]
+fn 拍快捷键表(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 浏览现场 { mut app, 目录 } = 浏览现场(false);
+    let mut harness = 开一个(主题, move |ui| app.ui(ui));
+    harness.event(egui::Event::Key {
+        key: egui::Key::Questionmark,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.step();
+    harness.run_steps(6);
+    harness.run();
+    拍下(harness, 名字);
+    drop(目录);
+}
+
+#[test]
+fn 浏览_右键菜单_浅色() {
+    拍右键菜单("browse/context-menu-light", Theme::Light);
+}
+
+#[test]
+fn 浏览_右键菜单_暗色() {
+    拍右键菜单("browse/context-menu-dark", Theme::Dark);
+}
+
+#[test]
+fn 浏览_快捷键表_浅色() {
+    拍快捷键表("browse/keys-sheet-light", Theme::Light);
+}
+
+#[test]
+fn 浏览_快捷键表_暗色() {
+    拍快捷键表("browse/keys-sheet-dark", Theme::Dark);
+}
+
 /// 带「未关联作品」标签的那一行，正题至少露出这么多个字（不算截断补上的「…」）。
 const 正题至少露出: usize = 3;
 
