@@ -111,6 +111,7 @@ use crate::tokens::Tokens;
 pub mod collections;
 pub mod menu;
 pub mod merge;
+pub mod sublibrary;
 pub mod suspicion;
 pub mod work;
 
@@ -531,6 +532,15 @@ pub struct Screen {
     manage_collections: Option<collections::Manage>,
     /// 「**加入合集**」那个弹层；`None` 是没开着。
     join_collection_dialog: Option<collections::Join>,
+    /// 「**加入子库**」那个弹层（票 `23`，设计稿 `openAddSub`）；`None` 是没开着。
+    add_to_sublibrary: Option<sublibrary::AddTo>,
+    /// 那一层「加入到」那一列此刻列着哪几台，**连它们各自那几个数**。
+    ///
+    /// 条数一查就有；选中多少、多大要折一遍事实（343 毫秒），所以先摆 `None`
+    /// （屏上写「正在算…」），算完再填。
+    sublibrary_devices: Vec<sublibrary::Device>,
+    /// 预估那一块此刻是什么状况。
+    sublibrary_estimate: sublibrary::Estimate,
     /// 台上那趟**整批收藏**（或者自建合集的加减）是第几号。`None` 是眼下没排着。
     ///
     /// **按号认领**，与别的屏一个写法：台上跑的可能是别人排的活。
@@ -647,6 +657,9 @@ impl Screen {
             suppressed: Vec::new(),
             suppressed_for: None,
             manage_collections: None,
+            add_to_sublibrary: None,
+            sublibrary_devices: Vec::new(),
+            sublibrary_estimate: sublibrary::Estimate::Working,
             join_collection_dialog: None,
             collecting: None,
             title_draft: TitleDraft::default(),
@@ -910,6 +923,161 @@ impl Screen {
                 self.join_collection(site, tasks);
             }
         }
+    }
+
+    /// 画「**加入子库**」那一层，并把按下去那一下办了。
+    ///
+    /// **只画和转发**：屏上那几个数全部来自核心库一处（`sublibrary::addition`），
+    /// 这一层一个都不自己算（ADR-0024；设计稿那张对照表也这么写）。
+    fn add_to_sublibrary_dialog(&mut self, ctx: &egui::Context, site: &mut Site) {
+        let Some(弹层) = self.add_to_sublibrary.as_mut() else {
+            return;
+        };
+        // 当前筛选折成的那条规则：`Ok(None)` 是一个条件都没筛，`Err` 是有写错的子句。
+        let 折出来的 = self.query.to_rule();
+        let (rule, unruly) = match &折出来的 {
+            Ok(有的) => (有的.as_ref(), None),
+            Err(不成) => (None, Some(不成.advice())),
+        };
+        // **只用于浏览、写不进规则的那几维**：识别结论与整理建议（照稿那句说明）。
+        let mut browse_only: Vec<&str> = Vec::new();
+        if self.query.state.is_some() {
+            browse_only.push("识别结论");
+        }
+        if self.query.suspected.is_some() {
+            browse_only.push(suspicion::SECTION);
+        }
+        let facts = sublibrary::Facts {
+            devices: &self.sublibrary_devices,
+            rule,
+            unruly: unruly.as_deref(),
+            unfilled: self.filter.pending().len(),
+            browse_only: &browse_only,
+            searching: !self.query.search.trim().is_empty(),
+            picked: self.picked.count(self.window.total()),
+            picked_variants: self.scope,
+            estimate: &self.sublibrary_estimate,
+        };
+        match 弹层.ui(ctx, &facts) {
+            sublibrary::Out::Open => {}
+            sublibrary::Out::Closed => self.add_to_sublibrary = None,
+            sublibrary::Out::NewDevice => {
+                self.add_to_sublibrary = None;
+                // 一台子库都没有时那一颗：把人送去子库屏建一个。
+                self.returned = Some(String::new());
+            }
+            sublibrary::Out::Add(deed) => {
+                self.add_to_sublibrary = None;
+                self.add_into_sublibrary(site, &deed, rule);
+            }
+        }
+    }
+
+    /// 真把这一批加进那个子库。**两档各走各的那一条现成的路。**
+    fn add_into_sublibrary(
+        &mut self,
+        site: &mut Site,
+        deed: &sublibrary::Deed,
+        rule: Option<&Rule>,
+    ) {
+        let name = deed.device.clone();
+        match deed.mode {
+            sublibrary::Mode::Rule => {
+                let Some(rule) = rule else {
+                    // 按不动的那一档走不到这儿；真走到了宁可什么都不做。
+                    return;
+                };
+                match site.catalog.add_rule(&name, rule, Some(&deed.rule_name)) {
+                    Ok(ordinal) => {
+                        self.error = None;
+                        self.notice = Some(format!(
+                            "「{name}」加了第 {ordinal} 条规则「{}」：{rule}",
+                            deed.rule_name_or(rule),
+                        ));
+                    }
+                    Err(写不进) => self.error = Some(format!("规则写不进中立库：{写不进}")),
+                }
+            }
+            sublibrary::Mode::Picked => {
+                // **只加勾中的那几个**：作为手动例外（`收入`）整批落库，一个事务。
+                let keys = match site
+                    .catalog
+                    .scoped_variants(&self.query, self.picked.scope())
+                {
+                    Ok(keys) => keys,
+                    Err(读不动) => {
+                        self.error = Some(format!("中立库读不动：{读不动}"));
+                        return;
+                    }
+                };
+                let 几个: Vec<&str> = keys.iter().map(String::as_str).collect();
+                match site.catalog.set_exceptions(
+                    &name,
+                    &几个,
+                    romcat_core::sublibrary::Exception::Include,
+                    None,
+                ) {
+                    Ok(落了几条) => {
+                        self.error = None;
+                        self.notice = Some(format!(
+                            "「{name}」收入了 {} 个变体（手动例外，不随筛选条件变）。",
+                            thousands(落了几条 as u64),
+                        ));
+                    }
+                    Err(写不进) => self.error = Some(format!("例外写不进中立库：{写不进}")),
+                }
+            }
+        }
+        self.touched = Some(name.clone());
+        if !deed.keep_picking {
+            self.returned = Some(name);
+        }
+    }
+
+    /// 摊开「**加入子库**」那一层（票 `gui-looks-like-the-design/23`）。
+    ///
+    /// 「加入到」那一列要的东西分两档取：
+    ///
+    /// - **条数与上限一查就有**，当场读；
+    /// - **选中多少、多大**要折一遍事实（`facts()` 走全库，真机 343 毫秒），
+    ///   **摆不上画帧线**——先摆 `None`（屏上写「正在算…」），那一趟排任务台（挂单 `Q1181`）。
+    ///
+    /// **「已经有同一条规则了」当场答**：它只要读一遍那台的规则（`Rule::same_one_in`，
+    /// 比树不比原文，`Q1180`），不用折事实。让「按不动」去等那趟 343 毫秒的活，
+    /// 人会在它还亮着的时候按下去。
+    fn open_add_to_sublibrary(&mut self, site: &Site) {
+        let 这一条 = self.query.to_rule().ok().flatten();
+        let 几台 = match site.catalog.sublibraries() {
+            Ok(几台) => 几台,
+            Err(读不动) => {
+                self.error = Some(format!("中立库读不动，列不出子库：{读不动}"));
+                return;
+            }
+        };
+        let mut devices = Vec::with_capacity(几台.len());
+        for 一台 in 几台 {
+            let 规则们 = match site.catalog.sublibrary_rules(&一台.name) {
+                Ok(几条) => 几条,
+                Err(读不动) => {
+                    self.error = Some(format!("中立库读不动，列不出子库：{读不动}"));
+                    return;
+                }
+            };
+            devices.push(sublibrary::Device {
+                duplicate: 这一条
+                    .as_ref()
+                    .and_then(|rule| Rule::same_one_in(&规则们, rule)),
+                rules: 规则们.len(),
+                picked: None,
+                bytes: None,
+                capacity: 一台.capacity,
+                name: 一台.name,
+            });
+        }
+        self.add_to_sublibrary = Some(sublibrary::AddTo::open(&devices, None));
+        self.sublibrary_devices = devices;
+        self.sublibrary_estimate = sublibrary::Estimate::Working;
+        self.error = None;
     }
 
     /// 给一个合集**改名**：核心库那一趟连引用它的子库规则一起改（`collection::rename`），
@@ -2773,6 +2941,8 @@ impl Screen {
         self.merge_ui(ui.ctx(), site);
         // **收藏与合集那两个弹层**（票 `gui-looks-like-the-design/13`）。
         self.collection_dialogs(ui.ctx(), site, tasks);
+        // **加入子库那一层**（票 `gui-looks-like-the-design/23`）。
+        self.add_to_sublibrary_dialog(ui.ctx(), site);
         // **右键菜单**（票 `gui-looks-like-the-design/14`）：上一帧表格或卡片墙认下的那一下，
         // 这一帧摊开、这一帧画。两句挨着摆，按下右键与菜单出现之间才只差一帧。
         self.settle_menu(ui.ctx(), site);
@@ -2850,6 +3020,7 @@ impl Screen {
                             }
                         },
                         Action::Merge => self.open_merge(site),
+                        Action::AddToSublibrary => self.open_add_to_sublibrary(site),
                     }
                 }
                 let opened = match self.view {
@@ -3047,7 +3218,17 @@ impl Screen {
         look::small_buttons(ui, |ui| {
             let mut 按了 = None;
             for 一颗 in ACTIONS {
-                if ui.button(一颗.label()).on_hover_text(一颗.hint()).clicked() {
+                // **最右那颗「加入子库…」照稿是主按钮**（`btn sm pri`）——
+                // 这一组里只有它是。主按钮的颜色全窗口只有 `look::primary_button` 一处答。
+                let 画的 = ui
+                    .scope(|ui| {
+                        if 一颗.primary() {
+                            look::primary_button(ui.visuals_mut());
+                        }
+                        ui.button(一颗.label())
+                    })
+                    .inner;
+                if 画的.on_hover_text(一颗.hint()).clicked() {
                     按了 = Some(一颗);
                 }
             }
@@ -4864,22 +5045,31 @@ pub enum Action {
     Join,
     /// 「合并作品…」（稿上 `#merge-btn`，票 `16` 做的）。
     Merge,
+    /// 「加入子库…」（稿上 `#save-sub`，票 `23` 做的）。**这一组里唯一的主按钮。**
+    AddToSublibrary,
 }
 
 /// 这一组照稿的次序，**量宽与画都走它**。
 ///
-/// 稿上是五颗：**刮削… / ★ 收藏 / 加入合集… / 合并作品… / 加入子库…**。
-/// 今天摆得出四颗（「加入合集…」票 `13` 填上了），**最后一颗位置照稿留着**：
+/// 稿上是五颗：**刮削… / ★ 收藏 / 加入合集… / 合并作品… / 加入子库…**，
+/// **五颗到票 `23` 齐了**。最右那颗「加入子库…」照稿是 `btn sm pri`
+/// ——这一组里唯一的主按钮。
 ///
-/// - **「加入子库…」归票 `23`**（从浏览屏加入子库），摆在最右，稿上是 `btn sm pri`
-///   ——**这一组里唯一的主按钮**。
+/// ⚠️ **五颗摆不下默认那一行，整组常驻第二行**。量过（票 `23`，`browse/rows-light`
+/// 那张基线）：四颗那一组 297 点（54 ＋ 57 ＋ 78 ＋ 78，三个 11 点间距），
+/// 第五颗与「加入合集…」同形、78 点，五颗就是 386；而那一行左半段
+/// （视图开关 ＋ 作品数）占到 x 637，正中那一栏能画到 x 969，**只留得出 321**。
+/// 差 65 点。而且那还是合成数据那句短的「8 个作品（共 8）」，
+/// 真库上「1,284 个作品（共 28,529）」更宽。
 ///
-/// 写在这儿是为了那一票不必再想一遍摆在哪：次序是稿定的，不是先到先得。
-const ACTIONS: [Action; 4] = [
+/// **这是常态不是边角情形**——看见基线图上按钮在第二行，那是对的。
+/// 稿上 `.tbar` 本来就是 `flex-wrap`、摆不下就折行（拿主意的人 2026-09-22 认下）。
+const ACTIONS: [Action; 5] = [
     Action::Scrape,
     Action::Favorite,
     Action::Join,
     Action::Merge,
+    Action::AddToSublibrary,
 ];
 
 impl Action {
@@ -4891,7 +5081,13 @@ impl Action {
             Self::Favorite => "★ 收藏",
             Self::Join => "加入合集…",
             Self::Merge => merge::MERGE,
+            Self::AddToSublibrary => "加入子库…",
         }
+    }
+
+    /// **这一颗是不是主按钮**（稿上 `btn sm pri`）。这一组里只有「加入子库…」是。
+    fn primary(self) -> bool {
+        matches!(self, Self::AddToSublibrary)
     }
 
     /// 悬停里那一段。
@@ -4916,6 +5112,11 @@ impl Action {
             Self::Merge => {
                 "把被识别成不同作品、其实是同一个游戏的变体归到一起。\n\n\
                  勾两个或更多作品再按。只写入裁决记录，不会移动或修改任何文件。"
+            }
+            Self::AddToSublibrary => {
+                "把筛到的这一批加进一台设备的子库：作为一条规则加入\
+                 （以后扫描到符合条件的新作品也自动进来），或者只加勾中的那几个作品。\n\n\
+                 加进去多少、与已有规则重复多少、加入后装不装得下，按之前都写在那一层上。"
             }
         }
     }
