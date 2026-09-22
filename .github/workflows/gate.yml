@@ -1,6 +1,6 @@
 # **门禁。** 推一次代码就跑，跑的是仓库里那一条子命令 `cargo xtask gate`。
 #
-# ⭐ **这份文件里一条门禁命令都不写。** 那几条（fmt / glossary / check / clippy / test / doc）的唯一定义在
+# ⭐ **这份文件里一条门禁命令都不写。** 那几条（fmt / glossary / check / clippy / test / numbers / doc）的唯一定义在
 # `xtask/src/gate.rs`，本地与 CI 调的是同一句话——把命令抄一份到这里，就等于给自己造了
 # 一处会慢慢漂的第二定义，而「我这儿绿的、CI 红的」这种分歧只能靠猜。
 # 想知道它跑哪几条：`cargo xtask gate --list`。
