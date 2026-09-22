@@ -592,6 +592,27 @@ impl Rule {
         self.root.clauses()
     }
 
+    /// 把这条规则里**合集**那一维上叫 `from` 的值改成 `to`；一处都没改就交回 `None`。
+    ///
+    /// **改名要连规则一起改**（票 `gui-looks-like-the-design/13`）：一个合集改了名，
+    /// 而写着 `合集=旧名` 的子库规则没跟着改，那个子库**第二天就选不出东西了**——
+    /// 而且屏上不会红，只是那一批悄悄变空。
+    ///
+    /// **这件事必须走树，不许在别处替换字符串**（ADR-0024）：一条子句能带好几个值
+    /// （`合集=甲,乙`，逗号是值分隔符），而作品名、简介那几维里完全可能出现同样的字。
+    /// 拿 `text.replace("合集=甲", "合集=乙")` 去改，遇上 `合集=甲乙`
+    /// 或者 `作品~合集=甲` 就改错了。所以这里只认 [`Dimension::Collection`] 那一维，
+    /// 逐个值**一字不差**地比。
+    ///
+    /// 改完那一条走 [`Clause::build`] 重造（与手打那行字同一条路），
+    /// 于是印出去照样读得回来。
+    #[must_use]
+    pub fn with_collection_renamed(&self, from: &str, to: &str) -> Option<Self> {
+        let mut 改过 = false;
+        let root = rename_in_group(&self.root, from, to, &mut 改过);
+        改过.then(|| Self::from_group(root))
+    }
+
     /// 这条规则**一眼认得出的短名**（设计稿 `autoName`）：`平台 · 其余`，如「FC · 汉化」「PSP · 汉化和官中」。
     ///
     /// 只看顶层「全部满足」那一层：`平台=` 的值用「、」连成头一段（没有就是「全部平台」）；其余几段依次是
@@ -722,6 +743,46 @@ impl fmt::Display for Clause {
 impl fmt::Display for Group {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&render_group(self, false))
+    }
+}
+
+/// [`Rule::with_collection_renamed`] 的递归那一半：一层一层重建。
+fn rename_in_group(group: &Group, from: &str, to: &str, 改过: &mut bool) -> Group {
+    let nodes = group
+        .nodes
+        .iter()
+        .map(|node| match node {
+            Node::Clause(clause) => Node::Clause(rename_in_clause(clause, from, to, 改过)),
+            Node::Group(inner) => Node::Group(rename_in_group(inner, from, to, 改过)),
+        })
+        .collect();
+    Group::new(group.join, nodes)
+}
+
+/// 一条子句里那几个值逐个比：**只动合集那一维**，而且**一字不差才算**。
+///
+/// 重造走 [`Clause::build`]。**造不出来就原样留着**：那只可能是新名字本身写不进规则
+/// （比如带着逗号），而那件事该在改名那一步就被 `collection::check_name` 拦住——
+/// 真漏到这儿，宁可让那条规则照旧指着旧名（选不出东西、但读得懂），
+/// 也不把它换成一条读不回来的原文。
+fn rename_in_clause(clause: &Clause, from: &str, to: &str, 改过: &mut bool) -> Clause {
+    if clause.dimension != Dimension::Collection {
+        return clause.clone();
+    }
+    let 值们: Vec<&str> = clause.raw.split(',').map(str::trim).collect();
+    if !值们.contains(&from) {
+        return clause.clone();
+    }
+    let 换过的: Vec<&str> = 值们
+        .iter()
+        .map(|一个| if *一个 == from { to } else { *一个 })
+        .collect();
+    match Clause::build(clause.dimension, clause.op, &换过的.join(",")) {
+        Ok(新的) => {
+            *改过 = true;
+            新的
+        }
+        Err(_) => clause.clone(),
     }
 }
 

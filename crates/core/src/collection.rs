@@ -62,6 +62,7 @@ use crate::catalog::{Catalog, CatalogError, KEYS_PER_QUERY, VariantRow};
 use crate::identify;
 use crate::report::thousands;
 use crate::site::Site;
+use crate::sublibrary::Rule;
 use crate::task::{Cutoff, Halted, Handle};
 use crate::verdict::{Anchor, Membership, VerdictError};
 
@@ -84,6 +85,15 @@ pub enum CollectionError {
     /// 合集没名字。
     #[error("合集得有个名字：一组东西没有名字，日后既指不着它也筛不出它。")]
     Nameless,
+    /// 名字用不得（改名与新建共用那四条，见 [`check_name`]）。
+    #[error("{}", .0.advice())]
+    Name(BadName),
+    /// 想给[**收藏**](FAVORITE)改名。那一组的名字是定死的。
+    #[error(
+        "「{FAVORITE}」是默认的那一组，改不了名也删不掉——它与自建合集同一套成员关系，\
+         只是名字由本仓定死（`collection::FAVORITE`）。"
+    )]
+    Reserved,
     /// 被按停了。**读那一半整条只读**，所以这一档停在哪儿都是干净的。
     ///
     /// **这一句想怎么写就怎么写。** 任务台分「停了」与「失败」看的是
@@ -152,6 +162,67 @@ pub struct Projected {
 
 /// 这个变体眼下钉得住哪一种锚。
 ///
+/// 一个**合集**的名字用不得的那几种（票 `gui-looks-like-the-design/13`，稿上
+/// `collNameErr` 那四条）。
+///
+/// **四条判在一处**（ADR-0024）：建合集、改名、以及日后命令行那条路，问的都是
+/// [`check_name`]。界面自己判字符串的话，「加入合集」那个弹层与「改名」那个弹层
+/// 迟早对同一个名字给出两种答复。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BadName {
+    /// 空的（或者只有空白）。
+    Empty,
+    /// 与[**收藏**](FAVORITE)重名——那一组的名字是定死的。
+    Reserved,
+    /// 已经有一个合集叫这个。
+    Taken,
+    /// 名字里有逗号。**逗号是规则里的值分隔符**（`合集=甲,乙`），
+    /// 带着它的名字写进规则会被读成两个值。
+    Comma,
+}
+
+impl BadName {
+    /// 屏上那一句：**说清哪儿不行、以及怎么才行**（ADR-0005 那条「不禁按钮」）。
+    #[must_use]
+    pub fn advice(&self) -> String {
+        match self {
+            Self::Empty => "请输入名称。".to_string(),
+            Self::Reserved => format!("「{FAVORITE}」是默认的那一组，请换一个名称。"),
+            Self::Taken => "已经有同名的合集。".to_string(),
+            Self::Comma => "名称里不能有逗号——规则里用逗号分隔多个值。".to_string(),
+        }
+    }
+}
+
+/// 这个名字用得上吗；用得上就交回**收拾过空白**的那一串。
+///
+/// `existing` 是库里眼下有哪几个合集。**改名时要把被改的那一个先剔掉**——
+/// 不剔的话「改成它自己」会被判成重名（稿上 `collNameErr(v, k)` 那个 `k` 就是这件事）。
+///
+/// **交回收拾过的名字而不是 `()`**：调用方拿到的就是该写进库的那一串，忘不掉 `trim`
+/// 这一步——忘了的话「 通关过的」与「通关过的」会在库里各占一行。
+///
+/// # Errors
+/// 名字空着、与**收藏**重名、已经有同名的、或者带着逗号时交回 [`BadName`]。
+pub fn check_name(name: &str, existing: &[String]) -> Result<String, BadName> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(BadName::Empty);
+    }
+    if name == FAVORITE {
+        return Err(BadName::Reserved);
+    }
+    // **半角与全角的逗号都算**：规则那一侧只把半角那个当分隔符，可人在中文输入法下
+    // 打出来的是全角那一个——放它进去，屏上那条规则读起来就是两个值。
+    if name.contains(',') || name.contains('，') {
+        return Err(BadName::Comma);
+    }
+    if existing.iter().any(|一个| 一个 == name) {
+        return Err(BadName::Taken);
+    }
+    Ok(name.to_string())
+}
+
 /// **内容判据拿得到就用内容锚**，拿不到才退路径锚——与裁决同一条规矩
 /// （`triage::Item::anchor`），而且必须是同一条：两处各挑各的，同一个变体上的收藏与
 /// 裁决会钉在不同的东西上，改个名字丢一个留一个。
@@ -423,6 +494,82 @@ pub fn favorite_of(site: &Site, keys: &[String]) -> Result<Option<&'static str>,
 ///
 /// 一条锚落在哪几个变体上由 `landed` 说了算，**增量那一处走的是同一个函数**。
 ///
+/// 一趟**改名**落下来之后的账。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Renamed {
+    /// 沉淀库里换了几条成员关系。
+    pub members: usize,
+    /// 跟着改掉的**子库规则**有几条。
+    pub rules: usize,
+}
+
+/// 给一个合集**改名**：沉淀库里那批成员关系、中立库里那份投影、
+/// 以及**写着 `合集=旧名` 的子库规则**，三样一起改。
+///
+/// ## 为什么规则必须跟着改
+///
+/// 一个合集改了名，而写着 `合集=旧名` 的子库规则没跟着改，那个子库**第二天就选不出
+/// 东西了**——而且屏上不会红，只是那一批悄悄变空。稿上「改名」那一下的回执里因此有
+/// 一句「引用它的子库规则一并更新」（`prototype.html` 的 `DLG.coll`）。
+///
+/// 改规则走的是**树**（`Rule::with_collection_renamed`），不是拿字符串去替换：
+/// 一条子句能带好几个值（`合集=甲,乙`），而作品名、简介那几维里完全可能出现同样的字。
+///
+/// ## 顺序：先沉淀库，再投影，最后规则
+///
+/// 沉淀库是**不可再生**的那一份（`CONTEXT.md` 的**沉淀库**词条），所以它先落；
+/// 投影照它重建，重建失败下一趟识别还会再建一次；规则最后改，那一步失败最坏是
+/// 「合集改了名、某条规则还指着旧名」——那一条**读得懂、只是选不出东西**，
+/// 比反过来（规则改了、合集没改名）好收拾。
+///
+/// ## 拦在门口的两样
+///
+/// - **[收藏](FAVORITE)不许改名**：那一组的名字是定死的，稿上「管理合集」那一行也写着
+///   「默认的一组，不能改名或删除」。
+/// - **新名字过 [`check_name`]**，而且**把被改的那一个先剔掉**——不剔的话
+///   「改成它自己」会被判成重名。
+///
+/// # Errors
+/// 新名字用不得时交回 [`CollectionError::Name`]；改**收藏**时交回
+/// [`CollectionError::Reserved`]；两份库读写失败时各自交回那一支。
+pub fn rename(site: &mut Site, from: &str, to: &str) -> Result<Renamed, CollectionError> {
+    if from == FAVORITE {
+        return Err(CollectionError::Reserved);
+    }
+    // **库里眼下有哪几个合集**（沉淀库那一份才是账本，投影只是投影），
+    // 把被改的那一个剔掉再校验。
+    let 已有: Vec<String> = site
+        .store
+        .collections()?
+        .into_iter()
+        .map(|(name, _)| name)
+        .filter(|name| name != from)
+        .collect();
+    let to = check_name(to, &已有).map_err(CollectionError::Name)?;
+
+    // 一、沉淀库。
+    let members = site.store.rename_collection(from, &to)?;
+    // 二、投影照沉淀库重建。
+    project(&mut site.catalog, &site.store.memberships()?)?;
+    // 三、写着旧名那几条子库规则。
+    let mut rules = 0;
+    for 子库 in site.catalog.sublibraries()? {
+        for 一条 in site.catalog.sublibrary_rules(&子库.name)? {
+            // **读不懂的那几条一个字都不碰**：它们本来就没参与求值（票 `gui-redesign/14`），
+            // 而这一趟没有「把它改对」的依据。
+            let Ok(rule) = Rule::parse(&一条.text) else {
+                continue;
+            };
+            if let Some(改过的) = rule.with_collection_renamed(from, &to) {
+                site.catalog
+                    .replace_rule(&子库.name, 一条.ordinal, &改过的)?;
+                rules += 1;
+            }
+        }
+    }
+    Ok(Renamed { members, rules })
+}
+
 /// 走「拿成员关系去找变体」而不是「拿每个变体去问在不在合集里」，理由与
 /// `scrape::zh::Rulings::resolve` 同一条：成员关系是**人一条条点出来的**，
 /// 量级几百到几千，与四万多个变体不同阶。

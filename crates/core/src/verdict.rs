@@ -1748,6 +1748,28 @@ impl Store {
         Ok(changed)
     }
 
+    /// 把一个合集**改名**：那一组成员关系上的名字整批换掉。交回换了几条。
+    ///
+    /// **只动这一张表**。中立库里那两张是投影，照沉淀库重建
+    /// （`collection::project`）；而写着 `合集=旧名` 的子库规则要跟着改，
+    /// 那是 `collection::rename` 那一趟里的另一步——**这一层不知道规则的事**。
+    ///
+    /// **同名合并进去是允许的**：`to` 已经有成员时，两批就成了一批。调用方要拦就先
+    /// 拦（`collection::check_name` 的 [`Taken`](crate::collection::BadName::Taken)）。
+    /// 这一层不拦，是因为「把甲并进乙」本身是个说得通的动作，日后真要它时不必改这儿。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn rename_collection(&mut self, from: &str, to: &str) -> Result<usize, VerdictError> {
+        let path = self.path.clone();
+        self.conn
+            .execute(
+                "UPDATE collection_member SET name = ?2 WHERE name = ?1",
+                params![from, to],
+            )
+            .map_err(|source| VerdictError::Sqlite { path, source })
+    }
+
     /// 这条锚在哪几个合集里，按名字排。
     ///
     /// # Errors
