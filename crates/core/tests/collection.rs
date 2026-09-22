@@ -769,3 +769,77 @@ fn 改名连引用它的子库规则一起改_收藏改不得() {
         "校验没过却把库改了"
     );
 }
+
+/// **删掉一个合集＝把成员全部移出；写着它的子库规则一个字不改**
+/// （票 `gui-looks-like-the-design/13`）。
+///
+/// 与[改名](romcat_core::collection::rename)正相反，而那是有意的：改名之后旧名字
+/// **再没有了**，规则不跟着改就成了一条永远选不中的死规则；删除之后
+/// `合集=这个名字` **还可能再活过来**（人重新建一个同名的，成员关系照内容锚重新挂上）。
+/// 替人把那几条规则删掉，等于替他决定「这个合集不会再回来」。
+#[test]
+fn 删合集是把成员全部移出_写着它的规则照旧留着_收藏删不得() {
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    collection::add(&mut 现场.site, "送朋友的", &键(&[马里奥, 勇者])).expect("加得进");
+    现场
+        .site
+        .catalog
+        .put_sublibrary(&sublibrary::Sublibrary::at(
+            "掌机",
+            std::path::Path::new("/Volumes/SDCARD/掌机"),
+            "Pegasus",
+            None,
+        ))
+        .expect("建得出子库");
+    现场
+        .site
+        .catalog
+        .add_rule("掌机", &Rule::parse("合集=送朋友的").expect("读得懂"))
+        .expect("加得进规则");
+
+    // **屏上那句警告要的那个数**：删之前说清有几条规则写着它。
+    assert_eq!(
+        collection::rules_naming(&现场.site.catalog, "送朋友的").expect("数得出"),
+        1,
+    );
+    // 一字不差才算：`送朋友` 不是 `送朋友的`。
+    assert_eq!(
+        collection::rules_naming(&现场.site.catalog, "送朋友").expect("数得出"),
+        0,
+        "子串不该算——那正是不拿字符串去比的理由",
+    );
+
+    let 移出了 = collection::drop_all(&mut 现场.site, "送朋友的").expect("删得掉");
+    assert!(移出了 > 0, "一条成员都没移出");
+
+    // 一、这个合集从投影里没了，筛不出东西。
+    assert!(
+        筛(&现场.site.catalog, "合集=送朋友的").is_empty(),
+        "删完还筛得出东西"
+    );
+    // 二、**那条规则原样留着**。
+    let 规则们: Vec<String> = 现场
+        .site
+        .catalog
+        .sublibrary_rules("掌机")
+        .expect("读得出")
+        .into_iter()
+        .map(|一条| 一条.text)
+        .collect();
+    assert_eq!(
+        规则们,
+        vec!["合集=送朋友的".to_string()],
+        "删合集顺手改了子库规则——那是替人决定「这个合集不会再回来」",
+    );
+    // 三、**作品本身不受影响**：变体还在库里。
+    assert!(
+        !筛(&现场.site.catalog, "平台=FC").is_empty(),
+        "删合集把作品也带走了"
+    );
+    // 四、**收藏删不得**。
+    assert!(matches!(
+        collection::drop_all(&mut 现场.site, FAVORITE),
+        Err(CollectionError::Reserved)
+    ));
+}

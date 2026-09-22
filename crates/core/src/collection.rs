@@ -503,6 +503,60 @@ pub struct Renamed {
     pub rules: usize,
 }
 
+/// 有几条**子库规则**写着这个合集。
+///
+/// 删一个合集之前屏上要说「子库里有 N 条规则写着它，删完那几条筛不出东西」
+/// （稿上 `DLG.coll` 那个警告框）。**读不懂的规则不算**——它们本来就没参与求值。
+///
+/// 判「写着它没有」走 [`Rule::names_collection`]，与[改名](rename)那一趟**同一条口径**：
+/// 两处各写一份的话，「警告说有 2 条」与「改名真改了 3 条」就会对不上。
+///
+/// # Errors
+/// 读中立库失败时返回错误。
+pub fn rules_naming(catalog: &Catalog, name: &str) -> Result<usize, CatalogError> {
+    let mut 几条 = 0;
+    for 子库 in catalog.sublibraries()? {
+        for 一条 in catalog.sublibrary_rules(&子库.name)? {
+            if Rule::parse(&一条.text).is_ok_and(|rule| rule.names_collection(name)) {
+                几条 += 1;
+            }
+        }
+    }
+    Ok(几条)
+}
+
+/// **删掉一个合集 ＝ 把它的成员全部移出**（票 `gui-looks-like-the-design/13` 票面那一句）。
+/// 交回移出了几条。
+///
+/// **作品本身一个字都不动**，稿上那个警告框也这么写。
+///
+/// **写着它的那几条子库规则一个字都不改**——与[改名](rename)正相反，那是有意的：
+/// 改名时「旧名字再没有了」，规则不跟着改就成了一条永远选不中的死规则；而删除之后
+/// `合集=这个名字` **还可能再活过来**（人可以重新建一个同名的合集，成员关系照内容锚
+/// 重新挂上去）。替人把那几条规则删掉或改掉，等于替他决定「这个合集不会再回来」。
+/// 屏上照实说有几条写着它（[`rules_naming`]），删不删由人定。
+///
+/// [**收藏**](FAVORITE)删不得：那一组与自建合集同一套成员关系，只是名字由本仓定死。
+/// 要清空它就在浏览屏上勾一批按「☆ 取消收藏」。
+///
+/// # Errors
+/// 删**收藏**时交回 [`CollectionError::Reserved`]；两份库读写失败时各自交回那一支。
+pub fn drop_all(site: &mut Site, name: &str) -> Result<usize, CollectionError> {
+    if name == FAVORITE {
+        return Err(CollectionError::Reserved);
+    }
+    let anchors: Vec<Anchor> = site
+        .store
+        .memberships()?
+        .into_iter()
+        .filter(|一条| 一条.name == name)
+        .map(|一条| 一条.anchor)
+        .collect();
+    let members = site.store.leave(name, &anchors)?;
+    project(&mut site.catalog, &site.store.memberships()?)?;
+    Ok(members)
+}
+
 /// 给一个合集**改名**：沉淀库里那批成员关系、中立库里那份投影、
 /// 以及**写着 `合集=旧名` 的子库规则**，三样一起改。
 ///

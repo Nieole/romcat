@@ -592,6 +592,26 @@ impl Rule {
         self.root.clauses()
     }
 
+    /// 这条规则写着这个**合集**吗。
+    ///
+    /// 删一个合集之前屏上要说「子库里有 N 条规则写着它，删完那几条筛不出东西」
+    /// （稿上 `DLG.coll` 那个警告框），数的就是它。
+    ///
+    /// **与 [`Self::with_collection_renamed`] 同一条口径**：只认
+    /// [`Dimension::Collection`] 那一维、逐个值一字不差地比。两处各写一份的话，
+    /// 「警告说有 2 条」与「改名真改了 3 条」就会对不上。
+    #[must_use]
+    pub fn names_collection(&self, name: &str) -> bool {
+        self.clauses().iter().any(|clause| {
+            clause.dimension == Dimension::Collection
+                && clause
+                    .raw
+                    .split(',')
+                    .map(str::trim)
+                    .any(|一个| 一个 == name)
+        })
+    }
+
     /// 把这条规则里**合集**那一维上叫 `from` 的值改成 `to`；一处都没改就交回 `None`。
     ///
     /// **改名要连规则一起改**（票 `gui-looks-like-the-design/13`）：一个合集改了名，
