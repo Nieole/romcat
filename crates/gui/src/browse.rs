@@ -1415,6 +1415,15 @@ impl Screen {
         }
     }
 
+    /// **只勾这一行**（照稿 `ctxOpen` 那一路）：右键菜单里那两项作用于勾中的那一批，
+    /// 而人右键的是这一行——没勾过它就先把选中换成只有它，勾过了就照旧。
+    fn pick_only(&mut self, anchor: &WorkAnchor) {
+        if !self.picked.is_all() && !self.picked.contains(anchor) {
+            self.picked.clear();
+            self.picked.toggle(anchor);
+        }
+    }
+
     /// 摊开「**加入子库**」那一层（票 `gui-looks-like-the-design/23`）。
     ///
     /// 「加入到」那一列要的东西分两档取：
@@ -3145,6 +3154,24 @@ impl Screen {
             menu::Pressed::EditMeta => self.edit_meta_of(&site.catalog, anchor),
             menu::Pressed::TogglePick => self.picked.toggle(anchor),
             menu::Pressed::ToggleFavorite => self.toggle_favorite_of(site, tasks, anchor),
+            // **右键这一下先把这一行勾上再摊开那一层**（照稿 `ctxOpen` 那一路：
+            // `if(!S.picked.has(i)&&!S.pickAll){S.picked.clear();S.picked.add(i);}`）
+            // ——那两层作用于勾中的那一批，而人右键的是**这一行**。
+            menu::Pressed::JoinCollection => {
+                self.pick_only(anchor);
+                match 合集账本(site) {
+                    Ok(账本) => {
+                        self.join_collection_dialog = Some(collections::Join::open(&账本));
+                    }
+                    Err(读不动) => {
+                        self.error = Some(format!("沉淀库读不动，开不了这一层：{读不动}"));
+                    }
+                }
+            }
+            menu::Pressed::AddToSublibrary => {
+                self.pick_only(anchor);
+                self.open_add_to_sublibrary(site);
+            }
             menu::Pressed::Merge => {
                 let rows = self.merge_rows_with(anchor);
                 self.open_merge_rows(site, &rows);
@@ -4490,48 +4517,21 @@ impl Screen {
     ///
     /// **写不成规则的条件当场挡住**，不是少写一条了事：少一条，子库选出来的就比屏上多。
     fn save_panel(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+        // **「存成子库」那一块这一票搬走了**（挂单 `Q873` 收口，票
+        // `gui-looks-like-the-design/23`）。票 09 照稿把它缩成小号垫在左栏最底下，
+        // 说好「等『加入子库…』那层弹层做出来之后搬走」——那一层这一票做出来了：
+        //
+        // - **往已有的一台里加**走表格上方那一条最右那颗「加入子库…」，
+        //   那儿还能选「作为规则」还是「只加勾中的那几个」，并且按之前看得见
+        //   新增多少、与已有规则重复多少、加入后装不装得下；
+        // - **建一台新的**走那一层「加入到」那一列底下的「新建子库…」
+        //   （照稿 `data-dg="open:subform|new"`），到子库屏去建——
+        //   目标路径、前端格式、容量上限本来就都在那儿问，而这儿从前只问得了两样。
+        //
+        // 于是这儿照稿什么都不摆；**「更新到子库」那一半留着**——它是票 12 那条
+        // 「改选择」闭环的回程，与「存成子库」不是一回事。
         if self.editing.is_some() {
             self.update_panel(ui, site);
-            return;
-        }
-        section_title(ui, "存成子库", None);
-        section_gap(ui);
-        // **筛出多少条当场写出来**：按下去之前心里有数。
-        look::help(
-            ui,
-            &format!(
-                "筛出 {} 行 · {} 个变体",
-                thousands(self.window.total()),
-                scope_label(self.filtered),
-            ),
-        )
-        .on_hover_text(
-            "行数照的是「作品数 ＋ 还没认出作品的变体数」；\
-             变体数是这批行底下的全部变体，按当前筛选。",
-        );
-        // 折出来的规则、折不成的原因都写在条件组底下那一条里（[`rule_text`]）；这儿只补一句
-        // 「一个条件都没筛」——那时那一条不画。
-        let folded = self.query.to_rule();
-        if matches!(folded, Ok(None)) {
-            look::help(ui, "一个条件都没筛——存出来的子库就是整个库。先筛一批。");
-        }
-        for (value, hint) in [
-            (&mut self.save.name, "名字：一台目标设备一个"),
-            (&mut self.save.target, "目标路径：读卡器挂上来的那个目录"),
-        ] {
-            let width = ui.available_width();
-            look::small_text_input(ui, width, egui::TextEdit::singleline(value).hint_text(hint));
-        }
-        let ready = !self.save.name.trim().is_empty()
-            && !self.save.target.trim().is_empty()
-            && matches!(folded, Ok(Some(_)));
-        let 存 = look::small_buttons(ui, |ui| {
-            ui.add_enabled(ready, egui::Button::new("存成子库"))
-                .on_hover_text("把当前筛选原样变成这个子库的规则。前端格式与容量上限去子库屏调。")
-                .clicked()
-        });
-        if 存 {
-            self.save_as_sublibrary(site);
         }
     }
 

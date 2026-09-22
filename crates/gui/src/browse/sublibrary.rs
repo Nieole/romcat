@@ -162,6 +162,8 @@ pub struct AddTo {
     name: String,
     /// 那一格**人动过没有**。没动过时它跟着当前筛选走（现拼的短名）。
     typed: bool,
+    /// 这一帧按了「新建子库…」。下一句 `ui` 交回 [`Out::NewDevice`]。
+    new_device: bool,
 }
 
 /// 这一层交回去的东西：要不要接着开着，以及按下去要干什么。
@@ -189,6 +191,7 @@ impl AddTo {
             mode: Some(Mode::Rule),
             name: String::new(),
             typed: false,
+            new_device: false,
         }
     }
 
@@ -236,6 +239,9 @@ impl AddTo {
             )
             .width(Width::Wide)
             .show(ctx, |ui| self.body(ui, facts));
+        if std::mem::take(&mut self.new_device) {
+            return Out::NewDevice;
+        }
         match shown.pressed {
             Some(Pressed::Dismiss) => Out::Closed,
             Some(Pressed::NewDevice) => Out::NewDevice,
@@ -324,6 +330,20 @@ impl AddTo {
             if look::radio_option(ui, 选中, &一台.name, &一台.line()).clicked() {
                 self.target = Some(一台.name.clone());
             }
+        }
+        // **「新建子库…」照稿摆在这一列底下**（`data-dg="open:subform|new"`）：
+        // 一台设备一个子库，建的那一步在子库屏上（目标路径、前端格式、容量上限都在那儿问）。
+        // **票 `23` 把左栏那块「存成子库」搬走之后，从浏览屏建一台走的就是这一条**（挂单 `Q873`）。
+        if look::small_buttons(ui, |ui| {
+            ui.scope(|ui| {
+                look::ghost_button(ui.visuals_mut());
+                ui.button("新建子库…")
+            })
+            .inner
+            .on_hover_text("一台设备一个子库。去子库屏建一个，再回来把筛选结果加进去。")
+            .clicked()
+        }) {
+            self.new_device = true;
         }
 
         一段之间(ui);

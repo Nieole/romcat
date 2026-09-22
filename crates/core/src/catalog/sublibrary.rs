@@ -251,18 +251,26 @@ impl RemovedSublibrary {
     }
 }
 
-/// [`RemovedSublibrary`] 里的一条规则：`sublibrary_rule` 那几列。
+/// **删掉之前整条留下来的一条规则**：`sublibrary_rule` 那几列，**逐列原样**。
+///
+/// 两处用它：[`RemovedSublibrary`] 里那一批（删掉整台时），
+/// 以及 [`Catalog::take_rule`] / [`Catalog::restore_rule`]
+/// （删掉一条时那颗「撤销」，票 `gui-looks-like-the-design/23` 验收第 7 条）。
+///
+/// ⚠️ **序号要原样回去**：`ordinal` 是命令行与报告上认的那个号，
+/// 撤销之后换了号，人照着上一份报告删「第 2 条」删掉的会是另一条。
+/// 所以放回去走的不是 [`Catalog::add_rule`]（那会重新发号）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RemovedRule {
-    /// 序号。
-    ordinal: i64,
+pub struct RemovedRule {
+    /// 序号。**放回去时原样用它**，不重新发号。
+    pub ordinal: i64,
     /// 原文。
-    text: String,
+    pub text: String,
     /// 人起的名字（没起过就是 `None`）。**撤销要把它原样放回去**——
     /// 丢了的话那条规则从此只剩现拼的短名，而人看见的是「名字没了」。
-    name: Option<String>,
-    /// 记下的时刻。
-    at: i64,
+    pub name: Option<String>,
+    /// 记下的时刻。**放回去时也原样**：那是它当初被加进来的时刻，不是撤销的时刻。
+    pub at: i64,
 }
 
 /// [`RemovedSublibrary`] 里的一条例外：`sublibrary_exception` 那几列。
@@ -878,6 +886,81 @@ impl Catalog {
         .map_err(to_err)?;
         tx.commit().map_err(to_err)?;
         Ok(ordinal)
+    }
+
+    /// **整条拿走一条规则**：读与删在同一个事务里，交回它那几列**逐列原样**。
+    ///
+    /// 界面上删一条规则之后提示条上那颗「撤销」靠的就是它
+    /// （票 `gui-looks-like-the-design/23` 验收第 7 条，与删掉整台子库那一套
+    /// [`Catalog::take_sublibrary`] 同一个形状）。
+    ///
+    /// **读与删必须同一个事务**：分开做的话，两处同时删同一条会各拿到一份，
+    /// 撤销两次就插回两条。
+    ///
+    /// 本来就不在就交回 `None`。
+    ///
+    /// # Errors
+    /// 读写库失败时返回错误。
+    pub fn take_rule(
+        &mut self,
+        name: &str,
+        ordinal: i64,
+    ) -> Result<Option<RemovedRule>, CatalogError> {
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        let 拿到的 = tx
+            .query_row(
+                "SELECT ordinal, text, name, at FROM sublibrary_rule
+                 WHERE sublibrary = ?1 AND ordinal = ?2",
+                params![name, ordinal],
+                |row| {
+                    Ok(RemovedRule {
+                        ordinal: row.get(0)?,
+                        text: row.get(1)?,
+                        name: row.get(2)?,
+                        at: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(to_err)?;
+        if 拿到的.is_some() {
+            tx.execute(
+                "DELETE FROM sublibrary_rule WHERE sublibrary = ?1 AND ordinal = ?2",
+                params![name, ordinal],
+            )
+            .map_err(to_err)?;
+        }
+        tx.commit().map_err(to_err)?;
+        Ok(拿到的)
+    }
+
+    /// 把 [`Catalog::take_rule`] 拿走的那一条**原样放回去**，交回「真放回去了吗」。
+    ///
+    /// ⚠️ **序号原样用，不重新发号**（`add_rule` 会）：那个号是命令行与报告上认的，
+    /// 换了号人照着上一份报告删「第 2 条」会删错。发号器 `next_rule` 也不动——
+    /// 这一条的号本来就发过了。
+    ///
+    /// **那个号又被别人占了就一行都不写，交回 `false`**（同
+    /// [`Catalog::restore_sublibrary`] 那一条）：撤销撤到一半又插进来一条，
+    /// 硬写会把人家那条顶掉。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn restore_rule(&mut self, name: &str, rule: &RemovedRule) -> Result<bool, CatalogError> {
+        let 写了 = self
+            .conn
+            .execute(
+                "INSERT OR IGNORE INTO sublibrary_rule(sublibrary, ordinal, text, name, at)
+                 VALUES(?1, ?2, ?3, ?4, ?5)",
+                params![name, rule.ordinal, rule.text, rule.name, rule.at],
+            )
+            .map_err(|source| self.err(source))?;
+        Ok(写了 > 0)
     }
 
     /// 删掉一条规则。返回它本来在不在。

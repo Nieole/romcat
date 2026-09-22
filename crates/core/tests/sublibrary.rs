@@ -1882,3 +1882,82 @@ fn 加进去之后会怎样_新增与重复各算得出_同一条规则拦得下
         "卡在手边，加入后该算得出来"
     );
 }
+
+/// **拿走一条规则、原样放回去**（票 `gui-looks-like-the-design/23` 验收第 7 条：
+/// 移除一条规则能撤销）。
+///
+/// 要钉的正题是**序号原样回去**：`ordinal` 是命令行与报告上认的那个号，
+/// 撤销之后换了号，人照着上一份报告删「第 2 条」删掉的会是另一条。
+/// 所以放回去走的不是 `add_rule`（那会重新发号）。
+#[test]
+fn 拿走一条规则再放回去_序号与名字都原样() {
+    let mut catalog = 现场();
+    建子库(&mut catalog, "掌机", None);
+    let 读通 = |text: &str| Rule::parse(text).expect("规则读得懂");
+    let 头一条 = catalog
+        .add_rule("掌机", &读通("平台=GB"), Some("随身那几个"))
+        .expect("写得进");
+    let 第二条 = catalog
+        .add_rule("掌机", &读通("平台=SFC"), None)
+        .expect("写得进");
+
+    // 一、拿走中间那一条，库里只剩另一条。
+    let 拿走的 = catalog
+        .take_rule("掌机", 头一条)
+        .expect("拿得动")
+        .expect("那一条在");
+    assert_eq!(拿走的.ordinal, 头一条);
+    assert_eq!(拿走的.text, "平台=GB");
+    assert_eq!(拿走的.name.as_deref(), Some("随身那几个"));
+    let 剩下的 = catalog.sublibrary_rules("掌机").expect("读得出");
+    assert_eq!(剩下的.len(), 1);
+    assert_eq!(剩下的[0].ordinal, 第二条);
+
+    // 二、**原样放回去**：序号、原文、名字、记下的时刻，四样都是原来那份。
+    assert!(catalog.restore_rule("掌机", &拿走的).expect("放得回"));
+    let 回来了 = catalog.sublibrary_rules("掌机").expect("读得出");
+    assert_eq!(回来了.len(), 2);
+    let 那一条 = 回来了
+        .iter()
+        .find(|一条| 一条.ordinal == 头一条)
+        .expect("序号原样回来了");
+    assert_eq!(那一条.text, "平台=GB");
+    assert_eq!(
+        那一条.name.as_deref(),
+        Some("随身那几个"),
+        "撤销之后名字没了的话，人看见的是「名字自己变了」"
+    );
+
+    // 三、**发号器没动**：下一条照旧接着发，不会跳号也不会撞号。
+    let 第三条 = catalog
+        .add_rule("掌机", &读通("平台=FC"), None)
+        .expect("写得进");
+    assert_eq!(第三条, 第二条 + 1, "撤销不该动发号器");
+
+    // 四、**那个号又被占了就一行都不写**：撤销撤到一半又插进来一条时，
+    // 硬写会把人家那条顶掉。
+    let 又拿走 = catalog
+        .take_rule("掌机", 第三条)
+        .expect("拿得动")
+        .expect("那一条在");
+    catalog.restore_rule("掌机", &又拿走).expect("头一次放得回");
+    // 拿刚放回去的那一份再放一次——它的号这会儿正被自己占着。
+    assert!(
+        !catalog.restore_rule("掌机", &又拿走).expect("不报错"),
+        "那个号已经被占了，该一行都不写"
+    );
+    let 最后 = catalog.sublibrary_rules("掌机").expect("读得出");
+    assert_eq!(最后.len(), 3, "顶不掉的那一下不该多出一条");
+    assert_eq!(
+        最后
+            .iter()
+            .find(|一条| 一条.ordinal == 第三条)
+            .expect("在")
+            .text,
+        "平台=FC",
+        "原来占着那个号的那一条不该被顶掉"
+    );
+
+    // 五、本来就不在的那一条：交回 `None`，不报错。
+    assert!(catalog.take_rule("掌机", 999).expect("不报错").is_none());
+}

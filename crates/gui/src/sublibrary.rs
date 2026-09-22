@@ -95,7 +95,7 @@ use romcat_core::capability::{
 };
 use romcat_core::catalog::CatalogError;
 use romcat_core::catalog::browse::{Scope, WorkAnchor, WorkQuery};
-use romcat_core::catalog::sublibrary::{RemovedSublibrary, Renamed};
+use romcat_core::catalog::sublibrary::{RemovedRule, RemovedSublibrary, Renamed};
 use romcat_core::filename::Rules;
 use romcat_core::report::{decimal_bytes, decimal_gigabytes, human_bytes, thousands};
 use romcat_core::scrape::Priorities;
@@ -387,10 +387,29 @@ struct StoredSelection {
 /// 删掉一台之后留着的那一份撤销：核心交回来的整份子库，与底边那条提示条。
 #[derive(Debug)]
 struct Undo {
-    /// 删之前整份留下来的那一份（[`Catalog::take_sublibrary`](romcat_core::catalog::Catalog::take_sublibrary)）。
-    removed: RemovedSublibrary,
-    /// 「已删除子库「…」，设备上的文件没有改动」，带一颗「撤销」。
+    /// 撤销要放回去的是什么。
+    what: Undoable,
+    /// 那一句提示，带一颗「撤销」。
     toast: Toast,
+}
+
+#[derive(Debug)]
+/// **撤销撤得回来的那两样**：删掉的一台子库，或者删掉的一条规则。
+///
+/// 两样共用一条提示条与一颗「撤销」（`Undo` 只留**一份**：再删一下，上一份就丢了
+/// ——与删子库那一套同一条规矩）。
+enum Undoable {
+    /// 删之前整份留下来的那一台（[`Catalog::take_sublibrary`](romcat_core::catalog::Catalog::take_sublibrary)）。
+    Sublibrary(Box<RemovedSublibrary>),
+    /// 删之前整条留下来的那一条规则（票 `gui-looks-like-the-design/23` 验收第 7 条）。
+    ///
+    /// **序号一起留着**：放回去时原样用它，不重新发号——那个号是命令行与报告上认的。
+    Rule {
+        /// 哪一台的。
+        sublibrary: String,
+        /// 那一条，逐列原样。
+        rule: Box<RemovedRule>,
+    },
 }
 
 /// 「**手动例外**」那层弹层开着时手上的那点东西（设计稿 `DLG.excl`）。
@@ -800,10 +819,15 @@ impl Screen {
         self.undo = None;
     }
 
-    /// 眼下还撤销得了的那一台叫什么（提示条还摆着）；没有就是 `None`。
+    /// 眼下还撤销得了的是哪一台（提示条还摆着）；没有就是 `None`。
+    ///
+    /// 删掉一条**规则**那一档交回的是那条规则所在的子库名——两档撤销共用一条提示条。
     #[must_use]
     pub fn undo_pending(&self) -> Option<&str> {
-        self.undo.as_ref().map(|undo| undo.removed.name())
+        self.undo.as_ref().map(|undo| match &undo.what {
+            Undoable::Sublibrary(removed) => removed.name(),
+            Undoable::Rule { sublibrary, .. } => sublibrary.as_str(),
+        })
     }
 
     /// 库里现有的子库。
@@ -3991,7 +4015,7 @@ impl Screen {
                 self.undo = Some(Undo {
                     toast: Toast::new(format!("已删除子库「{name}」，设备上的文件没有改动"))
                         .action("撤销"),
-                    removed,
+                    what: Undoable::Sublibrary(Box::new(removed)),
                 });
                 self.invalidate();
                 self.reload(site);
@@ -4009,20 +4033,43 @@ impl Screen {
         let Some(undo) = self.undo.take() else {
             return;
         };
-        let name = undo.removed.name().to_string();
-        match site.catalog.restore_sublibrary(&undo.removed) {
-            Ok(true) => {
-                self.notice = None;
-                self.reload(site);
+        match undo.what {
+            Undoable::Sublibrary(removed) => {
+                let name = removed.name().to_string();
+                match site.catalog.restore_sublibrary(&removed) {
+                    Ok(true) => {
+                        self.notice = None;
+                        self.reload(site);
+                    }
+                    // 删完之后又建了一个同名的：核心一行都没写，两份不揉在一起。
+                    Ok(false) => {
+                        self.error = Some(format!(
+                            "放不回去：这会儿已经又有一个叫「{name}」的子库了。\
+                             两份揉在一起谁的清单都说不清，所以一行都没写。"
+                        ));
+                    }
+                    Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+                }
             }
-            // 删完之后又建了一个同名的：核心一行都没写，两份不揉在一起。
-            Ok(false) => {
-                self.error = Some(format!(
-                    "放不回去：这会儿已经又有一个叫「{name}」的子库了。\
-                     两份揉在一起谁的清单都说不清，所以一行都没写。"
-                ));
+            Undoable::Rule { sublibrary, rule } => {
+                let ordinal = rule.ordinal;
+                match site.catalog.restore_rule(&sublibrary, &rule) {
+                    Ok(true) => {
+                        self.notice = None;
+                        // 规则一变，选中的那批就变了：算过的容量与排过的差量都作废。
+                        self.forget(site, &sublibrary);
+                        self.reload(site);
+                    }
+                    // 撤销撤到一半又插进来一条，占了同一个号：核心一行都没写。
+                    Ok(false) => {
+                        self.error = Some(format!(
+                            "放不回去：「{sublibrary}」的第 {ordinal} 条这会儿已经被另一条占着了。\
+                             硬写会把那一条顶掉，所以一行都没写。"
+                        ));
+                    }
+                    Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+                }
             }
-            Err(error) => self.error = Some(format!("中立库写不动：{error}")),
         }
     }
 
@@ -4135,15 +4182,30 @@ impl Screen {
     /// **设备上的文件与主库一个字节都不动。** 界面上按那颗按钮走的就是它，实测与测试拿它当那一下。
     pub fn remove_rule(&mut self, site: &mut Site, name: &str, ordinal: i64) {
         self.rule_dialog = None;
-        match site.catalog.remove_rule(name, ordinal) {
-            Ok(true) => {
+        // **整条拿走、留一份在手上**（票 `23` 验收第 7 条）：与删掉整台子库那一套
+        // 同一个形状（`take_sublibrary` / `restore_sublibrary`）。
+        // 走 `take_rule` 不走 `remove_rule`，因为撤销要把**那个序号**原样放回去
+        // ——它是命令行与报告上认的那个号。
+        match site.catalog.take_rule(name, ordinal) {
+            Ok(Some(rule)) => {
                 self.forget(site, name);
-                self.notice = Some(format!(
-                    "从子库「{name}」移除了第 {ordinal} 条规则。选中的变体跟着变了：\
-                     容量要重算，差量预览要重新生成。"
-                ));
+                let 叫什么 = rule.name.clone().unwrap_or_else(|| {
+                    romcat_core::sublibrary::Rule::parse(&rule.text)
+                        .map_or_else(|_| rule.text.clone(), |读通的| 读通的.label())
+                });
+                self.notice = None;
+                self.undo = Some(Undo {
+                    toast: Toast::new(format!(
+                        "已从「{name}」移除第 {ordinal} 条规则「{叫什么}」，设备上的文件没有改动"
+                    ))
+                    .action("撤销"),
+                    what: Undoable::Rule {
+                        sublibrary: name.to_string(),
+                        rule: Box::new(rule),
+                    },
+                });
             }
-            Ok(false) => self.notice = Some("那一条规则已经不在了。".to_string()),
+            Ok(None) => self.notice = Some("那一条规则已经不在了。".to_string()),
             Err(error) => self.error = Some(format!("中立库写不动：{error}")),
         }
     }
@@ -4591,13 +4653,16 @@ impl Screen {
                     look::note_box(ui, |ui| {
                         ui.label(
                             egui::RichText::new(match tab {
-                                // **这一栏这一版不照稿**（票面 F3）：稿上写的是「在浏览中勾选作品，
-                                // 『加入子库…』时选『只加入勾选的作品』」，而那层对话框是票 23、眼下
-                                // 还不存在——照稿写等于在空态上指一条按不着的路，而空态的全部价值
-                                // 就是告诉人下一步去哪儿。票 23 落地后换回稿上那句。
+                                // **这一栏换回稿上那句了**（票 `gui-looks-like-the-design/23`）。
+                                //
+                                // 票 22 那一版特意不照稿：稿上指的是「在浏览中勾选作品，
+                                // 『加入子库…』时选『只加入勾选的作品』」，而那层弹层当时还不存在
+                                // ——照稿写等于在空态上指一条按不着的路，**而空态的全部价值就是
+                                // 告诉人下一步去哪儿**。那一层这一票做出来了（表格上方那一条最右
+                                // 那颗「加入子库…」，加入方式第二档就是它），所以这条路按得着了。
                                 Exception::Include => {
-                                    "还没有手动包含的作品。在下面搜作品直接添加；\
-                                     也可以在浏览屏的详情面板里对着某一份按「包含它」。"
+                                    "还没有手动包含的作品。在浏览中勾选作品，\
+                                     「加入子库…」时选「只加入勾选的作品」；或在下面搜索添加。"
                                 }
                                 // 这一栏**逐字照稿**：它指的两条路眼下都有。
                                 Exception::Exclude => {
