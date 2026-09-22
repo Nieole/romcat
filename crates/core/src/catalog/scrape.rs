@@ -521,6 +521,62 @@ impl Catalog {
             .map_err(|source| self.err(source))
     }
 
+    /// **某几个源**落下的全部字段值，连它们落在哪个锚点上：`(锚点种类, 锚点, 值)`。
+    ///
+    /// **一趟读回来**，不逐个锚点问：全库扫一遍「哪些作品撞上了同一条中文条目」
+    /// （[`scrape::zh::entry_marks`](crate::scrape::zh::entry_marks)）要的正是这个形状，
+    /// 而真库上作品九千多个、变体四万多个，一个锚点问一次是几万次查库。
+    ///
+    /// **依据带着回来**，与 [`Self::for_each_scraped_value`] 不同：那一条是给导出用的，
+    /// 依据在那一侧用不上；这一条的调用方要从依据里认条目号。
+    ///
+    /// 认不出的锚点种类（库被人改过）整条略过——多认一种出来，调用方那一侧得替一个
+    /// 不存在的层级想一套说法。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn scraped_values_of_sources(
+        &self,
+        sources: &[&str],
+    ) -> Result<Vec<(AnchorKind, String, ScrapedValue)>, CatalogError> {
+        let mut out = Vec::new();
+        if sources.is_empty() {
+            return Ok(out);
+        }
+        let sql = format!(
+            "SELECT anchor, subject, field, source, value, evidence, at FROM scrape_value
+              WHERE source IN ({}) ORDER BY anchor, subject, field, source, value",
+            crate::catalog::placeholders(sources.len()),
+        );
+        let mut statement = self.conn.prepare(&sql).map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(sources.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    ScrapedValue {
+                        field: row.get(2)?,
+                        source: row.get(3)?,
+                        value: row.get(4)?,
+                        evidence: row.get(5)?,
+                        at: row.get(6)?,
+                    },
+                ))
+            })
+            .map_err(|source| self.err(source))?;
+        for row in rows {
+            let (anchor, subject, value) = row.map_err(|source| self.err(source))?;
+            let Some(kind) = [AnchorKind::Work, AnchorKind::Variant]
+                .into_iter()
+                .find(|kind| kind.label() == anchor)
+            else {
+                continue;
+            };
+            out.push((kind, subject, value));
+        }
+        Ok(out)
+    }
+
     /// 一个锚点上的全部媒体引用。
     ///
     /// # Errors

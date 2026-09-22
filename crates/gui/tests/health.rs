@@ -251,7 +251,7 @@ fn 扫过之后八格的数照核心库的报告画_疑似同一作品在识别�
     );
     assert_eq!(那一格(&屏上, "附属文件落单").0, "1 个");
     assert_eq!(那一格(&屏上, "非游戏资产").0, "1 个");
-    // 疑似同一作品的判断在票 17，这之前界面不许自己算一个（验收第 6 条）；识别还没跑，照票写。
+    // 疑似同一作品那一格的数由核心库交（票 17 的 `same_work::survey_apart`）；识别还没跑，照票写。
     assert_eq!(
         那一格(&屏上, "疑似同一作品"),
         ("—".to_string(), "识别完成后才有".to_string())
@@ -561,9 +561,9 @@ fn 明细导出成清单_重复拷贝与命令行同一份字节_其余几格是
 }
 
 #[test]
-fn 点疑似同一作品那一格_不跳屏也不开明细_只在屏上说一句_识别跑完之后那一格与那一句都改说实话() {
-    // 拿主意的人 2026-09-15 答岔路口 9：识别没跑完照票写「识别完成后才有」，跑完改一句实话；点进去不跳屏，只在屏上说一句
-    // （跳到浏览屏「整理建议」由票 17 接上，挂单 `Q957`）。界面里不许自己算一个数（验收第 6 条）。
+fn 疑似同一作品那一格的数照核心库画_点进去落到浏览屏的整理建议上() {
+    // 票 17 收挂单 `Q957`：那一格的数是核心库交的（`same_work::survey_apart`），点进去落到
+    // 浏览屏「整理建议」那一簇上。**界面里不许自己算一个数**（票 27 验收第 6 条）。
     let ctx = headless::context();
     let 盘 = 有体检发现的盘();
     let mut 现场 = 现场::摆好();
@@ -571,12 +571,9 @@ fn 点疑似同一作品那一格_不跳屏也不开明细_只在屏上说一句
     现场.扫("主库");
     滚到底(&ctx, |ui| 现场.app.ui(ui));
 
+    // 识别还没跑：那一格画「—」，点进去不跳屏，只在八格底下说一句。
     let 屏上 = 点一下(&ctx, "疑似同一作品", |ui| 现场.app.ui(ui));
-    assert_eq!(
-        现场.app.view(),
-        View::Library,
-        "点了疑似同一作品那一格跳走了"
-    );
+    assert_eq!(现场.app.view(), View::Library, "识别还没跑就跳走了");
     assert!(
         !屏上.contains("库体检 · 疑似同一作品"),
         "疑似同一作品那一格不开明细弹层：\n{屏上}"
@@ -586,6 +583,17 @@ fn 点疑似同一作品那一格_不跳屏也不开明细_只在屏上说一句
         "点了疑似同一作品那一格，屏上没说一句：\n{屏上}"
     );
 
+    // **识别没做完，体检跑过一趟也照旧画「—」**（设计稿 `renderHealth` 最后那一行是一条
+    // 后置的覆盖，压在算出来的数上头）：那时库里的作品还没立全，算出来的数明天就不是这个数。
+    点一下(&ctx, "重新体检", |ui| 现场.app.ui(ui));
+    现场.等台上空了();
+    let 屏上 = 滚到底(&ctx, |ui| 现场.app.ui(ui));
+    assert_eq!(
+        那一格(&屏上, "疑似同一作品"),
+        ("—".to_string(), "识别完成后才有".to_string()),
+        "识别没做完，体检跑过一趟就把数画出来了"
+    );
+
     // 识别跑完：弹药空着也跑得完（识别认不出什么不要紧，要的是那一道做完了）。
     drop(
         romcat_core::dat::DatRepo::open(&romcat_core::workspace::dat_repo_path(现场.工作区.path()))
@@ -593,17 +601,120 @@ fn 点疑似同一作品那一格_不跳屏也不开明细_只在屏上说一句
     );
     现场.app.start_stage(romcat_core::stage::Stage::Identify);
     现场.等台上空了();
+
+    // **零那一档另有一句**（稿上八格里只有这一格给零态写了话）。
+    点一下(&ctx, "重新体检", |ui| 现场.app.ui(ui));
+    现场.等台上空了();
     let 屏上 = 滚到底(&ctx, |ui| 现场.app.ui(ui));
     assert_eq!(
         那一格(&屏上, "疑似同一作品"),
-        ("—".to_string(), "暂时还给不出这一项".to_string()),
-        "识别跑完之后那一格还说识别完成后才有"
+        ("0 组".to_string(), "没有待处理的建议".to_string()),
+        "一条建议都没有时那一格该另说一句"
     );
     let 屏上 = 点一下(&ctx, "疑似同一作品", |ui| 现场.app.ui(ui));
+    assert_eq!(现场.app.view(), View::Library, "一条建议都没有却跳走了");
     assert!(
-        屏上.contains("暂时还给不出疑似同一作品的建议"),
-        "识别跑完之后点那一格，屏上没改说实话：\n{屏上}"
+        屏上.contains("没有疑似同一作品的建议。"),
+        "一条都没有时点那一格，屏上没说一句：\n{屏上}"
     );
+
+    // **手摆一对疑似同一作品**：这份小盘上识别撞不出作品来（没有 DAT），而这一格要看的是
+    // 「核心库说有几组，那一格就画几组」。两个作品同在 GB 上、同一年，两边的名字在
+    // 中文离线源里指向同一条条目——判据一条都不在界面里（ADR-0024）。
+    摆一对疑似同一作品(&mut 现场);
+
+    // 「重新体检」那一趟算它：那一格画出组数，小字照设计稿。
+    点一下(&ctx, "重新体检", |ui| 现场.app.ui(ui));
+    现场.等台上空了();
+    let 屏上 = 滚到底(&ctx, |ui| 现场.app.ui(ui));
+    assert_eq!(
+        那一格(&屏上, "疑似同一作品"),
+        ("1 组".to_string(), "可以合并为一个作品".to_string()),
+        "重新体检之后那一格没照核心库画：\n{屏上}"
+    );
+
+    // 点进去：落到浏览屏「整理建议」那一簇上（挂单 `Q957`）。
+    let 屏上 = 点一下(&ctx, "疑似同一作品", |ui| 现场.app.ui(ui));
+    assert_eq!(现场.app.view(), View::Browse, "点了那一格没跳到浏览屏");
+    assert!(
+        屏上.contains("整理建议"),
+        "跳过去之后左栏没有整理建议那一簇：\n{屏上}"
+    );
+    // 那颗标签的名字与条数是两段字（`look::facet_chip` 分开画），各查各的。
+    assert!(
+        屏上.contains("疑似同一作品") && 屏上.contains("1 组"),
+        "跳过去之后那颗标签上没写组数：\n{屏上}"
+    );
+}
+
+/// 往现场那份中立库里手摆一对**疑似同一作品**：两个作品各一个变体，同在 GB 上、同一年，
+/// 两边的名字在**中文离线源**里指向同一条条目。
+fn 摆一对疑似同一作品(现场: &mut 现场) {
+    use romcat_core::catalog::State;
+    use romcat_core::catalog::identify::{Identification, Provenance};
+    use romcat_core::catalog::scrape::{Harvested, HarvestedValue};
+    use romcat_core::scrape::{AnchorKind, Field};
+
+    let (_, site) = 现场.app.browse_and_site();
+    let 变体们: Vec<String> = site
+        .catalog
+        .variants()
+        .expect("读得动")
+        .into_iter()
+        .map(|row| row.key)
+        .take(2)
+        .collect();
+    assert_eq!(变体们.len(), 2, "这份小盘上该有两个以上变体");
+    let mut 结论 = Vec::new();
+    for (at, (名字, 叫作)) in [
+        ("Pocket Monsters - Aka (Japan)", "精灵宝可梦 红"),
+        ("Pocket Monster - Red Version (Japan)", "口袋妖怪 红"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let work = site
+            .catalog
+            .add_work(名字, Provenance::Identified)
+            .expect("建得出作品");
+        结论.push(Identification {
+            variant_key: 变体们[at].clone(),
+            state: State::Matched,
+            reason: None,
+            platform: Some("GB".to_string()),
+            standalone: None,
+            edition: None,
+            units: 1,
+            nkit: 0,
+            read_bytes: 0,
+            work_id: Some(work),
+            release_id: None,
+            candidates: Vec::new(),
+        });
+        site.catalog
+            .put_verdict_value(AnchorKind::Work, 名字, Field::Year, "1996", "夹具")
+            .expect("写得进年份");
+        site.catalog
+            .put_scraped(&[Harvested {
+                anchor: AnchorKind::Variant.label().to_string(),
+                subject: 变体们[at].clone(),
+                source: "中文离线源".to_string(),
+                input: "夹具".to_string(),
+                values: vec![HarvestedValue {
+                    field: Field::Title.label().to_string(),
+                    value: 叫作.to_string(),
+                    evidence: format!(
+                        "「{叫作}」撞上了中文离线源{}4312：名字一字不差",
+                        romcat_core::zh::ENTRY_MARK
+                    ),
+                }],
+                media: Vec::new(),
+            }])
+            .expect("写得进刮削值");
+    }
+    site.catalog
+        .write_identifications(&结论)
+        .expect("写得进识别结论");
 }
 
 /// 一块摆着**十二份落单存档**的盘：`GBA/汉化/落单NN.sav`，同目录里一份主文件都没有。扫描那一趟每类只留十个样例。

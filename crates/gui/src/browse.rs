@@ -94,6 +94,7 @@ use romcat_core::sublibrary::{
 };
 use romcat_core::task::{Cutoff, Ending, Finished};
 use romcat_core::title::{self, Language, TitleKind};
+use romcat_core::triage::same_work::{self, Suspicion};
 use romcat_core::verdict::TitleSuppression;
 
 use crate::filter::Filter;
@@ -109,6 +110,7 @@ use crate::tokens::Tokens;
 
 pub mod menu;
 pub mod merge;
+pub mod suspicion;
 pub mod work;
 
 /// 搜索框那个认得出的 id：`⌘/Ctrl+F` 要把光标放进去，得先叫得出它的名字。
@@ -119,6 +121,19 @@ fn 搜索框() -> egui::Id {
 /// 侧边详情变体卡片上**首选变体**那一枚标签上的字（词表**首选变体**条）。哪一个是首选由核心库答
 /// （[`VariantDetail::preferred_now`]），这里只是屏上怎么写。
 const PREFERRED_TAG: &str = "首选变体";
+
+/// 左栏那两簇**只用于浏览**的分面底下那句说明：**识别结论**与**整理建议**。
+///
+/// ⚠️ **稿上只有「识别结论」那一簇带这句 `.help`**（`prototype.html:1101`）；
+/// 「整理建议」那一簇稿上只有标题与那颗标签，**没有这一句**（`:1113`–`:1116`，
+/// 合 main 之后逐行复核过）。给它也写上一句是票 12 验收第 3 条点名要的
+/// （「只用于浏览的分面（识别结论、整理建议）不写进规则，**屏上说明**」），
+/// 挂单 `Q1130`。
+///
+/// **一句话只有一处**：两簇各写一份的话，改了一处屏上就同时摆着两种说法。
+/// 它们不写进子库的规则这件事由核心库那一侧答（`WorkQuery::to_rule` 的
+/// `Unruly::State` 与 `Unruly::Suspected`），这里只是屏上怎么写。
+pub const BROWSE_ONLY: &str = "只用于浏览，不写入规则";
 
 /// 浏览屏两种不改变集合的呈现方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -417,6 +432,20 @@ pub struct Screen {
     /// 「不改了」、或者直接从顶栏切回子库屏——那两条路上没有「更新到子库」，
     /// 只认 `returned` 的话，子库屏会摆着一份按旧选择集排出来的差量，而「同步」认的正是它。
     touched: Option<String>,
+    /// **疑似同一作品**那几条建议，核心库交回来的那一份（票 `gui-looks-like-the-design/17`）。
+    ///
+    /// **缓着而不是每帧现扫**：那一趟要走一遍全库变体表、一遍全库标题集合
+    /// （`same_work::survey` 的文档），而这一屏画在画帧那条线程上。库底下变了就整份重扫
+    /// （[`Screen::reload`]，与左栏那几档分面同一处）。**一个数都不在这一层算**
+    /// （ADR-0005、ADR-0024）：左栏那颗标签上的「N 组」数的就是它。
+    suspicions: Vec<Suspicion>,
+    /// 那几条建议牵着的作品，**屏上那个名字**：作品名 → 显示标题。
+    ///
+    /// 建议里带的是**作品名**（那是库里的锚点），而屏上主列表、详情面板印的一律是
+    /// **显示标题**（`title::choose` 挑的那一个）。卡片上照作品名写的话，屏上同一部作品
+    /// 会有两个名字——表里写「精灵宝可梦 红」、卡片上写「Pocket Monsters - Aka (Japan)」。
+    /// 挑的那一处与主列表同一个（`title::choose`，ADR-0024），这里只是拿它多问几个作品。
+    suspicion_titles: BTreeMap<String, String>,
     /// **合并作品向导**开着时是 `Some`（票 `gui-looks-like-the-design/16`）。
     merging: Option<merge::Wizard>,
     /// **移出此作品**那一层开着时是 `Some`。它从作品详情页某一张变体卡上开。
@@ -614,6 +643,8 @@ impl Screen {
             suppressed_for: None,
             collecting: None,
             title_draft: TitleDraft::default(),
+            suspicions: Vec::new(),
+            suspicion_titles: BTreeMap::new(),
             notice: None,
             lift_notice: None,
             toast: None,
@@ -916,6 +947,145 @@ impl Screen {
     /// 重问一次筛选面板上的可选值。开库时与改过元数据之后各一次。
     pub fn reload(&mut self, site: &Site) {
         self.reload_facets(&site.catalog);
+        // **疑似同一作品那一份也在这儿重取**（票 `gui-looks-like-the-design/17`）：
+        // 它与左栏那几档分面同一个处境——库底下一变，缓着的那一份就过期了。
+        self.reload_suspicions(site);
+    }
+
+    /// 重扫一趟**疑似同一作品**，并把「整理建议」那颗标签筛着的名单跟着换一份。
+    ///
+    /// **判断一个字都不在这儿**（ADR-0024）：哪两个作品疑似是同一个、人说过哪一对不是
+    /// 同一个，全由核心库那一处答（`same_work::survey`）。
+    ///
+    /// **筛着的名单要跟着换**：合掉一对之后那两个作品并成了一个，名单不换的话，
+    /// 屏上那颗标签写着新的组数，表里却还按旧名单摆着行——两个数当场对不上
+    /// （票面验收第 4 条）。
+    ///
+    /// 读不动时只记下那句错、不每帧重试，与 [`Self::reload_facets`] 一样。
+    fn reload_suspicions(&mut self, site: &Site) {
+        match same_work::survey(&site.catalog, &site.store, &site.library_identity) {
+            Ok(found) => {
+                self.suspicions = found;
+                self.suspicion_titles = self.shown_names(&site.catalog);
+                if self.query.suspected.is_some() {
+                    self.query.suspected = Some(self.suspected_works());
+                }
+            }
+            Err(error) => self.error = Some(format!("疑似同一作品扫不动：{error}")),
+        }
+    }
+
+    /// 那几条建议牵着的作品，**屏上那个名字**（[`Screen::suspicion_titles`]）。
+    ///
+    /// 挑显示标题走的是主列表那一处（[`title::choose`]），只是喂给它的是这几个作品的
+    /// 标题集合；挑出来与作品名一样的不进表——卡片上照作品名写就是了。
+    fn shown_names(&self, catalog: &Catalog) -> BTreeMap<String, String> {
+        let names = self.suspected_works();
+        let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+        // **读不动就退回作品名**：卡上那个名字会与表里那一行写的不一样（那正是这一格
+        // 要防的事），可那也只是难看；扫出来的建议本身照旧摆得出来，理由也照旧列得出。
+        // 真正的那句错由 [`Self::reload_suspicions`] 说——它与这一趟是同一下。
+        let Ok(sets) = catalog.titles_of_works(&borrowed) else {
+            return BTreeMap::new();
+        };
+        let mut out = BTreeMap::new();
+        for (work, entries) in sets {
+            let chosen = title::choose(
+                &title::TitleSet {
+                    work: work.clone(),
+                    entries,
+                },
+                &self.priorities,
+            );
+            if chosen.display != work {
+                out.insert(work, chosen.display);
+            }
+        }
+        out
+    }
+
+    /// **只看疑似同一作品那几对**：库体检里点了那一格跳过来时，把左栏「整理建议」那颗
+    /// 标签按下去（挂单 `Q957`，设计稿点那一格之后那两句 toast）。
+    ///
+    /// 先重扫一趟再筛：库屏那份建议是**体检那一趟**算的，跟屏上这一份不是同一次
+    /// （ADR-0024 推论 3：缓存可以有好几份），跳过来时按这一屏自己刚算的那一份筛，
+    /// 屏上那颗标签写的数与表里摆的行才对得上。
+    pub fn show_suspicions(&mut self, site: &Site) {
+        self.reload_suspicions(site);
+        self.query.suspected = Some(self.suspected_works());
+        self.window.invalidate();
+        self.notice = Some(crate::health::SAME_WORK_JUMPED.to_string());
+    }
+
+    /// 那几条建议一共牵着哪几个作品（去重、排过序）：「整理建议」那颗标签筛的就是它们。
+    fn suspected_works(&self) -> Vec<String> {
+        let mut out: BTreeMap<&str, ()> = BTreeMap::new();
+        for one in &self.suspicions {
+            for work in &one.works {
+                out.insert(work.as_str(), ());
+            }
+        }
+        out.into_keys().map(str::to_string).collect()
+    }
+
+    /// 人按了建议卡上那两颗之一。
+    ///
+    /// **「合并…」**开合并向导（那一层自己走三步、落一批裁决）；**「不是同一个」**
+    /// 记进沉淀库那一张表，随后整份重扫——那一对当场从屏上消失。
+    pub(super) fn do_suspicion(&mut self, site: &mut Site, deed: &suspicion::Deed) {
+        match deed {
+            suspicion::Deed::Merge(works) => {
+                let mut anchors: Vec<WorkAnchor> = Vec::new();
+                for name in works {
+                    match site.catalog.work_named(name) {
+                        Ok(Some(id)) => anchors.push(WorkAnchor::Work(id)),
+                        // **缓着的那份建议过期了**：那个作品已经被并掉、或者库重扫过了。
+                        // 不复用屏头那颗「合并作品…」的那句（人刚在一张卡上按了一颗，
+                        // 根本没有「勾选」这回事）——说实话，并就地重取一份建议。
+                        Ok(None) => {
+                            self.notice = Some(format!(
+                                "《{name}》已经不在库里了，这条建议过期了——已经重取了一份。"
+                            ));
+                            self.reload_suspicions(site);
+                            return;
+                        }
+                        // **不静默**：读不动就说读不动。
+                        Err(error) => {
+                            self.notice = Some(format!("中立库读不动：{error}"));
+                            return;
+                        }
+                    }
+                }
+                // **不带当前筛选**：向导第二步要核对的是这两个作品**全部**的变体，
+                // 而「整理建议」那颗标签正筛着这一对——照筛过的展开会少列几个
+                // （`Wizard::open` 收的那份查询就是用来展变体的）。
+                let query = WorkQuery {
+                    non_game_assets: self.query.non_game_assets,
+                    ..WorkQuery::default()
+                };
+                self.merging = Some(merge::Wizard::open(
+                    &site.catalog,
+                    &query,
+                    &self.rules,
+                    &self.priorities,
+                    &anchors,
+                ));
+            }
+            suspicion::Deed::NotSame(works) => {
+                match same_work::not_same(
+                    &mut site.store,
+                    &site.library_identity,
+                    &works[0],
+                    &works[1],
+                ) {
+                    Ok(()) => {
+                        self.notice = Some(suspicion::NOT_SAME_SAID.to_string());
+                        self.reload_suspicions(site);
+                    }
+                    Err(error) => self.notice = Some(format!("沉淀库写不动：{error}")),
+                }
+            }
+        }
     }
 
     /// 照眼下那颗「显示非游戏资产」开关，重问一次左栏那几档各有哪些值、各多少个。
@@ -3284,7 +3454,7 @@ impl Screen {
                 facet_chips(ui, "中文", &self.facets.chinese, &mut self.query.chinese);
 
                 pane_gap(ui);
-                section_title(ui, "识别结论", Some("只用于浏览，不写入规则"));
+                section_title(ui, "识别结论", Some(BROWSE_ONLY));
                 section_gap(ui);
                 let mut state = self.query.state;
                 chip_cluster(ui, |ui| {
@@ -3310,6 +3480,27 @@ impl Screen {
                     &self.facets.collections,
                     &mut self.query.collection,
                 );
+
+                pane_gap(ui);
+                // **整理建议**（设计稿 `#dup-chip` 那一簇）：一颗标签，数的是核心库交回来的
+                // 那几条建议（`same_work::survey`）——界面一个数都不自己算（ADR-0024）。
+                // 它与「识别结论」同一个处境：**只用于浏览，不写进规则**。
+                section_title(ui, suspicion::SECTION, Some(BROWSE_ONLY));
+                section_gap(ui);
+                let 建议数 = self.suspicions.len();
+                let mut 只看建议 = self.query.suspected.is_some();
+                chip_cluster(ui, |ui| {
+                    if look::facet_chip(ui, 只看建议, suspicion::FACET, &suspicion::groups(建议数))
+                        .on_hover_text(
+                            "只看核心库认为可能是同一个作品的那几对。\n\
+                         可以直接合并，也可以标记为不是同一个。",
+                        )
+                        .clicked()
+                    {
+                        只看建议 = !只看建议;
+                    }
+                });
+                self.query.suspected = 只看建议.then(|| self.suspected_works());
 
                 pane_gap(ui);
                 section_title(ui, "条件组", Some("存成子库时就是规则")).on_hover_text(
@@ -3802,6 +3993,8 @@ impl Screen {
         // 先抄一份出来画，画完有改动再写回去。平常浏览时一样都不摆，也不留空位。
         let mut 备注 = self.editing.as_ref().map(|editing| editing.note.clone());
         let mut 例外: Option<Option<Exception>> = None;
+        // 建议卡上按了哪一颗；攒在外头，出了这个闭包再去办（同上面那几样）。
+        let mut 建议: Option<suspicion::Deed> = None;
         let this = &*self;
         let Some(work) = this.work.as_ref() else {
             return;
@@ -3817,6 +4010,15 @@ impl Screen {
                 // 头上那一块底下一排两颗小号按钮（设计稿 `.dhead` 后头那一排）：打开作品详情页，停在概览或元数据那一面。
                 pane_gap(ui);
                 去详情页 = page_buttons(ui);
+                // **疑似同一作品那张建议卡**照稿摆在这两颗按钮底下（设计稿 `#detail` 里的
+                // `suggHTML(S.sel)`）。认不出作品的那一行没有作品名，也就不参与合并。
+                if !matches!(work.anchor, WorkAnchor::Loose(_))
+                    && suspicion::any_for(&this.suspicions, &work.name)
+                {
+                    pane_gap(ui);
+                    建议 =
+                        suspicion::cards(ui, &this.suspicions, &work.name, &this.suspicion_titles);
+                }
                 // 认不出作品的那一行：名字是怎么来的——没有作品链接**本身就是一条信息**（照稿摆在两颗按钮底下）。
                 if matches!(work.anchor, WorkAnchor::Loose(_)) {
                     pane_gap(ui);
@@ -3874,6 +4076,9 @@ impl Screen {
         }
         if let Some(key) = pick {
             self.pick(&site.catalog, &key);
+        }
+        if let Some(deed) = 建议 {
+            self.do_suspicion(site, &deed);
         }
         if let Some((tab, 编辑)) = 去详情页 {
             self.open_page(tab);

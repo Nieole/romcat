@@ -41,6 +41,7 @@ use romcat_core::sync;
 use romcat_core::task::{Ending, Handle};
 use romcat_core::title;
 use romcat_core::titledb;
+use romcat_core::triage::same_work;
 use romcat_core::triage::{self, Filter, Shape};
 use romcat_core::verdict::{self, Store};
 use romcat_core::workspace::{self, Slug};
@@ -1090,6 +1091,7 @@ fn main() -> ExitCode {
         Command::Triage(TriageCommand::Batches(args)) => run_triage_batches(&args),
         Command::Triage(TriageCommand::Undo(args)) => run_triage_undo(&args),
         Command::Triage(TriageCommand::Redo(args)) => run_triage_redo(&args),
+        Command::Triage(TriageCommand::SameWork(args)) => run_triage_same_work(&args),
         Command::Triage(TriageCommand::Export(args)) => run_triage_export(&args),
         Command::Triage(TriageCommand::Import(args)) => run_triage_import(&args),
         Command::Sublibrary(SublibraryCommand::Set(args)) => run_sublibrary_set(&args),
@@ -2983,6 +2985,8 @@ enum TriageCommand {
     Undo(TriageUndoArgs),
     /// 把撤掉的那一**批**原样放回去。撤销本身撤得回来
     Redo(TriageRedoArgs),
+    /// **疑似同一作品**：哪两个作品其实是同一个，连理由；也在这里说「不是同一个」
+    SameWork(TriageSameWorkArgs),
     /// 把沉淀库导出成可分享的一份 JSON——这份数据补的正是 TOSEC 缺的中文汉化部分
     Export(TriageExportArgs),
     /// 收下别人分享的一份裁决
@@ -3227,6 +3231,18 @@ struct TriageBatchesArgs {
     /// 列几批（新的在前）
     #[arg(long, value_name = "批数", default_value_t = 20)]
     limit: usize,
+}
+
+#[derive(Debug, Args)]
+struct TriageSameWorkArgs {
+    #[command(flatten)]
+    common: TriageCommonArgs,
+    /// **不是同一个**：记下这两个作品不是同一个，以后不再提这一对
+    #[arg(long, value_names = ["作品", "另一个作品"], num_args = 2)]
+    not_same: Vec<String>,
+    /// 与 `--not-same` 一起给：**撤掉**那一条，这一对回到「还没看过」
+    #[arg(long, requires = "not_same")]
+    undo: bool,
 }
 
 #[derive(Debug, Args)]
@@ -3896,6 +3912,82 @@ fn run_triage_batches(args: &TriageBatchesArgs) -> ExitCode {
     println!(
         "\n撤掉一批：`romcat triage undo --batch <编号>{}`——中立库与沉淀库两边\n\
          都回到那一批落下之前，不必重跑识别。放回去用 `romcat triage redo --batch <编号>`。",
+        args.common.选择器(),
+    );
+    ExitCode::SUCCESS
+}
+
+/// `romcat triage same-work`：列出**疑似同一作品**的那几对，连每一对的理由；
+/// 给了 `--not-same` 就记一条（或者加 `--undo` 撤掉它）。
+///
+/// **判断一个字都不在这儿**（ADR-0024）：哪两个作品疑似是同一个、凭什么、
+/// 那几句理由逐字怎么写，全问核心库那一处（`triage::same_work`）——界面上
+/// 「整理建议」那一簇读的是同一处，两边说的是同一句话。
+fn run_triage_same_work(args: &TriageSameWorkArgs) -> ExitCode {
+    let mut site = match args.common.open() {
+        Ok(site) => site,
+        Err(message) => return fail(message),
+    };
+    // `--not-same` 给两遍时 clap 把四个值攒进同一个 `Vec`。**不许悄悄忽略**：
+    // 那时人以为自己记了两对，实际一对都没记。
+    if !args.not_same.is_empty() && args.not_same.len() != 2 {
+        return fail(format!(
+            "`--not-same` 一次只收一对作品，收到了 {} 个名字：{}。\n             要记好几对就分几趟跑。",
+            args.not_same.len(),
+            args.not_same.join("、"),
+        ));
+    }
+    if let [left, right] = args.not_same.as_slice() {
+        if args.undo {
+            return match same_work::undo_not_same(
+                &mut site.store,
+                &site.library_identity,
+                left,
+                right,
+            ) {
+                Ok(true) => {
+                    println!("撤掉了：《{left}》与《{right}》回到「还没看过」，下一趟会重新提它。");
+                    ExitCode::SUCCESS
+                }
+                Ok(false) => {
+                    println!("《{left}》与《{right}》上本来就没有「不是同一个」这一条。");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => fail(format!("沉淀库写不动：{error}")),
+            };
+        }
+        return match same_work::not_same(&mut site.store, &site.library_identity, left, right) {
+            Ok(()) => {
+                println!("记下了：《{left}》与《{right}》不是同一个，以后不再提这一对。");
+                println!("反悔就加 `--undo` 再跑一遍这条命令。");
+                ExitCode::SUCCESS
+            }
+            Err(error) => fail(format!("沉淀库写不动：{error}")),
+        };
+    }
+    let found = match same_work::survey(&site.catalog, &site.store, &site.library_identity) {
+        Ok(found) => found,
+        Err(error) => return fail(format!("扫不动：{error}")),
+    };
+    if found.is_empty() {
+        println!(
+            "主库「{}」上没有疑似同一作品的建议。",
+            site.library_identity
+        );
+        return ExitCode::SUCCESS;
+    }
+    println!("疑似同一作品 {} 组", thousands(found.len() as u64));
+    println!("{}", "═".repeat(24));
+    for one in &found {
+        println!("《{}》 ←→ 《{}》", one.works[0], one.works[1]);
+        for reason in one.reasons() {
+            println!("    · {reason}");
+        }
+    }
+    println!(
+        "\n否掉一对（记下「不是同一个」，以后不再提）：\n  \
+         `romcat triage same-work{} --not-same '<作品>' '<另一个作品>'`\n\
+         真要合并请在界面上走合并作品那三步——它要人逐个核对变体与字段。",
         args.common.选择器(),
     );
     ExitCode::SUCCESS

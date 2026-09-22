@@ -433,6 +433,9 @@ capacity-input-width = 110  # 目标设置里「自定义」容量上限那一�
 exception-table-columns = [56, 84, 92, 64]  # 手动例外表「平台 / 体积 / 时间 / 撤销」四列的宽，「作品」与「备注」分余下的（设计稿 DLG.excl 的 th 宽）
 merge-row-columns = [150, 84, 70, 64]  # 合并向导第二步一行里「来自哪儿 / 置信度 / 体积 / 首选」四列的宽，变体那一列占余下的（设计稿 .vrow 的 grid-template-columns:22px minmax(0,1fr) 150px 84px 70px 64px）
 conflict-key-width = 90   # 合并向导第三步字段冲突表「字段」那一列的宽，「保留作品」与「其他作品」分余下的（设计稿 .ctbl th 的 width:90px）
+suspicion-padding = [12, 14]  # 疑似同一作品那张建议卡的内边距（上下, 左右）（设计稿 .sugg 的 padding:12px 14px）
+suspicion-gap     = 8     # 那张卡里一段与一段之间（设计稿 .sugg 的 gap:8px）
+suspicion-reason-gap = 3  # 那张卡里理由一条与一条之间（设计稿 .sugg ul 的 gap:3px）
 exception-note-width = 220  # 手动例外弹层里「备注（可选）」那一格的宽（设计稿 DLG.excl 的 width:220px）
 radio-diameter    = 13    # 单选圆点的直径（设计稿 .opt input 是浏览器默认的 13px）
 radio-dot         = 5     # 选中时正中那一粒强调色的直径（设计稿 accent-color 画出来的样子）
@@ -472,6 +475,7 @@ dirty-row-tint    = 0.07  # 编辑态下改过的那一行底色里调进几成�
 hero-tint         = 0.09  # 作品详情页头上那一块底色里调进几成平台色（设计稿 .hero 的 color-mix(… 9%)）
 dist-bar-opacity  = 0.7   # 「细分」底下占比条上填的那一截淡到几成（设计稿 .dist .b i 的 opacity:.7）
 drill-tint        = 0.05  # 下钻之后就地那一框底色里调进几成强调色（设计稿 .drill 的 color-mix(… 5%)）
+suspicion-tint    = 0.06  # 疑似同一作品那张建议卡底色里调进几成强调色（设计稿 .sugg 的 color-mix(… 6%)）
 
 # ── 阴影的形状：两套主题共用，颜色是各主题里同名的那一格（pop → pop-color） ──
 # check_tokens.py 不核这一节：设计稿里是一整句 box-shadow，不是分开的几格。

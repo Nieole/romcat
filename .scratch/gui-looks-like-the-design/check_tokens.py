@@ -166,6 +166,10 @@ literal_pairs(".dist .b", r"\.dist \.b\{[^}]*?height:(\d+)px", [(1, L["dist-bar"
 literal_pairs(".dist .b i", r"\.dist \.b i\{[^}]*?opacity:([\d.]+)", [(1, M["dist-bar-opacity"], "dist-bar-opacity")])
 literal_pairs(".drill", r"\.drill\{[^}]*?var\(--accent\) (\d+%),[^}]*?padding:(\d+)px (\d+)px;[^}]*?gap:(\d+)px", [(1, M["drill-tint"], "drill-tint"), (2, S["drill-padding"][0], "drill-padding 上下"), (3, S["drill-padding"][1], "drill-padding 左右"), (4, S["drill-gap"], "drill-gap")])
 
+# 疑似同一作品那张建议卡（票 gui-looks-like-the-design/17）。
+literal_pairs(".sugg", r"\.sugg\{[^}]*?var\(--accent\) (\d+%),[^}]*?padding:(\d+)px (\d+)px;[^}]*?gap:(\d+)px", [(1, M["suspicion-tint"], "suspicion-tint"), (2, L["suspicion-padding"][0], "suspicion-padding 上下"), (3, L["suspicion-padding"][1], "suspicion-padding 左右"), (4, L["suspicion-gap"], "suspicion-gap")])
+literal_pairs(".sugg ul", r"\.sugg ul\{[^}]*?gap:(\d+)px", [(1, L["suspicion-reason-gap"], "suspicion-reason-gap")])
+
 # 平台那一簇先摆几个：「更多（N）」前头没带 data-more 的那几枚。
 plats = re.search(r'<span class="sec">平台</span>\s*<div class="facet">(.*?)id="more-plat"', html, re.S)
 if not plats:
