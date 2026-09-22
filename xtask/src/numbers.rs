@@ -40,7 +40,11 @@
 //! 门禁别的几条按从便宜到贵排，这一条例外：它要跑一趟 `cargo test … -- --list` 才数得出
 //! 测试条数，而门禁那几条走的是继承 stdio 的方式、**不捕获子进程输出**，没法从 `test` 那一趟里
 //! 顺手把数捞出来。排在 `test` 后面，那份编译缓存正热着，`--list` 只是把已经编好的那几十个
-//! 测试二进制各起一次、各印一份清单——**它不重编，也不跑测试**。
+//! 测试二进制各起一次、把测试名字逐条印一遍——**它不重编，也不跑测试**。
+//!
+//! ⚠️ **那一趟跑的就是门禁 `test` 那一条**（从 `crate::gate::step` 取，后面加 `-- --list`），
+//! 这儿一个参数都不自己抄：抄一份就是当场犯这一族数要治的病——`test` 哪天改了口径，
+//! 数出来的会悄悄跟着换而没人报。
 //!
 //! ⚠️ 反过来说，**单独跑 `cargo xtask numbers --check` 而缓存是冷的时候，它要付一整趟编译**。
 //! 那不是这一条慢，是那趟编译本来就欠着。
@@ -59,11 +63,11 @@
 //! - `--list` 的输出格式变了：逐条数出来的与每个测试目标自己报的总数对不上，当场报错
 //!   （而不是悄悄数出一个小了的数）。
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// 标记的两种开头：Markdown 的 HTML 注释、TOML 的 `#` 注释。**形状是同一个**——
 /// 注释开头 ＋ `数:` ＋ 名字，名字到第一个空白为止。
@@ -84,6 +88,10 @@ pub enum Kind {
 
 impl Kind {
     /// 全部四样，标记名的顺序也按这个。
+    ///
+    /// **加一样要动的地方，编译器会逼着走全**：这儿加一支，[`Kind::name`]、[`Kind::how`]、
+    /// [`Tallies::value`] 三处 `match` 各补一臂，[`Tallies`] 加一个字段，[`count`] 里加一处
+    /// 数法——漏一处就编不过。**别读成「只动一处」**；一处也漏不掉，才是这儿要的。
     pub const ALL: [Self; 4] = [Self::Tests, Self::TestTargets, Self::Issues, Self::Adrs];
 
     /// 标记里写的那个名字。
@@ -98,12 +106,14 @@ impl Kind {
     }
 
     /// 这一样是怎么数出来的——报红时一起印，人要自己复核就照着敲。
+    ///
+    /// 前两样那一行**不是写死的**，是从门禁 `test` 那一条当场折出来的（见底下那个 `list_line`）。
     #[must_use]
-    pub const fn how(self) -> &'static str {
+    pub fn how(self) -> String {
         match self {
-            Self::Tests | Self::TestTargets => "cargo test --workspace --all-features -- --list",
-            Self::Issues => "`.scratch/*/issues/NN-*.md` 里行首锚定的那行 `Status:`",
-            Self::Adrs => "`docs/adr/` 里 `NNNN-*.md` 的份数",
+            Self::Tests | Self::TestTargets => list_line(),
+            Self::Issues => "`.scratch/*/issues/NN-*.md` 里行首锚定的那行 `Status:`".to_string(),
+            Self::Adrs => "`docs/adr/` 里 `NNNN-*.md` 的份数".to_string(),
         }
     }
 
@@ -261,9 +271,10 @@ pub fn run(root: &Path, action: Action) -> Result<Report, Error> {
         marks: 0,
         stale: Vec::new(),
     };
-    let mut seen: BTreeMap<Kind, usize> = BTreeMap::new();
+    let mut seen: BTreeSet<Kind> = BTreeSet::new();
+    let mut 扫到的: Vec<(PathBuf, String, Vec<Mark>)> = Vec::new();
     for path in marked_files(root) {
-        let shown = show(root, &path);
+        let shown = rel_path(root, &path);
         let text = fs::read_to_string(&path)
             .map_err(|err| Error::Count(format!("读不动 {shown}：{err}")))?;
         let marks = marks(&text).map_err(|(line, message)| Error::Mark {
@@ -277,7 +288,7 @@ pub fn run(root: &Path, action: Action) -> Result<Report, Error> {
         report.files += 1;
         report.marks += marks.len();
         for mark in &marks {
-            *seen.entry(mark.kind).or_default() += 1;
+            seen.insert(mark.kind);
             let right = report.tallies.value(mark.kind);
             if mark.written != right {
                 report.stale.push(Stale {
@@ -289,19 +300,26 @@ pub fn run(root: &Path, action: Action) -> Result<Report, Error> {
                 });
             }
         }
-        if action == Action::Write {
-            let fixed = apply(&text, &marks, &report.tallies);
-            if fixed != text {
-                fs::write(&path, fixed)
-                    .map_err(|err| Error::Count(format!("写不动 {shown}：{err}")))?;
-            }
-        }
+        扫到的.push((path, text, marks));
     }
     // ⭐ **一样都不许没人看。** 少了一处标记，这一条会一直绿——绿着而没在看，正是这个机制
     // 要治的那个病本身。
+    //
+    // ⚠️ **这一关排在写盘之前。** 一边报「这一样没人看着」、一边盘上已经被改过，那句报错
+    // 自己就不成立了；在这儿被拦下时，`--write` 也是一个字节都没动。
     for kind in Kind::ALL {
-        if !seen.contains_key(&kind) {
+        if !seen.contains(&kind) {
             return Err(Error::Unwatched(kind));
+        }
+    }
+    if action == Action::Write {
+        for (path, text, marks) in 扫到的 {
+            let fixed = apply(&text, &marks, &report.tallies);
+            if fixed != text {
+                fs::write(&path, fixed).map_err(|err| {
+                    Error::Count(format!("写不动 {}：{err}", rel_path(root, &path)))
+                })?;
+            }
         }
     }
     Ok(report)
@@ -327,22 +345,40 @@ pub fn count(root: &Path) -> Result<Tallies, Error> {
 
 // ── 四样各怎么数 ──
 
-/// 测试条数与测试目标数：跑一趟 `cargo test --workspace --all-features -- --list`。
+/// 数测试那一趟：**就是门禁 `test` 那一条，后面加 `-- --list`**。
 ///
-/// 口径与门禁 `test` 那一条逐字一致（同样的 `--all-features`），所以排在它后面时**一行都不重编**。
+/// ⚠️ **这儿一个参数都不自己抄。** 门禁那几条的唯一定义在 `crate::gate::steps` 里；在这儿
+/// 另写一份 `cargo test --workspace --all-features`，就是当场犯这一族数要治的病——`test`
+/// 那条哪天改了口径，数出来的会悄悄跟着换而没有任何东西报。口径一致也正是它排在 `test`
+/// 后面**一行都不重编**的原因。
+fn list_step() -> crate::gate::Step {
+    let mut step =
+        crate::gate::step("test", crate::gate::Limits::default()).expect("门禁里有 `test` 这一条");
+    step.args.push("--".to_string());
+    step.args.push("--list".to_string());
+    step
+}
+
+/// 上面那一条印出来是什么样。报红时那句「怎么数出来的」印的就是它。
+fn list_line() -> String {
+    list_step().display()
+}
+
+/// 测试条数与测试目标数。
+///
 /// 子进程的 stderr 直通终端：缓存冷的时候那一片 `Compiling` 是人该看见的。
 fn count_tests(root: &Path) -> Result<(usize, usize), Error> {
-    let out = Command::new(crate::gate::cargo())
-        .args(["test", "--workspace", "--all-features", "--", "--list"])
-        .current_dir(root)
+    let mut command = list_step().command_in(root);
+    let out = command
         .stdin(Stdio::null())
         .stderr(Stdio::inherit())
         .output()
         .map_err(|err| Error::Count(format!("起不来 cargo：{err}")))?;
     if !out.status.success() {
-        return Err(Error::Count(
-            "`cargo test --workspace --all-features -- --list` 没跑通（原因印在上面）".to_string(),
-        ));
+        return Err(Error::Count(format!(
+            "`{}` 没跑通（原因印在上面）",
+            list_line()
+        )));
     }
     read_list(&String::from_utf8_lossy(&out.stdout)).map_err(Error::Count)
 }
@@ -399,7 +435,7 @@ fn count_issues(root: &Path) -> Result<(usize, usize), Error> {
     let mut done = 0usize;
     let mut all = 0usize;
     let features = fs::read_dir(&scratch)
-        .map_err(|err| Error::Count(format!("读不动 {}：{err}", show(root, &scratch))))?;
+        .map_err(|err| Error::Count(format!("读不动 {}：{err}", rel_path(root, &scratch))))?;
     let mut dirs: Vec<PathBuf> = features
         .filter_map(Result::ok)
         .map(|it| it.path().join("issues"))
@@ -408,7 +444,7 @@ fn count_issues(root: &Path) -> Result<(usize, usize), Error> {
     dirs.sort();
     for dir in dirs {
         let mut files: Vec<PathBuf> = fs::read_dir(&dir)
-            .map_err(|err| Error::Count(format!("读不动 {}：{err}", show(root, &dir))))?
+            .map_err(|err| Error::Count(format!("读不动 {}：{err}", rel_path(root, &dir))))?
             .filter_map(Result::ok)
             .map(|it| it.path())
             .filter(|it| is_issue(it))
@@ -416,9 +452,9 @@ fn count_issues(root: &Path) -> Result<(usize, usize), Error> {
         files.sort();
         for file in files {
             let text = fs::read_to_string(&file)
-                .map_err(|err| Error::Count(format!("读不动 {}：{err}", show(root, &file))))?;
+                .map_err(|err| Error::Count(format!("读不动 {}：{err}", rel_path(root, &file))))?;
             let status = status_of(&text)
-                .map_err(|why| Error::Count(format!("{}：{why}", show(root, &file))))?;
+                .map_err(|why| Error::Count(format!("{}：{why}", rel_path(root, &file))))?;
             all += 1;
             if status == "done" {
                 done += 1;
@@ -475,7 +511,7 @@ fn status_of(text: &str) -> Result<&str, String> {
 fn count_adrs(root: &Path) -> Result<usize, Error> {
     let dir = root.join("docs").join("adr");
     let count = fs::read_dir(&dir)
-        .map_err(|err| Error::Count(format!("读不动 {}：{err}", show(root, &dir))))?
+        .map_err(|err| Error::Count(format!("读不动 {}：{err}", rel_path(root, &dir))))?
         .filter_map(Result::ok)
         .filter(|it| {
             it.file_name().to_str().is_some_and(|name| {
@@ -527,7 +563,7 @@ fn marked_files(root: &Path) -> Vec<PathBuf> {
 }
 
 /// 路径印出来的样子：相对仓库根，`/` 分隔。
-fn show(root: &Path, path: &Path) -> String {
+fn rel_path(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()
@@ -564,7 +600,7 @@ fn marks(text: &str) -> Result<Vec<Mark>, (usize, String)> {
                 ));
             };
             let mut cursor = after + name.len();
-            cursor += blank(&raw[cursor..]);
+            cursor += blank_len(&raw[cursor..]);
             if raw[cursor..].starts_with("-->") {
                 cursor += "-->".len();
             }
@@ -572,7 +608,7 @@ fn marks(text: &str) -> Result<Vec<Mark>, (usize, String)> {
             // （TOML 那一种注释就隔着一个空格），但**数被人删光时补回去的位置是这一个**
             // ——补到空白后面会把那个空格挤到数的前头。
             let tight = cursor;
-            let value_at = tight + blank(&raw[tight..]);
+            let value_at = tight + blank_len(&raw[tight..]);
             let written: String = raw[value_at..]
                 .chars()
                 .take_while(|it| it.is_ascii_digit() || *it == ',' || *it == '/')
@@ -590,8 +626,8 @@ fn marks(text: &str) -> Result<Vec<Mark>, (usize, String)> {
     Ok(out)
 }
 
-/// 一段文本开头那几个字节的空白有多长。
-fn blank(rest: &str) -> usize {
+/// 一段文本开头那一截空白有多少个字节。
+fn blank_len(rest: &str) -> usize {
     rest.len() - rest.trim_start().len()
 }
 

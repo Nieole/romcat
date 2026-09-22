@@ -153,14 +153,24 @@ pub fn steps(limits: Limits) -> Vec<Step> {
     ]
 }
 
+/// 门禁里名叫 `name` 的那一条，没有这一条就交回 `None`。
+///
+/// **门禁之外要拿某一条的定义，走这儿。** [`crate::numbers`] 数测试条数时跑的就是 `test`
+/// 那一条加 `-- --list`——它从这儿取，不另抄一份参数串，否则 `test` 那条哪天改了口径
+/// （比如不再带 `--all-features`），数出来的就悄悄换了口径而没有任何东西报。
+#[must_use]
+pub fn step(name: &str, limits: Limits) -> Option<Step> {
+    steps(limits).into_iter().find(|it| it.name == name)
+}
+
 /// 文档里那几个算得出来的数没过期。检查本体在 [`crate::numbers`]，这一条只是递归起一趟
 /// `cargo xtask numbers --check`——与 `glossary` 一样仍是 cargo 子进程，门禁里没有第二种起法。
 ///
 /// ⚠️ **这一条不按「从便宜到贵」排，排在 [`test`] 之后是有原因的**：它要跑一趟
 /// `cargo test … -- --list` 才数得出测试条数，而门禁这几条走的是继承 stdio 的方式、
 /// **不捕获子进程输出**，没法从 `test` 那一趟里顺手把数捞出来。排在 `test` 后面，
-/// 那份编译缓存正热着，`--list` 只把已经编好的那几十个测试二进制各起一次、各印一份清单
-/// ——**不重编，也不跑测试**。
+/// 那份编译缓存正热着，`--list` 只把已经编好的那几十个测试二进制各起一次、把测试名字
+/// 逐条印一遍——**不重编，也不跑测试**。
 ///
 /// 不吃 `-j`：它什么都不编（真要编，欠的也是 `test` 那一趟的账）。
 fn numbers() -> Step {
