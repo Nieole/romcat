@@ -598,7 +598,7 @@ impl Rule {
     /// （稿上 `DLG.coll` 那个警告框），数的就是它。
     ///
     /// **与 [`Self::with_collection_renamed`] 同一条口径**：两处问的是同一个
-    /// [`clause_names_collection`]。各写一份的话，「警告说有 2 条」与
+    /// `clause_names_collection`。各写一份的话，「警告说有 2 条」与
     /// 「改名真改了 3 条」就会对不上——ADR-0024 那条推论管的正是这件事。
     #[must_use]
     pub fn names_collection(&self, name: &str) -> bool {
