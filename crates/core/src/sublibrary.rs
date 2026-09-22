@@ -1361,6 +1361,137 @@ pub fn survey(
     Ok(out)
 }
 
+/// **往一个子库里加什么**（票 `gui-looks-like-the-design/23`，稿上「加入方式」那两档）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Adding<'a> {
+    /// **作为规则加入**：以后扫描到的新作品只要符合条件也会自动进来。
+    Rule(&'a Rule),
+    /// **只加这几个变体**，作为手动例外（`收入`）。**不随筛选条件变**。
+    Exceptions(&'a [String]),
+}
+
+/// 「把这一批加进这个子库之后会怎样」——屏上「预估」那一块要的**每一个数**。
+///
+/// **界面一个数都不自己算**（ADR-0024；设计稿那张对照表也逐字写着
+/// 「预估数字由核心库计算，界面只显示」）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Addition {
+    /// 这个子库里**已经有同一条规则**了，就是它的序号。
+    ///
+    /// 判据是 [`Rule::same_one_in`]——**只比树不比原文**（挂单 `Q1180`）。
+    /// 只在 [`Adding::Rule`] 那一档才可能是 `Some`。
+    pub duplicate: Option<i64>,
+    /// **新增多少个变体**：加完之后选中的那批，比加之前多出来的个数。
+    ///
+    /// **已经被别的规则选中的不算在内**——加进去也不会多选出一个，
+    /// 算进去的话屏上那个「+N」比实际多。
+    pub added: u64,
+    /// 新增那几个变体一共多大（下界，同 [`Selected::bytes`] 的口径）。
+    pub added_bytes: u64,
+    /// **与已有规则重复多少**：这一条自己命中的个数里，有多少本来就被选中了。
+    ///
+    /// 屏上那句「与已有规则重复（不重复计算）」说的就是它。
+    /// `duplicate` 是 `Some` 时这个数是**这一条整个命中数**——它一个都不新增。
+    pub overlap: u64,
+    /// 加之前这个子库选中多大。
+    pub before_bytes: u64,
+    /// **加完之后装不装得下**。走的是 [`fit`]，与差量预览同一条线。
+    ///
+    /// ⚠️ [`Fit::Unknown`]（卡不在手边）**是答案的一种，不是零**：
+    /// 屏上要照实写「算不出」，不许拿别的数冒充（挂单 `Q591`）。
+    pub after: Fit,
+}
+
+/// **算一遍「加进去之后会怎样」**（票 `gui-looks-like-the-design/23`）。
+///
+/// 加之前、加之后各求一次值，两边相减得出新增与重复——**不另立一套算法**：
+/// 「这条规则选中谁」只有 [`select`] 一个答案，屏上那个「+N」要与真加进去之后
+/// 子库里多出来的那批是同一批，否则人按下「加入」会看见与预估不同的数。
+///
+/// ## 为什么不便宜
+///
+/// 大头是 [`facts`] 走一遍全库（真机 **343 毫秒**，挂账 D156），再加两趟
+/// [`fit`]（各走一遍排计划那半条线）。**摆不上画帧线**——调用方得排任务台
+/// （票 23 的界面就是这么做的，挂单 `Q1181`）。
+///
+/// # Errors
+/// 折事实、读选择集时中立库读不动返回 [`Cutoff::Failed`]；被叫停返回 [`Cutoff::Halted`]。
+/// **排不出计划不在此列**——那落在 [`Addition::after`] 的 [`Fit::Unknown`] 里。
+pub fn addition(
+    catalog: &Catalog,
+    workspace: &Path,
+    sublibrary: &Sublibrary,
+    adding: Adding<'_>,
+    task: &Handle,
+) -> Result<Addition, Cutoff> {
+    // 折事实一步，加之前加之后各走一遍排计划那半条线。
+    task.steps(crate::sync::PLAN_STEPS.saturating_mul(2).saturating_add(1));
+    task.step("折事实")?;
+    let facts = facts(catalog).map_err(|error| format!("中立库读不动：{error}"))?;
+    let loaded = catalog
+        .selection(&sublibrary.name)
+        .map_err(|error| format!("中立库读不动：{error}"))?;
+
+    let duplicate = match adding {
+        Adding::Rule(rule) => {
+            let stored = catalog
+                .sublibrary_rules(&sublibrary.name)
+                .map_err(|error| format!("中立库读不动：{error}"))?;
+            Rule::same_one_in(&stored, rule)
+        }
+        Adding::Exceptions(_) => None,
+    };
+
+    // **加之后那一份选择集**：规则那一档往 `rules` 后面添一条，例外那一档往
+    // `exceptions` 里添几条 `收入`。两档都不落库——这一趟整条只读。
+    let mut 加完的 = loaded.selection.clone();
+    match adding {
+        Adding::Rule(rule) => 加完的.rules.push(rule.clone()),
+        Adding::Exceptions(keys) => {
+            for key in keys {
+                加完的.exceptions.push(ExceptionRow {
+                    variant_key: key.clone(),
+                    kind: Exception::Include,
+                    note: None,
+                    // **这一趟只在内存里求值、一个字都不落库**，所以记下的时刻取不取都一样。
+                    // 真加进去那一下由 `Catalog::set_exceptions` 自己取挂钟。
+                    at: 0,
+                });
+            }
+        }
+    }
+
+    let 加之前 = select(&loaded.selection, &facts);
+    let 加之后 = select(&加完的, &facts);
+
+    let before = 加之前.picked.len() as u64;
+    let after = 加之后.picked.len() as u64;
+    let added = after.saturating_sub(before);
+    let added_bytes = 加之后.bytes.saturating_sub(加之前.bytes);
+
+    // **重复 ＝ 这一条自己命中多少 − 它真新增多少**。规则那一档的「自己命中多少」
+    // 读加完那一份的 `rule_hits` 最后一格（刚添进去的就是它）；例外那一档是这一批的个数。
+    let 自己命中 = match adding {
+        Adding::Rule(_) => 加之后.rule_hits.last().copied().unwrap_or(0),
+        Adding::Exceptions(keys) => keys.len() as u64,
+    };
+    let overlap = 自己命中.saturating_sub(added);
+
+    task.step("算加入后装不装得下")?;
+    let after_fit = fit(catalog, workspace, sublibrary, &加之后, &|step| {
+        task.step(&format!("算「{}」：{step}", sublibrary.name))
+    })?;
+
+    Ok(Addition {
+        duplicate,
+        added,
+        added_bytes,
+        overlap,
+        before_bytes: 加之前.bytes,
+        after: after_fit,
+    })
+}
+
 /// 规则用得上的那几个刮削字段，以及它落进事实的哪一格。
 ///
 /// **一处定死。** 攒的时候按它筛（真库上 78,902 条刮削值里 65,630 条是标题，

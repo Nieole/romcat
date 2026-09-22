@@ -1799,3 +1799,86 @@ fn 同一棵树两种原文也算同一条规则() {
     }];
     assert_eq!(Rule::same_one_in(&坏的, &读通("平台=GB")), None);
 }
+
+/// **「加进去之后会怎样」那几个数由核心库一处算出来**
+/// （票 `gui-looks-like-the-design/23`，稿上「预估」那一块）。
+///
+/// 界面一个数都不自己算（ADR-0024；设计稿那张对照表也逐字写着「预估数字由核心库计算，
+/// 界面只显示」）。这一条钉四档：**新增**、**与已有规则重复**、**已经有同一条了**、
+/// 以及**例外那一档**。
+///
+/// 口径是「加之前加之后各求一次值、两边相减」——**不另立一套算法**：屏上那个「+N」
+/// 要与真加进去之后子库里多出来的那批是同一批，否则人按下「加入」会看见与预估不同的数。
+#[test]
+fn 加进去之后会怎样_新增与重复各算得出_同一条规则拦得下() {
+    use romcat_core::sublibrary::{Adding, Fit};
+
+    let mut 现场 = 一张卡::摆好(0);
+    // 主库里两个 FC（2048 + 4096）、一个 GB（8192）。子库先收着 FC 那两个。
+    现场.建子库("平台=FC", None);
+    let 子库 = 现场
+        .catalog
+        .sublibrary("掌机")
+        .expect("读得出")
+        .expect("建过了");
+    let 工作区 = 现场.工作区.path().to_path_buf();
+    let 算 = |adding: Adding<'_>| {
+        romcat_core::sublibrary::addition(
+            &现场.catalog,
+            &工作区,
+            &子库,
+            adding,
+            &romcat_core::task::Handle::new(),
+        )
+        .expect("算得出来")
+    };
+    let 读通 = |text: &str| Rule::parse(text).expect("规则读得懂");
+
+    // 一、**加一条全新的**：GB 那一个是新增，一个都不与已有的重复。
+    let gb = 读通("平台=GB");
+    let 账 = 算(Adding::Rule(&gb));
+    assert_eq!(账.duplicate, None);
+    assert_eq!(账.added, 1, "GB 那一个是新增的");
+    assert_eq!(账.overlap, 0, "它与 `平台=FC` 一个都不重复");
+    assert_eq!(账.added_bytes, 8192);
+
+    // 二、**加一条部分重叠的**：`平台=FC,GB` 自己命中三个，其中两个已经在里头了。
+    let 两个平台 = 读通("平台=FC,GB");
+    let 账 = 算(Adding::Rule(&两个平台));
+    assert_eq!(账.duplicate, None, "它与 `平台=FC` 不是同一棵树");
+    assert_eq!(账.added, 1, "只有 GB 那一个是新增的");
+    assert_eq!(账.overlap, 2, "FC 那两个本来就被选中了——不重复计算");
+    assert_eq!(账.added_bytes, 8192);
+
+    // 三、**已经有同一条规则了**：拦得下，而且一个都不新增。
+    let 又一条 = 读通("平台=FC");
+    let 账 = 算(Adding::Rule(&又一条));
+    assert_eq!(账.duplicate, Some(1), "该指出它是第几条");
+    assert_eq!(账.added, 0);
+    assert_eq!(账.overlap, 2, "它自己命中的那两个全都已经在里头了");
+    assert_eq!(账.added_bytes, 0);
+
+    // 三之二、**同一棵树、另一串原文也拦得下**（`Q1180`：判重比树不比原文）。
+    let 换个写法 = 读通("(平台=FC)");
+    assert_ne!(换个写法.text, 又一条.text, "这两串字得真的不一样");
+    assert_eq!(算(Adding::Rule(&换个写法)).duplicate, Some(1));
+
+    // 四、**例外那一档**：只加勾中的那几个变体，不随筛选变。
+    let 新的 = "库/GB/口袋妖怪.zip".to_string();
+    let 本来就有的 = "库/FC/魂斗罗.zip".to_string();
+    let 账 = 算(Adding::Exceptions(std::slice::from_ref(&新的)));
+    assert_eq!(账.duplicate, None, "例外那一档没有「同一条规则」这回事");
+    assert_eq!(账.added, 1);
+    assert_eq!(账.overlap, 0);
+    let 账 = 算(Adding::Exceptions(std::slice::from_ref(&本来就有的)));
+    assert_eq!(账.added, 0, "它本来就被 `平台=FC` 选中了");
+    assert_eq!(账.overlap, 1, "算作与已有规则重复");
+
+    // 五、**加之前多大**照实报，**加入后装不装得下**走 `fit` 那条线。
+    let 账 = 算(Adding::Rule(&gb));
+    assert_eq!(账.before_bytes, 2048 + 4096);
+    assert!(
+        matches!(账.after, Fit::Known(_)),
+        "卡在手边，加入后该算得出来"
+    );
+}
