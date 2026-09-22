@@ -136,6 +136,43 @@ impl Catalog {
         self.meta_set(MetaKey::TitlesFoldedAt, &now_secs().to_string())
     }
 
+    /// 把每个作品的**排序标题**写进 `work.sort_title`——主列表按「作品」排时排的就是它。
+    ///
+    /// **整列换掉，不是逐条更新**：先把这一列全抹成 `NULL`，再把交进来的这批写下去。
+    /// 抹那一下不能省——一个作品的叫法被删光之后它不该再顶着上一轮折出来的排序键，
+    /// 而逐条更新看不见「这一轮没算出它来」这件事。这与[标题集合那张表](Self::clear_titles)
+    /// 是同一条路：**折出来的投影整份换**。
+    ///
+    /// 交进来的是「作品名 → 排序标题」。算它的是 `title::write_sort_titles` 那一处
+    /// （折标题那一趟里），这儿只写（ADR-0024）。
+    ///
+    /// **按作品名认那一行**（`WHERE name = ?`），与标题集合那张表同一个锚——那张表的
+    /// `work` 列装的也是作品名，不是行号（见本模块开头）。`work.name` 上只有一条**非唯一**
+    /// 索引，重名靠 `Catalog::work_named` 那条复用路兜着；真出现两行同名，这一句把两行
+    /// 都写上同一个排序标题，而那正是它们该有的样子——同名作品的叫法本来就是同一批。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn put_sort_titles(&mut self, titles: &[(String, String)]) -> Result<(), CatalogError> {
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        tx.execute("UPDATE work SET sort_title = NULL", [])
+            .map_err(to_err)?;
+        {
+            let mut update = tx
+                .prepare("UPDATE work SET sort_title = ?2 WHERE name = ?1")
+                .map_err(to_err)?;
+            for (work, title) in titles {
+                update.execute(params![work, title]).map_err(to_err)?;
+            }
+        }
+        tx.commit().map_err(to_err)
+    }
+
     /// 把一批叫法写进去。**同一条写两次是同一个结果**。
     ///
     /// # Errors

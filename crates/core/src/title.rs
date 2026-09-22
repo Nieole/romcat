@@ -11,8 +11,15 @@
 //!
 //! 塞成单值字段，第一件事就是要在**写的时候**挑一个，而挑哪个取决于导出到哪个前端。
 //! 挑早了，跨格式转换与按中文搜索这两件事就都做不了了。所以集合落库
-//! （[`catalog::title`](crate::catalog::title)），而显示标题与排序标题**不落库**——
-//! 它们是集合的纯函数，换一份优先级表就该跟着变。
+//! （[`catalog::title`](crate::catalog::title)），而**显示标题不落库**——它是集合的
+//! 纯函数，换一份优先级表就该跟着变。
+//!
+//! **排序标题是这条规矩的一处例外**（票 `gui-looks-like-the-design/11`，挂单 `Q802`）：
+//! 它照样是集合的纯函数，可主列表按「作品」排时**排序发生在分页之前**——一万多行里挑出
+//! 这一页是哪几十行，是中立库那一句 `ORDER BY` 干的活，而现折出来的东西进不了
+//! `ORDER BY`。所以它**另外落一列**（`work.sort_title`，由 `write_sort_titles` 在折标题
+//! 那一趟写下来），而「换一份优先级表就该跟着变」这件事，在它身上变成了
+//! 「**换一份优先级表就得再折一趟**」（挂单 `Q1092`）。
 //!
 //! ### 二、显示标题的来源与**首选变体**解耦（ADR-0012）
 //!
@@ -951,6 +958,10 @@ pub fn run_task(
     // **最后一个能停的地方。** 底下那两句是「清掉再写回」，中间停下会把整份集合丢掉。
     task.step("写回中立库")?;
     write_back(catalog, &rows).map_err(RefoldError::from)?;
+    // **排序标题跟着这一趟落库**（票 `gui-looks-like-the-design/11`）：主列表按「作品」排
+    // 时排的是它，而排序在分页之前发生、现折的东西进不了 `ORDER BY`。
+    // 摆在写回之后、同样不停：这一列是上面那批叫法的投影，两者不该有一个中间态。
+    write_sort_titles(catalog, priorities).map_err(RefoldError::from)?;
     // **记下这一趟折的时刻**：库屏工序段上折标题那一行说的正是它——那一支的
     // 「还差多少」算不出来（`stage::Stage::FoldTitles` 写着为什么与实测代价），
     // 退回显示上次跑的时刻。
@@ -1086,6 +1097,49 @@ fn keep_unsuppressed(
 fn write_back(catalog: &mut Catalog, rows: &[TitleRow]) -> Result<(), CatalogError> {
     catalog.clear_titles()?;
     catalog.put_titles(rows)
+}
+
+/// 把每个作品的**排序标题**算出来写进中立库（`work.sort_title`）——主列表按「作品」排
+/// 时排的就是它（票 `gui-looks-like-the-design/11`）。
+///
+/// ## 为什么要落库
+///
+/// 显示标题与排序标题本来都**不落库**（见本模块开头）：它们是这批叫法的投影，谁要谁
+/// 现折。可**排序发生在分页之前**——主列表一万多行里挑出这一页是哪几十行，是中立库
+/// 那一句 `ORDER BY` 干的活，而现折出来的东西进不了 `ORDER BY`。要按排序标题排，
+/// 它就必须在库里有一列（拿主意的人 2026-09-21 裁，挂单 `Q802`）。
+///
+/// ## 两笔新账
+///
+/// - **没折过标题的库这一列全是 `NULL`**，那时排序退回作品名
+///   （`WorkOrder::Name` 那一句 `COALESCE`）。这不是坏掉，是「还没折过」
+///   ——库屏工序段上折标题那一行说得出上次折是什么时候（挂单 `Q1093`）。
+///   折过一趟之后**每个作品都有**：一条叫法都没有的那些拿的是作品名（见下面「算法」）。
+/// - **它跟着[优先级表](Priorities)走**：优先级表一改，挑出来的显示标题可能换一个，
+///   排序标题跟着换，而库里这一列还是上一轮的。**得再折一趟**才对得上
+///   （挂单 `Q1092`）。同一条账也落在 [`refold`] 上——那一条是别人顺手把集合折回来的，
+///   手上没有优先级表，所以它**不动这一列**。
+///
+/// ## 算法
+///
+/// 走 [`work_titles`] 把**全部作品**连同它们的叫法读回来，逐个交给 [`choose`]，
+/// 取 [`Chosen::sort`]。
+///
+/// **走 `work_titles` 而不是把刚写回去的那批 [`TitleRow`] 在内存里折一遍**：那一批里
+/// 只有**有叫法的**作品，而一条叫法都没有的作品照样要有排序标题（`choose` 那时退回
+/// 作品名，[`SortFrom::WorkName`]）。少算它们的话，同一份库里一半行按排序标题排、
+/// 一半落进 SQL 那句 `COALESCE` 的退路——两条路折大写的口径并不完全一样
+/// （`catalog::browse` 的 `row_sort_title!`，挂单 `Q1096`），于是那一半会排错位置。
+/// 顺带也省掉一次把整批叫法克隆进 `BTreeMap`。
+fn write_sort_titles(catalog: &mut Catalog, priorities: &Priorities) -> Result<(), CatalogError> {
+    let keys: Vec<(String, String)> = work_titles(catalog)?
+        .into_iter()
+        .map(|set| {
+            let work = set.work.clone();
+            (work, choose(&set, priorities).sort)
+        })
+        .collect();
+    catalog.put_sort_titles(&keys)
 }
 
 /// 一条叫法在**标题集合**里的去重键：作品、语言、类型、源、值。

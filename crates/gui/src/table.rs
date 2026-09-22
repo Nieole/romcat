@@ -483,6 +483,9 @@ impl Table<'_> {
         let total_rows = window.total();
         let total = usize::try_from(total_rows).unwrap_or(usize::MAX);
         let (sorted_by, descending) = (query.order, query.descending);
+        // 排法是不是默认那一种——**核心库那一处说了算**（`WorkQuery::sorted_by_default`）。
+        // 表头画不画箭头、搜索着的时候按不按匹配质量排，是同一句话。
+        let 照默认排 = query.sorted_by_default();
         // **格子里**照旧用这一屏的间距；**格与格、行与行之间**一点缝都不留，每一格自己让出左右留白
         // （[`padded`]）——那样定宽那几列正好是稿上写的宽，选中那一行的底色也连成一整条。
         let spacing = ui.spacing().item_spacing;
@@ -555,17 +558,31 @@ impl Table<'_> {
                     });
                     let mut 表头 = 全选格.rect;
                     // **默认那一种排法不画箭头**（照稿；拿主意的人 2026-09-14 定）：人点过表头、
-                    // 换了排法才出箭头。
-                    let 默认 = WorkQuery::default();
-                    let 照默认排 = sorted_by == 默认.order && descending == 默认.descending;
+                    // 换了排法才出箭头。**是不是默认那一种由核心库答**
+                    // （`WorkQuery::sorted_by_default`）——屏上不画箭头与库里按匹配质量排
+                    // 是同一句话，界面再比一遍就成了第二处判据（ADR-0024）。
                     for order in WorkOrder::ALL {
                         let (_, 这一格) = header.col(|ui| {
                             let active = sorted_by == order;
                             let 箭头 = (active && !照默认排).then_some(descending);
                             if sort_header(ui, spacing, order, 箭头).clicked() {
-                                query.order = order;
-                                // 再点一次同一列就翻方向。
-                                query.descending = active && !descending;
+                                // **点第三次回到默认那一种排法**（票
+                                // `gui-looks-like-the-design/11` 验收第 1 条）：
+                                // 正着 → 倒着 → 默认。走回默认那一档要紧的是**搜索着的时候**
+                                // ——默认那一种就是按匹配质量排，不回来的话，人一旦点过表头
+                                // 就再也回不到「匹配得好的排前面」，除非把搜索词删掉重打。
+                                //
+                                // **作品那一列只有两态**：默认那一种就是它正着排，
+                                // 所以它第三态与第一态本来就是同一个。
+                                if active && descending {
+                                    let 默认 = WorkQuery::default();
+                                    query.order = 默认.order;
+                                    query.descending = 默认.descending;
+                                } else {
+                                    query.order = order;
+                                    // 再点一次同一列就翻方向。
+                                    query.descending = active;
+                                }
                             }
                         });
                         表头 = 表头.union(这一格.rect);
