@@ -532,8 +532,23 @@ pub struct Screen {
     manage_collections: Option<collections::Manage>,
     /// 「**加入合集**」那个弹层；`None` 是没开着。
     join_collection_dialog: Option<collections::Join>,
+    /// **工作目录**：算「加入后装不装得下」那一趟要它（`sublibrary::addition` 走
+    /// `sync::prepare_selected`，那条线要工作目录里那份优先级表）。
+    workspace: std::path::PathBuf,
     /// 「**加入子库**」那个弹层（票 `23`，设计稿 `openAddSub`）；`None` 是没开着。
     add_to_sublibrary: Option<sublibrary::AddTo>,
+    /// 正在算的那一趟预估是任务台上的第几号；`None` 是没在算。
+    sublibrary_estimating: Option<u64>,
+    /// 正在算的那一趟**各台现状**（`survey`）是第几号；`None` 是没在算。
+    ///
+    /// 与预估那一趟分开排：**那一趟是「加进去之后」，这一趟是「眼下各台是什么样」**，
+    /// 换一台不必重算这一份。
+    sublibrary_surveying: Option<u64>,
+    /// 上一趟预估**是照哪一档算的**（哪一台 ＋ 哪种加入方式）。
+    ///
+    /// 人换一台、换一种方式，上一趟那个数就不作数了——**得认得出来**，
+    /// 不然屏上会拿着上一台的数当这一台的。
+    sublibrary_estimated_for: Option<(String, sublibrary::Mode)>,
     /// 那一层「加入到」那一列此刻列着哪几台，**连它们各自那几个数**。
     ///
     /// 条数一查就有；选中多少、多大要折一遍事实（343 毫秒），所以先摆 `None`
@@ -621,6 +636,7 @@ impl Screen {
             all_works: None,
             non_game_assets: None,
             save: SaveDraft::default(),
+            workspace: workspace.clone(),
             scrape: scrape::Panel::new(workspace),
             fixer: crate::shaping::Fixer::default(),
             reshaped: false,
@@ -658,6 +674,9 @@ impl Screen {
             suppressed_for: None,
             manage_collections: None,
             add_to_sublibrary: None,
+            sublibrary_estimating: None,
+            sublibrary_surveying: None,
+            sublibrary_estimated_for: None,
             sublibrary_devices: Vec::new(),
             sublibrary_estimate: sublibrary::Estimate::Working,
             join_collection_dialog: None,
@@ -971,6 +990,177 @@ impl Screen {
                 self.add_into_sublibrary(site, &deed, rule);
             }
         }
+    }
+
+    /// **排一趟「各台眼下是什么样」**：「加入到」那一列每一行副行那几个数。
+    ///
+    /// 走的是全仓那一处 `sublibrary::survey`（与子库屏「算一遍容量」、
+    /// 命令行 `sublibrary show` 同一个），**不另算一份**。
+    /// 折一趟事实全部设备共用，所以这一份一次算全，换一台不必重来。
+    fn queue_survey(&mut self, site: &Site, tasks: &mut Tasks) {
+        if self.sublibrary_surveying.is_some() {
+            return;
+        }
+        let Ok(几台) = site.catalog.sublibraries() else {
+            return;
+        };
+        let workspace = self.workspace.clone();
+        let title = "算各台子库眼下的容量".to_string();
+        self.sublibrary_surveying = Some(match site.catalog.read_only() {
+            Ok(reader) => tasks.queue(title, move |task| {
+                romcat_core::sublibrary::survey(&reader, &workspace, &几台, task)
+                    .map(|reports| Product::Evaluated(Box::new(reports)))
+            }),
+            Err(CatalogError::NotOnDisk { .. }) => tasks.run_here(title, |task| {
+                romcat_core::sublibrary::survey(&site.catalog, &workspace, &几台, task)
+                    .map(|reports| Product::Evaluated(Box::new(reports)))
+            }),
+            // 开不出第二份连接时那几个数就一直是「正在算…」——这一档不该让整层打不开，
+            // 所以只是不排，不报错。
+            Err(_) => return,
+        });
+    }
+
+    /// **排一趟预估**（票 `gui-looks-like-the-design/23`，挂单 `Q1181`）。
+    ///
+    /// 它折一遍事实（真机 343 毫秒）再走一趟排计划那半条线——**摆不上画帧线**，
+    /// 所以排任务台。回来之前弹层上写「正在算…」，**不写 0**。
+    ///
+    /// **换一台、换一种加入方式就重排**：上一趟那个数是照上一档算的，留着不动的话
+    /// 屏上会拿上一台的数当这一台的。
+    fn queue_addition(&mut self, site: &Site, tasks: &mut Tasks) {
+        let Some(弹层) = self.add_to_sublibrary.as_ref() else {
+            return;
+        };
+        let (Some(target), mode) = (弹层.target().map(str::to_string), 弹层.mode()) else {
+            return;
+        };
+        if self.sublibrary_estimating.is_some()
+            || self.sublibrary_estimated_for.as_ref() == Some(&(target.clone(), mode))
+        {
+            return;
+        }
+        let Ok(Some(子库)) = site.catalog.sublibrary(&target) else {
+            self.sublibrary_estimate =
+                sublibrary::Estimate::Failed(format!("中立库里没有「{target}」了"));
+            return;
+        };
+        // **例外那一档算的是勾中的那一批**；规则那一档算的是当前筛选折成的那条。
+        let keys = match mode {
+            sublibrary::Mode::Picked => {
+                match site
+                    .catalog
+                    .scoped_variants(&self.query, self.picked.scope())
+                {
+                    Ok(keys) => keys,
+                    Err(读不动) => {
+                        self.sublibrary_estimate =
+                            sublibrary::Estimate::Failed(format!("中立库读不动：{读不动}"));
+                        return;
+                    }
+                }
+            }
+            sublibrary::Mode::Rule => Vec::new(),
+        };
+        let rule = match mode {
+            sublibrary::Mode::Rule => match self.query.to_rule() {
+                Ok(Some(rule)) => Some(rule),
+                // 一个条件都没筛、或者有写错的子句：那两档「加入」本来就按不动，
+                // 预估也就无从算起。屏上照实说，不摆一个现编的数。
+                _ => {
+                    self.sublibrary_estimate = sublibrary::Estimate::Failed(
+                        "当前筛选还折不成一条规则，先把条件组理顺。".to_string(),
+                    );
+                    self.sublibrary_estimated_for = Some((target, mode));
+                    return;
+                }
+            },
+            sublibrary::Mode::Picked => None,
+        };
+        self.sublibrary_estimate = sublibrary::Estimate::Working;
+        self.sublibrary_estimated_for = Some((target.clone(), mode));
+        let workspace = self.workspace.clone();
+        let title = format!("算「{target}」加入后会怎样");
+        let 跑 = move |catalog: &Catalog, task: &romcat_core::task::Handle| {
+            let adding = match &rule {
+                Some(rule) => romcat_core::sublibrary::Adding::Rule(rule),
+                None => romcat_core::sublibrary::Adding::Exceptions(&keys),
+            };
+            romcat_core::sublibrary::addition(catalog, &workspace, &子库, adding, task)
+                .map(|账| Product::Added(Box::new(账)))
+        };
+        self.sublibrary_estimating = Some(match site.catalog.read_only() {
+            Ok(reader) => tasks.queue(title, move |task| 跑(&reader, task)),
+            // **只活在内存里的库分不出第二份连接**（合成数据走这条），意料之中。
+            Err(CatalogError::NotOnDisk { .. }) => {
+                tasks.run_here(title, |task| 跑(&site.catalog, task))
+            }
+            Err(why) => {
+                self.sublibrary_estimate =
+                    sublibrary::Estimate::Failed(format!("另开一份只读连接没开出来：{why}"));
+                return;
+            }
+        });
+    }
+
+    /// 任务台交回来那一趟预估。**不是自己那一趟就放过去。**
+    pub fn settle_addition(&mut self, done: Finished<Product>) -> Option<Finished<Product>> {
+        if self.sublibrary_estimating != Some(done.id) {
+            return Some(done);
+        }
+        self.sublibrary_estimating = None;
+        match done.ended {
+            Ending::Done(Product::Added(账)) => {
+                self.sublibrary_estimate = sublibrary::Estimate::Done(账);
+            }
+            // 别人的产物原样交回去（走不到：号对上了就是这一趟）。
+            Ending::Done(别的)
+            | Ending::Halfway {
+                product: 别的, ..
+            } => {
+                return Some(Finished {
+                    ended: Ending::Done(别的),
+                    ..done
+                });
+            }
+            Ending::Failed { step, why } => {
+                self.sublibrary_estimate = sublibrary::Estimate::Failed(if step.is_empty() {
+                    why
+                } else {
+                    format!("{step}：{why}")
+                });
+            }
+            Ending::Stopped => {
+                self.sublibrary_estimate = sublibrary::Estimate::Failed("按停了".to_string());
+                // 停了就让它能再排一趟——那一趟整条只读，从头再算一次就是。
+                self.sublibrary_estimated_for = None;
+            }
+        }
+        None
+    }
+
+    /// 任务台交回来那一趟「各台眼下是什么样」。**不是自己那一趟就放过去。**
+    pub fn settle_survey(&mut self, done: Finished<Product>) -> Option<Finished<Product>> {
+        if self.sublibrary_surveying != Some(done.id) {
+            return Some(done);
+        }
+        self.sublibrary_surveying = None;
+        let (Ending::Done(Product::Evaluated(几份))
+        | Ending::Halfway {
+            product: Product::Evaluated(几份),
+            ..
+        }) = done.ended
+        else {
+            // 停了或者失败了，那几个数就一直写着「正在算…」——**不拿 0 顶上去**。
+            return None;
+        };
+        for 一台 in &mut self.sublibrary_devices {
+            if let Some(报告) = 几份.get(&一台.name) {
+                一台.picked = Some(报告.picked);
+                一台.bytes = Some(报告.bytes);
+            }
+        }
+        None
     }
 
     /// 真把这一批加进那个子库。**两档各走各的那一条现成的路。**
@@ -2942,6 +3132,12 @@ impl Screen {
         // **收藏与合集那两个弹层**（票 `gui-looks-like-the-design/13`）。
         self.collection_dialogs(ui.ctx(), site, tasks);
         // **加入子库那一层**（票 `gui-looks-like-the-design/23`）。
+        // 画之前先看要不要重排一趟预估——换了台、换了加入方式，上一趟那个数就不作数了。
+        // `queue_addition` 自己挡重排，所以每帧调它是安全的。
+        if self.add_to_sublibrary.is_some() {
+            self.queue_survey(site, tasks);
+            self.queue_addition(site, tasks);
+        }
         self.add_to_sublibrary_dialog(ui.ctx(), site);
         // **右键菜单**（票 `gui-looks-like-the-design/14`）：上一帧表格或卡片墙认下的那一下，
         // 这一帧摊开、这一帧画。两句挨着摆，按下右键与菜单出现之间才只差一帧。
@@ -5064,7 +5260,7 @@ pub enum Action {
 ///
 /// **这是常态不是边角情形**——看见基线图上按钮在第二行，那是对的。
 /// 稿上 `.tbar` 本来就是 `flex-wrap`、摆不下就折行（拿主意的人 2026-09-22 认下）。
-const ACTIONS: [Action; 5] = [
+pub const ACTIONS: [Action; 5] = [
     Action::Scrape,
     Action::Favorite,
     Action::Join,

@@ -605,6 +605,14 @@ impl App {
             let Some(done) = self.browse.settle_collection(&mut self.site, done) else {
                 continue;
             };
+            // **「加入子库」那一层的预估**（票 `gui-looks-like-the-design/23`）：
+            // 整趟只读，认领时什么都不写，只把算出来的数交给那一层去印。
+            let Some(done) = self.browse.settle_addition(done) else {
+                continue;
+            };
+            let Some(done) = self.browse.settle_survey(done) else {
+                continue;
+            };
             // **同步那一趟要把清单写回中立库**，所以子库屏认领时拿的是可写的那份现场
             // ——台上那条线拿的是只读连接，写不动（`task::Product` 的文档）。
             self.sublibrary.settle(&mut self.site, done);

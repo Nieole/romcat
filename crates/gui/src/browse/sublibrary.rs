@@ -404,6 +404,22 @@ impl AddTo {
             }
         }
 
+        // **「已经有这条规则了」不等预估那一趟**：它由 `Device::duplicate` 当场答
+        // （读一遍那台的规则就有），而预估要折一遍事实。摆进预估那一块里的话，
+        // 屏上会有一段时间既不说它重复、按钮却已经按不动了——**说不出为什么的灰**
+        // 正是 ADR-0005 拦的那一种。
+        if self.mode() == Mode::Rule
+            && let Some(第几条) = self.chosen(facts).and_then(|一台| 一台.duplicate)
+        {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!(
+                    "「{}」中已经有这条规则了（第 {第几条} 条）。",
+                    self.target.as_deref().unwrap_or_default()
+                ),
+            );
+        }
+
         一段之间(ui);
         look::section(ui, "预估");
         self.estimate_ui(ui, facts);
@@ -455,15 +471,6 @@ impl AddTo {
                         format!(
                             "加入后超出容量上限 {}。不会自动删减，子库页会给出删减建议。",
                             human_bytes(超出)
-                        ),
-                    );
-                }
-                if let Some(第几条) = 已经有了 {
-                    ui.colored_label(
-                        ui.visuals().error_fg_color,
-                        format!(
-                            "「{}」中已经有这条规则了（第 {第几条} 条）。",
-                            self.target.as_deref().unwrap_or_default()
                         ),
                     );
                 }

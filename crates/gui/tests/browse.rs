@@ -4259,14 +4259,29 @@ fn 排序那句说明只在搜索着的时候才出现() {
 /// **真按一下**。
 #[test]
 fn 批量那一组整组靠右_摆不下就整组换行_不拆散也点得中() {
-    /// 照稿的次序，**五颗齐了**：「加入合集…」票 13 补的（挂单 `Q1102`）、
-    /// 「加入子库…」票 23 补的（最右那颗，稿上唯一的主按钮）。
+    /// 屏上那一组是哪几颗——**从 `ACTIONS` 派生，不在这儿另抄一份**。
     ///
-    /// ⚠️ **这份清单漏一颗，这条测试就在量错的那一颗**：它拿「最后一颗的右沿」
-    /// 判整组靠没靠右，清单短一截就会拿倒数第二颗去量，于是**整组明明靠右也判红**。
-    /// 票 23 那一趟正是这么红的（清单还停在四颗），而票 12 那一趟也栽过同一下
-    /// （acts 从三颗填到四颗）。**往 `ACTIONS` 里添一颗，这儿要跟着添。**
-    const 照稿次序: [&str; 5] = ["刮削…", "★ 收藏", "加入合集…", "合并作品…", "加入子库…"];
+    /// ⚠️ **这份清单从前是手抄的，栽过两回**：这条测试拿「最后一颗的右沿」判整组靠没靠右，
+    /// 清单短一截就会拿**倒数第二颗**去量，于是整组明明靠右也判红。
+    /// acts 从三颗填到四颗时栽过一次（票 12），四颗填到五颗又栽一次（票 23）。
+    /// 头一回在这儿补了一句「添一颗要跟着添」的注释，**没挡住第二回**
+    /// ——下一个人不会去读那句话。**算得出来的东西不许手抄。**
+    ///
+    /// 次序本身另有一条断言钉着（底下头一句），那一处是**唯一**手写次序的地方。
+    fn 照稿次序() -> Vec<&'static str> {
+        romcat_gui::browse::ACTIONS
+            .iter()
+            .map(|一颗| 一颗.label())
+            .collect()
+    }
+
+    // **次序本身在这一处钉死，全仓只此一份手写的。** 改 `ACTIONS` 的次序要连这一句一起改。
+    // 稿上 `.tbar .acts` 就是这个次序，最右那颗「加入子库…」是这一组里唯一的主按钮。
+    assert_eq!(
+        照稿次序(),
+        ["刮削…", "★ 收藏", "加入合集…", "合并作品…", "加入子库…"],
+        "`ACTIONS` 的次序与稿上不一样"
+    );
 
     let ctx = headless::context();
     let mut app = 界面(ROWS);
@@ -4274,7 +4289,7 @@ fn 批量那一组整组靠右_摆不下就整组换行_不拆散也点得中() 
 
     /// 那几颗各画在哪儿，按屏上从左到右排好。
     fn 那一组(帧: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
-        let mut 几颗: Vec<(String, egui::Rect)> = 照稿次序
+        let mut 几颗: Vec<(String, egui::Rect)> = 照稿次序()
             .iter()
             .map(|字| {
                 含着这几个字的每一段(帧, 字)
@@ -4297,7 +4312,7 @@ fn 批量那一组整组靠右_摆不下就整组换行_不拆散也点得中() 
             );
         }
         let 屏上次序: Vec<&str> = 几颗.iter().map(|(字, _)| 字.as_str()).collect();
-        assert_eq!(屏上次序, 照稿次序, "这一组的次序与稿上不一样");
+        assert_eq!(屏上次序, 照稿次序(), "屏上画出来的次序与 `ACTIONS` 不一样");
     }
 
     /// 中间那一栏的**右边界**：右栏摊开着就是它那块面板的左沿，收起来了就是视口右缘
@@ -4875,5 +4890,145 @@ fn 加入合集那一层建得出新合集_名字写不得时加不进() {
     assert!(
         分面.iter().any(|(名, 几个)| 名 == "送朋友的" && *几个 > 0),
         "建出来的那个合集没进分面：{分面:?}"
+    );
+}
+
+/// **「加入子库」那一层：作为规则加入，名字落得进库**
+/// （票 `gui-looks-like-the-design/23`，验收第 1、3 条）。
+///
+/// 钉四件事：
+///
+/// 1. 表格上方那一条最右那颗把这一层摊开，库里那台列得出来；
+/// 2. **预估那几个数由核心库算**（`sublibrary::addition` 排任务台），屏上印的是它算的；
+/// 3. 按「加入」之后**库里真的多了一条规则**，而且**人起的名字落进了那一列**
+///    （票 23 给 `sublibrary_rule` 补的那一列）；
+/// 4. **同一条规则再加一次会被拦下**（`Rule::same_one_in`，比树不比原文，`Q1180`）。
+#[test]
+fn 加入子库那一层把当前筛选存成规则_名字落得进库_同一条拦得下() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[
+            ("SFC", "短.zip", shared::档::命中),
+            ("GBA", "另一个.zip", shared::档::命中),
+        ],
+        shared::干净工作目录("romcat-测试-浏览-加入子库"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+
+    // 先有一台子库。
+    {
+        let (browse, site) = app.browse_and_site();
+        site.catalog
+            .put_sublibrary(&romcat_core::sublibrary::Sublibrary::at(
+                "掌机",
+                std::path::Path::new("/Volumes/SDCARD/掌机"),
+                "Pegasus",
+                None,
+            ))
+            .expect("建得出子库");
+        // 筛到一个平台——那就是要存的那条规则。
+        browse.set_filter_rule(Some(
+            romcat_core::sublibrary::Rule::parse("平台=SFC").expect("读得懂"),
+        ));
+        browse.invalidate(site);
+    }
+    跑(&ctx, &mut app, 3);
+
+    // 一、最右那颗把这一层摊开，库里那台列得出来。
+    shared::点正好(&ctx, "加入子库…", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    // **预估那一趟排在任务台上**（折一遍事实，真机 343 毫秒）——等它收场并认领完，
+    // 不看挂钟。这一等正是这一层与别的弹层不一样的地方。
+    shared::等任务台空了(&mut app);
+    跑(&ctx, &mut app, 2);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        屏上.contains("把筛选结果加入一台设备的子库"),
+        "「加入子库」那一层没摊开：\n{屏上}"
+    );
+    assert!(屏上.contains("掌机"), "库里那台没列出来：\n{屏上}");
+    assert!(
+        屏上.contains("作为规则加入 · 推荐"),
+        "加入方式那两档没画出来：\n{屏上}"
+    );
+    // 那条规则原样印着——按下去之前心里有数。
+    assert!(
+        屏上.contains("平台=SFC"),
+        "没把要存的那条规则印出来：\n{屏上}"
+    );
+
+    // 二、**预估那几个数是核心库算的**。合成库走 `run_here`，排下去当帧就跑完，
+    // 所以这会儿不该再写着「正在算…」。
+    assert!(
+        !屏上.contains("正在算…"),
+        "预估那一趟没跑完（或者没排下去）：\n{屏上}"
+    );
+    assert!(屏上.contains("新增变体"), "预估那三格没画出来：\n{屏上}");
+
+    // 三、起个名字，按「加入」。
+    //
+    // **那一格预填着现拼的短名**（稿上 `autoName`），所以点的是那串字本身。
+    let 现拼的短名 = romcat_core::sublibrary::Rule::parse("平台=SFC")
+        .expect("读得懂")
+        .label();
+    assert!(
+        屏上.contains(&现拼的短名),
+        "「规则名称」那一格没预填现拼的短名「{现拼的短名}」：\n{屏上}"
+    );
+    点弹层里的(&ctx, &现拼的短名, "", |ui| app.ui(ui));
+    headless::frame(
+        &ctx,
+        shared::输入(vec![
+            shared::按键事件(egui::Key::End),
+            egui::Event::Text("·改".to_string()),
+        ]),
+        |ui| app.ui(ui),
+    );
+    let 起的名字 = format!("{现拼的短名}·改");
+    {
+        let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+        assert!(
+            屏上.contains(&起的名字),
+            "名字那一格没收到字（该是「{起的名字}」）：\n{屏上}"
+        );
+    }
+    点弹层里的(&ctx, "加入", "", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 3);
+
+    // 四、**库里真的多了一条规则，名字也落进去了**——断的是库，不是屏上那句回执。
+    let 规则们 = app.site().catalog.sublibrary_rules("掌机").expect("读得出");
+    assert_eq!(规则们.len(), 1, "该多出一条规则：{规则们:?}");
+    assert_eq!(规则们[0].text, "平台=SFC");
+    assert_eq!(
+        规则们[0].name.as_deref(),
+        Some(起的名字.as_str()),
+        "人起的名字没落进 `sublibrary_rule.name` 那一列"
+    );
+    assert_eq!(规则们[0].shown_name(), 起的名字);
+
+    // 五、**同一条再加一次拦得下**：再开一次，那两颗该按不动。
+    //
+    // 按「加入」之后人被送去了子库屏（照稿：「加入」＝加完就走，
+    // 「加入并继续挑选」才留在这一屏）——先回浏览屏。
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 2);
+    shared::点正好(&ctx, "加入子库…", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 3);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        屏上.contains("已经有这条规则了"),
+        "同一条规则又加了一次却没拦下：\n{屏上}"
+    );
+    点弹层里的(&ctx, "取消", "", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    assert_eq!(
+        app.site()
+            .catalog
+            .sublibrary_rules("掌机")
+            .expect("读得出")
+            .len(),
+        1,
+        "拦下之后库里还是只该有一条"
     );
 }
