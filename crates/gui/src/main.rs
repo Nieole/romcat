@@ -56,7 +56,7 @@ const BENCH_ROWS: u64 = 100_000;
 #[command(
     name = "romcat-gui",
     version,
-    about = "romcat 界面：库 / 浏览 / 待确认 / 子库 / 任务，五屏"
+    about = "romcat 界面：库 / 浏览 / 待确认 / 子库 / 任务 / 设置，六屏"
 )]
 struct Args {
     /// 主库根目录。**只用来找到对应的中立库，一个字节都不读它**

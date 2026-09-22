@@ -807,6 +807,100 @@ pub fn trim_suggestions(by_variant: impl IntoIterator<Item = (String, u64)>) -> 
         .collect()
 }
 
+/// 判「这条子句筛不筛得出东西」要的那点上下文：**认得哪些值**。
+///
+/// **两样都得从外头交进来，这一层不自己去查**：平台认不认得出由**平台清单**说了算
+/// （界面一律用内置那一份，挂单 `Q1031`），合集有哪几个由中立库那份投影说了算
+/// （`Catalog::facets`）。捏在一个结构体里而不是两个挨着排的参数——两个同型引用挨着传，
+/// 写颠倒了编译照过（同 `NewRelease` 那一条）。
+#[derive(Debug, Clone, Copy)]
+pub struct KnownValues<'a> {
+    /// **平台清单**。
+    pub platforms: &'a crate::platform::Manifest,
+    /// 库里眼下有哪几个**合集**（含**收藏**那一组）。
+    pub collections: &'a [String],
+}
+
+/// 一条子句**读得成规则、也存得进去，可库里没有对得上的东西**。
+///
+/// 与 [`RuleError`] 是两件事，屏上的待遇也不一样：
+///
+/// - `RuleError` 说「这条子句**读不成**」——写下去就是一条坏规则，**当场拦住**。
+/// - 这一个说「读得成，只是**眼下筛不出东西**」——**只提醒，不许拦**。拦住它是错的：
+///   合集可以是待会儿才建的，平台清单也会长，而一条「现在选不中、将来选得中」的规则
+///   正是**规则**这个东西的用法（`Dimension` 的文档写着「维度可以先于源立起来」）。
+///
+/// **与 [`Selected::thin_dimensions`] 不是同一件事，名字也特意分开**：那一个答的是
+/// 「这**一维**在这份库里一条数据都没有」（求完值才知道），这一个答的是
+/// 「这**一条子句**的值对不上任何东西」（编辑那一刻就知道）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThinClause {
+    /// 平台名不在**平台清单**里。
+    UnknownPlatform(String),
+    /// 这个**合集**眼下库里没有。
+    NoCollection(String),
+    /// 这一维**眼下没有源**：写得出规则，一条值都产不出来（`评分`，挂账 `D68`）。
+    NoSource(Dimension),
+}
+
+impl ThinClause {
+    /// 屏上那一句：**说清是哪一条、为什么筛不出东西、以及这不是错**。
+    #[must_use]
+    pub fn advice(&self) -> String {
+        match self {
+            Self::UnknownPlatform(name) => format!(
+                "平台「{name}」不在平台清单里——这条规则存得进去，但眼下一个变体都选不中。\
+                 拼写对不对、或者这个平台本仓还没收。"
+            ),
+            Self::NoCollection(name) => {
+                format!("合集「{name}」眼下还没有——这条规则存得进去，等你建出这个合集它就生效。")
+            }
+            Self::NoSource(dimension) => format!(
+                "「{}」这一维眼下没有源：写得出规则，可中立库里还没有哪个源在写它，\
+                 所以它筛不出东西。",
+                dimension.label()
+            ),
+        }
+    }
+}
+
+/// 这条子句**筛不筛得出东西**。读得成的子句才轮到它（[`Clause::build`] 先过）。
+///
+/// **只在 `=` 上判值，`!=` 不判。** 两个都判是错的，而且错得正好反过来：
+/// `平台=没这个平台` 一个变体都选不中，可 `平台!=没这个平台` **全中**——认不出来的那个
+/// 值在 `!=` 上等于「这一条没起作用」，不是「选不中」。那是另一件事、另一句话，
+/// 而这个枚举眼下只说得出前一句（挂单 `Q1101`）。
+///
+/// **子串那三个运算符也不判**：`平台~GB` 本来就不是拿一个平台名去对——`GB` 撞得上
+/// `GBA`、也撞得上任何带这两个字母的串，拿平台清单去挑它的错是判错了题。
+///
+/// **没有源的那一维不看运算符也不看值**（[`Dimension::no_source`]）：整维都产不出值。
+#[must_use]
+pub fn thin_clause(clause: &Clause, known: &KnownValues<'_>) -> Vec<ThinClause> {
+    if clause.dimension.no_source() {
+        return vec![ThinClause::NoSource(clause.dimension)];
+    }
+    if clause.op != Op::Is {
+        return Vec::new();
+    }
+    let Bound::Text(values) = &clause.bound else {
+        return Vec::new();
+    };
+    values
+        .iter()
+        .filter_map(|value| match clause.dimension {
+            Dimension::Platform => known
+                .platforms
+                .platform_named(value)
+                .is_none()
+                .then(|| ThinClause::UnknownPlatform(value.clone())),
+            Dimension::Collection => (!known.collections.iter().any(|one| one == value))
+                .then(|| ThinClause::NoCollection(value.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 /// 按选择集在一批事实上求值。**纯函数**：不碰中立库、不碰磁盘、不看时钟。
 #[must_use]
 pub fn select(selection: &Selection, facts: &[VariantFacts]) -> Selected {
@@ -903,7 +997,7 @@ fn matches(rule: &Rule, facts: &VariantFacts) -> bool {
     holds(&rule.root, facts)
 }
 
-/// 这个组成立吗。三种连接各算各的，**空组按各自的中性元算**：
+/// 这个组成立吗。三种组合方式各算各的，**空组按各自的中性元算**：
 /// 「全部满足」与「都不满足」空着成立（没有一项不成立），「任一满足」空着不成立。
 fn holds(group: &Group, facts: &VariantFacts) -> bool {
     let mut each = group.nodes.iter().map(|node| match node {

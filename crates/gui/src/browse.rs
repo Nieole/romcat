@@ -14,7 +14,7 @@
 //! 1. **我有哪些游戏**——中间那张表，虚拟化，十万行滚起来的代价与总行数无关。
 //! 2. **我要找的那一批在哪**——左边那一栏（票 `gui-looks-like-the-design/09` 照稿排）。几簇带着条数的
 //!    分面标签：**平台**、**中文**、**识别结论**、**收藏与合集**、**语言**；一棵可嵌套的**条件组**
-//!    （[`crate::filter`]），三种连接、九个运算符。**两套之间是且**，一律下推到中立库的
+//!    （[`crate::filter`]），三种组合方式、九个运算符。**两套之间是且**，一律下推到中立库的
 //!    `WHERE`，内存里永远只有当前视口那几十行。
 //!
 //!    **那棵条件组就是子库的规则**：筛到满意按「存成子库」，条件原样变成那个子库的
@@ -108,9 +108,15 @@ use crate::task::{Product, Tasks};
 use crate::toast::{self, Toast};
 use crate::tokens::Tokens;
 
+pub mod menu;
 pub mod merge;
 pub mod suspicion;
 pub mod work;
+
+/// 搜索框那个认得出的 id：`⌘/Ctrl+F` 要把光标放进去，得先叫得出它的名字。
+fn 搜索框() -> egui::Id {
+    egui::Id::new("浏览屏搜索框")
+}
 
 /// 侧边详情变体卡片上**首选变体**那一枚标签上的字（词表**首选变体**条）。哪一个是首选由核心库答
 /// （[`VariantDetail::preferred_now`]），这里只是屏上怎么写。
@@ -139,11 +145,20 @@ enum CardSize {
     Large,
 }
 
-/// 卡片工具栏里「默认」指作品名；其余排序沿用表格的领域词。
-fn card_order_label(order: WorkOrder) -> &'static str {
+/// 卡片工具条那个排序下拉里，一档叫什么（设计稿 `#csort`）。
+///
+/// **`None` 是「默认」那一档，不是某一列**（挂单 `Q1098`，拿主意的人 2026-09-21 定照稿
+/// 拆回两个）：稿上「默认」与「名称」本来就是两个选项，票 09 把它们合成了一个，于是
+/// `(作品, 倒着)` 在这个下拉上照样显示「默认」——而那一刻库里排的并不是默认那一种。
+///
+/// 两档的差别是**方向**：「默认」把排法整个按回 [`WorkQuery::default`]（作品、正着），
+/// 「名称」只把列换成作品、方向照旧。所以从表头倒着排过来的人选「名称」还是倒着的，
+/// 选「默认」才回到正着。
+fn card_order_label(order: Option<WorkOrder>) -> &'static str {
     match order {
-        WorkOrder::Name => "默认",
-        _ => order.label(),
+        None => "默认",
+        Some(WorkOrder::Name) => "名称",
+        Some(other) => other.label(),
     }
 }
 
@@ -544,6 +559,15 @@ pub struct Screen {
     page: Option<work::Page>,
     /// 把表格的滚动位置强按到这个像素偏移。**只有量帧率时才设**，真界面上永远是 `None`。
     pub scroll_to: Option<f32>,
+    /// **右键菜单**那一层（[`menu`]）：表格与卡片墙共用这一层。
+    menu: menu::Menu,
+    /// 这一帧右键按在哪一行；表格与卡片墙各自落一份进来，这一屏取走、开出菜单
+    /// （[`Self::settle_menu`]）。
+    menu_click: Option<crate::table::RightClicked>,
+    /// `↑` `↓` 刚挪过高亮：下一帧画表格时把那一行滚进视口。
+    scroll_to_focused: bool,
+    /// `⌘/Ctrl+F` 按过了：画搜索框的那一帧把光标放进去（[`Self::focus_search`]）。
+    focus_search: bool,
 }
 
 impl Screen {
@@ -625,6 +649,10 @@ impl Screen {
             opener: Box::new(romcat_core::scrape::preview::open_externally),
             page: None,
             scroll_to: None,
+            menu: menu::Menu::default(),
+            menu_click: None,
+            scroll_to_focused: false,
+            focus_search: false,
         }
     }
 
@@ -646,7 +674,16 @@ impl Screen {
         self.priorities = priorities;
     }
 
-    /// 切到卡片视图；供窗口恢复偏好与界面测试走同一份状态。
+    /// **眼下摆的是卡片墙吗**：键盘那几下要问它（`App::browse_keys`）。
+    ///
+    /// 挪高亮那几下走的是表格背后那扇窗的**行序号**（[`Self::step_focus`]），而卡片墙背后
+    /// 是另一扇窗、另一份查询——同一个数在两边指的不是同一行（挂单 `Q1142`）。
+    #[must_use]
+    pub fn showing_cards(&self) -> bool {
+        self.view == BrowseView::Cards
+    }
+
+    /// 换成卡片墙（实测与截图门用）。    /// 切到卡片视图；供窗口恢复偏好与界面测试走同一份状态。
     pub fn show_cards(&mut self) {
         self.view = BrowseView::Cards;
     }
@@ -748,13 +785,7 @@ impl Screen {
             return;
         }
         let rows = rows.to_vec();
-        self.merging = Some(merge::Wizard::open(
-            &site.catalog,
-            &self.query,
-            &self.rules,
-            &self.priorities,
-            &rows,
-        ));
+        self.open_merge_rows(site, &rows);
     }
 
     /// 作品详情页头上那颗「**合并…**」：从这一个作品起头开一层向导，第一步再搜别的作品加进来。
@@ -762,13 +793,7 @@ impl Screen {
         let Some(anchor) = self.opened.clone() else {
             return;
         };
-        self.merging = Some(merge::Wizard::open(
-            &site.catalog,
-            &self.query,
-            &self.rules,
-            &self.priorities,
-            &[anchor],
-        ));
+        self.open_merge_rows(site, &[anchor]);
     }
 
     /// 变体卡头一行右头那颗「**移出此作品…**」。
@@ -1786,60 +1811,21 @@ impl Screen {
         }
     }
 
-    /// **屏头右侧**属于这一屏的那一段（[`crate::look::screen_header`]，票 `gui-looks-like-the-design/32`
-    /// 把它从顶栏原样挪进来，这一票照稿摆）：「刮削…」「★ 收藏」两颗小号按钮（[`look::small_buttons`]，
-    /// 照稿 `.btn.sm`，拿主意的人 2026-09-14 定，挂单 `Q877`），最后是开发用的「字体样张」开关——
-    /// 只在 `demo` 为真（这扇窗带 `--demo` 启动，[`crate::app::App::mark_demo`]）时摆。
-    /// 「N 个作品（共 M）」那一句在表格上方「列表」那一条的右端（`Self::list_bar`，挂单 `Q876`）。
+    /// **屏头右侧**属于这一屏的那一段（[`crate::look::screen_header`]）。
     ///
-    /// 先同步一次窗口再画：屏头与正文各画各的，而屏头**先画**——不先同步，
-    /// 这一屏头一帧的行数就比表格慢一帧（与队列那一屏 `status` 同一条道理）。
-    pub fn status(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks, demo: bool) {
-        self.sync_window(&site.catalog);
-        let (刮削, 收藏, 合并) = look::small_buttons(ui, |ui| {
-            // **「刮削…」摆在屏头**。它只摊开弹层——真按下去那一下在弹层底下，
-            // 因为按之前该先看清那本账；作用于哪一批，弹层标题上写着。
-            let 刮削 = ui
-                .button("刮削…")
-                .on_hover_text(
-                    "对勾中的那几个作品取元数据与媒体。四个旋钮定清楚要干什么，\
-                     按下去之前就看得见会发多少网络请求、大概多久。",
-                )
-                .clicked();
-            // **「★ 收藏」也摆在屏头**：它是这一屏按得最勤的一下（勾一批、按一下、接着筛下一批）。
-            // 取消收藏与自建合集是低频的，摆在左栏最底下。
-            let 收藏 = ui
-                .button("★ 收藏")
-                .on_hover_text(
-                    "把勾中的那一批全放进收藏。落沉淀库、锚在内容上——\
-                     删掉中立库重扫、改名、挪目录都还在。无判据的那些只钉得住本机路径，\
-                     按完的回执里会点名说有几个。\n\n\
-                     取消收藏与自建合集在左栏最底下：加收藏按得最勤，所以只有它在屏头。",
-                )
-                .clicked();
-            // **「合并作品…」摆在这一排**：稿上它与「刮削…」「★ 收藏」同在工具条那一组
-            // （`.tbar .acts`），而那一组在这个仓库里整组挪进了屏头（挂单 `Q876`／`Q877`）。
-            let 合并 = ui
-                .button(merge::MERGE)
-                .on_hover_text(
-                    "把被识别成不同作品、其实是同一个游戏的变体归到一起。\n\n\
-                     勾两个或更多作品再按。只写入裁决记录，不会移动或修改任何文件。",
-                )
-                .clicked();
-            (刮削, 收藏, 合并)
-        });
-        if 刮削 {
-            self.open_scrape(&site.catalog);
-        }
-        if 收藏 {
-            self.favorite(site, tasks);
-        }
-        if 合并 {
-            self.open_merge(site);
-        }
-        // **开发用的开关只在演示/开发构建里有**（拿主意的人 2026-09-14 定，挂单 `Q874`）：看的是**运行时**
-        // 那个标记——这扇窗带 `--demo` 启动才摆。不看编译开关：门禁带 `--all-features` 跑截图，照编译开关藏
-        // 的话门禁那一路的截图里就画着它。
+    /// **照稿它几乎是空的**（拿主意的人 2026-09-22 对着 `prototype.html` 裁的，挂单 `Q1102`）：
+    /// 稿上 `#s-browse .scrhead` 里只有标题与那句副标题，另有两样**默认不画**的——
+    /// 「正在编辑子库「…」的选择集」那句话与那颗「更新子库」（`hidden`，**归票 `23`**：
+    /// 从浏览屏改子库的选择集是那一票的活，位置照稿在这儿，条件是「正在改哪个子库」）。
+    ///
+    /// **那几颗批量按钮不在这儿**：稿上它们从来就在表格上方那一条的右端
+    /// （`.tbar .acts`，见 `Screen::action_bar`）。票 09 把它们整组挪进了屏头
+    /// （挂单 `Q876`／`Q877`，那时拿主意的人点过头），这一票照稿挪了回去。
+    ///
+    /// 于是这儿只剩**开发用的那一个开关**——只在 `demo` 为真（这扇窗带 `--demo` 启动，
+    /// [`crate::app::App::mark_demo`]）时摆，挂单 `Q874`。**不看编译开关**：门禁带
+    /// `--all-features` 跑截图，照编译开关藏的话门禁那一路的截图里就画着它。
+    pub fn status(&mut self, ui: &mut egui::Ui, demo: bool) {
         if demo {
             ui.toggle_value(&mut self.sample, "字体样张");
         }
@@ -2114,21 +2100,52 @@ impl Screen {
         joining: bool,
         doing: &str,
     ) {
-        // **一趟没跑完就别排第二趟**：两趟一起落，后一趟算的是前一趟落库之前那份库。
-        //
-        // 这句话里**不带动词**：`doing` 说的是**这一次**按的那一下，而还在跑的是**上一趟**
-        // ——先按 ★ 再按 ☆，写成「上一趟取消收藏还在跑」就是句假话。
-        if self.collecting.is_some() {
-            self.error = Some(
-                "上一趟还在跑（收藏与合集一次只排一趟）。\
-                 任务屏上看得见它走到哪儿了，也按得停。"
-                    .to_string(),
-            );
+        if self.上一趟还在跑() {
             return;
         }
         let Some(keys) = self.scoped_keys(&site.catalog, doing) else {
             return;
         };
+        self.queue_collection_keys(site, tasks, name, joining, keys, doing);
+    }
+
+    /// **一趟没跑完就别排第二趟**：两趟一起落，后一趟算的是前一趟落库之前那份库。
+    /// 还在跑就摆一句话出来，并交回 `true`。
+    ///
+    /// 这句话里**不带动词**：按的那一下是加收藏还是取消收藏，说的是**这一次**，而还在跑的是
+    /// **上一趟**——先按 ★ 再按 ☆，写成「上一趟取消收藏还在跑」就是句假话。
+    ///
+    /// **那句话只有这一处**：排活有两个入口（[`Self::queue_collection`] 按勾中的那一批，
+    /// [`Self::queue_collection_keys`] 按交进来的那几个键），两处各写一份迟早说成两句话。
+    fn 上一趟还在跑(&mut self) -> bool {
+        if self.collecting.is_none() {
+            return false;
+        }
+        self.error = Some(
+            "上一趟还在跑（收藏与合集一次只排一趟）。\
+             任务屏上看得见它走到哪儿了，也按得停。"
+                .to_string(),
+        );
+        true
+    }
+
+    /// 同 [`Self::queue_collection`]，只是**作用范围由调用方交进来**。
+    ///
+    /// 分出这一半，是因为收藏这一下有两种范围：屏头那颗 ★ 与左栏那几颗作用于**勾中的那一批**
+    /// （[`Self::scoped_keys`]），而右键菜单里那一项与 `F` 那一下作用于**光标底下这一行**
+    /// ——范围不同，排活、落库、那本账一个字都不该不同。
+    fn queue_collection_keys(
+        &mut self,
+        site: &Site,
+        tasks: &mut Tasks,
+        name: &str,
+        joining: bool,
+        keys: Vec<String>,
+        doing: &str,
+    ) {
+        if self.上一趟还在跑() {
+            return;
+        }
         let title = format!(
             "{}「{name}」· {} 个变体",
             if joining { "放进" } else { "拿出" },
@@ -2332,6 +2349,260 @@ impl Screen {
         };
     }
 
+    // ── 右键菜单与键盘（票 `gui-looks-like-the-design/14`） ───────────────────────
+
+    /// **这一帧右键按在哪一行**，就贴着那一下摊开一层菜单。
+    ///
+    /// 表格与卡片墙各自认出那一下、落一份 [`crate::table::RightClicked`] 进来，
+    /// 这里取走。菜单要的那几个事实**在这一下问一次**，不是每帧问一遍：
+    /// 「收没收藏」是一次读库（[`collection::favorite_of`]），摊开的那几秒里它不会变。
+    fn settle_menu(&mut self, ctx: &egui::Context, site: &Site) {
+        let Some(按的) = self.menu_click.take() else {
+            return;
+        };
+        // **右键那一行跟着点开**（设计稿 `S.sel=i; S.varSel=0; render()`）：菜单上那几项
+        // 动的就是它，侧边详情摆的也得是它。表格那一路已经把高亮挪过去了。
+        self.open_work(&site.catalog, &按的.row.anchor);
+        let keys = self.row_keys(&site.catalog, &按的.row.anchor);
+        // **收没收藏由核心库答**（ADR-0024）：与作品详情页状态块那一行照的是同一处。
+        // 读不动就当没收藏——菜单上那一项照旧按得动，按下去那条路自己会说话。
+        let favorited = collection::favorite_of(site, &keys)
+            .unwrap_or(None)
+            .is_some();
+        self.menu.open(
+            ctx,
+            menu::Facts {
+                at: 按的.at,
+                title: crate::table::row_name(&按的.row, &self.rules)
+                    .text()
+                    .to_owned(),
+                picked: self.picked.contains(&按的.row.anchor),
+                merging: self.merge_rows_with(&按的.row.anchor).len() as u64,
+                anchor: 按的.row.anchor,
+                favorited,
+            },
+        );
+    }
+
+    /// 菜单里「合并」那一项**要带上哪几行**：勾中的那一批，连光标底下这一行算在内。
+    ///
+    /// **屏上写的那句话与按下去真合的那一批出自这一处**（挂单 `Q1148`）：菜单上写着
+    /// 「合并勾选的 N 个作品…」，按下去开的向导里就该是那 N 个——两处各数一遍，迟早不一样
+    /// （ADR-0024）。
+    ///
+    /// **全选那一档只带这一行**（设计稿 `openMerge(S.pickAll?[i]:…)`）：「全选」不是一批身份，
+    /// 是一个筛选条件，而合并要人逐个核对变体（[`Self::open_merge`]）。
+    fn merge_rows_with(&self, anchor: &WorkAnchor) -> Vec<WorkAnchor> {
+        let Scope::Rows(rows) = self.picked.scope() else {
+            return vec![anchor.clone()];
+        };
+        let mut rows = rows.to_vec();
+        if !rows.contains(anchor) {
+            rows.push(anchor.clone());
+        }
+        rows
+    }
+
+    /// 这一行底下那几个变体的键。读不动库时是空的——调用方各自说话。
+    fn row_keys(&self, catalog: &Catalog, anchor: &WorkAnchor) -> Vec<String> {
+        catalog
+            .scoped_variants(&self.query, Scope::Rows(std::slice::from_ref(anchor)))
+            .unwrap_or_default()
+    }
+
+    /// 画那一层菜单；按下去的那一项当场办。
+    fn menu_ui(&mut self, ctx: &egui::Context, site: &mut Site, tasks: &mut Tasks) {
+        let Some((pressed, facts)) = self.menu.ui(ctx) else {
+            return;
+        };
+        self.apply_menu(ctx, site, tasks, pressed, &facts);
+    }
+
+    /// 菜单上按下去的那一项。
+    ///
+    /// **每一项走的都是屏上别处那颗按钮走的同一个入口**：打开详情走 [`Self::open_work`]、
+    /// 编辑元数据走作品详情页那一处、刮削走那层弹层、在文件系统中打开走
+    /// [`Self::reveal_row`]。菜单不另开一条路——另开一条，两条迟早不一样
+    /// （ADR-0005：界面不许自己长出第二份判断）。
+    fn apply_menu(
+        &mut self,
+        ctx: &egui::Context,
+        site: &mut Site,
+        tasks: &mut Tasks,
+        pressed: menu::Pressed,
+        facts: &menu::Facts,
+    ) {
+        let anchor = &facts.anchor;
+        match pressed {
+            menu::Pressed::OpenDetail => {
+                self.open_work(&site.catalog, anchor);
+                self.open_page(work::Tab::Overview);
+            }
+            menu::Pressed::EditMeta => self.edit_meta_of(&site.catalog, anchor),
+            menu::Pressed::TogglePick => self.picked.toggle(anchor),
+            menu::Pressed::ToggleFavorite => self.toggle_favorite_of(site, tasks, anchor),
+            menu::Pressed::Merge => {
+                let rows = self.merge_rows_with(anchor);
+                self.open_merge_rows(site, &rows);
+            }
+            menu::Pressed::Scrape => {
+                let keys = self.row_keys(&site.catalog, anchor);
+                if keys.is_empty() {
+                    self.notice = Some("这个作品底下一个变体都没有，没什么可刮的。".to_owned());
+                } else {
+                    let shown = u64::try_from(keys.len()).unwrap_or(u64::MAX);
+                    self.scrape.open(keys, shown);
+                }
+            }
+            menu::Pressed::Reveal => self.reveal_row(site, anchor),
+            // **复制的是菜单顶上那一行写着的那个名字**：屏上摆着什么就复制什么
+            // （设计稿 `toast(\`已复制：${w.t}\`)`）。
+            menu::Pressed::CopyName => {
+                ctx.copy_text(facts.title.clone());
+                self.notice = Some(format!("已复制：{}", facts.title));
+            }
+        }
+    }
+
+    /// 「**编辑元数据**」：打开这个作品的详情页、停在元数据那一面、当场进编辑态。
+    /// 与详情页头上那颗按钮走的是同一处（`work::Screen::begin_meta_edit`）。
+    fn edit_meta_of(&mut self, catalog: &Catalog, anchor: &WorkAnchor) {
+        self.open_work(catalog, anchor);
+        self.open_page(work::Tab::Metadata);
+        self.begin_meta_edit();
+    }
+
+    /// 「**在文件系统中打开**」：这一行底下头一个变体所在的目录。
+    ///
+    /// 键折回盘上真名走核心库那一处（`Roots::real_path`，ADR-0020），与作品详情页头上
+    /// 那颗按钮同一个函数（`Screen::reveal`）。**只读**，一个字节都不碰（ADR-0004）。
+    fn reveal_row(&mut self, site: &Site, anchor: &WorkAnchor) {
+        let keys = self.row_keys(&site.catalog, anchor);
+        let Some(key) = keys.first().cloned() else {
+            self.notice = Some("这个作品底下一个变体都没有，盘上没有对应的位置。".to_owned());
+            return;
+        };
+        self.reveal(site, &key);
+    }
+
+    /// 「**收藏 / 取消收藏**」这一行：范围就是这一行底下那几个变体。
+    ///
+    /// **收没收藏由核心库答**（[`collection::favorite_of`]，ADR-0024），不是界面自己记一个
+    /// 标志；排活、落库、那本账与屏头那颗 ★ 走的是同一条路（[`Self::queue_collection_keys`]）。
+    fn toggle_favorite_of(&mut self, site: &Site, tasks: &mut Tasks, anchor: &WorkAnchor) {
+        let keys = self.row_keys(&site.catalog, anchor);
+        if keys.is_empty() {
+            self.notice = Some("这个作品底下一个变体都没有，没什么可收藏的。".to_owned());
+            return;
+        }
+        let 收着的 = match collection::favorite_of(site, &keys) {
+            Ok(收着的) => 收着的,
+            Err(error) => {
+                self.error = Some(format!("{error}"));
+                return;
+            }
+        };
+        let joining = 收着的.is_none();
+        let doing = if joining { "加收藏" } else { "取消收藏" };
+        self.queue_collection_keys(site, tasks, FAVORITE, joining, keys, doing);
+    }
+
+    /// **开一层合并向导，就这一处。** 屏头那颗「合并作品…」（勾中那一批，
+    /// [`Self::open_merge`]）、作品详情页头上那颗「合并…」（[`Self::open_merge_here`]）、
+    /// 右键菜单里那一项，三处交进来的只是**带上哪几行**不同。
+    ///
+    /// 拦在前头的那几条（勾不够两个、全选那一档开不了）归 [`Self::open_merge`]：那是
+    /// 「屏头那颗按下去算不算数」，不是「向导怎么开」。
+    pub fn open_merge_rows(&mut self, site: &Site, rows: &[WorkAnchor]) {
+        self.merging = Some(merge::Wizard::open(
+            &site.catalog,
+            &self.query,
+            &self.rules,
+            &self.priorities,
+            rows,
+        ));
+    }
+
+    // ── 键盘那几下（`App::shortcuts` 调，票 `gui-looks-like-the-design/14`） ──
+
+    /// **高亮往上／往下挪一行**（`↑` `↓`）。一行都没高亮时落在头一行上。
+    ///
+    /// 只在**表格**那一路走得动：卡片墙背后那扇窗是另一份查询（只看有封面的那一批），
+    /// 下标不在同一个空间里（挂单 `Q1142`）。
+    pub fn step_focus(&mut self, catalog: &Catalog, 往下: bool) {
+        let 总数 = self.window.total();
+        if 总数 == 0 {
+            return;
+        }
+        let at = match self.focused {
+            None => 0,
+            Some(at) if 往下 => (at + 1).min(总数 - 1),
+            Some(at) => at.saturating_sub(1),
+        };
+        self.focused = Some(at);
+        self.scroll_focused_into_view();
+        if let Some(anchor) = self.window.row(catalog, at).map(|row| row.anchor.clone()) {
+            self.open_work(catalog, &anchor);
+        }
+    }
+
+    /// 挪到的那一行要看得见：交给表格那一层下一帧滚过去。
+    fn scroll_focused_into_view(&mut self) {
+        // 表格那一层每帧按 `focused` 画选中底色；滚过去由 egui 的 `scroll_to_rect` 办，
+        // 而那要拿得到那一行的矩形——只有画它的那一帧才有。这里留个记号就够了。
+        self.scroll_to_focused = true;
+    }
+
+    /// **打开高亮那一行的作品详情页**（`Enter`）。
+    pub fn open_focused(&mut self, catalog: &Catalog) {
+        let Some(anchor) = self.focused_anchor(catalog) else {
+            return;
+        };
+        self.open_work(catalog, &anchor);
+        self.open_page(work::Tab::Overview);
+    }
+
+    /// **勾选 / 取消勾选高亮那一行**（`空格`）。
+    pub fn toggle_pick_focused(&mut self, catalog: &Catalog) {
+        if let Some(anchor) = self.focused_anchor(catalog) {
+            self.picked.toggle(&anchor);
+        }
+    }
+
+    /// **全选筛出来的那一批**（`⌘/Ctrl+A`）：选中集就是当前这个筛选本身（ADR-0016）。
+    pub fn select_all(&mut self) {
+        self.picked.select_all();
+    }
+
+    /// **收藏 / 取消收藏高亮那一行**（`F`）。
+    pub fn toggle_favorite_focused(&mut self, site: &Site, tasks: &mut Tasks) {
+        let Some(anchor) = self.focused_anchor(&site.catalog) else {
+            return;
+        };
+        self.toggle_favorite_of(site, tasks, &anchor);
+    }
+
+    /// **编辑高亮那一行的元数据**（`E`）。
+    pub fn edit_focused(&mut self, catalog: &Catalog) {
+        if let Some(anchor) = self.focused_anchor(catalog) {
+            self.edit_meta_of(catalog, &anchor);
+        }
+    }
+
+    /// 高亮那一行是谁；一行都没高亮（或者读不到）时是 `None`。
+    fn focused_anchor(&mut self, catalog: &Catalog) -> Option<WorkAnchor> {
+        let at = self.focused?;
+        self.window.row(catalog, at).map(|row| row.anchor.clone())
+    }
+
+    /// **把光标放进搜索框**（`⌘/Ctrl+F`）：留个记号，画那一框的那一帧落实。
+    ///
+    /// 不在这儿直接 `request_focus`：那一框这一帧还没画出来（筛选栏收起来时连画都不画），
+    /// 而焦点只给得了已经在这一帧里摆过的控件。
+    pub fn focus_search(&mut self) {
+        self.focus_search = true;
+    }
+
     /// 画一帧。
     pub fn ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         self.sync_window(&site.catalog);
@@ -2345,6 +2616,10 @@ impl Screen {
         self.scrape.show(ui.ctx(), site, tasks);
         // **合并向导与「移出此作品」也是弹层**：盖在整屏上头，三栏与作品详情页都由这一处画。
         self.merge_ui(ui.ctx(), site);
+        // **右键菜单**（票 `gui-looks-like-the-design/14`）：上一帧表格或卡片墙认下的那一下，
+        // 这一帧摊开、这一帧画。两句挨着摆，按下右键与菜单出现之间才只差一帧。
+        self.settle_menu(ui.ctx(), site);
+        self.menu_ui(ui.ctx(), site, tasks);
         self.notice_toast(ui.ctx(), site);
         // **作品详情页开着就只画它**（票 `gui-looks-like-the-design/15`）：稿上它盖住整块屏。
         if self.page.is_some() {
@@ -2373,10 +2648,24 @@ impl Screen {
                 tokens.space.detail_pane_padding,
                 tokens.space.detail_pane_padding,
             )));
-        layout::FILTER.show_collapsible(ui, "筛选", 左栏, |ui| {
+        // **收起之后那根窄条上写着筛了几个条件**（照稿 `.fstrip` 与 `renderFilterCount`，
+        // 挂单 `Q806`）：收起来正是「看不见自己筛了什么」最危险的那一刻——屏上少了一半行，
+        // 而左栏已经卷起来了。数法在核心库一处（`WorkQuery::filter_count`），
+        // **与筛空时那句空态印的是同一个数**。
+        //
+        // **一个都没有时照稿写「无条件」**，不是什么都不写：窄条上空着读起来是
+        // 「这一栏没话说」，而它其实有话说——「眼下没筛」。
+        let 筛了几个 = self.query.filter_count();
+        let 窄条上 = if 筛了几个 > 0 {
+            format!("{筛了几个}个条件")
+        } else {
+            "无条件".to_string()
+        };
+        layout::FILTER.show_collapsible(ui, "筛选", Some(&窄条上), 左栏, |ui| {
             self.filter_panel(ui, site, tasks);
         });
-        layout::DETAIL.show_collapsible(ui, "详情", 右栏, |ui| self.detail_panel(ui, site));
+        layout::DETAIL
+            .show_collapsible(ui, "详情", None, 右栏, |ui| self.detail_panel(ui, site));
         // **底下那块编辑面板拆掉了**（票 `gui-looks-like-the-design/15` 收挂单 `Q804`）：改元数据归作品详情页，
         // 选中数在表格上方那一条，改选择时的例外摆在右栏选中那张变体卡底下。正中那一栏从上到下就是表。
         egui::CentralPanel::default()
@@ -2388,7 +2677,15 @@ impl Screen {
                     self.font_sample(ui);
                     ui.separator();
                 }
-                self.list_bar(ui);
+                // **按下去要干的事在这一层做**：那一组摆在哪一行要先量宽再定，
+                // 而那段摆位的活不该连着两份库的可变借用一起拖进去。
+                if let Some(按了) = self.list_bar(ui) {
+                    match 按了 {
+                        Action::Scrape => self.open_scrape(&site.catalog),
+                        Action::Favorite => self.favorite(site, tasks),
+                        Action::Merge => self.open_merge(site),
+                    }
+                }
                 let opened = match self.view {
                     BrowseView::Table => Table {
                         catalog: &site.catalog,
@@ -2403,6 +2700,8 @@ impl Screen {
                         } else {
                             None
                         },
+                        menu: &mut self.menu_click,
+                        scroll_focused: std::mem::take(&mut self.scroll_to_focused),
                     }
                     .show(ui),
                     BrowseView::Cards => {
@@ -2512,7 +2811,22 @@ impl Screen {
         ui.add_space(Tokens::builtin().space.empty_padding);
         ui.vertical_centered(|ui| {
             if 筛过 {
-                ui.weak("没有符合当前筛选条件的作品。");
+                // **空态那句带上条件数**（照稿 `.empty` 那句，挂单 `Q806`；数法见
+                // `WorkQuery::filter_count`）：「筛不出东西」与「筛了几样才筛不出东西」是
+                // 两件事——人得先知道自己叠了几层，才知道该松哪一层。**这个数与收起后那根
+                // 窄条上的是同一个**。
+                //
+                // **数出来是 0 就不写那个数**：`筛过` 问的是 `WorkQuery::same_filter`，
+                // 它把搜索词与「只显示有封面的」也算进「筛过」，而那两样按定下来的口径
+                // **不算条件**（搜索管顺序不管集合；封面是卡片墙的临时呈现）。于是只拨了
+                // 「只显示有封面的」而筛空时，两处问的不是同一件事，照写就会在屏上印出
+                // 「没有符合当前 0 个筛选条件的作品」——一句自相矛盾的话。
+                let 几个 = self.query.filter_count();
+                if 几个 > 0 {
+                    ui.weak(format!("没有符合当前 {几个} 个筛选条件的作品。"));
+                } else {
+                    ui.weak("没有符合当前筛选条件的作品。");
+                }
                 ui.add_space(steps[1]);
                 let 清除 = look::small_buttons(ui, |ui| {
                     ui.button("清除筛选")
@@ -2539,18 +2853,62 @@ impl Screen {
         });
     }
 
-    /// 主列表上方的工具条（设计稿 `#lbar` 的 `.cbar`）：次级底色、底下一条分隔线；右端是
-    /// 「N 个作品（共 M）」那一句（[`Self::count_line`]）。
+    /// 工具条右端那一组**批量操作**要多宽（设计稿 `.tbar .acts`）。
     ///
-    /// 稿上那一句在再上面一条 `.tbar` 里，与视图切换、几颗批量按钮做邻居：批量按钮挪进了屏头右侧，
-    /// 视图切换归票 `10`，那一条只剩这一句，于是摆进这一条的右端，不另起一条。
-    fn list_bar(&mut self, ui: &mut egui::Ui) {
+    /// **在 `look::small_buttons` 那一块外头量**（`look::small_button_width` 的文档写着
+    /// 为什么）：那一块是个 `ui.scope`，哪怕里头什么都不摆，它也在横排里占一格间距——
+    /// 进去再量，量的那一下就把后面摆的东西往右推了一格。
+    ///
+    /// **字照按钮取字的规矩取**：egui 0.36 的按钮只认 `override_font_id`，
+    /// `TextStyle::Button` 那一格它根本不读（`look::sized_buttons` 的文档）。头一版在这儿
+    /// 拿 `TextStyle::Button` 量，量的是正文那一档 13、画的是小号 12，三颗十来个字**高估
+    /// 十点上下**——整组右端贴不住右沿，而且比该折的时候早折。
+    fn action_width(ui: &egui::Ui) -> f32 {
+        let 间距 = ui.spacing().item_spacing.x;
+        ACTIONS
+            .iter()
+            .map(|一颗| look::small_button_width(ui, 一颗.label()))
+            .sum::<f32>()
+            + 间距 * (ACTIONS.len() as f32 - 1.0)
+    }
+
+    /// 画那一组，交回**按了哪一颗**。
+    ///
+    /// **只画、不动库**：按下去要干的事（摊开刮削弹层、放进收藏、开合并向导）由
+    /// [`Self::ui`] 那一层去做。这么分是因为这一组摆在哪一行要先量宽再定
+    /// （[`Self::list_bar`]），而那段摆位的活不该连着两份库的可变借用一起拖进来。
+    fn action_buttons(ui: &mut egui::Ui) -> Option<Action> {
+        look::small_buttons(ui, |ui| {
+            let mut 按了 = None;
+            for 一颗 in ACTIONS {
+                if ui.button(一颗.label()).on_hover_text(一颗.hint()).clicked() {
+                    按了 = Some(一颗);
+                }
+            }
+            按了
+        })
+    }
+
+    /// 主列表上方那一条（设计稿 `.tbar` 与 `.cbar` 两层叠在一个框里）：次级底色、
+    /// 底下一条分隔线。
+    ///
+    /// **第一层照稿是 `.tbar`**：视图切换、「N 个作品（共 M）」那一句
+    /// （[`Self::count_line`]）、选中数与「清除选择」一路从左往右，那几颗批量操作
+    /// **整组靠右**（[`Self::action_bar`]）。**第二层是 `.cbar`**：当前这种呈现方式
+    /// 自己的那几样（表格是「在每行开头显示封面」，卡片是分组／排序／大小）。
+    ///
+    /// ⚠️ **「N 个作品（共 M）」这一票挪回了左边**（挂单 `Q1102`）。票 09 把它摆在这一条的
+    /// **右端**（挂单 `Q876`，拿主意的人 2026-09-14 定；同一处落点 09-15 又确认过一次），
+    /// 当时的依据写着「批量按钮挪进了屏头，稿上那一条只剩这一句」——**那几颗按钮这一票
+    /// 挪回来了，依据跟着不成立**，而稿上 `.cnt` 明写着紧跟在 `.seg` 后头。
+    fn list_bar(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let tokens = Tokens::builtin();
         let [上下, 左右] = tokens.space.list_bar_padding;
         let 线 = ui.visuals().widgets.noninteractive.bg_stroke;
         let 这一句 = self.count_line(ui);
         let 有封面 = self.cover_window.total();
         let 作品总数 = self.window.total();
+        let mut 按了 = None;
         let 这一条 = egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
             .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
@@ -2559,45 +2917,67 @@ impl Screen {
                 ui.spacing_mut().item_spacing =
                     egui::vec2(tokens.space.list_bar_gap, look::step(0));
                 ui.vertical(|ui| {
-                    // 第一层只回答“看什么、共有多少”，让视图切换与集合规模一眼成组。
-                    // 左端视图切换、右端计数与「清除选择」，交给 [`egui::Sides`] 各排各的。
+                    // **照稿这一条的次序**（`.tbar`）：视图切换、作品数、选中数与「清除选择」
+                    // 一路从左往右，那几颗批量操作**整组靠右**（`.acts` 的 `margin-left:auto`）。
                     //
-                    // 自己算位置的两种写法都塌过：拿剩余宽度把计数推到右端、按钮跟在它后面时，按钮被挤出
-                    // 行外——字还画着、点下去没反应（票 `gui-looks-like-the-design/15` 那条「清除选择一按就清」
-                    // 因此红）；改成在从左往右的行里嵌一个从右往左的子块，那个子块吃掉全部剩余宽度，把这一条
-                    // 的需求宽度撑大、连带挤窄了表格主栏，认不出作品那一行的副行就画不下了。
-                    egui::Sides::new().show(
-                        ui,
-                        |ui| {
-                            if ui
-                                .selectable_label(self.view == BrowseView::Table, "表格")
-                                .clicked()
-                            {
-                                self.view = BrowseView::Table;
-                            }
-                            if ui
-                                .selectable_label(self.view == BrowseView::Cards, "卡片")
-                                .clicked()
-                            {
-                                self.view = BrowseView::Cards;
-                            }
-                        },
-                        |ui| {
-                            if self.picked.count(self.window.total()) > 0
-                                && look::small_buttons(ui, |ui| {
-                                    ui.scope(|ui| {
-                                        look::ghost_button(ui.visuals_mut());
-                                        ui.button(CLEAR_PICK)
-                                    })
-                                    .inner
-                                    .clicked()
+                    // ## 摆不下的时候整组换一行——**自己分行，不交给 egui 折**
+                    //
+                    // 稿上是 `.tbar{flex-wrap:wrap}` 加 `.acts{flex-wrap:nowrap}`。
+                    // 头一版想拿 `horizontal_wrapped` 加「把这一行剩下的宽占掉」去逼它折行，
+                    // **那是错的**：`add_space` 只把光标往前推，不触发换行，于是那三颗被摆到
+                    // 行外、连画都没画出来（合并向导那条测试当场红——**屏上压根没有「合并作品…」**）。
+                    // 那正是票 `10` 栽过的头一条路。
+                    //
+                    // 所以这儿**先量后分行**：量出那一组要多宽（[`Self::action_width`]），
+                    // 这一行的剩余宽度装得下就摆同一行的右头，装不下就另起一行、在那一行里靠右。
+                    // 两条路都是普通的 `ui.horizontal`，摆哪儿由算出来的数说了算，不靠布局器的脾气。
+                    let 要多宽 = Self::action_width(ui);
+                    let mut 同一行摆得下 = true;
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(self.view == BrowseView::Table, "表格")
+                            .clicked()
+                        {
+                            self.view = BrowseView::Table;
+                        }
+                        if ui
+                            .selectable_label(self.view == BrowseView::Cards, "卡片")
+                            .clicked()
+                        {
+                            self.view = BrowseView::Cards;
+                        }
+                        // **作品数照稿紧跟在视图切换后头**（`.tbar` 里 `.seg` 之后就是
+                        // `.cnt`），不在这一条的右端。票 09 把它摆到右端，理由是
+                        // 「批量按钮挪进了屏头，稿上那一条只剩这一句」（挂单 `Q876`）
+                        // ——那几颗按钮这一票挪回来了，那条理由跟着不成立。
+                        ui.label(这一句.clone());
+                        if self.picked.count(self.window.total()) > 0
+                            && look::small_buttons(ui, |ui| {
+                                ui.scope(|ui| {
+                                    look::ghost_button(ui.visuals_mut());
+                                    ui.button(CLEAR_PICK)
                                 })
-                            {
-                                self.picked.clear();
-                            }
-                            ui.label(这一句.clone());
-                        },
-                    );
+                                .inner
+                                .clicked()
+                            })
+                        {
+                            self.picked.clear();
+                        }
+                        // 比的时候松一像素：宽是浮点算出来的，差一丝就白换一行，
+                        // 而白换一行比挤一丝难看得多。**只松在「换不换行」这一步**，
+                        // 靠右那一步照旧按算出来的数垫，所以松这一点不会把按钮推出行外。
+                        同一行摆得下 = ui.available_width() + 1.0 >= 要多宽;
+                        if 同一行摆得下 {
+                            ui.add_space((ui.available_width() - 要多宽).max(0.0));
+                            按了 = Self::action_buttons(ui);
+                        }
+                    });
+                    if !同一行摆得下 {
+                        ui.horizontal(|ui| {
+                            ui.add_space((ui.available_width() - 要多宽).max(0.0));
+                            按了 = Self::action_buttons(ui);
+                        });
+                    }
                     ui.add_space(look::step(1));
                     // 第二层才是当前呈现方式的控制。卡片不会再和视图、计数争一行。
                     ui.horizontal_wrapped(|ui| {
@@ -2624,36 +3004,53 @@ impl Screen {
                                 self.query.order = WorkOrder::Platform;
                             }
                             look::section(ui, "排序");
-                            let mut card_order = None;
+                            // **「默认」与「名称」是两档，不是一档**（照稿 `#csort`，
+                            // 挂单 `Q1098`）：眼下是不是默认那一种由核心库答
+                            // （`WorkQuery::sorted_by_default`），这一层只照着显示——
+                            // 界面自己再比一遍 `order == Name` 的话，从表头倒着排过来的
+                            // `(作品, 倒着)` 会在这儿显示成「默认」，而库里排的并不是它
+                            // （ADR-0024）。
+                            let mut 选了: Option<Option<WorkOrder>> = None;
+                            let 眼下 = if self.group_cards || self.query.sorted_by_default() {
+                                // 平台分组本身就是主排序，组内不另排——界面上同样叫「默认」。
+                                None
+                            } else {
+                                Some(self.query.order)
+                            };
                             egui::ComboBox::from_id_salt("卡片排序")
-                                // 平台分组本身就是主排序；组内没有额外字段时，界面上叫「默认」。
-                                .selected_text(if self.group_cards {
-                                    "默认"
-                                } else {
-                                    card_order_label(self.query.order)
-                                })
+                                .selected_text(card_order_label(眼下))
                                 .show_ui(ui, |ui| {
-                                    for order in WorkOrder::ALL {
-                                        let selected = if self.group_cards {
-                                            order == WorkOrder::Name
-                                        } else {
-                                            self.query.order == order
-                                        };
+                                    for one in std::iter::once(None).chain(WorkOrder::ALL.map(Some))
+                                    {
                                         if ui
-                                            .selectable_label(selected, card_order_label(order))
+                                            .selectable_label(眼下 == one, card_order_label(one))
                                             .clicked()
                                         {
-                                            card_order = Some(order);
+                                            选了 = Some(one);
                                         }
                                     }
                                 });
-                            if let Some(order) = card_order {
-                                if self.group_cards && order == WorkOrder::Name {
-                                    // 「默认」保留按平台的组序，组内则由中立库的稳定次序决定。
-                                } else {
-                                    self.group_cards = false;
-                                    self.card_group_header = None;
-                                    self.query.order = order;
+                            // **分组着的时候点「默认」＝什么都不做**：那一档此刻显示的就是
+                            // 它，而按平台分组本身就是主排序。不挡这一下的话，人点一下
+                            // 当前显示的那一项，分组会**静悄悄**关掉（票 09 原先专门留了
+                            // 一支挡它，这一票重做下拉时漏掉了，`/code-review` 抓出来的）。
+                            if 选了 == Some(None) && self.group_cards {
+                                选了 = None;
+                            }
+                            if let Some(one) = 选了 {
+                                self.group_cards = false;
+                                self.card_group_header = None;
+                                match one {
+                                    // **「默认」把排法整个按回默认那一种**——方向也回正着，
+                                    // 否则它与「名称」是同一个状态，两档就白拆了。
+                                    None => {
+                                        let 默认 = WorkQuery::default();
+                                        self.query.order = 默认.order;
+                                        self.query.descending = 默认.descending;
+                                    }
+                                    // 挑一列只换列，**方向照旧**：从表头倒着排过来的人
+                                    // 在这儿挑一列，不该被顺手翻回正着。
+                                    Some(order) => self.query.order = order,
                                 }
                             }
                             look::section(ui, "大小");
@@ -2685,6 +3082,7 @@ impl Screen {
             .rect;
         ui.painter()
             .hline(这一条.x_range(), 这一条.bottom() - 线.width / 2.0, 线);
+        按了
     }
 
     /// 卡片墙走自己的分页窗：仅封面开关不影响主列表；封面与无封面字卡都复用 [`Shelf`]。
@@ -2792,11 +3190,8 @@ impl Screen {
                             // **认不认得出作品，问表格那一路同一处**（[`unlinked_title`]）：
                             // 判据在核心库（ADR-0024），卡片这边不另写一套，不然有一天两处判得不一样。
                             let 未关联 = unlinked_title(&row, &self.rules);
-                            let title = row
-                                .display
-                                .clone()
-                                .or_else(|| 未关联.clone())
-                                .unwrap_or_else(|| row.name.clone());
+                            // 这一行屏上叫什么，问表格那一路同一处（`table::row_name`）。
+                            let title = crate::table::row_name(&row, &self.rules).text().to_owned();
                             let (rect, response) = ui.allocate_exact_size(
                                 egui::vec2(
                                     width,
@@ -2819,6 +3214,11 @@ impl Screen {
                                     .max_rect(rect)
                                     .layout(Layout::top_down(Align::Min)),
                             );
+                            // **卡面上的字不许接住点击**（表格那一路早就这么干了，
+                            // `table::Table::show`）：egui 的标签默认可选中，会把按在标题或
+                            // 那几行小字上的那一下当成选字——于是点在卡面的字上整张卡收不到，
+                            // 右键更是摊不开菜单。整张卡才是那个按钮。
+                            card.style_mut().interaction.selectable_labels = false;
                             let cover_radius = if self.shelf.has_cover(&row) == Some(true) {
                                 Tokens::builtin().radius.medium
                             } else {
@@ -2903,6 +3303,17 @@ impl Screen {
                                     点了选择 = true;
                                 }
                             }
+                            // **右键摊菜单**：与表格那一路认的是同一件事，交出来的也是同一份
+                            // （`table::RightClicked`）——菜单上摆哪几项由 [`menu`] 一处说了算。
+                            if response.secondary_clicked()
+                                && let Some(at) = response.interact_pointer_pos()
+                            {
+                                response.request_focus();
+                                self.menu_click = Some(crate::table::RightClicked {
+                                    row: row.clone(),
+                                    at,
+                                });
+                            }
                             if response.clicked() && !点了选择 {
                                 response.request_focus();
                                 opened = Some(row.clone());
@@ -2979,20 +3390,46 @@ impl Screen {
 
                 // **搜索框**（设计稿 `.field`）：管顺序不管集合，所以它不在条件里、进不了子库的规则。
                 let width = ui.available_width();
-                look::text_input(
+                let 搜索框 = look::text_input(
                     ui,
                     width,
                     egui::TextEdit::singleline(&mut self.query.search)
+                        .id(搜索框())
                         .hint_text("搜索名称、别名或简介"),
-                )
-                .on_hover_text(
+                );
+                // **`⌘/Ctrl+F` 那一下在这儿落实**（[`Self::focus_search`]）：焦点只给得了
+                // 这一帧已经摆过的控件，而这一框在筛选栏收起来时连画都不画。
+                if std::mem::take(&mut self.focus_search) {
+                    搜索框.request_focus();
+                }
+                搜索框.on_hover_text(
                     "搜索管排序，筛选器管集合。三条路都找：屏上这个名字、\
                      标题集合里别的叫法（中文名就在这儿）、简介。\
                      命中在哪一条决定这一行排哪一档，权重内置、不用配。\n\
                      它进不了子库的规则——子库要的是集合不是顺序，\
                      「存成子库」之前得先把它清空。",
                 );
-                look::help(ui, "搜索结果按匹配程度排序。");
+                // **搜索框里有字的时候才画这一句**（拿主意的人 2026-09-21 定，挂单 `Q1099`）。
+                //
+                // 两层道理叠在一起：
+                //
+                // 1. **没搜索的时候它本来就是废话**——「搜索结果默认按匹配程度排序」，
+                //    可还没搜。一句当下不成立的话常驻在那儿，读的人得先分辨它说的是不是
+                //    此刻，那正是票 `03` 要赶走的东西。
+                // 2. 它**要占两行**。这一句得连「默认」一起说（票 `11` 改了口径：搜索着的
+                //    时候按匹配程度排的只是**默认那一种**排法，人点过表头就以他点的那一列
+                //    为准，见 `WorkQuery::sorted_by_default`），而左栏只有两百来点宽。
+                //    常驻两行的话，它底下压着的平台、中文、识别结论、收藏与合集、条件组
+                //    一路下移，最底下「语言」那一段被顶出视口。
+                //
+                // **「怎么回到默认」放悬停**，不往屏上那一行里塞：塞进去就是三行。
+                if !self.query.search.trim().is_empty() {
+                    look::help(ui, "搜索结果默认按匹配程度排序；点表头可以改成按那一列排。")
+                        .on_hover_text(
+                            "「默认」那一种排法就是按匹配程度排。点过表头之后以你点的那一列为准；\
+                             在同一个表头上点到第三下就回到默认那一种——不必把搜索词删掉重打。",
+                        );
+                }
 
                 pane_gap(ui);
                 section_title(ui, "平台", None)
@@ -3112,6 +3549,25 @@ impl Screen {
     fn rule_box(&mut self, ui: &mut egui::Ui) -> bool {
         let tokens = Tokens::builtin();
         let 留白 = tokens.space.rule_box_padding;
+        // **判「这条子句筛不筛得出东西」要的那点上下文**（票 `gui-looks-like-the-design/12`）：
+        // 平台认不认得出由**平台清单**说了算（界面一律用内置那一份，挂单 `Q1031`）；
+        // 库里有哪几个合集由中立库那份投影说了算（分面那一趟已经问回来了，不另查一遍）。
+        // **判在核心库**（`sublibrary::thin`），这一层只把这两样交出去。
+        // **内置清单只建一次**：`Manifest::builtin()` 要解一遍 TOML、编一遍那批模式，
+        // 而这儿是**画帧线**——每帧建一份的话，光摆着不动也在烧 CPU。
+        static 平台清单: std::sync::OnceLock<romcat_core::platform::Manifest> =
+            std::sync::OnceLock::new();
+        let platforms = 平台清单.get_or_init(romcat_core::platform::Manifest::builtin);
+        let collections: Vec<String> = self
+            .facets
+            .collections
+            .iter()
+            .map(|facet| facet.value.clone())
+            .collect();
+        let known = romcat_core::sublibrary::KnownValues {
+            platforms,
+            collections: &collections,
+        };
         egui::Frame::new()
             .fill(ui.visuals().window_fill)
             .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
@@ -3119,7 +3575,7 @@ impl Screen {
             .inner_margin(egui::Margin::from(egui::vec2(留白, 留白)))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                self.filter.ui(ui)
+                self.filter.ui(ui, &known)
             })
             .inner
     }
@@ -3738,7 +4194,7 @@ impl Screen {
     /// 选中的那张描强调色、铺强调浅底。点中了返回 `true`。**依据**摊在底下「判定依据」那一块
     /// （[`Self::basis_ui`]）。
     ///
-    /// **置信度那一档走五屏共用的那一份**（[`crate::look`]，票 `gui-redesign/12`）：色条与标签出自一处，
+    /// **置信度那一档走六屏共用的那一份**（[`crate::look`]，票 `gui-redesign/12`）：色条与标签出自一处，
     /// 而且**两样一起出现**——色觉障碍下读得出来的只有词。
     ///
     /// **那个词由核心库挑**（[`WorkVariant::confidence_label`]，票 `gui-redesign/17`）：一条候选都没有时
@@ -4214,8 +4670,73 @@ fn exception_block(
 /// **打开外部程序**那一下：拿到一个路径交给系统（播放视频、看原图、打开位置），不成时交回一句为什么。
 type Opener = Box<dyn FnMut(&std::path::Path) -> Result<(), String>>;
 
-/// 表格上方那一条右端「清除选择」那颗按钮上的字（设计稿 `#clear-pick`）。
+/// 表格上方那一条上「清除选择」那颗按钮上的字（设计稿 `#clear-pick`）。
+///
+/// 照稿它在**左边那一流**里（`.seg`、`.cnt`、选中数之后，那一组批量操作之前），
+/// 不在这一条的右端——右端是 `.acts`（挂单 `Q1102`）。
 const CLEAR_PICK: &str = "清除选择";
+
+/// 表格上方那一条右端那一组**批量操作**里的一颗（设计稿 `.tbar .acts`）。
+///
+/// **摆成一个闭集合**：这一组要先量宽、再决定摆在哪一行（`Screen::action_width` 与
+/// `Screen::list_bar`），而**量的与画的必须是同一批按钮、同一串字**——各写一遍的话，
+/// 加了一颗却没加进量的那一处，摆出来就差一截，而那种错在屏上是「最右一颗贴着边」
+/// 或者「早折了一行」这种说不清的样子。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// 「刮削…」（稿上 `#open-scrape`）。
+    Scrape,
+    /// 「★ 收藏」（稿上 `#fav`）。
+    Favorite,
+    /// 「合并作品…」（稿上 `#merge-btn`，票 `16` 做的）。
+    Merge,
+}
+
+/// 这一组照稿的次序，**量宽与画都走它**。
+///
+/// 稿上是五颗：**刮削… / ★ 收藏 / 加入合集… / 合并作品… / 加入子库…**。
+/// 今天摆得出三颗，另外两颗**位置照稿留着**，各归一张票：
+///
+/// - **「加入合集…」归票 `13`**（收藏与合集的弹层），摆在「★ 收藏」与「合并作品…」之间；
+/// - **「加入子库…」归票 `23`**（从浏览屏加入子库），摆在最右，稿上是 `btn sm pri`
+///   ——**这一组里唯一的主按钮**。
+///
+/// 写在这儿是为了那两票不必各自再想一遍摆在哪：次序是稿定的，不是先到先得。
+const ACTIONS: [Action; 3] = [Action::Scrape, Action::Favorite, Action::Merge];
+
+impl Action {
+    /// 按钮上的字。
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Scrape => "刮削…",
+            Self::Favorite => "★ 收藏",
+            Self::Merge => merge::MERGE,
+        }
+    }
+
+    /// 悬停里那一段。
+    fn hint(self) -> &'static str {
+        match self {
+            // **「刮削…」只摊开弹层**——真按下去那一下在弹层底下，因为按之前该先看清
+            // 那本账；作用于哪一批，弹层标题上写着。
+            Self::Scrape => {
+                "对勾中的那几个作品取元数据与媒体。四个旋钮定清楚要干什么，\
+                 按下去之前就看得见会发多少网络请求、大概多久。"
+            }
+            Self::Favorite => {
+                "把勾中的那一批全放进收藏。落沉淀库、锚在内容上——\
+                 删掉中立库重扫、改名、挪目录都还在。无判据的那些只钉得住本机路径，\
+                 按完的回执里会点名说有几个。\n\n\
+                 取消收藏与自建合集在左栏最底下：加收藏按得最勤，所以只有它在这一组里。"
+            }
+            Self::Merge => {
+                "把被识别成不同作品、其实是同一个游戏的变体归到一起。\n\n\
+                 勾两个或更多作品再按。只写入裁决记录，不会移动或修改任何文件。"
+            }
+        }
+    }
+}
 
 /// 刚落下一批裁决时，底边那条提示条上那颗按钮上的字（设计稿 `doMerge` 末尾那个 `toast`）。
 const UNDO: &str = "撤销";

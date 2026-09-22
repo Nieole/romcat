@@ -79,6 +79,50 @@ pub fn unlinked_title(work: &WorkRow, rules: &Rules) -> Option<String> {
     work.title(rules)
 }
 
+/// **这一行屏上叫什么**：主栏那一行印的那个名字，以及副行该跟什么。
+///
+/// 三处要它：表格那一格（`name_cell`）、卡片墙的卡面、右键菜单顶上那一行连「复制名称」
+/// （`crate::browse::menu`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowName {
+    /// **认不出作品**：主栏是那份内容的**正题**，副行是「未关联作品」标签加根名与相对路径。
+    Loose(String),
+    /// 认出来、而且挑得出**显示标题**：主栏是它，副行小字是作品名。
+    Display(String),
+    /// 挑不出显示标题：主栏就是**作品名**，副行不写。
+    WorkName(String),
+}
+
+impl RowName {
+    /// 主栏那一行印的那几个字。
+    #[must_use]
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Loose(text) | Self::Display(text) | Self::WorkName(text) => text,
+        }
+    }
+}
+
+/// **这一行屏上叫什么，只有这一处判**（ADR-0024）。
+///
+/// 它是一条**次序**：认不出作品的那一行印正题、认出来的印显示标题、都挑不出才印作品名。
+/// 三处各写一遍，屏上同一行在三处就会叫三个名字——而「复制名称」复制的那个会与人眼前
+/// 看见的不是同一个。
+///
+/// 交回的不只是那几个字，还有**是哪一支**：表格那一格照它决定副行写什么
+/// （`name_cell`），而「主栏印谁」与「副行跟什么」本来就是同一个决定的两半，
+/// 拆开就又是两处判据。
+#[must_use]
+pub fn row_name(work: &WorkRow, rules: &Rules) -> RowName {
+    if let Some(title) = unlinked_title(work, rules) {
+        return RowName::Loose(title);
+    }
+    if let Some(display) = work.display.clone() {
+        return RowName::Display(display);
+    }
+    RowName::WorkName(work.name.clone())
+}
+
 /// 窗口默认一次取多少行。
 ///
 /// 视口撑死几十行，取 512 是给上下滚动留预取余量：往下翻过 3/4 个窗口才需要再查一次库。
@@ -353,6 +397,18 @@ pub struct Opened {
     pub page: bool,
 }
 
+/// 表上或卡片墙上这一帧**右键按下**的那一行（[`crate::browse::menu`] 那一层贴着它摊开）。
+///
+/// **两路共用这一个**：表格与卡片墙各自认出「这一下是右键、按在哪一行」，交出来的是同一份
+/// ——菜单上摆哪几项由那一层一处说了算（ADR-0024）。
+#[derive(Debug, Clone)]
+pub struct RightClicked {
+    /// 那一行的一份拷贝。
+    pub row: WorkRow,
+    /// 按下去那一下指针在哪儿——菜单贴着它摊开（设计稿 `ctxOpen(e.clientX,e.clientY,…)`）。
+    pub at: egui::Pos2,
+}
+
 /// 一张主列表。
 ///
 /// 它**直接改 `query`**：点表头就是换排序，而排序是中立库那一层的事，界面这边只是把
@@ -381,6 +437,18 @@ pub struct Table<'a> {
     /// **行首那一小格封面**：「在每行开头显示封面」开着时是 `Some`，关着是 `None`
     /// ——那时行首什么都不摆，行也照令牌矮回 `table-row`。
     pub shelf: Option<&'a mut Shelf>,
+    /// **右键按在哪一行**：这一帧按了就落一份在这儿（[`RightClicked`]）。
+    ///
+    /// 不走返回值那一条（[`Opened`]）：右键**不打开**任何东西，它只摊开一层菜单，
+    /// 而那一层归浏览屏画（[`crate::browse::menu`]）。两件事各走各的口子，读代码的人
+    /// 不必先分辨这一帧交回来的那一行是「点开了」还是「右键了」。
+    pub menu: &'a mut Option<RightClicked>,
+    /// **把高亮那一行滚进视口**：`↑` `↓` 刚挪过高亮的那一帧是 `true`。
+    ///
+    /// 滚**最少那么多**（`align` 给 `None`）而不是滚到正中：设计稿那一路
+    /// （`scrollIntoView({block:'nearest'})`）也是这样——翻着看时整张表跟着跳，
+    /// 上下文就全没了。
+    pub scroll_focused: bool,
 }
 
 impl Table<'_> {
@@ -398,6 +466,8 @@ impl Table<'_> {
             scroll_to,
             rules,
             mut shelf,
+            menu,
+            scroll_focused,
         } = self;
         let tokens = Tokens::builtin();
         // 行首摆封面时一行照令牌 `table-row-cover` 高：两行字旁边还得竖得下那一小格封面。
@@ -413,6 +483,9 @@ impl Table<'_> {
         let total_rows = window.total();
         let total = usize::try_from(total_rows).unwrap_or(usize::MAX);
         let (sorted_by, descending) = (query.order, query.descending);
+        // 排法是不是默认那一种——**核心库那一处说了算**（`WorkQuery::sorted_by_default`）。
+        // 表头画不画箭头、搜索着的时候按不按匹配质量排，是同一句话。
+        let 照默认排 = query.sorted_by_default();
         // **格子里**照旧用这一屏的间距；**格与格、行与行之间**一点缝都不留，每一格自己让出左右留白
         // （[`padded`]）——那样定宽那几列正好是稿上写的宽，选中那一行的底色也连成一整条。
         let spacing = ui.spacing().item_spacing;
@@ -454,6 +527,9 @@ impl Table<'_> {
                 .column(Column::exact(容量宽).clip(true))
                 .column(Column::exact(年份宽).clip(true))
                 .column(Column::exact(元数据宽).clip(true));
+            if scroll_focused && let Some(at) = *focused {
+                builder = builder.scroll_to_row(usize::try_from(at).unwrap_or(usize::MAX), None);
+            }
             if let Some(offset) = scroll_to {
                 builder = builder.vertical_scroll_offset(offset);
             }
@@ -482,17 +558,31 @@ impl Table<'_> {
                     });
                     let mut 表头 = 全选格.rect;
                     // **默认那一种排法不画箭头**（照稿；拿主意的人 2026-09-14 定）：人点过表头、
-                    // 换了排法才出箭头。
-                    let 默认 = WorkQuery::default();
-                    let 照默认排 = sorted_by == 默认.order && descending == 默认.descending;
+                    // 换了排法才出箭头。**是不是默认那一种由核心库答**
+                    // （`WorkQuery::sorted_by_default`）——屏上不画箭头与库里按匹配质量排
+                    // 是同一句话，界面再比一遍就成了第二处判据（ADR-0024）。
                     for order in WorkOrder::ALL {
                         let (_, 这一格) = header.col(|ui| {
                             let active = sorted_by == order;
                             let 箭头 = (active && !照默认排).then_some(descending);
                             if sort_header(ui, spacing, order, 箭头).clicked() {
-                                query.order = order;
-                                // 再点一次同一列就翻方向。
-                                query.descending = active && !descending;
+                                // **点第三次回到默认那一种排法**（票
+                                // `gui-looks-like-the-design/11` 验收第 1 条）：
+                                // 正着 → 倒着 → 默认。走回默认那一档要紧的是**搜索着的时候**
+                                // ——默认那一种就是按匹配质量排，不回来的话，人一旦点过表头
+                                // 就再也回不到「匹配得好的排前面」，除非把搜索词删掉重打。
+                                //
+                                // **作品那一列只有两态**：默认那一种就是它正着排，
+                                // 所以它第三态与第一态本来就是同一个。
+                                if active && descending {
+                                    let 默认 = WorkQuery::default();
+                                    query.order = 默认.order;
+                                    query.descending = 默认.descending;
+                                } else {
+                                    query.order = order;
+                                    // 再点一次同一列就翻方向。
+                                    query.descending = active;
+                                }
                             }
                         });
                         表头 = 表头.union(这一格.rect);
@@ -603,6 +693,18 @@ impl Table<'_> {
                         // （票 `gui-redesign/12` 验收第 7 条）。行自己画底色，走不了 egui
                         // 按钮那条路，得自己描一圈。
                         look::focus_ring(&ctx, 看得见的, &response);
+                        // **右键也换高亮**（设计稿 `contextmenu` 那一路先 `S.sel=i` 再
+                        // `render()`）：菜单上那几项动的就是这一行，屏上得看得出是哪一行。
+                        // 侧边详情跟着换，由浏览屏在下一帧办（`Screen::settle_menu`）。
+                        if response.secondary_clicked()
+                            && let Some(at) = response.interact_pointer_pos()
+                        {
+                            *focused = Some(index);
+                            *menu = Some(RightClicked {
+                                row: work.clone(),
+                                at,
+                            });
+                        }
                         if response.clicked() {
                             *focused = Some(index);
                             // **交一份拷贝出去而不只是下标**：详情面板要在这一行滚出视口
@@ -786,13 +888,18 @@ fn name_cell(ui: &mut egui::Ui, work: &WorkRow, rules: &Rules, shelf: Option<&mu
     // 是不是由核心库答（`WorkRow::non_game_asset`），这里照着标，
     // 不自己判（ADR-0024）。
     let hit = work.hit.filter(|hit| *hit > SearchHit::Title);
-    if let Some(title) = unlinked_title(work, rules) {
-        two_lines(ui, work, hit, &title, Some(UNLINKED_LABEL), Second::Path);
-        return;
-    }
-    if let Some(display) = work.display.as_deref() {
-        two_lines(ui, work, hit, display, None, Second::WorkName);
-        return;
+    // **主栏印谁、副行跟什么，问同一处**（[`row_name`]，ADR-0024）：卡片墙与右键菜单
+    // 照的是同一个答案，三处不会各叫各的名字。
+    match row_name(work, rules) {
+        RowName::Loose(title) => {
+            two_lines(ui, work, hit, &title, Some(UNLINKED_LABEL), Second::Path);
+            return;
+        }
+        RowName::Display(display) => {
+            two_lines(ui, work, hit, &display, None, Second::WorkName);
+            return;
+        }
+        RowName::WorkName(_) => {}
     }
     // 取不到显示标题的那一行一行字：作品名，拉丁与数字加粗（设计稿 `.w1`）。
     if hit.is_none() && !work.non_game_asset {

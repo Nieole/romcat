@@ -17,7 +17,9 @@
 //! 窗口宽度一变就回到自动收起（拿主意的人 2026-09-14 定，挂单 `Q867`）。这一层只交回按下去的是哪一种
 //! （[`Pressed::Collapse`] 还是 [`Pressed::Peek`]），记不记、什么时候作废由窗口那一层管。
 //!
-//! 设置入口等设置屏（票 31）来了再摆；新手引导主程序眼下没有，栏底不摆那一颗。
+//! 设置摆在「后台」那一组、紧跟任务（设计稿 `.rail` 里那一颗 `data-go="set"`），**不带计数**——
+//! 设置里没有哪个数答得上「还差多少」（票 `gui-looks-like-the-design/31`）。新手引导主程序眼下
+//! 没有，栏底不摆那一颗。
 
 use egui::{Color32, Rect, Sense, vec2};
 use romcat_core::report::thousands;
@@ -30,8 +32,20 @@ use crate::tokens::Tokens;
 pub const GROUPS: [(&str, &[View]); 3] = [
     ("整理", &[View::Library, View::Queue, View::Browse]),
     ("输出", &[View::Sublibraries]),
-    ("后台", &[View::Tasks]),
+    ("后台", &[View::Tasks, View::Settings]),
 ];
+
+/// 左栏那六个入口**从上到下**的次序。
+///
+/// `⌘/Ctrl+1–6` 数的就是它（票 `gui-looks-like-the-design/14`）：屏上摆着的次序与键上数的次序
+/// **是同一份**（[`GROUPS`]）。另记一份的话，哪天分组一改，第 3 下按到的就不再是屏上第三个。
+#[must_use]
+pub fn order() -> Vec<View> {
+    GROUPS
+        .iter()
+        .flat_map(|(_, views)| views.iter().copied())
+        .collect()
+}
 
 /// 切换主库那张卡上的那句话。
 pub const SWITCH: &str = "切换主库";

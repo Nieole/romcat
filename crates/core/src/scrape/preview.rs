@@ -357,6 +357,60 @@ pub fn extract_frame(program: &str, video: &Path) -> Result<Vec<u8>, Missing> {
     Ok(out.stdout)
 }
 
+/// **这台机器上有没有 ffmpeg、是哪一版**：跑一趟 `<program> -version`，把它自报的第一行折成一句。
+///
+/// 抽首帧那条路是**用到才知道**（[`extract_frame`] 在「程序不在」那一下交回
+/// [`Missing::NoFfmpeg`]），而设置屏上那盏灯要在一个视频都还没点开的时候就答得出来。
+///
+/// **判据摆在核心库而不在界面层**（ADR-0024）：「它在不在、算哪一版」是一条领域判断，
+/// 两处各挑一次迟早挑出两个答案。`program` 单独收进来与 [`extract_frame`] 同理——
+/// 「它不在」那条路要测得到（[`NO_SUCH_PROGRAM`]）。
+///
+/// 交回来的是**版本那一小截**（`ffmpeg version 7.1 Copyright …` → `7.1`）；第一行里读不出
+/// 版本时交回整条第一行——照实交出它说了什么，比编一个版本号强。
+///
+/// # Errors
+/// - 程序不在：[`Missing::NoFfmpeg`]。**这不是失败**，是这条路本来就允许的退化。
+/// - 程序在、跑不起来或者退了个非零：[`Missing::FrameFailed`]。
+pub fn probe(program: &str) -> Result<String, Missing> {
+    let out = match std::process::Command::new(program).arg("-version").output() {
+        Ok(out) => out,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Err(Missing::NoFfmpeg {
+                program: program.to_string(),
+            });
+        }
+        Err(source) => {
+            return Err(Missing::FrameFailed {
+                why: format!("{program} 跑不起来（{source}）"),
+            });
+        }
+    };
+    if !out.status.success() {
+        return Err(Missing::FrameFailed {
+            why: format!("{program} 退出码 {}", out.status),
+        });
+    }
+    Ok(version_of(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// `ffmpeg -version` 吐出来的那一堆里，版本是哪一截。
+///
+/// 第一行形如 `ffmpeg version 7.1 Copyright (c) 2000-2024 …`：取 `version` 后头那一个词。
+/// 读不出来就交回整条第一行（截到 80 个字符），空的话交回一句「版本读不出来」。
+fn version_of(text: &str) -> String {
+    let first = text.lines().next().unwrap_or("").trim();
+    let after = first
+        .split_whitespace()
+        .skip_while(|word| *word != "version")
+        .nth(1);
+    match after {
+        Some(version) => version.to_string(),
+        None if first.is_empty() => "版本读不出来".to_string(),
+        None => first.chars().take(80).collect(),
+    }
+}
+
 /// 用**系统默认程序**打开这个文件。视频那一下点下去走的就是它。
 ///
 /// 三个平台各一条命令，**都不经过 shell**：路径直接当参数递过去，于是带空格、带中文、
@@ -778,6 +832,28 @@ mod tests {
             .expect_err("没有这个程序");
         assert!(why.is_no_ffmpeg(), "{why:?}");
         assert!(why.render().contains("这台机器上没有"), "{}", why.render());
+    }
+
+    /// 探一下与抽一帧**对「它不在」说的是同一句**：设置屏那盏灯与媒体那一格不许各说各的。
+    #[test]
+    fn 探一下也说得出ffmpeg不在() {
+        let why = probe(NO_SUCH_PROGRAM).expect_err("没有这个程序");
+        assert!(why.is_no_ffmpeg(), "{why:?}");
+        assert!(why.render().contains(NO_SUCH_PROGRAM), "{}", why.render());
+    }
+
+    #[test]
+    fn 版本从它自报的第一行里取() {
+        let 它说 = "ffmpeg version 7.1 Copyright (c) 2000-2024 the FFmpeg developers\n\
+                    built with Apple clang\n";
+        assert_eq!(version_of(它说), "7.1");
+    }
+
+    /// 读不出版本就**照实交出它说了什么**，不编一个版本号。
+    #[test]
+    fn 读不出版本就交回那一行() {
+        assert_eq!(version_of("某个自制的 ffmpeg\n别的"), "某个自制的 ffmpeg");
+        assert_eq!(version_of(""), "版本读不出来");
     }
 
     #[test]

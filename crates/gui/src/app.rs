@@ -1,4 +1,4 @@
-//! 窗口本体：五屏由左栏切换，每屏一个屏头，**待确认队列**是打开工具后看见的那一屏。
+//! 窗口本体：六屏由左栏切换，每屏一个屏头，**待确认队列**是打开工具后看见的那一屏。
 //!
 //! ## 为什么默认是队列而不是封面墙
 //!
@@ -19,7 +19,7 @@
 //! `set_ime_allowed(false)`。所以关窗请求来的第一帧不真的关：先撤销关闭、放掉文本焦点、
 //! 发一条 `IMEAllowed(false)`，下一帧再关。[`App::closing`] 就是这两拍的状态。
 //!
-//! ## 五屏共用的那两样也在这儿接上
+//! ## 六屏共用的那两样也在这儿接上
 //!
 //! 开窗第一帧装两样：[观感基线](crate::look)——置信度四档的颜色与
 //! 键盘焦点长什么样；以及[上次拖到哪儿的版式](crate::layout)——六条面板边界的宽度，
@@ -42,7 +42,7 @@
 
 use std::path::PathBuf;
 
-use crate::{browse, layout, look, queue, rail, roots, sublibrary, task};
+use crate::{browse, dialog, layout, look, queue, rail, roots, settings, sublibrary, task};
 use romcat_core::catalog::WorkQuery;
 use romcat_core::report::thousands;
 use romcat_core::site::Site;
@@ -56,6 +56,31 @@ pub enum Closing {
     Deferred,
     /// 已经把关闭命令发出去了。
     Sent,
+}
+
+/// **这一下是不是「单按了这个键」**：按下、而且**没带 `⌘` / `Ctrl` / `Alt`**。
+///
+/// 照的是设计稿那一支（`if(typing||mod&&k.toLowerCase()!=='a')return`）：带修饰键的那几下
+/// 各有各的归处（`⌘ A` 全选、`⌘ F` 搜索），剩下的一概不接——不然 macOS 上 `Ctrl+F`
+/// （系统里那是「光标右移」）会被当成收藏。
+///
+/// **看的是那一下自己带的修饰键**，不是 `InputState::modifiers` 那份「眼下按着什么」：
+/// 后者由开窗那一层每帧填，测试里合成的输入填不出来——而这道门正是测试要钉的。
+/// `shift` 不算：`?` 在多数键盘上就得按 `shift` 才打得出来。
+fn 单键按下(ctx: &egui::Context, key: egui::Key) -> bool {
+    ctx.input(|input| {
+        input.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Key {
+                    key: 按的,
+                    modifiers,
+                    pressed: true,
+                    ..
+                } if *按的 == key && !(modifiers.command || modifiers.ctrl || modifiers.alt)
+            )
+        })
+    })
 }
 
 /// 看的是哪一屏。
@@ -82,16 +107,22 @@ pub enum View {
     Sublibraries,
     /// **任务**：排队、进度、可停、历史。**不发起操作，只承接**（票 01）。
     Tasks,
+    /// **设置**：八节摆在一屏上——常规、工作目录、数据源、刮削、导出、工具、快捷键、关于
+    /// （票 `gui-looks-like-the-design/31`）。
+    ///
+    /// **它是一屏，不是一层弹层**（规格实现决定三）：与另外五屏同级，走同一套左栏入口、同一个屏头。
+    Settings,
 }
 
 impl View {
-    /// 全部五屏。左栏里的次序另有一份，照设计稿分组（[`rail::GROUPS`]）。
-    pub const ALL: [Self; 5] = [
+    /// 全部六屏。左栏里的次序另有一份，照设计稿分组（[`rail::GROUPS`]）。
+    pub const ALL: [Self; 6] = [
         Self::Queue,
         Self::Library,
         Self::Browse,
         Self::Sublibraries,
         Self::Tasks,
+        Self::Settings,
     ];
 
     /// 这一屏叫什么。用**词表**里的词。
@@ -103,6 +134,7 @@ impl View {
             Self::Browse => "浏览",
             Self::Sublibraries => "子库",
             Self::Tasks => "任务",
+            Self::Settings => "设置",
         }
     }
 
@@ -132,6 +164,8 @@ pub struct App {
     sublibrary: sublibrary::Screen,
     /// 任务那一屏。
     tasks: task::Screen,
+    /// 设置那一屏。
+    settings: settings::Screen,
     /// **任务台**：长活排在这儿跑，跑在画帧那条线程之外。
     board: task::Tasks,
     /// 六条**面板边界**各自拖到哪儿了。存**工作目录**，不存中立库。
@@ -148,13 +182,24 @@ pub struct App {
     prepared: bool,
     /// 上一次写进窗口标题的那一句。**标题变了才发一条命令**（换屏、打开或换掉作品详情页），不是每帧发一条。
     titled: Option<String>,
+    /// **按 `?` 摊开的那层快捷键表**开着没有（票 `gui-looks-like-the-design/14`）。
+    ///
+    /// 开没开着由画它的那一屏自己记——这一层是窗口，因为 `?` 在哪一屏上按都摊得开
+    /// （[`crate::dialog`] 那一条「弹层开没开着是画它的那一屏自己记着的」）。
+    keys_sheet: bool,
     /// **人按了左栏顶上那张「切换主库」。**
     ///
-    /// 这一层自己换不了库：五屏全建立在「库一定在」这个前提上，换库那一下要把整份
+    /// 这一层自己换不了库：六屏全建立在「库一定在」这个前提上，换库那一下要把整份
     /// **现场**换掉，而那件事在 [`Program`](crate::program::Program) 上（ADR-0023）。
     /// 这儿只放下一个记号，由它下一步读走——**放下就不撤**：读到它的那一下这份 `App`
     /// 整个被丢掉，没有「换回来」这回事。
     switching: bool,
+    /// **人在设置屏上挑了一个新的工作目录。**
+    ///
+    /// 与 [`Self::switching`] 同一个形状、同一个理由：换一个工作目录等于换一整套工具状态
+    /// （词表**工作目录**那一条），那件事同样在 [`Program`](crate::program::Program) 上。
+    /// 这儿只放下一个记号，由它下一步读走，整份退回**开场**——那边列得出新目录里有哪几份库。
+    switch_workspace: Option<PathBuf>,
     /// 左栏「浏览」那一项的**作品数**：核心库按默认那一套筛选数的。`None` 是数不出来。
     /// 不每帧问，见模块文档「左栏的几个数从哪来」。
     works: Option<u64>,
@@ -203,7 +248,8 @@ impl App {
         for fold in layout::Fold::ALL {
             roots.set_folded(fold, layout.folded(fold));
         }
-        let workspace_label = Self::shorten_home(&workspace);
+        let workspace_label = shorten_home(&workspace);
+        let workspace_for_settings = workspace.clone();
         let mut sublibrary = sublibrary::Screen::new(workspace);
         sublibrary.reload(&site);
         // **给人看的主库原名，不是主库标识。** `Site::library_identity` 是中立库的主文件名
@@ -219,13 +265,16 @@ impl App {
             browse,
             sublibrary,
             tasks: task::Screen::new(),
+            settings: settings::Screen::new(workspace_for_settings),
             board: task::Tasks::new(),
             layout,
             library_label,
             workspace_label,
             prepared: false,
             titled: None,
+            keys_sheet: false,
             switching: false,
+            switch_workspace: None,
             works: None,
             verdicts: None,
             rail_peek: None,
@@ -278,20 +327,6 @@ impl App {
         self.tasks.pin_clock(clock);
     }
 
-    /// 工作目录排成给人看的样子：落在 `HOME` 底下的缩成 `~/…`，别处照原样。
-    fn shorten_home(workspace: &std::path::Path) -> String {
-        std::env::var_os("HOME")
-            .and_then(|home| {
-                workspace
-                    .strip_prefix(&home)
-                    .ok()
-                    .map(|rest| std::path::Path::new("~").join(rest))
-            })
-            .unwrap_or_else(|| workspace.to_path_buf())
-            .display()
-            .to_string()
-    }
-
     /// 窗口标题：**开的是哪一份库、看的是哪一屏**（验收第 6 条）。
     ///
     /// 两样都写进去，是因为它们各自回答一个只有标题答得了的问题：任务栏上并排两个
@@ -329,6 +364,23 @@ impl App {
     #[must_use]
     pub fn switching(&self) -> bool {
         self.switching
+    }
+
+    /// **人在设置屏上挑好的那个新工作目录**：[`Program`](crate::program::Program) 取走它，
+    /// 整份退回开场。取走就没了，同 [`Self::switching`] 那个记号一样不撤。
+    pub fn take_workspace_switch(&mut self) -> Option<PathBuf> {
+        self.switch_workspace.take()
+    }
+
+    /// 设置那一屏，供测试查看的是哪一节、改名改成了没有。
+    #[must_use]
+    pub fn settings(&self) -> &settings::Screen {
+        &self.settings
+    }
+
+    /// 设置那一屏，改得动的那一份：截图那一路拿它翻到某一节、把探 ffmpeg 那个程序名钉死。
+    pub fn settings_mut(&mut self) -> &mut settings::Screen {
+        &mut self.settings
     }
 
     /// 关窗走到哪一拍了。测试拿它核对两拍的次序。
@@ -525,7 +577,7 @@ impl App {
                             self.browse.refresh(&self.site);
                         }
                         // **导出跑完了，哪一屏都不必重读**：它写出去的是主库根上那些
-                        // 元数据文件，五屏一个都不画它们；库里被它动过的只有**底本**
+                        // 元数据文件，六屏一个都不画它们；库里被它动过的只有**底本**
                         // 与那个时刻戳，而工序段那一行已经由 `Section::settle` 自己
                         // 重问过了。这一支空着是**故意的**，不是漏了——照抄上面两支
                         // 随手 `reload` 一屏，等于每导一趟就白读一遍几万行。
@@ -696,6 +748,8 @@ impl App {
         // 人会看见子库屏又闪一下才换过去。点一下 egui 本来就会再要一帧，所以
         // 「下一帧开头结算」在眼里就是「按下去就换」。
         self.route();
+        self.shortcuts(ui.ctx());
+        self.keys_sheet(ui.ctx());
         // **换到别的屏，子库屏删掉一台之后留着的那一份撤销就丢掉**（拿主意的人 2026-09-14 定）：提示条上
         // 那颗「撤销」只在子库屏摆着的时候按得着。
         if self.view != View::Sublibraries {
@@ -788,6 +842,16 @@ impl App {
                 let (tasks, board) = (&mut self.tasks, &mut self.board);
                 tasks.ui(ui, board);
             }
+            View::Settings => {
+                let facts = settings::Facts {
+                    site: &self.site,
+                    workspace_label: &self.workspace_label,
+                    verdicts: self.verdicts,
+                    open_last: settings::open_last(&self.layout),
+                };
+                self.settings.ui(ui, &facts);
+                self.settle_settings();
+            }
         }
         // **这一句要在画完之后问**：排活的那一下就发生在上面那几屏里
         // （子库屏点「排差量预览」）。搁在这一帧开头问的话，刚排上去的那一趟要等到
@@ -826,6 +890,14 @@ impl App {
         // 与开场那一态（`Program::ui`）走同一句：两态各装一遍的话，换进主窗口那一帧会再装一次。
         look::install_once(ctx);
         self.layout.seed(ctx);
+        // **记着的那一档外观装回去**（设置屏「常规」那一排，[`settings::THEME_KEY`]）。
+        // 没记过就一个字都不碰：egui 默认跟随系统，而截图那一路正靠这一条——
+        // 临时工作目录里没有这份偏好，两张基线各自按自己要的那套主题画。
+        if let Some(记着的) = self.layout.preference(settings::THEME_KEY)
+            && let Some(挑的) = settings::theme_of(记着的)
+        {
+            ctx.set_theme(挑的);
+        }
     }
 
     /// 窗口标题变了（换屏、打开或换掉作品详情页）就改掉。**变了才发**，不是每帧发一条。
@@ -836,6 +908,194 @@ impl App {
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
         self.titled = Some(title);
+    }
+
+    /// **全窗口的快捷键，全在这一处**（票 `gui-looks-like-the-design/14`）。
+    ///
+    /// 摆在窗口这一层而不在某一屏里，理由与 [`Self::start_stage`] 同一条：**只有这儿够得着
+    /// 「看的是哪一屏」**（ADR-0005：屏与屏之间不该互相拿着对方）。浏览屏那几下
+    /// （`↑` `↓` / `Enter` / `空格` / `⌘ A` / `F` / `E`）因此也接在这儿，不在那一屏里另开一个
+    /// 键盘入口——**一件事一个判据**（ADR-0024）：「这一下算不算快捷键」的那三道门只有一份。
+    ///
+    /// ## 三道门
+    ///
+    /// 前两道抄的是逐条那一处（`queue::Screen::keyboard`）：
+    ///
+    /// 1. **有一层弹层开着不接**（[`crate::dialog::screen_has_keys`]）——egui 的 `Modal`
+    ///    拦得住指针、拦不住键盘。
+    /// 2. **光标在文本框里不接**——那一栏里正打着中文，`F` 是用户要的字母不是命令。
+    /// 3. **有一层浮层摊着不接**（[`egui::Popup::is_any_open`]）——右键菜单、下拉都算。
+    ///    菜单摊着时 `Esc` 该收的是菜单，那一下归 egui 那一层收（`browse::menu`）；这里再接
+    ///    一遍，就成了一下退两层。
+    ///
+    /// ## `Esc` 一层一层退
+    ///
+    /// 这里**一个 `Esc` 都不接**。那一下收的是**浮起来的那两层**，各自收各自的：
+    /// 右键菜单由 `egui::Popup` 自己收（`browse::menu`），弹层由 [`crate::dialog`] 那一处
+    /// `consume_key` 收。**一下只退一层**，因为上面那两层开着时这一处压根不跑（门 1 与门 3），
+    /// 而两层叠着时 `dialog` 自己只退最上面那一层。
+    ///
+    /// 屏与屏之间**不归 `Esc` 管**：作品详情页回三栏走的是它顶上那颗「← 返回浏览」，
+    /// 屏上那张表里 `Esc` 那一条写的也是「关闭对话框或菜单」（[`crate::keys`]）。
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        if !crate::dialog::screen_has_keys(ctx)
+            || egui::Popup::is_any_open(ctx)
+            || ctx.egui_wants_keyboard_input()
+        {
+            return;
+        }
+        self.switch_view_keys(ctx);
+        self.browse_keys(ctx);
+    }
+
+    /// 走到哪一屏、开哪一层：`⌘/Ctrl+1–6`、`⌘/Ctrl+,`、`⌘/Ctrl+F`、`?`。
+    fn switch_view_keys(&mut self, ctx: &egui::Context) {
+        const 数字: [egui::Key; 6] = [
+            egui::Key::Num1,
+            egui::Key::Num2,
+            egui::Key::Num3,
+            egui::Key::Num4,
+            egui::Key::Num5,
+            egui::Key::Num6,
+        ];
+        // **第几下就是左栏上从上往下第几个**（[`rail::order`]）：屏上摆着的次序与键上数的
+        // 次序是同一份，不在这儿另列一遍。
+        for (at, view) in rail::order().into_iter().enumerate() {
+            let Some(key) = 数字.get(at).copied() else {
+                break;
+            };
+            let 这一下 = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, key);
+            if ctx.input_mut(|input| input.consume_shortcut(&这一下)) {
+                // **先关掉作品详情页**（设计稿 `S.wd=false` 在 `go(...)` 之前）：它盖住整块屏，
+                // 留着的话换回浏览屏时看见的还是它。
+                self.browse.close_page();
+                self.show_view(view);
+            }
+        }
+        let 设置 = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Comma);
+        if ctx.input_mut(|input| input.consume_shortcut(&设置)) {
+            self.view = View::Settings;
+        }
+        // **搜索**：换到浏览屏、把筛选栏展开（收着时那一框连画都不画）、光标放进去。
+        // 放进去那一下由浏览屏在画那一框的那一帧落实（`browse::Screen::focus_search`）。
+        let 搜索 = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::F);
+        if ctx.input_mut(|input| input.consume_shortcut(&搜索)) {
+            // 详情页盖住整块屏，那一框在它底下——不关掉的话记号会一直悬着（设计稿 `S.wd=false`）。
+            self.browse.close_page();
+            self.view = View::Browse;
+            layout::FILTER.set_collapsed(ctx, false);
+            self.browse.focus_search();
+        }
+        // **`?` 看快捷键**：一层弹层，摆的是全仓那唯一一份表（[`crate::keys`]）。
+        let 快捷键 = egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::Questionmark);
+        if ctx.input_mut(|input| input.consume_shortcut(&快捷键)) {
+            self.keys_sheet = true;
+        }
+    }
+
+    /// 浏览屏那几下：`↑` `↓` 挪高亮、`Enter` 打开、`空格` 勾选、`⌘/Ctrl+A` 全选、
+    /// `F` 收藏、`E` 编辑元数据。
+    ///
+    /// **只在浏览屏、而且作品详情页没开着时才接**（设计稿 `S.screen!=='browse'||S.wd`）：
+    /// 详情页盖住整块屏，那时 `F` 与 `E` 说的是另一件事。
+    ///
+    /// **摆着卡片墙时，跟高亮走的那六下一下都不接**（挂单 `Q1142`）：高亮是表格背后那扇窗的
+    /// **行序号**，而卡片墙背后是另一扇窗——在卡上按空格会勾中人看不见的另一行，比什么都不
+    /// 发生坏得多。卡片墙自己那条路照旧走得通：Tab 走到一张卡，`Enter` / `空格` 由那张卡
+    /// 自己接（`browse::Screen::card_grid`）。设计稿拿
+    /// `if(e.target.closest('.gcard'))return` 挡的是同一件事。
+    ///
+    /// **`⌘/Ctrl+A` 不在这道门里头**：全选的是**当前这个筛选**（ADR-0016），与光标落在哪一行
+    /// 无关，两种视图上说的是同一件事。
+    fn browse_keys(&mut self, ctx: &egui::Context) {
+        if self.view != View::Browse || self.browse.page().is_some() {
+            return;
+        }
+        let 全选 = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::A);
+        if ctx.input_mut(|input| input.consume_shortcut(&全选)) {
+            self.browse.select_all();
+        }
+        if self.browse.showing_cards() {
+            return;
+        }
+        let (往上, 往下, 打开, 勾选, 收藏, 编辑) = (
+            单键按下(ctx, egui::Key::ArrowUp),
+            单键按下(ctx, egui::Key::ArrowDown),
+            单键按下(ctx, egui::Key::Enter),
+            单键按下(ctx, egui::Key::Space),
+            单键按下(ctx, egui::Key::F),
+            单键按下(ctx, egui::Key::E),
+        );
+        if 往上 {
+            self.browse.step_focus(&self.site.catalog, false);
+        }
+        if 往下 {
+            self.browse.step_focus(&self.site.catalog, true);
+        }
+        if 打开 {
+            self.browse.open_focused(&self.site.catalog);
+        }
+        if 勾选 {
+            self.browse.toggle_pick_focused(&self.site.catalog);
+        }
+        if 收藏 {
+            self.browse
+                .toggle_favorite_focused(&self.site, &mut self.board);
+        }
+        if 编辑 {
+            self.browse.edit_focused(&self.site.catalog);
+        }
+    }
+
+    /// **按 `?` 摊开的那层快捷键表**（设计稿 `DLG.keys`）。
+    ///
+    /// 摆的是全仓那唯一一份表，连**怎么画**也是那一处（[`crate::keys::table`]）——设置屏
+    /// 「快捷键」那一节画的是同一个函数。照稿 `w:620`，也就是[默认那一档](crate::dialog::Width::Standard)。
+    fn keys_sheet(&mut self, ctx: &egui::Context) {
+        if !self.keys_sheet {
+            return;
+        }
+        /// 页脚上按下去的那一颗。
+        enum 按的 {
+            知道了,
+        }
+        let footer = dialog::Footer::new(dialog::Button::new("知道了", 按的::知道了).primary())
+            .dismiss_on_right();
+        let shown = dialog::Dialog::new("快捷键", "快捷键", footer)
+            .note(crate::keys::NOTE)
+            .width(dialog::Width::Standard)
+            .show(ctx, crate::keys::table);
+        if shown.pressed.is_some() {
+            self.keys_sheet = false;
+        }
+    }
+
+    /// 设置屏这一帧交出来的那几样，各自落到该落的地方。
+    ///
+    /// **四样都不是设置屏自己办得了的**：改完名要换窗口标题与左栏那张卡（那两处在窗口上）、
+    /// 换工作目录要整份退回开场（那件事在 [`Program`](crate::program::Program) 上）、
+    /// 外观那一档记进版式文件（版式归窗口管）、优先级表保存后要换进浏览屏（够得着两屏的只有窗口）。
+    fn settle_settings(&mut self) {
+        if let Some(新名) = self.settings.take_renamed() {
+            self.library_label = 新名;
+        }
+        if let Some(开着) = self.settings.take_open_last() {
+            self.layout
+                .set_preference(settings::OPEN_LAST_KEY, if 开着 { "是" } else { "否" });
+        }
+        if let Some(挑的) = self.settings.take_theme() {
+            self.layout
+                .set_preference(settings::THEME_KEY, settings::theme_label(挑的));
+        }
+        if let Some(去处) = self.settings.take_workspace() {
+            self.switch_workspace = Some(去处);
+        }
+        // **与浏览屏那一支是同一件事**（`View::Browse` 那一臂）：优先级那一层在哪儿打开的
+        // 都一样，保存之后浏览屏手上缓着的那一份要跟着换（挂单 `Q782`）。
+        if let Some(priorities) = self.settings.priority_mut().take_saved() {
+            self.browse.set_priorities(priorities);
+            self.browse.refresh(&self.site);
+        }
     }
 
     /// 画左栏：几个计数交进去，按下去的那一下在这儿落实（[`rail`]）。
@@ -872,6 +1132,8 @@ impl App {
             View::Browse => rail::Badge::Count(作品.clone()),
             View::Sublibraries => rail::Badge::Count(子库.clone()),
             View::Tasks => 任务.clone().map_or(rail::Badge::Nothing, rail::Badge::Live),
+            // **设置不带计数**：这一屏里没有哪个数答得上「还差多少」（设计稿那一颗也没有徽标）。
+            View::Settings => rail::Badge::Nothing,
         };
         let facts = rail::Facts {
             library: &self.library_label,
@@ -885,8 +1147,11 @@ impl App {
             Some(rail::Pressed::Go(view)) => self.view = view,
             // **回开场换一份库的那条路**（票 `gui-self-sufficient/04` 验收第 5 条）。
             //
-            // **它不是第六屏**，所以不长成入口里的一项：开场是五屏之外的那一屏，它交出现场之后
+            // **它不是又一屏**，所以不长成入口里的一项：开场是六屏之外的那一屏，它交出现场之后
             // 自己退场（词表**开场**那一条）。一按，这份 `App` 连同它手上那份现场整个退场，不必关窗重开。
+            //
+            // 这句话从前写的是「它不是第六屏」——第六屏自票 `gui-looks-like-the-design/31` 起
+            // 真的有了，就是**设置**（[`View::Settings`]），所以换了说法，说的仍是同一件事。
             Some(rail::Pressed::SwitchLibrary) => self.switching = true,
             Some(rail::Pressed::Collapse(collapsed)) => self.layout.set_rail_collapsed(collapsed),
             Some(rail::Pressed::Peek(peeking)) => self.rail_peek = peeking.then_some(窗口宽),
@@ -909,6 +1174,7 @@ impl App {
             View::Browse => "查找作品，并对选中的内容进行操作".to_owned(),
             View::Sublibraries => "选择集在「浏览」中编辑，这里负责同步到各台设备".to_owned(),
             View::Tasks => "查看正在运行、等待中和已完成的任务".to_owned(),
+            View::Settings => settings::SUBTITLE.to_owned(),
         }
     }
 
@@ -927,11 +1193,13 @@ impl App {
                 roots.header_actions(ui, site);
             }
             View::Browse => {
-                // **屏头上那颗「★ 收藏」真的写库**（票 `gui-redesign/06`），
-                // 所以这一屏的屏头拿的是可变的那一份。它同时**往任务台上排活**
-                // ——那一下在真库量级上是几秒的读（票 `parking-3/09`）。
-                let (browse, site, board) = (&mut self.browse, &mut self.site, &mut self.board);
-                browse.status(ui, site, board, self.demo);
+                // **浏览屏的屏头右边，照稿只剩开发用的那一个开关**
+                // （拿主意的人 2026-09-22 对着稿裁的，挂单 `Q1102`）：
+                // 稿上 `#s-browse .scrhead` 里只有标题、那句副标题，以及两样**默认不画**的
+                // 东西（「正在编辑子库…」与「更新子库」，归票 `23`）。
+                // 那几颗批量按钮稿上从来就在**表格上方那一条**的右端（`.tbar .acts`），
+                // 票 09 把它们整组挪到了屏头（挂单 `Q876`／`Q877`），这一票挪回去。
+                self.browse.status(ui, self.demo);
             }
             View::Sublibraries => {
                 let (sublibrary, site) = (&mut self.sublibrary, &self.site);
@@ -942,6 +1210,9 @@ impl App {
                 let (tasks, board) = (&mut self.tasks, &mut self.board);
                 tasks.status(ui, board);
             }
+            // **设置屏的屏头右边是空的**（设计稿 `#s-set .scrhead` 上只有标题与那句副标题）：
+            // 这一屏上每个动作都贴着它管的那一格，抬到屏头上反而说不清它动的是哪一节。
+            View::Settings => {}
         }
     }
 
@@ -964,4 +1235,21 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
+}
+
+/// 一条路径排成给人看的样子：落在 `HOME` 底下的缩成 `~/…`，别处照原样。
+///
+/// **摆在模块上而不在 `App` 里**：底部状态栏那一段工作目录走它（[`App::new`]），设置屏
+/// 「导出目录」那一格也走它（`crate::settings`）——两处各写一份，同一条路径在相邻两格里
+/// 就会一个带 `~`、一个不带。
+pub(crate) fn shorten_home(path: &std::path::Path) -> String {
+    std::env::var_os("HOME")
+        .and_then(|home| {
+            path.strip_prefix(&home)
+                .ok()
+                .map(|rest| std::path::Path::new("~").join(rest))
+        })
+        .unwrap_or_else(|| path.to_path_buf())
+        .display()
+        .to_string()
 }

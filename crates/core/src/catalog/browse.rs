@@ -57,7 +57,7 @@
 //!
 //! ## 那棵**条件组**也一律下推
 //!
-//! 票 `gui-redesign/04`：筛选器就是**规则**语言，可嵌套的组加三种连接。它同样折成
+//! 票 `gui-redesign/04`：筛选器就是**规则**语言，可嵌套的组加三种组合方式。它同样折成
 //! `WHERE`（`catalog::filter`）而不是取回来再过一遍，理由与上面那四条同一条。
 //!
 //! **它与那四个档之间是且**：那四个是一按就有的快捷档（带条数，供探索），
@@ -366,7 +366,7 @@ pub struct VariantQuery {
     pub chinese: Option<String>,
     /// 只要**识别状态**是这一档的。
     pub state: Option<StateFilter>,
-    /// **筛选器那棵条件树**：可嵌套的组，三种连接（票 `gui-redesign/04`）。
+    /// **筛选器那棵条件树**：可嵌套的组，三种组合方式（票 `gui-redesign/04`）。
     ///
     /// 它与上面那几个维度之间是**且**——上面那几个是一按就有的快捷档，这一条是
     /// 手搭的表达式，两边收窄的是同一批变体。`None` 是「没搭任何条件」。
@@ -973,6 +973,58 @@ impl WorkAnchor {
     }
 }
 
+/// 主列表这一行**画出来的那个名字**在 SQL 里怎么取。
+///
+/// **只有这一处写它**：[`WORK_ANCHOR_COLUMNS`] 里那一列、[`WORK_FROM`] 里年份那张
+/// join、搜索框那条名字命中路（[`Search::name`]），全都从这儿展开——画的、搜的
+/// 不是同一串字的话，屏上会出现一行「凭什么在这儿」看不出答案的结果。
+///
+/// 没认出作品的那一行**主栏**画的是从这串键里剥出来的正题（[`WorkRow::title`]），
+/// 这串键本身画在副行，于是搜的那一串照旧在屏上（挂单 `Q802`）。
+///
+/// ⚠️ **排的不是它**，是 [`row_sort_title`]——按「作品」排排的是**排序标题**。
+///
+/// **是个宏而不是常量**，因为那几处里有两处是 `const &str`：`const` 里拼不了
+/// `format!`，而 `concat!` 只吃字面量与展开成字面量的宏。写成常量的话那两处只能各自
+/// 再抄一遍，而「只有这一处写它」这句话就成了空话——那正是它要防的事。
+macro_rules! row_name {
+    () => {
+        "COALESCE(work.name, variant.key)"
+    };
+}
+
+/// 主列表这一行**按「作品」排时排的那一串**：**排序标题**（词表那一条）。
+///
+/// 三层退路，从准到糙：
+///
+/// 1. `work.sort_title`——折标题那一趟算下来的排序键（`title::write_sort_titles` →
+///    [`title::choose`](crate::title::choose) 的 `Chosen::sort`）。**中文显示标题按码位
+///    排等于乱排**，所以排序另取一个拉丁标题，这一列装的就是它。
+/// 2. **还没折过标题**（或者这个作品一条叫法都没有）时退回**作品名**。
+/// 3. 没认出作品的那些行退回**变体的键**（屏上副行画着的那条相对路径，挂单 `Q802`）。
+///
+/// 另有一档**第一层自己就糙**的：一个拉丁标题都没有时（`title::SortFrom::None`），
+/// `Chosen::sort` 装的就是那个中文显示标题，于是这一列里真的会躺着一串 CJK——
+/// 那正是这一票要治的东西，核心库把这一档单独报得出来，但**治不了**（挂单 `Q1097`）。
+///
+/// **后两层要折一道大写**：第一层是 `title::sort_title` 折过大写的（排的时候不分
+/// 大小写），三层混在同一列里比，不折的话同一份库里一半行按大小写敏感排、一半不敏感。
+///
+/// ⚠️ **两侧折得并不完全一样**，这是一笔认下来的账（挂单 `Q1096`）：第一层折大写走的是
+/// Rust 的 `to_uppercase()`（认 Unicode：`é→É`、西里尔也折），还顺手把中间的空白压成一个；
+/// 这里走的是 SQLite 的 `UPPER()`，**只认 ASCII**、也不压空白。于是带重音的拉丁名与
+/// 西里尔名在「折过标题的库」与「还没折过的库」上会落在不同的位置。**ASCII 拉丁与 CJK
+/// 上两侧一致**，而那是这个库里绝大多数行。
+///
+/// ⚠️ **它与 [`row_name`] 不是同一串字**，这是有意的：屏上主栏画的是显示标题，
+/// 排的是排序标题——「凭什么排在这儿」的答案写在**作品详情页**那一行「排序标题」上
+/// （设计稿 `ovTab`），不在主列表那一格里。
+macro_rules! row_sort_title {
+    () => {
+        concat!("COALESCE(work.sort_title, UPPER(", row_name!(), "))")
+    };
+}
+
 /// 主列表按哪一列排。
 ///
 /// 与 [`VariantOrder`] 一样是个闭集合：拼进 `ORDER BY` 的只能来自这里。
@@ -1021,7 +1073,8 @@ impl WorkOrder {
     /// [`WORK_ANCHOR_COLUMNS`] 与 [`Self::select`] 里自己起的别名，一个字都不来自外面。
     fn column(self) -> &'static str {
         match self {
-            Self::Name => "name",
+            // **排的是排序标题**（[`row_sort_title`]），不是屏上主栏那个名字。
+            Self::Name => "work_sort_title",
             Self::Platform => "platform",
             Self::Variants => "variants",
             Self::Bytes => "bytes",
@@ -1035,10 +1088,12 @@ impl WorkOrder {
     /// 别的几样等挑完这一页再算（[`Catalog::work_page_totals`]），
     /// 那时只剩几百行，不是一万多组。
     ///
-    /// 作品名那一档是空的：它本来就在 [`WORK_ANCHOR_COLUMNS`] 里。
+    /// 作品那一档多算的是**排序标题**（[`row_sort_title`]）：屏上主栏那个名字早就在
+    /// [`WORK_ANCHOR_COLUMNS`] 里了，可**排的不是它**，所以这一列得另算出来。
+    /// 它是同一行上的表达式（不是聚合），组里每一行算出来都一样——与 `name` 同一个道理。
     fn select(self) -> &'static str {
         match self {
-            Self::Name => "",
+            Self::Name => concat!(",\n    ", row_sort_title!(), " AS work_sort_title"),
             Self::Platform => ",\n    MIN(variant.platform) AS platform",
             Self::Variants => ",\n    COUNT(*) AS variants",
             Self::Bytes => ",\n    SUM(variant.bytes) AS bytes",
@@ -1046,6 +1101,25 @@ impl WorkOrder {
             // join 出来的就是同一条）。**只有这一档才连年份那张表**。
             Self::Year => ",\n    MIN(year.value) AS year",
         }
+    }
+
+    /// 这一列上**可能一个值都没有**——排的时候要多一把键，把那些行摁在末尾。
+    ///
+    /// 年份是 `MIN(year.value)`：一条都没刮到就是 `NULL`。平台是 `MIN(variant.platform)`：
+    /// 这一行底下的变体**全都**认不出平台时也是 `NULL`。另外三列空不了——作品名由
+    /// `COALESCE` 兜住，变体数与容量是聚合出来的数。
+    ///
+    /// **为什么要摁在末尾**（票 `gui-looks-like-the-design/11` 验收第 2 条）：SQLite 给 `NULL`
+    /// 的默认次序是「正序最前、倒序最后」，那意味着人点一下表头翻个方向，年份没刮到的
+    /// 那一批就从表尾跳到表头。理由不在这一批有多大，在于**它们在这一列上根本没有值可比**
+    /// ——没有值的东西，位置不该由方向决定。
+    ///
+    /// **变体表那一侧是同一条道理、不是同一份实现**：`VariantOrder::order_clause` 把
+    /// `work_name IS NULL` 写死在它那个分支里，而且只管作品名那一列；这里按**列空不空**
+    /// 给，平台也归它管。两处形状不同、管的列也不同（挂单 `Q1091`）——要合成一处的话，
+    /// 该合的是「空值排末尾」这件事本身，那是两个枚举一起动的活。
+    fn nullable(self) -> bool {
+        matches!(self, Self::Platform | Self::Year)
     }
 }
 
@@ -1250,24 +1324,6 @@ impl WorkRow {
     pub fn tier(&self) -> Tier {
         Tier::of(self.confidence)
     }
-}
-
-/// 主列表这一行**画出来的那个名字**在 SQL 里怎么取。
-///
-/// **只有这一处写它**：[`WORK_ANCHOR_COLUMNS`] 里那一列、[`WORK_FROM`] 里年份那张
-/// join、搜索框那条名字命中路（[`Search::name`]），全都从这儿展开——排的、画的、搜的
-/// 不是同一串字的话，屏上会出现一行「凭什么排在这儿」看不出答案的结果。
-///
-/// 没认出作品的那一行**主栏**画的是从这串键里剥出来的正题（[`WorkRow::title`]），
-/// 这串键本身画在副行，于是排的、搜的那一串照旧在屏上（挂单 `Q802`）。
-///
-/// **是个宏而不是常量**，因为那几处里有两处是 `const &str`：`const` 里拼不了
-/// `format!`，而 `concat!` 只吃字面量与展开成字面量的宏。写成常量的话那两处只能各自
-/// 再抄一遍，而「只有这一处写它」这句话就成了空话——那正是它要防的事。
-macro_rules! row_name {
-    () => {
-        "COALESCE(work.name, variant.key)"
-    };
 }
 
 /// 主列表这一行的**刮削锚点**在 SQL 里怎么取：认出作品的挂**作品名**，
@@ -1925,6 +1981,44 @@ impl WorkQuery {
         self
     }
 
+    /// 屏上那句「**N 个条件**」里的那个 N（票 `gui-looks-like-the-design/12`，挂单 `Q806`）。
+    ///
+    /// **口径是拿主意的人 2026-09-21 定的**，两处照着印（收起筛选栏之后那根窄条、
+    /// 筛空时那句空态）——**数在核心库数一次**，界面两处都问它，各数一遍就会在屏上
+    /// 说出两个数（ADR-0024）。
+    ///
+    /// 数的是**几样筛选加起来的个数**：
+    ///
+    /// - 五个分面里**选了值的**那几个（平台、合集、语言、中文、识别结论）；
+    /// - 条件组里**真正生效的子句**数（[`Rule::clauses`] 深度优先数到底，嵌套的组不另算
+    ///   一个——组是括号，不是条件）；
+    /// - **非游戏资产那颗开关**，摊开着算一个。
+    ///
+    /// **搜索词不算**：它管顺序不管集合（`Unruly::Search` 早把这条界线钉死了），
+    /// 算进来就是在屏上说「搜索缩小了这一批」。
+    ///
+    /// **没填完的子句不算**：它们本来就不在 [`rule`](Self::rule) 里
+    /// （界面那一层的 `Filter` 折规则时就筛掉了），而且屏上另有一句「还有 N 条没生效」
+    /// 专门说它们——两句话各说各的，不重不漏。
+    ///
+    /// **`cover_only` 也不算**：它是卡片墙的临时呈现条件，连子库规则都进不去。
+    #[must_use]
+    pub fn filter_count(&self) -> usize {
+        let facets = [
+            self.platform.is_some(),
+            self.collection.is_some(),
+            self.language.is_some(),
+            self.chinese.is_some(),
+            self.state.is_some(),
+        ]
+        .into_iter()
+        .filter(|on| *on)
+        .count();
+        let clauses = self.rule.as_ref().map_or(0, |rule| rule.clauses().len());
+        let non_game_assets = usize::from(self.non_game_assets == NonGameAssets::Listed);
+        facets + clauses + non_game_assets
+    }
+
     /// 折出 `SELECT` 里那一列**匹配质量的名次**，连它的参数。没搜索时是空的。
     ///
     /// 它拼在 [`WORK_ANCHOR_COLUMNS`] 与 [`WorkOrder::select`] 后面，所以它的参数排在
@@ -1940,11 +2034,27 @@ impl WorkQuery {
         }
     }
 
+    /// 排法是不是**默认那一种**——也就是人一次表头都没点过。
+    ///
+    /// **屏上「有没有箭头」问的就是它**（`table.rs` 的表头）：不画箭头就是在说
+    /// 「这是默认那一种」。所以这句判断只有这一处，界面照着问、不自己比一遍
+    /// （ADR-0024）——两处各比一次的话，屏上不画箭头、排的却已经不是默认那一种了。
+    #[must_use]
+    pub fn sorted_by_default(&self) -> bool {
+        let default = Self::default();
+        self.order == default.order && self.descending == default.descending
+    }
+
     /// 折出 `ORDER BY` 那一段。
     ///
-    /// **搜索框打了字时，匹配质量是第一把键**，人点的那个表头退成同一档里的次序
-    /// ——「匹配得好的排前面」是这个框唯一的产品承诺，让位给「按容量排」就没了。
-    /// 它**永远升序**（好的在前），不跟着 [`descending`](Self::descending) 翻。
+    /// **搜索框打了字、而排法还是默认那一种时，匹配质量是第一把键**——「匹配得好的
+    /// 排前面」是这个框唯一的产品承诺，所以它就是**默认**那一种次序。它**永远升序**
+    /// （好的在前），不跟着 [`descending`](Self::descending) 翻。
+    ///
+    /// **人点过表头就以他点的为准**（票 `gui-looks-like-the-design/11` 验收第 4 条）：按容量
+    /// 排着找大文件，打几个字把范围缩小一点，屏上不该连次序一起换掉——那时人要的是
+    /// 「这几个字圈出来的那批里，最大的是哪个」。想回到按匹配质量排，表头上再点一下
+    /// 就回到默认那一种（[`Self::sorted_by_default`]），不必先把搜索词删掉。
     ///
     /// **末尾一律缀上那一行的身份**（名字、`work_id`、那个键），理由与变体表同一条：
     /// 并列行的次序不定死，翻页就会漏行与重行。`(work_id, loose)` 是这张表的主键，
@@ -1953,8 +2063,13 @@ impl WorkQuery {
         let direction = if self.descending { "DESC" } else { "ASC" };
         let column = self.order.column();
         let mut parts = Vec::new();
-        if Search::new(&self.search).is_some() {
+        if Search::new(&self.search).is_some() && self.sorted_by_default() {
             parts.push("hit ASC".to_string());
+        }
+        // 这一列上没有值的那些行**两个方向都排在末尾**（`WorkOrder::nullable`）：
+        // 这一把键不跟着 `direction` 翻，翻了就等于让方向决定空格子的位置。
+        if self.order.nullable() {
+            parts.push(format!("{column} IS NULL"));
         }
         parts.push(format!("{column} {direction}"));
         for tail in ["name", "work_id", "loose"] {
