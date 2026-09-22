@@ -128,9 +128,15 @@ pub struct Page {
     /// 头上「平台」那一格印的字：作品的平台照核心库的平台表写全名（`Manifest::full_name`），没写全名的写代号，
     /// 几个平台之间「 / 」。
     platform_names: String,
-    /// 这个作品**收没收藏**、收了的钉在哪种锚上（核心库 `collection::favorite_of`）：状态块里「收藏」那一行照它写，只读
-    /// （拿主意的人 2026-09-15 定；收藏按钮与合集那一行归票 13）。没收藏是 `None`。
+    /// 这个作品**收没收藏**、收了的钉在哪种锚上（核心库 `collection::favorite_of`，它转调
+    /// `standing_of_work`——与底下那一行「合集」同一处判）：状态块里「收藏」那一行照它写，只读
+    /// （拿主意的人 2026-09-15 定）。没收藏是 `None`。
     favorite: Option<&'static str>,
+    /// 这个作品在**哪几个合集**里，各钉在哪种锚上（核心库 `collection::standing_of_work`，
+    /// 与上面「收藏」那一行**同一处判**）：状态块里「合集」那一行照它写，每一个后头一个
+    /// 「×」就地移出（票 `gui-looks-like-the-design/13`）。**收藏不在这一行里**——
+    /// 它上面单占一行，两处印同一件事会让人以为收藏是个另外的东西。
+    collections: Vec<(String, &'static str)>,
     /// 这个作品的**中文版本**（核心库 `Catalog::work_chinese_mark`，与首选变体那条规则同一处判）：头上那枚标签与
     /// 基本信息里「中文版本」那一格照它印；一个中文的都没有是 `None`。
     chinese: Option<ChineseMark>,
@@ -188,6 +194,10 @@ impl Page {
         self.sublibraries.clear();
         self.exported = None;
         self.doubts.clear();
+        // **收藏与合集这两格也得清**（票 `gui-looks-like-the-design/13`）：忘了清，
+        // 换到另一个作品时那两行会先画着上一个作品的合集，等重读那一趟落下来才改口。
+        self.favorite = None;
+        self.collections.clear();
     }
 }
 
@@ -557,13 +567,23 @@ impl Screen {
                 Err(error) => self.error = Some(format!("中立库读不动：{error}")),
             }
         }
-        let favorite = match romcat_core::collection::favorite_of(site, &keys) {
-            Ok(anchor) => anchor,
+        // **收藏与合集走同一趟**（核心库 `standing_of_work`，`favorite_of` 转调它）：
+        // 两处各问一次的话，屏上「收藏」那一行与「合集」那一行会对同一批变体说两种锚。
+        let 在哪几个合集里 = match romcat_core::collection::standing_of_work(site, &keys) {
+            Ok(几个) => 几个,
             Err(error) => {
-                self.error = Some(format!("收藏读不动：{error}"));
-                None
+                self.error = Some(format!("收藏与合集读不动：{error}"));
+                Vec::new()
             }
         };
+        let favorite = 在哪几个合集里
+            .iter()
+            .find(|(name, _)| name == romcat_core::collection::FAVORITE)
+            .map(|(_, anchor)| *anchor);
+        let collections: Vec<(String, &'static str)> = 在哪几个合集里
+            .into_iter()
+            .filter(|(name, _)| name != romcat_core::collection::FAVORITE)
+            .collect();
         let chinese = match self.work.as_ref() {
             Some(work) => match catalog.work_chinese_mark(work) {
                 Ok(mark) => mark,
@@ -620,6 +640,7 @@ impl Screen {
         };
         page.doubts = 存疑;
         page.favorite = favorite;
+        page.collections = collections;
         page.row = row;
         page.head = 头;
         page.groups = groups;
@@ -1480,7 +1501,9 @@ impl Screen {
                 if let Some(按了) = self.media_strip_card(ui) {
                     动作 = Some(按了);
                 }
-                status_card(ui, work, page);
+                if let Some(按了) = status_card(ui, work, page) {
+                    动作 = Some(按了);
+                }
             });
         });
         动作
@@ -1648,10 +1671,64 @@ impl Screen {
         }
     }
 
+    /// 把**这一个作品**从一个合集里移出（状态块「合集」那一行上那颗「×」，
+    /// 票 `gui-looks-like-the-design/13`）。
+    ///
+    /// 走核心库 `collection::remove`：成员关系挂在**变体**上，所以交进去的是这个作品
+    /// 底下那几个变体的键。两种锚都拿——只拿内容锚的话，无判据那一档移不掉，
+    /// 屏上那一枚会赖着不走。
+    fn leave_here(&mut self, site: &mut Site, name: &str) {
+        let keys: Vec<String> = self
+            .work
+            .as_ref()
+            .map(|work| {
+                work.variants
+                    .iter()
+                    .map(|variant| variant.row.key.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if keys.is_empty() {
+            return;
+        }
+        match romcat_core::collection::remove(site, name, &keys) {
+            Ok(账) => {
+                self.error = None;
+                // **报的是真删掉了几条，不是「打算删几条」**（`changed` 而不是 `touched()`）：
+                // `touched()` 数的是这一趟折出了几个锚，而库里本来挂着几条是另一件事。
+                // 拿前者报数，就会出现「屏上说移出了 2 个、库里一条没动」——
+                // 而那种话是真话里最坏的一种（它照实报了它以为发生的事）。
+                self.notice = Some(if 账.changed > 0 {
+                    format!(
+                        "从「{name}」里移出了 {} 条成员关系。作品本身一个字没动。",
+                        thousands(账.changed as u64),
+                    )
+                } else {
+                    format!("「{name}」里本来就没有这个作品的变体，没什么可移出的。")
+                });
+                // **逼这一页重读一趟**：`sync_page_details` 只在「底下那几个变体换了」
+                // 时才重读（`page.for_keys == keys` 就早退），而移出合集**一个变体都没换**
+                // ——不忘掉的话，那一行会照旧画着刚移出去的那个合集。
+                if let Some(page) = self.page.as_mut() {
+                    page.forget();
+                }
+                // 整屏也要重读：合集那一维的分面数变了。
+                self.refresh(site);
+            }
+            Err(error) => self.error = Some(format!("移不出去：{error}")),
+        }
+    }
+
     /// 办头上那一块与概览那一面上按下去的那一下。
-    fn apply_page(&mut self, site: &Site, action: PageAction) {
+    fn apply_page(&mut self, site: &mut Site, action: PageAction) {
         match action {
             PageAction::EditMeta => self.begin_meta_edit(),
+            // **就地移出**：范围是这个作品底下那几个变体（成员关系挂在变体上）。
+            //
+            // **当场落库，不排任务台**：一个作品底下的变体是个位数到几十个，
+            // 而那一趟要为每个折一次内容判据——放在画帧线上跑得起。
+            // 整批那条路（表格上方那一条的「加入合集…」）不一样：全选那一档是四万多个。
+            PageAction::LeaveCollection(name) => self.leave_here(site, &name),
             PageAction::Merge => self.open_merge_here(site),
             PageAction::Reveal(key) => self.reveal(site, &key),
             PageAction::ShowTab(tab) => {
@@ -3515,6 +3592,9 @@ enum PageAction {
     Merge,
     /// 「在文件系统中打开」：这个变体在盘上所在的目录交给系统。
     Reveal(String),
+    /// 状态块「合集」那一行上按的那个「×」：把这个作品从这个合集里**就地移出**
+    /// （票 `gui-looks-like-the-design/13`）。
+    LeaveCollection(String),
 }
 
 /// 变体卡片头一行右头按下去的是哪一颗。
@@ -3719,7 +3799,8 @@ fn description_card(ui: &mut egui::Ui, page: &Page) -> Option<PageAction> {
 /// 「子库」与「导出」两行的判断**一个字都不在这儿**（票 `gui-looks-like-the-design/34`）：
 /// 落在哪几个子库里由求值那一处答（`sublibrary::holding`），上次几点写出去的由导出那一趟
 /// 逐条记下的账答（`Catalog::entry_exported`）。界面只把它们印出来。
-fn status_card(ui: &mut egui::Ui, work: &WorkDetail, page: &Page) {
+fn status_card(ui: &mut egui::Ui, work: &WorkDetail, page: &Page) -> Option<PageAction> {
+    let mut 移出 = None;
     let tokens = Tokens::builtin();
     let 字号 = look::font_size(ui.ctx(), tokens.font.size_small_plus);
     let 强 = ui.visuals().strong_text_color();
@@ -3770,6 +3851,52 @@ fn status_card(ui: &mut egui::Ui, work: &WorkDetail, page: &Page) {
             }
             ui.add(egui::Label::new(job).wrap());
         });
+        // **合集：稿上夹在「收藏」与「子库」中间那一行**（票 `gui-looks-like-the-design/13`）。
+        //
+        // 每一个后头跟一个「×」**就地移出**（照稿 `data-cl` 那一颗）；一个都没进写「—」
+        // ——与别处「那一格说不出来」同一个记号。
+        //
+        // **挂不住内容锚的那几个照实标出来**（票面第 4 条）：那一个挪了位置就丢。
+        // 锚取弱的那一头，与上面「收藏」那一行**同一处判**（`standing_of_work`）。
+        ui.add_space(tokens.space.info_list_gap[0]);
+        info_row(ui, "合集", |ui| {
+            if page.collections.is_empty() {
+                ui.label(egui::RichText::new("—").size(字号).color(强));
+                return;
+            }
+            ui.horizontal_wrapped(|ui| {
+                for (name, anchor) in &page.collections {
+                    let 只按路径 = *anchor == romcat_core::verdict::ANCHOR_PATH;
+                    let 话 = if 只按路径 {
+                        format!("{name} · 只按路径记录")
+                    } else {
+                        name.clone()
+                    };
+                    let 色 = if 只按路径 {
+                        look::tone_colors(look::Tone::Caution, ui.visuals()).0
+                    } else {
+                        强
+                    };
+                    ui.label(egui::RichText::new(话).size(字号).color(色))
+                        .on_hover_text(if 只按路径 {
+                            "这个合集里有变体拿不到内容判据（无判据那一档），\
+                             成员关系只能按文件路径记下来——文件改名或挪到别的目录之后，\
+                             它会从这个合集里消失。识别出作品之后自动改成按内容记录。"
+                        } else {
+                            "成员关系钉在内容上：删掉中立库重扫、改名、挪目录都还认得出。"
+                        });
+                    if look::small_buttons(ui, |ui| {
+                        ui.button("×")
+                            .on_hover_text(format!(
+                                "把这个作品从「{name}」里移出。作品本身不受影响。"
+                            ))
+                            .clicked()
+                    }) {
+                        移出 = Some(name.clone());
+                    }
+                }
+            });
+        });
         // 子库：落在哪几个子库的选择集里，名字之间「、」（设计稿 `ovTab` 的 `subs`）。
         // **一个都没落进写「—」**——与别处「那一格说不出来」同一个记号。
         ui.add_space(tokens.space.info_list_gap[0]);
@@ -3795,6 +3922,7 @@ fn status_card(ui: &mut egui::Ui, work: &WorkDetail, page: &Page) {
             ui.add(egui::Label::new(egui::RichText::new(话).size(字号).color(强)).wrap());
         });
     });
+    移出.map(PageAction::LeaveCollection)
 }
 
 /// 媒体那一格底下那行小字：「来源 · 尺寸 · 时长 · 大小」（设计稿 `mediaOf` 的 `src · dim · size`）。

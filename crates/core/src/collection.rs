@@ -471,20 +471,48 @@ pub fn standing(site: &Site, key: &str) -> Result<Vec<(String, &'static str)>, C
 /// # Errors
 /// 两份库有一份读不动时返回错误。
 pub fn favorite_of(site: &Site, keys: &[String]) -> Result<Option<&'static str>, CollectionError> {
-    let mut found = None;
+    Ok(standing_of_work(site, keys)?
+        .into_iter()
+        .find(|(name, _)| name == FAVORITE)
+        .map(|(_, anchor)| anchor))
+}
+
+/// 一个作品在**哪几个合集**里，各钉在哪种锚上（作品详情页状态块那一行「合集」照它写，
+/// 票 `gui-looks-like-the-design/13`）。按名字排；**[收藏](FAVORITE)也在里头**——
+/// 它与自建合集同一套成员关系，只是屏上那一行另外单写。
+///
+/// ## 锚取**弱的那一头**
+///
+/// 成员关系挂在**变体**上，而一个作品底下有好几个变体。同一个合集里，只要**有一个变体
+/// 只钉得住本机路径**，这一整部作品在那个合集里就是
+/// [`ANCHOR_PATH`](crate::verdict::ANCHOR_PATH)——那一个挪了位置就丢，
+/// 整部作品的成员关系说不上「按文件内容记录」。都钉在内容上才是
+/// [`ANCHOR_CONTENT`](crate::verdict::ANCHOR_CONTENT)。
+///
+/// **与[收藏那一行](favorite_of)同一条规矩，而且是同一处实现**（那一条转调这一条）：
+/// 两处各判一次的话，屏上「收藏」那一行说「按文件内容记录」而「合集」那一行说
+/// 「只按路径记录」，而它们说的是同一批变体（ADR-0024）。
+///
+/// # Errors
+/// 两份库有一份读不动时返回错误。
+pub fn standing_of_work(
+    site: &Site,
+    keys: &[String],
+) -> Result<Vec<(String, &'static str)>, CollectionError> {
+    let mut out: BTreeMap<String, &'static str> = BTreeMap::new();
     for key in keys {
-        let Some((_, anchor)) = standing(site, key)?
-            .into_iter()
-            .find(|(name, _)| name == FAVORITE)
-        else {
-            continue;
-        };
-        if anchor == crate::verdict::ANCHOR_PATH {
-            return Ok(Some(anchor));
+        for (name, anchor) in standing(site, key)? {
+            match out.get(&name) {
+                // **弱的那一头赢**：已经记着「只钉得住路径」就不许被后一个变体的
+                // 「钉在内容上」盖过去。
+                Some(已有) if *已有 == crate::verdict::ANCHOR_PATH => {}
+                _ => {
+                    out.insert(name, anchor);
+                }
+            }
         }
-        found = Some(anchor);
     }
-    Ok(found)
+    Ok(out.into_iter().collect())
 }
 
 /// 照沉淀库把中立库里的合集**整份重建**一遍。

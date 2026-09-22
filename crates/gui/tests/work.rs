@@ -1984,3 +1984,95 @@ fn 点最后一个(ctx: &egui::Context, app: &mut App, 那一段: &str) -> Strin
     headless::frame(ctx, input, |ui| app.ui(ui));
     画出来的字(&headless::frame(ctx, headless::input(), |ui| app.ui(ui)))
 }
+
+/// **状态块「合集」那一行：列得出它在哪几个合集里，「×」就地移出**
+/// （票 `gui-looks-like-the-design/13`，稿上夹在「收藏」与「子库」中间那一行）。
+///
+/// **挑一部一个合集都没进的作品来验**：合成数据本来就给不少作品挂了合集
+/// （「小时候玩过」「送朋友的」「适合双人玩的」），挑中那种的话屏上会有好几颗「×」，
+/// 而「点头一颗」点到的未必是这一条要验的那一个——第一版就是这么错的：
+/// 那一下删掉的是别的合集，而断言看的是这一个，于是报「屏上说移出了、库里还挂着」。
+#[test]
+fn 详情页状态块那一行列得出合集_按叉就地移出() {
+    /// 这一条自己用的合集名：合成数据里没有这个名字，于是屏上那一行只会有一颗「×」。
+    const 这一组: &str = "票13验一验";
+
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    跑(&ctx, &mut app, 3);
+
+    // **挑一部一个合集都没进的作品**：不然屏上好几颗「×」，点头一颗点到的是别人。
+    let (work_id, keys) = {
+        let (browse, site) = app.browse_and_site();
+        let mut 挑中的 = None;
+        for row in site
+            .catalog
+            .work_page(browse.query(), 0, 40)
+            .expect("取得出几行")
+        {
+            let WorkAnchor::Work(id) = row.anchor else {
+                continue;
+            };
+            let keys: Vec<String> = site
+                .catalog
+                .scoped_variants(
+                    browse.query(),
+                    romcat_core::catalog::browse::Scope::Rows(std::slice::from_ref(&row.anchor)),
+                )
+                .expect("展得开");
+            if romcat_core::collection::standing_of_work(site, &keys)
+                .expect("读得到")
+                .is_empty()
+            {
+                挑中的 = Some((id, keys));
+                break;
+            }
+        }
+        挑中的.expect("四十行里该有一部一个合集都没进的作品")
+    };
+
+    // 一、一个合集都没进：那一行照别处的规矩写「—」。
+    let 屏上 = 打开详情页(&ctx, &mut app, work_id, Tab::Overview);
+    assert!(
+        屏上.contains("合集"),
+        "状态块里没有「合集」那一行：\n{屏上}"
+    );
+
+    // 二、放进一个合集，重开一次详情页（那一趟只在变体换了时重读）。
+    {
+        let (_, site) = app.browse_and_site();
+        romcat_core::collection::add(site, 这一组, &keys).expect("加得进");
+    }
+    let 屏上 = 打开详情页(&ctx, &mut app, work_id, Tab::Overview);
+    assert!(
+        屏上.contains(这一组),
+        "那一行没列出刚加进去的合集：\n{屏上}"
+    );
+
+    // 三、按那颗「×」——屏上只有这一颗。
+    点一下(&ctx, "×", |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    assert!(屏上.contains("移出了"), "移出之后没说清动了什么：\n{屏上}");
+
+    // 四、**库里真的移出去了**——不是只把屏上那一枚擦掉。
+    //     回执报的是真删掉了几条（`Applied::changed`），不是「打算删几条」。
+    {
+        let (_, site) = app.browse_and_site();
+        let 还在哪几个合集里 =
+            romcat_core::collection::standing_of_work(site, &keys).expect("读得到");
+        assert!(
+            !还在哪几个合集里.iter().any(|(name, _)| name == 这一组),
+            "屏上说移出了，库里还挂着：{还在哪几个合集里:?}"
+        );
+    }
+    // 五、**作品本身一个字没动**：那几个变体还在库里。
+    {
+        let (_, site) = app.browse_and_site();
+        for key in &keys {
+            assert!(
+                site.catalog.variant(key).expect("读得动").is_some(),
+                "移出合集把变体也带走了：{key}"
+            );
+        }
+    }
+}
