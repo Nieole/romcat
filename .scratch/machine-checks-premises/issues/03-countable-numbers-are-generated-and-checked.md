@@ -101,3 +101,43 @@ ADR 份数**由一条命令写进带标记的位置；它们过期时**门禁报
 README 里逐队列的数删掉）、`Q1162`（ADR 份数搬出代码围栏）、`Q1163`（标记要带注释开头）、
 `Q1164`（没加标记的手抄数逮不住）、`Q1165`（TOML 那一半今天没有用户）、`Q1166`（三条收口）、
 `Q1167`（台账里那句历史读数没动）。
+
+## 门禁与审查
+
+**全量门禁（2026-09-22，分支 `q5/mc-03-countable-numbers`，跑在最后那笔 `18f0e29` 上）：**
+`TMPDIR=/Users/nicoer/dev/game-wt/cs/tmp CARGO_INCREMENTAL=0 cargo xtask gate -j 3 --test-threads 3 --keep-going`
+——**7 条全绿**，末行 `7 条全绿。`、`EXIT=0`。
+
+| 条 | 秒 |
+|---|---|
+| fmt | 1 |
+| glossary | 0 |
+| check | 0 |
+| clippy | 0 |
+| **test** | **752** |
+| **numbers**（本票加的） | **4** |
+| doc | 1 |
+
+日志 `/Users/nicoer/dev/game-wt/logs/slot-3-mc03-gate2.log`（3,321 行，开头三行是本工作树、
+本分支、`18f0e29`）。`check` 与 `clippy` 那两个 0 秒是缓存热着——同一棵树上改动前那一趟
+（`slot-3-mc03-gate.log`，3,581 行，也是 **7 条全绿 `EXIT=0`**）量的是 fmt 1s／glossary 0s／
+**check 48s**／**clippy 21s**／**test 759s**／**numbers 3s**／doc 4s。
+
+⭐ **新加那一步在门禁里是 3–4 秒**，而 `test` 是 750 秒上下——**占门禁总时长千分之五**。
+它不重编、不跑测试，只把 `test` 那一步已经编好的 86 个测试二进制各起一次、把测试名字逐条
+印一遍。口径也不是另抄的：`numbers::list_step()` 从 `gate::step("test", …)` 取那一条、后面
+加 `-- --list`，所以它与 `test` 跑的是同一份编译产物。
+
+**`/code-review` 两轴（只读，派的时候写死了 worktree 绝对路径与基点 `7e119e2`）：**
+两份回执报的审查范围与自取的 10 个文件逐个对得上，**不是审错了树**。
+
+- **Standards 轴一条硬的，照改了**：那条 `cargo test --workspace --all-features -- --list`
+  当时写了六遍（`numbers.rs` 四处、`gate.rs` 一处、`README.md` 一处），**正是本票要治的病**。
+  改成从 `gate::step("test", …)` 取，报错里那句「怎么数出来的」也跟着折出来；集成测试加一行
+  手写的独立比对基准钉住它。另照改：`Unwatched` 那一关挪到写盘之前、`Kind::ALL` 那句
+  「别处不许再列一份」改成说实话、词表里「清单」是正名（换成「把测试名字逐条印一遍」）、
+  `blank`→`blank_len`／`show`→`rel_path`。
+- **Spec 轴报了两处范围外，没照改、各记了挂单**：README 那段整段重写（`Q1161`）、第二个
+  口径那对数删成「一百多条」（`Q1160`）——两条都归拿主意的人裁。它另指出 `Q198`/`Q268`/`Q380`
+  三行没就地标 `settled`：那三行是别轮收口表里的一行、**连「状态」那一栏都没有**，结算落在
+  `Q1166`（本条已标 `settled`），要不要回头补指针归收尾（也记在 `Q1166` 里）。
