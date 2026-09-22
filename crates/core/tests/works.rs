@@ -515,6 +515,97 @@ fn 五列都排得了序而且一页页翻完等于一次全取() {
     );
 }
 
+/// **年份没刮到的那些排在末尾，正反两个方向都是**（票 `gui-looks-like-the-design/11`
+/// 验收第 2 条）。
+///
+/// 钉的是「**位置不该由方向决定**」这一条：SQLite 给 `NULL` 的默认次序是正序最前、
+/// 倒序最后，照那个走的话，人点一下表头翻个方向，年份未知的那一批就整批从表尾跳到表头。
+/// 它们在这一列上根本没有值可比，两个方向都该待在末尾。
+#[test]
+fn 年份没刮到的那些两个方向都排在末尾() {
+    let catalog = 建库();
+    for descending in [false, true] {
+        let query = WorkQuery {
+            order: WorkOrder::Year,
+            descending,
+            ..WorkQuery::default()
+        };
+        let total = catalog.work_total(&query).expect("数得出总数");
+        let rows = catalog.work_page(&query, 0, total).expect("取得出一页");
+        let 没年份的 = rows.iter().filter(|row| row.year.is_none()).count();
+        assert!(
+            没年份的 > 0 && 没年份的 < rows.len(),
+            "这份 fixture 得两样都有才验得了：没年份的 {没年份的} 行 / 共 {} 行",
+            rows.len(),
+        );
+        let 年份们: Vec<Option<&str>> = rows.iter().map(|row| row.year.as_deref()).collect();
+        assert!(
+            rows.iter()
+                .rev()
+                .take(没年份的)
+                .all(|row| row.year.is_none()),
+            "按年份{}排，没年份的那 {没年份的} 行没有全落在末尾：{年份们:?}",
+            if descending { "倒着" } else { "正着" },
+        );
+    }
+}
+
+/// **屏上那句「N 个条件」怎么数**（票 `gui-looks-like-the-design/12`，挂单 `Q806`；
+/// 口径是拿主意的人 2026-09-21 定的）。
+///
+/// 数在核心库数**一次**，窄条与空态两处都问它——各数一遍的话屏上会说出两个数
+/// （ADR-0024）。这条把口径逐项钉死，尤其是**不算**的那两样。
+#[test]
+fn 屏上那个条件数等于分面加生效子句加非游戏资产开关() {
+    use romcat_core::sublibrary::Rule;
+
+    // 一个条件都没有。
+    assert_eq!(WorkQuery::default().filter_count(), 0);
+
+    // 分面：选了值的才算，一个算一个。
+    let 一个分面 = WorkQuery {
+        platform: Some(PlatformFilter::Named("GB".into())),
+        ..WorkQuery::default()
+    };
+    assert_eq!(一个分面.filter_count(), 1);
+
+    // 条件组：数的是**生效的子句**，嵌套的组不另算一个——组是括号，不是条件。
+    let 嵌套 = WorkQuery {
+        rule: Some(Rule::parse("平台=GB 且 (中文=汉化 或 类型~RPG)").expect("读得懂")),
+        ..WorkQuery::default()
+    };
+    assert_eq!(嵌套.filter_count(), 3, "三条子句、两个组，数的是子句");
+
+    // 非游戏资产那颗开关：摊开着算一个。
+    let 摊开着 = WorkQuery {
+        non_game_assets: NonGameAssets::Listed,
+        ..WorkQuery::default()
+    };
+    assert_eq!(摊开着.filter_count(), 1);
+
+    // **搜索词不算**：它管顺序不管集合。
+    let 搜着 = WorkQuery {
+        search: "口袋".into(),
+        ..WorkQuery::default()
+    };
+    assert_eq!(
+        搜着.filter_count(),
+        0,
+        "搜索词算进「筛选条件」就是在屏上说它缩小了这一批"
+    );
+
+    // 三样各来一点，加起来；搜索词照旧不算。
+    let 三样 = WorkQuery {
+        platform: Some(PlatformFilter::Named("GB".into())),
+        collection: Some("通关过的".into()),
+        rule: Some(Rule::parse("年份>=1990").expect("读得懂")),
+        non_game_assets: NonGameAssets::Listed,
+        search: "口袋".into(),
+        ..WorkQuery::default()
+    };
+    assert_eq!(三样.filter_count(), 4, "两个分面 + 一条子句 + 那颗开关");
+}
+
 #[test]
 fn 筛选下推之后行与聚合一起收窄() {
     let catalog = 建库();

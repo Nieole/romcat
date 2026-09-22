@@ -341,6 +341,70 @@ fn 挑(现场: &现场, work: &str) -> title::Chosen {
     title::choose(&set, &Priorities::builtin())
 }
 
+/// **主列表按「作品」排，排的是排序标题，不是屏上主栏那个显示标题**
+/// （票 `gui-looks-like-the-design/11`，词表**排序标题**）。
+///
+/// 中文显示标题按码位排等于乱排——码位顺序对读者是随机的。所以排序另取一个拉丁标题，
+/// 而那一串由 [`title::choose`] 一处算出来、折标题那一趟落进 `work.sort_title`
+/// （拿主意的人 2026-09-21 裁走物化一列这条路，挂单 `Q802`）。
+///
+/// 这条断的是**两件事对得上**：
+///
+/// 1. 主列表排出来的次序，正是把这些作品各自的[排序标题](title::Chosen::sort)排一遍；
+/// 2. 而且它**不是**按显示标题排的——塞尔达那一行显示标题是中文，排的位置由它的
+///    拉丁排序标题决定。
+///
+/// **期望从数据自己算出来**，不写死一串名字：换一份同样合法的 fixture 它照样成立。
+#[test]
+fn 主列表按作品排排的是排序标题不是显示标题() {
+    use romcat_core::catalog::browse::{WorkAnchor, WorkOrder, WorkQuery};
+
+    let mut 现场 = 建现场();
+    放一份中文名的塞尔达(&mut 现场);
+    跑一遍(&mut 现场);
+
+    let query = WorkQuery {
+        order: WorkOrder::Name,
+        ..WorkQuery::default()
+    };
+    let total = 现场.catalog.work_total(&query).expect("数得出总数");
+    let 这一页 = 现场
+        .catalog
+        .work_page(&query, 0, total)
+        .expect("取得出一页");
+    // 认出作品的那些行：它们才有排序标题（没认出来的那些排的是自己的键，挂单 `Q802`）。
+    let 认出来的: Vec<String> = 这一页
+        .iter()
+        .filter(|row| matches!(row.anchor, WorkAnchor::Work(_)))
+        .map(|row| row.name.clone())
+        .collect();
+    assert!(
+        认出来的.len() >= 2,
+        "至少要两部认出来的作品才比得出次序：{认出来的:?}"
+    );
+
+    // 一、屏上这个次序 = 按排序标题排一遍。
+    let mut 期望 = 认出来的.clone();
+    期望.sort_by_key(|work| 挑(&现场, work).sort);
+    assert_eq!(认出来的, 期望, "主列表按「作品」排出来的不是排序标题的次序",);
+
+    // 二、**塞尔达那一行的显示标题是中文，排序标题是拉丁的**——排的是后者。
+    let 塞尔达 = 挑(&现场, "Zelda");
+    assert_eq!(
+        塞尔达.display, "塞尔达传说",
+        "这条 fixture 本该给塞尔达挑出中文显示标题，不然这条测试验不到要害",
+    );
+    assert!(
+        塞尔达.sort.is_ascii(),
+        "排序标题该是拉丁串（中文按码位排等于乱排）：{}",
+        塞尔达.sort,
+    );
+    assert_ne!(
+        塞尔达.sort, 塞尔达.display,
+        "排的与画的要是同一串字，这一票就白做了",
+    );
+}
+
 #[test]
 fn 标题以集合形式落库每条带语言地区来源与类型() {
     let mut 现场 = 建现场();

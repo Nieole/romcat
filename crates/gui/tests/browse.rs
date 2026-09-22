@@ -392,6 +392,135 @@ fn 五列都排得了序而且换排序真的换了次序() {
     );
 }
 
+/// 按一下主列表**表头**上那一列。
+///
+/// **不走 `shared::点一下`**，两处过不去：
+///
+/// 1. 「平台」这类词**左栏也有一处**（条件组里维度那个下拉），而 `shared::点一下` 按
+///    「含有」找**头一处**，点到的是左栏那一个。所以这里按**整段一字不差**找，
+///    再取**最靠右**的那一处——主列表在左栏右边。
+/// 2. **取 galley 的中心点会点到隔壁那一列**：实测点「容量」选中的是「年份」。
+///    靠右那两列（变体、容量）的列名画在自己这一格的右头，而这一层量到的 galley 矩形
+///    与屏上那几个字的位置**对不齐**（`Shape::Text` 的 `pos` 在这条路上不是最终屏幕
+///    坐标——基线图 `snapshots/browse/rows-*.png` 上那几个字是正常右对齐的，没有出格）。
+///    没有去追那个偏移是哪儿来的：这条测试要的是「点得中这一列」，不是「量得准这一格」。
+///
+/// 于是点的是那几个字的**左缘**而不是中心。**点没点中由断言兜着**：底下那条测试点了
+/// 作品、容量、年份三列，每一下都断言选中的是哪一列，点错列当场红。
+/// **要量表头的对齐，去看基线图，别拿这儿的矩形当真。**
+fn 点表头(ctx: &egui::Context, 列名: &str, mut 画一帧: impl FnMut(&mut egui::Ui)) {
+    fn 收(shape: &egui::epaint::Shape, 列名: &str, out: &mut Vec<egui::Rect>) {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == 列名 => {
+                out.push(egui::Rect::from_min_size(text.pos, text.galley.size()));
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for one in shapes {
+                    收(one, 列名, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let 头一帧 = headless::frame(ctx, headless::input(), &mut 画一帧);
+    let mut 处处 = Vec::new();
+    for clipped in &头一帧.shapes {
+        收(&clipped.shape, 列名, &mut 处处);
+    }
+    // 主列表在屏子中间那一大块：左栏那一份（如果有）在它左边。取**最靠右**的那一处。
+    let Some(那一格) = 处处.into_iter().max_by(|a, b| a.min.x.total_cmp(&b.min.x)) else {
+        panic!(
+            "屏上没有正好写着「{列名}」的表头：\n{}",
+            shared::画出来的字(&头一帧)
+        );
+    };
+    let 位置 = egui::pos2(那一格.min.x + 2.0, 那一格.center().y);
+    let 按 = |pressed: bool| egui::Event::PointerButton {
+        pos: 位置,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    headless::frame(
+        ctx,
+        shared::输入(vec![egui::Event::PointerMoved(位置), 按(true)]),
+        &mut 画一帧,
+    );
+    headless::frame(ctx, shared::输入(vec![按(false)]), &mut 画一帧);
+    shared::跑一帧(ctx, 画一帧);
+}
+
+/// **点表头：一下正着、两下倒着、三下回到默认那一种**
+/// （票 `gui-looks-like-the-design/11` 验收第 1 条）。
+///
+/// 第三下要紧的是**搜索着的时候**：默认那一种排法就是按匹配质量排
+/// （`WorkQuery::sorted_by_default`），没有这一下的话，人点过一次表头就再也回不到
+/// 「匹配得好的排前面」，除非把搜索词删掉重打。
+///
+/// **默认那一列（作品）只有两态**：默认那一种就是它正着排，它的第三态与第一态是同一个。
+#[test]
+fn 点表头一下正着两下倒着三下回到默认() {
+    let ctx = headless::context();
+    let mut app = 界面(ROWS);
+    跑(&ctx, &mut app, 2);
+    let 排法 = |app: &mut App| {
+        let (browse, _) = app.browse_and_site();
+        let query = browse.query();
+        (query.order, query.descending, query.sorted_by_default())
+    };
+    assert_eq!(
+        排法(&mut app),
+        (WorkOrder::Name, false, true),
+        "一进屏本该是默认那一种排法",
+    );
+
+    // 一下：按这一列正着排。
+    点表头(&ctx, "容量", |ui| app.ui(ui));
+    assert_eq!(
+        排法(&mut app),
+        (WorkOrder::Bytes, false, false),
+        "点头一下没换成按容量正着排",
+    );
+
+    // 两下：同一列翻方向。
+    点表头(&ctx, "容量", |ui| app.ui(ui));
+    assert_eq!(
+        排法(&mut app),
+        (WorkOrder::Bytes, true, false),
+        "再点一下没翻成倒着排",
+    );
+
+    // 三下：回到默认那一种。
+    点表头(&ctx, "容量", |ui| app.ui(ui));
+    assert_eq!(
+        排法(&mut app),
+        (WorkOrder::Name, false, true),
+        "点第三下没回到默认那一种排法",
+    );
+
+    // 换一列照样走这三下——不是只有容量那一列特殊。
+    点表头(&ctx, "年份", |ui| app.ui(ui));
+    assert_eq!(排法(&mut app), (WorkOrder::Year, false, false));
+    点表头(&ctx, "年份", |ui| app.ui(ui));
+    assert_eq!(排法(&mut app), (WorkOrder::Year, true, false));
+    点表头(&ctx, "年份", |ui| app.ui(ui));
+    assert_eq!(排法(&mut app), (WorkOrder::Name, false, true));
+
+    // **作品那一列只有两态**：默认那一种就是它正着排。
+    点表头(&ctx, "作品", |ui| app.ui(ui));
+    assert_eq!(
+        排法(&mut app),
+        (WorkOrder::Name, true, false),
+        "点默认那一列该直接翻成倒着排",
+    );
+    点表头(&ctx, "作品", |ui| app.ui(ui));
+    assert_eq!(
+        排法(&mut app),
+        (WorkOrder::Name, false, true),
+        "再点一下该回到默认那一种",
+    );
+}
+
 #[test]
 fn 五个维度筛得动而且筛选下推到中立库() {
     let ctx = headless::context();
@@ -1162,7 +1291,7 @@ fn 按规则筛(ctx: &egui::Context, app: &mut App, text: &str) -> u64 {
 }
 
 #[test]
-fn 三种连接在筛选器上各自成立而且组嵌得动() {
+fn 三种组合方式在筛选器上各自成立而且组嵌得动() {
     let ctx = headless::context();
     let mut app = 界面(ROWS);
     跑(&ctx, &mut app, 2);
@@ -3541,12 +3670,72 @@ fn 卡片工具条显示覆盖率并能改排序() {
     }
 
     // 分组时「默认」仍然可点；选具体字段会取消分组，交给中立库按那个字段重排。
-    shared::点一下(&ctx, "默认", |ui| app.ui(ui));
-    shared::点一下(&ctx, "容量", |ui| app.ui(ui));
+    //
+    // **按整段一字不差点**（`点正好`）：左栏那句「搜索结果默认按匹配程度排序……」里也有
+    // 「默认」两个字，按「含有」找头一处会点到那句话上，下拉压根打不开。
+    shared::点正好(&ctx, "默认", |ui| app.ui(ui));
+    shared::点正好(&ctx, "容量", |ui| app.ui(ui));
     assert_eq!(
         app.browse().query().order,
         romcat_core::catalog::browse::WorkOrder::Bytes,
         "卡片工具条的排序没有同步进查询"
+    );
+}
+
+/// **卡片下拉上「默认」与「名称」是两档**（票 `gui-looks-like-the-design/12`，挂单
+/// `Q1098`，拿主意的人 2026-09-21 定照稿拆回两个）。
+///
+/// 票 09 把两档合成了一个（`Name => "默认"`），于是从表头倒着排过来的 `(作品, 倒着)`
+/// 在这个下拉上照样显示「默认」——**而那一刻库里排的并不是默认那一种**，
+/// 搜索着的时候它也不再按匹配质量排（票 `11` 的 `WorkQuery::sorted_by_default`）。
+#[test]
+fn 卡片下拉上默认与名称是两档_倒着排时不再显示默认() {
+    use romcat_core::catalog::browse::WorkOrder;
+
+    let ctx = headless::context();
+    let (mut app, _dir) = 一个有封面一个没有的小库();
+    app.browse_and_site().0.show_cards();
+    跑(&ctx, &mut app, 3);
+
+    // 一进来是默认那一种排法：下拉上写「默认」。
+    //
+    // **按整行比，不用「含有」**：左栏那句「搜索结果默认按匹配程度排序……」里也有这两个
+    // 字，按含有找的话这条测试在任何实现上都是绿的（第一版就这么假绿过一次）。
+    let 下拉上写着 = |屏上: &str, 字: &str| 屏上.lines().any(|line| line == 字);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        下拉上写着(&屏上, "默认"),
+        "默认那一种排法下，卡片下拉该写「默认」：\n{屏上}"
+    );
+
+    // **把排法换成「作品、倒着」**——那正是从表头点过来的那个状态。
+    {
+        let query = app.browse_and_site().0.query_mut();
+        query.order = WorkOrder::Name;
+        query.descending = true;
+    }
+    跑(&ctx, &mut app, 2);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        !app.browse().query().sorted_by_default(),
+        "这个状态本来就不是默认那一种，不然这条测试验不到要害"
+    );
+    assert!(
+        下拉上写着(&屏上, "名称"),
+        "按作品倒着排时，卡片下拉该写「名称」：\n{屏上}"
+    );
+    assert!(
+        !下拉上写着(&屏上, "默认"),
+        "按作品倒着排，下拉上却还写着「默认」——那一刻库里排的并不是默认那一种：\n{屏上}"
+    );
+
+    // **选「默认」把方向也按回去**，否则它与「名称」是同一个状态、两档就白拆了。
+    // 先点开下拉（那时它写着「名称」），再点那一档。
+    shared::点正好(&ctx, "名称", |ui| app.ui(ui));
+    shared::点正好(&ctx, "默认", |ui| app.ui(ui));
+    assert!(
+        app.browse().query().sorted_by_default(),
+        "选了「默认」之后该回到默认那一种排法（列与方向都回）"
     );
 }
 
@@ -3567,7 +3756,9 @@ fn 卡片视图选择记在工作目录而不进中立库() {
 
 #[test]
 fn 筛不出东西时说清楚并给一颗清除筛选_按下去表就回来() {
-    const 空态: &str = "没有符合当前筛选条件的作品。";
+    // **空态那句带着条件数**（照稿，挂单 `Q806`）：这一趟摊开了非游戏资产、又筛了一个
+    // 平台，按定下来的口径就是 **2 个**（那颗开关算一个、分面算一个）。
+    const 空态: &str = "没有符合当前 2 个筛选条件的作品。";
 
     let ctx = headless::context();
     let mut app = shared::小库(
@@ -3698,14 +3889,18 @@ fn 含着这几个字的每一段(
     out
 }
 
-/// **「N 个作品（共 M）」固定在表格上方那一条的头一行右端，控件与帮助自己另起一行**（协调人 2026-09-15 定，
-/// 岔路口 1 选 C）。
+/// **「N 个作品（共 M）」固定在表格上方那一条的头一行，控件与帮助自己另起一行**
+/// （协调人 2026-09-15 定，岔路口 1 选 C）。
 ///
 /// 票 `gui-looks-like-the-design/10` 把这一条重排成两层：头一层只有视图切换与这个数，第二层才是当前视图的
-/// 控件与帮助，原来的「列表」标签与「没有封面的作品显示平台色块」那句一并去掉了。要守的还是同一件事——
-/// 这个数不许被挤到第二行——所以这里认头一层的「表格」与第二层的帮助。
+/// 控件与帮助。要守的是同一件事——**这个数不许被挤到第二行**——所以这里认头一层的「表格」与第二层的帮助。
+///
+/// ⚠️ **「右端」那半句 2026-09-22 起不作数了**（挂单 `Q1102`）：那几颗批量操作照稿挪回
+/// 这一条的右端之后，这个数照稿挪到了**视图切换紧后头**（稿上 `.seg` 之后就是 `.cnt`）。
+/// 09-15 那条裁定护的是「不许掉到第二行」，那一半照旧守着；「在右端」那一半被稿推翻了。
+/// 所以这里**连它在那一组左边一起断**——不然这个数哪天又飘回右端也没人拦。
 #[test]
-fn 表格上方那一条的作品数摆在头一行右端_帮助自己折行() {
+fn 表格上方那一条的作品数摆在头一行_紧跟视图切换_帮助自己折行() {
     let ctx = headless::context();
     let mut app = 界面(2_000);
     跑(&ctx, &mut app, 3);
@@ -3734,5 +3929,305 @@ fn 表格上方那一条的作品数摆在头一行右端_帮助自己折行() {
     assert!(
         帮助.min.y > 数.max.y,
         "帮助那句没有另起一行：那一句 {数:?}，帮助 {帮助:?}"
+    );
+    // **这个数在那一组批量操作的左边**（稿上 `.cnt` 在 `.acts` 之前，挂单 `Q1102`）。
+    let (_, 头一颗) = 含着这几个字的每一段(&这一帧, "刮削…")
+        .into_iter()
+        .next()
+        .expect("那一条右端画着批量操作那一组");
+    assert!(
+        数.max.x < 头一颗.min.x,
+        "作品数飘到那一组批量操作右边去了：那一句 {数:?}，头一颗 {头一颗:?}"
+    );
+}
+
+/// **收起后那根窄条与筛空时那句空态，印的是同一个条件数**
+/// （票 `gui-looks-like-the-design/12`，挂单 `Q806`；口径是拿主意的人 2026-09-21 定的）。
+///
+/// 两处各数一遍的话，屏上会说出两个数——所以数在核心库数**一次**
+/// （`WorkQuery::filter_count`），这两处都问它（ADR-0024）。
+///
+/// 夹具**三样各有一点**，正是口径里要加起来的那三样：一个分面（平台）、条件组里一条
+/// **生效的**子句、以及非游戏资产那颗开关。外加一个**不该算**的搜索词——它管顺序不管
+/// 集合，算进来就是在屏上说搜索缩小了这一批。
+#[test]
+fn 收起后的窄条与筛空时的空态印的是同一个条件数() {
+    use romcat_core::catalog::browse::NonGameAssets;
+    use romcat_core::sublibrary::Rule;
+
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-条件数"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+
+    {
+        let query = app.browse_and_site().0.query_mut();
+        // 一个分面：库里没有 FC，于是这一趟一行都不剩、空态画得出来。
+        query.platform = Some(PlatformFilter::from_label("FC"));
+        // 一条生效的子句。
+        query.rule = Some(Rule::parse("年份>=1990").expect("读得懂"));
+        // 那颗开关。
+        query.non_game_assets = NonGameAssets::Listed;
+        // **不该算的那一样。**
+        query.search = "口袋".to_string();
+        assert_eq!(query.filter_count(), 3, "口径：两样加一条子句，搜索词不算");
+    }
+    跑(&ctx, &mut app, 2);
+
+    // 一、空态那句。
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert_eq!(app.window().total(), 0, "这个筛选下该一行都不剩");
+    assert!(
+        屏上.contains("没有符合当前 3 个筛选条件的作品。"),
+        "空态那句没写条件数、或者数得不对：\n{屏上}"
+    );
+
+    // 二、把左栏收起来，窄条上竖着写的是同一个数（照稿 `.fstrip`「筛选 · 3 个条件」）。
+    let 屏上 = 点这半边的(&ctx, "«", true, |ui| app.ui(ui));
+    assert!(
+        屏上.contains("筛\n选\n·\n3\n个\n条\n件"),
+        "收起后那根窄条上没竖着写「筛选·3个条件」：\n{屏上}"
+    );
+}
+
+/// **筛不出东西的子句：屏上逐条点名，但一条都不拦**
+/// （票 `gui-looks-like-the-design/12`）。
+///
+/// 三档各来一条：认不出的平台名、还没建的合集、以及**评分**那一维（立着但眼下没有源）。
+/// 判在核心库一处（`sublibrary::thin`），这一层只把它印出来（ADR-0024）。
+///
+/// **与「还有 N 条没生效」是两件事**：那一段说的是**没填完或者填错了**的，它们不进规则；
+/// 这一段说的是**读得成、也进了规则**、只是眼下一个变体都选不中的。把后者也拦下来是错的
+/// ——合集可以是待会儿才建的，平台清单也会长。
+#[test]
+fn 筛不出东西的子句屏上逐条点名但不拦着() {
+    let ctx = headless::context();
+    // **用小库不用合成数据**：合成数据那份左栏长得多（平台与语言各一大簇），
+    // 条件组那一段会被 `ScrollArea` 剔到视口外，屏上根本读不到那几句话。
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-筛不出东西"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+
+    let text = "平台=没这个平台 且 合集=还没建的 且 评分>=0.8";
+    let rule = romcat_core::sublibrary::Rule::parse(text).expect("读得懂");
+    app.browse_and_site().0.set_filter_rule(Some(rule.clone()));
+    跑(&ctx, &mut app, 2);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+
+    // 一、三条都点到名，而且数目写出来。
+    assert!(
+        屏上.contains("有 3 条筛不出东西："),
+        "屏上没说有几条筛不出东西：\n{屏上}"
+    );
+    for 该说的 in ["没这个平台", "还没建的", "评分"] {
+        assert!(
+            屏上.contains(该说的),
+            "「{该说的}」那一条没被点名：\n{屏上}"
+        );
+    }
+
+    // 二、**一条都没被拦**：三条照样进了规则，屏上那行规则原文一字不少。
+    assert_eq!(
+        app.browse()
+            .query()
+            .rule
+            .as_ref()
+            .map(|one| one.text.clone()),
+        Some(text.to_string()),
+        "筛不出东西的子句被悄悄扔掉了——那会让存出去的子库比屏上说的宽",
+    );
+
+    // 三、**它不是「没生效」**：那一段说的是没填完或填错的，这一趟一条都没有。
+    assert!(
+        !屏上.contains("还有 1 条没生效") && !屏上.contains("还有 3 条没生效"),
+        "把「筛不出东西」说成了「没生效」，两件事混了：\n{屏上}"
+    );
+}
+
+/// **搜索框底下那句排序说明，只在搜索框里真有字时才画**
+/// （挂单 `Q1099`，拿主意的人 2026-09-21 定）。
+///
+/// 两层道理：**没搜的时候它是废话**（「搜索结果默认按匹配程度排序」——可还没搜），
+/// 而且它**要占两行**（这一句得连「默认」一起说，票 `11` 改了口径），常驻的话左栏最底下
+/// 「语言」那一段会被一路顶出视口。
+///
+/// **两个方向各断一条**：只断「搜索着的时候有」的话，一份「永远显示」的实现照样全绿，
+/// 而那正是这一条要防的。
+#[test]
+fn 排序那句说明只在搜索着的时候才出现() {
+    const 那句话: &str = "搜索结果默认按匹配程度排序";
+
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-排序说明"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+
+    // 一、**没搜索：屏上没有这句话**。
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        !屏上.contains(那句话),
+        "还没搜就把「{那句话}」挂在屏上了——那句话此刻不成立：\n{屏上}"
+    );
+
+    // 二、**打了字：屏上有**。
+    app.browse_and_site().0.query_mut().search = "幻想".to_string();
+    跑(&ctx, &mut app, 2);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        屏上.contains(那句话),
+        "搜索着的时候没说清结果是按什么排的：\n{屏上}"
+    );
+
+    // 三、**把字删干净，它跟着收回去**——只留空白也算没搜。
+    app.browse_and_site().0.query_mut().search = "   ".to_string();
+    跑(&ctx, &mut app, 2);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        !屏上.contains(那句话),
+        "搜索词清空之后那句话没收回去：\n{屏上}"
+    );
+}
+
+/// **表格上方那一组批量操作：整组靠右、组内不拆散、摆不下整组换一行**
+/// （设计稿 `.tbar{flex-wrap:wrap}` 加 `.acts{margin-left:auto;flex-wrap:nowrap}`；
+/// 拿主意的人 2026-09-22 对着稿裁的，挂单 `Q1102`）。
+///
+/// **两种宽窄各验一遍**，这是要害：
+///
+/// - **没勾行**时左边只有视图切换与作品数，那一组摆得下，落在**同一行的右头**；
+/// - **勾了行**之后作品数变长（「已选 N 个作品 · M 个变体」）、还多出一颗「清除选择」，
+///   左边挤占了宽度，那一组**整组换到第二行**、在那一行里照旧靠右。
+///
+/// 头一版只画了一帧默认布局就断言，**换行那条路一次都没走到**——而那条路恰恰是写错的
+/// （拿 `add_space` 想逼 `horizontal_wrapped` 折行，实际只是把光标推过右沿，三颗按钮
+/// 连画都没画出来）。抓到它的是合并向导那条测试，不是这一条。
+///
+/// 票 `gui-looks-like-the-design/10` 栽的是「**字画着、点不动**」，所以这里除了位置还
+/// **真按一下**。
+#[test]
+fn 批量那一组整组靠右_摆不下就整组换行_不拆散也点得中() {
+    /// 照稿的次序。今天摆得出这三颗，「加入合集…」（票 13）与「加入子库…」（票 23）
+    /// 位置留着。
+    const 照稿次序: [&str; 3] = ["刮削…", "★ 收藏", "合并作品…"];
+
+    let ctx = headless::context();
+    let mut app = 界面(ROWS);
+    跑(&ctx, &mut app, 3);
+
+    /// 那三颗各画在哪儿，按屏上从左到右排好。
+    fn 那一组(帧: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+        let mut 几颗: Vec<(String, egui::Rect)> = 照稿次序
+            .iter()
+            .map(|字| {
+                含着这几个字的每一段(帧, 字)
+                    .into_iter()
+                    .find(|(text, _)| text == 字)
+                    .unwrap_or_else(|| panic!("屏上没有「{字}」这颗按钮：\n{}", 画出来的字(帧)))
+            })
+            .collect();
+        几颗.sort_by(|(_, a), (_, b)| a.min.x.total_cmp(&b.min.x));
+        几颗
+    }
+
+    /// 这一组**整组不拆散**：三颗在同一行上、次序照稿。
+    fn 断整组不拆散(几颗: &[(String, egui::Rect)]) {
+        let 行 = 几颗[0].1.center().y;
+        for (字, rect) in 几颗 {
+            assert!(
+                (rect.center().y - 行).abs() <= 2.0,
+                "「{字}」没和这一组其余几颗在同一行上（{rect:?}，这一行 y≈{行}）",
+            );
+        }
+        let 屏上次序: Vec<&str> = 几颗.iter().map(|(字, _)| 字.as_str()).collect();
+        assert_eq!(屏上次序, 照稿次序, "这一组的次序与稿上不一样");
+    }
+
+    // 右栏那块面板的左沿：拿它当「中间那一栏的右边界」。按钮越过它就是盖到右栏上了。
+    let 帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 右栏左沿 = 含着这几个字的每一段(&帧, "点主列表里的一行")
+        .into_iter()
+        .next()
+        .map_or(headless::VIEWPORT[0], |(_, rect)| rect.min.x);
+
+    // ── 一、没勾行：摆得下，落在同一行的右头 ────────────────────────────────
+    let 帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 几颗 = 那一组(&帧);
+    断整组不拆散(&几颗);
+    let (_, 作品数) = 含着这几个字的每一段(&帧, "个作品（共")
+        .into_iter()
+        .next()
+        .expect("那一条上画着作品数");
+    assert!(
+        (几颗[0].1.center().y - 作品数.center().y).abs() <= 4.0,
+        "摆得下的时候这一组该和作品数同一行：那一组 {:?}，作品数 {作品数:?}",
+        几颗[0].1,
+    );
+    // **靠右**：最后一颗的右沿**贴着中间那一栏的右边界**（稿上 `.acts` 的
+    // `margin-left:auto`）。这么断比「与作品数之间空多少」稳——那个间隙随作品数那一句
+    // 多长而变，库一换就不作数了；贴不贴右沿是「有没有靠右」本身。
+    let 贴右沿 = |几颗: &[(String, egui::Rect)]| 右栏左沿 - 几颗[几颗.len() - 1].1.max.x;
+    assert!(
+        贴右沿(&几颗) < 60.0,
+        "这一组没靠右：最后一颗右沿离中间那一栏的右边界还有 {}（那一栏右边界 {右栏左沿}）",
+        贴右沿(&几颗),
+    );
+    for (字, rect) in &几颗 {
+        assert!(
+            rect.max.x < 右栏左沿,
+            "「{字}」越过了中间那一栏的右边界（{rect:?}，右栏左沿 {右栏左沿}）",
+        );
+    }
+
+    // ── 二、勾一行：左边变宽，这一组整组换到第二行 ──────────────────────────
+    {
+        let (browse, site) = app.browse_and_site();
+        let anchor = site
+            .catalog
+            .work_page(browse.query(), 0, 1)
+            .expect("取得出一行")
+            .remove(0)
+            .anchor;
+        browse.picked_mut().toggle(&anchor);
+    }
+    跑(&ctx, &mut app, 2);
+    let 帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 几颗 = 那一组(&帧);
+    断整组不拆散(&几颗);
+    let (那一句, 已选) = 含着这几个字的每一段(&帧, "已选")
+        .into_iter()
+        .next()
+        .expect("勾了行之后那一条上画着「已选 …」");
+    assert!(
+        几颗[0].1.min.y > 已选.max.y,
+        "左边挤满之后这一组没换到第二行：「{那一句}」{已选:?}，头一颗 {:?}",
+        几颗[0].1,
+    );
+    // 换了行照旧**靠右**：同一条尺子量第二行。
+    assert!(
+        贴右沿(&几颗) < 60.0,
+        "换行之后这一组没靠右：最后一颗右沿离右边界还有 {}",
+        贴右沿(&几颗),
+    );
+    for (字, rect) in &几颗 {
+        assert!(
+            rect.max.x < 右栏左沿,
+            "换行之后「{字}」越过了中间那一栏的右边界（{rect:?}）",
+        );
+    }
+
+    // ── 三、**点得中**：票 10 栽的正是「字画着、点不动」 ───────────────────
+    let 屏上 = shared::点正好(&ctx, "刮削…", |ui| app.ui(ui));
+    assert!(
+        屏上.contains("刮削"),
+        "按了「刮削…」什么都没发生——多半是它画在行外，点不中：\n{屏上}"
     );
 }

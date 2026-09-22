@@ -263,10 +263,15 @@ impl Boundary {
     /// （id 另起），这条边界自己那格尺寸在 egui 那张表里原样留着，展开回来就是原来那么宽。
     ///
     /// **只收左右两栏**：底栏收起来要的是横着的另一副窄条，眼下没有哪一屏要，底栏照常画。
+    ///
+    /// `note` 是窄条上跟在栏名后头的那一句（照稿 `.fstrip` 的「筛选 · 3 个条件」）。
+    /// **它由调用方算好交进来**：那个数是领域判断（`WorkQuery::filter_count`），
+    /// 这一层只负责把它竖着铺出来（ADR-0024）。不需要就交 `None`。
     pub fn show_collapsible<R>(
         self,
         ui: &mut egui::Ui,
         name: &str,
+        note: Option<&str>,
         frame: egui::Frame,
         add_contents: impl FnOnce(&mut egui::Ui) -> R,
     ) -> Option<R> {
@@ -315,15 +320,23 @@ impl Boundary {
                     }
                     ui.add_space((tokens.space.strip_gap - ui.spacing().item_spacing.y).max(0.0));
                     // **竖着写**：一个字一行，照稿那一条竖排的栏名（说明字号、次一级的字色）。
+                    //
+                    // `note` 给了就接在栏名底下，中间一个「·」（照稿 `.fstrip` 那句
+                    // 「筛选 · 3 个条件」）。**空白一律不占一行**：竖排里一个空格就是
+                    // 一道断口，照原样铺会在「3」与「个」之间劈出一条缝。
+                    let 竖排: String = match note {
+                        Some(note) => format!("{name}·{note}"),
+                        None => name.to_string(),
+                    }
+                    .chars()
+                    .filter(|one| !one.is_whitespace())
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+                    .join("\n");
                     ui.label(
-                        egui::RichText::new(
-                            name.chars()
-                                .map(String::from)
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        )
-                        .small()
-                        .color(ui.visuals().text_color()),
+                        egui::RichText::new(竖排)
+                            .small()
+                            .color(ui.visuals().text_color()),
                     );
                 });
             });

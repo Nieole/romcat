@@ -725,7 +725,7 @@ impl Screen {
                 // （设计稿 `.lstrip`），与浏览屏两栏同一副。
                 let 框 = egui::Frame::new().fill(look::palette(ui).panel);
                 layout::QUEUE_LIST
-                    .show_collapsible(ui, "待选列表", 框, |ui| self.item_list(ui));
+                    .show_collapsible(ui, "待选列表", None, 框, |ui| self.item_list(ui));
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(ui.visuals().panel_fill))
                     .show(ui, |ui| self.detail_pane(ui, site));

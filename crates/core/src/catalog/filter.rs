@@ -54,7 +54,7 @@ pub(super) fn rule_sql(rule: &Rule) -> Predicate {
     group_sql(&rule.root)
 }
 
-/// 把一个组折成一段。三种连接各算各的，**空组按各自的中性元算**——与
+/// 把一个组折成一段。三种组合方式各算各的，**空组按各自的中性元算**——与
 /// [`sublibrary`](crate::sublibrary) 那一侧逐字一致。
 fn group_sql(group: &Group) -> Predicate {
     let mut parts: Vec<String> = Vec::new();
