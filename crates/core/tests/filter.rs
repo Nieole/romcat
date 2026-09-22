@@ -684,7 +684,7 @@ fn 旧的平铺规则原样解析() {
         })
         .expect("子库写得进");
     let 老规则 = Rule::parse("平台=GB,GBA 且 中文=汉化").expect("读得懂");
-    catalog.add_rule("掌机", &老规则).expect("规则写得进");
+    catalog.add_rule("掌机", &老规则, None).expect("规则写得进");
     let loaded = catalog.selection("掌机").expect("选择集读得回来");
     assert!(
         loaded.broken.is_empty(),

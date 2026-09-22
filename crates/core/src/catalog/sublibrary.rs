@@ -98,6 +98,9 @@ CREATE TABLE IF NOT EXISTS sublibrary_rule(
     sublibrary TEXT    NOT NULL REFERENCES sublibrary(name),
     ordinal    INTEGER NOT NULL,
     text       TEXT    NOT NULL,
+    -- 人给这条规则起的名字。**可空**：空就是没起过，屏上照旧拿 `Rule::label()`
+    -- 从原文现拼（稿上 `autoName`）。老库补这一列走 `add_columns`，见那一支。
+    name       TEXT,
     at         INTEGER NOT NULL,
     PRIMARY KEY (sublibrary, ordinal)
 ) STRICT;
@@ -185,6 +188,14 @@ pub(super) fn add_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         "absent",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    // **规则的名字**（票 `gui-looks-like-the-design/23`，稿上「加入子库」那一格「规则名称」）。
+    //
+    // 从前规则没有名字那一列，屏上的短名是 `Rule::label()` 从原文现拼的（稿上 `autoName`）。
+    // 挂单 `Q811` 记的那条路是「升结构版本、删库重扫」——**那条路过时了**：这张表在
+    // **中立库**里，而 `Catalog::open` 每开一次库就把 `add_columns` 跑一遍，
+    // 纯加一列的老行取得到的含义与从前完全一致（老行是 NULL ＝ 没起过名字 ＝ 照旧现拼）。
+    // 票 11 给 `work` 加 `sort_title` 走的就是这条，`SCHEMA_VERSION` 没动过。
+    super::add_column(conn, "sublibrary_rule", "name", "TEXT")?;
     Ok(())
 }
 
@@ -247,6 +258,9 @@ struct RemovedRule {
     ordinal: i64,
     /// 原文。
     text: String,
+    /// 人起的名字（没起过就是 `None`）。**撤销要把它原样放回去**——
+    /// 丢了的话那条规则从此只剩现拼的短名，而人看见的是「名字没了」。
+    name: Option<String>,
     /// 记下的时刻。
     at: i64,
 }
@@ -534,7 +548,7 @@ impl Catalog {
         {
             let mut statement = tx
                 .prepare(
-                    "SELECT ordinal, text, at FROM sublibrary_rule
+                    "SELECT ordinal, text, name, at FROM sublibrary_rule
                      WHERE sublibrary = ?1 ORDER BY ordinal",
                 )
                 .map_err(to_err)?;
@@ -543,7 +557,8 @@ impl Catalog {
                     Ok(RemovedRule {
                         ordinal: row.get(0)?,
                         text: row.get(1)?,
-                        at: row.get(2)?,
+                        name: row.get(2)?,
+                        at: row.get(3)?,
                     })
                 })
                 .map_err(to_err)?;
@@ -681,13 +696,19 @@ impl Catalog {
         {
             let mut insert = tx
                 .prepare(
-                    "INSERT INTO sublibrary_rule(sublibrary, ordinal, text, at)
-                     VALUES(?1, ?2, ?3, ?4)",
+                    "INSERT INTO sublibrary_rule(sublibrary, ordinal, text, name, at)
+                     VALUES(?1, ?2, ?3, ?4, ?5)",
                 )
                 .map_err(to_err)?;
             for rule in &removed.rules {
                 insert
-                    .execute(params![removed.name, rule.ordinal, rule.text, rule.at])
+                    .execute(params![
+                        removed.name,
+                        rule.ordinal,
+                        rule.text,
+                        rule.name,
+                        rule.at
+                    ])
                     .map_err(to_err)?;
             }
             let mut insert = tx
@@ -756,7 +777,12 @@ impl Catalog {
     ///
     /// # Errors
     /// 写库失败，或者这个子库不存在时返回错误。
-    pub fn add_rule(&mut self, name: &str, rule: &Rule) -> Result<i64, CatalogError> {
+    pub fn add_rule(
+        &mut self,
+        name: &str,
+        rule: &Rule,
+        rule_name: Option<&str>,
+    ) -> Result<i64, CatalogError> {
         let path = self.path.clone();
         let to_err = |source| CatalogError::Sqlite {
             path: path.clone(),
@@ -772,9 +798,17 @@ impl Catalog {
             )
             .map_err(to_err)?;
         tx.execute(
-            "INSERT INTO sublibrary_rule(sublibrary, ordinal, text, at)
-             VALUES(?1, ?2, ?3, ?4)",
-            params![name, ordinal, rule.text, super::now_secs()],
+            "INSERT INTO sublibrary_rule(sublibrary, ordinal, text, name, at)
+             VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![
+                name,
+                ordinal,
+                rule.text,
+                // **收拾过空白、空的当没起过**：不然「   」会存成一个名字，
+                // 屏上既不是现拼的短名、也看不出是空的。
+                rule_name.map(str::trim).filter(|一串| !一串.is_empty()),
+                super::now_secs()
+            ],
         )
         .map_err(to_err)?;
         tx.execute(
@@ -832,8 +866,8 @@ impl Catalog {
             )
             .map_err(to_err)?;
         tx.execute(
-            "INSERT INTO sublibrary_rule(sublibrary, ordinal, text, at)
-             VALUES(?1, ?2, ?3, ?4)",
+            "INSERT INTO sublibrary_rule(sublibrary, ordinal, text, name, at)
+             VALUES(?1, ?2, ?3, NULL, ?4)",
             params![name, ordinal, rule.text, super::now_secs()],
         )
         .map_err(to_err)?;
@@ -940,7 +974,7 @@ impl Catalog {
         let mut statement = self
             .conn
             .prepare(
-                "SELECT ordinal, text FROM sublibrary_rule
+                "SELECT ordinal, text, name FROM sublibrary_rule
                  WHERE sublibrary = ?1 ORDER BY ordinal",
             )
             .map_err(|source| self.err(source))?;
@@ -949,6 +983,7 @@ impl Catalog {
                 Ok(StoredRule {
                     ordinal: row.get(0)?,
                     text: row.get(1)?,
+                    name: row.get(2)?,
                 })
             })
             .map_err(|source| self.err(source))?;

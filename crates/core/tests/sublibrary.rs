@@ -94,7 +94,7 @@ fn 现场() -> Catalog {
 /// 读通一条规则再写进去——`add_rule` 收的就是读通了的 [`Rule`]。
 fn 加规则(catalog: &mut Catalog, name: &str, text: &str) -> i64 {
     let rule = Rule::parse(text).expect("规则读得懂");
-    catalog.add_rule(name, &rule).expect("规则写得进")
+    catalog.add_rule(name, &rule, None).expect("规则写得进")
 }
 
 fn 建子库(catalog: &mut Catalog, name: &str, capacity: Option<u64>) {
@@ -526,14 +526,17 @@ fn 读不懂的规则跳过并报出来_不连累别的() {
         StoredRule {
             ordinal: 1,
             text: "平台=GB".to_string(),
+            name: None,
         },
         StoredRule {
             ordinal: 7,
             text: "标签=汉化".to_string(),
+            name: None,
         },
         StoredRule {
             ordinal: 9,
             text: "平台=GB 且 中文=汉化".to_string(),
+            name: None,
         },
     ];
     let loaded = LoadedSelection::from_stored(&stored);
@@ -560,6 +563,7 @@ fn 读不懂的规则进得了报告_不只写在标准错误上() {
     let 坏的 = LoadedSelection::from_stored(&[StoredRule {
         ordinal: 7,
         text: "标签=汉化".to_string(),
+        name: None,
     }]);
     loaded.broken = 坏的.broken;
 
@@ -698,6 +702,7 @@ fn 换掉规则时读不懂的那几条原样留着() {
                     Vec::new(),
                 ),
             },
+            None,
         )
         .expect("写得进");
 
@@ -744,6 +749,7 @@ fn 扔掉读不懂的那一条不碰读得懂的那几条与例外() {
                 text: "这不是一条规则".to_string(),
                 root: sublibrary::Group::new(sublibrary::Join::All, Vec::new()),
             },
+            None,
         )
         .expect("写得进");
     catalog
@@ -1686,4 +1692,110 @@ fn 一个变体落在哪几个子库里由求值那一处答_例外照样优先�
             .is_empty(),
         "一个键都不给时问的是空集"
     );
+}
+
+/// **规则的名字：人起过就用那个，没起过就现拼**
+/// （票 `gui-looks-like-the-design/23`，稿上「加入子库」那一格「规则名称」）。
+///
+/// 这一列是后补的（`add_columns`，**不升结构版本、不删库**），所以要钉的是三档：
+/// 起过名字的读回来是那个；没起过的（`None`）退回 `Rule::label()` 现拼；
+/// **只打了空白的等于没起过**——不然「   」会存成一个名字，屏上既不是短名也看不出是空的。
+#[test]
+fn 规则起过名字就用那个_没起过就照原文现拼() {
+    let mut catalog = 现场();
+    建子库(&mut catalog, "掌机", None);
+    let 读通 = |text: &str| Rule::parse(text).expect("规则读得懂");
+
+    let 起过 = catalog
+        .add_rule("掌机", &读通("平台=GB"), Some("随身那几个"))
+        .expect("写得进");
+    let 没起过 = catalog
+        .add_rule("掌机", &读通("平台=SFC"), None)
+        .expect("写得进");
+    let 只有空白 = catalog
+        .add_rule("掌机", &读通("平台=FC"), Some("   "))
+        .expect("写得进");
+
+    let 存着的 = catalog.sublibrary_rules("掌机").expect("读得回来");
+    let 取 = |ordinal: i64| {
+        存着的
+            .iter()
+            .find(|一条| 一条.ordinal == ordinal)
+            .expect("这一条在")
+    };
+
+    assert_eq!(取(起过).name.as_deref(), Some("随身那几个"));
+    assert_eq!(取(起过).shown_name(), "随身那几个");
+
+    assert_eq!(取(没起过).name, None, "没起过名字就该是 None，不是空字符串");
+    assert_eq!(
+        取(没起过).shown_name(),
+        读通("平台=SFC").label(),
+        "没起过名字时该拿 `Rule::label()` 现拼（稿上 `autoName`）"
+    );
+
+    assert_eq!(
+        取(只有空白).name,
+        None,
+        "只打了空白等于没起过——存进去的话屏上既不是短名也看不出是空的"
+    );
+    assert_eq!(取(只有空白).shown_name(), 读通("平台=FC").label());
+}
+
+/// **判「这条规则已经有了」只比树，不比原文**
+/// （票 `gui-looks-like-the-design/23`，挂单 `Q1180`）。
+///
+/// ⚠️ **与稿不同、是有意的**：稿上 `renderAS` 比的是字符串（`x.text===r.text`）。
+/// 而同一棵树可以有两种原文——空白不同、多值的次序不同，折出来是同一棵树、却是两串字。
+/// 拿原文判重的话同一条规则加得进去两遍，子库那一侧照样取并集：
+/// **屏上多一条、选出来的一个不多**，人只会以为哪里坏了。
+#[test]
+fn 同一棵树两种原文也算同一条规则() {
+    let mut catalog = 现场();
+    建子库(&mut catalog, "掌机", None);
+    let 读通 = |text: &str| Rule::parse(text).expect("规则读得懂");
+    let 头一条 = catalog
+        .add_rule("掌机", &读通("平台=GB 且 中文=汉化"), None)
+        .expect("写得进");
+    let 存着的 = catalog.sublibrary_rules("掌机").expect("读得回来");
+
+    // 一、一字不差的那一条当然算同一条。
+    assert_eq!(
+        Rule::same_one_in(&存着的, &读通("平台=GB 且 中文=汉化")),
+        Some(头一条)
+    );
+
+    // 二、**同一棵树、另一串原文**：也算同一条。这是这一条要钉的正题。
+    //
+    // 两种都来一次：中间多打一个空格（人手打出来最常见的那种），
+    // 以及整条外头套一对括号（从别处粘过来的那种）。
+    for 另一串 in ["平台=GB  且  中文=汉化", "(平台=GB 且 中文=汉化)"] {
+        let 另一条 = 读通(另一串);
+        assert_ne!(
+            另一条.text, 存着的[0].text,
+            "「{另一串}」与存着的那串字得真的不一样，不然下一句测的是空气"
+        );
+        assert_eq!(
+            Rule::same_one_in(&存着的, &另一条),
+            Some(头一条),
+            "「{另一串}」与存着的是同一棵树，判重得认得出来"
+        );
+        assert!(另一条.same_as(&读通("平台=GB 且 中文=汉化")));
+        assert!(
+            另一条 != 读通("平台=GB 且 中文=汉化"),
+            "派生的 `==` 连原文一起比，所以它不是判重该用的那个——这一句把差别钉住"
+        );
+    }
+
+    // 三、**真的不一样的那条不算**。
+    assert_eq!(Rule::same_one_in(&存着的, &读通("平台=SFC")), None);
+
+    // 四、**读不回来的那几条一律当作不同**：读不懂的规则本来就没参与求值，
+    // 拿它去挡一条读得懂的会挡错。
+    let 坏的 = [romcat_core::sublibrary::StoredRule {
+        ordinal: 99,
+        text: "这不是一条规则".to_string(),
+        name: None,
+    }];
+    assert_eq!(Rule::same_one_in(&坏的, &读通("平台=GB")), None);
 }

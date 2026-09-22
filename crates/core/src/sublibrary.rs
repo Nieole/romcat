@@ -416,6 +416,30 @@ pub struct StoredRule {
     pub ordinal: i64,
     /// 规则原文。
     pub text: String,
+    /// **人给它起的名字**（票 `gui-looks-like-the-design/23`，稿上「加入子库」那一格）。
+    ///
+    /// `None` 是**没起过**——不是「叫空字符串」。这一列是后补的（`add_columns`，
+    /// 不升结构版本），**老规则一律是 `None`**，屏上照旧拿 [`Self::shown_name`]
+    /// 从原文现拼。
+    pub name: Option<String>,
+}
+
+impl StoredRule {
+    /// **屏上这条规则叫什么**：人起过名字就是那个，没起过就拿 [`Rule::label`] 从原文现拼
+    /// （稿上 `autoName`）。原文读不回来时退回原文本身——那时现拼不出来，
+    /// 而印一句空的比印原文更难查。
+    ///
+    /// **全仓问「这条规则叫什么」只走这一处**：屏上、报告、命令行各拼一遍的话，
+    /// 同一条规则在三处会有三个名字，而人照着其中一个去找另一处就找不着。
+    #[must_use]
+    pub fn shown_name(&self) -> String {
+        if let Some(起过的) = self.name.as_deref()
+            && !起过的.trim().is_empty()
+        {
+            return 起过的.to_string();
+        }
+        Rule::parse(&self.text).map_or_else(|_| self.text.clone(), |读通的| 读通的.label())
+    }
 }
 
 /// 从中立库读回来的一份选择集。

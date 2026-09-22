@@ -1689,7 +1689,11 @@ fn 摆上第几版子库与导出(app: &mut App) {
         })
         .expect("子库写得进");
     site.catalog
-        .add_rule("RG35XX Plus", &Rule::parse("平台=SFC").expect("规则读得懂"))
+        .add_rule(
+            "RG35XX Plus",
+            &Rule::parse("平台=SFC").expect("规则读得懂"),
+            None,
+        )
         .expect("规则写得进");
     site.catalog
         .mark_exported_at(
@@ -3004,7 +3008,7 @@ impl 子库现场 {
             .expect("写得进子库");
         for 那条 in 规则 {
             site.catalog
-                .add_rule(名字, &Rule::parse(那条).expect("读得懂"))
+                .add_rule(名字, &Rule::parse(那条).expect("读得懂"), None)
                 .expect("写得进规则");
         }
         screen.reload(site);

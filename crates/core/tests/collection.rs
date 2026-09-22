@@ -734,7 +734,7 @@ fn 改名连引用它的子库规则一起改_收藏改不得() {
         现场
             .site
             .catalog
-            .add_rule("掌机", &Rule::parse(text).expect("读得懂"))
+            .add_rule("掌机", &Rule::parse(text).expect("读得懂"), None)
             .expect("加得进规则");
     }
 
@@ -874,7 +874,7 @@ fn 删合集是把成员全部移出_写着它的规则照旧留着_收藏删不
     现场
         .site
         .catalog
-        .add_rule("掌机", &Rule::parse("合集=送朋友的").expect("读得懂"))
+        .add_rule("掌机", &Rule::parse("合集=送朋友的").expect("读得懂"), None)
         .expect("加得进规则");
 
     // **屏上那句警告要的那个数**：删之前说清有几条规则写着它。

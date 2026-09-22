@@ -91,6 +91,8 @@
 
 use std::fmt;
 
+use super::StoredRule;
+
 /// 「全部满足」写成的那个组合方式。**要求两侧有空白**，于是值里出现这个字也不会被当成分隔符。
 const AND: char = '且';
 
@@ -739,6 +741,40 @@ pub struct Rule {
     pub text: String,
     /// 顶层那个组。一条平铺的老规则在这里就是一个「全部满足」组。
     pub root: Group,
+}
+
+impl Rule {
+    /// **这两条规则是同一条吗**：只比树，不比原文。
+    ///
+    /// ⚠️ **不要拿 `==`。** `Rule` 派生的 `PartialEq` 连 [`Self::text`] 一起比，
+    /// 于是它实际上是「原文一字不差」——而**同一棵树可以有两种原文**：
+    /// `平台=GB 且 中文=汉化` 与 `平台=GB且中文=汉化`（空白）、
+    /// `平台=GB,SFC` 与 `平台=SFC,GB`（值的次序）折出来的是同一棵树，却是两串字。
+    /// 拿原文判重的话，同一条规则加得进去两遍，子库那一侧照样取并集——
+    /// 屏上多一条、选出来的一个不多，人只会以为哪里坏了。
+    ///
+    /// **全仓判「这条规则已经有了」只走这一处**（ADR-0024）。
+    /// 稿上 `renderAS` 那一路比的是字符串（`x.text===r.text`），
+    /// **这儿与稿不同、是有意的**——票 13 那一趟「改名必须走树、不许替换字符串」
+    /// 是同一个教训（挂单 `Q1180`）。
+    #[must_use]
+    pub fn same_as(&self, other: &Self) -> bool {
+        self.root == other.root
+    }
+
+    /// 这几条存着的规则里，有没有与 `rule` **同一棵树**的那一条；有就交回它的序号。
+    ///
+    /// 读不回来的那几条（换过一版程序、人手改过库）**一律当作不同**：
+    /// 读不懂的规则本来就没参与求值，拿它去挡一条读得懂的会挡错。
+    #[must_use]
+    pub fn same_one_in(stored: &[StoredRule], rule: &Self) -> Option<i64> {
+        stored.iter().find_map(|一条| {
+            Self::parse(&一条.text)
+                .ok()
+                .filter(|读通的| 读通的.same_as(rule))
+                .map(|_| 一条.ordinal)
+        })
+    }
 }
 
 impl fmt::Display for Rule {

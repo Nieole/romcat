@@ -4077,7 +4077,10 @@ impl Screen {
             self.error = Some(format!("子库写不进中立库：{error}"));
             return;
         }
-        match site.catalog.add_rule(&name, &rule) {
+        // **「存成子库」这条路不收规则名**：它一次只建一台、只写一条规则，
+        // 那条规则的名字与子库同名没有意义。起名字那一格在「加入子库」那层弹层上
+        //（票 `gui-looks-like-the-design/23`）。`None` ＝ 没起过，屏上现拼。
+        match site.catalog.add_rule(&name, &rule, None) {
             Ok(_) => {
                 self.notice = Some(format!(
                     "子库「{name}」已建好，规则是：{rule}。屏上这 {} 行 · {} 个变体原样带过去。",

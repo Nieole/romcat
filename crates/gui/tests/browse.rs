@@ -4678,6 +4678,7 @@ fn 管理合集那一层删得掉_成员全部移出而规则原样留着() {
                 .add_rule(
                     "掌机",
                     &romcat_core::sublibrary::Rule::parse(一条).expect("读得懂"),
+                    None,
                 )
                 .expect("加得进规则");
         }

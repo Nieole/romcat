@@ -1723,6 +1723,7 @@ fn 状态块上子库与导出两行照核心库写_都答不出时说没有() {
             .add_rule(
                 "掌机",
                 &Rule::parse(&format!("平台={平台}")).expect("规则读得懂"),
+                None,
             )
             .expect("规则写得进");
         site.catalog

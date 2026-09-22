@@ -162,7 +162,9 @@ impl 现场 {
     fn 加规则(&mut self, name: &str, rule: &str) {
         let parsed = Rule::parse(rule).expect("读得懂");
         let (screen, site) = self.app.sublibrary_and_site();
-        site.catalog.add_rule(name, &parsed).expect("写得进去");
+        site.catalog
+            .add_rule(name, &parsed, None)
+            .expect("写得进去");
         screen.reload(site);
         screen.open(site, name);
     }
@@ -179,7 +181,7 @@ impl 现场 {
             root: Group::new(Join::All, Vec::new()),
         };
         let (screen, site) = self.app.sublibrary_and_site();
-        let ordinal = site.catalog.add_rule(name, &坏的).expect("写得进去");
+        let ordinal = site.catalog.add_rule(name, &坏的, None).expect("写得进去");
         screen.open(site, name);
         ordinal
     }

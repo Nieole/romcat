@@ -77,7 +77,7 @@ impl 现场 {
             })
             .expect("建得出子库");
         catalog
-            .add_rule("掌机", &Rule::parse("平台=SFC").expect("规则读得懂"))
+            .add_rule("掌机", &Rule::parse("平台=SFC").expect("规则读得懂"), None)
             .expect("写得进规则");
         Self {
             库,
