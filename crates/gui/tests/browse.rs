@@ -5032,3 +5032,105 @@ fn 加入子库那一层把当前筛选存成规则_名字落得进库_同一条
         "拦下之后库里还是只该有一条"
     );
 }
+
+/// **挑选模式：按「加入并继续挑选」留在这一屏，换个平台再加一条，累计当场更新**
+/// （票 `gui-looks-like-the-design/23`，验收第 4、5 条，设计稿 `.pickbar`）。
+///
+/// 钉四件事：
+///
+/// 1. 按「加入并继续挑选」之后**人留在浏览屏**（不像「加入」那样被送走），顶上多一条挑选栏；
+/// 2. 挑选栏上写着**为哪一台挑**，以及累计几条规则；
+/// 3. **换一个平台，挑选栏上那颗「加入当前筛选」再按一下就又加一条**；
+/// 4. **累计数字当场更新**——第二条加完之后那一栏写的是 2 条规则，不是 1 条。
+#[test]
+fn 挑选模式留在浏览屏_换个平台再加一条_累计当场更新() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[
+            ("SFC", "短.zip", shared::档::命中),
+            ("GBA", "另一个.zip", shared::档::命中),
+        ],
+        shared::干净工作目录("romcat-测试-浏览-挑选模式"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+    {
+        let (browse, site) = app.browse_and_site();
+        site.catalog
+            .put_sublibrary(&romcat_core::sublibrary::Sublibrary::at(
+                "掌机",
+                std::path::Path::new("/Volumes/SDCARD/掌机"),
+                "Pegasus",
+                None,
+            ))
+            .expect("建得出子库");
+        browse.set_filter_rule(Some(
+            romcat_core::sublibrary::Rule::parse("平台=SFC").expect("读得懂"),
+        ));
+        browse.invalidate(site);
+    }
+    跑(&ctx, &mut app, 3);
+
+    // 一、摊开那一层，按「加入并继续挑选」。
+    shared::点正好(&ctx, "加入子库…", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    shared::等任务台空了(&mut app);
+    跑(&ctx, &mut app, 2);
+    点弹层里的(&ctx, "加入并继续挑选", "", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    shared::等任务台空了(&mut app);
+    跑(&ctx, &mut app, 2);
+
+    // 二、**人还在浏览屏**，顶上那条挑选栏写着为哪一台挑、累计几条。
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        屏上.contains("正在为「掌机」挑选"),
+        "按了「加入并继续挑选」，挑选栏没出来（或者人被送走了）：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("1 条规则"),
+        "挑选栏上没写累计几条规则：\n{屏上}"
+    );
+    // **那颗按钮上的字是「加入当前筛选」与「已在选择集中」二选一**（照稿）：
+    // 这会儿刚加完、同一条还筛着，所以它该改口说「已在选择集中」。
+    assert!(
+        屏上.contains("已在选择集中"),
+        "同一条还在筛着，那颗该写「已在选择集中」：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("加入当前筛选"),
+        "两种字面只该出现一种：\n{屏上}"
+    );
+
+    // 三、**换一个平台**，再按一下。
+    {
+        let (browse, site) = app.browse_and_site();
+        browse.set_filter_rule(Some(
+            romcat_core::sublibrary::Rule::parse("平台=GBA").expect("读得懂"),
+        ));
+        browse.invalidate(site);
+    }
+    跑(&ctx, &mut app, 3);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        屏上.contains("加入当前筛选") && !屏上.contains("已在选择集中"),
+        "换了平台之后那颗该又按得动了：\n{屏上}"
+    );
+    shared::点正好(&ctx, "加入当前筛选", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    shared::等任务台空了(&mut app);
+    跑(&ctx, &mut app, 2);
+
+    // 四、**库里真的两条了，挑选栏上的累计也跟着变**。
+    let 规则们 = app.site().catalog.sublibrary_rules("掌机").expect("读得出");
+    assert_eq!(规则们.len(), 2, "换个平台再加一条没加进去：{规则们:?}");
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        屏上.contains("2 条规则"),
+        "累计没当场更新（该写 2 条规则）：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("正在为「掌机」挑选"),
+        "加完第二条之后挑选栏不该收掉：\n{屏上}"
+    );
+}

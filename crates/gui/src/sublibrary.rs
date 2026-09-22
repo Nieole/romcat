@@ -130,12 +130,6 @@ const TOP_NOTES: usize = 20;
 /// **不给「下一页」**：这儿要的是「把我想起来的那一部找出来」，不是浏览——翻页那条路在浏览屏上。
 const SEARCH_HITS: u64 = 6;
 
-/// 容量条上「清单之外：还不知道」那一段画多长，占整条的几成。
-///
-/// 取的是设计稿 `devCard` 里那个数（没看过目标时那一段 `min(12%, 余下的)`）：它不是一个量出来的
-/// 容量——还不知道就没有数可画——只是让「这儿有一段不知道的」看得见，而不是缩成零。
-const UNKNOWN_SHARE: f32 = 0.12;
-
 /// **没有有效预览时「同步」为什么按不动**——这一句只许有一处（ADR-0005「『不禁按钮』那一条
 /// 什么时候允许同时画灰」那一节）。
 ///
@@ -2668,52 +2662,12 @@ impl Screen {
         };
         let 之外色 = visuals.warn_fg_color;
         let 未知描边 = visuals.widgets.inactive.bg_stroke;
-        // 条高照稿（设计稿 `.gauge` 的 10 点，令牌 `gauge-height`）。「容量」那个小标题摆在卡片那一层的抬头里。
+        // **条子本身由 `look::gauge_bar` 画**（设计稿那张对照表：「容量条与子库页共用同一个
+        // 画法」）——浏览屏挑选栏上那根窄的是同一根，只是尺寸不同。这儿只管底下那行图例。
+        // 条高照稿（设计稿 `.gauge` 的 10 点，令牌 `gauge-height`）；
+        // 「容量」那个小标题摆在卡片那一层的抬头里。
         let height = Tokens::builtin().layout.gauge_height;
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), height),
-            egui::Sense::hover(),
-        );
-        let rounding = height / 2.0;
-        let painter = ui.painter();
-        painter.rect_filled(rect, rounding, visuals.extreme_bg_color);
-        let picked = rect.width() * gauge.picked_share();
-        if picked > 0.0 {
-            painter.rect_filled(
-                egui::Rect::from_min_size(rect.min, egui::vec2(picked, height)),
-                rounding,
-                选中色,
-            );
-        }
-        let rest_left = rect.left() + picked;
-        match gauge.strangers {
-            Some(_) => {
-                let width = rect.width() * gauge.stranger_share();
-                if width > 0.0 {
-                    painter.rect_filled(
-                        egui::Rect::from_min_size(
-                            egui::pos2(rest_left, rect.top()),
-                            egui::vec2(width, height),
-                        ),
-                        rounding,
-                        之外色,
-                    );
-                }
-            }
-            // **「还不知道」画成一段斜纹，不画成零**（设计稿 `.gauge .unk`）：卡不在手边时目标上
-            // 有什么本来就没看过，一段也不画等于说「卡上是空的」。
-            None => {
-                let width = (rect.right() - rest_left).min(rect.width() * UNKNOWN_SHARE);
-                hatch(
-                    painter,
-                    egui::Rect::from_min_size(
-                        egui::pos2(rest_left, rect.top()),
-                        egui::vec2(width, height),
-                    ),
-                    未知描边,
-                );
-            }
-        }
+        look::gauge_bar(ui, egui::vec2(ui.available_width(), height), &gauge, over);
         ui.horizontal_wrapped(|ui| {
             legend_swatch(ui, 选中色);
             // 图例带「（N 个变体）」（设计稿 `.legend`）。几个由核心数：算过容量的照报告，排过差量的照那份计划。
@@ -4810,30 +4764,6 @@ fn empty_ui(ui: &mut egui::Ui) -> bool {
         });
     });
     clicked
-}
-
-/// 容量条上「还不知道」那一段的斜纹（设计稿 `.gauge .unk`）：强一级描边色的斜条，一个来回一道，一半有色。
-///
-/// 描边颜色取 `widgets.inactive.bg_stroke`，由 [`look::install`] 照令牌 `line-2` 装好；一个来回多宽取令牌
-/// `gauge-hatch`，斜条宽是它的一半。
-fn hatch(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
-    if rect.width() <= 0.0 {
-        return;
-    }
-    let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
-    let gap = Tokens::builtin().layout.gauge_hatch;
-    let stroke = egui::Stroke::new(gap / 2.0, stroke.color);
-    let mut x = rect.left() - rect.height();
-    while x < rect.right() {
-        painter.line_segment(
-            [
-                egui::pos2(x, rect.bottom()),
-                egui::pos2(x + rect.height(), rect.top()),
-            ],
-            stroke,
-        );
-        x += gap;
-    }
 }
 
 /// 容量条图例前那一小块颜色（设计稿 `.legend i`）。**颜色不是唯一线索**：后面一定跟着那一段的名字。

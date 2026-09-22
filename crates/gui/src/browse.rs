@@ -539,6 +539,16 @@ pub struct Screen {
     add_to_sublibrary: Option<sublibrary::AddTo>,
     /// 正在算的那一趟预估是任务台上的第几号；`None` 是没在算。
     sublibrary_estimating: Option<u64>,
+    /// **正在为哪一台挑选**（票 `23` 验收第 4 条，设计稿 `S.pick`）；`None` 是没在挑。
+    ///
+    /// 按「加入并继续挑选」进这一档：人留在浏览屏，顶上多一条挑选栏，
+    /// 换一个平台再加一条，累计数字当场更新。
+    picking: Option<String>,
+    /// 各台眼下那份选择集报告（`survey` 算回来的），挑选栏与「加入到」那一列共用。
+    sublibrary_reports:
+        std::collections::BTreeMap<String, romcat_core::sublibrary::report::SelectionReport>,
+    /// **那份报告作废了**：刚加进去一条，得重算一趟，不然挑选栏上的累计还是上一趟的数。
+    sublibrary_stale: bool,
     /// 正在算的那一趟**各台现状**（`survey`）是第几号；`None` 是没在算。
     ///
     /// 与预估那一趟分开排：**那一趟是「加进去之后」，这一趟是「眼下各台是什么样」**，
@@ -676,6 +686,9 @@ impl Screen {
             add_to_sublibrary: None,
             sublibrary_estimating: None,
             sublibrary_surveying: None,
+            picking: None,
+            sublibrary_reports: std::collections::BTreeMap::new(),
+            sublibrary_stale: false,
             sublibrary_estimated_for: None,
             sublibrary_devices: Vec::new(),
             sublibrary_estimate: sublibrary::Estimate::Working,
@@ -992,6 +1005,171 @@ impl Screen {
         }
     }
 
+    /// **挑选栏**（票 `gui-looks-like-the-design/23` 验收第 4 条，设计稿 `.pickbar`）：
+    /// 只在挑选模式下出现，钉在浏览屏最上头。
+    ///
+    /// 左边「正在为「X」挑选」＋累计（几条规则 · 几个变体 · 多大 / 上限），
+    /// 一根**容量条**（走全仓那一处 `look::gauge_bar`，与子库屏卡片上那根是同一根），
+    /// 右边四颗：加入当前筛选 / 加入勾选的 N 个 / 查看选择集 / 完成。
+    ///
+    /// **累计当场更新**（验收第 5 条）：每加一条就把那份报告标脏，下一帧重算一趟。
+    /// 还没算回来时那几个数写「正在算…」，**不写 0**。
+    fn picking_bar(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
+        let Some(name) = self.picking.clone() else {
+            return;
+        };
+        self.queue_survey(site, tasks);
+        let 报告 = self.sublibrary_reports.get(&name);
+        let 几条规则 = 报告.map_or(0, |一份| 一份.rules.len());
+        let 累计 = 报告.map_or_else(
+            || "正在算…".to_string(),
+            |一份| {
+                format!(
+                    "{几条规则} 条规则 · {} 个变体 · {}{}",
+                    thousands(一份.picked),
+                    human_bytes(一份.bytes),
+                    一份
+                        .capacity
+                        .map_or_else(String::new, |上限| format!(" / {}", human_bytes(上限))),
+                )
+            },
+        );
+        // 当前筛选折成的那条规则，以及它在这台里是不是已经有了。
+        let 这一条 = self.query.to_rule().ok().flatten();
+        let 已经有了 = 这一条.as_ref().and_then(|rule| {
+            site.catalog
+                .sublibrary_rules(&name)
+                .ok()
+                .and_then(|几条| Rule::same_one_in(&几条, rule))
+        });
+        let 勾了 = self.picked.count(self.window.total());
+        let mut 按了 = None;
+        let tokens = Tokens::builtin();
+        // 照稿 `.pickbar`：强调色淡底、整条通栏、上下 9 左右 16 的内边距。
+        // **钉在浏览屏最上头**（稿上是一条 `TopBottomPanel`，这儿画在这一屏的第一格，
+        // 位置一样；这一屏本身就画在一个 `ui` 里，另起一条面板会把左右两栏挤到它底下去）。
+        egui::Frame::NONE
+            .fill(look::palette(ui).accent_soft)
+            .inner_margin(egui::Margin::symmetric(16, 9))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(font::strong(format!("正在为「{name}」挑选")));
+                        look::help(ui, &累计);
+                    });
+                    if let Some(一份) = 报告 {
+                        let tokens = Tokens::builtin();
+                        look::gauge_bar(
+                            ui,
+                            egui::vec2(
+                                tokens.layout.pick_gauge_width,
+                                tokens.layout.pick_gauge_height,
+                            ),
+                            &romcat_core::sublibrary::Gauge {
+                                picked: 一份.bytes,
+                                strangers: 一份.fit.known().map(|room| room.stranger_bytes),
+                                capacity: 一份.capacity,
+                            },
+                            一份
+                                .fit
+                                .known()
+                                .and_then(|room| room.over_capacity)
+                                .is_some(),
+                        );
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        按了 = look::small_buttons(ui, |ui| {
+                            let mut 按了 = None;
+                            if ui
+                                .button("完成")
+                                .on_hover_text("挑完了，回子库屏看这一份选择集。")
+                                .clicked()
+                            {
+                                按了 = Some(Picking::Done);
+                            }
+                            if ui
+                                .scope(|ui| {
+                                    look::ghost_button(ui.visuals_mut());
+                                    ui.button("查看选择集")
+                                })
+                                .inner
+                                .on_hover_text("去子库屏看这一台眼下都收了些什么。")
+                                .clicked()
+                            {
+                                按了 = Some(Picking::View);
+                            }
+                            if ui
+                                .add_enabled(
+                                    勾了 > 0,
+                                    egui::Button::new(format!("加入勾选的 {} 个", thousands(勾了))),
+                                )
+                                .on_hover_text(if 勾了 > 0 {
+                                    "把勾中的那几个作为手动例外加进去，不随筛选条件变。"
+                                } else {
+                                    "先在列表里勾选作品。"
+                                })
+                                .clicked()
+                            {
+                                按了 = Some(Picking::AddPicked);
+                            }
+                            let 加得了 = 这一条.is_some() && 已经有了.is_none();
+                            if ui
+                                .scope(|ui| {
+                                    look::primary_button(ui.visuals_mut());
+                                    ui.add_enabled(
+                                        加得了,
+                                        egui::Button::new(if 已经有了.is_some() {
+                                            "已在选择集中"
+                                        } else {
+                                            "加入当前筛选"
+                                        }),
+                                    )
+                                })
+                                .inner
+                                .on_hover_text(match (&这一条, 已经有了) {
+                                    (None, _) => "当前筛选还折不成一条规则，先把条件组理顺。",
+                                    (_, Some(_)) => {
+                                        "这一条已经在这台的选择集里了。换一个平台再加一条。"
+                                    }
+                                    _ => "把当前筛选作为一条规则加进去。",
+                                })
+                                .clicked()
+                            {
+                                按了 = Some(Picking::AddRule);
+                            }
+                            按了
+                        });
+                    });
+                });
+            });
+        ui.add_space(tokens.space.pane_gap);
+        match 按了 {
+            Some(Picking::Done) => {
+                self.picking = None;
+                self.returned = Some(name);
+            }
+            Some(Picking::View) => self.returned = Some(name),
+            // **挑选栏上那两下不另起名字**：稿上那两颗就是「加入当前筛选」「加入勾选的 N 个」，
+            // 没有输名字的地方。留空＝没起过，屏上照旧拿现拼的短名。
+            Some(按的 @ (Picking::AddRule | Picking::AddPicked)) => {
+                let deed = sublibrary::Deed {
+                    device: name,
+                    mode: if 按的 == Picking::AddRule {
+                        sublibrary::Mode::Rule
+                    } else {
+                        sublibrary::Mode::Picked
+                    },
+                    rule_name: String::new(),
+                    // **留在这一屏接着挑**：这两颗按的就是「再加一条」。
+                    keep_picking: true,
+                };
+                self.add_into_sublibrary(site, &deed, 这一条.as_ref());
+            }
+            None => {}
+        }
+    }
+
     /// **排一趟「各台眼下是什么样」**：「加入到」那一列每一行副行那几个数。
     ///
     /// 走的是全仓那一处 `sublibrary::survey`（与子库屏「算一遍容量」、
@@ -1001,6 +1179,11 @@ impl Screen {
         if self.sublibrary_surveying.is_some() {
             return;
         }
+        // 算过一趟而且没作废，就不再算——`facts()` 那一趟不便宜。
+        if !self.sublibrary_reports.is_empty() && !self.sublibrary_stale {
+            return;
+        }
+        self.sublibrary_stale = false;
         let Ok(几台) = site.catalog.sublibraries() else {
             return;
         };
@@ -1160,6 +1343,7 @@ impl Screen {
                 一台.bytes = Some(报告.bytes);
             }
         }
+        self.sublibrary_reports = *几份;
         None
     }
 
@@ -1219,7 +1403,14 @@ impl Screen {
             }
         }
         self.touched = Some(name.clone());
-        if !deed.keep_picking {
+        // **刚加进去一条，上一趟那份报告就不作数了**：挑选栏上的累计要当场更新
+        // （验收第 5 条），所以标脏、下一帧重算一趟。
+        self.sublibrary_stale = true;
+        if deed.keep_picking {
+            // **留在这一屏接着挑**（设计稿 `S.pick`）：顶上那条挑选栏从这一下起常驻。
+            self.picking = Some(name);
+        } else {
+            self.picking = None;
             self.returned = Some(name);
         }
     }
@@ -3149,6 +3340,9 @@ impl Screen {
             self.page_ui(ui, site);
             return;
         }
+        // **挑选栏钉在这一屏最上头**（票 `23` 验收第 4 条，设计稿 `.pickbar`）：
+        // 只在挑选模式下出现。稿上它不画在作品详情页上，所以摆在那一支 `return` 之后。
+        self.picking_bar(ui, site, tasks);
         // **三栏：左筛选 / 中表格 / 右详情**（票 `gui-looks-like-the-design/09`）。左右两栏
         // 从顶到底，拖得动、收得起来、下次打开还记得；怎么拖、收起来长什么样、记在哪儿，全在
         // [`crate::layout`] 那一份声明里（票 `gui-redesign/12`）。两栏的底色与内边距照稿：
@@ -5243,6 +5437,19 @@ pub enum Action {
     Merge,
     /// 「加入子库…」（稿上 `#save-sub`，票 `23` 做的）。**这一组里唯一的主按钮。**
     AddToSublibrary,
+}
+
+/// 挑选栏上按下去的是哪一颗（设计稿 `.pickbar` 那四颗）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Picking {
+    /// 「加入当前筛选」：把当前筛选作为一条规则加进去。
+    AddRule,
+    /// 「加入勾选的 N 个」：把勾中的那几个作为手动例外加进去。
+    AddPicked,
+    /// 「查看选择集」：去子库屏看这一台。
+    View,
+    /// 「完成」：挑完了。
+    Done,
 }
 
 /// 这一组照稿的次序，**量宽与画都走它**。
