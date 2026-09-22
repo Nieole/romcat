@@ -5,7 +5,7 @@
 
 **Blocked by:** 09
 
-**Status:** ready-for-agent
+**Status:** done
 
 ⚠️ **跨平台**：macOS 上是 ⌘，Windows 与 Linux 上是 Ctrl；表上两种都写得出。
 
@@ -39,8 +39,64 @@
 卡片墙上 `Enter` / `空格` 照旧走得通（Tab 走到一张卡，那张卡自己接）。
 要让 ↑↓ 在卡片墙上也走得通，得把 `focused` 换成作品身份——那是票 09 那块地盘上的改动。
 
-- [ ] 行与卡片上的右键菜单：打开详情、编辑元数据、勾选、收藏、~~加入合集~~（票 13）、~~加入子库~~（票 23）、合并、刮削、在文件系统中打开、复制名称
-- [ ] 切屏（⌘/Ctrl+1–6）、搜索（⌘/Ctrl+F）、设置（⌘/Ctrl+,）、快捷键表（`?`）
-- [ ] 浏览屏（跟高亮走的那几下**只在表格那一路**，卡片墙见 `Q1142`；⌘/Ctrl+A 两种视图都走得通）：上下选、Enter 打开、空格勾选、⌘/Ctrl+A 全选筛选结果、F 收藏、E 编辑元数据
-- [ ] 输入框获得焦点时不响应单键快捷键（中文输入不被抢）
-- [ ] Esc 关掉菜单与弹层，一层一层退
+- [x] 行与卡片上的右键菜单：打开详情、编辑元数据、勾选、收藏、~~加入合集~~（票 13）、~~加入子库~~（票 23）、合并、刮削、在文件系统中打开、复制名称
+- [x] 切屏（⌘/Ctrl+1–6）、搜索（⌘/Ctrl+F）、设置（⌘/Ctrl+,）、快捷键表（`?`）
+- [x] 浏览屏（跟高亮走的那几下**只在表格那一路**，卡片墙见 `Q1142`；⌘/Ctrl+A 两种视图都走得通）：上下选、Enter 打开、空格勾选、⌘/Ctrl+A 全选筛选结果、F 收藏、E 编辑元数据
+- [x] 输入框获得焦点时不响应单键快捷键（中文输入不被抢）
+- [x] Esc 关掉菜单与弹层，一层一层退
+
+---
+
+## 做完了
+
+**分支** `q5/gl-14-context-menu-shortcuts`，已合 `main`（`adecd64`，合点 `f2d7bdd`）。
+
+### 门禁
+
+合 main 之后那一趟（按 `docs/agents/long-jobs.md` 那个跑法跑的，日志
+`/Users/nicoer/dev/game-wt/logs/slot-1-票14-合main后.log`，开头两行印着树与分支）：
+
+```
+绿  fmt        1s  cargo fmt --all --check
+绿  glossary    0s  cargo xtask glossary
+绿  check     12s  cargo check --workspace
+绿  clippy    14s  cargo clippy --workspace --all-targets --all-features
+绿  test     769s  cargo test --workspace --all-features
+绿  doc        8s  RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --lib --bins
+6 条全绿。
+EXIT=0
+```
+
+日志 3211 行 / 256K，`Running` 81 处、`Compiling` 10 处。
+⚠️ **`EXIT=` 那一行是那个跑法自己 `echo` 的**（`long-jobs.md:89`），不是 `xtask` 印的。
+
+### 测试与基线
+
+- `crates/gui/tests/menu.rs` **23 条**（菜单摆哪几项、每一项写哪一句、按下去真有事发生、
+  三道门、卡片墙那道门、Esc 一层一层退）。
+- 截图门 **119 张**，不带更新连跑两遍全绿。
+- 这一票的六张：`browse/context-menu-{light,dark}` 与 `browse/keys-sheet-{light,dark}`
+  （新），`settings/keys-{light,dark}`（重出：表从九条到十七条、表底注脚按稿换了一句）。
+  合 main 之后前四张因**屏头腾空 + 左栏少那一句**两种传导叠加重出过一次
+  （`23fb3bc`，编排者按「纯传导」裁定入库）。
+- **量过的对齐**（控件矩形，不是像素比）：菜单八项左缘全 532.000／右缘全 728.000；
+  快捷键表键帽左列十枚全 626.000／右列七枚全 927.000。
+
+### 这一票开的挂单
+
+`Q1140`（那两项不摆）｜`Q1141`（菜单那圈描边稿上没有，**已裁：留着**）｜`Q1142`（上下键只在
+表格那一路）｜`Q1143`（键盘入口眼下三处）｜`Q1144`（票 31 那句注脚摆错了地方）｜
+`Q1145`（最长那条原先默声截断）｜`Q1146`（`tests/program.rs` 那条会飘红，与本票无关）｜
+`Q1147`（卡面的字会吞点击，票 09 漏的）｜`Q1148`（稿在全选那一档前后不一致，**已裁：挑自洽那边**）｜
+`Q1149`（`keys-group-gap`）｜`Q1150`（卡片标题次序，结果恒等）。
+
+顺带把这一票新立的八个令牌补进了 `.scratch/gui-looks-like-the-design/check_tokens.py`
+（`Q1083` 那个「绿着没人看」的洞）：276 → 291 项，一致。
+
+### ⚠️ 留给别人的三件事
+
+1. **`spec.md` 第 46 条原话仍列着「加入合集、加入子库」**——收尾前别把它当已满足（`Q1140`）。
+2. **票 13** 收尾再合一次时要接住这一支在 `filter_panel` 搜索框那一处加的两样：
+   `.id(搜索框())` 与 `let 搜索框 = …` ＋ `if std::mem::take(&mut self.focus_search) {
+   搜索框.request_focus(); }`。理由与合法写在 `23fb3bc` 的提交说明里。
+3. **`Q1142` 要接的下一步**：把 `focused` 从行序号换成作品身份，卡片墙上 ↑↓ 才走得通。
