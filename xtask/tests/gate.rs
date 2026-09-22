@@ -13,6 +13,9 @@
 //! - **词表那一条扫的是哪几行。** 相对 `main` 的 merge base、含未提交的、存量不扫，
 //!   拿不到历史时如实跳过；撞了真的退非零。「哪些词元算撞、注释里不算」那一半是纯函数，
 //!   单元测试在 `xtask/src/glossary.rs` 里，不在这儿。
+//! - **那几个算得出来的数过期时真的会红。** 造一份数写错了的丢弃仓库，`--check` 退非零
+//!   **并把对的那个数印出来**；`--write` 改完，同一份输入就绿。「标记怎么扫、四样各怎么数」
+//!   那一半是纯函数，单元测试在 `xtask/src/numbers.rs` 里，不在这儿。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -139,7 +142,13 @@ fn 门禁就是这几条而且顺序是从便宜到贵() {
     // `fmt` 后面：它跑几条 git、读几份改过的文件，也是秒级。
     let 门禁 = steps(Limits::default());
     let 名字: Vec<&str> = 门禁.iter().map(|it| it.name).collect();
-    assert_eq!(名字, ["fmt", "glossary", "check", "clippy", "test", "doc"]);
+    // `numbers` 是唯一不按这条排的：它要的那份编译缓存由 `test` 热着，所以它跟在 `test` 后面。
+    assert_eq!(
+        名字,
+        [
+            "fmt", "glossary", "check", "clippy", "test", "numbers", "doc"
+        ]
+    );
 }
 
 #[test]
@@ -175,7 +184,8 @@ fn 每一条打印出来对得上_readme_那一段() {
     // 反推出来的：其中三行（`fmt` / `clippy` / `test`）原样抄自门禁落地之前 README
     // 的开发块，两行是票 `parking-3/02` 添的——`check` 那一条，以及敲成硬红、
     // 补上 `--all-features` 之后的 `doc`；`cargo xtask glossary` 那一行是票
-    // `machine-checks-premises/02` 添的，它是一条递归的 xtask 子命令，仍然是 cargo 子进程。
+    // `machine-checks-premises/02` 添的，`cargo xtask numbers --check` 那一行是票
+    // `machine-checks-premises/03` 添的——两条都是递归的 xtask 子命令，仍然是 cargo 子进程。
     let 打印: Vec<String> = steps(Limits::default()).iter().map(Step::display).collect();
     assert_eq!(
         打印,
@@ -185,6 +195,7 @@ fn 每一条打印出来对得上_readme_那一段() {
             "cargo check --workspace",
             "cargo clippy --workspace --all-targets --all-features",
             "cargo test --workspace --all-features",
+            "cargo xtask numbers --check",
             "RUSTDOCFLAGS=\"-D warnings\" cargo doc --workspace --no-deps --all-features --lib --bins",
         ]
     );
@@ -530,5 +541,124 @@ fn 词表里门禁词越出它那条近义词时这一条当场红() {
     assert!(
         输出.contains("CONTEXT.md:3") && 输出.contains("近义四"),
         "报错得点名是哪一行、哪个词越界：\n{输出}"
+    );
+}
+
+// ── 那几个算得出来的数 ──
+//
+// 纯函数那一半（标记怎么扫、四样各怎么数）在 `xtask/src/numbers.rs` 里单元测试；这里验的是
+// **真的跑一趟**：一份数写错了的丢弃仓库上，`--check` 红、`--write` 改完就绿。
+//
+// ⚠️ 这份丢弃仓库自带一个最小的 crate——`--check` 要跑一趟 `cargo test … -- --list` 才数得出
+// 测试条数，没有 crate 它就无从数起。crate 只有两条空测试，编一趟是秒级的。
+
+/// 一份带标记、而**每个数都写错了**的 README。
+const 数写错了的README: &str = "\
+# 丢弃仓库
+
+**<!-- 数:票数 -->9/9 张票落地**，<!-- 数:ADR份数 -->9 份 ADR。
+
+<!-- 数:测试条数 -->9 条测试、<!-- 数:测试目标数 -->9 个测试目标。
+";
+
+/// 一份带标记的丢弃仓库：两张票（落地一张）、两份 ADR、一个最小的 crate。
+fn 丢弃仓库带数(tag: &str) -> 丢弃目录 {
+    let dir = 丢弃目录 {
+        path: 丢弃路径(tag),
+    };
+    let d = &dir.path;
+    // `[workspace]` 那一行是封口用的，理由同 `丢弃crate带同名bin`。
+    写(
+        d,
+        "Cargo.toml",
+        "[package]\nname = \"throwaway\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+    );
+    写(
+        d,
+        "src/lib.rs",
+        "//! 一份丢弃 crate。\n\n#[test]\nfn 甲() {}\n\n#[test]\nfn 乙() {}\n",
+    );
+    写(
+        d,
+        ".scratch/q/issues/01-甲.md",
+        "# 甲\n\n**Status:** done\n",
+    );
+    写(
+        d,
+        ".scratch/q/issues/02-乙.md",
+        "# 乙\n\n**Status:** ready-for-agent\n\n收尾时把上面那一行改成 done。\n",
+    );
+    // 文件名没有那两位数字的不是票——`issues/` 底下允许躺着维护者自己的文件。
+    写(d, ".scratch/q/issues/记事.md", "这不是一张票。\n");
+    写(d, "docs/adr/0001-一.md", "# 一\n");
+    写(d, "docs/adr/0002-二.md", "# 二\n");
+    写(d, "README.md", 数写错了的README);
+    dir
+}
+
+/// 在 `dir` 里跑 `xtask numbers <动作>`，交回退出码绿没绿与它印的全部输出。
+fn 跑数那一条(dir: &Path, 动作: &str) -> (bool, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("numbers")
+        .arg(动作)
+        .current_dir(dir)
+        .output()
+        .expect("能起 xtask");
+    let 输出 = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.success(), 输出)
+}
+
+#[test]
+fn 数过期了这一条红并把对的那个数说出来改写之后就绿() {
+    // ⭐ **两面都验，而且红的那一面是真造出来的。** 只断言「数对上了」，一条永远绿的命令
+    // 也能过；这里先让四个数都是错的，看它红、看它把对的那个数印出来，再 `--write`，
+    // 同一份输入必须变绿。
+    let 仓库 = 丢弃仓库带数("numbers");
+    let d = &仓库.path;
+
+    let (绿, 输出) = 跑数那一条(d, "--check");
+    assert!(!绿, "四个数都写错了，这一条必须退非零：\n{输出}");
+    for 该有 in [
+        "README.md:3",
+        "「票数」写着 9/9，对的是 1/2",
+        "「ADR份数」写着 9，对的是 2",
+    ] {
+        assert!(输出.contains(该有), "报红里得有「{该有}」：\n{输出}");
+    }
+
+    let (绿, 输出) = 跑数那一条(d, "--write");
+    assert!(绿, "`--write` 得跑得通：\n{输出}");
+    let readme = fs::read_to_string(d.join("README.md")).expect("读得回来");
+    assert!(
+        readme.contains("-->1/2 张票落地") && readme.contains("-->2 份 ADR"),
+        "两个数都该被写回去，别处一个字节不动：\n{readme}"
+    );
+    assert!(
+        readme.starts_with("# 丢弃仓库\n\n**<!-- 数:票数 -->"),
+        "标记与正文原样留着：\n{readme}"
+    );
+
+    let (绿, 输出) = 跑数那一条(d, "--check");
+    assert!(
+        绿,
+        "改写之后同一份输入必须绿——否则它红的不是那几个数：\n{输出}"
+    );
+
+    // ⭐ **少一处标记不许悄悄绿。** 把票数那一处连标记一起删掉：这一样从此没人看着，
+    // 而「绿着但没在看」正是这个机制自己要治的病。
+    写(
+        d,
+        "README.md",
+        "# 丢弃仓库\n\n<!-- 数:ADR份数 -->2 份 ADR。\n<!-- 数:测试条数 -->2 条、<!-- 数:测试目标数 -->2 个。\n",
+    );
+    let (绿, 输出) = 跑数那一条(d, "--check");
+    assert!(!绿, "票数那一处标记没了，这一条必须红：\n{输出}");
+    assert!(
+        输出.contains("「票数」") && 输出.contains("没在看"),
+        "得点名是哪一样没人看着：\n{输出}"
     );
 }

@@ -10,6 +10,9 @@
 //! 传 `false`），于是「忘了跑 `cargo fmt --all`」这种最常见的红，代价是两秒而不是
 //! 一整趟冷编译。CI 上想一次看全每一条时给 `--keep-going`。
 //!
+//! **只有 `numbers` 那一条不照这条排**：它要的那份编译缓存由 `test` 热着，所以它跟在 `test`
+//! 后面，理由写在那一条自己的文档上。
+//!
 //! ## 两份特性配置，各有一条盯着
 //!
 //! `clippy` / `test` / `doc` 三条都带 `--all-features`——不带的话 `romcat-gui`
@@ -83,7 +86,7 @@ impl Limits {
 /// 门禁里的一条命令。程序一律是 `cargo`（见 [`cargo`]）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step {
-    /// 这一条叫什么——`fmt` / `glossary` / `check` / `clippy` / `test` / `doc`。
+    /// 这一条叫什么——`fmt` / `glossary` / `check` / `clippy` / `test` / `numbers` / `doc`。
     pub name: &'static str,
     /// 递给 `cargo` 的参数，按顺序。
     pub args: Vec<String>,
@@ -135,7 +138,8 @@ pub fn cargo() -> OsString {
     std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"))
 }
 
-/// 门禁那几条，按从便宜到贵排。**这是它们唯一的定义。**
+/// 门禁那几条，按从便宜到贵排（`numbers` 那一条例外，理由写在它自己那儿）。
+/// **这是它们唯一的定义。**
 #[must_use]
 pub fn steps(limits: Limits) -> Vec<Step> {
     vec![
@@ -144,8 +148,27 @@ pub fn steps(limits: Limits) -> Vec<Step> {
         check(limits),
         clippy(limits),
         test(limits),
+        numbers(),
         doc(limits),
     ]
+}
+
+/// 文档里那几个算得出来的数没过期。检查本体在 [`crate::numbers`]，这一条只是递归起一趟
+/// `cargo xtask numbers --check`——与 `glossary` 一样仍是 cargo 子进程，门禁里没有第二种起法。
+///
+/// ⚠️ **这一条不按「从便宜到贵」排，排在 [`test`] 之后是有原因的**：它要跑一趟
+/// `cargo test … -- --list` 才数得出测试条数，而门禁这几条走的是继承 stdio 的方式、
+/// **不捕获子进程输出**，没法从 `test` 那一趟里顺手把数捞出来。排在 `test` 后面，
+/// 那份编译缓存正热着，`--list` 只把已经编好的那几十个测试二进制各起一次、各印一份清单
+/// ——**不重编，也不跑测试**。
+///
+/// 不吃 `-j`：它什么都不编（真要编，欠的也是 `test` 那一趟的账）。
+fn numbers() -> Step {
+    Step {
+        name: "numbers",
+        args: ["xtask", "numbers", "--check"].map(String::from).to_vec(),
+        env: Vec::new(),
+    }
 }
 
 /// 新写的代码不撞词表 `_Gate_`。检查本体在 [`crate::glossary`]，这一条只是递归起一趟

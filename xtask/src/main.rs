@@ -5,6 +5,8 @@
 //! cargo xtask gate --throttle      # 退回限流那一档（-j 1、--test-threads=2）
 //! cargo xtask gate --list          # 只打印它会跑哪几条，一条都不跑
 //! cargo xtask glossary             # 只跑门禁里扫词表的那一条
+//! cargo xtask numbers --check      # 只跑门禁里核对那几个数的那一条
+//! cargo xtask numbers --write      # 把那几个数写进带标记的位置
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -13,6 +15,7 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 use xtask::gate::{self, Limits};
 use xtask::glossary::{self, Place, Scope};
+use xtask::numbers::{self, Action, Kind};
 
 /// 仓库里的杂活。
 #[derive(Debug, Parser)]
@@ -23,15 +26,33 @@ struct Cli {
     command: Job,
 }
 
-/// 门禁，以及门禁里扫词表那一条单独的入口。
+/// 门禁，以及门禁里那两条单独的入口。
 #[derive(Debug, Subcommand)]
 enum Job {
-    /// 跑门禁：排版、词表、默认特性编得过、clippy、全量测试、文档。
+    /// 跑门禁：排版、词表、默认特性编得过、clippy、全量测试、那几个数、文档。
     Gate(GateArgs),
     /// 扫新写的代码撞没撞词表 `_Gate_` 的词。门禁里 `glossary` 那一条跑的就是它。
     ///
     /// 范围是相对 `main` 的 merge base 以来的改动，含未提交的；站在 `main` 上时只看未提交的。
     Glossary,
+    /// 把票数、测试条数、测试目标数、ADR 份数写进带标记的位置，或者核对它们过期没有。
+    ///
+    /// 门禁里 `numbers` 那一条跑的是 `--check`。标记长什么样、四样各怎么数出来的，
+    /// 写在 `xtask/src/numbers.rs` 的模块文档上。
+    Numbers(NumbersArgs),
+}
+
+/// `cargo xtask numbers` 的开关。**两个动作二选一，必须给一个。**
+#[derive(Debug, Args)]
+#[group(required = true, multiple = false)]
+struct NumbersArgs {
+    /// 改写：把算出来的数写进每一处标记。
+    #[arg(long)]
+    write: bool,
+
+    /// 核对：过期就退非零，并说出对的那个数；一个字节都不改。门禁跑的是这一个。
+    #[arg(long)]
+    check: bool,
 }
 
 /// `cargo xtask gate` 的开关。
@@ -68,6 +89,69 @@ fn main() -> ExitCode {
     match Cli::parse().command {
         Job::Gate(args) => gate_job(&args),
         Job::Glossary => glossary_job(),
+        Job::Numbers(args) => numbers_job(&args),
+    }
+}
+
+/// 把那几个算得出来的数写进去，或者核对它们过期没有。
+///
+/// 站在哪个目录跑，管的就是那个目录所在的仓库——门禁起它时工作目录正是仓库根。
+fn numbers_job(args: &NumbersArgs) -> ExitCode {
+    let action = if args.write {
+        Action::Write
+    } else {
+        Action::Check
+    };
+    let dir = std::env::current_dir().unwrap_or_else(|_| repo_root());
+    let report = match numbers::run(&dir, action) {
+        Ok(report) => report,
+        Err(err) => {
+            eprintln!("那几个数这一条跑不下去：{err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let 四样: Vec<String> = Kind::ALL
+        .iter()
+        .map(|kind| format!("{}={}", kind.name(), report.tallies.value(*kind)))
+        .collect();
+    println!(
+        "数：{}；{} 份文件里 {} 处标记。",
+        四样.join(" "),
+        report.files,
+        report.marks
+    );
+    if report.stale.is_empty() {
+        // ⭐ 绿的时候不多话：上面那一行已经把四样与看了几处说完了。
+        return ExitCode::SUCCESS;
+    }
+    for one in &report.stale {
+        // ⭐ **报错里必须带上对的那个数**，这样人不必自己去数——那正是这个机制存在的理由。
+        println!(
+            "{}:{}  「{}」写着 {}，对的是 {}（怎么数出来的：{}）",
+            one.path,
+            one.line,
+            one.kind.name(),
+            if one.written.is_empty() {
+                "（空的）"
+            } else {
+                &one.written
+            },
+            one.right,
+            one.kind.how()
+        );
+    }
+    match action {
+        Action::Write => {
+            println!("改好了 {} 处。", report.stale.len());
+            ExitCode::SUCCESS
+        }
+        Action::Check => {
+            println!(
+                "红：{} 处数过期了。跑 `cargo xtask numbers --write` 让它把上面那几个数写回去。",
+                report.stale.len()
+            );
+            ExitCode::FAILURE
+        }
     }
 }
 
