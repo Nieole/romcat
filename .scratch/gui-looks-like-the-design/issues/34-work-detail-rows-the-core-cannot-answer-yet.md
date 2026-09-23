@@ -104,3 +104,69 @@ Standards 轴 3 硬伤 + 7 判断题，Spec 轴 6 条；**照改 8 条**，见�
 那一行早就是这写法，要改是整块的事）。**`Q997` 当场收了**——加上 `revision` 之后
 `add_release` 有八个参数，撞上 clippy 的 `too_many_arguments`，门禁把「以后再说」
 变成了「现在就做」（提交 `02f1ad2`）。
+
+## 挂单裁决（第五轮收口，2026-09-23）
+
+从 `.scratch/PARKING-LOT.md` 迁来（`/settle`，范围 `Q449`–`Q1185`）。每条顶上多一行**裁决**：落哪一档、去了哪儿。
+编号 `Qn` 留着占号、不复用。
+
+### Q993 — `release.revision` 眼下只有 DAT 那一条路在写，刮削那一侧的「修订」没有落点
+
+- **裁决（第五轮收口，2026-09-23）：** **记** —— 眼下没有在线源报修订，今天没人欠动作。记下，无事可做
+
+- **来自：** 票 `gui-looks-like-the-design/34`
+- **类别：** 路过发现，不在范围内
+- **在哪：** `crates/core/src/catalog/content.rs` 的 `release.revision` 那一列；唯一的写者是 `crates/core/src/identify.rs` 的 `Projector::dat_release`。
+- **为什么没停线：** 这张票要的两层（裁决 + DAT 条目名）都已经有落点，而在线源那一维**眼下一个源都没在报**。
+- **这张票实际做了什么：** 只接了 DAT 那一条写者；`scrape::Field` 一列没加。
+- **另一条路：** 在线源（ScreenScraper 等）也报得出版本号。真要接，得先定它是 `Field` 上的一维、还是直接写 `release.revision`——两条路各写一份就是同一件事的第二个判据（ADR-0024）。
+- **谁来裁：** 拿主意的人
+- **状态：** settled（第五轮收口，2026-09-23，见顶上裁决）
+### Q994 — 卡带内部头读出来的版本号仍只躺在 JSON 里，与「第几版」那条链不通
+
+- **裁决（第五轮收口，2026-09-23）：** **活** —— 无家可归（全仓没有一张开着的票占这片地），进 `/grill-with-docs`，束「沉淀库该收、还没收的人手写的东西」。
+
+- **来自：** 票 `gui-looks-like-the-design/34`
+- **类别：** 路过发现，不在范围内
+- **在哪：** `crates/core/src/identify/cart.rs:233` `Facts::version`、`crates/core/src/identify/ident.rs:111` `Ident::version`；落在 `content_cart.facts` / `content_switch.facts` 的 JSON 整段里，不单独成列。
+- **为什么没停线：** 回退链按拿主意的人 2026-09-20 的裁决只有两层（裁决 > DAT 修订）。
+- **这张票实际做了什么：** 没动它。`VariantDetail::edition` 那条链上没有这一层。
+- **另一条路：** 给它补一列、接进那条链。**但先得答一问**：卡带头里那个 mask ROM version、DAT 名里的 `(Rev 1)`、汉化第几版——这三个是不是同一件事？答不清就别接，接上去就是第三个答案。
+- **谁来裁：** 拿主意的人
+- **状态：** settled（第五轮收口，2026-09-23，见顶上裁决）
+### Q995 — 老库里入过池的媒体那三格永远空着，没有补齐的入口
+
+- **裁决（第五轮收口，2026-09-23）：** **活** —— 无家可归（全仓没有一张开着的票占这片地），进 `/grill-with-docs`，束「导出、同步与设置屏：落点、半截与程序级落盘」。
+
+- **来自：** 票 `gui-looks-like-the-design/34`
+- **类别：** 路过发现，不在范围内
+- **在哪：** `crates/core/src/catalog/scrape.rs` 的 `add_columns`（`media` 上新补的 `width` / `height` / `duration_ms` **不回填**）与 `Catalog::put_media`（那三格「空着才补」）。
+- **为什么没停线：** 空着时屏上照实退回「来源 · 大小」，不骗人；而多出来的那两段是装饰性的。
+- **这张票实际做了什么：** 只在**入池**那一刻量一次（`scrape::pool::adopt_into`）。于是重新刮削走过入池那一段的会自己补齐，只在池里躺着、没人再刮的那些永远空着。
+- **另一条路：** 开一条「把媒体池扫一遍量尺」的活排进任务台。不放在开库那条路上——回填要逐张开真库那 440 张图、逐段拉一百多个进程。
+- **谁来裁：** 拿主意的人
+- **状态：** settled（第五轮收口，2026-09-23，见顶上裁决）
+### Q996 — 详情页「子库」「导出」两行读不动时退回「—」与「还没导出」，把不可读压成了「没有」
+
+- **裁决（第五轮收口，2026-09-23）：** **活** —— 无家可归（全仓没有一张开着的票占这片地），进 `/grill-with-docs`，束「核心库该多交一样东西、或把一个判据收到一处」。
+
+- **来自：** 票 `gui-looks-like-the-design/34`（收尾两轴审查，Standards 轴挑出）
+- **类别：** 路过发现，不在范围内
+- **在哪：** `crates/gui/src/browse/work.rs` 的 `sync_page_details`：`sublibrary::holding` 与 `Catalog::entry_exported` 出错时只设 `self.error`，两行照旧画「—」与「还没导出」。
+- **为什么没停线：** 红字横幅照样出来，人不会毫不知情；而且**同一个文件里「收藏」那一行早就是这个写法**（`collection::favorite_of` 的 `Err` 分支交 `None`），单改这两行会让同一块里两种写法并存。
+- **这张票实际做了什么：** 照着收藏那一行的既有写法写的，没改。
+- **另一条路：** 把这一族「读不动」与「读出来是没有」在 `Page` 上分成两档（ADR-0021 的第三态），状态块那几行一起改——那是整块的事，不是这两行的事。
+- **谁来裁：** 拿主意的人
+- **状态：** settled（第五轮收口，2026-09-23，见顶上裁决）
+### Q997 — `Catalog::add_release` 八个位置参数，其中五个同型 `Option<&str>`（本票已收）
+
+- **裁决（第五轮收口，2026-09-23）：** **记** —— settled，本票已收成 NewRelease。已落地：票 gui-looks-like-the-design/34（catalog::content::NewRelease）
+
+- **来自：** 票 `gui-looks-like-the-design/34`（收尾两轴审查，Standards 轴挑出）
+- **类别：** 路过发现，不在范围内
+- **在哪：** `crates/core/src/catalog/content.rs` 的 `pub fn add_release`；11 处调用点（`identify.rs` 两处、`demo.rs` 一处、测试若干）。
+- **为什么没停线：** 本票只是在已有的六个后面加了第七个（`revision`），形状是既有的。
+- **这张票实际做了什么：** 加了 `revision` 这一个位置参数，摆在 `origin` 之后。
+- **另一条路：** 把 `platform / region / serial / languages / revision` 捏成一个「这条发行版是什么样」的结构体（Data Clumps），`add_release` 收它加 `work_id` 与 `origin`。传错一个同型参数眼下是静默的。
+- **谁来裁：** 拿主意的人
+- **状态：** settled —— **本票当场收了**。加上 `revision` 之后它有八个参数，撞上 `clippy::too_many_arguments`（上限七个），门禁把「以后再说」变成了「现在就做」。落成 `catalog::content::NewRelease`；`release_like` 不动（它那把去重键有意不含 `revision`）。
