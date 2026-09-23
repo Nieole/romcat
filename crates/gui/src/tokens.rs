@@ -923,6 +923,10 @@ pub struct Layout {
     pub health_list_max_height: f32,
     /// 子库卡上容量条的高（设计稿 `.gauge`）。
     pub gauge_height: f32,
+    /// 挑选栏上那根容量条的宽（设计稿 `.pickbar .gauge`）。
+    pub pick_gauge_width: f32,
+    /// 挑选栏上那根容量条的高（同上）。
+    pub pick_gauge_height: f32,
     /// 容量条上「清单之外：还不知道」那一段斜纹一个来回多宽（设计稿 `.gauge .unk`：一半有色、一半空）。
     pub gauge_hatch: f32,
     /// 容量条图例前那一小块颜色的边长（设计稿 `.legend i`）。

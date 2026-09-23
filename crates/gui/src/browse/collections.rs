@@ -17,16 +17,53 @@
 //!
 //! ## 两处都不自己数数
 //!
-//! 每个合集有几个作品，读的是筛选栏那一趟已经问回来的分面（`Facets::collections`），
-//! 不另查一遍库——**屏上两处写着不同的数，是这一屏最容易犯的错**（ADR-0024 在前三票
-//! 各栽过一次）。
+//! 这一层列哪几个合集、每个记了几个成员，问的是**沉淀库**那本账（[`Recorded`]），
+//! **不看当下筛选**——拿主意的人 2026-09-22 裁的（挂单 `Q1109`）。
+//! 左栏那个分面的数仍旧跟着筛选走，那是另一个问题、另一个单位，
+//! 两处不同不是哪边错了；理由与账都写在 [`Recorded`] 的文档里。
+//!
+//! **屏上两处写着不同的数**这件事本身仍是这一屏最容易犯的错（ADR-0024 在前三票各栽过
+//! 一次）——所以这两个数为什么不一样，代码里写明了。
 
-use romcat_core::catalog::browse::Facet;
 use romcat_core::collection::{self, FAVORITE};
 
 use crate::dialog::{Button, Dialog, Footer, Width};
 use crate::font;
 use crate::look;
+
+/// **库里有哪几个合集、各记了几个成员**——问的是**沉淀库**那本账
+/// （`verdict::Store::collections`），一行一条成员关系。
+///
+/// # 为什么不拿左栏那份分面
+///
+/// 分面（`Facets::collections`）答的是**另一个问题**：「**眼下这份筛选**底下，
+/// 这个合集还筛得着几个变体」。那条查询 `JOIN collection_variant` 走的是中立库里的
+/// 投影，而且跟着「列出非游戏资产」那颗开关走。拿它来列「库里有哪几个合集」有两种漏法：
+///
+/// - 成员全是路径锚、那些文件眼下不在库里（换了根、或删了根还没重扫）；
+/// - 成员全是非游戏资产，而那颗开关收着。
+///
+/// 两种情形下那个合集会从这一层里**整个消失**，于是既改不了名也删不掉——而核心库那两条路
+/// （`collection::rename` / `collection::drop_all`）本来是按沉淀库办的，能力一直在。
+/// 拿主意的人 2026-09-22 裁：**这个弹层从列表到数字都问沉淀库，不看当下筛选**
+/// （挂单 `Q1109`）。
+///
+/// # 屏上那两个数为什么不一样
+///
+/// **左栏那个分面的数仍旧跟着筛选走，那是对的**——它就是「这一维上眼下点得出几个」。
+/// 这一层这个数不跟着走，因为「这个合集里记了几个」与筛选无关。
+/// 两个数不同不是哪边错了，是两个问题。
+///
+/// 单位也不同：分面数的是**变体**；这儿数的是**成员关系**，一行一条锚——
+/// 一条内容锚（CRC32＋大小）可能对上好几个变体，所以这两个数不换算。
+/// 稿上写的是「N 个成员」（`prototype.html:2687`），与这儿一致。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recorded {
+    /// 合集的名字。
+    pub name: String,
+    /// 沉淀库里记着几条成员关系。
+    pub members: u64,
+}
 
 /// 左栏「收藏与合集」那一行右头那颗按钮上写的字（稿上 `.btn.ghost.sm`）。
 ///
@@ -78,12 +115,12 @@ pub struct Join {
 impl Join {
     /// 开一层：**库里已经有合集就默认头一个**，一个都没有就默认「新建合集」（照稿）。
     #[must_use]
-    pub fn open(collections: &[Facet]) -> Self {
+    pub fn open(collections: &[Recorded]) -> Self {
         Self {
             target: collections
                 .iter()
-                .find(|一个| 一个.value != FAVORITE)
-                .map(|一个| 一个.value.clone()),
+                .find(|一个| 一个.name != FAVORITE)
+                .map(|一个| 一个.name.clone()),
             fresh: String::new(),
         }
     }
@@ -108,7 +145,7 @@ impl Manage {
     pub fn ui(
         &mut self,
         ctx: &egui::Context,
-        collections: &[Facet],
+        collections: &[Recorded],
         rules_naming: &mut dyn FnMut(&str) -> Option<usize>,
     ) -> (bool, Option<Managed>) {
         let footer =
@@ -132,7 +169,7 @@ impl Manage {
     fn body(
         &mut self,
         ui: &mut egui::Ui,
-        collections: &[Facet],
+        collections: &[Recorded],
         rules_naming: &mut dyn FnMut(&str) -> Option<usize>,
     ) -> Option<Managed> {
         let mut 动作 = None;
@@ -150,9 +187,9 @@ impl Manage {
         });
 
         // ── 自建的那几个 ────────────────────────────────────────────────────
-        let 自建的: Vec<&Facet> = collections
+        let 自建的: Vec<&Recorded> = collections
             .iter()
-            .filter(|一个| 一个.value != FAVORITE)
+            .filter(|一个| 一个.name != FAVORITE)
             .collect();
         if 自建的.is_empty() {
             一段之间(ui);
@@ -160,7 +197,7 @@ impl Manage {
         }
         for 一个 in 自建的 {
             一段之间(ui);
-            let name = 一个.value.clone();
+            let name = 一个.name.clone();
             // **正在改名的那一行换成一个输入框**（照稿就地展开）。
             if let Some((改的是, 打的字)) = &mut self.renaming
                 && *改的是 == name
@@ -181,7 +218,7 @@ impl Manage {
                     continue;
                 }
             }
-            let (筛, 改, 删) = 一行(ui, &name, 一个.count);
+            let (筛, 改, 删) = 一行(ui, &name, 一个.members);
             if 筛 {
                 动作 = Some(Managed::Filter(name.clone()));
             }
@@ -200,7 +237,7 @@ impl Manage {
                 && *删的是 == name
             {
                 {
-                    match 删除确认(ui, &name, 一个.count, *几条规则) {
+                    match 删除确认(ui, &name, 一个.members, *几条规则) {
                         Some(true) => {
                             动作 = Some(Managed::Drop(name.clone()));
                             self.deleting = None;
@@ -236,11 +273,11 @@ fn 改名那一行(
     ui: &mut egui::Ui,
     原名: &str,
     打的字: &mut String,
-    collections: &[Facet],
+    collections: &[Recorded],
 ) -> Option<RenameRow> {
     let 已有: Vec<String> = collections
         .iter()
-        .map(|一个| 一个.value.clone())
+        .map(|一个| 一个.name.clone())
         .filter(|一个| 一个 != 原名)
         .collect();
     let 判 = collection::check_name(打的字, &已有);
@@ -281,7 +318,7 @@ fn 一行(ui: &mut egui::Ui, name: &str, count: u64) -> (bool, bool, bool) {
     let mut out = (false, false, false);
     ui.horizontal_top(|ui| {
         ui.label(font::strong(name));
-        look::help(ui, &format!("· {}", 多少个变体(count)));
+        look::help(ui, &format!("· {}", 多少个成员(count)));
         let (筛, 改, 删) = look::small_buttons(ui, |ui| {
             let 筛 = ui.button("按它筛选").clicked();
             let 改 = ui.button("改名").clicked();
@@ -318,7 +355,7 @@ fn 删除确认(
     let mut 定了 = None;
     let 头一句 = format!(
         "就是把它的 {} 全部移出，作品本身不受影响。",
-        多少个变体(count)
+        多少个成员(count)
     );
     let 那句话 = match 几条规则 {
         Some(0) => 头一句,
@@ -361,12 +398,12 @@ impl Join {
     pub fn ui(
         &mut self,
         ctx: &egui::Context,
-        collections: &[Facet],
+        collections: &[Recorded],
         scope: &str,
     ) -> (bool, Option<String>) {
         let 已有: Vec<String> = collections
             .iter()
-            .map(|一个| 一个.value.clone())
+            .map(|一个| 一个.name.clone())
             .filter(|一个| 一个 != FAVORITE)
             .collect();
         // 选了已有的那一档就一定用得上；「新建合集」那一档要过四条校验。
@@ -408,12 +445,12 @@ impl Join {
     }
 
     /// 内容区：已有那几个各一档、「新建合集」一档，外加路径锚那句警告。
-    fn body(&mut self, ui: &mut egui::Ui, collections: &[Facet]) {
-        for 一个 in collections.iter().filter(|一个| 一个.value != FAVORITE) {
-            let 选中 = self.target.as_deref() == Some(一个.value.as_str());
-            if look::radio_option(ui, 选中, &一个.value, &多少个变体(一个.count)).clicked()
+    fn body(&mut self, ui: &mut egui::Ui, collections: &[Recorded]) {
+        for 一个 in collections.iter().filter(|一个| 一个.name != FAVORITE) {
+            let 选中 = self.target.as_deref() == Some(一个.name.as_str());
+            if look::radio_option(ui, 选中, &一个.name, &多少个成员(一个.members)).clicked()
             {
-                self.target = Some(一个.value.clone());
+                self.target = Some(一个.name.clone());
             }
         }
         if look::radio_option(
@@ -437,7 +474,7 @@ impl Join {
             // 人还没打字就先见一句红的。
             let 已有: Vec<String> = collections
                 .iter()
-                .map(|一个| 一个.value.clone())
+                .map(|一个| 一个.name.clone())
                 .filter(|一个| 一个 != FAVORITE)
                 .collect();
             if let Err(不行) = collection::check_name(&self.fresh, &已有)
@@ -462,28 +499,30 @@ impl Join {
     }
 }
 
-/// 「N 个变体」那半句。
+/// 「N 个成员」那半句。
 ///
-/// ⚠️ **写「变体」不写「作品」，因为这个数数的就是变体。** 它来自
-/// [`Facet::count`]，核心库那一侧写着「这个值选中多少个变体」，那条 SQL 是
-/// `COUNT(*) FROM collection_variant`——一行一个变体。
-/// 稿上 `DLG.coll` 那几处写的是「N 个作品」（`c.ids` 装的是作品下标），
-/// **那是另一个数**：一部作品挂三个变体，稿上写 1、这儿的来源是 3。
+/// ⚠️ **写「成员」，因为这个数数的就是成员关系**：[`Recorded::members`] 来自沉淀库
+/// `collection_member` 的 `COUNT(*)`，**一行一条锚**。一条内容锚（CRC32＋大小）
+/// 可能对上好几个变体，所以它既不是变体数、也不是作品数。
+/// 稿上删除那句写的正是「N 个成员」（`prototype.html:2687`）。
 ///
-/// 要照稿写「个作品」得在合集这一维上另问一趟 `COUNT(DISTINCT work_id)`，
-/// 那就破了这一屏「屏上的数只有一个来源、不自己数第二遍」的规矩（模块头那一段）。
-/// 与其印一个单位对不上的数，不如照实写它是什么——挂单 `Q1107`。
-fn 多少个变体(count: u64) -> String {
-    format!("{} 个变体", romcat_core::report::thousands(count))
+/// **与左栏那个分面的数不是一回事**，理由写在 [`Recorded`] 的文档里：
+/// 那个数跟着当下筛选走（那是对的），这个不跟。
+///
+/// 稿上另外几处写的是「N 个作品」（`c.ids` 装的是作品下标）——**那是第三个数**，
+/// 要它得另问一趟 `COUNT(DISTINCT work_id)`。挂单 `Q1107` 记着这一笔。
+fn 多少个成员(count: u64) -> String {
+    format!("{} 个成员", romcat_core::report::thousands(count))
 }
 
-/// 这个合集在分面上写着几个。分面里没有它就是 0——**不另查一遍库**。
-fn 几个(collections: &[Facet], name: &str) -> String {
-    多少个变体(
+/// 这个合集在**沉淀库那本账**上记着几个成员（[`Recorded`]）。账上没有它就是 0。
+/// **不另查一遍库**——那本账是外头一次问好递进来的。
+fn 几个(collections: &[Recorded], name: &str) -> String {
+    多少个成员(
         collections
             .iter()
-            .find(|一个| 一个.value == name)
-            .map_or(0, |一个| 一个.count),
+            .find(|一个| 一个.name == name)
+            .map_or(0, |一个| 一个.members),
     )
 }
 

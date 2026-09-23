@@ -715,7 +715,7 @@ pub fn sublibrary(
         // 印出来是「选出 0 个变体、0 步」——一个看着像结果的假数。
         match romcat_core::sublibrary::Rule::parse(rule) {
             Ok(parsed) => {
-                if let Err(error) = site.catalog.add_rule(name, &parsed) {
+                if let Err(error) = site.catalog.add_rule(name, &parsed, None) {
                     eprintln!("规则写不进中立库：{error}");
                 }
             }

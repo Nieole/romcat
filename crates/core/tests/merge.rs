@@ -560,7 +560,7 @@ fn 合并之前算得出会发生什么_裁决数_前端条目从多少变多少
         .expect("建得出子库");
     现场
         .catalog
-        .add_rule("掌机", &Rule::parse("平台=GB").expect("规则读得懂"))
+        .add_rule("掌机", &Rule::parse("平台=GB").expect("规则读得懂"), None)
         .expect("写得进规则");
 
     let 计划 = 排一趟(&现场, Kind::Merge, 甲, &[乙一]);

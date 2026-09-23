@@ -175,7 +175,7 @@ fn 说得出哪台子库的选择集会少多少() {
         ))
         .expect("存得下子库");
     catalog
-        .add_rule("掌机", &Rule::parse("平台=GB").expect("读得懂"))
+        .add_rule("掌机", &Rule::parse("平台=GB").expect("读得懂"), None)
         .expect("加得上规则");
     // 第二台只收主库那一份：它一个都不该少。
     catalog
@@ -187,7 +187,11 @@ fn 说得出哪台子库的选择集会少多少() {
         ))
         .expect("存得下子库");
     catalog
-        .add_rule("另一台", &Rule::parse("作品=只在主库").expect("读得懂"))
+        .add_rule(
+            "另一台",
+            &Rule::parse("作品=只在主库").expect("读得懂"),
+            None,
+        )
         .expect("加得上规则");
 
     let 代价 = catalog.root_removal(备份).expect("算得出代价");

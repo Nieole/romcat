@@ -742,7 +742,7 @@ fn 装得下吗_计划器与子库报告是同一个数_说装得下就真装得
         .put_sublibrary(&子库(目标.path(), None))
         .expect("子库写得进");
     catalog
-        .add_rule("掌机", &Rule::parse("平台=FC").expect("规则读得懂"))
+        .add_rule("掌机", &Rule::parse("平台=FC").expect("规则读得懂"), None)
         .expect("规则写得进");
     let 同步之后 = 排计划(&catalog, 工作区.path()).plan.after_bytes;
     assert!(
@@ -866,7 +866,7 @@ fn 按名字读一台设备的脚印_读选择集折事实求值读成员() {
         .put_sublibrary(&子库(卡.path(), None))
         .expect("子库写得进");
     catalog
-        .add_rule("掌机", &Rule::parse("平台=FC").expect("读得懂"))
+        .add_rule("掌机", &Rule::parse("平台=FC").expect("读得懂"), None)
         .expect("规则写得进");
     let 脚印 =
         sync::prepare::footprint(&catalog, "掌机", &Handle::new()).expect("读得出这一台的脚印");

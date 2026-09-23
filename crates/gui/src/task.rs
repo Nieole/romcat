@@ -64,6 +64,12 @@ pub enum Product {
     Synced(Box<SyncOutcome>),
     /// 算了一遍**每台设备的容量**：一台一份[选择集报告](SelectionReport)，按子库名。
     Evaluated(Box<BTreeMap<String, SelectionReport>>),
+    /// 算了一遍「**把这一批加进那个子库之后会怎样**」（票 `gui-looks-like-the-design/23`
+    /// 的「加入子库」弹层，核心库 `sublibrary::addition`）。
+    ///
+    /// **它排在台上而不是画帧线上**：那一趟要折一遍事实（真机 343 毫秒）。
+    /// 弹层在它回来之前写「正在算…」，不写 0（挂单 `Q1181`）。
+    Added(Box<romcat_core::sublibrary::Addition>),
     /// 跑完了一趟**识别**。装箱同上：这份账里带着整份命中率报告。
     ///
     /// **被按停的那一趟也会走到这儿**（`Outcome::interrupted` 记着），而且**必须**

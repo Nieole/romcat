@@ -4259,9 +4259,29 @@ fn 排序那句说明只在搜索着的时候才出现() {
 /// **真按一下**。
 #[test]
 fn 批量那一组整组靠右_摆不下就整组换行_不拆散也点得中() {
-    /// 照稿的次序。「加入合集…」是票 13 补上的（挂单 `Q1102`）；
-    /// 稿上这一条还有「加入子库…」，那一颗等票 23。
-    const 照稿次序: [&str; 4] = ["刮削…", "★ 收藏", "加入合集…", "合并作品…"];
+    /// 屏上那一组是哪几颗——**从 `ACTIONS` 派生，不在这儿另抄一份**。
+    ///
+    /// ⚠️ **这份清单从前是手抄的，栽过两回**：这条测试拿「最后一颗的右沿」判整组靠没靠右，
+    /// 清单短一截就会拿**倒数第二颗**去量，于是整组明明靠右也判红。
+    /// acts 从三颗填到四颗时栽过一次（票 12），四颗填到五颗又栽一次（票 23）。
+    /// 头一回在这儿补了一句「添一颗要跟着添」的注释，**没挡住第二回**
+    /// ——下一个人不会去读那句话。**算得出来的东西不许手抄。**
+    ///
+    /// 次序本身另有一条断言钉着（底下头一句），那一处是**唯一**手写次序的地方。
+    fn 照稿次序() -> Vec<&'static str> {
+        romcat_gui::browse::ACTIONS
+            .iter()
+            .map(|一颗| 一颗.label())
+            .collect()
+    }
+
+    // **次序本身在这一处钉死，全仓只此一份手写的。** 改 `ACTIONS` 的次序要连这一句一起改。
+    // 稿上 `.tbar .acts` 就是这个次序，最右那颗「加入子库…」是这一组里唯一的主按钮。
+    assert_eq!(
+        照稿次序(),
+        ["刮削…", "★ 收藏", "加入合集…", "合并作品…", "加入子库…"],
+        "`ACTIONS` 的次序与稿上不一样"
+    );
 
     let ctx = headless::context();
     let mut app = 界面(ROWS);
@@ -4269,7 +4289,7 @@ fn 批量那一组整组靠右_摆不下就整组换行_不拆散也点得中() 
 
     /// 那几颗各画在哪儿，按屏上从左到右排好。
     fn 那一组(帧: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
-        let mut 几颗: Vec<(String, egui::Rect)> = 照稿次序
+        let mut 几颗: Vec<(String, egui::Rect)> = 照稿次序()
             .iter()
             .map(|字| {
                 含着这几个字的每一段(帧, 字)
@@ -4292,7 +4312,7 @@ fn 批量那一组整组靠右_摆不下就整组换行_不拆散也点得中() 
             );
         }
         let 屏上次序: Vec<&str> = 几颗.iter().map(|(字, _)| 字.as_str()).collect();
-        assert_eq!(屏上次序, 照稿次序, "这一组的次序与稿上不一样");
+        assert_eq!(屏上次序, 照稿次序(), "屏上画出来的次序与 `ACTIONS` 不一样");
     }
 
     /// 中间那一栏的**右边界**：右栏摊开着就是它那块面板的左沿，收起来了就是视口右缘
@@ -4309,7 +4329,8 @@ fn 批量那一组整组靠右_摆不下就整组换行_不拆散也点得中() 
 
     // ── 一、**把两栏收起来**：中间那一栏宽了，四颗摆得下，落在同一行的右头 ──
     //
-    // 两栏摊开时中间只有五百多点，而稿上这一组是五颗（今天四颗）——**摆不下才是常态**。
+    // 两栏摊开时中间只有五百多点，而这一组是**五颗 386 点**——**摆不下才是常态**
+    // （票 23 量过：留得出 321，差 65；`ACTIONS` 的文档里有整笔账）。
     // 所以「摆得下」那条路得先把地方腾出来，不然这一条永远只验到换行那一支。
     romcat_gui::layout::FILTER.set_collapsed(&ctx, true);
     romcat_gui::layout::DETAIL.set_collapsed(&ctx, true);
@@ -4539,6 +4560,99 @@ fn 管理合集那一层改得动名字_收藏那一行写明改不动() {
     );
 }
 
+/// **筛选筛不着的合集，照样列得出、改得动、删得掉**
+/// （挂单 `Q1109`，拿主意的人 2026-09-22 裁）。
+///
+/// 「管理合集」那一层从前列的是左栏那份**分面**，而分面走的是中立库里的投影
+/// （`JOIN collection_variant`）、还跟着「列出非游戏资产」那颗开关走。于是两种情形下
+/// 一个合集会从这一层里**整个消失**——成员全是路径锚而那些文件眼下不在库里
+/// （换了根、或删了根还没重扫），或者成员全是非游戏资产而那颗开关收着。
+/// 消失之后既改不了名也删不掉，**而核心库那两条路本来是按沉淀库办的，能力一直在**。
+///
+/// 这一条造的是头一种：往沉淀库里记一条**库里没有对应变体**的成员关系。
+/// 它在分面上一定不出现（投影里没有它），而弹层里必须出现。
+#[test]
+fn 筛不着的合集在管理合集里照样列得出() {
+    use romcat_core::verdict::{Anchor, Membership};
+
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-筛不着的合集"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+
+    // 往沉淀库里记一条锚——**故意挑一份库里没有的内容**，于是投影落不到任何变体。
+    const 名字: &str = "换过根的那一批";
+    {
+        let (browse, site) = app.browse_and_site();
+        site.store
+            .join(&[Membership::now(
+                名字,
+                Anchor::Content {
+                    crc32: 0xDEAD_BEEF,
+                    size: 1_234_567,
+                    sha1: None,
+                },
+            )])
+            .expect("记得进沉淀库");
+        browse.invalidate(site);
+    }
+    跑(&ctx, &mut app, 3);
+
+    // 一、**分面上没有它**——这一条是前提，不成立的话底下测的就不是 `Q1109`。
+    assert!(
+        !app.browse()
+            .facets()
+            .collections
+            .iter()
+            .any(|一个| 一个.value == 名字),
+        "这条成员关系居然投影出了变体，这一条的前提不成立了"
+    );
+
+    // 二、**弹层里有它，还写得出记了几个成员**。
+    shared::点正好(&ctx, "管理合集…", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        屏上.contains(名字),
+        "筛选筛不着的合集没列在「管理合集」里——它就此改不动也删不掉：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("1 个成员"),
+        "没写出它记了几个成员（数的是沉淀库那本账，一行一条锚）：\n{屏上}"
+    );
+
+    // 三、**改得动**：改完沉淀库里是新名字。
+    点弹层里的(&ctx, "改名", "", |ui| app.ui(ui));
+    点弹层里的(&ctx, 名字, "", |ui| app.ui(ui));
+    headless::frame(
+        &ctx,
+        shared::输入(vec![
+            shared::按键事件(egui::Key::End),
+            egui::Event::Text("·改".to_string()),
+        ]),
+        |ui| app.ui(ui),
+    );
+    点弹层里的(&ctx, "保存", "", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    let 沉淀库里: Vec<String> = app
+        .site()
+        .store
+        .collections()
+        .expect("读得出")
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        沉淀库里.iter().any(|一个| 一个 == "换过根的那一批·改"),
+        "改名没落到沉淀库：{沉淀库里:?}\n回执：{:?}／{:?}",
+        app.browse().notice(),
+        app.browse().error(),
+    );
+}
+
 /// **「管理合集」那一层：删除＝把成员全部移出，写着它的子库规则一个字不改**
 /// （票 `gui-looks-like-the-design/13`）。
 ///
@@ -4585,6 +4699,7 @@ fn 管理合集那一层删得掉_成员全部移出而规则原样留着() {
                 .add_rule(
                     "掌机",
                     &romcat_core::sublibrary::Rule::parse(一条).expect("读得懂"),
+                    None,
                 )
                 .expect("加得进规则");
         }
@@ -4775,5 +4890,293 @@ fn 加入合集那一层建得出新合集_名字写不得时加不进() {
     assert!(
         分面.iter().any(|(名, 几个)| 名 == "送朋友的" && *几个 > 0),
         "建出来的那个合集没进分面：{分面:?}"
+    );
+}
+
+/// **「加入子库」那一层：作为规则加入，名字落得进库**
+/// （票 `gui-looks-like-the-design/23`，验收第 1、3 条）。
+///
+/// 钉四件事：
+///
+/// 1. 表格上方那一条最右那颗把这一层摊开，库里那台列得出来；
+/// 2. **预估那几个数由核心库算**（`sublibrary::addition` 排任务台），屏上印的是它算的；
+/// 3. 按「加入」之后**库里真的多了一条规则**，而且**人起的名字落进了那一列**
+///    （票 23 给 `sublibrary_rule` 补的那一列）；
+/// 4. **同一条规则再加一次会被拦下**（`Rule::same_one_in`，比树不比原文，`Q1180`）。
+#[test]
+fn 加入子库那一层把当前筛选存成规则_名字落得进库_同一条拦得下() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[
+            ("SFC", "短.zip", shared::档::命中),
+            ("GBA", "另一个.zip", shared::档::命中),
+        ],
+        shared::干净工作目录("romcat-测试-浏览-加入子库"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+
+    // 先有一台子库。
+    {
+        let (browse, site) = app.browse_and_site();
+        site.catalog
+            .put_sublibrary(&romcat_core::sublibrary::Sublibrary::at(
+                "掌机",
+                std::path::Path::new("/Volumes/SDCARD/掌机"),
+                "Pegasus",
+                None,
+            ))
+            .expect("建得出子库");
+        // 筛到一个平台——那就是要存的那条规则。
+        browse.set_filter_rule(Some(
+            romcat_core::sublibrary::Rule::parse("平台=SFC").expect("读得懂"),
+        ));
+        browse.invalidate(site);
+    }
+    跑(&ctx, &mut app, 3);
+
+    // 一、最右那颗把这一层摊开，库里那台列得出来。
+    shared::点正好(&ctx, "加入子库…", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    // **预估那一趟排在任务台上**（折一遍事实，真机 343 毫秒）——等它收场并认领完，
+    // 不看挂钟。这一等正是这一层与别的弹层不一样的地方。
+    shared::等任务台空了(&mut app);
+    跑(&ctx, &mut app, 2);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        屏上.contains("把筛选结果加入一台设备的子库"),
+        "「加入子库」那一层没摊开：\n{屏上}"
+    );
+    assert!(屏上.contains("掌机"), "库里那台没列出来：\n{屏上}");
+    assert!(
+        屏上.contains("作为规则加入 · 推荐"),
+        "加入方式那两档没画出来：\n{屏上}"
+    );
+    // 那条规则原样印着——按下去之前心里有数。
+    assert!(
+        屏上.contains("平台=SFC"),
+        "没把要存的那条规则印出来：\n{屏上}"
+    );
+
+    // 二、**预估那几个数是核心库算的**。合成库走 `run_here`，排下去当帧就跑完，
+    // 所以这会儿不该再写着「正在算…」。
+    assert!(
+        !屏上.contains("正在算…"),
+        "预估那一趟没跑完（或者没排下去）：\n{屏上}"
+    );
+    assert!(屏上.contains("新增变体"), "预估那三格没画出来：\n{屏上}");
+
+    // 三、起个名字，按「加入」。
+    //
+    // **那一格预填着现拼的短名**（稿上 `autoName`），所以点的是那串字本身。
+    let 现拼的短名 = romcat_core::sublibrary::Rule::parse("平台=SFC")
+        .expect("读得懂")
+        .label();
+    assert!(
+        屏上.contains(&现拼的短名),
+        "「规则名称」那一格没预填现拼的短名「{现拼的短名}」：\n{屏上}"
+    );
+    点弹层里的(&ctx, &现拼的短名, "", |ui| app.ui(ui));
+    headless::frame(
+        &ctx,
+        shared::输入(vec![
+            shared::按键事件(egui::Key::End),
+            egui::Event::Text("·改".to_string()),
+        ]),
+        |ui| app.ui(ui),
+    );
+    let 起的名字 = format!("{现拼的短名}·改");
+    {
+        let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+        assert!(
+            屏上.contains(&起的名字),
+            "名字那一格没收到字（该是「{起的名字}」）：\n{屏上}"
+        );
+    }
+    点弹层里的(&ctx, "加入", "", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 3);
+
+    // 四、**库里真的多了一条规则，名字也落进去了**——断的是库，不是屏上那句回执。
+    let 规则们 = app.site().catalog.sublibrary_rules("掌机").expect("读得出");
+    assert_eq!(规则们.len(), 1, "该多出一条规则：{规则们:?}");
+    assert_eq!(规则们[0].text, "平台=SFC");
+    assert_eq!(
+        规则们[0].name.as_deref(),
+        Some(起的名字.as_str()),
+        "人起的名字没落进 `sublibrary_rule.name` 那一列"
+    );
+    assert_eq!(规则们[0].shown_name(), 起的名字);
+
+    // 四之二、**人起的名字在子库屏上看得见**。
+    //
+    // 这一句是这一格存在的全部理由：名字写进了库而屏上永远显示现拼的短名，
+    // 那一格就是空转的。审查抓到过一次——当时库里那一列测着、屏上没人测。
+    {
+        let (screen, site) = app.sublibrary_and_site();
+        screen.reload(site);
+        screen.open(site, "掌机");
+    }
+    app.show_view(romcat_gui::app::View::Sublibraries);
+    跑(&ctx, &mut app, 3);
+    let 子库屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        子库屏上.contains(&起的名字),
+        "人起的名字在子库屏上看不见（那一格就白填了）：\n{子库屏上}"
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 2);
+
+    // 五、**同一条再加一次拦得下**：再开一次，那两颗该按不动。
+    //
+    // 按「加入」之后人被送去了子库屏（照稿：「加入」＝加完就走，
+    // 「加入并继续挑选」才留在这一屏）——先回浏览屏。
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 2);
+    shared::点正好(&ctx, "加入子库…", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 3);
+    shared::等任务台空了(&mut app);
+    跑(&ctx, &mut app, 2);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        屏上.contains("已经有这条规则了"),
+        "同一条规则又加了一次却没拦下：\n{屏上}"
+    );
+    // **第二次开这一层，预估那一块也得是算好的**。
+    //
+    // 从前 `open_add_to_sublibrary` 不清「上一趟是照哪一档算的」那个记号，于是第二次
+    // 打开时守卫直接命中、那一趟不排，屏上**永远写着「正在算…」而两颗按钮是亮的**
+    // ——人按下去就是盲加。审查抓到的，这一句钉住它。
+    assert!(
+        !屏上.contains("正在算…"),
+        "第二次开这一层，那几个数永远停在「正在算…」：\n{屏上}"
+    );
+    点弹层里的(&ctx, "取消", "", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    assert_eq!(
+        app.site()
+            .catalog
+            .sublibrary_rules("掌机")
+            .expect("读得出")
+            .len(),
+        1,
+        "拦下之后库里还是只该有一条"
+    );
+
+    // 六、**取消之后再开一次，预估照样得是算好的**。
+    //
+    // 这一支与第五步那一支走的是**两条不同的路**：那一支之前经过了「加入」
+    // （`add_into_sublibrary` 会清掉「上一趟照哪一档算的」那个记号），这一支没有
+    // ——挡重排的记号只有 `open_add_to_sublibrary` 清得掉。头一版漏了那一句，
+    // 而当时这条测试只走了「加入」那一支，所以照样绿。
+    shared::点正好(&ctx, "加入子库…", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    shared::等任务台空了(&mut app);
+    跑(&ctx, &mut app, 2);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        !屏上.contains("正在算…"),
+        "取消之后再开这一层，那几个数永远停在「正在算…」：\n{屏上}"
+    );
+}
+
+/// **挑选模式：按「加入并继续挑选」留在这一屏，换个平台再加一条，累计当场更新**
+/// （票 `gui-looks-like-the-design/23`，验收第 4、5 条，设计稿 `.pickbar`）。
+///
+/// 钉四件事：
+///
+/// 1. 按「加入并继续挑选」之后**人留在浏览屏**（不像「加入」那样被送走），顶上多一条挑选栏；
+/// 2. 挑选栏上写着**为哪一台挑**，以及累计几条规则；
+/// 3. **换一个平台，挑选栏上那颗「加入当前筛选」再按一下就又加一条**；
+/// 4. **累计数字当场更新**——第二条加完之后那一栏写的是 2 条规则，不是 1 条。
+#[test]
+fn 挑选模式留在浏览屏_换个平台再加一条_累计当场更新() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[
+            ("SFC", "短.zip", shared::档::命中),
+            ("GBA", "另一个.zip", shared::档::命中),
+        ],
+        shared::干净工作目录("romcat-测试-浏览-挑选模式"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+    {
+        let (browse, site) = app.browse_and_site();
+        site.catalog
+            .put_sublibrary(&romcat_core::sublibrary::Sublibrary::at(
+                "掌机",
+                std::path::Path::new("/Volumes/SDCARD/掌机"),
+                "Pegasus",
+                None,
+            ))
+            .expect("建得出子库");
+        browse.set_filter_rule(Some(
+            romcat_core::sublibrary::Rule::parse("平台=SFC").expect("读得懂"),
+        ));
+        browse.invalidate(site);
+    }
+    跑(&ctx, &mut app, 3);
+
+    // 一、摊开那一层，按「加入并继续挑选」。
+    shared::点正好(&ctx, "加入子库…", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    shared::等任务台空了(&mut app);
+    跑(&ctx, &mut app, 2);
+    点弹层里的(&ctx, "加入并继续挑选", "", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    shared::等任务台空了(&mut app);
+    跑(&ctx, &mut app, 2);
+
+    // 二、**人还在浏览屏**，顶上那条挑选栏写着为哪一台挑、累计几条。
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        屏上.contains("正在为「掌机」挑选"),
+        "按了「加入并继续挑选」，挑选栏没出来（或者人被送走了）：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("1 条规则"),
+        "挑选栏上没写累计几条规则：\n{屏上}"
+    );
+    // **那颗按钮上的字是「加入当前筛选」与「已在选择集中」二选一**（照稿）：
+    // 这会儿刚加完、同一条还筛着，所以它该改口说「已在选择集中」。
+    assert!(
+        屏上.contains("已在选择集中"),
+        "同一条还在筛着，那颗该写「已在选择集中」：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("加入当前筛选"),
+        "两种字面只该出现一种：\n{屏上}"
+    );
+
+    // 三、**换一个平台**，再按一下。
+    {
+        let (browse, site) = app.browse_and_site();
+        browse.set_filter_rule(Some(
+            romcat_core::sublibrary::Rule::parse("平台=GBA").expect("读得懂"),
+        ));
+        browse.invalidate(site);
+    }
+    跑(&ctx, &mut app, 3);
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        屏上.contains("加入当前筛选") && !屏上.contains("已在选择集中"),
+        "换了平台之后那颗该又按得动了：\n{屏上}"
+    );
+    shared::点正好(&ctx, "加入当前筛选", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    shared::等任务台空了(&mut app);
+    跑(&ctx, &mut app, 2);
+
+    // 四、**库里真的两条了，挑选栏上的累计也跟着变**。
+    let 规则们 = app.site().catalog.sublibrary_rules("掌机").expect("读得出");
+    assert_eq!(规则们.len(), 2, "换个平台再加一条没加进去：{规则们:?}");
+    let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(
+        屏上.contains("2 条规则"),
+        "累计没当场更新（该写 2 条规则）：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("正在为「掌机」挑选"),
+        "加完第二条之后挑选栏不该收掉：\n{屏上}"
     );
 }

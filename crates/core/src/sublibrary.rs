@@ -416,6 +416,41 @@ pub struct StoredRule {
     pub ordinal: i64,
     /// 规则原文。
     pub text: String,
+    /// **人给它起的名字**（票 `gui-looks-like-the-design/23`，稿上「加入子库」那一格）。
+    ///
+    /// `None` 是**没起过**——不是「叫空字符串」。这一列是后补的（`add_columns`，
+    /// 不升结构版本），**老规则一律是 `None`**，屏上照旧拿 [`Self::shown_name`]
+    /// 从原文现拼。
+    pub name: Option<String>,
+}
+
+/// **屏上这条规则叫什么**：人起过名字就是那个，没起过就拿 [`Rule::label`] 从原文现拼
+/// （稿上 `autoName`）。原文读不回来时退回原文本身——那时现拼不出来，
+/// 而印一句空的比印原文更难查。只打了空白**等于没起过**。
+///
+/// **全仓问「这条规则叫什么」只走这一处**（ADR-0024）：屏上、报告、命令行各拼一遍的话，
+/// 同一条规则在三处会有三个名字，而人照着其中一个去找另一处就找不着。
+///
+/// ⚠️ 收的是**两个字段**而不是某一个结构体：库里那一条（[`StoredRule`]）、
+/// 删之前留下来的那一条（`catalog::RemovedRule`）、界面上刚起好还没落库的那一份，
+/// 三处形状不同而这一问是同一个——判断收什么由领域定，不由第一个调用方的手头数据定
+/// （ADR-0024 推论 2）。
+#[must_use]
+pub fn shown_rule_name(name: Option<&str>, text: &str) -> String {
+    if let Some(起过的) = name
+        && !起过的.trim().is_empty()
+    {
+        return 起过的.to_string();
+    }
+    Rule::parse(text).map_or_else(|_| text.to_string(), |读通的| 读通的.label())
+}
+
+impl StoredRule {
+    /// **屏上这条规则叫什么**——走全仓那一处 [`shown_rule_name`]。
+    #[must_use]
+    pub fn shown_name(&self) -> String {
+        shown_rule_name(self.name.as_deref(), &self.text)
+    }
 }
 
 /// 从中立库读回来的一份选择集。
@@ -1335,6 +1370,189 @@ pub fn survey(
         );
     }
     Ok(out)
+}
+
+/// **往一个子库里加什么**（票 `gui-looks-like-the-design/23`，稿上「加入方式」那两档）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Adding<'a> {
+    /// **作为规则加入**：以后扫描到的新作品只要符合条件也会自动进来。
+    Rule(&'a Rule),
+    /// **只加这几个变体**，作为手动例外（`收入`）。**不随筛选条件变**。
+    Exceptions(&'a [String]),
+}
+
+/// 「把这一批加进这个子库之后会怎样」——屏上「预估」那一块要的**每一个数**。
+///
+/// **界面一个数都不自己算**（ADR-0024；设计稿那张对照表也逐字写着
+/// 「预估数字由核心库计算，界面只显示」）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Addition {
+    /// 这个子库里**已经有同一条规则**了，就是它的序号。
+    ///
+    /// 判据是 [`Rule::same_one_in`]——**只比树不比原文**（挂单 `Q1180`）。
+    /// 只在 [`Adding::Rule`] 那一档才可能是 `Some`。
+    pub duplicate: Option<i64>,
+    /// **新增多少个变体**：加完之后选中的那批，比加之前多出来的个数。
+    ///
+    /// **已经被别的规则选中的不算在内**——加进去也不会多选出一个，
+    /// 算进去的话屏上那个「+N」比实际多。
+    pub added: u64,
+    /// 新增那几个变体一共多大（下界，同 [`Selected::bytes`] 的口径）。
+    pub added_bytes: u64,
+    /// **与已有规则重复多少**：这一条自己命中的个数里，有多少本来就被选中了。
+    ///
+    /// 屏上那句「与已有规则重复（不重复计算）」说的就是它。
+    /// `duplicate` 是 `Some` 时这个数是**这一条整个命中数**——它一个都不新增。
+    pub overlap: u64,
+    /// 加之前这个子库选中多大。
+    pub before_bytes: u64,
+    /// **加完之后装不装得下**。走的是 [`fit`]，与差量预览同一条线。
+    ///
+    /// ⚠️ [`Fit::Unknown`]（卡不在手边）**是答案的一种，不是零**：
+    /// 屏上要照实写「算不出」，不许拿别的数冒充（挂单 `Q591`）。
+    pub after: Fit,
+}
+
+/// **算一遍「加进去之后会怎样」**（票 `gui-looks-like-the-design/23`）。
+///
+/// 加之前、加之后各求一次值，两边相减得出新增与重复——**不另立一套算法**：
+/// 「这条规则选中谁」只有 [`select`] 一个答案，屏上那个「+N」要与真加进去之后
+/// 子库里多出来的那批是同一批，否则人按下「加入」会看见与预估不同的数。
+///
+/// ## 为什么不便宜
+///
+/// 大头是 [`facts`] 走一遍全库（真机 **343 毫秒**，挂账 D156），再加**一趟**
+/// [`fit`]（走一遍排计划那半条线；「加之前」那一份只在内存里求值，不排计划）。
+/// **摆不上画帧线**——调用方得排任务台
+/// （票 23 的界面就是这么做的，挂单 `Q1181`）。
+///
+/// # Errors
+/// 折事实、读选择集时中立库读不动返回 [`Cutoff::Failed`]；被叫停返回 [`Cutoff::Halted`]。
+/// **排不出计划不在此列**——那落在 [`Addition::after`] 的 [`Fit::Unknown`] 里。
+pub fn addition(
+    catalog: &Catalog,
+    workspace: &Path,
+    sublibrary: &Sublibrary,
+    adding: Adding<'_>,
+    task: &Handle,
+) -> Result<Addition, Cutoff> {
+    // **折事实一步、算装不装得下一步，再加那一趟排计划那半条线**。
+    // 照实报：多报的话任务台上那根进度条永远走不到头（从前这儿写的是
+    // `PLAN_STEPS * 2 + 1` ＝ 17 步，而实际只走 10 步）。
+    task.steps(crate::sync::PLAN_STEPS.saturating_add(2));
+    task.step("折事实")?;
+    let facts = facts(catalog).map_err(|error| format!("中立库读不动：{error}"))?;
+    let loaded = catalog
+        .selection(&sublibrary.name)
+        .map_err(|error| format!("中立库读不动：{error}"))?;
+
+    let duplicate = match adding {
+        Adding::Rule(rule) => {
+            let stored = catalog
+                .sublibrary_rules(&sublibrary.name)
+                .map_err(|error| format!("中立库读不动：{error}"))?;
+            Rule::same_one_in(&stored, rule)
+        }
+        Adding::Exceptions(_) => None,
+    };
+
+    // **加之后那一份选择集**：规则那一档往 `rules` 后面添一条，例外那一档往
+    // `exceptions` 里添几条 `收入`。两档都不落库——这一趟整条只读。
+    let mut 加完的 = loaded.selection.clone();
+    match adding {
+        Adding::Rule(rule) => 加完的.rules.push(rule.clone()),
+        Adding::Exceptions(keys) => {
+            for key in keys {
+                加完的.exceptions.push(ExceptionRow {
+                    variant_key: key.clone(),
+                    kind: Exception::Include,
+                    note: None,
+                    // **这一趟只在内存里求值、一个字都不落库**，所以记下的时刻取不取都一样。
+                    // 真加进去那一下由 `Catalog::set_exceptions` 自己取挂钟。
+                    at: 0,
+                });
+            }
+        }
+    }
+
+    let 加之前 = select(&loaded.selection, &facts);
+    let 加之后 = select(&加完的, &facts);
+
+    let before = 加之前.picked.len() as u64;
+    let after = 加之后.picked.len() as u64;
+    let added = after.saturating_sub(before);
+    let added_bytes = 加之后.bytes.saturating_sub(加之前.bytes);
+
+    // **重复 ＝ 这一条自己命中多少 − 它真新增多少**。规则那一档的「自己命中多少」
+    // 读加完那一份的 `rule_hits` 最后一格（刚添进去的就是它）；例外那一档是这一批的个数。
+    let 自己命中 = match adding {
+        // **刚 push 进去那一条就是最后一格**（`rule_hits` 与 `rules` 等长）。
+        // 取不到就是求值器的形状变了——那时宁可坏得响，也别当成 0
+        // 悄悄把「重复」算成整条命中。
+        Adding::Rule(_) => *加之后
+            .rule_hits
+            .last()
+            .expect("刚添进去的那一条在 rule_hits 的最后一格"),
+        Adding::Exceptions(keys) => keys.len() as u64,
+    };
+    let overlap = 自己命中.saturating_sub(added);
+
+    task.step("算加入后装不装得下")?;
+    let after_fit = fit(catalog, workspace, sublibrary, &加之后, &|step| {
+        task.step(&format!("算「{}」：{step}", sublibrary.name))
+    })?;
+
+    Ok(Addition {
+        duplicate,
+        added,
+        added_bytes,
+        overlap,
+        before_bytes: 加之前.bytes,
+        after: after_fit,
+    })
+}
+
+impl Gauge {
+    /// **照一份选择集报告折出这三个数**（看过目标的那一台再给一份 [`Room`]）。
+    ///
+    /// **填这三个数只走这一处**（ADR-0024）：本类型的文档把那条恒等式写死了
+    /// ——`over_capacity(capacity, taken())` 必须等于旁边那行字用的那个超出量，
+    /// 而要它成立就得**看过目标的照 `Room` 填、没看过的照报告填**，两档不能混。
+    /// 各屏手搓一份的话，同一台设备在两屏上会画出两根不同的条子
+    /// （票 `gui-looks-like-the-design/23` 的挑选栏差点就是第二份）。
+    /// 三样各有可能缺席，所以**三样都收 `Option`**：
+    ///
+    /// - `room`：**看过目标**才有（排过差量预览、或者算容量那一趟卡在手边）。
+    ///   有它就照它填——选中 ＝ `after_bytes − stranger_bytes`，上限 ＝ 计划里真用上的那个。
+    /// - `report`：**算过容量**才有。没有 `room` 时选中照它的 `bytes` 填。
+    /// - `fallback_capacity`：两样都说不出上限时，库里记着的那个。
+    ///
+    /// 两样都没有就是「还没算过」：选中 0、清单之外**未知**（画成斜纹，不画成零）。
+    #[must_use]
+    pub fn of(
+        report: Option<&report::SelectionReport>,
+        room: Option<&Room>,
+        fallback_capacity: Option<u64>,
+    ) -> Self {
+        Self {
+            picked: room.map_or_else(
+                || report.map_or(0, |report| report.bytes),
+                |room| room.after_bytes.saturating_sub(room.stranger_bytes),
+            ),
+            strangers: room.map(|room| room.stranger_bytes),
+            // **排过差量、算过容量的照计划里真用上的那个上限画**（`Room::capacity`：
+            // 按设备容量是卡此刻的总量，本机磁盘不设上限时按剩余空间算）——
+            // 与旁边「超出容量上限」同一个底；都没有时照库里记着的。
+            capacity: room.map_or_else(
+                || {
+                    report
+                        .and_then(|report| report.capacity)
+                        .or(fallback_capacity)
+                },
+                |room| room.capacity,
+            ),
+        }
+    }
 }
 
 /// 规则用得上的那几个刮削字段，以及它落进事实的哪一格。

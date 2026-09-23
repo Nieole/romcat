@@ -605,6 +605,14 @@ impl App {
             let Some(done) = self.browse.settle_collection(&mut self.site, done) else {
                 continue;
             };
+            // **「加入子库」那一层的预估**（票 `gui-looks-like-the-design/23`）：
+            // 整趟只读，认领时什么都不写，只把算出来的数交给那一层去印。
+            let Some(done) = self.browse.settle_addition(done) else {
+                continue;
+            };
+            let Some(done) = self.browse.settle_survey(done) else {
+                continue;
+            };
             // **同步那一趟要把清单写回中立库**，所以子库屏认领时拿的是可写的那份现场
             // ——台上那条线拿的是只读连接，写不动（`task::Product` 的文档）。
             self.sublibrary.settle(&mut self.site, done);
@@ -703,6 +711,14 @@ impl App {
         // 它手上缓着的是改之前那几条，而那一面板上就摆着「眼下：包含（…）」。
         if let Some(name) = self.sublibrary.take_touched() {
             self.browse.exceptions_changed(&self.site, &name);
+        }
+        // **浏览屏「加入子库」那一层底下那颗「新建子库…」**（票 `23`）：
+        // 送去子库屏，并且**把那层表单开着**——按钮上写着「新建子库」，
+        // 只把人送到一块空屏上等于它什么都没建。
+        if self.browse.take_new_sublibrary_asked() {
+            self.sublibrary.reload(&self.site);
+            self.sublibrary.begin_new();
+            self.view = View::Sublibraries;
         }
         if let Some(name) = self.browse.take_return() {
             self.sublibrary.reload(&self.site);

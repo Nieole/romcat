@@ -95,7 +95,7 @@ use romcat_core::capability::{
 };
 use romcat_core::catalog::CatalogError;
 use romcat_core::catalog::browse::{Scope, WorkAnchor, WorkQuery};
-use romcat_core::catalog::sublibrary::{RemovedSublibrary, Renamed};
+use romcat_core::catalog::sublibrary::{RemovedRule, RemovedSublibrary, Renamed};
 use romcat_core::filename::Rules;
 use romcat_core::report::{decimal_bytes, decimal_gigabytes, human_bytes, thousands};
 use romcat_core::scrape::Priorities;
@@ -129,12 +129,6 @@ const TOP_NOTES: usize = 20;
 ///
 /// **不给「下一页」**：这儿要的是「把我想起来的那一部找出来」，不是浏览——翻页那条路在浏览屏上。
 const SEARCH_HITS: u64 = 6;
-
-/// 容量条上「清单之外：还不知道」那一段画多长，占整条的几成。
-///
-/// 取的是设计稿 `devCard` 里那个数（没看过目标时那一段 `min(12%, 余下的)`）：它不是一个量出来的
-/// 容量——还不知道就没有数可画——只是让「这儿有一段不知道的」看得见，而不是缩成零。
-const UNKNOWN_SHARE: f32 = 0.12;
 
 /// **没有有效预览时「同步」为什么按不动**——这一句只许有一处（ADR-0005「『不禁按钮』那一条
 /// 什么时候允许同时画灰」那一节）。
@@ -393,10 +387,29 @@ struct StoredSelection {
 /// 删掉一台之后留着的那一份撤销：核心交回来的整份子库，与底边那条提示条。
 #[derive(Debug)]
 struct Undo {
-    /// 删之前整份留下来的那一份（[`Catalog::take_sublibrary`](romcat_core::catalog::Catalog::take_sublibrary)）。
-    removed: RemovedSublibrary,
-    /// 「已删除子库「…」，设备上的文件没有改动」，带一颗「撤销」。
+    /// 撤销要放回去的是什么。
+    what: Undoable,
+    /// 那一句提示，带一颗「撤销」。
     toast: Toast,
+}
+
+/// **撤销撤得回来的那两样**：删掉的一台子库，或者删掉的一条规则。
+///
+/// 两样共用一条提示条与一颗「撤销」（`Undo` 只留**一份**：再删一下，上一份就丢了
+/// ——与删子库那一套同一条规矩）。
+#[derive(Debug)]
+enum Undoable {
+    /// 删之前整份留下来的那一台（[`Catalog::take_sublibrary`](romcat_core::catalog::Catalog::take_sublibrary)）。
+    Sublibrary(Box<RemovedSublibrary>),
+    /// 删之前整条留下来的那一条规则（票 `gui-looks-like-the-design/23` 验收第 7 条）。
+    ///
+    /// **序号一起留着**：放回去时原样用它，不重新发号——那个号是命令行与报告上认的。
+    Rule {
+        /// 哪一台的。
+        sublibrary: String,
+        /// 那一条，逐列原样。
+        rule: Box<RemovedRule>,
+    },
 }
 
 /// 「**手动例外**」那层弹层开着时手上的那点东西（设计稿 `DLG.excl`）。
@@ -806,10 +819,15 @@ impl Screen {
         self.undo = None;
     }
 
-    /// 眼下还撤销得了的那一台叫什么（提示条还摆着）；没有就是 `None`。
+    /// 眼下还撤销得了的是哪一台（提示条还摆着）；没有就是 `None`。
+    ///
+    /// 删掉一条**规则**那一档交回的是那条规则所在的子库名——两档撤销共用一条提示条。
     #[must_use]
     pub fn undo_pending(&self) -> Option<&str> {
-        self.undo.as_ref().map(|undo| undo.removed.name())
+        self.undo.as_ref().map(|undo| match &undo.what {
+            Undoable::Sublibrary(removed) => removed.name(),
+            Undoable::Rule { sublibrary, .. } => sublibrary.as_str(),
+        })
     }
 
     /// 库里现有的子库。
@@ -866,12 +884,13 @@ impl Screen {
         // ——一遍在规则里当正常的，一遍在下面当坏的。
         let broken: std::collections::BTreeSet<i64> =
             loaded.broken.iter().map(|row| row.ordinal).collect();
-        let labels = loaded
-            .selection
-            .rules
+        // **人起过名字就显示那个**（票 `gui-looks-like-the-design/23` 给
+        // `sublibrary_rule` 加了 `name` 那一列）。走 `StoredRule::shown_name`
+        // ——全仓问「这条规则叫什么」只这一处；从前这儿一律 `rule.label()` 现拼，
+        // 于是「加入子库」那一格起的名字**写进了库、屏上再也见不着**。
+        let labels = stored
             .iter()
-            .zip(&loaded.ordinals)
-            .map(|(rule, ordinal)| (*ordinal, rule.label()))
+            .map(|一条| (一条.ordinal, 一条.shown_name()))
             .collect();
         self.selections.insert(
             name.to_string(),
@@ -1011,25 +1030,17 @@ impl Screen {
     /// [`Fit`]: romcat_core::sublibrary::Fit
     #[must_use]
     pub fn gauge(&self, name: &str) -> Gauge {
-        let room = self.room_of(name);
-        Gauge {
-            picked: room.as_ref().map_or_else(
-                || self.evaluated.get(name).map_or(0, |report| report.bytes),
-                |room| room.after_bytes.saturating_sub(room.stranger_bytes),
-            ),
-            strangers: room.as_ref().map(|room| room.stranger_bytes),
-            // **排过差量、算过容量的照计划里真用上的那个上限画**（`Room::capacity`：按设备容量是卡此刻的总量，本机磁盘不设
-            // 上限时按剩余空间算）——与旁边「超出容量上限」同一个底；都没有时照库里记着的。
-            capacity: room.as_ref().map_or_else(
-                || {
-                    self.list
-                        .iter()
-                        .find(|row| row.name == name)
-                        .and_then(|row| row.capacity)
-                },
-                |room| room.capacity,
-            ),
-        }
+        // **这三个数走核心那一处 `Gauge::of`**（浏览屏挑选栏那根条子用的是同一个）：
+        // 看过目标的照 `Room` 填、只算过容量的照报告填、都没有的就是「还没算过」。
+        // 这儿只负责把三样递进去——**哪一样优先由领域定**，不由这一屏定。
+        Gauge::of(
+            self.evaluated.get(name),
+            self.room_of(name).as_ref(),
+            self.list
+                .iter()
+                .find(|row| row.name == name)
+                .and_then(|row| row.capacity),
+        )
     }
 
     /// 这一台卡上那笔**装得下吗**的账：排过差量的照那份计划，没排过的照「算一遍容量」
@@ -1728,7 +1739,9 @@ impl Screen {
     }
 
     /// 「**新建子库**」：打开「新建子库」那层弹层，草稿换成一份空的，没有哪一张卡算摊开着。
-    fn begin_new(&mut self) {
+    /// **摊开「新建子库」那层表单**（屏头那颗，以及浏览屏「加入子库」那一层底下
+    /// 那颗「新建子库…」按的都是它）。
+    pub fn begin_new(&mut self) {
         self.forget_strangers();
         self.vetted = None;
         self.name_vetted = None;
@@ -2668,52 +2681,12 @@ impl Screen {
         };
         let 之外色 = visuals.warn_fg_color;
         let 未知描边 = visuals.widgets.inactive.bg_stroke;
-        // 条高照稿（设计稿 `.gauge` 的 10 点，令牌 `gauge-height`）。「容量」那个小标题摆在卡片那一层的抬头里。
+        // **条子本身由 `look::gauge_bar` 画**（设计稿那张对照表：「容量条与子库页共用同一个
+        // 画法」）——浏览屏挑选栏上那根窄的是同一根，只是尺寸不同。这儿只管底下那行图例。
+        // 条高照稿（设计稿 `.gauge` 的 10 点，令牌 `gauge-height`）；
+        // 「容量」那个小标题摆在卡片那一层的抬头里。
         let height = Tokens::builtin().layout.gauge_height;
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), height),
-            egui::Sense::hover(),
-        );
-        let rounding = height / 2.0;
-        let painter = ui.painter();
-        painter.rect_filled(rect, rounding, visuals.extreme_bg_color);
-        let picked = rect.width() * gauge.picked_share();
-        if picked > 0.0 {
-            painter.rect_filled(
-                egui::Rect::from_min_size(rect.min, egui::vec2(picked, height)),
-                rounding,
-                选中色,
-            );
-        }
-        let rest_left = rect.left() + picked;
-        match gauge.strangers {
-            Some(_) => {
-                let width = rect.width() * gauge.stranger_share();
-                if width > 0.0 {
-                    painter.rect_filled(
-                        egui::Rect::from_min_size(
-                            egui::pos2(rest_left, rect.top()),
-                            egui::vec2(width, height),
-                        ),
-                        rounding,
-                        之外色,
-                    );
-                }
-            }
-            // **「还不知道」画成一段斜纹，不画成零**（设计稿 `.gauge .unk`）：卡不在手边时目标上
-            // 有什么本来就没看过，一段也不画等于说「卡上是空的」。
-            None => {
-                let width = (rect.right() - rest_left).min(rect.width() * UNKNOWN_SHARE);
-                hatch(
-                    painter,
-                    egui::Rect::from_min_size(
-                        egui::pos2(rest_left, rect.top()),
-                        egui::vec2(width, height),
-                    ),
-                    未知描边,
-                );
-            }
-        }
+        look::gauge_bar(ui, egui::vec2(ui.available_width(), height), &gauge, over);
         ui.horizontal_wrapped(|ui| {
             legend_swatch(ui, 选中色);
             // 图例带「（N 个变体）」（设计稿 `.legend`）。几个由核心数：算过容量的照报告，排过差量的照那份计划。
@@ -4037,7 +4010,7 @@ impl Screen {
                 self.undo = Some(Undo {
                     toast: Toast::new(format!("已删除子库「{name}」，设备上的文件没有改动"))
                         .action("撤销"),
-                    removed,
+                    what: Undoable::Sublibrary(Box::new(removed)),
                 });
                 self.invalidate();
                 self.reload(site);
@@ -4055,20 +4028,43 @@ impl Screen {
         let Some(undo) = self.undo.take() else {
             return;
         };
-        let name = undo.removed.name().to_string();
-        match site.catalog.restore_sublibrary(&undo.removed) {
-            Ok(true) => {
-                self.notice = None;
-                self.reload(site);
+        match undo.what {
+            Undoable::Sublibrary(removed) => {
+                let name = removed.name().to_string();
+                match site.catalog.restore_sublibrary(&removed) {
+                    Ok(true) => {
+                        self.notice = None;
+                        self.reload(site);
+                    }
+                    // 删完之后又建了一个同名的：核心一行都没写，两份不揉在一起。
+                    Ok(false) => {
+                        self.error = Some(format!(
+                            "放不回去：这会儿已经又有一个叫「{name}」的子库了。\
+                             两份揉在一起谁的清单都说不清，所以一行都没写。"
+                        ));
+                    }
+                    Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+                }
             }
-            // 删完之后又建了一个同名的：核心一行都没写，两份不揉在一起。
-            Ok(false) => {
-                self.error = Some(format!(
-                    "放不回去：这会儿已经又有一个叫「{name}」的子库了。\
-                     两份揉在一起谁的清单都说不清，所以一行都没写。"
-                ));
+            Undoable::Rule { sublibrary, rule } => {
+                let ordinal = rule.ordinal;
+                match site.catalog.restore_rule(&sublibrary, &rule) {
+                    Ok(true) => {
+                        self.notice = None;
+                        // 规则一变，选中的那批就变了：算过的容量与排过的差量都作废。
+                        self.forget(site, &sublibrary);
+                        self.reload(site);
+                    }
+                    // 撤销撤到一半又插进来一条，占了同一个号：核心一行都没写。
+                    Ok(false) => {
+                        self.error = Some(format!(
+                            "放不回去：「{sublibrary}」的第 {ordinal} 条这会儿已经被另一条占着了。\
+                             硬写会把那一条顶掉，所以一行都没写。"
+                        ));
+                    }
+                    Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+                }
             }
-            Err(error) => self.error = Some(format!("中立库写不动：{error}")),
         }
     }
 
@@ -4181,15 +4177,29 @@ impl Screen {
     /// **设备上的文件与主库一个字节都不动。** 界面上按那颗按钮走的就是它，实测与测试拿它当那一下。
     pub fn remove_rule(&mut self, site: &mut Site, name: &str, ordinal: i64) {
         self.rule_dialog = None;
-        match site.catalog.remove_rule(name, ordinal) {
-            Ok(true) => {
+        // **整条拿走、留一份在手上**（票 `23` 验收第 7 条）：与删掉整台子库那一套
+        // 同一个形状（`take_sublibrary` / `restore_sublibrary`）。
+        // 走 `take_rule` 不走 `remove_rule`，因为撤销要把**那个序号**原样放回去
+        // ——它是命令行与报告上认的那个号。
+        match site.catalog.take_rule(name, ordinal) {
+            Ok(Some(rule)) => {
                 self.forget(site, name);
-                self.notice = Some(format!(
-                    "从子库「{name}」移除了第 {ordinal} 条规则。选中的变体跟着变了：\
-                     容量要重算，差量预览要重新生成。"
-                ));
+                // 名字走全仓那一处（`RemovedRule::shown_name` → `shown_rule_name`）：
+                // 在这儿另拼一份的话，提示条上那个名字会与子库屏上那个对不上。
+                let 叫什么 = rule.shown_name();
+                self.notice = None;
+                self.undo = Some(Undo {
+                    toast: Toast::new(format!(
+                        "已从「{name}」移除第 {ordinal} 条规则「{叫什么}」，设备上的文件没有改动"
+                    ))
+                    .action("撤销"),
+                    what: Undoable::Rule {
+                        sublibrary: name.to_string(),
+                        rule: Box::new(rule),
+                    },
+                });
             }
-            Ok(false) => self.notice = Some("那一条规则已经不在了。".to_string()),
+            Ok(None) => self.notice = Some("那一条规则已经不在了。".to_string()),
             Err(error) => self.error = Some(format!("中立库写不动：{error}")),
         }
     }
@@ -4637,13 +4647,16 @@ impl Screen {
                     look::note_box(ui, |ui| {
                         ui.label(
                             egui::RichText::new(match tab {
-                                // **这一栏这一版不照稿**（票面 F3）：稿上写的是「在浏览中勾选作品，
-                                // 『加入子库…』时选『只加入勾选的作品』」，而那层对话框是票 23、眼下
-                                // 还不存在——照稿写等于在空态上指一条按不着的路，而空态的全部价值
-                                // 就是告诉人下一步去哪儿。票 23 落地后换回稿上那句。
+                                // **这一栏换回稿上那句了**（票 `gui-looks-like-the-design/23`）。
+                                //
+                                // 票 22 那一版特意不照稿：稿上指的是「在浏览中勾选作品，
+                                // 『加入子库…』时选『只加入勾选的作品』」，而那层弹层当时还不存在
+                                // ——照稿写等于在空态上指一条按不着的路，**而空态的全部价值就是
+                                // 告诉人下一步去哪儿**。那一层这一票做出来了（表格上方那一条最右
+                                // 那颗「加入子库…」，加入方式第二档就是它），所以这条路按得着了。
                                 Exception::Include => {
-                                    "还没有手动包含的作品。在下面搜作品直接添加；\
-                                     也可以在浏览屏的详情面板里对着某一份按「包含它」。"
+                                    "还没有手动包含的作品。在浏览中勾选作品，\
+                                     「加入子库…」时选「只加入勾选的作品」；或在下面搜索添加。"
                                 }
                                 // 这一栏**逐字照稿**：它指的两条路眼下都有。
                                 Exception::Exclude => {
@@ -4810,30 +4823,6 @@ fn empty_ui(ui: &mut egui::Ui) -> bool {
         });
     });
     clicked
-}
-
-/// 容量条上「还不知道」那一段的斜纹（设计稿 `.gauge .unk`）：强一级描边色的斜条，一个来回一道，一半有色。
-///
-/// 描边颜色取 `widgets.inactive.bg_stroke`，由 [`look::install`] 照令牌 `line-2` 装好；一个来回多宽取令牌
-/// `gauge-hatch`，斜条宽是它的一半。
-fn hatch(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
-    if rect.width() <= 0.0 {
-        return;
-    }
-    let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
-    let gap = Tokens::builtin().layout.gauge_hatch;
-    let stroke = egui::Stroke::new(gap / 2.0, stroke.color);
-    let mut x = rect.left() - rect.height();
-    while x < rect.right() {
-        painter.line_segment(
-            [
-                egui::pos2(x, rect.bottom()),
-                egui::pos2(x + rect.height(), rect.top()),
-            ],
-            stroke,
-        );
-        x += gap;
-    }
 }
 
 /// 容量条图例前那一小块颜色（设计稿 `.legend i`）。**颜色不是唯一线索**：后面一定跟着那一段的名字。

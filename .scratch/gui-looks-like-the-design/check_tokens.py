@@ -129,6 +129,11 @@ literal_pairs(".dpane h3", r"\.dpane h3\{font-size:([\d.]+)px", [(1, F["size-det
 literal_pairs("平台那一段的 .col", r'class="col" style="gap:(\d+)px">\s*<span class="sec">平台', [(1, S["section-gap"], "section-gap")])
 literal_pairs(".facet", r"\.facet\{[^}]*?gap:(\d+)px", [(1, S["facet-gap"], "facet-gap")])
 literal_pairs(".fchip", r"\.fchip\{[^}]*?gap:(\d+)px;height:(\d+)px;padding:0 (\d+)px;[^}]*?font-size:(\d+)px", [(1, S["facet-chip-gap"], "facet-chip-gap"), (2, L["facet-chip-height"], "facet-chip-height"), (3, L["facet-chip-padding"], "facet-chip-padding"), (4, F["size-small"], "size-small")])
+# 挑选栏上那根容量条（票 `gui-looks-like-the-design/23`）：稿上 `.pickbar .gauge` 是
+# `width:140px;height:8px`。**新令牌当场进这份名单**——`Q1083` 那个「绿着但没在看」的洞
+# 就是这么一点点填上的。
+literal_pairs(".pickbar .gauge", r"\.pickbar \.gauge\{width:(\d+)px;height:(\d+)px", [(1, L["pick-gauge-width"], "pick-gauge-width"), (2, L["pick-gauge-height"], "pick-gauge-height")])
+
 # 分段开关（`.seg`）：票 `gui-looks-like-the-design/13` 把浏览屏那三组开关改用 `look::segmented`
 # 时，这三个令牌是**手工比着稿核过一遍**的——那正是这份脚本该替人干的活。`Q1083`
 # 那个「绿着但没在看」的洞，这一处就此堵上。

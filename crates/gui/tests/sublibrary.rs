@@ -162,7 +162,9 @@ impl 现场 {
     fn 加规则(&mut self, name: &str, rule: &str) {
         let parsed = Rule::parse(rule).expect("读得懂");
         let (screen, site) = self.app.sublibrary_and_site();
-        site.catalog.add_rule(name, &parsed).expect("写得进去");
+        site.catalog
+            .add_rule(name, &parsed, None)
+            .expect("写得进去");
         screen.reload(site);
         screen.open(site, name);
     }
@@ -179,7 +181,7 @@ impl 现场 {
             root: Group::new(Join::All, Vec::new()),
         };
         let (screen, site) = self.app.sublibrary_and_site();
-        let ordinal = site.catalog.add_rule(name, &坏的).expect("写得进去");
+        let ordinal = site.catalog.add_rule(name, &坏的, None).expect("写得进去");
         screen.open(site, name);
         ordinal
     }
@@ -4228,10 +4230,20 @@ fn 没有例外时两栏各是空态并写明从哪儿加() {
         屏上.contains("还没有手动包含的作品。"),
         "包含那一栏空着却不是空态：\n{屏上}"
     );
-    assert!(
-        屏上.contains("在下面搜作品直接添加"),
-        "空态没写明从哪儿加：\n{屏上}"
-    );
+    // **票 23 落地之后换回稿上那句**：它指的头一条路（勾一批 →「加入子库…」→
+    // 「只加入勾选的作品」）那一票做出来了，所以空态指得着了。
+    // 票 22 当时特意没照稿写，理由是**空态的全部价值就是告诉人下一步去哪儿**，
+    // 而那条路当时按不着。
+    for 该写的 in [
+        "在浏览中勾选作品",
+        "「加入子库…」时选「只加入勾选的作品」",
+        "或在下面搜索添加",
+    ] {
+        assert!(
+            屏上.contains(该写的),
+            "空态没写明从哪儿加（缺「{该写的}」）：\n{屏上}"
+        );
+    }
     assert!(
         !屏上.lines().any(|line| line == "撤销"),
         "空着却画出了表身：\n{屏上}"
@@ -5078,4 +5090,107 @@ fn 装不装得下与容量条说的是同一个数_两处都照那份计划() {
     );
     assert_eq!(gauge.strangers, Some(plan.stranger_bytes));
     assert_eq!(gauge.capacity, plan.capacity, "两处的上限不是同一个");
+}
+
+/// **移除一条规则能撤销，序号与名字都原样回来**
+/// （票 `gui-looks-like-the-design/23` 验收第 7 条）。
+///
+/// 与删掉整台子库那一套同一个形状（`take_rule` / `restore_rule` ＋ 提示条上一颗「撤销」）。
+/// 要钉的两件正题：
+///
+/// - **序号原样回来**：`ordinal` 是命令行与报告上认的那个号，撤销之后换了号，
+///   人照着上一份报告删「第 2 条」删掉的会是另一条。所以放回去不走 `add_rule`。
+/// - **名字原样回来**：票 23 给 `sublibrary_rule` 补了 `name` 那一列，
+///   拿走与放回两头都要带上它——丢了的话人看见的是「名字自己变了」。
+#[test]
+fn 移除一条规则之后撤销得回来_序号与名字都原样() {
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    // 两条规则，头一条**起过名字**——撤销要把它带回来。
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        site.catalog
+            .add_rule(
+                "掌机",
+                &Rule::parse("平台=SFC").expect("读得懂"),
+                Some("随身那几个"),
+            )
+            .expect("写得进去");
+        site.catalog
+            .add_rule("掌机", &Rule::parse("平台=GBA").expect("读得懂"), None)
+            .expect("写得进去");
+        screen.reload(site);
+        screen.open(site, "掌机");
+    }
+    let 删之前 = 场
+        .app
+        .site()
+        .catalog
+        .sublibrary_rules("掌机")
+        .expect("读得动");
+    assert_eq!(删之前.len(), 2);
+    let 要删的 = 删之前[0].clone();
+    assert_eq!(
+        要删的.name.as_deref(),
+        Some("随身那几个"),
+        "前提：它起过名字"
+    );
+
+    // 一、删掉头一条。
+    场.app
+        .sublibrary_and_site()
+        .0
+        .ask_remove_rule("掌机", 要删的.ordinal);
+    // 弹层是下一帧才摊开的，先画一帧再去点。
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        场.app.ui(ui)
+    }));
+    assert!(
+        场.app.sublibrary().rule_dialog_open(),
+        "「移除规则」那一层没摊开：\n{屏上}"
+    );
+    let 屏上 = 点最后正好那一段(&ctx, "移除这条规则", |ui| 场.app.ui(ui));
+    assert_eq!(
+        场.app
+            .site()
+            .catalog
+            .sublibrary_rules("掌机")
+            .expect("读得动")
+            .len(),
+        1,
+        "没删掉"
+    );
+    // **提示条上写着删的是哪一条，而且带一颗「撤销」**。
+    assert!(
+        屏上.contains("随身那几个"),
+        "提示条上没写删掉的那条叫什么：\n{屏上}"
+    );
+    assert!(屏上.contains("撤销"), "提示条上没有「撤销」：\n{屏上}");
+    assert_eq!(场.app.sublibrary().undo_pending(), Some("掌机"));
+
+    // 二、按「撤销」——**逐列原样回来**。
+    点正好那一段(&ctx, "撤销", |ui| 场.app.ui(ui));
+    assert!(
+        场.app.sublibrary().undo_pending().is_none(),
+        "撤销之后还摆着撤销"
+    );
+    let 删之后 = 场
+        .app
+        .site()
+        .catalog
+        .sublibrary_rules("掌机")
+        .expect("读得动");
+    assert_eq!(删之后.len(), 2, "撤销之后没回来：{删之后:?}");
+    let 回来的 = 删之后
+        .iter()
+        .find(|一条| 一条.ordinal == 要删的.ordinal)
+        .expect("序号原样回来了");
+    assert_eq!(回来的.text, 要删的.text);
+    assert_eq!(
+        回来的.name.as_deref(),
+        Some("随身那几个"),
+        "名字没跟着回来——人看见的会是「名字自己变了」"
+    );
+    assert_eq!(回来的.shown_name(), "随身那几个");
 }

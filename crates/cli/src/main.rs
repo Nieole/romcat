@@ -4526,7 +4526,10 @@ fn run_sublibrary_rule(args: &SubRuleArgs) -> ExitCode {
             Ok(rule) => rule,
             Err(error) => return fail(format!("这条规则读不懂：{error}")),
         };
-        match catalog.add_rule(&args.name, &rule) {
+        // 命令行这条路眼下不收规则名——那一格在界面的「加入子库」弹层上
+        //（票 `gui-looks-like-the-design/23`）。`None` ＝ 没起过名字，
+        // 屏上与报告里照旧拿 `StoredRule::shown_name` 从原文现拼。
+        match catalog.add_rule(&args.name, &rule, None) {
             Ok(ordinal) => println!("规则 {ordinal} 已加进子库「{}」：{text}", args.name),
             Err(error) => return fail(format!("规则写不进中立库：{error}")),
         }
