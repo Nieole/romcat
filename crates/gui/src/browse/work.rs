@@ -428,8 +428,8 @@ impl Screen {
 
     /// 按了保存：改过的每一格写进中立库，**只走核心库那几个写入口**，写完收掉编辑态、整屏重读。
     ///
-    /// - 认出作品的显示标题：往标题集合里加一条**裁决**来源的叫法（`put_titles`）——标题集合挑显示标题时裁决压过一切
-    ///   （`title::choose` 第 1 层）。框里空着不算改。
+    /// - 认出作品的显示标题：往标题集合里加一条**裁决**来源的叫法（亲手加的叫法，`Site::add_own_titles`：原件落沉淀库）
+    ///   ——标题集合挑显示标题时裁决压过一切（`title::choose` 第 1 层）。框里空着不算改。
     /// - 别的格：写成那一格的裁决（`put_verdict_value`，一个字段上只留一条）；框里清空就是撤掉裁决（`clear_verdict_value`）。
     fn save_meta(&mut self, site: &mut Site) {
         let Some(drafts) = self.page.as_mut().and_then(|page| page.editing.take()) else {
@@ -447,32 +447,35 @@ impl Screen {
                 if text.is_empty() {
                     continue;
                 }
-                site.catalog
-                    .put_titles(&[TitleRow {
-                        work: subject.clone(),
-                        language: language_of(&text, None),
-                        kind: TitleKind::Alias,
-                        source: VERDICT.to_owned(),
-                        region: None,
-                        variant_key: None,
-                        confidence: Confidence::High,
-                        seam: None,
-                        evidence: HAND_WRITTEN.to_owned(),
-                        seen: 1,
-                        value: text,
-                    }])
-                    .map(|()| true)
+                site.add_own_titles(&[TitleRow {
+                    work: subject.clone(),
+                    language: language_of(&text, None),
+                    kind: TitleKind::Alias,
+                    source: VERDICT.to_owned(),
+                    region: None,
+                    variant_key: None,
+                    confidence: Confidence::High,
+                    seam: None,
+                    evidence: HAND_WRITTEN.to_owned(),
+                    seen: 1,
+                    value: text,
+                }])
+                .map(|()| true)
+                .map_err(|error| error.to_string())
             } else if text.is_empty() {
-                site.catalog.clear_verdict_value(anchor, &subject, field)
+                site.catalog
+                    .clear_verdict_value(anchor, &subject, field)
+                    .map_err(|error| format!("中立库写不动：{error}"))
             } else {
                 site.catalog
                     .put_verdict_value(anchor, &subject, field, &text, HAND_WRITTEN)
                     .map(|()| true)
+                    .map_err(|error| format!("中立库写不动：{error}"))
             };
             match done {
                 Ok(true) => 存了 += 1,
                 Ok(false) => 没动 += 1,
-                Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+                Err(error) => self.error = Some(error),
             }
         }
         self.refresh(site);
@@ -700,7 +703,7 @@ impl Screen {
     }
 
     /// 「恢复规则选择」：撤掉这个变体所在作品、所在平台上的**首选变体裁决**，回到规则选的那一个（拿主意的人 2026-09-15 定）。
-    /// 走的是侧边详情那一条同一种撤法（`clear_preferred` → `Catalog::clear_preferred_variant`）。
+    /// 走的是侧边详情那一条同一种撤法（`clear_preferred` → `Site::clear_preferred_variant`：沉淀库那一条与投影一起撤）。
     fn restore_rule(&mut self, site: &mut Site, key: &str) {
         let Some((work, platform)) = self
             .page
@@ -1603,19 +1606,22 @@ impl Screen {
                         .and_then(|at| self.short_names.get(at))
                         .map_or_else(|| romcat_core::path::file_name_of_key(key), String::as_str);
                     字(ui, 简称);
-                    let 裁过 = page
-                        .details
-                        .iter()
-                        .find(|detail| detail.row.key == key)
-                        .is_some_and(|detail| detail.preferred.is_some());
-                    look::help(
-                        ui,
-                        if 裁过 {
-                            "裁决指定的"
-                        } else {
-                            "默认按「汉化 > 官中 > 日版 > 其他」选择"
-                        },
-                    );
+                    let 那一份 = page.details.iter().find(|detail| detail.row.key == key);
+                    let 裁过 = 那一份.is_some_and(|detail| detail.preferred.is_some());
+                    // 人裁过、却对不上了（首选变体钉的是位置：挪过目录、改过名、移出了这个作品、那个根移除了……
+                    // 都会走到这儿）：如实说它不在了，不猜是哪一种，也不让人以为那条裁决还在管用
+                    // （`VariantDetail::preferred_unmatched`）。
+                    let 对不上 = 那一份.and_then(VariantDetail::preferred_unmatched);
+                    let 说明 = match (裁过, 对不上) {
+                        (true, _) => "裁决指定的".to_owned(),
+                        (false, Some(那个)) => format!(
+                            "裁决指定的「{}」已不在这个作品底下，\
+                             默认按「汉化 > 官中 > 日版 > 其他」选择",
+                            romcat_core::path::file_name_of_key(那个)
+                        ),
+                        (false, None) => "默认按「汉化 > 官中 > 日版 > 其他」选择".to_owned(),
+                    };
+                    look::help(ui, &说明);
                 });
             });
         });
@@ -1902,30 +1908,23 @@ impl Screen {
             },
             MetaAction::UseTitle(row) => {
                 let source = row.source.clone();
-                let verdict = TitleRow {
-                    source: VERDICT.to_owned(),
-                    ..row
-                };
-                match site.catalog.put_titles(&[verdict]) {
+                // 记成**亲手加的叫法**：源一律是裁决，原件落沉淀库（`Site::add_own_titles`）。
+                match site.add_own_titles(&[row]) {
                     Ok(()) => {
                         self.refresh(site);
                         self.notice = Some(format!("已改为使用 {source} 的名称（记为手动修改）"));
                     }
-                    Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+                    Err(error) => self.error = Some(error.to_string()),
                 }
             }
-            MetaAction::RevertTitle(row) => match site.catalog.remove_title(
-                &row.work,
-                row.language,
-                row.kind,
-                &row.source,
-                &row.value,
-            ) {
+            // 撤的是**亲手加的叫法**：沉淀库里那一条与中立库那份投影一起撤（`Site::remove_own_title`），
+            // 只撤投影的话下次开现场它又回来了。
+            MetaAction::RevertTitle(row) => match site.remove_own_title(&row) {
                 Ok(_) => {
                     self.refresh(site);
                     self.notice = Some("已撤销手动修改，恢复为标题集合的选择".to_owned());
                 }
-                Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+                Err(error) => self.error = Some(error.to_string()),
             },
             MetaAction::Revert {
                 anchor,

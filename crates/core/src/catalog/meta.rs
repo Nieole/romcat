@@ -18,7 +18,7 @@
 //! ## 为什么是键值表上的键，不是哪张表上的一列
 //!
 //! 这些都是**整份库一份**的账，落在某张表的行上等于同一个值抄几万遍；更要紧的是
-//! **加一张表或一列要升结构版本**，而升版的意思是让人删掉重扫一份 8.60 TiB 的库
+//! **加一张表或一列要升结构版本**，而升版的意思是让人删掉重扫一份八个多 TiB 的库（见台账 `docs/library-facts.md`）
 //! （[`SCHEMA_VERSION`](super::SCHEMA_VERSION) 的文档）。键值表上**加一个键是纯加**：
 //! 已有的表一列没动，旧库拿新程序打开照样能用，读不到那一行就是「还没记过」。
 
@@ -97,6 +97,14 @@ pub(super) enum MetaKey {
     /// `site::carry_over_shaping_overrides` 里，结构版本对得上的库才写——对不上的那一份
     /// 一个字不改）。那一行不在就是还没搬过，或者这份库压根没有旧表。
     ShapingOverridesCarriedAt,
+    /// **旧中立库里的首选变体与亲手加的叫法已经搬进沉淀库了**（记下的时刻，UNIX 纪元起的秒）。
+    ///
+    /// 票 `verdict-store-and-sync/01` 之前这两样只住在这份库里（`preferred_variant` 表、`title`
+    /// 表里 `source = 裁决` 的行）；那之后两张表都是沉淀库的投影。读
+    /// [`Catalog::stranded_preferred_and_titles`]（记着就不再交出旧行），写
+    /// [`Catalog::mark_preferred_and_titles_carried`]（只在 `site::carry_over_preferred_and_titles`
+    /// 里）。与 [`Self::ShapingOverridesCarriedAt`] 分开记：两次搬家各是一步，一份库可能只走过前一步。
+    PreferredAndTitlesCarriedAt,
 }
 
 impl MetaKey {
@@ -120,6 +128,7 @@ impl MetaKey {
             Self::ShapedManifest => "shaped_manifest",
             Self::IdentifyUnfinished => "identify_unfinished",
             Self::ShapingOverridesCarriedAt => "shaping_overrides_carried_at",
+            Self::PreferredAndTitlesCarriedAt => "preferred_and_titles_carried_at",
         }
     }
 }

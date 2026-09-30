@@ -12,8 +12,8 @@
 //! `catalog::content` 里已经有 [`work_names`](Catalog::work_names)、
 //! [`releases`](Catalog::releases)、[`preferred_variants`](Catalog::preferred_variants)
 //! 这类**整份读回来**的入口，那是给导出与报告用的——它们本来就要走遍全库。
-//! 详情面板不是：人点一行就要出一次，真库上作品有 9,226 个、自动通过的候选有 38,963
-//! 条，每点一行整读一遍就是几十毫秒的卡顿。所以这里另开几条按主键查的路。
+//! 详情面板不是：人点一行就要出一次，真库上作品有九千多个、自动通过的候选有近四万
+//! 条（见台账 `docs/library-facts.md`），每点一行整读一遍就是几十毫秒的卡顿。所以这里另开几条按主键查的路。
 //!
 //! ## ADR-0012：**首选变体与标题来源解耦**
 //!
@@ -186,7 +186,12 @@ pub struct VariantDetail {
     /// 中文标题取的是哪一条叫法。读它走 [`Self::chinese_title`]。
     chinese_title: Option<TitleRow>,
     /// **首选变体**的人工裁决；没人裁过是 `None`（那时按规则算，见 [`Self::preferred_now`]）。
+    ///
+    /// **只在它对得上时才是 `Some`**：裁决指着的那个变体得还在这个作品、这个平台底下。
+    /// 对不上的那一条读 [`Self::preferred_unmatched`]。
     pub preferred: Option<String>,
+    /// 人裁过、却**对不上**的那一条首选变体裁决指着哪个变体的键。读它走 [`Self::preferred_unmatched`]。
+    preferred_unmatched: Option<String>,
     /// 同一个作品、同一个平台下的全部变体，**按首选规则排好**，第一个就是眼下的首选。
     pub siblings: Vec<Sibling>,
     /// 媒体各类各有多少。
@@ -208,6 +213,18 @@ impl VariantDetail {
     #[must_use]
     pub fn preferred_now(&self) -> Option<&str> {
         self.siblings.first().map(|first| first.row.key.as_str())
+    }
+
+    /// 这个作品在这个平台上**人裁过、却对不上**的首选变体：裁决指着的那个变体的键；
+    /// 没人裁过、或者对得上时是 `None`。
+    ///
+    /// 首选变体钉的是一个**位置**（变体的键，与**路径锚**同一个处境，票
+    /// `verdict-store-and-sync/01`）：熬得过删库重扫，熬不过改名与挪目录。挪过之后那条裁决
+    /// **不算数**（[`Self::preferred`] 是 `None`，首选照规则算），也**不猜着**挂到挪过去的那一份
+    /// 上——而这一格把「人定过的那一个不在这儿了」如实交出来，屏上照它说。
+    #[must_use]
+    pub fn preferred_unmatched(&self) -> Option<&str> {
+        self.preferred_unmatched.as_deref()
     }
 
     /// 这个变体自己就是首选吗。
@@ -342,6 +359,14 @@ impl Catalog {
             }
             _ => Vec::new(),
         };
+        // 裁决指着的那个变体不在这个作品、这个平台底下了（挪过目录、改过名、移出了这个作品……）：
+        // 不算数，如实另交。
+        let (preferred, preferred_unmatched) = match preferred {
+            Some(key) if !siblings.iter().any(|sibling| sibling.row.key == key) => {
+                (None, Some(key))
+            }
+            preferred => (preferred, None),
+        };
         let media = self.media_have(key, work.as_deref(), pool)?;
         let media_items = self.media_items(key, work.as_deref(), pool)?;
         let mut values = Vec::new();
@@ -365,6 +390,7 @@ impl Catalog {
             display,
             chinese_title,
             preferred,
+            preferred_unmatched,
             siblings,
             media,
             media_items,
@@ -575,7 +601,7 @@ impl Catalog {
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             // 中文记号从**自动通过**的候选上读回来（与 `adapter::converge` 同一条路），
-            // 只查这几个变体自己的——整表走一遍是 38,963 条。
+            // 只查这几个变体自己的——整表走一遍是近四万条（见台账 `docs/library-facts.md`）。
             let marks: BTreeSet<ChineseMark> = self
                 .candidates_of(&row.key)?
                 .into_iter()

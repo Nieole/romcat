@@ -28,13 +28,15 @@
 //! 打开时把没跑过的接着跑完。**往前迁得动，往后（库比程序新）如实拒绝并说清**——
 //! 那时该换新程序，而不是删库。
 //!
-//! 眼下八条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
+//! 眼下十条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
 //! 第 3 条建 `verdict_batch` 与 `verdict_batch_row` 两张表（**批**，见下一节），
 //! 第 4 条建 `collection_member` 表（**合集**与**收藏**，见再下一节），
 //! 第 5 条建 `title_suppression` 表（**压掉的叫法**），
-//! 第 6 条建 `shaping_override` 表（**成型的人工纠正**，见最后一节），
+//! 第 6 条建 `shaping_override` 表（**成型的人工纠正**），
 //! 第 7 条把标题类型那两个旧词换掉，
-//! 第 8 条建 `platform_correction` 表（**平台纠正**，见倒数第二节）。
+//! 第 8 条建 `platform_correction` 表（**平台纠正**），
+//! 第 9 条建 `not_same_work` 表（**「不是同一个作品」**），
+//! 第 10 条建 `preferred_variant` 与 `own_title` 两张表（**首选变体**与**亲手加的叫法**，见最后一节）。
 //! 加这几条时库还是空的，但那不改变纪律——**永远不要求删库**，中立库那条「版本一变就
 //! 重建」的便宜路子在这份库上不许走。
 //!
@@ -187,8 +189,29 @@
 //! 票 `one-criterion-per-thing/07` 之前的中立库里那张 `shaping_override` 表，开现场时搬进来
 //! 一次（[`carry_over_shaping_overrides`](crate::site::carry_over_shaping_overrides)），
 //! 旧表原样留着、不再读。**结构版本对不上、开不进去的旧库**，列出来或试着打开的那一下
-//! 就先救进来（[`rescue_shaping_overrides`](crate::site::rescue_shaping_overrides)）——那句
+//! 就先救进来（[`rescue`](crate::site::rescue)）——那句
 //! 叫人删库重扫的话说「人工纠正一条不丢」，删之前得先救出来。
+//!
+//! ## **首选变体**与**亲手加的叫法**：中立库里那两份是投影
+//!
+//! 两样都是人一条条定下来的——「这个作品在这个平台上默认启动这一个」「这个作品还叫这个名字」
+//! ——原先只住在中立库里（`preferred_variant` 表、`title` 表里 `source = 裁决` 的行），删库重扫
+//! 就跟着没了（挂单 `Q725`，票 `verdict-store-and-sync/01`）。第 10 条迁移把它们的原件收进
+//! 这里：[`Store::preferred_variants`] 与 [`Store::own_titles`]。
+//!
+//! **键是主库标识加中立库那张表的键**，与人工纠正同族（已裁：路径锚）：首选变体的值是一个
+//! 变体的键——一个位置——熬得过删库重扫，熬不过改名与挪目录，对不上时不算数、也不猜着挂到
+//! 别的变体上（`catalog::VariantDetail::preferred_unmatched`）；叫法挂在作品名上，与中立库那张
+//! 表同一个锚。两样都按主库标识分开，**导出不带**——[`Store::export`] 只折裁决与匹配裁决
+//! 两张表（`--include-path` 也不带，与人工纠正同一条，挂单 `Q722`）。
+//!
+//! 中立库里那两份从此是这里的**投影**，与合集、收藏同一个身份：开现场时照这里重建
+//! （[`site::reconcile`](crate::site::reconcile)，与眼下一样就一个字都不写）；人的动作先落这里、
+//! 再改投影（`Site::set_preferred_variant`、`Site::add_own_titles` 那几支）。旧中立库里
+//! 已有的开现场时救进来一次、记下「搬过了」，做法与人工纠正那一次一个字不差
+//! （[`carry_over_preferred_and_titles`](crate::site::carry_over_preferred_and_titles)、
+//! [`rescue`](crate::site::rescue)）。往后再搬一样人定的东西，照 [`site::reconcile`](crate::site::reconcile)
+//! 那一段「做法」走。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -196,7 +219,7 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::now_secs;
+use crate::catalog::{TitleRow, now_secs};
 use crate::dat::chinese::ChineseMark;
 
 /// 沉淀库跑到第几条迁移，也就是它的结构版本。
@@ -469,6 +492,49 @@ CREATE TABLE IF NOT EXISTS not_same_work(
 CREATE UNIQUE INDEX IF NOT EXISTS not_same_work_live
     ON not_same_work(library, left_work, right_work) WHERE undone_at IS NULL;
 CREATE INDEX IF NOT EXISTS not_same_work_library ON not_same_work(library);
+",
+    // 10：**首选变体**与**亲手加的叫法**（票 `verdict-store-and-sync/01`，挂单 `Q725`）。两样原先
+    // 住在中立库里，删库重扫就跟着没了；它们与人工纠正同族，是人一条条定下来的。
+    "\
+-- 一条**首选变体**裁决：这份主库里，这个作品在这个平台上默认启动 `variant_key` 那一个。
+--
+-- **键是主库标识加中立库那张表的键**（作品名、平台），值是那个变体的键——一个**位置**，
+-- 与**路径锚**同一个处境：熬得过删库重扫（位置没变），熬不过改名与挪目录（位置变了就对不上，
+-- 不猜着挪到别的变体上）。所以它按主库标识分开，**导出也不带它**（`Store::export` 只折
+-- 裁决与匹配裁决两张表）。中立库里那张 `preferred_variant` 是这里的**投影**。
+CREATE TABLE IF NOT EXISTS preferred_variant(
+    library     TEXT    NOT NULL,
+    work        TEXT    NOT NULL,
+    platform    TEXT    NOT NULL,
+    variant_key TEXT    NOT NULL,
+    decided_at  INTEGER NOT NULL,
+    PRIMARY KEY (library, work, platform)
+) STRICT;
+
+-- 一条**亲手加的叫法**：这份主库里，这个作品的标题集合里有人亲手写下的这一条
+-- （中立库 `title` 表里 `source = 裁决` 的那些行，这里是它们的原件）。
+--
+-- **键是主库标识加中立库那张表的键**（作品名、语言、类型、那一串字；源一律是裁决，不另存）。
+-- 其余几列照抄中立库那张表，投影回去一个字不差。`variant_key` 记着它是在哪个变体上加的
+-- （界面上「加进集合」那一下），合并留下的别名没有。按主库标识分开、**导出不带它**，
+-- 理由同上一张表。
+CREATE TABLE IF NOT EXISTS own_title(
+    library     TEXT    NOT NULL,
+    work        TEXT    NOT NULL,
+    -- 语言码 zh / ja / en / und，与中立库那张表同一套码（`title::Language::code`）。
+    language    TEXT    NOT NULL,
+    -- 官方名称 / 译名 / 别名 / 汉化组译名（`title::TitleKind::label`）。
+    kind        TEXT    NOT NULL,
+    value       TEXT    NOT NULL,
+    region      TEXT,
+    variant_key TEXT,
+    confidence  TEXT    NOT NULL,
+    seam        TEXT,
+    evidence    TEXT    NOT NULL,
+    seen        INTEGER NOT NULL,
+    decided_at  INTEGER NOT NULL,
+    PRIMARY KEY (library, work, language, kind, value)
+) STRICT;
 ",
 ];
 
@@ -2340,7 +2406,7 @@ impl Store {
     ///
     /// 用处是收**中立库旧表里还没搬走的那批**（票 `one-criterion-per-thing/07` 之前记下的，
     /// [`carry_over_shaping_overrides`](crate::site::carry_over_shaping_overrides) 与
-    /// [`rescue_shaping_overrides`](crate::site::rescue_shaping_overrides)）：沉淀库里那一条是
+    /// [`rescue`](crate::site::rescue)）：沉淀库里那一条是
     /// 人后来定的，旧表里那一条是它之前的样子。**一个事务**：半途断掉要么全收下、要么
     /// 一条没收，下次再搬一遍。一条都没交进来就一个字都不写。
     ///
@@ -2378,6 +2444,276 @@ impl Store {
         tx.commit().map_err(|source| self.err(source))?;
         Ok(added)
     }
+
+    /// 这份主库的全部**首选变体**裁决：`(作品名, 平台)` → 那个变体的键。中立库里那张表
+    /// 是它的投影，开现场时照它重建（[`site::reconcile`](crate::site::reconcile)）。
+    ///
+    /// `library` 是**主库标识**：值是一个变体的键，换一份主库指的是另一个文件。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn preferred_variants(
+        &self,
+        library: &str,
+    ) -> Result<BTreeMap<(String, String), String>, VerdictError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT work, platform, variant_key FROM preferred_variant WHERE library = ?1")
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![library], |row| {
+                Ok(((row.get(0)?, row.get(1)?), row.get(2)?))
+            })
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
+    /// 记一条首选变体裁决：这份主库里 `work` 在 `platform` 上默认启动 `variant_key`。
+    /// 同一个作品、同一个平台上已经有一条就**盖掉**——人改了主意，不攒出第二行。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn set_preferred_variant(
+        &mut self,
+        library: &str,
+        work: &str,
+        platform: &str,
+        variant_key: &str,
+    ) -> Result<(), VerdictError> {
+        self.conn
+            .execute(
+                "INSERT INTO preferred_variant(library, work, platform, variant_key, decided_at)
+                 VALUES(?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(library, work, platform) DO UPDATE SET
+                    variant_key = excluded.variant_key,
+                    decided_at = excluded.decided_at",
+                params![library, work, platform, variant_key, now_secs()],
+            )
+            .map(|_| ())
+            .map_err(|source| self.err(source))
+    }
+
+    /// 撤掉这份主库里 `work` 在 `platform` 上的首选变体裁决，返回原来有没有这一条。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn clear_preferred_variant(
+        &mut self,
+        library: &str,
+        work: &str,
+        platform: &str,
+    ) -> Result<bool, VerdictError> {
+        self.conn
+            .execute(
+                "DELETE FROM preferred_variant WHERE library = ?1 AND work = ?2 AND platform = ?3",
+                params![library, work, platform],
+            )
+            .map(|removed| removed > 0)
+            .map_err(|source| self.err(source))
+    }
+
+    /// 这份主库的全部**亲手加的叫法**，每条的源都是**裁决**，按作品、语言、类型、那一串字排。
+    /// 中立库标题集合里 `source = 裁决` 的那些行是它们的投影，开现场时照它重建
+    /// （[`site::reconcile`](crate::site::reconcile)）。
+    ///
+    /// 语言码或类型认不出的那一行**丢掉**，理由与压制记录那一处（`read_suppression_row`）同一条：
+    /// 回退成 `und` / `别名` 的话，投影回去是另一条叫法。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn own_titles(&self, library: &str) -> Result<Vec<TitleRow>, VerdictError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT work, language, kind, value, region, variant_key, confidence, seam,
+                        evidence, seen
+                 FROM own_title WHERE library = ?1
+                 ORDER BY work, language, kind, value",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![library], read_own_title)
+            .map_err(|source| self.err(source))?;
+        let mut out = Vec::new();
+        for row in rows {
+            if let Some(row) = row.map_err(|source| self.err(source))? {
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
+
+    /// 记下这几条亲手加的叫法（**源一律记成裁决**，交进来的那一格不看）。同一个作品、同一种
+    /// 语言、同一个类型、同一串字已经有一条就**盖掉**——同一条写两次是同一个结果。
+    /// **一个事务**。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn put_own_titles(&mut self, library: &str, rows: &[TitleRow]) -> Result<(), VerdictError> {
+        self.write_own_titles(library, rows, true).map(|_| ())
+    }
+
+    /// 撤掉这份主库里的一条亲手加的叫法，返回原来有没有这一条。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn remove_own_title(
+        &mut self,
+        library: &str,
+        work: &str,
+        language: crate::title::Language,
+        kind: crate::title::TitleKind,
+        value: &str,
+    ) -> Result<bool, VerdictError> {
+        self.conn
+            .execute(
+                "DELETE FROM own_title
+                 WHERE library = ?1 AND work = ?2 AND language = ?3 AND kind = ?4 AND value = ?5",
+                params![library, work, language.code(), kind.label(), value],
+            )
+            .map(|removed| removed > 0)
+            .map_err(|source| self.err(source))
+    }
+
+    /// 把一批首选变体裁决里**这份库还没有的那几条**收进来，返回新收下几条。同一个作品、
+    /// 同一个平台上已经有的**不盖**：沉淀库里那一条是人后来定的，旧中立库里那一条是它之前的
+    /// 样子。用处同 [`Self::add_missing_shaping_overrides`]：收旧中立库里还没搬走的那批
+    /// （[`carry_over_preferred_and_titles`](crate::site::carry_over_preferred_and_titles)）。
+    /// **一个事务**；一条都没交进来就一个字都不写。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn add_missing_preferred_variants(
+        &mut self,
+        library: &str,
+        preferred: &BTreeMap<(String, String), String>,
+    ) -> Result<usize, VerdictError> {
+        if preferred.is_empty() {
+            return Ok(0);
+        }
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(|source| self.err(source))?;
+        let mut added = 0;
+        {
+            let mut statement = tx
+                .prepare(
+                    "INSERT INTO preferred_variant(library, work, platform, variant_key, decided_at)
+                     VALUES(?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(library, work, platform) DO NOTHING",
+                )
+                .map_err(|source| self.err(source))?;
+            let now = now_secs();
+            for ((work, platform), variant_key) in preferred {
+                added += statement
+                    .execute(params![library, work, platform, variant_key, now])
+                    .map_err(|source| self.err(source))?;
+            }
+        }
+        tx.commit().map_err(|source| self.err(source))?;
+        Ok(added)
+    }
+
+    /// 把一批亲手加的叫法里**这份库还没有的那几条**收进来，返回新收下几条；同一个键上已经有的
+    /// **不盖**。理由与用处同 [`Self::add_missing_preferred_variants`]。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn add_missing_own_titles(
+        &mut self,
+        library: &str,
+        rows: &[TitleRow],
+    ) -> Result<usize, VerdictError> {
+        self.write_own_titles(library, rows, false)
+    }
+
+    /// 写那几条叫法；`replace` 为假时同一个键上已有的**不盖**。返回新收下几条。
+    fn write_own_titles(
+        &mut self,
+        library: &str,
+        rows: &[TitleRow],
+        replace: bool,
+    ) -> Result<usize, VerdictError> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(|source| self.err(source))?;
+        let mut added = 0;
+        {
+            let conflict = if replace {
+                "DO UPDATE SET region = excluded.region, variant_key = excluded.variant_key,
+                    confidence = excluded.confidence, seam = excluded.seam,
+                    evidence = excluded.evidence, seen = excluded.seen,
+                    decided_at = excluded.decided_at"
+            } else {
+                "DO NOTHING"
+            };
+            let mut statement = tx
+                .prepare(&format!(
+                    "INSERT INTO own_title(library, work, language, kind, value, region,
+                         variant_key, confidence, seam, evidence, seen, decided_at)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                     ON CONFLICT(library, work, language, kind, value) {conflict}"
+                ))
+                .map_err(|source| self.err(source))?;
+            let now = now_secs();
+            for row in rows {
+                added += statement
+                    .execute(params![
+                        library,
+                        row.work,
+                        row.language.code(),
+                        row.kind.label(),
+                        row.value,
+                        row.region,
+                        row.variant_key,
+                        row.confidence.label(),
+                        row.seam.map(crate::title::Seam::label),
+                        row.evidence,
+                        i64::try_from(row.seen).unwrap_or(i64::MAX),
+                        now,
+                    ])
+                    .map_err(|source| self.err(source))?;
+            }
+        }
+        tx.commit().map_err(|source| self.err(source))?;
+        Ok(added)
+    }
+}
+
+/// 读一行亲手加的叫法；语言码或类型认不出就是 `None`（见 [`Store::own_titles`]）。
+fn read_own_title(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<TitleRow>> {
+    let language: String = row.get(1)?;
+    let kind: String = row.get(2)?;
+    let (Some(language), Some(kind)) = (
+        crate::title::Language::from_code(&language),
+        crate::title::TitleKind::from_label(&kind),
+    ) else {
+        return Ok(None);
+    };
+    let confidence: String = row.get(6)?;
+    let seam: Option<String> = row.get(7)?;
+    Ok(Some(TitleRow {
+        work: row.get(0)?,
+        language,
+        kind,
+        source: crate::scrape::priority::VERDICT.to_string(),
+        value: row.get(3)?,
+        region: row.get(4)?,
+        variant_key: row.get(5)?,
+        confidence: crate::catalog::Confidence::from_label(&confidence)
+            .unwrap_or(crate::catalog::Confidence::High),
+        seam: seam.as_deref().and_then(crate::title::Seam::from_label),
+        evidence: row.get(8)?,
+        seen: u64::try_from(row.get::<_, i64>(9)?).unwrap_or(0),
+    }))
 }
 
 const SUPPRESSION_SELECT: &str = "SELECT work, language, kind, source, value, note,
@@ -2525,8 +2861,8 @@ fn mark_of_label(label: &str) -> Option<ChineseMark> {
 
 /// 识别那一趟拿在手里的沉淀库快照。
 ///
-/// 是一份**内存里的快照**而不是一个连接：识别要为 46,444 个变体各查一次，逐次开库查
-/// 是把一件常数时间的事做成 46,444 次 I/O。库里的条数与裁决的条数同阶（几万），
+/// 是一份**内存里的快照**而不是一个连接：识别要为四万多个变体（见台账 `docs/library-facts.md`）各查一次，逐次开库查
+/// 是把一件常数时间的事做成四万多次 I/O。库里的条数与裁决的条数同阶（几万），
 /// 整份读进来不值一提。
 ///
 /// **[`Membership`] 也在这份快照里**，不是因为识别要拿它撞什么——它一次都不参与识别。
@@ -3476,6 +3812,101 @@ mod tests {
             .set_platform_correction("主库", "FC", "FDS", PlatformDecision::ByContent)
             .expect("升上来之后这张表就记得下了");
         assert_eq!(store.platform_corrections("主库").expect("读得出").len(), 1);
+    }
+
+    #[test]
+    fn 第九版的老库升上来_首选变体与亲手加的叫法按主库分开存得住也撤得掉() {
+        // 钉的是**第 10 条迁移**（票 `verdict-store-and-sync/01`）：老东西一条不丢，两张新表
+        // 按主库标识分开——键是中立库里的键，换一份主库指的是另一批文件。
+        let conn = Connection::open_in_memory().expect("开得出来");
+        for sql in &MIGRATIONS[..9] {
+            conn.execute_batch(sql).expect("建得出第九版");
+        }
+        conn.execute_batch("PRAGMA user_version = 9")
+            .expect("盖得上第九版的版本号");
+        let mut store = Store {
+            conn,
+            path: "（内存）".to_string(),
+        };
+        store
+            .set_shaping_override("甲库", "库/FC/封面.png", "库/FC/魂斗罗.zip")
+            .expect("第九版里就存得进");
+
+        store.migrate().expect("升得上来");
+        assert_eq!(
+            store.shaping_overrides("甲库").expect("读得出").len(),
+            1,
+            "老东西一条都不许丢"
+        );
+
+        store
+            .set_preferred_variant("甲库", "魂斗罗", "FC", "库/FC/魂斗罗 (J).zip")
+            .expect("升上来之后这张表就记得下了");
+        store
+            .set_preferred_variant("甲库", "魂斗罗", "FC", "库/FC/魂斗罗 汉化.zip")
+            .expect("同一处再定一次是盖掉");
+        let 叫法 = TitleRow {
+            work: "魂斗罗".to_string(),
+            value: "魂斗罗 我起的名".to_string(),
+            language: crate::title::Language::Chinese,
+            kind: crate::title::TitleKind::Alias,
+            // 交进来的源不看，一律记成裁决。
+            source: "文件名".to_string(),
+            region: None,
+            variant_key: Some("库/FC/魂斗罗 汉化.zip".to_string()),
+            confidence: crate::catalog::Confidence::High,
+            seam: None,
+            evidence: "亲手写的".to_string(),
+            seen: 1,
+        };
+        store
+            .put_own_titles("甲库", std::slice::from_ref(&叫法))
+            .expect("升上来之后这张表就记得下了");
+
+        assert_eq!(
+            store.preferred_variants("甲库").expect("读得出"),
+            BTreeMap::from([(
+                ("魂斗罗".to_string(), "FC".to_string()),
+                "库/FC/魂斗罗 汉化.zip".to_string()
+            )]),
+        );
+        let 存下的 = store.own_titles("甲库").expect("读得出");
+        assert_eq!(存下的.len(), 1);
+        assert_eq!(存下的[0].source, crate::scrape::priority::VERDICT);
+        assert_eq!(存下的[0].variant_key, 叫法.variant_key);
+        assert!(store.preferred_variants("乙库").expect("读得出").is_empty());
+        assert!(store.own_titles("乙库").expect("读得出").is_empty());
+
+        // 已有的不盖：旧中立库里那一条是人后来改过之前的样子。
+        let 旧的 = BTreeMap::from([(
+            ("魂斗罗".to_string(), "FC".to_string()),
+            "库/FC/魂斗罗 (J).zip".to_string(),
+        )]);
+        assert_eq!(
+            store
+                .add_missing_preferred_variants("甲库", &旧的)
+                .expect("收得进"),
+            0
+        );
+        assert_eq!(
+            store
+                .add_missing_own_titles("甲库", std::slice::from_ref(&叫法))
+                .expect("收得进"),
+            0
+        );
+
+        assert!(
+            store
+                .clear_preferred_variant("甲库", "魂斗罗", "FC")
+                .expect("撤得掉")
+        );
+        assert!(
+            store
+                .remove_own_title("甲库", "魂斗罗", 叫法.language, 叫法.kind, &叫法.value)
+                .expect("撤得掉")
+        );
+        assert!(store.preferred_variants("甲库").expect("读得出").is_empty());
+        assert!(store.own_titles("甲库").expect("读得出").is_empty());
     }
 
     #[test]

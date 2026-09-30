@@ -290,3 +290,64 @@ fn 导出加上铺媒体才铺_干跑先说要铺几份多大() {
         "{元数据}"
     );
 }
+
+#[test]
+fn 导出时定的首选变体_删掉中立库重扫之后还在() {
+    // 真入口上的「删库重扫」（票 `verdict-store-and-sync/01`）：`export --prefer` 定的首选变体
+    // 原件落沉淀库，删掉中立库、从零 `scan` 一遍，中立库里那份投影在扫描那一趟就照沉淀库回来了。
+    let (dir, workspace) = 现场();
+    let out_dir = temp_dir("pegasus-cli-prefer-out");
+    let 变体 = "库/FC/魂斗罗.zip";
+    let out = romcat(&[
+        "export",
+        "--out",
+        &out_dir.path().to_string_lossy(),
+        "--library",
+        "测试库",
+        "--workspace",
+        &workspace.path().to_string_lossy(),
+        "--prefer",
+        变体,
+        "--dry-run",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // 删掉中立库：连 SQLite 的附件一起，中立库住的那个目录整个清掉；再从零扫一遍。
+    fs::remove_dir_all(workspace.path().join("catalog")).expect("删得掉中立库");
+    let out = romcat(&[
+        "scan",
+        "--root-name",
+        "库",
+        &dir.path().to_string_lossy(),
+        "--workspace",
+        &workspace.path().to_string_lossy(),
+        "--library",
+        "测试库",
+        "--no-checkpoint",
+        "--quiet",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let 库文件 = romcat_core::workspace::catalog_path(
+        workspace.path(),
+        romcat_core::workspace::Slug::Named("测试库"),
+    );
+    let catalog = romcat_core::catalog::Catalog::open(&库文件).expect("开得出重扫过的中立库");
+    // 还没认出作品时，裁决钉在这个变体自己的键上（`run_export` 那一段）。
+    assert_eq!(
+        catalog
+            .preferred_variant(变体, "FC")
+            .expect("读得出")
+            .as_deref(),
+        Some(变体),
+        "删库重扫之后，导出时定的首选变体该还在",
+    );
+}

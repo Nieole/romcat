@@ -57,6 +57,7 @@ use crate::dat::chinese::ChineseMark;
 use crate::identify;
 use crate::scrape::priority::{Priorities, Said, VERDICT, entry_fields};
 use crate::scrape::{AnchorKind, Field};
+use crate::site::{Site, WriteError};
 use crate::title::{TitleKind, TitleSet, language_of};
 use crate::verdict::{Decision, Facts, Store, Verdict, VerdictError};
 
@@ -608,31 +609,32 @@ pub fn conflicts(
 /// 第三步选中了别的作品那一格：把它记到保留作品名下。
 ///
 /// **走的是作品详情页「改用另一个来源的值」同一条路**（`put_verdict_value` /
-/// `put_titles`，源记**裁决**）：手动改写优先于所有数据源，重新刮削不覆盖。
-/// 显示标题另走标题集合——那一格不是刮削字段，它由 [`choose`](crate::title::choose) 挑。
+/// 亲手加的叫法，源记**裁决**）：手动改写优先于所有数据源，重新刮削不覆盖。
+/// 显示标题另走标题集合——那一格不是刮削字段，它由 [`choose`](crate::title::choose) 挑；
+/// 记下的那一条是**亲手加的叫法**，原件落沉淀库（[`Site::add_own_titles`]）。
 ///
 /// ⚠️ **它不在这一批裁决里**，所以[撤销这一批](super::undo_batch)不会把它退回去；
 /// 要改回来在作品详情页元数据那一面上原地撤（挂单 `Q1012`）。
 ///
 /// # Errors
-/// 写中立库失败时返回错误。
+/// 写两份库失败时返回错误。
 pub fn adopt(
-    catalog: &mut Catalog,
+    site: &mut Site,
     priorities: &Priorities,
     keep: &str,
     field: Field,
     offer: &Offer,
-) -> Result<(), CatalogError> {
+) -> Result<(), WriteError> {
     let why = format!("{}：改用《{}》的值", Kind::Merge.label(), offer.work);
     if field == Field::Title {
         let chosen = crate::title::choose(
             &TitleSet {
                 work: offer.work.clone(),
-                entries: catalog.titles_of(&offer.work)?,
+                entries: site.catalog.titles_of(&offer.work)?,
             },
             priorities,
         );
-        return catalog.put_titles(&[TitleRow {
+        return site.add_own_titles(&[TitleRow {
             work: keep.to_string(),
             value: chosen.display,
             language: chosen.language,
@@ -647,30 +649,27 @@ pub fn adopt(
             seen: 1,
         }]);
     }
-    catalog.put_verdict_value(
+    Ok(site.catalog.put_verdict_value(
         AnchorKind::Work,
         keep,
         field,
         &offer.said.values.join("、"),
         &why,
-    )
+    )?)
 }
 
 /// 把被合并作品的名字**留作别名**：搜这些名字仍能找到合并后的作品。
 ///
 /// 记进保留作品的标题集合、源是**裁决**——重新整理标题时一行都不碰
-/// （`Catalog::clear_titles`）。
+/// （`Catalog::clear_titles`）；它们是**亲手加的叫法**，原件落沉淀库，删库重扫之后还在
+/// （[`Site::add_own_titles`]）。
 ///
 /// ⚠️ 同 [`adopt`]：**它不在这一批裁决里**，撤销这一批不会把它去掉；
 /// 要去掉在作品详情页标题那一面上删（挂单 `Q1012`）。
 ///
 /// # Errors
-/// 写中立库失败时返回错误。
-pub fn keep_aliases(
-    catalog: &mut Catalog,
-    keep: &str,
-    names: &[String],
-) -> Result<(), CatalogError> {
+/// 写两份库失败时返回错误。
+pub fn keep_aliases(site: &mut Site, keep: &str, names: &[String]) -> Result<(), WriteError> {
     let rows: Vec<TitleRow> = names
         .iter()
         .filter(|name| name.as_str() != keep)
@@ -692,7 +691,7 @@ pub fn keep_aliases(
             seen: 1,
         })
         .collect();
-    catalog.put_titles(&rows)
+    site.add_own_titles(&rows)
 }
 
 /// **「以后扫描到的也自动归入」还做不到**，屏上那个勾选框不可选，写的就是这一句。

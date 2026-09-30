@@ -266,14 +266,14 @@ const TOP_TITLES: usize = 24;
 /// 面板上**文件成员**最多列几条。
 ///
 /// 与标题分开定：一个变体可以是**一整个目录**（`CONTEXT.md` 的「变体」词条），
-/// PSV 那批目录树转储一个变体底下就是上千个文件（真库上最大的一份有 21,436 个）。
+/// PSV 那批目录树转储一个变体底下就是上千个文件（真库上最大的一份有两万多个，见台账 `docs/library-facts.md`）。
 /// 这个数管的是「扫一眼看得完」，与「一部作品有几个叫法」不是同一件事，
 /// 共用一个常量迟早会为了一边把另一边调坏。
 const TOP_MEMBERS: usize = 40;
 
 /// 详情面板上**候选的依据**一个变体最多列几条。
 ///
-/// 一个变体可以撞上好几条 DAT 记录（真库上多候选那批有 3,584 个），而这一栏是给人
+/// 一个变体可以撞上好几条 DAT 记录（真库上多候选那批有三千多个，浏览屏按作品出行那一票当时的数；台账没收，见挂单 `Q1550`），而这一栏是给人
 /// 「判断得出哪个版本更可信」用的，不是给人读完的。
 const TOP_CANDIDATES: usize = 8;
 
@@ -1683,26 +1683,21 @@ impl Screen {
         self.just_landed = Some(batch);
         let mut 顺手 = Vec::new();
         if let Err(failed) =
-            romcat_core::triage::merge::keep_aliases(&mut site.catalog, &keep, &wizard.aliases())
+            romcat_core::triage::merge::keep_aliases(site, &keep, &wizard.aliases())
         {
             顺手.push(format!("别名没留下：{failed}"));
         }
         for (field, offer) in wizard.adopted() {
-            if let Err(failed) = romcat_core::triage::merge::adopt(
-                &mut site.catalog,
-                &self.priorities,
-                &keep,
-                field,
-                &offer,
-            ) {
+            if let Err(failed) =
+                romcat_core::triage::merge::adopt(site, &self.priorities, &keep, field, &offer)
+            {
                 顺手.push(format!("{} 那一格没改成：{failed}", field.label()));
             }
         }
         // **只写人亲手点过的那几条**：没点过的平台照规则来，写下去等于把规则冻成覆盖。
         for one in wizard.preferred() {
             if let Err(failed) =
-                site.catalog
-                    .set_preferred_variant(&one.work, &one.platform, &one.variant_key)
+                site.set_preferred_variant(&one.work, &one.platform, &one.variant_key)
             {
                 顺手.push(format!("{} 的首选变体没记下：{failed}", one.platform));
             }
@@ -2451,7 +2446,12 @@ impl Screen {
     /// 下一趟重折就把它折回来了；只记压制不删行，人得等到下一趟重折才看得见效果。
     pub fn suppress_title(&mut self, site: &mut Site, row: &romcat_core::catalog::TitleRow) {
         let value = row.value.clone();
-        let done = title::suppress(&mut site.catalog, &mut site.store, row);
+        let done = title::suppress(
+            &mut site.catalog,
+            &mut site.store,
+            &site.library_identity,
+            row,
+        );
         // **不论成没成都重读一遍。** 那个动作是两步（先记号、后删行），中间撕得开一次
         // ——出了错也可能已经动过库了，面板上摆着旧的那一份会让人以为什么都没发生。
         self.suppressed_for = None;
@@ -2521,24 +2521,24 @@ impl Screen {
 
     /// 把**首选变体**裁给这一个。界面上点那一行走的就是它。
     pub fn set_preferred(&mut self, site: &mut Site, work: &str, platform: &str, key: &str) {
-        match site.catalog.set_preferred_variant(work, platform, key) {
+        match site.set_preferred_variant(work, platform, key) {
             Ok(()) => {
                 self.notice = Some(format!("首选变体裁给了 {key}。"));
                 self.load_detail(&site.catalog);
             }
-            Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+            Err(error) => self.error = Some(error.to_string()),
         }
     }
 
     /// 撤掉**首选变体**裁决，回到规则算的那一个。
     pub fn clear_preferred(&mut self, site: &mut Site, work: &str, platform: &str) {
-        match site.catalog.clear_preferred_variant(work, platform) {
+        match site.clear_preferred_variant(work, platform) {
             Ok(true) => {
                 self.notice = Some("撤掉了首选变体裁决，回到规则算的那一个。".to_string());
                 self.load_detail(&site.catalog);
             }
             Ok(false) => self.notice = Some("本来就没人裁过。".to_string()),
-            Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+            Err(error) => self.error = Some(error.to_string()),
         }
     }
 
@@ -5355,7 +5355,8 @@ impl Screen {
             value: value.clone(),
             language: self.title_draft.language,
             kind: self.title_draft.kind,
-            // **裁决**：重折标题集合时一行都不碰（`Catalog::clear_titles`）。
+            // **裁决**：重折标题集合时一行都不碰（`Catalog::clear_titles`）；原件落沉淀库，
+            // 删库重扫之后照它重建（`Site::add_own_titles`）。
             source: VERDICT.to_string(),
             region: detail
                 .release
@@ -5367,14 +5368,14 @@ impl Screen {
             evidence: HAND_WRITTEN.to_string(),
             seen: 1,
         };
-        match site.catalog.put_titles(&[row]) {
+        match site.add_own_titles(&[row]) {
             Ok(()) => {
                 self.notice = Some(format!("已添加名称「{value}」（记为裁决）"));
                 self.title_draft.value.clear();
                 true
             }
             Err(error) => {
-                self.error = Some(format!("中立库写不动：{error}"));
+                self.error = Some(error.to_string());
                 false
             }
         }
