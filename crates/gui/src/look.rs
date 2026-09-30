@@ -5,10 +5,11 @@
 //! 亮暗两套 `Visuals` 与字号表由 [`install`] 从**令牌**（[`crate::tokens`]，同目录的
 //! `tokens.toml`）装上去，**每一个颜色都取自令牌**：底色、描边、字色、选中、焦点、警告与错误。
 //! `Visuals` 里没有槽位的颜色：置信度四档由 [`tier_color`]、弹层遮罩由 [`scrim`] 按主题挑，
-//! 主按钮那一档由 [`primary_button`] 换上；平台色、视频播放标这类
+//! 主按钮那一档由 [`primary_button`] 换上；平台色、视频播放标、平台标上的字、开关圆点这类
 //! 两套主题共用、没有映射可言的，直接问令牌（[`Tokens::builtin`] 的 `color.platform`、
-//! `color.video`）。**界面里别处不写一个颜色**，要颜色就问 `ui.visuals()`、[`tier_color`]
-//! 或令牌。
+//! `color.video`、`color.platform_badge`、`color.switch`）。**界面里别处不写一个颜色**，要颜色就问
+//! `ui.visuals()`、[`tier_color`] 或令牌——`tests/colors.rs` 逐个读界面源码守着这一条，
+//! 只放行透明与占位色。
 //!
 //! 槽位怎么对上令牌：
 //!
@@ -1022,7 +1023,7 @@ pub fn warn_box(ui: &mut egui::Ui, head: &str, body: &str) {
 ///
 /// 滑块的外框宽高与里头那粒圆点的直径取令牌 `settings-switch`，与字之间取 `settings-switch-gap`，
 /// 字是说明字号 `size-small-plus`。**拨开是强调色的底、圆点滑到右边**；关着是 `line-2` 的底、
-/// 圆点在左边。圆点一律是白的（稿上就是 `#fff`，两套主题共用）。整颗（滑块连字）都点得动，
+/// 圆点在左边。圆点取令牌 `[color.switch]` 的 `knob`（稿上就是 `#fff`，两套主题共用）。整颗（滑块连字）都点得动，
 /// 拿到焦点描一圈强调色。
 ///
 /// 交回来的 [`egui::Response`]：`changed()` 为真就是这一帧被拨了，`on` 已经是拨完之后那一档。
@@ -1068,7 +1069,7 @@ pub fn switch(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
         },
         滑块.center().y,
     );
-    painter.circle_filled(圆心, 圆点 / 2.0, Color32::WHITE);
+    painter.circle_filled(圆心, 圆点 / 2.0, tokens.color.switch.knob);
     painter.galley(
         egui::pos2(滑块.right() + 缝, rect.center().y - 字.size().y / 2.0),
         字,

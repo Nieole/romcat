@@ -97,6 +97,20 @@ other = "#555555"         # 表里没有的平台
 shade = "#00000050"       # 压在首帧上的那层半透明底
 mark  = "#FFFFFF"         # 底上的 ▶
 
+# ── 平台标上的字：两套主题共用 ──
+# 平台标（设计稿 .hplat、卡面上的 .cv-plat）的底是上面的平台色，两套主题共用；稿上两处的字都写死 color:#fff，暗色主题不另写。
+# 不取 on-accent：它暗色那一格是深色，压在 MD、PSP 这几种深平台色上几乎看不清（挂单 Q1236）。
+# 设计稿里没有这一格的 CSS 变量；check_tokens.py 拿 .hplat 与 .cv-plat 两条规则上的 color 核它。
+[color.platform-badge]
+ink = "#FFFFFF"           # 平台色底上的字
+
+# ── 开关里的圆点：两套主题共用 ──
+# 设计稿 .switch i::after 写死 background:#fff，暗色主题不另写：拨开时压在强调色上、关着压在 line-2 上，两套都是白点。
+# 不取 on-accent：它暗色那一格是深色，压在暗色关着那一档的 line-2 上几乎看不见。
+# 设计稿里没有这一格的 CSS 变量；check_tokens.py 拿那条规则上的 background 核它。
+[color.switch]
+knob = "#FFFFFF"          # 滑块里的圆点
+
 # ── 尺寸（逻辑像素，egui 的 points） ──────────────────────
 [radius]
 small  = 4    # 分面、标签、小按钮

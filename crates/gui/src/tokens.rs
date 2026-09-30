@@ -127,7 +127,7 @@ impl std::error::Error for TokensError {
     }
 }
 
-/// 颜色：两套主题各一份 [`Palette`]，外加两套主题共用的平台色。
+/// 颜色：两套主题各一份 [`Palette`]，外加两套主题共用的几节（平台色、视频播放标、平台标上的字、开关圆点）。
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Colors {
@@ -139,12 +139,17 @@ pub struct Colors {
     pub platform: Platforms,
     /// 视频格上的播放标：两套主题共用。
     pub video: VideoMark,
+    /// 平台标上的字：两套主题共用。
+    #[serde(rename = "platform-badge")]
+    pub platform_badge: PlatformBadge,
+    /// 开关里的圆点：两套主题共用。
+    pub switch: Switch,
 }
 
 /// 视频格上那个**播放标**的两个颜色。
 ///
 /// **两套主题共用**：它压在一帧视频画面上，不压在界面底色上——画面多亮多暗与主题无关。
-/// 设计稿里没有这两格的 CSS 变量，`check_tokens.py` 不核它们。
+/// 设计稿里没有这两格的 CSS 变量，`check_tokens.py` 拿 `.mtile .pv .play` 那条规则上的 background 与 color 核它们。
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VideoMark {
@@ -154,6 +159,32 @@ pub struct VideoMark {
     /// 底上的 ▶。
     #[serde(deserialize_with = "hex")]
     pub mark: Color32,
+}
+
+/// **平台标**上的字（设计稿 `.hplat`，卡面上的 `.cv-plat`）。
+///
+/// **两套主题共用**：平台标的底是平台色，平台色两套主题共用；稿上两处的字都写死白色，暗色主题不另写。
+/// 不取 `on-accent`（强色底上的字那一格）：它暗色那一格是深色，压在 `MD`、`PSP` 这几种深平台色上几乎看不清
+/// （挂单 `Q1236`）。设计稿里没有这一格的 CSS 变量，`check_tokens.py` 拿那两条规则上的 color 核它。
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlatformBadge {
+    /// 平台色底上的字。
+    #[serde(deserialize_with = "hex")]
+    pub ink: Color32,
+}
+
+/// **开关**滑块里的那粒圆点（设计稿 `.switch i::after`）。
+///
+/// **两套主题共用**：稿上写死白色，暗色主题不另写——拨开时压在强调色上、关着压在 `line-2` 上，两套都是白点。
+/// 不取 `on-accent`：它暗色那一格是深色，压在暗色关着那一档的 `line-2` 上几乎看不见。
+/// 设计稿里没有这一格的 CSS 变量，`check_tokens.py` 拿那条规则上的 background 核它。
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Switch {
+    /// 滑块里的圆点。
+    #[serde(deserialize_with = "hex")]
+    pub knob: Color32,
 }
 
 impl Colors {
@@ -1168,6 +1199,11 @@ mod tests {
         // `media.rs` 里写死的样子——搬家不许变色。
         assert_eq!(tokens.color.video.shade, Color32::from_black_alpha(80));
         assert_eq!(tokens.color.video.mark, Color32::WHITE);
+        // 平台标上的字与开关圆点同理：设计稿里没有 CSS 变量，期望值是它们搬进令牌之前在 `health.rs`、
+        // `browse.rs`、`look.rs` 里写死的样子（稿上 `.hplat` / `.cv-plat` 的 `color:#fff`、`.switch i::after`
+        // 的 `background:#fff`）——搬家不许变色。
+        assert_eq!(tokens.color.platform_badge.ink, Color32::WHITE);
+        assert_eq!(tokens.color.switch.knob, Color32::WHITE);
         assert_eq!(tokens.radius.medium, 6);
         assert_eq!(tokens.font.size_body, 13.0);
         assert_eq!(tokens.font.size_caption_plus, 11.5);

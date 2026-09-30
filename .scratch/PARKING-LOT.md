@@ -1162,6 +1162,40 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 - **谁来裁：** 拿主意的人
 - **状态：** open
 
+### Q1236 — 平台标上的字：照稿新立一格白（`[color.platform-badge]`），没取 `on-accent`；作品页那枚平台标仍取 `on-accent`
+
+- **裁决（2026-09-30，拿主意的人当面裁）：** 甲——拿主意的人 2026-09-30 裁甲，作品页一并改。库体检、浏览屏卡面的平台标字照稿取白（`platform-badge.ink`）；作品页那枚（`browse/work.rs` 的 `platform_chip`）本票改取同一格，`Q924` 的「两套主题里都接近白」前提不成立，改裁。
+
+- **来自：** 票 `gate-and-tests/06`
+- **类别：** 两份东西矛盾
+- **在哪：** 设计稿 `.hplat{…background:var(--pc);color:#fff…}`（`prototype.html:520`）与 `.cv-plat{…color:#fff…}`（`:485`），两套主题都写死白、暗色不另写；
+  `crates/gui/src/health.rs` 的 `platform_badge`、`crates/gui/src/browse.rs` 的 `paint_card_overlay`（本票换成新令牌 `[color.platform-badge] ink = "#FFFFFF"`）；
+  `crates/gui/src/browse/work.rs` 的 `platform_chip`（同一条稿上规则 `.hplat`，挂单 `Q924` 随 `Q894` 取了 `on-accent`，本票没动）
+- **为什么没停线：** 推翻只动两处取值、删一格令牌，再重批两张暗色基线（`library/platfix-dark`、`browse/cards-dark`，实测乙那条路只有这两张变），不出本票；亮色主题两条路逐像素一样。
+- **这张票实际做了什么：** 票面与 grill（`Q486`）说「换成强色底上的字那一格（`on-accent`）」，编排者的派活口径是「以稿为准：稿上暗色仍是白色的，新立令牌」。
+  稿上 `.hplat` / `.cv-plat` 不是 `on-accent` 那一档（稿里取 `var(--on-accent)` 的是 `.btn.pri`、`.keepb`、`.step.on i`、`.stage.next .dot`），而且 `on-accent` 暗色 `#0D1030`
+  压在平台色上对比度很低：`MD` 1.38、`PSP` 1.84、`PS2` 2.37、兜底 `other` 2.48、`PS1` 2.77（白字对同样几色是 13.37 / 10.06 / 7.81 / 7.46 / 6.69）。所以照稿新立一格白，
+  暗色基线逐像素不变。`Q924` 当初写的理由是「两套主题里它（`on-accent`）都接近白」——暗色那一格其实是 `#0D1030`，这句不成立。
+  乙那条路的候选图（临时改取 `on-accent` 跑出来的）：`/Users/nicoer/dev/game-wt/logs/q6-gt06-on-accent-candidates/`（`library/platfix-dark`、`browse/cards-dark`；现基线与它上下并排的放在 `compare/` 底下）。
+- **两条路：** 甲，平台标的字取新令牌（两套都白，照稿）——本票做了库体检、浏览屏卡面那两处；作品页 `platform_chip` 要跟上得重开 `Q924`，本票没动，眼下同一条稿上规则在界面里画成两种字色。
+  乙，照 `Q894` / `Q924` 的先例：三处平台标都取 `on-accent`，暗色平台标换深字（`platform-badge` 那一格令牌随之删掉）。
+- **建议留：** 甲，并让作品页那一枚跟上——同一条稿上规则现在在界面里画成两种字色；`Q894` 的危险按钮底是暗色 `lo`（`#EC7C70`，浅），深字看得清，平台色大多是深色，那条先例搬不过来。
+- **谁来裁：** 拿主意的人
+- **状态：** settled（2026-09-30，见顶上裁决）
+
+### Q1237 — 卡面上的中文标与选择框不照稿，也不走令牌：拿 `window_fill` 乘一个写死的比例
+
+- **来自：** 票 `gate-and-tests/06`
+- **类别：** 路过发现，不在范围内
+- **在哪：** `crates/gui/src/browse.rs:222`（中文标的底 `window_fill.gamma_multiply(0.85)`，字 `strong_text_color()`）与 `:4149`（没选中的选择框底 `window_fill.gamma_multiply(0.75)`）；
+  设计稿 `.cv-zh{…background:rgba(10,12,18,.72);color:#fff…}`（`prototype.html:486`）、`.cv-ck{…background:rgba(10,12,18,.5);border:1.5px solid rgba(255,255,255,.9)…}`（`:481`），两套主题共用
+- **为什么没停线：** 不是颜色字面量，本票那条测试按裁定不管（它认的是 `Color32::…` 常量与构造）；要照稿得新立几格令牌、重批浏览屏卡片那几张基线，是另一件事。
+- **这张票实际做了什么：** 没改，只记。亮色主题下这两样画成浅底深字，稿上是压在封面上的深色半透明底加白字。
+- **两条路：** 甲，照稿立令牌（`.cv-zh` 的底与字、`.cv-ck` 的底与描边，两套主题共用），`browse.rs` 两处改取它们；乙，维持现状，把稿改成跟主题走。
+- **建议留：** 甲。它们压在封面上，与平台标、视频播放标同一个道理：底下是画面，不是界面底色。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
 ---
 
 ## 结算索引（第四轮收口，`Q364`–`Q448`）

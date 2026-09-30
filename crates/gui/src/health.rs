@@ -1297,16 +1297,18 @@ fn platfix_group_ui(
     按了
 }
 
-/// 一枚**平台标**（设计稿 `.hplat`）：平台色的底、白字、小圆角。高与左右留白跟标签同一对令牌
+/// 一枚**平台标**（设计稿 `.hplat`）：平台色的底、小圆角，字取令牌 `[color.platform-badge]`（两套主题都是白字，照稿；
+/// 为什么不取 `on-accent` 见 [`crate::tokens::PlatformBadge`]）。高与左右留白跟标签同一对令牌
 /// （`chip-height` / `chip-padding`，与稿上那两个数逐字相同），字取 `size-caption-plus` 的粗体。
 fn platform_badge(ui: &mut egui::Ui, platform: &str) {
     let tokens = Tokens::builtin();
     let 字号 = look::font_size(ui.ctx(), tokens.font.size_caption_plus);
     let color = tokens.color.platform.of(platform);
+    let 字色 = tokens.color.platform_badge.ink;
     let galley = ui.painter().layout_no_wrap(
         platform.to_owned(),
         egui::FontId::new(字号, font::strong_family()),
-        egui::Color32::WHITE,
+        字色,
     );
     let 高 = tokens.layout.chip_height.max(galley.size().y);
     let (rect, _) = ui.allocate_exact_size(
@@ -1315,11 +1317,7 @@ fn platform_badge(ui: &mut egui::Ui, platform: &str) {
     );
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, tokens.radius.small, color);
-    painter.galley(
-        rect.center() - galley.size() / 2.0,
-        galley,
-        egui::Color32::WHITE,
-    );
+    painter.galley(rect.center() - galley.size() / 2.0, galley, 字色);
 }
 
 /// 体检那一趟：从中立库折出全库的统计，出报告，连同重复拷贝的完整明细（**每组记全路径**，明细弹层要列得出全部）。
