@@ -28,7 +28,7 @@
 //! 打开时把没跑过的接着跑完。**往前迁得动，往后（库比程序新）如实拒绝并说清**——
 //! 那时该换新程序，而不是删库。
 //!
-//! 眼下十条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
+//! 眼下十一条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
 //! 第 3 条建 `verdict_batch` 与 `verdict_batch_row` 两张表（**批**，见下一节），
 //! 第 4 条建 `collection_member` 表（**合集**与**收藏**，见再下一节），
 //! 第 5 条建 `title_suppression` 表（**压掉的叫法**），
@@ -36,7 +36,8 @@
 //! 第 7 条把标题类型那两个旧词换掉，
 //! 第 8 条建 `platform_correction` 表（**平台纠正**），
 //! 第 9 条建 `not_same_work` 表（**「不是同一个作品」**），
-//! 第 10 条建 `preferred_variant` 与 `own_title` 两张表（**首选变体**与**亲手加的叫法**，见最后一节）。
+//! 第 10 条建 `preferred_variant` 与 `own_title` 两张表（**首选变体**与**亲手加的叫法**，见最后一节），
+//! 第 11 条建 `verdict_value` 表（**详情页上改过的字段**，同一节）。
 //! 加这几条时库还是空的，但那不改变纪律——**永远不要求删库**，中立库那条「版本一变就
 //! 重建」的便宜路子在这份库上不许走。
 //!
@@ -212,6 +213,13 @@
 //! （[`carry_over_preferred_and_titles`](crate::site::carry_over_preferred_and_titles)、
 //! [`rescue`](crate::site::rescue)）。往后再搬一样人定的东西，照 [`site::reconcile`](crate::site::reconcile)
 //! 那一段「做法」走。
+//!
+//! **详情页上改过的字段**是照那段做法搬的头一样（挂单 `Q921`，票 `verdict-store-and-sync/02`）：
+//! 年份、发行商、简介、汉化组这类格子上人亲手写下的那一句，原先只住在中立库刮削值那张表里
+//! （`source = 裁决` 的行）。第 11 条迁移收下原件（[`Store::verdict_values`]），键是主库标识加
+//! 中立库那张表的键（锚点种类、锚点、字段）——挂在作品上的与叫法同一个锚，挂在变体上的钉的是
+//! 变体的键、熬不过改名与挪目录；导出不带。人的动作走 `Site::put_verdict_value` /
+//! `Site::clear_verdict_value`，旧库里的救一次（[`carry_over_verdict_values`](crate::site::carry_over_verdict_values)）。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -219,6 +227,7 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+use crate::catalog::scrape::VerdictValue;
 use crate::catalog::{TitleRow, now_secs};
 use crate::dat::chinese::ChineseMark;
 
@@ -534,6 +543,32 @@ CREATE TABLE IF NOT EXISTS own_title(
     seen        INTEGER NOT NULL,
     decided_at  INTEGER NOT NULL,
     PRIMARY KEY (library, work, language, kind, value)
+) STRICT;
+",
+    // 11：**详情页上改过的字段**（票 `verdict-store-and-sync/02`，挂单 `Q921`）。它原先只住在
+    // 中立库里（刮削值那张表里 `source = 裁决` 的行），删库重扫就跟着没了；它与首选变体、亲手加的
+    // 叫法同族，是人一格格改出来的。
+    "\
+-- 一格**字段修改**：这份主库里，这个锚点上的这个字段，人在作品详情页上亲手写下了这一句
+-- （中立库 `scrape_value` 表里 `source = 裁决` 的那些行，这里是它们的原件）。
+--
+-- **键是主库标识加中立库那张表的键**（锚点种类、锚点、字段；源一律是裁决，不另存）。
+-- 一个字段上**只有一条**——人改了主意就是改了主意（`Catalog::put_verdict_value`），所以值不进键。
+-- 锚点是作品名或变体的键：挂在变体上的那几格钉的是一个**位置**，与**路径锚**同一个处境——
+-- 熬得过删库重扫，熬不过改名与挪目录；挂在作品上的与亲手加的叫法同一个锚。按主库标识分开、
+-- **导出不带它**，理由同上两张表。中立库那张表里 `at` 那一格投影的就是 `decided_at`。
+CREATE TABLE IF NOT EXISTS verdict_value(
+    library     TEXT    NOT NULL,
+    -- 锚点种类：作品 / 变体（`scrape::AnchorKind::label`）。
+    anchor      TEXT    NOT NULL,
+    -- 作品名或变体的键。
+    subject     TEXT    NOT NULL,
+    -- 年份、发行商、简介……（`scrape::Field::label`）。
+    field       TEXT    NOT NULL,
+    value       TEXT    NOT NULL,
+    evidence    TEXT    NOT NULL,
+    decided_at  INTEGER NOT NULL,
+    PRIMARY KEY (library, anchor, subject, field)
 ) STRICT;
 ",
 ];
@@ -2686,6 +2721,143 @@ impl Store {
         tx.commit().map_err(|source| self.err(source))?;
         Ok(added)
     }
+
+    // ── 字段修改：作品详情页上亲手改过的那几格（票 `verdict-store-and-sync/02`） ──
+
+    /// 这份主库的全部**字段修改**，按锚点种类、锚点、字段排。中立库刮削值那张表里
+    /// `source = 裁决` 的那些行是它们的投影，开现场时照它重建（[`site::reconcile`](crate::site::reconcile)）。
+    ///
+    /// `library` 是**主库标识**：锚点是作品名或变体的键，换一份主库指的是另一批东西。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn verdict_values(&self, library: &str) -> Result<Vec<VerdictValue>, VerdictError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT anchor, subject, field, value, evidence, decided_at
+                 FROM verdict_value WHERE library = ?1
+                 ORDER BY anchor, subject, field",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![library], |row| {
+                Ok(VerdictValue {
+                    anchor: row.get(0)?,
+                    subject: row.get(1)?,
+                    field: row.get(2)?,
+                    value: row.get(3)?,
+                    evidence: row.get(4)?,
+                    at: row.get(5)?,
+                })
+            })
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
+    /// 记一格字段修改。同一个锚点、同一个字段上已经有一条就**盖掉**——人改了主意就是改了主意，
+    /// 不攒出第二行（与 [`Catalog::put_verdict_value`](crate::catalog::Catalog::put_verdict_value) 同一条）。
+    /// `decided_at` 记的是 `value.at`：中立库那份投影的 `at` 与它一字不差，重建时才比得出「一样」。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn put_verdict_value(
+        &mut self,
+        library: &str,
+        value: &VerdictValue,
+    ) -> Result<(), VerdictError> {
+        self.conn
+            .execute(
+                "INSERT INTO verdict_value(library, anchor, subject, field, value, evidence,
+                     decided_at)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(library, anchor, subject, field) DO UPDATE SET
+                    value = excluded.value,
+                    evidence = excluded.evidence,
+                    decided_at = excluded.decided_at",
+                params![
+                    library,
+                    value.anchor,
+                    value.subject,
+                    value.field,
+                    value.value,
+                    value.evidence,
+                    value.at,
+                ],
+            )
+            .map(|_| ())
+            .map_err(|source| self.err(source))
+    }
+
+    /// 撤掉这份主库里这个锚点上这个字段的修改，返回原来有没有这一条。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn clear_verdict_value(
+        &mut self,
+        library: &str,
+        anchor: crate::scrape::AnchorKind,
+        subject: &str,
+        field: crate::scrape::Field,
+    ) -> Result<bool, VerdictError> {
+        self.conn
+            .execute(
+                "DELETE FROM verdict_value
+                 WHERE library = ?1 AND anchor = ?2 AND subject = ?3 AND field = ?4",
+                params![library, anchor.label(), subject, field.label()],
+            )
+            .map(|removed| removed > 0)
+            .map_err(|source| self.err(source))
+    }
+
+    /// 把一批字段修改里**这份库还没有的那几格**收进来，返回新收下几格；同一个锚点、同一个字段上
+    /// 已经有的**不盖**。理由与用处同 [`Self::add_missing_preferred_variants`]：收旧中立库里还没搬走的
+    /// 那批（[`carry_over_verdict_values`](crate::site::carry_over_verdict_values)）。
+    /// **一个事务**；一格都没交进来就一个字都不写。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn add_missing_verdict_values(
+        &mut self,
+        library: &str,
+        values: &[VerdictValue],
+    ) -> Result<usize, VerdictError> {
+        if values.is_empty() {
+            return Ok(0);
+        }
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(|source| self.err(source))?;
+        let mut added = 0;
+        {
+            let mut statement = tx
+                .prepare(
+                    "INSERT INTO verdict_value(library, anchor, subject, field, value, evidence,
+                         decided_at)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(library, anchor, subject, field) DO NOTHING",
+                )
+                .map_err(|source| self.err(source))?;
+            for value in values {
+                added += statement
+                    .execute(params![
+                        library,
+                        value.anchor,
+                        value.subject,
+                        value.field,
+                        value.value,
+                        value.evidence,
+                        value.at,
+                    ])
+                    .map_err(|source| self.err(source))?;
+            }
+        }
+        tx.commit().map_err(|source| self.err(source))?;
+        Ok(added)
+    }
 }
 
 /// 读一行亲手加的叫法；语言码或类型认不出就是 `None`（见 [`Store::own_titles`]）。
@@ -3907,6 +4079,82 @@ mod tests {
         );
         assert!(store.preferred_variants("甲库").expect("读得出").is_empty());
         assert!(store.own_titles("甲库").expect("读得出").is_empty());
+    }
+
+    #[test]
+    fn 第十版的老库升上来_字段修改按主库分开存得住也撤得掉() {
+        // 钉的是**第 11 条迁移**（票 `verdict-store-and-sync/02`）：老东西一条不丢，新表按主库标识
+        // 分开——锚点是作品名或变体的键，换一份主库指的是另一批东西。
+        use crate::scrape::{AnchorKind, Field};
+
+        let conn = Connection::open_in_memory().expect("开得出来");
+        for sql in &MIGRATIONS[..10] {
+            conn.execute_batch(sql).expect("建得出第十版");
+        }
+        conn.execute_batch("PRAGMA user_version = 10")
+            .expect("盖得上第十版的版本号");
+        let mut store = Store {
+            conn,
+            path: "（内存）".to_string(),
+        };
+        store
+            .set_preferred_variant("甲库", "魂斗罗", "FC", "库/FC/魂斗罗 汉化.zip")
+            .expect("第十版里就存得进");
+
+        store.migrate().expect("升得上来");
+        assert_eq!(
+            store.preferred_variants("甲库").expect("读得出").len(),
+            1,
+            "老东西一条都不许丢"
+        );
+
+        let 一格 = |value: &str, at: i64| VerdictValue {
+            anchor: AnchorKind::Work.label().to_string(),
+            subject: "魂斗罗".to_string(),
+            field: Field::Year.label().to_string(),
+            value: value.to_string(),
+            evidence: "手写的".to_string(),
+            at,
+        };
+        store
+            .put_verdict_value("甲库", &一格("1986", 100))
+            .expect("升上来之后这张表就记得下了");
+        store
+            .put_verdict_value("甲库", &一格("1987", 200))
+            .expect("同一格再改一次是盖掉");
+        assert_eq!(
+            store.verdict_values("甲库").expect("读得出"),
+            [一格("1987", 200)],
+            "一格上只留人最后改的那一句，时刻原样记下",
+        );
+        assert!(store.verdict_values("乙库").expect("读得出").is_empty());
+
+        // 已有的不盖：旧中立库里那一格是人后来改过之前的样子。
+        assert_eq!(
+            store
+                .add_missing_verdict_values("甲库", &[一格("1986", 100)])
+                .expect("收得进"),
+            0
+        );
+        assert_eq!(
+            store
+                .add_missing_verdict_values("乙库", &[一格("1986", 100)])
+                .expect("收得进"),
+            1,
+            "别的主库上同一个作品名是另一格"
+        );
+
+        assert!(
+            store
+                .clear_verdict_value("甲库", AnchorKind::Work, "魂斗罗", Field::Year)
+                .expect("撤得掉")
+        );
+        assert!(store.verdict_values("甲库").expect("读得出").is_empty());
+        assert_eq!(
+            store.verdict_values("乙库").expect("读得出").len(),
+            1,
+            "撤甲库那一格不碰乙库"
+        );
     }
 
     #[test]

@@ -14,9 +14,11 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::catalog::scrape::VerdictValue;
 use crate::catalog::{Catalog, CatalogError, TitleRow};
 use crate::path;
 use crate::scrape::priority::VERDICT;
+use crate::scrape::{AnchorKind, Field};
 use crate::verdict::{Store, VerdictError};
 use crate::workspace::{self, Slug};
 
@@ -53,10 +55,11 @@ pub enum SiteError {
     #[error("沉淀库打不开：{0}")]
     Verdict(#[from] VerdictError),
     /// 中立库结构版本对不上，而它里面还没搬进沉淀库的人定的东西（**人工纠正**、**首选变体**、
-    /// **亲手加的叫法**）这一回没救出来（[`rescue`]）。那句「删掉它重扫」**这时不能照做**。
+    /// **亲手加的叫法**、**详情页上改过的字段**）这一回没救出来（[`rescue`]）。那句「删掉它重扫」
+    /// **这时不能照做**。
     #[error(
-        "{said}——但这份库里还记着没搬进沉淀库的人工纠正、首选变体或亲手加的叫法，\
-         这一回没搬成（{why}）。\
+        "{said}——但这份库里还记着没搬进沉淀库的人工纠正、首选变体、亲手加的叫法或详情页上\
+         改过的字段，这一回没搬成（{why}）。\
          删掉它之前先把沉淀库弄好，不然它们就没了"
     )]
     Stranded {
@@ -67,16 +70,15 @@ pub enum SiteError {
     },
 }
 
-/// 人在现场上定下一件事（首选变体、亲手加的叫法），两份库有一份没写进去。
+/// 人在现场上定下一件事（首选变体、亲手加的叫法、字段修改），两份库有一份没写进去。
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
     /// 沉淀库写不动。**这时中立库一个字都没动**：先落的是沉淀库。
     #[error("沉淀库写不动：{0}")]
     Store(#[from] VerdictError),
-    /// 中立库读写不动。走到这一支时沉淀库那一笔**写了没有看是哪个入口**：首选变体与亲手加的
-    /// 叫法那几支先落沉淀库，这时沉淀库已经记下，投影没跟上——下次开现场照沉淀库重建
-    /// （[`reconcile`]）；`merge::adopt` 读中立库那一步、写别的字段那一步都只碰中立库，
-    /// 走到这里就是什么都没记下。
+    /// 中立库读写不动。走到这一支时沉淀库那一笔**写了没有看是哪个入口**：首选变体、亲手加的
+    /// 叫法、字段修改那几支先落沉淀库，这时沉淀库已经记下，投影没跟上——下次开现场照沉淀库重建
+    /// （[`reconcile`]）；`merge::adopt` 读中立库挑标题那一步只碰中立库，走到这里就是什么都没记下。
     #[error("中立库读写不动：{0}")]
     Catalog(#[from] CatalogError),
 }
@@ -300,6 +302,47 @@ impl Site {
         Ok(done.removed)
     }
 
+    /// 记一格**字段修改**：`subject` 这个锚点上的 `field` 写成 `value`，源记**裁决**、优先于所有
+    /// 数据源。作品详情页「编辑 → 保存」、「使用这个值」、合并作品时人挑的那一格走的都是它。
+    ///
+    /// 次序同 [`Self::set_preferred_variant`]：先沉淀库，再投影——两边记的是同一个时刻，
+    /// 下次开现场照沉淀库重建时比得出「一样」，一个字都不写。
+    ///
+    /// # Errors
+    /// 两份库有一份写不动时返回错误。
+    pub fn put_verdict_value(
+        &mut self,
+        anchor: AnchorKind,
+        subject: &str,
+        field: Field,
+        value: &str,
+        evidence: &str,
+    ) -> Result<(), WriteError> {
+        let row = VerdictValue::now(anchor, subject, field, value, evidence);
+        self.store.put_verdict_value(&self.library_identity, &row)?;
+        self.catalog.put_verdict_row(&row)?;
+        Ok(())
+    }
+
+    /// 撤掉一格**字段修改**，让数据源重新说了算。返回原来有没有这一格（两份库哪一份里有都算）。
+    ///
+    /// 次序同 [`Self::set_preferred_variant`]：先沉淀库，再投影。
+    ///
+    /// # Errors
+    /// 两份库有一份写不动时返回错误。
+    pub fn clear_verdict_value(
+        &mut self,
+        anchor: AnchorKind,
+        subject: &str,
+        field: Field,
+    ) -> Result<bool, WriteError> {
+        let stored =
+            self.store
+                .clear_verdict_value(&self.library_identity, anchor, subject, field)?;
+        let projected = self.catalog.clear_verdict_value(anchor, subject, field)?;
+        Ok(stored || projected)
+    }
+
     /// 一份**全在内存里**的现场。演示与实测走这条，连磁盘都不碰。
     #[must_use]
     pub fn in_memory(catalog: Catalog, store: Store, library_identity: &str) -> Self {
@@ -355,16 +398,20 @@ impl Site {
 ///
 /// ADR-0001 的修订：不可再生的东西不住在中立库里。**成型的人工纠正**是头一样
 /// （票 `one-criterion-per-thing/07`），**首选变体**与**亲手加的叫法**是第二批
-/// （票 `verdict-store-and-sync/01`）。往后再搬一样，照这几步：
+/// （票 `verdict-store-and-sync/01`），**详情页上改过的字段**是第三批（票 `02`）。往后再搬一样，照这几步：
 ///
 /// 1. **沉淀库追加一条迁移**（`verdict::MIGRATIONS`，只追加、不改已有的）：一张表，列是中立库
 ///    那张表的列，**键前面加主库标识**（`library`），再加一列 `decided_at`。它与**路径锚**同一个
 ///    处境——只在本机这一份主库里成立——所以**导出不带它**（`Store::export` 只折裁决与匹配
-///    裁决两张表，什么都不用做）。
+///    裁决两张表，什么都不用做）。中立库那几行的源一律是裁决的，源那一列不另存；那张表自己
+///    带着时刻一列的（`scrape_value.at`），`decided_at` 就是它，投影时原样写回——两边一字不差，
+///    重建时才比得出「一样」。
 /// 2. **中立库那张表降为投影**：建表语句不动（不升结构版本），这里照沉淀库**整份换掉**；
 ///    与眼下一样就一个字都不写。写它的每一处人的动作改走 [`Site`] 上那个写入口：先落沉淀库，
 ///    再改投影（删一条叫法另有 [`title::suppress`](crate::title::suppress) 那一处，它不收现场、
-///    收的是两份库加主库标识；[`Site::remove_own_title`] 走的就是它）。
+///    收的是两份库加主库标识；[`Site::remove_own_title`] 走的就是它）。**一处都不许漏**：
+///    投影整份替换，漏下的那一处照旧直写中立库，写下的东西屏上当场亮着，下次开现场就被抹掉——
+///    界面上按得下去的每一处，拿一条「关掉再打开」的界面测试钉住。
 /// 3. **旧中立库里已有的救进沉淀库一次**，在中立库的元数据表上记下「搬过了」（每一样一个键，
 ///    `catalog::meta::MetaKey`），同一个键上沉淀库已有的不盖；结构版本对不上、开不进去的
 ///    那一份在 [`rescue`] 里只读地救。**旧行一行不删**：搬走不是删掉。
@@ -378,8 +425,10 @@ impl Site {
 pub fn reconcile(catalog: &mut Catalog, store: &mut Store, library: &str) -> Result<(), SiteError> {
     carry_over_shaping_overrides(catalog, store, library)?;
     carry_over_preferred_and_titles(catalog, store, library)?;
+    carry_over_verdict_values(catalog, store, library)?;
     catalog.replace_preferred_variants(&store.preferred_variants(library)?)?;
     catalog.replace_verdict_titles(&store.own_titles(library)?)?;
+    catalog.replace_verdict_values(&store.verdict_values(library)?)?;
     Ok(())
 }
 
@@ -445,8 +494,34 @@ pub fn carry_over_preferred_and_titles(
     Ok(added)
 }
 
+/// 把票 `verdict-store-and-sync/02` 之前记在这份中立库里的**详情页上改过的字段**搬进沉淀库，
+/// **只搬一次**。返回新收下几格。
+///
+/// 做法与 [`carry_over_preferred_and_titles`] 一个字不差（[`reconcile`] 那一段「做法」）。
+/// 搬进去的每一格**原样带着它的依据与时刻**：紧接着的投影照沉淀库重建，与旧行一模一样，
+/// 一个字都不写。
+///
+/// # Errors
+/// 读中立库、写沉淀库或记下「搬过了」失败时返回错误。
+pub fn carry_over_verdict_values(
+    catalog: &Catalog,
+    store: &mut Store,
+    library: &str,
+) -> Result<usize, SiteError> {
+    // 只活在内存里的库是这一版建的，没有旧行。
+    let Some(file) = catalog.file() else {
+        return Ok(0);
+    };
+    let Some(stranded) = Catalog::stranded_verdict_values(file)? else {
+        return Ok(0);
+    };
+    let added = store.add_missing_verdict_values(library, &stranded)?;
+    catalog.mark_verdict_values_carried()?;
+    Ok(added)
+}
+
 /// **结构版本对不上、开不进去**的那一份中立库：把它里面还没搬走的人定的东西——**人工纠正**、
-/// **首选变体**、**亲手加的叫法**——救进沉淀库。返回新收下几条（几样合起来）。
+/// **首选变体**、**亲手加的叫法**、**详情页上改过的字段**——救进沉淀库。返回新收下几条（几样合起来）。
 ///
 /// 那份库打不开，它交出来的那句话（`unopened`，[`CatalogError::Version`]）叫人删掉它
 /// 重扫、并说这几样「一条不丢」——**这句话要成立，删之前就得先救**，而现场开不起来，
@@ -469,7 +544,12 @@ pub fn rescue(
     let rescue = || -> Result<usize, SiteError> {
         let shaping = Catalog::stranded_shaping_overrides(catalog_file)?.unwrap_or_default();
         let own = Catalog::stranded_preferred_and_titles(catalog_file)?.unwrap_or_default();
-        if shaping.is_empty() && own.preferred.is_empty() && own.titles.is_empty() {
+        let values = Catalog::stranded_verdict_values(catalog_file)?.unwrap_or_default();
+        if shaping.is_empty()
+            && own.preferred.is_empty()
+            && own.titles.is_empty()
+            && values.is_empty()
+        {
             return Ok(0);
         }
         let library = workspace::library_identity_of(catalog_file)
@@ -477,7 +557,8 @@ pub fn rescue(
         let mut store = Store::open(&workspace::verdict_store_path(workspace))?;
         Ok(store.add_missing_shaping_overrides(&library, &shaping)?
             + store.add_missing_preferred_variants(&library, &own.preferred)?
-            + store.add_missing_own_titles(&library, &own.titles)?)
+            + store.add_missing_own_titles(&library, &own.titles)?
+            + store.add_missing_verdict_values(&library, &values)?)
     };
     rescue().map_err(|why| SiteError::Stranded {
         said: unopened.to_string(),

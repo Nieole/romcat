@@ -279,7 +279,7 @@ pub fn plan(
             variant: row,
             state,
             reason,
-            // **候选不读**：合并不挑候选，而真库上那是 15 万行。
+            // **候选不读**：合并不挑候选，而真库上那是十几万行（见台账 `docs/library-facts.md`）。
             candidates: Vec::new(),
             print: prints.get(&key).cloned(),
         };
@@ -608,10 +608,10 @@ pub fn conflicts(
 
 /// 第三步选中了别的作品那一格：把它记到保留作品名下。
 ///
-/// **走的是作品详情页「改用另一个来源的值」同一条路**（`put_verdict_value` /
-/// 亲手加的叫法，源记**裁决**）：手动改写优先于所有数据源，重新刮削不覆盖。
-/// 显示标题另走标题集合——那一格不是刮削字段，它由 [`choose`](crate::title::choose) 挑；
-/// 记下的那一条是**亲手加的叫法**，原件落沉淀库（[`Site::add_own_titles`]）。
+/// **走的是作品详情页「改用另一个来源的值」同一条路**（字段修改 [`Site::put_verdict_value`] /
+/// 亲手加的叫法，源记**裁决**，原件都落沉淀库）：手动改写优先于所有数据源，重新刮削不覆盖，
+/// 删库重扫之后还在。显示标题另走标题集合——那一格不是刮削字段，它由 [`choose`](crate::title::choose) 挑；
+/// 记下的那一条是**亲手加的叫法**（[`Site::add_own_titles`]）。
 ///
 /// ⚠️ **它不在这一批裁决里**，所以[撤销这一批](super::undo_batch)不会把它退回去；
 /// 要改回来在作品详情页元数据那一面上原地撤（挂单 `Q1012`）。
@@ -649,13 +649,13 @@ pub fn adopt(
             seen: 1,
         }]);
     }
-    Ok(site.catalog.put_verdict_value(
+    site.put_verdict_value(
         AnchorKind::Work,
         keep,
         field,
         &offer.said.values.join("、"),
         &why,
-    )?)
+    )
 }
 
 /// 把被合并作品的名字**留作别名**：搜这些名字仍能找到合并后的作品。

@@ -520,6 +520,17 @@ fn 选了别的作品那一格_记成裁决挂到保留作品名下() {
         .find(|value| value.field == Field::Year.label() && value.source == VERDICT)
         .expect("该有一条源是裁决的年份");
     assert_eq!(那一格.value, "1996");
+    // 它是一格**字段修改**：原件在沉淀库里，删库重扫之后照它重建回来（票 `verdict-store-and-sync/02`）。
+    assert!(
+        site.store
+            .verdict_values("库")
+            .expect("读得动")
+            .iter()
+            .any(|one| one.subject == 甲
+                && one.field == Field::Year.label()
+                && one.value == "1996"),
+        "合并时改用的那一格没落进沉淀库",
+    );
 }
 
 #[test]
