@@ -1,4 +1,4 @@
-//! **子库屏**：管住这几台设备。**不增删规则**——改选择跳回浏览屏；手挑的那一半（**例外**）在这一屏上
+//! **子库屏**：管住这几台设备。**不增删规则**——加规则、改规则都跳去浏览屏；手挑的那一半（**例外**）在这一屏上
 //! 管得了：超限时删减建议上按得出一条排除例外，「手动例外」那层弹层里包含与排除两栏逐条增撤。
 //!
 //! ## 一屏三件事，不是八件
@@ -17,8 +17,15 @@
 //! 手挑的例外摆在第 1 件与第 2 件之间那层自己的弹层里，卡上不铺开：它是**一台设备一份账**，
 //! 而卡片那一列要摆得下好几台。
 //!
-//! **规则在这一屏上只读**。规则怎么改全在浏览屏上做：卡上点
-//! 「改选择」跳过去、这个子库的规则预填进筛选器，调完按「更新到子库」原样带回来。
+//! **规则在这一屏上只读**。规则怎么增改全在浏览屏上做，跳过去有两条路：
+//!
+//! - 卡头「**从浏览添加…**」（[`Screen::add_from_browse`]）：筛选器空着跳过去，筛好按「更新到子库」
+//!   给这一台**新添一条**；已有的规则一条不碰——名字、序号、原文照旧，读不懂的那几条也原样留着。
+//! - 规则行上「**✎**」（[`Screen::edit_rule`]）：那一条预填进筛选器，调完按「更新到子库」只换回那一条，
+//!   名字与序号照旧。
+//!
+//! 两条路都**永远不把几条并成一条**（挂单 `Q1184`：从前卡头那颗把几条并成一条预填过去，带回来整批换成
+//! 一条没名字的；拿主意的人 2026-09-30 改裁，照字一律新添，挂单 `Q1269`）。
 //! 这不是为了少写几个控件——**在浏览屏上改规则，人看得见它真的筛出了什么**；
 //! 在这一屏上改，改完只看得见一行字。
 //!
@@ -103,8 +110,8 @@ use romcat_core::site::Site;
 use romcat_core::sublibrary::report::SelectionReport;
 use romcat_core::sublibrary::target::{self, NameRefusal, Presence, TargetRefusal};
 use romcat_core::sublibrary::{
-    BrokenRule, Exception, ExceptionDetail, ExceptionRow, Fit, Gauge, LoadedSelection, Room, Rule,
-    StoredRule, Sublibrary, rule,
+    BrokenRule, Exception, ExceptionDetail, ExceptionRow, Fit, Gauge, Room, Rule, StoredRule,
+    Sublibrary, rule,
 };
 use romcat_core::sync::{self, Act, Outcome, Prepared, SurpriseKind};
 use romcat_core::task::{Cutoff, Ending, Finished, Handle};
@@ -326,25 +333,28 @@ impl Form {
     }
 }
 
-/// 「**改选择**」按下去之后要交给浏览屏的那一份东西。
+/// 卡头「**从浏览添加…**」或规则行上「**✎**」按下去之后要交给浏览屏的那一份东西。
 ///
-/// 规则在这一屏上是**只读**的，改它的地方是浏览屏的筛选器。跳过去时带的正是这个：
-/// 哪个子库、它的规则并成的那一条、以及读不懂的那几条原样。
+/// 规则在这一屏上是**只读**的，增改它的地方是浏览屏的筛选器。跳过去时带的正是这个：
+/// 哪个子库、要预填进筛选器的那一条规则（带着它的序号；新添时没有）、以及读不懂的那几条原样。
 #[derive(Debug, Clone)]
 pub struct Jump {
     /// 改的是哪个子库。
     pub sublibrary: String,
-    /// 这个子库的规则并成一条（多条之间是**任一满足**，与求值同一条口径）。
+    /// 预填进筛选器的那一条规则：规则行上「✎」按的那一条。
     ///
-    /// 一条都没有时是 `None`——那是「没有任何条件」，不是「一条都选不中」。
+    /// 「从浏览添加…」跳过去时是 `None`——筛选器空着，那是「没有任何条件」，不是「一条都选不中」。
+    /// **从来不是几条并成的一条**（挂单 `Q1184`）：并成一条带回来，就得把几条整批换成一条，名字一起没了。
     pub rule: Option<Rule>,
     /// 读不懂的那几条**原样带过去**（序号、原文、错在哪）。
     ///
     /// 它们没参与求值，「更新到子库」也不会碰它们；带过去是为了**在那一屏上扔得掉**
     /// （票 `gui-redesign/14`）。只带一个数的话，浏览屏摆得出「有 N 条」却指不出是哪几条。
     pub broken: Vec<BrokenRule>,
-    /// 规则行上「✎」跳过去的：只改这个子库的**第几条**（`rule` 就是那一条），浏览屏「更新到子库」只换回这一条
-    /// （票 `gui-looks-like-the-design/20`）。`None` 是「从浏览添加…」那种整批改。
+    /// 只改这个子库的**第几条**（`rule` 就是那一条），浏览屏「更新到子库」只换回这一条、名字与序号照旧
+    /// （规则行上「✎」，票 `gui-looks-like-the-design/20`）。
+    ///
+    /// `None` 是卡头「从浏览添加…」：「更新到子库」时**新添一条**，已有的一条不碰（挂单 `Q1184`、`Q1269`）。
     pub ordinal: Option<i64>,
 }
 
@@ -597,7 +607,7 @@ pub struct Screen {
     evaluating: Option<u64>,
     /// 计划里有删除时，要先勾这一格才动得了手。
     acknowledged: bool,
-    /// 「改选择」按下去了，等窗口把它送去浏览屏（[`crate::app::App::route`]）。
+    /// 「从浏览添加…」或「✎」按下去了，等窗口把它送去浏览屏（[`crate::app::App::route`]）。
     jump: Option<Jump>,
     /// 「删除子库」那层确认弹层开着时，删的是哪一台（[`Self::ask_remove`]）。
     ///
@@ -1523,30 +1533,40 @@ impl Screen {
         }
     }
 
-    /// 「**改选择**」：把这个子库的规则并成一条，交给窗口送去浏览屏。
+    /// 卡头「**从浏览添加…**」：把摊开那一台交给窗口送去浏览屏，**筛选器空着、不带序号**——
+    /// 筛好按「更新到子库」给这一台**新添一条**规则。
+    ///
+    /// **照字一律是「加」**（拿主意的人 2026-09-30 改裁，挂单 `Q1269`）：这一台零条、一条、几条读得懂的规则都一样，
+    /// 已有的一条不碰——名字、序号、原文照旧，读不懂的那几条也原样留着。要改已有的某一条，走规则行上的
+    /// 「✎」（[`Self::edit_rule`]）。从前这一下把几条并成一条预填过去，带回来整批换成一条没名字的，
+    /// 人起的名字和分开的几条一起没了（挂单 `Q1184`）。
+    ///
+    /// 读不懂的那几条照旧带过去：浏览屏筛选栏顶上那条横幅里扔得掉（票 `gui-redesign/14`）。
     ///
     /// 这一下**什么都没写**——它只是把要改的东西装好（规则与例外的增减在浏览屏上做）。
     /// 真正的跳转由 [`crate::app::App::route`] 走：那儿才同时够得着两屏。
     ///
     /// 界面上按那个按钮走的就是它，实测与测试拿它当那一下。
-    pub fn edit_selection(&mut self) {
+    pub fn add_from_browse(&mut self) {
         let Some(name) = self.picked.clone() else {
             self.error = Some("先摊开一张卡。".to_string());
             return;
         };
-        // 读得懂的并成一条，读不懂的只数一数：它们本来就没参与求值，这一趟也不碰。
-        let chosen = self.selections.get(&name).cloned().unwrap_or_default();
-        let loaded = LoadedSelection::from_stored(&chosen.rules);
+        let broken = self
+            .selections
+            .get(&name)
+            .map(|chosen| chosen.broken.clone())
+            .unwrap_or_default();
         self.jump = Some(Jump {
             sublibrary: name,
-            rule: Rule::any_of(loaded.selection.rules),
-            broken: chosen.broken,
+            rule: None,
+            broken,
             ordinal: None,
         });
     }
 
     /// 规则行上「**✎**」：把这一台的**第 `ordinal` 条**规则交给窗口送去浏览屏，只预填这一条；调完按「更新到子库」只换回
-    /// 这一条（拿主意的人 2026-09-14 定）。与 [`Self::edit_selection`] 一样这一下什么都没写。
+    /// 这一条（拿主意的人 2026-09-14 定）。与 [`Self::add_from_browse`] 一样这一下什么都没写。
     ///
     /// 界面上按那颗按钮走的就是它，实测与测试拿它当那一下。
     pub fn edit_rule(&mut self, name: &str, ordinal: i64) {
@@ -1570,15 +1590,15 @@ impl Screen {
         });
     }
 
-    /// 把「改选择」那一下取走。**取过就没了**：窗口一帧问一次。
+    /// 把「从浏览添加…」或「✎」那一下取走。**取过就没了**：窗口一帧问一次。
     pub fn take_jump(&mut self) -> Option<Jump> {
         self.jump.take()
     }
 
     /// **这一屏刚动过哪个子库的例外**，取走那个记号（挂单 `Q812`）。**取过就没了**：窗口一帧问一次。
     ///
-    /// 窗口拿它去转告浏览屏重读（`browse::Screen::exceptions_changed`）——那儿「改选择」
-    /// 可能正开着同一个子库，手上缓着的是改之前那几条。
+    /// 窗口拿它去转告浏览屏重读（`browse::Screen::exceptions_changed`）——那儿
+    /// 可能正在改同一个子库，手上缓着的是改之前那几条。
     pub fn take_touched(&mut self) -> Option<String> {
         self.touched.take()
     }
@@ -2084,8 +2104,8 @@ impl Screen {
                 ui.label(font::strong(&sublibrary.name).size(Tokens::builtin().font.size_title));
                 self.state_chip_ui(ui, &sublibrary);
                 // 右边两颗照稿（设计稿 `devCard`）：`btn sm pri` 在左、`btn sm ghost`「目标设置…」靠右。
-                // 主按钮的字照稿写「从浏览添加…」（拿主意的人定，挂单 `Q892`），行为不变：跳去浏览屏、
-                // 这一台的规则预填进筛选器。
+                // 主按钮的字照稿写「从浏览添加…」（拿主意的人定，挂单 `Q892`），行为也照字：跳去浏览屏、筛选器空着，
+                // 回来新添一条，已有的一条不碰（拿主意的人 2026-09-30 改裁，挂单 `Q1269`）。
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     look::small_buttons(ui, |ui| {
                         if ghost_button(ui, "目标设置…")
@@ -2096,18 +2116,19 @@ impl Screen {
                         {
                             self.edit_target(name);
                         }
-                        // 它带走的是「这一台的规则」，规则要等 `open` 读回来才在手上——没摊开的先摊开。
+                        // 它带走的是「这一台」，连读不懂的那几条（浏览屏上扔得掉）——那要等 `open` 读回来才在手上，
+                        // 没摊开的先摊开。
                         if primary_button(ui, "从浏览添加…")
                             .on_hover_text(
-                                "跳去浏览屏，这个子库的规则预填进筛选器。\
-                                 在那儿改得见它真的筛出了什么；调完按「更新到子库」原样带回。",
+                                "跳去浏览屏，筛选器空着。筛好按「更新到子库」，给这个子库新添一条规则；\
+                                 已有的规则一条不碰。要改已有的某一条，按那一行行尾的铅笔。",
                             )
                             .clicked()
                         {
                             if !open {
                                 self.open(site, name);
                             }
-                            self.edit_selection();
+                            self.add_from_browse();
                         }
                     });
                 });
@@ -2625,7 +2646,7 @@ impl Screen {
             });
         if !broken.is_empty() {
             // **处置它的那条路在浏览屏上**（票 `gui-redesign/14`，挂单 `Q86`）：筛选器摆的是一棵
-            // 读得懂的树，一条读不回来的原文在那儿没有位置，所以它跟着「改选择」那一趟整条带过去，
+            // 读得懂的树，一条读不回来的原文在那儿没有位置，所以它跟着「从浏览添加…」或「✎」那一趟整条带过去，
             // 摆在**筛选栏顶上**那条横幅里逐条扔。
             ui.weak(format!(
                 "读不懂的这 {} 条要扔掉：按上面「从浏览添加…」跳去浏览屏，\

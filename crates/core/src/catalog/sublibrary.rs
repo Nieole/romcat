@@ -837,66 +837,6 @@ impl Catalog {
         Ok(ordinal)
     }
 
-    /// 把这个子库**读得懂的那几条规则整个换成这一条**，返回新那条的序号。
-    ///
-    /// 「**改选择**」那条回程走的就是它（票 `gui-redesign/11`）：子库屏点「改选择」时
-    /// 把这个子库的规则并成一条（[`Rule::any_of`](crate::sublibrary::rule::Rule::any_of)）
-    /// 预填进浏览屏的筛选器，调完按「更新到子库」，屏上那份筛选折回一条规则原样带回来。
-    /// 带回来的是**一条**：筛选器是一棵树，它折出来的本来就是一条
-    /// （`WorkQuery::to_rule`）。往上加而不是换掉的话，旧的那几条还在，
-    /// 子库选出来的就比屏上多——而那正是「筛选就是子库的规则」这条约定要消灭的东西。
-    ///
-    /// **读不懂的那几条原样留着，一条都不碰。** 它们本来就没参与求值
-    /// （[`LoadedSelection::from_stored`] 把它们挑出来另放），所以留着不改变这个子库
-    /// 选出什么；而顺手删掉它们等于拿一次「改选择」悄悄清掉用户还没来得及修的东西。
-    ///
-    /// 整趟在一个事务里：删一半就断电的话，那个子库会变成「一条规则都没有」，
-    /// 同步过去是空的。
-    ///
-    /// # Errors
-    /// 写库失败，或者这个子库不存在时返回错误。
-    pub fn replace_rules(&mut self, name: &str, rule: &Rule) -> Result<i64, CatalogError> {
-        let stale: Vec<i64> = self
-            .sublibrary_rules(name)?
-            .into_iter()
-            .filter(|stored| Rule::parse(&stored.text).is_ok())
-            .map(|stored| stored.ordinal)
-            .collect();
-        let path = self.path.clone();
-        let to_err = |source| CatalogError::Sqlite {
-            path: path.clone(),
-            source,
-        };
-        let tx = self.conn.transaction().map_err(to_err)?;
-        for ordinal in stale {
-            tx.execute(
-                "DELETE FROM sublibrary_rule WHERE sublibrary = ?1 AND ordinal = ?2",
-                params![name, ordinal],
-            )
-            .map_err(to_err)?;
-        }
-        let ordinal: i64 = tx
-            .query_row(
-                "SELECT next_rule FROM sublibrary WHERE name = ?1",
-                params![name],
-                |row| row.get(0),
-            )
-            .map_err(to_err)?;
-        tx.execute(
-            "INSERT INTO sublibrary_rule(sublibrary, ordinal, text, name, at)
-             VALUES(?1, ?2, ?3, NULL, ?4)",
-            params![name, ordinal, rule.text, super::now_secs()],
-        )
-        .map_err(to_err)?;
-        tx.execute(
-            "UPDATE sublibrary SET next_rule = ?2 WHERE name = ?1",
-            params![name, ordinal + 1],
-        )
-        .map_err(to_err)?;
-        tx.commit().map_err(to_err)?;
-        Ok(ordinal)
-    }
-
     /// **整条拿走一条规则**：读与删在同一个事务里，交回它那几列**逐列原样**。
     ///
     /// 界面上删一条规则之后提示条上那颗「撤销」靠的就是它
@@ -990,8 +930,12 @@ impl Catalog {
     /// 把这个子库的**第 `ordinal` 条规则换成这一条**，序号不变。返回那一条本来在不在；不在就一行都不写。
     ///
     /// 子库屏规则行上「✎」那条回程走的就是它（票 `gui-looks-like-the-design/20`，拿主意的人 2026-09-14 定）：跳去浏览屏时
-    /// 只把这一条预填进筛选器，调完按「更新到子库」只换回这一条——别的规则、读不懂的那几条、例外一样不碰。与
-    /// [`Self::replace_rules`] 的差别就在这儿：那一条把读得懂的整批换成一条。
+    /// 只把这一条预填进筛选器，调完按「更新到子库」只换回这一条——别的规则、读不懂的那几条、例外一样不碰。
+    /// 从前子库屏卡头那颗「改选择」（现在叫「从浏览添加…」）的回程把读得懂的整批删掉、写回一条没名字的，
+    /// 几条规则连同人起的名字一起没了（挂单 `Q1184`）；那个整批替换的函数已经删掉，别再接回来——
+    /// 改已有的一条走这儿，加一条走 [`Self::add_rule`]（拿主意的人 2026-09-30 改裁，挂单 `Q1269`）。
+    ///
+    /// **名字不动**：这一句只改原文，人起的名字照旧——原文换了，它还是人叫惯了的那一条。
     ///
     /// **序号照旧**：人照着报告认的是「第 2 条」，改了条件它还是第 2 条；发号器（`next_rule`）不动。
     ///
@@ -1018,7 +962,7 @@ impl Catalog {
     /// 与 [`Self::remove_rule`] 的差别只有一条：它按序号删任何一条，这一条**先读一遍
     /// 再决定删不删**，读得懂就拒绝（[`Discarded::Readable`]）。这一道闸是给界面上
     /// 那条路准备的（票 `gui-redesign/14`）：读不懂的那几条在界面上处置得掉，而读得懂
-    /// 的那几条只经由「改选择」整批换掉（[`Self::replace_rules`]）——两条路混在一起
+    /// 的那几条只经由「✎」逐条换掉（[`Self::replace_rule`]）或者规则行上的「×」移除——两条路混在一起
     /// 的话，一次「扔掉这条坏的」就能悄悄删掉一条好的，而屏上写的是「扔掉读不懂的」。
     ///
     /// 判「读不懂」用的是与 [`LoadedSelection::from_stored`] **同一条** `Rule::parse`：
