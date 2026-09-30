@@ -533,14 +533,6 @@ impl Catalog {
             "DELETE FROM preferred_variant WHERE substr(variant_key, 1, length(?1)) = ?1",
             "DELETE FROM title
              WHERE variant_key IS NOT NULL AND substr(variant_key, 1, length(?1)) = ?1",
-            // 刮削那三张表按**锚点**存，锚点既可能是变体的键也可能是作品名——
-            // 只删 `subject = '变体'` 那一半，作品那一层是别的根也在用的。
-            "DELETE FROM scrape_value
-             WHERE subject = '变体' AND substr(anchor, 1, length(?1)) = ?1",
-            "DELETE FROM media_ref
-             WHERE subject = '变体' AND substr(anchor, 1, length(?1)) = ?1",
-            "DELETE FROM scrape_probe
-             WHERE subject = '变体' AND substr(anchor, 1, length(?1)) = ?1",
             // **子库的例外与清单**也认变体的键。例外跟着这个根走；清单只清「源指着这个
             // 根」的那几行——目标上真有什么，由下一趟同步照实观察出来（ADR-0015）。
             "DELETE FROM sublibrary_exception WHERE substr(variant_key, 1, length(?1)) = ?1",
@@ -550,6 +542,10 @@ impl Catalog {
                 .execute(sql, params![prefix])
                 .map_err(|source| self.err(source))?;
         }
+        // **刮削那三张表**（刮削结论、媒体引用、采集记录）交给它们自己那个模块删：
+        // 哪一列装锚点种类、哪一列装键，只有那边说了算（挂单 `Q555` 就是这一侧把两列写反了）。
+        // 删的是这个根底下变体的那些；作品那一层、人亲手写下的「裁决」那一句一条不动。
+        self.forget_scraped_under(&prefix)?;
         // 遍历与它的批注按**根名**记（`catalog::SCHEMA_VERSION` 的 7），跟着这个根一起走。
         for sql in [
             "DELETE FROM traversal WHERE root_name = ?1",
