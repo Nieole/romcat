@@ -1,9 +1,14 @@
-"""核对设计稿 prototype.html 顶部的 CSS 变量与令牌是否一致。
+"""核对设计稿 prototype.html 与令牌是否一致：顶部的 CSS 变量，以及写在规则上的字面值。
 
 令牌全仓库只有一份：crates/gui/src/tokens.toml——界面编进二进制的就是它。设计稿目录里
 不留第二份：两份各改各的，正是这份脚本要防的事。
 
-用法：python3 check_tokens.py    （在哪个目录下运行都行；不一致时列出差异并以 1 退出）
+**漏核也算不一致**（票 gate-and-tests/07）：令牌文件里每一格，要么被下面某条核对取去与设计稿比过，
+要么列在文件末尾的豁免表 EXEMPT 里、写明为什么设计稿里没有可核的对应物；两样都不沾的，
+照样退 1 并说出是哪几格。新立一个令牌，就在这儿补一条核对，或者进豁免表。
+
+用法：python3 check_tokens.py [令牌文件]
+    在哪个目录下运行都行；令牌文件缺省是 crates/gui/src/tokens.toml。不一致时列出差异并以 1 退出。
 """
 import re
 import sys
@@ -12,8 +17,76 @@ from pathlib import Path
 
 here = Path(__file__).resolve().parent
 repo = here.parents[1]
-tokens = tomllib.loads((repo / "crates" / "gui" / "src" / "tokens.toml").read_text(encoding="utf-8"))
+tokens_path = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else repo / "crates" / "gui" / "src" / "tokens.toml"
+raw_tokens = tomllib.loads(tokens_path.read_text(encoding="utf-8"))
 html = (here / "prototype.html").read_text(encoding="utf-8")
+
+# ── 记账：哪几格令牌被核对取过 ──
+# 下面每条核对都从 tokens 里取令牌值去与设计稿比。tokens 是套在令牌外面的一层记账壳：取过哪一格，
+# 就在 covered 里记下那一格的名字（节.键，数组逐格记成 节.键[i]）。只列键名（for k in 节）不算取过。
+# 全部核对跑完，令牌文件里还有没取过、也不在 EXEMPT 里的格子，就是没人核——见文件末尾。
+covered: set[str] = set()
+
+
+class Section(dict):
+    """令牌里的一节。按键取值与 .items() 记账；只数键名（for、in、len）不记。别的 dict 方法没覆写，取了也不记——
+    那只会让那一格被报成没人核，不会把没核的算成核过。"""
+
+    def __init__(self, path: str, data: dict):
+        super().__init__({key: watched(f"{path}{key}", value) for key, value in data.items()})
+        self.path = path
+
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        if not isinstance(value, (Section, Row)):
+            covered.add(self.path + key)
+        return value
+
+    def items(self):
+        return [(key, self[key]) for key in self]
+
+
+class Row(list):
+    """令牌里的一个数组。按下标取、遍历、整个拿去比都记账——记的是哪几格，不是整个键。"""
+
+    def __init__(self, path: str, data: list):
+        super().__init__(data)
+        self.path = path
+
+    def _all(self):
+        covered.update(f"{self.path}[{i}]" for i in range(len(self)))
+
+    def __getitem__(self, at):
+        if isinstance(at, slice):
+            covered.update(f"{self.path}[{i}]" for i in range(*at.indices(len(self))))
+        else:
+            covered.add(f"{self.path}[{at % len(self)}]")
+        return super().__getitem__(at)
+
+    def __iter__(self):
+        self._all()
+        return super().__iter__()
+
+    def __eq__(self, other):
+        self._all()
+        return list.__eq__(self, other)
+
+    def __ne__(self, other):
+        self._all()
+        return list.__ne__(self, other)
+
+    __hash__ = None
+
+
+def watched(path: str, value):
+    if isinstance(value, dict):
+        return Section(path + ".", value)
+    if isinstance(value, list):
+        return Row(path, value)
+    return value
+
+
+tokens = Section("", raw_tokens)
 
 
 def css_block(selector_pattern: str) -> dict[str, str]:
@@ -29,7 +102,15 @@ def norm(v: str) -> str:
     if m:
         r, g, b, a = int(m[1]), int(m[2]), int(m[3]), float(m[4])
         return f"#{r:02X}{g:02X}{b:02X}{round(a * 255):02X}"
+    if m := re.fullmatch(r"#([0-9A-Fa-f])([0-9A-Fa-f])([0-9A-Fa-f])", v):
+        return "#" + "".join(c * 2 for c in m.groups()).upper()
     return v.upper()
+
+
+def same_color(got: str, want: str) -> bool:
+    """设计稿里的一色与令牌比。半透明的允许 1 级取整误差（设计稿写 rgba 的小数，令牌写 #RRGGBBAA）。"""
+    a, b = norm(got), norm(want)
+    return a == b or (len(a) == len(b) == 9 and a[:7] == b[:7] and abs(int(a[7:], 16) - int(b[7:], 16)) <= 1)
 
 
 problems = []
@@ -39,15 +120,15 @@ for theme, pattern in [("light", r":root"), ("dark", r':root\[data-theme="dark"\
         got = css.get(key)
         if got is None:
             problems.append(f"{theme}: CSS 里没有 --{key}")
-        elif norm(got) != norm(want):
-            # 半透明遮罩允许 1 级取整误差
-            if not (len(want) == 9 and norm(got)[:7] == want.upper()[:7] and abs(int(norm(got)[7:], 16) - int(want[7:], 16)) <= 1):
-                problems.append(f"{theme}: --{key} 设计稿是 {got}，令牌是 {want}")
+        elif not same_color(got, want):
+            problems.append(f"{theme}: --{key} 设计稿是 {got}，令牌是 {want}")
 
 pcol = dict(re.findall(r"(\w+):'(#[0-9A-Fa-f]{6})'", re.search(r"const PCOL=\{(.*?)\}", html).group(1)))
-for plat, want in tokens["color"]["platform"].items():
+platform_colors = tokens["color"]["platform"]
+for plat in platform_colors:
     if plat == "other":
         continue
+    want = platform_colors[plat]
     if pcol.get(plat, "").upper() != want.upper():
         problems.append(f"平台色 {plat}: 设计稿是 {pcol.get(plat)}，令牌是 {want}")
 
@@ -108,6 +189,11 @@ else:
 L, S, F, M = tokens["layout"], tokens["space"], tokens["font"], tokens["mix"]
 
 
+def literal_value(got: str) -> float:
+    """设计稿里的一个字面值折成数：带 % 的按成数（7% → 0.07），其余照原样。"""
+    return float(got[:-1]) / 100 if got.endswith("%") else float(got)
+
+
 def literal_pairs(label, pattern, pairs):
     """在设计稿里按 pattern 找一处，逐组与令牌比。pairs 是 [(组号, 令牌值, 叫什么)]；带 % 的按成数比。"""
     global literals
@@ -118,8 +204,7 @@ def literal_pairs(label, pattern, pairs):
     for group, want, key in pairs:
         literals += 1
         got = m[group]
-        value = float(got[:-1]) / 100 if got.endswith("%") else float(got)
-        if abs(value - float(want)) > 1e-9:
+        if abs(literal_value(got) - float(want)) > 1e-9:
             problems.append(f"{key}: 设计稿是 {got}，令牌是 {want}")
 
 
@@ -207,10 +292,12 @@ def same(got: str, want, key: str):
 
 
 def in_steps(got: str, what: str):
+    """稿上这个数落在不落在间距档位里。核的是稿，不是那几档：读不记账的原始令牌，档位本身另进豁免表。"""
     global literals
     literals += 1
-    if float(got) not in [float(s) for s in tokens["space"]["steps"]]:
-        problems.append(f"{what} {got}px 不在间距档位 {tokens['space']['steps']} 里")
+    steps = raw_tokens["space"]["steps"]
+    if float(got) not in [float(s) for s in steps]:
+        problems.append(f"{what} {got}px 不在间距档位 {steps} 里")
 
 
 panel_padding = tokens["space"]["panel-padding"]
@@ -401,7 +488,7 @@ def token(section, key, at):
 
 
 def check_literals(entries):
-    """逐条核对设计稿里写死的字面值；交回核了几项。"""
+    """逐条核对设计稿里写死的字面值；交回核了几项。带 % 的按成数比（设计稿 7% 对令牌 0.07）。"""
     checked = 0
     for pattern, checks in entries:
         m = re.search(pattern, html)
@@ -411,9 +498,10 @@ def check_literals(entries):
         for group, section, key, at in checks:
             checked += 1
             want = token(section, key, at)
-            if float(m[group]) != float(want):
+            got = m[group]
+            if abs(literal_value(got) - float(want)) > 1e-9:
                 where = key if at is None else f"{key}[{at}]"
-                problems.append(f"{where}: 设计稿是 {m[group]}，令牌是 {want}")
+                problems.append(f"{where}: 设计稿是 {got}，令牌是 {want}")
     return checked
 
 rail_literals = [
@@ -474,8 +562,321 @@ menu_literals = [
 ]
 literals += check_literals(menu_literals)
 
+# ── 票 gate-and-tests/07 补齐的存量 ──
+# 下面这些令牌此前一条核对都没有，脚本照样报「一致」（挂单 Q963 / Q1083）。完整性检查立起来之后，
+# 它印出来的漏核清单就是这一批：设计稿里有对应物的都在这儿写了核对，没有的进文件末尾的豁免表。
+
+# 外壳：左栏两档宽与状态栏高（.main 的两列两行）、浏览屏左右两栏的宽与收起后的窄条、控件描边、字体。
+shell_literals = [
+    (r"\.main\{[^}]*?grid-template-columns:(\d+)px 1fr;grid-template-rows:1fr (\d+)px", [(1, "layout", "rail-width", None), (2, "layout", "statusbar", None)]),
+    (r"\.main\.rcol\{grid-template-columns:(\d+)px 1fr", [(1, "layout", "rail-collapsed", None)]),
+    (r"\.browse\{--fw:(\d+)px;--dw:(\d+)px", [(1, "layout", "filter-pane-width", None), (2, "layout", "detail-pane-width", None)]),
+    (r"\.browse\.fcol\{--fw:(\d+)px\}\.browse\.dcol\{--dw:(\d+)px\}", [(1, "layout", "strip-width", None), (2, "layout", "strip-width", None)]),
+    (r"\.btn\{[^}]*?border:(\d+)px solid", [(1, "layout", "control-stroke", None)]),
+    (r"\.input\{[^}]*?border:(\d+)px solid", [(1, "layout", "control-stroke", None)]),
+    (r"\.btn\[disabled\]\{opacity:([\d.]+)", [(1, "mix", "disabled-opacity", None)]),
+    (r"body\{[^}]*?font:(\d+)px/([\d.]+) var\(--sans\)", [(1, "font", "size-body", None), (2, "font", "line-height", None)]),
+    (r"h1,h2,h3,h4\{[^}]*?font-weight:(\d+)", [(1, "font", "weight-strong", None)]),
+    (r"\.scrhead h2\{font-size:(\d+)px", [(1, "font", "size-page", None)]),
+    # size-title 的注释写的是「卡片标题、对话框标题」：卡片（.runcard h3 / .dev h3）与弹层标头（.mhead h3）三处都核。
+    (r"\.runcard h3\{font-size:(\d+)px", [(1, "font", "size-title", None)]),
+    (r"\.dev h3\{font-size:(\d+)px", [(1, "font", "size-title", None)]),
+    (r"\.mhead h3\{font-size:(\d+)px", [(1, "font", "size-title", None)]),
+]
+literals += check_literals(shell_literals)
+
+# 开场与弹层（.opening / .op-hero / .op-side / .mark / .promise / .step / .mbody / .kv / .frm / .warnbox）。
+opening_literals = [
+    (r"\.opening\{[^}]*?minmax\((\d+)px,1fr\) minmax\((\d+)px,(\d+)px\)", [(1, "layout", "opening-hero-min", None), (2, "layout", "opening-side-width", 0), (3, "layout", "opening-side-width", 1)]),
+    (r"\.op-hero\{padding:(\d+)px (\d+)px", [(1, "space", "opening-hero-padding", 0), (2, "space", "opening-hero-padding", 1)]),
+    (r"\.op-side\{padding:(\d+)px (\d+)px", [(1, "space", "opening-side-padding", 0), (2, "space", "opening-side-padding", 1)]),
+    (r"(?m)^\.mark\{width:(\d+)px;height:(\d+)px", [(1, "layout", "mark", None), (2, "layout", "mark", None)]),
+    (r"\.promise \.ic\{width:(\d+)px;height:(\d+)px", [(1, "layout", "promise-icon", None), (2, "layout", "promise-icon", None)]),
+    (r"\.step i\{width:(\d+)px;height:(\d+)px", [(1, "layout", "page-dot", None), (2, "layout", "page-dot", None)]),
+    (r"\.mbody\{padding:(\d+)px (\d+)px", [(1, "space", "dialog-padding", 0), (2, "space", "dialog-padding", 1)]),
+    # 弹层只用四档宽：设计稿说明表里那一句写着这四个数。
+    (r"宽度只用 (\d+) / (\d+) / (\d+) / (\d+) 四档", [(i + 1, "layout", "dialog-width", i) for i in range(4)]),
+    (r"\.kv\{[^}]*?grid-template-columns:(\d+)px", [(1, "layout", "kv-key-width", None)]),
+    (r"\.frm\{[^}]*?grid-template-columns:(\d+)px", [(1, "layout", "form-label-width", None)]),
+    (r"\.warnbox\{padding:(\d+)px (\d+)px", [(1, "layout", "warn-box-padding", 0), (2, "layout", "warn-box-padding", 1)]),
+    (r"\.opt\{[^}]*?gap:(\d+)px;[^}]*?padding:(\d+)px 0", [(1, "layout", "option-gap", None), (2, "layout", "option-padding", None)]),
+]
+literals += check_literals(opening_literals)
+# 那一句是稿自己的声明；稿里弹层实际用到的宽也得都落在这四档里：DLG 各页交回的 w:、渲染时的缺省 .w||620、
+# .modal 的缺省宽、直接写在弹层上的 style 宽。
+used_widths = {int(w) for w in re.findall(r"[{,]w:(\d+)[,}]", html) + re.findall(r"\.w\|\|(\d+)", html)
+               + re.findall(r"\.modal\{width:(\d+)px", html) + re.findall(r'class="modal"[^>]*?style="width:(\d+)px', html)}
+literals += 1
+if not used_widths:
+    problems.append("找不到设计稿里弹层用到的宽")
+elif off_tiers := sorted(used_widths - {int(w) for w in L["dialog-width"]}):
+    problems.append(f"dialog-width: 设计稿的弹层用到了 {off_tiers}，不在令牌那几档 {list(L['dialog-width'])} 里")
+
+# 浏览屏的卡片视图（.cgrid / .cover / .cv-tier）：三档封面宽、封面宽高比、封面底下那道置信度色带。
+card_literals = [
+    (r"\.cgrid\{--cw:(\d+)px", [(1, "layout", "card-widths", 1)]),
+    (r"\.cgrid\.s\{--cw:(\d+)px\}\.cgrid\.l\{--cw:(\d+)px\}", [(1, "layout", "card-widths", 0), (2, "layout", "card-widths", 2)]),
+    (r"\.cv-tier\{[^}]*?height:(\d+)px", [(1, "layout", "tier-bar", None)]),
+]
+literals += check_literals(card_literals)
+m = re.search(r"\.cover\{[^}]*?aspect-ratio:(\d+)/(\d+)", html)
+if not m:
+    problems.append("找不到 .cover 的 aspect-ratio")
+else:
+    literals += 1
+    if abs(int(m[1]) / int(m[2]) - L["card-cover-ratio"]) > 1e-9:
+        problems.append(f"card-cover-ratio: 设计稿是 {m[1]}/{m[2]}，令牌是 {L['card-cover-ratio']}")
+
+# 待确认屏（票 gui-looks-like-the-design/18、19）：正文头上三格、空态卡、一批变体卡、逐条那一屏、候选卡、键位提示、
+# 中文离线源那一堆（挂单 Q963 点名的那一批）。
+queue_literals = [
+    (r"\.qsum\{[^}]*?gap:(\d+)px;margin-bottom:(\d+)px", [(1, "space", "queue-summary-gap", None), (2, "space", "queue-summary-margin", None)]),
+    (r"\.qcell\{padding:(\d+)px (\d+)px", [(1, "space", "queue-cell-padding", 0), (2, "space", "queue-cell-padding", 1)]),
+    (r"\.qcell \.v\{[^}]*?font-size:(\d+)px", [(1, "font", "size-summary-count", None)]),
+    (r'id="q-empty"[^>]*>\s*<div class="card" style="max-width:(\d+)px;margin:(\d+)px auto;padding:(\d+)px', [(1, "layout", "empty-state-width", None), (2, "space", "empty-state-margin", None), (3, "space", "empty-state-padding", None)]),
+    (r'(?s)id="q-empty".*?<p class="dim" style="margin:(\d+)px 0 (\d+)px">.*?<p class="help" style="margin-top:(\d+)px">', [(1, "space", "empty-state-gaps", 0), (2, "space", "empty-state-gaps", 1), (3, "space", "empty-state-gaps", 2)]),
+    (r"\.batch\{[^}]*?margin-bottom:(\d+)px;[^}]*?box-shadow:inset (\d+)px 0 0 var\(--c\)", [(1, "space", "batch-gap", None), (2, "layout", "tier-bar", None)]),
+    (r"\.bhead\{[^}]*?grid-template-columns:(\d+)px 1fr auto (\d+)px;gap:(\d+)px;[^}]*?padding:(\d+)px (\d+)px", [(1, "layout", "batch-count-width", None), (2, "layout", "batch-chevron-column", None), (3, "space", "batch-head-gap", None), (4, "space", "batch-head-padding", 0), (5, "space", "batch-head-padding", 1)]),
+    (r"\.bhead \.cnt\{[^}]*?font-size:(\d+)px", [(1, "font", "size-batch-count", None)]),
+    (r"\.bhead \.why1\{[^}]*?margin-top:(\d+)px", [(1, "space", "batch-line-gap", None)]),
+    (r"\.shape\{[^}]*?gap:(\d+)px (\d+)px", [(1, "space", "shape-gap", 0), (2, "space", "shape-gap", 1)]),
+    (r"\.chev\{width:(\d+)px;height:(\d+)px;border-right:([\d.]+)px", [(1, "layout", "chevron", None), (2, "layout", "chevron", None), (3, "layout", "chevron-stroke", None)]),
+    (r"\.bbody\{padding:(\d+)px (\d+)px (\d+)px;[^}]*?grid-template-columns:minmax\(0,([\d.]+)fr\) minmax\(0,([\d.]+)fr\);gap:(\d+)px", [(1, "space", "batch-body-padding", 0), (2, "space", "batch-body-padding", 1), (3, "space", "batch-body-padding", 2), (4, "layout", "batch-body-columns", 0), (5, "layout", "batch-body-columns", 1), (6, "space", "batch-body-gap", None)]),
+    (r"\.why\{[^}]*?padding:(\d+)px (\d+)px", [(1, "space", "why-padding", 0), (2, "space", "why-padding", 1)]),
+    (r"\.dist\{[^}]*?gap:(\d+)px \d+px", [(1, "space", "dist-row-gap", None)]),
+    (r"\.smp\{[^}]*?grid-template-columns:minmax\(0,1fr\) (\d+)px minmax\(0,1fr\);[^}]*?padding:(\d+)px 0", [(1, "layout", "sample-arrow-column", None), (2, "space", "sample-row-padding", None)]),
+    (r"\.bare\{margin-top:(\d+)px;[^}]*?padding:(\d+)px (\d+)px", [(1, "space", "bare-margin", None), (2, "space", "bare-padding", 0), (3, "space", "bare-padding", 1)]),
+    (r'(?s)<div class="bare">.*?<p class="help" style="margin-top:(\d+)px">', [(1, "space", "bare-note-gap", None)]),
+    (r"\.lot\{padding:(\d+)px (\d+)px", [(1, "space", "record-row-padding", 0), (2, "space", "record-row-padding", 1)]),
+    (r"\.drawer\{[^}]*?width:(\d+)px", [(1, "layout", "drawer-width", None)]),
+    (r'<div class="obolist">\s*<div class="ptitle" style="padding:(\d+)px (\d+)px (\d+)px (\d+)px', [(i + 1, "space", "list-head-padding", i) for i in range(4)]),
+    (r"\.oboit\{[^}]*?padding:(\d+)px (\d+)px (\d+)px (\d+)px", [(i + 1, "space", "list-item-padding", i) for i in range(4)]),
+    (r"\.obodet\{[^}]*?padding:(\d+)px (\d+)px;[^}]*?gap:(\d+)px", [(1, "space", "detail-padding", 0), (2, "space", "detail-padding", 1), (3, "space", "detail-gap", None)]),
+    (r"\$\('#obo-det'\)\.innerHTML=`<div class=\"col\" style=\"gap:(\d+)px\"", [(1, "space", "obo-head-gap", None)]),
+    (r"\.cands\{[^}]*?gap:(\d+)px", [(1, "space", "candidate-gap", None)]),
+    (r"\.cand\{[^}]*?padding:(\d+)px;[^}]*?gap:(\d+)px", [(1, "space", "candidate-padding", None), (2, "space", "candidate-inner-gap", None)]),
+    (r'\.cand\[aria-selected="true"\]\{[^}]*?0 0 0 (\d+)px var\(--accent-soft\)', [(1, "layout", "candidate-ring", None)]),
+    (r"\.cand \.t\{[^}]*?font-size:([\d.]+)px", [(1, "font", "size-candidate-title", None)]),
+    (r"\.cand dl\{[^}]*?grid-template-columns:(\d+)px 1fr;gap:(\d+)px (\d+)px", [(1, "layout", "candidate-key-width", None), (2, "space", "candidate-row-gap", 0), (3, "space", "candidate-row-gap", 1)]),
+    (r"\.keys\{[^}]*?gap:(\d+)px (\d+)px;[^}]*?padding:(\d+)px (\d+)px", [(1, "space", "keys-gap", 0), (2, "space", "keys-gap", 1), (3, "space", "keys-padding", 0), (4, "space", "keys-padding", 1)]),
+    (r"\.keys span\{[^}]*?gap:(\d+)px", [(1, "space", "key-hint-gap", None)]),
+    (r"\.kbd\{[^}]*?padding:(\d+)px (\d+)px;[^}]*?border-bottom-width:(\d+)px", [(1, "space", "kbd-padding", 0), (2, "space", "kbd-padding", 1), (3, "layout", "kbd-bottom", None)]),
+    (r"\.btn\{[^}]*?gap:(\d+)px", [(1, "space", "key-button-gap", None)]),
+    (r"\.mgroup \.gh\{[^}]*?padding:(\d+)px (\d+)px", [(1, "space", "match-head-padding", 0), (2, "space", "match-head-padding", 1)]),
+    (r"\.mgroup dl\{[^}]*?grid-template-columns:(\d+)px minmax\(0,1fr\);gap:(\d+)px (\d+)px;[^}]*?padding:(\d+)px (\d+)px", [(1, "layout", "match-key-width", None), (2, "space", "match-row-gap", 0), (3, "space", "match-row-gap", 1), (4, "space", "match-row-padding", 0), (5, "space", "match-row-padding", 1)]),
+]
+literals += check_literals(queue_literals)
+
+# 库屏的库体检（.health / .htile / .lst、renderHealth 空态那一行、重复拷贝那张表）与差量账（票 24 的 .diff，挂单 Q1083）。
+library_literals = [
+    (r"\.health\{[^}]*?gap:(\d+)px;padding:(\d+)px (\d+)px", [(1, "space", "health-grid-gap", None), (2, "space", "health-grid-padding", 0), (3, "space", "health-grid-padding", 1)]),
+    (r"\.htile\{[^}]*?gap:(\d+)px;padding:(\d+)px (\d+)px", [(1, "space", "health-tile-gap", None), (2, "space", "health-tile-padding", 0), (3, "space", "health-tile-padding", 1)]),
+    (r"\.htile b\{[^}]*?font-size:(\d+)px", [(1, "font", "size-health-value", None)]),
+    (r"\.lst>div\{[^}]*?padding:(\d+)px (\d+)px", [(1, "space", "health-list-padding", 0), (2, "space", "health-list-padding", 1)]),
+    (r'<div class="empty" style="padding:(\d+)px">扫描完成后生成体检报告', [(1, "space", "health-empty-padding", None)]),
+    (r'<th style="width:(\d+)px">平台</th><th class="r" style="width:(\d+)px">份数</th><th class="r" style="width:(\d+)px">单份大小</th><th style="width:(\d+)px">', [(i + 1, "layout", "health-dup-columns", i) for i in range(4)]),
+    (r"\.diff\{[^}]*?gap:(\d+)px", [(1, "space", "diff-gap", None)]),
+    (r"\.diff div\{padding:(\d+)px (\d+)px", [(1, "space", "diff-tile-padding", 0), (2, "space", "diff-tile-padding", 1)]),
+    (r"\.diff b\{[^}]*?font-size:(\d+)px", [(1, "font", "size-diff-value", None)]),
+]
+literals += check_literals(library_literals)
+
+# 子库屏的弹层（DLG.subform 目标设置、DLG.excl 手动例外）与合并向导（.vrow、.ctbl）：表头列宽、输入框宽。
+sublibrary_literals = [
+    (r'<th style="width:(\d+)px">平台</th><th>设备直接能用</th><th style="width:(\d+)px">不能用时</th><th style="width:(\d+)px">覆盖</th>', [(i + 1, "layout", "platform-table-columns", i) for i in range(3)]),
+    (r'<input class="input num" style="width:(\d+)px" data-dgi="capv"', [(1, "layout", "capacity-input-width", None)]),
+    (r'<th>作品</th><th style="width:(\d+)px">平台</th><th class="r" style="width:(\d+)px">体积</th><th>备注</th><th style="width:(\d+)px">时间</th><th style="width:(\d+)px"></th>', [(i + 1, "layout", "exception-table-columns", i) for i in range(4)]),
+    (r'<input class="input" style="width:(\d+)px" data-dgi="note"', [(1, "layout", "exception-note-width", None)]),
+    (r"\.vrow\{[^}]*?grid-template-columns:\d+px minmax\(0,1fr\) (\d+)px (\d+)px (\d+)px (\d+)px", [(i + 1, "layout", "merge-row-columns", i) for i in range(4)]),
+    (r'<table class="tbl ctbl"><thead><tr><th style="width:(\d+)px">字段</th>', [(1, "layout", "conflict-key-width", None)]),
+]
+literals += check_literals(sublibrary_literals)
+
+# 作品详情页（票 gui-looks-like-the-design/15）：顶条、六个面、头上那一块与字卡、概览、变体卡、文件表、识别依据、
+# 元数据那一面、标题面、媒体那一面。
+work_literals = [
+    (r"\.wdbar\{[^}]*?gap:(\d+)px;padding:(\d+)px (\d+)px", [(1, "space", "work-bar-gap", None), (2, "space", "work-bar-padding", 0), (3, "space", "work-bar-padding", 1)]),
+    (r"\.tabs\{[^}]*?gap:(\d+)px;padding:0 (\d+)px", [(1, "space", "tabs-gap", None), (2, "space", "tabs-padding", None)]),
+    (r"\.tabs button\{height:(\d+)px;padding:0 (\d+)px", [(1, "layout", "tab-height", None), (2, "space", "tab-padding", None)]),
+    (r'\.tabs button\[aria-selected="true"\]\{[^}]*?inset 0 -(\d+)px 0 var\(--accent\)', [(1, "layout", "tab-underline", None)]),
+    (r"\.tabs button small\{[^}]*?margin-left:(\d+)px", [(1, "space", "tab-count-gap", None)]),
+    (r"\.tabp\{padding:(\d+)px (\d+)px (\d+)px", [(i + 1, "space", "tab-panel-padding", i) for i in range(3)]),
+    (r"\.hero\{[^}]*?grid-template-columns:(\d+)px minmax\(0,1fr\);gap:(\d+)px;padding:(\d+)px (\d+)px (\d+)px;[^}]*?var\(--pc\) (\d+%)", [(1, "layout", "hero-cover-width", None), (2, "space", "hero-gap", None), (3, "space", "hero-padding", 0), (4, "space", "hero-padding", 1), (5, "space", "hero-padding", 2), (6, "mix", "hero-tint", None)]),
+    (r"\.htitle\{font-size:(\d+)px", [(1, "font", "size-hero", None)]),
+    (r"\.mast h1\{font-size:(\d+)px", [(1, "font", "size-hero", None)]),
+    (r"\.hfacts\{[^}]*?repeat\((\d+),minmax\(0,1fr\)\);gap:(\d+)px (\d+)px;[^}]*?max-width:(\d+)px", [(1, "layout", "hero-facts-columns", None), (2, "space", "hero-facts-gap", 0), (3, "space", "hero-facts-gap", 1), (4, "layout", "hero-facts-max", None)]),
+    (r"\.hfacts div\{[^}]*?gap:(\d+)px", [(1, "space", "hero-fact-gap", None)]),
+    (r"\.hcover \.tcard\{padding:(\d+)px (\d+)px", [(1, "space", "hero-card-padding", 0), (2, "space", "hero-card-padding", 1)]),
+    (r"(?m)^\.tcard\{[^}]*?gap:(\d+)px", [(1, "space", "hero-card-gap", None)]),
+    (r"(?m)^\.tc-t\{font-size:(\d+)px;[^}]*?-webkit-line-clamp:(\d+)", [(1, "font", "size-hero-card-title", None), (2, "layout", "hero-card-title-rows", None)]),
+    (r"\.tc-s\{[^}]*?-webkit-line-clamp:(\d+)", [(1, "layout", "card-subtitle-rows", None)]),
+    (r"\.dcover \.tc-t\{[^}]*?-webkit-line-clamp:(\d+)", [(1, "layout", "card-title-rows", None)]),
+    (r"\.tc-wm\{[^}]*?right:-(\d+)px;bottom:-(\d+)px;font-size:(\d+)px", [(1, "layout", "hero-card-mark-offset", 0), (2, "layout", "hero-card-mark-offset", 1), (3, "font", "size-hero-card-mark", None)]),
+    (r"\.ov\{[^}]*?grid-template-columns:minmax\(0,([\d.]+)fr\) minmax\(0,([\d.]+)fr\);gap:(\d+)px", [(1, "layout", "overview-columns", 0), (2, "layout", "overview-columns", 1), (3, "space", "overview-gap", None)]),
+    (r"\.mstrip\{[^}]*?repeat\((\d+),1fr\);gap:(\d+)px", [(1, "layout", "media-strip-columns", None), (2, "space", "media-strip-gap", None)]),
+    (r"\.desc\{font-size:([\d.]+)px;line-height:([\d.]+)", [(1, "font", "size-desc", None), (2, "font", "desc-line-height", None)]),
+    (r"\.sect\{[^}]*?padding:(\d+)px (\d+)px", [(1, "space", "section-card-padding", 0), (2, "space", "section-card-padding", 1)]),
+    (r"\.sect>\.row:first-child\{margin-bottom:(\d+)px", [(1, "space", "section-card-title-gap", None)]),
+    (r"\.sect h3\{font-size:([\d.]+)px", [(1, "font", "size-section-title", None)]),
+    (r"\.srcb\{[^}]*?height:(\d+)px;padding:0 (\d+)px", [(1, "layout", "source-badge-height", None), (2, "space", "source-badge-padding", None)]),
+    (r"\.infol\{[^}]*?gap:(\d+)px (\d+)px", [(1, "space", "info-list-gap", 0), (2, "space", "info-list-gap", 1)]),
+    (r"\.vcard\{[^}]*?margin-bottom:(\d+)px", [(1, "space", "work-card-gap", None)]),
+    (r"\.vhead\{[^}]*?gap:(\d+)px;padding:(\d+)px (\d+)px", [(1, "space", "work-card-head-gap", None), (2, "space", "work-card-head-padding", 0), (3, "space", "work-card-head-padding", 1)]),
+    (r"\.vbody\{[^}]*?minmax\(0,([\d.]+)fr\) minmax\(0,([\d.]+)fr\);gap:\d+px (\d+)px;padding:(\d+)px (\d+)px", [(1, "layout", "work-card-columns", 0), (2, "layout", "work-card-columns", 1), (3, "space", "work-card-columns-gap", None), (4, "space", "work-card-body-padding", 0), (5, "space", "work-card-body-padding", 1)]),
+    (r"\.ftbl th,\.ftbl td\{[^}]*?padding:(\d+)px (\d+)px", [(1, "space", "file-table-cell-padding", 0), (2, "space", "file-table-cell-padding", 1)]),
+    (r'(?s)function evTab\(\).*?<div style="padding:(\d+)px (\d+)px" class="col">', [(1, "space", "evidence-card-padding", 0), (2, "space", "evidence-card-padding", 1)]),
+    (r"\.mrow\{[^}]*?grid-template-columns:(\d+)px minmax\(0,1fr\) (\d+)px;gap:(\d+)px (\d+)px;padding:(\d+)px (\d+)px", [(1, "layout", "meta-row-columns", 0), (2, "layout", "meta-row-columns", 1), (3, "space", "meta-row-gap", 0), (4, "space", "meta-row-gap", 1), (5, "space", "meta-row-padding", 0), (6, "space", "meta-row-padding", 1)]),
+    # 名那一列底下那行小字：字重是稿上唯一写明的常规字重（400），与底下那道间距一起核。
+    (r"\.mrow \.fl small\{[^}]*?font-weight:(\d+);[^}]*?margin-top:(\d+)px", [(1, "font", "weight-regular", None), (2, "space", "meta-label-gap", None)]),
+    (r"\.mrow \.v\{[^}]*?line-height:([\d.]+)", [(1, "font", "meta-value-line-height", None)]),
+    (r"\.mrow \.v\.clamp\{[^}]*?-webkit-line-clamp:(\d+)", [(1, "layout", "meta-clamp-rows", None)]),
+    (r"\.mrow\.dirty\{[^}]*?var\(--accent\) (\d+%)", [(1, "mix", "dirty-row-tint", None)]),
+    (r"\.alts\{[^}]*?gap:(\d+)px", [(1, "space", "alts-gap", None)]),
+    (r"\.alt\{[^}]*?gap:(\d+)px;[^}]*?padding:(\d+)px (\d+)px", [(1, "space", "alt-gap", None), (2, "space", "alt-padding", 0), (3, "space", "alt-padding", 1)]),
+    (r"\.pickchips\{[^}]*?gap:(\d+)px", [(1, "space", "pick-chip-gap", None)]),
+    # .pickchip 的 padding 是「上 右 下 左」＝ 0 8px 0 3px；令牌 pick-chip-padding 记的是（左, 右）。
+    (r"\.pickchip\{[^}]*?gap:(\d+)px;[^}]*?height:(\d+)px;padding:0 (\d+)px 0 (\d+)px", [(1, "space", "pick-chip-gap", None), (2, "layout", "pick-chip-height", None), (3, "space", "pick-chip-padding", 1), (4, "space", "pick-chip-padding", 0)]),
+    (r"\.pickchip b\{[^}]*?max-width:(\d+)px", [(1, "layout", "pick-chip-max", None)]),
+    (r"\.savebar\{[^}]*?gap:(\d+)px;padding:(\d+)px (\d+)px", [(1, "space", "save-bar-gap", None), (2, "space", "save-bar-padding", 0), (3, "space", "save-bar-padding", 1)]),
+    (r'<textarea class="input" data-mf="\$\{k\}" name="mf-\$\{k\}" rows="(\d+)"', [(1, "layout", "meta-textarea-rows", None)]),
+    (r"\.tadd\{[^}]*?minmax\(0,1fr\) (\d+)px (\d+)px auto", [(1, "layout", "title-add-columns", 0), (2, "layout", "title-add-columns", 1)]),
+    (r'<div class="row" style="padding:(\d+)px 0;border-top:1px solid var\(--line\)"><span>\$\{esc\(r\.v\)\}', [(1, "space", "suppressed-row-padding", None)]),
+    (r"\.mgrid\{[^}]*?minmax\((\d+)px,1fr\)\);gap:(\d+)px", [(1, "layout", "media-tile-min", None), (2, "space", "media-grid-gap", None)]),
+    (r"\.mtile \.mi\{padding:(\d+)px (\d+)px", [(1, "space", "media-info-padding", 0), (2, "space", "media-info-padding", 1)]),
+    (r"\.mtile \.pv \.play\{[^}]*?font-size:(\d+)px", [(1, "font", "size-play-mark", None)]),
+    (r"\.noff\{[^}]*?gap:(\d+)px;padding:(\d+)px;[^}]*?var\(--sunken\) 0 (\d+)px", [(1, "space", "noff-gap", None), (2, "space", "noff-padding", None), (3, "layout", "noff-stripe", None)]),
+    (r"\.noff i\{[^}]*?font-size:(\d+)px", [(1, "font", "size-noff-mark", None)]),
+]
+literals += check_literals(work_literals)
+
+# 弹层与弹出菜单的阴影（[shadow.pop]，票 gui-looks-like-the-design/04 裁定）：设计稿 --pop 第一层是
+# 「0 10px 30px -12px」。偏移照稿；扩散照「egui 只收非负数」换算成 max(0, 稿上的扩散)；模糊是看图调出来的近似，
+# 进豁免表——但它是对着稿上 30 模糊、-12 扩散这一组调的，稿上这组数一变，近似就得重调，所以把这组数钉在这儿。
+POP_TUNED_AGAINST = (30, -12)
+m = re.search(r"--pop:(-?\d+)(?:px)? (-?\d+)px (-?\d+)px (-?\d+)px var\(--pop-color\)", html)
+if not m:
+    problems.append("找不到 --pop 的第一层")
+else:
+    pop = tokens["shadow"]["pop"]
+    for got, want, key in [(int(m[1]), pop["offset"][0], "shadow.pop.offset 横"), (int(m[2]), pop["offset"][1], "shadow.pop.offset 竖"), (max(0, int(m[4])), pop["spread"], "shadow.pop.spread（取 max(0, 稿上的扩散)）")]:
+        literals += 1
+        if got != want:
+            problems.append(f"{key}: 设计稿折出来是 {got}，令牌是 {want}")
+    literals += 1
+    if (int(m[3]), int(m[4])) != POP_TUNED_AGAINST:
+        problems.append(f"shadow.pop.blur: 设计稿 --pop 的模糊与扩散成了 {m[3]}px {m[4]}px，令牌里那个 {raw_tokens['shadow']['pop']['blur']} 是对着 {POP_TUNED_AGAINST[0]}px {POP_TUNED_AGAINST[1]}px 调的，重调")
+
+# 颜色里不走 :root 那几格：表里没有的平台（设计稿 --pc:${PCOL[…]||'#555'} 那个兜底）、视频格上的播放标
+# （设计稿 .mtile .pv .play 的 background 与 color）。
+fallbacks = set(re.findall(r"--pc:\$\{PCOL\[[^\]]+\]\|\|'(#[0-9A-Fa-f]+)'\}", html))
+literals += 1
+if len(fallbacks) != 1 or not same_color(next(iter(fallbacks)), tokens["color"]["platform"]["other"]):
+    problems.append(f"平台色 other: 设计稿 --pc 的兜底是 {sorted(fallbacks)}，令牌是 {tokens['color']['platform']['other']}")
+m = re.search(r"\.mtile \.pv \.play\{[^}]*?background:(rgba\([^)]*\));color:(#[0-9A-Fa-f]+)", html)
+if not m:
+    problems.append("找不到 .mtile .pv .play 的 background 与 color")
+else:
+    for got, key in [(m[1], "shade"), (m[2], "mark")]:
+        literals += 1
+        want = tokens["color"]["video"][key]
+        if not same_color(got, want):
+            problems.append(f"视频播放标 {key}: 设计稿 .mtile .pv .play 是 {got}，令牌是 {want}")
+
+# 字体族：等宽照设计稿 --mono-latin 逐个对上（去掉末尾的通用族 monospace）；无衬线只挑了设计稿 --sans 里的几个，
+# 核的是「每一个都在稿里、先后次序一样」。
+root_css = css_block(r":root")
+
+
+def families(value: str) -> list[str]:
+    return [name.strip().strip('"') for name in value.split(",")]
+
+
+mono_design = [name for name in families(root_css.get("mono-latin", "")) if name != "monospace"]
+literals += 1
+if list(tokens["font"]["mono"]) != mono_design:
+    problems.append(f"font.mono: 设计稿 --mono-latin 是 {mono_design}，令牌是 {list(tokens['font']['mono'])}")
+sans_design = iter(families(root_css.get("sans", "")))
+literals += 1
+if not all(name in sans_design for name in tokens["font"]["sans"]):
+    problems.append(f"font.sans: 令牌 {list(tokens['font']['sans'])} 不全在设计稿 --sans 里，或者先后次序不一样")
+
+# ── 豁免表：设计稿里没有可核的对应物的令牌 ──
+# 键是令牌的格名（节.键；整个数组写键名），值是一句理由：说清**设计稿里为什么没有可核的对应物**，
+# 不是「还没顾上核」。设计稿里有对应物的，写一条核对，不进这张表。
+EXEMPT: dict[str, str] = {
+    "version": "令牌文件格式的版本号（程序读令牌时核它），不是一个样式参数，设计稿里没有这一说。",
+    "font.bold-coverage": "字体预算的裁定（粗体只覆盖拉丁与数字），是个枚举；设计稿是拿 @font-face「CJK 常规」的 unicode-range 把中文钉在常规体来画出这个结果，没有一个能与之比的值。",
+    "layout.rail-collapse-below": "设计稿的窗口定宽（.win 的 min-width:1160px），左栏只靠「收起」按钮切换，没有「窄到多少自动收」这一格；800 是拿主意的人 2026-09-14 定、照 layout.rs 那三个数算出来的。",
+    "layout.card-info-height": "设计稿卡片封面下那三行是自然流排出来的（.gcard 的 gap、.gt 两行的 min-height:2.8em、.gm 一行），没有写成一个高；104 是界面为了等高行另定的。",
+    "layout.card-group-height": "设计稿组头 .ghead 的高是 padding:10px 0 8px 加字撑出来的，没有写成一个数。",
+    "layout.fold-mark": "设计稿的折叠标是 .iconbtn 里 13px 字号的一个 ▾ 字符，稿里只有字号没有宽；7 是照稿图量出来的。",
+    "layout.root-name-max": "设计稿根那张表没有给根名称那一列设上限；120 是拿主意的人 2026-09-14 定的，稿上没有这一格。",
+    "layout.health-list-max-height": "设计稿体检明细列表 .lst 没写最大高度（稿里数据少，不用滚）；420 是拿主意的人 2026-09-15 答照稿用虚拟化列表时另定的。",
+    "layout.settings-name-width": "设计稿设置屏上没有「主库原名」那一格（改名是票 gui-looks-like-the-design/31 补的落点），无从核起。",
+    "layout.radio-diameter": "设计稿单选框是浏览器原生的 <input type=radio>（.opt input 只设了 accent-color），13px 是浏览器缺省，CSS 里没写。",
+    "layout.radio-dot": "同上：选中那一粒是浏览器按 accent-color 画出来的，CSS 里没有这一格。",
+    "layout.radio-gap": "同上：圆心与外圈之间那道缝是浏览器原生单选框画出来的样子，CSS 里没有这一格。",
+    "layout.title-name-share": "设计稿标题面那张表（titleTab 里的 .tbl）没写列宽；0.30 是协调人 2026-09-15 照稿图定的比例。",
+    "space.steps": "通用间距的档位，界面随手要一个间距时从这几档里取（由代码走查守，见 tokens.rs 的 Space）；设计稿没有一处列出这几档。脚本只拿它验 .stage / .nextline 的 gap 落在档里——那是核稿，不是核这几档，不算核到。",
+    "shadow.pop.blur": "稿上 --pop 的模糊是 30、扩散是 -12，两个一起才画出「只落在下沿」的样子；egui 的扩散收不了负数，只好把模糊收窄来凑，24 是对着稿看出来的，不是从 30 算出来的，没有一个等值可核（票 gui-looks-like-the-design/04 裁定）。换算前提由上面 POP_TUNED_AGAINST 那条钉着。",
+}
+
+
+def leaves(path: str, value):
+    """令牌文件里的每一格：标量一格，数组逐格。"""
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            yield from leaves(f"{path}{key}." if isinstance(inner, dict) else f"{path}{key}", inner)
+    elif isinstance(value, list):
+        for i in range(len(value)):
+            yield f"{path}[{i}]"
+    else:
+        yield path
+
+
+all_leaves = list(leaves("", raw_tokens))
+
+
+def exempt_by(leaf: str):
+    """这一格被豁免表里哪一条管着：它自己，或者它所在的那个数组。"""
+    for name in (leaf, leaf.split("[")[0]):
+        if name in EXEMPT:
+            return name
+    return None
+
+
+def squeeze(names: list[str]) -> list[str]:
+    """一个数组的每一格都在名单上，就只写键名。"""
+    rows: dict[str, list[str]] = {}
+    for name in names:
+        rows.setdefault(name.split("[")[0], []).append(name)
+    out = []
+    for key, items in rows.items():
+        whole = [leaf for leaf in all_leaves if leaf.startswith(key + "[")]
+        out.extend([key] if whole and len(items) == len(whole) else items)
+    return out
+
+
+missing = [leaf for leaf in all_leaves if leaf not in covered and exempt_by(leaf) is None]
+both = [leaf for leaf in all_leaves if leaf in covered and exempt_by(leaf) is not None]
+used = {exempt_by(leaf) for leaf in all_leaves}
+stale = [name for name in EXEMPT if name not in used]
+blank = [name for name, why in EXEMPT.items() if not why.strip()]
+if missing:
+    problems.append(
+        f"没人核的令牌 {len(missing)} 格（写一条核对，或者进 EXEMPT 并写明设计稿里为什么没有可核的对应物）：\n  "
+        + "\n  ".join(squeeze(missing))
+    )
+if both:
+    problems.append("既核了又在豁免表里（删掉豁免那一条）：" + "、".join(squeeze(both)))
+if stale:
+    problems.append("豁免表里有、令牌文件里没有（令牌删了或改了名，豁免那一条跟着删）：" + "、".join(stale))
+if blank:
+    problems.append("豁免表里没写理由：" + "、".join(blank))
+
 if problems:
     print("\n".join(problems))
     sys.exit(1)
 n = sum(len(tokens["color"][t]) for t in ("light", "dark")) + len(pcol) + 3 + buttons + literals
-print(f"一致：核对了 {n} 项")
+hit = sum(leaf in covered for leaf in all_leaves)
+print(f"一致：核对了 {n} 项；令牌 {len(all_leaves)} 格，核到 {hit} 格、豁免 {len(all_leaves) - hit} 格")
