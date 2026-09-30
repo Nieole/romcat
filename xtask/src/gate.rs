@@ -55,6 +55,52 @@ use std::time::Instant;
 /// 私有条目改成公开来消警——那是改 API 面；改成不带链接的代码体即可。
 const DOC_ENV: &[(&str, &str)] = &[("RUSTDOCFLAGS", "-D warnings")];
 
+/// 门禁起每一条子进程前**清掉**的环境变量：`cargo run` 塞给 xtask、会让内层 cargo 的编译指纹
+/// 与裸跑对不上的那几个。
+///
+/// # 它们是什么
+///
+/// `cargo xtask` 是 `cargo run --quiet --package xtask --` 的别名（`.cargo/config.toml`）。
+/// `cargo run` 起 xtask 时往它的进程里塞了一份**描述 xtask 这个包**的变量：`CARGO_MANIFEST_DIR`、
+/// `CARGO_PKG_NAME`、`CARGO_PKG_VERSION_*` 等等。它们只对 xtask 自己有意义，
+/// 门禁起的内层 cargo 却原样继承了下去。
+///
+/// # 为什么让指纹不同
+///
+/// `ring` 的构建脚本对下面这六个声明了 `cargo:rerun-if-env-changed`。cargo 记这种指纹时
+/// 读的是**它自己进程里**的值，不是它递给构建脚本的那份：在终端里裸跑 `cargo`，
+/// 进程里没有这几个；门禁里的内层 cargo 有，值是 xtask 的。于是两边一换手，`ring` 的构建脚本
+/// 就判成脏的、重跑一遍 C 与汇编，连带 `ring` → `rustls` / `rustls-webpki` → `ureq` →
+/// 三个 `romcat` crate 一共七个 crate 重编（`-j 3` 一趟一分多钟）；来回一趟，裸跑与门禁
+/// 各白付一次（挂单 `Q1168`，票 `gate-and-tests/03`）。
+///
+/// # 怎么追出来的、往后怎么再追
+///
+/// 2026-09-30 在本机（Homebrew 的 cargo 1.98.0）上：先跑一趟门禁里那条内层 cargo，再裸跑同一条，
+/// 裸跑带 `CARGO_LOG=cargo::core::compiler::fingerprint=info`，唯一一处不是「依赖变了」的脏因是
+/// `ring` 构建脚本上的 `EnvVarChanged { name: "CARGO_MANIFEST_DIR", old_value: Some(".../xtask"),
+/// new_value: None }`。cargo 每个单元只报**第一处**不同，所以实测到的只有这一个名字；另外五个是
+/// 拿 `ring` 构建脚本印出的 `rerun-if-env-changed` 全表（`target/debug/build/ring-*/output`）与
+/// `cargo run` 实际塞进来的变量对交集推出来的——整个依赖图里盯着 `cargo run` 所塞变量的构建脚本
+/// 只有 `ring` 一个。六个一起清掉之后，同样的顺序再跑一遍不再有 `EnvVarChanged`（回执在那张票里）。
+/// 哪天换了依赖、裸跑与门禁又开始互顶，照这个办法再追一遍，把新的名字补进来。
+///
+/// # 只清这几个，不整份清空
+///
+/// 门禁要的 `RUSTDOCFLAGS`（见 [`DOC_ENV`]）、`TMPDIR`、`PATH` 等照旧递下去；`CARGO` 也留着——
+/// [`cargo`] 靠它挑同一个 cargo。`cargo run` 塞的别的几个（`CARGO_MANIFEST_PATH`、
+/// 其余 `CARGO_PKG_*`、`DYLD_FALLBACK_LIBRARY_PATH`）眼下没有哪个构建脚本盯着，追不出它们
+/// 动了指纹，就不清。清掉这六个之后，`cargo xtask gate --list` 印出来的那几行拿去终端里敲，
+/// 与门禁里跑的共用同一份编译缓存。
+const CARGO_RUN_VARS_THAT_FLIP_FINGERPRINTS: &[&str] = &[
+    "CARGO_MANIFEST_DIR",
+    "CARGO_PKG_NAME",
+    "CARGO_PKG_VERSION_MAJOR",
+    "CARGO_PKG_VERSION_MINOR",
+    "CARGO_PKG_VERSION_PATCH",
+    "CARGO_PKG_VERSION_PRE",
+];
+
 /// 跑门禁时给这台机器留多少余量。
 ///
 /// 默认两项都是 `None`——按机器给的资源跑，不递任何开关。
@@ -119,10 +165,17 @@ impl Step {
     }
 
     /// 折成一条可以跑的命令，工作目录设成 `dir`。
+    ///
+    /// 清掉 `CARGO_RUN_VARS_THAT_FLIP_FINGERPRINTS` 那几个继承来的变量（`cargo run` 塞给 xtask、
+    /// 会让内层 cargo 与裸跑互顶编译缓存的，理由写在那个常量上），其余环境照旧继承，
+    /// 再加上这一条自己要的。
     #[must_use]
     pub fn command_in(&self, dir: &Path) -> Command {
         let mut command = Command::new(cargo());
         command.args(&self.args).current_dir(dir);
+        for key in CARGO_RUN_VARS_THAT_FLIP_FINGERPRINTS {
+            command.env_remove(key);
+        }
         for (key, value) in &self.env {
             command.env(key, value);
         }
