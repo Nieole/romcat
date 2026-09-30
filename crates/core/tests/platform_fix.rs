@@ -5,15 +5,22 @@
 //! 2. **下一趟识别**：按纠正后的平台重新匹配，而「目录声明的平台」那一列一个字不动
 //!    （票 `one-criterion-per-thing/03` 那条对照物）。
 //! 3. **ADR-0004**：从头到尾**盘上一个字节都没动**——整份快照逐字节相同。
+//!
+//! 外加一件同一条回退链上的事（挂单 `Q602`）：**人裁决过的变体照样按卡带头判平台**。裁决说的是
+//! 它是哪个发行版，不是它属于哪个平台；放错目录的一张卡被认真裁过之后，平台不许反而退回目录声明的那个。
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
 use romcat_core::catalog::{Catalog, Roots};
-use romcat_core::dat::repo::DatRepo;
+use romcat_core::dat::Convention;
+use romcat_core::dat::chinese::ChineseMark;
+use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
+use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
 use romcat_core::fs::RealFs;
-use romcat_core::identify::{self, DecidedPlatforms, Options, fuzzy};
+use romcat_core::identify::cart::{self as cart_head, Cart};
+use romcat_core::identify::{self, DecidedPlatforms, Options, VERDICT_SOURCE, fuzzy};
 use romcat_core::platform::Manifest;
 use romcat_core::report::{CorrectionGroups, HealthReport};
 use romcat_core::scan::aggregate::Limits;
@@ -23,8 +30,14 @@ use romcat_core::testing::cart as real;
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::verdict::{self, PlatformDecision, Store};
 
-/// 这份主库在盘上叫什么。
+/// 这份主库的**主库标识**：平台纠正按它记，路径锚的裁决也按它钉。
 const LIBRARY: &str = "这一份主库";
+
+/// 放错目录的那张卡带：头是真的 GBC 卡（《007 黑日危机》繁体修正版），躺在 `psp/` 底下。
+const 放错目录的卡带: &str = "psp/放错的/007 黑日危机 繁体修正版.gbc";
+
+/// 那张卡带整份多大。比判平台要读的那段头大得多——读了整份还是只读头，一眼分得出来。
+const 卡带多大: usize = 1 << 16;
 
 struct 现场 {
     dir: TempDir,
@@ -40,6 +53,10 @@ struct 现场 {
 ///   NDS。这一组用来看「保持目录的说法」——它要**压得过内容那一层**，否则人定完等于没定。
 /// - `gba/` 底下还有一份本分的 `.gba`：同一个目录里不冲突的那一份一点不受影响。
 /// - `杂物/` 底下也有一份 `.nds`——**未纳入管理的目录不进识别管线**，不算一条冲突（ADR-0011 修订段）。
+/// - `psp/` 底下一张 **GBC 卡**（真头，`testing::cart`）——ADR-0011 说的「放错」，真库里 `psp/`
+///   目录下就混着整包的 GB ROM（`identify::platform_of` 的文档）。`.gbc` 在平台清单里没有扩展名
+///   那一列，所以库体检的那几组不数它；它是给**裁决过的变体照样按卡带头判平台**那几条用的
+///   （挂单 `Q602`）。
 fn 建现场() -> 现场 {
     let dir = temp_dir("platform-fix");
     let root = dir.path();
@@ -58,6 +75,7 @@ fn 建现场() -> 现场 {
             "杂物/放错的.nds",
             real::padded(&real::NDS_GYAKUTEN_KENJI, 1 << 15),
         ),
+        (放错目录的卡带, real::padded(&real::GBC_TWINE, 卡带多大)),
     ] {
         let 落点 = root.join(相对);
         fs::create_dir_all(落点.parent().expect("有上级目录")).expect("建得出目录");
@@ -98,21 +116,23 @@ fn 那一层(现场: &现场) -> CorrectionGroups {
     )
 }
 
-/// 跑一趟识别，带上人定过的那些平台纠正。
-fn 跑一趟识别(现场: &mut 现场) {
+/// 跑一趟识别，带上人定过的那些平台纠正与裁决；`回盘读` 关掉时一个字节都不读主库。
+fn 跑一趟识别(现场: &mut 现场, 回盘读: bool) -> identify::Outcome {
     let corrections = 现场
         .store
         .platform_corrections(LIBRARY)
         .expect("读得出人定过的那些");
+    let 裁决 = verdict::Index::load(&现场.store, LIBRARY).expect("读得出沉淀库");
     let mut options = Options::new(Roots::single("库", 现场.dir.path()));
     options.decided_platforms = Some(DecidedPlatforms::new(&Manifest::builtin(), &corrections));
-    let repo = DatRepo::in_memory().expect("开得出 DAT 库");
+    options.read_library = 回盘读;
+    let repo = 建_dat();
     identify::run(
         &RealFs::new(),
         &mut 现场.catalog,
         &identify::Ammo {
             repo: &repo,
-            verdicts: &verdict::Index::default(),
+            verdicts: &裁决,
             naming: &fuzzy::Naming::off(),
             guessing: &identify::model::Guessing::off(),
             titledb: None,
@@ -121,7 +141,128 @@ fn 跑一趟识别(现场: &mut 现场) {
         &CancelToken::new(),
         &mut |_| {},
     )
-    .expect("识别跑得动");
+    .expect("识别跑得动")
+}
+
+/// DAT 库里两份，各一条，哈希都对不上盘上任何一份：
+///
+/// - **GBC**：那张卡的原版，序列号是卡带头里那个 `BO7E`。放它进来是为了让「裁决短路那一步
+///   **不产出候选**」这句话验得出来：没人裁过的时候，卡带那一层拿头里的游戏码撞得出这一条；
+///   裁过之后同样读了头，却一条都不许撞出来。
+/// - **PSP**：随便一条。有了它，`psp/` 底下的裸文件才会回盘算哈希（DAT 库里一条都没有的平台
+///   不读，读出来也无处可撞）——按**内容锚**钉的裁决要到那之后才问得着，走的是第二处短路。
+fn 建_dat() -> DatRepo {
+    let mut repo = DatRepo::in_memory().expect("开得出 DAT 库");
+    for (dat, platform, game, serial) in [
+        (
+            "Nintendo - Game Boy Color",
+            "GBC",
+            "007 - The World Is Not Enough (USA, Europe)",
+            Some("BO7E"),
+        ),
+        (
+            "Sony - PlayStation Portable",
+            "PSP",
+            "Some PSP Game (Japan)",
+            None,
+        ),
+    ] {
+        let mut writer = repo
+            .begin(&Unit {
+                source: "No-Intro".to_string(),
+                name: dat.to_string(),
+                url: "https://example.invalid/dat".to_string(),
+                fingerprint: "sha".to_string(),
+            })
+            .expect("开得了事务");
+        writer
+            .write_dat(
+                &DatMeta {
+                    name: dat.to_string(),
+                    platform: platform.to_string(),
+                    convention: Convention::AsIs,
+                    header: DatHeader::default(),
+                },
+                &[GameRecord {
+                    name: game.to_string(),
+                    roms: vec![RomRecord {
+                        name: format!("{game}.rom"),
+                        size: Some(1),
+                        crc32: Some(0xDEAD_BEEF),
+                        serial: serial.map(ToString::to_string),
+                        ..RomRecord::default()
+                    }],
+                    ..GameRecord::default()
+                }],
+            )
+            .expect("写得进");
+        writer.commit().expect("提交");
+    }
+    repo
+}
+
+/// 往沉淀库里钉一条裁决：那张放错目录的卡带是《007 黑日危机》的一次发行，汉化组与第几版
+/// 都说了——**平台一个字没说**，那不归人裁（`identify::Projector::project`）。
+fn 钉一条裁决(现场: &mut 现场, 锚: verdict::Anchor) {
+    现场
+        .store
+        .put(&verdict::Verdict::now(
+            锚,
+            verdict::Decision::Release(verdict::Facts {
+                work: "007 黑日危机".to_string(),
+                chinese: Some(ChineseMark::FanTranslated),
+                team: Some("某汉化组".to_string()),
+                version: Some("繁体修正版".to_string()),
+                ..verdict::Facts::default()
+            }),
+        ))
+        .expect("写得进");
+}
+
+/// 钉在那张卡带的路径上：拿不到内容判据也查得着，第一处短路（读盘之前）就问着。
+fn 路径锚(现场: &现场) -> verdict::Anchor {
+    verdict::Anchor::Path {
+        library: LIBRARY.to_string(),
+        variant_key: 变体键(现场, 放错目录的卡带),
+    }
+}
+
+/// 钉在那张卡带的内容上（CRC-32 加大小）：裸文件的 CRC-32 要回盘算过才有，第二处短路才问着。
+fn 内容锚() -> verdict::Anchor {
+    let mut crc = flate2::Crc::new();
+    crc.update(&real::padded(&real::GBC_TWINE, 卡带多大));
+    verdict::Anchor::Content {
+        crc32: crc.sum(),
+        size: 卡带多大 as u64,
+        sha1: None,
+    }
+}
+
+/// 中立库里那个变体的键：键里带着盘上那条相对路径。
+fn 变体键(现场: &现场, 相对: &str) -> String {
+    现场
+        .catalog
+        .variants()
+        .expect("读得出变体")
+        .into_iter()
+        .find(|variant| variant.key.ends_with(相对))
+        .unwrap_or_else(|| panic!("{相对} 该是一个变体"))
+        .key
+}
+
+/// 这一趟识别**为这个变体**读了多少字节：它那条结论上记着的数（`identification.read_bytes`）。
+fn 为它读了(现场: &现场, 相对: &str) -> u64 {
+    let 键 = 变体键(现场, 相对);
+    let mut 读了 = None;
+    现场
+        .catalog
+        .for_each_identification(&mut |_, _, _, key, read_bytes| {
+            if key == 键 {
+                读了 = Some(read_bytes);
+            }
+        })
+        .expect("读得出结论");
+    读了.unwrap_or_else(|| panic!("{相对} 这一趟该有一条结论"))
 }
 
 /// 这个变体**按哪个平台算**：读的是识别落下来的那一列（`identification.platform`）。
@@ -184,7 +325,7 @@ fn 平台冲突按组列出来_每组说得出从哪到哪几条凭什么两条�
 #[test]
 fn 按内容改之后下一趟识别按新平台算_目录声明的那一列一个字不动_那一格不再数它() {
     let mut 现场 = 建现场();
-    跑一趟识别(&mut 现场);
+    跑一趟识别(&mut 现场, true);
     assert_eq!(
         按哪个平台算(&现场, "塞尔达传说.fds").as_deref(),
         Some("FC"),
@@ -196,7 +337,7 @@ fn 按内容改之后下一趟识别按新平台算_目录声明的那一列一�
         .set_platform_correction(LIBRARY, "FC", "FDS", PlatformDecision::ByContent)
         .expect("记得下");
     现场.catalog.clear_identifications().expect("清得掉上一趟");
-    跑一趟识别(&mut 现场);
+    跑一趟识别(&mut 现场, true);
 
     assert_eq!(
         按哪个平台算(&现场, "塞尔达传说.fds").as_deref(),
@@ -231,7 +372,7 @@ fn 保持目录的说法压得过内容那一层_而且不再问第二遍() {
     // NDS（ADR-0011）。人说保持目录的说法，它就得压过去——否则定完下一趟识别照旧按 NDS 算，
     // 而那正是他说不要的。
     let mut 现场 = 建现场();
-    跑一趟识别(&mut 现场);
+    跑一趟识别(&mut 现场, true);
     assert_eq!(
         按哪个平台算(&现场, "逆转裁判4.nds").as_deref(),
         Some("NDS"),
@@ -243,7 +384,7 @@ fn 保持目录的说法压得过内容那一层_而且不再问第二遍() {
         .set_platform_correction(LIBRARY, "GBA", "NDS", PlatformDecision::KeepDeclared)
         .expect("记得下");
     现场.catalog.clear_identifications().expect("清得掉上一趟");
-    跑一趟识别(&mut 现场);
+    跑一趟识别(&mut 现场, true);
 
     assert_eq!(
         按哪个平台算(&现场, "逆转裁判4.nds").as_deref(),
@@ -287,7 +428,7 @@ fn 纠正一整轮下来盘上的文件一个字节都没动() {
     let mut 现场 = 建现场();
     let 之前 = 快照(现场.dir.path());
 
-    跑一趟识别(&mut 现场);
+    跑一趟识别(&mut 现场, true);
     现场
         .store
         .set_platform_correction(LIBRARY, "FC", "FDS", PlatformDecision::ByContent)
@@ -297,7 +438,7 @@ fn 纠正一整轮下来盘上的文件一个字节都没动() {
         .set_platform_correction(LIBRARY, "GBA", "NDS", PlatformDecision::KeepDeclared)
         .expect("记得下");
     现场.catalog.clear_identifications().expect("清得掉上一趟");
-    跑一趟识别(&mut 现场);
+    跑一趟识别(&mut 现场, true);
     let _ = 那一层(&现场);
     现场
         .store
@@ -308,6 +449,153 @@ fn 纠正一整轮下来盘上的文件一个字节都没动() {
         之前,
         快照(现场.dir.path()),
         "纠正不移动、不改名、不改写任何一个文件"
+    );
+}
+
+#[test]
+fn 裁决过的放错目录的卡带照样按卡带头判平台_目录声明的与裁决说的一个字不动() {
+    // 对照：**没人裁过**的同一张卡，识别读了卡带头，判的是头里那一族；卡带那一层还拿头里的
+    // 游戏码撞得出一条候选。
+    let mut 没裁过的 = 建现场();
+    let 对照 = 跑一趟识别(&mut 没裁过的, true);
+    assert_eq!(
+        按哪个平台算(&没裁过的, 放错目录的卡带).as_deref(),
+        Some("GBC"),
+        "没人裁过的时候，平台按卡带头算"
+    );
+    assert!(对照.cart.candidates >= 1, "没人裁过时卡带那一层撞得出一条");
+
+    // 同一张卡，**第一趟识别之前**就钉上一条裁决（删库重扫之后就是这样：中立库是新的，
+    // 裁决钉在路径上，卡带头一次都没读过）。
+    let mut 现场 = 建现场();
+    let 锚 = 路径锚(&现场);
+    钉一条裁决(&mut 现场, 锚);
+    let 这一趟 = 跑一趟识别(&mut 现场, true);
+    assert_eq!(这一趟.from_verdicts, 1, "这一趟真是裁决短路的");
+
+    assert_eq!(
+        按哪个平台算(&现场, 放错目录的卡带).as_deref(),
+        Some("GBC"),
+        "人裁过它是哪个发行版，平台照样按卡带头算——与没裁过的那张判出同一个"
+    );
+    assert_eq!(
+        目录声明的(&现场, 放错目录的卡带).as_deref(),
+        Some("PSP"),
+        "「目录声明的平台」那一列一个字不动"
+    );
+    let 冲突 = 现场.catalog.platform_conflicts(10).expect("查得出");
+    let 它 = 冲突
+        .iter()
+        .find(|it| it.variant_key.ends_with(放错目录的卡带))
+        .expect("平台冲突那张报表报得出它：目录说 PSP，卡带头说 GBC");
+    assert_eq!((它.declared.as_str(), 它.found.as_str()), ("PSP", "GBC"));
+
+    // 裁决说的那几样照旧：这一步只补平台那一格。
+    let 键 = 变体键(&现场, 放错目录的卡带);
+    let 候选 = 现场.catalog.candidates_of(&键).expect("读得出候选");
+    assert_eq!(
+        候选.len(),
+        1,
+        "这一趟没为它产出候选，只有裁决落成的那一条：{候选:?}"
+    );
+    assert_eq!(候选[0].source, VERDICT_SOURCE);
+    assert_eq!(候选[0].game, "007 黑日危机", "裁决说的作品照旧");
+    assert!(候选[0].release_id.is_some(), "裁决说的发行版照旧");
+    assert_eq!(候选[0].chinese, Some(ChineseMark::FanTranslated));
+    assert!(
+        候选[0].evidence.contains("某汉化组"),
+        "裁决说的汉化组照旧：{}",
+        候选[0].evidence
+    );
+    assert_eq!(
+        现场
+            .catalog
+            .decided_edition(&键)
+            .expect("读得出")
+            .as_deref(),
+        Some("繁体修正版"),
+        "裁决说的第几版照旧"
+    );
+    assert_eq!(这一趟.cart.candidates, 0, "卡带那一层这一趟一条候选都没撞");
+
+    // 读盘：只读判平台所需的那段头，不读整份。
+    let 读了 = 为它读了(&现场, 放错目录的卡带);
+    let 头多长 = cart_head::probe_len(Cart::GameBoy, 卡带多大 as u64) as u64;
+    assert!(
+        读了 > 0 && 读了 <= 头多长,
+        "只读判平台所需的头（至多 {头多长} 字节），这一趟为它读了 {读了}"
+    );
+}
+
+#[test]
+fn 裁决过的卡带头读过一次就落库_下一趟一个字节都不读() {
+    let mut 现场 = 建现场();
+    let 锚 = 路径锚(&现场);
+    钉一条裁决(&mut 现场, 锚);
+    跑一趟识别(&mut 现场, true);
+    assert!(
+        为它读了(&现场, 放错目录的卡带) > 0,
+        "头一趟中立库里还没有算过的卡带头，要读"
+    );
+
+    // 卡带头已经在中立库里了（上一趟裁决短路那一步读完落的库）。
+    let 下一趟 = 跑一趟识别(&mut 现场, true);
+    assert_eq!(下一趟.from_verdicts, 1, "这一趟也是裁决短路的");
+    assert_eq!(为它读了(&现场, 放错目录的卡带), 0, "为它一个字节都不读");
+    assert_eq!(下一趟.read_bytes, 0, "整趟一个字节都不读");
+    assert_eq!(
+        按哪个平台算(&现场, 放错目录的卡带).as_deref(),
+        Some("GBC"),
+        "平台照样按取回来的卡带头算"
+    );
+}
+
+#[test]
+fn 关掉回盘读又没算过卡带头时_裁决过的卡带平台照旧按目录声明_一个字节都不读() {
+    let mut 现场 = 建现场();
+    let 锚 = 路径锚(&现场);
+    钉一条裁决(&mut 现场, 锚);
+    let 这一趟 = 跑一趟识别(&mut 现场, false);
+    assert_eq!(这一趟.from_verdicts, 1, "这一趟真是裁决短路的");
+    assert_eq!(为它读了(&现场, 放错目录的卡带), 0);
+    assert_eq!(这一趟.read_bytes, 0, "关掉回盘读就一个字节都不读主库");
+    assert_eq!(
+        按哪个平台算(&现场, 放错目录的卡带).as_deref(),
+        Some("PSP"),
+        "卡带头中立库里没算过、又不许读，平台只好照旧按目录声明"
+    );
+}
+
+#[test]
+fn 按内容锚裁决的裸文件回盘算完哈希才问着裁决_平台照样按卡带头算() {
+    // 第二处短路：裸文件的 CRC-32 要回盘算过才有，裁决要到那之后才问得着（`identify_variant`
+    // 的第一之二步）。这一处与读盘之前那一处走同一步补依据，平台照样按卡带头算。
+    let mut 现场 = 建现场();
+    钉一条裁决(&mut 现场, 内容锚());
+    let 这一趟 = 跑一趟识别(&mut 现场, true);
+    assert_eq!(这一趟.from_verdicts, 1, "这一趟真是裁决短路的");
+    assert!(
+        为它读了(&现场, 放错目录的卡带) >= 卡带多大 as u64,
+        "先整份读过一遍算哈希，裁决才问得着"
+    );
+    assert_eq!(
+        按哪个平台算(&现场, 放错目录的卡带).as_deref(),
+        Some("GBC"),
+        "回盘之后才问着的裁决，平台照样按卡带头算"
+    );
+    assert_eq!(
+        目录声明的(&现场, 放错目录的卡带).as_deref(),
+        Some("PSP"),
+        "「目录声明的平台」那一列一个字不动"
+    );
+    let 候选 = 现场
+        .catalog
+        .candidates_of(&变体键(&现场, 放错目录的卡带))
+        .expect("读得出候选");
+    assert_eq!(
+        候选.iter().map(|it| it.source.as_str()).collect::<Vec<_>>(),
+        vec![VERDICT_SOURCE],
+        "这一趟没为它产出候选，只有裁决落成的那一条"
     );
 }
 
