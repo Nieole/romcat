@@ -684,56 +684,6 @@ fn 报告数得出选中多少条与多少容量() {
 }
 
 #[test]
-fn 换掉规则时读不懂的那几条原样留着() {
-    // 「**改选择**」那条回程走的是 `replace_rules`（票 `gui-redesign/11`）：筛选器折出来
-    // 的是**一条**，所以是换而不是加——加的话旧那几条还在，子库选出来的就比屏上多。
-    let mut catalog = 现场();
-    建子库(&mut catalog, "掌机", None);
-    加规则(&mut catalog, "掌机", "平台=GB");
-    加规则(&mut catalog, "掌机", "平台=SFC");
-    // 中立库是个 SQLite 文件，人打得开；换一版程序、删掉一个维度之后旧规则也会读不懂。
-    catalog
-        .add_rule(
-            "掌机",
-            &Rule {
-                text: "这不是一条规则".to_string(),
-                root: romcat_core::sublibrary::Group::new(
-                    romcat_core::sublibrary::Join::All,
-                    Vec::new(),
-                ),
-            },
-            None,
-        )
-        .expect("写得进");
-
-    let 新的 = Rule::parse("平台=GB 或 平台=SFC").expect("读得懂");
-    catalog.replace_rules("掌机", &新的).expect("换得了");
-
-    let 剩下的: Vec<String> = catalog
-        .sublibrary_rules("掌机")
-        .expect("读得动")
-        .into_iter()
-        .map(|stored| stored.text)
-        .collect();
-    assert_eq!(
-        剩下的,
-        vec![
-            "这不是一条规则".to_string(),
-            "平台=GB 或 平台=SFC".to_string()
-        ],
-        "读得懂的那两条该被换掉，读不懂的那条该原样留着",
-    );
-    // **序号不复用**：换一趟之后新那条拿的是下一个号，不是被删掉那两个之一。
-    let ordinals: Vec<i64> = catalog
-        .sublibrary_rules("掌机")
-        .expect("读得动")
-        .into_iter()
-        .map(|stored| stored.ordinal)
-        .collect();
-    assert_eq!(ordinals, vec![3, 4]);
-}
-
-#[test]
 fn 扔掉读不懂的那一条不碰读得懂的那几条与例外() {
     // 票 `gui-redesign/14`：一条读不回来的规则在界面上处置得掉，而处置它**只删它自己**。
     // 这道闸落在核心里而不是界面上（ADR-0005）：界面只递一个序号过来，

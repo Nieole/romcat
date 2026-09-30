@@ -1910,7 +1910,7 @@ impl WorkQuery {
         Ok(Some(Rule::from_group(Group::new(Join::All, nodes))))
     }
 
-    /// 把一条规则预填进筛选器：子库屏点「改选择」跳回浏览屏时走的那条路
+    /// 把一条规则预填进筛选器：子库屏规则行上点「✎」跳回浏览屏时走的那条路
     /// （票 `gui-redesign/11`）。排序不属于筛选，留给调用方自己补。
     #[must_use]
     pub fn from_rule(rule: Rule) -> Self {

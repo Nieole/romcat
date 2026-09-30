@@ -18,9 +18,9 @@
 //!    `WHERE`，内存里永远只有当前视口那几十行。
 //!
 //!    **那棵条件组就是子库的规则**：筛到满意按「存成子库」，条件原样变成那个子库的
-//!    规则（[`WorkQuery::to_rule`]）；反过来子库屏点「改选择」跳回来，规则预填进筛选器
-//!    （[`Screen::begin_editing`]），调完按「更新到子库」原样换回去
-//!    （[`Screen::update_sublibrary`]）。**例外也在这一趟里加减**——「哪一份」只有在
+//!    规则（[`WorkQuery::to_rule`]）；反过来子库屏规则行上点「✎」跳回来，那一条规则预填进筛选器
+//!    （[`Screen::begin_editing`]），调完按「更新到子库」只换回那一条、名字与序号照旧；卡头点「从浏览添加…」
+//!    跳回来时筛选器空着，筛好按「更新到子库」给那一台新添一条（[`Screen::update_sublibrary`]）。**例外也在这一趟里加减**——「哪一份」只有在
 //!    详情面板里才指得准（[`Screen::set_exception`]）。
 //!
 //!    左栏顶上还有一个**搜索框**（票 `gui-redesign/05`）。**它与筛选器不是一类
@@ -48,7 +48,7 @@
 //!
 //! - 选中主列表的行 ＝ 选中这些**作品**，批量操作作用于它们的变体
 //!   （[`Catalog::scoped_variants`]，随当前筛选收窄；不筛的时候就是全部变体）。
-//! - 在详情面板里选中某一个**变体** ＝ 变体级的操作只作用于它：改选择那一趟里给它记一条
+//! - 在详情面板里选中某一个**变体** ＝ 变体级的操作只作用于它：改子库那一趟里给它记一条
 //!   例外、看它凭什么落在这一档。
 //!
 //! 两件事各有各的状态（[`Picked`] 与 [`Screen::variant_key`]），混成一件的话，
@@ -331,11 +331,11 @@ impl Default for TitleDraft {
     }
 }
 
-/// 「**改选择**」跳过来之后，这一屏正在改的是哪个子库。
+/// 子库屏「**从浏览添加…**」或规则行上「**✎**」跳过来之后，这一屏正在改的是哪个子库。
 ///
-/// 子库屏管「送到哪」、浏览屏管「选什么」（票 `gui-redesign/11`）。跳过来时那个子库的
+/// 子库屏管「送到哪」、浏览屏管「选什么」（票 `gui-redesign/11`）。「✎」跳过来时那一条
 /// 规则已经预填进筛选器，人在这儿改的时候**看得见它真的筛出了什么**；调完按
-/// 「更新到子库」原样带回去。
+/// 「更新到子库」只换回那一条。「从浏览添加…」跳过来时筛选器空着，筛好按「更新到子库」新添一条。
 ///
 /// **例外也在这儿加减**：规则表达不了的个人口味落在某一个变体上（ADR-0016），
 /// 而「某一个变体」只有在详情面板里才指得准。
@@ -350,8 +350,8 @@ pub struct Editing {
     pub sublibrary: String,
     /// 这个子库**读不懂**的那几条规则，原样带过来的。
     ///
-    /// 它们没参与求值，「更新到子库」也不会碰它们（`Catalog::replace_rules` 只换
-    /// 读得懂的那几条）；这一栏给的是另一条路——[`Screen::discard_broken_rule`]。
+    /// 它们没参与求值，「更新到子库」也不会碰它们（它只换「✎」那一条、或者新添一条）；
+    /// 这一栏给的是另一条路——[`Screen::discard_broken_rule`]。
     pub broken: Vec<BrokenRule>,
     /// 这个子库眼下的例外：变体的键 → 方向与那句话。
     pub exceptions: BTreeMap<String, ExceptionRow>,
@@ -359,8 +359,11 @@ pub struct Editing {
     ///
     /// 它在详情面板里，那儿不虚拟化——**唯一会碰到输入法的位置**（ADR-0005 的修订段）。
     pub note: String,
-    /// 子库屏规则行上「✎」跳过来的：只改这个子库的**第几条**规则，「更新到子库」只换回这一条
-    /// （`Catalog::replace_rule`，票 `gui-looks-like-the-design/20`）。`None` 是「改选择」那种整批改。
+    /// 只改这个子库的**第几条**规则，「更新到子库」只换回这一条、名字与序号照旧
+    /// （`Catalog::replace_rule`，子库屏规则行上「✎」，票 `gui-looks-like-the-design/20`）。
+    ///
+    /// `None` 是子库屏卡头「从浏览添加…」：「更新到子库」时**新添一条**，已有的一条不碰
+    /// （挂单 `Q1184`；拿主意的人 2026-09-30 改裁，挂单 `Q1269`）。
     pub ordinal: Option<i64>,
 }
 
@@ -421,7 +424,7 @@ pub struct Screen {
     ///
     /// **全窗口只有库屏那一处排它**：两处各排一趟的话，报告会有两份各说各的。
     reshaped: bool,
-    /// 「**改选择**」跳过来了，正在改这个子库的选择集。`None` 是平常的浏览。
+    /// 子库屏「从浏览添加…」或「✎」跳过来了，正在改这个子库的选择集。`None` 是平常的浏览。
     editing: Option<Editing>,
     /// 「更新到子库」按完了，等窗口把人送回子库屏（[`crate::app::App::route`]）。
     returned: Option<String>,
@@ -1983,8 +1986,8 @@ impl Screen {
 
     /// 把一条**规则**预填进筛选器，并当场按它筛。
     ///
-    /// 子库屏点「改选择」跳回浏览屏时走的就是它（票 `gui-redesign/11`）：**规则原样摊在
-    /// 筛选器里**，人改的时候看得见它真的筛出了什么。反过来那一半是
+    /// 子库屏规则行上点「✎」跳回浏览屏时走的就是它（票 `gui-redesign/11`、`gui-looks-like-the-design/20`）：
+    /// **规则原样摊在筛选器里**，人改的时候看得见它真的筛出了什么。反过来那一半是
     /// [`WorkQuery::to_rule`]。
     pub fn set_filter_rule(&mut self, rule: Option<Rule>) {
         self.filter.set_rule(rule.clone());
@@ -2008,13 +2011,14 @@ impl Screen {
         self.editing.as_ref()
     }
 
-    /// 「**改选择**」跳过来了：把这个子库的规则预填进筛选器，并当场按它筛。
+    /// 子库屏「从浏览添加…」或「✎」跳过来了：把 `rule` 预填进筛选器（`None` 就空着），并当场按它筛。
     ///
-    /// **整份筛选换成这一条**，不是往现有的筛选上再叠一层：屏上摆着的必须正好是
-    /// 这个子库选出来的那一批，多一个档、多一条搜索词，人核对的就不是同一件事了。
+    /// **整份筛选换成这一条**，不是往现有的筛选上再叠一层：「✎」跳过来时屏上摆着的必须正好是
+    /// 那一条规则选出来的那一批，多一个档、多一条搜索词，人核对的就不是同一件事了；「从浏览添加…」
+    /// 跳过来时从一张白纸筛起，上一趟留下的筛选不混进要新添的那一条。
     /// 排序留着——它不属于筛选（`WorkQuery::from_rule` 的文档说的就是这件事）。
     ///
-    /// 窗口按下「改选择」时走的就是它（[`crate::app::App::route`]），
+    /// 窗口转那一下时走的就是它（[`crate::app::App::route`]），
     /// 实测与测试拿它当那一下。
     pub fn begin_editing(
         &mut self,
@@ -2072,7 +2076,7 @@ impl Screen {
 
     /// **别处改过某个子库的例外**，手上缓着的那一份跟着重读（挂单 `Q812`）。
     ///
-    /// 例外是**一按就落库**的，而这一屏「改选择」开着时手上缓着一份——子库屏那层
+    /// 例外是**一按就落库**的，而这一屏正在改子库时手上缓着一份——子库屏那层
     /// 「手动例外」弹层（票 `gui-looks-like-the-design/22`）与删减建议表上的「排除」都写得动它。
     /// 不转告的话这儿画的是改之前那几条，而人正对着同一个子库。
     ///
@@ -2099,11 +2103,15 @@ impl Screen {
         self.editing = None;
     }
 
-    /// 「**更新到子库**」：把屏上这份筛选原样折回一条规则，换掉那个子库读得懂的规则。
+    /// 「**更新到子库**」：把屏上这份筛选原样折回一条规则，带回那个子库。只有两条路（挂单 `Q1184`）：
     ///
-    /// 换而不是加（`Catalog::replace_rules`）：筛选器是一棵树，它折出来的本来就是
-    /// **一条**；往上加的话旧那几条还在，子库选出来的就比屏上多——而那正是
-    /// 「筛选就是子库的规则」这条约定要消灭的东西。
+    /// - **有序号**（[`Editing::ordinal`]，规则行上「✎」跳过来的）：只换那一条（`Catalog::replace_rule`），
+    ///   名字与序号照旧，别的规则、读不懂的那几条、例外一样不碰。
+    /// - **没序号**（卡头「从浏览添加…」跳过来的）：**新添一条**（`Catalog::add_rule`），已有的一条不碰
+    ///   （拿主意的人 2026-09-30 改裁，挂单 `Q1269`）。
+    ///
+    /// **从来不把几条并成一条**：从前卡头那颗把几条并成一条预填过来，这儿再把读得懂的整批删掉、写回一条，
+    /// 人起的名字、分开的几条一起没了（挂单 `Q1184`）。那个整批替换的核心函数已经删掉。
     ///
     /// **写不成规则的条件当场挡住**（`Unruly`），不是少写一条了事。
     ///
@@ -2120,8 +2128,7 @@ impl Screen {
             Ok(Some(rule)) => rule,
             Ok(None) => {
                 self.error = Some(format!(
-                    "一个条件都没筛：这样带回去，子库「{name}」选中的会是整个库。\
-                     真要清空它的规则，走命令行。"
+                    "一个条件都没筛：这样带回去，子库「{name}」选中的会是整个库。"
                 ));
                 return;
             }
@@ -2130,10 +2137,11 @@ impl Screen {
                 return;
             }
         };
-        // 「✎」跳过来的只换那一条（`Editing::ordinal`），「改选择」跳过来的整批换。
-        let written = match self.editing.as_ref().and_then(|editing| editing.ordinal) {
+        // 有序号的只换那一条（`Editing::ordinal`）；没序号的新添一条。
+        // 两支各自说清做了哪一件：回执那句话照做了的那一件写，不拿一个标记再拼一遍。
+        let 回执 = match self.editing.as_ref().and_then(|editing| editing.ordinal) {
             Some(ordinal) => match site.catalog.replace_rule(&name, ordinal, &rule) {
-                Ok(true) => Ok(0),
+                Ok(true) => Ok(format!("「{name}」的第 {ordinal} 条规则换成了：{rule}")),
                 Ok(false) => {
                     self.error = Some(format!(
                         "子库「{name}」的第 {ordinal} 条规则已经不在了，没换。"
@@ -2142,12 +2150,16 @@ impl Screen {
                 }
                 Err(error) => Err(error),
             },
-            None => site.catalog.replace_rules(&name, &rule),
+            // 与「加入子库…」那一档（`add_into_sublibrary`）同一个说法：加的是第几条。
+            None => site
+                .catalog
+                .add_rule(&name, &rule, None)
+                .map(|ordinal| format!("「{name}」加了第 {ordinal} 条规则：{rule}")),
         };
-        match written {
-            Ok(_) => {
+        match 回执 {
+            Ok(做了什么) => {
                 self.notice = Some(format!(
-                    "子库「{name}」的规则换成了：{rule}。屏上这 {} 行 · {} 个变体原样带过去。",
+                    "{做了什么}。屏上这 {} 行 · {} 个变体原样带过去。",
                     thousands(self.window.total()),
                     scope_label(self.filtered),
                 ));
@@ -3515,7 +3527,7 @@ impl Screen {
         layout::DETAIL
             .show_collapsible(ui, "详情", None, 右栏, |ui| self.detail_panel(ui, site));
         // **底下那块编辑面板拆掉了**（票 `gui-looks-like-the-design/15` 收挂单 `Q804`）：改元数据归作品详情页，
-        // 选中数在表格上方那一条，改选择时的例外摆在右栏选中那张变体卡底下。正中那一栏从上到下就是表。
+        // 选中数在表格上方那一条，改子库时的例外摆在右栏选中那张变体卡底下。正中那一栏从上到下就是表。
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(正中底))
             .show(ui, |ui| {
@@ -4632,14 +4644,14 @@ impl Screen {
         //   （照稿 `data-dg="open:subform|new"`），到子库屏去建——
         //   目标路径、前端格式、容量上限本来就都在那儿问，而这儿从前只问得了两样。
         //
-        // 于是这儿照稿什么都不摆；**「更新到子库」那一半留着**——它是票 12 那条
-        // 「改选择」闭环的回程，与「存成子库」不是一回事。
+        // 于是这儿照稿什么都不摆；**「更新到子库」那一半留着**——它是子库屏「从浏览添加…」与「✎」
+        // 那两条去程的回程（票 12 那个闭环），与「存成子库」不是一回事。
         if self.editing.is_some() {
             self.update_panel(ui, site);
         }
     }
 
-    /// 「**改选择**」跳过来之后，那一栏换成的样子：改的是谁、折出来会是什么、带不带得回去。
+    /// 子库屏「从浏览添加…」或「✎」跳过来之后，那一栏换成的样子：改的是谁、折出来会是什么、带不带得回去。
     ///
     /// 与「存成子库」共用一个位置**是故意的**：这两个按钮是同一条约定的两个方向
     /// （筛选就是子库的规则），摆成两处会让人以为它们是两件事。
@@ -4647,12 +4659,25 @@ impl Screen {
         let Some(editing) = &self.editing else {
             return;
         };
-        let (name, broken) = (editing.sublibrary.clone(), editing.broken.len());
+        let (name, broken, ordinal) = (
+            editing.sublibrary.clone(),
+            editing.broken.len(),
+            editing.ordinal,
+        );
         ui.label(font::strong(format!("正在改子库「{name}」的选择集")));
-        ui.weak("这个子库的规则已经预填在上面的筛选器里。调完按「更新到子库」原样带回。");
+        // 两条去程各说各的（挂单 `Q1184`、`Q1269`）：「✎」来的只换那一条，「从浏览添加…」来的新添一条。
+        ui.weak(match ordinal {
+            Some(ordinal) => format!(
+                "这个子库的第 {ordinal} 条规则已经预填在上面的筛选器里。\
+                 调完按「更新到子库」只换回这一条，名字与序号照旧。"
+            ),
+            None => {
+                "筛好按「更新到子库」，给这个子库新添一条规则；已有的规则一条不碰。".to_string()
+            }
+        });
         if broken > 0 {
             // **处置它们的地方在这一栏顶上**（票 `gui-redesign/14`）：这儿说的是
-            // 「更新到子库」的承诺——那一趟只换读得懂的那几条，坏的一条都不碰。
+            // 「更新到子库」的承诺——那一趟只换「✎」那一条、或者新添一条，坏的一条都不碰。
             ui.colored_label(
                 ui.visuals().warn_fg_color,
                 format!(
@@ -4671,7 +4696,10 @@ impl Screen {
                 );
             }
             Ok(Some(rule)) => {
-                ui.weak(format!("规则会变成：{rule}"));
+                ui.weak(match ordinal {
+                    Some(ordinal) => format!("第 {ordinal} 条规则会变成：{rule}"),
+                    None => format!("会新添一条规则：{rule}"),
+                });
             }
             Err(unruly) => {
                 ui.colored_label(ui.visuals().error_fg_color, unruly.advice());
@@ -4684,10 +4712,12 @@ impl Screen {
                         matches!(folded, Ok(Some(_))),
                         egui::Button::new("更新到子库"),
                     )
-                    .on_hover_text(
-                        "把屏上这份筛选原样换成那个子库的规则，然后回子库屏。\
-                         换掉而不是加上去：加的话子库选出来的会比屏上多。",
-                    )
+                    .on_hover_text(match ordinal {
+                        Some(_) => {
+                            "把屏上这份筛选原样换回那一条规则，然后回子库屏。别的规则一条不碰。"
+                        }
+                        None => "把屏上这份筛选原样存成那个子库的一条新规则，然后回子库屏。",
+                    })
                     .clicked();
                 let 不改 = ui
                     .button("不改了")
@@ -4726,7 +4756,7 @@ impl Screen {
         match site.catalog.sublibrary(&name) {
             Ok(Some(_)) => {
                 self.error = Some(format!(
-                    "已经有一个叫「{name}」的子库了。换个名字——改已有子库的选择去子库屏点「改选择」。"
+                    "已经有一个叫「{name}」的子库了。换个名字——往已有的子库里加，按「加入子库…」。"
                 ));
                 return;
             }
@@ -4808,7 +4838,7 @@ impl Screen {
         self.gallery.sync(ctx, &mut site.catalog, &items, writable);
     }
 
-    /// 右边那块面板：**作品 → 变体 → 判定依据 → 媒体 → 合集**；改选择那一趟里，选中那张变体卡底下多一块例外。
+    /// 右边那块面板：**作品 → 变体 → 判定依据 → 媒体 → 合集**；改子库那一趟里，选中那张变体卡底下多一块例外。
     ///
     /// **这一份不复制一遍再画**：一行底下可以挂着上百个变体、每个又带着几条候选，
     /// 每帧克隆一次就是每帧几百次分配。所以画的时候只借（`as_ref`），点中哪个变体、按了哪颗例外
@@ -4831,7 +4861,7 @@ impl Screen {
         let mut open: Option<crate::media::Clicked> = None;
         // 点了「查看详情」或「编辑元数据」：要打开作品详情页的哪一面、进不进编辑态。
         let mut 去详情页: Option<(work::Tab, bool)> = None;
-        // **改选择那一趟里例外摆在选中那张变体卡底下**（拿主意的人 2026-09-15 定）：备注框要改得动，
+        // **改子库那一趟里例外摆在选中那张变体卡底下**（拿主意的人 2026-09-15 定）：备注框要改得动，
         // 先抄一份出来画，画完有改动再写回去。平常浏览时一样都不摆，也不留空位。
         let mut 备注 = self.editing.as_ref().map(|editing| editing.note.clone());
         let mut 例外: Option<Option<Exception>> = None;
@@ -4991,7 +5021,7 @@ impl Screen {
                     },
                 );
                 // 字号**直接问令牌**，不走具名字号档：那几档要等观感基线装上之后的下一帧才有，
-                // 而点开一行正好可能发生在头一帧（跳过来的「改选择」、测试里先点开再跑帧）。
+                // 而点开一行正好可能发生在头一帧（从子库屏跳过来的那一趟、测试里先点开再跑帧）。
                 ui.label(
                     egui::RichText::new(&title)
                         .size(tokens.font.size_detail_title)
@@ -5443,7 +5473,7 @@ fn non_game_asset_label(rows: Option<u64>) -> String {
     }
 }
 
-/// 右栏选中那张变体卡底下的**例外**那一块，只在「改选择」那一趟里摆（拿主意的人 2026-09-15 定）：把这个变体
+/// 右栏选中那张变体卡底下的**例外**那一块，只在改子库那一趟里摆（拿主意的人 2026-09-15 定）：把这个变体
 /// 收进来或者排除掉，旁边留一句为什么。按了哪一颗交回那一下：`Some(方向)` 是记一条，`None` 是撤掉。
 ///
 /// **优先于规则、永久记住**（ADR-0016）：规则表达不了「这个我小时候玩过」「这个太占地方先不带」这类个人口味。

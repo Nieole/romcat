@@ -743,8 +743,8 @@ fn 选中一个变体时变体级的操作只作用于它() {
     // 点开一行默认选中第一个变体：面板的第二三层总得有东西摆。
     assert_eq!(app.browse().variant_key(), Some(变体们[0].as_str()));
 
-    // 挑第二个：详情跟着换到它。变体级的操作（改选择时右栏选中那张卡底下那几颗例外按钮）作用的正是这一个
-    // ——按下去落在哪个变体上，钉在 `tests/sublibrary.rs` 的「改选择时例外按钮与备注框…」那一条。
+    // 挑第二个：详情跟着换到它。变体级的操作（改子库时右栏选中那张卡底下那几颗例外按钮）作用的正是这一个
+    // ——按下去落在哪个变体上，钉在 `tests/sublibrary.rs` 的「改子库时例外按钮与备注框…」那一条。
     {
         let (browse, site) = app.browse_and_site();
         browse.pick(&site.catalog, &变体们[1]);
@@ -1281,7 +1281,7 @@ fn 翻行的代价按读了几次库算而且真库量级上一次不多() {
 /// 把一条规则预填进筛选器，跑几帧，返回筛出多少行。
 ///
 /// **走的是界面上那条路**（[`browse::Screen::set_filter_rule`]），不是直接改查询：
-/// 子库屏点「改选择」跳回来预填的正是它（票 `gui-redesign/11`）。
+/// 子库屏规则行上点「✎」跳回来预填的正是它（票 `gui-redesign/11`）。
 fn 按规则筛(ctx: &egui::Context, app: &mut App, text: &str) -> u64 {
     let rule = romcat_core::sublibrary::Rule::parse(text)
         .unwrap_or_else(|error| panic!("「{text}」读不懂：{error}"));
