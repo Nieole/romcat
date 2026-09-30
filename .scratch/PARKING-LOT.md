@@ -1190,6 +1190,16 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 - **谁来裁：** 拿主意的人
 - **状态：** open
 
+### Q1206 — 门禁起子进程时只清追出来的六个包变量，没有把 `cargo run` 塞的那一族整个清掉
+
+- **来自：** 票 `gate-and-tests/03`
+- **类别：** 规格没说
+- **在哪：** `xtask/src/gate.rs` 的 `CARGO_RUN_VARS_THAT_FLIP_FINGERPRINTS` 与 `Step::command_in`；`xtask/tests/gate.rs` 的 `门禁起的每一条都不带_cargo_run_塞给_xtask_的那几个包变量`
+- **为什么没停线：** 两条路都只改 `CARGO_RUN_VARS_THAT_FLIP_FINGERPRINTS` 那一张表与钉它的那条测试，推翻不出这张票
+- **这张票实际做了什么：** 只清 `CARGO_MANIFEST_DIR`、`CARGO_PKG_NAME`、`CARGO_PKG_VERSION_{MAJOR,MINOR,PATCH,PRE}` 这六个——`cargo run` 实际塞给子进程的 17 个变量（2026-09-30 用丢弃 crate 在 `env -i` 下比对：`CARGO`、`CARGO_MANIFEST_DIR`、`CARGO_MANIFEST_PATH`、13 个 `CARGO_PKG_*`、`DYLD_FALLBACK_LIBRARY_PATH`）与本机 `target/debug/build/*/output` 里全部 `rerun-if-env-changed` 的交集；盯着它们的构建脚本只有 `ring` 一个。指纹日志实测到的只有 `CARGO_MANIFEST_DIR`（cargo 每个单元只报第一处不同），另五个是交集推得，改后同顺序那趟里一个 `EnvVarChanged` 都不再出现为证。另一条路：按「描述 xtask 这个包」整族清——`CARGO_MANIFEST_*` 加全部 `CARGO_PKG_*`（15 个），它们对内层 cargo 都没有意义，哪天新依赖的构建脚本盯上 `CARGO_PKG_VERSION` 或 `CARGO_MANIFEST_PATH` 也不会再互顶。留六个：派单与票都写明「只清追出来的」，每个名字都说得出是谁盯着、为什么，测试钉得住「清且只清这几个」；整族清也封不住这一类——`CARGO` 与 `DYLD_FALLBACK_LIBRARY_PATH` 同样是 `cargo run` 塞的、同样可能被盯上，前者 `gate::cargo` 要用、不能清，后者不算「包变量」。封这一类靠的是常量文档里那段「往后怎么再追」
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
 ---
 
 ## 结算索引（第四轮收口，`Q364`–`Q448`）

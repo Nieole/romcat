@@ -13,6 +13,8 @@
 //! - **几个开关递到了该递的那一条上。** 限流的 `-j` / `--test-threads`、`--keep-going` 带出来的
 //!   `--no-fail-fast`、`check` 的 `--all-targets`——这几条**只断言参数**，不在测试里真跑全量门禁
 //!   （一趟要好几分钟）；cargo 认不认这些开关由每张票收尾时那一趟真门禁验。
+//! - **起子进程时清掉的是哪几个变量。** `cargo run` 塞给 xtask、会让门禁与裸跑互顶编译缓存的
+//!   那几个，每一条都清、只清它们——同样**只断言命令**，缓存真不再互顶由那张票的回执为证。
 //! - **词表那一条扫的是哪几行。** 相对 `main` 的 merge base、含未提交的、存量不扫，
 //!   拿不到历史时如实跳过；撞了真的退非零。给了「跟哪个提交比」的覆盖口就扫它之后的改动，
 //!   它是全零或求不到时如实跳过；CI 推到 `main` 的那一趟把上一版递进去。「哪些词元算撞、
@@ -21,6 +23,7 @@
 //!   **并把对的那个数印出来**；`--write` 改完，同一份输入就绿。「标记怎么扫、四样各怎么数」
 //!   那一半是纯函数，单元测试在 `xtask/src/numbers.rs` 里，不在这儿。
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -301,6 +304,54 @@ fn 看全那个开关递给_cargo_而不是递给测试二进制() {
         看全在 < 分隔在,
         "`--no-fail-fast` 得排在 `--` 前面，否则递给的是测试二进制：{:?}",
         test.args
+    );
+}
+
+#[test]
+fn 门禁起的每一条都不带_cargo_run_塞给_xtask_的那几个包变量() {
+    // ⭐ **本机裸跑 `cargo` 与跑门禁曾互相顶掉编译缓存**（挂单 `Q1168`，票 `gate-and-tests/03`）：
+    // 门禁经 `cargo run` 起，内层 cargo 继承了 `cargo run` 塞给 xtask 的包变量，`ring` 的构建脚本
+    // 盯着其中六个，两边一换手就一串重编。机理与怎么追出来的写在 `gate.rs` 那个常量的文档上。
+    //
+    // 下面这六个名字是手写的**独立基准**（2026-09-30 追出来的），不从 `gate.rs` 那份清单反推。
+    //
+    // **只清这六个、不整份清空。** `get_envs` 只看得见显式改过的变量，看不见继承来的
+    // `TMPDIR` / `PATH`；这里钉得住的是「显式拿掉的恰好是这六个」，以及 `doc` 那一条
+    // 自己加的 `RUSTDOCFLAGS` 照旧递下去。
+    let 追出来的 = [
+        "CARGO_MANIFEST_DIR",
+        "CARGO_PKG_NAME",
+        "CARGO_PKG_VERSION_MAJOR",
+        "CARGO_PKG_VERSION_MINOR",
+        "CARGO_PKG_VERSION_PATCH",
+        "CARGO_PKG_VERSION_PRE",
+    ];
+    for keep_going in [false, true] {
+        for 它 in steps(Limits::throttled(), keep_going) {
+            let command = 它.command_in(Path::new("."));
+            let mut 清掉的: Vec<String> = command
+                .get_envs()
+                .filter(|(_, value)| value.is_none())
+                .map(|(key, _)| key.to_string_lossy().into_owned())
+                .collect();
+            清掉的.sort();
+            assert_eq!(
+                清掉的, 追出来的,
+                "`{}` 那一条起的子进程得清掉且只清掉这几个——漏一个，裸跑与门禁照样互顶缓存；\
+                 多清了，就是在拿掉门禁不该拿掉的东西",
+                它.name
+            );
+        }
+    }
+
+    let doc = step("doc", Limits::default(), false).expect("有 doc 这一条");
+    let command = doc.command_in(Path::new("."));
+    assert!(
+        command
+            .get_envs()
+            .any(|(key, value)| key == OsStr::new("RUSTDOCFLAGS")
+                && value == Some(OsStr::new("-D warnings"))),
+        "清的是那几个包变量，不是整份环境：`doc` 那一条要的 `RUSTDOCFLAGS` 得照旧递下去"
     );
 }
 
