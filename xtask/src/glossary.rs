@@ -13,6 +13,13 @@
 //! - **只扫新写的代码**：相对 `main` 的 merge base 以来的全部改动，**含未提交的**（暂存了的、
 //!   没暂存的、还没 `git add` 的新文件）。接票的人跑门禁时改动一半已提交一半没有，只看一半都会漏。
 //!   存量一处都不报。
+//! - **「跟哪个提交比」可以覆盖**：环境变量 [`SINCE_VAR`] 给了一个提交，比的就是它与 `HEAD` 的
+//!   merge base，不再是 `main`。给的提交在 `HEAD` 的历史上时 merge base 就是它自己，于是扫的正是
+//!   它之后的全部改动（含未提交的）。求 merge base 而不直接比它，理由同 `main`：它要是不在
+//!   `HEAD` 的历史上（强推），直接比会把它改掉而 `HEAD` 上原样留着的存量读成新写的。
+//!   在 `main` 上合完一张票、推之前想自己验一遍推上去那一趟会扫什么，也是给它一个提交：
+//!   `ROMCAT_GLOSSARY_SINCE=HEAD^1 cargo xtask glossary`（合并提交的第一个父提交就是合之前的 `main`；
+//!   快进合并没有合并提交，给 `ORIG_HEAD`）。
 //! - **`crates/` 底下的 `.rs`**（规格定的口径），其中的**标识符与字符串字面量**。
 //!   **不扫注释与文档注释**——那里是在谈论这个词，不是拿它起名。`.scratch/` 与词表自己
 //!   都是 Markdown、都不在 `crates/` 底下，天然不扫。
@@ -23,11 +30,15 @@
 //!
 //! - **站在 `main` 上时 merge base 就是 `HEAD`**，于是退化成「只看未提交的」。这是对的，
 //!   不是失效了；`docs/agents/long-jobs.md`「读回执」一节写着这一句。
-//! - **拿不到历史时如实跳过**（[`Scope::Skipped`]）：浅克隆、找不到 `main`、不是 git 仓库。
-//!   跳过退 0，但印明「一行代码都没扫」——不许假装扫过了。
+//! - **拿不到历史时如实跳过**（[`Scope::Skipped`]）：浅克隆、找不到 `main`、不是 git 仓库；
+//!   给了覆盖口时还有两种——它是全零、它在这份仓库里求不到。跳过退 0，但印明「一行代码都没扫」
+//!   ——不许假装扫过了，也不许把历史被改写了报成新写的代码撞了词。
 //! - GitHub Actions 那份配置给 `actions/checkout` 配了 `fetch-depth: 0`，PR 那一趟扫得到
-//!   整条分支的改动。**推到 `main` 的那一趟检出的就是 `main`，一行都不扫**：在本地合进 `main`
-//!   再推上去的改动，CI 上没有这道机器看着，看着它的只有合并之前在分支上跑的那趟门禁。
+//!   整条分支的改动。**推到 `main` 的那一趟**检出的就是 `main`，merge base 就是 `HEAD`——所以那一趟
+//!   把推之前那一版（`github.event.before`）递进覆盖口，扫的是这一次推上去的全部提交：在本地
+//!   合进 `main` 再推的改动，CI 上也有这道机器看着。它是**事后**报红：改动已经在 `main` 上了。
+//!   头一回推这条分支时上一版是全零、强推时上一版是被盖掉的那一版（检出里没有它），两种都跳过；
+//!   前一趟被 `concurrency` 掐掉时，那一次推上去的提交这一条没扫到（挂单 `Q1216`）。
 //!
 //! ## 它拦不住什么
 //!
@@ -159,6 +170,17 @@ pub enum Scope {
         /// 两种都只看得到未提交的改动。
         on_base: bool,
     },
+    /// 覆盖口 [`SINCE_VAR`] 给了一个提交：它与 `HEAD` 的 merge base 以来的全部改动，含未提交的。
+    ///
+    /// 给的提交在 `HEAD` 的历史上（推到 `main` 的那一趟递的上一版就是），merge base 就是它自己。
+    SinceGiven {
+        /// 覆盖口里给的那个值，原样。
+        given: String,
+        /// 它与 `HEAD` 的 merge base，缩写的提交号。
+        merge_base: String,
+        /// merge base 就是 `HEAD`：只看得到未提交的改动。
+        on_base: bool,
+    },
     /// 拿不到历史，**一行都没扫**。
     Skipped {
         /// 为什么拿不到，一句话。
@@ -210,13 +232,41 @@ impl fmt::Display for ScanError {
     }
 }
 
+/// 「跟哪个提交比」的覆盖口：一个环境变量。给了，这一条比的就是那个提交，不再是 `main`。
+///
+/// 读它的是 `cargo xtask glossary` 那个入口，原样递进 [`scan`] 的 `since`；门禁起那一条时
+/// 子进程照样继承它。
+pub const SINCE_VAR: &str = "ROMCAT_GLOSSARY_SINCE";
+
+/// 跟哪个提交求 merge base。
+enum Against<'a> {
+    /// 没给覆盖口：`main`。
+    Main {
+        /// 本地分支 `main`，没有就 `origin/main`。
+        base: &'static str,
+        /// 它的全名，递给 git 用。
+        base_ref: &'static str,
+    },
+    /// 覆盖口给的那个提交。
+    Given {
+        /// 原样的那个值。
+        given: &'a str,
+        /// 求出来的完整提交号。
+        commit: String,
+    },
+}
+
 /// 在 `dir` 所在的仓库上扫一趟：读词表、拿改动、逐份文件找命中。
+///
+/// `since` 是覆盖口 [`SINCE_VAR`] 里原样的值：`None` 或空白时比相对 `main` 的 merge base
+/// ——CI 在不是 push 的那几趟递的就是空串——给了一个提交就比它与 `HEAD` 的 merge base。
 ///
 /// # Errors
 ///
 /// 词表读不通、读不动文件、起不来 git 时报 [`ScanError`]。拿不到历史**不是**错，
 /// 是 [`Scope::Skipped`]。
-pub fn scan(dir: &Path) -> Result<Report, ScanError> {
+pub fn scan(dir: &Path, since: Option<&str>) -> Result<Report, ScanError> {
+    let since = since.map(str::trim).filter(|given| !given.is_empty());
     let toplevel = git(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from);
     let root = toplevel.as_deref().unwrap_or(dir);
     let glossary_path = root.join("CONTEXT.md");
@@ -237,26 +287,61 @@ pub fn scan(dir: &Path) -> Result<Report, ScanError> {
         Ok(root) => root,
         Err(why) => return skipped(format!("这里不是一个 git 仓库，没有历史可比（{why}）")),
     };
-    if git(&root, &["rev-parse", "--is-shallow-repository"]).as_deref() == Ok("true") {
-        return skipped(
-            "这是一份浅克隆，只取了最近几层历史，相对 `main` 的 merge base 求不准；\
-             CI 上要扫就给 `actions/checkout` 配 `fetch-depth: 0`"
-                .to_string(),
-        );
+    if let Some(given) = since
+        && given.bytes().all(|b| b == b'0')
+    {
+        return skipped(format!(
+            "`{SINCE_VAR}` 给的是全零（`{given}`）：没有上一版可比——\
+             GitHub 推一条新分支时递的 `github.event.before` 就是它"
+        ));
     }
-    let Some((base, base_ref)) = [
-        ("main", "refs/heads/main"),
-        ("origin/main", "refs/remotes/origin/main"),
-    ]
-    .into_iter()
-    .find(|(_, name)| git(&root, &["rev-parse", "--verify", "--quiet", name]).is_ok()) else {
-        return skipped("找不到 `main`：本地分支 `main` 与 `origin/main` 都没有".to_string());
+    if git(&root, &["rev-parse", "--is-shallow-repository"]).as_deref() == Ok("true") {
+        let base = since.map_or_else(
+            || "`main`".to_string(),
+            |given| format!("`{SINCE_VAR}` 给的 `{given}`"),
+        );
+        return skipped(format!(
+            "这是一份浅克隆，只取了最近几层历史，相对 {base} 的 merge base 求不准；\
+             CI 上要扫就给 `actions/checkout` 配 `fetch-depth: 0`"
+        ));
+    }
+    let against = if let Some(given) = since {
+        let Ok(commit) = git(
+            &root,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{given}^{{commit}}"),
+            ],
+        ) else {
+            // 历史被改写了不是新写的代码撞了词：报红就是假红。
+            return skipped(format!(
+                "`{SINCE_VAR}` 给的 `{given}` 在这份仓库里求不到——强推盖掉的那一版不在任何引用上，\
+                 检出里就没有它；也可能是给错了"
+            ));
+        };
+        Against::Given { given, commit }
+    } else {
+        let Some((base, base_ref)) = [
+            ("main", "refs/heads/main"),
+            ("origin/main", "refs/remotes/origin/main"),
+        ]
+        .into_iter()
+        .find(|(_, name)| git(&root, &["rev-parse", "--verify", "--quiet", name]).is_ok()) else {
+            return skipped("找不到 `main`：本地分支 `main` 与 `origin/main` 都没有".to_string());
+        };
+        Against::Main { base, base_ref }
+    };
+    let (name, rev) = match &against {
+        Against::Main { base, base_ref } => (*base, *base_ref),
+        Against::Given { given, commit } => (*given, commit.as_str()),
     };
     let (Ok(head), Ok(merge_base)) = (
         git(&root, &["rev-parse", "--verify", "--quiet", "HEAD"]),
-        git(&root, &["merge-base", "HEAD", base_ref]),
+        git(&root, &["merge-base", "HEAD", rev]),
     ) else {
-        return skipped(format!("`HEAD` 与 `{base}` 求不出 merge base"));
+        return skipped(format!("`HEAD` 与 `{name}` 求不出 merge base"));
     };
 
     let diff = git(
@@ -284,13 +369,22 @@ pub fn scan(dir: &Path) -> Result<Report, ScanError> {
 
     let mut paths: BTreeSet<&str> = changed.keys().map(String::as_str).collect();
     paths.extend(untracked.iter().copied());
+    let short =
+        git(&root, &["rev-parse", "--short", &merge_base]).unwrap_or_else(|_| merge_base.clone());
+    let on_base = merge_base == head;
     let mut report = Report {
         gate_words: words.len(),
-        scope: Scope::SinceMergeBase {
-            base: base.to_string(),
-            merge_base: git(&root, &["rev-parse", "--short", &merge_base])
-                .unwrap_or_else(|_| merge_base.clone()),
-            on_base: merge_base == head,
+        scope: match against {
+            Against::Main { base, .. } => Scope::SinceMergeBase {
+                base: base.to_string(),
+                merge_base: short,
+                on_base,
+            },
+            Against::Given { given, .. } => Scope::SinceGiven {
+                given: given.to_string(),
+                merge_base: short,
+                on_base,
+            },
         },
         files: 0,
         lines: 0,
