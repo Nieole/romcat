@@ -1043,14 +1043,16 @@ fn identify_variant(
     let (mut units, visible) = collect(&bulk, &members)?;
     // 算过的哈希先取回来。**这一步不读盘**，只是把中立库里存着的那套判据装回 units
     // （挂账 D14）。它排在撞库之前，是为了让沉淀库拿判据查得着——裁决过的东西
-    // 一个字节都不必再读。
+    // 不必为撞库再读一遍，只读判平台所需的头（[`settle_after_verdict`]）。
     restore_cached(&bulk, &mut units, state);
 
     // 零、**沉淀库先说话**：裁决过的内容直接精确命中，不再进队列（ADR-0008）。
     //
-    // 这一问排在读盘之前，为的正是那句「裁决过的东西一个字节都不必再读」——判据已经
-    // 在手上的时候（容器里那套零解压白拿，上一趟识别算过的存在中立库里）它就答得出来。
-    // 答不出来的那些，第一之二步读完盘还要再问一次。
+    // 这一问排在读盘之前，为的正是那句「裁决过的东西只读判平台所需的头」——判据已经
+    // 在手上的时候（容器里那套零解压白拿，上一趟识别算过的存在中立库里）它就答得出来，
+    // 撞库那几层要读的整份内容一个字节都不读。裁决说不了的那几格（平台、能不能独立运行）
+    // 由 [`settle_after_verdict`] 补依据：卡带头与 Switch 容器头是同一条例外，只读那段头，
+    // 读完落库，下一趟不再读。答不出来的那些，第一之二步读完盘还要再问一次。
     let mut unknown = false;
     let mut silent = false;
     match ask_verdicts(catalog, verdicts, variant, &visible, &units, state)? {
@@ -1340,14 +1342,27 @@ fn standalone_of(
     Ok(Some(scope::standalone(variant, visible, &containers).0))
 }
 
-/// 裁决短路出来的结论，**能不能独立运行**还没说时补齐依据再判。
+/// 裁决短路出来的结论，**裁决说不了的那两格**补齐依据再判：平台，与能不能独立运行。
 ///
-/// [`ask_verdicts`] 先从中立库里取算过的 Switch 容器事实。取不到的是这一种：删库重扫之后、
-/// 裁决钉在路径上——识别每一趟都在 Switch 那一层读过它之前就短路，缓存永远空着。那就在这儿
-/// 把容器头读出来（[`probe_switch`]，几 KB，读完落库，下一趟不再读）。
+/// 人裁的是它是哪个发行版，不是它属于哪个平台、能不能独立运行——这两格照旧由识别按内容判
+/// （ADR-0011：目录声明必须能被文件内容推翻）。可短路那一步排在卡带那一层与 Switch 那一层
+/// **之前**，依据还没到手。两格是同一个形状：
 ///
-/// 这是「裁决过的东西一个字节都不必再读」唯一的例外：不读的话那份更新包一趟都判不出来，
-/// 永远是前端条目（挂单 `Q704`）。那一层顺手产出的候选不要——人已经裁过了。
+/// 1. **先取中立库里算过的**（`content_cart` / `content_switch`，不读盘）。
+/// 2. **取不到、而且允许回盘读**，就只读判它所需的那段头——卡带头读卡带那一层平时读的那么多
+///    （[`probe_carts`]，[`cart::probe_len`]：多数是一千来字节），Switch 容器头几 KB
+///    （[`probe_switch`]）——读完落库，下一趟不再读。卡带头**不为这一步另读一段更短的**：
+///    落进 `content_cart` 的那份事实，撞库那一层下一趟会原样取回去用，两段长短不一的头
+///    落在同一份内容的同一行上，就是两份口径不一的事实。取不到的是这一种：删库重扫之后、
+///    裁决钉在路径上，识别每一趟都在那一层读过它之前就短路，中立库里永远没有它算过的那份。
+///    关掉回盘读时一个字节都不读，那一格照旧退回手上有的依据（平台就是目录声明的那个）。
+/// 3. **按内容重算**那一格。
+///
+/// 这就是「裁决过的东西只读判平台所需的头」那句话里的例外，卡带头与 Switch 容器头是**同一条**：
+/// 不读卡带头，一张放错目录又被人认真裁过的卡平台就按目录判错，刮削照旧撞不上——人越认真裁
+/// 结果越错（挂单 `Q602`）；不读容器头，一份裁过的更新包一趟都判不出来，永远是前端条目
+/// （挂单 `Q704`）。**两层顺手探出来的编号与候选一概不要**：人已经裁过了，这一步只补那两格，
+/// 裁决说的发行版、汉化组、第几版一个字都不动。
 #[allow(clippy::too_many_arguments)]
 fn settle_after_verdict(
     library: &dyn LibraryFs,
@@ -1360,6 +1375,13 @@ fn settle_after_verdict(
     record: &mut Identification,
     state: &mut Run,
 ) -> Result<(), IdentifyError> {
+    // 一、平台：卡带头。不是卡带的变体这一步一条都不探，也就不读盘、不问库；平台照样在这儿判
+    // （[`ask_verdicts`] 不判它），退回目录声明的那个也是这一处。
+    let carted = probe_carts(library, catalog, options, variant, units, state)?;
+    record.read_bytes += carted.read_bytes;
+    record.platform = platform_of(variant, units, state);
+
+    // 二、能不能独立运行：Switch 容器头。
     if record.standalone.is_some() || !units.iter().any(|unit| switch::by_name(&unit.name)) {
         return Ok(());
     }
@@ -2263,9 +2285,13 @@ enum Said {
 /// 问一次沉淀库；说得上话就当场把那条**裁决**投影成结论。
 ///
 /// **抽出来是因为一趟识别里要问两次**（[`identify_variant`] 的第零步与第一之二步）：
-/// 一次在读盘之前——判据在手上的时候，裁决过的东西一个字节都不必再读；一次在回盘算完
+/// 一次在读盘之前——判据在手上的时候，裁决过的东西不必为撞库再读，只读判平台所需的头
+/// （[`settle_after_verdict`]，卡带头与 Switch 容器头是同一条例外）；一次在回盘算完
 /// 哈希之后——**裸文件的判据只有那时候才有**。两处各写一遍的话，`from_verdicts` 这个数
 /// 与「都不对」那一档的处置迟早会在两处走岔。
+///
+/// **它自己一个字节都不读**：能不能独立运行这里按中立库里算过的先判一次，平台那一格留给
+/// [`settle_after_verdict`]——两格缺的依据都由它补齐。
 fn ask_verdicts(
     catalog: &mut Catalog,
     verdicts: &verdict::Index,
@@ -2283,13 +2309,13 @@ fn ask_verdicts(
             .projector
             .project(catalog, variant, found.verdict, &found.member, &found.inner)?;
     Ok(match projected {
-        // **裁决不判平台，识别替它判**。这一问排在探卡带头之前，units 上还没有卡带头，
-        // 判出来的是目录声明的那个（挂单 `Q602`）。
+        // **裁决不判平台，识别替它判**——但不在这儿判：这一问排在探卡带头之前，units 上还没有
+        // 卡带头，这里判出来的只会是目录声明的那个（挂单 `Q602`）。[`settle_after_verdict`]
+        // 取回或读出卡带头之后才判，结论里这一格在那之前空着。
         Some(mut record) => {
-            record.platform = platform_of(variant, units, state);
             // **能不能独立运行同样由识别替它判**：人裁的是它是哪个发行版，不是它能不能独立
-            // 运行。Switch 那一层这一趟不跑，TitleID 从中立库里算过的那份取，不读盘
-            // （票 `one-criterion-per-thing/05`）。
+            // 运行。这里 TitleID 从中立库里算过的那份取，不读盘（票 `one-criterion-per-thing/05`）；
+            // 取不到时 [`settle_after_verdict`] 读容器头补上（挂单 `Q704`）。
             record.standalone = standalone_of(catalog, variant, visible, units)?;
             Said::Conclusion(record)
         }

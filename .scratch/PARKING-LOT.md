@@ -1286,6 +1286,18 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 - **谁来裁：** 拿主意的人
 - **状态：** open
 
+### Q1287 — 裁决过的放错目录的卡带，判定的平台对了，裁决落成的发行版与那条候选的平台照旧是目录声明的那个
+
+- **来自：** 票 `no-wrong-deletes-or-platforms/03`
+- **类别：** 路过发现，不在范围内
+- **在哪：** `crates/core/src/identify.rs` 的 `Projector::project`（`let platform = facts.platform.clone().or_else(|| variant.platform.clone())`，发行版那一行与 `沉淀库` 那条候选都拿它）；上游 `crates/core/src/triage.rs` 的 `resolve`（`if facts.platform.is_none() { facts.platform = item.variant.platform.clone(); }`——人手写作品名、没另说平台时，把目录声明的那个当成人说的写进**沉淀库**）；`crates/core/src/triage/merge.rs:341` 同一条退路。本票那条测试的现场实测：`psp/` 底下那张 GBC 卡裁过之后，`identification.platform` 是 `GBC`，裁决候选的 `platform` 是 `PSP`
+- **为什么没停线：** 票面硬约束「不改裁决说的任何字段（发行版、汉化组、第几版），只影响平台那一格」；刮削读的是 `identification.platform`（`crates/core/src/scrape.rs` 的 `Plan::build`），本票要治的「刮削按错的平台去撞」已经治好，这一处不挡它。它与 `Q605` 那四处（`rank`、`has_ammo` 两处、两份报告按 `v.platform` 分组）同一族，是第五处拿目录声明的平台，而且是唯一**落进沉淀库**的一处
+- **这张票实际做了什么：** 没动，只在本票测试的现场上实测核实了这一格仍是 `PSP`。
+- **两条路：** 甲，`resolve` 不替人填平台（人没说就留 `None`），`Projector::project` 在识别那一趟拿识别判定的平台建发行版（卡带头那一步排到投影之前，或把判定的平台递进去），`romcat triage decide` 那条没读内容的路退回 `identified_platforms`；乙，维持现状——裁决说的发行版就是「人在那个目录里认下的那一次发行」，平台跟着目录走，判定的平台只管刮削与报告
+- **建议留：** 甲，并进 `Q605` 那一束一起定。乙之下这一格对人说的是错话：待确认队列里那条候选、标题那一层的依据（`crates/core/src/title.rs:625`「……PSP、地区不详那一条发行版」）、合并作品时带过去的平台（`crates/core/src/triage/merge.rs:341`）都说它是 PSP 的；而且沉淀库是人的东西，里面不该有一格是工具替人猜、人却没说过的
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
 ---
 
 ## 结算索引（第四轮收口，`Q364`–`Q448`）
