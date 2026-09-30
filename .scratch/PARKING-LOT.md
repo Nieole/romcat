@@ -1003,6 +1003,26 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 
 上一次清空：2026-09-23（第五轮收口，`Q449`–`Q1185`，421 条）。下一轮队列从 `Q1186` 起，每张票领一段编号，没用完的号留空。
 
+### Q1196 — `--keep-going` 看全的只是「跑起来之后」的红：哪个测试目标编不过，`test` 那一条仍一个测试二进制都不起
+
+- **来自：** 票 `gate-and-tests/02`
+- **类别：** 规格没说
+- **在哪：** `xtask/src/gate.rs` 的 `test`（`--no-fail-fast` 那段文档末句）、`check` / `clippy`（都不递 cargo 的 `--keep-going`）；`docs/agents/long-jobs.md`「读回执」一节
+- **为什么没停线：** 规格与 `grill.md` 的 `Q510` 只裁了 `test` 步加 `--no-fail-fast`，补不补编译那一半不出这张票、也不撤销它
+- **这张票实际做了什么：** 只加了 `--no-fail-fast`，并在丢弃 crate 上实测（2026-09-30，cargo 1.98.0）：`tests/b.rs` 编不过时带不带 `--no-fail-fast` 都是零个 `Running`；去掉它之后，不带停在第一个红的 `a`，带了跑完 `a` `c` `d`、报「2 targets failed」。这条限度写进了 `test` 的文档与 `long-jobs.md`。另一条路：门禁带 `--keep-going` 时给 `check` / `clippy` 也递 cargo 的 `--keep-going`（`cargo test` 本身不收这个开关，手册原话），让一趟列全所有编不过的目标。留「不递」：编译红多半同一个原因，`check`（默认特性、全部目标）与 `clippy`（全特性、全部目标）两条已各自把第一处编译红摆出来，修掉之后单跑一趟 `check` 是秒级到几十秒
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q1197 — `--keep-going` 进 `steps` 走的是一个 `bool` 参数，没有与 `Limits` 捆成一个类型
+
+- **来自：** 票 `gate-and-tests/02`
+- **类别：** 规格没说
+- **在哪：** `xtask/src/gate.rs` 的 `steps(limits, keep_going)` / `step(name, limits, keep_going)` / `run(limits, dir, keep_going)`；`xtask/src/main.rs` 三处调用；`xtask/src/numbers.rs` 的 `list_step` 固定递 `false`
+- **为什么没停线：** 纯接口形状，推翻它只动 xtask 这几处签名，不出这张票
+- **这张票实际做了什么：** `steps` / `step` 各加一个 `keep_going: bool`，与 `run` 早就有的同名参数、`GateArgs::keep_going` 一个样；`--list` 也递它，于是 `--keep-going --list` 印的就是真会跑的那一行。另一条路（审查 Standards 轴报的 Data Clumps / Speculative Generality）：把 `Limits` 与 `keep_going` 捆成一个「这一趟怎么跑」的类型，或者让 `step` 自己固定取不带 `--keep-going` 的那份、不收这个参数。留 `bool`：`run` 的参数本来就是它，眼下只有三个签名、一个开关，捆成类型换来的是改 `run` 与 `numbers` 的调用面；`step` 显式收参数，`numbers` 那边递 `false` 并写明为什么，比藏在 `step` 里的默认值好读
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
 ---
 
 ## 结算索引（第四轮收口，`Q364`–`Q448`）

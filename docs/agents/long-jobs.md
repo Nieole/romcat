@@ -95,7 +95,7 @@ git -C <worktree> ls-files --others --exclude-standard   # 还没 add 的新文�
 nohup sh -c '{ cd <worktree> && pwd && git branch --show-current && cargo xtask gate --keep-going; echo "EXIT=$?"; } > <日志> 2>&1' > /dev/null 2>&1 & echo "pid=$!"
 ```
 
-`--keep-going` 让一趟看全门禁每一条；不给就在第一处红上停。几个 worktree 同时跑时按机器分资源，开关见 `cargo xtask gate --help`。
+`--keep-going` 让一趟看全门禁每一条，连 `test` 那一条里的每个测试二进制；不给就在第一处红上停。几个 worktree 同时跑时按机器分资源，开关见 `cargo xtask gate --help`。
 
 **等**：在前台分段阻塞着等，每一段都短于前台上限。
 
@@ -126,11 +126,14 @@ for i in $(seq 100); do tail -n 1 <日志> | grep -q '^EXIT=' && break; sleep 5;
 - **`EXIT=` 非零**：汇总表里没列出来的那几条**没跑**，不是绿。门禁默认在第一处红上停，会印「还有 N 条没跑」。
 - **没有 `EXIT=`**：别据此重跑。先看进程还在不在（`ps -p <起跑时印回来的 pid>`）、日志还在不在长。
 
-**`test` 红了一条，不等于其余都绿。** 门禁 `test` 那一步不带 `--no-fail-fast`（`xtask/src/gate.rs` 的 `test`），
-cargo 在**第一个红的测试二进制**上就停，排在后面的测试二进制一条没跑。实测（2026-09-13，第五轮队列）：
-票 `no-mute-spots-opening-a-catalog/01` 那一趟停在 `romcat-core` 的 lib 上，后面的核心库集成测试、界面测试、
-xtask 测试都没跑到。要知道其余的，另跑一趟 `cargo test --workspace --all-features --no-fail-fast`，
-或者把改动涉及的测试目标逐个跑；写证据时说明是哪一种。
+**`test` 红了一条，其余测试二进制跑没跑，看这一趟给没给 `--keep-going`。** 给了（上面那条起跑命令就给了），
+门禁 `test` 那一步带 `--no-fail-fast`（`xtask/src/gate.rs` 的 `test`），每个测试二进制都跑完，一趟看全哪几个红。
+没给，cargo 在**第一个红的测试二进制**上就停，排在后面的一条没跑。票 `gate-and-tests/02` 之前**给了也照样停**——
+实测（2026-09-13，第五轮队列）：票 `no-mute-spots-opening-a-catalog/01` 那一趟带着 `--keep-going`，仍停在 `romcat-core`
+的 lib 上，后面的核心库集成测试、界面测试、xtask 测试都没跑到。所以读旧日志时从 `── test ──` 底下那行
+`$ cargo test …` 认：带 `--no-fail-fast` 的才是看全了的。
+**它只管跑起来之后的红。** 哪个测试目标编不过，cargo 一个测试二进制都不起，带不带 `--no-fail-fast` 都一样
+（2026-09-30 在一份丢弃 crate 上实测）——这时去看 `check` / `clippy` 那两条的红。
 
 **`glossary` 那一条在 `main` 上只看未提交的改动，这不是它失效了。** 它扫的是相对 `main` 的
 merge base 以来的改动、含未提交的；站在 `main` 上直接干活时 merge base 就是 `HEAD`，

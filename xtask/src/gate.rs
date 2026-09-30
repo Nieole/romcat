@@ -8,7 +8,8 @@
 //!
 //! `fmt` 两秒出结果，`test` 要几分钟。默认在第一处红上就停（[`run`] 的 `keep_going`
 //! 传 `false`），于是「忘了跑 `cargo fmt --all`」这种最常见的红，代价是两秒而不是
-//! 一整趟冷编译。CI 上想一次看全每一条时给 `--keep-going`。
+//! 一整趟冷编译。CI 上想一次看全每一条时给 `--keep-going`——它连 `test` 那一条**里头**
+//! 也看全：每个测试二进制都跑完，不在第一个红的上停（理由写在 `test` 那一条自己的文档上）。
 //!
 //! **只有 `numbers` 那一条不照这条排**：它要的那份编译缓存由 `test` 热着，所以它跟在 `test`
 //! 后面，理由写在那一条自己的文档上。
@@ -21,7 +22,8 @@
 //! **关掉**的那份：三条全带 `--all-features` 就意味着没有任何一条再编译交付的那份配置，
 //! 谁在 `crates/gui/src/` 里写下一处只有开着 `demo` 才编得过的引用，门禁全绿而发版
 //! 当场编不过。`check` 那一条补的正是这一格——它是门禁里**唯一**一条在默认特性上编整个工作区的。
-//! （票 `parking-3/01` 收尾审查报的第 1 条，票 `parking-3/02` 落的。）
+//! （票 `parking-3/01` 收尾审查报的第 1 条，票 `parking-3/02` 落的。）它带 `--all-targets`，
+//! 连默认特性下的测试目标也一起编（票 `gate-and-tests/02`，理由写在 `check` 那一条自己的文档上）。
 //!
 //! ## 两档资源
 //!
@@ -140,14 +142,18 @@ pub fn cargo() -> OsString {
 
 /// 门禁那几条，按从便宜到贵排（`numbers` 那一条例外，理由写在它自己那儿）。
 /// **这是它们唯一的定义。**
+///
+/// `keep_going` 与 [`run`] 的同名参数是同一个开关（`cargo xtask gate --keep-going`）：
+/// 条数、名字与次序都不跟着它变，变的只有 `test` 那一条的参数（多一个 `--no-fail-fast`）。
+/// 交给 `--list` 的也是这一份，所以 `--keep-going --list` 印出来的就是它真会跑的那几行。
 #[must_use]
-pub fn steps(limits: Limits) -> Vec<Step> {
+pub fn steps(limits: Limits, keep_going: bool) -> Vec<Step> {
     vec![
         fmt(),
         glossary(),
         check(limits),
         clippy(limits),
-        test(limits),
+        test(limits, keep_going),
         numbers(),
         doc(limits),
     ]
@@ -158,9 +164,13 @@ pub fn steps(limits: Limits) -> Vec<Step> {
 /// **门禁之外要拿某一条的定义，走这儿。** [`crate::numbers`] 数测试条数时跑的就是 `test`
 /// 那一条加 `-- --list`——它从这儿取，不另抄一份参数串，否则 `test` 那条哪天改了口径
 /// （比如不再带 `--all-features`），数出来的就悄悄换了口径而没有任何东西报。
+///
+/// `keep_going` 同 [`steps`]：要的是哪一趟门禁里的那一条，就递那一趟的开关。
 #[must_use]
-pub fn step(name: &str, limits: Limits) -> Option<Step> {
-    steps(limits).into_iter().find(|it| it.name == name)
+pub fn step(name: &str, limits: Limits, keep_going: bool) -> Option<Step> {
+    steps(limits, keep_going)
+        .into_iter()
+        .find(|it| it.name == name)
 }
 
 /// 文档里那几个算得出来的数没过期。检查本体在 [`crate::numbers`]，这一条只是递归起一趟
@@ -218,16 +228,19 @@ fn fmt() -> Step {
 /// 一个把门的都没有——谁在 `crates/gui/src/` 里写下一处只有开着 `demo` 才编得过的
 /// 引用，门禁全绿而发版当场编不过。
 ///
-/// 不带 `--all-targets`：要盯的是 `cargo build --release` 那份配置，也就是库与二进制。
+/// ⚠️ **带 `--all-targets`：「默认特性下的测试目标」也归这一条编。** `clippy` 也带
+/// `--all-targets`，可它编的是 `demo` **开着**的那一份，盖不住这一格。漏的是这么一个文件：
+/// **不带** `#[cfg(feature = "demo")]`、却引用了 `demo` 后面的东西——少了这个开关，门禁全绿，
+/// 而 `cargo test --workspace`（不带 `--all-features`）编不过。第三轮以「眼下没有这种文件」
+/// 没补（挂单 `Q208`）；后来真撞上一次（挂单 `Q1081`，`crates/gui/tests/snapshot.rs` 的一行
+/// `use`），于是补上（挂单 `Q1082`，票 `gate-and-tests/02`）。
 ///
-/// ⚠️ **于是「默认特性下的测试目标」门禁里哪一条都没编。** `clippy` 编的那批测试目标是
-/// `demo` **开着**的那一份，盖不住这一格。漏的是这么一个文件：**不带**
-/// `#[cfg(feature = "demo")]`、却引用了 `demo` 后面的东西——门禁全绿，而
-/// `cargo test --workspace`（不带 `--all-features`）编不过。眼下不存在这种文件
-/// （`demo` 那七个测试目标走的是 `required-features`）。要盖住就给这一条补
-/// `--all-targets`，代价是多编一遍默认特性下的测试目标。挂单 `Q208`。
+/// 代价是多编一遍默认特性下的测试目标：这一条从「只编库与二进制」涨到接近 `clippy` 的量级。
+/// 仍排在 `clippy` 前面——它不开 `demo`、编得比 `clippy` 少。
 fn check(limits: Limits) -> Step {
-    let mut args = ["check", "--workspace"].map(String::from).to_vec();
+    let mut args = ["check", "--workspace", "--all-targets"]
+        .map(String::from)
+        .to_vec();
     push_jobs(&mut args, limits);
     Step {
         name: "check",
@@ -255,10 +268,20 @@ fn clippy(limits: Limits) -> Step {
 /// 不带它，那七个 `required-features = ["demo"]` 的测试目标**整份都不生成二进制**，
 /// 全仓库少跑一百多条——**而退出码照样是 0**。这正是门禁必须写成一条子命令、
 /// 而不是留给人记四行命令的原因。
-fn test(limits: Limits) -> Step {
+///
+/// ⚠️ **`--no-fail-fast` 跟着 `keep_going` 走。** 不带它，cargo 在**第一个红的测试二进制**
+/// 上就停，排在后面的测试二进制一条没跑——`--keep-going` 于是只在条与条之间看全，
+/// `test` 这一条里头照停，回执只报第一个红的（挂单 `Q510`，票 `gate-and-tests/02`）。
+/// 默认不带：与门禁在第一处红上就停同一个理由（见 [`run`]）。它是 **cargo** 的开关，
+/// 得排在 `--` 前面；排到后面就递给了每个测试二进制，它们当场报不认得的选项。
+/// 它只管**跑起来之后**的红：哪个测试目标编不过，cargo 一个测试二进制都不起，带不带它都一样。
+fn test(limits: Limits, keep_going: bool) -> Step {
     let mut args = ["test", "--workspace", "--all-features"]
         .map(String::from)
         .to_vec();
+    if keep_going {
+        args.push("--no-fail-fast".to_string());
+    }
     push_jobs(&mut args, limits);
     if let Some(threads) = limits.test_threads {
         args.push("--".to_string());
@@ -332,13 +355,14 @@ pub struct Ran {
 /// 跑一趟门禁，边跑边把每一条的输出直接透给终端。
 ///
 /// `keep_going` 为 `false` 时在第一处红上就停——后面那几条的红多半是同一个原因的回声，
-/// 而它们各要几分钟。
+/// 而它们各要几分钟；`test` 那一条里头同理，停在第一个红的测试二进制上。为 `true` 时
+/// 条与条之间、`test` 里的测试二进制之间都跑完（见 [`steps`]）。
 ///
 /// 返回跑过的那几条；调用方按「有没有一条不绿」定退出码。
 #[must_use]
 pub fn run(limits: Limits, dir: &Path, keep_going: bool) -> Vec<Ran> {
     let mut out = Vec::new();
-    for step in steps(limits) {
+    for step in steps(limits, keep_going) {
         let line = step.display();
         println!("\n── {} ──\n$ {line}", step.name);
         let started = Instant::now();
