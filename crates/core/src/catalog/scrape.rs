@@ -1208,6 +1208,40 @@ impl Catalog {
         Ok(())
     }
 
+    /// 把**一个根底下的变体**留下的刮削结论、媒体引用与采集记录清掉。移除一个根走它
+    /// （[`Catalog::remove_root`]）；`prefix` 是这个根的键前缀（`根名/`）。
+    ///
+    /// **锚点种类与键分两列存**：`anchor` 那一列是种类（「变体」／「作品」），`subject` 那一列
+    /// 才是键（[`Harvested`] 的那两格）。所以删的是种类为变体、键以这个前缀开头的那些。
+    /// 这份「哪一列装什么」的知识住在这里、不住在移除根那一侧：那一侧曾经把两列写反，
+    /// 一行都没删到（挂单 `Q555`）。
+    ///
+    /// **作品那一层一条不动**：作品名不带根，别的根的变体也挂在同一部作品下。
+    ///
+    /// **[`裁决`](VERDICT)那一源的值一条都不删**，与 [`clear_scraped`](Self::clear_scraped)
+    /// 同一条纪律：它不是采来的，是人在详情面板上亲手写下的，中立库之外没有第二份。
+    /// 移除一个根丢掉的只该是可再生的；这个根加回来，那一句照旧对得上。
+    /// `media_ref` 与 `scrape_probe` 上没有裁决那一源的行，那两句不设这道闸。
+    pub(super) fn forget_scraped_under(&self, prefix: &str) -> Result<(), CatalogError> {
+        let variant = AnchorKind::Variant.label();
+        self.conn
+            .execute(
+                "DELETE FROM scrape_value
+                 WHERE anchor = ?1 AND substr(subject, 1, length(?2)) = ?2 AND source <> ?3",
+                params![variant, prefix, VERDICT],
+            )
+            .map_err(|source| self.err(source))?;
+        for sql in [
+            "DELETE FROM media_ref    WHERE anchor = ?1 AND substr(subject, 1, length(?2)) = ?2",
+            "DELETE FROM scrape_probe WHERE anchor = ?1 AND substr(subject, 1, length(?2)) = ?2",
+        ] {
+            self.conn
+                .execute(sql, params![variant, prefix])
+                .map_err(|source| self.err(source))?;
+        }
+        Ok(())
+    }
+
     /// 把刮削结论整批清掉。**换一套源之后整份重来**走它。
     ///
     /// **`--refresh` 不走这一条**（它只是不看那道输入指纹，见 `scrape::run`）：清空跑在

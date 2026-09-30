@@ -1,7 +1,7 @@
 //! **移除一个根**（票 `gui-looks-like-the-design/26`）：按下那一下之前算得出代价，
 //! 按下去之后**盘上一个字节都不动**。
 //!
-//! 这个文件钉四件事，每一件都是「不这么做用户就会做出错误的决定」：
+//! 这个文件钉五件事，每一件都是「不这么做用户就会做出错误的决定」：
 //!
 //! 1. **代价的四个数**——去掉多少变体、浏览里少几行、导出少几条、哪台子库少多少——
 //!    各是真的，而且与真按下去之后的结果对得上。
@@ -10,15 +10,22 @@
 //! 3. **主库只读**（ADR-0004）：移除一个根只动中立库，那个目录里的文件、大小、内容
 //!    整份快照不变。
 //! 4. **说了算的那几样留得住**：裁决与合集锚在内容锚上，这个根加回来照旧对得上。
+//! 5. **刮削那一层跟着变体走**（挂单 `Q555`）：这个根底下变体的刮削结论、媒体引用、
+//!    采集记录一条不剩；**作品**那一层与别的根底下的一条不少。人在详情面板上亲手写下的
+//!    「裁决」那一句不是采来的、不可再生，一个字不动（同 4）。
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use romcat_core::catalog::identify::{Candidate, Identification, Provenance, Standalone};
 use romcat_core::catalog::roots::add_root;
+use romcat_core::catalog::scrape::{Harvested, HarvestedMedia, HarvestedValue};
 use romcat_core::catalog::{Catalog, Confidence, State};
 use romcat_core::dat::Convention;
 use romcat_core::platform::Manifest;
+use romcat_core::scrape::measure::Measured;
+use romcat_core::scrape::priority::VERDICT;
+use romcat_core::scrape::{AnchorKind, Field, MediaKind};
 use romcat_core::shape::{Role, SINGLE_FILE_RULE, Variant};
 use romcat_core::sublibrary::{Rule, Sublibrary};
 use romcat_core::testing::temp_dir;
@@ -257,6 +264,146 @@ fn 移除一个根不动盘上的任何一个字节() {
     catalog.remove_root(备份).expect("移得掉");
 
     assert_eq!(之前, 快照(盘.path()), "盘上的文件一个字节都不许变");
+}
+
+/// 刮削那三样落的是哪个源。
+const 源: &str = "测试源";
+
+/// 在一个锚点上落一份刮削：一条刮削结论、一条媒体引用，连那一趟的采集记录。
+///
+/// 三样都带着锚点自己的名字，读回来认得出是谁的——删错了一个锚点，断言会说出是哪一个。
+fn 落刮削(catalog: &mut Catalog, 种类: AnchorKind, 键: &str) {
+    let 哈希 = 封面哈希(种类, 键);
+    catalog
+        .put_media(&哈希, "png", 4, Measured::default())
+        .expect("池里记得下");
+    catalog
+        .put_scraped(&[Harvested {
+            anchor: 种类.label().to_string(),
+            subject: 键.to_string(),
+            source: 源.to_string(),
+            input: 输入指纹(键),
+            values: vec![HarvestedValue {
+                field: Field::Description.label().to_string(),
+                value: 简介(键),
+                evidence: "合成 fixture 里钉死的依据".to_string(),
+            }],
+            media: vec![HarvestedMedia {
+                kind: MediaKind::Cover.label().to_string(),
+                hash: 哈希,
+                evidence: "合成 fixture 里钉死的依据".to_string(),
+            }],
+        }])
+        .expect("刮削结论写得进");
+}
+
+fn 封面哈希(种类: AnchorKind, 键: &str) -> String {
+    format!("{}「{键}」的封面", 种类.label())
+}
+
+fn 输入指纹(键: &str) -> String {
+    format!("「{键}」那一趟的输入指纹")
+}
+
+fn 简介(键: &str) -> String {
+    format!("「{键}」的简介")
+}
+
+/// 经公开的读取入口，把一个锚点上的三样读回来：刮削结论的值、媒体引用的哈希、采集记录的输入指纹。
+fn 刮削三样(
+    catalog: &Catalog,
+    种类: AnchorKind,
+    键: &str,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let 值 = catalog
+        .scraped_values(种类.label(), 键)
+        .expect("读得出刮削结论")
+        .into_iter()
+        .map(|one| one.value)
+        .collect();
+    let 媒体 = catalog
+        .scraped_media(种类.label(), 键)
+        .expect("读得出媒体引用")
+        .into_iter()
+        .map(|one| one.hash)
+        .collect();
+    let 采集 = catalog
+        .scrape_inputs(种类.label(), 键)
+        .expect("读得出采集记录")
+        .into_values()
+        .collect();
+    (值, 媒体, 采集)
+}
+
+#[test]
+fn 移除一个根之后它底下变体的刮削三样一条不剩_作品那一层与别的根一条不少() {
+    let mut catalog = 现场();
+    // 两个根下各一个变体，连它们共同的作品「两边都有」，各落一份刮削。
+    let 备份的 = "备份/GB/两边都有.zip";
+    let 主库的 = "主库/GB/两边都有.zip";
+    let 作品 = "两边都有";
+    落刮削(&mut catalog, AnchorKind::Variant, 备份的);
+    落刮削(&mut catalog, AnchorKind::Variant, 主库的);
+    落刮削(&mut catalog, AnchorKind::Work, 作品);
+
+    catalog.remove_root(备份).expect("移得掉");
+
+    assert_eq!(
+        刮削三样(&catalog, AnchorKind::Variant, 备份的),
+        (Vec::new(), Vec::new(), Vec::new()),
+        "这个根底下变体的刮削结论、媒体引用、采集记录一条都不许剩"
+    );
+    assert_eq!(
+        刮削三样(&catalog, AnchorKind::Variant, 主库的),
+        (
+            vec![简介(主库的)],
+            vec![封面哈希(AnchorKind::Variant, 主库的)],
+            vec![输入指纹(主库的)],
+        ),
+        "别的根底下变体的三样一条不少"
+    );
+    assert_eq!(
+        刮削三样(&catalog, AnchorKind::Work, 作品),
+        (
+            vec![简介(作品)],
+            vec![封面哈希(AnchorKind::Work, 作品)],
+            vec![输入指纹(作品)],
+        ),
+        "作品那一层是别的根也在用的，一条不删"
+    );
+}
+
+#[test]
+fn 移除一个根删掉采来的刮削结论_人亲手写下的那一句留着() {
+    // 人在详情面板上亲手写下的值以「裁决」为源，与采来的刮削结论住同一张表，但它**不可再生**：
+    // 中立库之外没有第二份（`Catalog::clear_scraped` 同一条纪律）。移除一个根丢掉的只该是
+    // 可再生的——这个根加回来，那一句照旧在，与住沉淀库的人工纠正同一个道理。
+    let mut catalog = 现场();
+    let 备份的 = "备份/GB/两边都有.zip";
+    落刮削(&mut catalog, AnchorKind::Variant, 备份的);
+    catalog
+        .put_verdict_value(
+            AnchorKind::Variant,
+            备份的,
+            Field::TranslationGroup,
+            "人手写的汉化组",
+            "详情面板上手写",
+        )
+        .expect("裁决写得进");
+
+    catalog.remove_root(备份).expect("移得掉");
+
+    let 剩下: Vec<(String, String)> = catalog
+        .scraped_values(AnchorKind::Variant.label(), 备份的)
+        .expect("读得出刮削结论")
+        .into_iter()
+        .map(|one| (one.source, one.value))
+        .collect();
+    assert_eq!(
+        剩下,
+        vec![(VERDICT.to_string(), "人手写的汉化组".to_string())],
+        "采来的那条删掉，人亲手写下的那一句一个字不动"
+    );
 }
 
 /// 一个目录整份的样子：每个文件的相对路径 → 它的字节。
