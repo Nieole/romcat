@@ -3640,20 +3640,22 @@ fn head_of<'a>(work: &WorkDetail, details: &'a [VariantDetail]) -> Option<&'a st
         .find_map(VariantDetail::preferred_now)
 }
 
-/// 平台色块标签（设计稿 `.hplat`）：平台色底、小号加粗的平台代号。字取 `on-accent`（强色底上的字那一格），不照稿写死白字
-/// ——同挂单 `Q894` 那一条。
+/// 平台色块标签（设计稿 `.hplat`）：平台色底、小号加粗的平台代号。字取令牌 `[color.platform-badge]`——两套主题都是白字，
+/// 照稿，与库体检、浏览屏卡面上的平台标同一格。
+///
+/// 从前这里取 `on-accent`（挂单 `Q924`，随 `Q894` 危险按钮那一条），理由是「两套主题里它都接近白」——这个前提不成立：
+/// `on-accent` 暗色那一格是深色，压在 `MD`、`PSP` 这几种深平台色上几乎看不清。拿主意的人 2026-09-30 改裁照稿取白
+/// （挂单 `Q1236`，票 `gate-and-tests/06`）。
 fn platform_chip(ui: &mut egui::Ui, platform: &str) {
     let tokens = Tokens::builtin();
-    let palette = tokens
-        .color
-        .theme(egui::Theme::from_dark_mode(ui.visuals().dark_mode));
+    let 字色 = tokens.color.platform_badge.ink;
     let galley = ui.painter().layout_no_wrap(
         platform.to_owned(),
         egui::FontId::new(
             look::font_size(ui.ctx(), tokens.font.size_mini),
             font::strong_family(),
         ),
-        palette.on_accent,
+        字色,
     );
     let size = egui::vec2(
         galley.size().x + 2.0 * tokens.layout.tag_padding,
@@ -3665,11 +3667,8 @@ fn platform_chip(ui: &mut egui::Ui, platform: &str) {
         tokens.radius.small,
         tokens.color.platform.of(platform),
     );
-    ui.painter().galley(
-        rect.center() - galley.size() / 2.0,
-        galley,
-        palette.on_accent,
-    );
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, 字色);
 }
 
 /// 头上那几格事实（设计稿 `.hfacts`）：平台、年份、类型、开发商、发行商、变体，一排 `hero-facts-columns` 格、整排最宽

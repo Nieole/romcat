@@ -782,6 +782,21 @@ else:
         if not same_color(got, want):
             problems.append(f"视频播放标 {key}: 设计稿 .mtile .pv .play 是 {got}，令牌是 {want}")
 
+# 平台标上的字（设计稿 .hplat 与卡面上的 .cv-plat 的 color）、开关里的圆点（.switch i::after 的 background）：
+# 稿上都写死在规则上、暗色主题不另写，令牌里两套主题共用一格（票 gate-and-tests/06）。
+for selector, prop, section, key, what in [
+    (".hplat", "color", "platform-badge", "ink", "平台标上的字"),
+    (".cv-plat", "color", "platform-badge", "ink", "卡面平台标上的字"),
+    (".switch i::after", "background", "switch", "knob", "开关里的圆点"),
+]:
+    m = re.search(re.escape(selector) + r"\{(?:[^}]*?;)?" + prop + r":(#[0-9A-Fa-f]+)", html)
+    literals += 1
+    want = tokens["color"][section][key]
+    if not m:
+        problems.append(f"{what}: 找不到 {selector} 的 {prop}")
+    elif not same_color(m[1], want):
+        problems.append(f"{what} {section}.{key}: 设计稿 {selector} 的 {prop} 是 {m[1]}，令牌是 {want}")
+
 # 字体族：等宽照设计稿 --mono-latin 逐个对上（去掉末尾的通用族 monospace）；无衬线只挑了设计稿 --sans 里的几个，
 # 核的是「每一个都在稿里、先后次序一样」。
 root_css = css_block(r":root")

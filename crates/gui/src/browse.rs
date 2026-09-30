@@ -2,7 +2,7 @@
 //!
 //! ## 主列表一个游戏一行
 //!
-//! 真库上 46,444 个变体收敛成一万出头的行——**元数据本来就锚在作品这一层**，所以这个
+//! 真库上四万多个变体收敛成近三万行（两个数都见台账 `docs/library-facts.md`）——**元数据本来就锚在作品这一层**，所以这个
 //! 粒度与数据模型天然对齐。六成作品下面挂着不止一个变体，它们在详情面板里挑。
 //! 收敛在中立库里做（[`romcat_core::catalog::browse`]），这一层只画和转发（ADR-0005）。
 //!
@@ -196,17 +196,15 @@ fn paint_card_overlay(
     let platform = row.platforms.first().map_or("未知", String::as_str);
     let color = tokens.color.platform.of(platform);
     let font = egui::FontId::new(tokens.font.size_caption_plus, font::strong_family());
-    let galley = painter.layout_no_wrap(platform.to_owned(), font.clone(), egui::Color32::WHITE);
+    // 平台标上的字取令牌 `[color.platform-badge]`：稿上 `.cv-plat` 两套主题都是白字。
+    let 字色 = tokens.color.platform_badge.ink;
+    let galley = painter.layout_no_wrap(platform.to_owned(), font.clone(), 字色);
     let badge = egui::Rect::from_min_size(
         egui::pos2(cover.right() - galley.size().x - 14.0, cover.top() + 8.0),
         galley.size() + egui::vec2(12.0, 6.0),
     );
     painter.rect_filled(badge, tokens.radius.small, color);
-    painter.galley(
-        badge.center() - galley.size() / 2.0,
-        galley,
-        egui::Color32::WHITE,
-    );
+    painter.galley(badge.center() - galley.size() / 2.0, galley, 字色);
     if !row.chinese.is_empty() {
         let text = row.chinese.join(" / ");
         let galley = painter.layout_no_wrap(
@@ -2480,7 +2478,7 @@ impl Screen {
     /// **撤掉一条压制**：那条叫法下一趟重折就回来了。界面上那个「恢复」走的就是它。
     ///
     /// **不当场把它折回来**：折一趟要走遍全库的发行版、变体与刮削值，那是画帧线程上
-    /// 几秒钟的事（真库 46,483 个变体、38,963 条自动通过的候选）。所以这里只撤记号，
+    /// 几秒钟的事（真库四万多个变体、十七万多条自动通过的候选，见台账 `docs/library-facts.md`）。所以这里只撤记号，
     /// 回执里说清它什么时候回来。
     pub fn lift_title(&mut self, site: &mut Site, one: &TitleSuppression) {
         match site.store.lift_title_suppression(&one.key()) {
@@ -2897,7 +2895,7 @@ impl Screen {
     ///
     /// ## 为什么非搬走不可
     ///
-    /// 「全选 46,483 行 → ★ 收藏」那一下，读那一半要为每个变体折出它的锚
+    /// 「全选真库那四万多行 → ★ 收藏」那一下（量级见台账 `docs/library-facts.md`），读那一半要为每个变体折出它的锚
     /// （`collection::plan`），实测在画帧那条线程上跑 **6.7 秒**（挂单 `Q119`）——
     /// 期间窗口是一块白板，切不了屏、滚不动列表、连「停下」都点不着。
     ///
@@ -5569,7 +5567,7 @@ enum Picking {
 /// 第五颗与「加入合集…」同形、78 点，五颗就是 386；而那一行左半段
 /// （视图开关 ＋ 作品数）占到 x 637，正中那一栏能画到 x 969，**只留得出 321**。
 /// 差 65 点。而且那还是合成数据那句短的「8 个作品（共 8）」，
-/// 真库上「1,284 个作品（共 28,529）」更宽。
+/// 真库上「共」后面那个数是五位数（作品级收敛之后近三万行，见台账 `docs/library-facts.md`），那一句更宽。
 ///
 /// **这是常态不是边角情形**——看见基线图上按钮在第二行，那是对的。
 /// 稿上 `.tbar` 本来就是 `flex-wrap`、摆不下就折行（拿主意的人 2026-09-22 认下）。
