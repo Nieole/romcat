@@ -6,9 +6,9 @@
 # 这份文件是设计稿与界面共用的**唯一**来源，全仓库只有这一份：
 # - 界面：crates/gui/src/look.rs 从这里装亮暗两套 Visuals 与字号、圆角，那儿的测试逐项比对，
 #   偏一项门禁就红；
-# - 设计稿：.scratch/gui-looks-like-the-design/check_tokens.py 读这一份，核对 prototype.html
-#   顶部的 CSS 变量。
-# 改颜色只改这里；再跑一遍 check_tokens.py，把设计稿那边对齐。
+# - 设计稿：.scratch/gui-looks-like-the-design/check_tokens.py 读这一份，核对 prototype.html 的 CSS 变量与规则上的
+#   字面值；这里每一格要么有一条核对、要么在它的豁免表里写明稿里为什么没有对应物，漏一格它就退 1。
+# 改颜色只改这里；再跑一遍 check_tokens.py，把设计稿那边对齐。新立令牌，同一张票里补一条核对或进豁免表。
 #
 # 读得严：少一项、多一项、颜色写法不对，程序当场报错并说出是哪一项。
 # 颜色一律写 #RRGGBB（半透明的写 #RRGGBBAA，未预乘）。键名与 CSS 变量同名（去掉前缀 --）。
@@ -92,7 +92,7 @@ other = "#555555"         # 表里没有的平台
 
 # ── 视频格上的播放标：两套主题共用 ──
 # 它压在一帧视频画面上，不压在界面底色上，画面多亮多暗与主题无关。
-# 设计稿里没有这两格的 CSS 变量，check_tokens.py 不核它们。
+# 设计稿里没有这两格的 CSS 变量；check_tokens.py 拿 .mtile .pv .play 那条规则上的 background 与 color 核它们。
 [color.video]
 shade = "#00000050"       # 压在首帧上的那层半透明底
 mark  = "#FFFFFF"         # 底上的 ▶
@@ -480,7 +480,7 @@ drill-tint        = 0.05  # 下钻之后就地那一框底色里调进几成强�
 suspicion-tint    = 0.06  # 疑似同一作品那张建议卡底色里调进几成强调色（设计稿 .sugg 的 color-mix(… 6%)）
 
 # ── 阴影的形状：两套主题共用，颜色是各主题里同名的那一格（pop → pop-color） ──
-# check_tokens.py 不核这一节：设计稿里是一整句 box-shadow，不是分开的几格。
+# check_tokens.py 核偏移（照稿）与扩散（照下面那条换算）；模糊进它的豁免表，换算时稿上那组数钉在脚本里。
 #
 # pop：弹层与弹出菜单。设计稿 --pop 是 `0 10px 30px -12px <pop-color>, 0 0 0 1px <line-2>`。
 # 第二层就是描边，已经由 line-2 管着。第一层 egui 的 Shadow 画不出一样的形状：它的扩散只收
