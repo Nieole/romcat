@@ -32,7 +32,9 @@
 //! 一个冷启动时出现一次的状态。挡在现场之前，六屏一行都不用改（ADR-0023）。
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use romcat_core::fs::LibraryFs;
 use romcat_core::site::Site;
 
 use crate::app::App;
@@ -75,6 +77,9 @@ pub struct Program {
     /// **整趟拿着不放**：启动时读一次，往后每换一份库写一次（换库这件事在窗口活着的
     /// 时候发生），两处走的必须是同一份文件。
     recent: Recent,
+    /// 测试递进来的、扫描读主库时隔着的那一层（[`Self::scan_through`]）。`None` 就是真盘——
+    /// 库屏自己的默认，生产那条路一直是它。
+    library_fs: Option<Arc<dyn LibraryFs + Send>>,
 }
 
 impl Program {
@@ -141,6 +146,7 @@ impl Program {
                     stage: Stage::Opening(screen),
                     workspace,
                     recent,
+                    library_fs: None,
                 })
             }
         }
@@ -163,6 +169,7 @@ impl Program {
             stage: Stage::Opening(opening::Screen::new(workspace.clone())),
             workspace,
             recent,
+            library_fs: None,
         }
     }
 
@@ -178,6 +185,7 @@ impl Program {
             stage: Stage::Opened(Box::new(App::new(site, workspace.clone()))),
             workspace,
             recent,
+            library_fs: None,
         }
     }
 
@@ -200,6 +208,7 @@ impl Program {
             stage: Stage::Opened(Box::new(app)),
             workspace,
             recent,
+            library_fs: None,
         }
     }
 
@@ -224,6 +233,28 @@ impl Program {
             Stage::Opening(_) => None,
             Stage::Opened(app) => Some(app.as_mut()),
         }
+    }
+
+    /// 换掉扫描读主库时隔着的那一层（为什么要它见 [`crate::roots::Screen::scan_through`]），
+    /// **换库、回开场都原样带着**。
+    ///
+    /// **记在这一层**：添加主库那条向导走完的那一帧里，主窗口刚开出来、第一趟扫描就排上了
+    /// （[`App::claim_first_root`]）——测试那时候还够不着窗口本体（[`Self::app_mut`]），只能先交给这一层记着，
+    /// 开主窗口时递进去。眼下已开库的话，当场换掉那扇窗里的。
+    pub fn scan_through(&mut self, library_fs: Arc<dyn LibraryFs + Send>) {
+        if let Stage::Opened(app) = &mut self.stage {
+            app.scan_through(Arc::clone(&library_fs));
+        }
+        self.library_fs = Some(library_fs);
+    }
+
+    /// 换到下一态。**测试递进来的那一层读盘跟着过去**（[`Self::scan_through`]），同那份记忆——
+    /// 记忆在造下一态时就递进去了，这一层是后补的，于是在这儿补。
+    fn switch_to(&mut self, mut next: Self) {
+        if let Some(library_fs) = self.library_fs.take() {
+            next.scan_through(library_fs);
+        }
+        *self = next;
     }
 
     /// 画一帧。`eframe` 与不开窗跑帧的那条路走的是同一个函数。
@@ -252,26 +283,32 @@ impl Program {
         }
         if let Some(chosen) = 开出来的 {
             let 欠着的 = chosen.first_root;
-            let mut 换成 = Self::opened_with(chosen.site, chosen.workspace, self.recent.clone());
+            self.switch_to(Self::opened_with(
+                chosen.site,
+                chosen.workspace,
+                self.recent.clone(),
+            ));
             // **刚认领出来的那一份还欠着第一个根**（[`opening::Chosen::first_root`]）：
             // 加上它，再把第一趟扫描排上**任务台**。**这两下都在换成主窗口之后**——
             // 它们的现成入口都长在库屏上（[`App::claim_first_root`]），而库屏是主窗口的
             // 一部分，开场手上没有。
-            if let (Some(first), Stage::Opened(app)) = (欠着的, &mut 换成.stage) {
+            if let (Some(first), Stage::Opened(app)) = (欠着的, &mut self.stage) {
                 app.claim_first_root(&first);
             }
-            *self = 换成;
         } else if let Some(换成) = 换工作目录 {
             // **人在设置屏上换了工作目录**（票 `gui-looks-like-the-design/31`）：换一个工作目录
             // 等于换一整套工具状态（词表**工作目录**那一条），手上这份现场连同那六屏整个退场，
             // 退回**开场**——只有那一屏列得出新目录里有哪几份库。**那份记忆原样带走**，
             // 同「切换主库」那一条。
-            *self = Self::opening_with(换成, self.recent.clone());
+            self.switch_to(Self::opening_with(换成, self.recent.clone()));
         } else if 要回开场 {
             // **回的是这一趟正开着的那个工作目录**：人要换的多半是隔壁那一份，
             // 而不是默认那条链折出来的那个。**那份记忆原样带走**——不然在主窗口里换的库
             // 记不下来。
-            *self = Self::opening_with(self.workspace.clone(), self.recent.clone());
+            self.switch_to(Self::opening_with(
+                self.workspace.clone(),
+                self.recent.clone(),
+            ));
         }
     }
 }

@@ -43,11 +43,12 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use romcat_core::catalog::Catalog;
 use romcat_core::catalog::roots::{self, LibraryRoot, RootRemoval, RootStats};
-use romcat_core::fs::RealFs;
+use romcat_core::fs::{LibraryFs, RealFs};
 use romcat_core::report::{human_duration, thousands};
 use romcat_core::scan::{self, CheckpointOptions, Jobs, ScanOptions};
 use romcat_core::site::Site;
@@ -276,6 +277,8 @@ pub struct Screen {
     folded: BTreeSet<&'static str>,
     /// 画时刻用的钟（[`Clock`]）：本地时间短格式；截图测试钉死此刻与偏移（[`Screen::set_clock`]）。
     clock: Clock,
+    /// 扫描**隔着哪一层读主库**（[`Screen::scan_through`]）。就是真盘（[`RealFs`]），只有测试换它。
+    library_fs: Arc<dyn LibraryFs + Send>,
 }
 
 /// 这一屏排上去的活是哪一种。
@@ -310,6 +313,7 @@ impl Screen {
             notice: None,
             folded: BTreeSet::new(),
             clock: Clock::default(),
+            library_fs: Arc::new(RealFs::new()),
         }
     }
 
@@ -586,6 +590,7 @@ impl Screen {
             return;
         }
         let workspace = self.workspace.clone();
+        let library_fs = Arc::clone(&self.library_fs);
         let owned = name.to_string();
         let title = format!("扫描 · {owned}");
         // **断点路径在这条线程上折**：后台那条线程手里没有现场（`Site` 交不过去）。
@@ -618,7 +623,7 @@ impl Screen {
                 interval: CHECKPOINT_INTERVAL,
                 resume: true,
             });
-            match scan::scan(&RealFs::new(), &mut catalog, &options, task) {
+            match scan::scan(library_fs.as_ref(), &mut catalog, &options, task) {
                 // **被按停的那一趟照旧交出产物**：那份「到目前为止」的体检报告是真的，
                 // 而 `scan` 自己已经报过「停在半路」了，任务台不会把它记成「完成」。
                 Ok(outcome) => Ok(Product::Scanned(Box::new(outcome))),
@@ -630,6 +635,16 @@ impl Screen {
         self.error = None;
         self.running.push((id, Job::Scan(name.to_string())));
         self.sync_scan_board();
+    }
+
+    /// 换掉扫描读主库时隔着的那一层（默认是真盘，[`RealFs`]）。
+    ///
+    /// **测试要它**：「按得下停下」只有扫描还在走的时候才验得到，而测试那块盘几十毫秒就扫完了。
+    /// 测试递一道闸进来（转发给真盘，读到第几个文件就停住等信号），扫描停多久由测试说了算，
+    /// 不必拿一块大盘去赌挂钟（票 `gate-and-tests/05`）。**生产那条路不调它**：扫描照旧直读真盘，
+    /// 一处判断都没多。
+    pub fn scan_through(&mut self, library_fs: Arc<dyn LibraryFs + Send>) {
+        self.library_fs = library_fs;
     }
 
     /// 换一个画时刻用的钟（[`Clock`]）：截图测试钉死此刻与偏移，截图里才没有当前时间。

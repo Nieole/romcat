@@ -41,9 +41,11 @@
 //! **不每帧问**：开库时问一次，库变了再问（`App::recount`）——库屏认领完一趟、待确认屏落下或撤回一批。
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::{browse, dialog, layout, look, queue, rail, roots, settings, sublibrary, task};
 use romcat_core::catalog::WorkQuery;
+use romcat_core::fs::LibraryFs;
 use romcat_core::report::thousands;
 use romcat_core::site::Site;
 
@@ -430,6 +432,11 @@ impl App {
     /// 库那一屏、它的库、**再加任务台**。加根、扫描、取数据源这三下都要它们。
     pub fn roots_site_and_tasks(&mut self) -> (&mut roots::Screen, &mut Site, &mut task::Tasks) {
         (&mut self.roots, &mut self.site, &mut self.board)
+    }
+
+    /// 换掉库屏扫描读主库时隔着的那一层（[`roots::Screen::scan_through`]）。
+    pub fn scan_through(&mut self, library_fs: Arc<dyn LibraryFs + Send>) {
+        self.roots.scan_through(library_fs);
     }
 
     /// **刚认领出来的那一份的第一个根**：加上它，再把第一趟扫描排到任务台上。
