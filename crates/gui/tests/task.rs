@@ -77,23 +77,26 @@ fn 画到台上空了(ctx: &egui::Context, app: &mut App) {
 /// 「没有」，两档得并排验（见那条测试）——而并排就得把它们装进同一个 `Vec`。
 type 一档进度 = (&'static str, Box<dyn FnOnce(&Handle) + Send>);
 
-/// 排一趟活上去，让它**报完这点进度就停在那儿等着被叫停**。
+/// 排一趟[占位活]上去，让它**报完这点进度就停在那儿等信号**。
 ///
 /// 「屏上这一帧写着什么」那一类断言要的正是它：进度报到哪儿由 `报进度` 说了算，
 /// 报完就不动了——于是测试看到的每一帧都是同一个数，不靠「睡够多久它大概走到第几步」。
-/// 与共享夹具里的 `占位活` 的分工：那一趟是**占着位子**用的（一步都不走，等信号收场），
-/// 这一趟是**摆一个确定的进度**用的。
+/// 光秃秃的占位活一步都不走，这一趟**先摆一个确定的进度**再等；等法与按停法都是占位活那一套
+/// （[`占位活::按停`]：先叫停、再发信号，于是它记成「已取消」，不是「失败」）。
 fn 排一趟停在原地的(
-    app: &mut App, 报进度: impl FnOnce(&Handle) + Send + 'static
-) -> u64 {
-    app.tasks_mut().queue("装作在扫一趟库", move |task| {
-        报进度(task);
-        loop {
-            // 收到「停下」就带着 `Halted` 退出去——于是它记成「按停了」，不是「失败」。
+    app: &mut App,
+    报进度: impl FnOnce(&Handle) + Send + 'static,
+) -> 占位活 {
+    占位活::照这样排上(
+        app.tasks_mut(),
+        "装作在扫一趟库",
+        move |task, 等收场| {
+            报进度(task);
+            等收场.等();
             task.check()?;
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    })
+            Err(Cutoff::failed("这一趟本来就只是停在原地"))
+        },
+    )
 }
 
 /// 一直画帧，直到台上那一趟报出了要等的那个进度，交出那一刻的样子。
@@ -443,7 +446,7 @@ fn 算不出还剩多久的那一帧屏上一个剩余时间的字都没有() {
         let ctx = headless::context();
         let mut app = 开一个();
         app.show_view(View::Tasks);
-        let id = 排一趟停在原地的(&mut app, 报进度);
+        let 占位 = 排一趟停在原地的(&mut app, 报进度);
         let live = 等到那一趟报出(&ctx, &mut app, |live| live.progress.at == 1);
         // **这一句在这儿是防恒绿的那道守卫**：夹具哪天不再造出「算不出还剩多久」
         // 那一档，先炸的是它，而不是让底下那条负面断言静静地变成恒真。
@@ -464,7 +467,7 @@ fn 算不出还剩多久的那一帧屏上一个剩余时间的字都没有() {
             "「{哪一档}」：算不出来却还是画了个剩余时间出来：\n{屏上}",
         );
 
-        app.tasks_mut().stop(id);
+        占位.按停(app.tasks_mut());
         画到台上空了(&ctx, &mut app);
     }
 }
@@ -475,7 +478,7 @@ fn 走了一半时屏上那一句写着约剩多少() {
     let ctx = headless::context();
     let mut app = 开一个();
     app.show_view(View::Tasks);
-    let id = 排一趟停在原地的(&mut app, |task| {
+    let 占位 = 排一趟停在原地的(&mut app, |task| {
         task.steps(2);
         task.step("认根").expect("没人叫停");
         task.step("挨个文件过一遍").expect("没人叫停");
@@ -505,7 +508,7 @@ fn 走了一半时屏上那一句写着约剩多少() {
         "走了一半时「剩余约」该与「已用」是同一个数（已用 ÷ 0.5 − 已用 = 已用）：\n{屏上}",
     );
 
-    app.tasks_mut().stop(id);
+    占位.按停(app.tasks_mut());
     画到台上空了(&ctx, &mut app);
 }
 

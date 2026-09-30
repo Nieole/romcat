@@ -603,6 +603,140 @@ impl 占位活 {
     }
 }
 
+// ——— 扫描的闸：读到第几个文件就停住等信号（票 `gate-and-tests/05`）———
+
+/// 扫描**隔着它读主库**的那一层：一律转发给真盘（[`RealFs`](romcat_core::fs::RealFs)），只在第
+/// N 回伸手读文件时停住，等测试发信号。库屏扫描读盘经过它，靠的是 `Program::scan_through`。
+///
+/// 与[占位活]同一个规矩：**等信号，不等挂钟**。「按得下停下」只有在扫描还**在走**的时候才验得到，
+/// 从前那条向导测试靠一块三万个文件的大盘赌「扫描比进主窗口那头几帧慢」（挂单 `Q833`、`Q864`、`Q1146`），
+/// 加了三次盘，三次都被追上，机器一忙照样红。有了闸，扫描停在第 N 个文件上，停多久全由测试说了算。
+///
+/// - **「读一回文件」**：`open`、`read_head`、`read_tail` 哪一样都算一回——扫描碰一个条目，
+///   穿透容器走前一样，抽样文件头走后两样。列目录（`read_dir`）与化开根路径（`canonicalize`）不算，
+///   也不停。
+/// - **丢掉[闸口]也算放行**：测试半路炸了，停在闸上的那条线程照样醒，不会把任务台占到进程结束。
+/// - **只读**：它转发给真盘的全是只读的调用，一个字节都不写（ADR-0004）。
+#[derive(Debug)]
+pub struct 闸 {
+    停在第几回: usize,
+    读过几回: std::sync::atomic::AtomicUsize,
+    /// 放闸的信号在这一头等着。停住时取出来等，于是等的时候不攥着锁。
+    等放行: std::sync::Mutex<Option<等信号>>,
+    /// 停住的那一下往测试那头报一声（[`闸口::等扫描走到闸上`]）。
+    走到了: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    造它的线程: std::thread::ThreadId,
+}
+
+/// 一道闸在测试手上的那一头：等扫描走到闸上、放它走。
+#[derive(Debug)]
+pub struct 闸口 {
+    放的: 信号,
+    走到了: std::sync::mpsc::Receiver<()>,
+}
+
+/// 开一道闸：扫描第 `第几回` 回读文件时停住（从 1 数起）。[`闸`]交给扫描，[`闸口`]留在测试手上。
+#[must_use]
+pub fn 一道闸(第几回: usize) -> (闸, 闸口) {
+    let (放的, 等放的) = 一对信号();
+    let (报的, 听的) = std::sync::mpsc::channel();
+    (
+        闸 {
+            停在第几回: 第几回,
+            读过几回: std::sync::atomic::AtomicUsize::new(0),
+            等放行: std::sync::Mutex::new(Some(等放的)),
+            走到了: std::sync::Mutex::new(Some(报的)),
+            造它的线程: std::thread::current().id(),
+        },
+        闸口 {
+            放的, 走到了: 听的
+        },
+    )
+}
+
+impl 闸 {
+    /// 读一回文件之前过一下闸：不是第 N 回就直接过；是第 N 回就先报一声「走到了」，再停住等放行。
+    fn 过(&self) -> std::io::Result<()> {
+        let 这一回 = self
+            .读过几回
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if 这一回 != self.停在第几回 {
+            return Ok(());
+        }
+        // **在造它的那条线程上就不停**：放闸的信号只有那条线程发得出，停下去就把它永远堵死——测试不红，
+        // 门禁卡住。交一句读不动，扫描照常收场，测试照常红。同[占位活]那一道。
+        if std::thread::current().id() == self.造它的线程 {
+            return Err(std::io::Error::other(
+                "闸落在了造它的那条线程上：停在这儿等信号会把那条线程堵死",
+            ));
+        }
+        if let Some(报的) = self.走到了.lock().expect("闸的锁没中毒").take() {
+            let _ = 报的.send(());
+        }
+        let 等放的 = self.等放行.lock().expect("闸的锁没中毒").take();
+        if let Some(等放的) = 等放的 {
+            等放的.等();
+        }
+        Ok(())
+    }
+}
+
+impl romcat_core::fs::LibraryFs for 闸 {
+    fn canonicalize(&self, path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+        romcat_core::fs::RealFs.canonicalize(path)
+    }
+
+    fn read_dir(&self, dir: &std::path::Path) -> std::io::Result<Vec<romcat_core::fs::DirEntry>> {
+        romcat_core::fs::RealFs.read_dir(dir)
+    }
+
+    fn read_head(&self, file: &std::path::Path, limit: usize) -> std::io::Result<Vec<u8>> {
+        self.过()?;
+        romcat_core::fs::RealFs.read_head(file, limit)
+    }
+
+    fn read_tail(&self, file: &std::path::Path, limit: usize) -> std::io::Result<Vec<u8>> {
+        self.过()?;
+        romcat_core::fs::RealFs.read_tail(file, limit)
+    }
+
+    fn open(
+        &self,
+        file: &std::path::Path,
+    ) -> std::io::Result<Box<dyn romcat_core::fs::ReadSeek + '_>> {
+        self.过()?;
+        romcat_core::fs::RealFs.open(file)
+    }
+}
+
+impl 闸口 {
+    /// 停在这儿，直到扫描走到闸上报了一声。
+    ///
+    /// **等的是那一声，不是挂钟**：它一到就当场返回。一分钟那个上限**只防挂住**——扫描哪天不再隔着
+    /// 这道闸读盘（或者一个文件都不读），这里不等它就会永远等下去，而门禁卡住比红一条难查得多。
+    ///
+    /// # Panics
+    /// 一分钟了扫描还没走到闸上，或者闸已经被丢掉了。
+    pub fn 等扫描走到闸上(&self) {
+        match self.走到了.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("一分钟了扫描还没走到闸上：它多半没隔着这道闸读盘，或者一个文件都没读")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("闸被丢掉了，扫描却一次都没走到它")
+            }
+        }
+    }
+
+    /// 放扫描走。**要按停的话先按「停止」再放**，同[占位活::按停]：先放的话，它醒过来时还没被叫停，
+    /// 一口气扫完。
+    pub fn 放行(self) {
+        self.放的.发();
+    }
+}
+
 /// 等任务台上的活都**收场并且都认领完**。等的是台上空了这个信号，一轮一轮问，不看挂钟就走。
 ///
 /// 界面这几份测试原先各写各的：`tests/roots.rs` 是 600 轮 × 10 毫秒，库体检那两处是逐字同一段
