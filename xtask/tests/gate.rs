@@ -14,8 +14,9 @@
 //!   `--no-fail-fast`、`check` 的 `--all-targets`——这几条**只断言参数**，不在测试里真跑全量门禁
 //!   （一趟要好几分钟）；cargo 认不认这些开关由每张票收尾时那一趟真门禁验。
 //! - **词表那一条扫的是哪几行。** 相对 `main` 的 merge base、含未提交的、存量不扫，
-//!   拿不到历史时如实跳过；撞了真的退非零。「哪些词元算撞、注释里不算」那一半是纯函数，
-//!   单元测试在 `xtask/src/glossary.rs` 里，不在这儿。
+//!   拿不到历史时如实跳过；撞了真的退非零。给了「跟哪个提交比」的覆盖口就扫它之后的改动，
+//!   它是全零或求不到时如实跳过；CI 推到 `main` 的那一趟把上一版递进去。「哪些词元算撞、
+//!   注释里不算」那一半是纯函数，单元测试在 `xtask/src/glossary.rs` 里，不在这儿。
 //! - **那几个算得出来的数过期时真的会红。** 造一份数写错了的丢弃仓库，`--check` 退非零
 //!   **并把对的那个数印出来**；`--write` 改完，同一份输入就绿。「标记怎么扫、四样各怎么数」
 //!   那一半是纯函数，单元测试在 `xtask/src/numbers.rs` 里，不在这儿。
@@ -437,7 +438,7 @@ fn 丢弃仓库(tag: &str) -> 丢弃目录 {
 
 /// 扫一趟，交出范围与每一处命中的（路径, 行, 词）。
 fn 扫(dir: &Path) -> (Scope, Vec<(String, usize, String)>) {
-    let report = glossary::scan(dir).expect("这一条跑得下去");
+    let report = glossary::scan(dir, None).expect("这一条跑得下去");
     let found = report
         .findings
         .into_iter()
@@ -538,7 +539,7 @@ fn 词表那一条在浅克隆上如实跳过而不是假装扫过() {
         "pub fn 正常() {}\npub fn 未提交的近义一() {}\n",
     );
 
-    let report = glossary::scan(&克隆.path).expect("拿不到历史是跳过，不是出错");
+    let report = glossary::scan(&克隆.path, None).expect("拿不到历史是跳过，不是出错");
     let Scope::Skipped { reason } = &report.scope else {
         panic!("浅克隆上求不准 merge base，必须跳过：{:?}", report.scope);
     };
@@ -554,7 +555,7 @@ fn 词表那一条找不到_main_时如实跳过() {
     let 仓库 = 丢弃仓库("glossary-no-main");
     git(&仓库.path, &["branch", "--quiet", "-m", "main", "trunk"]);
 
-    let report = glossary::scan(&仓库.path).expect("拿不到历史是跳过，不是出错");
+    let report = glossary::scan(&仓库.path, None).expect("拿不到历史是跳过，不是出错");
     let Scope::Skipped { reason } = &report.scope else {
         panic!(
             "没有 `main` 就没有 merge base，必须跳过：{:?}",
@@ -564,15 +565,26 @@ fn 词表那一条找不到_main_时如实跳过() {
     assert!(reason.contains("main"), "跳过得说清为什么：{reason}");
 }
 
-/// 在 `dir` 里跑 `xtask glossary`，交回退出码绿没绿与它印的全部输出。
+/// 词表那一条「跟哪个提交比」的覆盖口。名字是对外的约定——CI 那份配置里逐字写着它——
+/// 所以这里手写，不从代码里的常量取：代码里改了名而配置没跟上，这几条先红。
+const 覆盖口: &str = "ROMCAT_GLOSSARY_SINCE";
+
+/// 在 `dir` 里跑 `xtask glossary`，交回退出码绿没绿与它印的全部输出。`比` 是递给覆盖口的值，
+/// `None` 就是不给。
 ///
 /// 直接跑编出来的那个二进制，不绕 `cargo xtask`：丢弃仓库里没有那条别名。
-fn 跑词表那一条(dir: &Path) -> (bool, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
-        .arg("glossary")
-        .current_dir(dir)
-        .output()
-        .expect("能起 xtask");
+///
+/// ⚠️ **不给时要把它从环境里摘掉，不是不管。** CI 推到 `main` 的那一趟整个门禁都带着它，
+/// 跑这几条测试的进程也就带着它；子进程照样继承，而那个提交在丢弃仓库里求不到——
+/// 这几条就会因为「跳过」，而不是因为它们要验的东西变绿。
+fn 跑词表那一条(dir: &Path, 比: Option<&str>) -> (bool, String) {
+    let mut 命令 = Command::new(env!("CARGO_BIN_EXE_xtask"));
+    命令.arg("glossary").current_dir(dir);
+    match 比 {
+        Some(提交) => 命令.env(覆盖口, 提交),
+        None => 命令.env_remove(覆盖口),
+    };
+    let out = 命令.output().expect("能起 xtask");
     let 输出 = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -591,7 +603,7 @@ fn 词表那一条撞词就红并说清哪一行哪个词该用哪个正名改�
         "crates/a/src/lib.rs",
         "pub fn 正常() {}\npub fn 新的近义一() {}\n",
     );
-    let (绿, 输出) = 跑词表那一条(d);
+    let (绿, 输出) = 跑词表那一条(d, None);
     assert!(!绿, "新写的标识符撞了 `_Gate_`，这一条必须退非零：\n{输出}");
     for 该有 in ["crates/a/src/lib.rs:2", "「近义一」", "「正名甲」"] {
         assert!(输出.contains(该有), "报红得说清「{该有}」：\n{输出}");
@@ -602,8 +614,153 @@ fn 词表那一条撞词就红并说清哪一行哪个词该用哪个正名改�
         "crates/a/src/lib.rs",
         "pub fn 正常() {}\npub fn 新的() {}\n",
     );
-    let (绿, 输出) = 跑词表那一条(d);
+    let (绿, 输出) = 跑词表那一条(d, None);
     assert!(绿, "改掉之后这一条必须绿——否则它红的不是那个词：\n{输出}");
+}
+
+#[test]
+fn 词表那一条给了覆盖提交就扫它之后提交上去的改动() {
+    // ⭐ 这就是 CI 上推到 `main` 的那一趟的形状：站在 `main` 上，新写的代码**已经提交了**，
+    // 工作区是干净的。只比 merge base 时它一行都看不见（merge base 就是 `HEAD`）——
+    // 在本地合进 `main` 再推的改动，CI 上从来没被这一条扫过（挂单 `Q543`）。
+    let 仓库 = 丢弃仓库("glossary-since");
+    let d = &仓库.path;
+    let 上一版 = git(d, &["rev-parse", "HEAD"]).trim().to_string();
+    写(
+        d,
+        "crates/a/src/lib.rs",
+        "pub fn 正常() {}\npub fn 推上去的近义一() {}\n",
+    );
+    git(d, &["commit", "--quiet", "-am", "推上去的那一个提交"]);
+
+    let (绿, 输出) = 跑词表那一条(d, None);
+    assert!(
+        绿,
+        "不给覆盖口，站在 `main` 上只看未提交的——这一面照旧：\n{输出}"
+    );
+
+    let (绿, 输出) = 跑词表那一条(d, Some(&上一版));
+    assert!(
+        !绿,
+        "给了上一版，它之后提交上去的那一处撞词必须报红：\n{输出}"
+    );
+    for 该有 in ["crates/a/src/lib.rs:2", "「近义一」"] {
+        assert!(输出.contains(该有), "报红得说清「{该有}」：\n{输出}");
+    }
+    // `old.rs` 那处存量在上一版里就有，不是这一次推上去的。
+    assert!(!输出.contains("old.rs"), "存量不许报：\n{输出}");
+}
+
+#[test]
+fn ci_在推到_main_的那一趟把上一版递给词表那一条() {
+    // ⭐ 覆盖口的名字在代码与 CI 配置里各写一遍。配置里拼错一个字母、或者这一行被删了，
+    // 推到 `main` 的那一趟就退回「merge base 就是 `HEAD`，只看未提交的」——一行都不扫，
+    // 而门禁照样是绿的。只在 push 上递：`pull_request` 在 `synchronize` 时也带 `before`，
+    // 递进去就只扫最后一次推的那几个提交，不再是整条分支。
+    //
+    // 得落在跑门禁的**那一步**里：挪到别的步骤上，门禁那个进程就继承不到它。
+    let 配置 = include_str!("../../.github/workflows/gate.yml");
+    let 那一步: Vec<&str> = 配置
+        .lines()
+        .skip_while(|行| !行.trim_start().starts_with("- name: 跑门禁"))
+        .enumerate()
+        .take_while(|&(第几行, 行)| 第几行 == 0 || !行.trim_start().starts_with("- "))
+        .map(|(_, 行)| 行.trim())
+        .collect();
+    assert!(
+        那一步.contains(&"run: cargo xtask gate --keep-going"),
+        "`.github/workflows/gate.yml` 里找不到跑门禁的那一步：{那一步:?}"
+    );
+    let 该有 =
+        format!("{覆盖口}: ${{{{ github.event_name == 'push' && github.event.before || '' }}}}");
+    assert!(
+        那一步.contains(&该有.as_str()),
+        "跑门禁的那一步得带着这一行：{该有}\n那一步现在是：{那一步:#?}"
+    );
+}
+
+#[test]
+fn 词表那一条的覆盖口是空的就与没给一样() {
+    // CI 在 `pull_request` 那一趟往覆盖口里递的是空串：那一趟照旧比相对 `main` 的 merge base，
+    // 不许被读成「给了一个提交」，更不许被读成全零而跳过。
+    let 仓库 = 丢弃仓库("glossary-since-empty");
+    let d = &仓库.path;
+    写(
+        d,
+        "crates/a/src/lib.rs",
+        "pub fn 正常() {}\npub fn 未提交的近义二() {}\n",
+    );
+
+    let (没给绿, 没给) = 跑词表那一条(d, None);
+    let (空的绿, 空的) = 跑词表那一条(d, Some(""));
+    assert!(
+        !没给绿 && !空的绿,
+        "未提交的那一处撞词两面都得报红：\n{没给}\n{空的}"
+    );
+    assert!(
+        空的.contains("范围：merge base 就是 `HEAD`"),
+        "空的覆盖口照旧比 merge base：\n{空的}"
+    );
+    assert_eq!(空的, 没给, "空的覆盖口与没给，印出来的得一字不差");
+}
+
+#[test]
+fn 词表那一条的覆盖口是全零时如实跳过并说清为什么() {
+    // GitHub 推一条新分支时，`github.event.before` 递的就是全零：没有上一版可比。
+    let 仓库 = 丢弃仓库("glossary-since-null");
+    let d = &仓库.path;
+    // 有一处明明白白的撞词：跳过时它不许被报，也不许被说成「扫过了、干净」。
+    写(
+        d,
+        "crates/a/src/lib.rs",
+        "pub fn 正常() {}\npub fn 未提交的近义一() {}\n",
+    );
+
+    let (绿, 输出) = 跑词表那一条(d, Some("0000000000000000000000000000000000000000"));
+    assert!(绿, "没有上一版可比不是谁写错了什么，跳过退 0：\n{输出}");
+    for 该有 in ["跳过：", "全零", "一行代码都没扫"] {
+        assert!(输出.contains(该有), "跳过得说清「{该有}」：\n{输出}");
+    }
+}
+
+#[test]
+fn 词表那一条的覆盖口指向求不到的提交时如实跳过而不报假红() {
+    // 强推的形状：`github.event.before` 是被盖掉的那一版，它不在任何引用上，
+    // CI 检出的那份克隆里就没有它——`fetch-depth: 0` 也取不到。
+    let 源 = 丢弃仓库("glossary-since-gone-src");
+    写(
+        &源.path,
+        "crates/a/src/lib.rs",
+        "pub fn 正常() {}\npub fn 被盖掉的() {}\n",
+    );
+    git(
+        &源.path,
+        &["commit", "--quiet", "-am", "被强推盖掉的那一版"],
+    );
+    let 盖掉的 = git(&源.path, &["rev-parse", "HEAD"]).trim().to_string();
+    git(&源.path, &["reset", "--quiet", "--hard", "HEAD~1"]);
+    写(
+        &源.path,
+        "crates/a/src/lib.rs",
+        "pub fn 正常() {}\npub fn 强推上去的近义一() {}\n",
+    );
+    git(&源.path, &["commit", "--quiet", "-am", "强推上去的那一版"]);
+    // 走 `file://`，不走本地路径：本地路径的克隆会把对象库整份硬链过来，连没人指着的那个提交一起。
+    let 克隆 = 丢弃目录 {
+        path: 丢弃路径("glossary-since-gone"),
+    };
+    let url = format!("file://{}", 源.path.display());
+    let into = 克隆.path.to_string_lossy().into_owned();
+    git(&源.path, &["clone", "--quiet", &url, &into]);
+
+    let (绿, 输出) = 跑词表那一条(&克隆.path, Some(&盖掉的));
+    assert!(
+        绿,
+        "上一版求不到是历史被改写了，不是新写的代码撞了词——不许报红：\n{输出}"
+    );
+    for 该有 in ["跳过：", 盖掉的.as_str(), "求不到", "一行代码都没扫"] {
+        assert!(输出.contains(该有), "跳过得说清「{该有}」：\n{输出}");
+    }
 }
 
 #[test]
@@ -614,7 +771,7 @@ fn 词表里门禁词越出它那条近义词时这一条当场红() {
         "CONTEXT.md",
         "**正名甲**:\n_Avoid_: 近义一\n_Gate_: 近义一、近义四\n",
     );
-    let (绿, 输出) = 跑词表那一条(&仓库.path);
+    let (绿, 输出) = 跑词表那一条(&仓库.path, None);
     assert!(!绿, "`_Gate_` 越出了 `_Avoid_`，这一条必须当场红：\n{输出}");
     assert!(
         输出.contains("CONTEXT.md:3") && 输出.contains("近义四"),

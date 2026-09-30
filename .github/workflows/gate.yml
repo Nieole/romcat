@@ -17,6 +17,7 @@ on:
   pull_request:
 
 # 同一条分支上连推两次，前一趟没跑完就掐掉——门禁看的是**最新那一版**绿不绿。
+# ⚠️ 词表那一条例外：它在推到 `main` 的那一趟只扫这一次推上去的提交，被掐掉的那一趟推上去的它没扫到（挂单 `Q1216`）。
 concurrency:
   group: gate-${{ github.ref }}
   cancel-in-progress: true
@@ -32,9 +33,10 @@ jobs:
     name: cargo xtask gate
     runs-on: ubuntu-latest
     steps:
-      # ⚠️ **`fetch-depth: 0` 是给门禁里 `glossary` 那一条的**：它比的是相对 `main` 的 merge base，
-      # 默认的浅克隆只取 1 层历史、不取 `origin/main`，那时它只能跳过。它在 CI 上各看得见什么
-      # （推到 `main` 的那一趟一行都不扫），见 `xtask/src/glossary.rs` 的模块文档。
+      # ⚠️ **`fetch-depth: 0` 是给门禁里 `glossary` 那一条的**：PR 那一趟它比相对 `main` 的 merge base，
+      # 推到 `main` 的那一趟比推之前那一版（见下面「跑门禁」那一步的 `env`）。默认的浅克隆只取 1 层历史、
+      # 不取 `origin/main`，也没有上一版，那时它只能跳过。它在 CI 上各看得见什么，见
+      # `xtask/src/glossary.rs` 的模块文档。
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -86,5 +88,12 @@ jobs:
       #
       # ⚠️ **不给 `--throttle`。** 那一档（`-j 1` / `--test-threads=2`）是为一台 15 GB 的
       # 开发机留的，runner 没有这个约束，限流只会让它白白慢上几倍。
+      #
+      # ⭐ **`ROMCAT_GLOSSARY_SINCE`：门禁里 `glossary` 那一条跟哪个提交比。** 推到 `main` 的那一趟递推之前
+      # 那一版，扫这一次推上去的全部提交；不递，站在 `main` 上它一行都不扫。**只在 push 上递**：`pull_request`
+      # 在 `synchronize` 时也带 `before`，递进去就只剩最后一次推的那几个提交，所以那一趟递空串、照旧比 merge base。
+      # 上一版是全零、或者检出里求不到时怎么办，见 `xtask/src/glossary.rs` 的模块文档。
       - name: 跑门禁
+        env:
+          ROMCAT_GLOSSARY_SINCE: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: cargo xtask gate --keep-going

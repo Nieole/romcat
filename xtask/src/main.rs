@@ -5,6 +5,7 @@
 //! cargo xtask gate --throttle      # 退回限流那一档（-j 1、--test-threads=2）
 //! cargo xtask gate --list          # 只打印它会跑哪几条，一条都不跑
 //! cargo xtask glossary             # 只跑门禁里扫词表的那一条
+//! ROMCAT_GLOSSARY_SINCE=<提交> cargo xtask glossary   # 同上，但扫那个提交之后的改动
 //! cargo xtask numbers --check      # 只跑门禁里核对那几个数的那一条
 //! cargo xtask numbers --write      # 把那几个数写进带标记的位置
 //! ```
@@ -34,6 +35,7 @@ enum Job {
     /// 扫新写的代码撞没撞词表 `_Gate_` 的词。门禁里 `glossary` 那一条跑的就是它。
     ///
     /// 范围是相对 `main` 的 merge base 以来的改动，含未提交的；站在 `main` 上时只看未提交的。
+    /// 环境变量 `ROMCAT_GLOSSARY_SINCE` 给了一个提交，就改比它：扫它之后的改动。
     Glossary,
     /// 把票数、测试条数、测试目标数、ADR 份数写进带标记的位置，或者核对它们过期没有。
     ///
@@ -161,7 +163,9 @@ fn numbers_job(args: &NumbersArgs) -> ExitCode {
 /// 站在哪个目录跑，扫的就是那个目录所在的仓库——门禁起它时把工作目录设成了仓库根。
 fn glossary_job() -> ExitCode {
     let dir = std::env::current_dir().unwrap_or_else(|_| repo_root());
-    let report = match glossary::scan(&dir) {
+    // 原样递下去：空值当没给，是 `scan` 的规矩，不在这儿另解释一遍。
+    let since = std::env::var(glossary::SINCE_VAR).ok();
+    let report = match glossary::scan(&dir, since.as_deref()) {
         Ok(report) => report,
         Err(err) => {
             eprintln!("词表那一条跑不下去：{err}");
@@ -191,6 +195,22 @@ fn glossary_job() -> ExitCode {
         Scope::SinceMergeBase {
             base, merge_base, ..
         } => println!("范围：相对 `{base}` 的 merge base（{merge_base}）以来的改动，含未提交的。"),
+        Scope::SinceGiven {
+            given,
+            merge_base,
+            on_base: true,
+        } => println!(
+            "范围：`{}` 给的 `{given}` 与 `HEAD` 的 merge base 就是 `HEAD`（{merge_base}）\
+             ——于是只看未提交的改动。",
+            glossary::SINCE_VAR
+        ),
+        Scope::SinceGiven {
+            given, merge_base, ..
+        } => println!(
+            "范围：`{}` 给的 `{given}` 与 `HEAD` 的 merge base（{merge_base}）以来的改动，\
+             含未提交的。",
+            glossary::SINCE_VAR
+        ),
     }
     println!(
         "扫了 `crates/` 下 {} 份 `.rs` 里新写的 {} 行：标识符与字符串字面量，不含注释。",

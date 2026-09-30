@@ -47,9 +47,10 @@
   **它是这条限制最诚实的一处代价**：2026-09-10 那次真撞上的正是 `job_of`，而这道门禁拦不住它。
 - 光板 `库` `目录` `游戏` `结果` `状态` —— 第 3 类：它们是别的正名的一截，也在散文里当普通词用。
 
-**门禁只扫新写的代码**（相对 `main` 的 merge base 以来的全部改动，含未提交的），
+**门禁只扫新写的代码**（相对 `main` 的 merge base 以来的全部改动，含未提交的；
+CI 上推到 `main` 的那一趟是推之前那一版以来的），
 不扫存量、不扫注释、不扫 `.scratch/`。理由与实测数在
-`.scratch/machine-checks-premises/grill.md` 里。
+`.scratch/machine-checks-premises/grill.md` 里，推到 `main` 那一趟的见 `.scratch/gate-and-tests/grill.md` 的 `Q543`。
 
 ### 内容层级
 
