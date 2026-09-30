@@ -10,6 +10,9 @@
 //!   ——在那张票之前 `cargo doc` 那一条退出码**永远**是 0，「跑绿」只在字面上成立。
 //! - **定义只有一份。** 门禁每一条的名字与形态从 `gate::steps` 一处来，
 //!   README 与 CI 都只指向它。
+//! - **几个开关递到了该递的那一条上。** 限流的 `-j` / `--test-threads`、`--keep-going` 带出来的
+//!   `--no-fail-fast`、`check` 的 `--all-targets`——这几条**只断言参数**，不在测试里真跑全量门禁
+//!   （一趟要好几分钟）；cargo 认不认这些开关由每张票收尾时那一趟真门禁验。
 //! - **词表那一条扫的是哪几行。** 相对 `main` 的 merge base、含未提交的、存量不扫，
 //!   拿不到历史时如实跳过；撞了真的退非零。「哪些词元算撞、注释里不算」那一半是纯函数，
 //!   单元测试在 `xtask/src/glossary.rs` 里，不在这儿。
@@ -23,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 
-use xtask::gate::{Limits, Step, steps};
+use xtask::gate::{Limits, Step, step, steps};
 use xtask::glossary::{self, Scope};
 
 // ── 一份用完即删的丢弃 crate ──
@@ -99,7 +102,7 @@ fn 丢弃crate带同名bin(tag: &str, lib: &str, main: Option<&str>) -> 丢弃�
 /// 走的是**真的子进程**：门禁的全部价值在「它真的会退非零」上，
 /// 断言参数串长什么样是验不到这件事的。
 fn 这一条绿吗(name: &str, dir: &Path) -> bool {
-    let 门禁 = steps(Limits::default());
+    let 门禁 = steps(Limits::default(), false);
     let 它 = 门禁
         .iter()
         .find(|it| it.name == name)
@@ -140,7 +143,7 @@ fn 门禁就是这几条而且顺序是从便宜到贵() {
     // ⭐ **顺序不是随手排的**：fmt 两秒就出结果，`test` 要几分钟。默认在第一处红上就停，
     // 于是「忘了跑 fmt」这种最常见的红，代价是两秒而不是一整趟编译。`glossary` 紧跟在
     // `fmt` 后面：它跑几条 git、读几份改过的文件，也是秒级。
-    let 门禁 = steps(Limits::default());
+    let 门禁 = steps(Limits::default(), false);
     let 名字: Vec<&str> = 门禁.iter().map(|it| it.name).collect();
     // `numbers` 是唯一不按这条排的：它要的那份编译缓存由 `test` 热着，所以它跟在 `test` 后面。
     assert_eq!(
@@ -162,7 +165,7 @@ fn 交付出去的那份配置还有一条在看着() {
     //
     // 按 `--workspace` 过滤不是多余的：`fmt` 走 `--all`，`glossary` 压根不编译，
     // 两条都不带 `--all-features`，但它们也都不是在编「交付的那份」。
-    let 门禁 = steps(Limits::default());
+    let 门禁 = steps(Limits::default(), false);
     let 盖默认特性的: Vec<&str> = 门禁
         .iter()
         .filter(|it| !it.args.iter().any(|a| a == "--all-features"))
@@ -177,6 +180,27 @@ fn 交付出去的那份配置还有一条在看着() {
 }
 
 #[test]
+fn 编测试而不开_demo_那一格也有一条在编() {
+    // ⭐ **这一格在票 `gate-and-tests/02` 之前一条都没编**（挂单 `Q1082`，翻 `Q208` 的「不补」）。
+    // 那时带 `--all-targets` 的只有 `clippy`，它编的是 `demo` **开着**的那一份；`check` 在默认特性上编，
+    // 却只编库与二进制。于是一个**不带** `#[cfg(feature = "demo")]`、却引用了 `demo` 后面东西的
+    // 测试文件，门禁全绿而 `cargo test --workspace` 编不过——`Q1081` 真撞上过一次
+    // （`crates/gui/tests/snapshot.rs` 的一行 `use`）。
+    let 门禁 = steps(Limits::default(), false);
+    let 盖这一格的: Vec<&str> = 门禁
+        .iter()
+        .filter(|it| it.args.iter().any(|a| a == "--all-targets"))
+        .filter(|it| !it.args.iter().any(|a| a == "--all-features"))
+        .map(|it| it.name)
+        .collect();
+    assert_eq!(
+        盖这一格的,
+        ["check"],
+        "测试目标在**默认特性**下编不编得过，得有一条门禁看着，而那一条就是 `check`"
+    );
+}
+
+#[test]
 fn 每一条打印出来对得上_readme_那一段() {
     // ⭐ 这条钉的是**定义只有一份**：README 的门禁块从此只写 `cargo xtask gate`，
     // 「它到底跑什么」由 `cargo xtask gate --list` 当场打印，不再有第二份手抄的
@@ -186,13 +210,17 @@ fn 每一条打印出来对得上_readme_那一段() {
     // 补上 `--all-features` 之后的 `doc`；`cargo xtask glossary` 那一行是票
     // `machine-checks-premises/02` 添的，`cargo xtask numbers --check` 那一行是票
     // `machine-checks-premises/03` 添的——两条都是递归的 xtask 子命令，仍然是 cargo 子进程。
-    let 打印: Vec<String> = steps(Limits::default()).iter().map(Step::display).collect();
+    // `check` 那一行末尾的 `--all-targets` 是票 `gate-and-tests/02` 添的（挂单 `Q1082`）。
+    let 打印: Vec<String> = steps(Limits::default(), false)
+        .iter()
+        .map(Step::display)
+        .collect();
     assert_eq!(
         打印,
         [
             "cargo fmt --all --check",
             "cargo xtask glossary",
-            "cargo check --workspace",
+            "cargo check --workspace --all-targets",
             "cargo clippy --workspace --all-targets --all-features",
             "cargo test --workspace --all-features",
             "cargo xtask numbers --check",
@@ -206,7 +234,7 @@ fn 限流那一档把两个开关都递下去() {
     // ⭐ 15 GB 的开发机上跑全量测试会被 OOM 杀掉，所以要能退回限流那一档。
     // 两个开关**各管一段**：`-j` 管编译期的并行 rustc，`--test-threads` 管跑测试时
     // 同时活着的测试线程数——只限其中一个，另一段照样能把内存吃光。
-    let 限流 = steps(Limits::throttled());
+    let 限流 = steps(Limits::throttled(), false);
     let test = 限流
         .iter()
         .find(|it| it.name == "test")
@@ -216,13 +244,63 @@ fn 限流那一档把两个开关都递下去() {
     assert!(test.args.contains(&"--test-threads=2".to_string()));
 
     // 默认那一档一个都不递——按机器给的资源跑。
-    let 默认 = steps(Limits::default());
+    let 默认 = steps(Limits::default(), false);
     let test = 默认
         .iter()
         .find(|it| it.name == "test")
         .expect("有 test 这一条");
     assert!(!test.args.iter().any(|a| a == "-j"));
     assert!(!test.args.iter().any(|a| a.starts_with("--test-threads")));
+}
+
+#[test]
+fn 给_keep_going_时_test_那一条不在第一个红的测试二进制上停() {
+    // ⭐ **`--keep-going` 的本意是一趟看全**，CI 就是这么调的。可在票 `gate-and-tests/02`
+    // 之前它只管「条与条之间」：`test` 那一条里 cargo 照样在**第一个红的测试二进制**上停，
+    // 排在后面的测试二进制一条没跑，回执只报第一个红的，要知道其余的得人手动另跑一趟补
+    // （挂单 `Q510`）。
+    let test = step("test", Limits::default(), true).expect("有 test 这一条");
+    assert!(
+        test.args.iter().any(|a| a == "--no-fail-fast"),
+        "给了 `--keep-going`，`test` 那一条得带 `--no-fail-fast`——否则它在第一个红的测试二进制上停，\
+         「一趟看全」只在条与条之间成立：{:?}",
+        test.args
+    );
+}
+
+#[test]
+fn 不给_keep_going_时_test_那一条仍在第一个红的测试二进制上停() {
+    // ⭐ 默认在第一处红上停，这条理由在 `test` 那一条**里头**同样成立：第一个红的测试二进制
+    // 后面那一串多半是同一个原因的回声，而它们要几分钟。`--no-fail-fast` 只跟着 `--keep-going` 走。
+    let test = step("test", Limits::default(), false).expect("有 test 这一条");
+    assert!(
+        !test.args.iter().any(|a| a == "--no-fail-fast"),
+        "没给 `--keep-going`，`test` 那一条得在第一个红的测试二进制上停：{:?}",
+        test.args
+    );
+}
+
+#[test]
+fn 看全那个开关递给_cargo_而不是递给测试二进制() {
+    // ⭐ `--no-fail-fast` 是 **cargo** 的开关；`--` 后面那一截（`--test-threads=N`）递给的是
+    // 每个测试二进制。排到 `--` 后面，每个测试二进制都会当场报「不认得的选项」而红——
+    // 限流与看全同时给的时候（本机队列正是 `--keep-going -j 3 --test-threads 3`）才撞得上。
+    let test = step("test", Limits::throttled(), true).expect("有 test 这一条");
+    let 看全在 = test
+        .args
+        .iter()
+        .position(|a| a == "--no-fail-fast")
+        .expect("给了 `--keep-going` 就带 `--no-fail-fast`");
+    let 分隔在 = test
+        .args
+        .iter()
+        .position(|a| a == "--")
+        .expect("限流那一档递 `--test-threads`，前面有 `--`");
+    assert!(
+        看全在 < 分隔在,
+        "`--no-fail-fast` 得排在 `--` 前面，否则递给的是测试二进制：{:?}",
+        test.args
+    );
 }
 
 #[test]

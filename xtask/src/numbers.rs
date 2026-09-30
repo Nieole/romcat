@@ -351,9 +351,12 @@ pub fn count(root: &Path) -> Result<Tallies, Error> {
 /// 另写一份 `cargo test --workspace --all-features`，就是当场犯这一族数要治的病——`test`
 /// 那条哪天改了口径，数出来的会悄悄跟着换而没有任何东西报。口径一致也正是它排在 `test`
 /// 后面**一行都不重编**的原因。
+///
+/// 取的是不带 `--keep-going` 的那一份：两份只差 `--no-fail-fast`，那是 cargo 跑测试时的开关，
+/// 不改编什么、列什么，而 `-- --list` 一条测试都不跑。
 fn list_step() -> crate::gate::Step {
-    let mut step =
-        crate::gate::step("test", crate::gate::Limits::default()).expect("门禁里有 `test` 这一条");
+    let mut step = crate::gate::step("test", crate::gate::Limits::default(), false)
+        .expect("门禁里有 `test` 这一条");
     step.args.push("--".to_string());
     step.args.push("--list".to_string());
     step

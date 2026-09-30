@@ -95,8 +95,8 @@ mod shared;
 // **`等任务台空了` 不带门**：它只问任务台忙不忙（`App::poll_tasks` / `App::tasks`），与合成数据
 // 无关，而**不带 `demo` 也要编的那几张**要它——库屏那几个夹具开窗之前都先体检一趟
 // （`先体检一趟`）。从前它搭着旁边两个的顺风车写在同一行 `#[cfg(feature = "demo")]` 上，
-// 于是 `cargo check --all-targets`（不带 `--all-features`）当场红，而门禁一步都不跑这个组合
-// （挂单 `Q1081` / `Q1082`）。
+// 于是 `cargo check --all-targets`（不带 `--all-features`）当场红，而那时门禁一步都不跑这个组合
+// （挂单 `Q1081` / `Q1082`；票 `gate-and-tests/02` 起门禁 `check` 那一条带 `--all-targets`，盖住了）。
 use shared::等任务台空了;
 // 这两个是占位活那一路的，只有 `demo` 开着时才有测试用得上。
 #[cfg(feature = "demo")]

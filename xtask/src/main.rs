@@ -76,7 +76,8 @@ struct GateArgs {
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
     test_threads: Option<u16>,
 
-    /// 红了也把剩下几条跑完。默认在第一处红上就停——`fmt` 排在最前，两秒就出结果。
+    /// 红了也把剩下几条跑完，`test` 那一条里的每个测试二进制也跑完（`--no-fail-fast`）。
+    /// 默认在第一处红上就停——`fmt` 排在最前，两秒就出结果。
     #[arg(long)]
     keep_going: bool,
 
@@ -227,13 +228,13 @@ fn glossary_job() -> ExitCode {
 fn gate_job(args: &GateArgs) -> ExitCode {
     let limits = limits(args);
     if args.list {
-        for step in gate::steps(limits) {
+        for step in gate::steps(limits, args.keep_going) {
             println!("{}", step.display());
         }
         return ExitCode::SUCCESS;
     }
 
-    let 总条数 = gate::steps(limits).len();
+    let 总条数 = gate::steps(limits, args.keep_going).len();
     let ran = gate::run(limits, &repo_root(), args.keep_going);
     println!("\n── 门禁 ──");
     for one in &ran {
