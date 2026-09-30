@@ -600,8 +600,8 @@ fn catalog_files(dir: &Path) -> Result<Vec<PathBuf>, DirUnreadable> {
 
 /// 看一份中立库：开得开就问它自己那几个数，开不开就从文件名截个名字、把那句话带上。
 ///
-/// **结构版本对不上的那一份，列出来这一下就把它里面没搬走的人工纠正救进沉淀库**
-/// （[`site::rescue_shaping_overrides`](crate::site::rescue_shaping_overrides)）：开场那一屏
+/// **结构版本对不上的那一份，列出来这一下就把它里面没搬走的人定的东西救进沉淀库**
+/// （人工纠正、首选变体、亲手加的叫法，[`site::rescue`](crate::site::rescue)）：开场那一屏
 /// 正是人读到「删掉它重扫」的地方，而那份库开不进去、现场开不起来——等不到别处去救。
 /// 这是列举唯一会写的东西，写的是沉淀库；那份旧库一个字不动。
 fn entry_of(workspace: &Path, path: PathBuf) -> CatalogEntry {
@@ -618,7 +618,7 @@ fn entry_of(workspace: &Path, path: PathBuf) -> CatalogEntry {
         ) => CatalogState::SchemaMismatch {
             found: *found,
             expected: *expected,
-            said: match crate::site::rescue_shaping_overrides(workspace, &path, error) {
+            said: match crate::site::rescue(workspace, &path, error) {
                 Ok(_) => format!("{error}"),
                 Err(stranded) => format!("{stranded}"),
             },
@@ -726,7 +726,7 @@ pub fn titledb_cache_dir(workspace: &Path) -> PathBuf {
 ///
 /// 不是猜——[`catalog_path`] 就是拿 [`Slug::text`] 拼出 `catalog/{主库标识}.sqlite3` 的，
 /// 这里是同一条算法反过来走。**只此一处**：开现场（`site::Site::open_file`）与救旧库里的
-/// 人工纠正（`site::rescue_shaping_overrides`）问的都是它（ADR-0024）。
+/// 人定的东西（`site::rescue`）问的都是它（ADR-0024）。
 #[must_use]
 pub fn library_identity_of(catalog_file: &Path) -> Option<String> {
     catalog_file

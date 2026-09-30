@@ -29,6 +29,11 @@
 //! 与作品、发行版上那一列 `origin` 是同一条纪律；这里把它落在 `source` 上，是因为
 //! `裁决` 本来就是优先级表里的一个**源**（`scrape::priority::VERDICT`），
 //! 而且它在那张表里已经排在每条链的第一位。
+//!
+//! **那几行是沉淀库的投影**（票 `verdict-store-and-sync/01`，挂单 `Q725`）：亲手加的叫法
+//! 不可再生，原件住沉淀库（`verdict::Store::own_titles`），开现场时照它整份重建
+//! （[`Catalog::replace_verdict_titles`]）。人加、人删走 `Site::add_own_titles` /
+//! `Site::remove_own_title`（删还有 `title::suppress` 那一支），**不直接写这里**。
 
 use rusqlite::params;
 
@@ -181,12 +186,24 @@ impl Catalog {
         if rows.is_empty() {
             return Ok(());
         }
+        self.write_titles(None, rows)
+    }
+
+    /// 写一批叫法，**一个事务**；`clear` 给了就先清掉那个源的全部行，在同一个事务里。
+    ///
+    /// 写那一句 upsert 全模块只有这一处：[`Self::put_titles`] 与
+    /// [`Self::replace_verdict_titles`] 各写一遍的话，迟早在哪一格上分家。
+    fn write_titles(&mut self, clear: Option<&str>, rows: &[TitleRow]) -> Result<(), CatalogError> {
         let path = self.path.clone();
         let to_err = |source| CatalogError::Sqlite {
             path: path.clone(),
             source,
         };
         let tx = self.conn.transaction().map_err(to_err)?;
+        if let Some(source) = clear {
+            tx.execute("DELETE FROM title WHERE source = ?1", params![source])
+                .map_err(to_err)?;
+        }
         {
             let mut insert = tx
                 .prepare(
@@ -252,6 +269,60 @@ impl Catalog {
             .map_err(|source| self.err(source))
     }
 
+    /// 全部**裁决**来源的叫法——人亲手加的那些，按作品、语言、类型、那一串字排。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn verdict_titles(&self) -> Result<Vec<TitleRow>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(&format!(
+                "{SELECT_TITLE} WHERE source = ?1 ORDER BY work, language, kind, value"
+            ))
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![VERDICT], read_title)
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
+    /// 把**裁决**来源的那些叫法**整份换成**给的这些（沉淀库那一份，
+    /// [`site::reconcile`](crate::site::reconcile)），返回真写了没有。折出来的那些一行都不碰。
+    ///
+    /// 这些行是沉淀库的**投影**（票 `verdict-store-and-sync/01`），与
+    /// [`Self::replace_preferred_variants`] 同一个做法：**与眼下一样就一个字都不写**；
+    /// 不一样时先清后写、一个事务。比的是整条叫法（依据、置信度那几格也算），
+    /// 次序不算。
+    ///
+    /// # Errors
+    /// 读写库失败时返回错误。
+    pub fn replace_verdict_titles(&mut self, wanted: &[TitleRow]) -> Result<bool, CatalogError> {
+        let key = |row: &TitleRow| {
+            (
+                row.work.clone(),
+                row.language.code(),
+                row.kind.label(),
+                row.value.clone(),
+            )
+        };
+        let mut had = self.verdict_titles()?;
+        had.sort_by_key(key);
+        let mut rows: Vec<TitleRow> = wanted
+            .iter()
+            .map(|row| TitleRow {
+                source: VERDICT.to_string(),
+                ..row.clone()
+            })
+            .collect();
+        rows.sort_by_key(key);
+        if had == rows {
+            return Ok(false);
+        }
+        self.write_titles(Some(VERDICT), &rows)?;
+        Ok(true)
+    }
+
     /// 一个作品的全部叫法。
     ///
     /// # Errors
@@ -302,7 +373,7 @@ impl Catalog {
 
     /// 一条条走过全部叫法，**按作品聚在一起**。
     ///
-    /// 走回调而不是返回一整份 `Vec`：真库里作品有 9,226 个，而选**显示标题**是逐个作品
+    /// 走回调而不是返回一整份 `Vec`：真库里作品有九千多个（见台账 `docs/library-facts.md`），而选**显示标题**是逐个作品
     /// 做的——攒齐一个作品的叫法就够挑一次，不必把全库的标题一起端进内存。
     ///
     /// # Errors

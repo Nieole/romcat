@@ -470,7 +470,7 @@ fn rank(entry: &TitleRow, priorities: &Priorities) -> Rank {
         //
         // **只垫这一路，不垫整档别名。** 把「中文 · 别名」整档垫到汉化名之下解不了这条
         // ——正名还在 5 桶开外，别名照样赢；垫到「其余」那一桶倒是解得了，代价是**库里
-        // 那 16,420 个只有文件名的变体**的中文名一律输给英文条目名，实测破三条测试
+        // 那一万六千多个只有文件名的变体**（见台账 `docs/library-facts.md`）的中文名一律输给英文条目名，实测破三条测试
         // （`显示标题按中文英文日文文件名回退`、`排序标题独立生成而不是拿中文标题去排`、
         // `中文名带置信度低的那些进得了队列`）——那三条钉的是「中文优先」这条回退链本身。
         //
@@ -1180,12 +1180,16 @@ pub struct Suppressed {
 /// 只删中立库那一行，下一趟 [`refold`] 就把它折回来了；只记压制不删行，人得等到下一趟
 /// 重折才看得见效果。两件事分开摆，第二个调用方迟早只做其中一样。
 ///
-/// ## `source = 裁决` 的那些不记压制
+/// ## `source = 裁决` 的那些不记压制，删的是沉淀库里那一条
 ///
 /// 它们根本不经过折——[`Catalog::clear_titles`](crate::catalog::Catalog::clear_titles)
-/// 一行都不碰它们，[`fold`] 也从不产出它们。删掉就是删掉了，没有什么会把它折回来。
-/// 为它记一条压制，只会让面板同时说「它在集合里」（人转头又手写了一条同样的）
-/// 和「它被压掉了」。
+/// 一行都不碰它们，[`fold`] 也从不产出它们。为它记一条压制，只会让面板同时说「它在集合里」
+/// （人转头又手写了一条同样的）和「它被压掉了」。
+///
+/// 它们是**亲手加的叫法**，原件住沉淀库、按主库标识（`library`）分开，中立库里那一行是投影
+/// （票 `verdict-store-and-sync/01`）。所以删它**先删沉淀库那一条、再删投影**，次序与下面
+/// 「先记号、后删行」同一条理由：沉淀库删不动时一个字都没动；投影删不动时，下次开现场
+/// 照沉淀库重建会把它收干净（`site::reconcile`）。只删投影的话，下次开现场它就回来了。
 ///
 /// ## **先记号，后删行**
 ///
@@ -1204,9 +1208,11 @@ pub struct Suppressed {
 pub fn suppress(
     catalog: &mut Catalog,
     store: &mut Store,
+    library: &str,
     row: &TitleRow,
 ) -> Result<Suppressed, RefoldError> {
     let recorded = if row.is_verdict() {
+        store.remove_own_title(library, &row.work, row.language, row.kind, &row.value)?;
         false
     } else {
         store.suppress_title(&TitleSuppression::now(

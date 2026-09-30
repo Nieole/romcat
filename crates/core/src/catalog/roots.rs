@@ -523,6 +523,9 @@ impl Catalog {
         //
         // **人工纠正不在这份清单上**：它住沉淀库（票 `one-criterion-per-thing/07`），
         // 移除根不动沉淀库一个字——与路径锚同一条，这个根加回来，那几条照旧生效。
+        // **首选变体与亲手加的叫法也不在**（票 `verdict-store-and-sync/01`）：中立库里那两份是
+        // 沉淀库的投影，这里删了、下次开现场又照沉淀库重建回来；指着这个根的那几条眼下对不上
+        // 任何变体（`VariantDetail::preferred_unmatched`），根加回来就又对上了。
         for sql in [
             "DELETE FROM variant_member WHERE substr(variant_key, 1, length(?1)) = ?1",
             "DELETE FROM variant WHERE substr(key, 1, length(?1)) = ?1",
@@ -530,9 +533,6 @@ impl Catalog {
             "DELETE FROM identification WHERE substr(variant_key, 1, length(?1)) = ?1",
             "DELETE FROM model_answer WHERE substr(variant_key, 1, length(?1)) = ?1",
             "DELETE FROM collection_variant WHERE substr(variant_key, 1, length(?1)) = ?1",
-            "DELETE FROM preferred_variant WHERE substr(variant_key, 1, length(?1)) = ?1",
-            "DELETE FROM title
-             WHERE variant_key IS NOT NULL AND substr(variant_key, 1, length(?1)) = ?1",
             // **子库的例外与清单**也认变体的键。例外跟着这个根走；清单只清「源指着这个
             // 根」的那几行——目标上真有什么，由下一趟同步照实观察出来（ADR-0015）。
             "DELETE FROM sublibrary_exception WHERE substr(variant_key, 1, length(?1)) = ?1",
@@ -542,6 +542,15 @@ impl Catalog {
                 .execute(sql, params![prefix])
                 .map_err(|source| self.err(source))?;
         }
+        // 变体级的叫法跟着这个根走；**裁决**来源的那些（亲手加的叫法）是投影，不在这里删（见上）。
+        self.conn
+            .execute(
+                "DELETE FROM title
+                 WHERE variant_key IS NOT NULL AND substr(variant_key, 1, length(?1)) = ?1
+                   AND source <> ?2",
+                params![prefix, crate::scrape::priority::VERDICT],
+            )
+            .map_err(|source| self.err(source))?;
         // **刮削那三张表**（刮削结论、媒体引用、采集记录）交给它们自己那个模块删：
         // 哪一列装锚点种类、哪一列装键，只有那边说了算（挂单 `Q555` 就是这一侧把两列写反了）。
         // 删的是这个根底下变体的那些；作品那一层、人亲手写下的「裁决」那一句一条不动。

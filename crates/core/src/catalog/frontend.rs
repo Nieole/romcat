@@ -21,13 +21,18 @@
 //!
 //! **首选变体**（汉化 > 官中 > 日版 > 其他）是一条规则，而规则要能被人推翻
 //! （ADR-0012 明说「首选这个属性本身需要能被裁决修改」）。裁决是**沉淀**：
-//! 它不随重跑识别消失，也不随重新成型消失——这与 `title` 表里 `source = 裁决`
-//! 的那些行、沉淀库里 `shaping_override`（人工纠正）那张表是同一条纪律。
+//! 它不随重跑识别消失，也不随重新成型消失，删库重扫也不丢——这与 `title` 表里
+//! `source = 裁决` 的那些行、沉淀库里 `shaping_override`（人工纠正）那张表是同一条纪律。
 //!
 //! 锚点是 `(作品名, 平台)` 而不是行号，理由与 `scrape_value`、`title` 一样：
 //! 重跑识别会把发行版整批换掉；作品那张表票 parking-3/10 起按名字复用、行号跨重跑不换，
 //! 但一行收得掉的那几种情形照旧在（底下最后一个变体没了、这一趟一条判据都没落在它身上）。
 //! 挂在行号上的东西那时就成了孤儿。
+//!
+//! **这张表是沉淀库的投影**（票 `verdict-store-and-sync/01`，挂单 `Q725`）：首选变体裁决
+//! 不可再生，原件住沉淀库（`verdict::Store::preferred_variants`，键前面多一个主库标识），
+//! 开现场时照它整份重建（[`Catalog::replace_preferred_variants`]）。人定首选变体走
+//! `Site::set_preferred_variant`，**不直接写这里**——直接写的那一条下次开现场就被抹掉了。
 
 use rusqlite::{OptionalExtension, params};
 
@@ -261,6 +266,46 @@ impl Catalog {
             .map_err(|source| self.err(source))
     }
 
+    /// 把这张表**整份换成**给的这些（沉淀库那一份，[`site::reconcile`](crate::site::reconcile)），
+    /// 返回真写了没有。
+    ///
+    /// 这张表是沉淀库的**投影**（票 `verdict-store-and-sync/01`）。**与眼下一样就一个字都不写**：
+    /// 每开一次现场都要照一遍，而命令行与界面常常同时开着——一趟不必要的写要去抢写锁。
+    /// 不一样时**先清后写、一个事务**，中途死掉不留下半份。
+    ///
+    /// # Errors
+    /// 读写库失败时返回错误。
+    pub fn replace_preferred_variants(
+        &mut self,
+        wanted: &std::collections::BTreeMap<(String, String), String>,
+    ) -> Result<bool, CatalogError> {
+        if &self.preferred_variants()? == wanted {
+            return Ok(false);
+        }
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        tx.execute("DELETE FROM preferred_variant", [])
+            .map_err(to_err)?;
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO preferred_variant(work, platform, variant_key) VALUES(?1,?2,?3)",
+                )
+                .map_err(to_err)?;
+            for ((work, platform), key) in wanted {
+                insert
+                    .execute(params![work, platform, key])
+                    .map_err(to_err)?;
+            }
+        }
+        tx.commit().map_err(to_err)?;
+        Ok(true)
+    }
+
     /// 全部首选变体裁决：`(作品名, 平台)` → 变体的键。
     ///
     /// # Errors
@@ -311,7 +356,7 @@ impl Catalog {
     /// **导出要挡下整个都是附属内容的变体**（ADR-0013）——而挡不挡得住不能靠
     /// 「眼下没有这种变体」这句话，得靠一条查得出来的判据。
     ///
-    /// 用一句聚合而不是逐个变体查成员：真库里变体有 46,444 个。
+    /// 用一句聚合而不是逐个变体查成员：真库里变体有四万多个（见台账 `docs/library-facts.md`）。
     ///
     /// # Errors
     /// 读库失败时返回错误。
