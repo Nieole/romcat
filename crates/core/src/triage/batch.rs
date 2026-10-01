@@ -2,8 +2,8 @@
 //!
 //! ## 为什么一定要有这一层
 //!
-//! 真机上待裁决 **18,241 个变体**（`.scratch/gui-redesign/spec.md`）。按 5 秒一条算是
-//! **25 小时**——逐条不是可行路径。但其中八成只有**一个候选**：那不是「选哪个」，
+//! 真机上待裁决**一万八千多个变体**（`.scratch/gui-redesign/spec.md`）。按 5 秒一条算是
+//! **二十五个小时上下**——逐条不是可行路径。但其中八成只有**一个候选**：那不是「选哪个」，
 //! 是「**对不对**」，而「对不对」可以按批回答。
 //!
 //! 分批的键是**依据形状**，因为它就是「**工具凭什么这么认为**」——
@@ -14,7 +14,7 @@
 //!
 //! - **这里的批**：一组**依据形状相同的待裁决变体**。它是屏上的一张卡片，
 //!   还没落任何库。
-//! - [`verdict::Batch`](crate::verdict::Batch)：一次 [`apply`](super::apply) 落下的
+//! - [`verdict::Batch`]：一次 [`apply`](super::apply) 落下的
 //!   那些**裁决**，**撤销以它为粒度**。
 //!
 //! 两者在按下「整批通过」那一刻一一对应：这一批变体落成那一批裁决。词表**两个都收了**
@@ -23,7 +23,7 @@
 //! ## 一条只落一个形状
 //!
 //! [`Shape::of`] 取的是**第一条候选**。取「置信度最高的那条」听着更聪明，但
-//! 「整批通过」就是 `--pick 1`（[`DecisionSpec::Pick`](super::DecisionSpec::Pick)），
+//! 「整批通过」就是 `--pick 1`（[`DecisionSpec::Pick`]），
 //! 它采用的正是第一条——分批时说 A、按下去做 B，那句共同依据当场变成假话。
 //!
 //! 于是各批条数加起来**恰好**是队列的条数，屏上那个「前 5 批盖住多少」才算得出来。
@@ -35,7 +35,8 @@ use crate::catalog::identify::{Confidence, Tier};
 use crate::catalog::{Candidate, State};
 use crate::dat::Convention;
 
-use super::{Axis, GroupRow, Item};
+use super::{Axis, DecisionSpec, GroupRow, Item};
+use crate::verdict;
 
 /// **选择器**那串字里各段之间的分隔。
 ///
@@ -52,7 +53,8 @@ const BARE: &str = "一条候选都没有";
 /// 一批的**候选数**落在哪一档。
 ///
 /// 分档而不是记确切条数：屏上要的是「这一批能不能按批回答」，而那只分得出几档。
-/// 档的边界照真库实测的分布来（2–3 个 2,750、4–10 个 688、10 个以上 146）。
+/// 档的边界照真库实测的分布来（2–3 个的两千多、4–10 个的近七百、10 个以上的一百多，
+/// 出自 `.scratch/gui-redesign/issues/09-triage-screen.md`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Fanout {
     /// **一条候选都没有**。真机上队列里绝大多数条目在这一档。
@@ -446,7 +448,8 @@ impl Batch {
 /// 有多个候选与没有候选的各多少。
 ///
 /// 它**算在核心库里**：屏上那句「前 5 批可直接批量处理 12,223 条」是这一屏存在的理由本身
-/// （18,241 条按 5 秒一条是 25 小时），而算它就是走一遍这几批。界面只负责把这几个数
+/// （一万八千多条按 5 秒一条是二十五个小时上下，`.scratch/gui-redesign/spec.md`），
+/// 而算它就是走一遍这几批。界面只负责把这几个数
 /// 摆出来（ADR-0005）；库屏工序段裁决那一行「前 N 批可一次处理 N 个」说的也是它。
 ///
 /// ## 「前几批」只数能整批通过的
@@ -709,13 +712,33 @@ pub enum PartKind {
 }
 
 impl PartKind {
-    /// 屏上那一项旁边那枚标签上写什么。
+    /// 两档，[`Self::from_label`] 照这个次序认。
+    pub const ALL: [Self; 2] = [Self::Passed, Self::Rejected];
+
+    /// 这一种裁决落在一整组上是哪一档：采用候选是**通过**，「都不对，而且认不出」是**拒绝**；
+    /// 手工指定与「没有发行版」天生是逐条的动作，折不出一部分（`None`）。
+    #[must_use]
+    pub fn of(spec: &DecisionSpec) -> Option<Self> {
+        match spec {
+            DecisionSpec::Pick(_) => Some(Self::Passed),
+            DecisionSpec::Unknown => Some(Self::Rejected),
+            DecisionSpec::Manual(_) | DecisionSpec::NoRelease { .. } => None,
+        }
+    }
+
+    /// 屏上那一项旁边那枚标签上写什么。沉淀库批表上记的也是这个词（[`Part::record`]）。
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Passed => "已通过",
             Self::Rejected => "已拒绝",
         }
+    }
+
+    /// 把 [`Self::label`] 那个词认回来；认不出是 `None`。
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.label() == label)
     }
 
     /// 同一件事的**动词**：「这一部分通过了」那句话里的那两个字。
@@ -737,33 +760,95 @@ impl PartKind {
 /// 部分」可说；而下钻落下一部分之后这一批还在，屏上那一栏要同时说清「这一项处理过了」
 /// 与「还剩这些」——那两句话都只有记着这一条才说得出。
 ///
-/// 落下的仍旧是**一批裁决**（[`verdict::Batch`](crate::verdict::Batch)），不另造一套：
-/// [`Part::batch`] 指的就是它，撤销照旧以它为粒度。
+/// 落下的仍旧是**一批裁决**（[`verdict::Batch`]），不另造一套：它就记在那一批上
+/// （[`verdict::BatchScope`]，票 `verdict-store-and-sync/03`），撤销照旧以那一批为粒度。
+/// **记在沉淀库里而不是只活在一个窗口里**：关掉窗口再开，那几项照旧标着「已通过」、
+/// 细分方式照旧锁着（挂单 `Q964`）。批表上那几格怎么写（[`Part::record`]）、怎么读回来
+/// （[`Part::of`]）、折成哪句给人看的话（[`Part::label`]），都只有这一处。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Part {
-    /// 哪一批下面的哪一组。`drill` 必不为空——整批那一层不记（见上）。
-    pub scope: Scope,
-    /// 落下的时候这一组有多少条。
+    /// 哪一批：这一批变体的**依据形状**。
+    pub shape: Shape,
+    /// 按哪个轴切的。
+    pub axis: Axis,
+    /// 切出来的哪一组。**它同时是选择器的值**（[`Axis::filter`]）。
+    pub group: String,
+    /// 落下的时候这一组有多少条**变体**。
     ///
     /// **落下时记住，不事后再数**：这些条一落下就从队列里消失了，再数是零，
-    /// 而屏上那一行要写的正是「这一项当时有多少条」。
+    /// 而屏上那一行要写的正是「这一项当时有多少条」。也不拿落下之后那笔账里的「落了几条」
+    /// 当它：几个变体共享同一条内容锚时落成的是同一条裁决，那个数会小于这一组的变体数。
     pub count: u64,
     /// 通过还是拒绝。
     pub kind: PartKind,
-    /// 落成了第几**批裁决**（[`verdict::Batch::id`](crate::verdict::Batch::id)）。
-    /// 那一批撤掉，这一条跟着作废（[`Parts::keep`]）。
+}
+
+impl Part {
+    /// 一次整批裁决落在这个范围上，落下之后就是这样一部分；范围不带下钻那一层（整批），
+    /// 或者这种裁决折不出一部分（[`PartKind::of`]）时是 `None`——**整批那一层不归这里管**。
     ///
-    /// 叫 `batch` 不叫 `lot`：后者正是词表**批**那一条 `_Gate_` 里的「批号」，
-    /// 而这个东西全仓早有名字——[`Applied::batch`](super::Applied::batch)、
-    /// [`undo_batch`](super::undo_batch) 指的都是它。
-    pub batch: i64,
+    /// `count` 是落下之前这个范围里有多少个变体。
+    #[must_use]
+    pub fn within(scope: &Scope, count: u64, spec: &DecisionSpec) -> Option<Self> {
+        let (axis, group) = scope.drill.as_ref()?;
+        Some(Self {
+            shape: scope.shape.clone(),
+            axis: *axis,
+            group: group.clone(),
+            count,
+            kind: PartKind::of(spec)?,
+        })
+    }
+
+    /// 这一批裁决是**就地落下的一部分**吗——是就把它折回来，不是（整批那一层、逐条落下的、
+    /// 命令行按选择器落下的、加作用范围那几格之前落下的旧批）是 `None`。
+    ///
+    /// 批表上那几格**认不回来**（形状那串字、轴、裁成什么里哪一格不是本程序写得出的词）时
+    /// 也是 `None`：说不清作用在哪一组上，就不在屏上标它。
+    #[must_use]
+    pub fn of(batch: &verdict::Batch) -> Option<Self> {
+        let scope = batch.scope.as_ref()?;
+        Some(Self {
+            shape: Shape::parse(&scope.shape).ok()?,
+            axis: Axis::from_label(&scope.axis)?,
+            group: scope.group.clone(),
+            count: scope.count,
+            kind: PartKind::from_label(&scope.kind)?,
+        })
+    }
+
+    /// 折成沉淀库批表上那几格（[`verdict::BatchScope`]）：形状折成命令行 `--shape` 收的那串字
+    /// （[`Shape::selector`]），轴与裁成什么记它们的词。
+    #[must_use]
+    pub fn record(&self) -> verdict::BatchScope {
+        verdict::BatchScope {
+            shape: self.shape.selector(),
+            axis: self.axis.label().to_string(),
+            group: self.group.clone(),
+            count: self.count,
+            kind: self.kind.label().to_string(),
+        }
+    }
+
+    /// 这一部分当初的**作用范围**：哪一批下面的哪一组。
+    #[must_use]
+    pub fn scope(&self) -> Scope {
+        Scope::under(self.shape.clone(), self.axis, &self.group)
+    }
+
+    /// 给人看的那一句：作用范围原话（[`Scope::label`]，形如「MAME / gameboy.xml / 含头 · 按目录 GB/汉化/」）。
+    ///
+    /// 裁决记录那一行、命令行列批，说这一批作用在哪一组上的都是这一句。
+    #[must_use]
+    pub fn label(&self) -> String {
+        self.scope().label()
+    }
 }
 
 /// 眼下这一屏上，各批已经就地裁完的那几部分。
 ///
-/// **它不是第二份账**：条数、撤没撤都以沉淀库那一批裁决为准，这里存的是沉淀库答不出的
-/// 那一半——**那一批裁决当初作用在哪一批的哪一组上**。沉淀库只记「落了哪些条」，
-/// 折不回「按目录 · `GB/汉化/`」这一句。
+/// **它不是第二份账**：哪几部分在、各自多少条、通过还是拒绝，全照沉淀库那本册子折
+/// （[`Parts::sync`]）——撤掉的那一批当场不算，命令行撤的、上一个窗口落的也都认。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Parts {
     done: Vec<Part>,
@@ -771,36 +856,25 @@ pub struct Parts {
 }
 
 impl Parts {
-    /// 记下刚落下的这一部分。`scope` 不带下钻那一层时**一个字都不记**并交回 `false`
-    /// ——整批那一层不归这里管。
+    /// 照沉淀库那本册子（这份主库上落过的那些批，[`verdict::Store::batches`]）重折一遍：
+    /// **在册**的、就地落下的那些批（[`Part::of`]）各是一部分。
     ///
-    /// **同一组落下过两次就记两条，后一条不盖掉前一条**：头一趟里有几条落不下去
-    /// （[`Plan::blocked`](super::Plan::blocked)）时那一组还剩着，人会再裁一次——
-    /// 盖掉的话头一批的账就从这里消失了，而它在裁决记录里还在册，撤掉它屏上也不会有反应。
-    /// 同一批裁决（`batch` 相同）重记才是覆盖：那是同一件事说了两遍。
-    pub fn record(&mut self, scope: Scope, count: u64, kind: PartKind, batch: i64) -> bool {
-        if scope.drill.is_none() {
-            return false;
-        }
-        self.done.retain(|part| part.batch != batch);
-        self.done.push(Part {
-            scope,
-            count,
-            kind,
-            batch,
-        });
-        self.revision += 1;
-        true
-    }
-
-    /// 只留下 `live` 认的那几批裁决对应的部分。
+    /// **同一组落下过两次就是两部分**：头一趟里有几条落不下去（[`Plan::blocked`](super::Plan::blocked)）
+    /// 时那一组还剩着，人会再裁一次——两批都在册，两份都算。
     ///
-    /// **撤销以一批裁决为粒度**：那一批撤掉，那些变体当场回到队列，这一项就不再是
-    /// 「处理过的」——屏上那一行要重新变成点得动的，细分方式也跟着解开。
-    pub fn keep(&mut self, live: impl Fn(i64) -> bool) {
-        let 原先 = self.done.len();
-        self.done.retain(|part| live(part.batch));
-        if self.done.len() != 原先 {
+    /// 与上一次折出来的一样就一个字不动（[`Self::revision`] 不跳）：裁决记录每重列一遍就折一次，
+    /// 缓着细分那一栏的人不该因此白算一遍。
+    pub fn sync(&mut self, records: &[verdict::Batch]) {
+        let mut live: Vec<(i64, Part)> = records
+            .iter()
+            .filter(|batch| !batch.undone())
+            .filter_map(|batch| Some((batch.id, Part::of(batch)?)))
+            .collect();
+        // **按落下的先后排**：册子是新的在前，而同一组裁过两次时屏上那一项标的是后一次。
+        live.sort_by_key(|(id, _)| *id);
+        let done: Vec<Part> = live.into_iter().map(|(_, part)| part).collect();
+        if done != self.done {
+            self.done = done;
             self.revision += 1;
         }
     }
@@ -817,24 +891,18 @@ impl Parts {
     /// 会重叠——新那一栏里每一项含着多少条已经处理掉的，谁也说不出。
     #[must_use]
     pub fn locked_axis(&self, shape: &Shape) -> Option<Axis> {
-        self.under(shape).next().map(|(axis, _, _)| axis)
+        self.under(shape).next().map(|part| part.axis)
     }
 
     /// 这一批已经就地处理掉多少条。
     #[must_use]
     pub fn done_in(&self, shape: &Shape) -> u64 {
-        self.under(shape).map(|(_, _, part)| part.count).sum()
+        self.under(shape).map(|part| part.count).sum()
     }
 
-    /// 这一批下面已经处理掉的那几部分，连它们各自落在哪个轴的哪一组上。
-    fn under(&self, shape: &Shape) -> impl Iterator<Item = (Axis, &str, &Part)> {
-        self.done.iter().filter_map(move |part| {
-            if &part.scope.shape != shape {
-                return None;
-            }
-            let (axis, label) = part.scope.drill.as_ref()?;
-            Some((*axis, label.as_str(), part))
-        })
+    /// 这一批下面已经处理掉的那几部分。
+    fn under(&self, shape: &Shape) -> impl Iterator<Item = &Part> {
+        self.done.iter().filter(move |part| &part.shape == shape)
     }
 }
 
@@ -996,19 +1064,19 @@ pub fn breakdown(drilled: &Drill, parts: &Parts, shape: &Shape, axis: Axis) -> B
     // 里会有几条落不下去（[`Plan::blocked`](super::Plan::blocked)），那一组于是还在
     // `drilled` 里：它那几条已经算进 `drilled.total` 了，整份再加一遍就是重复计数。
     let mut 退出队列的 = 0;
-    for (处理时的轴, label, part) in parts.under(shape) {
+    for part in parts.under(shape) {
         // 锁着轴的时候这一条永远成立；换轴被挡住之前落下的那几部分不混进别的轴。
-        if 处理时的轴 != axis {
+        if part.axis != axis {
             continue;
         }
-        if let Some(at) = rows.iter().position(|row| row.label == label) {
+        if let Some(at) = rows.iter().position(|row| row.label == part.group) {
             // 这一组还在队列里，也就是它没裁干净。标上裁过，条数照旧是眼下还剩的那些
             // ——屏上那一项于是还点得动，剩下的几条再裁一次就完了。
             rows[at].done = Some(part.kind);
         } else {
             退出队列的 += part.count;
             rows.push(Slice {
-                label: label.to_string(),
+                label: part.group.clone(),
                 count: part.count,
                 left: 0,
                 done: Some(part.kind),
@@ -1431,6 +1499,36 @@ mod tests {
         drill(&members, axis)
     }
 
+    /// 沉淀库册子上的一批（[`verdict::Store::batches`] 列出来的样子）：`part` 是它就地落下的
+    /// 那一部分（整批那一层与逐条落下的给 `None`），`undone` 为真就是撤掉了。
+    fn 册子上的一批(id: i64, part: Option<&Part>, undone: bool) -> verdict::Batch {
+        verdict::Batch {
+            id,
+            library: "小库".to_string(),
+            summary: "采用各自的第 1 条候选".to_string(),
+            note: None,
+            decided_at: 100,
+            undone_at: undone.then_some(200),
+            rows: part.map_or(30, |part| part.count),
+            scope: part.map(Part::record),
+        }
+    }
+
+    /// 这一批下面按目录切出来的这一组，整组通过（或拒绝）之后的那一部分。
+    fn 一部分(shape: &Shape, group: &str, count: u64, 通过: bool) -> Part {
+        let spec = if 通过 {
+            DecisionSpec::Pick(1)
+        } else {
+            DecisionSpec::Unknown
+        };
+        Part::within(
+            &Scope::under(shape.clone(), Axis::Directory, group),
+            count,
+            &spec,
+        )
+        .expect("下钻那一层的整批通过与拒绝都是一部分")
+    }
+
     #[test]
     fn 细分每一项都说得出占整批的几成() {
         // 屏上那条占比条的长短就是它。一项都没处理掉时，各项加起来正好是整批。
@@ -1472,12 +1570,11 @@ mod tests {
             .cloned()
             .collect();
         let mut parts = Parts::default();
-        assert!(parts.record(
-            Scope::under(shape.clone(), Axis::Directory, &那一项.label),
-            那一项.count,
-            PartKind::Passed,
+        parts.sync(&[册子上的一批(
             7,
-        ));
+            Some(&一部分(&shape, &那一项.label, 那一项.count, true)),
+            false,
+        )]);
         let 之后 = breakdown(
             &下钻(&剩下, Axis::Directory),
             &parts,
@@ -1529,13 +1626,9 @@ mod tests {
         // 两套切法会重叠，数就对不上了——挡住，并说得出为什么。
         let (items, shape) = 一批加它的细分(30);
         let 那一项 = 下钻(&items, Axis::Directory).rows[0].clone();
+        let 那一部分 = 一部分(&shape, &那一项.label, 那一项.count, false);
         let mut parts = Parts::default();
-        parts.record(
-            Scope::under(shape.clone(), Axis::Directory, &那一项.label),
-            那一项.count,
-            PartKind::Rejected,
-            7,
-        );
+        parts.sync(&[册子上的一批(7, Some(&那一部分), false)]);
         assert_eq!(parts.locked_axis(&shape), Some(Axis::Directory));
         let 细分 = breakdown(
             &下钻(&items, Axis::Directory),
@@ -1557,7 +1650,13 @@ mod tests {
         assert_eq!(parts.locked_axis(&别的批), None);
 
         // 那一批裁决撤掉，这一项就不再是处理过的。
-        parts.keep(|batch| batch != 7);
+        let 折过几次 = parts.revision();
+        parts.sync(&[册子上的一批(7, Some(&那一部分), true)]);
+        assert_ne!(
+            parts.revision(),
+            折过几次,
+            "换了样子却没说，缓着的那一栏会照旧画"
+        );
         assert_eq!(parts.locked_axis(&shape), None);
         let 撤完 = breakdown(
             &下钻(&items, Axis::Directory),
@@ -1573,12 +1672,63 @@ mod tests {
     #[test]
     fn 整批那一层不记成一部分() {
         // 一级整批落下之后这一批整个从队列里消失，屏上没有「剩下的部分」可说。
-        let (items, shape) = 一批加它的细分(30);
+        let (_, shape) = 一批加它的细分(30);
+        assert_eq!(
+            Part::within(&Scope::whole(shape.clone()), 30, &DecisionSpec::Pick(1)),
+            None
+        );
+        // 手工指定与「没有发行版」天生是逐条的动作，作用不到一整组上。
+        let 那一组 = Scope::under(shape.clone(), Axis::Directory, "FC/0");
+        for spec in [
+            DecisionSpec::Manual("某部作品".to_string()),
+            DecisionSpec::NoRelease { work: None },
+        ] {
+            assert_eq!(Part::within(&那一组, 3, &spec), None, "{spec:?}");
+        }
+        // 册子上整批那一层的批没有作用范围，折不出一部分。
         let mut parts = Parts::default();
-        assert!(!parts.record(Scope::whole(shape.clone()), 30, PartKind::Passed, 7));
+        parts.sync(&[册子上的一批(7, None, false)]);
         assert_eq!(parts.done_in(&shape), 0);
         assert_eq!(parts.locked_axis(&shape), None);
-        let _ = items;
+    }
+
+    #[test]
+    fn 一部分记进批表再读回来一个字不差() {
+        // 关窗再开靠的就是这一来一回（票 `verdict-store-and-sync/03`）。形状那串字里 DAT 与理由
+        // 都可能自带 `/`，组名也是——读回来得还是同一批的同一组，不是静悄悄的另一组。
+        for shape in [
+            Shape::Candidates {
+                source: "No-Intro".to_string(),
+                dat: "Nintendo - Game Boy (20260901-000000) / 补充".to_string(),
+                confidence: Confidence::Medium,
+                convention: Convention::Headerless,
+                fanout: Fanout::Few,
+            },
+            Shape::Bare {
+                state: State::NoEvidence,
+                reason: Some("容器穿不透 / 压缩镜像".to_string()),
+            },
+        ] {
+            for 通过 in [true, false] {
+                let 那一部分 = 一部分(&shape, "库/GB/汉化/某组", 12, 通过);
+                let 读回来 = Part::of(&册子上的一批(3, Some(&那一部分), false));
+                assert_eq!(读回来.as_ref(), Some(&那一部分));
+                assert_eq!(
+                    读回来.map(|part| part.label()),
+                    Some(format!("{} · 按目录 库/GB/汉化/某组", shape.label())),
+                );
+            }
+        }
+        // 认不回来的那几格（不是本程序写得出的词）不当成一部分：说不清作用在哪一组上，就不在屏上标它。
+        let mut 写岔了 = 册子上的一批(
+            4,
+            Some(&一部分(&一批加它的细分(3).1, "FC/0", 3, true)),
+            false,
+        );
+        if let Some(scope) = &mut 写岔了.scope {
+            scope.axis = "按年份".to_string();
+        }
+        assert_eq!(Part::of(&写岔了), None);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! **待确认队列**是主界面：列得出、盖得住一批、裁得下去，而中文输入不在表格单元格里。
 //!
-//! 合成数据的**形状照真机来**（票 08 实测：队列 16,656 条，
+//! 合成数据的**形状照真机来**（票 08 实测：队列一万六千多条，见台账 `docs/library-facts.md`；
 //! `--under 合成库/gba/【全部汉化】` 852、`--under 合成库/GoodNES3.1` 1,543、`--name 汉化` 1,986）。
 //! 前缀带着**根名**：键的第一段就是它（`path::library_key`）。
 //! 这几个数在这里是**断言**而不是注释——ADR-0002 说批量裁决的覆盖面是这件事成不成立的
@@ -171,7 +171,8 @@ fn 每条待裁决项都带着结论理由与候选() {
             .all(|candidate| !candidate.evidence.is_empty() && !candidate.accepted),
         "候选要么没有依据，要么已经自动通过——自动通过的不该进队列",
     );
-    // 真机上 98.2% 的条目一条候选都没有，所以**手工指定**是主路径。
+    // 真机上队列里九成八上下的条目一条候选都没有（票 `rom-metadata-automation/08` 那一趟实测），
+    // 所以**手工指定**是主路径。
     let 没候选 = items
         .iter()
         .filter(|item| item.candidates.is_empty())
@@ -500,7 +501,8 @@ fn 说它不成其为一次发行就当场说不成立() {
 
 #[test]
 fn 打开看见的是分好的批而不是一万八千行的表() {
-    // 票 `gui-redesign/09` 的正题。18,241 条按 5 秒一条是 25 小时——那张表根本没法用，
+    // 票 `gui-redesign/09` 的正题。一万八千多条按 5 秒一条是二十五个小时上下（`.scratch/gui-redesign/spec.md`）
+    // ——那张表根本没法用，
     // 所以打开这一屏看见的必须是**工具已经分好的几十批**。
     let app = 界面(demo::QUEUE_ROWS);
     assert_eq!(app.queue().mode(), Mode::Batches, "打开该是批优先");
@@ -1464,25 +1466,27 @@ fn 就地落下的那一批裁决在记录上认得出是哪一组() {
         let (那一项, _) = 下钻到头一项(&ctx, &mut app, axis);
         那一项
     };
-    let 作用范围 = app.queue().scope().expect("下钻了就该有作用范围").label();
+    let 作用范围 = app.queue().scope().expect("下钻了就该有作用范围");
     let id = 就地裁掉(&mut app, true);
     跑(&ctx, &mut app, 1);
 
+    // 作用范围**结构化地**记在那一批上（票 `verdict-store-and-sync/03`），给人看的那一句由核心库一处折
+    // （`Part::label`）——备注留给人自己写的那句为什么，不再拿它装作用范围。
     let 那一批 = 册子上的(&app, id);
-    assert_eq!(
-        那一批.note.as_deref(),
-        Some(作用范围.as_str()),
-        "就地落下的那一批没记下它作用在哪一组上",
-    );
+    let 一部分 = triage::Part::of(&那一批).expect("就地落下的那一批没记下它作用在哪一组上");
+    assert_eq!(一部分.scope(), 作用范围);
+    assert_eq!(一部分.label(), 作用范围.label());
     assert!(
-        作用范围.contains(&那一组),
-        "作用范围那句话里该有这一组的名字：{作用范围}",
+        一部分.label().contains(&那一组),
+        "作用范围那句话里该有这一组的名字：{}",
+        一部分.label(),
     );
+    assert_eq!(那一批.note, None, "作用范围不该再塞进备注那句人话里");
 
-    // ⚠️ **只钉到这里**：裁决记录那一行眼下把备注画在**悬停**里（`records_drawer` 里那个
+    // ⚠️ **只钉到这里**：裁决记录那一行眼下把作用范围画在**悬停**里（`records_drawer` 里那个
     // `悬停`），屏上那两行字是「第 N 批裁决 · M 条」与「时刻 · summary」——`画出来的字`
     // 读不到悬停，所以「人在屏上认不认得出是哪一组」这一半没法在这一层钉。
-    // 要它上屏得动记录那一行的样式（票 18 定的），那是另一个岔路口，记在挂单 `Q966`。
+    // 副行照稿接「· 作用范围」是票 `gui-draws-the-rest-of-the-design/13` 的活（挂单 `Q966`）。
     打开裁决记录(&ctx, &mut app);
     let 屏上 = 画一帧(&ctx, &mut app);
     assert!(
@@ -1581,6 +1585,63 @@ fn 处理过一部分之后换细分方式被挡住并说清为什么_撤掉那�
             .is_none(),
         "撤完了还挡着",
     );
+}
+
+#[test]
+fn 就地裁掉一组之后关掉窗口再开_那一项照旧标着已通过_细分方式照旧锁着() {
+    // 票 `verdict-store-and-sync/03`（挂单 `Q964`）：「已经就地裁掉了哪一组」原先只活在这个窗口里，
+    // 关掉再开那几项不再标「已通过」、换得动轴——屏上的数当场变成假话。作用范围记在沉淀库那一批上，
+    // 开窗时照它折回来。
+    let ctx = headless::context();
+    let (mut app, shape, axis) = 展开一批能过的(&ctx);
+    let (那一项, 条数) = 下钻到头一项(&ctx, &mut app, axis);
+    就地裁掉(&mut app, true);
+    跑(&ctx, &mut app, 1);
+
+    // 关掉窗口再开：待确认屏整个重建，这个窗口里记着的一样都不留——剩下的只有两份库。
+    {
+        let (screen, site) = app.queue_and_site();
+        *screen = romcat_gui::queue::Screen::new();
+        screen.reload(site);
+    }
+    展开(&mut app, &shape);
+    跑(&ctx, &mut app, 1);
+
+    assert_eq!(
+        app.queue().axis(),
+        axis,
+        "重开之后那一批该停在锁着的那个轴上"
+    );
+    let 细分 = app.queue().breakdown().expect("展开了就该有细分").clone();
+    assert_eq!(细分.locked, Some(axis), "重开之后细分方式没锁着");
+    let 标着 = 细分
+        .rows
+        .iter()
+        .find(|row| row.label == 那一项)
+        .expect("裁完的那一项重开之后该还在细分那一栏上");
+    assert_eq!(
+        (标着.done, 标着.count),
+        (Some(triage::PartKind::Passed), 条数),
+        "重开之后那一项该标着已通过、条数还是落下时那么多",
+    );
+    let 屏上 = 画一帧(&ctx, &mut app);
+    assert!(
+        屏上.lines().any(|line| line == "已通过"),
+        "重开之后那一项旁边没标出那枚「已通过」：\n{屏上}",
+    );
+    let 那句话 = 细分.axis_refusal().expect("锁着就该说得出为什么");
+    assert!(屏上.contains(&那句话), "锁着却没说为什么：\n{屏上}");
+
+    // 换轴照旧被挡住。
+    let 换成 = Axis::ALL
+        .into_iter()
+        .find(|one| *one != axis)
+        .expect("三个轴里该有别的");
+    {
+        let (screen, _) = app.queue_and_site();
+        assert!(!screen.set_axis(换成), "重开之后换得动轴了");
+    }
+    assert_eq!(app.queue().axis(), axis);
 }
 
 #[test]
@@ -1924,7 +1985,7 @@ fn 换过选择器之后那份计划书作废而不是照旧落下() {
 
 /// 这几条中文匹配的测试摆多少条队列。
 ///
-/// **不用整份 16,656 条**：这一块要的只是「那一堆摆在屏上、裁得动」，而摆得出那一堆
+/// **不用整份合成队列（`demo::QUEUE_ROWS` 条）**：这一块要的只是「那一堆摆在屏上、裁得动」，而摆得出那一堆
 /// 要的是两个拿得到内容判据的变体——命中那一档在这个规模上有 3 条，够了。
 const 中文匹配用的条数: u64 = 200;
 
@@ -2440,7 +2501,7 @@ fn 按在(ctx: &egui::Context, app: &mut App, 位置: egui::Pos2) -> String {
 
 #[test]
 fn 点一下列表头上的排序屏上画出来的第一条就换了() {
-    // 挂账 `D153`：真机上 16,656 条待裁决，而次序**永远是变体的键**——想按容量或按
+    // 挂账 `D153`：真机上一万六千多条待裁决（见台账 `docs/library-facts.md`），而次序**永远是变体的键**——想按容量或按
     // 结论找出该先动的那几条，从前只能靠选择器缩小范围。逐条那一屏照稿两栏之后
     // （票 `gui-looks-like-the-design/18`），排序收在待选列表栏头那一颗里。
     let ctx = headless::context();
@@ -2489,7 +2550,7 @@ fn 五列每一列都排得出一个全序而且一条都不少() {
     // 而且**一条都不多一条都不少**。
     //
     // 只比相邻的那 n−1 对，**不两两比**：反对称与传递性是 `ItemOrder::cmp_items` 自己
-    // 保证的（每一档都拿唯一的键收尾），拿 16,656 条去穷举 1.38 亿对既证不出更多东西，
+    // 保证的（每一档都拿唯一的键收尾），拿整份合成队列（`demo::QUEUE_ROWS` 条）去穷举上亿对既证不出更多东西，
     // 又会把门禁拖垮。
     let mut app = 界面(demo::QUEUE_ROWS);
     let 原有: Vec<String> = {

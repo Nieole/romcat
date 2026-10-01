@@ -19,7 +19,7 @@
 //! ## 候选集不是天花板
 //!
 //! [`DecisionSpec::Pick`] 从候选里挑一条，但队列里**大多数变体一条候选都没有**
-//! （真机上未命中 11,823 条、无判据 4,537 条，候选数都是 0）。所以
+//! （真机上未命中一万多条、无判据四千多条，候选数都是 0，见台账 `docs/library-facts.md`）。所以
 //! [`DecisionSpec::Manual`] 是一等公民：人直接说出作品、平台、地区、**汉化组**与**版本**，
 //! 不必先有一条候选。判定「都不对」有两种说法，**分开记**：
 //! [`DecisionSpec::NoRelease`] 是「它没有发行版」（同人移植、homebrew），
@@ -536,7 +536,7 @@ impl Axis {
         }
     }
 
-    /// 这个轴在界面上叫什么。
+    /// 这个轴在界面上叫什么。沉淀库批表上记的也是这个词（[`Part::record`](batch::Part::record)）。
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -544,6 +544,12 @@ impl Axis {
             Self::CandidateWork => "按候选作品",
             Self::NameMark => "按命名规律",
         }
+    }
+
+    /// 把 [`Self::label`] 那个词认回来；认不出是 `None`。
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|axis| axis.label() == label)
     }
 
     /// 这个轴筛的是什么，一句人话。界面上是输入框的提示。
@@ -636,7 +642,7 @@ pub(crate) fn tally_by(items: &[Item], keys: impl Fn(&Item) -> Vec<String>) -> V
 
 /// 走一趟**待确认队列**的结果。
 ///
-/// 三样一起给，是因为**它们出自同一趟扫描**：中立库里那 46,444 行只该读一遍。
+/// 三样一起给，是因为**它们出自同一趟扫描**：中立库里那四万多行（一个变体一行，见台账 `docs/library-facts.md`）只该读一遍。
 /// 分成三个入口的话，命令行为了印一行「队列 N 条、选中 M 条」就要读三遍。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Survey {
@@ -675,7 +681,7 @@ pub fn survey(
         if !in_queue(&row, filter) || decided(verdicts, &row) {
             continue;
         }
-        // 候选按需读——真库里那是 150,959 行，而队列里绝大多数条目一条都没有。
+        // 候选按需读——真库里那是十五万多行（见台账 `docs/library-facts.md`），而队列里绝大多数条目一条都没有。
         let candidates = if row.candidates > 0 {
             catalog.candidates_of(&row.variant.key)?
         } else {
@@ -762,7 +768,7 @@ fn decided(verdicts: &verdict::Index, row: &QueueRow) -> bool {
 /// 把每条的**内容判据**算出来。**一个字节都不读主库。**
 ///
 /// **整批一趟取回来**（[`identify::content_prints`]）：一条一条地问是一个变体四次库，
-/// 而真库的队列上这是 18,241 条各算一次（票 `parking-3/09`）。挑「谁代表这个变体」
+/// 而真库的队列上这是一万八千多条各算一次（票 `parking-3/09`；条数出自 `.scratch/gui-redesign/spec.md`）。挑「谁代表这个变体」
 /// 的那句说法两条路共用同一份——队列钉裁决的锚与收藏钉的锚必须是同一个。
 ///
 /// # Errors
@@ -1044,6 +1050,13 @@ pub struct Plan {
     pub summary: String,
     /// 记的那一句为什么，跟着计划落进批里。
     pub note: Option<String>,
+    /// 这份计划落下去就是待确认屏上**就地裁完的一部分**时，是哪一部分（[`Part`]）：
+    /// 哪一批按哪个轴切出来的哪一组、落下之前那一组多少条、通过还是拒绝。
+    /// 整批那一层、逐条落下的、按选择器排的计划都是 `None`（[`Queue::plan_scope`] 填它）。
+    ///
+    /// 它跟着计划落进那一批（[`verdict::Batch::scope`]），**关掉窗口再开还认得出**那一项
+    /// 已经裁过、细分方式锁在哪个轴上（票 `verdict-store-and-sync/03`）。
+    pub part: Option<Part>,
     /// 这一批落在哪份主库上（路径锚里记的那个**主库标识**）。
     pub library: String,
     /// 这份计划是对着**哪一批条目**排的：它们的变体键，落得下的与落不下的都在里面。
@@ -1298,7 +1311,13 @@ pub fn apply(
             before: store.find(&verdict.anchor)?,
         });
     }
-    let batch = store.put_batch(&plan.library, &plan.summary, plan.note.as_deref(), &rows)?;
+    let batch = store.put_batch(
+        &plan.library,
+        &plan.summary,
+        plan.note.as_deref(),
+        plan.part.as_ref().map(Part::record).as_ref(),
+        &rows,
+    )?;
     let keys: Vec<&str> = rows.iter().map(|row| row.variant_key.as_str()).collect();
     catalog.stash_conclusions(batch, &keys)?;
 
@@ -1665,7 +1684,7 @@ pub fn plan_forget(
     // （[`fill_prints`] 那条批量入口，票 `parking-3/09`）。
     let mut items = Vec::new();
     for row in catalog.queue_rows()? {
-        // 候选只在选择器真的按它筛时才读——真库里那是 150,959 行。
+        // 候选只在选择器真的按它筛时才读——真库里那是十五万多行（见台账 `docs/library-facts.md`）。
         let candidates = if row.candidates > 0 && !filter.candidate_work.is_empty() {
             catalog.candidates_of(&row.variant.key)?
         } else {

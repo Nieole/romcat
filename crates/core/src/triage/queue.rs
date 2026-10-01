@@ -4,7 +4,7 @@
 //!
 //! 命令行一条命令干一件事，折一次队列印一张表就结束了。界面不是——人在这里的动作是
 //! **换个选择器再看一眼**，一分钟里能换十几次。每换一次都重跑一遍 [`survey`]，
-//! 真机上是每次 1.3 秒的卡顿（46,444 行连表带候选走一遍），那样的队列没人用得下去。
+//! 真机上是每次 1.3 秒的卡顿（四万多行连表带候选走一遍，见台账 `docs/library-facts.md`），那样的队列没人用得下去。
 //!
 //! 所以队列在这里**整份留在内存里**，换选择器只是把 [`Filter::keeps_item`] 重跑一遍。
 //! 这与「绝不把全库载入内存」（ADR-0005、`catalog::browse`）不矛盾，理由有两条：
@@ -37,7 +37,7 @@
 
 use std::collections::BTreeSet;
 
-use super::batch::{self, Batch, Coverage, Drill, Sample, Scope};
+use super::batch::{self, Batch, Coverage, Drill, Part, Sample, Scope};
 use super::{
     Applied, Axis, Decide, Filter, GroupRow, Item, ItemOrder, Plan, State, TriageError, Undone,
     apply, fill_prints, plan, plan_each, redo_batch, survey, tally, undo_batch,
@@ -62,7 +62,7 @@ pub struct Queue {
     ///
     /// 它们不算在 `pending` 里（跳过不是「拿不定主意」），但**选中的条数里可能有它们**
     /// ——界面上勾一下就连跳过一起复核。两个数分开报，状态栏才说得出
-    /// 「队列 16,656 条待裁决，另有 N 条跳过，选中 M 条」这种自洽的话。
+    /// 「队列一万六千多条待裁决，另有 N 条跳过，选中 M 条」这种自洽的话（真库的条数见台账 `docs/library-facts.md`）。
     skipped: u64,
     /// 跑过识别没有。没跑过时队列是空的，**但那不是「没什么可裁的」**。
     identified: bool,
@@ -335,6 +335,9 @@ impl Queue {
     /// 与 [`Queue::plan`] 是同一件事，只是范围从「选择器选中的全部」收到「这一批」
     /// ——屏上按下「整批通过」时选择器一个字都没动，人看的还是那一列卡片。
     ///
+    /// 范围是**下钻出来的那一组**、裁的是整组通过或拒绝时，计划还记着落下去是哪一部分
+    /// （[`Plan::part`]，连这一组眼下多少条）：它跟着计划落进那一批，关掉窗口再开还认得出。
+    ///
     /// # Errors
     /// 读中立库或沉淀库失败时返回错误。
     pub fn plan_scope(
@@ -348,7 +351,10 @@ impl Queue {
         for index in &at {
             self.ensure_prints(catalog, *index..index + 1)?;
         }
-        plan_each(store, at.iter().map(|index| &self.items[*index]), decide)
+        let mut plan = plan_each(store, at.iter().map(|index| &self.items[*index]), decide)?;
+        // 条数趁现在数：落下之后这一组就空了，再数是零。
+        plan.part = Part::within(scope, at.len() as u64, &decide.spec);
+        Ok(plan)
     }
 
     /// 换一套选择器。和现在这套一样就什么都不做——界面每帧都会调它。
