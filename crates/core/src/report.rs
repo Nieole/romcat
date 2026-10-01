@@ -24,6 +24,17 @@ use crate::shape::{CompanionKind, DoubtKind, Role};
 /// 平台未知时在报告里的显示名。
 pub const UNKNOWN_PLATFORM_LABEL: &str = "（平台未知）";
 
+/// **识别报告与刮削报告按平台分组的口径**：两份报告头上印的同一句（票 `core-answers-once/02`）。
+///
+/// 两份报告按**识别判定的平台**分组，与刮削实际取的是同一个——人做过平台纠正的听人的，
+/// 没做过的看卡带头，都没有才退回目录声明的那个（`Catalog::identified_platforms` 那一种读法）。
+/// 于是它与盘上的目录对不上是**有意的**：没纠正过的放错目录的卡记在卡带头说的那个平台下，
+/// 人说「保持目录的说法」的照目录记；目录与内容的分歧另由库体检那一格报。报告头上不写明这一句，
+/// 读的人拿它去对盘上的目录，对不上就会以为报告数错了。一句话两份报告共用，各写一遍迟早写出
+/// 两个说法。
+pub const PLATFORM_BASIS: &str = "按识别判定的平台分组——做过平台纠正的听纠正，没做过的看卡带头，\
+     都没有才照目录声明；与刮削实际取的是同一个，目录与内容平台不符见库体检";
+
 /// 报告里每个平台展示几个扩展名。
 const TOP_EXTENSIONS_PER_PLATFORM: usize = 5;
 /// 报告里全库展示几个扩展名。
@@ -32,7 +43,8 @@ const TOP_EXTENSIONS_GLOBAL: usize = 25;
 const TOP_INNER_EXTENSIONS: usize = 15;
 /// 报告里展示几组重复拷贝。
 const TOP_DUPLICATE_GROUPS: usize = 10;
-/// 报告里列出几个**还没映射**的顶层目录。真库顶层 73 个条目，一多半是这一类。
+/// 报告里列出几个**还没映射**的顶层目录。真库里这样的顶层目录有二十多个，另有二十多个
+/// 散在库根下的文件（见台账 `docs/library-facts.md`）。
 const TOP_UNMAPPED_DIRS: usize = 15;
 /// 报告里每组重复拷贝展示几条路径。
 ///

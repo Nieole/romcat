@@ -44,6 +44,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::{OptionalExtension, params};
 
+use super::identify::identified_platform_sql;
 use super::{Catalog, CatalogError};
 use crate::scrape::measure::Measured;
 use crate::scrape::priority::VERDICT;
@@ -123,7 +124,8 @@ CREATE TABLE IF NOT EXISTS media_remote(
 ) STRICT;
 
 -- 一份**视频**抽出来的首帧是池里的哪一份内容（票 `gui-redesign/07`）。
--- **抽帧要外部 ffmpeg，一份视频抽一次就够了**：真库的媒体池里有 178 个 mp4，
+-- **抽帧要外部 ffmpeg，一份视频抽一次就够了**：真库的媒体池里有一百多个 mp4
+-- （票 `gui-redesign/07` 开票时数的；台账没收），
 -- 每开一次详情面板重抽一遍，等于每次翻库都拉起一百多个进程。
 --
 -- 键是**视频自己的内容哈希**而不是它的键：媒体池按内容哈希存（ADR-0009），
@@ -943,6 +945,10 @@ impl Catalog {
 
     /// 一个源在**变体**这一层的覆盖，按平台：那个平台几个变体、其中几个被它撞上。
     ///
+    /// **按识别判定的平台分**（票 `core-answers-once/02`）：刮削拿哪个平台去撞，这张表就把它
+    /// 记在哪个平台下。按目录声明分的话，`psp/` 底下那张 GBC 卡报告说是 PSP 的，实际按 GBC 刮
+    /// ——读法只在一处（`identified_platform_sql!`，与 [`Catalog::identified_platforms`] 同一句）。
+    ///
     /// **只数变体锚点。** 中文离线源在两层都说话（票 02），可撞只发生在变体这一层
     /// ——作品那一层是读「名下的变体撞到了哪些条目号」推上去的。于是「撞上多少」这个
     /// 数唯一说得清的地方就是变体：作品锚点上按平台归本来就归不动（一部作品跨平台）。
@@ -967,11 +973,16 @@ impl Catalog {
                 // `LEFT JOIN` 而不是相关子查询：一个平台一行，撞不上的那些平台照样有行
                 // ——那正是这张表要说的话。`COUNT(DISTINCT s.subject)` 不数 NULL，
                 // 于是它就是「撞上了的变体数」，而同一个变体上有几条值不影响它。
-                "SELECT COALESCE(v.platform, ?3), COUNT(DISTINCT v.key), COUNT(DISTINCT s.subject)
+                concat!(
+                    "SELECT COALESCE(",
+                    identified_platform_sql!(),
+                    ", ?3), COUNT(DISTINCT v.key), COUNT(DISTINCT s.subject)
                  FROM variant v
+                 LEFT JOIN identification i ON i.variant_key = v.key
                  LEFT JOIN scrape_value s
                    ON s.subject = v.key AND s.anchor = ?2 AND s.source = ?1
                  GROUP BY 1 ORDER BY 1",
+                ),
             )
             .map_err(|source| self.err(source))?;
         let rows = statement

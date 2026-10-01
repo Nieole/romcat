@@ -114,6 +114,8 @@ fn 识别跑通并把命中率打出来() {
     assert!(text.contains("命中率"), "{text}");
     assert!(text.contains("FC"), "{text}");
     assert!(text.contains("TOSEC"), "{text}");
+    // 报告头上写明按平台那一节的口径（票 `core-answers-once/02`）：命令行上看得到。
+    assert!(text.contains("按识别判定的平台分组"), "{text}");
 
     // 结论落进中立库：候选、依据、作品与发行版都在。
     let catalog = Catalog::open(&workspace::catalog_path(

@@ -26,6 +26,7 @@ use romcat_core::platform::Manifest;
 use romcat_core::report::{CorrectionGroup, CorrectionGroups, HealthReport};
 use romcat_core::scan::aggregate::{ConflictEvidence, Limits};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
+use romcat_core::scrape::{self, Priorities, ScrapeReport};
 use romcat_core::task::Handle;
 use romcat_core::testing::cart as real;
 use romcat_core::testing::container::{ZipEntrySpec, zip_container};
@@ -159,6 +160,13 @@ fn 那一层(现场: &现场) -> CorrectionGroups {
 
 /// 跑一趟识别，带上人定过的那些平台纠正与裁决；`回盘读` 关掉时一个字节都不读主库。
 fn 跑一趟识别(现场: &mut 现场, 回盘读: bool) -> identify::Outcome {
+    跑一趟识别_对着(现场, 回盘读, &建_dat())
+}
+
+/// 同 [`跑一趟识别`]，DAT 库换成 `repo` 那一份。
+fn 跑一趟识别_对着(
+    现场: &mut 现场, 回盘读: bool, repo: &DatRepo
+) -> identify::Outcome {
     let corrections = 现场
         .store
         .platform_corrections(LIBRARY)
@@ -167,12 +175,11 @@ fn 跑一趟识别(现场: &mut 现场, 回盘读: bool) -> identify::Outcome {
     let mut options = Options::new(Roots::single("库", 现场.dir.path()));
     options.decided_platforms = Some(DecidedPlatforms::new(&corrections));
     options.read_library = 回盘读;
-    let repo = 建_dat();
     identify::run(
         &RealFs::new(),
         &mut 现场.catalog,
         &identify::Ammo {
-            repo: &repo,
+            repo,
             verdicts: &裁决,
             naming: &fuzzy::Naming::off(),
             guessing: &identify::model::Guessing::off(),
@@ -193,24 +200,32 @@ fn 跑一趟识别(现场: &mut 现场, 回盘读: bool) -> identify::Outcome {
 /// - **PSP**：随便一条。有了它，`psp/` 底下的裸文件才会回盘算哈希（DAT 库里一条都没有的平台
 ///   不读，读出来也无处可撞）——按**内容锚**钉的裁决要到那之后才问得着，走的是第二处短路。
 fn 建_dat() -> DatRepo {
-    let mut repo = DatRepo::in_memory().expect("开得出 DAT 库");
-    for (dat, platform, game, serial) in [
+    dat_库(&[
         (
+            "No-Intro",
             "Nintendo - Game Boy Color",
             "GBC",
             "007 - The World Is Not Enough (USA, Europe)",
             Some("BO7E"),
         ),
         (
+            "No-Intro",
             "Sony - PlayStation Portable",
             "PSP",
             "Some PSP Game (Japan)",
             None,
         ),
-    ] {
+    ])
+}
+
+/// 一份 DAT 库，每一项是 `(源, DAT 名, 平台, 条目名, 序列号)`，一份 DAT 一条记录；
+/// 哈希都对不上盘上任何一份（CRC-32 `DEADBEEF`、大小 1）。
+fn dat_库(各条: &[(&str, &str, &str, &str, Option<&str>)]) -> DatRepo {
+    let mut repo = DatRepo::in_memory().expect("开得出 DAT 库");
+    for &(source, dat, platform, game, serial) in 各条 {
         let mut writer = repo
             .begin(&Unit {
-                source: "No-Intro".to_string(),
+                source: source.to_string(),
                 name: dat.to_string(),
                 url: "https://example.invalid/dat".to_string(),
                 fingerprint: "sha".to_string(),
@@ -938,6 +953,201 @@ fn 加_cgb_标志之前读的旧头_库体检先保守地不报_gb_到_gbc_下�
         为它读了(&现场, 只能在GBC上跑的),
         0,
         "重读过的落了库，再下一趟一个字节都不读"
+    );
+}
+
+/// 从中立库折一份**刮削报告**（ADR-0001：不重跑刮削）。这几条只看它按平台怎么分，
+/// 一个源都没跑过也照样分得出——分母是库里那个平台的变体数。
+fn 刮削报告(现场: &现场) -> ScrapeReport {
+    ScrapeReport::build(
+        &现场.catalog,
+        &Priorities::builtin(),
+        &scrape::Options::new(Roots::single("库", 现场.dir.path()), "媒体池"),
+        &scrape::report::Run {
+            sources: &[],
+            plan: &scrape::PlanCounts::default(),
+            online: None,
+            halted: None,
+        },
+    )
+    .expect("折得出刮削报告")
+}
+
+#[test]
+fn 刮削报告按识别判定的平台分组_放错目录的卡记在卡带头说的平台下() {
+    // 票 `core-answers-once/02`：刮削按识别判定的平台去撞（`scrape::Plan::build` 读
+    // `identification.platform`），报告却按目录声明的分——报告说它是 PSP 的，实际按 GBC 刮。
+    let mut 现场 = 建现场();
+    跑一趟识别(&mut 现场, true);
+    assert_eq!(
+        按哪个平台算(&现场, 放错目录的卡带).as_deref(),
+        Some("GBC"),
+        "前提：`psp/` 底下那张卡识别判定的是卡带头说的 GBC"
+    );
+
+    let 报告 = 刮削报告(&现场);
+    let 各平台: BTreeMap<&str, u64> = 报告
+        .zh_platforms
+        .iter()
+        .map(|row| (row.platform.as_str(), row.variants))
+        .collect();
+    assert_eq!(
+        各平台,
+        BTreeMap::from([("FC", 2), ("GBA", 1), ("GBC", 1), ("NDS", 1)]),
+        "`psp/` 底下那张 GBC 卡记在 GBC 下，`gba/` 底下那份头是 NDS 的记在 NDS 下；\
+         PSP 一个变体都不剩，未纳入管理的目录那一份不是变体"
+    );
+    assert_eq!(报告.zh_total.variants, 5, "合计照旧是全库的变体数");
+    let 头 = 报告头(&报告.render_text());
+    assert!(
+        头.contains("按识别判定的平台分组"),
+        "报告头上写明口径——读的人才知道它为什么对不上盘上的目录：\n{头}"
+    );
+}
+
+/// 一份文本报告的**头**：第一个空行之前的那几行（小节标题前面都空一行，`report::heading`）。
+fn 报告头(text: &str) -> String {
+    text.lines()
+        .take_while(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn 识别报告按识别判定的平台分组_同一张放错目录的卡记在卡带头说的平台下_那一行的中文数跟着它走() {
+    // 同一张卡，人裁过它是《007 黑日危机》的汉化版：它在识别报告里是一条**命中**、带**汉化**
+    // 记号。按平台那几列各自从中立库数——变体那一列按判定的平台分、汉化那一列按目录声明的分，
+    // 同一个变体就会在 GBC 那一行算命中、在 PSP 那一行算汉化。
+    let mut 现场 = 建现场();
+    let 锚 = 路径锚(&现场);
+    钉一条裁决(&mut 现场, 锚);
+    let 这一趟 = 跑一趟识别(&mut 现场, true);
+    assert_eq!(
+        按哪个平台算(&现场, 放错目录的卡带).as_deref(),
+        Some("GBC"),
+        "前提：裁过的那张卡识别判定的照样是卡带头说的 GBC"
+    );
+
+    let 报告 = &这一趟.report;
+    let 各平台: BTreeMap<&str, u64> = 报告
+        .platforms
+        .iter()
+        .map(|row| (row.platform.as_str(), row.variants))
+        .collect();
+    assert_eq!(
+        各平台,
+        BTreeMap::from([("FC", 2), ("GBA", 1), ("GBC", 1), ("NDS", 1)]),
+        "与刮削报告分得一样：放错目录的两份各记在内容说的那个平台下，PSP 一行都没有"
+    );
+    let gbc = 报告
+        .platforms
+        .iter()
+        .find(|row| row.platform == "GBC")
+        .expect("GBC 那一行");
+    assert_eq!(
+        (gbc.matched, gbc.fan_translated),
+        (1, 1),
+        "那张卡的命中与汉化记号记在同一行"
+    );
+    assert_eq!(
+        报告.total.fan_translated, 1,
+        "各行加起来的汉化数与全库那个数对得上"
+    );
+    let 头 = 报告头(&报告.render_text());
+    assert!(
+        头.contains("按识别判定的平台分组"),
+        "报告头上写明口径，与刮削报告同一句：\n{头}"
+    );
+}
+
+#[test]
+fn 做过平台纠正的变体两份报告都记在纠正之后的平台下_按内容改与保持目录两个方向() {
+    // 识别判定的平台里人的纠正先说话（`identify::platform_of`）：FC → FDS 那一组按内容改，
+    // 两份 `.fds` 记在 FDS 下；GBA → NDS 那一组保持目录的说法，头是 NDS 的那份照目录记在 GBA 下。
+    // 没人纠正过的 `psp/` 那张照旧听卡带头。
+    let mut 现场 = 建现场();
+    现场
+        .store
+        .set_platform_correction(LIBRARY, "FC", "FDS", PlatformDecision::ByContent)
+        .expect("记得下");
+    现场
+        .store
+        .set_platform_correction(LIBRARY, "GBA", "NDS", PlatformDecision::KeepDeclared)
+        .expect("记得下");
+    let 这一趟 = 跑一趟识别(&mut 现场, true);
+
+    let 期望 = BTreeMap::from([("FDS", 2), ("GBA", 2), ("GBC", 1)]);
+    let 识别报告: BTreeMap<&str, u64> = 这一趟
+        .report
+        .platforms
+        .iter()
+        .map(|row| (row.platform.as_str(), row.variants))
+        .collect();
+    assert_eq!(识别报告, 期望, "识别报告记在纠正之后的平台下");
+    let 刮削报告 = 刮削报告(&现场);
+    let 刮削报告: BTreeMap<&str, u64> = 刮削报告
+        .zh_platforms
+        .iter()
+        .map(|row| (row.platform.as_str(), row.variants))
+        .collect();
+    assert_eq!(刮削报告, 期望, "刮削报告与识别报告分得一样");
+}
+
+#[test]
+fn 候选打分比的是识别判定的平台_放错目录的卡与放对目录的卡对同几条_dat_记录排出同一个次序() {
+    // 票 `core-answers-once/02`：候选同一档可信程度里**平台对得上的在前**。比的要是识别判定的
+    // 平台——比目录声明的，躺在 `gb/` 里那张只能在 GBC 上跑的卡就会把 GB 那条排到前面，
+    // 而它与躺在 `gbc/` 里的同一张卡读出来的是同一段头、撞上的是同几条记录。
+    //
+    // 两份 DAT 各有一条写着那张卡的游戏码 `BO7E`：No-Intro 的 GBC 集，与一份 TOSEC 的 GB 集。
+    // 卡带那一层撞库时圈的是整一族（GB、GBC），两条都撞得上、可信程度同一档。
+    let 放对目录的 = "gbc/汉化/007 黑日危机 汉化版.gbc";
+    let mut 现场 = 摆现场(vec![
+        (只能在GBC上跑的, real::padded(&real::GBC_TWINE, 1 << 15)),
+        (放对目录的, real::padded(&real::GBC_TWINE, 1 << 15)),
+    ]);
+    let repo = dat_库(&[
+        (
+            "No-Intro",
+            "Nintendo - Game Boy Color",
+            "GBC",
+            "007 - The World Is Not Enough (USA, Europe)",
+            Some("BO7E"),
+        ),
+        (
+            "TOSEC",
+            "Nintendo Game Boy - Games",
+            "GB",
+            "007 - The World Is Not Enough (2000)(THQ)",
+            Some("BO7E"),
+        ),
+    ]);
+    跑一趟识别_对着(&mut 现场, true, &repo);
+    assert_eq!(
+        按哪个平台算(&现场, 只能在GBC上跑的).as_deref(),
+        Some("GBC"),
+        "前提：`gb/` 底下那张识别判定的是卡带头说的 GBC"
+    );
+
+    let 次序 = |相对: &str| -> Vec<(String, String, String)> {
+        现场
+            .catalog
+            .candidates_of(&变体键(&现场, 相对))
+            .expect("读得出候选")
+            .into_iter()
+            .map(|it| (it.source, it.platform, it.confidence.label().to_string()))
+            .collect()
+    };
+    let 放对的 = 次序(放对目录的);
+    assert_eq!(
+        放对的.iter().map(|it| it.1.as_str()).collect::<Vec<_>>(),
+        vec!["GBC", "GB"],
+        "前提：放对目录的那张，GBC 那条平台对得上、排在前面"
+    );
+    assert_eq!(
+        次序(只能在GBC上跑的),
+        放对的,
+        "放错目录的那张不因为目录丢分：同几条记录，同一个次序、同一档可信程度"
     );
 }
 

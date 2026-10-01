@@ -23,6 +23,9 @@
 //! 一个交代：N64、DC 这些平台在数据源里条目数以几十计，那是**数据源本身浅**，
 //! 不是匹配算法的锅——报告不点名的话，用户会怪错地方。
 //!
+//! 按平台那一栏按**识别判定的平台**分（票 `core-answers-once/02`）：刮削拿哪个平台去撞，
+//! 报告就把它记在哪个平台下，报告头上印着这句口径（[`PLATFORM_BASIS`]）。
+//!
 //! ## 在线那一节是给「对着真账号跑之前」看的
 //!
 //! 发了几个请求、服务端说还剩多少、并发上限是几、**未识别的变体一个请求都没发**——
@@ -36,7 +39,9 @@ use serde::Serialize;
 
 use crate::catalog::{Catalog, CatalogError};
 use crate::identify::fuzzy;
-use crate::report::{UNKNOWN_PLATFORM_LABEL, heading, human_bytes, pad, share, thousands};
+use crate::report::{
+    PLATFORM_BASIS, UNKNOWN_PLATFORM_LABEL, heading, human_bytes, pad, share, thousands,
+};
 
 use super::priority::Priorities;
 use super::{Field, MediaKind, Options, PlanCounts, online};
@@ -132,7 +137,8 @@ pub struct ZhFieldRow {
 /// **中文离线源**在一个平台上的覆盖（票 06）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ZhPlatformRow {
-    /// 平台。认不出平台的那些归在「（平台未知）」底下。
+    /// 平台：**识别判定的**那个（报告头上那句 [`PLATFORM_BASIS`]），刮削拿它去撞的就是它。
+    /// 认不出平台的那些归在「（平台未知）」底下。
     pub platform: String,
     /// 这个平台一共几个变体。**分母是库里的变体数**，不是这一趟采过的个数。
     pub variants: u64,
@@ -418,6 +424,7 @@ impl ScrapeReport {
         let _ = writeln!(out, "中立库          {}", self.catalog);
         let _ = writeln!(out, "媒体池          {}", self.pool);
         let _ = writeln!(out, "数据源          {}", self.sources.join(" / "));
+        let _ = writeln!(out, "平台口径        {PLATFORM_BASIS}");
         let _ = writeln!(
             out,
             "锚点            作品 {} 个、变体 {} 个",
