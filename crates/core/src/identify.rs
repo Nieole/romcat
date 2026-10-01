@@ -185,6 +185,10 @@ pub struct Options {
     /// **平台纠正**：人对「目录说 A、内容是 B」那几组定过的决定（票
     /// `gui-looks-like-the-design/28`）。`None` 是一条都没定过，这一趟照旧只看内容与目录。
     pub decided_platforms: Option<DecidedPlatforms>,
+    /// **平台清单**：判「这个变体撞上了平台纠正的哪一组」与识别报告里「目录与内容平台不符」那一栏，
+    /// 问的都是平台不符那一处判据（[`conflicting_platform`]），它要这份清单。[`Options::new`] 给的是
+    /// 内置那一份；命令行照工作目录那条链取了别的，就换上它。
+    pub manifest: Manifest,
 }
 
 impl Options {
@@ -197,6 +201,7 @@ impl Options {
             max_read_bytes: None,
             write_batch: 2_000,
             decided_platforms: None,
+            manifest: Manifest::builtin(),
         }
     }
 }
@@ -204,12 +209,10 @@ impl Options {
 /// 人对平台下过的那些决定，摆成识别问得动的样子（票 `gui-looks-like-the-design/28`）。
 ///
 /// **它自己不判任何事**：一个变体撞上的是哪一组，问的是核心库那一处判据
-/// （[`conflicting_platform`]，ADR-0024）；这里只记着「那一组人定的是什么」，
-/// 并把那份清单拿在手上好去问。
+/// （[`conflicting_platform`]，ADR-0024）；这里只记着「那一组人定的是什么」。那一处判据要的平台清单
+/// 是这一趟的（[`Options::manifest`]），不在这儿另拿一份。
 #[derive(Debug, Clone)]
 pub struct DecidedPlatforms {
-    /// 判「撞上哪一组」要用的那份平台清单。
-    manifest: Manifest,
     /// 那一对平台 → 人定的那一档。
     by_pair: BTreeMap<(String, String), PlatformDecision>,
 }
@@ -217,9 +220,8 @@ pub struct DecidedPlatforms {
 impl DecidedPlatforms {
     /// 从沉淀库读回来的那些纠正摆成一份。
     #[must_use]
-    pub fn new(manifest: &Manifest, corrections: &[PlatformCorrection]) -> Self {
+    pub fn new(corrections: &[PlatformCorrection]) -> Self {
         Self {
-            manifest: manifest.clone(),
             by_pair: corrections
                 .iter()
                 .map(|one| ((one.declared.clone(), one.implied.clone()), one.decision))
@@ -235,29 +237,37 @@ impl DecidedPlatforms {
 
     /// 这个变体上人说了什么；它没撞上任何一组、或者那一组人还没定过，都是 `None`。
     ///
-    /// **撞上哪一组由那一处判据说了算**：变体的哪个成员（容器里的算内部那条路径）
-    /// 的扩展名只可能属于别的平台，那一对就是它这一组。先撞上的那一组算数——
-    /// 一个变体的成员分属两组是病态情形（成型该把它们分开），按第一条办比按谁都不办诚实。
-    fn decide(&self, variant: &VariantRow, units: &[ContentUnit]) -> Option<String> {
-        let declared = self.manifest.platform_named(variant.platform.as_deref()?)?;
+    /// **撞上哪一组由那一处判据说了算**：变体的哪个成员（容器里的算内部那条路径）的内容——
+    /// 扩展名、识别读过的卡带头——说它不属于目录说的那个平台，那一对就是它这一组。先撞上的
+    /// 那一组算数——一个变体的成员分属两组是病态情形（成型该把它们分开），按第一条办比按谁都不办诚实。
+    fn decide(
+        &self,
+        manifest: &Manifest,
+        variant: &VariantRow,
+        units: &[ContentUnit],
+    ) -> Option<String> {
+        let declared = manifest.platform_named(variant.platform.as_deref()?)?;
         for unit in units {
             let path = if unit.inner.is_empty() {
                 &unit.member
             } else {
                 &unit.inner
             };
-            let Some(extension) = path::extension_lower(Path::new(file_name_of_key(path))) else {
+            let extension = path::extension_lower(Path::new(file_name_of_key(path)));
+            let Some(mismatch) = conflicting_platform(
+                manifest,
+                Some(declared),
+                extension.as_deref(),
+                unit.cart.as_ref(),
+            ) else {
                 continue;
             };
-            let Some((declared, implied)) =
-                conflicting_platform(&self.manifest, Some(declared), &extension)
-            else {
-                continue;
-            };
-            let decision = self.by_pair.get(&(declared.clone(), implied.clone()))?;
+            let decision = self
+                .by_pair
+                .get(&(mismatch.declared.clone(), mismatch.implied.clone()))?;
             return Some(match decision {
-                PlatformDecision::ByContent => implied,
-                PlatformDecision::KeepDeclared => declared,
+                PlatformDecision::ByContent => mismatch.implied,
+                PlatformDecision::KeepDeclared => mismatch.declared,
             });
         }
         None
@@ -296,8 +306,6 @@ pub struct CartCount {
     pub only: u64,
     /// 这一趟没读到几份。**读不到不是结论，不落库**（ADR-0021）。
     pub missed: u64,
-    /// 内部头说的平台与目录声明的平台对不上的份数（ADR-0011）。
-    pub conflicts: u64,
 }
 
 /// **文件名那一层**这一趟干了什么（票 11）。
@@ -497,6 +505,7 @@ pub fn run(
         projector: Projector::adopting(catalog)?,
         // 人定过的那些平台纠正：判「这个变体按哪个平台算」时**它先说话**（`platform_of`）。
         decided_platforms: options.decided_platforms.clone(),
+        manifest: options.manifest.clone(),
         ..Run::default()
     };
     let mut batch: Vec<Identification> = Vec::new();
@@ -556,7 +565,7 @@ pub fn run(
         catalog.set_identify_unfinished(false)?;
     }
 
-    let mut report = IdentifyReport::build(catalog, ammo.repo)?;
+    let mut report = IdentifyReport::build(catalog, ammo.repo, &options.manifest)?;
     // 花费要留得下痕迹：`--json` 存的是这份报告，只在标准错误上说一句的话，跑完就没了。
     if state.model.residue > 0 {
         report.model = Some(state.model.clone());
@@ -984,6 +993,8 @@ struct Run {
     /// **平台纠正**：人对那几组「目录说 A、内容是 B」定过的决定（票
     /// `gui-looks-like-the-design/28`）。从 [`Options`] 上搬过来，一趟里不变。
     decided_platforms: Option<DecidedPlatforms>,
+    /// 这一趟的平台清单（[`Options::manifest`]）：问平台不符那一处判据时要它。
+    manifest: Manifest,
     /// **落到模型推断这一层、而缓存里还没有答案**的那些问题，连它们的提问指纹。
     ///
     /// 攒起来等主循环跑完再打包问，而不是边跑边问：批量打包本来就要求先把一批凑齐，
@@ -2585,9 +2596,11 @@ struct Carted {
 ///    没有魔数，唯一的判据是总长的余数。
 /// 2. **撞上了就不必再探**。这一层没有 NKit 那样「CRC 会骗人所以照验」的例外——
 ///    卡带头认出来的是发行版，而精确哈希已经认得更细。
-/// 3. **它顺带回答一个不撞库的问题**：内部头说的平台与目录声明的平台对不对得上
-///    （ADR-0011 说那正是最该报告的产出之一）。答案落进 `content_cart.platform`，
-///    报告一条 SQL 数得出来。
+/// 3. **它读出来的头顺带喂一个不撞库的问题**：内部头说的平台与目录声明的平台对不对得上
+///    （ADR-0011 说那正是最该报告的产出之一）。这一层**自己不判**：整份头落进 `content_cart`，
+///    库体检从中立库里取回去问平台不符那一处判据（`scan::aggregate::conflicting_platform`，
+///    票 `core-answers-once/01`）。**精确命中过的不探**也就意味着：那几份的 CGB 标志无从知道，
+///    平台不符那一格只能凭扩展名说它们（挂单 `Q1297`）。
 fn probe_carts(
     library: &dyn LibraryFs,
     catalog: &mut Catalog,
@@ -2622,12 +2635,19 @@ fn probe_carts(
         return Ok(carted);
     }
 
-    // 二、算过的先取回来（不读盘），剩下的才回盘。
+    // 二、算过的先取回来（不读盘），剩下的才回盘。**加 CGB 标志那一格之前读的 GB / GBC 头不算
+    // 算过**（`cart::Facts::predates_cgb`）：它答不全平台不符那一问，重读那一千来字节，落库盖掉旧的。
     let (cached, (mut facts, todo)) = plan_probe::<cart::Facts>(
         catalog,
         &wanted,
         options.read_library,
-        &|catalog, member| catalog.cart_facts(member),
+        &|catalog, member| {
+            let mut stored = catalog.cart_facts(member)?;
+            stored.retain(|_, text| {
+                serde_json::from_str::<cart::Facts>(text).is_ok_and(|facts| !facts.predates_cgb())
+            });
+            Ok(stored)
+        },
     )?;
     for (member, indexes) in todo {
         let path = library_path(library, &options.roots, &mut state.dirs, &member);
@@ -2672,12 +2692,13 @@ fn probe_carts(
         if !found.ids.is_empty() {
             state.cart.with_id += 1;
         }
-        // 这份头认哪几个平台。它有两个用处，而两个都不能拿「头说的那一个平台」顶替：
+        // 这一族认哪几个平台：**撞库时圈住候选**。4 个字符的游戏码跨平台撞车是现实存在的
+        // （`A83J` 在 SFC 与 GBA 各有一条）。判据取自内容自己，不取自目录（ADR-0011）。
+        // 圈的是整一族、不按 CGB 标志再切：No-Intro 把双模卡记在 GBC 集里，一张躺在 GB 集里的
+        // 也照样要撞得上。
         //
-        // 1. **撞库时圈住候选**：4 个字符的游戏码跨平台撞车是现实存在的（`A83J` 在
-        //    SFC 与 GBA 各有一条）。判据取自内容自己，不取自目录（ADR-0011）。
-        // 2. **判平台冲突**：GB 与 GBC 共用一份卡带头，一份 CGB 卡躺在 `gb/` 目录里
-        //    不是冲突，是常态。
+        // **这里不判平台不符**：那一问只在一处（`scan::aggregate::conflicting_platform`），
+        // 库体检、平台纠正与识别报告都从中立库里这份头去问它（票 `core-answers-once/01`）。
         let kind = found.cart.as_deref().and_then(cart::Cart::from_code);
         let platforms: Vec<String> = kind
             .map(|kind| {
@@ -2687,13 +2708,6 @@ fn probe_carts(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        // **内部头与目录声明的平台冲突**（ADR-0011）。目录只是强先验，字节说了算。
-        if let Some(declared) = hint
-            && !platforms.is_empty()
-            && !platforms.iter().any(|it| it == declared)
-        {
-            state.cart.conflicts += 1;
-        }
         if cached
             .get(&it.member)
             .and_then(|rows| rows.get(&it.inner))
@@ -2704,7 +2718,9 @@ fn probe_carts(
                 key: it.member.clone(),
                 inner: it.inner.clone(),
                 platform: found.platform.clone(),
-                family: kind.map(|kind| format!(",{},", kind.platforms().join(","))),
+                family: found
+                    .platforms()
+                    .map(|accepted| format!(",{},", accepted.join(","))),
                 facts: text,
             });
         }
@@ -3455,7 +3471,7 @@ fn assemble(
 /// [`conflicting_platform`] 那一处（[`DecidedPlatforms::decide`]）。
 fn platform_of(variant: &VariantRow, units: &[ContentUnit], state: &Run) -> Option<String> {
     if let Some(fixes) = &state.decided_platforms
-        && let Some(decided) = fixes.decide(variant, units)
+        && let Some(decided) = fixes.decide(&state.manifest, variant, units)
     {
         return Some(decided);
     }
@@ -4003,7 +4019,7 @@ mod tests {
             })
             .collect();
         Run {
-            decided_platforms: Some(DecidedPlatforms::new(&Manifest::builtin(), &corrections)),
+            decided_platforms: Some(DecidedPlatforms::new(&corrections)),
             ..Run::default()
         }
     }

@@ -413,7 +413,7 @@ fn merge_body(ui: &mut egui::Ui, spot: &Spot) -> Option<usize> {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     let mut 勾着 = one.picked;
-                    if ui.checkbox(&mut 勾着, "").changed() {
+                    if look::checkbox(ui, &mut 勾着, "").changed() {
                         勾了 = Some(at);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

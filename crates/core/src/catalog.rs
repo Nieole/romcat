@@ -1802,6 +1802,10 @@ impl Catalog {
         // 的路径去接别的根的键，印出来的是一条盘上根本不存在的路径。
         let roots = Roots::load(self)?;
         let mut aggregate = Aggregate::default();
+        // 识别读过的卡带头：**平台不符**那一格的判据要它（`conflicting_platform`，票
+        // `core-answers-once/01`）。识别还没跑过时一份都没有，那一格只凭扩展名。
+        let carts = self.stored_cart_heads()?;
+        let cart_of = |key: &str, inner: &str| carts.get(key).and_then(|heads| heads.get(inner));
 
         let mut statement = self
             .conn
@@ -1843,7 +1847,16 @@ impl Catalog {
                 len.map(|len| u64::try_from(len).unwrap_or(0))
             };
             aggregate.record_file(
-                &FileObservation::derive(manifest, &roots, &key, len, non_utf8 != 0, sample, role),
+                &FileObservation::derive(
+                    manifest,
+                    &roots,
+                    &key,
+                    len,
+                    non_utf8 != 0,
+                    sample,
+                    role,
+                    cart_of(&key, ""),
+                ),
                 limits,
             );
             if role.is_some() {
@@ -1950,6 +1963,7 @@ impl Catalog {
                 &inner,
                 u64::try_from(size).unwrap_or(0),
                 lossy != 0,
+                cart_of(container_key, &inner),
                 limits,
             );
         }

@@ -1247,8 +1247,7 @@ impl Section {
             self.count_media(site, tasks);
         }
         let mut on = self.lay_media;
-        let 拨了 = ui
-            .checkbox(&mut on, LAY_MEDIA)
+        let 拨了 = look::checkbox(ui, &mut on, LAY_MEDIA)
             .on_hover_text(
                 "把媒体池里的封面、截图、视频照这个前端格式的布局铺进导出目录。\
                  默认关着：媒体池在工作目录里，主库多半在外置盘上，跨盘就是整份复制。",
@@ -1606,10 +1605,7 @@ fn identify_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Prod
         .platform_corrections(&site.library_identity)
         .map_err(|error| Cutoff::failed(format!("沉淀库里的平台纠正读不动：{error}")))?;
     if !corrections.is_empty() {
-        options.decided_platforms = Some(identify::DecidedPlatforms::new(
-            &romcat_core::platform::Manifest::builtin(),
-            &corrections,
-        ));
+        options.decided_platforms = Some(identify::DecidedPlatforms::new(&corrections));
     }
     identify::run_task(
         &RealFs::new(),

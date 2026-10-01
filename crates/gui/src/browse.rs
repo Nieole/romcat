@@ -2908,7 +2908,7 @@ impl Screen {
     /// ## 为什么非搬走不可
     ///
     /// 「全选真库那四万多行 → ★ 收藏」那一下（量级见台账 `docs/library-facts.md`），读那一半要为每个变体折出它的锚
-    /// （`collection::plan`），实测在画帧那条线程上跑 **6.7 秒**（挂单 `Q119`）——
+    /// （`collection::plan`），实测在画帧那条线程上跑**好几秒**（挂单 `Q119` 量的）——
     /// 期间窗口是一块白板，切不了屏、滚不动列表、连「停下」都点不着。
     ///
     /// **只有读那一半上台**：写那一半（沉淀库那些成员关系、中立库那份投影）在
@@ -3861,7 +3861,8 @@ impl Screen {
                     // 第二层才是当前呈现方式的控制。卡片不会再和视图、计数争一行。
                     ui.horizontal_wrapped(|ui| {
                         if self.view == BrowseView::Table {
-                            ui.checkbox(
+                            look::checkbox(
+                                ui,
                                 &mut self.list_covers,
                                 egui::RichText::new("在每行开头显示封面")
                                     .size(look::font_size(ui.ctx(), tokens.font.size_small_plus)),
@@ -3951,7 +3952,7 @@ impl Screen {
                             ) {
                                 self.card_size = 换成;
                             }
-                            ui.checkbox(&mut self.only_covers, "只显示有封面的");
+                            look::checkbox(ui, &mut self.only_covers, "只显示有封面的");
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.weak(format!(
                                     "有封面 {} / {}",
@@ -4528,33 +4529,16 @@ impl Screen {
         const 说明: &str = "BIOS 这类：模拟器要它，它本身不是游戏。默认收起；\
                             打开之后列出来，行上标着「非游戏资产」。\
                             照旧入库、永不导出——这颗开关只管列不列出来。";
-        let tokens = Tokens::builtin();
         let mut listed = self.query.non_game_assets == NonGameAssets::Listed;
-        // 两档半号字号走 `look::font_size` 取整（票 `gui-looks-like-the-design/32` 定的统一入口）。
-        let 字 = egui::RichText::new("显示非游戏资产")
-            .size(look::font_size(ui.ctx(), tokens.font.size_small_plus));
-        let 小字 = egui::RichText::new(non_game_asset_label(self.non_game_assets))
-            .size(look::font_size(ui.ctx(), tokens.font.size_caption_plus))
-            .color(ui.visuals().weak_text_color());
-        // 照稿 `.opt`：勾选框在左，右边一栏两行——开关上的字、底下那句小字，**两行左沿对齐**。
-        // 勾选框自己不带字，字摆在右边那一栏里，点字与点勾选框是同一下。
-        let mut 拨了 = false;
-        ui.scope(|ui| {
-            ui.spacing_mut().interact_size.y = 0.0;
-            ui.horizontal_top(|ui| {
-                拨了 |= ui.checkbox(&mut listed, "").on_hover_text(说明).changed();
-                ui.vertical(|ui| {
-                    let 点字 = ui
-                        .add(egui::Label::new(字).sense(egui::Sense::click()))
-                        .on_hover_text(说明);
-                    if 点字.clicked() {
-                        listed = !listed;
-                        拨了 = true;
-                    }
-                    ui.label(小字);
-                });
-            });
-        });
+        // 照稿 `.opt`：勾选框在左，右边一栏两行——开关上的字、底下那句小字，**两行左沿对齐**；点哪一处都是同一下。
+        let 拨了 = look::checkbox_option(
+            ui,
+            &mut listed,
+            "显示非游戏资产",
+            &non_game_asset_label(self.non_game_assets),
+        )
+        .on_hover_text(说明)
+        .changed();
         if 拨了 {
             self.query.non_game_assets = if listed {
                 NonGameAssets::Listed
@@ -5277,7 +5261,8 @@ impl Screen {
         if self.pool.is_none() {
             ui.weak("媒体池不在工作目录里，「在不在池子里」这一栏查不了，图也画不出。");
         } else if self.gallery.lacks_ffmpeg() {
-            // **只说一遍**：真库里 178 个 mp4，每格各摆一句是噪音。
+            // **只说一遍**：真库里一百多个 mp4（台账没收这个数，出处是票 `gui-redesign/07`，挂单 `Q1256`），
+            // 每格各摆一句是噪音。
             ui.weak("这台机器上没有 ffmpeg，视频抽不出首帧——那几格是占位，点下去照样放得了。");
         }
         // **一件一件说清**：哪一格没有图、为什么。汇总的那句「有 N 条引用找不到文件」

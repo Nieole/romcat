@@ -2108,13 +2108,8 @@ impl Screen {
             return;
         }
         let names: Vec<String> = self.list.iter().map(|row| row.name.clone()).collect();
-        // **两列**（设计稿 `.devs`）；窄到并排放不下两张卡时一列。一张卡至少多宽取令牌里弹层的
-        // 头一档——卡上那几行（规则、容量条图例、差量账）在那个宽度上摆得开。
-        let columns = if ui.available_width() >= 2.0 * Tokens::builtin().layout.dialog_width[0] {
-            2
-        } else {
-            1
-        };
+        // **两列**（设计稿 `.devs`）；窄到并排放不下两张卡时一列（[`卡片几列`]）。
+        let columns = 卡片几列(ui.available_width(), &Tokens::builtin().layout);
         // 竖着滚的是整块屏体（[`look::screen_body`]），这里不再套一层滚动区。
         ui.columns(columns, |cols| {
             for (at, name) in names.iter().enumerate() {
@@ -3074,13 +3069,14 @@ impl Screen {
         ui.add_space(step(2));
         let mut on = self.restore_missing;
         if ui
-            .add_enabled(
-                能补几个 > 0 || self.restore_missing,
-                egui::Checkbox::new(
+            .add_enabled_ui(能补几个 > 0 || self.restore_missing, |ui| {
+                look::checkbox(
+                    ui,
                     &mut on,
                     format!("同步时补回这 {} 个文件", thousands(能补几个)),
-                ),
-            )
+                )
+            })
+            .inner
             .on_hover_text("勾上或取消都要重排一趟差量：同步认的是排它那一刻的那份计划。")
             .changed()
         {
@@ -3239,7 +3235,8 @@ impl Screen {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             if plan.deletes.files > 0 {
-                ui.checkbox(
+                look::checkbox(
+                    ui,
                     &mut self.acknowledged,
                     format!(
                         "我看过删除清单（{} 个，{}）",
@@ -5037,6 +5034,16 @@ fn ghost_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     .inner
 }
 
+/// 子库屏这么宽摆几列卡：**两列**（设计稿 `.devs`），窄到并排摆不下两张时一列。一张卡最窄多宽取令牌
+/// `sublibrary-card-min`——卡上那几行（规则、容量条图例、差量账）在那个宽度上摆得开（挂单 `Q813`）。
+fn 卡片几列(宽: f32, 版式: &crate::tokens::Layout) -> usize {
+    if 宽 >= 2.0 * 版式.sublibrary_card_min {
+        2
+    } else {
+        1
+    }
+}
+
 /// **还没有子库**时那一块：一张居中的卡（[`look::card`]），说清子库是什么，给一颗「新建子库」。
 /// 返回按没按。
 ///
@@ -6126,4 +6133,34 @@ fn trim_row(
                 }
             });
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 子库卡片两列门槛取令牌_改门槛同一个宽上摆几列跟着变() {
+        // 挂单 `Q813`：门槛从前借弹层头一档的宽（`dialog-width[0]`），现在单立一格。设计稿 `.devs` 固定两列、
+        // 没有断点，门槛是界面自己定的——照旧 520，不改观感。
+        let 令牌 = Tokens::builtin();
+        let 门槛 = 令牌.layout.sublibrary_card_min;
+        assert_eq!(门槛, 520.0, "照旧 520");
+        assert_eq!(卡片几列(1040.0, &令牌.layout), 2, "并排摆得下两张卡");
+        assert_eq!(卡片几列(1039.0, &令牌.layout), 1, "差一点就只摆一列");
+
+        let mut 改过 = 令牌.clone();
+        改过.layout.sublibrary_card_min = 600.0;
+        assert_eq!(
+            卡片几列(1040.0, &改过.layout),
+            1,
+            "门槛抬到 600，同一个宽只摆得下一列"
+        );
+        改过.layout.sublibrary_card_min = 400.0;
+        assert_eq!(
+            卡片几列(800.0, &改过.layout),
+            2,
+            "门槛降到 400，800 宽就摆两列"
+        );
+    }
 }

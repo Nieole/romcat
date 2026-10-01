@@ -2,8 +2,8 @@
 //!
 //! ## 一行是一个作品，不是一个变体
 //!
-//! 真库上 46,444 个变体收敛成一万出头的行——六成作品下面挂着不止一个变体，那几个
-//! 在详情面板里挑。这一层不做收敛，收敛在中立库里
+//! 真库上四万多个变体收敛成一万出头的行（见台账 `docs/library-facts.md`）——六成作品下面挂着
+//! 不止一个变体，那几个在详情面板里挑。这一层不做收敛，收敛在中立库里
 //! （[`romcat_core::catalog::browse`] 的 `GROUP BY`）：把变体表在界面里聚合，
 //! 等于先要看见全部行才数得出「这个作品有几个变体」，而那正是这一层从头到尾在躲的事。
 //!
@@ -540,8 +540,7 @@ impl Table<'_> {
                         padded(ui, spacing, check, false, |ui| {
                             // 全选那一格。**它选的是「当前这个筛选」**，不是屏上看得见的那几行。
                             let mut all = picked.is_all();
-                            if ui
-                                .checkbox(&mut all, "")
+                            if look::checkbox(ui, &mut all, "")
                                 .on_hover_text(
                                     "全选当前筛选下的每一行。它记的是这个筛选本身，\
                                      不是一万行的身份——换了筛选就作废。",
@@ -626,7 +625,7 @@ impl Table<'_> {
                             看得见的 = ui.clip_rect();
                             padded(ui, spacing, check, false, |ui| {
                                 let mut on = picked.contains(&work.anchor);
-                                if ui.checkbox(&mut on, "").changed() {
+                                if look::checkbox(ui, &mut on, "").changed() {
                                     picked.toggle(&work.anchor);
                                 }
                             });

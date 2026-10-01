@@ -428,6 +428,8 @@ pub struct Font {
     pub size_badge_narrow: f32,
     /// 左栏分组标题的字距，字号的倍数。
     pub group_tracking: f32,
+    /// 小标题的字距，字号的倍数（设计稿 `.sec` 的 `letter-spacing`）。
+    pub section_tracking: f32,
     /// 大号按钮上的字。
     pub size_button_large: f32,
     /// 待确认屏正文头上三格里的数（设计稿 `.qcell .v`）。
@@ -968,6 +970,8 @@ pub struct Layout {
     pub rule_badge: f32,
     /// 子库屏空态那张卡的内边距（设计稿空态卡的 `padding`）。
     pub empty_card_padding: f32,
+    /// 子库屏一张卡最窄多宽：并排摆得下两张才摆两列（设计稿 `.devs` 固定两列、没有断点，这一格是界面自己定的）。
+    pub sublibrary_card_min: f32,
     /// 提示条离窗口底边多远（设计稿 `.toast` 的 `bottom`）。
     pub toast_bottom: f32,
     /// 提示条四边留白：`[上, 右, 下, 左]`（设计稿 `.toast` 的 `padding`）。
@@ -1040,10 +1044,16 @@ pub struct Layout {
     pub radio_dot: f32,
     /// 选中时圆心与外圈之间那一道缝的宽。
     pub radio_gap: f32,
-    /// 单选那一行圆点与名字之间（设计稿 `.opt` 的 `gap`）。
+    /// 单选、勾选那一行圆点或方框与名字之间（设计稿 `.opt` 的 `gap`）。
     pub option_gap: f32,
-    /// 单选那一行上下留白（设计稿 `.opt` 的 `padding`）。
+    /// 单选、勾选那一行上下留白（设计稿 `.opt` 的 `padding`）。
     pub option_padding: f32,
+    /// 勾选框的边长（设计稿 `.ckb`）；圆角取 [`Radius::small`]。
+    pub checkbox_size: f32,
+    /// 勾选框那一圈描边的宽（设计稿 `.ckb` 的 `border`）。
+    pub checkbox_stroke: f32,
+    /// 勾上时描边与里头那块强调色之间那一圈底色的宽（设计稿 `.ckb.on` 的 `box-shadow:inset`）。
+    pub checkbox_gap: f32,
     /// 作品详情页六个面那一排一格的高（设计稿 `.tabs button`）。
     pub tab_height: f32,
     /// 选中那一面底下那道强调色线的粗（设计稿 `.tabs button[aria-selected]`）。
@@ -1080,6 +1090,8 @@ pub struct Layout {
     pub overview_columns: [f32; 2],
     /// 变体卡身子左右两半的比例：`[左, 右]`（设计稿 `.vbody`）。
     pub work_card_columns: [f32; 2],
+    /// 库屏左右两栏的比例：`[左, 右]`（设计稿 `.libgrid`）。
+    pub library_columns: [f32; 2],
     /// 元数据那一面简介至多几行（设计稿 `.mrow .v.clamp`）。
     pub meta_clamp_rows: usize,
     /// 侧边详情头上那张字卡的标题至多几行（设计稿 `.dcover .tc-t`）。

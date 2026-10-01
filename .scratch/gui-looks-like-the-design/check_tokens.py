@@ -229,6 +229,11 @@ literal_pairs(".tag", r"\.tag\{[^}]*?height:(\d+)px;padding:0 (\d+)px;[^}]*?font
 literal_pairs(".note", r"\.note\{padding:(\d+)px (\d+)px;[^}]*?font-size:([\d.]+)px", [(1, S["note-padding"][0], "note-padding 上下"), (2, S["note-padding"][1], "note-padding 左右"), (3, F["size-small-plus"], "size-small-plus")])
 literal_pairs(".opt", r"\.opt\{[^}]*?font-size:([\d.]+)px", [(1, F["size-small-plus"], "size-small-plus")])
 literal_pairs(".opt small", r"\.opt small\{[^}]*?font-size:([\d.]+)px", [(1, F["size-caption-plus"], "size-caption-plus")])
+# 共用控件（票 gui-draws-the-rest-of-the-design/01）：勾选框 .ckb 的边长、圆角、描边宽，勾上时描边里头那一圈底色；
+# 小标题 .sec 的字号、字重与字距。
+literal_pairs(".ckb", r"\.ckb\{width:(\d+)px;height:(\d+)px;border-radius:(\d+)px;border:([\d.]+)px solid var\(--line-2\)", [(1, L["checkbox-size"], "checkbox-size 宽"), (2, L["checkbox-size"], "checkbox-size 高"), (3, tokens["radius"]["small"], "radius small（.ckb）"), (4, L["checkbox-stroke"], "checkbox-stroke")])
+literal_pairs(".ckb.on", r"\.ckb\.on\{background:var\(--accent\);border-color:var\(--accent\);box-shadow:inset 0 0 0 ([\d.]+)px var\(--panel\)", [(1, L["checkbox-gap"], "checkbox-gap")])
+literal_pairs(".sec", r"\.sec\{font-size:(\d+)px;font-weight:(\d+);color:var\(--ink-3\);letter-spacing:([\d.]+)em", [(1, F["size-small"], "size-small（.sec）"), (2, F["weight-strong"], "weight-strong（.sec）"), (3, F["section-tracking"], "section-tracking")])
 literal_pairs(".var", r"\.var\{[^}]*?padding:(\d+)px (\d+)px;[^}]*?gap:(\d+)px (\d+)px", [(1, S["variant-card-padding"][0], "variant-card-padding 上下"), (2, S["variant-card-padding"][1], "variant-card-padding 左右"), (3, S["variant-card-gap"][0], "variant-card-gap 竖"), (4, S["variant-card-gap"][1], "variant-card-gap 横")])
 literal_pairs(".var .p", r"\.var \.p\{[^}]*?font-size:(\d+)px", [(1, F["size-path"], "size-path")])
 literal_pairs(".w2", r"\.w2\{[^}]*?font-size:(\d+)px", [(1, F["size-path"], "size-path")])
@@ -303,6 +308,8 @@ def in_steps(got: str, what: str):
 panel_padding = tokens["space"]["panel-padding"]
 if m := literal(r"\.libgrid\{[^}]*?gap:(\d+)px", ".libgrid 的 gap"):
     same(m[1], tokens["space"]["library-gap"], "library-gap")
+# 库屏两栏的比例（挂单 Q824）：稿上 minmax(0,1.25fr) minmax(0,1fr)。
+literal_pairs(".libgrid 两栏的比例", r"\.libgrid\{[^}]*?minmax\(0,([\d.]+)fr\) minmax\(0,([\d.]+)fr\)", [(1, L["library-columns"][0], "library-columns 左"), (2, L["library-columns"][1], "library-columns 右")])
 if m := literal(r"\.phead\{[^}]*?gap:(\d+)px;padding:(\d+)px (\d+)px", ".phead 的 gap 与 padding"):
     same(m[1], tokens["space"]["panel-head-gap"], "panel-head-gap")
     same(m[2], panel_padding[0], "panel-padding 上下（.phead）")
@@ -831,6 +838,7 @@ EXEMPT: dict[str, str] = {
     "layout.radio-diameter": "设计稿单选框是浏览器原生的 <input type=radio>（.opt input 只设了 accent-color），13px 是浏览器缺省，CSS 里没写。",
     "layout.radio-dot": "同上：选中那一粒是浏览器按 accent-color 画出来的，CSS 里没有这一格。",
     "layout.radio-gap": "同上：圆心与外圈之间那道缝是浏览器原生单选框画出来的样子，CSS 里没有这一格。",
+    "layout.sublibrary-card-min": "设计稿子库屏那几张卡 .devs 是 repeat(2,minmax(0,1fr))：固定两列、没有断点，稿里没有「窄到多少叠成一列」这一格；520 是界面自己定的（卡上规则、容量条图例、差量账在这个宽上摆得开，沿用从前借的弹层头一档，挂单 Q813）。",
     "layout.title-name-share": "设计稿标题面那张表（titleTab 里的 .tbl）没写列宽；0.30 是协调人 2026-09-15 照稿图定的比例。",
     "space.steps": "通用间距的档位，界面随手要一个间距时从这几档里取（由代码走查守，见 tokens.rs 的 Space）；设计稿没有一处列出这几档。脚本只拿它验 .stage / .nextline 的 gap 落在档里——那是核稿，不是核这几档，不算核到。",
     "shadow.pop.blur": "稿上 --pop 的模糊是 30、扩散是 -12，两个一起才画出「只落在下沿」的样子；egui 的扩散收不了负数，只好把模糊收窄来凑，24 是对着稿看出来的，不是从 30 算出来的，没有一个等值可核（票 gui-looks-like-the-design/04 裁定）。换算前提由上面 POP_TUNED_AGAINST 那条钉着。",

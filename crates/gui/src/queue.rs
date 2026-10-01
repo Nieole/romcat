@@ -2282,7 +2282,7 @@ impl Screen {
                 look::section(ui, "按识别结论");
                 ui.horizontal_wrapped(|ui| {
                     for (at, state) in State::ALL.iter().enumerate() {
-                        ui.checkbox(&mut self.picks.states[at], state.label());
+                        look::checkbox(ui, &mut self.picks.states[at], state.label());
                     }
                 });
                 for axis in Axis::ALL {
@@ -2348,15 +2348,14 @@ impl Screen {
     /// 「手工指定…」那一层里的表单：只裁选中的这一条、裁成哪一种、作品与那几样事实、备注。
     /// **这里的每一个文本框都会碰到输入法**，它们全在弹层里（ADR-0005）。
     fn form_ui(&mut self, ui: &mut egui::Ui) {
-        ui.checkbox(&mut self.only_picked, "只裁选中的这一条")
-            .on_hover_text(
-                "「采用第 N 条候选」天生是逐条的动作：同一批里各人的候选不是同一部游戏。",
-            );
+        look::checkbox(ui, &mut self.only_picked, "只裁选中的这一条").on_hover_text(
+            "「采用第 N 条候选」天生是逐条的动作：同一批里各人的候选不是同一部游戏。",
+        );
         ui.scope(|ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(font::strong("裁成"));
                 for how in How::ALL {
-                    ui.radio_value(&mut self.form.how, how, how.label());
+                    look::radio_value(ui, &mut self.form.how, how, how.label());
                 }
             });
             if self.form.how == How::Pick {
@@ -2381,9 +2380,14 @@ impl Screen {
                     ui.label("中文身份");
                     ui.add_enabled_ui(facts, |ui| {
                         ui.horizontal(|ui| {
-                            ui.radio_value(&mut self.form.chinese, None, "不记");
+                            look::radio_value(ui, &mut self.form.chinese, None, "不记");
                             for mark in [ChineseMark::FanTranslated, ChineseMark::Official] {
-                                ui.radio_value(&mut self.form.chinese, Some(mark), mark.label());
+                                look::radio_value(
+                                    ui,
+                                    &mut self.form.chinese,
+                                    Some(mark),
+                                    mark.label(),
+                                );
                             }
                         });
                     });

@@ -36,10 +36,11 @@
 //! **正文是 `ink-2`、强调字是 `ink`**：中文没有粗体（票 `gui-looks-like-the-design/02`），
 //! 一句纯中文的小标题与正文之间只剩颜色这一层差别——两个都给 `ink`，那一层也没了。
 //!
-//! **线宽只有一处从令牌来：控件那一圈描边**（令牌 `control-stroke`，未激活、悬停、按下、展开四档一样宽）。
+//! **egui 控件的线宽只有一处从令牌来：控件那一圈描边**（令牌 `control-stroke`，未激活、悬停、按下、展开四档一样宽）。
 //! egui 原样里未激活那一档是 0、其余三档是 1，于是次要按钮没有边框；设计稿 `.btn` 是一圈 1px 的
 //! `line-2`——拿主意的人 2026-09-14 看过开场的候选基线之后裁：照稿补上（票 `gui-looks-like-the-design/05`）。
-//! 四档必须一样宽，理由见下面「键盘焦点」一节；别的线宽照 egui 原样。屏的版式由各屏自己的票重排。
+//! 四档必须一样宽，理由见下面「键盘焦点」一节；别的线宽照 egui 原样。这一层自己画的控件各取各的令牌
+//! （勾选框那一圈是 `checkbox-stroke`，单选没选中那一圈是 `control-stroke`）。屏的版式由各屏自己的票重排。
 //!
 //! **按钮三档的高与左右留白也从令牌来**（默认 `button-height` / `button-padding`，小号
 //! `button-small-*`，大号 `button-large-*`，照设计稿 `.btn` / `.btn.sm` / `.btn.lg`）。egui 原样的按钮
@@ -98,7 +99,9 @@
 //! egui 把「拿到焦点」与「正被按下」并成同一档 `WidgetVisuals`（`widgets.active`），
 //! 默认那一档的描边在暗色主题里是白的、亮色里是黑的——与**悬停**那一档的灰只差一点点。
 //! [`install`] 把它换成主题自己的**强调色**（`selection.stroke`），也就是 `TextEdit`
-//! 得到焦点时用的那一串：于是按钮、勾选框、可选标签与文本框**得到焦点的样子是同一个**。
+//! 得到焦点时用的那一串：于是按钮、可选标签与文本框**得到焦点的样子是同一个**。这一层自己画的控件不走那一档，
+//! 拿到焦点时自己描同一个强调色：开关 [`switch`] 整颗描一圈（[`focus_ring`]），勾选框 [`checkbox`] 与单选 [`radio`]
+//! 只在方框、圆点外头描一圈、隔开一个线宽（连字那么宽的一圈压在一枚 15 点的方框外头太吵）。
 //!
 //! **四档一样宽，宽度取令牌 `control-stroke`。** egui 把描边宽度反过来从按钮的内边距里扣
 //! （`Style::button_style`），哪一档比别的档宽，控件就会在进出那一档的那一帧缩一下——焦点在
@@ -909,56 +912,123 @@ pub fn note_box<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R
         .inner
 }
 
-/// 一行**单选**（设计稿 `.opt`）：左边一枚圆点，右边名字、底下一行说明小字，整行按得动。圆点选中时是强调色外圈、一道底色缝、
-/// 强调色圆心；没选中是一圈说明字色的细线。直径、圆心、缝、行内间距与上下留白取令牌 `radio-diameter` / `radio-dot` /
-/// `radio-gap` / `option-gap` / `option-padding`；名字 `size-small-plus`、说明 `size-caption-plus`（稿 12.5 / 11.5）。
+/// 一行**单选**（设计稿 `.opt`）：左边一枚圆点（[`radio_dot`]），右边名字、底下一行说明小字，整行按得动。
+/// 行内间距与上下留白取令牌 `option-gap` / `option-padding`；名字 `size-small-plus`、说明 `size-caption-plus`（稿 12.5 / 11.5）。
 ///
-/// 交回整行的点击（圆点、名字、说明哪一处按下去都算）。
+/// 交回整行的点击（圆点、名字、说明哪一处按下去都算）。名字后头还要接东西的用 [`radio_option_with`]；
+/// 一行里要摆的不止名字与说明的，拿 [`radio_dot`] 自己拼。
 pub fn radio_option(ui: &mut egui::Ui, selected: bool, title: &str, note: &str) -> egui::Response {
+    radio_option_in(ui, selected, title, note, None)
+}
+
+/// 同 [`radio_option`]，名字**后头紧跟着**再摆一样东西（`名字后头` 摆，与名字同一行、隔 `option-gap`）。
+/// 合并向导第一步那枚「保留」标签就摆在这儿（设计稿 `.mwit` 里 `<b>作品名</b>` 后头的 `.keepb`，挂单 `Q1015`）。
+pub fn radio_option_with(
+    ui: &mut egui::Ui,
+    selected: bool,
+    title: &str,
+    note: &str,
+    名字后头: impl FnOnce(&mut egui::Ui),
+) -> egui::Response {
+    radio_option_in(ui, selected, title, note, Some(Box::new(名字后头)))
+}
+
+/// 名字那一行后头再摆的那一样（[`radio_option_with`]）；没有就是 `None`。
+type 后头摆的<'a> = Option<Box<dyn FnOnce(&mut egui::Ui) + 'a>>;
+
+fn radio_option_in(
+    ui: &mut egui::Ui,
+    selected: bool,
+    title: &str,
+    note: &str,
+    名字后头: 后头摆的<'_>,
+) -> egui::Response {
+    let response = option_row(ui, title, note, |ui| radio_dot(ui, selected), 名字后头);
+    let enabled = ui.is_enabled();
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::RadioButton, enabled, selected, title)
+    });
+    response
+}
+
+/// 一行**带说明的勾选**（设计稿 `.opt` 里摆一枚勾选框）：左边一枚 [`checkbox`] 那样的方框，右边名字、底下一行说明小字，
+/// 整行按得动，点一下拨一次。摆法与 [`radio_option`] 是同一行（`option-gap` / `option-padding`，名字 `size-small-plus`、
+/// 说明 `size-caption-plus`），只是左边那一枚换成方框。
+///
+/// 交回整行的点击：`changed()` 为真就是这一帧被拨了，`checked` 已经是拨完之后那一档。
+pub fn checkbox_option(
+    ui: &mut egui::Ui,
+    checked: &mut bool,
+    title: &str,
+    note: &str,
+) -> egui::Response {
+    let 边长 = Tokens::builtin().layout.checkbox_size;
+    let mut 方框那一格 = None;
+    let mut response = option_row(
+        ui,
+        title,
+        note,
+        |ui| {
+            let 行高 = option_line_height(ui);
+            let (_, response) =
+                ui.allocate_exact_size(egui::vec2(边长, 行高), egui::Sense::click());
+            方框那一格 = Some(response.clone());
+            response
+        },
+        None,
+    );
+    // **先拨再画**：点在名字或说明上的那一下也得当帧画成拨过之后的样子。
+    let 勾着 = 拨一下(ui, &mut response, checked, title);
+    if let Some(那一格) = 方框那一格
+        && ui.is_rect_visible(那一格.rect)
+    {
+        let 方框 = egui::Rect::from_center_size(那一格.rect.center(), egui::Vec2::splat(边长));
+        paint_checkbox(ui.painter(), 方框, 勾着, response.hovered(), palette(ui));
+        圈住记号(ui, &那一格, 方框, false);
+    }
+    response
+}
+
+/// 设计稿 `.opt` 那一行：上下各留 `option-padding`；左边一枚记号（`mark` 摆，圆点或方框，高是名字那一行），
+/// 隔 `option-gap`，右边一栏名字（`size-small-plus`、`ink`）与底下一行说明（`size-caption-plus`、`ink-3`），两行左沿对齐。
+/// 给了 `名字后头` 的，名字那一行后头再摆它（同一行、隔 `option-gap`）。
+/// 交回整行的点击（记号、名字、说明哪一处按下去都算）。
+fn option_row(
+    ui: &mut egui::Ui,
+    title: &str,
+    note: &str,
+    mark: impl FnOnce(&mut egui::Ui) -> egui::Response,
+    名字后头: 后头摆的<'_>,
+) -> egui::Response {
     let tokens = Tokens::builtin();
     let layout = &tokens.layout;
-    let palette = tokens
-        .color
-        .theme(egui::Theme::from_dark_mode(ui.visuals().dark_mode));
+    let palette = palette(ui);
     let 名字号 = font_size(ui.ctx(), tokens.font.size_small_plus);
     let 说明号 = font_size(ui.ctx(), tokens.font.size_caption_plus);
     ui.add_space(layout.option_padding);
     let row = ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = layout.option_gap;
-        let 名字 =
-            egui::WidgetText::from(egui::RichText::new(title).size(名字号).color(palette.ink))
-                .into_galley(
-                    ui,
-                    Some(egui::TextWrapMode::Extend),
-                    f32::INFINITY,
-                    egui::TextStyle::Body,
-                );
-        let (dot_rect, dot) = ui.allocate_exact_size(
-            egui::vec2(layout.radio_diameter, 名字.size().y),
-            egui::Sense::click(),
-        );
-        let center = dot_rect.center();
-        let painter = ui.painter();
-        if selected {
-            painter.circle_filled(center, layout.radio_diameter / 2.0, palette.accent);
-            painter.circle_filled(
-                center,
-                layout.radio_dot / 2.0 + layout.radio_gap,
-                palette.panel,
-            );
-            painter.circle_filled(center, layout.radio_dot / 2.0, palette.accent);
-        } else {
-            painter.circle(
-                center,
-                layout.radio_diameter / 2.0 - 0.5,
-                palette.panel,
-                egui::Stroke::new(1.0, palette.ink_3),
-            );
-        }
+        let 记号 = mark(ui);
         let texts = ui
             .vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                let 名 = ui.add(egui::Label::new(名字).sense(egui::Sense::click()));
+                let 名字 =
+                    egui::Label::new(egui::RichText::new(title).size(名字号).color(palette.ink))
+                        .extend()
+                        .sense(egui::Sense::click());
+                let 名 = match 名字后头 {
+                    None => ui.add(名字),
+                    // 横排一行最矮是 `interact_size.y`（按钮那么高）：清掉它，名字那一行才不被撑高。
+                    Some(后头) => {
+                        ui.spacing_mut().interact_size.y = 0.0;
+                        ui.horizontal(|ui| {
+                            let 名 = ui.add(名字);
+                            后头(ui);
+                            名
+                        })
+                        .inner
+                    }
+                };
                 let 注 = ui.add(
                     egui::Label::new(egui::RichText::new(note).size(说明号).color(palette.ink_3))
                         .sense(egui::Sense::click()),
@@ -966,10 +1036,295 @@ pub fn radio_option(ui: &mut egui::Ui, selected: bool, title: &str, note: &str) 
                 名 | 注
             })
             .inner;
-        dot | texts
+        记号 | texts
     });
     ui.add_space(layout.option_padding);
     row.inner
+}
+
+/// `.opt` 名字那一行有多高（`size-small-plus` 一行）：记号照它的高摆，圆点、方框就对着旁边头一行字的中线。
+///
+/// 量的是**排出来的一行字**，不是字体的行高（`Fonts::row_height`）：egui 把排好的一段字的高取整到整像素
+/// （那一行 18.8 点排出来是 19），旁边那个名字就是这么高——拿字体行高去摆，记号会比字高出小半个点。
+fn option_line_height(ui: &egui::Ui) -> f32 {
+    let 字号 = font_size(ui.ctx(), Tokens::builtin().font.size_small_plus);
+    egui::WidgetText::from(egui::RichText::new(" ").size(字号))
+        .into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::TextStyle::Body,
+        )
+        .size()
+        .y
+}
+
+/// **单独一枚单选圆点**（设计稿 `.opt input[type=radio]`）：内容由调用方摆在它旁边——一行里除了名字与说明还要摆
+/// 别的（「加入子库」那一层每一台旁边的容量条）就拿它自己拼（挂单 `Q946`）。[`radio_option`] 是它拼的；
+/// 行内的 [`radio`] 与它画的是同一枚（同一个画法，量法跟着 [`checkbox`]）。
+///
+/// 选中是强调色外圈、一道底色缝、强调色圆心；没选中是面板底、一圈说明字色的细线（宽 `control-stroke`）。直径、圆心、缝取令牌
+/// `radio-diameter` / `radio-dot` / `radio-gap`。占 `radio-diameter` 宽、`.opt` 名字那一行高（`size-small-plus` 一行），
+/// 圆点在正中——摆进 `horizontal_top` 里就对着旁边头一行字的中线。
+///
+/// **悬停不另画**：照勾选框那一条（悬停时描边换按钮悬停那一档 `ink-3`，拿主意的人 2026-10-01 裁），而没选中那一圈本来
+/// 就是 `ink-3`，换了也一样。
+///
+/// 交回圆点的点击，自己不改任何状态：选中哪一个由调用方记。
+pub fn radio_dot(ui: &mut egui::Ui, selected: bool) -> egui::Response {
+    let 行高 = option_line_height(ui);
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(Tokens::builtin().layout.radio_diameter, 行高),
+        egui::Sense::click(),
+    );
+    if ui.is_rect_visible(rect) {
+        paint_radio(ui.painter(), rect.center(), selected, palette(ui));
+        let 圆点 = egui::Rect::from_center_size(
+            rect.center(),
+            egui::Vec2::splat(Tokens::builtin().layout.radio_diameter),
+        );
+        圈住记号(ui, &response, 圆点, true);
+    }
+    response
+}
+
+/// 在 `center` 上画一枚单选圆点（[`radio_dot`] 那一枚的样子），颜色取这一套主题的令牌。
+fn paint_radio(painter: &egui::Painter, center: egui::Pos2, selected: bool, palette: &Palette) {
+    let layout = &Tokens::builtin().layout;
+    let 半径 = layout.radio_diameter / 2.0;
+    if selected {
+        painter.circle_filled(center, 半径, palette.accent);
+        painter.circle_filled(
+            center,
+            layout.radio_dot / 2.0 + layout.radio_gap,
+            palette.panel,
+        );
+        painter.circle_filled(center, layout.radio_dot / 2.0, palette.accent);
+    } else {
+        // 描边压在圆周正中：半径收半个线宽，外沿才落在直径上。
+        painter.circle(
+            center,
+            半径 - layout.control_stroke / 2.0,
+            palette.panel,
+            egui::Stroke::new(layout.control_stroke, palette.ink_3),
+        );
+    }
+}
+
+/// 记号（勾选框的方框、单选的圆点）**拿到焦点**时外头那一圈：与 [`focus_ring`] 同一个强调色，宽两个 `control-stroke`，
+/// 离记号再空一个那么宽——勾上的方框自己就描着强调色，贴着描会糊成一道。**只圈记号、不圈整颗**：连字那么宽的一圈太吵，
+/// 表格勾选那一列里也只圈得下方框。`圆` 为真圈成圆（单选），否则圈成圆角方框（勾选）。
+fn 圈住记号(ui: &egui::Ui, response: &egui::Response, 记号: egui::Rect, 圆: bool) {
+    if !response.has_focus() {
+        return;
+    }
+    let tokens = Tokens::builtin();
+    let 线 = egui::Stroke::new(
+        2.0 * tokens.layout.control_stroke,
+        ui.visuals().selection.stroke.color,
+    );
+    // 线落在记号外头 [一个线宽, 两个线宽] 那一圈。
+    let 外沿 = 记号.expand(2.0 * 线.width);
+    let painter = ui.painter();
+    if 圆 {
+        painter.circle_stroke(外沿.center(), 外沿.width() / 2.0 - 线.width / 2.0, 线);
+    } else {
+        painter.rect_stroke(
+            外沿,
+            f32::from(tokens.radius.small) + 2.0 * 线.width,
+            线,
+            egui::StrokeKind::Inside,
+        );
+    }
+}
+
+/// 一枚**勾选框**（设计稿 `.ckb`）连它右边那句字，点一下拨一次。**全仓的勾选框都走这里**，替的是 egui 自带的
+/// `ui.checkbox`——那一枚是个打勾的小方块，与稿上的不是一个东西（挂单 `Q1043`；`tests/controls.rs` 读源码守着）。
+///
+/// 方框边长取令牌 `checkbox-size`、圆角 `radius.small`、描边宽 `checkbox-stroke`。没勾是面板底、`line-2` 描边；
+/// 勾上是强调色描边、里头填一块强调色，描边与那一块之间隔一圈 `checkbox-gap` 宽的面板底（稿上 `.ckb.on` 的
+/// `box-shadow:inset`）——**不画勾**，稿上就不画。
+///
+/// 字在方框右边、隔 `option-gap`（设计稿 `.opt`），没说字号的按 `size-small-plus`、字色 `ink`；`text` 给空串就只画方框
+/// （表格勾选那一列）。**整颗点得中**：方框、字哪一处按下去都算。高至少 `interact_size.y`——与同一行的按钮一样高，
+/// 照 egui 自带那一枚的量法——方框与字竖直居中。摆在按不动的一块里（`add_enabled_ui(false, …)`）时照 egui 的规矩
+/// 整颗调淡、点了不拨。
+///
+/// 交回来的 [`egui::Response`]：`changed()` 为真就是这一帧被拨了，`checked` 已经是拨完之后那一档。
+pub fn checkbox(
+    ui: &mut egui::Ui,
+    checked: &mut bool,
+    text: impl Into<egui::WidgetText>,
+) -> egui::Response {
+    let 边长 = Tokens::builtin().layout.checkbox_size;
+    let 摆好 = inline_mark(ui, 边长, text.into());
+    let mut response = 摆好.response.clone();
+    let 勾着 = 拨一下(ui, &mut response, checked, &摆好.说的);
+    if ui.is_rect_visible(response.rect) {
+        let 方框 = egui::Rect::from_center_size(摆好.记号.center(), egui::Vec2::splat(边长));
+        let palette = palette(ui);
+        paint_checkbox(ui.painter(), 方框, 勾着, response.hovered(), palette);
+        摆好.画字(ui, palette);
+        圈住记号(ui, &response, 方框, false);
+    }
+    response
+}
+
+/// 一颗**行内单选**：一枚 [`radio_dot`] 那样的圆点连它右边那句字，摆在一行里跟别的东西并排（待确认屏「裁成」那一排、
+/// 合并向导「首选」那一格）。替的是 egui 自带的 `ui.radio` / `ui.radio_value`（挂单 `Q946`）。
+///
+/// 字在圆点右边、隔 `option-gap`，没说字号的按 `size-small-plus`、字色 `ink`；高至少 `interact_size.y`，圆点与字竖直居中
+/// ——量法与 [`checkbox`] 一样。整颗点得中，交回点击；**自己不改任何状态**，选中哪一个由调用方记。
+pub fn radio(
+    ui: &mut egui::Ui,
+    selected: bool,
+    text: impl Into<egui::WidgetText>,
+) -> egui::Response {
+    let 摆好 = inline_mark(ui, Tokens::builtin().layout.radio_diameter, text.into());
+    let response = 摆好.response.clone();
+    let enabled = ui.is_enabled();
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::RadioButton, enabled, selected, &摆好.说的)
+    });
+    if ui.is_rect_visible(response.rect) {
+        let palette = palette(ui);
+        paint_radio(ui.painter(), 摆好.记号.center(), selected, palette);
+        摆好.画字(ui, palette);
+        圈住记号(ui, &response, 摆好.记号, true);
+    }
+    response
+}
+
+/// 同 [`radio`]，**选中哪一个也替调用方记**：`current` 等于 `value` 时画成选中，点一下把 `current` 换成 `value`
+/// （egui 自带 `ui.radio_value` 那一种用法，一排几颗各管一个值）。交回那一颗的点击，换了的那一帧 `changed()` 为真。
+pub fn radio_value<T: PartialEq>(
+    ui: &mut egui::Ui,
+    current: &mut T,
+    value: T,
+    text: impl Into<egui::WidgetText>,
+) -> egui::Response {
+    let mut response = radio(ui, *current == value, text);
+    if response.clicked() && *current != value {
+        *current = value;
+        response.mark_changed();
+    }
+    response
+}
+
+/// 行内一枚记号（勾选框的方框、单选的圆点）连它右边那句字，量好、占好地方之后的样子。**画由调用方来**：
+/// 勾选框得先把这一下拨了再画。
+struct 行内记号 {
+    /// 记号那一格：`边长` 见方，在整颗的左沿、竖直居中。
+    记号: egui::Rect,
+    /// 整颗（记号连字）的点击。
+    response: egui::Response,
+    /// 字排好的样子与摆在哪儿；没给字时没有。
+    字: Option<(egui::Pos2, std::sync::Arc<egui::Galley>)>,
+    /// 读屏念的那句：字的原文，没给字时是空串。
+    说的: String,
+}
+
+impl 行内记号 {
+    /// 把字画上去，没说颜色的那几段用这一套主题的 `ink`。
+    fn 画字(&self, ui: &egui::Ui, palette: &Palette) {
+        if let Some((摆在, 字)) = &self.字 {
+            ui.painter().galley(*摆在, 字.clone(), palette.ink);
+        }
+    }
+}
+
+/// 摆一颗行内记号：记号 `边长` 见方，字在它右边隔 `option-gap`（没说字号的按 `size-small-plus`）；整颗至少
+/// `interact_size.y` 高（与同一行的按钮一样高），记号与字都竖直居中，整颗点得中。`text` 是空串就只占记号那一格。
+fn inline_mark(ui: &mut egui::Ui, 边长: f32, text: egui::WidgetText) -> 行内记号 {
+    let tokens = Tokens::builtin();
+    let 缝 = tokens.layout.option_gap;
+    let 字 = (!text.is_empty()).then(|| {
+        text.into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::FontSelection::FontId(egui::FontId::proportional(font_size(
+                ui.ctx(),
+                tokens.font.size_small_plus,
+            ))),
+        )
+    });
+    let 字大小 = 字.as_ref().map_or(egui::Vec2::ZERO, |字| 字.size());
+    let 宽 = 边长
+        + if 字.is_some() {
+            缝 + 字大小.x
+        } else {
+            0.0
+        };
+    let 高 = ui.spacing().interact_size.y.max(边长).max(字大小.y);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(宽, 高), egui::Sense::click());
+    let 记号 = egui::Rect::from_min_size(
+        egui::pos2(rect.left(), rect.center().y - 边长 / 2.0),
+        egui::Vec2::splat(边长),
+    );
+    let 说的 = 字
+        .as_ref()
+        .map_or_else(String::new, |字| 字.text().to_owned());
+    let 字 = 字.map(|字| {
+        let 摆在 = egui::pos2(记号.right() + 缝, rect.center().y - 字大小.y / 2.0);
+        (摆在, 字)
+    });
+    行内记号 {
+        记号,
+        response,
+        字,
+        说的,
+    }
+}
+
+/// 勾选框被点了就拨一次、记成这一帧改过，再报读屏信息（勾选框、勾没勾、念哪句）。交回拨完之后那一档。
+fn 拨一下(
+    ui: &egui::Ui, response: &mut egui::Response, checked: &mut bool, 说的: &str
+) -> bool {
+    if response.clicked() {
+        *checked = !*checked;
+        response.mark_changed();
+    }
+    let (enabled, 勾着) = (ui.is_enabled(), *checked);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, 勾着, 说的)
+    });
+    勾着
+}
+
+/// 在 `方框` 上画一枚勾选框（[`checkbox`] 那一枚的样子），颜色取这一套主题的令牌。
+///
+/// **悬停时没勾的那一格描边换 `ink-3`**——按钮悬停那一档的描边（拿主意的人 2026-10-01 裁；稿上 `.ckb` 没画悬停）。
+/// 勾上的那一格照旧是强调色描边：换成灰的就把稿上 `.ckb.on` 那一圈强调色拆了。
+fn paint_checkbox(
+    painter: &egui::Painter,
+    方框: egui::Rect,
+    勾着: bool,
+    悬停: bool,
+    palette: &Palette,
+) {
+    let tokens = Tokens::builtin();
+    let layout = &tokens.layout;
+    let 描边色 = match (勾着, 悬停) {
+        (true, _) => palette.accent,
+        (false, true) => palette.ink_3,
+        (false, false) => palette.line_2,
+    };
+    painter.rect(
+        方框,
+        tokens.radius.small,
+        palette.panel,
+        egui::Stroke::new(layout.checkbox_stroke, 描边色),
+        egui::StrokeKind::Inside,
+    );
+    if 勾着 {
+        let 缩进 = layout.checkbox_stroke + layout.checkbox_gap;
+        painter.rect_filled(
+            方框.shrink(缩进),
+            (f32::from(tokens.radius.small) - 缩进).max(0.0),
+            palette.accent,
+        );
+    }
 }
 
 /// 一块**警示框**（设计稿 `.warnbox`）：`lo-soft` 底、描边是分隔线色往 `lo` 挪四成、中圆角，内边距取令牌
@@ -1213,9 +1568,26 @@ pub fn more_chip(ui: &mut egui::Ui, text: &str) -> egui::Response {
     response
 }
 
-/// 一栏的**小标题**（设计稿 `.sec`）：说明字号、弱字色。稿上还加粗，眼下没照，画得与 [`help`] 一样（挂单 `Q770`）。
+/// 一栏的**小标题**（设计稿 `.sec`）：说明字号，**加粗**，带一点字距（令牌 `section-tracking`），正文色 `ink-2`。
+///
+/// 与 [`help`] 同字号，靠字重分开（挂单 `Q770` 裁了照稿加粗）。粗走 [`crate::font::strong`] 那条路：字体预算只打包
+/// 拉丁与数字的粗体（2026-09-13 裁定），于是「主库 · 3 个」里粗的是那个「3」，中文照旧是常规体那一个字形；**中文那一层
+/// 由颜色说**——小标题是正文色 `ink-2`，比帮助字的弱字色 `ink-3` 深一档。稿上 `.sec` 写的是 `ink-3` 加 600 字重，这一格与稿
+/// 不同：拿主意的人 2026-10-01 裁（票 `gui-draws-the-rest-of-the-design/01` 岔路口 1）——`ink-3` 分不开纯中文的小标题与帮助字，
+/// `font::strong` 自带的强调字色 `ink` 又比稿黑太多，取当中那一档。
 pub fn section(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    ui.label(egui::RichText::new(text).small().weak())
+    let 字 = section_text(ui, text);
+    ui.label(字)
+}
+
+/// 小标题（[`section`]）那一段字本身：要在上面再改一样东西（任务屏照稿给它行高）的地方取它，别处直接用 [`section`]。
+#[must_use]
+pub fn section_text(ui: &egui::Ui, text: &str) -> egui::RichText {
+    let font = &Tokens::builtin().font;
+    crate::font::strong(text)
+        .size(font.size_small)
+        .color(palette(ui).ink_2)
+        .extra_letter_spacing(font.section_tracking * font.size_small)
 }
 
 /// 一行**帮助字**（设计稿 `.help`）：说明字号、弱字色，摆在它说的那样东西底下。
@@ -2086,9 +2458,9 @@ pub fn segmented_where<T: Copy + PartialEq>(
     按下
 }
 
-/// 给一个**自己画底色的可点件**补上焦点那一圈：表格的行、缩略图那几格。
+/// 给一个**自己画底色的可点件**补上焦点那一圈：表格的行、缩略图那几格，这一层自己画的开关。
 ///
-/// [`install`] 换的那圈强调色只到得了走 egui 按钮那条路的控件（按钮、勾选框、可选标签、
+/// [`install`] 换的那圈强调色只到得了走 egui 按钮那条路的控件（按钮、可选标签、
 /// 文本框）。表格的行自己画底色（`TableRow::set_selected`），缩略图那几格自己画边框
 /// ——焦点落上去一点动静都没有，而它们**是点得中的**，于是 Tab 走得到
 /// （`egui::Sense::click` 自带 `FOCUSABLE`）。走得到又看不见，是最坏的一种。
@@ -3412,5 +3784,632 @@ mod tests {
             }
         };
         0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
+    }
+
+    /// 这一帧画出来的每一个图形，按画出来的次序，`Shape::Vec` 摊平。
+    fn 摊平的图形(output: &egui::FullOutput) -> Vec<egui::Shape> {
+        fn 收(shape: &egui::Shape, out: &mut Vec<egui::Shape>) {
+            match shape {
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|one| 收(one, out)),
+                one => out.push(one.clone()),
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &output.shapes {
+            收(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// 这一帧画出来的每一个矩形：`(摆在哪儿, 圆角, 底色, 描边)`。
+    fn 画出来的框(
+        output: &egui::FullOutput,
+    ) -> Vec<(egui::Rect, CornerRadius, Color32, egui::Stroke)> {
+        摊平的图形(output)
+            .into_iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::Rect(框) => Some((框.rect, 框.corner_radius, 框.fill, 框.stroke)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 这一帧画出来的每一个圆：`(圆心, 半径, 底色, 描边)`。
+    fn 画出来的圆(output: &egui::FullOutput) -> Vec<(egui::Pos2, f32, Color32, egui::Stroke)> {
+        摊平的图形(output)
+            .into_iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::Circle(圆) => Some((圆.center, 圆.radius, 圆.fill, 圆.stroke)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 在 `位置` 上按一下：移过去按下、松开、再跑一帧。交回这三帧各自 `画一帧` 交出来的，连那一帧的产出。
+    fn 按一下<R>(
+        ctx: &egui::Context,
+        位置: egui::Pos2,
+        mut 画一帧: impl FnMut(&mut egui::Ui) -> R,
+    ) -> Vec<(R, egui::FullOutput)> {
+        let 按 = |pressed: bool| egui::Event::PointerButton {
+            pos: 位置,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        [
+            vec![egui::Event::PointerMoved(位置), 按(true)],
+            vec![按(false)],
+            Vec::new(),
+        ]
+        .into_iter()
+        .map(|events| {
+            let mut input = headless::input();
+            input.events = events;
+            let mut 交出 = None;
+            let 产出 = headless::frame(ctx, input, |ui| 交出 = Some(画一帧(ui)));
+            (交出.expect("跑过帧"), 产出)
+        })
+        .collect()
+    }
+
+    /// 这几帧产出里读屏收到的「点了」：每一次点的是什么控件、选没选、念哪句。
+    fn 点了什么(帧们: &[egui::FullOutput]) -> Vec<egui::WidgetInfo> {
+        帧们
+            .iter()
+            .flat_map(|帧| &帧.platform_output.events)
+            .filter_map(|event| match event {
+                egui::output::OutputEvent::Clicked(info) => Some(info.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn 勾选框照稿_方框取令牌_勾上是强调色描边填满_里头一圈底色() {
+        // 设计稿 `.ckb{width:15px;height:15px;border-radius:4px;border:1.5px solid var(--line-2);background:var(--panel)}`
+        // 与 `.ckb.on{background:var(--accent);border-color:var(--accent);box-shadow:inset 0 0 0 2.5px var(--panel)}`
+        // （挂单 `Q1043` 已裁：自画稿上这一枚，不画勾）。两套主题各查一遍。
+        let t = Tokens::builtin();
+        let l = &t.layout;
+        assert_eq!(
+            [l.checkbox_size, l.checkbox_stroke, l.checkbox_gap],
+            [15.0, 1.5, 2.5],
+            "设计稿 .ckb"
+        );
+        assert_eq!(t.radius.small, 4, "设计稿 .ckb 的 border-radius:4px");
+        for theme in [Theme::Dark, Theme::Light] {
+            let p = t.color.theme(theme);
+            let ctx = headless::context();
+            install(&ctx);
+            ctx.set_theme(theme);
+            for 勾着 in [false, true] {
+                let mut 输出 = None;
+                for _ in 0..2 {
+                    输出 = Some(headless::frame(&ctx, headless::input(), |ui| {
+                        let mut on = 勾着;
+                        drop(checkbox(ui, &mut on, ""));
+                    }));
+                }
+                let 框们 = 画出来的框(&输出.expect("跑过帧"));
+                let 方框: Vec<_> = 框们
+                    .iter()
+                    .filter(|(框, ..)| 框.size() == egui::Vec2::splat(l.checkbox_size))
+                    .collect();
+                assert_eq!(
+                    方框.len(),
+                    1,
+                    "{theme:?} 勾着={勾着}：画了一个方框：{框们:?}"
+                );
+                let (外, 圆角, 底, 描边) = *方框[0];
+                assert_eq!(圆角, CornerRadius::same(t.radius.small), "{theme:?}");
+                assert_eq!(底, p.panel, "{theme:?} 勾着={勾着}：方框底是面板底");
+                let 描边色 = if 勾着 { p.accent } else { p.line_2 };
+                assert_eq!(
+                    描边,
+                    egui::Stroke::new(l.checkbox_stroke, 描边色),
+                    "{theme:?} 勾着={勾着}：描边"
+                );
+                let 里头 = 外.shrink(l.checkbox_stroke + l.checkbox_gap);
+                let 填满: Vec<_> = 框们.iter().filter(|(框, ..)| *框 == 里头).collect();
+                if 勾着 {
+                    assert_eq!(
+                        填满.len(),
+                        1,
+                        "{theme:?}：勾上时描边里头隔一圈底色是一块强调色：{框们:?}"
+                    );
+                    assert_eq!(填满[0].2, p.accent, "{theme:?}：那一块是强调色");
+                } else {
+                    assert!(填满.is_empty(), "{theme:?}：没勾时里头不填：{框们:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn 勾选框点方框点字都拨一次_按不动时不拨_字在方框右边隔一格() {
+        let t = Tokens::builtin();
+        let ctx = headless::context();
+        install(&ctx);
+        let mut on = false;
+        let mut 量到 = None;
+        let mut 输出 = None;
+        for _ in 0..2 {
+            输出 = Some(headless::frame(&ctx, headless::input(), |ui| {
+                量到 = Some(checkbox(ui, &mut on, "只显示有封面的").rect);
+            }));
+        }
+        let (整颗, 输出) = (量到.expect("画过勾选框"), 输出.expect("跑过帧"));
+        let (字, _) = 那一段(&输出, "只显示有封面的");
+        assert!(
+            (字.left() - (整颗.left() + t.layout.checkbox_size + t.layout.option_gap)).abs() < 0.5,
+            "字该在方框右边隔 option-gap：整颗 {整颗:?}，字 {字:?}",
+        );
+        assert!(
+            整颗.height() >= t.layout.button_height,
+            "与同一行的按钮等高：{整颗:?}"
+        );
+
+        let 方框中心 = egui::pos2(整颗.left() + t.layout.checkbox_size / 2.0, 整颗.center().y);
+        按一下(&ctx, 方框中心, |ui| {
+            drop(checkbox(ui, &mut on, "只显示有封面的"))
+        });
+        assert!(on, "点方框勾上");
+        按一下(&ctx, 字.center(), |ui| {
+            drop(checkbox(ui, &mut on, "只显示有封面的"))
+        });
+        assert!(!on, "点字也拨一次");
+
+        按一下(&ctx, 方框中心, |ui| {
+            ui.add_enabled_ui(false, |ui| drop(checkbox(ui, &mut on, "只显示有封面的")));
+        });
+        assert!(!on, "按不动时点了不拨");
+    }
+
+    #[test]
+    fn 带说明的勾选一行照稿_方框对着名字那一行_名字说明左沿对齐_点说明也拨() {
+        // 设计稿 `.opt`：方框在左、隔 8；右边一栏两行——名字 12.5、底下说明 11.5 的弱字，两行左沿对齐；上下各留 4。
+        let t = Tokens::builtin();
+        let l = &t.layout;
+        let ctx = headless::context();
+        install(&ctx);
+        let p = t.color.theme(ctx.theme());
+        let mut on = false;
+        let mut 量到 = None;
+        let mut 输出 = None;
+        for _ in 0..2 {
+            输出 = Some(headless::frame(&ctx, headless::input(), |ui| {
+                let 顶 = ui.cursor().top();
+                let 整行 = checkbox_option(ui, &mut on, "显示非游戏资产", "共有 3 个，不会被导出");
+                量到 = Some((顶, 整行.rect, ui.cursor().top()));
+            }));
+        }
+        let ((顶, 整行, 底), 输出) = (量到.expect("画过"), 输出.expect("跑过帧"));
+        let 段 = 画出来的段(&输出);
+        let 找 = |字: &str| {
+            段.iter()
+                .find(|(画的, ..)| 画的 == 字)
+                .cloned()
+                .unwrap_or_else(|| panic!("没画「{字}」：{段:?}"))
+        };
+        let (_, 名字, 名字号, 名字色) = 找("显示非游戏资产");
+        let (_, 说明, 说明号, 说明色) = 找("共有 3 个，不会被导出");
+        assert_eq!(
+            名字号,
+            font_size(&ctx, t.font.size_small_plus),
+            "名字的字号"
+        );
+        assert_eq!(
+            说明号,
+            font_size(&ctx, t.font.size_caption_plus),
+            "说明的字号"
+        );
+        assert_eq!([名字色, 说明色], [p.ink, p.ink_3], "名字正文色、说明弱字色");
+        assert!(
+            (名字.left() - 说明.left()).abs() < 0.5,
+            "两行左沿对齐：{名字:?} {说明:?}"
+        );
+        assert!(说明.top() >= 名字.bottom() - 0.5, "说明在名字底下");
+        let 方框 = 画出来的框(&输出)
+            .into_iter()
+            .find(|(框, ..)| 框.size() == egui::Vec2::splat(l.checkbox_size))
+            .expect("画了方框")
+            .0;
+        assert!(
+            (方框.center().y - 名字.center().y).abs() < 0.5,
+            "方框对着名字那一行的中线：方框 {方框:?}，名字 {名字:?}"
+        );
+        assert!(
+            (名字.left() - (方框.right() + l.option_gap)).abs() < 0.5,
+            "名字在方框右边隔 option-gap：方框 {方框:?}，名字 {名字:?}"
+        );
+        // 底下那一截另有 egui 自己那一份竖向间距（`item_spacing.y`），所以只断「至少留够」。
+        assert!(
+            (整行.top() - 顶 - l.option_padding).abs() < 0.5
+                && 底 - 整行.bottom() >= l.option_padding - 0.5,
+            "上下各留 option-padding：顶 {顶}，整行 {整行:?}，底 {底}"
+        );
+
+        按一下(&ctx, 说明.center(), |ui| {
+            drop(checkbox_option(
+                ui,
+                &mut on,
+                "显示非游戏资产",
+                "共有 3 个，不会被导出",
+            ));
+        });
+        assert!(on, "点说明也拨一次");
+        let mut 勾上之后 = None;
+        for _ in 0..2 {
+            勾上之后 = Some(headless::frame(&ctx, headless::input(), |ui| {
+                drop(checkbox_option(
+                    ui,
+                    &mut on,
+                    "显示非游戏资产",
+                    "共有 3 个，不会被导出",
+                ));
+            }));
+        }
+        let 里头 = 方框.shrink(l.checkbox_stroke + l.checkbox_gap);
+        assert!(
+            画出来的框(&勾上之后.expect("跑过帧"))
+                .iter()
+                .any(|(框, _, 底, _)| *框 == 里头 && *底 == p.accent),
+            "勾上之后方框里头填上强调色"
+        );
+    }
+
+    #[test]
+    fn 单选圆点照稿_直径圆心缝取令牌_选中是强调色外圈底色缝强调色圆心() {
+        // 设计稿 `.opt input[type=radio]` 是浏览器原生那一枚（13 点、accent-color）；令牌照它的样子立了三格。
+        // 挂单 `Q946`：拆出单独一枚，调用方自己摆内容。
+        let t = Tokens::builtin();
+        let l = &t.layout;
+        for theme in [Theme::Dark, Theme::Light] {
+            let p = t.color.theme(theme);
+            let ctx = headless::context();
+            install(&ctx);
+            ctx.set_theme(theme);
+            for 选中 in [false, true] {
+                let mut 量到 = None;
+                let mut 输出 = None;
+                for _ in 0..2 {
+                    输出 = Some(headless::frame(&ctx, headless::input(), |ui| {
+                        量到 = Some(radio_dot(ui, 选中).rect);
+                    }));
+                }
+                let (占, 圆们) = (量到.expect("画过"), 画出来的圆(&输出.expect("跑过帧")));
+                assert_eq!(占.width(), l.radio_diameter, "占一个直径那么宽");
+                let 圆心 = 占.center();
+                let 该有: Vec<(egui::Pos2, f32, Color32, egui::Stroke)> = if 选中 {
+                    vec![
+                        (圆心, l.radio_diameter / 2.0, p.accent, egui::Stroke::NONE),
+                        (
+                            圆心,
+                            l.radio_dot / 2.0 + l.radio_gap,
+                            p.panel,
+                            egui::Stroke::NONE,
+                        ),
+                        (圆心, l.radio_dot / 2.0, p.accent, egui::Stroke::NONE),
+                    ]
+                } else {
+                    vec![(
+                        圆心,
+                        (l.radio_diameter - l.control_stroke) / 2.0,
+                        p.panel,
+                        egui::Stroke::new(l.control_stroke, p.ink_3),
+                    )]
+                };
+                assert_eq!(圆们, 该有, "{theme:?} 选中={选中}");
+            }
+        }
+    }
+
+    #[test]
+    fn 行内单选点圆点点字都交回点击_字在圆点右边隔一格_读屏说得出选没选() {
+        let t = Tokens::builtin();
+        let ctx = headless::context();
+        install(&ctx);
+        let mut 量到 = None;
+        let mut 输出 = None;
+        for _ in 0..2 {
+            输出 = Some(headless::frame(&ctx, headless::input(), |ui| {
+                量到 = Some(radio(ui, false, "汉化").rect);
+            }));
+        }
+        let (整颗, 输出) = (量到.expect("画过"), 输出.expect("跑过帧"));
+        let (字, 字号) = 那一段(&输出, "汉化");
+        assert_eq!(
+            字号,
+            font_size(&ctx, t.font.size_small_plus),
+            "字取 .opt 那一档"
+        );
+        assert!(
+            (字.left() - (整颗.left() + t.layout.radio_diameter + t.layout.option_gap)).abs() < 0.5,
+            "字在圆点右边隔 option-gap：整颗 {整颗:?}，字 {字:?}"
+        );
+        let [(圆心, ..)] = 画出来的圆(&输出)[..] else {
+            panic!("没选中画一个圆");
+        };
+        assert!((圆心.y - 字.center().y).abs() < 0.5, "圆点对着字的中线");
+        // 在这一处按一下，数这几帧交回了几次点击、读屏报了什么。
+        let 点一下 = |位置: egui::Pos2| {
+            let 帧们 = 按一下(&ctx, 位置, |ui| radio(ui, true, "汉化").clicked());
+            let 点到 = 帧们.iter().filter(|(点了, _)| *点了).count();
+            let 产出: Vec<_> = 帧们.into_iter().map(|(_, 产出)| 产出).collect();
+            (点到, 点了什么(&产出))
+        };
+        for (位置, 点哪儿) in [(圆心, "圆点"), (字.center(), "字")] {
+            let (点到, 读屏) = 点一下(位置);
+            assert_eq!(点到, 1, "点{点哪儿}交回一次点击");
+            let [info] = 读屏.as_slice() else {
+                panic!("点{点哪儿}报一次读屏信息：{读屏:?}");
+            };
+            assert_eq!(info.typ, egui::WidgetType::RadioButton);
+            assert_eq!(info.selected, Some(true));
+            assert_eq!(info.label.as_deref(), Some("汉化"));
+        }
+    }
+
+    #[test]
+    fn 小标题与帮助字同字号_靠字重分得开_中文靠正文色深一档_带着稿上那一点字距() {
+        // 设计稿 `.sec{font-size:12px;font-weight:600;color:var(--ink-3);letter-spacing:.04em}` 对
+        // `.help{font-size:12px;color:var(--ink-3)}`（挂单 `Q770` 裁了照稿加粗）。字体预算只打包拉丁与数字的粗体
+        // （2026-09-13 裁定），粗落在「3」上、落不到中文上——中文照旧是同一个字形，不许合成出假粗体；
+        // 中文那一层字重由颜色说：小标题是正文色 `ink-2`，比帮助字的 `ink-3` 深一档
+        // （拿主意的人 2026-10-01 裁，票 `gui-draws-the-rest-of-the-design/01` 岔路口 1 选丙）。
+        let t = Tokens::builtin();
+        let ctx = headless::context();
+        install(&ctx);
+        let p = t.color.theme(ctx.theme());
+        let 字 = "主库 · 3 个";
+        let mut 输出 = None;
+        for _ in 0..2 {
+            输出 = Some(headless::frame(&ctx, headless::input(), |ui| {
+                drop(section(ui, 字));
+                drop(help(ui, 字));
+            }));
+        }
+        // 两段各自的：字体、颜色、字距、每个字画的是图集里哪一块（左上、右下两个角）。
+        // 每个字画的是图集里哪一块：`(字, [左上角, 右下角])`。
+        type 字形 = Vec<(char, [[u16; 2]; 2])>;
+        let 两段: Vec<(egui::FontId, Color32, f32, 字形)> = 摊平的图形(&输出.expect("跑过帧"))
+            .into_iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::Text(text) if text.galley.text() == 字 => {
+                    let format = &text.galley.job.sections[0].format;
+                    Some((
+                        format.font_id.clone(),
+                        format.color,
+                        format.extra_letter_spacing,
+                        text.galley
+                            .rows
+                            .iter()
+                            .flat_map(|row| row.glyphs.iter())
+                            .map(|glyph| (glyph.chr, [glyph.uv_rect.min, glyph.uv_rect.max]))
+                            .collect(),
+                    ))
+                }
+                _ => None,
+            })
+            .collect();
+        let [
+            (小标题字体, 小标题色, 小标题字距, 小标题字形),
+            (帮助字体, 帮助色, 帮助字距, 帮助字形),
+        ] = 两段.as_slice()
+        else {
+            panic!("先画小标题、再画帮助字，各一段：{两段:?}");
+        };
+        assert_eq!(
+            [小标题字体.size, 帮助字体.size],
+            [t.font.size_small; 2],
+            "同字号"
+        );
+        assert_eq!(
+            [*小标题色, *帮助色],
+            [p.ink_2, p.ink_3],
+            "小标题是正文色（中文没有粗体，字重由颜色说），帮助字是弱字色"
+        );
+        assert_eq!(
+            小标题字体.family,
+            crate::font::strong_family(),
+            "小标题走粗体那一族"
+        );
+        assert_eq!(
+            帮助字体.family,
+            egui::FontFamily::Proportional,
+            "帮助字是常规体"
+        );
+        let 那个字 = |字形: &[(char, [[u16; 2]; 2])], 找: char| {
+            字形
+                .iter()
+                .find(|(chr, _)| *chr == 找)
+                .map(|(_, uv)| *uv)
+                .unwrap_or_else(|| panic!("没画「{找}」"))
+        };
+        assert_ne!(
+            那个字(小标题字形, '3'),
+            那个字(帮助字形, '3'),
+            "数字靠字重分得开：小标题里的「3」是粗体那一份字形"
+        );
+        assert_eq!(
+            那个字(小标题字形, '主'),
+            那个字(帮助字形, '主'),
+            "中文照旧是常规体那一个字形（不打包中文粗体，也不合成假粗体）"
+        );
+        assert_eq!(
+            [*小标题字距, *帮助字距],
+            [t.font.section_tracking * t.font.size_small, 0.0],
+            "小标题带稿上那一点字距，帮助字不带"
+        );
+        assert_eq!(
+            t.font.section_tracking, 0.04,
+            "设计稿 .sec 的 letter-spacing:.04em"
+        );
+    }
+
+    #[test]
+    fn 勾选框悬停时描边换成按钮悬停那一档_勾上的那一格不换() {
+        // 稿上 `.ckb` 没画悬停；拿主意的人 2026-10-01 裁（票 `gui-draws-the-rest-of-the-design/01` 岔路口 7 选乙）：
+        // 悬停时描边换 `ink-3`，与按钮悬停那一档（`widgets.hovered` 的描边）同一个颜色。勾上的那一格描边照旧是强调色
+        // ——换成灰的就把稿上 `.ckb.on` 那一圈强调色拆了。两套主题各查一遍。
+        let t = Tokens::builtin();
+        for theme in [Theme::Dark, Theme::Light] {
+            let p = t.color.theme(theme);
+            let ctx = headless::context();
+            install(&ctx);
+            ctx.set_theme(theme);
+            assert_eq!(
+                ctx.style_of(theme).visuals.widgets.hovered.bg_stroke.color,
+                p.ink_3,
+                "按钮悬停那一档的描边就是 ink-3"
+            );
+            for 勾着 in [false, true] {
+                let mut 量到 = None;
+                for _ in 0..2 {
+                    headless::frame(&ctx, headless::input(), |ui| {
+                        let mut on = 勾着;
+                        量到 = Some(checkbox(ui, &mut on, "只显示有封面的").rect);
+                    });
+                }
+                let 整颗 = 量到.expect("画过");
+                let mut input = headless::input();
+                input.events.push(egui::Event::PointerMoved(整颗.center()));
+                headless::frame(&ctx, input, |ui| {
+                    let mut on = 勾着;
+                    drop(checkbox(ui, &mut on, "只显示有封面的"));
+                });
+                let 停着 = headless::frame(&ctx, headless::input(), |ui| {
+                    let mut on = 勾着;
+                    drop(checkbox(ui, &mut on, "只显示有封面的"));
+                });
+                let 方框 = 画出来的框(&停着)
+                    .into_iter()
+                    .find(|(框, ..)| 框.size() == egui::Vec2::splat(t.layout.checkbox_size))
+                    .expect("画了方框");
+                let 该是 = if 勾着 { p.accent } else { p.ink_3 };
+                assert_eq!(方框.3.color, 该是, "{theme:?} 勾着={勾着}：悬停时的描边");
+            }
+        }
+    }
+
+    #[test]
+    fn 勾选框拿到焦点只圈方框_不圈连字的整颗() {
+        // 焦点得看得见（模块文档「键盘焦点」），可连字那么宽、按钮那么高的一圈压在一枚 15 点的方框外头太吵，
+        // 表格勾选那一列里也放不下——只圈方框，与方框隔开一个线宽。
+        let t = Tokens::builtin();
+        let ctx = headless::context();
+        install(&ctx);
+        let 强调色 = t.color.theme(ctx.theme()).accent;
+        let mut on = true;
+        let mut 量到 = None;
+        let mut 输出 = None;
+        for 第几帧 in 0..3 {
+            输出 = Some(headless::frame(&ctx, headless::input(), |ui| {
+                let response = checkbox(ui, &mut on, "只显示有封面的");
+                if 第几帧 == 0 {
+                    response.request_focus();
+                }
+                量到 = Some(response.rect);
+            }));
+        }
+        let (整颗, 框们) = (量到.expect("画过"), 画出来的框(&输出.expect("跑过帧")));
+        let 焦点圈: Vec<_> = 框们
+            .iter()
+            .filter(|(_, _, 底, 线)| *底 == Color32::TRANSPARENT && 线.color == 强调色)
+            .collect();
+        let [(圈, ..)] = 焦点圈.as_slice() else {
+            panic!("拿到焦点该描一圈强调色：{框们:?}");
+        };
+        let 方框 = egui::Rect::from_min_size(
+            egui::pos2(整颗.left(), 整颗.center().y - t.layout.checkbox_size / 2.0),
+            egui::Vec2::splat(t.layout.checkbox_size),
+        );
+        assert_eq!(
+            *圈,
+            方框.expand(4.0 * t.layout.control_stroke),
+            "圈的是方框（外扩两个线宽），不是整颗 {整颗:?}"
+        );
+    }
+
+    #[test]
+    fn 勾选框拨了那一帧交回changed_读屏说得出勾没勾() {
+        let ctx = headless::context();
+        install(&ctx);
+        let mut on = false;
+        let mut 量到 = None;
+        for _ in 0..2 {
+            headless::frame(&ctx, headless::input(), |ui| {
+                量到 = Some(checkbox(ui, &mut on, "只显示有封面的").rect);
+            });
+        }
+        let 整颗 = 量到.expect("画过勾选框");
+        let 帧们 = 按一下(&ctx, 整颗.center(), |ui| {
+            checkbox(ui, &mut on, "只显示有封面的").changed()
+        });
+        assert_eq!(
+            帧们.iter().filter(|(拨了, _)| *拨了).count(),
+            1,
+            "拨一次交回一帧 changed"
+        );
+        assert!(on);
+        let 产出: Vec<_> = 帧们.into_iter().map(|(_, 产出)| 产出).collect();
+        let 读屏 = 点了什么(&产出);
+        let [info] = 读屏.as_slice() else {
+            panic!("点一下报一次读屏信息：{读屏:?}");
+        };
+        assert_eq!(info.typ, egui::WidgetType::Checkbox);
+        assert_eq!(info.selected, Some(true), "报的是拨完之后那一档");
+        assert_eq!(info.label.as_deref(), Some("只显示有封面的"));
+    }
+
+    #[test]
+    fn 行内单选记值_点一下换成这一颗的值_只在换了那一帧交回changed() {
+        let ctx = headless::context();
+        install(&ctx);
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum 采法 {
+            补缺,
+            重采,
+        }
+        let mut 眼下 = 采法::补缺;
+        let mut 量到 = None;
+        for _ in 0..2 {
+            headless::frame(&ctx, headless::input(), |ui| {
+                ui.horizontal(|ui| {
+                    drop(radio_value(ui, &mut 眼下, 采法::补缺, "补缺"));
+                    量到 = Some(radio_value(ui, &mut 眼下, 采法::重采, "重采").rect);
+                });
+            });
+        }
+        let 重采那一颗 = 量到.expect("画过");
+        let 帧们 = 按一下(&ctx, 重采那一颗.center(), |ui| {
+            ui.horizontal(|ui| {
+                let 甲 = radio_value(ui, &mut 眼下, 采法::补缺, "补缺").changed();
+                let 乙 = radio_value(ui, &mut 眼下, 采法::重采, "重采").changed();
+                甲 || 乙
+            })
+            .inner
+        });
+        assert_eq!(眼下, 采法::重采, "点了「重采」就换成它");
+        assert_eq!(
+            帧们.iter().filter(|(换了, _)| *换了).count(),
+            1,
+            "换一次交回一帧 changed"
+        );
+        // 摆法与上面一样（两颗并排），点的还是「重采」那一颗：点中了（交回点击），只是不算换了。
+        let 再点 = 按一下(&ctx, 重采那一颗.center(), |ui| {
+            ui.horizontal(|ui| {
+                drop(radio_value(ui, &mut 眼下, 采法::补缺, "补缺"));
+                let 那一颗 = radio_value(ui, &mut 眼下, 采法::重采, "重采");
+                (那一颗.clicked(), 那一颗.changed())
+            })
+            .inner
+        });
+        assert!(再点.iter().any(|((点了, _), _)| *点了), "点中了「重采」");
+        assert!(
+            再点.iter().all(|((_, 换了), _)| !换了),
+            "点已经选中的那一颗不算换了"
+        );
     }
 }
