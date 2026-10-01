@@ -1247,8 +1247,7 @@ impl Section {
             self.count_media(site, tasks);
         }
         let mut on = self.lay_media;
-        let 拨了 = ui
-            .checkbox(&mut on, LAY_MEDIA)
+        let 拨了 = look::checkbox(ui, &mut on, LAY_MEDIA)
             .on_hover_text(
                 "把媒体池里的封面、截图、视频照这个前端格式的布局铺进导出目录。\
                  默认关着：媒体池在工作目录里，主库多半在外置盘上，跨盘就是整份复制。",

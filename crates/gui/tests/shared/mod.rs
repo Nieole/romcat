@@ -9,6 +9,8 @@
 // 而是「这个二进制没用它」，所以整份压掉。
 #![allow(dead_code)]
 
+pub mod source;
+
 /// 这一帧**真的画在屏上**的那些字，**一段一行**。
 ///
 /// 「屏上摆得出来」「屏上写的是同一个词」「屏上没了」这三类断言只有看这个才算数：
@@ -266,18 +268,31 @@ fn 头一处画在哪儿(
     output: &egui::FullOutput,
     认: &dyn Fn(&str) -> bool,
 ) -> Option<egui::Pos2> {
-    fn 找(shape: &egui::epaint::Shape, 认: &dyn Fn(&str) -> bool) -> Option<egui::Pos2> {
+    画着的每一处(output, 认).first().map(egui::Rect::center)
+}
+
+/// 这一帧里认得下的**每一段**字画成多大、摆在哪儿，按画出来的次序。
+///
+/// 要断的是**位置关系**（「紧跟在那几个字后头」「在它底下」）时用它：同一句话屏上常常不止一处
+/// （表格里一处、弹层里又一处），拿到每一处，断言说得出「其中有一处……」。
+#[must_use]
+pub fn 画着的每一处(
+    output: &egui::FullOutput, 认: &dyn Fn(&str) -> bool
+) -> Vec<egui::Rect> {
+    fn 收(shape: &egui::epaint::Shape, 认: &dyn Fn(&str) -> bool, out: &mut Vec<egui::Rect>) {
         match shape {
-            egui::epaint::Shape::Text(text) => 认(text.galley.text())
-                .then(|| egui::Rect::from_min_size(text.pos, text.galley.size()).center()),
-            egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(|one| 找(one, 认)),
-            _ => None,
+            egui::epaint::Shape::Text(text) if 认(text.galley.text()) => {
+                out.push(egui::Rect::from_min_size(text.pos, text.galley.size()));
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|one| 收(one, 认, out)),
+            _ => {}
         }
     }
-    output
-        .shapes
-        .iter()
-        .find_map(|clipped| 找(&clipped.shape, 认))
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        收(&clipped.shape, 认, &mut out);
+    }
+    out
 }
 
 /// 指针不动地再跑这么多帧，够 egui 那道悬停延迟跨过去。
