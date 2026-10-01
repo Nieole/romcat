@@ -26,6 +26,8 @@ use romcat_core::task::Handle;
 use romcat_core::testing::container::{ZipEntrySpec, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::title::{Language, TitleKind};
+use romcat_core::triage::batch::breakdown;
+use romcat_core::triage::{self, Axis, Breakdown, Part, PartKind, Parts, Queue, Scope, Shape};
 use romcat_core::verdict::{self, Anchor, Decision, Facts, Verdict};
 use romcat_core::workspace::{self, CatalogState, Slug};
 
@@ -786,4 +788,131 @@ fn 导出沉淀库不带详情页改过的字段() {
                 .is_empty()
         );
     }
+}
+
+// ——— 就地裁一组的作用范围（票 `verdict-store-and-sync/03`，挂单 `Q964`）———
+
+/// 一份落进同一批、按目录切得出两组的主库：`FC/汉化/` 底下两份、`FC/日版/` 底下一份。
+///
+/// DAT 一条都不装，三份全是**未命中**、一条候选都没有——依据形状相同，于是落进同一批。
+fn 摆好两组的主库() -> TempDir {
+    let dir = temp_dir("verdict-store-parts");
+    for (name, fill) in [
+        ("FC/汉化/甲.zip", 0xC1),
+        ("FC/汉化/乙.zip", 0xC2),
+        ("FC/日版/丙.zip", 0xC3),
+    ] {
+        写(
+            &dir.path().join(name),
+            &zip_container(&[ZipEntrySpec::stored("rom.nes", 卡带(fill))]),
+        );
+    }
+    dir
+}
+
+const 那一组: &str = "库/FC/汉化";
+
+/// 这份现场眼下那一批（三份都在里面的那一批）的依据形状。
+fn 那一批的形状(site: &Site) -> Shape {
+    let index = verdict::Index::load(&site.store, &site.library_identity).expect("读得出沉淀库");
+    let queue = Queue::load(&site.catalog, &index).expect("列得出队列");
+    queue
+        .batches()
+        .first()
+        .map(|batch| batch.shape.clone())
+        .expect("队列里该有一批")
+}
+
+/// 照沉淀库里那本册子折回来的那几部分，连眼下队列里那一批按目录切出来的那一栏。
+fn 细分那一栏(site: &Site, shape: &Shape) -> (Parts, Breakdown) {
+    let 册子 = site
+        .store
+        .batches(&site.library_identity, 0)
+        .expect("读得出沉淀库");
+    let mut parts = Parts::default();
+    parts.sync(&册子);
+    let index = verdict::Index::load(&site.store, &site.library_identity).expect("读得出沉淀库");
+    let queue = Queue::load(&site.catalog, &index).expect("列得出队列");
+    let drilled = queue.drill(&Scope::whole(shape.clone()), Axis::Directory);
+    let 那一栏 = breakdown(&drilled, &parts, shape, Axis::Directory);
+    (parts, 那一栏)
+}
+
+#[test]
+fn 就地拒绝的那一组_重开现场之后作用范围读得回来_删库重扫之后也还在() {
+    let 主库 = 摆好两组的主库();
+    let 工作目录 = temp_dir("verdict-store-parts-ws");
+    let (库文件, mut site) = 开现场(工作目录.path());
+    扫(&mut site, 主库.path());
+    跑识别(&mut site, 主库.path());
+    let shape = 那一批的形状(&site);
+
+    // 就地落下一组：屏上点开那一批、按目录切、点进 `库/FC/汉化`、「拒绝这 2 条」走的就是这一条。
+    let 作用范围 = Scope::under(shape.clone(), Axis::Directory, 那一组);
+    let index = verdict::Index::load(&site.store, &site.library_identity).expect("读得出沉淀库");
+    let mut queue = Queue::load(&site.catalog, &index).expect("列得出队列");
+    assert_eq!(queue.count(&作用范围), 2, "前提：那一组两条");
+    let decide = triage::Draft {
+        unknown: true,
+        ..triage::Draft::default()
+    }
+    .build(&site.library_identity)
+    .expect("说得成立");
+    let plan = queue
+        .plan_scope(&site.catalog, &site.store, &decide, &作用范围)
+        .expect("排得出计划");
+    let applied = queue
+        .apply(&mut site.catalog, &mut site.store, &plan)
+        .expect("落得下");
+    drop(site);
+
+    // 关掉再开：新的一份现场，这个进程里一样东西都没留着。
+    let (_, site) = 开现场(工作目录.path());
+    let 册子 = site
+        .store
+        .batches(&site.library_identity, 0)
+        .expect("读得出沉淀库");
+    let 那一批 = 册子
+        .iter()
+        .find(|batch| batch.id == applied.batch)
+        .expect("落下的那一批在册");
+    let 一部分 = Part::of(那一批).expect("重开之后那一批的作用范围读不回来");
+    assert_eq!(一部分.scope(), 作用范围, "读回来的作用范围不是落下的那一组");
+    assert_eq!(一部分.count, 2);
+    assert_eq!(一部分.kind, PartKind::Rejected);
+    assert_eq!(
+        一部分.label(),
+        format!("{} · 按目录 {那一组}", shape.label()),
+        "那句给人看的话：形状、轴、组名",
+    );
+
+    let (parts, 那一栏) = 细分那一栏(&site, &shape);
+    assert_eq!(
+        parts.locked_axis(&shape),
+        Some(Axis::Directory),
+        "重开之后细分方式该还锁在按目录上",
+    );
+    let 那一项 = 那一栏
+        .rows
+        .iter()
+        .find(|row| row.label == 那一组)
+        .expect("裁掉的那一组该还在栏上");
+    assert_eq!(
+        (那一项.count, 那一项.left, 那一项.done),
+        (2, 0, Some(PartKind::Rejected)),
+        "那一项该标着已拒绝、条数还是当初那 2 条",
+    );
+    assert_eq!(那一栏.whole, 3, "占比的分母还是这一批本来那 3 条");
+
+    // 删掉中立库重扫：作用范围住沉淀库，一样还在。
+    let site = 删库重扫(&库文件, 主库.path(), 工作目录.path());
+    let (parts, 那一栏) = 细分那一栏(&site, &shape);
+    assert_eq!(parts.locked_axis(&shape), Some(Axis::Directory));
+    assert!(
+        那一栏
+            .rows
+            .iter()
+            .any(|row| row.label == 那一组 && row.done == Some(PartKind::Rejected)),
+        "删库重扫之后裁掉的那一组不见了：{那一栏:?}",
+    );
 }

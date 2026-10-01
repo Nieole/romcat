@@ -14,6 +14,7 @@ use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
 use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
+use romcat_core::triage;
 use romcat_core::workspace;
 
 fn 跑(args: &[&str]) -> std::process::Output {
@@ -613,6 +614,95 @@ fn 按批撤销之后当场列队列就看得见它们回来了() {
         String::from_utf8_lossy(&out.stdout).contains("队列            1 条待裁决"),
         "{}",
         String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn 就地落下的那一批列出来带着作用范围_别的批不带() {
+    // 票 `verdict-store-and-sync/03` 验收第 3 条：待确认屏上就地裁掉一组，落下的那一批在命令行的
+    // 裁决记录里也看得出作用在哪一组上——与界面同一份（沉淀库批表上那几格），同一句话（`Part::label`）。
+    // 命令行自己落不出这种批（它按选择器落），所以就地那一下走核心库那条同一条路：
+    // 界面「拒绝这 N 条」按下去走的就是 `Queue::plan_scope` 再 `Queue::apply`。
+    let (library, workspace) = 现场();
+    扫并识别(library.path(), workspace.path());
+    let 工作目录 = workspace.path().to_string_lossy().into_owned();
+
+    // 先用命令行按选择器落一批：它不是就地落下的，不该带作用范围。
+    let out = 跑(&[
+        "triage",
+        "decide",
+        "--library",
+        "小库",
+        "--workspace",
+        &工作目录,
+        "--name",
+        "别家",
+        "--work",
+        "某部作品",
+        "--yes",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    {
+        let mut site = romcat_core::site::Site::open(
+            workspace.path(),
+            workspace::Slug::Named("小库"),
+            None,
+            "--library",
+        )
+        .expect("开得出现场");
+        let index = romcat_core::verdict::Index::load(&site.store, &site.library_identity)
+            .expect("读得出沉淀库");
+        let mut queue = triage::Queue::load(&site.catalog, &index).expect("列得出队列");
+        let shape = queue
+            .batches()
+            .first()
+            .map(|batch| batch.shape.clone())
+            .expect("还剩一批");
+        let scope = triage::Scope::under(shape, triage::Axis::Directory, "库/FC");
+        assert_eq!(queue.count(&scope), 2, "前提：那一组还剩两条外星科技汉化");
+        let decide = triage::Draft {
+            unknown: true,
+            ..triage::Draft::default()
+        }
+        .build(&site.library_identity)
+        .expect("说得成立");
+        let plan = queue
+            .plan_scope(&site.catalog, &site.store, &decide, &scope)
+            .expect("排得出计划");
+        queue
+            .apply(&mut site.catalog, &mut site.store, &plan)
+            .expect("落得下");
+    }
+
+    let out = 跑(&[
+        "triage",
+        "batches",
+        "--library",
+        "小库",
+        "--workspace",
+        &工作目录,
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let 列表 = String::from_utf8_lossy(&out.stdout).into_owned();
+    // 新的在前：第 2 批是就地落下的那一批，第 1 批是按选择器落下的。
+    let (第二批, 第一批) = 列表
+        .split_once("#1 ")
+        .unwrap_or_else(|| panic!("两批都该列出来：{列表}"));
+    assert!(
+        第二批.contains("作用范围：一条候选都没有 · 未命中 · 按目录 库/FC"),
+        "就地落下的那一批没带着作用范围（形状、轴、组名）：{列表}",
+    );
+    assert!(
+        !第一批.contains("作用范围"),
+        "按选择器落下的那一批不是就地落下的，不该带作用范围：{列表}",
     );
 }
 

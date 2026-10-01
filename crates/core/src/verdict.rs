@@ -28,7 +28,7 @@
 //! 打开时把没跑过的接着跑完。**往前迁得动，往后（库比程序新）如实拒绝并说清**——
 //! 那时该换新程序，而不是删库。
 //!
-//! 眼下十一条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
+//! 眼下十二条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
 //! 第 3 条建 `verdict_batch` 与 `verdict_batch_row` 两张表（**批**，见下一节），
 //! 第 4 条建 `collection_member` 表（**合集**与**收藏**，见再下一节），
 //! 第 5 条建 `title_suppression` 表（**压掉的叫法**），
@@ -37,7 +37,8 @@
 //! 第 8 条建 `platform_correction` 表（**平台纠正**），
 //! 第 9 条建 `not_same_work` 表（**「不是同一个作品」**），
 //! 第 10 条建 `preferred_variant` 与 `own_title` 两张表（**首选变体**与**亲手加的叫法**，见最后一节），
-//! 第 11 条建 `verdict_value` 表（**详情页上改过的字段**，同一节）。
+//! 第 11 条建 `verdict_value` 表（**详情页上改过的字段**，同一节），
+//! 第 12 条给 `verdict_batch` 加作用范围那几格（**就地落下的一部分**，见「批」那一节）。
 //! 加这几条时库还是空的，但那不改变纪律——**永远不要求删库**，中立库那条「版本一变就
 //! 重建」的便宜路子在这份库上不许走。
 //!
@@ -54,6 +55,18 @@
 //!
 //! 中立库那一半的撤销原料**不在这里**：那是候选与结论，可再生，住在中立库自己的
 //! `verdict_batch_shadow`（`catalog::identify`）。两半分开住，各按各的身份。
+//!
+//! ### 就地落下的那一批还记着**作用范围**
+//!
+//! 待确认屏上按某个轴切开一批变体、就地把其中一组整批裁掉，落下的照旧是一批裁决；
+//! 屏上那一项从此标着「已通过／已拒绝」，这一批的细分方式锁在那个轴上（词表**批**那一条的
+//! **一部分**）。这件事只有记着「这一批裁决当初作用在哪一批变体的哪一组上」才说得出，
+//! 而那是人的动作留下的，重扫补不回来——所以它也住这里，不只活在一个窗口里（挂单 `Q964`，
+//! 票 `verdict-store-and-sync/03`）。第 12 条迁移给批表加了这几格（[`BatchScope`]）：
+//! 依据形状、轴、组名**分格结构化地存**，再加落下之前那一组多少条、裁成了什么——
+//! 不塞进摘要或备注那句人话里再拆回来（ADR-0024 否掉的正是那个形状）。
+//! 这几格怎么折回**一部分**、折成哪句给人看的话，只有 [`triage::Part`](crate::triage::Part)
+//! 一处；整批那一层与逐条落下的批这几格都是空的，加这几格之前落下的旧批也是。
 //!
 //! ## **合集**与**收藏**：为什么它们也住这儿
 //!
@@ -571,6 +584,25 @@ CREATE TABLE IF NOT EXISTS verdict_value(
     PRIMARY KEY (library, anchor, subject, field)
 ) STRICT;
 ",
+    // 12：**就地落下的那一批的作用范围**（票 `verdict-store-and-sync/03`，挂单 `Q964`）。待确认屏上
+    // 「已经就地裁掉了哪一组」原先只活在一个窗口里，关掉再开那几项不再标着已通过、细分方式也不再锁着。
+    "\
+-- 这一批裁决当初作用在**哪一批变体按哪个轴切出来的哪一组**上（词表**批**那一条的**一部分**）。
+-- 只有待确认屏上就地落下的那一批五格齐全；整批那一层、逐条落下的、命令行按选择器落下的，
+-- 以及加这几格之前落下的旧批，五格都是空的。**分格存**，不塞进 `summary` 或 `note` 那句人话里
+-- 再拆回来（ADR-0024）。几格怎么折回一部分只有 `triage::Part` 一处。
+--
+-- 依据形状：`triage::Shape::selector` 折出来的那串字（命令行 `--shape` 收的也是它）。
+ALTER TABLE verdict_batch ADD COLUMN scope_shape TEXT;
+-- 按哪个轴切的：`triage::Axis::label`（按目录 / 按候选作品 / 按命名规律）。
+ALTER TABLE verdict_batch ADD COLUMN scope_axis  TEXT;
+-- 切出来的那一组叫什么：那个轴上的组名，同时是选择器的值。
+ALTER TABLE verdict_batch ADD COLUMN scope_group TEXT;
+-- 落下之前那一组有多少个**变体**。落下时记住、不事后再数：那些条一落下就退出了队列。
+ALTER TABLE verdict_batch ADD COLUMN scope_count INTEGER;
+-- 裁成了什么：`triage::PartKind::label`（已通过 / 已拒绝）。
+ALTER TABLE verdict_batch ADD COLUMN scope_kind  TEXT;
+",
 ];
 
 /// 「内容锚」在库里与报告里叫什么。
@@ -985,6 +1017,28 @@ pub struct Batch {
     pub undone_at: Option<i64>,
     /// 这一批有几条。
     pub rows: u64,
+    /// 待确认屏上**就地落下**的那一批作用在哪一组上（[`BatchScope`]）；别的批是 `None`。
+    pub scope: Option<BatchScope>,
+}
+
+/// 就地落下的那一批**作用在哪一组上**：哪一批变体（依据形状）、按哪个轴切、切出来的哪一组，
+/// 连落下之前那一组多少条、裁成了什么（第 12 条迁移，票 `verdict-store-and-sync/03`）。
+///
+/// 这里只管**存得住、读得回**，几格原样是批表上的那几格；它们怎么折回**一部分**、
+/// 折成哪句给人看的话，只有 [`triage::Part`](crate::triage::Part) 一处说——拿它的
+/// [`of`](crate::triage::Part::of) 读、[`record`](crate::triage::Part::record) 写。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchScope {
+    /// 依据形状：`triage::Shape::selector` 折出来的那串字。
+    pub shape: String,
+    /// 按哪个轴切的：`triage::Axis::label`。
+    pub axis: String,
+    /// 切出来的那一组叫什么。
+    pub group: String,
+    /// 落下之前那一组有多少个变体。
+    pub count: u64,
+    /// 裁成了什么：`triage::PartKind::label`。
+    pub kind: String,
 }
 
 impl Batch {
@@ -1464,6 +1518,8 @@ impl Store {
     /// **落裁决与记批在同一个事务里**（调用方把两件事一起交过来）：批记下了而裁决没落，
     /// 或者反过来，都会让撤销这件事从一开始就说不准。
     ///
+    /// `scope` 是就地落下的那一批作用在哪一组上（[`BatchScope`]）；别的批给 `None`。
+    ///
     /// # Errors
     /// 写库失败时返回错误。
     pub fn put_batch(
@@ -1471,6 +1527,7 @@ impl Store {
         library: &str,
         summary: &str,
         note: Option<&str>,
+        scope: Option<&BatchScope>,
         rows: &[BatchRow],
     ) -> Result<i64, VerdictError> {
         let path = self.path.clone();
@@ -1481,9 +1538,20 @@ impl Store {
         let tx = self.conn.transaction().map_err(to_err)?;
         let id = {
             tx.execute(
-                "INSERT INTO verdict_batch(library, summary, note, decided_at)
-                 VALUES(?1,?2,?3,?4)",
-                params![library, summary, note, now_secs()],
+                "INSERT INTO verdict_batch(library, summary, note, decided_at,
+                     scope_shape, scope_axis, scope_group, scope_count, scope_kind)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![
+                    library,
+                    summary,
+                    note,
+                    now_secs(),
+                    scope.map(|scope| scope.shape.as_str()),
+                    scope.map(|scope| scope.axis.as_str()),
+                    scope.map(|scope| scope.group.as_str()),
+                    scope.map(|scope| i64::try_from(scope.count).unwrap_or(i64::MAX)),
+                    scope.map(|scope| scope.kind.as_str()),
+                ],
             )
             .map_err(to_err)?;
             let id = tx.last_insert_rowid();
@@ -1520,27 +1588,13 @@ impl Store {
     /// # Errors
     /// 读库失败时返回错误。
     pub fn batches(&self, library: &str, limit: usize) -> Result<Vec<Batch>, VerdictError> {
-        let mut sql = String::from(
-            "SELECT b.id, b.library, b.summary, b.note, b.decided_at, b.undone_at,
-                    (SELECT COUNT(*) FROM verdict_batch_row r WHERE r.batch = b.id)
-             FROM verdict_batch b WHERE b.library = ?1 ORDER BY b.id DESC",
-        );
+        let mut sql = format!("{BATCH_SELECT} WHERE b.library = ?1 ORDER BY b.id DESC");
         if limit > 0 {
             sql.push_str(&format!(" LIMIT {limit}"));
         }
         let mut statement = self.conn.prepare(&sql).map_err(|source| self.err(source))?;
         let rows = statement
-            .query_map(params![library], |row| {
-                Ok(Batch {
-                    id: row.get(0)?,
-                    library: row.get(1)?,
-                    summary: row.get(2)?,
-                    note: row.get(3)?,
-                    decided_at: row.get(4)?,
-                    undone_at: row.get(5)?,
-                    rows: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
-                })
-            })
+            .query_map(params![library], batch_of)
             .map_err(|source| self.err(source))?;
         rows.collect::<Result<_, _>>()
             .map_err(|source| self.err(source))
@@ -1553,21 +1607,9 @@ impl Store {
     pub fn batch(&self, id: i64) -> Result<Option<Batch>, VerdictError> {
         self.conn
             .query_row(
-                "SELECT b.id, b.library, b.summary, b.note, b.decided_at, b.undone_at,
-                        (SELECT COUNT(*) FROM verdict_batch_row r WHERE r.batch = b.id)
-                 FROM verdict_batch b WHERE b.id = ?1",
+                &format!("{BATCH_SELECT} WHERE b.id = ?1"),
                 params![id],
-                |row| {
-                    Ok(Batch {
-                        id: row.get(0)?,
-                        library: row.get(1)?,
-                        summary: row.get(2)?,
-                        note: row.get(3)?,
-                        decided_at: row.get(4)?,
-                        undone_at: row.get(5)?,
-                        rows: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
-                    })
-                },
+                batch_of,
             )
             .optional()
             .map_err(|source| self.err(source))
@@ -2947,6 +2989,43 @@ fn match_columns(anchor: &Anchor) -> (Option<i64>, Option<i64>, Option<String>, 
     }
 }
 
+/// 读一**批**时要的那一串列，两处查询（[`Store::batches`] 与 [`Store::batch`]）共用。
+const BATCH_SELECT: &str = "SELECT b.id, b.library, b.summary, b.note, b.decided_at, b.undone_at,
+     (SELECT COUNT(*) FROM verdict_batch_row r WHERE r.batch = b.id),
+     b.scope_shape, b.scope_axis, b.scope_group, b.scope_count, b.scope_kind
+     FROM verdict_batch b";
+
+/// 把 [`BATCH_SELECT`] 的一行折成一批。作用范围那五格**齐了才算有**：只有就地落下的那一批
+/// 五格一起写（[`Store::put_batch`]），缺一格的那一行说不清作用在哪一组上，当它没有。
+fn batch_of(row: &rusqlite::Row<'_>) -> rusqlite::Result<Batch> {
+    let scope = match (
+        row.get::<_, Option<String>>(7)?,
+        row.get::<_, Option<String>>(8)?,
+        row.get::<_, Option<String>>(9)?,
+        row.get::<_, Option<i64>>(10)?,
+        row.get::<_, Option<String>>(11)?,
+    ) {
+        (Some(shape), Some(axis), Some(group), Some(count), Some(kind)) => Some(BatchScope {
+            shape,
+            axis,
+            group,
+            count: u64::try_from(count).unwrap_or(0),
+            kind,
+        }),
+        _ => None,
+    };
+    Ok(Batch {
+        id: row.get(0)?,
+        library: row.get(1)?,
+        summary: row.get(2)?,
+        note: row.get(3)?,
+        decided_at: row.get(4)?,
+        undone_at: row.get(5)?,
+        rows: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
+        scope,
+    })
+}
+
 /// 读一行匹配裁决时要的那一串列。
 const MATCH_SELECT: &str = "SELECT anchor, crc32, size, library, variant_key, source, entry,
      accepted, note, decided_at FROM match_verdict";
@@ -3608,6 +3687,41 @@ mod tests {
         )
     }
 
+    /// **旧程序**记下一批的样子：批表上只有第 3 条迁移建的那几列（作用范围那几格是第 12 条才有的），
+    /// 照那几列原样写进去。新程序的 [`Store::put_batch`] 要写作用范围那几格，在旧版的库上写不进去。
+    fn 旧程序记一批(
+        conn: &Connection,
+        library: &str,
+        summary: &str,
+        note: Option<&str>,
+        rows: &[BatchRow],
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO verdict_batch(library, summary, note, decided_at) VALUES(?1,?2,?3,?4)",
+            params![library, summary, note, now_secs()],
+        )
+        .expect("旧版的批表里记得下");
+        let id = conn.last_insert_rowid();
+        for row in rows {
+            conn.execute(
+                "INSERT INTO verdict_batch_row(batch, variant_key, member, inner, after, before)
+                 VALUES(?1,?2,?3,?4,?5,?6)",
+                params![
+                    id,
+                    row.variant_key,
+                    row.member,
+                    row.inner,
+                    encode(&row.after).expect("折得成"),
+                    row.before
+                        .as_ref()
+                        .map(|before| encode(before).expect("折得成")),
+                ],
+            )
+            .expect("旧版的批表里记得下");
+        }
+        id
+    }
+
     #[test]
     fn 新建的库跑到最新一版迁移() {
         let store = Store::in_memory().expect("开得出来");
@@ -3716,20 +3830,19 @@ mod tests {
         };
         let verdict = 汉化裁决();
         store.put(&verdict).expect("第三版里就存得进");
-        let batch = store
-            .put_batch(
-                "小库",
-                "作品《魂斗罗》",
-                None,
-                &[BatchRow {
-                    variant_key: "库/FC/某.zip".to_string(),
-                    member: "库/FC/某.zip".to_string(),
-                    inner: "rom.nes".to_string(),
-                    after: verdict.clone(),
-                    before: None,
-                }],
-            )
-            .expect("第三版里就记得下批");
+        let batch = 旧程序记一批(
+            &store.conn,
+            "小库",
+            "作品《魂斗罗》",
+            None,
+            &[BatchRow {
+                variant_key: "库/FC/某.zip".to_string(),
+                member: "库/FC/某.zip".to_string(),
+                inner: "rom.nes".to_string(),
+                after: verdict.clone(),
+                before: None,
+            }],
+        );
 
         store.migrate().expect("升得上来");
 
@@ -4158,6 +4271,76 @@ mod tests {
     }
 
     #[test]
+    fn 第十一版的老库升上来_旧批的作用范围为空_新落下的批记得住作用范围() {
+        // 钉的是**第 12 条迁移**（票 `verdict-store-and-sync/03`）：批表加了作用范围那几格。老库里的批
+        // 一条不丢、照常读得回来，作用范围是空的——**备注里那句话不拆回来**：加这几格之前，界面把
+        // 作用范围原话写进了备注，那是给人看的一句，拆回结构正是 ADR-0024 否掉的形状。
+        let conn = Connection::open_in_memory().expect("开得出来");
+        for sql in &MIGRATIONS[..11] {
+            conn.execute_batch(sql).expect("建得出第十一版");
+        }
+        conn.execute_batch("PRAGMA user_version = 11")
+            .expect("盖得上第十一版的版本号");
+        let mut store = Store {
+            conn,
+            path: "（内存）".to_string(),
+        };
+        let 一行 = |key: &str| BatchRow {
+            variant_key: key.to_string(),
+            member: key.to_string(),
+            inner: "rom.nes".to_string(),
+            after: 汉化裁决(),
+            before: None,
+        };
+        let 旧备注 = "No-Intro / gb.dat / 含头 · 按目录 库/GB/汉化";
+        let 旧批 = 旧程序记一批(
+            &store.conn,
+            "小库",
+            "采用各自的第 1 条候选",
+            Some(旧备注),
+            &[一行("库/GB/汉化/甲.zip")],
+        );
+
+        store.migrate().expect("升得上来");
+
+        let 读回来 = store.batch(旧批).expect("读得到").expect("老批还在");
+        assert_eq!(读回来.scope, None, "旧批没有作用范围那几格，读回来该是空的");
+        assert_eq!(读回来.note.as_deref(), Some(旧备注), "备注一个字不动");
+        assert_eq!(读回来.rows, 1, "老批里的行也还在");
+
+        let 作用范围 = BatchScope {
+            shape: "No-Intro / gb.dat / 高置信 / 含头 / 1 个候选".to_string(),
+            axis: "按目录".to_string(),
+            group: "库/GB/汉化".to_string(),
+            count: 2,
+            kind: "已通过".to_string(),
+        };
+        let 新批 = store
+            .put_batch(
+                "小库",
+                "采用各自的第 1 条候选",
+                None,
+                Some(&作用范围),
+                &[一行("库/GB/汉化/乙.zip")],
+            )
+            .expect("升上来之后记得下作用范围");
+        let 列出来 = store.batches("小库", 0).expect("列得出");
+        assert_eq!(
+            列出来
+                .iter()
+                .map(|batch| (batch.id, batch.scope.clone()))
+                .collect::<Vec<_>>(),
+            [(新批, Some(作用范围.clone())), (旧批, None)],
+            "新落下的那一批五格原样读得回来，旧批照旧是空的",
+        );
+        assert_eq!(
+            store.batch(新批).expect("读得到").expect("在").scope,
+            Some(作用范围),
+            "点名要一批也读得回作用范围",
+        );
+    }
+
+    #[test]
     fn 人工纠正按主库分开存得住也撤得掉() {
         // 沉淀库一个工作目录一份、几份主库共用，而人工纠正的键是中立库里的键——
         // 同一个键在另一份主库里指的是另一个文件，所以一条纠正要说得出属于哪份主库。
@@ -4387,7 +4570,13 @@ mod tests {
             before: Some(旧的.clone()),
         }];
         let id = store
-            .put_batch("小库", "作品《改成这个》", Some("按记号裁一批"), &rows)
+            .put_batch(
+                "小库",
+                "作品《改成这个》",
+                Some("按记号裁一批"),
+                None,
+                &rows,
+            )
             .expect("记得下");
 
         let 列出来 = store.batches("小库", 0).expect("列得出");

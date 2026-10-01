@@ -34,6 +34,7 @@
 核查（2026-09-23）：crates/gui/src/queue.rs:152 parts: Parts 只在进程里，:786 refresh_records 只 keep 在册批号；沉淀库批表 crates/core/src/verdict.rs:299-311 verdict_batch / :872-887 Batch 没有「作用范围（形状+轴+组名）」这一格。
 依赖／可并：Q973（都想给「一批」加一格；表不同——Q964 是沉淀库 verdict_batch，Q973 是中立库 sublibrary_exception——不必同票）
 （大小 M，来自票 `gui-looks-like-the-design/19`）
+**settled（2026-10-01）：** 票 `03` 走 A——沉淀库第 12 条迁移给 `verdict_batch` 加了作用范围那五格（形状、轴、组名，连条数与裁成什么），开窗时照册子折回、锁轴、标「已通过」；命令行 `triage batches` 印「作用范围：…」。备注里那句原话本票没再写（这是一个岔路口，记在挂单 `Q1567`、待拿主意的人裁）。
 
 ### `Q1010` — 合并作品落成的裁决把 DAT 条目名里的**修订标记**丢了（`release.revision` 过不来）
 
