@@ -699,7 +699,7 @@ pub fn survey(
 /// [`Queue::pending`] 是同一个数**：判据只有 `awaits_verdict` 那一句。
 ///
 /// **只数，不取候选、不折条目**：库屏工序段上裁决那一行（`stage::Stages::survey`）每次重读库屏
-/// 都要问它，而 [`survey`] 要为列出来的每一条读候选——真库上那是 15 万行。
+/// 都要问它，而 [`survey`] 要为列出来的每一条读候选——真库上那是十五万多行（见台账 `docs/library-facts.md`）。
 ///
 /// **要沉淀库**（`verdicts`）：钉在路径上的裁决只记在那儿（`decided`），只问中立库的话，
 /// 人已经裁过的那几个会被再数一遍。
@@ -721,7 +721,7 @@ pub const HEADLINE_BATCHES: usize = 5;
 /// **前 `head` 批盖住多少**（[`batch::Coverage`]）：整个待确认队列（默认那几档，裁过的不算）照依据形状一级分批，数前几批的账。
 ///
 /// **与待确认队列屏说的是同一个数**：条目照 [`survey`] 列（默认选择器），分批照 [`batch::batches`]，账照 [`batch::coverage`]
-/// ——与 [`Queue::load`] 之后 [`Queue::coverage`] 走的是同一副。**它贵**：要为队列里每一条读候选（真库 15 万行），所以库屏
+/// ——与 [`Queue::load`] 之后 [`Queue::coverage`] 走的是同一副。**它贵**：要为队列里每一条读候选（真库十五万多行，见台账 `docs/library-facts.md`），所以库屏
 /// 工序段算一次存着、只在队列可能变了时重算（`romcat_gui::stages::Section`），不跟着每次重读库屏算。
 ///
 /// # Errors
@@ -1170,6 +1170,9 @@ fn resolve(item: &Item, decide: &Decide) -> Result<Decision, String> {
                 region: parsed.region,
                 serial: candidate.serial.clone(),
                 languages: parsed.languages,
+                // **修订**照那条候选撞上的 DAT 条目名记（`(Rev 1)`）：它是发行版那一层的事实，
+                // 裁决不记的话，发行版照裁决重建之后就没了（挂单 `Q1010`）。
+                revision: parsed.revision,
                 chinese: candidate.chinese,
                 team: None,
                 version: None,

@@ -26,10 +26,11 @@
 //! 中立库里识别落下的那一行读回来（`release` 那几格加 `identification.edition`），
 //! **只把 [`Facts::work`] 换掉**，别的原样抄回去。
 //!
-//! ⚠️ **DAT 条目名尾巴上的修订标记（`release.revision`）过不来**：裁决落成的发行版行
-//! 由 [`Projector`](crate::identify::Projector) 建，那一处刻意不写 `revision`（几个变体
-//! 共用一行，写进去会让头一个落库的盖住其余几个），而 [`Facts`] 里没有装它的格子。
-//! 挂单 `Q1010`，与 `Q993`／`Q994` 同一族。
+//! **DAT 条目名尾巴上的修订**（`release.revision`，`(Rev 1)`）也在抄回去的那几格里
+//! （[`Facts::revision`]，票 `verdict-store-and-sync/04`）：裁决落成的发行版行由
+//! [`Projector`](crate::identify::Projector) 照裁决重建，裁决不记修订的话，合并之后详情页
+//! 「版本」那一格就从 `Rev 1` 退回「—」（原挂单 `Q1010`）。修订是发行版那一层的事实，进那一行的
+//! 去重键；汉化第几版（`identification.edition`）照旧不进——那是变体那一层的。
 //!
 //! ### 二、**条目不从待确认队列里取**
 //!
@@ -309,8 +310,10 @@ pub fn plan(
 ///
 /// 1. **沉淀库已经对这份内容说过话**——用它那一份。那是人亲手定的，比库里算出来的权威。
 ///    说的是「没有发行版」或者「认不出」的，那两档没有事实可抄，落回第二档。
-/// 2. **没裁过**——从中立库里识别落下的那一行读：发行版那几格（平台、地区、序列号、语言）、
-///    已接受候选上的中文身份、`identification.edition` 记着的**第几版**。
+/// 2. **没裁过**——从中立库里识别落下的那一行读：发行版那几格（平台、地区、序列号、语言、
+///    **修订**）、已接受候选上的中文身份、`identification.edition` 记着的**第几版**。
+///    修订不抄的话，合并之后发行版那一行照裁决重建、没有修订，详情页「版本」那一格就从
+///    `Rev 1` 退回「—」（挂单 `Q1010`）。
 fn facts_of(
     catalog: &Catalog,
     store: &Store,
@@ -348,6 +351,9 @@ fn facts_of(
         languages: release
             .as_ref()
             .and_then(|release| release.languages.clone()),
+        revision: release
+            .as_ref()
+            .and_then(|release| release.revision.clone()),
         chinese,
         // **汉化组**只活在沉淀库里（[`Projector`](crate::identify::Projector) 不投影它），
         // 没裁过的变体身上本来就没有这一格。

@@ -14,8 +14,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use romcat_core::catalog::{Catalog, Confidence, Roots, TitleRow, VariantDetail};
+use romcat_core::dat::Convention;
 use romcat_core::dat::chinese::ChineseMark;
-use romcat_core::dat::repo::DatRepo;
+use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
+use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
 use romcat_core::fs::RealFs;
 use romcat_core::identify::{self, Options, fuzzy};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
@@ -23,10 +25,11 @@ use romcat_core::scrape::priority::{Said, VERDICT, entry_fields};
 use romcat_core::scrape::{AnchorKind, Field, Priorities};
 use romcat_core::site::Site;
 use romcat_core::task::Handle;
-use romcat_core::testing::container::{ZipEntrySpec, zip_container};
+use romcat_core::testing::container::{self, ZipEntrySpec, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::title::{Language, TitleKind};
 use romcat_core::triage::batch::breakdown;
+use romcat_core::triage::merge;
 use romcat_core::triage::{self, Axis, Breakdown, Part, PartKind, Parts, Queue, Scope, Shape};
 use romcat_core::verdict::{self, Anchor, Decision, Facts, Verdict};
 use romcat_core::workspace::{self, CatalogState, Slug};
@@ -101,15 +104,19 @@ fn 扫(site: &mut Site, root: &Path) {
 
 /// 跑一趟识别：沉淀库里的裁决照内容锚重放，作品与发行版就是这么回来的。
 fn 跑识别(site: &mut Site, root: &Path) {
+    跑识别对着(site, root, &DatRepo::in_memory().expect("开得出 DAT 库"));
+}
+
+/// 拿这一份 DAT 库跑一趟识别。
+fn 跑识别对着(site: &mut Site, root: &Path, repo: &DatRepo) {
     let index = verdict::Index::load(&site.store, &site.library_identity).expect("读得出沉淀库");
-    let repo = DatRepo::in_memory().expect("开得出 DAT 库");
     let mut options = Options::new(Roots::single(根名, root));
     options.read_library = false;
     identify::run(
         &RealFs::new(),
         &mut site.catalog,
         &identify::Ammo {
-            repo: &repo,
+            repo,
             verdicts: &index,
             naming: &fuzzy::Naming::off(),
             guessing: &identify::model::Guessing::off(),
@@ -163,10 +170,20 @@ fn 认好的现场(root: &Path, 工作目录: &Path) -> (PathBuf, Site) {
 
 /// 删掉中立库、从零扫一遍再识别一遍——结构版本一变，维护者按提示做的正是这件事。
 fn 删库重扫(库文件: &Path, root: &Path, 工作目录: &Path) -> Site {
+    删库重扫对着(
+        库文件,
+        root,
+        工作目录,
+        &DatRepo::in_memory().expect("开得出 DAT 库"),
+    )
+}
+
+/// 同上，识别那一趟拿这一份 DAT 库去撞。
+fn 删库重扫对着(库文件: &Path, root: &Path, 工作目录: &Path, repo: &DatRepo) -> Site {
     删库(库文件);
     let (_, mut site) = 开现场(工作目录);
     扫(&mut site, root);
-    跑识别(&mut site, root);
+    跑识别对着(&mut site, root, repo);
     site
 }
 
@@ -914,5 +931,217 @@ fn 就地拒绝的那一组_重开现场之后作用范围读得回来_删库重
             .iter()
             .any(|row| row.label == 那一组 && row.done == Some(PartKind::Rejected)),
         "删库重扫之后裁掉的那一组不见了：{那一栏:?}",
+    );
+}
+
+// ——— 裁决带上 DAT 的修订（票 `verdict-store-and-sync/04`，挂单 `Q1010`）———
+
+/// 一份只装一条 FC 条目的 DAT 库：`source` 那个源的那份 DAT 里，`game` 那一条记着 `rom` 那份字节的
+/// CRC-32；`with_size` 为假时不记大小（GoodNES 那种：撞上了也对不上号，不自动通过）。
+fn 一条_fc_条目的_dat(source: &str, game: &str, rom: &[u8], with_size: bool) -> DatRepo {
+    let mut repo = DatRepo::in_memory().expect("开得出 DAT 库");
+    let mut writer = repo
+        .begin(&Unit {
+            source: source.to_string(),
+            name: format!("{source}.dat"),
+            url: "https://example.invalid/x".to_string(),
+            fingerprint: "sha".to_string(),
+        })
+        .expect("开得了事务");
+    writer
+        .write_dat(
+            &DatMeta {
+                name: format!("{source}.dat"),
+                platform: 平台.to_string(),
+                convention: Convention::AsIs,
+                header: DatHeader::default(),
+            },
+            &[GameRecord {
+                name: game.to_string(),
+                roms: vec![RomRecord {
+                    name: format!("{game}.nes"),
+                    size: with_size.then(|| u64::try_from(rom.len()).expect("装得下")),
+                    crc32: Some(container::crc32(rom)),
+                    ..RomRecord::default()
+                }],
+                ..GameRecord::default()
+            }],
+        )
+        .expect("写得进");
+    writer.commit().expect("提交");
+    repo
+}
+
+/// 一份 FC 的 DAT：日版那一份的字节原样撞得上，条目名尾巴上带着**修订** `(Rev 1)`。
+fn 带修订的_dat() -> DatRepo {
+    一条_fc_条目的_dat("No-Intro", "Contra (Japan) (Rev 1)", &卡带(0xA1), true)
+}
+
+/// 只把汉化版裁成《魂斗罗》：日版留给 DAT 去撞，撞上的是《Contra》那一条 `(Rev 1)`。
+fn 只裁汉化版(site: &mut Site) {
+    let variant = site
+        .catalog
+        .variant(汉化)
+        .expect("读得出")
+        .expect("汉化版该在库里");
+    let print = identify::content_print(&site.catalog, &variant)
+        .expect("算得出")
+        .expect("zip 的 CRC 零解压就有");
+    site.store
+        .put(&Verdict::now(
+            Anchor::Content {
+                crc32: print.crc32,
+                size: print.size,
+                sha1: None,
+            },
+            Decision::Release(Facts {
+                work: 作品.to_string(),
+                platform: Some(平台.to_string()),
+                chinese: Some(ChineseMark::FanTranslated),
+                ..Facts::default()
+            }),
+        ))
+        .expect("落得进沉淀库");
+}
+
+#[test]
+fn 撞上修订的变体合并进另一个作品_版本那一格照旧是修订_删库重扫之后也还是() {
+    let 主库 = 摆好主库();
+    let 原样 = 主库的字节(主库.path());
+    let 工作目录 = temp_dir("verdict-store-revision-ws");
+    let repo = 带修订的_dat();
+    let (库文件, mut site) = 开现场(工作目录.path());
+    扫(&mut site, 主库.path());
+    只裁汉化版(&mut site);
+    跑识别对着(&mut site, 主库.path(), &repo);
+    let 合并前 = 详情(&site, 日版);
+    assert_eq!(
+        (合并前.work.as_deref(), 合并前.edition()),
+        (Some("Contra"), Some("Rev 1")),
+        "前提：日版自己撞上 DAT，「版本」那一格是条目名里的修订",
+    );
+
+    // 人说日版的《Contra》与汉化版的《魂斗罗》是同一部作品：合并进《魂斗罗》。
+    let 计划 = merge::plan(
+        &site.catalog,
+        &site.store,
+        &site.library_identity,
+        merge::Kind::Merge,
+        作品,
+        &[日版.to_string()],
+    )
+    .expect("排得出计划");
+    merge::apply(&mut site.catalog, &mut site.store, &计划).expect("落得下");
+    let 合并后 = 详情(&site, 日版);
+    assert_eq!(
+        合并后.work.as_deref(),
+        Some(作品),
+        "日版改挂到《魂斗罗》名下"
+    );
+    assert_eq!(
+        合并后.edition(),
+        Some("Rev 1"),
+        "合并之后「版本」那一格照旧写着 DAT 的修订，不退回「—」",
+    );
+    let 依据 = site
+        .catalog
+        .candidates_of(日版)
+        .expect("读得出")
+        .into_iter()
+        .find(|candidate| candidate.accepted)
+        .expect("合并落下的那条裁决投影成一条定下来的候选")
+        .evidence;
+    assert!(
+        依据.contains("修订 Rev 1"),
+        "依据里说得出那一格的修订是裁决记着的：{依据}",
+    );
+
+    drop(site);
+    let site = 删库重扫对着(&库文件, 主库.path(), 工作目录.path(), &repo);
+    let 重扫后 = 详情(&site, 日版);
+    assert_eq!(
+        (重扫后.work.as_deref(), 重扫后.edition()),
+        (Some(作品), Some("Rev 1")),
+        "删库重扫之后，那条裁决照沉淀库重放，修订跟着它回来",
+    );
+    assert!(
+        主库的字节(主库.path()) == 原样,
+        "合并、删库重扫一整趟下来，主库该一个字节都没动（ADR-0004）",
+    );
+}
+
+/// 一份只记 CRC 的 DAT（GoodNES 那种，大小没记）：汉化版那一份撞得上一条**带修订**的条目，
+/// 可大小对不上号——撞上了也不自动通过，进队列等人挑。
+fn 汉化版撞上带修订条目的_dat() -> DatRepo {
+    一条_fc_条目的_dat(
+        "GoodNES",
+        "Contra (Japan) (Rev 1) [T+Chi]",
+        &卡带(0xB1),
+        false,
+    )
+}
+
+#[test]
+fn 采用一条带修订的候选_裁决记着修订_删库重扫之后版本那一格照旧是它() {
+    // 「一切定成这个发行版的裁决」都带修订（票 `verdict-store-and-sync/04`）：待确认队列里挑一条
+    // 候选落下的裁决，修订照那条候选撞上的 DAT 条目名记。
+    let 主库 = 摆好主库();
+    let 工作目录 = temp_dir("verdict-store-pick-ws");
+    let repo = 汉化版撞上带修订条目的_dat();
+    let (库文件, mut site) = 开现场(工作目录.path());
+    扫(&mut site, 主库.path());
+    跑识别对着(&mut site, 主库.path(), &repo);
+    assert_eq!(
+        详情(&site, 汉化).edition(),
+        None,
+        "前提：还没人裁过，「版本」那一格是「—」"
+    );
+
+    let index = verdict::Index::load(&site.store, &site.library_identity).expect("读得出沉淀库");
+    let mut items = triage::survey(
+        &site.catalog,
+        &index,
+        &triage::Filter {
+            keys: vec![汉化.to_string()],
+            ..triage::Filter::default()
+        },
+    )
+    .expect("折得出队列")
+    .items;
+    triage::fill_prints(&site.catalog, &mut items).expect("算得出判据");
+    assert_eq!(items.len(), 1, "前提：汉化版在队列里等人挑");
+    let decide = triage::Decide {
+        spec: triage::DecisionSpec::Pick(1),
+        overrides: triage::Overrides::default(),
+        note: None,
+        library: site.library_identity.clone(),
+    };
+    let plan = triage::plan(&site.store, &items, &decide).expect("排得出计划");
+    triage::apply(&mut site.catalog, &mut site.store, &items, &plan).expect("落得下");
+
+    let Decision::Release(facts) = site
+        .store
+        .all()
+        .expect("读得出沉淀库")
+        .into_iter()
+        .next()
+        .expect("落下了一条裁决")
+        .decision
+    else {
+        panic!("挑候选落下的该是一条发行版裁决");
+    };
+    assert_eq!(
+        (facts.work.as_str(), facts.revision.as_deref()),
+        ("Contra", Some("Rev 1")),
+        "裁决记着那条候选撞上的 DAT 条目名里的修订",
+    );
+    assert_eq!(详情(&site, 汉化).edition(), Some("Rev 1"));
+
+    drop(site);
+    let site = 删库重扫对着(&库文件, 主库.path(), 工作目录.path(), &repo);
+    assert_eq!(
+        详情(&site, 汉化).edition(),
+        Some("Rev 1"),
+        "删库重扫之后裁决照沉淀库重放，修订跟着回来",
     );
 }

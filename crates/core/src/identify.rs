@@ -4,7 +4,7 @@
 //! ## 为什么第一层是 CRC-32 而不是 SHA-1
 //!
 //! zip 与 7z 的元数据里**只有 CRC-32**，而且零解压可得（票 03）；DAT 的每条 `<rom>` 都带
-//! `size` + `crc`。库里 **91.1% 的容量在透明容器里**，所以第一层用 CRC-32 加未压缩大小
+//! `size` + `crc`。库里**九成以上的容量在透明容器里**（见台账 `docs/library-facts.md`），所以第一层用 CRC-32 加未压缩大小
 //! 就能不解压地认出绝大部分内容（ADR-0002 的再修订）。SHA-1 留给后面几层。
 //!
 //! ## 两套哈希，两种成本
@@ -35,7 +35,8 @@
 //! ## 第三命中层：卡带内部头（票 10）
 //!
 //! CRC 那一层对卡带世代的**汉化版**同样结构性地不够用，而且缺口正落在中文玩家存量
-//! 最大的两个平台上：票 07 实测 GBA 5.8%、NDS 4.4%、GBC 0%，抽样确认那批未命中全是
+//! 最大的两个平台上：票 07 实测 GBA 与 NDS 的命中率都不到一成、GBC 一条都没撞上（见台账
+//! `docs/library-facts.md`），抽样确认那批未命中全是
 //! 汉化版。**汉化补丁通常不改内部头**（调研 C.2、D.3.1），于是 GBA 头里的 game code、
 //! NDS 头里的 gamecode 照样说得出「这是哪个游戏」——缺的只是「这是谁汉化的第几版」，
 //! 那归**裁决**（ADR-0008）。
@@ -56,8 +57,8 @@
 //!
 //! ## 还有一条 SHA-1 的窄路
 //!
-//! DAT 库里有一批记录连 `crc32` 与 `size` 两列都是空的（GoodNES 实测 30,244 条，
-//! 其中 748 条中文汉化），第一命中层够不到它们。SHA-1 要整份读一遍，所以它**只对
+//! DAT 库里有一批记录连 `crc32` 与 `size` 两列都是空的（GoodNES 实测三万多条，
+//! 其中七百多条中文汉化，见台账 `docs/library-facts.md`），第一命中层够不到它们。SHA-1 要整份读一遍，所以它**只对
 //! 真有这种弹药的平台、而且第一层没办成时**才付（`has_sha1_ammo`）——ADR-0008 的修订段
 //! 算过这笔账，对光盘世代不值，对卡带世代反过来。
 //!
@@ -479,8 +480,8 @@ pub fn run(
             ..Progress::default()
         },
         // DAT 库里有哪几个平台。**没有弹药的平台不值得为它读盘**——真机上
-        // `switch/` 那 91 个变体是 154 GiB 的 `.xci`，而 DAT 库里 Switch 一条记录都没有
-        // （那是票 27 的活），读完它们只是把 154 GiB 换成一堆撞不上的数。
+        // `switch/` 那近百个变体是上百 GiB 的整卡镜像（见台账 `docs/library-facts.md`），而 DAT 库里
+        // Switch 一条记录都没有（那是票 27 的活），读完它们只是把上百 GiB 换成一堆撞不上的数。
         ammo: ammo.repo.platforms()?,
         // **只有真有 SHA-1 弹药的平台才付整份读一遍那笔钱**（票 10）。真机实测这份
         // 名单上的卡带平台只有 FC 与 MD——GoodNES 那两份只记 SHA-1。
@@ -639,8 +640,8 @@ fn start_or_continue(
 ///
 /// 它就是 [`run`] 外面包的那一层，接法与 [`scan::scan`](crate::scan::scan) 一模一样：
 /// 「停下」接在把手底下那个中断信号上，进度往
-/// [`Handle::tick`](crate::task::Handle::tick) 上报。**识别一趟 65 秒**（真机上四万六千
-/// 个变体），跑在画帧那条线程上的话窗口就是一块白板。
+/// [`Handle::tick`](crate::task::Handle::tick) 上报。**识别一趟一分钟上下**（真机上四万多
+/// 个变体，耗时与变体数都见台账 `docs/library-facts.md`），跑在画帧那条线程上的话窗口就是一块白板。
 ///
 /// ## 为什么另开一个函数而不是给 [`run`] 换参数
 ///
@@ -805,7 +806,7 @@ fn ask_model(
 /// 只装着一个变体的那些目录。
 ///
 /// 它一趟算完（`variants` 本来就整份在手上），而不是每个变体查一次库——真库上那是
-/// 46,444 次查询，换来的是一件早就摆在眼前的事实。
+/// 四万多次查询（变体数见台账 `docs/library-facts.md`），换来的是一件早就摆在眼前的事实。
 fn exclusive_dirs(variants: &[VariantRow]) -> BTreeSet<String> {
     let mut counts: BTreeMap<&str, u32> = BTreeMap::new();
     for variant in variants {
@@ -838,15 +839,15 @@ struct Neighbours {
     ///
     /// **不存它就得每次现找**（`position()`），而那是一次线性扫描：真库里
     /// `3ds/3DSCH/` 这样的目录底下几千个变体，一次识别就是几百万次比较——
-    /// 实测那让整趟识别从 38 秒涨到 91 秒。
+    /// 实测那让整趟识别的耗时翻了一倍多（票 12 实测，提交 `5c354f1`；台账没收）。
     at: BTreeMap<String, usize>,
 }
 
 impl Neighbours {
     /// 一趟算完（`variants` 本来就整份在手上），而不是每个变体查一次库。
     ///
-    /// **名字整份留着，不截断**：全库加起来正好是变体的条数（真机 46,444 个名字，
-    /// 几 MB）。截断的代价是真的——只留目录里头几个的话，同一个目录下每一条残渣
+    /// **名字整份留着，不截断**：全库加起来正好是变体的条数（真机四万多个名字，见台账
+    /// `docs/library-facts.md`，几 MB）。截断的代价是真的——只留目录里头几个的话，同一个目录下每一条残渣
     /// 拿到的**是同一组名字**，与它自己旁边是什么无关，那就不是「同目录其他文件」，
     /// 是「本目录头几个」。
     fn build(variants: &[VariantRow]) -> Self {
@@ -1179,12 +1180,13 @@ fn identify_variant(
     }
 
     // 二之二、**SHA-1 那条窄路**（票 10）。DAT 库里有一批记录连 `crc32` 与 `size` 两列
-    // 都是空的（GoodNES 实测 30,244 条，其中 748 条中文汉化），第一命中层够不到它们
+    // 都是空的（GoodNES 实测三万多条，其中七百多条中文汉化，见台账 `docs/library-facts.md`），
+    // 第一命中层够不到它们
     // ——不是撞不上，是**根本没有可以对的那一列**。
     //
     // 它排在撞 CRC **之后**，理由与光盘那一层的 `worth_probing` 一模一样：**第一层办成了
-    // 的事不必重办**，而这一层要把内容整份读一遍。真机上 FC 全平台 2.01 GiB，撞上了的
-    // 占 1.97 GiB——先撞后读，读的是剩下那 0.45 GiB。
+    // 的事不必重办**，而这一层要把内容整份读一遍。真机上 FC 全平台两 GiB 上下，绝大部分第一层
+    // 就撞上了——先撞后读，读的只是剩下那零点几 GiB（票 10 实测，提交 `e9a664a`；台账没收）。
     let first_layer_empty = units.iter().all(|unit| unit.hits.is_empty());
     let crc_accepted = units
         .iter()
@@ -1574,7 +1576,8 @@ fn blocked_unit(member: &str, inner: &str, reason: String, in_container: bool) -
 /// 容器里这一条值不值得拿去撞。
 ///
 /// 封面、说明书、金手指文本不是内容——它们撞不上任何 DAT，白白多几十万次查询。
-/// 拿不准的（**未归类**）照撞：库里 2,297 个文件的扩展名连探针都没有，其中真有 ROM。
+/// 拿不准的（**未归类**）照撞：库里两千多个文件的扩展名连探针都没有（见台账
+/// `docs/library-facts.md`），其中真有 ROM。
 fn worth_matching(inner: &str) -> bool {
     let classification = classify::classify(Path::new(file_name_of_key(inner)));
     !matches!(classification.category, Category::MediaOrMetadata)
@@ -1875,7 +1878,7 @@ fn read_from_container(
 
 /// 主库里那个文件在哪。键是「根名 + 相对那个根的路径」，分隔符是 `/`（ADR-0020）。
 ///
-/// 折法在 [`Roots::open_path_in`]（键是 NFC 的、盘上那个名字有 1.99% 是分解形式，
+/// 折法在 [`Roots::open_path_in`]（键是 NFC 的、盘上那个名字有百分之二上下是分解形式——ADR-0020 的实测，
 /// 所以折得开的键要折回盘上真名）。**这里只多做一件事**：认不出根名时原样把那条键
 /// 交回去，好让它照常走「开不了 → 读不到」那一支——识别不必为「哪个根不在」另长一条
 /// 岔路，与盘不在位是同一种处置。
@@ -2024,8 +2027,9 @@ pub fn content_print(
 /// ## 为什么非有这一条不可
 ///
 /// 折一个变体的判据要问四次库：成员、容器构成、容器状态、算过的哈希。界面上
-/// 「全选 46,483 行 → ★ 收藏」按下去，那是十八万次往返，实测在画帧那条线程上
-/// 跑 6.7 秒（挂单 `Q119`）；真库的**待确认队列**上是 18,241 条各算一次
+/// 「全选四万多行 → ★ 收藏」按下去，那是十八万次往返，实测在画帧那条线程上
+/// 跑 6.7 秒（合成数据，挂单 `Q119`）；真库的**待确认队列**上是一万八千多条各算一次（规格
+/// `.scratch/gui-redesign/spec.md` 那一天的数，台账没收）
 /// （[`crate::triage::fill_prints`]）。这一条把那四次问成整批的几条
 /// （[`Catalog::variants_of`] 那一族）。
 ///
@@ -2350,7 +2354,7 @@ struct Wanted {
 /// - [`Self::Read`] 是关于这份内容的**结论**，只要文件没变就一直成立 → 落进中立库，
 ///   第二趟直接取回。
 /// - [`Self::Missed`] 是「**这一趟**没读到」——盘不在位、容器解不开、
-///   或者那 4,085 个在 macOS 上连 `stat` 都失败的文件（ADR-0021 的第三态）。
+///   或者那四千多个在 macOS 上连 `stat` 都失败的文件（见台账 `docs/library-facts.md`，ADR-0021 的第三态）。
 ///   **它绝不落库**：缓存一次读失败等于让它永久生效，而那批文件在 Windows 上是正常的
 ///   （ADR-0018 定的工作方式正是两台机器轮流碰同一块盘）。
 enum Probed<T> {
@@ -2395,7 +2399,8 @@ fn probe_discs(
     };
     // 一、要探哪几份。先是 units 里那些长得像光盘形态的；再是变体成员里那些
     // **裸的 `param.sfo`**——目录树转储里那一份的角色是**内部资源**，压根不在 units 里
-    // （`CONTEXT.md`：内部资源不产生候选），可它正是 PSV 那 1,416 个变体的锚。
+    // （`CONTEXT.md`：内部资源不产生候选），可它正是 PSV 那一千四百多个变体的锚（见台账
+    // `docs/library-facts.md`）。
     let mut wanted: Vec<Wanted> = Vec::new();
     for (index, unit) in units.iter().enumerate() {
         // **`blocked` 不是跳过的理由**：压缩镜像与目录树转储在第一命中层就是带着
@@ -3709,7 +3714,8 @@ impl Projector {
             let id = match catalog.work_named(name)? {
                 Some(id) => {
                     // 复用现成的那一行。**只升不降**：识别认领到它时这一列一个字不动，
-                    // 顺带也省掉真库上 9,226 次「写的还是原值」的 UPDATE。
+                    // 顺带也省掉真库上九千多次「写的还是原值」的 UPDATE（作品数见台账
+                    // `docs/library-facts.md`）。
                     if origin == Provenance::Verdict {
                         catalog.set_work_origin(id, origin)?;
                     }
@@ -3797,44 +3803,45 @@ impl Projector {
         facts: &verdict::Facts,
         platform: Option<&str>,
     ) -> Result<i64, CatalogError> {
+        let said = NewRelease {
+            platform,
+            region: facts.region.as_deref(),
+            serial: facts.serial.as_deref(),
+            languages: facts.languages.as_deref(),
+            // **修订**是**发行版**那一层的事实（DAT 条目名尾巴上那一组 `(Rev 1)`，词表**第几版**
+            // 上面那一层），裁决记着它就写在这一行上——不写的话，一个撞上 `(Rev 1)` 的变体被合并
+            // 之后，发行版照裁决重建、没有修订，详情页「版本」那一格退回「—」（挂单 `Q1010`）。
+            //
+            // **裁决说的「汉化第几版」不写在这儿**（`Facts::version`）：这一行会被几个变体共用，
+            // 而「汉化打到第几版」是**变体**那一层的事实——写进来会让第一个落库的那一版盖住
+            // 其余几个。它落在**识别结论**那一行上（`Identification::edition` →
+            // `identification.edition`，词表**第几版**下面那一层）。
+            revision: facts.revision.as_deref(),
+        };
         // 键取裁决说出口的那几样。同一次发行被裁决过几次（几个变体基于它），
         // 只该有一行发行版——多出来的行会让导出时的**收敛**把一个条目拆成好几个。
+        // 键就是作品名加 `said` 那五格——与下面 `release_like` 逐格比的是同一份，不另抄一遍。
+        // **修订在键里**：`(Rev 1)` 与不带修订的那一条在 DAT 里是两条条目、两次发行。
         let key = format!(
-            "裁决|{}|{}|{}|{}|{}",
+            "裁决|{}|{}",
             facts.work,
-            platform.unwrap_or(""),
-            facts.region.as_deref().unwrap_or(""),
-            facts.serial.as_deref().unwrap_or(""),
-            facts.languages.as_deref().unwrap_or(""),
+            [
+                said.platform,
+                said.region,
+                said.serial,
+                said.languages,
+                said.revision,
+            ]
+            .map(|cell| cell.unwrap_or(""))
+            .join("|"),
         );
         if let Some(id) = self.releases.get(&key) {
             return Ok(*id);
         }
         // 跨调用的去重靠库自己：`romcat triage decide` 一次一批，两批之间这张表是空的。
-        let id = match catalog.release_like(
-            work,
-            platform,
-            facts.region.as_deref(),
-            facts.serial.as_deref(),
-            facts.languages.as_deref(),
-        )? {
+        let id = match catalog.release_like(work, &said)? {
             Some(id) => id,
-            None => catalog.add_release(
-                work,
-                &NewRelease {
-                    platform,
-                    region: facts.region.as_deref(),
-                    serial: facts.serial.as_deref(),
-                    languages: facts.languages.as_deref(),
-                    // **裁决说的那一版不写在这儿**：这一行会被几个变体共用（上面那把
-                    // 去重键里没有版本），而「汉化打到第几版」是**变体**那一层的事实
-                    // ——写进来会让第一个落库的那一版盖住其余几个。它落在**识别结论**
-                    // 那一行上（`Identification::edition` → `identification.edition`，
-                    // 词表**第几版**下面那一层）。
-                    revision: None,
-                },
-                Provenance::Verdict,
-            )?,
+            None => catalog.add_release(work, &said, Provenance::Verdict)?,
         };
         self.releases.insert(key, id);
         Ok(id)
@@ -4092,7 +4099,7 @@ mod tests {
 
     #[test]
     fn 容器里那份内容的扩展名也算数() {
-        // 库里 91.1% 的容量在**透明容器**里，只看容器自己的名字等于放过大头——
+        // 库里九成以上的容量在**透明容器**里（见台账 `docs/library-facts.md`），只看容器自己的名字等于放过大头——
         // 判据那一处（`conflicting_platform`）裸文件与容器内部共用，这里也共用。
         let variant = 变体("GBA/合集.zip", Some("GBA"));
         let mut unit = 一份内容("GBA/合集.zip", None);

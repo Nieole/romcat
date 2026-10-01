@@ -82,7 +82,7 @@ fn 建现场() -> 现场 {
             real::padded(&real::NDS_GYAKUTEN_KENJI, 1 << 16),
         )]),
     );
-    // ── GBC：汉化版。票 07 那一层这个平台的命中率是 0%。
+    // ── GBC：汉化版。票 07 那一层这个平台一条都没撞上（见台账 `docs/library-facts.md`）。
     写(
         &root.join("gbc/007 黑日危机 繁体修正版.gbc"),
         &real::padded(&real::GBC_TWINE, 1 << 16),
@@ -303,7 +303,7 @@ fn 汉化版哈希撞不上但内部头说得出它基于哪一次发行() {
     let outcome = 跑一趟(&mut 现场);
 
     // 六个平台，每一个都该靠内部头认出来。GBA 与 NDS 是中文玩家存量最大的两个平台，
-    // 票 07 在它们身上的命中率是 5.8% 与 4.4%。
+    // 票 07 在它们身上的命中率都不到一成（见台账 `docs/library-facts.md`）。
     for (片段, 条目) in [
         ("洛克人EXE6", "Rockman EXE 6 - Dennoujuu Falzar (Japan)"),
         ("逆转检事", "Gyakuten Kenji (Japan)"),
@@ -556,5 +556,95 @@ fn 官中版是发行版汉化版是变体() {
     assert_eq!(
         candidate.release_id, None,
         "汉化版是变体，认不出它基于哪一条发行版——那条留空等裁决"
+    );
+}
+
+// ——— 卡带头里写的版本号（票 `verdict-store-and-sync/04`，挂单 `Q994`）———
+//
+// 词表**第几版**：卡带头与光盘头里写的那个版本号说的是**发行版**那一层的**修订**——同一件事的
+// 另一份证据，不是第三层；它**只进依据**，不接进那条链，没撞上 DAT 的变体那一格照旧说不出。
+
+/// 这个变体的详情（「版本」那一格读的是它的 `edition`）。
+fn 详情(catalog: &Catalog, key: &str) -> romcat_core::catalog::VariantDetail {
+    catalog
+        .variant_detail(key, &romcat_core::scrape::Priorities::builtin(), None)
+        .expect("读得动")
+        .unwrap_or_else(|| panic!("{key} 该在库里"))
+}
+
+#[test]
+fn 卡带头里写的版本号进依据并说清是头里读的_版本那一格不因它变化() {
+    let mut 现场 = 建现场();
+    跑一趟(&mut 现场);
+    let key = 变体键(&现场.catalog, "洛克人EXE6");
+    let (_, candidates) = 结论(&现场.catalog, &key);
+    let candidate = candidates
+        .iter()
+        .find(|it| it.game.contains("Rockman"))
+        .expect("有那条候选");
+    // 真卡带头 `0x0BC` 那一字节是 0（`testing::cart::GBA_ROCKMAN_EXE6` 的倒数第二行）。
+    assert!(
+        candidate.evidence.contains("卡带头里写的版本号 v0"),
+        "依据里该有头里读出来的版本号，并说清是卡带头里读的：{}",
+        candidate.evidence,
+    );
+    assert!(
+        candidate.evidence.contains("修订"),
+        "依据里该说清它是修订的一份证据，不是第几版：{}",
+        candidate.evidence,
+    );
+    assert_eq!(
+        详情(&现场.catalog, &key).edition(),
+        None,
+        "「版本」那一格不因头里那个数变化：没有已接受的候选撞上 DAT 条目名里的修订，就说不出",
+    );
+}
+
+#[test]
+fn 没撞上_dat_的卡带头里也写着版本号_版本那一格照旧说不出() {
+    let dir = temp_dir("cart-header-no-hit");
+    写(
+        &dir.path().join("gba/洛克人EXE6 电脑兽法尔扎 汉化版.gba"),
+        &real::padded(&real::GBA_ROCKMAN_EXE6, 1 << 20),
+    );
+    let mut catalog = Catalog::open_in_memory().expect("能开中立库");
+    let mut options = ScanOptions::named(dir.path(), "库");
+    options.jobs = Jobs::Fixed(2);
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
+    // GBA 有弹药（不然识别一个字节都不读它），可这张卡的游戏码 `BR6J` 不在里面。
+    let mut repo = DatRepo::in_memory().expect("开得出来");
+    装(
+        &mut repo,
+        "No-Intro",
+        "Nintendo - Game Boy Advance",
+        "GBA",
+        &[卡带条目("Something Else (Japan)", "AXXJ")],
+    );
+    let mut 现场 = 现场 { dir, catalog, repo };
+    跑一趟(&mut 现场);
+
+    let key = 变体键(&现场.catalog, "洛克人EXE6");
+    let (_, candidates) = 结论(&现场.catalog, &key);
+    assert!(candidates.is_empty(), "前提：没撞上 DAT：{candidates:?}");
+    let 头里读出来的: Vec<Option<String>> = 现场
+        .catalog
+        .cart_facts(&key)
+        .expect("读得出")
+        .values()
+        .map(|text| {
+            serde_json::from_str::<romcat_core::identify::cart::Facts>(text)
+                .expect("读得回")
+                .version
+        })
+        .collect();
+    assert_eq!(
+        头里读出来的,
+        [Some("v0".to_string())],
+        "前提：卡带头读过了，版本号读得出来",
+    );
+    assert_eq!(
+        详情(&现场.catalog, &key).edition(),
+        None,
+        "没撞上 DAT 的变体，「版本」那一格照旧说不出——头里那个数不接进那条链",
     );
 }
