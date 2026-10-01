@@ -437,6 +437,7 @@ fn 沉淀库已经说过话的那一条起头用它那一份事实_只把作品�
                 region: Some("Japan".to_string()),
                 serial: Some("DMG-APAJ-1".to_string()),
                 languages: Some("Ja,Zh-Hans".to_string()),
+                revision: Some("Rev 1".to_string()),
                 chinese: Some(ChineseMark::FanTranslated),
                 team: Some("漫游汉化".to_string()),
                 version: Some("v1.1".to_string()),
@@ -460,6 +461,8 @@ fn 沉淀库已经说过话的那一条起头用它那一份事实_只把作品�
     assert_eq!(facts.version.as_deref(), Some("v1.1"));
     assert_eq!(facts.serial.as_deref(), Some("DMG-APAJ-1"));
     assert_eq!(facts.chinese, Some(ChineseMark::FanTranslated));
+    // 裁决记着的**修订**也原样抄回去（票 `verdict-store-and-sync/04`）。
+    assert_eq!(facts.revision.as_deref(), Some("Rev 1"));
 }
 
 #[test]

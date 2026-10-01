@@ -3910,6 +3910,11 @@ fn run_triage_batches(args: &TriageBatchesArgs) -> ExitCode {
             if batch.undone() { "已撤" } else { "在册" },
         );
         println!("    {}", batch.summary);
+        // 待确认屏上就地落下的那一批作用在哪一组上（票 `verdict-store-and-sync/03`）：
+        // 与界面同一份（沉淀库批表上那几格）、同一句话（核心库 `Part::label`）。
+        if let Some(part) = triage::Part::of(batch) {
+            println!("    作用范围：{}", part.label());
+        }
         if let Some(note) = &batch.note {
             println!("    「{note}」");
         }

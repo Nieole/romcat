@@ -11,7 +11,7 @@
 //! - **变体**是磁盘上一份实际可玩的东西，由**成型**产出（[`crate::shape`]），现在就是满的。
 //! - **发行版**指向一个作品；`platform` 与 `languages` 分开存，是 ADR-0019 那道**世代裂缝**
 //!   的落地形状：卡带与光盘世代的官中是**独立一条发行版**（有独立序列号、DAT 里独立一条），
-//!   数字世代的中文只是**同一条发行版的语言属性**（Switch 港服与美服 69.4% 共用 TitleID）。
+//!   数字世代的中文只是**同一条发行版的语言属性**（Switch 港服与美服近七成共用 TitleID，见台账 `docs/library-facts.md`、ADR-0019）。
 //!   一张表同时装得下两侧，不必为数字世代造现实中不存在的发行版。
 //! - **变体到发行版的链接可空**，而且**空本身是信息**：同人移植与 homebrew 没有任何官方
 //!   发行版，直接挂在作品下——没有发行版链接这件事就告诉识别管线「别拿它去撞 DAT」。
@@ -1155,20 +1155,20 @@ impl Catalog {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// 找一条形状一模一样的**发行版**；没有就是 `None`。
+    /// 找这个作品底下一条形状一模一样的**发行版**（`said` 那五格逐格相等，**修订**也算一格）；
+    /// 没有就是 `None`。
     ///
     /// **裁决**拿它跨调用去重：`romcat triage decide` 一次一批，两批之间内存里那张
     /// 去重表是空的，同一次发行被第二批裁决点到时不查库就会多建一行。
+    ///
+    /// 修订算一格：DAT 里 `(Rev 1)` 与不带修订的那一条是两条条目、两次发行（`identify::naming`）。
     ///
     /// # Errors
     /// 读库失败时返回错误。
     pub fn release_like(
         &self,
         work_id: i64,
-        platform: Option<&str>,
-        region: Option<&str>,
-        serial: Option<&str>,
-        languages: Option<&str>,
+        said: &NewRelease<'_>,
     ) -> Result<Option<i64>, CatalogError> {
         self.conn
             .query_row(
@@ -1178,8 +1178,16 @@ impl Catalog {
                    AND COALESCE(region, '')    = COALESCE(?3, '')
                    AND COALESCE(serial, '')    = COALESCE(?4, '')
                    AND COALESCE(languages, '') = COALESCE(?5, '')
+                   AND COALESCE(revision, '')  = COALESCE(?6, '')
                  ORDER BY id LIMIT 1",
-                params![work_id, platform, region, serial, languages],
+                params![
+                    work_id,
+                    said.platform,
+                    said.region,
+                    said.serial,
+                    said.languages,
+                    said.revision
+                ],
                 |row| row.get(0),
             )
             .optional()

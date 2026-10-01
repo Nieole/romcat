@@ -41,6 +41,7 @@
     4. 库体检那一格在截图里**不动**，行为由核心库的测试钉着。
 - [x] 门禁全绿（本机不分大小写的盘上 `sync_run` 那五条已知红除外，`Q479`）
   - 证据：本机已没有那五条的红，要的就是全绿。日志 `/Users/nicoer/dev/game-wt/logs/q8-cao-01-gate1.log`，开头两行是 `/Users/nicoer/dev/game-wt/slot3` 与 `q8/cao-01`，末行 `EXIT=0`。汇总：fmt 绿 3s／glossary 绿 2s（看的是未提交的改动，17 份 `.rs` 里新写的 1080 行，没撞上）／check 绿 20s／clippy 绿 15s／test 绿 1344s（`--no-fail-fast`，88 个测试目标全 ok）／numbers 绿 20s（`numbers --write` 先写回了 README 两处：票数 165/205、测试条数 2,674）／doc 绿 23s，「7 条全绿」。
+  - 合并 main（vs-03、vs-04）之后，在合好的树上又跑了一趟：`/Users/nicoer/dev/game-wt/logs/q8-cao-01-gate2.log`，开头两行同上，末行 `EXIT=0`，「7 条全绿」（test 1812s，88 个测试目标全 ok；`numbers --write` 写回 167/208、2,686）。
 
 **收挂单 `Q1030`：** 照 grill 那一条落地：「平台不符」只在核心库判一处（`scan::aggregate::conflicting_platform`）——扩展名、卡带头家族、CGB 标志三样取并集，库体检那一格、平台纠正那一层、识别报告都读它；稿上打头的 GB↔GBC 两组出得来了。并集这一条照的是规格用户故事 4（「合并判据不会漏掉从前报得出的」）。两样都说不符、说的平台不一样时记卡带头说的，只有这一条路站得住：字节是内容自己说的，识别判定的平台那条回退链也是先听卡带头。GB 游戏躺在 GBC 目录也算不符，照的是票面与设计稿，grill 原话只说了 GB 目录那一半（挂单 `Q1298`）。
 
