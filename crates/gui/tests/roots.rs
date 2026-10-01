@@ -4157,7 +4157,12 @@ mod 问过的答案 {
             .into_iter()
             .map(|key| (key, catalog.candidates_of(key).expect("读得出候选").len()))
             .collect();
-        let report = IdentifyReport::build(catalog, &开_dat(现场)).expect("报告折得出");
+        let report = IdentifyReport::build(
+            catalog,
+            &开_dat(现场),
+            &romcat_core::platform::Manifest::builtin(),
+        )
+        .expect("报告折得出");
         let 模型推断 = report
             .sources
             .iter()

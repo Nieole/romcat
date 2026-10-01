@@ -1606,10 +1606,7 @@ fn identify_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Prod
         .platform_corrections(&site.library_identity)
         .map_err(|error| Cutoff::failed(format!("沉淀库里的平台纠正读不动：{error}")))?;
     if !corrections.is_empty() {
-        options.decided_platforms = Some(identify::DecidedPlatforms::new(
-            &romcat_core::platform::Manifest::builtin(),
-            &corrections,
-        ));
+        options.decided_platforms = Some(identify::DecidedPlatforms::new(&corrections));
     }
     identify::run_task(
         &RealFs::new(),

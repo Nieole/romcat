@@ -449,8 +449,8 @@ fn 开得了(
     }
 }
 
-/// **有库**：两份开得了的，一份结构版本对不上的。规模照真库（46,444 个变体，
-/// `docs/library-facts.md`）。次序照核心库排好的交（上次扫描倒排，说不上来的垫底）。
+/// **有库**：两份开得了的，一份结构版本对不上的。规模照真库那个量级（四万多个变体，
+/// 见台账 `docs/library-facts.md`）。次序照核心库排好的交（上次扫描倒排，说不上来的垫底）。
 fn 有库(工作目录: &Path) -> Listing {
     let 旧库 = 工作目录
         .join("catalog")
@@ -2298,33 +2298,49 @@ impl 库屏 {
         现场
     }
 
-    /// 一个根完整扫过一趟、**体检报告里有两组「目录说 A、内容是 B」**（票 `gui-looks-like-the-design/28`）：
-    /// `fc/` 底下两份 `.fds`（FC 跑不了磁碟机的游戏，**只能改**），`3ds/` 底下一份头部字节是真的 `.nds`
-    /// （3DS **向下兼容** NDS，**改不改都行**）。根那一行的路径与上次扫描时刻交成定值，同 [`Self::有体检发现`]。
+    /// 一个根完整扫过一趟、**识别读过卡带头**，**体检报告里有四组「目录说 A、内容是 B」**，次序照设计稿
+    /// `DLG.platfix`（票 `gui-looks-like-the-design/28`、`core-answers-once/01`）：
+    ///
+    /// - `gb/` 底下四张**只能在 GBC 上跑**的卡（CGB 标志 `C0h`，GB 跑不了，**只能改**）；
+    /// - `gbc/` 底下三张 **GB 游戏**（CGB 标志 `00h`，GBC **向下兼容**，**改不改都行**）；
+    /// - `fc/` 底下两份 `.fds`（FC 跑不了磁碟机的游戏，**只能改**）；
+    /// - `3ds/` 底下一份头部字节是真的 `.nds`（3DS **向下兼容** NDS，**改不改都行**）。
+    ///
+    /// 张数是为了让各组照稿上那个次序排（条数多的在前）：那一层的正文会滚，稿上打头的 GB ↔ GBC 两组得在头一屏里。
+    /// 卡带头都是 `testing::cart` 里那份真头（GB ↔ GBC 那几张只换了 CGB 标志那一个字节），名字照稿上的样例起。
+    /// 根那一行的路径与上次扫描时刻交成定值，同 [`Self::有体检发现`]。
     fn 有平台不符() -> Self {
+        use romcat_core::testing::cart::{NDS_GYAKUTEN_KENJI, gbc_twine_with_cgb_flag, padded};
         let 工作区 = temp_dir("snapshot-库屏-平台纠正");
         let site = 开库(工作区.path());
         let 盘 = temp_dir("snapshot-库屏-平台纠正盘");
+        let 只能在_gbc_上跑 = padded(&gbc_twine_with_cgb_flag(0xC0), 1 << 15);
+        let gb_游戏 = padded(&gbc_twine_with_cgb_flag(0x00), 1 << 15);
         for (相对, 字节) in [
+            ("gb/合集/精灵宝可梦 水晶.gbc", 只能在_gbc_上跑.clone()),
+            ("gb/合集/塞尔达传说 神谕之章.gbc", 只能在_gbc_上跑.clone()),
+            ("gb/合集/勇者斗恶龙3.gbc", 只能在_gbc_上跑.clone()),
+            ("gb/【其他整理】/游戏王 怪兽之决斗4.gbc", 只能在_gbc_上跑),
+            ("gbc/合集/超级马里奥大陆2.gb", gb_游戏.clone()),
+            ("gbc/合集/星之卡比.gb", gb_游戏.clone()),
+            ("gbc/【其他整理】/俄罗斯方块.gb", gb_游戏),
             ("fc/日版/塞尔达传说.fds", vec![1_u8; 64]),
             ("fc/合集/银河战士.fds", vec![2_u8; 64]),
             (
                 "3ds/合集/雷顿教授与最后的时间旅行.nds",
-                romcat_core::testing::cart::padded(
-                    &romcat_core::testing::cart::NDS_GYAKUTEN_KENJI,
-                    1 << 16,
-                ),
+                padded(&NDS_GYAKUTEN_KENJI, 1 << 16),
             ),
         ] {
             let 落点 = 盘.path().join(相对);
             std::fs::create_dir_all(落点.parent().expect("有上级目录")).expect("建得出目录");
             std::fs::write(&落点, 字节).expect("写得进");
         }
-        Self::扫一个根摆好(工作区, site, 盘)
+        Self::扫一个根摆好(工作区, site, 盘, 识别::读过卡带头)
     }
 
     /// 一个根完整扫过一趟、**体检报告里几格都有东西**（票 `gui-looks-like-the-design/27`）：两组重复拷贝、两面磁碟各成
-    /// 一个变体、一份落单的存档、一份 BIOS、一个未纳入管理的目录。不可读与平台不符在临时目录里造不出来，那两格是 0。
+    /// 一个变体、一份落单的存档、一份 BIOS、一个未纳入管理的目录。不可读在临时目录里造不出来，那一格是 0；平台不符那一格
+    /// 也是 0——盘上没摆扩展名只可能属于别的平台的文件，这一份也只扫不识别、没读过卡带头（那一层拍在 [`Self::有平台不符`]）。
     /// 根那一行的路径与上次扫描时刻交成定值，同 [`Self::扫过两个根`]。
     fn 有体检发现() -> Self {
         let 工作区 = temp_dir("snapshot-库屏-体检");
@@ -2346,7 +2362,7 @@ impl 库屏 {
             std::fs::create_dir_all(落点.parent().expect("有上级目录")).expect("建得出目录");
             std::fs::write(&落点, 字节).expect("写得进");
         }
-        Self::扫一个根摆好(工作区, site, 盘)
+        Self::扫一个根摆好(工作区, site, 盘, 识别::没跑过)
     }
     /// 一个根完整扫过一趟、**体检报告里两种成型存疑各有一处**（票 `gui-looks-like-the-design/29`）：
     /// `FDS/某游戏/` 底下两面磁碟各成一个变体（**多碟没合在一起**），`ps3/动作合集/` 是一棵目录树、
@@ -2367,20 +2383,25 @@ impl 库屏 {
             std::fs::create_dir_all(落点.parent().expect("有上级目录")).expect("建得出目录");
             std::fs::write(&落点, 字节).expect("写得进");
         }
-        Self::扫一个根摆好(工作区, site, 盘)
+        Self::扫一个根摆好(工作区, site, 盘, 识别::没跑过)
     }
 
-    /// 一个根、一块盘：扫一遍、把根那一行的路径与上次扫描时刻交成定值、体检一趟。
+    /// 一个根、一块盘：扫一遍、（要的话）识别一趟、把根那一行的路径与上次扫描时刻交成定值、体检一趟。
     ///
     /// **三处 fixture 共用**（[`Self::有体检发现`]、[`Self::有平台不符`]、[`Self::有成型存疑`]）：
     /// 它们只在盘上摆什么不同，摆好之后那十几行逐字相同——抄第三遍时那几行就会各漂各的。
-    fn 扫一个根摆好(工作区: TempDir, mut site: Site, 盘: TempDir) -> Self {
+    fn 扫一个根摆好(
+        工作区: TempDir, mut site: Site, 盘: TempDir, 识别: 识别
+    ) -> Self {
         let 目录 = romcat_core::path::normalize_existing(盘.path());
         roots::add_root(&site.catalog, Some(工作区.path()), "主库", &目录).expect("加得上根");
         let mut options = ScanOptions::named(&目录, "主库");
         options.workspace = Some(工作区.path().to_path_buf());
         options.jobs = Jobs::Fixed(1);
         scan::scan(&RealFs::new(), &mut site.catalog, &options, &Handle::new()).expect("扫得完");
+        if 识别 == 识别::读过卡带头 {
+            识别一趟(&mut site);
+        }
         let 记下的 = site
             .catalog
             .root("主库")
@@ -2423,6 +2444,38 @@ impl 库屏 {
             _盘: vec![盘],
         }
     }
+}
+
+/// 截图夹具扫完之后跑不跑识别。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum 识别 {
+    /// 只扫过：库体检那一格只凭扩展名。
+    没跑过,
+    /// 识别跑过一趟，**卡带头读过、落了库**：平台不符那一格连卡带头一起看（票 `core-answers-once/01`）。
+    读过卡带头,
+}
+
+/// **在界面之外跑一趟识别**：空 DAT 库、沉淀库里什么都没有、文件名与模型推断那两层关着——要的只是卡带那一层
+/// 把头读出来、落进中立库（平台不符的判据从那儿取）。一个字节都不写主库（ADR-0004）。
+fn 识别一趟(site: &mut Site) {
+    use romcat_core::identify::{self, fuzzy, model};
+    let roots = romcat_core::catalog::Roots::load(&site.catalog).expect("读得出根");
+    let repo = romcat_core::dat::repo::DatRepo::in_memory().expect("开得出 DAT 库");
+    identify::run(
+        &RealFs::new(),
+        &mut site.catalog,
+        &identify::Ammo {
+            repo: &repo,
+            verdicts: &romcat_core::verdict::Index::default(),
+            naming: &fuzzy::Naming::off(),
+            guessing: &model::Guessing::off(),
+            titledb: None,
+        },
+        &identify::Options::new(roots),
+        &romcat_core::scan::CancelToken::new(),
+        &mut |_| {},
+    )
+    .expect("识别跑得动");
 }
 
 /// **开窗之前先体检一趟、等它收场**（票 `gui-looks-like-the-design/27`）：有扫过的根、还没有报告时，库屏头一帧会自动排一趟
@@ -2763,8 +2816,9 @@ fn 拍重复拷贝明细(名字: &str, 主题: Theme) {
 /// **平台纠正那一层**（票 `gui-looks-like-the-design/28`，设计稿 `DLG.platfix`）：滚到库屏底下按
 /// 「目录与内容平台不符」那一格——它点进去开的不是明细弹层，是这一层。
 ///
-/// **拍的是刚开那一下**：两组都还没定，各摆着「按内容改」与「保持」两颗按钮，改不改都行的那一组
-/// 底下多一句——稿上就是这个样子，而「每组两条出路」正是这一票的验收第 2 条。
+/// **拍的是刚开那一下**：四组都还没定，各摆着「按内容改」与「保持」两颗按钮，改不改都行的那几组
+/// 底下多一句——稿上就是这个样子，而「每组两条出路」正是票 28 的验收第 2 条。正文会滚，头一屏里是
+/// 稿上打头的 GB ↔ GBC 两组（票 `core-answers-once/01`）。
 fn 拍平台纠正(名字: &str, 主题: Theme) {
     if 该跳过(名字) {
         return;
@@ -3753,8 +3807,8 @@ fn 摆上四档收场(app: &mut App) {
 
 /// 台上有一趟在跑、后面排着一趟时拍一张。
 ///
-/// 跑着的那一趟是共享夹具的占位活：报完进度（四步走到第二步、这一步走了 96,064 / 256,128 件，
-/// 即 34%）就停在那儿等信号，**等它报完再开窗**，不数挂钟。台上有活时主窗口每一帧都请求下一帧，
+/// 跑着的那一趟是共享夹具的占位活：报完进度（四步走到第二步、这一步走了三成多，总件数取真库文件数
+/// 那个量级，见台账 `docs/library-facts.md`）就停在那儿等信号，**等它报完再开窗**，不数挂钟。台上有活时主窗口每一帧都请求下一帧，
 /// 跑不到「不要重画」，于是数帧：头两帧装字体与观感（[`搭一个`]），再跑几帧让历史表与卡片的列宽
 /// 摆稳；这一屏上没有会动的东西（进度条是走了几成的那种）。
 #[cfg(feature = "demo")]
