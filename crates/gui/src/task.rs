@@ -2,7 +2,7 @@
 //!
 //! ## 这一屏为什么是基础设施而不是一屏
 //!
-//! 核心库那几个长入口一趟要跑很久——扫一遍真库 37.1 分钟、识别 65.5 秒、
+//! 核心库那几个长入口一趟要跑很久——扫一遍真库半个小时上下、识别一分钟上下（见台账 `docs/library-facts.md`）、
 //! 排一次**差量预览**在真机量级上 343 毫秒。它们跑在画帧那条线程上的话，窗口就是一块
 //! 白板：期间切不了屏、滚不动列表、连「停下」都点不着。所以它们统统搬到画帧线程之外，
 //! 这一屏是那件事在界面上的落点。
@@ -106,7 +106,7 @@ pub enum Product {
     /// **它要写两份库**（沉淀库那些成员关系、中立库那份投影），所以与
     /// [`Synced`](Self::Synced) 同一条：产物交回来，由认领它的那一屏落库
     /// （`browse::Screen::settle_collection`）。装箱是因为它带着整批的锚——
-    /// 真库上「全选 46,483 行 → ★ 收藏」那一下就是四万多条。
+    /// 真库上「全选四万多行 → ★ 收藏」那一下就是四万多条（见台账 `docs/library-facts.md`）。
     Planned(Box<collection::Plan>),
     /// 算了一遍**开着铺媒体时这一趟导出最多要铺多少**：几份、共多少字节
     /// （库屏工序段导出那一支，票 `one-criterion-per-thing/09`）。
@@ -613,16 +613,12 @@ fn text_width(ui: &egui::Ui, text: impl Into<egui::WidgetText>, style: &egui::Te
         .x
 }
 
-/// 一块的小标题：设计稿 `.sec`（说明字号、弱字色，同 [`look::section`]），行高照稿；底下空出
+/// 一块的小标题：设计稿 `.sec`（就是 [`look::section`] 那一段字），行高照稿；底下空出
 /// `section-title-gap` 再摆那一块（设计稿 `.col` 的 `gap:8px`）。
 fn section(ui: &mut egui::Ui, title: &str) {
     let tokens = Tokens::builtin();
-    ui.label(
-        egui::RichText::new(title)
-            .small()
-            .weak()
-            .line_height(lh(tokens.font.size_small)),
-    );
+    let 字 = look::section_text(ui, title).line_height(lh(tokens.font.size_small));
+    ui.label(字);
     ui.add_space(tokens.space.section_title_gap);
 }
 

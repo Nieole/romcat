@@ -545,12 +545,18 @@ impl Wizard {
                         thousands(row.variants.len() as u64),
                         row.tier.label(),
                     );
-                    if look::radio_option(ui, 是保留, &row.title, &一句).clicked() && 当得了
-                    {
+                    // **「保留」那枚标签紧跟在作品名后头**（稿上 `.mwit` 的 `<b>作品名</b>` 后头就是 `.keepb`，
+                    // 挂单 `Q1015`）：摆在整块后头的话，它离名字隔着整句说明那么远、落在两行之间。
+                    let 点了 = look::radio_option_with(ui, 是保留, &row.title, &一句, |ui| {
+                        if 是保留 {
+                            table::tag(ui, "保留");
+                        } else {
+                            // 没挂标签的那几行也留出标签那么高：不然保留那一行比别的行高出一截，几张卡高矮不齐。
+                            ui.allocate_space(egui::vec2(0.0, Tokens::builtin().layout.tag_height));
+                        }
+                    });
+                    if 点了.clicked() && 当得了 {
                         换保留 = Some(at);
-                    }
-                    if 是保留 {
-                        table::tag(ui, "保留");
                     }
                     if !当得了 {
                         look::help(ui, "还没认出作品，当不了保留的那一个");
@@ -737,10 +743,10 @@ impl Wizard {
                             // 光秃秃的小方块是个很小的靶子，而这一步正是要人逐个点过去。
                             // **保留作品自己的变体勾不掉**：它们本来就在那儿，这一层不是删东西的地方。
                             if ui
-                                .add_enabled(
-                                    !自带,
-                                    egui::Checkbox::new(&mut 勾着, font::strong(&variant.short)),
-                                )
+                                .add_enabled_ui(!自带, |ui| {
+                                    look::checkbox(ui, &mut 勾着, font::strong(&variant.short))
+                                })
+                                .inner
                                 .on_disabled_hover_text(merge::ALREADY_HELD)
                                 .changed()
                             {
@@ -768,7 +774,8 @@ impl Wizard {
                         列(ui, 首选宽, &mut |ui| {
                             let 是首选 = 首选.as_deref() == Some(variant.key.as_str());
                             if ui
-                                .add_enabled(勾着, egui::RadioButton::new(是首选, "首选"))
+                                .add_enabled_ui(勾着, |ui| look::radio(ui, 是首选, "首选"))
+                                .inner
                                 .on_disabled_hover_text(NO_PREFER)
                                 .clicked()
                             {
@@ -900,7 +907,7 @@ impl Wizard {
         }
 
         ui.add_space(look::step(2));
-        ui.checkbox(&mut self.alias, "把被合并作品的名称保留为别名");
+        look::checkbox(ui, &mut self.alias, "把被合并作品的名称保留为别名");
         // **说清留的是哪几个名字**（Spec 轴挑出）：留的是**一个变体都不剩**的那几个
         // （核心库 `Impact::emptied`）。第二步取消掉某个变体、那个作品还剩变体时，
         // 它照旧在浏览列表里、名字就是它自己，不必记成别人的别名——但屏上得说出来，
@@ -919,7 +926,8 @@ impl Wizard {
         // **「以后扫描到的也自动归入」画成不可选**，并写明原因与眼下的走法（票面 ⚠️ 第二条）。
         let mut 永不 = false;
         ui.add_enabled_ui(false, |ui| {
-            ui.checkbox(
+            look::checkbox(
+                ui,
                 &mut 永不,
                 format!("以后扫描到被识别为这些作品的变体，也自动归入「{keep}」"),
             );

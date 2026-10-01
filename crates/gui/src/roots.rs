@@ -30,7 +30,7 @@
 //!
 //! ## 长活一律排到任务台上
 //!
-//! 扫一趟真库 **37.1 分钟**，取一趟 DAT 是几百 MB 的下载。它们跑在画帧那条线程上的话
+//! 扫一趟真库要**半个小时上下**（见台账 `docs/library-facts.md`），取一趟 DAT 是几百 MB 的下载。它们跑在画帧那条线程上的话
 //! 窗口就是一块白板。所以这一屏一个长活都不自己跑，全排到 [`Tasks`] 上——
 //! 与子库屏排差量预览走的是同一条路。
 //!
@@ -140,9 +140,12 @@ const ROOT_PATH_ROWS: usize = 2;
 /// 屏头那颗按钮上写的字：弹系统的选目录窗口，选中的加成一个根（`Screen::picked_root`）。
 pub const ADD_ROOT: &str = "添加根…";
 
-/// 库屏两栏里左边（工序）占多少：设计稿 `.libgrid` 是 `1.25fr : 1fr`。**设计稿不给断点**，
-/// 窗口窄了两栏一起收窄，不叠成一栏。
-const LEFT_SHARE: f32 = 1.25 / 2.25;
+/// 库屏两栏里左边（工序）那一栏多宽：两栏分掉 `宽` 减去中间那一道 `缝` 之后的地方，比例取令牌 `library-columns`
+/// （设计稿 `.libgrid` 是 `1.25fr : 1fr`，挂单 `Q824`）。**设计稿不给断点**，窗口窄了两栏一起收窄，不叠成一栏。
+fn 左栏宽(宽: f32, 缝: f32, 版式: &crate::tokens::Layout) -> f32 {
+    let [左份, 右份] = 版式.library_columns;
+    (宽 - 缝) * (左份 / (左份 + 右份))
+}
 
 /// 「移除根」那一层里**逐条说明代价**那一张单子（设计稿 `ul.impact`）。
 ///
@@ -535,7 +538,8 @@ impl Screen {
                 removal_impact_ui(ui, &impact);
                 ui.add_space(look::step(2));
                 // 勾上才按得动那一格（设计稿 `label.opt`）：说的数与第一条里那个是同一个。
-                ui.checkbox(
+                look::checkbox(
+                    ui,
                     &mut agreed,
                     format!("我知道这会从库中去掉 {} 个变体", thousands(impact.variants)),
                 );
@@ -877,7 +881,7 @@ impl Screen {
 
         // 两栏（设计稿 `.libgrid`）：左边工序段，右边根、数据源、导出设置三块。
         ui.horizontal_top(|ui| {
-            let 左宽 = (ui.available_width() - 间距) * LEFT_SHARE;
+            let 左宽 = 左栏宽(ui.available_width(), 间距, &Tokens::builtin().layout);
             ui.vertical(|ui| {
                 ui.set_width(左宽);
                 // 左边那一整张卡（设计稿 `#stages-panel`）：卡里头的几块各自铺满卡宽、自己垫内边距（`stages::Section::ui`）。
@@ -1841,4 +1845,26 @@ fn widest(ui: &egui::Ui, 那几段: impl IntoIterator<Item = egui::WidgetText>) 
                 .x
         })
         .fold(0.0, f32::max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 库屏两栏的比例取令牌_改比例左栏跟着变() {
+        // 挂单 `Q824`：比例从前是界面里一个常量，现在进令牌。设计稿 `.libgrid` 是
+        // `minmax(0,1.25fr) minmax(0,1fr)`，两栏之间隔 `library-gap`。
+        let 令牌 = Tokens::builtin();
+        assert_eq!(令牌.layout.library_columns, [1.25, 1.0], "设计稿 .libgrid");
+        // 1018 宽、隔 18：两栏分那 1000，左边占 1.25 / 2.25。
+        assert!((左栏宽(1018.0, 18.0, &令牌.layout) - 555.555_6).abs() < 0.01);
+
+        let mut 改过 = 令牌.clone();
+        改过.layout.library_columns = [1.0, 1.0];
+        assert!(
+            (左栏宽(1018.0, 18.0, &改过.layout) - 500.0).abs() < 0.01,
+            "改成一比一，左栏跟着变成一半"
+        );
+    }
 }

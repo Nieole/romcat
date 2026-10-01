@@ -49,9 +49,9 @@ use romcat_core::task::{Cutoff, Ending, Finished, Handle};
 use romcat_core::{verdict, workspace, zh};
 
 use crate::dialog::{Button, Dialog, Footer, Width};
-use crate::font;
 use crate::priority::Editor;
 use crate::task::{Product, Tasks};
+use crate::{font, look};
 
 /// 面板上那句常驻的话。**行为上也成立**，不只是写着好看：
 /// 裁决排在每条优先级链的第一位，重采清采集记录时一条裁决都不删。
@@ -592,13 +592,12 @@ impl Panel {
         ui.label(font::strong("字段 · 我要什么"));
         for field in KNOBS {
             let mut on = self.fields.contains(&field);
-            if ui.checkbox(&mut on, field.label()).changed() {
+            if look::checkbox(ui, &mut on, field.label()).changed() {
                 self.toggle_field(field);
             }
         }
         let mut media = self.media;
-        if ui
-            .checkbox(&mut media, "媒体（封面、截图、视频）")
+        if look::checkbox(ui, &mut media, "媒体（封面、截图、视频）")
             .on_hover_text(
                 "本地那一半要回主库把图读一遍（真库上 539 份、71 秒，第二趟哈希从中立库\
                  取回）；联网那一半每份图各花一个请求。",
@@ -618,14 +617,14 @@ impl Panel {
     fn sources_ui(&mut self, ui: &mut egui::Ui) {
         ui.label(font::strong("源 · 花多少代价"));
         let mut local = true;
-        ui.add_enabled(false, egui::Checkbox::new(&mut local, "本地源"))
+        ui.add_enabled_ui(false, |ui| look::checkbox(ui, &mut local, "本地源"))
+            .inner
             .on_hover_text(
                 "DAT、文件名、中文离线源、本地媒体。免费——一个网络请求都不发，\
                  也关不掉：它们不花任何配额，关掉只会让联网那一侧多背几个字段。",
             );
         let mut online = self.online;
-        if ui
-            .checkbox(&mut online, "ScreenScraper（联网 · 扣配额）")
+        if look::checkbox(ui, &mut online, "ScreenScraper（联网 · 扣配额）")
             .on_hover_text(QUOTA_WARNING)
             .changed()
         {
@@ -640,15 +639,8 @@ impl Panel {
     fn sweep_ui(&mut self, ui: &mut egui::Ui) {
         ui.label(font::strong("采法 · 跑多久"));
         for sweep in Gather::all() {
-            if ui
-                .radio(
-                    self.sweep == sweep,
-                    format!("{}（{}）", sweep.label(), sweep.why()),
-                )
-                .clicked()
-            {
-                self.sweep = sweep;
-            }
+            let 那一档 = format!("{}（{}）", sweep.label(), sweep.why());
+            look::radio_value(ui, &mut self.sweep, sweep, 那一档);
         }
         ui.weak(NOT_BY_RESCRAPE).on_hover_text(
             "每个源采到的值各记一条、并存，没有覆盖这回事。\

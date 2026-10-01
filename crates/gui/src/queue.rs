@@ -2,7 +2,8 @@
 //!
 //! ## 为什么是批而不是表
 //!
-//! 真机上待裁决 18,241 个变体，按 5 秒一条算是 **25 小时**——逐条不是可行路径。
+//! 真机上待裁决近两万个变体（台账没收这个数，出处见票 `queue-followups/09`），按 5 秒一条算是**一天多**
+//! ——逐条不是可行路径。
 //! 但其中八成只有**一个候选**：那不是「选哪个」，是「**对不对**」，而「对不对」
 //! 可以按批回答。于是这一屏的正文是**工具已经分好的几十批**，每张卡片上常驻三样：
 //!
@@ -2270,7 +2271,7 @@ impl Screen {
                 look::section(ui, "按识别结论");
                 ui.horizontal_wrapped(|ui| {
                     for (at, state) in State::ALL.iter().enumerate() {
-                        ui.checkbox(&mut self.picks.states[at], state.label());
+                        look::checkbox(ui, &mut self.picks.states[at], state.label());
                     }
                 });
                 for axis in Axis::ALL {
@@ -2336,15 +2337,14 @@ impl Screen {
     /// 「手工指定…」那一层里的表单：只裁选中的这一条、裁成哪一种、作品与那几样事实、备注。
     /// **这里的每一个文本框都会碰到输入法**，它们全在弹层里（ADR-0005）。
     fn form_ui(&mut self, ui: &mut egui::Ui) {
-        ui.checkbox(&mut self.only_picked, "只裁选中的这一条")
-            .on_hover_text(
-                "「采用第 N 条候选」天生是逐条的动作：同一批里各人的候选不是同一部游戏。",
-            );
+        look::checkbox(ui, &mut self.only_picked, "只裁选中的这一条").on_hover_text(
+            "「采用第 N 条候选」天生是逐条的动作：同一批里各人的候选不是同一部游戏。",
+        );
         ui.scope(|ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(font::strong("裁成"));
                 for how in How::ALL {
-                    ui.radio_value(&mut self.form.how, how, how.label());
+                    look::radio_value(ui, &mut self.form.how, how, how.label());
                 }
             });
             if self.form.how == How::Pick {
@@ -2369,9 +2369,14 @@ impl Screen {
                     ui.label("中文身份");
                     ui.add_enabled_ui(facts, |ui| {
                         ui.horizontal(|ui| {
-                            ui.radio_value(&mut self.form.chinese, None, "不记");
+                            look::radio_value(ui, &mut self.form.chinese, None, "不记");
                             for mark in [ChineseMark::FanTranslated, ChineseMark::Official] {
-                                ui.radio_value(&mut self.form.chinese, Some(mark), mark.label());
+                                look::radio_value(
+                                    ui,
+                                    &mut self.form.chinese,
+                                    Some(mark),
+                                    mark.label(),
+                                );
                             }
                         });
                     });
@@ -3396,7 +3401,7 @@ struct MatchJudged {
 
 /// 正文头上那三格（设计稿 `.qsum`）：前几批可直接批量处理的、有多个候选的、没有候选的。
 ///
-/// 这三个数是这一屏存在的理由本身：18,241 条按 5 秒一条是 25 小时，而**前几批一次就能处理掉一大截**。**数全是核心库算的**
+/// 这三个数是这一屏存在的理由本身：近两万条按 5 秒一条是一天多，而**前几批一次就能处理掉一大截**。**数全是核心库算的**
 /// （[`romcat_core::triage::batch::coverage`]；头一格与库屏工序段裁决那一行「前 N 批可一次处理 N 个」是同一个数），这里只摆
 /// ——界面只画和转发（ADR-0005）。头一格描强调色（设计稿 `.qcell.lead`：一道描边加一道内描边）。
 fn summary_cells(ui: &mut egui::Ui, 账: &Coverage) {
