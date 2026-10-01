@@ -75,8 +75,8 @@
 //!
 //! ## 三条长活全走任务台
 //!
-//! 这一屏上会跑一会儿的有三条：**排差量预览**（真机量级 343 毫秒）、**算一遍容量**
-//! （同一趟全库事实，343 毫秒）、**同步**（几十 GiB、可能几十分钟）。三条都跑在画帧
+//! 这一屏上会跑一会儿的有三条：**排差量预览**（真机量级三百多毫秒，挂账 D156）、**算一遍容量**
+//! （同一趟全库事实，也是三百多毫秒）、**同步**（几十 GiB、可能几十分钟）。三条都跑在画帧
 //! 那条线程之外，而且都走同一张[任务台](crate::task)——点那三个按钮等于各往台上排一趟活，
 //! 跑完了台上按号把产物交回来（[`Screen::settle`]）。于是规格里那句「扫描、识别、刮削、
 //! 同步统一排队，一处看得见」在这一屏上是真的：名字、进度、已用时间、按得停、跑完那条
@@ -184,6 +184,34 @@ const NOFIT_HELP: &str = "这些文件这一趟不会复制：落点撞车、超
 /// 备注是这一条的「为什么」：半年后在例外那张表上看见它，读得出这条排除不是口味，
 /// 是撞车时替另一份让的路。
 const CLASH_NOTE: &str = "落点撞车，保留另一份";
+
+/// 「被修改过」那一栏底下那颗按钮上的字：词表**收回清单**，后面一个省略号——按下去先问一层。
+///
+/// **不照设计稿写「以设备上的版本为准，更新清单」**（拿主意的人 2026-09-23 裁的是做「收回清单」这一样，
+/// 挂单 `Q1022`）：「更新」在这一屏上已经是差量里重传那一档的名字（`Act::Update`，就摆在上面那一排），并着摆，
+/// 人会读成「把它们更新一遍」——收回恰恰是**不**重传；「版本」在屏上已经是作品详情页那一格（词表**第几版**，
+/// 它的 `_Avoid_` 里正有「版本」），拿它指「设备上那一份」是同一个字眼两样东西。挂单 `Q1618` 记着这个岔路口。
+pub const TAKE_BACK_BUTTON: &str = "收回清单…";
+
+/// 那层确认弹层上点头那一颗的字。
+pub const TAKE_BACK_CONFIRM: &str = "收回清单";
+
+/// 同步还在台上时按「收回清单…」说的那句。**这是界面这一层的拒绝**（ADR-0005 那条「不禁按钮、点了要说话」）：
+/// 台上那一趟收回来时照排它那一刻的清单把清单整份记一遍（`sync::execute` 的 `rebuild`），这时收回的会被它盖掉。
+/// 两个入口（[`Screen::ask_take_back`]、[`Screen::take_back`]）说的都是这一句。
+const TAKE_BACK_WHILE_SYNCING: &str = "同步正在台上：它跑完会照排它那一刻的清单把清单整份记一遍，现在收回的会被它盖掉。\
+     等它跑完、重新排一趟差量预览再收回。";
+
+/// 「收回清单」那层确认弹层要说的东西，**按下去那一刻照核心算好**（[`Screen::ask_take_back`]）。
+///
+/// 弹层开着时每一帧都要画它；每一帧重算一遍就得整份复制一次清单（`Manifest::take_back`）。
+#[derive(Debug, Clone)]
+struct TakeBackAsk {
+    /// 收回的是哪一台。
+    name: String,
+    /// 哪几份：核心照那份差量与库里眼下那份清单算出来的（`Manifest::take_back`），每份带着选择集还要不要它。
+    files: Vec<sync::TakenFile>,
+}
 
 /// 差量预览里**异常**那一块摆着的是哪一栏（设计稿 `ANOM` 那一排 tab）。
 ///
@@ -592,7 +620,7 @@ pub struct Screen {
     steps_drawn: usize,
     /// 每台设备各求一次**选择集**的结果：选中哪些、多大、超限多少、砍谁。
     ///
-    /// **一趟折一次事实，全部子库共用**——折事实是走一遍全库（343 ms，挂账 D156），
+    /// **一趟折一次事实，全部子库共用**——折事实是走一遍全库（三百多毫秒，挂账 D156），
     /// 而按选择集求值是内存里的事。一台一折的话，五张卡就是五趟全库。
     /// 整趟活在核心里（`sublibrary::survey`），于是屏上摆着的与 `romcat sublibrary show`
     /// 印出来的是同一个值。
@@ -616,6 +644,11 @@ pub struct Screen {
     delete_dialog: Option<String>,
     /// 规则行上「×」那层确认弹层开着时，移除的是哪一台的第几条规则（[`Self::ask_remove_rule`]）。
     rule_dialog: Option<(String, i64)>,
+    /// 「被修改过」那一栏上按了「收回清单…」：那层确认弹层开着时要收回哪一台的哪几份（[`Self::ask_take_back`]）。
+    ///
+    /// **收回清单扩的是工具在目标设备上的行为边界**（ADR-0015）：收回之后工具有权更新或删除那几份。所以按下去
+    /// 先问一层，说清是哪几份、意味着什么；取消就什么都不写。
+    take_back_dialog: Option<TakeBackAsk>,
     /// 「手动例外」那层弹层开着时手上那点东西（[`Self::open_exceptions`]，票 `gui-looks-like-the-design/22`）。
     exceptions: Option<Exceptions>,
     /// 例外那张表「时间」一列怎么画（[`RecordClock`]）：本地短格式；截图测试钉死此刻、偏移
@@ -678,6 +711,7 @@ impl Screen {
             jump: None,
             delete_dialog: None,
             rule_dialog: None,
+            take_back_dialog: None,
             exceptions: None,
             exception_clock: RecordClock::default(),
             touched: None,
@@ -1192,7 +1226,7 @@ impl Screen {
     /// `romcat sublibrary show` 印出来的是同一个值。容量超限时**只给建议，一个都不砍**
     /// （ADR-0016）。
     ///
-    /// **它原先跑在画帧那条线程上**：真机量级上按一下窗口僵 343 毫秒，期间连「停下」
+    /// **它原先跑在画帧那条线程上**：真机量级上按一下窗口僵三百多毫秒，期间连「停下」
     /// 都没有（挂单 Q87、挂账 D156）。搬上任务台之后进度看得见、停得动，而它整条只读，
     /// 所以停在哪儿都是干净的——一个字节都没写，再算一次就是。
     ///
@@ -1700,6 +1734,7 @@ impl Screen {
         // 「删除子库」那层确认弹层同一个路子；删掉之后底边那条提示条盖在最上面（[`crate::toast`]）。
         self.delete_dialog_ui(&ctx, site);
         self.rule_dialog_ui(&ctx, site);
+        self.take_back_dialog_ui(&ctx, site, tasks);
         self.exceptions_dialog_ui(&ctx, site, tasks);
         self.toast_ui(&ctx, site);
     }
@@ -2980,6 +3015,9 @@ impl Screen {
                 thousands((rows.len() - ANOMALY_ROWS) as u64)
             ));
         }
+        if kind == SurpriseKind::Changed && !rows.is_empty() {
+            self.take_back_ui(ui, site);
+        }
         if kind == SurpriseKind::Gone {
             // **上一趟就记着不补的那一批也在这一栏底下说一句。** 它们刻意不进
             // [对不上的那一堆](romcat_core::sync::Plan::surprises)（上一趟已经报过一次了），
@@ -2994,6 +3032,29 @@ impl Screen {
                 );
             }
             self.restore_ui(ui, site, tasks, plan.restorable);
+        }
+    }
+
+    /// 「被修改过」那一栏底下那一行：一颗「**收回清单…**」，旁边一句收回之后会怎样（设计稿 `mod` 那一栏的 `.row`）。
+    ///
+    /// 按下去**先问一层**（[`Self::ask_take_back`]）：收回清单扩的是工具在目标设备上的行为边界（ADR-0015）。
+    /// **不画灰**：同步还在台上时照样按得下，按了说为什么不行（[`TAKE_BACK_WHILE_SYNCING`]，ADR-0005）。
+    fn take_back_ui(&mut self, ui: &mut egui::Ui, site: &Site) {
+        ui.add_space(step(2));
+        let pressed = ui
+            .horizontal(|ui| {
+                let pressed = look::small_buttons(ui, |ui| ui.button(TAKE_BACK_BUTTON))
+                    .on_hover_text(
+                        "把设备上这几份记回清单：之后不再提示它们，工具此后有权更新或删除它们。\
+                         按下去先问一层。",
+                    )
+                    .clicked();
+                look::help(ui, "收回之后不再提示这些文件");
+                pressed
+            })
+            .inner;
+        if pressed {
+            self.ask_take_back(site);
         }
     }
 
@@ -4179,6 +4240,179 @@ impl Screen {
                 }
                 self.remove(site);
             }
+        }
+    }
+
+    /// 「被修改过」那一栏上按「**收回清单…**」：照眼下这份差量与库里**眼下那份清单**算出能收回哪几份（核心
+    /// `Manifest::take_back`，界面不另判；点头时 `Site::take_back_into_manifest` 照同一份清单再算一遍），打开那层
+    /// 确认弹层。同步还在台上、或者一份都收不了时不开，屏上说为什么。界面上按那颗按钮走的就是它，测试拿它当那一下。
+    pub fn ask_take_back(&mut self, site: &Site) {
+        if self.syncing.is_some() {
+            self.error = Some(TAKE_BACK_WHILE_SYNCING.to_string());
+            return;
+        }
+        let Some(prepared) = &self.prepared else {
+            return;
+        };
+        let name = prepared.sublibrary.name.clone();
+        let manifest = match site.catalog.manifest(&name) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                self.error = Some(format!("中立库读不动：{error}"));
+                return;
+            }
+        };
+        let (_, files) = manifest.take_back(&prepared.plan.surprises);
+        if files.is_empty() {
+            self.notice = Some(sync::NOTHING_TO_TAKE_BACK.to_string());
+            return;
+        }
+        self.take_back_dialog = Some(TakeBackAsk { name, files });
+    }
+
+    /// 「收回清单」那层确认弹层开着没有。
+    #[must_use]
+    pub fn take_back_dialog_open(&self) -> bool {
+        self.take_back_dialog.is_some()
+    }
+
+    /// 「收回清单」那层弹层上**点头**：把那几份记回清单、在沉淀库里记一笔审计（谁、何时、哪几份），由核心一处做
+    /// （`Site::take_back_into_manifest`）。**设备上与主库里的文件一个字节都不动。**
+    ///
+    /// 收回之后**那份差量当场作废、重排一趟**（与「补回」那一格 [`Self::set_restore_missing`] 同一个做法）：
+    /// 它说的是收回之前那份清单，而「同步」认的正是它——照它同步一趟，收回来的清单会把刚收回的那几份
+    /// 又记回旧的样子。界面上按那颗按钮走的就是它，测试拿它当那一下。
+    pub fn take_back(&mut self, site: &mut Site, tasks: &mut Tasks) {
+        let Some(ask) = self.take_back_dialog.take() else {
+            return;
+        };
+        if self.syncing.is_some() {
+            self.error = Some(TAKE_BACK_WHILE_SYNCING.to_string());
+            return;
+        }
+        let Some(prepared) = self
+            .prepared
+            .as_ref()
+            .filter(|prepared| prepared.sublibrary.name == ask.name)
+        else {
+            self.notice = Some("那份差量已经作废了：重新排一趟差量预览再收回。".to_string());
+            return;
+        };
+        match site.take_back_into_manifest(
+            &ask.name,
+            &prepared.plan.surprises,
+            &romcat_core::verdict::account(),
+        ) {
+            Ok(Some(record)) => {
+                self.undo = None;
+                self.saved = Some(Toast::new(format!(
+                    "已把 {} 个文件收回「{}」的清单，之后不再提示它们。差量预览正在重排。",
+                    thousands(record.files.len() as u64),
+                    ask.name,
+                )));
+                self.invalidate();
+                self.preview(site, tasks);
+            }
+            Ok(None) => self.notice = Some(sync::NOTHING_TO_TAKE_BACK.to_string()),
+            Err(error) => self.error = Some(format!("收回清单没写成：{error}")),
+        }
+    }
+
+    /// 「**收回清单**」那层确认弹层：写清是哪一台的哪几份（每份清单记的与设备上的各多大）、收回意味着工具此后
+    /// 有权更新或删除它们（选择集已经不要的那几份下一趟就会删掉）、这一下要在沉淀库里记一笔审计；设备上的文件
+    /// 与主库不动。按「收回清单」才真收（[`Self::take_back`]），按「取消」什么都不写。
+    fn take_back_dialog_ui(&mut self, ctx: &egui::Context, site: &mut Site, tasks: &mut Tasks) {
+        /// 页脚上按下去的是哪一颗。
+        enum Pressed {
+            /// 「取消」。
+            Cancel,
+            /// 「收回清单」。
+            TakeBack,
+        }
+        let Some(ask) = &self.take_back_dialog else {
+            return;
+        };
+        let footer = Footer::new(Button::new("取消", Pressed::Cancel)).button(
+            Button::new(TAKE_BACK_CONFIRM, Pressed::TakeBack)
+                .primary()
+                .hover(
+                    "只改这一台的清单，并在沉淀库里记一笔审计；设备上的文件与主库一个字节都不动。",
+                ),
+        );
+        let tokens = Tokens::builtin();
+        let shown = Dialog::new(
+            "收回清单",
+            format!(
+                "把 {} 个被修改过的文件收回「{}」的清单",
+                thousands(ask.files.len() as u64),
+                ask.name,
+            ),
+            footer,
+        )
+        .width(Width::Narrow)
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new("要收回的是这几份（清单原先记的 → 设备上眼下的）：")
+                    .size(look::font_size(ui.ctx(), tokens.font.size_small_plus)),
+            );
+            for file in &ask.files {
+                ui.horizontal(|ui| {
+                    ui.label(font::mono(&file.path).size(tokens.font.size_small));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        look::help(
+                            ui,
+                            &if file.was.bytes == file.now.bytes {
+                                "修改时间变了".to_string()
+                            } else {
+                                format!(
+                                    "{} → {}",
+                                    human_bytes(file.was.bytes),
+                                    human_bytes(file.now.bytes)
+                                )
+                            },
+                        );
+                    });
+                });
+            }
+            ui.add_space(step(2));
+            let 不再列进 = format!(
+                "收回之后清单记下设备上眼下这一份，差量预览不再把它们列进「{}」。",
+                SurpriseKind::Changed.shown()
+            );
+            look::impact(ui, &[(不再列进.as_str(), false)]);
+            look::impact_warn(
+                ui,
+                &[
+                    ("工具此后有权更新或删除它们", true),
+                    ("：主库那一份变了就用它覆盖，选择集不要了就删掉。", false),
+                ],
+            );
+            let 不要了 = ask.files.iter().filter(|file| !file.still_wanted).count();
+            if 不要了 > 0 {
+                look::impact_warn(
+                    ui,
+                    &[(
+                        &format!(
+                            "其中 {} 份选择集已经不要了：收回之后下一趟同步会删掉它们。",
+                            thousands(不要了 as u64)
+                        ),
+                        false,
+                    )],
+                );
+            }
+            look::impact(
+                ui,
+                &[(
+                    "这一下只改清单，并在沉淀库里记一笔审计（谁、何时、哪几份）；\
+                     设备上的文件与主库一个字节都不动。",
+                    false,
+                )],
+            );
+        });
+        match shown.pressed {
+            None => {}
+            Some(Pressed::Cancel) => self.take_back_dialog = None,
+            Some(Pressed::TakeBack) => self.take_back(site, tasks),
         }
     }
 

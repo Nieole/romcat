@@ -449,7 +449,7 @@ fn 开得了(
     }
 }
 
-/// **有库**：两份开得了的，一份结构版本对不上的。规模照真库（46,444 个变体，
+/// **有库**：两份开得了的，一份结构版本对不上的。规模照真库（四万多个变体，见台账
 /// `docs/library-facts.md`）。次序照核心库排好的交（上次扫描倒排，说不上来的垫底）。
 fn 有库(工作目录: &Path) -> Listing {
     let 旧库 = 工作目录
@@ -3679,6 +3679,55 @@ fn 子库_差量异常_放不进目标_暗色() {
     );
 }
 
+#[test]
+fn 子库_差量异常_被修改过_浅色() {
+    拍差量异常(
+        "sublibrary/anomalies-changed-light",
+        Theme::Light,
+        romcat_gui::sublibrary::Anomaly::Surprise(romcat_core::sync::SurpriseKind::Changed),
+    );
+}
+
+#[test]
+fn 子库_差量异常_被修改过_暗色() {
+    拍差量异常(
+        "sublibrary/anomalies-changed-dark",
+        Theme::Dark,
+        romcat_gui::sublibrary::Anomaly::Surprise(romcat_core::sync::SurpriseKind::Changed),
+    );
+}
+
+/// **收回清单那层确认弹层**（票 `verdict-store-and-sync/08`）：差量异常那一台停在「被修改过」那一栏上，按「收回清单…」。
+/// 画面与那几对同高（[`差量那几对的画面`]）：按钮在卡片下半截，800 高的画面里按不着它。
+fn 拍收回清单弹层(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 摆着异常的一台();
+    现场
+        .app
+        .sublibrary_and_site()
+        .0
+        .show_anomaly(romcat_gui::sublibrary::Anomaly::Surprise(
+            romcat_core::sync::SurpriseKind::Changed,
+        ));
+    let mut harness = 开一扇(主题, 差量那几对的画面, move |ui| {
+        现场.app.ui(ui);
+    });
+    按(&mut harness, romcat_gui::sublibrary::TAKE_BACK_BUTTON);
+    拍下(harness, 名字);
+}
+
+#[test]
+fn 子库_收回清单弹层_浅色() {
+    拍收回清单弹层("sublibrary/take-back-light", Theme::Light);
+}
+
+#[test]
+fn 子库_收回清单弹层_暗色() {
+    拍收回清单弹层("sublibrary/take-back-dark", Theme::Dark);
+}
+
 // ——— 任务屏（票 `gui-looks-like-the-design/25`）———
 //
 // **这一段垫的是合成数据（`demo` 模块），只在 `demo` 特性下编**：截图照正式构建跑时（不开 `demo`）
@@ -3753,8 +3802,8 @@ fn 摆上四档收场(app: &mut App) {
 
 /// 台上有一趟在跑、后面排着一趟时拍一张。
 ///
-/// 跑着的那一趟是共享夹具的占位活：报完进度（四步走到第二步、这一步走了 96,064 / 256,128 件，
-/// 即 34%）就停在那儿等信号，**等它报完再开窗**，不数挂钟。台上有活时主窗口每一帧都请求下一帧，
+/// 跑着的那一趟是共享夹具的占位活：报完进度（四步走到第二步、这一步走了三成多——总件数照真库的文件数，
+/// 见台账 `docs/library-facts.md`）就停在那儿等信号，**等它报完再开窗**，不数挂钟。台上有活时主窗口每一帧都请求下一帧，
 /// 跑不到「不要重画」，于是数帧：头两帧装字体与观感（[`搭一个`]），再跑几帧让历史表与卡片的列宽
 /// 摆稳；这一屏上没有会动的东西（进度条是走了几成的那种）。
 #[cfg(feature = "demo")]

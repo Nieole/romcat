@@ -19,7 +19,7 @@ use crate::catalog::{Catalog, CatalogError, TitleRow};
 use crate::path;
 use crate::scrape::priority::VERDICT;
 use crate::scrape::{AnchorKind, Field};
-use crate::verdict::{Store, VerdictError};
+use crate::verdict::{Store, TakeBack, VerdictError};
 use crate::workspace::{self, Slug};
 
 /// 开不出这份现场的原因。
@@ -343,6 +343,50 @@ impl Site {
         Ok(stored || projected)
     }
 
+    /// **收回清单**（`CONTEXT.md`）：把 `sublibrary` 这一台差量预览里**被修改过**的那几份记回它的清单，
+    /// 此后工具有权更新或删除它们；连同一笔审计（谁、何时、哪几份）记进沉淀库。交回那一笔；一份都收不了
+    /// （没有被修改过的，或者清单在预览之后又变过，[`Manifest::take_back`](crate::sync::Manifest::take_back)）
+    /// 时是 `None`，**两份库一个字都不写**。界面上「被修改过」那一栏点头之后走的就是它。
+    ///
+    /// `surprises` 是人按下去时看着的那份差量里的异常（[`Plan::surprises`](crate::sync::Plan::surprises)）；
+    /// `who` 是审计里「谁」那一格，界面填的是 [`verdict::account`](crate::verdict::account)。
+    ///
+    /// **只改清单与审计**：设备上与主库里的文件一个字节都不碰（ADR-0004、ADR-0015）。
+    ///
+    /// ## 次序：先记审计，再改清单
+    ///
+    /// 两份库不在一个事务里。反过来的话，清单改了、审计没记下，就是一次**没有审计的扩权**——恰恰是这件事
+    /// 要留一笔的那个理由。所以先落沉淀库（与 [`Self::set_preferred_variant`] 同一个次序）；清单写不进去时
+    /// 那一笔收回没生效，审计里那一笔当场删回去，免得它说一句假话。
+    ///
+    /// # Errors
+    /// 读写两份库失败时返回错误；清单没写进去时审计里那一笔已经删回去了。
+    pub fn take_back_into_manifest(
+        &mut self,
+        sublibrary: &str,
+        surprises: &[crate::sync::Surprise],
+        who: &str,
+    ) -> Result<Option<TakeBack>, WriteError> {
+        let manifest = self.catalog.manifest(sublibrary)?;
+        let (taken_back, files) = manifest.take_back(surprises);
+        if files.is_empty() {
+            return Ok(None);
+        }
+        let record = TakeBack {
+            sublibrary: sublibrary.to_string(),
+            who: who.to_string(),
+            at: crate::catalog::now_secs(),
+            files,
+        };
+        let id = self.store.put_take_back(&self.library_identity, &record)?;
+        if let Err(error) = self.catalog.put_manifest(sublibrary, &taken_back) {
+            // 删不回去的话审计里多一笔没生效的：报的仍是清单那一句——人要先修的是中立库。
+            let _ = self.store.drop_take_back(id);
+            return Err(error.into());
+        }
+        Ok(Some(record))
+    }
+
     /// 一份**全在内存里**的现场。演示与实测走这条，连磁盘都不碰。
     #[must_use]
     pub fn in_memory(catalog: Catalog, store: Store, library_identity: &str) -> Self {
@@ -419,6 +463,10 @@ impl Site {
 ///
 /// **次序：先搬、再投影。** 反过来的话，头一次开一份旧库时投影照一份还空着的沉淀库重建，
 /// 旧行当场就被抹掉了。
+///
+/// **不是从中立库搬过来、而是新长出来的一样**只走第 1 步：**收回清单**的审计（票 `verdict-store-and-sync/08`）
+/// 键前面是主库标识、时刻叫 `decided_at`、导出不带；中立库里没有它的旧行可救，也没有哪张表是它的投影，
+/// 所以这里一行都不用加。
 ///
 /// # Errors
 /// 读写两份库失败时返回错误。

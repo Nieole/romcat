@@ -28,7 +28,7 @@
 //! 打开时把没跑过的接着跑完。**往前迁得动，往后（库比程序新）如实拒绝并说清**——
 //! 那时该换新程序，而不是删库。
 //!
-//! 眼下十三条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
+//! 眼下十四条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
 //! 第 3 条建 `verdict_batch` 与 `verdict_batch_row` 两张表（**批**，见下一节），
 //! 第 4 条建 `collection_member` 表（**合集**与**收藏**，见再下一节），
 //! 第 5 条建 `title_suppression` 表（**压掉的叫法**），
@@ -36,10 +36,11 @@
 //! 第 7 条把标题类型那两个旧词换掉，
 //! 第 8 条建 `platform_correction` 表（**平台纠正**），
 //! 第 9 条建 `not_same_work` 表（**「不是同一个作品」**），
-//! 第 10 条建 `preferred_variant` 与 `own_title` 两张表（**首选变体**与**亲手加的叫法**，见最后一节），
+//! 第 10 条建 `preferred_variant` 与 `own_title` 两张表（**首选变体**与**亲手加的叫法**，见倒数第二节），
 //! 第 11 条建 `verdict_value` 表（**详情页上改过的字段**，同一节），
 //! 第 12 条给 `verdict_batch` 加作用范围那几格（**就地落下的一部分**，见「批」那一节），
-//! 第 13 条给 `verdict` 加**修订**那一格（DAT 条目名里的 `(Rev 1)`，[`Facts::revision`]）。
+//! 第 13 条给 `verdict` 加**修订**那一格（DAT 条目名里的 `(Rev 1)`，[`Facts::revision`]），
+//! 第 14 条建 `manifest_take_back` 与 `manifest_take_back_file` 两张表（**收回清单**的审计，见最后一节）。
 //! 加这几条时库还是空的，但那不改变纪律——**永远不要求删库**，中立库那条「版本一变就
 //! 重建」的便宜路子在这份库上不许走。
 //!
@@ -234,6 +235,20 @@
 //! 中立库那张表的键（锚点种类、锚点、字段）——挂在作品上的与叫法同一个锚，挂在变体上的钉的是
 //! 变体的键、熬不过改名与挪目录；导出不带。人的动作走 `Site::put_verdict_value` /
 //! `Site::clear_verdict_value`，旧库里的救一次（[`carry_over_verdict_values`](crate::site::carry_over_verdict_values)）。
+//!
+//! ## **收回清单**的审计：谁、何时、哪几份
+//!
+//! 差量预览「被修改过」那一栏上，人可以把设备上那几份**收回清单**：清单记下设备上眼下那一份，工具此后
+//! 有权更新或删除它们（[`Manifest::take_back`](crate::sync::Manifest::take_back)）。这一下扩的是工具在
+//! 目标设备上的行为边界（ADR-0015），所以每一次都留一笔审计（[`TakeBack`]：谁、何时、哪几份）——它是人的
+//! 动作，重扫补不回来，所以住这里（拿主意的人 2026-09-23 定，挂单 `Q1022`，票 `verdict-store-and-sync/08`）。
+//! 第 14 条迁移建这两张表。
+//!
+//! 它照 [`site::reconcile`](crate::site::reconcile) 那一段「做法」的第一步走：**键前面是主库标识**、
+//! 时刻那一列叫 `decided_at`，**导出不带它**（子库名与卡上的路径只在本机这一份主库里成立）。后三步
+//! 没有它的事：它是新的一样，旧中立库里没有可搬的；清单也**不是**它的投影——清单住中立库、由同步与收回
+//! 两处写，这一笔只记「那一次收回了什么」。落库只有一处入口
+//! （[`Site::take_back_into_manifest`](crate::site::Site::take_back_into_manifest)）：先记这一笔，再改清单。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -244,6 +259,7 @@ use serde::{Deserialize, Serialize};
 use crate::catalog::scrape::VerdictValue;
 use crate::catalog::{TitleRow, now_secs};
 use crate::dat::chinese::ChineseMark;
+use crate::sync::{Stamp, TakenFile};
 
 /// 沉淀库跑到第几条迁移，也就是它的结构版本。
 ///
@@ -614,6 +630,45 @@ ALTER TABLE verdict_batch ADD COLUMN scope_kind  TEXT;
 -- 加这一列之前落下的裁决这一格是空的——那时没记，不猜着补。
 -- **卡带头与光盘头里读出来的版本号不进这一列**：它只是修订的一份证据，只进依据（挂单 `Q994`）。
 ALTER TABLE verdict ADD COLUMN revision TEXT;
+",
+    // 14：**收回清单的审计**（票 `verdict-store-and-sync/08`，挂单 `Q1022`）。差量预览「被修改过」那一栏上，
+    // 人把设备上那几份记回清单——工具此后有权更新或删除它们。这一下扩的是工具在目标设备上的行为边界，
+    // 所以每一次都留一笔：谁、何时、哪几份。
+    "\
+-- 一笔**收回清单**：这份主库上，`sublibrary` 那个子库的清单里有几份被记成了设备上眼下那一份。
+--
+-- **键前面是主库标识**（`library`）：子库与它的清单住在那份主库的中立库里，名字只在那份主库里认得。
+-- 与路径锚同一个处境——只在本机这一份主库里成立——所以**导出不带它**（`Store::export` 只折裁决与
+-- 匹配裁决两张表）。**只追加**：没有撤销，子库日后改名这一格也不跟着改——审计记的是当时的事。
+-- 唯一的例外是同一个动作里清单没写进去：那一笔没生效，当场删回去（`Store::drop_take_back`）。
+CREATE TABLE IF NOT EXISTS manifest_take_back(
+    id          INTEGER PRIMARY KEY,
+    library     TEXT    NOT NULL,
+    -- 收回那一刻那个子库叫什么。
+    sublibrary  TEXT    NOT NULL,
+    -- 谁：收回那一刻这台机器上登录的账户（`verdict::account`）。
+    who         TEXT    NOT NULL,
+    decided_at  INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS manifest_take_back_library ON manifest_take_back(library);
+
+-- 那一笔收回的一份。戳是大小加修改时间（`sync::Stamp`），修改时间取不到时为空：
+-- `was_*` 是清单原先记着的那个（工具当初放上去的那一份），没前缀的那两格是设备上那一份收回那一刻的戳
+-- ——清单此后记的就是它。光记路径说不出收回的是哪一份：同一条路径上，人日后再改一遍就是另一份了。
+CREATE TABLE IF NOT EXISTS manifest_take_back_file(
+    take_back    INTEGER NOT NULL REFERENCES manifest_take_back(id),
+    -- 相对子库根的路径，与清单里那一条同一个写法。
+    path         TEXT    NOT NULL,
+    was_bytes    INTEGER NOT NULL,
+    was_mtime_ns INTEGER,
+    bytes        INTEGER NOT NULL,
+    mtime_ns     INTEGER,
+    -- 收回那一刻选择集还要不要它（1 / 0）。不要了的那几份，收回之后下一趟同步就会删掉——收回放开的
+    -- 正是这一层权，查账的人要看得出来。
+    still_wanted INTEGER NOT NULL,
+    PRIMARY KEY (take_back, path)
+) STRICT;
 ",
 ];
 
@@ -2927,6 +2982,161 @@ impl Store {
         tx.commit().map_err(|source| self.err(source))?;
         Ok(added)
     }
+
+    // ── 收回清单的审计：谁、何时、哪几份（票 `verdict-store-and-sync/08`） ──
+
+    /// 记一笔**收回清单**，交回它在库里的号。一个事务：那一笔与它的每一份一起落下，或者一个字都不写。
+    ///
+    /// `library` 是**主库标识**：子库与它的清单住在那份主库的中立库里，名字只在那份主库里认得
+    /// （同 [`Self::platform_corrections`]）。**只记，不碰清单**——改清单的是
+    /// [`Site::take_back_into_manifest`](crate::site::Site::take_back_into_manifest)，它先记这一笔、再改清单。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn put_take_back(&mut self, library: &str, record: &TakeBack) -> Result<i64, VerdictError> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(|source| self.err(source))?;
+        tx.execute(
+            "INSERT INTO manifest_take_back(library, sublibrary, who, decided_at)
+             VALUES(?1, ?2, ?3, ?4)",
+            params![library, record.sublibrary, record.who, record.at],
+        )
+        .map_err(|source| self.err(source))?;
+        let id = tx.last_insert_rowid();
+        {
+            let mut statement = tx
+                .prepare(
+                    "INSERT INTO manifest_take_back_file(take_back, path, was_bytes, was_mtime_ns,
+                         bytes, mtime_ns, still_wanted)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                )
+                .map_err(|source| self.err(source))?;
+            for file in &record.files {
+                statement
+                    .execute(params![
+                        id,
+                        file.path,
+                        i64::try_from(file.was.bytes).unwrap_or(i64::MAX),
+                        file.was.mtime_ns,
+                        i64::try_from(file.now.bytes).unwrap_or(i64::MAX),
+                        file.now.mtime_ns,
+                        i64::from(file.still_wanted),
+                    ])
+                    .map_err(|source| self.err(source))?;
+            }
+        }
+        tx.commit().map_err(|source| self.err(source))?;
+        Ok(id)
+    }
+
+    /// 这份主库上记过的每一笔**收回清单**，按收回的先后排（早的在前），每一笔里的那几份按路径排。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn take_backs(&self, library: &str) -> Result<Vec<TakeBack>, VerdictError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT t.id, t.sublibrary, t.who, t.decided_at,
+                        f.path, f.was_bytes, f.was_mtime_ns, f.bytes, f.mtime_ns, f.still_wanted
+                 FROM manifest_take_back t
+                 JOIN manifest_take_back_file f ON f.take_back = t.id
+                 WHERE t.library = ?1
+                 ORDER BY t.decided_at, t.id, f.path",
+            )
+            .map_err(|source| self.err(source))?;
+        let mut rows = statement
+            .query(params![library])
+            .map_err(|source| self.err(source))?;
+        let mut out: Vec<(i64, TakeBack)> = Vec::new();
+        while let Some(row) = rows.next().map_err(|source| self.err(source))? {
+            let read = || -> rusqlite::Result<(i64, TakeBack, TakenFile)> {
+                let stamp = |bytes: i64, mtime_ns: Option<i64>| Stamp {
+                    bytes: u64::try_from(bytes).unwrap_or(0),
+                    mtime_ns,
+                };
+                Ok((
+                    row.get(0)?,
+                    TakeBack {
+                        sublibrary: row.get(1)?,
+                        who: row.get(2)?,
+                        at: row.get(3)?,
+                        files: Vec::new(),
+                    },
+                    TakenFile {
+                        path: row.get(4)?,
+                        was: stamp(row.get(5)?, row.get(6)?),
+                        now: stamp(row.get(7)?, row.get(8)?),
+                        still_wanted: row.get::<_, i64>(9)? != 0,
+                    },
+                ))
+            };
+            let (id, head, file) = read().map_err(|source| self.err(source))?;
+            match out.last_mut() {
+                Some((last, record)) if *last == id => record.files.push(file),
+                _ => out.push((
+                    id,
+                    TakeBack {
+                        files: vec![file],
+                        ..head
+                    },
+                )),
+            }
+        }
+        Ok(out.into_iter().map(|(_, record)| record).collect())
+    }
+
+    /// 删掉刚记下的那一笔：**只给 [`Site::take_back_into_manifest`](crate::site::Site::take_back_into_manifest)
+    /// 在清单写不进去时用**——那一笔收回没有生效，留着它审计就说了一句假话。审计别处一律只追加。
+    pub(crate) fn drop_take_back(&mut self, id: i64) -> Result<(), VerdictError> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(|source| self.err(source))?;
+        tx.execute(
+            "DELETE FROM manifest_take_back_file WHERE take_back = ?1",
+            params![id],
+        )
+        .map_err(|source| self.err(source))?;
+        tx.execute("DELETE FROM manifest_take_back WHERE id = ?1", params![id])
+            .map_err(|source| self.err(source))?;
+        tx.commit().map_err(|source| self.err(source))
+    }
+}
+
+/// 一笔**收回清单**的审计（`CONTEXT.md`）：**谁**、**何时**、把**哪几份**记回了哪个子库的清单。
+///
+/// 收回清单扩的是工具在目标设备上的行为边界（ADR-0015）——收回之后工具有权更新或删除那几份——所以
+/// 每一次都留一笔，住沉淀库（拿主意的人 2026-09-23 定，挂单 `Q1022`）。**只追加**：没有撤销，也不跟着
+/// 子库改名改写，它记的是当时发生了什么。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TakeBack {
+    /// 收回那一刻那个子库叫什么。
+    pub sublibrary: String,
+    /// 谁：收回那一刻这台机器上登录的账户（[`account`]）。
+    pub who: String,
+    /// 何时，UNIX 纪元起的秒。
+    pub at: i64,
+    /// 哪几份，按路径排：每一份连清单原先记着的戳、设备上那一份的戳，以及那一刻选择集还要不要它。
+    pub files: Vec<TakenFile>,
+}
+
+/// 审计里「**谁**」那一格：这台机器上眼下登录的账户名——`USER`，Windows 上是 `USERNAME`。
+///
+/// 记一笔收回的入口（眼下只有界面那一个）都问这一处，不各取各的（ADR-0024）。两样都没有时如实说
+/// 「说不出是谁」，不猜。
+#[must_use]
+pub fn account() -> String {
+    ["USER", "USERNAME"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .map(|value| value.trim().to_string())
+        .find(|value| !value.is_empty())
+        .unwrap_or_else(|| "（说不出是谁）".to_string())
 }
 
 /// 读一行亲手加的叫法；语言码或类型认不出就是 `None`（见 [`Store::own_titles`]）。
@@ -4541,6 +4751,92 @@ mod tests {
             (新批里的[0].after.clone(), 新批里的[0].before.clone()),
             (新裁决.clone(), Some(新裁决)),
             "批里落下的与盖掉的那条都带着修订——撤销放回去的才不会把修订丢掉",
+        );
+    }
+
+    /// 一份收回清单的样子：清单原先记着 `was` 字节，设备上那一份是 `now` 字节；选择集还要它。
+    fn 收回的一份(path: &str, was: u64, now: u64) -> TakenFile {
+        TakenFile {
+            still_wanted: true,
+            path: path.to_string(),
+            was: Stamp {
+                bytes: was,
+                mtime_ns: Some(1),
+            },
+            now: Stamp {
+                bytes: now,
+                mtime_ns: Some(2),
+            },
+        }
+    }
+
+    #[test]
+    fn 第十三版的老库升上来_旧裁决一条不丢_收回清单的审计记得下也读得回() {
+        // 钉的是**第 14 条迁移**（票 `verdict-store-and-sync/08`，挂单 `Q1022`）：收回清单的审计那两张表。
+        // 老库上它们是空的——那正是加它们之前的唯一可能；升上来之后一笔连它那几份一起记得下、读得回，
+        // 按主库分开，别的主库读不到。
+        let conn = Connection::open_in_memory().expect("开得出来");
+        for sql in &MIGRATIONS[..13] {
+            conn.execute_batch(sql).expect("建得出第十三版");
+        }
+        conn.execute_batch("PRAGMA user_version = 13")
+            .expect("盖得上第十三版的版本号");
+        let mut store = Store {
+            conn,
+            path: "（内存）".to_string(),
+        };
+        let 旧裁决 = 带修订的裁决();
+        store.put(&旧裁决).expect("第十三版记得下修订");
+
+        store.migrate().expect("升得上来");
+
+        assert_eq!(
+            store.find(&旧裁决.anchor).expect("读得到"),
+            Some(旧裁决),
+            "老裁决一个字都没变",
+        );
+        assert!(
+            store.take_backs("小库").expect("读得到").is_empty(),
+            "老库上没有一笔收回",
+        );
+
+        let 头一笔 = TakeBack {
+            sublibrary: "掌机".to_string(),
+            who: "测试员".to_string(),
+            at: 100,
+            files: vec![
+                收回的一份("FC/魂斗罗.zip", 2048, 21),
+                收回的一份("GBA/黄金太阳.zip", 4096, 30),
+            ],
+        };
+        let 第二笔 = TakeBack {
+            sublibrary: "备份卡".to_string(),
+            who: "另一个人".to_string(),
+            at: 200,
+            files: vec![TakenFile {
+                still_wanted: false,
+                ..收回的一份("SFC/幻想传说.zip", 8192, 7)
+            }],
+        };
+        // 先记晚的那一笔：读回来照时刻排，不照记下的先后。
+        store.put_take_back("小库", &第二笔).expect("记得下");
+        let 头一笔的号 = store.put_take_back("小库", &头一笔).expect("记得下");
+        store
+            .put_take_back("别的库", &头一笔)
+            .expect("别的主库也记得下");
+        assert_eq!(
+            store.take_backs("小库").expect("读得到"),
+            vec![头一笔.clone(), 第二笔.clone()],
+            "谁、何时、哪几份原样读得回来，按时刻排",
+        );
+
+        // 删回去只给「清单没写进去」那一下用：删的是那一笔连它那几份，别的一笔不碰。
+        store.drop_take_back(头一笔的号).expect("删得掉");
+        assert_eq!(store.take_backs("小库").expect("读得到"), vec![第二笔]);
+        assert_eq!(
+            store.take_backs("别的库").expect("读得到"),
+            vec![头一笔],
+            "别的主库那一笔被一并删了",
         );
     }
 

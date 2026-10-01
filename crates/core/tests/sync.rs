@@ -17,6 +17,7 @@ use romcat_core::capability::{Filesystem, RejectReason};
 use romcat_core::catalog::{Catalog, Roots, roots};
 use romcat_core::fs::RealFs;
 use romcat_core::scan::{self, Jobs, ScanOptions};
+use romcat_core::site::Site;
 use romcat_core::sublibrary::{self, Rule, Selection, Sublibrary};
 use romcat_core::sync::{
     self, Act, Desired, DesiredFile, FileKind, Manifest, ManifestFile, Options, Rejected, Stamp,
@@ -25,6 +26,7 @@ use romcat_core::sync::{
 use romcat_core::task::Handle;
 use romcat_core::testing::sample::zip;
 use romcat_core::testing::{TempDir, temp_dir};
+use romcat_core::verdict::Store;
 
 fn 写(path: &Path, bytes: &[u8]) {
     fs::create_dir_all(path.parent().expect("有上级目录")).expect("能建目录");
@@ -1119,4 +1121,279 @@ fn 同步不碰卡上pegasus的收藏与游玩时长文件() {
         plan.steps
     );
     assert_eq!(plan.strangers, 2, "那两份是清单之外的文件，只数一数");
+}
+
+// ───────────────────────── 五、收回清单（票 `verdict-store-and-sync/08`，挂单 `Q1022`）
+//
+// 词表**收回清单**：把目标上一份**被修改过**的文件记回清单，此后工具重新有权更新或删除它。它扩的是工具在
+// 目标设备上的行为边界（ADR-0015），所以每一次都留一笔审计（谁、何时、哪几份），住沉淀库；不收回的那几份
+// 每趟照旧报出来、工具照旧不碰。收回只改清单与审计——设备上与主库里的文件一个字节都不动。
+
+/// 照排好的那份计划真同步一趟，把交回来的清单落回中立库——界面上「同步」那一趟收回来时做的就是这两步。
+fn 同步一趟(catalog: &mut Catalog, prepared: &sync::Prepared, 库根: &Path) {
+    let roots = Roots::single("库", 库根);
+    let sources = sync::Sources {
+        library: &RealFs,
+        target: &RealFs,
+        library_roots: Some(&roots),
+        target_root: &prepared.root,
+        from_pool: &prepared.from_pool,
+        generated: &prepared.generated,
+        link_probe_dir: Some(&prepared.scratch),
+        convert_cache: None,
+    };
+    let outcome = sync::execute::run(
+        &prepared.plan,
+        &prepared.desired,
+        &prepared.actual,
+        &prepared.manifest,
+        &sources,
+        &Handle::new(),
+    )
+    .expect("传得动");
+    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    catalog
+        .put_manifest("掌机", &outcome.manifest)
+        .expect("清单写得回");
+}
+
+/// 这份计划里**被修改过**的那几条，按路径。
+fn 被修改过的(plan: &sync::Plan) -> Vec<&str> {
+    plan.surprises
+        .iter()
+        .filter(|one| one.kind == SurpriseKind::Changed)
+        .map(|one| one.path.as_str())
+        .collect()
+}
+
+/// 此刻，UNIX 纪元起的秒。审计里「何时」那一格拿它夹着比。
+fn 此刻() -> i64 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("钟没倒着走")
+        .as_secs();
+    i64::try_from(secs).expect("装得下")
+}
+
+/// 卡上被人改过的那一份：同步上去之后，别的工具把它整份改写了。
+const 改过的: &str = "FC/魂斗罗.zip";
+
+/// 改写成了什么。
+const 改成: &str = "别的工具改过它";
+
+/// 往 `catalog` 里建「掌机」这一台（只要 FC），同步一趟到 `目标`，然后在卡上把 [`改过的`] 那一份改写掉。
+fn 同步之后改掉一份(catalog: &mut Catalog, 库根: &Path, 工作区: &Path, 目标: &Path) {
+    catalog
+        .put_sublibrary(&子库(目标, None))
+        .expect("子库写得进");
+    catalog
+        .add_rule("掌机", &Rule::parse("平台=FC").expect("规则读得懂"), None)
+        .expect("规则写得进");
+    let prepared = 排计划(catalog, 工作区);
+    同步一趟(catalog, &prepared, 库根);
+    写(&目标.join(改过的), 改成.as_bytes());
+}
+
+/// 摆一张同步过一趟、其中一份随后被人改过的卡：交回主库、工作目录、卡与中立库。
+fn 同步过又被改过的卡() -> (TempDir, TempDir, TempDir, Catalog) {
+    let dir = 建库();
+    let 工作区 = temp_dir("sync-takeback-ws");
+    let 目标 = temp_dir("sync-takeback-card");
+    let mut catalog = 扫成库(dir.path());
+    同步之后改掉一份(&mut catalog, dir.path(), 工作区.path(), 目标.path());
+    (dir, 工作区, 目标, catalog)
+}
+
+#[test]
+fn 被人改过的那一份收回清单之后_下一趟差量预览不再把它列进被修改过() {
+    let (dir, 工作区, 目标, mut catalog) = 同步过又被改过的卡();
+    let 卡上那份 = 目标.path().join(改过的);
+
+    // ── 不收回：每趟照旧报出来，同步一个字节都不碰它（ADR-0015）。
+    let prepared = 排计划(&catalog, 工作区.path());
+    assert_eq!(被修改过的(&prepared.plan), vec![改过的]);
+    同步一趟(&mut catalog, &prepared, dir.path());
+    assert_eq!(
+        fs::read(&卡上那份).expect("读得到"),
+        改成.as_bytes(),
+        "同步碰了被修改过的那一份",
+    );
+    let prepared = 排计划(&catalog, 工作区.path());
+    assert_eq!(
+        被修改过的(&prepared.plan),
+        vec![改过的],
+        "不收回的那一份下一趟照旧报出来",
+    );
+
+    // ── 收回清单：只改清单与审计。
+    let mut site = Site::in_memory(catalog, Store::in_memory().expect("开得出沉淀库"), "主库");
+    let 之前 = 此刻();
+    let 收回 = site
+        .take_back_into_manifest("掌机", &prepared.plan.surprises, "测试员")
+        .expect("收得回")
+        .expect("有一份可收");
+    let 之后 = 此刻();
+    assert_eq!(
+        收回
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![改过的],
+    );
+    assert_eq!(
+        fs::read(&卡上那份).expect("读得到"),
+        改成.as_bytes(),
+        "收回清单动了设备上的文件",
+    );
+
+    // ── 下一趟差量预览：它不再是「被修改过」，而是设备上那一份——主库没变，就不动它。
+    let prepared = 排计划(&site.catalog, 工作区.path());
+    assert!(
+        被修改过的(&prepared.plan).is_empty(),
+        "收回之后还列在被修改过里：{:?}",
+        prepared.plan.surprises,
+    );
+    assert!(
+        prepared.plan.steps.iter().all(|step| step.path != 改过的),
+        "收回之后主库那份没变，却排了一步动它：{:?}",
+        prepared.plan.steps,
+    );
+
+    // ── 审计读得回：谁、何时、哪几份。按主库分开，别的主库读不到这一笔。
+    let 账 = site.store.take_backs("主库").expect("读得回");
+    assert_eq!(账.len(), 1, "{账:?}");
+    assert_eq!(账[0].sublibrary, "掌机");
+    assert_eq!(账[0].who, "测试员");
+    assert!(
+        (之前..=之后).contains(&账[0].at),
+        "何时那一格不在收回那一刻：{} 不在 {之前}..={之后}",
+        账[0].at,
+    );
+    assert_eq!(
+        账[0]
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![改过的],
+    );
+    assert_eq!(
+        账[0].files[0].now.bytes,
+        改成.len() as u64,
+        "哪几份要说得出是设备上哪一份：记的是收回那一刻设备上那一份的戳",
+    );
+    assert!(账[0].files[0].still_wanted, "那一刻选择集还要它");
+    assert_eq!(
+        账[0].files, 收回.files,
+        "读回来的与收回时交出来的不是同一份"
+    );
+    assert!(site.store.take_backs("别的库").expect("读得回").is_empty());
+}
+
+#[test]
+fn 选择集已经不要的那一份收回之后_下一趟就删掉它_审计里记着那一刻不要了() {
+    // 收回意味着工具此后**有权更新或删除**它——确认那一层说的正是这句。选择集已经不要了的那一份，不收回时
+    // 只报不删（它已经不是工具放的那一份，ADR-0015）；收回之后它就是一条普通的删除。
+    let (_dir, 工作区, _目标, mut catalog) = 同步过又被改过的卡();
+    for stored in catalog.sublibrary_rules("掌机").expect("读得动") {
+        catalog.remove_rule("掌机", stored.ordinal).expect("删得掉");
+    }
+    catalog
+        .add_rule("掌机", &Rule::parse("平台=PSV").expect("规则读得懂"), None)
+        .expect("规则写得进");
+    let prepared = 排计划(&catalog, 工作区.path());
+    assert_eq!(被修改过的(&prepared.plan), vec![改过的]);
+    assert!(
+        prepared.plan.steps.iter().all(|step| step.path != 改过的),
+        "没收回之前就排了一步动它：{:?}",
+        prepared.plan.steps,
+    );
+
+    let mut site = Site::in_memory(catalog, Store::in_memory().expect("开得出沉淀库"), "主库");
+    let 收回 = site
+        .take_back_into_manifest("掌机", &prepared.plan.surprises, "测试员")
+        .expect("收得回")
+        .expect("有一份可收");
+    assert!(
+        !收回.files[0].still_wanted,
+        "那一刻选择集已经不要它了，交回来的却说还要",
+    );
+    assert!(
+        !site.store.take_backs("主库").expect("读得回")[0].files[0].still_wanted,
+        "审计里没记下那一刻选择集已经不要它了",
+    );
+
+    let prepared = 排计划(&site.catalog, 工作区.path());
+    assert!(
+        prepared
+            .plan
+            .steps
+            .iter()
+            .any(|step| step.act == Act::Delete && step.path == 改过的),
+        "收回之后选择集不要它，下一趟却没删：{:?}",
+        prepared.plan.steps,
+    );
+}
+
+#[test]
+fn 清单写不进去时审计里那一笔删回去_两份库都像没按过() {
+    // 两份库不在一个事务里：先记审计、再改清单。清单写不进去，那一笔收回就没生效——审计里留着它就是一句假话。
+    let dir = 建库();
+    let 工作区 = temp_dir("sync-takeback-ro-ws");
+    let 目标 = temp_dir("sync-takeback-ro-card");
+    let 库文件 = 工作区.path().join("catalog").join("fixture.sqlite3");
+    fs::create_dir_all(库文件.parent().expect("有上级目录")).expect("能建目录");
+    let mut catalog = Catalog::create(&库文件, "fixture").expect("能建中立库");
+    let mut options = ScanOptions::named(dir.path(), "库");
+    options.jobs = Jobs::Fixed(2);
+    scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
+    同步之后改掉一份(&mut catalog, dir.path(), 工作区.path(), 目标.path());
+    let prepared = 排计划(&catalog, 工作区.path());
+    let 清单原样 = catalog.manifest("掌机").expect("读得回");
+
+    // 同一份库文件的**只读**连接：读得出清单，写不进去。
+    let 写不动 = catalog.read_only().expect("分得出只读连接");
+    let mut site = Site::in_memory(写不动, Store::in_memory().expect("开得出沉淀库"), "主库");
+    let 结果 = site.take_back_into_manifest("掌机", &prepared.plan.surprises, "测试员");
+    assert!(结果.is_err(), "清单写不进去却说收回了：{结果:?}");
+    assert!(
+        site.store.take_backs("主库").expect("读得回").is_empty(),
+        "清单没写进去，审计里却留着那一笔",
+    );
+    assert_eq!(
+        catalog.manifest("掌机").expect("读得回"),
+        清单原样,
+        "清单变了",
+    );
+}
+
+#[test]
+fn 收回之后清单变过的那一份不收_收的只是人看见的那一份() {
+    // 人按下去时看着的是排预览那一刻的差量。之后清单又变过（另一趟同步把它重新放上去了），那条异常说的已经
+    // 不是眼下清单里的那一份——照着它改清单，等于替人收回一份他没看见的东西。
+    let (_dir, 工作区, _目标, mut catalog) = 同步过又被改过的卡();
+    let prepared = 排计划(&catalog, 工作区.path());
+    let mut 清单 = catalog.manifest("掌机").expect("读得回");
+    for file in &mut 清单.files {
+        if file.path == 改过的 {
+            file.stamp.bytes += 1;
+        }
+    }
+    catalog.put_manifest("掌机", &清单).expect("清单写得进");
+
+    let mut site = Site::in_memory(catalog, Store::in_memory().expect("开得出沉淀库"), "主库");
+    let 收回 = site
+        .take_back_into_manifest("掌机", &prepared.plan.surprises, "测试员")
+        .expect("读写得动");
+    assert!(收回.is_none(), "清单变过的那一份被收了：{收回:?}");
+    assert_eq!(
+        site.catalog.manifest("掌机").expect("读得回"),
+        清单,
+        "一份都没收，清单却变了",
+    );
+    assert!(
+        site.store.take_backs("主库").expect("读得回").is_empty(),
+        "一份都没收，审计里却记了一笔",
+    );
 }
