@@ -15,6 +15,7 @@ use crate::catalog::Roots;
 use crate::classify::{self, Category, Classification, SuspectReason, classify};
 use crate::container::{ContainerKind, FailureReason};
 use crate::header::{self, ProbeClass, ProbeOutcome};
+use crate::identify::cart;
 use crate::path;
 use crate::platform::{Manifest, Platform};
 use crate::shape::{self, CompanionKind, DoubtKind, Role, Scope};
@@ -126,8 +127,8 @@ pub struct VariantCounts {
 
 /// **成型**的统计，从中立库的变体表折出来。
 ///
-/// 它回答这张票最要紧的那个问题：**从文件收敛到了多少个变体**。PSV 那 171,073 个文件
-/// 若没收敛到几百个变体，说明成型规则漏掉了那批目录树转储。
+/// 它回答这张票最要紧的那个问题：**从文件收敛到了多少个变体**。PSV 那十七万多个文件（见台账
+/// `docs/library-facts.md`）若没收敛到几百个变体，说明成型规则漏掉了那批目录树转储。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ShapingAcc {
     /// 成型跑到哪一次遍历为止；从没成型过时是 `None`。
@@ -163,7 +164,9 @@ impl ShapingAcc {
 /// 一条「目录说 A、内容是 B」的冲突凭什么算数。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ConflictEvidence {
-    /// 扩展名说了话，**头部抽样也确认了**内容确实是那个格式。这一档最硬。
+    /// **识别读过它的卡带头**：内容自己说的，不是名字说的。这一档最硬（票 `core-answers-once/01`）。
+    CartHeader,
+    /// 扩展名说了话，**头部抽样也确认了**内容确实是那个格式。
     Confirmed,
     /// 只有扩展名说了话——这个文件没被抽样到，内容没验过。
     ExtensionOnly,
@@ -176,6 +179,8 @@ impl ConflictEvidence {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
+            // 给人看的名字照稿叫「文件头」（拿主意的人 2026-10-01 裁，见 `report::ConflictGroup::reason`）。
+            Self::CartHeader => "文件头",
             Self::Confirmed => "内容已确认",
             Self::ExtensionOnly => "仅凭扩展名",
             Self::InsideContainer => "容器内部",
@@ -184,9 +189,54 @@ impl ConflictEvidence {
 
     /// 报告里固定的排列顺序。
     #[must_use]
-    pub fn all() -> [Self; 3] {
-        [Self::Confirmed, Self::ExtensionOnly, Self::InsideContainer]
+    pub fn all() -> [Self; 4] {
+        [
+            Self::CartHeader,
+            Self::Confirmed,
+            Self::ExtensionOnly,
+            Self::InsideContainer,
+        ]
     }
+}
+
+/// 「平台不符」**凭的是内容的哪一样**：判据那一处（[`conflicting_platform`]）连结论一起交出来，
+/// 理由那一句照它说（`report::ConflictGroup::reason`）。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum MismatchBasis {
+    /// 这个扩展名**只可能属于**那一个平台（平台清单的「扩展名」那一列）。存的是小写的扩展名。
+    Extension(String),
+    /// **识别读过的卡带头是另一族的**：`gba/` 目录里一张 NDS 卡带头。
+    CartFamily,
+    /// 同是 GB / GBC 那一族，**CGB 标志说它只能在 GBC 上跑**，却躺在 GB 目录里。
+    GbcOnly,
+    /// 同是 GB / GBC 那一族，**CGB 标志说它是一张 GB 游戏**，却躺在 GBC 目录里。
+    NotGbc,
+}
+
+impl MismatchBasis {
+    /// 凭的是**识别读过的卡带头**（不是名字）：这几样的凭据一律是 [`ConflictEvidence::CartHeader`]。
+    #[must_use]
+    pub fn read_from_cart_header(&self) -> bool {
+        !matches!(self, Self::Extension(_))
+    }
+}
+
+/// 旧报告里没有这一样：读回来是一个空的扩展名（与加这一样之前 `extension` 那一格读回来是空串同一个处置）。
+impl Default for MismatchBasis {
+    fn default() -> Self {
+        Self::Extension(String::new())
+    }
+}
+
+/// 判据那一处说「不符」时交出来的全部：目录说的、内容说的，凭的是哪一样。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mismatch {
+    /// 目录声明的平台。
+    pub declared: String,
+    /// 内容说的平台。
+    pub implied: String,
+    /// 凭的是内容的哪一样。
+    pub basis: MismatchBasis,
 }
 
 /// 一条平台冲突。
@@ -205,10 +255,10 @@ pub struct PlatformConflict {
     /// ——基线图里不许有某一台机器上那条临时目录。旧报告里没有这一样，读回来是空串。
     #[serde(default)]
     pub key: String,
-    /// **说这句话的那个扩展名**（已折成小写）：判据是「这个扩展名只可能属于那一个平台」
-    /// （[`conflicting_platform`]），所以理由要说得出是哪一个。旧报告里没有这一样，读回来是空串。
+    /// **凭的是内容的哪一样**（[`conflicting_platform`] 交出来的）：扩展名（连同是哪一个）、
+    /// 卡带头的族、还是 CGB 标志——理由那一句要说得出是哪一样。
     #[serde(default)]
-    pub extension: String,
+    pub basis: MismatchBasis,
     /// 凭什么算数。
     pub evidence: ConflictEvidence,
 }
@@ -224,8 +274,8 @@ pub struct ConflictGroupAcc {
     pub count: u64,
     /// 这一组按凭据分类计数。
     pub by_evidence: BTreeMap<ConflictEvidence, u64>,
-    /// 这一组里出现过的扩展名（小写、去重）：理由那一句说的就是它们。
-    pub extensions: BTreeSet<String>,
+    /// 这一组凭的是内容的哪几样（去重；扩展名那一样连着是哪几个扩展名）：理由那一句说的就是它们。
+    pub bases: BTreeSet<MismatchBasis>,
     /// 这一组的样例，**中立库里的键**（[`PlatformConflict::key`]），有上限。
     pub examples: Vec<String>,
 }
@@ -586,8 +636,9 @@ impl FileObservation {
     ///
     /// `key` 是那条记录的键（根名 + 相对那个根、NFC），`roots` 拿它第一段查出那个根
     /// 在盘上的位置，好把展示路径拼回来。平台由清单从**根名之后**那一级目录名折出来
-    /// （ADR-0011）。
+    /// （ADR-0011）。`cart` 是识别读过、落在中立库里的那份卡带头；没读过是 `None`。
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn derive(
         manifest: &Manifest,
         roots: &Roots,
@@ -596,6 +647,7 @@ impl FileObservation {
         non_utf8: bool,
         sample: Option<(ProbeClass, SampleResult)>,
         role: Option<Role>,
+        cart: Option<&cart::Facts>,
     ) -> Self {
         let display_path = roots.display_key(key);
         // 归类只看文件名，因此这里传的是文件名而不是整条键——键里的 `/`
@@ -604,17 +656,22 @@ impl FileObservation {
         let scope = shape::scope_of(manifest, key);
         let dir = path::platform_of_key(key);
         let extension = path::extension_lower(name);
-        let conflict = extension.as_deref().and_then(|extension| {
-            let (declared, implied) = conflicting_platform(manifest, scope.platform(), extension)?;
-            Some(PlatformConflict {
-                path: display_path.clone(),
-                key: key.to_string(),
-                declared,
-                implied,
-                extension: extension.to_string(),
-                evidence: evidence_of(sample.as_ref())?,
-            })
-        });
+        let conflict = conflicting_platform(manifest, scope.platform(), extension.as_deref(), cart)
+            .and_then(|mismatch| {
+                let evidence = if mismatch.basis.read_from_cart_header() {
+                    ConflictEvidence::CartHeader
+                } else {
+                    evidence_of(sample.as_ref())?
+                };
+                Some(PlatformConflict {
+                    path: display_path.clone(),
+                    key: key.to_string(),
+                    declared: mismatch.declared,
+                    implied: mismatch.implied,
+                    basis: mismatch.basis,
+                    evidence,
+                })
+            });
         Self {
             over_max_path: path::exceeds_max_path(&display_path),
             display_path,
@@ -643,26 +700,73 @@ impl FileObservation {
     }
 }
 
-/// 目录声明的平台与这个扩展名说的平台对不对得上；对得上或说不准时是 `None`。
+/// **平台不符**：目录声明的平台与这一份内容对不对得上；对得上或说不准时是 `None`。
 ///
 /// **「哪些算不符」只有这一处判据**（ADR-0024）：库体检那一格数的是它，**平台纠正**
-/// 按它分组，下一趟识别也从它问「这个变体撞上的是哪一组」——三处都不许自己再判一遍。
+/// 按它分组，识别报告里那一栏读的是同一份数（`IdentifyReport::build`），下一趟识别也从它问
+/// 「这个变体撞上的是哪一组」——几处都不许自己再判一遍。
+///
+/// 内容说话的有三样（票 `core-answers-once/01`，挂单 `Q1030`）：
+///
+/// 1. **扩展名**：这个扩展名只可能属于那一个平台（平台清单的「扩展名」那一列）。
+/// 2. **卡带头的族**：识别读过的卡带头认的平台里没有目录说的那个（`gba/` 目录里一张 NDS 卡带头）。
+/// 3. **CGB 标志**：GB 与 GBC 共用一份卡带头，族里再按 `0x143` 切一刀——只能在 GBC 上跑的
+///    躺在 GB 目录算不符（它会被当成 GB 游戏导出），兼容单色的双模卡躺在 GB 目录不算；一张 GB 游戏
+///    躺在 GBC 目录算不符（GBC 向下兼容它，改不改都行，那一句由 `Manifest::runs_games_of` 答）。
+///    后两样都是 [`cart::Facts::platforms`] 那一问。
+///
+/// **三样取并集**：有一样说不符就算（用户故事 4：并了判据，从前报得出的一条不许漏）。
+/// 一份 `.32x` 躺在 `md/` 目录里，卡带头的族（MD、32X、Mega-CD）认 MD 目录，可扩展名只可能属于
+/// 32X——照旧算。两样都说不符、说的平台又不一样时，**记卡带头说的那一个**：字节是内容自己说的，
+/// 扩展名只是名字（识别判定的平台那条回退链也是先听卡带头，`identify::platform_of`）。
+/// 没读过卡带头的（识别还没跑、不是卡带、精确命中过的不探），只有扩展名那一样说话。
 ///
 /// 两条闸，少一条这份清单就成了噪音：
 ///
 /// 1. **只看在范围内的东西**。未映射的顶层目录本来就不进识别管线，拿它报冲突没有意义。
 /// 2. **扩展名说不准就不报**。`.iso` / `.bin` / `.zip` 跨平台，清单里那张表故意只填
-///    「只可能属于这一个平台」的（见 `platform/platforms.toml`）。
+///    「只可能属于这一个平台」的（见 `platform/platforms.toml`；GB / GBC 那两行没有这一列，
+///    那一族由卡带头答）。
 ///
 /// 裸文件与**容器内部文件**共用这一个判据——两处各写一遍的话，改一条就会有一处漏改。
 pub fn conflicting_platform(
     manifest: &Manifest,
     declared: Option<&Platform>,
-    extension: &str,
-) -> Option<(String, String)> {
+    extension: Option<&str>,
+    cart: Option<&cart::Facts>,
+) -> Option<Mismatch> {
     let declared = declared?;
-    let implied = manifest.platform_for_extension(extension)?;
-    (implied.name != declared.name).then(|| (declared.name.clone(), implied.name.clone()))
+    let mismatch = |implied: &str, basis| Mismatch {
+        declared: declared.name.clone(),
+        implied: implied.to_string(),
+        basis,
+    };
+    let by_header = cart.and_then(|facts| {
+        let accepted = facts.platforms()?;
+        if accepted.contains(&declared.name.as_str()) {
+            return None;
+        }
+        let family = cart::Cart::from_code(facts.cart.as_deref()?)?;
+        // 族认目录那个、切过 CGB 标志之后不认：只可能是 GB / GBC 那一族里那一刀。
+        let basis = if !family.platforms().contains(&declared.name.as_str()) {
+            MismatchBasis::CartFamily
+        } else if facts.cgb == Some(cart::Cgb::Only) {
+            MismatchBasis::GbcOnly
+        } else {
+            MismatchBasis::NotGbc
+        };
+        Some(mismatch(facts.platform.as_deref()?, basis))
+    });
+    by_header.or_else(|| {
+        let extension = extension?;
+        let implied = manifest.platform_for_extension(extension)?;
+        (implied.name != declared.name).then(|| {
+            mismatch(
+                &implied.name,
+                MismatchBasis::Extension(extension.to_string()),
+            )
+        })
+    })
 }
 
 /// 这条冲突凭什么算数；`None` 表示**根本不算冲突**。
@@ -844,7 +948,7 @@ impl Aggregate {
             );
         }
 
-        // 「大小未知」不是「大小为零」：库里有 4,317 个真正的空文件，
+        // 「大小未知」不是「大小为零」：库里有四千多个真正的空文件（见台账 `docs/library-facts.md`），
         // 混在一起两个数字都会说谎（ADR-0021）。
         if observation.len.is_none() {
             self.anomalies.unreadable += 1;
@@ -904,9 +1008,7 @@ impl Aggregate {
             .or_default();
         group.count += 1;
         *group.by_evidence.entry(conflict.evidence).or_default() += 1;
-        if !conflict.extension.is_empty() {
-            group.extensions.insert(conflict.extension.clone());
-        }
+        group.bases.insert(conflict.basis.clone());
         if group.examples.len() < limits.max_examples {
             group.examples.push(conflict.key.clone());
         }
@@ -1051,32 +1153,42 @@ impl Aggregate {
     /// 并入一个容器内部文件。目录条目不进来——它们不是内容。
     ///
     /// `container` 是那个容器的展示路径与所在范围，用来认出「容器躺在 A 平台目录下，
-    /// 里面装着 B 平台的东西」。库里 91.1% 的容量在透明容器里，把容器内部排除在
+    /// 里面装着 B 平台的东西」。库里九成以上的容量在透明容器里（见台账 `docs/library-facts.md`），把容器内部排除在
     /// 冲突检测之外等于放过大头。
+    ///
+    /// `cart` 是识别读过、落在中立库里的那一条内部文件的卡带头；没读过是 `None`。
     pub fn record_inner_entry(
         &mut self,
         container: &InnerEntryContext<'_>,
         inner_path: &str,
         size: u64,
         name_lossy: bool,
+        cart: Option<&cart::Facts>,
         limits: &Limits,
     ) {
         if name_lossy {
             self.containers.lossy_names += 1;
         }
         let name = Path::new(path::file_name_of_key(inner_path));
-        if let Some(extension) = path::extension_lower(name)
-            && let Some((declared, implied)) =
-                conflicting_platform(container.manifest, container.scope.platform(), &extension)
-        {
+        if let Some(mismatch) = conflicting_platform(
+            container.manifest,
+            container.scope.platform(),
+            path::extension_lower(name).as_deref(),
+            cart,
+        ) {
+            let evidence = if mismatch.basis.read_from_cart_header() {
+                ConflictEvidence::CartHeader
+            } else {
+                ConflictEvidence::InsideContainer
+            };
             self.record_conflict(
                 PlatformConflict {
                     path: format!("{} › {inner_path}", container.display_path),
                     key: format!("{} › {inner_path}", container.key),
-                    declared,
-                    implied,
-                    extension: extension.clone(),
-                    evidence: ConflictEvidence::InsideContainer,
+                    declared: mismatch.declared,
+                    implied: mismatch.implied,
+                    basis: mismatch.basis,
+                    evidence,
                 },
                 limits,
             );
@@ -1159,6 +1271,7 @@ mod tests {
             false,
             None,
             None,
+            None,
         )
     }
 
@@ -1169,6 +1282,7 @@ mod tests {
             key,
             None,
             false,
+            None,
             None,
             None,
         )
@@ -1290,6 +1404,50 @@ mod tests {
     }
 
     #[test]
+    fn 平台不符_扩展名与卡带头取并集_两样说的平台不一样时记卡带头的() {
+        let manifest = Manifest::builtin();
+        let gba = manifest.platform_named("GBA");
+        let 头 = |head: &[u8], name: &str| cart::probe(name, head, 1 << 20, Some("GBA"));
+        let nds_头 = 头(&crate::testing::cart::NDS_GYAKUTEN_KENJI, "x.nds");
+        let gba_头 = 头(&crate::testing::cart::GBA_ROCKMAN_EXE6, "x.gba");
+
+        assert_eq!(
+            conflicting_platform(&manifest, gba, Some("nds"), None),
+            Some(Mismatch {
+                declared: "GBA".to_string(),
+                implied: "NDS".to_string(),
+                basis: MismatchBasis::Extension("nds".to_string()),
+            }),
+            "没读过卡带头：扩展名只可能属于 NDS"
+        );
+        assert_eq!(
+            conflicting_platform(&manifest, gba, Some("gba"), Some(&nds_头)).map(|it| it.basis),
+            Some(MismatchBasis::CartFamily),
+            "名字是 `.gba`、头是 NDS 的：卡带头说了算"
+        );
+        assert_eq!(
+            conflicting_platform(&manifest, gba, Some("nds"), Some(&gba_头)).map(|it| it.basis),
+            Some(MismatchBasis::Extension("nds".to_string())),
+            "名字是 `.nds`、头是 GBA 的：卡带头认目录，扩展名不认——并集，照旧算"
+        );
+        let gb_头 = 头(&crate::testing::cart::GBC_TWINE, "x.nds");
+        assert_eq!(
+            conflicting_platform(&manifest, gba, Some("nds"), Some(&gb_头)),
+            Some(Mismatch {
+                declared: "GBA".to_string(),
+                implied: "GBC".to_string(),
+                basis: MismatchBasis::CartFamily,
+            }),
+            "名字说 NDS、头说 GBC，都不是目录那个：记卡带头说的"
+        );
+        assert_eq!(
+            conflicting_platform(&manifest, None, Some("nds"), Some(&nds_头)),
+            None,
+            "未纳入管理的目录不报"
+        );
+    }
+
+    #[test]
     fn 派生字段全由键算出() {
         let observation = FileObservation::derive(
             &Manifest::builtin(),
@@ -1297,6 +1455,7 @@ mod tests {
             "库/PS1/某游戏/disc.cue",
             Some(64),
             false,
+            None,
             None,
             None,
         );

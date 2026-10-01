@@ -61,7 +61,7 @@ pub const NDS_GYAKUTEN_KENJI: [u8; 352] = [
 /// **GBC**：`007 - 黑日危机` 繁体修正版的前 `0x150` 字节。
 ///
 /// Manufacturer Code `BO7E`，No-Intro 的 GBC 集里是
-/// 《007 - The World Is Not Enough (USA, Europe)》。GBC 在票 07 的命中率是 **0%**。
+/// 《007 - The World Is Not Enough (USA, Europe)》。GBC 在票 07 的命中率是**零**（见台账 `docs/library-facts.md`）。
 pub const GBC_TWINE: [u8; 336] = [
     0xD9, 0xF5, 0xF0, 0x41, 0xE6, 0x02, 0xC2, 0x02, 0x00, 0xF1, 0xC9, 0x4F, 0xFA, 0xA2, 0xC0, 0xF5,
     0x79, 0xCD, 0x1E, 0x00, 0x01, 0x19, 0x00, 0xC5, 0xE9, 0xF1, 0xCD, 0x1E, 0x00, 0xC9, 0xEA, 0xA2,
@@ -85,6 +85,23 @@ pub const GBC_TWINE: [u8; 336] = [
     0xBB, 0xB9, 0x33, 0x3E, 0x54, 0x57, 0x49, 0x4E, 0x45, 0x20, 0x43, 0x47, 0x42, 0x00, 0x00, 0x42,
     0x4F, 0x37, 0x45, 0xC0, 0x36, 0x39, 0x00, 0x1B, 0x06, 0x03, 0x01, 0x33, 0x00, 0xE0, 0xE7, 0x92,
 ];
+
+/// **同一份 GBC 真头（[`GBC_TWINE`]），只换掉 `0x143` 那个 CGB 标志**：`80h` 是兼容单色的双模卡，
+/// 别的值（如 `00h`）是一张 GB 游戏；`C0h` 是它原样那张，只能在 GBC 上跑。
+///
+/// 平台不符要分出 GB↔GBC 那两组（票 `core-answers-once/01`），而这三种卡在头上只差这一个字节
+/// （Pan Docs A.3 的 CGB flag）。另找两份真头摆进来，读的人看不出它们之间除了那一个字节还差在哪；
+/// 只换这一个字节，差在哪一眼就明白。头部校验和（`0x14D`，覆盖 `0x134..=0x14C`）跟着修好——
+/// boot ROM 验它，真卡上它必然自洽。
+#[must_use]
+pub fn gbc_twine_with_cgb_flag(flag: u8) -> [u8; 336] {
+    let mut head = GBC_TWINE;
+    head[0x143] = flag;
+    head[0x14D] = head[0x134..0x14D]
+        .iter()
+        .fold(0u8, |acc, byte| acc.wrapping_sub(*byte).wrapping_sub(1));
+    head
+}
 
 /// **MD**：`光明力量2 - 古代之封印` 简体汉化版的前 `0x200` 字节。
 ///

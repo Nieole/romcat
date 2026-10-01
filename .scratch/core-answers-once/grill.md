@@ -18,6 +18,7 @@
 核查（2026-09-23）：两处判据仍在：crates/core/src/scan/aggregate.rs:658 conflicting_platform（按扩展名，库体检/平台纠正用）与 crates/core/src/catalog/identify.rs:724-726 CONFLICT_FROM（按卡带头家族，识别报告用）；GB/GBC 两处都明说不算冲突（identify.rs:174、:724），稿上的 GB↔GBC 两组出不来
 依赖／可并：Q605、Q606、Q602、Q1031
 （大小 L，来自票 `gui-looks-like-the-design/28`）
+**收于票 `core-answers-once/01`（2026-10-01）：settled。**
 
 ### `Q605` — 识别与两份报告里还有四处拿目录声明的平台，没跟着改
 
@@ -32,6 +33,7 @@
 核查（2026-09-23）：CONTEXT.md:102-104 平台条仍只一句「目录只是强先验，文件内容可以推翻它」，没立「目录声明的平台 / 识别判定的平台」；平台纠正已成词（:74、:273、:422），三个说法齐了
 依赖／可并：Q605（报告按哪个算定了再写）、Q1030
 （大小 S，来自票 `one-criterion-per-thing/03`）
+**收于票 `core-answers-once/01`（2026-10-01）：settled。**
 
 ### `Q1031` — 平台清单：界面一律用内置那一份，命令行走工作目录那条链
 

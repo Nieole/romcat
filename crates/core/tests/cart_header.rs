@@ -20,6 +20,8 @@ use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
 use romcat_core::fs::RealFs;
 use romcat_core::identify::fuzzy;
 use romcat_core::identify::{self, Options};
+use romcat_core::platform::Manifest;
+use romcat_core::scan::aggregate::{ConflictEvidence, Limits};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::task::Handle;
 use romcat_core::testing::cart as real;
@@ -371,14 +373,23 @@ fn 内部头与目录声明的平台冲突记下来() {
     // 是库体检最该报告的产出之一。
     let mut 现场 = 建现场();
     let outcome = 跑一趟(&mut 现场);
-    assert!(outcome.cart.conflicts >= 1, "该报出至少一条冲突");
-    let conflicts = 现场.catalog.platform_conflicts(10).expect("查得出");
-    let found = conflicts
+    assert!(
+        outcome.report.platform_conflicts >= 1,
+        "识别报告那一栏该报出至少一条冲突"
+    );
+    let found = outcome
+        .report
+        .conflict_examples
         .iter()
-        .find(|it| it.variant_key.contains("下错了的"))
+        .find(|it| it.key.contains("下错了的"))
         .expect("那一份该在里面");
     assert_eq!(found.declared, "GBA");
-    assert_eq!(found.found, "NDS");
+    assert_eq!(found.implied, "NDS");
+    assert_eq!(
+        found.evidence,
+        ConflictEvidence::CartHeader,
+        "扩展名是 `.gba`，说它不符的是识别读出的卡带头"
+    );
 }
 
 #[test]
@@ -402,13 +413,18 @@ fn 识别把内容说的平台落下来而目录声明的那一列一个字不�
             Some("GBA"),
             "{趟}：目录声明的那一列原样"
         );
-        let conflicts = 现场.catalog.platform_conflicts(10).expect("查得出");
+        let conflicts = 现场
+            .catalog
+            .aggregate(&Limits::default(), &Manifest::builtin())
+            .expect("折得出库体检")
+            .conflicts;
         let found = conflicts
+            .examples
             .iter()
-            .find(|it| it.variant_key == key)
-            .unwrap_or_else(|| panic!("{趟}：平台冲突那张报表照旧报得出它"));
+            .find(|it| it.key == key)
+            .unwrap_or_else(|| panic!("{趟}：库体检「目录与内容平台不符」那一格照旧报得出它"));
         assert_eq!(
-            (found.declared.as_str(), found.found.as_str()),
+            (found.declared.as_str(), found.implied.as_str()),
             ("GBA", "NDS")
         );
         // 目录也说对了的那一份，判定的与声明的是同一个。

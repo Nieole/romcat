@@ -24,6 +24,7 @@ use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
 use romcat_core::fs::RealFs;
 use romcat_core::identify::report::IdentifyReport;
 use romcat_core::identify::{self, Options, fuzzy};
+use romcat_core::platform::Manifest;
 use romcat_core::report::human_bytes;
 use romcat_core::report::thousands;
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
@@ -908,7 +909,8 @@ fn 工序那几行底下那句小字_数各由一个查询函数交出来_与别
     // **识别跑完**：分布与命令行识别报告那一行是同一组数；模型候选数与报告按数据源分的那一行是同一个数。
     现场.跑识别("甲", 甲.path());
     let tally = 现场.catalog.identify_tally().expect("读得出");
-    let report = IdentifyReport::build(&现场.catalog, &现场.repo).expect("出得了识别报告");
+    let report = IdentifyReport::build(&现场.catalog, &现场.repo, &Manifest::builtin())
+        .expect("出得了识别报告");
     assert_eq!(
         (
             tally.matched,
@@ -1602,7 +1604,7 @@ fn 挡下一份_写成了别的几份_那一趟也不打时刻戳() {
 #[test]
 fn 逐条记下导出去的是谁_真库量级上那一笔写库的代价量得出来() {
     // 票 `gui-looks-like-the-design/34` 里那条**预测**的实测：`mark_exported` 多写的那
-    // 28,529 行（真库的条目数，`docs/library-facts.md`）在一趟 2.7 秒的导出里占多少。
+    // 近三万行（真库那个量级的条目数，见台账 `docs/library-facts.md`）在一趟 2.7 秒的导出里占多少。
     //
     // **不断言一个时间上限**——挂钟在忙机器上不稳，钉一个数就是钉一条会随机变红的测试。
     // 这里断言的是**量得出来**与**行为对**：整批写完、读得回来、再写一趟是整份重写

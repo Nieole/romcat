@@ -16,7 +16,7 @@ use crate::container::{ContainerKind, FailureReason};
 use crate::header::ProbeClass;
 use crate::scan::aggregate::{
     Aggregate, Anomalies, ConflictAcc, ConflictEvidence, ContainerAcc, Counts, ExtensionAcc,
-    Placement, PlatformAcc, PlatformConflict, SampleAcc, ShapingAcc, ShapingDoubt,
+    MismatchBasis, Placement, PlatformAcc, PlatformConflict, SampleAcc, ShapingAcc, ShapingDoubt,
     StrandedCompanion, UNKNOWN_PLATFORM,
 };
 use crate::shape::{CompanionKind, DoubtKind, Role};
@@ -353,7 +353,7 @@ pub struct PlatformShapeStats {
     pub bytes: u64,
     /// 平均每个变体吃掉多少个文件。
     ///
-    /// 它是这张票最要紧的那个数：PSV 那 171,073 个文件若没聚起来，这一栏会是 1.0，
+    /// 它是这张票最要紧的那个数：PSV 那十七万多个文件（见台账 `docs/library-facts.md`）若没聚起来，这一栏会是 1.0，
     /// 而那就说明目录树规则整个没生效。
     ///
     /// **不叫「收敛比」**：词表里 **收敛** 专指导出时把同一作品的多个变体合并成前端里的
@@ -481,8 +481,10 @@ pub struct ConflictGroup {
     pub implied: String,
     /// 这一组几条。
     pub count: u64,
-    /// 说这句话的那几个扩展名（小写、按字母序）。
-    pub extensions: Vec<String>,
+    /// 这一组凭的是内容的哪几样（[`MismatchBasis`]，去重、次序固定）：扩展名那一样连着是哪几个
+    /// 扩展名（小写、按字母序）。理由那一句（[`Self::reason`]）照它说。
+    #[serde(default)]
+    pub bases: Vec<MismatchBasis>,
     /// 这一组按凭据分类，照 [`ConflictEvidence::all`] 的次序。
     pub by_evidence: Vec<(ConflictEvidence, String, u64)>,
     /// 这一组的样例路径，有上限（体检那一趟不设上限）。
@@ -490,22 +492,63 @@ pub struct ConflictGroup {
 }
 
 impl ConflictGroup {
-    /// 这一组凭什么这么判，一句话：判据是「这个扩展名只可能属于那一个平台」（[`conflicting_platform`](crate::scan::aggregate::conflicting_platform)），
-    /// 所以这一句说得出是哪几个扩展名、又有多少条的内容真验过。
+    /// 这一组凭什么这么判，一句话：判据那一处（[`conflicting_platform`](crate::scan::aggregate::conflicting_platform)）
+    /// 凭的是内容的哪几样，这一句就说哪几样——扩展名说得出是哪几个，卡带头说得出是族不对还是
+    /// CGB 标志不对——再说有多少条的内容真验过。
+    ///
+    /// **给人看的这几句把卡带头叫「文件头」**：照设计稿 `DLG.platfix` 的原话（拿主意的人 2026-10-01 裁，
+    /// 沿用「屏上照稿写」的先例——规格 `gui-draws-the-rest-of-the-design` 里「照稿写的词沿用已有『屏上照稿写』
+    /// 的先例」）。代码、测试名与词表照旧叫卡带头。屏上、识别报告与命令行印的都是这一处的字，不分两份。
     #[must_use]
     pub fn reason(&self) -> String {
+        let (declared, implied) = (&self.declared, &self.implied);
         let 扩展名 = self
-            .extensions
+            .bases
             .iter()
-            .map(|one| format!(".{one}"))
-            .collect::<Vec<_>>()
-            .join("、");
-        let mut out = format!(
-            "扩展名 {扩展名} 只可能属于 {}（平台清单），而这几条躺在 {} 目录下",
-            self.implied, self.declared
-        );
+            .filter_map(|basis| match basis {
+                MismatchBasis::Extension(one) if !one.is_empty() => Some(format!(".{one}")),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut 说法 = Vec::new();
+        if !扩展名.is_empty() {
+            说法.push(format!(
+                "扩展名 {} 只可能属于 {implied}（平台清单），而这几条躺在 {declared} 目录下",
+                扩展名.join("、")
+            ));
+        }
+        for basis in &self.bases {
+            match basis {
+                MismatchBasis::Extension(_) => {}
+                MismatchBasis::CartFamily => 说法.push(format!(
+                    "识别读出的文件头说它是 {implied} 的卡，而这几条躺在 {declared} 目录下"
+                )),
+                MismatchBasis::GbcOnly => 说法.push(format!(
+                    "文件头的 CGB 标志为 0xC0：只能在 {implied} 上运行，放在 {declared} 目录会被当成 {declared} 游戏导出"
+                )),
+                MismatchBasis::NotGbc => 说法.push(format!(
+                    "文件头的 CGB 标志不是 0x80 也不是 0xC0：这是 {implied} 游戏，而这几条躺在 {declared} 目录下"
+                )),
+            }
+        }
+        if 说法.is_empty() {
+            // 旧报告里没有「凭的是哪一样」：只说得出结论。
+            说法.push(format!(
+                "内容说它是 {implied}，而这几条躺在 {declared} 目录下"
+            ));
+        }
+        let mut out = 说法.join("；");
+        // 整组都凭识别读过的卡带头时，凭据那一截与上面那句是同一件事，不再说一遍。
+        if self
+            .by_evidence
+            .iter()
+            .all(|(evidence, _, _)| *evidence == ConflictEvidence::CartHeader)
+        {
+            return out;
+        }
         for (evidence, label, count) in &self.by_evidence {
             let 这一句 = match evidence {
+                ConflictEvidence::CartHeader => "识别读过它们的文件头",
                 ConflictEvidence::Confirmed => "头部抽样也确认了内容确实是那个格式",
                 ConflictEvidence::ExtensionOnly => "没被抽样到，内容没验过",
                 ConflictEvidence::InsideContainer => "在透明容器里面",
@@ -785,7 +828,7 @@ fn conflict_summary(acc: &ConflictAcc) -> ConflictSummary {
             declared: declared.clone(),
             implied: implied.clone(),
             count: group.count,
-            extensions: group.extensions.iter().cloned().collect(),
+            bases: group.bases.iter().cloned().collect(),
             by_evidence: by_evidence(&group.by_evidence),
             examples: group.examples.clone(),
         })
@@ -1136,6 +1179,7 @@ mod tests {
             false,
             None,
             None,
+            None,
         )
     }
 
@@ -1194,8 +1238,11 @@ mod tests {
         );
         let 头一组 = &conflicts.groups[0];
         assert_eq!(
-            头一组.extensions,
-            vec!["nds".to_string(), "srl".to_string()],
+            头一组.bases,
+            vec![
+                MismatchBasis::Extension("nds".to_string()),
+                MismatchBasis::Extension("srl".to_string()),
+            ],
             "说这句话的那几个扩展名都列出来"
         );
         assert_eq!(

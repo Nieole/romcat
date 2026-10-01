@@ -8,7 +8,7 @@
 //! - `identification`：这个变体这一轮的结论——**命中 / 未命中 / 无判据 / 跳过**。
 //!   报告因此和体检报告一样，是从中立库折出来的，不必重跑一遍识别。
 //! - `content_hash`：算过的哈希留着。**这是增量在这张票上的兑现**（挂账 D14）：
-//!   容器里的 CRC-32 零解压就有，而裸文件要整份读一遍——一块 8.60 TiB 的盘上，
+//!   容器里的 CRC-32 零解压就有，而裸文件要整份读一遍——一块近 9 TiB 的盘上（见台账 `docs/library-facts.md`），
 //!   第二趟识别不该再读一遍。它由扫描按文件的三元组作废（`Catalog::write`），
 //!   与容器内部构成的作废方式是同一条。
 //! - 作品与发行版多出一列 `origin`：这一行是**识别**撞出来的，还是**裁决**定下来的。
@@ -30,7 +30,7 @@
 //! ——裁决定了作品、识别认出了发行版，清完也是这个形状（原挂账 D48）。票 08 起
 //! 沉淀库把「确认没有发行版」记成一条**明确的裁决**，识别读那一条，不再猜。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -38,6 +38,7 @@ use super::meta::MetaKey;
 use super::{Catalog, CatalogError};
 use crate::dat::Convention;
 use crate::dat::chinese::ChineseMark;
+use crate::identify::cart;
 
 /// **一个透明容器里的一份内部文件**：内部路径、未压缩大小、可得的 CRC-32。
 ///
@@ -139,7 +140,7 @@ CREATE INDEX IF NOT EXISTS content_hash_print ON content_hash(crc32, size);
 --
 -- 它与 `content_hash` 同源同命：都是「读过的盘不白读」，都按文件的三元组作废。
 -- 分开一张表而不是往 `content_hash` 上加列，是为了**不动已有的表结构**。票 09 那时以为
--- 加列要用户删掉 8.60 TiB 的中立库重扫一遍；票 10 起 `add_columns` 那条路证明纯加一列
+-- 加列要用户删掉中立库、把近 9 TiB 的主库重扫一遍（见台账 `docs/library-facts.md`）；票 10 起 `add_columns` 那条路证明纯加一列
 -- 同样不必（见那一头的文档），加表与加列如今都是白拿的。代价写在下面那两列上。
 --
 -- `len` 与 `mtime_ns` 是**这一行自带的有效期**：算这一条时那个成员文件多大、什么时候
@@ -158,9 +159,9 @@ CREATE TABLE IF NOT EXISTS content_disc(
 -- 从一份内容前几百字节里读出来的**卡带内部头**（票 10）。与 `content_disc` 同一条路：
 -- 同样自带有效期、同样「读过的不白读」、同样加表而不加列。
 --
--- `platform` 单独一列而不是只躺在 JSON 里，是因为**报告要按它数一件事**：内部头说的
--- 平台与目录声明的平台对不上（ADR-0011 说那正是最该报告的产出之一）。一条 SQL 数得出来
--- 的东西，不该逐行反序列化几万段 JSON 去数。
+-- `platform` 与 `family` 单独两列是票 10 时为了让一条 SQL 数平台冲突。**那条 SQL 已经不在了**
+-- （票 `core-answers-once/01`）：平台不符只在一处判（`scan::aggregate::conflicting_platform`），
+-- 它要的 CGB 标志只在 JSON 里，库体检逐行读回 `facts` 去问它。两列照写，旧程序读同一份库时还用得着。
 CREATE TABLE IF NOT EXISTS content_cart(
     key      TEXT    NOT NULL,
     inner    TEXT    NOT NULL,
@@ -168,12 +169,10 @@ CREATE TABLE IF NOT EXISTS content_cart(
     mtime_ns INTEGER,
     -- 内部头说这份内容属于哪个平台；认不出是 NULL。
     platform TEXT,
-    -- 这份头**认哪几个平台**，写成 `,GB,GBC,` 这样两头带逗号的一串。
-    --
-    -- 它与 `platform` 是两件事，而**判冲突要看它不看那一个**：GB 与 GBC 共用一份卡带头
-    -- （差别只在 `0x143` 那一个字节），一份 CGB 卡躺在 `gb/` 目录里不是冲突，是常态。
-    -- 只按 `platform` 比字符串，报告会被这类同族配对淹掉（真机实测 1,722 份里绝大多数）。
-    -- 两头的逗号是为了让 SQL 能用 `instr` 做整词匹配，不至于 `GB` 匹配上 `GBA`。
+    -- 这份头**认哪几个平台**（`identify::cart::Facts::platforms`），写成 `,GB,GBC,` 这样两头
+    -- 带逗号的一串：躺在这几个平台的目录里都说得通。GB / GBC 那一族按 CGB 标志再切一刀
+    -- ——只能在 GBC 上跑的只认 GBC，双模卡两个都认。两头的逗号是为了整词匹配，
+    -- 不至于 `GB` 匹配上 `GBA`。
     family   TEXT,
     -- `identify::cart::Facts` 的 JSON。
     facts    TEXT    NOT NULL,
@@ -310,8 +309,8 @@ CREATE TABLE IF NOT EXISTS verdict_batch_shadow_candidate(
 /// [`SCHEMA_VERSION`](super::SCHEMA_VERSION)——旧库照样打得开，旧程序也照样能用
 /// （与 `catalog::sublibrary::add_columns` 同一条路）。
 ///
-/// 票 10 加的是 `content_hash` 上那两列 SHA-1。为它逼用户删掉 8.60 TiB 的中立库、
-/// 重扫 27 分钟，换不到任何东西。
+/// 票 10 加的是 `content_hash` 上那两列 SHA-1。为它逼用户删掉中立库、把近 9 TiB 的主库
+/// 重扫半小时上下（见台账 `docs/library-facts.md`），换不到任何东西。
 ///
 /// **`content_cart` 不在这里**：那张表是票 10 新建的，`CREATE TABLE IF NOT EXISTS`
 /// 一次就把它连同 `family` 那一列建齐了。这里只放「已经存在于旧库里的表上后来加的列」。
@@ -687,7 +686,8 @@ pub struct CartFactRow {
     pub inner: String,
     /// 内部头说这份内容属于哪个平台；认不出是 `None`。
     pub platform: Option<String>,
-    /// 这份头认哪几个平台，写成 `,GB,GBC,` 这样两头带逗号的一串。**判冲突看它。**
+    /// 这份头认哪几个平台（`identify::cart::Facts::platforms`），写成 `,GB,GBC,` 这样两头带逗号的一串。
+    /// **判平台不符不读它**——那一处读 `facts` 里的整份头（`scan::aggregate::conflicting_platform`）。
     pub family: Option<String>,
     /// `identify::cart::Facts` 的 JSON。
     pub facts: String,
@@ -718,35 +718,6 @@ SELECT COALESCE(v.platform, ?2), COUNT(*), SUM(CASE WHEN i.units = 0 THEN 1 ELSE
                         WHERE c.variant_key = i.variant_key
                           AND instr(?1, ',' || c.source || ',') = 0)
                  GROUP BY 1";
-
-/// 「内部头与目录声明的平台对不上」这件事的判据，两处查询共用一份。
-///
-/// **判据是家族不是那一个平台**：GB 与 GBC 共用一份卡带头，一份 CGB 卡躺在 `gb/`
-/// 目录里不是冲突。`instr` 上两头带逗号是为了整词匹配——不然 `GB` 会匹配上 `GBA`。
-const CONFLICT_FROM: &str = "\
-                 FROM content_cart c
-                 JOIN variant_member m ON m.key = c.key
-                 JOIN variant v ON v.key = m.variant_key
-                 WHERE c.platform IS NOT NULL
-                   AND c.family IS NOT NULL
-                   AND v.platform IS NOT NULL
-                   AND instr(c.family, ',' || v.platform || ',') = 0";
-
-/// 内部头说的平台与**目录声明的平台**对不上的一条（ADR-0011）。
-///
-/// 「目录说 GBA、文件头说 NDS」是真实会发生的（下错、放错、压缩包混装），而 ADR-0011
-/// 明说这类冲突不是错误而是**最该报告的产出之一**。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct PlatformConflict {
-    /// 哪个变体。
-    pub variant_key: String,
-    /// 目录声明的平台。
-    pub declared: String,
-    /// 内部头说的平台。
-    pub found: String,
-    /// 是哪一份内容说的。
-    pub member: String,
-}
 
 /// 一份内容探出来的**光盘标识**，写库前的样子。
 ///
@@ -843,8 +814,8 @@ pub type NotRunVisitor<'a> = dyn FnMut(Option<&str>, &str) + 'a;
 /// 逐条走候选时收到的那三样：变体的键、源、条目名。
 ///
 /// **只有这三样**：刮削从条目名里读元数据，是哪一份 DAT、有没有中文记号都在
-/// `candidate` 那张表里躺着，事后复核照查不误。真库里这是 150,959 行，多搬一列
-/// 就是多搬 150,959 个字符串。
+/// `candidate` 那张表里躺着，事后复核照查不误。真库里这是十五万行上下（见台账 `docs/library-facts.md`），
+/// 多搬一列就是多搬十几万个字符串。
 pub type CandidateFactVisitor<'a> = dyn FnMut(&str, &str, &str) + 'a;
 
 /// 一条**自动通过**的候选，**标题集合**用得上的那几列。
@@ -974,8 +945,8 @@ fn chinese_mark(label: &str) -> Option<ChineseMark> {
 
 /// **待确认队列**要的一行：变体连它这一轮的结论。
 ///
-/// 捏成一次查询而不是「先列变体、再逐个问结论」：真库里那是 46,444 个变体，
-/// 逐个问就是 46,444 次查询，而队列只是要把其中一万多条挑出来。
+/// 捏成一次查询而不是「先列变体、再逐个问结论」：真库里那是四万多个变体，
+/// 逐个问就是四万多次查询（见台账 `docs/library-facts.md`），而队列只是要把其中一万多条挑出来。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueRow {
     /// 变体本身。
@@ -1316,16 +1287,16 @@ impl Catalog {
     ///
     /// 判据从**两张表**里找，因为它本来就躺在两处：**裸文件**读一遍算出来，落在
     /// `content_hash`；**透明容器**里的东西零解压就有，落在 `container_entry`
-    /// （票 03 的整个意义就是不去解压它们）。只查前一张，库里 91.1% 的容量——
+    /// （票 03 的整个意义就是不去解压它们）。只查前一张，库里九成以上的容量（见台账 `docs/library-facts.md`）——
     /// 也就是绝大多数已确认的变体——会安静地取不到判据。
     ///
     /// ## 为什么是逐个查而不是一条大 JOIN
     ///
     /// 写成一条 `candidate LEFT JOIN content_hash LEFT JOIN container_entry` 在真库上
-    /// **实测 73 秒**：136,238 条自动通过的候选各自去 1,016,857 行的容器构成表里按
+    /// **实测一分多钟**（这个耗时台账没收，原文没写是哪一趟）：十几万条自动通过的候选各自去上百万行的容器构成表里按
     /// `key` 做一次范围扫描，而候选是按 `variant_key` 排的，没有任何局部性。
     /// 逐个查的次数少一个量级——**在线档只为每部作品的那一个代表变体查一次**
-    /// （真库 9,226 次而不是 136,238 次），而且离线档一次都不查。
+    /// （真库上是九千多次而不是十几万次（见台账 `docs/library-facts.md`）），而且离线档一次都不查。
     ///
     /// # Errors
     /// 读库失败时返回错误。
@@ -1414,7 +1385,7 @@ impl Catalog {
     /// 一条**匹配裁决**钉在**内容锚**上（票 05），那正是「换台机器、改过名字仍然认得出」
     /// 的来处；而刮削那一侧手里只有变体的键。两头要接得上，只有两条路：
     ///
-    /// - 为每个变体算一次内容判据（`identify::content_print`）——真库 46,444 个变体，
+    /// - 为每个变体算一次内容判据（`identify::content_print`）——真库四万多个变体（见台账 `docs/library-facts.md`），
     ///   每个要查两次库。**这条路刮削那一侧本来就特意不走**（见 `scrape::Plan::build`
     ///   里那句「变体这一层不带判据」）。
     /// - 反过来，拿手里那几条裁决去问「谁装着这份内容」。裁决是**人一条条裁出来的**，
@@ -1634,6 +1605,44 @@ impl Catalog {
         Ok(out)
     }
 
+    /// **识别读过、还作数的每一份卡带内部头**：成员的键 → 内部路径（裸文件是空串）→ 那一份。
+    ///
+    /// 与 [`cart_facts`](Self::cart_facts) 同一道有效期（条目的大小与修改时刻没变）。库体检拿它喂平台
+    /// 不符的判据（`scan::aggregate::conflicting_platform`）：报告从中立库折出来，不读盘（ADR-0001）。
+    /// 读不回来的那一行（被人改过）当没读过——与识别那一侧取回算过的事实时同一个处置。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn stored_cart_heads(
+        &self,
+    ) -> Result<HashMap<String, HashMap<String, cart::Facts>>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT c.key, c.inner, c.facts FROM content_cart c
+                 JOIN entry e ON e.key = c.key
+                 WHERE c.len IS e.len AND c.mtime_ns IS e.mtime_ns",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut out: HashMap<String, HashMap<String, cart::Facts>> = HashMap::new();
+        for row in rows {
+            let (key, inner, facts) = row.map_err(|source| self.err(source))?;
+            if let Ok(facts) = serde_json::from_str::<cart::Facts>(&facts) {
+                out.entry(key).or_default().insert(inner, facts);
+            }
+        }
+        Ok(out)
+    }
+
     /// 把探出来的卡带内部头整批存下来。
     ///
     /// # Errors
@@ -1675,37 +1684,6 @@ impl Catalog {
             }
         }
         tx.commit().map_err(to_err)
-    }
-
-    /// **内部头说的平台与目录声明的平台对不上的那些**（ADR-0011）。
-    ///
-    /// 报告从中立库折出来，不重跑识别（ADR-0001）：所以这件事记在 `content_cart` 上，
-    /// 而不是攒在一趟识别的内存里。`limit` 是最多取几条例子。
-    ///
-    /// # Errors
-    /// 读库失败时返回错误。
-    pub fn platform_conflicts(&self, limit: usize) -> Result<Vec<PlatformConflict>, CatalogError> {
-        let mut statement = self
-            .conn
-            .prepare(&format!(
-                "SELECT v.key, v.platform, c.platform, c.key
-                 {CONFLICT_FROM}
-                 ORDER BY v.key
-                 LIMIT ?1"
-            ))
-            .map_err(|source| self.err(source))?;
-        let rows = statement
-            .query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
-                Ok(PlatformConflict {
-                    variant_key: row.get(0)?,
-                    declared: row.get(1)?,
-                    found: row.get(2)?,
-                    member: row.get(3)?,
-                })
-            })
-            .map_err(|source| self.err(source))?;
-        rows.collect::<Result<_, _>>()
-            .map_err(|source| self.err(source))
     }
 
     /// 把探出来的光盘标识整批存下来。有效期那两列从 `entry` 上现取。
@@ -2473,7 +2451,7 @@ impl Catalog {
 
     /// 一条条走过全部**候选**里刮削用得上的那几列：变体的键、源、条目名。
     ///
-    /// 走回调而不是返回一整份 `Vec`：真库里这是 150,959 行，而刮削要的只是把它们按
+    /// 走回调而不是返回一整份 `Vec`：真库里这是十五万行上下（见台账 `docs/library-facts.md`），而刮削要的只是把它们按
     /// 锚点归堆。
     ///
     /// # Errors
@@ -2503,8 +2481,8 @@ impl Catalog {
     ///
     /// **只走自动通过的那些**：标题集合要的是「那次发行的官方名叫什么」与「这个变体是不是
     /// 官中 / 汉化」，两者都是**结论**而不是猜测——没通过的候选连它到底是不是这个游戏
-    /// 都还没定，拿它的条目名当官方名等于把猜测写成事实。真库上这一刀把 150,959 条
-    /// 候选筛成 136,238 条。
+    /// 都还没定，拿它的条目名当官方名等于把猜测写成事实。真库上这一刀把十五万条上下的
+    /// 候选筛成十三万多条（见台账 `docs/library-facts.md`）。
     ///
     /// # Errors
     /// 读库失败时返回错误。
@@ -2539,7 +2517,7 @@ impl Catalog {
 
     /// 一条条走过全部识别结论：平台、结论、理由、变体的键、这一趟读了多少字节。
     ///
-    /// 走回调而不是返回一整份 `Vec`：真库里这是 46,444 行，报告要的只是几个计数与
+    /// 走回调而不是返回一整份 `Vec`：真库里这是四万多行（见台账 `docs/library-facts.md`），报告要的只是几个计数与
     /// 几个例子，攒一份完整的表纯属浪费。
     ///
     /// ⚠️ **它走的是结论，不是变体。** 连识别都还没跑过的变体这里一条都不出现
@@ -2740,7 +2718,7 @@ impl Catalog {
     ///
     /// 这是**发行版级**的统计（票 10 从挂账转来的那条前瞻）：数的是识别撞出来的候选
     /// 上带的那个记号，而不是文件名里有没有汉字。两者差得远——票 01 用文件名做的粗略
-    /// 代理实测 15.6%，那个数里既有官中也有汉化，还混着一堆压根不是中文版的目录名。
+    /// 代理实测一成半上下（见台账 `docs/library-facts.md`），那个数里既有官中也有汉化，还混着一堆压根不是中文版的目录名。
     ///
     /// **官中版与汉化版分开数，不许加成一个「中文条目数」**（ADR-0012）：前者在卡带与
     /// 光盘世代是一次独立的**官方发行**（独立序列号、DAT 里独立一条、精确哈希直接命中），
@@ -2784,22 +2762,6 @@ impl Catalog {
             out.insert(platform, counts);
         }
         Ok(out)
-    }
-
-    /// 内部头与目录声明的平台对不上的**总数**（ADR-0011）。
-    ///
-    /// # Errors
-    /// 读库失败时返回错误。
-    pub fn platform_conflict_count(&self) -> Result<u64, CatalogError> {
-        let value: i64 = self
-            .conn
-            .query_row(
-                &format!("SELECT COUNT(DISTINCT v.key) {CONFLICT_FROM}"),
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|source| self.err(source))?;
-        Ok(u64::try_from(value).unwrap_or(0))
     }
 
     /// **命中里只有「一个字节都不读」那几个源的候选**的变体数，按平台。
@@ -2925,8 +2887,8 @@ impl Catalog {
     ///
     /// 这是读一份物化的结论，**不是第二次判断**（ADR-0024 推论 3）：谁要拿变体的平台去撞
     /// 别的东西（刮削的平台交叉校验），就从这儿取，不自己拿目录那一列再判一次。
-    /// 目录声明的那个原样在 [`VariantRow::platform`](super::VariantRow::platform) 上，
-    /// 平台冲突那张报表拿它当对照物（[`Catalog::platform_conflicts`]）。
+    /// 目录声明的那个原样在 [`VariantRow::platform`](super::VariantRow::platform) 上——
+    /// **平台不符**比的是它与内容（`scan::aggregate::conflicting_platform`），不是这一列。
     ///
     /// # Errors
     /// 读库失败时返回错误。
@@ -2982,7 +2944,7 @@ impl Catalog {
     /// **模型推断问过的答案**，整份读回来（票 12）。
     ///
     /// 整份读而不是逐个变体查：残渣最多也就一万多条，一次读进内存是几 MB，而逐个查
-    /// 是每个变体一次查询——识别那一趟本来就在为 46,444 个变体做别的事了。
+    /// 是每个变体一次查询——识别那一趟本来就在为四万多个变体做别的事了（见台账 `docs/library-facts.md`）。
     ///
     /// **`model` 那一列要一起读回来**：依据里印的必须是**真答话的那个模型**，
     /// 而请求的那个未必是它。少读这一列，同一条候选两趟会印出两个模型名。

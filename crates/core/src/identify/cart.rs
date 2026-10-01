@@ -1,7 +1,7 @@
 //! **第三命中层：卡带内部头。** 哈希撞不上时，从卡带自己的字节里读出「这是哪个游戏」。
 //!
-//! 这一层正面回答最初那个痛点。票 07 的命中率按平台拆开是两个世界：GB 91.5%、FC 82.8%、
-//! SFC 80.1%，而 **GBA 5.8%、NDS 4.4%、GBC 0%**——而 GBA 与 NDS 恰恰是中文玩家存量最大
+//! 这一层正面回答最初那个痛点。票 07 的命中率按平台拆开是两个世界：GB、FC、SFC 都在八九成，
+//! 而 **GBA、NDS 只有个位数百分比，GBC 是零**（见台账 `docs/library-facts.md`）——而 GBA 与 NDS 恰恰是中文玩家存量最大
 //! 的两个平台，抽样确认那批未命中全是汉化版。**汉化补丁通常不改内部头**（调研 C.2 与
 //! D.3.1），于是即使一份汉化版对不上任何数据库，卡带头里那串游戏码照样说得出它基于
 //! 哪一次发行。
@@ -21,8 +21,8 @@
 //! **FC 那一行不是遗漏。** NESdev 的 iNES 页全页检索不出 CRC / checksum / serial 三个词
 //! ——iNES 是本文所有平台里唯一完全没有自校验结构、也没有内部编号的格式（A.18.1）。
 //! 它照样解析，因为解析出来的东西还有两个用处：**验平台**（一份 `.nes` 躺在 `gba/` 里
-//! 是真实会发生的，ADR-0011）与**说清楚它为什么撞不上**。FC 那 3,491 个未命中要靠
-//! 别的路（GoodNES 那 646 条汉化条目以 SHA-1 为键，见 [`fingerprint`](super::fingerprint)）。
+//! 是真实会发生的，ADR-0011）与**说清楚它为什么撞不上**。FC 那三千多个未命中（见台账 `docs/library-facts.md`「按平台」那张表）
+//! 要靠别的路（GoodNES 那 646 条汉化条目以 SHA-1 为键，`docs/research/rom-identification.md` C.4；见 [`fingerprint`](super::fingerprint)）。
 //!
 //! ## 归一化在解析之前
 //!
@@ -158,7 +158,8 @@ impl Cart {
 /// `.bin` 谁都可能是，而清单里 GB / GBC 干脆没有那一列（`.gb` 与 `.gbc` 互相串目录
 /// 是常态，填了只会把报告淹掉）。两张表放在一起，改一处就得记着另一处的用途。
 ///
-/// **`.bin` 只在目录说 MD 时才当卡带**。真库里 `.bin` 有 46,920 条、140 GiB，其中绝大
+/// **`.bin` 只在目录说 MD 时才当卡带**。真库里 `.bin` 有四万多条、上百 GiB（台账没收，出处是
+/// 挂账 D108，`.scratch/rom-metadata-automation/deferred.md`），其中绝大
 /// 多数是光盘轨道与游戏内部的封包数据（挂账 D108）——不设这道闸，这一层会为它们每一条
 /// 读 16 KiB，把「只读几百字节」翻两个数量级。
 #[must_use]
@@ -244,6 +245,56 @@ pub struct Facts {
     pub normalized: Option<String>,
     /// 读不出想要的那一段时，说人话的一句。
     pub note: Option<String>,
+    /// **GB / GBC 卡带头 `0x143` 那个 CGB 标志**说这张卡在哪几台上跑得起来；别的卡带头是 `None`。
+    ///
+    /// [`platform`](Self::platform) 那一格只分得出 GB 与 GBC，分不出「兼容单色」与「只能在 GBC 上跑」
+    /// ——而平台不符要的正是这一刀：只能在 GBC 上跑的卡躺在 `gb/` 目录算不符，兼容单色的不算
+    /// （票 `core-answers-once/01`）。加这一格之前读的那些头（中立库里的旧行）这里是 `None`，
+    /// 判据那一侧按 [`platform`](Self::platform) 保守地答（[`Self::platforms`]），识别下一趟重读那段头
+    /// （[`Self::predates_cgb`]）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgb: Option<Cgb>,
+}
+
+/// GB / GBC 卡带头 `0x143` 那个 **CGB 标志**说的事（Pan Docs A.3）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Cgb {
+    /// 不是 `80h` 也不是 `C0h`：**一张 GB 游戏**。老卡上那个字节是标题的最后一个字，照样落在这儿。
+    Absent,
+    /// `80h`：支持 GBC，**也兼容单色 GB**——两台都跑得起来。
+    Compatible,
+    /// `C0h`：**只能在 GBC 上跑**。
+    Only,
+}
+
+impl Facts {
+    /// 这份头认哪几个**平台**——躺在这几个平台的目录里都说得通；认不出是哪一种头时是 `None`。
+    ///
+    /// 多数头就是那一族（[`Cart::platforms`]）：MD 的头在 32X 卡上一模一样，FC 与 FDS 同一族。
+    /// **GB / GBC 那一族再按 CGB 标志切一刀**：只能在 GBC 上跑的只认 GBC，GB 游戏只认 GB，
+    /// 双模卡两个都认。平台不符的判据（`scan::aggregate::conflicting_platform`）问的就是这一句。
+    ///
+    /// 加 CGB 标志那一格之前读的头（[`Self::cgb`] 是 `None`）：[`platform`](Self::platform) 是 GB
+    /// 的那些 CGB 标志必然不是 `80h` / `C0h`（那一格就是照它判的），照 GB 游戏答；是 GBC 的分不出
+    /// 兼容单色还是只能在 GBC 上跑，**保守地两个都认**——宁可这一趟少报一条，不把一张双模卡报成不符。
+    #[must_use]
+    pub fn platforms(&self) -> Option<&'static [&'static str]> {
+        let cart = Cart::from_code(self.cart.as_deref()?)?;
+        if cart != Cart::GameBoy {
+            return Some(cart.platforms());
+        }
+        Some(match (self.cgb, self.platform.as_deref()) {
+            (Some(Cgb::Only), _) => &["GBC"],
+            (Some(Cgb::Absent), _) | (None, Some("GB")) => &["GB"],
+            (Some(Cgb::Compatible), _) | (None, _) => cart.platforms(),
+        })
+    }
+
+    /// 这是**加 CGB 标志那一格之前**读的一份 GB / GBC 卡带头：它答不全平台不符那一问，识别该重读那段头。
+    #[must_use]
+    pub fn predates_cgb(&self) -> bool {
+        self.cart.as_deref() == Some(Cart::GameBoy.code()) && self.cgb.is_none()
+    }
 }
 
 /// 探一份内容的卡带头。
@@ -544,7 +595,12 @@ fn read_gameboy(facts: &mut Facts, head: &[u8]) -> bool {
     }
     facts.cart = Some(Cart::GameBoy.code().to_string());
     // CGB flag（`0x143`）：`$80` = 兼容单色的 CGB 卡，`$C0` = 仅 CGB。
-    let cgb = matches!(head.get(0x143), Some(0x80 | 0xC0));
+    facts.cgb = Some(match head.get(0x143) {
+        Some(0xC0) => Cgb::Only,
+        Some(0x80) => Cgb::Compatible,
+        _ => Cgb::Absent,
+    });
+    let cgb = facts.cgb != Some(Cgb::Absent);
     facts.platform = Some(if cgb { "GBC" } else { "GB" }.to_string());
     facts.version = head.get(0x14C).map(|byte| format!("v{byte}"));
     facts.region = head.get(0x14A).map(|byte| {
@@ -875,7 +931,7 @@ mod tests {
 
     #[test]
     fn bin_只在目录说_md_时才当卡带() {
-        // 真库里 `.bin` 有 46,920 条、140 GiB，绝大多数是光盘轨道与封包数据（挂账 D108）。
+        // 真库里 `.bin` 有四万多条、上百 GiB，绝大多数是光盘轨道与封包数据（挂账 D108）。
         assert_eq!(by_name("MD/游戏.bin", Some("MD")), Some(Cart::Genesis));
         assert_eq!(by_name("PS1/Track01.bin", Some("PS1")), None);
         assert_eq!(by_name("某处/x.bin", None), None);
@@ -941,6 +997,50 @@ mod tests {
             Some(true),
             "boot ROM 会验这一位，汉化者改了标题就得修好它"
         );
+    }
+
+    #[test]
+    fn gb_卡带头的_cgb_标志分出三种卡_各认哪几个平台() {
+        // 票 `core-answers-once/01`：只能在 GBC 上跑的只认 GBC，双模卡两个都认，GB 游戏只认 GB。
+        for (标志, cgb, 平台, 认的) in [
+            (0xC0, Cgb::Only, "GBC", &["GBC"][..]),
+            (0x80, Cgb::Compatible, "GBC", &["GB", "GBC"][..]),
+            (0x00, Cgb::Absent, "GB", &["GB"][..]),
+        ] {
+            let head = real::gbc_twine_with_cgb_flag(标志);
+            let facts = probe("x.gbc", &head, 2 << 20, Some("GB"));
+            assert_eq!(facts.cgb, Some(cgb), "0x143 = {标志:#04X}");
+            assert_eq!(facts.platform.as_deref(), Some(平台), "0x143 = {标志:#04X}");
+            assert_eq!(facts.platforms(), Some(认的), "0x143 = {标志:#04X}");
+            assert!(!facts.predates_cgb());
+            assert_eq!(
+                facts.checksum,
+                Some(true),
+                "换掉那个字节时头部校验和跟着修好了"
+            );
+        }
+    }
+
+    #[test]
+    fn 加_cgb_标志之前读的_gb_头_平台是_gb_的照_gb_游戏答_是_gbc_的两个都认() {
+        let 旧的 = |platform: &str| Facts {
+            cart: Some(Cart::GameBoy.code().to_string()),
+            platform: Some(platform.to_string()),
+            ..Facts::default()
+        };
+        assert!(旧的("GBC").predates_cgb());
+        assert_eq!(旧的("GB").platforms(), Some(&["GB"][..]));
+        assert_eq!(
+            旧的("GBC").platforms(),
+            Some(&["GB", "GBC"][..]),
+            "分不出兼容单色还是只能在 GBC 上跑：保守地两个都认"
+        );
+        // 别的头没有这一格，也就谈不上「之前读的」。
+        let nds = probe("x.nds", &real::NDS_GYAKUTEN_KENJI, 1 << 27, Some("NDS"));
+        assert_eq!(nds.cgb, None);
+        assert!(!nds.predates_cgb());
+        assert_eq!(nds.platforms(), Some(&["NDS"][..]));
+        assert_eq!(Facts::default().platforms(), None, "认不出是哪一种头");
     }
 
     #[test]

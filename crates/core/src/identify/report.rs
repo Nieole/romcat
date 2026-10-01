@@ -36,11 +36,13 @@ use std::fmt::Write as _;
 use rusqlite::params;
 use serde::Serialize;
 
-use crate::catalog::identify::{NOT_RUN_LABEL, PlatformConflict};
+use crate::catalog::identify::NOT_RUN_LABEL;
 use crate::catalog::{Catalog, CatalogError, State};
 use crate::classify::has_cjk;
 use crate::dat::DatRepo;
-use crate::report::{heading, pad, thousands};
+use crate::platform::Manifest;
+use crate::report::{Finding, heading, pad, thousands};
+use crate::scan::aggregate::{Limits, PlatformConflict};
 
 /// 一个平台一行。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -216,7 +218,9 @@ pub struct IdentifyReport {
     pub releases: u64,
     /// 这一轮回盘读了多少字节。
     pub read_bytes: u64,
-    /// **内部头说的平台与目录声明的平台对不上**的变体数（ADR-0011）。
+    /// **目录与内容平台不符**的条数（ADR-0011）——与库体检那一格**同一个数**：两处读的是同一份
+    /// 折统计（[`Catalog::aggregate`]），判据只在一处（`scan::aggregate::conflicting_platform`，
+    /// 票 `core-answers-once/01`）。
     pub platform_conflicts: u64,
     /// 其中几条的样子，好让人一眼看出是下错了还是放错了。
     pub conflict_examples: Vec<PlatformConflict>,
@@ -259,9 +263,15 @@ const EXAMPLES: usize = 3;
 impl IdentifyReport {
     /// 从中立库与 DAT 库折出报告。**不碰主库、不联网。**
     ///
+    /// `manifest` 是这份库按哪份平台清单分的目录：「目录与内容平台不符」那一栏要它。
+    ///
     /// # Errors
     /// 读库失败时返回错误。
-    pub fn build(catalog: &Catalog, repo: &DatRepo) -> Result<Self, CatalogError> {
+    pub fn build(
+        catalog: &Catalog,
+        repo: &DatRepo,
+        manifest: &Manifest,
+    ) -> Result<Self, CatalogError> {
         let mut report = Self {
             catalog: catalog.location().to_string(),
             dat: repo.location(),
@@ -369,8 +379,19 @@ impl IdentifyReport {
         report.official_chinese = counts.official;
         report.switch_kinds = catalog.switch_kinds()?;
         report.switch_read = catalog.switch_read()?;
-        report.platform_conflicts = catalog.platform_conflict_count()?;
-        report.conflict_examples = catalog.platform_conflicts(EXAMPLES)?;
+        // **与库体检那一格同一份数**：不另写一条查询去数——另写一条，判据就成了两处
+        // （ADR-0024；票 `core-answers-once/01` 收掉的正是那一条）。
+        let conflicts = catalog
+            .aggregate(
+                &Limits {
+                    max_examples: EXAMPLES,
+                    ..Limits::default()
+                },
+                manifest,
+            )?
+            .conflicts;
+        report.platform_conflicts = conflicts.total();
+        report.conflict_examples = conflicts.examples;
         report.nkit = counts.nkit;
         report.works = counts.works;
         report.releases = counts.releases;
@@ -570,19 +591,26 @@ impl IdentifyReport {
         if self.platform_conflicts > 0 {
             heading(
                 &mut out,
-                "内部头与目录声明的平台对不上（ADR-0011：目录只是强先验）",
+                &format!(
+                    "{}（ADR-0011：目录只是强先验）",
+                    Finding::PlatformConflicts.label()
+                ),
             );
             let _ = writeln!(
                 out,
-                "{}个变体：文件内容说的平台与它躺着的目录不一致。**这不是错误**，\
+                "{} 条：文件内容说的平台与它躺着的目录不一致，与库体检报告里这一项是同一份数\
+                 （库体检那一格只画其中还没做平台纠正的组）。**这不是错误**，\
                  是下错、放错或压缩包混装，也是库体检最该报告的产出之一",
                 thousands(self.platform_conflicts)
             );
             for it in &self.conflict_examples {
                 let _ = writeln!(
                     out,
-                    "         · {}｜目录说 {}，内部头说 {}（{}）",
-                    it.variant_key, it.declared, it.found, it.member
+                    "         · {}｜目录说 {}，内容是 {}（{}）",
+                    it.key,
+                    it.declared,
+                    it.implied,
+                    it.evidence.label()
                 );
             }
         }
