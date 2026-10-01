@@ -25,6 +25,7 @@ use romcat_core::platform::Manifest;
 use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::scrape::priority::VERDICT;
 use romcat_core::scrape::{AnchorKind, Field, Priorities};
+use romcat_core::site::Site;
 use romcat_core::sublibrary::{Rule, Sublibrary};
 use romcat_core::task::Handle;
 use romcat_core::testing::container::{ZipEntrySpec, zip_container};
@@ -436,6 +437,7 @@ fn 沉淀库已经说过话的那一条起头用它那一份事实_只把作品�
                 region: Some("Japan".to_string()),
                 serial: Some("DMG-APAJ-1".to_string()),
                 languages: Some("Ja,Zh-Hans".to_string()),
+                revision: Some("Rev 1".to_string()),
                 chinese: Some(ChineseMark::FanTranslated),
                 team: Some("漫游汉化".to_string()),
                 version: Some("v1.1".to_string()),
@@ -459,6 +461,8 @@ fn 沉淀库已经说过话的那一条起头用它那一份事实_只把作品�
     assert_eq!(facts.version.as_deref(), Some("v1.1"));
     assert_eq!(facts.serial.as_deref(), Some("DMG-APAJ-1"));
     assert_eq!(facts.chinese, Some(ChineseMark::FanTranslated));
+    // 裁决记着的**修订**也原样抄回去（票 `verdict-store-and-sync/04`）。
+    assert_eq!(facts.revision.as_deref(), Some("Rev 1"));
 }
 
 #[test]
@@ -499,7 +503,7 @@ fn 只列出有冲突的字段_两边一样的与对方空着的都不列() {
 
 #[test]
 fn 选了别的作品那一格_记成裁决挂到保留作品名下() {
-    let mut 现场 = 建现场();
+    let 现场 = 建现场();
     let 冲突 = merge::conflicts(&现场.catalog, &Priorities::builtin(), 甲, &[乙.to_string()])
         .expect("算得出冲突");
     let 年份 = 冲突
@@ -507,16 +511,10 @@ fn 选了别的作品那一格_记成裁决挂到保留作品名下() {
         .find(|one| one.field == Field::Year)
         .expect("有年份这一行");
     let offer = 年份.others.first().expect("对方说了话").clone();
-    merge::adopt(
-        &mut 现场.catalog,
-        &Priorities::builtin(),
-        甲,
-        Field::Year,
-        &offer,
-    )
-    .expect("写得进去");
+    let mut site = Site::in_memory(现场.catalog, 现场.store, "库");
+    merge::adopt(&mut site, &Priorities::builtin(), 甲, Field::Year, &offer).expect("写得进去");
 
-    let 值 = 现场
+    let 值 = site
         .catalog
         .scraped_values(AnchorKind::Work.label(), 甲)
         .expect("读得动");
@@ -525,20 +523,41 @@ fn 选了别的作品那一格_记成裁决挂到保留作品名下() {
         .find(|value| value.field == Field::Year.label() && value.source == VERDICT)
         .expect("该有一条源是裁决的年份");
     assert_eq!(那一格.value, "1996");
+    // 它是一格**字段修改**：原件在沉淀库里，删库重扫之后照它重建回来（票 `verdict-store-and-sync/02`）。
+    assert!(
+        site.store
+            .verdict_values("库")
+            .expect("读得动")
+            .iter()
+            .any(|one| one.subject == 甲
+                && one.field == Field::Year.label()
+                && one.value == "1996"),
+        "合并时改用的那一格没落进沉淀库",
+    );
 }
 
 #[test]
 fn 被合并作品的名字留作别名_源是裁决所以重折标题不碰它() {
-    let mut 现场 = 建现场();
-    merge::keep_aliases(&mut 现场.catalog, 甲, &[乙.to_string()]).expect("写得进去");
-    现场.catalog.clear_titles().expect("重折一遍标题集合");
+    let 现场 = 建现场();
+    let mut site = Site::in_memory(现场.catalog, 现场.store, "库");
+    merge::keep_aliases(&mut site, 甲, &[乙.to_string()]).expect("写得进去");
+    site.catalog.clear_titles().expect("重折一遍标题集合");
 
-    let 叫法 = 现场.catalog.titles_of(甲).expect("读得动");
+    let 叫法 = site.catalog.titles_of(甲).expect("读得动");
     assert!(
         叫法
             .iter()
             .any(|row| row.value == 乙 && row.source == VERDICT),
         "被合并作品的名字没留作别名、或者被重折冲掉了：{叫法:?}",
+    );
+    // 它是**亲手加的叫法**：原件在沉淀库里，删库重扫之后照它重建回来（票 `verdict-store-and-sync/01`）。
+    assert!(
+        site.store
+            .own_titles("库")
+            .expect("读得动")
+            .iter()
+            .any(|row| row.work == 甲 && row.value == 乙),
+        "留作别名的那一条没落进沉淀库",
     );
 }
 

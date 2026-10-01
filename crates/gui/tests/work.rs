@@ -2096,3 +2096,243 @@ fn 详情页状态块那一行列得出合集_按叉就地移出() {
         }
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 字段修改住沉淀库（票 `verdict-store-and-sync/02`）：关掉窗口再打开，改过的那几格照旧
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 那一个还没认出作品的变体：详情页上改的是它自己那几格（变体级字段）。
+const 散变体: &str = "主库/SFC/某游戏.zip";
+
+/// 一份**落在磁盘上**的小库，只有 [`散变体`] 一个变体：简介一家说法，类型两家说法。交回工作区与库文件。
+///
+/// 非落盘不可：「关掉再打开」要的是**开现场那一条正门**（`Site::open_file`）——两份库在盘上，
+/// 开现场时照沉淀库把中立库里那几格投影重建一遍。只活在内存里的库关掉就没了，什么都验不了。
+fn 落盘的小库() -> (romcat_core::testing::TempDir, std::path::PathBuf) {
+    use romcat_core::catalog::Catalog;
+    use romcat_core::catalog::scrape::{Harvested, HarvestedValue};
+    use romcat_core::platform::Manifest;
+    use romcat_core::scrape::{AnchorKind, Field};
+    use romcat_core::shape::{Role, SINGLE_FILE_RULE, Variant};
+    use romcat_core::workspace::{self, Slug};
+
+    let 工作区 = romcat_core::testing::temp_dir("gui-work-fields");
+    let 库文件 = workspace::catalog_path(工作区.path(), Slug::Named("小库"));
+    let mut catalog = Catalog::create(&库文件, "小库").expect("建得出中立库");
+    romcat_core::catalog::roots::add_root(&catalog, None, "主库", std::path::Path::new("/主库"))
+        .expect("建得出根");
+    catalog
+        .replace_variants(
+            &[Variant {
+                main_key: 散变体.to_string(),
+                platform: Some("SFC".to_string()),
+                rule: SINGLE_FILE_RULE.to_string(),
+                manual: false,
+                files: 1,
+                bytes: 4096,
+                unreadable_files: 0,
+                members: vec![(散变体.to_string(), Role::Main)],
+                key: 散变体.to_string(),
+            }],
+            1,
+            &Manifest::default(),
+        )
+        .expect("写得进变体");
+    let 采到 = |source: &str, values: &[(Field, &str)]| Harvested {
+        anchor: AnchorKind::Variant.label().to_string(),
+        subject: 散变体.to_string(),
+        source: source.to_string(),
+        input: "测试".to_string(),
+        values: values
+            .iter()
+            .map(|(field, value)| HarvestedValue {
+                field: field.label().to_string(),
+                value: (*value).to_string(),
+                evidence: "测试摆的".to_string(),
+            })
+            .collect(),
+        media: Vec::new(),
+    };
+    catalog
+        .put_scraped(&[
+            采到(
+                "ScreenScraper",
+                &[(Field::Description, "一句简介。"), (Field::Genre, "Action")],
+            ),
+            采到("中文离线源", &[(Field::Genre, "动作")]),
+        ])
+        .expect("写得进刮削结果");
+    (工作区, 库文件)
+}
+
+/// 照开现场那一条正门开一扇主窗口，打开 [`散变体`] 的详情页、停在元数据那一面，交出那一帧画出来的字。
+fn 开窗(
+    ctx: &egui::Context,
+    工作区: &std::path::Path,
+    库文件: &std::path::Path,
+) -> (App, String) {
+    let site = romcat_core::site::Site::open_file(工作区, 库文件, None).expect("开得出现场");
+    let mut app = App::new(site, 工作区.to_path_buf());
+    app.show_view(View::Browse);
+    跑(ctx, &mut app, 2);
+    {
+        let (browse, site) = app.browse_and_site();
+        browse.open_work(&site.catalog, &WorkAnchor::Loose(散变体.to_string()));
+        browse.open_page(Tab::Metadata);
+    }
+    headless::frame(ctx, headless::input(), |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&headless::frame(ctx, headless::input(), |ui| app.ui(ui)));
+    (app, 屏上)
+}
+
+/// 核心库说 [`散变体`] 这一格眼下写出去的是什么（与详情页、导出同一处）。
+fn 这一格(
+    app: &mut App,
+    field: romcat_core::scrape::Field,
+) -> Option<romcat_core::scrape::priority::Said> {
+    let (_, site) = app.browse_and_site();
+    romcat_core::scrape::priority::entry_fields(
+        &site.catalog,
+        romcat_core::scrape::AnchorKind::Variant,
+        散变体,
+        "SFC",
+        Some(散变体),
+        &Priorities::builtin(),
+    )
+    .expect("读得出")
+    .into_iter()
+    .find(|one| one.field == field)
+    .expect("这一格在")
+    .shown
+}
+
+#[test]
+fn 详情页改过的字段_关掉窗口再打开值照旧_撤掉的也不回来() {
+    use romcat_core::scrape::Field;
+    use romcat_core::scrape::priority::{Said, VERDICT};
+
+    let 裁决 = |value: &str| {
+        Some(Said {
+            source: Some(VERDICT.to_string()),
+            values: vec![value.to_string()],
+        })
+    };
+    let (工作区, 库文件) = 落盘的小库();
+    let ctx = headless::context();
+    let (mut app, 屏上) = 开窗(&ctx, 工作区.path(), &库文件);
+    assert!(
+        有这一段(&屏上, "一句简介。") && 有这一段(&屏上, "其他 1 个来源 ▾"),
+        "前提：元数据那一面摆着简介，类型那一格还有另一家说法：\n{屏上}"
+    );
+
+    // 一、类型那一格「使用这个值」：改用另一家说的那一句，记为手动修改。
+    按正好(&ctx, &mut app, "其他 1 个来源 ▾");
+    按正好(&ctx, &mut app, "使用这个值");
+    let 改用的 = 这一格(&mut app, Field::Genre);
+    assert!(
+        改用的
+            .as_ref()
+            .is_some_and(|said| said.source.as_deref() == Some(VERDICT)),
+        "「使用这个值」没记成手动修改：{改用的:?}"
+    );
+
+    // 二、「编辑 → 保存」：简介那一框改成手写的一句。
+    跑(&ctx, &mut app, 2);
+    按正好(&ctx, &mut app, "编辑");
+    选中简介那一框(&ctx, &mut app, "一句简介。");
+    带着事件跑一帧(
+        &ctx,
+        &mut app,
+        vec![egui::Event::Text("手写的简介".to_string())],
+    );
+    按正好(&ctx, &mut app, "保存");
+    assert_eq!(这一格(&mut app, Field::Description), 裁决("手写的简介"));
+
+    // 三、**关掉窗口再打开**：新的现场、新的主窗口，两格照旧是改过的样子。
+    drop(app);
+    let ctx = headless::context();
+    let (mut app, 屏上) = 开窗(&ctx, 工作区.path(), &库文件);
+    assert_eq!(
+        这一格(&mut app, Field::Description),
+        裁决("手写的简介"),
+        "关掉再打开，保存过的简介没了"
+    );
+    assert_eq!(
+        这一格(&mut app, Field::Genre),
+        改用的,
+        "关掉再打开，改用的那一句没了"
+    );
+    assert!(
+        有这一段(&屏上, "手写的简介"),
+        "再打开的详情页上没画改过的简介：\n{屏上}"
+    );
+
+    // 四、「撤销手动修改」（屏上头一颗是简介那一格的），关掉再打开：撤掉的不回来。
+    按正好(&ctx, &mut app, "撤销手动修改");
+    assert_eq!(
+        这一格(&mut app, Field::Description).and_then(|said| said.source),
+        Some("ScreenScraper".to_string()),
+        "撤销之后简介没回到数据源"
+    );
+    drop(app);
+    let ctx = headless::context();
+    let (mut app, _) = 开窗(&ctx, 工作区.path(), &库文件);
+    assert_eq!(
+        这一格(&mut app, Field::Description).and_then(|said| said.source),
+        Some("ScreenScraper".to_string()),
+        "关掉再打开，撤掉的手动修改又回来了"
+    );
+    assert_eq!(
+        这一格(&mut app, Field::Genre),
+        改用的,
+        "撤简介不该碰类型那一格"
+    );
+
+    // 五、「编辑」里把类型那一框清空再保存——那也是撤掉手动修改；关掉再打开，它也不回来。
+    let 类型写着 = 改用的
+        .as_ref()
+        .and_then(|said| said.values.first().cloned())
+        .expect("类型那一格写着改用的那一句");
+    跑(&ctx, &mut app, 2);
+    按正好(&ctx, &mut app, "编辑");
+    // 头上那一块信息里也写着类型，先画的是它；编辑框在底下，点屏上最后一处。
+    点最后一个(&ctx, &mut app, &类型写着);
+    let 全选再删 = |key: egui::Key, modifiers: egui::Modifiers| egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    };
+    带着事件跑一帧(
+        &ctx,
+        &mut app,
+        vec![全选再删(egui::Key::A, egui::Modifiers::COMMAND)],
+    );
+    带着事件跑一帧(
+        &ctx,
+        &mut app,
+        vec![全选再删(egui::Key::Backspace, egui::Modifiers::NONE)],
+    );
+    let 屏上 = 带着事件跑一帧(&ctx, &mut app, Vec::new());
+    assert!(
+        有这一段(&屏上, "已修改 1 个字段。"),
+        "类型那一框没清空：\n{屏上}"
+    );
+    按正好(&ctx, &mut app, "保存");
+    let 清空之后 = 这一格(&mut app, Field::Genre);
+    assert!(
+        清空之后
+            .as_ref()
+            .is_some_and(|said| said.source.as_deref() != Some(VERDICT)),
+        "清空类型那一框保存之后，该回到数据源说的：{清空之后:?}"
+    );
+    drop(app);
+    let ctx = headless::context();
+    let (mut app, _) = 开窗(&ctx, 工作区.path(), &库文件);
+    assert_eq!(
+        这一格(&mut app, Field::Genre),
+        清空之后,
+        "关掉再打开，清空撤掉的手动修改又回来了"
+    );
+}

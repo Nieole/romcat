@@ -26,10 +26,11 @@
 //! 中立库里识别落下的那一行读回来（`release` 那几格加 `identification.edition`），
 //! **只把 [`Facts::work`] 换掉**，别的原样抄回去。
 //!
-//! ⚠️ **DAT 条目名尾巴上的修订标记（`release.revision`）过不来**：裁决落成的发行版行
-//! 由 [`Projector`](crate::identify::Projector) 建，那一处刻意不写 `revision`（几个变体
-//! 共用一行，写进去会让头一个落库的盖住其余几个），而 [`Facts`] 里没有装它的格子。
-//! 挂单 `Q1010`，与 `Q993`／`Q994` 同一族。
+//! **DAT 条目名尾巴上的修订**（`release.revision`，`(Rev 1)`）也在抄回去的那几格里
+//! （[`Facts::revision`]，票 `verdict-store-and-sync/04`）：裁决落成的发行版行由
+//! [`Projector`](crate::identify::Projector) 照裁决重建，裁决不记修订的话，合并之后详情页
+//! 「版本」那一格就从 `Rev 1` 退回「—」（原挂单 `Q1010`）。修订是发行版那一层的事实，进那一行的
+//! 去重键；汉化第几版（`identification.edition`）照旧不进——那是变体那一层的。
 //!
 //! ### 二、**条目不从待确认队列里取**
 //!
@@ -57,6 +58,7 @@ use crate::dat::chinese::ChineseMark;
 use crate::identify;
 use crate::scrape::priority::{Priorities, Said, VERDICT, entry_fields};
 use crate::scrape::{AnchorKind, Field};
+use crate::site::{Site, WriteError};
 use crate::title::{TitleKind, TitleSet, language_of};
 use crate::verdict::{Decision, Facts, Store, Verdict, VerdictError};
 
@@ -278,7 +280,7 @@ pub fn plan(
             variant: row,
             state,
             reason,
-            // **候选不读**：合并不挑候选，而真库上那是 15 万行。
+            // **候选不读**：合并不挑候选，而真库上那是十几万行（见台账 `docs/library-facts.md`）。
             candidates: Vec::new(),
             print: prints.get(&key).cloned(),
         };
@@ -308,8 +310,10 @@ pub fn plan(
 ///
 /// 1. **沉淀库已经对这份内容说过话**——用它那一份。那是人亲手定的，比库里算出来的权威。
 ///    说的是「没有发行版」或者「认不出」的，那两档没有事实可抄，落回第二档。
-/// 2. **没裁过**——从中立库里识别落下的那一行读：发行版那几格（平台、地区、序列号、语言）、
-///    已接受候选上的中文身份、`identification.edition` 记着的**第几版**。
+/// 2. **没裁过**——从中立库里识别落下的那一行读：发行版那几格（平台、地区、序列号、语言、
+///    **修订**）、已接受候选上的中文身份、`identification.edition` 记着的**第几版**。
+///    修订不抄的话，合并之后发行版那一行照裁决重建、没有修订，详情页「版本」那一格就从
+///    `Rev 1` 退回「—」（挂单 `Q1010`）。
 fn facts_of(
     catalog: &Catalog,
     store: &Store,
@@ -347,6 +351,9 @@ fn facts_of(
         languages: release
             .as_ref()
             .and_then(|release| release.languages.clone()),
+        revision: release
+            .as_ref()
+            .and_then(|release| release.revision.clone()),
         chinese,
         // **汉化组**只活在沉淀库里（[`Projector`](crate::identify::Projector) 不投影它），
         // 没裁过的变体身上本来就没有这一格。
@@ -607,32 +614,33 @@ pub fn conflicts(
 
 /// 第三步选中了别的作品那一格：把它记到保留作品名下。
 ///
-/// **走的是作品详情页「改用另一个来源的值」同一条路**（`put_verdict_value` /
-/// `put_titles`，源记**裁决**）：手动改写优先于所有数据源，重新刮削不覆盖。
-/// 显示标题另走标题集合——那一格不是刮削字段，它由 [`choose`](crate::title::choose) 挑。
+/// **走的是作品详情页「改用另一个来源的值」同一条路**（字段修改 [`Site::put_verdict_value`] /
+/// 亲手加的叫法，源记**裁决**，原件都落沉淀库）：手动改写优先于所有数据源，重新刮削不覆盖，
+/// 删库重扫之后还在。显示标题另走标题集合——那一格不是刮削字段，它由 [`choose`](crate::title::choose) 挑；
+/// 记下的那一条是**亲手加的叫法**（[`Site::add_own_titles`]）。
 ///
 /// ⚠️ **它不在这一批裁决里**，所以[撤销这一批](super::undo_batch)不会把它退回去；
 /// 要改回来在作品详情页元数据那一面上原地撤（挂单 `Q1012`）。
 ///
 /// # Errors
-/// 写中立库失败时返回错误。
+/// 写两份库失败时返回错误。
 pub fn adopt(
-    catalog: &mut Catalog,
+    site: &mut Site,
     priorities: &Priorities,
     keep: &str,
     field: Field,
     offer: &Offer,
-) -> Result<(), CatalogError> {
+) -> Result<(), WriteError> {
     let why = format!("{}：改用《{}》的值", Kind::Merge.label(), offer.work);
     if field == Field::Title {
         let chosen = crate::title::choose(
             &TitleSet {
                 work: offer.work.clone(),
-                entries: catalog.titles_of(&offer.work)?,
+                entries: site.catalog.titles_of(&offer.work)?,
             },
             priorities,
         );
-        return catalog.put_titles(&[TitleRow {
+        return site.add_own_titles(&[TitleRow {
             work: keep.to_string(),
             value: chosen.display,
             language: chosen.language,
@@ -647,7 +655,7 @@ pub fn adopt(
             seen: 1,
         }]);
     }
-    catalog.put_verdict_value(
+    site.put_verdict_value(
         AnchorKind::Work,
         keep,
         field,
@@ -659,18 +667,15 @@ pub fn adopt(
 /// 把被合并作品的名字**留作别名**：搜这些名字仍能找到合并后的作品。
 ///
 /// 记进保留作品的标题集合、源是**裁决**——重新整理标题时一行都不碰
-/// （`Catalog::clear_titles`）。
+/// （`Catalog::clear_titles`）；它们是**亲手加的叫法**，原件落沉淀库，删库重扫之后还在
+/// （[`Site::add_own_titles`]）。
 ///
 /// ⚠️ 同 [`adopt`]：**它不在这一批裁决里**，撤销这一批不会把它去掉；
 /// 要去掉在作品详情页标题那一面上删（挂单 `Q1012`）。
 ///
 /// # Errors
-/// 写中立库失败时返回错误。
-pub fn keep_aliases(
-    catalog: &mut Catalog,
-    keep: &str,
-    names: &[String],
-) -> Result<(), CatalogError> {
+/// 写两份库失败时返回错误。
+pub fn keep_aliases(site: &mut Site, keep: &str, names: &[String]) -> Result<(), WriteError> {
     let rows: Vec<TitleRow> = names
         .iter()
         .filter(|name| name.as_str() != keep)
@@ -692,7 +697,7 @@ pub fn keep_aliases(
             seen: 1,
         })
         .collect();
-    catalog.put_titles(&rows)
+    site.add_own_titles(&rows)
 }
 
 /// **「以后扫描到的也自动归入」还做不到**，屏上那个勾选框不可选，写的就是这一句。

@@ -11,7 +11,7 @@
 //! - **变体**是磁盘上一份实际可玩的东西，由**成型**产出（[`crate::shape`]），现在就是满的。
 //! - **发行版**指向一个作品；`platform` 与 `languages` 分开存，是 ADR-0019 那道**世代裂缝**
 //!   的落地形状：卡带与光盘世代的官中是**独立一条发行版**（有独立序列号、DAT 里独立一条），
-//!   数字世代的中文只是**同一条发行版的语言属性**（Switch 港服与美服 69.4% 共用 TitleID）。
+//!   数字世代的中文只是**同一条发行版的语言属性**（Switch 港服与美服近七成共用 TitleID，见台账 `docs/library-facts.md`、ADR-0019）。
 //!   一张表同时装得下两侧，不必为数字世代造现实中不存在的发行版。
 //! - **变体到发行版的链接可空**，而且**空本身是信息**：同人移植与 homebrew 没有任何官方
 //!   发行版，直接挂在作品下——没有发行版链接这件事就告诉识别管线「别拿它去撞 DAT」。
@@ -38,6 +38,16 @@ use super::{Catalog, CatalogError};
 use crate::platform::Manifest;
 use crate::scan::aggregate::ShapingAcc;
 use crate::shape::{Role, Variant};
+
+/// 旧中立库里**还没搬进沉淀库**的首选变体与亲手加的叫法
+/// （[`Catalog::stranded_preferred_and_titles`]）。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PreferredAndTitles {
+    /// `(作品名, 平台)` → 那个变体的键。
+    pub(crate) preferred: BTreeMap<(String, String), String>,
+    /// `source = 裁决` 的那些叫法。
+    pub(crate) titles: Vec<super::TitleRow>,
+}
 
 /// 三层内容层级与合集的表。
 pub(super) const CONTENT_SCHEMA: &str = "\
@@ -66,7 +76,7 @@ CREATE TABLE IF NOT EXISTS work(
 ) STRICT;
 
 -- **按名字找现成的那一行**是重跑识别的热路径（`Catalog::work_named`）：真库上一趟要问
--- 9,226 次，没有它就是 9,226 次全表扫。实测（debug、内存库、9,226 行）**13.52 秒 →
+-- 九千多次，没有它就是九千多次全表扫。实测（debug、内存库、真库那么多行（见台账 `docs/library-facts.md`））**13.52 秒 →
 -- 0.639 秒**。删了重建那条老路子付不起也看不见这笔钱——那时表是从空的长起来的；
 -- 改成复用之后它一开始就是满的，这一句才必须在。
 --
@@ -122,7 +132,7 @@ CREATE INDEX IF NOT EXISTS variant_platform ON variant(platform);
 -- 这两条索引不是为了查得快，是为了**删得动**：`rusqlite` 的 bundled SQLite
 -- 编译时开了 `SQLITE_DEFAULT_FOREIGN_KEYS=1`，外键检查默认是**开着**的。
 -- 于是重跑识别删掉自己上一轮建的一万多条发行版时，每删一行都要在 variant 上找
--- 「还有没有人指着我」——没有索引就是一次全表扫描，实测 46,444 个变体上要 3 分半。
+-- 「还有没有人指着我」——没有索引就是一次全表扫描，实测真库四万多个变体（见台账 `docs/library-facts.md`）上要 3 分半。
 CREATE INDEX IF NOT EXISTS variant_work ON variant(work_id);
 CREATE INDEX IF NOT EXISTS variant_release ON variant(release_id);
 
@@ -142,11 +152,11 @@ CREATE INDEX IF NOT EXISTS variant_bytes_key ON variant(bytes, key);
 --
 -- 上面四条接的是变体表的 `ORDER BY`；这一条接的是**分组**。主列表按「一个作品一行」
 -- 出行，分组键是 `(work_id, 没认出作品时那个变体自己的键)`——`work_id` 上虽然已经有
--- `variant_work`，但第二项是个**表达式**，索引里没有，于是 SQLite 只能把 46,428 行
+-- `variant_work`，但第二项是个**表达式**，索引里没有，于是 SQLite 只能把四万多行（见台账 `docs/library-facts.md`）
 -- 全塞进一口临时 b 树里排一遍才分得出组。把那个表达式原样写进索引，那口 b 树就没了
 -- （查询计划从 `USE TEMP B-TREE FOR GROUP BY` 变成 `SCAN variant USING INDEX`）。
 --
--- 单把这一条加上、别的都不动，实测（release，46,428 个变体收敛成 10,978 行）：
+-- 单把这一条加上、别的都不动，实测（release，真库四万多个变体收敛成一万出头行，见台账）：
 -- 数一次总行数与取一页那条查询**各快一倍以上**。整条路的改前改后见
 -- `docs/library-facts.md`「作品级主列表翻一页要多久」，量的命令是 `--bench-paging`。
 --
@@ -532,7 +542,7 @@ impl Catalog {
                 continue;
             }
             // `len` 是 `NULL` 就是**元数据读不到**（ADR-0021），不是 0 字节——
-            // 库里另有 4,317 个真正的空文件，塌成一个数两边都会说谎。
+            // 库里另有四千多个真正的空文件（见台账 `docs/library-facts.md`），塌成一个数两边都会说谎。
             let len: Option<i64> = row.get(2).map_err(|source| self.err(source))?;
             out.push(crate::shape::Entry {
                 key: row.get(0).map_err(|source| self.err(source))?,
@@ -552,7 +562,7 @@ impl Catalog {
     ///
     /// **不走 [`Self::open`] / [`Self::open_read_only`]**：那两条先核结构版本、对不上就不往下读，
     /// 而结构版本对不上的旧库恰恰最要这一步——那句提示叫人删掉它重扫，删之前纠正得先救出来
-    /// （`site::rescue_shaping_overrides`）。这里只读，一个字都不写。
+    /// （`site::rescue`）。这里只读，一个字都不写。
     ///
     /// 交出 `None` 的两种情形：那张表根本不在（那张票之后建的库），或者已经搬过
     /// （[`Self::mark_shaping_overrides_carried`] 记下过）。**旧表一行不删**：搬走不是删掉，
@@ -563,21 +573,7 @@ impl Catalog {
     pub(crate) fn stranded_shaping_overrides(
         file: &std::path::Path,
     ) -> Result<Option<BTreeMap<String, String>>, CatalogError> {
-        let path = crate::path::display(file);
-        let flags =
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let conn = rusqlite::Connection::open_with_flags(file, flags).map_err(|source| {
-            CatalogError::Sqlite {
-                path: path.clone(),
-                source,
-            }
-        })?;
-        let raw = Self {
-            conn,
-            file: Some(file.to_path_buf()),
-            path,
-        };
-        raw.batch("PRAGMA busy_timeout = 10000;")?;
+        let raw = Self::raw_read_only(file)?;
         if !raw.has_table("shaping_override")? {
             return Ok(None);
         }
@@ -598,6 +594,112 @@ impl Catalog {
             );
         }
         Ok(Some(out))
+    }
+
+    /// 一份中立库**文件**里、票 `verdict-store-and-sync/01` 之前记下而**还没搬进沉淀库**的
+    /// **首选变体**与**亲手加的叫法**（`title` 里 `source = 裁决` 的行）。**不管那份库的结构版本
+    /// 对不对得上**——做法与 [`Self::stranded_shaping_overrides`] 一个字不差，理由也同一条：
+    /// 结构版本对不上的旧库恰恰最要这一步。只读，一个字都不写。
+    ///
+    /// 交出 `None` 的两种情形：已经搬过（[`Self::mark_preferred_and_titles_carried`] 记下过），
+    /// 或者两张表一张都不在。**旧行一行不删**：那两张表从此是沉淀库的**投影**，开现场时照
+    /// 沉淀库重建（`site::reconcile`）。
+    ///
+    /// # Errors
+    /// 文件打不开或读库失败时返回错误。
+    pub(crate) fn stranded_preferred_and_titles(
+        file: &std::path::Path,
+    ) -> Result<Option<PreferredAndTitles>, CatalogError> {
+        let raw = Self::raw_read_only(file)?;
+        let has_preferred = raw.has_table("preferred_variant")?;
+        let has_title = raw.has_table("title")?;
+        if !has_preferred && !has_title {
+            return Ok(None);
+        }
+        if raw.has_table("meta")?
+            && raw
+                .meta_get(MetaKey::PreferredAndTitlesCarriedAt)?
+                .is_some()
+        {
+            return Ok(None);
+        }
+        let mut out = PreferredAndTitles::default();
+        if has_preferred {
+            out.preferred = raw.preferred_variants()?;
+        }
+        if has_title {
+            out.titles = raw.verdict_titles()?;
+        }
+        Ok(Some(out))
+    }
+
+    /// 记下「旧中立库里的首选变体与亲手加的叫法已经搬进沉淀库了」：往后
+    /// [`Self::stranded_preferred_and_titles`] 不再交出它们——人在沉淀库里撤掉的，不许被旧行
+    /// 又带回来。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub(crate) fn mark_preferred_and_titles_carried(&self) -> Result<(), CatalogError> {
+        self.meta_set(
+            MetaKey::PreferredAndTitlesCarriedAt,
+            &super::now_secs().to_string(),
+        )
+    }
+
+    /// 一份中立库**文件**里、票 `verdict-store-and-sync/02` 之前记下而**还没搬进沉淀库**的
+    /// **详情页上改过的字段**（`scrape_value` 里 `source = 裁决` 的行）。**不管那份库的结构版本
+    /// 对不对得上**——做法与 [`Self::stranded_preferred_and_titles`] 一个字不差。只读，一个字都不写。
+    ///
+    /// 交出 `None` 的两种情形：已经搬过（[`Self::mark_verdict_values_carried`] 记下过），或者那张表
+    /// 根本不在。**旧行一行不删**：那几行从此是沉淀库的**投影**，开现场时照沉淀库重建
+    /// （`site::reconcile`）。
+    ///
+    /// # Errors
+    /// 文件打不开或读库失败时返回错误。
+    pub(crate) fn stranded_verdict_values(
+        file: &std::path::Path,
+    ) -> Result<Option<Vec<super::scrape::VerdictValue>>, CatalogError> {
+        let raw = Self::raw_read_only(file)?;
+        if !raw.has_table("scrape_value")? {
+            return Ok(None);
+        }
+        if raw.has_table("meta")? && raw.meta_get(MetaKey::VerdictValuesCarriedAt)?.is_some() {
+            return Ok(None);
+        }
+        raw.verdict_values().map(Some)
+    }
+
+    /// 记下「旧中立库里详情页上改过的字段已经搬进沉淀库了」：往后
+    /// [`Self::stranded_verdict_values`] 不再交出它们——人在沉淀库里撤掉的，不许被旧行又带回来。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub(crate) fn mark_verdict_values_carried(&self) -> Result<(), CatalogError> {
+        self.meta_set(
+            MetaKey::VerdictValuesCarriedAt,
+            &super::now_secs().to_string(),
+        )
+    }
+
+    /// 只读地开一份中立库**文件**，**不核结构版本**（不走 [`Self::open_read_only`]）：
+    /// 搬旧东西那几支要读的，恰恰是结构版本对不上、开不进去的旧库。
+    fn raw_read_only(file: &std::path::Path) -> Result<Self, CatalogError> {
+        let path = crate::path::display(file);
+        let flags =
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = rusqlite::Connection::open_with_flags(file, flags).map_err(|source| {
+            CatalogError::Sqlite {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        let raw = Self {
+            conn,
+            file: Some(file.to_path_buf()),
+            path,
+        };
+        raw.batch("PRAGMA busy_timeout = 10000;")?;
+        Ok(raw)
     }
 
     /// 这份库里有没有叫 `name` 的表。
@@ -840,7 +942,7 @@ impl Catalog {
     /// 一批变体的**文件成员**，连它们在主库里的大小。**同步计划器的原料**。
     ///
     /// 一趟顺读整张成员表、在内存里筛，而不是逐个变体查一次，也不是把几千个键拼成
-    /// 一条 `IN`：真库上 216,203 条成员对 46,444 个变体，一条规则选中上千个变体是
+    /// 一条 `IN`：真库上二十多万条成员对四万多个变体（见台账 `docs/library-facts.md`），一条规则选中上千个变体是
     /// 常态，逐个查就是上千次往返，而拼 `IN` 会撞上 SQLite 的绑定参数上限。
     ///
     /// **非文件成员照样返回**（`is_file` 为假），由调用方决定怎么处置——目录树变体的
@@ -879,8 +981,8 @@ impl Catalog {
                 variant_key,
                 key: row.get(1).map_err(|source| self.err(source))?,
                 is_file: kind == super::KIND_FILE,
-                // **读不到就是 `None`，不是 0**（ADR-0021）：库里另有 4,317 个
-                // 真正的空文件，混在一起两个数都会说谎。
+                // **读不到就是 `None`，不是 0**（ADR-0021）：库里另有四千多个
+                // 真正的空文件（见台账 `docs/library-facts.md`），混在一起两个数都会说谎。
                 len: if readable == 0 {
                     None
                 } else {
@@ -1053,20 +1155,20 @@ impl Catalog {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// 找一条形状一模一样的**发行版**；没有就是 `None`。
+    /// 找这个作品底下一条形状一模一样的**发行版**（`said` 那五格逐格相等，**修订**也算一格）；
+    /// 没有就是 `None`。
     ///
     /// **裁决**拿它跨调用去重：`romcat triage decide` 一次一批，两批之间内存里那张
     /// 去重表是空的，同一次发行被第二批裁决点到时不查库就会多建一行。
+    ///
+    /// 修订算一格：DAT 里 `(Rev 1)` 与不带修订的那一条是两条条目、两次发行（`identify::naming`）。
     ///
     /// # Errors
     /// 读库失败时返回错误。
     pub fn release_like(
         &self,
         work_id: i64,
-        platform: Option<&str>,
-        region: Option<&str>,
-        serial: Option<&str>,
-        languages: Option<&str>,
+        said: &NewRelease<'_>,
     ) -> Result<Option<i64>, CatalogError> {
         self.conn
             .query_row(
@@ -1076,8 +1178,16 @@ impl Catalog {
                    AND COALESCE(region, '')    = COALESCE(?3, '')
                    AND COALESCE(serial, '')    = COALESCE(?4, '')
                    AND COALESCE(languages, '') = COALESCE(?5, '')
+                   AND COALESCE(revision, '')  = COALESCE(?6, '')
                  ORDER BY id LIMIT 1",
-                params![work_id, platform, region, serial, languages],
+                params![
+                    work_id,
+                    said.platform,
+                    said.region,
+                    said.serial,
+                    said.languages,
+                    said.revision
+                ],
                 |row| row.get(0),
             )
             .optional()
@@ -1135,7 +1245,7 @@ impl Catalog {
     /// **这个变体属于哪个作品**：作品锚点上那个名字；识别还没认出来时是 `None`。
     ///
     /// 单开一条而不是让调用方读一遍 [`work_names`](Self::work_names)：只想问一个变体的
-    /// 时候，那是把 9,226 行整份读进内存去取其中一行。
+    /// 时候，那是把九千多行（见台账 `docs/library-facts.md`）整份读进内存去取其中一行。
     ///
     /// # Errors
     /// 读库失败时返回错误。
@@ -1156,7 +1266,7 @@ impl Catalog {
     /// 全部**发行版**：id → 那一行。
     ///
     /// 一次读完而不是逐条查：**标题集合**要为每个变体问一次「它基于的那条发行版是什么
-    /// 地区、什么语言」，真库上那是 46,444 次查询，而发行版本身只有 18,571 行。
+    /// 地区、什么语言」，真库上那是四万多次查询，而发行版本身不到两万行（见台账 `docs/library-facts.md`）。
     ///
     /// # Errors
     /// 读库失败时返回错误。
@@ -1444,7 +1554,7 @@ impl Catalog {
     /// 全库的合集成员关系：变体的键 → 它在哪几个合集里。
     ///
     /// 与逐个变体问一遍 [`Self::collections_of`] 的差别不是风格问题：**子库的选择集**
-    /// 要在 46,444 个变体上求值，逐个查等于把这条连接跑四万多遍。
+    /// 要在四万多个变体（见台账 `docs/library-facts.md`）上求值，逐个查等于把这条连接跑四万多遍。
     ///
     /// # Errors
     /// 读库失败时返回错误。

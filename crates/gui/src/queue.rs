@@ -2,8 +2,7 @@
 //!
 //! ## 为什么是批而不是表
 //!
-//! 真机上待裁决近两万个变体（台账没收这个数，出处见票 `queue-followups/09`），按 5 秒一条算是**一天多**
-//! ——逐条不是可行路径。
+//! 真机上待裁决一万八千多个变体（`.scratch/gui-redesign/spec.md`），按 5 秒一条算是**二十五个小时上下**——逐条不是可行路径。
 //! 但其中八成只有**一个候选**：那不是「选哪个」，是「**对不对**」，而「对不对」
 //! 可以按批回答。于是这一屏的正文是**工具已经分好的几十批**，每张卡片上常驻三样：
 //!
@@ -72,8 +71,8 @@ use romcat_core::scrape::zh::{Judged, MatchGroup, judge, matched_groups};
 use romcat_core::stage::Stage;
 use romcat_core::triage::batch::{Coverage, breakdown};
 use romcat_core::triage::{
-    Applied, Axis, Batch, Breakdown, Draft, Filter, ItemOrder, Overrides, PartKind, Parts, Plan,
-    Queue, Sample, Scope, Shape, Slice, TriageError, Undone,
+    Applied, Axis, Batch, Breakdown, DecisionSpec, Draft, Filter, ItemOrder, Overrides, Part,
+    PartKind, Parts, Plan, Queue, Sample, Scope, Shape, Slice, TriageError, Undone,
 };
 use romcat_core::verdict;
 
@@ -144,12 +143,12 @@ pub struct Screen {
     drill: Option<String>,
     /// 各批下面**已经就地裁完的那几部分**（[`Parts`]）。
     ///
-    /// **它不是第二份账**：落了多少条、撤没撤都以沉淀库那一批裁决为准，这里存的是沉淀库
-    /// 答不出的那一半——那一批裁决当初作用在哪一批的哪一组上。沉淀库只记落了哪些条，
-    /// 折不回「按目录 · `GB/汉化/`」这一句，而屏上那一项要标着「已通过」正需要它。
+    /// **它不是第二份账**：哪几部分在、各作用在哪一组上、撤没撤，全照沉淀库那本册子折——
+    /// 那一批裁决当初作用在哪一批的哪一组上记在那一批身上（票 `verdict-store-and-sync/03`），
+    /// 所以关掉窗口再开，那几项照旧标着「已通过」、细分方式照旧锁着。
     ///
-    /// **裁决记录每重列一遍就跟着对一次**（[`Screen::refresh_records`]）：撤掉的那一批
-    /// 对应的那一项当场作废，那一行重新点得动，细分方式也跟着解开。
+    /// **裁决记录每重列一遍就跟着折一次**（[`Screen::refresh_records`]）：撤掉的那一批
+    /// 对应的那一项当场作废，那一行重新点得动，细分方式也跟着解开；命令行撤的也认。
     parts: Parts,
     /// 能整批通过的批**全都摆出来了没有**：默认只先摆前几批（与正文头一格说的是同几批），余下的收成一句，按「列出这 N 批」才摆。
     all_passable: bool,
@@ -532,10 +531,14 @@ impl Screen {
     /// **打开就停在锁着的那个轴上**：处理过一部分的那一批退回按目录的话，那一排上选中的
     /// 与底下真画的不是同一个轴，而另外两颗还按不动——屏上自相矛盾。
     fn locked_or_default(&self) -> Axis {
+        self.locked().unwrap_or(Axis::Directory)
+    }
+
+    /// 展开着那一批锁在哪个轴上（[`Parts::locked_axis`]）；没展开、没锁都是 `None`。
+    fn locked(&self) -> Option<Axis> {
         self.open
             .as_ref()
             .and_then(|shape| self.parts.locked_axis(shape))
-            .unwrap_or(Axis::Directory)
     }
 
     /// 眼下展开的那一批连它的下钻，也就是**整批操作的作用范围**。
@@ -676,7 +679,7 @@ impl Screen {
 
     /// 列一次队列。**一个字节都不读主库**——原料全在中立库与沉淀库里（ADR-0001）。
     pub fn reload(&mut self, site: &Site) {
-        match verdict::Index::load(&site.store, &site.library_identity)
+        let 重列了 = match verdict::Index::load(&site.store, &site.library_identity)
             .map_err(|error| format!("沉淀库读不动：{error}"))
             .and_then(|index| {
                 Queue::load(&site.catalog, &index).map_err(|error| format!("中立库读不动：{error}"))
@@ -697,11 +700,21 @@ impl Screen {
                 self.drill = None;
                 self.all_passable = false;
                 self.seed = 0;
-                self.refresh_opened();
+                true
             }
-            Err(message) => self.error = Some(message),
-        }
+            Err(message) => {
+                self.error = Some(message);
+                false
+            }
+        };
+        // 先照沉淀库把那几部分折回来（[`Screen::refresh_records`]），再看新展开的那一批锁没锁：
+        // 锁着就**停在锁着的那个轴上**（与点开一张卡片同一条，[`Screen::open_batch`]），没锁就照旧用人选的那个轴。
+        // 关掉窗口再开、头一回列队列走的就是这里——那时这个窗口里一样东西都没记着，锁在哪个轴上全靠沉淀库。
         self.refresh_records(site);
+        if 重列了 && let Some(锁) = self.locked() {
+            self.axis = 锁;
+            self.refresh_opened();
+        }
         self.records_refusal = None;
         self.pending = None;
         self.cursor = None;
@@ -776,15 +789,9 @@ impl Screen {
             Ok(records) => self.records = records,
             Err(error) => self.error = Some(format!("沉淀库读不动：{error}")),
         }
-        // **撤没撤以沉淀库为准**：撤掉的那一批对应的那一部分当场作废——那一项重新点得动，
-        // 细分方式跟着解开。自己另记一份撤销状态的话，命令行撤的那几批这里永远不知道。
-        let 在册: std::collections::BTreeSet<i64> = self
-            .records
-            .iter()
-            .filter(|batch| !batch.undone())
-            .map(|batch| batch.id)
-            .collect();
-        self.parts.keep(|batch| 在册.contains(&batch));
+        // **哪几部分裁过、撤没撤，都以沉淀库为准**：照这本册子重折一遍。撤掉的那一批对应的那一部分
+        // 当场作废——那一项重新点得动，细分方式跟着解开；上一个窗口落下的、命令行撤的也都认。
+        self.parts.sync(&self.records);
         self.refresh_opened();
     }
 
@@ -997,6 +1004,10 @@ impl Screen {
                 }
                 let 悬停 = {
                     let mut text = record.summary.clone();
+                    // 就地落下的那一批作用在哪一组上：那句话由核心库一处折（[`Part::label`]）。
+                    if let Some(part) = Part::of(record) {
+                        text.push_str(&format!("\n作用范围：{}", part.label()));
+                    }
                     if let Some(note) = &record.note {
                         text.push_str(&format!("\n「{note}」"));
                     }
@@ -2477,7 +2488,7 @@ impl Screen {
         match outcome {
             Ok(applied) => {
                 self.error = None;
-                self.receipt = Some(Receipt::applied(Verdicted::of(draft), &applied));
+                self.receipt = Some(Receipt::applied(Verdicted::of(&decide.spec), &applied));
                 self.applied = Some(applied);
                 self.undone = None;
                 self.changed = true;
@@ -2496,7 +2507,6 @@ impl Screen {
             scope,
             &Draft {
                 pick: Some(1),
-                note: Self::scope_note(scope),
                 ..Draft::default()
             },
         );
@@ -2509,20 +2519,9 @@ impl Screen {
             scope,
             &Draft {
                 unknown: true,
-                note: Self::scope_note(scope),
                 ..Draft::default()
             },
         );
-    }
-
-    /// 下钻那一层落下时记在那一批裁决上的**那一句为什么**：作用范围原话
-    /// （[`Scope::label`]，形如「MAME / gameboy.xml / 含头 · 按目录 GB/汉化/」）。
-    ///
-    /// **裁决记录里那一行要认得出这是哪一组**（设计稿 `passPart` 给它的 label 带着同一段）：
-    /// 挡住换轴那句话让人「先在裁决记录中撤销那几批」，而记录上只写「第 N 批裁决 · M 条」
-    /// 的话，人根本挑不出该撤哪几批。整批那一层不写——那一行本来就是整批，没有可补的。
-    fn scope_note(scope: &Scope) -> Option<String> {
-        scope.drill.is_some().then(|| scope.label())
     }
 
     /// 给一个范围排一次计划。**整批操作按下去走的就是它。**
@@ -2531,16 +2530,14 @@ impl Screen {
         match draft.build(&site.library_identity).and_then(|decide| {
             self.queue
                 .plan_scope(&site.catalog, &site.store, &decide, scope)
+                .map(|plan| (plan, Verdicted::of(&decide.spec)))
                 .map_err(|error| format!("排不出计划：{error}"))
         }) {
-            Ok(plan) => {
+            Ok((plan, kind)) => {
                 self.error = None;
-                // **记不记由核心库说**：整批那一层落下之后这一批整个从队列里消失，屏上没有
-                // 「剩下的部分」可说，[`Parts::record`] 对它一个字都不记——所以这里一律把
-                // 范围交下去，不在界面层再拼一道同样的判断。
-                // 条数趁现在数：落下之后这一组就空了，再数是零。
-                let drilled = Some(Drilled::new(scope.clone(), self.queue.count(scope)));
-                self.pending = Some(self.hold(plan, Verdicted::of(draft), drilled));
+                // 落下去是不是一部分、是哪一部分、那一组眼下多少条，**由核心库说**
+                // （[`Plan::part`]，[`Queue::plan_scope`] 填）：它跟着计划落进那一批，这一层不再另记一份。
+                self.pending = Some(self.hold(plan, kind));
             }
             Err(message) => self.error = Some(message),
         }
@@ -2552,24 +2549,23 @@ impl Screen {
         match draft.build(&site.library_identity).and_then(|decide| {
             self.queue
                 .plan(&site.catalog, &site.store, &decide)
+                .map(|plan| (plan, Verdicted::of(&decide.spec)))
                 .map_err(|error| format!("排不出计划：{error}"))
         }) {
-            Ok(plan) => {
+            Ok((plan, kind)) => {
                 self.error = None;
-                self.pending = Some(self.hold(plan, Verdicted::of(draft), None));
+                self.pending = Some(self.hold(plan, kind));
             }
             Err(message) => self.error = Some(message),
         }
     }
 
-    /// 把刚排出来的计划挂起来，**记下它是照着哪一版队列排的**，以及它作用在下钻出来的
-    /// 哪一组上、那一组当时有多少条。
-    fn hold(&self, plan: Plan, kind: Verdicted, drilled: Option<Drilled>) -> Pending {
+    /// 把刚排出来的计划挂起来，**记下它是照着哪一版队列排的**。
+    fn hold(&self, plan: Plan, kind: Verdicted) -> Pending {
         Pending {
             plan,
             revision: self.queue.revision(),
             kind,
-            drilled,
         }
     }
 
@@ -2613,7 +2609,7 @@ impl Screen {
             /// 「落下」。
             Apply,
         }
-        let (plan, kind, drilled) = (pending.plan, pending.kind, pending.drilled);
+        let (plan, kind) = (pending.plan, pending.kind);
         // **一层弹层**（[`dialog`]）：说明是那句总账，内容区是明细，页脚「取消 ｜ 落下」。
         // 明细不再自己套一层滚动区——弹层的内容区本来就滚得动，页脚一直在屏上。
         let note = format!(
@@ -2663,14 +2659,13 @@ impl Screen {
                 }
             });
         match shown.pressed {
-            Some(Pressed::Apply) => self.apply_plan(site, &plan, kind, drilled),
+            Some(Pressed::Apply) => self.apply_plan(site, &plan, kind),
             Some(Pressed::Cancel) => {}
             None => {
                 self.pending = Some(Pending {
                     plan,
                     revision: pending.revision,
                     kind,
-                    drilled,
                 });
             }
         }
@@ -2679,32 +2674,21 @@ impl Screen {
     /// 落下等着的那份计划。**模态框里「落下」按下去走的就是它。**
     pub fn commit(&mut self, site: &mut Site) {
         if let Some(pending) = self.pending.take() {
-            self.apply_plan(site, &pending.plan, pending.kind, pending.drilled);
+            self.apply_plan(site, &pending.plan, pending.kind);
         }
     }
 
     /// 真的落下：写沉淀库、当场在中立库里兑现、把裁完的从队列里去掉。
     ///
-    /// 落的是**下钻出来的那一组**时还多一步：把这一部分记进 [`Parts`]。不记的话它那些条
-    /// 一落下就从队列里消失，屏上那一项跟着不见——人只会以为自己刚才什么也没做。
-    fn apply_plan(
-        &mut self,
-        site: &mut Site,
-        plan: &Plan,
-        kind: Verdicted,
-        drilled: Option<Drilled>,
-    ) {
+    /// 落的是**下钻出来的那一组**时（[`Plan::part`]），那一部分跟着这一批记进沉淀库，
+    /// 重列裁决记录那一下照册子折回 [`Parts`]——不然它那些条一落下就从队列里消失，
+    /// 屏上那一项跟着不见，人只会以为自己刚才什么也没做。
+    fn apply_plan(&mut self, site: &mut Site, plan: &Plan, kind: Verdicted) {
         match self.queue.apply(&mut site.catalog, &mut site.store, plan) {
             Ok(applied) => {
                 self.error = None;
                 self.receipt = Some(Receipt::applied(kind, &applied));
-                if let Some(drilled) = drilled
-                    && let Some(kind) = kind.part_kind()
-                    // **记不记由核心库说**：整批那一层它一个字都不记，交回 `false`。
-                    && self
-                        .parts
-                        .record(drilled.scope, drilled.count, kind, applied.batch)
-                {
+                if plan.part.is_some() {
                     // 这一组裁完了，就地那一框跟着收起：作用范围回到整批，
                     // 底下那两颗按钮写的就是「剩余的 N 条」。
                     self.drill = None;
@@ -2901,78 +2885,24 @@ struct Pending {
     revision: u64,
     /// 这份计划裁成哪一类：落下之后提示条上说「已通过」还是「已拒绝」（[`Verdicted`]）。
     kind: Verdicted,
-    /// 这份计划作用在**下钻出来的哪一组**上；整批那一层与逐条那一路都是 `None`。
-    drilled: Option<Drilled>,
 }
 
-/// 一份计划作用在**下钻出来的哪一组**上，连那一组**落下之前**有多少条。
+/// 一次裁决裁成哪一类，只为提示条上那一句用（设计稿 `toast(\`已${kind} …\`)`）。
 ///
-/// 两样捆在一起，因为它们从排计划到落下一路同行（[`Screen::preview_scope`] → [`Screen::hold`]
-/// → [`Pending::drilled`] → [`Screen::apply_plan`]），而且**只有凑齐了才记得成一部分**
-/// （[`Parts::record`] 两样都要）。拆成一对散值传的话，四个签名各拆一遍元组，
-/// 谁也说不出那个 `u64` 数的是什么。
-///
-/// **条数在排计划那一刻就记下**，不拿落下之后那笔账里的「落了几条」当它：几个变体共享同一条
-/// **内容锚**（几份**重复拷贝**）时落成的是同一条裁决，那个数会小于这一组的变体数——而屏上
-/// 那一项写的、占比条量的都是**变体**有多少条。
-///
-/// **跟着计划走，不在落下那一刻读屏上眼下的作用范围**：计划书开着的那段时间里人换得了下钻。
-#[derive(Debug, Clone)]
-struct Drilled {
-    /// 哪一批下面的哪一组。
-    scope: Scope,
-    /// 那一组落下之前有多少条**变体**。
-    count: u64,
-}
-
-impl Drilled {
-    fn new(scope: Scope, count: u64) -> Self {
-        Self { scope, count }
-    }
-}
-
-/// 一次裁决裁成哪一类，只为提示条上那一句用（设计稿 `toast(\`已${kind} …\`)`）。**判断在草稿里**（[`Draft`]），这里只折成词。
+/// **判断在核心库**（[`PartKind::of`]）：采用候选是通过、「都不对，而且认不出」是拒绝——就地裁一组时那一项
+/// 标的是同两个词、落进沉淀库的也是同一个判断；手工指定作品、确认没有发行版折不出这两档，这里只说「已裁决」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Verdicted {
-    /// 采用候选：「全部通过」、逐条的 `Y`。
-    Passed,
-    /// 记成「我看过了，认不出」：「全部拒绝」、逐条的 `N`。
-    Rejected,
-    /// 手工指定作品、确认没有发行版：「手工指定…」那一层。
-    Decided,
-}
+struct Verdicted(Option<PartKind>);
 
 impl Verdicted {
-    /// 这份草稿裁成哪一类。
-    fn of(draft: &Draft) -> Self {
-        if draft.pick.is_some() {
-            Self::Passed
-        } else if draft.unknown {
-            Self::Rejected
-        } else {
-            Self::Decided
-        }
+    /// 这一种裁决裁成哪一类。
+    fn of(spec: &DecisionSpec) -> Self {
+        Self(PartKind::of(spec))
     }
 
-    /// 提示条上那个动词。
-    ///
-    /// 前两档**从核心库取**（[`PartKind::label`]）：屏上那一项旁边那枚标签写的是同两个词，
-    /// 各存一份字面量的话，改一处另一处就跟着说岔了。
+    /// 提示条上那个动词：前两档是核心库的那两个词（[`PartKind::label`]），屏上那一项旁边那枚标签写的也是它们。
     fn word(self) -> &'static str {
-        match self.part_kind() {
-            Some(kind) => kind.label(),
-            None => "已裁决",
-        }
-    }
-
-    /// 折成**一部分**裁成了什么（[`PartKind`]）；「手工指定」那一档折不出来——
-    /// 它天生是逐条的动作，作用不到一整组上。
-    fn part_kind(self) -> Option<PartKind> {
-        match self {
-            Self::Passed => Some(PartKind::Passed),
-            Self::Rejected => Some(PartKind::Rejected),
-            Self::Decided => None,
-        }
+        self.0.map_or("已裁决", PartKind::label)
     }
 }
 
@@ -3401,7 +3331,7 @@ struct MatchJudged {
 
 /// 正文头上那三格（设计稿 `.qsum`）：前几批可直接批量处理的、有多个候选的、没有候选的。
 ///
-/// 这三个数是这一屏存在的理由本身：近两万条按 5 秒一条是一天多，而**前几批一次就能处理掉一大截**。**数全是核心库算的**
+/// 这三个数是这一屏存在的理由本身：一万八千多条按 5 秒一条是二十五个小时上下（`.scratch/gui-redesign/spec.md`），而**前几批一次就能处理掉一大截**。**数全是核心库算的**
 /// （[`romcat_core::triage::batch::coverage`]；头一格与库屏工序段裁决那一行「前 N 批可一次处理 N 个」是同一个数），这里只摆
 /// ——界面只画和转发（ADR-0005）。头一格描强调色（设计稿 `.qcell.lead`：一道描边加一道内描边）。
 fn summary_cells(ui: &mut egui::Ui, 账: &Coverage) {

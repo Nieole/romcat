@@ -1017,7 +1017,7 @@ struct ScanArgs {
 
     /// 一个透明容器都不读：不去读容器内部的 CRC-32、大小与名字
     ///
-    /// 库里 91% 的容量在透明容器里，关掉它报告就只知道「这里有一个 3GB 的容器」，看不见里面装着什么。
+    /// 库里九成多的容量在透明容器里（见台账 `docs/library-facts.md`），关掉它报告就只知道「这里有一个 3GB 的容器」，看不见里面装着什么。
     /// 它盖过 `--zst`：这一条说的是「一个都别读」
     #[arg(long)]
     no_containers: bool,
@@ -1025,7 +1025,7 @@ struct ScanArgs {
     /// 也读 zst 与 tar.zst 的内部构成。**这一趟会慢几个小时**
     ///
     /// zip 与 7z 的内部清单零解压就在容器头里写着；zstd 没有这个东西，列全清单只能把
-    /// 整条流解一遍。主库里这是 2,685 个文件、2.50 TiB，真机实测约 125 MB/s，一趟约 5.8 小时
+    /// 整条流解一遍。主库里这是两千多个文件、两个半 TiB（见台账 `docs/library-facts.md`），真机实测约 125 MB/s，一趟约 5.8 小时
     /// （瓶颈全在磁盘）。打开一次即可：结论按 (路径, 大小, 修改时间) 落进中立库，
     /// 往后的扫描原样沿用，实测二次扫描 1.0 秒
     #[arg(long)]
@@ -1349,11 +1349,11 @@ fn open_catalog(
 /// 「中立库打不开」那一句。
 ///
 /// **结构版本对不上时先把那份旧库里没搬走的人工纠正救进沉淀库**
-/// （`site::rescue_shaping_overrides`）：那句话叫人删掉它重扫，删之前得先救出来——与开现场、
+/// （`site::rescue`，连首选变体、亲手加的叫法与详情页上改过的字段一起）：那句话叫人删掉它重扫，删之前得先救出来——与开现场、
 /// 开场列举是同一个函数。没救成就说没救成的那一句（核心库的原话）。
 fn unopened(workspace: &Path, path: &Path, error: &CatalogError) -> String {
     if matches!(error, CatalogError::Version { .. })
-        && let Err(stranded) = romcat_core::site::rescue_shaping_overrides(workspace, path, error)
+        && let Err(stranded) = romcat_core::site::rescue(workspace, path, error)
     {
         return stranded.to_string();
     }
@@ -1448,7 +1448,7 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
     // **人工纠正住沉淀库**（票 `one-criterion-per-thing/07`）：收尾成型要照着它，
     // 删掉中立库重扫它也还在。
     let library_identity = slug.text();
-    let shaping_overrides = match open_store_beside(&workspace, &catalog, &library_identity)
+    let shaping_overrides = match open_store_beside(&workspace, &mut catalog, &library_identity)
         .and_then(|store| {
             store
                 .shaping_overrides(&library_identity)
@@ -1628,7 +1628,7 @@ fn run_report(args: &ReportArgs) -> ExitCode {
 }
 
 /// 按平台清单重新成型一遍。**一个字节都不读主库**——成型是中立库上的纯计算，
-/// 改一条规则不必重扫 8.6 TiB。
+/// 改一条规则不必重扫八 TiB 多（见台账 `docs/library-facts.md`）。
 fn run_shape(args: &ShapeArgs) -> ExitCode {
     let (slug, located_by) = match locate(args.library.as_deref(), args.root.as_deref()) {
         Ok(pair) => pair,
@@ -1657,7 +1657,7 @@ fn run_shape(args: &ShapeArgs) -> ExitCode {
     };
     // **人工纠正住沉淀库**（票 `one-criterion-per-thing/07`），按**主库标识**分开。
     let library_identity = slug.text();
-    let mut store = match open_store_beside(&workspace, &catalog, &library_identity) {
+    let mut store = match open_store_beside(&workspace, &mut catalog, &library_identity) {
         Ok(store) => store,
         Err(message) => return fail(message),
     };
@@ -1816,26 +1816,26 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
     let mut options = identify::Options::new(roots);
     options.read_library = !args.no_read_library;
     options.max_read_bytes = args.max_read_mib.map(|mib| mib.saturating_mul(1 << 20));
+    // 平台清单照**老规矩**那条链取（工作目录里的 `platforms.toml`，没有就用内置那一份）——
+    // `romcat identify` 本来就没有 `--manifest` 这个开关。平台不符那一处判据要它：判「这个变体撞上
+    // 了平台纠正的哪一组」，与报告里「目录与内容平台不符」那一栏（票 `core-answers-once/01`）。
+    //
+    // ⚠️ **平台清单两边取的路子不同**：这里走老规矩那条链，界面那一侧一律用内置那一份。自带清单时
+    // 两边会分出不同的组——那是界面整条路子上的既有口径（库体检那一趟也是内置），挂单 `Q1031` 记着。
+    options.manifest = match (ManifestArgs { manifest: None }).load(&workspace) {
+        Ok(manifest) => manifest,
+        Err(message) => return fail(message),
+    };
     // **平台纠正**：人在界面上按组定过的那些「按内容改 / 保持目录的说法」（票
     // `gui-looks-like-the-design/28`）。判「这个变体按哪个平台算」时它先说话
     // （`identify::platform_of`）——命令行不读它的话，人在界面上定完、回终端挂后台跑一趟
     // 识别（ADR-0023 说的正是这条分工）就等于没定。
-    //
-    // ⚠️ **平台清单两边取的路子不同**：这里走老规矩那条链（工作目录里的 `platforms.toml`），
-    // 界面那一侧一律用内置那一份。自带清单时两边会分出不同的组——那是界面整条路子上的既有
-    // 口径（库体检那一趟也是内置），挂单 `Q1031` 记着。
     let corrections = match store.platform_corrections(&slug.text()) {
         Ok(rows) => rows,
         Err(error) => return fail(format!("沉淀库里的平台纠正读不动：{error}")),
     };
     if !corrections.is_empty() {
-        // 平台清单照**老规矩**那条链取（工作目录里的 `platforms.toml`，没有就用内置那一份）——
-        // `romcat identify` 本来就没有 `--manifest` 这个开关。
-        let manifest = match (ManifestArgs { manifest: None }).load(&workspace) {
-            Ok(manifest) => manifest,
-            Err(message) => return fail(message),
-        };
-        options.decided_platforms = Some(identify::DecidedPlatforms::new(&manifest, &corrections));
+        options.decided_platforms = Some(identify::DecidedPlatforms::new(&corrections));
     }
 
     // **文件名那一层**（票 11）：剥离规则加中文离线索引。取过数才跑得起来——
@@ -2009,7 +2009,7 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
         &options,
         cancel,
         &mut |progress| {
-            // 46,444 个变体、可能几十分钟：不说进度的话，用户分不清它是在干活还是卡住了。
+            // 四万多个变体（见台账 `docs/library-facts.md`）、可能几十分钟：不说进度的话，用户分不清它是在干活还是卡住了。
             if last.elapsed() >= Duration::from_secs(5) {
                 last = Instant::now();
                 eprintln!(
@@ -2083,14 +2083,12 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
     if outcome.cart.probed > 0 {
         eprintln!(
             "卡带那一层探了 {} 份内容（读出游戏码 {} 份，另有 {} 份这一趟没读到），\
-             撞出 {} 条候选，其中 {} 个变体是**只靠内部头**才认出来的；\
-             内部头与目录声明的平台对不上的有 {} 份。",
+             撞出 {} 条候选，其中 {} 个变体是**只靠内部头**才认出来的。",
             thousands(outcome.cart.probed),
             thousands(outcome.cart.with_id),
             thousands(outcome.cart.missed),
             thousands(outcome.cart.candidates),
             thousands(outcome.cart.only),
-            thousands(outcome.cart.conflicts),
         );
     }
     if outcome.sha1_hits > 0 {
@@ -2833,20 +2831,24 @@ fn run_export(args: &ExportArgs, cancel: &CancelToken) -> ExitCode {
     {
         return fail(message);
     }
-    let mut catalog = match open_catalog(&workspace, slug, None, &located_by) {
-        Ok(catalog) => catalog,
-        Err(message) => return fail(message),
+    // **开现场**而不只开中立库：首选变体的原件住沉淀库（票 `verdict-store-and-sync/01`），
+    // `--prefer` 要落进去；开现场那一步也把中立库里那份投影照沉淀库对齐（`site::reconcile`），
+    // 导出读的正是那份投影。
+    let mut site = match Site::open(&workspace, slug, None, &located_by) {
+        Ok(site) => site,
+        Err(error) => return fail(format!("{error}")),
     };
 
     // **裁决先落库**：它是沉淀，不随这一趟导出消失。
     for key in &args.prefer {
+        let catalog = &site.catalog;
         let variant = match catalog.variant(key) {
             Ok(Some(variant)) => variant,
             Ok(None) => return fail(format!("库里没有叫「{key}」的变体。")),
             Err(error) => return fail(format!("中立库读不动：{error}")),
         };
         // **只问这一个变体属于哪个作品**（`Catalog::work_of_variant`）：`work_names()`
-        // 是把那张表整份读进内存（真库 9,226 行），为取其中一行付那笔钱是白付的
+        // 是把那张表整份读进内存（真库九千多行，见台账 `docs/library-facts.md`），为取其中一行付那笔钱是白付的
         // ——那个函数自己的文档说的就是这件事（票 `parking-3/11`）。
         let work = match catalog.work_of_variant(key) {
             Ok(Some(name)) => name,
@@ -2858,11 +2860,12 @@ fn run_export(args: &ExportArgs, cancel: &CancelToken) -> ExitCode {
             .platform
             .clone()
             .unwrap_or_else(|| romcat_core::report::UNKNOWN_PLATFORM_LABEL.to_string());
-        if let Err(error) = catalog.set_preferred_variant(&work, &platform, key) {
-            return fail(format!("裁决写不进中立库：{error}"));
+        if let Err(error) = site.set_preferred_variant(&work, &platform, key) {
+            return fail(format!("裁决没记下：{error}"));
         }
         eprintln!("裁决已记下：作品「{work}」在 {platform} 上默认启动 {key}。");
     }
+    let mut catalog = site.catalog;
 
     let started = Instant::now();
     let options = transfer::ExportOptions {
@@ -3012,18 +3015,20 @@ fn open_store(workspace: &Path) -> Result<Store, String> {
     Store::open(&workspace::verdict_store_path(workspace)).map_err(|error| format!("{error}"))
 }
 
-/// 给一份已经开着的中立库配上**沉淀库**：票 `one-criterion-per-thing/07` 之前记在那份
-/// 中立库里的**人工纠正**先搬过去一次（`site::carry_over_shaping_overrides`）。
+/// 给一份已经开着的中立库配上**沉淀库**，并把两份对齐（`site::reconcile`）：那份中立库里还没搬走的
+/// 人定的东西（人工纠正、首选变体、亲手加的叫法、详情页上改过的字段）先搬过去一次，后三样在中立库里的
+/// 那三份投影照沉淀库重建。
 ///
 /// 不经现场、自己开两份库再成型的那两条路（`romcat scan`、`romcat shape`）走这里——
-/// 与开现场那一步是同一个函数，不另写一遍。
+/// 与开现场那一步是同一个函数，不另写一遍。**删掉中立库之后头一趟就是 `romcat scan`**，
+/// 投影在这一趟就回来。
 fn open_store_beside(
     workspace: &Path,
-    catalog: &Catalog,
+    catalog: &mut Catalog,
     library_identity: &str,
 ) -> Result<Store, String> {
     let mut store = open_store(workspace)?;
-    romcat_core::site::carry_over_shaping_overrides(catalog, &mut store, library_identity)
+    romcat_core::site::reconcile(catalog, &mut store, library_identity)
         .map_err(|error| format!("{error}"))?;
     Ok(store)
 }
@@ -3905,6 +3910,11 @@ fn run_triage_batches(args: &TriageBatchesArgs) -> ExitCode {
             if batch.undone() { "已撤" } else { "在册" },
         );
         println!("    {}", batch.summary);
+        // 待确认屏上就地落下的那一批作用在哪一组上（票 `verdict-store-and-sync/03`）：
+        // 与界面同一份（沉淀库批表上那几格）、同一句话（核心库 `Part::label`）。
+        if let Some(part) = triage::Part::of(batch) {
+            println!("    作用范围：{}", part.label());
+        }
         if let Some(note) = &batch.note {
             println!("    「{note}」");
         }
@@ -5369,7 +5379,7 @@ fn run_switch_sync(args: &SwitchSyncArgs) -> ExitCode {
 }
 
 /// 索引里现在有什么。**官中那两行是这份数据源对本项目的价值**：Switch 的中文覆盖是
-/// 全库最好的（8,447 个 TitleID），而其中多区共用的那些，中文只是**语言属性**
+/// 全库最好的（八千多个 TitleID，票 27 实测；台账没收，见挂单 `Q1550`），而其中多区共用的那些，中文只是**语言属性**
 /// 不是独立发行版（ADR-0019）。
 fn print_titledb_stats(stats: &titledb::store::Stats) {
     println!(
@@ -5815,7 +5825,7 @@ fn run_zh_find(args: &ZhFindArgs, cancel: &CancelToken) -> ExitCode {
 /// 把名字还是乱码的那些容器重读一遍（票 11 的补救路径）。
 ///
 /// 它**不遍历主库**：要读哪几个容器是中立库说的（`lossy = 1`），一个容器只读它的
-/// 中央目录。真机上那是 21,901 条名字散在若干个容器里，全库重扫要 27 分钟，
+/// 中央目录。真机上那是两万多条名字散在若干个容器里，全库重扫要半个小时上下（见台账 `docs/library-facts.md`），
 /// 而这一趟只有几秒。
 fn run_names_recheck(args: &NamesArgs, cancel: &CancelToken) -> ExitCode {
     let (slug, located_by) = match locate(args.library.as_deref(), args.root.as_deref()) {

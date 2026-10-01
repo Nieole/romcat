@@ -28,13 +28,18 @@
 //! 打开时把没跑过的接着跑完。**往前迁得动，往后（库比程序新）如实拒绝并说清**——
 //! 那时该换新程序，而不是删库。
 //!
-//! 眼下八条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
+//! 眼下十三条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
 //! 第 3 条建 `verdict_batch` 与 `verdict_batch_row` 两张表（**批**，见下一节），
 //! 第 4 条建 `collection_member` 表（**合集**与**收藏**，见再下一节），
 //! 第 5 条建 `title_suppression` 表（**压掉的叫法**），
-//! 第 6 条建 `shaping_override` 表（**成型的人工纠正**，见最后一节），
+//! 第 6 条建 `shaping_override` 表（**成型的人工纠正**），
 //! 第 7 条把标题类型那两个旧词换掉，
-//! 第 8 条建 `platform_correction` 表（**平台纠正**，见倒数第二节）。
+//! 第 8 条建 `platform_correction` 表（**平台纠正**），
+//! 第 9 条建 `not_same_work` 表（**「不是同一个作品」**），
+//! 第 10 条建 `preferred_variant` 与 `own_title` 两张表（**首选变体**与**亲手加的叫法**，见最后一节），
+//! 第 11 条建 `verdict_value` 表（**详情页上改过的字段**，同一节），
+//! 第 12 条给 `verdict_batch` 加作用范围那几格（**就地落下的一部分**，见「批」那一节），
+//! 第 13 条给 `verdict` 加**修订**那一格（DAT 条目名里的 `(Rev 1)`，[`Facts::revision`]）。
 //! 加这几条时库还是空的，但那不改变纪律——**永远不要求删库**，中立库那条「版本一变就
 //! 重建」的便宜路子在这份库上不许走。
 //!
@@ -51,6 +56,18 @@
 //!
 //! 中立库那一半的撤销原料**不在这里**：那是候选与结论，可再生，住在中立库自己的
 //! `verdict_batch_shadow`（`catalog::identify`）。两半分开住，各按各的身份。
+//!
+//! ### 就地落下的那一批还记着**作用范围**
+//!
+//! 待确认屏上按某个轴切开一批变体、就地把其中一组整批裁掉，落下的照旧是一批裁决；
+//! 屏上那一项从此标着「已通过／已拒绝」，这一批的细分方式锁在那个轴上（词表**批**那一条的
+//! **一部分**）。这件事只有记着「这一批裁决当初作用在哪一批变体的哪一组上」才说得出，
+//! 而那是人的动作留下的，重扫补不回来——所以它也住这里，不只活在一个窗口里（挂单 `Q964`，
+//! 票 `verdict-store-and-sync/03`）。第 12 条迁移给批表加了这几格（[`BatchScope`]）：
+//! 依据形状、轴、组名**分格结构化地存**，再加落下之前那一组多少条、裁成了什么——
+//! 不塞进摘要或备注那句人话里再拆回来（ADR-0024 否掉的正是那个形状）。
+//! 这几格怎么折回**一部分**、折成哪句给人看的话，只有 [`triage::Part`](crate::triage::Part)
+//! 一处；整批那一层与逐条落下的批这几格都是空的，加这几格之前落下的旧批也是。
 //!
 //! ## **合集**与**收藏**：为什么它们也住这儿
 //!
@@ -187,8 +204,36 @@
 //! 票 `one-criterion-per-thing/07` 之前的中立库里那张 `shaping_override` 表，开现场时搬进来
 //! 一次（[`carry_over_shaping_overrides`](crate::site::carry_over_shaping_overrides)），
 //! 旧表原样留着、不再读。**结构版本对不上、开不进去的旧库**，列出来或试着打开的那一下
-//! 就先救进来（[`rescue_shaping_overrides`](crate::site::rescue_shaping_overrides)）——那句
+//! 就先救进来（[`rescue`](crate::site::rescue)）——那句
 //! 叫人删库重扫的话说「人工纠正一条不丢」，删之前得先救出来。
+//!
+//! ## **首选变体**与**亲手加的叫法**：中立库里那两份是投影
+//!
+//! 两样都是人一条条定下来的——「这个作品在这个平台上默认启动这一个」「这个作品还叫这个名字」
+//! ——原先只住在中立库里（`preferred_variant` 表、`title` 表里 `source = 裁决` 的行），删库重扫
+//! 就跟着没了（挂单 `Q725`，票 `verdict-store-and-sync/01`）。第 10 条迁移把它们的原件收进
+//! 这里：[`Store::preferred_variants`] 与 [`Store::own_titles`]。
+//!
+//! **键是主库标识加中立库那张表的键**，与人工纠正同族（已裁：路径锚）：首选变体的值是一个
+//! 变体的键——一个位置——熬得过删库重扫，熬不过改名与挪目录，对不上时不算数、也不猜着挂到
+//! 别的变体上（`catalog::VariantDetail::preferred_unmatched`）；叫法挂在作品名上，与中立库那张
+//! 表同一个锚。两样都按主库标识分开，**导出不带**——[`Store::export`] 只折裁决与匹配裁决
+//! 两张表（`--include-path` 也不带，与人工纠正同一条，挂单 `Q722`）。
+//!
+//! 中立库里那两份从此是这里的**投影**，与合集、收藏同一个身份：开现场时照这里重建
+//! （[`site::reconcile`](crate::site::reconcile)，与眼下一样就一个字都不写）；人的动作先落这里、
+//! 再改投影（`Site::set_preferred_variant`、`Site::add_own_titles` 那几支）。旧中立库里
+//! 已有的开现场时救进来一次、记下「搬过了」，做法与人工纠正那一次一个字不差
+//! （[`carry_over_preferred_and_titles`](crate::site::carry_over_preferred_and_titles)、
+//! [`rescue`](crate::site::rescue)）。往后再搬一样人定的东西，照 [`site::reconcile`](crate::site::reconcile)
+//! 那一段「做法」走。
+//!
+//! **详情页上改过的字段**是照那段做法搬的头一样（挂单 `Q921`，票 `verdict-store-and-sync/02`）：
+//! 年份、发行商、简介、汉化组这类格子上人亲手写下的那一句，原先只住在中立库刮削值那张表里
+//! （`source = 裁决` 的行）。第 11 条迁移收下原件（[`Store::verdict_values`]），键是主库标识加
+//! 中立库那张表的键（锚点种类、锚点、字段）——挂在作品上的与叫法同一个锚，挂在变体上的钉的是
+//! 变体的键、熬不过改名与挪目录；导出不带。人的动作走 `Site::put_verdict_value` /
+//! `Site::clear_verdict_value`，旧库里的救一次（[`carry_over_verdict_values`](crate::site::carry_over_verdict_values)）。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -196,7 +241,8 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::now_secs;
+use crate::catalog::scrape::VerdictValue;
+use crate::catalog::{TitleRow, now_secs};
 use crate::dat::chinese::ChineseMark;
 
 /// 沉淀库跑到第几条迁移，也就是它的结构版本。
@@ -470,6 +516,105 @@ CREATE UNIQUE INDEX IF NOT EXISTS not_same_work_live
     ON not_same_work(library, left_work, right_work) WHERE undone_at IS NULL;
 CREATE INDEX IF NOT EXISTS not_same_work_library ON not_same_work(library);
 ",
+    // 10：**首选变体**与**亲手加的叫法**（票 `verdict-store-and-sync/01`，挂单 `Q725`）。两样原先
+    // 住在中立库里，删库重扫就跟着没了；它们与人工纠正同族，是人一条条定下来的。
+    "\
+-- 一条**首选变体**裁决：这份主库里，这个作品在这个平台上默认启动 `variant_key` 那一个。
+--
+-- **键是主库标识加中立库那张表的键**（作品名、平台），值是那个变体的键——一个**位置**，
+-- 与**路径锚**同一个处境：熬得过删库重扫（位置没变），熬不过改名与挪目录（位置变了就对不上，
+-- 不猜着挪到别的变体上）。所以它按主库标识分开，**导出也不带它**（`Store::export` 只折
+-- 裁决与匹配裁决两张表）。中立库里那张 `preferred_variant` 是这里的**投影**。
+CREATE TABLE IF NOT EXISTS preferred_variant(
+    library     TEXT    NOT NULL,
+    work        TEXT    NOT NULL,
+    platform    TEXT    NOT NULL,
+    variant_key TEXT    NOT NULL,
+    decided_at  INTEGER NOT NULL,
+    PRIMARY KEY (library, work, platform)
+) STRICT;
+
+-- 一条**亲手加的叫法**：这份主库里，这个作品的标题集合里有人亲手写下的这一条
+-- （中立库 `title` 表里 `source = 裁决` 的那些行，这里是它们的原件）。
+--
+-- **键是主库标识加中立库那张表的键**（作品名、语言、类型、那一串字；源一律是裁决，不另存）。
+-- 其余几列照抄中立库那张表，投影回去一个字不差。`variant_key` 记着它是在哪个变体上加的
+-- （界面上「加进集合」那一下），合并留下的别名没有。按主库标识分开、**导出不带它**，
+-- 理由同上一张表。
+CREATE TABLE IF NOT EXISTS own_title(
+    library     TEXT    NOT NULL,
+    work        TEXT    NOT NULL,
+    -- 语言码 zh / ja / en / und，与中立库那张表同一套码（`title::Language::code`）。
+    language    TEXT    NOT NULL,
+    -- 官方名称 / 译名 / 别名 / 汉化组译名（`title::TitleKind::label`）。
+    kind        TEXT    NOT NULL,
+    value       TEXT    NOT NULL,
+    region      TEXT,
+    variant_key TEXT,
+    confidence  TEXT    NOT NULL,
+    seam        TEXT,
+    evidence    TEXT    NOT NULL,
+    seen        INTEGER NOT NULL,
+    decided_at  INTEGER NOT NULL,
+    PRIMARY KEY (library, work, language, kind, value)
+) STRICT;
+",
+    // 11：**详情页上改过的字段**（票 `verdict-store-and-sync/02`，挂单 `Q921`）。它原先只住在
+    // 中立库里（刮削值那张表里 `source = 裁决` 的行），删库重扫就跟着没了；它与首选变体、亲手加的
+    // 叫法同族，是人一格格改出来的。
+    "\
+-- 一格**字段修改**：这份主库里，这个锚点上的这个字段，人在作品详情页上亲手写下了这一句
+-- （中立库 `scrape_value` 表里 `source = 裁决` 的那些行，这里是它们的原件）。
+--
+-- **键是主库标识加中立库那张表的键**（锚点种类、锚点、字段；源一律是裁决，不另存）。
+-- 一个字段上**只有一条**——人改了主意就是改了主意（`Catalog::put_verdict_value`），所以值不进键。
+-- 锚点是作品名或变体的键：挂在变体上的那几格钉的是一个**位置**，与**路径锚**同一个处境——
+-- 熬得过删库重扫，熬不过改名与挪目录；挂在作品上的与亲手加的叫法同一个锚。按主库标识分开、
+-- **导出不带它**，理由同上两张表。中立库那张表里 `at` 那一格投影的就是 `decided_at`。
+CREATE TABLE IF NOT EXISTS verdict_value(
+    library     TEXT    NOT NULL,
+    -- 锚点种类：作品 / 变体（`scrape::AnchorKind::label`）。
+    anchor      TEXT    NOT NULL,
+    -- 作品名或变体的键。
+    subject     TEXT    NOT NULL,
+    -- 年份、发行商、简介……（`scrape::Field::label`）。
+    field       TEXT    NOT NULL,
+    value       TEXT    NOT NULL,
+    evidence    TEXT    NOT NULL,
+    decided_at  INTEGER NOT NULL,
+    PRIMARY KEY (library, anchor, subject, field)
+) STRICT;
+",
+    // 12：**就地落下的那一批的作用范围**（票 `verdict-store-and-sync/03`，挂单 `Q964`）。待确认屏上
+    // 「已经就地裁掉了哪一组」原先只活在一个窗口里，关掉再开那几项不再标着已通过、细分方式也不再锁着。
+    "\
+-- 这一批裁决当初作用在**哪一批变体按哪个轴切出来的哪一组**上（词表**批**那一条的**一部分**）。
+-- 只有待确认屏上就地落下的那一批五格齐全；整批那一层、逐条落下的、命令行按选择器落下的，
+-- 以及加这几格之前落下的旧批，五格都是空的。**分格存**，不塞进 `summary` 或 `note` 那句人话里
+-- 再拆回来（ADR-0024）。几格怎么折回一部分只有 `triage::Part` 一处。
+--
+-- 依据形状：`triage::Shape::selector` 折出来的那串字（命令行 `--shape` 收的也是它）。
+ALTER TABLE verdict_batch ADD COLUMN scope_shape TEXT;
+-- 按哪个轴切的：`triage::Axis::label`（按目录 / 按候选作品 / 按命名规律）。
+ALTER TABLE verdict_batch ADD COLUMN scope_axis  TEXT;
+-- 切出来的那一组叫什么：那个轴上的组名，同时是选择器的值。
+ALTER TABLE verdict_batch ADD COLUMN scope_group TEXT;
+-- 落下之前那一组有多少个**变体**。落下时记住、不事后再数：那些条一落下就退出了队列。
+ALTER TABLE verdict_batch ADD COLUMN scope_count INTEGER;
+-- 裁成了什么：`triage::PartKind::label`（已通过 / 已拒绝）。
+ALTER TABLE verdict_batch ADD COLUMN scope_kind  TEXT;
+",
+    // 13：**裁决带上 DAT 的修订**（票 `verdict-store-and-sync/04`，挂单 `Q1010`）。合并作品与一切
+    // 「定成这个发行版」的裁决落下之后，发行版那一行照裁决重建——裁决不记修订，详情页「版本」那一格
+    // 就从 `Rev 1` 退回「—」。
+    "\
+-- 这次发行的**修订**：DAT 条目名尾巴上那一组 `(Rev 1)` / `(Rev A)` / `(v1.1)`，原样不含括号
+-- （`identify::naming::parse`）。它是词表**第几版**上面那一层——**发行版**那一层的事实，与 `version`
+-- 那一列（变体那一层：汉化打到第几版，只有人说得出）不是一件事。没有就是空，不拿「初版」去补。
+-- 加这一列之前落下的裁决这一格是空的——那时没记，不猜着补。
+-- **卡带头与光盘头里读出来的版本号不进这一列**：它只是修订的一份证据，只进依据（挂单 `Q994`）。
+ALTER TABLE verdict ADD COLUMN revision TEXT;
+",
 ];
 
 /// 「内容锚」在库里与报告里叫什么。
@@ -732,11 +877,20 @@ pub struct Facts {
     pub serial: Option<String>,
     /// 语言标记组（`Ja,Zh-Hans`）；可空。
     pub languages: Option<String>,
+    /// **修订**：这一次发行在 DAT 条目名尾巴上那一组 `(Rev 1)` / `(v1.1)`，原样（不含括号）；
+    /// 没有就是 `None`，不拿「初版」去补。
+    ///
+    /// 它是词表**第几版**上面那一层——**发行版**那一层的事实，自动识别给得出（ADR-0008 划的线
+    /// 正落在这儿），与下面 [`version`](Self::version) 那一格（变体那一层、只有人说得出）不是一件事。
+    /// 裁决记着它，是因为一条「定成这个发行版」的裁决落下之后，发行版那一行是照裁决重建的：
+    /// 裁决不记，修订就跟着丢了（挂单 `Q1010`，票 `verdict-store-and-sync/04`）。
+    /// **卡带头与光盘头里读出来的版本号不进这一格**：它只是修订的一份证据，只进**依据**（挂单 `Q994`）。
+    pub revision: Option<String>,
     /// 中文身份：**汉化版**还是**官中版**（ADR-0012）。
     pub chinese: Option<ChineseMark>,
     /// **汉化组**：谁做的这个中文版本。
     pub team: Option<String>,
-    /// 版本，如 `v1.2`。
+    /// **第几版**里**变体**那一层：汉化打到第几版，如 `v1.2`——只有人说得出（ADR-0008）。
     pub version: Option<String>,
 }
 
@@ -792,6 +946,11 @@ impl Verdict {
             self.anchor.describe(),
         );
         if let Decision::Release(facts) = &self.decision {
+            // **修订**是发行版那一层的事实（DAT 条目名里的 `(Rev 1)`）：「版本」那一格写着它时，
+            // 依据里得说得出它从哪来——是这条裁决记着的，不是这一趟撞出来的。
+            if let Some(revision) = &facts.revision {
+                text.push_str(&format!("；修订 {revision}"));
+            }
             if let Some(team) = &facts.team {
                 text.push_str(&format!("；汉化组「{team}」"));
             }
@@ -884,6 +1043,28 @@ pub struct Batch {
     pub undone_at: Option<i64>,
     /// 这一批有几条。
     pub rows: u64,
+    /// 待确认屏上**就地落下**的那一批作用在哪一组上（[`BatchScope`]）；别的批是 `None`。
+    pub scope: Option<BatchScope>,
+}
+
+/// 就地落下的那一批**作用在哪一组上**：哪一批变体（依据形状）、按哪个轴切、切出来的哪一组，
+/// 连落下之前那一组多少条、裁成了什么（第 12 条迁移，票 `verdict-store-and-sync/03`）。
+///
+/// 这里只管**存得住、读得回**，几格原样是批表上的那几格；它们怎么折回**一部分**、
+/// 折成哪句给人看的话，只有 [`triage::Part`](crate::triage::Part) 一处说——拿它的
+/// [`of`](crate::triage::Part::of) 读、[`record`](crate::triage::Part::record) 写。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchScope {
+    /// 依据形状：`triage::Shape::selector` 折出来的那串字。
+    pub shape: String,
+    /// 按哪个轴切的：`triage::Axis::label`。
+    pub axis: String,
+    /// 切出来的那一组叫什么。
+    pub group: String,
+    /// 落下之前那一组有多少个变体。
+    pub count: u64,
+    /// 裁成了什么：`triage::PartKind::label`。
+    pub kind: String,
 }
 
 impl Batch {
@@ -1231,8 +1412,8 @@ impl Store {
             .execute(
                 "INSERT INTO verdict(anchor, crc32, size, sha1, library, variant_key,
                      kind, work, platform, region, serial, languages, chinese, team, version,
-                     note, decided_at)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                     note, decided_at, revision)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
                 params![
                     verdict.anchor.label(),
                     crc32,
@@ -1251,6 +1432,7 @@ impl Store {
                     facts.and_then(|f| f.version.clone()),
                     verdict.note,
                     verdict.decided_at,
+                    facts.and_then(|f| f.revision.clone()),
                 ],
             )
             .map_err(|source| self.err(source))?;
@@ -1363,6 +1545,8 @@ impl Store {
     /// **落裁决与记批在同一个事务里**（调用方把两件事一起交过来）：批记下了而裁决没落，
     /// 或者反过来，都会让撤销这件事从一开始就说不准。
     ///
+    /// `scope` 是就地落下的那一批作用在哪一组上（[`BatchScope`]）；别的批给 `None`。
+    ///
     /// # Errors
     /// 写库失败时返回错误。
     pub fn put_batch(
@@ -1370,6 +1554,7 @@ impl Store {
         library: &str,
         summary: &str,
         note: Option<&str>,
+        scope: Option<&BatchScope>,
         rows: &[BatchRow],
     ) -> Result<i64, VerdictError> {
         let path = self.path.clone();
@@ -1380,9 +1565,20 @@ impl Store {
         let tx = self.conn.transaction().map_err(to_err)?;
         let id = {
             tx.execute(
-                "INSERT INTO verdict_batch(library, summary, note, decided_at)
-                 VALUES(?1,?2,?3,?4)",
-                params![library, summary, note, now_secs()],
+                "INSERT INTO verdict_batch(library, summary, note, decided_at,
+                     scope_shape, scope_axis, scope_group, scope_count, scope_kind)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![
+                    library,
+                    summary,
+                    note,
+                    now_secs(),
+                    scope.map(|scope| scope.shape.as_str()),
+                    scope.map(|scope| scope.axis.as_str()),
+                    scope.map(|scope| scope.group.as_str()),
+                    scope.map(|scope| i64::try_from(scope.count).unwrap_or(i64::MAX)),
+                    scope.map(|scope| scope.kind.as_str()),
+                ],
             )
             .map_err(to_err)?;
             let id = tx.last_insert_rowid();
@@ -1419,27 +1615,13 @@ impl Store {
     /// # Errors
     /// 读库失败时返回错误。
     pub fn batches(&self, library: &str, limit: usize) -> Result<Vec<Batch>, VerdictError> {
-        let mut sql = String::from(
-            "SELECT b.id, b.library, b.summary, b.note, b.decided_at, b.undone_at,
-                    (SELECT COUNT(*) FROM verdict_batch_row r WHERE r.batch = b.id)
-             FROM verdict_batch b WHERE b.library = ?1 ORDER BY b.id DESC",
-        );
+        let mut sql = format!("{BATCH_SELECT} WHERE b.library = ?1 ORDER BY b.id DESC");
         if limit > 0 {
             sql.push_str(&format!(" LIMIT {limit}"));
         }
         let mut statement = self.conn.prepare(&sql).map_err(|source| self.err(source))?;
         let rows = statement
-            .query_map(params![library], |row| {
-                Ok(Batch {
-                    id: row.get(0)?,
-                    library: row.get(1)?,
-                    summary: row.get(2)?,
-                    note: row.get(3)?,
-                    decided_at: row.get(4)?,
-                    undone_at: row.get(5)?,
-                    rows: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
-                })
-            })
+            .query_map(params![library], batch_of)
             .map_err(|source| self.err(source))?;
         rows.collect::<Result<_, _>>()
             .map_err(|source| self.err(source))
@@ -1452,21 +1634,9 @@ impl Store {
     pub fn batch(&self, id: i64) -> Result<Option<Batch>, VerdictError> {
         self.conn
             .query_row(
-                "SELECT b.id, b.library, b.summary, b.note, b.decided_at, b.undone_at,
-                        (SELECT COUNT(*) FROM verdict_batch_row r WHERE r.batch = b.id)
-                 FROM verdict_batch b WHERE b.id = ?1",
+                &format!("{BATCH_SELECT} WHERE b.id = ?1"),
                 params![id],
-                |row| {
-                    Ok(Batch {
-                        id: row.get(0)?,
-                        library: row.get(1)?,
-                        summary: row.get(2)?,
-                        note: row.get(3)?,
-                        decided_at: row.get(4)?,
-                        undone_at: row.get(5)?,
-                        rows: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
-                    })
-                },
+                batch_of,
             )
             .optional()
             .map_err(|source| self.err(source))
@@ -2340,7 +2510,7 @@ impl Store {
     ///
     /// 用处是收**中立库旧表里还没搬走的那批**（票 `one-criterion-per-thing/07` 之前记下的，
     /// [`carry_over_shaping_overrides`](crate::site::carry_over_shaping_overrides) 与
-    /// [`rescue_shaping_overrides`](crate::site::rescue_shaping_overrides)）：沉淀库里那一条是
+    /// [`rescue`](crate::site::rescue)）：沉淀库里那一条是
     /// 人后来定的，旧表里那一条是它之前的样子。**一个事务**：半途断掉要么全收下、要么
     /// 一条没收，下次再搬一遍。一条都没交进来就一个字都不写。
     ///
@@ -2378,6 +2548,413 @@ impl Store {
         tx.commit().map_err(|source| self.err(source))?;
         Ok(added)
     }
+
+    /// 这份主库的全部**首选变体**裁决：`(作品名, 平台)` → 那个变体的键。中立库里那张表
+    /// 是它的投影，开现场时照它重建（[`site::reconcile`](crate::site::reconcile)）。
+    ///
+    /// `library` 是**主库标识**：值是一个变体的键，换一份主库指的是另一个文件。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn preferred_variants(
+        &self,
+        library: &str,
+    ) -> Result<BTreeMap<(String, String), String>, VerdictError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT work, platform, variant_key FROM preferred_variant WHERE library = ?1")
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![library], |row| {
+                Ok(((row.get(0)?, row.get(1)?), row.get(2)?))
+            })
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
+    /// 记一条首选变体裁决：这份主库里 `work` 在 `platform` 上默认启动 `variant_key`。
+    /// 同一个作品、同一个平台上已经有一条就**盖掉**——人改了主意，不攒出第二行。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn set_preferred_variant(
+        &mut self,
+        library: &str,
+        work: &str,
+        platform: &str,
+        variant_key: &str,
+    ) -> Result<(), VerdictError> {
+        self.conn
+            .execute(
+                "INSERT INTO preferred_variant(library, work, platform, variant_key, decided_at)
+                 VALUES(?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(library, work, platform) DO UPDATE SET
+                    variant_key = excluded.variant_key,
+                    decided_at = excluded.decided_at",
+                params![library, work, platform, variant_key, now_secs()],
+            )
+            .map(|_| ())
+            .map_err(|source| self.err(source))
+    }
+
+    /// 撤掉这份主库里 `work` 在 `platform` 上的首选变体裁决，返回原来有没有这一条。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn clear_preferred_variant(
+        &mut self,
+        library: &str,
+        work: &str,
+        platform: &str,
+    ) -> Result<bool, VerdictError> {
+        self.conn
+            .execute(
+                "DELETE FROM preferred_variant WHERE library = ?1 AND work = ?2 AND platform = ?3",
+                params![library, work, platform],
+            )
+            .map(|removed| removed > 0)
+            .map_err(|source| self.err(source))
+    }
+
+    /// 这份主库的全部**亲手加的叫法**，每条的源都是**裁决**，按作品、语言、类型、那一串字排。
+    /// 中立库标题集合里 `source = 裁决` 的那些行是它们的投影，开现场时照它重建
+    /// （[`site::reconcile`](crate::site::reconcile)）。
+    ///
+    /// 语言码或类型认不出的那一行**丢掉**，理由与压制记录那一处（`read_suppression_row`）同一条：
+    /// 回退成 `und` / `别名` 的话，投影回去是另一条叫法。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn own_titles(&self, library: &str) -> Result<Vec<TitleRow>, VerdictError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT work, language, kind, value, region, variant_key, confidence, seam,
+                        evidence, seen
+                 FROM own_title WHERE library = ?1
+                 ORDER BY work, language, kind, value",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![library], read_own_title)
+            .map_err(|source| self.err(source))?;
+        let mut out = Vec::new();
+        for row in rows {
+            if let Some(row) = row.map_err(|source| self.err(source))? {
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
+
+    /// 记下这几条亲手加的叫法（**源一律记成裁决**，交进来的那一格不看）。同一个作品、同一种
+    /// 语言、同一个类型、同一串字已经有一条就**盖掉**——同一条写两次是同一个结果。
+    /// **一个事务**。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn put_own_titles(&mut self, library: &str, rows: &[TitleRow]) -> Result<(), VerdictError> {
+        self.write_own_titles(library, rows, true).map(|_| ())
+    }
+
+    /// 撤掉这份主库里的一条亲手加的叫法，返回原来有没有这一条。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn remove_own_title(
+        &mut self,
+        library: &str,
+        work: &str,
+        language: crate::title::Language,
+        kind: crate::title::TitleKind,
+        value: &str,
+    ) -> Result<bool, VerdictError> {
+        self.conn
+            .execute(
+                "DELETE FROM own_title
+                 WHERE library = ?1 AND work = ?2 AND language = ?3 AND kind = ?4 AND value = ?5",
+                params![library, work, language.code(), kind.label(), value],
+            )
+            .map(|removed| removed > 0)
+            .map_err(|source| self.err(source))
+    }
+
+    /// 把一批首选变体裁决里**这份库还没有的那几条**收进来，返回新收下几条。同一个作品、
+    /// 同一个平台上已经有的**不盖**：沉淀库里那一条是人后来定的，旧中立库里那一条是它之前的
+    /// 样子。用处同 [`Self::add_missing_shaping_overrides`]：收旧中立库里还没搬走的那批
+    /// （[`carry_over_preferred_and_titles`](crate::site::carry_over_preferred_and_titles)）。
+    /// **一个事务**；一条都没交进来就一个字都不写。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn add_missing_preferred_variants(
+        &mut self,
+        library: &str,
+        preferred: &BTreeMap<(String, String), String>,
+    ) -> Result<usize, VerdictError> {
+        if preferred.is_empty() {
+            return Ok(0);
+        }
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(|source| self.err(source))?;
+        let mut added = 0;
+        {
+            let mut statement = tx
+                .prepare(
+                    "INSERT INTO preferred_variant(library, work, platform, variant_key, decided_at)
+                     VALUES(?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(library, work, platform) DO NOTHING",
+                )
+                .map_err(|source| self.err(source))?;
+            let now = now_secs();
+            for ((work, platform), variant_key) in preferred {
+                added += statement
+                    .execute(params![library, work, platform, variant_key, now])
+                    .map_err(|source| self.err(source))?;
+            }
+        }
+        tx.commit().map_err(|source| self.err(source))?;
+        Ok(added)
+    }
+
+    /// 把一批亲手加的叫法里**这份库还没有的那几条**收进来，返回新收下几条；同一个键上已经有的
+    /// **不盖**。理由与用处同 [`Self::add_missing_preferred_variants`]。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn add_missing_own_titles(
+        &mut self,
+        library: &str,
+        rows: &[TitleRow],
+    ) -> Result<usize, VerdictError> {
+        self.write_own_titles(library, rows, false)
+    }
+
+    /// 写那几条叫法；`replace` 为假时同一个键上已有的**不盖**。返回新收下几条。
+    fn write_own_titles(
+        &mut self,
+        library: &str,
+        rows: &[TitleRow],
+        replace: bool,
+    ) -> Result<usize, VerdictError> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(|source| self.err(source))?;
+        let mut added = 0;
+        {
+            let conflict = if replace {
+                "DO UPDATE SET region = excluded.region, variant_key = excluded.variant_key,
+                    confidence = excluded.confidence, seam = excluded.seam,
+                    evidence = excluded.evidence, seen = excluded.seen,
+                    decided_at = excluded.decided_at"
+            } else {
+                "DO NOTHING"
+            };
+            let mut statement = tx
+                .prepare(&format!(
+                    "INSERT INTO own_title(library, work, language, kind, value, region,
+                         variant_key, confidence, seam, evidence, seen, decided_at)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                     ON CONFLICT(library, work, language, kind, value) {conflict}"
+                ))
+                .map_err(|source| self.err(source))?;
+            let now = now_secs();
+            for row in rows {
+                added += statement
+                    .execute(params![
+                        library,
+                        row.work,
+                        row.language.code(),
+                        row.kind.label(),
+                        row.value,
+                        row.region,
+                        row.variant_key,
+                        row.confidence.label(),
+                        row.seam.map(crate::title::Seam::label),
+                        row.evidence,
+                        i64::try_from(row.seen).unwrap_or(i64::MAX),
+                        now,
+                    ])
+                    .map_err(|source| self.err(source))?;
+            }
+        }
+        tx.commit().map_err(|source| self.err(source))?;
+        Ok(added)
+    }
+
+    // ── 字段修改：作品详情页上亲手改过的那几格（票 `verdict-store-and-sync/02`） ──
+
+    /// 这份主库的全部**字段修改**，按锚点种类、锚点、字段排。中立库刮削值那张表里
+    /// `source = 裁决` 的那些行是它们的投影，开现场时照它重建（[`site::reconcile`](crate::site::reconcile)）。
+    ///
+    /// `library` 是**主库标识**：锚点是作品名或变体的键，换一份主库指的是另一批东西。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn verdict_values(&self, library: &str) -> Result<Vec<VerdictValue>, VerdictError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT anchor, subject, field, value, evidence, decided_at
+                 FROM verdict_value WHERE library = ?1
+                 ORDER BY anchor, subject, field",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![library], |row| {
+                Ok(VerdictValue {
+                    anchor: row.get(0)?,
+                    subject: row.get(1)?,
+                    field: row.get(2)?,
+                    value: row.get(3)?,
+                    evidence: row.get(4)?,
+                    at: row.get(5)?,
+                })
+            })
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
+    /// 记一格字段修改。同一个锚点、同一个字段上已经有一条就**盖掉**——人改了主意就是改了主意，
+    /// 不攒出第二行（与 [`Catalog::put_verdict_value`](crate::catalog::Catalog::put_verdict_value) 同一条）。
+    /// `decided_at` 记的是 `value.at`：中立库那份投影的 `at` 与它一字不差，重建时才比得出「一样」。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn put_verdict_value(
+        &mut self,
+        library: &str,
+        value: &VerdictValue,
+    ) -> Result<(), VerdictError> {
+        self.conn
+            .execute(
+                "INSERT INTO verdict_value(library, anchor, subject, field, value, evidence,
+                     decided_at)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(library, anchor, subject, field) DO UPDATE SET
+                    value = excluded.value,
+                    evidence = excluded.evidence,
+                    decided_at = excluded.decided_at",
+                params![
+                    library,
+                    value.anchor,
+                    value.subject,
+                    value.field,
+                    value.value,
+                    value.evidence,
+                    value.at,
+                ],
+            )
+            .map(|_| ())
+            .map_err(|source| self.err(source))
+    }
+
+    /// 撤掉这份主库里这个锚点上这个字段的修改，返回原来有没有这一条。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn clear_verdict_value(
+        &mut self,
+        library: &str,
+        anchor: crate::scrape::AnchorKind,
+        subject: &str,
+        field: crate::scrape::Field,
+    ) -> Result<bool, VerdictError> {
+        self.conn
+            .execute(
+                "DELETE FROM verdict_value
+                 WHERE library = ?1 AND anchor = ?2 AND subject = ?3 AND field = ?4",
+                params![library, anchor.label(), subject, field.label()],
+            )
+            .map(|removed| removed > 0)
+            .map_err(|source| self.err(source))
+    }
+
+    /// 把一批字段修改里**这份库还没有的那几格**收进来，返回新收下几格；同一个锚点、同一个字段上
+    /// 已经有的**不盖**。理由与用处同 [`Self::add_missing_preferred_variants`]：收旧中立库里还没搬走的
+    /// 那批（[`carry_over_verdict_values`](crate::site::carry_over_verdict_values)）。
+    /// **一个事务**；一格都没交进来就一个字都不写。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn add_missing_verdict_values(
+        &mut self,
+        library: &str,
+        values: &[VerdictValue],
+    ) -> Result<usize, VerdictError> {
+        if values.is_empty() {
+            return Ok(0);
+        }
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(|source| self.err(source))?;
+        let mut added = 0;
+        {
+            let mut statement = tx
+                .prepare(
+                    "INSERT INTO verdict_value(library, anchor, subject, field, value, evidence,
+                         decided_at)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(library, anchor, subject, field) DO NOTHING",
+                )
+                .map_err(|source| self.err(source))?;
+            for value in values {
+                added += statement
+                    .execute(params![
+                        library,
+                        value.anchor,
+                        value.subject,
+                        value.field,
+                        value.value,
+                        value.evidence,
+                        value.at,
+                    ])
+                    .map_err(|source| self.err(source))?;
+            }
+        }
+        tx.commit().map_err(|source| self.err(source))?;
+        Ok(added)
+    }
+}
+
+/// 读一行亲手加的叫法；语言码或类型认不出就是 `None`（见 [`Store::own_titles`]）。
+fn read_own_title(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<TitleRow>> {
+    let language: String = row.get(1)?;
+    let kind: String = row.get(2)?;
+    let (Some(language), Some(kind)) = (
+        crate::title::Language::from_code(&language),
+        crate::title::TitleKind::from_label(&kind),
+    ) else {
+        return Ok(None);
+    };
+    let confidence: String = row.get(6)?;
+    let seam: Option<String> = row.get(7)?;
+    Ok(Some(TitleRow {
+        work: row.get(0)?,
+        language,
+        kind,
+        source: crate::scrape::priority::VERDICT.to_string(),
+        value: row.get(3)?,
+        region: row.get(4)?,
+        variant_key: row.get(5)?,
+        confidence: crate::catalog::Confidence::from_label(&confidence)
+            .unwrap_or(crate::catalog::Confidence::High),
+        seam: seam.as_deref().and_then(crate::title::Seam::from_label),
+        evidence: row.get(8)?,
+        seen: u64::try_from(row.get::<_, i64>(9)?).unwrap_or(0),
+    }))
 }
 
 const SUPPRESSION_SELECT: &str = "SELECT work, language, kind, source, value, note,
@@ -2439,6 +3016,43 @@ fn match_columns(anchor: &Anchor) -> (Option<i64>, Option<i64>, Option<String>, 
     }
 }
 
+/// 读一**批**时要的那一串列，两处查询（[`Store::batches`] 与 [`Store::batch`]）共用。
+const BATCH_SELECT: &str = "SELECT b.id, b.library, b.summary, b.note, b.decided_at, b.undone_at,
+     (SELECT COUNT(*) FROM verdict_batch_row r WHERE r.batch = b.id),
+     b.scope_shape, b.scope_axis, b.scope_group, b.scope_count, b.scope_kind
+     FROM verdict_batch b";
+
+/// 把 [`BATCH_SELECT`] 的一行折成一批。作用范围那五格**齐了才算有**：只有就地落下的那一批
+/// 五格一起写（[`Store::put_batch`]），缺一格的那一行说不清作用在哪一组上，当它没有。
+fn batch_of(row: &rusqlite::Row<'_>) -> rusqlite::Result<Batch> {
+    let scope = match (
+        row.get::<_, Option<String>>(7)?,
+        row.get::<_, Option<String>>(8)?,
+        row.get::<_, Option<String>>(9)?,
+        row.get::<_, Option<i64>>(10)?,
+        row.get::<_, Option<String>>(11)?,
+    ) {
+        (Some(shape), Some(axis), Some(group), Some(count), Some(kind)) => Some(BatchScope {
+            shape,
+            axis,
+            group,
+            count: u64::try_from(count).unwrap_or(0),
+            kind,
+        }),
+        _ => None,
+    };
+    Ok(Batch {
+        id: row.get(0)?,
+        library: row.get(1)?,
+        summary: row.get(2)?,
+        note: row.get(3)?,
+        decided_at: row.get(4)?,
+        undone_at: row.get(5)?,
+        rows: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
+        scope,
+    })
+}
+
 /// 读一行匹配裁决时要的那一串列。
 const MATCH_SELECT: &str = "SELECT anchor, crc32, size, library, variant_key, source, entry,
      accepted, note, decided_at FROM match_verdict";
@@ -2470,7 +3084,7 @@ fn read_match_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MatchVerdict> {
 
 /// 读一行时要的那一串列，两处查询共用。
 const SELECT: &str = "SELECT anchor, crc32, size, sha1, library, variant_key, kind, work,
-     platform, region, serial, languages, chinese, team, version, note, decided_at
+     platform, region, serial, languages, chinese, team, version, note, decided_at, revision
      FROM verdict";
 
 fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Verdict> {
@@ -2498,6 +3112,7 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Verdict> {
             region: row.get(9)?,
             serial: row.get(10)?,
             languages: row.get(11)?,
+            revision: row.get(17)?,
             chinese: row
                 .get::<_, Option<String>>(12)?
                 .as_deref()
@@ -2525,8 +3140,8 @@ fn mark_of_label(label: &str) -> Option<ChineseMark> {
 
 /// 识别那一趟拿在手里的沉淀库快照。
 ///
-/// 是一份**内存里的快照**而不是一个连接：识别要为 46,444 个变体各查一次，逐次开库查
-/// 是把一件常数时间的事做成 46,444 次 I/O。库里的条数与裁决的条数同阶（几万），
+/// 是一份**内存里的快照**而不是一个连接：识别要为四万多个变体（见台账 `docs/library-facts.md`）各查一次，逐次开库查
+/// 是把一件常数时间的事做成四万多次 I/O。库里的条数与裁决的条数同阶（几万），
 /// 整份读进来不值一提。
 ///
 /// **[`Membership`] 也在这份快照里**，不是因为识别要拿它撞什么——它一次都不参与识别。
@@ -2703,8 +3318,12 @@ pub const EXPORT_FORMAT: &str = "romcat-沉淀库";
 /// 只是那一批是空的），往后如实拒绝——一份第 2 版的文件里可能装着老程序读不出来的
 /// 匹配裁决，静静地丢掉它们比读不了更糟。
 ///
+/// **票 `verdict-store-and-sync/04` 从 2 涨到 3**：裁决那一批里多了**修订**那一栏（[`Row::revision`]，
+/// 挂单 `Q1010`）。同一条道理：第 1、2 版的文件照读，修订为空；一份第 3 版的文件里装着老程序
+/// 不认识的修订，老程序 serde 会把不认识的那一栏静静丢掉——所以它该被拦下。
+///
 /// **导出时写的不一定是这个数**：见 [`Export::version_for`]。
-pub const EXPORT_VERSION: u32 = 2;
+pub const EXPORT_VERSION: u32 = 3;
 
 /// 一份可分享的裁决文件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2723,18 +3342,21 @@ pub struct Export {
 }
 
 impl Export {
-    /// 一份导出文件**该盖第几版**。
+    /// 一份导出文件**该盖第几版**：装得下它那份内容的**最低**一版。
     ///
-    /// 一条匹配裁决都没有时盖 **1**，有才盖 [`EXPORT_VERSION`]。理由是版本号在这个格式里
-    /// 的唯一作用是**那道往后拒绝的闸**（`version > EXPORT_VERSION` 就不收）：无条件盖 2
-    /// 的话，升级之后导出的**每一份**文件——哪怕内容与第 1 版一模一样——都会被老版本的
-    /// 程序拒收，而它其实一个字都读得懂。**装着新东西的才该拦下，空的不该。**
+    /// 有一条裁决带着**修订**就盖 **3**（[`EXPORT_VERSION`]）；没有修订而有匹配裁决盖 **2**；
+    /// 两样都没有盖 **1**。理由是版本号在这个格式里的唯一作用是**那道往后拒绝的闸**
+    /// （`version > EXPORT_VERSION` 就不收）：无条件盖最新一版的话，升级之后导出的**每一份**
+    /// 文件——哪怕内容与第 1 版一模一样——都会被老版本的程序拒收，而它其实一个字都读得懂。
+    /// **装着新东西的才该拦下，空的不该。**
     #[must_use]
-    pub fn version_for(matches: &[MatchRow]) -> u32 {
-        if matches.is_empty() {
-            1
-        } else {
+    pub fn version_for(verdicts: &[Row], matches: &[MatchRow]) -> u32 {
+        if verdicts.iter().any(|row| row.revision.is_some()) {
             EXPORT_VERSION
+        } else if !matches.is_empty() {
+            2
+        } else {
+            1
         }
     }
 }
@@ -2862,6 +3484,12 @@ pub struct Row {
     /// 语言标记组。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub languages: Option<String>,
+    /// **修订**：DAT 条目名尾巴上那一组 `(Rev 1)`（[`Facts::revision`]）。
+    ///
+    /// **第 3 版格式才有这一栏**（票 `verdict-store-and-sync/04`）。没有就是 `None`：第 1、2 版的
+    /// 导出文件、以及批里旧程序记下的那份 JSON 都读得回来，修订为空。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub revision: Option<String>,
     /// 中文身份：`汉化` 或 `官中`。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub chinese: Option<String>,
@@ -2893,6 +3521,7 @@ impl Row {
             region: facts.and_then(|f| f.region.clone()),
             serial: facts.and_then(|f| f.serial.clone()),
             languages: facts.and_then(|f| f.languages.clone()),
+            revision: facts.and_then(|f| f.revision.clone()),
             chinese: facts
                 .and_then(|f| f.chinese)
                 .map(|mark| mark.label().to_string()),
@@ -2943,6 +3572,7 @@ impl Row {
                 region: self.region,
                 serial: self.serial,
                 languages: self.languages,
+                revision: self.revision,
                 chinese: self.chinese.as_deref().and_then(mark_of_label),
                 team: self.team,
                 version: self.version,
@@ -2999,7 +3629,7 @@ impl Store {
     /// # Errors
     /// 读库失败时返回错误。
     pub fn export(&self, include_path: bool) -> Result<Export, VerdictError> {
-        let verdicts = self
+        let verdicts: Vec<Row> = self
             .all()?
             .iter()
             .filter(|verdict| include_path || verdict.anchor.is_shareable())
@@ -3015,7 +3645,7 @@ impl Store {
             .collect();
         Ok(Export {
             format: EXPORT_FORMAT.to_string(),
-            version: Export::version_for(&matches),
+            version: Export::version_for(&verdicts, &matches),
             exported_at: now_secs(),
             verdicts,
             matches,
@@ -3100,6 +3730,95 @@ mod tests {
         )
     }
 
+    /// **旧程序**记下一批的样子：批表上只有第 3 条迁移建的那几列（作用范围那几格是第 12 条才有的），
+    /// 照那几列原样写进去。新程序的 [`Store::put_batch`] 要写作用范围那几格，在旧版的库上写不进去。
+    fn 旧程序记一批(
+        conn: &Connection,
+        library: &str,
+        summary: &str,
+        note: Option<&str>,
+        rows: &[BatchRow],
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO verdict_batch(library, summary, note, decided_at) VALUES(?1,?2,?3,?4)",
+            params![library, summary, note, now_secs()],
+        )
+        .expect("旧版的批表里记得下");
+        let id = conn.last_insert_rowid();
+        for row in rows {
+            conn.execute(
+                "INSERT INTO verdict_batch_row(batch, variant_key, member, inner, after, before)
+                 VALUES(?1,?2,?3,?4,?5,?6)",
+                params![
+                    id,
+                    row.variant_key,
+                    row.member,
+                    row.inner,
+                    encode(&row.after).expect("折得成"),
+                    row.before
+                        .as_ref()
+                        .map(|before| encode(before).expect("折得成")),
+                ],
+            )
+            .expect("旧版的批表里记得下");
+        }
+        id
+    }
+
+    /// **旧程序**记下一条裁决的样子：裁决表上只有第 1 条迁移建的那几列（修订那一格是第 13 条才有的），
+    /// 照那几列原样写进去。新程序的 [`Store::put`] 要写修订那一格，在旧版的库上写不进去。
+    fn 旧程序记一条裁决(conn: &Connection, verdict: &Verdict) {
+        let facts = match &verdict.decision {
+            Decision::Release(facts) => Some(facts),
+            _ => None,
+        };
+        let (crc32, size, sha1, library, variant_key) = match &verdict.anchor {
+            Anchor::Content { crc32, size, sha1 } => (
+                Some(i64::from(*crc32)),
+                Some(size_column(*size)),
+                sha1.clone(),
+                None,
+                None,
+            ),
+            Anchor::Path {
+                library,
+                variant_key,
+            } => (
+                None,
+                None,
+                None,
+                Some(library.clone()),
+                Some(variant_key.clone()),
+            ),
+        };
+        conn.execute(
+            "INSERT INTO verdict(anchor, crc32, size, sha1, library, variant_key,
+                 kind, work, platform, region, serial, languages, chinese, team, version,
+                 note, decided_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+            params![
+                verdict.anchor.label(),
+                crc32,
+                size,
+                sha1,
+                library,
+                variant_key,
+                verdict.decision.label(),
+                verdict.decision.work(),
+                facts.and_then(|f| f.platform.clone()),
+                facts.and_then(|f| f.region.clone()),
+                facts.and_then(|f| f.serial.clone()),
+                facts.and_then(|f| f.languages.clone()),
+                facts.and_then(|f| f.chinese).map(ChineseMark::label),
+                facts.and_then(|f| f.team.clone()),
+                facts.and_then(|f| f.version.clone()),
+                verdict.note,
+                verdict.decided_at,
+            ],
+        )
+        .expect("旧版的裁决表里记得下");
+    }
+
     #[test]
     fn 新建的库跑到最新一版迁移() {
         let store = Store::in_memory().expect("开得出来");
@@ -3121,12 +3840,12 @@ mod tests {
         conn.execute_batch(MIGRATIONS[0]).expect("建得出第一版");
         conn.execute_batch("PRAGMA user_version = 1")
             .expect("盖得上第一版的版本号");
-        let mut store = Store {
+        let store = Store {
             conn,
             path: "（内存）".to_string(),
         };
         let verdict = 汉化裁决();
-        store.put(&verdict).expect("第一版里就存得进");
+        旧程序记一条裁决(&store.conn, &verdict);
 
         store.migrate().expect("升得上来");
 
@@ -3202,26 +3921,25 @@ mod tests {
         }
         conn.execute_batch("PRAGMA user_version = 3")
             .expect("盖得上第三版的版本号");
-        let mut store = Store {
+        let store = Store {
             conn,
             path: "（内存）".to_string(),
         };
         let verdict = 汉化裁决();
-        store.put(&verdict).expect("第三版里就存得进");
-        let batch = store
-            .put_batch(
-                "小库",
-                "作品《魂斗罗》",
-                None,
-                &[BatchRow {
-                    variant_key: "库/FC/某.zip".to_string(),
-                    member: "库/FC/某.zip".to_string(),
-                    inner: "rom.nes".to_string(),
-                    after: verdict.clone(),
-                    before: None,
-                }],
-            )
-            .expect("第三版里就记得下批");
+        旧程序记一条裁决(&store.conn, &verdict);
+        let batch = 旧程序记一批(
+            &store.conn,
+            "小库",
+            "作品《魂斗罗》",
+            None,
+            &[BatchRow {
+                variant_key: "库/FC/某.zip".to_string(),
+                member: "库/FC/某.zip".to_string(),
+                inner: "rom.nes".to_string(),
+                after: verdict.clone(),
+                before: None,
+            }],
+        );
 
         store.migrate().expect("升得上来");
 
@@ -3263,7 +3981,7 @@ mod tests {
             path: "（内存）".to_string(),
         };
         let verdict = 汉化裁决();
-        store.put(&verdict).expect("第四版里就存得进");
+        旧程序记一条裁决(&store.conn, &verdict);
         let 收藏 = [Membership::now(
             "收藏",
             Anchor::Content {
@@ -3314,7 +4032,7 @@ mod tests {
             path: "（内存）".to_string(),
         };
         let verdict = 汉化裁决();
-        store.put(&verdict).expect("第五版里就存得进");
+        旧程序记一条裁决(&store.conn, &verdict);
         let 压掉的 = TitleSuppression::now(
             "Contra",
             crate::title::Language::Chinese,
@@ -3464,7 +4182,7 @@ mod tests {
             path: "（内存）".to_string(),
         };
         let verdict = 汉化裁决();
-        store.put(&verdict).expect("第七版里就存得进");
+        旧程序记一条裁决(&store.conn, &verdict);
 
         store.migrate().expect("升得上来");
 
@@ -3476,6 +4194,354 @@ mod tests {
             .set_platform_correction("主库", "FC", "FDS", PlatformDecision::ByContent)
             .expect("升上来之后这张表就记得下了");
         assert_eq!(store.platform_corrections("主库").expect("读得出").len(), 1);
+    }
+
+    #[test]
+    fn 第九版的老库升上来_首选变体与亲手加的叫法按主库分开存得住也撤得掉() {
+        // 钉的是**第 10 条迁移**（票 `verdict-store-and-sync/01`）：老东西一条不丢，两张新表
+        // 按主库标识分开——键是中立库里的键，换一份主库指的是另一批文件。
+        let conn = Connection::open_in_memory().expect("开得出来");
+        for sql in &MIGRATIONS[..9] {
+            conn.execute_batch(sql).expect("建得出第九版");
+        }
+        conn.execute_batch("PRAGMA user_version = 9")
+            .expect("盖得上第九版的版本号");
+        let mut store = Store {
+            conn,
+            path: "（内存）".to_string(),
+        };
+        store
+            .set_shaping_override("甲库", "库/FC/封面.png", "库/FC/魂斗罗.zip")
+            .expect("第九版里就存得进");
+
+        store.migrate().expect("升得上来");
+        assert_eq!(
+            store.shaping_overrides("甲库").expect("读得出").len(),
+            1,
+            "老东西一条都不许丢"
+        );
+
+        store
+            .set_preferred_variant("甲库", "魂斗罗", "FC", "库/FC/魂斗罗 (J).zip")
+            .expect("升上来之后这张表就记得下了");
+        store
+            .set_preferred_variant("甲库", "魂斗罗", "FC", "库/FC/魂斗罗 汉化.zip")
+            .expect("同一处再定一次是盖掉");
+        let 叫法 = TitleRow {
+            work: "魂斗罗".to_string(),
+            value: "魂斗罗 我起的名".to_string(),
+            language: crate::title::Language::Chinese,
+            kind: crate::title::TitleKind::Alias,
+            // 交进来的源不看，一律记成裁决。
+            source: "文件名".to_string(),
+            region: None,
+            variant_key: Some("库/FC/魂斗罗 汉化.zip".to_string()),
+            confidence: crate::catalog::Confidence::High,
+            seam: None,
+            evidence: "亲手写的".to_string(),
+            seen: 1,
+        };
+        store
+            .put_own_titles("甲库", std::slice::from_ref(&叫法))
+            .expect("升上来之后这张表就记得下了");
+
+        assert_eq!(
+            store.preferred_variants("甲库").expect("读得出"),
+            BTreeMap::from([(
+                ("魂斗罗".to_string(), "FC".to_string()),
+                "库/FC/魂斗罗 汉化.zip".to_string()
+            )]),
+        );
+        let 存下的 = store.own_titles("甲库").expect("读得出");
+        assert_eq!(存下的.len(), 1);
+        assert_eq!(存下的[0].source, crate::scrape::priority::VERDICT);
+        assert_eq!(存下的[0].variant_key, 叫法.variant_key);
+        assert!(store.preferred_variants("乙库").expect("读得出").is_empty());
+        assert!(store.own_titles("乙库").expect("读得出").is_empty());
+
+        // 已有的不盖：旧中立库里那一条是人后来改过之前的样子。
+        let 旧的 = BTreeMap::from([(
+            ("魂斗罗".to_string(), "FC".to_string()),
+            "库/FC/魂斗罗 (J).zip".to_string(),
+        )]);
+        assert_eq!(
+            store
+                .add_missing_preferred_variants("甲库", &旧的)
+                .expect("收得进"),
+            0
+        );
+        assert_eq!(
+            store
+                .add_missing_own_titles("甲库", std::slice::from_ref(&叫法))
+                .expect("收得进"),
+            0
+        );
+
+        assert!(
+            store
+                .clear_preferred_variant("甲库", "魂斗罗", "FC")
+                .expect("撤得掉")
+        );
+        assert!(
+            store
+                .remove_own_title("甲库", "魂斗罗", 叫法.language, 叫法.kind, &叫法.value)
+                .expect("撤得掉")
+        );
+        assert!(store.preferred_variants("甲库").expect("读得出").is_empty());
+        assert!(store.own_titles("甲库").expect("读得出").is_empty());
+    }
+
+    #[test]
+    fn 第十版的老库升上来_字段修改按主库分开存得住也撤得掉() {
+        // 钉的是**第 11 条迁移**（票 `verdict-store-and-sync/02`）：老东西一条不丢，新表按主库标识
+        // 分开——锚点是作品名或变体的键，换一份主库指的是另一批东西。
+        use crate::scrape::{AnchorKind, Field};
+
+        let conn = Connection::open_in_memory().expect("开得出来");
+        for sql in &MIGRATIONS[..10] {
+            conn.execute_batch(sql).expect("建得出第十版");
+        }
+        conn.execute_batch("PRAGMA user_version = 10")
+            .expect("盖得上第十版的版本号");
+        let mut store = Store {
+            conn,
+            path: "（内存）".to_string(),
+        };
+        store
+            .set_preferred_variant("甲库", "魂斗罗", "FC", "库/FC/魂斗罗 汉化.zip")
+            .expect("第十版里就存得进");
+
+        store.migrate().expect("升得上来");
+        assert_eq!(
+            store.preferred_variants("甲库").expect("读得出").len(),
+            1,
+            "老东西一条都不许丢"
+        );
+
+        let 一格 = |value: &str, at: i64| VerdictValue {
+            anchor: AnchorKind::Work.label().to_string(),
+            subject: "魂斗罗".to_string(),
+            field: Field::Year.label().to_string(),
+            value: value.to_string(),
+            evidence: "手写的".to_string(),
+            at,
+        };
+        store
+            .put_verdict_value("甲库", &一格("1986", 100))
+            .expect("升上来之后这张表就记得下了");
+        store
+            .put_verdict_value("甲库", &一格("1987", 200))
+            .expect("同一格再改一次是盖掉");
+        assert_eq!(
+            store.verdict_values("甲库").expect("读得出"),
+            [一格("1987", 200)],
+            "一格上只留人最后改的那一句，时刻原样记下",
+        );
+        assert!(store.verdict_values("乙库").expect("读得出").is_empty());
+
+        // 已有的不盖：旧中立库里那一格是人后来改过之前的样子。
+        assert_eq!(
+            store
+                .add_missing_verdict_values("甲库", &[一格("1986", 100)])
+                .expect("收得进"),
+            0
+        );
+        assert_eq!(
+            store
+                .add_missing_verdict_values("乙库", &[一格("1986", 100)])
+                .expect("收得进"),
+            1,
+            "别的主库上同一个作品名是另一格"
+        );
+
+        assert!(
+            store
+                .clear_verdict_value("甲库", AnchorKind::Work, "魂斗罗", Field::Year)
+                .expect("撤得掉")
+        );
+        assert!(store.verdict_values("甲库").expect("读得出").is_empty());
+        assert_eq!(
+            store.verdict_values("乙库").expect("读得出").len(),
+            1,
+            "撤甲库那一格不碰乙库"
+        );
+    }
+
+    #[test]
+    fn 第十一版的老库升上来_旧批的作用范围为空_新落下的批记得住作用范围() {
+        // 钉的是**第 12 条迁移**（票 `verdict-store-and-sync/03`）：批表加了作用范围那几格。老库里的批
+        // 一条不丢、照常读得回来，作用范围是空的——**备注里那句话不拆回来**：加这几格之前，界面把
+        // 作用范围原话写进了备注，那是给人看的一句，拆回结构正是 ADR-0024 否掉的形状。
+        let conn = Connection::open_in_memory().expect("开得出来");
+        for sql in &MIGRATIONS[..11] {
+            conn.execute_batch(sql).expect("建得出第十一版");
+        }
+        conn.execute_batch("PRAGMA user_version = 11")
+            .expect("盖得上第十一版的版本号");
+        let mut store = Store {
+            conn,
+            path: "（内存）".to_string(),
+        };
+        let 一行 = |key: &str| BatchRow {
+            variant_key: key.to_string(),
+            member: key.to_string(),
+            inner: "rom.nes".to_string(),
+            after: 汉化裁决(),
+            before: None,
+        };
+        let 旧备注 = "No-Intro / gb.dat / 含头 · 按目录 库/GB/汉化";
+        let 旧批 = 旧程序记一批(
+            &store.conn,
+            "小库",
+            "采用各自的第 1 条候选",
+            Some(旧备注),
+            &[一行("库/GB/汉化/甲.zip")],
+        );
+
+        store.migrate().expect("升得上来");
+
+        let 读回来 = store.batch(旧批).expect("读得到").expect("老批还在");
+        assert_eq!(读回来.scope, None, "旧批没有作用范围那几格，读回来该是空的");
+        assert_eq!(读回来.note.as_deref(), Some(旧备注), "备注一个字不动");
+        assert_eq!(读回来.rows, 1, "老批里的行也还在");
+
+        let 作用范围 = BatchScope {
+            shape: "No-Intro / gb.dat / 高置信 / 含头 / 1 个候选".to_string(),
+            axis: "按目录".to_string(),
+            group: "库/GB/汉化".to_string(),
+            count: 2,
+            kind: "已通过".to_string(),
+        };
+        let 新批 = store
+            .put_batch(
+                "小库",
+                "采用各自的第 1 条候选",
+                None,
+                Some(&作用范围),
+                &[一行("库/GB/汉化/乙.zip")],
+            )
+            .expect("升上来之后记得下作用范围");
+        let 列出来 = store.batches("小库", 0).expect("列得出");
+        assert_eq!(
+            列出来
+                .iter()
+                .map(|batch| (batch.id, batch.scope.clone()))
+                .collect::<Vec<_>>(),
+            [(新批, Some(作用范围.clone())), (旧批, None)],
+            "新落下的那一批五格原样读得回来，旧批照旧是空的",
+        );
+        assert_eq!(
+            store.batch(新批).expect("读得到").expect("在").scope,
+            Some(作用范围),
+            "点名要一批也读得回作用范围",
+        );
+    }
+
+    /// 一条带着 DAT **修订**的发行版裁决：日版撞上的是 `(Rev 1)` 那一条。
+    fn 带修订的裁决() -> Verdict {
+        Verdict::now(
+            内容锚(0xABCD_0001, 40_976),
+            Decision::Release(Facts {
+                work: "魂斗罗".to_string(),
+                platform: Some("FC".to_string()),
+                region: Some("Japan".to_string()),
+                revision: Some("Rev 1".to_string()),
+                ..Facts::default()
+            }),
+        )
+    }
+
+    #[test]
+    fn 第十二版的老库升上来_旧裁决与旧批里的修订为空_新落下的记得住修订() {
+        // 钉的是**第 13 条迁移**（票 `verdict-store-and-sync/04`，挂单 `Q1010`）：裁决表加了修订那一格。
+        // 老裁决一条不丢、修订为空（那时没记，不猜着补）；批里存的是导出行那份 JSON，旧程序写的那份
+        // 没有 `revision` 这一栏，照样读得回来、修订为空——**撤销靠的就是这份 JSON**，读不回来就撤不掉。
+        let conn = Connection::open_in_memory().expect("开得出来");
+        for sql in &MIGRATIONS[..12] {
+            conn.execute_batch(sql).expect("建得出第十二版");
+        }
+        conn.execute_batch("PRAGMA user_version = 12")
+            .expect("盖得上第十二版的版本号");
+        let mut store = Store {
+            conn,
+            path: "（内存）".to_string(),
+        };
+        let 旧裁决 = 汉化裁决();
+        旧程序记一条裁决(&store.conn, &旧裁决);
+        // 旧程序记在批里的那一行：导出行那个形状，**逐字是旧程序写出来的样子**，没有 `revision`。
+        let 旧行 = r#"{"crc32":"12345678","size":40976,"kind":"发行版","work":"重装机兵","platform":"FC","chinese":"汉化","team":"外星科技","version":"v1.2","decided_at":0}"#;
+        store
+            .conn
+            .execute(
+                "INSERT INTO verdict_batch(library, summary, decided_at) VALUES('小库', '作品《重装机兵》', 0)",
+                [],
+            )
+            .expect("旧版的批表里记得下");
+        let 旧批 = store.conn.last_insert_rowid();
+        store
+            .conn
+            .execute(
+                "INSERT INTO verdict_batch_row(batch, variant_key, member, inner, after, before)
+                 VALUES(?1, '库/FC/重装机兵.zip', '库/FC/重装机兵.zip', 'rom.nes', ?2, NULL)",
+                params![旧批, 旧行],
+            )
+            .expect("旧版的批表里记得下");
+
+        store.migrate().expect("升得上来");
+
+        let back = store
+            .find(&旧裁决.anchor)
+            .expect("读得到")
+            .expect("老裁决还在");
+        assert_eq!(back.decision, 旧裁决.decision, "老裁决一个字都没变");
+        let Decision::Release(facts) = &back.decision else {
+            panic!("老裁决该是一条发行版裁决");
+        };
+        assert_eq!(facts.revision, None, "加这一格之前落下的裁决修订为空");
+        let 旧批里的 = store.batch_rows(旧批).expect("读得到");
+        assert_eq!(
+            旧批里的.len(),
+            1,
+            "旧批里那一行没有 `revision` 那一栏也读得回来"
+        );
+        let Decision::Release(facts) = &旧批里的[0].after.decision else {
+            panic!("旧批里落下的该是一条发行版裁决");
+        };
+        assert_eq!(
+            (facts.work.as_str(), facts.revision.as_deref()),
+            ("重装机兵", None),
+            "旧批里那条读回来修订为空",
+        );
+
+        // 升上来之后，新落下的裁决与批都记得住修订。
+        let 新裁决 = 带修订的裁决();
+        store.put(&新裁决).expect("升上来之后记得下修订");
+        assert_eq!(
+            store.find(&新裁决.anchor).expect("读得到"),
+            Some(新裁决.clone()),
+            "修订那一格原样读得回来",
+        );
+        let 新批 = store
+            .put_batch(
+                "小库",
+                "作品《魂斗罗》",
+                None,
+                None,
+                &[BatchRow {
+                    variant_key: "库/FC/魂斗罗 (Japan) (Rev 1).zip".to_string(),
+                    member: "库/FC/魂斗罗 (Japan) (Rev 1).zip".to_string(),
+                    inner: "rom.nes".to_string(),
+                    after: 新裁决.clone(),
+                    before: Some(新裁决.clone()),
+                }],
+            )
+            .expect("记得下");
+        let 新批里的 = store.batch_rows(新批).expect("读得到");
+        assert_eq!(
+            (新批里的[0].after.clone(), 新批里的[0].before.clone()),
+            (新裁决.clone(), Some(新裁决)),
+            "批里落下的与盖掉的那条都带着修订——撤销放回去的才不会把修订丢掉",
+        );
     }
 
     #[test]
@@ -3708,7 +4774,13 @@ mod tests {
             before: Some(旧的.clone()),
         }];
         let id = store
-            .put_batch("小库", "作品《改成这个》", Some("按记号裁一批"), &rows)
+            .put_batch(
+                "小库",
+                "作品《改成这个》",
+                Some("按记号裁一批"),
+                None,
+                &rows,
+            )
             .expect("记得下");
 
         let 列出来 = store.batches("小库", 0).expect("列得出");
@@ -3951,7 +5023,8 @@ mod tests {
                 false,
             ))
             .expect("写得进");
-        assert_eq!(store.export(false).expect("导得出").version, EXPORT_VERSION);
+        // 装着匹配裁决、没有修订：盖第 2 版——不是最新的第 3 版，第 2 版的程序读得懂它。
+        assert_eq!(store.export(false).expect("导得出").version, 2);
         // 只在本机成立的那条不带出去，于是**不带路径锚的那一份仍旧盖第 1 版**。
         let mut 只有路径锚 = Store::in_memory().expect("开得出来");
         只有路径锚
@@ -3966,10 +5039,7 @@ mod tests {
             ))
             .expect("写得进");
         assert_eq!(只有路径锚.export(false).expect("导得出").version, 1);
-        assert_eq!(
-            只有路径锚.export(true).expect("导得出").version,
-            EXPORT_VERSION
-        );
+        assert_eq!(只有路径锚.export(true).expect("导得出").version, 2);
     }
 
     #[test]
@@ -3982,6 +5052,81 @@ mod tests {
         assert_eq!(
             (account.read, account.added, account.matches_read),
             (1, 1, 0)
+        );
+    }
+
+    #[test]
+    fn 带修订的裁决导出成第三版_别人导入得回修订() {
+        // 票 `verdict-store-and-sync/04`（挂单 `Q1010`）：导出格式升一版，带上修订。
+        // **盖第 3 版**：老程序读到一份装着修订的文件，会把那一栏静静丢掉——那比读不了更糟，
+        // 所以版本号那道往后拒绝的闸要拦下它（与匹配裁决升第 2 版同一条理由）。
+        let mut store = Store::in_memory().expect("开得出来");
+        store.put(&汉化裁决()).expect("写得进");
+        store.put(&带修订的裁决()).expect("写得进");
+        let 导出 = store.export(false).expect("导得出");
+        assert_eq!(导出.version, 3, "装着修订的文件盖第 3 版");
+        let text = serde_json::to_string(&导出).expect("序列化");
+        assert!(
+            text.contains(r#""revision":"Rev 1""#),
+            "修订那一栏在文件里：{text}"
+        );
+
+        let mut 别人的 = Store::in_memory().expect("开得出来");
+        let account = 别人的.import(&text).expect("收得下");
+        assert_eq!((account.read, account.added), (2, 2));
+        assert_eq!(
+            别人的.find(&带修订的裁决().anchor).expect("读得到"),
+            Some(带修订的裁决()),
+            "别人那份里修订原样读得回来",
+        );
+        assert_eq!(
+            别人的
+                .find(&汉化裁决().anchor)
+                .expect("读得到")
+                .map(|back| back.decision),
+            Some(汉化裁决().decision),
+            "不带修订的那条照旧是不带的",
+        );
+
+        // 再往后一版的文件，本程序如实拒收，不猜着读。
+        let 第四版 = text.replacen(r#""version":3"#, r#""version":4"#, 1);
+        assert!(
+            Store::in_memory()
+                .expect("开得出来")
+                .import(&第四版)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn 第二版的裁决文件照读_修订为空() {
+        // 往前兼容：第 2 版的文件里没有 `revision` 那一栏（匹配裁决那一栏有），读回来修订为空。
+        let mut store = Store::in_memory().expect("开得出来");
+        let text = r#"{"format":"romcat-沉淀库","version":2,"exported_at":0,
+             "verdicts":[{"crc32":"12345678","size":40976,"kind":"发行版","work":"重装机兵",
+                          "platform":"FC","chinese":"汉化","team":"外星科技","version":"v1.2","decided_at":0}],
+             "matches":[{"crc32":"12345678","size":40976,"source":"中文离线源","entry":"7",
+                         "accepted":true,"decided_at":0}]}"#;
+        let account = store.import(text).expect("收得下");
+        assert_eq!(
+            (account.read, account.added, account.matches_read),
+            (1, 1, 1)
+        );
+        let back = store
+            .find(&内容锚(0x1234_5678, 40_976))
+            .expect("读得到")
+            .expect("收下了");
+        let Decision::Release(facts) = back.decision else {
+            panic!("收下的该是一条发行版裁决");
+        };
+        assert_eq!(
+            (
+                facts.work.as_str(),
+                facts.version.as_deref(),
+                facts.revision
+            ),
+            ("重装机兵", Some("v1.2"), None),
+            "第 2 版的文件读得回来，修订为空",
         );
     }
 

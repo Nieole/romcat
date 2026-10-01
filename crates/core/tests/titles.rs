@@ -951,7 +951,7 @@ fn 压掉一条叫法之后重折不把它折回来而同批没压的照旧回�
     );
 
     let 那条 = 那条中文叫法(&现场);
-    let 压掉 = title::suppress(&mut 现场.catalog, &mut 现场.store, &那条).expect("压得掉");
+    let 压掉 = title::suppress(&mut 现场.catalog, &mut 现场.store, "库", &那条).expect("压得掉");
     assert!(压掉.removed, "中立库里那一行当场就没了");
     assert!(压掉.recorded, "沉淀库里记下了这一下");
     assert!(!集合里有(&现场, "Contra", "魂斗罗"), "删完当场就不在了");
@@ -977,7 +977,7 @@ fn 压制记在沉淀库里_中立库整份重建之后它照旧压着() {
     let mut 现场 = 建现场();
     跑一遍(&mut 现场);
     let 那条 = 那条中文叫法(&现场);
-    title::suppress(&mut 现场.catalog, &mut 现场.store, &那条).expect("压得掉");
+    title::suppress(&mut 现场.catalog, &mut 现场.store, "库", &那条).expect("压得掉");
 
     // **中立库整份重建**：升 `SCHEMA_VERSION` 之后用户删库重扫，落到测试里就是换一份
     // 空的中立库、从头扫一遍。沉淀库**不跟着走**。
@@ -1009,7 +1009,7 @@ fn 撤掉压制之后那条叫法下一趟重折就回来() {
     let mut 现场 = 建现场();
     跑一遍(&mut 现场);
     let 那条 = 那条中文叫法(&现场);
-    title::suppress(&mut 现场.catalog, &mut 现场.store, &那条).expect("压得掉");
+    title::suppress(&mut 现场.catalog, &mut 现场.store, "库", &那条).expect("压得掉");
     跑一遍(&mut 现场);
     assert!(!集合里有(&现场, "Contra", "魂斗罗"));
 
@@ -1052,7 +1052,7 @@ fn 裁决来源的叫法删掉就是删掉_不为它记压制() {
         .put_titles(std::slice::from_ref(&人说的))
         .expect("写得进");
 
-    let 压掉 = title::suppress(&mut 现场.catalog, &mut 现场.store, &人说的).expect("删得掉");
+    let 压掉 = title::suppress(&mut 现场.catalog, &mut 现场.store, "库", &人说的).expect("删得掉");
     assert!(压掉.removed, "中立库里那一行没了");
     assert!(!压掉.recorded, "裁决来源的不记压制——没有什么会把它折回来");
     assert!(

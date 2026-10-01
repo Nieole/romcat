@@ -19,6 +19,7 @@
 核查（2026-09-23）：三样人手写的仍落中立库：字段裁决 crates/gui/src/browse/work.rs:434 save_meta→:469 put_verdict_value（crates/core/src/catalog/scrape.rs:1123，中立库刮削值表）、work.rs:1873 apply_meta；手加名称 crates/gui/src/browse.rs:2426 add_title→:5320 write_title→catalog/title.rs:180 put_titles；首选变体 browse.rs:2513→catalog/frontend.rs:248 set_preferred_variant。沉淀库 verdict.rs:229-470 的表里没有这三样。另：删库那句话 crates/core/src/catalog.rs:370-376 只逐项列了「首选变体与亲手加的叫法」，没列详情页的**字段裁决**，反而说「沉淀库里的裁决……一条不丢」——对这一样说了假话。
 依赖／可并：Q725（同一件事，Q725 是其中两样+键的选择题，先裁它）、Q682（变体锚若走内容锚，要先定代表那一份）
 （大小 L，来自票 `gui-looks-like-the-design/15`）
+**settled（2026-10-01）：** 首选变体与手加的名称 → 票 `01`，字段修改 → 票 `02`；删库那句话三样都在「一条不丢」那边。
 
 ### `Q725` — 中立库里还住着两样人亲手定的东西：首选变体、亲手加的叫法
 
@@ -33,6 +34,7 @@
 核查（2026-09-23）：crates/gui/src/queue.rs:152 parts: Parts 只在进程里，:786 refresh_records 只 keep 在册批号；沉淀库批表 crates/core/src/verdict.rs:299-311 verdict_batch / :872-887 Batch 没有「作用范围（形状+轴+组名）」这一格。
 依赖／可并：Q973（都想给「一批」加一格；表不同——Q964 是沉淀库 verdict_batch，Q973 是中立库 sublibrary_exception——不必同票）
 （大小 M，来自票 `gui-looks-like-the-design/19`）
+**settled（2026-10-01）：** 票 `03` 走 A——沉淀库第 12 条迁移给 `verdict_batch` 加了作用范围那五格（形状、轴、组名，连条数与裁成什么），开窗时照册子折回、锁轴、标「已通过」；命令行 `triage batches` 印「作用范围：…」。备注里那句原话本票没再写（这是一个岔路口，记在挂单 `Q1567`、待拿主意的人裁）。
 
 ### `Q1010` — 合并作品落成的裁决把 DAT 条目名里的**修订标记**丢了（`release.revision` 过不来）
 
@@ -40,6 +42,7 @@
 核查（2026-09-23）：crates/core/src/triage/merge.rs:313-356 facts_of 从 release 抄平台/地区/序列号/语言、version 取 catalog.decided_edition（identification.edition），无 revision；verdict::Facts（crates/core/src/verdict.rs:724-741）没有 revision 格；crates/core/src/identify.rs:3767 verdict_release 在 :3808 写 revision: None。详情页 crates/core/src/catalog/detail.rs:235-239 edition() 回退链第二档读 release.revision，于是合并后退回「—」。
 依赖／可并：Q994（同一条「第几版」链，先答 Q994 的领域题再定列名）
 （大小 M，来自票 `gui-looks-like-the-design/16`）
+**settled（2026-10-01）：** 票 `04` 照裁定做——`verdict::Facts` 多一格 `revision`，沉淀库第 13 条迁移给 `verdict` 加 `revision` 列（列名与中立库 `release.revision` 同名，说的是同一层），导出格式升到第 3 版（装着修订才盖 3，第 1、2 版照读、修订为空）。合并照「眼下那一份」把 `release.revision` 抄进裁决，待确认里挑一条候选照 DAT 条目名记下；`Projector::verdict_release` 把它写进发行版那一行、也进去重键。合并之后、删库重扫之后「版本」那一格照旧是修订。
 
 ### `Q994` — 卡带内部头读出来的版本号仍只躺在 JSON 里，与「第几版」那条链不通
 
@@ -47,6 +50,7 @@
 核查（2026-09-23）：三件事在代码与词表里各住一处：①卡带/光盘头版本号——crates/core/src/identify/cart.rs:233 Facts::version（:457 GBA 0xBC、:549 GB 0x14C mask ROM version、:705 SFC 头+0x1B 等，一律折成 "v{byte}"）、光盘 identify/disc.rs:429（NGC/Wii 头第 7 字节）、identify/ident.rs:111 Ident::version；落 content_cart.facts / content_switch.facts JSON（catalog/identify.rs:164,190），无独立列、不进任何链；词表无名，且 CONTEXT.md:248 第几版 _Avoid_ 了「版本、Version、修订号」。②DAT (Rev N)——identify/naming.rs:14,57 revision→release.revision；词表 CONTEXT.md:242「第几版」上一层＝发行版的**修订**。③汉化第几版——沉淀库 verdict 表 version 列（verdict.rs:251）/ verdict::Facts::version（:739）→ identification.edition（catalog/identify.rs:2902 decided_edition）；词表 CONTEXT.md:243 下一层＝变体的第几版，只有人说得出。链在 catalog/detail.rs:235-239（裁决 > 修订 > 说不出）。另有第四个被明令排除的：filename::Parsed::version（detail.rs 文档、CONTEXT.md:245）。结论：①与②是**同一层（发行版的修订）的两种证据**——头里那个字节是官方重发时改的，No-Intro 的 (Rev 1) 多数正对应头版本 1；但编码不一（v0 在 DAT 里是「没有标记」，Rev A/v1.1 各平台写法不一），汉化补丁通常不改它，所以在汉化变体上它说的是「打在哪一版原盘上」，与③完全不是一件事。
 依赖／可并：Q1010（同一条链；先定此题再定 Facts 加不加 revision）
 （大小 S，来自票 `gui-looks-like-the-design/34`）
+**settled（2026-10-01）：** 票 `04` 照裁定做——头里读出来的版本号不接「第几版」那条链，只写进候选的依据：「卡带头里（光盘头里、盘里）写的版本号 v0——它说的是这次发行的修订，只是一份证据，不是第几版」（`identify::serial`）；`VariantDetail::edition` 不看它，没撞上 DAT 的变体那一格照旧说不出。没有候选的变体详情上看不见它（这是一个岔路口，记在挂单 `Q1577`、待拿主意的人裁）。
 
 ### `Q682` — 「谁代表这个变体」（裁决的内容锚）照旧可能挑中捎带的 BIOS
 

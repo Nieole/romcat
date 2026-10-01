@@ -5,7 +5,7 @@
 //! （`identify::header` / `fingerprint` / `scope` / `naming` 各有自己的单元测试），
 //! 这里要证的是另一件事：那几条纯函数真的接在了扫描、DAT 库与中立库之间。
 //!
-//! fixture 的形状照真机来（`docs/library-facts.md`）：库里 91.1% 的容量在**透明容器**
+//! fixture 的形状照真机来（`docs/library-facts.md`）：库里九成以上的容量在**透明容器**
 //! 里，所以主力路径是「零解压读容器里的 CRC-32」；`.smc` 那一份带 512 字节拷贝机头，
 //! 只有去头哈希撞得上 No-Intro；`补丁` 与 `AIME00001` 那两份真库里就躺着。
 
@@ -24,6 +24,7 @@ use romcat_core::fs::{MemFs, RealFs};
 use romcat_core::identify::fuzzy;
 use romcat_core::identify::report::IdentifyReport;
 use romcat_core::identify::{self, Options};
+use romcat_core::platform::Manifest;
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::scrape::{AnchorKind, Field};
 use romcat_core::task::Handle;
@@ -93,7 +94,7 @@ fn 建现场() -> 现场 {
     let dir = temp_dir("identify");
     let root = dir.path();
 
-    // ── FC：三个变体，全在透明容器里（真库 91.1% 的容量是这个形态）
+    // ── FC：三个变体，全在透明容器里（真库九成以上的容量是这个形态，见台账 `docs/library-facts.md`）
     写(
         &root.join("FC/超级马里奥.zip"),
         &zip_container(&[ZipEntrySpec::stored("Super Mario (Japan).nes", 原版())]),
@@ -737,7 +738,7 @@ fn 快照(root: &Path) -> Vec<(String, u64, std::time::SystemTime)> {
 
 // ───────── 盘上的名字是分解形式：回盘读那一趟不能落成「无判据」 ─────────
 //
-// 中立库的键一律是 NFC（ADR-0020），而主库里 1.99% 的名字在盘上是**分解形式**。
+// 中立库的键一律是 NFC（ADR-0020），而主库里百分之二上下的名字在盘上是**分解形式**（台账没收，出处是 `docs/research/ntfs-mtime-precision.md`）。
 // 在**分解敏感**的文件系统上（Windows 的 NTFS、Linux 的 ext4——ADR-0018 说主力机
 // 是 Windows），拿 NFC 的键直接拼出来的那条路径根本开不了，而识别把「开不了」读成
 // **无判据**：几百个变体从此认不出来，报告里说的却是「拿不到可撞的东西」。
@@ -861,7 +862,8 @@ fn 还没识别的变体照样占着变体总数与全部变体里那个分母()
     );
     重扫(&mut 现场);
 
-    let report = IdentifyReport::build(&现场.catalog, &现场.repo).expect("折得出报告");
+    let report =
+        IdentifyReport::build(&现场.catalog, &现场.repo, &Manifest::builtin()).expect("折得出报告");
     assert_eq!(report.total.variants, 跑过的 + 1, "新来的那个也是一个变体");
     assert_eq!(report.total.not_run, 1, "它还没识别");
     // **四档一档都没多**：还没识别既不是未命中也不是无判据，更不是跳过。
@@ -1672,7 +1674,7 @@ fn 结论全貌(现场: &现场) -> Vec<String> {
         }
     }
     行.push(
-        IdentifyReport::build(catalog, &现场.repo)
+        IdentifyReport::build(catalog, &现场.repo, &Manifest::builtin())
             .expect("折得出报告")
             .render_text(),
     );

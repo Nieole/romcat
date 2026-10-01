@@ -7,6 +7,11 @@
 
 收挂单 `Q945`：见 `../grill.md` 里那一条。
 
+收票 09 第 4 条（2026-10-01）：照票 09 末尾的结论，把设备档案 `crates/core/src/capability/profiles.toml` 里 ES-DE 那一段的说明补上——
+gamelist 只从 `<应用数据目录>/gamelists/<系统名>/` 读；应用数据目录照 ES-DE 默认在内置存储上、不在卡上；`LegacyGamelistFileLocation` 默认关，开了也只认 ROM 系统目录里**已有**的那一份。
+**「默认照 ES-DE 2.x」按票 09 的结论读作 3.x 的默认**，拿主意的人 2026-10-01 裁：「ES-DE 数据目录」这一项**默认 = 在内置存储上（够不着）**——默认那一档同步不写 gamelist、差量预览如实说；
+填了相对卡根的路径（例如 `ES-DE`）才写到那里。另：今天的落点是卡根下 `gamelists/<平台目录>/`，不是票面说的「平台目录旁」。
+
 **Blocked by:** 09
 
 **Status:** ready-for-agent
