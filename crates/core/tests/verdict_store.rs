@@ -19,8 +19,8 @@ use romcat_core::dat::repo::DatRepo;
 use romcat_core::fs::RealFs;
 use romcat_core::identify::{self, Options, fuzzy};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
-use romcat_core::scrape::Priorities;
-use romcat_core::scrape::priority::VERDICT;
+use romcat_core::scrape::priority::{Said, VERDICT, entry_fields};
+use romcat_core::scrape::{AnchorKind, Field, Priorities};
 use romcat_core::site::Site;
 use romcat_core::task::Handle;
 use romcat_core::testing::container::{ZipEntrySpec, zip_container};
@@ -489,6 +489,87 @@ fn 导出沉淀库不带首选变体与亲手加的叫法() {
     }
 }
 
+/// 详情页上改的那一格的回执写的是什么（界面「保存」那一下记的**依据**）。
+const 手写的: &str = "作品详情页上手动修改";
+
+/// 核心库说《魂斗罗》这个条目（FC，汉化版当头）上这个字段眼下写出去的是什么——
+/// 作品详情页元数据那一面与导出读的是同一处（`scrape::priority::entry_fields`）。
+fn 写出去的(site: &Site, field: Field) -> Option<Said> {
+    entry_fields(
+        &site.catalog,
+        AnchorKind::Work,
+        作品,
+        平台,
+        Some(汉化),
+        &Priorities::builtin(),
+    )
+    .expect("读得出")
+    .into_iter()
+    .find(|one| one.field == field)
+    .expect("这一格在")
+    .shown
+}
+
+/// 裁决说的那一句。
+fn 裁决说(value: &str) -> Option<Said> {
+    Some(Said {
+        source: Some(VERDICT.to_string()),
+        values: vec![value.to_string()],
+    })
+}
+
+#[test]
+fn 详情页改过的字段_删掉中立库重扫之后还在() {
+    // 作品详情页「编辑 → 保存」、「使用这个值」落下的是一格**字段修改**：来源记裁决，
+    // 优先于所有数据源。改在作品上的（年份）与改在变体上的（汉化组）各一格。
+    let 主库 = 摆好主库();
+    let 原样 = 主库的字节(主库.path());
+    let 工作目录 = temp_dir("verdict-store-fields");
+    let (库文件, mut site) = 认好的现场(主库.path(), 工作目录.path());
+    assert_eq!(
+        写出去的(&site, Field::Year),
+        None,
+        "前提：年份这一格没人说过"
+    );
+
+    site.put_verdict_value(AnchorKind::Work, 作品, Field::Year, "1987", 手写的)
+        .expect("改得动年份");
+    site.put_verdict_value(
+        AnchorKind::Variant,
+        汉化,
+        Field::TranslationGroup,
+        "我的汉化组",
+        手写的,
+    )
+    .expect("改得动汉化组");
+    assert_eq!(写出去的(&site, Field::Year), 裁决说("1987"), "当场就生效了");
+
+    drop(site);
+    let site = 删库重扫(&库文件, 主库.path(), 工作目录.path());
+    assert_eq!(
+        写出去的(&site, Field::Year),
+        裁决说("1987"),
+        "删库重扫之后，改在作品上的那一格该还在",
+    );
+    assert_eq!(
+        写出去的(&site, Field::TranslationGroup),
+        裁决说("我的汉化组"),
+        "删库重扫之后，改在变体上的那一格该还在",
+    );
+    assert!(
+        详情(&site, 汉化)
+            .values
+            .iter()
+            .any(|one| one.is_verdict() && one.value.evidence == 手写的),
+        "依据也原样回来了：{:?}",
+        详情(&site, 汉化).values,
+    );
+    assert!(
+        主库的字节(主库.path()) == 原样,
+        "改字段、删库重扫一整趟下来，主库该一个字节都没动（ADR-0004）",
+    );
+}
+
 #[test]
 fn 删掉亲手加的叫法_删库重扫之后它也不回来() {
     // 详情面板上那个「删」对亲手加的叫法也管用（`title::suppress`）。它住沉淀库之后，
@@ -525,4 +606,184 @@ fn 删掉亲手加的叫法_删库重扫之后它也不回来() {
         !有这条叫法(&site, "魂斗罗 我起的名"),
         "删掉的亲手加的叫法被沉淀库带回来了",
     );
+}
+
+#[test]
+fn 撤掉的字段修改_删库重扫之后它也不回来() {
+    // 元数据那一面「撤销手动修改」、编辑时把框清空保存，撤的都是那一格字段修改。它住沉淀库之后，
+    // 撤就得撤沉淀库里那一条——只撤中立库那份投影的话，下次开现场它就被重建回来了。
+    let 主库 = 摆好主库();
+    let 工作目录 = temp_dir("verdict-store-fields-clear");
+    let (库文件, mut site) = 认好的现场(主库.path(), 工作目录.path());
+    site.put_verdict_value(AnchorKind::Work, 作品, Field::Year, "1987", 手写的)
+        .expect("改得动年份");
+
+    assert!(
+        site.clear_verdict_value(AnchorKind::Work, 作品, Field::Year)
+            .expect("撤得动"),
+        "撤的时候说得出原来有这一格",
+    );
+    assert_eq!(写出去的(&site, Field::Year), None, "当场就撤掉了");
+    assert!(
+        !site
+            .clear_verdict_value(AnchorKind::Work, 作品, Field::Year)
+            .expect("撤得动"),
+        "再撤一次：两份库里都没有了",
+    );
+
+    drop(site);
+    let site = 删库重扫(&库文件, 主库.path(), 工作目录.path());
+    assert_eq!(
+        写出去的(&site, Field::Year),
+        None,
+        "撤掉的字段修改被沉淀库带回来了",
+    );
+}
+
+#[test]
+fn 旧中立库里的字段修改_开现场时救进沉淀库一次_撤掉的不再回来() {
+    // 这张票之前，字段修改只住在中立库里。新程序开现场时把中立库那几行当成沉淀库的**投影**
+    // 照沉淀库重建——**不先救一次，旧库里人改过的就在头一次开现场时被抹掉了**。
+    let 工作目录 = temp_dir("verdict-store-fields-carry");
+    let 库文件 = workspace::catalog_path(工作目录.path(), Slug::Named("主库"));
+    {
+        // 旧版程序在这份中立库里记过的样子：作品上一格、变体上一格。
+        let mut catalog = Catalog::create(&库文件, "主库").expect("建得出中立库");
+        catalog
+            .put_verdict_value(AnchorKind::Work, 作品, Field::Year, "1987", 手写的)
+            .expect("写得进旧库");
+        catalog
+            .put_verdict_value(
+                AnchorKind::Variant,
+                汉化,
+                Field::TranslationGroup,
+                "我的汉化组",
+                手写的,
+            )
+            .expect("写得进旧库");
+    }
+    let 旧库里的 = Catalog::open(&库文件)
+        .expect("开得出")
+        .verdict_values()
+        .expect("读得出");
+    assert_eq!(旧库里的.len(), 2, "前提：旧库里两格");
+
+    let (_, mut site) = 开现场(工作目录.path());
+    let 标识 = site.library_identity.clone();
+    assert_eq!(
+        site.store.verdict_values(&标识).expect("读得出"),
+        旧库里的,
+        "开现场那一下，两格字段修改就原样搬进沉淀库了（依据与时刻一个字不差）",
+    );
+    assert_eq!(
+        site.catalog.verdict_values().expect("读得出"),
+        旧库里的,
+        "中立库里那两格也还在",
+    );
+
+    // 人撤掉一格：下次开现场，旧库里原来那一行**不许**又被搬回来。
+    assert!(
+        site.clear_verdict_value(AnchorKind::Work, 作品, Field::Year)
+            .expect("撤得掉")
+    );
+    drop(site);
+    let (_, site) = 开现场(工作目录.path());
+    let 剩下的: Vec<String> = site
+        .store
+        .verdict_values(&标识)
+        .expect("读得出")
+        .into_iter()
+        .map(|one| one.value)
+        .collect();
+    assert_eq!(剩下的, ["我的汉化组"], "撤掉的那一格被旧库带回来了");
+    assert_eq!(
+        site.catalog
+            .verdict_values()
+            .expect("读得出")
+            .into_iter()
+            .map(|one| one.value)
+            .collect::<Vec<_>>(),
+        ["我的汉化组"],
+    );
+}
+
+#[test]
+fn 结构版本对不上的旧库里的字段修改_列出来那一下就救进沉淀库_照提示删库重扫之后还在() {
+    // 删库那句提示说详情页上改过的字段「一条不丢」，而人读到它的时候，那份库**开不进去**
+    // ——开现场时搬一次那条路走不到。列出来那一下就得先救出来（同首选变体与叫法那一条）。
+    let 主库 = 摆好主库();
+    let 工作目录 = temp_dir("verdict-store-fields-stranded");
+    let 库文件 = workspace::catalog_path(工作目录.path(), Slug::Named("主库"));
+    {
+        let mut catalog = Catalog::create(&库文件, "主库").expect("建得出中立库");
+        catalog
+            .put_verdict_value(AnchorKind::Work, 作品, Field::Year, "1987", 手写的)
+            .expect("写得进旧库");
+    }
+    rusqlite::Connection::open(&库文件)
+        .expect("开得出旧库")
+        .execute_batch("UPDATE meta SET value = '6' WHERE key = 'schema_version';")
+        .expect("改得成一份旧版本的库");
+
+    let 列出来的 = workspace::catalogs(工作目录.path());
+    let 那一份 = 列出来的
+        .entries()
+        .expect("列得开")
+        .iter()
+        .find(|一份| 一份.path == 库文件)
+        .expect("版本对不上的那一份照样列出来了");
+    let CatalogState::SchemaMismatch { said: 说的, .. } = &那一份.state else {
+        panic!("该是结构版本对不上：{那一份:?}");
+    };
+    assert!(说的.contains("删掉它重扫一遍"), "{说的}");
+
+    删库(&库文件);
+    let (_, mut site) = 开现场(工作目录.path());
+    扫(&mut site, 主库.path());
+    裁成魂斗罗(&mut site);
+    跑识别(&mut site, 主库.path());
+    assert_eq!(
+        写出去的(&site, Field::Year),
+        裁决说("1987"),
+        "照提示删库重扫之后，旧库里改过的年份还在",
+    );
+}
+
+#[test]
+fn 导出沉淀库不带详情页改过的字段() {
+    // 字段修改与首选变体、亲手加的叫法同族：键是本机这一份主库里的作品名与变体的键，
+    // 给别人一格也用不上（`--include-path` 也不带，同那两样，挂单 `Q722` 的裁决）。
+    let 主库 = 摆好主库();
+    let 工作目录 = temp_dir("verdict-store-fields-export");
+    let (_, mut site) = 认好的现场(主库.path(), 工作目录.path());
+    site.put_verdict_value(AnchorKind::Work, 作品, Field::Year, "1987", 手写的)
+        .expect("改得动年份");
+    site.put_verdict_value(
+        AnchorKind::Variant,
+        汉化,
+        Field::TranslationGroup,
+        "我的汉化组",
+        手写的,
+    )
+    .expect("改得动汉化组");
+
+    for 带路径锚 in [false, true] {
+        let 导出 = site.store.export(带路径锚).expect("导得出");
+        assert_eq!(导出.verdicts.len(), 2, "对照：两条内容锚的裁决在导出里");
+        let 原文 = serde_json::to_string(&导出).expect("折得成 JSON");
+        for 不该有的 in ["1987", "我的汉化组", 手写的] {
+            assert!(
+                !原文.contains(不该有的),
+                "带路径锚={带路径锚}：导出里出现了「{不该有的}」：{原文}",
+            );
+        }
+        let mut 别人的 = romcat_core::verdict::Store::in_memory().expect("开得出沉淀库");
+        别人的.import(&原文).expect("导得进");
+        assert!(
+            别人的
+                .verdict_values(&site.library_identity)
+                .expect("读得出")
+                .is_empty()
+        );
+    }
 }

@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS media(
     -- 三列**可空，而且空是有含义的**：这一版不解的图片格式、半截文件、以及这台机器上
     -- 没有 ffmpeg，三种都留空（ADR-0021：**不可读**是第三态，不是零）。老库里此前已经
     -- 入过池的那些也全空着——屏上那一行照样退回「来源 · 大小」，不为这三个数逼人重扫
-    -- 一份 8.60 TiB 的库。
+    -- 一份八 TiB 多的库（见台账 `docs/library-facts.md`）。
     --
     -- 这三列由 `add_columns` 给老库补上，见那个函数的注释。
     width       INTEGER,
@@ -240,6 +240,67 @@ pub struct ScrapedValue {
     pub at: i64,
 }
 
+/// 一格**字段修改**：人在作品详情页上亲手写下的一个字段值，源一律是**裁决**
+/// （`scrape_value` 里 `source = 裁决` 的一行，少了源那一格）。
+///
+/// 原件住**沉淀库**（票 `verdict-store-and-sync/02`，[`Store::verdict_values`](crate::verdict::Store::verdict_values)），
+/// 中立库里那几行是它的**投影**。锚点种类与字段照中立库那张表存成词，与那张表一个字不差——
+/// 投影回去不经过「认得出认不出」这一道。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct VerdictValue {
+    /// 锚点种类的那个词：作品 / 变体（[`AnchorKind::label`]）。
+    pub anchor: String,
+    /// 锚点：作品名或变体的键。
+    pub subject: String,
+    /// 字段的那个词（[`Field::label`]）。
+    pub field: String,
+    /// 人写下的那一句。
+    pub value: String,
+    /// **依据**：在哪儿、怎么改的（「作品详情页上手动修改」「合并作品：改用《某某》的值」）。
+    pub evidence: String,
+    /// 写下的时刻（Unix 秒）。
+    pub at: i64,
+}
+
+impl VerdictValue {
+    /// 人**眼下**在 `subject` 这个锚点的 `field` 上写下 `value` 这一格：锚点种类与字段折成库里存的词，
+    /// 时刻取现在。沉淀库那一条与中立库那份投影从同一个值写出去，时刻一字不差。
+    #[must_use]
+    pub fn now(
+        anchor: AnchorKind,
+        subject: &str,
+        field: Field,
+        value: &str,
+        evidence: &str,
+    ) -> Self {
+        Self {
+            anchor: anchor.label().to_string(),
+            subject: subject.to_string(),
+            field: field.label().to_string(),
+            value: value.to_string(),
+            evidence: evidence.to_string(),
+            at: super::now_secs(),
+        }
+    }
+}
+
+/// 往 `scrape_value` 里写一格字段修改的投影（源记**裁决**）。写一格与整份重建共用这一句。
+fn insert_verdict(conn: &rusqlite::Connection, row: &VerdictValue) -> rusqlite::Result<usize> {
+    conn.prepare_cached(
+        "INSERT INTO scrape_value(anchor, subject, field, source, value, evidence, at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7)",
+    )?
+    .execute(params![
+        row.anchor,
+        row.subject,
+        row.field,
+        VERDICT,
+        row.value,
+        row.evidence,
+        row.at,
+    ])
+}
+
 /// 一条读回来的媒体引用。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScrapedMedia {
@@ -273,7 +334,7 @@ pub type FileVisitor<'a> = dyn FnMut(&str, Option<u64>, Option<i64>) + 'a;
 
 /// 逐条走刮削结论时收到的那三样：锚点种类、锚点、那条值。
 ///
-/// **`evidence` 在这条路上是空的**：报告只用得着值与源，而真库里那是 78,902 条依据、
+/// **`evidence` 在这条路上是空的**：报告只用得着值与源，而真库里那是近八万条依据（见台账 `docs/library-facts.md`）、
 /// 每条几十个字——为一次计数把它们全搬进内存不划算。要看依据走
 /// [`scraped_values`](Catalog::scraped_values)。
 pub type ScrapedVisitor<'a> = dyn FnMut(&str, &str, ScrapedValue) + 'a;
@@ -812,7 +873,7 @@ impl Catalog {
 
     /// 一条条走过库里全部**文件**条目：键、字节数、修改时间。
     ///
-    /// 刮削拿它找本地媒体。走回调而不是返回一整份 `Vec`：真库里这是 256,128 行。
+    /// 刮削拿它找本地媒体。走回调而不是返回一整份 `Vec`：真库里这是二十五万多行（见台账 `docs/library-facts.md`）。
     /// 大小与修改时间一并交出来，是因为它们要进本地媒体源的**输入指纹**——那正是
     /// 扫描判增量用的那个三元组（ADR-0021 的第三态在这里表现为两个 `None`）。
     ///
@@ -1118,6 +1179,11 @@ impl Catalog {
     /// 优先级表把**裁决**排在每个字段的最前（`priorities.toml` 的规则一），所以写下之后
     /// 导出真会用它——而不是「记下了但不生效」。
     ///
+    /// ⚠️ **这里只写中立库那份投影。** 字段修改的原件住沉淀库（票 `verdict-store-and-sync/02`）：
+    /// 人的动作走 [`Site::put_verdict_value`](crate::site::Site::put_verdict_value)，先落沉淀库、
+    /// 再调这里；只调这里写下的那一格，下次开现场照沉淀库重建投影时就被抹掉了
+    /// （[`site::reconcile`](crate::site::reconcile)）。
+    ///
     /// # Errors
     /// 写库失败时返回错误。
     pub fn put_verdict_value(
@@ -1128,6 +1194,11 @@ impl Catalog {
         value: &str,
         evidence: &str,
     ) -> Result<(), CatalogError> {
+        self.put_verdict_row(&VerdictValue::now(anchor, subject, field, value, evidence))
+    }
+
+    /// 写一格字段修改的投影，`at` 照交进来的那一格（与沉淀库那一条同一个时刻）。
+    pub(crate) fn put_verdict_row(&mut self, row: &VerdictValue) -> Result<(), CatalogError> {
         // **裁决一个字段上只有一条**：人改了主意就是改了主意，不是又添了一句。
         // 去重键里带上值之后，光靠 `ON CONFLICT` 做不到这件事——改一个字的新裁决会
         // 落成第二行，旧的那条还在。所以先把这个字段上的裁决删干净再写。
@@ -1140,27 +1211,83 @@ impl Catalog {
         tx.execute(
             "DELETE FROM scrape_value
              WHERE anchor = ?1 AND subject = ?2 AND field = ?3 AND source = ?4",
-            params![anchor.label(), subject, field.label(), VERDICT],
+            params![row.anchor, row.subject, row.field, VERDICT],
         )
         .map_err(to_err)?;
-        tx.execute(
-            "INSERT INTO scrape_value(anchor, subject, field, source, value, evidence, at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            params![
-                anchor.label(),
-                subject,
-                field.label(),
-                VERDICT,
-                value,
-                evidence,
-                super::now_secs(),
-            ],
-        )
-        .map_err(to_err)?;
+        insert_verdict(&tx, row).map_err(to_err)?;
         tx.commit().map_err(to_err)
     }
 
+    /// 全部**裁决**来源的字段值——作品详情页上改过的那几格，按锚点种类、锚点、字段排。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn verdict_values(&self) -> Result<Vec<VerdictValue>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT anchor, subject, field, value, evidence, at FROM scrape_value
+                 WHERE source = ?1 ORDER BY anchor, subject, field, value",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map(params![VERDICT], |row| {
+                Ok(VerdictValue {
+                    anchor: row.get(0)?,
+                    subject: row.get(1)?,
+                    field: row.get(2)?,
+                    value: row.get(3)?,
+                    evidence: row.get(4)?,
+                    at: row.get(5)?,
+                })
+            })
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
+    /// 把**裁决**来源的那些字段值**整份换成**给的这些（沉淀库那一份，
+    /// [`site::reconcile`](crate::site::reconcile)），返回真写了没有。别的源的值一行都不碰。
+    ///
+    /// 这些行是沉淀库的**投影**（票 `verdict-store-and-sync/02`），与
+    /// [`Self::replace_verdict_titles`] 同一个做法：**与眼下一样就一个字都不写**（依据与时刻
+    /// 也算，次序不算）；不一样时先清后写、一个事务，中途死掉不留下半份。
+    ///
+    /// # Errors
+    /// 读写库失败时返回错误。
+    pub fn replace_verdict_values(
+        &mut self,
+        wanted: &[VerdictValue],
+    ) -> Result<bool, CatalogError> {
+        let mut had = self.verdict_values()?;
+        had.sort();
+        let mut rows = wanted.to_vec();
+        rows.sort();
+        if had == rows {
+            return Ok(false);
+        }
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        tx.execute(
+            "DELETE FROM scrape_value WHERE source = ?1",
+            params![VERDICT],
+        )
+        .map_err(to_err)?;
+        for row in &rows {
+            insert_verdict(&tx, row).map_err(to_err)?;
+        }
+        tx.commit().map_err(to_err)?;
+        Ok(true)
+    }
+
     /// 撤掉一条**裁决**来源的字段值，让别的源重新说了算。返回撤掉了没有。
+    ///
+    /// ⚠️ 同 [`Self::put_verdict_value`]：**这里只撤投影**，人的动作走
+    /// [`Site::clear_verdict_value`](crate::site::Site::clear_verdict_value)。
     ///
     /// # Errors
     /// 写库失败时返回错误。
@@ -1219,8 +1346,9 @@ impl Catalog {
     /// **作品那一层一条不动**：作品名不带根，别的根的变体也挂在同一部作品下。
     ///
     /// **[`裁决`](VERDICT)那一源的值一条都不删**，与 [`clear_scraped`](Self::clear_scraped)
-    /// 同一条纪律：它不是采来的，是人在详情面板上亲手写下的，中立库之外没有第二份。
-    /// 移除一个根丢掉的只该是可再生的；这个根加回来，那一句照旧对得上。
+    /// 同一条纪律：它不是采来的，是人在详情面板上亲手写下的。它是沉淀库的**投影**（票
+    /// `verdict-store-and-sync/02`），这里删了下次开现场也照原件重建回来——删它只是让屏上
+    /// 平白少一格、到下次开现场才回来。移除一个根丢掉的只该是可再生的；这个根加回来，那一句照旧对得上。
     /// `media_ref` 与 `scrape_probe` 上没有裁决那一源的行，那两句不设这道闸。
     pub(super) fn forget_scraped_under(&self, prefix: &str) -> Result<(), CatalogError> {
         let variant = AnchorKind::Variant.label();
@@ -1249,8 +1377,8 @@ impl Catalog {
     /// `media_ref` 在「这趟不收媒体」那一档根本写不回来。
     ///
     /// **裁决那一行不碰**（`source = ` [`VERDICT`]）：刮削结论整份可再生，人在详情面板上
-    /// 亲手写下的那句不是——中立库之外没有第二份（沉淀库导出的是裁决与匹配两张表，
-    /// 不含它），冲掉就永远没了。同一条纪律
+    /// 亲手写下的那句不是——它的原件住沉淀库（票 `verdict-store-and-sync/02`），这里是投影，
+    /// 冲掉了要等下次开现场才照原件重建回来，这一趟里屏上、导出里就没了。同一条纪律
     /// [`clear_titles`](Self::clear_titles) 上已经写着。
     ///
     /// **另外两张表照旧整批清**：裁决只落在 `scrape_value` 上，
@@ -1309,7 +1437,7 @@ impl Catalog {
             return Ok(Vec::new());
         }
         // **一次绑不下四万多个键。** SQLite 的绑定变量有上限（新版 32,766，老版 999），
-        // 而真库全选就是 46,444 个——超过上限时它报的是「too many SQL variables」，
+        // 而真库全选就是四万多个（见台账 `docs/library-facts.md`）——超过上限时它报的是「too many SQL variables」，
         // 在屏上会变成一句莫名其妙的「中立库读不动」。所以分批问，答案在 Rust 这边并起来。
         //
         // **分批不改结果**：`MIN(key)` 取的是作品名归组之后的最小键，而那一组里装的是
@@ -1545,7 +1673,7 @@ mod tests {
 
     #[test]
     fn 作品代表变体这一问吃得下四万多个键() {
-        // **真库全选就是 46,444 个键**，而 SQLite 的绑定变量有上限（新版 32,766）。
+        // **真库全选就是四万多个键**（见台账 `docs/library-facts.md`），而 SQLite 的绑定变量有上限（新版 32,766）。
         // 一句塞完的写法在这个量级上报的是「too many SQL variables」，
         // 而那句错在刮削面板上会变成一句莫名其妙的「中立库读不动」——
         // 屏上于是既没有估算也没有原因。分批之后它只是多几趟查询。
@@ -1623,7 +1751,7 @@ mod tests {
     #[test]
     fn 整批清结论时数据源的值与采集记录都清掉而裁决留着() {
         // `--refresh` 走的就是这一条。刮削结论整份可再生，人亲手写下的那句不是——
-        // 中立库之外没有第二份。**采集记录必须一起清掉**：留下一条，下一趟就被输入
+        // 这里清了要等下次开现场才照沉淀库重建回来。**采集记录必须一起清掉**：留下一条，下一趟就被输入
         // 指纹咬定「这一对采全了」而整条跳过，重采一遍于是名存实亡。
         let mut catalog = Catalog::open_in_memory().expect("能开中立库");
         catalog

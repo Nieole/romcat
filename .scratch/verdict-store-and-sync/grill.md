@@ -19,6 +19,7 @@
 核查（2026-09-23）：三样人手写的仍落中立库：字段裁决 crates/gui/src/browse/work.rs:434 save_meta→:469 put_verdict_value（crates/core/src/catalog/scrape.rs:1123，中立库刮削值表）、work.rs:1873 apply_meta；手加名称 crates/gui/src/browse.rs:2426 add_title→:5320 write_title→catalog/title.rs:180 put_titles；首选变体 browse.rs:2513→catalog/frontend.rs:248 set_preferred_variant。沉淀库 verdict.rs:229-470 的表里没有这三样。另：删库那句话 crates/core/src/catalog.rs:370-376 只逐项列了「首选变体与亲手加的叫法」，没列详情页的**字段裁决**，反而说「沉淀库里的裁决……一条不丢」——对这一样说了假话。
 依赖／可并：Q725（同一件事，Q725 是其中两样+键的选择题，先裁它）、Q682（变体锚若走内容锚，要先定代表那一份）
 （大小 L，来自票 `gui-looks-like-the-design/15`）
+**settled（2026-10-01）：** 首选变体与手加的名称 → 票 `01`，字段修改 → 票 `02`；删库那句话三样都在「一条不丢」那边。
 
 ### `Q725` — 中立库里还住着两样人亲手定的东西：首选变体、亲手加的叫法
 

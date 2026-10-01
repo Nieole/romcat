@@ -105,6 +105,13 @@ pub(super) enum MetaKey {
     /// [`Catalog::mark_preferred_and_titles_carried`]（只在 `site::carry_over_preferred_and_titles`
     /// 里）。与 [`Self::ShapingOverridesCarriedAt`] 分开记：两次搬家各是一步，一份库可能只走过前一步。
     PreferredAndTitlesCarriedAt,
+    /// **旧中立库里详情页上改过的字段已经搬进沉淀库了**（记下的时刻，UNIX 纪元起的秒）。
+    ///
+    /// 票 `verdict-store-and-sync/02` 之前这一样只住在这份库里（`scrape_value` 表里 `source = 裁决`
+    /// 的行）；那之后那几行是沉淀库的投影。读 [`Catalog::stranded_verdict_values`]（记着就不再交出
+    /// 旧行），写 [`Catalog::mark_verdict_values_carried`]（只在 `site::carry_over_verdict_values` 里）。
+    /// 与前两个搬家记号分开记，理由同 [`Self::PreferredAndTitlesCarriedAt`]。
+    VerdictValuesCarriedAt,
 }
 
 impl MetaKey {
@@ -129,6 +136,7 @@ impl MetaKey {
             Self::IdentifyUnfinished => "identify_unfinished",
             Self::ShapingOverridesCarriedAt => "shaping_overrides_carried_at",
             Self::PreferredAndTitlesCarriedAt => "preferred_and_titles_carried_at",
+            Self::VerdictValuesCarriedAt => "verdict_values_carried_at",
         }
     }
 }

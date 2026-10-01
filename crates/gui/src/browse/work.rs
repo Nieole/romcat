@@ -426,11 +426,12 @@ impl Screen {
             .inner
     }
 
-    /// 按了保存：改过的每一格写进中立库，**只走核心库那几个写入口**，写完收掉编辑态、整屏重读。
+    /// 按了保存：改过的每一格落下去，**只走核心库那几个写入口**，写完收掉编辑态、整屏重读。
     ///
     /// - 认出作品的显示标题：往标题集合里加一条**裁决**来源的叫法（亲手加的叫法，`Site::add_own_titles`：原件落沉淀库）
     ///   ——标题集合挑显示标题时裁决压过一切（`title::choose` 第 1 层）。框里空着不算改。
-    /// - 别的格：写成那一格的裁决（`put_verdict_value`，一个字段上只留一条）；框里清空就是撤掉裁决（`clear_verdict_value`）。
+    /// - 别的格：写成那一格的**字段修改**（`Site::put_verdict_value`，原件落沉淀库、一个字段上只留一条）；
+    ///   框里清空就是撤掉它（`Site::clear_verdict_value`）。只写中立库的话，下次开现场照沉淀库重建投影时就被抹掉了。
     fn save_meta(&mut self, site: &mut Site) {
         let Some(drafts) = self.page.as_mut().and_then(|page| page.editing.take()) else {
             return;
@@ -463,14 +464,12 @@ impl Screen {
                 .map(|()| true)
                 .map_err(|error| error.to_string())
             } else if text.is_empty() {
-                site.catalog
-                    .clear_verdict_value(anchor, &subject, field)
-                    .map_err(|error| format!("中立库写不动：{error}"))
+                site.clear_verdict_value(anchor, &subject, field)
+                    .map_err(|error| error.to_string())
             } else {
-                site.catalog
-                    .put_verdict_value(anchor, &subject, field, &text, HAND_WRITTEN)
+                site.put_verdict_value(anchor, &subject, field, &text, HAND_WRITTEN)
                     .map(|()| true)
-                    .map_err(|error| format!("中立库写不动：{error}"))
+                    .map_err(|error| error.to_string())
             };
             match done {
                 Ok(true) => 存了 += 1,
@@ -1874,8 +1873,9 @@ impl Screen {
         }
     }
 
-    /// 办「元数据」那一面上按下去的那一下。写进中立库的只走核心库那两个写入口（`put_verdict_value` /
-    /// `clear_verdict_value`），写完整屏重读一遍：表上那一行的元数据那一格、详情页每一格都是照库里现在的样子画的。
+    /// 办「元数据」那一面上按下去的那一下。字段修改只走现场上那两个写入口（`Site::put_verdict_value` /
+    /// `Site::clear_verdict_value`：先沉淀库、再中立库那份投影），写完整屏重读一遍：表上那一行的元数据那一格、
+    /// 详情页每一格都是照库里现在的样子画的。
     fn apply_meta(&mut self, site: &mut Site, action: MetaAction) {
         match action {
             MetaAction::BeginEdit => self.begin_meta_edit(),
@@ -1893,7 +1893,7 @@ impl Screen {
                 field,
                 source,
                 value,
-            } => match site.catalog.put_verdict_value(
+            } => match site.put_verdict_value(
                 anchor,
                 &subject,
                 field,
@@ -1904,7 +1904,7 @@ impl Screen {
                     self.refresh(site);
                     self.notice = Some(format!("已改为使用 {source} 的值（记为手动修改）"));
                 }
-                Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+                Err(error) => self.error = Some(error.to_string()),
             },
             MetaAction::UseTitle(row) => {
                 let source = row.source.clone();
@@ -1926,16 +1926,18 @@ impl Screen {
                 }
                 Err(error) => self.error = Some(error.to_string()),
             },
+            // 撤的是**字段修改**：沉淀库里那一格与中立库那份投影一起撤（`Site::clear_verdict_value`），
+            // 只撤投影的话下次开现场它又回来了。
             MetaAction::Revert {
                 anchor,
                 subject,
                 field,
-            } => match site.catalog.clear_verdict_value(anchor, &subject, field) {
+            } => match site.clear_verdict_value(anchor, &subject, field) {
                 Ok(_) => {
                     self.refresh(site);
                     self.notice = Some("已撤销手动修改，恢复为数据源的值".to_owned());
                 }
-                Err(error) => self.error = Some(format!("中立库写不动：{error}")),
+                Err(error) => self.error = Some(error.to_string()),
             },
         }
     }

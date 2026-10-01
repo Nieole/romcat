@@ -1017,7 +1017,7 @@ struct ScanArgs {
 
     /// 一个透明容器都不读：不去读容器内部的 CRC-32、大小与名字
     ///
-    /// 库里 91% 的容量在透明容器里，关掉它报告就只知道「这里有一个 3GB 的容器」，看不见里面装着什么。
+    /// 库里九成多的容量在透明容器里（见台账 `docs/library-facts.md`），关掉它报告就只知道「这里有一个 3GB 的容器」，看不见里面装着什么。
     /// 它盖过 `--zst`：这一条说的是「一个都别读」
     #[arg(long)]
     no_containers: bool,
@@ -1349,7 +1349,7 @@ fn open_catalog(
 /// 「中立库打不开」那一句。
 ///
 /// **结构版本对不上时先把那份旧库里没搬走的人工纠正救进沉淀库**
-/// （`site::rescue`，连首选变体与亲手加的叫法一起）：那句话叫人删掉它重扫，删之前得先救出来——与开现场、
+/// （`site::rescue`，连首选变体、亲手加的叫法与详情页上改过的字段一起）：那句话叫人删掉它重扫，删之前得先救出来——与开现场、
 /// 开场列举是同一个函数。没救成就说没救成的那一句（核心库的原话）。
 fn unopened(workspace: &Path, path: &Path, error: &CatalogError) -> String {
     if matches!(error, CatalogError::Version { .. })
@@ -1628,7 +1628,7 @@ fn run_report(args: &ReportArgs) -> ExitCode {
 }
 
 /// 按平台清单重新成型一遍。**一个字节都不读主库**——成型是中立库上的纯计算，
-/// 改一条规则不必重扫 8.6 TiB。
+/// 改一条规则不必重扫八 TiB 多（见台账 `docs/library-facts.md`）。
 fn run_shape(args: &ShapeArgs) -> ExitCode {
     let (slug, located_by) = match locate(args.library.as_deref(), args.root.as_deref()) {
         Ok(pair) => pair,
@@ -3018,8 +3018,8 @@ fn open_store(workspace: &Path) -> Result<Store, String> {
 }
 
 /// 给一份已经开着的中立库配上**沉淀库**，并把两份对齐（`site::reconcile`）：那份中立库里还没搬走的
-/// 人定的东西（人工纠正、首选变体、亲手加的叫法）先搬过去一次，首选变体与亲手加的叫法那两份
-/// 投影照沉淀库重建。
+/// 人定的东西（人工纠正、首选变体、亲手加的叫法、详情页上改过的字段）先搬过去一次，后三样在中立库里的
+/// 那三份投影照沉淀库重建。
 ///
 /// 不经现场、自己开两份库再成型的那两条路（`romcat scan`、`romcat shape`）走这里——
 /// 与开现场那一步是同一个函数，不另写一遍。**删掉中立库之后头一趟就是 `romcat scan`**，

@@ -646,6 +646,41 @@ impl Catalog {
         )
     }
 
+    /// 一份中立库**文件**里、票 `verdict-store-and-sync/02` 之前记下而**还没搬进沉淀库**的
+    /// **详情页上改过的字段**（`scrape_value` 里 `source = 裁决` 的行）。**不管那份库的结构版本
+    /// 对不对得上**——做法与 [`Self::stranded_preferred_and_titles`] 一个字不差。只读，一个字都不写。
+    ///
+    /// 交出 `None` 的两种情形：已经搬过（[`Self::mark_verdict_values_carried`] 记下过），或者那张表
+    /// 根本不在。**旧行一行不删**：那几行从此是沉淀库的**投影**，开现场时照沉淀库重建
+    /// （`site::reconcile`）。
+    ///
+    /// # Errors
+    /// 文件打不开或读库失败时返回错误。
+    pub(crate) fn stranded_verdict_values(
+        file: &std::path::Path,
+    ) -> Result<Option<Vec<super::scrape::VerdictValue>>, CatalogError> {
+        let raw = Self::raw_read_only(file)?;
+        if !raw.has_table("scrape_value")? {
+            return Ok(None);
+        }
+        if raw.has_table("meta")? && raw.meta_get(MetaKey::VerdictValuesCarriedAt)?.is_some() {
+            return Ok(None);
+        }
+        raw.verdict_values().map(Some)
+    }
+
+    /// 记下「旧中立库里详情页上改过的字段已经搬进沉淀库了」：往后
+    /// [`Self::stranded_verdict_values`] 不再交出它们——人在沉淀库里撤掉的，不许被旧行又带回来。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub(crate) fn mark_verdict_values_carried(&self) -> Result<(), CatalogError> {
+        self.meta_set(
+            MetaKey::VerdictValuesCarriedAt,
+            &super::now_secs().to_string(),
+        )
+    }
+
     /// 只读地开一份中立库**文件**，**不核结构版本**（不走 [`Self::open_read_only`]）：
     /// 搬旧东西那几支要读的，恰恰是结构版本对不上、开不进去的旧库。
     fn raw_read_only(file: &std::path::Path) -> Result<Self, CatalogError> {
