@@ -62,6 +62,8 @@ fn 不给档案就是离线档_一个网络请求都不发() {
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("刮削：离线档"), "{text}");
+    // 报告头上写明按平台那一节的口径（票 `core-answers-once/02`）：命令行上看得到。
+    assert!(text.contains("按识别判定的平台分组"), "{text}");
     // 报告要说清**离线档补不上的是图**（票 06），而不是把空着的字段推给在线档；
     // 在线源也不许被报成不存在的源。
     assert!(text.contains("**离线档补不上的是图**"), "{text}");

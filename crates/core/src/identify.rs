@@ -3259,6 +3259,11 @@ fn assemble(
     }
     scored.append(from_serial);
 
+    // **按哪个平台算**在这儿问一次（[`platform_of`]）：文件名那一层拿它挑中文条目、排序拿它
+    // 论「平台对得上」、结论把它落库，三处是同一个答案。排序那一处从前比的是目录声明的
+    // 那个——放错目录的卡在「平台对得上」那一档反而听目录的（票 `core-answers-once/02`）。
+    let 按哪个平台算 = platform_of(variant, units, state);
+
     // ⭐ **文件名那一层**（票 11）：前面几层一条**自动通过**的候选都没有时才跑。
     //
     // 判据是「自动通过」而不是「有没有候选」：一份撞上了卡带游戏码的汉化版有候选，
@@ -3269,7 +3274,6 @@ fn assemble(
         // No-Intro 的名字里根本没有年份（`scrape::dat` 的那张对照表）。
         let year = naming::year_in(scored.iter().map(|(candidate, _)| candidate.game.as_str()));
         let names = names_of(variant, units, state);
-        let 按哪个平台算 = platform_of(variant, units, state);
         let found = fuzzy::candidates(naming, variant, &names, 按哪个平台算.as_deref(), year);
         state.fuzzy.variants += 1;
         state.fuzzy.tried += found.tried;
@@ -3296,8 +3300,8 @@ fn assemble(
     // 排序：先按候选自己的可信程度，再按数据源的先后，最后按名字定死顺序——
     // 同一份中立库跑两次，候选的次序必须一样。
     scored.sort_by(|a, b| {
-        rank(variant, &a.0)
-            .cmp(&rank(variant, &b.0))
+        rank(按哪个平台算.as_deref(), &a.0)
+            .cmp(&rank(按哪个平台算.as_deref(), &b.0))
             .then_with(|| a.0.game.cmp(&b.0.game))
             .then_with(|| a.0.dat.cmp(&b.0.dat))
     });
@@ -3437,7 +3441,7 @@ fn assemble(
         reason,
         // 判出来的平台**落下来**：刮削读它，不再拿目录那一列判一次（票
         // `one-criterion-per-thing/03`）。
-        platform: platform_of(variant, units, state),
+        platform: 按哪个平台算,
         // **识别这一层不说第几版**：自动识别只保证做到发行版级（ADR-0008），
         // 而「这是谁汉化的第几版」只有人说得出——它走裁决那条路（`Projector::project`）。
         // 发行版那一层的**修订**不在这儿：那是 DAT 条目名里的事实，落在 `release.revision`。
@@ -3533,9 +3537,12 @@ fn hit_non_game_asset(candidate: &Candidate) -> bool {
 /// No-Intro 与 Redump 的条目名、序列号与 parent/clone 关系最整齐，TOSEC 的名字里
 /// 塞满了发行年份与小组名，MAME 是逐芯片的。清单里的顺序说的是「先取哪一个」，
 /// 与「哪个的名字更可信」无关，两者没有理由绑在一起。认不出的源排最后。
-fn rank(variant: &VariantRow, candidate: &Candidate) -> (u8, u8, u8) {
-    let platform_matches =
-        u8::from(variant.platform.as_deref() != Some(candidate.platform.as_str()));
+///
+/// `platform` 是这个变体**识别判定的平台**（[`platform_of`]），不是目录声明的那个：
+/// 「平台对得上」那一档比的是内容说它是什么，放错目录的卡不因为目录丢分
+/// （票 `core-answers-once/02`）。
+fn rank(platform: Option<&str>, candidate: &Candidate) -> (u8, u8, u8) {
+    let platform_matches = u8::from(platform != Some(candidate.platform.as_str()));
     let source = match candidate.source.as_str() {
         "No-Intro" => 0,
         "Redump" => 1,
@@ -4155,8 +4162,7 @@ mod tests {
         // 第一条），而候选从中立库出来是**按写入顺序**（`candidates_of` 的
         // `ORDER BY id`）。于是「第一条就是最可信的那条」这句话只由这里的排序担着：
         // 它一松，屏上那张卡片写的共同依据就与按下去做的事对不上（挂单 Q82）。
-        let variant = 变体("库/FC/某游戏.zip", Some("FC"));
-        let 排在前面 = |a: &Candidate, b: &Candidate| rank(&variant, a) < rank(&variant, b);
+        let 排在前面 = |a: &Candidate, b: &Candidate| rank(Some("FC"), a) < rank(Some("FC"), b);
 
         // 第一层：**可信程度压过源的先后**。中文离线源排在源那一列的最末（它一个字节
         // 都没看），可它中置信那一条照样排在 No-Intro 低置信那一条前面。

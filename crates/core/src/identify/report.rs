@@ -29,6 +29,13 @@
 //!
 //! 它按平台单占一列（`还没识别`），于是每一行的 `变体 = 命中 + 未命中 + 无判据 +
 //! 跳过 + 还没识别` 加得起来——加不起来的表，读者只能猜差额去哪了。
+//!
+//! ## 按哪个平台分
+//!
+//! 按**识别判定的平台**（票 `core-answers-once/02`），与刮削报告同一个口径、报告头上印着同一句
+//! （[`PLATFORM_BASIS`]）。一行里的每一列都按它分——变体、命中那几列走结论，中文与只靠名字
+//! 那几列走候选，各自从中立库数；有一列按目录声明的分，一张放错目录的汉化卡就会在这一行
+//! 算命中、在那一行算汉化。还没识别的那些，识别判定的平台就是目录声明的那个。
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -41,13 +48,13 @@ use crate::catalog::{Catalog, CatalogError, State};
 use crate::classify::has_cjk;
 use crate::dat::DatRepo;
 use crate::platform::Manifest;
-use crate::report::{Finding, heading, pad, thousands};
+use crate::report::{Finding, PLATFORM_BASIS, heading, pad, thousands};
 use crate::scan::aggregate::{Limits, PlatformConflict};
 
 /// 一个平台一行。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PlatformRow {
-    /// 平台名；认不出平台的归到「（未知）」。
+    /// 平台名：**识别判定的**那个（报告头上那句 [`PLATFORM_BASIS`]）；认不出平台的归到「（未知）」。
     pub platform: String,
     /// 这个平台有多少个变体。**跑过识别的与[还没识别](Self::not_run)的都算**
     /// ——这一栏问的是「库里有多少东西」，不是「识别说过话的有多少」。
@@ -227,13 +234,15 @@ pub struct IdentifyReport {
     /// **Switch 的内容分布**：本体 / 补丁 / 附属内容各有多少份（票 27）。
     ///
     /// 它单列出来，因为不摆这个数，库体检会把一堆更新包报成游戏——真机上 `.nsp`
-    /// 平均只有 512 MiB，82 个里相当一部分是更新与 DLC 而不是本体（调研的实现陷阱
-    /// 第 7 条）。空的表示这个库里没有 Switch，或者还没跑过那一层。
+    /// 平均才几百 MiB，几十个里相当一部分是更新与 DLC 而不是本体（见台账
+    /// `docs/library-facts.md`；调研的实现陷阱第 7 条）。空的表示这个库里没有 Switch，
+    /// 或者还没跑过那一层。
     pub switch_kinds: Vec<(String, u64)>,
     /// 一共读出了几份 Switch 容器的**明文文件名表**。
     ///
     /// 它是 [`switch_kinds`](Self::switch_kinds) 的分母：那几个数只有带 `.tik` 的容器
-    /// 说得出，不摆分母，读者会以为「本体 16」是全部（真机 134 份里 64 份没有票据）。
+    /// 说得出，不摆分母，读者会以为说得出的那几个是全部（真机上百来份容器里将近一半
+    /// 没有票据，见台账 `docs/library-facts.md`）。
     pub switch_read: u64,
     /// **模型推断那一层**这一趟干了什么（票 12）：残渣多少、问了几个请求、花了多少。
     ///
@@ -419,6 +428,7 @@ impl IdentifyReport {
         let _ = writeln!(out, "{}", "═".repeat(40));
         let _ = writeln!(out, "中立库          {}", self.catalog);
         let _ = writeln!(out, "DAT 库          {}", self.dat);
+        let _ = writeln!(out, "平台口径        {PLATFORM_BASIS}");
         let _ = writeln!(
             out,
             "变体            {} 个：命中 {}、未命中 {}、无判据 {}、跳过 {}、{} {}",

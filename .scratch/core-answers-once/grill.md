@@ -26,6 +26,7 @@
 核查（2026-09-23）：crates/core/src/identify.rs:3489-3491 rank 的 platform_matches 仍比 variant.platform；crates/core/src/catalog/scrape.rs:909 source_by_platform 按 COALESCE(v.platform,…) 分组；crates/core/src/catalog/identify.rs:2559 for_each_identification 取 v.platform
 依赖／可并：Q602、Q1030、Q606
 （大小 M，来自票 `one-criterion-per-thing/03`）
+**收于票 `core-answers-once/02`（2026-10-02）：settled。** `rank` 比识别判定的平台；两份报告按它分组（识别报告每一列都按它，刮削报告按平台那一节同一句读法），报告头印「按识别判定的平台分组」那一行口径。`has_ammo` / `has_sha1_ammo` 两处照原条目的建议留着：它们在读盘之前判，那时还没有识别判定的平台。
 
 ### `Q606` — 「识别判定的平台」词表里没有，没往 `CONTEXT.md` 加
 

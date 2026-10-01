@@ -693,6 +693,23 @@ pub struct CartFactRow {
     pub facts: String,
 }
 
+/// **识别判定的平台**在 SQL 里的那一种读法：`COALESCE(i.platform, v.platform)`。
+///
+/// 结论里判过的（`identification.platform`，回退链只在 `identify::platform_of` 一处）就是它；
+/// 识别没判过的——还没识别，或者是加那一列之前识别的——退回目录声明的那个。
+/// [`Catalog::identified_platforms`] 读的是它，**按平台分组的报告也读它**（识别报告、刮削报告，
+/// 票 `core-answers-once/02`）：报告说的平台就是刮削实际取的平台。各写一遍的话，哪天改了
+/// 回退的那一步，报告与刮削就又各说各的（ADR-0024）。
+///
+/// 写成宏而不是 `const`：好让 `concat!` 把它拼进一条 `&'static str` 的 SQL 里。用它的查询里
+/// 变体那张表叫 `v`、结论那张叫 `i`，而且结论是 `LEFT JOIN` 进来的——还没识别的那些也要在。
+macro_rules! identified_platform_sql {
+    () => {
+        "COALESCE(i.platform, v.platform)"
+    };
+}
+pub(super) use identified_platform_sql;
+
 /// **命中里只靠某一个源的候选**的变体数，按平台。
 ///
 /// 它为一件事而存在：[文件名那一层](crate::identify::fuzzy)与[模型推断那一层](crate::identify::model)
@@ -707,8 +724,12 @@ pub struct CartFactRow {
 /// 少了它，「不算那几层的命中率」会算错：那几层把一批本来在**无判据**里的变体拉进了
 /// 命中，而无判据本来就不在命中率的分母里（跳过与无判据不混进未命中，见模块文档）。
 /// 只从分子里减掉它们、分母却留着，那个数会比那几层跑之前还低——凭空冤枉前几层。
-pub(super) const NAME_ONLY_SQL: &str = "\
-SELECT COALESCE(v.platform, ?2), COUNT(*), SUM(CASE WHEN i.units = 0 THEN 1 ELSE 0 END)
+///
+/// 平台按**识别判定的**那个分（`identified_platform_sql!`），与识别报告别的几列同一句。
+pub(super) const NAME_ONLY_SQL: &str = concat!(
+    "SELECT COALESCE(",
+    identified_platform_sql!(),
+    ", ?2), COUNT(*), SUM(CASE WHEN i.units = 0 THEN 1 ELSE 0 END)
                  FROM identification i
                  JOIN variant v ON v.key = i.variant_key
                  WHERE i.state = ?3
@@ -717,7 +738,8 @@ SELECT COALESCE(v.platform, ?2), COUNT(*), SUM(CASE WHEN i.units = 0 THEN 1 ELSE
                        SELECT 1 FROM candidate c
                         WHERE c.variant_key = i.variant_key
                           AND instr(?1, ',' || c.source || ',') = 0)
-                 GROUP BY 1";
+                 GROUP BY 1",
+);
 
 /// 一份内容探出来的**光盘标识**，写库前的样子。
 ///
@@ -2517,6 +2539,10 @@ impl Catalog {
 
     /// 一条条走过全部识别结论：平台、结论、理由、变体的键、这一趟读了多少字节。
     ///
+    /// 平台是**识别判定的**那个（`identified_platform_sql!`，票 `core-answers-once/02`）：
+    /// 识别报告按它分组，与刮削实际取的平台是同一个。目录声明的那个要看
+    /// [`VariantRow::platform`](super::VariantRow::platform)。
+    ///
     /// 走回调而不是返回一整份 `Vec`：真库里这是四万多行（见台账 `docs/library-facts.md`），报告要的只是几个计数与
     /// 几个例子，攒一份完整的表纯属浪费。
     ///
@@ -2533,11 +2559,13 @@ impl Catalog {
     ) -> Result<(), CatalogError> {
         let mut statement = self
             .conn
-            .prepare(
-                "SELECT v.platform, i.state, i.reason, i.variant_key, i.read_bytes
+            .prepare(concat!(
+                "SELECT ",
+                identified_platform_sql!(),
+                ", i.state, i.reason, i.variant_key, i.read_bytes
                  FROM identification i JOIN variant v ON v.key = i.variant_key
                  ORDER BY i.variant_key",
-            )
+            ))
             .map_err(|source| self.err(source))?;
         let mut rows = statement.query([]).map_err(|source| self.err(source))?;
         while let Some(row) = rows.next().map_err(|source| self.err(source))? {
@@ -2559,6 +2587,10 @@ impl Catalog {
 
     /// 一条条走过[还没识别](NOT_RUN_LABEL)的变体：平台、变体的键。
     ///
+    /// 平台与 [`for_each_identification`](Self::for_each_identification) 同一种读法
+    /// （`identified_platform_sql!`）：还没识别的，识别判定的平台就是退回去的目录声明的那个。
+    /// 退回那一步不在这儿另写一遍。
+    ///
     /// 它是 [`for_each_identification`](Self::for_each_identification) 的**另一半**。
     /// 两半合起来正好是全部变体——报告的「变体总数」与「全部变体里命中多少」那个分母
     /// 必须走完两半，只走前一半就等于把还没轮到的变体从分母里抹掉，覆盖率当场虚高。
@@ -2572,11 +2604,14 @@ impl Catalog {
     pub fn for_each_not_run(&self, each: &mut NotRunVisitor) -> Result<(), CatalogError> {
         let mut statement = self
             .conn
-            .prepare(
-                "SELECT v.platform, v.key FROM variant v
-                 WHERE NOT EXISTS (SELECT 1 FROM identification i WHERE i.variant_key = v.key)
+            .prepare(concat!(
+                "SELECT ",
+                identified_platform_sql!(),
+                ", v.key FROM variant v
+                 LEFT JOIN identification i ON i.variant_key = v.key
+                 WHERE i.variant_key IS NULL
                  ORDER BY v.key",
-            )
+            ))
             .map_err(|source| self.err(source))?;
         let mut rows = statement.query([]).map_err(|source| self.err(source))?;
         while let Some(row) = rows.next().map_err(|source| self.err(source))? {
@@ -2716,6 +2751,9 @@ impl Catalog {
 
     /// 按平台数**中文**：官中版几个、汉化版几个。
     ///
+    /// 平台按**识别判定的**那个分（`identified_platform_sql!`）：识别报告里同一个变体的
+    /// 命中与中文记号得落在同一行，不然一张放错目录的汉化卡在这一行算命中、在那一行算汉化。
+    ///
     /// 这是**发行版级**的统计（票 10 从挂账转来的那条前瞻）：数的是识别撞出来的候选
     /// 上带的那个记号，而不是文件名里有没有汉字。两者差得远——票 01 用文件名做的粗略
     /// 代理实测一成半上下（见台账 `docs/library-facts.md`），那个数里既有官中也有汉化，还混着一堆压根不是中文版的目录名。
@@ -2737,12 +2775,17 @@ impl Catalog {
                 // **平台为空的一行也要在里面**。滤掉它，按平台加出来的总数就与
                 // `candidate_counts` 那个全局数对不上——同一份报告里两个中文总数，
                 // 读的人无从判断哪个是真的。空平台交给调用方按它自己的「（未知）」归。
-                "SELECT COALESCE(v.platform, ?1),
+                concat!(
+                    "SELECT COALESCE(",
+                    identified_platform_sql!(),
+                    ", ?1),
                         COUNT(DISTINCT CASE WHEN c.chinese = '官中' THEN c.variant_key END),
                         COUNT(DISTINCT CASE WHEN c.chinese = '汉化' THEN c.variant_key END)
                  FROM candidate c
                  JOIN variant v ON v.key = c.variant_key
+                 LEFT JOIN identification i ON i.variant_key = c.variant_key
                  GROUP BY 1",
+                ),
             )
             .map_err(|source| self.err(source))?;
         let rows = statement
@@ -2887,6 +2930,8 @@ impl Catalog {
     ///
     /// 这是读一份物化的结论，**不是第二次判断**（ADR-0024 推论 3）：谁要拿变体的平台去撞
     /// 别的东西（刮削的平台交叉校验），就从这儿取，不自己拿目录那一列再判一次。
+    /// 识别报告与刮削报告按平台分组走的是同一句读法（`identified_platform_sql!`，
+    /// 票 `core-answers-once/02`）。
     /// 目录声明的那个原样在 [`VariantRow::platform`](super::VariantRow::platform) 上——
     /// **平台不符**比的是它与内容（`scan::aggregate::conflicting_platform`），不是这一列。
     ///
@@ -2895,11 +2940,14 @@ impl Catalog {
     pub fn identified_platforms(&self) -> Result<BTreeMap<String, String>, CatalogError> {
         let mut statement = self
             .conn
-            .prepare(
-                "SELECT v.key, COALESCE(i.platform, v.platform)
-                 FROM variant v LEFT JOIN identification i ON i.variant_key = v.key
-                 WHERE COALESCE(i.platform, v.platform) IS NOT NULL",
-            )
+            .prepare(concat!(
+                "SELECT v.key, ",
+                identified_platform_sql!(),
+                " FROM variant v LEFT JOIN identification i ON i.variant_key = v.key
+                 WHERE ",
+                identified_platform_sql!(),
+                " IS NOT NULL",
+            ))
             .map_err(|source| self.err(source))?;
         let rows = statement
             .query_map([], |row| {
