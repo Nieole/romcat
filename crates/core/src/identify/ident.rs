@@ -91,6 +91,21 @@ impl IdKind {
     pub fn release_level_only(self) -> bool {
         matches!(self, Self::GameCode)
     }
+
+    /// 这一种标识连同顺带读到的标题与版本号，是从**哪一份头**里读出来的：卡带游戏码在**卡带头**里，
+    /// GC / Wii 的光盘 ID 在**光盘头**里。其余三种不是从头里读的（PARAM.SFO、SYSTEM.CNF、名字上
+    /// 写着的），是 `None`。
+    ///
+    /// 词表**第几版**说的「卡带头与光盘头里写的那个版本号」就是这两种头里的那一个字节：它说的是
+    /// **发行版**那一层的**修订**，只是一份证据，只进**依据**（挂单 `Q994`）。
+    #[must_use]
+    pub fn header(self) -> Option<&'static str> {
+        match self {
+            Self::GameCode => Some("卡带头"),
+            Self::DiscId => Some("光盘头"),
+            Self::Serial | Self::TitleId | Self::ContentId => None,
+        }
+    }
 }
 
 /// 一条从内容里读出来的标识。

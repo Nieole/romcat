@@ -169,14 +169,29 @@ fn candidate_of(evidence: &Evidence, hit: &SerialHit, exact: bool) -> Candidate 
         evidence.id.shown,
     );
     text.push_str(&format!("（{}）", evidence.id.from));
-    // **标题与版本读出来了就写在依据里**——票据要的是「取得 TitleID、标题与版本」，
+    // **标题与版本号读出来了就写在依据里**——票据要的是「取得 TitleID、标题与版本」，
     // 而一条读出来却没人看得见的字段等于没读。它们不参与命中（命中靠编号），
     // 但人在裁决队列里一眼就能看出这条候选对不对。
+    //
+    // **版本号要说清是头里读的、说的是什么**（词表**第几版**，挂单 `Q994`）：卡带头与光盘头里写的
+    // 那个数说的是**发行版**那一层的**修订**——与 DAT 条目名里的 `(Rev 1)` 是同一件事的另一份证据，
+    // 不是汉化第几版（汉化补丁一般不改它）。它**只进依据**，不接「第几版」那条链：
+    // 详情页「版本」那一格不看它（`VariantDetail::edition`）。不是从头里读的那几种（PARAM.SFO 的
+    // `APP_VER` 之类）词表没有说它是什么，只照实写在哪儿读的。
+    let header = evidence.id.kind.header();
     if let Some(title) = &evidence.id.title {
-        text.push_str(&format!("；盘里的标题是「{title}」"));
+        text.push_str(&format!(
+            "；{}里写的标题是「{title}」",
+            header.unwrap_or("盘")
+        ));
     }
     if let Some(version) = &evidence.id.version {
-        text.push_str(&format!("，版本 {version}"));
+        text.push_str(&match header {
+            Some(header) => format!(
+                "；{header}里写的版本号 {version}——它说的是这次发行的修订，只是一份证据，不是第几版"
+            ),
+            None => format!("；盘里写的版本号 {version}"),
+        });
     }
     if release_level_only {
         text.push_str(

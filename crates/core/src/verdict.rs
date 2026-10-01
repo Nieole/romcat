@@ -28,7 +28,7 @@
 //! 打开时把没跑过的接着跑完。**往前迁得动，往后（库比程序新）如实拒绝并说清**——
 //! 那时该换新程序，而不是删库。
 //!
-//! 眼下十二条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
+//! 眼下十三条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
 //! 第 3 条建 `verdict_batch` 与 `verdict_batch_row` 两张表（**批**，见下一节），
 //! 第 4 条建 `collection_member` 表（**合集**与**收藏**，见再下一节），
 //! 第 5 条建 `title_suppression` 表（**压掉的叫法**），
@@ -38,7 +38,8 @@
 //! 第 9 条建 `not_same_work` 表（**「不是同一个作品」**），
 //! 第 10 条建 `preferred_variant` 与 `own_title` 两张表（**首选变体**与**亲手加的叫法**，见最后一节），
 //! 第 11 条建 `verdict_value` 表（**详情页上改过的字段**，同一节），
-//! 第 12 条给 `verdict_batch` 加作用范围那几格（**就地落下的一部分**，见「批」那一节）。
+//! 第 12 条给 `verdict_batch` 加作用范围那几格（**就地落下的一部分**，见「批」那一节），
+//! 第 13 条给 `verdict` 加**修订**那一格（DAT 条目名里的 `(Rev 1)`，[`Facts::revision`]）。
 //! 加这几条时库还是空的，但那不改变纪律——**永远不要求删库**，中立库那条「版本一变就
 //! 重建」的便宜路子在这份库上不许走。
 //!
@@ -603,6 +604,17 @@ ALTER TABLE verdict_batch ADD COLUMN scope_count INTEGER;
 -- 裁成了什么：`triage::PartKind::label`（已通过 / 已拒绝）。
 ALTER TABLE verdict_batch ADD COLUMN scope_kind  TEXT;
 ",
+    // 13：**裁决带上 DAT 的修订**（票 `verdict-store-and-sync/04`，挂单 `Q1010`）。合并作品与一切
+    // 「定成这个发行版」的裁决落下之后，发行版那一行照裁决重建——裁决不记修订，详情页「版本」那一格
+    // 就从 `Rev 1` 退回「—」。
+    "\
+-- 这次发行的**修订**：DAT 条目名尾巴上那一组 `(Rev 1)` / `(Rev A)` / `(v1.1)`，原样不含括号
+-- （`identify::naming::parse`）。它是词表**第几版**上面那一层——**发行版**那一层的事实，与 `version`
+-- 那一列（变体那一层：汉化打到第几版，只有人说得出）不是一件事。没有就是空，不拿「初版」去补。
+-- 加这一列之前落下的裁决这一格是空的——那时没记，不猜着补。
+-- **卡带头与光盘头里读出来的版本号不进这一列**：它只是修订的一份证据，只进依据（挂单 `Q994`）。
+ALTER TABLE verdict ADD COLUMN revision TEXT;
+",
 ];
 
 /// 「内容锚」在库里与报告里叫什么。
@@ -865,11 +877,20 @@ pub struct Facts {
     pub serial: Option<String>,
     /// 语言标记组（`Ja,Zh-Hans`）；可空。
     pub languages: Option<String>,
+    /// **修订**：这一次发行在 DAT 条目名尾巴上那一组 `(Rev 1)` / `(v1.1)`，原样（不含括号）；
+    /// 没有就是 `None`，不拿「初版」去补。
+    ///
+    /// 它是词表**第几版**上面那一层——**发行版**那一层的事实，自动识别给得出（ADR-0008 划的线
+    /// 正落在这儿），与下面 [`version`](Self::version) 那一格（变体那一层、只有人说得出）不是一件事。
+    /// 裁决记着它，是因为一条「定成这个发行版」的裁决落下之后，发行版那一行是照裁决重建的：
+    /// 裁决不记，修订就跟着丢了（挂单 `Q1010`，票 `verdict-store-and-sync/04`）。
+    /// **卡带头与光盘头里读出来的版本号不进这一格**：它只是修订的一份证据，只进**依据**（挂单 `Q994`）。
+    pub revision: Option<String>,
     /// 中文身份：**汉化版**还是**官中版**（ADR-0012）。
     pub chinese: Option<ChineseMark>,
     /// **汉化组**：谁做的这个中文版本。
     pub team: Option<String>,
-    /// 版本，如 `v1.2`。
+    /// **第几版**里**变体**那一层：汉化打到第几版，如 `v1.2`——只有人说得出（ADR-0008）。
     pub version: Option<String>,
 }
 
@@ -925,6 +946,11 @@ impl Verdict {
             self.anchor.describe(),
         );
         if let Decision::Release(facts) = &self.decision {
+            // **修订**是发行版那一层的事实（DAT 条目名里的 `(Rev 1)`）：「版本」那一格写着它时，
+            // 依据里得说得出它从哪来——是这条裁决记着的，不是这一趟撞出来的。
+            if let Some(revision) = &facts.revision {
+                text.push_str(&format!("；修订 {revision}"));
+            }
             if let Some(team) = &facts.team {
                 text.push_str(&format!("；汉化组「{team}」"));
             }
@@ -1386,8 +1412,8 @@ impl Store {
             .execute(
                 "INSERT INTO verdict(anchor, crc32, size, sha1, library, variant_key,
                      kind, work, platform, region, serial, languages, chinese, team, version,
-                     note, decided_at)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                     note, decided_at, revision)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
                 params![
                     verdict.anchor.label(),
                     crc32,
@@ -1406,6 +1432,7 @@ impl Store {
                     facts.and_then(|f| f.version.clone()),
                     verdict.note,
                     verdict.decided_at,
+                    facts.and_then(|f| f.revision.clone()),
                 ],
             )
             .map_err(|source| self.err(source))?;
@@ -3057,7 +3084,7 @@ fn read_match_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MatchVerdict> {
 
 /// 读一行时要的那一串列，两处查询共用。
 const SELECT: &str = "SELECT anchor, crc32, size, sha1, library, variant_key, kind, work,
-     platform, region, serial, languages, chinese, team, version, note, decided_at
+     platform, region, serial, languages, chinese, team, version, note, decided_at, revision
      FROM verdict";
 
 fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Verdict> {
@@ -3085,6 +3112,7 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Verdict> {
             region: row.get(9)?,
             serial: row.get(10)?,
             languages: row.get(11)?,
+            revision: row.get(17)?,
             chinese: row
                 .get::<_, Option<String>>(12)?
                 .as_deref()
@@ -3290,8 +3318,12 @@ pub const EXPORT_FORMAT: &str = "romcat-沉淀库";
 /// 只是那一批是空的），往后如实拒绝——一份第 2 版的文件里可能装着老程序读不出来的
 /// 匹配裁决，静静地丢掉它们比读不了更糟。
 ///
+/// **票 `verdict-store-and-sync/04` 从 2 涨到 3**：裁决那一批里多了**修订**那一栏（[`Row::revision`]，
+/// 挂单 `Q1010`）。同一条道理：第 1、2 版的文件照读，修订为空；一份第 3 版的文件里装着老程序
+/// 不认识的修订，老程序 serde 会把不认识的那一栏静静丢掉——所以它该被拦下。
+///
 /// **导出时写的不一定是这个数**：见 [`Export::version_for`]。
-pub const EXPORT_VERSION: u32 = 2;
+pub const EXPORT_VERSION: u32 = 3;
 
 /// 一份可分享的裁决文件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3310,18 +3342,21 @@ pub struct Export {
 }
 
 impl Export {
-    /// 一份导出文件**该盖第几版**。
+    /// 一份导出文件**该盖第几版**：装得下它那份内容的**最低**一版。
     ///
-    /// 一条匹配裁决都没有时盖 **1**，有才盖 [`EXPORT_VERSION`]。理由是版本号在这个格式里
-    /// 的唯一作用是**那道往后拒绝的闸**（`version > EXPORT_VERSION` 就不收）：无条件盖 2
-    /// 的话，升级之后导出的**每一份**文件——哪怕内容与第 1 版一模一样——都会被老版本的
-    /// 程序拒收，而它其实一个字都读得懂。**装着新东西的才该拦下，空的不该。**
+    /// 有一条裁决带着**修订**就盖 **3**（[`EXPORT_VERSION`]）；没有修订而有匹配裁决盖 **2**；
+    /// 两样都没有盖 **1**。理由是版本号在这个格式里的唯一作用是**那道往后拒绝的闸**
+    /// （`version > EXPORT_VERSION` 就不收）：无条件盖最新一版的话，升级之后导出的**每一份**
+    /// 文件——哪怕内容与第 1 版一模一样——都会被老版本的程序拒收，而它其实一个字都读得懂。
+    /// **装着新东西的才该拦下，空的不该。**
     #[must_use]
-    pub fn version_for(matches: &[MatchRow]) -> u32 {
-        if matches.is_empty() {
-            1
-        } else {
+    pub fn version_for(verdicts: &[Row], matches: &[MatchRow]) -> u32 {
+        if verdicts.iter().any(|row| row.revision.is_some()) {
             EXPORT_VERSION
+        } else if !matches.is_empty() {
+            2
+        } else {
+            1
         }
     }
 }
@@ -3449,6 +3484,12 @@ pub struct Row {
     /// 语言标记组。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub languages: Option<String>,
+    /// **修订**：DAT 条目名尾巴上那一组 `(Rev 1)`（[`Facts::revision`]）。
+    ///
+    /// **第 3 版格式才有这一栏**（票 `verdict-store-and-sync/04`）。没有就是 `None`：第 1、2 版的
+    /// 导出文件、以及批里旧程序记下的那份 JSON 都读得回来，修订为空。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub revision: Option<String>,
     /// 中文身份：`汉化` 或 `官中`。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub chinese: Option<String>,
@@ -3480,6 +3521,7 @@ impl Row {
             region: facts.and_then(|f| f.region.clone()),
             serial: facts.and_then(|f| f.serial.clone()),
             languages: facts.and_then(|f| f.languages.clone()),
+            revision: facts.and_then(|f| f.revision.clone()),
             chinese: facts
                 .and_then(|f| f.chinese)
                 .map(|mark| mark.label().to_string()),
@@ -3530,6 +3572,7 @@ impl Row {
                 region: self.region,
                 serial: self.serial,
                 languages: self.languages,
+                revision: self.revision,
                 chinese: self.chinese.as_deref().and_then(mark_of_label),
                 team: self.team,
                 version: self.version,
@@ -3586,7 +3629,7 @@ impl Store {
     /// # Errors
     /// 读库失败时返回错误。
     pub fn export(&self, include_path: bool) -> Result<Export, VerdictError> {
-        let verdicts = self
+        let verdicts: Vec<Row> = self
             .all()?
             .iter()
             .filter(|verdict| include_path || verdict.anchor.is_shareable())
@@ -3602,7 +3645,7 @@ impl Store {
             .collect();
         Ok(Export {
             format: EXPORT_FORMAT.to_string(),
-            version: Export::version_for(&matches),
+            version: Export::version_for(&verdicts, &matches),
             exported_at: now_secs(),
             verdicts,
             matches,
@@ -3722,6 +3765,60 @@ mod tests {
         id
     }
 
+    /// **旧程序**记下一条裁决的样子：裁决表上只有第 1 条迁移建的那几列（修订那一格是第 13 条才有的），
+    /// 照那几列原样写进去。新程序的 [`Store::put`] 要写修订那一格，在旧版的库上写不进去。
+    fn 旧程序记一条裁决(conn: &Connection, verdict: &Verdict) {
+        let facts = match &verdict.decision {
+            Decision::Release(facts) => Some(facts),
+            _ => None,
+        };
+        let (crc32, size, sha1, library, variant_key) = match &verdict.anchor {
+            Anchor::Content { crc32, size, sha1 } => (
+                Some(i64::from(*crc32)),
+                Some(size_column(*size)),
+                sha1.clone(),
+                None,
+                None,
+            ),
+            Anchor::Path {
+                library,
+                variant_key,
+            } => (
+                None,
+                None,
+                None,
+                Some(library.clone()),
+                Some(variant_key.clone()),
+            ),
+        };
+        conn.execute(
+            "INSERT INTO verdict(anchor, crc32, size, sha1, library, variant_key,
+                 kind, work, platform, region, serial, languages, chinese, team, version,
+                 note, decided_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+            params![
+                verdict.anchor.label(),
+                crc32,
+                size,
+                sha1,
+                library,
+                variant_key,
+                verdict.decision.label(),
+                verdict.decision.work(),
+                facts.and_then(|f| f.platform.clone()),
+                facts.and_then(|f| f.region.clone()),
+                facts.and_then(|f| f.serial.clone()),
+                facts.and_then(|f| f.languages.clone()),
+                facts.and_then(|f| f.chinese).map(ChineseMark::label),
+                facts.and_then(|f| f.team.clone()),
+                facts.and_then(|f| f.version.clone()),
+                verdict.note,
+                verdict.decided_at,
+            ],
+        )
+        .expect("旧版的裁决表里记得下");
+    }
+
     #[test]
     fn 新建的库跑到最新一版迁移() {
         let store = Store::in_memory().expect("开得出来");
@@ -3743,12 +3840,12 @@ mod tests {
         conn.execute_batch(MIGRATIONS[0]).expect("建得出第一版");
         conn.execute_batch("PRAGMA user_version = 1")
             .expect("盖得上第一版的版本号");
-        let mut store = Store {
+        let store = Store {
             conn,
             path: "（内存）".to_string(),
         };
         let verdict = 汉化裁决();
-        store.put(&verdict).expect("第一版里就存得进");
+        旧程序记一条裁决(&store.conn, &verdict);
 
         store.migrate().expect("升得上来");
 
@@ -3824,12 +3921,12 @@ mod tests {
         }
         conn.execute_batch("PRAGMA user_version = 3")
             .expect("盖得上第三版的版本号");
-        let mut store = Store {
+        let store = Store {
             conn,
             path: "（内存）".to_string(),
         };
         let verdict = 汉化裁决();
-        store.put(&verdict).expect("第三版里就存得进");
+        旧程序记一条裁决(&store.conn, &verdict);
         let batch = 旧程序记一批(
             &store.conn,
             "小库",
@@ -3884,7 +3981,7 @@ mod tests {
             path: "（内存）".to_string(),
         };
         let verdict = 汉化裁决();
-        store.put(&verdict).expect("第四版里就存得进");
+        旧程序记一条裁决(&store.conn, &verdict);
         let 收藏 = [Membership::now(
             "收藏",
             Anchor::Content {
@@ -3935,7 +4032,7 @@ mod tests {
             path: "（内存）".to_string(),
         };
         let verdict = 汉化裁决();
-        store.put(&verdict).expect("第五版里就存得进");
+        旧程序记一条裁决(&store.conn, &verdict);
         let 压掉的 = TitleSuppression::now(
             "Contra",
             crate::title::Language::Chinese,
@@ -4085,7 +4182,7 @@ mod tests {
             path: "（内存）".to_string(),
         };
         let verdict = 汉化裁决();
-        store.put(&verdict).expect("第七版里就存得进");
+        旧程序记一条裁决(&store.conn, &verdict);
 
         store.migrate().expect("升得上来");
 
@@ -4337,6 +4434,113 @@ mod tests {
             store.batch(新批).expect("读得到").expect("在").scope,
             Some(作用范围),
             "点名要一批也读得回作用范围",
+        );
+    }
+
+    /// 一条带着 DAT **修订**的发行版裁决：日版撞上的是 `(Rev 1)` 那一条。
+    fn 带修订的裁决() -> Verdict {
+        Verdict::now(
+            内容锚(0xABCD_0001, 40_976),
+            Decision::Release(Facts {
+                work: "魂斗罗".to_string(),
+                platform: Some("FC".to_string()),
+                region: Some("Japan".to_string()),
+                revision: Some("Rev 1".to_string()),
+                ..Facts::default()
+            }),
+        )
+    }
+
+    #[test]
+    fn 第十二版的老库升上来_旧裁决与旧批里的修订为空_新落下的记得住修订() {
+        // 钉的是**第 13 条迁移**（票 `verdict-store-and-sync/04`，挂单 `Q1010`）：裁决表加了修订那一格。
+        // 老裁决一条不丢、修订为空（那时没记，不猜着补）；批里存的是导出行那份 JSON，旧程序写的那份
+        // 没有 `revision` 这一栏，照样读得回来、修订为空——**撤销靠的就是这份 JSON**，读不回来就撤不掉。
+        let conn = Connection::open_in_memory().expect("开得出来");
+        for sql in &MIGRATIONS[..12] {
+            conn.execute_batch(sql).expect("建得出第十二版");
+        }
+        conn.execute_batch("PRAGMA user_version = 12")
+            .expect("盖得上第十二版的版本号");
+        let mut store = Store {
+            conn,
+            path: "（内存）".to_string(),
+        };
+        let 旧裁决 = 汉化裁决();
+        旧程序记一条裁决(&store.conn, &旧裁决);
+        // 旧程序记在批里的那一行：导出行那个形状，**逐字是旧程序写出来的样子**，没有 `revision`。
+        let 旧行 = r#"{"crc32":"12345678","size":40976,"kind":"发行版","work":"重装机兵","platform":"FC","chinese":"汉化","team":"外星科技","version":"v1.2","decided_at":0}"#;
+        store
+            .conn
+            .execute(
+                "INSERT INTO verdict_batch(library, summary, decided_at) VALUES('小库', '作品《重装机兵》', 0)",
+                [],
+            )
+            .expect("旧版的批表里记得下");
+        let 旧批 = store.conn.last_insert_rowid();
+        store
+            .conn
+            .execute(
+                "INSERT INTO verdict_batch_row(batch, variant_key, member, inner, after, before)
+                 VALUES(?1, '库/FC/重装机兵.zip', '库/FC/重装机兵.zip', 'rom.nes', ?2, NULL)",
+                params![旧批, 旧行],
+            )
+            .expect("旧版的批表里记得下");
+
+        store.migrate().expect("升得上来");
+
+        let back = store
+            .find(&旧裁决.anchor)
+            .expect("读得到")
+            .expect("老裁决还在");
+        assert_eq!(back.decision, 旧裁决.decision, "老裁决一个字都没变");
+        let Decision::Release(facts) = &back.decision else {
+            panic!("老裁决该是一条发行版裁决");
+        };
+        assert_eq!(facts.revision, None, "加这一格之前落下的裁决修订为空");
+        let 旧批里的 = store.batch_rows(旧批).expect("读得到");
+        assert_eq!(
+            旧批里的.len(),
+            1,
+            "旧批里那一行没有 `revision` 那一栏也读得回来"
+        );
+        let Decision::Release(facts) = &旧批里的[0].after.decision else {
+            panic!("旧批里落下的该是一条发行版裁决");
+        };
+        assert_eq!(
+            (facts.work.as_str(), facts.revision.as_deref()),
+            ("重装机兵", None),
+            "旧批里那条读回来修订为空",
+        );
+
+        // 升上来之后，新落下的裁决与批都记得住修订。
+        let 新裁决 = 带修订的裁决();
+        store.put(&新裁决).expect("升上来之后记得下修订");
+        assert_eq!(
+            store.find(&新裁决.anchor).expect("读得到"),
+            Some(新裁决.clone()),
+            "修订那一格原样读得回来",
+        );
+        let 新批 = store
+            .put_batch(
+                "小库",
+                "作品《魂斗罗》",
+                None,
+                None,
+                &[BatchRow {
+                    variant_key: "库/FC/魂斗罗 (Japan) (Rev 1).zip".to_string(),
+                    member: "库/FC/魂斗罗 (Japan) (Rev 1).zip".to_string(),
+                    inner: "rom.nes".to_string(),
+                    after: 新裁决.clone(),
+                    before: Some(新裁决.clone()),
+                }],
+            )
+            .expect("记得下");
+        let 新批里的 = store.batch_rows(新批).expect("读得到");
+        assert_eq!(
+            (新批里的[0].after.clone(), 新批里的[0].before.clone()),
+            (新裁决.clone(), Some(新裁决)),
+            "批里落下的与盖掉的那条都带着修订——撤销放回去的才不会把修订丢掉",
         );
     }
 
@@ -4819,7 +5023,8 @@ mod tests {
                 false,
             ))
             .expect("写得进");
-        assert_eq!(store.export(false).expect("导得出").version, EXPORT_VERSION);
+        // 装着匹配裁决、没有修订：盖第 2 版——不是最新的第 3 版，第 2 版的程序读得懂它。
+        assert_eq!(store.export(false).expect("导得出").version, 2);
         // 只在本机成立的那条不带出去，于是**不带路径锚的那一份仍旧盖第 1 版**。
         let mut 只有路径锚 = Store::in_memory().expect("开得出来");
         只有路径锚
@@ -4834,10 +5039,7 @@ mod tests {
             ))
             .expect("写得进");
         assert_eq!(只有路径锚.export(false).expect("导得出").version, 1);
-        assert_eq!(
-            只有路径锚.export(true).expect("导得出").version,
-            EXPORT_VERSION
-        );
+        assert_eq!(只有路径锚.export(true).expect("导得出").version, 2);
     }
 
     #[test]
@@ -4850,6 +5052,81 @@ mod tests {
         assert_eq!(
             (account.read, account.added, account.matches_read),
             (1, 1, 0)
+        );
+    }
+
+    #[test]
+    fn 带修订的裁决导出成第三版_别人导入得回修订() {
+        // 票 `verdict-store-and-sync/04`（挂单 `Q1010`）：导出格式升一版，带上修订。
+        // **盖第 3 版**：老程序读到一份装着修订的文件，会把那一栏静静丢掉——那比读不了更糟，
+        // 所以版本号那道往后拒绝的闸要拦下它（与匹配裁决升第 2 版同一条理由）。
+        let mut store = Store::in_memory().expect("开得出来");
+        store.put(&汉化裁决()).expect("写得进");
+        store.put(&带修订的裁决()).expect("写得进");
+        let 导出 = store.export(false).expect("导得出");
+        assert_eq!(导出.version, 3, "装着修订的文件盖第 3 版");
+        let text = serde_json::to_string(&导出).expect("序列化");
+        assert!(
+            text.contains(r#""revision":"Rev 1""#),
+            "修订那一栏在文件里：{text}"
+        );
+
+        let mut 别人的 = Store::in_memory().expect("开得出来");
+        let account = 别人的.import(&text).expect("收得下");
+        assert_eq!((account.read, account.added), (2, 2));
+        assert_eq!(
+            别人的.find(&带修订的裁决().anchor).expect("读得到"),
+            Some(带修订的裁决()),
+            "别人那份里修订原样读得回来",
+        );
+        assert_eq!(
+            别人的
+                .find(&汉化裁决().anchor)
+                .expect("读得到")
+                .map(|back| back.decision),
+            Some(汉化裁决().decision),
+            "不带修订的那条照旧是不带的",
+        );
+
+        // 再往后一版的文件，本程序如实拒收，不猜着读。
+        let 第四版 = text.replacen(r#""version":3"#, r#""version":4"#, 1);
+        assert!(
+            Store::in_memory()
+                .expect("开得出来")
+                .import(&第四版)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn 第二版的裁决文件照读_修订为空() {
+        // 往前兼容：第 2 版的文件里没有 `revision` 那一栏（匹配裁决那一栏有），读回来修订为空。
+        let mut store = Store::in_memory().expect("开得出来");
+        let text = r#"{"format":"romcat-沉淀库","version":2,"exported_at":0,
+             "verdicts":[{"crc32":"12345678","size":40976,"kind":"发行版","work":"重装机兵",
+                          "platform":"FC","chinese":"汉化","team":"外星科技","version":"v1.2","decided_at":0}],
+             "matches":[{"crc32":"12345678","size":40976,"source":"中文离线源","entry":"7",
+                         "accepted":true,"decided_at":0}]}"#;
+        let account = store.import(text).expect("收得下");
+        assert_eq!(
+            (account.read, account.added, account.matches_read),
+            (1, 1, 1)
+        );
+        let back = store
+            .find(&内容锚(0x1234_5678, 40_976))
+            .expect("读得到")
+            .expect("收下了");
+        let Decision::Release(facts) = back.decision else {
+            panic!("收下的该是一条发行版裁决");
+        };
+        assert_eq!(
+            (
+                facts.work.as_str(),
+                facts.version.as_deref(),
+                facts.revision
+            ),
+            ("重装机兵", Some("v1.2"), None),
+            "第 2 版的文件读得回来，修订为空",
         );
     }
 
