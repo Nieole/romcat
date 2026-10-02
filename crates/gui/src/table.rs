@@ -796,7 +796,8 @@ fn sort_header(
 }
 
 /// 表头上的字：表头字号（令牌 `size-caption-plus`）、弱字色，拉丁与数字加粗（设计稿 `.tbl th`）。
-fn head_text(ui: &egui::Ui, text: &str) -> egui::RichText {
+/// 合并向导第三步那张冲突表的表头也照它（同一条 `.tbl th`）。
+pub(crate) fn head_text(ui: &egui::Ui, text: &str) -> egui::RichText {
     egui::RichText::new(text)
         .size(look::font_size(
             ui.ctx(),

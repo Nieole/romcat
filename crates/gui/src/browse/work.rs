@@ -668,10 +668,9 @@ impl Screen {
         page.sublibraries = sublibraries;
         page.exported = exported;
         page.platform_names = self.work.as_ref().map_or_else(String::new, |work| {
-            let manifest = romcat_core::platform::Manifest::builtin();
             work.platforms
                 .iter()
-                .map(|code| manifest.full_name(code).unwrap_or(code))
+                .map(|code| platform_full_name(code))
                 .collect::<Vec<_>>()
                 .join(" / ")
         });
@@ -856,7 +855,10 @@ impl Screen {
             .inner
     }
 
-    /// 六个面那一排（设计稿 `.tabs`）：一面一格，选中那一面正文色、底下一道强调色线；带数的面在名字后头跟一个小号等宽的数。
+    /// 六个面那一排（设计稿 `.tabs`）：一面一格，选中那一面最深那一档字色（`ink`）、底下一道强调色线；带数的面在名字后头跟一个小号等宽的数。
+    ///
+    /// 那几格走共用的下划线标签（[`look::underline_tabs`]，手动例外弹层、差量预览异常那一块同一个）；这一排左右留白
+    /// 与底下那道横贯整块正文的分隔线是这一页自己的（设计稿 `.tabs` 的 `padding`、`border-bottom`）。
     fn tabs_ui(&mut self, ui: &mut egui::Ui) {
         let tokens = Tokens::builtin();
         let Some(眼下) = self.page.as_ref().map(Page::tab) else {
@@ -876,93 +878,17 @@ impl Screen {
             Tab::Media => 媒体数,
             _ => None,
         };
-        let (字色, 强字色, 弱字色, 强调, 线) = {
-            let visuals = ui.visuals();
-            (
-                visuals.text_color(),
-                visuals.strong_text_color(),
-                visuals.weak_text_color(),
-                visuals.selection.stroke.color,
-                visuals.widgets.noninteractive.bg_stroke,
-            )
-        };
+        let 线 = ui.visuals().widgets.noninteractive.bg_stroke;
+        let 这一排: Vec<(Tab, &str, Option<u64>)> = Tab::ALL
+            .into_iter()
+            .map(|tab| (tab, tab.label(), 数(tab).map(|n| n as u64)))
+            .collect();
         let mut 换到 = None;
         let 这一排 = ui
             .horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = tokens.space.tabs_gap;
+                ui.spacing_mut().item_spacing.x = 0.0;
                 ui.add_space(tokens.space.tabs_padding);
-                for tab in Tab::ALL {
-                    let on = tab == 眼下;
-                    let 名字体 = if on {
-                        egui::FontId::new(tokens.font.size_body, font::strong_family())
-                    } else {
-                        egui::FontId::proportional(tokens.font.size_body)
-                    };
-                    let 名 = ui.painter().layout_no_wrap(
-                        tab.label().to_owned(),
-                        名字体,
-                        egui::Color32::PLACEHOLDER,
-                    );
-                    let 数字 = 数(tab).map(|n| {
-                        ui.painter().layout_no_wrap(
-                            thousands(n as u64),
-                            egui::FontId::monospace(tokens.font.size_caption),
-                            弱字色,
-                        )
-                    });
-                    let 宽 = 名.size().x
-                        + 数字
-                            .as_ref()
-                            .map_or(0.0, |galley| tokens.space.tab_count_gap + galley.size().x)
-                        + 2.0 * tokens.space.tab_padding;
-                    let (rect, response) = ui.allocate_exact_size(
-                        egui::vec2(宽, tokens.layout.tab_height),
-                        egui::Sense::click(),
-                    );
-                    let 色 = if on || response.hovered() {
-                        强字色
-                    } else {
-                        字色
-                    };
-                    let 名在 = egui::pos2(
-                        rect.left() + tokens.space.tab_padding,
-                        rect.center().y - 名.size().y / 2.0,
-                    );
-                    let 名宽 = 名.size().x;
-                    ui.painter().galley(名在, 名, 色);
-                    if let Some(数字) = 数字 {
-                        let 在 = egui::pos2(
-                            名在.x + 名宽 + tokens.space.tab_count_gap,
-                            rect.center().y - 数字.size().y / 2.0,
-                        );
-                        ui.painter().galley(在, 数字, 弱字色);
-                    }
-                    if on {
-                        ui.painter().rect_filled(
-                            egui::Rect::from_min_max(
-                                egui::pos2(
-                                    rect.left(),
-                                    rect.bottom() - tokens.layout.tab_underline,
-                                ),
-                                rect.max,
-                            ),
-                            0.0,
-                            强调,
-                        );
-                    }
-                    response.widget_info(|| {
-                        egui::WidgetInfo::selected(
-                            egui::WidgetType::SelectableLabel,
-                            true,
-                            on,
-                            tab.label(),
-                        )
-                    });
-                    look::focus_ring(ui.ctx(), ui.clip_rect(), &response);
-                    if response.clicked() {
-                        换到 = Some(tab);
-                    }
-                }
+                换到 = look::underline_tabs(ui, look::TabsSize::Page, &这一排, 眼下);
             })
             .response
             .rect;
@@ -3790,13 +3716,28 @@ fn head_of<'a>(work: &WorkDetail, details: &'a [VariantDetail]) -> Option<&'a st
         .find_map(VariantDetail::preferred_now)
 }
 
+/// 一个平台的**全名**（核心库平台表 `Manifest::full_name`）；表里没写全名的退回代号。头上「平台」那一格、合并向导第二步的组头
+/// 都问这一处。内置那张表里三十四个平台都写了带厂名的英文全名（拿主意的人 2026-10-02 裁，票
+/// `gui-draws-the-rest-of-the-design/04`），退回代号只剩读一份没写全名的平台表时才走得到。
+pub(super) fn platform_full_name(code: &str) -> &str {
+    // **内置清单只解一次**：`Manifest::builtin()` 要解一遍 TOML，合并向导每帧都问。
+    static 平台表: std::sync::OnceLock<romcat_core::platform::Manifest> =
+        std::sync::OnceLock::new();
+    平台表
+        .get_or_init(romcat_core::platform::Manifest::builtin)
+        .full_name(code)
+        .unwrap_or(code)
+}
+
 /// 平台色块标签（设计稿 `.hplat`）：平台色底、小号加粗的平台代号。字取令牌 `[color.platform-badge]`——两套主题都是白字，
 /// 照稿，与库体检、浏览屏卡面上的平台标同一格。
 ///
 /// 从前这里取 `on-accent`（挂单 `Q924`，随 `Q894` 危险按钮那一条），理由是「两套主题里它都接近白」——这个前提不成立：
 /// `on-accent` 暗色那一格是深色，压在 `MD`、`PSP` 这几种深平台色上几乎看不清。拿主意的人 2026-09-30 改裁照稿取白
 /// （挂单 `Q1236`，票 `gate-and-tests/06`）。
-fn platform_chip(ui: &mut egui::Ui, platform: &str) {
+///
+/// 合并向导第二步的组头、两处搜索结果那一框（`browse::merge`）摆的也是这一枚（设计稿那几处都是 `.hplat`）。
+pub(super) fn platform_chip(ui: &mut egui::Ui, platform: &str) {
     let tokens = Tokens::builtin();
     let 字色 = tokens.color.platform_badge.ink;
     let galley = ui.painter().layout_no_wrap(

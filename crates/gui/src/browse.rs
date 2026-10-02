@@ -929,17 +929,13 @@ impl Screen {
         let Some(variant) = work.variants.get(at) else {
             return;
         };
-        let short = self
-            .short_names
-            .get(at)
-            .cloned()
-            .unwrap_or_else(|| variant.row.key.clone());
         self.splitting = Some(merge::Split::open(
             &site.catalog,
             work,
             &self.rules,
+            &self.priorities,
             &variant.row.key,
-            &short,
+            &self.short_names,
         ));
     }
 
@@ -1718,7 +1714,13 @@ impl Screen {
 
     fn merge_ui(&mut self, ctx: &egui::Context, site: &mut Site) {
         if let Some(wizard) = self.merging.as_mut() {
-            match wizard.ui(ctx, site, &self.priorities, &mut self.shelf) {
+            match wizard.ui(
+                ctx,
+                site,
+                &self.priorities,
+                &mut self.shelf,
+                &self.suspicions,
+            ) {
                 None => {}
                 Some(merge::Done::Close) => self.merging = None,
                 Some(merge::Done::Apply) => self.apply_merge(site),

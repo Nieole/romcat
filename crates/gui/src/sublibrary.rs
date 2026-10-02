@@ -48,10 +48,10 @@
 //!
 //! ## 差量步骤一步都不截
 //!
-//! 摊开之后那张表（[`steps_table`]）**列得全**：真机量级上一次同步动上万个文件（实测
-//! 合成数据 **21,571 步**，`docs/library-facts.md`），而 ADR-0016 那句「同步前必须看一遍
-//! 它要做什么」不该有一半落在界面之外。不截的代价是零——计划整份本来就在 [`Screen::prepared`] 里，而
-//! `TableBody::rows` 只画视口里那几十行；[`Screen::steps_drawn`] 把「这一帧真的画了
+//! 计划那几步装在**一个定高的框**里（[`step_list`]，设计稿 `.steplist`），在框里滚，**列得全**：
+//! 合成数据上一次同步就动上万个文件（`--bench-sublibrary` 实测，见 [`step_list`] 的文档），而 ADR-0016
+//! 那句「同步前必须看一遍它要做什么」不该有一半落在界面之外。不截的代价是零——计划整份本来就在
+//! [`Screen::prepared`] 里，而框里只画看得见的那几行；[`Screen::steps_drawn`] 把「这一帧真的画了
 //! 几行」数出来，于是这句话是被数出来的（挂账 `D158`）。
 //!
 //! ## 容量条三段：选中的、清单之外的、上限
@@ -119,15 +119,10 @@ use romcat_core::task::{Cutoff, Ending, Finished, Handle};
 use crate::clock::{Clock, RecordClock};
 use crate::dialog::{Button, Dialog, Footer, Width};
 use crate::look::step;
-use crate::table::ROW_HEIGHT;
 use crate::task::{Product, Tasks};
 use crate::toast::{self, Toast};
 use crate::tokens::Tokens;
 use crate::{font, look};
-
-/// 没摊开时卡上先摆几条步骤。**摆得出样子就够**：这几条回答的是「它大概要干什么」，
-/// 「一共几步」那个数写在旁边，「到底哪几步」按「全部展开」。
-const STEP_SAMPLE: usize = 6;
 
 /// 意外与放不下的那几类，最多各列几条。
 const TOP_NOTES: usize = 20;
@@ -585,16 +580,9 @@ pub struct Screen {
     /// 中途改过选择的话这个号会被 [`Screen::invalidate`] 抹掉，那一趟排出来的差量
     /// 说的已经不是眼下这套选择集会做的事了，收回来反而是骗人。
     previewing: Option<u64>,
-    /// 排它用了多久，毫秒。
+    /// 排它用了多久，毫秒。**任务台记的那个数**；屏上不印它（拿主意的人 2026-10-01 裁 `F-2`：那是调试数），
+    /// 实测（`bench`）照它报。
     prepare_ms: f64,
-    /// 差量步骤摊开了没有。**默认不摊**：几百上千步铺满一屏，把它下面的按钮挤没了。
-    expanded: bool,
-    /// 刚摊开、还没把那张表滚进视口。
-    ///
-    /// 卡上差量表上面摆着卡头、规则、容量条与差量账，**摊开时那张表多半在视口底下**——
-    /// 虚拟化的表只画视口里的行，于是按了「全部展开」却一行都看不见。摊开那一下把它滚到
-    /// 视口顶上：看得见几行由视口多高决定，与上面那几段（按钮多高、规则几条）无关。
-    reveal_steps: bool,
     /// 上一帧差量账那**五格各画在哪儿**（[`tally_ui`] 交回来的）。
     ///
     /// 它是「五格等宽等高、上下缘对齐」那条的**量具**，与 [`Self::steps_drawn`] 同一个路子：
@@ -612,7 +600,7 @@ pub struct Screen {
     /// 只是同时也进计划。它**不是画上去就算数的**：那份计划是排它那一刻按这个开关排出来的，
     /// 所以改它要重排一趟（[`Self::set_restore_missing`]）。
     restore_missing: bool,
-    /// 上一帧那张步骤表**真的画了几行**。
+    /// 上一帧计划那几步那个框里**真的画了几步**（[`step_list`]）。
     ///
     /// 它是「翻行的代价与总步数无关」那句话的**量具**，与 [`crate::table::Window::reads`]
     /// 同一个路子：不掐表，数一帧真的做了多少事。挂钟在门禁上是一张彩票
@@ -699,8 +687,6 @@ impl Screen {
             prepared: None,
             previewing: None,
             prepare_ms: 0.0,
-            expanded: false,
-            reveal_steps: false,
             diff_tiles: Vec::new(),
             anomaly: Anomaly::all()[0],
             restore_missing: false,
@@ -963,22 +949,6 @@ impl Screen {
         self.prepare_ms
     }
 
-    /// 差量步骤摊开了没有。
-    #[must_use]
-    pub fn expanded(&self) -> bool {
-        self.expanded
-    }
-
-    /// 摊开或收起差量步骤。**界面上按「全部展开」走的就是它**，测试拿它当那一下。
-    ///
-    /// 收起来的时候卡上只摆头几条（`STEP_SAMPLE`）——几百上千步铺满一屏，
-    /// 会把它下面的「同步」挤到看不见的地方。摊开之后那张表是**虚拟化**的，
-    /// **一步都不截**（[`steps_table`]）。
-    pub fn expand(&mut self, on: bool) {
-        self.expanded = on;
-        self.reveal_steps = on;
-    }
-
     /// 上一帧差量账那五格各画在哪儿。见这个字段的文档：它是「等宽等高、上下缘对齐」的量具。
     #[must_use]
     pub fn diff_tiles(&self) -> &[egui::Rect] {
@@ -1014,14 +984,21 @@ impl Screen {
             return;
         }
         self.restore_missing = on;
-        // **正排着的那一趟先不认了**：它是按改之前那个开关排的，收回来的账与屏上这个勾
-        // 对不上。弃认之后 [`Self::preview`] 那道「已经在排了就不再排」的闸才让得过。
+        // **正排着的那一趟先停掉，再不认它**（票 `verdict-store-and-sync/13`，挂单 `Q1029`）：它是按改之前
+        // 那个开关排的，收回来的账与屏上这个勾对不上。只弃认不停的话，它照旧占着任务台「一次只跑一趟」
+        // 的位子跑完，新排的那一趟排在它后面——真库上勾一下要等两趟，前一趟的结果没人要。
+        // 排差量整条只读，停在哪儿都是干净的。停掉的那一趟交回来时号对不上，[`Self::settle`] 放过去，
+        // 屏上不说「已取消」：那不是人按的停下。
+        // 弃认之后 [`Self::preview`] 那道「已经在排了就不再排」的闸才让得过。
+        if let Some(id) = self.previewing {
+            tasks.stop(id);
+        }
         self.invalidate();
         self.preview(site, tasks);
     }
 
-    /// 上一帧那张步骤表真的画了几行。见这个字段的文档：它是那句「翻行的代价与总步数
-    /// 无关」的量具。摊开着才有值，没摊开是 0。
+    /// 上一帧计划那几步那个框里真的画了几步。见这个字段的文档：它是那句「翻行的代价与总步数
+    /// 无关」的量具。计划一步都没有时是 0。
     #[must_use]
     pub fn steps_drawn(&self) -> usize {
         self.steps_drawn
@@ -1181,15 +1158,16 @@ impl Screen {
     /// 选择集会做的事了，而「同步」按钮认的正是它（ADR-0016）。
     ///
     /// **正在台上排着的那一趟也一并不认了**：它是照旧那套规则排的，收回来同样是骗人。
-    /// 那趟活自己会跑完（整条只读，跑完也没有副作用），只是没人认领它。
+    /// 这里只弃认、不停它（这一层手上没有任务台）：那趟活自己会跑完（整条只读，跑完也没有
+    /// 副作用），只是没人认领它，跑完之前照旧占着「一次只跑一趟」的位子。手上有任务台、
+    /// 接着就要重排的那一处（[`Self::set_restore_missing`]）先把它停掉再来这里；
+    /// 换卡、新建、删子库这几处还没停（挂单 `Q1669`）。
     pub fn invalidate(&mut self) {
         self.prepared = None;
         self.previewing = None;
         // **耗时跟着那份差量一起作废。** 留着上一趟的数，下一趟被按停时旁边就摆着一个
         // 「排它用了 120 ms」——那说的是一份已经不在了的差量。
         self.prepare_ms = 0.0;
-        self.expanded = false;
-        self.reveal_steps = false;
         self.acknowledged = false;
         self.outcome = None;
     }
@@ -2844,82 +2822,35 @@ impl Screen {
         prepared: &Prepared,
     ) {
         let plan = &prepared.plan;
-        ui.separator();
-        self.diff_tiles = tally_ui(ui, plan, self.prepare_ms);
+        // 容量与差量账之间**不画横线**，只隔卡里那一档间距（设计稿 `.dev` 的 `gap:12px`，差距 D-06）。
+        self.diff_tiles = tally_ui(ui, plan);
         concerns_ui(ui, prepared);
         self.steps_ui(ui, plan);
         self.anomalies_ui(ui, site, tasks, plan);
         self.sync_ui(ui, site, tasks, plan);
     }
 
-    /// 步骤那一段：收起来时摆头几条，摊开是那张虚拟化的表。
+    /// 计划那几步（设计稿 `.steplist`）：装在一个定高的框里，框里滚（[`step_list`]）。
+    ///
+    /// **没有抬头那句、也没有类别那一列**（拿主意的人 2026-10-01 裁 `F-4`）：「共 N 步，先删后传」是框里末一行；
+    /// 路径本身说得清是元数据、ROM 还是媒体。一步都没有时不画框——「一步都不用做」那句在「同步」旁边说。
     fn steps_ui(&mut self, ui: &mut egui::Ui, plan: &romcat_core::sync::Plan) {
-        ui.add_space(4.0);
-        let header = ui
-            .horizontal(|ui| {
-                ui.label(font::strong(format!(
-                    "这一趟要动的 {} 步（先删后传）",
-                    thousands(plan.touched())
-                )));
-                if plan.steps.len() > STEP_SAMPLE {
-                    let label = if self.expanded {
-                        "收起来"
-                    } else {
-                        "全部展开"
-                    };
-                    if look::buttons(ui, |ui| ui.button(label)).clicked() {
-                        self.expand(!self.expanded);
-                    }
-                }
-            })
-            .response;
-        if self.expanded {
-            // **表里不按滚动位置**：人自己滚。`scroll_to` 是给实测与测试的
-            // （[`steps_table`]）。
-            self.steps_drawn = steps_table(ui, plan, None);
-            // 刚摊开：把卡片那一列滚到这张表的表头（`reveal_steps` 的文档）。**要在表画完之后问**：
-            // 表自己也是一块滚动区，在它之前问的话，那一下被它先收走，滚的是表里头而不是卡片那一列。
-            // **不带动画**：一下到位。带动画的话要跑上十几帧才滚到，而这一下是替人把刚摊开的表
-            // 摆到眼前，不是一段要看的过渡。
-            if self.reveal_steps {
-                ui.scroll_to_rect_animation(
-                    header.rect,
-                    Some(Align::Min),
-                    egui::style::ScrollAnimation::none(),
-                );
-                self.reveal_steps = false;
-            }
+        if plan.steps.is_empty() {
+            self.steps_drawn = 0;
             return;
         }
-        self.steps_drawn = 0;
-        for step in plan.steps.iter().take(STEP_SAMPLE) {
-            ui.horizontal(|ui| {
-                if step.act == Act::Delete {
-                    ui.colored_label(ui.visuals().error_fg_color, step.act.label());
-                } else {
-                    ui.label(step.act.label());
-                }
-                ui.weak(step.kind.label());
-                ui.label(&step.path);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.weak(human_bytes(if step.act == Act::Delete {
-                        step.was
-                    } else {
-                        step.bytes
-                    }));
-                });
-            });
-        }
-        if plan.steps.len() > STEP_SAMPLE {
-            ui.weak(format!(
-                "……另有 {} 步没列，按「全部展开」看全",
-                plan.steps.len() - STEP_SAMPLE
-            ));
-        }
+        ui.add_space(step(2));
+        // **框里不按滚动位置**：人自己滚。`scroll_to` 是给实测与测试的（[`step_list`]）。
+        self.steps_drawn = step_list(ui, plan, None);
     }
 
-    /// **差量预览里的异常**（设计稿 `.anom`）：一类一栏，栏名上跟着这一栏几条；
-    /// 栏里头一句先写清**工具不会做什么**，再逐条列出来。
+    /// **差量预览里的异常**（设计稿 `.anom`）：一个外框（描边 `line`、大圆角），头一排是**下划线标签**
+    /// （[`look::underline_tabs`]，铺 `panel-2` 底、左右留 `anomaly-tabs-padding`，底下一道分隔线），一类一栏，
+    /// 栏名后头跟着这一栏几条；底下正文（四周留 `anomaly-body-padding`，一样与一样之间 `anomaly-body-gap`）先写清
+    /// **工具不会做什么**，再把条目装进列表框（[`look::list_box`]）逐条列出来。
+    ///
+    /// **没有「异常」那个小标题**（差距 D-12）：标签页本身就是抬头。那一排与手动例外弹层那一排、作品详情页六个面
+    /// 是**同一个共用件**——别另起一套。
     ///
     /// ## 为什么分栏而不是铺成一张表
     ///
@@ -2944,32 +2875,66 @@ impl Screen {
             Anomaly::Surprise(kind) => plan.surprises.iter().filter(|one| one.kind == kind).count(),
             Anomaly::NoFit => plan.rejected.len(),
         };
-        ui.add_space(step(3));
-        ui.label(font::strong("异常"));
-        // 栏名后面跟着这一栏几条（设计稿 `dtabs` 里那个 `<small>`），与手动例外弹层那一排
-        // 同一个写法（[`look::segmented`]）——**别另起一套**。
-        let 栏名: Vec<String> = Anomaly::all()
+        let tokens = Tokens::builtin();
+        let palette = look::palette(ui);
+        let 线 = ui.visuals().widgets.noninteractive.bg_stroke;
+        // 栏名后面跟着这一栏几条（设计稿 `dtabs` 里那个 `<small>`）。
+        let 这一排: Vec<(Anomaly, &str, Option<u64>)> = Anomaly::all()
             .into_iter()
-            .map(|tab| format!("{} {}", tab.shown(), thousands(数(tab) as u64)))
+            .map(|tab| (tab, tab.shown(), Some(数(tab) as u64)))
             .collect();
-        let 这一排: Vec<(Anomaly, &str)> = Anomaly::all()
-            .into_iter()
-            .zip(栏名.iter().map(String::as_str))
-            .collect();
-        if let Some(换成) = look::segmented(ui, &这一排, self.anomaly) {
-            self.anomaly = 换成;
-        }
+        // 头一排那块底色的上两个角跟着外框圆：外框的圆角扣掉描边那一道。
+        let 里圆角 = tokens.radius.large.saturating_sub(线.width.ceil() as u8);
+        let [上下, 左右] = tokens.space.anomaly_body_padding;
+        let mut 换成 = None;
         ui.add_space(step(2));
-        match self.anomaly {
-            Anomaly::Surprise(kind) => self.surprises_ui(ui, site, tasks, plan, kind),
-            Anomaly::NoFit => self.nofit_ui(ui, site, tasks, plan),
+        egui::Frame::new()
+            .stroke(线)
+            .corner_radius(tokens.radius.large)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 0.0;
+                egui::Frame::new()
+                    .fill(palette.panel_2)
+                    .corner_radius(egui::CornerRadius {
+                        nw: 里圆角,
+                        ne: 里圆角,
+                        sw: 0,
+                        se: 0,
+                    })
+                    .inner_margin(egui::Margin::from(egui::vec2(
+                        tokens.space.anomaly_tabs_padding,
+                        0.0,
+                    )))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        换成 =
+                            look::underline_tabs(ui, look::TabsSize::Dialog, &这一排, self.anomaly);
+                    });
+                look::divider(ui);
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.spacing_mut().item_spacing.y = tokens.space.anomaly_body_gap;
+                        match self.anomaly {
+                            Anomaly::Surprise(kind) => {
+                                self.surprises_ui(ui, site, tasks, plan, kind)
+                            }
+                            Anomaly::NoFit => self.nofit_ui(ui, site, tasks, plan),
+                        }
+                    });
+            });
+        if let Some(换成) = 换成 {
+            self.anomaly = 换成;
         }
     }
 
-    /// 「目标上对不上」那四栏里的一栏：那句「工具不会做什么」，再逐条列出来。
+    /// 「目标上对不上」那四栏里的一栏：那句「工具不会做什么」，再把条目装进列表框（设计稿 `.lst`）逐条列出来，
+    /// 列不下的「另有 N 个」是框里末一行。
     ///
-    /// **「选择集还要不要它」逐条写着**：同一条路径上，选择集还要的那一条与已经不要的那一条，
-    /// 人处置的办法完全不同（一个是「要不要补回来」，另一个是「它迟早会被删掉吗」）。
+    /// **「选择集还要不要它」逐条写着**，弱字靠右（拿主意的人 2026-10-01 裁 `F-6` B：稿上没有，留）：同一条路径上，
+    /// 选择集还要的那一条与已经不要的那一条，人处置的办法完全不同（一个是「要不要补回来」，另一个是「它迟早会被删掉吗」）。
     fn surprises_ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -2986,29 +2951,32 @@ impl Screen {
             .collect();
         if rows.is_empty() {
             ui.weak(format!("没有{}的。", kind.shown()));
-        }
-        for one in rows.iter().take(ANOMALY_ROWS) {
-            ui.horizontal(|ui| {
-                ui.label(font::mono(&one.path));
-                // **落点与卡上那份只差大小写时两条都得印**：只印一条，人要么在卡上找不到
-                // 那个名字，要么不知道是谁要挤进来（`Surprise::landing` 的文档）。
-                if let Some(landing) = &one.landing {
-                    ui.weak(format!("← 本来要落 {landing}"));
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.weak(if one.still_wanted {
-                        "选择集还要它"
-                    } else {
-                        "选择集已经不要它了"
+        } else {
+            look::list_box(ui, |框| {
+                for one in rows.iter().take(ANOMALY_ROWS) {
+                    框.row(|ui| {
+                        靠右摆(
+                            ui,
+                            |ui| {
+                                look::help(
+                                    ui,
+                                    if one.still_wanted {
+                                        "选择集还要它"
+                                    } else {
+                                        "选择集已经不要它了"
+                                    },
+                                );
+                            },
+                            |ui| {
+                                // **落点与卡上那份只差大小写时两条都得印**：只印一条，人要么在卡上找不到
+                                // 那个名字，要么不知道是谁要挤进来（`Surprise::landing` 的文档）。
+                                list_path(ui, &one.path, one.landing.as_deref());
+                            },
+                        );
                     });
-                });
+                }
+                框.rest(rows.len().saturating_sub(ANOMALY_ROWS));
             });
-        }
-        if rows.len() > ANOMALY_ROWS {
-            ui.weak(format!(
-                "……另有 {} 个",
-                thousands((rows.len() - ANOMALY_ROWS) as u64)
-            ));
         }
         if kind == SurpriseKind::Changed && !rows.is_empty() {
             self.take_back_ui(ui, site);
@@ -3030,12 +2998,12 @@ impl Screen {
         }
     }
 
-    /// 「被修改过」那一栏底下那一行：一颗「**收回清单…**」，旁边一句收回之后会怎样（设计稿 `mod` 那一栏的 `.row`）。
+    /// 「被修改过」那一栏列表框底下那一行：一颗「**收回清单…**」，旁边一句收回之后会怎样（设计稿 `mod` 那一栏的 `.row`，
+    /// 摆在 `.lst` 框底下、异常那一块正文里）。
     ///
     /// 按下去**先问一层**（[`Self::ask_take_back`]）：收回清单扩的是工具在目标设备上的行为边界（ADR-0015）。
     /// **不画灰**：同步还在台上时照样按得下，按了说为什么不行（[`TAKE_BACK_WHILE_SYNCING`]，ADR-0005）。
     fn take_back_ui(&mut self, ui: &mut egui::Ui, site: &Site) {
-        ui.add_space(step(2));
         let pressed = ui
             .horizontal(|ui| {
                 let pressed = look::small_buttons(ui, |ui| ui.button(TAKE_BACK_BUTTON))
@@ -3053,7 +3021,8 @@ impl Screen {
         }
     }
 
-    /// 「设备上缺失」那一栏底下那一格：**同步时补回这几个文件**（设计稿 `opt`）。
+    /// 「设备上缺失」那一栏底下那一格：**同步时补回这几个文件**（设计稿 `.opt`：方框对着名字那一行，说明小字缩进挂在
+    /// 名字底下——gd-01 立的 [`look::checkbox_option`]）。
     ///
     /// **默认不勾**（ADR-0015）：清单说有、目标上没了的那可能是维护者在掌机上有意删的。
     /// 勾上它是「明知故犯」，不是静默补回——那几条照旧列在上面，只是同时也进计划。
@@ -3066,14 +3035,16 @@ impl Screen {
         if 能补几个 == 0 && !self.restore_missing {
             return;
         }
-        ui.add_space(step(2));
         let mut on = self.restore_missing;
+        // **说明照稿摆在名字底下，不藏进悬停**（设计稿 `.opt` 里那行 `<small>`）：
+        // 「补回会不会碰到我自己拷进去的东西」是人勾之前就要看见的答案，不是悬停半秒的奖励。
         if ui
             .add_enabled_ui(能补几个 > 0 || self.restore_missing, |ui| {
-                look::checkbox(
+                look::checkbox_option(
                     ui,
                     &mut on,
-                    format!("同步时补回这 {} 个文件", thousands(能补几个)),
+                    &format!("同步时补回这 {} 个文件", thousands(能补几个)),
+                    "只补清单里记录过的文件——清单之外的东西工具一律不碰（ADR-0015）。",
                 )
             })
             .inner
@@ -3082,19 +3053,17 @@ impl Screen {
         {
             self.set_restore_missing(site, tasks, on);
         }
-        // **这半句照稿摆在那一格底下，不藏进悬停**（设计稿 `opt` 里那行 `<small>`）：
-        // 「补回会不会碰到我自己拷进去的东西」是人勾之前就要看见的答案，不是悬停半秒的奖励。
-        look::help(
-            ui,
-            "只补清单里记录过的文件——清单之外的东西工具一律不碰（ADR-0015）。",
-        );
     }
 
-    /// 「放不进目标」那一栏：**落点撞车**一处一堆摆，别的几类按原因归堆。
+    /// 「放不进目标」那一栏：**落点撞车**一处一个列表框，别的几类按原因归堆、各装一个列表框。
     ///
     /// 撞车那一堆与别的不一样，因为它**有得办**：排除其中一份，剩下那一份下一趟就正常复制
     /// （词表**落点撞车**）。别的几类（超过单文件上限、文件名不收的字符、太长）得去主库里
     /// 改名或者换一张卡，这一屏上没有按钮可按。
+    ///
+    /// 一处撞车一个框（设计稿 `nofit` 那一段）：头一行落点路径、右头一枚「撞车」标签（[`look::inline_tag`]）；
+    /// 底下每份一行「根名 · 相对路径」（[`crate::table::root_and_path`]），右头「排除这一份」。**每份不印体积**
+    /// （拿主意的人 2026-10-01 裁 `F-6` B：与「排除哪一份」关系不大；第五格的容量口径另说，见 [`tally_ui`]）。
     fn nofit_ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -3104,73 +3073,97 @@ impl Screen {
     ) {
         look::help(ui, NOFIT_HELP);
         let name = self.picked.clone().unwrap_or_default();
-        // 撞车归堆由核心一处算（`Plan::collisions`）：命令行与这一屏配出来的对子是同一批。
-        let 撞车 = plan.collisions();
+        // 撞车归堆由核心一处算（`Collision::among`，排计划时归好存在 `Plan::collisions`）：
+        // 命令行、`--json` 与这一屏配出来的对子是同一批。
+        let 撞车 = &plan.collisions;
         let 撞上几份: u64 = 撞车.iter().map(|一处| 一处.files.len() as u64).sum();
-        ui.add_space(step(2));
-        // **写「几份（撞成几处）」而不是光写几处**：上头那颗分段按钮上的「放不进目标 N」
-        // 数的是**份**，几个小标题加起来得对得上那个数——两个数写成同一个「标签 · 数」的
-        // 形状却加不起来，人只会以为哪儿漏了。
-        ui.label(font::strong(if 撞车.is_empty() {
-            format!("{} · 0", RejectReason::Collision.label())
-        } else {
-            format!(
-                "{} · {} 份，撞成 {} 处",
-                RejectReason::Collision.label(),
-                thousands(撞上几份),
-                thousands(撞车.len() as u64),
-            )
-        }));
+        // **写「几份（撞成几处）」而不是光写几处**：上头那一排「放不进目标 N」数的是**份**，
+        // 几个小标题加起来得对得上那个数——两个数写成同一个「标签 · 数」的形状却加不起来，人只会以为哪儿漏了。
+        ui.label(anomaly_heading(
+            ui,
+            &if 撞车.is_empty() {
+                format!("{} · 0", RejectReason::Collision.label())
+            } else {
+                format!(
+                    "{} · {} 份，撞成 {} 处",
+                    RejectReason::Collision.label(),
+                    thousands(撞上几份),
+                    thousands(撞车.len() as u64),
+                )
+            },
+        ));
         look::help(ui, CLASH_HELP);
         if 撞车.is_empty() {
             ui.weak("没有撞车的文件。");
         }
         // 这一帧按了哪一份的「排除这一份」。**画完再动库**：中途改库，脚下这份计划就变了。
         let mut 排除掉 = None;
+        let 路径号 = look::font_size(ui.ctx(), Tokens::builtin().font.size_caption_plus);
         for 一处 in 撞车.iter().take(ANOMALY_ROWS) {
-            ui.horizontal(|ui| {
-                ui.label(font::mono(&一处.path));
-                ui.weak(if 一处.only_folded {
-                    "撞车（只差大小写）"
-                } else {
-                    "撞车"
+            look::list_box(ui, |框| {
+                框.row(|ui| {
+                    靠右摆(
+                        ui,
+                        |ui| {
+                            look::inline_tag(
+                                ui,
+                                if 一处.only_folded {
+                                    "撞车（只差大小写）"
+                                } else {
+                                    "撞车"
+                                },
+                            );
+                        },
+                        |ui| {
+                            list_path(ui, &一处.path, None);
+                        },
+                    );
                 });
-            });
-            for file in &一处.files {
-                ui.horizontal(|ui| {
-                    // **印的是主库侧的完整键**（带根名）：落点剥掉了根名，不带根名的话
-                    // 这几行长得一模一样，人看不出撞的是哪两块盘（挂单 `Q57`）。
-                    ui.label(font::mono(&file.source));
-                    // 按钮**靠右对齐**（照稿 `.lst` 那几行）：跟在长短不一的键后面的话，
-                    // 几颗按钮各停在各的位置上，读的人得横着找。
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        // **前端元数据排不掉**：它挂在一个记号名下、不是变体，而例外落在变体
-                        // 这一层（ADR-0016）。画那颗按钮的话，按下去会往库里写一条指着
-                        // 「（前端元数据）」的例外——排不掉这份文件，还得人手去撤。
-                        // 那一问由核心答（`sync::is_variant`），与裁剪建议那一侧同一处。
-                        if sync::is_variant(&file.variant) {
-                            if look::small_buttons(ui, |ui| ui.button("排除这一份"))
-                                .on_hover_text(
-                                    "把这一份记成这个子库的一条排除例外，另一份下一趟就正常复制。\
-                                     盘上的文件一个字节都不动；记完这份差量作废，要重排一趟。",
-                                )
-                                .clicked()
-                            {
-                                排除掉 = Some(file.variant.clone());
-                            }
-                        } else {
-                            look::help(ui, "前端元数据不是变体，排除不掉");
-                        }
-                        ui.weak(human_bytes(file.bytes));
+                for file in &一处.files {
+                    框.row(|ui| {
+                        靠右摆(
+                            ui,
+                            |ui| {
+                                // **前端元数据排不掉**：它挂在一个记号名下、不是变体，而例外落在变体
+                                // 这一层（ADR-0016）。画那颗按钮的话，按下去会往库里写一条指着
+                                // 「（前端元数据）」的例外——排不掉这份文件，还得人手去撤。
+                                // 那一问由核心答（`sync::is_variant`），与裁剪建议那一侧同一处。
+                                if sync::is_variant(&file.variant) {
+                                    if look::small_buttons(ui, |ui| ui.button("排除这一份"))
+                                        .on_hover_text(
+                                            "把这一份记成这个子库的一条排除例外，另一份下一趟就正常复制。\
+                                             盘上的文件一个字节都不动；记完这份差量作废，要重排一趟。",
+                                        )
+                                        .clicked()
+                                    {
+                                        排除掉 = Some(file.variant.clone());
+                                    }
+                                } else {
+                                    look::help(ui, "前端元数据不是变体，排除不掉");
+                                }
+                            },
+                            |ui| {
+                                // **写「根名 · 相对路径」**（照稿）：落点剥掉了根名，不带根名的话这几行长得
+                                // 一模一样，人看不出撞的是哪两块盘（挂单 `Q57`）。放不下从左边删字、根名留着。
+                                let 字 = crate::table::root_and_path(
+                                    ui,
+                                    &file.source,
+                                    &egui::FontId::monospace(路径号),
+                                    ui.available_width(),
+                                );
+                                list_path(ui, &字, None);
+                            },
+                        );
                     });
-                });
-            }
+                }
+            });
         }
+        // 撞车是**一处一个框**，列不下的那几处没有哪个框可放：说在最后一个框底下。
         if 撞车.len() > ANOMALY_ROWS {
-            ui.weak(format!(
-                "……另有 {} 处",
-                thousands((撞车.len() - ANOMALY_ROWS) as u64)
-            ));
+            look::help(
+                ui,
+                &format!("另有 {} 处", thousands((撞车.len() - ANOMALY_ROWS) as u64)),
+            );
         }
         for reason in RejectReason::all() {
             if reason == RejectReason::Collision {
@@ -3187,36 +3180,42 @@ impl Screen {
             if rows.is_empty() && !一直摆着 {
                 continue;
             }
-            ui.add_space(step(2));
-            ui.label(font::strong(format!(
-                "{} · {}",
-                reason.label(),
-                thousands(rows.len() as u64)
-            )));
-            // **这一类该怎么办，写在它自己那一段底下**（票 `gui-looks-like-the-design/07`：
-            // 不说去哪儿办的话，人只会对着一行字发呆）。那句话由核心答（`RejectReason::advice`），
-            // 命令行与这一屏印的是同一份。**一条都没有时不说**：目标本来就是 exFAT 时，
+            ui.label(anomaly_heading(
+                ui,
+                &format!("{} · {}", reason.label(), thousands(rows.len() as u64)),
+            ));
+            if !rows.is_empty() {
+                look::list_box(ui, |框| {
+                    for one in rows.iter().take(ANOMALY_ROWS) {
+                        框.row(|ui| {
+                            靠右摆(
+                                ui,
+                                |ui| {
+                                    look::help(
+                                        ui,
+                                        &format!(
+                                            "{}{}",
+                                            human_bytes(one.bytes),
+                                            if one.estimated { "（估的）" } else { "" },
+                                        ),
+                                    );
+                                },
+                                |ui| {
+                                    list_path(ui, &one.path, None)
+                                        .on_hover_text(plain(&one.detail));
+                                },
+                            );
+                        });
+                    }
+                    框.rest(rows.len().saturating_sub(ANOMALY_ROWS));
+                });
+            }
+            // **这一类该怎么办，写在它那个框底下**（设计稿那句「Windows 与 exFAT 都不收…」摆在 `.lst` 之后；
+            // 票 `gui-looks-like-the-design/07`：不说去哪儿办的话，人只会对着一行字发呆）。那句话由核心答
+            // （`RejectReason::advice`），命令行与这一屏印的是同一份。**一条都没有时不说**：目标本来就是 exFAT 时，
             // 在「超过单文件上限 · 0」底下劝人换一张 exFAT 的卡是句蠢话。
             if let Some(怎么办) = reason.advice().filter(|_| !rows.is_empty()) {
                 look::help(ui, 怎么办);
-            }
-            for one in rows.iter().take(ANOMALY_ROWS) {
-                ui.horizontal(|ui| {
-                    ui.label(font::mono(&one.path));
-                    ui.weak(format!(
-                        "{}{}",
-                        human_bytes(one.bytes),
-                        if one.estimated { "（估的）" } else { "" },
-                    ));
-                })
-                .response
-                .on_hover_text(plain(&one.detail));
-            }
-            if rows.len() > ANOMALY_ROWS {
-                ui.weak(format!(
-                    "……另有 {} 个",
-                    thousands((rows.len() - ANOMALY_ROWS) as u64)
-                ));
             }
         }
         if let Some(key) = 排除掉 {
@@ -3267,7 +3266,10 @@ impl Screen {
 }
 
 /// 差量的账（设计稿 `diffHTML` 的 `.diff`）：**一排五个大数字**——新增 / 删除 / 不动 / 异常 /
-/// 放不进目标——底下一行小字，加上净变化那一句。
+/// 放不进目标——底下一行弱色小字，净变化那一句也在这行里（拿主意的人 2026-10-01 裁 `F-2`）。
+///
+/// **正负号照稿**：新增写 ASCII `+`、删除写 U+2212 `−`（差距 D-07）。从前写全角「＋」「－」，等宽字里画成宽号，
+/// 「－0」读着像破折号。数字照旧是**等宽常规**（`F-10` 裁 A：字体预算里等宽只有常规体，与库体检八格同一处理）。
 ///
 /// 稿上第三格写的是「保留」，**屏上写「不动」**（词表**不动**，2026-09-21 拿主意的人定）：
 /// 「保留」在这个仓库里已经被占了两次——「合并作品」的「选一个保留」与平台纠正的
@@ -3293,20 +3295,20 @@ impl Screen {
 ///
 /// [`Plan::surprises`]: romcat_core::sync::Plan::surprises
 /// [`Plan::rejected`]: romcat_core::sync::Plan::rejected
-fn tally_ui(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan, prepare_ms: f64) -> Vec<egui::Rect> {
+fn tally_ui(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan) -> Vec<egui::Rect> {
     let 放不进 = plan.rejected_tally();
-    // 五格照稿：大数字前的正负号也照稿（新增 `＋`、删除 `－`），别的三格不带号。
+    // 五格照稿：大数字前的正负号也照稿（新增 `+`、删除 `−`），别的三格不带号。
     //
     // 小字那一行写成**几个不可断的字段**，不是一整串：折行只许发生在字段与字段之间。
     // 一整串交给 egui 去折的话，它在中日韩字之间随处都断得下去——上一版就折出了
     // 「新增 · 690」＋「B」（数值与单位分了家）与「异常 · 不处」＋「理」（词被拦腰切断）。
     let 五格: [(String, Vec<String>); 5] = [
         (
-            format!("＋{}", thousands(plan.adds.files)),
+            format!("{PLUS}{}", thousands(plan.adds.files)),
             vec!["新增".to_string(), human_bytes(plan.adds.bytes)],
         ),
         (
-            format!("－{}", thousands(plan.deletes.files)),
+            format!("{MINUS}{}", thousands(plan.deletes.files)),
             vec![
                 "删除".to_string(),
                 "释放".to_string(),
@@ -3426,21 +3428,30 @@ fn tally_ui(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan, prepare_ms: f64) 
     if !变体数.is_empty() {
         补齐.push(format!("按变体数：{}", 变体数.join("、")));
     }
-    if !补齐.is_empty() {
-        look::help(ui, &plain(&补齐.join("；")));
+    // **第五格的容量口径**（票 `verdict-store-and-sync/13`，挂单 `Q1029`）：那一格的数一份一份数，容量却是
+    // 一条落点只算一次（`Plan::rejected_tally`）——两个数口径不一样，不写明就读着对不上。说不说、说哪句
+    // 由核心一处答（`Plan::rejected_bytes_basis`，没撞车时不说），命令行报告印的是同一句。
+    if let Some(口径) = plan.rejected_bytes_basis() {
+        补齐.push(口径.to_string());
     }
-    let net = if plan.net_bytes >= 0 {
-        format!("＋{}", human_bytes(plan.net_bytes.unsigned_abs()))
-    } else {
-        format!("－{}", human_bytes(plan.net_bytes.unsigned_abs()))
-    };
-    ui.label(format!(
-        "净变化 {net}；同步完之后目标上占 {}（眼下 {}）｜排它用了 {prepare_ms:.0} ms",
+    // **净变化并进这行小字**（`F-2` 裁 A）：词表**差量预览**要的「净变化多少」，连同步完之后卡上占多少。
+    // 从前它另起一行、正文色，比上面这行还响，后头还跟着一句「排它用了 N ms」——那是调试数，不印。
+    let 号 = if plan.net_bytes >= 0 { PLUS } else { MINUS };
+    补齐.push(format!(
+        "净变化 {号}{}；同步完之后目标上占 {}（眼下 {}）",
+        human_bytes(plan.net_bytes.unsigned_abs()),
         human_bytes(plan.after_bytes),
         human_bytes(plan.actual_bytes),
     ));
+    look::help(ui, &plain(&补齐.join("；")));
     几格
 }
+
+/// 差量账上的**加号**：ASCII `+`（设计稿 `.diff b` 的「+87」）。
+const PLUS: char = '+';
+
+/// 差量账上的**减号**：U+2212（设计稿 `.diff b` 的「−30」）。不用连字符 `-`：等宽字里它短、偏下，与加号不成对。
+const MINUS: char = '\u{2212}';
 
 /// 一格小字**照稿写成一行**是什么样：字段之间点一个「·」（`新增 · 690 B`）。
 ///
@@ -3497,6 +3508,46 @@ fn 折成几行(
         }
     }
     几行.into_iter().map(排).collect()
+}
+
+/// 异常那一块正文里一段的**小标题**（设计稿 `.ab` 里的 `<b>`，12.5 号、粗那一族）：「落点撞车 · 2 份，撞成 1 处」那几行。
+fn anomaly_heading(ui: &egui::Ui, text: &str) -> egui::RichText {
+    font::strong(text).size(look::font_size(
+        ui.ctx(),
+        Tokens::builtin().font.size_small_plus,
+    ))
+}
+
+/// 列表框一行里**左右两样**（设计稿 `.lst>div` 的 `grid-template-columns:minmax(0,1fr) auto`）：`右` 靠右、宽随内容，
+/// `左` 占满剩下的宽（画不下自己截）。先摆右边那一样，左边才知道还剩多宽。
+fn 靠右摆(ui: &mut egui::Ui, 右: impl FnOnce(&mut egui::Ui), 左: impl FnOnce(&mut egui::Ui)) {
+    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        右(ui);
+        ui.with_layout(Layout::left_to_right(Align::Center), 左);
+    });
+}
+
+/// 列表框一行里那条**路径**（设计稿 `.lst .mono`：等宽 11.5 号），一行放不下截尾巴。`landing` 给了就跟一截弱字
+/// 「← 本来要落 X」（只差大小写时两条都得印，`Surprise::landing` 的文档）。
+fn list_path(ui: &mut egui::Ui, path: &str, landing: Option<&str>) -> egui::Response {
+    let 字号 = look::font_size(ui.ctx(), Tokens::builtin().font.size_caption_plus);
+    let mut 一段 = egui::text::LayoutJob::default();
+    一段.append(
+        path,
+        0.0,
+        egui::TextFormat::simple(egui::FontId::monospace(字号), ui.visuals().text_color()),
+    );
+    if let Some(landing) = landing {
+        一段.append(
+            &format!(" ← 本来要落 {landing}"),
+            0.0,
+            egui::TextFormat::simple(
+                egui::FontId::proportional(字号),
+                ui.visuals().weak_text_color(),
+            ),
+        );
+    }
+    ui.add(egui::Label::new(一段).truncate())
 }
 
 /// 折期望状态与排计划时那几件**要说出口**的怪事：核心报的那几条，以及**目标吃不下而
@@ -4538,15 +4589,6 @@ impl Screen {
         self.exception_clock.pinned = Some(at);
     }
 
-    /// 截图测试用：差量账旁边那句「排它用了 N ms」一律画成 `ms`。
-    ///
-    /// 那个数是**任务台掐的表**（排差量那一趟回来时记下的），一趟一个样——照实画进基线，
-    /// 每一趟都会有几个像素对不上，而界面一点毛病都没有。与钉死例外那张表上的时刻
-    /// （[`Self::pin_exception_time`]）同一个用处。真窗口那一路不调它。
-    pub fn pin_prepare_ms(&mut self, ms: f64) {
-        self.prepare_ms = ms;
-    }
-
     /// 「手动例外」那一行上按「**管理**」：开出那层弹层，管的是 `name` 这一台（票 `gui-looks-like-the-design/22`）。
     ///
     /// 打开这一下就把**要读的两样**读齐：优先级表（挑显示标题，与浏览屏、导出、同步读的是同一份），
@@ -4863,9 +4905,10 @@ impl Screen {
         let mut 备注 = open.note.clone();
         // 两栏摆在**标头底下、分隔线上头**那一排里（设计稿 `DLG.excl` 的 `head` 那个 `.dtabs`）：
         // 内容区滚下去之后还看得出自己在哪一栏。栏名后面跟着这一栏几条。
+        // **下划线标签**，与差量预览异常那一块、作品详情页六个面同一个共用件（[`look::underline_tabs`]）。
         let 栏 = [
-            (Exception::Include, format!("包含 {}", thousands(包含))),
-            (Exception::Exclude, format!("排除 {}", thousands(排除))),
+            (Exception::Include, Exception::Include.shown(), Some(包含)),
+            (Exception::Exclude, Exception::Exclude.shown(), Some(排除)),
         ];
         let shown = Dialog::new("手动例外", format!("手动例外 · {name}"), footer)
             .note(
@@ -4873,11 +4916,7 @@ impl Screen {
                  「排除」是规则选中了也不带的。",
             )
             .head(|ui| {
-                let 摆法: Vec<(Exception, &str)> = 栏
-                    .iter()
-                    .map(|(kind, label)| (*kind, label.as_str()))
-                    .collect();
-                if let Some(按了) = look::segmented(ui, &摆法, tab) {
+                if let Some(按了) = look::underline_tabs(ui, look::TabsSize::Dialog, &栏, tab) {
                     换栏 = Some(按了);
                 }
             })
@@ -5362,78 +5401,204 @@ fn hit_row_ui(ui: &mut egui::Ui, hit: &Found, 记着的: (u64, u64)) -> bool {
     })
 }
 
-/// 摊开之后那张步骤表。**虚拟化，而且一步都不截**；返回这一帧真的画了几行。
+/// 计划那几步（设计稿 `.steplist`）：**一个框**——描边 `line`、中圆角，最高 `step-list-max-height`，超过就在框里滚。
+/// 一行一步，行与行之间一道分隔线：
 ///
-/// ## 为什么不再截在 2,000 步（挂账 `D158`）
+/// - **动作词**定宽一格（`step-list-op-width`），粗那一族：删除取 `lo`，新增与更新取 `hi`。词照核心
+///   （[`Act::label`]，与五格大数字、命令行同词；拿主意的人 2026-10-01 裁 `F-3`：留「新增 / 更新 / 删除」，不照稿写「复制」）。
+/// - **路径**等宽（`size-path`），一行放不下省略号。转换那一步照稿写主库那一份的相对路径，跟着「→ 转为 zip」
+///   （那半句由核心答，[`Conversion::shown`]，命令行报告印的是同一句）。
+/// - **大小**弱字靠右：这一步写多大由核心答（`Step::size`：删除写它释放多少，新增写落到卡上多大），与命令行报告同一个数。
 ///
-/// 真机量级上一次同步动上万个文件（实测合成数据 **21,571 步**，`--bench-sublibrary`
-/// 跑出来的；挂账 `D158` 记的 8,206 是票 `parking-3/17` 换合成数据形状之前那个数）。
+/// 框里末一行小字「共 N 步，先删后传」（`F-4` 裁 A：并进框里，抬头那句不要了）。
+///
+/// ## 虚拟化，而且一步都不截（挂账 `D158`）
+///
+/// 合成数据上一次同步就动两万多个文件（`--bench-sublibrary` 实测，数见台账 `docs/library-facts.md`「一次同步动几步」）。
 /// 截断的代价不是「少看几行」——是「想确认第 5,000 步是什么就得转去命令行」，
 /// 而**同步前必须看一遍它要做什么**是 ADR-0016 的硬要求，那一眼不该有一半落在界面之外。
 ///
-/// 不截的代价是零：计划整份本来就在界面状态里（[`Screen::prepared`]），而
-/// `TableBody::rows` 只调用视口里那几十行的闭包——**一帧画几行只跟视口有多高有关，
-/// 与总步数无关**。返回的正是这个数，[`Screen::steps_drawn`] 把它交给实测与测试，
-/// 于是这句话是被数出来的，不是被相信的。
+/// 不截的代价是零：计划整份本来就在界面状态里（[`Screen::prepared`]），而框里只为看得见的那几行调闭包
+/// （`ScrollArea::show_rows`）——**一帧画几行只跟框有多高有关，与总步数无关**。返回的正是这个数
+/// （末一行那句不算），[`Screen::steps_drawn`] 把它交给实测与测试，于是这句话是被数出来的，不是被相信的。
 ///
-/// `scroll_to` 把滚动位置强按到某个像素偏移，**只有量帧率与测试才给**。
-pub fn steps_table(
+/// `scroll_to` 把框里的滚动位置强按到某个像素偏移，**只有量帧率与测试才给**；一步多高见 [`step_row_pitch`]。
+///
+/// [`Conversion::shown`]: romcat_core::capability::Conversion::shown
+pub fn step_list(
     ui: &mut egui::Ui,
     plan: &romcat_core::sync::Plan,
     scroll_to: Option<f32>,
 ) -> usize {
-    let shown = plan.steps.len();
+    let tokens = Tokens::builtin();
+    let 线 = ui.visuals().widgets.noninteractive.bg_stroke;
+    let 行距 = step_row_pitch(ui.ctx());
+    let 几步 = plan.steps.len();
     let mut drawn = 0;
-    let mut builder = egui_extras::TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .id_salt(format!("差量步骤 · {}", plan.sublibrary))
-        .cell_layout(Layout::left_to_right(Align::Center))
-        .column(egui_extras::Column::initial(60.0).at_least(50.0))
-        .column(egui_extras::Column::initial(70.0).at_least(50.0))
-        .column(egui_extras::Column::initial(90.0).at_least(70.0))
-        .column(egui_extras::Column::remainder().at_least(160.0).clip(true));
-    if let Some(offset) = scroll_to {
-        builder = builder.vertical_scroll_offset(offset);
-    }
-    builder
-        .header(22.0, |mut header| {
-            for title in ["干什么", "类别", "容量", "目标上的路径"] {
-                header.col(|ui| {
-                    ui.label(font::strong(title));
-                });
+    egui::Frame::new()
+        .stroke(线)
+        .corner_radius(tokens.radius.medium)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            // 框最高 `step-list-max-height`，**连描边**：里头那块滚动区扣掉上下两道线。
+            let mut 框里 = egui::ScrollArea::vertical()
+                .id_salt(("差量那几步", plan.sublibrary.as_str()))
+                .max_height((tokens.layout.step_list_max_height - 2.0 * 线.width).max(0.0))
+                .auto_shrink([false, true]);
+            if let Some(offset) = scroll_to {
+                框里 = 框里.vertical_scroll_offset(offset);
             }
-        })
-        .body(|body| {
-            body.rows(ROW_HEIGHT, shown, |mut row| {
-                let index = row.index();
-                let Some(step) = plan.steps.get(index) else {
-                    return;
-                };
-                drawn += 1;
-                row.col(|ui| {
-                    if step.act == Act::Delete {
-                        ui.colored_label(ui.visuals().error_fg_color, step.act.label());
-                    } else {
-                        ui.label(step.act.label());
+            // 末一行是「共 N 步，先删后传」那句，所以比步数多一行。
+            框里.show_rows(ui, 行距, 几步 + 1, |ui, 看得见的| {
+                for 第几行 in 看得见的 {
+                    let (格, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 行距),
+                        egui::Sense::hover(),
+                    );
+                    if 第几行 > 0 {
+                        ui.painter()
+                            .hline(格.x_range(), 格.top() + 线.width / 2.0, 线);
                     }
-                });
-                row.col(|ui| {
-                    ui.label(step.kind.label());
-                });
-                row.col(|ui| {
-                    ui.label(human_bytes(if step.act == Act::Delete {
-                        step.was
-                    } else {
-                        step.bytes
-                    }));
-                });
-                row.col(|ui| {
-                    ui.label(&step.path);
-                });
+                    match plan.steps.get(第几行) {
+                        Some(一步) => {
+                            drawn += 1;
+                            step_row(ui, 格, 一步);
+                        }
+                        None => {
+                            step_list_footer(
+                                ui,
+                                格,
+                                &format!("共 {} 步，先删后传", thousands(plan.touched())),
+                            );
+                        }
+                    }
+                }
             });
         });
     drawn
+}
+
+/// 计划那几步那个框里**一行多高**（连行间那道线）：上下各留 `step-list-padding`，中间一行 `size-small` 的字。
+///
+/// 框里每一行一样高（虚拟化要的就是这个），量帧率与测试按它算「滚到第几步」的偏移。
+/// 它要量字体，**字体头一帧才装上**：在帧里问（`ui.ctx()`），别在跑第一帧之前问。
+#[must_use]
+pub fn step_row_pitch(ctx: &egui::Context) -> f32 {
+    let tokens = Tokens::builtin();
+    let [上下, _] = tokens.space.step_list_padding;
+    let 字号 = look::font_size(ctx, tokens.font.size_small);
+    let 一行字 = ctx.fonts_mut(|fonts| fonts.row_height(&egui::FontId::proportional(字号)));
+    (2.0 * 上下 + 一行字).round()
+}
+
+/// 计划那几步那个框里**最多能滚多远**（像素）：几步加末一行那句一共多高，减去框里那块滚动区最高多高
+/// （框最高 `step-list-max-height`，连上下两道描边）。量帧率那一趟照它定行程。同 [`step_row_pitch`]，在帧里问。
+#[must_use]
+pub fn step_list_max_offset(ctx: &egui::Context, plan: &romcat_core::sync::Plan) -> f32 {
+    let 描边 = ctx
+        .style_of(ctx.theme())
+        .visuals
+        .widgets
+        .noninteractive
+        .bg_stroke
+        .width;
+    let 框里最高 = Tokens::builtin().layout.step_list_max_height - 2.0 * 描边;
+    ((plan.steps.len() + 1) as f32 * step_row_pitch(ctx) - 框里最高).max(0.0)
+}
+
+/// 框里一行**摆字的那一块**与**路径那一格的左沿**（设计稿 `.steplist div`：四周留 `step-list-padding`，
+/// 动作词定宽 `step-list-op-width`，隔 `step-list-gap` 是路径那一格）。一步那一行与末一行那句都照它摆。
+fn step_cells(格: egui::Rect) -> (egui::Rect, f32) {
+    let tokens = Tokens::builtin();
+    let [上下, 左右] = tokens.space.step_list_padding;
+    let 里头 = 格.shrink2(egui::vec2(左右, 上下));
+    let 路径左 = 里头.left() + tokens.layout.step_list_op_width + tokens.space.step_list_gap;
+    (里头, 路径左)
+}
+
+/// 框里一步那一行，画满 `格`（[`step_list`]）。
+fn step_row(ui: &egui::Ui, 格: egui::Rect, 一步: &romcat_core::sync::Step) {
+    let tokens = Tokens::builtin();
+    let 缝 = tokens.space.step_list_gap;
+    let (里头, 路径左) = step_cells(格);
+    let palette = look::palette(ui);
+    let 字号 = look::font_size(ui.ctx(), tokens.font.size_small);
+    let 路径号 = look::font_size(ui.ctx(), tokens.font.size_path);
+    let painter = ui.painter();
+    let 摆 = |galley: std::sync::Arc<egui::Galley>, 左: f32, 色: egui::Color32| {
+        let 上 = 里头.center().y - galley.size().y / 2.0;
+        painter.galley(egui::pos2(左, 上), galley, 色);
+    };
+    let 动作色 = match 一步.act {
+        Act::Delete => palette.lo,
+        Act::Add | Act::Update => palette.hi,
+    };
+    摆(
+        painter.layout_no_wrap(
+            一步.act.label().to_owned(),
+            egui::FontId::new(字号, font::strong_family()),
+            动作色,
+        ),
+        里头.left(),
+        动作色,
+    );
+    // 这一步写多大由核心一处答（`Step::size`：删除写释放多少），命令行报告印的是同一个数。
+    let 大小 = painter.layout_no_wrap(
+        human_bytes(一步.size()),
+        egui::FontId::proportional(字号),
+        palette.ink_3,
+    );
+    let 大小左 = 里头.right() - 大小.size().x;
+    摆(大小, 大小左, palette.ink_3);
+    // 路径那一格：动作词那一格之后、大小之前。
+    let 路径宽 = (大小左 - 缝 - 路径左).max(0.0);
+    let 等宽 = egui::FontId::monospace(路径号);
+    let 截到 = |text: &str, 宽: f32| {
+        egui::WidgetText::from(
+            egui::RichText::new(text)
+                .font(等宽.clone())
+                .color(palette.ink),
+        )
+        .into_galley(
+            ui,
+            Some(egui::TextWrapMode::Truncate),
+            宽.max(0.0),
+            egui::TextStyle::Monospace,
+        )
+    };
+    let Some(conversion) = &一步.convert else {
+        摆(截到(&一步.path, 路径宽), 路径左, palette.ink);
+        return;
+    };
+    // **转换那一步照稿**：主库那一份的相对路径，跟着「→ 转为 zip」，一段字。放不下时**那半句不截**——
+    // 截的是路径：「转成什么」正是这一行比别的行多说的那件事。
+    let 路径 = romcat_core::path::split_root(&一步.source).1;
+    let 跟着 = format!(" → {}", conversion.shown());
+    let 一整段 = painter.layout_no_wrap(format!("{路径}{跟着}"), 等宽.clone(), palette.ink);
+    if 一整段.size().x <= 路径宽 {
+        摆(一整段, 路径左, palette.ink);
+        return;
+    }
+    let 跟着 = painter.layout_no_wrap(跟着, 等宽.clone(), palette.ink);
+    let 路径 = 截到(路径, 路径宽 - 跟着.size().x);
+    let 路径右 = 路径左 + 路径.size().x;
+    摆(路径, 路径左, palette.ink);
+    摆(跟着, 路径右, palette.ink);
+}
+
+/// 框里末一行那句小字（`.steplist` 末一行的 `.dim`）：摆在路径那一格上，弱字。
+fn step_list_footer(ui: &egui::Ui, 格: egui::Rect, text: &str) {
+    let (里头, 左) = step_cells(格);
+    let palette = look::palette(ui);
+    let 字号 = look::font_size(ui.ctx(), Tokens::builtin().font.size_small);
+    let 字 = ui.painter().layout_no_wrap(
+        text.to_owned(),
+        egui::FontId::proportional(字号),
+        palette.ink_3,
+    );
+    let 上 = 里头.center().y - 字.size().y / 2.0;
+    ui.painter().galley(egui::pos2(左, 上), 字, palette.ink_3);
 }
 
 /// 「分不出第二份只读连接」那句话。

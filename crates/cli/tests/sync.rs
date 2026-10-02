@@ -180,6 +180,78 @@ fn 子库不在时说得清怎么建() {
     assert!(text.contains("没有叫「备用卡」的子库"), "{text}");
 }
 
+#[test]
+fn 撞车明细在json里_撞在一起的几份归成一处() {
+    // 票 `verdict-store-and-sync/13`（挂单 `Q1029`）：「撞的是哪几份」由核心一处归堆
+    // （`Collision`），可 `--json` 里从前只有一条一条平铺的 `rejected`——读它的工具得自己按
+    // 落点再归一次堆，那正是 ADR-0024 要挡的第二处判据。
+    //
+    // 第二块盘上同一条相对路径：子库里的落点剥掉了根名，两份都要落在卡上 `FC/魂斗罗.zip`。
+    let (_library, workspace, _target) = 现场();
+    let 另一块盘 = temp_dir("sync-cli-lib2");
+    写(&另一块盘.path().join("FC/魂斗罗.zip"), &zip(1024));
+    let out = romcat(
+        workspace.path(),
+        &[
+            "scan",
+            "--root-name",
+            "另一块盘",
+            &另一块盘.path().display().to_string(),
+            "--library",
+            "测试库",
+            "--no-checkpoint",
+            "--samples-per-class",
+            "0",
+            "--quiet",
+        ],
+    );
+    assert!(out.status.success(), "{}", 出来的话(&out));
+
+    let json = workspace.path().join("计划.json");
+    let out = 子库(
+        workspace.path(),
+        &["plan", "掌机", "--json", &json.display().to_string()],
+    );
+    let text = 出来的话(&out);
+    assert!(out.status.success(), "{text}");
+    let plan: serde_json::Value =
+        serde_json::from_slice(&fs::read(&json).expect("读得出")).expect("是 JSON");
+
+    let 撞车 = plan["collisions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("--json 里没有撞车明细：{plan}"));
+    assert_eq!(撞车.len(), 1, "撞的是一处：{plan}");
+    assert_eq!(撞车[0]["path"], "FC/魂斗罗.zip");
+    assert_eq!(撞车[0]["only_folded"], false);
+    // **一处里是哪几份**：主库侧那条完整的键（带根名），按键排——与命令行报告、界面同一批。
+    let 来自: Vec<&str> = 撞车[0]["files"]
+        .as_array()
+        .expect("有撞上的那几份")
+        .iter()
+        .map(|one| one["source"].as_str().expect("有主库侧的键"))
+        .collect();
+    assert_eq!(
+        来自,
+        ["另一块盘/FC/魂斗罗.zip", "库/FC/魂斗罗.zip"],
+        "{plan}"
+    );
+    // 平铺的那一份照旧在：明细是**多出来**的字段，不是换掉了 `rejected`。
+    assert_eq!(plan["rejected"].as_array().map(Vec::len), Some(2), "{plan}");
+
+    // 印出来的那一份：两份，容量这一处只算一次（取大的那份 2048），并写明口径——与界面同一句。
+    assert!(
+        text.contains(&format!(
+            "2 个、{}。",
+            romcat_core::report::human_bytes(2048)
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(romcat_core::sync::REJECTED_BYTES_BASIS),
+        "{text}"
+    );
+}
+
 // ───────────────────────── `romcat sublibrary sync`：真的往目标上写
 
 /// 卡上文件的 `(相对路径, 字节数)`。

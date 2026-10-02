@@ -337,9 +337,9 @@ impl<'a, A> Dialog<'a, A> {
     /// 正是这一排要防的事。也因此这里**只摆一排挑东西的控件**，别往里塞输入框（会碰到输入法的东西归内容区，
     /// ADR-0005）。
     ///
-    /// 给了它，标头那一块的下留白收窄成一档（设计稿拿 `margin-bottom:-14px` 把 `.mhead` 的下留白抵掉，
-    /// 让那一排贴着分隔线；这里换成少留一点，效果是同一个）。**不给就一点地方都不占**，画出来与没有这个槽
-    /// 之前一模一样。
+    /// 给了它，标头那一块**不留下留白**：那一排的下沿就贴着分隔线（设计稿拿 `margin-bottom:-14px` 把 `.mhead`
+    /// 的下留白抵掉，`.dtabs` 自己那道底线正好压在分隔线上）——下划线标签选中那一格的线于是落在分隔线正上方
+    /// （[`look::underline_tabs`]）。**不给就一点地方都不占**，画出来与没有这个槽之前一模一样。
     #[must_use]
     pub fn head(mut self, add: impl FnOnce(&mut egui::Ui) + 'a) -> Self {
         self.head = Some(Box::new(add));
@@ -452,15 +452,15 @@ impl<'a, A> Dialog<'a, A> {
                 // 三段之间不留缝：分隔线就是缝。段里头照旧用原来的间距。
                 ui.spacing_mut().item_spacing.y = 0.0;
 
-                // **有标头那一排时下留白收窄**（[`Dialog::head`]）：设计稿拿 `margin-bottom:-14px` 把
-                // `.mhead` 的下留白抵掉，让那一排贴着分隔线；这里换成少留一点，效果是同一个。
+                // **有标头那一排时不留下留白**（[`Dialog::head`]）：设计稿拿 `margin-bottom:-14px` 把
+                // `.mhead` 的下留白抵掉，让那一排（`.dtabs`）贴着分隔线。
                 // 没给那个槽时这里一个字都不变——下留白照旧是 `header_pad_y`。
                 //
                 // **没给那个槽时这一句折出来的与从前一模一样**：底下那一行原来就是
                 // `Margin::from(vec2(pad_x, header_pad_y))`，只在有标头那一排时才去改它的下边。
                 let mut header_margin = egui::Margin::from(egui::vec2(pad_x, header_pad_y));
                 if head.is_some() {
-                    header_margin.bottom = egui::Margin::from(egui::vec2(pad_x, step(1))).bottom;
+                    header_margin.bottom = 0;
                 }
                 egui::Frame::new()
                     .inner_margin(header_margin)

@@ -113,7 +113,7 @@ pub fn scroll(app: &mut App, frames: u32, sweep: Sweep) -> FrameCost {
 
 /// **待确认队列**量出来的响应，毫秒。
 ///
-/// 量的不是「一帧多少毫秒」这一样：队列上人真正会等的是**列一次队列**（真机 16,656 条）
+/// 量的不是「一帧多少毫秒」这一样：队列上人真正会等的是**列一次队列**（真机上一万六千多条，见台账 `docs/library-facts.md`）
 /// 与**点一行分组表**（重新筛一遍再重新分一次组）。三样一起报，因为它们的量级差着
 /// 两三个数量级，只报其中一样会把结论带偏。
 #[derive(Debug, Clone, PartialEq)]
@@ -226,7 +226,7 @@ pub fn queue(app: &mut App, frames: u32) -> QueueCost {
         (queue.pending(), queue.selected().len() as u64)
     };
 
-    // 二、点一下表头：**按容量倒着排**。那正是这一票要给人的动作——「16,656 条里
+    // 二、点一下表头：**按容量倒着排**。那正是这一票要给人的动作——「一万多条里
     //     哪几条最大」，从前只能靠选择器缩小范围。排的是整份条目，一次都不读库。
     let sort = (ItemOrder::Bytes, true);
     // 排的是**内存里全部条目**，跳过的那些也在里头——报出去的得是这个数，
@@ -366,7 +366,7 @@ pub struct BrowseCost {
     ///
     /// **那张作品表不在这一趟里**：主列表那一列作品名从头到尾是页查询自己带回来的
     /// （`WORK_ANCHOR_COLUMNS` 里的 `COALESCE(work.name, variant.key)`），
-    /// 这一屏一次都没整份读过它（真库 9,226 行）。这半句原先写着「连那张小表一起」
+    /// 这一屏一次都没整份读过它（真库上近一万行，见台账 `docs/library-facts.md`）。这半句原先写着「连那张小表一起」
     /// ——那是票 25 那一版变体表的说法，早不作数了（票 `parking-3/11`）。
     pub facets_ms: f64,
     /// 平台、合集、语言、中文各有几个可选值。
@@ -629,7 +629,7 @@ pub struct SubCost {
     pub over_capacity: Option<u64>,
     /// 给了几条裁剪建议。
     pub trims: usize,
-    /// 摊开那张**步骤表**滚一趟，每帧最多真的画了几行。
+    /// 计划那几步那个**框里**滚一趟，每帧最多真的画了几步。
     ///
     /// **这是「翻行的代价与总步数无关」那句话的量具**，不是秒表：`steps` 从几百涨到
     /// 上万，这个数一动不动（视口就那么高）。挂钟在门禁上是一张彩票，这个数机器忙不忙
@@ -643,7 +643,7 @@ pub struct SubCost {
     pub steps_frames: u32,
 }
 
-/// 摊开步骤表之后滚几帧。头两帧是热身（字体图集与列宽在那两帧里定下来），所以取的
+/// 计划那几步那个框里滚几帧。头两帧是热身（字体图集在那两帧里定下来），所以取的
 /// 帧数得比热身多得多。
 const STEP_FRAMES: u32 = 60;
 
@@ -663,7 +663,7 @@ impl SubCost {
             romcat_core::report::human_bytes(self.adds.1),
         );
         out.push_str(&format!(
-            "摊开步骤表滚一趟  每帧画 {} 行（与总步数无关）；\
+            "那几步的框里滚一趟  每帧画 {} 行（与总步数无关）；\
              中位 {:.2} ms，最慢 {:.2} ms，共 {} 帧\n",
             self.steps_rows, self.steps_median_ms, self.steps_worst_ms, self.steps_frames,
         ));
@@ -757,19 +757,23 @@ pub fn sublibrary(
         };
     };
 
-    // **摊开那张步骤表滚一趟**：计划整份在界面状态里，而一帧画几行只跟视口有多高有关
+    // **计划那几步那个框里滚一趟**：计划整份在界面状态里，而一帧画几行只跟框有多高有关
     // （票 `parking-3/08` 去掉了那个 2,000 条的上限）。量的正是这一条——每帧真的画了
     // 几行，连带每帧的 CPU 代价。
     //
-    // **这一趟单独画那张表，不走 [`App::ui`]**，与这个模块别处的规矩不一样，理由是
-    // 真机量级上量出来的会是别的东西：一份两万步的计划，卡头、容量条、四行汇总与
-    // 「要说出口的怪事」那几段加起来就比一屏高，于是那张表**整个落在视口之外、一行都
+    // **这一趟单独画那个框，不走 [`App::ui`]**，与这个模块别处的规矩不一样，理由是
+    // 真机量级上量出来的会是别的东西：一份两万步的计划，卡头、容量条、汇总与
+    // 「要说出口的怪事」那几段加起来就比一屏高，于是那个框**整个落在视口之外、一行都
     // 不画**（实测：300 个变体那份画 5 行，默认那份画 0 行）。那时「每帧多少毫秒」量的
-    // 是这一屏别的东西多贵，而这一条要量的是**翻行本身**。屏上那张表画的是同一个
-    // [`steps_table`](crate::sublibrary::steps_table)，一个字都不另写。
+    // 是这一屏别的东西多贵，而这一条要量的是**翻行本身**。屏上那个框画的是同一个
+    // [`step_list`](crate::sublibrary::step_list)，一个字都不另写。
     let ctx = headless::context();
     let plan = &prepared.plan;
-    let travel = (plan.steps.len() as f32 * row_pitch() - VIEWPORT[1]).max(0.0);
+    // 框里能滚多远由那个框自己答（`step_list_max_offset`）；它要量字体，字体头一帧才装上：先空跑一帧问它。
+    let mut travel = 0.0;
+    headless::frame(&ctx, headless::input(), |ui| {
+        travel = crate::sublibrary::step_list_max_offset(ui.ctx(), plan);
+    });
     let mut steps_rows = 0;
     let mut costs: Vec<f64> = Vec::with_capacity(STEP_FRAMES as usize);
     for frame in 0..STEP_FRAMES {
@@ -781,7 +785,7 @@ pub fn sublibrary(
         let mut drawn = 0;
         let started = Instant::now();
         let output = headless::frame(&ctx, headless::input(), |ui| {
-            drawn = crate::sublibrary::steps_table(ui, plan, Some(at));
+            drawn = crate::sublibrary::step_list(ui, plan, Some(at));
         });
         let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
         let elapsed = started.elapsed().as_secs_f64() * 1000.0;
@@ -916,7 +920,7 @@ fn probe(catalog: &Catalog, label: &str, query: &WorkQuery) -> PagingProbe {
 
 /// 落一次整批收藏，量它。**只该在合成数据上调**，理由见 [`FavoriteCost`]。
 ///
-/// **筛选先清掉**：挂单 `Q119` 量的正是「**全选 46,483 行** → ★ 收藏」，
+/// **筛选先清掉**：挂单 `Q119` 量的正是「**全选**（真库上四万多行，见台账 `docs/library-facts.md`）→ ★ 收藏」，
 /// 而上一步把表筛成了最大的那个平台。不清的话这个数只是那一个平台的。
 ///
 /// **它不许静静地印出一个数**（这个仓库那条「不静默结束」）：一行都没勾、库读不动、

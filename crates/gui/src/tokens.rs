@@ -519,12 +519,22 @@ pub struct Space {
     pub health_tile_padding: [f32; 2],
     /// 一格里标题、数、小字之间（设计稿 `.htile` 的 `gap`）。
     pub health_tile_gap: f32,
-    /// 体检明细一行的内边距：`[上下, 左右]`（设计稿 `.lst>div`）。
-    pub health_list_padding: [f32; 2],
+    /// 列表框一行的内边距：`[上下, 左右]`（设计稿 `.lst>div`）。库体检明细与差量预览异常那一块里的条目共用。
+    pub list_padding: [f32; 2],
     /// 差量账一格的内边距（上下, 左右）。
     pub diff_tile_padding: [f32; 2],
     /// 差量账格与格之间。
     pub diff_gap: f32,
+    /// 差量预览计划那几步一行的内边距：`[上下, 左右]`（设计稿 `.steplist div`）。
+    pub step_list_padding: [f32; 2],
+    /// 那一行动作词、路径、大小几格之间（设计稿 `.steplist div` 的 `gap`）。
+    pub step_list_gap: f32,
+    /// 差量预览异常那一块头上那一排标签左右留白（设计稿 `.anom .dtabs`）。
+    pub anomaly_tabs_padding: f32,
+    /// 异常那一块正文的内边距：`[上下, 左右]`（设计稿 `.anom .ab`）。
+    pub anomaly_body_padding: [f32; 2],
+    /// 正文里一样与一样之间（设计稿 `.anom .ab` 的 `gap`）。
+    pub anomaly_body_gap: f32,
     /// 侧边详情媒体格之间。
     pub thumb_gap: f32,
     /// 侧边详情头上封面与字之间。
@@ -695,6 +705,12 @@ pub struct Space {
     pub tab_padding: f32,
     /// 面名与后头那个数之间（设计稿 `.tabs button small`）。
     pub tab_count_gap: f32,
+    /// 弹层与差量预览异常那一块的下划线标签之间（设计稿 `.dtabs` 的 `gap`）。
+    pub dialog_tabs_gap: f32,
+    /// 那一排一格左右留白（设计稿 `.dtabs button`）。
+    pub dialog_tab_padding: f32,
+    /// 那一格名字与后头那个数之间（设计稿 `.dtabs button small`）。
+    pub dialog_tab_count_gap: f32,
     /// 作品详情页一面的正文内边距：`[上, 左右, 下]`（设计稿 `.tabp`）。
     pub tab_panel_padding: [f32; 3],
     /// 作品详情页一张卡与下一张之间（设计稿 `.vcard` 的 `margin-bottom`）。
@@ -1065,6 +1081,12 @@ pub struct Layout {
     pub tab_height: f32,
     /// 选中那一面底下那道强调色线的粗（设计稿 `.tabs button[aria-selected]`）。
     pub tab_underline: f32,
+    /// 弹层与差量预览异常那一块的下划线标签一格的高（设计稿 `.dtabs button`）。
+    pub dialog_tab_height: f32,
+    /// 差量预览计划那几步那个框最高多高，超过就在框里滚（设计稿 `.steplist` 的 `max-height`）。
+    pub step_list_max_height: f32,
+    /// 那一行动作词那一格的宽（设计稿 `.steplist div` 的 `grid-template-columns` 头一列）。
+    pub step_list_op_width: f32,
     /// 作品详情页元数据那一面一行里 `[名那一列, 动作那一列]` 的宽（设计稿 `.mrow`）。
     pub meta_row_columns: [f32; 2],
     /// 来源标签的高（设计稿 `.srcb`）。
@@ -1093,6 +1115,28 @@ pub struct Layout {
     pub hero_card_title_rows: usize,
     /// 合并向导第一步每一行左边封面那一格的宽，高按 `card_cover_ratio` 折（设计稿 `.mwit .mc`）。
     pub merge_cover_width: f32,
+    /// 整张是一颗按钮的选择卡的内边距 `[上下, 左右]`（设计稿 `.mwit` 与 `.asmode` 的 `padding`）。
+    pub choice_card_padding: [f32; 2],
+    /// 合并向导第一步那一张卡里几样之间（设计稿 `.mwit` 的 `gap`）。
+    pub merge_card_gap: f32,
+    /// 「移出此作品」那两档一张卡里圆点与字之间（设计稿 `.asmode` 的 `gap`）。
+    pub mode_card_gap: f32,
+    /// 「移出此作品」那一档底下的输入框与说明缩进多少（设计稿 `DLG.split` 里 `.field` 的 `padding-left`）。
+    pub mode_indent: f32,
+    /// 搜索结果那一框最高多高，再多框里滚（设计稿 `.srch` 的 `max-height`）。
+    pub search_list_max: f32,
+    /// 搜索结果一行的内边距 `[上下, 左右]`（设计稿 `.srch button` 的 `padding`）。
+    pub search_row_padding: [f32; 2],
+    /// 搜索结果一行里几样之间（设计稿 `.srch button` 的 `gap`）。
+    pub search_row_gap: f32,
+    /// 合并向导第二步平台组头一排的内边距 `[上下, 左右]`（设计稿 `.vgrp>.row:first-child`）。
+    pub variant_group_head_padding: [f32; 2],
+    /// 合并向导第二步一行变体的内边距 `[上下, 左右]`（设计稿 `.vrow` 的 `padding`）。
+    pub variant_row_padding: [f32; 2],
+    /// 那一行里几列之间（设计稿 `.vrow` 的 `gap`）。
+    pub variant_row_gap: f32,
+    /// 那一行头一列勾选框那一格的宽（设计稿 `.vrow` 的 `grid-template-columns` 头一格）。
+    pub variant_check_column: f32,
     /// 概览里媒体那一块摆几格（设计稿 `.mstrip`）。
     pub media_strip_columns: usize,
     /// 概览左右两栏的比例：`[左, 右]`（设计稿 `.ov`）。
@@ -1143,6 +1187,10 @@ pub struct Mix {
     pub drill_tint: f32,
     /// 疑似同一作品那张建议卡底色里调进几成强调色（设计稿 `.sugg` 的 `color-mix`）。
     pub suspicion_tint: f32,
+    /// 按不动、整格调淡的那一行带说明的勾选淡到几成（设计稿合并向导第三步「也自动归入」那一格的 `opacity`）。
+    pub muted_option_opacity: f32,
+    /// 合并向导第二步取消勾选的那一行变体整行淡到几成（设计稿 `.vrow.off` 的 `opacity`）。
+    pub variant_off_opacity: f32,
 }
 
 /// 阴影：一种一格，**形状两套主题共用**，颜色是各主题里同名的那一格（`pop` → `pop-color`）。

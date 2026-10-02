@@ -2331,10 +2331,63 @@ fn 合并向导_确认合并_暗色() {
     拍合并向导("merge/step3-dark", Theme::Dark, 3);
 }
 
+/// **合并向导第一步带「建议一并合并」那一段**（设计稿 `renderMW` 的 `extra`，票 `gui-draws-the-rest-of-the-design/16`）：
+/// 浏览现场摆上那一对**疑似同一作品**（[`浏览现场_`] 的 `疑似`），勾上其中一边（`Pocket Monsters - Aka`）与一个 GBA 的作品
+/// ——另一边（[`疑似的作品`]）不在向导里，第一步就把它连核心库给的头一条理由摆出来。与稿上那一张同一个摆法
+/// （精灵宝可梦 红 + 火焰之纹章，建议「口袋妖怪 红」）。没挂媒体池：两行左边都画平台代号那一格。
+#[track_caller]
+fn 拍建议一并合并(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 浏览现场 { mut app, 目录 } = 浏览现场_(false, true);
+    {
+        let 行: Vec<romcat_core::catalog::browse::WorkAnchor> = {
+            let (_, site) = app.browse_and_site();
+            ["Pocket Monsters - Aka (Japan)", "Gyakuten Saiban (Japan)"]
+                .iter()
+                .map(|名字| {
+                    romcat_core::catalog::browse::WorkAnchor::Work(
+                        site.catalog
+                            .work_named(名字)
+                            .expect("读得动")
+                            .expect("作品表里有它"),
+                    )
+                })
+                .collect()
+        };
+        let (browse, _) = app.browse_and_site();
+        for anchor in 行 {
+            browse.picked_mut().toggle(&anchor);
+        }
+    }
+    let mut harness = 开一个(主题, move |ui| app.ui(ui));
+    按(&mut harness, romcat_gui::browse::merge::MERGE);
+    assert_eq!(
+        正好画着的每一处(harness.output(), "建议一并合并").len(),
+        1,
+        "{名字}：第一步该有「建议一并合并」那一段"
+    );
+    拍下(harness, 名字);
+    drop(目录);
+}
+
+#[test]
+fn 合并向导_建议一并合并_浅色() {
+    拍建议一并合并("merge/suggest-light", Theme::Light);
+}
+
+#[test]
+fn 合并向导_建议一并合并_暗色() {
+    拍建议一并合并("merge/suggest-dark", Theme::Dark);
+}
+
 /// **移出此作品**那一层：打开作品详情页停在「变体与文件」，按头一张变体卡上那颗
 /// 「移出此作品…」（[`按`] 点的是**最后一处**，也就是最底下那张卡的那一颗）。
+///
+/// `移入` 为真时再按「移入另一个作品」那一档（设计稿 `st.mode='move'`）：候选那一框没搜时列五个、同平台（SFC）的排前。
 #[track_caller]
-fn 拍移出此作品(名字: &str, 主题: Theme) {
+fn 拍移出此作品(名字: &str, 主题: Theme, 移入: bool) {
     if 该跳过(名字) {
         return;
     }
@@ -2355,18 +2408,36 @@ fn 拍移出此作品(名字: &str, 主题: Theme) {
     }
     let mut harness = 开一个(主题, move |ui| app.ui(ui));
     按(&mut harness, romcat_gui::browse::merge::SPLIT);
+    if 移入 {
+        按(&mut harness, "移入另一个作品");
+        assert!(
+            !正好画着的每一处(harness.output(), "Seiken Densetsu 2 (Japan)").is_empty()
+                || !正好画着的每一处(harness.output(), "圣剑传说 2").is_empty(),
+            "{名字}：候选那一框该列出与它同平台的那个作品"
+        );
+    }
     拍下(harness, 名字);
     drop(目录);
 }
 
 #[test]
 fn 移出此作品弹层_浅色() {
-    拍移出此作品("merge/split-light", Theme::Light);
+    拍移出此作品("merge/split-light", Theme::Light, false);
 }
 
 #[test]
 fn 移出此作品弹层_暗色() {
-    拍移出此作品("merge/split-dark", Theme::Dark);
+    拍移出此作品("merge/split-dark", Theme::Dark, false);
+}
+
+#[test]
+fn 移出此作品弹层_移入另一个作品_浅色() {
+    拍移出此作品("merge/split-move-light", Theme::Light, true);
+}
+
+#[test]
+fn 移出此作品弹层_移入另一个作品_暗色() {
+    拍移出此作品("merge/split-move-dark", Theme::Dark, true);
 }
 
 // ——— 库 ———
@@ -3182,7 +3253,7 @@ fn 库屏_移除根弹层_暗色() {
 /// 子库那几张的现场：几个临时目录（跟着窗口一起活到拍完）与窗口本身。
 struct 子库现场 {
     主库: TempDir,
-    /// 第二个**根**（主库是一组根）：只有差量异常那两对要它——两个根里同一条相对路径
+    /// 第二个**根**（主库是一组根）：只有差量异常那几对要它——两个根里同一条相对路径
     /// 剥掉根名之后落在卡上同一个文件上，那正是**落点撞车**。别的几张摆 `None`。
     _另一块盘: Option<TempDir>,
     _工作区: TempDir,
@@ -3372,7 +3443,7 @@ impl 子库现场 {
         screen.open(site, name);
     }
 
-    /// 排一趟差量预览，等它收回来；跟着把「排它用了 N ms」钉死。
+    /// 排一趟差量预览，等它收回来。
     fn 排一遍差量(&mut self) {
         {
             let (screen, site, tasks) = self.app.sublibrary_site_and_tasks();
@@ -3390,7 +3461,6 @@ impl 子库现场 {
             "差量没排出来：{:?}",
             screen.error(),
         );
-        screen.pin_prepare_ms(排它用了多少毫秒);
     }
 
     /// 按一下「算一遍容量」，等它收回来。内存里的库就地跑完，认领在 `App::poll_tasks` 里。
@@ -3833,18 +3903,14 @@ fn 子库_手动例外空态_暗色() {
 // 东西。与超限那一对同一个处置（挂单 `Q895`）：画面放高，整张卡一次拍全，不滚——滚到底拍的话
 // 图顶上那一行只露出下半截，字被切掉一半，看着像画坏了（票 20 第二段对稿时被打回过）。
 
-/// 差量异常那两对拍的是哪一台。
+/// 差量异常那几对拍的是哪一台。
 const 摆着异常的那一台: &str = "RG35XX Plus";
 
-/// 差量账旁边那句「排它用了 N ms」在基线里定死成这个数（`sublibrary::Screen::pin_prepare_ms`）。
-/// 照实画的话一趟一个样——与例外那张表上的时刻同一个用处。
-const 排它用了多少毫秒: f64 = 343.0;
-
-/// 差量异常那两对的画面：宽照旧，高 1180——整张卡连差量账、步骤、异常那一块与底下的
+/// 差量异常那几对的画面：宽照旧，高 1180——整张卡连差量账、步骤、异常那一块与底下的
 /// 「同步」都要拍全（[`搭一扇`]，模块文档「视口定死」那一节的第二处例外）。
 const 差量那几对的画面: [f32; 2] = [1280.0, 1180.0];
 
-/// **差量异常那两对的现场**：一台在位的设备，库是**两个根**，清单里记着两条，卡上被人动过手脚。
+/// **差量异常那几对的现场**：一台在位的设备，库是**两个根**，清单里记着两条，卡上被人动过手脚。
 ///
 /// 四类异常在这一屏上各有一条：
 ///
@@ -3901,10 +3967,10 @@ fn 拍差量异常(名字: &str, 主题: Theme, 摆在哪一栏: romcat_gui::sub
     let harness = 开一扇(主题, 差量那几对的画面, move |ui| {
         现场.app.ui(ui);
     });
-    // **「看得全」写成断言**：五个栏名与底下那颗「同步」都整个在画面里。哪天卡片长高、
+    // **「看得全」写成断言**：异常那一排标签（头一格与末一格）与底下那颗「同步」都整个在画面里。哪天卡片长高、
     // 异常那一块被挤出画面，这里当场红，不会悄悄拍一张截掉半块的基线。
     let 视口 = egui::Rect::from_min_size(egui::Pos2::ZERO, 差量那几对的画面.into());
-    for 该在画面里 in ["异常", "同步"] {
+    for 该在画面里 in ["设备上缺失", "元数据读不到", "同步"] {
         let 在 = 正好画着的每一处(harness.output(), 该在画面里);
         assert!(
             在.iter().any(|rect| 视口.contains_rect(*rect)),
@@ -3965,6 +4031,24 @@ fn 子库_差量异常_被修改过_暗色() {
         "sublibrary/anomalies-changed-dark",
         Theme::Dark,
         romcat_gui::sublibrary::Anomaly::Surprise(romcat_core::sync::SurpriseKind::Changed),
+    );
+}
+
+#[test]
+fn 子库_差量异常_目标位置被占用_浅色() {
+    拍差量异常(
+        "sublibrary/anomalies-occupied-light",
+        Theme::Light,
+        romcat_gui::sublibrary::Anomaly::Surprise(romcat_core::sync::SurpriseKind::Occupied),
+    );
+}
+
+#[test]
+fn 子库_差量异常_目标位置被占用_暗色() {
+    拍差量异常(
+        "sublibrary/anomalies-occupied-dark",
+        Theme::Dark,
+        romcat_gui::sublibrary::Anomaly::Surprise(romcat_core::sync::SurpriseKind::Occupied),
     );
 }
 
@@ -4249,11 +4333,14 @@ fn 停在逐条(app: &mut App) {
     app.queue_and_site().0.show_multiple();
 }
 
-/// 裁决记录那一块要有东西可画：整批通过最小的那一批能整批通过的、整批拒绝最小的那一批没有候选的，再撤掉头一批——
-/// 抽屉里在册的与撤过的各一行。走的是界面上按下去的那几条路（`pass` / `reject` / `commit` / `undo`）。
+/// 裁决记录那一块要有东西可画：先在另一批能整批通过、又切得出好几项的里**就地**通过头一项（那一行的副行接着
+/// 作用范围，票 `gui-draws-the-rest-of-the-design/13`），再整批通过最小的那一批能整批通过的、整批拒绝最小的那一批
+/// 没有候选的，最后撤掉整批通过的那一批——抽屉里就地落下的、在册的与撤过的各一行。走的是界面上按下去的那几条路
+/// （`pass` / `reject` / `commit` / `undo`）。挑哪一批、哪个轴由数据当场定（切得出不止一项的头一个轴、头一项），
+/// 合成数据是定值，挑出来的那一组就是定值。
 #[cfg(feature = "demo")]
-fn 落两批撤一批(app: &mut App) {
-    use romcat_core::triage::{Fanout, Scope};
+fn 落三批撤一批(app: &mut App) {
+    use romcat_core::triage::{Axis, Fanout, Scope};
 
     let batches = app.queue().queue().batches().to_vec();
     let 能过 = batches
@@ -4268,7 +4355,21 @@ fn 落两批撤一批(app: &mut App) {
         .min_by_key(|batch| batch.count)
         .cloned()
         .expect("合成数据里该有一批没有候选的");
+    let 就地那一组 = batches
+        .iter()
+        .filter(|batch| batch.passable() && batch.shape != 能过.shape)
+        .find_map(|batch| {
+            Axis::ALL.into_iter().find_map(|axis| {
+                let scope = Scope::whole(batch.shape.clone());
+                let rows = app.queue().queue().drill(&scope, axis).rows;
+                (rows.len() > 1).then(|| Scope::under(batch.shape.clone(), axis, &rows[0].label))
+            })
+        })
+        .expect("合成数据里该有另一批能整批通过、又切得出好几项的");
     let (screen, site) = app.queue_and_site();
+    screen.pass(site, &就地那一组);
+    screen.commit(site);
+    assert!(screen.error().is_none(), "{:?}", screen.error());
     screen.pass(site, &Scope::whole(能过.shape));
     screen.commit(site);
     let 头一批 = screen.applied().expect("整批通过该落下一批").batch;
@@ -4421,16 +4522,16 @@ fn 待确认_下钻_暗色() {
     );
 }
 
-/// 落两批、撤一批，点屏头那颗「裁决记录 1」（数的是还在册的）打开右边那块抽屉，再拍。
+/// 落三批、撤一批，点屏头那颗「裁决记录 2」（数的是还在册的）打开右边那块抽屉，再拍。
 #[cfg(feature = "demo")]
 fn 拍裁决记录(名字: &str, 主题: Theme, 临时目录名: &str) {
     if 该跳过(名字) {
         return;
     }
     let mut app = 待确认屏(临时目录名);
-    落两批撤一批(&mut app);
+    落三批撤一批(&mut app);
     let mut harness = 开一个(主题, move |ui| app.ui(ui));
-    按(&mut harness, "裁决记录 1");
+    按(&mut harness, "裁决记录 2");
     拍下(harness, 名字);
 }
 

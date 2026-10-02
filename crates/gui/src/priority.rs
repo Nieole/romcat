@@ -15,6 +15,7 @@
 //! | 「已调整」 | [`Priorities::differs_in`]，对着内置那一份 |
 //! | 保存后哪几处显示值会变 | [`priority::shifts`] |
 //! | 保存 | [`Priorities::save`] 写到 [`workspace::priorities_path`]——读的那一侧拿的是同一个路径 |
+//! | 草稿就是内置那一份时保存 | 删掉 [`workspace::priorities_path`] 那一份：读的那一侧没有它就用内置的 |
 //!
 //! **这一层里一行「按优先级挑值」的代码都没有**：屏上「由谁的什么改为谁的什么」那几句，
 //! 是核心库交出来的。
@@ -24,6 +25,10 @@
 //! 刮削结果按「锚点 × 字段 × 源」三元组并存，换一份表只是换一次排序：**不排任何刮削任务、
 //! 不重采**。读这份表的那几条路（刮削、整理标题、导出、同步）每一趟开头读一次，下一趟就是
 //! 新的；浏览屏手上缓着的那一份由主窗口换掉（[`Editor::take_saved`]）。
+//!
+//! **草稿就是内置那一份时，保存是删掉工作目录那份**（挂单 `Q785`），不写一份与内置相同的表：
+//! 那样一份表把今天的内置顺序冻在工作目录里，日后内置那份改了，这个人永远看不见。
+//! 所以「工作目录里有一份、草稿等于内置」也算有东西可存——哪怕那份的内容本来就与内置一样。
 
 use std::path::PathBuf;
 
@@ -63,6 +68,10 @@ pub const TITLE_REACH: &str = "作品的显示标题由标题集合按语言、�
 
 /// 保存不排活那一句。
 pub const NO_RESCRAPE: &str = "保存只换排序：不排任何刮削任务，不重采。";
+
+/// 草稿就是内置那一份、工作目录里又有一份时，「保存后的变化」底下那句：这一下存的是**删掉**。
+pub const REMOVES: &str = "保存会删掉工作目录里那份 priorities.toml，回到内置那一份：\
+     日后内置的顺序更新了，这里跟着走。";
 
 /// 保存成了之后刮削面板上那句回话。
 pub const SAVED: &str = "已保存数据源优先级：立即生效，不需要重新刮削。";
@@ -115,6 +124,8 @@ pub struct Editor {
     current: Priorities,
     /// 工作目录里那份读不动。
     unreadable: bool,
+    /// 打开时工作目录里**有**那一份（读不读得动都算）。草稿等于内置时，保存就是删掉它。
+    on_disk: bool,
     /// 改到一半的那一份。
     draft: Priorities,
     /// 正在看哪个字段。
@@ -141,6 +152,7 @@ impl Editor {
             draft: builtin.clone(),
             builtin,
             unreadable: false,
+            on_disk: false,
             field: Field::Title.label().to_string(),
             platform: None,
             counted: None,
@@ -154,6 +166,7 @@ impl Editor {
     /// 那份读不动时照样打开，摆的是内置那一份，读不动那句话写在屏上——按「保存」会把
     /// 坏的那份换掉。不打开的话，人在界面上没有任何办法把它修好（挂单 `Q787`）。
     pub fn open(&mut self) {
+        self.on_disk = workspace::priorities_path(&self.workspace).exists();
         match romcat_core::sync::prepare::priorities(None, &self.workspace) {
             Ok(current) => {
                 self.current = current;
@@ -164,7 +177,8 @@ impl Editor {
                 self.current = self.builtin.clone();
                 self.unreadable = true;
                 self.error = Some(format!(
-                    "{error}。下面摆的是内置那一份；按「保存」会把工作目录里那份换掉。"
+                    "{error}。下面摆的是内置那一份；按「保存」会把工作目录里那份处理掉：\
+                     原样保存就是删掉它、回到内置那一份，改过再存就换成改过的那一份。"
                 ));
             }
         }
@@ -264,31 +278,56 @@ impl Editor {
         self.draft.differs_in(&self.builtin, field)
     }
 
-    /// **恢复默认**：回到内置那一份。按「保存」之前工作目录里什么都不变。
+    /// **恢复默认**：回到内置那一份。按「保存」之前工作目录里什么都不变；按了是删掉那一份（[`Self::save`]）。
     pub fn reset(&mut self) {
         self.draft = self.builtin.clone();
     }
 
-    /// 按得下「保存」没有：改过了，或者工作目录里那份读不动、要换掉。
+    /// 按得下「保存」没有：改过了，或者工作目录里那份读不动、要换掉，或者草稿就是内置那一份
+    /// 而工作目录里还留着一份、要删掉（[`Self::removes`]）。
     #[must_use]
     pub fn can_save(&self) -> bool {
-        self.draft != self.current || self.unreadable
+        self.draft != self.current || self.unreadable || self.removes()
+    }
+
+    /// 这会儿按「保存」是**删掉**工作目录那一份：草稿就是内置那一份，而工作目录里有一份。
+    #[must_use]
+    pub fn removes(&self) -> bool {
+        self.on_disk && self.at_builtin()
+    }
+
+    /// 草稿就是内置那一份：「恢复默认」按不动，保存是删掉工作目录那份而不是写一份。
+    fn at_builtin(&self) -> bool {
+        self.draft == self.builtin
     }
 
     /// **保存**：写到工作目录的 `priorities.toml`，关上这一层，留一份等主窗口取走。
+    /// 草稿就是内置那一份时**删掉**那份文件（[`Self::removes`]），不写一份与内置相同的。
     ///
-    /// 只写那一份文件：不排任何刮削任务、不重采。
+    /// 只动那一份文件：不排任何刮削任务、不重采。
     pub fn save(&mut self) {
         let path = workspace::priorities_path(&self.workspace);
-        match self.draft.save(&path) {
+        let done = if self.at_builtin() {
+            match std::fs::remove_file(&path) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(format!(
+                    "删不掉 {}：{error}",
+                    romcat_core::path::display(&path)
+                )),
+                _ => Ok(()),
+            }
+        } else {
+            self.draft.save(&path).map_err(|error| error.to_string())
+        };
+        match done {
             Ok(()) => {
+                self.on_disk = !self.at_builtin();
                 self.current = self.draft.clone();
                 self.unreadable = false;
                 self.error = None;
                 self.saved = Some(self.draft.clone());
                 self.open = false;
             }
-            Err(error) => self.error = Some(error.to_string()),
+            Err(error) => self.error = Some(error),
         }
     }
 
@@ -342,14 +381,22 @@ impl Editor {
         let footer = Footer::new(Button::new("取消", Pressed::Cancel))
             .button(
                 Button::new("恢复默认", Pressed::Reset)
-                    .enabled(self.draft != self.builtin)
-                    .hover("回到内置那一份。按「保存」之前工作目录里什么都不变。"),
+                    .enabled(!self.at_builtin())
+                    .hover(
+                        "回到内置那一份。工作目录里有那份 priorities.toml 的，按「保存」才删掉它；\
+                         在那之前什么都不变。",
+                    ),
             )
             .button(
                 Button::new("保存", Pressed::Save)
                     .primary()
                     .enabled(self.can_save())
-                    .hover("写到工作目录的 priorities.toml，立即生效。不排任何刮削任务，不重采。"),
+                    .hover(if self.removes() {
+                        format!("{REMOVES}立即生效。不排任何刮削任务，不重采。")
+                    } else {
+                        "写到工作目录的 priorities.toml，立即生效。不排任何刮削任务，不重采。"
+                            .to_string()
+                    }),
             );
         let shown = Dialog::new("数据源优先级", "数据源优先级", footer)
             .note(NOTE)
@@ -496,9 +543,14 @@ impl Editor {
         }
         ui.separator();
         ui.label(font::strong("保存后的变化"));
+        if self.removes() {
+            ui.weak(REMOVES);
+        }
         match &self.counted {
             _ if self.draft == self.current => {
-                ui.weak("还没改动。");
+                if !self.removes() {
+                    ui.weak("还没改动。");
+                }
             }
             None => {}
             Some(Counted {

@@ -28,6 +28,13 @@
 //! 的第一位（`priorities.toml` 的第一条规则、ADR-0001）；重采清采集记录时也**一条裁决
 //! 都不删**（`Catalog::clear_scraped`）。
 //!
+//! ## 排上就关，回执交给任务台
+//!
+//! 按下「开始刮削」，那一趟排上任务台，这一层**当场关上**（收挂单 `Q664`，与设计稿 `scr-go` 同一个动作）：
+//! 一趟刮削动辄跑上几分钟，弹层开着就挡着整屏。跑到哪儿、怎么收的场，去任务屏看——任务台历史本来就记着每一趟的
+//! **收场**，部分完成与失败连那半句说明一起（[`Ending::render`](romcat_core::task::Ending::render)）。这一层**不再画回执**：关上的弹层里画着的回执
+//! 没人看得见，下次摊开时又已经是上一趟的事了。
+//!
 //! ## 「有值了但我想换一个」不该按这个按钮
 //!
 //! 那是**优先级**的事：改一次排序、零成本、不重跑。面板上把这句话写出来，是因为
@@ -45,7 +52,7 @@ use romcat_core::scrape::estimate::{self, Estimate};
 use romcat_core::scrape::online::{self, Credentials, Limits, Net};
 use romcat_core::scrape::{self, Field, Gather, Options, Profile};
 use romcat_core::site::Site;
-use romcat_core::task::{Cutoff, Ending, Finished, Handle};
+use romcat_core::task::{Cutoff, Finished, Handle};
 use romcat_core::{verdict, workspace, zh};
 
 use crate::dialog::{Button, Dialog, Footer, Width};
@@ -60,6 +67,10 @@ pub const UNTOUCHED: &str = "裁决与你手工维护的元数据不会被动。
 /// 「有值了但我想换一个」该怎么办。
 pub const NOT_BY_RESCRAPE: &str =
     "「有值了但我想换一个」不该靠重采——那是优先级的事：改一次排序，零成本、不重跑。";
+
+/// 上一趟刮削还没跑完时又摊开这一层，内容区底下那句：「开始刮削」为什么按不动。
+pub const STILL_RUNNING: &str =
+    "上一趟刮削还在任务台上，跑完之前这儿排不了下一趟——进度去任务屏看。";
 
 /// 勾联网源时弹的那句提醒。**照 ADR-0007 的口径说**。
 pub const QUOTA_WARNING: &str = "\
@@ -128,7 +139,7 @@ pub struct Panel {
     counted: Option<Knobs>,
     /// 正在跑的那一趟的任务号。
     running: Option<u64>,
-    /// 上一次动作的回执。
+    /// 叠在上头的那一层（优先级）刚说的那句话：保存成了。刮削那一趟的回执不在这儿，在任务台上。
     notice: Option<String>,
     /// 上一次出的错。
     error: Option<String>,
@@ -296,7 +307,7 @@ impl Panel {
         self.error.as_deref()
     }
 
-    /// 上一次动作的回执。
+    /// 叠在上头的那一层刚说的那句话（优先级保存成了）。刮削那一趟的回执在任务台上，不在这儿。
     #[must_use]
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
@@ -306,6 +317,15 @@ impl Panel {
     #[must_use]
     pub fn running(&self) -> Option<u64> {
         self.running
+    }
+
+    /// 眼下排不了下一趟的理由：上一趟还在任务台上（挂单 `Q1538`）。没有就是 `None`。
+    ///
+    /// **守卫拒下时说的、屏上常驻的是这同一句**（ADR-0005「不禁按钮」那条的再修订：画灰的同时，唯一的入口
+    /// [`Self::start`] 拒下要带着理由，屏上常驻着那条理由，理由只有一处）。
+    #[must_use]
+    pub fn busy(&self) -> Option<&'static str> {
+        self.running.is_some().then_some(STILL_RUNNING)
     }
 
     /// 这一趟的选项。**估算与真跑收的是同一份**——两边各摆一份的话，
@@ -388,9 +408,13 @@ impl Panel {
     /// 分不出第二份，那时**就地跑完**——合成数据上这是几毫秒的事，与子库屏排差量预览
     /// 走的是同一条退路。
     ///
+    /// **排上就关上这一层**（收挂单 `Q664`）：跑到哪儿、怎么收的场去任务屏看。排不上（范围是空的、中立库读不动、
+    /// 联网源拿不到凭据）时这一层留着，那句话画在里头——人得在这儿改。
+    ///
     /// 界面上按「开始刮削」走的就是它，测试与实测拿它当那一下。
     pub fn start(&mut self, site: &mut Site, tasks: &mut Tasks) {
-        if self.running.is_some() {
+        if let Some(why) = self.busy() {
+            self.error = Some(why.to_string());
             return;
         }
         if self.scope.is_empty() {
@@ -445,9 +469,14 @@ impl Panel {
                 run(site, &workspace, &options, credentials, task)
             }),
         });
+        self.close();
     }
 
     /// 任务台交回来一趟跑完的活。**不是自己那一趟就放过去**，返回「认领了没有」。
+    ///
+    /// **认领只销号、作废那本账**，不写回执：怎么收的场任务台历史上记着（完成、已取消、部分完成连留下了什么、
+    /// 失败连哪一步为什么，[`Ending::render`](romcat_core::task::Ending::render)），这一层排上那一下就关了（收挂单 `Q664`）。产物里那份报告
+    /// 没有别处要——浏览屏重读一遍由主窗口在认领之后做。
     pub fn settle(&mut self, done: &Finished<Product>) -> bool {
         if self.running != Some(done.id) {
             return false;
@@ -455,37 +484,6 @@ impl Panel {
         self.running = None;
         // 跑完一趟，采集记录变了，那本账跟着作废——重算一遍，屏上那个数才对得上。
         self.counted = None;
-        match &done.ended {
-            Ending::Done(Product::Scraped(outcome))
-            | Ending::Halfway {
-                product: Product::Scraped(outcome),
-                ..
-            } => {
-                self.notice = Some(finished(outcome));
-                self.error = None;
-            }
-            // 别的屏排上去的活轮不到这儿——`running` 那道判断已经挡掉了。
-            Ending::Done(_) | Ending::Halfway { .. } => {}
-            // **停下来的地方是干净的，就得这么说。**
-            //
-            // 刮削这条路上「被按停」有两个出口，而**落到这一档的只剩前一个**：
-            // 走不到 `scrape::run` 就被 `?` 出来的那一趟（`run` 里那四处 `task.step`），
-            // 它一个锚点都还没采。留下了东西的那个出口报了「停在半路」，走上面
-            // `Ending::Halfway` 那一支。所以这儿**不许说「已经采到的那些留在中立库里」**
-            // ——那一趟什么都没采，那句话是骗人的（词表「收场」：这一档是干净的、
-            // 可以当没跑过）。
-            Ending::Stopped => {
-                self.notice = Some(format!(
-                    "刮削{}。这一趟还没开始采——中立库与媒体池一个字节都没动，\
-                     再排一次就是。",
-                    done.ended.render(),
-                ));
-            }
-            // **不静默结束**：哪一步、为什么，两样都说出来。
-            Ending::Failed { .. } => {
-                self.error = Some(format!("刮削{}", done.ended.render()));
-            }
-        }
         true
     }
 
@@ -517,14 +515,14 @@ impl Panel {
             // **账算不出来就不许按。** 屏上写着「这本账算不出来」而按钮照旧按得下去的话，
             // 勾了联网源就是在零估算下拿账号与 IP 发几千个请求——那正是这块面板要防的
             // 那一件事（ADR-0007）。
-            let ready = self.running.is_none() && !self.scope.is_empty() && self.estimate.is_some();
+            let ready = self.busy().is_none() && !self.scope.is_empty() && self.estimate.is_some();
             Footer::new(Button::new("取消", Pressed::Close)).button(
                 Button::new("开始刮削", Pressed::Start)
                     .primary()
                     .enabled(ready)
                     .hover(
-                        "排到任务台上跑：按下之后按「取消」或 Esc 收起这一层，\
-                         浏览、筛选、看详情照常，那一趟接着跑。\
+                        "排到任务台上跑：按下就收起这一层，进度与收场去任务屏看；\
+                         浏览、筛选、看详情照常。\
                          底下那本账算不出来时按不动——不知道要发多少请求就不该发。",
                     ),
             )
@@ -562,7 +560,7 @@ impl Panel {
         }
     }
 
-    /// 内容区：三列旋钮、底下那本账、按下去之后的回话。
+    /// 内容区：三列旋钮、底下那本账，外加叠在上头那一层的回话与排不上的那句为什么。
     fn knobs_ui(&mut self, ui: &mut egui::Ui) {
         // **三列等宽**（`Ui::columns`）。不定宽的话，头一列里那句长话照整块内容区的宽度排，
         // 后两列只剩一条缝：「采法」那一列的字一个一行地竖着排下去，把「不该靠重采」那句与
@@ -574,8 +572,12 @@ impl Panel {
         });
         ui.separator();
         self.account_ui(ui);
-        if self.running.is_some() {
-            ui.weak("这一趟在任务屏里跑着。");
+        // 排上就关了这一层，所以这句只在**上一趟还没跑完时又摊开**才看得见：说清「开始刮削」为什么按不动。
+        // 守卫拒下时记进 `error` 的也是这一句，底下那一处已经画了就不再画一遍。
+        if let Some(why) = self.busy()
+            && self.error.as_deref() != Some(why)
+        {
+            ui.weak(why);
         }
         if let Some(notice) = &self.notice {
             ui.weak(notice);
@@ -636,11 +638,15 @@ impl Panel {
     }
 
     /// **采法 · 跑多久。**
+    ///
+    /// 两颗单选照稿各是两行（拿主意的人 2026-10-01 裁）：名字，底下一行小字。小字取核心库 [`Gather::why`]
+    /// 那一句，不抄稿上那两句——那一句与命令行 `--refresh` 说的是同一件事。
     fn sweep_ui(&mut self, ui: &mut egui::Ui) {
         ui.label(font::strong("采法 · 跑多久"));
         for sweep in Gather::all() {
-            let 那一档 = format!("{}（{}）", sweep.label(), sweep.why());
-            look::radio_value(ui, &mut self.sweep, sweep, 那一档);
+            if look::radio_option(ui, self.sweep == sweep, sweep.label(), sweep.why()).clicked() {
+                self.set_sweep(sweep);
+            }
         }
         ui.weak(NOT_BY_RESCRAPE).on_hover_text(
             "每个源采到的值各记一条、并存，没有覆盖这回事。\
@@ -747,8 +753,12 @@ pub fn summary(account: &Estimate) -> String {
 /// 这一趟没走完的话，**留下了什么**——[`Handle::halfway`] 要的就是这一句。
 ///
 /// 走完了就交 `None`：那一趟记成「完成」。**收手的理由不改变这一档是什么**（词表
-/// 「停在半路」）：人按的「停下」（`interrupted`）是一种，联网源自己收的手
+/// 「部分完成」）：人按的「停下」（`interrupted`）是一种，联网源自己收的手
 /// （配额、凭据、网断了）是另一种，两种留下的都是「下一趟接着来」的东西。
+///
+/// **联网源自己收的手，这一句里说为什么**（[`online::Halt::describe`]）：刮削弹层排上就关、回执交给任务台
+/// （收挂单 `Q664`），任务台历史上「部分完成」后头那半句就是这一句——配额超限是硬停、明天再来（ADR-0007），
+/// 这件事人只能从这儿读到。
 fn left_behind(outcome: &scrape::Outcome) -> Option<String> {
     if !outcome.interrupted && outcome.halted.is_none() {
         return None;
@@ -758,11 +768,20 @@ fn left_behind(outcome: &scrape::Outcome) -> Option<String> {
     } else {
         "收手时"
     };
-    Some(format!(
+    let mut said = format!(
         "{那一下}已经采到的那些落进了中立库（这一趟收进媒体 {} 份），\
          再排一次从那儿接着采——不重做已经采完的部分。",
         thousands(outcome.new_blobs + outcome.deduped),
-    ))
+    );
+    if let Some(halt) = &outcome.halted {
+        said.push_str(&halted_by(halt));
+    }
+    Some(said)
+}
+
+/// 联网源自己收的手：为什么。任务台上「部分完成」那半句（[`left_behind`]）与库屏那句回执（[`finished`]）说的是这同一句。
+fn halted_by(halt: &online::Halt) -> String {
+    format!("这一趟是它自己收的手：{}", halt.describe())
 }
 
 /// 跑完那一趟排成一句回执。
@@ -770,8 +789,8 @@ fn left_behind(outcome: &scrape::Outcome) -> Option<String> {
 /// **没走完的那一趟不许说「跑完了」**：它交出来的产物长得跟跑完的那一份一模一样，
 /// 可它只走了一段（同 [`left_behind`]）。
 ///
-/// **工序段刮削那一行认领时说的也是这一句**（`crate::stages::Section::settle`）：同一个
-/// 函数交出来的产物，两处各折一句的话迟早差着字。
+/// **工序段刮削那一行认领时说的就是这一句**（`crate::stages::Section::settle`）。刮削弹层排的那一趟不说它：
+/// 那一层排上就关，收场在任务台历史上（收挂单 `Q664`）。
 pub(crate) fn finished(outcome: &scrape::Outcome) -> String {
     // **这一句得与那一档对得上。** 走到这儿又没走完的，任务台记的都是「部分完成」
     // （`left_behind` 报了那一句）——起头写「已取消」的话，屏上这一句与任务屏历史
@@ -796,7 +815,8 @@ pub(crate) fn finished(outcome: &scrape::Outcome) -> String {
         ));
     }
     if let Some(halt) = &outcome.halted {
-        out.push_str(&format!(" 这一趟是它自己收的手：{}", halt.describe()));
+        out.push(' ');
+        out.push_str(&halted_by(halt));
     }
     if outcome.interrupted {
         out.push_str(
@@ -1007,6 +1027,32 @@ mod tests {
         assert!(!回执.contains("跑完了"), "按停的那一趟说成了跑完了：{回执}");
         assert!(回执.starts_with("刮削部分完成"), "{回执}");
         assert!(回执.contains("被你按停的"), "说不出是谁收的手：{回执}");
+    }
+
+    #[test]
+    fn 联网源自己收的手_任务台上那一句说得出为什么收手() {
+        // 刮削弹层排上就关，回执交给任务台（收挂单 `Q664`）：任务台历史上「部分完成」后头那半句就是
+        // `left_behind` 这一句。为什么收的手（配额超限是硬停、明天再来，ADR-0007）从前只写在弹层里那份回执上，
+        // 回执不画了，这一句里就得有。
+        let 收手的那一趟 = scrape::Outcome {
+            halted: Some(online::Halt::Quota {
+                source: "ScreenScraper".to_string(),
+                why: "当日未识别 ROM 配额超限（431）".to_string(),
+            }),
+            new_blobs: 3,
+            ..scrape::Outcome::default()
+        };
+        let 留下了 = left_behind(&收手的那一趟).expect("自己收了手就该说得出留下了什么");
+        let 为什么 = 收手的那一趟
+            .halted
+            .as_ref()
+            .map(online::Halt::describe)
+            .unwrap_or_default();
+        assert!(留下了.contains("落进了中立库"), "{留下了}");
+        assert!(
+            留下了.contains(&为什么),
+            "任务台上说不出为什么收的手：{留下了}"
+        );
     }
 
     #[test]

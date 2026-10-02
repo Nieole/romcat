@@ -200,6 +200,8 @@ pub struct Screen {
     manual_open: bool,
     /// 裁决记录里的时刻怎么画（[`RecordClock`]）：截图测试钉死「此刻」（[`Screen::set_clock`]）与落批时刻（[`Screen::pin_record_time`]）。
     record_clock: RecordClock,
+    /// 裁决记录里每一行排好的高（[`RecordRows`]）。册子重列、钟换了就作废，下一帧照新的重排。
+    record_rows: Option<RecordRows>,
     /// 裁决记录里那两颗按钮上一次的回话：撤不掉、放不回去时核心库那句话。
     ///
     /// 与 `error` 分开存，是因为两处**画在不同的地方、清在不同的时刻**：那句话要画在按下去
@@ -360,6 +362,7 @@ impl Screen {
             filter_open: false,
             manual_open: false,
             record_clock: RecordClock::default(),
+            record_rows: None,
             records_refusal: None,
             not_run: 0,
             matches: None,
@@ -376,6 +379,7 @@ impl Screen {
     /// 换一个画时刻用的钟（[`Clock`]）：截图测试钉死此刻与偏移，截图里才没有当前时间。
     pub fn set_clock(&mut self, clock: Clock) {
         self.record_clock.clock = clock;
+        self.record_rows = None;
     }
 
     /// 截图测试用：裁决记录里每一批落下（撤过的撤下）的时刻一律画成 `at`（UNIX 纪元起的秒）。
@@ -384,6 +388,7 @@ impl Screen {
     /// 同一个用处。真窗口那一路不调它。
     pub fn pin_record_time(&mut self, at: i64) {
         self.record_clock.pinned = Some(at);
+        self.record_rows = None;
     }
 
     /// 打开「手工指定…」那一层弹层。界面上点那颗按钮走的就是它，实测与测试拿它当那一下。
@@ -789,6 +794,7 @@ impl Screen {
             Ok(records) => self.records = records,
             Err(error) => self.error = Some(format!("沉淀库读不动：{error}")),
         }
+        self.record_rows = None;
         // **哪几部分裁过、撤没撤，都以沉淀库为准**：照这本册子重折一遍。撤掉的那一批对应的那一部分
         // 当场作废——那一项重新点得动，细分方式跟着解开；上一个窗口落下的、命令行撤的也都认。
         self.parts.sync(&self.records);
@@ -802,11 +808,15 @@ impl Screen {
     /// `Q625`、`Q661`）。**不是模态**，也就不走 [`dialog`]：开着的时候照样在队列上裁、撤了看队列变，逐条流的键盘照接
     /// （[`dialog::screen_has_keys`] 只拦模态那一层）。**也不是一条面板边界**：宽度不拖、不记。
     ///
-    /// 每一行两行字（拿主意的人 2026-09-15 定）：主行「第 N 批裁决 · N 条」，副行「本地短时刻 · 裁成什么」；撤过的主行
+    /// 每一行两行字（拿主意的人 2026-09-15 定）：主行「第 N 批裁决 · N 条」，副行「本地短时刻 · 裁成什么」，就地落下的
+    /// 那一批照稿再接「· 作用范围」、人写过备注的再接「· 备注」（收挂单 `Q966`）；撤过的主行
     /// 划删除线、旁边一枚「已撤销」、一颗「放回」，在册的旁边一颗「撤销」。页脚那句说明照稿，底下写沉淀库在哪。
     ///
-    /// **行是虚拟化的**（`show_rows`）：逐条流里按一下 `Y` 就是一批，真库上攒出几千批
-    /// 是寻常事，每帧把几千行全排一遍版不划算。
+    /// **副行照稿折行**（设计稿 `.lot .m` 不截断）：就地落下的那一批接着作用范围、人写的备注接在后头，截成一行的话
+    /// 最要紧的那一段（切出来的是哪一组）正好被截掉。于是一行多高看副行折成几行（[`RecordRows`]）。
+    ///
+    /// **行是虚拟化的**（`show_viewport`，只画看得见的那几行）：逐条流里按一下 `Y` 就是一批，真库上攒出几千批
+    /// 是寻常事，每帧把几千行全排一遍版不划算——各行多高也只在册子重列、宽与字号变了时才重排一遍。
     fn records_drawer(&mut self, ctx: &egui::Context, site: &mut Site, area: egui::Rect) {
         /// 这一帧在裁决记录里按下了哪一颗。
         enum Pressed {
@@ -918,22 +928,33 @@ impl Screen {
                                 });
                                 return;
                             }
-                            let 主行高 = ui.text_style_height(&egui::TextStyle::Body);
-                            let 副行高 = ui.text_style_height(&egui::TextStyle::Small);
-                            let 行高 = (2.0 * 行上下 + 主行高 + look::step(0) + 副行高)
-                                .max(tokens.layout.button_small_height + 2.0 * 行上下);
                             ui.spacing_mut().item_spacing.y = 0.0;
+                            let (records, clock, rows) =
+                                (&self.records, self.record_clock, &mut self.record_rows);
                             egui::ScrollArea::vertical()
                                 .id_salt("裁决记录")
                                 .auto_shrink(false)
-                                .show_rows(ui, 行高, self.records.len(), |ui, rows| {
-                                    for record in &self.records[rows] {
-                                        if let Some(press) =
-                                            record_row(ui, record, self.record_clock, 行高, palette)
-                                        {
-                                            pressed = Some(press);
+                                .show_viewport(ui, |ui, viewport| {
+                                    let 尺寸 = RowSize::measure(ui);
+                                    let rows = RecordRows::fit(rows, ui, records, clock, 尺寸, palette);
+                                    ui.set_height(rows.total());
+                                    let shown = rows.visible(viewport);
+                                    let 顶 = ui.max_rect().top();
+                                    let 那几行 = egui::Rect::from_x_y_ranges(
+                                        ui.max_rect().x_range(),
+                                        顶 + rows.tops[shown.start]..=顶 + rows.tops[shown.end],
+                                    );
+                                    ui.scope_builder(egui::UiBuilder::new().max_rect(那几行), |ui| {
+                                        // 与 `show_rows` 同一招：看得见的那几行每帧拿到同一串自动 id。
+                                        ui.skip_ahead_auto_ids(shown.start);
+                                        for record in &records[shown] {
+                                            if let Some(press) =
+                                                record_row(ui, record, clock, 尺寸, palette)
+                                            {
+                                                pressed = Some(press);
+                                            }
                                         }
-                                    }
+                                    });
                                 });
                         });
                 });
@@ -945,53 +966,42 @@ impl Screen {
             None => {}
         }
 
-        /// 裁决记录里一批裁决那一行：主行「第 N 批裁决 · N 条」、副行「本地短时刻 · 裁成什么」，右头「撤销」或
-        /// 「已撤销」＋「放回」。交回这一帧按下的那一颗。
+        /// 裁决记录里一批裁决那一行：主行「第 N 批裁决 · N 条」、副行「本地短时刻 · 裁成什么」（有作用范围、备注的再接，
+        /// 见 [`sub_line_text`]，照稿折行），右头「撤销」或「已撤销」＋「放回」。交回这一帧按下的那一颗。
+        ///
+        /// 副行照 [`RowSize::text_width`] 那个宽排、这一行照 [`RowSize::row_height`] 那个高占——与 [`RecordRows::fit`]
+        /// 量的时候同一套，画出来的高就是排好的高。
         fn record_row(
             ui: &mut egui::Ui,
             record: &verdict::Batch,
             clock: RecordClock,
-            行高: f32,
+            尺寸: RowSize,
             palette: &crate::tokens::Palette,
         ) -> Option<Pressed> {
             let tokens = Tokens::builtin();
             let [行上下, 行左右] = tokens.space.record_row_padding;
-            let (行, _) = ui
-                .allocate_exact_size(egui::vec2(ui.available_width(), 行高), egui::Sense::hover());
+            let 撤过 = record.undone();
+            let 副行 = sub_line(ui, record, clock, 尺寸.text_width(撤过), palette);
+            let (行, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), 尺寸.row_height(&副行)),
+                egui::Sense::hover(),
+            );
             ui.painter().hline(
                 行.x_range(),
                 行.bottom() - tokens.layout.control_stroke / 2.0,
                 egui::Stroke::new(tokens.layout.control_stroke, palette.line),
             );
             let 里头 = 行.shrink2(egui::vec2(行左右, 行上下));
-            let mut pressed = None;
             let mut 子 = ui.new_child(
                 egui::UiBuilder::new()
                     .max_rect(里头)
                     .layout(Layout::right_to_left(Align::Center)),
             );
-            let 撤过 = record.undone();
-            let (label, hint, press) = if 撤过 {
-                (
-                    "放回",
-                    "把这一批原样放回去：当初落下的每一条都记在批里，一个字都不必重打。",
-                    Pressed::Redo(record.id),
-                )
+            let pressed = right_end(&mut 子, 撤过).then_some(if 撤过 {
+                Pressed::Redo(record.id)
             } else {
-                (
-                    "撤销",
-                    "中立库与沉淀库两边都回到这一批落下之前，那些变体当场回到待确认队列——不必重跑识别。",
-                    Pressed::Undo(record.id),
-                )
-            };
-            if look::small_buttons(&mut 子, |ui| {
-                ui.button(label).on_hover_text(hint).clicked()
-            }) {
-                pressed = Some(press);
-            }
-            if 撤过 {
-                look::plain_chip(&mut 子, look::Tone::Neutral, "已撤销");
-            }
+                Pressed::Undo(record.id)
+            });
             子.with_layout(Layout::top_down(Align::Min), |ui| {
                 ui.spacing_mut().item_spacing.y = look::step(0);
                 let mut 主行 = font::strong(format!(
@@ -1018,19 +1028,7 @@ impl Screen {
                 };
                 ui.add(egui::Label::new(主行).truncate())
                     .on_hover_text(悬停.clone());
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(format!(
-                            "{} · {}",
-                            clock.short(record.decided_at),
-                            record.summary
-                        ))
-                        .small()
-                        .color(palette.ink_3),
-                    )
-                    .truncate(),
-                )
-                .on_hover_text(悬停);
+                ui.add(egui::Label::new(副行)).on_hover_text(悬停);
             });
             pressed
         }
@@ -4538,6 +4536,175 @@ fn empty_axis(axis: Axis) -> &'static str {
         Axis::Directory => "（选中的这些不在任何目录下）",
         Axis::CandidateWork => "（选中的这些一条候选都没有——那正是队列的常态，走手工指定）",
         Axis::NameMark => "（选中的这些名字里一个记号都没有）",
+    }
+}
+
+/// 裁决记录里一行**右头**那一块：在册的一颗「撤销」，撤过的一枚「已撤销」＋一颗「放回」。交回那颗按钮按下去没有。
+///
+/// 画与量走这一处（[`RowSize::measure`]）：量出来的宽就是画出来的宽，副行照它排。
+fn right_end(ui: &mut egui::Ui, 撤过: bool) -> bool {
+    let (label, hint) = if 撤过 {
+        (
+            "放回",
+            "把这一批原样放回去：当初落下的每一条都记在批里，一个字都不必重打。",
+        )
+    } else {
+        (
+            "撤销",
+            "中立库与沉淀库两边都回到这一批落下之前，那些变体当场回到待确认队列——不必重跑识别。",
+        )
+    };
+    let clicked = look::small_buttons(ui, |ui| ui.button(label).on_hover_text(hint).clicked());
+    if 撤过 {
+        look::plain_chip(ui, look::Tone::Neutral, "已撤销");
+    }
+    clicked
+}
+
+/// 裁决记录里一行的**副行**：「本地短时刻 · 裁成什么」，就地落下的那一批照稿再接「· 作用范围」，人写过备注的
+/// 再接「· 备注」（收挂单 `Q966`）。整句另在悬停里。
+///
+/// 作用范围**从核心库取**（[`Part::of`] 认得回来才有，那一句是 [`Part::label`]），不从备注里拆——
+/// 备注从票 `verdict-store-and-sync/03` 起只装人写的那句为什么（挂单 `Q1567`）。加那几格之前落下的旧批，
+/// 作用范围原话还在备注里，照备注接，屏上看着是同一句。
+fn sub_line_text(record: &verdict::Batch, clock: RecordClock) -> String {
+    let mut text = format!("{} · {}", clock.short(record.decided_at), record.summary);
+    if let Some(part) = Part::of(record) {
+        text.push_str(&format!(" · {}", part.label()));
+    }
+    if let Some(note) = &record.note {
+        text.push_str(&format!(" · {note}"));
+    }
+    text
+}
+
+/// [副行](sub_line_text)排好的字：说明字号、`ink-3`，照稿**折行**（设计稿 `.lot .m` 不截断），`宽` 是副行那一栏多宽。
+fn sub_line(
+    ui: &egui::Ui,
+    record: &verdict::Batch,
+    clock: RecordClock,
+    宽: f32,
+    palette: &crate::tokens::Palette,
+) -> std::sync::Arc<egui::Galley> {
+    ui.painter().layout_job(egui::text::LayoutJob::simple(
+        sub_line_text(record, clock),
+        egui::TextStyle::Small.resolve(ui.style()),
+        palette.ink_3,
+        宽,
+    ))
+}
+
+/// 裁决记录里一行的几样尺寸，照这一帧的内容区宽与字号量：副行那一栏多宽、一行多高都从它算。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RowSize {
+    /// 内容区多宽：一行占满它。
+    width: f32,
+    /// 在册那一行右头多宽（[`right_end`]：一颗「撤销」）。
+    right_live: f32,
+    /// 撤过那一行右头多宽（一枚「已撤销」＋一颗「放回」）。
+    right_undone: f32,
+    /// 右头与副行那一栏之间那道缝。
+    gap: f32,
+    /// 主行多高。
+    main: f32,
+}
+
+impl RowSize {
+    /// 照这一帧量：右头那两种各在一块不画出来的子区里摆一遍（`sizing_pass`），量它们多宽。
+    fn measure(ui: &mut egui::Ui) -> Self {
+        let mut 量 = |撤过: bool| {
+            let mut 那一块 = ui.new_child(
+                egui::UiBuilder::new()
+                    .sizing_pass()
+                    .invisible()
+                    .layout(Layout::right_to_left(Align::Center)),
+            );
+            right_end(&mut 那一块, 撤过);
+            那一块.min_rect().width()
+        };
+        let (right_live, right_undone) = (量(false), 量(true));
+        Self {
+            width: ui.available_width(),
+            right_live,
+            right_undone,
+            gap: ui.spacing().item_spacing.x,
+            main: ui.text_style_height(&egui::TextStyle::Body),
+        }
+    }
+
+    /// 副行那一栏多宽：一行的宽，去掉左右内边距、右头那一块与那道缝。
+    fn text_width(self, 撤过: bool) -> f32 {
+        let [_, 行左右] = Tokens::builtin().space.record_row_padding;
+        let right = if 撤过 {
+            self.right_undone
+        } else {
+            self.right_live
+        };
+        (self.width - 2.0 * 行左右 - right - self.gap).max(0.0)
+    }
+
+    /// 副行排成 `副行` 那样时，这一行多高：上下内边距、主行、一道缝、副行折成的那几行；至少放得下右头那颗小按钮。
+    fn row_height(self, 副行: &egui::Galley) -> f32 {
+        let tokens = Tokens::builtin();
+        let [行上下, _] = tokens.space.record_row_padding;
+        (2.0 * 行上下 + self.main + look::step(0) + 副行.size().y)
+            .max(tokens.layout.button_small_height + 2.0 * 行上下)
+    }
+}
+
+/// 裁决记录里每一行排好的高：副行照稿折行，一行多高看副行折成几行（[`Screen::records_drawer`]）。
+///
+/// **不每帧重排**：真库上攒出几千批是寻常事，每帧把几千行的副行全排一遍版不划算。册子重列、钟换了就作废
+/// （`Screen::record_rows` 置空），内容区的宽或字号变了（[`RowSize`] 不一样了）也重排。
+#[derive(Debug, Clone)]
+struct RecordRows {
+    /// 照哪一份尺寸排的。
+    size: RowSize,
+    /// 每一行的顶（从头一行的顶量起），末尾多一格是总高：第 `i` 行占 `tops[i]..tops[i + 1]`。
+    tops: Vec<f32>,
+}
+
+impl RecordRows {
+    /// 手上那份还对得上就用它，对不上（作废了、尺寸变了、行数变了）就照 `records` 重排一遍。
+    fn fit<'a>(
+        cache: &'a mut Option<Self>,
+        ui: &egui::Ui,
+        records: &[verdict::Batch],
+        clock: RecordClock,
+        size: RowSize,
+        palette: &crate::tokens::Palette,
+    ) -> &'a Self {
+        let fresh = cache
+            .as_ref()
+            .is_some_and(|rows| rows.size == size && rows.tops.len() == records.len() + 1);
+        if !fresh {
+            let mut tops = Vec::with_capacity(records.len() + 1);
+            let mut y = 0.0;
+            for record in records {
+                tops.push(y);
+                let 副行 = sub_line(ui, record, clock, size.text_width(record.undone()), palette);
+                y += size.row_height(&副行);
+            }
+            tops.push(y);
+            *cache = Some(Self { size, tops });
+        }
+        cache.as_ref().expect("对得上的留着，对不上的上面刚排过")
+    }
+
+    /// 所有行加起来多高。
+    fn total(&self) -> f32 {
+        self.tops.last().copied().unwrap_or_default()
+    }
+
+    /// `viewport`（内容区里看得见的那一截）碰得到的那几行。
+    fn visible(&self, viewport: egui::Rect) -> std::ops::Range<usize> {
+        let rows = self.tops.len().saturating_sub(1);
+        let tops = &self.tops[..rows];
+        let first = tops
+            .partition_point(|top| *top <= viewport.min.y)
+            .saturating_sub(1);
+        let end = tops.partition_point(|top| *top < viewport.max.y).max(first);
+        first..end
     }
 }
 

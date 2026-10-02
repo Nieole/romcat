@@ -499,6 +499,28 @@ fn 只列出有冲突的字段_两边一样的与对方空着的都不列() {
     );
     // **汉化组不在里面**：它挂在变体上（ADR-0012），合并一个字不动它。
     assert!(!字段.contains(&Field::TranslationGroup));
+    // **次序照稿**（设计稿 `mwConflicts`）：显示标题、简介、类型、开发商、发行商、年份。
+    let 照稿 = [
+        Field::Title,
+        Field::Description,
+        Field::Genre,
+        Field::Developer,
+        Field::Publisher,
+        Field::Year,
+    ];
+    let 第几个: Vec<usize> = 字段
+        .iter()
+        .map(|field| {
+            照稿
+                .iter()
+                .position(|one| one == field)
+                .expect("照稿那几个字段之一")
+        })
+        .collect();
+    assert!(
+        第几个.windows(2).all(|两个| 两个[0] < 两个[1]),
+        "冲突的字段该照稿排：{字段:?}",
+    );
 }
 
 #[test]
@@ -663,13 +685,16 @@ fn 说不成立的话当场说不成立() {
 
 #[test]
 fn 自动归入那一句说得出为什么还不能选() {
-    let 话 = merge::auto_absorb_reason(甲);
+    let 话 = merge::AUTO_ABSORB_REASON;
     assert!(
         话.contains("沉淀库"),
         "得说清缺的是沉淀库里那条作品级记录：{话}"
     );
     assert!(话.contains("再合并一次"), "得说清眼下的走法：{话}");
-    assert!(话.contains(甲), "得说清再合一次会归进哪个作品：{话}");
+    // 照稿停在「可以再合并一次。」：尾巴那一截「——再合一次就归进《X》了」与前半句说的是同一件事
+    // （拿主意的人 2026-10-01 裁，票 `gui-draws-the-rest-of-the-design/16` 岔路口 `F-9`）。
+    assert!(话.ends_with("可以再合并一次。"), "那句尾巴该删掉：{话}");
+    assert!(!话.contains("再合一次就归进"), "那句尾巴该删掉：{话}");
 }
 
 #[test]
