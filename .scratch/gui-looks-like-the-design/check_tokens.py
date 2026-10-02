@@ -255,6 +255,11 @@ literal_pairs(".dcover .tc-t", r"\.dcover \.tc-t\{font-size:(\d+)px", [(1, F["si
 literal_pairs(".dcover .tc-wm", r"\.dcover \.tc-wm\{font-size:(\d+)px;bottom:-(\d+)px", [(1, F["size-cover-mark"], "size-cover-mark"), (2, L["title-card-mark-offset"][1], "title-card-mark-offset 下")])
 literal_pairs(".tcard", r"\.tcard\{[^}]*?(\d+%)[^}]*?inset 0 (\d+)px", [(1, M["title-card-tint"], "title-card-tint"), (2, L["title-card-band"], "title-card-band")])
 literal_pairs(".tc-wm", r"\.tc-wm\{[^}]*?right:-(\d+)px;[^}]*?opacity:([\d.]+)", [(1, L["title-card-mark-offset"][0], "title-card-mark-offset 右"), (2, M["watermark-opacity"], "watermark-opacity")])
+# 合并向导第一步那一行（票 gui-draws-the-rest-of-the-design/03）：左边封面那一格的宽与圆角（没封面时画平台色块，
+# 与 .lthumb 同一套令牌，拿主意的人 2026-10-01 裁，稿上那张小字卡不照搬）；作品名后头那枚强调色实底的「保留」
+# （.keepb，高、左右留白与 .tag 同，圆角、字号另核一遍）。
+literal_pairs(".mwit .mc", r"\.mwit \.mc\{[^}]*?width:(\d+)px;[^}]*?border-radius:(\d+)px", [(1, L["merge-cover-width"], "merge-cover-width"), (2, tokens["radius"]["small"], "radius small（.mwit .mc）")])
+literal_pairs(".keepb", r"\.keepb\{[^}]*?height:(\d+)px;padding:0 (\d+)px;border-radius:(\d+)px;background:var\(--accent\);color:var\(--on-accent\);font-size:(\d+)px", [(1, L["tag-height"], "tag-height（.keepb）"), (2, L["tag-padding"], "tag-padding（.keepb）"), (3, tokens["radius"]["small"], "radius small（.keepb）"), (4, F["size-caption"], "size-caption（.keepb）")])
 literal_pairs(".thumbs", r"\.thumbs\{[^}]*?repeat\((\d+),1fr\);gap:(\d+)px", [(1, L["thumbs-per-row"], "thumbs-per-row"), (2, S["thumb-gap"], "thumb-gap")])
 literal_pairs(".gtree", r"\.gtree\{border:[^}]*?padding:(\d+)px", [(1, S["rule-box-padding"], "rule-box-padding")])
 literal_pairs(".ruletext", r"\.ruletext\{[^}]*?font-size:(\d+)px;[^}]*?padding:(\d+)px (\d+)px", [(1, F["size-path"], "size-path"), (2, S["rule-text-padding"][0], "rule-text-padding 上下"), (3, S["rule-text-padding"][1], "rule-text-padding 左右")])

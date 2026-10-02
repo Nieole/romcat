@@ -801,3 +801,448 @@ fn 移出那一层的默认名字里那几个字由核心库答_不是把变体�
         "默认名字里那几个字不对：\n{开了}",
     );
 }
+
+/// 甲那一份**标题集合**：显示标题（中文译名，与作品名同字）、一条官方名称、两条别的叫法。
+const 甲的官方名称: &str = "Pocket Monsters - Aka";
+/// 甲头上那一句该写什么：官方名称打头，其余叫法照核心库那把排序键跟着（中文别名在日文别名前头）。
+const 甲那一句: &str = "Pocket Monsters - Aka · 宝可梦 红版 · ポケットモンスター 赤";
+
+fn 摆上甲的叫法(app: &mut App) {
+    use romcat_core::title::{Language, TitleKind};
+
+    let 一条 = |value: &str, language: Language, kind: TitleKind, source: &str| {
+        romcat_core::catalog::TitleRow {
+            work: 甲.to_string(),
+            value: value.to_string(),
+            language,
+            kind,
+            source: source.to_string(),
+            region: None,
+            variant_key: None,
+            confidence: Confidence::High,
+            seam: None,
+            evidence: "夹具".to_string(),
+            seen: 1,
+        }
+    };
+    let (_, site) = app.browse_and_site();
+    site.catalog
+        .put_titles(&[
+            一条(甲, Language::Chinese, TitleKind::Translated, "中文离线源"),
+            一条(
+                甲的官方名称,
+                Language::English,
+                TitleKind::Official,
+                "No-Intro",
+            ),
+            一条("宝可梦 红版", Language::Chinese, TitleKind::Alias, "文件名"),
+            一条(
+                "ポケットモンスター 赤",
+                Language::Japanese,
+                TitleKind::Alias,
+                "文件名",
+            ),
+        ])
+        .expect("写得进标题集合");
+}
+
+#[test]
+fn 详情页头上与合并向导那一行印的是同一句_官方名称打头其余叫法跟着() {
+    let ctx = headless::context();
+    let mut app = 界面("romcat-测试-合并-同一句副标题");
+    摆上甲的叫法(&mut app);
+    打开详情页(&ctx, &mut app, 甲);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    assert_eq!(
+        画着的每一处(&这一帧, &|字| 字 == 甲那一句).len(),
+        1,
+        "详情页头上那一句（设计稿 `.hsub`）该是「{甲那一句}」：\n{}",
+        画出来的字(&这一帧)
+    );
+
+    // 从详情页头上那颗「合并…」开向导：头上那一句还画在弹层后头，向导里甲那一行底下再印一遍——**同一句**。
+    点一下(&ctx, "合并…", |ui| app.ui(ui));
+    稳一稳(&ctx, &mut app);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 每一处 = 画着的每一处(&这一帧, &|字| 字 == 甲那一句);
+    assert_eq!(
+        每一处.len(),
+        2,
+        "详情页头上与合并向导甲那一行该各印一遍「{甲那一句}」：{每一处:?}\n{}",
+        画出来的字(&这一帧)
+    );
+}
+
+/// 稿上 `.mwit .mc` 那一格：宽 44，3:4。
+const 封面那一格: egui::Vec2 = egui::vec2(44.0, 44.0 / 0.75);
+
+/// 一张纯色 PNG 的字节，3:4。
+fn 一张封面() -> Vec<u8> {
+    let buf = image::RgbImage::from_pixel(60, 80, image::Rgb([30, 90, 160]));
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(buf)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .expect("编得出 PNG");
+    out.into_inner()
+}
+
+/// 同 [`界面`]，工作目录里先开一份**媒体池**、甲那个作品上挂一张封面；乙一张图都没有。
+fn 甲有封面的界面(名字: &str) -> App {
+    let dir = 干净工作目录(名字);
+    // **池子得先在**：界面开起来那一刻看工作目录里有没有媒体池，没有就不指。
+    let pool =
+        romcat_core::scrape::pool::MediaPool::open(&romcat_core::workspace::media_pool_dir(&dir))
+            .expect("开得出媒体池");
+    let site = Site::in_memory(建库(), Store::in_memory().expect("开得出沉淀库"), 根);
+    let mut app = App::new(site, dir);
+    app.show_view(View::Browse);
+    let bytes = 一张封面();
+    let (hash, _) = pool.take_bytes(&bytes, "png").expect("落得进池");
+    let (_, site) = app.browse_and_site();
+    site.catalog
+        .put_media(
+            &hash,
+            "png",
+            bytes.len() as u64,
+            romcat_core::scrape::measure::Measured::default(),
+        )
+        .expect("记得进库");
+    site.catalog
+        .put_scraped(&[romcat_core::catalog::scrape::Harvested {
+            anchor: AnchorKind::Work.label().to_string(),
+            subject: 甲.to_string(),
+            source: "测试".to_string(),
+            input: "测试指纹".to_string(),
+            values: Vec::new(),
+            media: vec![romcat_core::catalog::scrape::HarvestedMedia {
+                kind: romcat_core::scrape::MediaKind::Cover.label().to_string(),
+                hash,
+                evidence: "测试摆进去的".to_string(),
+            }],
+        }])
+        .expect("写得进");
+    app
+}
+
+/// 这一帧里画着的每一块方的：外框、贴没贴图、底色。贴图的那几块不论画成方块还是网格都收。
+fn 方块们(output: &egui::FullOutput) -> Vec<(egui::Rect, bool, egui::Color32)> {
+    fn 收(shape: &egui::epaint::Shape, out: &mut Vec<(egui::Rect, bool, egui::Color32)>) {
+        match shape {
+            egui::epaint::Shape::Rect(rect) => out.push((
+                rect.rect,
+                rect.fill_texture_id() != egui::TextureId::default(),
+                rect.fill,
+            )),
+            egui::epaint::Shape::Mesh(mesh) if mesh.texture_id != egui::TextureId::default() => {
+                out.push((mesh.calc_bounds(), true, egui::Color32::TRANSPARENT));
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|one| 收(one, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        收(&clipped.shape, &mut out);
+    }
+    out
+}
+
+/// 向导里那一行左边那一格（`封面那一格` 那么大、在那一行说明的左边、与它同在一行里）上画着的方块。
+fn 那一行左边那一格(
+    output: &egui::FullOutput,
+    说明: egui::Rect,
+) -> Vec<(egui::Rect, bool, egui::Color32)> {
+    方块们(output)
+        .into_iter()
+        .filter(|(rect, _, _)| {
+            (rect.size() - 封面那一格).length() < 1.0
+                && rect.right() < 说明.left()
+                && rect.top() <= 说明.bottom()
+                && rect.bottom() >= 说明.top()
+        })
+        .collect()
+}
+
+/// 这一帧里**画在 `那一块` 那个方块之后**、中心落在它里头的每一段字：写的什么、画在哪儿。
+///
+/// 只数画在它之后的：弹层盖在浏览屏上头，背后那张表在同一个位置上的字也在这一帧里，可那是被盖住的。
+fn 那一块里的字(
+    output: &egui::FullOutput, 那一块: egui::Rect
+) -> Vec<(String, egui::Rect)> {
+    fn 摊平<'a>(shape: &'a egui::epaint::Shape, out: &mut Vec<&'a egui::epaint::Shape>) {
+        match shape {
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|one| 摊平(one, out)),
+            one => out.push(one),
+        }
+    }
+    let mut 全部 = Vec::new();
+    for clipped in &output.shapes {
+        摊平(&clipped.shape, &mut 全部);
+    }
+    let 从 = 全部
+        .iter()
+        .position(|shape| matches!(shape, egui::epaint::Shape::Rect(rect) if rect.rect == 那一块))
+        .unwrap_or_else(|| panic!("这一帧里没画 {那一块:?} 那一块"));
+    全部[从..]
+        .iter()
+        .filter_map(|shape| match shape {
+            egui::epaint::Shape::Text(text) => {
+                let rect = egui::Rect::from_min_size(text.pos, text.galley.size());
+                那一块
+                    .contains(rect.center())
+                    .then(|| (text.galley.text().to_string(), rect))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn 合并向导每一行左边有封面缩略图_有封面贴封面_没有画平台代号() {
+    let ctx = headless::context();
+    let mut app = 甲有封面的界面("romcat-测试-合并-封面缩略图");
+    走到第几步(&ctx, &mut app, 1);
+    // 解码在后台：一帧一帧跑到甲那一行贴上图，**不看挂钟**；跑满上限还没贴上就当场炸。
+    let mut 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 甲那一行 = |output: &egui::FullOutput| {
+        画着的每一处(output, &|字| 字.starts_with("GB · 年份未知 · 2 个变体 · "))
+            .first()
+            .copied()
+            .unwrap_or_else(|| panic!("向导里没有甲那一行：\n{}", 画出来的字(output)))
+    };
+    for _ in 0..5_000 {
+        if 那一行左边那一格(&这一帧, 甲那一行(&这一帧))
+            .iter()
+            .any(|(_, 贴图, _)| *贴图)
+        {
+            break;
+        }
+        std::thread::yield_now();
+        这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    }
+    assert!(
+        那一行左边那一格(&这一帧, 甲那一行(&这一帧))
+            .iter()
+            .any(|(_, 贴图, _)| *贴图),
+        "甲在媒体池里有封面，向导那一行左边该贴上它：{:?}",
+        那一行左边那一格(&这一帧, 甲那一行(&这一帧))
+    );
+
+    // 乙一张图都没有：那一格画占位——平台色调进去的底，正中只写平台代号（拿主意的人 2026-10-01 裁：作品名不画，
+    // 右边粗体已经写着；从前逐字折行塞进 44 点宽、还压在水印上），不留白、不贴图。
+    let 乙那一行 = 画着的每一处(&这一帧, &|字| 字.starts_with("GB · 1996 · 1 个变体 · "))
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("向导里没有乙那一行：\n{}", 画出来的字(&这一帧)));
+    let 那一格 = 那一行左边那一格(&这一帧, 乙那一行);
+    assert!(
+        !那一格.is_empty() && 那一格.iter().all(|(_, 贴图, _)| !*贴图),
+        "乙没有封面，那一格该画占位、不贴图：{那一格:?}",
+    );
+    assert!(
+        那一格.iter().any(|(_, _, 底)| 底.a() > 0),
+        "乙那一格占位该有底色：{那一格:?}",
+    );
+    let 卡 = 那一格[0].0;
+    let 卡上的字 = 那一块里的字(&这一帧, 卡);
+    let [(代号, 在哪)] = 卡上的字.as_slice() else {
+        panic!("乙那一格占位上该只写平台代号一段字，写着的是 {卡上的字:?}");
+    };
+    assert_eq!(代号, "GB", "乙那一格占位上写的该是它的平台代号");
+    assert!(
+        (在哪.center() - 卡.center()).length() < 1.0,
+        "平台代号该摆在那一格正中：字在 {在哪:?}，格子 {卡:?}",
+    );
+}
+
+/// 乙补一条中文译名：显示标题换成它，作品名照旧是 [`乙`]。
+const 乙的译名: &str = "精灵宝可梦 红版";
+
+#[test]
+fn 合并向导那一行粗体写显示标题_不是作品名() {
+    // 拿主意的人 2026-10-01 裁（票 `gui-draws-the-rest-of-the-design/03` 人的关岔路口 1）：照稿 `.mwit` 的 `<b>${w.t}</b>`，
+    // 与作品详情页大标题同一个名字——底下那一句去掉的正是显示标题，粗体再写作品名，向导里就哪儿都看不到它了。
+    let ctx = headless::context();
+    let mut app = 界面("romcat-测试-合并-粗体写显示标题");
+    {
+        let (_, site) = app.browse_and_site();
+        site.catalog
+            .put_titles(&[romcat_core::catalog::TitleRow {
+                work: 乙.to_string(),
+                value: 乙的译名.to_string(),
+                language: romcat_core::title::Language::Chinese,
+                kind: romcat_core::title::TitleKind::Translated,
+                source: "中文离线源".to_string(),
+                region: None,
+                variant_key: None,
+                confidence: Confidence::High,
+                seam: None,
+                evidence: "夹具".to_string(),
+                seen: 1,
+            }])
+            .expect("写得进标题集合");
+    }
+    走到第几步(&ctx, &mut app, 1);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 说明 = 画着的每一处(&这一帧, &|字| 字.starts_with("GB · 1996 · 1 个变体 · "))
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("向导里没有乙那一行：\n{}", 画出来的字(&这一帧)));
+    // 紧挨在那一行说明头上、与它左沿对齐的那一段，就是那一行的粗体名。
+    let 头上那一段 = |字: &egui::Rect| {
+        (字.left() - 说明.left()).abs() < 1.0
+            && 字.bottom() <= 说明.top() + 1.0
+            && 说明.top() - 字.bottom() < 字.height()
+    };
+    assert!(
+        画着的每一处(&这一帧, &|字| 字 == 乙的译名)
+            .iter()
+            .any(头上那一段),
+        "乙那一行粗体该写显示标题「{乙的译名}」：\n{}",
+        画出来的字(&这一帧)
+    );
+    assert!(
+        !画着的每一处(&这一帧, &|字| 字 == 乙).iter().any(头上那一段),
+        "乙那一行粗体不该再写作品名「{乙}」",
+    );
+}
+
+/// 甲那一份标题集合里**别的叫法有五条**：那一句只列前三条，后头接「等 5 个」。
+fn 摆上甲的一堆叫法(app: &mut App) {
+    use romcat_core::title::{Language, TitleKind};
+
+    let 一条 = |value: &str, language: Language, kind: TitleKind| romcat_core::catalog::TitleRow {
+        work: 甲.to_string(),
+        value: value.to_string(),
+        language,
+        kind,
+        source: "文件名".to_string(),
+        region: None,
+        variant_key: None,
+        confidence: Confidence::High,
+        seam: None,
+        evidence: "夹具".to_string(),
+        seen: 1,
+    };
+    let (_, site) = app.browse_and_site();
+    site.catalog
+        .put_titles(&[
+            一条(甲, Language::Chinese, TitleKind::Translated),
+            一条(甲的官方名称, Language::English, TitleKind::Official),
+            一条("宝可梦 红版", Language::Chinese, TitleKind::Alias),
+            一条("口袋怪兽 红", Language::Chinese, TitleKind::Alias),
+            一条(
+                "ポケットモンスター 赤",
+                Language::Japanese,
+                TitleKind::Alias,
+            ),
+            一条("pm_red_cn", Language::Unknown, TitleKind::Alias),
+            一条("pokered", Language::Unknown, TitleKind::Alias),
+        ])
+        .expect("写得进标题集合");
+}
+
+#[test]
+fn 别的叫法多于三条时那一句只列前三条_后头接等几个() {
+    // 拿主意的人 2026-10-01 裁（票 `gui-draws-the-rest-of-the-design/03` 人的关岔路口 2）：别名最多 3 条，后面接「等 M 个」，
+    // 详情页头上与合并向导同一句。次序照核心库那把排序键：中文别名在前（同档按字排），认不出语言的与日文的在后。
+    const 那一句: &str = "Pocket Monsters - Aka · 口袋怪兽 红 · 宝可梦 红版 · pm_red_cn 等 5 个";
+    let ctx = headless::context();
+    let mut app = 界面("romcat-测试-合并-别名截到三条");
+    摆上甲的一堆叫法(&mut app);
+    打开详情页(&ctx, &mut app, 甲);
+    点一下(&ctx, "合并…", |ui| app.ui(ui));
+    稳一稳(&ctx, &mut app);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 每一处 = 画着的每一处(&这一帧, &|字| 字 == 那一句);
+    assert_eq!(
+        每一处.len(),
+        2,
+        "详情页头上与合并向导甲那一行该各印一遍「{那一句}」：{每一处:?}\n{}",
+        画出来的字(&这一帧)
+    );
+}
+
+/// 这一帧里正好写着这几个字的每一段：画在哪儿、什么颜色（排字时给的那个颜色，没给时是画的时候兜底那个）。
+fn 那几个字画成什么色(
+    output: &egui::FullOutput,
+    那几个字: &str,
+) -> Vec<(egui::Rect, egui::Color32)> {
+    fn 收(
+        shape: &egui::epaint::Shape,
+        那几个字: &str,
+        out: &mut Vec<(egui::Rect, egui::Color32)>,
+    ) {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == 那几个字 => {
+                let color = text
+                    .galley
+                    .job
+                    .sections
+                    .first()
+                    .map(|section| section.format.color)
+                    .filter(|color| *color != egui::Color32::PLACEHOLDER)
+                    .unwrap_or(text.fallback_color);
+                out.push((
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                    color,
+                ));
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                shapes.iter().for_each(|one| 收(one, 那几个字, out))
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        收(&clipped.shape, 那几个字, &mut out);
+    }
+    out
+}
+
+#[test]
+fn 第一步保留那枚标签照稿是强调色实底_字是强调色上的字色() {
+    // 设计稿 `.keepb`：`background:var(--accent);color:var(--on-accent)`、高 20、左右 7（与 `.tag` 同），
+    // 不是灰底的 `.tag`（拿主意的人 2026-10-01 在票 `gui-draws-the-rest-of-the-design/01` 人的关上裁：照稿改）。
+    let ctx = headless::context();
+    let mut app = 界面("romcat-测试-合并-保留标签照稿");
+    走到第几步(&ctx, &mut app, 1);
+    // 弹层是淡入的：等它整个显出来再量颜色，不然量到的是淡入那一半。
+    跑(&ctx, &mut app, 60);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 色 = romcat_gui::tokens::Tokens::builtin()
+        .color
+        .theme(ctx.theme());
+    let 标签们 = 那几个字画成什么色(&这一帧, "保留");
+    let [(字, 字色)] = 标签们.as_slice() else {
+        panic!("第一步该正好有一枚「保留」：{标签们:?}");
+    };
+    assert_eq!(*字色, 色.on_accent, "「保留」那几个字该是强调色上的字色");
+    let 版式 = &romcat_gui::tokens::Tokens::builtin().layout;
+    let 底们: Vec<egui::Rect> = 方块们(&这一帧)
+        .into_iter()
+        .filter(|(rect, 贴图, _)| !*贴图 && rect.contains(字.center()))
+        .filter(|(_, _, 底)| *底 == 色.accent)
+        .map(|(rect, _, _)| rect)
+        .collect();
+    let [底] = 底们.as_slice() else {
+        let 垫着的: Vec<_> = 方块们(&这一帧)
+            .into_iter()
+            .filter(|(rect, _, _)| rect.contains(字.center()))
+            .collect();
+        panic!(
+            "「保留」底下该正好垫一块强调色（{:?}）的底：{底们:?}；垫着的是 {垫着的:?}",
+            色.accent
+        );
+    };
+    assert!(
+        (底.height() - 版式.tag_height).abs() < 0.5
+            && (字.left() - 底.left() - 版式.tag_padding).abs() < 1.0,
+        "那块底高 {}（该 {}），字离左沿 {}（该 {}）",
+        底.height(),
+        版式.tag_height,
+        字.left() - 底.left(),
+        版式.tag_padding,
+    );
+}

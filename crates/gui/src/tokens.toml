@@ -479,6 +479,7 @@ hero-facts-max    = 980   # 头上那几格事实整排最宽（设计稿 .hfact
 hero-facts-columns = 6    # 头上那几格事实一排几格（设计稿 .hfacts 的 repeat(6,…)）
 hero-card-mark-offset = [4, 16]  # 头上那张字卡的水印伸出格子多少（右, 下）（设计稿 .tc-wm 的 right:-4px、bottom:-16px）
 hero-card-title-rows = 4  # 头上那张字卡的标题至多几行（设计稿 .tc-t 的 -webkit-line-clamp:4）
+merge-cover-width = 44    # 合并向导第一步每一行左边封面那一格的宽，高按 card-cover-ratio 折（设计稿 .mwit .mc 的 width:44px；圆角取 radius.small，稿上 4px）
 media-strip-columns = 3   # 概览里媒体那一块摆几格（设计稿 .mstrip 的 repeat(3,1fr) 与 slice(0,3)）
 overview-columns  = [1.55, 1.0]  # 概览左右两栏的比例（设计稿 .ov 的 minmax(0,1.55fr) minmax(0,1fr)）
 work-card-columns = [0.9, 1.1]   # 变体卡身子左右两半的比例（设计稿 .vbody 的 minmax(0,.9fr) minmax(0,1.1fr)）
