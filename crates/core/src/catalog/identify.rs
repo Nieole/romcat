@@ -966,6 +966,37 @@ fn chinese_mark(label: &str) -> Option<ChineseMark> {
     ChineseMark::from_label(label)
 }
 
+/// [`Catalog::queue_rows`] 与 [`Catalog::queue_row`] 共用的那半句查询：整份列与点名一个**取的是同一份原料**，
+/// 两处各写一句的话，哪天一边多 join 一张表，「列出来在队列里」与「问一个在队列里」就各说各的。
+const QUEUE_ROW_SELECT: &str =
+    "SELECT v.key, v.platform, v.rule, v.main_key, v.files, v.bytes, v.unreadable,
+            v.manual, v.work_id, v.release_id, i.state, i.reason, i.candidates,
+            i.accepted
+     FROM variant v JOIN identification i ON i.variant_key = v.key";
+
+/// [`QUEUE_ROW_SELECT`] 那一行读成 [`QueueRow`]。
+fn queue_row_of(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueRow> {
+    let state: String = row.get(10)?;
+    Ok(QueueRow {
+        variant: super::VariantRow {
+            key: row.get(0)?,
+            platform: row.get(1)?,
+            rule: row.get(2)?,
+            main_key: row.get(3)?,
+            files: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
+            bytes: u64::try_from(row.get::<_, i64>(5)?).unwrap_or(0),
+            unreadable_files: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
+            manual: row.get::<_, i64>(7)? != 0,
+            work_id: row.get(8)?,
+            release_id: row.get(9)?,
+        },
+        state: State::from_label(&state).unwrap_or(State::NoEvidence),
+        reason: row.get(11)?,
+        candidates: u64::try_from(row.get::<_, i64>(12)?).unwrap_or(0),
+        accepted: u64::try_from(row.get::<_, i64>(13)?).unwrap_or(0),
+    })
+}
+
 /// **待确认队列**要的一行：变体连它这一轮的结论。
 ///
 /// 捏成一次查询而不是「先列变体、再逐个问结论」：真库里那是四万多个变体，
@@ -1031,38 +1062,30 @@ impl Catalog {
     pub fn queue_rows(&self) -> Result<Vec<QueueRow>, CatalogError> {
         let mut statement = self
             .conn
-            .prepare(
-                "SELECT v.key, v.platform, v.rule, v.main_key, v.files, v.bytes, v.unreadable,
-                        v.manual, v.work_id, v.release_id, i.state, i.reason, i.candidates,
-                        i.accepted
-                 FROM variant v JOIN identification i ON i.variant_key = v.key
-                 ORDER BY v.key",
-            )
+            .prepare(&format!("{QUEUE_ROW_SELECT} ORDER BY v.key"))
             .map_err(|source| self.err(source))?;
         let rows = statement
-            .query_map([], |row| {
-                let state: String = row.get(10)?;
-                Ok(QueueRow {
-                    variant: super::VariantRow {
-                        key: row.get(0)?,
-                        platform: row.get(1)?,
-                        rule: row.get(2)?,
-                        main_key: row.get(3)?,
-                        files: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
-                        bytes: u64::try_from(row.get::<_, i64>(5)?).unwrap_or(0),
-                        unreadable_files: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
-                        manual: row.get::<_, i64>(7)? != 0,
-                        work_id: row.get(8)?,
-                        release_id: row.get(9)?,
-                    },
-                    state: State::from_label(&state).unwrap_or(State::NoEvidence),
-                    reason: row.get(11)?,
-                    candidates: u64::try_from(row.get::<_, i64>(12)?).unwrap_or(0),
-                    accepted: u64::try_from(row.get::<_, i64>(13)?).unwrap_or(0),
-                })
-            })
+            .query_map([], queue_row_of)
             .map_err(|source| self.err(source))?;
         rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
+    /// **一个变体**的那一行队列原料；还没识别、或者库里没有这个键，都是 `None`。
+    ///
+    /// 与 [`queue_rows`](Self::queue_rows) 是**同一句查询**（`QUEUE_ROW_SELECT`），只是点名一个键：
+    /// 浏览屏侧边详情问「这一个在不在待确认队列里」时，为一个变体把四万多行再列一遍不值（见台账 `docs/library-facts.md`）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn queue_row(&self, key: &str) -> Result<Option<QueueRow>, CatalogError> {
+        self.conn
+            .query_row(
+                &format!("{QUEUE_ROW_SELECT} WHERE v.key = ?1"),
+                params![key],
+                queue_row_of,
+            )
+            .optional()
             .map_err(|source| self.err(source))
     }
 

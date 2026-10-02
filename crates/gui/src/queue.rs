@@ -251,6 +251,9 @@ pub struct Screen {
     /// 把表格的滚动位置强按到这个像素偏移。**只有量帧率时才设**（[`crate::bench`]），
     /// 真界面上永远是 `None`。
     pub scroll_to: Option<f32>,
+    /// **下一帧把待选列表滚到光标那一行**，滚过一次就放掉：从浏览屏跳过来（[`Screen::reveal`]）那一条
+    /// 可能排在一屏之外，左边那一列不跟过去的话，铺着浅底的那一行人看不见。只滚这一次——之后人自己滚到哪儿算哪儿。
+    reveal_scroll: bool,
 }
 
 /// 那颗**就地跑识别**的捷径（设计稿「运行识别」）。按下去返回 `true`。`primary` 为真时是空态卡上那颗默认大小的主按钮，
@@ -373,6 +376,7 @@ impl Screen {
             only_picked: false,
             asked: None,
             scroll_to: None,
+            reveal_scroll: false,
         }
     }
 
@@ -516,6 +520,60 @@ impl Screen {
         self.cursor = None;
         self.at = 0;
         self.nth = 0;
+    }
+
+    /// **从浏览屏侧边详情那颗「在待确认中处理」跳过来**（挂单 `Q810`，票 `gui-draws-the-rest-of-the-design/05`）：
+    /// 换到逐条那一档、看**整个队列**（选择器回到默认那一份，展开与下钻一并收起），**光标停在这一条上**。
+    ///
+    /// 那颗按钮只在核心库答「它在队列里」时才摆（`triage::is_queued`，与列队列同一句判据），所以这里只是**找**它，
+    /// 不再判一次。手上这份队列比那一问旧时（列过之后库变了，而还没轮到重列）找不着，就重列一次再找；
+    /// 还是找不着就照实说，不把光标随手落到别的一条上——那样屏上停着的就不是人要处理的那一条。
+    pub fn reveal(&mut self, site: &Site, key: &str) {
+        self.whole_queue_one_by_one();
+        let 在 = match self.position_of(key) {
+            Some(at) => Some(at),
+            None => {
+                // 重列会把展开的那一批摆回头一批、选择器照草稿重折；摆回逐条看整个队列再找一次。
+                self.reload(site);
+                self.whole_queue_one_by_one();
+                self.position_of(key)
+            }
+        };
+        self.nth = 0;
+        match 在 {
+            Some(at) => {
+                self.at = at;
+                self.cursor = Some(key.to_owned());
+                self.reveal_scroll = true;
+            }
+            None => {
+                self.at = 0;
+                self.cursor = None;
+                self.error = Some(format!(
+                    "「{}」眼下不在待确认队列里了（可能刚裁过），没有可以停的那一条。",
+                    romcat_core::path::file_name_of_key(key),
+                ));
+            }
+        }
+    }
+
+    /// 换到逐条那一档、看**整个队列**：选择器回到默认那一份（[`Picks::default`]），展开与下钻收起，
+    /// 「只裁选中的那一条」放掉。光标不动——由调用方停。
+    fn whole_queue_one_by_one(&mut self) {
+        self.mode = Mode::OneByOne;
+        self.open = None;
+        self.drill = None;
+        self.picks = Picks::default();
+        self.only_picked = false;
+        self.queue.set_filter(self.picks.filter());
+    }
+
+    /// 这个变体排在眼下选中的那些里的第几位；不在里面是 `None`。
+    fn position_of(&self, key: &str) -> Option<usize> {
+        self.queue
+            .selected()
+            .iter()
+            .position(|item| item.variant.key == key)
     }
 
     /// 展开一批。**界面上点卡片走的就是它**，再点一次收起。
@@ -1714,6 +1772,9 @@ impl Screen {
                 .auto_shrink(false);
             if let Some(offset) = self.scroll_to {
                 area = area.vertical_scroll_offset(offset);
+            } else if std::mem::take(&mut self.reveal_scroll) {
+                // 光标那一行之上留两行，不把它顶在最上沿（越过底的偏移 egui 自己收回来）。
+                area = area.vertical_scroll_offset((at as f32 - 2.0).max(0.0) * 行高);
             }
             area.show_rows(ui, 行高, items.len(), |ui, rows| {
                 ui.spacing_mut().item_spacing.y = 0.0;

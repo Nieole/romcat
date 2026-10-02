@@ -740,7 +740,44 @@ pub fn head_coverage(
 /// [`survey`] 数整个队列与 [`pending_count`] 都问这一句——两处各写一遍的话，库屏工序段与
 /// 待确认队列屏迟早报出两个数。
 fn awaits_verdict(row: &QueueRow, verdicts: &verdict::Index) -> bool {
-    in_queue(row, &Filter::default()) && !decided(verdicts, row)
+    awaits(row, verdicts.by_path(&row.variant.key).is_some())
+}
+
+/// 同上，只是**路径锚那一问已经答好了**（`path_ruled`：沉淀库里这个变体身上钉没钉着一条路径锚裁决）。
+///
+/// 拆出来是给 [`is_queued`]：点名一个变体时只查它那一条锚，不必把整本册子读成 [`verdict::Index`]。
+/// 判据仍只有这一处——[`awaits_verdict`] 也走它。
+fn awaits(row: &QueueRow, path_ruled: bool) -> bool {
+    in_queue(row, &Filter::default()) && !decided_by(row, path_ruled)
+}
+
+/// **这一个变体眼下在不在待确认队列里**——等不等人裁。
+///
+/// 判据就是列队列那一句（`awaits_verdict`：[`survey`] 数整个队列、[`pending_count`] 都问它），只是点名一个变体：
+/// 中立库只读它那一行（[`Catalog::queue_row`]），沉淀库只查它那一条路径锚。**还没识别、库里没有这个键，都是不在**。
+///
+/// 浏览屏侧边详情那颗「在待确认中处理」照它摆、照它不摆（票 `gui-draws-the-rest-of-the-design/05`）：
+/// 界面不自己拿候选数、识别结论去拼一个「大概在队列里」——一条候选都没有的未命中照样在队列里，
+/// 那正是「手工指定」那条主路径要接的。
+///
+/// # Errors
+/// 读中立库或沉淀库失败时返回错误。
+pub fn is_queued(
+    catalog: &Catalog,
+    store: &Store,
+    library: &str,
+    key: &str,
+) -> Result<bool, TriageError> {
+    let Some(row) = catalog.queue_row(key)? else {
+        return Ok(false);
+    };
+    let path_ruled = store
+        .find(&Anchor::Path {
+            library: library.to_string(),
+            variant_key: key.to_string(),
+        })?
+        .is_some();
+    Ok(awaits(&row, path_ruled))
 }
 
 /// 这个变体在队列里吗（还没过过滤器）。
@@ -761,8 +798,12 @@ fn in_queue(row: &QueueRow, filter: &Filter) -> bool {
 ///
 /// 只剩路径锚那一种要真的查一下沉淀库，而那是一次内存里的查表。
 fn decided(verdicts: &verdict::Index, row: &QueueRow) -> bool {
-    row.reason.as_deref() == Some(identify::VERDICT_UNKNOWN_REASON)
-        || verdicts.by_path(&row.variant.key).is_some()
+    decided_by(row, verdicts.by_path(&row.variant.key).is_some())
+}
+
+/// 同上，路径锚那一问已经答好了（`path_ruled`）。[`decided`] 与 [`awaits`] 都走它，判据只写这一处。
+fn decided_by(row: &QueueRow, path_ruled: bool) -> bool {
+    row.reason.as_deref() == Some(identify::VERDICT_UNKNOWN_REASON) || path_ruled
 }
 
 /// 把每条的**内容判据**算出来。**一个字节都不读主库。**
